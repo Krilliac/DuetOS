@@ -96,6 +96,7 @@
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/svg.h"
 #include "drivers/video/ttf.h"
 #include "drivers/video/ttf_raster.h"
 #include "drivers/video/calendar.h"
@@ -669,6 +670,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                    []()
                                    {
                                        duetos::drivers::video::TtfRasterSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    duetos::core::InitcallRegister(duetos::core::Phase::Drivers, "svg-selftest",
+                                   []()
+                                   {
+                                       duetos::drivers::video::SvgSelfTest();
                                        return duetos::core::Result<void>{};
                                    });
     (void)duetos::core::RunPhase(duetos::core::Phase::Drivers);

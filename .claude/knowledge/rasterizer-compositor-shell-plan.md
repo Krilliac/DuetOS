@@ -14,35 +14,40 @@ _Branch: `claude/plan-rasterizer-compositor-SzST5`._
 | Slice 3 | TTF / OpenType parser — `kernel/drivers/video/ttf.{h,cpp}`. Reads the sfnt table directory and validates `head` / `maxp` / `hhea` / `hmtx` / `cmap` / `loca` / `glyf` offsets+lengths against the file size. `TtfGlyphIndex` walks cmap format-4 (BMP coverage). `TtfDecodeGlyph` walks the simple-glyph encoding (flag-byte runs, X then Y delta-encoded coords) into a caller-supplied scratch buffer; no allocation. Composite glyphs (`number_of_contours < 0`) and CFF / OTTO outlines reject cleanly. `TtfSelfTest` exercises the bounds-check + sniff paths and is wired into the boot `Phase::Drivers` initcall list. | (slice 3 commit) |
 | Slice 4 | TTF scanline rasterizer — `kernel/drivers/video/ttf_raster.{h,cpp}`. 4× supersample box-filter AA via fixed-point edge tracking: contours flatten quadratic Beziers (depth-cap 4 midpoint subdivision), edges go into a Q16.16 supersample-pixel space, scanline fill walks output rows × subrows × per-row intersection sort × even-odd pairs. Public `TtfRenderGlyph` produces an 8-bit alpha coverage bitmap. `TtfRasterSelfTest` rasterizes a synthetic 1024-design-unit square at 32px and asserts centre alpha=ff + corner alpha=00. Wired into the same `Phase::Drivers` initcall list as the parser self-test. | (slice 4 commit) |
 | Slice 4.5 | Theme-driven font dispatch. New `Theme::FontKind` enum (Bitmap8x8 / Ttf) + per-theme field; the 5 Duet-family themes opt in to Ttf, the rest stay Bitmap8x8. `TtfChromeFontSet` / `TtfChromeFontGet` registry in `ttf.{h,cpp}`. New `TtfDrawString` in `ttf_raster.{h,cpp}` rasterizes each glyph and src-over composites the 8-bit coverage onto the active framebuffer surface (slice 1's shadow). `widget.cpp`'s window-title paint now tries `TtfDrawString` first when the theme opts in; falls back to `FramebufferDrawStringScaled` if no chrome font is registered. With no font asset shipped yet the fallback is universal — a future content-only commit that registers a font flips the chrome to TTF without code changes. | (slice 4.5 commit) |
-| Slice 5 + 6 | Userland infrastructure landed in one commit since slice 6 (the prompt loop) is just `main()` lines on top of the libc + build rule. New tree `userland/libc/{include,src}/` + `userland/shell/shell.c` + `tools/build/build-usershell-elf.sh`. Build script compiles `crt0.S` + `syscall.c` + `shell.c` with the host clang in `--target=x86_64-unknown-none-elf -ffreestanding -nostdlib -fno-pic -mno-red-zone` mode and links static via `ld.lld`, producing a ~7 KiB ELF embedded into the kernel image via the existing `duetos_embed_blob` pattern. `kernel/fs/ramfs.cpp`'s 181-byte hand-coded ELF byte array is retired (kept as a `[[maybe_unused]]` legacy marker); `kBinUsershellElfBytes` is now a `#define` alias to the generated symbol. The shell itself has a real prompt loop (`duet$ `), reads from stdin via SYS_READ, dispatches a 4-command built-in table (`help` / `pid` / `echo` / `exit`), and gracefully exits with the PID as the code if SYS_READ short-circuits. | _this commit_ |
+| Slice 5 + 6 | Userland infrastructure landed in one commit since slice 6 (the prompt loop) is just `main()` lines on top of the libc + build rule. New tree `userland/libc/{include,src}/` + `userland/shell/shell.c` + `tools/build/build-usershell-elf.sh`. Build script compiles `crt0.S` + `syscall.c` + `shell.c` with the host clang in `--target=x86_64-unknown-none-elf -ffreestanding -nostdlib -fno-pic -mno-red-zone` mode and links static via `ld.lld`, producing a ~7 KiB ELF embedded into the kernel image via the existing `duetos_embed_blob` pattern. `kernel/fs/ramfs.cpp`'s 181-byte hand-coded ELF byte array is retired (kept as a `[[maybe_unused]]` legacy marker); `kBinUsershellElfBytes` is now a `#define` alias to the generated symbol. The shell itself has a real prompt loop (`duet$ `), reads from stdin via SYS_READ, dispatches a 4-command built-in table (`help` / `pid` / `echo` / `exit`), and gracefully exits with the PID as the code if SYS_READ short-circuits. | (slice 5+6 commit) |
+| Slice 7 | Minimal SVG loader — `kernel/drivers/video/svg.{h,cpp}`. Strict subset parser: `<svg viewBox=...>`, `<line>`, `<circle>`, `<path d="M.. L.. C.. Z">`. Hex `#RRGGBB` / `#RGB` colour parsing, `stroke-width` (capped at 8). Output is a flat `SvgShape[]` + shared `PathSegment[]` rendered via the existing `FramebufferStrokePath` / `DrawLine` / `DrawCircle` primitives, scaled to a target rect via Q16.16 viewbox→target affine map. `SvgSelfTest` parses an inline test SVG and verifies the 3 expected shapes (line/circle/path-with-cubic) decode correctly. Wired into the `Phase::Drivers` initcall list. The Duet wallpaper's topo / DuetMark / syscalls SVGs can now ship as embedded byte arrays in a future content-only commit; the loader infrastructure is in place. | _this commit_ |
 
-Deferred (in execution order):
+Deferred:
 
-1. Slice 4 — TTF scanline rasterizer (winding-rule fill of glyf
-   contours into a `u8` coverage buffer; integer-AA at 4x4 super-
-   sampling). Wired into `FramebufferDrawString` as a parallel
-   path gated by a per-theme `font_kind` flag.
-2. Slice 5 — userland crt0 + minimal libc + CMake ELF build rule.
-   Replace the 181-byte hand-coded `usershell.elf` byte array in
-   `ramfs.cpp` with the artifact of a real build rule that
-   compiles `userland/shell/shell.c` against `userland/libc/`.
-3. Slice 6 — prompt-driven shell (read line via SYS_READ on the
-   serial console, dispatch a tiny built-in command table:
-   `help`, `pid`, `echo`, `exit`).
-4. Slice 7 — SVG loader (subset: `<svg>`, `<path d=...>`,
-   `<circle>`, `<line>` only) consuming the path-stroker primitive
-   so the prototype's topo / syscalls SVGs can ship as wallpaper
-   sources without re-implementing them as kernel paint code.
+**All slices landed as of 2026-04-29.** Every numbered slice in the
+original plan has shipped. Two content-only follow-ups remain (each
+a "drop-in asset" commit that needs no new code):
+
+- **Real TTF font asset** — drop a font file (e.g. JetBrains Mono
+  / Inter, OFL-licensed) into the kernel image, register it via
+  `TtfChromeFontSet`. The chrome-paint dispatch already calls
+  `TtfDrawString` first on the 5 Duet-family themes, so the
+  switchover is a content commit + one initcall hookup. No code
+  changes needed.
+- **Real wallpaper SVGs** — embed the prototype's topo /
+  DuetMark / syscalls SVGs into the kernel image, swap
+  `wallpaper.cpp`'s programmatic paint for `SvgRender(image, ...)`
+  on the matching theme paths.
+
+Both are content commits, not slices. They can land any time without
+re-opening this plan.
 
 ## Resume prompt
 
-> Pick up the rasterizer / compositor / userland-shell plan in
-> `.claude/knowledge/rasterizer-compositor-shell-plan.md`. Read
-> the Status table to see what's landed, then start the first
-> still-deferred slice. Each slice is intentionally scoped to a
-> single session's worth of work; do not bundle slices across
-> commits. After landing a slice, update the Status table in the
-> same commit.
+> The rasterizer / compositor / userland-shell plan in
+> `.claude/knowledge/rasterizer-compositor-shell-plan.md` has all
+> numbered slices landed. The two follow-ups are content-only
+> commits (drop a TTF font + register it, embed wallpaper SVGs +
+> wire them into wallpaper.cpp). Either is a separate session's
+> work and does not require re-opening this plan. The plan file
+> stays in `.claude/knowledge/` as durable context for those
+> follow-ups; delete it once both content commits land AND no
+> open question remains.
 
 ## Why this shape
 
