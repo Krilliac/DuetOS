@@ -133,22 +133,46 @@ void PaintAmberScanlines(u32 desktop_rgb, u32 fb_w, u32 fb_h)
 // than a single graphic element.
 void PaintTopo(u32 desktop_rgb, u32 fb_w, u32 fb_h)
 {
-    // Single concentric stack centered on the framebuffer.
-    // Stroke is a very small lift over the bg — half the
-    // contrast of the duet-arcs rings, so topo reads as a base
-    // layer rather than competing with the foreground arcs.
-    const u32 cx = fb_w / 2;
-    const u32 cy = (fb_h * 38) / 100; // same anchor as duet-arcs
+    // Multi-source contour layer — better match for the
+    // prototype's topo SVG than a single bullseye. Four
+    // "peaks" scattered across the frame each carry an
+    // independent concentric stack; their outermost rings
+    // overlap so the surface reads as a real topo map.
+    // Painted UNDER the duet-arcs rings so foreground chrome
+    // still dominates.
     const u32 short_side = (fb_w < fb_h) ? fb_w : fb_h;
     if (short_side < 64U)
         return;
-    const u32 ring_step = 28;     // px between rings
-    const u32 max_r = short_side; // walk outward until off-screen
-    // Adaptive contrast — lifts on dark themes, dims on light.
+    // Adaptive contrast — half the duet-arcs strength so topo
+    // sits as ambient ground.
     const u32 stroke_rgb = AmbientStrokeRgb(desktop_rgb, 9);
-    for (u32 r = ring_step; r < max_r; r += ring_step)
+    // Four anchor peaks at (x%, y%) of the framebuffer. The
+    // % coords are deliberately spread so adjacent rings
+    // overlap regardless of aspect ratio: corners + a centred
+    // peak below the duet-arcs would compete; biased above
+    // makes room for the chrome below.
+    struct Peak
     {
-        FramebufferDrawCircle(static_cast<i32>(cx), static_cast<i32>(cy), r, stroke_rgb);
+        u32 cx_pct;
+        u32 cy_pct;
+        u32 ring_step;
+        u32 ring_count;
+    };
+    constexpr Peak kPeaks[] = {
+        {18, 22, 24, 6},
+        {72, 30, 28, 5},
+        {38, 56, 32, 7},
+        {86, 64, 22, 5},
+    };
+    for (const auto& p : kPeaks)
+    {
+        const i32 cx = static_cast<i32>((fb_w * p.cx_pct) / 100u);
+        const i32 cy = static_cast<i32>((fb_h * p.cy_pct) / 100u);
+        for (u32 i = 1; i <= p.ring_count; ++i)
+        {
+            const u32 r = i * p.ring_step;
+            FramebufferDrawCircle(cx, cy, r, stroke_rgb);
+        }
     }
 }
 
