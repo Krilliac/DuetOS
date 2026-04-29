@@ -291,7 +291,7 @@ i64 DoTimerfdCreate(u64 clockid, u64 flags)
     if (p == nullptr)
         return kEPERM;
     u32 fd = 16;
-    for (u32 i = 3; i < 16; ++i)
+    for (u32 i = 3; i < LinuxFdEffectiveMax(p); ++i)
     {
         if (p->linux_fds[i].state == 0)
         {
@@ -551,7 +551,7 @@ i64 DoSignalfd(u64 fd, u64 user_mask, u64 sigsetsize, u64 flags)
         return static_cast<i64>(fd);
     }
     u32 new_fd = 16;
-    for (u32 i = 3; i < 16; ++i)
+    for (u32 i = 3; i < LinuxFdEffectiveMax(p); ++i)
     {
         if (p->linux_fds[i].state == 0)
         {
@@ -671,6 +671,29 @@ u32 LinuxFdEpollReady(u32 fd, u32 interest_mask)
         break;
     case 9: // epoll instance — never readable through epoll
         break;
+    case 12: // pidfd — readable iff target process has exited
+        if (interest_mask & kEPOLLIN)
+        {
+            const u64 target_pid = slot.first_cluster;
+            // Two terminal states count as "exited":
+            //   - target on g_zombies (DoExit done, not yet reaped)
+            //   - SchedFindProcessByPid returns nullptr (already
+            //     reaped or never existed)
+            // Unreaped-zombie is the common case for shells that
+            // poll a pidfd before wait4; reaped-already covers
+            // races where wait4 ran first.
+            if (sched::SchedIsPidZombie(target_pid))
+            {
+                ready |= kEPOLLIN;
+            }
+            else
+            {
+                core::Process* tgt = sched::SchedFindProcessByPid(target_pid);
+                if (tgt == nullptr)
+                    ready |= kEPOLLIN;
+            }
+        }
+        break;
     default:
         break;
     }
@@ -690,7 +713,7 @@ i64 DoEpollCreate1(u64 flags)
     if (p == nullptr)
         return kEPERM;
     u32 fd = 16;
-    for (u32 i = 3; i < 16; ++i)
+    for (u32 i = 3; i < LinuxFdEffectiveMax(p); ++i)
     {
         if (p->linux_fds[i].state == 0)
         {
@@ -888,6 +911,15 @@ i64 DoEpollWait(u64 epfd, u64 user_events, u64 maxevents, u64 timeout_ms)
                 return kEFAULT;
             return static_cast<i64>(hits);
         }
+        // If the watch set includes a pidfd, prefer blocking on
+        // the pidfd-exit waitqueue: any process exit wakes us
+        // immediately and we re-evaluate readiness. For watch
+        // sets without a pidfd, fall back to the timer cadence
+        // so unrelated fd state changes still get the 100 ms
+        // poll-and-recheck. Sub-GAP: only pidfd has a real wake
+        // source; pipes / sockets / timerfds / signalfds still
+        // rely on the timer cadence within this loop.
+        const bool has_pidfd = LinuxProcessHasPidfd(p);
         if (!infinite)
         {
             const u64 now = sched::SchedNowTicks();
@@ -895,11 +927,17 @@ i64 DoEpollWait(u64 epfd, u64 user_events, u64 maxevents, u64 timeout_ms)
                 return 0;
             const u64 remaining = deadline_tick - now;
             const u64 step = (remaining < 1) ? 1 : ((remaining < 10) ? remaining : 10);
-            sched::SchedSleepTicks(step);
+            if (has_pidfd)
+                (void)sched::WaitQueueBlockTimeout(LinuxPidfdExitWq(), step);
+            else
+                sched::SchedSleepTicks(step);
         }
         else
         {
-            sched::SchedSleepTicks(10); // 100 ms infinite-poll cadence
+            if (has_pidfd)
+                (void)sched::WaitQueueBlockTimeout(LinuxPidfdExitWq(), 10);
+            else
+                sched::SchedSleepTicks(10); // 100 ms infinite-poll cadence
         }
     }
 }

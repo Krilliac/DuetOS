@@ -8,7 +8,7 @@
 // Target Windows version: Windows 11 and Server (11 25H2)
 // Bedrock NT calls (present in every Windows XP→Win11 25H2): 292
 // All known NT calls on the target version: 489
-// DuetOS coverage: 49/292 = 16%
+// DuetOS coverage: 50/292 = 17%
 //
 // See tools/win32-compat/README.md for the legal + design rationale.
 
@@ -30,9 +30,9 @@ inline constexpr u32 kSysNtNotImpl = 0xFFFFFFFFu;
 /// SYS_*. Sorted by `nt_number` so the shim can binary-search.
 struct NtSyscallMapping
 {
-    const char* nt_name; // e.g. "NtCreateFile"
-    u16 nt_number;       // syscall number on the target Windows version
-    u32 duetos_sys;      // matching SYS_* enumerator value, or kSysNtNotImpl
+    const char* nt_name;     // e.g. "NtCreateFile"
+    u16 nt_number;           // syscall number on the target Windows version
+    u32 duetos_sys;        // matching SYS_* enumerator value, or kSysNtNotImpl
 };
 
 /// Bedrock NT syscalls — present in every Windows version from XP SP1
@@ -88,7 +88,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtOpenThreadTokenEx", 0x002f, kSysNtNotImpl},
     {"NtOpenProcessTokenEx", 0x0030, kSysNtNotImpl},
     {"NtQueryPerformanceCounter", 0x0031, static_cast<u32>(::duetos::core::SYS_PERF_COUNTER)},
-    {"NtEnumerateKey", 0x0032, kSysNtNotImpl},
+    {"NtEnumerateKey", 0x0032, static_cast<u32>(::duetos::core::SYS_REGISTRY)},
     {"NtOpenFile", 0x0033, static_cast<u32>(::duetos::core::SYS_FILE_OPEN)},
     {"NtDelayExecution", 0x0034, static_cast<u32>(::duetos::core::SYS_SLEEP_MS)},
     {"NtQueryDirectoryFile", 0x0035, kSysNtNotImpl},
@@ -333,9 +333,10 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtWaitLowEventPair", 0x01e8, kSysNtNotImpl},
 };
 
-inline constexpr u32 kBedrockNtSyscallCount = sizeof(kBedrockNtSyscalls) / sizeof(kBedrockNtSyscalls[0]);
+inline constexpr u32 kBedrockNtSyscallCount =
+    sizeof(kBedrockNtSyscalls) / sizeof(kBedrockNtSyscalls[0]);
 
-inline constexpr u32 kBedrockNtSyscallsCovered = 49;
+inline constexpr u32 kBedrockNtSyscallsCovered = 50;
 
 /// Every NT syscall known on the target Windows version — superset
 /// of `kBedrockNtSyscalls`. Includes version-specific additions
@@ -394,7 +395,7 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtOpenThreadTokenEx", 0x002f, kSysNtNotImpl},
     {"NtOpenProcessTokenEx", 0x0030, kSysNtNotImpl},
     {"NtQueryPerformanceCounter", 0x0031, static_cast<u32>(::duetos::core::SYS_PERF_COUNTER)},
-    {"NtEnumerateKey", 0x0032, kSysNtNotImpl},
+    {"NtEnumerateKey", 0x0032, static_cast<u32>(::duetos::core::SYS_REGISTRY)},
     {"NtOpenFile", 0x0033, static_cast<u32>(::duetos::core::SYS_FILE_OPEN)},
     {"NtDelayExecution", 0x0034, static_cast<u32>(::duetos::core::SYS_SLEEP_MS)},
     {"NtQueryDirectoryFile", 0x0035, kSysNtNotImpl},
@@ -835,7 +836,8 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtWaitLowEventPair", 0x01e8, kSysNtNotImpl},
 };
 
-inline constexpr u32 kAllNtSyscallCount = sizeof(kAllNtSyscalls) / sizeof(kAllNtSyscalls[0]);
+inline constexpr u32 kAllNtSyscallCount =
+    sizeof(kAllNtSyscalls) / sizeof(kAllNtSyscalls[0]);
 
 /// Look up an NT syscall number on the target version and return
 /// the corresponding NtSyscallMapping, or nullptr if it's outside

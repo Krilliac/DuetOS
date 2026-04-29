@@ -13,12 +13,10 @@
 // header from outside kernel/subsystems/linux/. The public API
 // lives in syscall.h.
 
+#include "arch/x86_64/traps.h"
+#include "proc/process.h"
+#include "sched/sched.h"
 #include "util/types.h"
-
-namespace duetos::core
-{
-struct Process;
-}
 
 namespace duetos::subsystems::linux::internal
 {
@@ -42,6 +40,7 @@ inline constexpr i64 kENFILE = -23;
 inline constexpr i64 kEMFILE = -24;
 inline constexpr i64 kEAGAIN = -11;
 inline constexpr i64 kEOVERFLOW = -75;
+inline constexpr i64 kEOPNOTSUPP = -95;
 inline constexpr i64 kESTALE = -116;
 inline constexpr i64 kENOTTY = -25;
 inline constexpr i64 kESPIPE = -29;
@@ -286,6 +285,23 @@ i64 DoPwrite64(u64 fd, u64 user_buf, u64 len, i64 offset);
 // fills a 144-byte Linux struct stat from the entry; lstat is
 // identical (no symlinks); openat / newfstatat enforce the
 // AT_FDCWD-only constraint via AtFdCwdOnly.
+// Effective per-Process fd ceiling: min(16, p->linux_rlimit_nofile_cur).
+// Used by primary fd-alloc paths (DoOpen, DoDup) so a setrlimit
+// that lowers RLIMIT_NOFILE actually limits subsequent open()s.
+// Auxiliary allocators (signalfd / timerfd / eventfd / inotify /
+// fanotify / pidfd / pipe / msgq / memfd) currently still allow
+// up to 16 — sub-GAP, separate slice. Any caller that uses the
+// 0xFFFFFFFFFFFFFFFF sentinel falls through to 16.
+inline u32 LinuxFdEffectiveMax(const core::Process* p)
+{
+    if (p == nullptr)
+        return 16;
+    const u64 cap = p->linux_rlimit_nofile_cur;
+    if (cap == 0xFFFFFFFFFFFFFFFFull || cap > 16)
+        return 16;
+    return static_cast<u32>(cap);
+}
+
 i64 DoOpen(u64 user_path, u64 flags, u64 mode);
 i64 DoClose(u64 fd);
 i64 DoStat(u64 user_path, u64 user_buf);
@@ -417,6 +433,27 @@ i64 DoPidfdOpen(u64 pid, u64 flags);
 i64 DoPidfdSendSignal(u64 pidfd, u64 sig, u64 user_info, u64 flags);
 i64 DoPidfdGetfd(u64 pidfd, u64 target_fd, u64 flags);
 
+// Global pidfd-exit waitqueue. Wakes every poller blocked
+// on a pidfd whenever ANY Linux process exits. Sub-GAP: a
+// per-pid waitqueue would scope the wake — the global form
+// causes spurious wakes when an unrelated process exits, but
+// the predicate (`SchedIsPidZombie` etc.) is re-evaluated on
+// wake so correctness holds. Used by:
+//   - DoExitGroup     — calls LinuxPidfdExitWake() on the way out.
+//   - DoEpollWait     — when at least one watched fd is a
+//                       state-12 pidfd, sleeps on the queue
+//                       instead of via SchedSleepTicks, so
+//                       wake-on-exit latency is bounded by
+//                       process-exit ordering instead of the
+//                       100 ms timer cadence.
+void LinuxPidfdExitWake();
+sched::WaitQueue* LinuxPidfdExitWq();
+
+// True iff `p` has at least one pidfd (state == 12) in its
+// linux_fds[] table. Cheap (16-slot scan); used by DoEpollWait
+// to decide whether to sleep on the pidfd-exit waitqueue.
+bool LinuxProcessHasPidfd(const core::Process* p);
+
 // Kernel-level zero-copy fd-to-fd I/O. v0 implementations bounce
 // through a 1 KiB on-stack buffer (no actual zero-copy yet, but
 // the syscall surface works so callers don't need to roll their
@@ -452,7 +489,7 @@ i64 LinuxSignalDeliver(core::Process* target, u32 signum);
 bool LinuxSignalIsFatalDefault(u32 signum);
 i64 DoRtSigprocmask(u64 how, u64 user_set, u64 user_oldset, u64 sigsetsize);
 i64 DoSigaltstack(u64 ss, u64 old_ss);
-i64 DoRtSigreturn();
+i64 DoRtSigreturn(arch::TrapFrame* frame);
 i64 DoRtSigpending(u64 user_set, u64 sigsetsize);
 i64 DoRtSigsuspend(u64 user_mask, u64 sigsetsize);
 i64 DoRtSigtimedwait(u64 user_mask, u64 user_info, u64 user_ts, u64 sigsetsize);
@@ -469,6 +506,26 @@ i64 DoNanosleep(u64 user_req, u64 user_rem);
 i64 DoTimes(u64 user_buf);
 i64 DoClockGetres(u64 clk_id, u64 user_res);
 i64 DoClockNanosleep(u64 clk_id, u64 flags, u64 user_req, u64 user_rem);
+
+// Real clock-mutator handlers. v0 maintains a single signed
+// `g_realtime_offset_ns` added to NowNs() on CLOCK_REALTIME reads;
+// CLOCK_MONOTONIC / boot-relative clocks ignore the offset.
+// Cap-gated by kCapDebug — Linux's CAP_SYS_TIME analog in v0 (no
+// dedicated time-set cap yet). Untrusted callers keep their pre-
+// slice behaviour (-EPERM) so existing sandbox profiles are
+// unchanged. clock_adjtime / adjtimex stay STUB until a struct-timex
+// definition lands; the dispatch arms for them route through the
+// helpers here so the cap probe is consistent.
+i64 DoClockSettime(u64 clk_id, u64 user_ts);
+i64 DoSettimeofday(u64 user_tv, u64 user_tz);
+i64 DoClockAdjtime(u64 clk_id, u64 user_buf);
+i64 DoAdjtimex(u64 user_buf);
+
+// Read the live realtime offset (signed ns). Exposed for any other
+// TU that needs to format a wall-clock time (e.g. uname-style date
+// printing, log timestamping). Monotonic readers should keep using
+// NowNs() directly.
+i64 LinuxRealtimeOffsetNs();
 
 // Scheduler-policy handlers (syscall_sched.cpp). v0 has one real
 // scheduler (round-robin kernel threads) and BSP-only SMP, so

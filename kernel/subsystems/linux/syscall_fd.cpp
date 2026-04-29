@@ -51,7 +51,8 @@ i64 DoDup(u64 fd)
         KLOG_WARN_V("linux/fd", "DoDup: EBADF (fd not open)", fd);
         return kEBADF;
     }
-    for (u32 i = 3; i < 16; ++i)
+    const u32 fd_max = LinuxFdEffectiveMax(p);
+    for (u32 i = 3; i < fd_max; ++i)
     {
         if (p->linux_fds[i].state == 0)
         {
@@ -133,8 +134,9 @@ i64 DoFcntl(u64 fd, u64 cmd, u64 arg)
     {
     case 0: // F_DUPFD
     {
-        const u32 start = (arg < 3) ? 3 : (arg >= 16 ? 16 : static_cast<u32>(arg));
-        for (u32 i = start; i < 16; ++i)
+        const u32 fd_max = LinuxFdEffectiveMax(p);
+        const u32 start = (arg < 3) ? 3 : (arg >= fd_max ? fd_max : static_cast<u32>(arg));
+        for (u32 i = start; i < fd_max; ++i)
         {
             if (p->linux_fds[i].state == 0)
             {

@@ -76,6 +76,7 @@
 #include "mm/page.h"
 #include "mm/paging.h"
 #include "sched/sched.h"
+#include "subsystems/linux/signal_deliver.h"
 #include "subsystems/translation/translate.h"
 
 extern "C" void linux_syscall_entry();
@@ -747,7 +748,7 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         rv = DoFchdir(frame->rdi);
         break;
     case kSysRtSigreturn:
-        rv = DoRtSigreturn();
+        rv = DoRtSigreturn(frame);
         break;
     case kSysSigaltstack:
         rv = DoSigaltstack(frame->rdi, frame->rsi);
@@ -1555,13 +1556,23 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         rv = DoFanotifyMark(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
         break;
 
-    // clock writeback / system-time mutators — no RTC writeback,
-    // -EPERM matches the "you don't have CAP_SYS_TIME" Linux return.
+    // clock writeback / system-time mutators — cap-gated by
+    // kCapDebug (CAP_SYS_TIME analog in v0). Untrusted callers
+    // see -EPERM exactly as before; cap-holders get a real
+    // wall-clock offset via clock_settime / settimeofday and
+    // -EOPNOTSUPP from clock_adjtime / adjtimex (struct timex
+    // not yet wired). See syscall_time.cpp.
     case kSysClockSettime:
+        rv = DoClockSettime(frame->rdi, frame->rsi);
+        break;
     case kSysClockAdjtime:
+        rv = DoClockAdjtime(frame->rdi, frame->rsi);
+        break;
     case kSysSettimeofday:
+        rv = DoSettimeofday(frame->rdi, frame->rsi);
+        break;
     case kSysAdjtimex:
-        rv = kEPERM;
+        rv = DoAdjtimex(frame->rdi);
         break;
 
     // Keyrings — minimal real engine in keyrings.cpp.
@@ -1652,6 +1663,14 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
     }
     }
     frame->rax = static_cast<u64>(rv);
+
+    // Pending-signal check — if a user-installed handler is due,
+    // mutate the trap frame so iretq lands at the handler instead
+    // of the original syscall caller. The handler eventually
+    // returns through sa_restorer -> rt_sigreturn which restores
+    // the saved frame (including the rax we just wrote, so the
+    // post-signal world sees the original syscall's return value).
+    LinuxSignalCheckAndDeliver(frame);
 }
 
 void SyscallInit()

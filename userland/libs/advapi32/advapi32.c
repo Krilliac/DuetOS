@@ -52,6 +52,7 @@ typedef unsigned long LSTATUS; /* 32-bit Win32 error code */
 #define ERROR_FILE_NOT_FOUND 2UL
 #define ERROR_INVALID_HANDLE 6UL
 #define ERROR_MORE_DATA 234UL
+#define ERROR_NO_MORE_ITEMS 259UL
 
 /* Standard predefined HKEY values (per Win32 API). Casting a
  * sentinel integer to HKEY matches what Windows hands out and
@@ -130,6 +131,10 @@ static const RegValue k_hkcu_volatile_env_values[] = {
     {"USERDOMAIN", REG_SZ, "DUETOS\0", 7, 0},
 };
 
+/* Mirror of registry.cpp::kRegKeys[] — see the comment block
+ * there for the tier rationale (terminal vs. prefix). Adding an
+ * entry here means adding the matching entry in the kernel side
+ * in the same commit. */
 static const RegKey k_reg_keys[] = {
     /* Both Windows NT and Windows paths point at the same data —
      * different callers look in different places. */
@@ -141,6 +146,17 @@ static const RegKey k_reg_keys[] = {
      (DWORD)(sizeof(k_hkcu_internet_values) / sizeof(k_hkcu_internet_values[0]))},
     {HKEY_CURRENT_USER, "Volatile Environment", k_hkcu_volatile_env_values,
      (DWORD)(sizeof(k_hkcu_volatile_env_values) / sizeof(k_hkcu_volatile_env_values[0]))},
+    /* Prefix entries (no values). Each terminal path's distinct
+     * proper prefixes appear here so RegOpenKey(parent, sub, ...)
+     * can walk the tree one component at a time. */
+    {HKEY_LOCAL_MACHINE, "Software", (const RegValue*)0, 0},
+    {HKEY_LOCAL_MACHINE, "Software\\Microsoft", (const RegValue*)0, 0},
+    {HKEY_LOCAL_MACHINE, "Software\\Microsoft\\Windows", (const RegValue*)0, 0},
+    {HKEY_LOCAL_MACHINE, "Software\\Microsoft\\Windows NT", (const RegValue*)0, 0},
+    {HKEY_CURRENT_USER, "Software", (const RegValue*)0, 0},
+    {HKEY_CURRENT_USER, "Software\\Microsoft", (const RegValue*)0, 0},
+    {HKEY_CURRENT_USER, "Software\\Microsoft\\Windows", (const RegValue*)0, 0},
+    {HKEY_CURRENT_USER, "Software\\Microsoft\\Windows\\CurrentVersion", (const RegValue*)0, 0},
 };
 
 #define REG_KEY_COUNT (sizeof(k_reg_keys) / sizeof(k_reg_keys[0]))
@@ -217,6 +233,72 @@ static HANDLE reg_handle_for_key(const RegKey* k)
     return (HANDLE)(UINT_PTR)(REG_HANDLE_BASE + index);
 }
 
+/* Resolve `hKey` (predefined HKEY sentinel OR previously-handed
+ * handle from REG_HANDLE_BASE) to its (root, path) pair. Returns
+ * 0 on success and writes into *out_root + *out_path; non-zero on
+ * an unrecognised handle. *out_path is "" for predefined HKEYs
+ * (caller substitutes the user-provided subkey). */
+static int reg_resolve_parent(HANDLE hKey, HANDLE* out_root, const char** out_path)
+{
+    UINT_PTR v = (UINT_PTR)hKey;
+    if (v >= 0x80000000UL && v <= 0x80000005UL)
+    {
+        *out_root = hKey;
+        *out_path = "";
+        return 0;
+    }
+    if (v >= REG_HANDLE_BASE && v < REG_HANDLE_BASE + REG_KEY_COUNT)
+    {
+        const RegKey* parent = &k_reg_keys[v - REG_HANDLE_BASE];
+        *out_root = parent->root;
+        *out_path = parent->path;
+        return 0;
+    }
+    return 1;
+}
+
+/* Concat parent_path + "\\" + sub into out (cap-bounded). Tolerant
+ * of trailing backslash on parent and leading backslash on sub.
+ * Returns 1 on success, 0 on overflow. Empty sub -> parent_path
+ * verbatim; empty parent -> sub verbatim. */
+static int reg_concat_path(const char* parent_path, const char* sub, char* out, DWORD cap)
+{
+    DWORD i = 0;
+    if (parent_path)
+    {
+        while (parent_path[i] != 0)
+        {
+            if (i + 1 >= cap)
+                return 0;
+            out[i] = parent_path[i];
+            ++i;
+        }
+    }
+    if (i > 0 && out[i - 1] == '\\')
+        --i;
+    if (sub && sub[0] == '\\')
+        ++sub;
+    if (!sub || sub[0] == 0)
+    {
+        out[i] = 0;
+        return 1;
+    }
+    if (i > 0)
+    {
+        if (i + 1 >= cap)
+            return 0;
+        out[i++] = '\\';
+    }
+    while (*sub != 0)
+    {
+        if (i + 1 >= cap)
+            return 0;
+        out[i++] = *sub++;
+    }
+    out[i] = 0;
+    return 1;
+}
+
 /* ------------------------------------------------------------------
  * Registry API (real, read-only)
  * ------------------------------------------------------------------ */
@@ -228,7 +310,29 @@ __declspec(dllexport) LSTATUS RegOpenKeyExA(HANDLE hKey, const char* subkey, DWO
     if (out == (HANDLE*)0)
         return ERROR_FILE_NOT_FOUND;
     *out = (HANDLE)0;
-    const RegKey* target = reg_lookup_key_a(hKey, subkey);
+
+    HANDLE root = (HANDLE)0;
+    const char* parent_path = "";
+    if (reg_resolve_parent(hKey, &root, &parent_path) != 0)
+        return ERROR_FILE_NOT_FOUND;
+
+    /* Predefined HKEY: lookup against `subkey` directly. Nested:
+     * synthesise the full path. Both forms route through the same
+     * lookup, so either tier of caller hits the same static tree. */
+    const char* lookup;
+    char concat_buf[256];
+    if (parent_path[0] == 0)
+    {
+        lookup = subkey ? subkey : "";
+    }
+    else
+    {
+        if (!reg_concat_path(parent_path, subkey, concat_buf, (DWORD)sizeof(concat_buf)))
+            return ERROR_FILE_NOT_FOUND;
+        lookup = concat_buf;
+    }
+
+    const RegKey* target = reg_lookup_key_a(root, lookup);
     if (!target)
         return ERROR_FILE_NOT_FOUND;
     *out = reg_handle_for_key(target);
@@ -372,27 +476,140 @@ __declspec(dllexport) LSTATUS RegDeleteValueW(HANDLE hKey, const wchar_t16* name
     return ERROR_SUCCESS;
 }
 
+/* Direct-child predicate mirror — kernel side
+ * (registry.cpp::IsDirectChild) uses the same shape. Returns 1 iff
+ * `candidate` is exactly `parent_path + "\\" + single_component`,
+ * with `*child_offset` pointing at the child's first byte. */
+static int reg_is_direct_child(const char* parent_path, const char* candidate, const char** child_offset)
+{
+    DWORD i = 0;
+    while (parent_path[i] != 0)
+    {
+        char a = parent_path[i];
+        char b = candidate[i];
+        if (a >= 'A' && a <= 'Z')
+            a = (char)(a + ('a' - 'A'));
+        if (b >= 'A' && b <= 'Z')
+            b = (char)(b + ('a' - 'A'));
+        if (a != b)
+            return 0;
+        ++i;
+    }
+    if (candidate[i] != '\\')
+        return 0;
+    const char* rest = candidate + i + 1;
+    if (rest[0] == 0)
+        return 0;
+    for (DWORD j = 0; rest[j] != 0; ++j)
+    {
+        if (rest[j] == '\\')
+            return 0;
+    }
+    *child_offset = rest;
+    return 1;
+}
+
+/* Find the idx'th direct child of `key` in k_reg_keys[]. Returns
+ * a pointer to the ASCII child component name, or NULL if `idx`
+ * is past the children count. */
+static const char* reg_enum_child_name(const RegKey* key, DWORD idx)
+{
+    DWORD hits = 0;
+    for (DWORD i = 0; i < REG_KEY_COUNT; ++i)
+    {
+        if (k_reg_keys[i].root != key->root)
+            continue;
+        const char* child = (const char*)0;
+        if (!reg_is_direct_child(key->path, k_reg_keys[i].path, &child))
+            continue;
+        if (hits == idx)
+            return child;
+        ++hits;
+    }
+    return (const char*)0;
+}
+
 __declspec(dllexport) LSTATUS RegEnumKeyW(HANDLE hKey, DWORD idx, wchar_t16* name, DWORD cb)
 {
-    (void)hKey;
-    (void)idx;
-    (void)name;
-    (void)cb;
-    return ERROR_FILE_NOT_FOUND; /* "no more keys" */
+    const RegKey* key = reg_key_from_handle(hKey);
+    if (!key)
+        return ERROR_FILE_NOT_FOUND;
+    const char* child = reg_enum_child_name(key, idx);
+    if (!child)
+        return ERROR_NO_MORE_ITEMS;
+    DWORD len = 0;
+    while (child[len])
+        ++len;
+    if (!name || cb < len + 1)
+        return ERROR_MORE_DATA;
+    for (DWORD i = 0; i <= len; ++i)
+        name[i] = (wchar_t16)(unsigned char)child[i];
+    return ERROR_SUCCESS;
 }
 
 __declspec(dllexport) LSTATUS RegEnumKeyExW(HANDLE hKey, DWORD idx, wchar_t16* name, DWORD* cb, DWORD* reserved,
                                             wchar_t16* cls, DWORD* cls_cb, void* last_write)
 {
-    (void)hKey;
-    (void)idx;
-    (void)name;
-    (void)cb;
     (void)reserved;
-    (void)cls;
-    (void)cls_cb;
     (void)last_write;
-    return ERROR_FILE_NOT_FOUND;
+    /* Class is always empty in v0 (no class string tracking). */
+    if (cls_cb)
+        *cls_cb = 0;
+    if (cls && cls_cb && *cls_cb >= 1)
+        cls[0] = 0;
+
+    const RegKey* key = reg_key_from_handle(hKey);
+    if (!key)
+        return ERROR_FILE_NOT_FOUND;
+    const char* child = reg_enum_child_name(key, idx);
+    if (!child)
+        return ERROR_NO_MORE_ITEMS;
+    DWORD len = 0;
+    while (child[len])
+        ++len;
+    DWORD cap = cb ? *cb : 0;
+    if (cb)
+        *cb = len;
+    if (!name || cap < len + 1)
+        return ERROR_MORE_DATA;
+    for (DWORD i = 0; i <= len; ++i)
+        name[i] = (wchar_t16)(unsigned char)child[i];
+    return ERROR_SUCCESS;
+}
+
+__declspec(dllexport) LSTATUS RegEnumKeyExA(HANDLE hKey, DWORD idx, char* name, DWORD* cb, DWORD* reserved, char* cls,
+                                            DWORD* cls_cb, void* last_write)
+{
+    (void)reserved;
+    (void)last_write;
+    if (cls_cb)
+        *cls_cb = 0;
+    if (cls && cls_cb && *cls_cb >= 1)
+        cls[0] = 0;
+
+    const RegKey* key = reg_key_from_handle(hKey);
+    if (!key)
+        return ERROR_FILE_NOT_FOUND;
+    const char* child = reg_enum_child_name(key, idx);
+    if (!child)
+        return ERROR_NO_MORE_ITEMS;
+    DWORD len = 0;
+    while (child[len])
+        ++len;
+    DWORD cap = cb ? *cb : 0;
+    if (cb)
+        *cb = len;
+    if (!name || cap < len + 1)
+        return ERROR_MORE_DATA;
+    for (DWORD i = 0; i <= len; ++i)
+        name[i] = child[i];
+    return ERROR_SUCCESS;
+}
+
+__declspec(dllexport) LSTATUS RegEnumKeyA(HANDLE hKey, DWORD idx, char* name, DWORD cb)
+{
+    DWORD cb_inout = cb;
+    return RegEnumKeyExA(hKey, idx, name, &cb_inout, (DWORD*)0, (char*)0, (DWORD*)0, (void*)0);
 }
 
 __declspec(dllexport) LSTATUS RegEnumValueW(HANDLE hKey, DWORD idx, wchar_t16* name, DWORD* name_cb, DWORD* reserved,
@@ -400,8 +617,10 @@ __declspec(dllexport) LSTATUS RegEnumValueW(HANDLE hKey, DWORD idx, wchar_t16* n
 {
     const RegKey* key = reg_key_from_handle(hKey);
     (void)reserved;
-    if (!key || idx >= key->value_count)
-        return ERROR_FILE_NOT_FOUND;
+    if (!key)
+        return ERROR_INVALID_HANDLE;
+    if (idx >= key->value_count)
+        return ERROR_NO_MORE_ITEMS;
     const RegValue* v = &key->values[idx];
     /* Write name in wide form. */
     DWORD name_cap = name_cb ? *name_cb : 0;
@@ -432,6 +651,131 @@ __declspec(dllexport) LSTATUS RegEnumValueW(HANDLE hKey, DWORD idx, wchar_t16* n
             data[i] = src[i];
     }
     return ERROR_SUCCESS;
+}
+
+__declspec(dllexport) LSTATUS RegEnumValueA(HANDLE hKey, DWORD idx, char* name, DWORD* name_cb, DWORD* reserved,
+                                            DWORD* type, unsigned char* data, DWORD* data_cb)
+{
+    const RegKey* key = reg_key_from_handle(hKey);
+    (void)reserved;
+    if (!key)
+        return ERROR_INVALID_HANDLE;
+    if (idx >= key->value_count)
+        return ERROR_NO_MORE_ITEMS;
+    const RegValue* v = &key->values[idx];
+    DWORD name_cap = name_cb ? *name_cb : 0;
+    DWORD name_len = 0;
+    while (v->name[name_len])
+        ++name_len;
+    if (name_cb)
+        *name_cb = name_len;
+    if (name)
+    {
+        if (name_cap < name_len + 1)
+            return ERROR_MORE_DATA;
+        for (DWORD i = 0; i <= name_len; ++i)
+            name[i] = v->name[i];
+    }
+    if (type)
+        *type = v->type;
+    DWORD data_cap = data_cb ? *data_cb : 0;
+    if (data_cb)
+        *data_cb = v->size;
+    if (data)
+    {
+        if (data_cap < v->size)
+            return ERROR_MORE_DATA;
+        const unsigned char* src = (const unsigned char*)v->data;
+        for (DWORD i = 0; i < v->size; ++i)
+            data[i] = src[i];
+    }
+    return ERROR_SUCCESS;
+}
+
+/* RegQueryInfoKey* — populate the count + max-len out-parameters
+ * for an open key. Mirrors RegQueryInfoKeyA/W's contract. The
+ * advapi32-side mirror only sees static values (no kernel sidecar
+ * visibility), so the value/data max-lens reflect the same view
+ * advapi32 itself enumerates. */
+static LSTATUS reg_query_info_common(HANDLE hKey, DWORD* subkeys, DWORD* max_subkey_chars, DWORD* values,
+                                     DWORD* max_value_name_chars, DWORD* max_value_data_bytes)
+{
+    const RegKey* key = reg_key_from_handle(hKey);
+    if (!key)
+        return ERROR_INVALID_HANDLE;
+    DWORD nsub = 0, max_sub = 0;
+    for (DWORD i = 0; i < REG_KEY_COUNT; ++i)
+    {
+        if (k_reg_keys[i].root != key->root)
+            continue;
+        const char* child = (const char*)0;
+        if (!reg_is_direct_child(key->path, k_reg_keys[i].path, &child))
+            continue;
+        ++nsub;
+        DWORD len = 0;
+        while (child[len])
+            ++len;
+        if (len > max_sub)
+            max_sub = len;
+    }
+    DWORD max_vn = 0, max_vd = 0;
+    for (DWORD i = 0; i < key->value_count; ++i)
+    {
+        DWORD nl = 0;
+        while (key->values[i].name[nl])
+            ++nl;
+        if (nl > max_vn)
+            max_vn = nl;
+        if (key->values[i].size > max_vd)
+            max_vd = key->values[i].size;
+    }
+    if (subkeys)
+        *subkeys = nsub;
+    if (max_subkey_chars)
+        *max_subkey_chars = max_sub;
+    if (values)
+        *values = key->value_count;
+    if (max_value_name_chars)
+        *max_value_name_chars = max_vn;
+    if (max_value_data_bytes)
+        *max_value_data_bytes = max_vd;
+    return ERROR_SUCCESS;
+}
+
+__declspec(dllexport) LSTATUS RegQueryInfoKeyW(HANDLE hKey, wchar_t16* cls, DWORD* cls_cb, DWORD* reserved,
+                                               DWORD* subkeys, DWORD* max_subkey, DWORD* max_class, DWORD* values,
+                                               DWORD* max_value_name, DWORD* max_value, DWORD* sec_descr,
+                                               void* last_write)
+{
+    (void)reserved;
+    (void)last_write;
+    if (cls_cb)
+        *cls_cb = 0;
+    if (cls && cls_cb && *cls_cb >= 1)
+        cls[0] = 0;
+    if (max_class)
+        *max_class = 0;
+    if (sec_descr)
+        *sec_descr = 0;
+    return reg_query_info_common(hKey, subkeys, max_subkey, values, max_value_name, max_value);
+}
+
+__declspec(dllexport) LSTATUS RegQueryInfoKeyA(HANDLE hKey, char* cls, DWORD* cls_cb, DWORD* reserved, DWORD* subkeys,
+                                               DWORD* max_subkey, DWORD* max_class, DWORD* values,
+                                               DWORD* max_value_name, DWORD* max_value, DWORD* sec_descr,
+                                               void* last_write)
+{
+    (void)reserved;
+    (void)last_write;
+    if (cls_cb)
+        *cls_cb = 0;
+    if (cls && cls_cb && *cls_cb >= 1)
+        cls[0] = 0;
+    if (max_class)
+        *max_class = 0;
+    if (sec_descr)
+        *sec_descr = 0;
+    return reg_query_info_common(hKey, subkeys, max_subkey, values, max_value_name, max_value);
 }
 
 __declspec(dllexport) LSTATUS RegSetValueW(HANDLE hKey, const wchar_t16* subkey, DWORD type, const wchar_t16* data,

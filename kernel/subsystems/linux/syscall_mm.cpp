@@ -45,19 +45,70 @@ u64 PageUp(u64 x)
 
 } // namespace
 
-// Linux: madvise(addr, len, advice). v0 has no page reclaim or
-// readahead — every advice is a no-op. We still validate inputs.
-// The most common bad-input case is a non-page-aligned addr; mirror
-// Linux's -EINVAL on that.
+// Linux: madvise(addr, len, advice).
+//
+// v0 has no page reclaim or readahead — most advice values are
+// genuinely no-ops on our system. The exceptions worth honoring
+// are the data-clearing ones: a process that issues MADV_DONTNEED
+// / MADV_FREE / MADV_REMOVE expects subsequent reads to return
+// zero (anonymous mappings) or trigger a re-read from backing
+// store (file mappings — sub-GAP since v0 has no file-backed
+// mmap). For anonymous mappings we zero the requested range,
+// matching the contract callers actually depend on (jemalloc /
+// glibc free arenas use MADV_DONTNEED to reclaim large blocks).
+//
+// Invalid-input shapes (Linux-conformant -EINVAL):
+//   - addr not page-aligned
+//   - addr + len overflows
 i64 DoMadvise(u64 addr, u64 len, u64 advice)
 {
     constexpr u64 kPageSize = 4096;
+    constexpr u64 kMadvNormal = 0;
+    constexpr u64 kMadvRandom = 1;
+    constexpr u64 kMadvSequential = 2;
+    constexpr u64 kMadvWillneed = 3;
+    constexpr u64 kMadvDontneed = 4;
+    constexpr u64 kMadvFree = 8;
+    constexpr u64 kMadvRemove = 9;
     if ((addr & (kPageSize - 1)) != 0)
         return kEINVAL;
     if (addr + len < addr)
         return kEINVAL;
-    (void)advice;
-    return 0;
+    if (len == 0)
+        return 0;
+
+    switch (advice)
+    {
+    case kMadvNormal:
+    case kMadvRandom:
+    case kMadvSequential:
+    case kMadvWillneed:
+        // No reclaim or readahead policy — accept silently.
+        return 0;
+    case kMadvDontneed:
+    case kMadvFree:
+    case kMadvRemove:
+    {
+        // Zero each mapped page in the range. CopyToUser refuses
+        // pointers outside the canonical low half AND fails for
+        // unmapped pages — both shapes are silently skipped, which
+        // matches Linux's "best-effort" madvise contract for
+        // these advice values.
+        u8 zeros[256] = {};
+        u64 va = addr;
+        const u64 end = addr + len;
+        while (va < end)
+        {
+            const u64 chunk = (end - va < sizeof(zeros)) ? (end - va) : sizeof(zeros);
+            (void)mm::CopyToUser(reinterpret_cast<void*>(va), zeros, chunk);
+            va += chunk;
+        }
+        return 0;
+    }
+    default:
+        // Unknown advice — Linux returns -EINVAL.
+        return kEINVAL;
+    }
 }
 
 // Linux: mprotect(addr, len, prot). v0 maps all user pages RW
@@ -271,20 +322,112 @@ i64 DoMunmap(u64 addr, u64 len)
 // v0 has no mremap engine. If the request shrinks, accept and
 // keep the original VA — every page above new_size stays mapped
 // but the caller agreed to ignore them. Otherwise -ENOMEM.
+// Linux: mremap(old_addr, old_len, new_len, flags, new_addr).
+//
+// flags:
+//   MREMAP_MAYMOVE = 0x1 — kernel may relocate the mapping if it
+//     can't grow in place. Without this flag, growth requires
+//     contiguous free VA at the existing position; v0's mmap
+//     cursor is bump-only so we can never grow in place and
+//     return -ENOMEM as Linux does.
+//   MREMAP_FIXED   = 0x2 — caller-supplied target VA. Not
+//     implemented in v0 (would need a fixed-VA reservation
+//     check in the address space).
+//
+// Three cases handled:
+//   shrink (new_len < old_len): unmap pages in the tail
+//     [old_addr + new_len, old_addr + old_len), return old_addr.
+//   same  (new_len == old_len): no-op, return old_addr.
+//   grow with MAYMOVE: allocate a fresh range at the linux_mmap
+//     cursor (same shape as DoMmap anonymous), copy each old
+//     page's contents page-by-page via the direct map, unmap the
+//     old range, return the new base.
 i64 DoMremap(u64 old_addr, u64 old_len, u64 new_len, u64 flags, u64 new_addr)
 {
     constexpr u64 kPageSize = 4096;
+    constexpr u64 kMremapMaymove = 0x1;
+    constexpr u64 kMremapFixed = 0x2;
+    (void)new_addr;
+
     if ((old_addr & (kPageSize - 1)) != 0)
         return kEINVAL;
     if (old_len == 0 || new_len == 0)
         return kEINVAL;
-    if (new_len <= old_len)
+    if ((flags & kMremapFixed) != 0)
+        return kEINVAL; // sub-GAP — fixed VA not honored
+
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || p->abi_flavor != core::kAbiLinux)
+        return kEINVAL;
+
+    const u64 old_pages = PageUp(old_len) / kPageSize;
+    const u64 new_pages = PageUp(new_len) / kPageSize;
+
+    if (new_pages == old_pages)
+        return static_cast<i64>(old_addr);
+
+    if (new_pages < old_pages)
     {
+        const u64 tail_va = old_addr + new_pages * kPageSize;
+        for (u64 i = 0; i < (old_pages - new_pages); ++i)
+            (void)mm::AddressSpaceUnmapUserPage(p->as, tail_va + i * kPageSize);
         return static_cast<i64>(old_addr);
     }
-    (void)flags;
-    (void)new_addr;
-    return kENOMEM;
+
+    // new_pages > old_pages — needs MAYMOVE.
+    if ((flags & kMremapMaymove) == 0)
+        return kENOMEM;
+
+    const u64 base = p->linux_mmap_cursor;
+    const u64 pte_flags = mm::kPagePresent | mm::kPageUser | mm::kPageWritable | mm::kPageNoExecute;
+
+    // Allocate new frames for the entire new range.
+    for (u64 i = 0; i < new_pages; ++i)
+    {
+        const mm::PhysAddr fr = mm::AllocateFrame();
+        if (fr == mm::kNullFrame)
+        {
+            // Unwind freshly mapped frames so we don't leak.
+            for (u64 j = 0; j < i; ++j)
+                (void)mm::AddressSpaceUnmapUserPage(p->as, base + j * kPageSize);
+            return kENOMEM;
+        }
+        mm::AddressSpaceMapUserPage(p->as, base + i * kPageSize, fr, pte_flags);
+    }
+
+    // Copy old contents page-by-page via the direct map. Unmapped
+    // old pages (kNullFrame) just leave the corresponding new
+    // page zero-initialised, which is the same shape Linux exposes
+    // when growing past a hole inside the original VMA.
+    for (u64 i = 0; i < old_pages; ++i)
+    {
+        const u64 src_va = old_addr + i * kPageSize;
+        const u64 dst_va = base + i * kPageSize;
+        const mm::PhysAddr src_frame = mm::AddressSpaceLookupUserFrame(p->as, src_va);
+        const mm::PhysAddr dst_frame = mm::AddressSpaceLookupUserFrame(p->as, dst_va);
+        if (src_frame == mm::kNullFrame || dst_frame == mm::kNullFrame)
+            continue;
+        const u8* src = static_cast<const u8*>(mm::PhysToVirt(src_frame));
+        u8* dst = static_cast<u8*>(mm::PhysToVirt(dst_frame));
+        for (u64 b = 0; b < kPageSize; ++b)
+            dst[b] = src[b];
+    }
+
+    // Free old VAs. Each unmap returns the frame to the allocator.
+    for (u64 i = 0; i < old_pages; ++i)
+        (void)mm::AddressSpaceUnmapUserPage(p->as, old_addr + i * kPageSize);
+
+    p->linux_mmap_cursor += new_pages * kPageSize;
+    arch::SerialWrite("[linux] mremap MAYMOVE old=");
+    arch::SerialWriteHex(old_addr);
+    arch::SerialWrite(" old_pages=");
+    arch::SerialWriteHex(old_pages);
+    arch::SerialWrite(" -> new=");
+    arch::SerialWriteHex(base);
+    arch::SerialWrite(" new_pages=");
+    arch::SerialWriteHex(new_pages);
+    arch::SerialWrite("\n");
+    return static_cast<i64>(base);
 }
 
 // msync(): write-back of a memory mapping. v0 mmap is anonymous-

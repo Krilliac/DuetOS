@@ -81,6 +81,7 @@
 #include "subsystems/win32/iocp_job.h"
 #include "subsystems/win32/section.h"
 #include "subsystems/win32/spawn_syscall.h"
+#include "subsystems/win32/token_syscall.h"
 #include "subsystems/win32/window_syscall.h"
 #include "subsystems/win32/heap.h"
 #include "subsystems/win32/custom.h"
@@ -1635,6 +1636,14 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_JOB_CLOSE:
         frame->rax = static_cast<u64>(::duetos::subsystems::win32::SysJobClose(frame->rdi));
         return;
+
+    case SYS_TOKEN_ADJUST:
+    {
+        const i64 rv =
+            ::duetos::subsystems::win32::SysTokenAdjust(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        frame->rax = static_cast<u64>(rv);
+        return;
+    }
 
     case SYS_FILE_QUERY_ATTRIBUTES:
     {

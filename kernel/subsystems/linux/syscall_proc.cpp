@@ -45,6 +45,13 @@ i64 DoExitGroup(u64 status)
         p->linux_was_signaled = false;
         p->linux_exit_signal = 0;
     }
+    // Wake every pidfd poller before SchedExit transitions us
+    // into TaskState::Dead. The waiter's predicate
+    // (LinuxFdEpollReady on a state-12 fd) will see
+    // SchedIsPidZombie === true on this exact wakeup, so the
+    // first scheduled poll completes with EPOLLIN instead of
+    // sleeping again.
+    LinuxPidfdExitWake();
     sched::SchedExit();
     // sched::SchedExit is [[noreturn]]; this line is unreachable.
     return 0;

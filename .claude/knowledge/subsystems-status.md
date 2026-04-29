@@ -2,7 +2,7 @@
 
 **Type:** Decision + Observation (consolidated)
 **Status:** Active — single source of truth
-**Last updated:** 2026-04-27
+**Last updated:** 2026-04-29
 
 This doc consolidates 17 prior knowledge files into one tracker for
 the Win32/NT + Linux ABI subsystems. The originals (per-slice
@@ -21,20 +21,30 @@ Headline gaps:
 ### Linux ABI (~190 of 374 syscalls still stubbed)
 
 - **BPF + perf_event_open** — huge surface, likely never realistic
-- **Real signal completion**: user-handler trampoline + sigreturn (the trampoline is the hard part)
+- **Real signal completion**: user-handler trampoline + sigreturn — DONE 2026-04-29 for sa_restorer-supplying callers (glibc / musl, which means almost everyone). Old-style "no SA_RESTORER" callers still see the pending bit cleared without invocation (logged as a warning)
 - **Containers**: setns, unshare, pivot_root, mount/umount2 (currently -EPERM)
 - **Real ptrace state machine** (currently only kCapDebug-gated stub)
-- **clock_settime / clock_adjtime** — currently -EPERM (no RTC writeback)
-- **Real rlimit enforcement** (currently mostly stored, not enforced)
-- **mremap for real**, full madvise advice handling
-- **pidfd poll-on-exit** (pidfd_getfd now real for pool-backed states)
-- **Real splice / tee / vmsplice page-grant** (currently -EINVAL except vmsplice→pipe)
+- ~~**clock_settime / settimeofday**~~ — landed: signed `g_realtime_offset_ns` in syscall_time.cpp, set by clock_settime(CLOCK_REALTIME) / settimeofday; CLOCK_MONOTONIC / boot-relative reject with -EINVAL (matches Linux). CLOCK_REALTIME readers (clock_gettime / gettimeofday / time) compose `RealtimeNs() = NowNs() + offset`; saturate-at-zero on negative-offset underflow so userspace never sees a negative tv_sec. Cap-gated by kCapDebug (CAP_SYS_TIME analog in v0); untrusted callers keep pre-slice -EPERM. **clock_adjtime / adjtimex** stay -EOPNOTSUPP for cap-holders (was -EPERM uniformly) — struct timex / NTP discipline not yet wired (separate slice)
+- ~~**Real rlimit enforcement**~~ — landed for NOFILE + NPROC: per-Process soft caps (`linux_rlimit_nofile_cur`, `linux_rlimit_nproc_cur`) initialised to 0xFF... sentinel ("no cap below kernel ceiling"); setrlimit/prlimit64 lower them; getrlimit reports them. NOFILE enforced uniformly across all 15 fd-allocator sites (open / dup / F_DUPFD / pipe / pipe2 / socket / msgq_open / pidfd_open / pidfd_getfd / inotify_init / fanotify_init / signalfd / timerfd / eventfd / memfd_create) via `LinuxFdEffectiveMax(p)`; NPROC enforced in DoFork via `SchedCountChildrenOfPid` (live-child count vs. cap, returns -EAGAIN like Linux). Sub-GAPs remaining: STACK / AS / DATA still served from constants. CLONE_THREAD doesn't burn NPROC (same Process)
+- ~~**mremap for real**, full madvise advice handling~~ — landed: madvise honors DONTNEED / FREE / REMOVE (zeros mapped pages, skips unmapped); mremap shrinks via real per-page unmap, MAYMOVE growth allocates a new range and direct-map-copies old contents page-by-page (sub-GAPs: file-backed VMAs not tracked, MREMAP_FIXED unimplemented)
+- ~~**pidfd poll-on-exit**~~ — landed: `LinuxFdEpollReady` reports EPOLLIN on a state-12 slot when `SchedIsPidZombie(target_pid)` (task on `g_zombies`) or `SchedFindProcessByPid` returns nullptr (already reaped). `DoPoll` rerouted through the same predicate so POLLIN is consistent across epoll / poll / select. Wake-on-exit landed too: global `g_pidfd_exit_wq` woken by `LinuxPidfdExitWake()` at the top of `DoExitGroup`; `DoEpollWait` uses `WaitQueueBlockTimeout` against it when at least one watched fd is a pidfd, so wake latency is bounded by exit ordering instead of the 100 ms timer cadence. Sub-GAP: only pidfd has a real wake source — pipes / sockets / timerfds / signalfds still rely on the timer cadence within `DoEpollWait`.
+- **Real splice / tee zero-copy for file↔pipe** (pipe→pipe landed 2026-04-29; vmsplice→pipe was already real)
 - **userfaultfd, io_uring** (-ENOSYS facades only)
 - **landlock / seccomp filter execution** (-ENOSYS facades only)
 
 ### Win32 / NT subsystem (~470 NT facades remaining of 506 total)
 
-- **NtCreateProcess / NtCreateUserProcess** — section-from-file based spawn (CreateProcessA/W now real via SYS_PROCESS_SPAWN; NT layer still pending ProcessParameters parsing)
+- ~~**NtCreateUserProcess**~~ — DONE (2026-04-29): ntdll's
+  NtCreateUserProcess now parses RTL_USER_PROCESS_PARAMETERS,
+  translates the Windows ImagePathName UNICODE_STRING into the
+  kernel's `/disk/N/...` form (drive letter + extended-length
+  prefix stripping inline; matches the kernel32 NormalizePathW
+  translator), and issues SYS_PROCESS_SPAWN. ThreadHandle = -1
+  (caller does NtOpenThread(pid) for a real handle). Sub-GAPs:
+  CommandLine ignored; ProcessFlags / ThreadFlags ignored;
+  CreateInfo / AttributeList ignored. Old NtCreateProcess /
+  NtCreateProcessEx remain NotImpl (section-from-file based —
+  separate slice).
 - **LPC / ALPC family** — IPC backbone (NtCreatePort / NtConnectPort / NtRequestPort / NtReplyPort)
 - **ETW / NtTrace*** — tracing infrastructure
 - **KTM transactions** — NtCreateTransaction / NtCommitTransaction
@@ -163,7 +173,7 @@ Documented so an audit doesn't flag them:
 |---|---|---|
 | `NtOpenProcessToken` / `Ex` | constant handle 0xA00 | No auth model; kernel's `kCap*` is the real gate |
 | `NtQueryInformationToken` (TokenUser, TokenIntegrityLevel) | static SIDs | Same. PE callers probe; nothing in DuetOS gates on the answer |
-| `NtAdjustPrivilegesToken` | success no-op | No privilege model. `kCapDebug` etc. is what actually gates cross-process inspection |
+| ~~`NtAdjustPrivilegesToken`~~ | ~~success no-op~~ | FIXED 2026-04-29: real LUID→cap mapping via SYS_TOKEN_ADJUST. Disable / SE_PRIVILEGE_REMOVED / DisableAllPrivileges drop the mapped cap; enable refuses if the cap isn't held (returns STATUS_NOT_ALL_ASSIGNED) |
 | `NtOpenMutant` / `NtOpenEvent` | STATUS_OBJECT_NAME_NOT_FOUND | No named-object table yet. Create* thunks DO work; only Open-by-name is a facade |
 | `NtFsControlFile` / `NtDeviceIoControlFile` | STATUS_NOT_IMPLEMENTED | No IOCTL framework. Explicit NotImpl is the right answer |
 | `NtFlushBuffersFile` | success no-op | No write cache; flush has nothing to do |
@@ -450,8 +460,9 @@ TcpServerSend slice.
 `LinuxSignalDeliver(target, signum)` is the central delivery
 helper. Default actions (SIGHUP/INT/QUIT/ABRT/BUS/FPE/KILL/
 USR1/SEGV/USR2/PIPE/TERM = fatal) call `SchedKillByProcess`;
-SIG_IGN drops; user handler sets pending bit but no trampoline
-runs (sub-GAP).
+SIG_IGN drops; user handlers (with SA_RESTORER + restorer_va)
+are invoked via the trampoline+sigreturn path landed 2026-04-29
+(`subsystems/linux/signal_deliver.{cpp,h}`).
 
 ---
 
@@ -540,7 +551,7 @@ described in §9):
 | ~~`NtReadVirtualMemory`~~ | FIXED: now routes to `SYS_PROCESS_VM_READ` |
 | ~~`NtCreateSemaphore`~~ | FIXED: routed to `kSysNtNotImpl` |
 | ~~`NtReleaseSemaphore`~~ | FIXED: routed to `kSysNtNotImpl` |
-| `NtSetInformationFile` | Mapped to `SYS_FILE_SEEK` — only the FilePositionInformation class is correct; other classes silently no-op |
+| `NtSetInformationFile` | Mapped to `SYS_FILE_SEEK`; ntdll thunk handles FilePositionInformation (real seek) + FileBasicInformation (accept-as-success — v0 doesn't track on-disk file times); FileEndOfFileInformation / FileRenameInformation / FileDispositionInformation return STATUS_NOT_IMPLEMENTED |
 | `NtCreateMutant` | Suspect — verify mapping |
 
 **Action**: any new mismap discovered should either get a correct
@@ -563,7 +574,12 @@ have landed (see §10).
    until their backing syscalls exist
 5. ~~Implement registry read syscalls~~ — DONE for read path
    (`e60ce80` + `40a4230`), EXTENDED: registry value-write subset
-   (`0caf60f`) — sidecar pool of mutable values
+   (`0caf60f`) — sidecar pool of mutable values; ENUMERATION
+   landed (2026-04-29): static-tree gained 8 prefix entries so
+   nested `RegOpenKey` walks one component at a time, kernel
+   `DoEnumerateKey` op=9 lists direct children, `NtEnumerateKey`
+   + advapi32 `RegEnumKey*` are real (no longer NotImpl stubs),
+   `DoQueryKey` reports real subkey_count via `CountSubkeys`
 6. ~~Cross-process VM access~~ — DONE (`23b2585` + `a2bb164`):
    NtOpenProcess + NtRead/Write/QueryVirtualMemory all live
 7. ~~Thread manipulation~~ — DONE (`de3f155` + `c8f1bef` +
@@ -604,21 +620,63 @@ have landed (see §10).
 25. ~~SysV msg queues + POSIX msg queues~~ — DONE (`efe483e`):
     real ring + WaitQueue blocking; mtype filter (SysV) and
     priority delivery (POSIX); `Process::linux_fds` state 13
+26. ~~Registry enumeration + nested OpenKey~~ — DONE (2026-04-29):
+    8 prefix entries in the static tree make nested
+    `RegOpenKey(parent, sub, &h)` walk one component at a time.
+    `NtEnumerateKey` (op=9) + `RegEnumKey*` walk direct children.
+    `DoQueryKey` reports `subkey_count` + `MaxNameLen` +
+    `MaxValueNameLen` + `MaxValueDataLen`. `RegQueryInfoKeyA/W`
+    + `RegEnumValueA` round out the userland API surface
+27. ~~Win32 path translation (drive-letter + extended-prefix)~~ —
+    DONE (2026-04-29): `kernel32::Win32PathPrefixA` + the
+    `NormalizePathA/W` rewrite map `"C:\\..."` /
+    `"\\?\C:\\..."` paths into the kernel's `/disk/N` form.
+    Wired into `FindFirstFile*`, `DeleteFile*`, `MoveFile*`,
+    `GetFileAttributes*`. `shlwapi::PathFileExists*` inlines a
+    minimal mirror of the same translator and routes through
+    `SYS_FILE_QUERY_ATTRIBUTES`
+28. ~~`FindFirstFile*` glob filter~~ — DONE (2026-04-29):
+    leaf glob (`*`/`?`) is parsed off the path, stored per
+    handle in `g_find_slots[8]`, and `FindNextFile*` skips
+    non-matching kernel-returned entries via `FindGlobMatch`
+    (case-insensitive, recursive, bounded by the 63-byte
+    pattern cap)
 
 ### Next slices (high-leverage, achievable)
 
-- **NtCreateProcess / CreateProcessW** (~400 LOC): subprocess
-  spawn from PEs. Needs section-from-file (currently anonymous-only)
-  OR a path-taking fast path
+- ~~**NtCreateUserProcess**~~ — DONE 2026-04-29 (RTL_USER_PROCESS_PARAMETERS
+  parsing in ntdll, routes to existing SYS_PROCESS_SPAWN path-taking
+  fast path)
+- **NtCreateProcess / NtCreateProcessEx** (~400 LOC): legacy
+  section-from-file spawn. Section-from-file path doesn't exist
+  yet; PE-from-section is the bigger lift
 - ~~**NtNotifyChangeDirectoryFile**: wire to inotify~~ — DONE (`4996457`)
-- **Real signal-handler trampoline + sigreturn** (~500 LOC):
-  completes signal delivery — currently default-action only
-- **POSIX message queues** (~350 LOC): mq_open / mq_unlink / mq_timedsend / mq_timedreceive
-- **SysV msg queues** (~250 LOC): msgget / msgsnd / msgrcv / msgctl
-- **Real splice / tee zero-copy** (~300 LOC): kernel-bypass
-  PipeRead/Write variants OR real page-grant
-- **NtAdjustPrivilegesToken honoring caps** (~150 LOC): translate
-  Windows privilege names to `kCap*` adjustments
+- ~~**Real signal-handler trampoline + sigreturn**~~ — DONE
+  (2026-04-29): `subsystems/linux/signal_deliver.{cpp,h}` plus
+  hook in LinuxSyscallDispatch tail. Builds a saved frame on
+  the user stack (LinuxSignalFrame, magic-guarded), mutates the
+  trap frame so iretq lands in the handler with rdi=signum and
+  rsp pointing at sa_restorer. rt_sigreturn (no longer the
+  "kill on entry" stub) restores every register + signal mask
+  from the saved frame. **Sub-GAPs**: SA_SIGINFO siginfo_t /
+  ucontext_t pointers stub-zeroed; alt-stack delivery not
+  honored; old-style no-SA_RESTORER callers see pending bit
+  cleared with a serial warning
+- ~~**POSIX message queues**~~ — DONE (`efe483e` + 2026-04-29 timeout honoring)
+- ~~**SysV msg queues**~~ — DONE (`efe483e`)
+- ~~**Real splice / tee zero-copy**~~ — DONE (2026-04-29):
+  pipe→pipe fast path lands kernel-bypass via
+  `PipeSpliceFromPipe` / `PipeTeeFromPipe` in
+  `subsystems/linux/syscall_pipe.cpp`. No CopyToUser/FromUser
+  bounce; rings are touched directly. `tee(pipe→pipe)` peeks
+  without consuming. **Sub-GAPs**: file↔pipe paths still
+  -EINVAL (need FAT32 integration); SPLICE_F_GIFT page-grant
+  (vmsplice)
+- ~~**NtAdjustPrivilegesToken honoring caps**~~ — DONE
+  (2026-04-29): SYS_TOKEN_ADJUST = 169 with LUID→cap mapping for
+  SeDebugPrivilege / SeBackupPrivilege / SeRestorePrivilege /
+  SeIncreaseBasePriorityPrivilege; CapSetRemove helper;
+  STATUS_NOT_ALL_ASSIGNED on enable-without-cap
 
 ### Audit cadence
 
@@ -668,7 +726,7 @@ sequence of what got built when.
 | 2026-04-27 | `4b41615` | Real Linux `getdents64` + dirfd via shared snapshot pool. State 11 LinuxFd. `subsystems/win32/dir_syscall.{cpp,h}` exposed `SysDirOpenKernel` for cross-subsystem use. `linux_dirent64` marshaling |
 | 2026-04-27 | `3b7b753` | Linux pidfd family (state 12) + splice/tee/vmsplice + PR_SET_NAME. pidfd_open ProcessRetains target; pidfd_send_signal forwards to `LinuxSignalDeliver`. splice/tee return -EINVAL (lib fallback); vmsplice honours iovec→pipe direction. `Process::linux_task_name[16]` matches TASK_COMM_LEN |
 | 2026-04-27 | `8c2d619` | SysV shared memory + semaphores. shm: 8-segment global pool, frames mapped via `AddressSpaceMapBorrowedPage` at per-process arena (`kLinuxShmArenaBase = 0x70000000`); `Process::linux_shm_attaches[8]` table. sem: 8-set / 16-sem-per-set pool, `SemTryApplyLocked` atomic-batch with WaitQueue blocking |
-| 2026-04-27 | `efe483e` | SysV msg queues + POSIX msg queues. SysV: 8-queue keyed pool, 16-msg ring of 1024-byte messages, mtype filter (== / 0 = any / < 0 = any ≤ filter), IPC_NOWAIT honoured. POSIX: 8-queue named pool, LinuxFd state 13, refcounted (mq_unlink + close-of-last frees), highest-priority delivery, mq_notify -ENOSYS. **Sub-GAPs**: mq_timedsend / mq_timedreceive ignore timeout argument; mq_getsetattr SET no-op; 1024-byte msg cap; 16-msg ring cap |
+| 2026-04-27 | `efe483e` | SysV msg queues + POSIX msg queues. SysV: 8-queue keyed pool, 16-msg ring of 1024-byte messages, mtype filter (== / 0 = any / < 0 = any ≤ filter), IPC_NOWAIT honoured. POSIX: 8-queue named pool, LinuxFd state 13, refcounted (mq_unlink + close-of-last frees), highest-priority delivery, mq_notify -ENOSYS. **Sub-GAPs**: ~~mq_timedsend / mq_timedreceive ignore timeout argument~~ FIXED 2026-04-29 — abs_timeout (struct timespec, treated as ns-since-boot) now honored via WaitQueueBlockTimeout; deadline-in-past returns -ETIMEDOUT immediately; null pointer = block forever; mq_getsetattr SET no-op; 1024-byte msg cap; 16-msg ring cap |
 | 2026-04-27 | `108064b` | name_to_handle_at + open_by_handle_at flipped from -ENOSYS to real (FAT32 first_cluster + size encoded as 8-byte file_handle; root-only resolution sub-GAP). Modern mount API (fsopen / fsconfig / fsmount / fspick / open_tree / move_mount / mount_setattr) → -EPERM (was -ENOSYS) for honest CAP_SYS_ADMIN-style fallback. Net: 2 real + 7 EPERM |
 | 2026-04-27 | `60bda43` | bpf / perf_event_open / init_module / finit_module / delete_module / kexec_load / kexec_file_load → -EPERM (matches Linux CAP_SYS_ADMIN gating); flock fd-validity gate (was: silent success on bad fd) |
 | 2026-04-27 | `879f2e5` | Real pidfd_getfd cross-process fd dup. Cap-gated on kCapDebug. Pool-backed states (pipe / eventfd / socket / timerfd / signalfd / epoll / inotify / pidfd / mq) supported via slot-copy + refcount bump. Regular file / dirfd / memfd refused (-EINVAL) — real Linux uses shared file-descriptions; v0 sub-GAP |
@@ -676,6 +734,7 @@ sequence of what got built when.
 | 2026-04-27 | `1ed6a6d` | Real CreateProcessA / CreateProcessW + new SYS_PROCESS_SPAWN. kernel-side handler in `subsystems/win32/spawn_syscall.{cpp,h}` reads named PE / ELF off FAT32 (`/disk/<idx>/<rest>`), autodetects format by magic (MZ / `0x7F ELF`), dispatches to existing SpawnPeFile / SpawnElfFile. Cap-gated on kCapSpawnThread. CreateProcessA/W kernel32 thunks fill PROCESS_INFORMATION with new pid. Caller inherits caps + root + tick_budget. **Sub-GAPs**: lpStartupInfo / lpEnvironment / lpCurrentDirectory / dwCreationFlags / bInheritHandles all ignored; hThread = 0 (callers can NtOpenThread the tid); 16 MiB file cap; "/disk/<idx>" paths only (no Win→Unix path translator yet); first-token cmdline parsing is literal-pointer (no quoted-multiword); NtCreateUserProcess still NotImpl pending RTL_USER_PROCESS_PARAMETERS parsing |
 | 2026-04-27 | `4996457` | Real NtNotifyChangeDirectoryFile + new SYS_DIR_NOTIFY engine. Win32DirHandle gained `path[64]` (cached at SysDirOpenKernel time). New 8-slot subscriber pool in dir_syscall.cpp; each sub has {path, filter, subtree, last_action, last_name, wq}. SysDirNotify allocates sub, blocks on wq, writes single FILE_NOTIFY_INFORMATION record (12 + UTF-16 name) on wake. **Publish-side**: `Win32DirNotifyPublish(path, in_mask)` invoked from `InotifyPublish` (same fan-out point fanotify uses). IN_*→FILE_ACTION_* translation: IN_CREATE→ADDED, IN_DELETE→REMOVED, IN_MOVED_FROM/TO→RENAMED_OLD/NEW_NAME, IN_MODIFY→MODIFIED. FILE_NOTIFY_CHANGE_* filter bits honoured (FILE_NAME / DIR_NAME / ATTRIBUTES / SIZE / LAST_WRITE). ntdll thunk issues SYS_DIR_NOTIFY directly. Sub-GAPs: single-record-per-call (callers loop); Event / ApcRoutine / ApcContext accepted but not honoured |
 | 2026-04-27 | `63a1c15` | fanotify(7) + keyrings + clock_settime/adjtime/adjtimex/settimeofday. **fanotify**: 4-instance / 16-mark / 32-event ring, LinuxFd state 15. Subscribes to the FS-mutation publish path that powers inotify; same exact-path-or-parent matcher, fanotify wire mask translated from inotify bits. 24-byte struct fanotify_event_metadata. fd field = FAN_NOFD; pid = 0. **keyrings**: per-process 16-key store keyed by pid (up to 32 processes). add_key (type "user" / "logon" only), request_key (lookup by type+desc), keyctl (GET_KEYRING_ID / READ / DESCRIBE / UPDATE / SETPERM / SEARCH / INVALIDATE / REVOKE / UNLINK / CLEAR + accept-as-noop for chown/link/timeout/etc.). 256-byte payload cap. **clock writeback**: clock_settime / clock_adjtime / settimeofday / adjtimex all -EPERM (no RTC writeback). Net: 9 syscalls flipped from -ENOSYS / facade to real-or-honest |
+| 2026-04-29 | (this slice) | NtAdjustPrivilegesToken cap-honoring — SYS_TOKEN_ADJUST = 169 in `subsystems/win32/token_syscall.{cpp,h}`. LUID→cap map: SeDebugPrivilege (20)→kCapDebug, SeBackupPrivilege (17)→kCapFsRead, SeRestorePrivilege (18)→kCapFsWrite, SeIncreaseBasePriorityPrivilege (14)→kCapSpawnThread. SE_PRIVILEGE_REMOVED / DisableAllPrivileges drop the mapped cap (CapSetRemove helper, also new). Enable-without-cap returns STATUS_NOT_ALL_ASSIGNED (0x00000106) — no path adds caps from user space. PreviousState writeback honored when caller buffer fits |
 | 2026-04-27 | `f8998d8` | 33 modern Linux syscalls in one TU (`extra_syscalls.cpp`). Real (5): **statx** (256-byte struct, STATX_BASIC_STATS); **copy_file_range** (4 KiB-stage bounce; cap-gated on kCapFsWrite); **memfd_create** (8-slot pool, LinuxFd state 14, 1-page initial alloc); **close_range** (skip stdin/out/err); **statfs / fstatfs** (FAT-shaped defaults). No-op success (8): NUMA family (set/get_mempolicy / mbind / migrate_pages / move_pages), mseal, process_madvise, process_mrelease. Honest -ENOSYS / -EINVAL (20): userfaultfd, io_uring_*, name_to_handle_at / open_by_handle_at, fsopen / fsconfig / fsmount / fspick / open_tree / move_mount / mount_setattr, landlock_*, pkey_alloc / pkey_free / pkey_mprotect (forwards to mprotect, key ignored). DoClose / DoFork arms wired for state 14. **Sub-GAPs**: statx timestamps + dio_align stamped 0; copy_file_range FAT32 only; memfd ftruncate-grow not wired; statfs defaults regardless of path/fd; mseal advisory not enforced; landlock returns -ENOSYS to avoid false-sandbox advertisement |
 
 ---

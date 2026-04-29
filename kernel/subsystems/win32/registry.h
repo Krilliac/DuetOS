@@ -25,14 +25,20 @@
  *   - NtClose on a registry handle returns the slot to the pool.
  *
  * What's stubbed (kSysNtNotImpl):
- *   - NtCreateKey / NtSetValueKey / NtDeleteKey / NtDeleteValueKey
- *     (no write support — registry is constexpr-static).
- *   - NtEnumerateKey / NtEnumerateValueKey (no children-list
- *     walker yet; returns STATUS_NO_MORE_ENTRIES via the
- *     dispatcher fallback so well-behaved callers see a clean
- *     "no more" instead of a crash).
- *   - NtFlushKey / NtNotifyChangeKey (no-op tier; no journal,
- *     no change notifications).
+ *   - NtCreateKey / NtDeleteKey (no mutable key tree — only
+ *     mutable VALUES on existing static keys via NtSetValueKey /
+ *     NtDeleteValueKey).
+ *   - NtNotifyChangeKey (no-op tier; no change notifications).
+ *
+ * What works for enumeration:
+ *   - NtEnumerateKey walks the static tree's prefix + terminal
+ *     entries to list the direct children of an open key. Each
+ *     index produces a unique child component name; the caller
+ *     loops until STATUS_NO_MORE_ENTRIES.
+ *   - NtEnumerateValueKey walks values of an open terminal key.
+ *   - NtQueryKey reports both subkey_count (children walked from
+ *     the static tree) and value_count (static + matching
+ *     sidecar entries).
  */
 
 #include "arch/x86_64/traps.h"
@@ -69,6 +75,7 @@ inline constexpr u64 kOpDeleteValue = 5;
 inline constexpr u64 kOpFlushKey = 6;
 inline constexpr u64 kOpEnumerateValue = 7;
 inline constexpr u64 kOpQueryKey = 8;
+inline constexpr u64 kOpEnumerateKey = 9;
 
 /// SYS_REGISTRY entry point. Routes by op selector to the matching
 /// handler. Returns NTSTATUS through frame->rax. Per-op argument

@@ -13,7 +13,8 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | Build and CI workflow speedups | [knowledge/build-optimizations.md](knowledge/build-optimizations.md) | Optimization | Active | 2026-04-20 |
 | Lifetime download tally — survives rolling-channel asset re-uploads | [knowledge/lifetime-downloads-tally-v0.md](knowledge/lifetime-downloads-tally-v0.md) | Issue + Decision + Pattern | Active | 2026-04-29 |
 | Effective dev workflows | [knowledge/workflow-patterns.md](knowledge/workflow-patterns.md) | Pattern | Active | 2026-04-20 |
-| **Subsystems status — Win32/NT + Linux ABI (consolidated)** | [knowledge/subsystems-status.md](knowledge/subsystems-status.md) | Decision + Observation | Active — single source of truth for the subsystems work | 2026-04-27 |
+| **Subsystems status — Win32/NT + Linux ABI (consolidated)** | [knowledge/subsystems-status.md](knowledge/subsystems-status.md) | Decision + Observation | Active — single source of truth for the subsystems work | 2026-04-29 |
+| Registry static-tree v0 — terminal + prefix tier + nested OpenKey + KEY_FULL_INFORMATION | [knowledge/registry-prefix-tree-v0.md](knowledge/registry-prefix-tree-v0.md) | Decision + Observation | Active | 2026-04-29 |
 | Kernel breakpoint subsystem v0 + phase 2a (per-task DR, syscall, kCapDebug) + phase 3 (suspend/inspect/resume/step) + phase 4 (static KBP_PROBE macros) | [knowledge/breakpoints-v0.md](knowledge/breakpoints-v0.md) | Observation | Active | 2026-04-23 |
 | Hardware target matrix (CPU/GPU/IO tiers) | [knowledge/hardware-target-matrix.md](knowledge/hardware-target-matrix.md) | Decision | Active | 2026-04-20 |
 | UEFI hybrid-ISO boot path — same ISO boots SeaBIOS + OVMF | [knowledge/uefi-hybrid-iso-v0.md](knowledge/uefi-hybrid-iso-v0.md) | Observation | Active | 2026-04-23 |
@@ -82,7 +83,6 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | qemu-smoke profile-matrix redesign — split monolith into per-profile parallel jobs + isa-debug-exit + serial spinlock + hosted unit tests | [knowledge/qemu-smoke-profile-matrix-v0.md](knowledge/qemu-smoke-profile-matrix-v0.md) | Decision + Pattern | Active | 2026-04-28 |
 | KMalloc-zero-init pattern — every kernel struct with embedded sync primitives must memset before use | [knowledge/kmalloc-zero-init-pattern.md](knowledge/kmalloc-zero-init-pattern.md) | Pattern + Issue | Active | 2026-04-28 |
 | Deferred-task batches (2026-04-25 + 2026-04-26 follow-up) — PE ordinal forwarders + by-ord IAT + binary-search EAT, ext4 multi-block dirs, ext4 depth>0 extent tree walk, GDI ellipse fill/outline parity, RNDIS multi-record RX, FAT32 LFN-checksum, window-DC SetTextColor explicit-black | [knowledge/deferred-task-batch-2026-04-25.md](knowledge/deferred-task-batch-2026-04-25.md) | Observation | Active | 2026-04-26 |
-| Rasterizer / compositor / userland-shell — multi-slice plan (shadow framebuffer → true alpha → TTF parser → TTF rasterizer → userland libc + ELF build → prompt shell → SVG loader → real TTF + SVG content) | [knowledge/rasterizer-compositor-shell-plan.md](knowledge/rasterizer-compositor-shell-plan.md) | Plan | Closed 2026-04-29 — every numbered slice + both content follow-ups (Liberation Sans TTF, 3 wallpaper SVGs) landed; eligible for deletion on next session cleanup | 2026-04-29 |
 
 ## Quick Reference
 

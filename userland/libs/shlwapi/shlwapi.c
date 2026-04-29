@@ -1,8 +1,11 @@
 /*
  * userland/libs/shlwapi/shlwapi.c
  *
- * Freestanding DuetOS shlwapi.dll. 16 Path* / Str*
- * string helpers — all pure-C loops. No syscall dependency.
+ * Freestanding DuetOS shlwapi.dll. 16 Path* / Str* string
+ * helpers — almost all pure-C loops. PathFileExistsA/W is the
+ * one exception: it issues SYS_FILE_QUERY_ATTRIBUTES (= 151) so
+ * a real existence check works against the kernel's mounted
+ * filesystems instead of unconditionally returning FALSE.
  */
 
 typedef int BOOL;
@@ -30,10 +33,94 @@ static size_t alen(const char* s)
 
 /* Path* narrow */
 
+/* Translate a Win32 path prefix to the kernel's "/disk/N" form.
+ * Inline mirror of kernel32::Win32PathPrefixA so shlwapi keeps
+ * its build-time independence from kernel32. Returns the number
+ * of bytes consumed from `in`. */
+static unsigned long path_xlat_prefix(const char* in, char* out, unsigned long out_cap, unsigned long* out_written)
+{
+    *out_written = 0;
+    if (out_cap == 0)
+        return 0;
+    out[0] = 0;
+    unsigned long ci = 0;
+    /* Strip "\\?\" extended-length prefix(es). */
+    for (;;)
+    {
+        if ((in[ci] == '\\' || in[ci] == '/') && (in[ci + 1] == '\\' || in[ci + 1] == '/') && in[ci + 2] == '?' &&
+            (in[ci + 3] == '\\' || in[ci + 3] == '/'))
+            ci += 4;
+        else
+            break;
+    }
+    char letter = in[ci];
+    if (((letter >= 'A' && letter <= 'Z') || (letter >= 'a' && letter <= 'z')) && in[ci + 1] == ':')
+    {
+        char upper = (letter >= 'a' && letter <= 'z') ? (char)(letter - 'a' + 'A') : letter;
+        int idx = (upper < 'C') ? 0 : (upper - 'C');
+        const char* prefix = "/disk/";
+        unsigned long pi = 0;
+        while (prefix[pi] && pi + 1 < out_cap)
+        {
+            out[pi] = prefix[pi];
+            ++pi;
+        }
+        if (pi + 1 < out_cap)
+        {
+            if (idx >= 10)
+                out[pi++] = (char)('0' + (idx / 10));
+            if (pi + 1 < out_cap)
+                out[pi++] = (char)('0' + (idx % 10));
+        }
+        out[pi] = 0;
+        *out_written = pi;
+        ci += 2;
+    }
+    return ci;
+}
+
+static void path_xlat_full(const char* in, char* out, unsigned long out_cap)
+{
+    if (out_cap == 0)
+        return;
+    unsigned long prefix_len = 0;
+    unsigned long consumed = path_xlat_prefix(in, out, out_cap, &prefix_len);
+    in += consumed;
+    unsigned long ci = prefix_len;
+    while (in[0] != 0 && ci + 1 < out_cap)
+    {
+        char c = (in[0] == '\\') ? '/' : in[0];
+        out[ci] = c;
+        ++ci;
+        ++in;
+    }
+    out[ci] = 0;
+}
+
 __declspec(dllexport) BOOL PathFileExistsA(const char* p)
 {
-    (void)p;
-    return 0; /* v0: every path "doesn't exist" — real FS-backed. */
+    if (!p)
+        return 0;
+    char kpath[256];
+    for (unsigned long i = 0; i < sizeof(kpath); ++i)
+        kpath[i] = 0;
+    path_xlat_full(p, kpath, sizeof(kpath));
+    int len = 0;
+    while (kpath[len] != 0 && len < 255)
+        ++len;
+    if (len == 0)
+        return 0;
+    /* SYS_FILE_QUERY_ATTRIBUTES = 151. Out-buffer = 56-byte
+     * FILE_NETWORK_OPEN_INFORMATION blob; we ignore the contents
+     * and just check the NTSTATUS return. */
+    unsigned char info[56];
+    long long status;
+    register long long r10 __asm__("r10") = (long long)sizeof(info);
+    __asm__ volatile("int $0x80"
+                     : "=a"(status)
+                     : "a"((long long)151), "D"((long long)kpath), "S"((long long)len), "d"((long long)info), "r"(r10)
+                     : "memory");
+    return status == 0 ? 1 : 0;
 }
 
 __declspec(dllexport) char* PathFindExtensionA(const char* p)
@@ -64,8 +151,17 @@ __declspec(dllexport) char* PathFindFileNameA(const char* p)
 
 __declspec(dllexport) BOOL PathFileExistsW(const wchar_t16* p)
 {
-    (void)p;
-    return 0;
+    if (!p)
+        return 0;
+    char ascii[256];
+    int i = 0;
+    while (i < 255 && p[i] != 0)
+    {
+        ascii[i] = (char)(p[i] & 0xFF);
+        ++i;
+    }
+    ascii[i] = 0;
+    return PathFileExistsA(ascii);
 }
 
 __declspec(dllexport) wchar_t16* PathFindExtensionW(const wchar_t16* p)

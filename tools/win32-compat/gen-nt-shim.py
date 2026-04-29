@@ -120,19 +120,20 @@ KNOWN_MAPPINGS = {
     "NtWriteFile":                 "SYS_FILE_WRITE",
     "NtQueryInformationFile":      "SYS_FILE_FSTAT",
     "NtEnumerateValueKey":         "SYS_REGISTRY",
+    "NtEnumerateKey":              "SYS_REGISTRY",
     "NtQueryKey":                  "SYS_REGISTRY",
     # NtFlushBuffersFile / NtFsControlFile / NtDeviceIoControlFile
     # are userland-only thunks (no kernel work needed); they don't
     # appear in KNOWN_MAPPINGS for the same reason the token family
     # doesn't.
-    # NtCreateKey / NtSetValueKey / NtDeleteKey / NtDeleteValueKey:
-    # NotImpl on purpose — registry is read-only in v0. Mapping
-    # them to SYS_REGISTRY's read-only Open op would silently lie
-    # to a writer; better to keep the honest STATUS_NOT_IMPLEMENTED.
-    # NtEnumerateKey / NtEnumerateValueKey: NotImpl on purpose —
-    # the static tree has no children-list walker yet. Adding
-    # one means broadening the v0 RegKey schema to know about
-    # subkey arrays; deferred.
+    # NtCreateKey / NtDeleteKey: NotImpl on purpose — v0 has no
+    # mutable key tree, only mutable VALUES on existing static
+    # keys (NtSetValueKey / NtDeleteValueKey). Mapping NtCreateKey
+    # to SYS_REGISTRY's read-only Open op would silently lie to a
+    # writer; better to keep the honest STATUS_NOT_IMPLEMENTED.
+    # NtEnumerateValueKey / NtEnumerateKey are real, op=7 + op=9
+    # respectively — they walk the static tree's value list +
+    # direct-children list.
     # NtFlushKey / NtNotifyChangeKey: NotImpl on purpose — there
     # is no journal to flush and no change-notification machinery.
     # NtWriteVirtualMemory / NtReadVirtualMemory / NtQueryVirtualMemory:

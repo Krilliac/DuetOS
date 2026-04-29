@@ -194,6 +194,20 @@ inline constexpr void CapSetAdd(CapSet& s, Cap c)
     s.bits |= (1ULL << static_cast<u32>(c));
 }
 
+// Drop a single cap from the set. Used by NtAdjustPrivilegesToken's
+// disable / remove paths so a Win32 PE can voluntarily shed
+// privilege at runtime. Adding a cap from user space is deliberately
+// NOT exposed — the kernel's spawn-time inheritance is the only
+// path that grants caps. CapSetRemove is the safe counterpart.
+inline constexpr void CapSetRemove(CapSet& s, Cap c)
+{
+    if (c == kCapNone || c >= kCapCount)
+    {
+        return;
+    }
+    s.bits &= ~(1ULL << static_cast<u32>(c));
+}
+
 struct Process
 {
     u64 pid;
@@ -786,6 +800,16 @@ struct Process
     };
     LinuxSigAction linux_sigactions[kLinuxSignalCount];
     u64 linux_signal_mask; // per-process blocked-signal bitmask (rt_sigprocmask)
+
+    // Per-process rlimit soft caps. Only the ones the kernel can
+    // actually enforce live here; everything else stays at the
+    // RlimitDefaultsFor constant table. setrlimit / prlimit64
+    // write `linux_rlimit_nofile_cur` and `linux_rlimit_nproc_cur`
+    // and the next fd-alloc / clone consults them. 0xFFFFFFFFFFFFFFFF
+    // sentinel = "no cap below kernel hard ceiling" (the constructor
+    // initialises both to that). Hard caps stay 16 / 64.
+    u64 linux_rlimit_nofile_cur;
+    u64 linux_rlimit_nproc_cur;
     // Bitmap of pending Linux signals. Bit N set = signum N is
     // pending delivery. Populated by LinuxSignalDeliver()
     // (kill / tgkill / synthetic deliveries) and drained by

@@ -341,7 +341,7 @@ i64 DoFanotifyInit(u64 flags, u64 event_f_flags)
     if (p == nullptr)
         return kEPERM;
     u32 fd = 16;
-    for (u32 i = 3; i < 16; ++i)
+    for (u32 i = 3; i < LinuxFdEffectiveMax(p); ++i)
         if (p->linux_fds[i].state == 0)
         {
             fd = i;

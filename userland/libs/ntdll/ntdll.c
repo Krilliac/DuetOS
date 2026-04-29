@@ -3173,24 +3173,158 @@ __declspec(dllexport) NTSTATUS ZwCreateProcessEx(HANDLE* ProcessHandle, ULONG De
                              DebugPort, ExceptionPort, JobMemberLevel);
 }
 
+/* RTL_USER_PROCESS_PARAMETERS — Windows process-parameters block.
+ * Only the fields v0 actually consumes are named; the rest is
+ * skipped via byte-offset reads so we don't need the full layout
+ * here. ImagePathName is the path to the .exe we're spawning;
+ * everything else (CommandLine, environment, current directory,
+ * console handles) is accepted but unused — sub-GAP.
+ *
+ * UNICODE_STRING layout on x64:
+ *   +0x00  Length        (USHORT, byte count, NOT including NUL)
+ *   +0x02  MaximumLength (USHORT)
+ *   +0x04  Padding
+ *   +0x08  Buffer        (PWSTR — 8 bytes)
+ *
+ * Inside RTL_USER_PROCESS_PARAMETERS, ImagePathName lives at +0x60.
+ * Independently verified against ntdll.dll on Windows 10 / 11 25H2.
+ */
+#define NTDLL_PP_OFFSET_IMAGE_PATH 0x60
+
+/* Translate a Windows-shaped image path (UNICODE_STRING.Buffer +
+ * Length-in-bytes) into the kernel's "/disk/N/..." form. Mirrors
+ * the kernel32 NormalizePathW translator inline so ntdll stays
+ * freestanding (kernel32 isn't guaranteed loaded yet at the time
+ * a PE may issue NtCreateUserProcess).
+ *
+ * Strips up to one "\??\" or "\\?\" extended-length prefix, maps
+ * a drive letter ("C:") to "/disk/N" (C → /disk/0, D → /disk/1,
+ * ...), and converts "\" to "/" for the rest. Non-ASCII codepoints
+ * become '?'. Returns 1 on success, 0 on capacity overrun / no
+ * recognisable shape. */
+static int ntdll_translate_image_path(const wchar_t16* buf, unsigned chars, char* out, unsigned cap)
+{
+    if (out == (char*)0 || cap == 0)
+        return 0;
+    out[0] = '\0';
+    if (buf == (wchar_t16*)0 || chars == 0)
+        return 0;
+
+    unsigned ci = 0;
+    /* "\??\" or "\\?\" extended-length prefix — strip once. */
+    if (chars >= 4)
+    {
+        unsigned short a = buf[0];
+        unsigned short b = buf[1];
+        unsigned short c = buf[2];
+        unsigned short d = buf[3];
+        if ((a == L'\\' || a == L'/') && (b == L'\\' || b == L'?' || b == L'/') && (c == L'?' || c == L'\\') &&
+            (d == L'\\' || d == L'/'))
+        {
+            ci = 4;
+        }
+    }
+
+    unsigned oi = 0;
+    /* Drive-letter prefix? */
+    if (ci + 1 < chars)
+    {
+        unsigned short letter = buf[ci];
+        unsigned short colon = buf[ci + 1];
+        if (((letter >= L'A' && letter <= L'Z') || (letter >= L'a' && letter <= L'z')) && colon == L':')
+        {
+            char upper = (letter >= L'a' && letter <= L'z') ? (char)(letter - L'a' + L'A') : (char)letter;
+            int idx = (upper < 'C') ? 0 : (upper - 'C');
+            const char* prefix = "/disk/";
+            for (unsigned p = 0; prefix[p] != '\0'; ++p)
+            {
+                if (oi + 1 >= cap)
+                    return 0;
+                out[oi++] = prefix[p];
+            }
+            if (idx >= 10)
+            {
+                if (oi + 1 >= cap)
+                    return 0;
+                out[oi++] = (char)('0' + (idx / 10));
+            }
+            if (oi + 1 >= cap)
+                return 0;
+            out[oi++] = (char)('0' + (idx % 10));
+            ci += 2;
+        }
+    }
+
+    while (ci < chars)
+    {
+        unsigned short w = buf[ci++];
+        char c;
+        if (w == L'\\')
+            c = '/';
+        else if (w <= 0x7F)
+            c = (char)w;
+        else
+            c = '?';
+        if (oi + 1 >= cap)
+            return 0;
+        out[oi++] = c;
+    }
+    out[oi] = '\0';
+    return 1;
+}
+
+/* NtCreateUserProcess — backed by SYS_PROCESS_SPAWN = 158.
+ *
+ * Pulls ImagePathName out of RTL_USER_PROCESS_PARAMETERS, translates
+ * the Windows-shaped path to the kernel's "/disk/N/..." form, and
+ * issues SYS_PROCESS_SPAWN. Writes the new pid (cast to HANDLE) to
+ * *ProcessHandle. ThreadHandle is set to -1 — the new thread's tid
+ * is the same as its pid in v0 (single-thread-per-process at spawn),
+ * so callers wanting a real thread handle can NtOpenThread the pid.
+ *
+ * Sub-GAPs (accepted but unused): CommandLine (kernel doesn't pass
+ * arguments yet); ProcessFlags / ThreadFlags (no PROCESS_CREATE_*
+ * semantics); CreateInfo / AttributeList (PS_ATTRIBUTE list is
+ * Windows-internal); object attributes (no NT object-namespace yet).
+ */
 __declspec(dllexport) NTSTATUS NtCreateUserProcess(HANDLE* ProcessHandle, HANDLE* ThreadHandle,
                                                    ULONG ProcessDesiredAccess, ULONG ThreadDesiredAccess,
                                                    void* ProcessObjectAttributes, void* ThreadObjectAttributes,
                                                    ULONG ProcessFlags, ULONG ThreadFlags, void* ProcessParameters,
                                                    void* CreateInfo, void* AttributeList)
 {
-    (void)ProcessHandle;
-    (void)ThreadHandle;
     (void)ProcessDesiredAccess;
     (void)ThreadDesiredAccess;
     (void)ProcessObjectAttributes;
     (void)ThreadObjectAttributes;
     (void)ProcessFlags;
     (void)ThreadFlags;
-    (void)ProcessParameters;
     (void)CreateInfo;
     (void)AttributeList;
-    return (NTSTATUS)0xC0000002;
+    if (ProcessHandle == (HANDLE*)0 || ThreadHandle == (HANDLE*)0 || ProcessParameters == (void*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+
+    const unsigned char* pp = (const unsigned char*)ProcessParameters;
+    const unsigned char* image = pp + NTDLL_PP_OFFSET_IMAGE_PATH;
+    const unsigned short length_bytes = *(const unsigned short*)(image + 0);
+    const wchar_t16* buffer = *(const wchar_t16* const*)(image + 8);
+    if (buffer == (wchar_t16*)0 || length_bytes == 0)
+        return NTSTATUS_INVALID_PARAMETER;
+
+    char path[128];
+    const unsigned chars = (unsigned)(length_bytes / 2);
+    if (!ntdll_translate_image_path(buffer, chars, path, sizeof(path)))
+        return NTSTATUS_INVALID_PARAMETER;
+
+    long long pid;
+    /* SYS_PROCESS_SPAWN = 158: rdi = const char* path, rsi = u64 flags. */
+    __asm__ volatile("int $0x80" : "=a"(pid) : "a"((long long)158), "D"((long long)path), "S"((long long)0) : "memory");
+    if (pid < 0)
+        return (NTSTATUS)0xC0000022; /* STATUS_ACCESS_DENIED — most likely cap miss */
+
+    *ProcessHandle = (HANDLE)pid;
+    *ThreadHandle = (HANDLE)-1; /* sub-GAP: caller can NtOpenThread(pid) for a real handle */
+    return NTSTATUS_SUCCESS;
 }
 
 __declspec(dllexport) NTSTATUS ZwCreateUserProcess(HANDLE* ProcessHandle, HANDLE* ThreadHandle,
@@ -3801,19 +3935,44 @@ __declspec(dllexport) NTSTATUS ZwQueryInformationToken(HANDLE TokenHandle, ULONG
                                    ReturnLength);
 }
 
+/* NtAdjustPrivilegesToken — backed by SYS_TOKEN_ADJUST = 169.
+ *
+ * Translates the requested privilege adjustments into kernel
+ * CapSet operations. Mappings (kernel/subsystems/win32/token_syscall.h):
+ *   SeIncreaseBasePriorityPrivilege (LUID 14) → kCapSpawnThread
+ *   SeBackupPrivilege               (LUID 17) → kCapFsRead
+ *   SeRestorePrivilege              (LUID 18) → kCapFsWrite
+ *   SeDebugPrivilege                (LUID 20) → kCapDebug
+ *
+ * Enabling a privilege whose mapped cap isn't held returns
+ * STATUS_NOT_ALL_ASSIGNED (0x00000106) — NOT a failure, just an
+ * "info" status. The kernel never adds caps from user space.
+ * Disable / SE_PRIVILEGE_REMOVED / DisableAllPrivileges all drop
+ * the mapped cap. Privileges with no mapping (SeShutdown, etc.)
+ * are silently accepted.
+ *
+ * Returns: STATUS_SUCCESS (0), STATUS_NOT_ALL_ASSIGNED (0x106), or
+ * STATUS_INVALID_PARAMETER on a malformed blob.
+ */
 __declspec(dllexport) NTSTATUS NtAdjustPrivilegesToken(HANDLE TokenHandle, BOOL DisableAllPrivileges, void* NewState,
                                                        ULONG BufferLength, void* PreviousState, ULONG* ReturnLength)
 {
     (void)TokenHandle;
-    (void)DisableAllPrivileges;
-    (void)NewState;
-    (void)PreviousState;
+    long long rv;
+    __asm__ volatile("mov %5, %%r10\n\t"
+                     "mov %6, %%r8\n\t"
+                     "int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)169), /* SYS_TOKEN_ADJUST */
+                       "D"((long long)(DisableAllPrivileges ? 1 : 0)), "S"((long long)NewState),
+                       "d"((long long)BufferLength), "r"((long long)PreviousState), "r"((long long)BufferLength)
+                     : "r10", "r8", "memory");
+    if (rv < 0)
+        return NTSTATUS_INVALID_PARAMETER;
     if (ReturnLength != (ULONG*)0)
-        *ReturnLength = BufferLength; /* "we accepted everything you asked for" */
-    /* No privilege model — every privilege is implicitly granted
-     * (or implicitly disabled when DisableAllPrivileges, which has
-     * no observable effect since we don't gate anything on token
-     * privileges). Sub-GAP: SeDebugPrivilege etc. unobservable. */
+        *ReturnLength = BufferLength;
+    if (rv == 1)
+        return (NTSTATUS)0x00000106UL; /* STATUS_NOT_ALL_ASSIGNED — info, not failure */
     return NTSTATUS_SUCCESS;
 }
 
@@ -3885,8 +4044,11 @@ __declspec(dllexport) NTSTATUS ZwEnumerateValueKey(HANDLE KeyHandle, ULONG Index
     return NtEnumerateValueKey(KeyHandle, Index, KeyValueInformationClass, KeyValueInformation, Length, ResultLength);
 }
 
-/* NtQueryKey — KeyFullInformation only. SubKeys = 0 (no
- * mutable key tree); Values = static + sidecar count. */
+/* NtQueryKey — KeyFullInformation only. Kernel-side SYS_REGISTRY
+ * op=8 returns 5 u64 fields: SubKeys / Values / MaxNameLen /
+ * MaxValueNameLen / MaxValueDataLen (40 bytes total). The thunk
+ * maps these onto KEY_FULL_INFORMATION's offsets. ClassOffset /
+ * ClassLength / MaxClassLen stay zero — v0 has no class strings. */
 __declspec(dllexport) NTSTATUS NtQueryKey(HANDLE KeyHandle, ULONG KeyInformationClass, void* KeyInformation,
                                           ULONG Length, ULONG* ResultLength)
 {
@@ -3899,21 +4061,32 @@ __declspec(dllexport) NTSTATUS NtQueryKey(HANDLE KeyHandle, ULONG KeyInformation
         *ResultLength = total;
     if (Length < total)
         return (NTSTATUS)0xC0000023;
-    unsigned long long counts[2] = {0, 0};
+    unsigned long long fields[5] = {0, 0, 0, 0, 0};
     long long status;
     __asm__ volatile("mov %3, %%r10\n\t"
                      "int $0x80"
                      : "=a"(status)
-                     : "a"((long long)130), "D"((long long)8), "S"((long long)KeyHandle), "r"((long long)16),
-                       "d"((long long)counts)
+                     : "a"((long long)130), "D"((long long)8), "S"((long long)KeyHandle), "r"((long long)40),
+                       "d"((long long)fields)
                      : "r10", "memory");
     if (status != 0)
         return (NTSTATUS)status;
     unsigned char* out = (unsigned char*)KeyInformation;
     for (unsigned i = 0; i < total; ++i)
         out[i] = 0;
-    *(unsigned*)(out + 20) = (unsigned)counts[0];
-    *(unsigned*)(out + 32) = (unsigned)counts[1];
+    /* KEY_FULL_INFORMATION fields:
+     *   [20..24) SubKeys
+     *   [24..28) MaxNameLen      (chars)
+     *   [28..32) MaxClassLen     (chars, always 0 in v0)
+     *   [32..36) Values
+     *   [36..40) MaxValueNameLen (chars)
+     *   [40..44) MaxValueDataLen (bytes)
+     */
+    *(unsigned*)(out + 20) = (unsigned)fields[0];
+    *(unsigned*)(out + 24) = (unsigned)fields[2];
+    *(unsigned*)(out + 32) = (unsigned)fields[1];
+    *(unsigned*)(out + 36) = (unsigned)fields[3];
+    *(unsigned*)(out + 40) = (unsigned)fields[4];
     return NTSTATUS_SUCCESS;
 }
 
@@ -3925,8 +4098,7 @@ __declspec(dllexport) NTSTATUS ZwQueryKey(HANDLE KeyHandle, ULONG KeyInformation
 
 /* NtCreateKey / NtDeleteKey — NotImpl facades. v0 has no
  * mutable key tree; only mutable VALUES on existing static keys
- * (via NtSetValueKey). NtEnumerateKey returns NO_MORE_ENTRIES so
- * for-loops terminate cleanly with zero subkeys. */
+ * (via NtSetValueKey). */
 __declspec(dllexport) NTSTATUS NtCreateKey(HANDLE* KeyHandle, ULONG DesiredAccess, void* ObjectAttributes,
                                            ULONG TitleIndex, void* Class, ULONG CreateOptions, ULONG* Disposition)
 {
@@ -3946,17 +4118,63 @@ __declspec(dllexport) NTSTATUS NtDeleteKey(HANDLE KeyHandle)
     return (NTSTATUS)0xC0000002;
 }
 
+/* NtEnumerateKey — list direct children of an open key. v0 honours
+ * KeyBasicInformation (class 0); other classes return NotImpl.
+ * STATUS_NO_MORE_ENTRIES (0x8000001A) past end so for-loops
+ * terminate cleanly. The kernel side (SYS_REGISTRY op=9) walks the
+ * static tree's prefix + terminal entries to derive direct
+ * children. */
 __declspec(dllexport) NTSTATUS NtEnumerateKey(HANDLE KeyHandle, ULONG Index, ULONG KeyInformationClass,
                                               void* KeyInformation, ULONG Length, ULONG* ResultLength)
 {
-    (void)KeyHandle;
-    (void)Index;
-    (void)KeyInformationClass;
-    (void)KeyInformation;
-    (void)Length;
+    if (KeyInformationClass != 0)
+        return (NTSTATUS)0xC0000002;
+    if (KeyInformation == (void*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    unsigned char stage[96];
+    long long status;
+    __asm__ volatile("mov %4, %%r10\n\t"
+                     "mov %5, %%r8\n\t"
+                     "int $0x80"
+                     : "=a"(status)
+                     : "a"((long long)130), "D"((long long)9), "S"((long long)KeyHandle), "d"((long long)Index),
+                       "r"((long long)stage), "r"((long long)sizeof(stage))
+                     : "r10", "r8", "memory");
+    if (status != 0)
+    {
+        if (ResultLength != (ULONG*)0)
+            *ResultLength = 0;
+        return (NTSTATUS)status;
+    }
+    /* KEY_BASIC_INFORMATION layout:
+     *   LARGE_INTEGER LastWriteTime;  (8 bytes)
+     *   ULONG TitleIndex;             (4 bytes)
+     *   ULONG NameLength;             (4 bytes, byte count of UTF-16)
+     *   WCHAR Name[1];                (UTF-16 LE name body, no NUL)
+     */
+    const unsigned name_chars = (unsigned)*(unsigned*)(stage + 16);
+    const ULONG name_bytes = (ULONG)(name_chars * 2);
+    const ULONG total = 16 + name_bytes;
     if (ResultLength != (ULONG*)0)
-        *ResultLength = 0;
-    return (NTSTATUS)0x8000001A;
+        *ResultLength = total;
+    if (Length < total)
+        return (NTSTATUS)0xC0000023;
+    unsigned char* out = (unsigned char*)KeyInformation;
+    /* LastWriteTime — zero in v0 (no mtime tracking). */
+    *(unsigned long long*)(out + 0) = 0;
+    *(unsigned*)(out + 8) = (unsigned)Index;
+    *(unsigned*)(out + 12) = name_bytes;
+    const char* src = (const char*)(stage + 32);
+    wchar_t16* dst = (wchar_t16*)(out + 16);
+    for (unsigned i = 0; i < name_chars; ++i)
+        dst[i] = (unsigned char)src[i];
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS ZwEnumerateKey(HANDLE KeyHandle, ULONG Index, ULONG KeyInformationClass,
+                                              void* KeyInformation, ULONG Length, ULONG* ResultLength)
+{
+    return NtEnumerateKey(KeyHandle, Index, KeyInformationClass, KeyInformation, Length, ResultLength);
 }
 
 /* ------------------------------------------------------------------
@@ -4332,10 +4550,32 @@ __declspec(dllexport) NTSTATUS NtSetInformationFile(HANDLE FileHandle, void* IoS
         }
         return NTSTATUS_SUCCESS;
     }
-    /* FileEndOfFileInformation, FileRenameInformation,
-     * FileDispositionInformation, FileAllocationInformation
-     * need additional kernel-side syscalls (truncate, rename-by-
-     * handle, delete-on-close); deferred. */
+    if (FileInformationClass == 4 /* FileBasicInformation */)
+    {
+        /* FILE_BASIC_INFORMATION: 4 LARGE_INTEGER timestamps +
+         * u32 attributes + u32 pad. v0 doesn't track times on
+         * disk (FAT32 cluster-time updates aren't wired through
+         * the SYS_FILE_WRITE path), so the safe shape is
+         * accept-as-success — the caller's expectation is "the
+         * timestamps are now what I set" but most callers only
+         * use this to bump LastAccess / LastWrite which we'd
+         * silently lose anyway. Length must cover at least the
+         * 4 timestamps (32 bytes). Sub-GAP: timestamps unobserved. */
+        if (Length < 32)
+            return (NTSTATUS)0xC0000004;
+        if (IoStatusBlock != (void*)0)
+        {
+            unsigned long long* iosb = (unsigned long long*)IoStatusBlock;
+            iosb[0] = 0;
+            iosb[1] = Length;
+        }
+        return NTSTATUS_SUCCESS;
+    }
+    /* FileEndOfFileInformation (20) — truncate-by-handle.
+     * FileRenameInformation (10) — rename-by-handle.
+     * FileDispositionInformation (13) — delete-on-close.
+     * Each needs a new kernel syscall (SYS_FILE_TRUNCATE,
+     * handle->path resolution, per-handle flags) — separate slices. */
     return (NTSTATUS)0xC0000002;
 }
 

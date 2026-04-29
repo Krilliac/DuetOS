@@ -155,7 +155,7 @@ i64 DoOpen(u64 user_path, u64 flags, u64 mode)
         if (dh < 0)
             return kENOMEM;
         const u32 dslot = static_cast<u32>(dh) - static_cast<u32>(core::Process::kWin32DirBase);
-        for (u32 i = 3; i < 16; ++i)
+        for (u32 i = 3; i < LinuxFdEffectiveMax(p); ++i)
         {
             if (p->linux_fds[i].state == 0)
             {
@@ -170,7 +170,7 @@ i64 DoOpen(u64 user_path, u64 flags, u64 mode)
         ::duetos::subsystems::win32::SysDirClose(p, static_cast<u64>(dh));
         return kEMFILE;
     }
-    for (u32 i = 3; i < 16; ++i)
+    for (u32 i = 3; i < LinuxFdEffectiveMax(p); ++i)
     {
         if (p->linux_fds[i].state == 0)
         {
