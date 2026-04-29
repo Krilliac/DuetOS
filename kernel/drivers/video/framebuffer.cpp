@@ -346,6 +346,64 @@ void FramebufferDrawString(u32 x, u32 y, const char* text, u32 fg, u32 bg)
     }
 }
 
+namespace
+{
+// Render one 8x8 glyph at (x, y) with each source pixel as a
+// `scale x scale` filled rect. A 0-scale or out-of-range
+// scale collapses to scale=1 to keep the call defensive.
+void DrawCharScaled(u32 x, u32 y, char ch, u32 fg, u32 bg, u32 scale)
+{
+    if (scale == 0)
+        scale = 1;
+    if (scale > 8)
+        scale = 8;
+    const u8* glyph = Font8x8Lookup(ch);
+    for (u32 row = 0; row < kGlyphHeight; ++row)
+    {
+        const u8 bits = glyph[row];
+        for (u32 col = 0; col < kGlyphWidth; ++col)
+        {
+            const bool on = (bits & (0x80U >> col)) != 0;
+            FramebufferFillRect(x + col * scale, y + row * scale, scale, scale, on ? fg : bg);
+        }
+    }
+}
+} // namespace
+
+void FramebufferDrawStringScaled(u32 x, u32 y, const char* text, u32 fg, u32 bg, u32 scale)
+{
+    if (!g_available || text == nullptr)
+        return;
+    if (scale == 0)
+        scale = 1;
+    if (scale > 8)
+        scale = 8;
+    const u32 cell = kGlyphWidth * scale;
+    u32 cx = x;
+    while (*text != '\0')
+    {
+        if (cx + cell > g_info.width)
+            break;
+        DrawCharScaled(cx, y, *text, fg, bg, scale);
+        cx += cell;
+        ++text;
+    }
+}
+
+u32 StringPixelWidthScaled(const char* text, u32 scale)
+{
+    if (text == nullptr)
+        return 0;
+    if (scale == 0)
+        scale = 1;
+    if (scale > 8)
+        scale = 8;
+    u32 n = 0;
+    while (text[n] != '\0')
+        ++n;
+    return n * kGlyphWidth * scale;
+}
+
 void FramebufferDrawRect(u32 x, u32 y, u32 w, u32 h, u32 rgb, u32 thickness)
 {
     if (!g_available || w == 0 || h == 0 || thickness == 0)

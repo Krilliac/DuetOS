@@ -1600,8 +1600,14 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
         // each glyph's bg = desktop_rgb (matches the gradient
         // closely enough that the shadow doesn't show up as a
         // smear) while the foreground is pure white.
-        FramebufferDrawString(17, 9, banner, 0x00000000, desktop_rgb);
-        FramebufferDrawString(16, 8, banner, 0x00FFFFFF, desktop_rgb);
+        // On themes with a 30+ px title bar (Duet family) the
+        // banner renders at 2x scale so the larger chrome has a
+        // proportionate banner — first concrete consumer of
+        // FramebufferDrawStringScaled. Compact themes stay 1x
+        // so existing layouts don't shift.
+        const u32 scale = (ThemeCurrent().title_bar_height >= 30) ? 2u : 1u;
+        FramebufferDrawStringScaled(17, 9, banner, 0x00000000, desktop_rgb, scale);
+        FramebufferDrawStringScaled(16, 8, banner, 0x00FFFFFF, desktop_rgb, scale);
     }
     TaskbarRedraw();
     MenuRedraw();

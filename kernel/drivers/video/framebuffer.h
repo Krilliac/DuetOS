@@ -302,6 +302,24 @@ void FramebufferDrawChar(u32 x, u32 y, char ch, u32 fg, u32 bg);
 /// would exceed the framebuffer width.
 void FramebufferDrawString(u32 x, u32 y, const char* text, u32 fg, u32 bg);
 
+/// Draw `text` at (x, y) with each font pixel rendered as a
+/// `scale x scale` block — integer-scaled bitmap font. `scale=1`
+/// is identical to FramebufferDrawString; scale=2 produces a
+/// 16x16 cell; scale=4 a 32x32 cell. Useful for chrome titles
+/// at the prototype's larger sizes (14 / 18 px) without
+/// shipping a full TTF rasterizer. Bilinear smoothing isn't
+/// applied — pixels stay crisp, the result reads as an
+/// "8-bit / chunky" font. Cell advance is 8*scale px.
+///
+/// Capped at scale=8 so a hostile arg can't overflow into the
+/// framebuffer. Stops at NUL or when the next cell would
+/// exceed framebuffer width.
+void FramebufferDrawStringScaled(u32 x, u32 y, const char* text, u32 fg, u32 bg, u32 scale);
+
+/// Pixel width of `text` rendered at scale (i.e. strlen * 8 *
+/// scale, bounded). NUL-safe.
+u32 StringPixelWidthScaled(const char* text, u32 scale);
+
 /// Exercise the draw path at boot: clear to black, draw coloured
 /// corner swatches + a framing rectangle. Visible proof that the
 /// firmware handoff + Mmio map + pixel store all work end-to-end.
