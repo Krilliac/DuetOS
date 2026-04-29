@@ -93,4 +93,47 @@ void TaskbarNetCellBounds(u32* x, u32* y, u32* w, u32* h);
 /// the sliver hasn't been laid out yet.
 void TaskbarShowDesktopBounds(u32* x, u32* y, u32* w, u32* h);
 
+/// Where the taskbar is anchored on the framebuffer. v0 supports
+/// the two horizontal edges; left / right would need a vertical
+/// layout (stacked tabs / clock pill rotated) and are deferred.
+enum class TaskbarDock : u8
+{
+    Bottom = 0,
+    Top = 1,
+};
+
+/// Set the active dock edge + immediately re-anchor the strip
+/// against the current framebuffer. Cycles through Bottom -> Top
+/// when called from the Ctrl+Alt+B keybind (see main.cpp's mouse
+/// reader). Repaint is the caller's responsibility (typically
+/// `DesktopCompose` runs again on the next frame).
+void TaskbarSetDock(TaskbarDock edge);
+TaskbarDock TaskbarGetDock();
+
+/// Lock the strip in place. While locked the user can't drag the
+/// taskbar (the mouse reader's "is this a drag?" check consults
+/// this flag). Hotkey: Ctrl+Alt+L. Default: locked.
+void TaskbarSetLocked(bool locked);
+bool TaskbarIsLocked();
+
+/// Recompute the strip's `(y, height)` from the active dock edge
+/// + current framebuffer height. Idempotent. Called automatically
+/// by `TaskbarRedraw` so a framebuffer rebind (virtio-gpu coming
+/// online after a stale FramebufferInit returned no FB tag) does
+/// not leave the taskbar pinned at the wrong y. External callers
+/// can fire this after a `FramebufferRebind*` if they want the
+/// new layout visible before the next compose.
+void TaskbarReanchor();
+
+/// Drag-and-snap. The mouse reader calls `BeginDrag` on a
+/// mouse-down inside the taskbar strip when the strip is not
+/// locked, then `EndDrag(cursor_y)` on mouse-up; the drop snaps
+/// to the nearest dock edge based on `cursor_y`'s position
+/// relative to the framebuffer's vertical mid-line. While a drag
+/// is in progress, `IsDragging` returns true so the compose path
+/// can paint a soft outline at the snap target.
+void TaskbarBeginDrag();
+void TaskbarEndDrag(u32 cursor_y);
+bool TaskbarIsDragging();
+
 } // namespace duetos::drivers::video
