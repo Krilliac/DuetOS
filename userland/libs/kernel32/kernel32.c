@@ -2114,14 +2114,22 @@ __declspec(dllexport) BOOL DeleteFileA(const char* path)
 {
     if (path == (const char*)0)
         return 0;
+    /* Run through the same Win32 path translator the Find* /
+     * CreateProcess paths use so a "C:\\..." path resolves
+     * through the kernel's "/disk/N" routing. NormalizePathA
+     * with no glob-pattern out parameter is a pure translator. */
+    char kpath[256];
+    for (unsigned long i = 0; i < sizeof(kpath); ++i)
+        kpath[i] = 0;
+    NormalizePathA(path, kpath, sizeof(kpath), (char*)0, 0);
     int len = 0;
-    while (path[len] != '\0' && len < 255)
+    while (kpath[len] != '\0' && len < 255)
         ++len;
     long long status;
     __asm__ volatile("int $0x80"
                      : "=a"(status)
                      : "a"((long long)143), /* SYS_FILE_UNLINK */
-                       "D"((long long)path), "S"((long long)len)
+                       "D"((long long)kpath), "S"((long long)len)
                      : "memory");
     return status == 0 ? 1 : 0;
 }
@@ -2145,18 +2153,26 @@ __declspec(dllexport) BOOL MoveFileA(const char* src, const char* dst)
 {
     if (src == (const char*)0 || dst == (const char*)0)
         return 0;
+    char ksrc[256];
+    char kdst[256];
+    for (unsigned long i = 0; i < sizeof(ksrc); ++i)
+        ksrc[i] = 0;
+    for (unsigned long i = 0; i < sizeof(kdst); ++i)
+        kdst[i] = 0;
+    NormalizePathA(src, ksrc, sizeof(ksrc), (char*)0, 0);
+    NormalizePathA(dst, kdst, sizeof(kdst), (char*)0, 0);
     int slen = 0;
-    while (src[slen] != '\0' && slen < 255)
+    while (ksrc[slen] != '\0' && slen < 255)
         ++slen;
     int dlen = 0;
-    while (dst[dlen] != '\0' && dlen < 255)
+    while (kdst[dlen] != '\0' && dlen < 255)
         ++dlen;
     long long status;
     register long long r10 __asm__("r10") = (long long)dlen;
     __asm__ volatile("int $0x80"
                      : "=a"(status)
                      : "a"((long long)144), /* SYS_FILE_RENAME */
-                       "D"((long long)src), "S"((long long)slen), "d"((long long)dst), "r"(r10)
+                       "D"((long long)ksrc), "S"((long long)slen), "d"((long long)kdst), "r"(r10)
                      : "memory");
     return status == 0 ? 1 : 0;
 }
