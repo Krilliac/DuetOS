@@ -1625,8 +1625,82 @@ static int LeafIsGlob(const char* s)
     return 0;
 }
 
+/* Translate a Win32-shaped path prefix into the kernel's
+ * "/disk/N" form.
+ *
+ *   - "\\?\" extended-length prefix is stripped (any depth of
+ *     these is collapsed to plain).
+ *   - "<letter>:" drive prefix is converted to /disk/<idx> where
+ *     idx = uppercase(letter) - 'C' (so C: -> /disk/0, D: -> 1,
+ *     E: -> 2, ...). Drive letters before C ('A' / 'B' — the
+ *     classic floppy slots on real Windows) map to /disk/0 too;
+ *     v0 doesn't expose floppies but the path still has to land
+ *     somewhere usable.
+ *   - Pure-relative paths and bare-leading-'\\' paths pass
+ *     through with the backslash-to-slash conversion only.
+ *
+ * Returns the number of bytes consumed from `in` (always advances
+ * past the drive-prefix if one was present) and writes the
+ * canonicalised prefix (or "") to `out`. The caller continues
+ * appending the remainder. */
+static unsigned long Win32PathPrefixA(const char* in, char* out, unsigned long out_cap, unsigned long* out_written)
+{
+    *out_written = 0;
+    if (out_cap == 0)
+        return 0;
+    out[0] = '\0';
+
+    unsigned long ci = 0;
+
+    /* Strip any number of repeated "\\?\" / "//?/" extended-
+     * length prefixes (case-insensitive, separator-agnostic). */
+    for (;;)
+    {
+        const char a = in[ci];
+        const char b = in[ci + 1];
+        const char c = in[ci + 2];
+        const char d = in[ci + 3];
+        if ((a == '\\' || a == '/') && (b == '\\' || b == '/') && c == '?' && (d == '\\' || d == '/'))
+            ci += 4;
+        else
+            break;
+    }
+
+    /* Drive-letter prefix? */
+    char letter = in[ci];
+    if (((letter >= 'A' && letter <= 'Z') || (letter >= 'a' && letter <= 'z')) && in[ci + 1] == ':')
+    {
+        char upper = (letter >= 'a' && letter <= 'z') ? (char)(letter - 'a' + 'A') : letter;
+        int idx = (upper < 'C') ? 0 : (upper - 'C');
+        /* "/disk/<idx>" — single-digit suffices for our sane cap. */
+        const char* prefix = "/disk/";
+        unsigned long pi = 0;
+        while (prefix[pi] && pi + 1 < out_cap)
+        {
+            out[pi] = prefix[pi];
+            ++pi;
+        }
+        if (pi + 1 < out_cap)
+        {
+            if (idx >= 10)
+            {
+                /* 2-digit fallback for theoretical ZZ disks. */
+                out[pi++] = (char)('0' + (idx / 10));
+            }
+            if (pi + 1 < out_cap)
+                out[pi++] = (char)('0' + (idx % 10));
+        }
+        out[pi] = '\0';
+        *out_written = pi;
+        ci += 2; /* past the ':' — the next char is the separator
+                  * that introduces the rest of the path. */
+    }
+    return ci;
+}
+
 /* Normalize a Win32 path to the kernel's "/disk/N/..." form:
- *   - translate '\\' to '/'
+ *   - translate Win32 drive prefixes ("C:\\...", "\\?\C:\\..."),
+ *   - translate '\\' to '/',
  *   - if the leaf component is a glob (contains '*' or '?'),
  *     strip it from `out` and copy it to `pattern_out` (capped).
  *
@@ -1637,12 +1711,17 @@ static void NormalizePathA(const char* in, char* out, unsigned long out_cap, cha
 {
     if (out_cap == 0)
         return;
-    unsigned long ci = 0;
-    unsigned long last_sep = 0;
-    int has_sep = 0;
-    while (in[ci] != '\0' && ci + 1 < out_cap)
+
+    unsigned long prefix_len = 0;
+    unsigned long consumed = Win32PathPrefixA(in, out, out_cap, &prefix_len);
+    in += consumed;
+
+    unsigned long ci = prefix_len;
+    unsigned long last_sep = ci;
+    int has_sep = (prefix_len > 0); /* "/disk/N" is itself a separator-bearing prefix. */
+    while (in[0] != '\0' && ci + 1 < out_cap)
     {
-        char c = in[ci] == '\\' ? '/' : in[ci];
+        char c = (in[0] == '\\') ? '/' : in[0];
         out[ci] = c;
         if (c == '/')
         {
@@ -1650,6 +1729,7 @@ static void NormalizePathA(const char* in, char* out, unsigned long out_cap, cha
             has_sep = 1;
         }
         ++ci;
+        ++in;
     }
     out[ci] = '\0';
     if (pattern_out && pat_cap > 0)
