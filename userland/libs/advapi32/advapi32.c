@@ -52,6 +52,7 @@ typedef unsigned long LSTATUS; /* 32-bit Win32 error code */
 #define ERROR_FILE_NOT_FOUND 2UL
 #define ERROR_INVALID_HANDLE 6UL
 #define ERROR_MORE_DATA 234UL
+#define ERROR_NO_MORE_ITEMS 259UL
 
 /* Standard predefined HKEY values (per Win32 API). Casting a
  * sentinel integer to HKEY matches what Windows hands out and
@@ -475,27 +476,140 @@ __declspec(dllexport) LSTATUS RegDeleteValueW(HANDLE hKey, const wchar_t16* name
     return ERROR_SUCCESS;
 }
 
+/* Direct-child predicate mirror — kernel side
+ * (registry.cpp::IsDirectChild) uses the same shape. Returns 1 iff
+ * `candidate` is exactly `parent_path + "\\" + single_component`,
+ * with `*child_offset` pointing at the child's first byte. */
+static int reg_is_direct_child(const char* parent_path, const char* candidate, const char** child_offset)
+{
+    DWORD i = 0;
+    while (parent_path[i] != 0)
+    {
+        char a = parent_path[i];
+        char b = candidate[i];
+        if (a >= 'A' && a <= 'Z')
+            a = (char)(a + ('a' - 'A'));
+        if (b >= 'A' && b <= 'Z')
+            b = (char)(b + ('a' - 'A'));
+        if (a != b)
+            return 0;
+        ++i;
+    }
+    if (candidate[i] != '\\')
+        return 0;
+    const char* rest = candidate + i + 1;
+    if (rest[0] == 0)
+        return 0;
+    for (DWORD j = 0; rest[j] != 0; ++j)
+    {
+        if (rest[j] == '\\')
+            return 0;
+    }
+    *child_offset = rest;
+    return 1;
+}
+
+/* Find the idx'th direct child of `key` in k_reg_keys[]. Returns
+ * a pointer to the ASCII child component name, or NULL if `idx`
+ * is past the children count. */
+static const char* reg_enum_child_name(const RegKey* key, DWORD idx)
+{
+    DWORD hits = 0;
+    for (DWORD i = 0; i < REG_KEY_COUNT; ++i)
+    {
+        if (k_reg_keys[i].root != key->root)
+            continue;
+        const char* child = (const char*)0;
+        if (!reg_is_direct_child(key->path, k_reg_keys[i].path, &child))
+            continue;
+        if (hits == idx)
+            return child;
+        ++hits;
+    }
+    return (const char*)0;
+}
+
 __declspec(dllexport) LSTATUS RegEnumKeyW(HANDLE hKey, DWORD idx, wchar_t16* name, DWORD cb)
 {
-    (void)hKey;
-    (void)idx;
-    (void)name;
-    (void)cb;
-    return ERROR_FILE_NOT_FOUND; /* "no more keys" */
+    const RegKey* key = reg_key_from_handle(hKey);
+    if (!key)
+        return ERROR_FILE_NOT_FOUND;
+    const char* child = reg_enum_child_name(key, idx);
+    if (!child)
+        return ERROR_NO_MORE_ITEMS;
+    DWORD len = 0;
+    while (child[len])
+        ++len;
+    if (!name || cb < len + 1)
+        return ERROR_MORE_DATA;
+    for (DWORD i = 0; i <= len; ++i)
+        name[i] = (wchar_t16)(unsigned char)child[i];
+    return ERROR_SUCCESS;
 }
 
 __declspec(dllexport) LSTATUS RegEnumKeyExW(HANDLE hKey, DWORD idx, wchar_t16* name, DWORD* cb, DWORD* reserved,
                                             wchar_t16* cls, DWORD* cls_cb, void* last_write)
 {
-    (void)hKey;
-    (void)idx;
-    (void)name;
-    (void)cb;
     (void)reserved;
-    (void)cls;
-    (void)cls_cb;
     (void)last_write;
-    return ERROR_FILE_NOT_FOUND;
+    /* Class is always empty in v0 (no class string tracking). */
+    if (cls_cb)
+        *cls_cb = 0;
+    if (cls && cls_cb && *cls_cb >= 1)
+        cls[0] = 0;
+
+    const RegKey* key = reg_key_from_handle(hKey);
+    if (!key)
+        return ERROR_FILE_NOT_FOUND;
+    const char* child = reg_enum_child_name(key, idx);
+    if (!child)
+        return ERROR_NO_MORE_ITEMS;
+    DWORD len = 0;
+    while (child[len])
+        ++len;
+    DWORD cap = cb ? *cb : 0;
+    if (cb)
+        *cb = len;
+    if (!name || cap < len + 1)
+        return ERROR_MORE_DATA;
+    for (DWORD i = 0; i <= len; ++i)
+        name[i] = (wchar_t16)(unsigned char)child[i];
+    return ERROR_SUCCESS;
+}
+
+__declspec(dllexport) LSTATUS RegEnumKeyExA(HANDLE hKey, DWORD idx, char* name, DWORD* cb, DWORD* reserved, char* cls,
+                                            DWORD* cls_cb, void* last_write)
+{
+    (void)reserved;
+    (void)last_write;
+    if (cls_cb)
+        *cls_cb = 0;
+    if (cls && cls_cb && *cls_cb >= 1)
+        cls[0] = 0;
+
+    const RegKey* key = reg_key_from_handle(hKey);
+    if (!key)
+        return ERROR_FILE_NOT_FOUND;
+    const char* child = reg_enum_child_name(key, idx);
+    if (!child)
+        return ERROR_NO_MORE_ITEMS;
+    DWORD len = 0;
+    while (child[len])
+        ++len;
+    DWORD cap = cb ? *cb : 0;
+    if (cb)
+        *cb = len;
+    if (!name || cap < len + 1)
+        return ERROR_MORE_DATA;
+    for (DWORD i = 0; i <= len; ++i)
+        name[i] = child[i];
+    return ERROR_SUCCESS;
+}
+
+__declspec(dllexport) LSTATUS RegEnumKeyA(HANDLE hKey, DWORD idx, char* name, DWORD cb)
+{
+    DWORD cb_inout = cb;
+    return RegEnumKeyExA(hKey, idx, name, &cb_inout, (DWORD*)0, (char*)0, (DWORD*)0, (void*)0);
 }
 
 __declspec(dllexport) LSTATUS RegEnumValueW(HANDLE hKey, DWORD idx, wchar_t16* name, DWORD* name_cb, DWORD* reserved,
