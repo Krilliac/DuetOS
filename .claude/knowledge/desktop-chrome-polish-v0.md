@@ -93,6 +93,40 @@ Two more items off `docs/duet-theme-spec.md`:
 - `kernel/drivers/video/wallpaper.h`
 - `kernel/drivers/video/wallpaper.cpp`
 
+## Update 2026-04-29 (window controls + pinned tabs)
+
+### Batch A: window minimize / maximize / restore
+
+`WindowDraw` now paints three control buttons in the title
+bar (right-to-left: min, max, close) sized off `title_bar_height`.
+Min is a horizontal "_" bar near the bottom; max is a 1-px
+outlined square; close is the existing doubled-X. Min + max
+share the title fill; close keeps its theme-distinct red.
+
+`widget.h` gains:
+- `WindowPointInMaxBox` / `WindowPointInMinBox` hit-tests
+- `WindowMinimize` (SW_HIDE-style; promotes next visible
+  window to active)
+- `WindowMaximize` (snapshots `saved_x/y/w/h`, fills
+  framebuffer minus 28-px taskbar reserve; idempotent)
+- `WindowRestore` / `WindowIsMaximized`
+
+`RegisteredWindow` gained `saved_x/y/w/h + maximized`.
+`main.cpp`'s mouse press dispatcher routes clicks to the new
+hit-tests; max click toggles between maximize and restore;
+min hides (taskbar tab click restores via WindowRaise).
+
+### Batch B: pinned-vs-running tab distinction
+
+`widget.h` gains `WindowSetPinned` / `WindowIsPinned`. The
+flag is a UI hint — kernel taskbar paints an 8-px active-tab
+focus dot when the active window is pinned, 14-px when it's
+not. `ThemeRegisterWindow` automatically pins any role-
+tracked window (Calculator / Notes / TaskManager / LogView /
+Files / Clock / GfxDemo — the boot apps), so ring-3 PE
+windows registered via SYS_WIN_CREATE land unpinned and get
+the larger dot.
+
 ## Update 2026-04-29 (login + button + banner polish, accent variants, Show Desktop)
 
 Two big batches:

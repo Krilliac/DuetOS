@@ -263,17 +263,15 @@ void TaskbarRedraw()
         const u32 tab_h_eff = g_h - 8;
         FramebufferFillRoundRect(tab_x, g_y + 4, tab_w, tab_h_eff, tab_radius, tab_bg);
         FramebufferDrawRoundRect(tab_x, g_y + 4, tab_w, tab_h_eff, tab_radius, g_border);
-        // Focus dot under the active tab — the spec asks for a
-        // 2-px-tall sliver under running apps (8 px for pinned,
-        // 14 px for "running"). v0 of the kernel taskbar has no
-        // pinned-vs-running distinction (every tab maps to a
-        // live window, so all tabs are "running"), so we paint
-        // the 14-px running variant centred horizontally on the
-        // tab. Brighter shade of the accent so it reads even on
-        // themes where the active-tab fill ≈ taskbar bg.
+        // Focus dot under the active tab. Per the spec the dot
+        // is 14 px wide for running-but-not-pinned active apps
+        // and 8 px wide for pinned-and-active apps — the size
+        // difference encodes "session-bound vs always-here"
+        // without adding ink.
         if (is_active && tab_h_eff > 4)
         {
-            constexpr u32 dot_w = 14;
+            const bool pinned = WindowIsPinned(h);
+            const u32 dot_w = pinned ? 8U : 14U;
             constexpr u32 dot_h = 2;
             const u32 strip_rgb = LightenRgb(g_accent, 56);
             const u32 dot_x = tab_x + (tab_w - dot_w) / 2;

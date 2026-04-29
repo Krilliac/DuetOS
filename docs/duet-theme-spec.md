@@ -100,7 +100,7 @@ state, not theme state.
 | 1-px border                                            | Yes — `window_border` is sampled by the existing border-draw path |
 | 6-px corner radius (0 when maximized)                  | Yes (Duet only) — `FramebufferPunchCorners(x, y, w, h, 6, desktop_rgb)` overpaints the four corner-quadrant pixels OUTSIDE the curve so the silhouette reads as rounded. Other themes keep rectangular chrome. Compositor mask is still the proper fix, but the punch is good enough as a v0 approximation. |
 | Vertical gradient on focus titlebar                    | Yes — `WindowDraw` paints `LightenRgb(colour_title, 24) → colour_title` with a 1-px highlight ridge on top |
-| Square title buttons, 46-px wide                       | No (widget code) |
+| Square title buttons, 46-px wide                       | Partial — chrome now paints a min / max / close trio sized off `title_bar_height` rather than a fixed 46-px width. Pixel-perfect fixed widths await a per-theme dimensions slice. |
 | Red-on-hover close button                              | Yes — `window_close = 0x00E3413C` matches the prototype's `TitleBtn` close hover; chrome now also draws an "X" glyph inside the close box |
 | 3% dim on unfocused windows                            | Yes — `WindowDrawAllOrdered` alpha-blends `0x18000000` over the whole inactive-window rect when more than one window is visible |
 | Drop shadow on every window                            | Yes — `FramebufferDropShadow(depth=4, alpha=0x60)` from `WindowDraw` |
@@ -113,7 +113,7 @@ state, not theme state.
 | 44-px (compact 38-px) bar                              | No — taskbar height fixed in `taskbar.cpp` |
 | 4 positions (bottom/top/left/right)                    | No — taskbar position fixed |
 | Accent-rail "Show desktop" sliver                      | Yes — paints a 4-px theme-accent rail at the right edge of the strip; clicking the rail snapshots visibility of every alive window via `WindowShowDesktopToggle`, hides them all, and a second click restores the snapshot. Rail body alpha shifts (0x60 → 0xC0) when the toggle is active so the user has a visible "armed" cue. |
-| 2-px tall focus dot under running apps (8 / 14 px)     | Yes (running-only) — active tab paints a centred 14-px × 2-px focus dot; pinned-vs-running distinction deferred until the kernel taskbar tracks pinned items |
+| 2-px tall focus dot under running apps (8 / 14 px)     | Yes — active-tab dot is 8 px when the window is pinned (kernel boot apps marked via `ThemeRegisterWindow` → `WindowSetPinned(true)`) and 14 px otherwise (ring-3 PE windows + any unpinned). Per-window `WindowIsPinned` / `WindowSetPinned` accessors back the distinction. |
 | Rounded START + tabs                                    | Yes — `FramebufferFillRoundRect` + `FramebufferDrawRoundRect` (radius 4 / 3) |
 | Vertical gradient on the strip                          | Yes — `LightenRgb(g_bg, 12) → g_bg` |
 | Bottom-default w/ Start | search | pinned | tray | clock | Already shipping in this layout — colours sampled from Duet palette transparently |

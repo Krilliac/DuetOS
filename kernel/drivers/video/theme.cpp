@@ -517,6 +517,15 @@ void ThemeRegisterWindow(ThemeRole role, WindowHandle h)
     if (idx >= static_cast<u32>(ThemeRole::kCount))
         return;
     g_role_window[idx] = h;
+    // Role-tracked windows are the kernel's permanent boot apps —
+    // Calculator / Notes / TaskManager / LogView / Files / Clock /
+    // GfxDemo. These are always-present from the user's
+    // perspective, so we mark them pinned so the taskbar paints
+    // a smaller (8-px) active-tab focus dot than running ring-3
+    // PE windows get (14-px). Ring-3 windows registered via
+    // SYS_WIN_CREATE never call ThemeRegisterWindow, so this
+    // automatically gives the right hint for both classes.
+    WindowSetPinned(h, true);
 }
 
 void ThemeApplyToAll()

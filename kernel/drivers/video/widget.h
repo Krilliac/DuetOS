@@ -440,6 +440,17 @@ u64 WindowOwnerPid(WindowHandle h);
 /// True iff `h` is alive AND currently visible.
 bool WindowIsVisible(WindowHandle h);
 
+/// Mark `h` as a "pinned" window. Pinning is a UI hint — the
+/// kernel taskbar uses it to draw a smaller (8-px) focus dot
+/// when an active pinned tab is selected, vs the 14-px dot for
+/// running-but-not-pinned tabs. Native boot apps (Calculator,
+/// Notes, Files, …) are typically pinned at registration; PE-
+/// owned ring-3 windows default to unpinned.
+void WindowSetPinned(WindowHandle h, bool pinned);
+
+/// True iff `h` is alive AND currently marked pinned.
+bool WindowIsPinned(WindowHandle h);
+
 /// Set the visible bit. No redraw — callers trigger the next
 /// DesktopCompose themselves.
 void WindowSetVisible(WindowHandle h, bool visible);

@@ -242,7 +242,8 @@ struct RegisteredWindow
     bool visible;
     bool dirty;     // set by InvalidateRect; cleared by BeginPaint / WindowDrainPaints
     bool maximized; // true while WindowMaximize has been applied without a Restore
-    u8 _pad[4];
+    bool pinned;    // taskbar UI hint — affects active-tab dot size
+    u8 _pad[3];
 };
 
 constinit RegisteredWindow g_windows[kMaxWindows] = {};
@@ -573,6 +574,7 @@ WindowHandle WindowRegister(const WindowChrome& chrome, const char* title)
     g_windows[h].visible = true;
     g_windows[h].dirty = false;
     g_windows[h].maximized = false;
+    g_windows[h].pinned = false;
     g_windows[h].saved_x = 0;
     g_windows[h].saved_y = 0;
     g_windows[h].saved_w = 0;
@@ -895,6 +897,18 @@ void WindowRestore(WindowHandle h)
 bool WindowIsMaximized(WindowHandle h)
 {
     return WindowValid(h) && g_windows[h].maximized;
+}
+
+void WindowSetPinned(WindowHandle h, bool pinned)
+{
+    if (!WindowValid(h))
+        return;
+    g_windows[h].pinned = pinned;
+}
+
+bool WindowIsPinned(WindowHandle h)
+{
+    return WindowValid(h) && g_windows[h].pinned;
 }
 
 void WindowClose(WindowHandle h)
