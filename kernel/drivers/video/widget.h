@@ -228,6 +228,17 @@ void WindowSnapLeft(WindowHandle h);
 /// Snap `h` to the right half. Mirrors Win10's Win+Right.
 void WindowSnapRight(WindowHandle h);
 
+/// Per-window opacity, 0..255. 0xFF = fully opaque (default).
+/// Lower values fade the window via a post-paint black-alpha
+/// overlay — fake-transparency cue without a real compositor
+/// backbuffer. No-op for invalid handles.
+void WindowSetOpacity(WindowHandle h, u8 opacity);
+
+/// Read the per-window opacity. Returns 0xFF for invalid
+/// handles so callers don't accidentally treat unknown
+/// windows as fully transparent.
+u8 WindowGetOpacity(WindowHandle h);
+
 /// Mark `h` closed: the window stops drawing, stops participating
 /// in hit-testing, and its widgets (buttons with owner=h) also
 /// disappear. The handle stays valid — no re-use — but the slot

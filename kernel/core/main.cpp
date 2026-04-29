@@ -1813,6 +1813,39 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 SerialWrite("\n");
                 continue;
             }
+            // Ctrl+Alt+, / Ctrl+Alt+. — adjust active window
+            // opacity in 32-step increments. Lower bound 64
+            // (anything below would render the chrome
+            // unreadable); upper bound 255 (fully opaque).
+            if (ctrl && alt && (ev.code == ',' || ev.code == '.'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                if (active != duetos::drivers::video::kWindowInvalid)
+                {
+                    const duetos::u8 cur = duetos::drivers::video::WindowGetOpacity(active);
+                    duetos::u8 next = cur;
+                    constexpr duetos::u8 kStep = 32;
+                    constexpr duetos::u8 kMin = 64;
+                    if (ev.code == ',')
+                    {
+                        next = (cur > kMin + kStep) ? static_cast<duetos::u8>(cur - kStep) : kMin;
+                    }
+                    else
+                    {
+                        next = (cur > 0xFFu - kStep) ? 0xFFu : static_cast<duetos::u8>(cur + kStep);
+                    }
+                    duetos::drivers::video::WindowSetOpacity(active, next);
+                    SerialWrite("[ui] opacity=");
+                    SerialWriteHex(next);
+                    SerialWrite("\n");
+                }
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+                duetos::drivers::video::CompositorUnlock();
+                continue;
+            }
             // Ctrl+Alt+digit picks a specific theme directly —
             // saves repeat presses of Ctrl+Alt+Y when there are
             // 9 themes registered. Index 1..9 maps onto

@@ -267,7 +267,15 @@ struct RegisteredWindow
     bool dirty;     // set by InvalidateRect; cleared by BeginPaint / WindowDrainPaints
     bool maximized; // true while WindowMaximize has been applied without a Restore
     bool pinned;    // taskbar UI hint — affects active-tab dot size
-    u8 _pad[3];
+    // Per-window opacity. 0xFF = fully opaque (default). Values
+    // below dim the window by alpha-blending a black overlay
+    // with alpha = (0xFF - opacity) AFTER chrome / content
+    // paint. Cheap fake-transparency that doesn't need a real
+    // compositor backbuffer — blends toward the desktop's dark
+    // ink rather than the surface beneath, but the visual
+    // "fading window" cue still reads correctly.
+    u8 opacity;
+    u8 _pad[2];
 };
 
 constinit RegisteredWindow g_windows[kMaxWindows] = {};
@@ -609,6 +617,7 @@ WindowHandle WindowRegister(const WindowChrome& chrome, const char* title)
     g_windows[h].alive = true;
     g_windows[h].visible = true;
     g_windows[h].dirty = false;
+    g_windows[h].opacity = 0xFF; // fully opaque by default
     g_windows[h].maximized = false;
     g_windows[h].pinned = false;
     g_windows[h].saved_x = 0;
@@ -994,6 +1003,20 @@ void WindowSnapRight(WindowHandle h)
     c.w = wa_w - half; // pick up the odd column on odd-width framebuffers
     c.h = wa_h;
     g_windows[h].maximized = false;
+}
+
+void WindowSetOpacity(WindowHandle h, u8 opacity)
+{
+    if (!WindowValid(h))
+        return;
+    g_windows[h].opacity = opacity;
+}
+
+u8 WindowGetOpacity(WindowHandle h)
+{
+    if (!WindowValid(h))
+        return 0xFF;
+    return g_windows[h].opacity;
 }
 
 void WindowSetPinned(WindowHandle h, bool pinned)
@@ -1474,6 +1497,21 @@ void WindowDrawAllOrdered()
         {
             FramebufferFillRectAlpha(g_windows[h].chrome.x, g_windows[h].chrome.y, g_windows[h].chrome.w,
                                      g_windows[h].chrome.h, 0x18000000U);
+        }
+        // Per-window opacity overlay. Lays a black rect at
+        // alpha = (0xFF - opacity) over the whole window so
+        // lower opacity values fade the window. This is a
+        // fake-transparency approximation — a real compositor
+        // would alpha-blend toward the underlying surface
+        // rather than black — but the user-visible "this
+        // window is fading" cue still reads correctly. Skipped
+        // when opacity is fully opaque (the common case).
+        if (g_windows[h].opacity < 0xFF)
+        {
+            const u32 overlay_alpha = static_cast<u32>(0xFFu - g_windows[h].opacity);
+            const u32 overlay = (overlay_alpha << 24);
+            FramebufferFillRectAlpha(g_windows[h].chrome.x, g_windows[h].chrome.y, g_windows[h].chrome.w,
+                                     g_windows[h].chrome.h, overlay);
         }
     }
 }
