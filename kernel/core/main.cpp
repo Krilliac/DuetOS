@@ -1164,6 +1164,23 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::fs::RamfsCpuhistSnapshot();
     duetos::fs::RamfsInspectSnapshot();
 
+    // Spawn the userland shell stub. Hand-built ELF ships in
+    // /bin/usershell.elf; calls SYS_WRITE("Hello from
+    // userland shell stub\n") + SYS_EXIT(0) and returns to
+    // the reaper. Proves end-to-end ring-3: ELF parse,
+    // PT_LOAD map, ring transition, syscall round-trip,
+    // exit cleanup. A future slice grows this into a real
+    // prompt-driven shell with TOML reader.
+    {
+        const auto pid = duetos::core::SpawnElfFile(
+            "/bin/usershell.elf", duetos::fs::RamfsUsershellElfBytes(), duetos::fs::RamfsUsershellElfSize(),
+            duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
+            duetos::core::kTickBudgetTrusted);
+        SerialWrite("[boot] usershell pid=");
+        SerialWriteHex(pid);
+        SerialWrite("\n");
+    }
+
     // Login gate — blocks keyboard input from reaching the shell
     // until a valid session is open. TTY mode prints a classic
     // `username:` / `password:` banner; desktop mode paints a

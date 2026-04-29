@@ -122,4 +122,11 @@ void RamfsCpuhistSnapshot();
 /// serial-only.
 void RamfsInspectSnapshot();
 
+/// Borrowed pointer + length of the hand-built userland shell
+/// stub ELF. The kernel boot path spawns this at end of init
+/// to demonstrate ring-3 + SYS_WRITE + SYS_EXIT end to end.
+/// A future slice grows this into a real prompt-driven shell.
+const u8* RamfsUsershellElfBytes();
+u64 RamfsUsershellElfSize();
+
 } // namespace duetos::fs

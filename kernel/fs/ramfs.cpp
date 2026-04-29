@@ -96,6 +96,71 @@ constexpr u8 kBinExitElfBytes[] = {
     0xCD, 0x80,                   // int 0x80
 };
 
+// /bin/usershell.elf — first userland ELF spawned at boot.
+// Hand-built ELF64 (no compiler needed), 184 bytes total:
+// 64-byte Ehdr + 56-byte Phdr + 33-byte code + 31-byte data.
+// The code is the simplest possible userland shell stub:
+//   SYS_WRITE(1, "Hello from userland shell stub\n", 31);
+//   SYS_EXIT(0);
+// Future slices will grow this into a real prompt-driven
+// shell with TOML reader + ~/.config/duet/shell.toml. For now
+// it's enough to demonstrate that a userland process spawns,
+// runs ring-3 code, makes a syscall, and exits cleanly.
+//
+// Spawn happens from main.cpp via core::SpawnElfFile with
+// CapSetTrusted() so the SYS_WRITE survives the
+// kCapSerialConsole gate.
+// clang-format off
+constexpr u8 kBinUsershellElfBytes[] = {
+    // -- ELF64 header (64 bytes) --
+    0x7F, 'E', 'L', 'F',                            // e_ident magic
+    0x02,                                           // EI_CLASS = ELFCLASS64
+    0x01,                                           // EI_DATA = ELFDATA2LSB
+    0x01,                                           // EI_VERSION
+    0x00,                                           // EI_OSABI = SYSV
+    0x00,                                           // EI_ABIVERSION
+    0, 0, 0, 0, 0, 0, 0,                            // padding
+    0x02, 0x00,                                     // e_type = ET_EXEC
+    0x3E, 0x00,                                     // e_machine = EM_X86_64
+    0x01, 0x00, 0x00, 0x00,                         // e_version
+    0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // e_entry = 0x400000
+    0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // e_phoff = 64
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // e_shoff = 0
+    0x00, 0x00, 0x00, 0x00,                         // e_flags
+    0x40, 0x00,                                     // e_ehsize
+    0x38, 0x00,                                     // e_phentsize
+    0x01, 0x00,                                     // e_phnum = 1
+    0x00, 0x00,                                     // e_shentsize
+    0x00, 0x00,                                     // e_shnum
+    0x00, 0x00,                                     // e_shstrndx
+
+    // -- PT_LOAD program header (56 bytes) --
+    0x01, 0x00, 0x00, 0x00,                         // p_type = PT_LOAD
+    0x05, 0x00, 0x00, 0x00,                         // p_flags = PF_R | PF_X
+    0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // p_offset = 120
+    0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // p_vaddr = 0x400000
+    0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // p_paddr
+    0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // p_filesz = 64
+    0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // p_memsz  = 64
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // p_align  = 1
+
+    // -- Code (33 bytes, file offset 120, va 0x400000) --
+    0x48, 0x8D, 0x35, 0x1A, 0x00, 0x00, 0x00, // lea rsi, [rip + 26]  -> msg
+    0xBA, 0x1F, 0x00, 0x00, 0x00,             // mov edx, 31           (msg len)
+    0xBF, 0x01, 0x00, 0x00, 0x00,             // mov edi, 1            (fd=stdout)
+    0xB8, 0x02, 0x00, 0x00, 0x00,             // mov eax, 2            (SYS_WRITE)
+    0xCD, 0x80,                               // int 0x80
+    0xB8, 0x00, 0x00, 0x00, 0x00,             // mov eax, 0            (SYS_EXIT)
+    0x31, 0xFF,                               // xor edi, edi          (status=0)
+    0xCD, 0x80,                               // int 0x80
+
+    // -- Message (31 bytes, file offset 153) --
+    // "Hello from userland shell stub\n"
+    'H', 'e', 'l', 'l', 'o', ' ', 'f', 'r', 'o', 'm', ' ', 'u',  's', 'e', 'r', 'l',
+    'a', 'n', 'd', ' ', 's', 'h', 'e', 'l', 'l', ' ', 's', 't',  'u', 'b', '\n',
+};
+// clang-format on
+
 // Message-of-the-day shown by the shell on startup. Kept short
 // so a 80x40 console has room for the banner + boot log + first
 // prompt without scrolling anything important off the top.
@@ -366,12 +431,26 @@ constinit RamfsNode k_trusted_bin_customdll_test = {
     .file_size = generated::kBinCustomDllTestBytes_len,
 };
 
+constinit RamfsNode k_trusted_bin_usershell = {
+    .name = "usershell.elf",
+    .type = RamfsNodeType::kFile,
+    .children = nullptr,
+    .file_bytes = kBinUsershellElfBytes,
+    .file_size = sizeof(kBinUsershellElfBytes),
+};
+
 constinit const RamfsNode* const k_trusted_bin_children[] = {
-    &k_trusted_bin_hello,          &k_trusted_bin_exit_elf,
-    &k_trusted_bin_hello_pe,       &k_trusted_bin_winkill,
-    &k_trusted_bin_hello_winapi,   &k_trusted_bin_thread_stress,
-    &k_trusted_bin_syscall_stress, &k_trusted_bin_customdll_test,
-    &k_trusted_bin_windowed_hello, nullptr,
+    &k_trusted_bin_hello,
+    &k_trusted_bin_exit_elf,
+    &k_trusted_bin_hello_pe,
+    &k_trusted_bin_winkill,
+    &k_trusted_bin_hello_winapi,
+    &k_trusted_bin_thread_stress,
+    &k_trusted_bin_syscall_stress,
+    &k_trusted_bin_customdll_test,
+    &k_trusted_bin_windowed_hello,
+    &k_trusted_bin_usershell,
+    nullptr,
 };
 
 constinit RamfsNode k_trusted_bin_dir = {
@@ -650,6 +729,16 @@ const RamfsNode* RamfsSandboxRoot()
 bool RamfsIsDir(const RamfsNode* n)
 {
     return n != nullptr && n->type == RamfsNodeType::kDir;
+}
+
+const u8* RamfsUsershellElfBytes()
+{
+    return kBinUsershellElfBytes;
+}
+
+u64 RamfsUsershellElfSize()
+{
+    return sizeof(kBinUsershellElfBytes);
 }
 
 namespace
