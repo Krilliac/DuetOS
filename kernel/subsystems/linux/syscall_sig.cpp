@@ -15,6 +15,7 @@
  */
 
 #include "subsystems/linux/syscall_internal.h"
+#include "subsystems/linux/signal_deliver.h"
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
@@ -229,15 +230,31 @@ i64 DoSigaltstack(u64 ss, u64 old_ss)
     return 0;
 }
 
-// Linux: rt_sigreturn. Called by user-mode signal trampolines
-// at the end of a signal handler. Without signal delivery
-// there's no frame to unwind; if a program ever calls this
-// unexpectedly, kill it so we don't silently return garbage.
-i64 DoRtSigreturn()
+// Linux: rt_sigreturn. Called by the user-mode trampoline (sa_restorer)
+// at the end of a signal handler. The trap frame on entry has its rsp
+// pointing at the LinuxSignalFrame the kernel wrote in
+// LinuxSignalCheckAndDeliver; this handler restores every saved
+// register and the signal mask so iretq lands the original syscall
+// caller exactly where it was, with the original syscall's rax
+// preserved.
+//
+// If the slot table doesn't have a recorded delivery for this pid,
+// or the magic header on the user stack is corrupt, treat as a
+// fatal protocol violation and kill the task — better than letting
+// a malicious user program fabricate a bogus frame and inject
+// arbitrary register state.
+i64 DoRtSigreturn(arch::TrapFrame* frame)
 {
-    arch::SerialWrite("[linux] rt_sigreturn on task without signal frame — exiting\n");
-    sched::SchedExit();
-    return 0;
+    if (!LinuxSignalRestoreFrame(frame))
+    {
+        arch::SerialWrite("[linux] rt_sigreturn on task without saved frame — exiting\n");
+        sched::SchedExit();
+        return 0;
+    }
+    // The dispatcher will write rv into frame->rax; we already
+    // restored frame->rax to the original syscall's value. Return
+    // the same value so that overwrite is a no-op.
+    return static_cast<i64>(frame->rax);
 }
 
 // rt_sigpending(set, sigsetsize). Reads the per-process pending

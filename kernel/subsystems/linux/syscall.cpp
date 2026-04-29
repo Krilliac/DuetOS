@@ -76,6 +76,7 @@
 #include "mm/page.h"
 #include "mm/paging.h"
 #include "sched/sched.h"
+#include "subsystems/linux/signal_deliver.h"
 #include "subsystems/translation/translate.h"
 
 extern "C" void linux_syscall_entry();
@@ -747,7 +748,7 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         rv = DoFchdir(frame->rdi);
         break;
     case kSysRtSigreturn:
-        rv = DoRtSigreturn();
+        rv = DoRtSigreturn(frame);
         break;
     case kSysSigaltstack:
         rv = DoSigaltstack(frame->rdi, frame->rsi);
@@ -1652,6 +1653,14 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
     }
     }
     frame->rax = static_cast<u64>(rv);
+
+    // Pending-signal check — if a user-installed handler is due,
+    // mutate the trap frame so iretq lands at the handler instead
+    // of the original syscall caller. The handler eventually
+    // returns through sa_restorer -> rt_sigreturn which restores
+    // the saved frame (including the rax we just wrote, so the
+    // post-signal world sees the original syscall's return value).
+    LinuxSignalCheckAndDeliver(frame);
 }
 
 void SyscallInit()

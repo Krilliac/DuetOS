@@ -13,6 +13,7 @@
 // header from outside kernel/subsystems/linux/. The public API
 // lives in syscall.h.
 
+#include "arch/x86_64/traps.h"
 #include "util/types.h"
 
 namespace duetos::core
@@ -452,7 +453,7 @@ i64 LinuxSignalDeliver(core::Process* target, u32 signum);
 bool LinuxSignalIsFatalDefault(u32 signum);
 i64 DoRtSigprocmask(u64 how, u64 user_set, u64 user_oldset, u64 sigsetsize);
 i64 DoSigaltstack(u64 ss, u64 old_ss);
-i64 DoRtSigreturn();
+i64 DoRtSigreturn(arch::TrapFrame* frame);
 i64 DoRtSigpending(u64 user_set, u64 sigsetsize);
 i64 DoRtSigsuspend(u64 user_mask, u64 sigsetsize);
 i64 DoRtSigtimedwait(u64 user_mask, u64 user_info, u64 user_ts, u64 sigsetsize);

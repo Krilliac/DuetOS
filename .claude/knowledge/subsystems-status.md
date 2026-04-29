@@ -21,7 +21,7 @@ Headline gaps:
 ### Linux ABI (~190 of 374 syscalls still stubbed)
 
 - **BPF + perf_event_open** — huge surface, likely never realistic
-- **Real signal completion**: user-handler trampoline + sigreturn (the trampoline is the hard part)
+- **Real signal completion**: user-handler trampoline + sigreturn — DONE 2026-04-29 for sa_restorer-supplying callers (glibc / musl, which means almost everyone). Old-style "no SA_RESTORER" callers still see the pending bit cleared without invocation (logged as a warning)
 - **Containers**: setns, unshare, pivot_root, mount/umount2 (currently -EPERM)
 - **Real ptrace state machine** (currently only kCapDebug-gated stub)
 - **clock_settime / clock_adjtime** — currently -EPERM (no RTC writeback)
@@ -460,8 +460,9 @@ TcpServerSend slice.
 `LinuxSignalDeliver(target, signum)` is the central delivery
 helper. Default actions (SIGHUP/INT/QUIT/ABRT/BUS/FPE/KILL/
 USR1/SEGV/USR2/PIPE/TERM = fatal) call `SchedKillByProcess`;
-SIG_IGN drops; user handler sets pending bit but no trampoline
-runs (sub-GAP).
+SIG_IGN drops; user handlers (with SA_RESTORER + restorer_va)
+are invoked via the trampoline+sigreturn path landed 2026-04-29
+(`subsystems/linux/signal_deliver.{cpp,h}`).
 
 ---
 
@@ -650,8 +651,17 @@ have landed (see §10).
   section-from-file spawn. Section-from-file path doesn't exist
   yet; PE-from-section is the bigger lift
 - ~~**NtNotifyChangeDirectoryFile**: wire to inotify~~ — DONE (`4996457`)
-- **Real signal-handler trampoline + sigreturn** (~500 LOC):
-  completes signal delivery — currently default-action only
+- ~~**Real signal-handler trampoline + sigreturn**~~ — DONE
+  (2026-04-29): `subsystems/linux/signal_deliver.{cpp,h}` plus
+  hook in LinuxSyscallDispatch tail. Builds a saved frame on
+  the user stack (LinuxSignalFrame, magic-guarded), mutates the
+  trap frame so iretq lands in the handler with rdi=signum and
+  rsp pointing at sa_restorer. rt_sigreturn (no longer the
+  "kill on entry" stub) restores every register + signal mask
+  from the saved frame. **Sub-GAPs**: SA_SIGINFO siginfo_t /
+  ucontext_t pointers stub-zeroed; alt-stack delivery not
+  honored; old-style no-SA_RESTORER callers see pending bit
+  cleared with a serial warning
 - ~~**POSIX message queues**~~ — DONE (`efe483e` + 2026-04-29 timeout honoring)
 - ~~**SysV msg queues**~~ — DONE (`efe483e`)
 - ~~**Real splice / tee zero-copy**~~ — DONE (2026-04-29):
