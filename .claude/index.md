@@ -14,6 +14,7 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | Lifetime download tally — survives rolling-channel asset re-uploads | [knowledge/lifetime-downloads-tally-v0.md](knowledge/lifetime-downloads-tally-v0.md) | Issue + Decision + Pattern | Active | 2026-04-29 |
 | Effective dev workflows | [knowledge/workflow-patterns.md](knowledge/workflow-patterns.md) | Pattern | Active | 2026-04-20 |
 | **Subsystems status — Win32/NT + Linux ABI (consolidated)** | [knowledge/subsystems-status.md](knowledge/subsystems-status.md) | Decision + Observation | Active — single source of truth for the subsystems work | 2026-04-29 |
+| Registry static-tree v0 — terminal + prefix tier + nested OpenKey + KEY_FULL_INFORMATION | [knowledge/registry-prefix-tree-v0.md](knowledge/registry-prefix-tree-v0.md) | Decision + Observation | Active | 2026-04-29 |
 | Kernel breakpoint subsystem v0 + phase 2a (per-task DR, syscall, kCapDebug) + phase 3 (suspend/inspect/resume/step) + phase 4 (static KBP_PROBE macros) | [knowledge/breakpoints-v0.md](knowledge/breakpoints-v0.md) | Observation | Active | 2026-04-23 |
 | Hardware target matrix (CPU/GPU/IO tiers) | [knowledge/hardware-target-matrix.md](knowledge/hardware-target-matrix.md) | Decision | Active | 2026-04-20 |
 | UEFI hybrid-ISO boot path — same ISO boots SeaBIOS + OVMF | [knowledge/uefi-hybrid-iso-v0.md](knowledge/uefi-hybrid-iso-v0.md) | Observation | Active | 2026-04-23 |
