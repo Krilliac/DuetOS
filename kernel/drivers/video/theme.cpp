@@ -1,6 +1,7 @@
 #include "drivers/video/theme.h"
 
 #include "arch/x86_64/serial.h"
+#include "drivers/video/calendar.h"
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
 #include "drivers/video/menu.h"
@@ -369,6 +370,11 @@ void ThemeApplyToAll()
     // the bright `taskbar_fg` so labels are legible against the
     // recess body.
     MenuSetColours(t.taskbar_tab_inactive, t.taskbar_border, t.taskbar_fg, t.taskbar_accent);
+
+    // Calendar popup: same body / border / ink as the menu so the
+    // two popups feel like siblings; header takes the taskbar
+    // accent so the month name reads with the brand colour.
+    CalendarSetColours(t.taskbar_tab_inactive, t.taskbar_border, t.taskbar_accent, t.taskbar_fg);
 }
 
 void ThemeSelfTest()

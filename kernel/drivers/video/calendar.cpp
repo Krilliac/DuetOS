@@ -24,13 +24,35 @@ constexpr u32 kWeekdayH = 18;
 constexpr u32 kPanelW = kMargin * 2 + kCellW * kCols;
 constexpr u32 kPanelH = kMargin * 2 + kHeaderH + kWeekdayH + kCellH * kGridRows;
 
-// Same palette as the start menu so the two popups feel sibling.
-constexpr u32 kBodyRgb = 0x00303848;
-constexpr u32 kBorderRgb = 0x00101828;
-constexpr u32 kHeaderRgb = 0x00406090;
+// Theme-driven chrome palette. Defaults match the original
+// hardcoded slate-blue look so a kernel that never calls
+// CalendarSetColours sees the v0 popup unchanged. ThemeApplyToAll
+// rewrites these per-theme.
+constinit u32 g_body_rgb = 0x00303848;
+constinit u32 g_border_rgb = 0x00101828;
+constinit u32 g_header_rgb = 0x00406090;
+constinit u32 g_ink_rgb = 0x00FFFFFF;
+
+// Semantic indicators — kept hardcoded across themes since
+// "today" / "other-month dim" carry meaning independent of palette.
 constexpr u32 kTodayRgb = 0x0054C06A; // accent green for today
 constexpr u32 kDimRgb = 0x00707884;
-constexpr u32 kTextRgb = 0x00FFFFFF;
+
+// Saturating per-channel lighten — file-local copy of the helper
+// in widget.cpp / taskbar.cpp / menu.cpp.
+u32 LightenRgb(u32 rgb, u32 amount)
+{
+    u32 r = ((rgb >> 16) & 0xFFU) + amount;
+    u32 g = ((rgb >> 8) & 0xFFU) + amount;
+    u32 b = (rgb & 0xFFU) + amount;
+    if (r > 0xFFU)
+        r = 0xFFU;
+    if (g > 0xFFU)
+        g = 0xFFU;
+    if (b > 0xFFU)
+        b = 0xFFU;
+    return (r << 16) | (g << 8) | b;
+}
 
 constinit bool g_open = false;
 constinit u32 g_ax = 0;
@@ -98,6 +120,14 @@ void FormatU16Dec(char* out, u16 v)
 
 } // namespace
 
+void CalendarSetColours(u32 body_rgb, u32 border_rgb, u32 header_rgb, u32 ink_rgb)
+{
+    g_body_rgb = body_rgb;
+    g_border_rgb = border_rgb;
+    g_header_rgb = header_rgb;
+    g_ink_rgb = ink_rgb;
+}
+
 void CalendarOpen(u32 ax, u32 ay)
 {
     g_ax = ax;
@@ -142,12 +172,23 @@ void CalendarRedraw()
         today = 0;
     }
 
-    // Panel body + border.
-    FramebufferFillRect(g_ax, g_ay, kPanelW, kPanelH, kBodyRgb);
-    FramebufferDrawRect(g_ax, g_ay, kPanelW, kPanelH, kBorderRgb, 2);
+    // Drop shadow first so the popup reads as raised — same depth
+    // + alpha as window chrome / start menu for visual consistency.
+    FramebufferDropShadow(g_ax, g_ay, kPanelW, kPanelH, 4, 0x60);
+
+    // Body: subtle vertical gradient from a lifted shade of the
+    // theme body to the body itself. Matches the menu / taskbar
+    // chrome polish.
+    FramebufferFillRectGradient(g_ax, g_ay, kPanelW, kPanelH, LightenRgb(g_body_rgb, 14), g_body_rgb);
+    // 1-px highlight ridge along the inside of the top border.
+    if (kPanelW > 4)
+    {
+        FramebufferFillRect(g_ax + 2, g_ay + 1, kPanelW - 4, 1, LightenRgb(g_body_rgb, 36));
+    }
+    FramebufferDrawRect(g_ax, g_ay, kPanelW, kPanelH, g_border_rgb, 1);
 
     // Header: coloured bar + "MMM YYYY" centred.
-    FramebufferFillRect(g_ax + kMargin, g_ay + kMargin, kPanelW - kMargin * 2, kHeaderH, kHeaderRgb);
+    FramebufferFillRect(g_ax + kMargin, g_ay + kMargin, kPanelW - kMargin * 2, kHeaderH, g_header_rgb);
     char ybuf[5];
     FormatU16Dec(ybuf, u16(year));
     // "APR 2026" = 8 glyphs × 8 px = 64 px.
@@ -164,7 +205,7 @@ void CalendarRedraw()
     const u32 title_w = 8 * 8;
     const u32 title_x = g_ax + (kPanelW - title_w) / 2;
     const u32 title_y = g_ay + kMargin + (kHeaderH - 8) / 2;
-    FramebufferDrawString(title_x, title_y, title, kTextRgb, kHeaderRgb);
+    FramebufferDrawString(title_x, title_y, title, g_ink_rgb, g_header_rgb);
 
     // Weekday initials row.
     const char* kWeek = "SMTWTFS";
@@ -176,7 +217,7 @@ void CalendarRedraw()
         one[1] = '\0';
         const u32 cx = g_ax + kMargin + c * kCellW + (kCellW - 8) / 2;
         const u32 cy = week_y + (kWeekdayH - 8) / 2;
-        FramebufferDrawString(cx, cy, one, kDimRgb, kBodyRgb);
+        FramebufferDrawString(cx, cy, one, kDimRgb, g_body_rgb);
     }
 
     // Grid.
@@ -212,7 +253,7 @@ void CalendarRedraw()
             buf[2] = '\0';
             const u32 text_x = cx + (kCellW - 16) / 2;
             const u32 text_y = cy + (kCellH - 8) / 2;
-            FramebufferDrawString(text_x, text_y, buf, kTextRgb, is_today ? kTodayRgb : kBodyRgb);
+            FramebufferDrawString(text_x, text_y, buf, g_ink_rgb, is_today ? kTodayRgb : g_body_rgb);
         }
     }
 }

@@ -28,6 +28,14 @@
 namespace duetos::drivers::video
 {
 
+/// Update the calendar's chrome palette. Called by the theme
+/// module so a runtime theme switch re-hues the popup without
+/// tearing it down. Every parameter is written unconditionally
+/// (theme palettes may legitimately use 0x00000000 for any
+/// field). The "today" highlight + dim-other-month ink stay
+/// hardcoded — they encode semantic state, not theme identity.
+void CalendarSetColours(u32 body_rgb, u32 border_rgb, u32 header_rgb, u32 ink_rgb);
+
 /// Open the calendar popup anchored with `ax, ay` as its
 /// upper-left corner. Usually called from the clock hit-test;
 /// the caller passes a value that puts the popup above the
