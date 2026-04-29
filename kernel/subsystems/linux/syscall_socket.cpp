@@ -96,7 +96,7 @@ bool WriteSockaddrIn(u64 user_addr, u64 user_addrlen_ptr, ::duetos::net::Ipv4Add
 
 i32 AllocFd(::duetos::core::Process* p)
 {
-    for (u32 i = 3; i < 16; ++i)
+    for (u32 i = 3; i < LinuxFdEffectiveMax(p); ++i)
     {
         if (p->linux_fds[i].state == 0)
             return static_cast<i32>(i);

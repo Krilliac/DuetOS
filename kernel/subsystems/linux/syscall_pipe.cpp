@@ -596,7 +596,8 @@ i64 DoPipe2(u64 user_fds, u64 flags)
     // tty-reserved). Linux semantics: lowest two free fds.
     u32 r_fd = 16;
     u32 w_fd = 16;
-    for (u32 i = 3; i < 16; ++i)
+    const u32 fd_max = LinuxFdEffectiveMax(p);
+    for (u32 i = 3; i < fd_max; ++i)
     {
         if (p->linux_fds[i].state != 0)
             continue;
@@ -661,7 +662,7 @@ i64 DoEventfd2(u64 initval, u64 flags)
     if (p == nullptr)
         return kEPERM;
     u32 fd = 16;
-    for (u32 i = 3; i < 16; ++i)
+    for (u32 i = 3; i < LinuxFdEffectiveMax(p); ++i)
     {
         if (p->linux_fds[i].state == 0)
         {

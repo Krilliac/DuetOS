@@ -291,7 +291,7 @@ i64 DoTimerfdCreate(u64 clockid, u64 flags)
     if (p == nullptr)
         return kEPERM;
     u32 fd = 16;
-    for (u32 i = 3; i < 16; ++i)
+    for (u32 i = 3; i < LinuxFdEffectiveMax(p); ++i)
     {
         if (p->linux_fds[i].state == 0)
         {
@@ -551,7 +551,7 @@ i64 DoSignalfd(u64 fd, u64 user_mask, u64 sigsetsize, u64 flags)
         return static_cast<i64>(fd);
     }
     u32 new_fd = 16;
-    for (u32 i = 3; i < 16; ++i)
+    for (u32 i = 3; i < LinuxFdEffectiveMax(p); ++i)
     {
         if (p->linux_fds[i].state == 0)
         {
@@ -713,7 +713,7 @@ i64 DoEpollCreate1(u64 flags)
     if (p == nullptr)
         return kEPERM;
     u32 fd = 16;
-    for (u32 i = 3; i < 16; ++i)
+    for (u32 i = 3; i < LinuxFdEffectiveMax(p); ++i)
     {
         if (p->linux_fds[i].state == 0)
         {

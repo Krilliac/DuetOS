@@ -50,7 +50,7 @@ i32 FindFreeLinuxFd(core::Process* p)
 {
     if (p == nullptr)
         return -1;
-    for (u32 i = 3; i < 16; ++i)
+    for (u32 i = 3; i < LinuxFdEffectiveMax(p); ++i)
         if (p->linux_fds[i].state == 0)
             return static_cast<i32>(i);
     return -1;
@@ -133,7 +133,7 @@ i64 DoPidfdGetfd(u64 pidfd, u64 target_fd, u64 flags)
 
     // Find a free slot in caller's table.
     i32 caller_slot = -1;
-    for (u32 i = 3; i < 16; ++i)
+    for (u32 i = 3; i < LinuxFdEffectiveMax(caller); ++i)
         if (caller->linux_fds[i].state == 0)
         {
             caller_slot = static_cast<i32>(i);
