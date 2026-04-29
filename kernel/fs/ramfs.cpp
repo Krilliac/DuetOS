@@ -97,15 +97,21 @@ constexpr u8 kBinExitElfBytes[] = {
 };
 
 // /bin/usershell.elf — first userland ELF spawned at boot.
-// Hand-built ELF64 (no compiler needed), 184 bytes total:
-// 64-byte Ehdr + 56-byte Phdr + 33-byte code + 31-byte data.
-// The code is the simplest possible userland shell stub:
-//   SYS_WRITE(1, "Hello from userland shell stub\n", 31);
-//   SYS_EXIT(0);
-// Future slices will grow this into a real prompt-driven
-// shell with TOML reader + ~/.config/duet/shell.toml. For now
-// it's enough to demonstrate that a userland process spawns,
-// runs ring-3 code, makes a syscall, and exits cleanly.
+// Hand-built ELF64 (no compiler needed), 181 bytes total:
+// 64-byte Ehdr + 56-byte Phdr + 40-byte code + 21-byte data.
+// The code exercises three syscalls in sequence:
+//   SYS_WRITE(1, "Hello from usershell\n", 21);
+//   pid = SYS_GETPID();
+//   SYS_EXIT(pid);
+// The exit-code-as-pid trick lets the kernel's reaper log
+// the userland shell's PID via the existing "task <pid>
+// exited with code <N>" path — confirms the round-trip
+// without needing decimal-to-ASCII conversion in the stub.
+//
+// Future slices grow this into a real prompt-driven shell
+// with TOML reader + ~/.config/duet/shell.toml. For now
+// it's enough to demonstrate the spawn pipeline + ring-3
+// + multiple syscalls + clean exit.
 //
 // Spawn happens from main.cpp via core::SpawnElfFile with
 // CapSetTrusted() so the SYS_WRITE survives the
@@ -140,24 +146,26 @@ constexpr u8 kBinUsershellElfBytes[] = {
     0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // p_offset = 120
     0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // p_vaddr = 0x400000
     0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // p_paddr
-    0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // p_filesz = 64
-    0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // p_memsz  = 64
+    0x3D, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // p_filesz = 61
+    0x3D, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // p_memsz  = 61
     0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // p_align  = 1
 
-    // -- Code (33 bytes, file offset 120, va 0x400000) --
-    0x48, 0x8D, 0x35, 0x1A, 0x00, 0x00, 0x00, // lea rsi, [rip + 26]  -> msg
-    0xBA, 0x1F, 0x00, 0x00, 0x00,             // mov edx, 31           (msg len)
-    0xBF, 0x01, 0x00, 0x00, 0x00,             // mov edi, 1            (fd=stdout)
-    0xB8, 0x02, 0x00, 0x00, 0x00,             // mov eax, 2            (SYS_WRITE)
-    0xCD, 0x80,                               // int 0x80
-    0xB8, 0x00, 0x00, 0x00, 0x00,             // mov eax, 0            (SYS_EXIT)
-    0x31, 0xFF,                               // xor edi, edi          (status=0)
-    0xCD, 0x80,                               // int 0x80
+    // -- Code (40 bytes, file offset 120, va 0x400000) --
+    0x48, 0x8D, 0x35, 0x21, 0x00, 0x00, 0x00, // 00: lea rsi, [rip+33] -> msg
+    0xBA, 0x15, 0x00, 0x00, 0x00,             // 07: mov edx, 21        (msg len)
+    0xBF, 0x01, 0x00, 0x00, 0x00,             // 0C: mov edi, 1         (fd=stdout)
+    0xB8, 0x02, 0x00, 0x00, 0x00,             // 11: mov eax, 2         (SYS_WRITE)
+    0xCD, 0x80,                               // 16: int 0x80
+    0xB8, 0x01, 0x00, 0x00, 0x00,             // 18: mov eax, 1         (SYS_GETPID)
+    0xCD, 0x80,                               // 1D: int 0x80           (rax = pid)
+    0x89, 0xC7,                               // 1F: mov edi, eax       (status = pid)
+    0xB8, 0x00, 0x00, 0x00, 0x00,             // 21: mov eax, 0         (SYS_EXIT)
+    0xCD, 0x80,                               // 26: int 0x80
 
-    // -- Message (31 bytes, file offset 153) --
-    // "Hello from userland shell stub\n"
-    'H', 'e', 'l', 'l', 'o', ' ', 'f', 'r', 'o', 'm', ' ', 'u',  's', 'e', 'r', 'l',
-    'a', 'n', 'd', ' ', 's', 'h', 'e', 'l', 'l', ' ', 's', 't',  'u', 'b', '\n',
+    // -- Message (21 bytes, file offset 160) --
+    // "Hello from usershell\n"
+    'H', 'e', 'l', 'l', 'o', ' ', 'f', 'r', 'o', 'm', ' ',
+    'u', 's', 'e', 'r', 's', 'h', 'e', 'l', 'l', '\n',
 };
 // clang-format on
 
