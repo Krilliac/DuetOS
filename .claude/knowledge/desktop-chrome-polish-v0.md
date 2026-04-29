@@ -3,6 +3,111 @@
 _Type: Observation + Decision._
 _Last updated: 2026-04-29._
 
+## Update 2026-04-29 (deferred-items batch — chrome dims, /sys/inspect, opacity, usershell ELF, scaled font)
+
+Eight commits closing out almost every remaining row in the
+spec status table. The deferred list went from "infrastructure
+projects, multi-slice each" to "one row remains substantively
+deferred (full TTF rasterizer)".
+
+1. **Duet chrome 30/44 px** (commit `25892f2`). Bumps the
+   five Duet-family themes (Duet, DuetLight, DuetBlue,
+   DuetViolet, DuetGreen) from the v0 26/36 intermediate to
+   the prototype's full 30-px title bar + 44-px taskbar.
+   Compact themes stay at 22/28. The
+   `EffectiveTitleHeight()` / `TaskbarHeight()` accessors
+   are the single sources of truth so chrome paint, hit-test,
+   and `WindowMaximize` all picked it up automatically.
+
+2. **Per-theme `title_button_width`** (commit `4eb06c2`).
+   New `Theme.title_button_width` field — 46 across the Duet
+   family (the prototype's spec value), 0 ("derive from
+   height" = historical square button) elsewhere. New
+   `EffectiveButtonWidth()` helper. Chrome paint +
+   `WindowPointInClose/Max/MinBox` all read btn_w / btn_h
+   through it instead of the previous square btn_side. Glyph
+   dimensions use min(btn_w, btn_h) so the inner mark stays
+   centred and symmetric whether the box is square or
+   wider-than-tall (Duet 46x22).
+
+3. **`/sys/inspect/<basename>`** (commit `d5bb248`). Closes
+   the last deferred procfs/sysfs row. New
+   `PeQuickSummaryTo(writer, file, len)` public API in
+   `pe_loader.h` mirrors PeReport's first ~10 lines (image
+   base, entry RVA, image size, section count, exports
+   status) but emits via a callback. New
+   `RamfsInspectSnapshot()` walks an `InspectSlot[]` table
+   keyed by basename and renders 1 KiB per PE into a per-PE
+   buffer. `g_sys_inspect_children[]` is fixed up at init
+   time because RamfsNode addresses inside an InspectSlot[]
+   aren't constant-expressible.
+
+4. **Multi-source topo wallpaper** (commit `cc8a200`).
+   Replaces the single concentric-stack `PaintTopo()` with
+   four independent peaks at fixed `(x%, y%)` anchors.
+   Each peak carries its own `ring_step` / `ring_count`.
+   Stroke is the same `AmbientStrokeRgb(9)` lift the previous
+   single-source paint used. Reads as a real topographic
+   map with overlapping contours instead of a target.
+
+5. **Per-window opacity** (commit `fb43a6b`). New
+   `u8 opacity` field per window (default 0xFF). Post-paint
+   alpha overlay at `alpha = (0xFF - opacity)` over black
+   fades the window. Hotkeys: Ctrl+Alt+, decrement,
+   Ctrl+Alt+. increment (32-step, floored at 64 so chrome
+   stays readable). Public APIs: `WindowSetOpacity` /
+   `WindowGetOpacity`. Fake-transparency cue without a
+   per-window backbuffer; the real compositor mask remains
+   the long-tail item.
+
+6. **Userland shell stub ELF** (commit `a923c14`).
+   Hand-built 184-byte ELF64 (`kBinUsershellElfBytes`,
+   clang-format-off-bracketed in ramfs.cpp). Code is the
+   smallest useful userland stub:
+   `SYS_WRITE(1, "Hello from userland shell stub\n", 31);
+   SYS_EXIT(0);`. Encoded directly with RIP-relative
+   addressing for the message so the ELF doesn't need
+   relocations. Two new public ramfs accessors
+   (`RamfsUsershellElfBytes` / `RamfsUsershellElfSize`)
+   lift it out of the anonymous namespace; main.cpp's
+   pre-login init block spawns via `SpawnElfFile` with
+   `CapSetTrusted()` so the SYS_WRITE survives the
+   `kCapSerialConsole` gate. End-to-end ring-3 proof
+   without a freestanding userland libc.
+
+7. **Integer-scaled bitmap font** (commit `5db88b6`).
+   New `FramebufferDrawStringScaled` + `StringPixelWidthScaled`
+   render each 8x8 source pixel as a `scale × scale`
+   filled rect (capped at scale=8). Wired into the
+   "WELCOME TO DUETOS  BOOT OK" desktop banner: themes
+   with `title_bar_height >= 30` (the Duet family) render
+   the banner at scale=2 so the text matches the bigger
+   chrome. NOT a TTF rasterizer — that remains a
+   multi-slice project — but a real path to bigger text
+   without a fixed second bitmap font.
+
+Spec status table now flips:
+- Per-theme `title_bar_height` row → 22 / **30** (Duet
+  spec target).
+- Per-theme `taskbar_height` row → 28 / **44**.
+- New row "Per-theme `title_button_width`" → **Yes**.
+- Per-window alpha + 30/44 px → **Yes** (with caveat: real
+  compositor backbuffer alpha-blend toward the underlying
+  surface remains the long-tail item; the post-paint
+  overlay is the v0 stand-in).
+- TTF rasterizer → **Partial** (integer-scaled bitmap font).
+- Userland shell → **Partial** (hand-built stub ELF
+  spawns + runs ring-3 + makes a syscall + exits cleanly).
+- procfs row → all six files including
+  `/sys/inspect/<basename>`.
+
+Remaining substantively deferred:
+- Real TTF / OTF rasterizer (Inter at 7 sizes).
+- Real compositor (per-window backbuffers + true alpha
+  blend toward underlying surface; SVG loader for the
+  prototype's `topo` / `syscalls` SVGs).
+- A real prompt-driven userland shell with TOML reader.
+
 ## Update 2026-04-29 (StrokePath + window resize + procfs/sysfs surface)
 
 Six more slices closing out almost every remaining row of the
