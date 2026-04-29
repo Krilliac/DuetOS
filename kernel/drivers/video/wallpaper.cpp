@@ -223,11 +223,17 @@ void WallpaperPaint(u32 desktop_rgb)
     {
     case ThemeId::Duet:
     case ThemeId::DuetLight:
-        // Both Duet variants stack the topo backdrop under the
-        // foreground arcs — the layered look matches the
+    case ThemeId::DuetBlue:
+    case ThemeId::DuetViolet:
+    case ThemeId::DuetGreen:
+        // Every Duet-family theme stacks the topo backdrop under
+        // the foreground arcs — the layered look matches the
         // prototype's multi-layer SVG composition. Both paints
         // use AmbientStrokeRgb internally so the contrast
         // direction flips on the light variant automatically.
+        // The accent variants share the same neutral arc tints
+        // since the START button + active-tab dot already carry
+        // the variant's brand hue.
         PaintTopo(desktop_rgb, info.width, info.height);
         PaintDuetArcs(desktop_rgb, info.width, info.height);
         break;

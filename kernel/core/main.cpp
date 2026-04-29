@@ -2395,6 +2395,27 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 }
             }
 
+            // "Show Desktop" sliver at the right edge of the
+            // taskbar. First press snapshots the visibility of
+            // every alive window and hides them; second press
+            // restores the snapshotted state. Tab-click + START
+            // clicks already consumed earlier presses, so this
+            // hit-test runs on the residual press_edge stream.
+            if (press_edge && !menu_handled && !drag.active)
+            {
+                duetos::u32 dx = 0, dy = 0, dw = 0, dh = 0;
+                duetos::drivers::video::TaskbarShowDesktopBounds(&dx, &dy, &dw, &dh);
+                if (dw > 0 && cx >= dx && cx < dx + dw && cy >= dy && cy < dy + dh)
+                {
+                    const bool now_active = duetos::drivers::video::WindowShowDesktopToggle();
+                    SerialWrite(now_active ? "[ui] show-desktop ON\n" : "[ui] show-desktop OFF\n");
+                    duetos::drivers::video::CursorHide();
+                    duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                    duetos::drivers::video::CursorShow();
+                    menu_handled = true; // sliver ate the click
+                }
+            }
+
             if (press_edge && !menu_handled && !drag.active && duetos::drivers::video::TaskbarContains(cx, cy))
             {
                 const duetos::u32 tab_hit = duetos::drivers::video::TaskbarTabAt(cx, cy);

@@ -191,7 +191,10 @@ void TaskbarRedraw()
     // rasterization is a follow-on once a proper path stroker
     // lands in the framebuffer.
     const ThemeId tid_start = ThemeCurrentId();
-    if (tid_start == ThemeId::Duet || tid_start == ThemeId::DuetLight)
+    const bool is_duet_family = tid_start == ThemeId::Duet || tid_start == ThemeId::DuetLight ||
+                                tid_start == ThemeId::DuetBlue || tid_start == ThemeId::DuetViolet ||
+                                tid_start == ThemeId::DuetGreen;
+    if (is_duet_family)
     {
         constexpr u32 mark_label_w = 4 * 8; // "DUET"
         constexpr u32 mark_diameter = 14;
@@ -205,10 +208,15 @@ void TaskbarRedraw()
         // Teal accent (matches Duet's `--accent`). Drawing the ring
         // twice — once at radius r, once at radius r-1 — gives a
         // 2-pixel stroke without a separate stroke primitive.
-        constexpr u32 kTeal = 0x002DD4BF;
+        // Primary ring: the active theme's accent (teal on slate
+        // Duet, blue on DuetBlue, violet on DuetViolet, etc.) so
+        // each variant's brand colour reads in the START glyph.
+        // Secondary ring: amber across all variants — the "second
+        // ABI" ink the duet narrative is built around.
         constexpr u32 kAmber = 0x00F0B040;
-        FramebufferDrawCircle(ring_a_cx, ring_cy, ring_r, kTeal);
-        FramebufferDrawCircle(ring_a_cx, ring_cy, ring_r - 1, kTeal);
+        const u32 primary_ring = g_accent;
+        FramebufferDrawCircle(ring_a_cx, ring_cy, ring_r, primary_ring);
+        FramebufferDrawCircle(ring_a_cx, ring_cy, ring_r - 1, primary_ring);
         FramebufferDrawCircle(ring_b_cx, ring_cy, ring_r, kAmber);
         FramebufferDrawCircle(ring_b_cx, ring_cy, ring_r - 1, kAmber);
         // Label sits right of the rings.
@@ -471,18 +479,18 @@ void TaskbarRedraw()
     // outer pixel column stays on the bg gradient — keeps the
     // chrome from looking pasted onto the surface.
     //
-    // STUB: click dispatch (true Win10 minimize-all + restore)
-    // not yet wired — the kernel taskbar's hit-test exposes the
-    // bounds via TaskbarShowDesktopBounds for a future slice.
+    // The rail's body alpha shifts based on toggle state: 0x60
+    // (subtle) when windows are visible, 0xC0 (brighter) when
+    // the desktop is showing — gives the user a visible
+    // "armed" cue that a click would restore the windows.
     {
         constexpr u32 rail_w = 4;
         const u32 rail_x = (fbw > rail_w + 1) ? fbw - rail_w - 1 : 0;
         const u32 rail_y = g_y + 4;
         const u32 rail_h = (g_h > 8) ? g_h - 8 : g_h;
-        // Body: 2-px translucent accent (alpha-blended over the
-        // taskbar gradient so it reads as a soft accent rather
-        // than a hard stripe).
-        FramebufferFillRectAlpha(rail_x, rail_y, rail_w, rail_h, 0x60000000U | (g_accent & 0x00FFFFFFU));
+        const u8 rail_alpha = WindowShowDesktopActive() ? 0xC0 : 0x60;
+        FramebufferFillRectAlpha(rail_x, rail_y, rail_w, rail_h,
+                                 (static_cast<u32>(rail_alpha) << 24) | (g_accent & 0x00FFFFFFU));
         // 1-px brighter highlight on the inside edge so the
         // rail has visible structure when hovered.
         FramebufferFillRect(rail_x, rail_y, 1, rail_h, LightenRgb(g_accent, 56));

@@ -50,6 +50,13 @@
  *               from the prototype's `light` mode tokens. The
  *               cursor + chrome adapt to the inverted contrast
  *               budget so dark-on-light text reads cleanly.
+ *   - DuetBlue / DuetViolet / DuetGreen :
+ *               three accent variants of the slate Duet, each
+ *               swapping the teal accent for a different brand
+ *               hue (Win10 blue, modern violet, and a deep
+ *               forest green). The amber accent for
+ *               document-style apps stays — keeps the dual-
+ *               accent "duet" identity intact across variants.
  *
  * Switching themes is a runtime operation (Ctrl+Alt+Y cycles, the
  * `theme` shell command switches or cycles by name, or
@@ -74,7 +81,10 @@ enum class ThemeId : u8
     Amber = 2,
     Duet = 3,
     DuetLight = 4,
-    kCount = 5,
+    DuetBlue = 5,
+    DuetViolet = 6,
+    DuetGreen = 7,
+    kCount = 8,
 };
 
 /// Stable role tag for each application window whose chrome is

@@ -93,6 +93,57 @@ Two more items off `docs/duet-theme-spec.md`:
 - `kernel/drivers/video/wallpaper.h`
 - `kernel/drivers/video/wallpaper.cpp`
 
+## Update 2026-04-29 (login + button + banner polish, accent variants, Show Desktop)
+
+Two big batches:
+
+### Batch A: chrome polish for login / banner / buttons
+
+1. **Login screen polish** — `login.cpp::DrawBackground` swaps
+   the two-stripe BG approximation for `FillRectGradient` (now
+   that the framebuffer ships gradient primitives). `DrawPanel`
+   gains drop shadow (depth 5, alpha 0x70), gradient title bar,
+   1-px ridge highlight along the title's top, 1-px outer
+   border (was 2-px slab), 1-px divider where the title meets
+   the body. Login → desktop transition is now visually
+   continuous.
+
+2. **Welcome banner drop shadow** — `DesktopCompose` paints a
+   black 1-pixel offset shadow before the white banner ink
+   so the text reads on every theme's gradient bg without a
+   hard background-fill rectangle.
+
+3. **Widget button gradient + ridge** — `PaintButton` swaps
+   the flat fill for a vertical gradient (Lighten +22) plus a
+   1-px ridge highlight along the inside top. Pressed buttons
+   skip the gradient + ridge so the press transition reads as
+   a clear "settled" state. Forward-declares the existing
+   `LightenRgb` helper so PaintButton can use it.
+
+### Batch B: accent variants + Show Desktop
+
+4. **Three Duet accent variants** — `ThemeId::DuetBlue /
+   DuetViolet / DuetGreen` (kCount: 5 → 8). Each duplicates the
+   slate Duet palette and swaps the primary accent for the
+   variant's brand hue (Win10 blue / tailwind violet-500 /
+   mint green). The amber accent for document-style apps
+   stays — preserves the dual-accent identity. Rounded corners
+   + DuetMark START + duet-arcs wallpaper extend to all three
+   automatically. The DuetMark's primary ring colour now reads
+   from the live `g_accent` taskbar state so it picks up the
+   variant's accent without per-theme code.
+
+5. **Real Show Desktop click** — `WindowShowDesktopToggle()` /
+   `WindowShowDesktopActive()` in widget.h. The toggle
+   snapshots a `g_show_desktop_mask` bitmask of which alive
+   windows were `visible` at activation time, hides them all,
+   and the next click restores only those — windows the user
+   closed mid-toggle drop off the mask. Mouse reader in
+   main.cpp dispatches clicks on `TaskbarShowDesktopBounds`
+   into the toggle, then re-composes. The taskbar paint reads
+   `WindowShowDesktopActive()` and shifts the rail's body
+   alpha 0x60 → 0xC0 so the user has a visible "armed" cue.
+
 ## Update 2026-04-29 (theme-aware popups + Light Duet)
 
 Three more chrome polish slices:

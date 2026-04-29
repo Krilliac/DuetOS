@@ -112,7 +112,7 @@ state, not theme state.
 |--------------------------------------------------------|---------------------------|-------|
 | 44-px (compact 38-px) bar                              | No — taskbar height fixed in `taskbar.cpp` |
 | 4 positions (bottom/top/left/right)                    | No — taskbar position fixed |
-| Accent-rail "Show desktop" sliver                      | Partial — paints a 4-px theme-accent rail at the right edge of the strip + exposes `TaskbarShowDesktopBounds`; click dispatch is STUB until restore-on-toggle lands |
+| Accent-rail "Show desktop" sliver                      | Yes — paints a 4-px theme-accent rail at the right edge of the strip; clicking the rail snapshots visibility of every alive window via `WindowShowDesktopToggle`, hides them all, and a second click restores the snapshot. Rail body alpha shifts (0x60 → 0xC0) when the toggle is active so the user has a visible "armed" cue. |
 | 2-px tall focus dot under running apps (8 / 14 px)     | Yes (running-only) — active tab paints a centred 14-px × 2-px focus dot; pinned-vs-running distinction deferred until the kernel taskbar tracks pinned items |
 | Rounded START + tabs                                    | Yes — `FramebufferFillRoundRect` + `FramebufferDrawRoundRect` (radius 4 / 3) |
 | Vertical gradient on the strip                          | Yes — `LightenRgb(g_bg, 12) → g_bg` |
@@ -263,10 +263,15 @@ ship yet. Each is its own slice — none are inside this commit.
   ships as `ThemeId::DuetLight` (sourced from the prototype's
   light tokens, near-white canvas + dual-accent teal/amber);
   Classic-mode Duet remains deferred.
-- All of the prototype's accent variants beyond
-  teal-amber (`blue`, `violet`, `amber`, `duet-green`). v0
-  ships teal-amber only; further accents are a one-line palette
-  duplication once the chrome upgrade lands.
+- ~~All of the prototype's accent variants beyond
+  teal-amber~~ — DuetBlue / DuetViolet / DuetGreen ship as
+  additional `ThemeId` entries. Each duplicates the slate Duet
+  palette and swaps the cool accent for a different brand hue
+  (Win10 blue / Tailwind violet / mint green). The amber accent
+  for document-style apps stays so the dual-accent identity is
+  preserved. The DuetMark START glyph picks up the variant's
+  primary accent automatically; the wallpaper falls through to
+  the same duet-arcs paint path.
 - DuetMark-as-Start-glyph in the kernel taskbar — _v0 simplified
   form lands (two interlocking outlined circles); partial-arc
   stroke form deferred to the path-stroker slice._

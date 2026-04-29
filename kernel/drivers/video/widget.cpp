@@ -331,6 +331,17 @@ constinit WindowHandle g_active_window = kWindowInvalid;
 // engineering at v0 scale.
 constinit DisplayMode g_display_mode = DisplayMode::Desktop;
 
+// Show-Desktop snapshot: bitmask over `kMaxWindows` slots
+// recording which windows were visible at the moment the user
+// last triggered "show desktop". When `g_show_desktop_active` is
+// true, the toggle is in its "windows hidden" state; the next
+// trigger re-shows the marked windows. The snapshot is taken at
+// activation time (not at every redraw) so windows that the user
+// closes WHILE the desktop is shown don't get resurrected when
+// the toggle releases.
+constinit u32 g_show_desktop_mask = 0;
+constinit bool g_show_desktop_active = false;
+
 // Desktop fill colour observed on the most recent DesktopCompose
 // pass. `WindowDrawAllOrdered` reads this when rounding window
 // corners on the Duet theme — the punch primitive needs a "what
@@ -813,8 +824,12 @@ void WindowDrawAllOrdered()
         // the visible silhouette reads as rounded. Other themes
         // keep rectangular chrome (preserves their original v0
         // look bit-for-bit).
+        // All five Duet-family themes (slate Duet + light + 3
+        // accent variants) share the rounded-corner punch;
+        // Classic / Slate10 / Amber stay rectangular.
         const ThemeId tid = ThemeCurrentId();
-        if (tid == ThemeId::Duet || tid == ThemeId::DuetLight)
+        if (tid == ThemeId::Duet || tid == ThemeId::DuetLight || tid == ThemeId::DuetBlue ||
+            tid == ThemeId::DuetViolet || tid == ThemeId::DuetGreen)
         {
             FramebufferPunchCorners(drawn.x, drawn.y, drawn.w, drawn.h, 6U, g_compose_desktop_rgb);
         }
@@ -2269,6 +2284,62 @@ u32 WindowDrainPaints()
         WindowMsgWakeAll();
     }
     return posted;
+}
+
+bool WindowShowDesktopToggle()
+{
+    if (g_show_desktop_active)
+    {
+        // Restore phase: re-show every window in the snapshot
+        // mask that's still alive. Windows the user closed
+        // during the "showing desktop" interval drop off the
+        // mask implicitly (their slot may still be alive but
+        // we honor whatever the visible-flag logic decides;
+        // restoring "visible" on a dead window is a no-op).
+        for (u32 i = 0; i < g_window_count && i < 32; ++i)
+        {
+            if ((g_show_desktop_mask & (1u << i)) == 0)
+                continue;
+            if (!g_windows[i].alive)
+                continue;
+            g_windows[i].visible = true;
+        }
+        g_show_desktop_mask = 0;
+        g_show_desktop_active = false;
+        return false;
+    }
+    // Activate phase: snapshot which windows are currently
+    // visible, then hide them all. The mask is bounded to 32
+    // bits; if kMaxWindows ever grows past that the snapshot
+    // gets truncated and the extra-slot windows stay hidden
+    // until reopened — kMaxWindows is 16 today so we have
+    // headroom.
+    g_show_desktop_mask = 0;
+    bool any_alive = false;
+    for (u32 i = 0; i < g_window_count && i < 32; ++i)
+    {
+        if (!g_windows[i].alive)
+            continue;
+        any_alive = true;
+        if (g_windows[i].visible)
+        {
+            g_show_desktop_mask |= (1u << i);
+            g_windows[i].visible = false;
+        }
+    }
+    if (!any_alive)
+    {
+        // Nothing to hide — leave the toggle in its inactive
+        // state so the next click triggers a fresh snapshot.
+        return false;
+    }
+    g_show_desktop_active = true;
+    return true;
+}
+
+bool WindowShowDesktopActive()
+{
+    return g_show_desktop_active;
 }
 
 void WindowResizeTo(WindowHandle h, u32 w, u32 hgt)

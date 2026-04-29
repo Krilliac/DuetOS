@@ -324,8 +324,130 @@ constexpr Theme kDuetLight = {
     .cursor_fill = 0x000F8C80,
 };
 
+// Duet accent variants. Each one duplicates the slate Duet
+// palette and swaps the primary `taskbar_accent` (teal in slate
+// Duet) for the variant's brand hue. The amber accent for
+// document-style apps (Notes, Files) stays — the dual-accent
+// "duet" identity is preserved; only the cool side swings.
+//
+// To keep the table readable we extract the per-variant overrides
+// into a small `MakeDuetAccent()` macro-style aggregate
+// initializer, repeating just the deltas. Per-role title hues
+// pick a single representative shade per variant.
+
+constexpr Theme kDuetBlue = {
+    .name = "duetblue",
+    .desktop_bg = 0x000B0E13,
+    .banner_fg = 0x00E8EDF2,
+    .taskbar_bg = 0x001C222B,
+    .taskbar_fg = 0x00AEB7C2,
+    .taskbar_accent = 0x000078D7, // Win10 system blue
+    .taskbar_tab_inactive = 0x000F1319,
+    .taskbar_border = 0x001E2530,
+    .window_border = 0x002A323C,
+    .window_close = 0x00E3413C,
+    .role_title =
+        {
+            0x00204D80, // Calculator   — blue-tinted chrome
+            0x00805E20, // Notes        — amber-tinted chrome (preserved)
+            0x00163A66, // TaskManager  — deeper blue
+            0x00161B23, // LogView      — slate panel
+            0x00604818, // Files        — amber-tinted (preserved)
+            0x00141822, // Clock        — slate panel
+            0x00702070, // GfxDemo      — magenta marker
+        },
+    .role_client =
+        {
+            0x00141A22,
+            0x00F3F0E6,
+            0x00141A22,
+            0x000F1319,
+            0x00141A22,
+            0x000B0E13,
+            0x00000000,
+        },
+    .console_fg = 0x00E8EDF2,
+    .console_bg = 0x000F1319,
+    .cursor_outline = 0x000B0E13,
+    .cursor_fill = 0x00E8EDF2,
+};
+
+constexpr Theme kDuetViolet = {
+    .name = "duetviolet",
+    .desktop_bg = 0x000B0E13,
+    .banner_fg = 0x00E8EDF2,
+    .taskbar_bg = 0x001C222B,
+    .taskbar_fg = 0x00AEB7C2,
+    .taskbar_accent = 0x008B5CF6, // tailwind violet-500
+    .taskbar_tab_inactive = 0x000F1319,
+    .taskbar_border = 0x001E2530,
+    .window_border = 0x002A323C,
+    .window_close = 0x00E3413C,
+    .role_title =
+        {
+            0x00553788, // Calculator   — violet-tinted chrome
+            0x00805E20, // Notes        — amber (preserved)
+            0x00402568, // TaskManager  — deeper violet
+            0x00161B23, // LogView
+            0x00604818, // Files        — amber (preserved)
+            0x00141822, // Clock
+            0x00702070, // GfxDemo
+        },
+    .role_client =
+        {
+            0x00141A22,
+            0x00F3F0E6,
+            0x00141A22,
+            0x000F1319,
+            0x00141A22,
+            0x000B0E13,
+            0x00000000,
+        },
+    .console_fg = 0x00E8EDF2,
+    .console_bg = 0x000F1319,
+    .cursor_outline = 0x000B0E13,
+    .cursor_fill = 0x00E8EDF2,
+};
+
+constexpr Theme kDuetGreen = {
+    .name = "duetgreen",
+    .desktop_bg = 0x000B0E13,
+    .banner_fg = 0x00E8EDF2,
+    .taskbar_bg = 0x001C222B,
+    .taskbar_fg = 0x00AEB7C2,
+    .taskbar_accent = 0x0034C759, // forest / mint green
+    .taskbar_tab_inactive = 0x000F1319,
+    .taskbar_border = 0x001E2530,
+    .window_border = 0x002A323C,
+    .window_close = 0x00E3413C,
+    .role_title =
+        {
+            0x00256B36, // Calculator   — green-tinted chrome
+            0x00805E20, // Notes        — amber (preserved)
+            0x00184A24, // TaskManager  — deeper green
+            0x00161B23, // LogView
+            0x00604818, // Files        — amber (preserved)
+            0x00141822, // Clock
+            0x00702070, // GfxDemo
+        },
+    .role_client =
+        {
+            0x00141A22,
+            0x00F3F0E6,
+            0x00141A22,
+            0x000F1319,
+            0x00141A22,
+            0x000B0E13,
+            0x00000000,
+        },
+    .console_fg = 0x00E8EDF2,
+    .console_bg = 0x000F1319,
+    .cursor_outline = 0x000B0E13,
+    .cursor_fill = 0x00E8EDF2,
+};
+
 const Theme* const kThemes[static_cast<u32>(ThemeId::kCount)] = {
-    &kClassic, &kSlate10, &kAmber, &kDuet, &kDuetLight,
+    &kClassic, &kSlate10, &kAmber, &kDuet, &kDuetLight, &kDuetBlue, &kDuetViolet, &kDuetGreen,
 };
 
 // ---------------------------------------------------------------

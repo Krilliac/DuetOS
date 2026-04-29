@@ -583,6 +583,20 @@ bool WindowIsDirty(WindowHandle h);
 /// WM_PAINTs posted.
 u32 WindowDrainPaints();
 
+/// Toggle "Show Desktop" — Win10's minimize-all + restore.
+/// First call snapshots the current visibility of every alive
+/// window into a backing mask and hides them all. Second call
+/// re-shows only the windows that were visible at snapshot
+/// time (any that were SW_HIDE'd by the user before the toggle
+/// stay hidden). Returns the new state: true == "showing
+/// desktop", false == "windows visible". Safe to call any time;
+/// no-op if there are no alive windows.
+bool WindowShowDesktopToggle();
+
+/// Read the current Show-Desktop state without toggling. True
+/// means a snapshot is pending and the windows are hidden.
+bool WindowShowDesktopActive();
+
 // ---------------------------------------------------------------
 // Parent / child tracking + focus + caret.
 //
