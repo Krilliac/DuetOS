@@ -362,6 +362,19 @@ The repository keeps CI/release automation in-tree as the source of truth:
     - `latest-debug` (debug channel)
     - `latest-release` (release channel)
   - Triggers from `main`, `v*` tags, and manual dispatch
+- [`.github/workflows/lifetime-downloads.yml`](../.github/workflows/lifetime-downloads.yml)
+  - Maintains a real cumulative download tally on a separate
+    `stats` branch (`lifetime-downloads.json`) that the README's
+    "lifetime downloads" badge reads via shields.io's `endpoint`
+    type
+  - Both publish workflows call this one as a `workflow_call`
+    BEFORE their `action-gh-release` step, so any downloads
+    accrued on the about-to-be-deleted assets are folded into
+    the tally before the asset object is replaced
+  - Also runs on a 30-minute schedule to catch organic downloads
+    between publishes
+  - Rationale + delta arithmetic in
+    `.claude/knowledge/lifetime-downloads-tally-v0.md`
 
 Artifact channels are intentionally split:
 
@@ -370,4 +383,9 @@ Artifact channels are intentionally split:
 
 The Actions-tab run artifacts are short-retention diagnostics; GitHub Releases
 under the two rolling tags are the long-lived distribution channels.
+
+The `stats` branch is auto-maintained by the lifetime-downloads
+workflow and is intentionally not part of `main`'s history. It
+holds only `lifetime-downloads.json` plus a one-line README, and
+should never be checked out as a working branch.
 

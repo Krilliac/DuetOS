@@ -1,0 +1,131 @@
+# Maintain a real "lifetime downloads" tally that survives the
+# rolling channel asset re-uploads.
+#
+# Why this workflow exists:
+#   shields.io's /github/downloads/{owner}/{repo}/total endpoint sums
+#   download counters of currently-existing assets. Our rolling
+#   channels (latest-debug, latest-release) are republished on every
+#   push to main with overwrite_files: true, which deletes the live
+#   asset object and uploads a fresh one whose counter starts at 0.
+#   Result: GitHub's "total" reports nearly zero immediately after
+#   each CI run, so a badge advertised as "lifetime" is in fact
+#   "current snapshot." This workflow persists a real cumulative
+#   total in a JSON file on the `stats` branch, and the README
+#   badge points at that JSON via a shields.io endpoint URL.
+#
+# How it captures pre-replacement counts:
+#   * Scheduled every 30 minutes — catches organic downloads
+#     between publishes.
+#   * workflow_call — build.yml and release.yml call this workflow
+#     BEFORE their publish step, so any downloads on the
+#     about-to-be-deleted assets are folded into the tally before
+#     the asset object is replaced.
+#   * workflow_dispatch — for manual reconciliation.
+#
+# The python script (tools/release/update-lifetime-downloads.py)
+# encodes the asset-ID-aware delta arithmetic; this workflow only
+# wires the I/O.
+
+name: lifetime-downloads
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: write
+
+concurrency:
+  # Serialize across the schedule, dispatch, and workflow_call paths.
+  # Concurrent runs would race on the `stats` branch push and one
+  # would lose its update.
+  group: lifetime-downloads
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: update tally
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source (for the script)
+        uses: actions/checkout@v4
+        with:
+          path: src
+          fetch-depth: 1
+
+      - name: Check out stats branch (or initialize)
+        shell: bash
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p stats
+          cd stats
+          git init -q
+          git config user.name  "duetos-stats-bot"
+          git config user.email "duetos-stats-bot@users.noreply.github.com"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GH_REPO}.git"
+          if git ls-remote --exit-code --heads origin stats >/dev/null 2>&1; then
+            git fetch --depth=1 origin stats
+            git checkout -B stats FETCH_HEAD
+          else
+            echo "stats branch not found on remote -- bootstrapping orphan branch"
+            git checkout --orphan stats
+            git rm -rf --quiet --ignore-unmatch . || true
+            printf '%s\n' \
+              '# DuetOS -- stats branch' \
+              '' \
+              'Auto-maintained by `.github/workflows/lifetime-downloads.yml`.' \
+              'Holds `lifetime-downloads.json` -- a shields.io endpoint badge' \
+              'source whose `_state.lifetime_total` is monotonically' \
+              'non-decreasing across rolling-channel asset re-uploads.' \
+              'See `tools/release/update-lifetime-downloads.py` on `main`' \
+              'for the delta arithmetic.' \
+              > README.md
+            git add README.md
+            git commit -q -m "stats: initialize branch"
+          fi
+
+      - name: Update lifetime tally
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 src/tools/release/update-lifetime-downloads.py \
+            --state stats/lifetime-downloads.json \
+            --repo "$GITHUB_REPOSITORY"
+
+      - name: Commit + push if changed
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd stats
+          git add lifetime-downloads.json
+          if git diff --cached --quiet; then
+            echo "no change to lifetime-downloads.json — skipping push"
+            exit 0
+          fi
+          # Surface the new total in the commit subject for at-a-glance
+          # log grepping. The python script already wrote the new
+          # total to message; pull it out of the JSON.
+          NEW_TOTAL=$(python3 -c '
+          import json,sys
+          d = json.load(open("lifetime-downloads.json"))
+          print(d.get("message", "?"))
+          ')
+          git commit -q -m "stats: lifetime downloads -> ${NEW_TOTAL}"
+          # Retry-with-backoff on transient push flakes, mirroring the
+          # apt-get retry loop in build.yml.
+          for attempt in 1 2 3 4; do
+            if git push origin stats; then
+              exit 0
+            fi
+            echo "push attempt ${attempt} failed; sleeping $((attempt * 2))s"
+            sleep $((attempt * 2))
+          done
+          echo "::error::push to stats branch failed after 4 attempts"
+          exit 1

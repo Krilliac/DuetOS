@@ -120,12 +120,27 @@ jobs:
       - name: Run smoke test
         run: DUETOS_TIMEOUT=30 tools/test/ctest-boot-smoke.sh build/x86_64-debug
 
-  publish-debug-release:
-    name: publish debug channel
+  pre-publish-lifetime-snapshot:
+    # Snapshot current asset download counts into the persisted
+    # lifetime tally BEFORE the rolling assets get deleted by the
+    # publish-* jobs' overwrite_files: true. See
+    # .github/workflows/lifetime-downloads.yml for the rationale.
+    name: snapshot lifetime downloads
     needs: [build-release-assets, release-smoke-gate]
     if: |
       always() && needs.build-release-assets.result == 'success' &&
       (needs.release-smoke-gate.result == 'success' || needs.release-smoke-gate.result == 'skipped')
+    uses: ./.github/workflows/lifetime-downloads.yml
+    permissions:
+      contents: write
+
+  publish-debug-release:
+    name: publish debug channel
+    needs: [build-release-assets, release-smoke-gate, pre-publish-lifetime-snapshot]
+    if: |
+      always() && needs.build-release-assets.result == 'success' &&
+      (needs.release-smoke-gate.result == 'success' || needs.release-smoke-gate.result == 'skipped') &&
+      (needs.pre-publish-lifetime-snapshot.result == 'success' || needs.pre-publish-lifetime-snapshot.result == 'failure')
     runs-on: ubuntu-24.04
     steps:
       - name: Download packaged assets
@@ -153,10 +168,11 @@ jobs:
 
   publish-release-release:
     name: publish release channel
-    needs: [build-release-assets, release-smoke-gate]
+    needs: [build-release-assets, release-smoke-gate, pre-publish-lifetime-snapshot]
     if: |
       always() && needs.build-release-assets.result == 'success' &&
-      (needs.release-smoke-gate.result == 'success' || needs.release-smoke-gate.result == 'skipped')
+      (needs.release-smoke-gate.result == 'success' || needs.release-smoke-gate.result == 'skipped') &&
+      (needs.pre-publish-lifetime-snapshot.result == 'success' || needs.pre-publish-lifetime-snapshot.result == 'failure')
     runs-on: ubuntu-24.04
     steps:
       - name: Download packaged assets

@@ -4,7 +4,7 @@
 [![Download release ISO](https://img.shields.io/github/downloads/krilliac/duetos/latest-release/duetos-release.iso?label=release%20iso%20%E2%86%93%20this%20release&color=blue)](https://github.com/krilliac/duetos/releases/download/latest-release/duetos-release.iso)
 [![Debug channel](https://img.shields.io/github/v/release/krilliac/duetos?include_prereleases&display_name=tag&filter=latest-debug&label=debug%20channel)](https://github.com/krilliac/duetos/releases/tag/latest-debug)
 [![Download debug ISO](https://img.shields.io/github/downloads/krilliac/duetos/latest-debug/duetos-debug.iso?label=debug%20iso%20%E2%86%93%20this%20release&color=orange)](https://github.com/krilliac/duetos/releases/download/latest-debug/duetos-debug.iso)
-[![Lifetime downloads](https://img.shields.io/github/downloads/krilliac/duetos/total?label=lifetime%20downloads%20(all%20channels)&color=success)](https://github.com/krilliac/duetos/releases)
+[![Lifetime downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fkrilliac%2Fduetos%2Fstats%2Flifetime-downloads.json)](https://github.com/krilliac/duetos/releases)
 
 Click a **channel** badge to open the release page, or an **iso ↓** badge to download the ISO directly. The "this release" counter resets when CI re-publishes the rolling channel; "lifetime downloads" sums every asset download across both channels and never resets.
 

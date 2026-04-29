@@ -373,6 +373,19 @@ jobs:
       - name: Test
         run: ctest --test-dir build/host-tests --output-on-failure --parallel $(nproc)
 
+  pre-publish-lifetime-snapshot:
+    # Snapshot current asset download counts into the persisted
+    # lifetime tally BEFORE the rolling assets get deleted by
+    # publish-rolling's overwrite_files: true. Without this step
+    # any downloads that accrued since the last scheduled snapshot
+    # would be silently lost when the asset object is replaced.
+    name: snapshot lifetime downloads
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [check-format, build-debug, build-release, qemu-smoke, host-tests]
+    uses: ./.github/workflows/lifetime-downloads.yml
+    permissions:
+      contents: write
+
   publish-rolling:
     # Refresh the latest-debug / latest-release rolling channels on every
     # push to main. The README's download badges read off these tags;
@@ -381,7 +394,7 @@ jobs:
     name: publish rolling channels
     runs-on: ubuntu-24.04
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [check-format, build-debug, build-release, qemu-smoke, host-tests]
+    needs: [check-format, build-debug, build-release, qemu-smoke, host-tests, pre-publish-lifetime-snapshot]
     permissions:
       contents: write
     steps:
