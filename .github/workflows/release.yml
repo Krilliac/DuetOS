@@ -186,6 +186,80 @@ jobs:
       - name: Run smoke test
         run: DUETOS_TIMEOUT=30 tools/test/ctest-boot-smoke.sh build/x86_64-debug
 
+  flavor-smoke-gate:
+    # Per-flavor smoke gate. Same opt-in trigger as release-smoke-gate
+    # — runs only on workflow_dispatch with smoke_gate=true or when
+    # the RELEASE_SMOKE_GATE workflow var is set. Matrix has one
+    # entry per flavor; each entry downloads the matching artifact,
+    # stages it as `build/<preset>/duetos.iso`, and runs the same
+    # ctest driver. The driver auto-detects from the boot banner
+    # whether this build had selftests on, and skips selftest-
+    # signature requirements accordingly.
+    name: flavor smoke gate (${{ matrix.preset }})
+    needs: [build-release-assets, build-flavor-assets]
+    runs-on: ubuntu-24.04
+    if: |
+      (github.event_name == 'workflow_dispatch' && inputs.smoke_gate) ||
+      (github.event_name != 'workflow_dispatch' && vars.RELEASE_SMOKE_GATE == 'true')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - preset: x86_64-release-asserts
+            label: release-asserts
+            timeout: 90
+          - preset: x86_64-release-audit
+            label: release-audit
+            timeout: 180
+          - preset: x86_64-release-lto
+            label: release-lto
+            timeout: 90
+          - preset: x86_64-debug-fast
+            label: debug-fast
+            timeout: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU + grub
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 grub-common grub-pc-bin \
+                                  grub-efi-amd64-bin xorriso mtools ovmf
+      - name: Download flavor artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: duetos-flavor-${{ matrix.label }}-${{ needs.build-release-assets.outputs.source_ref }}
+          path: dist-flavor
+      - name: Stage ISO for smoke driver
+        run: |
+          # ctest-boot-smoke.sh expects `<binary-dir>/duetos.iso`.
+          # The artifact contains the renamed asset; rename back to
+          # the canonical filename before invocation.
+          mkdir -p build/${{ matrix.preset }}
+          cp dist-flavor/flavors/duetos-${{ matrix.label }}.iso \
+             build/${{ matrix.preset }}/duetos.iso
+      - name: Smoke (with flake retry)
+        shell: bash
+        run: |
+          set +e
+          attempts=3
+          rc=0
+          for i in $(seq 1 ${attempts}); do
+            echo "::group::flavor-smoke ${{ matrix.preset }} attempt ${i}/${attempts}"
+            DUETOS_PRESET=${{ matrix.preset }} \
+            DUETOS_TIMEOUT=${{ matrix.timeout }} \
+              tools/test/ctest-boot-smoke.sh build/${{ matrix.preset }}
+            rc=$?
+            echo "::endgroup::"
+            if [[ $rc -eq 0 ]]; then break; fi
+            if [[ $rc -eq 1 ]]; then echo "::error::flavor=${{ matrix.preset }} regression"; break; fi
+            if [[ $rc -eq 2 ]]; then echo "::warning::QEMU not available; smoke skipped"; rc=0; break; fi
+            if [[ $i -lt ${attempts} ]]; then
+              echo "::warning::flavor=${{ matrix.preset }} attempt ${i} flaked; retrying..."
+              sleep 2
+            fi
+          done
+          exit $rc
+
   pre-publish-lifetime-snapshot:
     # Snapshot current asset download counts into the persisted
     # lifetime tally BEFORE the rolling assets get deleted by the
@@ -294,12 +368,24 @@ jobs:
     # users land on `latest-release`, devs on `latest-debug`, and
     # anyone with a specialized need (audit, asserts, LTO, fast)
     # follows the breadcrumb from those primary releases to here.
+    #
+    # Gates on flavor-smoke-gate when it ran (opt-in via the same
+    # workflow var as release-smoke-gate). Skipped flavor smoke
+    # is allowed (matches release-smoke-gate's allow-skip
+    # behavior); a failed flavor smoke blocks the publish so a
+    # broken flavor never ships.
     name: publish flavor channel
-    needs: [build-release-assets, build-flavor-assets, release-smoke-gate, pre-publish-lifetime-snapshot]
+    needs:
+      - build-release-assets
+      - build-flavor-assets
+      - release-smoke-gate
+      - flavor-smoke-gate
+      - pre-publish-lifetime-snapshot
     if: |
       always() && needs.build-release-assets.result == 'success' &&
       needs.build-flavor-assets.result == 'success' &&
       (needs.release-smoke-gate.result == 'success' || needs.release-smoke-gate.result == 'skipped') &&
+      (needs.flavor-smoke-gate.result == 'success' || needs.flavor-smoke-gate.result == 'skipped') &&
       (needs.pre-publish-lifetime-snapshot.result == 'success' || needs.pre-publish-lifetime-snapshot.result == 'failure')
     runs-on: ubuntu-24.04
     steps:

@@ -123,42 +123,108 @@ jobs:
           retention-days: 7
 
   # Build-flavor matrix: each non-default preset that exposes a
-  # distinct build axis (asserts, full audit, LTO). The matrix
-  # only verifies that the flavor configures + builds clean —
-  # the qemu-smoke job already covers boot-time correctness on
-  # the debug flavor, and these presets share its source set.
-  # Catches a flavor regression where a knob's compile-time
-  # branch or a new option silently breaks one preset.
+  # distinct build axis (asserts, full audit, LTO, fast-debug).
+  # Each matrix entry builds AND smoke-tests its preset, so a
+  # flavor-specific regression — a constexpr branch that breaks
+  # one preset's boot path, an audit hook that wedges under load,
+  # an LTO inlining decision that mis-codegens — surfaces here
+  # rather than after publish.
+  #
+  # The matrix shares a single runner-shape with the main
+  # qemu-smoke job and uses the same ctest-boot-smoke driver
+  # (33 signatures), but with a more generous DUETOS_TIMEOUT
+  # because release-audit is verbose enough that boot output
+  # serializes more slowly through the COM1 spinlock under TCG.
   build-flavor-matrix:
-    name: build flavor (${{ matrix.preset }})
+    name: build+smoke flavor (${{ matrix.preset }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        preset:
-          - x86_64-release-asserts
-          - x86_64-release-audit
-          - x86_64-release-lto
-          - x86_64-debug-fast
+        include:
+          - preset: x86_64-release-asserts
+            # Release-shape; signatures should land at
+            # release-comparable speed.
+            timeout: 90
+          - preset: x86_64-release-audit
+            # Full cap-audit + lock-order audit + Trace floor —
+            # serial output is ~5x normal release. Boost the
+            # timeout accordingly.
+            timeout: 180
+          - preset: x86_64-release-lto
+            # ThinLTO: same observable behavior as release; link
+            # time is the only delta and that's already paid.
+            timeout: 90
+          - preset: x86_64-debug-fast
+            # Debug-shape minus lock-order audit; should match
+            # debug timing.
+            timeout: 90
     steps:
       - uses: actions/checkout@v4
-      - name: Install toolchain
+      - name: Install toolchain + QEMU
         run: |
           for attempt in 1 2 3 4; do
             if sudo apt-get update; then break; fi
             sleep $((attempt * 5))
           done
           sudo apt-get install -y clang-18 lld-18 llvm-18 cmake ninja-build python3 \
-                                  grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools
+                                  qemu-system-x86 grub-common grub-pc-bin \
+                                  grub-efi-amd64-bin xorriso mtools ovmf
           sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
           sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
           sudo ln -sf /usr/bin/lld-link-18 /usr/local/bin/lld-link
           sudo ln -sf /usr/bin/llvm-dlltool-18 /usr/local/bin/llvm-dlltool
           sudo ln -sf /usr/bin/ld.lld-18 /usr/local/bin/ld.lld
+      - name: Enable KVM access (~50× speedup vs TCG)
+        run: |
+          if [[ -e /dev/kvm ]]; then
+            sudo chmod 666 /dev/kvm
+            ls -l /dev/kvm
+          else
+            echo "kvm_present=no — /dev/kvm not on this runner"
+          fi
       - name: Configure
         run: cmake --preset ${{ matrix.preset }}
       - name: Build
         run: cmake --build build/${{ matrix.preset }} --parallel $(nproc)
+      - name: Smoke-boot (with flake retry)
+        id: smoke
+        shell: bash
+        run: |
+          # Same retry shape as the main qemu-smoke job: regression
+          # (rc=1) fails immediately, env-skip (rc=2) is a warning,
+          # flake (rc=3) retries up to twice before giving up.
+          set +e
+          attempts=3
+          rc=0
+          for i in $(seq 1 ${attempts}); do
+            echo "::group::flavor=${{ matrix.preset }} attempt ${i}/${attempts}"
+            DUETOS_PRESET=${{ matrix.preset }} \
+            DUETOS_TIMEOUT=${{ matrix.timeout }} \
+              tools/test/ctest-boot-smoke.sh build/${{ matrix.preset }}
+            rc=$?
+            echo "::endgroup::"
+            cp -f "build/${{ matrix.preset }}/ctest-smoke-serial.log" \
+                  "smoke-${{ matrix.preset }}-attempt-${i}.log" 2>/dev/null || true
+            if [[ $rc -eq 0 ]]; then break; fi
+            if [[ $rc -eq 1 ]]; then echo "::error::flavor=${{ matrix.preset }} regression"; break; fi
+            if [[ $rc -eq 2 ]]; then echo "::warning::QEMU not available; smoke skipped"; rc=0; break; fi
+            if [[ $i -lt ${attempts} ]]; then
+              echo "::warning::flavor=${{ matrix.preset }} attempt ${i} flaked; retrying..."
+              sleep 2
+            fi
+          done
+          exit $rc
+      - name: Upload serial logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flavor-smoke-log-${{ matrix.preset }}
+          if-no-files-found: ignore
+          path: |
+            smoke-${{ matrix.preset }}-attempt-*.log
+            build/${{ matrix.preset }}/ctest-smoke-serial.log
+          retention-days: 7
 
   qemu-smoke:
     # Profile-matrix qemu-smoke. Each profile boots the kernel

@@ -174,8 +174,46 @@ allowed_unresolved=(
     "api-ms-win-crt-convert"  # stubbed; fallback for case variants
 )
 
+# Boot-banner sniff — read the build flavor + active knobs from
+# the first line the kernel emits. Used below to auto-skip
+# expected signatures that only appear when their corresponding
+# build knob is on. Lets the same smoke driver run uniformly
+# against debug, release, and every flavor preset.
+banner=$(grep -aF '[boot] DuetOS build flavor:' "${SERIAL_LOG}" | head -1 || true)
+selftests_on=0
+if [[ "${banner}" == *"+selftests"* ]]; then
+    selftests_on=1
+fi
+echo "smoke: detected banner: ${banner:-<missing>}"
+echo "smoke: selftests_on=${selftests_on}"
+
+# Signatures emitted only when DUETOS_BOOT_SELFTESTS is on
+# (boot self-tests gated on `kBootSelfTests`). Always present
+# in debug; absent in plain release / release-asserts / release-lto.
+# Auto-skipped when the banner doesn't show `+selftests`.
+selftest_sigs=(
+    "[calc] self-test OK"
+    "[files] self-test OK"
+    "[clock] self-test OK"
+    "[block] self-test OK"
+    "[string-selftest] PASS"
+    "[hexdump-selftest] PASS"
+    "[process-selftest] PASS"
+    "[fs/vfs] self-test OK (32 cases"
+)
+
 fail=0
 for sig in "${expected[@]}"; do
+    # Skip selftest signatures when this build had selftests off.
+    if [[ ${selftests_on} -eq 0 ]]; then
+        is_selftest_sig=0
+        for ss in "${selftest_sigs[@]}"; do
+            if [[ "$sig" == "$ss" ]]; then is_selftest_sig=1; break; fi
+        done
+        if [[ ${is_selftest_sig} -eq 1 ]]; then
+            continue
+        fi
+    fi
     if ! grep -aF "$sig" "${SERIAL_LOG}" > /dev/null; then
         echo "MISSING: $sig"
         fail=1
