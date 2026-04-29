@@ -108,6 +108,14 @@ CI is wired in `.github/workflows/`:
 - `build.yml` runs format + debug/release builds and CI smoke checks.
 - `release.yml` publishes rolling channels (`latest-debug`,
   `latest-release`) from `main` and `v*` tags.
+- `lifetime-downloads.yml` maintains a cumulative download tally on
+  a `stats` branch that the README's "lifetime downloads" badge
+  reads via shields.io's `endpoint` type. Without it, the badge
+  resets to zero every time CI republishes a rolling channel,
+  because `softprops/action-gh-release@v2 overwrite_files: true`
+  deletes the old asset object and uploads a fresh one with
+  `download_count = 0`. See
+  `.claude/knowledge/lifetime-downloads-tally-v0.md`.
 
 See [Architecture Overview > CI topology](../getting-started/Architecture-Overview.md#14-ci-topology-and-artifact-channels).
 
