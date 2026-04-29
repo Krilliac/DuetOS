@@ -45,4 +45,10 @@ namespace duetos::drivers::video
 /// pattern.
 void WallpaperPaint(u32 desktop_rgb);
 
+/// One-shot init that parses the embedded wallpaper SVG assets
+/// (DuetMark, topo backdrop, syscalls grid) into static SvgImage
+/// instances ready for `WallpaperPaint` to consume. Idempotent;
+/// safe to call from any boot phase after `FramebufferInit`.
+void WallpaperSvgInit();
+
 } // namespace duetos::drivers::video

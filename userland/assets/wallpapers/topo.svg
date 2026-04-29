@@ -1,0 +1,16 @@
+<svg viewBox="0 0 400 300">
+<circle cx="80" cy="60" r="20" stroke="#446070" stroke-width="1"/>
+<circle cx="80" cy="60" r="40" stroke="#446070" stroke-width="1"/>
+<circle cx="80" cy="60" r="60" stroke="#446070" stroke-width="1"/>
+<circle cx="80" cy="60" r="80" stroke="#446070" stroke-width="1"/>
+<circle cx="320" cy="80" r="18" stroke="#446070" stroke-width="1"/>
+<circle cx="320" cy="80" r="36" stroke="#446070" stroke-width="1"/>
+<circle cx="320" cy="80" r="54" stroke="#446070" stroke-width="1"/>
+<circle cx="320" cy="80" r="72" stroke="#446070" stroke-width="1"/>
+<circle cx="120" cy="240" r="22" stroke="#446070" stroke-width="1"/>
+<circle cx="120" cy="240" r="44" stroke="#446070" stroke-width="1"/>
+<circle cx="120" cy="240" r="66" stroke="#446070" stroke-width="1"/>
+<circle cx="280" cy="220" r="16" stroke="#446070" stroke-width="1"/>
+<circle cx="280" cy="220" r="32" stroke="#446070" stroke-width="1"/>
+<circle cx="280" cy="220" r="48" stroke="#446070" stroke-width="1"/>
+</svg>

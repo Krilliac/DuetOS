@@ -20,22 +20,17 @@ _Branch: `claude/plan-rasterizer-compositor-SzST5`._
 Deferred:
 
 **All slices landed as of 2026-04-29.** Every numbered slice in the
-original plan has shipped. Two content-only follow-ups remain (each
-a "drop-in asset" commit that needs no new code):
+original plan has shipped, **and both content follow-ups landed
+too** (Liberation Sans TTF + 3 wallpaper SVGs):
 
-- **Real TTF font asset** — drop a font file (e.g. JetBrains Mono
-  / Inter, OFL-licensed) into the kernel image, register it via
-  `TtfChromeFontSet`. The chrome-paint dispatch already calls
-  `TtfDrawString` first on the 5 Duet-family themes, so the
-  switchover is a content commit + one initcall hookup. No code
-  changes needed.
-- **Real wallpaper SVGs** — embed the prototype's topo /
-  DuetMark / syscalls SVGs into the kernel image, swap
-  `wallpaper.cpp`'s programmatic paint for `SvgRender(image, ...)`
-  on the matching theme paths.
+| Asset | Status | Commit |
+|-------|--------|--------|
+| Liberation Sans Regular TTF (411 KiB, SIL OFL 1.1) at `userland/assets/fonts/duet-chrome.ttf` — embedded via `duetos_embed_blob`, parsed by `TtfLoad` at the `chrome-font-load` initcall, registered via `TtfChromeFontSet`. The 5 Duet-family themes' window-title paint now renders via the slice-4 rasterizer instead of the bitmap fallback. | Landed | _content commit_ |
+| 3 wallpaper SVGs at `userland/assets/wallpapers/{duet-mark,topo,syscalls-grid}.svg` — embedded, parsed by `WallpaperSvgInit` at boot, layered into `WallpaperPaint` (DuetMark + topo on the Duet family, syscalls grid on Slate10). | Landed | _content commit_ |
 
-Both are content commits, not slices. They can land any time without
-re-opening this plan.
+The plan file can be deleted on the next session-start cleanup pass
+since every numbered slice + every follow-up has landed and no
+follow-up generated open questions.
 
 ## Resume prompt
 

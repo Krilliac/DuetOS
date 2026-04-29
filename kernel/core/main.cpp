@@ -99,6 +99,8 @@
 #include "drivers/video/svg.h"
 #include "drivers/video/ttf.h"
 #include "drivers/video/ttf_raster.h"
+#include "drivers/video/wallpaper.h"
+#include "generated_chrome_font.h"
 #include "drivers/video/calendar.h"
 #include "drivers/video/menu.h"
 #include "drivers/video/netpanel.h"
@@ -207,6 +209,11 @@
 
 namespace
 {
+
+// Storage for the chrome font handle. Populated by the
+// chrome-font-load initcall once at boot; outlives the registration
+// because TtfChromeFontSet stores a borrowed pointer.
+constinit duetos::drivers::video::TtfFont g_chrome_font_storage{};
 
 // Walk the Multiboot2 tag list for type-1 (boot cmdline) and
 // return its NUL-terminated string, or nullptr if absent. The
@@ -676,6 +683,39 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                    []()
                                    {
                                        duetos::drivers::video::SvgSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    // Load the embedded chrome font (Liberation Sans Regular, SIL OFL
+    // 1.1) and register it for the TTF dispatch path. Once registered,
+    // the 5 Duet-family themes' window-title paint stops falling back
+    // to the bitmap font and renders via the slice-4 rasterizer.
+    duetos::core::InitcallRegister(
+        duetos::core::Phase::Drivers, "chrome-font-load",
+        []()
+        {
+            const auto* bytes = duetos::drivers::video::generated::kBinChromeFontBytes;
+            const auto size = static_cast<duetos::u32>(sizeof(duetos::drivers::video::generated::kBinChromeFontBytes));
+            auto r = duetos::drivers::video::TtfLoad(bytes, size);
+            if (r.has_value())
+            {
+                g_chrome_font_storage = r.value();
+                duetos::drivers::video::TtfChromeFontSet(&g_chrome_font_storage);
+                duetos::arch::SerialWrite("[boot] chrome font (Liberation Sans) loaded + registered\n");
+            }
+            else
+            {
+                duetos::arch::SerialWrite("[boot] chrome font load FAILED — staying on bitmap fallback\n");
+            }
+            return duetos::core::Result<void>{};
+        });
+    // Parse the embedded wallpaper SVGs once into static SvgImage
+    // instances. WallpaperPaint then layers them on the matching
+    // theme paints (DuetMark + topo for Duet family; syscalls grid
+    // for Slate10).
+    duetos::core::InitcallRegister(duetos::core::Phase::Drivers, "wallpaper-svg-init",
+                                   []()
+                                   {
+                                       duetos::drivers::video::WallpaperSvgInit();
                                        return duetos::core::Result<void>{};
                                    });
     (void)duetos::core::RunPhase(duetos::core::Phase::Drivers);
@@ -1193,10 +1233,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // exit cleanup. A future slice grows this into a real
     // prompt-driven shell with TOML reader.
     {
-        const auto pid = duetos::core::SpawnElfFile(
-            "/bin/usershell.elf", duetos::fs::RamfsUsershellElfBytes(), duetos::fs::RamfsUsershellElfSize(),
-            duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
-            duetos::core::kTickBudgetTrusted);
+        const auto pid = duetos::core::SpawnElfFile("/bin/usershell.elf", duetos::fs::RamfsUsershellElfBytes(),
+                                                    duetos::fs::RamfsUsershellElfSize(), duetos::core::CapSetTrusted(),
+                                                    duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
+                                                    duetos::core::kTickBudgetTrusted);
         SerialWrite("[boot] usershell pid=");
         SerialWriteHex(pid);
         SerialWrite("\n");
