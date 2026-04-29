@@ -58,6 +58,35 @@ i32 FindFreeLinuxFd(core::Process* p)
 
 } // namespace
 
+// Global pidfd-exit waitqueue (§ syscall_internal.h LinuxPidfdExitWake).
+// Lives in this TU because pidfd is the canonical surface that needs
+// it; everything else (epoll_wait, DoExitGroup) reaches it through
+// the LinuxPidfdExitWake() / LinuxProcessHasPidfd() helpers.
+namespace
+{
+sched::WaitQueue g_pidfd_exit_wq{};
+} // namespace
+
+void LinuxPidfdExitWake()
+{
+    sched::WaitQueueWakeAll(&g_pidfd_exit_wq);
+}
+
+bool LinuxProcessHasPidfd(const core::Process* p)
+{
+    if (p == nullptr)
+        return false;
+    for (u32 i = 3; i < 16; ++i)
+        if (p->linux_fds[i].state == 12)
+            return true;
+    return false;
+}
+
+sched::WaitQueue* LinuxPidfdExitWq()
+{
+    return &g_pidfd_exit_wq;
+}
+
 // =========================================================
 // pidfd_open / pidfd_send_signal
 // =========================================================

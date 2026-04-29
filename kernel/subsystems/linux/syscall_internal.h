@@ -15,6 +15,7 @@
 
 #include "arch/x86_64/traps.h"
 #include "proc/process.h"
+#include "sched/sched.h"
 #include "util/types.h"
 
 namespace duetos::subsystems::linux::internal
@@ -430,6 +431,27 @@ i64 DoKeyctl(u64 op, u64 a2, u64 a3, u64 a4, u64 a5);
 i64 DoPidfdOpen(u64 pid, u64 flags);
 i64 DoPidfdSendSignal(u64 pidfd, u64 sig, u64 user_info, u64 flags);
 i64 DoPidfdGetfd(u64 pidfd, u64 target_fd, u64 flags);
+
+// Global pidfd-exit waitqueue. Wakes every poller blocked
+// on a pidfd whenever ANY Linux process exits. Sub-GAP: a
+// per-pid waitqueue would scope the wake — the global form
+// causes spurious wakes when an unrelated process exits, but
+// the predicate (`SchedIsPidZombie` etc.) is re-evaluated on
+// wake so correctness holds. Used by:
+//   - DoExitGroup     — calls LinuxPidfdExitWake() on the way out.
+//   - DoEpollWait     — when at least one watched fd is a
+//                       state-12 pidfd, sleeps on the queue
+//                       instead of via SchedSleepTicks, so
+//                       wake-on-exit latency is bounded by
+//                       process-exit ordering instead of the
+//                       100 ms timer cadence.
+void LinuxPidfdExitWake();
+sched::WaitQueue* LinuxPidfdExitWq();
+
+// True iff `p` has at least one pidfd (state == 12) in its
+// linux_fds[] table. Cheap (16-slot scan); used by DoEpollWait
+// to decide whether to sleep on the pidfd-exit waitqueue.
+bool LinuxProcessHasPidfd(const core::Process* p);
 
 // Kernel-level zero-copy fd-to-fd I/O. v0 implementations bounce
 // through a 1 KiB on-stack buffer (no actual zero-copy yet, but
