@@ -25,6 +25,14 @@ constinit u32 g_tab_inactive = 0x00303848;
 constinit u32 g_border = 0x00101828;
 constinit bool g_ready = false;
 
+// Dock + lock + drag state. Default: docked at the bottom + locked
+// (matches the project's pre-dock-API behaviour). The reanchor
+// helper recomputes `g_y` from these whenever the framebuffer
+// dimensions are known to be valid.
+constinit TaskbarDock g_dock = TaskbarDock::Bottom;
+constinit bool g_locked = true;
+constinit bool g_dragging = false;
+
 // Cached clock-widget bounds (recomputed every redraw). Exposed
 // via TaskbarClockBounds for the mouse reader's calendar-toggle.
 constinit u32 g_clock_x = 0;
@@ -146,12 +154,80 @@ void TaskbarSetColours(u32 bg_rgb, u32 fg_rgb, u32 accent_rgb, u32 tab_inactive_
     g_border = border_rgb;
 }
 
+void TaskbarReanchor()
+{
+    if (!g_ready || !FramebufferAvailable())
+        return;
+    const auto info = FramebufferGet();
+    if (info.height == 0 || g_h == 0)
+        return;
+    if (g_dock == TaskbarDock::Top)
+        g_y = 0;
+    else
+        g_y = (info.height > g_h) ? info.height - g_h : 0;
+}
+
+void TaskbarSetDock(TaskbarDock edge)
+{
+    g_dock = edge;
+    TaskbarReanchor();
+}
+
+TaskbarDock TaskbarGetDock()
+{
+    return g_dock;
+}
+
+void TaskbarSetLocked(bool locked)
+{
+    g_locked = locked;
+    if (locked && g_dragging)
+        g_dragging = false;
+}
+
+bool TaskbarIsLocked()
+{
+    return g_locked;
+}
+
+void TaskbarBeginDrag()
+{
+    if (g_locked || !g_ready)
+        return;
+    g_dragging = true;
+}
+
+void TaskbarEndDrag(u32 cursor_y)
+{
+    if (!g_dragging)
+        return;
+    g_dragging = false;
+    if (!FramebufferAvailable())
+        return;
+    const auto info = FramebufferGet();
+    // Snap to the nearest horizontal edge: above mid-line -> Top,
+    // below -> Bottom. Drop on the current edge is a no-op.
+    const TaskbarDock target = (cursor_y * 2u < info.height) ? TaskbarDock::Top : TaskbarDock::Bottom;
+    if (target != g_dock)
+        TaskbarSetDock(target);
+}
+
+bool TaskbarIsDragging()
+{
+    return g_dragging;
+}
+
 void TaskbarRedraw()
 {
     if (!g_ready || !FramebufferAvailable())
     {
         return;
     }
+    // Always reanchor before painting — handles the case where the
+    // framebuffer was rebound (virtio-gpu coming online after a
+    // stale FramebufferInit) AFTER TaskbarInit set g_y from the
+    // pre-rebind dimensions.
+    TaskbarReanchor();
     const auto info = FramebufferGet();
     const u32 fbw = info.width;
 

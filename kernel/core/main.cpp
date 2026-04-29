@@ -1861,6 +1861,39 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 continue;
             }
 
+            // Ctrl+Alt+B toggles the taskbar dock edge between
+            // Bottom (default) and Top. Re-anchor + recompose
+            // so the new placement appears immediately. Useful
+            // for users who want the strip out of the way of
+            // an app pinned to the bottom of the desktop.
+            if (ctrl && alt && (ev.code == 'b' || ev.code == 'B'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto cur = duetos::drivers::video::TaskbarGetDock();
+                duetos::drivers::video::TaskbarSetDock(cur == duetos::drivers::video::TaskbarDock::Bottom
+                                                           ? duetos::drivers::video::TaskbarDock::Top
+                                                           : duetos::drivers::video::TaskbarDock::Bottom);
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+                duetos::drivers::video::CompositorUnlock();
+                SerialWrite("[ui] taskbar dock -> ");
+                SerialWrite(duetos::drivers::video::TaskbarGetDock() == duetos::drivers::video::TaskbarDock::Top
+                                ? "top\n"
+                                : "bottom\n");
+                continue;
+            }
+            // Ctrl+Alt+L locks / unlocks the taskbar. While unlocked
+            // the user can drag the strip to either horizontal edge
+            // — drop snaps to whichever half of the screen the
+            // cursor was released in. Default: locked.
+            if (ctrl && alt && (ev.code == 'l' || ev.code == 'L'))
+            {
+                duetos::drivers::video::TaskbarSetLocked(!duetos::drivers::video::TaskbarIsLocked());
+                SerialWrite("[ui] taskbar -> ");
+                SerialWrite(duetos::drivers::video::TaskbarIsLocked() ? "locked\n" : "unlocked\n");
+                continue;
+            }
             // Ctrl+Alt+Y cycles the desktop theme. Classic (teal)
             // -> Slate10 (Win10 x Unreal Slate hybrid) -> Amber
             // (mono CRT tribute) -> Duet (redesigned palette,
@@ -2690,6 +2723,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     duetos::drivers::video::CursorShow();
                     menu_handled = true; // taskbar ate the click
                 }
+                else if (!duetos::drivers::video::TaskbarIsLocked())
+                {
+                    // Empty-strip click on an unlocked taskbar -> begin
+                    // drag. Snap target is decided on release below.
+                    duetos::drivers::video::TaskbarBeginDrag();
+                    menu_handled = true;
+                }
             }
 
             if (press_edge && menu_handled)
@@ -2785,6 +2825,19 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 SerialWriteHex(drag.window);
                 SerialWrite("\n");
                 drag.active = false;
+            }
+            if (release_edge && duetos::drivers::video::TaskbarIsDragging())
+            {
+                // Snap to whichever horizontal edge the cursor was
+                // released over.
+                duetos::drivers::video::TaskbarEndDrag(cy);
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+                SerialWrite("[ui] taskbar dock -> ");
+                SerialWrite(duetos::drivers::video::TaskbarGetDock() == duetos::drivers::video::TaskbarDock::Top
+                                ? "top (drag-snap)\n"
+                                : "bottom (drag-snap)\n");
             }
 
             // Mouse-message routing to PE windows. Posts
