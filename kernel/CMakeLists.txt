@@ -120,6 +120,22 @@ duetos_embed_blob(generated_hello_pe.h
     SRC     "${CMAKE_SOURCE_DIR}/userland/apps/hello_pe/hello.c"
     COMMENT "Compiling + embedding /bin/hello.exe (freestanding PE)")
 
+# /bin/usershell.elf — real userland shell binary built from
+# userland/shell/shell.c against userland/libc/. Replaces the
+# previous hand-coded 181-byte ELF stub. The build script
+# compiles crt0.S + syscall.c + shell.c, links static via lld,
+# and embeds the resulting bytes for ramfs.
+duetos_embed_blob(generated_usershell_elf.h
+    SCRIPT      "${CMAKE_SOURCE_DIR}/tools/build/build-usershell-elf.sh"
+    SRC         "${CMAKE_SOURCE_DIR}/userland/shell/shell.c"
+    EXTRA_DEPS
+        "${CMAKE_SOURCE_DIR}/userland/libc/src/crt0.S"
+        "${CMAKE_SOURCE_DIR}/userland/libc/src/syscall.c"
+        "${CMAKE_SOURCE_DIR}/userland/libc/include/duet/syscall.h"
+        "${CMAKE_SOURCE_DIR}/userland/libc/include/string.h"
+        "${CMAKE_SOURCE_DIR}/userland/libc/include/unistd.h"
+    COMMENT     "Compiling + embedding /bin/usershell.elf (real userland shell)")
+
 duetos_embed_blob(generated_hello_winapi.h
     SCRIPT   "${CMAKE_SOURCE_DIR}/tools/build/build-hello-winapi.sh"
     SRC      "${CMAKE_SOURCE_DIR}/userland/apps/hello_winapi/hello.c"

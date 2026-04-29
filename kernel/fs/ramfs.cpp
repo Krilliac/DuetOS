@@ -13,6 +13,7 @@
 // duetos::fs::generated namespace. The build rule lives in
 // kernel/CMakeLists.txt.
 #include "generated_hello_pe.h"
+#include "generated_usershell_elf.h"
 
 // First PE that imports from kernel32.dll and is designed to
 // be RESOLVED (not just reported) by the Win32 subsystem.
@@ -97,27 +98,28 @@ constexpr u8 kBinExitElfBytes[] = {
 };
 
 // /bin/usershell.elf — first userland ELF spawned at boot.
-// Hand-built ELF64 (no compiler needed), 181 bytes total:
-// 64-byte Ehdr + 56-byte Phdr + 40-byte code + 21-byte data.
-// The code exercises three syscalls in sequence:
-//   SYS_WRITE(1, "Hello from usershell\n", 21);
-//   pid = SYS_GETPID();
-//   SYS_EXIT(pid);
-// The exit-code-as-pid trick lets the kernel's reaper log
-// the userland shell's PID via the existing "task <pid>
-// exited with code <N>" path — confirms the round-trip
-// without needing decimal-to-ASCII conversion in the stub.
 //
-// Future slices grow this into a real prompt-driven shell
-// with TOML reader + ~/.config/duet/shell.toml. For now
-// it's enough to demonstrate the spawn pipeline + ring-3
-// + multiple syscalls + clean exit.
+// Built from userland/shell/shell.c (against userland/libc/) by
+// tools/build/build-usershell-elf.sh, which compiles crt0.S +
+// syscall.c + shell.c with clang and links them static via lld.
+// The bytes land in `kBinUsershellElfBytesCompiled` inside the
+// generated header.
+//
+// Replaces the 181-byte hand-coded ELF that was the v0
+// "spawn pipeline alive" proof. The compiled program has:
+//   - prompt loop reading stdin (graceful no-stdin fallback)
+//   - tiny built-in dispatcher: help / pid / echo / exit
+//   - exit code = getpid() so the kernel reaper logs the
+//     round-trip cleanly
 //
 // Spawn happens from main.cpp via core::SpawnElfFile with
 // CapSetTrusted() so the SYS_WRITE survives the
-// kCapSerialConsole gate.
+// kCapSerialConsole gate. The generated header is included at
+// the top of this TU, outside the namespace block.
+#define kBinUsershellElfBytes ::duetos::fs::generated::kBinUsershellElfBytesCompiled
+
 // clang-format off
-constexpr u8 kBinUsershellElfBytes[] = {
+[[maybe_unused]] constexpr u8 kBinUsershellElfStubMarkerOld[] = {
     // -- ELF64 header (64 bytes) --
     0x7F, 'E', 'L', 'F',                            // e_ident magic
     0x02,                                           // EI_CLASS = ELFCLASS64
