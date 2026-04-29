@@ -114,4 +114,12 @@ void RamfsAbiSnapshot();
 /// off a 1 Hz timer to fill the ring.
 void RamfsCpuhistSnapshot();
 
+/// Populate `/sys/inspect/<basename>` for each PE shipped in
+/// `/bin`. Each file holds a short summary (image base,
+/// entry RVA, image size, section count, exports status)
+/// produced by `PeQuickSummaryTo`. 1 KiB per entry is enough
+/// for the summary; full PeReport-style disassembly remains
+/// serial-only.
+void RamfsInspectSnapshot();
+
 } // namespace duetos::fs

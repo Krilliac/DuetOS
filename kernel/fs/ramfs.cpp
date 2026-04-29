@@ -1,6 +1,7 @@
 #include "fs/ramfs.h"
 
 #include "arch/x86_64/serial.h"
+#include "loader/pe_loader.h"
 #include "log/klog.h"
 #include "sched/sched.h"
 #include "subsystems/win32/thunks.h"
@@ -381,6 +382,50 @@ constinit RamfsNode k_trusted_bin_dir = {
     .file_size = 0,
 };
 
+// ------- /sys/inspect/<basename> -------
+//
+// Per-PE summary file populated at boot via PeQuickSummaryTo.
+// Each PE we ship in /bin/<basename>.exe gets a paired
+// /sys/inspect/<basename>.exe with header counts, image base,
+// entry RVA, image size, section count, exports status. 1 KiB
+// per file is plenty for the summary (PeQuickSummary's full
+// output is ~10 lines).
+constexpr u32 kInspectBufferBytes = 1024;
+struct InspectSlot
+{
+    const char* name;
+    const u8* file;
+    u64 file_len;
+    u8 buffer[kInspectBufferBytes];
+    u64 cursor;
+    RamfsNode node;
+};
+
+InspectSlot g_inspect_slots[] = {
+    {"hello.exe", generated::kBinHelloPeBytes, generated::kBinHelloPeBytes_len, {}, 0, {}},
+    {"hello_winapi.exe", generated::kBinHelloWinapiBytes, generated::kBinHelloWinapiBytes_len, {}, 0, {}},
+    {"thread_stress.exe", generated::kBinThreadStressBytes, generated::kBinThreadStressBytes_len, {}, 0, {}},
+    {"syscall_stress.exe", generated::kBinSyscallStressBytes, generated::kBinSyscallStressBytes_len, {}, 0, {}},
+    {"windowed_hello.exe", generated::kBinWindowedHelloBytes, generated::kBinWindowedHelloBytes_len, {}, 0, {}},
+    {"customdll_test.exe", generated::kBinCustomDllTestBytes, generated::kBinCustomDllTestBytes_len, {}, 0, {}},
+    {"windows-kill.exe", generated::kBinWinKillBytes, generated::kBinWinKillBytes_len, {}, 0, {}},
+};
+constexpr u32 kInspectSlotCount = sizeof(g_inspect_slots) / sizeof(g_inspect_slots[0]);
+
+// Children array gets fixed up at init time (constinit on a
+// pointer-into-array isn't expressible without designated array
+// initialisers). Sized for one slot per PE plus the nullptr
+// terminator.
+const RamfsNode* g_sys_inspect_children[kInspectSlotCount + 1] = {};
+
+constinit RamfsNode k_sys_inspect_dir = {
+    .name = "inspect",
+    .type = RamfsNodeType::kDir,
+    .children = g_sys_inspect_children,
+    .file_bytes = nullptr,
+    .file_size = 0,
+};
+
 // ------- /sys/syscalls -------
 //
 // Static text dump of the native syscall name table:
@@ -402,6 +447,7 @@ constinit RamfsNode k_sys_syscalls = {
 
 constinit const RamfsNode* const k_sys_children[] = {
     &k_sys_syscalls,
+    &k_sys_inspect_dir,
     nullptr,
 };
 
@@ -771,6 +817,46 @@ void RamfsAbiSnapshot()
 
     core::LogWithValue(core::LogLevel::Info, "fs/ramfs", "abi/native bytes", g_abi_native_cursor);
     core::LogWithValue(core::LogLevel::Info, "fs/ramfs", "abi/win32 bytes", g_abi_win32_cursor);
+}
+
+namespace
+{
+// Per-snapshot scratch — `g_inspect_active` points at the
+// InspectSlot whose buffer the writer should append into.
+// `PeReportFn` is a free function pointer with no closure, so
+// we route through a global. Writes happen in a single thread
+// (the boot path) so no locking is needed.
+InspectSlot* g_inspect_active = nullptr;
+
+void InspectWriter(const char* chunk)
+{
+    if (g_inspect_active == nullptr || chunk == nullptr)
+        return;
+    while (*chunk != '\0' && g_inspect_active->cursor < kInspectBufferBytes)
+    {
+        g_inspect_active->buffer[g_inspect_active->cursor++] = static_cast<u8>(*chunk++);
+    }
+}
+} // namespace
+
+void RamfsInspectSnapshot()
+{
+    for (u32 i = 0; i < kInspectSlotCount; ++i)
+    {
+        InspectSlot& slot = g_inspect_slots[i];
+        slot.cursor = 0;
+        slot.node.name = slot.name;
+        slot.node.type = RamfsNodeType::kFile;
+        slot.node.children = nullptr;
+        slot.node.file_bytes = slot.buffer;
+        g_inspect_active = &slot;
+        core::PeQuickSummaryTo(&InspectWriter, slot.file, slot.file_len);
+        slot.node.file_size = slot.cursor;
+        g_sys_inspect_children[i] = &slot.node;
+    }
+    g_sys_inspect_children[kInspectSlotCount] = nullptr;
+    g_inspect_active = nullptr;
+    core::Log(core::LogLevel::Info, "fs/ramfs", "/sys/inspect populated");
 }
 
 void RamfsCpuhistSnapshot()

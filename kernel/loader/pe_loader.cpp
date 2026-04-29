@@ -1864,4 +1864,117 @@ bool PeResolveViaDlls(const char* dll_name, const char* fn_name, const DllImage*
     return TryResolveViaPreloadedDlls(dll_name, fn_name, dlls, count, out_va);
 }
 
+namespace
+{
+// Hex emit (no "0x" prefix, lowercase, no leading zeros except
+// for v == 0). Local to PeQuickSummaryTo so it doesn't affect
+// the broader serial path.
+void EmitHexTo(PeReportFn writer, u64 v)
+{
+    if (v == 0)
+    {
+        writer("0");
+        return;
+    }
+    char buf[17] = {};
+    int i = 0;
+    while (v != 0)
+    {
+        const u8 nyb = static_cast<u8>(v & 0xF);
+        buf[i++] = static_cast<char>(nyb < 10 ? '0' + nyb : 'a' + (nyb - 10));
+        v >>= 4;
+    }
+    char out[18] = {};
+    int o = 0;
+    while (i > 0)
+        out[o++] = buf[--i];
+    writer(out);
+}
+
+void EmitDecTo(PeReportFn writer, u64 v)
+{
+    if (v == 0)
+    {
+        writer("0");
+        return;
+    }
+    char buf[24] = {};
+    int i = 0;
+    while (v != 0)
+    {
+        buf[i++] = static_cast<char>('0' + (v % 10));
+        v /= 10;
+    }
+    char out[25] = {};
+    int o = 0;
+    while (i > 0)
+        out[o++] = buf[--i];
+    writer(out);
+}
+} // namespace
+
+void PeQuickSummaryTo(PeReportFn writer, const u8* file, u64 file_len)
+{
+    if (writer == nullptr)
+        return;
+    if (file == nullptr || file_len == 0)
+    {
+        writer("# PE inspect: empty / nullptr file\n");
+        return;
+    }
+    PeHeaders h{};
+    const PeStatus s = ParseHeaders(file, file_len, h);
+    writer("# PE inspect summary\n");
+    writer("file_bytes 0x");
+    EmitHexTo(writer, file_len);
+    writer("\n");
+    writer("parse_status ");
+    writer(PeStatusName(s));
+    writer("\n");
+    if (s == PeStatus::TooSmall || s == PeStatus::BadDosMagic || s == PeStatus::BadLfanewBounds ||
+        s == PeStatus::BadNtSignature || s == PeStatus::BadMachine || s == PeStatus::NotPe32Plus)
+    {
+        // Headers couldn't be trusted past the magic — bail
+        // before reading h.
+        return;
+    }
+    writer("image_base 0x");
+    EmitHexTo(writer, h.image_base);
+    writer("\n");
+    writer("entry_rva 0x");
+    EmitHexTo(writer, h.entry_rva);
+    writer("\n");
+    writer("image_size 0x");
+    EmitHexTo(writer, h.image_size);
+    writer("\n");
+    writer("section_count ");
+    EmitDecTo(writer, h.section_count);
+    writer("\n");
+    // Export directory: present iff the PE acts as a DLL or
+    // re-exporting EXE. PeParseExports is cheap on absent
+    // exports (returns NoExportDirectory immediately).
+    PeExports exp{};
+    const PeExportStatus pes = PeParseExports(file, file_len, exp);
+    if (pes == PeExportStatus::Ok)
+    {
+        writer("exports_status ok\n");
+        writer("exports_named ");
+        EmitDecTo(writer, exp.num_names);
+        writer("\n");
+        writer("exports_funcs ");
+        EmitDecTo(writer, exp.num_funcs);
+        writer("\n");
+    }
+    else if (pes == PeExportStatus::NoExportDirectory)
+    {
+        writer("exports_status none\n");
+    }
+    else
+    {
+        writer("exports_status ");
+        writer(PeExportStatusName(pes));
+        writer("\n");
+    }
+}
+
 } // namespace duetos::core

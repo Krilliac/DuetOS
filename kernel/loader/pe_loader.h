@@ -108,6 +108,17 @@ PeStatus PeValidate(const u8* file, u64 file_len);
 /// bytes.
 void PeReport(const u8* file, u64 file_len);
 
+/// Materialise a short PE summary (header counts, image base,
+/// entry RVA, image size, section count, parse status) into a
+/// caller-supplied writer. Mirrors the first ~10 lines of
+/// `PeReport` but emits via a callback instead of the serial
+/// port — used by /sys/inspect/<basename> to populate a static
+/// ramfs file at boot. The full disasm + import dump in
+/// PeReport stays serial-only; the summary is what fits into
+/// a few-KiB inspect buffer.
+using PeReportFn = void (*)(const char* chunk);
+void PeQuickSummaryTo(PeReportFn writer, const u8* file, u64 file_len);
+
 struct PeLoadResult
 {
     bool ok;

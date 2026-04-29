@@ -1162,6 +1162,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::fs::RamfsSyscallsSnapshot();
     duetos::fs::RamfsAbiSnapshot();
     duetos::fs::RamfsCpuhistSnapshot();
+    duetos::fs::RamfsInspectSnapshot();
 
     // Login gate — blocks keyboard input from reaching the shell
     // until a valid session is open. TTY mode prints a classic
