@@ -90,7 +90,8 @@ enum class ThemeId : u8
     DuetViolet = 6,
     DuetGreen = 7,
     DuetClassic = 8,
-    kCount = 9,
+    HighContrast = 9,
+    kCount = 10,
 };
 
 /// Stable role tag for each application window whose chrome is

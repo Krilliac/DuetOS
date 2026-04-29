@@ -553,8 +553,69 @@ constexpr Theme kDuetClassic = {
     .title_text_scale = 1,
 };
 
+// HighContrast — accessibility-first theme. Pure black bg,
+// pure white text, pure cyan / yellow accents picked for
+// maximum luminance contrast against black per WCAG AAA.
+// Every role uses the SAME title hue (yellow) so users with
+// colour-blindness aren't relying on hue distinction;
+// per-role differentiation falls back to title-text content.
+// 2-px+ borders on every chrome element, no gradients.
+constexpr Theme kHighContrast = {
+    .name = "highcontrast",
+
+    .desktop_bg = 0x00000000,
+    .banner_fg = 0x00FFFFFF,
+
+    .taskbar_bg = 0x00000000,
+    .taskbar_fg = 0x00FFFFFF,
+    .taskbar_accent = 0x00FFFF00, // bright yellow start button
+    .taskbar_tab_inactive = 0x00202020,
+    .taskbar_border = 0x00FFFFFF, // 1-px white top edge
+
+    .window_border = 0x00FFFFFF, // crisp white border on every window
+    .window_close = 0x00FFFF00,  // yellow close — high contrast on black
+
+    .role_title =
+        {
+            0x00FFFF00, // Calculator   — yellow on black, max contrast
+            0x00FFFF00, // Notes
+            0x00FFFF00, // TaskManager
+            0x00FFFF00, // LogView
+            0x00FFFF00, // Files
+            0x00FFFF00, // Clock
+            0x00FFFF00, // GfxDemo
+        },
+    .role_client =
+        {
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+        },
+
+    .console_fg = 0x00FFFFFF,
+    .console_bg = 0x00000000,
+
+    // Cursor: pure white outline + fill — visible on every
+    // background including the all-black chrome.
+    .cursor_outline = 0x00FFFFFF,
+    .cursor_fill = 0x00FFFF00,
+
+    // Compact dimensions — high-contrast users often run on
+    // smaller / lower-res displays, so the chrome stays
+    // tight rather than chunky.
+    .title_bar_height = 22,
+    .taskbar_height = 28,
+    .title_button_width = 0,
+    .title_text_scale = 1,
+};
+
 const Theme* const kThemes[static_cast<u32>(ThemeId::kCount)] = {
-    &kClassic, &kSlate10, &kAmber, &kDuet, &kDuetLight, &kDuetBlue, &kDuetViolet, &kDuetGreen, &kDuetClassic,
+    &kClassic,  &kSlate10,    &kAmber,     &kDuet,        &kDuetLight,
+    &kDuetBlue, &kDuetViolet, &kDuetGreen, &kDuetClassic, &kHighContrast,
 };
 
 // ---------------------------------------------------------------
