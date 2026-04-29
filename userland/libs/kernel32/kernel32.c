@@ -1612,10 +1612,28 @@ static long long DirNextSyscall(long long handle, void* report)
     return rv;
 }
 
-/* Strip trailing "\\*" / "\\*.*" wildcards and translate backslashes
- * to forward slashes. Cap at 63 bytes so the kernel's path-copy
- * buffer doesn't truncate the leaf. */
-static void NormalizePathA(const char* in, char* out, unsigned long out_cap)
+/* True iff `s` contains '*' or '?' before NUL — i.e. a Win32
+ * filename glob pattern as opposed to a literal leaf. */
+static int LeafIsGlob(const char* s)
+{
+    while (*s)
+    {
+        if (*s == '*' || *s == '?')
+            return 1;
+        ++s;
+    }
+    return 0;
+}
+
+/* Normalize a Win32 path to the kernel's "/disk/N/..." form:
+ *   - translate '\\' to '/'
+ *   - if the leaf component is a glob (contains '*' or '?'),
+ *     strip it from `out` and copy it to `pattern_out` (capped).
+ *
+ * `pattern_out` may be NULL — caller doesn't care about the
+ * pattern (no glob filtering). Cap at 63 bytes so the kernel's
+ * path-copy buffer doesn't truncate the leaf. */
+static void NormalizePathA(const char* in, char* out, unsigned long out_cap, char* pattern_out, unsigned long pat_cap)
 {
     if (out_cap == 0)
         return;
@@ -1634,16 +1652,27 @@ static void NormalizePathA(const char* in, char* out, unsigned long out_cap)
         ++ci;
     }
     out[ci] = '\0';
-    /* If the tail after the last separator is a wildcard, lop it. */
+    if (pattern_out && pat_cap > 0)
+        pattern_out[0] = '\0';
     if (has_sep)
     {
         const char* tail = out + last_sep + 1;
-        if (tail[0] == '*' && (tail[1] == '\0' || (tail[1] == '.' && tail[2] == '*' && tail[3] == '\0')))
+        if (LeafIsGlob(tail))
+        {
+            if (pattern_out && pat_cap > 0)
+            {
+                unsigned long pi = 0;
+                for (; tail[pi] != '\0' && pi + 1 < pat_cap; ++pi)
+                    pattern_out[pi] = tail[pi];
+                pattern_out[pi] = '\0';
+            }
             out[last_sep] = '\0';
+        }
     }
 }
 
-static void NormalizePathW(const wchar_t16* in, char* out, unsigned long out_cap)
+static void NormalizePathW(const wchar_t16* in, char* out, unsigned long out_cap, char* pattern_out,
+                           unsigned long pat_cap)
 {
     if (out_cap == 0)
         return;
@@ -1655,13 +1684,119 @@ static void NormalizePathW(const wchar_t16* in, char* out, unsigned long out_cap
         ++ci;
     }
     out[ci] = '\0';
-    /* Reuse the A-variant wildcard strip by copying through. */
+    /* Reuse the A-variant glob extract by copying through. */
     char tmp[64];
     for (unsigned long i = 0; i < sizeof(tmp); ++i)
         tmp[i] = 0;
-    NormalizePathA(out, tmp, sizeof(tmp));
+    NormalizePathA(out, tmp, sizeof(tmp), pattern_out, pat_cap);
     for (unsigned long i = 0; i < sizeof(tmp); ++i)
         out[i] = tmp[i];
+}
+
+/* Case-insensitive Win32 glob matcher. Honours '*' (match any
+ * run, including empty) and '?' (match exactly one char).
+ * Recursion is bounded by `*` count + pattern length; with the
+ * 63-byte pattern cap from NormalizePath* this is safe.
+ *
+ * Empty pattern means "match anything" (no filter set). */
+static int FindGlobLowerA(char c)
+{
+    if (c >= 'A' && c <= 'Z')
+        return c + ('a' - 'A');
+    return (int)(unsigned char)c;
+}
+static int FindGlobMatch(const char* pattern, const char* name)
+{
+    if (pattern == 0 || pattern[0] == '\0')
+        return 1;
+    while (*pattern)
+    {
+        if (*pattern == '*')
+        {
+            ++pattern;
+            if (*pattern == '\0')
+                return 1;
+            while (*name)
+            {
+                if (FindGlobMatch(pattern, name))
+                    return 1;
+                ++name;
+            }
+            return 0;
+        }
+        if (*name == '\0')
+            return 0;
+        if (*pattern != '?' && FindGlobLowerA(*pattern) != FindGlobLowerA(*name))
+            return 0;
+        ++pattern;
+        ++name;
+    }
+    return *name == '\0';
+}
+
+/* Per-handle pattern table — FindFirstFile installs a slot,
+ * FindNextFile looks it up, FindClose retires it. 8 slots cover
+ * a typical Win32 PE's nested enumerations (most PEs have one
+ * outer + one inner enumerate at a time). */
+struct FindHandleSlot
+{
+    long long handle;
+    int in_use;
+    char pattern[64];
+};
+static struct FindHandleSlot g_find_slots[8];
+
+static void FindSlotInstall(long long h, const char* pattern)
+{
+    /* Reuse-or-allocate. A previous handle with the same number
+     * (impossible in practice — kernel issues fresh handles) is
+     * overwritten cleanly. */
+    int free_idx = -1;
+    for (int i = 0; i < (int)(sizeof(g_find_slots) / sizeof(g_find_slots[0])); ++i)
+    {
+        if (g_find_slots[i].in_use && g_find_slots[i].handle == h)
+        {
+            free_idx = i;
+            break;
+        }
+        if (!g_find_slots[i].in_use && free_idx < 0)
+            free_idx = i;
+    }
+    if (free_idx < 0)
+        return; /* table full — fallback to no-filter */
+    g_find_slots[free_idx].handle = h;
+    g_find_slots[free_idx].in_use = 1;
+    unsigned long pi = 0;
+    if (pattern)
+    {
+        for (; pattern[pi] != '\0' && pi + 1 < sizeof(g_find_slots[free_idx].pattern); ++pi)
+            g_find_slots[free_idx].pattern[pi] = pattern[pi];
+    }
+    g_find_slots[free_idx].pattern[pi] = '\0';
+}
+
+static const char* FindSlotPattern(long long h)
+{
+    for (int i = 0; i < (int)(sizeof(g_find_slots) / sizeof(g_find_slots[0])); ++i)
+    {
+        if (g_find_slots[i].in_use && g_find_slots[i].handle == h)
+            return g_find_slots[i].pattern;
+    }
+    return ""; /* no slot = no filter */
+}
+
+static void FindSlotRelease(long long h)
+{
+    for (int i = 0; i < (int)(sizeof(g_find_slots) / sizeof(g_find_slots[0])); ++i)
+    {
+        if (g_find_slots[i].in_use && g_find_slots[i].handle == h)
+        {
+            g_find_slots[i].in_use = 0;
+            g_find_slots[i].handle = 0;
+            g_find_slots[i].pattern[0] = '\0';
+            return;
+        }
+    }
 }
 
 static void FillFindDataA(const struct Win32DirEntryReport_t* r, struct Win32FindDataA_t* fd)
@@ -1699,22 +1834,40 @@ static void FillFindDataW(const struct Win32DirEntryReport_t* r, struct Win32Fin
     fd->wFinderFlags = 0;
 }
 
+/* Walk past kernel-returned entries until one matches `pattern` or
+ * the iteration ends. Empty pattern means "no filter". Returns the
+ * raw DirNextSyscall return code (1=hit, 0=end, <0=error) for the
+ * first matching entry. */
+static long long FindWalkUntilMatch(long long h, const char* pattern, struct Win32DirEntryReport_t* r)
+{
+    for (;;)
+    {
+        long long rc = DirNextSyscall(h, r);
+        if (rc != 1)
+            return rc;
+        if (FindGlobMatch(pattern, r->name))
+            return 1;
+    }
+}
+
 __declspec(dllexport) HANDLE FindFirstFileA(const char* path, void* find_data)
 {
     if (path == (const char*)0 || find_data == (void*)0)
         return (HANDLE)(long long)-1;
     char kpath[64];
+    char pattern[64];
     for (unsigned long i = 0; i < sizeof(kpath); ++i)
         kpath[i] = 0;
-    NormalizePathA(path, kpath, sizeof(kpath));
+    NormalizePathA(path, kpath, sizeof(kpath), pattern, sizeof(pattern));
     long long h = DirOpenSyscall(kpath);
     if (h < 0)
         return (HANDLE)(long long)-1;
     struct Win32DirEntryReport_t r;
-    long long rc = DirNextSyscall(h, &r);
+    long long rc = FindWalkUntilMatch(h, pattern, &r);
     if (rc != 1)
-        return (HANDLE)(long long)-1; /* end-of-iter on first call = no match */
+        return (HANDLE)(long long)-1;
     FillFindDataA(&r, (struct Win32FindDataA_t*)find_data);
+    FindSlotInstall(h, pattern);
     return (HANDLE)h;
 }
 
@@ -1723,17 +1876,19 @@ __declspec(dllexport) HANDLE FindFirstFileW(const wchar_t16* path, void* find_da
     if (path == (const wchar_t16*)0 || find_data == (void*)0)
         return (HANDLE)(long long)-1;
     char kpath[64];
+    char pattern[64];
     for (unsigned long i = 0; i < sizeof(kpath); ++i)
         kpath[i] = 0;
-    NormalizePathW(path, kpath, sizeof(kpath));
+    NormalizePathW(path, kpath, sizeof(kpath), pattern, sizeof(pattern));
     long long h = DirOpenSyscall(kpath);
     if (h < 0)
         return (HANDLE)(long long)-1;
     struct Win32DirEntryReport_t r;
-    long long rc = DirNextSyscall(h, &r);
+    long long rc = FindWalkUntilMatch(h, pattern, &r);
     if (rc != 1)
         return (HANDLE)(long long)-1;
     FillFindDataW(&r, (struct Win32FindDataW_t*)find_data);
+    FindSlotInstall(h, pattern);
     return (HANDLE)h;
 }
 
@@ -1742,7 +1897,7 @@ __declspec(dllexport) BOOL FindNextFileA(HANDLE h, void* find_data)
     if (find_data == (void*)0)
         return 0;
     struct Win32DirEntryReport_t r;
-    long long rc = DirNextSyscall((long long)h, &r);
+    long long rc = FindWalkUntilMatch((long long)h, FindSlotPattern((long long)h), &r);
     if (rc != 1)
         return 0;
     FillFindDataA(&r, (struct Win32FindDataA_t*)find_data);
@@ -1754,7 +1909,7 @@ __declspec(dllexport) BOOL FindNextFileW(HANDLE h, void* find_data)
     if (find_data == (void*)0)
         return 0;
     struct Win32DirEntryReport_t r;
-    long long rc = DirNextSyscall((long long)h, &r);
+    long long rc = FindWalkUntilMatch((long long)h, FindSlotPattern((long long)h), &r);
     if (rc != 1)
         return 0;
     FillFindDataW(&r, (struct Win32FindDataW_t*)find_data);
@@ -1762,11 +1917,13 @@ __declspec(dllexport) BOOL FindNextFileW(HANDLE h, void* find_data)
 }
 
 /* FindClose — calls SYS_FILE_CLOSE (= 9), which already routes the
- * kWin32DirBase range to the directory snapshot teardown. */
+ * kWin32DirBase range to the directory snapshot teardown. Releases
+ * the per-handle pattern slot regardless of the kernel return. */
 __declspec(dllexport) BOOL FindClose(HANDLE h)
 {
     long long discard;
     __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)9), "D"((long long)h) : "memory");
+    FindSlotRelease((long long)h);
     return 1;
 }
 
