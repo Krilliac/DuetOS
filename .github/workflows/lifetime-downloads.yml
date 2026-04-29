@@ -25,6 +25,14 @@
 # The python script (tools/release/update-lifetime-downloads.py)
 # encodes the asset-ID-aware delta arithmetic; this workflow only
 # wires the I/O.
+#
+# Two files land on the `stats` branch:
+#   * lifetime-downloads.json — shields.io endpoint badge envelope
+#     ONLY (schemaVersion / label / message / color / cacheSeconds).
+#     shields.io rejects unknown top-level properties, so persistence
+#     state does NOT live here.
+#   * lifetime-downloads-state.json — persistence (lifetime_total,
+#     by_asset, snapshot_at, …). Read by the next run.
 
 name: lifetime-downloads
 
@@ -96,7 +104,8 @@ jobs:
         run: |
           set -euo pipefail
           python3 src/tools/release/update-lifetime-downloads.py \
-            --state stats/lifetime-downloads.json \
+            --state stats/lifetime-downloads-state.json \
+            --badge stats/lifetime-downloads.json \
             --repo "$GITHUB_REPOSITORY"
 
       - name: Commit + push if changed
@@ -104,18 +113,22 @@ jobs:
         run: |
           set -euo pipefail
           cd stats
-          git add lifetime-downloads.json
+          # Track both files: the badge (shields.io endpoint, READMEs
+          # point at this) and the state (persistence, read by the
+          # next run). The script only rewrites a file when its
+          # content actually changed, so on idle scheduled runs the
+          # diff is empty and we skip the push entirely.
+          git add lifetime-downloads.json lifetime-downloads-state.json
           if git diff --cached --quiet; then
-            echo "no change to lifetime-downloads.json — skipping push"
+            echo "no change to badge/state — skipping push"
             exit 0
           fi
           # Surface the new total in the commit subject for at-a-glance
-          # log grepping. The python script already wrote the new
-          # total to message; pull it out of the JSON.
+          # log grepping. The badge file's `message` is the current
+          # tally as a localized string ("1,234").
           NEW_TOTAL=$(python3 -c '
-          import json,sys
-          d = json.load(open("lifetime-downloads.json"))
-          print(d.get("message", "?"))
+          import json
+          print(json.load(open("lifetime-downloads.json")).get("message", "?"))
           ')
           git commit -q -m "stats: lifetime downloads -> ${NEW_TOTAL}"
           # Retry-with-backoff on transient push flakes, mirroring the

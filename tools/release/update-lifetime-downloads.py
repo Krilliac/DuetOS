@@ -11,8 +11,7 @@
 # "current snapshot."
 #
 # This script reconstructs a real lifetime number by:
-#   * reading the previous snapshot from
-#     `lifetime-downloads.json` (shape documented below)
+#   * reading the previous snapshot's persistence state
 #   * fetching the current state of every release asset via the
 #     GitHub REST API
 #   * computing the *delta* per asset since the last snapshot
@@ -23,19 +22,29 @@
 #   * writing a new snapshot with `lifetime_total = old_total + delta`
 #     and a `by_asset` map of currently-live asset counts.
 #
-# The output JSON also embeds the shields.io endpoint schema
-# (schemaVersion / label / message / color) so the README badge can
-# point at this file directly via
-# https://img.shields.io/endpoint?url=...
+# Output is split across two files:
+#   * --badge → shields.io endpoint schema (schemaVersion / label /
+#     message / color / cacheSeconds). NOTHING ELSE — shields.io
+#     rejects unknown top-level properties (it returns "invalid
+#     properties: _state" if you give it any).
+#   * --state → our persistence dict (lifetime_total, by_asset,
+#     snapshot_at, …). Read by the next run; not consumed by
+#     shields.io.
 #
 # Usage:
 #   GITHUB_TOKEN=... \
 #   GITHUB_REPOSITORY=krilliac/duetos \
 #     tools/release/update-lifetime-downloads.py \
-#       --state path/to/lifetime-downloads.json
+#       --state path/to/lifetime-downloads-state.json \
+#       --badge path/to/lifetime-downloads.json
 #
-# If --state does not exist (first run), the script bootstraps from
-# the live counters: lifetime_total = sum(current asset counts).
+# Migration: if --state does not exist but --badge does and contains a
+# legacy `_state` block (the pre-split shape), the script lifts that
+# block as the prev state so no tally is lost on the first run after
+# the split.
+#
+# If neither file exists (first run), the script bootstraps from the
+# live counters: lifetime_total = sum(current asset counts).
 
 import argparse
 import json
@@ -90,18 +99,47 @@ def gather_assets(releases: list[dict]) -> list[dict]:
 
 
 def _unwrap_state(prev: dict) -> dict:
-    """Pull the persistence block out of the on-disk JSON.
+    """Pull the persistence block out of an on-disk JSON document.
 
-    The script writes the badge envelope at the top level (so
-    shields.io can read it directly) and parks our state under
-    `_state`. Older snapshots wrote the state at the top level;
-    accept both shapes so a hand-edited file keeps working.
+    Three shapes are accepted:
+      * post-split state file: top-level dict with `lifetime_total` /
+        `by_asset` directly. Returned as-is.
+      * pre-split combined file: top-level dict with `_state` nested.
+        The nested block is returned (migration path on first run
+        after the badge/state split).
+      * empty/missing: returns {}.
     """
     if not prev:
         return {}
     if "_state" in prev and isinstance(prev["_state"], dict):
         return prev["_state"]
     return prev
+
+
+def load_prev_state(state_path: str, badge_path: str | None) -> dict:
+    """Read previous persistence state.
+
+    Tries the dedicated state file first. Falls back to lifting the
+    legacy `_state` block out of the badge file so the very first
+    run after the badge/state split doesn't lose the tally.
+    """
+    try:
+        with open(state_path, "r", encoding="utf-8") as fh:
+            return _unwrap_state(json.load(fh))
+    except FileNotFoundError:
+        pass
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"error: state file {state_path} is not valid JSON: {exc}")
+
+    if badge_path:
+        try:
+            with open(badge_path, "r", encoding="utf-8") as fh:
+                badge_doc = json.load(fh)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+        if isinstance(badge_doc, dict) and isinstance(badge_doc.get("_state"), dict):
+            return badge_doc["_state"]
+    return {}
 
 
 def compute_new_total(prev_state: dict, assets: list[dict]) -> tuple[int, dict, int]:
@@ -149,10 +187,30 @@ def render_badge(label: str, total: int, color: str) -> dict:
     }
 
 
+def _render(doc: dict) -> str:
+    return json.dumps(doc, indent=2, sort_keys=True) + "\n"
+
+
+def _write_text(path: str, text: str) -> None:
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+
+
+def _read_text(path: str) -> str | None:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return fh.read()
+    except FileNotFoundError:
+        return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--state", required=True,
-                        help="Path to lifetime-downloads.json (read + written).")
+                        help="Path to persistence state JSON (read + written).")
+    parser.add_argument("--badge", required=True,
+                        help="Path to shields.io endpoint badge JSON (written).")
     parser.add_argument("--repo",
                         default=os.environ.get("GITHUB_REPOSITORY"),
                         help="owner/repo (defaults to $GITHUB_REPOSITORY).")
@@ -161,7 +219,7 @@ def main() -> int:
     parser.add_argument("--color", default="success",
                         help="Badge color.")
     parser.add_argument("--dry-run", action="store_true",
-                        help="Print result to stdout, do not write the file.")
+                        help="Print both files to stdout, do not write.")
     args = parser.parse_args()
 
     if not args.repo or "/" not in args.repo:
@@ -170,14 +228,7 @@ def main() -> int:
 
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
 
-    try:
-        with open(args.state, "r", encoding="utf-8") as fh:
-            prev_state = json.load(fh)
-    except FileNotFoundError:
-        prev_state = {}
-    except json.JSONDecodeError as exc:
-        print(f"error: existing state at {args.state} is not valid JSON: {exc}", file=sys.stderr)
-        return 2
+    prev_state = load_prev_state(args.state, args.badge)
 
     try:
         releases = fetch_all_releases(args.repo, token)
@@ -194,26 +245,26 @@ def main() -> int:
     # from the current sum so we don't lose what's already counted.
     if not prev_state:
         seed_total = sum(a["download_count"] for a in assets)
-        prev_state = {
-            "lifetime_total": seed_total,
-            "by_asset": {
-                str(a["asset_id"]): {
-                    "name": a["name"],
-                    "release_tag": a["release_tag"],
-                    "count": a["download_count"],
-                }
-                for a in assets
-            },
+        new_total = seed_total
+        new_by_asset = {
+            str(a["asset_id"]): {
+                "name": a["name"],
+                "release_tag": a["release_tag"],
+                "count": a["download_count"],
+            }
+            for a in assets
         }
         delta = 0
-        new_total = seed_total
-        new_by_asset = prev_state["by_asset"]
     else:
         new_total, new_by_asset, delta = compute_new_total(prev_state, assets)
 
-    snapshot_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    prev_total = int(prev_state.get("lifetime_total", 0) or 0)
+    prev_by_asset = prev_state.get("by_asset", {}) or {}
+    nothing_changed = (new_total == prev_total) and (new_by_asset == prev_by_asset)
+
     badge = render_badge(args.label, new_total, args.color)
-    badge["_state"] = {
+    snapshot_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    state_doc = {
         "lifetime_total": new_total,
         "snapshot_at": snapshot_at,
         "delta_this_run": delta,
@@ -223,18 +274,41 @@ def main() -> int:
         "by_asset": new_by_asset,
     }
 
-    rendered = json.dumps(badge, indent=2, sort_keys=True) + "\n"
+    new_badge_text = _render(badge)
+    new_state_text = _render(state_doc)
 
     if args.dry_run:
-        sys.stdout.write(rendered)
+        sys.stdout.write("=== badge ===\n" + new_badge_text)
+        sys.stdout.write("=== state ===\n" + new_state_text)
         return 0
 
-    os.makedirs(os.path.dirname(os.path.abspath(args.state)) or ".", exist_ok=True)
-    with open(args.state, "w", encoding="utf-8") as fh:
-        fh.write(rendered)
+    # The badge file should match new_badge_text exactly; if not (e.g.
+    # the legacy combined badge+state file is still on disk), rewrite
+    # it so shields.io stops rejecting the unknown `_state` property.
+    badge_dirty = _read_text(args.badge) != new_badge_text
+    # State is rewritten when the underlying numbers moved OR when the
+    # state file is missing (migration from the legacy combined file —
+    # without this we'd lose the carry on the very next run because
+    # load_prev_state would fall through to a clean badge file and
+    # bootstrap from scratch). snapshot_at intentionally is NOT part
+    # of the change signal: otherwise every scheduled run produces a
+    # no-op commit whose only diff is the timestamp.
+    state_missing = not os.path.exists(args.state)
+    state_changed = (not nothing_changed) or state_missing
+
+    if not badge_dirty and not state_changed:
+        print(f"lifetime_total unchanged at {new_total:,} "
+              f"({len(new_by_asset)} live asset(s)) — skipping write")
+        return 0
+
+    if badge_dirty:
+        _write_text(args.badge, new_badge_text)
+    if state_changed:
+        _write_text(args.state, new_state_text)
 
     print(f"lifetime_total: {new_total:,} (delta this run: +{delta:,}, "
-          f"{len(new_by_asset)} live asset(s))")
+          f"{len(new_by_asset)} live asset(s); "
+          f"badge_dirty={badge_dirty} state_changed={state_changed})")
     return 0
 
 
