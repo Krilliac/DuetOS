@@ -1801,6 +1801,39 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 SerialWrite("\n");
                 continue;
             }
+            // Ctrl+Alt+digit picks a specific theme directly —
+            // saves repeat presses of Ctrl+Alt+Y when there are
+            // 9 themes registered. Index 1..9 maps onto
+            // ThemeId 0..8 so the digit row reads as "press 4
+            // for the 4th theme" matching `theme list`'s
+            // column ordering.
+            if (ctrl && alt && ev.code >= '1' && ev.code <= '9')
+            {
+                const auto idx = static_cast<duetos::u32>(ev.code - '1');
+                if (idx < static_cast<duetos::u32>(duetos::drivers::video::ThemeId::kCount))
+                {
+                    duetos::drivers::video::CompositorLock();
+                    duetos::drivers::video::ThemeSet(static_cast<duetos::drivers::video::ThemeId>(idx));
+                    duetos::drivers::video::ThemeApplyToAll();
+                    const bool is_tty =
+                        (duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Tty);
+                    if (is_tty)
+                    {
+                        duetos::drivers::video::DesktopCompose(0x00000000, nullptr);
+                    }
+                    else
+                    {
+                        duetos::drivers::video::CursorHide();
+                        duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                        duetos::drivers::video::CursorShow();
+                    }
+                    duetos::drivers::video::CompositorUnlock();
+                    SerialWrite("[ui] theme set -> ");
+                    SerialWrite(duetos::drivers::video::ThemeIdName(duetos::drivers::video::ThemeCurrentId()));
+                    SerialWrite("\n");
+                    continue;
+                }
+            }
 
             // Window-manager shortcuts take priority over any
             // text-input path. Alt+Tab cycles active window;

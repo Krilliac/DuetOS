@@ -3,6 +3,27 @@
 _Type: Observation + Decision._
 _Last updated: 2026-04-29._
 
+## Update 2026-04-29 (window snap + direct theme select hotkeys)
+
+Two more chrome / UX slices:
+
+1. **Window snap halves (Ctrl+Alt+Arrow)** — new `WindowSnapLeft`
+   / `WindowSnapRight` APIs sit `h` against the left / right half
+   of the work area (framebuffer minus taskbar). Both clear the
+   maximized flag. New file-local `WorkArea()` helper is the
+   single source of truth for "framebuffer minus taskbar
+   reserve" — same calculation `WindowMaximize` already uses.
+   Keyboard shortcuts: `Ctrl+Alt+Left/Right` snap halves,
+   `Ctrl+Alt+Up` maximizes, `Ctrl+Alt+Down` restores (or
+   minimizes if not maximized). Mirrors Win10's Win+Arrow tiling
+   (Win key isn't tracked separately; Ctrl+Alt is the standard
+   "system" modifier in this session).
+
+2. **Direct theme select** — `Ctrl+Alt+1..9` now picks a specific
+   theme (idx 1..9 maps to `ThemeId` 0..8). Saves repeat presses
+   of Ctrl+Alt+Y (cycle) when there are 9 themes registered.
+   Out-of-range digits (idx ≥ kCount) silently no-op.
+
 ## Update 2026-04-29 (Duet-theme follow-on slice)
 
 Five additional changes layered on top of the v0 chrome polish to
