@@ -93,6 +93,29 @@ Two more items off `docs/duet-theme-spec.md`:
 - `kernel/drivers/video/wallpaper.h`
 - `kernel/drivers/video/wallpaper.cpp`
 
+## Update 2026-04-29 (Show Desktop sliver + topo backdrop)
+
+Two more chrome additions:
+
+1. **Show Desktop sliver** — `taskbar.cpp` paints a 4-px-wide
+   theme-accent rail at the very right edge of the strip,
+   inset 1 px so the framebuffer's outer column stays on the
+   bg gradient. Body is alpha-blended (`0x60` over the accent)
+   for a soft accent feel; a 1-px brighter highlight runs down
+   the inside edge so the rail has visible structure. New
+   `TaskbarShowDesktopBounds(x*, y*, w*, h*)` exposes the rect
+   for a future click dispatcher. Click logic is **STUB** —
+   the spec's restore-on-toggle behaviour needs a "minimize-
+   all + restore" backing map that's its own slice.
+
+2. **Topo backdrop layer for Duet wallpaper** — `WallpaperPaint`
+   on the Duet theme now paints a topo concentric-circle stack
+   FIRST, then the duet-arcs over the top. Stroke contrast is
+   half the duet-arcs lift so the topo reads as a base layer
+   rather than competing with the foreground rings. Gives the
+   Duet desktop a layered look matching the prototype's
+   multi-layer SVG composition.
+
 
 
 ## What landed

@@ -42,6 +42,14 @@ constinit u32 g_net_cell_y = 0;
 constinit u32 g_net_cell_w = 0;
 constinit u32 g_net_cell_h = 0;
 
+// "Show Desktop" sliver bounds — exposed via
+// `TaskbarShowDesktopBounds`. Updated every redraw; remains 0
+// until the strip has been Init'd + Redrawn at least once.
+constinit u32 g_show_desktop_x = 0;
+constinit u32 g_show_desktop_y = 0;
+constinit u32 g_show_desktop_w = 0;
+constinit u32 g_show_desktop_h = 0;
+
 // Last-painted tab layout. Updated by TaskbarRedraw; consumed by
 // TaskbarTabAt. Capacity matches kMaxWindows so tabs and window
 // slots are in 1:1 correspondence.
@@ -453,6 +461,35 @@ void TaskbarRedraw()
             draw_tray_cell("B", colour, nullptr, nullptr, nullptr, nullptr);
         }
     }
+
+    // Show-Desktop accent rail at the very right edge of the
+    // strip — Win10's "minimize all" target. Painted as a thin
+    // 4-px-wide vertical strip in the theme accent so it reads
+    // as the same affordance language as the START button. The
+    // rail is INSET 1 px from the edge so the framebuffer's
+    // outer pixel column stays on the bg gradient — keeps the
+    // chrome from looking pasted onto the surface.
+    //
+    // STUB: click dispatch (true Win10 minimize-all + restore)
+    // not yet wired — the kernel taskbar's hit-test exposes the
+    // bounds via TaskbarShowDesktopBounds for a future slice.
+    {
+        constexpr u32 rail_w = 4;
+        const u32 rail_x = (fbw > rail_w + 1) ? fbw - rail_w - 1 : 0;
+        const u32 rail_y = g_y + 4;
+        const u32 rail_h = (g_h > 8) ? g_h - 8 : g_h;
+        // Body: 2-px translucent accent (alpha-blended over the
+        // taskbar gradient so it reads as a soft accent rather
+        // than a hard stripe).
+        FramebufferFillRectAlpha(rail_x, rail_y, rail_w, rail_h, 0x60000000U | (g_accent & 0x00FFFFFFU));
+        // 1-px brighter highlight on the inside edge so the
+        // rail has visible structure when hovered.
+        FramebufferFillRect(rail_x, rail_y, 1, rail_h, LightenRgb(g_accent, 56));
+        g_show_desktop_x = rail_x;
+        g_show_desktop_y = rail_y;
+        g_show_desktop_w = rail_w;
+        g_show_desktop_h = rail_h;
+    }
 }
 
 u32 TaskbarTabAt(u32 x, u32 y)
@@ -504,6 +541,18 @@ void TaskbarNetCellBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)
         *w_out = g_net_cell_w;
     if (h_out)
         *h_out = g_net_cell_h;
+}
+
+void TaskbarShowDesktopBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)
+{
+    if (x_out)
+        *x_out = g_show_desktop_x;
+    if (y_out)
+        *y_out = g_show_desktop_y;
+    if (w_out)
+        *w_out = g_show_desktop_w;
+    if (h_out)
+        *h_out = g_show_desktop_h;
 }
 
 void TaskbarStartBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)

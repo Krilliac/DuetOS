@@ -79,4 +79,11 @@ void TaskbarClockBounds(u32* x, u32* y, u32* w, u32* h);
 /// framebuffer-absolute.
 void TaskbarNetCellBounds(u32* x, u32* y, u32* w, u32* h);
 
+/// Bounds of the "Show Desktop" sliver — a thin accent rail at
+/// the very right edge of the taskbar. Spec calls for a Win10-
+/// style minimize-all click target; v0 paints it but the click
+/// dispatcher hasn't been wired yet (STUB). Returns `w == 0` if
+/// the sliver hasn't been laid out yet.
+void TaskbarShowDesktopBounds(u32* x, u32* y, u32* w, u32* h);
+
 } // namespace duetos::drivers::video

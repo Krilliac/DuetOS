@@ -27,6 +27,32 @@ u32 LightenRgb(u32 rgb, u32 amount)
     return (r << 16) | (g << 8) | b;
 }
 
+// Topo backdrop: a stack of low-contrast concentric circles
+// centered in the visible area. The prototype's `topo` wallpaper
+// is a contour-line motif; concentric circles approximate it
+// without needing a vector path stroker. Painted UNDER the
+// duet-arcs rings so the desktop reads as layered terrain rather
+// than a single graphic element.
+void PaintTopo(u32 desktop_rgb, u32 fb_w, u32 fb_h)
+{
+    // Single concentric stack centered on the framebuffer.
+    // Stroke is a very small lift over the bg — half the
+    // contrast of the duet-arcs rings, so topo reads as a base
+    // layer rather than competing with the foreground arcs.
+    const u32 cx = fb_w / 2;
+    const u32 cy = (fb_h * 38) / 100; // same anchor as duet-arcs
+    const u32 short_side = (fb_w < fb_h) ? fb_w : fb_h;
+    if (short_side < 64U)
+        return;
+    const u32 ring_step = 28;     // px between rings
+    const u32 max_r = short_side; // walk outward until off-screen
+    const u32 stroke_rgb = LightenRgb(desktop_rgb, 9);
+    for (u32 r = ring_step; r < max_r; r += ring_step)
+    {
+        FramebufferDrawCircle(static_cast<i32>(cx), static_cast<i32>(cy), r, stroke_rgb);
+    }
+}
+
 // Paint two interlocking outlined circles centered horizontally
 // in the visible area, each ~28% of the smaller framebuffer
 // dimension. Stroke is a low-contrast lift of the desktop colour
@@ -96,6 +122,10 @@ void WallpaperPaint(u32 desktop_rgb)
     switch (ThemeCurrentId())
     {
     case ThemeId::Duet:
+        // Duet stacks the topo backdrop under the foreground
+        // arcs — the layered look matches the prototype's
+        // multi-layer SVG composition.
+        PaintTopo(desktop_rgb, info.width, info.height);
         PaintDuetArcs(desktop_rgb, info.width, info.height);
         break;
     case ThemeId::Classic:

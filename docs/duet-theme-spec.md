@@ -112,7 +112,7 @@ state, not theme state.
 |--------------------------------------------------------|---------------------------|-------|
 | 44-px (compact 38-px) bar                              | No — taskbar height fixed in `taskbar.cpp` |
 | 4 positions (bottom/top/left/right)                    | No — taskbar position fixed |
-| Accent-rail "Show desktop" sliver                      | No — would be a new widget |
+| Accent-rail "Show desktop" sliver                      | Partial — paints a 4-px theme-accent rail at the right edge of the strip + exposes `TaskbarShowDesktopBounds`; click dispatch is STUB until restore-on-toggle lands |
 | 2-px tall focus dot under running apps (8 / 14 px)     | Yes (running-only) — active tab paints a centred 14-px × 2-px focus dot; pinned-vs-running distinction deferred until the kernel taskbar tracks pinned items |
 | Rounded START + tabs                                    | Yes — `FramebufferFillRoundRect` + `FramebufferDrawRoundRect` (radius 4 / 3) |
 | Vertical gradient on the strip                          | Yes — `LightenRgb(g_bg, 12) → g_bg` |
@@ -170,13 +170,15 @@ follow-on once `FramebufferStrokePath` lands.
 ## Wallpaper — same approach
 
 The prototype offers `duet-arcs`, `topo`, `syscalls` SVG-based
-wallpapers. v0 ships a **duet-arcs**-style backdrop on the Duet
-theme: `kernel/drivers/video/wallpaper.{h,cpp}` paints two large
-interlocking outlined circles (teal-tinted left, amber-tinted
-right) at ~28% of the shorter framebuffer dimension, anchored at
-~38% of the height so the taskbar doesn't crop them. Stroke is a
-low-contrast lift over the gradient bg so the rings read as
-ambient texture, not chrome.
+wallpapers. v0 ships a **duet-arcs + topo**-style backdrop on the Duet
+theme: `kernel/drivers/video/wallpaper.{h,cpp}` paints two
+layers — a `topo` concentric-circle stack as the base layer
+and two interlocking outlined circles (teal-tinted left,
+amber-tinted right) over the top. The arcs sit at ~28% of the
+shorter framebuffer dimension, anchored at ~38% of the height
+so the taskbar doesn't crop them. Stroke is a low-contrast
+lift over the gradient bg so the rings read as ambient
+texture, not chrome.
 
 The other three themes still paint a flat / gradient
 `desktop_bg`. `topo` and `syscalls` patterns + a real SVG
