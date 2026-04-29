@@ -93,6 +93,34 @@ Two more items off `docs/duet-theme-spec.md`:
 - `kernel/drivers/video/wallpaper.h`
 - `kernel/drivers/video/wallpaper.cpp`
 
+## Update 2026-04-29 (per-theme dimensions + DuetClassic palette)
+
+`Theme` struct gained a `title_bar_height` field. Duet family
+(Duet / DuetLight / DuetBlue / DuetViolet / DuetGreen) ships
+26 px; non-Duet themes + DuetClassic stay at 22 px. New
+`EffectiveTitleHeight(WindowChrome&)` helper in widget.cpp is
+the single source of truth — explicit per-window
+`title_height` wins, otherwise the active theme's value, else
+the historical 22-px default. Six call sites that hardcoded
+`(c.title_height == 0) ? 22 : c.title_height` now route
+through the helper, so paint + hit-test can't desync after a
+theme cycle.
+
+`ThemeId` gained `DuetClassic` (kCount: 8 → 9). Win9x panel
+grey (#C0C0C0) carrying Duet's dual-accent teal/amber title
+hues. Uses a 4-px corner-punch radius (vs 6-px for the modern
+Duet variants) so the chrome proportions match the era's
+chunkier feel. Cursor returns to classic black-on-white.
+DuetMark, rounded corners, duet-arcs wallpaper extend to
+DuetClassic transparently.
+
+`docs/duet-theme-spec.md` gained a "Status (2026-04-29)" table
+at the top — single-glance shipping summary, sorted by area.
+Six rows are **Yes** (slate Duet, variants, window chrome,
+taskbar polish, wallpapers, popup polish + cursor); five
+remain **Deferred** (real compositor, TTF rasterizer, path
+stroker, userland shell, procfs entries).
+
 ## Update 2026-04-29 (window controls + pinned tabs)
 
 ### Batch A: window minimize / maximize / restore

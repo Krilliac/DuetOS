@@ -96,6 +96,8 @@ constexpr Theme kClassic = {
 
     .cursor_outline = 0x00000000, // classic black outline
     .cursor_fill = 0x00FFFFFF,    // classic white fill
+
+    .title_bar_height = 22,
 };
 
 // Amber is a deliberate retro exercise — a single-hue amber palette
@@ -149,6 +151,8 @@ constexpr Theme kAmber = {
     // interior — preserves the monochrome aesthetic.
     .cursor_outline = 0x00301008,
     .cursor_fill = 0x00FFB840,
+
+    .title_bar_height = 22,
 };
 
 constexpr Theme kSlate10 = {
@@ -205,6 +209,8 @@ constexpr Theme kSlate10 = {
     // dark slate.
     .cursor_outline = 0x00101015,
     .cursor_fill = 0x00DDE6F0,
+
+    .title_bar_height = 22,
 };
 
 // Duet — the redesigned palette. Slate-charcoal canvas, dual-accent
@@ -266,6 +272,11 @@ constexpr Theme kDuet = {
     // teal / amber accents reserved for the duet-arcs identity.
     .cursor_outline = 0x000B0E13, // matches `desktop_bg`
     .cursor_fill = 0x00E8EDF2,    // matches `--ink`
+
+    // Duet ships the prototype's larger 26-px title bar so the
+    // chrome buttons + subtitle slot have the breathing room
+    // the design calls for.
+    .title_bar_height = 26,
 };
 
 // DuetLight — light-mode sibling of Duet, sourced from the
@@ -322,6 +333,8 @@ constexpr Theme kDuetLight = {
     // the pointer reads as a brand-tinted ink on a light surface.
     .cursor_outline = 0x00161A20,
     .cursor_fill = 0x000F8C80,
+
+    .title_bar_height = 26,
 };
 
 // Duet accent variants. Each one duplicates the slate Duet
@@ -370,6 +383,7 @@ constexpr Theme kDuetBlue = {
     .console_bg = 0x000F1319,
     .cursor_outline = 0x000B0E13,
     .cursor_fill = 0x00E8EDF2,
+    .title_bar_height = 26,
 };
 
 constexpr Theme kDuetViolet = {
@@ -407,6 +421,7 @@ constexpr Theme kDuetViolet = {
     .console_bg = 0x000F1319,
     .cursor_outline = 0x000B0E13,
     .cursor_fill = 0x00E8EDF2,
+    .title_bar_height = 26,
 };
 
 constexpr Theme kDuetGreen = {
@@ -444,10 +459,75 @@ constexpr Theme kDuetGreen = {
     .console_bg = 0x000F1319,
     .cursor_outline = 0x000B0E13,
     .cursor_fill = 0x00E8EDF2,
+    .title_bar_height = 26,
+};
+
+// DuetClassic — the prototype's "classic mode" sibling.
+// Win9x-era grey panels (#C0C0C0) carrying Duet's dual-accent
+// teal/amber title hues, so the layout / role identity story
+// is preserved while the surface palette swings into retro
+// territory. Useful as a stress-test for the chrome paths
+// against a light client + dark title combination, and as a
+// nostalgic option distinct from the modern slate.
+constexpr Theme kDuetClassic = {
+    .name = "duetclassic",
+
+    // Desktop: Win9x teal — the iconic 256-colour "Teal" the
+    // base PC desktop shipped with through the late '90s.
+    .desktop_bg = 0x00008080,
+    .banner_fg = 0x00FFFFFF,
+
+    // Taskbar: classic light-grey panel with a dark border —
+    // maps to the Win98 chrome language but uses Duet's accent
+    // for the active-tab indicator + START fill.
+    .taskbar_bg = 0x00C0C0C0,
+    .taskbar_fg = 0x00000000,
+    .taskbar_accent = 0x002DD4BF, // teal — Duet's primary accent
+    .taskbar_tab_inactive = 0x00A8A8A8,
+    .taskbar_border = 0x00404040,
+
+    // Window border: Win9x dark-grey 3D bevel approximation;
+    // close button takes the Duet red so it reads as the same
+    // affordance across the family.
+    .window_border = 0x00808080,
+    .window_close = 0x00E3413C,
+
+    .role_title =
+        {
+            0x00207A6F, // Calculator   — teal-tinted (utility)
+            0x00805E20, // Notes        — amber-tinted (paper)
+            0x00164D45, // TaskManager  — deeper teal
+            0x00404040, // LogView      — flat grey panel
+            0x00604818, // Files        — amber-tinted
+            0x00404040, // Clock        — flat grey
+            0x00702070, // GfxDemo      — magenta marker
+        },
+    .role_client =
+        {
+            0x00C0C0C0, // Calculator   — Win9x panel grey
+            0x00FFFFFF, // Notes        — paper white
+            0x00C0C0C0, // TaskManager
+            0x00DCDCDC, // LogView      — light off-white for log readability
+            0x00C0C0C0, // Files
+            0x00000000, // Clock        — black ground for retro 7-seg
+            0x00000000, // GfxDemo
+        },
+
+    .console_fg = 0x00000000,
+    .console_bg = 0x00FFFFFF,
+
+    // Cursor: classic black on white — matches the Win9x
+    // pointer the chrome evokes.
+    .cursor_outline = 0x00000000,
+    .cursor_fill = 0x00FFFFFF,
+
+    // Classic mode keeps the smaller 22-px title bar — the
+    // cosier proportions match the era's UI.
+    .title_bar_height = 22,
 };
 
 const Theme* const kThemes[static_cast<u32>(ThemeId::kCount)] = {
-    &kClassic, &kSlate10, &kAmber, &kDuet, &kDuetLight, &kDuetBlue, &kDuetViolet, &kDuetGreen,
+    &kClassic, &kSlate10, &kAmber, &kDuet, &kDuetLight, &kDuetBlue, &kDuetViolet, &kDuetGreen, &kDuetClassic,
 };
 
 // ---------------------------------------------------------------

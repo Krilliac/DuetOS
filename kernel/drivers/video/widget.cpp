@@ -134,6 +134,20 @@ u32 StringPixelWidth(const char* s)
 // look as the rest of the chrome.
 u32 LightenRgb(u32 rgb, u32 amount);
 
+// Resolve a window's effective title-bar height: explicit
+// per-window value wins; otherwise sample the active theme's
+// `title_bar_height`; otherwise fall back to the historical
+// 22-px default. Single source of truth — paint + hit-test
+// paths both consult this so a theme switch can't desync the
+// chrome and the click target.
+u32 EffectiveTitleHeight(const WindowChrome& w)
+{
+    if (w.title_height != 0)
+        return w.title_height;
+    const u32 from_theme = ThemeCurrent().title_bar_height;
+    return (from_theme != 0) ? from_theme : 22u;
+}
+
 void PaintButton(const ButtonWidget& b)
 {
     u32 bx = 0, by = 0;
@@ -425,7 +439,7 @@ void WindowDraw(const WindowChrome& w)
     // bottom. The +24 lift is small enough to preserve the
     // theme's hue identity while still reading as "depth" — the
     // chrome no longer looks like a solid coloured bar.
-    const u32 tbh = (w.title_height == 0) ? 22 : w.title_height;
+    const u32 tbh = EffectiveTitleHeight(w);
     const u32 tbh_eff = (tbh > w.h) ? w.h : tbh;
     const u32 title_top = LightenRgb(w.colour_title, 24);
     FramebufferFillRectGradient(w.x, w.y, w.w, tbh_eff, title_top, w.colour_title);
@@ -754,7 +768,7 @@ bool WindowPointInTitle(WindowHandle h, u32 x, u32 y)
         return false;
     }
     const auto& c = g_windows[h].chrome;
-    const u32 tbh = (c.title_height == 0) ? 22 : c.title_height;
+    const u32 tbh = EffectiveTitleHeight(c);
     return x >= c.x && x < c.x + c.w && y >= c.y && y < c.y + tbh;
 }
 
@@ -765,7 +779,7 @@ bool WindowPointInCloseBox(WindowHandle h, u32 x, u32 y)
         return false;
     }
     const auto& c = g_windows[h].chrome;
-    const u32 tbh = (c.title_height == 0) ? 22 : c.title_height;
+    const u32 tbh = EffectiveTitleHeight(c);
     const u32 tbh_eff = (tbh > c.h) ? c.h : tbh;
     const u32 btn_pad = 4;
     if (tbh_eff <= 2 * btn_pad + 4 || c.w <= tbh_eff * 3U + btn_pad * 2U)
@@ -785,7 +799,7 @@ bool WindowPointInMaxBox(WindowHandle h, u32 x, u32 y)
         return false;
     }
     const auto& c = g_windows[h].chrome;
-    const u32 tbh = (c.title_height == 0) ? 22 : c.title_height;
+    const u32 tbh = EffectiveTitleHeight(c);
     const u32 tbh_eff = (tbh > c.h) ? c.h : tbh;
     const u32 btn_pad = 4;
     if (tbh_eff <= 2 * btn_pad + 4 || c.w <= tbh_eff * 3U + btn_pad * 2U)
@@ -810,7 +824,7 @@ bool WindowPointInMinBox(WindowHandle h, u32 x, u32 y)
         return false;
     }
     const auto& c = g_windows[h].chrome;
-    const u32 tbh = (c.title_height == 0) ? 22 : c.title_height;
+    const u32 tbh = EffectiveTitleHeight(c);
     const u32 tbh_eff = (tbh > c.h) ? c.h : tbh;
     const u32 btn_pad = 4;
     if (tbh_eff <= 2 * btn_pad + 4 || c.w <= tbh_eff * 3U + btn_pad * 2U)
@@ -995,14 +1009,21 @@ void WindowDrawAllOrdered()
         // the visible silhouette reads as rounded. Other themes
         // keep rectangular chrome (preserves their original v0
         // look bit-for-bit).
-        // All five Duet-family themes (slate Duet + light + 3
-        // accent variants) share the rounded-corner punch;
-        // Classic / Slate10 / Amber stay rectangular.
+        // All Duet-family themes (slate Duet + light + 3 accent
+        // variants + classic mode) share the rounded-corner
+        // punch; Classic / Slate10 / Amber stay rectangular.
+        // DuetClassic uses a smaller 4-px radius to match the
+        // era's chunkier proportions vs the modern variants'
+        // 6-px softness.
         const ThemeId tid = ThemeCurrentId();
         if (tid == ThemeId::Duet || tid == ThemeId::DuetLight || tid == ThemeId::DuetBlue ||
             tid == ThemeId::DuetViolet || tid == ThemeId::DuetGreen)
         {
             FramebufferPunchCorners(drawn.x, drawn.y, drawn.w, drawn.h, 6U, g_compose_desktop_rgb);
+        }
+        else if (tid == ThemeId::DuetClassic)
+        {
+            FramebufferPunchCorners(drawn.x, drawn.y, drawn.w, drawn.h, 4U, g_compose_desktop_rgb);
         }
         // Title text. White ink on the title-bar fill, 8-px top
         // padding + 8-px left padding so the first glyph clears
@@ -1028,7 +1049,7 @@ void WindowDrawAllOrdered()
         const char* subtitle = g_windows[h].mut_subtitle;
         if (subtitle != nullptr && subtitle[0] != '\0' && title_pixel_w > 0)
         {
-            const u32 tbh_for_sub = (drawn.title_height == 0) ? 22 : drawn.title_height;
+            const u32 tbh_for_sub = EffectiveTitleHeight(drawn);
             const u32 btn_pad = 4;
             const u32 btn_side = (tbh_for_sub > 2 * btn_pad + 4) ? tbh_for_sub - 2 * btn_pad : 0;
             const u32 close_left =
@@ -1075,7 +1096,7 @@ void WindowDrawAllOrdered()
         // it (origin is just inside the 2-px border, under the
         // title bar).
         const auto& cc = drawn;
-        const u32 tbh_c = (cc.title_height == 0) ? 22 : cc.title_height;
+        const u32 tbh_c = EffectiveTitleHeight(cc);
         const u32 tbh_eff_c = (tbh_c > cc.h) ? cc.h : tbh_c;
         const u32 client_x = cc.x + 2;
         const u32 client_y = cc.y + tbh_eff_c + 2;

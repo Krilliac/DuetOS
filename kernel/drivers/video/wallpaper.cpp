@@ -226,6 +226,7 @@ void WallpaperPaint(u32 desktop_rgb)
     case ThemeId::DuetBlue:
     case ThemeId::DuetViolet:
     case ThemeId::DuetGreen:
+    case ThemeId::DuetClassic:
         // Every Duet-family theme stacks the topo backdrop under
         // the foreground arcs — the layered look matches the
         // prototype's multi-layer SVG composition. Both paints

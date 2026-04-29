@@ -57,6 +57,11 @@
  *               forest green). The amber accent for
  *               document-style apps stays — keeps the dual-
  *               accent "duet" identity intact across variants.
+ *   - DuetClassic : Duet's "classic mode" sibling — Win9x grey
+ *               panels (#C0C0C0) with the dual-accent teal /
+ *               amber title hues retained. The intentional
+ *               retro-grey contrast against the modern Duet
+ *               story is the point of the variant.
  *
  * Switching themes is a runtime operation (Ctrl+Alt+Y cycles, the
  * `theme` shell command switches or cycles by name, or
@@ -84,7 +89,8 @@ enum class ThemeId : u8
     DuetBlue = 5,
     DuetViolet = 6,
     DuetGreen = 7,
-    kCount = 8,
+    DuetClassic = 8,
+    kCount = 9,
 };
 
 /// Stable role tag for each application window whose chrome is
@@ -138,6 +144,14 @@ struct Theme
     // on the amber CRT theme, slate-ink on the Duet theme).
     u32 cursor_outline;
     u32 cursor_fill;
+
+    // Chrome dimensions. Per-theme so the Duet family can
+    // ship the prototype's larger titlebar (26 px vs the
+    // existing 22 px) without breaking other themes' layouts.
+    // Windows whose `WindowChrome.title_height` is 0 (the
+    // common case — main.cpp leaves it 0 at registration)
+    // sample this. Explicit per-window heights still win.
+    u32 title_bar_height;
 };
 
 /// Read-only snapshot of the active theme. Valid for as long as

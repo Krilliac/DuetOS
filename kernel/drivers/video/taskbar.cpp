@@ -193,7 +193,7 @@ void TaskbarRedraw()
     const ThemeId tid_start = ThemeCurrentId();
     const bool is_duet_family = tid_start == ThemeId::Duet || tid_start == ThemeId::DuetLight ||
                                 tid_start == ThemeId::DuetBlue || tid_start == ThemeId::DuetViolet ||
-                                tid_start == ThemeId::DuetGreen;
+                                tid_start == ThemeId::DuetGreen || tid_start == ThemeId::DuetClassic;
     if (is_duet_family)
     {
         constexpr u32 mark_label_w = 4 * 8; // "DUET"

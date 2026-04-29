@@ -8,6 +8,25 @@ struct can express. It is the source of truth that
 chrome work, and the eventual user-mode shell port will all be
 measured against.
 
+## Status (2026-04-29)
+
+| Area              | State |
+|-------------------|-------|
+| Slate Duet palette + per-role title hues | **Yes** |
+| Duet variants (Light, Blue, Violet, Green, Classic) | **Yes** — 6 Duet-family themes ship |
+| Window chrome (gradient title, ridge, drop shadow, X-glyph close, min/max/restore controls, subtitle, dim-on-blur, rounded corners on Duet family) | **Yes** |
+| Per-theme `title_bar_height` (22 / 26 px) | **Yes** |
+| Taskbar polish (gradient strip, rounded START + tabs, focus dot 8/14 px for pinned/running, theme-tinted Show Desktop sliver with click toggle) | **Yes** |
+| Wallpapers (duet-arcs + topo on Duet family; Classic bubbles, Slate10 grid, Amber scanlines on others) | **Yes** |
+| DuetMark on START | **Yes** (simplified two-circle form; partial-arc form deferred) |
+| Login screen + start menu + calendar + netpanel chrome polish | **Yes** |
+| Theme-aware cursor | **Yes** |
+| Per-window alpha (real compositor mask, 30-px titlebar, taskbar height/position) | **Deferred** — needs a real compositor / dimensions pass |
+| TTF/OTF rasterizer | **Deferred** — 8×8 bitmap font remains |
+| `FramebufferStrokePath` + partial-arc DuetMark / topo SVG / syscalls SVG wallpaper | **Deferred** — needs path stroker primitive |
+| Userland shell + TOML reader + `~/.config/duet/shell.toml` | **Deferred** — needs userland process |
+| procfs entries (`/proc/cpuhist`, `/sys/inspect`, `/proc/abi/*`, `/sys/syscalls`, `/proc/boottrace`) | **Deferred** — separate slice each |
+
 ## Personality (short form)
 
 > Refined, confident, calm. Two interlocking arcs as the
@@ -96,7 +115,7 @@ state, not theme state.
 
 | Prototype spec                                         | Ships in v0 Duet palette? | Notes |
 |--------------------------------------------------------|---------------------------|-------|
-| 30-px titlebar (26-px in compact)                      | No (height owned by widget code, not theme) | See "Phase 3 prerequisites" |
+| 30-px titlebar (26-px in compact)                      | Partial — `Theme.title_bar_height` is now per-theme. Duet family (Duet / DuetLight / DuetBlue / DuetViolet / DuetGreen) ships 26 px; non-Duet themes + DuetClassic stay at 22 px. The full 30-px target awaits a chrome-side pass that gives content rooms more vertical breathing room. |
 | 1-px border                                            | Yes — `window_border` is sampled by the existing border-draw path |
 | 6-px corner radius (0 when maximized)                  | Yes (Duet only) — `FramebufferPunchCorners(x, y, w, h, 6, desktop_rgb)` overpaints the four corner-quadrant pixels OUTSIDE the curve so the silhouette reads as rounded. Other themes keep rectangular chrome. Compositor mask is still the proper fix, but the punch is good enough as a v0 approximation. |
 | Vertical gradient on focus titlebar                    | Yes — `WindowDraw` paints `LightenRgb(colour_title, 24) → colour_title` with a 1-px highlight ridge on top |
@@ -259,10 +278,13 @@ ship yet. Each is its own slice — none are inside this commit.
 
 ## Deferred to follow-on slices
 
-- ~~Light + Classic-mode Duet palettes~~ — light-mode Duet
-  ships as `ThemeId::DuetLight` (sourced from the prototype's
-  light tokens, near-white canvas + dual-accent teal/amber);
-  Classic-mode Duet remains deferred.
+- ~~Light + Classic-mode Duet palettes~~ — both ship.
+  `ThemeId::DuetLight` carries the prototype's light tokens
+  (near-white canvas, dual-accent teal/amber, dark per-role
+  titles); `ThemeId::DuetClassic` carries Win9x panel grey
+  (#C0C0C0) with the same dual-accent identity in role
+  titles, plus a 4-px corner radius that matches the era's
+  chunkier chrome proportions.
 - ~~All of the prototype's accent variants beyond
   teal-amber~~ — DuetBlue / DuetViolet / DuetGreen ship as
   additional `ThemeId` entries. Each duplicates the slate Duet
