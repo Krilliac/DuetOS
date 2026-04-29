@@ -159,6 +159,7 @@ Five additional follow-ups landed:
 | `DEBUG_ASSERT` applied to hot paths | **Landed.** Three demonstration sites: `mm::FreeFrame` (frame⇄index round-trip), `sched::Schedule` (popped task is Ready), `mm::KFree` (chunk header alignment). All compile out in release. Exercises the pattern for future authors. |
 | CI exercises new presets | **Landed.** `.github/workflows/build.yml` adds a `build-flavor-matrix` job that builds `release-asserts`, `release-audit`, `release-lto`, `debug-fast` on every PR. The four-way matrix catches a flavor regression where a knob's compile-time branch silently breaks one preset. |
 | README documents the presets | **Landed.** New "Build flavors" section under the Build + run heading, with a per-preset use-case table and the boot-banner example. |
+| CI publishes downloadable ISOs for every flavor | **Landed.** `release.yml` now has a `build-flavor-assets` matrix job + `publish-flavor-channels` job. Three rolling channels: `latest-release` and `latest-debug` are the front runners; `latest-flavors` bundles the four specialized ISOs (release-asserts, release-audit, release-lto, debug-fast) in one release page with per-preset notes explaining when to use each. README cross-links the new channel and adds a "Front-runner downloads" line. |
 
 ## KASLR scope
 
