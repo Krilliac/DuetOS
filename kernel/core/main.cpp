@@ -96,6 +96,7 @@
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/ttf.h"
 #include "drivers/video/calendar.h"
 #include "drivers/video/menu.h"
 #include "drivers/video/netpanel.h"
@@ -655,6 +656,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                    []()
                                    {
                                        duetos::drivers::video::FramebufferSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    duetos::core::InitcallRegister(duetos::core::Phase::Drivers, "ttf-selftest",
+                                   []()
+                                   {
+                                       duetos::drivers::video::TtfSelfTest();
                                        return duetos::core::Result<void>{};
                                    });
     (void)duetos::core::RunPhase(duetos::core::Phase::Drivers);
