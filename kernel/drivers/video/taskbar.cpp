@@ -562,6 +562,11 @@ void TaskbarShowDesktopBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)
         *h_out = g_show_desktop_h;
 }
 
+u32 TaskbarHeight()
+{
+    return g_h;
+}
+
 void TaskbarStartBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)
 {
     // Keep these in lock-step with TaskbarRedraw's START block:

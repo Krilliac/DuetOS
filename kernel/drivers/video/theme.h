@@ -152,6 +152,17 @@ struct Theme
     // common case — main.cpp leaves it 0 at registration)
     // sample this. Explicit per-window heights still win.
     u32 title_bar_height;
+
+    // Taskbar strip height in pixels. The Duet family ships
+    // 36 px (the prototype's "compact 38 minus 2 for the
+    // accent line"); non-Duet themes + DuetClassic stay at
+    // 28 px. main.cpp seeds the taskbar with this value at
+    // boot. Live re-init on theme cycle is deferred —
+    // changing taskbar height mid-session would shift the
+    // console anchor and the maximize reserve in ways the
+    // current chrome can't unwind without a re-compose
+    // pass.
+    u32 taskbar_height;
 };
 
 /// Read-only snapshot of the active theme. Valid for as long as

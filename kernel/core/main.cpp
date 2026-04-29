@@ -985,7 +985,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // runtime so a different resolution still anchors correctly.
     {
         const auto fb_info = duetos::drivers::video::FramebufferGet();
-        constexpr duetos::u32 tb_h = 28;
+        // Per-theme taskbar height — Duet family ships 36 px,
+        // others ship 28. The fallback (theme.taskbar_height
+        // == 0 from a stale palette in a future ABI bump) keeps
+        // the historical 28-px strip so the chrome stays
+        // recognizable.
+        const duetos::u32 tb_h = (theme0.taskbar_height != 0) ? theme0.taskbar_height : 28u;
         const duetos::u32 tb_y = (fb_info.height > tb_h) ? fb_info.height - tb_h : 0;
         duetos::drivers::video::TaskbarInit(tb_y, tb_h, theme0.taskbar_bg, theme0.taskbar_fg, theme0.taskbar_accent,
                                             theme0.taskbar_tab_inactive, theme0.taskbar_border);

@@ -883,12 +883,15 @@ void WindowMaximize(WindowHandle h)
     g_windows[h].saved_w = c.w;
     g_windows[h].saved_h = c.h;
     const auto info = FramebufferGet();
-    // Reserve room for the taskbar at the bottom — assume the
-    // standard 28-px strip the boot path installs. A future
-    // theme-dimension slice will read this from the taskbar
-    // module directly.
-    constexpr u32 kReservedForTaskbar = 28;
-    const u32 max_h = (info.height > kReservedForTaskbar) ? info.height - kReservedForTaskbar : info.height;
+    // Reserve room for the taskbar at the bottom. Sample the
+    // live `TaskbarHeight()` so the per-theme strip height
+    // (36 px on Duet family, 28 px elsewhere) is honoured. A
+    // 0 return (no taskbar) falls through to the historical
+    // 28-px reserve so a no-taskbar mode still leaves a sane
+    // safety margin.
+    const u32 reserve = TaskbarHeight();
+    const u32 reserved_for_taskbar = (reserve != 0) ? reserve : 28u;
+    const u32 max_h = (info.height > reserved_for_taskbar) ? info.height - reserved_for_taskbar : info.height;
     c.x = 0;
     c.y = 0;
     c.w = info.width;

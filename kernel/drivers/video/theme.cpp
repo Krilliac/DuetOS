@@ -98,6 +98,7 @@ constexpr Theme kClassic = {
     .cursor_fill = 0x00FFFFFF,    // classic white fill
 
     .title_bar_height = 22,
+    .taskbar_height = 28,
 };
 
 // Amber is a deliberate retro exercise — a single-hue amber palette
@@ -153,6 +154,7 @@ constexpr Theme kAmber = {
     .cursor_fill = 0x00FFB840,
 
     .title_bar_height = 22,
+    .taskbar_height = 28,
 };
 
 constexpr Theme kSlate10 = {
@@ -211,6 +213,7 @@ constexpr Theme kSlate10 = {
     .cursor_fill = 0x00DDE6F0,
 
     .title_bar_height = 22,
+    .taskbar_height = 28,
 };
 
 // Duet — the redesigned palette. Slate-charcoal canvas, dual-accent
@@ -277,6 +280,7 @@ constexpr Theme kDuet = {
     // chrome buttons + subtitle slot have the breathing room
     // the design calls for.
     .title_bar_height = 26,
+    .taskbar_height = 36,
 };
 
 // DuetLight — light-mode sibling of Duet, sourced from the
@@ -335,6 +339,7 @@ constexpr Theme kDuetLight = {
     .cursor_fill = 0x000F8C80,
 
     .title_bar_height = 26,
+    .taskbar_height = 36,
 };
 
 // Duet accent variants. Each one duplicates the slate Duet
@@ -384,6 +389,7 @@ constexpr Theme kDuetBlue = {
     .cursor_outline = 0x000B0E13,
     .cursor_fill = 0x00E8EDF2,
     .title_bar_height = 26,
+    .taskbar_height = 36,
 };
 
 constexpr Theme kDuetViolet = {
@@ -422,6 +428,7 @@ constexpr Theme kDuetViolet = {
     .cursor_outline = 0x000B0E13,
     .cursor_fill = 0x00E8EDF2,
     .title_bar_height = 26,
+    .taskbar_height = 36,
 };
 
 constexpr Theme kDuetGreen = {
@@ -460,6 +467,7 @@ constexpr Theme kDuetGreen = {
     .cursor_outline = 0x000B0E13,
     .cursor_fill = 0x00E8EDF2,
     .title_bar_height = 26,
+    .taskbar_height = 36,
 };
 
 // DuetClassic — the prototype's "classic mode" sibling.
@@ -524,6 +532,7 @@ constexpr Theme kDuetClassic = {
     // Classic mode keeps the smaller 22-px title bar — the
     // cosier proportions match the era's UI.
     .title_bar_height = 22,
+    .taskbar_height = 28,
 };
 
 const Theme* const kThemes[static_cast<u32>(ThemeId::kCount)] = {

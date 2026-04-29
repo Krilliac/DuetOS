@@ -66,6 +66,13 @@ bool TaskbarContains(u32 x, u32 y);
 /// non-null out pointer; all four may be null to skip.
 void TaskbarStartBounds(u32* x, u32* y, u32* w, u32* h);
 
+/// Live taskbar strip height in pixels — what `TaskbarInit`
+/// last consumed. Returns 0 before init. Callers (e.g.
+/// `WindowMaximize`) use this as the bottom-edge reserve so
+/// they don't paint over the strip; the Duet family's larger
+/// 36-px taskbar is automatically respected.
+u32 TaskbarHeight();
+
 /// Bounds of the clock / date widget on the right edge. Lets a
 /// caller hit-test a click on the clock so it can toggle the
 /// calendar popup. Populated after TaskbarRedraw.
