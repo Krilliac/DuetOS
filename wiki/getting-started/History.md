@@ -267,8 +267,9 @@ subsystem at a time.
 
 - `CLAUDE.md` — the authoritative project context, coding standards,
   and anti-bloat guidelines.
-- `docs/ARCHITECTURE.md` — the layering model, how a Win32 call
-  travels from the PE's `call qword [iat]` to a kernel syscall.
+- [Architecture Overview](Architecture-Overview.md) — the layering model,
+  how a Win32 call travels from the PE's `call qword [iat]` to a kernel
+  syscall.
 - `kernel/loader/pe_loader.cpp` — PE spawn path with diagnostic
   PeReport.
 - `kernel/loader/pe_exports.cpp` — EAT parser.

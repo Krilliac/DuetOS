@@ -1,8 +1,31 @@
 # Syscall ABI Coverage Matrix
 
-_Auto-generated; do not edit by hand._
+> **Audience:** ABI consumers, PE/Linux thunk authors, kernel hackers
+>
+> **Execution context:** N/A (specification)
+>
+> **Maturity:** ABI commitment — once a syscall number is published it is forever
 
+## Overview
 
+This page is the cross-ABI coverage matrix for every syscall surface
+DuetOS exposes (native `int 0x80`, Win32 NT, Linux). The numeric IDs,
+status, and owner-file columns are auto-generated.
+
+For the live native handler list (numbered against
+`kernel/syscall/syscall_names.def`), see the auto-block at the bottom
+of this page; it is refreshed by `docs/sync-wiki.sh sync`. The same
+data is also exported as machine-readable
+[`docs/syscall-abi-matrix.csv`](../../docs/syscall-abi-matrix.csv) and
+[`docs/syscall-abi-matrix.json`](../../docs/syscall-abi-matrix.json).
+
+For the calling-convention rules and the relationship between syscalls
+and capabilities, see [Syscalls](../kernel/Syscalls.md) and
+[Capabilities](../security/Capabilities.md).
+
+## Coverage Matrix
+
+_Auto-generated coverage matrix; do not edit by hand._
 
 | ABI | number | name | status | owner file/function | fallback behavior |
 | --- | ---: | --- | --- | --- | --- |
@@ -1025,3 +1048,139 @@ _Auto-generated; do not edit by hand._
 | nt | 486 | `NtWaitForWorkViaWorkerFactory` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 487 | `NtWaitHighEventPair` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 488 | `NtWaitLowEventPair` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+
+## Syscall Handler Inventory
+
+<!-- AUTO:syscall_list -->
+| # | Symbol |
+|---|--------|
+| 0 | `SYS_EXIT` |
+| 1 | `SYS_GETPID` |
+| 2 | `SYS_WRITE` |
+| 3 | `SYS_YIELD` |
+| 4 | `SYS_STAT` |
+| 5 | `SYS_READ` |
+| 6 | `SYS_DROPCAPS` |
+| 7 | `SYS_SPAWN` |
+| 8 | `SYS_GETPROCID` |
+| 9 | `SYS_GETLASTERROR` |
+| 10 | `SYS_SETLASTERROR` |
+| 11 | `SYS_HEAP_ALLOC` |
+| 12 | `SYS_HEAP_FREE` |
+| 13 | `SYS_PERF_COUNTER` |
+| 14 | `SYS_HEAP_SIZE` |
+| 15 | `SYS_HEAP_REALLOC` |
+| 16 | `SYS_WIN32_MISS_LOG` |
+| 17 | `SYS_GETTIME_FT` |
+| 18 | `SYS_NOW_NS` |
+| 19 | `SYS_SLEEP_MS` |
+| 20 | `SYS_FILE_OPEN` |
+| 21 | `SYS_FILE_READ` |
+| 22 | `SYS_FILE_CLOSE` |
+| 23 | `SYS_FILE_SEEK` |
+| 24 | `SYS_FILE_FSTAT` |
+| 25 | `SYS_MUTEX_CREATE` |
+| 26 | `SYS_MUTEX_WAIT` |
+| 27 | `SYS_MUTEX_RELEASE` |
+| 28 | `SYS_VMAP` |
+| 29 | `SYS_VUNMAP` |
+| 30 | `SYS_EVENT_CREATE` |
+| 31 | `SYS_EVENT_SET` |
+| 32 | `SYS_EVENT_RESET` |
+| 33 | `SYS_EVENT_WAIT` |
+| 34 | `SYS_TLS_ALLOC` |
+| 35 | `SYS_TLS_FREE` |
+| 36 | `SYS_TLS_GET` |
+| 37 | `SYS_TLS_SET` |
+| 38 | `SYS_BP_INSTALL` |
+| 39 | `SYS_BP_REMOVE` |
+| 40 | `SYS_GETTIME_ST` |
+| 41 | `SYS_ST_TO_FT` |
+| 42 | `SYS_FT_TO_ST` |
+| 43 | `SYS_FILE_WRITE` |
+| 44 | `SYS_FILE_CREATE` |
+| 45 | `SYS_THREAD_CREATE` |
+| 46 | `SYS_DEBUG_PRINT` |
+| 47 | `SYS_MEM_STATUS` |
+| 48 | `SYS_WAIT_MULTI` |
+| 49 | `SYS_SYSTEM_INFO` |
+| 50 | `SYS_DEBUG_PRINTW` |
+| 51 | `SYS_SEM_CREATE` |
+| 52 | `SYS_SEM_RELEASE` |
+| 53 | `SYS_SEM_WAIT` |
+| 54 | `SYS_THREAD_WAIT` |
+| 55 | `SYS_THREAD_EXIT_CODE` |
+| 56 | `SYS_NT_INVOKE` |
+| 57 | `SYS_DLL_PROC_ADDRESS` |
+| 58 | `SYS_WIN_CREATE` |
+| 59 | `SYS_WIN_DESTROY` |
+| 60 | `SYS_WIN_SHOW` |
+| 61 | `SYS_WIN_MSGBOX` |
+| 62 | `SYS_WIN_PEEK_MSG` |
+| 63 | `SYS_WIN_GET_MSG` |
+| 64 | `SYS_WIN_POST_MSG` |
+| 65 | `SYS_GDI_FILL_RECT` |
+| 66 | `SYS_GDI_TEXT_OUT` |
+| 67 | `SYS_GDI_RECTANGLE` |
+| 68 | `SYS_GDI_CLEAR` |
+| 69 | `SYS_WIN_MOVE` |
+| 70 | `SYS_WIN_GET_RECT` |
+| 71 | `SYS_WIN_SET_TEXT` |
+| 72 | `SYS_WIN_TIMER_SET` |
+| 73 | `SYS_WIN_TIMER_KILL` |
+| 74 | `SYS_GDI_LINE` |
+| 75 | `SYS_GDI_ELLIPSE` |
+| 76 | `SYS_GDI_SET_PIXEL` |
+| 77 | `SYS_WIN_GET_KEYSTATE` |
+| 78 | `SYS_WIN_GET_CURSOR` |
+| 79 | `SYS_WIN_SET_CURSOR` |
+| 80 | `SYS_WIN_SET_CAPTURE` |
+| 81 | `SYS_WIN_RELEASE_CAPTURE` |
+| 82 | `SYS_WIN_GET_CAPTURE` |
+| 83 | `SYS_WIN_CLIP_SET_TEXT` |
+| 84 | `SYS_WIN_CLIP_GET_TEXT` |
+| 85 | `SYS_WIN_GET_LONG` |
+| 86 | `SYS_WIN_SET_LONG` |
+| 87 | `SYS_WIN_INVALIDATE` |
+| 88 | `SYS_WIN_VALIDATE` |
+| 89 | `SYS_WIN_GET_ACTIVE` |
+| 90 | `SYS_WIN_SET_ACTIVE` |
+| 91 | `SYS_WIN_GET_METRIC` |
+| 92 | `SYS_WIN_ENUM` |
+| 93 | `SYS_WIN_FIND` |
+| 94 | `SYS_WIN_SET_PARENT` |
+| 95 | `SYS_WIN_GET_PARENT` |
+| 96 | `SYS_WIN_GET_RELATED` |
+| 97 | `SYS_WIN_SET_FOCUS` |
+| 98 | `SYS_WIN_GET_FOCUS` |
+| 99 | `SYS_WIN_CARET` |
+| 100 | `SYS_WIN_BEEP` |
+| 101 | `SYS_GFX_D3D_STUB` |
+| 102 | `SYS_GDI_BITBLT` |
+| 103 | `SYS_WIN_BEGIN_PAINT` |
+| 104 | `SYS_WIN_END_PAINT` |
+| 105 | `SYS_GDI_FILL_RECT_USER` |
+| 106 | `SYS_GDI_CREATE_COMPAT_DC` |
+| 107 | `SYS_GDI_CREATE_COMPAT_BITMAP` |
+| 108 | `SYS_GDI_CREATE_SOLID_BRUSH` |
+| 109 | `SYS_GDI_GET_STOCK_OBJECT` |
+| 110 | `SYS_GDI_SELECT_OBJECT` |
+| 111 | `SYS_GDI_DELETE_DC` |
+| 112 | `SYS_GDI_DELETE_OBJECT` |
+| 113 | `SYS_GDI_BITBLT_DC` |
+| 114 | `SYS_GDI_SET_TEXT_COLOR` |
+| 115 | `SYS_GDI_SET_BK_COLOR` |
+| 116 | `SYS_GDI_SET_BK_MODE` |
+| 117 | `SYS_GDI_STRETCH_BLT_DC` |
+| 118 | `SYS_GDI_CREATE_PEN` |
+| 119 | `SYS_GDI_MOVE_TO_EX` |
+| 120 | `SYS_GDI_LINE_TO` |
+| 121 | `SYS_GDI_DRAW_TEXT_USER` |
+| 122 | `SYS_GDI_RECTANGLE_FILLED` |
+| 123 | `SYS_GDI_ELLIPSE_FILLED` |
+| 124 | `SYS_GDI_PAT_BLT` |
+| 125 | `SYS_GDI_TEXT_OUT_W` |
+| 126 | `SYS_GDI_DRAW_TEXT_W` |
+| 127 | `SYS_GDI_GET_SYS_COLOR` |
+| 128 | `SYS_GDI_GET_SYS_COLOR_BRUSH` |
+<!-- /AUTO:syscall_list -->

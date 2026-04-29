@@ -31,6 +31,24 @@ scheduler, and our syscalls. Bits as shipped, running on DuetOS.
 
 ---
 
+## Documentation
+
+The full reference is in the [**wiki**](wiki/Home.md). Quick entry
+points:
+
+| You want to | Start at |
+|-------------|----------|
+| Build + boot DuetOS | [Getting Started](wiki/getting-started/Getting-Started.md) |
+| Understand the layering | [Architecture Overview](wiki/getting-started/Architecture-Overview.md) |
+| Trace the project's evolution | [History](wiki/getting-started/History.md) |
+| Find a syscall number | [Syscall ABI](wiki/specifications/Syscall-ABI.md) |
+| Hack on the kernel | [Boot](wiki/kernel/Boot.md) → [Memory](wiki/kernel/Memory-Management.md) → [Scheduler](wiki/kernel/Scheduler.md) |
+| Ship a Win32 PE | [Win32 PE Subsystem](wiki/subsystems/Win32-PE-Subsystem.md) → [PE Loader](wiki/subsystems/PE-Loader.md) |
+| Understand security model | [Sandboxing](wiki/security/Sandboxing.md) → [Capabilities](wiki/security/Capabilities.md) |
+
+The wiki is populated and refreshed by `docs/sync-wiki.sh`. Validate
+navigation with `tools/check-wiki-nav.sh`.
+
 ## What's here
 
 - **Kernel** (`kernel/`) — Multiboot2 boot, 4-level paging, per-process
@@ -79,9 +97,10 @@ Kernel-mode drivers (PCIe, NVMe, AHCI, USB, NIC, GPU, audio, input)
 
 The Win32 DLLs are **translators**, not parallel subsystems. There is
 one TCP stack in the kernel, one compositor, one VFS, one registry —
-each reachable from two entry ABIs (native and Win32). See
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full picture,
-including how `ws2_32!send` reaches the e1000 transmit ring.
+each reachable from two entry ABIs (native and Win32). See the
+[Architecture Overview](wiki/getting-started/Architecture-Overview.md)
+in the wiki for the full picture, including how `ws2_32!send` reaches
+the e1000 transmit ring.
 
 > **Subsystem isolation rule.** Win32 and Linux are *facades for
 > executing PE/ELF binaries*. They never drive DuetOS. Every effect a
@@ -90,8 +109,9 @@ including how `ws2_32!send` reaches the e1000 transmit ring.
 > capability set, the scheduler, address-space ownership, and FS
 > mediation are kernel-owned and not reachable past the syscall
 > boundary. NT/Linux thunks translate ABI shapes; they do not extend
-> the kernel's authority. See [`CLAUDE.md`](CLAUDE.md#subsystem-isolation-do-not-violate)
-> for the full rule set and `.claude/knowledge/subsystem-isolation-decision-v0.md`
+> the kernel's authority. See
+> [Subsystem Isolation](wiki/kernel/Subsystem-Isolation.md) for the full
+> rule set and `.claude/knowledge/subsystem-isolation-decision-v0.md`
 > for the audit checklist.
 
 ---
@@ -198,7 +218,7 @@ recompose.
 | Amber — single-hue retro-CRT tribute | **Duet — redesigned dual-accent** *(new)* |
 |---------------------------------------|--------------------------------------------|
 | ![amber theme](docs/screenshots/05-desktop-amber.png) | ![duet theme](docs/screenshots/06-desktop-duet.png) |
-| Every surface is a shade of warm amber on near-black, in the spirit of 1980s IBM / Wyse monochrome terminals. Doubles as a stress test for the theme system — anything that hard-coded a multi-hue assumption shows up here first. | Slate-charcoal canvas (`#0B0E13`) with **two accents**: teal `#2DD4BF` for native DuetOS surfaces, amber-warm hues for Win32 PE / document apps. Sourced from the React/Babel prototype under [`docs/duet-theme/prototype/`](docs/duet-theme/prototype/); per-token mapping documented in [`docs/duet-theme-spec.md`](docs/duet-theme-spec.md). |
+| Every surface is a shade of warm amber on near-black, in the spirit of 1980s IBM / Wyse monochrome terminals. Doubles as a stress test for the theme system — anything that hard-coded a multi-hue assumption shows up here first. | Slate-charcoal canvas (`#0B0E13`) with **two accents**: teal `#2DD4BF` for native DuetOS surfaces, amber-warm hues for Win32 PE / document apps. Sourced from the React/Babel prototype under [`docs/duet-theme/prototype/`](docs/duet-theme/prototype/); per-token mapping documented in [Duet Theme Spec](wiki/specifications/Duet-Theme-Spec.md). |
 
 ### Native pixel rendering — gfxdemo + DirectX v0 path
 
@@ -297,11 +317,14 @@ returns `CLASS_E_CLASSNOTAVAILABLE`. Each of those is its own
 multi-slice implementation track; the DLL surface is the
 scaffolding that makes them possible.
 
-See [`docs/HISTORY.md`](docs/HISTORY.md) for how the project got to
-this point and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the
-current layering model. [`CLAUDE.md`](CLAUDE.md) is the authoritative
-development guide — coding standards, anti-bloat guidelines, and the
-full architectural statement.
+See the [project history](wiki/getting-started/History.md) for how the
+project got to this point and the
+[Architecture Overview](wiki/getting-started/Architecture-Overview.md)
+for the current layering model. [`CLAUDE.md`](CLAUDE.md) is the
+authoritative development guide — coding standards, anti-bloat
+guidelines, and the full architectural statement; the
+[wiki](wiki/Home.md) is the human-facing digest of the same material
+plus the per-subsystem reference pages.
 
 ---
 
@@ -349,8 +372,11 @@ userland/
                thread_stress, syscall_stress, customdll_test,
                reg_fopen_test, …)
   libs/        29 userland DLLs shipped into every Win32-imports PE
-tools/         build helpers, QEMU launcher, embed-blob, gen-symbols
-docs/          architecture, history, ABI matrix, design notes
+tools/         build helpers, QEMU launcher, embed-blob, gen-symbols,
+               wiki check scripts
+docs/          screenshots, theme prototypes, ABI data files (csv/json),
+               sync-wiki.sh
+wiki/          public-facing reference (start at wiki/Home.md)
 tests/         hosted + on-target tests
 .claude/       working notes kept from development
 ```
