@@ -53,8 +53,14 @@ The DLLs are not flat stubs. Real implementations land per slice:
 
 - **Registry** (`advapi32`): hand-curated static tree with
   `HKLM\Software\Microsoft\Windows NT\CurrentVersion`, `HKCU\Volatile
-  Environment`, etc. Real case-insensitive `RegOpenKeyEx` /
-  `RegQueryValueEx` with `REG_SZ` / `REG_DWORD` and `ERROR_MORE_DATA`.
+  Environment`, etc., plus 8 prefix entries
+  (`HKLM\Software\Microsoft`, `HKCU\Software\Microsoft\Windows`, …)
+  so a caller can walk the tree one component at a time. Real
+  case-insensitive `RegOpenKeyEx` / `RegQueryValueEx` with `REG_SZ`
+  / `REG_DWORD` and `ERROR_MORE_DATA`. Enumeration is real:
+  `RegEnumKey*` / `RegEnumValue*` / `RegQueryInfoKey*` walk the
+  static tree and report `MaxNameLen` / `MaxValueNameLen` /
+  `MaxValueDataLen` so callers can size buffers up-front.
 - **File I/O** (`ucrtbase`): `fopen` / `fread` / `fseek` / `ftell` /
   `fgets` / `fgetc` / `fclose` wrap a `FILE*` around a real kernel
   handle and route through `SYS_FILE_*`.
