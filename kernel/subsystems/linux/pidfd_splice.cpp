@@ -203,28 +203,28 @@ void PidfdRelease(core::Process* p, u64 target_pid)
 // splice / tee / vmsplice — v0 bounce-buffer impls
 // =========================================================
 
-// splice / tee / vmsplice — v0 honest scope:
+// splice / tee / vmsplice — kernel-bypass byte movement.
 //
-// Our existing PipeRead / PipeWrite signatures take user-space
-// pointers and bounce through CopyToUser/CopyFromUser, which
-// fail on kernel-direct addresses. A real splice would need
-// either (a) a kernel-bypass variant of PipeRead/PipeWrite that
-// accepts kernel pointers, or (b) actual page-grant semantics.
+// v0 covers the highest-leverage shape: pipe→pipe transfer
+// without leaving the kernel. PipeSpliceFromPipe / PipeTeeFromPipe
+// (kernel/subsystems/linux/syscall_pipe.cpp) walk the pool rings
+// directly — no CopyToUser/CopyFromUser bounce, no userland
+// scratch buffer, no read+write loop the caller has to drive.
+// The single-iteration shape matches Linux's contract: one call
+// moves at most one transfer's worth of bytes; loops live in the
+// caller.
 //
-// v0 takes a third path: implement splice as "we don't actually
-// route bytes, but we report the API exists so library
-// fallbacks (read-then-write loops) trigger cleanly." A caller
-// that asks for splice and gets -EINVAL knows to fall back. For
-// the most common case (pipe→pipe, where the kernel-bypass
-// would matter most), we report -EINVAL so the caller falls
-// back to the read+write loop the existing pipe surface
-// supports. Sub-GAP: real splice is a follow-up that needs
-// either kernel-side pipe-pool peek+write or page-grant
-// machinery.
+// Sub-GAPs (returned as -EINVAL so library fallbacks engage):
+//   - file ↔ pipe paths (would need FAT32 read/write integration)
+//   - true page-grant zero-copy (vmsplice with SPLICE_F_GIFT)
+//   - SPLICE_F_NONBLOCK / SPLICE_F_MOVE / SPLICE_F_MORE flags
+//     (accepted but ignored — splice is already non-blocking on
+//     dst-full and blocks once on src-empty exactly like
+//     PipeRead, which is the practical "blocking" mode anyway).
+//   - splice with explicit offsets (for file ends only — fails
+//     -EINVAL with pipe ends as Linux does).
 i64 DoSplice(u64 fd_in, u64 user_off_in, u64 fd_out, u64 user_off_out, u64 len, u64 flags)
 {
-    (void)user_off_in;
-    (void)user_off_out;
     (void)flags;
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || fd_in >= 16 || fd_out >= 16)
@@ -233,10 +233,22 @@ i64 DoSplice(u64 fd_in, u64 user_off_in, u64 fd_out, u64 user_off_out, u64 len, 
         return kEBADF;
     if (len == 0)
         return 0;
-    // -EINVAL is the canonical "you must have at least one pipe
-    // end and the configuration isn't supported" return. Library
-    // fallbacks (sendfile / glibc) catch this and retry through
-    // read+write.
+    // pipe→pipe fast path: source is a pipe-read end (state 3),
+    // destination is a pipe-write end (state 4). Linux requires
+    // pipes don't take an offset — non-null user_off_* with a pipe
+    // is -ESPIPE.
+    const u32 in_state = p->linux_fds[fd_in].state;
+    const u32 out_state = p->linux_fds[fd_out].state;
+    if (in_state == 3 && out_state == 4)
+    {
+        if (user_off_in != 0 || user_off_out != 0)
+            return -29; // -ESPIPE
+        const u32 src_idx = p->linux_fds[fd_in].first_cluster;
+        const u32 dst_idx = p->linux_fds[fd_out].first_cluster;
+        return PipeSpliceFromPipe(dst_idx, src_idx, len);
+    }
+    // file ↔ pipe paths — sub-GAP. Library fallbacks catch
+    // -EINVAL and retry through read+write.
     return kEINVAL;
 }
 
@@ -246,13 +258,15 @@ i64 DoTee(u64 fd_in, u64 fd_out, u64 len, u64 flags)
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || fd_in >= 16 || fd_out >= 16)
         return kEBADF;
-    // tee requires both ends to be pipes per Linux. v0 doesn't
-    // implement the page-grant machinery, so refuse.
+    // tee requires both ends to be pipes per Linux. Source is the
+    // read end (state 3), destination is the write end (state 4).
     if (p->linux_fds[fd_in].state != 3 || p->linux_fds[fd_out].state != 4)
         return kEINVAL;
     if (len == 0)
         return 0;
-    return kEINVAL;
+    const u32 src_idx = p->linux_fds[fd_in].first_cluster;
+    const u32 dst_idx = p->linux_fds[fd_out].first_cluster;
+    return PipeTeeFromPipe(dst_idx, src_idx, len);
 }
 
 i64 DoVmsplice(u64 fd, u64 user_iov, u64 nr_segs, u64 flags)

@@ -290,6 +290,123 @@ i64 PipeWrite(u32 idx, u64 user_src, u64 len)
     return static_cast<i64>(to_write);
 }
 
+// splice / tee — kernel-bypass byte movement between two pipe
+// rings. No CopyFromUser/CopyToUser bounce; no per-byte loops on
+// the slow path because the rings are already kernel-owned and
+// already 4 KiB-bounded.
+//
+// Both operations match Linux's single-iteration shape: one call
+// moves at most one transfer's worth of bytes (≤ len, ≤ source
+// count, ≤ destination free). The caller's read/write loop
+// drives the next iteration. This matches glibc / sendfile's
+// expectation and keeps the kernel-side state machine simple.
+//
+// Source-side EOF (every writer closed) returns 0 as PipeRead
+// would. Destination-side disconnect (every reader closed)
+// returns -EPIPE.
+i64 PipeSpliceFromPipe(u32 dst_idx, u32 src_idx, u64 len)
+{
+    if (dst_idx >= kPipePoolCap || src_idx >= kPipePoolCap || len == 0)
+        return 0;
+    if (dst_idx == src_idx)
+        return -22; // -EINVAL — splice into itself is meaningless
+    Pipe& src = g_pipe_pool[src_idx];
+    Pipe& dst = g_pipe_pool[dst_idx];
+    arch::Cli();
+    // Source-side: block once if the ring is empty AND there are
+    // still writers (otherwise it's EOF or a torn pool slot).
+    while (src.in_use && src.count == 0)
+    {
+        if (src.write_refs == 0)
+        {
+            arch::Sti();
+            return 0; // EOF
+        }
+        sched::WaitQueueBlock(&src.read_wq);
+        arch::Cli();
+    }
+    if (!src.in_use)
+    {
+        arch::Sti();
+        return 0;
+    }
+    if (!dst.in_use || dst.read_refs == 0)
+    {
+        arch::Sti();
+        return kEpipe;
+    }
+    const u64 src_avail = src.count;
+    const u64 dst_free = kPipeBufBytes - dst.count;
+    u64 to_move = (len < src_avail) ? len : src_avail;
+    if (to_move > dst_free)
+        to_move = dst_free;
+    for (u64 i = 0; i < to_move; ++i)
+    {
+        dst.buf[dst.head] = src.buf[src.tail];
+        dst.head = (dst.head + 1) % kPipeBufBytes;
+        ++dst.count;
+        src.tail = (src.tail + 1) % kPipeBufBytes;
+        --src.count;
+    }
+    if (to_move > 0)
+    {
+        sched::WaitQueueWakeOne(&dst.read_wq);
+        sched::WaitQueueWakeOne(&src.write_wq);
+    }
+    arch::Sti();
+    return static_cast<i64>(to_move);
+}
+
+i64 PipeTeeFromPipe(u32 dst_idx, u32 src_idx, u64 len)
+{
+    if (dst_idx >= kPipePoolCap || src_idx >= kPipePoolCap || len == 0)
+        return 0;
+    if (dst_idx == src_idx)
+        return -22;
+    Pipe& src = g_pipe_pool[src_idx];
+    Pipe& dst = g_pipe_pool[dst_idx];
+    arch::Cli();
+    while (src.in_use && src.count == 0)
+    {
+        if (src.write_refs == 0)
+        {
+            arch::Sti();
+            return 0; // EOF
+        }
+        sched::WaitQueueBlock(&src.read_wq);
+        arch::Cli();
+    }
+    if (!src.in_use)
+    {
+        arch::Sti();
+        return 0;
+    }
+    if (!dst.in_use || dst.read_refs == 0)
+    {
+        arch::Sti();
+        return kEpipe;
+    }
+    const u64 src_avail = src.count;
+    const u64 dst_free = kPipeBufBytes - dst.count;
+    u64 to_copy = (len < src_avail) ? len : src_avail;
+    if (to_copy > dst_free)
+        to_copy = dst_free;
+    // Walk src starting at tail without consuming. Wraps the same
+    // way the source ring does.
+    u32 src_cursor = src.tail;
+    for (u64 i = 0; i < to_copy; ++i)
+    {
+        dst.buf[dst.head] = src.buf[src_cursor];
+        dst.head = (dst.head + 1) % kPipeBufBytes;
+        ++dst.count;
+        src_cursor = (src_cursor + 1) % kPipeBufBytes;
+    }
+    if (to_copy > 0)
+        sched::WaitQueueWakeOne(&dst.read_wq);
+    arch::Sti();
+    return static_cast<i64>(to_copy);
+}
+
 // ============================================================
 // Eventfd pool helpers
 // ============================================================

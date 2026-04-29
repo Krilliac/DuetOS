@@ -43,4 +43,21 @@ bool PipeReadReady(u32 idx);
 bool PipeWriteReady(u32 idx);
 bool EventfdReady(u32 idx);
 
+// splice / tee fast-paths — pipe-to-pipe byte movement that
+// stays inside the kernel-side ring buffers (no CopyFromUser /
+// CopyToUser bounce). Returns the number of bytes transferred
+// (≤ len), 0 on EOF, or a negative -EXX errno.
+//
+//   PipeSpliceFromPipe — single-iteration consume. Blocks once
+//     if the source ring is empty AND writers remain. Returns
+//     when something was moved or every writer has closed
+//     (source-side EOF). Does NOT block if the destination ring
+//     is full — partial transfer is the splice contract.
+//
+//   PipeTeeFromPipe — single-iteration peek. Same source-side
+//     blocking as splice, but the source's tail / count stay
+//     untouched (pure copy). Used by tee(2).
+i64 PipeSpliceFromPipe(u32 dst_idx, u32 src_idx, u64 len);
+i64 PipeTeeFromPipe(u32 dst_idx, u32 src_idx, u64 len);
+
 } // namespace duetos::subsystems::linux::internal

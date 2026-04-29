@@ -28,7 +28,7 @@ Headline gaps:
 - **Real rlimit enforcement** (currently mostly stored, not enforced)
 - **mremap for real**, full madvise advice handling
 - **pidfd poll-on-exit** (pidfd_getfd now real for pool-backed states)
-- **Real splice / tee / vmsplice page-grant** (currently -EINVAL except vmsplice→pipe)
+- **Real splice / tee zero-copy for file↔pipe** (pipe→pipe landed 2026-04-29; vmsplice→pipe was already real)
 - **userfaultfd, io_uring** (-ENOSYS facades only)
 - **landlock / seccomp filter execution** (-ENOSYS facades only)
 
@@ -641,8 +641,14 @@ have landed (see §10).
   completes signal delivery — currently default-action only
 - ~~**POSIX message queues**~~ — DONE (`efe483e` + 2026-04-29 timeout honoring)
 - ~~**SysV msg queues**~~ — DONE (`efe483e`)
-- **Real splice / tee zero-copy** (~300 LOC): kernel-bypass
-  PipeRead/Write variants OR real page-grant
+- ~~**Real splice / tee zero-copy**~~ — DONE (2026-04-29):
+  pipe→pipe fast path lands kernel-bypass via
+  `PipeSpliceFromPipe` / `PipeTeeFromPipe` in
+  `subsystems/linux/syscall_pipe.cpp`. No CopyToUser/FromUser
+  bounce; rings are touched directly. `tee(pipe→pipe)` peeks
+  without consuming. **Sub-GAPs**: file↔pipe paths still
+  -EINVAL (need FAT32 integration); SPLICE_F_GIFT page-grant
+  (vmsplice)
 - ~~**NtAdjustPrivilegesToken honoring caps**~~ — DONE
   (2026-04-29): SYS_TOKEN_ADJUST = 169 with LUID→cap mapping for
   SeDebugPrivilege / SeBackupPrivilege / SeRestorePrivilege /
