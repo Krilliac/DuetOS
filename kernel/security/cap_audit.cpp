@@ -1,10 +1,29 @@
 /*
  * DuetOS — capability-gate audit hook implementation.
  *
- * See cap_audit.h for the public contract. The trace function is
- * the only caller that actually pays attention to `kCapAuditMode`;
- * the counter helpers stay live regardless so a future runtime
- * `mode = Sample` flip can rely on the counter being current.
+ * See cap_audit.h for the public contract.
+ *
+ * Two-tier mode handling:
+ *   - The compile-time `core::kCapAuditMode` constexpr seeds the
+ *     boot-time default — that's what the build-flavor preset
+ *     selected. Off-mode builds compile away EmitLine entirely.
+ *   - At runtime, `g_mode` (initialised from the constexpr at boot)
+ *     can be flipped by the shell. The trace function reads `g_mode`
+ *     in non-Off compile-time builds; an Off-at-compile-time build
+ *     pays nothing for the indirection because the constexpr branch
+ *     short-circuits before `g_mode` is consulted.
+ *
+ * Why both:
+ *   - Compile-time gives us "release builds drop the verbosity by
+ *     default and the optimizer proves it by eliminating EmitLine
+ *     when Off". You can't reach Full from an Off-at-compile-time
+ *     build without rebuilding. That's a feature: a release image
+ *     that didn't budget for cap-audit overhead can't be tricked
+ *     into paying it at runtime.
+ *   - Runtime gives Sample/Full/Off-mode builds the ability to flip
+ *     between the three at the shell. An operator who wants verbose
+ *     forensic capture for one minute can `cap-audit mode full`,
+ *     observe, then `cap-audit mode sample` to dial back.
  */
 
 #include "security/cap_audit.h"
@@ -27,33 +46,46 @@ constinit u64 g_deny_count = 0;
 constinit u64 g_sample_cursor = 0;
 constinit bool g_force_next_sample = false;
 
-// Decide whether THIS call should emit a klog line. Folds to a
-// constant in non-Sample modes.
+// Runtime mode. Initialised from the compile-time constexpr at the
+// first call (or via CapAuditSetMode). The static-initialised value
+// matches the constexpr so a build that never calls CapAuditSetMode
+// behaves exactly as before.
+constinit duetos::core::CapAuditMode g_mode = duetos::core::kCapAuditMode;
+
+// Decide whether THIS call should emit a klog line. The compile-time
+// constexpr short-circuits the Off case so the function call vanishes
+// in Off-flavor builds; runtime mode handles the rest.
 bool ShouldEmit()
 {
     using duetos::core::CapAuditMode;
+    // If the compile-time mode is Off, no caller can flip the runtime
+    // to Sample/Full because EmitLine isn't even linked in. Short-
+    // circuit here so the runtime branch below is dead code.
     if constexpr (duetos::core::kCapAuditMode == CapAuditMode::Off)
     {
         return false;
     }
-    else if constexpr (duetos::core::kCapAuditMode == CapAuditMode::Full)
+
+    const CapAuditMode mode = g_mode;
+    if (mode == CapAuditMode::Off)
+    {
+        return false;
+    }
+    if (mode == CapAuditMode::Full)
     {
         return true;
     }
-    else
+    // Sample. The cursor is incremented every call; a line emits
+    // when the cursor crosses a stride boundary. The race under
+    // SMP is benign — at worst we miss or double-emit at the
+    // boundary, which the audit already tolerates as advisory.
+    if (g_force_next_sample)
     {
-        // Sample. The cursor is incremented every call; a line emits
-        // when the cursor crosses a stride boundary. The race under
-        // SMP is benign — at worst we miss or double-emit at the
-        // boundary, which the audit already tolerates as advisory.
-        if (g_force_next_sample)
-        {
-            g_force_next_sample = false;
-            return true;
-        }
-        const u64 next = ++g_sample_cursor;
-        return (next % duetos::core::kCapAuditSampleStride) == 0;
+        g_force_next_sample = false;
+        return true;
     }
+    const u64 next = ++g_sample_cursor;
+    return (next % duetos::core::kCapAuditSampleStride) == 0;
 }
 
 void EmitLine(const CapAuditEvent& event)
@@ -124,6 +156,36 @@ void CapAuditResetCounters()
 void CapAuditForceNextSample()
 {
     g_force_next_sample = true;
+}
+
+duetos::core::CapAuditMode CapAuditGetMode()
+{
+    return g_mode;
+}
+
+bool CapAuditSetMode(duetos::core::CapAuditMode mode)
+{
+    using duetos::core::CapAuditMode;
+    // An Off-at-compile-time build cannot honor a runtime flip — the
+    // EmitLine path was eliminated. Tell the caller so the shell can
+    // print a meaningful diagnostic instead of silently failing.
+    if constexpr (duetos::core::kCapAuditMode == CapAuditMode::Off)
+    {
+        return false;
+    }
+    g_mode = mode;
+    // Reset the sample cursor so the next stride starts fresh.
+    // Otherwise a flip from Full → Sample would carry an arbitrary
+    // cursor value and the first sample emit could happen at any
+    // call within the stride.
+    g_sample_cursor = 0;
+    g_force_next_sample = false;
+    return true;
+}
+
+duetos::core::CapAuditMode CapAuditCompileTimeMode()
+{
+    return duetos::core::kCapAuditMode;
 }
 
 void CapAuditSelfTest()

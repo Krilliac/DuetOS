@@ -384,6 +384,7 @@ void CmdInstr(u32 argc, char** argv);
 void CmdAddr2Sym(u32 argc, char** argv);
 void CmdInspect(u32 argc, char** argv);
 void CmdLockdepPanic(u32 argc, char** argv);
+void CmdCapAuditMode(u32 argc, char** argv);
 void CmdTracer(u32 argc, char** argv);
 void CmdPerf(u32 argc, char** argv);
 void CmdDomain(u32 argc, char** argv);

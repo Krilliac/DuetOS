@@ -481,6 +481,33 @@ if(DUETOS_BOOT_TTY)
     target_compile_definitions(duetos-kernel-stage1   PRIVATE DUETOS_BOOT_TTY=1)
 endif()
 
+# Link-time optimization (build-flavor follow-up). When ON, every
+# kernel TU is built with `-flto=thin` and the link consumes the
+# bitcode-flavored .o files via lld's ThinLTO. The two-stage
+# symbol-table generation still works because lld emits a real ELF
+# for each stage; gen-symbols.sh reads the stage-1 ELF normally.
+#
+# Costs:
+#   - First link is slower (lld walks the bitcode).
+#   - Debug info is preserved but optimization may reorder code;
+#     for triple-fault chases prefer a non-LTO debug build.
+# Wins:
+#   - Inlines across TU boundaries that single-TU codegen can't.
+#     The klog hot path and the cap-gate hot path benefit visibly
+#     on -O2 release.
+#
+# Wired off the top-level DUETOS_LTO option (declared in the root
+# CMakeLists.txt). Applied to both stages so symbol addresses
+# remain consistent across the symbol-table generation handoff.
+if(DUETOS_LTO)
+    set(DUETOS_LTO_FLAGS -flto=thin)
+    target_compile_options(duetos-kernel        PRIVATE ${DUETOS_LTO_FLAGS})
+    target_compile_options(duetos-kernel-stage1 PRIVATE ${DUETOS_LTO_FLAGS})
+    target_link_options(duetos-kernel        PRIVATE ${DUETOS_LTO_FLAGS})
+    target_link_options(duetos-kernel-stage1 PRIVATE ${DUETOS_LTO_FLAGS})
+    message(STATUS "DUETOS_LTO=ON — building kernel with -flto=thin")
+endif()
+
 # UBSAN runtime (plan D5 + D5-followup). When ON, every kernel TU
 # is built with `-fsanitize=undefined -fno-sanitize-trap=all`. The
 # `__ubsan_handle_*` symbols the compiler emits resolve to the

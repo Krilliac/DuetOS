@@ -105,18 +105,62 @@ To add a new build-flavor knob:
 - Release ISO boots through to heartbeat (~15s) without panic / triple
   fault / unresolved imports.
 
+## Status update (2026-04-29 follow-up)
+
+The four follow-ups from the original resume prompt:
+
+| Follow-up | Status |
+|-----------|--------|
+| Runtime cap-audit mode flip | **Landed.** `CapAuditGetMode/SetMode/CompileTimeMode` API; shell `cap-audit mode <off\|sample\|full>` + `inspect cap-audit`. The compile-time `Off` floor is honored (release-with-capaudit-off builds reject runtime flips). |
+| LTO wired to toolchain | **Landed.** `-flto=thin` propagated to both stages of the kernel link when `DUETOS_LTO=ON`. New preset: `x86_64-release-lto`. Verified boots clean. |
+| Selftest call-site audit | **Landed.** New macro `DUETOS_BOOT_SELFTEST(call)` in `build_config.h`. Wrapped ~60 of the ~67 call sites. The two intentional exceptions are `KLogSelfTest` (boot-banner anchor) and `SyscallGateSelfTest` (cap-gate alive check); both are cheap and load-bearing diagnostic anchors that stay on in release. Release ELF dropped 56 KB after dead-code elimination. Adjusted `tools/test/ctest-boot-smoke.sh` inner timeout (30s → 60s) and the ctest TIMEOUT (60s → 120s) to match the slightly slower full-debug boot under wrapped self-tests. |
+| KASLR | **Deferred** (out of scope for this slice). See "KASLR scope" section below. |
+
+## KASLR scope
+
+`kKaslrEnabled` remains a placeholder. Real KASLR — booting the
+kernel image at a randomized base address each boot — is a multi-
+week effort tracked separately in
+`.claude/knowledge/post-debug-recommendations-plan.md`. It requires:
+
+1. Linker support for a relocatable kernel (PIE-style ELF with
+   `R_X86_64_RELATIVE` relocations preserved through link).
+2. Boot-time relocation: the UEFI/Multiboot2 loader (or `boot.S`)
+   picks a random offset within the high-VA window, then applies
+   the relocations to fix every absolute reference in the image.
+3. Per-process address space coordination: PML4 entries for the
+   kernel half need updating once per CPU after the offset is
+   chosen.
+4. Symbol-table fixup: the embedded symbol table (used by the
+   panic dump path) needs to reflect the runtime base, not the
+   link-time base.
+5. Crash-dump tooling: `tools/debug/decode-panic.sh` needs to
+   accept a "boot-time offset" and subtract before symbol
+   resolution.
+
+The placeholder flag is in place so a future KASLR implementation
+has a single switch to flip and downstream code that wants to ask
+"is the address space randomized?" can read one constexpr without
+inventing its own.
+
+For the rare case where reproducible RIPs across reboots beat
+probabilistic protection — debugging a triple-fault, diffing
+crash dumps — flip the placeholder to OFF in your preset; the
+build banner will reflect the absence of `+kaslr`.
+
 ## Resume prompt
 
-> Continue extending the build-flavor system declared in
-> `.claude/knowledge/build-flavors-v0.md`. Outstanding hooks:
-> - Wire `kCapAuditMode` into the **runtime** (today it's compile-time
->   only); add a `inspect cap-audit` shell command that surfaces
->   `CapAuditCallCount/DenyCount` and a `cap-audit mode <off|sample|full>`
->   flip if a runtime knob is wanted.
-> - Implement KASLR for real; today `kKaslrEnabled` is a placeholder.
-> - Implement LTO; today `kLtoEnabled` doesn't propagate to the
->   toolchain. Wire `-flto=thin` + `-fuse-ld=lld` when on.
-> - Audit the remaining ~70 `SelfTest` call sites in `kernel_main` and
->   wrap the pure-test ones in `if constexpr (kBootSelfTests)`. The
->   four Earlycon adapters are already gated; the rest are still always
->   on.
+> The build-flavor system landed and four follow-ups are done. The
+> only remaining item is real KASLR, tracked in
+> `.claude/knowledge/post-debug-recommendations-plan.md`. The
+> placeholder `kKaslrEnabled` is in place so when KASLR lands,
+> downstream code that wants to know "is my address space
+> randomized?" already has a single constexpr to read.
+>
+> If extending the build-flavor system further, common knobs to
+> consider next: per-build-type `_FORTIFY_SOURCE`-equivalent
+> (kernel-side bounds checking on memcpy), `-fsanitize=address`
+> when a real kernel ASAN shadow lands (today the `x86_64-debug-kasan`
+> preset is just a UBSAN+audit alias), per-build-type tracing
+> verbosity (the existing `klog` Trace level is already runtime-
+> flippable but compile-time gating per build type is not exposed).

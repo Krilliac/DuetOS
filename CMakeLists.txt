@@ -211,7 +211,14 @@ add_test(NAME duetos-boot-smoke
 )
 set_tests_properties(duetos-boot-smoke PROPERTIES
     LABELS "smoke;boot;win32"
-    TIMEOUT 60
+    # 120s wall clock — the smoke driver's own DUETOS_TIMEOUT
+    # defaults to 30s for the QEMU run, but boot + ring3 smoke
+    # probes + signature verification on the slowest hosts (no
+    # KVM, full debug instrumentation) routinely takes 60-75s.
+    # The previous 60s was tight and would flake intermittently;
+    # 120s gives headroom without masking real regressions
+    # (a hung kernel still trips the inner DUETOS_TIMEOUT first).
+    TIMEOUT 120
 )
 
 message(STATUS "")

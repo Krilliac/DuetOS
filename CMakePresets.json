@@ -81,6 +81,14 @@
                 "DUETOS_LOCK_ORDER_AUDIT": "ON",
                 "DUETOS_CAP_AUDIT": "Full"
             }
+        },
+        {
+            "name": "x86_64-release-lto",
+            "displayName": "x86_64 release with ThinLTO (cross-TU inlining; slower link)",
+            "inherits": "x86_64-release",
+            "cacheVariables": {
+                "DUETOS_LTO": "ON"
+            }
         }
     ],
     "buildPresets": [
@@ -111,6 +119,10 @@
         {
             "name": "x86_64-debug-kasan",
             "configurePreset": "x86_64-debug-kasan"
+        },
+        {
+            "name": "x86_64-release-lto",
+            "configurePreset": "x86_64-release-lto"
         }
     ]
 }

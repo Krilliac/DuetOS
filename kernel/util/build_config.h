@@ -223,3 +223,26 @@ constexpr const char* BuildFlavorName()
 }
 
 } // namespace duetos::core
+
+// -----------------------------------------------------------------
+// DUETOS_BOOT_SELFTEST(call)
+//
+// Wrap a pure-test SelfTest invocation so release builds skip it
+// while debug builds run it as before. The `if constexpr` guard
+// makes the call dead code that the optimizer drops at any
+// optimization level, including -O0.
+//
+// Use this for selftests with NO init side effect — i.e. the call
+// only validates and panics on failure. Don't wrap selftests that
+// double as init validation (e.g. RegistrySelfTest after
+// RegistryInit, where the test seeds + checks state at the same
+// time).
+// -----------------------------------------------------------------
+#define DUETOS_BOOT_SELFTEST(call)                                                                                     \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        if constexpr (::duetos::core::kBootSelfTests)                                                                  \
+        {                                                                                                              \
+            call;                                                                                                      \
+        }                                                                                                              \
+    } while (0)

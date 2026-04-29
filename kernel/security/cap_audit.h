@@ -101,6 +101,27 @@ void CapAuditResetCounters();
 /// having to fire kCapAuditSampleStride synthetic events.
 void CapAuditForceNextSample();
 
+/// Read the current runtime audit mode. Initialised from
+/// `core::kCapAuditMode` at boot; flipped by `CapAuditSetMode`.
+/// Cheap (one byte load).
+duetos::core::CapAuditMode CapAuditGetMode();
+
+/// Set the runtime audit mode. Takes effect on the next
+/// `CapAuditTrace` call. Has NO EFFECT on a build whose compile-time
+/// mode is `Off` — the EmitLine path is dead code in such a build,
+/// so flipping the runtime to Full would silently do nothing. The
+/// shell command surfaces a warning when a flip is attempted on an
+/// Off-at-compile-time build (see kernel/shell).
+///
+/// Returns true if the mode was changed; false if the build's
+/// compile-time mode is Off (in which case nothing was changed).
+bool CapAuditSetMode(duetos::core::CapAuditMode mode);
+
+/// Compile-time minimum mode this build can reach. Equal to
+/// `core::kCapAuditMode`; exposed via this API so the shell can
+/// surface the floor without including build_config.h directly.
+duetos::core::CapAuditMode CapAuditCompileTimeMode();
+
 /// Boot-time self-test. Runs three synthetic events through
 /// `CapAuditTrace` and asserts the counters land where they should.
 /// Panics on mismatch — the audit is observability infrastructure,
