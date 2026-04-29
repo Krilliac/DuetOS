@@ -46,6 +46,7 @@
 #include "drivers/video/menu.h"
 #include "drivers/video/netpanel.h"
 #include "drivers/video/taskbar.h"
+#include "drivers/video/theme.h"
 #include "drivers/video/wallpaper.h"
 
 namespace duetos::drivers::video
@@ -305,6 +306,16 @@ constinit WindowHandle g_active_window = kWindowInvalid;
 // function — a dedicated compositor module would be over-
 // engineering at v0 scale.
 constinit DisplayMode g_display_mode = DisplayMode::Desktop;
+
+// Desktop fill colour observed on the most recent DesktopCompose
+// pass. `WindowDrawAllOrdered` reads this when rounding window
+// corners on the Duet theme — the punch primitive needs a "what
+// colour was here before chrome" approximation, and the gradient
+// mid-tone (= the raw desktop_rgb argument) is the cheapest
+// reasonable answer until per-pixel sampling lands. Defaults to
+// 0 so the corner-punch is a no-op before any compose pass has
+// run (i.e. during the initial framebuffer self-test).
+constinit u32 g_compose_desktop_rgb = 0;
 
 // Muted colour used for inactive windows' title bars. Chosen
 // slightly darker + desaturated versus any window's own
@@ -771,6 +782,17 @@ void WindowDrawAllOrdered()
             drawn.colour_title = kInactiveTitleRgb;
         }
         WindowDraw(drawn);
+        // Rounded-corner approximation for the Duet theme. The
+        // chrome itself is painted as a rectangle; we then
+        // overpaint the four corner-quadrant pixels OUTSIDE a
+        // 6-px radius curve with the desktop fill colour, so
+        // the visible silhouette reads as rounded. Other themes
+        // keep rectangular chrome (preserves their original v0
+        // look bit-for-bit).
+        if (ThemeCurrentId() == ThemeId::Duet)
+        {
+            FramebufferPunchCorners(drawn.x, drawn.y, drawn.w, drawn.h, 6U, g_compose_desktop_rgb);
+        }
         // Title text. White ink on the title-bar fill, 8-px top
         // padding + 8-px left padding so the first glyph clears
         // the 2-px outer border comfortably.
@@ -1188,6 +1210,12 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
     // paint) skips the gradient since lighten / darken on 0
     // produces a flat result anyway — the resulting solid
     // FramebufferClear is faster.
+    // Publish the desktop-fill colour for the chrome path's
+    // rounded-corner punch (Duet theme). Set unconditionally —
+    // black-screen modes (login, TTY-flip) get a 0 punch which
+    // is still a sensible "behind the chrome" fallback.
+    g_compose_desktop_rgb = desktop_rgb;
+
     if (desktop_rgb == 0)
     {
         FramebufferClear(0);

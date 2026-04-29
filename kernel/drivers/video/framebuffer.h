@@ -180,6 +180,26 @@ void FramebufferDrawCircle(i32 cx, i32 cy, u32 radius, u32 rgb);
 /// No-op if `!Available()`.
 void FramebufferFillCircle(i32 cx, i32 cy, u32 radius, u32 rgb);
 
+/// "Punch" the four corners of an axis-aligned rect so a chrome
+/// path that already painted a rectangular surface ends up
+/// looking rounded. For each of the four `radius × radius`
+/// corner squares, every pixel whose squared distance to the
+/// corner-arc centre is GREATER than `radius²` (i.e. lives
+/// "outside" the curve) gets overpainted with `punch_rgb`. The
+/// curve itself + the body interior are left untouched.
+///
+/// Caller is expected to pass a `punch_rgb` that visually
+/// matches the surface AROUND the chrome (typically the
+/// desktop's gradient mid-tone). A perfect colour match would
+/// require per-pixel sampling of the underlying surface; this
+/// primitive accepts a single colour as the "good enough"
+/// approximation until a real compositor mask lands.
+///
+/// `radius == 0` is a no-op (rectangular chrome stays
+/// rectangular). Radius is clamped to `min(w, h) / 2`. Clipped;
+/// no-op on empty dimensions or `!Available()`.
+void FramebufferPunchCorners(u32 x, u32 y, u32 w, u32 h, u32 radius, u32 punch_rgb);
+
 /// Soft "drop shadow" for a window or panel. Paints a
 /// `depth`-pixel-wide alpha-blended L-shape along the right
 /// and bottom edges of the rect at `(x, y, w, h)`, using black

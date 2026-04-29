@@ -758,6 +758,55 @@ void FramebufferDrawRoundRect(u32 x, u32 y, u32 w, u32 h, u32 radius, u32 rgb)
     }
 }
 
+void FramebufferPunchCorners(u32 x, u32 y, u32 w, u32 h, u32 radius, u32 punch_rgb)
+{
+    if (!g_available || w == 0 || h == 0 || radius == 0)
+    {
+        return;
+    }
+    const u32 max_r = (w < h ? w : h) / 2U;
+    if (radius > max_r)
+    {
+        radius = max_r;
+    }
+    if (radius == 0)
+    {
+        return;
+    }
+    // Walk the (radius × radius) corner square. For each row
+    // (dy), find the smallest `dx` for which the pixel lies
+    // INSIDE the rounded curve — every column to the left of
+    // that dx is outside the curve and gets the punch colour.
+    // Mirror the result to all four corners.
+    const u32 r1 = radius - 1U;
+    const u32 r1_sq = r1 * r1;
+    for (u32 dy = 0; dy < radius; ++dy)
+    {
+        const u32 vy = r1 - dy;
+        const u32 vy_sq = vy * vy;
+        u32 dx = 0;
+        while (dx < radius)
+        {
+            const u32 vx = r1 - dx;
+            if (vx * vx + vy_sq <= r1_sq)
+            {
+                break;
+            }
+            ++dx;
+        }
+        if (dx == 0)
+            continue; // entire row is inside the curve — no punch
+        // Top-left: paint columns [0, dx) at row dy.
+        FramebufferFillRect(x, y + dy, dx, 1U, punch_rgb);
+        // Top-right: paint the mirrored span at row dy.
+        FramebufferFillRect(x + w - dx, y + dy, dx, 1U, punch_rgb);
+        // Bottom-left.
+        FramebufferFillRect(x, y + h - 1U - dy, dx, 1U, punch_rgb);
+        // Bottom-right.
+        FramebufferFillRect(x + w - dx, y + h - 1U - dy, dx, 1U, punch_rgb);
+    }
+}
+
 void FramebufferDropShadow(u32 x, u32 y, u32 w, u32 h, u32 depth, u8 start_alpha)
 {
     if (!g_available || w == 0 || h == 0 || depth == 0 || start_alpha == 0)
