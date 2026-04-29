@@ -276,11 +276,11 @@ constexpr Theme kDuet = {
     .cursor_outline = 0x000B0E13, // matches `desktop_bg`
     .cursor_fill = 0x00E8EDF2,    // matches `--ink`
 
-    // Duet ships the prototype's larger 26-px title bar so the
-    // chrome buttons + subtitle slot have the breathing room
-    // the design calls for.
-    .title_bar_height = 26,
-    .taskbar_height = 36,
+    // Duet ships the prototype's full 30-px title bar + 44-px
+    // taskbar so the chrome buttons, subtitle slot, and tray
+    // cells get the breathing room the design calls for.
+    .title_bar_height = 30,
+    .taskbar_height = 44,
 };
 
 // DuetLight — light-mode sibling of Duet, sourced from the
@@ -338,8 +338,8 @@ constexpr Theme kDuetLight = {
     .cursor_outline = 0x00161A20,
     .cursor_fill = 0x000F8C80,
 
-    .title_bar_height = 26,
-    .taskbar_height = 36,
+    .title_bar_height = 30,
+    .taskbar_height = 44,
 };
 
 // Duet accent variants. Each one duplicates the slate Duet
@@ -388,8 +388,8 @@ constexpr Theme kDuetBlue = {
     .console_bg = 0x000F1319,
     .cursor_outline = 0x000B0E13,
     .cursor_fill = 0x00E8EDF2,
-    .title_bar_height = 26,
-    .taskbar_height = 36,
+    .title_bar_height = 30,
+    .taskbar_height = 44,
 };
 
 constexpr Theme kDuetViolet = {
@@ -427,8 +427,8 @@ constexpr Theme kDuetViolet = {
     .console_bg = 0x000F1319,
     .cursor_outline = 0x000B0E13,
     .cursor_fill = 0x00E8EDF2,
-    .title_bar_height = 26,
-    .taskbar_height = 36,
+    .title_bar_height = 30,
+    .taskbar_height = 44,
 };
 
 constexpr Theme kDuetGreen = {
@@ -466,8 +466,8 @@ constexpr Theme kDuetGreen = {
     .console_bg = 0x000F1319,
     .cursor_outline = 0x000B0E13,
     .cursor_fill = 0x00E8EDF2,
-    .title_bar_height = 26,
-    .taskbar_height = 36,
+    .title_bar_height = 30,
+    .taskbar_height = 44,
 };
 
 // DuetClassic — the prototype's "classic mode" sibling.
