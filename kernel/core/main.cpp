@@ -2467,6 +2467,30 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                             SerialWrite("\n");
                         }
                     }
+                    else if (duetos::drivers::video::WindowPointInMaxBox(hit, cx, cy))
+                    {
+                        // Toggle: max → restore, restore → max.
+                        if (duetos::drivers::video::WindowIsMaximized(hit))
+                        {
+                            duetos::drivers::video::WindowRestore(hit);
+                            SerialWrite("[ui] restore window=");
+                        }
+                        else
+                        {
+                            duetos::drivers::video::WindowMaximize(hit);
+                            SerialWrite("[ui] maximize window=");
+                        }
+                        SerialWriteHex(hit);
+                        SerialWrite("\n");
+                        duetos::drivers::video::WindowRaise(hit);
+                    }
+                    else if (duetos::drivers::video::WindowPointInMinBox(hit, cx, cy))
+                    {
+                        duetos::drivers::video::WindowMinimize(hit);
+                        SerialWrite("[ui] minimize window=");
+                        SerialWriteHex(hit);
+                        SerialWrite("\n");
+                    }
                     else
                     {
                         duetos::u32 wx = 0, wy = 0;

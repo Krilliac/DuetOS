@@ -190,6 +190,36 @@ bool WindowPointInTitle(WindowHandle h, u32 x, u32 y);
 /// WindowDraw chrome paints.
 bool WindowPointInCloseBox(WindowHandle h, u32 x, u32 y);
 
+/// True iff (x, y) is inside the maximize/restore button —
+/// the second-from-the-right title-bar control box. Same
+/// per-side padding + side as the close box.
+bool WindowPointInMaxBox(WindowHandle h, u32 x, u32 y);
+
+/// True iff (x, y) is inside the minimize button — the
+/// third-from-the-right title-bar control box.
+bool WindowPointInMinBox(WindowHandle h, u32 x, u32 y);
+
+/// Hide the window (SW_HIDE-style minimize). Does NOT reap the
+/// slot — the taskbar tab stays so the user can re-show via the
+/// tab click. No-op if the window is already hidden or invalid.
+void WindowMinimize(WindowHandle h);
+
+/// Maximize: snapshot current bounds + expand to the full
+/// framebuffer minus the taskbar strip. Idempotent — calling on
+/// an already-maximized window is a no-op (the snapshot is NOT
+/// overwritten). The window stays maximized until `WindowRestore`
+/// or until it's resized through other means (which clears the
+/// maximized flag without restoring the snapshot).
+void WindowMaximize(WindowHandle h);
+
+/// Restore the window to its pre-maximize bounds. No-op if the
+/// window isn't currently maximized.
+void WindowRestore(WindowHandle h);
+
+/// True iff `h` is currently in the maximized state. False for
+/// invalid handles or windows that have never been maximized.
+bool WindowIsMaximized(WindowHandle h);
+
 /// Mark `h` closed: the window stops drawing, stops participating
 /// in hit-testing, and its widgets (buttons with owner=h) also
 /// disappear. The handle stays valid — no re-use — but the slot

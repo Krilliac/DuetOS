@@ -234,10 +234,15 @@ struct RegisteredWindow
     // two extras.
     u64 longs[kWinLongSlots];
     WindowHandle parent; // kWindowInvalid if top-level
+    // Pre-maximize bounds snapshot. Stored at WindowMaximize
+    // time so WindowRestore can put the window back where it
+    // was. Only meaningful when `maximized == true`.
+    u32 saved_x, saved_y, saved_w, saved_h;
     bool alive;
     bool visible;
-    bool dirty; // set by InvalidateRect; cleared by BeginPaint / WindowDrainPaints
-    u8 _pad[5];
+    bool dirty;     // set by InvalidateRect; cleared by BeginPaint / WindowDrainPaints
+    bool maximized; // true while WindowMaximize has been applied without a Restore
+    u8 _pad[4];
 };
 
 constinit RegisteredWindow g_windows[kMaxWindows] = {};
@@ -452,31 +457,57 @@ void WindowDraw(const WindowChrome& w)
         FramebufferFillRect(w.x + 2, w.y + tbh_eff, w.w - 4, 1, w.colour_border);
     }
 
-    // Close button: filled square + 1px outline + an "X" glyph
-    // drawn with two diagonal lines. The X reads as "close" the
-    // way every desktop OS has trained users to expect; the
-    // earlier flat square left users guessing whether it was a
-    // close or a colour swatch.
+    // Three title-bar control buttons (min / max / close), laid
+    // out right-to-left from the title-bar's right edge with
+    // `btn_pad` between each. Each box reuses the same square
+    // geometry and shares the close button's colour for fill so
+    // the trio reads as a coherent set; the close box gets the
+    // distinct theme `colour_close_btn` so it's still the
+    // visually loudest control. Glyphs (— / □ / X) are drawn
+    // with the framebuffer's line primitive — pixel-perfect at
+    // any title-bar height.
     const u32 btn_pad = 4;
-    if (tbh_eff > 2 * btn_pad + 4 && w.w > tbh_eff)
+    if (tbh_eff > 2 * btn_pad + 4 && w.w > tbh_eff * 3U + btn_pad * 2U)
     {
         const u32 btn_side = tbh_eff - 2 * btn_pad;
-        const u32 btn_x = w.x + w.w - btn_side - btn_pad;
+        const u32 close_x = w.x + w.w - btn_side - btn_pad;
+        const u32 max_x = (close_x > btn_side + 2U) ? close_x - btn_side - 2U : close_x;
+        const u32 min_x = (max_x > btn_side + 2U) ? max_x - btn_side - 2U : max_x;
         const u32 btn_y = w.y + btn_pad;
-        FramebufferFillRect(btn_x, btn_y, btn_side, btn_side, w.colour_close_btn);
-        FramebufferDrawRect(btn_x, btn_y, btn_side, btn_side, w.colour_border, 1);
-        // X glyph with a 3-pixel inset on each side. Two diagonals.
+
+        // Use the title bar's gradient-bottom colour as the
+        // hover/control fill so min + max look like part of the
+        // chrome, not separate UI. The close box keeps its
+        // theme-distinct red.
+        const u32 ctrl_fill = w.colour_title;
+        FramebufferFillRect(min_x, btn_y, btn_side, btn_side, ctrl_fill);
+        FramebufferDrawRect(min_x, btn_y, btn_side, btn_side, w.colour_border, 1);
+        FramebufferFillRect(max_x, btn_y, btn_side, btn_side, ctrl_fill);
+        FramebufferDrawRect(max_x, btn_y, btn_side, btn_side, w.colour_border, 1);
+        FramebufferFillRect(close_x, btn_y, btn_side, btn_side, w.colour_close_btn);
+        FramebufferDrawRect(close_x, btn_y, btn_side, btn_side, w.colour_border, 1);
+
         if (btn_side >= 8)
         {
             const u32 inset = 3;
-            const i32 x0 = static_cast<i32>(btn_x + inset);
+            // Minimize: a 2-px-thick horizontal bar near the
+            // bottom of the box. Reads as the "_" glyph at
+            // small sizes.
+            FramebufferFillRect(min_x + inset, btn_y + btn_side - inset - 2U, btn_side - 2U * inset, 2U, 0x00FFFFFF);
+            // Maximize / restore: a 1-px outlined square in
+            // the centre. When already maximized, draw a
+            // double-square to hint "restore" — the chrome
+            // doesn't store hover state, so this is the only
+            // visible distinction between max + restore.
+            const u32 sq_side = btn_side - 2U * inset;
+            FramebufferDrawRect(max_x + inset, btn_y + inset, sq_side, sq_side, 0x00FFFFFF, 1);
+            // Close: doubled diagonal X (existing chrome).
+            const i32 x0 = static_cast<i32>(close_x + inset);
             const i32 y0 = static_cast<i32>(btn_y + inset);
-            const i32 x1 = static_cast<i32>(btn_x + btn_side - 1U - inset);
+            const i32 x1 = static_cast<i32>(close_x + btn_side - 1U - inset);
             const i32 y1 = static_cast<i32>(btn_y + btn_side - 1U - inset);
             FramebufferDrawLine(x0, y0, x1, y1, 0x00FFFFFF);
             FramebufferDrawLine(x0, y1, x1, y0, 0x00FFFFFF);
-            // Doubled stroke — a 1-pixel line is hard to see at
-            // 8x8 close-button size on a busy title-bar fill.
             FramebufferDrawLine(x0 + 1, y0, x1, y1 - 1, 0x00FFFFFF);
             FramebufferDrawLine(x0, y1 - 1, x1 - 1, y0, 0x00FFFFFF);
         }
@@ -541,6 +572,11 @@ WindowHandle WindowRegister(const WindowChrome& chrome, const char* title)
     g_windows[h].alive = true;
     g_windows[h].visible = true;
     g_windows[h].dirty = false;
+    g_windows[h].maximized = false;
+    g_windows[h].saved_x = 0;
+    g_windows[h].saved_y = 0;
+    g_windows[h].saved_w = 0;
+    g_windows[h].saved_h = 0;
     g_windows[h].owner_pid = 0;
     g_windows[h].parent = kWindowInvalid;
     g_windows[h].msgs.head = 0;
@@ -730,14 +766,135 @@ bool WindowPointInCloseBox(WindowHandle h, u32 x, u32 y)
     const u32 tbh = (c.title_height == 0) ? 22 : c.title_height;
     const u32 tbh_eff = (tbh > c.h) ? c.h : tbh;
     const u32 btn_pad = 4;
-    if (tbh_eff <= 2 * btn_pad + 4 || c.w <= tbh_eff)
+    if (tbh_eff <= 2 * btn_pad + 4 || c.w <= tbh_eff * 3U + btn_pad * 2U)
     {
-        return false; // title bar too short for a visible close box
+        return false; // title bar too short for the trio
     }
     const u32 btn_side = tbh_eff - 2 * btn_pad;
     const u32 btn_x = c.x + c.w - btn_side - btn_pad;
     const u32 btn_y = c.y + btn_pad;
     return x >= btn_x && x < btn_x + btn_side && y >= btn_y && y < btn_y + btn_side;
+}
+
+bool WindowPointInMaxBox(WindowHandle h, u32 x, u32 y)
+{
+    if (!WindowValid(h))
+    {
+        return false;
+    }
+    const auto& c = g_windows[h].chrome;
+    const u32 tbh = (c.title_height == 0) ? 22 : c.title_height;
+    const u32 tbh_eff = (tbh > c.h) ? c.h : tbh;
+    const u32 btn_pad = 4;
+    if (tbh_eff <= 2 * btn_pad + 4 || c.w <= tbh_eff * 3U + btn_pad * 2U)
+    {
+        return false;
+    }
+    const u32 btn_side = tbh_eff - 2 * btn_pad;
+    const u32 close_x = c.x + c.w - btn_side - btn_pad;
+    if (close_x <= btn_side + 2U)
+    {
+        return false;
+    }
+    const u32 max_x = close_x - btn_side - 2U;
+    const u32 btn_y = c.y + btn_pad;
+    return x >= max_x && x < max_x + btn_side && y >= btn_y && y < btn_y + btn_side;
+}
+
+bool WindowPointInMinBox(WindowHandle h, u32 x, u32 y)
+{
+    if (!WindowValid(h))
+    {
+        return false;
+    }
+    const auto& c = g_windows[h].chrome;
+    const u32 tbh = (c.title_height == 0) ? 22 : c.title_height;
+    const u32 tbh_eff = (tbh > c.h) ? c.h : tbh;
+    const u32 btn_pad = 4;
+    if (tbh_eff <= 2 * btn_pad + 4 || c.w <= tbh_eff * 3U + btn_pad * 2U)
+    {
+        return false;
+    }
+    const u32 btn_side = tbh_eff - 2 * btn_pad;
+    const u32 close_x = c.x + c.w - btn_side - btn_pad;
+    if (close_x <= btn_side + 2U)
+    {
+        return false;
+    }
+    const u32 max_x = close_x - btn_side - 2U;
+    if (max_x <= btn_side + 2U)
+    {
+        return false;
+    }
+    const u32 min_x = max_x - btn_side - 2U;
+    const u32 btn_y = c.y + btn_pad;
+    return x >= min_x && x < min_x + btn_side && y >= btn_y && y < btn_y + btn_side;
+}
+
+void WindowMinimize(WindowHandle h)
+{
+    if (!WindowValid(h))
+        return;
+    g_windows[h].visible = false;
+    // De-activate so the next compose doesn't try to draw a
+    // selected-but-hidden chrome. Promote the topmost remaining
+    // alive+visible window to active so keyboard input still
+    // flows somewhere.
+    if (g_active_window == h)
+    {
+        g_active_window = kWindowInvalid;
+        for (u32 i = g_window_count; i > 0; --i)
+        {
+            const WindowHandle cand = g_z_order[i - 1];
+            if (cand != h && WindowValid(cand) && g_windows[cand].visible)
+            {
+                g_active_window = cand;
+                break;
+            }
+        }
+    }
+}
+
+void WindowMaximize(WindowHandle h)
+{
+    if (!WindowValid(h))
+        return;
+    if (g_windows[h].maximized)
+        return; // idempotent — preserve the original snapshot
+    auto& c = g_windows[h].chrome;
+    g_windows[h].saved_x = c.x;
+    g_windows[h].saved_y = c.y;
+    g_windows[h].saved_w = c.w;
+    g_windows[h].saved_h = c.h;
+    const auto info = FramebufferGet();
+    // Reserve room for the taskbar at the bottom — assume the
+    // standard 28-px strip the boot path installs. A future
+    // theme-dimension slice will read this from the taskbar
+    // module directly.
+    constexpr u32 kReservedForTaskbar = 28;
+    const u32 max_h = (info.height > kReservedForTaskbar) ? info.height - kReservedForTaskbar : info.height;
+    c.x = 0;
+    c.y = 0;
+    c.w = info.width;
+    c.h = max_h;
+    g_windows[h].maximized = true;
+}
+
+void WindowRestore(WindowHandle h)
+{
+    if (!WindowValid(h) || !g_windows[h].maximized)
+        return;
+    auto& c = g_windows[h].chrome;
+    c.x = g_windows[h].saved_x;
+    c.y = g_windows[h].saved_y;
+    c.w = g_windows[h].saved_w;
+    c.h = g_windows[h].saved_h;
+    g_windows[h].maximized = false;
+}
+
+bool WindowIsMaximized(WindowHandle h)
+{
+    return WindowValid(h) && g_windows[h].maximized;
 }
 
 void WindowClose(WindowHandle h)
