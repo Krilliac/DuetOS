@@ -639,8 +639,8 @@ have landed (see §10).
 - ~~**NtNotifyChangeDirectoryFile**: wire to inotify~~ — DONE (`4996457`)
 - **Real signal-handler trampoline + sigreturn** (~500 LOC):
   completes signal delivery — currently default-action only
-- **POSIX message queues** (~350 LOC): mq_open / mq_unlink / mq_timedsend / mq_timedreceive
-- **SysV msg queues** (~250 LOC): msgget / msgsnd / msgrcv / msgctl
+- ~~**POSIX message queues**~~ — DONE (`efe483e` + 2026-04-29 timeout honoring)
+- ~~**SysV msg queues**~~ — DONE (`efe483e`)
 - **Real splice / tee zero-copy** (~300 LOC): kernel-bypass
   PipeRead/Write variants OR real page-grant
 - ~~**NtAdjustPrivilegesToken honoring caps**~~ — DONE
@@ -697,7 +697,7 @@ sequence of what got built when.
 | 2026-04-27 | `4b41615` | Real Linux `getdents64` + dirfd via shared snapshot pool. State 11 LinuxFd. `subsystems/win32/dir_syscall.{cpp,h}` exposed `SysDirOpenKernel` for cross-subsystem use. `linux_dirent64` marshaling |
 | 2026-04-27 | `3b7b753` | Linux pidfd family (state 12) + splice/tee/vmsplice + PR_SET_NAME. pidfd_open ProcessRetains target; pidfd_send_signal forwards to `LinuxSignalDeliver`. splice/tee return -EINVAL (lib fallback); vmsplice honours iovec→pipe direction. `Process::linux_task_name[16]` matches TASK_COMM_LEN |
 | 2026-04-27 | `8c2d619` | SysV shared memory + semaphores. shm: 8-segment global pool, frames mapped via `AddressSpaceMapBorrowedPage` at per-process arena (`kLinuxShmArenaBase = 0x70000000`); `Process::linux_shm_attaches[8]` table. sem: 8-set / 16-sem-per-set pool, `SemTryApplyLocked` atomic-batch with WaitQueue blocking |
-| 2026-04-27 | `efe483e` | SysV msg queues + POSIX msg queues. SysV: 8-queue keyed pool, 16-msg ring of 1024-byte messages, mtype filter (== / 0 = any / < 0 = any ≤ filter), IPC_NOWAIT honoured. POSIX: 8-queue named pool, LinuxFd state 13, refcounted (mq_unlink + close-of-last frees), highest-priority delivery, mq_notify -ENOSYS. **Sub-GAPs**: mq_timedsend / mq_timedreceive ignore timeout argument; mq_getsetattr SET no-op; 1024-byte msg cap; 16-msg ring cap |
+| 2026-04-27 | `efe483e` | SysV msg queues + POSIX msg queues. SysV: 8-queue keyed pool, 16-msg ring of 1024-byte messages, mtype filter (== / 0 = any / < 0 = any ≤ filter), IPC_NOWAIT honoured. POSIX: 8-queue named pool, LinuxFd state 13, refcounted (mq_unlink + close-of-last frees), highest-priority delivery, mq_notify -ENOSYS. **Sub-GAPs**: ~~mq_timedsend / mq_timedreceive ignore timeout argument~~ FIXED 2026-04-29 — abs_timeout (struct timespec, treated as ns-since-boot) now honored via WaitQueueBlockTimeout; deadline-in-past returns -ETIMEDOUT immediately; null pointer = block forever; mq_getsetattr SET no-op; 1024-byte msg cap; 16-msg ring cap |
 | 2026-04-27 | `108064b` | name_to_handle_at + open_by_handle_at flipped from -ENOSYS to real (FAT32 first_cluster + size encoded as 8-byte file_handle; root-only resolution sub-GAP). Modern mount API (fsopen / fsconfig / fsmount / fspick / open_tree / move_mount / mount_setattr) → -EPERM (was -ENOSYS) for honest CAP_SYS_ADMIN-style fallback. Net: 2 real + 7 EPERM |
 | 2026-04-27 | `60bda43` | bpf / perf_event_open / init_module / finit_module / delete_module / kexec_load / kexec_file_load → -EPERM (matches Linux CAP_SYS_ADMIN gating); flock fd-validity gate (was: silent success on bad fd) |
 | 2026-04-27 | `879f2e5` | Real pidfd_getfd cross-process fd dup. Cap-gated on kCapDebug. Pool-backed states (pipe / eventfd / socket / timerfd / signalfd / epoll / inotify / pidfd / mq) supported via slot-copy + refcount bump. Regular file / dirfd / memfd refused (-EINVAL) — real Linux uses shared file-descriptions; v0 sub-GAP |

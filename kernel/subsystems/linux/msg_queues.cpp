@@ -27,6 +27,7 @@
 #include "mm/paging.h"
 #include "proc/process.h"
 #include "sched/sched.h"
+#include "time/tick.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -357,6 +358,83 @@ i64 DoMsgctl(u64 msqid, u64 cmd, u64 user_buf)
 namespace
 {
 
+// abs_timeout in mq_timedsend / mq_timedreceive is a struct timespec
+// {tv_sec; tv_nsec} interpreted on CLOCK_REALTIME. v0's clock is
+// boot-relative (no RTC integration yet — see syscall_time.cpp), so
+// the absolute timestamp is treated as "ns-since-boot". A NULL
+// pointer means "block forever" (the same shape mq_send / mq_receive
+// expose to userland). A timestamp already in the past means
+// non-blocking — return -ETIMEDOUT immediately if the queue can't
+// service the request.
+//
+// Returns:
+//   true  → out_deadline_ticks valid (or zero if user_timeout == 0,
+//           meaning "no deadline; block forever").
+//   false → invalid timespec (negative or out-of-range nsec).
+constexpr i64 kETimedOut = -110;
+
+// Convert a user-pointed `struct timespec` (or NULL) into an
+// absolute scheduler-tick deadline. Caller treats deadline == 0 as
+// "no deadline; block indefinitely".
+bool LoadDeadline(u64 user_timeout, u64& out_deadline_ticks, bool& out_no_deadline)
+{
+    out_deadline_ticks = 0;
+    out_no_deadline = (user_timeout == 0);
+    if (out_no_deadline)
+        return true;
+
+    struct
+    {
+        i64 tv_sec;
+        i64 tv_nsec;
+    } ts;
+    if (!mm::CopyFromUser(&ts, reinterpret_cast<const void*>(user_timeout), sizeof(ts)))
+        return false;
+    if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1'000'000'000)
+        return false;
+
+    const u64 abs_ns = static_cast<u64>(ts.tv_sec) * 1'000'000'000ull + static_cast<u64>(ts.tv_nsec);
+    const u64 period_ns = ::duetos::time::TickPeriodNs();
+    if (period_ns == 0)
+        return false;
+    // Round up so a sub-tick deadline doesn't immediately fire.
+    out_deadline_ticks = (abs_ns + (period_ns - 1)) / period_ns;
+    return true;
+}
+
+// Block on `wq` honoring `deadline_ticks` (absolute). Returns:
+//   0  → woken (the surrounding loop re-checks the condition),
+//  -ETIMEDOUT → deadline reached.
+// Caller MUST hold IRQs disabled (arch::Cli) on entry; this helper
+// takes care of the wait. On return IRQs are also disabled — the
+// caller's outer loop expects to re-test under Cli().
+i64 WaitWithDeadline(::duetos::sched::WaitQueue* wq, u64 deadline_ticks, bool no_deadline)
+{
+    if (no_deadline)
+    {
+        ::duetos::sched::WaitQueueBlock(wq);
+        ::duetos::arch::Cli();
+        return 0;
+    }
+    const u64 now = ::duetos::sched::SchedNowTicks();
+    if (now >= deadline_ticks)
+    {
+        ::duetos::arch::Sti();
+        return kETimedOut;
+    }
+    const u64 wait = deadline_ticks - now;
+    const bool woken = ::duetos::sched::WaitQueueBlockTimeout(wq, wait);
+    ::duetos::arch::Cli();
+    if (!woken)
+        return kETimedOut;
+    return 0;
+}
+
+} // namespace
+
+namespace
+{
+
 bool PosixMqNameEqual(const char* a, const char* b)
 {
     while (*a != '\0' && *b != '\0' && *a == *b)
@@ -553,7 +631,6 @@ i64 DoMqUnlink(u64 user_name)
 
 i64 DoMqTimedsend(u64 mqdes, u64 user_msg, u64 msg_len, u64 prio, u64 user_timeout)
 {
-    (void)user_timeout; // sub-GAP
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || mqdes >= 16 || p->linux_fds[mqdes].state != 13)
         return -9; // -EBADF
@@ -563,6 +640,10 @@ i64 DoMqTimedsend(u64 mqdes, u64 user_msg, u64 msg_len, u64 prio, u64 user_timeo
     PosixMq& q = g_posix_pool[idx];
     if (msg_len > q.max_msg_bytes)
         return -90; // -EMSGSIZE
+    u64 deadline_ticks = 0;
+    bool no_deadline = true;
+    if (!LoadDeadline(user_timeout, deadline_ticks, no_deadline))
+        return -22; // -EINVAL
     PosixMsg stage;
     stage.prio = static_cast<u32>(prio);
     stage.len = static_cast<u32>(msg_len);
@@ -574,22 +655,15 @@ i64 DoMqTimedsend(u64 mqdes, u64 user_msg, u64 msg_len, u64 prio, u64 user_timeo
     arch::Cli();
     while (q.in_use && q.count == q.max_msgs)
     {
-        sched::WaitQueueBlock(&q.write_wq);
-        arch::Cli();
+        const i64 wait_rv = WaitWithDeadline(&q.write_wq, deadline_ticks, no_deadline);
+        if (wait_rv != 0)
+            return wait_rv; // -ETIMEDOUT (IRQs already re-enabled)
     }
     if (!q.in_use)
     {
         arch::Sti();
         return -9;
     }
-    // Insert in priority order: walk back from head until we find
-    // the first entry with higher-or-equal priority. Since we only
-    // emit head++, callers see the FIFO-within-priority Linux contract.
-    const u32 slot = (q.count == 0) ? 0 : (q.count); // append at logical end
-    (void)slot;
-    // Simple append; receivers re-scan for highest priority.
-    const u32 dst = ((q.count > 0) ? ((q.count - 1) + q.count) : 0); // unused; kept for clarity
-    (void)dst;
     q.ring[q.count] = stage;
     ++q.count;
     sched::WaitQueueWakeOne(&q.read_wq);
@@ -599,7 +673,6 @@ i64 DoMqTimedsend(u64 mqdes, u64 user_msg, u64 msg_len, u64 prio, u64 user_timeo
 
 i64 DoMqTimedreceive(u64 mqdes, u64 user_msg, u64 msg_cap, u64 user_prio, u64 user_timeout)
 {
-    (void)user_timeout;
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || mqdes >= 16 || p->linux_fds[mqdes].state != 13)
         return -9;
@@ -607,12 +680,17 @@ i64 DoMqTimedreceive(u64 mqdes, u64 user_msg, u64 msg_cap, u64 user_prio, u64 us
     if (idx >= kPosixMqPoolCap)
         return -22;
     PosixMq& q = g_posix_pool[idx];
+    u64 deadline_ticks = 0;
+    bool no_deadline = true;
+    if (!LoadDeadline(user_timeout, deadline_ticks, no_deadline))
+        return -22;
     PosixMsg out;
     arch::Cli();
     while (q.in_use && q.count == 0)
     {
-        sched::WaitQueueBlock(&q.read_wq);
-        arch::Cli();
+        const i64 wait_rv = WaitWithDeadline(&q.read_wq, deadline_ticks, no_deadline);
+        if (wait_rv != 0)
+            return wait_rv;
     }
     if (!q.in_use)
     {
