@@ -268,11 +268,64 @@ constexpr Theme kDuet = {
     .cursor_fill = 0x00E8EDF2,    // matches `--ink`
 };
 
+// DuetLight — light-mode sibling of Duet, sourced from the
+// prototype's `light` token set. Inverts the contrast budget:
+// near-white canvas with the same dual-accent (teal + amber)
+// vocabulary on top. Per-role chrome keeps its identity hue
+// from the slate variant so the same window reads as "the same
+// app" across both modes; the title hues are slightly brighter
+// versions of the slate ones so they survive the light client
+// fills, and the client fills lift to off-white panels.
+constexpr Theme kDuetLight = {
+    .name = "duetlight",
+
+    // Light canvas — `--bg-1` (light mode) ≈ near-white slate.
+    .desktop_bg = 0x00EDEFF2,
+    .banner_fg = 0x00161A20, // ink on light canvas
+
+    // Taskbar: warm-white surface with subtle dividers.
+    .taskbar_bg = 0x00DDE1E6,
+    .taskbar_fg = 0x00161A20,
+    .taskbar_accent = 0x000F8C80,       // deeper teal so it reads against light bg
+    .taskbar_tab_inactive = 0x00CFD4DA, // slightly recessed panel
+    .taskbar_border = 0x00BCC2C9,
+
+    // Windows: subtle slate-ink border, prototype-matched red close hover.
+    .window_border = 0x00B5BCC4,
+    .window_close = 0x00E3413C,
+
+    .role_title =
+        {
+            0x000F8C80, // Calculator   — teal accent (deeper for light bg)
+            0x00B5751A, // Notes        — amber accent
+            0x00086E64, // TaskManager  — deeper teal
+            0x00343A44, // LogView      — neutral chrome
+            0x008C5810, // Files        — amber accent
+            0x002C323C, // Clock        — slate panel
+            0x008B2C8B, // GfxDemo      — magenta marker (kept across themes)
+        },
+    .role_client =
+        {
+            0x00F4F5F7, // Calculator   — off-white panel
+            0x00FBF8EE, // Notes        — cream paper, the only "warm" client
+            0x00F4F5F7, // TaskManager
+            0x00ECEEF1, // LogView
+            0x00F4F5F7, // Files
+            0x00E5E8EC, // Clock        — light canvas ground
+            0x00000000, // GfxDemo      — black; overpainted every frame
+        },
+
+    .console_fg = 0x00161A20,
+    .console_bg = 0x00ECEEF1,
+
+    // DuetLight cursor: slate-ink outline + theme accent fill so
+    // the pointer reads as a brand-tinted ink on a light surface.
+    .cursor_outline = 0x00161A20,
+    .cursor_fill = 0x000F8C80,
+};
+
 const Theme* const kThemes[static_cast<u32>(ThemeId::kCount)] = {
-    &kClassic,
-    &kSlate10,
-    &kAmber,
-    &kDuet,
+    &kClassic, &kSlate10, &kAmber, &kDuet, &kDuetLight,
 };
 
 // ---------------------------------------------------------------

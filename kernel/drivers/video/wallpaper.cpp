@@ -27,6 +27,31 @@ u32 LightenRgb(u32 rgb, u32 amount)
     return (r << 16) | (g << 8) | b;
 }
 
+u32 DarkenRgb(u32 rgb, u32 amount)
+{
+    const u32 r0 = (rgb >> 16) & 0xFFU;
+    const u32 g0 = (rgb >> 8) & 0xFFU;
+    const u32 b0 = rgb & 0xFFU;
+    const u32 r = (r0 > amount) ? r0 - amount : 0U;
+    const u32 g = (g0 > amount) ? g0 - amount : 0U;
+    const u32 b = (b0 > amount) ? b0 - amount : 0U;
+    return (r << 16) | (g << 8) | b;
+}
+
+// Pick the right contrast direction for an ambient stroke over
+// `bg`: lighten dark backgrounds, darken light ones, so the
+// stroke always reads as a soft accent regardless of theme
+// brightness. The mid-luminance gate (~0x80 average) picks the
+// direction; saturation handling is delegated to Lighten/Darken.
+u32 AmbientStrokeRgb(u32 bg, u32 amount)
+{
+    const u32 r = (bg >> 16) & 0xFFU;
+    const u32 g = (bg >> 8) & 0xFFU;
+    const u32 b = bg & 0xFFU;
+    const u32 avg = (r + g + b) / 3U;
+    return (avg < 0x80U) ? LightenRgb(bg, amount) : DarkenRgb(bg, amount);
+}
+
 // Slate10 grid: a sparse Win10-style "subtle grid of dots"
 // pattern. Each dot is a single pixel at a regular interval —
 // the grid spacing is wide enough that the desktop reads as
@@ -119,7 +144,8 @@ void PaintTopo(u32 desktop_rgb, u32 fb_w, u32 fb_h)
         return;
     const u32 ring_step = 28;     // px between rings
     const u32 max_r = short_side; // walk outward until off-screen
-    const u32 stroke_rgb = LightenRgb(desktop_rgb, 9);
+    // Adaptive contrast — lifts on dark themes, dims on light.
+    const u32 stroke_rgb = AmbientStrokeRgb(desktop_rgb, 9);
     for (u32 r = ring_step; r < max_r; r += ring_step)
     {
         FramebufferDrawCircle(static_cast<i32>(cx), static_cast<i32>(cy), r, stroke_rgb);
@@ -153,11 +179,12 @@ void PaintDuetArcs(u32 desktop_rgb, u32 fb_w, u32 fb_h)
     // compute precise geometry from the SVG.
     const u32 cx_a = fb_w / 2 - r / 2;
     const u32 cx_b = fb_w / 2 + r / 2;
-    // Stroke colours: lift the desktop bg by a small amount and
-    // tint slightly toward teal / amber. The lift is the
-    // contrast budget — strong enough to be visible on the
-    // gradient, weak enough not to compete with windows.
-    const u32 base_lift = LightenRgb(desktop_rgb, 22);
+    // Stroke colours: shift the desktop bg by a small amount in
+    // the right contrast direction (light theme darkens, dark
+    // theme lightens), then tint slightly toward teal / amber.
+    // Strong enough to be visible on the gradient, weak enough
+    // not to compete with windows.
+    const u32 base_lift = AmbientStrokeRgb(desktop_rgb, 22);
     // Tint = base_lift biased toward the accent hue. We do this
     // by running another lighten on the relevant channel and
     // letting the others stay at the base lift's level. The
@@ -195,9 +222,12 @@ void WallpaperPaint(u32 desktop_rgb)
     switch (ThemeCurrentId())
     {
     case ThemeId::Duet:
-        // Duet stacks the topo backdrop under the foreground
-        // arcs — the layered look matches the prototype's
-        // multi-layer SVG composition.
+    case ThemeId::DuetLight:
+        // Both Duet variants stack the topo backdrop under the
+        // foreground arcs — the layered look matches the
+        // prototype's multi-layer SVG composition. Both paints
+        // use AmbientStrokeRgb internally so the contrast
+        // direction flips on the light variant automatically.
         PaintTopo(desktop_rgb, info.width, info.height);
         PaintDuetArcs(desktop_rgb, info.width, info.height);
         break;

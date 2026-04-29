@@ -93,6 +93,39 @@ Two more items off `docs/duet-theme-spec.md`:
 - `kernel/drivers/video/wallpaper.h`
 - `kernel/drivers/video/wallpaper.cpp`
 
+## Update 2026-04-29 (theme-aware popups + Light Duet)
+
+Three more chrome polish slices:
+
+1. **Theme-aware calendar popup** — `CalendarSetColours(body,
+   border, header, ink)` replaces the hardcoded slate-blue
+   palette. `CalendarRedraw` now paints with drop shadow,
+   vertical body gradient, top highlight ridge, and a 1-px
+   theme-border outline (was 2-px slab). Semantic indicators
+   ("today" green, "other-month" dim) stay hardcoded.
+   `ThemeApplyToAll` flows the palette through.
+
+2. **Theme-aware network flyout** — same treatment as the
+   calendar: `NetPanelSetColours(body, border, header, ink,
+   button)` + drop shadow + gradient + ridge + 1-px border on
+   both Preview and Full layouts. Online-green / pending-amber
+   / dim-slate stay hardcoded since they encode link state.
+   The RENEW button now uses the taskbar accent so it reads as
+   a callable affordance.
+
+3. **Light Duet palette** — `ThemeId::DuetLight` (kCount bumped
+   from 4 to 5). Light-mode sibling of Duet sourced from the
+   prototype's `light` tokens — near-white canvas (#EDEFF2),
+   the same dual-accent (teal/amber) vocabulary, with darker
+   per-role title hues so they read against the off-white
+   client fills. Cursor flips to slate-ink-on-teal.
+   Wallpaper module gains `AmbientStrokeRgb(bg, amount)` that
+   picks lighten vs darken by the bg's mid-luminance — both
+   `PaintTopo` and `PaintDuetArcs` use it now, so the same
+   paint paths render correctly on the dark and light Duet
+   variants. Rounded corners + DuetMark START button extend
+   to DuetLight automatically.
+
 ## Update 2026-04-29 (rounded corners + per-theme wallpapers + theme-aware cursor)
 
 Three more chrome polish slices, each its own commit:

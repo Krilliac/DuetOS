@@ -789,7 +789,8 @@ void WindowDrawAllOrdered()
         // the visible silhouette reads as rounded. Other themes
         // keep rectangular chrome (preserves their original v0
         // look bit-for-bit).
-        if (ThemeCurrentId() == ThemeId::Duet)
+        const ThemeId tid = ThemeCurrentId();
+        if (tid == ThemeId::Duet || tid == ThemeId::DuetLight)
         {
             FramebufferPunchCorners(drawn.x, drawn.y, drawn.w, drawn.h, 6U, g_compose_desktop_rgb);
         }

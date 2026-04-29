@@ -259,8 +259,10 @@ ship yet. Each is its own slice — none are inside this commit.
 
 ## Deferred to follow-on slices
 
-- Light + Classic-mode Duet palettes (the prototype's
-  alternates).
+- ~~Light + Classic-mode Duet palettes~~ — light-mode Duet
+  ships as `ThemeId::DuetLight` (sourced from the prototype's
+  light tokens, near-white canvas + dual-accent teal/amber);
+  Classic-mode Duet remains deferred.
 - All of the prototype's accent variants beyond
   teal-amber (`blue`, `violet`, `amber`, `duet-green`). v0
   ships teal-amber only; further accents are a one-line palette

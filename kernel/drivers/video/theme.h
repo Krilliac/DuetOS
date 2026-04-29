@@ -45,6 +45,11 @@
  *               the same flat-token shape the other three themes
  *               use. See docs/duet-theme-spec.md for the per-token
  *               source-of-truth.
+ *   - DuetLight : the light-mode sibling of Duet. Same dual-
+ *               accent vocabulary on a near-white canvas, sourced
+ *               from the prototype's `light` mode tokens. The
+ *               cursor + chrome adapt to the inverted contrast
+ *               budget so dark-on-light text reads cleanly.
  *
  * Switching themes is a runtime operation (Ctrl+Alt+Y cycles, the
  * `theme` shell command switches or cycles by name, or
@@ -68,7 +73,8 @@ enum class ThemeId : u8
     Slate10 = 1,
     Amber = 2,
     Duet = 3,
-    kCount = 4,
+    DuetLight = 4,
+    kCount = 5,
 };
 
 /// Stable role tag for each application window whose chrome is

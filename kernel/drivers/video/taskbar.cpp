@@ -190,7 +190,8 @@ void TaskbarRedraw()
     // rather than the prototype's partial-arc strokes; partial-arc
     // rasterization is a follow-on once a proper path stroker
     // lands in the framebuffer.
-    if (ThemeCurrentId() == ThemeId::Duet)
+    const ThemeId tid_start = ThemeCurrentId();
+    if (tid_start == ThemeId::Duet || tid_start == ThemeId::DuetLight)
     {
         constexpr u32 mark_label_w = 4 * 8; // "DUET"
         constexpr u32 mark_diameter = 14;
