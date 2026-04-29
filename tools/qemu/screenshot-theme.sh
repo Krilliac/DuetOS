@@ -47,8 +47,20 @@ python3 "${SCRIPT_DIR}/make-gpt-image.py" "${SATA_IMAGE}"
 
 rm -f "${SERIAL_LOG}" "${PPM_OUT}" "${MON_SOCK}" "${OUT_PNG}"
 
+# UEFI / OVMF — match run.sh's default firmware. See
+# screenshot.sh for the rationale (kernel ELF spawn path is
+# sensitive to firmware memory-map differences; UEFI is the
+# project's primary target).
+OVMF_CODE="${DUETOS_OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+OVMF_VARS_TEMPLATE="${DUETOS_OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+OVMF_VARS_COPY="${BUILD_DIR}/screen-theme-ovmf-vars.fd"
+cp "${OVMF_VARS_TEMPLATE}" "${OVMF_VARS_COPY}"
+
 qemu-system-x86_64 \
+    -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}" \
+    -drive "if=pflash,format=raw,file=${OVMF_VARS_COPY}" \
     -machine q35 -cpu max -m 512M \
+    -vga virtio \
     -display none \
     -serial "file:${SERIAL_LOG}" \
     -monitor "unix:${MON_SOCK},server,nowait" \
@@ -65,24 +77,41 @@ QEMU_PID=$!
 
 trap 'kill "${QEMU_PID}" 2>/dev/null || true; rm -f "${MON_SOCK}"' EXIT
 
-# Drive GRUB: send N down-arrows then return to pick the target
-# entry before the menu times out. If DOWN_COUNT is 0 we still
-# send `ret` so the default entry boots immediately instead of
-# waiting out GRUB's 3-second timeout.
+# Drive GRUB: poll the serial log for the "highlighted entry will
+# be executed automatically" marker that GRUB emits while the menu
+# is up, then send N down-arrows and ret. Polling the marker
+# (instead of a fixed sleep) handles slow firmware paths (OVMF
+# takes 3-5s to reach GRUB) without baking in a worst-case wait.
 (
-    sleep 1
+    # First: wait until the QEMU monitor socket exists.
+    for _ in $(seq 1 60); do
+        [[ -S "${MON_SOCK}" ]] && break
+        sleep 0.5
+    done
+    # Second: wait for GRUB to be on screen (it writes the
+    # menu countdown to the serial log).
+    for _ in $(seq 1 60); do
+        if grep -q "automatically in" "${SERIAL_LOG}" 2>/dev/null; then
+            break
+        fi
+        sleep 0.3
+    done
     python3 - <<PY "${MON_SOCK}" "${DOWN_COUNT}"
 import socket, sys, time
 p = sys.argv[1]
 n = int(sys.argv[2])
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-for _ in range(30):
-    try:
-        s.connect(p); break
-    except (FileNotFoundError, ConnectionRefusedError):
-        time.sleep(0.2)
+s.connect(p)
+# Drain the monitor banner so subsequent commands aren't racing
+# against init bytes the parser hasn't consumed yet.
+s.settimeout(0.5)
+try:
+    while s.recv(4096):
+        pass
+except socket.timeout:
+    pass
 def send(cmd):
-    s.sendall((cmd + "\n").encode()); time.sleep(0.2)
+    s.sendall((cmd + "\n").encode()); time.sleep(0.4)
 for _ in range(n):
     send("sendkey down")
 send("sendkey ret")

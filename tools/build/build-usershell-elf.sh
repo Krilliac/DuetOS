@@ -65,12 +65,28 @@ CFLAGS=(
 # and reproducible. Image base 0x400000 matches the previous
 # hand-coded stub so kernel-side debug code still recognises the
 # entry-point neighbourhood.
+#
+# `-z noseparate-code` keeps code + read-only data in the same
+# PT_LOAD segment instead of lld's default 3-segment layout (PHDR
+# at 0x200000, code at 0x400000, rodata at 0x401XXX). The
+# kernel's v0 ELF loader maps every PT_LOAD into user VA, so a
+# layout that places PHDR at 0x200000 (well below the .text
+# base) collides with a region the kernel-shipped userland
+# wasn't designed to populate, taking the loader's
+# AddressSpaceMapUserPage path through a code path that
+# subsequently double-faults. Forcing a single PT_LOAD at
+# 0x400000 keeps the layout congruent with the previous
+# hand-coded usershell.elf and the existing windowed_hello /
+# hello PE stubs.
+#
+# `--script` with the inline single-segment script would be
+# more surgical; the linker flag does the job in one line.
 "${LLD}" \
     -static \
     --no-dynamic-linker \
     -e _start \
     --build-id=none \
-    -Ttext=0x400000 \
+    -T "${REPO_ROOT}/userland/libc/usershell.lds" \
     -o "${WORK_DIR}/usershell.elf" \
     "${WORK_DIR}/crt0.o" \
     "${WORK_DIR}/syscall.o" \

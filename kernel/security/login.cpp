@@ -385,6 +385,13 @@ void GuiRepaint()
 
     const u32 y_hint = l.fb_h - 22;
     FramebufferDrawString(16, y_hint, "DEFAULT ACCOUNTS: ADMIN/ADMIN  GUEST/(EMPTY)", 0x00C0D0E0, kBgBottom);
+
+    // Push the freshly-painted login surface to the active backend
+    // (virtio-gpu TRANSFER_TO_HOST_2D + RESOURCE_FLUSH; no-op for
+    // direct firmware-handoff framebuffers). Without this the
+    // virtio-gpu host display stays at whatever the GPU init painted
+    // and the user never sees the login chrome.
+    drivers::video::FramebufferPresent();
 }
 
 bool GuiTrySubmit()

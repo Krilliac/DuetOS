@@ -51,8 +51,21 @@ rm -f "${SERIAL_LOG}" "${PPM_OUT}" "${MON_SOCK}" "${OUT_PNG}"
 #   - serial -> file (so we can grep for the "boot ok" marker),
 #   - monitor -> unix socket (so we can send screendump + quit),
 #   - display -> none (headless).
+# UEFI / OVMF — match run.sh's default firmware. The kernel works
+# under both SeaBIOS and OVMF for most paths, but the ELF spawn
+# path for the userland shell shows sensitivity to firmware
+# memory-map differences; UEFI is the project's primary target so
+# we screenshot under the same firmware production users see.
+OVMF_CODE="${DUETOS_OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+OVMF_VARS_TEMPLATE="${DUETOS_OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+OVMF_VARS_COPY="${BUILD_DIR}/screen-ovmf-vars.fd"
+cp "${OVMF_VARS_TEMPLATE}" "${OVMF_VARS_COPY}"
+
 qemu-system-x86_64 \
+    -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}" \
+    -drive "if=pflash,format=raw,file=${OVMF_VARS_COPY}" \
     -machine q35 -cpu max -m 512M \
+    -vga virtio \
     -display none \
     -serial "file:${SERIAL_LOG}" \
     -monitor "unix:${MON_SOCK},server,nowait" \

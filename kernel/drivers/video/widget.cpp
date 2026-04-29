@@ -1570,6 +1570,11 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
         // or similar) before switching modes.
         FramebufferClear(0x00000000);
         ConsoleRedraw();
+        // Push the freshly-painted console to the active backend
+        // (virtio-gpu flush). Without this the host display stays
+        // at whatever the GPU init painted and the user never
+        // sees the TTY-mode console.
+        FramebufferPresent();
         return;
     }
 

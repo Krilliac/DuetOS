@@ -134,6 +134,7 @@ duetos_embed_blob(generated_usershell_elf.h
         "${CMAKE_SOURCE_DIR}/userland/libc/include/duet/syscall.h"
         "${CMAKE_SOURCE_DIR}/userland/libc/include/string.h"
         "${CMAKE_SOURCE_DIR}/userland/libc/include/unistd.h"
+        "${CMAKE_SOURCE_DIR}/userland/libc/usershell.lds"
     COMMENT     "Compiling + embedding /bin/usershell.elf (real userland shell)")
 
 duetos_embed_blob(generated_hello_winapi.h

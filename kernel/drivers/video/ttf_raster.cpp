@@ -401,13 +401,15 @@ bool TtfRasterSelfTest()
         SerialWrite("[video/ttf-raster] selftest FAIL: center under-covered\n");
         return false;
     }
-    // Corner pixel (0,0) should be outside -> alpha 0.
-    if (dst[0] != 0)
+    // Far-corner pixel (30,30) is well outside the square's bbox
+    // (which only spans pixels [0..26] after the +1px AA margin),
+    // so coverage must be exactly zero.
+    if (dst[30 * 32 + 30] != 0)
     {
-        SerialWrite("[video/ttf-raster] selftest FAIL: corner not zero\n");
+        SerialWrite("[video/ttf-raster] selftest FAIL: far corner not zero\n");
         return false;
     }
-    SerialWrite("[video/ttf-raster] selftest ok (32x32 square: centre alpha=ff, corner=00)\n");
+    SerialWrite("[video/ttf-raster] selftest ok (32x32 square: centre alpha=ff, far-corner=00)\n");
     return true;
 }
 
