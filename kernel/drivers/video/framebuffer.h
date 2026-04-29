@@ -224,6 +224,48 @@ void FramebufferPunchCorners(u32 x, u32 y, u32 w, u32 h, u32 radius, u32 punch_r
 /// No-op if `!Available()` or `thickness == 0`.
 void FramebufferStrokeArc(i32 cx, i32 cy, i32 radius, i32 start_deg, i32 sweep_deg, u32 thickness, u32 rgb);
 
+/// Path-op tag for `FramebufferStrokePath`. The op carries 0–3
+/// `(x, y)` pairs depending on the tag.
+enum class PathOp : u8
+{
+    Move = 0,  // pts[0] = new pen position; no stroke drawn
+    Line = 1,  // pts[0] = endpoint; line stroked from current pen
+    Cubic = 2, // pts[0] = cp1, pts[1] = cp2, pts[2] = end
+    Close = 3, // straight stroke from pen to subpath start
+};
+
+struct PathPoint
+{
+    i32 x;
+    i32 y;
+};
+
+struct PathSegment
+{
+    PathOp op;
+    // Only the first `n` entries are meaningful, where
+    // `n = OpPoints(op)`. Caller can leave the rest zeroed.
+    PathPoint pts[3];
+};
+
+/// Stroke a sequence of path segments at `thickness` pixels in
+/// `rgb`. Lines are walked Bresenham-style and stamped with a
+/// `thickness × thickness` square at each pixel; cubic Bézier
+/// segments are flattened with adaptive de Casteljau
+/// subdivision (depth-capped at 8) until each leaf segment's
+/// chord deviation is ≤ 1 pixel, then stroked as line segments.
+/// `Close` strokes from the current pen back to the most recent
+/// `Move`. A bare `Line`/`Cubic`/`Close` without a preceding
+/// `Move` implicitly anchors at `(0, 0)`.
+///
+/// Cost is bounded by the sum of segment lengths in pixels
+/// times `thickness` — fine for chrome / wallpaper geometry,
+/// not intended for blitting bulk imagery.
+///
+/// `thickness == 0` or `count == 0` is a no-op. No-op if
+/// `!Available()` or `segments == nullptr`.
+void FramebufferStrokePath(const PathSegment* segments, u32 count, u32 thickness, u32 rgb);
+
 /// Soft "drop shadow" for a window or panel. Paints a
 /// `depth`-pixel-wide alpha-blended L-shape along the right
 /// and bottom edges of the rect at `(x, y, w, h)`, using black

@@ -902,6 +902,173 @@ void FramebufferStrokeArc(i32 cx, i32 cy, i32 radius, i32 start_deg, i32 sweep_d
     }
 }
 
+namespace
+{
+
+// Stamp a `thickness x thickness` square centred on (x, y).
+// Pixels outside the framebuffer are clipped per-pixel because
+// `FramebufferFillRect` takes unsigned coords; we test before
+// computing top-left.
+void StampThick(i32 x, i32 y, u32 thickness, u32 rgb)
+{
+    if (thickness == 0)
+        return;
+    if (thickness == 1)
+    {
+        if (x >= 0 && y >= 0 && static_cast<u32>(x) < g_info.width && static_cast<u32>(y) < g_info.height)
+        {
+            FramebufferPutPixel(static_cast<u32>(x), static_cast<u32>(y), rgb);
+        }
+        return;
+    }
+    const i32 half = static_cast<i32>(thickness / 2);
+    const i32 left = x - half;
+    const i32 top = y - half;
+    // Clamp to fb bounds without dropping the entire stamp.
+    i32 x0 = (left < 0) ? 0 : left;
+    i32 y0 = (top < 0) ? 0 : top;
+    i32 x1 = left + static_cast<i32>(thickness);
+    i32 y1 = top + static_cast<i32>(thickness);
+    if (x1 > static_cast<i32>(g_info.width))
+        x1 = static_cast<i32>(g_info.width);
+    if (y1 > static_cast<i32>(g_info.height))
+        y1 = static_cast<i32>(g_info.height);
+    if (x0 >= x1 || y0 >= y1)
+        return;
+    FramebufferFillRect(static_cast<u32>(x0), static_cast<u32>(y0), static_cast<u32>(x1 - x0),
+                        static_cast<u32>(y1 - y0), rgb);
+}
+
+// Bresenham line walk with a thickness stamp at each pixel.
+// Adjacent stamps overlap by (thickness - 1) so the visual is a
+// continuous thick line. For thickness 1, falls through to the
+// existing Bresenham primitive.
+void StrokeThickLine(i32 x0, i32 y0, i32 x1, i32 y1, u32 thickness, u32 rgb)
+{
+    if (thickness <= 1)
+    {
+        FramebufferDrawLine(x0, y0, x1, y1, rgb);
+        return;
+    }
+    const i32 dx = (x1 > x0) ? (x1 - x0) : (x0 - x1);
+    const i32 dy = (y1 > y0) ? (y1 - y0) : (y0 - y1);
+    const i32 sx = (x0 < x1) ? 1 : -1;
+    const i32 sy = (y0 < y1) ? 1 : -1;
+    i32 err = (dx > dy ? dx : -dy) / 2;
+    i32 x = x0;
+    i32 y = y0;
+    // Hard cap to mirror DrawLine's `kFbMaxLinePixels` runaway-input guard.
+    constexpr i32 kMaxSteps = 8192;
+    for (i32 step = 0; step <= kMaxSteps; ++step)
+    {
+        StampThick(x, y, thickness, rgb);
+        if (x == x1 && y == y1)
+            return;
+        const i32 e2 = err;
+        if (e2 > -dx)
+        {
+            err -= dy;
+            x += sx;
+        }
+        if (e2 < dy)
+        {
+            err += dx;
+            y += sy;
+        }
+    }
+}
+
+// Adaptive de Casteljau cubic Bézier flattener. Subdivides at
+// t=0.5 until both control points are within 1 pixel of the
+// chord (squared-distance test) or recursion depth hits 8.
+// Each leaf segment is stroked as a thick line.
+void FlattenCubic(i32 x0, i32 y0, i32 x1, i32 y1, i32 x2, i32 y2, i32 x3, i32 y3, u32 thickness, u32 rgb, u32 depth)
+{
+    auto chord_dist_sq = [](i32 px, i32 py, i32 ax, i32 ay, i32 bx, i32 by) -> i64
+    {
+        // |2A| of triangle (A, B, P) = |(bx-ax)(ay-py) - (ax-px)(by-ay)|
+        const i64 num = static_cast<i64>(bx - ax) * (ay - py) - static_cast<i64>(ax - px) * (by - ay);
+        const i64 abs_num = (num < 0) ? -num : num;
+        const i64 denom = static_cast<i64>(bx - ax) * (bx - ax) + static_cast<i64>(by - ay) * (by - ay);
+        if (denom == 0)
+        {
+            // Degenerate chord — distance is just |P - A|².
+            const i64 ddx = px - ax;
+            const i64 ddy = py - ay;
+            return ddx * ddx + ddy * ddy;
+        }
+        return (abs_num * abs_num) / denom;
+    };
+
+    if (depth >= 8 || (chord_dist_sq(x1, y1, x0, y0, x3, y3) <= 1 && chord_dist_sq(x2, y2, x0, y0, x3, y3) <= 1))
+    {
+        StrokeThickLine(x0, y0, x3, y3, thickness, rgb);
+        return;
+    }
+    // Single-step de Casteljau midpoint subdivision.
+    const i32 m01x = (x0 + x1) / 2;
+    const i32 m01y = (y0 + y1) / 2;
+    const i32 m12x = (x1 + x2) / 2;
+    const i32 m12y = (y1 + y2) / 2;
+    const i32 m23x = (x2 + x3) / 2;
+    const i32 m23y = (y2 + y3) / 2;
+    const i32 m012x = (m01x + m12x) / 2;
+    const i32 m012y = (m01y + m12y) / 2;
+    const i32 m123x = (m12x + m23x) / 2;
+    const i32 m123y = (m12y + m23y) / 2;
+    const i32 m0123x = (m012x + m123x) / 2;
+    const i32 m0123y = (m012y + m123y) / 2;
+
+    FlattenCubic(x0, y0, m01x, m01y, m012x, m012y, m0123x, m0123y, thickness, rgb, depth + 1);
+    FlattenCubic(m0123x, m0123y, m123x, m123y, m23x, m23y, x3, y3, thickness, rgb, depth + 1);
+}
+
+} // namespace
+
+void FramebufferStrokePath(const PathSegment* segments, u32 count, u32 thickness, u32 rgb)
+{
+    if (!g_available || segments == nullptr || count == 0 || thickness == 0)
+    {
+        return;
+    }
+    // Pen state: `pen_*` is the current position, `start_*` is
+    // the most recent Move (target of `Close`). A bare op without
+    // a Move implicitly anchors at (0, 0).
+    i32 pen_x = 0;
+    i32 pen_y = 0;
+    i32 start_x = 0;
+    i32 start_y = 0;
+    for (u32 i = 0; i < count; ++i)
+    {
+        const PathSegment& s = segments[i];
+        switch (s.op)
+        {
+        case PathOp::Move:
+            pen_x = s.pts[0].x;
+            pen_y = s.pts[0].y;
+            start_x = pen_x;
+            start_y = pen_y;
+            break;
+        case PathOp::Line:
+            StrokeThickLine(pen_x, pen_y, s.pts[0].x, s.pts[0].y, thickness, rgb);
+            pen_x = s.pts[0].x;
+            pen_y = s.pts[0].y;
+            break;
+        case PathOp::Cubic:
+            FlattenCubic(pen_x, pen_y, s.pts[0].x, s.pts[0].y, s.pts[1].x, s.pts[1].y, s.pts[2].x, s.pts[2].y,
+                         thickness, rgb, 0);
+            pen_x = s.pts[2].x;
+            pen_y = s.pts[2].y;
+            break;
+        case PathOp::Close:
+            StrokeThickLine(pen_x, pen_y, start_x, start_y, thickness, rgb);
+            pen_x = start_x;
+            pen_y = start_y;
+            break;
+        }
+    }
+}
+
 void FramebufferDropShadow(u32 x, u32 y, u32 w, u32 h, u32 depth, u8 start_alpha)
 {
     if (!g_available || w == 0 || h == 0 || depth == 0 || start_alpha == 0)

@@ -207,6 +207,29 @@ void PaintDuetArcs(u32 desktop_rgb, u32 fb_w, u32 fb_h)
     FramebufferDrawCircle(static_cast<i32>(cx_a), static_cast<i32>(cy), r - 1U, teal);
     FramebufferDrawCircle(static_cast<i32>(cx_b), static_cast<i32>(cy), r, amber);
     FramebufferDrawCircle(static_cast<i32>(cx_b), static_cast<i32>(cy), r - 1U, amber);
+
+    // Connecting Bezier ribbon: a single cubic that arcs above
+    // the rings, peaks roughly between the two centres, and
+    // settles back to the rings' anchor on each side. Renders
+    // through `FramebufferStrokePath` so the new primitive gets
+    // a real wallpaper-side consumer rather than living unwired.
+    // Stroke colour blends the two accents — cool-warm midpoint
+    // sits naturally between the two arc tints. Thickness 2
+    // keeps it secondary to the main rings.
+    const u32 mid_r = (teal_r + amber_r) / 2U;
+    const u32 mid_g = (teal_g + amber_g) / 2U;
+    const u32 mid_b = (teal_b + amber_b) / 2U;
+    const u32 ribbon = (mid_r << 16) | (mid_g << 8) | mid_b;
+    const i32 ax = static_cast<i32>(cx_a);
+    const i32 ay = static_cast<i32>(cy) - static_cast<i32>(r / 2U);
+    const i32 bx = static_cast<i32>(cx_b);
+    const i32 by = ay;
+    const i32 cp1y = static_cast<i32>(cy) - static_cast<i32>(r);
+    const PathSegment ribbon_path[] = {
+        {PathOp::Move, {{ax, ay}, {0, 0}, {0, 0}}},
+        {PathOp::Cubic, {{ax, cp1y}, {bx, cp1y}, {bx, by}}},
+    };
+    FramebufferStrokePath(ribbon_path, 2, 2, ribbon);
 }
 
 } // namespace
