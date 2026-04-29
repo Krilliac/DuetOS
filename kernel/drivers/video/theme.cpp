@@ -289,6 +289,7 @@ constexpr Theme kDuet = {
     .taskbar_height = 44,
     .title_button_width = 46,
     .title_text_scale = 2,
+    .font_kind = Theme::FontKind::Ttf,
 };
 
 // DuetLight — light-mode sibling of Duet, sourced from the
@@ -350,6 +351,7 @@ constexpr Theme kDuetLight = {
     .taskbar_height = 44,
     .title_button_width = 46,
     .title_text_scale = 2,
+    .font_kind = Theme::FontKind::Ttf,
 };
 
 // Duet accent variants. Each one duplicates the slate Duet
@@ -402,6 +404,7 @@ constexpr Theme kDuetBlue = {
     .taskbar_height = 44,
     .title_button_width = 46,
     .title_text_scale = 2,
+    .font_kind = Theme::FontKind::Ttf,
 };
 
 constexpr Theme kDuetViolet = {
@@ -443,6 +446,7 @@ constexpr Theme kDuetViolet = {
     .taskbar_height = 44,
     .title_button_width = 46,
     .title_text_scale = 2,
+    .font_kind = Theme::FontKind::Ttf,
 };
 
 constexpr Theme kDuetGreen = {
@@ -484,6 +488,7 @@ constexpr Theme kDuetGreen = {
     .taskbar_height = 44,
     .title_button_width = 46,
     .title_text_scale = 2,
+    .font_kind = Theme::FontKind::Ttf,
 };
 
 // DuetClassic — the prototype's "classic mode" sibling.

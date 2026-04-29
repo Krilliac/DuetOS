@@ -93,4 +93,19 @@ bool TtfRenderGlyph(const TtfFont& font, u32 codepoint, u32 pixel_height, u8* ds
 /// known-good geometry.
 bool TtfRasterSelfTest();
 
+/// Draw `text` at (`x`, `y`) using the chrome font registered via
+/// `TtfChromeFontSet` at `pixel_height` tall. Each glyph rasterizes
+/// into an internal scratch coverage bitmap and is alpha-composited
+/// (src-over) into the active framebuffer surface using `fg` as the
+/// ink colour. The pen advances by the per-glyph advance width.
+///
+/// Returns false (without painting) if no chrome font is registered
+/// or `pixel_height` is 0; falls back to bitmap font in the chrome
+/// paint path is the caller's responsibility.
+///
+/// Cost is O(num_glyphs × pixel_height² × supersample²); bounded
+/// for chrome sizes (≤ 32 px) and the typical title-bar string
+/// length (≤ 32 chars).
+bool TtfDrawString(u32 x, u32 y, const char* text, u32 fg, u32 pixel_height);
+
 } // namespace duetos::drivers::video

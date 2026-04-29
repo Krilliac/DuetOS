@@ -151,4 +151,15 @@ u16 TtfGlyphIndex(const TtfFont& font, u32 codepoint);
 /// returns true on success.
 bool TtfSelfTest();
 
+/// Register `font` as the active chrome font. The rasterizer's
+/// `TtfDrawString` consults this on every call; passing nullptr
+/// disables the TTF path so chrome falls back to the bitmap font.
+/// The caller retains ownership of the font bytes — see
+/// `TtfFont::bytes` lifetime contract above.
+void TtfChromeFontSet(const TtfFont* font);
+
+/// Read the active chrome font (or nullptr if none registered).
+/// Used by the chrome paint path to gate the TTF dispatch.
+const TtfFont* TtfChromeFontGet();
+
 } // namespace duetos::drivers::video

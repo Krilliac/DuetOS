@@ -181,6 +181,21 @@ struct Theme
     // 16-px title; compact themes stay at 1 (8-px). Subtitle +
     // separator pick this up too so the layout scales as a unit.
     u32 title_text_scale;
+
+    // Which font path the chrome should attempt for title / subtitle
+    // text. `Bitmap8x8` always uses the existing 8×8 ROM font (and
+    // its integer-scaled variant via title_text_scale). `Ttf` asks
+    // the chrome paint path to dispatch through the TTF rasterizer
+    // — which only succeeds if a font has been registered via
+    // `TtfChromeFontSet`; otherwise it falls back to the bitmap
+    // path automatically. Themes opt in independently so a future
+    // font asset can light up Duet without changing Classic.
+    enum class FontKind : u8
+    {
+        Bitmap8x8 = 0,
+        Ttf = 1,
+    };
+    FontKind font_kind;
 };
 
 /// Read-only snapshot of the active theme. Valid for as long as

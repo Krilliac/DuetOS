@@ -553,4 +553,19 @@ bool TtfSelfTest()
     return true;
 }
 
+namespace
+{
+constinit const TtfFont* g_chrome_font = nullptr;
+}
+
+void TtfChromeFontSet(const TtfFont* font)
+{
+    g_chrome_font = font;
+}
+
+const TtfFont* TtfChromeFontGet()
+{
+    return g_chrome_font;
+}
+
 } // namespace duetos::drivers::video

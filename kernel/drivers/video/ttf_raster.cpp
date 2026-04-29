@@ -1,6 +1,7 @@
 #include "drivers/video/ttf_raster.h"
 
 #include "arch/x86_64/serial.h"
+#include "drivers/video/framebuffer.h"
 
 namespace duetos::drivers::video
 {
@@ -407,6 +408,81 @@ bool TtfRasterSelfTest()
         return false;
     }
     SerialWrite("[video/ttf-raster] selftest ok (32x32 square: centre alpha=ff, corner=00)\n");
+    return true;
+}
+
+namespace
+{
+
+// Per-glyph scratch buffers for `TtfDrawString`. Bounded sizes —
+// chrome glyphs are well under these caps. Plain globals (single-
+// caller chrome paint path; see slice 4 thread-safety note).
+constinit u8 g_glyph_cover[128 * 128]{}; // alpha bitmap up to 128 px
+constinit TtfPoint g_glyph_pts[1024]{};
+constinit u16 g_glyph_endpoints[64]{};
+
+// Composite `cover` (one u8 per pixel, alpha 0..255) into the
+// framebuffer at (`dx`, `dy`) using `fg` as the ink. Per-pixel
+// src-over via the existing `FramebufferFillRectAlpha` (1×1 rect).
+// Slow but correct; chrome paint paths can afford it. For larger
+// glyph counts a blit-coverage primitive in framebuffer.cpp would
+// be the optimisation hook (slice 4.1+).
+void CompositeCoverage(i32 dx, i32 dy, const u8* cover, u32 w, u32 h, u32 fg)
+{
+    const u32 fg_rgb = fg & 0x00FFFFFFu;
+    for (u32 cy = 0; cy < h; ++cy)
+    {
+        const i32 oy = dy + static_cast<i32>(cy);
+        if (oy < 0)
+            continue;
+        for (u32 cx = 0; cx < w; ++cx)
+        {
+            const u8 a = cover[cy * w + cx];
+            if (a == 0)
+                continue;
+            const i32 ox = dx + static_cast<i32>(cx);
+            if (ox < 0)
+                continue;
+            const u32 argb = (static_cast<u32>(a) << 24) | fg_rgb;
+            FramebufferFillRectAlpha(static_cast<u32>(ox), static_cast<u32>(oy), 1, 1, argb);
+        }
+    }
+}
+
+} // namespace
+
+bool TtfDrawString(u32 x, u32 y, const char* text, u32 fg, u32 pixel_height)
+{
+    if (text == nullptr || pixel_height == 0)
+        return false;
+    const TtfFont* font = TtfChromeFontGet();
+    if (font == nullptr)
+        return false;
+
+    i32 pen_x = static_cast<i32>(x);
+    const i32 baseline_y = static_cast<i32>(y) + static_cast<i32>(pixel_height);
+    while (*text != '\0')
+    {
+        TtfRenderedGlyph rg{};
+        const u32 cp = static_cast<u32>(static_cast<u8>(*text));
+        const bool ok = TtfRenderGlyph(*font, cp, pixel_height, g_glyph_cover, sizeof(g_glyph_cover), g_glyph_pts,
+                                       sizeof(g_glyph_pts) / sizeof(g_glyph_pts[0]), g_glyph_endpoints,
+                                       sizeof(g_glyph_endpoints) / sizeof(g_glyph_endpoints[0]), &rg);
+        if (!ok)
+        {
+            // Skip on render failure; advance an em-width so layout
+            // stays roughly stable for the rest of the line.
+            pen_x += static_cast<i32>(pixel_height);
+            ++text;
+            continue;
+        }
+        if (rg.width != 0 && rg.height != 0)
+        {
+            CompositeCoverage(pen_x, baseline_y - rg.ascent, rg.pixels, rg.width, rg.height, fg);
+        }
+        pen_x += static_cast<i32>(rg.advance);
+        ++text;
+    }
     return true;
 }
 

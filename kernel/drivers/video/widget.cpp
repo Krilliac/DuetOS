@@ -44,6 +44,8 @@
 #include "drivers/video/cursor.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/menu.h"
+#include "drivers/video/ttf.h"
+#include "drivers/video/ttf_raster.h"
 #include "drivers/video/netpanel.h"
 #include "drivers/video/taskbar.h"
 #include "drivers/video/theme.h"
@@ -1148,8 +1150,19 @@ void WindowDrawAllOrdered()
         const u32 title_y = drawn.y + ((tbh_eff_for_title > cell_h) ? (tbh_eff_for_title - cell_h) / 2 : 0);
         if (g_windows[h].title != nullptr)
         {
-            FramebufferDrawStringScaled(drawn.x + 8, title_y, g_windows[h].title, 0x00FFFFFF, drawn.colour_title,
-                                        ttscale);
+            // Theme-driven font dispatch: themes that opt in to the
+            // TTF path try the rasterizer first; if no chrome font is
+            // registered (TtfChromeFontGet returns nullptr) the
+            // bitmap font runs as the fallback. Pixel height matches
+            // the existing scaled cell size so the overall chrome
+            // layout is identical between the two paths.
+            const bool used_ttf = (ThemeCurrent().font_kind == Theme::FontKind::Ttf) &&
+                                  TtfDrawString(drawn.x + 8, title_y, g_windows[h].title, 0x00FFFFFF, cell_h);
+            if (!used_ttf)
+            {
+                FramebufferDrawStringScaled(drawn.x + 8, title_y, g_windows[h].title, 0x00FFFFFF, drawn.colour_title,
+                                            ttscale);
+            }
             const char* t = g_windows[h].title;
             u32 n = 0;
             while (t[n] != '\0')
