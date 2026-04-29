@@ -163,7 +163,7 @@ Documented so an audit doesn't flag them:
 |---|---|---|
 | `NtOpenProcessToken` / `Ex` | constant handle 0xA00 | No auth model; kernel's `kCap*` is the real gate |
 | `NtQueryInformationToken` (TokenUser, TokenIntegrityLevel) | static SIDs | Same. PE callers probe; nothing in DuetOS gates on the answer |
-| `NtAdjustPrivilegesToken` | success no-op | No privilege model. `kCapDebug` etc. is what actually gates cross-process inspection |
+| ~~`NtAdjustPrivilegesToken`~~ | ~~success no-op~~ | FIXED 2026-04-29: real LUID→cap mapping via SYS_TOKEN_ADJUST. Disable / SE_PRIVILEGE_REMOVED / DisableAllPrivileges drop the mapped cap; enable refuses if the cap isn't held (returns STATUS_NOT_ALL_ASSIGNED) |
 | `NtOpenMutant` / `NtOpenEvent` | STATUS_OBJECT_NAME_NOT_FOUND | No named-object table yet. Create* thunks DO work; only Open-by-name is a facade |
 | `NtFsControlFile` / `NtDeviceIoControlFile` | STATUS_NOT_IMPLEMENTED | No IOCTL framework. Explicit NotImpl is the right answer |
 | `NtFlushBuffersFile` | success no-op | No write cache; flush has nothing to do |
@@ -643,8 +643,11 @@ have landed (see §10).
 - **SysV msg queues** (~250 LOC): msgget / msgsnd / msgrcv / msgctl
 - **Real splice / tee zero-copy** (~300 LOC): kernel-bypass
   PipeRead/Write variants OR real page-grant
-- **NtAdjustPrivilegesToken honoring caps** (~150 LOC): translate
-  Windows privilege names to `kCap*` adjustments
+- ~~**NtAdjustPrivilegesToken honoring caps**~~ — DONE
+  (2026-04-29): SYS_TOKEN_ADJUST = 169 with LUID→cap mapping for
+  SeDebugPrivilege / SeBackupPrivilege / SeRestorePrivilege /
+  SeIncreaseBasePriorityPrivilege; CapSetRemove helper;
+  STATUS_NOT_ALL_ASSIGNED on enable-without-cap
 
 ### Audit cadence
 
@@ -702,6 +705,7 @@ sequence of what got built when.
 | 2026-04-27 | `1ed6a6d` | Real CreateProcessA / CreateProcessW + new SYS_PROCESS_SPAWN. kernel-side handler in `subsystems/win32/spawn_syscall.{cpp,h}` reads named PE / ELF off FAT32 (`/disk/<idx>/<rest>`), autodetects format by magic (MZ / `0x7F ELF`), dispatches to existing SpawnPeFile / SpawnElfFile. Cap-gated on kCapSpawnThread. CreateProcessA/W kernel32 thunks fill PROCESS_INFORMATION with new pid. Caller inherits caps + root + tick_budget. **Sub-GAPs**: lpStartupInfo / lpEnvironment / lpCurrentDirectory / dwCreationFlags / bInheritHandles all ignored; hThread = 0 (callers can NtOpenThread the tid); 16 MiB file cap; "/disk/<idx>" paths only (no Win→Unix path translator yet); first-token cmdline parsing is literal-pointer (no quoted-multiword); NtCreateUserProcess still NotImpl pending RTL_USER_PROCESS_PARAMETERS parsing |
 | 2026-04-27 | `4996457` | Real NtNotifyChangeDirectoryFile + new SYS_DIR_NOTIFY engine. Win32DirHandle gained `path[64]` (cached at SysDirOpenKernel time). New 8-slot subscriber pool in dir_syscall.cpp; each sub has {path, filter, subtree, last_action, last_name, wq}. SysDirNotify allocates sub, blocks on wq, writes single FILE_NOTIFY_INFORMATION record (12 + UTF-16 name) on wake. **Publish-side**: `Win32DirNotifyPublish(path, in_mask)` invoked from `InotifyPublish` (same fan-out point fanotify uses). IN_*→FILE_ACTION_* translation: IN_CREATE→ADDED, IN_DELETE→REMOVED, IN_MOVED_FROM/TO→RENAMED_OLD/NEW_NAME, IN_MODIFY→MODIFIED. FILE_NOTIFY_CHANGE_* filter bits honoured (FILE_NAME / DIR_NAME / ATTRIBUTES / SIZE / LAST_WRITE). ntdll thunk issues SYS_DIR_NOTIFY directly. Sub-GAPs: single-record-per-call (callers loop); Event / ApcRoutine / ApcContext accepted but not honoured |
 | 2026-04-27 | `63a1c15` | fanotify(7) + keyrings + clock_settime/adjtime/adjtimex/settimeofday. **fanotify**: 4-instance / 16-mark / 32-event ring, LinuxFd state 15. Subscribes to the FS-mutation publish path that powers inotify; same exact-path-or-parent matcher, fanotify wire mask translated from inotify bits. 24-byte struct fanotify_event_metadata. fd field = FAN_NOFD; pid = 0. **keyrings**: per-process 16-key store keyed by pid (up to 32 processes). add_key (type "user" / "logon" only), request_key (lookup by type+desc), keyctl (GET_KEYRING_ID / READ / DESCRIBE / UPDATE / SETPERM / SEARCH / INVALIDATE / REVOKE / UNLINK / CLEAR + accept-as-noop for chown/link/timeout/etc.). 256-byte payload cap. **clock writeback**: clock_settime / clock_adjtime / settimeofday / adjtimex all -EPERM (no RTC writeback). Net: 9 syscalls flipped from -ENOSYS / facade to real-or-honest |
+| 2026-04-29 | (this slice) | NtAdjustPrivilegesToken cap-honoring — SYS_TOKEN_ADJUST = 169 in `subsystems/win32/token_syscall.{cpp,h}`. LUID→cap map: SeDebugPrivilege (20)→kCapDebug, SeBackupPrivilege (17)→kCapFsRead, SeRestorePrivilege (18)→kCapFsWrite, SeIncreaseBasePriorityPrivilege (14)→kCapSpawnThread. SE_PRIVILEGE_REMOVED / DisableAllPrivileges drop the mapped cap (CapSetRemove helper, also new). Enable-without-cap returns STATUS_NOT_ALL_ASSIGNED (0x00000106) — no path adds caps from user space. PreviousState writeback honored when caller buffer fits |
 | 2026-04-27 | `f8998d8` | 33 modern Linux syscalls in one TU (`extra_syscalls.cpp`). Real (5): **statx** (256-byte struct, STATX_BASIC_STATS); **copy_file_range** (4 KiB-stage bounce; cap-gated on kCapFsWrite); **memfd_create** (8-slot pool, LinuxFd state 14, 1-page initial alloc); **close_range** (skip stdin/out/err); **statfs / fstatfs** (FAT-shaped defaults). No-op success (8): NUMA family (set/get_mempolicy / mbind / migrate_pages / move_pages), mseal, process_madvise, process_mrelease. Honest -ENOSYS / -EINVAL (20): userfaultfd, io_uring_*, name_to_handle_at / open_by_handle_at, fsopen / fsconfig / fsmount / fspick / open_tree / move_mount / mount_setattr, landlock_*, pkey_alloc / pkey_free / pkey_mprotect (forwards to mprotect, key ignored). DoClose / DoFork arms wired for state 14. **Sub-GAPs**: statx timestamps + dio_align stamped 0; copy_file_range FAT32 only; memfd ftruncate-grow not wired; statfs defaults regardless of path/fd; mseal advisory not enforced; landlock returns -ENOSYS to avoid false-sandbox advertisement |
 
 ---

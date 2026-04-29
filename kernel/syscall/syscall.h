@@ -1589,6 +1589,34 @@ enum SyscallNumber : u64
     SYS_JOB_TERMINATE = 166,
     SYS_JOB_QUERY = 167,
     SYS_JOB_CLOSE = 168,
+
+    // SYS_TOKEN_ADJUST — backs NtAdjustPrivilegesToken /
+    // AdjustTokenPrivileges. Walks a TOKEN_PRIVILEGES blob (u32
+    // PrivilegeCount + PrivilegeCount × 12-byte LUID_AND_ATTRIBUTES)
+    // and translates Win32 privilege LUIDs to the caller's CapSet.
+    //   - Enable a privilege whose mapped cap is held → no-op success.
+    //   - Enable a privilege whose mapped cap is NOT held → the
+    //     handler refuses to grant the cap (kernel never adds caps
+    //     from user space), records a "not all assigned" status for
+    //     the call, and clears the requested SE_PRIVILEGE_ENABLED
+    //     attribute in the optional PreviousState writeback.
+    //   - SE_PRIVILEGE_REMOVED on a privilege with a mapped cap
+    //     drops the cap (CapSetRemove).
+    //   - DisableAllPrivileges drops every mapped cap.
+    //
+    //   rdi = u32 disable_all       (0 / 1)
+    //   rsi = const u8* user_new    (TOKEN_PRIVILEGES*; ignored if disable_all)
+    //   rdx = u32 user_new_byte_len (0 if disable_all == 1)
+    //   r10 = u8* user_prev         (optional TOKEN_PRIVILEGES* writeback; 0 = skip)
+    //   r8  = u32 user_prev_byte_cap
+    //
+    // Returns:
+    //   0  on full success (every requested attribute applied),
+    //   1  on STATUS_NOT_ALL_ASSIGNED (some enable-requests refused
+    //      because their cap was withheld; PreviousState filled with
+    //      what was actually assigned),
+    //  -1  on bad copy / oversized blob / bad PrivilegeCount.
+    SYS_TOKEN_ADJUST = 169,
 };
 
 // Cross-language record returned by SYS_DIR_NEXT. 96 bytes, exact

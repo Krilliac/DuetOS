@@ -3801,19 +3801,44 @@ __declspec(dllexport) NTSTATUS ZwQueryInformationToken(HANDLE TokenHandle, ULONG
                                    ReturnLength);
 }
 
+/* NtAdjustPrivilegesToken — backed by SYS_TOKEN_ADJUST = 169.
+ *
+ * Translates the requested privilege adjustments into kernel
+ * CapSet operations. Mappings (kernel/subsystems/win32/token_syscall.h):
+ *   SeIncreaseBasePriorityPrivilege (LUID 14) → kCapSpawnThread
+ *   SeBackupPrivilege               (LUID 17) → kCapFsRead
+ *   SeRestorePrivilege              (LUID 18) → kCapFsWrite
+ *   SeDebugPrivilege                (LUID 20) → kCapDebug
+ *
+ * Enabling a privilege whose mapped cap isn't held returns
+ * STATUS_NOT_ALL_ASSIGNED (0x00000106) — NOT a failure, just an
+ * "info" status. The kernel never adds caps from user space.
+ * Disable / SE_PRIVILEGE_REMOVED / DisableAllPrivileges all drop
+ * the mapped cap. Privileges with no mapping (SeShutdown, etc.)
+ * are silently accepted.
+ *
+ * Returns: STATUS_SUCCESS (0), STATUS_NOT_ALL_ASSIGNED (0x106), or
+ * STATUS_INVALID_PARAMETER on a malformed blob.
+ */
 __declspec(dllexport) NTSTATUS NtAdjustPrivilegesToken(HANDLE TokenHandle, BOOL DisableAllPrivileges, void* NewState,
                                                        ULONG BufferLength, void* PreviousState, ULONG* ReturnLength)
 {
     (void)TokenHandle;
-    (void)DisableAllPrivileges;
-    (void)NewState;
-    (void)PreviousState;
+    long long rv;
+    __asm__ volatile("mov %5, %%r10\n\t"
+                     "mov %6, %%r8\n\t"
+                     "int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)169), /* SYS_TOKEN_ADJUST */
+                       "D"((long long)(DisableAllPrivileges ? 1 : 0)), "S"((long long)NewState),
+                       "d"((long long)BufferLength), "r"((long long)PreviousState), "r"((long long)BufferLength)
+                     : "r10", "r8", "memory");
+    if (rv < 0)
+        return NTSTATUS_INVALID_PARAMETER;
     if (ReturnLength != (ULONG*)0)
-        *ReturnLength = BufferLength; /* "we accepted everything you asked for" */
-    /* No privilege model — every privilege is implicitly granted
-     * (or implicitly disabled when DisableAllPrivileges, which has
-     * no observable effect since we don't gate anything on token
-     * privileges). Sub-GAP: SeDebugPrivilege etc. unobservable. */
+        *ReturnLength = BufferLength;
+    if (rv == 1)
+        return (NTSTATUS)0x00000106UL; /* STATUS_NOT_ALL_ASSIGNED — info, not failure */
     return NTSTATUS_SUCCESS;
 }
 

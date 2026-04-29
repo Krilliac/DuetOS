@@ -194,6 +194,20 @@ inline constexpr void CapSetAdd(CapSet& s, Cap c)
     s.bits |= (1ULL << static_cast<u32>(c));
 }
 
+// Drop a single cap from the set. Used by NtAdjustPrivilegesToken's
+// disable / remove paths so a Win32 PE can voluntarily shed
+// privilege at runtime. Adding a cap from user space is deliberately
+// NOT exposed — the kernel's spawn-time inheritance is the only
+// path that grants caps. CapSetRemove is the safe counterpart.
+inline constexpr void CapSetRemove(CapSet& s, Cap c)
+{
+    if (c == kCapNone || c >= kCapCount)
+    {
+        return;
+    }
+    s.bits &= ~(1ULL << static_cast<u32>(c));
+}
+
 struct Process
 {
     u64 pid;
