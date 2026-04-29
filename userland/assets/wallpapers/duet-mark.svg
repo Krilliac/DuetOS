@@ -1,0 +1,6 @@
+<svg viewBox="0 0 200 100">
+<circle cx="80" cy="50" r="36" stroke="#3FB6B6" stroke-width="3"/>
+<circle cx="120" cy="50" r="36" stroke="#E0A030" stroke-width="3"/>
+<path d="M 80 14 C 100 14 100 86 80 86" stroke="#3FB6B6" stroke-width="2"/>
+<path d="M 120 14 C 100 14 100 86 120 86" stroke="#E0A030" stroke-width="2"/>
+</svg>

@@ -120,6 +120,23 @@ duetos_embed_blob(generated_hello_pe.h
     SRC     "${CMAKE_SOURCE_DIR}/userland/apps/hello_pe/hello.c"
     COMMENT "Compiling + embedding /bin/hello.exe (freestanding PE)")
 
+# /bin/usershell.elf — real userland shell binary built from
+# userland/shell/shell.c against userland/libc/. Replaces the
+# previous hand-coded 181-byte ELF stub. The build script
+# compiles crt0.S + syscall.c + shell.c, links static via lld,
+# and embeds the resulting bytes for ramfs.
+duetos_embed_blob(generated_usershell_elf.h
+    SCRIPT      "${CMAKE_SOURCE_DIR}/tools/build/build-usershell-elf.sh"
+    SRC         "${CMAKE_SOURCE_DIR}/userland/shell/shell.c"
+    EXTRA_DEPS
+        "${CMAKE_SOURCE_DIR}/userland/libc/src/crt0.S"
+        "${CMAKE_SOURCE_DIR}/userland/libc/src/syscall.c"
+        "${CMAKE_SOURCE_DIR}/userland/libc/include/duet/syscall.h"
+        "${CMAKE_SOURCE_DIR}/userland/libc/include/string.h"
+        "${CMAKE_SOURCE_DIR}/userland/libc/include/unistd.h"
+        "${CMAKE_SOURCE_DIR}/userland/libc/usershell.lds"
+    COMMENT     "Compiling + embedding /bin/usershell.elf (real userland shell)")
+
 duetos_embed_blob(generated_hello_winapi.h
     SCRIPT   "${CMAKE_SOURCE_DIR}/tools/build/build-hello-winapi.sh"
     SRC      "${CMAKE_SOURCE_DIR}/userland/apps/hello_winapi/hello.c"
@@ -174,6 +191,43 @@ add_custom_command(
     COMMENT "Embedding real Windows PE /bin/windows-kill.exe"
     VERBATIM)
 list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_WINKILL_HEADER}")
+
+# Chrome font — Liberation Sans Regular (SIL OFL 1.1). Embedded as
+# bytes for the TTF rasterizer; the boot path hands these to
+# TtfLoad + TtfChromeFontSet so the 5 Duet-family themes start
+# rendering window titles via the slice-4 rasterizer instead of
+# the fallback 8x8 bitmap font.
+set(DUETOS_CHROME_FONT_SRC    "${CMAKE_SOURCE_DIR}/userland/assets/fonts/duet-chrome.ttf")
+set(DUETOS_CHROME_FONT_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_chrome_font.h")
+add_custom_command(
+    OUTPUT "${DUETOS_CHROME_FONT_HEADER}"
+    COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
+            "${DUETOS_CHROME_FONT_SRC}" "${DUETOS_CHROME_FONT_HEADER}"
+            kBinChromeFontBytes --namespace "duetos::drivers::video::generated"
+    DEPENDS "${DUETOS_CHROME_FONT_SRC}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Embedding chrome font Liberation Sans Regular (SIL OFL 1.1)"
+    VERBATIM)
+list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_CHROME_FONT_HEADER}")
+
+# Wallpaper SVG assets — DuetMark, topo backdrop, syscalls grid.
+# Hand-authored under userland/assets/wallpapers/. Each gets its
+# own embed entry so the wallpaper paint dispatch can walk them
+# independently per theme.
+foreach(_svg_name duet-mark topo syscalls-grid)
+    set(_svg_src    "${CMAKE_SOURCE_DIR}/userland/assets/wallpapers/${_svg_name}.svg")
+    set(_svg_header "${CMAKE_CURRENT_BINARY_DIR}/generated_svg_${_svg_name}.h")
+    string(REPLACE "-" "_" _svg_underscore "${_svg_name}")
+    add_custom_command(
+        OUTPUT "${_svg_header}"
+        COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
+                "${_svg_src}" "${_svg_header}"
+                kBinSvg_${_svg_underscore}_Bytes
+                --namespace "duetos::drivers::video::generated"
+        DEPENDS "${_svg_src}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Embedding wallpaper SVG ${_svg_name}.svg"
+        VERBATIM)
+    list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${_svg_header}")
+endforeach()
 
 # ----------------------------------------------------------------------------
 # Userland DLLs embedded into the kernel image. Each entry retires

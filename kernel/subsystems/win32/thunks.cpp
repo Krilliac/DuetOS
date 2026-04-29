@@ -652,4 +652,19 @@ bool Win32ThunksLookupKind(const char* dll, const char* func, u64* out_va, bool*
     return found_hashed;
 }
 
+void Win32ThunksDumpTo(ThunksDumpFn writer)
+{
+    if (writer == nullptr)
+        return;
+    constexpr u64 kCount = sizeof(kThunksTable) / sizeof(kThunksTable[0]);
+    for (u64 i = 0; i < kCount; ++i)
+    {
+        const auto& e = kThunksTable[i];
+        writer(e.dll != nullptr ? e.dll : "?");
+        writer("!");
+        writer(e.func != nullptr ? e.func : "?");
+        writer("\n");
+    }
+}
+
 } // namespace duetos::win32

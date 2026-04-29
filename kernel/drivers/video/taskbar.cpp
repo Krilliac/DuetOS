@@ -7,6 +7,7 @@
 #include "net/stack.h"
 #include "sched/sched.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
 
 namespace duetos::drivers::video
@@ -40,6 +41,14 @@ constinit u32 g_net_cell_x = 0;
 constinit u32 g_net_cell_y = 0;
 constinit u32 g_net_cell_w = 0;
 constinit u32 g_net_cell_h = 0;
+
+// "Show Desktop" sliver bounds — exposed via
+// `TaskbarShowDesktopBounds`. Updated every redraw; remains 0
+// until the strip has been Init'd + Redrawn at least once.
+constinit u32 g_show_desktop_x = 0;
+constinit u32 g_show_desktop_y = 0;
+constinit u32 g_show_desktop_w = 0;
+constinit u32 g_show_desktop_h = 0;
 
 // Last-painted tab layout. Updated by TaskbarRedraw; consumed by
 // TaskbarTabAt. Capacity matches kMaxWindows so tabs and window
@@ -97,6 +106,23 @@ u32 TextRowY()
     return (g_h > 8) ? g_y + (g_h - 8) / 2 : g_y + 2;
 }
 
+// Lighten an 0x00RRGGBB colour by `amount` per channel, saturating
+// at 0xFF. Used to derive the highlight shade for the top of
+// gradient bands (taskbar strip, START button, active tab).
+u32 LightenRgb(u32 rgb, u32 amount)
+{
+    u32 r = ((rgb >> 16) & 0xFFU) + amount;
+    u32 g = ((rgb >> 8) & 0xFFU) + amount;
+    u32 b = (rgb & 0xFFU) + amount;
+    if (r > 0xFFU)
+        r = 0xFFU;
+    if (g > 0xFFU)
+        g = 0xFFU;
+    if (b > 0xFFU)
+        b = 0xFFU;
+    return (r << 16) | (g << 8) | b;
+}
+
 } // namespace
 
 void TaskbarInit(u32 y, u32 height, u32 bg_rgb, u32 fg_rgb, u32 accent_rgb, u32 tab_inactive_rgb, u32 border_rgb)
@@ -129,19 +155,84 @@ void TaskbarRedraw()
     const auto info = FramebufferGet();
     const u32 fbw = info.width;
 
-    // Background strip + thin accent line at top for visual
-    // separation from the desktop.
-    FramebufferFillRect(0, g_y, fbw, g_h, g_bg);
+    // Background strip with a subtle vertical gradient: a slightly
+    // lifted shade at the top fades into the registered taskbar bg
+    // at the bottom. Reads as a coherent toolbar surface rather
+    // than a flat coloured stripe. Keep the lift small so themes
+    // that picked a near-black bg still read as near-black.
+    FramebufferFillRectGradient(0, g_y, fbw, g_h, LightenRgb(g_bg, 12), g_bg);
+    // Thin accent line on the top edge — preserves the "the
+    // taskbar starts here" cue the original flat bar had.
     FramebufferFillRect(0, g_y, fbw, 1, g_accent);
 
     const u32 text_y = TextRowY();
 
     // "START" anchor on the left. Clicking it opens the start
     // menu via the mouse reader's TaskbarStartBounds hit-test.
+    // Rounded fill + matching outline so it reads as an affordance
+    // rather than a coloured rectangle. A 2-px highlight strip on
+    // the top edge gives it a subtle raised look matching the
+    // window-chrome highlight band.
     constexpr u32 start_w = 88;
-    FramebufferFillRect(4, g_y + 4, start_w, g_h - 8, g_accent);
-    FramebufferDrawRect(4, g_y + 4, start_w, g_h - 8, g_border, 1);
-    FramebufferDrawString(4 + (start_w - 5 * 8) / 2, text_y, "START", g_fg, g_accent);
+    constexpr u32 start_radius = 4;
+    const u32 start_h = (g_h > 8) ? g_h - 8 : g_h;
+    FramebufferFillRoundRect(4, g_y + 4, start_w, start_h, start_radius, g_accent);
+    FramebufferDrawRoundRect(4, g_y + 4, start_w, start_h, start_radius, g_border);
+    if (start_h > 4)
+    {
+        FramebufferFillRect(4 + start_radius, g_y + 5, start_w - 2 * start_radius, 1, LightenRgb(g_accent, 40));
+    }
+    // On the Duet theme the START button paints the DuetMark — two
+    // interlocking rings (teal + amber) glyphing the dual-ABI
+    // story — followed by the word "DUET". Other themes keep the
+    // five-letter "START" label since they don't carry the duet
+    // narrative. The simplified DuetMark uses two outlined circles
+    // rather than the prototype's partial-arc strokes; partial-arc
+    // rasterization is a follow-on once a proper path stroker
+    // lands in the framebuffer.
+    const ThemeId tid_start = ThemeCurrentId();
+    const bool is_duet_family = tid_start == ThemeId::Duet || tid_start == ThemeId::DuetLight ||
+                                tid_start == ThemeId::DuetBlue || tid_start == ThemeId::DuetViolet ||
+                                tid_start == ThemeId::DuetGreen || tid_start == ThemeId::DuetClassic;
+    if (is_duet_family)
+    {
+        constexpr u32 mark_label_w = 4 * 8; // "DUET"
+        constexpr u32 mark_diameter = 14;
+        constexpr u32 mark_overlap = 6; // shared horizontal overlap between rings
+        const u32 mark_total_w = 2 * mark_diameter - mark_overlap + 6 + mark_label_w;
+        const u32 mark_origin_x = 4 + (start_w - mark_total_w) / 2;
+        const i32 ring_cy = static_cast<i32>(g_y + g_h / 2);
+        const i32 ring_a_cx = static_cast<i32>(mark_origin_x + mark_diameter / 2);
+        const i32 ring_b_cx = static_cast<i32>(mark_origin_x + mark_diameter - mark_overlap + mark_diameter / 2);
+        constexpr u32 ring_r = mark_diameter / 2;
+        // Teal accent (matches Duet's `--accent`). Drawing the ring
+        // twice — once at radius r, once at radius r-1 — gives a
+        // 2-pixel stroke without a separate stroke primitive.
+        // Primary ring: the active theme's accent (teal on slate
+        // Duet, blue on DuetBlue, violet on DuetViolet, etc.) so
+        // each variant's brand colour reads in the START glyph.
+        // Secondary ring: amber across all variants — the "second
+        // ABI" ink the duet narrative is built around.
+        //
+        // Partial-arc geometry — matches the prototype's DuetMark
+        // (`docs/duet-theme/prototype/`): each ring is a ~189°
+        // sweep (52% of the full circle), with the two arcs
+        // rotated 180° apart so the open ends face away from
+        // each other. Stroke thickness 2 keeps the ring visible
+        // on the active-tab gradient + the inactive dim overlay.
+        constexpr u32 kAmber = 0x00F0B040;
+        const u32 primary_ring = g_accent;
+        constexpr i32 kArcSweep = 189;
+        FramebufferStrokeArc(ring_a_cx, ring_cy, static_cast<i32>(ring_r), -30, kArcSweep, 2U, primary_ring);
+        FramebufferStrokeArc(ring_b_cx, ring_cy, static_cast<i32>(ring_r), 150, kArcSweep, 2U, kAmber);
+        // Label sits right of the rings.
+        const u32 label_x = mark_origin_x + 2 * mark_diameter - mark_overlap + 6;
+        FramebufferDrawString(label_x, text_y, "DUET", g_fg, g_accent);
+    }
+    else
+    {
+        FramebufferDrawString(4 + (start_w - 5 * 8) / 2, text_y, "START", g_fg, g_accent);
+    }
 
     // Per-window tabs. Iterate every registered window, filter
     // alive, render a dark tab with its title. Advance x with a
@@ -169,10 +260,30 @@ void TaskbarRedraw()
         const bool is_active = (h == WindowActive());
         // Active tab uses the taskbar's accent colour so the
         // focused window reads at a glance — matches the window-
-        // chrome active/inactive distinction.
+        // chrome active/inactive distinction. Rounded fill +
+        // outline match the START button so the tray reads as
+        // a coherent set of affordances rather than mismatched
+        // styles.
         const u32 tab_bg = is_active ? g_accent : g_tab_inactive;
-        FramebufferFillRect(tab_x, g_y + 4, tab_w, g_h - 8, tab_bg);
-        FramebufferDrawRect(tab_x, g_y + 4, tab_w, g_h - 8, g_border, 1);
+        constexpr u32 tab_radius = 3;
+        const u32 tab_h_eff = g_h - 8;
+        FramebufferFillRoundRect(tab_x, g_y + 4, tab_w, tab_h_eff, tab_radius, tab_bg);
+        FramebufferDrawRoundRect(tab_x, g_y + 4, tab_w, tab_h_eff, tab_radius, g_border);
+        // Focus dot under the active tab. Per the spec the dot
+        // is 14 px wide for running-but-not-pinned active apps
+        // and 8 px wide for pinned-and-active apps — the size
+        // difference encodes "session-bound vs always-here"
+        // without adding ink.
+        if (is_active && tab_h_eff > 4)
+        {
+            const bool pinned = WindowIsPinned(h);
+            const u32 dot_w = pinned ? 8U : 14U;
+            constexpr u32 dot_h = 2;
+            const u32 strip_rgb = LightenRgb(g_accent, 56);
+            const u32 dot_x = tab_x + (tab_w - dot_w) / 2;
+            const u32 dot_y = g_y + g_h - 4 - dot_h;
+            FramebufferFillRect(dot_x, dot_y, dot_w, dot_h, strip_rgb);
+        }
         const char* title = WindowTitle(h);
         if (title != nullptr)
         {
@@ -363,6 +474,35 @@ void TaskbarRedraw()
             draw_tray_cell("B", colour, nullptr, nullptr, nullptr, nullptr);
         }
     }
+
+    // Show-Desktop accent rail at the very right edge of the
+    // strip — Win10's "minimize all" target. Painted as a thin
+    // 4-px-wide vertical strip in the theme accent so it reads
+    // as the same affordance language as the START button. The
+    // rail is INSET 1 px from the edge so the framebuffer's
+    // outer pixel column stays on the bg gradient — keeps the
+    // chrome from looking pasted onto the surface.
+    //
+    // The rail's body alpha shifts based on toggle state: 0x60
+    // (subtle) when windows are visible, 0xC0 (brighter) when
+    // the desktop is showing — gives the user a visible
+    // "armed" cue that a click would restore the windows.
+    {
+        constexpr u32 rail_w = 4;
+        const u32 rail_x = (fbw > rail_w + 1) ? fbw - rail_w - 1 : 0;
+        const u32 rail_y = g_y + 4;
+        const u32 rail_h = (g_h > 8) ? g_h - 8 : g_h;
+        const u8 rail_alpha = WindowShowDesktopActive() ? 0xC0 : 0x60;
+        FramebufferFillRectAlpha(rail_x, rail_y, rail_w, rail_h,
+                                 (static_cast<u32>(rail_alpha) << 24) | (g_accent & 0x00FFFFFFU));
+        // 1-px brighter highlight on the inside edge so the
+        // rail has visible structure when hovered.
+        FramebufferFillRect(rail_x, rail_y, 1, rail_h, LightenRgb(g_accent, 56));
+        g_show_desktop_x = rail_x;
+        g_show_desktop_y = rail_y;
+        g_show_desktop_w = rail_w;
+        g_show_desktop_h = rail_h;
+    }
 }
 
 u32 TaskbarTabAt(u32 x, u32 y)
@@ -414,6 +554,23 @@ void TaskbarNetCellBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)
         *w_out = g_net_cell_w;
     if (h_out)
         *h_out = g_net_cell_h;
+}
+
+void TaskbarShowDesktopBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)
+{
+    if (x_out)
+        *x_out = g_show_desktop_x;
+    if (y_out)
+        *y_out = g_show_desktop_y;
+    if (w_out)
+        *w_out = g_show_desktop_w;
+    if (h_out)
+        *h_out = g_show_desktop_h;
+}
+
+u32 TaskbarHeight()
+{
+    return g_h;
 }
 
 void TaskbarStartBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)

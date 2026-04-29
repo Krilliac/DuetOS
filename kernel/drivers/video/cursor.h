@@ -73,4 +73,13 @@ void CursorShow();
 /// repaints over the new desktop fill rather than the old one.
 void CursorSetDesktopBackground(u32 rgb);
 
+/// Update the cursor sprite's outline + fill colours. Called by
+/// the theme module so each theme's cursor matches its chrome
+/// (Classic = white-on-black, Amber = bright-amber-on-black,
+/// Duet = ink-on-slate-border, etc.). Both arguments are
+/// `0x00RRGGBB`. The cursor is repainted at its current
+/// position so the new colours appear on the next mouse event
+/// without waiting for motion.
+void CursorSetColours(u32 outline_rgb, u32 fill_rgb);
+
 } // namespace duetos::drivers::video

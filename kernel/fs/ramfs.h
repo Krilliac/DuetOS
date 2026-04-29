@@ -75,4 +75,58 @@ const RamfsNode* RamfsSandboxRoot();
 /// sentinel check used by the VFS walker.
 bool RamfsIsDir(const RamfsNode* n);
 
+/// Capture the current klog ring into the static `/proc/boottrace`
+/// buffer. After this returns, `/proc/boottrace` reads the
+/// captured bytes via the same path as any other ramfs file —
+/// no callback machinery needed in the rest of the VFS.
+///
+/// Idempotent: each call overwrites the previous snapshot. Buffer
+/// is 16 KiB; output truncates if the formatted log is larger.
+/// Intended call site: end of boot, just before the login gate
+/// or shell prompt, so the trace captures everything up to
+/// "system ready".
+void RamfsBoottraceSnapshot();
+
+/// Format the native syscall number → name table into the static
+/// `/sys/syscalls` buffer. Each line is "<dec_nr>  SYS_FOO\n",
+/// in `kSyscallNames[]` order. Idempotent. Buffer is 8 KiB,
+/// well above the current ~129-entry table size. Intended call
+/// site: once during boot, alongside `RamfsBoottraceSnapshot`.
+/// The table is constexpr so the snapshot never goes stale at
+/// runtime — re-running it just rewrites the same bytes.
+void RamfsSyscallsSnapshot();
+
+/// Materialise `/proc/abi/native` (syscall number→name) and
+/// `/proc/abi/win32` (every DLL!Function the Win32 thunks
+/// table knows). Both files start with a "#"-prefixed header
+/// line so a shell `cat` clearly identifies the dump. The
+/// payload below is one entry per line. Idempotent — both
+/// underlying tables are constexpr so re-running rewrites
+/// the same bytes. Native buffer 8 KiB, Win32 buffer 32 KiB.
+void RamfsAbiSnapshot();
+
+/// Push one sample into the `/proc/cpuhist` ring (capacity 60)
+/// and re-render the file. The busy % at each sample is the
+/// 1 - (idle delta / total delta) ratio against the previous
+/// sample. With no timer-driven sampler wired up yet, the
+/// ring fills only at calls to this function — the file's
+/// header explains the gap. A future slice will hang this
+/// off a 1 Hz timer to fill the ring.
+void RamfsCpuhistSnapshot();
+
+/// Populate `/sys/inspect/<basename>` for each PE shipped in
+/// `/bin`. Each file holds a short summary (image base,
+/// entry RVA, image size, section count, exports status)
+/// produced by `PeQuickSummaryTo`. 1 KiB per entry is enough
+/// for the summary; full PeReport-style disassembly remains
+/// serial-only.
+void RamfsInspectSnapshot();
+
+/// Borrowed pointer + length of the hand-built userland shell
+/// stub ELF. The kernel boot path spawns this at end of init
+/// to demonstrate ring-3 + SYS_WRITE + SYS_EXIT end to end.
+/// A future slice grows this into a real prompt-driven shell.
+const u8* RamfsUsershellElfBytes();
+u64 RamfsUsershellElfSize();
+
 } // namespace duetos::fs

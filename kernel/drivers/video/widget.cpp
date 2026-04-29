@@ -44,8 +44,12 @@
 #include "drivers/video/cursor.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/menu.h"
+#include "drivers/video/ttf.h"
+#include "drivers/video/ttf_raster.h"
 #include "drivers/video/netpanel.h"
 #include "drivers/video/taskbar.h"
+#include "drivers/video/theme.h"
+#include "drivers/video/wallpaper.h"
 
 namespace duetos::drivers::video
 {
@@ -126,6 +130,36 @@ u32 StringPixelWidth(const char* s)
     return n * 8;
 }
 
+// Saturating per-channel lighten — forward declaration of the
+// helper defined further down this TU (just before WindowDraw).
+// Buttons want the same "lifted top, settled bottom" gradient
+// look as the rest of the chrome.
+u32 LightenRgb(u32 rgb, u32 amount);
+
+// Resolve a window's effective title-bar height: explicit
+// per-window value wins; otherwise sample the active theme's
+// `title_bar_height`; otherwise fall back to the historical
+// 22-px default. Single source of truth — paint + hit-test
+// paths both consult this so a theme switch can't desync the
+// chrome and the click target.
+// Pixel width of one title-bar control button (close / max /
+// min). Theme.title_button_width = 0 means "derive from height"
+// (the historical pre-spec behaviour: square buttons sized off
+// the title bar). Otherwise the theme's value wins.
+u32 EffectiveButtonWidth(u32 derived_height)
+{
+    const u32 from_theme = ThemeCurrent().title_button_width;
+    return (from_theme != 0) ? from_theme : derived_height;
+}
+
+u32 EffectiveTitleHeight(const WindowChrome& w)
+{
+    if (w.title_height != 0)
+        return w.title_height;
+    const u32 from_theme = ThemeCurrent().title_bar_height;
+    return (from_theme != 0) ? from_theme : 22u;
+}
+
 void PaintButton(const ButtonWidget& b)
 {
     u32 bx = 0, by = 0;
@@ -134,8 +168,26 @@ void PaintButton(const ButtonWidget& b)
         return; // dead owner window — skip silently
     }
     const u32 fill = b.pressed ? b.colour_pressed : b.colour_normal;
-    FramebufferFillRect(bx, by, b.w, b.h, fill);
+    // Vertical gradient: lifted shade at the top fading to the
+    // registered fill at the bottom. Pressed buttons skip the
+    // gradient (a pressed button looks "settled" without the
+    // lifted highlight band) so the press transition reads
+    // visibly as a state change.
+    if (b.pressed)
+    {
+        FramebufferFillRect(bx, by, b.w, b.h, fill);
+    }
+    else
+    {
+        FramebufferFillRectGradient(bx, by, b.w, b.h, LightenRgb(fill, 22), fill);
+    }
     FramebufferDrawRect(bx, by, b.w, b.h, b.colour_border, 2);
+    // 1-px ridge highlight along the inside of the top edge —
+    // matches the window-chrome / taskbar / popup ridge.
+    if (!b.pressed && b.w > 6 && b.h > 4)
+    {
+        FramebufferFillRect(bx + 2, by + 2, b.w - 4, 1, LightenRgb(fill, 50));
+    }
     if (b.label != nullptr)
     {
         // Centre the label inside the button. 8x8 cell metrics,
@@ -208,10 +260,24 @@ struct RegisteredWindow
     // two extras.
     u64 longs[kWinLongSlots];
     WindowHandle parent; // kWindowInvalid if top-level
+    // Pre-maximize bounds snapshot. Stored at WindowMaximize
+    // time so WindowRestore can put the window back where it
+    // was. Only meaningful when `maximized == true`.
+    u32 saved_x, saved_y, saved_w, saved_h;
     bool alive;
     bool visible;
-    bool dirty; // set by InvalidateRect; cleared by BeginPaint / WindowDrainPaints
-    u8 _pad[5];
+    bool dirty;     // set by InvalidateRect; cleared by BeginPaint / WindowDrainPaints
+    bool maximized; // true while WindowMaximize has been applied without a Restore
+    bool pinned;    // taskbar UI hint — affects active-tab dot size
+    // Per-window opacity. 0xFF = fully opaque (default). Values
+    // below dim the window by alpha-blending a black overlay
+    // with alpha = (0xFF - opacity) AFTER chrome / content
+    // paint. Cheap fake-transparency that doesn't need a real
+    // compositor backbuffer — blends toward the desktop's dark
+    // ink rather than the surface beneath, but the visual
+    // "fading window" cue still reads correctly.
+    u8 opacity;
+    u8 _pad[2];
 };
 
 constinit RegisteredWindow g_windows[kMaxWindows] = {};
@@ -305,6 +371,27 @@ constinit WindowHandle g_active_window = kWindowInvalid;
 // engineering at v0 scale.
 constinit DisplayMode g_display_mode = DisplayMode::Desktop;
 
+// Show-Desktop snapshot: bitmask over `kMaxWindows` slots
+// recording which windows were visible at the moment the user
+// last triggered "show desktop". When `g_show_desktop_active` is
+// true, the toggle is in its "windows hidden" state; the next
+// trigger re-shows the marked windows. The snapshot is taken at
+// activation time (not at every redraw) so windows that the user
+// closes WHILE the desktop is shown don't get resurrected when
+// the toggle releases.
+constinit u32 g_show_desktop_mask = 0;
+constinit bool g_show_desktop_active = false;
+
+// Desktop fill colour observed on the most recent DesktopCompose
+// pass. `WindowDrawAllOrdered` reads this when rounding window
+// corners on the Duet theme — the punch primitive needs a "what
+// colour was here before chrome" approximation, and the gradient
+// mid-tone (= the raw desktop_rgb argument) is the cheapest
+// reasonable answer until per-pixel sampling lands. Defaults to
+// 0 so the corner-punch is a no-op before any compose pass has
+// run (i.e. during the initial framebuffer self-test).
+constinit u32 g_compose_desktop_rgb = 0;
+
 // Muted colour used for inactive windows' title bars. Chosen
 // slightly darker + desaturated versus any window's own
 // `colour_title`, so the active/inactive distinction reads at a
@@ -314,6 +401,42 @@ constexpr u32 kInactiveTitleRgb = 0x00506070;
 bool WindowValid(WindowHandle h)
 {
     return h < g_window_count && g_windows[h].alive;
+}
+
+} // namespace
+
+namespace
+{
+
+// Lighten an 0x00RRGGBB colour by `amount` per channel, saturating
+// at 0xFF. Used to derive the highlight shade for the top of a
+// title bar gradient. Cheap saturating add — no branch on
+// channel boundaries because the per-channel sums fit in u32.
+u32 LightenRgb(u32 rgb, u32 amount)
+{
+    u32 r = ((rgb >> 16) & 0xFFU) + amount;
+    u32 g = ((rgb >> 8) & 0xFFU) + amount;
+    u32 b = (rgb & 0xFFU) + amount;
+    if (r > 0xFFU)
+        r = 0xFFU;
+    if (g > 0xFFU)
+        g = 0xFFU;
+    if (b > 0xFFU)
+        b = 0xFFU;
+    return (r << 16) | (g << 8) | b;
+}
+
+// Darken sibling of LightenRgb. Saturates at 0 — channels that
+// would underflow clamp to 0 instead of wrapping.
+u32 DarkenRgb(u32 rgb, u32 amount)
+{
+    const u32 r0 = (rgb >> 16) & 0xFFU;
+    const u32 g0 = (rgb >> 8) & 0xFFU;
+    const u32 b0 = rgb & 0xFFU;
+    const u32 r = (r0 > amount) ? r0 - amount : 0U;
+    const u32 g = (g0 > amount) ? g0 - amount : 0U;
+    const u32 b = (b0 > amount) ? b0 - amount : 0U;
+    return (r << 16) | (g << 8) | b;
 }
 
 } // namespace
@@ -331,13 +454,36 @@ void WindowDraw(const WindowChrome& w)
     // pattern.
     FramebufferFillRect(w.x, w.y, w.w, w.h, w.colour_client);
 
-    // Title bar.
-    const u32 tbh = (w.title_height == 0) ? 22 : w.title_height;
+    // Title bar with a vertical gradient: a softly-lighter band
+    // at the top fades into the registered title colour at the
+    // bottom. The +24 lift is small enough to preserve the
+    // theme's hue identity while still reading as "depth" — the
+    // chrome no longer looks like a solid coloured bar.
+    const u32 tbh = EffectiveTitleHeight(w);
     const u32 tbh_eff = (tbh > w.h) ? w.h : tbh;
-    FramebufferFillRect(w.x, w.y, w.w, tbh_eff, w.colour_title);
+    const u32 title_top = LightenRgb(w.colour_title, 24);
+    FramebufferFillRectGradient(w.x, w.y, w.w, tbh_eff, title_top, w.colour_title);
+
+    // 1-pixel highlight at the very top of the title bar — a
+    // brighter ridge that catches the eye and makes the window
+    // read as a discrete object rather than a coloured fill.
+    if (tbh_eff > 0)
+    {
+        FramebufferFillRect(w.x + 2, w.y + 1, (w.w > 4) ? w.w - 4 : 0, 1, LightenRgb(w.colour_title, 56));
+    }
 
     // Outer border — 2-pixel dark frame over the whole window.
     FramebufferDrawRect(w.x, w.y, w.w, w.h, w.colour_border, 2);
+
+    // Inner client highlight: 1-pixel line just inside the
+    // border at the top of the client area. Catches incoming
+    // light from the title-bar gradient above and gives the
+    // client a slight "recessed" feel without blowing the
+    // theme's flat aesthetic.
+    if (tbh_eff + 3 <= w.h && w.w > 6)
+    {
+        FramebufferFillRect(w.x + 3, w.y + tbh_eff + 1, w.w - 6, 1, LightenRgb(w.colour_client, 16));
+    }
 
     // Title / client divider — 1-pixel line where the title
     // bar ends. Helps the eye separate chrome from content.
@@ -346,17 +492,80 @@ void WindowDraw(const WindowChrome& w)
         FramebufferFillRect(w.x + 2, w.y + tbh_eff, w.w - 4, 1, w.colour_border);
     }
 
-    // Close-button-ish square near top-right. Sized to fit
-    // inside the title bar with 4px padding on top/bottom.
+    // Three title-bar control buttons (min / max / close), laid
+    // out right-to-left from the title-bar's right edge with
+    // `btn_pad` between each. Each box reuses the same square
+    // geometry and shares the close button's colour for fill so
+    // the trio reads as a coherent set; the close box gets the
+    // distinct theme `colour_close_btn` so it's still the
+    // visually loudest control. Glyphs (— / □ / X) are drawn
+    // with the framebuffer's line primitive — pixel-perfect at
+    // any title-bar height.
     const u32 btn_pad = 4;
-    if (tbh_eff > 2 * btn_pad + 4 && w.w > tbh_eff)
     {
-        const u32 btn_side = tbh_eff - 2 * btn_pad;
-        const u32 btn_x = w.x + w.w - btn_side - btn_pad;
-        const u32 btn_y = w.y + btn_pad;
-        FramebufferFillRect(btn_x, btn_y, btn_side, btn_side, w.colour_close_btn);
-        FramebufferDrawRect(btn_x, btn_y, btn_side, btn_side, w.colour_border, 1);
+        const u32 btn_h = (tbh_eff > 2 * btn_pad) ? tbh_eff - 2 * btn_pad : 0;
+        const u32 btn_w = EffectiveButtonWidth(btn_h);
+        if (btn_h > 4 && w.w > btn_w * 3U + btn_pad * 2U)
+        {
+            const u32 close_x = w.x + w.w - btn_w - btn_pad;
+            const u32 max_x = (close_x > btn_w + 2U) ? close_x - btn_w - 2U : close_x;
+            const u32 min_x = (max_x > btn_w + 2U) ? max_x - btn_w - 2U : max_x;
+            const u32 btn_y = w.y + btn_pad;
+
+            // Use the title bar's gradient-bottom colour as the
+            // hover/control fill so min + max look like part of the
+            // chrome, not separate UI. The close box keeps its
+            // theme-distinct red.
+            const u32 ctrl_fill = w.colour_title;
+            FramebufferFillRect(min_x, btn_y, btn_w, btn_h, ctrl_fill);
+            FramebufferDrawRect(min_x, btn_y, btn_w, btn_h, w.colour_border, 1);
+            FramebufferFillRect(max_x, btn_y, btn_w, btn_h, ctrl_fill);
+            FramebufferDrawRect(max_x, btn_y, btn_w, btn_h, w.colour_border, 1);
+            FramebufferFillRect(close_x, btn_y, btn_w, btn_h, w.colour_close_btn);
+            FramebufferDrawRect(close_x, btn_y, btn_w, btn_h, w.colour_border, 1);
+
+            // Glyph dimensions use the smaller of width/height so
+            // the inner mark stays centred + symmetric whether the
+            // box is square (compact themes) or wider-than-tall
+            // (Duet 46-px chrome). Inset measured from the smaller
+            // dim; horizontal padding centres a square glyph
+            // inside the wider rectangle.
+            const u32 glyph_side = (btn_w < btn_h) ? btn_w : btn_h;
+            if (glyph_side >= 8)
+            {
+                const u32 inset = 3;
+                const u32 gx_pad = (btn_w - glyph_side) / 2;
+                // Minimize: a 2-px-thick horizontal bar near the
+                // bottom of the box. Reads as the "_" glyph at
+                // small sizes.
+                FramebufferFillRect(min_x + gx_pad + inset, btn_y + btn_h - inset - 2U, glyph_side - 2U * inset, 2U,
+                                    0x00FFFFFF);
+                // Maximize / restore: a 1-px outlined square in
+                // the centre. When already maximized, draw a
+                // double-square to hint "restore" — the chrome
+                // doesn't store hover state, so this is the only
+                // visible distinction between max + restore.
+                const u32 sq_side = glyph_side - 2U * inset;
+                FramebufferDrawRect(max_x + gx_pad + inset, btn_y + inset, sq_side, sq_side, 0x00FFFFFF, 1);
+                // Close: doubled diagonal X (existing chrome).
+                const i32 cx0 = static_cast<i32>(close_x + gx_pad + inset);
+                const i32 cy0 = static_cast<i32>(btn_y + inset);
+                const i32 cx1 = static_cast<i32>(close_x + gx_pad + glyph_side - 1U - inset);
+                const i32 cy1 = static_cast<i32>(btn_y + btn_h - 1U - inset);
+                FramebufferDrawLine(cx0, cy0, cx1, cy1, 0x00FFFFFF);
+                FramebufferDrawLine(cx0, cy1, cx1, cy0, 0x00FFFFFF);
+                FramebufferDrawLine(cx0 + 1, cy0, cx1, cy1 - 1, 0x00FFFFFF);
+                FramebufferDrawLine(cx0, cy1 - 1, cx1 - 1, cy0, 0x00FFFFFF);
+            }
+        }
     }
+
+    // Soft drop shadow on the right + bottom edges. Makes the
+    // active window read as raised relative to the desktop and
+    // recedes the inactive ones into the surface — a small
+    // chrome polish that costs ~depth × (w + h) alpha-blended
+    // pixels per window.
+    FramebufferDropShadow(w.x, w.y, w.w, w.h, 4, 0x60);
 }
 
 namespace
@@ -410,6 +619,13 @@ WindowHandle WindowRegister(const WindowChrome& chrome, const char* title)
     g_windows[h].alive = true;
     g_windows[h].visible = true;
     g_windows[h].dirty = false;
+    g_windows[h].opacity = 0xFF; // fully opaque by default
+    g_windows[h].maximized = false;
+    g_windows[h].pinned = false;
+    g_windows[h].saved_x = 0;
+    g_windows[h].saved_y = 0;
+    g_windows[h].saved_w = 0;
+    g_windows[h].saved_h = 0;
     g_windows[h].owner_pid = 0;
     g_windows[h].parent = kWindowInvalid;
     g_windows[h].msgs.head = 0;
@@ -585,7 +801,7 @@ bool WindowPointInTitle(WindowHandle h, u32 x, u32 y)
         return false;
     }
     const auto& c = g_windows[h].chrome;
-    const u32 tbh = (c.title_height == 0) ? 22 : c.title_height;
+    const u32 tbh = EffectiveTitleHeight(c);
     return x >= c.x && x < c.x + c.w && y >= c.y && y < c.y + tbh;
 }
 
@@ -596,17 +812,225 @@ bool WindowPointInCloseBox(WindowHandle h, u32 x, u32 y)
         return false;
     }
     const auto& c = g_windows[h].chrome;
-    const u32 tbh = (c.title_height == 0) ? 22 : c.title_height;
+    const u32 tbh = EffectiveTitleHeight(c);
     const u32 tbh_eff = (tbh > c.h) ? c.h : tbh;
     const u32 btn_pad = 4;
-    if (tbh_eff <= 2 * btn_pad + 4 || c.w <= tbh_eff)
+    const u32 btn_h = (tbh_eff > 2 * btn_pad) ? tbh_eff - 2 * btn_pad : 0;
+    const u32 btn_w = EffectiveButtonWidth(btn_h);
+    if (btn_h <= 4 || c.w <= btn_w * 3U + btn_pad * 2U)
     {
-        return false; // title bar too short for a visible close box
+        return false; // title bar too short for the trio
     }
-    const u32 btn_side = tbh_eff - 2 * btn_pad;
-    const u32 btn_x = c.x + c.w - btn_side - btn_pad;
+    const u32 btn_x = c.x + c.w - btn_w - btn_pad;
     const u32 btn_y = c.y + btn_pad;
-    return x >= btn_x && x < btn_x + btn_side && y >= btn_y && y < btn_y + btn_side;
+    return x >= btn_x && x < btn_x + btn_w && y >= btn_y && y < btn_y + btn_h;
+}
+
+bool WindowPointInMaxBox(WindowHandle h, u32 x, u32 y)
+{
+    if (!WindowValid(h))
+    {
+        return false;
+    }
+    const auto& c = g_windows[h].chrome;
+    const u32 tbh = EffectiveTitleHeight(c);
+    const u32 tbh_eff = (tbh > c.h) ? c.h : tbh;
+    const u32 btn_pad = 4;
+    const u32 btn_h = (tbh_eff > 2 * btn_pad) ? tbh_eff - 2 * btn_pad : 0;
+    const u32 btn_w = EffectiveButtonWidth(btn_h);
+    if (btn_h <= 4 || c.w <= btn_w * 3U + btn_pad * 2U)
+    {
+        return false;
+    }
+    const u32 close_x = c.x + c.w - btn_w - btn_pad;
+    if (close_x <= btn_w + 2U)
+    {
+        return false;
+    }
+    const u32 max_x = close_x - btn_w - 2U;
+    const u32 btn_y = c.y + btn_pad;
+    return x >= max_x && x < max_x + btn_w && y >= btn_y && y < btn_y + btn_h;
+}
+
+bool WindowPointInMinBox(WindowHandle h, u32 x, u32 y)
+{
+    if (!WindowValid(h))
+    {
+        return false;
+    }
+    const auto& c = g_windows[h].chrome;
+    const u32 tbh = EffectiveTitleHeight(c);
+    const u32 tbh_eff = (tbh > c.h) ? c.h : tbh;
+    const u32 btn_pad = 4;
+    const u32 btn_h = (tbh_eff > 2 * btn_pad) ? tbh_eff - 2 * btn_pad : 0;
+    const u32 btn_w = EffectiveButtonWidth(btn_h);
+    if (btn_h <= 4 || c.w <= btn_w * 3U + btn_pad * 2U)
+    {
+        return false;
+    }
+    const u32 close_x = c.x + c.w - btn_w - btn_pad;
+    if (close_x <= btn_w + 2U)
+    {
+        return false;
+    }
+    const u32 max_x = close_x - btn_w - 2U;
+    if (max_x <= btn_w + 2U)
+    {
+        return false;
+    }
+    const u32 min_x = max_x - btn_w - 2U;
+    const u32 btn_y = c.y + btn_pad;
+    return x >= min_x && x < min_x + btn_w && y >= btn_y && y < btn_y + btn_h;
+}
+
+void WindowMinimize(WindowHandle h)
+{
+    if (!WindowValid(h))
+        return;
+    g_windows[h].visible = false;
+    // De-activate so the next compose doesn't try to draw a
+    // selected-but-hidden chrome. Promote the topmost remaining
+    // alive+visible window to active so keyboard input still
+    // flows somewhere.
+    if (g_active_window == h)
+    {
+        g_active_window = kWindowInvalid;
+        for (u32 i = g_window_count; i > 0; --i)
+        {
+            const WindowHandle cand = g_z_order[i - 1];
+            if (cand != h && WindowValid(cand) && g_windows[cand].visible)
+            {
+                g_active_window = cand;
+                break;
+            }
+        }
+    }
+}
+
+void WindowMaximize(WindowHandle h)
+{
+    if (!WindowValid(h))
+        return;
+    if (g_windows[h].maximized)
+        return; // idempotent — preserve the original snapshot
+    auto& c = g_windows[h].chrome;
+    g_windows[h].saved_x = c.x;
+    g_windows[h].saved_y = c.y;
+    g_windows[h].saved_w = c.w;
+    g_windows[h].saved_h = c.h;
+    const auto info = FramebufferGet();
+    // Reserve room for the taskbar at the bottom. Sample the
+    // live `TaskbarHeight()` so the per-theme strip height
+    // (36 px on Duet family, 28 px elsewhere) is honoured. A
+    // 0 return (no taskbar) falls through to the historical
+    // 28-px reserve so a no-taskbar mode still leaves a sane
+    // safety margin.
+    const u32 reserve = TaskbarHeight();
+    const u32 reserved_for_taskbar = (reserve != 0) ? reserve : 28u;
+    const u32 max_h = (info.height > reserved_for_taskbar) ? info.height - reserved_for_taskbar : info.height;
+    c.x = 0;
+    c.y = 0;
+    c.w = info.width;
+    c.h = max_h;
+    g_windows[h].maximized = true;
+}
+
+void WindowRestore(WindowHandle h)
+{
+    if (!WindowValid(h) || !g_windows[h].maximized)
+        return;
+    auto& c = g_windows[h].chrome;
+    c.x = g_windows[h].saved_x;
+    c.y = g_windows[h].saved_y;
+    c.w = g_windows[h].saved_w;
+    c.h = g_windows[h].saved_h;
+    g_windows[h].maximized = false;
+}
+
+bool WindowIsMaximized(WindowHandle h)
+{
+    return WindowValid(h) && g_windows[h].maximized;
+}
+
+namespace
+{
+
+// Compute the visible work area (framebuffer minus taskbar)
+// Win-key snaps target. Single source of truth for the half-
+// snap geometry — same calculation `WindowMaximize` uses for
+// its full-screen reserve. A 0 taskbar height (no taskbar)
+// falls back to the historical 28-px margin so a no-taskbar
+// boot mode still leaves a sane safety strip.
+void WorkArea(u32* x_out, u32* y_out, u32* w_out, u32* h_out)
+{
+    const auto info = FramebufferGet();
+    const u32 reserve = TaskbarHeight();
+    const u32 reserved = (reserve != 0) ? reserve : 28u;
+    if (x_out)
+        *x_out = 0;
+    if (y_out)
+        *y_out = 0;
+    if (w_out)
+        *w_out = info.width;
+    if (h_out)
+        *h_out = (info.height > reserved) ? info.height - reserved : info.height;
+}
+
+} // namespace
+
+void WindowSnapLeft(WindowHandle h)
+{
+    if (!WindowValid(h))
+        return;
+    u32 wa_x = 0, wa_y = 0, wa_w = 0, wa_h = 0;
+    WorkArea(&wa_x, &wa_y, &wa_w, &wa_h);
+    auto& c = g_windows[h].chrome;
+    c.x = wa_x;
+    c.y = wa_y;
+    c.w = wa_w / 2u;
+    c.h = wa_h;
+    g_windows[h].maximized = false;
+}
+
+void WindowSnapRight(WindowHandle h)
+{
+    if (!WindowValid(h))
+        return;
+    u32 wa_x = 0, wa_y = 0, wa_w = 0, wa_h = 0;
+    WorkArea(&wa_x, &wa_y, &wa_w, &wa_h);
+    auto& c = g_windows[h].chrome;
+    const u32 half = wa_w / 2u;
+    c.x = wa_x + half;
+    c.y = wa_y;
+    c.w = wa_w - half; // pick up the odd column on odd-width framebuffers
+    c.h = wa_h;
+    g_windows[h].maximized = false;
+}
+
+void WindowSetOpacity(WindowHandle h, u8 opacity)
+{
+    if (!WindowValid(h))
+        return;
+    g_windows[h].opacity = opacity;
+}
+
+u8 WindowGetOpacity(WindowHandle h)
+{
+    if (!WindowValid(h))
+        return 0xFF;
+    return g_windows[h].opacity;
+}
+
+void WindowSetPinned(WindowHandle h, bool pinned)
+{
+    if (!WindowValid(h))
+        return;
+    g_windows[h].pinned = pinned;
+}
+
+bool WindowIsPinned(WindowHandle h)
+{
+    return WindowValid(h) && g_windows[h].pinned;
 }
 
 void WindowClose(WindowHandle h)
@@ -686,12 +1110,110 @@ void WindowDrawAllOrdered()
             drawn.colour_title = kInactiveTitleRgb;
         }
         WindowDraw(drawn);
+        // Rounded-corner approximation for the Duet theme. The
+        // chrome itself is painted as a rectangle; we then
+        // overpaint the four corner-quadrant pixels OUTSIDE a
+        // 6-px radius curve with the desktop fill colour, so
+        // the visible silhouette reads as rounded. Other themes
+        // keep rectangular chrome (preserves their original v0
+        // look bit-for-bit).
+        // All Duet-family themes (slate Duet + light + 3 accent
+        // variants + classic mode) share the rounded-corner
+        // punch; Classic / Slate10 / Amber stay rectangular.
+        // DuetClassic uses a smaller 4-px radius to match the
+        // era's chunkier proportions vs the modern variants'
+        // 6-px softness.
+        const ThemeId tid = ThemeCurrentId();
+        if (tid == ThemeId::Duet || tid == ThemeId::DuetLight || tid == ThemeId::DuetBlue ||
+            tid == ThemeId::DuetViolet || tid == ThemeId::DuetGreen)
+        {
+            FramebufferPunchCorners(drawn.x, drawn.y, drawn.w, drawn.h, 6U, g_compose_desktop_rgb);
+        }
+        else if (tid == ThemeId::DuetClassic)
+        {
+            FramebufferPunchCorners(drawn.x, drawn.y, drawn.w, drawn.h, 4U, g_compose_desktop_rgb);
+        }
         // Title text. White ink on the title-bar fill, 8-px top
         // padding + 8-px left padding so the first glyph clears
-        // the 2-px outer border comfortably.
+        // the 2-px outer border comfortably. Theme.title_text_scale
+        // controls the bitmap-font scale (1 = 8-px glyphs, 2 =
+        // 16-px). Vertical position centres the scaled text in
+        // the (also-scaled) title bar so a 16-px glyph in a
+        // 30-px title bar lands at y + 7 just like the 8-px
+        // glyph in a 22-px title bar.
+        u32 title_pixel_w = 0;
+        const u32 ttscale_raw = ThemeCurrent().title_text_scale;
+        const u32 ttscale = (ttscale_raw == 0) ? 1u : ttscale_raw;
+        const u32 cell_w = 8u * ttscale;
+        const u32 cell_h = 8u * ttscale;
+        const u32 tbh_eff_for_title = EffectiveTitleHeight(drawn);
+        const u32 title_y = drawn.y + ((tbh_eff_for_title > cell_h) ? (tbh_eff_for_title - cell_h) / 2 : 0);
         if (g_windows[h].title != nullptr)
         {
-            FramebufferDrawString(drawn.x + 8, drawn.y + 7, g_windows[h].title, 0x00FFFFFF, drawn.colour_title);
+            // Theme-driven font dispatch: themes that opt in to the
+            // TTF path try the rasterizer first; if no chrome font is
+            // registered (TtfChromeFontGet returns nullptr) the
+            // bitmap font runs as the fallback. Pixel height matches
+            // the existing scaled cell size so the overall chrome
+            // layout is identical between the two paths.
+            const bool used_ttf = (ThemeCurrent().font_kind == Theme::FontKind::Ttf) &&
+                                  TtfDrawString(drawn.x + 8, title_y, g_windows[h].title, 0x00FFFFFF, cell_h);
+            if (!used_ttf)
+            {
+                FramebufferDrawStringScaled(drawn.x + 8, title_y, g_windows[h].title, 0x00FFFFFF, drawn.colour_title,
+                                            ttscale);
+            }
+            const char* t = g_windows[h].title;
+            u32 n = 0;
+            while (t[n] != '\0')
+            {
+                ++n;
+            }
+            title_pixel_w = n * cell_w;
+        }
+        // Subtitle slot (Duet-era "context tag"). Painted in a
+        // dimmer ink immediately right of the title with a 12-px
+        // gap, capped at the close-button's left edge so it never
+        // collides with the chrome. The "·" separator from the
+        // prototype isn't in the 8x8 font's printable range, so we
+        // use a plain '|' which is.
+        const char* subtitle = g_windows[h].mut_subtitle;
+        if (subtitle != nullptr && subtitle[0] != '\0' && title_pixel_w > 0)
+        {
+            const u32 tbh_for_sub = EffectiveTitleHeight(drawn);
+            const u32 btn_pad = 4;
+            const u32 btn_h_for_sub = (tbh_for_sub > 2 * btn_pad) ? tbh_for_sub - 2 * btn_pad : 0;
+            const u32 btn_w_for_sub = EffectiveButtonWidth(btn_h_for_sub);
+            const u32 close_left =
+                (drawn.w > btn_w_for_sub + btn_pad) ? drawn.x + drawn.w - btn_w_for_sub - btn_pad : drawn.x + drawn.w;
+            const u32 sub_x = drawn.x + 8 + title_pixel_w + 12;
+            // Only paint if there's room for at least the
+            // separator + 4 glyphs before the close button.
+            if (sub_x + 5 * cell_w < close_left)
+            {
+                // Dim ink derived from the title — a brighter
+                // shade reads against dark titles, a dimmer one
+                // against bright titles. We use a fixed 60%-of-
+                // white blend with the title bg as the bg colour
+                // so the bitmap font's anti-aliased-by-bg trick
+                // still works. Brighten just enough that the
+                // subtitle reads as secondary, not background.
+                const u32 ink = LightenRgb(drawn.colour_title, 96);
+                const u32 max_chars = (close_left - sub_x) / cell_w;
+                FramebufferDrawStringScaled(sub_x, title_y, "|", ink, drawn.colour_title, ttscale);
+                if (max_chars > 2)
+                {
+                    char clipped[kWindowSubtitleStorage];
+                    u32 n = 0;
+                    while (subtitle[n] != '\0' && n < kWindowSubtitleStorage - 1 && n + 2 < max_chars)
+                    {
+                        clipped[n] = subtitle[n];
+                        ++n;
+                    }
+                    clipped[n] = '\0';
+                    FramebufferDrawStringScaled(sub_x + 2 * cell_w, title_y, clipped, ink, drawn.colour_title, ttscale);
+                }
+            }
         }
         // Widgets owned by this window — layered on top of the
         // window's chrome, under any windows that stack above.
@@ -706,7 +1228,7 @@ void WindowDrawAllOrdered()
         // it (origin is just inside the 2-px border, under the
         // title bar).
         const auto& cc = drawn;
-        const u32 tbh_c = (cc.title_height == 0) ? 22 : cc.title_height;
+        const u32 tbh_c = EffectiveTitleHeight(cc);
         const u32 tbh_eff_c = (tbh_c > cc.h) ? cc.h : tbh_c;
         const u32 client_x = cc.x + 2;
         const u32 client_y = cc.y + tbh_eff_c + 2;
@@ -987,6 +1509,43 @@ void WindowDrawAllOrdered()
         {
             g_windows[h].content_fn(client_x, client_y, client_w, client_h, g_windows[h].content_cookie);
         }
+
+        // Subtle "out of focus" dim. The Duet spec calls for ~3%
+        // dim on unfocused windows; we apply a ~10% (alpha 0x18)
+        // overlay over the whole window rect AFTER chrome +
+        // widgets + display-list + content_fn. Source colour is
+        // the desktop background (captured into
+        // `g_compose_desktop_rgb` at the top of DesktopCompose),
+        // so the blend washes the window toward the desktop
+        // hue — reads as "fading away" rather than the previous
+        // path's "darkening toward black", which was a misleading
+        // cue on light themes. With slice 1's shadow surface in
+        // place this is a real read-modify-write against the
+        // in-progress paint, not a read of the live MMIO.
+        // Skipped in single-window scenes (every window is
+        // "active enough" when there's nothing else to compete
+        // with).
+        if (!is_active && g_window_count > 1)
+        {
+            const u32 overlay = (0x18u << 24) | (g_compose_desktop_rgb & 0x00FFFFFFu);
+            FramebufferFillRectAlpha(g_windows[h].chrome.x, g_windows[h].chrome.y, g_windows[h].chrome.w,
+                                     g_windows[h].chrome.h, overlay);
+        }
+        // Per-window opacity overlay. Lays a desktop-coloured rect
+        // at alpha = (0xFF - opacity) over the whole window so
+        // lower opacity values fade the window toward the desktop
+        // surface. Real per-pixel transparency (seeing through the
+        // window to the underlying app stack) requires per-window
+        // backbuffers and is the next-tier item in the plan; this
+        // is the v0 stand-in. Skipped when opacity is fully opaque
+        // (the common case).
+        if (g_windows[h].opacity < 0xFF)
+        {
+            const u32 overlay_alpha = static_cast<u32>(0xFFu - g_windows[h].opacity);
+            const u32 overlay = (overlay_alpha << 24) | (g_compose_desktop_rgb & 0x00FFFFFFu);
+            FramebufferFillRectAlpha(g_windows[h].chrome.x, g_windows[h].chrome.y, g_windows[h].chrome.w,
+                                     g_windows[h].chrome.h, overlay);
+        }
     }
 }
 
@@ -1011,22 +1570,65 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
         // or similar) before switching modes.
         FramebufferClear(0x00000000);
         ConsoleRedraw();
+        // Push the freshly-painted console to the active backend
+        // (virtio-gpu flush). Without this the host display stays
+        // at whatever the GPU init painted and the user never
+        // sees the TTY-mode console.
+        FramebufferPresent();
         return;
     }
 
     // Desktop paint stack (bottom to top):
-    //   1. Desktop fill
-    //   2. Framebuffer console (under windows — windows dragged
+    //   1. Desktop gradient fill
+    //   2. Theme wallpaper (e.g. duet-arcs on the Duet theme)
+    //   3. Framebuffer console (under windows — windows dragged
     //      over the console occlude it, which restores on next
     //      compose — standard z-order feel)
-    //   3. Windows in z-order + their owned widgets
-    //   4. Freestanding widgets (float on top of windows for v0)
-    //   5. Banner (desktop-level label)
-    //   6. Taskbar
-    //   7. Menu (popup, on top of everything)
+    //   4. Windows in z-order + their owned widgets
+    //      (each inactive window gets a 10% dim overlay)
+    //   5. Freestanding widgets (float on top of windows for v0)
+    //   6. Banner (desktop-level label)
+    //   7. Taskbar
+    //   8. Menu (popup, on top of everything)
     // The cursor is not touched here — the mouse reader owns
     // CursorHide / CursorShow around this call.
-    FramebufferClear(desktop_rgb);
+    //
+    // Desktop fill: a subtle vertical gradient from a slightly-
+    // lifted shade of the theme's `desktop_bg` at the top to a
+    // slightly darker shade at the bottom. Reads as ambient
+    // depth without competing with window chrome for attention.
+    // A pure black `desktop_rgb` (used by the login / TTY-flip
+    // paint) skips the gradient since lighten / darken on 0
+    // produces a flat result anyway — the resulting solid
+    // FramebufferClear is faster.
+    // Publish the desktop-fill colour for the chrome path's
+    // rounded-corner punch (Duet theme). Set unconditionally —
+    // black-screen modes (login, TTY-flip) get a 0 punch which
+    // is still a sensible "behind the chrome" fallback.
+    g_compose_desktop_rgb = desktop_rgb;
+
+    // Redirect this whole pass into the offscreen shadow surface so
+    // alpha-blend primitives composite against the in-progress frame
+    // (slice 1 of the rasterizer / compositor / shell plan). If the
+    // shadow allocator is unavailable, BeginCompose silently leaves
+    // the writes targeting the live framebuffer — the rest of the
+    // function is unchanged either way.
+    FramebufferBeginCompose();
+
+    if (desktop_rgb == 0)
+    {
+        FramebufferClear(0);
+    }
+    else
+    {
+        const auto info = FramebufferGet();
+        const u32 top = LightenRgb(desktop_rgb, 18);
+        const u32 bot = DarkenRgb(desktop_rgb, 22);
+        FramebufferFillRectGradient(0, 0, info.width, info.height, top, bot);
+        // Theme-dispatched wallpaper layer (duet-arcs on the
+        // Duet theme; no-op on the other three for now).
+        WallpaperPaint(desktop_rgb);
+    }
     ConsoleRedraw();
     WindowDrawAllOrdered();
     for (u32 i = 0; i < g_widget_count; ++i)
@@ -1038,7 +1640,20 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
     }
     if (banner != nullptr)
     {
-        FramebufferDrawString(16, 8, banner, 0x00FFFFFF, desktop_rgb);
+        // 1-pixel offset shadow behind the banner so the white
+        // ink reads on every theme's gradient bg without a hard
+        // background-fill rectangle. The shadow is painted with
+        // each glyph's bg = desktop_rgb (matches the gradient
+        // closely enough that the shadow doesn't show up as a
+        // smear) while the foreground is pure white.
+        // On themes with a 30+ px title bar (Duet family) the
+        // banner renders at 2x scale so the larger chrome has a
+        // proportionate banner — first concrete consumer of
+        // FramebufferDrawStringScaled. Compact themes stay 1x
+        // so existing layouts don't shift.
+        const u32 scale = (ThemeCurrent().title_bar_height >= 30) ? 2u : 1u;
+        FramebufferDrawStringScaled(17, 9, banner, 0x00000000, desktop_rgb, scale);
+        FramebufferDrawStringScaled(16, 8, banner, 0x00FFFFFF, desktop_rgb, scale);
     }
     TaskbarRedraw();
     MenuRedraw();
@@ -1055,6 +1670,10 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
             FramebufferFillRect(g_caret.x, g_caret.y, g_caret.w, g_caret.h, 0x00000000);
         }
     }
+    // Flush the shadow surface to the live framebuffer (no-op if
+    // BeginCompose fell back to direct mode).
+    FramebufferEndCompose();
+
     // Present the freshly-composed frame. For in-place framebuffers
     // (firmware handoff, Bochs VBE) this is a no-op. For
     // virtio-gpu-backed framebuffers the hook runs
@@ -2034,6 +2653,62 @@ u32 WindowDrainPaints()
         WindowMsgWakeAll();
     }
     return posted;
+}
+
+bool WindowShowDesktopToggle()
+{
+    if (g_show_desktop_active)
+    {
+        // Restore phase: re-show every window in the snapshot
+        // mask that's still alive. Windows the user closed
+        // during the "showing desktop" interval drop off the
+        // mask implicitly (their slot may still be alive but
+        // we honor whatever the visible-flag logic decides;
+        // restoring "visible" on a dead window is a no-op).
+        for (u32 i = 0; i < g_window_count && i < 32; ++i)
+        {
+            if ((g_show_desktop_mask & (1u << i)) == 0)
+                continue;
+            if (!g_windows[i].alive)
+                continue;
+            g_windows[i].visible = true;
+        }
+        g_show_desktop_mask = 0;
+        g_show_desktop_active = false;
+        return false;
+    }
+    // Activate phase: snapshot which windows are currently
+    // visible, then hide them all. The mask is bounded to 32
+    // bits; if kMaxWindows ever grows past that the snapshot
+    // gets truncated and the extra-slot windows stay hidden
+    // until reopened — kMaxWindows is 16 today so we have
+    // headroom.
+    g_show_desktop_mask = 0;
+    bool any_alive = false;
+    for (u32 i = 0; i < g_window_count && i < 32; ++i)
+    {
+        if (!g_windows[i].alive)
+            continue;
+        any_alive = true;
+        if (g_windows[i].visible)
+        {
+            g_show_desktop_mask |= (1u << i);
+            g_windows[i].visible = false;
+        }
+    }
+    if (!any_alive)
+    {
+        // Nothing to hide — leave the toggle in its inactive
+        // state so the next click triggers a fresh snapshot.
+        return false;
+    }
+    g_show_desktop_active = true;
+    return true;
+}
+
+bool WindowShowDesktopActive()
+{
+    return g_show_desktop_active;
 }
 
 void WindowResizeTo(WindowHandle h, u32 w, u32 hgt)

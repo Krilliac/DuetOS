@@ -28,6 +28,7 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | `inspect` umbrella v0 — `syscalls` / `opcodes` / `arm` subcommands | [knowledge/inspect-umbrella-v0.md](knowledge/inspect-umbrella-v0.md) | Observation | Active | 2026-04-23 |
 | Native DuetOS apps v0 — pattern for in-kernel applications | [knowledge/native-apps-v0.md](knowledge/native-apps-v0.md) | Pattern | Active | 2026-04-21 |
 | gfxdemo multi-mode v0 — six animated effects (plasma/mandelbrot/cube/particles/starfield/fire) + key dispatch + self-tests | [knowledge/gfxdemo-multimode-v0.md](knowledge/gfxdemo-multimode-v0.md) | Observation + Pattern | Active | 2026-04-26 |
+| Desktop chrome polish v0 — fb line/circle/round-rect-outline/drop-shadow + window gradient titles + X-glyph close + taskbar gradient strip + rounded START/tabs + active-tab accent | [knowledge/desktop-chrome-polish-v0.md](knowledge/desktop-chrome-polish-v0.md) | Observation + Decision | Active | 2026-04-29 |
 | Kernel bring-up v0 (Multiboot2 → long mode → `kernel_main`) | [knowledge/kernel-bringup-v0.md](knowledge/kernel-bringup-v0.md) | Observation | Active | 2026-04-20 |
 | ISO build & end-to-end boot verification | [knowledge/iso-build-and-boot.md](knowledge/iso-build-and-boot.md) | Pattern | Active | 2026-04-20 |
 | GDT + IDT v0 — canonical descriptors and trap path | [knowledge/gdt-idt-v0.md](knowledge/gdt-idt-v0.md) | Observation | Active | 2026-04-20 |
@@ -80,6 +81,7 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | qemu-smoke profile-matrix redesign — split monolith into per-profile parallel jobs + isa-debug-exit + serial spinlock + hosted unit tests | [knowledge/qemu-smoke-profile-matrix-v0.md](knowledge/qemu-smoke-profile-matrix-v0.md) | Decision + Pattern | Active | 2026-04-28 |
 | KMalloc-zero-init pattern — every kernel struct with embedded sync primitives must memset before use | [knowledge/kmalloc-zero-init-pattern.md](knowledge/kmalloc-zero-init-pattern.md) | Pattern + Issue | Active | 2026-04-28 |
 | Deferred-task batches (2026-04-25 + 2026-04-26 follow-up) — PE ordinal forwarders + by-ord IAT + binary-search EAT, ext4 multi-block dirs, ext4 depth>0 extent tree walk, GDI ellipse fill/outline parity, RNDIS multi-record RX, FAT32 LFN-checksum, window-DC SetTextColor explicit-black | [knowledge/deferred-task-batch-2026-04-25.md](knowledge/deferred-task-batch-2026-04-25.md) | Observation | Active | 2026-04-26 |
+| Rasterizer / compositor / userland-shell — multi-slice plan (shadow framebuffer → true alpha → TTF parser → TTF rasterizer → userland libc + ELF build → prompt shell → SVG loader → real TTF + SVG content) | [knowledge/rasterizer-compositor-shell-plan.md](knowledge/rasterizer-compositor-shell-plan.md) | Plan | Closed 2026-04-29 — every numbered slice + both content follow-ups (Liberation Sans TTF, 3 wallpaper SVGs) landed; eligible for deletion on next session cleanup | 2026-04-29 |
 
 ## Quick Reference
 

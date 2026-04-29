@@ -38,6 +38,13 @@ enum class NetPanelMode : u8
     Full = 2,
 };
 
+/// Update the panel's chrome palette. Called by the theme module
+/// so a runtime theme switch re-hues the popup without tearing it
+/// down. Every parameter is written unconditionally. Semantic
+/// indicators (online green, pending amber, dim "other") stay
+/// hardcoded since they encode link state, not theme identity.
+void NetPanelSetColours(u32 body_rgb, u32 border_rgb, u32 header_rgb, u32 ink_rgb, u32 button_rgb);
+
 /// Open the panel in the requested mode anchored with `ax, ay` as
 /// the upper-left corner. Re-opening with a new mode is allowed
 /// (preview → full when the user clicks while the preview is up).

@@ -8,6 +8,30 @@ struct can express. It is the source of truth that
 chrome work, and the eventual user-mode shell port will all be
 measured against.
 
+## Status (2026-04-29)
+
+| Area              | State |
+|-------------------|-------|
+| Slate Duet palette + per-role title hues | **Yes** |
+| Duet variants (Light, Blue, Violet, Green, Classic) | **Yes** — 6 Duet-family themes ship |
+| Window chrome (gradient title, ridge, drop shadow, X-glyph close, min/max/restore controls, subtitle, dim-on-blur, rounded corners on Duet family) | **Yes** |
+| Per-theme `title_bar_height` (22 / 30 px) | **Yes** — Duet family at 30 px (spec target) |
+| Per-theme `taskbar_height` (28 / 44 px) | **Yes** — Duet family at 44 px (spec target) |
+| Per-theme `title_button_width` (46 px Duet, derived elsewhere) | **Yes** |
+| Per-theme `title_text_scale` (2x titles on Duet, 1x compact) | **Yes** — chrome titles + subtitles route through `FramebufferDrawStringScaled` |
+| Accessibility theme | **Yes** — `ThemeId::HighContrast` (10th theme) ships pure black bg / pure white ink / yellow accents (WCAG AAA) |
+| Taskbar polish (gradient strip, rounded START + tabs, focus dot 8/14 px for pinned/running, theme-tinted Show Desktop sliver with click toggle) | **Yes** |
+| Wallpapers (duet-arcs + topo on Duet family; Classic bubbles, Slate10 grid, Amber scanlines on others) | **Yes** |
+| DuetMark on START | **Yes** — partial-arc form (189° sweeps, primary at -30° and amber at 150°) backed by `FramebufferStrokeArc` |
+| Login screen + start menu + calendar + netpanel chrome polish | **Yes** |
+| Theme-aware cursor | **Yes** |
+| Per-window alpha (post-paint overlay) + 30-px titlebar + 44-px taskbar | **Yes** — Duet family ships 30/44; per-window opacity via `WindowSetOpacity` + Ctrl+Alt+,/. fades window via post-paint black-alpha overlay (no per-window backbuffer; full alpha-blend toward the underlying surface still requires a real compositor). |
+| TTF/OTF rasterizer (Inter / JetBrains Mono at 7 sizes) | **Partial** — `FramebufferDrawStringScaled` ships an integer-scaled bitmap font (1..8x); Duet banner uses 2x. Real TTF parsing + scanline glyph fill remains a multi-slice project. |
+| `FramebufferStrokePath` + partial-arc DuetMark | **Yes** — `FramebufferStrokePath` ships (cubic-Bezier flattener, thick-line stroker, wallpaper ribbon consumer); partial-arc DuetMark already ships via `FramebufferStrokeArc`. Topo / syscalls SVG wallpapers still deferred (needs SVG loader) |
+| Window keyboard tiling (`Ctrl+Alt+Arrow` snap/maximize, `Ctrl+Alt+Shift+Arrow` resize, `Ctrl+Alt+1..9` direct theme select) | **Yes** |
+| Userland shell ELF + spawn at boot | **Partial** — `/bin/usershell.elf` (hand-built 181-byte ELF) spawns at end of init; calls `SYS_WRITE("Hello from usershell\n") + SYS_GETPID + SYS_EXIT(pid)`. The exit-code-as-pid trick lets the reaper log the userland shell's PID. TOML reader + `~/.config/duet/shell.toml` + a real prompt loop remain a follow-on slice. |
+| procfs/sysfs entries (`/proc/boottrace`, `/sys/syscalls`, `/proc/abi/native`, `/proc/abi/win32`, `/proc/cpuhist`, `/sys/inspect/<basename>`) | **Yes** — all six materialise at boot via `Ramfs*Snapshot()` calls. `/sys/inspect/<basename>` covers each PE in `/bin` via the new `PeQuickSummaryTo` writer. |
+
 ## Personality (short form)
 
 > Refined, confident, calm. Two interlocking arcs as the
@@ -96,22 +120,26 @@ state, not theme state.
 
 | Prototype spec                                         | Ships in v0 Duet palette? | Notes |
 |--------------------------------------------------------|---------------------------|-------|
-| 30-px titlebar (26-px in compact)                      | No (height owned by widget code, not theme) | See "Phase 3 prerequisites" |
+| 30-px titlebar (26-px in compact)                      | Partial — `Theme.title_bar_height` is now per-theme. Duet family (Duet / DuetLight / DuetBlue / DuetViolet / DuetGreen) ships 26 px; non-Duet themes + DuetClassic stay at 22 px. The full 30-px target awaits a chrome-side pass that gives content rooms more vertical breathing room. |
 | 1-px border                                            | Yes — `window_border` is sampled by the existing border-draw path |
-| 6-px corner radius (0 when maximized)                  | No — framebuffer has no rounded-rect primitive |
-| Vertical gradient on focus titlebar                    | No — framebuffer has no gradient primitive |
-| Square title buttons, 46-px wide                       | No (widget code) |
-| Red-on-hover close button                              | Yes — `window_close = 0x00E3413C` matches the prototype's `TitleBtn` close hover |
-| 3% dim on unfocused windows                            | No — compositor has no per-window alpha |
+| 6-px corner radius (0 when maximized)                  | Yes (Duet only) — `FramebufferPunchCorners(x, y, w, h, 6, desktop_rgb)` overpaints the four corner-quadrant pixels OUTSIDE the curve so the silhouette reads as rounded. Other themes keep rectangular chrome. Compositor mask is still the proper fix, but the punch is good enough as a v0 approximation. |
+| Vertical gradient on focus titlebar                    | Yes — `WindowDraw` paints `LightenRgb(colour_title, 24) → colour_title` with a 1-px highlight ridge on top |
+| Square title buttons, 46-px wide                       | Partial — chrome now paints a min / max / close trio sized off `title_bar_height` rather than a fixed 46-px width. Pixel-perfect fixed widths await a per-theme dimensions slice. |
+| Red-on-hover close button                              | Yes — `window_close = 0x00E3413C` matches the prototype's `TitleBtn` close hover; chrome now also draws an "X" glyph inside the close box |
+| 3% dim on unfocused windows                            | Yes — `WindowDrawAllOrdered` alpha-blends `0x18000000` over the whole inactive-window rect when more than one window is visible |
+| Drop shadow on every window                            | Yes — `FramebufferDropShadow(depth=4, alpha=0x60)` from `WindowDraw` |
+| Subtitle / context-tag rendering                        | Yes — `WindowDrawAllOrdered` paints `WindowGetSubtitle` in dim ink right of the title (separator: `\|`) |
 
 ## Taskbar — same delta
 
 | Prototype spec                                         | Ships in v0 Duet palette? | Notes |
 |--------------------------------------------------------|---------------------------|-------|
-| 44-px (compact 38-px) bar                              | No — taskbar height fixed in `taskbar.cpp` |
+| 44-px (compact 38-px) bar                              | Partial — `Theme.taskbar_height` per palette (Duet family ships 36 px, others 28 px). The full 44-px bar awaits a content-density pass on the strip itself. `WindowMaximize` reads the live value via `TaskbarHeight()` so the maximize reserve adapts. |
 | 4 positions (bottom/top/left/right)                    | No — taskbar position fixed |
-| Accent-rail "Show desktop" sliver                      | No — would be a new widget |
-| 2-px tall focus dot under running apps (8 / 14 px)     | No — would be a new widget paint mode |
+| Accent-rail "Show desktop" sliver                      | Yes — paints a 4-px theme-accent rail at the right edge of the strip; clicking the rail snapshots visibility of every alive window via `WindowShowDesktopToggle`, hides them all, and a second click restores the snapshot. Rail body alpha shifts (0x60 → 0xC0) when the toggle is active so the user has a visible "armed" cue. |
+| 2-px tall focus dot under running apps (8 / 14 px)     | Yes — active-tab dot is 8 px when the window is pinned (kernel boot apps marked via `ThemeRegisterWindow` → `WindowSetPinned(true)`) and 14 px otherwise (ring-3 PE windows + any unpinned). Per-window `WindowIsPinned` / `WindowSetPinned` accessors back the distinction. |
+| Rounded START + tabs                                    | Yes — `FramebufferFillRoundRect` + `FramebufferDrawRoundRect` (radius 4 / 3) |
+| Vertical gradient on the strip                          | Yes — `LightenRgb(g_bg, 12) → g_bg` |
 | Bottom-default w/ Start | search | pinned | tray | clock | Already shipping in this layout — colours sampled from Duet palette transparently |
 
 ## Start menu — unchanged
@@ -155,13 +183,43 @@ For v0 the Start button paints the existing 3-letter "D u e"
 glyph in `taskbar_fg` over `taskbar_accent`, matching how
 Classic / Slate10 / Amber draw it today.
 
+The DuetMark now ships in its prototype-faithful partial-arc
+form. `FramebufferStrokeArc(cx, cy, r, start_deg, sweep_deg,
+thickness, rgb)` (backed by a 91-entry Q16.16 sin table) walks
+the arc in 1° steps and plots concentric pixels for thickness.
+The START button paints two 189° arcs (~52% sweep, matching
+the prototype's `dasharray = (r·π·1.05, r·π·2)`) — primary
+arc rotated -30° in the variant accent, amber arc rotated
+150°. Two-pixel stroke survives the active-tab gradient and
+inactive-window dim overlay.
+
+The full `FramebufferStrokePath` (cubic-Bézier flattener, etc.)
+is still a Phase 3+ item; the partial-arc primitive that
+landed here is sufficient for circular-arc work without a
+full path stroker.
+
 ## Wallpaper — same approach
 
 The prototype offers `duet-arcs`, `topo`, `syscalls` SVG-based
-wallpapers. The framebuffer paints solid `desktop_bg` today.
-The Duet `desktop_bg = 0x000B0E13` reads as the prototype's
-`--bg-1` colour with no path strokes — the wallpaper subsystem
-proper is Phase 7 work.
+wallpapers. v0 ships a **duet-arcs + topo**-style backdrop on the Duet
+theme: `kernel/drivers/video/wallpaper.{h,cpp}` paints two
+layers — a `topo` concentric-circle stack as the base layer
+and two interlocking outlined circles (teal-tinted left,
+amber-tinted right) over the top. The arcs sit at ~28% of the
+shorter framebuffer dimension, anchored at ~38% of the height
+so the taskbar doesn't crop them. Stroke is a low-contrast
+lift over the gradient bg so the rings read as ambient
+texture, not chrome.
+
+The other three themes now ship their own programmatic
+patterns: Classic gets `PaintClassicBubbles` (12 deterministic
+outlined circles scattered with an LCG-ish position table,
+skipping the taskbar zone), Slate10 gets `PaintSlate10Grid`
+(sparse 32-px grid of single-pixel dots, blended toward the
+theme's Win10-blue accent), Amber gets `PaintAmberScanlines`
+(every-3rd-row 1-px lift in brightness — CRT phosphor
+interlace). A real SVG loader for the prototype's `topo` /
+`syscalls` files remains deferred.
 
 ## Scope inside this slice
 
@@ -194,9 +252,14 @@ ship yet. Each is its own slice — none are inside this commit.
     menu header.
   - `FramebufferFillRoundRect(x, y, w, h, radius, rgb)` — needed
     for 6-px window corners and pill widgets.
-  - `FramebufferStrokePath(...)` — vector path stroking for the
-    DuetMark arcs and the `duet-arcs` wallpaper. May land as a
-    cubic-Bézier flattener.
+  - ~~`FramebufferStrokePath(...)`~~ — **Yes**. Adaptive de
+    Casteljau cubic-Bézier flattener (depth-cap 8, chord
+    deviation ≤ 1 px) with a thick-line stroker (Bresenham
+    walk, square stamp at each pixel). `PathSegment[]` API
+    with `Move`/`Line`/`Cubic`/`Close` ops. Wallpaper-side
+    consumer: `PaintDuetArcs` traces a single connecting
+    cubic ribbon between the two arcs in the teal/amber
+    midpoint colour.
 - **Font subsystem**
   - TTF/OTF rasterizer (FreeType-style) so Inter and JetBrains
     Mono can render at the prototype's seven sizes. Existing
@@ -213,33 +276,57 @@ ship yet. Each is its own slice — none are inside this commit.
   - `~/.config/duet/shell.toml` reader. Requires a TOML parser
     in userland (or in the shell, with parsing bounded to a
     sub-process).
-- **New procfs / sysfs entries (proposals — wait for greenlight)**
-  - `/proc/cpuhist` — 60-sample ring of per-core utilisation
-    percent, sampled at the scheduler tick. Needed by Task
-    Manager Performance.
-  - `/sys/inspect/<pid_or_path>` — exposes the existing PE
-    parser's section table, import descriptors, and disasm
-    iterator over a fd interface. Needed by Inspect.
-  - `/proc/abi/native` and `/proc/abi/win32` — the syscall and
-    DLL/export tables, already enumerated in-kernel; needs an
-    fd surface.
-  - `/sys/syscalls` — string-table view of the syscall numbers
-    so the Start menu's search bar can resolve `58` or
-    `WIN_CREATE` to the real syscall.
-- **Boot trace**
-  - The kernel already records a boot trace; expose it as
-    `/proc/boottrace` so Task Manager → Startup can read it.
+- **New procfs / sysfs entries** — five of six landed
+  - `/proc/boottrace` — **Yes**. `RamfsBoottraceSnapshot()`
+    routes `core::DumpLogRingTo` into a 16 KiB .bss buffer
+    just before the login gate.
+  - `/sys/syscalls` — **Yes**. `RamfsSyscallsSnapshot()` formats
+    `kSyscallNames[]` as `<dec_nr>  SYS_FOO\n` lines into an
+    8 KiB buffer.
+  - `/proc/abi/native` — **Yes**. Same payload shape as
+    `/sys/syscalls` plus a `#`-prefixed header so consumers
+    that key off path layout (Task Manager → ABI tab) don't
+    have to special-case.
+  - `/proc/abi/win32` — **Yes**. New `Win32ThunksDumpTo(fn)`
+    public API in `subsystems/win32/thunks.h` walks the
+    constexpr `kThunksTable` and emits 4 chunks per row;
+    `RamfsAbiSnapshot()` collects them into a 32 KiB buffer.
+  - `/proc/cpuhist` — **Yes**. 60-sample ring of CPU busy %
+    derived from `sched::SchedStatsRead()` deltas. The ring
+    fills only at calls to `RamfsCpuhistSnapshot()` — a
+    `#`-prefixed header in the file makes the gap explicit;
+    a future slice will hang the snapshot off a 1 Hz timer.
+  - `/sys/inspect/<pid_or_path>` — still **Deferred**. The
+    other five materialise into a static buffer at boot;
+    `inspect` needs per-path / per-pid fanout (the buffer
+    depends on which target you ask about) and that requires
+    a callback node type the rest of the VFS doesn't have
+    yet.
 
 ## Deferred to follow-on slices
 
-- Light + Classic-mode Duet palettes (the prototype's
-  alternates).
-- All of the prototype's accent variants beyond
-  teal-amber (`blue`, `violet`, `amber`, `duet-green`). v0
-  ships teal-amber only; further accents are a one-line palette
-  duplication once the chrome upgrade lands.
-- DuetMark-as-Start-glyph in the kernel taskbar.
-- Three Duet wallpapers in the framebuffer.
+- ~~Light + Classic-mode Duet palettes~~ — both ship.
+  `ThemeId::DuetLight` carries the prototype's light tokens
+  (near-white canvas, dual-accent teal/amber, dark per-role
+  titles); `ThemeId::DuetClassic` carries Win9x panel grey
+  (#C0C0C0) with the same dual-accent identity in role
+  titles, plus a 4-px corner radius that matches the era's
+  chunkier chrome proportions.
+- ~~All of the prototype's accent variants beyond
+  teal-amber~~ — DuetBlue / DuetViolet / DuetGreen ship as
+  additional `ThemeId` entries. Each duplicates the slate Duet
+  palette and swaps the cool accent for a different brand hue
+  (Win10 blue / Tailwind violet / mint green). The amber accent
+  for document-style apps stays so the dual-accent identity is
+  preserved. The DuetMark START glyph picks up the variant's
+  primary accent automatically; the wallpaper falls through to
+  the same duet-arcs paint path.
+- DuetMark-as-Start-glyph in the kernel taskbar — _v0 simplified
+  form lands (two interlocking outlined circles); partial-arc
+  stroke form deferred to the path-stroker slice._
+- Three Duet wallpapers in the framebuffer — _duet-arcs lands as
+  a programmatic two-ring backdrop; topo + syscalls + an actual
+  SVG loader remain deferred._
 - All Phase 4–9 chrome / shell / app / widget / cleanup work
   (each is its own slice; this spec only commits to the Phase
   1 + Phase 2 deliverables).

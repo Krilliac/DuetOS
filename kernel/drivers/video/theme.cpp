@@ -1,8 +1,11 @@
 #include "drivers/video/theme.h"
 
 #include "arch/x86_64/serial.h"
+#include "drivers/video/calendar.h"
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
+#include "drivers/video/menu.h"
+#include "drivers/video/netpanel.h"
 #include "drivers/video/taskbar.h"
 #include "drivers/video/widget.h"
 
@@ -90,6 +93,14 @@ constexpr Theme kClassic = {
 
     .console_fg = 0x0080F088,
     .console_bg = 0x00181028,
+
+    .cursor_outline = 0x00000000, // classic black outline
+    .cursor_fill = 0x00FFFFFF,    // classic white fill
+
+    .title_bar_height = 22,
+    .taskbar_height = 28,
+    .title_button_width = 0,
+    .title_text_scale = 1,
 };
 
 // Amber is a deliberate retro exercise — a single-hue amber palette
@@ -138,6 +149,16 @@ constexpr Theme kAmber = {
 
     .console_fg = 0x00FFA830,
     .console_bg = 0x00080400,
+
+    // Amber cursor: deep CRT brown outline with a bright phosphor
+    // interior — preserves the monochrome aesthetic.
+    .cursor_outline = 0x00301008,
+    .cursor_fill = 0x00FFB840,
+
+    .title_bar_height = 22,
+    .taskbar_height = 28,
+    .title_button_width = 0,
+    .title_text_scale = 1,
 };
 
 constexpr Theme kSlate10 = {
@@ -188,6 +209,17 @@ constexpr Theme kSlate10 = {
 
     .console_fg = 0x00D4D4D4, // VSCode default editor ink
     .console_bg = 0x001A1A20, // Slate panel
+
+    // Slate10 cursor: dark slate outline + bright Win10-blue
+    // interior so the pointer reads as a brand-tinted ink on
+    // dark slate.
+    .cursor_outline = 0x00101015,
+    .cursor_fill = 0x00DDE6F0,
+
+    .title_bar_height = 22,
+    .taskbar_height = 28,
+    .title_button_width = 0,
+    .title_text_scale = 1,
 };
 
 // Duet — the redesigned palette. Slate-charcoal canvas, dual-accent
@@ -243,13 +275,352 @@ constexpr Theme kDuet = {
 
     .console_fg = 0x00E8EDF2, // `--ink` — JetBrains-Mono ink in the prototype
     .console_bg = 0x000F1319, // `--chrome-3` — slate panel ground
+
+    // Duet cursor: slate ink on near-charcoal outline. Lifts the
+    // cursor off the dark gradient without competing with the
+    // teal / amber accents reserved for the duet-arcs identity.
+    .cursor_outline = 0x000B0E13, // matches `desktop_bg`
+    .cursor_fill = 0x00E8EDF2,    // matches `--ink`
+
+    // Duet ships the prototype's full 30-px title bar + 44-px
+    // taskbar so the chrome buttons, subtitle slot, and tray
+    // cells get the breathing room the design calls for.
+    .title_bar_height = 30,
+    .taskbar_height = 44,
+    .title_button_width = 46,
+    .title_text_scale = 2,
+    .font_kind = Theme::FontKind::Ttf,
+};
+
+// DuetLight — light-mode sibling of Duet, sourced from the
+// prototype's `light` token set. Inverts the contrast budget:
+// near-white canvas with the same dual-accent (teal + amber)
+// vocabulary on top. Per-role chrome keeps its identity hue
+// from the slate variant so the same window reads as "the same
+// app" across both modes; the title hues are slightly brighter
+// versions of the slate ones so they survive the light client
+// fills, and the client fills lift to off-white panels.
+constexpr Theme kDuetLight = {
+    .name = "duetlight",
+
+    // Light canvas — `--bg-1` (light mode) ≈ near-white slate.
+    .desktop_bg = 0x00EDEFF2,
+    .banner_fg = 0x00161A20, // ink on light canvas
+
+    // Taskbar: warm-white surface with subtle dividers.
+    .taskbar_bg = 0x00DDE1E6,
+    .taskbar_fg = 0x00161A20,
+    .taskbar_accent = 0x000F8C80,       // deeper teal so it reads against light bg
+    .taskbar_tab_inactive = 0x00CFD4DA, // slightly recessed panel
+    .taskbar_border = 0x00BCC2C9,
+
+    // Windows: subtle slate-ink border, prototype-matched red close hover.
+    .window_border = 0x00B5BCC4,
+    .window_close = 0x00E3413C,
+
+    .role_title =
+        {
+            0x000F8C80, // Calculator   — teal accent (deeper for light bg)
+            0x00B5751A, // Notes        — amber accent
+            0x00086E64, // TaskManager  — deeper teal
+            0x00343A44, // LogView      — neutral chrome
+            0x008C5810, // Files        — amber accent
+            0x002C323C, // Clock        — slate panel
+            0x008B2C8B, // GfxDemo      — magenta marker (kept across themes)
+        },
+    .role_client =
+        {
+            0x00F4F5F7, // Calculator   — off-white panel
+            0x00FBF8EE, // Notes        — cream paper, the only "warm" client
+            0x00F4F5F7, // TaskManager
+            0x00ECEEF1, // LogView
+            0x00F4F5F7, // Files
+            0x00E5E8EC, // Clock        — light canvas ground
+            0x00000000, // GfxDemo      — black; overpainted every frame
+        },
+
+    .console_fg = 0x00161A20,
+    .console_bg = 0x00ECEEF1,
+
+    // DuetLight cursor: slate-ink outline + theme accent fill so
+    // the pointer reads as a brand-tinted ink on a light surface.
+    .cursor_outline = 0x00161A20,
+    .cursor_fill = 0x000F8C80,
+
+    .title_bar_height = 30,
+    .taskbar_height = 44,
+    .title_button_width = 46,
+    .title_text_scale = 2,
+    .font_kind = Theme::FontKind::Ttf,
+};
+
+// Duet accent variants. Each one duplicates the slate Duet
+// palette and swaps the primary `taskbar_accent` (teal in slate
+// Duet) for the variant's brand hue. The amber accent for
+// document-style apps (Notes, Files) stays — the dual-accent
+// "duet" identity is preserved; only the cool side swings.
+//
+// To keep the table readable we extract the per-variant overrides
+// into a small `MakeDuetAccent()` macro-style aggregate
+// initializer, repeating just the deltas. Per-role title hues
+// pick a single representative shade per variant.
+
+constexpr Theme kDuetBlue = {
+    .name = "duetblue",
+    .desktop_bg = 0x000B0E13,
+    .banner_fg = 0x00E8EDF2,
+    .taskbar_bg = 0x001C222B,
+    .taskbar_fg = 0x00AEB7C2,
+    .taskbar_accent = 0x000078D7, // Win10 system blue
+    .taskbar_tab_inactive = 0x000F1319,
+    .taskbar_border = 0x001E2530,
+    .window_border = 0x002A323C,
+    .window_close = 0x00E3413C,
+    .role_title =
+        {
+            0x00204D80, // Calculator   — blue-tinted chrome
+            0x00805E20, // Notes        — amber-tinted chrome (preserved)
+            0x00163A66, // TaskManager  — deeper blue
+            0x00161B23, // LogView      — slate panel
+            0x00604818, // Files        — amber-tinted (preserved)
+            0x00141822, // Clock        — slate panel
+            0x00702070, // GfxDemo      — magenta marker
+        },
+    .role_client =
+        {
+            0x00141A22,
+            0x00F3F0E6,
+            0x00141A22,
+            0x000F1319,
+            0x00141A22,
+            0x000B0E13,
+            0x00000000,
+        },
+    .console_fg = 0x00E8EDF2,
+    .console_bg = 0x000F1319,
+    .cursor_outline = 0x000B0E13,
+    .cursor_fill = 0x00E8EDF2,
+    .title_bar_height = 30,
+    .taskbar_height = 44,
+    .title_button_width = 46,
+    .title_text_scale = 2,
+    .font_kind = Theme::FontKind::Ttf,
+};
+
+constexpr Theme kDuetViolet = {
+    .name = "duetviolet",
+    .desktop_bg = 0x000B0E13,
+    .banner_fg = 0x00E8EDF2,
+    .taskbar_bg = 0x001C222B,
+    .taskbar_fg = 0x00AEB7C2,
+    .taskbar_accent = 0x008B5CF6, // tailwind violet-500
+    .taskbar_tab_inactive = 0x000F1319,
+    .taskbar_border = 0x001E2530,
+    .window_border = 0x002A323C,
+    .window_close = 0x00E3413C,
+    .role_title =
+        {
+            0x00553788, // Calculator   — violet-tinted chrome
+            0x00805E20, // Notes        — amber (preserved)
+            0x00402568, // TaskManager  — deeper violet
+            0x00161B23, // LogView
+            0x00604818, // Files        — amber (preserved)
+            0x00141822, // Clock
+            0x00702070, // GfxDemo
+        },
+    .role_client =
+        {
+            0x00141A22,
+            0x00F3F0E6,
+            0x00141A22,
+            0x000F1319,
+            0x00141A22,
+            0x000B0E13,
+            0x00000000,
+        },
+    .console_fg = 0x00E8EDF2,
+    .console_bg = 0x000F1319,
+    .cursor_outline = 0x000B0E13,
+    .cursor_fill = 0x00E8EDF2,
+    .title_bar_height = 30,
+    .taskbar_height = 44,
+    .title_button_width = 46,
+    .title_text_scale = 2,
+    .font_kind = Theme::FontKind::Ttf,
+};
+
+constexpr Theme kDuetGreen = {
+    .name = "duetgreen",
+    .desktop_bg = 0x000B0E13,
+    .banner_fg = 0x00E8EDF2,
+    .taskbar_bg = 0x001C222B,
+    .taskbar_fg = 0x00AEB7C2,
+    .taskbar_accent = 0x0034C759, // forest / mint green
+    .taskbar_tab_inactive = 0x000F1319,
+    .taskbar_border = 0x001E2530,
+    .window_border = 0x002A323C,
+    .window_close = 0x00E3413C,
+    .role_title =
+        {
+            0x00256B36, // Calculator   — green-tinted chrome
+            0x00805E20, // Notes        — amber (preserved)
+            0x00184A24, // TaskManager  — deeper green
+            0x00161B23, // LogView
+            0x00604818, // Files        — amber (preserved)
+            0x00141822, // Clock
+            0x00702070, // GfxDemo
+        },
+    .role_client =
+        {
+            0x00141A22,
+            0x00F3F0E6,
+            0x00141A22,
+            0x000F1319,
+            0x00141A22,
+            0x000B0E13,
+            0x00000000,
+        },
+    .console_fg = 0x00E8EDF2,
+    .console_bg = 0x000F1319,
+    .cursor_outline = 0x000B0E13,
+    .cursor_fill = 0x00E8EDF2,
+    .title_bar_height = 30,
+    .taskbar_height = 44,
+    .title_button_width = 46,
+    .title_text_scale = 2,
+    .font_kind = Theme::FontKind::Ttf,
+};
+
+// DuetClassic — the prototype's "classic mode" sibling.
+// Win9x-era grey panels (#C0C0C0) carrying Duet's dual-accent
+// teal/amber title hues, so the layout / role identity story
+// is preserved while the surface palette swings into retro
+// territory. Useful as a stress-test for the chrome paths
+// against a light client + dark title combination, and as a
+// nostalgic option distinct from the modern slate.
+constexpr Theme kDuetClassic = {
+    .name = "duetclassic",
+
+    // Desktop: Win9x teal — the iconic 256-colour "Teal" the
+    // base PC desktop shipped with through the late '90s.
+    .desktop_bg = 0x00008080,
+    .banner_fg = 0x00FFFFFF,
+
+    // Taskbar: classic light-grey panel with a dark border —
+    // maps to the Win98 chrome language but uses Duet's accent
+    // for the active-tab indicator + START fill.
+    .taskbar_bg = 0x00C0C0C0,
+    .taskbar_fg = 0x00000000,
+    .taskbar_accent = 0x002DD4BF, // teal — Duet's primary accent
+    .taskbar_tab_inactive = 0x00A8A8A8,
+    .taskbar_border = 0x00404040,
+
+    // Window border: Win9x dark-grey 3D bevel approximation;
+    // close button takes the Duet red so it reads as the same
+    // affordance across the family.
+    .window_border = 0x00808080,
+    .window_close = 0x00E3413C,
+
+    .role_title =
+        {
+            0x00207A6F, // Calculator   — teal-tinted (utility)
+            0x00805E20, // Notes        — amber-tinted (paper)
+            0x00164D45, // TaskManager  — deeper teal
+            0x00404040, // LogView      — flat grey panel
+            0x00604818, // Files        — amber-tinted
+            0x00404040, // Clock        — flat grey
+            0x00702070, // GfxDemo      — magenta marker
+        },
+    .role_client =
+        {
+            0x00C0C0C0, // Calculator   — Win9x panel grey
+            0x00FFFFFF, // Notes        — paper white
+            0x00C0C0C0, // TaskManager
+            0x00DCDCDC, // LogView      — light off-white for log readability
+            0x00C0C0C0, // Files
+            0x00000000, // Clock        — black ground for retro 7-seg
+            0x00000000, // GfxDemo
+        },
+
+    .console_fg = 0x00000000,
+    .console_bg = 0x00FFFFFF,
+
+    // Cursor: classic black on white — matches the Win9x
+    // pointer the chrome evokes.
+    .cursor_outline = 0x00000000,
+    .cursor_fill = 0x00FFFFFF,
+
+    // Classic mode keeps the smaller 22-px title bar — the
+    // cosier proportions match the era's UI.
+    .title_bar_height = 22,
+    .taskbar_height = 28,
+    .title_button_width = 0,
+    .title_text_scale = 1,
+};
+
+// HighContrast — accessibility-first theme. Pure black bg,
+// pure white text, pure cyan / yellow accents picked for
+// maximum luminance contrast against black per WCAG AAA.
+// Every role uses the SAME title hue (yellow) so users with
+// colour-blindness aren't relying on hue distinction;
+// per-role differentiation falls back to title-text content.
+// 2-px+ borders on every chrome element, no gradients.
+constexpr Theme kHighContrast = {
+    .name = "highcontrast",
+
+    .desktop_bg = 0x00000000,
+    .banner_fg = 0x00FFFFFF,
+
+    .taskbar_bg = 0x00000000,
+    .taskbar_fg = 0x00FFFFFF,
+    .taskbar_accent = 0x00FFFF00, // bright yellow start button
+    .taskbar_tab_inactive = 0x00202020,
+    .taskbar_border = 0x00FFFFFF, // 1-px white top edge
+
+    .window_border = 0x00FFFFFF, // crisp white border on every window
+    .window_close = 0x00FFFF00,  // yellow close — high contrast on black
+
+    .role_title =
+        {
+            0x00FFFF00, // Calculator   — yellow on black, max contrast
+            0x00FFFF00, // Notes
+            0x00FFFF00, // TaskManager
+            0x00FFFF00, // LogView
+            0x00FFFF00, // Files
+            0x00FFFF00, // Clock
+            0x00FFFF00, // GfxDemo
+        },
+    .role_client =
+        {
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+        },
+
+    .console_fg = 0x00FFFFFF,
+    .console_bg = 0x00000000,
+
+    // Cursor: pure white outline + fill — visible on every
+    // background including the all-black chrome.
+    .cursor_outline = 0x00FFFFFF,
+    .cursor_fill = 0x00FFFF00,
+
+    // Compact dimensions — high-contrast users often run on
+    // smaller / lower-res displays, so the chrome stays
+    // tight rather than chunky.
+    .title_bar_height = 22,
+    .taskbar_height = 28,
+    .title_button_width = 0,
+    .title_text_scale = 1,
 };
 
 const Theme* const kThemes[static_cast<u32>(ThemeId::kCount)] = {
-    &kClassic,
-    &kSlate10,
-    &kAmber,
-    &kDuet,
+    &kClassic,  &kSlate10,    &kAmber,     &kDuet,        &kDuetLight,
+    &kDuetBlue, &kDuetViolet, &kDuetGreen, &kDuetClassic, &kHighContrast,
 };
 
 // ---------------------------------------------------------------
@@ -319,6 +690,15 @@ void ThemeRegisterWindow(ThemeRole role, WindowHandle h)
     if (idx >= static_cast<u32>(ThemeRole::kCount))
         return;
     g_role_window[idx] = h;
+    // Role-tracked windows are the kernel's permanent boot apps —
+    // Calculator / Notes / TaskManager / LogView / Files / Clock /
+    // GfxDemo. These are always-present from the user's
+    // perspective, so we mark them pinned so the taskbar paints
+    // a smaller (8-px) active-tab focus dot than running ring-3
+    // PE windows get (14-px). Ring-3 windows registered via
+    // SYS_WIN_CREATE never call ThemeRegisterWindow, so this
+    // automatically gives the right hint for both classes.
+    WindowSetPinned(h, true);
 }
 
 void ThemeApplyToAll()
@@ -340,6 +720,24 @@ void ThemeApplyToAll()
     TaskbarSetColours(t.taskbar_bg, t.taskbar_fg, t.taskbar_accent, t.taskbar_tab_inactive, t.taskbar_border);
     ConsoleSetColours(t.console_fg, t.console_bg);
     CursorSetDesktopBackground(t.desktop_bg);
+    CursorSetColours(t.cursor_outline, t.cursor_fill);
+
+    // Start menu / popup palette: body = inactive-tab recess panel
+    // (taskbar's "darkest" surface so the menu reads as a deeper
+    // layer than the bar), border + accent map directly, ink uses
+    // the bright `taskbar_fg` so labels are legible against the
+    // recess body.
+    MenuSetColours(t.taskbar_tab_inactive, t.taskbar_border, t.taskbar_fg, t.taskbar_accent);
+
+    // Calendar popup: same body / border / ink as the menu so the
+    // two popups feel like siblings; header takes the taskbar
+    // accent so the month name reads with the brand colour.
+    CalendarSetColours(t.taskbar_tab_inactive, t.taskbar_border, t.taskbar_accent, t.taskbar_fg);
+
+    // Network flyout panel: same chrome language as the calendar /
+    // start menu, with a button colour that matches the title-bar
+    // accent (the RENEW button reads as a callable affordance).
+    NetPanelSetColours(t.taskbar_tab_inactive, t.taskbar_border, t.taskbar_accent, t.taskbar_fg, t.taskbar_accent);
 }
 
 void ThemeSelfTest()

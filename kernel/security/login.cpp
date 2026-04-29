@@ -40,7 +40,9 @@ using duetos::drivers::video::ConsoleWriteChar;
 using duetos::drivers::video::ConsoleWriteln;
 using duetos::drivers::video::FramebufferDrawRect;
 using duetos::drivers::video::FramebufferDrawString;
+using duetos::drivers::video::FramebufferDropShadow;
 using duetos::drivers::video::FramebufferFillRect;
+using duetos::drivers::video::FramebufferFillRectGradient;
 using duetos::drivers::video::FramebufferGet;
 
 namespace
@@ -262,13 +264,29 @@ GuiLayout ComputeLayout()
     return l;
 }
 
+// Saturating per-channel lighten — file-local copy.
+u32 LightenRgb(u32 rgb, u32 amount)
+{
+    u32 r = ((rgb >> 16) & 0xFFU) + amount;
+    u32 g = ((rgb >> 8) & 0xFFU) + amount;
+    u32 b = (rgb & 0xFFU) + amount;
+    if (r > 0xFFU)
+        r = 0xFFU;
+    if (g > 0xFFU)
+        g = 0xFFU;
+    if (b > 0xFFU)
+        b = 0xFFU;
+    return (r << 16) | (g << 8) | b;
+}
+
 void DrawBackground(const GuiLayout& l)
 {
-    // Two-stripe "gradient" — good enough without a real
-    // per-row fade and cheap on any BPP.
-    const u32 half = l.fb_h / 2;
-    FramebufferFillRect(0, 0, l.fb_w, half, kBgTop);
-    FramebufferFillRect(0, half, l.fb_w, l.fb_h - half, kBgBottom);
+    // Smooth full-height vertical gradient. Replaces the previous
+    // two-stripe approximation now that the framebuffer ships
+    // FillRectGradient — the same primitive the desktop compose
+    // uses, so the login → desktop transition reads as continuous
+    // colour rather than a band hand-off.
+    FramebufferFillRectGradient(0, 0, l.fb_w, l.fb_h, kBgTop, kBgBottom);
     // Top banner text.
     FramebufferDrawString(16, 12, "DUETOS", 0x00FFFFFF, kBgTop);
     FramebufferDrawString(l.fb_w - 8 * 9, 12, "LOGIN v0", 0x00C0D0E0, kBgTop);
@@ -276,9 +294,28 @@ void DrawBackground(const GuiLayout& l)
 
 void DrawPanel(const GuiLayout& l)
 {
+    // Drop shadow first so the panel reads as raised relative to
+    // the gradient bg. Same depth + alpha as the desktop chrome.
+    FramebufferDropShadow(l.panel_x, l.panel_y, l.panel_w, l.panel_h, 5, 0x70);
+
+    // Body fill + 1-px outer border (was 2-px slab).
     FramebufferFillRect(l.panel_x, l.panel_y, l.panel_w, l.panel_h, kPanel);
-    FramebufferDrawRect(l.panel_x, l.panel_y, l.panel_w, l.panel_h, kPanelBorder, 2);
-    FramebufferFillRect(l.panel_x, l.panel_y, l.panel_w, l.title_h, kTitleBar);
+    FramebufferDrawRect(l.panel_x, l.panel_y, l.panel_w, l.panel_h, kPanelBorder, 1);
+
+    // Title bar with a vertical gradient + a 1-px ridge highlight
+    // along its top edge. Same chrome language as window titles.
+    FramebufferFillRectGradient(l.panel_x, l.panel_y, l.panel_w, l.title_h, LightenRgb(kTitleBar, 24), kTitleBar);
+    if (l.panel_w > 4)
+    {
+        FramebufferFillRect(l.panel_x + 2, l.panel_y + 1, l.panel_w - 4, 1, LightenRgb(kTitleBar, 56));
+    }
+    // 1-pixel divider where the title bar meets the panel body —
+    // matches the window-chrome divider.
+    if (l.panel_h > l.title_h + 2)
+    {
+        FramebufferFillRect(l.panel_x + 2, l.panel_y + l.title_h, l.panel_w - 4, 1, kPanelBorder);
+    }
+
     FramebufferDrawString(l.panel_x + 10, l.panel_y + 10, "WELCOME TO DUETOS", kTitleText, kTitleBar);
 }
 
@@ -348,6 +385,13 @@ void GuiRepaint()
 
     const u32 y_hint = l.fb_h - 22;
     FramebufferDrawString(16, y_hint, "DEFAULT ACCOUNTS: ADMIN/ADMIN  GUEST/(EMPTY)", 0x00C0D0E0, kBgBottom);
+
+    // Push the freshly-painted login surface to the active backend
+    // (virtio-gpu TRANSFER_TO_HOST_2D + RESOURCE_FLUSH; no-op for
+    // direct firmware-handoff framebuffers). Without this the
+    // virtio-gpu host display stays at whatever the GPU init painted
+    // and the user never sees the login chrome.
+    drivers::video::FramebufferPresent();
 }
 
 bool GuiTrySubmit()

@@ -140,6 +140,146 @@ void FramebufferFillRectGradient(u32 x, u32 y, u32 w, u32 h, u32 top_rgb, u32 bo
 /// Clipped; no-op on empty dimensions or !Available().
 void FramebufferFillRoundRect(u32 x, u32 y, u32 w, u32 h, u32 radius, u32 rgb);
 
+/// Outline-only sibling of `FramebufferFillRoundRect`. Paints a
+/// 1-pixel rounded-rect border in `rgb`. Same radius clamping
+/// rules as the fill primitive. Interior is untouched. Used by
+/// chrome paths that want a soft outline without an inner fill
+/// (taskbar tab borders, button outlines).
+///
+/// Clipped; no-op on empty dimensions or !Available().
+void FramebufferDrawRoundRect(u32 x, u32 y, u32 w, u32 h, u32 radius, u32 rgb);
+
+/// Bresenham line from (x0, y0) to (x1, y1) inclusive in `rgb`.
+/// Iterates pixels one at a time — useful for chrome details
+/// (close-button "X" glyphs, accent strips, simple icons) where
+/// a Manhattan-aligned filled rect would look wrong. Works for
+/// every octant; coordinates are clipped per-pixel against the
+/// surface so off-screen segments are silent no-ops.
+///
+/// Cost is O(max(|dx|, |dy|)) — one branch + one per-pixel
+/// PutPixel. Bounded by `kFbMaxLinePixels` so a malicious caller
+/// with insane endpoints can't spin the loop forever.
+///
+/// No-op if `!Available()`.
+void FramebufferDrawLine(i32 x0, i32 y0, i32 x1, i32 y1, u32 rgb);
+
+/// Midpoint-circle outline at center `(cx, cy)` with integer
+/// `radius` in `rgb`. One-pixel border, eight-octant symmetric
+/// plot — pixel-aligned, no anti-aliasing. Coordinates can be
+/// negative; off-surface plots are silently dropped.
+///
+/// Degenerate radii: `0` is a single pixel at the center,
+/// negative radius is a no-op. No-op if `!Available()`.
+void FramebufferDrawCircle(i32 cx, i32 cy, u32 radius, u32 rgb);
+
+/// Solid-filled circle at `(cx, cy)` of integer `radius`,
+/// painted via per-row spans (one `FramebufferFillRect` per
+/// scanline) using the integer test `dx² + dy² ≤ r²`. Same
+/// degenerate-radius rules as `FramebufferDrawCircle`.
+///
+/// No-op if `!Available()`.
+void FramebufferFillCircle(i32 cx, i32 cy, u32 radius, u32 rgb);
+
+/// "Punch" the four corners of an axis-aligned rect so a chrome
+/// path that already painted a rectangular surface ends up
+/// looking rounded. For each of the four `radius × radius`
+/// corner squares, every pixel whose squared distance to the
+/// corner-arc centre is GREATER than `radius²` (i.e. lives
+/// "outside" the curve) gets overpainted with `punch_rgb`. The
+/// curve itself + the body interior are left untouched.
+///
+/// Caller is expected to pass a `punch_rgb` that visually
+/// matches the surface AROUND the chrome (typically the
+/// desktop's gradient mid-tone). A perfect colour match would
+/// require per-pixel sampling of the underlying surface; this
+/// primitive accepts a single colour as the "good enough"
+/// approximation until a real compositor mask lands.
+///
+/// `radius == 0` is a no-op (rectangular chrome stays
+/// rectangular). Radius is clamped to `min(w, h) / 2`. Clipped;
+/// no-op on empty dimensions or `!Available()`.
+void FramebufferPunchCorners(u32 x, u32 y, u32 w, u32 h, u32 radius, u32 punch_rgb);
+
+/// Stroke a partial circular arc — every pixel in the
+/// `[start_deg, start_deg + sweep_deg)` sector at distance
+/// `radius` from `(cx, cy)`, plotted in `rgb`. Iterates `θ` in
+/// 1° steps so the arc is dense enough at small radii (≤ 64 px)
+/// to look continuous; larger radii will see visible gaps until
+/// a per-radius step refinement lands.
+///
+/// `thickness` paints `thickness` concentric arcs at radii
+/// `[radius - thickness/2, radius + (thickness+1)/2)` so a
+/// 1-px stroke is a single arc, 2-px is `r-0` and `r+1`, 3-px
+/// is `r-1`, `r`, `r+1`, etc. Pixel-aligned, no anti-aliasing.
+///
+/// Angles are in degrees, with 0° = positive X (3 o'clock) and
+/// increasing clockwise (matching a Y-down framebuffer's
+/// "counterclockwise on screen" intuition would require
+/// flipping the sin sign — left as-is so the API matches an
+/// SVG-style coordinate system the way the prototype's design
+/// language thinks).
+///
+/// `sweep_deg` may be negative (sweep counter-clockwise) or
+/// > 360 (multiple revolutions). Negative `radius` is a no-op.
+/// No-op if `!Available()` or `thickness == 0`.
+void FramebufferStrokeArc(i32 cx, i32 cy, i32 radius, i32 start_deg, i32 sweep_deg, u32 thickness, u32 rgb);
+
+/// Path-op tag for `FramebufferStrokePath`. The op carries 0–3
+/// `(x, y)` pairs depending on the tag.
+enum class PathOp : u8
+{
+    Move = 0,  // pts[0] = new pen position; no stroke drawn
+    Line = 1,  // pts[0] = endpoint; line stroked from current pen
+    Cubic = 2, // pts[0] = cp1, pts[1] = cp2, pts[2] = end
+    Close = 3, // straight stroke from pen to subpath start
+};
+
+struct PathPoint
+{
+    i32 x;
+    i32 y;
+};
+
+struct PathSegment
+{
+    PathOp op;
+    // Only the first `n` entries are meaningful, where
+    // `n = OpPoints(op)`. Caller can leave the rest zeroed.
+    PathPoint pts[3];
+};
+
+/// Stroke a sequence of path segments at `thickness` pixels in
+/// `rgb`. Lines are walked Bresenham-style and stamped with a
+/// `thickness × thickness` square at each pixel; cubic Bézier
+/// segments are flattened with adaptive de Casteljau
+/// subdivision (depth-capped at 8) until each leaf segment's
+/// chord deviation is ≤ 1 pixel, then stroked as line segments.
+/// `Close` strokes from the current pen back to the most recent
+/// `Move`. A bare `Line`/`Cubic`/`Close` without a preceding
+/// `Move` implicitly anchors at `(0, 0)`.
+///
+/// Cost is bounded by the sum of segment lengths in pixels
+/// times `thickness` — fine for chrome / wallpaper geometry,
+/// not intended for blitting bulk imagery.
+///
+/// `thickness == 0` or `count == 0` is a no-op. No-op if
+/// `!Available()` or `segments == nullptr`.
+void FramebufferStrokePath(const PathSegment* segments, u32 count, u32 thickness, u32 rgb);
+
+/// Soft "drop shadow" for a window or panel. Paints a
+/// `depth`-pixel-wide alpha-blended L-shape along the right
+/// and bottom edges of the rect at `(x, y, w, h)`, using black
+/// at `start_alpha` fading linearly to 0 at the outer edge of
+/// the band. The original rect content is NOT touched — the
+/// shadow lives entirely outside the rect, in the L-shaped
+/// region [x+w, x+w+depth) × [y+depth, y+h+depth) ∪
+/// [x+depth, x+w+depth) × [y+h, y+h+depth).
+///
+/// Cost: ~depth × (w + h) alpha-blended pixels. At depth=4 the
+/// budget is trivial even for the desktop-sized chrome path.
+/// Clipped; no-op on empty dimensions, depth==0, or !Available().
+void FramebufferDropShadow(u32 x, u32 y, u32 w, u32 h, u32 depth, u8 start_alpha);
+
 /// Copy `src_w × src_h` BGRA8888 pixels into the framebuffer at
 /// `(dst_x, dst_y)`. `src` is a kernel-side pointer to a row-major
 /// pixel buffer with `src_pitch_px` u32-pixels per row (allowing a
@@ -161,6 +301,24 @@ void FramebufferDrawChar(u32 x, u32 y, char ch, u32 fg, u32 bg);
 /// controls layout. Stops at the first NUL or when the next cell
 /// would exceed the framebuffer width.
 void FramebufferDrawString(u32 x, u32 y, const char* text, u32 fg, u32 bg);
+
+/// Draw `text` at (x, y) with each font pixel rendered as a
+/// `scale x scale` block — integer-scaled bitmap font. `scale=1`
+/// is identical to FramebufferDrawString; scale=2 produces a
+/// 16x16 cell; scale=4 a 32x32 cell. Useful for chrome titles
+/// at the prototype's larger sizes (14 / 18 px) without
+/// shipping a full TTF rasterizer. Bilinear smoothing isn't
+/// applied — pixels stay crisp, the result reads as an
+/// "8-bit / chunky" font. Cell advance is 8*scale px.
+///
+/// Capped at scale=8 so a hostile arg can't overflow into the
+/// framebuffer. Stops at NUL or when the next cell would
+/// exceed framebuffer width.
+void FramebufferDrawStringScaled(u32 x, u32 y, const char* text, u32 fg, u32 bg, u32 scale);
+
+/// Pixel width of `text` rendered at scale (i.e. strlen * 8 *
+/// scale, bounded). NUL-safe.
+u32 StringPixelWidthScaled(const char* text, u32 scale);
 
 /// Exercise the draw path at boot: clear to black, draw coloured
 /// corner swatches + a framing rectangle. Visible proof that the
@@ -202,5 +360,44 @@ bool FramebufferRebindExternal(void* virt, u64 phys, u32 width, u32 height, u32 
 using FramebufferPresentFn = void (*)();
 void FramebufferSetPresentHook(FramebufferPresentFn fn);
 void FramebufferPresent();
+
+/// Begin an offscreen compose pass. While compose is active every
+/// pixel-write primitive in this header (`FramebufferPutPixel`,
+/// `FillRect`, `Blit`, `FillRectAlpha`, `FillRectGradient` and
+/// every primitive that lowers onto them) targets a shadow buffer in
+/// normal RAM instead of the live MMIO framebuffer. Reads inside
+/// `FillRectAlpha` likewise read the shadow, so per-pixel
+/// `src-over` blending finally composites against whatever was
+/// painted earlier in the same compose pass — which is what the
+/// "real compositor" calls in `widget.cpp::DesktopCompose` need to
+/// do true per-window alpha instead of the post-paint black overlay
+/// dim that v0 ships.
+///
+/// Lazy-allocates the shadow buffer (4 bytes per pixel,
+/// tightly-packed pitch = `width * 4`) on first call. If the
+/// physical allocator can't satisfy the request, logs the failure
+/// to COM1 and stays in direct-to-MMIO mode — every primitive then
+/// behaves exactly as before this change. `FramebufferComposeActive`
+/// reports the resolved state.
+///
+/// Idempotent: a second `BeginCompose` without a matching
+/// `EndCompose` is a no-op. No-op if `!Available()`.
+void FramebufferBeginCompose();
+
+/// End the offscreen compose pass started by `FramebufferBeginCompose`.
+/// Copies the shadow buffer to the live framebuffer row by row
+/// (handling the live framebuffer's pitch padding) so the painted
+/// frame appears on screen. Does NOT call `FramebufferPresent` —
+/// callers that want the virtio-gpu flush hook to fire issue a
+/// `FramebufferPresent()` call after this returns. No-op if compose
+/// is not active.
+void FramebufferEndCompose();
+
+/// True between matched `BeginCompose` / `EndCompose` calls AND the
+/// shadow buffer is live (i.e. the allocator succeeded). False
+/// otherwise — including the "compose was requested but the
+/// allocator failed and we silently fell back to direct mode"
+/// case, which is observable to higher layers.
+bool FramebufferComposeActive();
 
 } // namespace duetos::drivers::video

@@ -96,6 +96,11 @@
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/svg.h"
+#include "drivers/video/ttf.h"
+#include "drivers/video/ttf_raster.h"
+#include "drivers/video/wallpaper.h"
+#include "generated_chrome_font.h"
 #include "drivers/video/calendar.h"
 #include "drivers/video/menu.h"
 #include "drivers/video/netpanel.h"
@@ -204,6 +209,11 @@
 
 namespace
 {
+
+// Storage for the chrome font handle. Populated by the
+// chrome-font-load initcall once at boot; outlives the registration
+// because TtfChromeFontSet stores a borrowed pointer.
+constinit duetos::drivers::video::TtfFont g_chrome_font_storage{};
 
 // Walk the Multiboot2 tag list for type-1 (boot cmdline) and
 // return its NUL-terminated string, or nullptr if absent. The
@@ -657,6 +667,57 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                        duetos::drivers::video::FramebufferSelfTest();
                                        return duetos::core::Result<void>{};
                                    });
+    duetos::core::InitcallRegister(duetos::core::Phase::Drivers, "ttf-selftest",
+                                   []()
+                                   {
+                                       duetos::drivers::video::TtfSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    duetos::core::InitcallRegister(duetos::core::Phase::Drivers, "ttf-raster-selftest",
+                                   []()
+                                   {
+                                       duetos::drivers::video::TtfRasterSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    duetos::core::InitcallRegister(duetos::core::Phase::Drivers, "svg-selftest",
+                                   []()
+                                   {
+                                       duetos::drivers::video::SvgSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    // Load the embedded chrome font (Liberation Sans Regular, SIL OFL
+    // 1.1) and register it for the TTF dispatch path. Once registered,
+    // the 5 Duet-family themes' window-title paint stops falling back
+    // to the bitmap font and renders via the slice-4 rasterizer.
+    duetos::core::InitcallRegister(
+        duetos::core::Phase::Drivers, "chrome-font-load",
+        []()
+        {
+            const auto* bytes = duetos::drivers::video::generated::kBinChromeFontBytes;
+            const auto size = static_cast<duetos::u32>(sizeof(duetos::drivers::video::generated::kBinChromeFontBytes));
+            auto r = duetos::drivers::video::TtfLoad(bytes, size);
+            if (r.has_value())
+            {
+                g_chrome_font_storage = r.value();
+                duetos::drivers::video::TtfChromeFontSet(&g_chrome_font_storage);
+                duetos::arch::SerialWrite("[boot] chrome font (Liberation Sans) loaded + registered\n");
+            }
+            else
+            {
+                duetos::arch::SerialWrite("[boot] chrome font load FAILED — staying on bitmap fallback\n");
+            }
+            return duetos::core::Result<void>{};
+        });
+    // Parse the embedded wallpaper SVGs once into static SvgImage
+    // instances. WallpaperPaint then layers them on the matching
+    // theme paints (DuetMark + topo for Duet family; syscalls grid
+    // for Slate10).
+    duetos::core::InitcallRegister(duetos::core::Phase::Drivers, "wallpaper-svg-init",
+                                   []()
+                                   {
+                                       duetos::drivers::video::WallpaperSvgInit();
+                                       return duetos::core::Result<void>{};
+                                   });
     (void)duetos::core::RunPhase(duetos::core::Phase::Drivers);
 
     // GUI composition. Order for every paint pass:
@@ -985,7 +1046,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // runtime so a different resolution still anchors correctly.
     {
         const auto fb_info = duetos::drivers::video::FramebufferGet();
-        constexpr duetos::u32 tb_h = 28;
+        // Per-theme taskbar height — Duet family ships 36 px,
+        // others ship 28. The fallback (theme.taskbar_height
+        // == 0 from a stale palette in a future ABI bump) keeps
+        // the historical 28-px strip so the chrome stays
+        // recognizable.
+        const duetos::u32 tb_h = (theme0.taskbar_height != 0) ? theme0.taskbar_height : 28u;
         const duetos::u32 tb_y = (fb_info.height > tb_h) ? fb_info.height - tb_h : 0;
         duetos::drivers::video::TaskbarInit(tb_y, tb_h, theme0.taskbar_bg, theme0.taskbar_fg, theme0.taskbar_accent,
                                             theme0.taskbar_tab_inactive, theme0.taskbar_border);
@@ -1001,6 +1067,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // reshuffling ids.
 
     duetos::drivers::video::ConsoleInit(16, 400, theme0.console_fg, theme0.console_bg);
+
+    // Publish theme0's palette into every chrome owner that
+    // didn't already get its colours via Init (the taskbar +
+    // console did, the start menu didn't). After this point any
+    // theme-cycle hotkey simply re-runs the same publish path.
+    duetos::drivers::video::ThemeApplyToAll();
 
     // Tee kernel log lines to the on-screen console so the desktop
     // shows subsystem activity live — not just the boot seed block.
@@ -1140,6 +1212,34 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             duetos::drivers::video::CalendarOpen(ax, ay);
             duetos::drivers::video::DesktopCompose(theme0.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
         }
+    }
+
+    // procfs / sysfs snapshots: materialize the static-text
+    // dumps NOW so they capture state at the "system ready"
+    // mark (just before the login gate, before user input).
+    // After this, all five files behave like any other
+    // static-bytes ramfs entry.
+    duetos::fs::RamfsBoottraceSnapshot();
+    duetos::fs::RamfsSyscallsSnapshot();
+    duetos::fs::RamfsAbiSnapshot();
+    duetos::fs::RamfsCpuhistSnapshot();
+    duetos::fs::RamfsInspectSnapshot();
+
+    // Spawn the userland shell stub. Hand-built ELF ships in
+    // /bin/usershell.elf; calls SYS_WRITE("Hello from
+    // userland shell stub\n") + SYS_EXIT(0) and returns to
+    // the reaper. Proves end-to-end ring-3: ELF parse,
+    // PT_LOAD map, ring transition, syscall round-trip,
+    // exit cleanup. A future slice grows this into a real
+    // prompt-driven shell with TOML reader.
+    {
+        const auto pid = duetos::core::SpawnElfFile("/bin/usershell.elf", duetos::fs::RamfsUsershellElfBytes(),
+                                                    duetos::fs::RamfsUsershellElfSize(), duetos::core::CapSetTrusted(),
+                                                    duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
+                                                    duetos::core::kTickBudgetTrusted);
+        SerialWrite("[boot] usershell pid=");
+        SerialWriteHex(pid);
+        SerialWrite("\n");
     }
 
     // Login gate — blocks keyboard input from reaching the shell
@@ -1646,6 +1746,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             }
             const bool alt = (ev.modifiers & kKeyModAlt) != 0;
             const bool ctrl = (ev.modifiers & kKeyModCtrl) != 0;
+            const bool shift = (ev.modifiers & kKeyModShift) != 0;
             bool dirty = false;
 
             // Login gate takes absolute priority — while a
@@ -1790,6 +1891,72 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 SerialWrite("\n");
                 continue;
             }
+            // Ctrl+Alt+, / Ctrl+Alt+. — adjust active window
+            // opacity in 32-step increments. Lower bound 64
+            // (anything below would render the chrome
+            // unreadable); upper bound 255 (fully opaque).
+            if (ctrl && alt && (ev.code == ',' || ev.code == '.'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                if (active != duetos::drivers::video::kWindowInvalid)
+                {
+                    const duetos::u8 cur = duetos::drivers::video::WindowGetOpacity(active);
+                    duetos::u8 next = cur;
+                    constexpr duetos::u8 kStep = 32;
+                    constexpr duetos::u8 kMin = 64;
+                    if (ev.code == ',')
+                    {
+                        next = (cur > kMin + kStep) ? static_cast<duetos::u8>(cur - kStep) : kMin;
+                    }
+                    else
+                    {
+                        next = (cur > 0xFFu - kStep) ? 0xFFu : static_cast<duetos::u8>(cur + kStep);
+                    }
+                    duetos::drivers::video::WindowSetOpacity(active, next);
+                    SerialWrite("[ui] opacity=");
+                    SerialWriteHex(next);
+                    SerialWrite("\n");
+                }
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+                duetos::drivers::video::CompositorUnlock();
+                continue;
+            }
+            // Ctrl+Alt+digit picks a specific theme directly —
+            // saves repeat presses of Ctrl+Alt+Y when there are
+            // 9 themes registered. Index 1..9 maps onto
+            // ThemeId 0..8 so the digit row reads as "press 4
+            // for the 4th theme" matching `theme list`'s
+            // column ordering.
+            if (ctrl && alt && ev.code >= '1' && ev.code <= '9')
+            {
+                const auto idx = static_cast<duetos::u32>(ev.code - '1');
+                if (idx < static_cast<duetos::u32>(duetos::drivers::video::ThemeId::kCount))
+                {
+                    duetos::drivers::video::CompositorLock();
+                    duetos::drivers::video::ThemeSet(static_cast<duetos::drivers::video::ThemeId>(idx));
+                    duetos::drivers::video::ThemeApplyToAll();
+                    const bool is_tty =
+                        (duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Tty);
+                    if (is_tty)
+                    {
+                        duetos::drivers::video::DesktopCompose(0x00000000, nullptr);
+                    }
+                    else
+                    {
+                        duetos::drivers::video::CursorHide();
+                        duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                        duetos::drivers::video::CursorShow();
+                    }
+                    duetos::drivers::video::CompositorUnlock();
+                    SerialWrite("[ui] theme set -> ");
+                    SerialWrite(duetos::drivers::video::ThemeIdName(duetos::drivers::video::ThemeCurrentId()));
+                    SerialWrite("\n");
+                    continue;
+                }
+            }
 
             // Window-manager shortcuts take priority over any
             // text-input path. Alt+Tab cycles active window;
@@ -1803,6 +1970,105 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 duetos::drivers::video::CursorShow();
                 duetos::drivers::video::CompositorUnlock();
                 SerialWrite("[ui] alt-tab\n");
+                continue;
+            }
+            // Ctrl+Alt+Shift+Arrow grows / shrinks the active
+            // window from its bottom-right corner in 32-px steps.
+            // Tested BEFORE the bare Ctrl+Alt+Arrow snap handler
+            // because the modifier mask is more specific.
+            if (ctrl && alt && shift &&
+                (ev.code == duetos::drivers::input::kKeyArrowLeft ||
+                 ev.code == duetos::drivers::input::kKeyArrowRight || ev.code == duetos::drivers::input::kKeyArrowUp ||
+                 ev.code == duetos::drivers::input::kKeyArrowDown))
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                if (active != duetos::drivers::video::kWindowInvalid)
+                {
+                    duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
+                    if (duetos::drivers::video::WindowGetBounds(active, &wx, &wy, &ww, &wh))
+                    {
+                        constexpr duetos::u32 kStep = 32;
+                        constexpr duetos::u32 kMin = 96; // floor — anything smaller is unusable
+                        duetos::u32 new_w = ww;
+                        duetos::u32 new_h = wh;
+                        if (ev.code == duetos::drivers::input::kKeyArrowRight)
+                        {
+                            new_w = ww + kStep;
+                        }
+                        else if (ev.code == duetos::drivers::input::kKeyArrowLeft)
+                        {
+                            new_w = (ww > kMin + kStep) ? ww - kStep : kMin;
+                        }
+                        else if (ev.code == duetos::drivers::input::kKeyArrowDown)
+                        {
+                            new_h = wh + kStep;
+                        }
+                        else
+                        {
+                            new_h = (wh > kMin + kStep) ? wh - kStep : kMin;
+                        }
+                        duetos::drivers::video::WindowResizeTo(active, new_w, new_h);
+                        SerialWrite("[ui] resize w=");
+                        SerialWriteHex(new_w);
+                        SerialWrite(" h=");
+                        SerialWriteHex(new_h);
+                        SerialWrite("\n");
+                    }
+                }
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+                duetos::drivers::video::CompositorUnlock();
+                continue;
+            }
+            // Ctrl+Alt+Arrow window snap shortcuts. Mirror Win10's
+            // Win+Arrow tiling: Left/Right snap to halves, Up
+            // maximizes, Down restores (or minimizes if not max).
+            // Ctrl+Alt is the standard "system" modifier in this
+            // session — Win key isn't tracked separately.
+            if (ctrl && alt &&
+                (ev.code == duetos::drivers::input::kKeyArrowLeft ||
+                 ev.code == duetos::drivers::input::kKeyArrowRight || ev.code == duetos::drivers::input::kKeyArrowUp ||
+                 ev.code == duetos::drivers::input::kKeyArrowDown))
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                if (active != duetos::drivers::video::kWindowInvalid)
+                {
+                    if (ev.code == duetos::drivers::input::kKeyArrowLeft)
+                    {
+                        duetos::drivers::video::WindowSnapLeft(active);
+                        SerialWrite("[ui] snap-left\n");
+                    }
+                    else if (ev.code == duetos::drivers::input::kKeyArrowRight)
+                    {
+                        duetos::drivers::video::WindowSnapRight(active);
+                        SerialWrite("[ui] snap-right\n");
+                    }
+                    else if (ev.code == duetos::drivers::input::kKeyArrowUp)
+                    {
+                        duetos::drivers::video::WindowMaximize(active);
+                        SerialWrite("[ui] maximize\n");
+                    }
+                    else
+                    {
+                        if (duetos::drivers::video::WindowIsMaximized(active))
+                        {
+                            duetos::drivers::video::WindowRestore(active);
+                            SerialWrite("[ui] restore\n");
+                        }
+                        else
+                        {
+                            duetos::drivers::video::WindowMinimize(active);
+                            SerialWrite("[ui] minimize\n");
+                        }
+                    }
+                }
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+                duetos::drivers::video::CompositorUnlock();
                 continue;
             }
             if (alt && ev.code == kKeyF4)
@@ -2389,6 +2655,27 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 }
             }
 
+            // "Show Desktop" sliver at the right edge of the
+            // taskbar. First press snapshots the visibility of
+            // every alive window and hides them; second press
+            // restores the snapshotted state. Tab-click + START
+            // clicks already consumed earlier presses, so this
+            // hit-test runs on the residual press_edge stream.
+            if (press_edge && !menu_handled && !drag.active)
+            {
+                duetos::u32 dx = 0, dy = 0, dw = 0, dh = 0;
+                duetos::drivers::video::TaskbarShowDesktopBounds(&dx, &dy, &dw, &dh);
+                if (dw > 0 && cx >= dx && cx < dx + dw && cy >= dy && cy < dy + dh)
+                {
+                    const bool now_active = duetos::drivers::video::WindowShowDesktopToggle();
+                    SerialWrite(now_active ? "[ui] show-desktop ON\n" : "[ui] show-desktop OFF\n");
+                    duetos::drivers::video::CursorHide();
+                    duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                    duetos::drivers::video::CursorShow();
+                    menu_handled = true; // sliver ate the click
+                }
+            }
+
             if (press_edge && !menu_handled && !drag.active && duetos::drivers::video::TaskbarContains(cx, cy))
             {
                 const duetos::u32 tab_hit = duetos::drivers::video::TaskbarTabAt(cx, cy);
@@ -2439,6 +2726,30 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                             SerialWriteHex(hit);
                             SerialWrite("\n");
                         }
+                    }
+                    else if (duetos::drivers::video::WindowPointInMaxBox(hit, cx, cy))
+                    {
+                        // Toggle: max → restore, restore → max.
+                        if (duetos::drivers::video::WindowIsMaximized(hit))
+                        {
+                            duetos::drivers::video::WindowRestore(hit);
+                            SerialWrite("[ui] restore window=");
+                        }
+                        else
+                        {
+                            duetos::drivers::video::WindowMaximize(hit);
+                            SerialWrite("[ui] maximize window=");
+                        }
+                        SerialWriteHex(hit);
+                        SerialWrite("\n");
+                        duetos::drivers::video::WindowRaise(hit);
+                    }
+                    else if (duetos::drivers::video::WindowPointInMinBox(hit, cx, cy))
+                    {
+                        duetos::drivers::video::WindowMinimize(hit);
+                        SerialWrite("[ui] minimize window=");
+                        SerialWriteHex(hit);
+                        SerialWrite("\n");
                     }
                     else
                     {

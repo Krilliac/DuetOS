@@ -190,6 +190,55 @@ bool WindowPointInTitle(WindowHandle h, u32 x, u32 y);
 /// WindowDraw chrome paints.
 bool WindowPointInCloseBox(WindowHandle h, u32 x, u32 y);
 
+/// True iff (x, y) is inside the maximize/restore button —
+/// the second-from-the-right title-bar control box. Same
+/// per-side padding + side as the close box.
+bool WindowPointInMaxBox(WindowHandle h, u32 x, u32 y);
+
+/// True iff (x, y) is inside the minimize button — the
+/// third-from-the-right title-bar control box.
+bool WindowPointInMinBox(WindowHandle h, u32 x, u32 y);
+
+/// Hide the window (SW_HIDE-style minimize). Does NOT reap the
+/// slot — the taskbar tab stays so the user can re-show via the
+/// tab click. No-op if the window is already hidden or invalid.
+void WindowMinimize(WindowHandle h);
+
+/// Maximize: snapshot current bounds + expand to the full
+/// framebuffer minus the taskbar strip. Idempotent — calling on
+/// an already-maximized window is a no-op (the snapshot is NOT
+/// overwritten). The window stays maximized until `WindowRestore`
+/// or until it's resized through other means (which clears the
+/// maximized flag without restoring the snapshot).
+void WindowMaximize(WindowHandle h);
+
+/// Restore the window to its pre-maximize bounds. No-op if the
+/// window isn't currently maximized.
+void WindowRestore(WindowHandle h);
+
+/// True iff `h` is currently in the maximized state. False for
+/// invalid handles or windows that have never been maximized.
+bool WindowIsMaximized(WindowHandle h);
+
+/// Snap `h` to the left half of the framebuffer minus the
+/// taskbar reserve at the bottom. Clears the maximized flag.
+/// No-op for invalid handles. Mirrors Win10's Win+Left tile.
+void WindowSnapLeft(WindowHandle h);
+
+/// Snap `h` to the right half. Mirrors Win10's Win+Right.
+void WindowSnapRight(WindowHandle h);
+
+/// Per-window opacity, 0..255. 0xFF = fully opaque (default).
+/// Lower values fade the window via a post-paint black-alpha
+/// overlay — fake-transparency cue without a real compositor
+/// backbuffer. No-op for invalid handles.
+void WindowSetOpacity(WindowHandle h, u8 opacity);
+
+/// Read the per-window opacity. Returns 0xFF for invalid
+/// handles so callers don't accidentally treat unknown
+/// windows as fully transparent.
+u8 WindowGetOpacity(WindowHandle h);
+
 /// Mark `h` closed: the window stops drawing, stops participating
 /// in hit-testing, and its widgets (buttons with owner=h) also
 /// disappear. The handle stays valid — no re-use — but the slot
@@ -410,6 +459,17 @@ u64 WindowOwnerPid(WindowHandle h);
 /// True iff `h` is alive AND currently visible.
 bool WindowIsVisible(WindowHandle h);
 
+/// Mark `h` as a "pinned" window. Pinning is a UI hint — the
+/// kernel taskbar uses it to draw a smaller (8-px) focus dot
+/// when an active pinned tab is selected, vs the 14-px dot for
+/// running-but-not-pinned tabs. Native boot apps (Calculator,
+/// Notes, Files, …) are typically pinned at registration; PE-
+/// owned ring-3 windows default to unpinned.
+void WindowSetPinned(WindowHandle h, bool pinned);
+
+/// True iff `h` is alive AND currently marked pinned.
+bool WindowIsPinned(WindowHandle h);
+
 /// Set the visible bit. No redraw — callers trigger the next
 /// DesktopCompose themselves.
 void WindowSetVisible(WindowHandle h, bool visible);
@@ -582,6 +642,20 @@ bool WindowIsDirty(WindowHandle h);
 /// message from re-firing every tick). Returns the number of
 /// WM_PAINTs posted.
 u32 WindowDrainPaints();
+
+/// Toggle "Show Desktop" — Win10's minimize-all + restore.
+/// First call snapshots the current visibility of every alive
+/// window into a backing mask and hides them all. Second call
+/// re-shows only the windows that were visible at snapshot
+/// time (any that were SW_HIDE'd by the user before the toggle
+/// stay hidden). Returns the new state: true == "showing
+/// desktop", false == "windows visible". Safe to call any time;
+/// no-op if there are no alive windows.
+bool WindowShowDesktopToggle();
+
+/// Read the current Show-Desktop state without toggling. True
+/// means a snapshot is pending and the windows are hidden.
+bool WindowShowDesktopActive();
 
 // ---------------------------------------------------------------
 // Parent / child tracking + focus + caret.

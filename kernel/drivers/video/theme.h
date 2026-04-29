@@ -45,6 +45,23 @@
  *               the same flat-token shape the other three themes
  *               use. See docs/duet-theme-spec.md for the per-token
  *               source-of-truth.
+ *   - DuetLight : the light-mode sibling of Duet. Same dual-
+ *               accent vocabulary on a near-white canvas, sourced
+ *               from the prototype's `light` mode tokens. The
+ *               cursor + chrome adapt to the inverted contrast
+ *               budget so dark-on-light text reads cleanly.
+ *   - DuetBlue / DuetViolet / DuetGreen :
+ *               three accent variants of the slate Duet, each
+ *               swapping the teal accent for a different brand
+ *               hue (Win10 blue, modern violet, and a deep
+ *               forest green). The amber accent for
+ *               document-style apps stays — keeps the dual-
+ *               accent "duet" identity intact across variants.
+ *   - DuetClassic : Duet's "classic mode" sibling — Win9x grey
+ *               panels (#C0C0C0) with the dual-accent teal /
+ *               amber title hues retained. The intentional
+ *               retro-grey contrast against the modern Duet
+ *               story is the point of the variant.
  *
  * Switching themes is a runtime operation (Ctrl+Alt+Y cycles, the
  * `theme` shell command switches or cycles by name, or
@@ -68,7 +85,13 @@ enum class ThemeId : u8
     Slate10 = 1,
     Amber = 2,
     Duet = 3,
-    kCount = 4,
+    DuetLight = 4,
+    DuetBlue = 5,
+    DuetViolet = 6,
+    DuetGreen = 7,
+    DuetClassic = 8,
+    HighContrast = 9,
+    kCount = 10,
 };
 
 /// Stable role tag for each application window whose chrome is
@@ -114,6 +137,65 @@ struct Theme
     // Framebuffer console
     u32 console_fg;
     u32 console_bg;
+
+    // Mouse cursor sprite. `cursor_outline` paints the
+    // 1-px black-by-default border around the arrow shape;
+    // `cursor_fill` paints the interior. Theme-tuned so the
+    // cursor matches the surrounding chrome (e.g. Amber cursors
+    // on the amber CRT theme, slate-ink on the Duet theme).
+    u32 cursor_outline;
+    u32 cursor_fill;
+
+    // Chrome dimensions. Per-theme so the Duet family can
+    // ship the prototype's larger titlebar (26 px vs the
+    // existing 22 px) without breaking other themes' layouts.
+    // Windows whose `WindowChrome.title_height` is 0 (the
+    // common case — main.cpp leaves it 0 at registration)
+    // sample this. Explicit per-window heights still win.
+    u32 title_bar_height;
+
+    // Taskbar strip height in pixels. The Duet family ships
+    // 36 px (the prototype's "compact 38 minus 2 for the
+    // accent line"); non-Duet themes + DuetClassic stay at
+    // 28 px. main.cpp seeds the taskbar with this value at
+    // boot. Live re-init on theme cycle is deferred —
+    // changing taskbar height mid-session would shift the
+    // console anchor and the maximize reserve in ways the
+    // current chrome can't unwind without a re-compose
+    // pass.
+    u32 taskbar_height;
+
+    // Title-bar control button width in pixels (the close /
+    // maximize / minimize trio). Height is always
+    // `title_bar_height - 2 * btn_pad` so the buttons fit
+    // inside the gradient strip vertically; width is
+    // independent so the Duet family can ship the prototype's
+    // 46-px-wide chrome trio. 0 = "derive from height" (square
+    // buttons sized off `title_bar_height`), the historical
+    // pre-spec behaviour.
+    u32 title_button_width;
+
+    // Title-bar text scale factor for `FramebufferDrawStringScaled`
+    // (1..8). 0 collapses to 1 (compact bitmap). Duet family
+    // ships 2 so the larger 30-px title bar carries a readable
+    // 16-px title; compact themes stay at 1 (8-px). Subtitle +
+    // separator pick this up too so the layout scales as a unit.
+    u32 title_text_scale;
+
+    // Which font path the chrome should attempt for title / subtitle
+    // text. `Bitmap8x8` always uses the existing 8×8 ROM font (and
+    // its integer-scaled variant via title_text_scale). `Ttf` asks
+    // the chrome paint path to dispatch through the TTF rasterizer
+    // — which only succeeds if a font has been registered via
+    // `TtfChromeFontSet`; otherwise it falls back to the bitmap
+    // path automatically. Themes opt in independently so a future
+    // font asset can light up Duet without changing Classic.
+    enum class FontKind : u8
+    {
+        Bitmap8x8 = 0,
+        Ttf = 1,
+    };
+    FontKind font_kind;
 };
 
 /// Read-only snapshot of the active theme. Valid for as long as
