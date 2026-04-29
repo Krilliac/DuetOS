@@ -34,7 +34,17 @@ Headline gaps:
 
 ### Win32 / NT subsystem (~470 NT facades remaining of 506 total)
 
-- **NtCreateProcess / NtCreateUserProcess** — section-from-file based spawn (CreateProcessA/W now real via SYS_PROCESS_SPAWN; NT layer still pending ProcessParameters parsing)
+- ~~**NtCreateUserProcess**~~ — DONE (2026-04-29): ntdll's
+  NtCreateUserProcess now parses RTL_USER_PROCESS_PARAMETERS,
+  translates the Windows ImagePathName UNICODE_STRING into the
+  kernel's `/disk/N/...` form (drive letter + extended-length
+  prefix stripping inline; matches the kernel32 NormalizePathW
+  translator), and issues SYS_PROCESS_SPAWN. ThreadHandle = -1
+  (caller does NtOpenThread(pid) for a real handle). Sub-GAPs:
+  CommandLine ignored; ProcessFlags / ThreadFlags ignored;
+  CreateInfo / AttributeList ignored. Old NtCreateProcess /
+  NtCreateProcessEx remain NotImpl (section-from-file based —
+  separate slice).
 - **LPC / ALPC family** — IPC backbone (NtCreatePort / NtConnectPort / NtRequestPort / NtReplyPort)
 - **ETW / NtTrace*** — tracing infrastructure
 - **KTM transactions** — NtCreateTransaction / NtCommitTransaction
@@ -633,9 +643,12 @@ have landed (see §10).
 
 ### Next slices (high-leverage, achievable)
 
-- **NtCreateProcess / CreateProcessW** (~400 LOC): subprocess
-  spawn from PEs. Needs section-from-file (currently anonymous-only)
-  OR a path-taking fast path
+- ~~**NtCreateUserProcess**~~ — DONE 2026-04-29 (RTL_USER_PROCESS_PARAMETERS
+  parsing in ntdll, routes to existing SYS_PROCESS_SPAWN path-taking
+  fast path)
+- **NtCreateProcess / NtCreateProcessEx** (~400 LOC): legacy
+  section-from-file spawn. Section-from-file path doesn't exist
+  yet; PE-from-section is the bigger lift
 - ~~**NtNotifyChangeDirectoryFile**: wire to inotify~~ — DONE (`4996457`)
 - **Real signal-handler trampoline + sigreturn** (~500 LOC):
   completes signal delivery — currently default-action only

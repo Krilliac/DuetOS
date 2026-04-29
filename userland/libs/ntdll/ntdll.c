@@ -3173,24 +3173,158 @@ __declspec(dllexport) NTSTATUS ZwCreateProcessEx(HANDLE* ProcessHandle, ULONG De
                              DebugPort, ExceptionPort, JobMemberLevel);
 }
 
+/* RTL_USER_PROCESS_PARAMETERS — Windows process-parameters block.
+ * Only the fields v0 actually consumes are named; the rest is
+ * skipped via byte-offset reads so we don't need the full layout
+ * here. ImagePathName is the path to the .exe we're spawning;
+ * everything else (CommandLine, environment, current directory,
+ * console handles) is accepted but unused — sub-GAP.
+ *
+ * UNICODE_STRING layout on x64:
+ *   +0x00  Length        (USHORT, byte count, NOT including NUL)
+ *   +0x02  MaximumLength (USHORT)
+ *   +0x04  Padding
+ *   +0x08  Buffer        (PWSTR — 8 bytes)
+ *
+ * Inside RTL_USER_PROCESS_PARAMETERS, ImagePathName lives at +0x60.
+ * Independently verified against ntdll.dll on Windows 10 / 11 25H2.
+ */
+#define NTDLL_PP_OFFSET_IMAGE_PATH 0x60
+
+/* Translate a Windows-shaped image path (UNICODE_STRING.Buffer +
+ * Length-in-bytes) into the kernel's "/disk/N/..." form. Mirrors
+ * the kernel32 NormalizePathW translator inline so ntdll stays
+ * freestanding (kernel32 isn't guaranteed loaded yet at the time
+ * a PE may issue NtCreateUserProcess).
+ *
+ * Strips up to one "\??\" or "\\?\" extended-length prefix, maps
+ * a drive letter ("C:") to "/disk/N" (C → /disk/0, D → /disk/1,
+ * ...), and converts "\" to "/" for the rest. Non-ASCII codepoints
+ * become '?'. Returns 1 on success, 0 on capacity overrun / no
+ * recognisable shape. */
+static int ntdll_translate_image_path(const wchar_t16* buf, unsigned chars, char* out, unsigned cap)
+{
+    if (out == (char*)0 || cap == 0)
+        return 0;
+    out[0] = '\0';
+    if (buf == (wchar_t16*)0 || chars == 0)
+        return 0;
+
+    unsigned ci = 0;
+    /* "\??\" or "\\?\" extended-length prefix — strip once. */
+    if (chars >= 4)
+    {
+        unsigned short a = buf[0];
+        unsigned short b = buf[1];
+        unsigned short c = buf[2];
+        unsigned short d = buf[3];
+        if ((a == L'\\' || a == L'/') && (b == L'\\' || b == L'?' || b == L'/') && (c == L'?' || c == L'\\') &&
+            (d == L'\\' || d == L'/'))
+        {
+            ci = 4;
+        }
+    }
+
+    unsigned oi = 0;
+    /* Drive-letter prefix? */
+    if (ci + 1 < chars)
+    {
+        unsigned short letter = buf[ci];
+        unsigned short colon = buf[ci + 1];
+        if (((letter >= L'A' && letter <= L'Z') || (letter >= L'a' && letter <= L'z')) && colon == L':')
+        {
+            char upper = (letter >= L'a' && letter <= L'z') ? (char)(letter - L'a' + L'A') : (char)letter;
+            int idx = (upper < 'C') ? 0 : (upper - 'C');
+            const char* prefix = "/disk/";
+            for (unsigned p = 0; prefix[p] != '\0'; ++p)
+            {
+                if (oi + 1 >= cap)
+                    return 0;
+                out[oi++] = prefix[p];
+            }
+            if (idx >= 10)
+            {
+                if (oi + 1 >= cap)
+                    return 0;
+                out[oi++] = (char)('0' + (idx / 10));
+            }
+            if (oi + 1 >= cap)
+                return 0;
+            out[oi++] = (char)('0' + (idx % 10));
+            ci += 2;
+        }
+    }
+
+    while (ci < chars)
+    {
+        unsigned short w = buf[ci++];
+        char c;
+        if (w == L'\\')
+            c = '/';
+        else if (w <= 0x7F)
+            c = (char)w;
+        else
+            c = '?';
+        if (oi + 1 >= cap)
+            return 0;
+        out[oi++] = c;
+    }
+    out[oi] = '\0';
+    return 1;
+}
+
+/* NtCreateUserProcess — backed by SYS_PROCESS_SPAWN = 158.
+ *
+ * Pulls ImagePathName out of RTL_USER_PROCESS_PARAMETERS, translates
+ * the Windows-shaped path to the kernel's "/disk/N/..." form, and
+ * issues SYS_PROCESS_SPAWN. Writes the new pid (cast to HANDLE) to
+ * *ProcessHandle. ThreadHandle is set to -1 — the new thread's tid
+ * is the same as its pid in v0 (single-thread-per-process at spawn),
+ * so callers wanting a real thread handle can NtOpenThread the pid.
+ *
+ * Sub-GAPs (accepted but unused): CommandLine (kernel doesn't pass
+ * arguments yet); ProcessFlags / ThreadFlags (no PROCESS_CREATE_*
+ * semantics); CreateInfo / AttributeList (PS_ATTRIBUTE list is
+ * Windows-internal); object attributes (no NT object-namespace yet).
+ */
 __declspec(dllexport) NTSTATUS NtCreateUserProcess(HANDLE* ProcessHandle, HANDLE* ThreadHandle,
                                                    ULONG ProcessDesiredAccess, ULONG ThreadDesiredAccess,
                                                    void* ProcessObjectAttributes, void* ThreadObjectAttributes,
                                                    ULONG ProcessFlags, ULONG ThreadFlags, void* ProcessParameters,
                                                    void* CreateInfo, void* AttributeList)
 {
-    (void)ProcessHandle;
-    (void)ThreadHandle;
     (void)ProcessDesiredAccess;
     (void)ThreadDesiredAccess;
     (void)ProcessObjectAttributes;
     (void)ThreadObjectAttributes;
     (void)ProcessFlags;
     (void)ThreadFlags;
-    (void)ProcessParameters;
     (void)CreateInfo;
     (void)AttributeList;
-    return (NTSTATUS)0xC0000002;
+    if (ProcessHandle == (HANDLE*)0 || ThreadHandle == (HANDLE*)0 || ProcessParameters == (void*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+
+    const unsigned char* pp = (const unsigned char*)ProcessParameters;
+    const unsigned char* image = pp + NTDLL_PP_OFFSET_IMAGE_PATH;
+    const unsigned short length_bytes = *(const unsigned short*)(image + 0);
+    const wchar_t16* buffer = *(const wchar_t16* const*)(image + 8);
+    if (buffer == (wchar_t16*)0 || length_bytes == 0)
+        return NTSTATUS_INVALID_PARAMETER;
+
+    char path[128];
+    const unsigned chars = (unsigned)(length_bytes / 2);
+    if (!ntdll_translate_image_path(buffer, chars, path, sizeof(path)))
+        return NTSTATUS_INVALID_PARAMETER;
+
+    long long pid;
+    /* SYS_PROCESS_SPAWN = 158: rdi = const char* path, rsi = u64 flags. */
+    __asm__ volatile("int $0x80" : "=a"(pid) : "a"((long long)158), "D"((long long)path), "S"((long long)0) : "memory");
+    if (pid < 0)
+        return (NTSTATUS)0xC0000022; /* STATUS_ACCESS_DENIED — most likely cap miss */
+
+    *ProcessHandle = (HANDLE)pid;
+    *ThreadHandle = (HANDLE)-1; /* sub-GAP: caller can NtOpenThread(pid) for a real handle */
+    return NTSTATUS_SUCCESS;
 }
 
 __declspec(dllexport) NTSTATUS ZwCreateUserProcess(HANDLE* ProcessHandle, HANDLE* ThreadHandle,
