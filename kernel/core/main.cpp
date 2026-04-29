@@ -1816,6 +1816,55 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 SerialWrite("[ui] alt-tab\n");
                 continue;
             }
+            // Ctrl+Alt+Arrow window snap shortcuts. Mirror Win10's
+            // Win+Arrow tiling: Left/Right snap to halves, Up
+            // maximizes, Down restores (or minimizes if not max).
+            // Ctrl+Alt is the standard "system" modifier in this
+            // session — Win key isn't tracked separately.
+            if (ctrl && alt &&
+                (ev.code == duetos::drivers::input::kKeyArrowLeft ||
+                 ev.code == duetos::drivers::input::kKeyArrowRight || ev.code == duetos::drivers::input::kKeyArrowUp ||
+                 ev.code == duetos::drivers::input::kKeyArrowDown))
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                if (active != duetos::drivers::video::kWindowInvalid)
+                {
+                    if (ev.code == duetos::drivers::input::kKeyArrowLeft)
+                    {
+                        duetos::drivers::video::WindowSnapLeft(active);
+                        SerialWrite("[ui] snap-left\n");
+                    }
+                    else if (ev.code == duetos::drivers::input::kKeyArrowRight)
+                    {
+                        duetos::drivers::video::WindowSnapRight(active);
+                        SerialWrite("[ui] snap-right\n");
+                    }
+                    else if (ev.code == duetos::drivers::input::kKeyArrowUp)
+                    {
+                        duetos::drivers::video::WindowMaximize(active);
+                        SerialWrite("[ui] maximize\n");
+                    }
+                    else
+                    {
+                        if (duetos::drivers::video::WindowIsMaximized(active))
+                        {
+                            duetos::drivers::video::WindowRestore(active);
+                            SerialWrite("[ui] restore\n");
+                        }
+                        else
+                        {
+                            duetos::drivers::video::WindowMinimize(active);
+                            SerialWrite("[ui] minimize\n");
+                        }
+                    }
+                }
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+                duetos::drivers::video::CompositorUnlock();
+                continue;
+            }
             if (alt && ev.code == kKeyF4)
             {
                 duetos::drivers::video::CompositorLock();

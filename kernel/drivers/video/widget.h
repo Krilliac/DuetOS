@@ -220,6 +220,14 @@ void WindowRestore(WindowHandle h);
 /// invalid handles or windows that have never been maximized.
 bool WindowIsMaximized(WindowHandle h);
 
+/// Snap `h` to the left half of the framebuffer minus the
+/// taskbar reserve at the bottom. Clears the maximized flag.
+/// No-op for invalid handles. Mirrors Win10's Win+Left tile.
+void WindowSnapLeft(WindowHandle h);
+
+/// Snap `h` to the right half. Mirrors Win10's Win+Right.
+void WindowSnapRight(WindowHandle h);
+
 /// Mark `h` closed: the window stops drawing, stops participating
 /// in hit-testing, and its widgets (buttons with owner=h) also
 /// disappear. The handle stays valid — no re-use — but the slot

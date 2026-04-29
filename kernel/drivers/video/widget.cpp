@@ -916,6 +916,61 @@ bool WindowIsMaximized(WindowHandle h)
     return WindowValid(h) && g_windows[h].maximized;
 }
 
+namespace
+{
+
+// Compute the visible work area (framebuffer minus taskbar)
+// Win-key snaps target. Single source of truth for the half-
+// snap geometry — same calculation `WindowMaximize` uses for
+// its full-screen reserve. A 0 taskbar height (no taskbar)
+// falls back to the historical 28-px margin so a no-taskbar
+// boot mode still leaves a sane safety strip.
+void WorkArea(u32* x_out, u32* y_out, u32* w_out, u32* h_out)
+{
+    const auto info = FramebufferGet();
+    const u32 reserve = TaskbarHeight();
+    const u32 reserved = (reserve != 0) ? reserve : 28u;
+    if (x_out)
+        *x_out = 0;
+    if (y_out)
+        *y_out = 0;
+    if (w_out)
+        *w_out = info.width;
+    if (h_out)
+        *h_out = (info.height > reserved) ? info.height - reserved : info.height;
+}
+
+} // namespace
+
+void WindowSnapLeft(WindowHandle h)
+{
+    if (!WindowValid(h))
+        return;
+    u32 wa_x = 0, wa_y = 0, wa_w = 0, wa_h = 0;
+    WorkArea(&wa_x, &wa_y, &wa_w, &wa_h);
+    auto& c = g_windows[h].chrome;
+    c.x = wa_x;
+    c.y = wa_y;
+    c.w = wa_w / 2u;
+    c.h = wa_h;
+    g_windows[h].maximized = false;
+}
+
+void WindowSnapRight(WindowHandle h)
+{
+    if (!WindowValid(h))
+        return;
+    u32 wa_x = 0, wa_y = 0, wa_w = 0, wa_h = 0;
+    WorkArea(&wa_x, &wa_y, &wa_w, &wa_h);
+    auto& c = g_windows[h].chrome;
+    const u32 half = wa_w / 2u;
+    c.x = wa_x + half;
+    c.y = wa_y;
+    c.w = wa_w - half; // pick up the odd column on odd-width framebuffers
+    c.h = wa_h;
+    g_windows[h].maximized = false;
+}
+
 void WindowSetPinned(WindowHandle h, bool pinned)
 {
     if (!WindowValid(h))
