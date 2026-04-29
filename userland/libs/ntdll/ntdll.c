@@ -3885,8 +3885,11 @@ __declspec(dllexport) NTSTATUS ZwEnumerateValueKey(HANDLE KeyHandle, ULONG Index
     return NtEnumerateValueKey(KeyHandle, Index, KeyValueInformationClass, KeyValueInformation, Length, ResultLength);
 }
 
-/* NtQueryKey — KeyFullInformation only. SubKeys = 0 (no
- * mutable key tree); Values = static + sidecar count. */
+/* NtQueryKey — KeyFullInformation only. Kernel-side SYS_REGISTRY
+ * op=8 returns 5 u64 fields: SubKeys / Values / MaxNameLen /
+ * MaxValueNameLen / MaxValueDataLen (40 bytes total). The thunk
+ * maps these onto KEY_FULL_INFORMATION's offsets. ClassOffset /
+ * ClassLength / MaxClassLen stay zero — v0 has no class strings. */
 __declspec(dllexport) NTSTATUS NtQueryKey(HANDLE KeyHandle, ULONG KeyInformationClass, void* KeyInformation,
                                           ULONG Length, ULONG* ResultLength)
 {
@@ -3899,21 +3902,32 @@ __declspec(dllexport) NTSTATUS NtQueryKey(HANDLE KeyHandle, ULONG KeyInformation
         *ResultLength = total;
     if (Length < total)
         return (NTSTATUS)0xC0000023;
-    unsigned long long counts[2] = {0, 0};
+    unsigned long long fields[5] = {0, 0, 0, 0, 0};
     long long status;
     __asm__ volatile("mov %3, %%r10\n\t"
                      "int $0x80"
                      : "=a"(status)
-                     : "a"((long long)130), "D"((long long)8), "S"((long long)KeyHandle), "r"((long long)16),
-                       "d"((long long)counts)
+                     : "a"((long long)130), "D"((long long)8), "S"((long long)KeyHandle), "r"((long long)40),
+                       "d"((long long)fields)
                      : "r10", "memory");
     if (status != 0)
         return (NTSTATUS)status;
     unsigned char* out = (unsigned char*)KeyInformation;
     for (unsigned i = 0; i < total; ++i)
         out[i] = 0;
-    *(unsigned*)(out + 20) = (unsigned)counts[0];
-    *(unsigned*)(out + 32) = (unsigned)counts[1];
+    /* KEY_FULL_INFORMATION fields:
+     *   [20..24) SubKeys
+     *   [24..28) MaxNameLen      (chars)
+     *   [28..32) MaxClassLen     (chars, always 0 in v0)
+     *   [32..36) Values
+     *   [36..40) MaxValueNameLen (chars)
+     *   [40..44) MaxValueDataLen (bytes)
+     */
+    *(unsigned*)(out + 20) = (unsigned)fields[0];
+    *(unsigned*)(out + 24) = (unsigned)fields[2];
+    *(unsigned*)(out + 32) = (unsigned)fields[1];
+    *(unsigned*)(out + 36) = (unsigned)fields[3];
+    *(unsigned*)(out + 40) = (unsigned)fields[4];
     return NTSTATUS_SUCCESS;
 }
 

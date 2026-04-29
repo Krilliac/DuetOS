@@ -777,9 +777,75 @@ u32 CountSubkeys(const RegKey* key)
     return n;
 }
 
-// Report subkey_count (children walked from the static tree) and
-// value_count (static + matching sidecar entries). Both packed
-// into a 16-byte u64[2] in [buf_va, buf_va+16).
+u32 StrLenAscii(const char* s)
+{
+    u32 n = 0;
+    while (s[n] != '\0')
+        ++n;
+    return n;
+}
+
+// Longest direct-child name (chars) under `key` in the static
+// tree. Backs KEY_FULL_INFORMATION.MaxNameLen so callers can
+// size their RegEnumKey buffers without iterating first.
+u32 MaxSubkeyNameChars(const RegKey* key)
+{
+    u32 best = 0;
+    for (u64 i = 0; i < kRegKeyCount; ++i)
+    {
+        if (kRegKeys[i].root != key->root)
+            continue;
+        const char* child = nullptr;
+        if (!IsDirectChild(key->path, kRegKeys[i].path, &child))
+            continue;
+        const u32 len = StrLenAscii(child);
+        if (len > best)
+            best = len;
+    }
+    return best;
+}
+
+// Longest value-name + value-data lengths across both the static
+// table and any matching sidecar entries. Backs
+// KEY_FULL_INFORMATION.MaxValueNameLen / MaxValueDataLen.
+void MaxValueLens(const RegKey* key, u32* max_name_chars, u32* max_data_bytes)
+{
+    u32 best_name = 0;
+    u32 best_data = 0;
+    for (u32 i = 0; i < key->value_count; ++i)
+    {
+        const u32 nl = StrLenAscii(key->values[i].name);
+        if (nl > best_name)
+            best_name = nl;
+        if (key->values[i].size > best_data)
+            best_data = key->values[i].size;
+    }
+    for (u32 i = 0; i < kSidecarValueCap; ++i)
+    {
+        if (!g_sidecar[i].in_use || g_sidecar[i].key != key)
+            continue;
+        const u32 nl = StrLenAscii(g_sidecar[i].name);
+        if (nl > best_name)
+            best_name = nl;
+        if (g_sidecar[i].size > best_data)
+            best_data = g_sidecar[i].size;
+    }
+    *max_name_chars = best_name;
+    *max_data_bytes = best_data;
+}
+
+// Report subkey_count + value_count + max-name / max-value
+// lengths. Output layout (40 bytes when buf_cap permits, else
+// truncated to 16 for backwards-compatibility):
+//
+//   [0..8)   subkey_count (u64) — direct children in static tree
+//   [8..16)  value_count  (u64) — static + matching sidecar
+//   [16..24) max_subkey_name_chars (u64)
+//   [24..32) max_value_name_chars  (u64) — across static + sidecar
+//   [32..40) max_value_data_bytes  (u64) — across static + sidecar
+//
+// User-side ntdll thunk maps these onto KEY_FULL_INFORMATION's
+// SubKeys / Values / MaxNameLen / MaxValueNameLen / MaxValueDataLen.
 i64 DoQueryKey(arch::TrapFrame* frame)
 {
     core::Process* proc = core::CurrentProcess();
@@ -799,10 +865,19 @@ i64 DoQueryKey(arch::TrapFrame* frame)
         if (g_sidecar[i].in_use && g_sidecar[i].key == key)
             ++sidecar_count;
     }
-    u64 packed[2];
+    u32 max_value_name_chars = 0;
+    u32 max_value_data_bytes = 0;
+    MaxValueLens(key, &max_value_name_chars, &max_value_data_bytes);
+
+    u64 packed[5];
     packed[0] = static_cast<u64>(CountSubkeys(key));
     packed[1] = static_cast<u64>(key->value_count + sidecar_count);
-    if (!duetos::mm::CopyToUser(reinterpret_cast<void*>(buf_va), packed, sizeof(packed)))
+    packed[2] = static_cast<u64>(MaxSubkeyNameChars(key));
+    packed[3] = static_cast<u64>(max_value_name_chars);
+    packed[4] = static_cast<u64>(max_value_data_bytes);
+
+    const u64 to_copy = (buf_cap >= sizeof(packed)) ? sizeof(packed) : 16;
+    if (!duetos::mm::CopyToUser(reinterpret_cast<void*>(buf_va), packed, to_copy))
         return kNtStatusInvalidParameter;
     return kNtStatusSuccess;
 }
@@ -1032,7 +1107,20 @@ void RegistrySelfTest()
     if (IsDirectChild("Software", "Software", &child))
         fail("IsDirectChild: same path incorrectly flagged as direct child");
 
-    arch::SerialWrite("[registry-selftest] PASS (4 terminal + 8 prefix keys, ci-lookup, concat-path, child walker)\n");
+    // Max-name walkers — used by KEY_FULL_INFORMATION.MaxNameLen +
+    // MaxValueNameLen + MaxValueDataLen so callers can size their
+    // RegEnumKey / RegEnumValue buffers without a probe pass.
+    if (MaxSubkeyNameChars(ms_hklm) != 10 /* "Windows NT" */)
+        fail("MaxSubkeyNameChars under HKLM\\Software\\Microsoft should be 10");
+    u32 mn = 0, md = 0;
+    MaxValueLens(hklm, &mn, &md);
+    if (mn != 25 /* "CurrentMajorVersionNumber" */)
+        fail("MaxValueLens name should be 25 for HKLM CurrentVersion");
+    if (md != 13 /* "19041.duetos\\0" / "Professional\\0" */)
+        fail("MaxValueLens data should be 13 for HKLM CurrentVersion");
+
+    arch::SerialWrite("[registry-selftest] PASS (4 terminal + 8 prefix keys, ci-lookup, concat-path, child walker, "
+                      "max-lens)\n");
 }
 
 } // namespace duetos::subsystems::win32::registry
