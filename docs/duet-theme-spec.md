@@ -24,9 +24,10 @@ measured against.
 | Theme-aware cursor | **Yes** |
 | Per-window alpha (real compositor mask, 30-px titlebar, taskbar height/position) | **Deferred** — needs a real compositor / dimensions pass |
 | TTF/OTF rasterizer | **Deferred** — 8×8 bitmap font remains |
-| `FramebufferStrokePath` + partial-arc DuetMark / topo SVG / syscalls SVG wallpaper | **Deferred** — needs path stroker primitive |
+| `FramebufferStrokePath` + partial-arc DuetMark | **Yes** — `FramebufferStrokePath` ships (cubic-Bezier flattener, thick-line stroker, wallpaper ribbon consumer); partial-arc DuetMark already ships via `FramebufferStrokeArc`. Topo / syscalls SVG wallpapers still deferred (needs SVG loader) |
+| Window keyboard tiling (`Ctrl+Alt+Arrow` snap/maximize, `Ctrl+Alt+Shift+Arrow` resize, `Ctrl+Alt+1..9` direct theme select) | **Yes** |
 | Userland shell + TOML reader + `~/.config/duet/shell.toml` | **Deferred** — needs userland process |
-| procfs entries (`/proc/cpuhist`, `/sys/inspect`, `/proc/abi/*`, `/sys/syscalls`, `/proc/boottrace`) | **Deferred** — separate slice each |
+| procfs/sysfs entries (`/proc/boottrace`, `/sys/syscalls`, `/proc/abi/native`, `/proc/abi/win32`, `/proc/cpuhist`) | **Yes** — all five materialise at boot via `Ramfs*Snapshot()` calls. `/sys/inspect/<pid_or_path>` still deferred (needs per-path fanout, not a static buffer) |
 
 ## Personality (short form)
 
@@ -248,9 +249,14 @@ ship yet. Each is its own slice — none are inside this commit.
     menu header.
   - `FramebufferFillRoundRect(x, y, w, h, radius, rgb)` — needed
     for 6-px window corners and pill widgets.
-  - `FramebufferStrokePath(...)` — vector path stroking for the
-    DuetMark arcs and the `duet-arcs` wallpaper. May land as a
-    cubic-Bézier flattener.
+  - ~~`FramebufferStrokePath(...)`~~ — **Yes**. Adaptive de
+    Casteljau cubic-Bézier flattener (depth-cap 8, chord
+    deviation ≤ 1 px) with a thick-line stroker (Bresenham
+    walk, square stamp at each pixel). `PathSegment[]` API
+    with `Move`/`Line`/`Cubic`/`Close` ops. Wallpaper-side
+    consumer: `PaintDuetArcs` traces a single connecting
+    cubic ribbon between the two arcs in the teal/amber
+    midpoint colour.
 - **Font subsystem**
   - TTF/OTF rasterizer (FreeType-style) so Inter and JetBrains
     Mono can render at the prototype's seven sizes. Existing
@@ -267,22 +273,32 @@ ship yet. Each is its own slice — none are inside this commit.
   - `~/.config/duet/shell.toml` reader. Requires a TOML parser
     in userland (or in the shell, with parsing bounded to a
     sub-process).
-- **New procfs / sysfs entries (proposals — wait for greenlight)**
-  - `/proc/cpuhist` — 60-sample ring of per-core utilisation
-    percent, sampled at the scheduler tick. Needed by Task
-    Manager Performance.
-  - `/sys/inspect/<pid_or_path>` — exposes the existing PE
-    parser's section table, import descriptors, and disasm
-    iterator over a fd interface. Needed by Inspect.
-  - `/proc/abi/native` and `/proc/abi/win32` — the syscall and
-    DLL/export tables, already enumerated in-kernel; needs an
-    fd surface.
-  - `/sys/syscalls` — string-table view of the syscall numbers
-    so the Start menu's search bar can resolve `58` or
-    `WIN_CREATE` to the real syscall.
-- **Boot trace**
-  - The kernel already records a boot trace; expose it as
-    `/proc/boottrace` so Task Manager → Startup can read it.
+- **New procfs / sysfs entries** — five of six landed
+  - `/proc/boottrace` — **Yes**. `RamfsBoottraceSnapshot()`
+    routes `core::DumpLogRingTo` into a 16 KiB .bss buffer
+    just before the login gate.
+  - `/sys/syscalls` — **Yes**. `RamfsSyscallsSnapshot()` formats
+    `kSyscallNames[]` as `<dec_nr>  SYS_FOO\n` lines into an
+    8 KiB buffer.
+  - `/proc/abi/native` — **Yes**. Same payload shape as
+    `/sys/syscalls` plus a `#`-prefixed header so consumers
+    that key off path layout (Task Manager → ABI tab) don't
+    have to special-case.
+  - `/proc/abi/win32` — **Yes**. New `Win32ThunksDumpTo(fn)`
+    public API in `subsystems/win32/thunks.h` walks the
+    constexpr `kThunksTable` and emits 4 chunks per row;
+    `RamfsAbiSnapshot()` collects them into a 32 KiB buffer.
+  - `/proc/cpuhist` — **Yes**. 60-sample ring of CPU busy %
+    derived from `sched::SchedStatsRead()` deltas. The ring
+    fills only at calls to `RamfsCpuhistSnapshot()` — a
+    `#`-prefixed header in the file makes the gap explicit;
+    a future slice will hang the snapshot off a 1 Hz timer.
+  - `/sys/inspect/<pid_or_path>` — still **Deferred**. The
+    other five materialise into a static buffer at boot;
+    `inspect` needs per-path / per-pid fanout (the buffer
+    depends on which target you ask about) and that requires
+    a callback node type the rest of the VFS doesn't have
+    yet.
 
 ## Deferred to follow-on slices
 

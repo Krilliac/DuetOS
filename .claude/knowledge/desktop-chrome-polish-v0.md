@@ -3,6 +3,114 @@
 _Type: Observation + Decision._
 _Last updated: 2026-04-29._
 
+## Update 2026-04-29 (StrokePath + window resize + procfs/sysfs surface)
+
+Six more slices closing out almost every remaining row of the
+spec status table. Theme not "chrome polish" anymore in the
+narrow sense — these are the path-stroker primitive + the
+keyboard tiling layer + the procfs/sysfs surface the spec's
+deferred list called out.
+
+1. **`FramebufferStrokePath`** (commit `164eb50`). New
+   primitive in `framebuffer.{h,cpp}` accepting a flat
+   `PathSegment[]` array of `PathOp { Move, Line, Cubic,
+   Close }` ops. Lines walk Bresenham with a `thickness ×
+   thickness` square stamp at each pixel; cubics flatten via
+   adaptive de Casteljau (depth-cap 8, chord-deviation ≤ 1 px
+   squared) and stroke each leaf as a thick line. Two
+   file-local helpers — `StampThick` (clip-to-fb, FillRect)
+   and `StrokeThickLine` (Bresenham-walk + stamp). Cubic
+   uses a midpoint subdivision; chord-distance test uses the
+   2A triangle formula, denominator-aware so degenerate
+   chords don't divide by zero. Wired into the wallpaper:
+   `PaintDuetArcs` now traces a single cubic-Bezier ribbon
+   over the two interlocking rings in the teal/amber
+   midpoint colour, thickness 2.
+
+2. **Window resize hotkeys** (commit `8fb2d4a`).
+   `Ctrl+Alt+Shift+Arrow` grows / shrinks the active window
+   from its bottom-right corner in 32-px steps. Floor at 96
+   px so the chrome stays usable. Tested BEFORE the bare
+   `Ctrl+Alt+Arrow` snap handler — more specific modifier
+   mask wins. Picks `shift` up from
+   `ev.modifiers & kKeyModShift` alongside `ctrl`/`alt`. No
+   new widget API; uses the existing `WindowResizeTo` +
+   `WindowGetBounds`.
+
+3. **`/proc/boottrace`** (commit `1559e27`). New /proc
+   directory in the trusted ramfs tree with one file
+   `boottrace`. Backed by a 16 KiB `.bss` buffer that
+   `RamfsBoottraceSnapshot()` fills by routing
+   `core::DumpLogRingTo` into a local writer. After
+   snapshot, `file_size` is updated and the file is a normal
+   static-bytes ramfs entry — no callback machinery in the
+   rest of the VFS. Snapshot runs at the end of boot, just
+   before the login gate. Sandbox tree intentionally not
+   given /proc — sandbox processes still see only
+   `/welcome.txt`.
+
+4. **`/sys/syscalls`** (commit `43b5971`). Companion to
+   `/proc/boottrace`: a `/sys` directory with one file
+   `syscalls`. Backed by an 8 KiB `.bss` buffer that
+   `RamfsSyscallsSnapshot()` fills with one line per
+   `kSyscallNames` entry, formatted as
+   `<dec_nr>  SYS_FOO\n`. Two file-local helpers —
+   `SyscallsAppend` (NUL-terminated string) and
+   `SyscallsAppendDec` (u64 → ASCII decimal, "0" for zero,
+   no leading zeros, max 24 chars). Both truncate at the
+   buffer end without a separate error path.
+
+5. **`/proc/abi/native` + `/proc/abi/win32`** (commit
+   `cb2625a`). New `/proc/abi` directory with two files:
+   - `native`: header line plus `<dec_nr>  SYS_FOO\n` per
+     `kSyscallNames` entry. Same payload shape as
+     `/sys/syscalls` plus a `#`-prefixed header so consumers
+     that key off path layout (Task Manager → ABI tab)
+     don't have to special-case.
+   - `win32`: header line plus every (DLL, function) the
+     Win32 thunks table knows, formatted as `<dll>!<func>\n`
+     in table order.
+   Win32 dump is sourced from a new
+   `Win32ThunksDumpTo(ThunksDumpFn)` public API in
+   `subsystems/win32/thunks.h`: walks `kThunksTable` and
+   emits 4 chunks per row (dll, "!", func, "\n"). The
+   constexpr table is the single source of truth so the
+   dump can never drift. Generic `AppendInto` /
+   `AppendDecInto` helpers parameterized over target buffer
+   so each ABI dump's cursor stays independent.
+
+6. **`/proc/cpuhist`** (commit `c4a6e97`). 60-sample ring of
+   `CpuhistSample {t_total, t_idle, busy_percent}`. Each
+   call to `RamfsCpuhistSnapshot()` reads
+   `sched::SchedStatsRead()` and computes busy% as
+   `1 - (delta_idle / delta_total)` against the previous
+   sample's cumulative ticks (first sample is 0 by
+   construction since it has no predecessor). Then
+   re-renders the buffer from the ring oldest-first, with
+   a `#`-prefixed header that calls out the gap: no
+   timer-driven sampler is wired up yet, so the ring fills
+   only at explicit `RamfsCpuhistSnapshot()` calls. Future
+   slice can hang it off a 1 Hz timer thread.
+
+`main.cpp`'s pre-login snapshot block now runs all four
+snapshots in sequence: `RamfsBoottraceSnapshot`,
+`RamfsSyscallsSnapshot`, `RamfsAbiSnapshot`,
+`RamfsCpuhistSnapshot`. All five materialised files behave
+like normal static-bytes ramfs entries from that point on.
+
+Spec status table now flips:
+- `FramebufferStrokePath` row → **Yes** (with cubic flattener +
+  wallpaper consumer; topo / syscalls SVG wallpapers still
+  deferred since they need an SVG loader, not a stroker).
+- procfs row → **Yes** for all five files; only
+  `/sys/inspect/<pid_or_path>` remains deferred (needs
+  per-path fanout, not a static buffer — would require a
+  callback node type the rest of the VFS doesn't have yet).
+
+The remaining "No"s in the spec table are the structural
+ones: real per-window alpha compositor, TTF rasterizer,
+userland shell. Each is a multi-slice project of its own.
+
 ## Update 2026-04-29 (window snap + direct theme select hotkeys)
 
 Two more chrome / UX slices:
