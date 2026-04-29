@@ -378,9 +378,48 @@ constinit RamfsNode k_trusted_bin_dir = {
     .file_size = 0,
 };
 
+// ------- /proc/boottrace -------
+//
+// Snapshot of the klog ring at the moment `RamfsBoottraceSnapshot`
+// is invoked. Buffer lives in .bss (mutable, zero-initialised).
+// `k_proc_boottrace.file_bytes` points at it from boot; the
+// `file_size` field starts at 0 and is updated when the snapshot
+// runs. After that, /proc/boottrace reads the captured bytes via
+// the existing static-file readers — no callback machinery
+// needed in the rest of the VFS.
+//
+// 16 KiB caps the trace at roughly the klog ring's serialised
+// size; the snapshot truncates if the ring formats larger than
+// that. Plenty for a v0 boot with ~512 ring slots.
+constexpr u32 kBoottraceBufferBytes = 16 * 1024;
+u8 g_boottrace_buffer[kBoottraceBufferBytes] = {};
+u64 g_boottrace_cursor = 0;
+
+constinit RamfsNode k_proc_boottrace = {
+    .name = "boottrace",
+    .type = RamfsNodeType::kFile,
+    .children = nullptr,
+    .file_bytes = g_boottrace_buffer,
+    .file_size = 0,
+};
+
+constinit const RamfsNode* const k_proc_children[] = {
+    &k_proc_boottrace,
+    nullptr,
+};
+
+constinit RamfsNode k_proc_dir = {
+    .name = "proc",
+    .type = RamfsNodeType::kDir,
+    .children = k_proc_children,
+    .file_bytes = nullptr,
+    .file_size = 0,
+};
+
 constinit const RamfsNode* const k_trusted_root_children[] = {
     &k_trusted_etc_dir,
     &k_trusted_bin_dir,
+    &k_proc_dir,
     nullptr,
 };
 
@@ -447,6 +486,33 @@ const RamfsNode* RamfsSandboxRoot()
 bool RamfsIsDir(const RamfsNode* n)
 {
     return n != nullptr && n->type == RamfsNodeType::kDir;
+}
+
+namespace
+{
+
+// Append a NUL-terminated chunk to the boottrace buffer.
+// Truncates at the buffer end — no realloc, no error path.
+// Each `chunk` is one of klog's emit fragments (subsystem name,
+// separator, message text, newline).
+void BoottraceAppend(const char* chunk)
+{
+    if (chunk == nullptr)
+        return;
+    while (*chunk != '\0' && g_boottrace_cursor < kBoottraceBufferBytes)
+    {
+        g_boottrace_buffer[g_boottrace_cursor++] = static_cast<u8>(*chunk++);
+    }
+}
+
+} // namespace
+
+void RamfsBoottraceSnapshot()
+{
+    g_boottrace_cursor = 0;
+    core::DumpLogRingTo(&BoottraceAppend);
+    k_proc_boottrace.file_size = g_boottrace_cursor;
+    core::LogWithValue(core::LogLevel::Info, "fs/ramfs", "boottrace snapshot bytes", g_boottrace_cursor);
 }
 
 } // namespace duetos::fs

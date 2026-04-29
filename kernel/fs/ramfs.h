@@ -75,4 +75,16 @@ const RamfsNode* RamfsSandboxRoot();
 /// sentinel check used by the VFS walker.
 bool RamfsIsDir(const RamfsNode* n);
 
+/// Capture the current klog ring into the static `/proc/boottrace`
+/// buffer. After this returns, `/proc/boottrace` reads the
+/// captured bytes via the same path as any other ramfs file —
+/// no callback machinery needed in the rest of the VFS.
+///
+/// Idempotent: each call overwrites the previous snapshot. Buffer
+/// is 16 KiB; output truncates if the formatted log is larger.
+/// Intended call site: end of boot, just before the login gate
+/// or shell prompt, so the trace captures everything up to
+/// "system ready".
+void RamfsBoottraceSnapshot();
+
 } // namespace duetos::fs
