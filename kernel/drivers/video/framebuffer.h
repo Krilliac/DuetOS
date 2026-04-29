@@ -361,4 +361,43 @@ using FramebufferPresentFn = void (*)();
 void FramebufferSetPresentHook(FramebufferPresentFn fn);
 void FramebufferPresent();
 
+/// Begin an offscreen compose pass. While compose is active every
+/// pixel-write primitive in this header (`FramebufferPutPixel`,
+/// `FillRect`, `Blit`, `FillRectAlpha`, `FillRectGradient` and
+/// every primitive that lowers onto them) targets a shadow buffer in
+/// normal RAM instead of the live MMIO framebuffer. Reads inside
+/// `FillRectAlpha` likewise read the shadow, so per-pixel
+/// `src-over` blending finally composites against whatever was
+/// painted earlier in the same compose pass — which is what the
+/// "real compositor" calls in `widget.cpp::DesktopCompose` need to
+/// do true per-window alpha instead of the post-paint black overlay
+/// dim that v0 ships.
+///
+/// Lazy-allocates the shadow buffer (4 bytes per pixel,
+/// tightly-packed pitch = `width * 4`) on first call. If the
+/// physical allocator can't satisfy the request, logs the failure
+/// to COM1 and stays in direct-to-MMIO mode — every primitive then
+/// behaves exactly as before this change. `FramebufferComposeActive`
+/// reports the resolved state.
+///
+/// Idempotent: a second `BeginCompose` without a matching
+/// `EndCompose` is a no-op. No-op if `!Available()`.
+void FramebufferBeginCompose();
+
+/// End the offscreen compose pass started by `FramebufferBeginCompose`.
+/// Copies the shadow buffer to the live framebuffer row by row
+/// (handling the live framebuffer's pitch padding) so the painted
+/// frame appears on screen. Does NOT call `FramebufferPresent` —
+/// callers that want the virtio-gpu flush hook to fire issue a
+/// `FramebufferPresent()` call after this returns. No-op if compose
+/// is not active.
+void FramebufferEndCompose();
+
+/// True between matched `BeginCompose` / `EndCompose` calls AND the
+/// shadow buffer is live (i.e. the allocator succeeded). False
+/// otherwise — including the "compose was requested but the
+/// allocator failed and we silently fell back to direct mode"
+/// case, which is observable to higher layers.
+bool FramebufferComposeActive();
+
 } // namespace duetos::drivers::video

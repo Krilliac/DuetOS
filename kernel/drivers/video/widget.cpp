@@ -1582,6 +1582,14 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
     // is still a sensible "behind the chrome" fallback.
     g_compose_desktop_rgb = desktop_rgb;
 
+    // Redirect this whole pass into the offscreen shadow surface so
+    // alpha-blend primitives composite against the in-progress frame
+    // (slice 1 of the rasterizer / compositor / shell plan). If the
+    // shadow allocator is unavailable, BeginCompose silently leaves
+    // the writes targeting the live framebuffer — the rest of the
+    // function is unchanged either way.
+    FramebufferBeginCompose();
+
     if (desktop_rgb == 0)
     {
         FramebufferClear(0);
@@ -1637,6 +1645,10 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
             FramebufferFillRect(g_caret.x, g_caret.y, g_caret.w, g_caret.h, 0x00000000);
         }
     }
+    // Flush the shadow surface to the live framebuffer (no-op if
+    // BeginCompose fell back to direct mode).
+    FramebufferEndCompose();
+
     // Present the freshly-composed frame. For in-place framebuffers
     // (firmware handoff, Bochs VBE) this is a no-op. For
     // virtio-gpu-backed framebuffers the hook runs

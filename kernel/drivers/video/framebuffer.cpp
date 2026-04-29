@@ -1,7 +1,9 @@
 #include "drivers/video/framebuffer.h"
 
 #include "arch/x86_64/serial.h"
+#include "mm/frame_allocator.h"
 #include "mm/multiboot2.h"
+#include "mm/page.h"
 #include "mm/paging.h"
 #include "drivers/video/font8x8.h"
 
@@ -20,6 +22,37 @@ using mm::MultibootTagHeader;
 constinit bool g_available = false;
 constinit bool g_init_called = false;
 constinit FramebufferInfo g_info{};
+
+// Offscreen shadow surface — see `FramebufferBeginCompose`. Sized to
+// the live framebuffer (`g_info.width * g_info.height * 4` bytes,
+// tightly packed) and allocated lazily from the physical frame
+// allocator the first time compose is requested. Pitch is always
+// `g_info.width * 4` so the inner loop's row stride is a single
+// multiplication; the live framebuffer's pitch padding is handled
+// only at the End-of-compose memcpy.
+constinit void* g_shadow_base = nullptr;
+constinit u32 g_shadow_pitch = 0;
+constinit bool g_compose_active = false;
+
+// Single source of truth for "where do pixel writes go". Called by
+// every primitive's inner loop; the cost is one dependent load +
+// branch per primitive call (NOT per pixel — primitives hoist the
+// result out of the loop). Returning by value avoids any aliasing
+// concerns the compiler might otherwise have to defend against.
+struct WriteTarget
+{
+    u8* base;
+    u32 pitch;
+};
+
+inline WriteTarget GetWriteTarget()
+{
+    if (g_compose_active && g_shadow_base != nullptr)
+    {
+        return {reinterpret_cast<u8*>(g_shadow_base), g_shadow_pitch};
+    }
+    return {reinterpret_cast<u8*>(g_info.virt), g_info.pitch};
+}
 
 // Walk the Multiboot2 tag list for tag 8. Returns a pointer into the
 // live info struct (no copy) so fields can be read directly, or
@@ -229,6 +262,64 @@ void FramebufferPresent()
         g_present_hook();
 }
 
+void FramebufferBeginCompose()
+{
+    if (!g_available || g_compose_active)
+        return;
+
+    if (g_shadow_base == nullptr)
+    {
+        // Tightly packed: width * 4 bytes per row, no padding.
+        const u64 bytes = static_cast<u64>(g_info.width) * 4ULL * g_info.height;
+        const u64 frames = (bytes + (mm::kPageSize - 1ULL)) >> mm::kPageSizeLog2;
+        const auto phys = mm::AllocateContiguousFrames(frames);
+        if (phys == mm::kNullFrame)
+        {
+            // Allocator exhausted — fall back to direct-to-MMIO mode.
+            // `g_compose_active` stays false so `GetWriteTarget` keeps
+            // pointing at the live framebuffer.
+            SerialWrite("[video/fb] shadow alloc failed (frames=");
+            SerialWriteHex(frames);
+            SerialWrite(") — staying direct\n");
+            return;
+        }
+        g_shadow_base = mm::PhysToVirt(phys);
+        g_shadow_pitch = g_info.width * 4U;
+        SerialWrite("[video/fb] shadow online bytes=");
+        SerialWriteHex(bytes);
+        SerialWrite(" virt=");
+        SerialWriteHex(reinterpret_cast<u64>(g_shadow_base));
+        SerialWrite("\n");
+    }
+    g_compose_active = true;
+}
+
+void FramebufferEndCompose()
+{
+    if (!g_compose_active)
+        return;
+    // Flush the shadow surface to the live framebuffer. Pitches
+    // differ in general (live may have padding), so the copy is
+    // row-by-row rather than a single memcpy.
+    auto* src_bytes = reinterpret_cast<const u8*>(g_shadow_base);
+    auto* dst_bytes = reinterpret_cast<u8*>(g_info.virt);
+    for (u32 yi = 0; yi < g_info.height; ++yi)
+    {
+        const auto* src_row = reinterpret_cast<const u32*>(src_bytes + static_cast<u64>(yi) * g_shadow_pitch);
+        auto* dst_row = reinterpret_cast<volatile u32*>(dst_bytes + static_cast<u64>(yi) * g_info.pitch);
+        for (u32 xi = 0; xi < g_info.width; ++xi)
+        {
+            dst_row[xi] = src_row[xi];
+        }
+    }
+    g_compose_active = false;
+}
+
+bool FramebufferComposeActive()
+{
+    return g_compose_active;
+}
+
 FramebufferInfo FramebufferGet()
 {
     return g_info;
@@ -244,8 +335,8 @@ void FramebufferPutPixel(u32 x, u32 y, u32 rgb)
     {
         return;
     }
-    auto* row =
-        reinterpret_cast<volatile u32*>(reinterpret_cast<u8*>(g_info.virt) + static_cast<u64>(y) * g_info.pitch);
+    const WriteTarget wt = GetWriteTarget();
+    auto* row = reinterpret_cast<volatile u32*>(wt.base + static_cast<u64>(y) * wt.pitch);
     row[x] = rgb;
 }
 
@@ -264,10 +355,10 @@ void FramebufferFillRect(u32 x, u32 y, u32 w, u32 h, u32 rgb)
     const u32 x_end = (x + w > g_info.width) ? g_info.width : x + w;
     const u32 y_end = (y + h > g_info.height) ? g_info.height : y + h;
 
-    auto* fb_bytes = reinterpret_cast<u8*>(g_info.virt);
+    const WriteTarget wt = GetWriteTarget();
     for (u32 yi = y; yi < y_end; ++yi)
     {
-        auto* row = reinterpret_cast<volatile u32*>(fb_bytes + static_cast<u64>(yi) * g_info.pitch);
+        auto* row = reinterpret_cast<volatile u32*>(wt.base + static_cast<u64>(yi) * wt.pitch);
         for (u32 xi = x; xi < x_end; ++xi)
         {
             row[xi] = rgb;
@@ -288,10 +379,10 @@ void FramebufferBlit(u32 dst_x, u32 dst_y, const u32* src, u32 src_w, u32 src_h,
     const u32 x_end = (dst_x + src_w > g_info.width) ? g_info.width : dst_x + src_w;
     const u32 y_end = (dst_y + src_h > g_info.height) ? g_info.height : dst_y + src_h;
 
-    auto* fb_bytes = reinterpret_cast<u8*>(g_info.virt);
+    const WriteTarget wt = GetWriteTarget();
     for (u32 yi = dst_y; yi < y_end; ++yi)
     {
-        auto* row = reinterpret_cast<volatile u32*>(fb_bytes + static_cast<u64>(yi) * g_info.pitch);
+        auto* row = reinterpret_cast<volatile u32*>(wt.base + static_cast<u64>(yi) * wt.pitch);
         const u32* src_row = src + static_cast<u64>(yi - dst_y) * src_pitch_px;
         for (u32 xi = dst_x; xi < x_end; ++xi)
         {
@@ -460,10 +551,10 @@ void FramebufferFillRectAlpha(u32 x, u32 y, u32 w, u32 h, u32 argb)
     const u32 x_end = (x + w > g_info.width) ? g_info.width : x + w;
     const u32 y_end = (y + h > g_info.height) ? g_info.height : y + h;
 
-    auto* fb_bytes = reinterpret_cast<u8*>(g_info.virt);
+    const WriteTarget wt = GetWriteTarget();
     for (u32 yi = y; yi < y_end; ++yi)
     {
-        auto* row = reinterpret_cast<volatile u32*>(fb_bytes + static_cast<u64>(yi) * g_info.pitch);
+        auto* row = reinterpret_cast<volatile u32*>(wt.base + static_cast<u64>(yi) * wt.pitch);
         for (u32 xi = x; xi < x_end; ++xi)
         {
             const u32 dst = row[xi];
@@ -509,7 +600,7 @@ void FramebufferFillRectGradient(u32 x, u32 y, u32 w, u32 h, u32 top_rgb, u32 bo
     const u32 y_end = (y + h > g_info.height) ? g_info.height : y + h;
     const u32 span = h - 1U; // we know h >= 2 here
 
-    auto* fb_bytes = reinterpret_cast<u8*>(g_info.virt);
+    const WriteTarget wt = GetWriteTarget();
     for (u32 yi = y; yi < y_end; ++yi)
     {
         // 8.8 fixed-point row position in [0, 256]. Use the
@@ -521,7 +612,7 @@ void FramebufferFillRectGradient(u32 x, u32 y, u32 w, u32 h, u32 top_rgb, u32 bo
         const i32 g = tg + ((bg - tg) * static_cast<i32>(t)) / 256;
         const i32 b = tb + ((bb - tb) * static_cast<i32>(t)) / 256;
         const u32 c = (static_cast<u32>(r) << 16) | (static_cast<u32>(g) << 8) | static_cast<u32>(b);
-        auto* row = reinterpret_cast<volatile u32*>(fb_bytes + static_cast<u64>(yi) * g_info.pitch);
+        auto* row = reinterpret_cast<volatile u32*>(wt.base + static_cast<u64>(yi) * wt.pitch);
         for (u32 xi = x; xi < x_end; ++xi)
         {
             row[xi] = c;
