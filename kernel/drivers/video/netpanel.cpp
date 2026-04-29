@@ -28,16 +28,36 @@ constexpr u32 kMargin = 10;
 constexpr u32 kRowH = 14;
 constexpr u32 kSectionGap = 8;
 
-// Same palette family as calendar.cpp + menu.cpp so the popups
-// look like siblings.
-constexpr u32 kBodyRgb = 0x00303848;
-constexpr u32 kBorderRgb = 0x00101828;
-constexpr u32 kHeaderRgb = 0x00406090;
+// Theme-driven chrome palette — overridable via NetPanelSetColours.
+// Defaults match the original v0 hardcoded slate-blue look so a
+// kernel that never calls the setter sees the panel unchanged.
+constinit u32 g_body_rgb = 0x00303848;
+constinit u32 g_border_rgb = 0x00101828;
+constinit u32 g_header_rgb = 0x00406090;
+constinit u32 g_ink_rgb = 0x00FFFFFF;
+constinit u32 g_button_rgb = 0x00406090;
+
+// Semantic indicators — kept hardcoded since they encode link
+// state, not theme identity. Online == green, pending == amber,
+// disconnected == dim slate.
 constexpr u32 kAccentRgb = 0x0054C06A; // green: connected
 constexpr u32 kWarnRgb = 0x00C0A040;   // amber: pending
 constexpr u32 kDimRgb = 0x00707884;
-constexpr u32 kTextRgb = 0x00FFFFFF;
-constexpr u32 kButtonRgb = 0x00406090;
+
+// Saturating per-channel lighten — file-local copy.
+u32 LightenRgb(u32 rgb, u32 amount)
+{
+    u32 r = ((rgb >> 16) & 0xFFU) + amount;
+    u32 g = ((rgb >> 8) & 0xFFU) + amount;
+    u32 b = (rgb & 0xFFU) + amount;
+    if (r > 0xFFU)
+        r = 0xFFU;
+    if (g > 0xFFU)
+        g = 0xFFU;
+    if (b > 0xFFU)
+        b = 0xFFU;
+    return (r << 16) | (g << 8) | b;
+}
 
 constinit NetPanelMode g_mode = NetPanelMode::Closed;
 constinit u32 g_ax = 0;
@@ -114,7 +134,7 @@ void DrawLabelValue(u32 x, u32 y, const char* label, const char* value, u32 bg)
     u32 i = 0;
     while (label[i] != '\0')
         ++i;
-    WriteAt(x + i * 8 + 8, y, value, kTextRgb, bg);
+    WriteAt(x + i * 8 + 8, y, value, g_ink_rgb, bg);
 }
 
 bool Ipv4IsZero(duetos::net::Ipv4Address ip)
@@ -161,7 +181,7 @@ u32 ComputeFullHeight()
 
 void DrawHeader(u32 ax, u32 ay, u32 w, const char* title)
 {
-    FramebufferFillRect(ax + kMargin, ay + kMargin, w - kMargin * 2, 22, kHeaderRgb);
+    FramebufferFillRect(ax + kMargin, ay + kMargin, w - kMargin * 2, 22, g_header_rgb);
     const u32 tw = 0;
     (void)tw;
     u32 nlen = 0;
@@ -169,13 +189,18 @@ void DrawHeader(u32 ax, u32 ay, u32 w, const char* title)
         ++nlen;
     const u32 tx = ax + kMargin + 6;
     const u32 ty = ay + kMargin + (22 - 8) / 2;
-    WriteAt(tx, ty, title, kTextRgb, kHeaderRgb);
+    WriteAt(tx, ty, title, g_ink_rgb, g_header_rgb);
 }
 
 void DrawPreview()
 {
-    FramebufferFillRect(g_ax, g_ay, kPreviewW, kPreviewH, kBodyRgb);
-    FramebufferDrawRect(g_ax, g_ay, kPreviewW, kPreviewH, kBorderRgb, 2);
+    FramebufferDropShadow(g_ax, g_ay, kPreviewW, kPreviewH, 4, 0x60);
+    FramebufferFillRectGradient(g_ax, g_ay, kPreviewW, kPreviewH, LightenRgb(g_body_rgb, 14), g_body_rgb);
+    if (kPreviewW > 4)
+    {
+        FramebufferFillRect(g_ax + 2, g_ay + 1, kPreviewW - 4, 1, LightenRgb(g_body_rgb, 36));
+    }
+    FramebufferDrawRect(g_ax, g_ay, kPreviewW, kPreviewH, g_border_rgb, 1);
 
     const auto lease = duetos::net::DhcpLeaseRead();
     const u64 nics = duetos::drivers::net::NicCount();
@@ -189,7 +214,7 @@ void DrawPreview()
     FramebufferFillRect(dot_x, dot_y, dot, dot, !any_link ? kDimRgb : online ? kAccentRgb : kWarnRgb);
 
     const char* status = !any_link ? "OFFLINE (no NIC)" : online ? "CONNECTED" : "PENDING (DHCP)";
-    WriteAt(g_ax + 26, g_ay + 10, status, kTextRgb, kBodyRgb);
+    WriteAt(g_ax + 26, g_ay + 10, status, g_ink_rgb, g_body_rgb);
 
     // IP line below.
     char buf[24];
@@ -207,27 +232,27 @@ void DrawPreview()
         for (u32 i = 0; ipbuf[i] != '\0' && off + 1 < sizeof(buf); ++i)
             buf[off++] = ipbuf[i];
         buf[off] = '\0';
-        WriteAt(g_ax + 10, g_ay + 28, buf, kTextRgb, kBodyRgb);
+        WriteAt(g_ax + 10, g_ay + 28, buf, g_ink_rgb, g_body_rgb);
     }
     else
     {
-        WriteAt(g_ax + 10, g_ay + 28, "click for details", kDimRgb, kBodyRgb);
+        WriteAt(g_ax + 10, g_ay + 28, "click for details", kDimRgb, g_body_rgb);
     }
 
     // Hint at the bottom that clicking expands.
-    WriteAt(g_ax + 10, g_ay + 42, "click to expand", kDimRgb, kBodyRgb);
+    WriteAt(g_ax + 10, g_ay + 42, "click to expand", kDimRgb, g_body_rgb);
 }
 
 void DrawWirelessSection(u32 ax, u32& y, u32 w)
 {
-    WriteAt(ax + kMargin, y, "WIRELESS", kAccentRgb, kBodyRgb);
+    WriteAt(ax + kMargin, y, "WIRELESS", kAccentRgb, g_body_rgb);
     y += 12;
     const auto wifi = duetos::drivers::net::WirelessStatusRead();
     if (wifi.adapters_detected == 0)
     {
-        WriteAt(ax + kMargin, y, "  no wireless adapter", kDimRgb, kBodyRgb);
+        WriteAt(ax + kMargin, y, "  no wireless adapter", kDimRgb, g_body_rgb);
         y += kRowH;
-        WriteAt(ax + kMargin, y, "  (use wired below)", kDimRgb, kBodyRgb);
+        WriteAt(ax + kMargin, y, "  (use wired below)", kDimRgb, g_body_rgb);
         y += kRowH;
         (void)w;
         return;
@@ -245,25 +270,25 @@ void DrawWirelessSection(u32 ax, u32& y, u32 w)
     while (*p != '\0' && off + 1 < sizeof(line))
         line[off++] = *p++;
     line[off] = '\0';
-    WriteAt(ax + kMargin, y, line, kTextRgb, kBodyRgb);
+    WriteAt(ax + kMargin, y, line, g_ink_rgb, g_body_rgb);
     y += kRowH;
     if (wifi.drivers_online > 0)
     {
-        WriteAt(ax + kMargin, y, "  driver shell online", kAccentRgb, kBodyRgb);
+        WriteAt(ax + kMargin, y, "  driver shell online", kAccentRgb, g_body_rgb);
         y += kRowH;
-        WriteAt(ax + kMargin, y, "  (firmware loader pending)", kDimRgb, kBodyRgb);
+        WriteAt(ax + kMargin, y, "  (firmware loader pending)", kDimRgb, g_body_rgb);
         y += kRowH;
     }
     else
     {
-        WriteAt(ax + kMargin, y, "  no wireless driver online", kWarnRgb, kBodyRgb);
+        WriteAt(ax + kMargin, y, "  no wireless driver online", kWarnRgb, g_body_rgb);
         y += kRowH;
     }
 }
 
 void DrawWiredSection(u32 ax, u32& y)
 {
-    WriteAt(ax + kMargin, y, "WIRED", kAccentRgb, kBodyRgb);
+    WriteAt(ax + kMargin, y, "WIRED", kAccentRgb, g_body_rgb);
     y += 12;
     const u64 nics = duetos::drivers::net::NicCount();
     bool printed = false;
@@ -289,12 +314,12 @@ void DrawWiredSection(u32 ax, u32& y)
             for (u32 j = 0; nic.vendor[j] != '\0' && off + 1 < sizeof(buf); ++j)
                 buf[off++] = nic.vendor[j];
         buf[off] = '\0';
-        WriteAt(ax + kMargin, y, buf, kTextRgb, kBodyRgb);
+        WriteAt(ax + kMargin, y, buf, g_ink_rgb, g_body_rgb);
         // Right-aligned link badge.
         const char* link = nic.link_up ? "UP" : "DOWN";
         const u32 link_w = (nic.link_up ? 2 : 4) * 8;
         const u32 link_x = ax + kFullW - kMargin - link_w;
-        WriteAt(link_x, y, link, nic.link_up ? kAccentRgb : kDimRgb, kBodyRgb);
+        WriteAt(link_x, y, link, nic.link_up ? kAccentRgb : kDimRgb, g_body_rgb);
         y += kRowH;
 
         // ip / gateway / dns rows.
@@ -303,23 +328,23 @@ void DrawWiredSection(u32 ax, u32& y)
         char ipbuf[20];
         FormatIpv4(ip, ipbuf, sizeof(ipbuf));
         if (Ipv4IsZero(ip))
-            DrawLabelValue(ax + kMargin + 16, y, "ip ", "(no lease yet)", kBodyRgb);
+            DrawLabelValue(ax + kMargin + 16, y, "ip ", "(no lease yet)", g_body_rgb);
         else
-            DrawLabelValue(ax + kMargin + 16, y, "ip ", ipbuf, kBodyRgb);
+            DrawLabelValue(ax + kMargin + 16, y, "ip ", ipbuf, g_body_rgb);
         y += kRowH;
 
         if (lease.valid)
         {
             FormatIpv4(lease.router, ipbuf, sizeof(ipbuf));
-            DrawLabelValue(ax + kMargin + 16, y, "gw ", ipbuf, kBodyRgb);
+            DrawLabelValue(ax + kMargin + 16, y, "gw ", ipbuf, g_body_rgb);
             y += kRowH;
             FormatIpv4(lease.dns, ipbuf, sizeof(ipbuf));
-            DrawLabelValue(ax + kMargin + 16, y, "dns", ipbuf, kBodyRgb);
+            DrawLabelValue(ax + kMargin + 16, y, "dns", ipbuf, g_body_rgb);
             y += kRowH;
         }
         else
         {
-            WriteAt(ax + kMargin + 16, y, "no DHCP lease — try RENEW", kWarnRgb, kBodyRgb);
+            WriteAt(ax + kMargin + 16, y, "no DHCP lease — try RENEW", kWarnRgb, g_body_rgb);
             y += kRowH;
             y += kRowH; // keep section heights consistent
         }
@@ -327,7 +352,7 @@ void DrawWiredSection(u32 ax, u32& y)
     }
     if (!printed)
     {
-        WriteAt(ax + kMargin, y, "  no wired adapter", kDimRgb, kBodyRgb);
+        WriteAt(ax + kMargin, y, "  no wired adapter", kDimRgb, g_body_rgb);
         y += kRowH;
     }
 }
@@ -335,8 +360,13 @@ void DrawWiredSection(u32 ax, u32& y)
 void DrawFull()
 {
     g_height = ComputeFullHeight();
-    FramebufferFillRect(g_ax, g_ay, kFullW, g_height, kBodyRgb);
-    FramebufferDrawRect(g_ax, g_ay, kFullW, g_height, kBorderRgb, 2);
+    FramebufferDropShadow(g_ax, g_ay, kFullW, g_height, 4, 0x60);
+    FramebufferFillRectGradient(g_ax, g_ay, kFullW, g_height, LightenRgb(g_body_rgb, 14), g_body_rgb);
+    if (kFullW > 4)
+    {
+        FramebufferFillRect(g_ax + 2, g_ay + 1, kFullW - 4, 1, LightenRgb(g_body_rgb, 36));
+    }
+    FramebufferDrawRect(g_ax, g_ay, kFullW, g_height, g_border_rgb, 1);
 
     DrawHeader(g_ax, g_ay, kFullW, "NETWORK");
     u32 y = g_ay + kMargin + 22 + 6;
@@ -351,13 +381,13 @@ void DrawFull()
     const char* status = !any_link ? "OFFLINE — no NIC discovered"
                          : online  ? "CONNECTED"
                                    : "PENDING — waiting for DHCP";
-    WriteAt(g_ax + kMargin + dot + 6, y + 2, status, kTextRgb, kBodyRgb);
+    WriteAt(g_ax + kMargin + dot + 6, y + 2, status, g_ink_rgb, g_body_rgb);
     y += kRowH + 4;
     if (online)
     {
         char ipbuf[20];
         FormatIpv4(lease.ip, ipbuf, sizeof(ipbuf));
-        DrawLabelValue(g_ax + kMargin + dot + 6, y, "IP ", ipbuf, kBodyRgb);
+        DrawLabelValue(g_ax + kMargin + dot + 6, y, "IP ", ipbuf, g_body_rgb);
         y += kRowH;
     }
     else
@@ -379,16 +409,25 @@ void DrawFull()
     g_renew_y = g_ay + g_height - kMargin - btn_h;
     g_renew_w = btn_w;
     g_renew_h = btn_h;
-    FramebufferFillRect(g_renew_x, g_renew_y, btn_w, btn_h, kButtonRgb);
-    FramebufferDrawRect(g_renew_x, g_renew_y, btn_w, btn_h, kBorderRgb, 1);
+    FramebufferFillRect(g_renew_x, g_renew_y, btn_w, btn_h, g_button_rgb);
+    FramebufferDrawRect(g_renew_x, g_renew_y, btn_w, btn_h, g_border_rgb, 1);
     const u32 lbl_w = 5 * 8; // "RENEW"
-    WriteAt(g_renew_x + (btn_w - lbl_w) / 2, g_renew_y + (btn_h - 8) / 2, "RENEW", kTextRgb, kButtonRgb);
+    WriteAt(g_renew_x + (btn_w - lbl_w) / 2, g_renew_y + (btn_h - 8) / 2, "RENEW", g_ink_rgb, g_button_rgb);
 
     // Hint to the left of the button.
-    WriteAt(g_ax + kMargin, g_renew_y + (btn_h - 8) / 2, "click outside to close", kDimRgb, kBodyRgb);
+    WriteAt(g_ax + kMargin, g_renew_y + (btn_h - 8) / 2, "click outside to close", kDimRgb, g_body_rgb);
 }
 
 } // namespace
+
+void NetPanelSetColours(u32 body_rgb, u32 border_rgb, u32 header_rgb, u32 ink_rgb, u32 button_rgb)
+{
+    g_body_rgb = body_rgb;
+    g_border_rgb = border_rgb;
+    g_header_rgb = header_rgb;
+    g_ink_rgb = ink_rgb;
+    g_button_rgb = button_rgb;
+}
 
 void NetPanelOpen(u32 ax, u32 ay, NetPanelMode mode)
 {

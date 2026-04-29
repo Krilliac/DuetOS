@@ -5,6 +5,7 @@
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
 #include "drivers/video/menu.h"
+#include "drivers/video/netpanel.h"
 #include "drivers/video/taskbar.h"
 #include "drivers/video/widget.h"
 
@@ -375,6 +376,11 @@ void ThemeApplyToAll()
     // two popups feel like siblings; header takes the taskbar
     // accent so the month name reads with the brand colour.
     CalendarSetColours(t.taskbar_tab_inactive, t.taskbar_border, t.taskbar_accent, t.taskbar_fg);
+
+    // Network flyout panel: same chrome language as the calendar /
+    // start menu, with a button colour that matches the title-bar
+    // accent (the RENEW button reads as a callable affordance).
+    NetPanelSetColours(t.taskbar_tab_inactive, t.taskbar_border, t.taskbar_accent, t.taskbar_fg, t.taskbar_accent);
 }
 
 void ThemeSelfTest()
