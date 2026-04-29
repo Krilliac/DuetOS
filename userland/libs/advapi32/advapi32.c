@@ -617,8 +617,10 @@ __declspec(dllexport) LSTATUS RegEnumValueW(HANDLE hKey, DWORD idx, wchar_t16* n
 {
     const RegKey* key = reg_key_from_handle(hKey);
     (void)reserved;
-    if (!key || idx >= key->value_count)
-        return ERROR_FILE_NOT_FOUND;
+    if (!key)
+        return ERROR_INVALID_HANDLE;
+    if (idx >= key->value_count)
+        return ERROR_NO_MORE_ITEMS;
     const RegValue* v = &key->values[idx];
     /* Write name in wide form. */
     DWORD name_cap = name_cb ? *name_cb : 0;
@@ -649,6 +651,131 @@ __declspec(dllexport) LSTATUS RegEnumValueW(HANDLE hKey, DWORD idx, wchar_t16* n
             data[i] = src[i];
     }
     return ERROR_SUCCESS;
+}
+
+__declspec(dllexport) LSTATUS RegEnumValueA(HANDLE hKey, DWORD idx, char* name, DWORD* name_cb, DWORD* reserved,
+                                            DWORD* type, unsigned char* data, DWORD* data_cb)
+{
+    const RegKey* key = reg_key_from_handle(hKey);
+    (void)reserved;
+    if (!key)
+        return ERROR_INVALID_HANDLE;
+    if (idx >= key->value_count)
+        return ERROR_NO_MORE_ITEMS;
+    const RegValue* v = &key->values[idx];
+    DWORD name_cap = name_cb ? *name_cb : 0;
+    DWORD name_len = 0;
+    while (v->name[name_len])
+        ++name_len;
+    if (name_cb)
+        *name_cb = name_len;
+    if (name)
+    {
+        if (name_cap < name_len + 1)
+            return ERROR_MORE_DATA;
+        for (DWORD i = 0; i <= name_len; ++i)
+            name[i] = v->name[i];
+    }
+    if (type)
+        *type = v->type;
+    DWORD data_cap = data_cb ? *data_cb : 0;
+    if (data_cb)
+        *data_cb = v->size;
+    if (data)
+    {
+        if (data_cap < v->size)
+            return ERROR_MORE_DATA;
+        const unsigned char* src = (const unsigned char*)v->data;
+        for (DWORD i = 0; i < v->size; ++i)
+            data[i] = src[i];
+    }
+    return ERROR_SUCCESS;
+}
+
+/* RegQueryInfoKey* — populate the count + max-len out-parameters
+ * for an open key. Mirrors RegQueryInfoKeyA/W's contract. The
+ * advapi32-side mirror only sees static values (no kernel sidecar
+ * visibility), so the value/data max-lens reflect the same view
+ * advapi32 itself enumerates. */
+static LSTATUS reg_query_info_common(HANDLE hKey, DWORD* subkeys, DWORD* max_subkey_chars, DWORD* values,
+                                     DWORD* max_value_name_chars, DWORD* max_value_data_bytes)
+{
+    const RegKey* key = reg_key_from_handle(hKey);
+    if (!key)
+        return ERROR_INVALID_HANDLE;
+    DWORD nsub = 0, max_sub = 0;
+    for (DWORD i = 0; i < REG_KEY_COUNT; ++i)
+    {
+        if (k_reg_keys[i].root != key->root)
+            continue;
+        const char* child = (const char*)0;
+        if (!reg_is_direct_child(key->path, k_reg_keys[i].path, &child))
+            continue;
+        ++nsub;
+        DWORD len = 0;
+        while (child[len])
+            ++len;
+        if (len > max_sub)
+            max_sub = len;
+    }
+    DWORD max_vn = 0, max_vd = 0;
+    for (DWORD i = 0; i < key->value_count; ++i)
+    {
+        DWORD nl = 0;
+        while (key->values[i].name[nl])
+            ++nl;
+        if (nl > max_vn)
+            max_vn = nl;
+        if (key->values[i].size > max_vd)
+            max_vd = key->values[i].size;
+    }
+    if (subkeys)
+        *subkeys = nsub;
+    if (max_subkey_chars)
+        *max_subkey_chars = max_sub;
+    if (values)
+        *values = key->value_count;
+    if (max_value_name_chars)
+        *max_value_name_chars = max_vn;
+    if (max_value_data_bytes)
+        *max_value_data_bytes = max_vd;
+    return ERROR_SUCCESS;
+}
+
+__declspec(dllexport) LSTATUS RegQueryInfoKeyW(HANDLE hKey, wchar_t16* cls, DWORD* cls_cb, DWORD* reserved,
+                                               DWORD* subkeys, DWORD* max_subkey, DWORD* max_class, DWORD* values,
+                                               DWORD* max_value_name, DWORD* max_value, DWORD* sec_descr,
+                                               void* last_write)
+{
+    (void)reserved;
+    (void)last_write;
+    if (cls_cb)
+        *cls_cb = 0;
+    if (cls && cls_cb && *cls_cb >= 1)
+        cls[0] = 0;
+    if (max_class)
+        *max_class = 0;
+    if (sec_descr)
+        *sec_descr = 0;
+    return reg_query_info_common(hKey, subkeys, max_subkey, values, max_value_name, max_value);
+}
+
+__declspec(dllexport) LSTATUS RegQueryInfoKeyA(HANDLE hKey, char* cls, DWORD* cls_cb, DWORD* reserved, DWORD* subkeys,
+                                               DWORD* max_subkey, DWORD* max_class, DWORD* values,
+                                               DWORD* max_value_name, DWORD* max_value, DWORD* sec_descr,
+                                               void* last_write)
+{
+    (void)reserved;
+    (void)last_write;
+    if (cls_cb)
+        *cls_cb = 0;
+    if (cls && cls_cb && *cls_cb >= 1)
+        cls[0] = 0;
+    if (max_class)
+        *max_class = 0;
+    if (sec_descr)
+        *sec_descr = 0;
+    return reg_query_info_common(hKey, subkeys, max_subkey, values, max_value_name, max_value);
 }
 
 __declspec(dllexport) LSTATUS RegSetValueW(HANDLE hKey, const wchar_t16* subkey, DWORD type, const wchar_t16* data,
