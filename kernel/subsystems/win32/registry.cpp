@@ -76,6 +76,22 @@ constexpr RegValue kHkcuVolatileEnvValues[] = {
     {"USERDOMAIN", kRegSz, 7, "DUETOS\0", 0},
 };
 
+// Static tree. Two tiers:
+//
+//   - Terminal keys carry `values` + `value_count` and back the
+//     well-known well-formed paths v0 callers actually read.
+//   - Prefix keys (`values=nullptr, value_count=0`) exist solely
+//     so a caller can walk into the tree one component at a time
+//     — `RegOpenKey(HKLM, "Software", &h)` then
+//     `RegOpenKey(h, "Microsoft\\Windows NT\\CurrentVersion", &h2)`
+//     resolves both steps. Without the prefix entries the second
+//     call would have to be `RegOpenKey(h, "...full path...", ...)`
+//     with parent = HKLM, which forced every caller to know the
+//     full path up-front.
+//
+// Mirror constraint: advapi32.c's k_reg_keys[] tracks the same
+// shape. Adding an entry here means adding the matching entry
+// there in the same commit.
 constexpr RegKey kRegKeys[] = {
     {kHkeyLocalMachine, "Software\\Microsoft\\Windows NT\\CurrentVersion", kHklmWinNtValues,
      static_cast<u32>(sizeof(kHklmWinNtValues) / sizeof(kHklmWinNtValues[0]))},
@@ -85,6 +101,17 @@ constexpr RegKey kRegKeys[] = {
      static_cast<u32>(sizeof(kHkcuInternetValues) / sizeof(kHkcuInternetValues[0]))},
     {kHkeyCurrentUser, "Volatile Environment", kHkcuVolatileEnvValues,
      static_cast<u32>(sizeof(kHkcuVolatileEnvValues) / sizeof(kHkcuVolatileEnvValues[0]))},
+    // Prefix keys — all distinct proper prefixes of the terminal
+    // paths above. Same root + path pair returns the same entry,
+    // so HKLM and HKCU each get their own prefix chain.
+    {kHkeyLocalMachine, "Software", nullptr, 0},
+    {kHkeyLocalMachine, "Software\\Microsoft", nullptr, 0},
+    {kHkeyLocalMachine, "Software\\Microsoft\\Windows", nullptr, 0},
+    {kHkeyLocalMachine, "Software\\Microsoft\\Windows NT", nullptr, 0},
+    {kHkeyCurrentUser, "Software", nullptr, 0},
+    {kHkeyCurrentUser, "Software\\Microsoft", nullptr, 0},
+    {kHkeyCurrentUser, "Software\\Microsoft\\Windows", nullptr, 0},
+    {kHkeyCurrentUser, "Software\\Microsoft\\Windows\\CurrentVersion", nullptr, 0},
 };
 
 constexpr u64 kRegKeyCount = sizeof(kRegKeys) / sizeof(kRegKeys[0]);
@@ -256,12 +283,71 @@ SidecarValue* SidecarAlloc()
 
 // ---- Op handlers ----
 
+// Concatenate a parent key's path with a subkey path into `out`.
+// Real Windows is forgiving about leading / trailing backslashes;
+// match that. Returns false on overflow (caller treats as
+// ObjectNameNotFound — a path that overflows can't possibly
+// resolve in our small static tree).
+bool ConcatRegPath(const char* parent_path, const char* sub, char* out, u64 cap)
+{
+    u64 i = 0;
+    if (parent_path != nullptr)
+    {
+        while (parent_path[i] != '\0')
+        {
+            if (i + 1 >= cap)
+                return false;
+            out[i] = parent_path[i];
+            ++i;
+        }
+    }
+    // Trim a single trailing backslash on the parent so we don't
+    // produce "Software\\\\Microsoft" if the parent string happened
+    // to carry one. None of our static paths do, but defence in
+    // depth.
+    if (i > 0 && out[i - 1] == '\\')
+        --i;
+
+    // Skip a single leading backslash on `sub` so callers passing
+    // "\\Microsoft" don't end up with a doubled separator.
+    if (sub != nullptr && sub[0] == '\\')
+        ++sub;
+
+    // Empty sub means "open the parent again" — leave the result
+    // as just the parent path. Caller resolves it back to the same
+    // key (or fails cleanly if the parent path isn't in the tree
+    // anymore for some reason).
+    if (sub == nullptr || sub[0] == '\0')
+    {
+        out[i] = '\0';
+        return true;
+    }
+
+    // Insert separator iff the parent contributed any characters.
+    if (i > 0)
+    {
+        if (i + 1 >= cap)
+            return false;
+        out[i++] = '\\';
+    }
+    while (*sub != '\0')
+    {
+        if (i + 1 >= cap)
+            return false;
+        out[i++] = *sub++;
+    }
+    out[i] = '\0';
+    return true;
+}
+
 i64 DoOpen(arch::TrapFrame* frame)
 {
-    // rsi = parent HKEY (predefined sentinel or kernel handle —
-    // v0 only honours predefined sentinels; passing a previously-
-    // opened subkey handle as parent returns INVALID_HANDLE).
-    // rdx = user VA of NUL-terminated ASCII subkey path.
+    // rsi = parent HKEY — predefined sentinel (kHkey*) OR a
+    //       previously-opened kernel handle in the
+    //       Process::kWin32RegistryBase range. Both forms walk
+    //       the static tree.
+    // rdx = user VA of NUL-terminated ASCII subkey path. May be
+    //       empty when the caller is reopening the parent.
     // r10 = user VA of u64 slot to receive the kernel handle on
     //       success (left untouched on failure).
     core::Process* proc = core::CurrentProcess();
@@ -283,17 +369,39 @@ i64 DoOpen(arch::TrapFrame* frame)
         return kNtStatusInvalidParameter;
     }
 
-    // STUB: parent must be a predefined HKEY sentinel — opening a
-    // subkey relative to a previously-opened kernel handle isn't
-    // walked through the static tree yet. Real Windows allows
-    // arbitrary nesting; v0 callers go HKLM\full\path or
-    // HKCU\full\path which matches what every MSVC CRT does.
-    if (parent < kHkeyClassesRoot || parent > kHkeyCurrentConfig)
+    // Resolve `parent` to a (root, path) pair so the rest of the
+    // function only deals with the static-tree lookup.
+    u64 root_sentinel = 0;
+    const char* parent_path = "";
+    char concat_buf[256];
+    if (parent >= kHkeyClassesRoot && parent <= kHkeyCurrentConfig)
+    {
+        // Predefined HKEY: the subkey path is the lookup path
+        // verbatim, root is the sentinel.
+        root_sentinel = parent;
+    }
+    else if (parent >= core::Process::kWin32RegistryBase &&
+             parent < core::Process::kWin32RegistryBase + core::Process::kWin32RegistryCap)
+    {
+        // Previously-opened kernel handle: synthesise the lookup
+        // path by concatenating the parent's static path with the
+        // caller's subkey, and lookup against the parent's root
+        // sentinel.
+        const RegKey* parent_key = SlotForHandle(proc, parent);
+        if (parent_key == nullptr)
+            return kNtStatusInvalidHandle;
+        if (!ConcatRegPath(parent_key->path, path_buf, concat_buf, sizeof(concat_buf)))
+            return kNtStatusObjectNameNotFound;
+        root_sentinel = parent_key->root;
+        parent_path = concat_buf;
+    }
+    else
     {
         return kNtStatusInvalidHandle;
     }
 
-    const RegKey* key = LookupKey(parent, path_buf);
+    const char* lookup_path = (parent_path[0] != '\0') ? parent_path : path_buf;
+    const RegKey* key = LookupKey(root_sentinel, lookup_path);
     if (key == nullptr)
     {
         return kNtStatusObjectNameNotFound;
@@ -767,7 +875,33 @@ void RegistrySelfTest()
         fail("ProductName value missing from HKLM\\...\\CurrentVersion");
     }
 
-    arch::SerialWrite("[registry-selftest] PASS (4 keys, well-known values, ci-lookup)\n");
+    // Prefix entries — the proper prefixes of every terminal path
+    // resolve to value-less RegKey rows so RegOpenKey can walk
+    // the tree one component at a time.
+    if (LookupKey(kHkeyLocalMachine, "Software") == nullptr)
+        fail("HKLM\\Software prefix entry missing");
+    if (LookupKey(kHkeyLocalMachine, "Software\\Microsoft\\Windows NT") == nullptr)
+        fail("HKLM\\Software\\Microsoft\\Windows NT prefix entry missing");
+    if (LookupKey(kHkeyCurrentUser, "Software\\Microsoft\\Windows\\CurrentVersion") == nullptr)
+        fail("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion prefix entry missing");
+    const RegKey* prefix = LookupKey(kHkeyLocalMachine, "Software");
+    if (prefix == nullptr || prefix->value_count != 0 || prefix->values != nullptr)
+        fail("prefix entry malformed");
+
+    // Path concatenation rules: trailing backslash on parent and
+    // leading backslash on subkey are tolerated, empty subkey
+    // returns the parent path verbatim.
+    char buf[64];
+    if (!ConcatRegPath("Software", "Microsoft", buf, sizeof(buf)) || !PathEqualCi(buf, "Software\\Microsoft"))
+        fail("ConcatRegPath: simple join failed");
+    if (!ConcatRegPath("Software\\", "\\Microsoft", buf, sizeof(buf)) || !PathEqualCi(buf, "Software\\Microsoft"))
+        fail("ConcatRegPath: edge-backslash trim failed");
+    if (!ConcatRegPath("Software", "", buf, sizeof(buf)) || !PathEqualCi(buf, "Software"))
+        fail("ConcatRegPath: empty subkey didn't return parent");
+    if (!ConcatRegPath("", "Software", buf, sizeof(buf)) || !PathEqualCi(buf, "Software"))
+        fail("ConcatRegPath: empty parent didn't return subkey");
+
+    arch::SerialWrite("[registry-selftest] PASS (4 terminal + 8 prefix keys, ci-lookup, concat-path)\n");
 }
 
 } // namespace duetos::subsystems::win32::registry
