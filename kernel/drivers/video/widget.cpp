@@ -1498,31 +1498,38 @@ void WindowDrawAllOrdered()
         }
 
         // Subtle "out of focus" dim. The Duet spec calls for ~3%
-        // dim on unfocused windows; we apply a black ~10% (alpha
-        // 0x18) overlay over the whole window rect AFTER chrome +
-        // widgets + display-list + content_fn. The slightly
-        // heavier alpha here vs. the 3% spec compensates for the
-        // 8-bit framebuffer's quantization — anything below ~6%
-        // alpha is invisible on a near-black client. Skipped in
-        // single-window scenes (every window is "active enough"
-        // when there's nothing else to compete with).
+        // dim on unfocused windows; we apply a ~10% (alpha 0x18)
+        // overlay over the whole window rect AFTER chrome +
+        // widgets + display-list + content_fn. Source colour is
+        // the desktop background (captured into
+        // `g_compose_desktop_rgb` at the top of DesktopCompose),
+        // so the blend washes the window toward the desktop
+        // hue — reads as "fading away" rather than the previous
+        // path's "darkening toward black", which was a misleading
+        // cue on light themes. With slice 1's shadow surface in
+        // place this is a real read-modify-write against the
+        // in-progress paint, not a read of the live MMIO.
+        // Skipped in single-window scenes (every window is
+        // "active enough" when there's nothing else to compete
+        // with).
         if (!is_active && g_window_count > 1)
         {
+            const u32 overlay = (0x18u << 24) | (g_compose_desktop_rgb & 0x00FFFFFFu);
             FramebufferFillRectAlpha(g_windows[h].chrome.x, g_windows[h].chrome.y, g_windows[h].chrome.w,
-                                     g_windows[h].chrome.h, 0x18000000U);
+                                     g_windows[h].chrome.h, overlay);
         }
-        // Per-window opacity overlay. Lays a black rect at
-        // alpha = (0xFF - opacity) over the whole window so
-        // lower opacity values fade the window. This is a
-        // fake-transparency approximation — a real compositor
-        // would alpha-blend toward the underlying surface
-        // rather than black — but the user-visible "this
-        // window is fading" cue still reads correctly. Skipped
-        // when opacity is fully opaque (the common case).
+        // Per-window opacity overlay. Lays a desktop-coloured rect
+        // at alpha = (0xFF - opacity) over the whole window so
+        // lower opacity values fade the window toward the desktop
+        // surface. Real per-pixel transparency (seeing through the
+        // window to the underlying app stack) requires per-window
+        // backbuffers and is the next-tier item in the plan; this
+        // is the v0 stand-in. Skipped when opacity is fully opaque
+        // (the common case).
         if (g_windows[h].opacity < 0xFF)
         {
             const u32 overlay_alpha = static_cast<u32>(0xFFu - g_windows[h].opacity);
-            const u32 overlay = (overlay_alpha << 24);
+            const u32 overlay = (overlay_alpha << 24) | (g_compose_desktop_rgb & 0x00FFFFFFu);
             FramebufferFillRectAlpha(g_windows[h].chrome.x, g_windows[h].chrome.y, g_windows[h].chrome.w,
                                      g_windows[h].chrome.h, overlay);
         }

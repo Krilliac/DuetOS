@@ -9,30 +9,27 @@ _Branch: `claude/plan-rasterizer-compositor-SzST5`._
 | Slice | Effect | Commit |
 |-------|--------|--------|
 | Plan landed | Plan file + index row | `914dba2` |
-| Slice 1 | Shadow framebuffer foundation — `FramebufferBeginCompose` / `EndCompose` / `ComposeActive` in framebuffer.{h,cpp}; lazy-allocated offscreen RAM-backed surface from the physical frame allocator; 5 primitive write sites retargeted via `GetWriteTarget`; `DesktopCompose` wraps its desktop paint with Begin/End so writes land in the shadow then get flushed to live MMIO row-by-row before `FramebufferPresent`. | _this commit_ |
+| Slice 1 | Shadow framebuffer foundation — `FramebufferBeginCompose` / `EndCompose` / `ComposeActive` in framebuffer.{h,cpp}; lazy-allocated offscreen RAM-backed surface from the physical frame allocator; 5 primitive write sites retargeted via `GetWriteTarget`; `DesktopCompose` wraps its desktop paint with Begin/End so writes land in the shadow then get flushed to live MMIO row-by-row before `FramebufferPresent`. | `dfd5635` |
+| Slice 2 | Inactive-window dim + per-window opacity overlays now blend toward `g_compose_desktop_rgb` (the active theme's desktop background) instead of toward black. With slice 1's shadow in place these are real read-modify-write src-over blends against the in-progress paint. Reads as "fading toward the desktop" rather than the previous "darkening toward black", which was a misleading cue on light themes. Real per-pixel transparency through the window to the underlying app stack still needs per-window backbuffers — captured as a future tier. | _this commit_ |
 
 Deferred (in execution order):
 
-1. Slice 2 — true alpha-blend onto shadow surface (read-modify-write
-   src-over now actually composites against the underlying paint
-   instead of overlaying black; replace the inactive-window dim and
-   per-window opacity overlays with real alpha against the shadow).
-2. Slice 3 — TTF table parser (head / maxp / hhea / cmap / loca /
+1. Slice 3 — TTF table parser (head / maxp / hhea / cmap / loca /
    glyf walking, no rasterizer yet) + a small embedded test font
    subset (e.g. 32 glyphs from Inter or similar OFL font). Bounded
    parser only — does not render.
-3. Slice 4 — TTF scanline rasterizer (winding-rule fill of glyf
+2. Slice 4 — TTF scanline rasterizer (winding-rule fill of glyf
    contours into a `u8` coverage buffer; integer-AA at 4x4 super-
    sampling). Wired into `FramebufferDrawString` as a parallel
    path gated by a per-theme `font_kind` flag.
-4. Slice 5 — userland crt0 + minimal libc + CMake ELF build rule.
+3. Slice 5 — userland crt0 + minimal libc + CMake ELF build rule.
    Replace the 181-byte hand-coded `usershell.elf` byte array in
    `ramfs.cpp` with the artifact of a real build rule that
    compiles `userland/shell/shell.c` against `userland/libc/`.
-5. Slice 6 — prompt-driven shell (read line via SYS_READ on the
+4. Slice 6 — prompt-driven shell (read line via SYS_READ on the
    serial console, dispatch a tiny built-in command table:
    `help`, `pid`, `echo`, `exit`).
-6. Slice 7 — SVG loader (subset: `<svg>`, `<path d=...>`,
+5. Slice 7 — SVG loader (subset: `<svg>`, `<path d=...>`,
    `<circle>`, `<line>` only) consuming the path-stroker primitive
    so the prototype's topo / syscalls SVGs can ship as wallpaper
    sources without re-implementing them as kernel paint code.
