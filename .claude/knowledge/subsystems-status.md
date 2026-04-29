@@ -26,7 +26,7 @@ Headline gaps:
 - **Real ptrace state machine** (currently only kCapDebug-gated stub)
 - **clock_settime / clock_adjtime** — currently -EPERM (no RTC writeback)
 - **Real rlimit enforcement** (currently mostly stored, not enforced)
-- **mremap for real**, full madvise advice handling
+- ~~**mremap for real**, full madvise advice handling~~ — landed: madvise honors DONTNEED / FREE / REMOVE (zeros mapped pages, skips unmapped); mremap shrinks via real per-page unmap, MAYMOVE growth allocates a new range and direct-map-copies old contents page-by-page (sub-GAPs: file-backed VMAs not tracked, MREMAP_FIXED unimplemented)
 - **pidfd poll-on-exit** (pidfd_getfd now real for pool-backed states)
 - **Real splice / tee zero-copy for file↔pipe** (pipe→pipe landed 2026-04-29; vmsplice→pipe was already real)
 - **userfaultfd, io_uring** (-ENOSYS facades only)
@@ -551,7 +551,7 @@ described in §9):
 | ~~`NtReadVirtualMemory`~~ | FIXED: now routes to `SYS_PROCESS_VM_READ` |
 | ~~`NtCreateSemaphore`~~ | FIXED: routed to `kSysNtNotImpl` |
 | ~~`NtReleaseSemaphore`~~ | FIXED: routed to `kSysNtNotImpl` |
-| `NtSetInformationFile` | Mapped to `SYS_FILE_SEEK` — only the FilePositionInformation class is correct; other classes silently no-op |
+| `NtSetInformationFile` | Mapped to `SYS_FILE_SEEK`; ntdll thunk handles FilePositionInformation (real seek) + FileBasicInformation (accept-as-success — v0 doesn't track on-disk file times); FileEndOfFileInformation / FileRenameInformation / FileDispositionInformation return STATUS_NOT_IMPLEMENTED |
 | `NtCreateMutant` | Suspect — verify mapping |
 
 **Action**: any new mismap discovered should either get a correct

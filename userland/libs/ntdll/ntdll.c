@@ -4550,10 +4550,32 @@ __declspec(dllexport) NTSTATUS NtSetInformationFile(HANDLE FileHandle, void* IoS
         }
         return NTSTATUS_SUCCESS;
     }
-    /* FileEndOfFileInformation, FileRenameInformation,
-     * FileDispositionInformation, FileAllocationInformation
-     * need additional kernel-side syscalls (truncate, rename-by-
-     * handle, delete-on-close); deferred. */
+    if (FileInformationClass == 4 /* FileBasicInformation */)
+    {
+        /* FILE_BASIC_INFORMATION: 4 LARGE_INTEGER timestamps +
+         * u32 attributes + u32 pad. v0 doesn't track times on
+         * disk (FAT32 cluster-time updates aren't wired through
+         * the SYS_FILE_WRITE path), so the safe shape is
+         * accept-as-success — the caller's expectation is "the
+         * timestamps are now what I set" but most callers only
+         * use this to bump LastAccess / LastWrite which we'd
+         * silently lose anyway. Length must cover at least the
+         * 4 timestamps (32 bytes). Sub-GAP: timestamps unobserved. */
+        if (Length < 32)
+            return (NTSTATUS)0xC0000004;
+        if (IoStatusBlock != (void*)0)
+        {
+            unsigned long long* iosb = (unsigned long long*)IoStatusBlock;
+            iosb[0] = 0;
+            iosb[1] = Length;
+        }
+        return NTSTATUS_SUCCESS;
+    }
+    /* FileEndOfFileInformation (20) — truncate-by-handle.
+     * FileRenameInformation (10) — rename-by-handle.
+     * FileDispositionInformation (13) — delete-on-close.
+     * Each needs a new kernel syscall (SYS_FILE_TRUNCATE,
+     * handle->path resolution, per-handle flags) — separate slices. */
     return (NTSTATUS)0xC0000002;
 }
 
