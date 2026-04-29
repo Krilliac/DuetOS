@@ -18,6 +18,8 @@ measured against.
 | Per-theme `title_bar_height` (22 / 30 px) | **Yes** — Duet family at 30 px (spec target) |
 | Per-theme `taskbar_height` (28 / 44 px) | **Yes** — Duet family at 44 px (spec target) |
 | Per-theme `title_button_width` (46 px Duet, derived elsewhere) | **Yes** |
+| Per-theme `title_text_scale` (2x titles on Duet, 1x compact) | **Yes** — chrome titles + subtitles route through `FramebufferDrawStringScaled` |
+| Accessibility theme | **Yes** — `ThemeId::HighContrast` (10th theme) ships pure black bg / pure white ink / yellow accents (WCAG AAA) |
 | Taskbar polish (gradient strip, rounded START + tabs, focus dot 8/14 px for pinned/running, theme-tinted Show Desktop sliver with click toggle) | **Yes** |
 | Wallpapers (duet-arcs + topo on Duet family; Classic bubbles, Slate10 grid, Amber scanlines on others) | **Yes** |
 | DuetMark on START | **Yes** — partial-arc form (189° sweeps, primary at -30° and amber at 150°) backed by `FramebufferStrokeArc` |
@@ -27,7 +29,7 @@ measured against.
 | TTF/OTF rasterizer (Inter / JetBrains Mono at 7 sizes) | **Partial** — `FramebufferDrawStringScaled` ships an integer-scaled bitmap font (1..8x); Duet banner uses 2x. Real TTF parsing + scanline glyph fill remains a multi-slice project. |
 | `FramebufferStrokePath` + partial-arc DuetMark | **Yes** — `FramebufferStrokePath` ships (cubic-Bezier flattener, thick-line stroker, wallpaper ribbon consumer); partial-arc DuetMark already ships via `FramebufferStrokeArc`. Topo / syscalls SVG wallpapers still deferred (needs SVG loader) |
 | Window keyboard tiling (`Ctrl+Alt+Arrow` snap/maximize, `Ctrl+Alt+Shift+Arrow` resize, `Ctrl+Alt+1..9` direct theme select) | **Yes** |
-| Userland shell ELF + spawn at boot | **Partial** — `/bin/usershell.elf` (hand-built 184-byte ELF) spawns at end of init; calls `SYS_WRITE("Hello from userland shell stub\n") + SYS_EXIT(0)`. TOML reader + `~/.config/duet/shell.toml` + a real prompt loop remain a follow-on slice. |
+| Userland shell ELF + spawn at boot | **Partial** — `/bin/usershell.elf` (hand-built 181-byte ELF) spawns at end of init; calls `SYS_WRITE("Hello from usershell\n") + SYS_GETPID + SYS_EXIT(pid)`. The exit-code-as-pid trick lets the reaper log the userland shell's PID. TOML reader + `~/.config/duet/shell.toml` + a real prompt loop remain a follow-on slice. |
 | procfs/sysfs entries (`/proc/boottrace`, `/sys/syscalls`, `/proc/abi/native`, `/proc/abi/win32`, `/proc/cpuhist`, `/sys/inspect/<basename>`) | **Yes** — all six materialise at boot via `Ramfs*Snapshot()` calls. `/sys/inspect/<basename>` covers each PE in `/bin` via the new `PeQuickSummaryTo` writer. |
 
 ## Personality (short form)

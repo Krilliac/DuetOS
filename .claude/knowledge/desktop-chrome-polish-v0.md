@@ -3,6 +3,65 @@
 _Type: Observation + Decision._
 _Last updated: 2026-04-29._
 
+## Update 2026-04-29 (title-text scale, usershell v2, HighContrast theme)
+
+Three more slices closing out adjacent items now that the
+big-ticket deferred items are fully scoped (TTF rasterizer
+needs a font file + glyf walker; real compositor needs a
+shadow framebuffer + per-window backing allocator; real
+userland shell needs a freestanding userland libc — each is
+a multi-week effort, not a single batch).
+
+1. **`Theme.title_text_scale`** (commit `f79407f`). New
+   per-theme field 1..8 (0 collapses to 1). Duet family at 2,
+   compact at 1. Chrome paint in widget.cpp's title +
+   subtitle path now routes through
+   `FramebufferDrawStringScaled` and centres the (also-scaled)
+   text in the title bar. Subtitle separator + clipped
+   subtitle text scale together so the layout reads as a
+   unit. Subtitle hit-zone calculation also picks up the
+   per-theme `title_button_width` (was still using the
+   pre-spec btn_side from before commit `4eb06c2` —
+   incidental fix).
+
+2. **Userland shell ELF v2** (commit `f00cdf5`). Extends the
+   hand-built ELF from a single SYS_WRITE+SYS_EXIT to a
+   three-syscall sequence:
+   `SYS_WRITE("Hello from usershell\n", 21);`
+   `pid = SYS_GETPID();`
+   `SYS_EXIT(pid);`
+   The exit-code-as-pid trick lets the kernel reaper log the
+   userland shell's PID via the existing "task <pid> exited
+   with code <N>" path — confirms the round-trip without
+   needing decimal-to-ASCII conversion in the stub. ELF
+   layout updated: 40-byte code (was 33), 21-byte msg, 181
+   bytes total.
+
+3. **HighContrast accessibility theme** (commit `077c418`).
+   `ThemeId::HighContrast` (idx 9, 10th theme). WCAG-AAA
+   palette: pure black bg, pure white ink, bright yellow
+   accents (start, close, every role title). Per-role hue
+   is uniform yellow; differentiation falls back to title
+   text content so users with colour-blindness aren't
+   relying on hue. Cursor white outline + yellow fill.
+   Compact 22 / 28 px chrome.
+
+Spec status table picks up:
+- "Per-theme `title_text_scale`" -> Yes (with chrome wiring).
+- "Accessibility theme" -> Yes (HighContrast).
+- Userland shell row updated to v2 details.
+
+Substantively deferred (each genuinely needs infrastructure
+that doesn't exist yet, not just more chrome work):
+- Real TTF/OTF rasterizer — needs glyf walker + scanline
+  fill + a real font file.
+- Real compositor — needs shadow framebuffer +
+  per-window backing allocator for true alpha-blend toward
+  the underlying surface; also needs an SVG loader for the
+  prototype's topo / syscalls SVGs.
+- Real prompt-driven userland shell — needs a freestanding
+  userland libc + an ELF build rule for compiling shell.c.
+
 ## Update 2026-04-29 (deferred-items batch — chrome dims, /sys/inspect, opacity, usershell ELF, scaled font)
 
 Eight commits closing out almost every remaining row in the
