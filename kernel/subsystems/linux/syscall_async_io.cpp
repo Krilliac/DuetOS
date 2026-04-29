@@ -671,6 +671,29 @@ u32 LinuxFdEpollReady(u32 fd, u32 interest_mask)
         break;
     case 9: // epoll instance — never readable through epoll
         break;
+    case 12: // pidfd — readable iff target process has exited
+        if (interest_mask & kEPOLLIN)
+        {
+            const u64 target_pid = slot.first_cluster;
+            // Two terminal states count as "exited":
+            //   - target on g_zombies (DoExit done, not yet reaped)
+            //   - SchedFindProcessByPid returns nullptr (already
+            //     reaped or never existed)
+            // Unreaped-zombie is the common case for shells that
+            // poll a pidfd before wait4; reaped-already covers
+            // races where wait4 ran first.
+            if (sched::SchedIsPidZombie(target_pid))
+            {
+                ready |= kEPOLLIN;
+            }
+            else
+            {
+                core::Process* tgt = sched::SchedFindProcessByPid(target_pid);
+                if (tgt == nullptr)
+                    ready |= kEPOLLIN;
+            }
+        }
+        break;
     default:
         break;
     }

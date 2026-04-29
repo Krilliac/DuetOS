@@ -118,6 +118,13 @@ core::Process* TaskProcess(Task* t);
 /// into a Process pointer the kernel can hand back as a handle.
 core::Process* SchedFindProcessByPid(u64 target_pid);
 
+/// True iff a task with `target_pid` is currently on the
+/// zombies list (TaskState::Dead, awaiting reap). Used by the
+/// pidfd EPOLLIN-on-exit path to flip a poll without claiming
+/// the process is still scheduling. Walks g_zombies under
+/// arch::Cli.
+bool SchedIsPidZombie(u64 target_pid);
+
 /// Find the first live Task with `id == target_tid`. Walks the
 /// same lists as SchedFindProcessByPid (running + run-normal +
 /// run-idle + sleep) under arch::Cli. Skips zombies — a

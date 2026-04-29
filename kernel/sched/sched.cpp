@@ -1825,6 +1825,22 @@ void SchedEnumerate(SchedEnumCb cb, void* cookie)
     arch::Sti();
 }
 
+bool SchedIsPidZombie(u64 target_pid)
+{
+    arch::Cli();
+    bool hit = false;
+    for (Task* t = g_zombies; t != nullptr; t = t->next)
+    {
+        if (t->process != nullptr && t->process->pid == target_pid)
+        {
+            hit = true;
+            break;
+        }
+    }
+    arch::Sti();
+    return hit;
+}
+
 core::Process* SchedFindProcessByPid(u64 target_pid)
 {
     auto match = [&](Task* t) -> core::Process*

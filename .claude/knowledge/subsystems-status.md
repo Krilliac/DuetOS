@@ -27,7 +27,7 @@ Headline gaps:
 - **clock_settime / clock_adjtime** — currently -EPERM (no RTC writeback)
 - **Real rlimit enforcement** (currently mostly stored, not enforced)
 - ~~**mremap for real**, full madvise advice handling~~ — landed: madvise honors DONTNEED / FREE / REMOVE (zeros mapped pages, skips unmapped); mremap shrinks via real per-page unmap, MAYMOVE growth allocates a new range and direct-map-copies old contents page-by-page (sub-GAPs: file-backed VMAs not tracked, MREMAP_FIXED unimplemented)
-- **pidfd poll-on-exit** (pidfd_getfd now real for pool-backed states)
+- ~~**pidfd poll-on-exit**~~ — landed: `LinuxFdEpollReady` reports EPOLLIN on a state-12 slot when `SchedIsPidZombie(target_pid)` (task on `g_zombies`) or `SchedFindProcessByPid` returns nullptr (already reaped). `DoPoll` rerouted through the same predicate so POLLIN is consistent across epoll / poll / select. Sub-GAP: no wake on exit — pollers still spin if pid is alive (no `WaitQueueWake` from `DoExit` into the pidfd's epoll instance — needs per-pidfd waitqueue, separate slice)
 - **Real splice / tee zero-copy for file↔pipe** (pipe→pipe landed 2026-04-29; vmsplice→pipe was already real)
 - **userfaultfd, io_uring** (-ENOSYS facades only)
 - **landlock / seccomp filter execution** (-ENOSYS facades only)

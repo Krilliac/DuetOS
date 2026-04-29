@@ -14,6 +14,7 @@
  * file doesn't depend on syscall.cpp's anon-namespace WriteMsr.
  */
 
+#include "subsystems/linux/syscall_async_io.h"
 #include "subsystems/linux/syscall_internal.h"
 
 #include "proc/process.h"
@@ -283,10 +284,22 @@ i64 DoPoll(u64 user_fds, u64 nfds, i64 timeout_ms)
             ++ready;
             continue;
         }
-        if ((fds[i].events & kPollIn) != 0 || (fds[i].events & kPollOut) != 0)
+        // Reuse epoll's readiness predicate: poll's POLLIN /
+        // POLLOUT bit values match EPOLLIN / EPOLLOUT (0x1 /
+        // 0x4), so the result drops straight into revents.
+        // This makes poll() honor the same per-fd semantics
+        // epoll already exposes — most importantly, pidfd
+        // (state 12) reads as POLLIN only after the target
+        // exits, instead of always claiming ready.
+        const u32 want = static_cast<u32>(fds[i].events) & (kPollIn | kPollOut);
+        if (want != 0)
         {
-            fds[i].revents = fds[i].events & (kPollIn | kPollOut);
-            ++ready;
+            const u32 got = LinuxFdEpollReady(static_cast<u32>(fds[i].fd), want);
+            if (got != 0)
+            {
+                fds[i].revents = static_cast<i16>(got);
+                ++ready;
+            }
         }
     }
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_fds), &fds[0], nfds * sizeof(PollFd)))
