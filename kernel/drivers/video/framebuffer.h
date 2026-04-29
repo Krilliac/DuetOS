@@ -200,6 +200,30 @@ void FramebufferFillCircle(i32 cx, i32 cy, u32 radius, u32 rgb);
 /// no-op on empty dimensions or `!Available()`.
 void FramebufferPunchCorners(u32 x, u32 y, u32 w, u32 h, u32 radius, u32 punch_rgb);
 
+/// Stroke a partial circular arc — every pixel in the
+/// `[start_deg, start_deg + sweep_deg)` sector at distance
+/// `radius` from `(cx, cy)`, plotted in `rgb`. Iterates `θ` in
+/// 1° steps so the arc is dense enough at small radii (≤ 64 px)
+/// to look continuous; larger radii will see visible gaps until
+/// a per-radius step refinement lands.
+///
+/// `thickness` paints `thickness` concentric arcs at radii
+/// `[radius - thickness/2, radius + (thickness+1)/2)` so a
+/// 1-px stroke is a single arc, 2-px is `r-0` and `r+1`, 3-px
+/// is `r-1`, `r`, `r+1`, etc. Pixel-aligned, no anti-aliasing.
+///
+/// Angles are in degrees, with 0° = positive X (3 o'clock) and
+/// increasing clockwise (matching a Y-down framebuffer's
+/// "counterclockwise on screen" intuition would require
+/// flipping the sin sign — left as-is so the API matches an
+/// SVG-style coordinate system the way the prototype's design
+/// language thinks).
+///
+/// `sweep_deg` may be negative (sweep counter-clockwise) or
+/// > 360 (multiple revolutions). Negative `radius` is a no-op.
+/// No-op if `!Available()` or `thickness == 0`.
+void FramebufferStrokeArc(i32 cx, i32 cy, i32 radius, i32 start_deg, i32 sweep_deg, u32 thickness, u32 rgb);
+
 /// Soft "drop shadow" for a window or panel. Paints a
 /// `depth`-pixel-wide alpha-blended L-shape along the right
 /// and bottom edges of the rect at `(x, y, w, h)`, using black

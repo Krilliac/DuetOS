@@ -93,6 +93,35 @@ Two more items off `docs/duet-theme-spec.md`:
 - `kernel/drivers/video/wallpaper.h`
 - `kernel/drivers/video/wallpaper.cpp`
 
+## Update 2026-04-29 (per-theme taskbar height + StrokeArc + partial-arc DuetMark)
+
+Three more chrome polish slices:
+
+1. **Per-theme `taskbar_height`** — `Theme` struct gained the
+   field. Duet family ships 36 px; non-Duet themes + DuetClassic
+   stay at 28. main.cpp's boot path samples `theme0.taskbar_height`
+   instead of the prior hardcoded 28. New `TaskbarHeight()`
+   accessor exposes the live value; `WindowMaximize` uses it for
+   the bottom-edge reserve so maximize on Duet correctly preserves
+   the larger strip. Live re-init on theme cycle still deferred
+   (would shift the console anchor mid-session).
+
+2. **`FramebufferStrokeArc(cx, cy, r, start_deg, sweep_deg,
+   thickness, rgb)`** — partial-arc rasterizer backed by a
+   91-entry Q16.16 sin table covering [0°, 90°] (mirrored for
+   the other quadrants). Walks the sweep in 1° steps; for each
+   step plots concentric pixels at `r-half .. r+half`. Negative
+   sweep flips direction; sweep > 360° caps to 360°. Coordinate-
+   clipped, no AA.
+
+3. **Partial-arc DuetMark on START** — the START button's
+   two-circle DuetMark is replaced with two 189° arcs (matches
+   the prototype's `dasharray = (r·π·1.05, r·π·2)` =
+   ~52% of the circle), thickness 2: primary arc rotated -30°
+   in the variant accent, amber arc rotated 150°. Each 189°
+   sweep × 2 thickness × 2 arcs = ~756 pixel writes per frame —
+   trivial.
+
 ## Update 2026-04-29 (per-theme dimensions + DuetClassic palette)
 
 `Theme` struct gained a `title_bar_height` field. Duet family

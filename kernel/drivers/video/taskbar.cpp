@@ -213,12 +213,18 @@ void TaskbarRedraw()
         // each variant's brand colour reads in the START glyph.
         // Secondary ring: amber across all variants — the "second
         // ABI" ink the duet narrative is built around.
+        //
+        // Partial-arc geometry — matches the prototype's DuetMark
+        // (`docs/duet-theme/prototype/`): each ring is a ~189°
+        // sweep (52% of the full circle), with the two arcs
+        // rotated 180° apart so the open ends face away from
+        // each other. Stroke thickness 2 keeps the ring visible
+        // on the active-tab gradient + the inactive dim overlay.
         constexpr u32 kAmber = 0x00F0B040;
         const u32 primary_ring = g_accent;
-        FramebufferDrawCircle(ring_a_cx, ring_cy, ring_r, primary_ring);
-        FramebufferDrawCircle(ring_a_cx, ring_cy, ring_r - 1, primary_ring);
-        FramebufferDrawCircle(ring_b_cx, ring_cy, ring_r, kAmber);
-        FramebufferDrawCircle(ring_b_cx, ring_cy, ring_r - 1, kAmber);
+        constexpr i32 kArcSweep = 189;
+        FramebufferStrokeArc(ring_a_cx, ring_cy, static_cast<i32>(ring_r), -30, kArcSweep, 2U, primary_ring);
+        FramebufferStrokeArc(ring_b_cx, ring_cy, static_cast<i32>(ring_r), 150, kArcSweep, 2U, kAmber);
         // Label sits right of the rings.
         const u32 label_x = mark_origin_x + 2 * mark_diameter - mark_overlap + 6;
         FramebufferDrawString(label_x, text_y, "DUET", g_fg, g_accent);

@@ -16,9 +16,10 @@ measured against.
 | Duet variants (Light, Blue, Violet, Green, Classic) | **Yes** — 6 Duet-family themes ship |
 | Window chrome (gradient title, ridge, drop shadow, X-glyph close, min/max/restore controls, subtitle, dim-on-blur, rounded corners on Duet family) | **Yes** |
 | Per-theme `title_bar_height` (22 / 26 px) | **Yes** |
+| Per-theme `taskbar_height` (28 / 36 px) | **Yes** |
 | Taskbar polish (gradient strip, rounded START + tabs, focus dot 8/14 px for pinned/running, theme-tinted Show Desktop sliver with click toggle) | **Yes** |
 | Wallpapers (duet-arcs + topo on Duet family; Classic bubbles, Slate10 grid, Amber scanlines on others) | **Yes** |
-| DuetMark on START | **Yes** (simplified two-circle form; partial-arc form deferred) |
+| DuetMark on START | **Yes** — partial-arc form (189° sweeps, primary at -30° and amber at 150°) backed by `FramebufferStrokeArc` |
 | Login screen + start menu + calendar + netpanel chrome polish | **Yes** |
 | Theme-aware cursor | **Yes** |
 | Per-window alpha (real compositor mask, 30-px titlebar, taskbar height/position) | **Deferred** — needs a real compositor / dimensions pass |
@@ -129,7 +130,7 @@ state, not theme state.
 
 | Prototype spec                                         | Ships in v0 Duet palette? | Notes |
 |--------------------------------------------------------|---------------------------|-------|
-| 44-px (compact 38-px) bar                              | No — taskbar height fixed in `taskbar.cpp` |
+| 44-px (compact 38-px) bar                              | Partial — `Theme.taskbar_height` per palette (Duet family ships 36 px, others 28 px). The full 44-px bar awaits a content-density pass on the strip itself. `WindowMaximize` reads the live value via `TaskbarHeight()` so the maximize reserve adapts. |
 | 4 positions (bottom/top/left/right)                    | No — taskbar position fixed |
 | Accent-rail "Show desktop" sliver                      | Yes — paints a 4-px theme-accent rail at the right edge of the strip; clicking the rail snapshots visibility of every alive window via `WindowShowDesktopToggle`, hides them all, and a second click restores the snapshot. Rail body alpha shifts (0x60 → 0xC0) when the toggle is active so the user has a visible "armed" cue. |
 | 2-px tall focus dot under running apps (8 / 14 px)     | Yes — active-tab dot is 8 px when the window is pinned (kernel boot apps marked via `ThemeRegisterWindow` → `WindowSetPinned(true)`) and 14 px otherwise (ring-3 PE windows + any unpinned). Per-window `WindowIsPinned` / `WindowSetPinned` accessors back the distinction. |
@@ -178,13 +179,20 @@ For v0 the Start button paints the existing 3-letter "D u e"
 glyph in `taskbar_fg` over `taskbar_accent`, matching how
 Classic / Slate10 / Amber draw it today.
 
-A simplified DuetMark now ships on the Duet theme: the START
-button renders two interlocking outlined circles (teal +
-amber, 2-px stroke each) followed by the word "DUET". This
-trades the prototype's partial-arc strokes for full circles —
-the visual story (two interlocking rings) is preserved without
-needing a path stroker. Partial-arc rasterization remains a
-follow-on once `FramebufferStrokePath` lands.
+The DuetMark now ships in its prototype-faithful partial-arc
+form. `FramebufferStrokeArc(cx, cy, r, start_deg, sweep_deg,
+thickness, rgb)` (backed by a 91-entry Q16.16 sin table) walks
+the arc in 1° steps and plots concentric pixels for thickness.
+The START button paints two 189° arcs (~52% sweep, matching
+the prototype's `dasharray = (r·π·1.05, r·π·2)`) — primary
+arc rotated -30° in the variant accent, amber arc rotated
+150°. Two-pixel stroke survives the active-tab gradient and
+inactive-window dim overlay.
+
+The full `FramebufferStrokePath` (cubic-Bézier flattener, etc.)
+is still a Phase 3+ item; the partial-arc primitive that
+landed here is sufficient for circular-arc work without a
+full path stroker.
 
 ## Wallpaper — same approach
 

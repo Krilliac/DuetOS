@@ -807,6 +807,101 @@ void FramebufferPunchCorners(u32 x, u32 y, u32 w, u32 h, u32 radius, u32 punch_r
     }
 }
 
+namespace
+{
+
+// Q16.16 sin values for [0°, 90°]. Generated offline from
+// `sin(d * π / 180) * 65536`, rounded to nearest. 91 entries
+// is enough for full-circle work via quadrant mirroring.
+constexpr i32 kSinDegQ16[91] = {
+    0,     1144,  2287,  3430,  4572,  5712,  6850,  7987,  9121,  10252, 11380, 12505, 13626, 14742, 15855, 16962,
+    18064, 19161, 20252, 21336, 22415, 23486, 24550, 25607, 26656, 27697, 28729, 29753, 30767, 31772, 32768, 33754,
+    34729, 35693, 36647, 37590, 38521, 39441, 40348, 41243, 42126, 42995, 43852, 44695, 45525, 46341, 47143, 47930,
+    48703, 49461, 50203, 50931, 51643, 52339, 53020, 53684, 54332, 54963, 55578, 56175, 56756, 57319, 57865, 58393,
+    58903, 59396, 59870, 60326, 60764, 61183, 61584, 61966, 62328, 62672, 62997, 63303, 63589, 63856, 64104, 64332,
+    64540, 64729, 64898, 65048, 65177, 65287, 65376, 65446, 65496, 65526, 65536,
+};
+
+// Reduce `deg` to the canonical range [0, 360).
+i32 NormalizeDeg(i32 deg)
+{
+    deg %= 360;
+    if (deg < 0)
+        deg += 360;
+    return deg;
+}
+
+// Q16.16 sin / cos via quadrant mirroring of the [0, 90°] table.
+// Inputs are integer degrees; results are i32 in Q16.16.
+i32 SinDegQ16(i32 deg)
+{
+    deg = NormalizeDeg(deg);
+    if (deg <= 90)
+        return kSinDegQ16[deg];
+    if (deg <= 180)
+        return kSinDegQ16[180 - deg];
+    if (deg <= 270)
+        return -kSinDegQ16[deg - 180];
+    return -kSinDegQ16[360 - deg];
+}
+
+i32 CosDegQ16(i32 deg)
+{
+    return SinDegQ16(deg + 90);
+}
+
+} // namespace
+
+void FramebufferStrokeArc(i32 cx, i32 cy, i32 radius, i32 start_deg, i32 sweep_deg, u32 thickness, u32 rgb)
+{
+    if (!g_available || radius <= 0 || thickness == 0)
+    {
+        return;
+    }
+    // Normalize the sweep direction to a positive walk so the
+    // inner loop is monotonic. A negative sweep flips the start
+    // and direction.
+    i32 walk_steps = sweep_deg;
+    i32 step_sign = 1;
+    if (walk_steps < 0)
+    {
+        walk_steps = -walk_steps;
+        step_sign = -1;
+    }
+    // Sweeps > 360° just paint the full circle (idempotent
+    // pixels are no problem); cap so the inner loop is bounded.
+    if (walk_steps > 360)
+    {
+        walk_steps = 360;
+    }
+    // Thickness: walk concentric arcs at radii in
+    // [r - half, r - half + thickness). Half-step asymmetry
+    // gives a 2-px stroke at radii (r, r+1), 3-px at (r-1, r,
+    // r+1), 4-px at (r-1, r, r+1, r+2), etc.
+    const i32 half = static_cast<i32>(thickness / 2);
+    for (i32 d = 0; d <= walk_steps; ++d)
+    {
+        const i32 angle = start_deg + step_sign * d;
+        const i32 c = CosDegQ16(angle);
+        const i32 s = SinDegQ16(angle);
+        for (u32 t = 0; t < thickness; ++t)
+        {
+            const i32 r = radius - half + static_cast<i32>(t);
+            if (r <= 0)
+                continue;
+            // (cx + cos*r, cy + sin*r), rounded.
+            const i32 dx = static_cast<i32>((static_cast<i64>(c) * r) >> 16);
+            const i32 dy = static_cast<i32>((static_cast<i64>(s) * r) >> 16);
+            const i32 px = cx + dx;
+            const i32 py = cy + dy;
+            if (px >= 0 && py >= 0 && static_cast<u32>(px) < g_info.width && static_cast<u32>(py) < g_info.height)
+            {
+                FramebufferPutPixel(static_cast<u32>(px), static_cast<u32>(py), rgb);
+            }
+        }
+    }
+}
+
 void FramebufferDropShadow(u32 x, u32 y, u32 w, u32 h, u32 depth, u8 start_alpha)
 {
     if (!g_available || w == 0 || h == 0 || depth == 0 || start_alpha == 0)
