@@ -2202,14 +2202,47 @@ __declspec(dllexport) BOOL MoveFileW(const wchar_t16* src, const wchar_t16* dst)
 
 __declspec(dllexport) DWORD GetFileAttributesA(const char* path)
 {
-    (void)path;
-    return 0xFFFFFFFFu; /* INVALID_FILE_ATTRIBUTES — "not found" */
+    if (path == (const char*)0)
+        return 0xFFFFFFFFu;
+    char kpath[256];
+    for (unsigned long i = 0; i < sizeof(kpath); ++i)
+        kpath[i] = 0;
+    NormalizePathA(path, kpath, sizeof(kpath), (char*)0, 0);
+    int len = 0;
+    while (kpath[len] != '\0' && len < 255)
+        ++len;
+    if (len == 0)
+        return 0xFFFFFFFFu;
+    /* SYS_FILE_QUERY_ATTRIBUTES = 151. Out buffer is the
+     * FILE_NETWORK_OPEN_INFORMATION layout — 56 bytes; we only
+     * read the FileAttributes DWORD at offset 48. */
+    unsigned char info[56];
+    for (unsigned long i = 0; i < sizeof(info); ++i)
+        info[i] = 0;
+    long long status;
+    register long long r10 __asm__("r10") = (long long)sizeof(info);
+    __asm__ volatile("int $0x80"
+                     : "=a"(status)
+                     : "a"((long long)151), "D"((long long)kpath), "S"((long long)len), "d"((long long)info), "r"(r10)
+                     : "memory");
+    if (status != 0)
+        return 0xFFFFFFFFu; /* not found / no read permission */
+    return *(unsigned*)(info + 48);
 }
 
 __declspec(dllexport) DWORD GetFileAttributesW(const wchar_t16* path)
 {
-    (void)path;
-    return 0xFFFFFFFFu;
+    if (path == (const wchar_t16*)0)
+        return 0xFFFFFFFFu;
+    char ascii[256];
+    int i = 0;
+    while (i < 255 && path[i] != 0)
+    {
+        ascii[i] = (char)(path[i] & 0xFF);
+        ++i;
+    }
+    ascii[i] = '\0';
+    return GetFileAttributesA(ascii);
 }
 
 /* SetFileAttributes — v0 has no writable FS backend; pretend
