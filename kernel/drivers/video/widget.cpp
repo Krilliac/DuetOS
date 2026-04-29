@@ -140,6 +140,16 @@ u32 LightenRgb(u32 rgb, u32 amount);
 // 22-px default. Single source of truth — paint + hit-test
 // paths both consult this so a theme switch can't desync the
 // chrome and the click target.
+// Pixel width of one title-bar control button (close / max /
+// min). Theme.title_button_width = 0 means "derive from height"
+// (the historical pre-spec behaviour: square buttons sized off
+// the title bar). Otherwise the theme's value wins.
+u32 EffectiveButtonWidth(u32 derived_height)
+{
+    const u32 from_theme = ThemeCurrent().title_button_width;
+    return (from_theme != 0) ? from_theme : derived_height;
+}
+
 u32 EffectiveTitleHeight(const WindowChrome& w)
 {
     if (w.title_height != 0)
@@ -482,49 +492,61 @@ void WindowDraw(const WindowChrome& w)
     // with the framebuffer's line primitive — pixel-perfect at
     // any title-bar height.
     const u32 btn_pad = 4;
-    if (tbh_eff > 2 * btn_pad + 4 && w.w > tbh_eff * 3U + btn_pad * 2U)
     {
-        const u32 btn_side = tbh_eff - 2 * btn_pad;
-        const u32 close_x = w.x + w.w - btn_side - btn_pad;
-        const u32 max_x = (close_x > btn_side + 2U) ? close_x - btn_side - 2U : close_x;
-        const u32 min_x = (max_x > btn_side + 2U) ? max_x - btn_side - 2U : max_x;
-        const u32 btn_y = w.y + btn_pad;
-
-        // Use the title bar's gradient-bottom colour as the
-        // hover/control fill so min + max look like part of the
-        // chrome, not separate UI. The close box keeps its
-        // theme-distinct red.
-        const u32 ctrl_fill = w.colour_title;
-        FramebufferFillRect(min_x, btn_y, btn_side, btn_side, ctrl_fill);
-        FramebufferDrawRect(min_x, btn_y, btn_side, btn_side, w.colour_border, 1);
-        FramebufferFillRect(max_x, btn_y, btn_side, btn_side, ctrl_fill);
-        FramebufferDrawRect(max_x, btn_y, btn_side, btn_side, w.colour_border, 1);
-        FramebufferFillRect(close_x, btn_y, btn_side, btn_side, w.colour_close_btn);
-        FramebufferDrawRect(close_x, btn_y, btn_side, btn_side, w.colour_border, 1);
-
-        if (btn_side >= 8)
+        const u32 btn_h = (tbh_eff > 2 * btn_pad) ? tbh_eff - 2 * btn_pad : 0;
+        const u32 btn_w = EffectiveButtonWidth(btn_h);
+        if (btn_h > 4 && w.w > btn_w * 3U + btn_pad * 2U)
         {
-            const u32 inset = 3;
-            // Minimize: a 2-px-thick horizontal bar near the
-            // bottom of the box. Reads as the "_" glyph at
-            // small sizes.
-            FramebufferFillRect(min_x + inset, btn_y + btn_side - inset - 2U, btn_side - 2U * inset, 2U, 0x00FFFFFF);
-            // Maximize / restore: a 1-px outlined square in
-            // the centre. When already maximized, draw a
-            // double-square to hint "restore" — the chrome
-            // doesn't store hover state, so this is the only
-            // visible distinction between max + restore.
-            const u32 sq_side = btn_side - 2U * inset;
-            FramebufferDrawRect(max_x + inset, btn_y + inset, sq_side, sq_side, 0x00FFFFFF, 1);
-            // Close: doubled diagonal X (existing chrome).
-            const i32 x0 = static_cast<i32>(close_x + inset);
-            const i32 y0 = static_cast<i32>(btn_y + inset);
-            const i32 x1 = static_cast<i32>(close_x + btn_side - 1U - inset);
-            const i32 y1 = static_cast<i32>(btn_y + btn_side - 1U - inset);
-            FramebufferDrawLine(x0, y0, x1, y1, 0x00FFFFFF);
-            FramebufferDrawLine(x0, y1, x1, y0, 0x00FFFFFF);
-            FramebufferDrawLine(x0 + 1, y0, x1, y1 - 1, 0x00FFFFFF);
-            FramebufferDrawLine(x0, y1 - 1, x1 - 1, y0, 0x00FFFFFF);
+            const u32 close_x = w.x + w.w - btn_w - btn_pad;
+            const u32 max_x = (close_x > btn_w + 2U) ? close_x - btn_w - 2U : close_x;
+            const u32 min_x = (max_x > btn_w + 2U) ? max_x - btn_w - 2U : max_x;
+            const u32 btn_y = w.y + btn_pad;
+
+            // Use the title bar's gradient-bottom colour as the
+            // hover/control fill so min + max look like part of the
+            // chrome, not separate UI. The close box keeps its
+            // theme-distinct red.
+            const u32 ctrl_fill = w.colour_title;
+            FramebufferFillRect(min_x, btn_y, btn_w, btn_h, ctrl_fill);
+            FramebufferDrawRect(min_x, btn_y, btn_w, btn_h, w.colour_border, 1);
+            FramebufferFillRect(max_x, btn_y, btn_w, btn_h, ctrl_fill);
+            FramebufferDrawRect(max_x, btn_y, btn_w, btn_h, w.colour_border, 1);
+            FramebufferFillRect(close_x, btn_y, btn_w, btn_h, w.colour_close_btn);
+            FramebufferDrawRect(close_x, btn_y, btn_w, btn_h, w.colour_border, 1);
+
+            // Glyph dimensions use the smaller of width/height so
+            // the inner mark stays centred + symmetric whether the
+            // box is square (compact themes) or wider-than-tall
+            // (Duet 46-px chrome). Inset measured from the smaller
+            // dim; horizontal padding centres a square glyph
+            // inside the wider rectangle.
+            const u32 glyph_side = (btn_w < btn_h) ? btn_w : btn_h;
+            if (glyph_side >= 8)
+            {
+                const u32 inset = 3;
+                const u32 gx_pad = (btn_w - glyph_side) / 2;
+                // Minimize: a 2-px-thick horizontal bar near the
+                // bottom of the box. Reads as the "_" glyph at
+                // small sizes.
+                FramebufferFillRect(min_x + gx_pad + inset, btn_y + btn_h - inset - 2U, glyph_side - 2U * inset, 2U,
+                                    0x00FFFFFF);
+                // Maximize / restore: a 1-px outlined square in
+                // the centre. When already maximized, draw a
+                // double-square to hint "restore" — the chrome
+                // doesn't store hover state, so this is the only
+                // visible distinction between max + restore.
+                const u32 sq_side = glyph_side - 2U * inset;
+                FramebufferDrawRect(max_x + gx_pad + inset, btn_y + inset, sq_side, sq_side, 0x00FFFFFF, 1);
+                // Close: doubled diagonal X (existing chrome).
+                const i32 cx0 = static_cast<i32>(close_x + gx_pad + inset);
+                const i32 cy0 = static_cast<i32>(btn_y + inset);
+                const i32 cx1 = static_cast<i32>(close_x + gx_pad + glyph_side - 1U - inset);
+                const i32 cy1 = static_cast<i32>(btn_y + btn_h - 1U - inset);
+                FramebufferDrawLine(cx0, cy0, cx1, cy1, 0x00FFFFFF);
+                FramebufferDrawLine(cx0, cy1, cx1, cy0, 0x00FFFFFF);
+                FramebufferDrawLine(cx0 + 1, cy0, cx1, cy1 - 1, 0x00FFFFFF);
+                FramebufferDrawLine(cx0, cy1 - 1, cx1 - 1, cy0, 0x00FFFFFF);
+            }
         }
     }
 
@@ -782,14 +804,15 @@ bool WindowPointInCloseBox(WindowHandle h, u32 x, u32 y)
     const u32 tbh = EffectiveTitleHeight(c);
     const u32 tbh_eff = (tbh > c.h) ? c.h : tbh;
     const u32 btn_pad = 4;
-    if (tbh_eff <= 2 * btn_pad + 4 || c.w <= tbh_eff * 3U + btn_pad * 2U)
+    const u32 btn_h = (tbh_eff > 2 * btn_pad) ? tbh_eff - 2 * btn_pad : 0;
+    const u32 btn_w = EffectiveButtonWidth(btn_h);
+    if (btn_h <= 4 || c.w <= btn_w * 3U + btn_pad * 2U)
     {
         return false; // title bar too short for the trio
     }
-    const u32 btn_side = tbh_eff - 2 * btn_pad;
-    const u32 btn_x = c.x + c.w - btn_side - btn_pad;
+    const u32 btn_x = c.x + c.w - btn_w - btn_pad;
     const u32 btn_y = c.y + btn_pad;
-    return x >= btn_x && x < btn_x + btn_side && y >= btn_y && y < btn_y + btn_side;
+    return x >= btn_x && x < btn_x + btn_w && y >= btn_y && y < btn_y + btn_h;
 }
 
 bool WindowPointInMaxBox(WindowHandle h, u32 x, u32 y)
@@ -802,19 +825,20 @@ bool WindowPointInMaxBox(WindowHandle h, u32 x, u32 y)
     const u32 tbh = EffectiveTitleHeight(c);
     const u32 tbh_eff = (tbh > c.h) ? c.h : tbh;
     const u32 btn_pad = 4;
-    if (tbh_eff <= 2 * btn_pad + 4 || c.w <= tbh_eff * 3U + btn_pad * 2U)
+    const u32 btn_h = (tbh_eff > 2 * btn_pad) ? tbh_eff - 2 * btn_pad : 0;
+    const u32 btn_w = EffectiveButtonWidth(btn_h);
+    if (btn_h <= 4 || c.w <= btn_w * 3U + btn_pad * 2U)
     {
         return false;
     }
-    const u32 btn_side = tbh_eff - 2 * btn_pad;
-    const u32 close_x = c.x + c.w - btn_side - btn_pad;
-    if (close_x <= btn_side + 2U)
+    const u32 close_x = c.x + c.w - btn_w - btn_pad;
+    if (close_x <= btn_w + 2U)
     {
         return false;
     }
-    const u32 max_x = close_x - btn_side - 2U;
+    const u32 max_x = close_x - btn_w - 2U;
     const u32 btn_y = c.y + btn_pad;
-    return x >= max_x && x < max_x + btn_side && y >= btn_y && y < btn_y + btn_side;
+    return x >= max_x && x < max_x + btn_w && y >= btn_y && y < btn_y + btn_h;
 }
 
 bool WindowPointInMinBox(WindowHandle h, u32 x, u32 y)
@@ -827,24 +851,25 @@ bool WindowPointInMinBox(WindowHandle h, u32 x, u32 y)
     const u32 tbh = EffectiveTitleHeight(c);
     const u32 tbh_eff = (tbh > c.h) ? c.h : tbh;
     const u32 btn_pad = 4;
-    if (tbh_eff <= 2 * btn_pad + 4 || c.w <= tbh_eff * 3U + btn_pad * 2U)
+    const u32 btn_h = (tbh_eff > 2 * btn_pad) ? tbh_eff - 2 * btn_pad : 0;
+    const u32 btn_w = EffectiveButtonWidth(btn_h);
+    if (btn_h <= 4 || c.w <= btn_w * 3U + btn_pad * 2U)
     {
         return false;
     }
-    const u32 btn_side = tbh_eff - 2 * btn_pad;
-    const u32 close_x = c.x + c.w - btn_side - btn_pad;
-    if (close_x <= btn_side + 2U)
+    const u32 close_x = c.x + c.w - btn_w - btn_pad;
+    if (close_x <= btn_w + 2U)
     {
         return false;
     }
-    const u32 max_x = close_x - btn_side - 2U;
-    if (max_x <= btn_side + 2U)
+    const u32 max_x = close_x - btn_w - 2U;
+    if (max_x <= btn_w + 2U)
     {
         return false;
     }
-    const u32 min_x = max_x - btn_side - 2U;
+    const u32 min_x = max_x - btn_w - 2U;
     const u32 btn_y = c.y + btn_pad;
-    return x >= min_x && x < min_x + btn_side && y >= btn_y && y < btn_y + btn_side;
+    return x >= min_x && x < min_x + btn_w && y >= btn_y && y < btn_y + btn_h;
 }
 
 void WindowMinimize(WindowHandle h)

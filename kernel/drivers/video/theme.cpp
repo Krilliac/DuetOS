@@ -99,6 +99,7 @@ constexpr Theme kClassic = {
 
     .title_bar_height = 22,
     .taskbar_height = 28,
+    .title_button_width = 0,
 };
 
 // Amber is a deliberate retro exercise — a single-hue amber palette
@@ -155,6 +156,7 @@ constexpr Theme kAmber = {
 
     .title_bar_height = 22,
     .taskbar_height = 28,
+    .title_button_width = 0,
 };
 
 constexpr Theme kSlate10 = {
@@ -214,6 +216,7 @@ constexpr Theme kSlate10 = {
 
     .title_bar_height = 22,
     .taskbar_height = 28,
+    .title_button_width = 0,
 };
 
 // Duet — the redesigned palette. Slate-charcoal canvas, dual-accent
@@ -281,6 +284,7 @@ constexpr Theme kDuet = {
     // cells get the breathing room the design calls for.
     .title_bar_height = 30,
     .taskbar_height = 44,
+    .title_button_width = 46,
 };
 
 // DuetLight — light-mode sibling of Duet, sourced from the
@@ -340,6 +344,7 @@ constexpr Theme kDuetLight = {
 
     .title_bar_height = 30,
     .taskbar_height = 44,
+    .title_button_width = 46,
 };
 
 // Duet accent variants. Each one duplicates the slate Duet
@@ -390,6 +395,7 @@ constexpr Theme kDuetBlue = {
     .cursor_fill = 0x00E8EDF2,
     .title_bar_height = 30,
     .taskbar_height = 44,
+    .title_button_width = 46,
 };
 
 constexpr Theme kDuetViolet = {
@@ -429,6 +435,7 @@ constexpr Theme kDuetViolet = {
     .cursor_fill = 0x00E8EDF2,
     .title_bar_height = 30,
     .taskbar_height = 44,
+    .title_button_width = 46,
 };
 
 constexpr Theme kDuetGreen = {
@@ -468,6 +475,7 @@ constexpr Theme kDuetGreen = {
     .cursor_fill = 0x00E8EDF2,
     .title_bar_height = 30,
     .taskbar_height = 44,
+    .title_button_width = 46,
 };
 
 // DuetClassic — the prototype's "classic mode" sibling.
@@ -533,6 +541,7 @@ constexpr Theme kDuetClassic = {
     // cosier proportions match the era's UI.
     .title_bar_height = 22,
     .taskbar_height = 28,
+    .title_button_width = 0,
 };
 
 const Theme* const kThemes[static_cast<u32>(ThemeId::kCount)] = {

@@ -163,6 +163,16 @@ struct Theme
     // current chrome can't unwind without a re-compose
     // pass.
     u32 taskbar_height;
+
+    // Title-bar control button width in pixels (the close /
+    // maximize / minimize trio). Height is always
+    // `title_bar_height - 2 * btn_pad` so the buttons fit
+    // inside the gradient strip vertically; width is
+    // independent so the Duet family can ship the prototype's
+    // 46-px-wide chrome trio. 0 = "derive from height" (square
+    // buttons sized off `title_bar_height`), the historical
+    // pre-spec behaviour.
+    u32 title_button_width;
 };
 
 /// Read-only snapshot of the active theme. Valid for as long as
