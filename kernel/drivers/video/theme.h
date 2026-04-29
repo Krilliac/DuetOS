@@ -114,6 +114,14 @@ struct Theme
     // Framebuffer console
     u32 console_fg;
     u32 console_bg;
+
+    // Mouse cursor sprite. `cursor_outline` paints the
+    // 1-px black-by-default border around the arrow shape;
+    // `cursor_fill` paints the interior. Theme-tuned so the
+    // cursor matches the surrounding chrome (e.g. Amber cursors
+    // on the amber CRT theme, slate-ink on the Duet theme).
+    u32 cursor_outline;
+    u32 cursor_fill;
 };
 
 /// Read-only snapshot of the active theme. Valid for as long as

@@ -91,6 +91,9 @@ constexpr Theme kClassic = {
 
     .console_fg = 0x0080F088,
     .console_bg = 0x00181028,
+
+    .cursor_outline = 0x00000000, // classic black outline
+    .cursor_fill = 0x00FFFFFF,    // classic white fill
 };
 
 // Amber is a deliberate retro exercise — a single-hue amber palette
@@ -139,6 +142,11 @@ constexpr Theme kAmber = {
 
     .console_fg = 0x00FFA830,
     .console_bg = 0x00080400,
+
+    // Amber cursor: deep CRT brown outline with a bright phosphor
+    // interior — preserves the monochrome aesthetic.
+    .cursor_outline = 0x00301008,
+    .cursor_fill = 0x00FFB840,
 };
 
 constexpr Theme kSlate10 = {
@@ -189,6 +197,12 @@ constexpr Theme kSlate10 = {
 
     .console_fg = 0x00D4D4D4, // VSCode default editor ink
     .console_bg = 0x001A1A20, // Slate panel
+
+    // Slate10 cursor: dark slate outline + bright Win10-blue
+    // interior so the pointer reads as a brand-tinted ink on
+    // dark slate.
+    .cursor_outline = 0x00101015,
+    .cursor_fill = 0x00DDE6F0,
 };
 
 // Duet — the redesigned palette. Slate-charcoal canvas, dual-accent
@@ -244,6 +258,12 @@ constexpr Theme kDuet = {
 
     .console_fg = 0x00E8EDF2, // `--ink` — JetBrains-Mono ink in the prototype
     .console_bg = 0x000F1319, // `--chrome-3` — slate panel ground
+
+    // Duet cursor: slate ink on near-charcoal outline. Lifts the
+    // cursor off the dark gradient without competing with the
+    // teal / amber accents reserved for the duet-arcs identity.
+    .cursor_outline = 0x000B0E13, // matches `desktop_bg`
+    .cursor_fill = 0x00E8EDF2,    // matches `--ink`
 };
 
 const Theme* const kThemes[static_cast<u32>(ThemeId::kCount)] = {
@@ -341,6 +361,7 @@ void ThemeApplyToAll()
     TaskbarSetColours(t.taskbar_bg, t.taskbar_fg, t.taskbar_accent, t.taskbar_tab_inactive, t.taskbar_border);
     ConsoleSetColours(t.console_fg, t.console_bg);
     CursorSetDesktopBackground(t.desktop_bg);
+    CursorSetColours(t.cursor_outline, t.cursor_fill);
 
     // Start menu / popup palette: body = inactive-tab recess panel
     // (taskbar's "darkest" surface so the menu reads as a deeper

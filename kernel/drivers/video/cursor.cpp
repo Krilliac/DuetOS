@@ -51,8 +51,11 @@ constinit const u8 kCursorMask[kCursorHeight][kCursorWidth] = {
 };
 // clang-format on
 
-constexpr u32 kColourOutline = 0x00000000;
-constexpr u32 kColourFill = 0x00FFFFFF;
+// Default colours match the v0 hardcoded behaviour (black
+// outline, white fill). Theme switches update these via
+// `CursorSetColours`.
+constinit u32 g_colour_outline = 0x00000000;
+constinit u32 g_colour_fill = 0x00FFFFFF;
 
 constinit u32 g_x = 0;
 constinit u32 g_y = 0;
@@ -148,7 +151,7 @@ void DrawAt(u32 x, u32 y)
             {
                 continue;
             }
-            const u32 rgb = (kind == kPxOutline) ? kColourOutline : kColourFill;
+            const u32 rgb = (kind == kPxOutline) ? g_colour_outline : g_colour_fill;
             FramebufferPutPixel(x + xi, y + yi, rgb);
         }
     }
@@ -249,6 +252,19 @@ void CursorShow()
 void CursorSetDesktopBackground(u32 rgb)
 {
     g_desktop_rgb = rgb;
+}
+
+void CursorSetColours(u32 outline_rgb, u32 fill_rgb)
+{
+    g_colour_outline = outline_rgb;
+    g_colour_fill = fill_rgb;
+    // Repaint with the new colours if the cursor is currently
+    // visible. Otherwise we'd wait for the next motion event,
+    // which can be many seconds when the user is mid-task.
+    if (g_ready)
+    {
+        DrawAt(g_x, g_y);
+    }
 }
 
 } // namespace duetos::drivers::video

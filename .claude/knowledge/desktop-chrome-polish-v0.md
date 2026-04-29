@@ -93,6 +93,46 @@ Two more items off `docs/duet-theme-spec.md`:
 - `kernel/drivers/video/wallpaper.h`
 - `kernel/drivers/video/wallpaper.cpp`
 
+## Update 2026-04-29 (rounded corners + per-theme wallpapers + theme-aware cursor)
+
+Three more chrome polish slices, each its own commit:
+
+1. **Rounded window corners on Duet** — new primitive
+   `FramebufferPunchCorners(x, y, w, h, radius, punch_rgb)` walks
+   each of the four corner-quadrant `radius × radius` squares
+   and overpaints every pixel OUTSIDE the rounded curve with
+   `punch_rgb`. `WindowDrawAllOrdered` calls it after
+   `WindowDraw` when `ThemeCurrentId() == ThemeId::Duet`,
+   passing the desktop fill colour (= the gradient mid-tone)
+   captured into a file-static `g_compose_desktop_rgb` by
+   `DesktopCompose`. The chrome itself is still painted as a
+   rectangle; the punch shapes the visible silhouette.
+   Other themes keep rectangular chrome to preserve their
+   original v0 look bit-for-bit.
+
+2. **Per-theme wallpapers for Classic / Slate10 / Amber** —
+   `wallpaper.cpp` gains three more programmatic patterns:
+   `PaintClassicBubbles` (12 deterministic outlined circles
+   scattered via LCG-ish positions, skipping the taskbar zone),
+   `PaintSlate10Grid` (sparse 32-px grid of single-pixel dots
+   blended toward Win10 blue), `PaintAmberScanlines` (every 3rd
+   row gets a 1-px brightness lift evoking CRT phosphor
+   interlace). All three skip the bottom 80 px so the taskbar
+   stays clean. `WallpaperPaint` now dispatches to one of the
+   four patterns per theme; Duet keeps its topo + duet-arcs
+   stack.
+
+3. **Theme-aware cursor** — new `CursorSetColours(outline, fill)`
+   replaces the cursor's hardcoded black-on-white sprite. The
+   `Theme` struct gained two new fields (`cursor_outline`,
+   `cursor_fill`) and `ThemeApplyToAll` flows them through.
+   Per-theme choices: Classic = white-on-black (preserves the
+   original look), Slate10 = bright slate ink on near-black,
+   Amber = bright phosphor on deep-CRT-brown, Duet = `--ink` on
+   `desktop_bg` (slate ink on near-charcoal). Cursor is
+   repainted at its current position when colours change so
+   the new look appears without waiting for motion.
+
 ## Update 2026-04-29 (Show Desktop sliver + topo backdrop)
 
 Two more chrome additions:

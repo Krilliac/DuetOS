@@ -98,7 +98,7 @@ state, not theme state.
 |--------------------------------------------------------|---------------------------|-------|
 | 30-px titlebar (26-px in compact)                      | No (height owned by widget code, not theme) | See "Phase 3 prerequisites" |
 | 1-px border                                            | Yes — `window_border` is sampled by the existing border-draw path |
-| 6-px corner radius (0 when maximized)                  | Partial — `FramebufferDrawRoundRect` / `FramebufferFillRoundRect` exist (used by tabs + START); window chrome itself still rectangular pending compositor mask |
+| 6-px corner radius (0 when maximized)                  | Yes (Duet only) — `FramebufferPunchCorners(x, y, w, h, 6, desktop_rgb)` overpaints the four corner-quadrant pixels OUTSIDE the curve so the silhouette reads as rounded. Other themes keep rectangular chrome. Compositor mask is still the proper fix, but the punch is good enough as a v0 approximation. |
 | Vertical gradient on focus titlebar                    | Yes — `WindowDraw` paints `LightenRgb(colour_title, 24) → colour_title` with a 1-px highlight ridge on top |
 | Square title buttons, 46-px wide                       | No (widget code) |
 | Red-on-hover close button                              | Yes — `window_close = 0x00E3413C` matches the prototype's `TitleBtn` close hover; chrome now also draws an "X" glyph inside the close box |
@@ -180,10 +180,15 @@ so the taskbar doesn't crop them. Stroke is a low-contrast
 lift over the gradient bg so the rings read as ambient
 texture, not chrome.
 
-The other three themes still paint a flat / gradient
-`desktop_bg`. `topo` and `syscalls` patterns + a real SVG
-loader are deferred — programmatic-only patterns survive the
-scope.
+The other three themes now ship their own programmatic
+patterns: Classic gets `PaintClassicBubbles` (12 deterministic
+outlined circles scattered with an LCG-ish position table,
+skipping the taskbar zone), Slate10 gets `PaintSlate10Grid`
+(sparse 32-px grid of single-pixel dots, blended toward the
+theme's Win10-blue accent), Amber gets `PaintAmberScanlines`
+(every-3rd-row 1-px lift in brightness — CRT phosphor
+interlace). A real SVG loader for the prototype's `topo` /
+`syscalls` files remains deferred.
 
 ## Scope inside this slice
 
