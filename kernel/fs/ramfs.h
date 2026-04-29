@@ -96,4 +96,13 @@ void RamfsBoottraceSnapshot();
 /// runtime — re-running it just rewrites the same bytes.
 void RamfsSyscallsSnapshot();
 
+/// Materialise `/proc/abi/native` (syscall number→name) and
+/// `/proc/abi/win32` (every DLL!Function the Win32 thunks
+/// table knows). Both files start with a "#"-prefixed header
+/// line so a shell `cat` clearly identifies the dump. The
+/// payload below is one entry per line. Idempotent — both
+/// underlying tables are constexpr so re-running rewrites
+/// the same bytes. Native buffer 8 KiB, Win32 buffer 32 KiB.
+void RamfsAbiSnapshot();
+
 } // namespace duetos::fs

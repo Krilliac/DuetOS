@@ -1153,12 +1153,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         }
     }
 
-    // /proc/boottrace + /sys/syscalls: materialize both files
-    // NOW so they capture state at the "system ready" mark
-    // (just before the login gate, before user input). After
-    // this, both behave like any other static-bytes ramfs file.
+    // procfs / sysfs snapshots: materialize the static-text
+    // dumps NOW so they capture state at the "system ready"
+    // mark (just before the login gate, before user input).
+    // After this, all five files behave like any other
+    // static-bytes ramfs entry.
     duetos::fs::RamfsBoottraceSnapshot();
     duetos::fs::RamfsSyscallsSnapshot();
+    duetos::fs::RamfsAbiSnapshot();
 
     // Login gate — blocks keyboard input from reaching the shell
     // until a valid session is open. TTY mode prints a classic

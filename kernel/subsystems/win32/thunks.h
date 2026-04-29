@@ -191,4 +191,13 @@ bool Win32ThunksLookupDataCatchAll(u64* out_va);
 /// (`?func@...@@QEAA...`).
 bool IsLikelyDataImport(const char* func);
 
+/// Iterate every (dll, func) pair the thunk table knows. The
+/// writer is invoked once per emitted token (DLL name, '!',
+/// function name, '\n') in table order, oldest entry first.
+/// Used by /proc/abi/win32 to materialise the export table as
+/// a static text file, and by future debug commands that want
+/// the same dump on the serial line.
+using ThunksDumpFn = void (*)(const char* chunk);
+void Win32ThunksDumpTo(ThunksDumpFn writer);
+
 } // namespace duetos::win32
