@@ -34,6 +34,14 @@ struct MenuItem
     u32 action_id;
 };
 
+/// Update the menu's chrome palette. Called by the theme module
+/// so a runtime theme switch re-hues the popup without tearing it
+/// down. Every parameter is written unconditionally — a theme
+/// that legitimately wants `0x00000000` for the border (e.g.
+/// Slate10's flat black divider) gets exactly that value.
+/// Safe before any open / first paint.
+void MenuSetColours(u32 body_rgb, u32 border_rgb, u32 ink_rgb, u32 accent_rgb);
+
 /// Open the menu with `items` as its content and `context` as
 /// an opaque u32 the dispatcher can read back via `MenuContext()`.
 /// Typical use: pass a target window handle so a "Close" item

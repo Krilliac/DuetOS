@@ -1002,6 +1002,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     duetos::drivers::video::ConsoleInit(16, 400, theme0.console_fg, theme0.console_bg);
 
+    // Publish theme0's palette into every chrome owner that
+    // didn't already get its colours via Init (the taskbar +
+    // console did, the start menu didn't). After this point any
+    // theme-cycle hotkey simply re-runs the same publish path.
+    duetos::drivers::video::ThemeApplyToAll();
+
     // Tee kernel log lines to the on-screen console so the desktop
     // shows subsystem activity live — not just the boot seed block.
     // Forwards chunks through ConsoleWrite; no DesktopCompose is

@@ -3,6 +3,7 @@
 #include "arch/x86_64/serial.h"
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
+#include "drivers/video/menu.h"
 #include "drivers/video/taskbar.h"
 #include "drivers/video/widget.h"
 
@@ -340,6 +341,13 @@ void ThemeApplyToAll()
     TaskbarSetColours(t.taskbar_bg, t.taskbar_fg, t.taskbar_accent, t.taskbar_tab_inactive, t.taskbar_border);
     ConsoleSetColours(t.console_fg, t.console_bg);
     CursorSetDesktopBackground(t.desktop_bg);
+
+    // Start menu / popup palette: body = inactive-tab recess panel
+    // (taskbar's "darkest" surface so the menu reads as a deeper
+    // layer than the bar), border + accent map directly, ink uses
+    // the bright `taskbar_fg` so labels are legible against the
+    // recess body.
+    MenuSetColours(t.taskbar_tab_inactive, t.taskbar_border, t.taskbar_fg, t.taskbar_accent);
 }
 
 void ThemeSelfTest()

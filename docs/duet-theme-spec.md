@@ -98,11 +98,13 @@ state, not theme state.
 |--------------------------------------------------------|---------------------------|-------|
 | 30-px titlebar (26-px in compact)                      | No (height owned by widget code, not theme) | See "Phase 3 prerequisites" |
 | 1-px border                                            | Yes — `window_border` is sampled by the existing border-draw path |
-| 6-px corner radius (0 when maximized)                  | No — framebuffer has no rounded-rect primitive |
-| Vertical gradient on focus titlebar                    | No — framebuffer has no gradient primitive |
+| 6-px corner radius (0 when maximized)                  | Partial — `FramebufferDrawRoundRect` / `FramebufferFillRoundRect` exist (used by tabs + START); window chrome itself still rectangular pending compositor mask |
+| Vertical gradient on focus titlebar                    | Yes — `WindowDraw` paints `LightenRgb(colour_title, 24) → colour_title` with a 1-px highlight ridge on top |
 | Square title buttons, 46-px wide                       | No (widget code) |
-| Red-on-hover close button                              | Yes — `window_close = 0x00E3413C` matches the prototype's `TitleBtn` close hover |
-| 3% dim on unfocused windows                            | No — compositor has no per-window alpha |
+| Red-on-hover close button                              | Yes — `window_close = 0x00E3413C` matches the prototype's `TitleBtn` close hover; chrome now also draws an "X" glyph inside the close box |
+| 3% dim on unfocused windows                            | Yes — `WindowDrawAllOrdered` alpha-blends `0x18000000` over the whole inactive-window rect when more than one window is visible |
+| Drop shadow on every window                            | Yes — `FramebufferDropShadow(depth=4, alpha=0x60)` from `WindowDraw` |
+| Subtitle / context-tag rendering                        | Yes — `WindowDrawAllOrdered` paints `WindowGetSubtitle` in dim ink right of the title (separator: `\|`) |
 
 ## Taskbar — same delta
 
@@ -111,7 +113,9 @@ state, not theme state.
 | 44-px (compact 38-px) bar                              | No — taskbar height fixed in `taskbar.cpp` |
 | 4 positions (bottom/top/left/right)                    | No — taskbar position fixed |
 | Accent-rail "Show desktop" sliver                      | No — would be a new widget |
-| 2-px tall focus dot under running apps (8 / 14 px)     | No — would be a new widget paint mode |
+| 2-px tall focus dot under running apps (8 / 14 px)     | Partial — active tab now paints a 2-px accent strip the full tab width; sized dot per running-vs-pinned still deferred |
+| Rounded START + tabs                                    | Yes — `FramebufferFillRoundRect` + `FramebufferDrawRoundRect` (radius 4 / 3) |
+| Vertical gradient on the strip                          | Yes — `LightenRgb(g_bg, 12) → g_bg` |
 | Bottom-default w/ Start | search | pinned | tray | clock | Already shipping in this layout — colours sampled from Duet palette transparently |
 
 ## Start menu — unchanged
@@ -154,6 +158,14 @@ would be a small extension.
 For v0 the Start button paints the existing 3-letter "D u e"
 glyph in `taskbar_fg` over `taskbar_accent`, matching how
 Classic / Slate10 / Amber draw it today.
+
+A simplified DuetMark now ships on the Duet theme: the START
+button renders two interlocking outlined circles (teal +
+amber, 2-px stroke each) followed by the word "DUET". This
+trades the prototype's partial-arc strokes for full circles —
+the visual story (two interlocking rings) is preserved without
+needing a path stroker. Partial-arc rasterization remains a
+follow-on once `FramebufferStrokePath` lands.
 
 ## Wallpaper — same approach
 
@@ -238,7 +250,9 @@ ship yet. Each is its own slice — none are inside this commit.
   teal-amber (`blue`, `violet`, `amber`, `duet-green`). v0
   ships teal-amber only; further accents are a one-line palette
   duplication once the chrome upgrade lands.
-- DuetMark-as-Start-glyph in the kernel taskbar.
+- DuetMark-as-Start-glyph in the kernel taskbar — _v0 simplified
+  form lands (two interlocking outlined circles); partial-arc
+  stroke form deferred to the path-stroker slice._
 - Three Duet wallpapers in the framebuffer.
 - All Phase 4–9 chrome / shell / app / widget / cleanup work
   (each is its own slice; this spec only commits to the Phase

@@ -1,7 +1,60 @@
 # Desktop chrome polish — v0
 
 _Type: Observation + Decision._
-_Last updated: 2026-04-28._
+_Last updated: 2026-04-29._
+
+## Update 2026-04-29 (Duet-theme follow-on slice)
+
+Five additional changes layered on top of the v0 chrome polish to
+close out more items from `docs/duet-theme-spec.md`:
+
+1. **Subtitle paint**: `WindowDrawAllOrdered` now reads
+   `WindowGetSubtitle` and paints it right of the title in dim
+   ink (`LightenRgb(colour_title, 96)`) with a `|` separator,
+   capped at the close-button's left edge. The `WindowSetSubtitle`
+   storage existed since the chrome polish slice; this is the
+   missing paint pass.
+
+2. **Inactive-window dim**: when more than one window is visible,
+   each inactive window gets a `0x18000000` alpha overlay over its
+   whole rect, painted last in its per-window pass. Matches the
+   spec's "3% dim on unfocused windows" — the slightly heavier
+   ~10% alpha compensates for 8-bit framebuffer quantization.
+
+3. **Theme-aware menu**: `MenuSetColours(body, border, ink, accent)`
+   now flows from `ThemeApplyToAll`. The menu paints with the
+   theme's `taskbar_tab_inactive` (recess body), `taskbar_border`,
+   `taskbar_fg`, and `taskbar_accent`. Adds a left-edge accent
+   strip, top highlight ridge, vertical body gradient, drop
+   shadow, and per-row separators — same chrome language as
+   windows + taskbar.
+
+4. **Boot-time theme publish**: `kernel/core/main.cpp` now calls
+   `ThemeApplyToAll()` after `ConsoleInit` so the start menu (and
+   any future theme-listener) gets the boot-time palette without
+   waiting for the first `Ctrl+Alt+Y`. Console + taskbar were
+   already initialised with `theme0` directly; the duplicate
+   publish is harmless (idempotent state writes).
+
+5. **DuetMark on Start (Duet only)**: when `ThemeCurrentId() ==
+   ThemeId::Duet`, `TaskbarRedraw` paints two outlined circles
+   (teal + amber, 2-px stroke via doubled `FramebufferDrawCircle`)
+   followed by "DUET" instead of the plain "START" label. This
+   ships the simplified form of the spec's DuetMark; the
+   partial-arc stroke form remains deferred until a path-stroker
+   primitive lands.
+
+### Files touched in this slice
+
+- `kernel/drivers/video/widget.cpp` — subtitle paint, inactive dim
+- `kernel/drivers/video/menu.h` — `MenuSetColours` declaration
+- `kernel/drivers/video/menu.cpp` — palette state + theme-aware paint
+- `kernel/drivers/video/theme.cpp` — call `MenuSetColours` from `ThemeApplyToAll`
+- `kernel/drivers/video/taskbar.cpp` — DuetMark in START button
+- `kernel/core/main.cpp` — boot-time `ThemeApplyToAll`
+- `docs/duet-theme-spec.md` — flipped shipping flags for the items above
+
+
 
 ## What landed
 

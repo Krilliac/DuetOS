@@ -7,6 +7,7 @@
 #include "net/stack.h"
 #include "sched/sched.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
 
 namespace duetos::drivers::video
@@ -173,7 +174,42 @@ void TaskbarRedraw()
     {
         FramebufferFillRect(4 + start_radius, g_y + 5, start_w - 2 * start_radius, 1, LightenRgb(g_accent, 40));
     }
-    FramebufferDrawString(4 + (start_w - 5 * 8) / 2, text_y, "START", g_fg, g_accent);
+    // On the Duet theme the START button paints the DuetMark — two
+    // interlocking rings (teal + amber) glyphing the dual-ABI
+    // story — followed by the word "DUET". Other themes keep the
+    // five-letter "START" label since they don't carry the duet
+    // narrative. The simplified DuetMark uses two outlined circles
+    // rather than the prototype's partial-arc strokes; partial-arc
+    // rasterization is a follow-on once a proper path stroker
+    // lands in the framebuffer.
+    if (ThemeCurrentId() == ThemeId::Duet)
+    {
+        constexpr u32 mark_label_w = 4 * 8; // "DUET"
+        constexpr u32 mark_diameter = 14;
+        constexpr u32 mark_overlap = 6; // shared horizontal overlap between rings
+        const u32 mark_total_w = 2 * mark_diameter - mark_overlap + 6 + mark_label_w;
+        const u32 mark_origin_x = 4 + (start_w - mark_total_w) / 2;
+        const i32 ring_cy = static_cast<i32>(g_y + g_h / 2);
+        const i32 ring_a_cx = static_cast<i32>(mark_origin_x + mark_diameter / 2);
+        const i32 ring_b_cx = static_cast<i32>(mark_origin_x + mark_diameter - mark_overlap + mark_diameter / 2);
+        constexpr u32 ring_r = mark_diameter / 2;
+        // Teal accent (matches Duet's `--accent`). Drawing the ring
+        // twice — once at radius r, once at radius r-1 — gives a
+        // 2-pixel stroke without a separate stroke primitive.
+        constexpr u32 kTeal = 0x002DD4BF;
+        constexpr u32 kAmber = 0x00F0B040;
+        FramebufferDrawCircle(ring_a_cx, ring_cy, ring_r, kTeal);
+        FramebufferDrawCircle(ring_a_cx, ring_cy, ring_r - 1, kTeal);
+        FramebufferDrawCircle(ring_b_cx, ring_cy, ring_r, kAmber);
+        FramebufferDrawCircle(ring_b_cx, ring_cy, ring_r - 1, kAmber);
+        // Label sits right of the rings.
+        const u32 label_x = mark_origin_x + 2 * mark_diameter - mark_overlap + 6;
+        FramebufferDrawString(label_x, text_y, "DUET", g_fg, g_accent);
+    }
+    else
+    {
+        FramebufferDrawString(4 + (start_w - 5 * 8) / 2, text_y, "START", g_fg, g_accent);
+    }
 
     // Per-window tabs. Iterate every registered window, filter
     // alive, render a dark tab with its title. Advance x with a

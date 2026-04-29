@@ -773,9 +773,60 @@ void WindowDrawAllOrdered()
         // Title text. White ink on the title-bar fill, 8-px top
         // padding + 8-px left padding so the first glyph clears
         // the 2-px outer border comfortably.
+        u32 title_pixel_w = 0;
         if (g_windows[h].title != nullptr)
         {
             FramebufferDrawString(drawn.x + 8, drawn.y + 7, g_windows[h].title, 0x00FFFFFF, drawn.colour_title);
+            const char* t = g_windows[h].title;
+            u32 n = 0;
+            while (t[n] != '\0')
+            {
+                ++n;
+            }
+            title_pixel_w = n * 8;
+        }
+        // Subtitle slot (Duet-era "context tag"). Painted in a
+        // dimmer ink immediately right of the title with a 12-px
+        // gap, capped at the close-button's left edge so it never
+        // collides with the chrome. The "·" separator from the
+        // prototype isn't in the 8x8 font's printable range, so we
+        // use a plain '|' which is.
+        const char* subtitle = g_windows[h].mut_subtitle;
+        if (subtitle != nullptr && subtitle[0] != '\0' && title_pixel_w > 0)
+        {
+            const u32 tbh_for_sub = (drawn.title_height == 0) ? 22 : drawn.title_height;
+            const u32 btn_pad = 4;
+            const u32 btn_side = (tbh_for_sub > 2 * btn_pad + 4) ? tbh_for_sub - 2 * btn_pad : 0;
+            const u32 close_left =
+                (drawn.w > btn_side + btn_pad) ? drawn.x + drawn.w - btn_side - btn_pad : drawn.x + drawn.w;
+            const u32 sub_x = drawn.x + 8 + title_pixel_w + 12;
+            // Only paint if there's room for at least the
+            // separator + 4 glyphs before the close button.
+            if (sub_x + 5 * 8 < close_left)
+            {
+                // Dim ink derived from the title — a brighter
+                // shade reads against dark titles, a dimmer one
+                // against bright titles. We use a fixed 60%-of-
+                // white blend with the title bg as the bg colour
+                // so the bitmap font's anti-aliased-by-bg trick
+                // still works. Brighten just enough that the
+                // subtitle reads as secondary, not background.
+                const u32 ink = LightenRgb(drawn.colour_title, 96);
+                const u32 max_chars = (close_left - sub_x) / 8;
+                FramebufferDrawString(sub_x, drawn.y + 7, "|", ink, drawn.colour_title);
+                if (max_chars > 2)
+                {
+                    char clipped[kWindowSubtitleStorage];
+                    u32 n = 0;
+                    while (subtitle[n] != '\0' && n < kWindowSubtitleStorage - 1 && n + 2 < max_chars)
+                    {
+                        clipped[n] = subtitle[n];
+                        ++n;
+                    }
+                    clipped[n] = '\0';
+                    FramebufferDrawString(sub_x + 16, drawn.y + 7, clipped, ink, drawn.colour_title);
+                }
+            }
         }
         // Widgets owned by this window — layered on top of the
         // window's chrome, under any windows that stack above.
@@ -1070,6 +1121,21 @@ void WindowDrawAllOrdered()
         if (g_windows[h].content_fn != nullptr)
         {
             g_windows[h].content_fn(client_x, client_y, client_w, client_h, g_windows[h].content_cookie);
+        }
+
+        // Subtle "out of focus" dim. The Duet spec calls for ~3%
+        // dim on unfocused windows; we apply a black ~10% (alpha
+        // 0x18) overlay over the whole window rect AFTER chrome +
+        // widgets + display-list + content_fn. The slightly
+        // heavier alpha here vs. the 3% spec compensates for the
+        // 8-bit framebuffer's quantization — anything below ~6%
+        // alpha is invisible on a near-black client. Skipped in
+        // single-window scenes (every window is "active enough"
+        // when there's nothing else to compete with).
+        if (!is_active && g_window_count > 1)
+        {
+            FramebufferFillRectAlpha(g_windows[h].chrome.x, g_windows[h].chrome.y, g_windows[h].chrome.w,
+                                     g_windows[h].chrome.h, 0x18000000U);
         }
     }
 }
