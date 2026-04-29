@@ -2,7 +2,7 @@
 
 **Type:** Decision + Observation (consolidated)
 **Status:** Active — single source of truth
-**Last updated:** 2026-04-27
+**Last updated:** 2026-04-29
 
 This doc consolidates 17 prior knowledge files into one tracker for
 the Win32/NT + Linux ABI subsystems. The originals (per-slice
@@ -563,7 +563,12 @@ have landed (see §10).
    until their backing syscalls exist
 5. ~~Implement registry read syscalls~~ — DONE for read path
    (`e60ce80` + `40a4230`), EXTENDED: registry value-write subset
-   (`0caf60f`) — sidecar pool of mutable values
+   (`0caf60f`) — sidecar pool of mutable values; ENUMERATION
+   landed (2026-04-29): static-tree gained 8 prefix entries so
+   nested `RegOpenKey` walks one component at a time, kernel
+   `DoEnumerateKey` op=9 lists direct children, `NtEnumerateKey`
+   + advapi32 `RegEnumKey*` are real (no longer NotImpl stubs),
+   `DoQueryKey` reports real subkey_count via `CountSubkeys`
 6. ~~Cross-process VM access~~ — DONE (`23b2585` + `a2bb164`):
    NtOpenProcess + NtRead/Write/QueryVirtualMemory all live
 7. ~~Thread manipulation~~ — DONE (`de3f155` + `c8f1bef` +
