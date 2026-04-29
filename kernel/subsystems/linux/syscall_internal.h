@@ -40,6 +40,7 @@ inline constexpr i64 kENFILE = -23;
 inline constexpr i64 kEMFILE = -24;
 inline constexpr i64 kEAGAIN = -11;
 inline constexpr i64 kEOVERFLOW = -75;
+inline constexpr i64 kEOPNOTSUPP = -95;
 inline constexpr i64 kESTALE = -116;
 inline constexpr i64 kENOTTY = -25;
 inline constexpr i64 kESPIPE = -29;
@@ -505,6 +506,26 @@ i64 DoNanosleep(u64 user_req, u64 user_rem);
 i64 DoTimes(u64 user_buf);
 i64 DoClockGetres(u64 clk_id, u64 user_res);
 i64 DoClockNanosleep(u64 clk_id, u64 flags, u64 user_req, u64 user_rem);
+
+// Real clock-mutator handlers. v0 maintains a single signed
+// `g_realtime_offset_ns` added to NowNs() on CLOCK_REALTIME reads;
+// CLOCK_MONOTONIC / boot-relative clocks ignore the offset.
+// Cap-gated by kCapDebug — Linux's CAP_SYS_TIME analog in v0 (no
+// dedicated time-set cap yet). Untrusted callers keep their pre-
+// slice behaviour (-EPERM) so existing sandbox profiles are
+// unchanged. clock_adjtime / adjtimex stay STUB until a struct-timex
+// definition lands; the dispatch arms for them route through the
+// helpers here so the cap probe is consistent.
+i64 DoClockSettime(u64 clk_id, u64 user_ts);
+i64 DoSettimeofday(u64 user_tv, u64 user_tz);
+i64 DoClockAdjtime(u64 clk_id, u64 user_buf);
+i64 DoAdjtimex(u64 user_buf);
+
+// Read the live realtime offset (signed ns). Exposed for any other
+// TU that needs to format a wall-clock time (e.g. uname-style date
+// printing, log timestamping). Monotonic readers should keep using
+// NowNs() directly.
+i64 LinuxRealtimeOffsetNs();
 
 // Scheduler-policy handlers (syscall_sched.cpp). v0 has one real
 // scheduler (round-robin kernel threads) and BSP-only SMP, so
