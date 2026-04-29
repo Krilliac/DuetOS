@@ -128,6 +128,12 @@ u32 StringPixelWidth(const char* s)
     return n * 8;
 }
 
+// Saturating per-channel lighten — forward declaration of the
+// helper defined further down this TU (just before WindowDraw).
+// Buttons want the same "lifted top, settled bottom" gradient
+// look as the rest of the chrome.
+u32 LightenRgb(u32 rgb, u32 amount);
+
 void PaintButton(const ButtonWidget& b)
 {
     u32 bx = 0, by = 0;
@@ -136,8 +142,26 @@ void PaintButton(const ButtonWidget& b)
         return; // dead owner window — skip silently
     }
     const u32 fill = b.pressed ? b.colour_pressed : b.colour_normal;
-    FramebufferFillRect(bx, by, b.w, b.h, fill);
+    // Vertical gradient: lifted shade at the top fading to the
+    // registered fill at the bottom. Pressed buttons skip the
+    // gradient (a pressed button looks "settled" without the
+    // lifted highlight band) so the press transition reads
+    // visibly as a state change.
+    if (b.pressed)
+    {
+        FramebufferFillRect(bx, by, b.w, b.h, fill);
+    }
+    else
+    {
+        FramebufferFillRectGradient(bx, by, b.w, b.h, LightenRgb(fill, 22), fill);
+    }
     FramebufferDrawRect(bx, by, b.w, b.h, b.colour_border, 2);
+    // 1-px ridge highlight along the inside of the top edge —
+    // matches the window-chrome / taskbar / popup ridge.
+    if (!b.pressed && b.w > 6 && b.h > 4)
+    {
+        FramebufferFillRect(bx + 2, by + 2, b.w - 4, 1, LightenRgb(fill, 50));
+    }
     if (b.label != nullptr)
     {
         // Centre the label inside the button. 8x8 cell metrics,
@@ -1242,6 +1266,13 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
     }
     if (banner != nullptr)
     {
+        // 1-pixel offset shadow behind the banner so the white
+        // ink reads on every theme's gradient bg without a hard
+        // background-fill rectangle. The shadow is painted with
+        // each glyph's bg = desktop_rgb (matches the gradient
+        // closely enough that the shadow doesn't show up as a
+        // smear) while the foreground is pure white.
+        FramebufferDrawString(17, 9, banner, 0x00000000, desktop_rgb);
         FramebufferDrawString(16, 8, banner, 0x00FFFFFF, desktop_rgb);
     }
     TaskbarRedraw();
