@@ -609,6 +609,27 @@ have landed (see §10).
 25. ~~SysV msg queues + POSIX msg queues~~ — DONE (`efe483e`):
     real ring + WaitQueue blocking; mtype filter (SysV) and
     priority delivery (POSIX); `Process::linux_fds` state 13
+26. ~~Registry enumeration + nested OpenKey~~ — DONE (2026-04-29):
+    8 prefix entries in the static tree make nested
+    `RegOpenKey(parent, sub, &h)` walk one component at a time.
+    `NtEnumerateKey` (op=9) + `RegEnumKey*` walk direct children.
+    `DoQueryKey` reports `subkey_count` + `MaxNameLen` +
+    `MaxValueNameLen` + `MaxValueDataLen`. `RegQueryInfoKeyA/W`
+    + `RegEnumValueA` round out the userland API surface
+27. ~~Win32 path translation (drive-letter + extended-prefix)~~ —
+    DONE (2026-04-29): `kernel32::Win32PathPrefixA` + the
+    `NormalizePathA/W` rewrite map `"C:\\..."` /
+    `"\\?\C:\\..."` paths into the kernel's `/disk/N` form.
+    Wired into `FindFirstFile*`, `DeleteFile*`, `MoveFile*`,
+    `GetFileAttributes*`. `shlwapi::PathFileExists*` inlines a
+    minimal mirror of the same translator and routes through
+    `SYS_FILE_QUERY_ATTRIBUTES`
+28. ~~`FindFirstFile*` glob filter~~ — DONE (2026-04-29):
+    leaf glob (`*`/`?`) is parsed off the path, stored per
+    handle in `g_find_slots[8]`, and `FindNextFile*` skips
+    non-matching kernel-returned entries via `FindGlobMatch`
+    (case-insensitive, recursive, bounded by the 63-byte
+    pattern cap)
 
 ### Next slices (high-leverage, achievable)
 
