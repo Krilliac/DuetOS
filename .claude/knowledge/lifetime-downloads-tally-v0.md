@@ -4,6 +4,37 @@
 **Type:** Issue + Decision + Pattern
 **Status:** Active
 
+## Update 2026-04-29 — badge/state split + idle-run no-op
+
+The first cut of this system put the persistence state inside the
+shields.io endpoint JSON under a top-level `_state` key. shields.io
+strictly validates the endpoint schema and rejects unknown top-level
+properties, returning **`invalid properties: _state`** in place of
+the badge. Two-file split fixes it:
+
+- `lifetime-downloads.json` — shields.io envelope ONLY
+  (`schemaVersion`, `label`, `message`, `color`, `cacheSeconds`).
+  Nothing else. The README badge URL is unchanged.
+- `lifetime-downloads-state.json` — persistence (`lifetime_total`,
+  `by_asset`, `snapshot_at`, …). Read by the next run.
+
+While there, also fix the spurious-commit problem: the script used to
+unconditionally rewrite `snapshot_at`, so every scheduled run pushed
+a "stats: lifetime downloads -> 0" no-op commit even when the tally
+hadn't moved. Now the script only writes a file when its content
+actually differs (badge: when the rendered envelope differs from what
+is on disk; state: when `lifetime_total` or `by_asset` changed, or
+the state file is missing on the migration run). Idle scheduled runs
+become true no-ops that the workflow's `git diff --cached --quiet`
+correctly skips.
+
+Migration handling: on the first run after the split, the state file
+doesn't exist yet, so `load_prev_state()` falls back to lifting the
+`_state` block out of the legacy combined badge file. The state file
+is force-written that run (state-missing branch of `state_changed`)
+so subsequent runs find the dedicated state file directly and don't
+re-bootstrap from a now-clean badge.
+
 ## Problem
 
 The README's "lifetime downloads" badge previously used shields.io's
@@ -123,10 +154,13 @@ verification will land on first push to `main` after merge.
 ## Files
 
 - `tools/release/update-lifetime-downloads.py` — delta logic + CLI
-- `.github/workflows/lifetime-downloads.yml` — I/O wrapper
+  (now takes `--state` and `--badge` as separate paths).
+- `.github/workflows/lifetime-downloads.yml` — I/O wrapper, tracks
+  both `lifetime-downloads.json` and `lifetime-downloads-state.json`.
 - `.github/workflows/build.yml` — `pre-publish-lifetime-snapshot` job
 - `.github/workflows/release.yml` — `pre-publish-lifetime-snapshot` job
-- `README.md` — badge URL switched to shields.io `endpoint?url=...`
+- `README.md` — badge URL is `https://img.shields.io/endpoint?url=`
+  pointing at the badge-only `lifetime-downloads.json` on `stats`.
 
 ## Re-derivation (audit cadence)
 
