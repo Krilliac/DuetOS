@@ -800,6 +800,16 @@ struct Process
     };
     LinuxSigAction linux_sigactions[kLinuxSignalCount];
     u64 linux_signal_mask; // per-process blocked-signal bitmask (rt_sigprocmask)
+
+    // Per-process rlimit soft caps. Only the ones the kernel can
+    // actually enforce live here; everything else stays at the
+    // RlimitDefaultsFor constant table. setrlimit / prlimit64
+    // write `linux_rlimit_nofile_cur` and `linux_rlimit_nproc_cur`
+    // and the next fd-alloc / clone consults them. 0xFFFFFFFFFFFFFFFF
+    // sentinel = "no cap below kernel hard ceiling" (the constructor
+    // initialises both to that). Hard caps stay 16 / 64.
+    u64 linux_rlimit_nofile_cur;
+    u64 linux_rlimit_nproc_cur;
     // Bitmap of pending Linux signals. Bit N set = signum N is
     // pending delivery. Populated by LinuxSignalDeliver()
     // (kill / tgkill / synthetic deliveries) and drained by

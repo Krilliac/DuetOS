@@ -125,6 +125,15 @@ core::Process* SchedFindProcessByPid(u64 target_pid);
 /// arch::Cli.
 bool SchedIsPidZombie(u64 target_pid);
 
+/// Count of currently-live processes whose
+/// `linux_parent_pid == parent_pid`. Used by Linux fork/clone
+/// to enforce RLIMIT_NPROC when the soft cap has been lowered
+/// below the kernel's hard ceiling. Walks the same lists as
+/// SchedFindProcessByPid (running + run-normal + run-idle +
+/// sleep), excluding zombies — a zombie no longer counts
+/// against the live-process limit.
+u64 SchedCountChildrenOfPid(u64 parent_pid);
+
 /// Find the first live Task with `id == target_tid`. Walks the
 /// same lists as SchedFindProcessByPid (running + run-normal +
 /// run-idle + sleep) under arch::Cli. Skips zombies — a

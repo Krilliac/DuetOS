@@ -123,6 +123,16 @@ i64 DoFork()
         core::RecordSandboxDenial(core::kCapSpawnThread);
         return kEPERM;
     }
+    // RLIMIT_NPROC: refuse if the parent's live-child count
+    // would exceed the soft cap. Sentinel 0xFF... means "no cap
+    // below kernel ceiling" — skip the check and let the
+    // ProcessCreate-side limit (MAX_SCHED_TASKS) apply.
+    if (parent->linux_rlimit_nproc_cur != 0xFFFFFFFFFFFFFFFFull)
+    {
+        const u64 children = sched::SchedCountChildrenOfPid(parent->pid);
+        if (children >= parent->linux_rlimit_nproc_cur)
+            return kEAGAIN;
+    }
     sched::Task* current = sched::CurrentTask();
     arch::TrapFrame* parent_tf = sched::SchedFindUserTrapFrame(current);
     if (parent_tf == nullptr)

@@ -1841,6 +1841,31 @@ bool SchedIsPidZombie(u64 target_pid)
     return hit;
 }
 
+u64 SchedCountChildrenOfPid(u64 parent_pid)
+{
+    auto count_in = [&](Task* head, bool follow_sleep) -> u64
+    {
+        u64 n = 0;
+        for (Task* t = head; t != nullptr; t = follow_sleep ? t->sleep_next : t->next)
+        {
+            if (t->process != nullptr && t->process->linux_parent_pid == parent_pid)
+                ++n;
+        }
+        return n;
+    };
+
+    arch::Cli();
+    u64 total = 0;
+    Task* running = Current();
+    if (running != nullptr && running->process != nullptr && running->process->linux_parent_pid == parent_pid)
+        ++total;
+    total += count_in(g_run_head_normal, false);
+    total += count_in(g_run_head_idle, false);
+    total += count_in(g_sleep_head, true);
+    arch::Sti();
+    return total;
+}
+
 core::Process* SchedFindProcessByPid(u64 target_pid)
 {
     auto match = [&](Task* t) -> core::Process*

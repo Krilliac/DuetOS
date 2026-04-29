@@ -14,12 +14,8 @@
 // lives in syscall.h.
 
 #include "arch/x86_64/traps.h"
+#include "proc/process.h"
 #include "util/types.h"
-
-namespace duetos::core
-{
-struct Process;
-}
 
 namespace duetos::subsystems::linux::internal
 {
@@ -287,6 +283,23 @@ i64 DoPwrite64(u64 fd, u64 user_buf, u64 len, i64 offset);
 // fills a 144-byte Linux struct stat from the entry; lstat is
 // identical (no symlinks); openat / newfstatat enforce the
 // AT_FDCWD-only constraint via AtFdCwdOnly.
+// Effective per-Process fd ceiling: min(16, p->linux_rlimit_nofile_cur).
+// Used by primary fd-alloc paths (DoOpen, DoDup) so a setrlimit
+// that lowers RLIMIT_NOFILE actually limits subsequent open()s.
+// Auxiliary allocators (signalfd / timerfd / eventfd / inotify /
+// fanotify / pidfd / pipe / msgq / memfd) currently still allow
+// up to 16 — sub-GAP, separate slice. Any caller that uses the
+// 0xFFFFFFFFFFFFFFFF sentinel falls through to 16.
+inline u32 LinuxFdEffectiveMax(const core::Process* p)
+{
+    if (p == nullptr)
+        return 16;
+    const u64 cap = p->linux_rlimit_nofile_cur;
+    if (cap == 0xFFFFFFFFFFFFFFFFull || cap > 16)
+        return 16;
+    return static_cast<u32>(cap);
+}
+
 i64 DoOpen(u64 user_path, u64 flags, u64 mode);
 i64 DoClose(u64 fd);
 i64 DoStat(u64 user_path, u64 user_buf);

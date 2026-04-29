@@ -223,6 +223,11 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     p->linux_pending_signals = 0;
     p->linux_signal_wq.head = nullptr;
     p->linux_signal_wq.tail = nullptr;
+    // Rlimit soft caps default to "no cap below kernel hard
+    // ceiling"; setrlimit/prlimit64 lower these and fd-alloc /
+    // clone honour them.
+    p->linux_rlimit_nofile_cur = 0xFFFFFFFFFFFFFFFFull;
+    p->linux_rlimit_nproc_cur = 0xFFFFFFFFFFFFFFFFull;
     // Linux parent / wait state. fork() / clone() patches the
     // parent_pid into the child after ProcessCreate returns; bare
     // ProcessCreate has no parent (init-spawned).

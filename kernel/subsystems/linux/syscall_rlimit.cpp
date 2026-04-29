@@ -14,6 +14,7 @@
 #include "subsystems/linux/syscall_internal.h"
 
 #include "mm/address_space.h"
+#include "proc/process.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -108,9 +109,10 @@ void RlimitDefaultsFor(u64 resource, u64& cur, u64& max)
 } // namespace
 
 // Linux: getrlimit(resource, rlim). Returns the per-resource
-// (cur, max) pair. v0 has no per-process policy state, so the
-// values come straight from RlimitDefaultsFor — they're constants
-// for the lifetime of the kernel.
+// (cur, max) pair. NOFILE / NPROC may have been lowered via
+// setrlimit, so those come from the per-Process soft cap (with
+// 0xFF... sentinel meaning "no cap below kernel ceiling, use the
+// default"); everything else still reads through RlimitDefaultsFor.
 i64 DoGetrlimit(u64 resource, u64 user_old)
 {
     if (resource >= kRlimitNlimits)
@@ -123,6 +125,14 @@ i64 DoGetrlimit(u64 resource, u64 user_old)
         u64 max;
     } old{};
     RlimitDefaultsFor(resource, old.cur, old.max);
+    core::Process* p = core::CurrentProcess();
+    if (p != nullptr)
+    {
+        if (resource == kRlimitNofile && p->linux_rlimit_nofile_cur != kRlimInfinity)
+            old.cur = p->linux_rlimit_nofile_cur;
+        else if (resource == kRlimitNproc && p->linux_rlimit_nproc_cur != kRlimInfinity)
+            old.cur = p->linux_rlimit_nproc_cur;
+    }
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_old), &old, sizeof(old)))
         return kEFAULT;
     return 0;
@@ -168,8 +178,19 @@ i64 DoPrlimit64(u64 pid, u64 resource, u64 user_new, u64 user_old)
         RlimitDefaultsFor(resource, def_cur, def_max);
         if (def_max != kRlimInfinity && new_lim.max > def_max)
             return kEPERM;
-        // Accept the call but keep no per-process record — next
-        // getrlimit will report defaults again.
+        // Persist the soft cap for the resources the kernel can
+        // actually enforce. cur >= def_max is recorded as the
+        // sentinel "no cap below ceiling" so DoGetrlimit reports
+        // the default. Other resources are accepted-but-not-stored
+        // (no policy in v0).
+        core::Process* p = core::CurrentProcess();
+        if (p != nullptr)
+        {
+            if (resource == kRlimitNofile)
+                p->linux_rlimit_nofile_cur = (new_lim.cur >= def_max) ? kRlimInfinity : new_lim.cur;
+            else if (resource == kRlimitNproc)
+                p->linux_rlimit_nproc_cur = (new_lim.cur >= def_max) ? kRlimInfinity : new_lim.cur;
+        }
     }
     return 0;
 }
