@@ -1657,6 +1657,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             }
             const bool alt = (ev.modifiers & kKeyModAlt) != 0;
             const bool ctrl = (ev.modifiers & kKeyModCtrl) != 0;
+            const bool shift = (ev.modifiers & kKeyModShift) != 0;
             bool dirty = false;
 
             // Login gate takes absolute priority — while a
@@ -1847,6 +1848,56 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 duetos::drivers::video::CursorShow();
                 duetos::drivers::video::CompositorUnlock();
                 SerialWrite("[ui] alt-tab\n");
+                continue;
+            }
+            // Ctrl+Alt+Shift+Arrow grows / shrinks the active
+            // window from its bottom-right corner in 32-px steps.
+            // Tested BEFORE the bare Ctrl+Alt+Arrow snap handler
+            // because the modifier mask is more specific.
+            if (ctrl && alt && shift &&
+                (ev.code == duetos::drivers::input::kKeyArrowLeft ||
+                 ev.code == duetos::drivers::input::kKeyArrowRight || ev.code == duetos::drivers::input::kKeyArrowUp ||
+                 ev.code == duetos::drivers::input::kKeyArrowDown))
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                if (active != duetos::drivers::video::kWindowInvalid)
+                {
+                    duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
+                    if (duetos::drivers::video::WindowGetBounds(active, &wx, &wy, &ww, &wh))
+                    {
+                        constexpr duetos::u32 kStep = 32;
+                        constexpr duetos::u32 kMin = 96; // floor — anything smaller is unusable
+                        duetos::u32 new_w = ww;
+                        duetos::u32 new_h = wh;
+                        if (ev.code == duetos::drivers::input::kKeyArrowRight)
+                        {
+                            new_w = ww + kStep;
+                        }
+                        else if (ev.code == duetos::drivers::input::kKeyArrowLeft)
+                        {
+                            new_w = (ww > kMin + kStep) ? ww - kStep : kMin;
+                        }
+                        else if (ev.code == duetos::drivers::input::kKeyArrowDown)
+                        {
+                            new_h = wh + kStep;
+                        }
+                        else
+                        {
+                            new_h = (wh > kMin + kStep) ? wh - kStep : kMin;
+                        }
+                        duetos::drivers::video::WindowResizeTo(active, new_w, new_h);
+                        SerialWrite("[ui] resize w=");
+                        SerialWriteHex(new_w);
+                        SerialWrite(" h=");
+                        SerialWriteHex(new_h);
+                        SerialWrite("\n");
+                    }
+                }
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+                duetos::drivers::video::CompositorUnlock();
                 continue;
             }
             // Ctrl+Alt+Arrow window snap shortcuts. Mirror Win10's
