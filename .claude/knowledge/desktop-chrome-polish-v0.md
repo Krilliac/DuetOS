@@ -54,6 +54,45 @@ close out more items from `docs/duet-theme-spec.md`:
 - `kernel/core/main.cpp` — boot-time `ThemeApplyToAll`
 - `docs/duet-theme-spec.md` — flipped shipping flags for the items above
 
+## Update 2026-04-29 (wallpaper + focus-dot slice)
+
+Two more items off `docs/duet-theme-spec.md`:
+
+1. **Wallpaper subsystem v0** — new TU
+   `kernel/drivers/video/wallpaper.{h,cpp}` exposes
+   `WallpaperPaint(desktop_rgb)`. Theme-dispatched: Classic /
+   Slate10 / Amber are intentional no-ops (preserves existing
+   flat / gradient look bit-for-bit); Duet paints `PaintDuetArcs`
+   — two interlocking outlined circles (teal-tinted left,
+   amber-tinted right) at ~28% of the shorter framebuffer
+   dimension, anchored at ~38% of the height. 2-pixel stroke
+   via doubled `FramebufferDrawCircle`. Tints are derived from
+   `LightenRgb(desktop_rgb, 22)` plus a per-channel bias toward
+   teal / amber, so the rings read as ambient texture, not
+   chrome. Cost is O(diameter) pixel writes per frame.
+
+   `DesktopCompose` calls `WallpaperPaint` after the gradient
+   fill and before the console / window paint, so windows
+   correctly occlude the wallpaper. Skipped in TTY mode (early
+   return before WallpaperPaint).
+
+2. **Active-tab focus dot** — `taskbar.cpp` replaced the
+   full-tab-width 2-px strip introduced in the previous slice
+   with a centred 14-px × 2-px dot at the bottom of the active
+   tab (matches the spec's "running-app" indicator size). 8-px
+   "pinned" form is deferred until the kernel taskbar tracks a
+   pinned-vs-running distinction.
+
+3. **Paint-stack comment** updated in `widget.cpp::DesktopCompose`
+   to reflect the new layer order: gradient → wallpaper → console
+   → windows (+ inactive dim) → freestanding widgets → banner →
+   taskbar → menu.
+
+### New files
+
+- `kernel/drivers/video/wallpaper.h`
+- `kernel/drivers/video/wallpaper.cpp`
+
 
 
 ## What landed

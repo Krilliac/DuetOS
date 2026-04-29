@@ -113,7 +113,7 @@ state, not theme state.
 | 44-px (compact 38-px) bar                              | No — taskbar height fixed in `taskbar.cpp` |
 | 4 positions (bottom/top/left/right)                    | No — taskbar position fixed |
 | Accent-rail "Show desktop" sliver                      | No — would be a new widget |
-| 2-px tall focus dot under running apps (8 / 14 px)     | Partial — active tab now paints a 2-px accent strip the full tab width; sized dot per running-vs-pinned still deferred |
+| 2-px tall focus dot under running apps (8 / 14 px)     | Yes (running-only) — active tab paints a centred 14-px × 2-px focus dot; pinned-vs-running distinction deferred until the kernel taskbar tracks pinned items |
 | Rounded START + tabs                                    | Yes — `FramebufferFillRoundRect` + `FramebufferDrawRoundRect` (radius 4 / 3) |
 | Vertical gradient on the strip                          | Yes — `LightenRgb(g_bg, 12) → g_bg` |
 | Bottom-default w/ Start | search | pinned | tray | clock | Already shipping in this layout — colours sampled from Duet palette transparently |
@@ -170,10 +170,18 @@ follow-on once `FramebufferStrokePath` lands.
 ## Wallpaper — same approach
 
 The prototype offers `duet-arcs`, `topo`, `syscalls` SVG-based
-wallpapers. The framebuffer paints solid `desktop_bg` today.
-The Duet `desktop_bg = 0x000B0E13` reads as the prototype's
-`--bg-1` colour with no path strokes — the wallpaper subsystem
-proper is Phase 7 work.
+wallpapers. v0 ships a **duet-arcs**-style backdrop on the Duet
+theme: `kernel/drivers/video/wallpaper.{h,cpp}` paints two large
+interlocking outlined circles (teal-tinted left, amber-tinted
+right) at ~28% of the shorter framebuffer dimension, anchored at
+~38% of the height so the taskbar doesn't crop them. Stroke is a
+low-contrast lift over the gradient bg so the rings read as
+ambient texture, not chrome.
+
+The other three themes still paint a flat / gradient
+`desktop_bg`. `topo` and `syscalls` patterns + a real SVG
+loader are deferred — programmatic-only patterns survive the
+scope.
 
 ## Scope inside this slice
 
@@ -253,7 +261,9 @@ ship yet. Each is its own slice — none are inside this commit.
 - DuetMark-as-Start-glyph in the kernel taskbar — _v0 simplified
   form lands (two interlocking outlined circles); partial-arc
   stroke form deferred to the path-stroker slice._
-- Three Duet wallpapers in the framebuffer.
+- Three Duet wallpapers in the framebuffer — _duet-arcs lands as
+  a programmatic two-ring backdrop; topo + syscalls + an actual
+  SVG loader remain deferred._
 - All Phase 4–9 chrome / shell / app / widget / cleanup work
   (each is its own slice; this spec only commits to the Phase
   1 + Phase 2 deliverables).

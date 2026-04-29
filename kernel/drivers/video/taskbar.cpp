@@ -246,15 +246,22 @@ void TaskbarRedraw()
         const u32 tab_h_eff = g_h - 8;
         FramebufferFillRoundRect(tab_x, g_y + 4, tab_w, tab_h_eff, tab_radius, tab_bg);
         FramebufferDrawRoundRect(tab_x, g_y + 4, tab_w, tab_h_eff, tab_radius, g_border);
-        // Active tab gets a 2-pixel accent strip at the bottom of
-        // the tab — Win10/macOS-style "selected" indicator. The
-        // strip uses a brighter shade of the accent so the active
-        // tab reads even on themes whose accent is close to the
-        // taskbar bg.
+        // Focus dot under the active tab — the spec asks for a
+        // 2-px-tall sliver under running apps (8 px for pinned,
+        // 14 px for "running"). v0 of the kernel taskbar has no
+        // pinned-vs-running distinction (every tab maps to a
+        // live window, so all tabs are "running"), so we paint
+        // the 14-px running variant centred horizontally on the
+        // tab. Brighter shade of the accent so it reads even on
+        // themes where the active-tab fill ≈ taskbar bg.
         if (is_active && tab_h_eff > 4)
         {
-            const u32 strip = LightenRgb(g_accent, 48);
-            FramebufferFillRect(tab_x + tab_radius, g_y + g_h - 6, tab_w - 2 * tab_radius, 2, strip);
+            constexpr u32 dot_w = 14;
+            constexpr u32 dot_h = 2;
+            const u32 strip_rgb = LightenRgb(g_accent, 56);
+            const u32 dot_x = tab_x + (tab_w - dot_w) / 2;
+            const u32 dot_y = g_y + g_h - 4 - dot_h;
+            FramebufferFillRect(dot_x, dot_y, dot_w, dot_h, strip_rgb);
         }
         const char* title = WindowTitle(h);
         if (title != nullptr)

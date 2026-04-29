@@ -46,6 +46,7 @@
 #include "drivers/video/menu.h"
 #include "drivers/video/netpanel.h"
 #include "drivers/video/taskbar.h"
+#include "drivers/video/wallpaper.h"
 
 namespace duetos::drivers::video
 {
@@ -1166,14 +1167,16 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
 
     // Desktop paint stack (bottom to top):
     //   1. Desktop gradient fill
-    //   2. Framebuffer console (under windows — windows dragged
+    //   2. Theme wallpaper (e.g. duet-arcs on the Duet theme)
+    //   3. Framebuffer console (under windows — windows dragged
     //      over the console occlude it, which restores on next
     //      compose — standard z-order feel)
-    //   3. Windows in z-order + their owned widgets
-    //   4. Freestanding widgets (float on top of windows for v0)
-    //   5. Banner (desktop-level label)
-    //   6. Taskbar
-    //   7. Menu (popup, on top of everything)
+    //   4. Windows in z-order + their owned widgets
+    //      (each inactive window gets a 10% dim overlay)
+    //   5. Freestanding widgets (float on top of windows for v0)
+    //   6. Banner (desktop-level label)
+    //   7. Taskbar
+    //   8. Menu (popup, on top of everything)
     // The cursor is not touched here — the mouse reader owns
     // CursorHide / CursorShow around this call.
     //
@@ -1195,6 +1198,9 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
         const u32 top = LightenRgb(desktop_rgb, 18);
         const u32 bot = DarkenRgb(desktop_rgb, 22);
         FramebufferFillRectGradient(0, 0, info.width, info.height, top, bot);
+        // Theme-dispatched wallpaper layer (duet-arcs on the
+        // Duet theme; no-op on the other three for now).
+        WallpaperPaint(desktop_rgb);
     }
     ConsoleRedraw();
     WindowDrawAllOrdered();
