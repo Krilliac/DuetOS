@@ -1,6 +1,6 @@
 # DuetOS — Architecture Deep Dive
 
-For the evolution timeline, see [`HISTORY.md`](HISTORY.md). This document is the system map: what exists today, how the major components interact, and where each ABI enters the same core runtime.
+For the evolution timeline, see [`History.md`](History.md). This document is the system map: what exists today, how the major components interact, and where each ABI enters the same core runtime.
 
 ---
 
@@ -319,7 +319,7 @@ Single backend per domain
 - `kernel/subsystems/linux/` + `kernel/subsystems/translation/` → Linux ABI/translation surfaces
 - `kernel/drivers/` → hardware domain drivers
 - `userland/apps/` → native/PE fixture workloads used for live validation
-- `docs/HISTORY.md` → historical landing order and milestone context
+- [History](History.md) → historical landing order and milestone context
 
 ---
 

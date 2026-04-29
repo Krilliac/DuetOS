@@ -288,7 +288,7 @@ ship yet. Each is its own slice — none are inside this commit.
     that key off path layout (Task Manager → ABI tab) don't
     have to special-case.
   - `/proc/abi/win32` — **Yes**. New `Win32ThunksDumpTo(fn)`
-    public API in `subsystems/win32/thunks.h` walks the
+    public API in `kernel/subsystems/win32/thunks.h` walks the
     constexpr `kThunksTable` and emits 4 chunks per row;
     `RamfsAbiSnapshot()` collects them into a 32 KiB buffer.
   - `/proc/cpuhist` — **Yes**. 60-sample ring of CPU busy %
@@ -333,7 +333,7 @@ ship yet. Each is its own slice — none are inside this commit.
 
 ## Files this spec touches in v0
 
-- `docs/duet-theme-spec.md` (this file).
+- `wiki/specifications/Duet-Theme-Spec.md` (this file).
 - `kernel/drivers/video/theme.h`: extends `ThemeId` with
   `Duet`, bumps `kCount`. ABI-additive — existing
   `Classic/Slate10/Amber` numeric values unchanged.

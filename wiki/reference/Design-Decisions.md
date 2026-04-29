@@ -515,7 +515,7 @@ get an inline "superseded by <commit>" note and stay.
 
 ## 018 — Runtime recovery taxonomy: halt / restart / retry / reject
 
-- **Scope:** `docs/knowledge/runtime-recovery-strategy.md`
+- **Scope:** [Runtime Recovery Strategy](../security/Runtime-Recovery.md)
 - **Commit:** `af665c1`
 - **Decision:** Codify, per fault class, what the kernel does:
     - Class A (kernel integrity) → **HALT** via `core::Panic`.
