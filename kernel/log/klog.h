@@ -56,14 +56,38 @@ enum class LogLevel : u8
     Error = 4,
 };
 
-/// Compile-time minimum severity. Trace is always compiled in; the
-/// runtime threshold defaults to Info so Trace calls are filtered
-/// unless somebody explicitly dials it down via `loglevel t`.
-/// Release builds can raise this to Info if the per-call Trace
-/// branch ever shows up in profiles — the macros gate on
-/// `if constexpr (level >= kKlogMinLevel)` so raising the floor
-/// genuinely compiles away Trace call sites.
-inline constexpr LogLevel kKlogMinLevel = LogLevel::Trace;
+/// Compile-time minimum severity. KLOG_TRACE / KLOG_TRACE_V /
+/// KLOG_TRACE_SCOPE call sites fold to nothing when `level <
+/// kKlogMinLevel`, so raising this floor genuinely eliminates the
+/// trace-emit code from the binary.
+///
+/// Wired off the build-flavor knob `DUETOS_KLOG_COMPILE_FLOOR`:
+///   - Debug builds default to Trace — the deepest instrumentation
+///     compiles in. The runtime threshold (`g_log_threshold`) starts
+///     at Debug so Trace lines are dropped unless `loglevel t`
+///     explicitly enables them, but the call sites themselves
+///     remain so they're available on demand.
+///   - Release builds default to Debug — Trace call sites are dead
+///     code at compile time. Operators trying to enable Trace via
+///     `loglevel t` on a release image will get a no-op (the lines
+///     don't exist in the binary). Document this in the shell help
+///     once we have a test that reaches it.
+///
+/// The runtime threshold (set by `SetLogThreshold`) can only RAISE
+/// the effective floor — it cannot dip below this compile-time
+/// minimum.
+#ifndef DUETOS_KLOG_COMPILE_FLOOR
+#  ifdef DUETOS_BUILD_FLAVOR
+#    if DUETOS_BUILD_FLAVOR == 1 // Debug
+#      define DUETOS_KLOG_COMPILE_FLOOR 0 // Trace
+#    else                                  // Release / RelWithDebInfo / MinSizeRel
+#      define DUETOS_KLOG_COMPILE_FLOOR 1 // Debug
+#    endif
+#  else
+#    define DUETOS_KLOG_COMPILE_FLOOR 1 // Debug — safe default for header-only TUs
+#  endif
+#endif
+inline constexpr LogLevel kKlogMinLevel = static_cast<LogLevel>(DUETOS_KLOG_COMPILE_FLOOR);
 
 /// Set the RUNTIME minimum severity. Lines below this level are
 /// dropped at the head of Log / LogWithValue (they still don't
@@ -277,10 +301,19 @@ void DumpLogRingToFiltered(LogTee writer, LogLevel min_level);
 // The helper creates a unique local name per call site by
 // concatenating __LINE__, so two scopes in the same function
 // don't collide.
+#if (DUETOS_KLOG_COMPILE_FLOOR <= 0) // Trace compiled in
 #define KLOG_TRACE_SCOPE_IMPL2(subsys, name, line_)                                                                    \
     ::duetos::core::TraceScope _klog_trace_scope_##line_((subsys), (name))
 #define KLOG_TRACE_SCOPE_IMPL(subsys, name, line_) KLOG_TRACE_SCOPE_IMPL2(subsys, name, line_)
 #define KLOG_TRACE_SCOPE(subsys, name) KLOG_TRACE_SCOPE_IMPL(subsys, name, __LINE__)
+#else
+// Trace compiled out — KLOG_TRACE_SCOPE folds to a typed-zero so
+// the call site stays a single statement (works in `if`/`else`
+// chains without braces) but no TraceScope object is constructed,
+// the in-flight table isn't touched, and storage for two pointers
+// + a u64 disappears from every function that uses it.
+#define KLOG_TRACE_SCOPE(subsys, name) ((void)0)
+#endif
 
 // Metrics snapshot. Prints one line with current heap-used,
 // frames-free, context-switches, tasks-live, each as a labelled

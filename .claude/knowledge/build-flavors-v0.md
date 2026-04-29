@@ -148,19 +148,61 @@ probabilistic protection — debugging a triple-fault, diffing
 crash dumps — flip the placeholder to OFF in your preset; the
 build banner will reflect the absence of `+kaslr`.
 
+## Status update (2026-04-29 third pass)
+
+Five additional follow-ups landed:
+
+| Follow-up | Status |
+|-----------|--------|
+| Compile-time klog Trace floor wired to build flavor | **Landed.** `DUETOS_KLOG_COMPILE_FLOOR` (default Trace=0 in debug, Debug=1 in release). `KLOG_TRACE_SCOPE` now folds to `((void)0)` when the floor is above Trace, eliminating the `TraceScope` storage at the call site. The `release-audit` preset forces the floor back to Trace for forensic capture. Boot banner shows `+trace` when Trace call sites are compiled in. |
+| Bounds-checked memcpy/memset/memmove | **Landed.** `core::MemcpyChecked / MemsetChecked / MemmoveChecked` in `kernel/util/string.h`. Use `__builtin_object_size(dst, 1)` to verify at compile time that `n` does not exceed the destination's known size. Folds to plain memcpy/memset when the bound is unknown (heap pointers). Always-on regardless of build flavor — the static check has zero cost when the bound is known to hold and infinite cost when it doesn't. |
+| `DEBUG_ASSERT` applied to hot paths | **Landed.** Three demonstration sites: `mm::FreeFrame` (frame⇄index round-trip), `sched::Schedule` (popped task is Ready), `mm::KFree` (chunk header alignment). All compile out in release. Exercises the pattern for future authors. |
+| CI exercises new presets | **Landed.** `.github/workflows/build.yml` adds a `build-flavor-matrix` job that builds `release-asserts`, `release-audit`, `release-lto`, `debug-fast` on every PR. The four-way matrix catches a flavor regression where a knob's compile-time branch silently breaks one preset. |
+| README documents the presets | **Landed.** New "Build flavors" section under the Build + run heading, with a per-preset use-case table and the boot-banner example. |
+
+## KASLR scope
+
+`kKaslrEnabled` remains a placeholder. Real KASLR — booting the
+kernel image at a randomized base address each boot — is a multi-
+week effort tracked separately in
+`.claude/knowledge/post-debug-recommendations-plan.md`. It requires:
+
+1. Linker support for a relocatable kernel (PIE-style ELF with
+   `R_X86_64_RELATIVE` relocations preserved through link).
+2. Boot-time relocation: the UEFI/Multiboot2 loader (or `boot.S`)
+   picks a random offset within the high-VA window, then applies
+   the relocations to fix every absolute reference in the image.
+3. Per-process address space coordination: PML4 entries for the
+   kernel half need updating once per CPU after the offset is
+   chosen.
+4. Symbol-table fixup: the embedded symbol table (used by the
+   panic dump path) needs to reflect the runtime base, not the
+   link-time base.
+5. Crash-dump tooling: `tools/debug/decode-panic.sh` needs to
+   accept a "boot-time offset" and subtract before symbol
+   resolution.
+
+The placeholder flag is in place so a future KASLR implementation
+has a single switch to flip and downstream code that wants to ask
+"is the address space randomized?" can read one constexpr without
+inventing its own.
+
 ## Resume prompt
 
-> The build-flavor system landed and four follow-ups are done. The
-> only remaining item is real KASLR, tracked in
-> `.claude/knowledge/post-debug-recommendations-plan.md`. The
-> placeholder `kKaslrEnabled` is in place so when KASLR lands,
-> downstream code that wants to know "is my address space
-> randomized?" already has a single constexpr to read.
+> The build-flavor system is fully landed across three passes
+> (initial, runtime cap-audit + LTO + selftest gating, and
+> compile-floor + bounds-check + DEBUG_ASSERT + CI + README).
+> The only remaining item is real KASLR, tracked separately in
+> `.claude/knowledge/post-debug-recommendations-plan.md`.
 >
-> If extending the build-flavor system further, common knobs to
-> consider next: per-build-type `_FORTIFY_SOURCE`-equivalent
-> (kernel-side bounds checking on memcpy), `-fsanitize=address`
-> when a real kernel ASAN shadow lands (today the `x86_64-debug-kasan`
-> preset is just a UBSAN+audit alias), per-build-type tracing
-> verbosity (the existing `klog` Trace level is already runtime-
-> flippable but compile-time gating per build type is not exposed).
+> If extending the system further, the natural next slices are:
+> - Apply `MemcpyChecked` / `MemsetChecked` to existing call
+>   sites where the destination is a known stack array
+>   (currently the wrappers exist but no caller uses them).
+> - Apply `DEBUG_ASSERT` more broadly — the three demonstration
+>   sites are tiny relative to the kernel's invariant surface.
+> - Real KASAN runtime (separate from UBSAN); today
+>   `x86_64-debug-kasan` is just an alias for UBSAN + Full audit.
+> - PMU-counter integration (the perf-profile self-test exists
+>   but the sampling source is not wired in — see
+>   `.claude/knowledge/post-debug-recommendations-plan.md`).

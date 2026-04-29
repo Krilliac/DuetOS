@@ -357,6 +357,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     {
         SerialWrite(" +kaslr");
     }
+    if constexpr (duetos::core::kKlogCompileFloor == 0)
+    {
+        // Trace-level call sites compiled in. Worth surfacing —
+        // operators looking at a forensic-release banner expect to
+        // see this so they know `loglevel t` will produce output.
+        SerialWrite(" +trace");
+    }
     SerialWrite("\n");
 
     constexpr duetos::u32 kMultiboot2BootMagic = 0x36D76289;

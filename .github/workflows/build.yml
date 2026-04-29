@@ -122,6 +122,44 @@ jobs:
             build/x86_64-release/kernel/duetos-kernel.elf
           retention-days: 7
 
+  # Build-flavor matrix: each non-default preset that exposes a
+  # distinct build axis (asserts, full audit, LTO). The matrix
+  # only verifies that the flavor configures + builds clean —
+  # the qemu-smoke job already covers boot-time correctness on
+  # the debug flavor, and these presets share its source set.
+  # Catches a flavor regression where a knob's compile-time
+  # branch or a new option silently breaks one preset.
+  build-flavor-matrix:
+    name: build flavor (${{ matrix.preset }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        preset:
+          - x86_64-release-asserts
+          - x86_64-release-audit
+          - x86_64-release-lto
+          - x86_64-debug-fast
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          for attempt in 1 2 3 4; do
+            if sudo apt-get update; then break; fi
+            sleep $((attempt * 5))
+          done
+          sudo apt-get install -y clang-18 lld-18 llvm-18 cmake ninja-build python3 \
+                                  grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools
+          sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
+          sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
+          sudo ln -sf /usr/bin/lld-link-18 /usr/local/bin/lld-link
+          sudo ln -sf /usr/bin/llvm-dlltool-18 /usr/local/bin/llvm-dlltool
+          sudo ln -sf /usr/bin/ld.lld-18 /usr/local/bin/ld.lld
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+      - name: Build
+        run: cmake --build build/${{ matrix.preset }} --parallel $(nproc)
+
   qemu-smoke:
     # Profile-matrix qemu-smoke. Each profile boots the kernel
     # through bringup-complete, runs ONE focused scenario, prints

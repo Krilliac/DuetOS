@@ -135,6 +135,34 @@ Tools required for the ISO path:
 Clang 18+ (used as both the freestanding kernel compiler and the
 host cross-compiler for the userland Windows PE toolchain).
 
+### Build flavors
+
+The two main presets (`x86_64-debug`, `x86_64-release`) are the
+defaults; five derived presets exercise specific instrumentation
+axes. See [`.claude/knowledge/build-flavors-v0.md`](.claude/knowledge/build-flavors-v0.md)
+for the per-knob matrix.
+
+| Preset | Use when |
+|--------|----------|
+| `x86_64-debug` | Default development. Full instrumentation: assertions on, lock-order audit on, boot self-tests on, klog at Debug, Trace call sites compiled in. |
+| `x86_64-release` | Production / shipping. Optimizer at `-O3`, instrumentation off, klog at Info, Trace call sites elided. |
+| `x86_64-debug-ubsan` | Debug build + `-fsanitize=undefined`. Catches signed overflow, OOB, divrem, alignment. |
+| `x86_64-debug-fast` | Debug binary with cheaper instrumentation (sample-only cap-audit, no lock-order audit). Faster boot, still debug-identifiable RIPs. |
+| `x86_64-release-asserts` | Release optimizer + `DEBUG_ASSERT` invocations + UBSAN runtime. Paranoid production: pay one branch per assert site for early invariant trip detection. |
+| `x86_64-release-audit` | Release + Full cap-gate audit + lock-order audit + boot selftests + klog Trace floor. Forensic post-incident capture build. |
+| `x86_64-release-lto` | Release + ThinLTO. Inlines across TU boundaries; slower link, faster runtime. |
+
+Granular knobs (`DUETOS_BOOT_SELFTESTS`, `DUETOS_ASSERTS`,
+`DUETOS_LOCK_ORDER_AUDIT`, `DUETOS_CAP_AUDIT`, `DUETOS_KLOG_DEFAULT`,
+`DUETOS_KLOG_COMPILE_FLOOR`, `DUETOS_KASLR`, `DUETOS_LTO`) can be
+overridden per-preset or on the cmake command line. The boot
+banner reflects the active set:
+
+```text
+[boot] DuetOS build flavor: debug +asserts +selftests +lockaudit +capaudit=sample +kaslr +trace
+[boot] DuetOS build flavor: release +capaudit=sample +kaslr
+```
+
 ## CI + release automation
 
 All release automation is in-repo under [`.github/workflows/`](.github/workflows/):

@@ -163,6 +163,17 @@ inline constexpr u8 kKlogDefaultLevel = static_cast<u8>(DUETOS_KLOG_DEFAULT);
 inline constexpr u8 kKlogDefaultLevel = 2; // Info
 #endif
 
+/// Compile-time klog floor. Mirrors the macro
+/// `DUETOS_KLOG_COMPILE_FLOOR` defined in klog.h's `#ifndef` block;
+/// surfaced here so callers that already include build_config.h can
+/// reason about it without dragging in klog.h. KLOG_TRACE / TRACE_V /
+/// TRACE_SCOPE call sites compile away when this is above 0.
+#ifdef DUETOS_KLOG_COMPILE_FLOOR
+inline constexpr u8 kKlogCompileFloor = static_cast<u8>(DUETOS_KLOG_COMPILE_FLOOR);
+#else
+inline constexpr u8 kKlogCompileFloor = 1; // Debug — matches klog.h fallback
+#endif
+
 // -----------------------------------------------------------------
 // KASLR — random-base kernel-image relocation at boot.
 //

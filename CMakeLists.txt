@@ -139,6 +139,28 @@ else()
     add_compile_definitions(DUETOS_CAP_AUDIT=1)
 endif()
 
+# Compile-time klog floor. Below this level, the macros fold to nothing;
+# the call sites are dead code that the compiler eliminates. Wired off
+# the build flavor so debug builds keep Trace (deepest instrumentation
+# available on demand via `loglevel t`) while release builds eliminate
+# the Trace-emit code path entirely.
+#
+# Levels match LogLevel: Trace=0 Debug=1 Info=2 Warn=3 Error=4.
+#
+# Caveat: an operator on a release build cannot enable Trace at runtime
+# — the call sites don't exist. The runtime knob only RAISES from this
+# floor, never below it. Release-with-trace operators want a debug
+# build (or the release-audit preset which forces the floor back to
+# Trace via the cache variable below).
+if(_duetos_is_debug)
+    set(_duetos_klog_floor 0) # Trace
+else()
+    set(_duetos_klog_floor 1) # Debug
+endif()
+set(DUETOS_KLOG_COMPILE_FLOOR "${_duetos_klog_floor}" CACHE STRING
+    "Compile-time klog severity floor (0=Trace 1=Debug 2=Info 3=Warn 4=Error)")
+add_compile_definitions(DUETOS_KLOG_COMPILE_FLOOR=${DUETOS_KLOG_COMPILE_FLOOR})
+
 # Default klog runtime threshold. The compile-time floor stays at Trace
 # (so release binaries can dial Trace back ON via `loglevel t`); this
 # knob picks the BOOT-TIME runtime threshold. Levels: Trace=0 Debug=1
@@ -183,6 +205,7 @@ message(STATUS "  KASSERT              : ${DUETOS_ASSERTS}")
 message(STATUS "  lock-order audit     : ${DUETOS_LOCK_ORDER_AUDIT}")
 message(STATUS "  cap-gate audit       : ${DUETOS_CAP_AUDIT}")
 message(STATUS "  klog default level   : ${DUETOS_KLOG_DEFAULT}")
+message(STATUS "  klog compile floor   : ${DUETOS_KLOG_COMPILE_FLOOR}")
 message(STATUS "  KASLR                : ${DUETOS_KASLR}")
 message(STATUS "  LTO                  : ${DUETOS_LTO}")
 

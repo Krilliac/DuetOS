@@ -58,7 +58,8 @@
                 "DUETOS_CAP_AUDIT": "Full",
                 "DUETOS_LOCK_ORDER_AUDIT": "ON",
                 "DUETOS_BOOT_SELFTESTS": "ON",
-                "DUETOS_KLOG_DEFAULT": "1"
+                "DUETOS_KLOG_DEFAULT": "1",
+                "DUETOS_KLOG_COMPILE_FLOOR": "0"
             }
         },
         {

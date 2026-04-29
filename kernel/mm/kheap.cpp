@@ -8,6 +8,7 @@
 #include "arch/x86_64/serial.h"
 #include "log/klog.h"
 #include "core/panic.h"
+#include "util/debug_assert.h"
 
 namespace duetos::mm
 {
@@ -296,6 +297,13 @@ void KFree(void* ptr)
     }
 
     auto* chunk = reinterpret_cast<ChunkHeader*>(static_cast<u8*>(ptr) - sizeof(ChunkHeader));
+    // Documentation-of-invariant: KMalloc lays out every chunk so
+    // that the user pointer sits exactly sizeof(ChunkHeader) past
+    // the header. The arithmetic above is the inverse; if `ptr`
+    // came from KMalloc, `chunk` is now well-formed and the magic
+    // check below should succeed.
+    DEBUG_ASSERT(reinterpret_cast<u64>(chunk) % alignof(ChunkHeader) == 0, "mm/kheap",
+                 "KFree: derived chunk header pointer is misaligned");
 
     // Magic check first: catches double-free (previous KFree flipped
     // magic to Free; second KFree sees wrong magic and panics instead
