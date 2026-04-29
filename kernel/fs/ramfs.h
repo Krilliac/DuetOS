@@ -105,4 +105,13 @@ void RamfsSyscallsSnapshot();
 /// the same bytes. Native buffer 8 KiB, Win32 buffer 32 KiB.
 void RamfsAbiSnapshot();
 
+/// Push one sample into the `/proc/cpuhist` ring (capacity 60)
+/// and re-render the file. The busy % at each sample is the
+/// 1 - (idle delta / total delta) ratio against the previous
+/// sample. With no timer-driven sampler wired up yet, the
+/// ring fills only at calls to this function — the file's
+/// header explains the gap. A future slice will hang this
+/// off a 1 Hz timer to fill the ring.
+void RamfsCpuhistSnapshot();
+
 } // namespace duetos::fs

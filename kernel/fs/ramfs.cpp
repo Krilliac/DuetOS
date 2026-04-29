@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "log/klog.h"
+#include "sched/sched.h"
 #include "subsystems/win32/thunks.h"
 #include "syscall/syscall_names.h"
 
@@ -412,6 +413,38 @@ constinit RamfsNode k_sys_dir = {
     .file_size = 0,
 };
 
+// ------- /proc/cpuhist -------
+//
+// 60-sample ring of per-tick CPU utilisation derived from
+// cumulative `total_ticks` / `idle_ticks` deltas. Each call
+// to RamfsCpuhistSnapshot() pushes one sample. With no
+// timer-driven sampler wired up yet, the file ships with
+// just the boot-time snapshot — header below makes that
+// explicit. A future slice can hang RamfsCpuhistSnapshot off
+// a 1 Hz timer to fill the ring.
+constexpr u32 kCpuhistRingCapacity = 60;
+struct CpuhistSample
+{
+    u64 t_total;     // SchedStats.total_ticks at sample time
+    u64 t_idle;      // SchedStats.idle_ticks at sample time
+    u8 busy_percent; // (1 - delta_idle/delta_total) * 100, clamped 0..100
+};
+CpuhistSample g_cpuhist_ring[kCpuhistRingCapacity] = {};
+u32 g_cpuhist_count = 0; // saturates at kCpuhistRingCapacity
+u32 g_cpuhist_next = 0;  // monotonic; (next % capacity) is write slot
+
+constexpr u32 kCpuhistBufferBytes = 4 * 1024;
+u8 g_cpuhist_buffer[kCpuhistBufferBytes] = {};
+u64 g_cpuhist_cursor = 0;
+
+constinit RamfsNode k_proc_cpuhist = {
+    .name = "cpuhist",
+    .type = RamfsNodeType::kFile,
+    .children = nullptr,
+    .file_bytes = g_cpuhist_buffer,
+    .file_size = 0,
+};
+
 // ------- /proc/abi/native + /proc/abi/win32 -------
 //
 // Two static dumps under /proc/abi:
@@ -492,6 +525,7 @@ constinit RamfsNode k_proc_boottrace = {
 constinit const RamfsNode* const k_proc_children[] = {
     &k_proc_boottrace,
     &k_proc_abi_dir,
+    &k_proc_cpuhist,
     nullptr,
 };
 
@@ -737,6 +771,56 @@ void RamfsAbiSnapshot()
 
     core::LogWithValue(core::LogLevel::Info, "fs/ramfs", "abi/native bytes", g_abi_native_cursor);
     core::LogWithValue(core::LogLevel::Info, "fs/ramfs", "abi/win32 bytes", g_abi_win32_cursor);
+}
+
+void RamfsCpuhistSnapshot()
+{
+    // 1. Push a new sample into the ring. Busy % is computed
+    //    relative to the PREVIOUS sample so adjacent calls
+    //    measure the gap between them. The first call has no
+    //    predecessor so its busy % is 0.
+    const auto stats = sched::SchedStatsRead();
+    const u32 slot = g_cpuhist_next % kCpuhistRingCapacity;
+    u8 busy = 0;
+    if (g_cpuhist_count > 0)
+    {
+        const u32 prev_slot =
+            (g_cpuhist_next == 0) ? (kCpuhistRingCapacity - 1) : ((g_cpuhist_next - 1) % kCpuhistRingCapacity);
+        const auto& prev = g_cpuhist_ring[prev_slot];
+        const u64 d_total = (stats.total_ticks > prev.t_total) ? stats.total_ticks - prev.t_total : 0;
+        const u64 d_idle = (stats.idle_ticks > prev.t_idle) ? stats.idle_ticks - prev.t_idle : 0;
+        if (d_total > 0)
+        {
+            const u64 d_busy = (d_total > d_idle) ? d_total - d_idle : 0;
+            const u64 percent = (d_busy * 100u) / d_total;
+            busy = static_cast<u8>((percent > 100u) ? 100u : percent);
+        }
+    }
+    g_cpuhist_ring[slot] = CpuhistSample{
+        .t_total = stats.total_ticks,
+        .t_idle = stats.idle_ticks,
+        .busy_percent = busy,
+    };
+    ++g_cpuhist_next;
+    if (g_cpuhist_count < kCpuhistRingCapacity)
+        ++g_cpuhist_count;
+
+    // 2. Re-render the buffer from the ring, oldest-first.
+    g_cpuhist_cursor = 0;
+    AppendInto(g_cpuhist_buffer, g_cpuhist_cursor, kCpuhistBufferBytes,
+               "# /proc/cpuhist — busy% per snapshot, oldest first.\n");
+    AppendInto(g_cpuhist_buffer, g_cpuhist_cursor, kCpuhistBufferBytes,
+               "# Sampler is currently driven only by RamfsCpuhistSnapshot()\n");
+    AppendInto(g_cpuhist_buffer, g_cpuhist_cursor, kCpuhistBufferBytes,
+               "# calls; future slice will hang it off a 1 Hz timer.\n");
+    const u32 start = (g_cpuhist_count < kCpuhistRingCapacity) ? 0u : (g_cpuhist_next % kCpuhistRingCapacity);
+    for (u32 i = 0; i < g_cpuhist_count; ++i)
+    {
+        const u32 idx = (start + i) % kCpuhistRingCapacity;
+        AppendDecInto(g_cpuhist_buffer, g_cpuhist_cursor, kCpuhistBufferBytes, g_cpuhist_ring[idx].busy_percent);
+        AppendInto(g_cpuhist_buffer, g_cpuhist_cursor, kCpuhistBufferBytes, "\n");
+    }
+    k_proc_cpuhist.file_size = g_cpuhist_cursor;
 }
 
 } // namespace duetos::fs
