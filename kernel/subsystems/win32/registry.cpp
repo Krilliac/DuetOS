@@ -731,8 +731,55 @@ i64 DoEnumerateValue(arch::TrapFrame* frame)
     return static_cast<i64>(static_cast<u32>(0x8000001A));
 }
 
-// Report counts: subkey_count = 0 (no children walker yet),
-// value_count = static + matching sidecar entries.
+// True iff `candidate` is a direct child path of `parent_path`
+// (one path component below). Out parameter `child_offset`
+// points at the start of the child component within `candidate`
+// when the function returns true.
+bool IsDirectChild(const char* parent_path, const char* candidate, const char** child_offset)
+{
+    // Compare parent_path against candidate's prefix, case-insensitive.
+    u64 i = 0;
+    while (parent_path[i] != '\0')
+    {
+        if (AsciiToLower(parent_path[i]) != AsciiToLower(candidate[i]))
+            return false;
+        ++i;
+    }
+    // Parent must be followed by '\\' on candidate, then a non-empty
+    // single-component remainder (no further '\\').
+    if (candidate[i] != '\\')
+        return false;
+    const char* rest = candidate + i + 1;
+    if (rest[0] == '\0')
+        return false;
+    for (u64 j = 0; rest[j] != '\0'; ++j)
+    {
+        if (rest[j] == '\\')
+            return false;
+    }
+    *child_offset = rest;
+    return true;
+}
+
+// Count children of `key` in the static tree. A child is any
+// kRegKeys[] entry whose path is `key->path + "\\" + single_name`.
+u32 CountSubkeys(const RegKey* key)
+{
+    u32 n = 0;
+    for (u64 i = 0; i < kRegKeyCount; ++i)
+    {
+        if (kRegKeys[i].root != key->root)
+            continue;
+        const char* unused = nullptr;
+        if (IsDirectChild(key->path, kRegKeys[i].path, &unused))
+            ++n;
+    }
+    return n;
+}
+
+// Report subkey_count (children walked from the static tree) and
+// value_count (static + matching sidecar entries). Both packed
+// into a 16-byte u64[2] in [buf_va, buf_va+16).
 i64 DoQueryKey(arch::TrapFrame* frame)
 {
     core::Process* proc = core::CurrentProcess();
@@ -753,11 +800,70 @@ i64 DoQueryKey(arch::TrapFrame* frame)
             ++sidecar_count;
     }
     u64 packed[2];
-    packed[0] = 0;                                                  // subkey_count
-    packed[1] = static_cast<u64>(key->value_count + sidecar_count); // value_count
+    packed[0] = static_cast<u64>(CountSubkeys(key));
+    packed[1] = static_cast<u64>(key->value_count + sidecar_count);
     if (!duetos::mm::CopyToUser(reinterpret_cast<void*>(buf_va), packed, sizeof(packed)))
         return kNtStatusInvalidParameter;
     return kNtStatusSuccess;
+}
+
+// Walk direct children of an opened key. Out shape mirrors
+// kOpEnumerateValue's 32-byte header + name body so the user-side
+// thunk can use the same staging-buffer pattern:
+//
+//   [0..4)   index (u32)
+//   [4..8)   reserved (u32, zero)
+//   [8..16)  reserved (u64, zero — last_write_time placeholder)
+//   [16..20) name_chars (u32, ASCII char count, no NUL)
+//   [20..32) reserved (zero)
+//   [32..)   ASCII name body, NUL-terminated, fits buf_cap
+//
+// Returns STATUS_NO_MORE_ENTRIES (0x8000001A) when `index` is past
+// the children count so a caller's enumeration loop terminates
+// cleanly.
+i64 DoEnumerateKey(arch::TrapFrame* frame)
+{
+    core::Process* proc = core::CurrentProcess();
+    if (proc == nullptr)
+        return kNtStatusInvalidParameter;
+    const u64 handle = frame->rsi;
+    const u32 index = static_cast<u32>(frame->rdx);
+    const u64 buf_va = frame->r10;
+    const u64 buf_cap = frame->r8;
+    const RegKey* key = SlotForHandle(proc, handle);
+    if (key == nullptr)
+        return kNtStatusInvalidHandle;
+    if (buf_va == 0 || buf_cap < 32)
+        return kNtStatusInvalidParameter;
+
+    u32 hits = 0;
+    for (u64 i = 0; i < kRegKeyCount; ++i)
+    {
+        if (kRegKeys[i].root != key->root)
+            continue;
+        const char* child_name = nullptr;
+        if (!IsDirectChild(key->path, kRegKeys[i].path, &child_name))
+            continue;
+        if (hits == index)
+        {
+            u32 name_chars = 0;
+            while (child_name[name_chars] != '\0')
+                ++name_chars;
+            const u64 hdr = 32;
+            if (buf_cap < hdr + name_chars + 1)
+                return kNtStatusBufferTooSmall;
+            u64 packed[4] = {0, 0, 0, 0};
+            packed[0] = static_cast<u64>(index);
+            packed[2] = static_cast<u64>(name_chars) << 32;
+            if (!duetos::mm::CopyToUser(reinterpret_cast<void*>(buf_va), packed, sizeof(packed)))
+                return kNtStatusInvalidParameter;
+            if (!duetos::mm::CopyToUser(reinterpret_cast<void*>(buf_va + hdr), child_name, name_chars + 1))
+                return kNtStatusInvalidParameter;
+            return kNtStatusSuccess;
+        }
+        ++hits;
+    }
+    return static_cast<i64>(static_cast<u32>(0x8000001A));
 }
 
 } // namespace
@@ -814,11 +920,14 @@ void DoRegistry(arch::TrapFrame* frame)
     case kOpQueryKey:
         status = DoQueryKey(frame);
         break;
+    case kOpEnumerateKey:
+        status = DoEnumerateKey(frame);
+        break;
     default:
-        // STUB: unknown / unsupported op — Enumerate{Key,Value}Key
-        // route through this fallback today (kSysNtNotImpl on the
-        // NT-name-table side keeps real Nt callers from getting
-        // here at all; this path catches malformed ntdll thunks).
+        // Unknown / unsupported op. Every op a userland DLL ships
+        // with today is routed above; falling through here means a
+        // malformed thunk or a future op the caller probed without
+        // first checking the kernel's op table.
         status = kNtStatusInvalidParameter;
         break;
     }
@@ -901,7 +1010,29 @@ void RegistrySelfTest()
     if (!ConcatRegPath("", "Software", buf, sizeof(buf)) || !PathEqualCi(buf, "Software"))
         fail("ConcatRegPath: empty parent didn't return subkey");
 
-    arch::SerialWrite("[registry-selftest] PASS (4 terminal + 8 prefix keys, ci-lookup, concat-path)\n");
+    // Children walker: counts + names match the static tree.
+    const RegKey* sw_hklm = LookupKey(kHkeyLocalMachine, "Software");
+    if (sw_hklm == nullptr || CountSubkeys(sw_hklm) != 1)
+        fail("HKLM\\Software should have exactly 1 child (Microsoft)");
+    const RegKey* ms_hklm = LookupKey(kHkeyLocalMachine, "Software\\Microsoft");
+    if (ms_hklm == nullptr || CountSubkeys(ms_hklm) != 2)
+        fail("HKLM\\Software\\Microsoft should have 2 children (Windows + Windows NT)");
+    const RegKey* terminal = LookupKey(kHkeyLocalMachine, "Software\\Microsoft\\Windows\\CurrentVersion");
+    if (terminal == nullptr || CountSubkeys(terminal) != 0)
+        fail("terminal HKLM CurrentVersion key should have no children");
+
+    // Direct-child predicate: positive + negative + grandchild rejection.
+    const char* child = nullptr;
+    if (!IsDirectChild("Software", "Software\\Microsoft", &child) || !PathEqualCi(child, "Microsoft"))
+        fail("IsDirectChild: positive case failed");
+    if (IsDirectChild("Software", "Software\\Microsoft\\Windows", &child))
+        fail("IsDirectChild: grandchild incorrectly flagged as direct child");
+    if (IsDirectChild("Software", "SoftwareElse\\Foo", &child))
+        fail("IsDirectChild: prefix-without-separator incorrectly matched");
+    if (IsDirectChild("Software", "Software", &child))
+        fail("IsDirectChild: same path incorrectly flagged as direct child");
+
+    arch::SerialWrite("[registry-selftest] PASS (4 terminal + 8 prefix keys, ci-lookup, concat-path, child walker)\n");
 }
 
 } // namespace duetos::subsystems::win32::registry
