@@ -87,4 +87,13 @@ bool RamfsIsDir(const RamfsNode* n);
 /// "system ready".
 void RamfsBoottraceSnapshot();
 
+/// Format the native syscall number → name table into the static
+/// `/sys/syscalls` buffer. Each line is "<dec_nr>  SYS_FOO\n",
+/// in `kSyscallNames[]` order. Idempotent. Buffer is 8 KiB,
+/// well above the current ~129-entry table size. Intended call
+/// site: once during boot, alongside `RamfsBoottraceSnapshot`.
+/// The table is constexpr so the snapshot never goes stale at
+/// runtime — re-running it just rewrites the same bytes.
+void RamfsSyscallsSnapshot();
+
 } // namespace duetos::fs
