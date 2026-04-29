@@ -39,6 +39,7 @@
  *   long readable function wins.
  */
 
+#include "util/build_config.h"
 #include "util/types.h"
 #include "acpi/acpi.h"
 #include "acpi/aml.h"
@@ -135,6 +136,7 @@
 #include "time/timekeeper.h"
 #include "diag/cleanroom_trace.h"
 #include "security/auth.h"
+#include "security/cap_audit.h"
 #include "loader/firmware_loader.h"
 #include "diag/heartbeat.h"
 #include "log/klog.h"
@@ -314,9 +316,48 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // klog online as early as Serial. Self-test prints one line at
     // each severity so visual inspection of the early boot log
     // confirms the tag format + u64-value form are working. Trace
-    // calls are gated by the runtime threshold (default Info) — use
-    // `loglevel t` at the shell to enable function-scope tracing.
+    // calls are gated by the runtime threshold — boot-time default
+    // is keyed off `core::kKlogDefaultLevel` (Debug for debug
+    // builds, Info for release). Use `loglevel <t|d|i|w|e>` at the
+    // shell to flip live.
     duetos::core::KLogSelfTest();
+
+    // Build-flavor banner. Single line so the boot log reader can
+    // see at a glance which preset produced this image — useful
+    // when crash reports come in from different builds. The
+    // sub-knobs match the ones declared in CMakeLists.txt and
+    // surfaced by build_config.h.
+    SerialWrite("[boot] DuetOS build flavor: ");
+    SerialWrite(duetos::core::BuildFlavorName());
+    if constexpr (duetos::core::kAssertsEnabled)
+    {
+        SerialWrite(" +asserts");
+    }
+    if constexpr (duetos::core::kBootSelfTests)
+    {
+        SerialWrite(" +selftests");
+    }
+    if constexpr (duetos::core::kLockOrderAudit)
+    {
+        SerialWrite(" +lockaudit");
+    }
+    if constexpr (duetos::core::kCapAuditMode == duetos::core::CapAuditMode::Full)
+    {
+        SerialWrite(" +capaudit=full");
+    }
+    else if constexpr (duetos::core::kCapAuditMode == duetos::core::CapAuditMode::Sample)
+    {
+        SerialWrite(" +capaudit=sample");
+    }
+    if constexpr (duetos::core::kUbsanRuntime)
+    {
+        SerialWrite(" +ubsan");
+    }
+    if constexpr (duetos::core::kKaslrEnabled)
+    {
+        SerialWrite(" +kaslr");
+    }
+    SerialWrite("\n");
 
     constexpr duetos::u32 kMultiboot2BootMagic = 0x36D76289;
     if (multiboot_magic == kMultiboot2BootMagic)
@@ -351,35 +392,45 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // the source TUs alongside the test definitions and
     // `kernel_main` keeps only the `RunPhase(...)` line.
     // (A1-followup, 2026-04-27.)
-    duetos::core::InitcallRegister(duetos::core::Phase::Earlycon, "result-selftest",
-                                   []()
-                                   {
-                                       SerialWrite("[boot] Exercising Result<T,E> + TRY primitives.\n");
-                                       duetos::core::ResultSelfTest();
-                                       return duetos::core::Result<void>{};
-                                   });
-    duetos::core::InitcallRegister(duetos::core::Phase::Earlycon, "string-selftest",
-                                   []()
-                                   {
-                                       SerialWrite("[boot] Exercising freestanding memset/memcpy/memmove.\n");
-                                       duetos::core::StringSelfTest();
-                                       return duetos::core::Result<void>{};
-                                   });
-    duetos::core::InitcallRegister(duetos::core::Phase::Earlycon, "hexdump-selftest",
-                                   []()
-                                   {
-                                       SerialWrite("[boot] Exercising kernel-VA range + hexdump formatters.\n");
-                                       duetos::core::HexdumpSelfTest();
-                                       return duetos::core::Result<void>{};
-                                   });
-    duetos::core::InitcallRegister(duetos::core::Phase::Earlycon, "varegion-selftest",
-                                   []()
-                                   {
-                                       SerialWrite(
-                                           "[boot] Exercising VA-region classifier (panic / trap dump annotation).\n");
-                                       duetos::core::VaRegionSelfTest();
-                                       return duetos::core::Result<void>{};
-                                   });
+    //
+    // The four Earlycon adapters are pure self-tests — they don't
+    // double as init code, so a release build with
+    // `kBootSelfTests == false` skips them entirely. The
+    // `if constexpr` makes the registration AND the self-test
+    // body dead code that the optimizer drops; the boot log loses
+    // four lines but gains ~one millisecond on a slow VM.
+    if constexpr (duetos::core::kBootSelfTests)
+    {
+        duetos::core::InitcallRegister(duetos::core::Phase::Earlycon, "result-selftest",
+                                       []()
+                                       {
+                                           SerialWrite("[boot] Exercising Result<T,E> + TRY primitives.\n");
+                                           duetos::core::ResultSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
+        duetos::core::InitcallRegister(duetos::core::Phase::Earlycon, "string-selftest",
+                                       []()
+                                       {
+                                           SerialWrite("[boot] Exercising freestanding memset/memcpy/memmove.\n");
+                                           duetos::core::StringSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
+        duetos::core::InitcallRegister(duetos::core::Phase::Earlycon, "hexdump-selftest",
+                                       []()
+                                       {
+                                           SerialWrite("[boot] Exercising kernel-VA range + hexdump formatters.\n");
+                                           duetos::core::HexdumpSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
+        duetos::core::InitcallRegister(
+            duetos::core::Phase::Earlycon, "varegion-selftest",
+            []()
+            {
+                SerialWrite("[boot] Exercising VA-region classifier (panic / trap dump annotation).\n");
+                duetos::core::VaRegionSelfTest();
+                return duetos::core::Result<void>{};
+            });
+    }
     (void)duetos::core::RunPhase(duetos::core::Phase::Earlycon);
 
     // One-shot mm-map anchor for every later panic dump. The region
@@ -1392,6 +1443,16 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // code reaches the int 0x80 boundary. Runs AFTER PerCpuInitBsp
     // so the denial path's CurrentTask() reads a programmed GSBASE.
     duetos::core::SyscallGateSelfTest();
+
+    // Cap-gate audit: validates the trace-hook counters + sample
+    // path. Cheap (three synthetic events) and the audit is what
+    // a release operator looks at to confirm the cap-gate is
+    // actually firing in production. Runs only when boot
+    // self-tests are on (debug + audit-flavored release).
+    if constexpr (duetos::core::kBootSelfTests)
+    {
+        duetos::security::CapAuditSelfTest();
+    }
 
     SerialWrite("[boot] Programming Linux-ABI syscall MSRs.\n");
     duetos::subsystems::linux::SyscallInit();

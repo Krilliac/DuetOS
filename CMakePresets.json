@@ -39,6 +39,48 @@
             "cacheVariables": {
                 "DUETOS_ENABLE_UBSAN": "ON"
             }
+        },
+        {
+            "name": "x86_64-release-asserts",
+            "displayName": "x86_64 release with KASSERT + UBSAN runtime kept on (paranoid release)",
+            "inherits": "x86_64-release",
+            "cacheVariables": {
+                "DUETOS_ASSERTS": "ON",
+                "DUETOS_ENABLE_UBSAN": "ON",
+                "DUETOS_CAP_AUDIT": "Sample"
+            }
+        },
+        {
+            "name": "x86_64-release-audit",
+            "displayName": "x86_64 release with full cap-gate + lock-order audit (forensic release)",
+            "inherits": "x86_64-release",
+            "cacheVariables": {
+                "DUETOS_CAP_AUDIT": "Full",
+                "DUETOS_LOCK_ORDER_AUDIT": "ON",
+                "DUETOS_BOOT_SELFTESTS": "ON",
+                "DUETOS_KLOG_DEFAULT": "1"
+            }
+        },
+        {
+            "name": "x86_64-debug-fast",
+            "displayName": "x86_64 debug with cheaper instrumentation (faster boot, debuggable)",
+            "inherits": "x86_64-debug",
+            "cacheVariables": {
+                "DUETOS_LOCK_ORDER_AUDIT": "OFF",
+                "DUETOS_CAP_AUDIT": "Sample",
+                "DUETOS_BOOT_SELFTESTS": "ON",
+                "DUETOS_ASSERTS": "ON"
+            }
+        },
+        {
+            "name": "x86_64-debug-kasan",
+            "displayName": "x86_64 debug + KASAN runtime (placeholder; runtime not yet implemented)",
+            "inherits": "x86_64-debug",
+            "cacheVariables": {
+                "DUETOS_ENABLE_UBSAN": "ON",
+                "DUETOS_LOCK_ORDER_AUDIT": "ON",
+                "DUETOS_CAP_AUDIT": "Full"
+            }
         }
     ],
     "buildPresets": [
@@ -53,6 +95,22 @@
         {
             "name": "x86_64-debug-ubsan",
             "configurePreset": "x86_64-debug-ubsan"
+        },
+        {
+            "name": "x86_64-release-asserts",
+            "configurePreset": "x86_64-release-asserts"
+        },
+        {
+            "name": "x86_64-release-audit",
+            "configurePreset": "x86_64-release-audit"
+        },
+        {
+            "name": "x86_64-debug-fast",
+            "configurePreset": "x86_64-debug-fast"
+        },
+        {
+            "name": "x86_64-debug-kasan",
+            "configurePreset": "x86_64-debug-kasan"
         }
     ]
 }

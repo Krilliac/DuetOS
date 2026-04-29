@@ -34,6 +34,7 @@
 #include "mm/frame_allocator.h"
 #include "mm/kheap.h"
 #include "sched/sched.h"
+#include "util/build_config.h"
 
 namespace duetos::core
 {
@@ -65,12 +66,13 @@ constinit bool g_color_enabled = true;
 
 // Runtime severity threshold — set via SetLogThreshold. Lines with
 // level < max(threshold, kKlogMinLevel) are silently dropped.
-// Default is Info: the compile-time floor is Trace (so Trace calls
-// exist in the binary), but the runtime default drops them. Users
-// dial down to Trace via `loglevel t` when they want function
-// entry / exit timing. This keeps boot logs readable by default
-// while leaving deep instrumentation a shell command away.
-constinit LogLevel g_log_threshold = LogLevel::Info;
+// Default is read from `core::kKlogDefaultLevel` (build_config.h),
+// which keys off `CMAKE_BUILD_TYPE`: debug builds default to Debug
+// (full driver + IRQ + sched chatter), release builds default to
+// Info (warnings and above). Both can be flipped at runtime via
+// `loglevel <t|d|i|w|e>` so a release operator can dial down to
+// Trace when they want function entry / exit timing.
+constinit LogLevel g_log_threshold = static_cast<LogLevel>(kKlogDefaultLevel);
 
 // Secondary sink. Set via SetLogTee once a framebuffer console (or
 // any string consumer) is up. Timestamps are NOT forwarded — they
