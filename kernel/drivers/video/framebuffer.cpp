@@ -537,6 +537,259 @@ void FramebufferFillRoundRect(u32 x, u32 y, u32 w, u32 h, u32 radius, u32 rgb)
     }
 }
 
+// Safety cap on the per-line iteration count so a malicious caller
+// passing absurd endpoints can't spin the compositor. 8K covers any
+// plausible diagonal at 4K resolution; anything larger is a bug.
+constexpr u32 kFbMaxLinePixels = 8192;
+
+void FramebufferDrawLine(i32 x0, i32 y0, i32 x1, i32 y1, u32 rgb)
+{
+    if (!g_available)
+    {
+        return;
+    }
+    // Standard Bresenham, all-octant. The signed deltas keep the
+    // four-quadrant logic out of the inner loop.
+    const i32 dx = (x1 >= x0) ? (x1 - x0) : (x0 - x1);
+    const i32 sx = (x1 >= x0) ? 1 : -1;
+    const i32 dy = -((y1 >= y0) ? (y1 - y0) : (y0 - y1));
+    const i32 sy = (y1 >= y0) ? 1 : -1;
+    i32 err = dx + dy;
+    i32 x = x0;
+    i32 y = y0;
+    for (u32 step = 0; step < kFbMaxLinePixels; ++step)
+    {
+        if (x >= 0 && y >= 0 && static_cast<u32>(x) < g_info.width && static_cast<u32>(y) < g_info.height)
+        {
+            FramebufferPutPixel(static_cast<u32>(x), static_cast<u32>(y), rgb);
+        }
+        if (x == x1 && y == y1)
+        {
+            break;
+        }
+        const i32 e2 = 2 * err;
+        if (e2 >= dy)
+        {
+            err += dy;
+            x += sx;
+        }
+        if (e2 <= dx)
+        {
+            err += dx;
+            y += sy;
+        }
+    }
+}
+
+namespace
+{
+
+// Plot the eight symmetric points around `(cx, cy)` for one
+// midpoint-circle iteration step. Each plot is independently
+// surface-clipped — a circle that hangs off the framebuffer
+// only loses the off-screen octants.
+void Plot8(i32 cx, i32 cy, i32 dx, i32 dy, u32 rgb)
+{
+    const i32 pts_x[8] = {cx + dx, cx - dx, cx + dx, cx - dx, cx + dy, cx - dy, cx + dy, cx - dy};
+    const i32 pts_y[8] = {cy + dy, cy + dy, cy - dy, cy - dy, cy + dx, cy + dx, cy - dx, cy - dx};
+    for (u32 k = 0; k < 8; ++k)
+    {
+        if (pts_x[k] >= 0 && pts_y[k] >= 0 && static_cast<u32>(pts_x[k]) < g_info.width &&
+            static_cast<u32>(pts_y[k]) < g_info.height)
+        {
+            FramebufferPutPixel(static_cast<u32>(pts_x[k]), static_cast<u32>(pts_y[k]), rgb);
+        }
+    }
+}
+
+} // namespace
+
+void FramebufferDrawCircle(i32 cx, i32 cy, u32 radius, u32 rgb)
+{
+    if (!g_available)
+    {
+        return;
+    }
+    if (radius == 0)
+    {
+        if (cx >= 0 && cy >= 0 && static_cast<u32>(cx) < g_info.width && static_cast<u32>(cy) < g_info.height)
+        {
+            FramebufferPutPixel(static_cast<u32>(cx), static_cast<u32>(cy), rgb);
+        }
+        return;
+    }
+    // Midpoint algorithm. Iterate dx from 0 outward; dy starts at
+    // r and walks inward. Decision variable `d` tracks the signed
+    // distance from the true arc.
+    i32 dx = 0;
+    i32 dy = static_cast<i32>(radius);
+    i32 d = 1 - dy;
+    while (dx <= dy)
+    {
+        Plot8(cx, cy, dx, dy, rgb);
+        ++dx;
+        if (d < 0)
+        {
+            d += 2 * dx + 1;
+        }
+        else
+        {
+            --dy;
+            d += 2 * (dx - dy) + 1;
+        }
+    }
+}
+
+void FramebufferFillCircle(i32 cx, i32 cy, u32 radius, u32 rgb)
+{
+    if (!g_available)
+    {
+        return;
+    }
+    if (radius == 0)
+    {
+        if (cx >= 0 && cy >= 0 && static_cast<u32>(cx) < g_info.width && static_cast<u32>(cy) < g_info.height)
+        {
+            FramebufferPutPixel(static_cast<u32>(cx), static_cast<u32>(cy), rgb);
+        }
+        return;
+    }
+    // Per-row span: for each y in [cy-r, cy+r], the row's half-
+    // width is floor(sqrt(r² - dy²)). Computed via integer test
+    // so we don't pull in libm. Walk an outer pointer right-ward
+    // until the squared distance crosses r² — bounded by r so
+    // the cost is O(r²) total writes, which is exactly the
+    // number of painted pixels.
+    const i32 r = static_cast<i32>(radius);
+    const i64 r2 = static_cast<i64>(r) * r;
+    for (i32 dy = -r; dy <= r; ++dy)
+    {
+        const i64 dy2 = static_cast<i64>(dy) * dy;
+        // Walk dx outward from 0 until the test fails — gives
+        // the largest dx with dx² + dy² ≤ r².
+        i32 dx = 0;
+        while (dx <= r && static_cast<i64>(dx) * dx + dy2 <= r2)
+        {
+            ++dx;
+        }
+        --dx;
+        if (dx < 0)
+            continue;
+        const i32 row_y = cy + dy;
+        const i32 row_x = cx - dx;
+        const u32 row_w = static_cast<u32>(2 * dx + 1);
+        if (row_y < 0 || static_cast<u32>(row_y) >= g_info.height)
+            continue;
+        // Clip the span to the surface; FramebufferFillRect is
+        // already coordinate-clipped but skipping the row when
+        // it's entirely off-screen avoids a no-op call.
+        i32 left = row_x;
+        i32 right = row_x + static_cast<i32>(row_w);
+        if (left < 0)
+            left = 0;
+        if (right > static_cast<i32>(g_info.width))
+            right = static_cast<i32>(g_info.width);
+        if (right <= left)
+            continue;
+        FramebufferFillRect(static_cast<u32>(left), static_cast<u32>(row_y), static_cast<u32>(right - left), 1U, rgb);
+    }
+}
+
+void FramebufferDrawRoundRect(u32 x, u32 y, u32 w, u32 h, u32 radius, u32 rgb)
+{
+    if (!g_available || w == 0 || h == 0)
+    {
+        return;
+    }
+    const u32 max_r = (w < h ? w : h) / 2U;
+    if (radius > max_r)
+    {
+        radius = max_r;
+    }
+    if (radius == 0)
+    {
+        // Fall through to a 1-pixel rectangular outline.
+        FramebufferDrawRect(x, y, w, h, rgb, 1);
+        return;
+    }
+    // Straight edges between the corner arcs. Top + bottom run
+    // from x+radius to x+w-radius; left + right run from y+radius
+    // to y+h-radius.
+    if (w > 2 * radius)
+    {
+        FramebufferFillRect(x + radius, y, w - 2 * radius, 1U, rgb);          // top edge
+        FramebufferFillRect(x + radius, y + h - 1U, w - 2 * radius, 1U, rgb); // bottom edge
+    }
+    if (h > 2 * radius)
+    {
+        FramebufferFillRect(x, y + radius, 1U, h - 2 * radius, rgb);          // left edge
+        FramebufferFillRect(x + w - 1U, y + radius, 1U, h - 2 * radius, rgb); // right edge
+    }
+    // Four corner arcs. Each arc lives inside a `radius × radius`
+    // square at the corresponding corner; iterate the same
+    // midpoint-style indent the fill primitive uses but plot only
+    // the boundary pixel (the smallest dx for each dy).
+    const u32 r1 = radius - 1U;
+    const u32 r1_sq = r1 * r1;
+    for (u32 dy = 0; dy < radius; ++dy)
+    {
+        const u32 vy = r1 - dy;
+        const u32 vy_sq = vy * vy;
+        u32 dx = 0;
+        while (dx < radius)
+        {
+            const u32 vx = r1 - dx;
+            if (vx * vx + vy_sq <= r1_sq)
+            {
+                break;
+            }
+            ++dx;
+        }
+        if (dx >= radius)
+            continue;
+        // Top-left corner pixel: (x + dx, y + dy).
+        FramebufferPutPixel(x + dx, y + dy, rgb);
+        // Top-right corner pixel.
+        FramebufferPutPixel(x + w - 1U - dx, y + dy, rgb);
+        // Bottom-left corner pixel.
+        FramebufferPutPixel(x + dx, y + h - 1U - dy, rgb);
+        // Bottom-right corner pixel.
+        FramebufferPutPixel(x + w - 1U - dx, y + h - 1U - dy, rgb);
+    }
+}
+
+void FramebufferDropShadow(u32 x, u32 y, u32 w, u32 h, u32 depth, u8 start_alpha)
+{
+    if (!g_available || w == 0 || h == 0 || depth == 0 || start_alpha == 0)
+    {
+        return;
+    }
+    // Each shadow band is one pixel inset further from the
+    // source rect; alpha decreases linearly from `start_alpha` to
+    // zero at the outermost band, so the shadow fades out into
+    // the desktop. `depth+1` divisions to avoid alpha hitting 0
+    // before the last band (which would be a wasted pass).
+    for (u32 d = 0; d < depth; ++d)
+    {
+        // Linear ramp: alpha at band d is start_alpha * (depth - d) / depth.
+        const u32 a = (static_cast<u32>(start_alpha) * (depth - d)) / depth;
+        if (a == 0)
+            continue;
+        const u32 argb = (a << 24); // black tint
+        // Right band: 1px column from (x+w+d, y+d+1) down to
+        // (x+w+d, y+h+d). The +d+1 vertical offset offsets the
+        // shadow downward so it reads as cast from a light from
+        // top-left, matching the chrome convention.
+        FramebufferFillRectAlpha(x + w + d, y + 1U + d, 1U, h, argb);
+        // Bottom band: 1px row from (x+d+1, y+h+d) across to
+        // (x+w+d, y+h+d). Includes the corner pixel that the
+        // right band already touched at (x+w+d, y+h+d) — the
+        // double-blend is harmless (alpha blending is idempotent
+        // at the same source colour for a single-pixel overlap).
+        FramebufferFillRectAlpha(x + 1U + d, y + h + d, w, 1U, argb);
+    }
+}
+
 void FramebufferSelfTest()
 {
     if (!g_available)

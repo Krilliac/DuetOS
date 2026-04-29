@@ -318,6 +318,42 @@ bool WindowValid(WindowHandle h)
 
 } // namespace
 
+namespace
+{
+
+// Lighten an 0x00RRGGBB colour by `amount` per channel, saturating
+// at 0xFF. Used to derive the highlight shade for the top of a
+// title bar gradient. Cheap saturating add — no branch on
+// channel boundaries because the per-channel sums fit in u32.
+u32 LightenRgb(u32 rgb, u32 amount)
+{
+    u32 r = ((rgb >> 16) & 0xFFU) + amount;
+    u32 g = ((rgb >> 8) & 0xFFU) + amount;
+    u32 b = (rgb & 0xFFU) + amount;
+    if (r > 0xFFU)
+        r = 0xFFU;
+    if (g > 0xFFU)
+        g = 0xFFU;
+    if (b > 0xFFU)
+        b = 0xFFU;
+    return (r << 16) | (g << 8) | b;
+}
+
+// Darken sibling of LightenRgb. Saturates at 0 — channels that
+// would underflow clamp to 0 instead of wrapping.
+u32 DarkenRgb(u32 rgb, u32 amount)
+{
+    const u32 r0 = (rgb >> 16) & 0xFFU;
+    const u32 g0 = (rgb >> 8) & 0xFFU;
+    const u32 b0 = rgb & 0xFFU;
+    const u32 r = (r0 > amount) ? r0 - amount : 0U;
+    const u32 g = (g0 > amount) ? g0 - amount : 0U;
+    const u32 b = (b0 > amount) ? b0 - amount : 0U;
+    return (r << 16) | (g << 8) | b;
+}
+
+} // namespace
+
 void WindowDraw(const WindowChrome& w)
 {
     if (w.w == 0 || w.h == 0)
@@ -331,13 +367,36 @@ void WindowDraw(const WindowChrome& w)
     // pattern.
     FramebufferFillRect(w.x, w.y, w.w, w.h, w.colour_client);
 
-    // Title bar.
+    // Title bar with a vertical gradient: a softly-lighter band
+    // at the top fades into the registered title colour at the
+    // bottom. The +24 lift is small enough to preserve the
+    // theme's hue identity while still reading as "depth" — the
+    // chrome no longer looks like a solid coloured bar.
     const u32 tbh = (w.title_height == 0) ? 22 : w.title_height;
     const u32 tbh_eff = (tbh > w.h) ? w.h : tbh;
-    FramebufferFillRect(w.x, w.y, w.w, tbh_eff, w.colour_title);
+    const u32 title_top = LightenRgb(w.colour_title, 24);
+    FramebufferFillRectGradient(w.x, w.y, w.w, tbh_eff, title_top, w.colour_title);
+
+    // 1-pixel highlight at the very top of the title bar — a
+    // brighter ridge that catches the eye and makes the window
+    // read as a discrete object rather than a coloured fill.
+    if (tbh_eff > 0)
+    {
+        FramebufferFillRect(w.x + 2, w.y + 1, (w.w > 4) ? w.w - 4 : 0, 1, LightenRgb(w.colour_title, 56));
+    }
 
     // Outer border — 2-pixel dark frame over the whole window.
     FramebufferDrawRect(w.x, w.y, w.w, w.h, w.colour_border, 2);
+
+    // Inner client highlight: 1-pixel line just inside the
+    // border at the top of the client area. Catches incoming
+    // light from the title-bar gradient above and gives the
+    // client a slight "recessed" feel without blowing the
+    // theme's flat aesthetic.
+    if (tbh_eff + 3 <= w.h && w.w > 6)
+    {
+        FramebufferFillRect(w.x + 3, w.y + tbh_eff + 1, w.w - 6, 1, LightenRgb(w.colour_client, 16));
+    }
 
     // Title / client divider — 1-pixel line where the title
     // bar ends. Helps the eye separate chrome from content.
@@ -346,8 +405,11 @@ void WindowDraw(const WindowChrome& w)
         FramebufferFillRect(w.x + 2, w.y + tbh_eff, w.w - 4, 1, w.colour_border);
     }
 
-    // Close-button-ish square near top-right. Sized to fit
-    // inside the title bar with 4px padding on top/bottom.
+    // Close button: filled square + 1px outline + an "X" glyph
+    // drawn with two diagonal lines. The X reads as "close" the
+    // way every desktop OS has trained users to expect; the
+    // earlier flat square left users guessing whether it was a
+    // close or a colour swatch.
     const u32 btn_pad = 4;
     if (tbh_eff > 2 * btn_pad + 4 && w.w > tbh_eff)
     {
@@ -356,7 +418,29 @@ void WindowDraw(const WindowChrome& w)
         const u32 btn_y = w.y + btn_pad;
         FramebufferFillRect(btn_x, btn_y, btn_side, btn_side, w.colour_close_btn);
         FramebufferDrawRect(btn_x, btn_y, btn_side, btn_side, w.colour_border, 1);
+        // X glyph with a 3-pixel inset on each side. Two diagonals.
+        if (btn_side >= 8)
+        {
+            const u32 inset = 3;
+            const i32 x0 = static_cast<i32>(btn_x + inset);
+            const i32 y0 = static_cast<i32>(btn_y + inset);
+            const i32 x1 = static_cast<i32>(btn_x + btn_side - 1U - inset);
+            const i32 y1 = static_cast<i32>(btn_y + btn_side - 1U - inset);
+            FramebufferDrawLine(x0, y0, x1, y1, 0x00FFFFFF);
+            FramebufferDrawLine(x0, y1, x1, y0, 0x00FFFFFF);
+            // Doubled stroke — a 1-pixel line is hard to see at
+            // 8x8 close-button size on a busy title-bar fill.
+            FramebufferDrawLine(x0 + 1, y0, x1, y1 - 1, 0x00FFFFFF);
+            FramebufferDrawLine(x0, y1 - 1, x1 - 1, y0, 0x00FFFFFF);
+        }
     }
+
+    // Soft drop shadow on the right + bottom edges. Makes the
+    // active window read as raised relative to the desktop and
+    // recedes the inactive ones into the surface — a small
+    // chrome polish that costs ~depth × (w + h) alpha-blended
+    // pixels per window.
+    FramebufferDropShadow(w.x, w.y, w.w, w.h, 4, 0x60);
 }
 
 namespace
@@ -1015,7 +1099,7 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
     }
 
     // Desktop paint stack (bottom to top):
-    //   1. Desktop fill
+    //   1. Desktop gradient fill
     //   2. Framebuffer console (under windows — windows dragged
     //      over the console occlude it, which restores on next
     //      compose — standard z-order feel)
@@ -1026,7 +1110,26 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
     //   7. Menu (popup, on top of everything)
     // The cursor is not touched here — the mouse reader owns
     // CursorHide / CursorShow around this call.
-    FramebufferClear(desktop_rgb);
+    //
+    // Desktop fill: a subtle vertical gradient from a slightly-
+    // lifted shade of the theme's `desktop_bg` at the top to a
+    // slightly darker shade at the bottom. Reads as ambient
+    // depth without competing with window chrome for attention.
+    // A pure black `desktop_rgb` (used by the login / TTY-flip
+    // paint) skips the gradient since lighten / darken on 0
+    // produces a flat result anyway — the resulting solid
+    // FramebufferClear is faster.
+    if (desktop_rgb == 0)
+    {
+        FramebufferClear(0);
+    }
+    else
+    {
+        const auto info = FramebufferGet();
+        const u32 top = LightenRgb(desktop_rgb, 18);
+        const u32 bot = DarkenRgb(desktop_rgb, 22);
+        FramebufferFillRectGradient(0, 0, info.width, info.height, top, bot);
+    }
     ConsoleRedraw();
     WindowDrawAllOrdered();
     for (u32 i = 0; i < g_widget_count; ++i)

@@ -140,6 +140,60 @@ void FramebufferFillRectGradient(u32 x, u32 y, u32 w, u32 h, u32 top_rgb, u32 bo
 /// Clipped; no-op on empty dimensions or !Available().
 void FramebufferFillRoundRect(u32 x, u32 y, u32 w, u32 h, u32 radius, u32 rgb);
 
+/// Outline-only sibling of `FramebufferFillRoundRect`. Paints a
+/// 1-pixel rounded-rect border in `rgb`. Same radius clamping
+/// rules as the fill primitive. Interior is untouched. Used by
+/// chrome paths that want a soft outline without an inner fill
+/// (taskbar tab borders, button outlines).
+///
+/// Clipped; no-op on empty dimensions or !Available().
+void FramebufferDrawRoundRect(u32 x, u32 y, u32 w, u32 h, u32 radius, u32 rgb);
+
+/// Bresenham line from (x0, y0) to (x1, y1) inclusive in `rgb`.
+/// Iterates pixels one at a time — useful for chrome details
+/// (close-button "X" glyphs, accent strips, simple icons) where
+/// a Manhattan-aligned filled rect would look wrong. Works for
+/// every octant; coordinates are clipped per-pixel against the
+/// surface so off-screen segments are silent no-ops.
+///
+/// Cost is O(max(|dx|, |dy|)) — one branch + one per-pixel
+/// PutPixel. Bounded by `kFbMaxLinePixels` so a malicious caller
+/// with insane endpoints can't spin the loop forever.
+///
+/// No-op if `!Available()`.
+void FramebufferDrawLine(i32 x0, i32 y0, i32 x1, i32 y1, u32 rgb);
+
+/// Midpoint-circle outline at center `(cx, cy)` with integer
+/// `radius` in `rgb`. One-pixel border, eight-octant symmetric
+/// plot — pixel-aligned, no anti-aliasing. Coordinates can be
+/// negative; off-surface plots are silently dropped.
+///
+/// Degenerate radii: `0` is a single pixel at the center,
+/// negative radius is a no-op. No-op if `!Available()`.
+void FramebufferDrawCircle(i32 cx, i32 cy, u32 radius, u32 rgb);
+
+/// Solid-filled circle at `(cx, cy)` of integer `radius`,
+/// painted via per-row spans (one `FramebufferFillRect` per
+/// scanline) using the integer test `dx² + dy² ≤ r²`. Same
+/// degenerate-radius rules as `FramebufferDrawCircle`.
+///
+/// No-op if `!Available()`.
+void FramebufferFillCircle(i32 cx, i32 cy, u32 radius, u32 rgb);
+
+/// Soft "drop shadow" for a window or panel. Paints a
+/// `depth`-pixel-wide alpha-blended L-shape along the right
+/// and bottom edges of the rect at `(x, y, w, h)`, using black
+/// at `start_alpha` fading linearly to 0 at the outer edge of
+/// the band. The original rect content is NOT touched — the
+/// shadow lives entirely outside the rect, in the L-shaped
+/// region [x+w, x+w+depth) × [y+depth, y+h+depth) ∪
+/// [x+depth, x+w+depth) × [y+h, y+h+depth).
+///
+/// Cost: ~depth × (w + h) alpha-blended pixels. At depth=4 the
+/// budget is trivial even for the desktop-sized chrome path.
+/// Clipped; no-op on empty dimensions, depth==0, or !Available().
+void FramebufferDropShadow(u32 x, u32 y, u32 w, u32 h, u32 depth, u8 start_alpha);
+
 /// Copy `src_w × src_h` BGRA8888 pixels into the framebuffer at
 /// `(dst_x, dst_y)`. `src` is a kernel-side pointer to a row-major
 /// pixel buffer with `src_pitch_px` u32-pixels per row (allowing a

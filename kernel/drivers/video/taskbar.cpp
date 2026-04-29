@@ -97,6 +97,23 @@ u32 TextRowY()
     return (g_h > 8) ? g_y + (g_h - 8) / 2 : g_y + 2;
 }
 
+// Lighten an 0x00RRGGBB colour by `amount` per channel, saturating
+// at 0xFF. Used to derive the highlight shade for the top of
+// gradient bands (taskbar strip, START button, active tab).
+u32 LightenRgb(u32 rgb, u32 amount)
+{
+    u32 r = ((rgb >> 16) & 0xFFU) + amount;
+    u32 g = ((rgb >> 8) & 0xFFU) + amount;
+    u32 b = (rgb & 0xFFU) + amount;
+    if (r > 0xFFU)
+        r = 0xFFU;
+    if (g > 0xFFU)
+        g = 0xFFU;
+    if (b > 0xFFU)
+        b = 0xFFU;
+    return (r << 16) | (g << 8) | b;
+}
+
 } // namespace
 
 void TaskbarInit(u32 y, u32 height, u32 bg_rgb, u32 fg_rgb, u32 accent_rgb, u32 tab_inactive_rgb, u32 border_rgb)
@@ -129,18 +146,33 @@ void TaskbarRedraw()
     const auto info = FramebufferGet();
     const u32 fbw = info.width;
 
-    // Background strip + thin accent line at top for visual
-    // separation from the desktop.
-    FramebufferFillRect(0, g_y, fbw, g_h, g_bg);
+    // Background strip with a subtle vertical gradient: a slightly
+    // lifted shade at the top fades into the registered taskbar bg
+    // at the bottom. Reads as a coherent toolbar surface rather
+    // than a flat coloured stripe. Keep the lift small so themes
+    // that picked a near-black bg still read as near-black.
+    FramebufferFillRectGradient(0, g_y, fbw, g_h, LightenRgb(g_bg, 12), g_bg);
+    // Thin accent line on the top edge — preserves the "the
+    // taskbar starts here" cue the original flat bar had.
     FramebufferFillRect(0, g_y, fbw, 1, g_accent);
 
     const u32 text_y = TextRowY();
 
     // "START" anchor on the left. Clicking it opens the start
     // menu via the mouse reader's TaskbarStartBounds hit-test.
+    // Rounded fill + matching outline so it reads as an affordance
+    // rather than a coloured rectangle. A 2-px highlight strip on
+    // the top edge gives it a subtle raised look matching the
+    // window-chrome highlight band.
     constexpr u32 start_w = 88;
-    FramebufferFillRect(4, g_y + 4, start_w, g_h - 8, g_accent);
-    FramebufferDrawRect(4, g_y + 4, start_w, g_h - 8, g_border, 1);
+    constexpr u32 start_radius = 4;
+    const u32 start_h = (g_h > 8) ? g_h - 8 : g_h;
+    FramebufferFillRoundRect(4, g_y + 4, start_w, start_h, start_radius, g_accent);
+    FramebufferDrawRoundRect(4, g_y + 4, start_w, start_h, start_radius, g_border);
+    if (start_h > 4)
+    {
+        FramebufferFillRect(4 + start_radius, g_y + 5, start_w - 2 * start_radius, 1, LightenRgb(g_accent, 40));
+    }
     FramebufferDrawString(4 + (start_w - 5 * 8) / 2, text_y, "START", g_fg, g_accent);
 
     // Per-window tabs. Iterate every registered window, filter
@@ -169,10 +201,25 @@ void TaskbarRedraw()
         const bool is_active = (h == WindowActive());
         // Active tab uses the taskbar's accent colour so the
         // focused window reads at a glance — matches the window-
-        // chrome active/inactive distinction.
+        // chrome active/inactive distinction. Rounded fill +
+        // outline match the START button so the tray reads as
+        // a coherent set of affordances rather than mismatched
+        // styles.
         const u32 tab_bg = is_active ? g_accent : g_tab_inactive;
-        FramebufferFillRect(tab_x, g_y + 4, tab_w, g_h - 8, tab_bg);
-        FramebufferDrawRect(tab_x, g_y + 4, tab_w, g_h - 8, g_border, 1);
+        constexpr u32 tab_radius = 3;
+        const u32 tab_h_eff = g_h - 8;
+        FramebufferFillRoundRect(tab_x, g_y + 4, tab_w, tab_h_eff, tab_radius, tab_bg);
+        FramebufferDrawRoundRect(tab_x, g_y + 4, tab_w, tab_h_eff, tab_radius, g_border);
+        // Active tab gets a 2-pixel accent strip at the bottom of
+        // the tab — Win10/macOS-style "selected" indicator. The
+        // strip uses a brighter shade of the accent so the active
+        // tab reads even on themes whose accent is close to the
+        // taskbar bg.
+        if (is_active && tab_h_eff > 4)
+        {
+            const u32 strip = LightenRgb(g_accent, 48);
+            FramebufferFillRect(tab_x + tab_radius, g_y + g_h - 6, tab_w - 2 * tab_radius, 2, strip);
+        }
         const char* title = WindowTitle(h);
         if (title != nullptr)
         {
