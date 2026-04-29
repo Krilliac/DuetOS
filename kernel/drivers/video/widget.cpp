@@ -1133,18 +1133,30 @@ void WindowDrawAllOrdered()
         }
         // Title text. White ink on the title-bar fill, 8-px top
         // padding + 8-px left padding so the first glyph clears
-        // the 2-px outer border comfortably.
+        // the 2-px outer border comfortably. Theme.title_text_scale
+        // controls the bitmap-font scale (1 = 8-px glyphs, 2 =
+        // 16-px). Vertical position centres the scaled text in
+        // the (also-scaled) title bar so a 16-px glyph in a
+        // 30-px title bar lands at y + 7 just like the 8-px
+        // glyph in a 22-px title bar.
         u32 title_pixel_w = 0;
+        const u32 ttscale_raw = ThemeCurrent().title_text_scale;
+        const u32 ttscale = (ttscale_raw == 0) ? 1u : ttscale_raw;
+        const u32 cell_w = 8u * ttscale;
+        const u32 cell_h = 8u * ttscale;
+        const u32 tbh_eff_for_title = EffectiveTitleHeight(drawn);
+        const u32 title_y = drawn.y + ((tbh_eff_for_title > cell_h) ? (tbh_eff_for_title - cell_h) / 2 : 0);
         if (g_windows[h].title != nullptr)
         {
-            FramebufferDrawString(drawn.x + 8, drawn.y + 7, g_windows[h].title, 0x00FFFFFF, drawn.colour_title);
+            FramebufferDrawStringScaled(drawn.x + 8, title_y, g_windows[h].title, 0x00FFFFFF, drawn.colour_title,
+                                        ttscale);
             const char* t = g_windows[h].title;
             u32 n = 0;
             while (t[n] != '\0')
             {
                 ++n;
             }
-            title_pixel_w = n * 8;
+            title_pixel_w = n * cell_w;
         }
         // Subtitle slot (Duet-era "context tag"). Painted in a
         // dimmer ink immediately right of the title with a 12-px
@@ -1157,13 +1169,14 @@ void WindowDrawAllOrdered()
         {
             const u32 tbh_for_sub = EffectiveTitleHeight(drawn);
             const u32 btn_pad = 4;
-            const u32 btn_side = (tbh_for_sub > 2 * btn_pad + 4) ? tbh_for_sub - 2 * btn_pad : 0;
+            const u32 btn_h_for_sub = (tbh_for_sub > 2 * btn_pad) ? tbh_for_sub - 2 * btn_pad : 0;
+            const u32 btn_w_for_sub = EffectiveButtonWidth(btn_h_for_sub);
             const u32 close_left =
-                (drawn.w > btn_side + btn_pad) ? drawn.x + drawn.w - btn_side - btn_pad : drawn.x + drawn.w;
+                (drawn.w > btn_w_for_sub + btn_pad) ? drawn.x + drawn.w - btn_w_for_sub - btn_pad : drawn.x + drawn.w;
             const u32 sub_x = drawn.x + 8 + title_pixel_w + 12;
             // Only paint if there's room for at least the
             // separator + 4 glyphs before the close button.
-            if (sub_x + 5 * 8 < close_left)
+            if (sub_x + 5 * cell_w < close_left)
             {
                 // Dim ink derived from the title — a brighter
                 // shade reads against dark titles, a dimmer one
@@ -1173,8 +1186,8 @@ void WindowDrawAllOrdered()
                 // still works. Brighten just enough that the
                 // subtitle reads as secondary, not background.
                 const u32 ink = LightenRgb(drawn.colour_title, 96);
-                const u32 max_chars = (close_left - sub_x) / 8;
-                FramebufferDrawString(sub_x, drawn.y + 7, "|", ink, drawn.colour_title);
+                const u32 max_chars = (close_left - sub_x) / cell_w;
+                FramebufferDrawStringScaled(sub_x, title_y, "|", ink, drawn.colour_title, ttscale);
                 if (max_chars > 2)
                 {
                     char clipped[kWindowSubtitleStorage];
@@ -1185,7 +1198,7 @@ void WindowDrawAllOrdered()
                         ++n;
                     }
                     clipped[n] = '\0';
-                    FramebufferDrawString(sub_x + 16, drawn.y + 7, clipped, ink, drawn.colour_title);
+                    FramebufferDrawStringScaled(sub_x + 2 * cell_w, title_y, clipped, ink, drawn.colour_title, ttscale);
                 }
             }
         }

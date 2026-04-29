@@ -173,6 +173,13 @@ struct Theme
     // buttons sized off `title_bar_height`), the historical
     // pre-spec behaviour.
     u32 title_button_width;
+
+    // Title-bar text scale factor for `FramebufferDrawStringScaled`
+    // (1..8). 0 collapses to 1 (compact bitmap). Duet family
+    // ships 2 so the larger 30-px title bar carries a readable
+    // 16-px title; compact themes stay at 1 (8-px). Subtitle +
+    // separator pick this up too so the layout scales as a unit.
+    u32 title_text_scale;
 };
 
 /// Read-only snapshot of the active theme. Valid for as long as
