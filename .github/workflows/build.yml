@@ -124,41 +124,33 @@ jobs:
 
   # Build-flavor matrix: each non-default preset that exposes a
   # distinct build axis (asserts, full audit, LTO, fast-debug).
-  # Each matrix entry builds AND smoke-tests its preset, so a
-  # flavor-specific regression — a constexpr branch that breaks
-  # one preset's boot path, an audit hook that wedges under load,
-  # an LTO inlining decision that mis-codegens — surfaces here
-  # rather than after publish.
+  # Each matrix entry builds AND smoke-boots its preset.
   #
-  # The matrix shares a single runner-shape with the main
-  # qemu-smoke job and uses the same ctest-boot-smoke driver
-  # (33 signatures), but with a more generous DUETOS_TIMEOUT
-  # because release-audit is verbose enough that boot output
-  # serializes more slowly through the COM1 spinlock under TCG.
+  # The smoke uses the `bringup` profile from
+  # tools/test/profile-boot-smoke.sh — kernel reaches
+  # bringup-complete, emits a sentinel, exits via isa-debug-exit.
+  # That's a much narrower test than the full ring3+Win32+driver
+  # ctest smoke (which would require ~60s of guest time per
+  # flavor — prohibitive on GitHub-hosted runners that can't use
+  # KVM and run TCG at ~1/50 native speed). The bringup profile
+  # still exercises every compile-time flavor decision (cap-audit,
+  # lockdep, asserts, klog floor, ubsan) up through driver init,
+  # which is what we care about validating per-flavor.
+  #
+  # Per-flavor timeouts are 480s — matches the main qemu-smoke job's
+  # generous budget for TCG. The kernel exits well under that on a
+  # successful bringup; the timeout only fires on a real wedge.
   build-flavor-matrix:
     name: build+smoke flavor (${{ matrix.preset }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - preset: x86_64-release-asserts
-            # Release-shape; signatures should land at
-            # release-comparable speed.
-            timeout: 90
-          - preset: x86_64-release-audit
-            # Full cap-audit + lock-order audit + Trace floor —
-            # serial output is ~5x normal release. Boost the
-            # timeout accordingly.
-            timeout: 180
-          - preset: x86_64-release-lto
-            # ThinLTO: same observable behavior as release; link
-            # time is the only delta and that's already paid.
-            timeout: 90
-          - preset: x86_64-debug-fast
-            # Debug-shape minus lock-order audit; should match
-            # debug timing.
-            timeout: 90
+        preset:
+          - x86_64-release-asserts
+          - x86_64-release-audit
+          - x86_64-release-lto
+          - x86_64-debug-fast
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain + QEMU
@@ -175,36 +167,38 @@ jobs:
           sudo ln -sf /usr/bin/lld-link-18 /usr/local/bin/lld-link
           sudo ln -sf /usr/bin/llvm-dlltool-18 /usr/local/bin/llvm-dlltool
           sudo ln -sf /usr/bin/ld.lld-18 /usr/local/bin/ld.lld
-      - name: Enable KVM access (~50× speedup vs TCG)
+      - name: Enable KVM access (~50× speedup vs TCG when present)
         run: |
           if [[ -e /dev/kvm ]]; then
             sudo chmod 666 /dev/kvm
             ls -l /dev/kvm
           else
-            echo "kvm_present=no — /dev/kvm not on this runner"
+            echo "kvm_present=no — /dev/kvm not on this runner; TCG fallback"
           fi
       - name: Configure
         run: cmake --preset ${{ matrix.preset }}
       - name: Build
         run: cmake --build build/${{ matrix.preset }} --parallel $(nproc)
-      - name: Smoke-boot (with flake retry)
+      - name: Smoke-boot bringup (with flake retry)
         id: smoke
         shell: bash
         run: |
-          # Same retry shape as the main qemu-smoke job: regression
-          # (rc=1) fails immediately, env-skip (rc=2) is a warning,
-          # flake (rc=3) retries up to twice before giving up.
+          # Use the bringup profile for the per-flavor matrix —
+          # same exit-code contract as ctest-boot-smoke (0 pass /
+          # 1 regression / 2 skip / 3 flake), but the kernel exits
+          # via isa-debug-exit when bringup-complete is reached.
+          # Flake retries up to twice; regression fails immediately.
           set +e
           attempts=3
           rc=0
           for i in $(seq 1 ${attempts}); do
-            echo "::group::flavor=${{ matrix.preset }} attempt ${i}/${attempts}"
+            echo "::group::flavor=${{ matrix.preset }} bringup attempt ${i}/${attempts}"
             DUETOS_PRESET=${{ matrix.preset }} \
-            DUETOS_TIMEOUT=${{ matrix.timeout }} \
-              tools/test/ctest-boot-smoke.sh build/${{ matrix.preset }}
+            DUETOS_TIMEOUT=480 \
+              tools/test/profile-boot-smoke.sh bringup build/${{ matrix.preset }}
             rc=$?
             echo "::endgroup::"
-            cp -f "build/${{ matrix.preset }}/ctest-smoke-serial.log" \
+            cp -f "build/${{ matrix.preset }}/smoke-bringup.log" \
                   "smoke-${{ matrix.preset }}-attempt-${i}.log" 2>/dev/null || true
             if [[ $rc -eq 0 ]]; then break; fi
             if [[ $rc -eq 1 ]]; then echo "::error::flavor=${{ matrix.preset }} regression"; break; fi
@@ -223,7 +217,7 @@ jobs:
           if-no-files-found: ignore
           path: |
             smoke-${{ matrix.preset }}-attempt-*.log
-            build/${{ matrix.preset }}/ctest-smoke-serial.log
+            build/${{ matrix.preset }}/smoke-bringup.log
           retention-days: 7
 
   qemu-smoke:

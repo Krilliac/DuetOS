@@ -163,9 +163,38 @@ case "${PROFILE}" in
         ;;
 esac
 
+# Boot-banner sniff — selftest pass-marker signatures
+# (string/hexdump/fs-vfs) only appear when the build was compiled
+# with DUETOS_BOOT_SELFTESTS=ON. Auto-skip them when the banner
+# doesn't show `+selftests` so this driver runs uniformly across
+# debug, release, and every flavor preset.
+banner=$(grep -aF '[boot] DuetOS build flavor:' "${SERIAL_LOG}" | head -1 || true)
+selftests_on=0
+if [[ "${banner}" == *"+selftests"* ]]; then
+    selftests_on=1
+fi
+echo "smoke: profile=${PROFILE} banner=${banner:-<missing>}"
+echo "smoke: selftests_on=${selftests_on}"
+
+selftest_sigs=(
+    "[string-selftest] PASS"
+    "[hexdump-selftest] PASS"
+    "[fs/vfs] self-test OK"
+)
+
 fail=0
 missing=()
 for sig in "${expected[@]}"; do
+    # Skip selftest-only signatures when this build had selftests off.
+    if [[ ${selftests_on} -eq 0 ]]; then
+        is_selftest_sig=0
+        for ss in "${selftest_sigs[@]}"; do
+            if [[ "$sig" == "$ss" ]]; then is_selftest_sig=1; break; fi
+        done
+        if [[ ${is_selftest_sig} -eq 1 ]]; then
+            continue
+        fi
+    fi
     if ! grep -aF "$sig" "${SERIAL_LOG}" > /dev/null; then
         missing+=("$sig")
         fail=1
