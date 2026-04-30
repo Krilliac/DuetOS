@@ -21,7 +21,7 @@ __declspec(dllexport) HANDLE SetupDiGetClassDevsW(const void* guid, const wchar_
     (void)enumerator;
     (void)parent;
     (void)flags;
-    return INVALID_HANDLE_VALUE;
+    return (HANDLE)(unsigned long long)0x5E700001ULL; /* sentinel device-info-set */
 }
 __declspec(dllexport) BOOL SetupDiDestroyDeviceInfoList(HANDLE h)
 {

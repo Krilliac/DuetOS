@@ -13,7 +13,12 @@ typedef unsigned short wchar_t16;
 #define S_OK 0UL
 #define S_FALSE 1UL
 #define E_NOTIMPL 0x80004001UL
+#define E_INVALIDARG 0x80070057UL
+#define E_OUTOFMEMORY 0x8007000EUL
 #define CLASS_E_CLASSNOTAVAILABLE 0x80040111UL
+
+/* Forward decl — CoTaskMemAlloc is defined later in this TU. */
+__declspec(dllexport) void* CoTaskMemAlloc(SIZE_T cb);
 
 __declspec(dllexport) HRESULT CoInitialize(void* reserved)
 {
@@ -105,10 +110,57 @@ __declspec(dllexport) HRESULT IIDFromString(const wchar_t16* sz, void* iid)
 
 __declspec(dllexport) HRESULT StringFromCLSID(const void* clsid, wchar_t16** psz)
 {
-    (void)clsid;
-    if (psz)
+    if (psz == (wchar_t16**)0)
+        return E_INVALIDARG;
+    if (clsid == (const void*)0)
+    {
         *psz = (wchar_t16*)0;
-    return E_NOTIMPL;
+        return E_INVALIDARG;
+    }
+    /* Format: {XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX} = 38 chars + NUL */
+    wchar_t16* buf = (wchar_t16*)CoTaskMemAlloc(39 * sizeof(wchar_t16));
+    if (buf == (wchar_t16*)0)
+    {
+        *psz = (wchar_t16*)0;
+        return E_OUTOFMEMORY;
+    }
+    static const wchar_t16 hex[] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
+    const unsigned char* p = (const unsigned char*)clsid;
+    /* GUID: 4-byte data1 (LE), 2-byte data2 (LE), 2-byte data3 (LE),
+     *       8-byte data4. Display: data1 (8 hex), data2 (4), data3
+     *       (4), then first 2 bytes of data4, dash, last 6 bytes. */
+    int i = 0;
+    buf[i++] = '{';
+    /* data1 — read as little-endian uint32, print high nybble first. */
+    unsigned int d1 =
+        (unsigned int)p[0] | ((unsigned int)p[1] << 8) | ((unsigned int)p[2] << 16) | ((unsigned int)p[3] << 24);
+    for (int j = 7; j >= 0; --j)
+        buf[i++] = hex[(d1 >> (j * 4)) & 0xF];
+    buf[i++] = '-';
+    unsigned short d2 = (unsigned short)p[4] | ((unsigned short)p[5] << 8);
+    for (int j = 3; j >= 0; --j)
+        buf[i++] = hex[(d2 >> (j * 4)) & 0xF];
+    buf[i++] = '-';
+    unsigned short d3 = (unsigned short)p[6] | ((unsigned short)p[7] << 8);
+    for (int j = 3; j >= 0; --j)
+        buf[i++] = hex[(d3 >> (j * 4)) & 0xF];
+    buf[i++] = '-';
+    /* data4[0..1] then dash then data4[2..7] */
+    for (int k = 8; k < 10; ++k)
+    {
+        buf[i++] = hex[(p[k] >> 4) & 0xF];
+        buf[i++] = hex[p[k] & 0xF];
+    }
+    buf[i++] = '-';
+    for (int k = 10; k < 16; ++k)
+    {
+        buf[i++] = hex[(p[k] >> 4) & 0xF];
+        buf[i++] = hex[p[k] & 0xF];
+    }
+    buf[i++] = '}';
+    buf[i] = 0;
+    *psz = buf;
+    return S_OK;
 }
 
 /* CoTaskMem* -> heap aliases */
@@ -262,4 +314,42 @@ __declspec(dllexport) HRESULT RevokeDragDrop(void* hwnd)
 {
     (void)hwnd;
     return S_OK;
+}
+
+/* StringFromGUID2 — like StringFromCLSID but writes into caller buffer. */
+__declspec(dllexport) int StringFromGUID2(const void* guid, wchar_t16* buf, int cch)
+{
+    if (guid == 0 || buf == 0 || cch < 39)
+        return 0;
+    static const wchar_t16 hex[] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
+    const unsigned char* p = (const unsigned char*)guid;
+    int i = 0;
+    buf[i++] = '{';
+    unsigned int d1 =
+        (unsigned int)p[0] | ((unsigned int)p[1] << 8) | ((unsigned int)p[2] << 16) | ((unsigned int)p[3] << 24);
+    for (int j = 7; j >= 0; --j)
+        buf[i++] = hex[(d1 >> (j * 4)) & 0xF];
+    buf[i++] = '-';
+    unsigned short d2 = (unsigned short)p[4] | ((unsigned short)p[5] << 8);
+    for (int j = 3; j >= 0; --j)
+        buf[i++] = hex[(d2 >> (j * 4)) & 0xF];
+    buf[i++] = '-';
+    unsigned short d3 = (unsigned short)p[6] | ((unsigned short)p[7] << 8);
+    for (int j = 3; j >= 0; --j)
+        buf[i++] = hex[(d3 >> (j * 4)) & 0xF];
+    buf[i++] = '-';
+    for (int k = 8; k < 10; ++k)
+    {
+        buf[i++] = hex[(p[k] >> 4) & 0xF];
+        buf[i++] = hex[p[k] & 0xF];
+    }
+    buf[i++] = '-';
+    for (int k = 10; k < 16; ++k)
+    {
+        buf[i++] = hex[(p[k] >> 4) & 0xF];
+        buf[i++] = hex[p[k] & 0xF];
+    }
+    buf[i++] = '}';
+    buf[i] = 0;
+    return 39;
 }

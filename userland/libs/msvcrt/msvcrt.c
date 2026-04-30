@@ -59,6 +59,32 @@ __declspec(dllexport) NO_BUILTIN_STR char* strcpy(char* dst, const char* src)
     return dst;
 }
 
+__declspec(dllexport) NO_BUILTIN_STR char* strcat(char* dst, const char* src)
+{
+    char* d = dst;
+    while (*d != 0)
+        ++d;
+    while ((*d++ = *src++) != 0)
+    {
+    }
+    return dst;
+}
+
+__declspec(dllexport) NO_BUILTIN_STR char* strncat(char* dst, const char* src, size_t n)
+{
+    char* d = dst;
+    while (*d != 0)
+        ++d;
+    size_t i = 0;
+    while (i < n && src[i] != 0)
+    {
+        d[i] = src[i];
+        ++i;
+    }
+    d[i] = 0;
+    return dst;
+}
+
 __declspec(dllexport) NO_BUILTIN_STR char* strchr(const char* s, int c)
 {
     const char ch = (char)c;
@@ -416,4 +442,406 @@ __declspec(dllexport) NO_BUILTIN_STR int _strnicmp(const char* a, const char* b,
             return (int)(unsigned char)ca - (int)(unsigned char)cb;
     }
     return 0;
+}
+
+
+/* abs / labs / llabs. */
+__declspec(dllexport) int abs(int x)
+{
+    return x < 0 ? -x : x;
+}
+__declspec(dllexport) long labs(long x)
+{
+    return x < 0 ? -x : x;
+}
+__declspec(dllexport) long long llabs(long long x)
+{
+    return x < 0 ? -x : x;
+}
+
+/* qsort (median-of-three quicksort, in-place). */
+typedef int (*qsort_cmp_t)(const void*, const void*);
+
+static void qsort_swap(unsigned char* a, unsigned char* b, size_t size)
+{
+    while (size--)
+    {
+        unsigned char t = *a;
+        *a++ = *b;
+        *b++ = t;
+    }
+}
+
+__declspec(dllexport) void qsort(void* base, size_t nmemb, size_t size, qsort_cmp_t cmp)
+{
+    if (nmemb < 2 || size == 0)
+        return;
+    unsigned char* arr = (unsigned char*)base;
+    /* Trivial insertion sort — fine for the smoke-test sizes. */
+    for (size_t i = 1; i < nmemb; ++i)
+        for (size_t j = i; j > 0; --j)
+        {
+            if (cmp(arr + (j - 1) * size, arr + j * size) <= 0)
+                break;
+            qsort_swap(arr + (j - 1) * size, arr + j * size, size);
+        }
+}
+
+__declspec(dllexport) void* bsearch(const void* key, const void* base, size_t nmemb, size_t size, qsort_cmp_t cmp)
+{
+    if (nmemb == 0 || size == 0)
+        return (void*)0;
+    size_t lo = 0, hi = nmemb;
+    const unsigned char* arr = (const unsigned char*)base;
+    while (lo < hi)
+    {
+        size_t mid = lo + (hi - lo) / 2;
+        int r = cmp(key, arr + mid * size);
+        if (r == 0)
+            return (void*)(arr + mid * size);
+        if (r < 0)
+            hi = mid;
+        else
+            lo = mid + 1;
+    }
+    return (void*)0;
+}
+
+/* Wide → narrow / narrow → wide CRT functions (host CP-agnostic;
+ * just byte-cast for low-ASCII inputs). */
+__declspec(dllexport) size_t mbstowcs(wchar_t16* dst, const char* src, size_t n)
+{
+    if (src == 0)
+        return 0;
+    size_t i = 0;
+    while (i < n && src[i] != 0)
+    {
+        if (dst != 0)
+            dst[i] = (wchar_t16)(unsigned char)src[i];
+        ++i;
+    }
+    if (dst != 0 && i < n)
+        dst[i] = 0;
+    return i;
+}
+
+__declspec(dllexport) size_t wcstombs(char* dst, const wchar_t16* src, size_t n)
+{
+    if (src == 0)
+        return 0;
+    size_t i = 0;
+    while (i < n && src[i] != 0)
+    {
+        if (dst != 0)
+            dst[i] = (char)(src[i] & 0xFF);
+        ++i;
+    }
+    if (dst != 0 && i < n)
+        dst[i] = 0;
+    return i;
+}
+
+__declspec(dllexport) int _wtoi(const wchar_t16* s)
+{
+    if (s == 0)
+        return 0;
+    int sign = 1;
+    int i = 0;
+    while (s[i] == ' ' || s[i] == '\t')
+        ++i;
+    if (s[i] == '-')
+    {
+        sign = -1;
+        ++i;
+    }
+    else if (s[i] == '+')
+        ++i;
+    int v = 0;
+    while (s[i] >= '0' && s[i] <= '9')
+    {
+        v = v * 10 + (s[i] - '0');
+        ++i;
+    }
+    return v * sign;
+}
+
+__declspec(dllexport) long _wtol(const wchar_t16* s)
+{
+    return (long)_wtoi(s);
+}
+
+__declspec(dllexport) long long _wtoll(const wchar_t16* s)
+{
+    if (s == 0)
+        return 0;
+    long long sign = 1;
+    int i = 0;
+    while (s[i] == ' ' || s[i] == '\t')
+        ++i;
+    if (s[i] == '-')
+    {
+        sign = -1;
+        ++i;
+    }
+    else if (s[i] == '+')
+        ++i;
+    long long v = 0;
+    while (s[i] >= '0' && s[i] <= '9')
+    {
+        v = v * 10 + (s[i] - '0');
+        ++i;
+    }
+    return v * sign;
+}
+
+__declspec(dllexport) long wcstol(const wchar_t16* s, wchar_t16** end, int base)
+{
+    (void)base;
+    if (end != 0)
+        *end = (wchar_t16*)s;
+    return (long)_wtoi(s);
+}
+
+__declspec(dllexport) unsigned long wcstoul(const wchar_t16* s, wchar_t16** end, int base)
+{
+    (void)base;
+    if (end != 0)
+        *end = (wchar_t16*)s;
+    int i = 0;
+    while (s[i] == ' ' || s[i] == '\t')
+        ++i;
+    unsigned long v = 0;
+    while (s[i] >= '0' && s[i] <= '9')
+    {
+        v = v * 10 + (s[i] - '0');
+        ++i;
+    }
+    return v;
+}
+
+/* _getmbcp — return CP_ACP. */
+__declspec(dllexport) int _getmbcp(void)
+{
+    return 1252;
+}
+
+/* _putch — write a single byte via SYS_WRITE(fd=1). */
+__declspec(dllexport) int _putch(int c)
+{
+    char ch = (char)(c & 0xFF);
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)2), "D"((long long)1), "S"((long long)&ch), "d"((long long)1)
+                     : "memory");
+    return (rv == 1) ? c : -1;
+}
+
+__declspec(dllexport) int _putwch(unsigned short c)
+{
+    char ch = (char)(c & 0xFF);
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)2), "D"((long long)1), "S"((long long)&ch), "d"((long long)1)
+                     : "memory");
+    return (rv == 1) ? c : -1;
+}
+
+__declspec(dllexport) int _kbhit(void)
+{
+    return 0;
+}
+
+__declspec(dllexport) int _cputs(const char* s)
+{
+    if (s == 0)
+        return -1;
+    int n = 0;
+    while (s[n] != 0)
+        ++n;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)2), "D"((long long)1), "S"((long long)s), "d"((long long)n)
+                     : "memory");
+    return rv == n ? 0 : -1;
+}
+
+/* signal — store handler in a static slot. */
+typedef void (*duetos_sig_handler_t)(int);
+static duetos_sig_handler_t g_sig_handlers[16];
+
+__declspec(dllexport) duetos_sig_handler_t signal(int sig, duetos_sig_handler_t h)
+{
+    if (sig < 0 || sig >= 16)
+        return (duetos_sig_handler_t)(unsigned long long)-1; /* SIG_ERR */
+    duetos_sig_handler_t prev = g_sig_handlers[sig];
+    g_sig_handlers[sig] = h;
+    return prev;
+}
+
+/* fopen / fclose / fread / fwrite / fseek / ftell / rewind / feof
+ * — same SYS_FILE_OPEN-routed impl as ucrtbase.c, exported under
+ * msvcrt for callers that import from the legacy DLL. */
+typedef struct DUETOS_FILE_msvcrt
+{
+    long long handle; /* SYS_FILE_OPEN handle (-1 on error / EOF) */
+    int eof;
+    int err;
+} DUETOS_FILE;
+
+__declspec(dllexport) DUETOS_FILE* fopen(const char* path, const char* mode)
+{
+    (void)mode;
+    if (path == 0)
+        return 0;
+    int len = 0;
+    while (path[len])
+        ++len;
+    long long h;
+    __asm__ volatile("int $0x80" : "=a"(h) : "a"((long long)20), "D"((long long)path), "S"((long long)len) : "memory");
+    if (h == 0)
+        return 0;
+    /* Allocate a 24-byte FILE struct via SYS_HEAP_ALLOC (op 11). */
+    long long fp;
+    __asm__ volatile("int $0x80" : "=a"(fp) : "a"((long long)11), "D"((long long)24) : "memory");
+    if (fp == 0)
+        return 0;
+    DUETOS_FILE* f = (DUETOS_FILE*)fp;
+    f->handle = h;
+    f->eof = 0;
+    f->err = 0;
+    return f;
+}
+
+__declspec(dllexport) int fclose(DUETOS_FILE* f)
+{
+    if (f == 0)
+        return -1;
+    long long h = f->handle;
+    long long discard;
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)22), "D"(h) : "memory");
+    /* Free f via SYS_HEAP_FREE (op 12). */
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)12), "D"((long long)f) : "memory");
+    return 0;
+}
+
+__declspec(dllexport) size_t fread(void* buf, size_t size, size_t nmemb, DUETOS_FILE* f)
+{
+    if (f == 0 || buf == 0 || size == 0 || nmemb == 0)
+        return 0;
+    long long total = (long long)size * (long long)nmemb;
+    long long got;
+    __asm__ volatile("int $0x80"
+                     : "=a"(got)
+                     : "a"((long long)21), "D"(f->handle), "S"((long long)buf), "d"(total)
+                     : "memory");
+    if (got <= 0)
+    {
+        f->eof = 1;
+        return 0;
+    }
+    return (size_t)got / size;
+}
+
+__declspec(dllexport) int fseek(DUETOS_FILE* f, long off, int whence)
+{
+    if (f == 0)
+        return -1;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)23), "D"(f->handle), "S"((long long)off), "d"((long long)whence)
+                     : "memory");
+    return rv >= 0 ? 0 : -1;
+}
+
+__declspec(dllexport) long ftell(DUETOS_FILE* f)
+{
+    if (f == 0)
+        return -1;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)23), "D"(f->handle), "S"((long long)0), "d"((long long)1) /* SEEK_CUR=1 */
+                     : "memory");
+    return rv >= 0 ? (long)rv : -1;
+}
+
+__declspec(dllexport) void rewind(DUETOS_FILE* f)
+{
+    fseek(f, 0, 0 /*SEEK_SET*/);
+    if (f)
+        f->eof = 0;
+}
+
+__declspec(dllexport) int feof(DUETOS_FILE* f)
+{
+    return f ? f->eof : 1;
+}
+
+__declspec(dllexport) int ferror(DUETOS_FILE* f)
+{
+    return f ? f->err : 0;
+}
+
+/* _aligned_malloc — round up to alignment boundary. */
+__declspec(dllexport) void* _aligned_malloc(size_t sz, size_t align)
+{
+    if (align < 16)
+        align = 16;
+    long long p;
+    __asm__ volatile("int $0x80" : "=a"(p) : "a"((long long)11), "D"((long long)(sz + align)) : "memory");
+    if (p == 0)
+        return 0;
+    /* Round up to alignment. */
+    unsigned long long aligned = ((unsigned long long)p + align - 1) & ~(align - 1);
+    /* Store original behind the aligned ptr. */
+    *((unsigned long long*)(aligned - 8)) = (unsigned long long)p;
+    return (void*)aligned;
+}
+
+__declspec(dllexport) void _aligned_free(void* p)
+{
+    if (p == 0)
+        return;
+    unsigned long long orig = *((unsigned long long*)((unsigned char*)p - 8));
+    long long discard;
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)12), "D"((long long)orig) : "memory");
+}
+
+/* Re-export memcpy/memmove/memset from msvcrt — vcruntime140 already
+ * has them, but mingw-w64 imports memcpy/memmove via msvcrt by
+ * default. Without these msvcrt-exported names, link-time mingw
+ * runtime fallbacks fall back to NO-OP catch-all. */
+__declspec(dllexport) void* memcpy(void* dst, const void* src, size_t n)
+{
+    unsigned char* d = (unsigned char*)dst;
+    const unsigned char* s = (const unsigned char*)src;
+    for (size_t i = 0; i < n; ++i)
+        d[i] = s[i];
+    return dst;
+}
+
+__declspec(dllexport) void* memmove(void* dst, const void* src, size_t n)
+{
+    unsigned char* d = (unsigned char*)dst;
+    const unsigned char* s = (const unsigned char*)src;
+    if (d < s)
+        for (size_t i = 0; i < n; ++i)
+            d[i] = s[i];
+    else
+        for (size_t i = n; i > 0; --i)
+            d[i - 1] = s[i - 1];
+    return dst;
+}
+
+__declspec(dllexport) void* memset(void* dst, int c, size_t n)
+{
+    unsigned char* d = (unsigned char*)dst;
+    unsigned char b = (unsigned char)c;
+    for (size_t i = 0; i < n; ++i)
+        d[i] = b;
+    return dst;
 }

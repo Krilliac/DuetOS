@@ -122,7 +122,7 @@ __declspec(dllexport) HBITMAP CreateCompatibleBitmap(HDC dc, INT w, INT h)
     (void)dc;
     (void)w;
     (void)h;
-    return (HBITMAP)0;
+    return (HBITMAP)0xC0DEBABEULL;
 }
 __declspec(dllexport) HBITMAP CreateDIBSection(HDC dc, const void* bi, UINT usage, void** bits, HANDLE section,
                                                DWORD offset)
@@ -221,14 +221,19 @@ __declspec(dllexport) HFONT CreateFontIndirectW(const void* lf)
 
 __declspec(dllexport) HGDIOBJ GetStockObject(INT idx)
 {
-    (void)idx;
-    return (HGDIOBJ)0;
+    /* Stock objects 0..18; return a sentinel handle keyed off idx. */
+    if (idx < 0 || idx > 18)
+        return (HGDIOBJ)0;
+    return (HGDIOBJ)(unsigned long long)(0xD000 + idx);
 }
 __declspec(dllexport) HGDIOBJ SelectObject(HDC dc, HGDIOBJ obj)
 {
     (void)dc;
-    (void)obj;
-    return (HGDIOBJ)0;
+    /* Return a non-NULL "previously selected" sentinel so callers
+     * that null-check don't bail. */
+    if (obj == (HGDIOBJ)0)
+        return (HGDIOBJ)0;
+    return (HGDIOBJ)(unsigned long long)0xD0FFEDULL;
 }
 __declspec(dllexport) BOOL DeleteObject(HGDIOBJ obj)
 {

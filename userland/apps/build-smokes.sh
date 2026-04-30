@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+#
+# Rebuild every PE smoke app via mingw-w64. The kernel build embeds
+# the prebuilt .exe files directly so this script only needs to run
+# when one of the C sources changes.
+#
+# Required: gcc-mingw-w64-x86-64 (Ubuntu: apt-get install gcc-mingw-w64-x86-64).
+#
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}"
+
+CC=x86_64-w64-mingw32-gcc
+COMMON_FLAGS=(
+    -nostdlib -ffreestanding -fno-stack-protector -mno-stack-arg-probe
+    -e mainCRTStartup -Wl,--subsystem,console -Wl,--entry,mainCRTStartup
+)
+
+declare -A APPS=(
+    [mini_browser]="-lkernel32 -lws2_32"
+    [crypto_smoke]="-lkernel32 -lbcrypt -ladvapi32"
+    [paths_smoke]="-lkernel32 -lshlwapi"
+    [time_smoke]="-lkernel32 -lwinmm"
+    [wininet_smoke]="-lkernel32 -lwininet"
+    [iphlpapi_smoke]="-lkernel32 -liphlpapi"
+    [string_smoke]="-lkernel32 -luser32"
+    [mem_smoke]="-lkernel32"
+    [fs_smoke]="-lkernel32"
+    [registry_smoke]="-lkernel32 -ladvapi32"
+    [handle_smoke]="-lkernel32"
+    [process_smoke]="-lkernel32"
+    [module_smoke]="-lkernel32"
+    [env_smoke]="-lkernel32"
+    [debug_smoke]="-lkernel32"
+    [codepage_smoke]="-lkernel32"
+    [rng_smoke]="-lkernel32 -lbcrypt -ladvapi32"
+    [version_smoke]="-lkernel32 -lversion"
+    [psapi_smoke]="-lkernel32 -lpsapi"
+    [com_smoke]="-lkernel32 -lole32"
+    [dbghelp_smoke]="-lkernel32 -ldbghelp"
+    [winhttp_smoke]="-lkernel32 -lwinhttp"
+    [crt_smoke]="-lkernel32 -lmsvcrt"
+    [critsec_smoke]="-lkernel32"
+    [tls_smoke]="-lkernel32"
+    [atom_smoke]="-lkernel32 -luser32"
+    [console_smoke]="-lkernel32"
+    [datetime_smoke]="-lkernel32"
+    [locale_smoke]="-lkernel32"
+    [gdi_smoke]="-lkernel32 -luser32 -lgdi32"
+    [msg_smoke]="-lkernel32 -luser32"
+    [pipe_smoke]="-lkernel32"
+    [resource_smoke]="-lkernel32 -luser32"
+    [ntdll_smoke]="-lkernel32 -lntdll"
+    [shell_smoke]="-lkernel32 -lshell32"
+    [userenv_smoke]="-lkernel32 -luserenv -ladvapi32"
+    [interlock_smoke]="-lkernel32"
+    [fiber_smoke]="-lkernel32"
+    [profile_smoke]="-lkernel32"
+    [clipboard_smoke]="-lkernel32 -luser32"
+    [windowclass_smoke]="-lkernel32 -luser32"
+    [wow64_smoke]="-lkernel32"
+    [mathlib_smoke]="-lkernel32"
+    [stdio_smoke]="-lkernel32 -lmsvcrt"
+    [nls_smoke]="-lkernel32"
+    [services_smoke]="-lkernel32 -ladvapi32"
+    [eventlog_smoke]="-lkernel32 -ladvapi32"
+    [sound_smoke]="-lkernel32 -lwinmm"
+    [multimon_smoke]="-lkernel32 -luser32"
+    [power_smoke]="-lkernel32"
+    [heap_smoke]="-lkernel32"
+    [thread2_smoke]="-lkernel32"
+    [ipc_smoke]="-lkernel32"
+    [jobobj_smoke]="-lkernel32"
+    [console2_smoke]="-lkernel32"
+    [dns_smoke]="-lkernel32 -lws2_32"
+    [network2_smoke]="-lkernel32 -lws2_32"
+    [dxgi_smoke]="-lkernel32 -ldxgi"
+    [dwm_smoke]="-lkernel32 -ldwmapi"
+    [uxtheme_smoke]="-lkernel32 -luxtheme"
+    [token_smoke]="-lkernel32 -ladvapi32"
+    [security_smoke]="-lkernel32 -ladvapi32"
+    [perf_smoke]="-lkernel32"
+    [accel_smoke]="-lkernel32 -luser32"
+    [wts_smoke]="-lkernel32 -lwtsapi32"
+    [winerr_smoke]="-lkernel32"
+    [sleep_smoke]="-lkernel32"
+    [nt_smoke]="-lkernel32 -lntdll"
+    [vol_smoke]="-lkernel32"
+    [drive_smoke]="-lkernel32"
+    [conio_smoke]="-lkernel32 -lmsvcrt"
+    [mbcs_smoke]="-lkernel32 -lmsvcrt"
+    [fpcontrol_smoke]="-lkernel32 -lmsvcrt"
+    [locale2_smoke]="-lkernel32"
+    [gdiplus_smoke]="-lkernel32 -lgdiplus"
+    [dde_smoke]="-lkernel32 -luser32"
+    [stream_smoke]="-lkernel32"
+    [setupapi_smoke]="-lkernel32 -lsetupapi"
+    [asyn_smoke]="-lkernel32"
+    [wndmsg_smoke]="-lkernel32 -luser32"
+    [scrap_smoke]="-lkernel32 -luser32"
+    [trace_smoke]="-lkernel32 -ladvapi32"
+    [wmi_smoke]="-lkernel32 -lole32"
+    [enviro_smoke]="-lkernel32"
+    [select_smoke]="-lkernel32 -lws2_32"
+    [proc2_smoke]="-lkernel32"
+    [find_smoke]="-lkernel32"
+    [iocp2_smoke]="-lkernel32"
+    [signal_smoke]="-lkernel32 -lmsvcrt"
+    [timer_smoke]="-lkernel32 -luser32"
+    [winsock_ext_smoke]="-lkernel32 -lws2_32"
+    [key_smoke]="-lkernel32 -luser32"
+    [reg2_smoke]="-lkernel32 -ladvapi32"
+    [paths2_smoke]="-lkernel32 -lshlwapi"
+    [advapi_smoke]="-lkernel32 -ladvapi32"
+    [heap3_smoke]="-lkernel32 -lmsvcrt"
+    [thread3_smoke]="-lkernel32"
+    [wstr_smoke]="-lkernel32 -lmsvcrt -lshlwapi"
+    [intl_smoke]="-lkernel32"
+    [disp_smoke]="-lkernel32 -luser32"
+    [svc_ctrl_smoke]="-lkernel32 -ladvapi32"
+    [sysinfo_smoke]="-lkernel32"
+    [mem2_smoke]="-lkernel32"
+    [fs2_smoke]="-lkernel32"
+    [console3_smoke]="-lkernel32"
+    [xml_smoke]="-lkernel32 -lole32"
+    [reg3_smoke]="-lkernel32 -ladvapi32"
+    [proc3_smoke]="-lkernel32"
+    [com2_smoke]="-lkernel32 -lole32 -lmsvcrt"
+    [advmem_smoke]="-lkernel32"
+    [wstr2_smoke]="-lkernel32 -lmsvcrt"
+    [fs3_smoke]="-lkernel32 -lshlwapi"
+    [cap_smoke]="-lkernel32 -ladvapi32"
+    [utf16_smoke]="-lkernel32"
+    [handle2_smoke]="-lkernel32"
+    [sock_opt_smoke]="-lkernel32 -lws2_32"
+    [prio_smoke]="-lkernel32"
+    [debug2_smoke]="-lkernel32"
+)
+
+for app in "${!APPS[@]}"; do
+    src=$(ls "$app"/*.c | head -1)
+    if [[ -z "$src" ]]; then
+        echo "SKIP: $app (no .c source found)"
+        continue
+    fi
+    # The kernel CMake embed function looks for <app>/<app>.exe;
+    # mini_browser predates that convention and uses browser.exe.
+    out="$app/${app}.exe"
+    if [[ "$app" == "mini_browser" ]]; then
+        out="$app/browser.exe"
+    fi
+    "$CC" "${COMMON_FLAGS[@]}" -o "$out" "$src" ${APPS[$app]}
+    printf '  %-16s %d bytes\n' "$app" "$(stat -c%s "$out")"
+done
+echo "All smoke PEs built."

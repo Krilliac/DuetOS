@@ -13,12 +13,59 @@ typedef unsigned short wchar_t16;
 #define S_OK 0UL
 #define E_FAIL 0x80004005UL
 
+/* CommandLineToArgvW — minimal whitespace-split parser.
+ * Allocates a single LocalAlloc block holding the argv pointer
+ * array followed by a parallel buffer of the parsed tokens. */
 __declspec(dllexport) wchar_t16** CommandLineToArgvW(const wchar_t16* cmd, int* argc)
 {
-    (void)cmd;
-    if (argc)
-        *argc = 0;
-    return (wchar_t16**)0; /* v0 doesn't allocate; caller sees NULL */
+    if (argc == (int*)0)
+        return (wchar_t16**)0;
+    *argc = 0;
+    if (cmd == (const wchar_t16*)0)
+        return (wchar_t16**)0;
+    /* First pass: count tokens, total chars. */
+    int n = 0, total = 0;
+    int i = 0;
+    while (cmd[i] != 0)
+    {
+        while (cmd[i] == ' ' || cmd[i] == '\t')
+            ++i;
+        if (cmd[i] == 0)
+            break;
+        ++n;
+        while (cmd[i] != 0 && cmd[i] != ' ' && cmd[i] != '\t')
+        {
+            ++i;
+            ++total;
+        }
+        ++total; /* NUL */
+    }
+    /* Allocate via SYS_HEAP_ALLOC — argv pointers + parallel chars. */
+    unsigned long bytes = (unsigned long)n * sizeof(wchar_t16*) + (unsigned long)total * sizeof(wchar_t16);
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)11), "D"((long long)bytes) : "memory");
+    if (rv == 0)
+        return (wchar_t16**)0;
+    wchar_t16** argv = (wchar_t16**)rv;
+    wchar_t16* str_buf = (wchar_t16*)((unsigned char*)rv + n * sizeof(wchar_t16*));
+    /* Second pass: copy. */
+    int k = 0, w = 0;
+    i = 0;
+    while (cmd[i] != 0)
+    {
+        while (cmd[i] == ' ' || cmd[i] == '\t')
+            ++i;
+        if (cmd[i] == 0)
+            break;
+        argv[k++] = &str_buf[w];
+        while (cmd[i] != 0 && cmd[i] != ' ' && cmd[i] != '\t')
+        {
+            str_buf[w++] = cmd[i++];
+        }
+        str_buf[w++] = 0;
+    }
+    *argc = n;
+    return argv;
 }
 
 __declspec(dllexport) UINT ExtractIconW(HANDLE h, const wchar_t16* file, UINT idx)

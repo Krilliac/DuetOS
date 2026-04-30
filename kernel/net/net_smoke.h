@@ -30,6 +30,10 @@ namespace duetos::net
 /// Spawn the live network smoke-test task. Idempotent — the second
 /// call is a no-op. Safe to call before DHCP completes; the task
 /// internally waits up to 5 seconds for a lease.
-void NetSmokeTestStart();
+///
+/// `force_on_emulator` overrides the IsEmulator gate. Used to opt
+/// in to the live www.google.com probe under QEMU SLIRP (which does
+/// support DHCP+DNS+TCP egress when invoked deliberately).
+void NetSmokeTestStart(bool force_on_emulator = false);
 
 } // namespace duetos::net

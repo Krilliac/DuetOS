@@ -149,16 +149,40 @@ __declspec(dllexport) HRESULT GetThemePartSize(HANDLE theme, HANDLE dc, INT part
 __declspec(dllexport) HRESULT GetCurrentThemeName(wchar_t16* name, int name_max, wchar_t16* color, int color_max,
                                                   wchar_t16* size, int size_max)
 {
-    (void)name_max;
-    (void)color_max;
-    (void)size_max;
+    static const wchar_t16 kName[] = {'A', 'e', 'r', 'o', 0};
+    static const wchar_t16 kColor[] = {'N', 'o', 'r', 'm', 'a', 'l', 'C', 'o', 'l', 'o', 'r', 0};
+    static const wchar_t16 kSize[] = {'N', 'o', 'r', 'm', 'a', 'l', 'S', 'i', 'z', 'e', 0};
     if (name && name_max > 0)
-        name[0] = 0;
+    {
+        int i = 0;
+        while (i < name_max - 1 && kName[i] != 0)
+        {
+            name[i] = kName[i];
+            ++i;
+        }
+        name[i] = 0;
+    }
     if (color && color_max > 0)
-        color[0] = 0;
+    {
+        int i = 0;
+        while (i < color_max - 1 && kColor[i] != 0)
+        {
+            color[i] = kColor[i];
+            ++i;
+        }
+        color[i] = 0;
+    }
     if (size && size_max > 0)
-        size[0] = 0;
-    return 0x80070490UL; /* HRESULT_FROM_WIN32(ERROR_NOT_FOUND) */
+    {
+        int i = 0;
+        while (i < size_max - 1 && kSize[i] != 0)
+        {
+            size[i] = kSize[i];
+            ++i;
+        }
+        size[i] = 0;
+    }
+    return 0; /* S_OK */
 }
 
 __declspec(dllexport) BOOL IsThemePartDefined(HANDLE theme, INT part, INT state)

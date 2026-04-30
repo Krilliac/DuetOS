@@ -60,11 +60,74 @@ set +e
     /export:strlen \
     /export:strcmp \
     /export:strcpy \
+    /export:strcat \
+    /export:strncat \
+    /export:strncmp \
+    /export:strncpy \
     /export:strchr \
+    /export:strrchr \
+    /export:strstr \
+    /export:strspn \
+    /export:strcspn \
+    /export:strpbrk \
+    /export:_stricmp \
+    /export:_strnicmp \
     /export:wcslen \
     /export:wcscmp \
     /export:wcscpy \
     /export:wcschr \
+    /export:wcsncmp \
+    /export:wcsncpy \
+    /export:wcsrchr \
+    /export:wcsstr \
+    /export:memcmp \
+    /export:memchr \
+    /export:atoi \
+    /export:atol \
+    /export:atoll \
+    /export:abs \
+    /export:labs \
+    /export:llabs \
+    /export:qsort \
+    /export:bsearch \
+    /export:isalpha \
+    /export:isdigit \
+    /export:isalnum \
+    /export:isspace \
+    /export:isupper \
+    /export:islower \
+    /export:isxdigit \
+    /export:isprint \
+    /export:ispunct \
+    /export:iscntrl \
+    /export:tolower \
+    /export:toupper \
+    /export:mbstowcs \
+    /export:wcstombs \
+    /export:_wtoi \
+    /export:_wtol \
+    /export:_wtoll \
+    /export:wcstol \
+    /export:wcstoul \
+    /export:_getmbcp \
+    /export:_putch \
+    /export:_putwch \
+    /export:_kbhit \
+    /export:_cputs \
+    /export:signal \
+    /export:fopen \
+    /export:fclose \
+    /export:fread \
+    /export:fseek \
+    /export:ftell \
+    /export:rewind \
+    /export:feof \
+    /export:ferror \
+    /export:_aligned_malloc \
+    /export:_aligned_free \
+    /export:memcpy \
+    /export:memmove \
+    /export:memset \
     /out:"${DLL}" \
     "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}

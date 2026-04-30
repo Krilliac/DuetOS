@@ -91,7 +91,125 @@
 #include "generated_windowed_hello.h"
 #include "generated_syscall_stress.h"
 #include "generated_thread_stress.h"
+#include "generated_codepage_smoke_pe.h"
+#include "generated_com_smoke_pe.h"
+#include "generated_crypto_smoke_pe.h"
+#include "generated_dbghelp_smoke_pe.h"
+#include "generated_debug_smoke_pe.h"
+#include "generated_env_smoke_pe.h"
+#include "generated_fs_smoke_pe.h"
+#include "generated_handle_smoke_pe.h"
+#include "generated_iphlpapi_smoke_pe.h"
+#include "generated_mem_smoke_pe.h"
+#include "generated_minibrowser_pe.h"
+#include "generated_module_smoke_pe.h"
+#include "generated_paths_smoke_pe.h"
+#include "generated_process_smoke_pe.h"
+#include "generated_psapi_smoke_pe.h"
+#include "generated_registry_smoke_pe.h"
+#include "generated_rng_smoke_pe.h"
+#include "generated_string_smoke_pe.h"
+#include "generated_time_smoke_pe.h"
+#include "generated_version_smoke_pe.h"
+#include "generated_winhttp_smoke_pe.h"
+#include "generated_wininet_smoke_pe.h"
 #include "generated_winkill_pe.h"
+#include "generated_atom_smoke_pe.h"
+#include "generated_console_smoke_pe.h"
+#include "generated_critsec_smoke_pe.h"
+#include "generated_crt_smoke_pe.h"
+#include "generated_datetime_smoke_pe.h"
+#include "generated_gdi_smoke_pe.h"
+#include "generated_locale_smoke_pe.h"
+#include "generated_msg_smoke_pe.h"
+#include "generated_ntdll_smoke_pe.h"
+#include "generated_pipe_smoke_pe.h"
+#include "generated_resource_smoke_pe.h"
+#include "generated_shell_smoke_pe.h"
+#include "generated_tls_smoke_pe.h"
+#include "generated_clipboard_smoke_pe.h"
+#include "generated_fiber_smoke_pe.h"
+#include "generated_interlock_smoke_pe.h"
+#include "generated_mathlib_smoke_pe.h"
+#include "generated_profile_smoke_pe.h"
+#include "generated_stdio_smoke_pe.h"
+#include "generated_userenv_smoke_pe.h"
+#include "generated_windowclass_smoke_pe.h"
+#include "generated_wow64_smoke_pe.h"
+#include "generated_eventlog_smoke_pe.h"
+#include "generated_heap_smoke_pe.h"
+#include "generated_multimon_smoke_pe.h"
+#include "generated_nls_smoke_pe.h"
+#include "generated_power_smoke_pe.h"
+#include "generated_services_smoke_pe.h"
+#include "generated_sound_smoke_pe.h"
+#include "generated_thread2_smoke_pe.h"
+#include "generated_console2_smoke_pe.h"
+#include "generated_dns_smoke_pe.h"
+#include "generated_dwm_smoke_pe.h"
+#include "generated_dxgi_smoke_pe.h"
+#include "generated_ipc_smoke_pe.h"
+#include "generated_jobobj_smoke_pe.h"
+#include "generated_network2_smoke_pe.h"
+#include "generated_uxtheme_smoke_pe.h"
+#include "generated_accel_smoke_pe.h"
+#include "generated_nt_smoke_pe.h"
+#include "generated_perf_smoke_pe.h"
+#include "generated_security_smoke_pe.h"
+#include "generated_sleep_smoke_pe.h"
+#include "generated_token_smoke_pe.h"
+#include "generated_winerr_smoke_pe.h"
+#include "generated_wts_smoke_pe.h"
+#include "generated_conio_smoke_pe.h"
+#include "generated_dde_smoke_pe.h"
+#include "generated_drive_smoke_pe.h"
+#include "generated_fpcontrol_smoke_pe.h"
+#include "generated_gdiplus_smoke_pe.h"
+#include "generated_locale2_smoke_pe.h"
+#include "generated_mbcs_smoke_pe.h"
+#include "generated_vol_smoke_pe.h"
+#include "generated_asyn_smoke_pe.h"
+#include "generated_enviro_smoke_pe.h"
+#include "generated_scrap_smoke_pe.h"
+#include "generated_setupapi_smoke_pe.h"
+#include "generated_stream_smoke_pe.h"
+#include "generated_trace_smoke_pe.h"
+#include "generated_wmi_smoke_pe.h"
+#include "generated_wndmsg_smoke_pe.h"
+#include "generated_find_smoke_pe.h"
+#include "generated_iocp2_smoke_pe.h"
+#include "generated_proc2_smoke_pe.h"
+#include "generated_select_smoke_pe.h"
+#include "generated_signal_smoke_pe.h"
+#include "generated_timer_smoke_pe.h"
+#include "generated_winsock_ext_smoke_pe.h"
+#include "generated_advapi_smoke_pe.h"
+#include "generated_heap3_smoke_pe.h"
+#include "generated_key_smoke_pe.h"
+#include "generated_paths2_smoke_pe.h"
+#include "generated_reg2_smoke_pe.h"
+#include "generated_thread3_smoke_pe.h"
+#include "generated_console3_smoke_pe.h"
+#include "generated_disp_smoke_pe.h"
+#include "generated_fs2_smoke_pe.h"
+#include "generated_intl_smoke_pe.h"
+#include "generated_mem2_smoke_pe.h"
+#include "generated_svc_ctrl_smoke_pe.h"
+#include "generated_sysinfo_smoke_pe.h"
+#include "generated_wstr_smoke_pe.h"
+#include "generated_advmem_smoke_pe.h"
+#include "generated_com2_smoke_pe.h"
+#include "generated_fs3_smoke_pe.h"
+#include "generated_proc3_smoke_pe.h"
+#include "generated_reg3_smoke_pe.h"
+#include "generated_wstr2_smoke_pe.h"
+#include "generated_xml_smoke_pe.h"
+#include "generated_cap_smoke_pe.h"
+#include "generated_debug2_smoke_pe.h"
+#include "generated_handle2_smoke_pe.h"
+#include "generated_prio_smoke_pe.h"
+#include "generated_sock_opt_smoke_pe.h"
+#include "generated_utf16_smoke_pe.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
@@ -2159,11 +2277,11 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         // return "not found" / success sentinels;
         // CoTaskMem* + SysAllocString alias the process heap.
         {"shlwapi.dll", fs::generated::kBinShlwapiDllBytes, fs::generated::kBinShlwapiDllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"shell32.dll", fs::generated::kBinShell32DllBytes, fs::generated::kBinShell32DllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"ole32.dll", fs::generated::kBinOle32DllBytes, fs::generated::kBinOle32DllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"oleaut32.dll", fs::generated::kBinOleaut32DllBytes, fs::generated::kBinOleaut32DllBytes_len,
          /*essential=*/false},
         // winmm.dll — perf-counter / GetTickCount routes for
@@ -2171,9 +2289,9 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         {"winmm.dll", fs::generated::kBinWinmmDllBytes, fs::generated::kBinWinmmDllBytes_len,
          /*essential=*/true},
         {"bcrypt.dll", fs::generated::kBinBcryptDllBytes, fs::generated::kBinBcryptDllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"psapi.dll", fs::generated::kBinPsapiDllBytes, fs::generated::kBinPsapiDllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         // DirectX + user32 / gdi32 return-constant tier. Every
         // DirectX entry returns E_NOTIMPL; GetDC returns a
         // sentinel so windowed programs don't null-check-fail
@@ -2186,20 +2304,22 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         {"d3d12.dll", fs::generated::kBinD3d12DllBytes, fs::generated::kBinD3d12DllBytes_len,
          /*essential=*/false},
         {"dxgi.dll", fs::generated::kBinDxgiDllBytes, fs::generated::kBinDxgiDllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"user32.dll", fs::generated::kBinUser32DllBytes, fs::generated::kBinUser32DllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"gdi32.dll", fs::generated::kBinGdi32DllBytes, fs::generated::kBinGdi32DllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         // Networking / crypto / common UI / version / setup.
-        // All stubs — real Windows programs that import these
-        // typically check returns and gracefully fall back.
+        // ws2_32 is essential because mini_browser.exe imports it
+        // and we exercise WSAStartup / gethostbyname / socket /
+        // connect / send / recv / closesocket / WSACleanup as a
+        // live HTTP probe to www.google.com.
         {"ws2_32.dll", fs::generated::kBinWs2_32DllBytes, fs::generated::kBinWs2_32DllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"wininet.dll", fs::generated::kBinWininetDllBytes, fs::generated::kBinWininetDllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"winhttp.dll", fs::generated::kBinWinhttpDllBytes, fs::generated::kBinWinhttpDllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"crypt32.dll", fs::generated::kBinCrypt32DllBytes, fs::generated::kBinCrypt32DllBytes_len,
          /*essential=*/false},
         {"comctl32.dll", fs::generated::kBinComctl32DllBytes, fs::generated::kBinComctl32DllBytes_len,
@@ -2207,21 +2327,21 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         {"comdlg32.dll", fs::generated::kBinComdlg32DllBytes, fs::generated::kBinComdlg32DllBytes_len,
          /*essential=*/false},
         {"version.dll", fs::generated::kBinVersionDllBytes, fs::generated::kBinVersionDllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"setupapi.dll", fs::generated::kBinSetupapiDllBytes, fs::generated::kBinSetupapiDllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         // Six more support DLLs — IP helper, user env,
         // terminal services, DWM, theming, SSPI.
         {"iphlpapi.dll", fs::generated::kBinIphlpapiDllBytes, fs::generated::kBinIphlpapiDllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"userenv.dll", fs::generated::kBinUserenvDllBytes, fs::generated::kBinUserenvDllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"wtsapi32.dll", fs::generated::kBinWtsapi32DllBytes, fs::generated::kBinWtsapi32DllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"dwmapi.dll", fs::generated::kBinDwmapiDllBytes, fs::generated::kBinDwmapiDllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"uxtheme.dll", fs::generated::kBinUxthemeDllBytes, fs::generated::kBinUxthemeDllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"secur32.dll", fs::generated::kBinSecur32DllBytes, fs::generated::kBinSecur32DllBytes_len,
          /*essential=*/false},
     };
@@ -2481,6 +2601,18 @@ bool SpawnOnDemand(const char* kind)
                     mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         return true;
     }
+    if (LocalStrEq(kind, "browser"))
+    {
+        // mini_browser.exe — minimal WinSock 2 PE that does an
+        // HTTP/1.0 GET to www.google.com. Imports kernel32 +
+        // ws2_32. Exits with rc=0 on success; rc=2..6 maps to
+        // the failing WinSock step. The point is to surface
+        // exactly which WS2_32 thunks are missing and to drive
+        // their implementation iteratively.
+        SpawnPeFile("ring3-mini-browser", fs::generated::kBinMiniBrowserBytes, fs::generated::kBinMiniBrowserBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        return true;
+    }
     return false;
 }
 
@@ -2666,6 +2798,269 @@ void StartRing3SmokeTask()
         SpawnPeFile("ring3-winkill", fs::generated::kBinWinKillBytes, fs::generated::kBinWinKillBytes_len,
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     }
+    // mini_browser.exe — minimal WinSock 2 PE that does an HTTP/1.0
+    // GET to www.google.com. Imports kernel32 + ws2_32; the
+    // kernel-side ws2_32 thunks route through SYS_SOCKET_OP into
+    // the native net stack. Always spawned: the failure
+    // transcripts are valuable on emulator too (they map exactly
+    // which Win32/WS2_32 API surface a real browser would need).
+    SpawnPeFile("ring3-mini-browser", fs::generated::kBinMiniBrowserBytes, fs::generated::kBinMiniBrowserBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    // Surface-coverage smoke PEs. Each prints a per-API PASS/FAIL
+    // line on serial; the boot transcript is the gap inventory.
+    // See .claude/knowledge/smoke-pe-suite-v0.md.
+    SpawnPeFile("ring3-crypto-smoke", fs::generated::kBinCryptoSmokeBytes, fs::generated::kBinCryptoSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-paths-smoke", fs::generated::kBinPathsSmokeBytes, fs::generated::kBinPathsSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-time-smoke", fs::generated::kBinTimeSmokeBytes, fs::generated::kBinTimeSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-iphlpapi-smoke", fs::generated::kBinIphlpapiSmokeBytes,
+                fs::generated::kBinIphlpapiSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-wininet-smoke", fs::generated::kBinWininetSmokeBytes, fs::generated::kBinWininetSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-string-smoke", fs::generated::kBinStringSmokeBytes, fs::generated::kBinStringSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-mem-smoke", fs::generated::kBinMemSmokeBytes, fs::generated::kBinMemSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-fs-smoke", fs::generated::kBinFsSmokeBytes, fs::generated::kBinFsSmokeBytes_len, CapSetTrusted(),
+                fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-registry-smoke", fs::generated::kBinRegistrySmokeBytes,
+                fs::generated::kBinRegistrySmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-handle-smoke", fs::generated::kBinHandleSmokeBytes, fs::generated::kBinHandleSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-process-smoke", fs::generated::kBinProcessSmokeBytes, fs::generated::kBinProcessSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-module-smoke", fs::generated::kBinModuleSmokeBytes, fs::generated::kBinModuleSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-env-smoke", fs::generated::kBinEnvSmokeBytes, fs::generated::kBinEnvSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-debug-smoke", fs::generated::kBinDebugSmokeBytes, fs::generated::kBinDebugSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-codepage-smoke", fs::generated::kBinCodepageSmokeBytes,
+                fs::generated::kBinCodepageSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-rng-smoke", fs::generated::kBinRngSmokeBytes, fs::generated::kBinRngSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-version-smoke", fs::generated::kBinVersionSmokeBytes, fs::generated::kBinVersionSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-psapi-smoke", fs::generated::kBinPsapiSmokeBytes, fs::generated::kBinPsapiSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-com-smoke", fs::generated::kBinComSmokeBytes, fs::generated::kBinComSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-dbghelp-smoke", fs::generated::kBinDbghelpSmokeBytes, fs::generated::kBinDbghelpSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-winhttp-smoke", fs::generated::kBinWinhttpSmokeBytes, fs::generated::kBinWinhttpSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-crt-smoke", fs::generated::kBinCrtSmokeBytes, fs::generated::kBinCrtSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-critsec-smoke", fs::generated::kBinCritsecSmokeBytes, fs::generated::kBinCritsecSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-tls-smoke", fs::generated::kBinTlsSmokeBytes, fs::generated::kBinTlsSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-atom-smoke", fs::generated::kBinAtomSmokeBytes, fs::generated::kBinAtomSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-console-smoke", fs::generated::kBinConsoleSmokeBytes, fs::generated::kBinConsoleSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-datetime-smoke", fs::generated::kBinDatetimeSmokeBytes,
+                fs::generated::kBinDatetimeSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-locale-smoke", fs::generated::kBinLocaleSmokeBytes, fs::generated::kBinLocaleSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-gdi-smoke", fs::generated::kBinGdiSmokeBytes, fs::generated::kBinGdiSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-msg-smoke", fs::generated::kBinMsgSmokeBytes, fs::generated::kBinMsgSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-pipe-smoke", fs::generated::kBinPipeSmokeBytes, fs::generated::kBinPipeSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-resource-smoke", fs::generated::kBinResourceSmokeBytes,
+                fs::generated::kBinResourceSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-ntdll-smoke", fs::generated::kBinNtdllSmokeBytes, fs::generated::kBinNtdllSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-shell-smoke", fs::generated::kBinShellSmokeBytes, fs::generated::kBinShellSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-userenv-smoke", fs::generated::kBinUserenvSmokeBytes, fs::generated::kBinUserenvSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-interlock-smoke", fs::generated::kBinInterlockSmokeBytes,
+                fs::generated::kBinInterlockSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-fiber-smoke", fs::generated::kBinFiberSmokeBytes, fs::generated::kBinFiberSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-profile-smoke", fs::generated::kBinProfileSmokeBytes, fs::generated::kBinProfileSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-clipboard-smoke", fs::generated::kBinClipboardSmokeBytes,
+                fs::generated::kBinClipboardSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-windowclass-smoke", fs::generated::kBinWindowclassSmokeBytes,
+                fs::generated::kBinWindowclassSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-wow64-smoke", fs::generated::kBinWow64SmokeBytes, fs::generated::kBinWow64SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-mathlib-smoke", fs::generated::kBinMathlibSmokeBytes, fs::generated::kBinMathlibSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-stdio-smoke", fs::generated::kBinStdioSmokeBytes, fs::generated::kBinStdioSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-nls-smoke", fs::generated::kBinNlsSmokeBytes, fs::generated::kBinNlsSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-services-smoke", fs::generated::kBinServicesSmokeBytes,
+                fs::generated::kBinServicesSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-eventlog-smoke", fs::generated::kBinEventlogSmokeBytes,
+                fs::generated::kBinEventlogSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-sound-smoke", fs::generated::kBinSoundSmokeBytes, fs::generated::kBinSoundSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-multimon-smoke", fs::generated::kBinMultimonSmokeBytes,
+                fs::generated::kBinMultimonSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-power-smoke", fs::generated::kBinPowerSmokeBytes, fs::generated::kBinPowerSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-heap-smoke", fs::generated::kBinHeapSmokeBytes, fs::generated::kBinHeapSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-thread2-smoke", fs::generated::kBinThread2SmokeBytes, fs::generated::kBinThread2SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-ipc-smoke", fs::generated::kBinIpcSmokeBytes, fs::generated::kBinIpcSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-jobobj-smoke", fs::generated::kBinJobobjSmokeBytes, fs::generated::kBinJobobjSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-console2-smoke", fs::generated::kBinConsole2SmokeBytes,
+                fs::generated::kBinConsole2SmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-dns-smoke", fs::generated::kBinDnsSmokeBytes, fs::generated::kBinDnsSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-network2-smoke", fs::generated::kBinNetwork2SmokeBytes,
+                fs::generated::kBinNetwork2SmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-dxgi-smoke", fs::generated::kBinDxgiSmokeBytes, fs::generated::kBinDxgiSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-dwm-smoke", fs::generated::kBinDwmSmokeBytes, fs::generated::kBinDwmSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-uxtheme-smoke", fs::generated::kBinUxthemeSmokeBytes, fs::generated::kBinUxthemeSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-token-smoke", fs::generated::kBinTokenSmokeBytes, fs::generated::kBinTokenSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-security-smoke", fs::generated::kBinSecuritySmokeBytes,
+                fs::generated::kBinSecuritySmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-perf-smoke", fs::generated::kBinPerfSmokeBytes, fs::generated::kBinPerfSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-accel-smoke", fs::generated::kBinAccelSmokeBytes, fs::generated::kBinAccelSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-wts-smoke", fs::generated::kBinWtsSmokeBytes, fs::generated::kBinWtsSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-winerr-smoke", fs::generated::kBinWinerrSmokeBytes, fs::generated::kBinWinerrSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-sleep-smoke", fs::generated::kBinSleepSmokeBytes, fs::generated::kBinSleepSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-nt-smoke", fs::generated::kBinNtSmokeBytes, fs::generated::kBinNtSmokeBytes_len, CapSetTrusted(),
+                fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-vol-smoke", fs::generated::kBinVolSmokeBytes, fs::generated::kBinVolSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-drive-smoke", fs::generated::kBinDriveSmokeBytes, fs::generated::kBinDriveSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-conio-smoke", fs::generated::kBinConioSmokeBytes, fs::generated::kBinConioSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-mbcs-smoke", fs::generated::kBinMbcsSmokeBytes, fs::generated::kBinMbcsSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-fpcontrol-smoke", fs::generated::kBinFpcontrolSmokeBytes,
+                fs::generated::kBinFpcontrolSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-locale2-smoke", fs::generated::kBinLocale2SmokeBytes, fs::generated::kBinLocale2SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-gdiplus-smoke", fs::generated::kBinGdiplusSmokeBytes, fs::generated::kBinGdiplusSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-dde-smoke", fs::generated::kBinDdeSmokeBytes, fs::generated::kBinDdeSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-stream-smoke", fs::generated::kBinStreamSmokeBytes, fs::generated::kBinStreamSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-setupapi-smoke", fs::generated::kBinSetupapiSmokeBytes,
+                fs::generated::kBinSetupapiSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-asyn-smoke", fs::generated::kBinAsynSmokeBytes, fs::generated::kBinAsynSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-wndmsg-smoke", fs::generated::kBinWndmsgSmokeBytes, fs::generated::kBinWndmsgSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-scrap-smoke", fs::generated::kBinScrapSmokeBytes, fs::generated::kBinScrapSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-trace-smoke", fs::generated::kBinTraceSmokeBytes, fs::generated::kBinTraceSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-wmi-smoke", fs::generated::kBinWmiSmokeBytes, fs::generated::kBinWmiSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-enviro-smoke", fs::generated::kBinEnviroSmokeBytes, fs::generated::kBinEnviroSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-select-smoke", fs::generated::kBinSelectSmokeBytes, fs::generated::kBinSelectSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-proc2-smoke", fs::generated::kBinProc2SmokeBytes, fs::generated::kBinProc2SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-find-smoke", fs::generated::kBinFindSmokeBytes, fs::generated::kBinFindSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-iocp2-smoke", fs::generated::kBinIocp2SmokeBytes, fs::generated::kBinIocp2SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-signal-smoke", fs::generated::kBinSignalSmokeBytes, fs::generated::kBinSignalSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-timer-smoke", fs::generated::kBinTimerSmokeBytes, fs::generated::kBinTimerSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-winsock-ext-smoke", fs::generated::kBinWinsockExtSmokeBytes,
+                fs::generated::kBinWinsockExtSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-key-smoke", fs::generated::kBinKeySmokeBytes, fs::generated::kBinKeySmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-reg2-smoke", fs::generated::kBinReg2SmokeBytes, fs::generated::kBinReg2SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-paths2-smoke", fs::generated::kBinPaths2SmokeBytes, fs::generated::kBinPaths2SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-advapi-smoke", fs::generated::kBinAdvapiSmokeBytes, fs::generated::kBinAdvapiSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-heap3-smoke", fs::generated::kBinHeap3SmokeBytes, fs::generated::kBinHeap3SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-thread3-smoke", fs::generated::kBinThread3SmokeBytes, fs::generated::kBinThread3SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-wstr-smoke", fs::generated::kBinWstrSmokeBytes, fs::generated::kBinWstrSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-intl-smoke", fs::generated::kBinIntlSmokeBytes, fs::generated::kBinIntlSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-disp-smoke", fs::generated::kBinDispSmokeBytes, fs::generated::kBinDispSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-svc-ctrl-smoke", fs::generated::kBinSvcCtrlSmokeBytes, fs::generated::kBinSvcCtrlSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-sysinfo-smoke", fs::generated::kBinSysinfoSmokeBytes, fs::generated::kBinSysinfoSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-mem2-smoke", fs::generated::kBinMem2SmokeBytes, fs::generated::kBinMem2SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-fs2-smoke", fs::generated::kBinFs2SmokeBytes, fs::generated::kBinFs2SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-console3-smoke", fs::generated::kBinConsole3SmokeBytes,
+                fs::generated::kBinConsole3SmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-xml-smoke", fs::generated::kBinXmlSmokeBytes, fs::generated::kBinXmlSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-reg3-smoke", fs::generated::kBinReg3SmokeBytes, fs::generated::kBinReg3SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-proc3-smoke", fs::generated::kBinProc3SmokeBytes, fs::generated::kBinProc3SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-com2-smoke", fs::generated::kBinCom2SmokeBytes, fs::generated::kBinCom2SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-advmem-smoke", fs::generated::kBinAdvmemSmokeBytes, fs::generated::kBinAdvmemSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-wstr2-smoke", fs::generated::kBinWstr2SmokeBytes, fs::generated::kBinWstr2SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-fs3-smoke", fs::generated::kBinFs3SmokeBytes, fs::generated::kBinFs3SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-cap-smoke", fs::generated::kBinCapSmokeBytes, fs::generated::kBinCapSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-utf16-smoke", fs::generated::kBinUtf16SmokeBytes, fs::generated::kBinUtf16SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-handle2-smoke", fs::generated::kBinHandle2SmokeBytes, fs::generated::kBinHandle2SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-sock-opt-smoke", fs::generated::kBinSockOptSmokeBytes, fs::generated::kBinSockOptSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-prio-smoke", fs::generated::kBinPrioSmokeBytes, fs::generated::kBinPrioSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-debug2-smoke", fs::generated::kBinDebug2SmokeBytes, fs::generated::kBinDebug2SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     // Windowing v0 proof: a freestanding PE that imports
     // user32!CreateWindowExA + ShowWindow + MessageBoxA and
     // calls them. The Win32 → SYS_WIN_CREATE bridge turns

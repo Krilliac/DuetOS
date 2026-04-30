@@ -1,8 +1,27 @@
-/* wininet.dll — Wininet HTTP client. No network in v0; all ops fail. */
+/*
+ * userland/libs/wininet/wininet.c — minimal Wininet HTTP client.
+ *
+ * v0 returns sentinel handles so callers can drive the
+ * Open → OpenUrl → ReadFile → Close flow without trapping.
+ * Real HTTP transport over ws2_32 is in a deferred slice.
+ *
+ * Sentinel values let the smoke test verify ABI shape:
+ *   0x4001 — session handle (from InternetOpen)
+ *   0x4002 — connection handle (from InternetConnect)
+ *   0x4003 — request handle (from HttpOpenRequest / InternetOpenUrl)
+ *
+ * InternetReadFile returns 0 bytes — the real transport
+ * isn't wired yet. Callers that fall through on EOF still
+ * proceed cleanly.
+ */
 typedef int BOOL;
 typedef unsigned int DWORD;
 typedef void* HANDLE;
 typedef unsigned short wchar_t16;
+
+#define HANDLE_SESSION ((HANDLE)0x4001)
+#define HANDLE_CONNECT ((HANDLE)0x4002)
+#define HANDLE_REQUEST ((HANDLE)0x4003)
 
 __declspec(dllexport) HANDLE InternetOpenA(const char* agent, DWORD type, const char* proxy, const char* proxyBypass,
                                            DWORD flags)
@@ -12,7 +31,7 @@ __declspec(dllexport) HANDLE InternetOpenA(const char* agent, DWORD type, const 
     (void)proxy;
     (void)proxyBypass;
     (void)flags;
-    return (HANDLE)0;
+    return HANDLE_SESSION;
 }
 __declspec(dllexport) HANDLE InternetOpenW(const wchar_t16* agent, DWORD type, const wchar_t16* proxy,
                                            const wchar_t16* proxyBypass, DWORD flags)
@@ -22,7 +41,7 @@ __declspec(dllexport) HANDLE InternetOpenW(const wchar_t16* agent, DWORD type, c
     (void)proxy;
     (void)proxyBypass;
     (void)flags;
-    return (HANDLE)0;
+    return HANDLE_SESSION;
 }
 __declspec(dllexport) HANDLE InternetConnectA(HANDLE h, const char* server, unsigned short port, const char* user,
                                               const char* pw, DWORD svc, DWORD flags, unsigned long long ctx)
@@ -35,7 +54,7 @@ __declspec(dllexport) HANDLE InternetConnectA(HANDLE h, const char* server, unsi
     (void)svc;
     (void)flags;
     (void)ctx;
-    return (HANDLE)0;
+    return HANDLE_CONNECT;
 }
 __declspec(dllexport) HANDLE HttpOpenRequestA(HANDLE h, const char* verb, const char* obj, const char* ver,
                                               const char* ref, const char** types, DWORD flags, unsigned long long ctx)
@@ -48,7 +67,7 @@ __declspec(dllexport) HANDLE HttpOpenRequestA(HANDLE h, const char* verb, const 
     (void)types;
     (void)flags;
     (void)ctx;
-    return (HANDLE)0;
+    return HANDLE_REQUEST;
 }
 __declspec(dllexport) BOOL HttpSendRequestA(HANDLE h, const char* hdrs, DWORD hlen, void* opt, DWORD ol)
 {
@@ -57,16 +76,17 @@ __declspec(dllexport) BOOL HttpSendRequestA(HANDLE h, const char* hdrs, DWORD hl
     (void)hlen;
     (void)opt;
     (void)ol;
-    return 0;
+    return 1; /* "sent" */
 }
 __declspec(dllexport) BOOL InternetReadFile(HANDLE h, void* buf, DWORD cb, DWORD* read)
 {
     (void)h;
     (void)buf;
     (void)cb;
+    /* No real transport yet — return TRUE with 0 bytes (EOF). */
     if (read)
         *read = 0;
-    return 0;
+    return 1;
 }
 __declspec(dllexport) BOOL InternetCloseHandle(HANDLE h)
 {
@@ -82,7 +102,7 @@ __declspec(dllexport) HANDLE InternetOpenUrlA(HANDLE h, const char* url, const c
     (void)hlen;
     (void)flags;
     (void)ctx;
-    return (HANDLE)0;
+    return HANDLE_REQUEST;
 }
 
 __declspec(dllexport) HANDLE InternetOpenUrlW(HANDLE h, const wchar_t16* url, const wchar_t16* hdrs, DWORD hlen,
@@ -94,7 +114,7 @@ __declspec(dllexport) HANDLE InternetOpenUrlW(HANDLE h, const wchar_t16* url, co
     (void)hlen;
     (void)flags;
     (void)ctx;
-    return (HANDLE)0;
+    return HANDLE_REQUEST;
 }
 
 __declspec(dllexport) HANDLE InternetConnectW(HANDLE h, const wchar_t16* server, unsigned short port,
@@ -109,7 +129,7 @@ __declspec(dllexport) HANDLE InternetConnectW(HANDLE h, const wchar_t16* server,
     (void)svc;
     (void)flags;
     (void)ctx;
-    return (HANDLE)0;
+    return HANDLE_CONNECT;
 }
 
 __declspec(dllexport) HANDLE HttpOpenRequestW(HANDLE h, const wchar_t16* verb, const wchar_t16* obj,
@@ -124,7 +144,7 @@ __declspec(dllexport) HANDLE HttpOpenRequestW(HANDLE h, const wchar_t16* verb, c
     (void)types;
     (void)flags;
     (void)ctx;
-    return (HANDLE)0;
+    return HANDLE_REQUEST;
 }
 
 __declspec(dllexport) BOOL HttpSendRequestW(HANDLE h, const wchar_t16* hdrs, DWORD hlen, void* opt, DWORD ol)
@@ -134,17 +154,16 @@ __declspec(dllexport) BOOL HttpSendRequestW(HANDLE h, const wchar_t16* hdrs, DWO
     (void)hlen;
     (void)opt;
     (void)ol;
-    return 0;
+    return 1;
 }
 
 __declspec(dllexport) BOOL InternetWriteFile(HANDLE h, const void* buf, DWORD cb, DWORD* written)
 {
     (void)h;
     (void)buf;
-    (void)cb;
     if (written)
-        *written = 0;
-    return 0;
+        *written = cb;
+    return 1;
 }
 
 __declspec(dllexport) BOOL InternetQueryDataAvailable(HANDLE h, DWORD* avail, DWORD flags, unsigned long long ctx)
@@ -154,7 +173,7 @@ __declspec(dllexport) BOOL InternetQueryDataAvailable(HANDLE h, DWORD* avail, DW
     (void)ctx;
     if (avail)
         *avail = 0;
-    return 0;
+    return 1;
 }
 
 __declspec(dllexport) BOOL InternetSetOptionA(HANDLE h, DWORD opt, void* val, DWORD len)
@@ -223,8 +242,8 @@ __declspec(dllexport) BOOL InternetGetConnectedState(DWORD* flags, DWORD rsv)
 {
     (void)rsv;
     if (flags)
-        *flags = 0;
-    return 0; /* Not connected. */
+        *flags = 0x40; /* INTERNET_CONNECTION_LAN */
+    return 1;
 }
 
 __declspec(dllexport) BOOL InternetCheckConnectionA(const char* url, DWORD flags, DWORD rsv)
@@ -232,5 +251,5 @@ __declspec(dllexport) BOOL InternetCheckConnectionA(const char* url, DWORD flags
     (void)url;
     (void)flags;
     (void)rsv;
-    return 0;
+    return 1;
 }

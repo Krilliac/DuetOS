@@ -1749,8 +1749,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // slot during its run and installs the boot HTTP listener
     // afterwards via NetSmokeInstallBootListener — so an active
     // connect to www.google.com (step 4) doesn't collide with
-    // the listener's TcpListen call.
-    duetos::net::NetSmokeTestStart();
+    // the listener's TcpListen call. `netsmoke=force` opts in to
+    // running on emulator (QEMU SLIRP supports DNS+TCP egress).
+    const bool force_net_smoke = CmdlineMatches(cmdline, "netsmoke", "force");
+    duetos::net::NetSmokeTestStart(force_net_smoke);
 
     SerialWrite("[boot] Bringing up graphics ICD skeleton.\n");
     duetos::subsystems::graphics::GraphicsIcdInit();

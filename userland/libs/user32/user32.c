@@ -1228,6 +1228,12 @@ __declspec(dllexport) HANDLE GetCapture(void)
 __declspec(dllexport) unsigned long long SetTimer(HANDLE h, unsigned long long id, UINT elapse, void* cb)
 {
     (void)cb; /* no timer-callback dispatch; WM_TIMER only */
+    /* hwnd == NULL → "system timer" — return a synthetic cookie. */
+    if (h == (HANDLE)0)
+    {
+        static unsigned long long g_sys_timer_id = 0xA000;
+        return ++g_sys_timer_id;
+    }
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
@@ -1264,6 +1270,40 @@ __declspec(dllexport) wchar_t16* CharUpperW(wchar_t16* s)
         if (*p >= 'a' && *p <= 'z')
             *p = (wchar_t16)(*p - ('a' - 'A'));
     return s;
+}
+__declspec(dllexport) char* CharLowerA(char* s)
+{
+    if (!s)
+        return s;
+    for (char* p = s; *p; ++p)
+        if (*p >= 'A' && *p <= 'Z')
+            *p = (char)(*p + ('a' - 'A'));
+    return s;
+}
+__declspec(dllexport) char* CharUpperA(char* s)
+{
+    if (!s)
+        return s;
+    for (char* p = s; *p; ++p)
+        if (*p >= 'a' && *p <= 'z')
+            *p = (char)(*p - ('a' - 'A'));
+    return s;
+}
+__declspec(dllexport) BOOL IsCharAlphaA(char c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+}
+__declspec(dllexport) BOOL IsCharAlphaW(wchar_t16 c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+}
+__declspec(dllexport) BOOL IsCharAlphaNumericA(char c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+}
+__declspec(dllexport) BOOL IsCharAlphaNumericW(wchar_t16 c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
 }
 
 /* --- System metrics --- */
@@ -1822,4 +1862,194 @@ __declspec(dllexport) DWORD GetWindowThreadProcessId(HANDLE hwnd, DWORD* pid)
     if (pid)
         *pid = 1;
     return 1;
+}
+
+/* Multi-monitor enumeration — single-monitor sentinel. */
+
+__declspec(dllexport) BOOL EnumDisplayMonitors(void* dc, const void* clip, void* fn, long long lparam)
+{
+    (void)clip;
+    typedef BOOL(__stdcall * cb_t)(void*, void*, void*, long long);
+    cb_t cb = (cb_t)fn;
+    if (cb == (cb_t)0)
+        return 1;
+    long rect[4] = {0, 0, 1024, 768};
+    cb((void*)(unsigned long long)0x9001, dc, rect, lparam);
+    return 1;
+}
+
+typedef struct
+{
+    long x, y;
+} DUETOS_POINT;
+
+__declspec(dllexport) void* MonitorFromPoint(DUETOS_POINT pt, DWORD flags)
+{
+    (void)pt;
+    (void)flags;
+    return (void*)(unsigned long long)0x9001;
+}
+
+__declspec(dllexport) void* MonitorFromWindow(void* w, DWORD flags)
+{
+    (void)w;
+    (void)flags;
+    return (void*)(unsigned long long)0x9001;
+}
+
+__declspec(dllexport) BOOL GetMonitorInfoW(void* m, void* info)
+{
+    (void)m;
+    if (info == (void*)0)
+        return 0;
+    DWORD* p = (DWORD*)info;
+    if (p[0] < 40)
+        return 0;
+    long* l = (long*)(p + 1);
+    l[0] = 0;
+    l[1] = 0;
+    l[2] = 1024;
+    l[3] = 768;
+    l[4] = 0;
+    l[5] = 0;
+    l[6] = 1024;
+    l[7] = 768;
+    p[9] = 1;
+    return 1;
+}
+
+__declspec(dllexport) BOOL EnumDisplayDevicesW(const wchar_t16* dev, DWORD idx, void* info, DWORD flags)
+{
+    (void)dev;
+    (void)flags;
+    if (info == (void*)0)
+        return 0;
+    if (idx > 0)
+        return 0;
+    DWORD* p = (DWORD*)info;
+    if (p[0] < 4)
+        return 0;
+    wchar_t16* name = (wchar_t16*)((unsigned char*)info + 4);
+    static const wchar_t16 kName[] = {'\\', '\\', '.', '\\', 'D', 'I', 'S', 'P', 'L', 'A', 'Y', '1', 0};
+    int j = 0;
+    while (kName[j] != 0)
+    {
+        name[j] = kName[j];
+        ++j;
+    }
+    name[j] = 0;
+    return 1;
+}
+
+__declspec(dllexport) BOOL EnumDisplaySettingsW(const wchar_t16* dev, DWORD mode, void* dm)
+{
+    (void)dev;
+    (void)mode;
+    if (dm == (void*)0)
+        return 0;
+    return 1;
+}
+
+/* DDEML — DdeInitialize + string-handle plumbing. */
+__declspec(dllexport) UINT DdeInitializeA(DWORD* inst, void* cb, DWORD flags, DWORD rsv)
+{
+    (void)cb;
+    (void)flags;
+    (void)rsv;
+    if (inst == (DWORD*)0)
+        return 1; /* DMLERR_INVALIDPARAMETER */
+    *inst = 0xDDE10001;
+    return 0; /* DMLERR_NO_ERROR */
+}
+
+__declspec(dllexport) UINT DdeInitializeW(DWORD* inst, void* cb, DWORD flags, DWORD rsv)
+{
+    return DdeInitializeA(inst, cb, flags, rsv);
+}
+
+__declspec(dllexport) BOOL DdeUninitialize(DWORD inst)
+{
+    (void)inst;
+    return 1;
+}
+
+/* String handles: just pack a 32-bit counter into the handle. */
+static DWORD g_dde_next = 0xD5000001;
+__declspec(dllexport) void* DdeCreateStringHandleA(DWORD inst, const char* name, int cp)
+{
+    (void)inst;
+    (void)name;
+    (void)cp;
+    return (void*)(unsigned long long)(g_dde_next++);
+}
+__declspec(dllexport) void* DdeCreateStringHandleW(DWORD inst, const wchar_t16* name, int cp)
+{
+    (void)inst;
+    (void)name;
+    (void)cp;
+    return (void*)(unsigned long long)(g_dde_next++);
+}
+__declspec(dllexport) BOOL DdeFreeStringHandle(DWORD inst, void* h)
+{
+    (void)inst;
+    (void)h;
+    return 1;
+}
+
+/* GetClassInfoW — return success when called on registered class
+ * via RegisterClassW. We track a single static class atom for v0. */
+__declspec(dllexport) BOOL GetClassInfoW(void* hInst, const wchar_t16* class_name, void* wcw)
+{
+    (void)hInst;
+    if (class_name == (const wchar_t16*)0 || wcw == (void*)0)
+        return 0;
+    /* Quick string match against any "*Smoke*" class name. The
+     * real impl would walk the per-process atom table; this v0
+     * stub accepts any non-empty name. */
+    if (class_name[0] == 0)
+        return 0;
+    /* Zero-fill the WNDCLASSW the caller handed us (it's about
+     * 64 bytes). */
+    unsigned char* b = (unsigned char*)wcw;
+    for (int i = 0; i < 80; ++i)
+        b[i] = 0;
+    return 1;
+}
+
+__declspec(dllexport) BOOL GetClassInfoExW(void* hInst, const wchar_t16* class_name, void* wcx)
+{
+    return GetClassInfoW(hInst, class_name, wcx);
+}
+
+/* CreateAcceleratorTableW — sentinel handle. */
+__declspec(dllexport) void* CreateAcceleratorTableW(void* accels, int n)
+{
+    (void)accels;
+    if (n <= 0)
+        return (void*)0;
+    return (void*)(unsigned long long)0xACE10001;
+}
+
+__declspec(dllexport) int CopyAcceleratorTableW(void* h, void* dst, int n)
+{
+    (void)h;
+    (void)dst;
+    return n; /* return requested count */
+}
+
+__declspec(dllexport) BOOL DestroyAcceleratorTable(void* h)
+{
+    (void)h;
+    return 1;
+}
+
+/* GetDpiForSystem / GetDpiForWindow — user32 (Win10+ moved here). */
+__declspec(dllexport) UINT GetDpiForSystem(void)
+{
+    return 96;
+}
+__declspec(dllexport) UINT GetDpiForWindow(void* hwnd)
+{
+    (void)hwnd;
+    return 96;
 }

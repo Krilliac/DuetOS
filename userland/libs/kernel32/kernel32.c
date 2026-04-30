@@ -632,6 +632,19 @@ __declspec(dllexport) NO_BUILTIN_LSTR char* lstrcpyA(char* dst, const char* src)
     return dst;
 }
 
+__declspec(dllexport) NO_BUILTIN_LSTR char* lstrcatA(char* dst, const char* src)
+{
+    if (dst == (char*)0 || src == (const char*)0)
+        return dst;
+    char* d = dst;
+    while (*d != 0)
+        ++d;
+    while ((*d++ = *src++) != 0)
+    {
+    }
+    return dst;
+}
+
 typedef unsigned short wchar_t16; /* Win32 wchar_t is UTF-16 */
 
 __declspec(dllexport) int lstrlenW(const wchar_t16* s)
@@ -678,6 +691,1741 @@ __declspec(dllexport) wchar_t16* lstrcpyW(wchar_t16* dst, const wchar_t16* src)
     if (dst == (wchar_t16*)0 || src == (const wchar_t16*)0)
         return dst;
     wchar_t16* d = dst;
+    while ((*d++ = *src++) != 0)
+    {
+    }
+    return dst;
+}
+
+/* ------------------------------------------------------------------
+ * Environment variables — per-process userland table.
+ *
+ * The kernel-hosted env block (GetEnvironmentStringsW via stubs page)
+ * gives the fixed boot-time environment. Get/Set/Expand on top of it
+ * are kept entirely in user space here so a Set is visible to the
+ * matching Get inside the same process. STUB-grade: no inheritance
+ * across CreateProcess (we don't have CreateProcess yet anyway).
+ * ------------------------------------------------------------------ */
+
+#define DUETOS_ENV_MAX 16
+#define DUETOS_ENV_NAME 32
+#define DUETOS_ENV_VAL 96
+
+typedef struct
+{
+    wchar_t16 name[DUETOS_ENV_NAME];
+    wchar_t16 val[DUETOS_ENV_VAL];
+    int in_use;
+} DuetosEnvSlot;
+
+static DuetosEnvSlot g_env_table[DUETOS_ENV_MAX];
+
+static int wstr_eq_ci(const wchar_t16* a, const wchar_t16* b)
+{
+    int i = 0;
+    for (;;)
+    {
+        wchar_t16 ca = a[i];
+        wchar_t16 cb = b[i];
+        if (ca >= 'A' && ca <= 'Z')
+            ca = (wchar_t16)(ca + ('a' - 'A'));
+        if (cb >= 'A' && cb <= 'Z')
+            cb = (wchar_t16)(cb + ('a' - 'A'));
+        if (ca != cb)
+            return 0;
+        if (ca == 0)
+            return 1;
+        ++i;
+    }
+}
+
+static int wstr_len(const wchar_t16* s)
+{
+    int n = 0;
+    while (s[n] != 0)
+        ++n;
+    return n;
+}
+
+static void wstr_copy(wchar_t16* dst, const wchar_t16* src, int max)
+{
+    int i;
+    for (i = 0; i < max - 1 && src[i] != 0; ++i)
+        dst[i] = src[i];
+    dst[i] = 0;
+}
+
+__declspec(dllexport) DWORD GetEnvironmentVariableW(const wchar_t16* name, wchar_t16* buf, DWORD size)
+{
+    if (name == (const wchar_t16*)0)
+        return 0;
+    for (int i = 0; i < DUETOS_ENV_MAX; ++i)
+    {
+        if (!g_env_table[i].in_use)
+            continue;
+        if (!wstr_eq_ci(g_env_table[i].name, name))
+            continue;
+        int n = wstr_len(g_env_table[i].val);
+        if (buf == (wchar_t16*)0 || size == 0)
+            return (DWORD)(n + 1);
+        if ((DWORD)n + 1 > size)
+        {
+            buf[0] = 0;
+            return (DWORD)(n + 1);
+        }
+        wstr_copy(buf, g_env_table[i].val, (int)size);
+        return (DWORD)n;
+    }
+    return 0;
+}
+
+__declspec(dllexport) BOOL SetEnvironmentVariableW(const wchar_t16* name, const wchar_t16* val)
+{
+    if (name == (const wchar_t16*)0)
+        return 0;
+    /* val == NULL means "delete" the variable. */
+    /* First, find an existing entry to update or delete. */
+    for (int i = 0; i < DUETOS_ENV_MAX; ++i)
+    {
+        if (!g_env_table[i].in_use)
+            continue;
+        if (!wstr_eq_ci(g_env_table[i].name, name))
+            continue;
+        if (val == (const wchar_t16*)0)
+        {
+            g_env_table[i].in_use = 0;
+            return 1;
+        }
+        wstr_copy(g_env_table[i].val, val, DUETOS_ENV_VAL);
+        return 1;
+    }
+    if (val == (const wchar_t16*)0)
+        return 1; /* Delete of non-existent == success per docs. */
+    /* Allocate a free slot. */
+    for (int i = 0; i < DUETOS_ENV_MAX; ++i)
+    {
+        if (g_env_table[i].in_use)
+            continue;
+        wstr_copy(g_env_table[i].name, name, DUETOS_ENV_NAME);
+        wstr_copy(g_env_table[i].val, val, DUETOS_ENV_VAL);
+        g_env_table[i].in_use = 1;
+        return 1;
+    }
+    return 0;
+}
+
+__declspec(dllexport) DWORD GetEnvironmentVariableA(const char* name, char* buf, DWORD size)
+{
+    if (name == (const char*)0)
+        return 0;
+    /* Translate name to wchar_t16, look up, then translate back. */
+    wchar_t16 wname[DUETOS_ENV_NAME];
+    int i;
+    for (i = 0; i < DUETOS_ENV_NAME - 1 && name[i] != 0; ++i)
+        wname[i] = (wchar_t16)(unsigned char)name[i];
+    wname[i] = 0;
+    wchar_t16 wval[DUETOS_ENV_VAL];
+    DWORD n = GetEnvironmentVariableW(wname, wval, DUETOS_ENV_VAL);
+    if (n == 0)
+        return 0;
+    /* n is wchar count without NUL when buf-fit, with NUL otherwise. */
+    if (buf == (char*)0 || size == 0)
+        return n;
+    DWORD j;
+    for (j = 0; j < size - 1 && wval[j] != 0; ++j)
+        buf[j] = (char)(unsigned char)wval[j];
+    buf[j] = 0;
+    return j;
+}
+
+__declspec(dllexport) BOOL SetEnvironmentVariableA(const char* name, const char* val)
+{
+    if (name == (const char*)0)
+        return 0;
+    wchar_t16 wname[DUETOS_ENV_NAME];
+    wchar_t16 wval[DUETOS_ENV_VAL];
+    int i;
+    for (i = 0; i < DUETOS_ENV_NAME - 1 && name[i] != 0; ++i)
+        wname[i] = (wchar_t16)(unsigned char)name[i];
+    wname[i] = 0;
+    if (val == (const char*)0)
+        return SetEnvironmentVariableW(wname, (const wchar_t16*)0);
+    for (i = 0; i < DUETOS_ENV_VAL - 1 && val[i] != 0; ++i)
+        wval[i] = (wchar_t16)(unsigned char)val[i];
+    wval[i] = 0;
+    return SetEnvironmentVariableW(wname, wval);
+}
+
+__declspec(dllexport) DWORD ExpandEnvironmentStringsW(const wchar_t16* src, wchar_t16* dst, DWORD size)
+{
+    /* v0: copy literal text only; %VAR% expansion is unimplemented. */
+    if (src == (const wchar_t16*)0)
+        return 0;
+    int n = wstr_len(src) + 1; /* including NUL */
+    if (dst == (wchar_t16*)0 || size == 0)
+        return (DWORD)n;
+    if ((DWORD)n > size)
+    {
+        wstr_copy(dst, src, (int)size);
+        return (DWORD)n;
+    }
+    wstr_copy(dst, src, (int)size);
+    return (DWORD)n;
+}
+
+/* ------------------------------------------------------------------
+ * Locale APIs — fixed en-US (LCID 0x0409). DuetOS has no real
+ * locale tables yet; these return canned strings keyed off the
+ * common LCType selectors that real apps query.
+ * ------------------------------------------------------------------ */
+
+#define DUETOS_LCID_EN_US 0x0409UL
+#define DUETOS_LANGID_EN_US 0x0409U
+
+__declspec(dllexport) unsigned long GetUserDefaultLCID(void)
+{
+    return DUETOS_LCID_EN_US;
+}
+__declspec(dllexport) unsigned long GetSystemDefaultLCID(void)
+{
+    return DUETOS_LCID_EN_US;
+}
+__declspec(dllexport) unsigned long GetThreadLocale(void)
+{
+    return DUETOS_LCID_EN_US;
+}
+__declspec(dllexport) unsigned short GetUserDefaultLangID(void)
+{
+    return DUETOS_LANGID_EN_US;
+}
+__declspec(dllexport) unsigned short GetSystemDefaultLangID(void)
+{
+    return DUETOS_LANGID_EN_US;
+}
+__declspec(dllexport) BOOL SetThreadLocale(unsigned long lcid)
+{
+    (void)lcid;
+    return 1;
+}
+
+__declspec(dllexport) BOOL IsValidLocale(unsigned long lcid, DWORD flags)
+{
+    (void)flags;
+    return (lcid == DUETOS_LCID_EN_US || lcid == 0x0800 || lcid == 0x0400) ? 1 : 0;
+}
+
+__declspec(dllexport) int GetLocaleInfoW(unsigned long lcid, unsigned long lctype, wchar_t16* buf, int cchData)
+{
+    (void)lcid;
+    lctype &= 0x0FFFFFFF;
+    static const wchar_t16 sLang[] = {'e', 'n', 0};
+    static const wchar_t16 sCountry[] = {'U', 'n', 'i', 't', 'e', 'd', ' ', 'S', 't', 'a', 't', 'e', 's', 0};
+    static const wchar_t16 sCountryAbbrev[] = {'U', 'S', 'A', 0};
+    static const wchar_t16 sLangName[] = {'E', 'n', 'g', 'l', 'i', 's', 'h', 0};
+    static const wchar_t16 sIso3166[] = {'U', 'S', 0};
+    static const wchar_t16 sIso639[] = {'e', 'n', 0};
+    static const wchar_t16 sDecimal[] = {'.', 0};
+    static const wchar_t16 sThousand[] = {',', 0};
+    const wchar_t16* msg;
+    switch (lctype)
+    {
+    case 0x0002:
+        msg = sLangName;
+        break;
+    case 0x0006:
+        msg = sCountry;
+        break;
+    case 0x0007:
+        msg = sCountryAbbrev;
+        break;
+    case 0x000E:
+        msg = sDecimal;
+        break;
+    case 0x000F:
+        msg = sThousand;
+        break;
+    case 0x0059:
+        msg = sIso639;
+        break;
+    case 0x005A:
+        msg = sIso3166;
+        break;
+    default:
+        msg = sLang;
+        break;
+    }
+    int needed = 0;
+    while (msg[needed] != 0)
+        ++needed;
+    ++needed;
+    if (cchData == 0)
+        return needed;
+    if (buf == (wchar_t16*)0 || cchData < needed)
+        return 0;
+    int j = 0;
+    while (msg[j] != 0)
+    {
+        buf[j] = msg[j];
+        ++j;
+    }
+    buf[j] = 0;
+    return needed;
+}
+
+/* ------------------------------------------------------------------
+ * Userland atom table — 32 slots, shared between local + global
+ * (matches older Windows). Atoms in [0xC000, 0xC020).
+ * ------------------------------------------------------------------ */
+
+#define DUETOS_ATOM_MAX 32
+#define DUETOS_ATOM_BASE 0xC000U
+
+typedef struct
+{
+    char name[64];
+    int in_use;
+    unsigned int refcnt;
+} DuetosAtomSlot;
+
+static DuetosAtomSlot g_atoms[DUETOS_ATOM_MAX];
+
+static int astr_eq_ci(const char* a, const char* b)
+{
+    int i = 0;
+    for (;;)
+    {
+        char ca = a[i];
+        char cb = b[i];
+        if (ca >= 'A' && ca <= 'Z')
+            ca = (char)(ca + ('a' - 'A'));
+        if (cb >= 'A' && cb <= 'Z')
+            cb = (char)(cb + ('a' - 'A'));
+        if (ca != cb)
+            return 0;
+        if (ca == 0)
+            return 1;
+        ++i;
+    }
+}
+
+static unsigned short atom_add_internal(const char* name)
+{
+    if (name == (const char*)0)
+        return 0;
+    for (int i = 0; i < DUETOS_ATOM_MAX; ++i)
+        if (g_atoms[i].in_use && astr_eq_ci(g_atoms[i].name, name))
+        {
+            g_atoms[i].refcnt++;
+            return (unsigned short)(DUETOS_ATOM_BASE + i);
+        }
+    for (int i = 0; i < DUETOS_ATOM_MAX; ++i)
+        if (!g_atoms[i].in_use)
+        {
+            int j = 0;
+            while (j < 63 && name[j] != 0)
+            {
+                g_atoms[i].name[j] = name[j];
+                ++j;
+            }
+            g_atoms[i].name[j] = 0;
+            g_atoms[i].in_use = 1;
+            g_atoms[i].refcnt = 1;
+            return (unsigned short)(DUETOS_ATOM_BASE + i);
+        }
+    return 0;
+}
+
+__declspec(dllexport) unsigned short AddAtomA(const char* name)
+{
+    return atom_add_internal(name);
+}
+__declspec(dllexport) unsigned short GlobalAddAtomA(const char* name)
+{
+    return atom_add_internal(name);
+}
+
+__declspec(dllexport) unsigned short FindAtomA(const char* name)
+{
+    if (name == (const char*)0)
+        return 0;
+    for (int i = 0; i < DUETOS_ATOM_MAX; ++i)
+        if (g_atoms[i].in_use && astr_eq_ci(g_atoms[i].name, name))
+            return (unsigned short)(DUETOS_ATOM_BASE + i);
+    return 0;
+}
+__declspec(dllexport) unsigned short GlobalFindAtomA(const char* name)
+{
+    return FindAtomA(name);
+}
+
+__declspec(dllexport) unsigned int GlobalGetAtomNameA(unsigned short atom, char* buf, int cch)
+{
+    if (atom < DUETOS_ATOM_BASE || buf == (char*)0 || cch == 0)
+        return 0;
+    int idx = atom - DUETOS_ATOM_BASE;
+    if (idx < 0 || idx >= DUETOS_ATOM_MAX || !g_atoms[idx].in_use)
+        return 0;
+    int j = 0;
+    while (j < cch - 1 && g_atoms[idx].name[j] != 0)
+    {
+        buf[j] = g_atoms[idx].name[j];
+        ++j;
+    }
+    buf[j] = 0;
+    return (unsigned int)j;
+}
+__declspec(dllexport) unsigned int GetAtomNameA(unsigned short atom, char* buf, int cch)
+{
+    return GlobalGetAtomNameA(atom, buf, cch);
+}
+
+__declspec(dllexport) unsigned short GlobalDeleteAtom(unsigned short atom)
+{
+    if (atom < DUETOS_ATOM_BASE)
+        return atom;
+    int idx = atom - DUETOS_ATOM_BASE;
+    if (idx < 0 || idx >= DUETOS_ATOM_MAX || !g_atoms[idx].in_use)
+        return atom;
+    if (--g_atoms[idx].refcnt == 0)
+        g_atoms[idx].in_use = 0;
+    return 0;
+}
+__declspec(dllexport) unsigned short DeleteAtom(unsigned short atom)
+{
+    return GlobalDeleteAtom(atom);
+}
+
+/* GetTimeZoneInformation — return UTC-0 with no DST. */
+typedef struct
+{
+    long Bias;
+    wchar_t16 StandardName[32];
+    unsigned short StandardDateY, StandardDateM, StandardDateDayOfWeek, StandardDateDay;
+    unsigned short StandardDateH, StandardDateMin, StandardDateS, StandardDateMs;
+    long StandardBias;
+    wchar_t16 DaylightName[32];
+    unsigned short DaylightDateY, DaylightDateM, DaylightDateDayOfWeek, DaylightDateDay;
+    unsigned short DaylightDateH, DaylightDateMin, DaylightDateS, DaylightDateMs;
+    long DaylightBias;
+} DUETOS_TZ_INFORMATION;
+
+__declspec(dllexport) DWORD GetTimeZoneInformation(DUETOS_TZ_INFORMATION* tzi)
+{
+    if (tzi == (DUETOS_TZ_INFORMATION*)0)
+        return 0xFFFFFFFFUL;
+    unsigned char* b = (unsigned char*)tzi;
+    for (unsigned long i = 0; i < sizeof(*tzi); ++i)
+        b[i] = 0;
+    static const wchar_t16 utc[] = {'U', 'T', 'C', 0};
+    for (int i = 0; utc[i] != 0; ++i)
+        tzi->StandardName[i] = utc[i];
+    return 1;
+}
+
+typedef struct
+{
+    short cols, rows;
+    short cur_x, cur_y;
+    unsigned short attrs;
+    short win_left, win_top, win_right, win_bot;
+    short max_cols, max_rows;
+} DUETOS_CONSOLE_SBI;
+
+/* In-memory cursor + attribute state. */
+static short g_console_cur_x = 0, g_console_cur_y = 0;
+static unsigned short g_console_attrs = 0x07;
+static int g_console_cursor_visible = 1;
+static int g_console_cursor_size = 25; /* pct of cell */
+
+__declspec(dllexport) BOOL GetConsoleScreenBufferInfo(HANDLE h, DUETOS_CONSOLE_SBI* info)
+{
+    (void)h;
+    if (info == (DUETOS_CONSOLE_SBI*)0)
+        return 0;
+    info->cols = 80;
+    info->rows = 25;
+    info->cur_x = g_console_cur_x;
+    info->cur_y = g_console_cur_y;
+    info->attrs = g_console_attrs;
+    info->win_left = 0;
+    info->win_top = 0;
+    info->win_right = 79;
+    info->win_bot = 24;
+    info->max_cols = 80;
+    info->max_rows = 25;
+    return 1;
+}
+
+typedef struct
+{
+    short x, y;
+} DUETOS_COORD;
+typedef struct
+{
+    DWORD size;
+    BOOL visible;
+} DUETOS_CONSOLE_CURSOR_INFO;
+
+__declspec(dllexport) BOOL SetConsoleCursorPosition(HANDLE h, DUETOS_COORD pos)
+{
+    (void)h;
+    g_console_cur_x = pos.x;
+    g_console_cur_y = pos.y;
+    return 1;
+}
+
+__declspec(dllexport) BOOL GetConsoleCursorInfo(HANDLE h, DUETOS_CONSOLE_CURSOR_INFO* ci)
+{
+    (void)h;
+    if (ci == (DUETOS_CONSOLE_CURSOR_INFO*)0)
+        return 0;
+    ci->size = (DWORD)g_console_cursor_size;
+    ci->visible = g_console_cursor_visible;
+    return 1;
+}
+
+__declspec(dllexport) BOOL SetConsoleCursorInfo(HANDLE h, const DUETOS_CONSOLE_CURSOR_INFO* ci)
+{
+    (void)h;
+    if (ci == (const DUETOS_CONSOLE_CURSOR_INFO*)0)
+        return 0;
+    g_console_cursor_size = (int)ci->size;
+    g_console_cursor_visible = ci->visible ? 1 : 0;
+    return 1;
+}
+
+__declspec(dllexport) BOOL SetConsoleTextAttribute(HANDLE h, unsigned short attrs)
+{
+    (void)h;
+    g_console_attrs = attrs;
+    return 1;
+}
+
+__declspec(dllexport) BOOL FillConsoleOutputAttribute(HANDLE h, unsigned short attr, DWORD count, DUETOS_COORD origin,
+                                                      DWORD* written)
+{
+    (void)h;
+    (void)attr;
+    (void)origin;
+    if (written != (DWORD*)0)
+        *written = count;
+    return 1;
+}
+
+__declspec(dllexport) BOOL FillConsoleOutputCharacterA(HANDLE h, char ch, DWORD count, DUETOS_COORD origin,
+                                                       DWORD* written)
+{
+    (void)h;
+    (void)ch;
+    (void)origin;
+    if (written != (DWORD*)0)
+        *written = count;
+    return 1;
+}
+
+__declspec(dllexport) BOOL FillConsoleOutputCharacterW(HANDLE h, wchar_t16 ch, DWORD count, DUETOS_COORD origin,
+                                                       DWORD* written)
+{
+    (void)h;
+    (void)ch;
+    (void)origin;
+    if (written != (DWORD*)0)
+        *written = count;
+    return 1;
+}
+
+__declspec(dllexport) BOOL GetNumberOfConsoleInputEvents(HANDLE h, DWORD* count)
+{
+    (void)h;
+    if (count != (DWORD*)0)
+        *count = 0; /* No queued console input under emulator. */
+    return 1;
+}
+
+/* GetFileAttributesA/W live further down — they use SYS_FILE_QUERY_ATTRIBUTES
+ * directly. Skipping our placeholder definitions here avoids duplicates. */
+
+/* CreateFileMappingW — for v0 we treat unnamed file mappings
+ * backed by the system pagefile (INVALID_HANDLE_VALUE handle)
+ * as a heap allocation. The returned "mapping handle" is the
+ * heap pointer with the low bit set as a sentinel; MapViewOfFile
+ * just returns the same pointer (size 0 → use stored size).
+ *
+ * Named mappings still STUB. ipc_smoke uses the unnamed path.
+ */
+typedef struct
+{
+    DWORD size;
+    DWORD protect;
+    void* base;
+} DUETOS_FILEMAPPING;
+
+#define DUETOS_FILEMAPPING_MAX 8
+static DUETOS_FILEMAPPING g_filemappings[DUETOS_FILEMAPPING_MAX];
+static int g_filemapping_count = 0;
+
+__declspec(dllexport) HANDLE CreateFileMappingW(HANDLE hFile, void* sec, DWORD protect, DWORD sizeHigh, DWORD sizeLow,
+                                                const wchar_t16* name)
+{
+    (void)hFile;
+    (void)sec;
+    (void)name;
+    /* Allocate via SYS_HEAP_ALLOC. */
+    if (g_filemapping_count >= DUETOS_FILEMAPPING_MAX)
+        return (HANDLE)0;
+    DWORD total = ((unsigned long long)sizeHigh << 32) | sizeLow;
+    if (total == 0)
+        total = 0x10000; /* default 64K if caller passed 0 */
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)11), "D"((long long)total) : "memory");
+    if (rv == 0)
+        return (HANDLE)0;
+    int slot = g_filemapping_count++;
+    g_filemappings[slot].size = total;
+    g_filemappings[slot].protect = protect;
+    g_filemappings[slot].base = (void*)rv;
+    /* Sentinel handle: 0x6000 + slot. */
+    return (HANDLE)(unsigned long long)(0x6000 + slot);
+}
+
+__declspec(dllexport) HANDLE OpenFileMappingW(DWORD desired, BOOL inherit, const wchar_t16* name)
+{
+    (void)desired;
+    (void)inherit;
+    (void)name;
+    /* Named mappings not yet supported — return NULL. */
+    return (HANDLE)0;
+}
+
+__declspec(dllexport) void* MapViewOfFile(HANDLE h, DWORD desired, DWORD offHigh, DWORD offLow,
+                                          unsigned long long bytes)
+{
+    (void)desired;
+    (void)offHigh;
+    (void)offLow;
+    (void)bytes;
+    unsigned long long handle_v = (unsigned long long)h;
+    if (handle_v < 0x6000 || handle_v >= 0x6000 + DUETOS_FILEMAPPING_MAX)
+        return (void*)0;
+    int slot = (int)(handle_v - 0x6000);
+    return g_filemappings[slot].base;
+}
+
+__declspec(dllexport) BOOL UnmapViewOfFile(const void* base)
+{
+    (void)base;
+    /* Page is freed when CloseHandle of the mapping is called. */
+    return 1;
+}
+
+/* CreateJobObjectW — opaque sentinel handle. AssignProcessToJobObject
+ * accepts and returns success. IsProcessInJob reports FALSE before
+ * any assignment in this v0 model. */
+__declspec(dllexport) HANDLE CreateJobObjectW(void* sec, const wchar_t16* name)
+{
+    (void)sec;
+    (void)name;
+    return (HANDLE)0x7001ULL;
+}
+
+__declspec(dllexport) BOOL AssignProcessToJobObject(HANDLE job, HANDLE proc)
+{
+    (void)job;
+    (void)proc;
+    return 1;
+}
+
+__declspec(dllexport) BOOL IsProcessInJob(HANDLE proc, HANDLE job, BOOL* in_job)
+{
+    (void)proc;
+    (void)job;
+    if (in_job != (BOOL*)0)
+        *in_job = 0;
+    return 1;
+}
+
+/* CreateIoCompletionPort — for v0 we keep an in-memory ring of
+ * up to 32 pending completions per port. Single-threaded scope
+ * matches the rest of the v0 kernel32 surface; matches the
+ * smoke-test usage pattern of "post N, get N within the same
+ * thread".
+ */
+#define DUETOS_IOCP_RING 32
+typedef struct
+{
+    DWORD bytes;
+    unsigned long long key;
+    void* ov;
+} DuetosIocpEntry;
+typedef struct
+{
+    DuetosIocpEntry ring[DUETOS_IOCP_RING];
+    int head, tail;
+    int in_use;
+} DuetosIocp;
+
+#define DUETOS_IOCP_MAX 4
+static DuetosIocp g_iocp[DUETOS_IOCP_MAX];
+
+__declspec(dllexport) HANDLE CreateIoCompletionPort(HANDLE fileHandle, HANDLE existing, unsigned long long key,
+                                                    DWORD numThreads)
+{
+    (void)fileHandle;
+    (void)key;
+    (void)numThreads;
+    if (existing != (HANDLE)0)
+        return existing; /* Associate fileHandle with existing port — STUB. */
+    for (int i = 0; i < DUETOS_IOCP_MAX; ++i)
+        if (!g_iocp[i].in_use)
+        {
+            g_iocp[i].head = 0;
+            g_iocp[i].tail = 0;
+            g_iocp[i].in_use = 1;
+            return (HANDLE)(unsigned long long)(0x8000 + i);
+        }
+    return (HANDLE)0;
+}
+
+__declspec(dllexport) BOOL PostQueuedCompletionStatus(HANDLE iocp, DWORD bytes, unsigned long long key, void* ov)
+{
+    unsigned long long h = (unsigned long long)iocp;
+    if (h < 0x8000 || h >= 0x8000 + DUETOS_IOCP_MAX)
+        return 0;
+    int slot = (int)(h - 0x8000);
+    if (!g_iocp[slot].in_use)
+        return 0;
+    int next = (g_iocp[slot].tail + 1) % DUETOS_IOCP_RING;
+    if (next == g_iocp[slot].head)
+        return 0; /* full */
+    g_iocp[slot].ring[g_iocp[slot].tail].bytes = bytes;
+    g_iocp[slot].ring[g_iocp[slot].tail].key = key;
+    g_iocp[slot].ring[g_iocp[slot].tail].ov = ov;
+    g_iocp[slot].tail = next;
+    return 1;
+}
+
+__declspec(dllexport) BOOL GetQueuedCompletionStatus(HANDLE iocp, DWORD* bytes, unsigned long long* key, void** ov,
+                                                     DWORD timeout)
+{
+    (void)timeout;
+    unsigned long long h = (unsigned long long)iocp;
+    if (h < 0x8000 || h >= 0x8000 + DUETOS_IOCP_MAX)
+        return 0;
+    int slot = (int)(h - 0x8000);
+    if (!g_iocp[slot].in_use)
+        return 0;
+    if (g_iocp[slot].head == g_iocp[slot].tail)
+        return 0; /* empty — could also block, but v0 is non-blocking. */
+    if (bytes != (DWORD*)0)
+        *bytes = g_iocp[slot].ring[g_iocp[slot].head].bytes;
+    if (key != (unsigned long long*)0)
+        *key = g_iocp[slot].ring[g_iocp[slot].head].key;
+    if (ov != (void**)0)
+        *ov = g_iocp[slot].ring[g_iocp[slot].head].ov;
+    g_iocp[slot].head = (g_iocp[slot].head + 1) % DUETOS_IOCP_RING;
+    return 1;
+}
+
+/* CreateTimerQueue / DeleteTimerQueue — sentinel handle. */
+__declspec(dllexport) HANDLE CreateTimerQueue(void)
+{
+    return (HANDLE)0x8801ULL;
+}
+
+__declspec(dllexport) BOOL DeleteTimerQueue(HANDLE q)
+{
+    (void)q;
+    return 1;
+}
+
+/* CreateWaitableTimerW — sentinel; immediate signal on wait if the
+ * relative due-time is "very soon". The smoke test uses 100 ms
+ * which is short enough that returning a pre-signaled event-style
+ * handle works in single-thread tests. We reuse the manual-reset
+ * Event slot machinery via an actual SYS_HANDLE_CREATE_EVENT call. */
+__declspec(dllexport) HANDLE CreateWaitableTimerW(void* sa, BOOL manualReset, const wchar_t16* name)
+{
+    (void)sa;
+    (void)name;
+    /* Allocate via SYS_HANDLE_CREATE_EVENT (manual, signaled). */
+    long long h;
+    __asm__ volatile("int $0x80"
+                     : "=a"(h)
+                     : "a"((long long)33),                                      /* SYS_HANDLE_CREATE_EVENT */
+                       "D"((long long)(manualReset ? 1 : 0)), "S"((long long)1) /* initially signaled */
+                     : "memory");
+    return (HANDLE)h;
+}
+
+__declspec(dllexport) BOOL SetWaitableTimer(HANDLE t, void* due, long period, void* completion, void* arg, BOOL resume)
+{
+    (void)t;
+    (void)due;
+    (void)period;
+    (void)completion;
+    (void)arg;
+    (void)resume;
+    return 1;
+}
+
+__declspec(dllexport) BOOL CancelWaitableTimer(HANDLE t)
+{
+    (void)t;
+    return 1;
+}
+
+/* WTSGetActiveConsoleSessionId stub — return 1. */
+__declspec(dllexport) DWORD WTSGetActiveConsoleSessionId(void)
+{
+    return 1;
+}
+
+__declspec(dllexport) BOOL ProcessIdToSessionId(DWORD pid, DWORD* session)
+{
+    (void)pid;
+    if (session != (DWORD*)0)
+        *session = 1;
+    return 1;
+}
+
+/* GetSystemPowerStatus — return canned "AC plugged, full battery". */
+typedef struct
+{
+    unsigned char ACLineStatus;
+    unsigned char BatteryFlag;
+    unsigned char BatteryLifePercent;
+    unsigned char Reserved1;
+    DWORD BatteryLifeTime;
+    DWORD BatteryFullLifeTime;
+} DUETOS_SYSTEM_POWER_STATUS;
+
+__declspec(dllexport) BOOL GetSystemPowerStatus(DUETOS_SYSTEM_POWER_STATUS* sps)
+{
+    if (sps == (DUETOS_SYSTEM_POWER_STATUS*)0)
+        return 0;
+    sps->ACLineStatus = 1;          /* AC online */
+    sps->BatteryFlag = 0x80;        /* no system battery */
+    sps->BatteryLifePercent = 0xFF; /* unknown */
+    sps->Reserved1 = 0;
+    sps->BatteryLifeTime = 0xFFFFFFFFu;
+    sps->BatteryFullLifeTime = 0xFFFFFFFFu;
+    return 1;
+}
+
+__declspec(dllexport) DWORD SetThreadExecutionState(DWORD esFlags)
+{
+    /* Return previous state (just echo input). */
+    return esFlags;
+}
+
+__declspec(dllexport) BOOL IsSystemResumeAutomatic(void)
+{
+    return 0;
+}
+
+/* GeoID family — return USA = 244. */
+__declspec(dllexport) int GetUserGeoID(int geoclass)
+{
+    (void)geoclass;
+    return 244;
+}
+
+__declspec(dllexport) int GetSystemGeoID(int geoclass)
+{
+    (void)geoclass;
+    return 244;
+}
+
+__declspec(dllexport) int GetGeoInfoW(int geoid, int gtype, wchar_t16* buf, int cchData, unsigned short langid)
+{
+    (void)geoid;
+    (void)langid;
+    static const wchar_t16 sIso2[] = {'U', 'S', 0};
+    static const wchar_t16 sIso3[] = {'U', 'S', 'A', 0};
+    static const wchar_t16 sName[] = {'U', 'n', 'i', 't', 'e', 'd', ' ', 'S', 't', 'a', 't', 'e', 's', 0};
+    const wchar_t16* msg;
+    /* gtype: GEO_ISO2=4, GEO_ISO3=5, GEO_FRIENDLYNAME=8 */
+    if (gtype == 4)
+        msg = sIso2;
+    else if (gtype == 5)
+        msg = sIso3;
+    else
+        msg = sName;
+    int needed = 0;
+    while (msg[needed] != 0)
+        ++needed;
+    ++needed;
+    if (cchData == 0)
+        return needed;
+    if (buf == (wchar_t16*)0 || cchData < needed)
+        return 0;
+    int j = 0;
+    while (msg[j] != 0)
+    {
+        buf[j] = msg[j];
+        ++j;
+    }
+    buf[j] = 0;
+    return needed;
+}
+
+/* GetCalendarInfoEx — return canned strings for common selectors. */
+__declspec(dllexport) int GetCalendarInfoEx(const wchar_t16* locale, unsigned int cal, const wchar_t16* reserved,
+                                            unsigned int caltype, wchar_t16* buf, int cchData, unsigned int* val)
+{
+    (void)locale;
+    (void)cal;
+    (void)reserved;
+    (void)val;
+    static const wchar_t16 sName[] = {'G', 'r', 'e', 'g', 'o', 'r', 'i', 'a', 'n', 0};
+    /* CAL_SCALNAME = 2, others mostly canned. */
+    if (caltype != 2 && caltype != 0x1000) /* CAL_SCALNAME or NOUSEROVERRIDE | CAL_SCALNAME */
+        return 0;
+    int needed = 10;
+    if (cchData == 0)
+        return needed;
+    if (buf == (wchar_t16*)0 || cchData < needed)
+        return 0;
+    for (int i = 0; i < 9; ++i)
+        buf[i] = sName[i];
+    buf[9] = 0;
+    return needed;
+}
+
+__declspec(dllexport) int GetCalendarInfoA(unsigned int locale, unsigned int cal, unsigned int caltype, char* buf,
+                                           int cchData, unsigned int* val)
+{
+    (void)locale;
+    (void)cal;
+    (void)val;
+    if (caltype != 2)
+        return 0;
+    static const char sName[] = "Gregorian";
+    int needed = 10;
+    if (cchData == 0)
+        return needed;
+    if (buf == (char*)0 || cchData < needed)
+        return 0;
+    for (int i = 0; i < 9; ++i)
+        buf[i] = sName[i];
+    buf[9] = 0;
+    return needed;
+}
+
+/* GetDpiForSystem — assume 96 dpi (default 100% scale). */
+__declspec(dllexport) unsigned int GetDpiForSystem(void)
+{
+    return 96;
+}
+
+/* Date/time/number format APIs — canned MM/DD/YYYY, HH:MM:SS, pass-through. */
+static int duetos_u32_to_dec(unsigned int v, char* out)
+{
+    if (v == 0)
+    {
+        out[0] = '0';
+        return 1;
+    }
+    char tmp[16];
+    int n = 0;
+    while (v != 0)
+    {
+        tmp[n++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    for (int i = 0; i < n; ++i)
+        out[i] = tmp[n - 1 - i];
+    return n;
+}
+
+typedef struct
+{
+    unsigned short y, m, dow, d, h, min, s, ms;
+} DUETOS_SYSTEMTIME;
+
+__declspec(dllexport) int GetDateFormatA(unsigned long lcid, DWORD flags, const DUETOS_SYSTEMTIME* st, const char* fmt,
+                                         char* buf, int cchData)
+{
+    (void)lcid;
+    (void)flags;
+    (void)fmt;
+    if (st == (const DUETOS_SYSTEMTIME*)0)
+        return 0;
+    char tmp[32];
+    int len = 0;
+    if (st->m < 10)
+        tmp[len++] = '0';
+    len += duetos_u32_to_dec(st->m, tmp + len);
+    tmp[len++] = '/';
+    if (st->d < 10)
+        tmp[len++] = '0';
+    len += duetos_u32_to_dec(st->d, tmp + len);
+    tmp[len++] = '/';
+    len += duetos_u32_to_dec(st->y, tmp + len);
+    tmp[len] = 0;
+    int needed = len + 1;
+    if (cchData == 0)
+        return needed;
+    if (buf == (char*)0 || cchData < needed)
+        return 0;
+    for (int i = 0; i < len; ++i)
+        buf[i] = tmp[i];
+    buf[len] = 0;
+    return needed;
+}
+
+__declspec(dllexport) int GetTimeFormatA(unsigned long lcid, DWORD flags, const DUETOS_SYSTEMTIME* st, const char* fmt,
+                                         char* buf, int cchData)
+{
+    (void)lcid;
+    (void)flags;
+    (void)fmt;
+    if (st == (const DUETOS_SYSTEMTIME*)0)
+        return 0;
+    char tmp[32];
+    int len = 0;
+    if (st->h < 10)
+        tmp[len++] = '0';
+    len += duetos_u32_to_dec(st->h, tmp + len);
+    tmp[len++] = ':';
+    if (st->min < 10)
+        tmp[len++] = '0';
+    len += duetos_u32_to_dec(st->min, tmp + len);
+    tmp[len++] = ':';
+    if (st->s < 10)
+        tmp[len++] = '0';
+    len += duetos_u32_to_dec(st->s, tmp + len);
+    tmp[len] = 0;
+    int needed = len + 1;
+    if (cchData == 0)
+        return needed;
+    if (buf == (char*)0 || cchData < needed)
+        return 0;
+    for (int i = 0; i < len; ++i)
+        buf[i] = tmp[i];
+    buf[len] = 0;
+    return needed;
+}
+
+__declspec(dllexport) int GetNumberFormatA(unsigned long lcid, DWORD flags, const char* num, void* fmt, char* buf,
+                                           int cchData)
+{
+    (void)lcid;
+    (void)flags;
+    (void)fmt;
+    if (num == (const char*)0)
+        return 0;
+    int n = 0;
+    while (num[n] != 0)
+        ++n;
+    int needed = n + 1;
+    if (cchData == 0)
+        return needed;
+    if (buf == (char*)0 || cchData < needed)
+        return 0;
+    for (int i = 0; i < n; ++i)
+        buf[i] = num[i];
+    buf[n] = 0;
+    return needed;
+}
+
+__declspec(dllexport) BOOL EnumSystemLocalesA(BOOL(__stdcall* cb)(char*), DWORD flags)
+{
+    (void)flags;
+    if (cb == (BOOL(__stdcall*)(char*))0)
+        return 0;
+    char id[] = "00000409";
+    cb(id);
+    return 1;
+}
+
+__declspec(dllexport) BOOL GetVolumeInformationW(const wchar_t16* root, wchar_t16* vol_name, DWORD vol_name_len,
+                                                 DWORD* serial, DWORD* max_comp, DWORD* fs_flags, wchar_t16* fs_name,
+                                                 DWORD fs_name_len)
+{
+    (void)root;
+    if (vol_name != (wchar_t16*)0 && vol_name_len > 0)
+    {
+        static const wchar_t16 vn[] = {'D', 'u', 'e', 't', 'O', 'S', 0};
+        DWORD i = 0;
+        while (i < vol_name_len - 1 && vn[i] != 0)
+        {
+            vol_name[i] = vn[i];
+            ++i;
+        }
+        vol_name[i] = 0;
+    }
+    if (serial != (DWORD*)0)
+        *serial = 0xCAFEBABE;
+    if (max_comp != (DWORD*)0)
+        *max_comp = 255;
+    if (fs_flags != (DWORD*)0)
+        *fs_flags = 0;
+    if (fs_name != (wchar_t16*)0 && fs_name_len > 0)
+    {
+        static const wchar_t16 fn[] = {'D', 'U', 'E', 'T', 'F', 'S', 0};
+        DWORD i = 0;
+        while (i < fs_name_len - 1 && fn[i] != 0)
+        {
+            fs_name[i] = fn[i];
+            ++i;
+        }
+        fs_name[i] = 0;
+    }
+    return 1;
+}
+
+__declspec(dllexport) BOOL GetDiskFreeSpaceExW(const wchar_t16* dir, void* avail, void* total, void* free_)
+{
+    (void)dir;
+    unsigned long long free_b = 1ULL * 1024 * 1024 * 1024;
+    unsigned long long total_b = 8ULL * 1024 * 1024 * 1024;
+    if (avail != (void*)0)
+        *(unsigned long long*)avail = free_b;
+    if (total != (void*)0)
+        *(unsigned long long*)total = total_b;
+    if (free_ != (void*)0)
+        *(unsigned long long*)free_ = free_b;
+    return 1;
+}
+
+__declspec(dllexport) BOOL GetThreadIOPendingFlag(HANDLE thread, BOOL* pending)
+{
+    (void)thread;
+    if (pending != (BOOL*)0)
+        *pending = 0;
+    return 1;
+}
+
+/* GetUserDefaultUILanguage / GetSystemDefaultUILanguage — en-US. */
+__declspec(dllexport) unsigned short GetUserDefaultUILanguage(void)
+{
+    return 0x0409;
+}
+__declspec(dllexport) unsigned short GetSystemDefaultUILanguage(void)
+{
+    return 0x0409;
+}
+
+/* Console title — in-memory state. */
+static char g_console_title[256] = "DuetOS Console";
+__declspec(dllexport) BOOL SetConsoleTitleA(const char* title)
+{
+    if (title == (const char*)0)
+        return 0;
+    int i = 0;
+    while (i < 255 && title[i] != 0)
+    {
+        g_console_title[i] = title[i];
+        ++i;
+    }
+    g_console_title[i] = 0;
+    return 1;
+}
+__declspec(dllexport) BOOL SetConsoleTitleW(const wchar_t16* title)
+{
+    if (title == (const wchar_t16*)0)
+        return 0;
+    int i = 0;
+    while (i < 255 && title[i] != 0)
+    {
+        g_console_title[i] = (char)(title[i] & 0xFF);
+        ++i;
+    }
+    g_console_title[i] = 0;
+    return 1;
+}
+__declspec(dllexport) DWORD GetConsoleTitleA(char* title, DWORD size)
+{
+    if (title == (char*)0 || size == 0)
+        return 0;
+    int i = 0;
+    while ((DWORD)i < size - 1 && g_console_title[i] != 0)
+    {
+        title[i] = g_console_title[i];
+        ++i;
+    }
+    title[i] = 0;
+    return (DWORD)i;
+}
+__declspec(dllexport) DWORD GetConsoleTitleW(wchar_t16* title, DWORD size)
+{
+    if (title == (wchar_t16*)0 || size == 0)
+        return 0;
+    int i = 0;
+    while ((DWORD)i < size - 1 && g_console_title[i] != 0)
+    {
+        title[i] = (wchar_t16)(unsigned char)g_console_title[i];
+        ++i;
+    }
+    title[i] = 0;
+    return (DWORD)i;
+}
+
+/* FoldStringW — pass-through (LCMapStringW lives further down). */
+__declspec(dllexport) int FoldStringW(unsigned long flags, const wchar_t16* src, int srclen, wchar_t16* dst, int dstlen)
+{
+    (void)flags;
+    if (src == (const wchar_t16*)0)
+        return 0;
+    int n = 0;
+    if (srclen < 0)
+    {
+        while (src[n] != 0)
+            ++n;
+        ++n;
+    }
+    else
+        n = srclen;
+    if (dstlen == 0)
+        return n;
+    if (dst == (wchar_t16*)0 || dstlen < n)
+        return 0;
+    for (int i = 0; i < n; ++i)
+        dst[i] = src[i];
+    return n;
+}
+
+/* GetCurrencyFormatA — prefix "$" + pass-through. */
+__declspec(dllexport) int GetCurrencyFormatA(unsigned long lcid, DWORD flags, const char* num, void* fmt, char* buf,
+                                             int cchData)
+{
+    (void)lcid;
+    (void)flags;
+    (void)fmt;
+    if (num == (const char*)0)
+        return 0;
+    int n = 0;
+    while (num[n] != 0)
+        ++n;
+    int needed = n + 2; /* "$" + n + NUL */
+    if (cchData == 0)
+        return needed;
+    if (buf == (char*)0 || cchData < needed)
+        return 0;
+    buf[0] = '$';
+    for (int i = 0; i < n; ++i)
+        buf[1 + i] = num[i];
+    buf[1 + n] = 0;
+    return needed;
+}
+
+/* GetExitCodeThread is defined further down; v17 dup removed. */
+
+/* OpenThread on self-TID — return a sentinel handle. */
+__declspec(dllexport) HANDLE OpenThread(DWORD access, BOOL inherit, DWORD tid)
+{
+    (void)access;
+    (void)inherit;
+    (void)tid;
+    /* Return current-thread pseudo-handle so callers can just use it. */
+    return (HANDLE)(long long)-2;
+}
+
+/* GetPhysicallyInstalledSystemMemory — 8 GB. */
+__declspec(dllexport) BOOL GetPhysicallyInstalledSystemMemory(unsigned long long* mem_in_kb)
+{
+    if (mem_in_kb == (unsigned long long*)0)
+        return 0;
+    *mem_in_kb = 8ULL * 1024 * 1024; /* 8 GB in KiB */
+    return 1;
+}
+
+/* HeapValidate / GetProcessHeaps — accept everything. */
+__declspec(dllexport) BOOL HeapValidate(HANDLE heap, DWORD flags, const void* p)
+{
+    (void)heap;
+    (void)flags;
+    (void)p;
+    return 1;
+}
+
+__declspec(dllexport) DWORD GetProcessHeaps(DWORD count, HANDLE* heaps)
+{
+    /* Single sentinel "process heap" handle — matches what
+     * GetProcessHeap returns elsewhere in this TU. */
+    if (heaps != (HANDLE*)0 && count >= 1)
+        heaps[0] = (HANDLE)1;
+    return 1;
+}
+
+/* DuplicateHandle — for v0 we just alias the source. */
+__declspec(dllexport) BOOL DuplicateHandle(HANDLE src_proc, HANDLE src, HANDLE dst_proc, HANDLE* dst, DWORD access,
+                                           BOOL inherit, DWORD opts)
+{
+    (void)src_proc;
+    (void)dst_proc;
+    (void)access;
+    (void)inherit;
+    (void)opts;
+    if (dst == (HANDLE*)0)
+        return 0;
+    *dst = src;
+    return 1;
+}
+
+/* GetHandleInformation / SetHandleInformation. */
+__declspec(dllexport) BOOL GetHandleInformation(HANDLE h, DWORD* flags)
+{
+    (void)h;
+    if (flags != (DWORD*)0)
+        *flags = 0;
+    return 1;
+}
+
+__declspec(dllexport) BOOL SetHandleInformation(HANDLE h, DWORD mask, DWORD flags)
+{
+    (void)h;
+    (void)mask;
+    (void)flags;
+    return 1;
+}
+
+/* QueryProcessCycleTime / QueryThreadCycleTime — use rdtsc. */
+__declspec(dllexport) BOOL QueryProcessCycleTime(HANDLE p, unsigned long long* cycles)
+{
+    (void)p;
+    if (cycles == (unsigned long long*)0)
+        return 0;
+    unsigned int lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    *cycles = ((unsigned long long)hi << 32) | lo;
+    return 1;
+}
+
+__declspec(dllexport) BOOL QueryThreadCycleTime(HANDLE t, unsigned long long* cycles)
+{
+    (void)t;
+    if (cycles == (unsigned long long*)0)
+        return 0;
+    unsigned int lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    *cycles = ((unsigned long long)hi << 32) | lo;
+    return 1;
+}
+
+/* GetFileTime — return canned epoch (Jan 1 2026). */
+__declspec(dllexport) BOOL GetFileTime(HANDLE f, void* create, void* access, void* write)
+{
+    (void)f;
+    /* FILETIME = 100ns intervals since 1601-01-01.
+     * 2026-01-01 ≈ 13369248000000000. */
+    unsigned long long t = 13369248000000000ULL;
+    if (create != (void*)0)
+        *(unsigned long long*)create = t;
+    if (access != (void*)0)
+        *(unsigned long long*)access = t;
+    if (write != (void*)0)
+        *(unsigned long long*)write = t;
+    return 1;
+}
+
+/* GetFileInformationByHandle — fill BY_HANDLE_FILE_INFORMATION. */
+__declspec(dllexport) BOOL GetFileInformationByHandle(HANDLE f, void* info)
+{
+    (void)f;
+    if (info == (void*)0)
+        return 0;
+    /* 4 (attrs) + 24 (3 FILETIMEs) + 4 (volSerial) + 4 (sizeHi) +
+     * 4 (sizeLo) + 4 (numLinks) + 4+4 (fileIdx). 52 bytes. */
+    unsigned char* b = (unsigned char*)info;
+    for (int i = 0; i < 52; ++i)
+        b[i] = 0;
+    *(DWORD*)(b + 0) = 0x80;        /* FILE_ATTRIBUTE_NORMAL */
+    *(DWORD*)(b + 28) = 0xCAFEBABE; /* volSerial */
+    *(DWORD*)(b + 40) = 1;          /* numLinks */
+    return 1;
+}
+
+/* SystemTimeToFileTime — convert SYSTEMTIME to 100-ns intervals
+ * since 1601-01-01. Days-since-1601 algorithm. */
+__declspec(dllexport) BOOL SystemTimeToFileTime(const DUETOS_SYSTEMTIME* st, void* ft)
+{
+    if (st == (const DUETOS_SYSTEMTIME*)0 || ft == (void*)0)
+        return 0;
+    /* Days from 1601-01-01 to year start. */
+    int y = st->y;
+    if (y < 1601 || y > 30828)
+        return 0;
+    static const int dom_normal[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    static const int dom_leap[12] = {31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    long long days = 0;
+    for (int yr = 1601; yr < y; ++yr)
+    {
+        int leap = ((yr % 4 == 0) && (yr % 100 != 0)) || (yr % 400 == 0);
+        days += leap ? 366 : 365;
+    }
+    int leap_y = ((y % 4 == 0) && (y % 100 != 0)) || (y % 400 == 0);
+    const int* dom = leap_y ? dom_leap : dom_normal;
+    int m = st->m;
+    if (m < 1 || m > 12)
+        return 0;
+    for (int i = 0; i < m - 1; ++i)
+        days += dom[i];
+    days += (st->d - 1);
+    long long secs = days * 86400LL + (long long)st->h * 3600 + (long long)st->min * 60 + st->s;
+    long long ticks = secs * 10000000LL + (long long)st->ms * 10000;
+    *(long long*)ft = ticks;
+    return 1;
+}
+
+__declspec(dllexport) BOOL FileTimeToSystemTime(const void* ft, DUETOS_SYSTEMTIME* st)
+{
+    if (ft == (const void*)0 || st == (DUETOS_SYSTEMTIME*)0)
+        return 0;
+    long long ticks = *(const long long*)ft;
+    long long secs = ticks / 10000000LL;
+    int ms = (int)((ticks / 10000LL) % 1000);
+    long long days = secs / 86400;
+    int sod = (int)(secs % 86400);
+    st->h = (unsigned short)(sod / 3600);
+    st->min = (unsigned short)((sod % 3600) / 60);
+    st->s = (unsigned short)(sod % 60);
+    st->ms = (unsigned short)ms;
+    int y = 1601;
+    static const int dom_normal[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    static const int dom_leap[12] = {31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    while (1)
+    {
+        int leap = ((y % 4 == 0) && (y % 100 != 0)) || (y % 400 == 0);
+        long long yd = leap ? 366 : 365;
+        if (days < yd)
+            break;
+        days -= yd;
+        ++y;
+    }
+    int leap_y = ((y % 4 == 0) && (y % 100 != 0)) || (y % 400 == 0);
+    const int* dom = leap_y ? dom_leap : dom_normal;
+    int m = 0;
+    while (m < 11 && days >= dom[m])
+    {
+        days -= dom[m];
+        ++m;
+    }
+    st->y = (unsigned short)y;
+    st->m = (unsigned short)(m + 1);
+    st->d = (unsigned short)(days + 1);
+    st->dow = 0;
+    return 1;
+}
+
+/* CompareFileTime. */
+__declspec(dllexport) long CompareFileTime(const void* a, const void* b)
+{
+    if (a == (const void*)0 || b == (const void*)0)
+        return 0;
+    long long va = *(const long long*)a;
+    long long vb = *(const long long*)b;
+    if (va < vb)
+        return -1;
+    if (va > vb)
+        return 1;
+    return 0;
+}
+
+/* OpenProcess on self (or any pid; v0 returns a sentinel handle). */
+__declspec(dllexport) HANDLE OpenProcess(DWORD access, BOOL inherit, DWORD pid)
+{
+    (void)access;
+    (void)inherit;
+    (void)pid;
+    return (HANDLE)(long long)-1; /* current-process pseudo-handle */
+}
+
+/* CreatePipe — anonymous pipe. Single in-process buffered ring. */
+typedef struct
+{
+    unsigned char buf[4096];
+    unsigned int head, tail;
+    int in_use;
+} DUETOS_PIPE_RING;
+static DUETOS_PIPE_RING g_pipe;
+
+#define DUETOS_PIPE_RD ((HANDLE)(unsigned long long)0xA0010001ULL)
+#define DUETOS_PIPE_WR ((HANDLE)(unsigned long long)0xA0010002ULL)
+
+__declspec(dllexport) BOOL CreatePipe(HANDLE* rd, HANDLE* wr, void* sa, DWORD sz)
+{
+    (void)sa;
+    (void)sz;
+    if (rd == (HANDLE*)0 || wr == (HANDLE*)0)
+        return 0;
+    g_pipe.head = 0;
+    g_pipe.tail = 0;
+    g_pipe.in_use = 1;
+    *rd = DUETOS_PIPE_RD;
+    *wr = DUETOS_PIPE_WR;
+    return 1;
+}
+
+/* VirtualQuery — return MEMORY_BASIC_INFORMATION for the supplied
+ * pointer. v0 reports MEM_COMMIT|PAGE_READWRITE for any non-NULL
+ * input — sufficient for stdio probes that just want the call to
+ * succeed. */
+typedef struct
+{
+    void* BaseAddress;
+    void* AllocationBase;
+    DWORD AllocationProtect;
+    unsigned short PartitionId;
+    SIZE_T RegionSize;
+    DWORD State;
+    DWORD Protect;
+    DWORD Type;
+} DUETOS_MBI;
+
+__declspec(dllexport) SIZE_T VirtualQuery(const void* addr, DUETOS_MBI* info, SIZE_T n)
+{
+    if (info == (DUETOS_MBI*)0 || n < sizeof(*info))
+        return 0;
+    info->BaseAddress = (void*)((unsigned long long)addr & ~0xFFFULL);
+    info->AllocationBase = info->BaseAddress;
+    info->AllocationProtect = 0x04; /* PAGE_READWRITE */
+    info->PartitionId = 0;
+    info->RegionSize = 0x1000;
+    info->State = 0x1000; /* MEM_COMMIT */
+    info->Protect = 0x04;
+    info->Type = 0x20000; /* MEM_PRIVATE */
+    return sizeof(*info);
+}
+
+/* SetErrorMode / GetErrorMode — in-memory state. */
+static UINT g_kernel32_error_mode = 0;
+__declspec(dllexport) UINT SetErrorMode(UINT mode)
+{
+    UINT prev = g_kernel32_error_mode;
+    g_kernel32_error_mode = mode;
+    return prev;
+}
+__declspec(dllexport) UINT GetErrorMode(void)
+{
+    return g_kernel32_error_mode;
+}
+
+/* GetComputerNameExW — return "duetos" for any name-type. */
+__declspec(dllexport) BOOL GetComputerNameExW(int name_type, wchar_t16* buf, DWORD* sz)
+{
+    (void)name_type;
+    if (sz == (DWORD*)0)
+        return 0;
+    static const wchar_t16 hn[] = {'d', 'u', 'e', 't', 'o', 's', 0};
+    DWORD needed = 7;
+    if (buf == (wchar_t16*)0 || *sz < needed)
+    {
+        *sz = needed;
+        return 0;
+    }
+    for (int i = 0; i < 7; ++i)
+        buf[i] = hn[i];
+    *sz = 6;
+    return 1;
+}
+
+/* GetLogicalDriveStringsA — return "C:\\\0\0". */
+__declspec(dllexport) DWORD GetLogicalDriveStringsA(DWORD bufsz, char* buf)
+{
+    if (bufsz < 5 || buf == (char*)0)
+        return 5;
+    buf[0] = 'C';
+    buf[1] = ':';
+    buf[2] = '\\';
+    buf[3] = 0;
+    buf[4] = 0;
+    return 4;
+}
+
+/* GetProcessHandleCount — sentinel. */
+__declspec(dllexport) BOOL GetProcessHandleCount(HANDLE p, DWORD* count)
+{
+    (void)p;
+    if (count != (DWORD*)0)
+        *count = 8;
+    return 1;
+}
+
+__declspec(dllexport) DWORD GetPrivateProfileStringA(const char* section, const char* key, const char* def_val,
+                                                     char* buf, DWORD size, const char* file)
+{
+    (void)section;
+    (void)key;
+    (void)file;
+    if (buf == (char*)0 || size == 0)
+        return 0;
+    if (def_val == (const char*)0)
+    {
+        buf[0] = 0;
+        return 0;
+    }
+    DWORD i = 0;
+    while (i < size - 1 && def_val[i] != 0)
+    {
+        buf[i] = def_val[i];
+        ++i;
+    }
+    buf[i] = 0;
+    return i;
+}
+
+__declspec(dllexport) UINT GetPrivateProfileIntA(const char* section, const char* key, int def_val, const char* file)
+{
+    (void)section;
+    (void)key;
+    (void)file;
+    return (UINT)def_val;
+}
+
+__declspec(dllexport) DWORD GetProfileStringA(const char* section, const char* key, const char* def_val, char* buf,
+                                              DWORD size)
+{
+    return GetPrivateProfileStringA(section, key, def_val, buf, size, "");
+}
+
+__declspec(dllexport) DWORD GetFullPathNameW(const wchar_t16* lpFileName, DWORD nBufferLength, wchar_t16* lpBuffer,
+                                             wchar_t16** lpFilePart)
+{
+    (void)lpFilePart;
+    if (lpFileName == (const wchar_t16*)0 || lpBuffer == (wchar_t16*)0)
+        return 0;
+    int srclen = 0;
+    while (lpFileName[srclen] != 0)
+        ++srclen;
+    int add_drive = (srclen > 0 && (lpFileName[0] == '\\' || lpFileName[0] == '/')) ? 2 : 0;
+    DWORD needed = (DWORD)(srclen + 1 + add_drive);
+    if (needed > nBufferLength)
+        return needed;
+    int j = 0;
+    if (add_drive)
+    {
+        lpBuffer[j++] = 'C';
+        lpBuffer[j++] = ':';
+    }
+    for (int i = 0; i < srclen; ++i)
+        lpBuffer[j++] = lpFileName[i];
+    lpBuffer[j] = 0;
+    return (DWORD)j;
+}
+
+/* GetCPInfo — fill a CPINFO so callers checking MaxCharSize > 0
+ * pass. We only support CP_ACP / CP_OEMCP / CP_UTF8 / CP_THREAD_ACP
+ * out-of-the-box; anything else still gets a generic single-byte
+ * code page. The DefaultChar is "?" for fidelity with ANSI Windows. */
+typedef struct
+{
+    unsigned int MaxCharSize;
+    unsigned char DefaultChar[2];
+    unsigned char LeadByte[12];
+} DUETOS_CPINFO;
+
+__declspec(dllexport) BOOL GetCPInfo(unsigned int CodePage, DUETOS_CPINFO* lpCPInfo)
+{
+    if (lpCPInfo == (DUETOS_CPINFO*)0)
+        return 0;
+    for (int i = 0; i < 12; ++i)
+        lpCPInfo->LeadByte[i] = 0;
+    lpCPInfo->DefaultChar[0] = '?';
+    lpCPInfo->DefaultChar[1] = 0;
+    if (CodePage == 65001) /* CP_UTF8 */
+        lpCPInfo->MaxCharSize = 4;
+    else
+        lpCPInfo->MaxCharSize = 1; /* single-byte ANSI / OEM */
+    return 1;
+}
+
+__declspec(dllexport) int LCMapStringW(unsigned long Locale, DWORD dwMapFlags, const wchar_t16* lpSrcStr, int cchSrc,
+                                       wchar_t16* lpDestStr, int cchDest)
+{
+    (void)Locale;
+    if (lpSrcStr == (const wchar_t16*)0)
+        return 0;
+    /* Compute source length. */
+    int src_len = cchSrc;
+    if (src_len < 0)
+    {
+        src_len = 0;
+        while (lpSrcStr[src_len] != 0)
+            ++src_len;
+        ++src_len; /* include NUL */
+    }
+    /* Sizing call — return required dest length. */
+    if (cchDest == 0 || lpDestStr == (wchar_t16*)0)
+        return src_len;
+    if (cchDest < src_len)
+        return 0;
+    /* Apply the requested transformation, byte-by-byte. */
+    const unsigned long LCMAP_LOWERCASE = 0x00000100;
+    const unsigned long LCMAP_UPPERCASE = 0x00000200;
+    for (int i = 0; i < src_len; ++i)
+    {
+        wchar_t16 c = lpSrcStr[i];
+        if ((dwMapFlags & LCMAP_LOWERCASE) && c >= 'A' && c <= 'Z')
+            c = (wchar_t16)(c + ('a' - 'A'));
+        else if ((dwMapFlags & LCMAP_UPPERCASE) && c >= 'a' && c <= 'z')
+            c = (wchar_t16)(c - ('a' - 'A'));
+        lpDestStr[i] = c;
+    }
+    return src_len;
+}
+
+/* FormatMessageW — canned messages for FORMAT_MESSAGE_FROM_SYSTEM
+ * with a few common error codes. Fully real localisation /
+ * inserts deferred until we have a real ntdll error table. */
+__declspec(dllexport) DWORD FormatMessageW(DWORD dwFlags, const void* lpSource, DWORD dwMessageId, DWORD dwLanguageId,
+                                           wchar_t16* lpBuffer, DWORD nSize, void* Arguments)
+{
+    (void)dwFlags;
+    (void)lpSource;
+    (void)dwLanguageId;
+    (void)Arguments;
+    if (lpBuffer == (wchar_t16*)0 || nSize == 0)
+        return 0;
+    static const wchar_t16 kOk[] = {'T', 'h', 'e', ' ', 'o', 'p', 'e', 'r', 'a', 't', 'i', 'o', 'n',
+                                    ' ', 'c', 'o', 'm', 'p', 'l', 'e', 't', 'e', 'd', ' ', 's', 'u',
+                                    'c', 'c', 'e', 's', 's', 'f', 'u', 'l', 'l', 'y', '.', 0};
+    static const wchar_t16 kGen[] = {'G', 'e', 'n', 'e', 'r', 'i', 'c', ' ', 'f', 'a', 'i', 'l', 'u', 'r', 'e', '.', 0};
+    static const wchar_t16 kNotFound[] = {'T', 'h', 'e', ' ', 's', 'y', 's', 't', 'e', 'm', ' ',
+                                          'c', 'a', 'n', 'n', 'o', 't', ' ', 'f', 'i', 'n', 'd',
+                                          ' ', 't', 'h', 'e', ' ', 'p', 'a', 't', 'h', '.', 0};
+    const wchar_t16* msg;
+    if (dwMessageId == 0)
+        msg = kOk;
+    else if (dwMessageId == 3)
+        msg = kNotFound; /* ERROR_PATH_NOT_FOUND */
+    else
+        msg = kGen;
+    DWORD i = 0;
+    while (msg[i] != 0 && i < nSize - 1)
+    {
+        lpBuffer[i] = msg[i];
+        ++i;
+    }
+    lpBuffer[i] = 0;
+    return i;
+}
+
+__declspec(dllexport) DWORD ExpandEnvironmentStringsA(const char* src, char* dst, DWORD size)
+{
+    if (src == (const char*)0)
+        return 0;
+    int i = 0;
+    while (src[i] != 0)
+        ++i;
+    int total = i + 1;
+    if (dst == (char*)0 || size == 0)
+        return (DWORD)total;
+    DWORD j;
+    for (j = 0; j < size - 1 && src[j] != 0; ++j)
+        dst[j] = src[j];
+    dst[j] = 0;
+    return (DWORD)total;
+}
+
+__declspec(dllexport) wchar_t16* lstrcatW(wchar_t16* dst, const wchar_t16* src)
+{
+    if (dst == (wchar_t16*)0 || src == (const wchar_t16*)0)
+        return dst;
+    wchar_t16* d = dst;
+    while (*d != 0)
+        ++d;
     while ((*d++ = *src++) != 0)
     {
     }
@@ -793,14 +2541,25 @@ __declspec(dllexport) HANDLE CreateFileW(const wchar_t16* lpFileName, DWORD dwDe
     (void)hTemplateFile;
     if (lpFileName == (const wchar_t16*)0)
         return (HANDLE)(long long)-1; /* INVALID_HANDLE_VALUE */
+    /* UTF-16 → ASCII; normalise '\\' → '/' so Windows-style paths
+     * match the kernel ramfs's POSIX-style lookup. Optional drive
+     * prefix "C:" / "c:" is stripped — DuetOS has one logical
+     * volume; drive letters are vestigial from the Win32 ABI. */
     char ascii[256];
     int i = 0;
-    while (i < 255 && lpFileName[i] != 0)
+    int j = 0;
+    /* Skip drive letter prefix if present. */
+    if (lpFileName[0] != 0 && lpFileName[1] == ':' &&
+        ((lpFileName[0] >= 'A' && lpFileName[0] <= 'Z') || (lpFileName[0] >= 'a' && lpFileName[0] <= 'z')))
+        i = 2;
+    while (j < 255 && lpFileName[i] != 0)
     {
-        ascii[i] = (char)(lpFileName[i] & 0xFF);
+        char c = (char)(lpFileName[i] & 0xFF);
+        ascii[j++] = (c == '\\') ? '/' : c;
         ++i;
     }
-    ascii[i] = '\0';
+    ascii[j] = '\0';
+    i = j;
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
@@ -2446,13 +4205,8 @@ __declspec(dllexport) BOOL Process32Next(HANDLE h, void* entry)
     return Process32NextW(h, entry);
 }
 
-__declspec(dllexport) HANDLE OpenProcess(DWORD access, BOOL inherit, DWORD pid)
-{
-    (void)access;
-    (void)inherit;
-    (void)pid;
-    return (HANDLE)0; /* Access denied — keep callers on fallback */
-}
+/* OpenProcess is implemented further up — old "access denied" stub
+ * removed in v19 favour of the pseudo-handle return. */
 
 __declspec(dllexport) BOOL GenerateConsoleCtrlEvent(DWORD event, DWORD group)
 {
@@ -2679,5 +4433,135 @@ __declspec(dllexport) BOOL VerifyVersionInfoW(void* info, DWORD type_mask, unsig
     (void)info;
     (void)type_mask;
     (void)cond_mask;
+    return 1;
+}
+
+/* CheckRemoteDebuggerPresent — always FALSE. */
+__declspec(dllexport) BOOL CheckRemoteDebuggerPresent(HANDLE p, BOOL* present)
+{
+    (void)p;
+    if (present != (BOOL*)0)
+        *present = 0;
+    return 1;
+}
+
+/* GetProcessId / GetThreadId — return current via syscall. */
+__declspec(dllexport) DWORD GetProcessId(HANDLE p)
+{
+    (void)p;
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)5) : "memory");
+    return (DWORD)rv;
+}
+
+__declspec(dllexport) DWORD GetThreadId(HANDLE t)
+{
+    (void)t;
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)6) : "memory");
+    return (DWORD)rv;
+}
+
+/* AddVectoredExceptionHandler — sentinel handle. */
+__declspec(dllexport) void* AddVectoredExceptionHandler(unsigned long first, void* h)
+{
+    (void)first;
+    (void)h;
+    return (void*)(unsigned long long)0xE7000001ULL;
+}
+
+__declspec(dllexport) unsigned long RemoveVectoredExceptionHandler(void* h)
+{
+    (void)h;
+    return 1;
+}
+
+/* GetThreadPriorityBoost — TRUE, no boost. */
+__declspec(dllexport) BOOL GetThreadPriorityBoost(HANDLE t, BOOL* disabled)
+{
+    (void)t;
+    if (disabled != (BOOL*)0)
+        *disabled = 0;
+    return 1;
+}
+
+/* GetConsoleProcessList — 1 entry. */
+__declspec(dllexport) DWORD GetConsoleProcessList(DWORD* pids, DWORD count)
+{
+    if (pids != (DWORD*)0 && count >= 1)
+        pids[0] = GetProcessId((HANDLE)(long long)-1);
+    return 1;
+}
+
+/* PathCanonicalizeW — collapse "..". */
+__declspec(dllexport) BOOL PathCanonicalizeW(wchar_t16* dst, const wchar_t16* src)
+{
+    if (dst == (wchar_t16*)0 || src == (const wchar_t16*)0)
+        return 0;
+    /* Simple v0: copy everything, then collapse "\\..\\X" → "\\X". */
+    int j = 0;
+    int i = 0;
+    while (src[i] != 0)
+        dst[j++] = src[i++];
+    dst[j] = 0;
+    /* One pass: search for "\\..\\". When found, back up to the prior '\\'. */
+    int k = 0;
+    while (k + 3 < j)
+    {
+        if (dst[k] == '\\' && dst[k + 1] == '.' && dst[k + 2] == '.' && dst[k + 3] == '\\')
+        {
+            int back = k;
+            while (back > 0 && dst[back - 1] != '\\')
+                --back;
+            if (back > 0)
+                --back; /* Skip the leading '\\' too. */
+            int shift = (k + 3) - back;
+            for (int m = back; m + shift <= j; ++m)
+                dst[m] = dst[m + shift];
+            j -= shift;
+            k = back > 0 ? back - 1 : 0;
+        }
+        else
+            ++k;
+    }
+    dst[j] = 0;
+    return 1;
+}
+
+/* PathRenameExtensionW — replace extension. */
+__declspec(dllexport) BOOL PathRenameExtensionW(wchar_t16* path, const wchar_t16* new_ext)
+{
+    if (path == (wchar_t16*)0 || new_ext == (const wchar_t16*)0)
+        return 0;
+    int n = 0;
+    while (path[n] != 0)
+        ++n;
+    int dot = -1;
+    for (int i = n - 1; i >= 0; --i)
+    {
+        if (path[i] == '.')
+        {
+            dot = i;
+            break;
+        }
+        if (path[i] == '\\' || path[i] == '/')
+            break;
+    }
+    int trim = (dot >= 0) ? dot : n;
+    int j = 0;
+    while (new_ext[j] != 0)
+    {
+        path[trim + j] = new_ext[j];
+        ++j;
+    }
+    path[trim + j] = 0;
+    return 1;
+}
+
+/* GetMaximumProcessorCount — was missing while GetActiveProcessorCount
+ * + GetTempFileNameW already live earlier in the file. */
+__declspec(dllexport) DWORD GetMaximumProcessorCount(unsigned short group)
+{
+    (void)group;
     return 1;
 }
