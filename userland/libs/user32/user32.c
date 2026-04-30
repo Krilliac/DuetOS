@@ -1265,6 +1265,40 @@ __declspec(dllexport) wchar_t16* CharUpperW(wchar_t16* s)
             *p = (wchar_t16)(*p - ('a' - 'A'));
     return s;
 }
+__declspec(dllexport) char* CharLowerA(char* s)
+{
+    if (!s)
+        return s;
+    for (char* p = s; *p; ++p)
+        if (*p >= 'A' && *p <= 'Z')
+            *p = (char)(*p + ('a' - 'A'));
+    return s;
+}
+__declspec(dllexport) char* CharUpperA(char* s)
+{
+    if (!s)
+        return s;
+    for (char* p = s; *p; ++p)
+        if (*p >= 'a' && *p <= 'z')
+            *p = (char)(*p - ('a' - 'A'));
+    return s;
+}
+__declspec(dllexport) BOOL IsCharAlphaA(char c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+}
+__declspec(dllexport) BOOL IsCharAlphaW(wchar_t16 c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+}
+__declspec(dllexport) BOOL IsCharAlphaNumericA(char c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+}
+__declspec(dllexport) BOOL IsCharAlphaNumericW(wchar_t16 c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+}
 
 /* --- System metrics --- */
 __declspec(dllexport) int GetSystemMetrics(int index)

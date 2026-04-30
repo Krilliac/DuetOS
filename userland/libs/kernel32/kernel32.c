@@ -632,6 +632,19 @@ __declspec(dllexport) NO_BUILTIN_LSTR char* lstrcpyA(char* dst, const char* src)
     return dst;
 }
 
+__declspec(dllexport) NO_BUILTIN_LSTR char* lstrcatA(char* dst, const char* src)
+{
+    if (dst == (char*)0 || src == (const char*)0)
+        return dst;
+    char* d = dst;
+    while (*d != 0)
+        ++d;
+    while ((*d++ = *src++) != 0)
+    {
+    }
+    return dst;
+}
+
 typedef unsigned short wchar_t16; /* Win32 wchar_t is UTF-16 */
 
 __declspec(dllexport) int lstrlenW(const wchar_t16* s)
@@ -678,6 +691,19 @@ __declspec(dllexport) wchar_t16* lstrcpyW(wchar_t16* dst, const wchar_t16* src)
     if (dst == (wchar_t16*)0 || src == (const wchar_t16*)0)
         return dst;
     wchar_t16* d = dst;
+    while ((*d++ = *src++) != 0)
+    {
+    }
+    return dst;
+}
+
+__declspec(dllexport) wchar_t16* lstrcatW(wchar_t16* dst, const wchar_t16* src)
+{
+    if (dst == (wchar_t16*)0 || src == (const wchar_t16*)0)
+        return dst;
+    wchar_t16* d = dst;
+    while (*d != 0)
+        ++d;
     while ((*d++ = *src++) != 0)
     {
     }

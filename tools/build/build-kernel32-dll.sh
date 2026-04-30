@@ -125,10 +125,12 @@ set +e
     /export:lstrcmpA \
     /export:lstrcmpiA \
     /export:lstrcpyA \
+    /export:lstrcatA \
     /export:lstrlenW \
     /export:lstrcmpW \
     /export:lstrcmpiW \
     /export:lstrcpyW \
+    /export:lstrcatW \
     /export:WriteFile \
     /export:WriteConsoleA \
     /export:WriteConsoleW \

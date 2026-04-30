@@ -92,9 +92,16 @@
 #include "generated_syscall_stress.h"
 #include "generated_thread_stress.h"
 #include "generated_crypto_smoke_pe.h"
+#include "generated_fs_smoke_pe.h"
+#include "generated_handle_smoke_pe.h"
 #include "generated_iphlpapi_smoke_pe.h"
+#include "generated_mem_smoke_pe.h"
 #include "generated_minibrowser_pe.h"
+#include "generated_module_smoke_pe.h"
 #include "generated_paths_smoke_pe.h"
+#include "generated_process_smoke_pe.h"
+#include "generated_registry_smoke_pe.h"
+#include "generated_string_smoke_pe.h"
 #include "generated_time_smoke_pe.h"
 #include "generated_wininet_smoke_pe.h"
 #include "generated_winkill_pe.h"
@@ -2194,7 +2201,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         {"dxgi.dll", fs::generated::kBinDxgiDllBytes, fs::generated::kBinDxgiDllBytes_len,
          /*essential=*/false},
         {"user32.dll", fs::generated::kBinUser32DllBytes, fs::generated::kBinUser32DllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"gdi32.dll", fs::generated::kBinGdi32DllBytes, fs::generated::kBinGdi32DllBytes_len,
          /*essential=*/false},
         // Networking / crypto / common UI / version / setup.
@@ -2707,6 +2714,21 @@ void StartRing3SmokeTask()
                 fs::generated::kBinIphlpapiSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
                 mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     SpawnPeFile("ring3-wininet-smoke", fs::generated::kBinWininetSmokeBytes, fs::generated::kBinWininetSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-string-smoke", fs::generated::kBinStringSmokeBytes, fs::generated::kBinStringSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-mem-smoke", fs::generated::kBinMemSmokeBytes, fs::generated::kBinMemSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-fs-smoke", fs::generated::kBinFsSmokeBytes, fs::generated::kBinFsSmokeBytes_len, CapSetTrusted(),
+                fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-registry-smoke", fs::generated::kBinRegistrySmokeBytes,
+                fs::generated::kBinRegistrySmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-handle-smoke", fs::generated::kBinHandleSmokeBytes, fs::generated::kBinHandleSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-process-smoke", fs::generated::kBinProcessSmokeBytes, fs::generated::kBinProcessSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-module-smoke", fs::generated::kBinModuleSmokeBytes, fs::generated::kBinModuleSmokeBytes_len,
                 CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     // Windowing v0 proof: a freestanding PE that imports
     // user32!CreateWindowExA + ShowWindow + MessageBoxA and

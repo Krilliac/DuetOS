@@ -23,6 +23,13 @@ declare -A APPS=(
     [time_smoke]="-lkernel32 -lwinmm"
     [wininet_smoke]="-lkernel32 -lwininet"
     [iphlpapi_smoke]="-lkernel32 -liphlpapi"
+    [string_smoke]="-lkernel32 -luser32"
+    [mem_smoke]="-lkernel32"
+    [fs_smoke]="-lkernel32"
+    [registry_smoke]="-lkernel32 -ladvapi32"
+    [handle_smoke]="-lkernel32"
+    [process_smoke]="-lkernel32"
+    [module_smoke]="-lkernel32"
 )
 
 for app in "${!APPS[@]}"; do
@@ -31,8 +38,9 @@ for app in "${!APPS[@]}"; do
         echo "SKIP: $app (no .c source found)"
         continue
     fi
-    out="$app/$(basename "$src" .c).exe"
-    # mini_browser uses the historical name browser.exe — keep it.
+    # The kernel CMake embed function looks for <app>/<app>.exe;
+    # mini_browser predates that convention and uses browser.exe.
+    out="$app/${app}.exe"
     if [[ "$app" == "mini_browser" ]]; then
         out="$app/browser.exe"
     fi
