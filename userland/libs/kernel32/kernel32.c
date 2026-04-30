@@ -1797,6 +1797,246 @@ __declspec(dllexport) BOOL GetThreadIOPendingFlag(HANDLE thread, BOOL* pending)
     return 1;
 }
 
+/* GetUserDefaultUILanguage / GetSystemDefaultUILanguage — en-US. */
+__declspec(dllexport) unsigned short GetUserDefaultUILanguage(void)
+{
+    return 0x0409;
+}
+__declspec(dllexport) unsigned short GetSystemDefaultUILanguage(void)
+{
+    return 0x0409;
+}
+
+/* Console title — in-memory state. */
+static char g_console_title[256] = "DuetOS Console";
+__declspec(dllexport) BOOL SetConsoleTitleA(const char* title)
+{
+    if (title == (const char*)0)
+        return 0;
+    int i = 0;
+    while (i < 255 && title[i] != 0)
+    {
+        g_console_title[i] = title[i];
+        ++i;
+    }
+    g_console_title[i] = 0;
+    return 1;
+}
+__declspec(dllexport) BOOL SetConsoleTitleW(const wchar_t16* title)
+{
+    if (title == (const wchar_t16*)0)
+        return 0;
+    int i = 0;
+    while (i < 255 && title[i] != 0)
+    {
+        g_console_title[i] = (char)(title[i] & 0xFF);
+        ++i;
+    }
+    g_console_title[i] = 0;
+    return 1;
+}
+__declspec(dllexport) DWORD GetConsoleTitleA(char* title, DWORD size)
+{
+    if (title == (char*)0 || size == 0)
+        return 0;
+    int i = 0;
+    while ((DWORD)i < size - 1 && g_console_title[i] != 0)
+    {
+        title[i] = g_console_title[i];
+        ++i;
+    }
+    title[i] = 0;
+    return (DWORD)i;
+}
+__declspec(dllexport) DWORD GetConsoleTitleW(wchar_t16* title, DWORD size)
+{
+    if (title == (wchar_t16*)0 || size == 0)
+        return 0;
+    int i = 0;
+    while ((DWORD)i < size - 1 && g_console_title[i] != 0)
+    {
+        title[i] = (wchar_t16)(unsigned char)g_console_title[i];
+        ++i;
+    }
+    title[i] = 0;
+    return (DWORD)i;
+}
+
+/* FoldStringW — pass-through (LCMapStringW lives further down). */
+__declspec(dllexport) int FoldStringW(unsigned long flags, const wchar_t16* src, int srclen, wchar_t16* dst, int dstlen)
+{
+    (void)flags;
+    if (src == (const wchar_t16*)0)
+        return 0;
+    int n = 0;
+    if (srclen < 0)
+    {
+        while (src[n] != 0)
+            ++n;
+        ++n;
+    }
+    else
+        n = srclen;
+    if (dstlen == 0)
+        return n;
+    if (dst == (wchar_t16*)0 || dstlen < n)
+        return 0;
+    for (int i = 0; i < n; ++i)
+        dst[i] = src[i];
+    return n;
+}
+
+/* GetCurrencyFormatA — prefix "$" + pass-through. */
+__declspec(dllexport) int GetCurrencyFormatA(unsigned long lcid, DWORD flags, const char* num, void* fmt, char* buf,
+                                             int cchData)
+{
+    (void)lcid;
+    (void)flags;
+    (void)fmt;
+    if (num == (const char*)0)
+        return 0;
+    int n = 0;
+    while (num[n] != 0)
+        ++n;
+    int needed = n + 2; /* "$" + n + NUL */
+    if (cchData == 0)
+        return needed;
+    if (buf == (char*)0 || cchData < needed)
+        return 0;
+    buf[0] = '$';
+    for (int i = 0; i < n; ++i)
+        buf[1 + i] = num[i];
+    buf[1 + n] = 0;
+    return needed;
+}
+
+/* GetExitCodeThread is defined further down; v17 dup removed. */
+
+/* OpenThread on self-TID — return a sentinel handle. */
+__declspec(dllexport) HANDLE OpenThread(DWORD access, BOOL inherit, DWORD tid)
+{
+    (void)access;
+    (void)inherit;
+    (void)tid;
+    /* Return current-thread pseudo-handle so callers can just use it. */
+    return (HANDLE)(long long)-2;
+}
+
+/* GetPhysicallyInstalledSystemMemory — 8 GB. */
+__declspec(dllexport) BOOL GetPhysicallyInstalledSystemMemory(unsigned long long* mem_in_kb)
+{
+    if (mem_in_kb == (unsigned long long*)0)
+        return 0;
+    *mem_in_kb = 8ULL * 1024 * 1024; /* 8 GB in KiB */
+    return 1;
+}
+
+/* HeapValidate / GetProcessHeaps — accept everything. */
+__declspec(dllexport) BOOL HeapValidate(HANDLE heap, DWORD flags, const void* p)
+{
+    (void)heap;
+    (void)flags;
+    (void)p;
+    return 1;
+}
+
+__declspec(dllexport) DWORD GetProcessHeaps(DWORD count, HANDLE* heaps)
+{
+    /* Single sentinel "process heap" handle — matches what
+     * GetProcessHeap returns elsewhere in this TU. */
+    if (heaps != (HANDLE*)0 && count >= 1)
+        heaps[0] = (HANDLE)1;
+    return 1;
+}
+
+/* DuplicateHandle — for v0 we just alias the source. */
+__declspec(dllexport) BOOL DuplicateHandle(HANDLE src_proc, HANDLE src, HANDLE dst_proc, HANDLE* dst, DWORD access,
+                                           BOOL inherit, DWORD opts)
+{
+    (void)src_proc;
+    (void)dst_proc;
+    (void)access;
+    (void)inherit;
+    (void)opts;
+    if (dst == (HANDLE*)0)
+        return 0;
+    *dst = src;
+    return 1;
+}
+
+/* GetHandleInformation / SetHandleInformation. */
+__declspec(dllexport) BOOL GetHandleInformation(HANDLE h, DWORD* flags)
+{
+    (void)h;
+    if (flags != (DWORD*)0)
+        *flags = 0;
+    return 1;
+}
+
+__declspec(dllexport) BOOL SetHandleInformation(HANDLE h, DWORD mask, DWORD flags)
+{
+    (void)h;
+    (void)mask;
+    (void)flags;
+    return 1;
+}
+
+/* QueryProcessCycleTime / QueryThreadCycleTime — use rdtsc. */
+__declspec(dllexport) BOOL QueryProcessCycleTime(HANDLE p, unsigned long long* cycles)
+{
+    (void)p;
+    if (cycles == (unsigned long long*)0)
+        return 0;
+    unsigned int lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    *cycles = ((unsigned long long)hi << 32) | lo;
+    return 1;
+}
+
+__declspec(dllexport) BOOL QueryThreadCycleTime(HANDLE t, unsigned long long* cycles)
+{
+    (void)t;
+    if (cycles == (unsigned long long*)0)
+        return 0;
+    unsigned int lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    *cycles = ((unsigned long long)hi << 32) | lo;
+    return 1;
+}
+
+/* GetFileTime — return canned epoch (Jan 1 2026). */
+__declspec(dllexport) BOOL GetFileTime(HANDLE f, void* create, void* access, void* write)
+{
+    (void)f;
+    /* FILETIME = 100ns intervals since 1601-01-01.
+     * 2026-01-01 ≈ 13369248000000000. */
+    unsigned long long t = 13369248000000000ULL;
+    if (create != (void*)0)
+        *(unsigned long long*)create = t;
+    if (access != (void*)0)
+        *(unsigned long long*)access = t;
+    if (write != (void*)0)
+        *(unsigned long long*)write = t;
+    return 1;
+}
+
+/* GetFileInformationByHandle — fill BY_HANDLE_FILE_INFORMATION. */
+__declspec(dllexport) BOOL GetFileInformationByHandle(HANDLE f, void* info)
+{
+    (void)f;
+    if (info == (void*)0)
+        return 0;
+    /* 4 (attrs) + 24 (3 FILETIMEs) + 4 (volSerial) + 4 (sizeHi) +
+     * 4 (sizeLo) + 4 (numLinks) + 4+4 (fileIdx). 52 bytes. */
+    unsigned char* b = (unsigned char*)info;
+    for (int i = 0; i < 52; ++i)
+        b[i] = 0;
+    *(DWORD*)(b + 0) = 0x80;        /* FILE_ATTRIBUTE_NORMAL */
+    *(DWORD*)(b + 28) = 0xCAFEBABE; /* volSerial */
+    *(DWORD*)(b + 40) = 1;          /* numLinks */
+    return 1;
+}
+
 __declspec(dllexport) DWORD GetPrivateProfileStringA(const char* section, const char* key, const char* def_val,
                                                      char* buf, DWORD size, const char* file)
 {

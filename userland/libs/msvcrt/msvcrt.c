@@ -506,3 +506,121 @@ __declspec(dllexport) void* bsearch(const void* key, const void* base, size_t nm
     }
     return (void*)0;
 }
+
+/* Wide → narrow / narrow → wide CRT functions (host CP-agnostic;
+ * just byte-cast for low-ASCII inputs). */
+__declspec(dllexport) size_t mbstowcs(wchar_t16* dst, const char* src, size_t n)
+{
+    if (src == 0)
+        return 0;
+    size_t i = 0;
+    while (i < n && src[i] != 0)
+    {
+        if (dst != 0)
+            dst[i] = (wchar_t16)(unsigned char)src[i];
+        ++i;
+    }
+    if (dst != 0 && i < n)
+        dst[i] = 0;
+    return i;
+}
+
+__declspec(dllexport) size_t wcstombs(char* dst, const wchar_t16* src, size_t n)
+{
+    if (src == 0)
+        return 0;
+    size_t i = 0;
+    while (i < n && src[i] != 0)
+    {
+        if (dst != 0)
+            dst[i] = (char)(src[i] & 0xFF);
+        ++i;
+    }
+    if (dst != 0 && i < n)
+        dst[i] = 0;
+    return i;
+}
+
+__declspec(dllexport) int _wtoi(const wchar_t16* s)
+{
+    if (s == 0)
+        return 0;
+    int sign = 1;
+    int i = 0;
+    while (s[i] == ' ' || s[i] == '\t')
+        ++i;
+    if (s[i] == '-')
+    {
+        sign = -1;
+        ++i;
+    }
+    else if (s[i] == '+')
+        ++i;
+    int v = 0;
+    while (s[i] >= '0' && s[i] <= '9')
+    {
+        v = v * 10 + (s[i] - '0');
+        ++i;
+    }
+    return v * sign;
+}
+
+__declspec(dllexport) long _wtol(const wchar_t16* s)
+{
+    return (long)_wtoi(s);
+}
+
+__declspec(dllexport) long long _wtoll(const wchar_t16* s)
+{
+    if (s == 0)
+        return 0;
+    long long sign = 1;
+    int i = 0;
+    while (s[i] == ' ' || s[i] == '\t')
+        ++i;
+    if (s[i] == '-')
+    {
+        sign = -1;
+        ++i;
+    }
+    else if (s[i] == '+')
+        ++i;
+    long long v = 0;
+    while (s[i] >= '0' && s[i] <= '9')
+    {
+        v = v * 10 + (s[i] - '0');
+        ++i;
+    }
+    return v * sign;
+}
+
+__declspec(dllexport) long wcstol(const wchar_t16* s, wchar_t16** end, int base)
+{
+    (void)base;
+    if (end != 0)
+        *end = (wchar_t16*)s;
+    return (long)_wtoi(s);
+}
+
+__declspec(dllexport) unsigned long wcstoul(const wchar_t16* s, wchar_t16** end, int base)
+{
+    (void)base;
+    if (end != 0)
+        *end = (wchar_t16*)s;
+    int i = 0;
+    while (s[i] == ' ' || s[i] == '\t')
+        ++i;
+    unsigned long v = 0;
+    while (s[i] >= '0' && s[i] <= '9')
+    {
+        v = v * 10 + (s[i] - '0');
+        ++i;
+    }
+    return v;
+}
+
+/* _getmbcp — return CP_ACP. */
+__declspec(dllexport) int _getmbcp(void)
+{
+    return 1252;
+}

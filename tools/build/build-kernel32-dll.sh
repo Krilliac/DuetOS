@@ -202,6 +202,26 @@ set +e
     /export:GetPrivateProfileStringA \
     /export:GetPrivateProfileIntA \
     /export:GetProfileStringA \
+    /export:GetUserDefaultUILanguage \
+    /export:GetSystemDefaultUILanguage \
+    /export:SetConsoleTitleA \
+    /export:SetConsoleTitleW \
+    /export:GetConsoleTitleA \
+    /export:GetConsoleTitleW \
+    /export:FoldStringW \
+    /export:GetCurrencyFormatA \
+    /export:GetExitCodeThread \
+    /export:OpenThread \
+    /export:GetPhysicallyInstalledSystemMemory \
+    /export:HeapValidate \
+    /export:GetProcessHeaps \
+    /export:DuplicateHandle \
+    /export:GetHandleInformation \
+    /export:SetHandleInformation \
+    /export:QueryProcessCycleTime \
+    /export:QueryThreadCycleTime \
+    /export:GetFileTime \
+    /export:GetFileInformationByHandle \
     /export:GetFullPathNameW \
     /export:WriteFile \
     /export:WriteConsoleA \

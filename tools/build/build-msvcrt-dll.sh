@@ -102,6 +102,14 @@ set +e
     /export:iscntrl \
     /export:tolower \
     /export:toupper \
+    /export:mbstowcs \
+    /export:wcstombs \
+    /export:_wtoi \
+    /export:_wtol \
+    /export:_wtoll \
+    /export:wcstol \
+    /export:wcstoul \
+    /export:_getmbcp \
     /out:"${DLL}" \
     "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}
