@@ -332,6 +332,15 @@ __declspec(dllexport) LSTATUS RegOpenKeyExA(HANDLE hKey, const char* subkey, DWO
         lookup = concat_buf;
     }
 
+    /* Empty subkey on a predefined root → return the root handle so
+     * callers that just want to open HKLM/HKCU/etc. and run
+     * QueryInfoKey on the top of the hive succeed. */
+    if (lookup[0] == 0 && parent_path[0] == 0 && hKey != (HANDLE)0)
+    {
+        *out = hKey;
+        return ERROR_SUCCESS;
+    }
+
     const RegKey* target = reg_lookup_key_a(root, lookup);
     if (!target)
         return ERROR_FILE_NOT_FOUND;

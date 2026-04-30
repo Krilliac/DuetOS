@@ -1857,3 +1857,135 @@ __declspec(dllexport) DWORD GetWindowThreadProcessId(HANDLE hwnd, DWORD* pid)
         *pid = 1;
     return 1;
 }
+
+/* Multi-monitor enumeration — single-monitor sentinel. */
+
+__declspec(dllexport) BOOL EnumDisplayMonitors(void* dc, const void* clip, void* fn, long long lparam)
+{
+    (void)clip;
+    typedef BOOL(__stdcall * cb_t)(void*, void*, void*, long long);
+    cb_t cb = (cb_t)fn;
+    if (cb == (cb_t)0)
+        return 1;
+    long rect[4] = {0, 0, 1024, 768};
+    cb((void*)(unsigned long long)0x9001, dc, rect, lparam);
+    return 1;
+}
+
+typedef struct
+{
+    long x, y;
+} DUETOS_POINT;
+
+__declspec(dllexport) void* MonitorFromPoint(DUETOS_POINT pt, DWORD flags)
+{
+    (void)pt;
+    (void)flags;
+    return (void*)(unsigned long long)0x9001;
+}
+
+__declspec(dllexport) void* MonitorFromWindow(void* w, DWORD flags)
+{
+    (void)w;
+    (void)flags;
+    return (void*)(unsigned long long)0x9001;
+}
+
+__declspec(dllexport) BOOL GetMonitorInfoW(void* m, void* info)
+{
+    (void)m;
+    if (info == (void*)0)
+        return 0;
+    DWORD* p = (DWORD*)info;
+    if (p[0] < 40)
+        return 0;
+    long* l = (long*)(p + 1);
+    l[0] = 0;
+    l[1] = 0;
+    l[2] = 1024;
+    l[3] = 768;
+    l[4] = 0;
+    l[5] = 0;
+    l[6] = 1024;
+    l[7] = 768;
+    p[9] = 1;
+    return 1;
+}
+
+__declspec(dllexport) BOOL EnumDisplayDevicesW(const wchar_t16* dev, DWORD idx, void* info, DWORD flags)
+{
+    (void)dev;
+    (void)flags;
+    if (info == (void*)0)
+        return 0;
+    if (idx > 0)
+        return 0;
+    DWORD* p = (DWORD*)info;
+    if (p[0] < 4)
+        return 0;
+    wchar_t16* name = (wchar_t16*)((unsigned char*)info + 4);
+    static const wchar_t16 kName[] = {'\\', '\\', '.', '\\', 'D', 'I', 'S', 'P', 'L', 'A', 'Y', '1', 0};
+    int j = 0;
+    while (kName[j] != 0)
+    {
+        name[j] = kName[j];
+        ++j;
+    }
+    name[j] = 0;
+    return 1;
+}
+
+__declspec(dllexport) BOOL EnumDisplaySettingsW(const wchar_t16* dev, DWORD mode, void* dm)
+{
+    (void)dev;
+    (void)mode;
+    if (dm == (void*)0)
+        return 0;
+    return 1;
+}
+
+/* DDEML — DdeInitialize + string-handle plumbing. */
+__declspec(dllexport) UINT DdeInitializeA(DWORD* inst, void* cb, DWORD flags, DWORD rsv)
+{
+    (void)cb;
+    (void)flags;
+    (void)rsv;
+    if (inst == (DWORD*)0)
+        return 1; /* DMLERR_INVALIDPARAMETER */
+    *inst = 0xDDE10001;
+    return 0; /* DMLERR_NO_ERROR */
+}
+
+__declspec(dllexport) UINT DdeInitializeW(DWORD* inst, void* cb, DWORD flags, DWORD rsv)
+{
+    return DdeInitializeA(inst, cb, flags, rsv);
+}
+
+__declspec(dllexport) BOOL DdeUninitialize(DWORD inst)
+{
+    (void)inst;
+    return 1;
+}
+
+/* String handles: just pack a 32-bit counter into the handle. */
+static DWORD g_dde_next = 0xD5000001;
+__declspec(dllexport) void* DdeCreateStringHandleA(DWORD inst, const char* name, int cp)
+{
+    (void)inst;
+    (void)name;
+    (void)cp;
+    return (void*)(unsigned long long)(g_dde_next++);
+}
+__declspec(dllexport) void* DdeCreateStringHandleW(DWORD inst, const wchar_t16* name, int cp)
+{
+    (void)inst;
+    (void)name;
+    (void)cp;
+    return (void*)(unsigned long long)(g_dde_next++);
+}
+__declspec(dllexport) BOOL DdeFreeStringHandle(DWORD inst, void* h)
+{
+    (void)inst;
+    (void)h;
+    return 1;
+}
