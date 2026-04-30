@@ -93,6 +93,14 @@ declare -A APPS=(
     [locale2_smoke]="-lkernel32"
     [gdiplus_smoke]="-lkernel32 -lgdiplus"
     [dde_smoke]="-lkernel32 -luser32"
+    [stream_smoke]="-lkernel32"
+    [setupapi_smoke]="-lkernel32 -lsetupapi"
+    [asyn_smoke]="-lkernel32"
+    [wndmsg_smoke]="-lkernel32 -luser32"
+    [scrap_smoke]="-lkernel32 -luser32"
+    [trace_smoke]="-lkernel32 -ladvapi32"
+    [wmi_smoke]="-lkernel32 -lole32"
+    [enviro_smoke]="-lkernel32"
 )
 
 for app in "${!APPS[@]}"; do
