@@ -43,8 +43,21 @@ __declspec(dllexport) BOOL CryptAcquireContextA(unsigned long long* h, const cha
     (void)type;
     (void)flags;
     if (h)
-        *h = 0;
-    return 0;
+        *h = 0xC597001ULL; /* sentinel CSP handle */
+    return 1;
+}
+
+typedef unsigned short wchar_t16;
+__declspec(dllexport) BOOL CryptAcquireContextW(unsigned long long* h, const wchar_t16* ct, const wchar_t16* prov,
+                                                DWORD type, DWORD flags)
+{
+    (void)ct;
+    (void)prov;
+    (void)type;
+    (void)flags;
+    if (h)
+        *h = 0xC597001ULL;
+    return 1;
 }
 __declspec(dllexport) BOOL CryptReleaseContext(unsigned long long h, DWORD flags)
 {

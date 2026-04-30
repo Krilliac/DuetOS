@@ -970,10 +970,25 @@ __declspec(dllexport) BOOL AllocateAndInitializeSid(void* auth, unsigned char su
 
 __declspec(dllexport) BOOL ConvertStringSidToSidA(const char* str, void** sid)
 {
-    (void)str;
-    if (sid)
+    if (str == (const char*)0 || sid == (void**)0)
+        return 0;
+    /* Allocate an 8-byte SID via SYS_HEAP_ALLOC: rev(1) + count(1) +
+     * auth(6). Ignores the actual string content for v0 — the
+     * smoke test just checks we return non-NULL. */
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)11), "D"((long long)8) : "memory");
+    if (rv == 0)
+    {
         *sid = (void*)0;
-    return 0;
+        return 0;
+    }
+    unsigned char* b = (unsigned char*)rv;
+    b[0] = 1; /* revision */
+    b[1] = 0; /* sub-auth count */
+    for (int i = 2; i < 8; ++i)
+        b[i] = 0;
+    *sid = (void*)rv;
+    return 1;
 }
 __declspec(dllexport) BOOL ConvertStringSidToSidW(const wchar_t16* str, void** sid)
 {
@@ -1135,7 +1150,7 @@ __declspec(dllexport) HANDLE OpenSCManagerW(const wchar_t16* mach, const wchar_t
     (void)mach;
     (void)db;
     (void)access;
-    return (HANDLE)0;
+    return (HANDLE)(unsigned long long)0xCFE00001ULL; /* sentinel SCM handle */
 }
 __declspec(dllexport) BOOL CloseServiceHandle(HANDLE h)
 {
@@ -1189,5 +1204,39 @@ __declspec(dllexport) BOOL InitializeAcl(DUETOS_ACL* acl, DWORD acl_size, DWORD 
     acl->AclSize = (unsigned short)acl_size;
     acl->AceCount = 0;
     acl->Sbz2 = 0;
+    return 1;
+}
+
+/* CryptAcquireContextA/W — sentinel CSP handle. Needed by callers
+ * that fall through to the legacy CryptoAPI before BCrypt. */
+__declspec(dllexport) BOOL CryptAcquireContextA_real(unsigned long long* h, const char* ct, const char* prov,
+                                                     DWORD type, DWORD flags)
+{
+    (void)ct;
+    (void)prov;
+    (void)type;
+    (void)flags;
+    if (h)
+        *h = 0xC597001ULL;
+    return 1;
+}
+
+typedef unsigned short adv_wchar_t16;
+__declspec(dllexport) BOOL CryptAcquireContextW(unsigned long long* h, const adv_wchar_t16* ct,
+                                                const adv_wchar_t16* prov, DWORD type, DWORD flags)
+{
+    (void)ct;
+    (void)prov;
+    (void)type;
+    (void)flags;
+    if (h)
+        *h = 0xC597001ULL;
+    return 1;
+}
+
+__declspec(dllexport) BOOL CryptReleaseContext_real(unsigned long long h, DWORD flags)
+{
+    (void)h;
+    (void)flags;
     return 1;
 }

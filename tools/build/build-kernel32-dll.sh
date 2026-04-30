@@ -227,6 +227,12 @@ set +e
     /export:GetProcessHandleCount \
     /export:SetErrorMode \
     /export:GetErrorMode \
+    /export:SystemTimeToFileTime \
+    /export:FileTimeToSystemTime \
+    /export:CompareFileTime \
+    /export:OpenProcess \
+    /export:CreatePipe \
+    /export:VirtualQuery \
     /export:GetFullPathNameW \
     /export:WriteFile \
     /export:WriteConsoleA \

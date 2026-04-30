@@ -680,3 +680,133 @@ __declspec(dllexport) duetos_sig_handler_t signal(int sig, duetos_sig_handler_t 
     g_sig_handlers[sig] = h;
     return prev;
 }
+
+/* fopen / fclose / fread / fwrite / fseek / ftell / rewind / feof
+ * — same SYS_FILE_OPEN-routed impl as ucrtbase.c, exported under
+ * msvcrt for callers that import from the legacy DLL. */
+typedef struct DUETOS_FILE_msvcrt
+{
+    long long handle; /* SYS_FILE_OPEN handle (-1 on error / EOF) */
+    int eof;
+    int err;
+} DUETOS_FILE;
+
+__declspec(dllexport) DUETOS_FILE* fopen(const char* path, const char* mode)
+{
+    (void)mode;
+    if (path == 0)
+        return 0;
+    int len = 0;
+    while (path[len])
+        ++len;
+    long long h;
+    __asm__ volatile("int $0x80" : "=a"(h) : "a"((long long)20), "D"((long long)path), "S"((long long)len) : "memory");
+    if (h == 0)
+        return 0;
+    /* Allocate a 24-byte FILE struct via SYS_HEAP_ALLOC (op 11). */
+    long long fp;
+    __asm__ volatile("int $0x80" : "=a"(fp) : "a"((long long)11), "D"((long long)24) : "memory");
+    if (fp == 0)
+        return 0;
+    DUETOS_FILE* f = (DUETOS_FILE*)fp;
+    f->handle = h;
+    f->eof = 0;
+    f->err = 0;
+    return f;
+}
+
+__declspec(dllexport) int fclose(DUETOS_FILE* f)
+{
+    if (f == 0)
+        return -1;
+    long long h = f->handle;
+    long long discard;
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)22), "D"(h) : "memory");
+    /* Free f via SYS_HEAP_FREE (op 12). */
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)12), "D"((long long)f) : "memory");
+    return 0;
+}
+
+__declspec(dllexport) size_t fread(void* buf, size_t size, size_t nmemb, DUETOS_FILE* f)
+{
+    if (f == 0 || buf == 0 || size == 0 || nmemb == 0)
+        return 0;
+    long long total = (long long)size * (long long)nmemb;
+    long long got;
+    __asm__ volatile("int $0x80"
+                     : "=a"(got)
+                     : "a"((long long)21), "D"(f->handle), "S"((long long)buf), "d"(total)
+                     : "memory");
+    if (got <= 0)
+    {
+        f->eof = 1;
+        return 0;
+    }
+    return (size_t)got / size;
+}
+
+__declspec(dllexport) int fseek(DUETOS_FILE* f, long off, int whence)
+{
+    if (f == 0)
+        return -1;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)23), "D"(f->handle), "S"((long long)off), "d"((long long)whence)
+                     : "memory");
+    return rv >= 0 ? 0 : -1;
+}
+
+__declspec(dllexport) long ftell(DUETOS_FILE* f)
+{
+    if (f == 0)
+        return -1;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)23), "D"(f->handle), "S"((long long)0), "d"((long long)1) /* SEEK_CUR=1 */
+                     : "memory");
+    return rv >= 0 ? (long)rv : -1;
+}
+
+__declspec(dllexport) void rewind(DUETOS_FILE* f)
+{
+    fseek(f, 0, 0 /*SEEK_SET*/);
+    if (f)
+        f->eof = 0;
+}
+
+__declspec(dllexport) int feof(DUETOS_FILE* f)
+{
+    return f ? f->eof : 1;
+}
+
+__declspec(dllexport) int ferror(DUETOS_FILE* f)
+{
+    return f ? f->err : 0;
+}
+
+/* _aligned_malloc — round up to alignment boundary. */
+__declspec(dllexport) void* _aligned_malloc(size_t sz, size_t align)
+{
+    if (align < 16)
+        align = 16;
+    long long p;
+    __asm__ volatile("int $0x80" : "=a"(p) : "a"((long long)11), "D"((long long)(sz + align)) : "memory");
+    if (p == 0)
+        return 0;
+    /* Round up to alignment. */
+    unsigned long long aligned = ((unsigned long long)p + align - 1) & ~(align - 1);
+    /* Store original behind the aligned ptr. */
+    *((unsigned long long*)(aligned - 8)) = (unsigned long long)p;
+    return (void*)aligned;
+}
+
+__declspec(dllexport) void _aligned_free(void* p)
+{
+    if (p == 0)
+        return;
+    unsigned long long orig = *((unsigned long long*)((unsigned char*)p - 8));
+    long long discard;
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)12), "D"((long long)orig) : "memory");
+}

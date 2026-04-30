@@ -1228,6 +1228,12 @@ __declspec(dllexport) HANDLE GetCapture(void)
 __declspec(dllexport) unsigned long long SetTimer(HANDLE h, unsigned long long id, UINT elapse, void* cb)
 {
     (void)cb; /* no timer-callback dispatch; WM_TIMER only */
+    /* hwnd == NULL → "system timer" — return a synthetic cookie. */
+    if (h == (HANDLE)0)
+    {
+        static unsigned long long g_sys_timer_id = 0xA000;
+        return ++g_sys_timer_id;
+    }
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)

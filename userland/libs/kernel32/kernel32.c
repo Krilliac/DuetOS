@@ -2037,6 +2037,158 @@ __declspec(dllexport) BOOL GetFileInformationByHandle(HANDLE f, void* info)
     return 1;
 }
 
+/* SystemTimeToFileTime — convert SYSTEMTIME to 100-ns intervals
+ * since 1601-01-01. Days-since-1601 algorithm. */
+__declspec(dllexport) BOOL SystemTimeToFileTime(const DUETOS_SYSTEMTIME* st, void* ft)
+{
+    if (st == (const DUETOS_SYSTEMTIME*)0 || ft == (void*)0)
+        return 0;
+    /* Days from 1601-01-01 to year start. */
+    int y = st->y;
+    if (y < 1601 || y > 30828)
+        return 0;
+    static const int dom_normal[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    static const int dom_leap[12] = {31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    long long days = 0;
+    for (int yr = 1601; yr < y; ++yr)
+    {
+        int leap = ((yr % 4 == 0) && (yr % 100 != 0)) || (yr % 400 == 0);
+        days += leap ? 366 : 365;
+    }
+    int leap_y = ((y % 4 == 0) && (y % 100 != 0)) || (y % 400 == 0);
+    const int* dom = leap_y ? dom_leap : dom_normal;
+    int m = st->m;
+    if (m < 1 || m > 12)
+        return 0;
+    for (int i = 0; i < m - 1; ++i)
+        days += dom[i];
+    days += (st->d - 1);
+    long long secs = days * 86400LL + (long long)st->h * 3600 + (long long)st->min * 60 + st->s;
+    long long ticks = secs * 10000000LL + (long long)st->ms * 10000;
+    *(long long*)ft = ticks;
+    return 1;
+}
+
+__declspec(dllexport) BOOL FileTimeToSystemTime(const void* ft, DUETOS_SYSTEMTIME* st)
+{
+    if (ft == (const void*)0 || st == (DUETOS_SYSTEMTIME*)0)
+        return 0;
+    long long ticks = *(const long long*)ft;
+    long long secs = ticks / 10000000LL;
+    int ms = (int)((ticks / 10000LL) % 1000);
+    long long days = secs / 86400;
+    int sod = (int)(secs % 86400);
+    st->h = (unsigned short)(sod / 3600);
+    st->min = (unsigned short)((sod % 3600) / 60);
+    st->s = (unsigned short)(sod % 60);
+    st->ms = (unsigned short)ms;
+    int y = 1601;
+    static const int dom_normal[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    static const int dom_leap[12] = {31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    while (1)
+    {
+        int leap = ((y % 4 == 0) && (y % 100 != 0)) || (y % 400 == 0);
+        long long yd = leap ? 366 : 365;
+        if (days < yd)
+            break;
+        days -= yd;
+        ++y;
+    }
+    int leap_y = ((y % 4 == 0) && (y % 100 != 0)) || (y % 400 == 0);
+    const int* dom = leap_y ? dom_leap : dom_normal;
+    int m = 0;
+    while (m < 11 && days >= dom[m])
+    {
+        days -= dom[m];
+        ++m;
+    }
+    st->y = (unsigned short)y;
+    st->m = (unsigned short)(m + 1);
+    st->d = (unsigned short)(days + 1);
+    st->dow = 0;
+    return 1;
+}
+
+/* CompareFileTime. */
+__declspec(dllexport) long CompareFileTime(const void* a, const void* b)
+{
+    if (a == (const void*)0 || b == (const void*)0)
+        return 0;
+    long long va = *(const long long*)a;
+    long long vb = *(const long long*)b;
+    if (va < vb)
+        return -1;
+    if (va > vb)
+        return 1;
+    return 0;
+}
+
+/* OpenProcess on self (or any pid; v0 returns a sentinel handle). */
+__declspec(dllexport) HANDLE OpenProcess(DWORD access, BOOL inherit, DWORD pid)
+{
+    (void)access;
+    (void)inherit;
+    (void)pid;
+    return (HANDLE)(long long)-1; /* current-process pseudo-handle */
+}
+
+/* CreatePipe — anonymous pipe. Single in-process buffered ring. */
+typedef struct
+{
+    unsigned char buf[4096];
+    unsigned int head, tail;
+    int in_use;
+} DUETOS_PIPE_RING;
+static DUETOS_PIPE_RING g_pipe;
+
+#define DUETOS_PIPE_RD ((HANDLE)(unsigned long long)0xA0010001ULL)
+#define DUETOS_PIPE_WR ((HANDLE)(unsigned long long)0xA0010002ULL)
+
+__declspec(dllexport) BOOL CreatePipe(HANDLE* rd, HANDLE* wr, void* sa, DWORD sz)
+{
+    (void)sa;
+    (void)sz;
+    if (rd == (HANDLE*)0 || wr == (HANDLE*)0)
+        return 0;
+    g_pipe.head = 0;
+    g_pipe.tail = 0;
+    g_pipe.in_use = 1;
+    *rd = DUETOS_PIPE_RD;
+    *wr = DUETOS_PIPE_WR;
+    return 1;
+}
+
+/* VirtualQuery — return MEMORY_BASIC_INFORMATION for the supplied
+ * pointer. v0 reports MEM_COMMIT|PAGE_READWRITE for any non-NULL
+ * input — sufficient for stdio probes that just want the call to
+ * succeed. */
+typedef struct
+{
+    void* BaseAddress;
+    void* AllocationBase;
+    DWORD AllocationProtect;
+    unsigned short PartitionId;
+    SIZE_T RegionSize;
+    DWORD State;
+    DWORD Protect;
+    DWORD Type;
+} DUETOS_MBI;
+
+__declspec(dllexport) SIZE_T VirtualQuery(const void* addr, DUETOS_MBI* info, SIZE_T n)
+{
+    if (info == (DUETOS_MBI*)0 || n < sizeof(*info))
+        return 0;
+    info->BaseAddress = (void*)((unsigned long long)addr & ~0xFFFULL);
+    info->AllocationBase = info->BaseAddress;
+    info->AllocationProtect = 0x04; /* PAGE_READWRITE */
+    info->PartitionId = 0;
+    info->RegionSize = 0x1000;
+    info->State = 0x1000; /* MEM_COMMIT */
+    info->Protect = 0x04;
+    info->Type = 0x20000; /* MEM_PRIVATE */
+    return sizeof(*info);
+}
+
 /* SetErrorMode / GetErrorMode — in-memory state. */
 static UINT g_kernel32_error_mode = 0;
 __declspec(dllexport) UINT SetErrorMode(UINT mode)
@@ -4053,13 +4205,8 @@ __declspec(dllexport) BOOL Process32Next(HANDLE h, void* entry)
     return Process32NextW(h, entry);
 }
 
-__declspec(dllexport) HANDLE OpenProcess(DWORD access, BOOL inherit, DWORD pid)
-{
-    (void)access;
-    (void)inherit;
-    (void)pid;
-    return (HANDLE)0; /* Access denied — keep callers on fallback */
-}
+/* OpenProcess is implemented further up — old "access denied" stub
+ * removed in v19 favour of the pseudo-handle return. */
 
 __declspec(dllexport) BOOL GenerateConsoleCtrlEvent(DWORD event, DWORD group)
 {

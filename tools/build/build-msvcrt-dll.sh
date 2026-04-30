@@ -115,6 +115,16 @@ set +e
     /export:_kbhit \
     /export:_cputs \
     /export:signal \
+    /export:fopen \
+    /export:fclose \
+    /export:fread \
+    /export:fseek \
+    /export:ftell \
+    /export:rewind \
+    /export:feof \
+    /export:ferror \
+    /export:_aligned_malloc \
+    /export:_aligned_free \
     /out:"${DLL}" \
     "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}
