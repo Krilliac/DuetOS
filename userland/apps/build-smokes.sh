@@ -47,6 +47,12 @@ declare -A APPS=(
     [datetime_smoke]="-lkernel32"
     [locale_smoke]="-lkernel32"
     [gdi_smoke]="-lkernel32 -luser32 -lgdi32"
+    [msg_smoke]="-lkernel32 -luser32"
+    [pipe_smoke]="-lkernel32"
+    [resource_smoke]="-lkernel32 -luser32"
+    [ntdll_smoke]="-lkernel32 -lntdll"
+    [shell_smoke]="-lkernel32 -lshell32"
+    [userenv_smoke]="-lkernel32 -luserenv -ladvapi32"
 )
 
 for app in "${!APPS[@]}"; do

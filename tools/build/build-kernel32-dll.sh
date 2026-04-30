@@ -140,6 +140,22 @@ set +e
     /export:GetCPInfo \
     /export:LCMapStringW \
     /export:FormatMessageW \
+    /export:GetUserDefaultLCID \
+    /export:GetSystemDefaultLCID \
+    /export:GetThreadLocale \
+    /export:SetThreadLocale \
+    /export:GetUserDefaultLangID \
+    /export:GetSystemDefaultLangID \
+    /export:IsValidLocale \
+    /export:GetLocaleInfoW \
+    /export:AddAtomA \
+    /export:FindAtomA \
+    /export:DeleteAtom \
+    /export:GlobalAddAtomA \
+    /export:GlobalFindAtomA \
+    /export:GlobalGetAtomNameA \
+    /export:GetAtomNameA \
+    /export:GlobalDeleteAtom \
     /export:WriteFile \
     /export:WriteConsoleA \
     /export:WriteConsoleW \

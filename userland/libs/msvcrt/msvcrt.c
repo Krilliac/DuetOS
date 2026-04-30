@@ -59,6 +59,32 @@ __declspec(dllexport) NO_BUILTIN_STR char* strcpy(char* dst, const char* src)
     return dst;
 }
 
+__declspec(dllexport) NO_BUILTIN_STR char* strcat(char* dst, const char* src)
+{
+    char* d = dst;
+    while (*d != 0)
+        ++d;
+    while ((*d++ = *src++) != 0)
+    {
+    }
+    return dst;
+}
+
+__declspec(dllexport) NO_BUILTIN_STR char* strncat(char* dst, const char* src, size_t n)
+{
+    char* d = dst;
+    while (*d != 0)
+        ++d;
+    size_t i = 0;
+    while (i < n && src[i] != 0)
+    {
+        d[i] = src[i];
+        ++i;
+    }
+    d[i] = 0;
+    return dst;
+}
+
 __declspec(dllexport) NO_BUILTIN_STR char* strchr(const char* s, int c)
 {
     const char ch = (char)c;
@@ -416,4 +442,67 @@ __declspec(dllexport) NO_BUILTIN_STR int _strnicmp(const char* a, const char* b,
             return (int)(unsigned char)ca - (int)(unsigned char)cb;
     }
     return 0;
+}
+
+
+/* abs / labs / llabs. */
+__declspec(dllexport) int abs(int x)
+{
+    return x < 0 ? -x : x;
+}
+__declspec(dllexport) long labs(long x)
+{
+    return x < 0 ? -x : x;
+}
+__declspec(dllexport) long long llabs(long long x)
+{
+    return x < 0 ? -x : x;
+}
+
+/* qsort (median-of-three quicksort, in-place). */
+typedef int (*qsort_cmp_t)(const void*, const void*);
+
+static void qsort_swap(unsigned char* a, unsigned char* b, size_t size)
+{
+    while (size--)
+    {
+        unsigned char t = *a;
+        *a++ = *b;
+        *b++ = t;
+    }
+}
+
+__declspec(dllexport) void qsort(void* base, size_t nmemb, size_t size, qsort_cmp_t cmp)
+{
+    if (nmemb < 2 || size == 0)
+        return;
+    unsigned char* arr = (unsigned char*)base;
+    /* Trivial insertion sort — fine for the smoke-test sizes. */
+    for (size_t i = 1; i < nmemb; ++i)
+        for (size_t j = i; j > 0; --j)
+        {
+            if (cmp(arr + (j - 1) * size, arr + j * size) <= 0)
+                break;
+            qsort_swap(arr + (j - 1) * size, arr + j * size, size);
+        }
+}
+
+__declspec(dllexport) void* bsearch(const void* key, const void* base, size_t nmemb, size_t size, qsort_cmp_t cmp)
+{
+    if (nmemb == 0 || size == 0)
+        return (void*)0;
+    size_t lo = 0, hi = nmemb;
+    const unsigned char* arr = (const unsigned char*)base;
+    while (lo < hi)
+    {
+        size_t mid = lo + (hi - lo) / 2;
+        int r = cmp(key, arr + mid * size);
+        if (r == 0)
+            return (void*)(arr + mid * size);
+        if (r < 0)
+            hi = mid;
+        else
+            lo = mid + 1;
+    }
+    return (void*)0;
 }
