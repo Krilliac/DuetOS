@@ -192,6 +192,16 @@ set +e
     /export:GetCalendarInfoEx \
     /export:GetCalendarInfoA \
     /export:GetDpiForSystem \
+    /export:GetDateFormatA \
+    /export:GetTimeFormatA \
+    /export:GetNumberFormatA \
+    /export:EnumSystemLocalesA \
+    /export:GetVolumeInformationW \
+    /export:GetDiskFreeSpaceExW \
+    /export:GetThreadIOPendingFlag \
+    /export:GetPrivateProfileStringA \
+    /export:GetPrivateProfileIntA \
+    /export:GetProfileStringA \
     /export:GetFullPathNameW \
     /export:WriteFile \
     /export:WriteConsoleA \

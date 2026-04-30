@@ -1618,6 +1618,222 @@ __declspec(dllexport) unsigned int GetDpiForSystem(void)
     return 96;
 }
 
+/* Date/time/number format APIs — canned MM/DD/YYYY, HH:MM:SS, pass-through. */
+static int duetos_u32_to_dec(unsigned int v, char* out)
+{
+    if (v == 0)
+    {
+        out[0] = '0';
+        return 1;
+    }
+    char tmp[16];
+    int n = 0;
+    while (v != 0)
+    {
+        tmp[n++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    for (int i = 0; i < n; ++i)
+        out[i] = tmp[n - 1 - i];
+    return n;
+}
+
+typedef struct
+{
+    unsigned short y, m, dow, d, h, min, s, ms;
+} DUETOS_SYSTEMTIME;
+
+__declspec(dllexport) int GetDateFormatA(unsigned long lcid, DWORD flags, const DUETOS_SYSTEMTIME* st, const char* fmt,
+                                         char* buf, int cchData)
+{
+    (void)lcid;
+    (void)flags;
+    (void)fmt;
+    if (st == (const DUETOS_SYSTEMTIME*)0)
+        return 0;
+    char tmp[32];
+    int len = 0;
+    if (st->m < 10)
+        tmp[len++] = '0';
+    len += duetos_u32_to_dec(st->m, tmp + len);
+    tmp[len++] = '/';
+    if (st->d < 10)
+        tmp[len++] = '0';
+    len += duetos_u32_to_dec(st->d, tmp + len);
+    tmp[len++] = '/';
+    len += duetos_u32_to_dec(st->y, tmp + len);
+    tmp[len] = 0;
+    int needed = len + 1;
+    if (cchData == 0)
+        return needed;
+    if (buf == (char*)0 || cchData < needed)
+        return 0;
+    for (int i = 0; i < len; ++i)
+        buf[i] = tmp[i];
+    buf[len] = 0;
+    return needed;
+}
+
+__declspec(dllexport) int GetTimeFormatA(unsigned long lcid, DWORD flags, const DUETOS_SYSTEMTIME* st, const char* fmt,
+                                         char* buf, int cchData)
+{
+    (void)lcid;
+    (void)flags;
+    (void)fmt;
+    if (st == (const DUETOS_SYSTEMTIME*)0)
+        return 0;
+    char tmp[32];
+    int len = 0;
+    if (st->h < 10)
+        tmp[len++] = '0';
+    len += duetos_u32_to_dec(st->h, tmp + len);
+    tmp[len++] = ':';
+    if (st->min < 10)
+        tmp[len++] = '0';
+    len += duetos_u32_to_dec(st->min, tmp + len);
+    tmp[len++] = ':';
+    if (st->s < 10)
+        tmp[len++] = '0';
+    len += duetos_u32_to_dec(st->s, tmp + len);
+    tmp[len] = 0;
+    int needed = len + 1;
+    if (cchData == 0)
+        return needed;
+    if (buf == (char*)0 || cchData < needed)
+        return 0;
+    for (int i = 0; i < len; ++i)
+        buf[i] = tmp[i];
+    buf[len] = 0;
+    return needed;
+}
+
+__declspec(dllexport) int GetNumberFormatA(unsigned long lcid, DWORD flags, const char* num, void* fmt, char* buf,
+                                           int cchData)
+{
+    (void)lcid;
+    (void)flags;
+    (void)fmt;
+    if (num == (const char*)0)
+        return 0;
+    int n = 0;
+    while (num[n] != 0)
+        ++n;
+    int needed = n + 1;
+    if (cchData == 0)
+        return needed;
+    if (buf == (char*)0 || cchData < needed)
+        return 0;
+    for (int i = 0; i < n; ++i)
+        buf[i] = num[i];
+    buf[n] = 0;
+    return needed;
+}
+
+__declspec(dllexport) BOOL EnumSystemLocalesA(BOOL(__stdcall* cb)(char*), DWORD flags)
+{
+    (void)flags;
+    if (cb == (BOOL(__stdcall*)(char*))0)
+        return 0;
+    char id[] = "00000409";
+    cb(id);
+    return 1;
+}
+
+__declspec(dllexport) BOOL GetVolumeInformationW(const wchar_t16* root, wchar_t16* vol_name, DWORD vol_name_len,
+                                                 DWORD* serial, DWORD* max_comp, DWORD* fs_flags, wchar_t16* fs_name,
+                                                 DWORD fs_name_len)
+{
+    (void)root;
+    if (vol_name != (wchar_t16*)0 && vol_name_len > 0)
+    {
+        static const wchar_t16 vn[] = {'D', 'u', 'e', 't', 'O', 'S', 0};
+        DWORD i = 0;
+        while (i < vol_name_len - 1 && vn[i] != 0)
+        {
+            vol_name[i] = vn[i];
+            ++i;
+        }
+        vol_name[i] = 0;
+    }
+    if (serial != (DWORD*)0)
+        *serial = 0xCAFEBABE;
+    if (max_comp != (DWORD*)0)
+        *max_comp = 255;
+    if (fs_flags != (DWORD*)0)
+        *fs_flags = 0;
+    if (fs_name != (wchar_t16*)0 && fs_name_len > 0)
+    {
+        static const wchar_t16 fn[] = {'D', 'U', 'E', 'T', 'F', 'S', 0};
+        DWORD i = 0;
+        while (i < fs_name_len - 1 && fn[i] != 0)
+        {
+            fs_name[i] = fn[i];
+            ++i;
+        }
+        fs_name[i] = 0;
+    }
+    return 1;
+}
+
+__declspec(dllexport) BOOL GetDiskFreeSpaceExW(const wchar_t16* dir, void* avail, void* total, void* free_)
+{
+    (void)dir;
+    unsigned long long free_b = 1ULL * 1024 * 1024 * 1024;
+    unsigned long long total_b = 8ULL * 1024 * 1024 * 1024;
+    if (avail != (void*)0)
+        *(unsigned long long*)avail = free_b;
+    if (total != (void*)0)
+        *(unsigned long long*)total = total_b;
+    if (free_ != (void*)0)
+        *(unsigned long long*)free_ = free_b;
+    return 1;
+}
+
+__declspec(dllexport) BOOL GetThreadIOPendingFlag(HANDLE thread, BOOL* pending)
+{
+    (void)thread;
+    if (pending != (BOOL*)0)
+        *pending = 0;
+    return 1;
+}
+
+__declspec(dllexport) DWORD GetPrivateProfileStringA(const char* section, const char* key, const char* def_val,
+                                                     char* buf, DWORD size, const char* file)
+{
+    (void)section;
+    (void)key;
+    (void)file;
+    if (buf == (char*)0 || size == 0)
+        return 0;
+    if (def_val == (const char*)0)
+    {
+        buf[0] = 0;
+        return 0;
+    }
+    DWORD i = 0;
+    while (i < size - 1 && def_val[i] != 0)
+    {
+        buf[i] = def_val[i];
+        ++i;
+    }
+    buf[i] = 0;
+    return i;
+}
+
+__declspec(dllexport) UINT GetPrivateProfileIntA(const char* section, const char* key, int def_val, const char* file)
+{
+    (void)section;
+    (void)key;
+    (void)file;
+    return (UINT)def_val;
+}
+
+__declspec(dllexport) DWORD GetProfileStringA(const char* section, const char* key, const char* def_val, char* buf,
+                                              DWORD size)
+{
+    return GetPrivateProfileStringA(section, key, def_val, buf, size, "");
+}
+
 __declspec(dllexport) DWORD GetFullPathNameW(const wchar_t16* lpFileName, DWORD nBufferLength, wchar_t16* lpBuffer,
                                              wchar_t16** lpFilePart)
 {
