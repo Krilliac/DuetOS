@@ -4,9 +4,12 @@
 [![Download release ISO](https://img.shields.io/github/downloads/krilliac/duetos/latest-release/duetos-release.iso?label=release%20iso%20%E2%86%93%20this%20release&color=blue)](https://github.com/krilliac/duetos/releases/download/latest-release/duetos-release.iso)
 [![Debug channel](https://img.shields.io/github/v/release/krilliac/duetos?include_prereleases&display_name=tag&filter=latest-debug&label=debug%20channel)](https://github.com/krilliac/duetos/releases/tag/latest-debug)
 [![Download debug ISO](https://img.shields.io/github/downloads/krilliac/duetos/latest-debug/duetos-debug.iso?label=debug%20iso%20%E2%86%93%20this%20release&color=orange)](https://github.com/krilliac/duetos/releases/download/latest-debug/duetos-debug.iso)
+[![Build flavors](https://img.shields.io/github/v/release/krilliac/duetos?include_prereleases&display_name=tag&filter=latest-flavors&label=build%20flavors&color=lightgrey)](https://github.com/krilliac/duetos/releases/tag/latest-flavors)
 [![Lifetime downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fkrilliac%2Fduetos%2Fstats%2Flifetime-downloads.json)](https://github.com/krilliac/duetos/releases)
 
-Click a **channel** badge to open the release page, or an **iso ↓** badge to download the ISO directly. The "this release" counter resets when CI re-publishes the rolling channel; "lifetime downloads" sums every asset download across both channels and never resets.
+**Front-runner downloads:** [release ISO](https://github.com/krilliac/duetos/releases/download/latest-release/duetos-release.iso) for production / shipping; [debug ISO](https://github.com/krilliac/duetos/releases/download/latest-debug/duetos-debug.iso) for development. Specialized variants (release-asserts, release-audit for forensic post-incident capture, release-lto, debug-fast) live in the [`latest-flavors`](https://github.com/krilliac/duetos/releases/tag/latest-flavors) channel — see the per-preset notes there or the [build flavors guide](.claude/knowledge/build-flavors-v0.md).
+
+Click a **channel** badge to open the release page, or an **iso ↓** badge to download the ISO directly. The "this release" counter resets when CI re-publishes the rolling channel; "lifetime downloads" sums every asset download across all channels and never resets.
 
 Channel releases are refreshed continuously by CI on every push to `main`, and re-published from **tag builds** (`v*` tags) when a version is cut. The ephemeral per-run uploads in the Actions tab are kept for 7 days for debugging and do not populate the Releases page.
 
@@ -135,12 +138,40 @@ Tools required for the ISO path:
 Clang 18+ (used as both the freestanding kernel compiler and the
 host cross-compiler for the userland Windows PE toolchain).
 
+### Build flavors
+
+The two main presets (`x86_64-debug`, `x86_64-release`) are the
+defaults; five derived presets exercise specific instrumentation
+axes. See [`.claude/knowledge/build-flavors-v0.md`](.claude/knowledge/build-flavors-v0.md)
+for the per-knob matrix.
+
+| Preset | Use when |
+|--------|----------|
+| `x86_64-debug` | Default development. Full instrumentation: assertions on, lock-order audit on, boot self-tests on, klog at Debug, Trace call sites compiled in. |
+| `x86_64-release` | Production / shipping. Optimizer at `-O3`, instrumentation off, klog at Info, Trace call sites elided. |
+| `x86_64-debug-ubsan` | Debug build + `-fsanitize=undefined`. Catches signed overflow, OOB, divrem, alignment. |
+| `x86_64-debug-fast` | Debug binary with cheaper instrumentation (sample-only cap-audit, no lock-order audit). Faster boot, still debug-identifiable RIPs. |
+| `x86_64-release-asserts` | Release optimizer + `DEBUG_ASSERT` invocations + UBSAN runtime. Paranoid production: pay one branch per assert site for early invariant trip detection. |
+| `x86_64-release-audit` | Release + Full cap-gate audit + lock-order audit + boot selftests + klog Trace floor. Forensic post-incident capture build. |
+| `x86_64-release-lto` | Release + ThinLTO. Inlines across TU boundaries; slower link, faster runtime. |
+
+Granular knobs (`DUETOS_BOOT_SELFTESTS`, `DUETOS_ASSERTS`,
+`DUETOS_LOCK_ORDER_AUDIT`, `DUETOS_CAP_AUDIT`, `DUETOS_KLOG_DEFAULT`,
+`DUETOS_KLOG_COMPILE_FLOOR`, `DUETOS_KASLR`, `DUETOS_LTO`) can be
+overridden per-preset or on the cmake command line. The boot
+banner reflects the active set:
+
+```text
+[boot] DuetOS build flavor: debug +asserts +selftests +lockaudit +capaudit=sample +kaslr +trace
+[boot] DuetOS build flavor: release +capaudit=sample +kaslr
+```
+
 ## CI + release automation
 
 All release automation is in-repo under [`.github/workflows/`](.github/workflows/):
 
 - [`build.yml`](.github/workflows/build.yml) runs format + debug/release builds and CI smoke checks.
-- [`release.yml`](.github/workflows/release.yml) publishes rolling channels (`latest-debug`, `latest-release`) from `main` and from `v*` tags.
+- [`release.yml`](.github/workflows/release.yml) publishes rolling channels (`latest-release` + `latest-debug` as front-runners; `latest-flavors` for the specialized presets — release-asserts, release-audit, release-lto, debug-fast) from `main` and from `v*` tags.
 
 Local validation of release logic (same core commands used by CI):
 

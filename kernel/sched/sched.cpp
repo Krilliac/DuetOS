@@ -58,6 +58,7 @@
 #include "mm/kstack.h"
 #include "mm/paging.h"
 #include "sync/spinlock.h"
+#include "util/debug_assert.h"
 #include "util/string.h"
 
 namespace duetos::sched
@@ -935,6 +936,11 @@ void Schedule()
             }
             return;
         }
+        // Documentation-of-invariant: a task pulled off the runqueue
+        // must have been Ready (the only state RunqueuePush accepts).
+        // A non-Ready next means the runqueue's contract was violated
+        // upstream — likely a missing state transition before push.
+        DEBUG_ASSERT(next->state == TaskState::Ready, "sched", "popped task was not Ready");
 
         prev = Current();
         if (prev->state == TaskState::Running)

@@ -37,6 +37,7 @@
 #include "diag/kdbg.h"
 #include "log/klog.h"
 #include "core/panic.h"
+#include "util/debug_assert.h"
 
 // Linker-script symbols. Both are PHYSICAL addresses: the kernel image is
 // loaded contiguously starting at 1 MiB and the bitmap reservation needs
@@ -449,6 +450,12 @@ void FreeFrame(PhysAddr frame)
         core::PanicWithValue("mm/frame_allocator", "FreeFrame called with non-page-aligned address", frame);
     }
     const u64 index = frame >> kPageSizeLog2;
+    // Documentation-of-invariant: by this point we've already checked
+    // alignment, so `index` is the unique frame number for this
+    // physical address. The bit we touch in the bitmap below is a
+    // function of `index`, not `frame` directly; the assert pins the
+    // expectation that the conversion is well-formed.
+    DEBUG_ASSERT(frame == (index << kPageSizeLog2), "mm/frame_allocator", "frame⇄index round-trip mismatch");
 
     // Double-free detection (Class A in runtime-recovery-strategy.md).
     // Silently marking an already-free frame "free" would let the bit

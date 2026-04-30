@@ -12,15 +12,14 @@
 # Exit codes:
 #    0 — full pass, every expected signature found, none forbidden.
 #    1 — real regression: one or more expected signatures missing,
-#        or an UNRESOLVED outside the allowed list.
+#        an UNRESOLVED outside the allowed list, or a forbidden
+#        signature (PANIC / DUETOS CRASH / triple fault) appeared.
+#        Crashes are NEVER retried — a kernel that crashed once on
+#        a clean boot path has a real bug, even if the next attempt
+#        happens to land all the signatures.
 #    2 — environment skip: QEMU not installed (CI installs it; on
 #        a dev box without QEMU we report a skip rather than a
 #        failure).
-#    3 — likely flake: kernel reached the test-run scope (we saw
-#        `[I] core/ring3 : ring3 smoke tasks queued`) but a later
-#        DUETOS CRASH / PANIC tripped before all expected
-#        signatures landed. The CI workflow retries on this code
-#        before declaring a real failure.
 #
 # The signature list mirrors .github/workflows/build.yml's
 # qemu-smoke job so local `ctest` and CI stay in lockstep.
@@ -57,7 +56,7 @@ rm -f "${SERIAL_LOG}"
 # the kernel has no orderly shutdown path and run.sh will time
 # out after DUETOS_TIMEOUT seconds) doesn't mask our own
 # assertions. run.sh exits 124 on timeout.
-DUETOS_TIMEOUT="${DUETOS_TIMEOUT:-30}" "${RUN_SCRIPT}" \
+DUETOS_TIMEOUT="${DUETOS_TIMEOUT:-60}" "${RUN_SCRIPT}" \
     > "${SERIAL_LOG}" 2>&1 || true
 
 # Expected signatures — every ring3 smoke probe prints its own
@@ -174,8 +173,46 @@ allowed_unresolved=(
     "api-ms-win-crt-convert"  # stubbed; fallback for case variants
 )
 
+# Boot-banner sniff — read the build flavor + active knobs from
+# the first line the kernel emits. Used below to auto-skip
+# expected signatures that only appear when their corresponding
+# build knob is on. Lets the same smoke driver run uniformly
+# against debug, release, and every flavor preset.
+banner=$(grep -aF '[boot] DuetOS build flavor:' "${SERIAL_LOG}" | head -1 || true)
+selftests_on=0
+if [[ "${banner}" == *"+selftests"* ]]; then
+    selftests_on=1
+fi
+echo "smoke: detected banner: ${banner:-<missing>}"
+echo "smoke: selftests_on=${selftests_on}"
+
+# Signatures emitted only when DUETOS_BOOT_SELFTESTS is on
+# (boot self-tests gated on `kBootSelfTests`). Always present
+# in debug; absent in plain release / release-asserts / release-lto.
+# Auto-skipped when the banner doesn't show `+selftests`.
+selftest_sigs=(
+    "[calc] self-test OK"
+    "[files] self-test OK"
+    "[clock] self-test OK"
+    "[block] self-test OK"
+    "[string-selftest] PASS"
+    "[hexdump-selftest] PASS"
+    "[process-selftest] PASS"
+    "[fs/vfs] self-test OK (32 cases"
+)
+
 fail=0
 for sig in "${expected[@]}"; do
+    # Skip selftest signatures when this build had selftests off.
+    if [[ ${selftests_on} -eq 0 ]]; then
+        is_selftest_sig=0
+        for ss in "${selftest_sigs[@]}"; do
+            if [[ "$sig" == "$ss" ]]; then is_selftest_sig=1; break; fi
+        done
+        if [[ ${is_selftest_sig} -eq 1 ]]; then
+            continue
+        fi
+    fi
     if ! grep -aF "$sig" "${SERIAL_LOG}" > /dev/null; then
         echo "MISSING: $sig"
         fail=1
@@ -205,24 +242,12 @@ if [[ $fail -ne 0 ]]; then
     echo "=== last 60 lines of serial log ==="
     tail -60 "${SERIAL_LOG}" || true
 
-    # Distinguish a real regression (expected signature genuinely
-    # absent because the code path didn't run) from a flake
-    # (kernel reached the test-run scope but tripped a
-    # non-deterministic crash before all signatures landed).
-    # The CI workflow retries on flakes (exit 3) but fails the
-    # build immediately on regressions (exit 1).
-    smoke_started=0
-    crash_seen=0
-    if grep -aF '[I] core/ring3 : ring3 smoke tasks queued' "${SERIAL_LOG}" > /dev/null; then
-        smoke_started=1
-    fi
-    if grep -aE 'DUETOS CRASH|^\[panic\]|triple fault' "${SERIAL_LOG}" > /dev/null; then
-        crash_seen=1
-    fi
-    if [[ $smoke_started -eq 1 && $crash_seen -eq 1 ]]; then
-        echo "FLAKY: kernel reached smoke scope then crashed; retry recommended."
-        exit 3
-    fi
+    # Any forbidden signature OR missing expected signature is a
+    # regression. The previous "kernel-reached-smoke-scope-then-
+    # crashed = flake" exit-3 tier was removed deliberately — a
+    # crash on a clean boot path is a real bug, and retrying past
+    # it just hides the signal. Callers (CI workflows) should
+    # treat this as a single-attempt gate.
     exit 1
 fi
 

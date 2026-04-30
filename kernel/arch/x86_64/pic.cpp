@@ -30,6 +30,30 @@ inline void IoWait()
 
 void PicDisable()
 {
+    // The PIC reconfigure is a multi-port-write sequence. If a hardware
+    // IRQ is delivered between ICW1 (which puts the chip in init mode)
+    // and ICW2 (which programs the new vector base), the chip's behaviour
+    // is implementation-defined: some 8259 variants and some QEMU TCG
+    // configurations have been observed to deliver a held line to the
+    // PRE-init vector base. If that base is 0 (firmware never programmed
+    // it), the IRQ lands at vector 0 = #DE handler. This is the root
+    // cause of the CI flake captured in
+    // `.claude/knowledge/qemu-smoke-pic-de-flake-v0.md`.
+    //
+    // Defence: hard-mask interrupts at the CPU level for the entire
+    // sequence, AND mask every line at the chip level BEFORE the init
+    // sequence begins. Belt and suspenders — either alone would fix the
+    // observed flake; together they're robust against future emulator
+    // quirks too.
+    const u64 saved_rflags = ReadRflags();
+    Cli();
+
+    // OCW1 (chip-level mask) BEFORE ICW1. The data port is the OCW1
+    // mask register while the chip is in operational mode, so this
+    // write lands as "mask all lines" before we enter init.
+    Outb(kPicMasterData, 0xFF);
+    Outb(kPicSlaveData, 0xFF);
+
     // ICW1 — start the init sequence on both PICs.
     Outb(kPicMasterCmd, kIcw1Init);
     IoWait();
@@ -58,10 +82,21 @@ void PicDisable()
     Outb(kPicSlaveData, kIcw4_8086);
     IoWait();
 
-    // OCW1 — mask every line on both chips. From here on no IRQ from the
-    // 8259 reaches the CPU.
+    // OCW1 — re-mask every line on both chips. The init sequence
+    // resets the IMR on some variants, so the pre-ICW1 mask doesn't
+    // necessarily survive. From here on no IRQ from the 8259 reaches
+    // the CPU.
     Outb(kPicMasterData, 0xFF);
     Outb(kPicSlaveData, 0xFF);
+
+    // Restore the caller's interrupt-enable state. Most callers run
+    // with IF=1 (kernel boot post-IDT-setup); preserving rflags lets
+    // PicDisable be called from either context without surprising the
+    // caller.
+    if ((saved_rflags & (1ULL << 9)) != 0)
+    {
+        Sti();
+    }
 
     core::Log(core::LogLevel::Info, "arch/pic", "8259 remapped (0x20..0x2F) and fully masked");
 }

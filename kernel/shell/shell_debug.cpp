@@ -37,6 +37,7 @@
 #include "diag/soft_lockup.h"
 #include "diag/ubsan.h"
 #include "mm/zone.h"
+#include "security/cap_audit.h"
 #include "security/driver_domain.h"
 #include "security/fault_domain.h"
 #include "sync/lockdep.h"
@@ -196,6 +197,7 @@ void CmdInspectHelp()
     ConsoleWriteln("  INSPECT OPCODES <PATH>            FIRST-BYTE HISTOGRAM + CLASS TALLY");
     ConsoleWriteln("  INSPECT ARM ON|OFF|STATUS         ONE-SHOT OPCODES SCAN ON NEXT SPAWN");
     ConsoleWriteln("  INSPECT LOCKDEP                   LOCKDEP COUNTERS + REGISTERED CLASSES");
+    ConsoleWriteln("  INSPECT CAP-AUDIT                 CAP-GATE AUDIT MODE + CALL/DENY COUNTERS");
     ConsoleWriteln("  INSPECT DOMAINS                   FAULT DOMAINS (DRIVER + HAND-REGISTERED)");
     ConsoleWriteln("  INSPECT ZONES                     PER-ZONE ALLOCATOR STATS");
     ConsoleWriteln("  INSPECT THREADS                   TASK ROSTER");
@@ -517,6 +519,63 @@ void CmdInspectLockdep()
     ConsoleWriteln(" (CLASS LIST ON COM1)");
 }
 
+// Helper: render a CapAuditMode as a stable lowercase string. The
+// shell prints this in user-facing output; inspect/dispatch parse
+// it case-insensitively.
+const char* CapAuditModeName(::duetos::core::CapAuditMode mode)
+{
+    using ::duetos::core::CapAuditMode;
+    switch (mode)
+    {
+    case CapAuditMode::Off:
+        return "off";
+    case CapAuditMode::Sample:
+        return "sample";
+    case CapAuditMode::Full:
+        return "full";
+    }
+    return "?";
+}
+
+// `inspect cap-audit` — surface the cap-gate audit's runtime state:
+// compile-time mode (the floor a release operator is locked into),
+// current runtime mode, total calls + denies observed, sample stride.
+//
+// Output goes to COM1 (machine-greppable) plus a one-line summary
+// on the console matching the `inspect lockdep` shape.
+void CmdInspectCapAudit()
+{
+    using duetos::arch::SerialWrite;
+    using duetos::arch::SerialWriteHex;
+
+    const auto compile_mode = ::duetos::security::CapAuditCompileTimeMode();
+    const auto runtime_mode = ::duetos::security::CapAuditGetMode();
+    const u64 calls = ::duetos::security::CapAuditCallCount();
+    const u64 denies = ::duetos::security::CapAuditDenyCount();
+
+    SerialWrite("[inspect-cap-audit] compile-mode=");
+    SerialWrite(CapAuditModeName(compile_mode));
+    SerialWrite(" runtime-mode=");
+    SerialWrite(CapAuditModeName(runtime_mode));
+    SerialWrite(" calls=");
+    SerialWriteHex(calls);
+    SerialWrite(" denies=");
+    SerialWriteHex(denies);
+    SerialWrite(" sample-stride=");
+    SerialWriteHex(::duetos::core::kCapAuditSampleStride);
+    SerialWrite("\n");
+
+    ConsoleWrite("INSPECT CAP-AUDIT: mode=");
+    ConsoleWrite(CapAuditModeName(runtime_mode));
+    ConsoleWrite(" (compile-floor=");
+    ConsoleWrite(CapAuditModeName(compile_mode));
+    ConsoleWrite(") calls=");
+    WriteU64Dec(calls);
+    ConsoleWrite(" denies=");
+    WriteU64Dec(denies);
+    ConsoleWriteChar('\n');
+}
+
 // Walk every row of `kSyscallCapTable` and print, for each:
 //   - the syscall number (decimal + hex),
 //   - its `SYS_FOO` identifier (via `SyscallNumberName`),
@@ -827,6 +886,58 @@ void CmdLockdepPanic(u32 argc, char** argv)
     ConsoleWriteln("LOCKDEP PANIC: ARG MUST BE ON OR OFF");
 }
 
+// `cap-audit mode <off|sample|full>` — flip the runtime audit
+// verbosity for the cap-gate hook. The build-flavor compile-time
+// mode acts as a floor: an Off-at-compile-time build cannot honor
+// a runtime flip because the EmitLine path was eliminated. The
+// handler surfaces that as a warning so the operator knows the
+// rebuild is required.
+//
+// External linkage so the dispatcher can reach it from
+// shell_dispatch.cpp.
+void CmdCapAuditMode(u32 argc, char** argv)
+{
+    if (argc < 3)
+    {
+        ConsoleWriteln("CAP-AUDIT: USAGE: CAP-AUDIT MODE OFF|SAMPLE|FULL");
+        return;
+    }
+    const char* arg = argv[2];
+    using ::duetos::core::CapAuditMode;
+    CapAuditMode requested;
+    if (StrEq(arg, "off"))
+    {
+        requested = CapAuditMode::Off;
+    }
+    else if (StrEq(arg, "sample"))
+    {
+        requested = CapAuditMode::Sample;
+    }
+    else if (StrEq(arg, "full"))
+    {
+        requested = CapAuditMode::Full;
+    }
+    else
+    {
+        ConsoleWriteln("CAP-AUDIT MODE: ARG MUST BE OFF, SAMPLE, OR FULL");
+        return;
+    }
+
+    if (!::duetos::security::CapAuditSetMode(requested))
+    {
+        // CapAuditSetMode returned false — this build has the
+        // compile-time mode pinned at Off, so EmitLine isn't linked
+        // in and there's no runtime path that would honor the flip.
+        // Tell the operator instead of letting the change look like
+        // it landed.
+        ConsoleWriteln("CAP-AUDIT MODE: NOT SUPPORTED ON THIS BUILD (COMPILE-MODE=OFF)");
+        ConsoleWriteln("  REBUILD WITH -DDUETOS_CAP_AUDIT=Sample OR Full TO ENABLE");
+        return;
+    }
+    ConsoleWrite("CAP-AUDIT: mode set to ");
+    ConsoleWriteln(CapAuditModeName(requested));
+}
+
 // `tracer dump` — print the dynamic event trace ring oldest-
 // first (plan D2-followup). Walks via EventTraceSnapshot into a
 // scratch heap buffer; prints one row per event. No filter
@@ -1022,6 +1133,11 @@ void CmdInspect(u32 argc, char** argv)
     if (StrEq(argv[1], "lockdep"))
     {
         CmdInspectLockdep();
+        return;
+    }
+    if (StrEq(argv[1], "cap-audit"))
+    {
+        CmdInspectCapAudit();
         return;
     }
     if (StrEq(argv[1], "domains"))

@@ -94,6 +94,72 @@ jobs:
           path: dist/**
           retention-days: 14
 
+  build-flavor-assets:
+    # Build the four non-default flavor presets in parallel.
+    # These are alternate-instrumentation builds of the same source
+    # — a forensic-release operator or a paranoid-production
+    # deployment can grab the matching ISO without rebuilding.
+    # Debug + release are the front-runner channels; this matrix
+    # publishes everything else.
+    name: build flavor (${{ matrix.preset }})
+    runs-on: ubuntu-24.04
+    needs: build-release-assets
+    outputs:
+      source_ref: ${{ needs.build-release-assets.outputs.source_ref }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - preset: x86_64-release-asserts
+            asset_name: duetos-release-asserts.iso
+            kernel_name: duetos-kernel-release-asserts.elf
+            label: release-asserts
+          - preset: x86_64-release-audit
+            asset_name: duetos-release-audit.iso
+            kernel_name: duetos-kernel-release-audit.elf
+            label: release-audit
+          - preset: x86_64-release-lto
+            asset_name: duetos-release-lto.iso
+            kernel_name: duetos-kernel-release-lto.elf
+            label: release-lto
+          - preset: x86_64-debug-fast
+            asset_name: duetos-debug-fast.iso
+            kernel_name: duetos-kernel-debug-fast.elf
+            label: debug-fast
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Checkout source ref
+        run: git checkout "${{ needs.build-release-assets.outputs.source_ref }}"
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 lld-18 llvm-18 cmake ninja-build python3 \
+                                  grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools
+          sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
+          sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
+          sudo ln -sf /usr/bin/lld-link-18 /usr/local/bin/lld-link
+          sudo ln -sf /usr/bin/llvm-dlltool-18 /usr/local/bin/llvm-dlltool
+          sudo ln -sf /usr/bin/ld.lld-18 /usr/local/bin/ld.lld
+      - name: Build ${{ matrix.preset }}
+        run: |
+          cmake --preset ${{ matrix.preset }}
+          cmake --build build/${{ matrix.preset }} --parallel $(nproc)
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p dist/flavors
+          cp build/${{ matrix.preset }}/duetos.iso dist/flavors/${{ matrix.asset_name }}
+          cp build/${{ matrix.preset }}/kernel/duetos-kernel.elf dist/flavors/${{ matrix.kernel_name }}
+      - name: Upload flavor asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: duetos-flavor-${{ matrix.label }}-${{ needs.build-release-assets.outputs.source_ref }}
+          if-no-files-found: error
+          path: dist/flavors/**
+          retention-days: 14
+
   release-smoke-gate:
     name: qemu smoke gate (optional)
     needs: build-release-assets
@@ -119,6 +185,75 @@ jobs:
           cp dist/debug/duetos-debug.iso build/x86_64-debug/duetos.iso
       - name: Run smoke test
         run: DUETOS_TIMEOUT=30 tools/test/ctest-boot-smoke.sh build/x86_64-debug
+
+  flavor-smoke-gate:
+    # Per-flavor smoke gate. Same opt-in trigger as release-smoke-gate
+    # — runs only on workflow_dispatch with smoke_gate=true or when
+    # the RELEASE_SMOKE_GATE workflow var is set.
+    #
+    # Uses the bringup profile (kernel boots through bringup-complete
+    # and exits via isa-debug-exit). Lighter than the ctest driver,
+    # but exercises every compile-time flavor decision up through
+    # driver init — sufficient signal for "this flavor's build axes
+    # don't break boot." The full ring3 + Win32 + driver smoke is
+    # already covered by the qemu-smoke matrix on the debug build.
+    name: flavor smoke gate (${{ matrix.preset }})
+    needs: [build-release-assets, build-flavor-assets]
+    runs-on: ubuntu-24.04
+    if: |
+      (github.event_name == 'workflow_dispatch' && inputs.smoke_gate) ||
+      (github.event_name != 'workflow_dispatch' && vars.RELEASE_SMOKE_GATE == 'true')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - preset: x86_64-release-asserts
+            label: release-asserts
+          - preset: x86_64-release-audit
+            label: release-audit
+          - preset: x86_64-release-lto
+            label: release-lto
+          - preset: x86_64-debug-fast
+            label: debug-fast
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU + grub
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 grub-common grub-pc-bin \
+                                  grub-efi-amd64-bin xorriso mtools ovmf
+      - name: Download flavor artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: duetos-flavor-${{ matrix.label }}-${{ needs.build-release-assets.outputs.source_ref }}
+          path: dist-flavor
+      - name: Stage ISO + kernel for smoke driver
+        run: |
+          # profile-boot-smoke.sh regenerates a per-profile ISO from
+          # the kernel ELF, so we need the kernel ELF in the
+          # standard build/<preset>/kernel/ location, not the
+          # pre-built ISO. Stage the artifact accordingly.
+          mkdir -p build/${{ matrix.preset }}/kernel
+          cp dist-flavor/flavors/duetos-kernel-${{ matrix.label }}.elf \
+             build/${{ matrix.preset }}/kernel/duetos-kernel.elf
+      - name: Smoke bringup
+        shell: bash
+        run: |
+          # Single-attempt smoke gate. profile-boot-smoke.sh exits:
+          #   0 = pass, 1 = regression (incl. crash), 2 = env skip.
+          # No retry — a crash on a clean boot path is a real bug
+          # the publish gate must catch. Regression and crash are
+          # both rc=1.
+          set +e
+          echo "::group::flavor-smoke ${{ matrix.preset }} bringup"
+          DUETOS_PRESET=${{ matrix.preset }} \
+          DUETOS_TIMEOUT=480 \
+            tools/test/profile-boot-smoke.sh bringup build/${{ matrix.preset }}
+          rc=$?
+          echo "::endgroup::"
+          if [[ $rc -eq 1 ]]; then echo "::error::flavor=${{ matrix.preset }} regression"; fi
+          if [[ $rc -eq 2 ]]; then echo "::warning::QEMU not available; smoke skipped"; rc=0; fi
+          exit $rc
 
   pre-publish-lifetime-snapshot:
     # Snapshot current asset download counts into the persisted
@@ -157,6 +292,19 @@ jobs:
           name: DuetOS Debug (from ${{ needs.build-release-assets.outputs.source_ref }})
           body: |
             Rolling debug channel build from `${{ needs.build-release-assets.outputs.source_ref }}`.
+
+            **This is the development / debugging download.** Boots
+            with `-Og`, full instrumentation: `KASSERT` + `DEBUG_ASSERT`
+            on, lock-order audit on, boot self-tests on, klog at
+            Debug level, Trace call sites compiled in (enable with
+            `loglevel t` at the shell). Useful when chasing a bug or
+            developing against the kernel's debug surface.
+
+            For end users, see
+            [`latest-release`](../../releases/tag/latest-release).
+            For specialized variants (audit, asserts, LTO, fast),
+            see
+            [`latest-flavors`](../../releases/tag/latest-flavors).
           prerelease: true
           make_latest: false
           fail_on_unmatched_files: true
@@ -189,6 +337,17 @@ jobs:
           name: DuetOS Release (from ${{ needs.build-release-assets.outputs.source_ref }})
           body: |
             Rolling stable release channel build from `${{ needs.build-release-assets.outputs.source_ref }}`.
+
+            **This is the primary download for end users.** Boots
+            with `-O3` optimization, instrumentation off, klog at
+            Info level — production-shape image.
+
+            For development / debugging, see the rolling
+            [`latest-debug`](../../releases/tag/latest-debug)
+            channel. For specialized variants (paranoid release
+            with assertions, forensic post-incident capture, ThinLTO
+            optimization, fast debug), see
+            [`latest-flavors`](../../releases/tag/latest-flavors).
           prerelease: false
           make_latest: true
           fail_on_unmatched_files: true
@@ -197,3 +356,133 @@ jobs:
             dist/release/duetos-release.iso
             dist/release/duetos-kernel-release.elf
             dist/release/SHA256SUMS.txt
+
+  publish-flavor-channels:
+    # Bundle the four non-default flavor ISOs into one rolling
+    # `latest-flavors` channel. Keeps the release page tidy: end
+    # users land on `latest-release`, devs on `latest-debug`, and
+    # anyone with a specialized need (audit, asserts, LTO, fast)
+    # follows the breadcrumb from those primary releases to here.
+    #
+    # Gates on flavor-smoke-gate when it ran (opt-in via the same
+    # workflow var as release-smoke-gate). Skipped flavor smoke
+    # is allowed (matches release-smoke-gate's allow-skip
+    # behavior); a failed flavor smoke blocks the publish so a
+    # broken flavor never ships.
+    name: publish flavor channel
+    needs:
+      - build-release-assets
+      - build-flavor-assets
+      - release-smoke-gate
+      - flavor-smoke-gate
+      - pre-publish-lifetime-snapshot
+    if: |
+      always() && needs.build-release-assets.result == 'success' &&
+      needs.build-flavor-assets.result == 'success' &&
+      (needs.release-smoke-gate.result == 'success' || needs.release-smoke-gate.result == 'skipped') &&
+      (needs.flavor-smoke-gate.result == 'success' || needs.flavor-smoke-gate.result == 'skipped') &&
+      (needs.pre-publish-lifetime-snapshot.result == 'success' || needs.pre-publish-lifetime-snapshot.result == 'failure')
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download flavor artifacts
+        uses: actions/download-artifact@v4
+        with:
+          # download-artifact with no `name` pulls every artifact
+          # produced by this run; the merge-multiple flag flattens
+          # them into one tree so the same dist/flavors/ directory
+          # collects every preset's payload.
+          path: dist
+          merge-multiple: true
+
+      - name: Stage flavor assets + checksums
+        run: |
+          set -euo pipefail
+          # The flavor-asset artifacts each upload a `flavors/`
+          # subdirectory; merge-multiple collapses them. Verify
+          # we have exactly the four ISOs + four ELFs we expect.
+          ls -la dist/flavors/
+          test -f dist/flavors/duetos-release-asserts.iso
+          test -f dist/flavors/duetos-release-audit.iso
+          test -f dist/flavors/duetos-release-lto.iso
+          test -f dist/flavors/duetos-debug-fast.iso
+          ( cd dist/flavors && sha256sum *.iso *.elf > SHA256SUMS.txt )
+
+      - name: Publish flavor channel
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-flavors
+          target_commitish: ${{ needs.build-release-assets.outputs.source_ref }}
+          name: DuetOS Build Flavors (from ${{ needs.build-release-assets.outputs.source_ref }})
+          body: |
+            Rolling channel for non-default build flavors. Built from
+            the same source as `latest-release` and `latest-debug`,
+            but with specialized instrumentation axes turned on or
+            optimization tuned.
+
+            For most users, **the front-runner channels are what
+            you want**:
+
+            - [`latest-release`](../../releases/tag/latest-release) — production / shipping
+            - [`latest-debug`](../../releases/tag/latest-debug) — development / debugging
+
+            Reach for one of the flavors below only when you have a
+            specific reason. See
+            [`.claude/knowledge/build-flavors-v0.md`](https://github.com/Krilliac/duetos/blob/main/.claude/knowledge/build-flavors-v0.md)
+            for the per-knob matrix.
+
+            ## Available flavors
+
+            ### `duetos-release-asserts.iso` — paranoid release
+            Release optimization (`-O3`) + `DEBUG_ASSERT()` invocations
+            kept on + UBSAN runtime. Pay one branch per assert site to
+            catch invariant violations early in production. Use when
+            you'd rather panic-on-bug than silently corrupt state, and
+            the runtime cost of the extra checks is acceptable.
+
+            ### `duetos-release-audit.iso` — forensic post-incident capture
+            Release shape with full cap-gate audit + lock-order audit +
+            boot self-tests + klog Trace floor. Boots normally; emits
+            a per-syscall cap-gate trace, every lock acquire/release,
+            and Trace-level klog timeline to serial.
+            **Use case**: a user reports a security incident or
+            mystery crash on `latest-release`. Build/run this same-
+            source-different-image to reproduce the bug with witnesses.
+            See the design notes in `build-flavors-v0.md` for the
+            workflow.
+
+            ### `duetos-release-lto.iso` — ThinLTO release
+            Release optimization + cross-TU inlining via lld's
+            ThinLTO. Slower link, faster runtime. Use for benchmarking
+            the upper bound of a release-shape build's throughput.
+
+            ### `duetos-debug-fast.iso` — debug, but cheaper instrumentation
+            Debug binary (debug-identifiable RIPs, full Trace
+            compiled in, KASSERT on) with sample-only cap-audit
+            instead of Full and lock-order audit off. Boots faster
+            than `latest-debug` while preserving most of the
+            debugger-friendly properties.
+
+            ## Reading the boot banner
+
+            Every kernel image prints its build flavor on the first
+            serial line, so you can confirm which ISO you booted:
+
+            ```
+            [boot] DuetOS build flavor: release +selftests +lockaudit +capaudit=full +kaslr +trace
+            ```
+
+            The `+` tags map directly to the build-flavor knobs.
+          prerelease: true
+          make_latest: false
+          fail_on_unmatched_files: true
+          overwrite_files: true
+          files: |
+            dist/flavors/duetos-release-asserts.iso
+            dist/flavors/duetos-kernel-release-asserts.elf
+            dist/flavors/duetos-release-audit.iso
+            dist/flavors/duetos-kernel-release-audit.elf
+            dist/flavors/duetos-release-lto.iso
+            dist/flavors/duetos-kernel-release-lto.elf
+            dist/flavors/duetos-debug-fast.iso
+            dist/flavors/duetos-kernel-debug-fast.elf
+            dist/flavors/SHA256SUMS.txt

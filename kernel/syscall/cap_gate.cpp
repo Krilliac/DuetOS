@@ -13,6 +13,7 @@
 #include "core/panic.h"
 #include "log/klog.h"
 #include "proc/process.h"
+#include "security/cap_audit.h"
 #include "util/result.h"
 #include "util/types.h"
 
@@ -64,12 +65,26 @@ Result<void> SyscallGate(u64 syscall_number, const Process* proc)
     }
 
     const CapSet held = (proc != nullptr) ? proc->caps : CapSetEmpty();
-    if ((held.bits & required) == required)
+    const bool allowed = ((held.bits & required) == required);
+    const Cap missing = allowed ? kCapNone : FirstMissingCap(required, held);
+
+    // Audit hook — fires on every cap-gated syscall regardless of
+    // outcome. Behavior governed by the build-flavor knob
+    // `core::kCapAuditMode`; in Off mode the trace is a near-NOP.
+    // See kernel/security/cap_audit.{h,cpp}.
+    duetos::security::CapAuditEvent event{
+        /*syscall_number*/ syscall_number,
+        /*proc_id*/ proc != nullptr ? proc->pid : 0,
+        /*required_mask*/ required,
+        /*missing*/ missing,
+    };
+    duetos::security::CapAuditTrace(event);
+
+    if (allowed)
     {
         return {};
     }
 
-    const Cap missing = FirstMissingCap(required, held);
     RecordSandboxDenial(missing);
     KLOG_WARN_V("syscall-gate", "cap denied", syscall_number);
     return Err{ErrorCode::PermissionDenied};

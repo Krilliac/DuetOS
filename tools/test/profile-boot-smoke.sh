@@ -8,12 +8,12 @@
 #
 #   0 — full pass, every expected signature found, none forbidden.
 #   1 — real regression: one or more expected signatures missing,
-#       or a forbidden signature (PANIC / triple fault / unexpected
-#       UNRESOLVED) appeared.
+#       or a forbidden signature (PANIC / DUETOS CRASH / triple
+#       fault / unexpected UNRESOLVED) appeared. Crashes are NEVER
+#       retried — a kernel that crashed once on a clean boot path
+#       has a real bug, even if the next attempt happens to land
+#       all the signatures.
 #   2 — environment skip: QEMU not installed.
-#   3 — likely flake: kernel reached the profile's spawn scope but
-#       a later crash tripped before the [smoke] complete sentinel
-#       landed. The CI workflow retries on this code.
 #
 # The profile names mirror kernel/test/smoke_profile.h (the kernel
 # is the source of truth):
@@ -163,9 +163,38 @@ case "${PROFILE}" in
         ;;
 esac
 
+# Boot-banner sniff — selftest pass-marker signatures
+# (string/hexdump/fs-vfs) only appear when the build was compiled
+# with DUETOS_BOOT_SELFTESTS=ON. Auto-skip them when the banner
+# doesn't show `+selftests` so this driver runs uniformly across
+# debug, release, and every flavor preset.
+banner=$(grep -aF '[boot] DuetOS build flavor:' "${SERIAL_LOG}" | head -1 || true)
+selftests_on=0
+if [[ "${banner}" == *"+selftests"* ]]; then
+    selftests_on=1
+fi
+echo "smoke: profile=${PROFILE} banner=${banner:-<missing>}"
+echo "smoke: selftests_on=${selftests_on}"
+
+selftest_sigs=(
+    "[string-selftest] PASS"
+    "[hexdump-selftest] PASS"
+    "[fs/vfs] self-test OK"
+)
+
 fail=0
 missing=()
 for sig in "${expected[@]}"; do
+    # Skip selftest-only signatures when this build had selftests off.
+    if [[ ${selftests_on} -eq 0 ]]; then
+        is_selftest_sig=0
+        for ss in "${selftest_sigs[@]}"; do
+            if [[ "$sig" == "$ss" ]]; then is_selftest_sig=1; break; fi
+        done
+        if [[ ${is_selftest_sig} -eq 1 ]]; then
+            continue
+        fi
+    fi
     if ! grep -aF "$sig" "${SERIAL_LOG}" > /dev/null; then
         missing+=("$sig")
         fail=1
@@ -198,23 +227,13 @@ if [[ $fail -ne 0 ]]; then
     echo "=== relevant ring3 / PE / Linux output (probe payload check) ==="
     grep -aE '^\[hello-pe\]|^\[hello-winapi\]|^\[vcruntime140\]|^\[strings\]|^\[heap\]|^\[advapi\]|^\[perf-counter\]|^\[heap-resize\]|^\[calc\]|^\[files\]|^\[clock\]|^\[block\]|^Hello from ring 3|^DuetOS v0|^Windows Kill|^\[ring3\] pe spawn|exit rc' "${SERIAL_LOG}" | head -40 || true
 
-    # Distinguish a real regression from a flake. If the kernel
-    # reached the [smoke] complete sentinel for THIS profile, but
-    # a sub-signature is missing, that's a regression. If the
-    # sentinel itself is missing AND a crash signature is
-    # present, treat as flake (CI retries).
-    sentinel_seen=0
-    crash_seen=0
-    if grep -aF "[smoke] profile=${PROFILE} complete" "${SERIAL_LOG}" > /dev/null; then
-        sentinel_seen=1
-    fi
-    if grep -aE 'DUETOS CRASH|^\[panic\]|triple fault' "${SERIAL_LOG}" > /dev/null; then
-        crash_seen=1
-    fi
-    if [[ $sentinel_seen -eq 0 && $crash_seen -eq 1 ]]; then
-        echo "FLAKY: kernel crashed before [smoke] complete sentinel; retry recommended."
-        exit 3
-    fi
+    # Any forbidden signature OR missing expected signature is a
+    # regression. We don't distinguish "crashed-before-sentinel" as
+    # a flake any more — if the kernel crashed during a clean boot
+    # path, that's a real bug, and retrying past it just hides the
+    # signal. The exit-3 retry tier was removed deliberately;
+    # callers (CI workflows) should treat this as a single-attempt
+    # gate.
     exit 1
 fi
 

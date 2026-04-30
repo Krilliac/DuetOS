@@ -610,25 +610,25 @@ u32 Tokenize(char* buf, char** argv)
 // New commands added here + dispatched in Dispatch — keeping
 // the two in sync is the price of not having reflection.
 const char* const kCommandSet[] = {
-    "help",      "about",    "version", "clear",    "uptime",   "date",      "windows",    "mode",       "ls",
-    "cat",       "touch",    "rm",      "echo",     "cp",       "mv",        "wc",         "head",       "tail",
-    "dmesg",     "stats",    "mem",     "history",  "set",      "unset",     "env",        "alias",      "unalias",
-    "sysinfo",   "source",   "man",     "grep",     "find",     "time",      "which",      "seq",        "sort",
-    "uniq",      "cpuid",    "cr",      "rflags",   "tsc",      "hpet",      "ticks",      "msr",        "lapic",
-    "smp",       "lspci",    "heap",    "paging",   "fb",       "kbdstats",  "mousestats", "loglevel",   "logcolor",
-    "kdbg",      "getenv",   "yield",   "reboot",   "halt",     "uname",     "whoami",     "hostname",   "pwd",
-    "true",      "false",    "mount",   "lsmod",    "lsblk",    "lsgpt",     "free",       "ps",         "spawn",
-    "readelf",   "hexdump",  "stat",    "basename", "dirname",  "cal",       "sleep",      "reset",      "tac",
-    "nl",        "rev",      "expr",    "color",    "rand",     "flushtlb",  "checksum",   "repeat",     "kill",
-    "exec",      "metrics",  "trace",   "read",     "guard",    "top",       "fatcat",     "fatls",      "fatwrite",
-    "fatappend", "fatnew",   "fatrm",   "fattrunc", "fatmkdir", "fatrmdir",  "linuxexec",  "translate",  "smbios",
-    "power",     "battery",  "thermal", "temp",     "gpu",      "lsgpu",     "gfx",        "nic",        "lsnic",
-    "ip",        "arp",      "ipv4",    "uuid",     "uuidgen",  "health",    "checkup",    "attacksim",  "redteam",
-    "memdump",   "ifconfig", "netinfo", "dhcp",     "route",    "netscan",   "wifi",       "fwpolicy",   "fwtrace",
-    "crtrace",   "crprobe",  "net",     "usbnet",   "instr",    "dumpstate", "bp",         "breakpoint", "login",
-    "logout",    "passwd",   "useradd", "userdel",  "users",    "who",       "su",         "hwmon",      "vbe",
-    "ping",      "nslookup", "ntp",     "http",     "shutdown", "poweroff",  "beep",       "inspect",    "theme",
-    "addr2sym",
+    "help",      "about",     "version", "clear",    "uptime",   "date",      "windows",    "mode",       "ls",
+    "cat",       "touch",     "rm",      "echo",     "cp",       "mv",        "wc",         "head",       "tail",
+    "dmesg",     "stats",     "mem",     "history",  "set",      "unset",     "env",        "alias",      "unalias",
+    "sysinfo",   "source",    "man",     "grep",     "find",     "time",      "which",      "seq",        "sort",
+    "uniq",      "cpuid",     "cr",      "rflags",   "tsc",      "hpet",      "ticks",      "msr",        "lapic",
+    "smp",       "lspci",     "heap",    "paging",   "fb",       "kbdstats",  "mousestats", "loglevel",   "logcolor",
+    "kdbg",      "getenv",    "yield",   "reboot",   "halt",     "uname",     "whoami",     "hostname",   "pwd",
+    "true",      "false",     "mount",   "lsmod",    "lsblk",    "lsgpt",     "free",       "ps",         "spawn",
+    "readelf",   "hexdump",   "stat",    "basename", "dirname",  "cal",       "sleep",      "reset",      "tac",
+    "nl",        "rev",       "expr",    "color",    "rand",     "flushtlb",  "checksum",   "repeat",     "kill",
+    "exec",      "metrics",   "trace",   "read",     "guard",    "top",       "fatcat",     "fatls",      "fatwrite",
+    "fatappend", "fatnew",    "fatrm",   "fattrunc", "fatmkdir", "fatrmdir",  "linuxexec",  "translate",  "smbios",
+    "power",     "battery",   "thermal", "temp",     "gpu",      "lsgpu",     "gfx",        "nic",        "lsnic",
+    "ip",        "arp",       "ipv4",    "uuid",     "uuidgen",  "health",    "checkup",    "attacksim",  "redteam",
+    "memdump",   "ifconfig",  "netinfo", "dhcp",     "route",    "netscan",   "wifi",       "fwpolicy",   "fwtrace",
+    "crtrace",   "crprobe",   "net",     "usbnet",   "instr",    "dumpstate", "bp",         "breakpoint", "login",
+    "logout",    "passwd",    "useradd", "userdel",  "users",    "who",       "su",         "hwmon",      "vbe",
+    "ping",      "nslookup",  "ntp",     "http",     "shutdown", "poweroff",  "beep",       "inspect",    "theme",
+    "addr2sym",  "cap-audit",
 };
 const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1331,6 +1331,23 @@ void Dispatch(char* line)
             return;
         }
         ConsoleWriteln("LOCKDEP: USAGE: LOCKDEP PANIC ON|OFF");
+        return;
+    }
+    if (StrEq(cmd, "cap-audit"))
+    {
+        // `cap-audit mode <off|sample|full>` — flip the runtime
+        // verbosity for the cap-gate audit hook. Admin-gated for
+        // the same reason loglevel is: a non-admin flipping the
+        // mode to Off would silence forensic evidence while
+        // mounting further attacks.
+        if (!RequireAdmin("CAP-AUDIT"))
+            return;
+        if (argc >= 2 && StrEq(argv[1], "mode"))
+        {
+            CmdCapAuditMode(argc, argv);
+            return;
+        }
+        ConsoleWriteln("CAP-AUDIT: USAGE: CAP-AUDIT MODE OFF|SAMPLE|FULL");
         return;
     }
     if (StrEq(cmd, "kdbg"))

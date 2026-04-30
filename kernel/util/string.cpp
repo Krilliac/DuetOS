@@ -190,4 +190,17 @@ void StringSelfTest()
     arch::SerialWrite("[string-selftest] PASS (memset / memcpy / memmove + overlap directions)\n");
 }
 
+[[noreturn]] void BoundsCheckedFailed(const char* op, duetos::usize requested, duetos::usize bound)
+{
+    // Use PanicWithValue so the requested size shows up in the
+    // crash dump's value field. The bound is logged separately
+    // beforehand so an operator can see both numbers in the
+    // serial log even if the panic dump truncates.
+    KLOG_ERROR_2V("core/string", "bounds-checked op overflow", "requested", requested, "bound", bound);
+    arch::SerialWrite("[bounds-check] FAIL: ");
+    arch::SerialWrite(op);
+    arch::SerialWrite(" requested>bound\n");
+    PanicWithValue("core/string", "bounds-checked op exceeded destination size", requested);
+}
+
 } // namespace duetos::core
