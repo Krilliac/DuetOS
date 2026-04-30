@@ -192,6 +192,23 @@ add_custom_command(
     VERBATIM)
 list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_WINKILL_HEADER}")
 
+# mini_browser.exe — minimal WinSock 2 PE that does an HTTP/1.0 GET to
+# www.google.com. Source is userland/apps/mini_browser/browser.c; the
+# prebuilt PE checked into the tree is what gets embedded so the
+# kernel build doesn't depend on mingw-w64 being installed. Rebuild
+# via userland/apps/mini_browser/build.sh when the source changes.
+set(DUETOS_MINIBROWSER_SRC    "${CMAKE_SOURCE_DIR}/userland/apps/mini_browser/browser.exe")
+set(DUETOS_MINIBROWSER_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_minibrowser_pe.h")
+add_custom_command(
+    OUTPUT "${DUETOS_MINIBROWSER_HEADER}"
+    COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
+            "${DUETOS_MINIBROWSER_SRC}" "${DUETOS_MINIBROWSER_HEADER}"
+            kBinMiniBrowserBytes --namespace "duetos::fs::generated"
+    DEPENDS "${DUETOS_MINIBROWSER_SRC}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Embedding mini_browser PE /bin/mini_browser.exe"
+    VERBATIM)
+list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_MINIBROWSER_HEADER}")
+
 # Chrome font — Liberation Sans Regular (SIL OFL 1.1). Embedded as
 # bytes for the TTF rasterizer; the boot path hands these to
 # TtfLoad + TtfChromeFontSet so the 5 Duet-family themes start

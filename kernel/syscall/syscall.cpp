@@ -1564,6 +1564,49 @@ void SyscallDispatch(arch::TrapFrame* frame)
             rv = write_sa(frame->rdx, frame->r10, ip, port) ? 0 : -14;
             break;
         }
+        case kSockOpResolveA:
+        {
+            char host[257] = {};
+            if (!mm::CopyFromUser(host, reinterpret_cast<const void*>(frame->rsi), sizeof(host) - 1))
+            {
+                rv = -14;
+                break;
+            }
+            host[256] = '\0';
+            const auto lease = ::duetos::net::DhcpLeaseRead();
+            if (!lease.valid)
+            {
+                rv = -100;
+                break;
+            }
+            if (!::duetos::net::NetDnsQueryA(/*iface_index=*/0, lease.dns, host))
+            {
+                rv = -22;
+                break;
+            }
+            ::duetos::net::DnsResult dns{};
+            for (u32 i = 0; i < 300; ++i)
+            {
+                ::duetos::sched::SchedSleepTicks(1);
+                dns = ::duetos::net::NetDnsResultRead();
+                if (dns.resolved)
+                    break;
+            }
+            if (!dns.resolved)
+            {
+                rv = -110;
+                break;
+            }
+            const u32 be = (u32(dns.ip.octets[0])) | (u32(dns.ip.octets[1]) << 8) | (u32(dns.ip.octets[2]) << 16) |
+                           (u32(dns.ip.octets[3]) << 24);
+            if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rdx), &be, sizeof(be)))
+            {
+                rv = -14;
+                break;
+            }
+            rv = 0;
+            break;
+        }
         }
         frame->rax = static_cast<u64>(rv);
         return;

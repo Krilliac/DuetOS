@@ -91,6 +91,7 @@
 #include "generated_windowed_hello.h"
 #include "generated_syscall_stress.h"
 #include "generated_thread_stress.h"
+#include "generated_minibrowser_pe.h"
 #include "generated_winkill_pe.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
@@ -2192,10 +2193,12 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         {"gdi32.dll", fs::generated::kBinGdi32DllBytes, fs::generated::kBinGdi32DllBytes_len,
          /*essential=*/false},
         // Networking / crypto / common UI / version / setup.
-        // All stubs — real Windows programs that import these
-        // typically check returns and gracefully fall back.
+        // ws2_32 is essential because mini_browser.exe imports it
+        // and we exercise WSAStartup / gethostbyname / socket /
+        // connect / send / recv / closesocket / WSACleanup as a
+        // live HTTP probe to www.google.com.
         {"ws2_32.dll", fs::generated::kBinWs2_32DllBytes, fs::generated::kBinWs2_32DllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"wininet.dll", fs::generated::kBinWininetDllBytes, fs::generated::kBinWininetDllBytes_len,
          /*essential=*/false},
         {"winhttp.dll", fs::generated::kBinWinhttpDllBytes, fs::generated::kBinWinhttpDllBytes_len,
@@ -2481,6 +2484,18 @@ bool SpawnOnDemand(const char* kind)
                     mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         return true;
     }
+    if (LocalStrEq(kind, "browser"))
+    {
+        // mini_browser.exe — minimal WinSock 2 PE that does an
+        // HTTP/1.0 GET to www.google.com. Imports kernel32 +
+        // ws2_32. Exits with rc=0 on success; rc=2..6 maps to
+        // the failing WinSock step. The point is to surface
+        // exactly which WS2_32 thunks are missing and to drive
+        // their implementation iteratively.
+        SpawnPeFile("ring3-mini-browser", fs::generated::kBinMiniBrowserBytes, fs::generated::kBinMiniBrowserBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        return true;
+    }
     return false;
 }
 
@@ -2666,6 +2681,14 @@ void StartRing3SmokeTask()
         SpawnPeFile("ring3-winkill", fs::generated::kBinWinKillBytes, fs::generated::kBinWinKillBytes_len,
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     }
+    // mini_browser.exe — minimal WinSock 2 PE that does an HTTP/1.0
+    // GET to www.google.com. Imports kernel32 + ws2_32; the
+    // kernel-side ws2_32 thunks route through SYS_SOCKET_OP into
+    // the native net stack. Always spawned: the failure
+    // transcripts are valuable on emulator too (they map exactly
+    // which Win32/WS2_32 API surface a real browser would need).
+    SpawnPeFile("ring3-mini-browser", fs::generated::kBinMiniBrowserBytes, fs::generated::kBinMiniBrowserBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     // Windowing v0 proof: a freestanding PE that imports
     // user32!CreateWindowExA + ShowWindow + MessageBoxA and
     // calls them. The Win32 → SYS_WIN_CREATE bridge turns

@@ -1644,6 +1644,12 @@ inline constexpr u64 kSockOpShutdown = 8;
 inline constexpr u64 kSockOpClose = 9;
 inline constexpr u64 kSockOpGetSock = 10;
 inline constexpr u64 kSockOpGetPeer = 11;
+// kSockOpResolveA: blocking A-record lookup. rsi = user const char*
+// hostname (NUL-terminated, ≤256 bytes). rdx = user u32* out_be_ipv4.
+// Returns 0 on success (out_be_ipv4 written in network byte order),
+// negative errno on miss / timeout. Routes to NetDnsQueryA against
+// the DHCP-supplied resolver, with a built-in 3-second wait.
+inline constexpr u64 kSockOpResolveA = 12;
 
 // Win32 CONTEXT — first 0x100 bytes (integer + control + the
 // segment / rflags slot). Field order and offsets match the

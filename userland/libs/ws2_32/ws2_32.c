@@ -38,6 +38,7 @@ typedef unsigned short USHORT;
 #define WSAENETUNREACH 10051
 #define WSAENOTCONN 10057
 #define WSAESHUTDOWN 10058
+#define WSAHOST_NOT_FOUND 11001
 
 static int g_wsa_last_error = 0;
 
@@ -91,13 +92,18 @@ static int wsa_translate_errno(long long e)
  *   r10 = arg3
  *   r8  = arg4
  *   r9  = arg5
- * Returns kernel result (negative on errno failure, non-negative otherwise). */
+ * Returns kernel result (negative on errno failure, non-negative otherwise).
+ *
+ * Operand indices are zero-based starting from the first OUTPUT (%0 = rv),
+ * then inputs (%1 = 153, %2 = op, %3 = a1, %4 = a2, %5 = a3, %6 = a4,
+ * %7 = a5). The asm body must move %5/%6/%7 (a3/a4/a5) into r10/r8/r9 —
+ * NOT %4/%5/%6 (which would put a2/a3/a4 there and lose a5 entirely). */
 static long long ws2_op(long long op, long long a1, long long a2, long long a3, long long a4, long long a5)
 {
     long long rv;
-    __asm__ volatile("mov %4, %%r10\n\t"
-                     "mov %5, %%r8\n\t"
-                     "mov %6, %%r9\n\t"
+    __asm__ volatile("mov %5, %%r10\n\t"
+                     "mov %6, %%r8\n\t"
+                     "mov %7, %%r9\n\t"
                      "int $0x80"
                      : "=a"(rv)
                      : "a"((long long)153), "D"(op), "S"(a1), "d"(a2), "r"(a3), "r"(a4), "r"(a5)
@@ -412,10 +418,47 @@ __declspec(dllexport) const char* inet_ntop(INT af, const void* src, char* dst, 
     return dst;
 }
 
+/* Static hostent storage. Single-threaded callers only — matches the
+ * Win32 documented behaviour ("the buffer is allocated by Windows and
+ * the calling thread must copy any data it wants to keep before the
+ * next call"). */
+static unsigned long g_gethostbyname_addr_be;
+static char* g_gethostbyname_addr_list[2];
+static struct
+{
+    char* h_name;
+    char** h_aliases;
+    short h_addrtype;
+    short h_length;
+    char** h_addr_list;
+} g_gethostbyname_hostent;
+static char g_gethostbyname_name[256];
+
 __declspec(dllexport) void* gethostbyname(const char* n)
 {
-    (void)n;
-    return (void*)0;
+    if (n == (const char*)0)
+        return (void*)0;
+    /* Copy hostname locally so the kernel sees a stable buffer. */
+    int i = 0;
+    for (; i < (int)sizeof(g_gethostbyname_name) - 1 && n[i] != '\0'; ++i)
+        g_gethostbyname_name[i] = n[i];
+    g_gethostbyname_name[i] = '\0';
+
+    long long rv = ws2_op(12 /* kSockOpResolveA */, (long long)g_gethostbyname_name,
+                          (long long)&g_gethostbyname_addr_be, 0, 0, 0);
+    if (rv < 0)
+    {
+        g_wsa_last_error = WSAHOST_NOT_FOUND;
+        return (void*)0;
+    }
+    g_gethostbyname_addr_list[0] = (char*)&g_gethostbyname_addr_be;
+    g_gethostbyname_addr_list[1] = (char*)0;
+    g_gethostbyname_hostent.h_name = g_gethostbyname_name;
+    g_gethostbyname_hostent.h_aliases = (char**)0;
+    g_gethostbyname_hostent.h_addrtype = 2 /* AF_INET */;
+    g_gethostbyname_hostent.h_length = 4;
+    g_gethostbyname_hostent.h_addr_list = g_gethostbyname_addr_list;
+    return &g_gethostbyname_hostent;
 }
 __declspec(dllexport) INT gethostname(char* buf, INT len)
 {

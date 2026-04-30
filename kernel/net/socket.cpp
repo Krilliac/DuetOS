@@ -332,7 +332,22 @@ bool SocketConnect(u32 idx, Ipv4Address peer_ip, u16 peer_port)
         return true;
     }
     // SOCK_STREAM — claim the single-slot active-connect machine.
-    if (g_tcp_owner != 0 && g_tcp_owner != idx + 1)
+    // The single-slot active-connect machine may be in use by
+    // another caller (kernel net-smoke probe, prior socket).
+    // Retry for up to ~5 seconds before giving up.
+    bool got_slot = false;
+    for (u32 attempt = 0; attempt < 500; ++attempt)
+    {
+        if (g_tcp_owner == 0 || g_tcp_owner == idx + 1)
+        {
+            got_slot = true;
+            break;
+        }
+        arch::Sti();
+        ::duetos::sched::SchedSleepTicks(1);
+        arch::Cli();
+    }
+    if (!got_slot)
     {
         arch::Sti();
         return false;
@@ -343,11 +358,22 @@ bool SocketConnect(u32 idx, Ipv4Address peer_ip, u16 peer_port)
     s.peer_port = peer_port;
     g_tcp_consumed[idx] = 0;
     arch::Sti();
-    // NetTcpConnect is non-blocking — it kicks off SYN and the RX
-    // path advances state. v0 sends an empty payload so the caller
-    // can issue send() afterwards through SocketSendStream.
+    // NetTcpConnect rejects when the underlying TCP slot is still
+    // in_use && state != Closed. Retry on transient busy: e.g.
+    // a prior connection lingering in TIME_WAIT or another caller
+    // (kernel net-smoke) finishing its FIN handshake.
     static const u8 kEmpty[1] = {0};
-    if (!NetTcpConnect(/*iface_index=*/0, peer_ip, peer_port, kEmpty, 0))
+    bool kicked = false;
+    for (u32 attempt = 0; attempt < 500; ++attempt)
+    {
+        if (NetTcpConnect(/*iface_index=*/0, peer_ip, peer_port, kEmpty, 0))
+        {
+            kicked = true;
+            break;
+        }
+        ::duetos::sched::SchedSleepTicks(1);
+    }
+    if (!kicked)
     {
         arch::Cli();
         if (g_tcp_owner == idx + 1)
@@ -357,6 +383,17 @@ bool SocketConnect(u32 idx, Ipv4Address peer_ip, u16 peer_port)
         s.peer_ip = {};
         arch::Sti();
         return false;
+    }
+    // Wait for the three-way handshake to complete before returning.
+    // POSIX/Win32 connect() is blocking by default — mirrors that.
+    // 5-second wall budget; the v0 active-connect slot uses tick-poll
+    // so SchedSleepTicks gives each ARP/SYN+ACK arrival a chance.
+    for (u32 i = 0; i < 500; ++i)
+    {
+        const auto snap = NetTcpActiveSnapshot();
+        if (snap.in_use && snap.established)
+            break;
+        ::duetos::sched::SchedSleepTicks(1);
     }
     arch::Cli();
     s.connected = true;
