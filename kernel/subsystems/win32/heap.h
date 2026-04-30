@@ -58,6 +58,15 @@ inline constexpr u64 kWin32HeapVa = 0x50000000ULL;
 // Pages mapped at process load. 16 × 4 KiB = 64 KiB total
 // heap. Small but enough for everything hello_winapi and its
 // kin want: a few KiB of allocations, no long-running growth.
+//
+// IMPORTANT: AddressSpace::region_count is u8-typed (max 255
+// regions), and a typical Win32 PE already burns ~200 region
+// slots on PE image + DLL preload + stack + TEB. Bumping this
+// past ~32 will overflow u8 and corrupt the region table —
+// see kernel/mm/address_space.h. If real DirectX surfaces
+// (>64 KiB swap chains, RTV textures) need more heap, the fix
+// is to widen region_count (slice unblocked elsewhere) and
+// to revisit per-process budgeting; not to crank this constant.
 inline constexpr u64 kWin32HeapPages = 16;
 
 /// Stand up the per-process heap: allocate kWin32HeapPages

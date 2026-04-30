@@ -3326,10 +3326,20 @@ void SyscallDispatch(arch::TrapFrame* frame)
 
     case SYS_GFX_D3D_STUB:
     {
-        // rdi = kind (1 = D3D11, 2 = D3D12, 3 = DXGI). Forward to
-        // the graphics ICD's counter-backed stubs so the `gfx`
-        // shell command sees create-call activity; each returns
-        // HRESULT E_FAIL (0x80004005) which we pass back unchanged.
+        // rdi = kind. Forward to the graphics ICD's counter-backed
+        // stubs so the `gfx` shell command sees per-API activity;
+        // each bumps a counter and returns HRESULT E_FAIL (real DLL
+        // implementations ignore this return — the userland DLL
+        // produced its own object).
+        //
+        // Kinds:
+        //   1 = D3D11           5 = DInput8
+        //   2 = D3D12           6 = XInput
+        //   3 = DXGI            7 = XAudio2
+        //   4 = D3D9            8 = DSound
+        //                       9 = DDraw
+        //                      10 = D2D1
+        //                      11 = DWrite
         u32 hr = 0;
         switch (frame->rdi)
         {
@@ -3341,6 +3351,30 @@ void SyscallDispatch(arch::TrapFrame* frame)
             break;
         case 3:
             hr = subsystems::graphics::DxgiCreateFactoryStub();
+            break;
+        case 4:
+            hr = subsystems::graphics::D3d9CreateStub();
+            break;
+        case 5:
+            hr = subsystems::graphics::Dinput8CreateStub();
+            break;
+        case 6:
+            hr = subsystems::graphics::XinputCreateStub();
+            break;
+        case 7:
+            hr = subsystems::graphics::Xaudio2CreateStub();
+            break;
+        case 8:
+            hr = subsystems::graphics::DsoundCreateStub();
+            break;
+        case 9:
+            hr = subsystems::graphics::DdrawCreateStub();
+            break;
+        case 10:
+            hr = subsystems::graphics::D2d1CreateStub();
+            break;
+        case 11:
+            hr = subsystems::graphics::DwriteCreateStub();
             break;
         default:
             hr = 0; // bad kind = S_OK surface would confuse callers; leave 0

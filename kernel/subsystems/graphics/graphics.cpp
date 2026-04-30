@@ -33,6 +33,19 @@ HandleTable g_devices{};
 HandleTable g_d3d_devices{};
 HandleTable g_dxgi_factories{};
 
+// Per-API call counters for the DirectX peripheral DLLs (dinput8,
+// xinput1_4, xaudio2_8, dsound, ddraw, d2d1, dwrite). These DLLs
+// hand out their own COM objects from heap; we only need the counter
+// here so the `gfx` shell command can show "this DLL was used N times".
+u32 g_d3d9_create_calls = 0;
+u32 g_dinput8_create_calls = 0;
+u32 g_xinput_create_calls = 0;
+u32 g_xaudio2_create_calls = 0;
+u32 g_dsound_create_calls = 0;
+u32 g_ddraw_create_calls = 0;
+u32 g_d2d1_create_calls = 0;
+u32 g_dwrite_create_calls = 0;
+
 u64 AllocSlot(HandleTable& t, u64 base)
 {
     for (u32 i = 0; i < kMaxPerKind; ++i)
@@ -75,6 +88,14 @@ enum EntryPointId
     EpD3d11Create,
     EpD3d12Create,
     EpDxgiCreate,
+    EpD3d9Create,
+    EpDinput8Create,
+    EpXinputCreate,
+    EpXaudio2Create,
+    EpDsoundCreate,
+    EpDdrawCreate,
+    EpD2d1Create,
+    EpDwriteCreate,
     EpCount
 };
 bool g_logged[EpCount] = {};
@@ -235,6 +256,55 @@ u32 DxgiCreateFactoryStub()
     return kHresultEFail;
 }
 
+u32 D3d9CreateStub()
+{
+    LogOnce(EpD3d9Create, "Direct3DCreate9");
+    ++g_d3d9_create_calls;
+    return kHresultEFail;
+}
+u32 Dinput8CreateStub()
+{
+    LogOnce(EpDinput8Create, "DirectInput8Create");
+    ++g_dinput8_create_calls;
+    return kHresultEFail;
+}
+u32 XinputCreateStub()
+{
+    LogOnce(EpXinputCreate, "XInputGetState");
+    ++g_xinput_create_calls;
+    return kHresultEFail;
+}
+u32 Xaudio2CreateStub()
+{
+    LogOnce(EpXaudio2Create, "XAudio2Create");
+    ++g_xaudio2_create_calls;
+    return kHresultEFail;
+}
+u32 DsoundCreateStub()
+{
+    LogOnce(EpDsoundCreate, "DirectSoundCreate");
+    ++g_dsound_create_calls;
+    return kHresultEFail;
+}
+u32 DdrawCreateStub()
+{
+    LogOnce(EpDdrawCreate, "DirectDrawCreate");
+    ++g_ddraw_create_calls;
+    return kHresultEFail;
+}
+u32 D2d1CreateStub()
+{
+    LogOnce(EpD2d1Create, "D2D1CreateFactory");
+    ++g_d2d1_create_calls;
+    return kHresultEFail;
+}
+u32 DwriteCreateStub()
+{
+    LogOnce(EpDwriteCreate, "DWriteCreateFactory");
+    ++g_dwrite_create_calls;
+    return kHresultEFail;
+}
+
 GraphicsStats GraphicsStatsRead()
 {
     return GraphicsStats{
@@ -246,6 +316,14 @@ GraphicsStats GraphicsStatsRead()
         .vk_devices_destroyed = g_devices.total_destroyed,
         .d3d_create_calls = g_d3d_devices.total_created,
         .dxgi_create_calls = g_dxgi_factories.total_created,
+        .d3d9_create_calls = g_d3d9_create_calls,
+        .dinput8_create_calls = g_dinput8_create_calls,
+        .xinput_create_calls = g_xinput_create_calls,
+        .xaudio2_create_calls = g_xaudio2_create_calls,
+        .dsound_create_calls = g_dsound_create_calls,
+        .ddraw_create_calls = g_ddraw_create_calls,
+        .d2d1_create_calls = g_d2d1_create_calls,
+        .dwrite_create_calls = g_dwrite_create_calls,
     };
 }
 
