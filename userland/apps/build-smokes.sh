@@ -69,6 +69,14 @@ declare -A APPS=(
     [power_smoke]="-lkernel32"
     [heap_smoke]="-lkernel32"
     [thread2_smoke]="-lkernel32"
+    [ipc_smoke]="-lkernel32"
+    [jobobj_smoke]="-lkernel32"
+    [console2_smoke]="-lkernel32"
+    [dns_smoke]="-lkernel32 -lws2_32"
+    [network2_smoke]="-lkernel32 -lws2_32"
+    [dxgi_smoke]="-lkernel32 -ldxgi"
+    [dwm_smoke]="-lkernel32 -ldwmapi"
+    [uxtheme_smoke]="-lkernel32 -luxtheme"
 )
 
 for app in "${!APPS[@]}"; do

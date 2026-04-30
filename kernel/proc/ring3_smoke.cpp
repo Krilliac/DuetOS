@@ -144,6 +144,14 @@
 #include "generated_services_smoke_pe.h"
 #include "generated_sound_smoke_pe.h"
 #include "generated_thread2_smoke_pe.h"
+#include "generated_console2_smoke_pe.h"
+#include "generated_dns_smoke_pe.h"
+#include "generated_dwm_smoke_pe.h"
+#include "generated_dxgi_smoke_pe.h"
+#include "generated_ipc_smoke_pe.h"
+#include "generated_jobobj_smoke_pe.h"
+#include "generated_network2_smoke_pe.h"
+#include "generated_uxtheme_smoke_pe.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
@@ -2238,7 +2246,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         {"d3d12.dll", fs::generated::kBinD3d12DllBytes, fs::generated::kBinD3d12DllBytes_len,
          /*essential=*/false},
         {"dxgi.dll", fs::generated::kBinDxgiDllBytes, fs::generated::kBinDxgiDllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"user32.dll", fs::generated::kBinUser32DllBytes, fs::generated::kBinUser32DllBytes_len,
          /*essential=*/true},
         {"gdi32.dll", fs::generated::kBinGdi32DllBytes, fs::generated::kBinGdi32DllBytes_len,
@@ -2273,9 +2281,9 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         {"wtsapi32.dll", fs::generated::kBinWtsapi32DllBytes, fs::generated::kBinWtsapi32DllBytes_len,
          /*essential=*/false},
         {"dwmapi.dll", fs::generated::kBinDwmapiDllBytes, fs::generated::kBinDwmapiDllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"uxtheme.dll", fs::generated::kBinUxthemeDllBytes, fs::generated::kBinUxthemeDllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"secur32.dll", fs::generated::kBinSecur32DllBytes, fs::generated::kBinSecur32DllBytes_len,
          /*essential=*/false},
     };
@@ -2855,6 +2863,24 @@ void StartRing3SmokeTask()
     SpawnPeFile("ring3-heap-smoke", fs::generated::kBinHeapSmokeBytes, fs::generated::kBinHeapSmokeBytes_len,
                 CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     SpawnPeFile("ring3-thread2-smoke", fs::generated::kBinThread2SmokeBytes, fs::generated::kBinThread2SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-ipc-smoke", fs::generated::kBinIpcSmokeBytes, fs::generated::kBinIpcSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-jobobj-smoke", fs::generated::kBinJobobjSmokeBytes, fs::generated::kBinJobobjSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-console2-smoke", fs::generated::kBinConsole2SmokeBytes,
+                fs::generated::kBinConsole2SmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-dns-smoke", fs::generated::kBinDnsSmokeBytes, fs::generated::kBinDnsSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-network2-smoke", fs::generated::kBinNetwork2SmokeBytes,
+                fs::generated::kBinNetwork2SmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-dxgi-smoke", fs::generated::kBinDxgiSmokeBytes, fs::generated::kBinDxgiSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-dwm-smoke", fs::generated::kBinDwmSmokeBytes, fs::generated::kBinDwmSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-uxtheme-smoke", fs::generated::kBinUxthemeSmokeBytes, fs::generated::kBinUxthemeSmokeBytes_len,
                 CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     // Windowing v0 proof: a freestanding PE that imports
     // user32!CreateWindowExA + ShowWindow + MessageBoxA and
