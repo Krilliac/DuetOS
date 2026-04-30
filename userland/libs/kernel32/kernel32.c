@@ -1523,6 +1523,101 @@ __declspec(dllexport) BOOL IsSystemResumeAutomatic(void)
     return 0;
 }
 
+/* GeoID family — return USA = 244. */
+__declspec(dllexport) int GetUserGeoID(int geoclass)
+{
+    (void)geoclass;
+    return 244;
+}
+
+__declspec(dllexport) int GetSystemGeoID(int geoclass)
+{
+    (void)geoclass;
+    return 244;
+}
+
+__declspec(dllexport) int GetGeoInfoW(int geoid, int gtype, wchar_t16* buf, int cchData, unsigned short langid)
+{
+    (void)geoid;
+    (void)langid;
+    static const wchar_t16 sIso2[] = {'U', 'S', 0};
+    static const wchar_t16 sIso3[] = {'U', 'S', 'A', 0};
+    static const wchar_t16 sName[] = {'U', 'n', 'i', 't', 'e', 'd', ' ', 'S', 't', 'a', 't', 'e', 's', 0};
+    const wchar_t16* msg;
+    /* gtype: GEO_ISO2=4, GEO_ISO3=5, GEO_FRIENDLYNAME=8 */
+    if (gtype == 4)
+        msg = sIso2;
+    else if (gtype == 5)
+        msg = sIso3;
+    else
+        msg = sName;
+    int needed = 0;
+    while (msg[needed] != 0)
+        ++needed;
+    ++needed;
+    if (cchData == 0)
+        return needed;
+    if (buf == (wchar_t16*)0 || cchData < needed)
+        return 0;
+    int j = 0;
+    while (msg[j] != 0)
+    {
+        buf[j] = msg[j];
+        ++j;
+    }
+    buf[j] = 0;
+    return needed;
+}
+
+/* GetCalendarInfoEx — return canned strings for common selectors. */
+__declspec(dllexport) int GetCalendarInfoEx(const wchar_t16* locale, unsigned int cal, const wchar_t16* reserved,
+                                            unsigned int caltype, wchar_t16* buf, int cchData, unsigned int* val)
+{
+    (void)locale;
+    (void)cal;
+    (void)reserved;
+    (void)val;
+    static const wchar_t16 sName[] = {'G', 'r', 'e', 'g', 'o', 'r', 'i', 'a', 'n', 0};
+    /* CAL_SCALNAME = 2, others mostly canned. */
+    if (caltype != 2 && caltype != 0x1000) /* CAL_SCALNAME or NOUSEROVERRIDE | CAL_SCALNAME */
+        return 0;
+    int needed = 10;
+    if (cchData == 0)
+        return needed;
+    if (buf == (wchar_t16*)0 || cchData < needed)
+        return 0;
+    for (int i = 0; i < 9; ++i)
+        buf[i] = sName[i];
+    buf[9] = 0;
+    return needed;
+}
+
+__declspec(dllexport) int GetCalendarInfoA(unsigned int locale, unsigned int cal, unsigned int caltype, char* buf,
+                                           int cchData, unsigned int* val)
+{
+    (void)locale;
+    (void)cal;
+    (void)val;
+    if (caltype != 2)
+        return 0;
+    static const char sName[] = "Gregorian";
+    int needed = 10;
+    if (cchData == 0)
+        return needed;
+    if (buf == (char*)0 || cchData < needed)
+        return 0;
+    for (int i = 0; i < 9; ++i)
+        buf[i] = sName[i];
+    buf[9] = 0;
+    return needed;
+}
+
+/* GetDpiForSystem — assume 96 dpi (default 100% scale). */
+__declspec(dllexport) unsigned int GetDpiForSystem(void)
+{
+    return 96;
+}
+
 __declspec(dllexport) DWORD GetFullPathNameW(const wchar_t16* lpFileName, DWORD nBufferLength, wchar_t16* lpBuffer,
                                              wchar_t16** lpFilePart)
 {

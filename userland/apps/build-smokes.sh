@@ -122,6 +122,13 @@ declare -A APPS=(
     [mem2_smoke]="-lkernel32"
     [fs2_smoke]="-lkernel32"
     [console3_smoke]="-lkernel32"
+    [xml_smoke]="-lkernel32 -lole32"
+    [reg3_smoke]="-lkernel32 -ladvapi32"
+    [proc3_smoke]="-lkernel32"
+    [com2_smoke]="-lkernel32 -lole32 -lmsvcrt"
+    [advmem_smoke]="-lkernel32"
+    [wstr2_smoke]="-lkernel32 -lmsvcrt"
+    [fs3_smoke]="-lkernel32 -lshlwapi"
 )
 
 for app in "${!APPS[@]}"; do

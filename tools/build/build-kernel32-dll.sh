@@ -186,6 +186,12 @@ set +e
     /export:GetSystemPowerStatus \
     /export:SetThreadExecutionState \
     /export:IsSystemResumeAutomatic \
+    /export:GetUserGeoID \
+    /export:GetSystemGeoID \
+    /export:GetGeoInfoW \
+    /export:GetCalendarInfoEx \
+    /export:GetCalendarInfoA \
+    /export:GetDpiForSystem \
     /export:GetFullPathNameW \
     /export:WriteFile \
     /export:WriteConsoleA \
