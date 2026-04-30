@@ -77,15 +77,15 @@ enum class LogLevel : u8
 /// the effective floor — it cannot dip below this compile-time
 /// minimum.
 #ifndef DUETOS_KLOG_COMPILE_FLOOR
-#  ifdef DUETOS_BUILD_FLAVOR
-#    if DUETOS_BUILD_FLAVOR == 1 // Debug
-#      define DUETOS_KLOG_COMPILE_FLOOR 0 // Trace
-#    else                                  // Release / RelWithDebInfo / MinSizeRel
-#      define DUETOS_KLOG_COMPILE_FLOOR 1 // Debug
-#    endif
-#  else
-#    define DUETOS_KLOG_COMPILE_FLOOR 1 // Debug — safe default for header-only TUs
-#  endif
+#ifdef DUETOS_BUILD_FLAVOR
+#if DUETOS_BUILD_FLAVOR == 1        // Debug
+#define DUETOS_KLOG_COMPILE_FLOOR 0 // Trace
+#else                               // Release / RelWithDebInfo / MinSizeRel
+#define DUETOS_KLOG_COMPILE_FLOOR 1 // Debug
+#endif
+#else
+#define DUETOS_KLOG_COMPILE_FLOOR 1 // Debug — safe default for header-only TUs
+#endif
 #endif
 inline constexpr LogLevel kKlogMinLevel = static_cast<LogLevel>(DUETOS_KLOG_COMPILE_FLOOR);
 
