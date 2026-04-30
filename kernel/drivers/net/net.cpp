@@ -516,7 +516,12 @@ void E1000RxPollEntry(void*)
                 duetos::arch::Sti();
                 continue;
             }
-            duetos::sched::WaitQueueBlock(&g_e1000.rx_wait);
+            // Bounded wait: under QEMU SLIRP the e1000e MSI-X
+            // delivery is unreliable for some IRQ causes (RXT0 in
+            // particular). The 10 ms timeout makes the RX poll
+            // path tick-poll as a safety net while still benefiting
+            // from real IRQ wakeups when they fire.
+            duetos::sched::WaitQueueBlockTimeout(&g_e1000.rx_wait, /*ticks=*/1);
         }
         else
         {

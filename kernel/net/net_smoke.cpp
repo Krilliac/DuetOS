@@ -291,7 +291,7 @@ void NetSmokeEntry(void*)
 
 } // namespace
 
-void NetSmokeTestStart()
+void NetSmokeTestStart(bool force_on_emulator)
 {
     if (g_started)
         return;
@@ -304,10 +304,16 @@ void NetSmokeTestStart()
     // 3 s DNS lookup, 5 s HTTP GET. None of that output is on the
     // boot-smoke critical path, so skip the spawn entirely under
     // emulation. Bare metal boots get the full coverage as before.
-    if (arch::IsEmulator())
+    // The `netsmoke=force` cmdline flag opts in deliberately.
+    if (arch::IsEmulator() && !force_on_emulator)
     {
-        arch::SerialWrite("[net-smoke] emulator detected — skipping (would burn ~15s on DHCP/DNS/TCP timeouts)\n");
+        arch::SerialWrite("[net-smoke] emulator detected — skipping (would burn ~15s on DHCP/DNS/TCP timeouts; pass "
+                          "netsmoke=force to override)\n");
         return;
+    }
+    if (arch::IsEmulator() && force_on_emulator)
+    {
+        arch::SerialWrite("[net-smoke] emulator detected but netsmoke=force set — running live probe\n");
     }
     duetos::sched::SchedCreate(NetSmokeEntry, nullptr, "net-smoke");
 }
