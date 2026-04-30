@@ -44,6 +44,12 @@ set +e
     /export:LookupPrivilegeValueA /export:LookupPrivilegeValueW \
     /export:GetUserNameA /export:GetUserNameW \
     /export:SystemFunction036 \
+    /export:InitializeSecurityDescriptor \
+    /export:IsValidSecurityDescriptor \
+    /export:InitializeAcl \
+    /export:IsValidSid \
+    /export:AllocateAndInitializeSid \
+    /export:FreeSid \
     /out:"${DLL}" "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}
 set -e

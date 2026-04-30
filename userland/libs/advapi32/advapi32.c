@@ -1126,3 +1126,52 @@ __declspec(dllexport) BOOL CloseServiceHandle(HANDLE h)
     (void)h;
     return 1;
 }
+
+/* Security descriptor + ACL — minimal valid headers. */
+typedef struct
+{
+    unsigned char Revision;
+    unsigned char Sbz1;
+    unsigned short Control;
+    void* Owner;
+    void* Group;
+    void* Sacl;
+    void* Dacl;
+} DUETOS_SECURITY_DESCRIPTOR;
+
+__declspec(dllexport) BOOL InitializeSecurityDescriptor(DUETOS_SECURITY_DESCRIPTOR* sd, DWORD revision)
+{
+    if (sd == (DUETOS_SECURITY_DESCRIPTOR*)0)
+        return 0;
+    unsigned char* b = (unsigned char*)sd;
+    for (unsigned long i = 0; i < sizeof(*sd); ++i)
+        b[i] = 0;
+    sd->Revision = (unsigned char)revision;
+    return 1;
+}
+
+__declspec(dllexport) BOOL IsValidSecurityDescriptor(const DUETOS_SECURITY_DESCRIPTOR* sd)
+{
+    return (sd != (const DUETOS_SECURITY_DESCRIPTOR*)0 && sd->Revision == 1) ? 1 : 0;
+}
+
+typedef struct
+{
+    unsigned char AclRevision;
+    unsigned char Sbz1;
+    unsigned short AclSize;
+    unsigned short AceCount;
+    unsigned short Sbz2;
+} DUETOS_ACL;
+
+__declspec(dllexport) BOOL InitializeAcl(DUETOS_ACL* acl, DWORD acl_size, DWORD revision)
+{
+    if (acl == (DUETOS_ACL*)0 || acl_size < sizeof(DUETOS_ACL))
+        return 0;
+    acl->AclRevision = (unsigned char)revision;
+    acl->Sbz1 = 0;
+    acl->AclSize = (unsigned short)acl_size;
+    acl->AceCount = 0;
+    acl->Sbz2 = 0;
+    return 1;
+}
