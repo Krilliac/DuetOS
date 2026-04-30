@@ -135,6 +135,16 @@ declare -A APPS=(
     [sock_opt_smoke]="-lkernel32 -lws2_32"
     [prio_smoke]="-lkernel32"
     [debug2_smoke]="-lkernel32"
+    [d3d11_smoke]="-lkernel32 -ld3d11"
+    [d3d12_smoke]="-lkernel32 -ld3d12"
+    [d3d9_smoke]="-lkernel32 -ld3d9"
+    [dinput8_smoke]="-lkernel32 -ldinput8"
+    [xinput_smoke]="-lkernel32 -lxinput1_4"
+    [xaudio2_smoke]="-lkernel32 -lxaudio2_8"
+    [dsound_smoke]="-lkernel32 -ldsound"
+    [ddraw_smoke]="-lkernel32 -lddraw"
+    [d2d1_smoke]="-lkernel32 -ld2d1"
+    [dwrite_smoke]="-lkernel32 -ldwrite"
 )
 
 for app in "${!APPS[@]}"; do

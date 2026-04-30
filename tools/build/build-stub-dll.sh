@@ -63,6 +63,13 @@ case "${DLL_NAME}" in
     dwmapi)    SYMBOL_NAME=kBinDwmapiDllBytes ;;
     uxtheme)   SYMBOL_NAME=kBinUxthemeDllBytes ;;
     secur32)   SYMBOL_NAME=kBinSecur32DllBytes ;;
+    dinput8)   SYMBOL_NAME=kBinDinput8DllBytes ;;
+    xinput1_4) SYMBOL_NAME=kBinXinput1_4DllBytes ;;
+    xaudio2_8) SYMBOL_NAME=kBinXaudio2_8DllBytes ;;
+    dsound)    SYMBOL_NAME=kBinDsoundDllBytes ;;
+    ddraw)     SYMBOL_NAME=kBinDdrawDllBytes ;;
+    d2d1)      SYMBOL_NAME=kBinD2d1DllBytes ;;
+    dwrite)    SYMBOL_NAME=kBinDwriteDllBytes ;;
     *)         ;; # leave whatever ${DLL_NAME^} produced
 esac
 

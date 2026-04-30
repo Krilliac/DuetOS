@@ -75,6 +75,13 @@
 #include "generated_iphlpapi_dll.h"
 #include "generated_secur32_dll.h"
 #include "generated_setupapi_dll.h"
+#include "generated_d2d1_dll.h"
+#include "generated_ddraw_dll.h"
+#include "generated_dinput8_dll.h"
+#include "generated_dsound_dll.h"
+#include "generated_dwrite_dll.h"
+#include "generated_xaudio2_8_dll.h"
+#include "generated_xinput1_4_dll.h"
 #include "generated_ucrtbase_dll.h"
 #include "generated_user32_dll.h"
 #include "generated_userenv_dll.h"
@@ -210,6 +217,16 @@
 #include "generated_prio_smoke_pe.h"
 #include "generated_sock_opt_smoke_pe.h"
 #include "generated_utf16_smoke_pe.h"
+#include "generated_d2d1_smoke_pe.h"
+#include "generated_d3d11_smoke_pe.h"
+#include "generated_d3d12_smoke_pe.h"
+#include "generated_d3d9_smoke_pe.h"
+#include "generated_ddraw_smoke_pe.h"
+#include "generated_dinput8_smoke_pe.h"
+#include "generated_dsound_smoke_pe.h"
+#include "generated_dwrite_smoke_pe.h"
+#include "generated_xaudio2_smoke_pe.h"
+#include "generated_xinput_smoke_pe.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
@@ -2188,7 +2205,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     // here is a one-line append once the blob is embedded via
     // CMake. `kPreloadSlotCap` caps the stack-local array size;
     // bump if the list grows past it.
-    constexpr u64 kPreloadSlotCap = 48;
+    constexpr u64 kPreloadSlotCap = 56;
     struct PreloadDllEntry
     {
         const char* label; // diagnostic name for boot-log
@@ -2292,17 +2309,18 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
          /*essential=*/true},
         {"psapi.dll", fs::generated::kBinPsapiDllBytes, fs::generated::kBinPsapiDllBytes_len,
          /*essential=*/true},
-        // DirectX + user32 / gdi32 return-constant tier. Every
-        // DirectX entry returns E_NOTIMPL; GetDC returns a
-        // sentinel so windowed programs don't null-check-fail
-        // at HDC acquisition. Full GUI/drawing stack remains
-        // deferred.
+        // DirectX v0 — d3d9/d3d11/d3d12/dxgi all carry real
+        // COM-vtable implementations of the Clear-and-Present
+        // pipeline (see userland/libs/d3d*/). Marked essential so
+        // the d3d{9,11,12}_smoke + dxgi_smoke PEs find their
+        // exports under the emulator preload trim. SYS_GFX_TRACE
+        // counters tick from inside each Present.
         {"d3d9.dll", fs::generated::kBinD3d9DllBytes, fs::generated::kBinD3d9DllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"d3d11.dll", fs::generated::kBinD3d11DllBytes, fs::generated::kBinD3d11DllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"d3d12.dll", fs::generated::kBinD3d12DllBytes, fs::generated::kBinD3d12DllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"dxgi.dll", fs::generated::kBinDxgiDllBytes, fs::generated::kBinDxgiDllBytes_len,
          /*essential=*/true},
         {"user32.dll", fs::generated::kBinUser32DllBytes, fs::generated::kBinUser32DllBytes_len,
@@ -2344,6 +2362,23 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
          /*essential=*/true},
         {"secur32.dll", fs::generated::kBinSecur32DllBytes, fs::generated::kBinSecur32DllBytes_len,
          /*essential=*/false},
+        // DirectX peripheral DLLs v0 — input/audio/2D-blit/Direct2D/
+        // DirectWrite. Marked essential so the matching smoke PEs find
+        // their exports under the emulator preload trim.
+        {"dinput8.dll", fs::generated::kBinDinput8DllBytes, fs::generated::kBinDinput8DllBytes_len,
+         /*essential=*/true},
+        {"xinput1_4.dll", fs::generated::kBinXinput1_4DllBytes, fs::generated::kBinXinput1_4DllBytes_len,
+         /*essential=*/true},
+        {"xaudio2_8.dll", fs::generated::kBinXaudio2_8DllBytes, fs::generated::kBinXaudio2_8DllBytes_len,
+         /*essential=*/true},
+        {"dsound.dll", fs::generated::kBinDsoundDllBytes, fs::generated::kBinDsoundDllBytes_len,
+         /*essential=*/true},
+        {"ddraw.dll", fs::generated::kBinDdrawDllBytes, fs::generated::kBinDdrawDllBytes_len,
+         /*essential=*/true},
+        {"d2d1.dll", fs::generated::kBinD2d1DllBytes, fs::generated::kBinD2d1DllBytes_len,
+         /*essential=*/true},
+        {"dwrite.dll", fs::generated::kBinDwriteDllBytes, fs::generated::kBinDwriteDllBytes_len,
+         /*essential=*/true},
     };
     constexpr u64 kPreloadEntryCount = sizeof(preload_set) / sizeof(preload_set[0]);
     static_assert(kPreloadEntryCount <= kPreloadSlotCap, "Preload DLL list exceeds stack-local cap");
@@ -3060,6 +3095,30 @@ void StartRing3SmokeTask()
     SpawnPeFile("ring3-prio-smoke", fs::generated::kBinPrioSmokeBytes, fs::generated::kBinPrioSmokeBytes_len,
                 CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     SpawnPeFile("ring3-debug2-smoke", fs::generated::kBinDebug2SmokeBytes, fs::generated::kBinDebug2SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    // DirectX v0 smoke suite — exercises the existing d3d{9,11,12}
+    // Clear+Present pipelines through real COM vtable calls plus the
+    // new dinput8/xinput/xaudio2/dsound/ddraw/d2d1/dwrite peripheral
+    // DLLs.
+    SpawnPeFile("ring3-d3d11-smoke", fs::generated::kBinD3d11SmokeBytes, fs::generated::kBinD3d11SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-d3d12-smoke", fs::generated::kBinD3d12SmokeBytes, fs::generated::kBinD3d12SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-d3d9-smoke", fs::generated::kBinD3d9SmokeBytes, fs::generated::kBinD3d9SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-dinput8-smoke", fs::generated::kBinDinput8SmokeBytes, fs::generated::kBinDinput8SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-xinput-smoke", fs::generated::kBinXinputSmokeBytes, fs::generated::kBinXinputSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-xaudio2-smoke", fs::generated::kBinXaudio2SmokeBytes, fs::generated::kBinXaudio2SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-dsound-smoke", fs::generated::kBinDsoundSmokeBytes, fs::generated::kBinDsoundSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-ddraw-smoke", fs::generated::kBinDdrawSmokeBytes, fs::generated::kBinDdrawSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-d2d1-smoke", fs::generated::kBinD2d1SmokeBytes, fs::generated::kBinD2d1SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-dwrite-smoke", fs::generated::kBinDwriteSmokeBytes, fs::generated::kBinDwriteSmokeBytes_len,
                 CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     // Windowing v0 proof: a freestanding PE that imports
     // user32!CreateWindowExA + ShowWindow + MessageBoxA and

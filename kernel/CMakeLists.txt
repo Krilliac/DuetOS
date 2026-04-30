@@ -344,6 +344,19 @@ duetos_embed_smoke_pe(handle2_smoke  kBinHandle2SmokeBytes)
 duetos_embed_smoke_pe(sock_opt_smoke kBinSockOptSmokeBytes)
 duetos_embed_smoke_pe(prio_smoke     kBinPrioSmokeBytes)
 duetos_embed_smoke_pe(debug2_smoke   kBinDebug2SmokeBytes)
+# DirectX v0 smoke suite — covers d3d{9,11,12} Clear+Present pipelines
+# plus the new dinput8/xinput/xaudio2/dsound/ddraw/d2d1/dwrite peripheral
+# DLLs through real COM vtable calls.
+duetos_embed_smoke_pe(d3d11_smoke    kBinD3d11SmokeBytes)
+duetos_embed_smoke_pe(d3d12_smoke    kBinD3d12SmokeBytes)
+duetos_embed_smoke_pe(d3d9_smoke     kBinD3d9SmokeBytes)
+duetos_embed_smoke_pe(dinput8_smoke  kBinDinput8SmokeBytes)
+duetos_embed_smoke_pe(xinput_smoke   kBinXinputSmokeBytes)
+duetos_embed_smoke_pe(xaudio2_smoke  kBinXaudio2SmokeBytes)
+duetos_embed_smoke_pe(dsound_smoke   kBinDsoundSmokeBytes)
+duetos_embed_smoke_pe(ddraw_smoke    kBinDdrawSmokeBytes)
+duetos_embed_smoke_pe(d2d1_smoke     kBinD2d1SmokeBytes)
+duetos_embed_smoke_pe(dwrite_smoke   kBinDwriteSmokeBytes)
 
 # Chrome font — Liberation Sans Regular (SIL OFL 1.1). Embedded as
 # bytes for the TTF rasterizer; the boot path hands these to
@@ -499,6 +512,17 @@ duetos_stub_dll(wtsapi32 0x10230000 "WTSQuerySessionInformationA,WTSQuerySession
 duetos_stub_dll(dwmapi 0x10240000 "DwmIsCompositionEnabled,DwmEnableComposition,DwmExtendFrameIntoClientArea,DwmGetWindowAttribute,DwmSetWindowAttribute,DwmFlush")
 duetos_stub_dll(uxtheme 0x10250000 "OpenThemeData,CloseThemeData,IsThemeActive,IsAppThemed,SetWindowTheme,GetThemeSysFont,DrawThemeBackground,DrawThemeText")
 duetos_stub_dll(secur32 0x10260000 "AcquireCredentialsHandleA,FreeCredentialsHandle,InitializeSecurityContextA,DeleteSecurityContext,GetUserNameExA,GetUserNameExW")
+
+# DirectX peripheral DLLs v0 — input/audio/2D-blit/Direct2D/DirectWrite.
+# Each is a real COM-vtable implementation that satisfies game/runtime
+# probes; audio path is silent for now (HDA mixer not wired through).
+duetos_stub_dll(dinput8 0x10270000 "DirectInput8Create")
+duetos_stub_dll(xinput1_4 0x10280000 "XInputGetState,XInputSetState,XInputGetCapabilities,XInputGetBatteryInformation,XInputGetKeystroke,XInputEnable")
+duetos_stub_dll(xaudio2_8 0x10290000 "XAudio2Create,CreateAudioReverb,CreateAudioVolumeMeter")
+duetos_stub_dll(dsound 0x102A0000 "DirectSoundCreate,DirectSoundCreate8,DirectSoundEnumerateA,DirectSoundEnumerateW,GetDeviceID")
+duetos_stub_dll(ddraw 0x102B0000 "DirectDrawCreate,DirectDrawCreateEx,DirectDrawEnumerateA,DirectDrawEnumerateW")
+duetos_stub_dll(d2d1 0x102C0000 "D2D1CreateFactory")
+duetos_stub_dll(dwrite 0x102D0000 "DWriteCreateFactory")
 
 
 set(DUETOS_KERNEL_LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/arch/x86_64/linker.ld")
