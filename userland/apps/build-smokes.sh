@@ -85,6 +85,14 @@ declare -A APPS=(
     [winerr_smoke]="-lkernel32"
     [sleep_smoke]="-lkernel32"
     [nt_smoke]="-lkernel32 -lntdll"
+    [vol_smoke]="-lkernel32"
+    [drive_smoke]="-lkernel32"
+    [conio_smoke]="-lkernel32 -lmsvcrt"
+    [mbcs_smoke]="-lkernel32 -lmsvcrt"
+    [fpcontrol_smoke]="-lkernel32 -lmsvcrt"
+    [locale2_smoke]="-lkernel32"
+    [gdiplus_smoke]="-lkernel32 -lgdiplus"
+    [dde_smoke]="-lkernel32 -luser32"
 )
 
 for app in "${!APPS[@]}"; do

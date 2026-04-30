@@ -160,6 +160,14 @@
 #include "generated_token_smoke_pe.h"
 #include "generated_winerr_smoke_pe.h"
 #include "generated_wts_smoke_pe.h"
+#include "generated_conio_smoke_pe.h"
+#include "generated_dde_smoke_pe.h"
+#include "generated_drive_smoke_pe.h"
+#include "generated_fpcontrol_smoke_pe.h"
+#include "generated_gdiplus_smoke_pe.h"
+#include "generated_locale2_smoke_pe.h"
+#include "generated_mbcs_smoke_pe.h"
+#include "generated_vol_smoke_pe.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
@@ -2907,6 +2915,23 @@ void StartRing3SmokeTask()
                 CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     SpawnPeFile("ring3-nt-smoke", fs::generated::kBinNtSmokeBytes, fs::generated::kBinNtSmokeBytes_len, CapSetTrusted(),
                 fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-vol-smoke", fs::generated::kBinVolSmokeBytes, fs::generated::kBinVolSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-drive-smoke", fs::generated::kBinDriveSmokeBytes, fs::generated::kBinDriveSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-conio-smoke", fs::generated::kBinConioSmokeBytes, fs::generated::kBinConioSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-mbcs-smoke", fs::generated::kBinMbcsSmokeBytes, fs::generated::kBinMbcsSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-fpcontrol-smoke", fs::generated::kBinFpcontrolSmokeBytes,
+                fs::generated::kBinFpcontrolSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-locale2-smoke", fs::generated::kBinLocale2SmokeBytes, fs::generated::kBinLocale2SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-gdiplus-smoke", fs::generated::kBinGdiplusSmokeBytes, fs::generated::kBinGdiplusSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-dde-smoke", fs::generated::kBinDdeSmokeBytes, fs::generated::kBinDdeSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     // Windowing v0 proof: a freestanding PE that imports
     // user32!CreateWindowExA + ShowWindow + MessageBoxA and
     // calls them. The Win32 → SYS_WIN_CREATE bridge turns
