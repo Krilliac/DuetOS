@@ -194,17 +194,19 @@ __declspec(dllexport) BOOL PathIsDirectoryW(const wchar_t16* p)
     return 0; /* Nothing is a directory since nothing exists. */
 }
 
-__declspec(dllexport) void PathRemoveFileSpecW(wchar_t16* p)
+__declspec(dllexport) BOOL PathRemoveFileSpecW(wchar_t16* p)
 {
     if (!p)
-        return;
+        return 0;
     size_t n = wlen(p);
     size_t last_sep = (size_t)-1;
     for (size_t i = 0; i < n; ++i)
         if (p[i] == '\\' || p[i] == '/')
             last_sep = i;
-    if (last_sep != (size_t)-1)
-        p[last_sep] = 0;
+    if (last_sep == (size_t)-1)
+        return 0;
+    p[last_sep] = 0;
+    return 1;
 }
 
 __declspec(dllexport) void PathStripPathW(wchar_t16* p)

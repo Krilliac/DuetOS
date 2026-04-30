@@ -91,7 +91,12 @@
 #include "generated_windowed_hello.h"
 #include "generated_syscall_stress.h"
 #include "generated_thread_stress.h"
+#include "generated_crypto_smoke_pe.h"
+#include "generated_iphlpapi_smoke_pe.h"
 #include "generated_minibrowser_pe.h"
+#include "generated_paths_smoke_pe.h"
+#include "generated_time_smoke_pe.h"
+#include "generated_wininet_smoke_pe.h"
 #include "generated_winkill_pe.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
@@ -2160,7 +2165,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         // return "not found" / success sentinels;
         // CoTaskMem* + SysAllocString alias the process heap.
         {"shlwapi.dll", fs::generated::kBinShlwapiDllBytes, fs::generated::kBinShlwapiDllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"shell32.dll", fs::generated::kBinShell32DllBytes, fs::generated::kBinShell32DllBytes_len,
          /*essential=*/false},
         {"ole32.dll", fs::generated::kBinOle32DllBytes, fs::generated::kBinOle32DllBytes_len,
@@ -2172,7 +2177,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         {"winmm.dll", fs::generated::kBinWinmmDllBytes, fs::generated::kBinWinmmDllBytes_len,
          /*essential=*/true},
         {"bcrypt.dll", fs::generated::kBinBcryptDllBytes, fs::generated::kBinBcryptDllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"psapi.dll", fs::generated::kBinPsapiDllBytes, fs::generated::kBinPsapiDllBytes_len,
          /*essential=*/false},
         // DirectX + user32 / gdi32 return-constant tier. Every
@@ -2200,7 +2205,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         {"ws2_32.dll", fs::generated::kBinWs2_32DllBytes, fs::generated::kBinWs2_32DllBytes_len,
          /*essential=*/true},
         {"wininet.dll", fs::generated::kBinWininetDllBytes, fs::generated::kBinWininetDllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"winhttp.dll", fs::generated::kBinWinhttpDllBytes, fs::generated::kBinWinhttpDllBytes_len,
          /*essential=*/false},
         {"crypt32.dll", fs::generated::kBinCrypt32DllBytes, fs::generated::kBinCrypt32DllBytes_len,
@@ -2216,7 +2221,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         // Six more support DLLs — IP helper, user env,
         // terminal services, DWM, theming, SSPI.
         {"iphlpapi.dll", fs::generated::kBinIphlpapiDllBytes, fs::generated::kBinIphlpapiDllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"userenv.dll", fs::generated::kBinUserenvDllBytes, fs::generated::kBinUserenvDllBytes_len,
          /*essential=*/false},
         {"wtsapi32.dll", fs::generated::kBinWtsapi32DllBytes, fs::generated::kBinWtsapi32DllBytes_len,
@@ -2688,6 +2693,20 @@ void StartRing3SmokeTask()
     // transcripts are valuable on emulator too (they map exactly
     // which Win32/WS2_32 API surface a real browser would need).
     SpawnPeFile("ring3-mini-browser", fs::generated::kBinMiniBrowserBytes, fs::generated::kBinMiniBrowserBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    // Surface-coverage smoke PEs. Each prints a per-API PASS/FAIL
+    // line on serial; the boot transcript is the gap inventory.
+    // See .claude/knowledge/smoke-pe-suite-v0.md.
+    SpawnPeFile("ring3-crypto-smoke", fs::generated::kBinCryptoSmokeBytes, fs::generated::kBinCryptoSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-paths-smoke", fs::generated::kBinPathsSmokeBytes, fs::generated::kBinPathsSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-time-smoke", fs::generated::kBinTimeSmokeBytes, fs::generated::kBinTimeSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-iphlpapi-smoke", fs::generated::kBinIphlpapiSmokeBytes,
+                fs::generated::kBinIphlpapiSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-wininet-smoke", fs::generated::kBinWininetSmokeBytes, fs::generated::kBinWininetSmokeBytes_len,
                 CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     // Windowing v0 proof: a freestanding PE that imports
     // user32!CreateWindowExA + ShowWindow + MessageBoxA and

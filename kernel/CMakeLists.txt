@@ -209,6 +209,30 @@ add_custom_command(
     VERBATIM)
 list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_MINIBROWSER_HEADER}")
 
+# Surface-coverage PE smoke apps. Each one is a self-contained
+# console PE (~10 KB) targeting a single Win32 API surface.
+# Source lives in userland/apps/<name>/<name>.c; rebuild with
+# userland/apps/build-smokes.sh when sources change.
+function(duetos_embed_smoke_pe app_name symbol)
+    set(_src "${CMAKE_SOURCE_DIR}/userland/apps/${app_name}/${app_name}.exe")
+    set(_hdr "${CMAKE_CURRENT_BINARY_DIR}/generated_${app_name}_pe.h")
+    add_custom_command(
+        OUTPUT "${_hdr}"
+        COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
+                "${_src}" "${_hdr}"
+                "${symbol}" --namespace "duetos::fs::generated"
+        DEPENDS "${_src}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Embedding ${app_name} PE"
+        VERBATIM)
+    set(DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_KERNEL_SHARED_SOURCES}" "${_hdr}" PARENT_SCOPE)
+endfunction()
+
+duetos_embed_smoke_pe(crypto_smoke   kBinCryptoSmokeBytes)
+duetos_embed_smoke_pe(paths_smoke    kBinPathsSmokeBytes)
+duetos_embed_smoke_pe(time_smoke     kBinTimeSmokeBytes)
+duetos_embed_smoke_pe(wininet_smoke  kBinWininetSmokeBytes)
+duetos_embed_smoke_pe(iphlpapi_smoke kBinIphlpapiSmokeBytes)
+
 # Chrome font — Liberation Sans Regular (SIL OFL 1.1). Embedded as
 # bytes for the TTF rasterizer; the boot path hands these to
 # TtfLoad + TtfChromeFontSet so the 5 Duet-family themes start
