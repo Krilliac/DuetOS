@@ -393,15 +393,18 @@ i64 DoWrite(u64 fd, const void* user_buf, u64 len)
         return -1;
     }
 
-    // Drive COM1 one byte at a time. SerialWrite() is null-terminated,
-    // which is wrong for an arbitrary byte stream — use the per-char
-    // helper via a tiny 2-char buffer so any \0 inside the user
-    // payload gets forwarded faithfully as a literal 0.
-    for (u64 i = 0; i < to_copy; ++i)
-    {
-        const char two[2] = {static_cast<char>(kbuf[i]), '\0'};
-        arch::SerialWrite(two);
-    }
+    // Drive COM1 with one SerialWriteN call — the per-port lock is
+    // held for the whole byte run, so no other thread (smoke ticker,
+    // klog sink, etc.) can interleave between bytes. The previous
+    // per-byte SerialWrite loop would release + re-acquire the lock
+    // 256 times for a 256-byte write, and under TCG slowness that
+    // window was wide enough for the smoke-ticker thread to insert
+    // its `[smoke] tick=...` line mid-write — splitting a single
+    // logical user line across two physical lines on the serial
+    // log, which signature-grep CI tests can't reassemble. Cost:
+    // ~2.2ms of IRQs-off at 115200 baud for a max-size 256-byte
+    // write; bounded and acceptable for v0.
+    arch::SerialWriteN(reinterpret_cast<const char*>(kbuf), to_copy);
     return static_cast<i64>(to_copy);
 }
 
