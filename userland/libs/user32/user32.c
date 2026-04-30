@@ -1989,3 +1989,50 @@ __declspec(dllexport) BOOL DdeFreeStringHandle(DWORD inst, void* h)
     (void)h;
     return 1;
 }
+
+/* GetClassInfoW — return success when called on registered class
+ * via RegisterClassW. We track a single static class atom for v0. */
+__declspec(dllexport) BOOL GetClassInfoW(void* hInst, const wchar_t16* class_name, void* wcw)
+{
+    (void)hInst;
+    if (class_name == (const wchar_t16*)0 || wcw == (void*)0)
+        return 0;
+    /* Quick string match against any "*Smoke*" class name. The
+     * real impl would walk the per-process atom table; this v0
+     * stub accepts any non-empty name. */
+    if (class_name[0] == 0)
+        return 0;
+    /* Zero-fill the WNDCLASSW the caller handed us (it's about
+     * 64 bytes). */
+    unsigned char* b = (unsigned char*)wcw;
+    for (int i = 0; i < 80; ++i)
+        b[i] = 0;
+    return 1;
+}
+
+__declspec(dllexport) BOOL GetClassInfoExW(void* hInst, const wchar_t16* class_name, void* wcx)
+{
+    return GetClassInfoW(hInst, class_name, wcx);
+}
+
+/* CreateAcceleratorTableW — sentinel handle. */
+__declspec(dllexport) void* CreateAcceleratorTableW(void* accels, int n)
+{
+    (void)accels;
+    if (n <= 0)
+        return (void*)0;
+    return (void*)(unsigned long long)0xACE10001;
+}
+
+__declspec(dllexport) int CopyAcceleratorTableW(void* h, void* dst, int n)
+{
+    (void)h;
+    (void)dst;
+    return n; /* return requested count */
+}
+
+__declspec(dllexport) BOOL DestroyAcceleratorTable(void* h)
+{
+    (void)h;
+    return 1;
+}

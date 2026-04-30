@@ -624,3 +624,59 @@ __declspec(dllexport) int _getmbcp(void)
 {
     return 1252;
 }
+
+/* _putch — write a single byte via SYS_WRITE(fd=1). */
+__declspec(dllexport) int _putch(int c)
+{
+    char ch = (char)(c & 0xFF);
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)2), "D"((long long)1), "S"((long long)&ch), "d"((long long)1)
+                     : "memory");
+    return (rv == 1) ? c : -1;
+}
+
+__declspec(dllexport) int _putwch(unsigned short c)
+{
+    char ch = (char)(c & 0xFF);
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)2), "D"((long long)1), "S"((long long)&ch), "d"((long long)1)
+                     : "memory");
+    return (rv == 1) ? c : -1;
+}
+
+__declspec(dllexport) int _kbhit(void)
+{
+    return 0;
+}
+
+__declspec(dllexport) int _cputs(const char* s)
+{
+    if (s == 0)
+        return -1;
+    int n = 0;
+    while (s[n] != 0)
+        ++n;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)2), "D"((long long)1), "S"((long long)s), "d"((long long)n)
+                     : "memory");
+    return rv == n ? 0 : -1;
+}
+
+/* signal — store handler in a static slot. */
+typedef void (*duetos_sig_handler_t)(int);
+static duetos_sig_handler_t g_sig_handlers[16];
+
+__declspec(dllexport) duetos_sig_handler_t signal(int sig, duetos_sig_handler_t h)
+{
+    if (sig < 0 || sig >= 16)
+        return (duetos_sig_handler_t)(unsigned long long)-1; /* SIG_ERR */
+    duetos_sig_handler_t prev = g_sig_handlers[sig];
+    g_sig_handlers[sig] = h;
+    return prev;
+}

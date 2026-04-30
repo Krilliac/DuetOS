@@ -110,6 +110,11 @@ set +e
     /export:wcstol \
     /export:wcstoul \
     /export:_getmbcp \
+    /export:_putch \
+    /export:_putwch \
+    /export:_kbhit \
+    /export:_cputs \
+    /export:signal \
     /out:"${DLL}" \
     "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}

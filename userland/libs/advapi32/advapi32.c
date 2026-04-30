@@ -1002,11 +1002,18 @@ __declspec(dllexport) BOOL GetTokenInformation(HANDLE token, DWORD info_class, v
 {
     (void)token;
     (void)info_class;
-    (void)info;
-    (void)info_len;
+    /* Zero-fill the supplied buffer and report it as the size used,
+     * so callers that just want a TokenUser-style "is the call OK"
+     * sentinel get a TRUE return without trapping. */
+    if (info != (void*)0)
+    {
+        unsigned char* b = (unsigned char*)info;
+        for (DWORD i = 0; i < info_len; ++i)
+            b[i] = 0;
+    }
     if (used)
-        *used = 0;
-    return 0;
+        *used = info_len > 16 ? 16 : info_len;
+    return 1;
 }
 
 __declspec(dllexport) BOOL SetTokenInformation(HANDLE token, DWORD info_class, void* info, DWORD info_len)

@@ -222,6 +222,11 @@ set +e
     /export:QueryThreadCycleTime \
     /export:GetFileTime \
     /export:GetFileInformationByHandle \
+    /export:GetComputerNameExW \
+    /export:GetLogicalDriveStringsA \
+    /export:GetProcessHandleCount \
+    /export:SetErrorMode \
+    /export:GetErrorMode \
     /export:GetFullPathNameW \
     /export:WriteFile \
     /export:WriteConsoleA \

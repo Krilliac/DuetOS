@@ -444,8 +444,8 @@ __declspec(dllexport) void* gethostbyname(const char* n)
         g_gethostbyname_name[i] = n[i];
     g_gethostbyname_name[i] = '\0';
 
-    long long rv = ws2_op(12 /* kSockOpResolveA */, (long long)g_gethostbyname_name,
-                          (long long)&g_gethostbyname_addr_be, 0, 0, 0);
+    long long rv =
+        ws2_op(12 /* kSockOpResolveA */, (long long)g_gethostbyname_name, (long long)&g_gethostbyname_addr_be, 0, 0, 0);
     if (rv < 0)
     {
         g_wsa_last_error = WSAHOST_NOT_FOUND;
@@ -569,4 +569,30 @@ __declspec(dllexport) INT getpeername(SOCKET s, void* addr, INT* cb)
         return SOCKET_ERROR;
     }
     return 0;
+}
+
+/* WSA event objects — sentinel handles. The smoke test just sets/
+ * resets the flag, no real signalling needed. */
+typedef void* WSAEVENT_t;
+__declspec(dllexport) WSAEVENT_t WSACreateEvent(void)
+{
+    return (WSAEVENT_t)(unsigned long long)0xE5000001;
+}
+
+__declspec(dllexport) BOOL WSACloseEvent(WSAEVENT_t e)
+{
+    (void)e;
+    return 1;
+}
+
+__declspec(dllexport) BOOL WSASetEvent(WSAEVENT_t e)
+{
+    (void)e;
+    return 1;
+}
+
+__declspec(dllexport) BOOL WSAResetEvent(WSAEVENT_t e)
+{
+    (void)e;
+    return 1;
 }

@@ -2037,6 +2037,60 @@ __declspec(dllexport) BOOL GetFileInformationByHandle(HANDLE f, void* info)
     return 1;
 }
 
+/* SetErrorMode / GetErrorMode — in-memory state. */
+static UINT g_kernel32_error_mode = 0;
+__declspec(dllexport) UINT SetErrorMode(UINT mode)
+{
+    UINT prev = g_kernel32_error_mode;
+    g_kernel32_error_mode = mode;
+    return prev;
+}
+__declspec(dllexport) UINT GetErrorMode(void)
+{
+    return g_kernel32_error_mode;
+}
+
+/* GetComputerNameExW — return "duetos" for any name-type. */
+__declspec(dllexport) BOOL GetComputerNameExW(int name_type, wchar_t16* buf, DWORD* sz)
+{
+    (void)name_type;
+    if (sz == (DWORD*)0)
+        return 0;
+    static const wchar_t16 hn[] = {'d', 'u', 'e', 't', 'o', 's', 0};
+    DWORD needed = 7;
+    if (buf == (wchar_t16*)0 || *sz < needed)
+    {
+        *sz = needed;
+        return 0;
+    }
+    for (int i = 0; i < 7; ++i)
+        buf[i] = hn[i];
+    *sz = 6;
+    return 1;
+}
+
+/* GetLogicalDriveStringsA — return "C:\\\0\0". */
+__declspec(dllexport) DWORD GetLogicalDriveStringsA(DWORD bufsz, char* buf)
+{
+    if (bufsz < 5 || buf == (char*)0)
+        return 5;
+    buf[0] = 'C';
+    buf[1] = ':';
+    buf[2] = '\\';
+    buf[3] = 0;
+    buf[4] = 0;
+    return 4;
+}
+
+/* GetProcessHandleCount — sentinel. */
+__declspec(dllexport) BOOL GetProcessHandleCount(HANDLE p, DWORD* count)
+{
+    (void)p;
+    if (count != (DWORD*)0)
+        *count = 8;
+    return 1;
+}
+
 __declspec(dllexport) DWORD GetPrivateProfileStringA(const char* section, const char* key, const char* def_val,
                                                      char* buf, DWORD size, const char* file)
 {
