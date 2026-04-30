@@ -114,6 +114,14 @@ declare -A APPS=(
     [advapi_smoke]="-lkernel32 -ladvapi32"
     [heap3_smoke]="-lkernel32 -lmsvcrt"
     [thread3_smoke]="-lkernel32"
+    [wstr_smoke]="-lkernel32 -lmsvcrt -lshlwapi"
+    [intl_smoke]="-lkernel32"
+    [disp_smoke]="-lkernel32 -luser32"
+    [svc_ctrl_smoke]="-lkernel32 -ladvapi32"
+    [sysinfo_smoke]="-lkernel32"
+    [mem2_smoke]="-lkernel32"
+    [fs2_smoke]="-lkernel32"
+    [console3_smoke]="-lkernel32"
 )
 
 for app in "${!APPS[@]}"; do
