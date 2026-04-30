@@ -131,6 +131,12 @@ set +e
     /export:lstrcmpiW \
     /export:lstrcpyW \
     /export:lstrcatW \
+    /export:GetEnvironmentVariableW \
+    /export:GetEnvironmentVariableA \
+    /export:SetEnvironmentVariableW \
+    /export:SetEnvironmentVariableA \
+    /export:ExpandEnvironmentStringsW \
+    /export:ExpandEnvironmentStringsA \
     /export:WriteFile \
     /export:WriteConsoleA \
     /export:WriteConsoleW \

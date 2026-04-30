@@ -91,7 +91,12 @@
 #include "generated_windowed_hello.h"
 #include "generated_syscall_stress.h"
 #include "generated_thread_stress.h"
+#include "generated_codepage_smoke_pe.h"
+#include "generated_com_smoke_pe.h"
 #include "generated_crypto_smoke_pe.h"
+#include "generated_dbghelp_smoke_pe.h"
+#include "generated_debug_smoke_pe.h"
+#include "generated_env_smoke_pe.h"
 #include "generated_fs_smoke_pe.h"
 #include "generated_handle_smoke_pe.h"
 #include "generated_iphlpapi_smoke_pe.h"
@@ -100,9 +105,13 @@
 #include "generated_module_smoke_pe.h"
 #include "generated_paths_smoke_pe.h"
 #include "generated_process_smoke_pe.h"
+#include "generated_psapi_smoke_pe.h"
 #include "generated_registry_smoke_pe.h"
+#include "generated_rng_smoke_pe.h"
 #include "generated_string_smoke_pe.h"
 #include "generated_time_smoke_pe.h"
+#include "generated_version_smoke_pe.h"
+#include "generated_winhttp_smoke_pe.h"
 #include "generated_wininet_smoke_pe.h"
 #include "generated_winkill_pe.h"
 #include "mm/address_space.h"
@@ -2176,7 +2185,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         {"shell32.dll", fs::generated::kBinShell32DllBytes, fs::generated::kBinShell32DllBytes_len,
          /*essential=*/false},
         {"ole32.dll", fs::generated::kBinOle32DllBytes, fs::generated::kBinOle32DllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"oleaut32.dll", fs::generated::kBinOleaut32DllBytes, fs::generated::kBinOleaut32DllBytes_len,
          /*essential=*/false},
         // winmm.dll — perf-counter / GetTickCount routes for
@@ -2186,7 +2195,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         {"bcrypt.dll", fs::generated::kBinBcryptDllBytes, fs::generated::kBinBcryptDllBytes_len,
          /*essential=*/true},
         {"psapi.dll", fs::generated::kBinPsapiDllBytes, fs::generated::kBinPsapiDllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         // DirectX + user32 / gdi32 return-constant tier. Every
         // DirectX entry returns E_NOTIMPL; GetDC returns a
         // sentinel so windowed programs don't null-check-fail
@@ -2214,7 +2223,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         {"wininet.dll", fs::generated::kBinWininetDllBytes, fs::generated::kBinWininetDllBytes_len,
          /*essential=*/true},
         {"winhttp.dll", fs::generated::kBinWinhttpDllBytes, fs::generated::kBinWinhttpDllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"crypt32.dll", fs::generated::kBinCrypt32DllBytes, fs::generated::kBinCrypt32DllBytes_len,
          /*essential=*/false},
         {"comctl32.dll", fs::generated::kBinComctl32DllBytes, fs::generated::kBinComctl32DllBytes_len,
@@ -2222,7 +2231,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         {"comdlg32.dll", fs::generated::kBinComdlg32DllBytes, fs::generated::kBinComdlg32DllBytes_len,
          /*essential=*/false},
         {"version.dll", fs::generated::kBinVersionDllBytes, fs::generated::kBinVersionDllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         {"setupapi.dll", fs::generated::kBinSetupapiDllBytes, fs::generated::kBinSetupapiDllBytes_len,
          /*essential=*/false},
         // Six more support DLLs — IP helper, user env,
@@ -2729,6 +2738,25 @@ void StartRing3SmokeTask()
     SpawnPeFile("ring3-process-smoke", fs::generated::kBinProcessSmokeBytes, fs::generated::kBinProcessSmokeBytes_len,
                 CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     SpawnPeFile("ring3-module-smoke", fs::generated::kBinModuleSmokeBytes, fs::generated::kBinModuleSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-env-smoke", fs::generated::kBinEnvSmokeBytes, fs::generated::kBinEnvSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-debug-smoke", fs::generated::kBinDebugSmokeBytes, fs::generated::kBinDebugSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-codepage-smoke", fs::generated::kBinCodepageSmokeBytes,
+                fs::generated::kBinCodepageSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-rng-smoke", fs::generated::kBinRngSmokeBytes, fs::generated::kBinRngSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-version-smoke", fs::generated::kBinVersionSmokeBytes, fs::generated::kBinVersionSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-psapi-smoke", fs::generated::kBinPsapiSmokeBytes, fs::generated::kBinPsapiSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-com-smoke", fs::generated::kBinComSmokeBytes, fs::generated::kBinComSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-dbghelp-smoke", fs::generated::kBinDbghelpSmokeBytes, fs::generated::kBinDbghelpSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-winhttp-smoke", fs::generated::kBinWinhttpSmokeBytes, fs::generated::kBinWinhttpSmokeBytes_len,
                 CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     // Windowing v0 proof: a freestanding PE that imports
     // user32!CreateWindowExA + ShowWindow + MessageBoxA and

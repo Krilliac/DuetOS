@@ -697,6 +697,199 @@ __declspec(dllexport) wchar_t16* lstrcpyW(wchar_t16* dst, const wchar_t16* src)
     return dst;
 }
 
+/* ------------------------------------------------------------------
+ * Environment variables — per-process userland table.
+ *
+ * The kernel-hosted env block (GetEnvironmentStringsW via stubs page)
+ * gives the fixed boot-time environment. Get/Set/Expand on top of it
+ * are kept entirely in user space here so a Set is visible to the
+ * matching Get inside the same process. STUB-grade: no inheritance
+ * across CreateProcess (we don't have CreateProcess yet anyway).
+ * ------------------------------------------------------------------ */
+
+#define DUETOS_ENV_MAX 16
+#define DUETOS_ENV_NAME 32
+#define DUETOS_ENV_VAL 96
+
+typedef struct
+{
+    wchar_t16 name[DUETOS_ENV_NAME];
+    wchar_t16 val[DUETOS_ENV_VAL];
+    int in_use;
+} DuetosEnvSlot;
+
+static DuetosEnvSlot g_env_table[DUETOS_ENV_MAX];
+
+static int wstr_eq_ci(const wchar_t16* a, const wchar_t16* b)
+{
+    int i = 0;
+    for (;;)
+    {
+        wchar_t16 ca = a[i];
+        wchar_t16 cb = b[i];
+        if (ca >= 'A' && ca <= 'Z')
+            ca = (wchar_t16)(ca + ('a' - 'A'));
+        if (cb >= 'A' && cb <= 'Z')
+            cb = (wchar_t16)(cb + ('a' - 'A'));
+        if (ca != cb)
+            return 0;
+        if (ca == 0)
+            return 1;
+        ++i;
+    }
+}
+
+static int wstr_len(const wchar_t16* s)
+{
+    int n = 0;
+    while (s[n] != 0)
+        ++n;
+    return n;
+}
+
+static void wstr_copy(wchar_t16* dst, const wchar_t16* src, int max)
+{
+    int i;
+    for (i = 0; i < max - 1 && src[i] != 0; ++i)
+        dst[i] = src[i];
+    dst[i] = 0;
+}
+
+__declspec(dllexport) DWORD GetEnvironmentVariableW(const wchar_t16* name, wchar_t16* buf, DWORD size)
+{
+    if (name == (const wchar_t16*)0)
+        return 0;
+    for (int i = 0; i < DUETOS_ENV_MAX; ++i)
+    {
+        if (!g_env_table[i].in_use)
+            continue;
+        if (!wstr_eq_ci(g_env_table[i].name, name))
+            continue;
+        int n = wstr_len(g_env_table[i].val);
+        if (buf == (wchar_t16*)0 || size == 0)
+            return (DWORD)(n + 1);
+        if ((DWORD)n + 1 > size)
+        {
+            buf[0] = 0;
+            return (DWORD)(n + 1);
+        }
+        wstr_copy(buf, g_env_table[i].val, (int)size);
+        return (DWORD)n;
+    }
+    return 0;
+}
+
+__declspec(dllexport) BOOL SetEnvironmentVariableW(const wchar_t16* name, const wchar_t16* val)
+{
+    if (name == (const wchar_t16*)0)
+        return 0;
+    /* val == NULL means "delete" the variable. */
+    /* First, find an existing entry to update or delete. */
+    for (int i = 0; i < DUETOS_ENV_MAX; ++i)
+    {
+        if (!g_env_table[i].in_use)
+            continue;
+        if (!wstr_eq_ci(g_env_table[i].name, name))
+            continue;
+        if (val == (const wchar_t16*)0)
+        {
+            g_env_table[i].in_use = 0;
+            return 1;
+        }
+        wstr_copy(g_env_table[i].val, val, DUETOS_ENV_VAL);
+        return 1;
+    }
+    if (val == (const wchar_t16*)0)
+        return 1; /* Delete of non-existent == success per docs. */
+    /* Allocate a free slot. */
+    for (int i = 0; i < DUETOS_ENV_MAX; ++i)
+    {
+        if (g_env_table[i].in_use)
+            continue;
+        wstr_copy(g_env_table[i].name, name, DUETOS_ENV_NAME);
+        wstr_copy(g_env_table[i].val, val, DUETOS_ENV_VAL);
+        g_env_table[i].in_use = 1;
+        return 1;
+    }
+    return 0;
+}
+
+__declspec(dllexport) DWORD GetEnvironmentVariableA(const char* name, char* buf, DWORD size)
+{
+    if (name == (const char*)0)
+        return 0;
+    /* Translate name to wchar_t16, look up, then translate back. */
+    wchar_t16 wname[DUETOS_ENV_NAME];
+    int i;
+    for (i = 0; i < DUETOS_ENV_NAME - 1 && name[i] != 0; ++i)
+        wname[i] = (wchar_t16)(unsigned char)name[i];
+    wname[i] = 0;
+    wchar_t16 wval[DUETOS_ENV_VAL];
+    DWORD n = GetEnvironmentVariableW(wname, wval, DUETOS_ENV_VAL);
+    if (n == 0)
+        return 0;
+    /* n is wchar count without NUL when buf-fit, with NUL otherwise. */
+    if (buf == (char*)0 || size == 0)
+        return n;
+    DWORD j;
+    for (j = 0; j < size - 1 && wval[j] != 0; ++j)
+        buf[j] = (char)(unsigned char)wval[j];
+    buf[j] = 0;
+    return j;
+}
+
+__declspec(dllexport) BOOL SetEnvironmentVariableA(const char* name, const char* val)
+{
+    if (name == (const char*)0)
+        return 0;
+    wchar_t16 wname[DUETOS_ENV_NAME];
+    wchar_t16 wval[DUETOS_ENV_VAL];
+    int i;
+    for (i = 0; i < DUETOS_ENV_NAME - 1 && name[i] != 0; ++i)
+        wname[i] = (wchar_t16)(unsigned char)name[i];
+    wname[i] = 0;
+    if (val == (const char*)0)
+        return SetEnvironmentVariableW(wname, (const wchar_t16*)0);
+    for (i = 0; i < DUETOS_ENV_VAL - 1 && val[i] != 0; ++i)
+        wval[i] = (wchar_t16)(unsigned char)val[i];
+    wval[i] = 0;
+    return SetEnvironmentVariableW(wname, wval);
+}
+
+__declspec(dllexport) DWORD ExpandEnvironmentStringsW(const wchar_t16* src, wchar_t16* dst, DWORD size)
+{
+    /* v0: copy literal text only; %VAR% expansion is unimplemented. */
+    if (src == (const wchar_t16*)0)
+        return 0;
+    int n = wstr_len(src) + 1; /* including NUL */
+    if (dst == (wchar_t16*)0 || size == 0)
+        return (DWORD)n;
+    if ((DWORD)n > size)
+    {
+        wstr_copy(dst, src, (int)size);
+        return (DWORD)n;
+    }
+    wstr_copy(dst, src, (int)size);
+    return (DWORD)n;
+}
+
+__declspec(dllexport) DWORD ExpandEnvironmentStringsA(const char* src, char* dst, DWORD size)
+{
+    if (src == (const char*)0)
+        return 0;
+    int i = 0;
+    while (src[i] != 0)
+        ++i;
+    int total = i + 1;
+    if (dst == (char*)0 || size == 0)
+        return (DWORD)total;
+    DWORD j;
+    for (j = 0; j < size - 1 && src[j] != 0; ++j)
+        dst[j] = src[j];
+    dst[j] = 0;
+    return (DWORD)total;
+}
+
 __declspec(dllexport) wchar_t16* lstrcatW(wchar_t16* dst, const wchar_t16* src)
 {
     if (dst == (wchar_t16*)0 || src == (const wchar_t16*)0)

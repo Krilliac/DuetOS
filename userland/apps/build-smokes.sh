@@ -30,6 +30,15 @@ declare -A APPS=(
     [handle_smoke]="-lkernel32"
     [process_smoke]="-lkernel32"
     [module_smoke]="-lkernel32"
+    [env_smoke]="-lkernel32"
+    [debug_smoke]="-lkernel32"
+    [codepage_smoke]="-lkernel32"
+    [rng_smoke]="-lkernel32 -lbcrypt -ladvapi32"
+    [version_smoke]="-lkernel32 -lversion"
+    [psapi_smoke]="-lkernel32 -lpsapi"
+    [com_smoke]="-lkernel32 -lole32"
+    [dbghelp_smoke]="-lkernel32 -ldbghelp"
+    [winhttp_smoke]="-lkernel32 -lwinhttp"
 )
 
 for app in "${!APPS[@]}"; do
