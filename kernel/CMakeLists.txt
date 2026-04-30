@@ -286,6 +286,14 @@ duetos_embed_smoke_pe(network2_smoke kBinNetwork2SmokeBytes)
 duetos_embed_smoke_pe(dxgi_smoke     kBinDxgiSmokeBytes)
 duetos_embed_smoke_pe(dwm_smoke      kBinDwmSmokeBytes)
 duetos_embed_smoke_pe(uxtheme_smoke  kBinUxthemeSmokeBytes)
+duetos_embed_smoke_pe(token_smoke    kBinTokenSmokeBytes)
+duetos_embed_smoke_pe(security_smoke kBinSecuritySmokeBytes)
+duetos_embed_smoke_pe(perf_smoke     kBinPerfSmokeBytes)
+duetos_embed_smoke_pe(accel_smoke    kBinAccelSmokeBytes)
+duetos_embed_smoke_pe(wts_smoke      kBinWtsSmokeBytes)
+duetos_embed_smoke_pe(winerr_smoke   kBinWinerrSmokeBytes)
+duetos_embed_smoke_pe(sleep_smoke    kBinSleepSmokeBytes)
+duetos_embed_smoke_pe(nt_smoke       kBinNtSmokeBytes)
 
 # Chrome font — Liberation Sans Regular (SIL OFL 1.1). Embedded as
 # bytes for the TTF rasterizer; the boot path hands these to

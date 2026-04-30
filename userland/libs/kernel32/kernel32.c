@@ -1131,6 +1131,12 @@ typedef struct
     short max_cols, max_rows;
 } DUETOS_CONSOLE_SBI;
 
+/* In-memory cursor + attribute state. */
+static short g_console_cur_x = 0, g_console_cur_y = 0;
+static unsigned short g_console_attrs = 0x07;
+static int g_console_cursor_visible = 1;
+static int g_console_cursor_size = 25; /* pct of cell */
+
 __declspec(dllexport) BOOL GetConsoleScreenBufferInfo(HANDLE h, DUETOS_CONSOLE_SBI* info)
 {
     (void)h;
@@ -1138,9 +1144,9 @@ __declspec(dllexport) BOOL GetConsoleScreenBufferInfo(HANDLE h, DUETOS_CONSOLE_S
         return 0;
     info->cols = 80;
     info->rows = 25;
-    info->cur_x = 0;
-    info->cur_y = 0;
-    info->attrs = 0x07;
+    info->cur_x = g_console_cur_x;
+    info->cur_y = g_console_cur_y;
+    info->attrs = g_console_attrs;
     info->win_left = 0;
     info->win_top = 0;
     info->win_right = 79;
@@ -1150,8 +1156,193 @@ __declspec(dllexport) BOOL GetConsoleScreenBufferInfo(HANDLE h, DUETOS_CONSOLE_S
     return 1;
 }
 
+typedef struct
+{
+    short x, y;
+} DUETOS_COORD;
+typedef struct
+{
+    DWORD size;
+    BOOL visible;
+} DUETOS_CONSOLE_CURSOR_INFO;
+
+__declspec(dllexport) BOOL SetConsoleCursorPosition(HANDLE h, DUETOS_COORD pos)
+{
+    (void)h;
+    g_console_cur_x = pos.x;
+    g_console_cur_y = pos.y;
+    return 1;
+}
+
+__declspec(dllexport) BOOL GetConsoleCursorInfo(HANDLE h, DUETOS_CONSOLE_CURSOR_INFO* ci)
+{
+    (void)h;
+    if (ci == (DUETOS_CONSOLE_CURSOR_INFO*)0)
+        return 0;
+    ci->size = (DWORD)g_console_cursor_size;
+    ci->visible = g_console_cursor_visible;
+    return 1;
+}
+
+__declspec(dllexport) BOOL SetConsoleCursorInfo(HANDLE h, const DUETOS_CONSOLE_CURSOR_INFO* ci)
+{
+    (void)h;
+    if (ci == (const DUETOS_CONSOLE_CURSOR_INFO*)0)
+        return 0;
+    g_console_cursor_size = (int)ci->size;
+    g_console_cursor_visible = ci->visible ? 1 : 0;
+    return 1;
+}
+
+__declspec(dllexport) BOOL SetConsoleTextAttribute(HANDLE h, unsigned short attrs)
+{
+    (void)h;
+    g_console_attrs = attrs;
+    return 1;
+}
+
+__declspec(dllexport) BOOL FillConsoleOutputAttribute(HANDLE h, unsigned short attr, DWORD count, DUETOS_COORD origin,
+                                                      DWORD* written)
+{
+    (void)h;
+    (void)attr;
+    (void)origin;
+    if (written != (DWORD*)0)
+        *written = count;
+    return 1;
+}
+
+__declspec(dllexport) BOOL FillConsoleOutputCharacterA(HANDLE h, char ch, DWORD count, DUETOS_COORD origin,
+                                                       DWORD* written)
+{
+    (void)h;
+    (void)ch;
+    (void)origin;
+    if (written != (DWORD*)0)
+        *written = count;
+    return 1;
+}
+
+__declspec(dllexport) BOOL FillConsoleOutputCharacterW(HANDLE h, wchar_t16 ch, DWORD count, DUETOS_COORD origin,
+                                                       DWORD* written)
+{
+    (void)h;
+    (void)ch;
+    (void)origin;
+    if (written != (DWORD*)0)
+        *written = count;
+    return 1;
+}
+
+__declspec(dllexport) BOOL GetNumberOfConsoleInputEvents(HANDLE h, DWORD* count)
+{
+    (void)h;
+    if (count != (DWORD*)0)
+        *count = 0; /* No queued console input under emulator. */
+    return 1;
+}
+
 /* GetFileAttributesA/W live further down — they use SYS_FILE_QUERY_ATTRIBUTES
  * directly. Skipping our placeholder definitions here avoids duplicates. */
+
+/* CreateFileMappingW — for v0 we treat unnamed file mappings
+ * backed by the system pagefile (INVALID_HANDLE_VALUE handle)
+ * as a heap allocation. The returned "mapping handle" is the
+ * heap pointer with the low bit set as a sentinel; MapViewOfFile
+ * just returns the same pointer (size 0 → use stored size).
+ *
+ * Named mappings still STUB. ipc_smoke uses the unnamed path.
+ */
+typedef struct
+{
+    DWORD size;
+    DWORD protect;
+    void* base;
+} DUETOS_FILEMAPPING;
+
+#define DUETOS_FILEMAPPING_MAX 8
+static DUETOS_FILEMAPPING g_filemappings[DUETOS_FILEMAPPING_MAX];
+static int g_filemapping_count = 0;
+
+__declspec(dllexport) HANDLE CreateFileMappingW(HANDLE hFile, void* sec, DWORD protect, DWORD sizeHigh, DWORD sizeLow,
+                                                const wchar_t16* name)
+{
+    (void)hFile;
+    (void)sec;
+    (void)name;
+    /* Allocate via SYS_HEAP_ALLOC. */
+    if (g_filemapping_count >= DUETOS_FILEMAPPING_MAX)
+        return (HANDLE)0;
+    DWORD total = ((unsigned long long)sizeHigh << 32) | sizeLow;
+    if (total == 0)
+        total = 0x10000; /* default 64K if caller passed 0 */
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)11), "D"((long long)total) : "memory");
+    if (rv == 0)
+        return (HANDLE)0;
+    int slot = g_filemapping_count++;
+    g_filemappings[slot].size = total;
+    g_filemappings[slot].protect = protect;
+    g_filemappings[slot].base = (void*)rv;
+    /* Sentinel handle: 0x6000 + slot. */
+    return (HANDLE)(unsigned long long)(0x6000 + slot);
+}
+
+__declspec(dllexport) HANDLE OpenFileMappingW(DWORD desired, BOOL inherit, const wchar_t16* name)
+{
+    (void)desired;
+    (void)inherit;
+    (void)name;
+    /* Named mappings not yet supported — return NULL. */
+    return (HANDLE)0;
+}
+
+__declspec(dllexport) void* MapViewOfFile(HANDLE h, DWORD desired, DWORD offHigh, DWORD offLow,
+                                          unsigned long long bytes)
+{
+    (void)desired;
+    (void)offHigh;
+    (void)offLow;
+    (void)bytes;
+    unsigned long long handle_v = (unsigned long long)h;
+    if (handle_v < 0x6000 || handle_v >= 0x6000 + DUETOS_FILEMAPPING_MAX)
+        return (void*)0;
+    int slot = (int)(handle_v - 0x6000);
+    return g_filemappings[slot].base;
+}
+
+__declspec(dllexport) BOOL UnmapViewOfFile(const void* base)
+{
+    (void)base;
+    /* Page is freed when CloseHandle of the mapping is called. */
+    return 1;
+}
+
+/* CreateJobObjectW — opaque sentinel handle. AssignProcessToJobObject
+ * accepts and returns success. IsProcessInJob reports FALSE before
+ * any assignment in this v0 model. */
+__declspec(dllexport) HANDLE CreateJobObjectW(void* sec, const wchar_t16* name)
+{
+    (void)sec;
+    (void)name;
+    return (HANDLE)0x7001ULL;
+}
+
+__declspec(dllexport) BOOL AssignProcessToJobObject(HANDLE job, HANDLE proc)
+{
+    (void)job;
+    (void)proc;
+    return 1;
+}
+
+__declspec(dllexport) BOOL IsProcessInJob(HANDLE proc, HANDLE job, BOOL* in_job)
+{
+    (void)proc;
+    (void)job;
+    if (in_job != (BOOL*)0)
+        *in_job = 0;
+    return 1;
+}
 
 __declspec(dllexport) DWORD GetFullPathNameW(const wchar_t16* lpFileName, DWORD nBufferLength, wchar_t16* lpBuffer,
                                              wchar_t16** lpFilePart)

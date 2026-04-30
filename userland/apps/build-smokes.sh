@@ -77,6 +77,14 @@ declare -A APPS=(
     [dxgi_smoke]="-lkernel32 -ldxgi"
     [dwm_smoke]="-lkernel32 -ldwmapi"
     [uxtheme_smoke]="-lkernel32 -luxtheme"
+    [token_smoke]="-lkernel32 -ladvapi32"
+    [security_smoke]="-lkernel32 -ladvapi32"
+    [perf_smoke]="-lkernel32"
+    [accel_smoke]="-lkernel32 -luser32"
+    [wts_smoke]="-lkernel32 -lwtsapi32"
+    [winerr_smoke]="-lkernel32"
+    [sleep_smoke]="-lkernel32"
+    [nt_smoke]="-lkernel32 -lntdll"
 )
 
 for app in "${!APPS[@]}"; do

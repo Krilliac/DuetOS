@@ -158,6 +158,21 @@ set +e
     /export:GlobalDeleteAtom \
     /export:GetTimeZoneInformation \
     /export:GetConsoleScreenBufferInfo \
+    /export:SetConsoleCursorPosition \
+    /export:GetConsoleCursorInfo \
+    /export:SetConsoleCursorInfo \
+    /export:SetConsoleTextAttribute \
+    /export:FillConsoleOutputAttribute \
+    /export:FillConsoleOutputCharacterA \
+    /export:FillConsoleOutputCharacterW \
+    /export:GetNumberOfConsoleInputEvents \
+    /export:CreateFileMappingW \
+    /export:OpenFileMappingW \
+    /export:MapViewOfFile \
+    /export:UnmapViewOfFile \
+    /export:CreateJobObjectW \
+    /export:AssignProcessToJobObject \
+    /export:IsProcessInJob \
     /export:GetFullPathNameW \
     /export:WriteFile \
     /export:WriteConsoleA \
