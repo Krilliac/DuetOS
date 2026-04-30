@@ -810,3 +810,38 @@ __declspec(dllexport) void _aligned_free(void* p)
     long long discard;
     __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)12), "D"((long long)orig) : "memory");
 }
+
+/* Re-export memcpy/memmove/memset from msvcrt — vcruntime140 already
+ * has them, but mingw-w64 imports memcpy/memmove via msvcrt by
+ * default. Without these msvcrt-exported names, link-time mingw
+ * runtime fallbacks fall back to NO-OP catch-all. */
+__declspec(dllexport) void* memcpy(void* dst, const void* src, size_t n)
+{
+    unsigned char* d = (unsigned char*)dst;
+    const unsigned char* s = (const unsigned char*)src;
+    for (size_t i = 0; i < n; ++i)
+        d[i] = s[i];
+    return dst;
+}
+
+__declspec(dllexport) void* memmove(void* dst, const void* src, size_t n)
+{
+    unsigned char* d = (unsigned char*)dst;
+    const unsigned char* s = (const unsigned char*)src;
+    if (d < s)
+        for (size_t i = 0; i < n; ++i)
+            d[i] = s[i];
+    else
+        for (size_t i = n; i > 0; --i)
+            d[i - 1] = s[i - 1];
+    return dst;
+}
+
+__declspec(dllexport) void* memset(void* dst, int c, size_t n)
+{
+    unsigned char* d = (unsigned char*)dst;
+    unsigned char b = (unsigned char)c;
+    for (size_t i = 0; i < n; ++i)
+        d[i] = b;
+    return dst;
+}

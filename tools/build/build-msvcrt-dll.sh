@@ -125,6 +125,9 @@ set +e
     /export:ferror \
     /export:_aligned_malloc \
     /export:_aligned_free \
+    /export:memcpy \
+    /export:memmove \
+    /export:memset \
     /out:"${DLL}" \
     "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}
