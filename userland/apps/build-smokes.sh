@@ -61,6 +61,14 @@ declare -A APPS=(
     [wow64_smoke]="-lkernel32"
     [mathlib_smoke]="-lkernel32"
     [stdio_smoke]="-lkernel32 -lmsvcrt"
+    [nls_smoke]="-lkernel32"
+    [services_smoke]="-lkernel32 -ladvapi32"
+    [eventlog_smoke]="-lkernel32 -ladvapi32"
+    [sound_smoke]="-lkernel32 -lwinmm"
+    [multimon_smoke]="-lkernel32 -luser32"
+    [power_smoke]="-lkernel32"
+    [heap_smoke]="-lkernel32"
+    [thread2_smoke]="-lkernel32"
 )
 
 for app in "${!APPS[@]}"; do
