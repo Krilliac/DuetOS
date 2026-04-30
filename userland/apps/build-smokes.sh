@@ -108,6 +108,12 @@ declare -A APPS=(
     [signal_smoke]="-lkernel32 -lmsvcrt"
     [timer_smoke]="-lkernel32 -luser32"
     [winsock_ext_smoke]="-lkernel32 -lws2_32"
+    [key_smoke]="-lkernel32 -luser32"
+    [reg2_smoke]="-lkernel32 -ladvapi32"
+    [paths2_smoke]="-lkernel32 -lshlwapi"
+    [advapi_smoke]="-lkernel32 -ladvapi32"
+    [heap3_smoke]="-lkernel32 -lmsvcrt"
+    [thread3_smoke]="-lkernel32"
 )
 
 for app in "${!APPS[@]}"; do

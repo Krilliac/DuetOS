@@ -173,6 +173,19 @@ set +e
     /export:CreateJobObjectW \
     /export:AssignProcessToJobObject \
     /export:IsProcessInJob \
+    /export:CreateIoCompletionPort \
+    /export:PostQueuedCompletionStatus \
+    /export:GetQueuedCompletionStatus \
+    /export:CreateTimerQueue \
+    /export:DeleteTimerQueue \
+    /export:CreateWaitableTimerW \
+    /export:SetWaitableTimer \
+    /export:CancelWaitableTimer \
+    /export:WTSGetActiveConsoleSessionId \
+    /export:ProcessIdToSessionId \
+    /export:GetSystemPowerStatus \
+    /export:SetThreadExecutionState \
+    /export:IsSystemResumeAutomatic \
     /export:GetFullPathNameW \
     /export:WriteFile \
     /export:WriteConsoleA \

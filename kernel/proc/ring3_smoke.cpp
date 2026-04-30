@@ -183,6 +183,12 @@
 #include "generated_signal_smoke_pe.h"
 #include "generated_timer_smoke_pe.h"
 #include "generated_winsock_ext_smoke_pe.h"
+#include "generated_advapi_smoke_pe.h"
+#include "generated_heap3_smoke_pe.h"
+#include "generated_key_smoke_pe.h"
+#include "generated_paths2_smoke_pe.h"
+#include "generated_reg2_smoke_pe.h"
+#include "generated_thread3_smoke_pe.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
@@ -2979,6 +2985,18 @@ void StartRing3SmokeTask()
     SpawnPeFile("ring3-winsock-ext-smoke", fs::generated::kBinWinsockExtSmokeBytes,
                 fs::generated::kBinWinsockExtSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
                 mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-key-smoke", fs::generated::kBinKeySmokeBytes, fs::generated::kBinKeySmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-reg2-smoke", fs::generated::kBinReg2SmokeBytes, fs::generated::kBinReg2SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-paths2-smoke", fs::generated::kBinPaths2SmokeBytes, fs::generated::kBinPaths2SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-advapi-smoke", fs::generated::kBinAdvapiSmokeBytes, fs::generated::kBinAdvapiSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-heap3-smoke", fs::generated::kBinHeap3SmokeBytes, fs::generated::kBinHeap3SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-thread3-smoke", fs::generated::kBinThread3SmokeBytes, fs::generated::kBinThread3SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     // Windowing v0 proof: a freestanding PE that imports
     // user32!CreateWindowExA + ShowWindow + MessageBoxA and
     // calls them. The Win32 → SYS_WIN_CREATE bridge turns

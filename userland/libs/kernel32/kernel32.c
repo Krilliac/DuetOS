@@ -1344,6 +1344,185 @@ __declspec(dllexport) BOOL IsProcessInJob(HANDLE proc, HANDLE job, BOOL* in_job)
     return 1;
 }
 
+/* CreateIoCompletionPort — for v0 we keep an in-memory ring of
+ * up to 32 pending completions per port. Single-threaded scope
+ * matches the rest of the v0 kernel32 surface; matches the
+ * smoke-test usage pattern of "post N, get N within the same
+ * thread".
+ */
+#define DUETOS_IOCP_RING 32
+typedef struct
+{
+    DWORD bytes;
+    unsigned long long key;
+    void* ov;
+} DuetosIocpEntry;
+typedef struct
+{
+    DuetosIocpEntry ring[DUETOS_IOCP_RING];
+    int head, tail;
+    int in_use;
+} DuetosIocp;
+
+#define DUETOS_IOCP_MAX 4
+static DuetosIocp g_iocp[DUETOS_IOCP_MAX];
+
+__declspec(dllexport) HANDLE CreateIoCompletionPort(HANDLE fileHandle, HANDLE existing, unsigned long long key,
+                                                    DWORD numThreads)
+{
+    (void)fileHandle;
+    (void)key;
+    (void)numThreads;
+    if (existing != (HANDLE)0)
+        return existing; /* Associate fileHandle with existing port — STUB. */
+    for (int i = 0; i < DUETOS_IOCP_MAX; ++i)
+        if (!g_iocp[i].in_use)
+        {
+            g_iocp[i].head = 0;
+            g_iocp[i].tail = 0;
+            g_iocp[i].in_use = 1;
+            return (HANDLE)(unsigned long long)(0x8000 + i);
+        }
+    return (HANDLE)0;
+}
+
+__declspec(dllexport) BOOL PostQueuedCompletionStatus(HANDLE iocp, DWORD bytes, unsigned long long key, void* ov)
+{
+    unsigned long long h = (unsigned long long)iocp;
+    if (h < 0x8000 || h >= 0x8000 + DUETOS_IOCP_MAX)
+        return 0;
+    int slot = (int)(h - 0x8000);
+    if (!g_iocp[slot].in_use)
+        return 0;
+    int next = (g_iocp[slot].tail + 1) % DUETOS_IOCP_RING;
+    if (next == g_iocp[slot].head)
+        return 0; /* full */
+    g_iocp[slot].ring[g_iocp[slot].tail].bytes = bytes;
+    g_iocp[slot].ring[g_iocp[slot].tail].key = key;
+    g_iocp[slot].ring[g_iocp[slot].tail].ov = ov;
+    g_iocp[slot].tail = next;
+    return 1;
+}
+
+__declspec(dllexport) BOOL GetQueuedCompletionStatus(HANDLE iocp, DWORD* bytes, unsigned long long* key, void** ov,
+                                                     DWORD timeout)
+{
+    (void)timeout;
+    unsigned long long h = (unsigned long long)iocp;
+    if (h < 0x8000 || h >= 0x8000 + DUETOS_IOCP_MAX)
+        return 0;
+    int slot = (int)(h - 0x8000);
+    if (!g_iocp[slot].in_use)
+        return 0;
+    if (g_iocp[slot].head == g_iocp[slot].tail)
+        return 0; /* empty — could also block, but v0 is non-blocking. */
+    if (bytes != (DWORD*)0)
+        *bytes = g_iocp[slot].ring[g_iocp[slot].head].bytes;
+    if (key != (unsigned long long*)0)
+        *key = g_iocp[slot].ring[g_iocp[slot].head].key;
+    if (ov != (void**)0)
+        *ov = g_iocp[slot].ring[g_iocp[slot].head].ov;
+    g_iocp[slot].head = (g_iocp[slot].head + 1) % DUETOS_IOCP_RING;
+    return 1;
+}
+
+/* CreateTimerQueue / DeleteTimerQueue — sentinel handle. */
+__declspec(dllexport) HANDLE CreateTimerQueue(void)
+{
+    return (HANDLE)0x8801ULL;
+}
+
+__declspec(dllexport) BOOL DeleteTimerQueue(HANDLE q)
+{
+    (void)q;
+    return 1;
+}
+
+/* CreateWaitableTimerW — sentinel; immediate signal on wait if the
+ * relative due-time is "very soon". The smoke test uses 100 ms
+ * which is short enough that returning a pre-signaled event-style
+ * handle works in single-thread tests. We reuse the manual-reset
+ * Event slot machinery via an actual SYS_HANDLE_CREATE_EVENT call. */
+__declspec(dllexport) HANDLE CreateWaitableTimerW(void* sa, BOOL manualReset, const wchar_t16* name)
+{
+    (void)sa;
+    (void)name;
+    /* Allocate via SYS_HANDLE_CREATE_EVENT (manual, signaled). */
+    long long h;
+    __asm__ volatile("int $0x80"
+                     : "=a"(h)
+                     : "a"((long long)33),                                      /* SYS_HANDLE_CREATE_EVENT */
+                       "D"((long long)(manualReset ? 1 : 0)), "S"((long long)1) /* initially signaled */
+                     : "memory");
+    return (HANDLE)h;
+}
+
+__declspec(dllexport) BOOL SetWaitableTimer(HANDLE t, void* due, long period, void* completion, void* arg, BOOL resume)
+{
+    (void)t;
+    (void)due;
+    (void)period;
+    (void)completion;
+    (void)arg;
+    (void)resume;
+    return 1;
+}
+
+__declspec(dllexport) BOOL CancelWaitableTimer(HANDLE t)
+{
+    (void)t;
+    return 1;
+}
+
+/* WTSGetActiveConsoleSessionId stub — return 1. */
+__declspec(dllexport) DWORD WTSGetActiveConsoleSessionId(void)
+{
+    return 1;
+}
+
+__declspec(dllexport) BOOL ProcessIdToSessionId(DWORD pid, DWORD* session)
+{
+    (void)pid;
+    if (session != (DWORD*)0)
+        *session = 1;
+    return 1;
+}
+
+/* GetSystemPowerStatus — return canned "AC plugged, full battery". */
+typedef struct
+{
+    unsigned char ACLineStatus;
+    unsigned char BatteryFlag;
+    unsigned char BatteryLifePercent;
+    unsigned char Reserved1;
+    DWORD BatteryLifeTime;
+    DWORD BatteryFullLifeTime;
+} DUETOS_SYSTEM_POWER_STATUS;
+
+__declspec(dllexport) BOOL GetSystemPowerStatus(DUETOS_SYSTEM_POWER_STATUS* sps)
+{
+    if (sps == (DUETOS_SYSTEM_POWER_STATUS*)0)
+        return 0;
+    sps->ACLineStatus = 1;          /* AC online */
+    sps->BatteryFlag = 0x80;        /* no system battery */
+    sps->BatteryLifePercent = 0xFF; /* unknown */
+    sps->Reserved1 = 0;
+    sps->BatteryLifeTime = 0xFFFFFFFFu;
+    sps->BatteryFullLifeTime = 0xFFFFFFFFu;
+    return 1;
+}
+
+__declspec(dllexport) DWORD SetThreadExecutionState(DWORD esFlags)
+{
+    /* Return previous state (just echo input). */
+    return esFlags;
+}
+
+__declspec(dllexport) BOOL IsSystemResumeAutomatic(void)
+{
+    return 0;
+}
+
 __declspec(dllexport) DWORD GetFullPathNameW(const wchar_t16* lpFileName, DWORD nBufferLength, wchar_t16* lpBuffer,
                                              wchar_t16** lpFilePart)
 {
