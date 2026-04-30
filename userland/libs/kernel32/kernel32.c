@@ -4435,3 +4435,125 @@ __declspec(dllexport) BOOL VerifyVersionInfoW(void* info, DWORD type_mask, unsig
     (void)cond_mask;
     return 1;
 }
+
+/* CheckRemoteDebuggerPresent — always FALSE. */
+__declspec(dllexport) BOOL CheckRemoteDebuggerPresent(HANDLE p, BOOL* present)
+{
+    (void)p;
+    if (present != (BOOL*)0)
+        *present = 0;
+    return 1;
+}
+
+/* GetProcessId / GetThreadId — return current via syscall. */
+__declspec(dllexport) DWORD GetProcessId(HANDLE p)
+{
+    (void)p;
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)5) : "memory");
+    return (DWORD)rv;
+}
+
+__declspec(dllexport) DWORD GetThreadId(HANDLE t)
+{
+    (void)t;
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)6) : "memory");
+    return (DWORD)rv;
+}
+
+/* AddVectoredExceptionHandler — sentinel handle. */
+__declspec(dllexport) void* AddVectoredExceptionHandler(unsigned long first, void* h)
+{
+    (void)first;
+    (void)h;
+    return (void*)(unsigned long long)0xE7000001ULL;
+}
+
+__declspec(dllexport) unsigned long RemoveVectoredExceptionHandler(void* h)
+{
+    (void)h;
+    return 1;
+}
+
+/* GetThreadPriorityBoost — TRUE, no boost. */
+__declspec(dllexport) BOOL GetThreadPriorityBoost(HANDLE t, BOOL* disabled)
+{
+    (void)t;
+    if (disabled != (BOOL*)0)
+        *disabled = 0;
+    return 1;
+}
+
+/* GetConsoleProcessList — 1 entry. */
+__declspec(dllexport) DWORD GetConsoleProcessList(DWORD* pids, DWORD count)
+{
+    if (pids != (DWORD*)0 && count >= 1)
+        pids[0] = GetProcessId((HANDLE)(long long)-1);
+    return 1;
+}
+
+/* PathCanonicalizeW — collapse "..". */
+__declspec(dllexport) BOOL PathCanonicalizeW(wchar_t16* dst, const wchar_t16* src)
+{
+    if (dst == (wchar_t16*)0 || src == (const wchar_t16*)0)
+        return 0;
+    /* Simple v0: copy everything, then collapse "\\..\\X" → "\\X". */
+    int j = 0;
+    int i = 0;
+    while (src[i] != 0)
+        dst[j++] = src[i++];
+    dst[j] = 0;
+    /* One pass: search for "\\..\\". When found, back up to the prior '\\'. */
+    int k = 0;
+    while (k + 3 < j)
+    {
+        if (dst[k] == '\\' && dst[k + 1] == '.' && dst[k + 2] == '.' && dst[k + 3] == '\\')
+        {
+            int back = k;
+            while (back > 0 && dst[back - 1] != '\\')
+                --back;
+            if (back > 0)
+                --back; /* Skip the leading '\\' too. */
+            int shift = (k + 3) - back;
+            for (int m = back; m + shift <= j; ++m)
+                dst[m] = dst[m + shift];
+            j -= shift;
+            k = back > 0 ? back - 1 : 0;
+        }
+        else
+            ++k;
+    }
+    dst[j] = 0;
+    return 1;
+}
+
+/* PathRenameExtensionW — replace extension. */
+__declspec(dllexport) BOOL PathRenameExtensionW(wchar_t16* path, const wchar_t16* new_ext)
+{
+    if (path == (wchar_t16*)0 || new_ext == (const wchar_t16*)0)
+        return 0;
+    int n = 0;
+    while (path[n] != 0)
+        ++n;
+    int dot = -1;
+    for (int i = n - 1; i >= 0; --i)
+    {
+        if (path[i] == '.')
+        {
+            dot = i;
+            break;
+        }
+        if (path[i] == '\\' || path[i] == '/')
+            break;
+    }
+    int trim = (dot >= 0) ? dot : n;
+    int j = 0;
+    while (new_ext[j] != 0)
+    {
+        path[trim + j] = new_ext[j];
+        ++j;
+    }
+    path[trim + j] = 0;
+    return 1;
+}

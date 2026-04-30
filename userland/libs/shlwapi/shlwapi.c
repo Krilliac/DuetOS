@@ -608,3 +608,104 @@ __declspec(dllexport) BOOL PathMatchSpecW(const wchar_t16* s, const wchar_t16* p
         return 0;
     return match_spec_w(s, pat);
 }
+
+/* PathCanonicalizeW — collapse "..". */
+__declspec(dllexport) BOOL PathCanonicalizeW(wchar_t16* dst, const wchar_t16* src)
+{
+    if (dst == (wchar_t16*)0 || src == (const wchar_t16*)0)
+        return 0;
+    int j = 0;
+    int i = 0;
+    while (src[i] != 0)
+        dst[j++] = src[i++];
+    dst[j] = 0;
+    int k = 0;
+    while (k + 3 < j)
+    {
+        if (dst[k] == '\\' && dst[k + 1] == '.' && dst[k + 2] == '.' && dst[k + 3] == '\\')
+        {
+            int back = k;
+            while (back > 0 && dst[back - 1] != '\\')
+                --back;
+            if (back > 0)
+                --back;
+            int shift = (k + 3) - back;
+            for (int m = back; m + shift <= j; ++m)
+                dst[m] = dst[m + shift];
+            j -= shift;
+            k = back > 0 ? back - 1 : 0;
+        }
+        else
+            ++k;
+    }
+    dst[j] = 0;
+    return 1;
+}
+
+/* PathRenameExtensionW. */
+__declspec(dllexport) BOOL PathRenameExtensionW(wchar_t16* path, const wchar_t16* new_ext)
+{
+    if (path == (wchar_t16*)0 || new_ext == (const wchar_t16*)0)
+        return 0;
+    int n = 0;
+    while (path[n] != 0)
+        ++n;
+    int dot = -1;
+    for (int i = n - 1; i >= 0; --i)
+    {
+        if (path[i] == '.')
+        {
+            dot = i;
+            break;
+        }
+        if (path[i] == '\\' || path[i] == '/')
+            break;
+    }
+    int trim = (dot >= 0) ? dot : n;
+    int j = 0;
+    while (new_ext[j] != 0)
+    {
+        path[trim + j] = new_ext[j];
+        ++j;
+    }
+    path[trim + j] = 0;
+    return 1;
+}
+
+/* PathQuoteSpacesW — wrap path in "" if it contains a space. */
+__declspec(dllexport) void PathQuoteSpacesW(wchar_t16* p)
+{
+    if (p == (wchar_t16*)0)
+        return;
+    int has_space = 0;
+    int n = 0;
+    while (p[n] != 0)
+    {
+        if (p[n] == ' ')
+            has_space = 1;
+        ++n;
+    }
+    if (!has_space)
+        return;
+    /* Shift right by 1 to make room for opening quote, then append closing quote. */
+    for (int i = n; i >= 0; --i)
+        p[i + 1] = p[i];
+    p[0] = '"';
+    p[n + 1] = '"';
+    p[n + 2] = 0;
+}
+
+/* PathUnquoteSpacesW — strip outer "" if present. */
+__declspec(dllexport) void PathUnquoteSpacesW(wchar_t16* p)
+{
+    if (p == (wchar_t16*)0 || p[0] != '"')
+        return;
+    int n = 0;
+    while (p[n] != 0)
+        ++n;
+    if (n < 2 || p[n - 1] != '"')
+        return;
+    for (int i = 0; i < n - 2; ++i)
+        p[i] = p[i + 1];
+    p[n - 2] = 0;
+}

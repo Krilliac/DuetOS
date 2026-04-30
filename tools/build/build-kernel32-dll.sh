@@ -233,6 +233,13 @@ set +e
     /export:OpenProcess \
     /export:CreatePipe \
     /export:VirtualQuery \
+    /export:CheckRemoteDebuggerPresent \
+    /export:GetProcessId \
+    /export:GetThreadId \
+    /export:AddVectoredExceptionHandler \
+    /export:RemoveVectoredExceptionHandler \
+    /export:GetThreadPriorityBoost \
+    /export:GetConsoleProcessList \
     /export:GetFullPathNameW \
     /export:WriteFile \
     /export:WriteConsoleA \
