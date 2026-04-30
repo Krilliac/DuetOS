@@ -51,6 +51,7 @@ set +e
     /export:AllocateAndInitializeSid \
     /export:FreeSid \
     /export:CryptAcquireContextW \
+    /export:CryptGenRandom \
     /out:"${DLL}" "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}
 set -e

@@ -240,6 +240,7 @@ set +e
     /export:RemoveVectoredExceptionHandler \
     /export:GetThreadPriorityBoost \
     /export:GetConsoleProcessList \
+    /export:GetMaximumProcessorCount \
     /export:GetFullPathNameW \
     /export:WriteFile \
     /export:WriteConsoleA \

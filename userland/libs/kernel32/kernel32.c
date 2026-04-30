@@ -4557,3 +4557,11 @@ __declspec(dllexport) BOOL PathRenameExtensionW(wchar_t16* path, const wchar_t16
     path[trim + j] = 0;
     return 1;
 }
+
+/* GetMaximumProcessorCount — was missing while GetActiveProcessorCount
+ * + GetTempFileNameW already live earlier in the file. */
+__declspec(dllexport) DWORD GetMaximumProcessorCount(unsigned short group)
+{
+    (void)group;
+    return 1;
+}

@@ -2042,3 +2042,14 @@ __declspec(dllexport) BOOL DestroyAcceleratorTable(void* h)
     (void)h;
     return 1;
 }
+
+/* GetDpiForSystem / GetDpiForWindow — user32 (Win10+ moved here). */
+__declspec(dllexport) UINT GetDpiForSystem(void)
+{
+    return 96;
+}
+__declspec(dllexport) UINT GetDpiForWindow(void* hwnd)
+{
+    (void)hwnd;
+    return 96;
+}

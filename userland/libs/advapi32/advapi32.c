@@ -1240,3 +1240,10 @@ __declspec(dllexport) BOOL CryptReleaseContext_real(unsigned long long h, DWORD 
     (void)flags;
     return 1;
 }
+
+/* CryptGenRandom — bridge to SystemFunction036. */
+__declspec(dllexport) BOOL CryptGenRandom(unsigned long long h, DWORD len, unsigned char* buf)
+{
+    (void)h;
+    return SystemFunction036(buf, len);
+}

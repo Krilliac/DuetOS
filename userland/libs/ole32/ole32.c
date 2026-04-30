@@ -315,3 +315,41 @@ __declspec(dllexport) HRESULT RevokeDragDrop(void* hwnd)
     (void)hwnd;
     return S_OK;
 }
+
+/* StringFromGUID2 — like StringFromCLSID but writes into caller buffer. */
+__declspec(dllexport) int StringFromGUID2(const void* guid, wchar_t16* buf, int cch)
+{
+    if (guid == 0 || buf == 0 || cch < 39)
+        return 0;
+    static const wchar_t16 hex[] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
+    const unsigned char* p = (const unsigned char*)guid;
+    int i = 0;
+    buf[i++] = '{';
+    unsigned int d1 =
+        (unsigned int)p[0] | ((unsigned int)p[1] << 8) | ((unsigned int)p[2] << 16) | ((unsigned int)p[3] << 24);
+    for (int j = 7; j >= 0; --j)
+        buf[i++] = hex[(d1 >> (j * 4)) & 0xF];
+    buf[i++] = '-';
+    unsigned short d2 = (unsigned short)p[4] | ((unsigned short)p[5] << 8);
+    for (int j = 3; j >= 0; --j)
+        buf[i++] = hex[(d2 >> (j * 4)) & 0xF];
+    buf[i++] = '-';
+    unsigned short d3 = (unsigned short)p[6] | ((unsigned short)p[7] << 8);
+    for (int j = 3; j >= 0; --j)
+        buf[i++] = hex[(d3 >> (j * 4)) & 0xF];
+    buf[i++] = '-';
+    for (int k = 8; k < 10; ++k)
+    {
+        buf[i++] = hex[(p[k] >> 4) & 0xF];
+        buf[i++] = hex[p[k] & 0xF];
+    }
+    buf[i++] = '-';
+    for (int k = 10; k < 16; ++k)
+    {
+        buf[i++] = hex[(p[k] >> 4) & 0xF];
+        buf[i++] = hex[p[k] & 0xF];
+    }
+    buf[i++] = '}';
+    buf[i] = 0;
+    return 39;
+}
