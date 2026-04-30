@@ -176,6 +176,13 @@
 #include "generated_trace_smoke_pe.h"
 #include "generated_wmi_smoke_pe.h"
 #include "generated_wndmsg_smoke_pe.h"
+#include "generated_find_smoke_pe.h"
+#include "generated_iocp2_smoke_pe.h"
+#include "generated_proc2_smoke_pe.h"
+#include "generated_select_smoke_pe.h"
+#include "generated_signal_smoke_pe.h"
+#include "generated_timer_smoke_pe.h"
+#include "generated_winsock_ext_smoke_pe.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
@@ -2957,6 +2964,21 @@ void StartRing3SmokeTask()
                 CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     SpawnPeFile("ring3-enviro-smoke", fs::generated::kBinEnviroSmokeBytes, fs::generated::kBinEnviroSmokeBytes_len,
                 CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-select-smoke", fs::generated::kBinSelectSmokeBytes, fs::generated::kBinSelectSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-proc2-smoke", fs::generated::kBinProc2SmokeBytes, fs::generated::kBinProc2SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-find-smoke", fs::generated::kBinFindSmokeBytes, fs::generated::kBinFindSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-iocp2-smoke", fs::generated::kBinIocp2SmokeBytes, fs::generated::kBinIocp2SmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-signal-smoke", fs::generated::kBinSignalSmokeBytes, fs::generated::kBinSignalSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-timer-smoke", fs::generated::kBinTimerSmokeBytes, fs::generated::kBinTimerSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-winsock-ext-smoke", fs::generated::kBinWinsockExtSmokeBytes,
+                fs::generated::kBinWinsockExtSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     // Windowing v0 proof: a freestanding PE that imports
     // user32!CreateWindowExA + ShowWindow + MessageBoxA and
     // calls them. The Win32 → SYS_WIN_CREATE bridge turns
