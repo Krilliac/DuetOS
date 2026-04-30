@@ -1,12 +1,33 @@
 # QEMU smoke #DE flake at PicDisable — observed 2026-04-30
 
-## Status
+## Status (2026-04-30)
 
-**Observation** — flake reproduces only on GitHub-hosted runners under
-TCG; not reproduced on the dev host (also TCG, no /dev/kvm).
-`ctest-boot-smoke.sh`'s exit-3 retry path catches it: the second
-attempt lands all 33 signatures and the job reports SUCCESS. **Not
-currently CI-blocking**, but is a real latent fault.
+**Fixed** — `PicDisable` now masks the chip BEFORE the ICW1 init
+sequence and runs the whole reconfigure with IF=0 (saved/restored
+across the function). The crash was hypothesis (3) below: a held
+legacy-IRQ line delivered to the master 8259's pre-init vector base
+of 0 (= #DE handler) during the multi-port reconfigure window.
+Mask-first + CLI-around eliminates both delivery paths.
+
+The smoke harness is now also single-attempt: any
+`DUETOS CRASH` / `PANIC` / `triple fault` / `[health] ESCALATE`
+is an immediate exit-1 in `profile-boot-smoke.sh` and
+`ctest-boot-smoke.sh`, and the workflow retry-loops in `build.yml`
++ `release.yml` were collapsed to single attempts. Crashes that
+"pass on retry" no longer hide.
+
+Original observation kept below for the audit trail.
+
+---
+
+## Original observation
+
+Flake reproduced only on GitHub-hosted runners under TCG; not
+reproduced on the dev host (also TCG, no /dev/kvm).
+`ctest-boot-smoke.sh`'s exit-3 retry path used to catch it: the
+second attempt lands all 33 signatures and the job reported
+SUCCESS — which is exactly what made the bug invisible until a
+serial-log scrub turned it up.
 
 ## Symptom
 

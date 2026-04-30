@@ -236,27 +236,23 @@ jobs:
           mkdir -p build/${{ matrix.preset }}/kernel
           cp dist-flavor/flavors/duetos-kernel-${{ matrix.label }}.elf \
              build/${{ matrix.preset }}/kernel/duetos-kernel.elf
-      - name: Smoke bringup (with flake retry)
+      - name: Smoke bringup
         shell: bash
         run: |
+          # Single-attempt smoke gate. profile-boot-smoke.sh exits:
+          #   0 = pass, 1 = regression (incl. crash), 2 = env skip.
+          # No retry — a crash on a clean boot path is a real bug
+          # the publish gate must catch. Regression and crash are
+          # both rc=1.
           set +e
-          attempts=3
-          rc=0
-          for i in $(seq 1 ${attempts}); do
-            echo "::group::flavor-smoke ${{ matrix.preset }} bringup attempt ${i}/${attempts}"
-            DUETOS_PRESET=${{ matrix.preset }} \
-            DUETOS_TIMEOUT=480 \
-              tools/test/profile-boot-smoke.sh bringup build/${{ matrix.preset }}
-            rc=$?
-            echo "::endgroup::"
-            if [[ $rc -eq 0 ]]; then break; fi
-            if [[ $rc -eq 1 ]]; then echo "::error::flavor=${{ matrix.preset }} regression"; break; fi
-            if [[ $rc -eq 2 ]]; then echo "::warning::QEMU not available; smoke skipped"; rc=0; break; fi
-            if [[ $i -lt ${attempts} ]]; then
-              echo "::warning::flavor=${{ matrix.preset }} attempt ${i} flaked; retrying..."
-              sleep 2
-            fi
-          done
+          echo "::group::flavor-smoke ${{ matrix.preset }} bringup"
+          DUETOS_PRESET=${{ matrix.preset }} \
+          DUETOS_TIMEOUT=480 \
+            tools/test/profile-boot-smoke.sh bringup build/${{ matrix.preset }}
+          rc=$?
+          echo "::endgroup::"
+          if [[ $rc -eq 1 ]]; then echo "::error::flavor=${{ matrix.preset }} regression"; fi
+          if [[ $rc -eq 2 ]]; then echo "::warning::QEMU not available; smoke skipped"; rc=0; fi
           exit $rc
 
   pre-publish-lifetime-snapshot:

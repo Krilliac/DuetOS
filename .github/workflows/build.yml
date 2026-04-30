@@ -179,35 +179,28 @@ jobs:
         run: cmake --preset ${{ matrix.preset }}
       - name: Build
         run: cmake --build build/${{ matrix.preset }} --parallel $(nproc)
-      - name: Smoke-boot bringup (with flake retry)
+      - name: Smoke-boot bringup
         id: smoke
         shell: bash
         run: |
           # Use the bringup profile for the per-flavor matrix —
           # same exit-code contract as ctest-boot-smoke (0 pass /
-          # 1 regression / 2 skip / 3 flake), but the kernel exits
-          # via isa-debug-exit when bringup-complete is reached.
-          # Flake retries up to twice; regression fails immediately.
+          # 1 regression incl. crash / 2 skip), but the kernel
+          # exits via isa-debug-exit when bringup-complete is
+          # reached. Single-attempt — a crash on a clean boot
+          # path is a real bug; retrying past it would just hide
+          # the signal.
           set +e
-          attempts=3
-          rc=0
-          for i in $(seq 1 ${attempts}); do
-            echo "::group::flavor=${{ matrix.preset }} bringup attempt ${i}/${attempts}"
-            DUETOS_PRESET=${{ matrix.preset }} \
-            DUETOS_TIMEOUT=480 \
-              tools/test/profile-boot-smoke.sh bringup build/${{ matrix.preset }}
-            rc=$?
-            echo "::endgroup::"
-            cp -f "build/${{ matrix.preset }}/smoke-bringup.log" \
-                  "smoke-${{ matrix.preset }}-attempt-${i}.log" 2>/dev/null || true
-            if [[ $rc -eq 0 ]]; then break; fi
-            if [[ $rc -eq 1 ]]; then echo "::error::flavor=${{ matrix.preset }} regression"; break; fi
-            if [[ $rc -eq 2 ]]; then echo "::warning::QEMU not available; smoke skipped"; rc=0; break; fi
-            if [[ $i -lt ${attempts} ]]; then
-              echo "::warning::flavor=${{ matrix.preset }} attempt ${i} flaked; retrying..."
-              sleep 2
-            fi
-          done
+          echo "::group::flavor=${{ matrix.preset }} bringup"
+          DUETOS_PRESET=${{ matrix.preset }} \
+          DUETOS_TIMEOUT=480 \
+            tools/test/profile-boot-smoke.sh bringup build/${{ matrix.preset }}
+          rc=$?
+          echo "::endgroup::"
+          cp -f "build/${{ matrix.preset }}/smoke-bringup.log" \
+                "smoke-${{ matrix.preset }}.log" 2>/dev/null || true
+          if [[ $rc -eq 1 ]]; then echo "::error::flavor=${{ matrix.preset }} regression"; fi
+          if [[ $rc -eq 2 ]]; then echo "::warning::QEMU not available; smoke skipped"; rc=0; fi
           exit $rc
       - name: Upload serial logs (on failure)
         if: failure()
@@ -216,8 +209,9 @@ jobs:
           name: flavor-smoke-log-${{ matrix.preset }}
           if-no-files-found: ignore
           path: |
-            smoke-${{ matrix.preset }}-attempt-*.log
+            smoke-${{ matrix.preset }}.log
             build/${{ matrix.preset }}/smoke-bringup.log
+            qemu.log
           retention-days: 7
 
   qemu-smoke:
@@ -282,50 +276,38 @@ jobs:
           path: build/x86_64-debug/
       - name: Configure
         run: cmake --preset x86_64-debug
-      - name: Boot profile + assert signatures (with flake retry)
+      - name: Boot profile + assert signatures
         id: smoke
         shell: bash
         run: |
           # profile-boot-smoke.sh runs ONE smoke profile and exits:
-          #   0 = pass, 1 = regression, 2 = env skip, 3 = flake.
-          # Retry on flake (exit 3) up to twice; regression fails
-          # immediately. Each profile's ISO is regenerated from a
-          # per-profile grub.cfg by tools/qemu/run.sh. Per-profile
+          #   0 = pass, 1 = regression (incl. crash), 2 = env skip.
+          # Single attempt — crashes always fail. The previous
+          # 3-attempt retry-on-flake tier was removed deliberately
+          # so a "passes on retry" run no longer hides a real
+          # boot-path crash. Each profile's ISO is regenerated from
+          # a per-profile grub.cfg by tools/qemu/run.sh. Per-profile
           # wall budget is 480s — leaves headroom for the observed
           # ~12:1 wall:guest ratio plus runner variance. Kernel
           # SmokeProfileSleepAndExit polls tasks_live and exits
           # within milliseconds of scenario completion; the timeout
           # only fires on a real wedge.
           set +e
-          attempts=3
-          rc=0
-          status=""
-          for i in $(seq 1 ${attempts}); do
-            echo "::group::smoke profile=${{ matrix.profile }} attempt ${i}/${attempts}"
-            DUETOS_TIMEOUT=480 \
-              tools/test/profile-boot-smoke.sh "${{ matrix.profile }}" build/x86_64-debug
-            rc=$?
-            echo "::endgroup::"
-            cp -f "build/x86_64-debug/smoke-${{ matrix.profile }}.log" \
-                  "smoke-${{ matrix.profile }}-attempt-${i}.log" 2>/dev/null || true
-            if [[ $rc -eq 0 ]]; then
-              status="pass"; break
-            fi
-            if [[ $rc -eq 1 ]]; then
-              status="regression"; break
-            fi
-            if [[ $rc -eq 2 ]]; then
-              status="skip"; break
-            fi
-            status="flaky"
-            if [[ $i -lt ${attempts} ]]; then
-              echo "::warning::Smoke ${{ matrix.profile }} attempt ${i} flaked; retrying..."
-              sleep 2
-              continue
-            fi
-          done
-          echo "rc=${rc}"          >> "$GITHUB_OUTPUT"
-          echo "status=${status}"  >> "$GITHUB_OUTPUT"
+          echo "::group::smoke profile=${{ matrix.profile }}"
+          DUETOS_TIMEOUT=480 \
+            tools/test/profile-boot-smoke.sh "${{ matrix.profile }}" build/x86_64-debug
+          rc=$?
+          echo "::endgroup::"
+          cp -f "build/x86_64-debug/smoke-${{ matrix.profile }}.log" \
+                "smoke-${{ matrix.profile }}.log" 2>/dev/null || true
+          case ${rc} in
+            0) status="pass"     ;;
+            1) status="regression" ;;
+            2) status="skip"     ;;
+            *) status="unknown"  ;;
+          esac
+          echo "rc=${rc}"         >> "$GITHUB_OUTPUT"
+          echo "status=${status}" >> "$GITHUB_OUTPUT"
           if [[ "${status}" == "skip" ]]; then
             echo "::warning::QEMU not available; smoke test skipped."
             exit 0
@@ -338,8 +320,9 @@ jobs:
         with:
           name: qemu-serial-log-${{ matrix.profile }}
           path: |
-            smoke-${{ matrix.profile }}-attempt-*.log
+            smoke-${{ matrix.profile }}.log
             build/x86_64-debug/smoke-${{ matrix.profile }}.log
+            qemu.log
           retention-days: 7
           if-no-files-found: ignore
       - name: Comment on PR (sticky, per profile)
@@ -369,9 +352,7 @@ jobs:
             if (status === 'pass' && !existing) return;
 
             const candidates = [
-              `smoke-${profile}-attempt-3.log`,
-              `smoke-${profile}-attempt-2.log`,
-              `smoke-${profile}-attempt-1.log`,
+              `smoke-${profile}.log`,
               `build/x86_64-debug/smoke-${profile}.log`,
             ];
             let tail = '(no serial log captured)';
@@ -385,8 +366,7 @@ jobs:
 
             const verdict = {
               pass:       `:white_check_mark: **qemu-smoke (${profile}) passed** for \`${sha}\`.`,
-              regression: `:x: **Regression in qemu-smoke (${profile})** — an expected signature is missing or a forbidden one appeared (\`${sha}\`).`,
-              flaky:      `:warning: **Flaky qemu-smoke (${profile})** — kernel reached the smoke scope then crashed; retried 3 times (\`${sha}\`).`,
+              regression: `:x: **Regression in qemu-smoke (${profile})** — an expected signature is missing, or a forbidden one (PANIC / DUETOS CRASH / triple fault / [health] ESCALATE) appeared (\`${sha}\`). No retry — single-attempt gate.`,
               skip:       `:information_source: **qemu-smoke (${profile}) skipped** — QEMU not available.`,
             }[status] || `:question: qemu-smoke (${profile}) exited rc=${rc} (status=${status}).`;
 
