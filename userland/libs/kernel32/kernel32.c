@@ -1095,6 +1095,89 @@ __declspec(dllexport) unsigned short DeleteAtom(unsigned short atom)
     return GlobalDeleteAtom(atom);
 }
 
+/* GetTimeZoneInformation — return UTC-0 with no DST. */
+typedef struct
+{
+    long Bias;
+    wchar_t16 StandardName[32];
+    unsigned short StandardDateY, StandardDateM, StandardDateDayOfWeek, StandardDateDay;
+    unsigned short StandardDateH, StandardDateMin, StandardDateS, StandardDateMs;
+    long StandardBias;
+    wchar_t16 DaylightName[32];
+    unsigned short DaylightDateY, DaylightDateM, DaylightDateDayOfWeek, DaylightDateDay;
+    unsigned short DaylightDateH, DaylightDateMin, DaylightDateS, DaylightDateMs;
+    long DaylightBias;
+} DUETOS_TZ_INFORMATION;
+
+__declspec(dllexport) DWORD GetTimeZoneInformation(DUETOS_TZ_INFORMATION* tzi)
+{
+    if (tzi == (DUETOS_TZ_INFORMATION*)0)
+        return 0xFFFFFFFFUL;
+    unsigned char* b = (unsigned char*)tzi;
+    for (unsigned long i = 0; i < sizeof(*tzi); ++i)
+        b[i] = 0;
+    static const wchar_t16 utc[] = {'U', 'T', 'C', 0};
+    for (int i = 0; utc[i] != 0; ++i)
+        tzi->StandardName[i] = utc[i];
+    return 1;
+}
+
+typedef struct
+{
+    short cols, rows;
+    short cur_x, cur_y;
+    unsigned short attrs;
+    short win_left, win_top, win_right, win_bot;
+    short max_cols, max_rows;
+} DUETOS_CONSOLE_SBI;
+
+__declspec(dllexport) BOOL GetConsoleScreenBufferInfo(HANDLE h, DUETOS_CONSOLE_SBI* info)
+{
+    (void)h;
+    if (info == (DUETOS_CONSOLE_SBI*)0)
+        return 0;
+    info->cols = 80;
+    info->rows = 25;
+    info->cur_x = 0;
+    info->cur_y = 0;
+    info->attrs = 0x07;
+    info->win_left = 0;
+    info->win_top = 0;
+    info->win_right = 79;
+    info->win_bot = 24;
+    info->max_cols = 80;
+    info->max_rows = 25;
+    return 1;
+}
+
+/* GetFileAttributesA/W live further down — they use SYS_FILE_QUERY_ATTRIBUTES
+ * directly. Skipping our placeholder definitions here avoids duplicates. */
+
+__declspec(dllexport) DWORD GetFullPathNameW(const wchar_t16* lpFileName, DWORD nBufferLength, wchar_t16* lpBuffer,
+                                             wchar_t16** lpFilePart)
+{
+    (void)lpFilePart;
+    if (lpFileName == (const wchar_t16*)0 || lpBuffer == (wchar_t16*)0)
+        return 0;
+    int srclen = 0;
+    while (lpFileName[srclen] != 0)
+        ++srclen;
+    int add_drive = (srclen > 0 && (lpFileName[0] == '\\' || lpFileName[0] == '/')) ? 2 : 0;
+    DWORD needed = (DWORD)(srclen + 1 + add_drive);
+    if (needed > nBufferLength)
+        return needed;
+    int j = 0;
+    if (add_drive)
+    {
+        lpBuffer[j++] = 'C';
+        lpBuffer[j++] = ':';
+    }
+    for (int i = 0; i < srclen; ++i)
+        lpBuffer[j++] = lpFileName[i];
+    lpBuffer[j] = 0;
+    return (DWORD)j;
+}
+
 /* GetCPInfo — fill a CPINFO so callers checking MaxCharSize > 0
  * pass. We only support CP_ACP / CP_OEMCP / CP_UTF8 / CP_THREAD_ACP
  * out-of-the-box; anything else still gets a generic single-byte

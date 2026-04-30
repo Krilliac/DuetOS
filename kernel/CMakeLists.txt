@@ -262,6 +262,14 @@ duetos_embed_smoke_pe(resource_smoke kBinResourceSmokeBytes)
 duetos_embed_smoke_pe(ntdll_smoke    kBinNtdllSmokeBytes)
 duetos_embed_smoke_pe(shell_smoke    kBinShellSmokeBytes)
 duetos_embed_smoke_pe(userenv_smoke  kBinUserenvSmokeBytes)
+duetos_embed_smoke_pe(interlock_smoke kBinInterlockSmokeBytes)
+duetos_embed_smoke_pe(fiber_smoke    kBinFiberSmokeBytes)
+duetos_embed_smoke_pe(profile_smoke  kBinProfileSmokeBytes)
+duetos_embed_smoke_pe(clipboard_smoke kBinClipboardSmokeBytes)
+duetos_embed_smoke_pe(windowclass_smoke kBinWindowclassSmokeBytes)
+duetos_embed_smoke_pe(wow64_smoke    kBinWow64SmokeBytes)
+duetos_embed_smoke_pe(mathlib_smoke  kBinMathlibSmokeBytes)
+duetos_embed_smoke_pe(stdio_smoke    kBinStdioSmokeBytes)
 
 # Chrome font — Liberation Sans Regular (SIL OFL 1.1). Embedded as
 # bytes for the TTF rasterizer; the boot path hands these to
@@ -389,7 +397,7 @@ duetos_stub_dll(ole32 0x100D0000 "CoInitialize,CoInitializeEx,CoUninitialize,Ole
 duetos_stub_dll(oleaut32 0x100E0000 "VariantInit,VariantClear,SysAllocString,SysFreeString,SysStringLen")
 duetos_stub_dll(winmm 0x100F0000 "timeGetTime,timeBeginPeriod,timeEndPeriod,timeGetDevCaps,timeSetEvent,timeKillEvent,PlaySoundW,mciSendStringW")
 duetos_stub_dll(bcrypt 0x10100000 "BCryptOpenAlgorithmProvider,BCryptCloseAlgorithmProvider,BCryptCreateHash,BCryptHashData,BCryptFinishHash,BCryptDestroyHash,BCryptGetProperty,BCryptGenRandom")
-duetos_stub_dll(psapi 0x10110000 "EnumProcesses,EnumProcessModules,GetMappedFileNameW,GetModuleBaseNameW,GetModuleFileNameExW,GetProcessMemoryInfo,QueryWorkingSet")
+duetos_stub_dll(psapi 0x10110000 "EnumProcesses,EnumProcessModules,GetMappedFileNameW,GetModuleBaseNameW,GetModuleFileNameExW,GetProcessImageFileNameW,GetProcessImageFileNameA,GetProcessMemoryInfo,QueryWorkingSet")
 
 # DirectX v0 — real COM-vtable d3d9/d3d11/d3d12/dxgi DLLs that produce working
 # Clear-and-Present pipelines via SYS_GDI_BITBLT.

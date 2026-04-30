@@ -156,6 +156,9 @@ set +e
     /export:GlobalGetAtomNameA \
     /export:GetAtomNameA \
     /export:GlobalDeleteAtom \
+    /export:GetTimeZoneInformation \
+    /export:GetConsoleScreenBufferInfo \
+    /export:GetFullPathNameW \
     /export:WriteFile \
     /export:WriteConsoleA \
     /export:WriteConsoleW \

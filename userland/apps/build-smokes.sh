@@ -53,6 +53,14 @@ declare -A APPS=(
     [ntdll_smoke]="-lkernel32 -lntdll"
     [shell_smoke]="-lkernel32 -lshell32"
     [userenv_smoke]="-lkernel32 -luserenv -ladvapi32"
+    [interlock_smoke]="-lkernel32"
+    [fiber_smoke]="-lkernel32"
+    [profile_smoke]="-lkernel32"
+    [clipboard_smoke]="-lkernel32 -luser32"
+    [windowclass_smoke]="-lkernel32 -luser32"
+    [wow64_smoke]="-lkernel32"
+    [mathlib_smoke]="-lkernel32"
+    [stdio_smoke]="-lkernel32 -lmsvcrt"
 )
 
 for app in "${!APPS[@]}"; do
