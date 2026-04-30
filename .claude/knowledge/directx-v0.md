@@ -147,17 +147,24 @@ Concrete proofs the existing v0 code now exercised end-to-end:
   `Buffer::Play` succeed but the bytes don't reach the HDA driver.
   `dsound`'s `Buffer::GetCurrentPosition` advances a fake cursor
   by 32 bytes per call so apps that wait for it move on.
-- **Real input** — DirectInput's `GetDeviceState` zero-fills
-  (no keys held); XInput reports all four pads not connected.
-  Real input goes through user32's `GetAsyncKeyState` /
-  `GetCursorPos` which we already implement.
+- **Real input** — ~~DirectInput's `GetDeviceState` zero-fills~~
+  WIRED 2026-04-30: keyboard `GetDeviceState` walks DIK→VK and
+  queries `SYS_WIN_GET_KEYSTATE` per slot, mouse fills
+  DIMOUSESTATE with cursor delta + button keystate. XInput still
+  reports all four pads not connected. See
+  `directx-input-d2d-dwrite-wire-v0.md`.
 - **DirectWrite glyph rasterisation** — `CreateTextLayout` returns
-  a layout object whose `GetMetrics` zero-fills. Real text
-  rendering on an ID2D1RenderTarget would need to consume layout
-  geometry; deferred.
+  a layout object. ~~`GetMetrics` zero-fills.~~ WIRED 2026-04-30:
+  `GetMetrics` writes the proper DWRITE_TEXT_METRICS field
+  offsets and computes a monospace approximation
+  (`width = textLen * font_size * 0.6`, `height = font_size * 1.2`,
+  `lineCount = 1`). Real glyph rendering on an ID2D1RenderTarget
+  still requires a font backend; deferred.
 - **Direct2D geometry primitives** — `FillRectangle` works (real
-  pixel writes); `FillEllipse`, `DrawLine`, geometry sinks are
-  E_NOTIMPL.
+  pixel writes); ~~`FillEllipse`, `DrawLine`~~ WIRED 2026-04-30:
+  `FillEllipse` + `DrawEllipse` + `DrawRectangle` (1px outline) +
+  `DrawLine` (Bresenham) all paint real pixels. Geometry sinks
+  (path objects, ID2D1PathGeometry) still E_NOTIMPL.
 - **D3D9Ex / D3D11.1+ / D3D12 1.1+** — only the base vtables.
   Apps that QueryInterface to higher versions get
   `E_NOINTERFACE`.

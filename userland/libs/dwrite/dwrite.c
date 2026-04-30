@@ -37,6 +37,8 @@ typedef struct DwLayoutImpl
     void* const* lpVtbl;
     ULONG refcount;
     float max_w, max_h;
+    float font_size; /* points; from the source TextFormat */
+    UINT text_len;   /* in UTF-16 code units */
 } DwLayoutImpl;
 
 static HRESULT layout_QueryInterface(DwLayoutImpl* self, REFIID riid, void** out)
@@ -77,10 +79,23 @@ static HRESULT layout_GetMetrics(DwLayoutImpl* self, void* metrics)
 {
     if (!metrics)
         return DX_E_POINTER;
-    /* DWRITE_TEXT_METRICS = 9 floats + 3 UINTs ≈ 60 bytes; zero-fill is safe. */
-    dx_memzero(metrics, 60);
-    *(float*)((BYTE*)metrics + 16) = self->max_w; /* width */
-    *(float*)((BYTE*)metrics + 20) = self->max_h; /* height */
+    /* DWRITE_TEXT_METRICS = 7 FLOATs + 2 UINT32s = 36 bytes. We
+     * populate it with a reasonable monospace approximation so apps
+     * that gate on width > 0 / lineCount >= 1 proceed. Real glyph
+     * metrics arrive when DirectWrite gains a font backend. */
+    dx_memzero(metrics, 36);
+    float fs = self->font_size > 0 ? self->font_size : 12.0f;
+    float approx_w = (float)self->text_len * fs * 0.6f;
+    float approx_h = fs * 1.2f;
+    if (self->max_w > 0 && approx_w > self->max_w)
+        approx_w = self->max_w;
+    /* width / widthIncludingTrailingWhitespace */
+    *(float*)((BYTE*)metrics + 8) = approx_w;
+    *(float*)((BYTE*)metrics + 12) = approx_w;
+    *(float*)((BYTE*)metrics + 16) = approx_h;    /* height */
+    *(float*)((BYTE*)metrics + 20) = self->max_w; /* layoutWidth */
+    *(float*)((BYTE*)metrics + 24) = self->max_h; /* layoutHeight */
+    *(UINT*)((BYTE*)metrics + 32) = 1;            /* lineCount */
     return DX_S_OK;
 }
 
@@ -102,7 +117,7 @@ static void layout_init_vtbl_once(void)
     g_layout_vtbl[28] = (void*)layout_GetMetrics;
 }
 
-static DwLayoutImpl* layout_alloc(float w, float h)
+static DwLayoutImpl* layout_alloc(float w, float h, float font_size, UINT text_len)
 {
     layout_init_vtbl_once();
     DwLayoutImpl* l = (DwLayoutImpl*)dx_heap_alloc(sizeof(*l));
@@ -113,6 +128,8 @@ static DwLayoutImpl* layout_alloc(float w, float h)
     l->refcount = 1;
     l->max_w = w;
     l->max_h = h;
+    l->font_size = font_size;
+    l->text_len = text_len;
     return l;
 }
 
@@ -255,11 +272,16 @@ static HRESULT dwf_CreateTextLayout(DwFactoryImpl* self, const void* str, UINT n
 {
     (void)self;
     (void)str;
-    (void)n;
-    (void)fmt;
     if (!out)
         return DX_E_POINTER;
-    DwLayoutImpl* l = layout_alloc(max_w, max_h);
+    float fs = 12.0f;
+    if (fmt)
+    {
+        DwFormatImpl* fimpl = (DwFormatImpl*)fmt;
+        if (fimpl->font_size > 0)
+            fs = fimpl->font_size;
+    }
+    DwLayoutImpl* l = layout_alloc(max_w, max_h, fs, n);
     if (!l)
     {
         *out = NULL;

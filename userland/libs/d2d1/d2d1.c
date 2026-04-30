@@ -5,9 +5,10 @@
  * then brushes, then call BeginDraw / Clear / FillRectangle / EndDraw.
  *
  * v0 implements ID2D1Factory + a software ID2D1HwndRenderTarget that
- * Clear-fills + Present-blits via the shared dx_bb path. FillRectangle
- * and FillEllipse paint with a solid-color brush. Geometry / DWrite
- * text rendering is deferred (returns S_OK without painting).
+ * Clear-fills + Present-blits via the shared dx_bb path. Real
+ * primitives: FillRectangle, FillEllipse, DrawRectangle (1px outline),
+ * DrawEllipse (1px outline), DrawLine (Bresenham). Text rendering and
+ * geometry/path objects deferred.
  *
  * Exports:
  *   D2D1CreateFactory
@@ -92,7 +93,11 @@ static D2dBrushImpl* brush_alloc(float r, float g, float b, float a)
  *   ID2D1RenderTarget(~50) + ID2D1HwndRenderTarget(2)              *
  * v0 lays out enough slots to cover the methods we implement:       *
  *   slot 8  CreateSolidColorBrush                                   *
+ *   slot 15 DrawLine                                                *
+ *   slot 16 DrawRectangle (1px outline)                             *
  *   slot 17 FillRectangle                                           *
+ *   slot 20 DrawEllipse  (1px outline)                              *
+ *   slot 21 FillEllipse                                             *
  *   slot 26 Clear                                                   *
  *   slot 27 BeginDraw                                               *
  *   slot 28 EndDraw                                                 *
@@ -151,6 +156,22 @@ static HRESULT rt_CreateSolidColorBrush(D2dRtImpl* self, const void* color, cons
     *out = b;
     return DX_S_OK;
 }
+static DWORD brush_pack_bgra(D2dBrushImpl* brush)
+{
+    BYTE br = (BYTE)(brush->r * 255.f);
+    BYTE bg = (BYTE)(brush->g * 255.f);
+    BYTE bb = (BYTE)(brush->b * 255.f);
+    BYTE ba = (BYTE)(brush->a * 255.f);
+    return ((DWORD)ba << 24) | ((DWORD)br << 16) | ((DWORD)bg << 8) | (DWORD)bb;
+}
+
+static inline void plot_clipped(DxBackBuffer* bb, int x, int y, DWORD packed)
+{
+    if (x < 0 || y < 0 || x >= (int)bb->width || y >= (int)bb->height)
+        return;
+    ((DWORD*)bb->pixels)[y * (int)bb->width + x] = packed;
+}
+
 /* FillRectangle(rect, brush). rect = D2D1_RECT_F (4x float = 16B). */
 static void rt_FillRectangle(D2dRtImpl* self, const void* rect, D2dBrushImpl* brush)
 {
@@ -168,16 +189,158 @@ static void rt_FillRectangle(D2dRtImpl* self, const void* rect, D2dBrushImpl* br
         y1 = self->bb->height;
     if (x1 <= x0 || y1 <= y0)
         return;
-    BYTE br = (BYTE)(brush->r * 255.f);
-    BYTE bg = (BYTE)(brush->g * 255.f);
-    BYTE bb = (BYTE)(brush->b * 255.f);
-    BYTE ba = (BYTE)(brush->a * 255.f);
-    DWORD packed = ((DWORD)ba << 24) | ((DWORD)br << 16) | ((DWORD)bg << 8) | (DWORD)bb;
+    DWORD packed = brush_pack_bgra(brush);
     DWORD* px = (DWORD*)self->bb->pixels;
     UINT pitch = self->bb->width;
     for (int y = y0; y < y1; ++y)
         for (int x = x0; x < x1; ++x)
             px[y * pitch + x] = packed;
+}
+
+/* DrawRectangle outlines the boundary one pixel thick. strokeWidth +
+ * style ignored in v0 — apps that want a thick frame call
+ * FillRectangle on a slightly inflated outer rect first. */
+static void rt_DrawRectangle(D2dRtImpl* self, const void* rect, D2dBrushImpl* brush, float stroke_width, void* style)
+{
+    (void)stroke_width;
+    (void)style;
+    if (!self->bb || !rect || !brush)
+        return;
+    const float* r = (const float*)rect;
+    int x0 = (int)r[0], y0 = (int)r[1], x1 = (int)r[2] - 1, y1 = (int)r[3] - 1;
+    if (x1 < x0 || y1 < y0)
+        return;
+    DWORD packed = brush_pack_bgra(brush);
+    for (int x = x0; x <= x1; ++x)
+    {
+        plot_clipped(self->bb, x, y0, packed);
+        plot_clipped(self->bb, x, y1, packed);
+    }
+    for (int y = y0; y <= y1; ++y)
+    {
+        plot_clipped(self->bb, x0, y, packed);
+        plot_clipped(self->bb, x1, y, packed);
+    }
+}
+
+/* DrawLine(p0, p1, brush, strokeWidth, strokeStyle). MSVC x64 ABI:
+ * D2D1_POINT_2F is 2x float = 8B, fits in a register, so each point
+ * is passed by value in rdx/r8. Bresenham; stroke + style ignored. */
+static void rt_DrawLine(D2dRtImpl* self, ULONGLONG p0_packed, ULONGLONG p1_packed, D2dBrushImpl* brush,
+                        float stroke_width, void* style)
+{
+    (void)stroke_width;
+    (void)style;
+    if (!self->bb || !brush)
+        return;
+    float p0x, p0y, p1x, p1y;
+    {
+        DWORD lo = (DWORD)(p0_packed & 0xFFFFFFFFULL);
+        DWORD hi = (DWORD)(p0_packed >> 32);
+        dx_memcpy(&p0x, &lo, 4);
+        dx_memcpy(&p0y, &hi, 4);
+        lo = (DWORD)(p1_packed & 0xFFFFFFFFULL);
+        hi = (DWORD)(p1_packed >> 32);
+        dx_memcpy(&p1x, &lo, 4);
+        dx_memcpy(&p1y, &hi, 4);
+    }
+    int x0 = (int)p0x, y0 = (int)p0y, x1 = (int)p1x, y1 = (int)p1y;
+    int dx_ = x1 - x0, dy_ = y1 - y0;
+    int sx = dx_ > 0 ? 1 : -1, sy = dy_ > 0 ? 1 : -1;
+    if (dx_ < 0)
+        dx_ = -dx_;
+    if (dy_ < 0)
+        dy_ = -dy_;
+    DWORD packed = brush_pack_bgra(brush);
+    int err = dx_ - dy_;
+    int x = x0, y = y0;
+    int guard = 0;
+    while (1)
+    {
+        plot_clipped(self->bb, x, y, packed);
+        if (x == x1 && y == y1)
+            break;
+        if (++guard > 65536) /* clamp on absurd line lengths */
+            break;
+        int e2 = 2 * err;
+        if (e2 > -dy_)
+        {
+            err -= dy_;
+            x += sx;
+        }
+        if (e2 < dx_)
+        {
+            err += dx_;
+            y += sy;
+        }
+    }
+}
+
+/* D2D1_ELLIPSE = D2D1_POINT_2F point + float radiusX + float radiusY = 16B */
+static void ellipse_outline_or_fill(DxBackBuffer* bb, float cx, float cy, float rx, float ry, DWORD packed, int fill)
+{
+    if (rx <= 0 || ry <= 0)
+        return;
+    int icx = (int)cx, icy = (int)cy, irx = (int)rx, iry = (int)ry;
+    /* 4-connected midpoint ellipse — same integer test the GDI primitive
+     * uses. For each (x,y) inside the bounding box, check if
+     * (x-cx)^2 / rx^2 + (y-cy)^2 / ry^2 <= 1, scaled to integer. */
+    long long rx2 = (long long)irx * irx;
+    long long ry2 = (long long)iry * iry;
+    if (rx2 == 0 || ry2 == 0)
+        return;
+    int x0 = icx - irx, x1 = icx + irx, y0 = icy - iry, y1 = icy + iry;
+    for (int y = y0; y <= y1; ++y)
+    {
+        for (int x = x0; x <= x1; ++x)
+        {
+            long long dxd = (long long)(x - icx);
+            long long dyd = (long long)(y - icy);
+            long long lhs = dxd * dxd * ry2 + dyd * dyd * rx2;
+            long long rhs = rx2 * ry2;
+            if (lhs > rhs)
+                continue;
+            if (!fill)
+            {
+                /* Outline test: a neighbour outside the ellipse means
+                 * (x,y) is on the boundary. */
+                int outside_neighbour = 0;
+                int nx[4] = {x - 1, x + 1, x, x};
+                int ny[4] = {y, y, y - 1, y + 1};
+                for (int k = 0; k < 4; ++k)
+                {
+                    long long nd1 = (long long)(nx[k] - icx);
+                    long long nd2 = (long long)(ny[k] - icy);
+                    if (nd1 * nd1 * ry2 + nd2 * nd2 * rx2 > rhs)
+                    {
+                        outside_neighbour = 1;
+                        break;
+                    }
+                }
+                if (!outside_neighbour)
+                    continue;
+            }
+            plot_clipped(bb, x, y, packed);
+        }
+    }
+}
+
+static void rt_DrawEllipse(D2dRtImpl* self, const void* ellipse, D2dBrushImpl* brush, float stroke_width, void* style)
+{
+    (void)stroke_width;
+    (void)style;
+    if (!self->bb || !ellipse || !brush)
+        return;
+    const float* e = (const float*)ellipse;
+    ellipse_outline_or_fill(self->bb, e[0], e[1], e[2], e[3], brush_pack_bgra(brush), 0);
+}
+
+static void rt_FillEllipse(D2dRtImpl* self, const void* ellipse, D2dBrushImpl* brush)
+{
+    if (!self->bb || !ellipse || !brush)
+        return;
+    const float* e = (const float*)ellipse;
+    ellipse_outline_or_fill(self->bb, e[0], e[1], e[2], e[3], brush_pack_bgra(brush), 1);
 }
 static void rt_Clear(D2dRtImpl* self, const void* color)
 {
@@ -238,7 +401,11 @@ static void rt_init_vtbl_once(void)
     g_rt_vtbl[1] = (void*)rt_AddRef;
     g_rt_vtbl[2] = (void*)rt_Release;
     g_rt_vtbl[8] = (void*)rt_CreateSolidColorBrush;
+    g_rt_vtbl[15] = (void*)rt_DrawLine;
+    g_rt_vtbl[16] = (void*)rt_DrawRectangle;
     g_rt_vtbl[17] = (void*)rt_FillRectangle;
+    g_rt_vtbl[20] = (void*)rt_DrawEllipse;
+    g_rt_vtbl[21] = (void*)rt_FillEllipse;
     g_rt_vtbl[26] = (void*)rt_Clear;
     g_rt_vtbl[27] = (void*)rt_BeginDraw;
     g_rt_vtbl[28] = (void*)rt_EndDraw;
