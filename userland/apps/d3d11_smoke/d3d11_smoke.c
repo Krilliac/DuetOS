@@ -71,8 +71,10 @@ void __cdecl mainCRTStartup(void)
     BYTE* p = (BYTE*)&desc;
     for (UINT i = 0; i < sizeof(desc); ++i)
         p[i] = 0;
-    desc.Width = 320;
-    desc.Height = 240;
+    /* 32x32 BGRA8 = 4 KiB — fits in the 64 KiB Win32 heap with
+     * room left for the COM objects + Texture2D wrapper + RTV. */
+    desc.Width = 32;
+    desc.Height = 32;
     desc.Format = 87; /* DXGI_FORMAT_B8G8R8A8_UNORM */
     desc.SampleCount = 1;
     desc.BufferUsage = 0x20; /* DXGI_USAGE_RENDER_TARGET_OUTPUT */

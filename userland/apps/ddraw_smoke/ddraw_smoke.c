@@ -38,10 +38,10 @@ void __cdecl mainCRTStartup(void)
     Out("[ddraw_smoke] SetCooperativeLevel      = ");
     Out((hr == 0) ? "PASS\r\n" : "FAIL\r\n");
 
-    /* slot 21 = SetDisplayMode */
+    /* slot 21 = SetDisplayMode — 32x32 fits in 64 KiB heap. */
     typedef long (*PFN_SDM)(void*, DWORD, DWORD, DWORD, DWORD, DWORD);
-    hr = ((PFN_SDM)dd_vt[21])(dd, 320, 240, 32, 60, 0);
-    Out("[ddraw_smoke] SetDisplayMode(320x240)  = ");
+    hr = ((PFN_SDM)dd_vt[21])(dd, 32, 32, 32, 60, 0);
+    Out("[ddraw_smoke] SetDisplayMode(32x32)    = ");
     Out((hr == 0) ? "PASS\r\n" : "FAIL\r\n");
 
     /* DDSURFACEDESC2 (124B): set width/height + caps=offscreen */
@@ -50,8 +50,8 @@ void __cdecl mainCRTStartup(void)
         desc[i] = 0;
     *(DWORD*)(desc + 0) = 124;                       /* dwSize */
     *(DWORD*)(desc + 4) = 0x1 | 0x2 | 0x4 | 0x40000; /* CAPS|HEIGHT|WIDTH|PIXELFORMAT */
-    *(DWORD*)(desc + 12) = 320;                      /* dwWidth */
-    *(DWORD*)(desc + 16) = 240;                      /* dwHeight */
+    *(DWORD*)(desc + 12) = 32;                       /* dwWidth */
+    *(DWORD*)(desc + 16) = 32;                       /* dwHeight */
     *(DWORD*)(desc + 108) = 0x40;                    /* DDSCAPS_OFFSCREENPLAIN */
 
     /* slot 6 = CreateSurface */

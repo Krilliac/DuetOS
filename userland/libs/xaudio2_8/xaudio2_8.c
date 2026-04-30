@@ -281,6 +281,7 @@ __declspec(dllexport) HRESULT XAudio2Create(void** out, UINT flags, UINT process
 {
     (void)flags;
     (void)processor;
+    dx_gfx_trace(7);
     if (!out)
         return DX_E_POINTER;
     x2_init_vtbl_once();

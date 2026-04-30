@@ -329,6 +329,7 @@ __declspec(dllexport) HRESULT DirectSoundCreate(const void* device_guid, void** 
 {
     (void)device_guid;
     (void)unk;
+    dx_gfx_trace(8);
     if (!out)
         return DX_E_POINTER;
     DsImpl* d = ds_alloc();

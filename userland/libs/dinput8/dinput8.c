@@ -279,6 +279,7 @@ __declspec(dllexport) HRESULT DirectInput8Create(HMODULE inst, DWORD ver, REFIID
     (void)ver;
     (void)riid;
     (void)unk;
+    dx_gfx_trace(5);
     if (!out)
         return DX_E_POINTER;
     DiImpl* d = di_alloc();

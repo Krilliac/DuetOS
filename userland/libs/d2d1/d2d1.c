@@ -344,6 +344,7 @@ __declspec(dllexport) HRESULT D2D1CreateFactory(UINT type, REFIID riid, const vo
     (void)type;
     (void)riid;
     (void)options;
+    dx_gfx_trace(10);
     if (!out)
         return DX_E_POINTER;
     df_init_vtbl_once();

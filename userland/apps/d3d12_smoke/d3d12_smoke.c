@@ -136,8 +136,9 @@ void __cdecl mainCRTStartup(void)
     for (UINT i = 0; i < sizeof(rd); ++i)
         p[i] = 0;
     rd.Dimension = 4; /* TEXTURE2D */
-    rd.Width = 320;
-    rd.Height = 240;
+    /* 32x32 BGRA8 = 4 KiB — fits in 64 KiB Win32 heap. */
+    rd.Width = 32;
+    rd.Height = 32;
     rd.DepthOrArraySize = 1;
     rd.MipLevels = 1;
     rd.Format = 87; /* BGRA8_UNORM */

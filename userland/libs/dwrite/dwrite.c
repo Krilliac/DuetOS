@@ -289,6 +289,7 @@ __declspec(dllexport) HRESULT DWriteCreateFactory(UINT type, REFIID riid, void**
 {
     (void)type;
     (void)riid;
+    dx_gfx_trace(11);
     if (!out)
         return DX_E_POINTER;
     dwf_init_vtbl_once();

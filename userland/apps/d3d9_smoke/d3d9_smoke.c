@@ -74,8 +74,9 @@ void __cdecl mainCRTStartup(void)
     BYTE* p = (BYTE*)&pp;
     for (UINT i = 0; i < sizeof(pp); ++i)
         p[i] = 0;
-    pp.BackBufferWidth = 320;
-    pp.BackBufferHeight = 240;
+    /* 32x32 BGRA8 = 4 KiB — fits in 64 KiB Win32 heap. */
+    pp.BackBufferWidth = 32;
+    pp.BackBufferHeight = 32;
     pp.BackBufferCount = 1;
     pp.SwapEffect = 1; /* D3DSWAPEFFECT_DISCARD */
     pp.hDeviceWindow = NULL;

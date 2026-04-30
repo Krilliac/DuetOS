@@ -128,6 +128,22 @@ u32 D3D12CreateDeviceStub();
 /// DXGI: `HRESULT CreateDXGIFactory(REFIID, void**)`.
 u32 DxgiCreateFactoryStub();
 
+/// D3D9: `IDirect3D9* Direct3DCreate9(UINT)`. Today: bumps counter.
+u32 D3d9CreateStub();
+
+/// DirectInput8 / XInput / XAudio2 / DirectSound / DirectDraw /
+/// Direct2D / DirectWrite create-call counters. Each just bumps
+/// the corresponding counter so the `gfx` shell command can see
+/// activity. The DLLs themselves return their own real handles;
+/// these stubs are for stats only.
+u32 Dinput8CreateStub();
+u32 XinputCreateStub();
+u32 Xaudio2CreateStub();
+u32 DsoundCreateStub();
+u32 DdrawCreateStub();
+u32 D2d1CreateStub();
+u32 DwriteCreateStub();
+
 /// Diagnostic snapshot — handle-table counters for every kind of
 /// object the ICD hands out. Covers a gap left by the logger-only
 /// pattern: a future unit test of the vkCreate/vkDestroy round
@@ -142,6 +158,14 @@ struct GraphicsStats
     u32 vk_devices_destroyed;
     u32 d3d_create_calls;
     u32 dxgi_create_calls;
+    u32 d3d9_create_calls;
+    u32 dinput8_create_calls;
+    u32 xinput_create_calls;
+    u32 xaudio2_create_calls;
+    u32 dsound_create_calls;
+    u32 ddraw_create_calls;
+    u32 d2d1_create_calls;
+    u32 dwrite_create_calls;
 };
 GraphicsStats GraphicsStatsRead();
 

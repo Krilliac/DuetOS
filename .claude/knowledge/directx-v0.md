@@ -82,11 +82,42 @@ indices match the `*_init_vtbl_once()` tables in the DLL sources.
   "generated_<smoke>_smoke_pe.h"` + 7 new preload-table entries +
   10 new `SpawnPeFile(...)` calls.
 
-## What works
+## What works — runtime-verified
 
-Every smoke PE reaches its `done` line on the kernel's serial log.
+Boot-time smoke under QEMU+OVMF (`DUETOS_PRESET=x86_64-release
+DUETOS_TIMEOUT=30 tools/qemu/run.sh`) shows:
+
+```
+PASSes: 81  FAILs: 0  DONEs: 10
+```
+
+across all 10 new DirectX smoke PEs. Every smoke reaches its
+`done` line. The `[gfx]` rate-limited LogOnce trace fires once
+per DLL kind (CreateDXGIFactory / D3D11CreateDevice /
+D3D12CreateDevice / Direct3DCreate9 / DirectInput8Create /
+XInputGetState / XAudio2Create / DirectSoundCreate /
+DirectDrawCreate / D2D1CreateFactory / DWriteCreateFactory) —
+proves the new SYS_GFX_D3D_STUB kinds 4–11 are live.
+
 Each step that returns a meaningful HRESULT/handle is checked
 explicitly; `[<smoke>] <step> = PASS` is printed on success.
+
+### Heap caveat — back-buffer sizing
+
+`AddressSpace::region_count` is `u8` (max 255). A typical Win32
+PE already burns ~200 region slots on PE image + DLL preload +
+stack + TEB. The Win32 per-process heap stays at **16 pages
+(64 KiB)** — bumping it to 128 pages overflows region_count
+mid-load and corrupts the region table.
+
+Practical consequence: a 32 KiB allocation (= 32×32×4 BGRA8 buffer
++ COM objects + RTV) fits cleanly. The smoke PEs all use
+**32×32 back buffers** for that reason. Real-world Win32 apps
+that demand a 1024×768 swap chain will hit OOM until either
+(a) `AddressSpace::region_count` is widened to `u16`, or
+(b) the heap region uses one large mapping instead of N
+per-page mappings. Documented as a known limit; not blocking
+v0.
 
 Concrete proofs the existing v0 code now exercised end-to-end:
 - d3d11: `D3D11SwapChainVtbl[8]=Present`, `[9]=GetBuffer`,

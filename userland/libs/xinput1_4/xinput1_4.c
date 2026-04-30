@@ -29,6 +29,7 @@
 
 __declspec(dllexport) DWORD XInputGetState(DWORD user_index, void* state)
 {
+    dx_gfx_trace(6);
     if (state)
         dx_memzero(state, 16);
     if (user_index >= 4)

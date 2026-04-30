@@ -45,8 +45,9 @@ void __cdecl mainCRTStartup(void)
     for (UINT i = 0; i < sizeof(hwnd_props); ++i)
         hwnd_props[i] = 0;
     *(HWND*)(hwnd_props + 0) = NULL; /* offscreen */
-    *(UINT*)(hwnd_props + 8) = 320;
-    *(UINT*)(hwnd_props + 12) = 240;
+    /* 32x32 BGRA8 = 4 KiB — fits in 64 KiB Win32 heap. */
+    *(UINT*)(hwnd_props + 8) = 32;
+    *(UINT*)(hwnd_props + 12) = 32;
 
     /* slot 14 = CreateHwndRenderTarget */
     void* rt = NULL;

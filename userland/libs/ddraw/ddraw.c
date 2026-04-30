@@ -343,6 +343,7 @@ __declspec(dllexport) HRESULT DirectDrawCreate(const void* guid, void** out, voi
 {
     (void)guid;
     (void)unk;
+    dx_gfx_trace(9);
     if (!out)
         return DX_E_POINTER;
     DdImpl* d = dd_alloc();
