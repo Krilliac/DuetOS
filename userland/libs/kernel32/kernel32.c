@@ -873,6 +873,103 @@ __declspec(dllexport) DWORD ExpandEnvironmentStringsW(const wchar_t16* src, wcha
     return (DWORD)n;
 }
 
+/* GetCPInfo — fill a CPINFO so callers checking MaxCharSize > 0
+ * pass. We only support CP_ACP / CP_OEMCP / CP_UTF8 / CP_THREAD_ACP
+ * out-of-the-box; anything else still gets a generic single-byte
+ * code page. The DefaultChar is "?" for fidelity with ANSI Windows. */
+typedef struct
+{
+    unsigned int MaxCharSize;
+    unsigned char DefaultChar[2];
+    unsigned char LeadByte[12];
+} DUETOS_CPINFO;
+
+__declspec(dllexport) BOOL GetCPInfo(unsigned int CodePage, DUETOS_CPINFO* lpCPInfo)
+{
+    if (lpCPInfo == (DUETOS_CPINFO*)0)
+        return 0;
+    for (int i = 0; i < 12; ++i)
+        lpCPInfo->LeadByte[i] = 0;
+    lpCPInfo->DefaultChar[0] = '?';
+    lpCPInfo->DefaultChar[1] = 0;
+    if (CodePage == 65001) /* CP_UTF8 */
+        lpCPInfo->MaxCharSize = 4;
+    else
+        lpCPInfo->MaxCharSize = 1; /* single-byte ANSI / OEM */
+    return 1;
+}
+
+__declspec(dllexport) int LCMapStringW(unsigned long Locale, DWORD dwMapFlags, const wchar_t16* lpSrcStr, int cchSrc,
+                                       wchar_t16* lpDestStr, int cchDest)
+{
+    (void)Locale;
+    if (lpSrcStr == (const wchar_t16*)0)
+        return 0;
+    /* Compute source length. */
+    int src_len = cchSrc;
+    if (src_len < 0)
+    {
+        src_len = 0;
+        while (lpSrcStr[src_len] != 0)
+            ++src_len;
+        ++src_len; /* include NUL */
+    }
+    /* Sizing call — return required dest length. */
+    if (cchDest == 0 || lpDestStr == (wchar_t16*)0)
+        return src_len;
+    if (cchDest < src_len)
+        return 0;
+    /* Apply the requested transformation, byte-by-byte. */
+    const unsigned long LCMAP_LOWERCASE = 0x00000100;
+    const unsigned long LCMAP_UPPERCASE = 0x00000200;
+    for (int i = 0; i < src_len; ++i)
+    {
+        wchar_t16 c = lpSrcStr[i];
+        if ((dwMapFlags & LCMAP_LOWERCASE) && c >= 'A' && c <= 'Z')
+            c = (wchar_t16)(c + ('a' - 'A'));
+        else if ((dwMapFlags & LCMAP_UPPERCASE) && c >= 'a' && c <= 'z')
+            c = (wchar_t16)(c - ('a' - 'A'));
+        lpDestStr[i] = c;
+    }
+    return src_len;
+}
+
+/* FormatMessageW — canned messages for FORMAT_MESSAGE_FROM_SYSTEM
+ * with a few common error codes. Fully real localisation /
+ * inserts deferred until we have a real ntdll error table. */
+__declspec(dllexport) DWORD FormatMessageW(DWORD dwFlags, const void* lpSource, DWORD dwMessageId, DWORD dwLanguageId,
+                                           wchar_t16* lpBuffer, DWORD nSize, void* Arguments)
+{
+    (void)dwFlags;
+    (void)lpSource;
+    (void)dwLanguageId;
+    (void)Arguments;
+    if (lpBuffer == (wchar_t16*)0 || nSize == 0)
+        return 0;
+    static const wchar_t16 kOk[] = {'T', 'h', 'e', ' ', 'o', 'p', 'e', 'r', 'a', 't', 'i', 'o', 'n',
+                                    ' ', 'c', 'o', 'm', 'p', 'l', 'e', 't', 'e', 'd', ' ', 's', 'u',
+                                    'c', 'c', 'e', 's', 's', 'f', 'u', 'l', 'l', 'y', '.', 0};
+    static const wchar_t16 kGen[] = {'G', 'e', 'n', 'e', 'r', 'i', 'c', ' ', 'f', 'a', 'i', 'l', 'u', 'r', 'e', '.', 0};
+    static const wchar_t16 kNotFound[] = {'T', 'h', 'e', ' ', 's', 'y', 's', 't', 'e', 'm', ' ',
+                                          'c', 'a', 'n', 'n', 'o', 't', ' ', 'f', 'i', 'n', 'd',
+                                          ' ', 't', 'h', 'e', ' ', 'p', 'a', 't', 'h', '.', 0};
+    const wchar_t16* msg;
+    if (dwMessageId == 0)
+        msg = kOk;
+    else if (dwMessageId == 3)
+        msg = kNotFound; /* ERROR_PATH_NOT_FOUND */
+    else
+        msg = kGen;
+    DWORD i = 0;
+    while (msg[i] != 0 && i < nSize - 1)
+    {
+        lpBuffer[i] = msg[i];
+        ++i;
+    }
+    lpBuffer[i] = 0;
+    return i;
+}
+
 __declspec(dllexport) DWORD ExpandEnvironmentStringsA(const char* src, char* dst, DWORD size)
 {
     if (src == (const char*)0)
@@ -1012,14 +1109,25 @@ __declspec(dllexport) HANDLE CreateFileW(const wchar_t16* lpFileName, DWORD dwDe
     (void)hTemplateFile;
     if (lpFileName == (const wchar_t16*)0)
         return (HANDLE)(long long)-1; /* INVALID_HANDLE_VALUE */
+    /* UTF-16 → ASCII; normalise '\\' → '/' so Windows-style paths
+     * match the kernel ramfs's POSIX-style lookup. Optional drive
+     * prefix "C:" / "c:" is stripped — DuetOS has one logical
+     * volume; drive letters are vestigial from the Win32 ABI. */
     char ascii[256];
     int i = 0;
-    while (i < 255 && lpFileName[i] != 0)
+    int j = 0;
+    /* Skip drive letter prefix if present. */
+    if (lpFileName[0] != 0 && lpFileName[1] == ':' &&
+        ((lpFileName[0] >= 'A' && lpFileName[0] <= 'Z') || (lpFileName[0] >= 'a' && lpFileName[0] <= 'z')))
+        i = 2;
+    while (j < 255 && lpFileName[i] != 0)
     {
-        ascii[i] = (char)(lpFileName[i] & 0xFF);
+        char c = (char)(lpFileName[i] & 0xFF);
+        ascii[j++] = (c == '\\') ? '/' : c;
         ++i;
     }
-    ascii[i] = '\0';
+    ascii[j] = '\0';
+    i = j;
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)

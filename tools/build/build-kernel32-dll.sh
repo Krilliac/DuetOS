@@ -137,6 +137,9 @@ set +e
     /export:SetEnvironmentVariableA \
     /export:ExpandEnvironmentStringsW \
     /export:ExpandEnvironmentStringsA \
+    /export:GetCPInfo \
+    /export:LCMapStringW \
+    /export:FormatMessageW \
     /export:WriteFile \
     /export:WriteConsoleA \
     /export:WriteConsoleW \

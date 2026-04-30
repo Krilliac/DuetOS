@@ -39,6 +39,14 @@ declare -A APPS=(
     [com_smoke]="-lkernel32 -lole32"
     [dbghelp_smoke]="-lkernel32 -ldbghelp"
     [winhttp_smoke]="-lkernel32 -lwinhttp"
+    [crt_smoke]="-lkernel32 -lmsvcrt"
+    [critsec_smoke]="-lkernel32"
+    [tls_smoke]="-lkernel32"
+    [atom_smoke]="-lkernel32 -luser32"
+    [console_smoke]="-lkernel32"
+    [datetime_smoke]="-lkernel32"
+    [locale_smoke]="-lkernel32"
+    [gdi_smoke]="-lkernel32 -luser32 -lgdi32"
 )
 
 for app in "${!APPS[@]}"; do

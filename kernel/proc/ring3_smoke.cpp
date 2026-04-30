@@ -114,6 +114,14 @@
 #include "generated_winhttp_smoke_pe.h"
 #include "generated_wininet_smoke_pe.h"
 #include "generated_winkill_pe.h"
+#include "generated_atom_smoke_pe.h"
+#include "generated_console_smoke_pe.h"
+#include "generated_critsec_smoke_pe.h"
+#include "generated_crt_smoke_pe.h"
+#include "generated_datetime_smoke_pe.h"
+#include "generated_gdi_smoke_pe.h"
+#include "generated_locale_smoke_pe.h"
+#include "generated_tls_smoke_pe.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
@@ -2212,7 +2220,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         {"user32.dll", fs::generated::kBinUser32DllBytes, fs::generated::kBinUser32DllBytes_len,
          /*essential=*/true},
         {"gdi32.dll", fs::generated::kBinGdi32DllBytes, fs::generated::kBinGdi32DllBytes_len,
-         /*essential=*/false},
+         /*essential=*/true},
         // Networking / crypto / common UI / version / setup.
         // ws2_32 is essential because mini_browser.exe imports it
         // and we exercise WSAStartup / gethostbyname / socket /
@@ -2757,6 +2765,23 @@ void StartRing3SmokeTask()
     SpawnPeFile("ring3-dbghelp-smoke", fs::generated::kBinDbghelpSmokeBytes, fs::generated::kBinDbghelpSmokeBytes_len,
                 CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     SpawnPeFile("ring3-winhttp-smoke", fs::generated::kBinWinhttpSmokeBytes, fs::generated::kBinWinhttpSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-crt-smoke", fs::generated::kBinCrtSmokeBytes, fs::generated::kBinCrtSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-critsec-smoke", fs::generated::kBinCritsecSmokeBytes, fs::generated::kBinCritsecSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-tls-smoke", fs::generated::kBinTlsSmokeBytes, fs::generated::kBinTlsSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-atom-smoke", fs::generated::kBinAtomSmokeBytes, fs::generated::kBinAtomSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-console-smoke", fs::generated::kBinConsoleSmokeBytes, fs::generated::kBinConsoleSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-datetime-smoke", fs::generated::kBinDatetimeSmokeBytes,
+                fs::generated::kBinDatetimeSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-locale-smoke", fs::generated::kBinLocaleSmokeBytes, fs::generated::kBinLocaleSmokeBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-gdi-smoke", fs::generated::kBinGdiSmokeBytes, fs::generated::kBinGdiSmokeBytes_len,
                 CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     // Windowing v0 proof: a freestanding PE that imports
     // user32!CreateWindowExA + ShowWindow + MessageBoxA and
