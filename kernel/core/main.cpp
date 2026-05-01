@@ -107,6 +107,7 @@
 #include "drivers/video/calendar.h"
 #include "drivers/video/magnifier.h"
 #include "drivers/video/menu.h"
+#include "drivers/video/start_menu_apps.h"
 #include "drivers/video/netpanel.h"
 #include "drivers/video/notify.h"
 #include "drivers/video/taskbar.h"
@@ -1884,6 +1885,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::core::SessionRestoreSelfTest());
     duetos::core::SessionRestoreApply();
 
+    // /APPS shortcut enumeration. Creates the directory + a
+    // SAMPLE.MNF seed on first boot so the user has a working
+    // template to copy. Each *.MNF file becomes an extra entry
+    // in the Start menu, dispatched through ThemeRole.
+    DUETOS_BOOT_SELFTEST(duetos::drivers::video::StartMenuAppsSelfTest());
+    duetos::drivers::video::StartMenuAppsScan();
+
     SerialWrite("[boot] Probing read-only FS shells (ext4 / NTFS / exFAT).\n");
     duetos::fs::ext4::Ext4ScanAll();
     duetos::fs::ntfs::NtfsScanAll();
@@ -2741,7 +2749,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         // — id = 100 + role index — so the dispatch handler can fan
         // back out to a single ThemeRoleWindow lookup. New roles
         // pick the next 100 + idx and need a label here only.
-        static const duetos::drivers::video::MenuItem kStartItems[] = {
+        static const duetos::drivers::video::MenuItem kStartItemsBuiltins[] = {
             {"CALCULATOR", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Calculator)},
             {"NOTEPAD", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Notes)},
             {"FILES", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Files)},
@@ -2750,10 +2758,32 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             {"KERNEL LOG", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::LogView)},
             {"GFX DEMO", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::GfxDemo)},
             {"SETTINGS", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Settings)},
+        };
+        static const duetos::drivers::video::MenuItem kStartItemsTrailing[] = {
             {"HELP / SHORTCUTS", 6},
             {"CYCLE WINDOWS", 2},
             {"ABOUT DUETOS", 1},
         };
+        // Combined array: builtins, then /APPS shortcuts, then
+        // help/cycle/about. The ui-thread is the only writer
+        // (so a function-static is fine), but it's recomputed
+        // each open so a freshly-dropped /APPS/*.MNF picks up
+        // without a reboot — StartMenuAppsScan runs at boot,
+        // but a per-open re-scan would be cheap to add later.
+        constexpr duetos::u32 kBuiltinsN = sizeof(kStartItemsBuiltins) / sizeof(kStartItemsBuiltins[0]);
+        constexpr duetos::u32 kTrailingN = sizeof(kStartItemsTrailing) / sizeof(kStartItemsTrailing[0]);
+        constexpr duetos::u32 kStartItemsCap = kBuiltinsN + duetos::drivers::video::kStartMenuAppsMax + kTrailingN;
+        static duetos::drivers::video::MenuItem kStartItems[kStartItemsCap] = {};
+        duetos::u32 start_items_count = 0;
+        for (duetos::u32 i = 0; i < kBuiltinsN; ++i)
+        {
+            kStartItems[start_items_count++] = kStartItemsBuiltins[i];
+        }
+        duetos::drivers::video::StartMenuAppsAppendTo(kStartItems, &start_items_count, kStartItemsCap - kTrailingN);
+        for (duetos::u32 i = 0; i < kTrailingN; ++i)
+        {
+            kStartItems[start_items_count++] = kStartItemsTrailing[i];
+        }
         static const duetos::drivers::video::MenuItem kDesktopMenuItems[] = {
             {"HELP / SHORTCUTS", 6}, {"ABOUT DUETOS", 1},  {"CYCLE WINDOWS", 2},
             {"LIST WINDOWS", 3},     {"SWITCH TO TTY", 5},
@@ -2921,10 +2951,25 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                         // un-hiding it if Show Desktop or a min/hide
                         // dropped its visible bit." Out-of-band ids
                         // fall through to the unrecognised log.
+                        // Builtin start-menu items use action 100+role.
+                        // /APPS shortcuts use action 200+slot — resolve
+                        // through StartMenuAppsResolve to recover the
+                        // ThemeRole before raising. Both paths share
+                        // the visibility / raise / log block below.
+                        bool have_role = false;
+                        duetos::drivers::video::ThemeRole role{};
                         if (action >= 100 &&
                             action < 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::kCount))
                         {
-                            const auto role = static_cast<duetos::drivers::video::ThemeRole>(action - 100);
+                            role = static_cast<duetos::drivers::video::ThemeRole>(action - 100);
+                            have_role = true;
+                        }
+                        else if (duetos::drivers::video::StartMenuAppsResolve(action, &role))
+                        {
+                            have_role = true;
+                        }
+                        if (have_role)
+                        {
                             const auto h = duetos::drivers::video::ThemeRoleWindow(role);
                             if (h != duetos::drivers::video::kWindowInvalid)
                             {
@@ -3093,12 +3138,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                         // flush against the top of the START
                         // button regardless of how many items
                         // are in the set.
-                        duetos::drivers::video::MenuOpen(kStartItems, sizeof(kStartItems) / sizeof(kStartItems[0]), sx,
-                                                         sy, 0);
+                        duetos::drivers::video::MenuOpen(kStartItems, start_items_count, sx, sy, 0);
                         const duetos::u32 mh = duetos::drivers::video::MenuPanelHeight();
                         const duetos::u32 my = (sy > mh) ? sy - mh : 0;
-                        duetos::drivers::video::MenuOpen(kStartItems, sizeof(kStartItems) / sizeof(kStartItems[0]), sx,
-                                                         my, 0);
+                        duetos::drivers::video::MenuOpen(kStartItems, start_items_count, sx, my, 0);
                         SerialWrite("[ui] menu open\n");
                     }
                     menu_handled = true;
