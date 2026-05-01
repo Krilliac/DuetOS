@@ -94,6 +94,7 @@
 #include "apps/files.h"
 #include "apps/gfxdemo.h"
 #include "apps/notes.h"
+#include "apps/screenshot.h"
 #include "apps/settings.h"
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
@@ -106,6 +107,7 @@
 #include "drivers/video/calendar.h"
 #include "drivers/video/magnifier.h"
 #include "drivers/video/menu.h"
+#include "drivers/video/start_menu_apps.h"
 #include "drivers/video/netpanel.h"
 #include "drivers/video/notify.h"
 #include "drivers/video/taskbar.h"
@@ -144,9 +146,11 @@
 #include "loader/firmware_loader.h"
 #include "diag/heartbeat.h"
 #include "log/klog.h"
+#include "log/klog_persist.h"
 #include "security/login.h"
 #include "core/init.h"
 #include "core/panic.h"
+#include "core/session_restore.h"
 #include "syscall/cap_gate.h"
 #include "proc/process.h"
 #include "util/random.h"
@@ -342,7 +346,13 @@ void PrintShortcutHelp()
     ConsoleWriteln("    CTRL+ALT+Y        CYCLE THEME");
     ConsoleWriteln("    CTRL+ALT+1..9     PICK THEME DIRECTLY");
     ConsoleWriteln("    CTRL+ALT+F1/F2    SHELL / KLOG CONSOLE");
+    ConsoleWriteln("    CTRL+ALT+P        SCREENSHOT TO SHOTNNNN.BMP");
     ConsoleWriteln("    CTRL+C            INTERRUPT SHELL COMMAND");
+    ConsoleWriteln("");
+    ConsoleWriteln("  NOTES (WHEN ACTIVE)");
+    ConsoleWriteln("    CTRL+C / CTRL+V   COPY / PASTE CLIPBOARD");
+    ConsoleWriteln("    CTRL+S            SAVE TO NOTES.TXT (FAT32)");
+    ConsoleWriteln("    CTRL+O            LOAD FROM NOTES.TXT (FAT32)");
     ConsoleWriteln("================================================");
     ConsoleWriteln("");
 }
@@ -1851,6 +1861,37 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWrite("[boot] Routing Win32 file syscalls through FAT32.\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::routing::SelfTest());
 
+    // Notes save/load round-trip — runs here (post-FAT32-probe) so
+    // the SKIP path stays only "no FAT32 volume" rather than "Notes
+    // ran before storage was up". Skipped silently if NOTES.TXT
+    // pre-exists on the boot image.
+    DUETOS_BOOT_SELFTEST(duetos::apps::notes::NotesPersistSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::apps::screenshot::ScreenshotSelfTest());
+
+    // Install the FAT32 file sink — replaces the early tmpfs
+    // sink (single-slot API). The tmpfs `/tmp/boot.log`
+    // captured the early-boot lines; from here on, every
+    // Info+ log entry goes to `KERNEL.LOG` on the FAT32 root.
+    // Non-fatal if FAT32 is unavailable — Install logs and
+    // returns.
+    duetos::core::KlogPersistInstall();
+    DUETOS_BOOT_SELFTEST(duetos::core::KlogPersistSelfTest());
+
+    // Session restore: read SESSION.CFG and apply the saved
+    // theme + per-app window positions. No-op on first boot
+    // (file doesn't exist) or if FAT32 isn't mounted.
+    // SessionRestoreSelfTest exercises the parse path in
+    // memory without touching the on-disk config.
+    DUETOS_BOOT_SELFTEST(duetos::core::SessionRestoreSelfTest());
+    duetos::core::SessionRestoreApply();
+
+    // /APPS shortcut enumeration. Creates the directory + a
+    // SAMPLE.MNF seed on first boot so the user has a working
+    // template to copy. Each *.MNF file becomes an extra entry
+    // in the Start menu, dispatched through ThemeRole.
+    DUETOS_BOOT_SELFTEST(duetos::drivers::video::StartMenuAppsSelfTest());
+    duetos::drivers::video::StartMenuAppsScan();
+
     SerialWrite("[boot] Probing read-only FS shells (ext4 / NTFS / exFAT).\n");
     duetos::fs::ext4::Ext4ScanAll();
     duetos::fs::ntfs::NtfsScanAll();
@@ -2004,6 +2045,46 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 duetos::drivers::video::CompositorUnlock();
             }
 
+            // Ctrl+S — persist the Notes buffer to the FAT32 root
+            // as NOTES.TXT. Active-window-gated: anywhere else this
+            // chord is unbound. NotesSave logs success/failure to
+            // COM1; the toast surfaces the same outcome to the user.
+            if (ctrl && !alt && (ev.code == 's' || ev.code == 'S'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                if (active != duetos::drivers::video::kWindowInvalid && active == duetos::apps::notes::NotesWindow())
+                {
+                    const bool ok = duetos::apps::notes::NotesSave();
+                    duetos::drivers::video::CompositorUnlock();
+                    duetos::drivers::video::NotifyShow(ok ? "saved to NOTES.TXT" : "save failed");
+                    SerialWrite(ok ? "[ui] ^S notes saved\n" : "[ui] ^S notes save FAILED\n");
+                    continue;
+                }
+                duetos::drivers::video::CompositorUnlock();
+            }
+
+            // Ctrl+O — replace the Notes buffer with the contents
+            // of NOTES.TXT from the FAT32 root. Active-window-gated.
+            // The pre-load buffer is overwritten without
+            // confirmation; matches the unsaved-by-default
+            // discipline of Notes — there is no "are you sure"
+            // dialog primitive in the WM yet.
+            if (ctrl && !alt && (ev.code == 'o' || ev.code == 'O'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                if (active != duetos::drivers::video::kWindowInvalid && active == duetos::apps::notes::NotesWindow())
+                {
+                    const bool ok = duetos::apps::notes::NotesLoad();
+                    duetos::drivers::video::CompositorUnlock();
+                    duetos::drivers::video::NotifyShow(ok ? "loaded NOTES.TXT" : "load failed (no NOTES.TXT?)");
+                    SerialWrite(ok ? "[ui] ^O notes loaded\n" : "[ui] ^O notes load FAILED\n");
+                    continue;
+                }
+                duetos::drivers::video::CompositorUnlock();
+            }
+
             // F1 (no modifiers) dumps the user-facing keyboard +
             // shortcut reference into the desktop console. Tested
             // BEFORE the Ctrl+Alt+F1 console-flip handler — bare
@@ -2127,6 +2208,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             // so muscle-memory for the existing chord stays intact.
             if (ctrl && alt && (ev.code == 'k' || ev.code == 'K'))
             {
+                // Capture session state BEFORE the compositor
+                // lock — SessionRestoreSave issues a FAT32 write
+                // and we don't want to hold the lock across that
+                // I/O. State is read via WindowGetBounds, which
+                // takes its own short-lived lock.
+                duetos::core::SessionRestoreSave();
                 duetos::drivers::video::CompositorLock();
                 duetos::core::AuthLogout();
                 duetos::core::LoginStart(duetos::core::LoginMode::Gui);
@@ -2146,6 +2233,21 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 duetos::drivers::video::NotifyShow(on ? "magnifier on" : "magnifier off");
                 duetos::drivers::video::CompositorUnlock();
                 SerialWrite(on ? "[ui] magnifier on\n" : "[ui] magnifier off\n");
+                continue;
+            }
+            // Ctrl+Alt+P captures the framebuffer to the next
+            // SHOTNNNN.BMP slot on the FAT32 root volume. Holds
+            // the compositor lock across the capture so a draw
+            // doesn't race the row copy. Toast surfaces the
+            // outcome; failure modes (no FAT32, no FB, disk
+            // full) all log a one-line reason to COM1.
+            if (ctrl && alt && (ev.code == 'p' || ev.code == 'P'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const bool ok = duetos::apps::screenshot::ScreenshotCapture();
+                duetos::drivers::video::CompositorUnlock();
+                duetos::drivers::video::NotifyShow(ok ? "screenshot saved" : "screenshot failed");
+                SerialWrite(ok ? "[ui] ^Alt+P screenshot saved\n" : "[ui] ^Alt+P screenshot FAILED\n");
                 continue;
             }
             // Ctrl+Alt+Y cycles the desktop theme. Classic (teal)
@@ -2583,6 +2685,15 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         for (;;)
         {
             duetos::sched::SchedSleepTicks(100);
+            // Drain buffered log chunks to KERNEL.LOG once per
+            // tick. Outside the compositor lock so a slow FAT32
+            // append never stalls the desktop redraw.
+            duetos::core::KlogPersistFlush();
+            // Autosave the theme + window-position session state.
+            // Internally throttled — bytewise-equal payloads skip
+            // the FAT32 write, so a stable session writes once
+            // and then idles.
+            duetos::core::SessionRestoreSave();
             duetos::drivers::video::CompositorLock();
             // While the login gate is up the full-screen login
             // panel owns the framebuffer. Repaint it from its
@@ -2638,7 +2749,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         // — id = 100 + role index — so the dispatch handler can fan
         // back out to a single ThemeRoleWindow lookup. New roles
         // pick the next 100 + idx and need a label here only.
-        static const duetos::drivers::video::MenuItem kStartItems[] = {
+        static const duetos::drivers::video::MenuItem kStartItemsBuiltins[] = {
             {"CALCULATOR", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Calculator)},
             {"NOTEPAD", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Notes)},
             {"FILES", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Files)},
@@ -2647,10 +2758,32 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             {"KERNEL LOG", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::LogView)},
             {"GFX DEMO", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::GfxDemo)},
             {"SETTINGS", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Settings)},
+        };
+        static const duetos::drivers::video::MenuItem kStartItemsTrailing[] = {
             {"HELP / SHORTCUTS", 6},
             {"CYCLE WINDOWS", 2},
             {"ABOUT DUETOS", 1},
         };
+        // Combined array: builtins, then /APPS shortcuts, then
+        // help/cycle/about. The ui-thread is the only writer
+        // (so a function-static is fine), but it's recomputed
+        // each open so a freshly-dropped /APPS/*.MNF picks up
+        // without a reboot — StartMenuAppsScan runs at boot,
+        // but a per-open re-scan would be cheap to add later.
+        constexpr duetos::u32 kBuiltinsN = sizeof(kStartItemsBuiltins) / sizeof(kStartItemsBuiltins[0]);
+        constexpr duetos::u32 kTrailingN = sizeof(kStartItemsTrailing) / sizeof(kStartItemsTrailing[0]);
+        constexpr duetos::u32 kStartItemsCap = kBuiltinsN + duetos::drivers::video::kStartMenuAppsMax + kTrailingN;
+        static duetos::drivers::video::MenuItem kStartItems[kStartItemsCap] = {};
+        duetos::u32 start_items_count = 0;
+        for (duetos::u32 i = 0; i < kBuiltinsN; ++i)
+        {
+            kStartItems[start_items_count++] = kStartItemsBuiltins[i];
+        }
+        duetos::drivers::video::StartMenuAppsAppendTo(kStartItems, &start_items_count, kStartItemsCap - kTrailingN);
+        for (duetos::u32 i = 0; i < kTrailingN; ++i)
+        {
+            kStartItems[start_items_count++] = kStartItemsTrailing[i];
+        }
         static const duetos::drivers::video::MenuItem kDesktopMenuItems[] = {
             {"HELP / SHORTCUTS", 6}, {"ABOUT DUETOS", 1},  {"CYCLE WINDOWS", 2},
             {"LIST WINDOWS", 3},     {"SWITCH TO TTY", 5},
@@ -2818,10 +2951,25 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                         // un-hiding it if Show Desktop or a min/hide
                         // dropped its visible bit." Out-of-band ids
                         // fall through to the unrecognised log.
+                        // Builtin start-menu items use action 100+role.
+                        // /APPS shortcuts use action 200+slot — resolve
+                        // through StartMenuAppsResolve to recover the
+                        // ThemeRole before raising. Both paths share
+                        // the visibility / raise / log block below.
+                        bool have_role = false;
+                        duetos::drivers::video::ThemeRole role{};
                         if (action >= 100 &&
                             action < 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::kCount))
                         {
-                            const auto role = static_cast<duetos::drivers::video::ThemeRole>(action - 100);
+                            role = static_cast<duetos::drivers::video::ThemeRole>(action - 100);
+                            have_role = true;
+                        }
+                        else if (duetos::drivers::video::StartMenuAppsResolve(action, &role))
+                        {
+                            have_role = true;
+                        }
+                        if (have_role)
+                        {
                             const auto h = duetos::drivers::video::ThemeRoleWindow(role);
                             if (h != duetos::drivers::video::kWindowInvalid)
                             {
@@ -2990,12 +3138,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                         // flush against the top of the START
                         // button regardless of how many items
                         // are in the set.
-                        duetos::drivers::video::MenuOpen(kStartItems, sizeof(kStartItems) / sizeof(kStartItems[0]), sx,
-                                                         sy, 0);
+                        duetos::drivers::video::MenuOpen(kStartItems, start_items_count, sx, sy, 0);
                         const duetos::u32 mh = duetos::drivers::video::MenuPanelHeight();
                         const duetos::u32 my = (sy > mh) ? sy - mh : 0;
-                        duetos::drivers::video::MenuOpen(kStartItems, sizeof(kStartItems) / sizeof(kStartItems[0]), sx,
-                                                         my, 0);
+                        duetos::drivers::video::MenuOpen(kStartItems, start_items_count, sx, my, 0);
                         SerialWrite("[ui] menu open\n");
                     }
                     menu_handled = true;

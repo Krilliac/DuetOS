@@ -14,6 +14,11 @@ _Last updated: 2026-05-01._
 | 2026-05-01 | P1 #11 Account management | Settings panel grew a `USERS:` readout listing every account (name + role) and a `LOG OUT` button. Read-only for v0; mutations remain shell-command driven (`useradd`, `passwd`). |
 | 2026-05-01 | P3 #23 Time zone | `kernel/time/timezone.{h,cpp}` — signed minutes offset ([-12 h, +14 h], 30-min steps). Settings shows UTC + LOCAL clocks and the live offset; TZ ± buttons step it. No zoneinfo, no DST, no persistence — documented limits. |
 | 2026-05-01 | P3 #21 Accessibility (magnifier) | `kernel/drivers/video/magnifier.{h,cpp}` — Ctrl+Alt+M toggles a 200×150 inset at top-right showing 2× nearest-neighbour zoom around the cursor. Drops to bottom-right when cursor is in top-right quadrant so it never occludes its own source. Direct framebuffer reads via `FramebufferGet().virt`. |
+| 2026-05-01 | P0 #1 Notes save / load | `kernel/apps/notes_persist.cpp` (new TU) + `kernel/apps/notes_internal.h` (private detail surface) — `NotesSave()` and `NotesLoad()` round-trip the live buffer through `Fat32CreateAtPath` / `Fat32DeleteAtPath` / `Fat32ReadFile` against `NOTES.TXT` on the FAT32 root volume. Wired to Ctrl+S / Ctrl+O when Notes is the active window (`kernel/core/main.cpp`). Boot self-test (`NotesPersistSelfTest`) runs after FAT32 probe and validates a save → load round-trip on a known marker. GAP: non-atomic save (delete-then-create); revisit when FS journaling lands. **The "blocked on FAT32 write" entry in this file was stale — the kernel-side write path was already complete; only app wiring was missing.** |
+| 2026-05-01 | P1 #9 Screenshot | `kernel/apps/screenshot.{h,cpp}` — Ctrl+Alt+P captures the framebuffer to the next `SHOTNNNN.BMP` slot on the FAT32 root volume. 32-bpp top-down BMP (negative DIB height so source rows match framebuffer order, no flip pass). Streams in 64 KiB chunks via `Fat32CreateAtPath` (first) and `Fat32AppendAtPath` (rest) — kernel heap is too small to buffer a full 1024×768 frame at once. Boot self-test exercises the BMP write path with a 4×4 synthetic gradient, verifies on-disk size, and deletes the test file. The deferred "tmpfs slot cap" entry in this file was the pre-FAT32-write design; with persistent storage live, that constraint no longer applies. |
+| 2026-05-01 | P3 #26 Persistent log viewer | `kernel/log/klog_persist.{h,cpp}` — installs a FAT32 file sink that replaces the early tmpfs sink (single-slot API). On install: truncates `KERNEL.LOG`, replays the log ring through the new writer (so the file captures pre-install Info+ history), then forwards every Info+ line as it arrives. 4 KiB scratch buffer + half-full flush threshold so the FAT mirror isn't beat per-line. The 1 Hz `ui-ticker` calls `KlogPersistFlush()` so a long-uptime log stays current within a second. New shell command `dmesg f` streams `KERNEL.LOG` through `Fat32ReadFileStream`. GAP: each boot truncates the file (no cross-boot rotation yet). Re-entrancy guard drops log lines emitted from inside `Fat32AppendAtPath` rather than recursing. |
+| 2026-05-01 | P3 #27 Session restore | `kernel/core/session_restore.{h,cpp}` — round-trips theme + per-app window positions through `SESSION.CFG` on the FAT32 root. Plain ASCII `key=value\n` payload (≤ 1 KiB) so it's hand-readable from `dmesg f` style streaming. `SessionRestoreApply()` runs once after FAT32 probe and applies `ThemeSet` + `WindowMoveTo` for every recognised line; missing file = first-boot path, no-op. `SessionRestoreSave()` snapshots current state and writes if (and only if) the formatted payload differs byte-for-byte from the last successful save — so the 1 Hz autosave from the ui-ticker idles silently when nothing has changed. Wired into the three logout paths: shell `logout`, Settings → Log Out, Ctrl+Alt+K screen lock. Self-test exercises the parser end-to-end without touching the on-disk file (synthetic theme + window position, restored before exit). |
+| 2026-05-01 | P2 #15 Start-menu /APPS enumeration | `kernel/drivers/video/start_menu_apps.{h,cpp}` — at boot, ensures `/APPS` exists on the FAT32 root, plants `APPS/SAMPLE.MNF` as a copy-paste template, then enumerates `APPS/*.MNF` shortcut manifests. Each manifest is `name=<label>\ntarget=<role>\n`; recognised targets are the eight ThemeRoles (calculator/notes/files/clock/settings/gfxdemo/taskmanager/logview). Discovered shortcuts are appended to the Start menu between the builtin items and the trailing help/cycle/about block. Action-id range 200..215 dispatches through `StartMenuAppsResolve` to the same window-raise path as builtin items. The loader runtime gate stays in place: real PE/ELF launching requires the loader, so v0 only honours role aliases — that's the "package manifest format" half of the original blocker, with the "PE/ELF launcher" half deferred to when the runtime lands. Self-test parses a synthetic manifest in memory and asserts the role round-trips. |
 
 ## Status — blocked on infrastructure
 
@@ -25,20 +30,17 @@ and finish the user-facing tier.
 
 | Item | Blocker | What lands when the blocker is gone |
 |------|---------|------------------------------------|
-| P0 #1 Persistent file save/load | FAT32 write path (~2000 LOC, called out in `subsystems-status.md`) | Notes save/load, Files copy/move/delete, `userland/libs/*` file-open dialog |
 | P0 #2 Audio output | Intel HDA codec discovery + CORB/RIRB stream programming (probe-only today; `kernel/drivers/audio/audio.cpp:43`) | Settings volume slider, system beep/chime on notifications, WAV / OGG playback app |
 | P0 #4 Wi-Fi connect-to-SSID | Per-vendor firmware loader (does not exist) + 802.11 MLME state machine; `iwlwifi/rtl88xx/bcm43xx` are chip-ID-probe-only | Network flyout SSID picker, Settings → Network → Wi-Fi tab, captive-portal handler |
 | P2 #12 Multi-monitor / resolution change | Per-vendor GPU drivers (Intel/AMD/NVIDIA all probe-only per `render-drivers-v6.md`); EDID parser; mode-set negotiation | Settings → Display tab with resolution / refresh-rate / monitor layout |
 | P2 #13 Brightness | ACPI EC driver (does not exist) + per-vendor backlight register paths | Settings brightness slider; Fn-key brightness hotkeys |
 | P2 #14 Battery + ACPI suspend | ACPI AML interpreter (only static tables parsed today); EC battery status registers; S3 / S0ix wake plumbing | Battery icon in tray, Settings → Power, lid-close suspend |
-| P2 #15 Software install / app discovery | Persistent FS (FAT32 write) for the install root + a package manifest format | Start menu enumerates `/disk/apps/`; "Install from file…" dialog |
-| P2 #16 Disk installer | FAT32 write + GPT write + bootloader copy | Installer app that lays DuetOS down on an NVMe partition |
+| P2 #15 PE/ELF launching from /APPS | The /APPS *.MNF enumeration landed; what's still missing is the loader runtime so a manifest with `kind=pe path=APPS/foo.exe` can actually launch a binary | Click an /APPS entry → load + run a PE32+ executable |
+| P2 #16 Disk installer | GPT write (`kernel/fs/gpt.cpp` is probe-only) + FAT32 mkfs (no equivalent of `make-gpt-image.py`'s BPB-laydown logic in the kernel yet) + bootloader copy. Plan + verification ladder + risk notes captured in `.claude/knowledge/disk-installer-plan.md`. | Installer app that lays DuetOS down on an NVMe partition |
 | P2 #17 System updater | Code-signing infrastructure + A/B kernel-slot layout | "Check for updates" surface; rollback |
 | P2 #18 Bluetooth | Host-controller (HCI) driver + L2CAP / RFCOMM / GATT stack | Pair mouse / keyboard / headset / phone |
 | P2 #19 Printer | USB printer class driver + IPP / PostScript / raster pipeline | Print from Notes |
 | P2 #20 Webcam | UVC USB-Video class driver | Camera app, video calls |
-| P3 #26 Persistent log viewer | FAT32 write so the `klog` ring can survive reboot | `journalctl`-style history viewer |
-| P3 #27 Session restore | FAT32 write for window-position / open-app state | Desktop comes back the way the user left it |
 
 ## Status — deferred
 
@@ -51,7 +53,6 @@ schedule them.
 | P0 #3 USB mouse | xHCI HID class needs report-descriptor parsing for mouse-class endpoints; the keyboard-class path landed in `xhci-hid-keyboard-v0.md` and is the template. No QEMU emulation of USB mouse — has to be tested on physical HW post-merge. | 200-300 LOC |
 | P1 #6 Terminal emulator | Kernel shell is wired to a single global console (ConsoleWrite). A windowed terminal needs a console-multiplex refactor so the shell takes a per-session sink. | Multi-session refactor |
 | P1 #7 Image / PDF / media viewers | Each format needs its own parser + frame loop. Image viewer is the smallest (PNG / BMP, ~500 LOC each). PDF is huge. Audio / video need P0 #2 first. | One-per-format |
-| P1 #9 Screenshot tool | tmpfs slot cap is 512 bytes/slot × 16 slots = 8 KiB total, far below a 1024×768 framebuffer (~3 MiB). Real screenshot save is gated on FAT32 write (P0 #1). | Wait for #1 |
 | P3 #21 Accessibility | Magnifier landed (this commit). Screen reader needs an AT-SPI-equivalent kernel surface; on-screen keyboard needs >32 widget slots (today's cap; bump first). | Per-primitive |
 | P3 #22 IME / non-Latin input | Input-method framework refactor; PS/2 + xHCI HID drivers currently hardcode US layout. | Input refactor |
 | P3 #24 Locale / language switching | UI strings live in C++ literals across every `kernel/apps/*.cpp`. A string-table layer with id → text indirection is the prerequisite. | Refactor across all apps |
@@ -78,14 +79,23 @@ future slice can pick one without re-deriving the field.
 
 ## P0 — workflow blockers (a fresh user hits these in the first 5 minutes)
 
-### 1. Persistent file save / load [BLOCKED on FAT32 write]
-- **Today:** `kernel/apps/notes.{h,cpp}` is keyboard-driven scratch
-  text — no save path, no load. `kernel/apps/files.{h,cpp}` is
-  read-only over ramfs and a read-only `/disk` mount (FAT32 read
-  landed; write didn't — see `storage-and-filesystem-roadmap.md`).
-- **Expected:** edit a note, reboot, note is still there.
-- **Owners:** `kernel/apps/notes.{h,cpp}`, `kernel/fs/fat32.h` (write
-  path), `userland/libs/*` (no file-open dialog primitive).
+### 1. Persistent file save / load [LANDED for Notes 2026-05-01]
+- **Today:** Notes save / load is wired against the FAT32 root
+  volume — Ctrl+S writes the live buffer to `NOTES.TXT`, Ctrl+O
+  loads it back. Implementation in
+  `kernel/apps/notes_persist.cpp`; uses
+  `Fat32CreateAtPath` / `Fat32DeleteAtPath` / `Fat32ReadFile`
+  directly. Boot self-test (`NotesPersistSelfTest`) round-trips
+  a known marker after FAT32 probe. The kernel-side write path
+  (`Fat32WriteInPlace`, `Fat32AppendAtPath`, `SYS_FILE_WRITE`,
+  `SYS_FILE_CREATE`, cap-gated by `kCapFsWrite`) had already
+  landed before this entry was opened — the gap was app wiring.
+- **Still missing:** `kernel/apps/files.{h,cpp}` is still
+  read-only (no copy / move / delete UI). `userland/libs/*`
+  doesn't have a file-open-dialog primitive. Other apps
+  (Settings, Calculator, Clock) don't persist any state yet.
+- **Owners:** `kernel/apps/files.{h,cpp}` for the file-manager
+  UI; userland for the dialog primitive.
 
 ### 2. Audio output [BLOCKED on HDA codec/stream]
 - **Today:** `kernel/drivers/audio/audio.cpp` does HDA register
@@ -157,12 +167,22 @@ future slice can pick one without re-deriving the field.
   the kernel shell.
 - **Owners:** `kernel/apps/notes.cpp` and clipboard syscall hookup.
 
-### 9. Screenshot tool [BLOCKED on FAT32 write]
-- **Today:** none. PrintScreen is unbound.
-- **Expected:** PrtSc captures the framebuffer to a file in
-  `/disk/screenshots/`.
-- **Owners:** new `kernel/apps/screenshot.{h,cpp}` + framebuffer
-  reader (already used by gfxdemo).
+### 9. Screenshot tool [LANDED 2026-05-01]
+- **Today:** Ctrl+Alt+P captures the framebuffer to the next
+  available `SHOTNNNN.BMP` on the FAT32 root volume.
+  Implementation in `kernel/apps/screenshot.{h,cpp}`. 32-bpp
+  top-down BMP (negative DIB height so source rows match
+  framebuffer order with no flip pass). Streams in 64 KiB
+  chunks via `Fat32CreateAtPath` then `Fat32AppendAtPath` —
+  the 2 MiB kernel heap is too small to buffer a full 1024×768
+  frame at once. Boot self-test exercises the BMP write path
+  with a 4×4 synthetic gradient.
+- **Still missing:** No region-select / window-only capture.
+  No annotation. No clipboard handoff. PNG output (BMP is
+  ~3 MiB at 1024×768 vs ~150 KiB PNG-compressed) is gated on
+  a zlib port — currently DuetOS doesn't have one.
+- **Owners:** `kernel/apps/screenshot.{h,cpp}` for region
+  capture + window mode; new `userland/libs/zlib*` for PNG.
 
 ### 10. Lock screen / screensaver [LANDED 2026-05-01]
 - **Today:** none. Single hardcoded `admin/admin` + `guest`

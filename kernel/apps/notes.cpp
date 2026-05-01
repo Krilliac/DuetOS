@@ -1,5 +1,6 @@
 #include "apps/notes.h"
 
+#include "apps/notes_internal.h"
 #include "arch/x86_64/serial.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/video/framebuffer.h"
@@ -7,14 +8,51 @@
 namespace duetos::apps::notes
 {
 
+// Cross-TU detail surface (shared with notes_persist.cpp). The
+// state and the InsertAtCursor primitive live here so persistence
+// can drive the same buffer the input path mutates.
+namespace detail
+{
+
+constinit char g_buf[kBufCap] = {};
+constinit duetos::u32 g_len = 0;
+// Cursor is an index into g_buf, valid range [0, g_len]. The
+// caret is visually drawn to the left of g_buf[g_cursor] (or
+// at the final trailing position when g_cursor == g_len).
+constinit duetos::u32 g_cursor = 0;
+
+// Path walker tolerates a missing leading slash (verified in
+// shell_filesystem.cpp's CmdFatappend handling).
+const char kSaveFile[] = "NOTES.TXT";
+
+bool InsertAtCursor(char c)
+{
+    if (g_len >= kBufCap)
+        return false;
+    for (duetos::u32 i = g_len; i > g_cursor; --i)
+    {
+        g_buf[i] = g_buf[i - 1];
+    }
+    g_buf[g_cursor] = c;
+    ++g_len;
+    ++g_cursor;
+    return true;
+}
+
+} // namespace detail
+
 namespace
 {
 
-// Buffer cap chosen to comfortably hold any note a user would
-// hand-type at boot but small enough that it doesn't add
-// meaningful weight to the kernel image's .bss. 4 KiB = one
-// full page.
-constexpr u32 kNotesBufCap = 4096;
+using detail::g_buf;
+using detail::g_cursor;
+using detail::g_len;
+using detail::InsertAtCursor;
+using detail::kBufCap;
+
+// Backwards-compatible alias for the cap. Kept so the body of
+// this TU reads as it did before the persistence split.
+constexpr u32 kNotesBufCap = detail::kBufCap;
 
 // 8x8 glyphs with 2 pixels of leading on each row: an 8 px
 // glyph stride horizontally, a 10 px row stride vertically.
@@ -29,29 +67,7 @@ constexpr u32 kGlyphH = 10;
 constexpr u32 kInkColour = 0x00101028;
 constexpr u32 kPaperColour = 0x00E0E0D8;
 
-constinit char g_buf[kNotesBufCap] = {};
-constinit u32 g_len = 0;
-// Cursor is an index into g_buf, valid range [0, g_len]. The
-// caret is visually drawn to the left of g_buf[g_cursor] (or
-// at the final trailing position when g_cursor == g_len).
-constinit u32 g_cursor = 0;
 constinit duetos::drivers::video::WindowHandle g_handle = duetos::drivers::video::kWindowInvalid;
-
-// Insert `c` at g_cursor, shifting the tail right by one.
-// Returns true iff the buffer had room.
-bool InsertAtCursor(char c)
-{
-    if (g_len >= kNotesBufCap)
-        return false;
-    for (u32 i = g_len; i > g_cursor; --i)
-    {
-        g_buf[i] = g_buf[i - 1];
-    }
-    g_buf[g_cursor] = c;
-    ++g_len;
-    ++g_cursor;
-    return true;
-}
 
 // Delete the char to the right of the cursor (forward delete).
 // Returns true iff anything was deleted.
