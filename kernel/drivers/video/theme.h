@@ -232,6 +232,14 @@ const char* ThemeIdName(ThemeId id);
 /// Passing kWindowInvalid clears the slot.
 void ThemeRegisterWindow(ThemeRole role, WindowHandle h);
 
+/// Look up the window handle previously registered for `role`.
+/// Returns `kWindowInvalid` if no handle was registered, or the
+/// stored handle is no longer alive (caller still gets a
+/// well-defined sentinel rather than a stale reference). Used
+/// by the Start menu / launcher dispatch to raise an app
+/// window by name without touching kernel-internal tables.
+WindowHandle ThemeRoleWindow(ThemeRole role);
+
 /// Re-publish every themed colour into the live UI:
 ///   - every registered window's chrome (border, title, client,
 ///     close button)
