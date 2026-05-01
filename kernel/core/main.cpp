@@ -136,6 +136,7 @@
 #include "time/clocksource.h"
 #include "time/tick.h"
 #include "time/timekeeper.h"
+#include "time/timezone.h"
 #include "diag/cleanroom_trace.h"
 #include "security/auth.h"
 #include "security/cap_audit.h"
@@ -864,6 +865,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     }
     DUETOS_BOOT_SELFTEST(duetos::drivers::video::ThemeSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::video::NotifySelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::time::TimezoneSelfTest());
     const auto& theme0 = duetos::drivers::video::ThemeCurrent();
 
     // CALCULATOR — native DuetOS app. Window chrome first,

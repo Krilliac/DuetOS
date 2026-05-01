@@ -8,6 +8,7 @@
 #include "drivers/video/widget.h"
 #include "security/auth.h"
 #include "security/login.h"
+#include "time/timezone.h"
 
 namespace duetos::apps::settings
 {
@@ -110,10 +111,26 @@ void DoLogOut()
     duetos::core::LoginStart(duetos::core::LoginMode::Gui);
 }
 
+void DoTzDown()
+{
+    duetos::time::TimezoneStep(false);
+}
+
+void DoTzUp()
+{
+    duetos::time::TimezoneStep(true);
+}
+
 constexpr Action kActions[kIdCount] = {
-    {"THEME PREV", DoThemePrev}, {"THEME NEXT", DoThemeNext},    {"OPACITY -", DoOpacityDown},
-    {"OPACITY +", DoOpacityUp},  {"HIGH CTRST", DoHighContrast}, {"DEFAULT", DoDefault},
+    {"THEME PREV", DoThemePrev},
+    {"THEME NEXT", DoThemeNext},
+    {"OPACITY -", DoOpacityDown},
+    {"OPACITY +", DoOpacityUp},
+    {"HIGH CTRST", DoHighContrast},
+    {"DEFAULT", DoDefault},
     {"LOG OUT", DoLogOut},
+    {"TZ -", DoTzDown},
+    {"TZ +", DoTzUp},
 };
 
 struct State
@@ -201,20 +218,66 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
         FramebufferDrawString(cx + kReadoutX + 8 * 9, y, "(no win)", ink_fg, ink_bg);
     }
 
-    // Wall clock — refreshed on every paint via RtcRead.
+    // Wall clock — refreshed on every paint via RtcRead. UTC line
+    // first, then a LOCAL line that applies the live timezone
+    // offset, then an offset readout. Each row is 12 px tall.
     y += 16;
-    FramebufferDrawString(cx + kReadoutX, y, "TIME:", ink_fg, ink_bg);
     arch::RtcTime t{};
     arch::RtcRead(&t);
-    char buf[20];
-    FormatRtc(t, buf);
-    FramebufferDrawString(cx + kReadoutX, y + 12, buf, ink_fg, ink_bg);
+    char utc_buf[20];
+    FormatRtc(t, utc_buf);
+    FramebufferDrawString(cx + kReadoutX, y, "UTC:  ", ink_fg, ink_bg);
+    FramebufferDrawString(cx + kReadoutX + 8 * 6, y, utc_buf, ink_fg, ink_bg);
+    y += 12;
 
-    // Users readout — shows the live account table + the
-    // currently signed-in identity. Read-only; mutations stay
-    // shell-command driven (`useradd`, `passwd`) until a
-    // text-input widget lands.
-    y += 30;
+    const i32 off_min = duetos::time::TimezoneOffsetMinutes();
+    arch::RtcTime local = t;
+    {
+        i32 total_min = static_cast<i32>(local.hour) * 60 + static_cast<i32>(local.minute) + off_min;
+        while (total_min < 0)
+        {
+            total_min += 1440;
+        }
+        while (total_min >= 1440)
+        {
+            total_min -= 1440;
+        }
+        local.hour = static_cast<u8>(total_min / 60);
+        local.minute = static_cast<u8>(total_min % 60);
+    }
+    char local_buf[20];
+    FormatRtc(local, local_buf);
+    FramebufferDrawString(cx + kReadoutX, y, "LOCAL:", ink_fg, ink_bg);
+    FramebufferDrawString(cx + kReadoutX + 8 * 6, y, local_buf, ink_fg, ink_bg);
+    y += 12;
+
+    char tz[12] = {'T', 'Z', ':', ' ', ' ', ' ', '+', '0', '0', ':', '0', 0};
+    {
+        i32 m = off_min;
+        if (m < 0)
+        {
+            tz[6] = '-';
+            m = -m;
+        }
+        const u32 hh = static_cast<u32>(m) / 60;
+        const u32 mm = static_cast<u32>(m) % 60;
+        tz[7] = Digit(hh / 10);
+        tz[8] = Digit(hh % 10);
+        tz[10] = Digit(mm / 10);
+        // Append trailing minute digit, terminate.
+        char buf[14];
+        for (u32 i = 0; i < 11; ++i)
+        {
+            buf[i] = tz[i];
+        }
+        buf[11] = Digit(mm % 10);
+        buf[12] = '\0';
+        FramebufferDrawString(cx + kReadoutX, y, buf, ink_fg, ink_bg);
+    }
+    y += 16;
+
+    // Users readout — shows the live account table + the currently
+    // signed-in identity. Read-only.
     FramebufferDrawString(cx + kReadoutX, y, "USERS:", ink_fg, ink_bg);
     const u32 count = duetos::core::AuthAccountCount();
     for (u32 i = 0; i < count && i < 4; ++i)
