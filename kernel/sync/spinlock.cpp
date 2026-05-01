@@ -167,11 +167,20 @@ void SpinLockRelease(SpinLock& lock, IrqFlags flags)
 {
     if (lock.locked == 0)
     {
-        PanicSpinlock("SpinLockRelease on unheld lock");
+        // Caller-side bug. Debug: panic. Release: log and return
+        // without touching the lock or IRQ state — the lock is
+        // already free, so no-op is the correct recovery.
+        core::DebugPanicOrWarn("sync/spinlock", "SpinLockRelease on unheld lock");
+        return;
     }
     if (lock.owner_cpu != cpu::CurrentCpuIdOrBsp())
     {
-        PanicSpinlock("SpinLockRelease by wrong CPU");
+        // Same recovery shape: another CPU still owns the lock,
+        // so don't flip its `locked`/`owner_cpu` bits from under
+        // it. Letting the buggy releaser silently fail is safer
+        // than corrupting the rightful holder's view.
+        core::DebugPanicOrWarn("sync/spinlock", "SpinLockRelease by wrong CPU");
+        return;
     }
 
     // Pop from lockdep held-class stack BEFORE the lock word goes
@@ -196,11 +205,18 @@ void SpinLockAssertHeld(const SpinLock& lock)
 {
     if (lock.locked == 0)
     {
-        PanicSpinlock("SpinLockAssertHeld on unheld lock");
+        // Pure assertion. Debug: panic so the violated invariant
+        // is impossible to miss. Release: log it and return — the
+        // assertion was just a sanity check and the caller is
+        // about to try to use the lock anyway, which will surface
+        // any consequence.
+        core::DebugPanicOrWarn("sync/spinlock", "SpinLockAssertHeld on unheld lock");
+        return;
     }
     if (lock.owner_cpu != cpu::CurrentCpuIdOrBsp())
     {
-        PanicSpinlock("SpinLockAssertHeld on lock held by another CPU");
+        core::DebugPanicOrWarn("sync/spinlock", "SpinLockAssertHeld on lock held by another CPU");
+        return;
     }
 }
 

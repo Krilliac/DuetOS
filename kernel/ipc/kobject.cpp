@@ -66,11 +66,18 @@ void KObjectInit(KObject* obj, KObjectType type, KObjectDestroyFn destroy)
 {
     if (obj == nullptr)
     {
-        PanicKObj("KObjectInit on null");
+        // Caller passed a null kobject. Debug: panic so the bug
+        // surfaces. Release: log and refuse — leaving obj null
+        // means the caller's later dereference will fault loudly
+        // anyway, which is no worse than the original panic and
+        // doesn't take the rest of the kernel down.
+        core::DebugPanicOrWarn("ipc/kobject", "KObjectInit on null");
+        return;
     }
     if (type == KObjectType::Invalid)
     {
-        PanicKObj("KObjectInit with KObjectType::Invalid");
+        core::DebugPanicOrWarn("ipc/kobject", "KObjectInit with KObjectType::Invalid");
+        return;
     }
     obj->type = type;
     obj->refcount = 1;
@@ -81,12 +88,18 @@ void KObjectAcquire(KObject* obj)
 {
     if (obj == nullptr)
     {
-        PanicKObj("KObjectAcquire on null");
+        core::DebugPanicOrWarn("ipc/kobject", "KObjectAcquire on null");
+        return;
     }
     sync::SpinLockGuard guard(g_kobject_lock);
     if (obj->refcount == 0)
     {
-        PanicKObj("KObjectAcquire on dead object (refcount already 0)");
+        // Use-after-free shape: object is on its way out, caller
+        // raced. Release: refuse the bump rather than resurrect a
+        // destroyed object. The guard's destructor unwinds the
+        // spinlock on early return.
+        core::DebugPanicOrWarn("ipc/kobject", "KObjectAcquire on dead object (refcount already 0)");
+        return;
     }
     ++obj->refcount;
 }
@@ -104,7 +117,12 @@ void KObjectRelease(KObject* obj)
         sync::SpinLockGuard guard(g_kobject_lock);
         if (obj->refcount == 0)
         {
-            PanicKObj("KObjectRelease on dead object (double-free?)");
+            // Double-release. Debug: panic. Release: log and
+            // return — touching `refcount` here would underflow
+            // the counter and turn a one-time bug into permanent
+            // miscount.
+            core::DebugPanicOrWarn("ipc/kobject", "KObjectRelease on dead object (double-free?)");
+            return;
         }
         --obj->refcount;
         reached_zero = (obj->refcount == 0);

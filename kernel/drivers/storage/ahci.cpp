@@ -548,7 +548,11 @@ void BringUpController(const pci::Device& dev, u32 ctrl_idx)
     void* mmio = mm::MapMmio(bar5.address, bar5.size);
     if (mmio == nullptr)
     {
-        core::Panic("drivers/ahci", "MapMmio failed for HBA window");
+        // Debug: panic. Release: log and skip this controller —
+        // matches the "BAR5 missing" early-return above and lets
+        // the rest of the storage subsystem keep enumerating.
+        core::DebugPanicOrWarn("drivers/ahci", "MapMmio failed for HBA window");
+        return;
     }
     auto* hba = static_cast<volatile u8*>(mmio);
 

@@ -86,6 +86,88 @@ unwind that state first (e.g. `MutexUnlock` before
 | `kernel/drivers/pci/pci.cpp:325` (`PciMsixUnmaskEntry` OOB index) | log + value; refuse the write |
 | `kernel/drivers/pci/pci.cpp:336` (`PciMsixEnable` on non-MSI-X device) | log; refuse — driver can fall back |
 
+## Third pass (2026-05-01) — thread-entry, kobject, spinlock contracts, MMIO mapping, SMP boot
+
+20 more sites broken into five families:
+
+### Ring-3 thread-entry invariants (debug-panic + release-SchedExit)
+
+`Ring3ThreadEntry` and `LinuxCloneEntry` are
+`[[noreturn]]`-tagged kernel-side trampolines that prepare ring-3
+state and then `iretq` into user mode. The two preconditions they
+panic on (`SchedCurrentKernelStackTop()` returning 0 and a null
+descriptor pointer) are programming errors in the front-end.
+
+The new shape pairs `DebugPanicOrWarn` with a follow-up
+`sched::SchedExit()` (which is itself `[[noreturn]]`):
+
+```cpp
+if (kstack_top == 0)
+{
+    core::DebugPanicOrWarn("win32/thread", "...");
+    if (arg != nullptr) mm::KFree(arg);  // dead code in debug
+    sched::SchedExit();
+}
+```
+
+Debug builds halt at the panic; release builds free the
+heap-allocated descriptor (avoiding a per-call leak) and route
+just this task to the reaper. The function's `[[noreturn]]`
+contract holds in both flavors because exactly one of `Panic` or
+`SchedExit` is reachable.
+
+| Site | Recovery shape in release |
+|------|---------------------------|
+| `kernel/subsystems/win32/thread_syscall.cpp:48` (kstack_top==0) | KFree(arg); SchedExit |
+| `kernel/subsystems/win32/thread_syscall.cpp:54` (arg==null) | SchedExit |
+| `kernel/subsystems/linux/syscall_clone.cpp:84` (kstack_top==0) | KFree(arg); SchedExit |
+| `kernel/subsystems/linux/syscall_clone.cpp:89` (arg==null) | SchedExit |
+
+### KObject contract violations
+
+| Site | Recovery shape in release |
+|------|---------------------------|
+| `kernel/ipc/kobject.cpp:69` (`KObjectInit` on null) | log; refuse |
+| `kernel/ipc/kobject.cpp:73` (`KObjectInit` with `Invalid`) | log; refuse |
+| `kernel/ipc/kobject.cpp:84` (`KObjectAcquire` on null) | log; refuse |
+| `kernel/ipc/kobject.cpp:89` (acquire on dead object) | log; SpinLockGuard unwinds; refuse |
+| `kernel/ipc/kobject.cpp:107` (release on dead object) | log; SpinLockGuard unwinds; refuse |
+
+### Spinlock contract violations
+
+| Site | Recovery shape in release |
+|------|---------------------------|
+| `kernel/sync/spinlock.cpp:170` (`Release` on unheld lock) | log; return without touching IRQ state or lock |
+| `kernel/sync/spinlock.cpp:174` (`Release` by wrong CPU) | log; return without touching the rightful holder's view |
+| `kernel/sync/spinlock.cpp:199` (`AssertHeld` on unheld) | log; return |
+| `kernel/sync/spinlock.cpp:203` (`AssertHeld` on lock owned by another CPU) | log; return |
+
+### Driver MMIO mapping failures
+
+These were boot-fatal-on-this-driver but never boot-fatal for the
+kernel as a whole — the affected device just becomes unusable.
+Each file already had a parallel "no BAR" early-return path with
+the same release shape; the conversions match it.
+
+| Site | Recovery shape in release |
+|------|---------------------------|
+| `kernel/drivers/storage/nvme.cpp:938` (`MapMmio` failed for BAR0) | log; return — controller skipped |
+| `kernel/drivers/storage/ahci.cpp:551` (`MapMmio` failed for HBA window) | log; return — controller skipped |
+| `kernel/arch/x86_64/hpet.cpp:52` (`MapMmio` failed for HPET block) | log; leave g_mmio null; timekeeper falls back to LAPIC |
+| `kernel/arch/x86_64/hpet.cpp:65` (32-bit HPET counter unsupported) | log; clear g_mmio; same LAPIC fallback path |
+
+### SMP boot — degraded-mode fallback
+
+| Site | Recovery shape in release |
+|------|---------------------------|
+| `kernel/arch/x86_64/smp.cpp:251` (trampoline image > 4 KiB) | log; return 0 — BSP runs uniprocessor |
+| `kernel/arch/x86_64/smp.cpp:294` (KMalloc failed for AP PerCpu) | log; `continue` — skip this AP, try the next |
+| `kernel/arch/x86_64/smp.cpp:328` (KMalloc failed for AP stack) | log; KFree the just-allocated PerCpu; `continue` |
+
+These all predate fault-domain isolation, so the user-visible
+recovery is "fewer cores online" — exactly what a hardware AP
+no-show would already produce.
+
 ## Second pass (2026-05-01) — scheduler primitive contract violations
 
 `PanicSched` was used for two different things: real boot-time
@@ -127,13 +209,18 @@ obvious.
   were converted to `DebugPanicOrWarn` in the second pass above —
   they sit between explicit `arch::Cli()` / `arch::Sti()` so each
   release-path return needs an explicit `Sti()`.
-- **`LinuxCloneEntry` / `Ring3ThreadEntry` invariants** — the
-  fail-paths run on a fresh kernel stack at task entry; the only
-  sane release recovery is "exit this task back to scheduler",
-  which is more involved than a return. Left as hard panics.
+- **`LinuxCloneEntry` / `Ring3ThreadEntry` invariants** —
+  converted in the third pass (above) by pairing
+  `DebugPanicOrWarn` with a follow-up `sched::SchedExit()` so the
+  function's `[[noreturn]]` contract holds in both flavors.
 
-These are good follow-up targets for a v1 pass once the v0 helper
-has burned in.
+What stays as hard `Panic` deliberately:
+- Heap / frame-allocator / page-table corruption.
+- Stack-canary mismatch (real overflow).
+- ACPI table parse / signature / checksum failures.
+- LAPIC / IOAPIC init failures (kernel cannot run without them).
+- Trap-frame state the kernel can't represent (kstack overflow).
+- SeqLock writer-leak invariants (continuing produces torn reads).
 
 ## Test surface
 
@@ -149,15 +236,22 @@ has burned in.
 
 > Continue the "soften release-build panics" work. The
 > `DebugPanicOrWarn` / `DebugPanicOrWarnWithValue` helpers are in
-> `kernel/core/panic.{h,cpp}`. 14 sites converted across two
-> passes (initial 11 caller-bug invariants + scheduler
-> Mutex/Condvar contract violations) — see the tables in this
-> file. Next candidates: the `Linux/Win32` thread-entry
-> invariants (`subsystems/linux/syscall_clone.cpp:84,89`,
-> `subsystems/win32/thread_syscall.cpp:49,54`) — they need a
-> "task-exits-back-to-scheduler" recovery shape that doesn't yet
-> exist, so they stay hard-panic until that lands. Boot-time
-> `PanicSched` OOM failures need a `Result<T,E>` return-type
-> refactor on `SchedCreate` before they can soften. Self-test
-> panics deliberately stay as-is — they're dead code in release
-> via `DUETOS_BOOT_SELFTEST(call)`.
+> `kernel/core/panic.{h,cpp}`. 34 sites converted across three
+> passes — see the tables in this file for the full inventory.
+>
+> What's left to triage:
+> - Boot-time `PanicSched` OOM (`sched.cpp:598/655/671/935`) —
+>   needs `SchedCreate` to return `Result<T,E>` first.
+> - `SeqLock` invariant violations (`sync/seqlock.cpp:77,98`) —
+>   continuing past these can produce torn reads, so they need a
+>   different recovery shape (perhaps "drop the seqlock-protected
+>   subsystem entirely").
+> - `arch/x86_64/smp.cpp:92` (IPI delivery-status bit stuck) —
+>   wedge-during-AP-bringup; recovery is unclear without
+>   per-AP-IPI tracking.
+>
+> Deliberately untouched: heap / frame-allocator / page-table
+> corruption (KEEP); ACPI table parse failures (KEEP — fundamental
+> firmware data); LAPIC / IOAPIC init (KEEP — kernel cannot run
+> without them); `*SelfTest` panics (already dead code in release
+> via `DUETOS_BOOT_SELFTEST(call)`).

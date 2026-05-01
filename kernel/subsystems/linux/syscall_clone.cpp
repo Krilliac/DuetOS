@@ -81,12 +81,26 @@ struct LinuxCloneDesc
     // before iretq.
     const u64 kstack_top = sched::SchedCurrentKernelStackTop();
     if (kstack_top == 0)
-        ::duetos::core::Panic("linux/clone", "SchedCurrentKernelStackTop returned 0");
+    {
+        // See win32 Ring3ThreadEntry for the rationale: debug
+        // hard-panics; release frees the descriptor and routes
+        // this single task to SchedExit, leaving the rest of the
+        // kernel running.
+        ::duetos::core::DebugPanicOrWarn("linux/clone", "SchedCurrentKernelStackTop returned 0");
+        if (arg != nullptr)
+        {
+            mm::KFree(arg);
+        }
+        sched::SchedExit();
+    }
     arch::TssSetRsp0(kstack_top);
     cpu::CurrentCpu()->kernel_rsp = kstack_top;
 
     if (arg == nullptr)
-        ::duetos::core::Panic("linux/clone", "LinuxCloneEntry called with null desc");
+    {
+        ::duetos::core::DebugPanicOrWarn("linux/clone", "LinuxCloneEntry called with null desc");
+        sched::SchedExit();
+    }
 
     LinuxCloneDesc d = *static_cast<LinuxCloneDesc*>(arg);
     mm::KFree(arg);

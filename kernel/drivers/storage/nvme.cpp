@@ -935,7 +935,11 @@ void NvmeInit()
     void* mmio = mm::MapMmio(bar0.address, bar0.size);
     if (mmio == nullptr)
     {
-        core::Panic("drivers/nvme", "MapMmio failed for BAR0");
+        // Debug: panic. Release: log and skip this controller —
+        // the NVMe device just won't be available; storage on
+        // other buses (AHCI, USB MSC) keeps working.
+        core::DebugPanicOrWarn("drivers/nvme", "MapMmio failed for BAR0");
+        return;
     }
     g_ctrl.mmio = static_cast<volatile u8*>(mmio);
 
