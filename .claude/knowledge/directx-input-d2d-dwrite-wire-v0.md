@@ -1,10 +1,12 @@
 # DirectX gap-fill v0 — DirectInput → real input, D2D1 geometry, DWrite metrics
 
-**Last updated:** 2026-04-30
+**Last updated:** 2026-05-01
 **Type:** Observation + Pattern
 **Status:** Active — wires three of the documented gap items from
 `directx-v0.md` so DI/D2D/DWrite-using PEs see live input + drawn
 geometry + nonzero text dimensions instead of zero-filled stubs.
+Three of the six original known limits closed in the 2026-05-01
+follow-up below; three still open.
 
 ## Scope
 
@@ -114,16 +116,6 @@ grub-efi-amd64-bin xorriso mtools ovmf`.
   has its own buffered queue (DIPROP_BUFFERSIZE) — we still report
   zero buffered events from `GetDeviceData`, so apps that gate on
   buffered events instead of state polling won't see input.
-- **DI mouse delta = poll-to-poll cursor delta.** When the OS
-  warps the cursor (e.g. DI_DEVMODE_FOREGROUND with
-  CONFINE_TO_WINDOW), the next poll's delta is the warp distance,
-  not the user motion. Fix: kernel-side accumulating delta counter
-  + reset-on-poll. Out of scope for v0.
-- **DI mouse wheel is always 0.** SYS_WIN_GET_KEYSTATE has no
-  wheel surface; we'd need a separate accumulating wheel counter.
-- **D2D1 stroke width is ignored.** Real D2D1 has variable-width
-  strokes + style objects (dash, line cap, miter limit). We always
-  paint 1px solid.
 - **D2D1 antialiasing.** All draws are nearest-pixel; D2D1 spec
   default is per-primitive AA. Real AA wants edge coverage
   evaluation.
@@ -131,6 +123,32 @@ grub-efi-amd64-bin xorriso mtools ovmf`.
   requires per-glyph advance from a font file. The 0.6×fs factor
   is reasonable for monospace at common sizes (10-16pt) but very
   off for proportional fonts or unusual sizes.
+
+### Closed in 2026-05-01 follow-up (commit 281fbca)
+
+- ~~**DI mouse delta = poll-to-poll cursor delta.**~~ Closed:
+  added `SYS_WIN_GET_MOUSE_DELTA = 170` + a kernel-side
+  accumulator (`MouseInputAccumulate` in
+  `kernel/subsystems/win32/window_syscall.cpp`). The mouse
+  reader thread feeds raw per-packet `dx`/`dy` into the
+  accumulator before any compositor warp; dinput8's
+  `GetDeviceState` mouse path drains it on read. Programmatic
+  `SetCursor` warps no longer corrupt the next reported delta.
+- ~~**DI mouse wheel is always 0.**~~ Closed: same accumulator
+  carries a third axis (`dz`). PS/2 always contributes 0
+  (no wheel byte by design); xHCI HID mouse path can inject
+  wheel ticks once that path is wired without further DI
+  changes.
+- ~~**D2D1 stroke width is ignored.**~~ Closed: new
+  `plot_stamp(bb, x, y, hw, packed)` helper paints a
+  (2*hw+1)² square per Bresenham step. `stroke_half_width(f)`
+  rounds the float pixel width to nearest int. `DrawLine` /
+  `DrawRectangle` / `DrawEllipse` all wired through.
+  Ellipse outline computed as the band between an inner and
+  outer integer ellipse so wide strokes paint a true band
+  (not a fat-sigil approximation). Style objects (dash,
+  cap, miter) still ignored — none of the smoke apps exercise
+  them.
 
 ## Pattern reused
 
