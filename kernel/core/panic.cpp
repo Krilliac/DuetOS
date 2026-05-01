@@ -13,6 +13,7 @@
 #include "diag/soft_lockup.h"
 #include "diag/hexdump.h"
 #include "log/klog.h"
+#include "util/build_config.h"
 #include "util/symbols.h"
 
 /*
@@ -514,6 +515,30 @@ void PanicWithValue(const char* subsystem, const char* message, u64 value)
     EndCrashDump();
     arch::SerialWrite("[panic] CPU halted — no recovery.\n");
     arch::Halt();
+}
+
+void DebugPanicOrWarn(const char* subsystem, const char* message)
+{
+    if constexpr (kIsDebugBuild)
+    {
+        Panic(subsystem, message);
+    }
+    else
+    {
+        Log(LogLevel::Error, subsystem, message);
+    }
+}
+
+void DebugPanicOrWarnWithValue(const char* subsystem, const char* message, u64 value)
+{
+    if constexpr (kIsDebugBuild)
+    {
+        PanicWithValue(subsystem, message, value);
+    }
+    else
+    {
+        LogWithValue(LogLevel::Error, subsystem, message, value);
+    }
 }
 
 } // namespace duetos::core

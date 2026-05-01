@@ -103,13 +103,19 @@ void HeldLocksPop(SpinLock& lock)
         if (p->held_locks[new_count] != &lock)
         {
             // Lock is being released out of acquire order — common
-            // root cause of mysterious deadlocks later. Surface it
-            // immediately, before more state piles up.
-            core::PanicWithValue("sync/spinlock", "release out-of-order: top-of-stack lock != released lock",
-                                 reinterpret_cast<u64>(&lock));
+            // root cause of mysterious deadlocks later. Debug builds
+            // panic so the offender is impossible to miss; release
+            // builds log the violation and skip zeroing the wrong
+            // slot (so its tracking stays as-is for the still-held
+            // lock that owns it) but still pop the count below.
+            core::DebugPanicOrWarnWithValue("sync/spinlock", "release out-of-order: top-of-stack lock != released lock",
+                                            reinterpret_cast<u64>(&lock));
         }
-        p->held_locks[new_count] = nullptr;
-        p->held_lock_rips[new_count] = 0;
+        else
+        {
+            p->held_locks[new_count] = nullptr;
+            p->held_lock_rips[new_count] = 0;
+        }
     }
     p->held_locks_count = new_count;
 }

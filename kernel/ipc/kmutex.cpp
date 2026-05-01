@@ -40,10 +40,14 @@ void KMutexDestroy(KObject* obj)
     if (m->recursion != 0 || m->owner != nullptr)
     {
         // Reaching refcount=0 with the lock still held means an
-        // ABI front-end leaked a release. Hard panic — the v0
-        // policy is "fail loud at the moment of the bug" rather
-        // than "limp along with a corrupted lock".
-        core::Panic("ipc/kmutex", "destroy on still-held mutex");
+        // ABI front-end leaked a release. Debug builds panic so
+        // the leak surfaces at the moment of the bug. Release
+        // builds log and leak the mutex memory rather than free
+        // it from under a thread that still believes it owns the
+        // lock — a one-time leak is recoverable; a use-after-free
+        // is not.
+        core::DebugPanicOrWarn("ipc/kmutex", "destroy on still-held mutex");
+        return;
     }
     duetos::mm::KFree(m);
 }
@@ -85,11 +89,19 @@ void KMutexRelease(KMutex* m)
     sched::Task* me = sched::CurrentTask();
     if (m->owner != me)
     {
-        core::Panic("ipc/kmutex", "release by non-owner");
+        // Debug: panic; release: log and refuse. Decrementing
+        // recursion or clearing owner here would corrupt the
+        // lock state visible to the real owner.
+        core::DebugPanicOrWarn("ipc/kmutex", "release by non-owner");
+        return;
     }
     if (m->recursion == 0)
     {
-        core::Panic("ipc/kmutex", "release on already-released mutex");
+        // Same shape — a double-release in a release build is
+        // ignored rather than allowed to wrap the recursion
+        // counter into a wedged state.
+        core::DebugPanicOrWarn("ipc/kmutex", "release on already-released mutex");
+        return;
     }
     --m->recursion;
     if (m->recursion > 0)
