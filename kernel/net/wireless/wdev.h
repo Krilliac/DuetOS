@@ -154,9 +154,15 @@ struct WirelessDeviceOps
     /// encrypt outgoing data with TK and decrypt RX with the GTK.
     ::duetos::core::Result<void> (*InstallKey)(WirelessDevice* wdev, const WirelessKeyInstallRequest& req);
 
-    /// Transmit a raw 802.11 management frame (auth / assoc req /
-    /// EAPOL inside a data frame). Driver returns Ok when queued.
+    /// Transmit a raw 802.11 management frame (auth / assoc req).
+    /// Driver returns Ok when queued.
     ::duetos::core::Result<void> (*SendMgmtFrame)(WirelessDevice* wdev, const u8* frame, u32 frame_len, u8 channel);
+
+    /// Transmit an EAPOL frame on the data path (used for M2 / M4
+    /// of the 4-way handshake). The kernel passes the EAPOL bytes
+    /// only — the driver wraps them in an 802.3 / 802.11 data
+    /// frame as appropriate for the chip.
+    ::duetos::core::Result<void> (*SendEapolFrame)(WirelessDevice* wdev, const u8* eapol_frame, u32 frame_len);
 };
 
 struct WirelessDevice
@@ -196,7 +202,7 @@ struct WirelessDevice
     u32 wdev_id;
 };
 
-inline constexpr u32 kWdevMaxDevices = 4;
+inline constexpr u32 kWdevMaxDevices = 8;
 
 ::duetos::core::Result<u32> WirelessDeviceRegister(const WirelessDevice& proto);
 WirelessDevice* WirelessDeviceById(u32 id);

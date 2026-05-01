@@ -155,11 +155,40 @@ WirelessDevice* WirelessDeviceAt(u32 index)
     if (wdev == nullptr || f.frame == nullptr)
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
     diag::RecordOk(diag::Layer::Eapol, "eapol-rx", f.frame_len, f.channel, wdev->wdev_id);
+    const FourWayState state_before = wdev->fw.state;
     auto pr = FourWayProcessIncoming(wdev->fw, f.frame, f.frame_len);
     if (!pr.has_value())
     {
         diag::RecordErr(diag::Layer::Eapol, "eapol-rx-err", static_cast<u32>(pr.error()), 0, 0, 0);
         return pr;
+    }
+
+    // After processing M1 (state advanced to AwaitingM3) the
+    // supplicant must build + transmit M2 to keep the handshake
+    // moving. Without this, the AP retransmits M1 forever and
+    // the handshake stalls.
+    if (state_before == FourWayState::AwaitingM1 && wdev->fw.state == FourWayState::AwaitingM3 &&
+        wdev->ops.SendEapolFrame != nullptr)
+    {
+        u8 m2[512];
+        u32 m2_len = 0;
+        // Caller (MLME) is expected to have stashed an RSN IE for
+        // us to include. v0 builds the default WPA2-PSK RSN IE.
+        const u8 rsn[22] = {0x30, 0x14, 0x01, 0x00, 0x00, 0x0F, 0xAC, 0x04, 0x01, 0x00, 0x00,
+                            0x0F, 0xAC, 0x04, 0x01, 0x00, 0x00, 0x0F, 0xAC, 0x02, 0x00, 0x00};
+        auto br = FourWayBuildOutgoing(wdev->fw, rsn, sizeof(rsn), m2, sizeof(m2), &m2_len);
+        if (!br.has_value())
+        {
+            diag::RecordErr(diag::Layer::Eapol, "m2-build-err", static_cast<u32>(br.error()), 0, 0, 0);
+            return br;
+        }
+        diag::RecordOk(diag::Layer::Eapol, "m2-tx", m2_len, 0, wdev->wdev_id);
+        auto sr = wdev->ops.SendEapolFrame(wdev, m2, m2_len);
+        if (!sr.has_value())
+        {
+            diag::RecordErr(diag::Layer::Eapol, "m2-tx-err", static_cast<u32>(sr.error()), 0, 0, 0);
+            return sr;
+        }
     }
 
     // After M3 the supplicant has the PTK. Install the keys via
@@ -205,6 +234,35 @@ WirelessDevice* WirelessDeviceAt(u32 index)
                 diag::RecordOk(diag::Layer::KeyMgmt, "gtk-installed", gk.key_len, gk.key_index, wdev->wdev_id);
             }
         }
+    }
+    // After processing M3 + installing keys, build and TX M4 to
+    // ack the handshake to the AP. Then transition to Established
+    // and Connected.
+    if (state_before == FourWayState::AwaitingM3 && wdev->fw.state == FourWayState::AwaitingM4Ack &&
+        wdev->ops.SendEapolFrame != nullptr)
+    {
+        u8 m4[256];
+        u32 m4_len = 0;
+        auto br = FourWayBuildOutgoing(wdev->fw, nullptr, 0, m4, sizeof(m4), &m4_len);
+        if (!br.has_value())
+        {
+            diag::RecordErr(diag::Layer::Eapol, "m4-build-err", static_cast<u32>(br.error()), 0, 0, 0);
+            return br;
+        }
+        diag::RecordOk(diag::Layer::Eapol, "m4-tx", m4_len, 0, wdev->wdev_id);
+        auto sr = wdev->ops.SendEapolFrame(wdev, m4, m4_len);
+        if (!sr.has_value())
+        {
+            diag::RecordErr(diag::Layer::Eapol, "m4-tx-err", static_cast<u32>(sr.error()), 0, 0, 0);
+            return sr;
+        }
+        // Transition the supplicant's view to Established. The
+        // 4-way state machine itself only flips to Established
+        // when the AP-side ack arrives over the air; in v0 the
+        // STA decides locally that M4 having been TX'd is enough
+        // because there's no explicit ack signal back from the AP.
+        wdev->fw.state = FourWayState::Established;
+        WirelessSetState(wdev, WirelessOpState::Connected);
     }
     if (wdev->fw.state == FourWayState::Established)
         WirelessSetState(wdev, WirelessOpState::Connected);

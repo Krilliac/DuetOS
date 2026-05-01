@@ -86,18 +86,54 @@ void WpaPmkDerive(const char* passphrase, const char* ssid, u32 ssid_len, u8 out
 
 void Pbkdf2SelfTest()
 {
-    // IEEE 802.11i Annex H.4 / RFC 7616 cross-vector:
-    //   passphrase = "password", SSID = "IEEE", 4096 iter, 32 bytes:
-    //   F4 2C 6F C5 2D F0 EB EF 9E BB 4B 90 B3 8A 5F 90
-    //   2E 83 FE 1B 13 5A 70 E2 3A AB 11 E4 D2 80 18 70
+    // RFC 6070 vector 1 — easiest first because c=1 means only
+    // one HMAC call per output block.
+    //   P = "password", S = "salt", c = 1, dkLen = 20:
+    //   0c60c80f961f0e71f3a9b524af6012062fe037a6
+    {
+        u8 dk[20];
+        Pbkdf2HmacSha1(reinterpret_cast<const u8*>("password"), 8, reinterpret_cast<const u8*>("salt"), 4, 1, dk, 20);
+        const u8 want[20] = {0x0C, 0x60, 0xC8, 0x0F, 0x96, 0x1F, 0x0E, 0x71, 0xF3, 0xA9,
+                             0xB5, 0x24, 0xAF, 0x60, 0x12, 0x06, 0x2F, 0xE0, 0x37, 0xA6};
+        for (u32 i = 0; i < 20; ++i)
+            KASSERT_WITH_VALUE(dk[i] == want[i], "net/wireless/crypto/pbkdf2", "RFC 6070 #1 mismatch", dk[i]);
+    }
+    // RFC 6070 vector 2 — c=2, exercises the iteration loop.
+    //   P = "password", S = "salt", c = 2, dkLen = 20:
+    //   ea6c014dc72d6f8ccd1ed92ace1d41f0d8de8957
+    {
+        u8 dk[20];
+        Pbkdf2HmacSha1(reinterpret_cast<const u8*>("password"), 8, reinterpret_cast<const u8*>("salt"), 4, 2, dk, 20);
+        const u8 want[20] = {0xEA, 0x6C, 0x01, 0x4D, 0xC7, 0x2D, 0x6F, 0x8C, 0xCD, 0x1E,
+                             0xD9, 0x2A, 0xCE, 0x1D, 0x41, 0xF0, 0xD8, 0xDE, 0x89, 0x57};
+        for (u32 i = 0; i < 20; ++i)
+            KASSERT_WITH_VALUE(dk[i] == want[i], "net/wireless/crypto/pbkdf2", "RFC 6070 #2 mismatch", dk[i]);
+    }
+    // RFC 6070 vector 4 — c=4096, single-block. Isolates
+    // iteration-count correctness from multi-block correctness.
+    //   P = "password", S = "salt", c = 4096, dkLen = 20:
+    //   4b007901b765489abead49d926f721d065a429c1
+    {
+        u8 dk[20];
+        Pbkdf2HmacSha1(reinterpret_cast<const u8*>("password"), 8, reinterpret_cast<const u8*>("salt"), 4, 4096, dk,
+                       20);
+        const u8 want[20] = {0x4B, 0x00, 0x79, 0x01, 0xB7, 0x65, 0x48, 0x9A, 0xBE, 0xAD,
+                             0x49, 0xD9, 0x26, 0xF7, 0x21, 0xD0, 0x65, 0xA4, 0x29, 0xC1};
+        for (u32 i = 0; i < 20; ++i)
+            KASSERT_WITH_VALUE(dk[i] == want[i], "net/wireless/crypto/pbkdf2", "RFC 6070 #4 mismatch", dk[i]);
+    }
+    // PBKDF2-HMAC-SHA1("password", "IEEE", 4096, 32) — verified
+    // against Python's hashlib.pbkdf2_hmac (independent reference):
+    //   f42c6fc52df0ebef9ebb4b90b38a5f902e83fe1b135a70e23aed762e9710a12e
     {
         u8 pmk[32];
         WpaPmkDerive("password", "IEEE", 4u, pmk);
         const u8 want[32] = {0xF4, 0x2C, 0x6F, 0xC5, 0x2D, 0xF0, 0xEB, 0xEF, 0x9E, 0xBB, 0x4B,
                              0x90, 0xB3, 0x8A, 0x5F, 0x90, 0x2E, 0x83, 0xFE, 0x1B, 0x13, 0x5A,
-                             0x70, 0xE2, 0x3A, 0xAB, 0x11, 0xE4, 0xD2, 0x80, 0x18, 0x70};
+                             0x70, 0xE2, 0x3A, 0xED, 0x76, 0x2E, 0x97, 0x10, 0xA1, 0x2E};
         for (u32 i = 0; i < 32; ++i)
-            KASSERT(pmk[i] == want[i], "net/wireless/crypto/pbkdf2", "PBKDF2-WPA \"password\"/IEEE KAT mismatch");
+            KASSERT_WITH_VALUE(pmk[i] == want[i], "net/wireless/crypto/pbkdf2",
+                               "PBKDF2-WPA \"password\"/IEEE KAT mismatch", pmk[i]);
     }
     // Second IEEE 802.11i vector:
     //   passphrase = "ThisIsAPassword", SSID = "ThisIsASSID", 4096 iter:

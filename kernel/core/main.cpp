@@ -86,6 +86,7 @@
 #include "net/wireless/eapol.h"
 #include "net/wireless/fourway.h"
 #include "net/wireless/mlme.h"
+#include "net/wireless/test/wireless_e2e_test.h"
 #include "net/wireless/wdev.h"
 #include "net/wireless/wifi_diag.h"
 #include "drivers/pci/pci.h"
@@ -1788,6 +1789,11 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::IwlRingsSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::RtlUploadSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::BcmUploadSelfTest());
+    // End-to-end loopback self-test exercises the entire control
+    // tier (scan + auth + assoc + 4-way handshake) against a
+    // software FakeAp peer + LoopbackDriver. Equivalent to
+    // Linux's `mac80211_hwsim` for our stack.
+    DUETOS_BOOT_SELFTEST(duetos::net::wireless::test::WirelessE2ESelfTest());
 
     SerialWrite("[boot] Detecting NICs.\n");
     duetos::drivers::net::NetInit();
