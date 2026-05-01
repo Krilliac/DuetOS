@@ -194,21 +194,30 @@ void DoThreadCreate(arch::TrapFrame* frame)
     }
     proc->thread_stack_cursor += stack_pages * mm::kPageSize;
     const u64 stack_top = stack_base_va + stack_pages * mm::kPageSize;
-    // Microsoft x64 ABI: rsp % 16 == 8 on function entry. The
-    // iretq into ring-3 doesn't push a return address, so we
-    // bias rsp by -8 before entry — same pattern as the main
-    // Ring3UserEntry path.
-    const u64 user_rsp = stack_top - 8;
+    // Microsoft x64 ABI at function entry:
+    //   rsp % 16 == 8                — `call` pushed 8 bytes
+    //   [rsp]                         — return address
+    //   [rsp+8..rsp+0x28)             — 32-byte shadow space the
+    //                                   callee may freely spill
+    //                                   register args into
+    // If we set rsp = stack_top - 8 the shadow space spans
+    // [stack_top..stack_top+0x20) — entirely OUTSIDE the mapped
+    // stack page. The very first prolog instruction that touches
+    // a shadow slot (`mov [rsp+8], rcx`, etc.) takes a #PF and the
+    // task is killed before it can run, leaving the matching
+    // win32_threads slot's exit_code stuck at STILL_ACTIVE forever.
+    //
+    // Bias rsp down by 0x28 so the shadow space lands at
+    // [stack_top-0x20..stack_top), well inside the mapped page.
+    // 0x28 mod 16 == 8, so the 16n+8 alignment requirement still
+    // holds. The matching trampoline VA is planted at the new
+    // [rsp] location (page offset 0x1000-0x28 = 0xfd8) instead of
+    // the old page-end - 8 slot.
+    constexpr u64 kShadowReserve = 0x28;
+    const u64 user_rsp = stack_top - kShadowReserve;
 
-    // Plant the thread-exit trampoline VA at [user_rsp]. When the
-    // thread proc returns, `ret` pops this value into rip and the
-    // trampoline issues SYS_EXIT(retcode). Without this the thread
-    // would `ret` into rip=0 and eat a #PF. We write via the
-    // direct-map image of the top stack frame — the page isn't
-    // mapped into any AS we currently own a CR3 for, but the
-    // direct-map gives every frame a kernel-writable alias.
     auto* top_page_kva = static_cast<u8*>(mm::PhysToVirt(top_frame_phys));
-    auto* retaddr_slot = reinterpret_cast<u64*>(top_page_kva + mm::kPageSize - 8);
+    auto* retaddr_slot = reinterpret_cast<u64*>(top_page_kva + mm::kPageSize - kShadowReserve);
     *retaddr_slot = ::duetos::win32::kWin32ThreadExitTrampVa;
 
     // Build the kernel-heap ThreadDesc that Ring3ThreadEntry
