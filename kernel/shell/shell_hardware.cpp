@@ -35,6 +35,9 @@
 #include "arch/x86_64/timer.h"
 #include "time/tick.h"
 #include "drivers/gpu/bochs_vbe.h"
+#include "drivers/gpu/cea861.h"
+#include "drivers/gpu/cvt.h"
+#include "drivers/gpu/edid.h"
 #include "drivers/gpu/gpu.h"
 #include "drivers/gpu/virtio_gpu.h"
 #include "drivers/input/ps2kbd.h"
@@ -1211,6 +1214,286 @@ void CmdVbe(u32 argc, char** argv)
     {
         ConsoleWriteln("VBE: mode-set rejected (dimensions exceed max, bpp unsupported, or no BGA)");
     }
+}
+
+namespace
+{
+
+// Decode a single hex nibble. Returns 0xFF on failure.
+u8 NibbleFromHex(char c)
+{
+    if (c >= '0' && c <= '9')
+        return static_cast<u8>(c - '0');
+    if (c >= 'a' && c <= 'f')
+        return static_cast<u8>(c - 'a' + 10);
+    if (c >= 'A' && c <= 'F')
+        return static_cast<u8>(c - 'A' + 10);
+    return 0xFF;
+}
+
+// Parse a hex stream of EXACTLY 256 hex digits (whitespace + colons
+// allowed) into 128 bytes. Returns false on any malformed digit or
+// short input.
+bool ParseEdidHex(const char* s, u8 out[128])
+{
+    u32 written = 0;
+    u8 hi = 0xFF;
+    while (*s != '\0' && written < 128)
+    {
+        const char c = *s++;
+        if (c == ' ' || c == '\t' || c == ':' || c == ',' || c == '\n' || c == '\r')
+            continue;
+        const u8 nib = NibbleFromHex(c);
+        if (nib == 0xFF)
+            return false;
+        if (hi == 0xFF)
+        {
+            hi = nib;
+        }
+        else
+        {
+            out[written++] = static_cast<u8>((hi << 4) | nib);
+            hi = 0xFF;
+        }
+    }
+    return written == 128 && hi == 0xFF;
+}
+
+void RunSyntheticDump()
+{
+    // Build the same 1080p fixture the boot self-test exercises so
+    // operators can see a known-good decode without needing a real
+    // monitor wired through DDC.
+    u8 buf[128];
+    for (u32 i = 0; i < 128; ++i)
+        buf[i] = 0;
+    buf[0] = 0x00;
+    buf[1] = 0xFF;
+    buf[2] = 0xFF;
+    buf[3] = 0xFF;
+    buf[4] = 0xFF;
+    buf[5] = 0xFF;
+    buf[6] = 0xFF;
+    buf[7] = 0x00;
+    // "DEL" PnP code = 0x10AC big-endian
+    buf[8] = 0x10;
+    buf[9] = 0xAC;
+    buf[10] = 0xC4;
+    buf[11] = 0x0A;
+    buf[12] = 0x78;
+    buf[13] = 0x56;
+    buf[14] = 0x34;
+    buf[15] = 0x12;
+    buf[16] = 12;
+    buf[17] = 30;
+    buf[18] = 1;
+    buf[19] = 4;
+    buf[20] = static_cast<u8>(0x80 | (2 << 4) | 5);
+    buf[21] = 60;
+    buf[22] = 34;
+    buf[23] = 120;
+    buf[24] = 0xE0 | 0x04 | 0x02;
+    buf[35] = 0x21;
+    buf[36] = 0x08;
+    buf[38] = static_cast<u8>((1280u / 8u) - 31u);
+    buf[39] = static_cast<u8>((2u << 6) | (60 - 60));
+    for (u32 i = 1; i < 8; ++i)
+    {
+        buf[38 + i * 2] = 0x01;
+        buf[39 + i * 2] = 0x01;
+    }
+    // DTD: 1920x1080@60 — same shape as the self-test fixture.
+    const u16 px = 14850;
+    buf[54] = static_cast<u8>(px & 0xFF);
+    buf[55] = static_cast<u8>((px >> 8) & 0xFF);
+    buf[56] = 1920 & 0xFF;
+    buf[57] = 280 & 0xFF;
+    buf[58] = static_cast<u8>(((1920 >> 4) & 0xF0) | ((280 >> 8) & 0x0F));
+    buf[59] = 1080 & 0xFF;
+    buf[60] = 45 & 0xFF;
+    buf[61] = static_cast<u8>(((1080 >> 4) & 0xF0) | ((45 >> 8) & 0x0F));
+    buf[62] = 88;
+    buf[63] = 44;
+    buf[64] = static_cast<u8>(((4 & 0x0F) << 4) | (5 & 0x0F));
+    buf[65] = 0;
+    buf[66] = 600 & 0xFF;
+    buf[67] = 340 & 0xFF;
+    buf[68] = static_cast<u8>(((600 >> 4) & 0xF0) | ((340 >> 8) & 0x0F));
+    buf[69] = 0;
+    buf[70] = 0;
+    buf[71] = static_cast<u8>((3u << 3) | 0x04 | 0x02);
+    // DTD slot 1 — monitor name
+    buf[72] = 0;
+    buf[73] = 0;
+    buf[74] = 0;
+    buf[75] = 0xFC;
+    buf[76] = 0;
+    const char name[] = "DUET-DEMO-1";
+    for (u32 i = 0; i < sizeof(name) - 1; ++i)
+        buf[77 + i] = static_cast<u8>(name[i]);
+    buf[77 + sizeof(name) - 1] = 0x0A;
+    for (u32 i = 77 + sizeof(name); i < 90; ++i)
+        buf[i] = 0x20;
+    // DTD slot 2 — range limits
+    buf[90] = 0;
+    buf[91] = 0;
+    buf[92] = 0;
+    buf[93] = 0xFD;
+    buf[94] = 0;
+    buf[95] = 50;
+    buf[96] = 75;
+    buf[97] = 30;
+    buf[98] = 80;
+    buf[99] = 17;
+    buf[100] = 0;
+    for (u32 i = 101; i < 108; ++i)
+        buf[i] = 0x20;
+    // DTD slot 3 — dummy
+    buf[111] = 0x10;
+
+    u32 sum = 0;
+    for (u32 i = 0; i < 127; ++i)
+        sum += buf[i];
+    buf[127] = static_cast<u8>((256u - (sum & 0xFFu)) & 0xFFu);
+
+    auto res = duetos::drivers::gpu::EdidParseBaseBlock(buf, sizeof(buf));
+    if (!res.has_value())
+    {
+        ConsoleWriteln("monitor: synthetic EDID failed to parse (parser bug?)");
+        return;
+    }
+    duetos::drivers::gpu::EdidDumpToConsole(res.value());
+}
+
+} // namespace
+
+void RunCvtDemo(u32 w, u32 h, u32 ref_mhz)
+{
+    duetos::drivers::gpu::CvtRequest req = {};
+    req.h_active = static_cast<u16>(w);
+    req.v_active = static_cast<u16>(h);
+    req.refresh_mhz = ref_mhz;
+    req.mode = duetos::drivers::gpu::CvtMode::ReducedBlankingV1;
+    auto rb = duetos::drivers::gpu::CvtGenerate(req);
+    if (rb.has_value())
+    {
+        const duetos::drivers::gpu::EdidDtd& t = rb.value();
+        ConsoleWrite("  CVT-RB:    ");
+        WriteU64Dec(t.h_active);
+        ConsoleWrite("x");
+        WriteU64Dec(t.v_active);
+        ConsoleWrite("  htotal=");
+        WriteU64Dec(t.h_active + t.h_blanking);
+        ConsoleWrite("  vtotal=");
+        WriteU64Dec(t.v_active + t.v_blanking);
+        ConsoleWrite("  pclk=");
+        WriteU64Dec(t.pixel_clock_khz / 1000);
+        ConsoleWrite(".");
+        WriteU64Dec(t.pixel_clock_khz % 1000);
+        ConsoleWrite(" MHz  refresh=");
+        WriteU64Dec(t.refresh_mhz / 1000);
+        ConsoleWrite(".");
+        WriteU64Dec(t.refresh_mhz % 1000);
+        ConsoleWriteln(" Hz");
+    }
+    req.mode = duetos::drivers::gpu::CvtMode::Standard;
+    auto std_res = duetos::drivers::gpu::CvtGenerate(req);
+    if (std_res.has_value())
+    {
+        const duetos::drivers::gpu::EdidDtd& t = std_res.value();
+        ConsoleWrite("  CVT-STD:   ");
+        WriteU64Dec(t.h_active);
+        ConsoleWrite("x");
+        WriteU64Dec(t.v_active);
+        ConsoleWrite("  htotal=");
+        WriteU64Dec(t.h_active + t.h_blanking);
+        ConsoleWrite("  vtotal=");
+        WriteU64Dec(t.v_active + t.v_blanking);
+        ConsoleWrite("  pclk=");
+        WriteU64Dec(t.pixel_clock_khz / 1000);
+        ConsoleWrite(".");
+        WriteU64Dec(t.pixel_clock_khz % 1000);
+        ConsoleWriteln(" MHz");
+    }
+}
+
+void CmdMonitor(u32 argc, char** argv)
+{
+    if (argc == 1)
+    {
+        ConsoleWriteln("monitor — dump parsed EDID for the system display");
+        ConsoleWriteln("");
+        ConsoleWriteln("Usage:");
+        ConsoleWriteln("  monitor                 — show synthetic test EDID + CVT modes");
+        ConsoleWriteln("  monitor demo            — same; explicit synonym");
+        ConsoleWriteln("  monitor parse <hex>     — parse + decode a 256-hex-digit EDID blob");
+        ConsoleWriteln("  monitor cea <hex>       — parse + decode a 256-hex-digit CEA-861 ext block");
+        ConsoleWriteln("  monitor cvt W H R       — generate a CVT timing for WxH @ R Hz");
+        ConsoleWriteln("");
+        ConsoleWriteln("NOTE: GPU drivers are probe-only in v0; no DDC/I2C transport is live.");
+        ConsoleWriteln("      Once a vendor driver gains DDC, this command will pick up real data.");
+        ConsoleWriteln("");
+        RunSyntheticDump();
+        ConsoleWriteln("");
+        ConsoleWriteln("CVT timings for common modes:");
+        RunCvtDemo(1920, 1080, 60000);
+        RunCvtDemo(2560, 1440, 60000);
+        RunCvtDemo(3840, 2160, 60000);
+        return;
+    }
+    if (argc == 2 && (argv[1][0] == 'd' || argv[1][0] == 'D'))
+    {
+        RunSyntheticDump();
+        return;
+    }
+    if (argc >= 3 && (argv[1][0] == 'p' || argv[1][0] == 'P'))
+    {
+        u8 buf[128];
+        if (!ParseEdidHex(argv[2], buf))
+        {
+            ConsoleWriteln("monitor: hex blob must be exactly 256 hex digits (128 bytes).");
+            ConsoleWriteln("         Whitespace, colons and commas are allowed as separators.");
+            return;
+        }
+        auto res = duetos::drivers::gpu::EdidParseBaseBlock(buf, sizeof(buf));
+        if (!res.has_value())
+        {
+            ConsoleWriteln("monitor: parser rejected the input (length check failed).");
+            return;
+        }
+        duetos::drivers::gpu::EdidDumpToConsole(res.value());
+        return;
+    }
+    if (argc >= 3 && argv[1][0] == 'c' && argv[1][1] == 'e')
+    {
+        u8 buf[128];
+        if (!ParseEdidHex(argv[2], buf))
+        {
+            ConsoleWriteln("monitor cea: hex blob must be exactly 256 hex digits (128 bytes).");
+            return;
+        }
+        auto res = duetos::drivers::gpu::Cea861ParseBlock(buf, sizeof(buf));
+        if (!res.has_value())
+        {
+            ConsoleWriteln("monitor cea: parser rejected the input.");
+            return;
+        }
+        duetos::drivers::gpu::Cea861DumpToConsole(res.value());
+        return;
+    }
+    if (argc >= 5 && argv[1][0] == 'c' && argv[1][1] == 'v')
+    {
+        u16 w = 0, h = 0;
+        u16 r = 60;
+        if (!ParseU16Decimal(argv[2], &w) || !ParseU16Decimal(argv[3], &h) || !ParseU16Decimal(argv[4], &r))
+        {
+            ConsoleWriteln("monitor cvt: usage: monitor cvt <width> <height> <refresh-hz>");
+            return;
+        }
+        RunCvtDemo(w, h, static_cast<u32>(r) * 1000u);
+        return;
+    }
+    ConsoleWriteln("monitor: unrecognised arguments — try `monitor` for usage.");
 }
 
 } // namespace duetos::core::shell::internal

@@ -39,6 +39,14 @@ void FrameAllocatorInit(uptr multiboot_info_phys);
 /// Allocate one 4 KiB frame. Returns kNullFrame on out-of-memory.
 PhysAddr AllocateFrame();
 
+/// Allocate a 4 KiB frame whose physical address is strictly less
+/// than `max_phys`. Used by per-zone allocation paths to honour
+/// DMA-window constraints (e.g. a legacy ISA device wants <16 MiB,
+/// most PCIe DMA engines accept <4 GiB). `max_phys == 0` is treated
+/// as "no upper bound" and is identical to `AllocateFrame()`.
+/// Returns kNullFrame if no in-range frame is free.
+PhysAddr AllocateFrameInRange(PhysAddr max_phys);
+
 /// Result-shaped sibling of `AllocateFrame`. Returns
 /// `ErrorCode::OutOfMemory` on allocator exhaustion; success wraps
 /// the same PhysAddr. Prefer this in new code.

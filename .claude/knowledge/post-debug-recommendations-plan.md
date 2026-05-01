@@ -1,15 +1,22 @@
 # Post-recommendations follow-on plan
 
-## Status (2026-04-28)
+## Status (2026-05-01)
 
-The 18-item kernel-debug recommendations plan
-(`kernel-debug-recommendations-plan.md`) closed on 2026-04-28
-with every numbered item landed and most followups absorbed.
+The 18-item kernel-debug recommendations plan closed on
+2026-04-28 with every numbered item landed and most followups
+absorbed. The original plan file was deleted on 2026-05-01 once
+all its content was either landed or graduated to this file.
 This file captures the genuinely-large work that remained at
 that plan's end — items whose name was "followup" but whose
 scope is a multi-commit slice on its own. Each entry below is
 a future plan in miniature: what it is, what blocks it, and
 what triggers it.
+
+### Landed since this plan was opened
+
+| Date | Item | Commit |
+|------|------|--------|
+| 2026-05-01 | C1-followup — Real per-zone allocator (physical-address ceiling routing in `mm/frame_allocator.{h,cpp}` + `mm/zone.cpp`, self-test now asserts the Dma 16-MiB / Dma32 4-GiB ceiling holds) | (this commit) |
 
 ## Resume prompt
 
@@ -78,21 +85,36 @@ the live signal already in place.
 See `.claude/knowledge/kpti-meltdown-investigation-v0.md` for
 the project's recorded position.
 
-### C1-followup — Real per-zone allocator
+### ~~C1-followup~~ Real per-zone allocator — LANDED 2026-05-01
 
-**Scope**: per-zone bitmaps + buddy free-lists so
-`AllocateZoneFrame(kZoneDma)` actually returns a frame inside
-the requested zone instead of forwarding to the global
-allocator.
+**Was**: per-zone routing so `AllocateZoneFrame(kZoneDma)` returns
+a frame whose physical address actually satisfies the zone
+constraint.
 
-**Blocks on**: nothing — `mm/zone.{h,cpp}` API surface is in
-place; today the implementation just forwards to
-`mm/frame_allocator.cpp`.
+**How it landed**: `kernel/mm/frame_allocator.{h,cpp}` gained
+`AllocateFrameInRange(PhysAddr max_phys)` — a bitmap search that
+clamps the highest frame index considered to
+`max_phys >> kPageSizeLog2`, with the same direct-map zero policy
+as the unrestricted `AllocateFrame`. `kernel/mm/zone.cpp`'s
+`AllocateZoneFrame` now picks the ceiling per zone (16 MiB for Dma,
+4 GiB for Dma32, no ceiling for Normal) and routes through the new
+API. Self-test extended to assert the ceiling: a Dma frame above
+16 MiB or a Dma32 frame above 4 GiB now panics with the offending
+physical address.
 
-**When to land**: when a DMA-needing driver (NVMe / e1000 /
-xHCI scatter-gather) starts allocating frames via
-`AllocateZoneFrame(kZoneDma32)` and observes an OOM that the
-unified pool wouldn't hit.
+**Note on full buddy-allocator design**: the original
+"per-zone bitmaps + buddy free-lists" framing was deferred in
+favour of the simpler ceiling-clamp approach because (a) the live
+bitmap is already a single backing store covering all RAM, so
+re-slicing it per zone would force a duplicate-bookkeeping refactor
+for no behaviour benefit at v0 RAM sizes, and (b) buddy free-lists
+buy contiguous-allocation speed which the existing
+`AllocateContiguousFrames` already handles via a linear-scan that
+nothing has yet identified as a hot path. If/when a zone genuinely
+exhausts its sub-range (e.g. lots of <16 MiB DMA buffers), the
+ceiling-clamp implementation already returns a clean `kNullFrame`
+with a one-shot warn — the buddy refactor can land then without
+changing any caller's contract.
 
 ### C2-followup — Slab freed-object poison + real KASAN
 
@@ -168,8 +190,9 @@ hot-swap a USB device + re-probe xhci).
 
 ## What's done
 
-The original 18-item plan
-(`kernel-debug-recommendations-plan.md`) accomplished:
+The original 18-item plan (now-deleted
+`kernel-debug-recommendations-plan.md`, closed 2026-04-28)
+accomplished:
 
 - **Init / register infrastructure (A1, A4)**: 11-phase
   RunPhase migration, `_init_array` invocation,

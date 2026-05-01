@@ -1,11 +1,12 @@
 /*
- * DuetOS — memory zones, v0 scaffolding (plan C1).
+ * DuetOS — memory zones (plan C1 + C1-followup).
  *
- * See `zone.h` for the public contract. v0 forwards every
- * allocation to the existing global frame allocator; the zone
- * argument is recorded in stats but doesn't yet route to a
- * separate underlying region. The day per-zone pools land,
- * this TU is the only place callers' shape changes.
+ * See `zone.h` for the public contract. The Dma and Dma32 zones
+ * route through `AllocateFrameInRange(max_phys)` so a returned
+ * frame's physical address is genuinely below the requested
+ * ceiling (16 MiB for Dma, 4 GiB for Dma32). Normal forwards to
+ * the global pool; Mmio always returns kNullFrame. Stats track
+ * allocs / frees / oom per zone for diagnostics.
  */
 
 #include "mm/zone.h"
@@ -61,7 +62,16 @@ PhysAddr AllocateZoneFrame(Zone zone)
         KLOG_ONCE_WARN("mm/zone", "AllocateZoneFrame: Mmio zone has no backing pool");
         return kNullFrame;
     }
-    const PhysAddr f = AllocateFrame();
+    // Per-zone physical-address ceilings (C1-followup). The frame
+    // allocator's `AllocateFrameInRange(max_phys)` honours the
+    // ceiling by clamping the bitmap search; zero means "no
+    // ceiling" and is the Normal-zone path.
+    PhysAddr max_phys = 0; // Normal: no constraint
+    if (zone == Zone::Dma)
+        max_phys = 16ULL * 1024 * 1024; // < 16 MiB (legacy ISA DMA)
+    else if (zone == Zone::Dma32)
+        max_phys = 4ULL * 1024 * 1024 * 1024; // < 4 GiB (PCIe DMA)
+    const PhysAddr f = AllocateFrameInRange(max_phys);
     if (f == kNullFrame)
     {
         ++g_stats[static_cast<u32>(zone)].oom;
@@ -126,6 +136,14 @@ void ZoneSelfTest()
         {
             core::Panic("mm/zone", "self-test: allocate returned null on a normal zone");
         }
+        // Verify the per-zone physical-address ceiling actually
+        // holds: a frame from kZoneDma must be below 16 MiB, a
+        // frame from kZoneDma32 must be below 4 GiB. Normal has
+        // no ceiling.
+        if (z == Zone::Dma && f >= (16ULL * 1024 * 1024))
+            core::PanicWithValue("mm/zone", "self-test: Dma zone returned a frame above 16 MiB", f);
+        if (z == Zone::Dma32 && f >= (4ULL * 1024 * 1024 * 1024))
+            core::PanicWithValue("mm/zone", "self-test: Dma32 zone returned a frame above 4 GiB", f);
         FreeZoneFrame(z, f);
         const ZoneStats after = ZoneStatsRead(z);
         if (after.allocs != before.allocs + 1)
@@ -138,7 +156,7 @@ void ZoneSelfTest()
         }
     }
 
-    arch::SerialWrite("[mm/zone] self-test OK (4 zones × allocate + free + stats verified).\n");
+    arch::SerialWrite("[mm/zone] self-test OK (4 zones × allocate + free + stats + ceiling verified).\n");
     KLOG_INFO("mm/zone", "self-test OK (4 zones x allocate + free + stats verified)");
 }
 

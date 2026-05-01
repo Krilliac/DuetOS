@@ -5,42 +5,34 @@
 #include "util/types.h"
 
 /*
- * DuetOS — memory zones, v0 scaffolding (plan C1).
+ * DuetOS — memory zones (plan C1 + C1-followup).
  *
  * WHAT
- *   A `Zone` enum + a thin `AllocateZoneFrame(zone)` API that
- *   wraps the existing physical frame allocator. Today every
- *   request goes to the same single pool (matches v0
- *   frame_allocator's "single bitmap"); the zone parameter is
- *   recorded in stats but doesn't yet route to a separate
- *   underlying region.
+ *   A `Zone` enum + an `AllocateZoneFrame(zone)` API that routes
+ *   each request through `AllocateFrameInRange(max_phys)`. The
+ *   max_phys ceiling is derived from the zone:
+ *     - kZoneDma:    < 16 MiB (legacy ISA DMA window)
+ *     - kZoneDma32:  < 4 GiB  (PCIe DMA addressable window)
+ *     - kZoneNormal: no ceiling
+ *     - kZoneMmio:   reserved enumerator, always returns kNullFrame
+ *   The frame allocator's bitmap is shared across all zones — the
+ *   constraint is enforced by clamping the highest searched index,
+ *   so a Dma frame is genuinely below 16 MiB. Stats track
+ *   allocs / frees / oom per zone.
  *
  * WHY
  *   Real DMA-capable drivers (NVMe, AHCI, e1000, USB xHCI all
  *   eventually) need physical memory below the 4 GiB / 16 MiB
- *   bar — which the kernel cannot promise from a single bitmap
- *   that covers 100% of available RAM. Landing the zone API
- *   first lets driver code call `AllocateZoneFrame(kZoneDma32)`
- *   right now; once a real per-zone pool exists, those calls
- *   start being honoured without any driver-side change.
- *
- * SCOPE FOR v0
- *   - 4 zones declared: kZoneDma (<16 MiB), kZoneDma32 (<4 GiB),
- *     kZoneNormal (everything else), kZoneMmio (reserved, never
- *     hands out RAM).
- *   - Forwarder implementation: every zone request allocates
- *     from the global pool. Stats track which zone an
- *     allocation was tagged with so an audit can spot DMA-
- *     starvation patterns.
- *   - Self-test: exercises every zone's allocate/free path
- *     and verifies stats advance.
+ *   bar — which the legacy global allocator cannot promise from
+ *   a single bitmap that covers 100% of available RAM without
+ *   the in-range clamp this layer added.
  *
  * NOT IN SCOPE
  *   - Buddy allocator inside each zone — comes when a workload
  *     justifies the per-order free-list machinery.
- *   - Per-zone bitmaps. Today every zone shares the global
- *     bitmap; per-zone slicing happens at the same time as the
- *     buddy work.
+ *   - Per-zone independent bitmaps. The shared bitmap + clamped
+ *     search is sufficient at v0 RAM sizes; per-zone bitmaps land
+ *     alongside the buddy work if/when a zone genuinely exhausts.
  *   - `kZoneMmio` actually carving out MMIO ranges.
  */
 

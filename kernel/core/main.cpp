@@ -66,6 +66,9 @@
 #include "debug/extable.h"
 #include "debug/probes.h"
 #include "drivers/audio/audio.h"
+#include "drivers/gpu/cea861.h"
+#include "drivers/gpu/cvt.h"
+#include "drivers/gpu/edid.h"
 #include "drivers/gpu/gpu.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/input/ps2mouse.h"
@@ -1768,6 +1771,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         auto gpu_teardown = []() -> duetos::core::Result<void> { return duetos::drivers::gpu::GpuShutdown(); };
         duetos::core::FaultDomainRegister("drivers/gpu", gpu_init, gpu_teardown);
     }
+
+    DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::EdidSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::CvtSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::Cea861SelfTest());
 
     SerialWrite("[boot] Bringing up firmware loader (scaffold).\n");
     duetos::core::FwLoaderInit();

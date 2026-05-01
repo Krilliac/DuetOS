@@ -106,11 +106,13 @@ side effect is observable.
 
 ## What this entry replaces
 
-Plan item E2 in
-`.claude/knowledge/kernel-debug-recommendations-plan.md`. The
-investigation produced a defensible "no, deferred" answer with a
-clear trigger condition for re-evaluation. Future sessions can
-read this file instead of re-deriving the same evidence chain.
+Plan item E2 in the original kernel-debug-recommendations plan
+(closed 2026-04-28; remaining follow-ons live in
+`.claude/knowledge/post-debug-recommendations-plan.md` as
+E2-followup). The investigation produced a defensible
+"no, deferred" answer with a clear trigger condition for
+re-evaluation. Future sessions can read this file instead of
+re-deriving the same evidence chain.
 
 ## When to revisit
 
