@@ -44,15 +44,17 @@ static inline int dx_get_key_state(int vk)
     return (int)(short)rv;
 }
 
-typedef struct DxCursorPos
-{
-    LONG x, y;
-} DxCursorPos;
-
-static inline int dx_get_cursor_pos(DxCursorPos* p)
+/* SYS_WIN_GET_MOUSE_DELTA = 170 — drains the kernel's per-event mouse
+ * accumulator. Out buffer is the same DIMOUSESTATE shape we want to
+ * fill (16 bytes: lX, lY, lZ as i32; rgbButtons[4]) so we just hand
+ * the caller's buffer straight in. Returns 1 on success. */
+static inline int dx_get_mouse_delta(void* out_dimousestate)
 {
     long long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)78), "D"((long long)(unsigned long long)p) : "memory");
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)170), "D"((long long)(unsigned long long)out_dimousestate)
+                     : "memory");
     return (int)rv;
 }
 
@@ -217,11 +219,8 @@ typedef struct DiDeviceImpl
 {
     void* const* lpVtbl;
     ULONG refcount;
-    UINT format_size;   /* size requested by SetDataFormat */
-    UINT kind;          /* DiDeviceKind */
-    LONG last_cursor_x; /* last seen abs X for relative mouse delta */
-    LONG last_cursor_y;
-    int cursor_seeded; /* first GetDeviceState seeds last_cursor_*, no delta */
+    UINT format_size; /* size requested by SetDataFormat */
+    UINT kind;        /* DiDeviceKind */
 } DiDeviceImpl;
 
 static HRESULT didev_QueryInterface(DiDeviceImpl* self, REFIID riid, void** out)
@@ -309,39 +308,42 @@ static HRESULT didev_GetDeviceState(DiDeviceImpl* self, DWORD size, void* data)
     {
         /* DIMOUSESTATE: lX, lY, lZ (each LONG = 4B) + rgbButtons[4] = 16B.
          * DIMOUSESTATE2: + rgbButtons[8] tail; total 20B. We honor either
-         * by writing only what the caller's `size` covers. */
+         * by writing only what the caller's `size` covers.
+         *
+         * Drain the kernel's raw-motion accumulator — it tracks true
+         * per-packet deltas + wheel ticks, immune to programmatic
+         * SetCursor warps. The kernel writes lX/lY/lZ + first 4
+         * rgbButtons. Larger buffers (DIMOUSESTATE2) get extended
+         * button slots filled by GetKeyState fallback. */
         if (size < 16)
             return DX_E_INVALIDARG;
-        DxCursorPos pos = {0, 0};
-        dx_get_cursor_pos(&pos);
-        LONG dx = 0, dy = 0;
-        if (self->cursor_seeded)
-        {
-            dx = pos.x - self->last_cursor_x;
-            dy = pos.y - self->last_cursor_y;
-        }
-        else
-        {
-            self->cursor_seeded = 1;
-        }
-        self->last_cursor_x = pos.x;
-        self->last_cursor_y = pos.y;
+
+        BYTE scratch[16] = {0};
+        if (!dx_get_mouse_delta(scratch))
+            return DX_E_FAIL;
         BYTE* p = (BYTE*)data;
-        *(LONG*)(p + 0) = dx;
-        *(LONG*)(p + 4) = dy;
-        *(LONG*)(p + 8) = 0; /* wheel; SYS_WIN_GET_KEYSTATE has no wheel surface */
-        /* VK_LBUTTON=1 / RBUTTON=2 / MBUTTON=4 / XBUTTON1=5 / XBUTTON2=6 */
-        const int kBtnVk[8] = {1, 2, 4, 5, 6, 0, 0, 0};
-        DWORD blim = size - 12;
-        if (blim > 8)
-            blim = 8;
-        for (DWORD i = 0; i < blim; ++i)
+        for (DWORD i = 0; i < (size < 16 ? size : 16); ++i)
+            p[i] = scratch[i];
+
+        /* Extend rgbButtons past the kernel-provided 4 slots for
+         * DIMOUSESTATE2 callers — the X1/X2 buttons aren't reported
+         * by the kernel accumulator, so fall back to GetKeyState. */
+        if (size > 16)
         {
-            if (kBtnVk[i] == 0)
-                continue;
-            int ks = dx_get_key_state(kBtnVk[i]);
-            if (ks & 0x8000)
-                p[12 + i] = 0x80;
+            const int kBtnVk[4] = {5, 6, 0, 0}; /* XBUTTON1, XBUTTON2 */
+            DWORD blim = size - 16;
+            if (blim > 4)
+                blim = 4;
+            for (DWORD i = 0; i < blim; ++i)
+            {
+                if (kBtnVk[i] == 0)
+                {
+                    p[16 + i] = 0;
+                    continue;
+                }
+                int ks = dx_get_key_state(kBtnVk[i]);
+                p[16 + i] = (ks & 0x8000) ? 0x80 : 0;
+            }
         }
         return DX_S_OK;
     }

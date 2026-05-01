@@ -365,15 +365,12 @@ i64 TranslateDeliberateEnosys(arch::TrapFrame* /*f*/)
     return -38;
 }
 
-// STUB: rseq machinery not implemented. Callers fall back to
-// non-rseq paths on -ENOSYS, which is what real Linux returns
-// when CONFIG_RSEQ=n. Drop the marker when a real per-CPU
-// rseq slot lands.
-//
-// rseq: restartable sequences. glibc and newer musl register an
-// rseq structure at startup for high-perf per-CPU data. v0
-// doesn't implement the machinery; return -ENOSYS and let the
-// caller fall back to non-rseq paths.
+// GAP: rseq (restartable sequences) — v0 happy path returns
+// -ENOSYS, which is exactly what real Linux returns on a
+// CONFIG_RSEQ=n kernel. glibc and newer musl detect this at
+// startup and fall back to non-rseq paths, so this is the
+// correct contract for callers; revisit when a real per-CPU
+// rseq slot lands and a workload genuinely benefits from it.
 i64 TranslateRseq(arch::TrapFrame* /*f*/)
 {
     // -ENOSYS is also what no-translation produces; the

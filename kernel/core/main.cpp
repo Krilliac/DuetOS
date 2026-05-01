@@ -161,6 +161,7 @@
 #include "subsystems/win32/gdi_objects.h"
 #include "subsystems/win32/nt_coverage.h"
 #include "subsystems/win32/registry.h"
+#include "subsystems/win32/window_syscall.h"
 #include "loader/dll_loader.h"
 #include "shell/shell.h"
 #include "syscall/syscall.h"
@@ -2579,6 +2580,16 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 SerialWrite("\n");
                 continue;
             }
+
+            // Feed the kernel-side raw-motion accumulator before
+            // any compositor warp logic touches the cursor. This is
+            // what DirectInput's GetDeviceState mouse path reads —
+            // the warp-corrected cursor diff would lie about user
+            // motion when programmatic SetCursor moves the cursor
+            // (e.g. confined-to-window capture).
+            // PS/2 has no wheel byte; xHCI HID will inject wheel
+            // ticks once that path is wired.
+            duetos::subsystems::win32::MouseInputAccumulate(p.dx, p.dy, /*dz=*/0, p.buttons);
 
             // Every UI mutation inside this packet lives under
             // the compositor mutex — the kbd reader can be mid-

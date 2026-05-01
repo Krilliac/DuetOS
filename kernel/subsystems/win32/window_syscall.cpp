@@ -43,6 +43,7 @@
 #include "proc/process.h"
 #include "syscall/syscall.h"
 #include "drivers/audio/pcspk.h"
+#include "drivers/input/ps2mouse.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
@@ -50,6 +51,7 @@
 #include "mm/paging.h"
 #include "sched/sched.h"
 #include "subsystems/win32/gdi_objects.h"
+#include "sync/spinlock.h"
 
 namespace duetos::subsystems::win32
 {
@@ -1291,6 +1293,105 @@ void DoWinSetCursor(arch::TrapFrame* frame)
     CompositorLock();
     WindowSetCursor(x, y);
     CompositorUnlock();
+    frame->rax = 1;
+}
+
+// Mouse motion + wheel accumulator — drained by SYS_WIN_GET_MOUSE_DELTA
+// (DirectInput's `IDirectInputDevice8::GetDeviceState` for mouse
+// devices). Each input source (PS/2, xHCI HID) calls
+// `MouseInputAccumulate` for every packet; readers drain the totals.
+//
+// Why a separate path from the cursor: the cursor position can be
+// programmatically warped (SetCursor / WindowSetCursor for capture
+// confinement). DirectInput consumers want raw motion regardless of
+// any warps, so we accumulate the per-packet `dx/dy` here, untouched
+// by the warp logic in the compositor.
+namespace
+{
+struct MouseAccum
+{
+    sync::SpinLock lock;
+    i32 dx;
+    i32 dy;
+    i32 dz;     // wheel (z axis); positive = away from user (Win32 convention)
+    u8 buttons; // last-seen button mask (snapshot, not accumulated)
+};
+MouseAccum g_mouse_accum{};
+} // namespace
+
+void MouseInputAccumulate(i32 dx, i32 dy, i32 dz, u8 buttons)
+{
+    sync::SpinLockGuard g(g_mouse_accum.lock);
+    // Saturate at i32 limits — a stuck IRQ source must not overflow
+    // and wrap into the opposite sign.
+    auto add_sat = [](i32 cur, i32 add) -> i32
+    {
+        const i64 sum = static_cast<i64>(cur) + static_cast<i64>(add);
+        if (sum > 0x7FFFFFFFll)
+            return 0x7FFFFFFF;
+        if (sum < -0x80000000ll)
+            return static_cast<i32>(-0x80000000ll);
+        return static_cast<i32>(sum);
+    };
+    g_mouse_accum.dx = add_sat(g_mouse_accum.dx, dx);
+    g_mouse_accum.dy = add_sat(g_mouse_accum.dy, dy);
+    g_mouse_accum.dz = add_sat(g_mouse_accum.dz, dz);
+    g_mouse_accum.buttons = buttons;
+}
+
+void DoWinGetMouseDelta(arch::TrapFrame* frame)
+{
+    const u64 user_ptr = frame->rdi;
+    if (user_ptr == 0)
+    {
+        frame->rax = 0;
+        return;
+    }
+
+    // Snapshot + zero under the lock so two concurrent readers (e.g.
+    // a Win32 PE polling DI mouse and a kernel diagnostic shell
+    // command) see disjoint deltas — the bytes a reader sees are the
+    // bytes the next reader doesn't.
+    i32 dx, dy, dz;
+    u8 buttons;
+    {
+        sync::SpinLockGuard g(g_mouse_accum.lock);
+        dx = g_mouse_accum.dx;
+        dy = g_mouse_accum.dy;
+        dz = g_mouse_accum.dz;
+        buttons = g_mouse_accum.buttons;
+        g_mouse_accum.dx = 0;
+        g_mouse_accum.dy = 0;
+        g_mouse_accum.dz = 0;
+    }
+
+    // DIMOUSESTATE-shaped output: lX, lY, lZ as i32; rgbButtons[4]
+    // each high-bit-set when down. Match the layout dinput8 expected
+    // from the previous keystate-poll path so the DLL doesn't need a
+    // second packing.
+    u8 out[16] = {};
+    out[0] = static_cast<u8>(dx & 0xFF);
+    out[1] = static_cast<u8>((dx >> 8) & 0xFF);
+    out[2] = static_cast<u8>((dx >> 16) & 0xFF);
+    out[3] = static_cast<u8>((dx >> 24) & 0xFF);
+    out[4] = static_cast<u8>(dy & 0xFF);
+    out[5] = static_cast<u8>((dy >> 8) & 0xFF);
+    out[6] = static_cast<u8>((dy >> 16) & 0xFF);
+    out[7] = static_cast<u8>((dy >> 24) & 0xFF);
+    out[8] = static_cast<u8>(dz & 0xFF);
+    out[9] = static_cast<u8>((dz >> 8) & 0xFF);
+    out[10] = static_cast<u8>((dz >> 16) & 0xFF);
+    out[11] = static_cast<u8>((dz >> 24) & 0xFF);
+    out[12] = (buttons & duetos::drivers::input::kMouseButtonLeft) ? 0x80 : 0;
+    out[13] = (buttons & duetos::drivers::input::kMouseButtonRight) ? 0x80 : 0;
+    out[14] = (buttons & duetos::drivers::input::kMouseButtonMiddle) ? 0x80 : 0;
+    out[15] = 0; // X1 — not reported by PS/2; xHCI HID can fill once wired
+
+    if (!duetos::mm::CopyToUser(reinterpret_cast<void*>(user_ptr), out, sizeof(out)))
+    {
+        frame->rax = 0;
+        return;
+    }
     frame->rax = 1;
 }
 

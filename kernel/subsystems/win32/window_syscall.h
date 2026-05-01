@@ -77,6 +77,18 @@ void DoWinGetKeyState(arch::TrapFrame* frame);
 void DoWinGetCursor(arch::TrapFrame* frame);
 void DoWinSetCursor(arch::TrapFrame* frame);
 
+/// Accumulate raw mouse-motion deltas + wheel ticks since the last
+/// drain. Called by the mouse reader thread for every PS/2 / xHCI
+/// HID packet so DirectInput's `GetDeviceState` mouse path can
+/// observe true motion (not poll-to-poll cursor diff that gets
+/// corrupted by programmatic SetCursor warps).
+void MouseInputAccumulate(i32 dx, i32 dy, i32 dz, u8 buttons);
+
+/// Read + zero the accumulator. `out` is `{i32 dx, i32 dy, i32 dz,
+/// u8 buttons[4]}` (16 bytes — DIMOUSESTATE-shaped). Buttons are a
+/// snapshot, not accumulated.
+void DoWinGetMouseDelta(arch::TrapFrame* frame);
+
 void DoWinSetCapture(arch::TrapFrame* frame);
 void DoWinReleaseCapture(arch::TrapFrame* frame);
 void DoWinGetCapture(arch::TrapFrame* frame);

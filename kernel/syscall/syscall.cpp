@@ -3175,6 +3175,9 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_WIN_GET_CURSOR:
         subsystems::win32::DoWinGetCursor(frame);
         return;
+    case SYS_WIN_GET_MOUSE_DELTA:
+        subsystems::win32::DoWinGetMouseDelta(frame);
+        return;
     case SYS_WIN_SET_CURSOR:
         subsystems::win32::DoWinSetCursor(frame);
         return;
