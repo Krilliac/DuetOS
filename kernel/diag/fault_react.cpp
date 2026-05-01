@@ -19,6 +19,27 @@ namespace
 constexpr u32 kPolicySlotCount = 16; // == core::kMaxFaultDomains
 constinit FaultReactionFn g_policies[kPolicySlotCount] = {};
 
+// Per-domain pending fault, written by trap handlers via
+// FaultReactReportFromTrap and drained by the heartbeat thread
+// via FaultReactDrainPending. The `valid` flag is the producer/
+// consumer signal — write order is `kind/rip first`, `valid =
+// true` last on the producer side; consumer reads `valid` first
+// and only consults the rest if it was set. On x86_64 plain
+// stores have release semantics within the same CPU, and the
+// trap handler runs with IF=0 so a single CPU cannot observe
+// its own torn write. Cross-CPU races on this slot are bounded:
+// the heartbeat thread is single-threaded, so the only contender
+// is a second trap on the SAME CPU before drain — handled by the
+// overwrite counter.
+struct PendingFault
+{
+    FaultKind kind;
+    u64 faulting_rip;
+    bool valid;
+};
+constinit PendingFault g_pending[kPolicySlotCount] = {};
+constinit u64 g_pending_overwrites = 0;
+
 constinit u64 g_dispatch_count = 0;
 constinit u64 g_reaction_counts[5] = {0, 0, 0, 0, 0}; // indexed by FaultReaction
 
@@ -240,6 +261,83 @@ FaultReaction FaultReactDispatch(::duetos::core::FaultDomainId domain_id, const 
     return chosen;
 }
 
+void FaultReactReportFromTrap(::duetos::core::FaultDomainId domain_id, FaultKind kind, u64 faulting_rip)
+{
+    if (domain_id >= kPolicySlotCount)
+    {
+        // Out-of-range — silently ignored (trap-handler contract:
+        // never panic from inside the handler). The lossless
+        // backbone via MarkRestart is also a no-op for invalid
+        // ids, so caller behaviour stays consistent with the
+        // status-quo path.
+        return;
+    }
+    if (g_pending[domain_id].valid)
+    {
+        // Track overwrites so an audit can tell whether the
+        // single-slot model is undersized for the actual fault
+        // rate. The first fault's MarkRestart already fired —
+        // the bool is still set — so the restart will still
+        // happen; only the kind/rip from the first fault is
+        // lost.
+        ++g_pending_overwrites;
+    }
+    // Order of writes matters for the heartbeat-side reader:
+    // populate kind + rip first, set `valid` last. On x86_64
+    // single-CPU all stores are release within the CPU and the
+    // trap handler runs with IF=0; cross-CPU drain reads only
+    // happen from the heartbeat thread which is single-threaded.
+    g_pending[domain_id].kind = kind;
+    g_pending[domain_id].faulting_rip = faulting_rip;
+    g_pending[domain_id].valid = true;
+
+    // Lossless backbone — even if the heartbeat drain misses a
+    // slot for any reason, FaultDomainTick will still run the
+    // restart from the bool.
+    ::duetos::core::FaultDomainMarkRestart(domain_id);
+}
+
+void FaultReactDrainPending()
+{
+    const u32 dn = ::duetos::core::FaultDomainCount();
+    for (u32 i = 0; i < dn; ++i)
+    {
+        if (!g_pending[i].valid)
+            continue;
+
+        // Snapshot + clear before dispatch, so a fault that lands
+        // during the dispatch's own logging doesn't get lost or
+        // silently overwritten.
+        const FaultKind kind = g_pending[i].kind;
+        const u64 rip = g_pending[i].faulting_rip;
+        g_pending[i].valid = false;
+
+        const auto* d = ::duetos::core::FaultDomainGet(i);
+        FaultEvidence ev = {};
+        ev.source = (d != nullptr && d->name != nullptr) ? d->name : "diag/fault-react";
+        ev.kind = kind;
+        // Trap-recorded faults are by definition kernel-side
+        // recovery events; severity stays at Recoverable so the
+        // floor doesn't auto-escalate beyond what the policy +
+        // kind already imply.
+        ev.severity = FaultSeverity::Recoverable;
+        ev.attempt_count = 0;
+        ev.faulting_rip = rip;
+        ev.aux = 0;
+
+        // Dispatch may panic; if it does, that's the right
+        // outcome (the floor decided the kind warrants Halt).
+        // Otherwise it logs + may re-call FaultDomainMarkRestart,
+        // which is idempotent.
+        (void)FaultReactDispatch(i, ev);
+    }
+}
+
+u64 FaultReactPendingOverwriteCount()
+{
+    return g_pending_overwrites;
+}
+
 u64 FaultReactDispatchCount()
 {
     return g_dispatch_count;
@@ -372,6 +470,33 @@ void FaultReactSelfTest()
     // Case 6 — counters incremented for each dispatch.
     Expect(FaultReactDispatchCount() == dispatched_before + 4, "dispatch count tally");
 
+    // Case 7 — deferred trap path. Reset the toy domain to use
+    // a permissive policy so the drain doesn't restart anything,
+    // then synthesise a trap-side report and verify the drain
+    // dispatches it.
+    FaultReactSetPolicy(id, &PermissiveAlwaysContinue);
+    const u64 before_trap_dispatch = FaultReactDispatchCount();
+    FaultReactReportFromTrap(id, FaultKind::DeviceTimeout, 0xCAFE);
+    Expect(g_pending[id].valid, "case7 trap-report sets pending");
+    Expect(g_pending[id].faulting_rip == 0xCAFE, "case7 rip recorded");
+    Expect(::duetos::core::FaultDomainGet(id)->restart_pending, "case7 lossless backbone armed");
+    FaultReactDrainPending();
+    Expect(!g_pending[id].valid, "case7 drain clears pending");
+    Expect(FaultReactDispatchCount() == before_trap_dispatch + 1, "case7 drain dispatched once");
+
+    // Case 8 — overwrite counter increments when a domain hits
+    // twice before the heartbeat drains.
+    const u64 before_overwrites = FaultReactPendingOverwriteCount();
+    FaultReactReportFromTrap(id, FaultKind::DeviceTimeout, 0x1111);
+    FaultReactReportFromTrap(id, FaultKind::DmaError, 0x2222);
+    Expect(FaultReactPendingOverwriteCount() == before_overwrites + 1, "case8 overwrite counted");
+    Expect(g_pending[id].faulting_rip == 0x2222, "case8 second write wins");
+    FaultReactDrainPending(); // clean up so subsequent drains are no-ops
+    // Drain the bool re-arm from the previous restart-class
+    // dispatches so the toy domain is left alive for the rest
+    // of boot.
+    ::duetos::core::FaultDomainTick();
+
     // Floor-only spot checks (no execution; just the floor table).
     {
         FaultEvidence ev = {};
@@ -396,7 +521,7 @@ void FaultReactSelfTest()
     }
 
     ::duetos::core::Log(::duetos::core::LogLevel::Info, "diag/fault-react",
-                        "self-test PASS (4 dispatches; floor + policy + decay verified)");
+                        "self-test PASS (dispatch + floor + decay + trap-defer + overwrite verified)");
 }
 
 } // namespace duetos::diag

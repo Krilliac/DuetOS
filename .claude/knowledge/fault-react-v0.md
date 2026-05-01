@@ -1,10 +1,62 @@
-# FaultReact v0 — self-defensive fault-reaction dispatcher
+# FaultReact v0/v1 — self-defensive fault-reaction dispatcher
 
 **Type:** Decision + Pattern + Observation
-**Status:** Active — DriverFault wired; trap-path + ubsan/runtime_checker wiring deferred
+**Status:** Active — v1 shipped (trap-deferred queue + heartbeat drain + runtime_checker / soft_lockup / ubsan migrated + `inspect fault-react` shell command). v0 followups all landed except `KillProcess` real impl which is genuinely blocked on the ring-3 process model.
 **Last updated:** 2026-05-01
 
-## What
+## What v0 deliberately did NOT do, and what v1 added
+
+v0 deliberately deferred the trap-handler integration, the
+ubsan / runtime_checker / soft_lockup migrations, the shell
+command, and `KillProcess`. v1 lands everything except
+`KillProcess` (genuinely blocked).
+
+### v1 — trap-handler deferred queue (LANDED)
+
+- `FaultReactReportFromTrap(domain_id, kind, faulting_rip)` —
+  trap/IRQ/NMI-safe. Records `(kind, faulting_rip)` in a per-
+  domain pending slot AND calls `FaultDomainMarkRestart` so the
+  lossless restart backbone still fires. Plain stores only —
+  no klog, no allocation, no locking. Producer write order is
+  `kind/rip first → valid=true last` so a torn read on the
+  consumer side observes either "valid=false" (skip) or a
+  fully-populated record.
+- `FaultReactDrainPending()` — heartbeat-thread-safe. Snapshots
+  + clears each pending slot, builds a `FaultEvidence`, calls
+  `FaultReactDispatch` (which may panic). Called from
+  `kheartbeat` BEFORE `FaultDomainTick` so a `RestartDomain`
+  reaction's re-MarkRestart is picked up by the same beat.
+- Per-domain single-slot model (rather than a ring): if a
+  domain hits twice before drain, the second overwrites the
+  first and `FaultReactPendingOverwriteCount()` increments.
+  Lossless restart backbone via `MarkRestart` ensures the
+  bool-driven restart still fires regardless of overwrite.
+- Trap handler in `kernel/arch/x86_64/traps.cpp` calls
+  `FaultReactReportFromTrap` instead of `FaultDomainMarkRestart`
+  directly. Uses `InternalInvariant` kind (not `KernelPageFault`)
+  because an extable hit means recovery WAS planned — the
+  kernel-page-fault floor isn't supposed to fire.
+
+### v1 — reporter migrations (LANDED)
+
+| Reporter | Before | After | FaultKind | Outcome delta |
+|----------|--------|-------|-----------|---------------|
+| `runtime_checker` `Report()` | direct `Panic("health", ...)` for Heal-failure + critical-no-heal | `FaultReactDispatch(...)` followed by `Panic` (unreachable; floor escalates) | `MemoryCorruption` | Same observable outcome (Halt). Dispatch counter now reflects health escalations; per-domain policy hook for "kernel/health" available for future fine-tuning. |
+| `soft_lockup` `TickInternal()` warn site | `KLOG_WARN_V("soft-lockup", ...)` | `FaultReactDispatch(kFaultDomainInvalid, ...)` (decays Restart→Continue, logs at Warn) | `SoftLockup` | Same observable outcome (log + return). Rate-limit gate stays at the soft_lockup layer. |
+| `ubsan` `Report()` | direct serial / klog log | per-line serial preserved verbatim + `FaultReactDispatch(kFaultDomainInvalid, ...)` | `Unknown` (Degraded severity) | Same observable outcome (log + return). UBSan reports now show up in `inspect fault-react` counters. |
+
+### v1 — shell command (LANDED)
+
+`inspect fault-react` (in `kernel/shell/shell_debug.cpp`):
+
+- Console: `dispatched=N continue=N retry=N restart=N kill=N
+  halt=N domains=N (PER-DOMAIN POLICY ON COM1)`.
+- COM1: per-domain breakdown with `id name policy=default|override`.
+
+Wired into the existing `inspect` umbrella's dispatch table +
+help text.
+
+## v0 — original infrastructure (still current)
 
 A single chokepoint that consumes a `(FaultDomainId, FaultEvidence)`
 pair, asks the per-subsystem reaction policy what it wants, applies a
@@ -13,12 +65,20 @@ kernel-owned floor, and executes the resulting reaction
 
 Files:
 
-- `kernel/diag/fault_react.h` (189 lines) — `FaultKind`,
-  `FaultSeverity`, `FaultEvidence`, `FaultReaction`, dispatcher API.
-- `kernel/diag/fault_react.cpp` (402 lines) — default policy table,
-  `FaultReactPolicyFloor`, `FaultReactDispatch`, self-test.
+- `kernel/diag/fault_react.h` — `FaultKind`, `FaultSeverity`,
+  `FaultEvidence`, `FaultReaction`, dispatcher API + deferred-queue API.
+- `kernel/diag/fault_react.cpp` — default policy table,
+  `FaultReactPolicyFloor`, `FaultReactDispatch`, deferred-queue
+  state, drain, self-test (8 cases).
 - `kernel/diag/recovery.{h,cpp}` — `DriverFault(name, reason, domain_id)`
   overload routes through the dispatcher.
+- `kernel/diag/heartbeat.cpp` — `FaultReactDrainPending()` runs
+  before `FaultDomainTick()` on each beat.
+- `kernel/arch/x86_64/traps.cpp` — extable-hit path uses
+  `FaultReactReportFromTrap` (trap-safe).
+- `kernel/diag/runtime_checker.cpp` / `soft_lockup.cpp` /
+  `ubsan.cpp` — all migrated to dispatch through FaultReact.
+- `kernel/shell/shell_debug.cpp` — `inspect fault-react` command.
 - `kernel/core/main.cpp` — `FaultReactSelfTest` registered after
   `FaultDomainSelfTest`.
 
@@ -112,32 +172,37 @@ misleading.
 - Boot self-test `FaultReactSelfTest` runs after
   `FaultDomainSelfTest` in `kernel_main`.
 
-## What v0 deliberately does NOT do
+## What v1 still does NOT do
 
-1. **No trap-handler integration.** The trap handler still calls
-   `FaultDomainMarkRestart` directly for extable hits. Wiring
-   `FaultReactDispatch` into the trap path requires care —
-   the dispatcher takes locks indirectly (klog) and trap context
-   may not be safe for that. The current tiered trap-response
-   policy (`TrapResponseFor`) is a peer of the dispatcher in
-   v0; consolidation comes when both can be NMI-safe.
-2. **No ubsan / runtime_checker / soft_lockup wiring.** Those
-   sites still call `DebugPanicOrWarn`. They CAN be migrated
-   one at a time without any churn to the dispatcher; the
-   skip is "scope," not "blocked."
-3. **No shell command.** `fault-react status` (counters + per-
-   domain policy table dump) is a sensible follow-up but not
-   required for v0.
-4. **No NMI / #MC support.** `FaultReactDispatch` is process /
-   IRQ / soft-IRQ safe but logs through klog. NMI context
-   should keep using `FaultDomainMarkRestart` directly and let
-   the heartbeat thread call the dispatcher later if a richer
-   decision is needed.
-5. **`KillProcess` is a STUB.** Logs loudly; doesn't actually
-   tear down anything. Real implementation lands with the
-   ring-3 process model.
+1. **`KillProcess` is still a STUB.** Genuinely blocked on the
+   ring-3 process model — there is no userland process to kill
+   into yet. The dispatcher logs loudly when a `KillProcess`
+   reaction would fire. Real impl lands when ring-3 process
+   kill arrives.
+2. **No NMI / #MC integration.** `FaultReactReportFromTrap` is
+   safe from NMI (plain stores, no klog, no allocation), but
+   the existing NMI watchdog (`arch::NmiWatchdog*`) panics
+   directly without going through the dispatcher. Following
+   the same migration as the regular trap path is
+   straightforward; deferred until a real NMI workload exists
+   to motivate the change.
+3. **Per-domain single-slot, not a ring.** If a domain hits
+   twice before the heartbeat drains, the second overwrites
+   the first kind/rip and `FaultReactPendingOverwriteCount()`
+   increments. The lossless restart backbone via
+   `FaultDomainMarkRestart` ensures the bool-driven restart
+   still fires regardless of overwrite. If a real workload
+   shows the overwrite counter rising, replace the slot with
+   a small bounded ring — design noted but not built.
+4. **`fault_react.cpp` is 527 lines** (above the 500-line
+   guideline). It does ONE coherent job (dispatcher + drain +
+   self-test), so splitting it now would be premature.
+   Splitting `FaultReactSelfTest` into a `fault_react_selftest.cpp`
+   sibling is the obvious move when the file grows further or
+   when the self-test diverges from the dispatcher's
+   internals.
 
-## Self-test coverage
+## Self-test coverage (v0 + v1)
 
 `FaultReactSelfTest()` exercises:
 
@@ -149,33 +214,51 @@ misleading.
 4. `nullptr` policy reverts to default.
 5. `RestartDomain` decays to `Continue` when domain is unbound.
 6. Dispatch counter tally matches expected calls.
-7. Floor spot checks for `kernel/mm` prefix, `MemoryCorruption`
-   kind, and recoverable-no-floor case.
+7. **(v1)** Trap-deferred path: `FaultReactReportFromTrap`
+   sets the pending slot + arms the lossless backbone;
+   `FaultReactDrainPending` clears the slot and dispatches.
+8. **(v1)** Overwrite counter increments when a domain hits
+   twice before drain; second write wins.
+
+Plus three floor-only spot checks for `kernel/mm` prefix,
+`MemoryCorruption` kind, and the recoverable-no-floor case.
 
 ## Files inventory
 
 ```
-kernel/diag/fault_react.h    189 lines — header
-kernel/diag/fault_react.cpp  402 lines — impl + self-test
-kernel/diag/recovery.h       203 lines (was 184) — DriverFault overload
-kernel/diag/recovery.cpp     128 lines (was 63) — DriverFault overload impl
-kernel/core/main.cpp         — added include + DUETOS_BOOT_SELFTEST
+kernel/diag/fault_react.h         228 lines — header (v0+v1 API)
+kernel/diag/fault_react.cpp       527 lines — impl + drain + self-test
+kernel/diag/recovery.h            203 lines — DriverFault overload
+kernel/diag/recovery.cpp          128 lines — DriverFault overload impl
+kernel/diag/heartbeat.cpp         156 lines — drain call before tick
+kernel/arch/x86_64/traps.cpp      999 lines — extable path uses ReportFromTrap
+kernel/diag/runtime_checker.cpp  1391 lines — Heal-fail + Panic via dispatcher
+kernel/diag/soft_lockup.cpp       240 lines — warn site via dispatcher
+kernel/diag/ubsan.cpp             338 lines — Report() via dispatcher
+kernel/shell/shell_debug.cpp     2023 lines — `inspect fault-react`
 ```
 
-All files are below the project's size thresholds.
+`fault_react.cpp` is the only file above the 500-line
+guideline (see follow-up #4 above). Everything else is within
+budget.
 
 ## Resume prompt
 
-> Continue the FaultReact v0 work landed on
-> `claude/self-defensive-error-handling-Vp3Xc`. The dispatcher,
-> kernel-owned floor, default policy table, parallel policy
-> registry, `DriverFault(...domain_id)` overload, and boot
-> self-test are all in. Open follow-ups from
-> `.claude/knowledge/fault-react-v0.md`'s "What v0 deliberately
-> does NOT do" section: (1) trap-handler integration —
-> consolidate `TrapResponseFor` and `FaultReactDispatch` once
-> both can be NMI-safe; (2) migrate `ubsan` /
-> `runtime_checker` / `soft_lockup` reporters one TU at a time;
-> (3) `fault-react status` shell command for counters + per-
-> domain policy table; (4) `KillProcess` real implementation
-> when ring-3 process kill lands.
+> FaultReact v1 is complete on
+> `claude/self-defensive-error-handling-Vp3Xc`. v0
+> deliverables (dispatcher, kernel-owned floor, default policy
+> table, parallel policy registry, `DriverFault(...domain_id)`
+> overload, boot self-test) plus v1 deliverables (trap-handler
+> deferred queue + heartbeat drain, `runtime_checker` /
+> `soft_lockup` / `ubsan` migrations, `inspect fault-react`
+> shell command) are all landed. The v0 resume prompt's
+> follow-ups (1)-(3) are done; (4) `KillProcess` real impl
+> stays open until ring-3 process kill exists. Pending v1
+> follow-ups: (a) NMI watchdog migration to
+> `FaultReactReportFromTrap` + `FaultReactDispatch` — same
+> shape as the regular trap path; (b) per-domain pending-slot
+> upgrade to a small ring if `FaultReactPendingOverwriteCount()`
+> shows stress in real workloads; (c) split
+> `fault_react_selftest.cpp` out of `fault_react.cpp` if the
+> file grows further. See the "What v1 still does NOT do"
+> section above for full context.

@@ -18,7 +18,9 @@
 
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "diag/fault_react.h"
 #include "log/klog.h"
+#include "security/fault_domain.h"
 #include "util/types.h"
 
 namespace duetos::diag
@@ -104,12 +106,26 @@ void TickInternal(u64 now_ticks, u64 current_tid)
     ++g_state.same_tid_count;
     if (g_state.same_tid_count > kSoftLockupThresholdTicks && g_state.warned_for_tid != current_tid)
     {
-        // First crossing of the threshold for this run. Log once,
-        // mark this TID as "already warned" so we don't spam the
-        // klog — the next reset (TID change) clears the gate.
+        // First crossing of the threshold for this run. Route
+        // through diag::FaultReactDispatch so the dispatch
+        // counter reflects soft-lockup events. Default policy
+        // for SoftLockup is RestartDomain, but we don't bind a
+        // domain (there's nothing TO restart for "task X is
+        // hogging the CPU") — the dispatcher decays
+        // RestartDomain → Continue when domain is unbound, so
+        // the observable outcome is "log + return", same as
+        // the previous KLOG_WARN_V path. The "already warned"
+        // gate stays at this layer to keep rate-limiting cheap.
         ++g_warnings_total;
         g_state.warned_for_tid = current_tid;
-        KLOG_WARN_V("soft-lockup", "task running > 1s without yield, tid", current_tid);
+        ::duetos::diag::FaultEvidence ev = {};
+        ev.source = "diag/soft-lockup";
+        ev.kind = ::duetos::diag::FaultKind::SoftLockup;
+        ev.severity = ::duetos::diag::FaultSeverity::Degraded;
+        ev.attempt_count = 0;
+        ev.faulting_rip = 0;
+        ev.aux = current_tid;
+        (void)::duetos::diag::FaultReactDispatch(::duetos::core::kFaultDomainInvalid, ev);
     }
 }
 

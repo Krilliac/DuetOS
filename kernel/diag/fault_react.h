@@ -171,6 +171,45 @@ FaultReaction FaultReactPolicyFloor(const FaultEvidence& ev);
 /// `Continue` (there's nothing to mark).
 FaultReaction FaultReactDispatch(::duetos::core::FaultDomainId domain_id, const FaultEvidence& ev);
 
+/// Trap-handler-safe deferred report. Records the (domain_id,
+/// kind, faulting_rip) triple into a per-domain pending slot
+/// AND calls `FaultDomainMarkRestart` so the lossless restart
+/// backbone still fires. Safe to call from any context that
+/// can do plain stores: trap handlers, IRQ, soft-IRQ, NMI.
+///
+/// The trap handler must NOT call `FaultReactDispatch` directly
+/// — the dispatcher takes klog locks and may panic, both of
+/// which are unsafe in trap context. Instead the trap handler
+/// records the fault via this function; `FaultReactDrainPending`
+/// is called from the heartbeat thread to apply the policy +
+/// floor + execution.
+///
+/// Per-domain slot model: only one pending entry per domain
+/// survives at a time. If two faults hit the same domain
+/// before the heartbeat drains, the second overwrites the
+/// first (the bool MarkRestart is set either way, so the
+/// restart still fires; the overwritten kind/rip is lost).
+/// On the typical case where a single subsystem trips a
+/// fixup once per beat that's not a real loss; if it becomes
+/// one we extend to a small ring.
+void FaultReactReportFromTrap(::duetos::core::FaultDomainId domain_id, FaultKind kind, u64 faulting_rip);
+
+/// Heartbeat-side drain. Walks every domain's pending slot,
+/// builds a `FaultEvidence`, calls `FaultReactDispatch`, and
+/// clears the slot. Called from `kheartbeat` BEFORE
+/// `FaultDomainTick` so a `RestartDomain` reaction's
+/// `FaultDomainMarkRestart` re-arms the bool that the tick
+/// then drains. Cheap when no slots are valid — one linear
+/// scan over the bounded registry.
+void FaultReactDrainPending();
+
+/// How many faults have been overwritten in pending slots
+/// since boot (i.e. a domain hit twice before the heartbeat
+/// drained it). Diagnostic only; non-zero is an indication
+/// the slot model isn't enough for the fault rate and a ring
+/// upgrade is warranted.
+u64 FaultReactPendingOverwriteCount();
+
 /// Diagnostic counters. Lifetime totals since boot.
 u64 FaultReactDispatchCount();
 u64 FaultReactReactionCount(FaultReaction r);

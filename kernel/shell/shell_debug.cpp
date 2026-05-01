@@ -28,6 +28,7 @@
 #include "sched/sched.h"
 #include "core/init.h"
 #include "diag/event_trace.h"
+#include "diag/fault_react.h"
 #include "diag/gdb_stub.h"
 #include "ipc/kobject.h"
 #include "util/random.h"
@@ -209,6 +210,7 @@ void CmdInspectHelp()
     ConsoleWriteln("  INSPECT IPC                       KNOWN KOBJECT TYPES");
     ConsoleWriteln("  INSPECT SECURITY                  FAULT-DOMAIN + INITCALL COUNTS");
     ConsoleWriteln("  INSPECT ENTROPY                   ENTROPY TIER + COUNTERS");
+    ConsoleWriteln("  INSPECT FAULT-REACT               FAULTREACT DISPATCHER COUNTERS + POLICIES");
     ConsoleWriteln("  INSPECT HELP                      THIS LIST");
 }
 
@@ -254,6 +256,75 @@ void CmdInspectSecurity()
     ConsoleWrite(" initcalls=");
     WriteU64Dec(duetos::core::InitcallCount());
     ConsoleWriteChar('\n');
+}
+
+// `inspect fault-react` — dispatcher counters + per-domain
+// policy registration table. The counters tell you whether
+// any reaction has fired since boot; the table tells you which
+// subsystems have an override registered (vs. running on the
+// conservative default policy). Useful when triaging "did the
+// dispatcher even see this fault?" after a real failure.
+void CmdInspectFaultReact()
+{
+    using duetos::arch::SerialWrite;
+    using duetos::diag::FaultReaction;
+    using duetos::diag::FaultReactionName;
+    const u64 dispatched = duetos::diag::FaultReactDispatchCount();
+    const u64 cont = duetos::diag::FaultReactReactionCount(FaultReaction::Continue);
+    const u64 retry = duetos::diag::FaultReactReactionCount(FaultReaction::RetryNow);
+    const u64 restart = duetos::diag::FaultReactReactionCount(FaultReaction::RestartDomain);
+    const u64 kill = duetos::diag::FaultReactReactionCount(FaultReaction::KillProcess);
+    const u64 halt = duetos::diag::FaultReactReactionCount(FaultReaction::Halt);
+
+    SerialWrite("[inspect-fault-react] dispatched=");
+    duetos::arch::SerialWriteHex(dispatched);
+    SerialWrite(" continue=");
+    duetos::arch::SerialWriteHex(cont);
+    SerialWrite(" retry=");
+    duetos::arch::SerialWriteHex(retry);
+    SerialWrite(" restart=");
+    duetos::arch::SerialWriteHex(restart);
+    SerialWrite(" kill=");
+    duetos::arch::SerialWriteHex(kill);
+    SerialWrite(" halt=");
+    duetos::arch::SerialWriteHex(halt);
+    SerialWrite("\n");
+
+    // Per-domain policy table. Default policy is shared by every
+    // domain that hasn't called FaultReactSetPolicy; the address
+    // comparison reveals which slots have an override.
+    const duetos::diag::FaultReactionFn default_policy = duetos::diag::FaultReactGetPolicy(0xFFFFFFFFu);
+    const u32 dn = duetos::core::FaultDomainCount();
+    for (u32 i = 0; i < dn; ++i)
+    {
+        const auto* d = duetos::core::FaultDomainGet(i);
+        if (d == nullptr || d->name == nullptr)
+            continue;
+        const duetos::diag::FaultReactionFn p = duetos::diag::FaultReactGetPolicy(i);
+        SerialWrite("[inspect-fault-react] id=");
+        duetos::arch::SerialWriteHex(i);
+        SerialWrite(" name=");
+        SerialWrite(d->name);
+        SerialWrite(p == default_policy ? " policy=default" : " policy=override");
+        SerialWrite("\n");
+    }
+
+    ConsoleWrite("INSPECT FAULT-REACT: dispatched=");
+    WriteU64Dec(dispatched);
+    ConsoleWrite(" continue=");
+    WriteU64Dec(cont);
+    ConsoleWrite(" retry=");
+    WriteU64Dec(retry);
+    ConsoleWrite(" restart=");
+    WriteU64Dec(restart);
+    ConsoleWrite(" kill=");
+    WriteU64Dec(kill);
+    ConsoleWrite(" halt=");
+    WriteU64Dec(halt);
+    ConsoleWrite(" domains=");
+    WriteU64Dec(dn);
+    ConsoleWriteln(" (PER-DOMAIN POLICY ON COM1)");
+    (void)FaultReactionName; // header-emit alone, not used in body
 }
 
 // `inspect entropy` — current tier + per-source counters.
@@ -1193,6 +1264,11 @@ void CmdInspect(u32 argc, char** argv)
     if (StrEq(argv[1], "entropy"))
     {
         CmdInspectEntropy();
+        return;
+    }
+    if (StrEq(argv[1], "fault-react"))
+    {
+        CmdInspectFaultReact();
         return;
     }
     if (StrEq(argv[1], "help"))

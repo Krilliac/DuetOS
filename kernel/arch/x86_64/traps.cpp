@@ -37,6 +37,7 @@
 
 #include "diag/diag_decode.h"
 #include "diag/event_trace.h"
+#include "diag/fault_react.h"
 #include "diag/gdb_stub.h"
 #include "security/fault_domain.h"
 #include "diag/hexdump.h"
@@ -563,15 +564,32 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             SerialWrite(hit->tag);
             SerialWrite("\n");
             // If the row is bound to a fault domain, hand off
-            // the recovery to the watchdog. The fixup runs first
-            // and gives the synchronous caller a clean error
-            // path; the watchdog then teardown+re-init's the
-            // subsystem so future calls succeed. MarkRestart is
-            // one bool write — safe from trap context.
+            // the recovery to the watchdog via the FaultReact
+            // deferred-report path. That path:
+            //   - records (kind, faulting RIP) in a per-domain
+            //     pending slot — picked up by the heartbeat's
+            //     FaultReactDrainPending so the per-subsystem
+            //     policy + kernel-owned floor get to react;
+            //   - calls FaultDomainMarkRestart as the lossless
+            //     backbone, so even if the dispatch path lost
+            //     the slot, the bool-driven restart still fires
+            //     on the next FaultDomainTick.
+            // Both writes are plain stores — safe from trap
+            // context (no locks, no klog, no allocation).
             if (hit->domain_id != ::duetos::debug::kExtableNoDomain)
             {
-                ::duetos::core::FaultDomainMarkRestart(hit->domain_id);
-                SerialWrite("[extable] marked domain for deferred restart id=");
+                // An extable hit means recovery WAS planned for
+                // this fault — it's not the kernel-page-fault
+                // floor case. Use InternalInvariant so the
+                // dispatcher's default policy returns
+                // RestartDomain and the kernel-owned floor
+                // (which escalates KernelPageFault to Halt) does
+                // not fire. The trap vector + cr2 are still
+                // logged on the [extable] line above for
+                // post-mortem.
+                ::duetos::diag::FaultReactReportFromTrap(hit->domain_id, ::duetos::diag::FaultKind::InternalInvariant,
+                                                         frame->rip);
+                SerialWrite("[extable] queued fault-react report for domain id=");
                 SerialWriteHex(hit->domain_id);
                 SerialWrite("\n");
             }
