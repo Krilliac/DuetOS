@@ -106,6 +106,7 @@
 #include "drivers/video/calendar.h"
 #include "drivers/video/menu.h"
 #include "drivers/video/netpanel.h"
+#include "drivers/video/notify.h"
 #include "drivers/video/taskbar.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
@@ -862,6 +863,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         }
     }
     DUETOS_BOOT_SELFTEST(duetos::drivers::video::ThemeSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::video::NotifySelfTest());
     const auto& theme0 = duetos::drivers::video::ThemeCurrent();
 
     // CALCULATOR — native DuetOS app. Window chrome first,
@@ -2087,6 +2089,8 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 duetos::drivers::video::CompositorLock();
                 duetos::drivers::video::ThemeCycle();
                 duetos::drivers::video::ThemeApplyToAll();
+                duetos::drivers::video::NotifyShow(duetos::drivers::video::ThemeIdName(
+                    duetos::drivers::video::ThemeCurrentId()));
                 const bool is_tty =
                     (duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Tty);
                 if (is_tty)
@@ -2152,6 +2156,8 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     duetos::drivers::video::CompositorLock();
                     duetos::drivers::video::ThemeSet(static_cast<duetos::drivers::video::ThemeId>(idx));
                     duetos::drivers::video::ThemeApplyToAll();
+                    duetos::drivers::video::NotifyShow(duetos::drivers::video::ThemeIdName(
+                        duetos::drivers::video::ThemeCurrentId()));
                     const bool is_tty =
                         (duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Tty);
                     if (is_tty)
