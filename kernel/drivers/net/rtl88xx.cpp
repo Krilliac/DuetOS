@@ -1,6 +1,7 @@
 #include "drivers/net/rtl88xx.h"
 
 #include "arch/x86_64/serial.h"
+#include "drivers/net/rtl88xx_fw.h"
 #include "loader/firmware_loader.h"
 #include "log/klog.h"
 #include "sched/sched.h"
@@ -194,9 +195,24 @@ bool Rtl88xxBringUp(NicInfo& n)
     auto fw = duetos::core::FwLoad(req);
     if (fw.has_value())
     {
+        // Parse the Realtek header. A structurally valid blob lifts
+        // the NIC to Ready; a malformed blob marks Incompatible.
+        RtlFirmwareParsed parsed{};
+        auto p = RtlFirmwareParse(fw.value().data, fw.value().size, &parsed);
+        if (p.has_value() && parsed.valid)
+        {
+            RtlFirmwareLog(parsed);
+            n.firmware_pending = false;
+            n.wireless_fw_state = NicInfo::WirelessFwState::Ready;
+        }
+        else
+        {
+            arch::SerialWrite("[rtl88xx] firmware blob found but header parse "
+                              "failed — marking Incompatible\n");
+            n.firmware_pending = true;
+            n.wireless_fw_state = NicInfo::WirelessFwState::Incompatible;
+        }
         duetos::core::FwRelease(fw.value());
-        n.firmware_pending = false;
-        n.wireless_fw_state = NicInfo::WirelessFwState::Ready;
     }
     else
     {

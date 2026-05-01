@@ -7,6 +7,8 @@ _Last updated: 2026-05-01._
 
 | Date | Item | Effect |
 |------|------|--------|
+| 2026-05-01 | P0 #4 Wi-Fi Phase 3 — 802.11 frame headers + beacon parser | `kernel/net/wireless/ieee80211.h` (frame-control bits, type/subtype enums, capability bits, 35 IE IDs + 4 ID extensions, 12 cipher suites, 12 AKM suites, OUI helpers) + `kernel/net/wireless/beacon.{h,cpp}` (`BeaconParse` walker producing `BeaconParsed` with SSID / channel / capability / supported-rate / RSN-cipher-AKM views, security-taxonomy derivation across Open / WEP / WPA / WPA2 / WPA3 / Wpa2Ent / Wpa3Ent). Boot self-test exercises 5 frame variants: positive WPA2-PSK on channel 6, data-frame rejection, short-frame rejection, hidden-SSID handling, WPA3-SAE classification. See `.claude/knowledge/ieee80211-beacon-parser-v0.md`. |
+| 2026-05-01 | P0 #4 Wi-Fi Phase 1b — rtl88xx + bcm43xx envelope parsers | `kernel/drivers/net/rtl88xx_fw.{h,cpp}` (rtlwifi/rtw88/rtw89 32-byte header walker + signature classification covering 8192c/8192d/8723b/8723d/8821/8812/8814/8822b/8852a + tolerant ramcodesize bytes-vs-kbytes detection) + `kernel/drivers/net/bcm43xx_fw.{h,cpp}` (b43 record-stream walker — `'u'`/`'p'`/`'i'` types with 8-byte big-endian header + bounded 8-record table + truncation handling). Both wired into respective BringUp paths: parse on FwLoad hit, set `Ready` on success / `Incompatible` on parse failure. Boot self-tests cover positive cases for each silicon family + bad-signature/bad-type/short-header/length-overflow negative cases. See `.claude/knowledge/wireless-fw-parsers-v0.md`. |
 | 2026-05-01 | P0 #4 Wi-Fi (parser half of firmware-loader blocker) | `kernel/drivers/net/iwlwifi_fw.{h,cpp}` — TLV walker for the Intel iwlwifi microcode envelope (zero/magic preamble validation, 64-byte name, ver/build, INST/DATA/INIT/INIT_DATA/SEC_RT/SecureSecRt section capture, FLAGS/NUM_OF_CPU/FW_VERSION/PHY_SKU/HW_TYPE scalar capture, length-overflow bounds check). Wired into `IwlwifiBringUp` so a blob loaded via `FwLoad` is parsed in-place: structurally valid → `wireless_fw_state=Ready`, malformed → `Incompatible` (instead of the old "drop and continue in fw-pending"). Boot self-test (`IwlFirmwareSelfTest`) builds a synthetic 7-record TLV blob in 384 bytes and asserts every recognised field round-trips, plus 3 negative cases (bad magic, truncated header, length overflow). Format spec adapted clean-room from documented Intel ABI (also visible in Linux `iwl-drv.c` and OpenIntelWireless/itlwm). **Microcode upload + 802.11 MLME still deferred** — this slice closes only the parser half of the blocker. See `.claude/knowledge/iwl-fw-tlv-parser-v0.md` for the full rationale + edge-case list. |
 | 2026-05-01 | P0 #5 Settings panel | `kernel/apps/settings.{h,cpp}` — theme prev/next/HighContrast/Default, opacity ±, TZ ±, LOG OUT, plus a readout pane (theme name, opacity, UTC + LOCAL clocks, TZ offset, user list). Reachable via Start menu and `t/h/-/+/0` keys. New `ThemeRole::Settings`; every theme palette extended. |
 | 2026-05-01 | P3 #25 Notifications | `kernel/drivers/video/notify.{h,cpp}` — single-slot toast painted bottom-right above the taskbar, decays on the 1 Hz compose tick. Public API: `NotifyShow(text)`, `NotifyShowFor(text, ttl_ticks)`. Wired into theme-cycle hotkeys, Notes copy/paste, lock-screen, magnifier toggle. |
@@ -32,7 +34,7 @@ and finish the user-facing tier.
 | Item | Blocker | What lands when the blocker is gone |
 |------|---------|------------------------------------|
 | P0 #2 Audio output | Intel HDA codec discovery + CORB/RIRB stream programming (probe-only today; `kernel/drivers/audio/audio.cpp:43`) | Settings volume slider, system beep/chime on notifications, WAV / OGG playback app |
-| P0 #4 Wi-Fi connect-to-SSID | Microcode upload + 802.11 MLME state machine. Loader scaffold + iwlwifi TLV envelope parser landed 2026-05-01 (see `iwl-fw-tlv-parser-v0.md`); rtl88xx + bcm43xx parsers + secure-boot upload + scan/assoc/EAPOL still missing | Network flyout SSID picker, Settings → Network → Wi-Fi tab, captive-portal handler |
+| P0 #4 Wi-Fi connect-to-SSID | Microcode upload (per-vendor reset / secure-boot / section copy / ALIVE wait) + 802.11 MLME state machine (auth / assoc / EAPOL 4-way / key install) + RX dispatch wired into per-driver bottom-halves. Loader scaffold (2026-05-01) + iwlwifi TLV parser (2026-05-01) + rtl88xx/bcm43xx envelope parsers (2026-05-01) + 802.11 frame headers + beacon-IE walker (2026-05-01) all landed; the data-decode tier is complete. The control tier is gated on real-HW verification cycles | Network flyout SSID picker, Settings → Network → Wi-Fi tab, captive-portal handler |
 | P2 #12 Multi-monitor / resolution change | Per-vendor GPU drivers (Intel/AMD/NVIDIA all probe-only per `render-drivers-v6.md`); EDID parser; mode-set negotiation | Settings → Display tab with resolution / refresh-rate / monitor layout |
 | P2 #13 Brightness | ACPI EC driver (does not exist) + per-vendor backlight register paths | Settings brightness slider; Fn-key brightness hotkeys |
 | P2 #14 Battery + ACPI suspend | ACPI AML interpreter (only static tables parsed today); EC battery status registers; S3 / S0ix wake plumbing | Battery icon in tray, Settings → Power, lid-close suspend |
@@ -114,32 +116,43 @@ future slice can pick one without re-deriving the field.
 - **Expected:** plug in an external USB mouse, cursor moves.
 - **Owners:** `kernel/drivers/usb/class/hid*`.
 
-### 4. Wi-Fi connect-to-SSID [PARTIAL — firmware loader scaffold + iwlwifi TLV parser landed 2026-05-01; upload + MLME still missing]
+### 4. Wi-Fi connect-to-SSID [PARTIAL — data-decode tier complete 2026-05-01; control tier still missing (real-HW gated)]
 - **Today:** `iwlwifi`, `rtl88xx`, `bcm43xx` are chip-ID-probe-only
   shells (`wireless-drivers-v0.md`); each calls
   `core::FwLoad(...)` against the VFS-backed firmware loader
-  scaffold (`/lib/firmware/duetos/open/<vendor>/<basename>` then
-  `/lib/firmware/<vendor>/<basename>`). When a blob IS present,
-  iwlwifi now parses it in-place via `IwlFirmwareParse`
-  (`iwl-fw-tlv-parser-v0.md`) — TLV envelope validated, sections
-  captured, ver/build extracted. Today the typical host has no
-  blob installed, so `FwLoad` returns NotFound and the NIC stays
-  in `firmware_pending` exactly as before.
-- **Still missing:** rtl88xx + bcm43xx envelope parsers (each
-  vendor uses a different format — Realtek's is a section/protection
-  table, Broadcom's is a b43 cfg + `.fw` pair). Microcode upload
+  scaffold. When a blob IS present, the matching driver parses
+  it in-place via the per-vendor envelope parser:
+    - iwlwifi: `IwlFirmwareParse` (TLV walker — see
+      `iwl-fw-tlv-parser-v0.md`).
+    - rtl88xx: `RtlFirmwareParse` (rtlwifi/rtw88/rtw89 32-byte
+      header — see `wireless-fw-parsers-v0.md`).
+    - bcm43xx: `BcmFirmwareParse` (b43 record stream — see
+      `wireless-fw-parsers-v0.md`).
+  The 802.11 frame-decode tier also landed: `kernel/net/wireless/`
+  carries `ieee80211.h` (frame-control bits, type/subtype, IE
+  IDs, cipher / AKM suites) + `beacon.{h,cpp}` (`BeaconParse`
+  produces a `BeaconParsed` view with SSID, channel, RSN-derived
+  security taxonomy, supported rates). Self-tests for all four
+  parsers run at boot.
+- **Still missing (gated on real hardware):** Microcode upload
   to the chip (per-silicon `CSR_RESET` / `CSR_GP_CNTRL.MAC_INIT`,
   secure-boot handshake, INST + DATA + SEC_RT copy into
-  FW_LOAD_BUFFER, ALIVE wait). 802.11 MLME (scan / association /
-  EAPOL / key install). Until those land the GUI flyout still
-  honestly reports "no driver online for SSID picking".
+  FW_LOAD_BUFFER, ALIVE wait). TX/RX ring setup per vendor
+  (TFD/RBD for iwlwifi, descriptor rings for rtl88xx, DMA64
+  for bcm43xx). 802.11 MLME state machine (scan transmission,
+  authentication, association, EAPOL 4-way handshake with
+  PTK/GTK derivation, key install via vendor MIC API). RX
+  bottom-half that delivers received beacons / probe-responses
+  to `BeaconParse`. UI integration — flyout SSID picker,
+  Settings → Network → Wi-Fi tab, captive-portal handler.
 - **Expected:** open the flyout, pick an SSID, type a password,
   get DHCP.
-- **Owners:** `kernel/drivers/net/wireless/` (per-vendor parser
-  + upload pass), `kernel/net/80211/` (does not exist; will need
-  cfg80211-equivalent), plus a real firmware-blob distribution
-  channel (today `/lib/firmware` is a ramfs node — that's fine
-  for dev, needs FAT32-mount support for shipping installs).
+- **Owners:** `kernel/drivers/net/wireless/` (per-vendor upload +
+  ring setup), `kernel/net/wireless/` (MLME state machine),
+  `kernel/net/wifi.{h,cpp}` (cfg80211-equivalent registration),
+  plus a real firmware-blob distribution channel (today
+  `/lib/firmware` is a ramfs node — that's fine for dev,
+  needs FAT32-mount support for shipping installs).
 
 ### 5. Settings panel [LANDED 2026-05-01]
 - **Today (2026-05-01):** v0 landed. New kernel app at
