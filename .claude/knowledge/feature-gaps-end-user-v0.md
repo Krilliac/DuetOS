@@ -36,7 +36,7 @@ and finish the user-facing tier.
 | P2 #13 Brightness | ACPI EC driver (does not exist) + per-vendor backlight register paths | Settings brightness slider; Fn-key brightness hotkeys |
 | P2 #14 Battery + ACPI suspend | ACPI AML interpreter (only static tables parsed today); EC battery status registers; S3 / S0ix wake plumbing | Battery icon in tray, Settings → Power, lid-close suspend |
 | P2 #15 PE/ELF launching from /APPS | The /APPS *.MNF enumeration landed; what's still missing is the loader runtime so a manifest with `kind=pe path=APPS/foo.exe` can actually launch a binary | Click an /APPS entry → load + run a PE32+ executable |
-| P2 #16 Disk installer | FAT32 write + GPT write + bootloader copy | Installer app that lays DuetOS down on an NVMe partition |
+| P2 #16 Disk installer | GPT write (`kernel/fs/gpt.cpp` is probe-only) + FAT32 mkfs (no equivalent of `make-gpt-image.py`'s BPB-laydown logic in the kernel yet) + bootloader copy. Plan + verification ladder + risk notes captured in `.claude/knowledge/disk-installer-plan.md`. | Installer app that lays DuetOS down on an NVMe partition |
 | P2 #17 System updater | Code-signing infrastructure + A/B kernel-slot layout | "Check for updates" surface; rollback |
 | P2 #18 Bluetooth | Host-controller (HCI) driver + L2CAP / RFCOMM / GATT stack | Pair mouse / keyboard / headset / phone |
 | P2 #19 Printer | USB printer class driver + IPP / PostScript / raster pipeline | Print from Notes |
