@@ -149,6 +149,7 @@
 #include "security/login.h"
 #include "core/init.h"
 #include "core/panic.h"
+#include "core/session_restore.h"
 #include "syscall/cap_gate.h"
 #include "proc/process.h"
 #include "util/random.h"
@@ -1875,6 +1876,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::core::KlogPersistInstall();
     DUETOS_BOOT_SELFTEST(duetos::core::KlogPersistSelfTest());
 
+    // Session restore: read SESSION.CFG and apply the saved
+    // theme + per-app window positions. No-op on first boot
+    // (file doesn't exist) or if FAT32 isn't mounted.
+    // SessionRestoreSelfTest exercises the parse path in
+    // memory without touching the on-disk config.
+    DUETOS_BOOT_SELFTEST(duetos::core::SessionRestoreSelfTest());
+    duetos::core::SessionRestoreApply();
+
     SerialWrite("[boot] Probing read-only FS shells (ext4 / NTFS / exFAT).\n");
     duetos::fs::ext4::Ext4ScanAll();
     duetos::fs::ntfs::NtfsScanAll();
@@ -2191,6 +2200,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             // so muscle-memory for the existing chord stays intact.
             if (ctrl && alt && (ev.code == 'k' || ev.code == 'K'))
             {
+                // Capture session state BEFORE the compositor
+                // lock — SessionRestoreSave issues a FAT32 write
+                // and we don't want to hold the lock across that
+                // I/O. State is read via WindowGetBounds, which
+                // takes its own short-lived lock.
+                duetos::core::SessionRestoreSave();
                 duetos::drivers::video::CompositorLock();
                 duetos::core::AuthLogout();
                 duetos::core::LoginStart(duetos::core::LoginMode::Gui);
@@ -2666,6 +2681,11 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             // tick. Outside the compositor lock so a slow FAT32
             // append never stalls the desktop redraw.
             duetos::core::KlogPersistFlush();
+            // Autosave the theme + window-position session state.
+            // Internally throttled — bytewise-equal payloads skip
+            // the FAT32 write, so a stable session writes once
+            // and then idles.
+            duetos::core::SessionRestoreSave();
             duetos::drivers::video::CompositorLock();
             // While the login gate is up the full-screen login
             // panel owns the framebuffer. Repaint it from its

@@ -6,6 +6,7 @@
 #include "drivers/video/notify.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
+#include "core/session_restore.h"
 #include "security/auth.h"
 #include "security/login.h"
 #include "time/timezone.h"
@@ -107,6 +108,9 @@ void DoDefault()
 
 void DoLogOut()
 {
+    // Persist theme + window positions before the gate goes up
+    // so the next login lands in the same layout the user left.
+    duetos::core::SessionRestoreSave();
     duetos::core::AuthLogout();
     duetos::core::LoginStart(duetos::core::LoginMode::Gui);
 }

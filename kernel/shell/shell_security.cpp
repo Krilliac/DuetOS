@@ -10,6 +10,7 @@
 
 #include "shell/shell_internal.h"
 
+#include "core/session_restore.h"
 #include "security/auth.h"
 #include "security/login.h"
 
@@ -204,6 +205,10 @@ void CmdLogout()
     }
     ConsoleWrite("LOGOUT: GOODBYE, ");
     ConsoleWriteln(AuthCurrentUserName());
+    // Snapshot theme + window positions before the gate goes
+    // back up — the next login should land in the same desktop
+    // layout the user just left.
+    duetos::core::SessionRestoreSave();
     LoginReopen();
 }
 
