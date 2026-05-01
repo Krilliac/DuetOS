@@ -930,6 +930,32 @@ struct Process
     // directly with no explicit init call.
     ::duetos::ipc::HandleTable kobj_handles;
 
+    // Per-process stdin ring buffer. Producer is the kbd-reader
+    // task in core/main.cpp's keyboard dispatch (after login is
+    // closed and no app has key focus); consumer is SYS_STDIN_READ
+    // from ring 3. Single-producer / single-consumer in v0 — one
+    // ring-3 task per process drains stdin, the kbd-reader thread
+    // is the only producer.
+    //
+    // 256 bytes is plenty for line-oriented use: a typical stdin
+    // line is ≤ 80 chars, the userland shell drains one line per
+    // Enter, and overflow drops the oldest byte (treats stdin like
+    // a tty's input queue, not a guaranteed-delivery pipe).
+    //
+    // Zero-initialised by ProcessCreate's memset — no explicit
+    // init needed. `head == tail` on a fresh process means the
+    // ring is empty; readers block on `waiters` until the kbd-
+    // reader pushes a byte.
+    struct StdinRing
+    {
+        static constexpr u32 kCap = 256;
+        u8 buf[kCap];
+        u32 head; // producer cursor (kbd-reader); writes new bytes
+        u32 tail; // consumer cursor (SYS_STDIN_READ); drains
+        sched::WaitQueue waiters;
+    };
+    StdinRing stdin_ring;
+
     u64 refcount;
 };
 
@@ -1044,5 +1070,39 @@ u64 ProcessResolveDllExportByBase(const Process* proc, u64 base_va, const char* 
 /// a Process — that path needs an AddressSpace + scheduler that
 /// aren't online at the call site. Panics on any failure.
 void ProcessSelfTest();
+
+/// Push one cooked ASCII byte into `proc`'s stdin ring and wake any
+/// task blocked in SYS_STDIN_READ on that process. Safe to call
+/// from task context with interrupts on; the producer-side cursor
+/// update is single-writer (the kbd-reader thread is the only
+/// caller in v0). Drops the oldest byte on overflow so a wedged
+/// reader doesn't back-pressure the IRQ-fed input pipeline.
+void ProcessFeedStdinChar(Process* proc, char c);
+
+/// Drain up to `cap` bytes from `proc`'s stdin ring into `dst_user`
+/// (a ring-3 VA). Blocks via the ring's waitqueue until at least
+/// one byte is available. Returns the number of bytes copied, or
+/// the kernel-side -1 on a bad user pointer. Caller-side ABI
+/// matches POSIX read(): a partial copy is fine — never blocks for
+/// "fill the buffer," always returns as soon as any data is ready.
+i64 ProcessReadStdinBlocking(Process* proc, void* dst_user, u64 cap);
+
+/// Last-stage stdin sink — set by the kbd-reader once login is
+/// closed and ring-3 input is the right destination. nullptr on
+/// boot until the userland shell first calls SYS_STDIN_READ;
+/// cleared on process release. Callers should prefer
+/// `ProcessFeedStdinFocusChar` to avoid the read-pointer / process-
+/// release race.
+Process* StdinFocusGet();
+void StdinFocusSet(Process* proc);
+void StdinFocusClearIf(Process* proc);
+
+/// Push one cooked byte into whatever process currently owns the
+/// stdin focus, atomically w.r.t. process teardown — the read of
+/// the focus pointer and the push happen with interrupts disabled,
+/// so the reaper can't free the process between the two on a
+/// single-CPU system. No-op when no focus is registered. The
+/// canonical kbd-reader entry point.
+void ProcessFeedStdinFocusChar(char c);
 
 } // namespace duetos::core

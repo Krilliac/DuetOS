@@ -1308,8 +1308,12 @@ void _start(void)
     //   * GetLogicalDrives returns 0x00800000 (bit 23 = X:).
     //   * GetDriveTypeW(L"X:\\") returns 3 (DRIVE_FIXED).
     //   * SetErrorMode returns 0 (previous mode).
-    //   * FormatMessageW returns 0 (can't format — caller
-    //     should handle).
+    //   * FormatMessageW returns the length of a canned message
+    //     (kernel32 has a small built-in table for FROM_SYSTEM
+    //     callers — see kernel32.c::FormatMessageW). The exact
+    //     length depends on the message ID; we just assert the
+    //     write was non-empty and the buffer was NUL-terminated
+    //     within bounds.
     DWORD drives_drives = GetLogicalDrives();
     static const WCHAR kDriveX[] = {'X', ':', '\\', 0};
     unsigned int drives_drive_type = GetDriveTypeW(kDriveX);
@@ -1321,7 +1325,8 @@ void _start(void)
 
     const char drives_ok[] = "[drives] drives + error mode + format OK\n";
     const char drives_bad[] = "[drives] misc-stubs FAILED invariants\n";
-    BOOL drives_pass = drives_drives == 0x00800000 && drives_drive_type == 3 && drives_prev_em == 0 && drives_fm == 0;
+    BOOL drives_pass = drives_drives == 0x00800000 && drives_drive_type == 3 && drives_prev_em == 0 && drives_fm > 0 &&
+                       drives_fm < 16 && drives_fmbuf[drives_fm] == 0;
     DWORD drives_written = 0;
     if (drives_pass)
         WriteFile(out, drives_ok, sizeof(drives_ok) - 1, &drives_written, 0);

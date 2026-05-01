@@ -503,23 +503,36 @@ bool UnlinkForProcess(::duetos::core::Process* proc, const char* path)
 
 bool StatPathForProcess(::duetos::core::Process* proc, const char* path, u64* out_size, bool* out_is_dir)
 {
-    (void)proc;
-    if (path == nullptr || path[0] == '\0')
+    if (proc == nullptr || path == nullptr || path[0] == '\0')
         return false;
     u32 idx = 0;
     const char* rest = nullptr;
-    if (!ParseDiskPath(path, &idx, &rest))
-        return false;
-    const fat32::Volume* v = fat32::Fat32Volume(idx);
-    if (v == nullptr)
-        return false;
-    fat32::DirEntry e;
-    if (!fat32::Fat32LookupPath(v, rest, &e))
+    if (ParseDiskPath(path, &idx, &rest))
+    {
+        const fat32::Volume* v = fat32::Fat32Volume(idx);
+        if (v == nullptr)
+            return false;
+        fat32::DirEntry e;
+        if (!fat32::Fat32LookupPath(v, rest, &e))
+            return false;
+        if (out_size != nullptr)
+            *out_size = e.size_bytes;
+        if (out_is_dir != nullptr)
+            *out_is_dir = (e.attributes & 0x10) != 0; // ATTR_DIRECTORY
+        return true;
+    }
+    // Ramfs fall-through — mirror OpenForProcess so a stat call
+    // sees every path the open call would. Without this,
+    // GetFileAttributesW on a ramfs path (e.g. "/etc/version")
+    // returns INVALID_FILE_ATTRIBUTES even though CreateFileW on
+    // the same path succeeds.
+    const RamfsNode* n = VfsLookup(proc->root, path, kPathMax);
+    if (n == nullptr)
         return false;
     if (out_size != nullptr)
-        *out_size = e.size_bytes;
+        *out_size = (n->type == RamfsNodeType::kFile) ? n->file_size : 0;
     if (out_is_dir != nullptr)
-        *out_is_dir = (e.attributes & 0x10) != 0; // ATTR_DIRECTORY
+        *out_is_dir = (n->type == RamfsNodeType::kDir);
     return true;
 }
 

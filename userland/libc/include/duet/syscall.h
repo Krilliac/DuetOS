@@ -22,4 +22,11 @@
 #define DUET_SYS_EXIT 0
 #define DUET_SYS_GETPID 1
 #define DUET_SYS_WRITE 2
-#define DUET_SYS_READ 3
+
+/* SYS_STDIN_READ — drain cooked ASCII bytes from the calling
+ * process's per-process stdin ring. Backs `read(STDIN_FILENO,
+ * buf, len)`. Blocks until at least one byte is available.
+ * Distinct from the kernel's path-based SYS_READ (= 5), which
+ * takes a NUL-terminated ASCII path pointer in rdi rather than
+ * a file descriptor + buffer. */
+#define DUET_SYS_STDIN_READ 171

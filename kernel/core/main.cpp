@@ -2673,14 +2673,29 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             // rubs out the last input; Enter submits + dispatches.
             // Mirror input chars to COM1 so a headless session is
             // still diagnosable end-to-end.
+            //
+            // In parallel, push the cooked byte into the
+            // registered ring-3 stdin focus (if any) so userland
+            // binaries calling SYS_STDIN_READ see real keystrokes.
+            // The kernel-shell + ring-3-stdin paths are
+            // independent; a userland program that reads stdin
+            // doesn't suppress the kernel-shell line editor (and
+            // vice versa). v0 policy is intentionally permissive
+            // — the userland shell is a peer of the kernel shell,
+            // not a replacement. ProcessFeedStdinFocusChar reads
+            // the focus pointer + does the push under a single
+            // IRQ-off section so the reaper can't free the
+            // process between the two operations.
             if (ev.code == kKeyBackspace)
             {
                 duetos::core::ShellBackspace();
+                duetos::core::ProcessFeedStdinFocusChar('\x7F');
                 dirty = true;
             }
             else if (ev.code == kKeyEnter)
             {
                 duetos::core::ShellSubmit();
+                duetos::core::ProcessFeedStdinFocusChar('\n');
                 dirty = true;
             }
             else if (ev.code == kKeyArrowUp)
@@ -2702,6 +2717,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             {
                 const char ch = static_cast<char>(ev.code);
                 duetos::core::ShellFeedChar(ch);
+                duetos::core::ProcessFeedStdinFocusChar(ch);
                 const char buf[2] = {ch, '\0'};
                 SerialWrite(buf);
                 dirty = true;
