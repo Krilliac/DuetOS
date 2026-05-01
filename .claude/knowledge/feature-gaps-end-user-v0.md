@@ -7,6 +7,7 @@ _Last updated: 2026-05-01._
 
 | Date | Item | Effect |
 |------|------|--------|
+| 2026-05-01 | P0 #4 Wi-Fi (parser half of firmware-loader blocker) | `kernel/drivers/net/iwlwifi_fw.{h,cpp}` — TLV walker for the Intel iwlwifi microcode envelope (zero/magic preamble validation, 64-byte name, ver/build, INST/DATA/INIT/INIT_DATA/SEC_RT/SecureSecRt section capture, FLAGS/NUM_OF_CPU/FW_VERSION/PHY_SKU/HW_TYPE scalar capture, length-overflow bounds check). Wired into `IwlwifiBringUp` so a blob loaded via `FwLoad` is parsed in-place: structurally valid → `wireless_fw_state=Ready`, malformed → `Incompatible` (instead of the old "drop and continue in fw-pending"). Boot self-test (`IwlFirmwareSelfTest`) builds a synthetic 7-record TLV blob in 384 bytes and asserts every recognised field round-trips, plus 3 negative cases (bad magic, truncated header, length overflow). Format spec adapted clean-room from documented Intel ABI (also visible in Linux `iwl-drv.c` and OpenIntelWireless/itlwm). **Microcode upload + 802.11 MLME still deferred** — this slice closes only the parser half of the blocker. See `.claude/knowledge/iwl-fw-tlv-parser-v0.md` for the full rationale + edge-case list. |
 | 2026-05-01 | P0 #5 Settings panel | `kernel/apps/settings.{h,cpp}` — theme prev/next/HighContrast/Default, opacity ±, TZ ±, LOG OUT, plus a readout pane (theme name, opacity, UTC + LOCAL clocks, TZ offset, user list). Reachable via Start menu and `t/h/-/+/0` keys. New `ThemeRole::Settings`; every theme palette extended. |
 | 2026-05-01 | P3 #25 Notifications | `kernel/drivers/video/notify.{h,cpp}` — single-slot toast painted bottom-right above the taskbar, decays on the 1 Hz compose tick. Public API: `NotifyShow(text)`, `NotifyShowFor(text, ttl_ticks)`. Wired into theme-cycle hotkeys, Notes copy/paste, lock-screen, magnifier toggle. |
 | 2026-05-01 | P1 #10 Lock screen | Ctrl+Alt+K reopens the GUI login gate via `AuthLogout` + `LoginStart(Gui)`. Bound separately from Ctrl+Alt+L (taskbar drag-lock) so existing chord muscle memory is intact. |
@@ -31,7 +32,7 @@ and finish the user-facing tier.
 | Item | Blocker | What lands when the blocker is gone |
 |------|---------|------------------------------------|
 | P0 #2 Audio output | Intel HDA codec discovery + CORB/RIRB stream programming (probe-only today; `kernel/drivers/audio/audio.cpp:43`) | Settings volume slider, system beep/chime on notifications, WAV / OGG playback app |
-| P0 #4 Wi-Fi connect-to-SSID | Per-vendor firmware loader (does not exist) + 802.11 MLME state machine; `iwlwifi/rtl88xx/bcm43xx` are chip-ID-probe-only | Network flyout SSID picker, Settings → Network → Wi-Fi tab, captive-portal handler |
+| P0 #4 Wi-Fi connect-to-SSID | Microcode upload + 802.11 MLME state machine. Loader scaffold + iwlwifi TLV envelope parser landed 2026-05-01 (see `iwl-fw-tlv-parser-v0.md`); rtl88xx + bcm43xx parsers + secure-boot upload + scan/assoc/EAPOL still missing | Network flyout SSID picker, Settings → Network → Wi-Fi tab, captive-portal handler |
 | P2 #12 Multi-monitor / resolution change | Per-vendor GPU drivers (Intel/AMD/NVIDIA all probe-only per `render-drivers-v6.md`); EDID parser; mode-set negotiation | Settings → Display tab with resolution / refresh-rate / monitor layout |
 | P2 #13 Brightness | ACPI EC driver (does not exist) + per-vendor backlight register paths | Settings brightness slider; Fn-key brightness hotkeys |
 | P2 #14 Battery + ACPI suspend | ACPI AML interpreter (only static tables parsed today); EC battery status registers; S3 / S0ix wake plumbing | Battery icon in tray, Settings → Power, lid-close suspend |
@@ -113,15 +114,32 @@ future slice can pick one without re-deriving the field.
 - **Expected:** plug in an external USB mouse, cursor moves.
 - **Owners:** `kernel/drivers/usb/class/hid*`.
 
-### 4. Wi-Fi connect-to-SSID [BLOCKED on firmware loader + MLME]
+### 4. Wi-Fi connect-to-SSID [PARTIAL — firmware loader scaffold + iwlwifi TLV parser landed 2026-05-01; upload + MLME still missing]
 - **Today:** `iwlwifi`, `rtl88xx`, `bcm43xx` are chip-ID-probe-only
-  shells (`wireless-drivers-v0.md`) with `firmware_pending=true`.
-  The network flyout panel (`network-flyout-panel-v0.md`)
-  honestly displays "no driver".
+  shells (`wireless-drivers-v0.md`); each calls
+  `core::FwLoad(...)` against the VFS-backed firmware loader
+  scaffold (`/lib/firmware/duetos/open/<vendor>/<basename>` then
+  `/lib/firmware/<vendor>/<basename>`). When a blob IS present,
+  iwlwifi now parses it in-place via `IwlFirmwareParse`
+  (`iwl-fw-tlv-parser-v0.md`) — TLV envelope validated, sections
+  captured, ver/build extracted. Today the typical host has no
+  blob installed, so `FwLoad` returns NotFound and the NIC stays
+  in `firmware_pending` exactly as before.
+- **Still missing:** rtl88xx + bcm43xx envelope parsers (each
+  vendor uses a different format — Realtek's is a section/protection
+  table, Broadcom's is a b43 cfg + `.fw` pair). Microcode upload
+  to the chip (per-silicon `CSR_RESET` / `CSR_GP_CNTRL.MAC_INIT`,
+  secure-boot handshake, INST + DATA + SEC_RT copy into
+  FW_LOAD_BUFFER, ALIVE wait). 802.11 MLME (scan / association /
+  EAPOL / key install). Until those land the GUI flyout still
+  honestly reports "no driver online for SSID picking".
 - **Expected:** open the flyout, pick an SSID, type a password,
   get DHCP.
-- **Owners:** `kernel/drivers/net/wireless/`, plus a
-  firmware-loader subsystem (does not exist).
+- **Owners:** `kernel/drivers/net/wireless/` (per-vendor parser
+  + upload pass), `kernel/net/80211/` (does not exist; will need
+  cfg80211-equivalent), plus a real firmware-blob distribution
+  channel (today `/lib/firmware` is a ramfs node — that's fine
+  for dev, needs FAT32-mount support for shipping installs).
 
 ### 5. Settings panel [LANDED 2026-05-01]
 - **Today (2026-05-01):** v0 landed. New kernel app at

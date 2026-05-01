@@ -69,6 +69,7 @@
 #include "drivers/gpu/gpu.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/input/ps2mouse.h"
+#include "drivers/net/iwlwifi_fw.h"
 #include "drivers/net/net.h"
 #include "drivers/pci/pci.h"
 #include "drivers/power/power.h"
@@ -1752,6 +1753,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Bringing up firmware loader (scaffold).\n");
     duetos::core::FwLoaderInit();
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::IwlFirmwareSelfTest());
 
     SerialWrite("[boot] Detecting NICs.\n");
     duetos::drivers::net::NetInit();
