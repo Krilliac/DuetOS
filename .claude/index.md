@@ -68,6 +68,7 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | GPU discovery v0 — PCI classification + BAR map | [knowledge/gpu-discovery-v0.md](knowledge/gpu-discovery-v0.md) | Observation | Active | 2026-04-22 |
 | Driver shells v0 — net / usb / audio / gpu-probes | [knowledge/driver-shells-v0.md](knowledge/driver-shells-v0.md) | Observation | Active | 2026-04-22 |
 | Render / drivers — current state (through v6) | [knowledge/render-drivers-v6.md](knowledge/render-drivers-v6.md) | Observation + Decision | Active | 2026-04-25 |
+| EDID 1.3/1.4 base-block parser v0 — clean-room VESA E-EDID decoder (header / vendor / video-input / DTD timings / monitor descriptors / standard timings / established timings) + 5-fixture boot self-test (incl. bad-checksum / bad-header / short-buffer negative cases) + `monitor` shell command | [knowledge/edid-parser-v0.md](knowledge/edid-parser-v0.md) | Observation + Decision | Active — parser only; DDC/I2C transport gated on per-vendor GPU drivers | 2026-05-01 |
 | xHCI enumeration v0 — Address Device + GET_DESCRIPTOR(Device) | [knowledge/xhci-enumeration-v0.md](knowledge/xhci-enumeration-v0.md) | Observation | Active | 2026-04-23 |
 | xHCI HID boot keyboard — end-to-end USB keyboard input | [knowledge/xhci-hid-keyboard-v0.md](knowledge/xhci-hid-keyboard-v0.md) | Observation | Active | 2026-04-23 |
 | Intel e1000 NIC driver — real packet I/O on commodity wired gigabit | [knowledge/e1000-driver-v0.md](knowledge/e1000-driver-v0.md) | Observation | Active | 2026-04-23 |

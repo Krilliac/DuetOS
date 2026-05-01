@@ -628,7 +628,7 @@ const char* const kCommandSet[] = {
     "crtrace",   "crprobe",   "net",     "usbnet",   "instr",    "dumpstate", "bp",         "breakpoint", "login",
     "logout",    "passwd",    "useradd", "userdel",  "users",    "who",       "su",         "hwmon",      "vbe",
     "ping",      "nslookup",  "ntp",     "http",     "shutdown", "poweroff",  "beep",       "inspect",    "theme",
-    "addr2sym",  "cap-audit",
+    "addr2sym",  "cap-audit", "monitor",
 };
 const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1125,6 +1125,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "vbe"))
     {
         CmdVbe(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "monitor"))
+    {
+        CmdMonitor(argc, argv);
         return;
     }
     if (StrEq(cmd, "ping"))
