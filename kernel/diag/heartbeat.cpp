@@ -9,6 +9,7 @@
 #include "security/fault_domain.h"
 #include "log/klog.h"
 #include "core/panic.h"
+#include "diag/fault_react.h"
 #include "diag/runtime_checker.h"
 
 namespace duetos::core
@@ -118,6 +119,15 @@ u64 DeltaClampMonotonic(const char* counter_name, u64 now, u64 prev)
         const auto& h = RuntimeCheckerStatusRead();
         LogWithValue(LogLevel::Info, "kheartbeat", "health_last_scan_issues", h.last_scan_issues);
         LogWithValue(LogLevel::Info, "kheartbeat", "health_issues_total", h.issues_found_total);
+
+        // Drain any deferred fault-react reports recorded from
+        // the trap handler since the previous beat. Each pending
+        // slot is dispatched through diag::FaultReactDispatch so
+        // the per-domain policy + kernel-owned floor get a say
+        // before the lossless restart bool fires. Must run BEFORE
+        // FaultDomainTick so a `RestartDomain` reaction's
+        // re-MarkRestart is picked up by the same beat.
+        ::duetos::diag::FaultReactDrainPending();
 
         // Drain any fault-domain restart requests posted from the
         // trap handler since the previous beat. Cheap when no

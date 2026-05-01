@@ -21,7 +21,9 @@
 #include "diag/ubsan.h"
 
 #include "arch/x86_64/serial.h"
+#include "diag/fault_react.h"
 #include "log/klog.h"
+#include "security/fault_domain.h"
 #include "util/types.h"
 
 namespace duetos::diag
@@ -118,23 +120,52 @@ struct AlignmentAssumptionData
 // Centralised report path. Keeps every handler down to one line of
 // glue and ensures every report increments the counter, so a future
 // runtime checker can ask "any UB since boot?" in O(1).
+//
+// Dispatch policy: routes through diag::FaultReactDispatch with
+// kind=Unknown and severity=Degraded. The dispatcher's default
+// policy for Unknown is Continue — the floor doesn't escalate
+// either, so the observable outcome is the same as the previous
+// log-and-return path. The win is that UBSan reports now show
+// up in `inspect fault-react` counters, so a "any UB since boot?"
+// triage answer comes from the same chokepoint as every other
+// fault class.
 void Report(const char* kind, const SourceLocation* loc)
 {
     ++g_reports;
-    if (loc == nullptr || loc->filename == nullptr)
+
+    // Detailed serial line, preserved verbatim — host-side
+    // tooling already greps for "[ubsan]" and the file:line:col
+    // anchor, so we keep the format stable.
+    if (loc != nullptr && loc->filename != nullptr)
+    {
+        arch::SerialWrite("[ubsan] ");
+        arch::SerialWrite(kind);
+        arch::SerialWrite(" at ");
+        arch::SerialWrite(loc->filename);
+        arch::SerialWrite(":");
+        arch::SerialWriteHex(loc->line);
+        arch::SerialWrite(":");
+        arch::SerialWriteHex(loc->column);
+        arch::SerialWrite("\n");
+    }
+    else
     {
         KLOG_WARN_S("ubsan", "incident", "kind", kind);
-        return;
     }
-    arch::SerialWrite("[ubsan] ");
-    arch::SerialWrite(kind);
-    arch::SerialWrite(" at ");
-    arch::SerialWrite(loc->filename);
-    arch::SerialWrite(":");
-    arch::SerialWriteHex(loc->line);
-    arch::SerialWrite(":");
-    arch::SerialWriteHex(loc->column);
-    arch::SerialWrite("\n");
+
+    // Dispatcher hand-off. UBSan handlers can run from any
+    // context the compiler emitted them in (including IRQ),
+    // so we conform to the dispatcher's IRQ-safety contract by
+    // not allocating / locking — FaultReactDispatch itself only
+    // calls klog (which is IRQ-safe).
+    ::duetos::diag::FaultEvidence ev = {};
+    ev.source = "diag/ubsan";
+    ev.kind = ::duetos::diag::FaultKind::Unknown;
+    ev.severity = ::duetos::diag::FaultSeverity::Degraded;
+    ev.attempt_count = 0;
+    ev.faulting_rip = (loc != nullptr) ? loc->line : 0;
+    ev.aux = 0;
+    (void)::duetos::diag::FaultReactDispatch(::duetos::core::kFaultDomainInvalid, ev);
 }
 
 } // namespace

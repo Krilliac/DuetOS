@@ -42,8 +42,10 @@
 #include "mm/kheap.h"
 #include "sched/sched.h"
 #include "security/guard.h"
+#include "diag/fault_react.h"
 #include "log/klog.h"
 #include "core/panic.h"
+#include "security/fault_domain.h"
 
 // __stack_chk_guard symbol is C-linkage.
 extern "C" duetos::u64 __stack_chk_guard;
@@ -420,6 +422,15 @@ void Report(HealthIssue issue)
     // Isolate is enacted by the detector itself (task walker
     // kills the offending task) and LogOnly has already done
     // its job (the Log call above).
+    //
+    // The Panic-class branches route through diag::FaultReactDispatch
+    // rather than calling Panic directly. The dispatcher's
+    // kernel-owned floor classifies "health" as kernel-critical
+    // (kind = MemoryCorruption) and escalates to Halt regardless,
+    // so the observable outcome is identical — but the dispatch
+    // counter increments and any future per-domain policy on
+    // "kernel/health" gets a chance to react before the floor
+    // takes over.
     const HealthResponse policy = ResponseFor(issue);
     if (policy == HealthResponse::Heal)
     {
@@ -432,11 +443,29 @@ void Report(HealthIssue issue)
         }
         arch::SerialWrite("[health] HEAL FAILED for ");
         arch::SerialWrite(HealthIssueName(issue));
-        arch::SerialWrite(" — escalating to Panic\n");
+        arch::SerialWrite(" — escalating via fault-react dispatcher\n");
+        ::duetos::diag::FaultEvidence ev = {};
+        ev.source = "kernel/health";
+        ev.kind = ::duetos::diag::FaultKind::MemoryCorruption;
+        ev.severity = ::duetos::diag::FaultSeverity::Critical;
+        ev.attempt_count = 0;
+        ev.faulting_rip = 0;
+        ev.aux = static_cast<u64>(issue);
+        (void)::duetos::diag::FaultReactDispatch(::duetos::core::kFaultDomainInvalid, ev);
+        // Dispatcher's MemoryCorruption floor is Halt — does not return.
         Panic("health", "heal failed — kernel state cannot be restored");
     }
     if (policy == HealthResponse::Panic)
     {
+        ::duetos::diag::FaultEvidence ev = {};
+        ev.source = "kernel/health";
+        ev.kind = ::duetos::diag::FaultKind::MemoryCorruption;
+        ev.severity = ::duetos::diag::FaultSeverity::Critical;
+        ev.attempt_count = 0;
+        ev.faulting_rip = 0;
+        ev.aux = static_cast<u64>(issue);
+        (void)::duetos::diag::FaultReactDispatch(::duetos::core::kFaultDomainInvalid, ev);
+        // Dispatcher's MemoryCorruption floor is Halt — does not return.
         Panic("health", "security-critical finding with no heal path");
     }
 }

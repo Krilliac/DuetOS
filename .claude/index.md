@@ -22,6 +22,7 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | DebugPanicOrWarn — release-stable variant of Panic (debug-panic / release-warn-and-recover) — 58 sites converted across 6 passes | [knowledge/debug-panic-or-warn-v0.md](knowledge/debug-panic-or-warn-v0.md) | Decision + Pattern | Active | 2026-05-01 |
 | Kernel-stack guard pages v0 — unmapped low-edge page per task | [knowledge/kernel-stack-guard-v0.md](knowledge/kernel-stack-guard-v0.md) | Observation + Decision | Active | 2026-04-23 |
 | Kernel isolation v0 — extable + fault domains | [knowledge/kernel-isolation-v0.md](knowledge/kernel-isolation-v0.md) | Decision + Pattern | Active | 2026-04-23 |
+| FaultReact v0/v1 — self-defensive fault-reaction dispatcher (per-domain policy + floor + DriverFault + trap-deferred queue + reporter migrations + shell cmd) | [knowledge/fault-react-v0.md](knowledge/fault-react-v0.md) | Decision + Pattern + Observation | Active — v1 shipped; only `KillProcess` real impl deferred (blocked on ring-3) | 2026-05-01 |
 | Rust bring-up plan — trigger, layout, toolchain, CI | [knowledge/rust-bringup-plan.md](knowledge/rust-bringup-plan.md) | Decision | Active | 2026-04-21 |
 | Storage + Filesystem roadmap — block layer → NVMe/AHCI → GPT → FS | [knowledge/storage-and-filesystem-roadmap.md](knowledge/storage-and-filesystem-roadmap.md) | Decision | Active (stages 1–2, 4 landed) | 2026-04-21 |
 | NVMe driver v0 — polling admin + I/O queue, marker self-test | [knowledge/nvme-driver-v0.md](knowledge/nvme-driver-v0.md) | Observation | Active | 2026-04-21 |
