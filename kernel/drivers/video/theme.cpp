@@ -684,6 +684,17 @@ const char* ThemeIdName(ThemeId id)
     return kThemes[static_cast<u32>(id)]->name;
 }
 
+WindowHandle ThemeRoleWindow(ThemeRole role)
+{
+    const u32 idx = static_cast<u32>(role);
+    if (idx >= static_cast<u32>(ThemeRole::kCount))
+        return kWindowInvalid;
+    const WindowHandle h = g_role_window[idx];
+    if (h == kWindowInvalid || !WindowIsAlive(h))
+        return kWindowInvalid;
+    return h;
+}
+
 void ThemeRegisterWindow(ThemeRole role, WindowHandle h)
 {
     const u32 idx = static_cast<u32>(role);

@@ -8,7 +8,7 @@ namespace duetos::drivers::video
 namespace
 {
 
-constexpr u32 kMaxItems = 8;
+constexpr u32 kMaxItems = 12;
 constexpr u32 kRowHeight = 22;
 constexpr u32 kMenuWidth = 240;
 constexpr u32 kPaddingX = 8;

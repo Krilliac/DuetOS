@@ -303,6 +303,45 @@ bool CmdlineMatches(const char* cmdline, const char* key, const char* want)
     return false;
 }
 
+// Print a concise, user-facing keyboard-shortcut + getting-started
+// reference into the framebuffer console. Called from F1 and from
+// the Start menu's HELP item — both paths land here so the text
+// stays in one place. Lines are kept short enough to fit the
+// 80-column console without wrapping. ASCII only because the font
+// driver maps lowercase to uppercase anyway.
+void PrintShortcutHelp()
+{
+    using duetos::drivers::video::ConsoleWriteln;
+    ConsoleWriteln("");
+    ConsoleWriteln("==== DUETOS QUICK REFERENCE ===================");
+    ConsoleWriteln("  GETTING STARTED");
+    ConsoleWriteln("    CLICK [START] (BOTTOM-LEFT) TO LAUNCH APPS");
+    ConsoleWriteln("    CLICK A TASKBAR TAB TO RAISE THAT WINDOW");
+    ConsoleWriteln("    DRAG A TITLE BAR TO MOVE A WINDOW");
+    ConsoleWriteln("    CLICK [X] OR PRESS ALT+F4 TO CLOSE");
+    ConsoleWriteln("    TYPE 'HELP' AT THE PROMPT FOR SHELL COMMANDS");
+    ConsoleWriteln("");
+    ConsoleWriteln("  WINDOWS");
+    ConsoleWriteln("    ALT+TAB           CYCLE ACTIVE WINDOW");
+    ConsoleWriteln("    CTRL+ALT+UP       MAXIMISE / RESTORE");
+    ConsoleWriteln("    CTRL+ALT+DOWN     RESTORE / MINIMISE");
+    ConsoleWriteln("    CTRL+ALT+LEFT/R   SNAP HALF-SCREEN");
+    ConsoleWriteln("    CTRL+ALT+SHIFT+   ARROW: GROW / SHRINK 32 PX");
+    ConsoleWriteln("    CTRL+ALT+, / .    OPACITY DOWN / UP");
+    ConsoleWriteln("");
+    ConsoleWriteln("  DESKTOP / SYSTEM");
+    ConsoleWriteln("    F1                THIS HELP");
+    ConsoleWriteln("    CTRL+ALT+T        TOGGLE DESKTOP / TTY");
+    ConsoleWriteln("    CTRL+ALT+B        TOGGLE TASKBAR TOP / BOT");
+    ConsoleWriteln("    CTRL+ALT+L        LOCK / UNLOCK TASKBAR");
+    ConsoleWriteln("    CTRL+ALT+Y        CYCLE THEME");
+    ConsoleWriteln("    CTRL+ALT+1..9     PICK THEME DIRECTLY");
+    ConsoleWriteln("    CTRL+ALT+F1/F2    SHELL / KLOG CONSOLE");
+    ConsoleWriteln("    CTRL+C            INTERRUPT SHELL COMMAND");
+    ConsoleWriteln("================================================");
+    ConsoleWriteln("");
+}
+
 } // namespace
 
 extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
@@ -1865,6 +1904,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 {
                     // Login succeeded — wipe the login panel and
                     // paint the full desktop (or TTY) underneath.
+                    // Drop a one-line orientation banner into the
+                    // console too, so a fresh user sees something
+                    // pointing at the discovery surface (Start
+                    // menu + F1) before the bare "duetos>" prompt.
+                    duetos::drivers::video::ConsoleWriteln("");
+                    duetos::drivers::video::ConsoleWriteln(
+                        "WELCOME TO DUETOS. CLICK [START] OR PRESS F1 FOR A SHORTCUT REFERENCE.");
                     const bool is_tty =
                         (duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Tty);
                     if (is_tty)
@@ -1891,6 +1937,23 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             {
                 duetos::core::ShellInterrupt();
                 SerialWrite("[ui] ^C\n");
+                continue;
+            }
+
+            // F1 (no modifiers) dumps the user-facing keyboard +
+            // shortcut reference into the desktop console. Tested
+            // BEFORE the Ctrl+Alt+F1 console-flip handler — bare
+            // F1 must not also flip consoles, and the modifier
+            // gate makes the two paths mutually exclusive.
+            if (!ctrl && !alt && ev.code == kKeyF1)
+            {
+                duetos::drivers::video::CompositorLock();
+                PrintShortcutHelp();
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+                duetos::drivers::video::CompositorUnlock();
+                SerialWrite("[ui] F1 help\n");
                 continue;
             }
 
@@ -2472,17 +2535,25 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         // Menu item sets — static so their label pointers outlive
         // the menu's open state. action_id scheme is documented in
         // kernel_main's comment above; keep these tables in sync.
+        // action_id 100..199 are reserved for "open app by ThemeRole"
+        // — id = 100 + role index — so the dispatch handler can fan
+        // back out to a single ThemeRoleWindow lookup. New roles
+        // pick the next 100 + idx and need a label here only.
         static const duetos::drivers::video::MenuItem kStartItems[] = {
-            {"ABOUT DUETOS", 1},
+            {"CALCULATOR", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Calculator)},
+            {"NOTEPAD", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Notes)},
+            {"FILES", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Files)},
+            {"CLOCK", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Clock)},
+            {"TASK MANAGER", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::TaskManager)},
+            {"KERNEL LOG", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::LogView)},
+            {"GFX DEMO", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::GfxDemo)},
+            {"HELP / SHORTCUTS", 6},
             {"CYCLE WINDOWS", 2},
-            {"LIST WINDOWS", 3},
-            {"PING CONSOLE", 4},
+            {"ABOUT DUETOS", 1},
         };
         static const duetos::drivers::video::MenuItem kDesktopMenuItems[] = {
-            {"ABOUT DUETOS", 1},
-            {"CYCLE WINDOWS", 2},
-            {"LIST WINDOWS", 3},
-            {"SWITCH TO TTY", 5},
+            {"HELP / SHORTCUTS", 6}, {"ABOUT DUETOS", 1},  {"CYCLE WINDOWS", 2},
+            {"LIST WINDOWS", 3},     {"SWITCH TO TTY", 5},
         };
         static const duetos::drivers::video::MenuItem kWindowMenuItems[] = {
             {"RAISE", 10},
@@ -2616,6 +2687,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                         duetos::drivers::video::ConsoleSetColours(duetos::drivers::video::ThemeCurrent().console_fg,
                                                                   0x00000000);
                         break;
+                    case 6: // HELP / SHORTCUTS
+                        PrintShortcutHelp();
+                        break;
                     case 10: // RAISE <ctx>
                         duetos::drivers::video::WindowRaise(ctx);
                         SerialWrite("[ui] ctx raise window=");
@@ -2629,7 +2703,29 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                         SerialWrite("\n");
                         break;
                     default:
-                        // Fall through and log the unrecognised action below.
+                        // App launcher bands: 100..199 == "raise the
+                        // window registered for ThemeRole(action - 100),
+                        // un-hiding it if Show Desktop or a min/hide
+                        // dropped its visible bit." Out-of-band ids
+                        // fall through to the unrecognised log.
+                        if (action >= 100 &&
+                            action < 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::kCount))
+                        {
+                            const auto role = static_cast<duetos::drivers::video::ThemeRole>(action - 100);
+                            const auto h = duetos::drivers::video::ThemeRoleWindow(role);
+                            if (h != duetos::drivers::video::kWindowInvalid)
+                            {
+                                duetos::drivers::video::WindowSetVisible(h, true);
+                                duetos::drivers::video::WindowRaise(h);
+                                duetos::drivers::video::ConsoleWrite("-> RAISED ");
+                                const char* tt = duetos::drivers::video::WindowTitle(h);
+                                duetos::drivers::video::ConsoleWriteln((tt != nullptr) ? tt : "(UNNAMED)");
+                            }
+                            else
+                            {
+                                duetos::drivers::video::ConsoleWriteln("-> APP NOT REGISTERED");
+                            }
+                        }
                         break;
                     }
                     SerialWrite("[ui] menu fire action=");
@@ -2637,6 +2733,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     SerialWrite("\n");
                 }
                 duetos::drivers::video::MenuClose();
+                // Force an immediate recompose so any console
+                // output the action wrote (HELP / ABOUT / -> RAISED
+                // ...) appears now rather than waiting up to a
+                // second for the ui-ticker. Also clears the menu
+                // panel from the framebuffer.
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
                 menu_handled = true;
             }
 
