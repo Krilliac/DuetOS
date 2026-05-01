@@ -3,8 +3,11 @@
 #include "arch/x86_64/rtc.h"
 #include "arch/x86_64/serial.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/notify.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
+#include "security/auth.h"
+#include "security/login.h"
 
 namespace duetos::apps::settings
 {
@@ -101,9 +104,16 @@ void DoDefault()
     }
 }
 
+void DoLogOut()
+{
+    duetos::core::AuthLogout();
+    duetos::core::LoginStart(duetos::core::LoginMode::Gui);
+}
+
 constexpr Action kActions[kIdCount] = {
     {"THEME PREV", DoThemePrev}, {"THEME NEXT", DoThemeNext},    {"OPACITY -", DoOpacityDown},
     {"OPACITY +", DoOpacityUp},  {"HIGH CTRST", DoHighContrast}, {"DEFAULT", DoDefault},
+    {"LOG OUT", DoLogOut},
 };
 
 struct State
@@ -200,10 +210,55 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     FormatRtc(t, buf);
     FramebufferDrawString(cx + kReadoutX, y + 12, buf, ink_fg, ink_bg);
 
-    // About line.
+    // Users readout — shows the live account table + the
+    // currently signed-in identity. Read-only; mutations stay
+    // shell-command driven (`useradd`, `passwd`) until a
+    // text-input widget lands.
     y += 30;
-    FramebufferDrawString(cx + kReadoutX, y, "DUETOS v0", ink_fg, ink_bg);
-    FramebufferDrawString(cx + kReadoutX, y + 12, "BUILD: HEAD", ink_fg, ink_bg);
+    FramebufferDrawString(cx + kReadoutX, y, "USERS:", ink_fg, ink_bg);
+    const u32 count = duetos::core::AuthAccountCount();
+    for (u32 i = 0; i < count && i < 4; ++i)
+    {
+        duetos::core::AccountView v{};
+        if (!duetos::core::AuthAccountAt(i, &v) || v.username == nullptr)
+        {
+            continue;
+        }
+        const char* role = "GUEST";
+        switch (v.role)
+        {
+        case duetos::core::AuthRole::Admin:
+            role = "ADMIN";
+            break;
+        case duetos::core::AuthRole::User:
+            role = "USER ";
+            break;
+        case duetos::core::AuthRole::Guest:
+            role = "GUEST";
+            break;
+        }
+        char line[40];
+        u32 li = 0;
+        const char* w = v.username;
+        while (*w != '\0' && li < 16)
+        {
+            line[li++] = *w++;
+        }
+        while (li < 18)
+        {
+            line[li++] = ' ';
+        }
+        for (u32 ri = 0; role[ri] != '\0' && li < sizeof(line) - 1; ++ri)
+        {
+            line[li++] = role[ri];
+        }
+        line[li] = '\0';
+        FramebufferDrawString(cx + kReadoutX + 8, y + 12 * (i + 1), line, ink_fg, ink_bg);
+    }
+    if (count == 0)
+    {
+        FramebufferDrawString(cx + kReadoutX + 8, y + 12, "(none)", ink_fg, ink_bg);
+    }
 }
 
 bool DispatchById(u32 id)

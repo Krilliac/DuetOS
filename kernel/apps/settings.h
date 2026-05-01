@@ -55,7 +55,7 @@ namespace duetos::apps::settings
 /// [0, kIdCount). Picked at the next free 0x1000 slot above the
 /// Calculator (which owns 0x1000..0x100F).
 inline constexpr u32 kIdBase = 0x2000;
-inline constexpr u32 kIdCount = 6;
+inline constexpr u32 kIdCount = 7;
 
 /// Install Settings state on `handle`. Registers the buttons and
 /// the content-draw callback; reads initial state lazily via the
