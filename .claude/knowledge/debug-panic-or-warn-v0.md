@@ -86,6 +86,25 @@ unwind that state first (e.g. `MutexUnlock` before
 | `kernel/drivers/pci/pci.cpp:325` (`PciMsixUnmaskEntry` OOB index) | log + value; refuse the write |
 | `kernel/drivers/pci/pci.cpp:336` (`PciMsixEnable` on non-MSI-X device) | log; refuse — driver can fall back |
 
+## Second pass (2026-05-01) — scheduler primitive contract violations
+
+`PanicSched` was used for two different things: real boot-time
+disasters (KMalloc-failed-for-Task, no-runnable-task) AND
+caller-side contract violations on the kernel mutex / condvar
+primitives. Only the second category is a candidate for the
+release-soft helper; the first stays as `PanicSched` because
+"continue with no Task struct" has no defined meaning.
+
+| Site | Recovery shape in release |
+|------|---------------------------|
+| `kernel/sched/sched.cpp:2371` (`MutexUnlock` by non-owner) | re-enable IRQs; log; return without mutating m |
+| `kernel/sched/sched.cpp:2417` (`CondvarWait` w/o companion mutex) | re-enable IRQs; log; return without enqueuing |
+| `kernel/sched/sched.cpp:2477` (`CondvarWaitTimeout` w/o companion mutex) | re-enable IRQs; log; return false (timeout) |
+
+The `arch::Sti()` before each return is load-bearing — the
+contract-check sits between `arch::Cli()` and the normal SpinLockGuard
+acquire, so leaving IRQs disabled would wedge the CPU.
+
 The leak in `KMutexDestroy` is the only conversion that costs
 *permanent* state. A one-time leak is recoverable; a
 use-after-free of the still-held mutex is not, so the trade is
@@ -98,13 +117,16 @@ obvious.
   whole call is dead code in release. The internal `Panic` is
   reachable only when the test actually runs (debug + paranoid
   presets), which is exactly when we want it.
-- **`PanicSched` family** (`sched/sched.cpp:316` and friends —
-  "MutexUnlock by non-owner", "no runnable task available",
-  KMalloc-failed-for-Task, …) — most are `[[noreturn]]` boot-time
-  failures or early-init OOM where "continue" doesn't have a
-  defined meaning. Conversion would require un-`[[noreturn]]`-ing
-  the helper and refactoring multiple call sites that assume the
-  helper doesn't return.
+- **`PanicSched` boot/OOM failures** (`sched/sched.cpp:598`,
+  `:655`, `:671`, `:935`) — KMalloc-failed-for-Task,
+  AllocateKernelStack-failed, no-runnable-task. These need a
+  `Result<T,E>` return-type refactor on `SchedCreate` (or, for the
+  no-runnable-task invariant, a guarantee the idle task is always
+  on the runqueue) before they can become recoverable. The three
+  *contract-violation* `PanicSched` calls (Mutex/Condvar misuse)
+  were converted to `DebugPanicOrWarn` in the second pass above —
+  they sit between explicit `arch::Cli()` / `arch::Sti()` so each
+  release-path return needs an explicit `Sti()`.
 - **`LinuxCloneEntry` / `Ring3ThreadEntry` invariants** — the
   fail-paths run on a fresh kernel stack at task entry; the only
   sane release recovery is "exit this task back to scheduler",
@@ -126,12 +148,16 @@ has burned in.
 ## Resume prompt
 
 > Continue the "soften release-build panics" work. The
-> `DebugPanicOrWarn` / `DebugPanicOrWarnWithValue` helpers landed
-> in `kernel/core/panic.{h,cpp}` and 11 sites were converted (see
-> `.claude/knowledge/debug-panic-or-warn-v0.md` for the table).
-> Next candidates: scheduler primitive misuse (`PanicSched` calls
-> in `kernel/sched/sched.cpp:2371,2417,2477` — Mutex/Condvar
-> contract violations), and the `Linux/Win32` thread-entry
-> invariants once a "exit task to scheduler" recovery path is
-> available. Self-test panics deliberately stay as-is — they're
-> dead code in release via `DUETOS_BOOT_SELFTEST(call)`.
+> `DebugPanicOrWarn` / `DebugPanicOrWarnWithValue` helpers are in
+> `kernel/core/panic.{h,cpp}`. 14 sites converted across two
+> passes (initial 11 caller-bug invariants + scheduler
+> Mutex/Condvar contract violations) — see the tables in this
+> file. Next candidates: the `Linux/Win32` thread-entry
+> invariants (`subsystems/linux/syscall_clone.cpp:84,89`,
+> `subsystems/win32/thread_syscall.cpp:49,54`) — they need a
+> "task-exits-back-to-scheduler" recovery shape that doesn't yet
+> exist, so they stay hard-panic until that lands. Boot-time
+> `PanicSched` OOM failures need a `Result<T,E>` return-type
+> refactor on `SchedCreate` before they can soften. Self-test
+> panics deliberately stay as-is — they're dead code in release
+> via `DUETOS_BOOT_SELFTEST(call)`.

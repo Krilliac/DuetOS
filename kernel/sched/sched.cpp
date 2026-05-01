@@ -2368,7 +2368,14 @@ void MutexUnlock(Mutex* m)
     arch::Cli();
     if (m->owner != Current())
     {
-        PanicSched("MutexUnlock by non-owner");
+        // Caller-side contract violation. Debug builds panic so the
+        // bad caller is found; release builds log, re-enable
+        // interrupts, and return without mutating m — touching
+        // owner / waiters from the wrong task would corrupt the
+        // mutex's view for whoever actually holds it.
+        arch::Sti();
+        core::DebugPanicOrWarn("sched", "MutexUnlock by non-owner");
+        return;
     }
     m->owner = nullptr;
 
@@ -2414,7 +2421,15 @@ void CondvarWait(Condvar* cv, Mutex* m)
     arch::Cli();
     if (m->owner != Current())
     {
-        PanicSched("CondvarWait called without the companion mutex held");
+        // Caller broke the condvar contract — must hold the
+        // companion mutex when calling Wait. Debug: panic.
+        // Release: log, re-enable interrupts, and return without
+        // dequeuing onto cv. The caller is buggy, but at least the
+        // kernel doesn't enqueue a wait that could later be woken
+        // and reacquire a mutex this task never owned.
+        arch::Sti();
+        core::DebugPanicOrWarn("sched", "CondvarWait called without the companion mutex held");
+        return;
     }
 
     {
@@ -2474,7 +2489,13 @@ bool CondvarWaitTimeout(Condvar* cv, Mutex* m, u64 ticks)
     arch::Cli();
     if (m->owner != Current())
     {
-        PanicSched("CondvarWaitTimeout called without the companion mutex held");
+        // Same contract as CondvarWait above. Release builds
+        // surface the violation through klog and report a
+        // timeout-style false return so the caller sees a
+        // recoverable signal instead of a phantom wakeup.
+        arch::Sti();
+        core::DebugPanicOrWarn("sched", "CondvarWaitTimeout called without the companion mutex held");
+        return false;
     }
 
     {
