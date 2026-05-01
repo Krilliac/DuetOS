@@ -1,5 +1,6 @@
 #pragma once
 
+#include "security/fault_domain.h" // for FaultDomainId
 #include "util/types.h"
 
 /*
@@ -71,6 +72,25 @@ enum class DriverFaultReason : u8
 /// Probe retry loop. Call sites don't change — the transition is
 /// behind this API.
 void DriverFault(const char* driver_name, DriverFaultReason reason);
+
+/// Same as above, but routes through the self-defensive
+/// `diag::FaultReactDispatch` chokepoint. Drivers that have
+/// already registered a fault domain (via `FaultDomainRegister`)
+/// pass the id here and the dispatcher consults the per-domain
+/// policy + kernel-owned floor + executes the chosen reaction
+/// (Continue / RetryNow / RestartDomain / KillProcess / Halt).
+///
+/// Behaviour delta vs. the no-id overload:
+///   - Always increments `DriverFaultCount()` (so the audit
+///     stream sees both flavours uniformly).
+///   - The Error log line is emitted by the dispatcher rather
+///     than this function, so its severity reflects the chosen
+///     reaction rather than always being `Error`.
+///   - May not return — `Halt` panics.
+///
+/// Recommended for new driver code; the no-id overload remains
+/// for callers that don't yet have a domain registered.
+void DriverFault(const char* driver_name, DriverFaultReason reason, FaultDomainId domain_id);
 
 /// Number of driver faults seen since boot. Diagnostic only.
 u64 DriverFaultCount();

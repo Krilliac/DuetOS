@@ -143,6 +143,7 @@
 #include "mm/zone.h"
 #include "ipc/handle_table.h"
 #include "diag/event_trace.h"
+#include "diag/fault_react.h"
 #include "diag/gdb_stub.h"
 #include "diag/perf_profile.h"
 #include "diag/soft_lockup.h"
@@ -582,6 +583,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // restarts it twice, checks counters. Real driver domains are
     // registered later in boot once their subsystems are up.
     DUETOS_BOOT_SELFTEST(duetos::core::FaultDomainSelfTest());
+
+    // Self-defensive fault-reaction dispatcher. Verifies the
+    // policy + floor + decay paths against a toy domain so a
+    // regression in the dispatcher is loud at boot rather than
+    // discovered the next time a real driver hits a fault.
+    DUETOS_BOOT_SELFTEST(duetos::diag::FaultReactSelfTest());
 
     // Per-driver fault-domain extension self-test (plan E3).
     // Wraps the core fault-domain registry with a driver-tag
