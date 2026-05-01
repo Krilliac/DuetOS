@@ -372,6 +372,67 @@ void FrameAllocatorInit(uptr multiboot_info_phys)
     g_next_hint = 0;
 }
 
+// Inner search shared by `AllocateFrame` and `AllocateFrameInRange`.
+// `max_frames` clamps the highest frame index considered (exclusive).
+// Returns the bitmap index on success or `g_bitmap_frames` (a
+// sentinel one past the end) on failure.
+namespace
+{
+
+u64 BitmapFindFreeBelow(u64 max_frames)
+{
+    if (max_frames > g_bitmap_frames)
+        max_frames = g_bitmap_frames;
+    if (max_frames == 0)
+        return g_bitmap_frames;
+    const u64 start = (g_next_hint < max_frames) ? g_next_hint : 0;
+    for (u64 i = 0; i < max_frames; ++i)
+    {
+        u64 frame = start + i;
+        if (frame >= max_frames)
+            frame -= max_frames;
+        if (!BitmapIsUsed(frame))
+            return frame;
+    }
+    return g_bitmap_frames;
+}
+
+PhysAddr AllocateFrameAtIndex(u64 frame)
+{
+    BitmapMarkUsed(frame);
+    g_next_hint = frame + 1;
+    const PhysAddr phys = frame << kPageSizeLog2;
+    // Same direct-map zero policy as AllocateFrame — we cannot zero
+    // a frame past the direct map without spilling into MapMmio,
+    // and handing back un-zeroed memory is an info-leak primitive.
+    if (phys >= kDirectMapBytes)
+        PanicFrame("AllocateFrameAtIndex: frame past direct map, cannot zero");
+    auto* virt = static_cast<u8*>(PhysToVirt(phys));
+    for (u64 b = 0; b < kPageSize; ++b)
+        virt[b] = 0;
+    return phys;
+}
+
+} // namespace
+
+PhysAddr AllocateFrameInRange(PhysAddr max_phys)
+{
+    u64 max_frames = g_bitmap_frames;
+    if (max_phys != 0)
+    {
+        // Round DOWN to a frame index — the constraint is "physical
+        // address strictly less than max_phys".
+        max_frames = max_phys >> kPageSizeLog2;
+    }
+    const u64 frame = BitmapFindFreeBelow(max_frames);
+    if (frame >= g_bitmap_frames)
+    {
+        KLOG_ONCE_WARN("mm/frame", "AllocateFrameInRange: no free frame in range");
+        return kNullFrame;
+    }
+    return AllocateFrameAtIndex(frame);
+}
+
 PhysAddr AllocateFrame()
 {
     for (u64 i = 0; i < g_bitmap_frames; ++i)
