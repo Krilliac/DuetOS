@@ -2077,6 +2077,19 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 SerialWrite(duetos::drivers::video::TaskbarIsLocked() ? "locked\n" : "unlocked\n");
                 continue;
             }
+            // Ctrl+Alt+K — lock the screen. Re-opens the GUI login
+            // gate; the next successful login restores the desktop.
+            // Bound separately from Ctrl+Alt+L (taskbar drag-lock)
+            // so muscle-memory for the existing chord stays intact.
+            if (ctrl && alt && (ev.code == 'k' || ev.code == 'K'))
+            {
+                duetos::drivers::video::CompositorLock();
+                duetos::core::AuthLogout();
+                duetos::core::LoginStart(duetos::core::LoginMode::Gui);
+                duetos::drivers::video::CompositorUnlock();
+                SerialWrite("[ui] screen locked\n");
+                continue;
+            }
             // Ctrl+Alt+Y cycles the desktop theme. Classic (teal)
             // -> Slate10 (Win10 x Unreal Slate hybrid) -> Amber
             // (mono CRT tribute) -> Duet (redesigned palette,
