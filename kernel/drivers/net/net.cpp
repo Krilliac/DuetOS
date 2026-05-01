@@ -747,20 +747,30 @@ void RunVendorProbe(NicInfo& n)
         wireless_shell = Bcm43xxBringUp(n);
         brought_up = wireless_shell;
     }
-    arch::SerialWrite("[net-probe] vid=");
-    arch::SerialWriteHex(n.vendor_id);
-    arch::SerialWrite(" did=");
-    arch::SerialWriteHex(n.device_id);
-    arch::SerialWrite(" family=");
-    arch::SerialWrite(family);
-    if (wireless_shell)
-        arch::SerialWrite("  (driver shell online — firmware pending)\n");
-    else if (brought_up)
-        arch::SerialWrite("  (driver online)\n");
-    else
-        arch::SerialWrite("  (probe only — no packet I/O)\n");
+    {
+        // Hold the serial line lock across the full vid/did/family
+        // print so a concurrent [dhcp] (or any other writer firing
+        // off another task) can't interleave at a SerialWrite call
+        // boundary. Smoke-test grep matches the line as a single
+        // substring; without the guard the line was occasionally
+        // split.
+        arch::SerialLineGuard line;
+        arch::SerialWrite("[net-probe] vid=");
+        arch::SerialWriteHex(n.vendor_id);
+        arch::SerialWrite(" did=");
+        arch::SerialWriteHex(n.device_id);
+        arch::SerialWrite(" family=");
+        arch::SerialWrite(family);
+        if (wireless_shell)
+            arch::SerialWrite("  (driver shell online — firmware pending)\n");
+        else if (brought_up)
+            arch::SerialWrite("  (driver online)\n");
+        else
+            arch::SerialWrite("  (probe only — no packet I/O)\n");
+    }
     if (n.mac_valid)
     {
+        arch::SerialLineGuard line;
         arch::SerialWrite("[net-probe]   mac=");
         for (u64 i = 0; i < 6; ++i)
         {

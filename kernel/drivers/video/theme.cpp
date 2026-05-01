@@ -103,6 +103,7 @@ constexpr Theme kClassic = {
     .taskbar_height = 28,
     .title_button_width = 0,
     .title_text_scale = 1,
+    .font_kind = Theme::FontKind::Bitmap8x8,
 };
 
 // Amber is a deliberate retro exercise — a single-hue amber palette
@@ -163,6 +164,7 @@ constexpr Theme kAmber = {
     .taskbar_height = 28,
     .title_button_width = 0,
     .title_text_scale = 1,
+    .font_kind = Theme::FontKind::Bitmap8x8,
 };
 
 constexpr Theme kSlate10 = {
@@ -226,6 +228,7 @@ constexpr Theme kSlate10 = {
     .taskbar_height = 28,
     .title_button_width = 0,
     .title_text_scale = 1,
+    .font_kind = Theme::FontKind::Bitmap8x8,
 };
 
 // Duet — the redesigned palette. Slate-charcoal canvas, dual-accent
@@ -556,6 +559,7 @@ constexpr Theme kDuetClassic = {
     .taskbar_height = 28,
     .title_button_width = 0,
     .title_text_scale = 1,
+    .font_kind = Theme::FontKind::Bitmap8x8,
 };
 
 // HighContrast — accessibility-first theme. Pure black bg,
@@ -612,6 +616,7 @@ constexpr Theme kHighContrast = {
     .taskbar_height = 28,
     .title_button_width = 0,
     .title_text_scale = 1,
+    .font_kind = Theme::FontKind::Bitmap8x8,
 };
 
 const Theme* const kThemes[static_cast<u32>(ThemeId::kCount)] = {

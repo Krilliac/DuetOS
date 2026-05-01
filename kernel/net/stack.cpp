@@ -1356,14 +1356,17 @@ void DhcpSendRequest()
     const Ipv4Address any_ip{{0, 0, 0, 0}};
     NetUdpSend(g_dhcp.iface_index, bcast_mac, bcast_ip, /*dst_port=*/67, any_ip, /*src_port=*/68, payload,
                sizeof(payload));
-    arch::SerialWrite("[dhcp] REQUEST sent for ");
-    for (u64 i = 0; i < 4; ++i)
     {
-        if (i != 0)
-            arch::SerialWrite(".");
-        arch::SerialWriteHex(g_dhcp.offered_ip.octets[i]);
+        arch::SerialLineGuard line;
+        arch::SerialWrite("[dhcp] REQUEST sent for ");
+        for (u64 i = 0; i < 4; ++i)
+        {
+            if (i != 0)
+                arch::SerialWrite(".");
+            arch::SerialWriteHex(g_dhcp.offered_ip.octets[i]);
+        }
+        arch::SerialWrite("\n");
     }
-    arch::SerialWrite("\n");
 }
 
 } // namespace
@@ -1431,23 +1434,26 @@ void DhcpOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, 
         // uses the leased address.
         g_interfaces[iface_index].ip = yiaddr;
 
-        arch::SerialWrite("[dhcp] ACK bound ip=");
-        for (u64 i = 0; i < 4; ++i)
         {
-            if (i != 0)
-                arch::SerialWrite(".");
-            arch::SerialWriteHex(yiaddr.octets[i]);
+            arch::SerialLineGuard line;
+            arch::SerialWrite("[dhcp] ACK bound ip=");
+            for (u64 i = 0; i < 4; ++i)
+            {
+                if (i != 0)
+                    arch::SerialWrite(".");
+                arch::SerialWriteHex(yiaddr.octets[i]);
+            }
+            arch::SerialWrite(" router=");
+            for (u64 i = 0; i < 4; ++i)
+            {
+                if (i != 0)
+                    arch::SerialWrite(".");
+                arch::SerialWriteHex(g_dhcp.lease.router.octets[i]);
+            }
+            arch::SerialWrite(" lease_secs=");
+            arch::SerialWriteHex(g_dhcp.lease.lease_secs);
+            arch::SerialWrite("\n");
         }
-        arch::SerialWrite(" router=");
-        for (u64 i = 0; i < 4; ++i)
-        {
-            if (i != 0)
-                arch::SerialWrite(".");
-            arch::SerialWriteHex(g_dhcp.lease.router.octets[i]);
-        }
-        arch::SerialWrite(" lease_secs=");
-        arch::SerialWriteHex(g_dhcp.lease.lease_secs);
-        arch::SerialWrite("\n");
     }
 }
 

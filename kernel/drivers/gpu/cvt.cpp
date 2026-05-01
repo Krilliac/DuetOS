@@ -172,13 +172,15 @@ EdidDtd GenerateStandard(const CvtRequest& req)
     //   (1/V_REFRESH - MIN_VSYNC_BP/1e6) /
     //   (V_LINES + MIN_PORCH) * 1e6
     //
-    // refresh_mhz = refresh × 1000 (mHz). Convert to Hz×100 for an
-    // integer-friendly intermediate:
-    //   period_per_frame_us_x1000 = 1e12 / refresh_mhz   (ns × 1000)
+    // refresh_mhz is millihertz (refresh × 1000), so refresh_hz =
+    // refresh_mhz / 1000. Frame period in picoseconds = 1e12 /
+    // refresh_hz = 1e15 / refresh_mhz. The variable is named
+    // `frame_period_ns_x1000` because the downstream formulas treat
+    // it as nanoseconds × 1000, which is the same scale.
     //
     // We carry an extra 1000× scale through to stash the precision
     // that floats would normally hold.
-    const u64 frame_period_ns_x1000 = (1000000000000ULL / req.refresh_mhz);
+    const u64 frame_period_ns_x1000 = (1000000000000000ULL / req.refresh_mhz);
     // h_period_us_x1000 = (frame_period_ns_x1000 - kMinVsyncBpUsStd*1000*1000) / (V_LINES + MIN_PORCH)
     if (frame_period_ns_x1000 <= static_cast<u64>(kMinVsyncBpUsStd) * 1000ULL * 1000ULL)
     {
@@ -193,25 +195,24 @@ EdidDtd GenerateStandard(const CvtRequest& req)
         return GenerateRb(req);
 
     // §4.1.3: V_SYNC_BP = round(MIN_VSYNC_BP / H_PERIOD) + 1
-    //         V_BACK_PORCH = V_SYNC_BP - V_SYNC
+    //         V_BACK_PORCH = V_SYNC_BP - V_SYNC (implicit in v_blanking layout below)
     const u64 vsync_bp_num = static_cast<u64>(kMinVsyncBpUsStd) * 1000000ULL;
     u32 v_sync_bp = DivRoundNearest(vsync_bp_num, h_period_ns_x1000) + 1;
     if (v_sync_bp < v_sync + kMinPorch)
         v_sync_bp = v_sync + kMinPorch;
-    const u32 v_back_porch = v_sync_bp - v_sync;
 
     // V_TOTAL = V_LINES + V_SYNC_BP + V_FRONT_PORCH(=MIN_PORCH).
     const u32 v_blanking = kMinPorch + v_sync_bp;
-    const u32 v_total = v_active + v_blanking;
 
-    // §4.1.4: IDEAL_DUTY_CYCLE = C - M * H_PERIOD/1000   (in %)
-    // We work in micro-percent (×100) to avoid loss of precision.
-    //   duty_x100 = C_x100 - M_us_per_s * H_PERIOD_ns_x1000 / 1e9 / 1000
-    //             = C_x100 - M_us_per_s * H_PERIOD_us / 1000
-    // h_period_us approximation: h_period_ns_x1000 / 1000000.
+    // §4.1.4: IDEAL_DUTY_CYCLE = C' - M' × H_PERIOD_us / 1000   (in %)
+    // Carry as micro-percent (×100) to avoid loss of precision:
+    //   duty_x100 = C'_x100 - (M' × H_PERIOD_us × 100) / 1000
+    //             = C'_x100 - M' × H_PERIOD_us / 10
+    // With h_period_us_x1000 = H_PERIOD_us × 1000:
+    //   duty_x100 = C'_x100 - (M' × h_period_us_x1000) / 10000
     const u64 h_period_us_x1000 = h_period_ns_x1000 / 1000ULL;
     const i64 duty_x100 = static_cast<i64>(kCPrimeX100) -
-                          static_cast<i64>(static_cast<u64>(kMPrimeUsPerS) * h_period_us_x1000 / 1000ULL / 1000ULL);
+                          static_cast<i64>(static_cast<u64>(kMPrimeUsPerS) * h_period_us_x1000 / 10000ULL);
 
     u32 h_blanking = 0;
     if (duty_x100 < 2000)

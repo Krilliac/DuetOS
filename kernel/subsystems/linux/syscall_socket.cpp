@@ -33,7 +33,6 @@ constexpr i64 kEAfNoSupport = -97;
 constexpr i64 kEProtoNoSupport = -93;
 constexpr i64 kEAddrInUse = -98;
 constexpr i64 kEOpNotSupp = -95;
-constexpr i64 kEDestAddrReq = -89;
 constexpr i64 kENotConn = -107;
 constexpr i64 kENetDown = -100;
 

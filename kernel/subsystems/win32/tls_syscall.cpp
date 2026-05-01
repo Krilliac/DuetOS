@@ -55,7 +55,10 @@ void DoTlsFree(arch::TrapFrame* frame)
     const u64 idx = frame->rdi;
     if (idx >= core::Process::kWin32TlsCap)
     {
-        KLOG_WARN_V("win32/tls", "DoTlsFree: idx out of range", idx);
+        // Out-of-range is a documented Win32 error path (TlsFree
+        // returns FALSE). Smoke probes call this deliberately.
+        // Trace, not warn.
+        KLOG_TRACE_V("win32/tls", "DoTlsFree: idx out of range", idx);
         frame->rax = static_cast<u64>(-1);
         return;
     }

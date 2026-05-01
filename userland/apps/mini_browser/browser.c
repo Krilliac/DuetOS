@@ -24,7 +24,7 @@
 
 #define BUFLEN 4096
 
-static void Out(const char *s)
+static void Out(const char* s)
 {
     HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
     DWORD n = 0;
@@ -45,7 +45,7 @@ void __cdecl mainCRTStartup(void)
         ExitProcess(1);
     }
 
-    struct hostent *he = gethostbyname("www.google.com");
+    struct hostent* he = gethostbyname("www.google.com");
     if (he == NULL || he->h_addr_list == NULL || he->h_addr_list[0] == NULL)
     {
         Out("[mini_browser] gethostbyname FAIL\r\n");
@@ -62,9 +62,9 @@ void __cdecl mainCRTStartup(void)
     struct sockaddr_in dst;
     dst.sin_family = AF_INET;
     dst.sin_port = htons(80);
-    dst.sin_addr.s_addr = *((unsigned long *)he->h_addr_list[0]);
+    dst.sin_addr.s_addr = *((unsigned long*)he->h_addr_list[0]);
 
-    if (connect(s, (struct sockaddr *)&dst, sizeof(dst)) != 0)
+    if (connect(s, (struct sockaddr*)&dst, sizeof(dst)) != 0)
     {
         Out("[mini_browser] connect FAIL\r\n");
         ExitProcess(4);

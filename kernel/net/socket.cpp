@@ -26,12 +26,6 @@ SocketStats g_stats = {};
 // meaningful when the slot owns the active-connect machine.
 u32 g_tcp_consumed[kSocketPoolCap] = {};
 
-bool IpEq(Ipv4Address a, Ipv4Address b)
-{
-    return a.octets[0] == b.octets[0] && a.octets[1] == b.octets[1] && a.octets[2] == b.octets[2] &&
-           a.octets[3] == b.octets[3];
-}
-
 bool IpZero(Ipv4Address a)
 {
     return a.octets[0] == 0 && a.octets[1] == 0 && a.octets[2] == 0 && a.octets[3] == 0;

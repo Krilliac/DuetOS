@@ -48,7 +48,13 @@ void DoHeapAlloc(arch::TrapFrame* frame)
     frame->rax = ::duetos::win32::Win32HeapAlloc(proc, frame->rdi);
     if (frame->rax == 0)
     {
-        KLOG_WARN_V("win32/heap", "DoHeapAlloc: OOM at requested size", frame->rdi);
+        // OOM is an expected control-flow path for any PE that
+        // handles HeapAlloc returning NULL (e.g. ipc_smoke probing
+        // CreateFileMappingW in 64 KiB chunks against a 64 KiB
+        // heap). Trace, not warn. The once-warn in heap.cpp still
+        // fires the first time the heap exhausts, so a real leak
+        // is still flagged.
+        KLOG_TRACE_V("win32/heap", "DoHeapAlloc: OOM at requested size", frame->rdi);
     }
     else
     {
@@ -114,7 +120,9 @@ void DoHeapRealloc(arch::TrapFrame* frame)
     frame->rax = ::duetos::win32::Win32HeapRealloc(proc, frame->rdi, frame->rsi);
     if (frame->rax == 0)
     {
-        KLOG_WARN_V("win32/heap", "DoHeapRealloc: returned 0 (OOM or invalid ptr)", frame->rdi);
+        // Same reasoning as DoHeapAlloc: NULL-on-OOM is part of
+        // the Win32 contract, callers handle it. Trace not warn.
+        KLOG_TRACE_V("win32/heap", "DoHeapRealloc: returned 0 (OOM or invalid ptr)", frame->rdi);
     }
 }
 

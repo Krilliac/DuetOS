@@ -189,16 +189,19 @@ void HexdumpSelfTest()
     Expect(!PlausibleKernelAddress(0x7FFFE000), "ring-3 stack VA rejected");
     Expect(!PlausibleKernelAddress(0xFFFFFFFE), "32-bit max rejected");
 
-    // Higher-half boundary: kHigherHalfStart inclusive, kHigherHalfEnd
-    // exclusive. The constants are file-private; assert against the
-    // canonical values from the header comment.
-    constexpr u64 kHigherHalfStart = 0xFFFFFFFF80000000ULL;
-    constexpr u64 kHigherHalfEnd = 0xFFFFFFFFE0000000ULL;
-    Expect(!PlausibleKernelAddress(kHigherHalfStart - 1), "below higher half rejected");
-    Expect(PlausibleKernelAddress(kHigherHalfStart), "higher-half start accepted");
-    Expect(PlausibleKernelAddress(kHigherHalfStart + 0x10000), "kernel direct map accepted");
-    Expect(PlausibleKernelAddress(kHigherHalfEnd - 1), "MMIO arena cap accepted");
-    Expect(!PlausibleKernelAddress(kHigherHalfEnd), "above MMIO arena rejected");
+    // Higher-half boundary: namespace-anonymous kHigherHalfStart inclusive,
+    // kHigherHalfEnd exclusive. Asserting against the canonical values
+    // (re-stated as locals to make the test self-documenting without
+    // shadowing the file-scope constants).
+    constexpr u64 kHigherHalfStartCanonical = 0xFFFFFFFF80000000ULL;
+    constexpr u64 kHigherHalfEndCanonical = 0xFFFFFFFFE0000000ULL;
+    static_assert(kHigherHalfStart == kHigherHalfStartCanonical, "higher-half start drifted");
+    static_assert(kHigherHalfEnd == kHigherHalfEndCanonical, "higher-half end drifted");
+    Expect(!PlausibleKernelAddress(kHigherHalfStartCanonical - 1), "below higher half rejected");
+    Expect(PlausibleKernelAddress(kHigherHalfStartCanonical), "higher-half start accepted");
+    Expect(PlausibleKernelAddress(kHigherHalfStartCanonical + 0x10000), "kernel direct map accepted");
+    Expect(PlausibleKernelAddress(kHigherHalfEndCanonical - 1), "MMIO arena cap accepted");
+    Expect(!PlausibleKernelAddress(kHigherHalfEndCanonical), "above MMIO arena rejected");
     Expect(!PlausibleKernelAddress(0xFFFFFFFFFFFFFFFFULL), "u64 max rejected");
 
     // ----- DumpInstructionBytes against a known-mapped kernel symbol -----

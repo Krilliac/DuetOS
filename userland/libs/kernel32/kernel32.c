@@ -3832,6 +3832,7 @@ __declspec(dllexport) BOOL CreateProcessW(const wchar_t16* lpApplicationName, wc
                                           const wchar_t16* lpCurrentDirectory, void* lpStartupInfo,
                                           void* lpProcessInformation)
 {
+    (void)lpCurrentDirectory;
     /* Strip wide → ASCII (low byte). 128-byte cap matches the
      * kernel-side path buffer. */
     char path[128];

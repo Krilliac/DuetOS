@@ -374,16 +374,6 @@ __declspec(dllexport) INT DrawTextW(HDC dc, const wchar_t16* text, INT len, void
     return (INT)(rv > 0 ? rv : 0);
 }
 
-static unsigned gdi32_ascii_len(const wchar_t16* s, INT len)
-{
-    unsigned n = 0;
-    if (!s)
-        return 0;
-    while ((len < 0 || (INT)n < len) && s[n] != 0 && n < 4096)
-        ++n;
-    return n;
-}
-
 __declspec(dllexport) BOOL ExtTextOutA(HDC dc, INT x, INT y, UINT opts, const void* r, const char* text, UINT len,
                                        const INT* dx)
 {

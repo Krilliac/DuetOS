@@ -128,7 +128,7 @@ bool NicInit(NicInfo& n)
     return true;
 }
 
-bool LoadSection(NicInfo& n, const IwlFwSection& sec, u32 sec_index, IwlUploadResult* r)
+bool LoadSection(NicInfo& /*n*/, const IwlFwSection& sec, u32 sec_index, IwlUploadResult* r)
 {
     if (sec.data == nullptr || sec.size == 0)
         return true; // empty section is fine
