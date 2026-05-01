@@ -11,7 +11,7 @@
  *   forwarders (`Dll.Func` / `Dll.#N` strings inside .edata).
  *
  * HOW
- *   `LeU16/32/64` byte-level readers (no packed-struct casts);
+ *   `LeU16/32` byte-level readers (no packed-struct casts);
  *   header offsets hand-coded rather than pulled from <winnt.h>
  *   to keep the kernel self-contained. `PeExportLookupName` is
  *   a binary search over the (sorted) name table.
@@ -40,11 +40,6 @@ inline u32 LeU32(const u8* p)
 {
     return u32(p[0]) | (u32(p[1]) << 8) | (u32(p[2]) << 16) | (u32(p[3]) << 24);
 }
-inline u64 LeU64(const u8* p)
-{
-    return static_cast<u64>(LeU32(p)) | (static_cast<u64>(LeU32(p + 4)) << 32);
-}
-
 // ---- PE header constants we need for EAT parsing ------------------------
 // These duplicate a handful of constants from pe_loader.cpp's
 // anon namespace. Deliberately re-declared locally so the EAT

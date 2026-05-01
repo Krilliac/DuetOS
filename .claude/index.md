@@ -8,7 +8,7 @@ _Read this at every session start (after git sync). Each row links to a detailed
 |-------|------|------|--------|--------------|
 | AI bloat pattern and countermeasures | [knowledge/ai-bloat-pattern.md](knowledge/ai-bloat-pattern.md) | Observation | Active | 2026-04-20 |
 | clang-format — CI-matching invocation | [knowledge/clang-format.md](knowledge/clang-format.md) | Pattern | Active | 2026-04-20 |
-| Format + boot + test runtime report (2026-05-01) — CVT self-test panic gates debug smoke; release boot is clean; 43 compile warnings + ~10 runtime warning categories inventoried for follow-up | [knowledge/format-and-test-2026-05-01-runtime-report.md](knowledge/format-and-test-2026-05-01-runtime-report.md) | Observation | Active — follow-up inventory | 2026-05-01 |
+| Format + boot + test runtime report (2026-05-01) — CVT pixel-clock unit-mismatch panic fixed (2 bugs collapsed to one), all 43 compile warnings cleared, 3 noisy runtime warnings reclassified, host regression guard at tests/host/test_cvt.cpp; debug + release boot clean | [knowledge/format-and-test-2026-05-01-runtime-report.md](knowledge/format-and-test-2026-05-01-runtime-report.md) | Issue + Observation | Closed — every inventory item landed; smoke passes; 0 compile warnings | 2026-05-01 |
 | Git rebase conflict resolution | [knowledge/git-rebase-conflicts.md](knowledge/git-rebase-conflicts.md) | Pattern | Active | 2026-04-20 |
 | GitHub API / PR checks diagnosis | [knowledge/github-api-pr-checks.md](knowledge/github-api-pr-checks.md) | Pattern | Active | 2026-04-20 |
 | Build and CI workflow speedups | [knowledge/build-optimizations.md](knowledge/build-optimizations.md) | Optimization | Active | 2026-04-20 |

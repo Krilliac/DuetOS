@@ -222,7 +222,7 @@ i64 DoRequestKey(u64 user_type, u64 user_desc, u64 user_callout, u64 dest_keyrin
     return -126;
 }
 
-i64 DoKeyctl(u64 op, u64 a2, u64 a3, u64 a4, u64 a5)
+i64 DoKeyctl(u64 op, u64 a2, u64 a3, u64 a4, u64 /*a5*/)
 {
     constexpr u64 kKeyctlGetKeyringId = 0;
     constexpr u64 kKeyctlJoinSession = 1;

@@ -37,7 +37,7 @@ typedef DWORD(__stdcall* LPTHREAD_START_ROUTINE)(LPVOID);
 __declspec(dllimport) HANDLE __stdcall GetStdHandle(DWORD nStdHandle);
 __declspec(dllimport) BOOL __stdcall WriteFile(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite,
                                                LPDWORD lpNumberOfBytesWritten, void* lpOverlapped);
-__declspec(dllimport) void __stdcall ExitProcess(unsigned int uExitCode);
+__declspec(dllimport) __declspec(noreturn) void __stdcall ExitProcess(unsigned int uExitCode);
 __declspec(dllimport) HANDLE __stdcall CreateThread(void* lpThreadAttributes, SIZE_T dwStackSize,
                                                     LPTHREAD_START_ROUTINE lpStartAddress, LPVOID lpParameter,
                                                     DWORD dwCreationFlags, LPDWORD lpThreadId);

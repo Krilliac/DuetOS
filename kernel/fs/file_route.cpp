@@ -6,8 +6,8 @@
  *
  * WHAT
  *   Decides which FS backend a path resolves into:
- *     - `/bin/*`       -> embedded ramfs (binaries baked into
- *                         the kernel image at build time)
+ *     - paths under `/bin/` -> embedded ramfs (binaries baked
+ *                              into the kernel image at build time)
  *     - everything     -> the active mount at the longest
  *                         matching prefix (FAT32 / ext4 /
  *                         tmpfs / ramfs)

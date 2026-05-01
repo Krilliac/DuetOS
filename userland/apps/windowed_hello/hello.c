@@ -120,14 +120,6 @@ __declspec(dllimport) void __stdcall Sleep(DWORD dwMilliseconds);
 __declspec(dllimport) void __stdcall ExitProcess(unsigned int uExitCode);
 __declspec(dllimport) void __stdcall OutputDebugStringA(const char* s);
 
-static int str_len(const char* s)
-{
-    int n = 0;
-    while (s[n])
-        ++n;
-    return n;
-}
-
 static void dbg_uint(const char* prefix, unsigned v)
 {
     /* Tiny printf for [odbg] logging. Max 16 decimal digits. */

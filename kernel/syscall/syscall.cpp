@@ -430,13 +430,13 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     }
     const u64 num = frame->rax;
-    // Outer-scope `proc` was previously `const Process*`; keep that
-    // shape so the many `case` blocks below that re-declare a local
-    // `Process* proc` for write access don't trip -Wshadow.
-    const Process* proc = CurrentProcess();
-    const u64 pid = (proc != nullptr) ? proc->pid : 0;
+    // Outer-scope process pointer for the dispatcher header. Renamed
+    // away from `proc` so the per-case `Process* proc = ...`
+    // declarations in the switch below don't trip -Wshadow.
+    const Process* dispatch_proc = CurrentProcess();
+    const u64 dispatch_pid = (dispatch_proc != nullptr) ? dispatch_proc->pid : 0;
     KLOG_TRACE_V("syscall", "SyscallDispatch: enter (number)", num);
-    CleanroomTraceRecord("syscall", "native-dispatch", num, pid, frame->rip);
+    CleanroomTraceRecord("syscall", "native-dispatch", num, dispatch_pid, frame->rip);
     // Event-tracer enter (D2 instrumentation). Tag the event
     // with the syscall number + first arg so a `tracer dump`
     // correlates to the in-flight syscall stream.
@@ -447,7 +447,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
     // mutable Process* because the recorder needs to write into the
     // process's lazy-allocated state — but the dispatcher itself
     // never mutates the process struct from this scope.
-    subsystems::win32::custom::OnSyscallEntry(const_cast<Process*>(proc), num, frame);
+    subsystems::win32::custom::OnSyscallEntry(const_cast<Process*>(dispatch_proc), num, frame);
 
     // Centralised capability gate (plan A4). Consults
     // `kSyscallCapTable` for syscalls whose authorisation reduces
@@ -455,9 +455,9 @@ void SyscallDispatch(arch::TrapFrame* frame)
     // table; the per-handler conditional checks (foreign vs self
     // PID, fd=1 vs fd=2, etc.) still live in the switch arms below
     // and remain authoritative for those cases.
-    if (!SyscallGate(num, proc).has_value())
+    if (!SyscallGate(num, dispatch_proc).has_value())
     {
-        KLOG_WARN_2V("syscall", "SyscallDispatch: capability gate denied", "num", num, "pid", pid);
+        KLOG_WARN_2V("syscall", "SyscallDispatch: capability gate denied", "num", num, "pid", dispatch_pid);
         frame->rax = static_cast<u64>(-1);
         return;
     }

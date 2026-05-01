@@ -51,11 +51,10 @@ constexpr u32 kPipeBufBytes = 4096;
 constexpr u32 kPipePoolCap = 16;
 constexpr u32 kEventfdPoolCap = 16;
 
-// EPIPE / EAGAIN constants in the negative-errno encoding the
-// rest of the Linux subsystem uses. Match the values in
-// syscall_internal.h's kEXXX block.
+// EPIPE constant in the negative-errno encoding the rest of the
+// Linux subsystem uses. Matches the value in syscall_internal.h's
+// kEXXX block.
 constexpr i64 kEpipe = -32;
-constexpr i64 kEagain = -11;
 
 struct Pipe
 {

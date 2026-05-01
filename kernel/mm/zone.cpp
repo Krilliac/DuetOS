@@ -57,9 +57,13 @@ PhysAddr AllocateZoneFrame(Zone zone)
     }
     if (zone == Zone::Mmio)
     {
-        // Reserved enumerator — no backing pool.
+        // Reserved enumerator — no backing pool by design (the
+        // self-test exercises this path explicitly to assert the
+        // OOM counter increments). Trace, not warn — a "warning"
+        // implies surprise, but every alloc against Mmio returning
+        // kNullFrame is the documented contract.
         ++g_stats[static_cast<u32>(zone)].oom;
-        KLOG_ONCE_WARN("mm/zone", "AllocateZoneFrame: Mmio zone has no backing pool");
+        KLOG_TRACE("mm/zone", "AllocateZoneFrame: Mmio zone has no backing pool");
         return kNullFrame;
     }
     // Per-zone physical-address ceilings (C1-followup). The frame

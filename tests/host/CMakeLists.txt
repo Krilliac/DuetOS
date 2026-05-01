@@ -87,3 +87,4 @@ endfunction()
 
 add_host_test(result)
 add_host_test(string)
+add_host_test(cvt)

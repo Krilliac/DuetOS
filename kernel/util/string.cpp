@@ -104,8 +104,12 @@ void StringSelfTest()
         {
             buf[i] = 0x11;
         }
-        // n=0 leaves the buffer untouched.
-        memset(buf, 0xFF, 0);
+        // n=0 leaves the buffer untouched. Use a `volatile` zero
+        // so clang doesn't fire -Wmemset-transposed-args (which
+        // would otherwise hand-wave us toward "did you mean
+        // memset(buf, 0, 0xFF)?").
+        volatile usize kZeroSize = 0;
+        memset(buf, 0xFF, kZeroSize);
         Expect(buf[0] == 0x11, "memset(.,.,0) is a no-op");
 
         // Sentinel bytes around a partial fill must survive.
