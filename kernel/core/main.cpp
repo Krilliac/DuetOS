@@ -69,7 +69,26 @@
 #include "drivers/gpu/gpu.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/input/ps2mouse.h"
+#include "drivers/net/bcm43xx_fw.h"
+#include "drivers/net/bcm43xx_upload.h"
+#include "drivers/net/iwlwifi_fw.h"
+#include "drivers/net/iwlwifi_rings.h"
+#include "drivers/net/iwlwifi_upload.h"
 #include "drivers/net/net.h"
+#include "drivers/net/rtl88xx_fw.h"
+#include "drivers/net/rtl88xx_upload.h"
+#include "net/wireless/beacon.h"
+#include "net/wireless/crypto/hmac.h"
+#include "net/wireless/crypto/pbkdf2.h"
+#include "net/wireless/crypto/prf.h"
+#include "net/wireless/crypto/sha1.h"
+#include "net/wireless/crypto/sha256.h"
+#include "net/wireless/eapol.h"
+#include "net/wireless/fourway.h"
+#include "net/wireless/mlme.h"
+#include "net/wireless/test/wireless_e2e_test.h"
+#include "net/wireless/wdev.h"
+#include "net/wireless/wifi_diag.h"
 #include "drivers/pci/pci.h"
 #include "drivers/power/power.h"
 #include "drivers/usb/cdc_ecm.h"
@@ -1752,6 +1771,29 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Bringing up firmware loader (scaffold).\n");
     duetos::core::FwLoaderInit();
+    duetos::net::wireless::diag::Init();
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::IwlFirmwareSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::RtlFirmwareSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::BcmFirmwareSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::wireless::BeaconSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::wireless::crypto::Sha1SelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::wireless::crypto::Sha256SelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::wireless::crypto::HmacSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::wireless::crypto::Pbkdf2SelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::wireless::crypto::PrfSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::wireless::EapolSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::wireless::FourWaySelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::wireless::WdevSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::wireless::MlmeSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::IwlUploadSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::IwlRingsSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::RtlUploadSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::BcmUploadSelfTest());
+    // End-to-end loopback self-test exercises the entire control
+    // tier (scan + auth + assoc + 4-way handshake) against a
+    // software FakeAp peer + LoopbackDriver. Equivalent to
+    // Linux's `mac80211_hwsim` for our stack.
+    DUETOS_BOOT_SELFTEST(duetos::net::wireless::test::WirelessE2ESelfTest());
 
     SerialWrite("[boot] Detecting NICs.\n");
     duetos::drivers::net::NetInit();

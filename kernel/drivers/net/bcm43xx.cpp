@@ -1,6 +1,7 @@
 #include "drivers/net/bcm43xx.h"
 
 #include "arch/x86_64/serial.h"
+#include "drivers/net/bcm43xx_fw.h"
 #include "loader/firmware_loader.h"
 #include "log/klog.h"
 #include "sched/sched.h"
@@ -176,9 +177,26 @@ bool Bcm43xxBringUp(NicInfo& n)
     auto fw = duetos::core::FwLoad(req);
     if (fw.has_value())
     {
+        // Parse the b43 record stream. A blob with at least one
+        // valid (ucode/pcm/iv) record clears firmware_pending; a
+        // blob whose first byte isn't a recognised record type or
+        // whose lengths overflow marks Incompatible.
+        BcmFirmwareParsed parsed{};
+        auto p = BcmFirmwareParse(fw.value().data, fw.value().size, &parsed);
+        if (p.has_value() && parsed.valid)
+        {
+            BcmFirmwareLog(parsed);
+            n.firmware_pending = false;
+            n.wireless_fw_state = NicInfo::WirelessFwState::Ready;
+        }
+        else
+        {
+            arch::SerialWrite("[bcm43xx] firmware blob found but record-stream "
+                              "parse failed — marking Incompatible\n");
+            n.firmware_pending = true;
+            n.wireless_fw_state = NicInfo::WirelessFwState::Incompatible;
+        }
         duetos::core::FwRelease(fw.value());
-        n.firmware_pending = false;
-        n.wireless_fw_state = NicInfo::WirelessFwState::Ready;
     }
     else
     {

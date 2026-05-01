@@ -1,6 +1,7 @@
 #include "drivers/net/iwlwifi.h"
 
 #include "arch/x86_64/serial.h"
+#include "drivers/net/iwlwifi_fw.h"
 #include "loader/firmware_loader.h"
 #include "log/klog.h"
 #include "sched/sched.h"
@@ -221,11 +222,28 @@ bool IwlwifiBringUp(NicInfo& n)
     auto fw = duetos::core::FwLoad(req);
     if (fw.has_value())
     {
-        // Real fw — cannot happen in v0; reserved for the loader
-        // slice. Drop the blob (we don't yet know how to use it).
+        // Parse the TLV envelope. A structurally valid blob lifts
+        // the NIC out of `firmware_pending` and logs a 1-line
+        // summary so the next slice (microcode upload) starts from
+        // a known baseline. A blob that fails to parse stays as
+        // Incompatible — the loader DID produce bytes, but the
+        // bytes weren't what iwlwifi expects.
+        IwlFirmwareParsed parsed{};
+        auto p = IwlFirmwareParse(fw.value().data, fw.value().size, &parsed);
+        if (p.has_value() && parsed.valid)
+        {
+            IwlFirmwareLog(parsed);
+            n.firmware_pending = false;
+            n.wireless_fw_state = NicInfo::WirelessFwState::Ready;
+        }
+        else
+        {
+            arch::SerialWrite("[iwlwifi] firmware blob found but TLV parse failed — "
+                              "marking Incompatible\n");
+            n.firmware_pending = true;
+            n.wireless_fw_state = NicInfo::WirelessFwState::Incompatible;
+        }
         duetos::core::FwRelease(fw.value());
-        n.firmware_pending = false;
-        n.wireless_fw_state = NicInfo::WirelessFwState::Ready;
     }
     else
     {
