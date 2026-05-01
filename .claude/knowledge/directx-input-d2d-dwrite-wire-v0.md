@@ -80,11 +80,33 @@ Closes three items from the DirectX v0 gap inventory:
 
 ## What works — runtime-verified
 
-The kernel builds clean with the changes; format is clang-format
-clean; no QEMU smoke on this host (qemu/grub-mkrescue not
-installed). The change is additive — every prior DI/D2D/DWrite
-smoke PE still hits the same vtable slots and gets at least the
-old behaviour (HRESULT == 0).
+Boot under QEMU+OVMF (`DUETOS_PRESET=x86_64-debug DUETOS_TIMEOUT=45
+tools/qemu/run.sh`):
+
+```
+[dinput8_smoke] DirectInput8Create  = PASS
+[dinput8_smoke] CreateDevice        = PASS
+[dinput8_smoke] SetDataFormat       = PASS
+[dinput8_smoke] Acquire             = PASS
+[dinput8_smoke] GetDeviceState      = PASS
+[dinput8_smoke] Unacquire           = PASS
+[d2d1_smoke]    D2D1CreateFactory   = PASS
+[d2d1_smoke]    CreateHwndRenderTarget = PASS
+[d2d1_smoke]    CreateSolidColorBrush  = PASS
+[d2d1_smoke]    BeginDraw  / Clear / FillRectangle / EndDraw = PASS
+[dwrite_smoke]  DWriteCreateFactory = PASS
+[dwrite_smoke]  CreateTextFormat / GetFontSize / CreateTextLayout = PASS
+```
+
+Aggregate boot smoke PE counters: **589 PASS, 34 FAIL** (~94.5%
+pass rate; all 34 FAILs are pre-existing `FAIL/STUB` markers in
+the smoke apps, none introduced by this slice). 0 health-monitor
+issues, 13 fault domains live, scheduler/heap/frames stable. No
+panics, triple faults, or exceptions.
+
+Boot tooling installed on demand for this verification:
+`sudo apt-get install -y qemu-system-x86 grub-common grub-pc-bin
+grub-efi-amd64-bin xorriso mtools ovmf`.
 
 ## Known limits
 
