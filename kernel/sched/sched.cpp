@@ -652,7 +652,13 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     auto* t = static_cast<Task*>(mm::KMalloc(sizeof(Task)));
     if (t == nullptr)
     {
-        PanicSched("KMalloc failed for Task");
+        // Debug: panic — fail loud so the OOM is impossible to
+        // miss during development. Release: log it and return
+        // nullptr; SchedCreate's signature is already nullable
+        // and every existing caller fire-and-forgets the result.
+        // A failed worker thread is preferable to a halted box.
+        core::DebugPanicOrWarn("sched", "KMalloc failed for Task");
+        return nullptr;
     }
     // Zero the struct first; explicit assignments below overwrite the
     // fields we care about, but any field NOT covered would otherwise
@@ -668,7 +674,12 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     auto* stack = static_cast<u8*>(mm::AllocateKernelStack(kKernelStackBytes));
     if (stack == nullptr)
     {
-        PanicSched("AllocateKernelStack failed for kernel stack");
+        // Same shape as the Task-alloc failure above. The Task
+        // struct was just allocated; KFree it before returning so
+        // we don't leak on the release path.
+        core::DebugPanicOrWarn("sched", "AllocateKernelStack failed for kernel stack");
+        mm::KFree(t);
+        return nullptr;
     }
 
     // Plant the canary at the low edge of the (usable) stack BEFORE

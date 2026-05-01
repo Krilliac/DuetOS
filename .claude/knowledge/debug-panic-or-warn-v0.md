@@ -86,6 +86,42 @@ unwind that state first (e.g. `MutexUnlock` before
 | `kernel/drivers/pci/pci.cpp:325` (`PciMsixUnmaskEntry` OOB index) | log + value; refuse the write |
 | `kernel/drivers/pci/pci.cpp:336` (`PciMsixEnable` on non-MSI-X device) | log; refuse — driver can fall back |
 
+## Fourth pass (2026-05-01) — runtime task allocation, PS/2 input
+
+5 more sites — same shape as the third pass.
+
+### `SchedCreate` runtime allocation failures
+
+`SchedCreate` already returns a nullable `Task*`. Existing
+callers fire-and-forget the result, so changing OOM from "halt
+the kernel" to "log + return nullptr" is forward-compatible —
+the worker thread just doesn't get created.
+
+| Site | Recovery shape in release |
+|------|---------------------------|
+| `kernel/sched/sched.cpp:655` (KMalloc failed for Task) | log; return nullptr |
+| `kernel/sched/sched.cpp:671` (AllocateKernelStack failed) | log; KFree(t); return nullptr |
+
+The boot-task allocation at `sched.cpp:598` keeps its hard
+panic — if the very first task can't be created, scheduler init
+has nothing to keep running.
+
+### PS/2 controller wedge
+
+PS/2 was the critical input path on early targets, but DuetOS
+now ships USB HID (xHCI keyboard / mouse). When the 8042
+controller wedges or fails its self-test, the right release
+behaviour is "give up on PS/2; USB HID still works", not "halt
+the kernel".
+
+| Site | Recovery shape in release |
+|------|---------------------------|
+| `kernel/drivers/input/ps2kbd.cpp:262` (input buffer never cleared) | log; return — caller's next port write fails on stuck controller, init backs out |
+| `kernel/drivers/input/ps2kbd.cpp:277` (output buffer never filled) | log; return 0 — handshake check fails cleanly |
+| `kernel/drivers/input/ps2kbd.cpp:360` (8042 self-test failed) | log + value; return — driver init bails |
+| `kernel/drivers/input/ps2mouse.cpp:121` (input buffer never cleared) | log; return |
+| `kernel/drivers/input/ps2mouse.cpp:151` (output buffer never filled) | log; return 0 |
+
 ## Third pass (2026-05-01) — thread-entry, kobject, spinlock contracts, MMIO mapping, SMP boot
 
 20 more sites broken into five families:
@@ -236,12 +272,10 @@ What stays as hard `Panic` deliberately:
 
 > Continue the "soften release-build panics" work. The
 > `DebugPanicOrWarn` / `DebugPanicOrWarnWithValue` helpers are in
-> `kernel/core/panic.{h,cpp}`. 34 sites converted across three
+> `kernel/core/panic.{h,cpp}`. 39 sites converted across four
 > passes — see the tables in this file for the full inventory.
 >
 > What's left to triage:
-> - Boot-time `PanicSched` OOM (`sched.cpp:598/655/671/935`) —
->   needs `SchedCreate` to return `Result<T,E>` first.
 > - `SeqLock` invariant violations (`sync/seqlock.cpp:77,98`) —
 >   continuing past these can produce torn reads, so they need a
 >   different recovery shape (perhaps "drop the seqlock-protected
@@ -251,7 +285,12 @@ What stays as hard `Panic` deliberately:
 >   per-AP-IPI tracking.
 >
 > Deliberately untouched: heap / frame-allocator / page-table
-> corruption (KEEP); ACPI table parse failures (KEEP — fundamental
-> firmware data); LAPIC / IOAPIC init (KEEP — kernel cannot run
-> without them); `*SelfTest` panics (already dead code in release
+> corruption (KEEP); stack-canary mismatch (KEEP — real overflow);
+> ACPI table parse failures (KEEP — fundamental firmware data);
+> LAPIC / IOAPIC init (KEEP — kernel cannot run without them);
+> the boot-task allocation at `sched.cpp:598` (KEEP — scheduler
+> init has nothing to keep running if it fires); the
+> "no runnable task available" invariant at `sched.cpp:946`
+> (KEEP — idle task should always be runnable, so this is true
+> corruption); `*SelfTest` panics (already dead code in release
 > via `DUETOS_BOOT_SELFTEST(call)`).
