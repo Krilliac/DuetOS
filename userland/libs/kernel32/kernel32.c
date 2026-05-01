@@ -1419,11 +1419,27 @@ typedef struct
     DWORD size;
     DWORD protect;
     void* base;
+    /* Optional name (UTF-16, low-byte stripped to ASCII for
+     * comparison). Empty → unnamed mapping; OpenFileMappingW
+     * walks the table for a matching non-empty name. */
+    char name[64];
 } DUETOS_FILEMAPPING;
 
 #define DUETOS_FILEMAPPING_MAX 8
 static DUETOS_FILEMAPPING g_filemappings[DUETOS_FILEMAPPING_MAX];
 static int g_filemapping_count = 0;
+
+static int dfm_name_eq(const char* a, const char* b)
+{
+    int i = 0;
+    while (a[i] && b[i])
+    {
+        if (a[i] != b[i])
+            return 0;
+        ++i;
+    }
+    return a[i] == 0 && b[i] == 0;
+}
 
 __declspec(dllexport) HANDLE CreateFileMappingW(HANDLE hFile, void* sec, DWORD protect, DWORD sizeHigh, DWORD sizeLow,
                                                 const WCHAR_t* name)
@@ -1431,20 +1447,44 @@ __declspec(dllexport) HANDLE CreateFileMappingW(HANDLE hFile, void* sec, DWORD p
     (void)hFile;
     (void)sec;
     (void)name;
-    /* Allocate via SYS_HEAP_ALLOC. */
     if (g_filemapping_count >= DUETOS_FILEMAPPING_MAX)
         return (HANDLE)0;
-    DWORD total = ((unsigned long long)sizeHigh << 32) | sizeLow;
+    unsigned long long total = ((unsigned long long)sizeHigh << 32) | sizeLow;
     if (total == 0)
-        total = 0x10000; /* default 64K if caller passed 0 */
+        total = 0x1000; /* default 4K if caller passed 0 */
+    /* Cap at the per-process heap budget. The Win32 heap in v0 is
+     * 16 pages = 64 KiB total, so any single allocation has to
+     * leave room for the heap header and the slab's own footer.
+     * Cap at 32 KiB so a follow-up alloc within the same process
+     * still has room — that's enough for ipc_smoke (which just
+     * probes the round-trip) and most caller workflows that do
+     * one mapping at a time. Real cross-process shared memory
+     * needs a SYS_VM_* path; deferred. */
+    const unsigned long long kMappingMaxBytes = 0x8000ULL;
+    if (total > kMappingMaxBytes)
+        total = kMappingMaxBytes;
     long long rv;
     __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)11), "D"((long long)total) : "memory");
     if (rv == 0)
         return (HANDLE)0;
     int slot = g_filemapping_count++;
-    g_filemappings[slot].size = total;
+    g_filemappings[slot].size = (DWORD)total;
     g_filemappings[slot].protect = protect;
     g_filemappings[slot].base = (void*)rv;
+    /* Capture the name (low-byte UTF-16 strip) so OpenFileMappingW
+     * can find the same mapping by name later. The slot is
+     * process-local; cross-process named-shm semantics are deferred
+     * (would need a kernel-side named-section table). */
+    int ni = 0;
+    if (name != (const WCHAR_t*)0)
+    {
+        while (ni < 63 && name[ni] != 0)
+        {
+            g_filemappings[slot].name[ni] = (char)(name[ni] & 0xFF);
+            ++ni;
+        }
+    }
+    g_filemappings[slot].name[ni] = 0;
     /* Sentinel handle: 0x6000 + slot. */
     return (HANDLE)(unsigned long long)(0x6000 + slot);
 }
@@ -1453,8 +1493,28 @@ __declspec(dllexport) HANDLE OpenFileMappingW(DWORD desired, BOOL inherit, const
 {
     (void)desired;
     (void)inherit;
-    (void)name;
-    /* Named mappings not yet supported — return NULL. */
+    if (name == (const WCHAR_t*)0)
+        return (HANDLE)0;
+    /* UTF-16 → ASCII low-byte strip into a local scratch, then
+     * scan the per-process mapping table for a matching name.
+     * Cross-process lookup requires a kernel-mediated named-
+     * section registry; this v0 path covers the common in-
+     * process pattern (CreateFileMappingW → OpenFileMappingW). */
+    char abuf[64];
+    int i = 0;
+    while (i < 63 && name[i] != 0)
+    {
+        abuf[i] = (char)(name[i] & 0xFF);
+        ++i;
+    }
+    abuf[i] = 0;
+    if (abuf[0] == 0)
+        return (HANDLE)0;
+    for (int s = 0; s < g_filemapping_count; ++s)
+    {
+        if (dfm_name_eq(g_filemappings[s].name, abuf))
+            return (HANDLE)(unsigned long long)(0x6000 + s);
+    }
     return (HANDLE)0;
 }
 
@@ -4287,24 +4347,118 @@ __declspec(dllexport) UINT GetSystemWindowsDirectoryW(wchar_t16* out, UINT cb)
     return write_xcolon_backslash_w(out, cb);
 }
 
+/* GetTempFileNameA / GetTempFileNameW — synthesise a unique
+ * "<dir>\<prefix>NNNN.tmp" path. Win32 contract:
+ *   - Combine dir + prefix + 4-hex-digit unique-id + ".TMP".
+ *   - If `unique == 0`, the impl picks the id (and creates the
+ *     file). v0 doesn't actually create the file (the FS layer
+ *     above us is FAT32 + ramfs; SYS_FILE_CREATE on a temp dir
+ *     isn't a v0 happy path). We just return the constructed
+ *     name and the chosen id, leaving file creation to the
+ *     caller's CreateFileW path.
+ *   - Returns the chosen id (non-zero on success).
+ *   - On caller buffer overflow, returns 0.
+ *
+ * The id rotation is process-local — incrementing static; that
+ * matches Win32's implementation enough that consecutive calls
+ * produce distinct names. */
+static UINT g_temp_unique = 0xA001;
+
 __declspec(dllexport) UINT GetTempFileNameA(const char* dir, const char* prefix, UINT unique, char* out)
 {
-    (void)dir;
-    (void)prefix;
-    (void)unique;
-    if (out)
-        out[0] = 0;
-    return 0;
+    if (out == (char*)0)
+        return 0;
+    UINT id = unique != 0 ? unique : (g_temp_unique++ & 0xFFFF);
+    /* Worst case: dir(MAX_PATH-14) + prefix(3) + 4 hex + ".TMP" + NUL.
+     * The Win32 spec caps dir + prefix at MAX_PATH-14 chars; we don't
+     * enforce the limit beyond a buffer-overflow guard below. */
+    int o = 0;
+    /* Copy dir. */
+    if (dir != (const char*)0)
+    {
+        while (o < 250 && dir[o] != 0)
+        {
+            out[o] = dir[o];
+            ++o;
+        }
+    }
+    /* Ensure trailing backslash. */
+    if (o == 0 || out[o - 1] != '\\')
+    {
+        if (o >= 250)
+            return 0;
+        out[o++] = '\\';
+    }
+    /* Copy prefix (≤ 3 chars). */
+    if (prefix != (const char*)0)
+    {
+        for (int p = 0; p < 3 && prefix[p] != 0; ++p)
+        {
+            if (o >= 250)
+                return 0;
+            out[o++] = prefix[p];
+        }
+    }
+    /* 4-hex unique-id. */
+    static const char hex[] = "0123456789ABCDEF";
+    if (o + 4 > 250)
+        return 0;
+    out[o++] = hex[(id >> 12) & 0xF];
+    out[o++] = hex[(id >> 8) & 0xF];
+    out[o++] = hex[(id >> 4) & 0xF];
+    out[o++] = hex[id & 0xF];
+    /* ".tmp" suffix + NUL. */
+    if (o + 5 > 250)
+        return 0;
+    out[o++] = '.';
+    out[o++] = 't';
+    out[o++] = 'm';
+    out[o++] = 'p';
+    out[o] = 0;
+    return id;
 }
 
 __declspec(dllexport) UINT GetTempFileNameW(const wchar_t16* dir, const wchar_t16* prefix, UINT unique, wchar_t16* out)
 {
-    (void)dir;
-    (void)prefix;
-    (void)unique;
-    if (out)
+    if (out == (wchar_t16*)0)
+        return 0;
+    char abuf[260];
+    char aprefix[8];
+    char adir[260];
+    int n = 0;
+    if (dir != (const wchar_t16*)0)
+    {
+        while (n < 255 && dir[n] != 0)
+        {
+            adir[n] = (char)(dir[n] & 0xFF);
+            ++n;
+        }
+    }
+    adir[n] = 0;
+    n = 0;
+    if (prefix != (const wchar_t16*)0)
+    {
+        while (n < 7 && prefix[n] != 0)
+        {
+            aprefix[n] = (char)(prefix[n] & 0xFF);
+            ++n;
+        }
+    }
+    aprefix[n] = 0;
+    UINT id = GetTempFileNameA(adir, aprefix, unique, abuf);
+    if (id == 0)
+    {
         out[0] = 0;
-    return 0;
+        return 0;
+    }
+    int i = 0;
+    while (i < 259 && abuf[i] != 0)
+    {
+        out[i] = (wchar_t16)(unsigned char)abuf[i];
+        ++i;
+    }
+    out[i] = 0;
+    return id;
 }
 
 __declspec(dllexport) DWORD GetCurrentDirectoryA(DWORD cb, char* out)
@@ -4739,5 +4893,146 @@ __declspec(dllexport) BOOL PathRenameExtensionW(wchar_t16* path, const wchar_t16
 __declspec(dllexport) DWORD GetMaximumProcessorCount(unsigned short group)
 {
     (void)group;
+    return 1;
+}
+
+/* ------------------------------------------------------------------
+ * K32* psapi entry points — duplicated into kernel32.
+ *
+ * Modern Windows (Vista+) duplicates the entire psapi process /
+ * module enumeration API into kernel32 with a `K32` prefix so a
+ * binary built against an updated psapi.h imports from kernel32
+ * directly. mingw-w64's `psapi.h` does the same thing under the
+ * hood. Without these in kernel32, `EnumProcesses` etc. in a
+ * smoke-test PE compile to imports of
+ * `kernel32.dll!K32EnumProcesses` and fall through to the catch-
+ * all NO-OP — the userland psapi.dll's K32* exports are
+ * unreachable because the import-hint DLL is wrong.
+ *
+ * The implementations here are tiny mirrors of psapi.c: report
+ * the calling process / EXE in fixed-size single-element form.
+ * Real cross-process enumeration needs a kernel-side process-
+ * snapshot syscall; deferred. */
+__declspec(dllexport) BOOL K32EnumProcesses(DWORD* pids, DWORD cb, DWORD* cb_needed)
+{
+    if (cb_needed)
+        *cb_needed = sizeof(DWORD);
+    if (pids != (DWORD*)0 && cb >= sizeof(DWORD))
+    {
+        long rv;
+        __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long)8) : "memory"); /* SYS_GETPROCID */
+        pids[0] = (DWORD)rv;
+    }
+    return 1;
+}
+
+__declspec(dllexport) BOOL K32EnumProcessModules(HANDLE hProcess, HANDLE* modules, DWORD cb, DWORD* cb_needed)
+{
+    (void)hProcess;
+    if (cb_needed)
+        *cb_needed = sizeof(HANDLE);
+    if (modules != (HANDLE*)0 && cb >= sizeof(HANDLE))
+        modules[0] = (HANDLE)0x140000000ULL; /* synthetic EXE base */
+    return 1;
+}
+
+__declspec(dllexport) BOOL K32EnumProcessModulesEx(HANDLE hProcess, HANDLE* modules, DWORD cb, DWORD* cb_needed,
+                                                   DWORD filter)
+{
+    (void)filter;
+    return K32EnumProcessModules(hProcess, modules, cb, cb_needed);
+}
+
+__declspec(dllexport) DWORD K32GetMappedFileNameW(HANDLE hProcess, void* addr, wchar_t16* path, DWORD cch)
+{
+    (void)hProcess;
+    (void)addr;
+    if (path != (wchar_t16*)0 && cch > 0)
+        path[0] = 0;
+    return 0;
+}
+
+__declspec(dllexport) DWORD K32GetModuleBaseNameW(HANDLE hProcess, HANDLE mod, wchar_t16* name, DWORD cch)
+{
+    (void)hProcess;
+    (void)mod;
+    static const wchar_t16 base[] = {'r', 'i', 'n', 'g', '3', 0};
+    if (name == (wchar_t16*)0 || cch == 0)
+        return 0;
+    int i = 0;
+    while (i < (int)cch - 1 && base[i] != 0)
+    {
+        name[i] = base[i];
+        ++i;
+    }
+    name[i] = 0;
+    return (DWORD)i;
+}
+
+__declspec(dllexport) DWORD K32GetModuleFileNameExW(HANDLE hProcess, HANDLE mod, wchar_t16* name, DWORD cch)
+{
+    (void)hProcess;
+    (void)mod;
+    static const wchar_t16 path[] = {'C', ':', '\\', 'b', 'i', 'n', '\\', 'r', 'i',
+                                     'n', 'g', '3',  '.', 'e', 'x', 'e',  0};
+    if (name == (wchar_t16*)0 || cch == 0)
+        return 0;
+    int i = 0;
+    while (i < (int)cch - 1 && path[i] != 0)
+    {
+        name[i] = path[i];
+        ++i;
+    }
+    name[i] = 0;
+    return (DWORD)i;
+}
+
+__declspec(dllexport) DWORD K32GetProcessImageFileNameW(HANDLE hProcess, wchar_t16* name, DWORD cch)
+{
+    return K32GetModuleFileNameExW(hProcess, (HANDLE)0, name, cch);
+}
+
+__declspec(dllexport) DWORD K32GetProcessImageFileNameA(HANDLE hProcess, char* name, DWORD cch)
+{
+    (void)hProcess;
+    static const char path[] = "C:\\bin\\ring3.exe";
+    if (name == (char*)0 || cch == 0)
+        return 0;
+    int i = 0;
+    while (i < (int)cch - 1 && path[i] != 0)
+    {
+        name[i] = path[i];
+        ++i;
+    }
+    name[i] = 0;
+    return (DWORD)i;
+}
+
+__declspec(dllexport) BOOL K32GetProcessMemoryInfo(HANDLE hProcess, void* info, DWORD cb)
+{
+    (void)hProcess;
+    if (info == (void*)0 || cb == 0)
+        return 0;
+    unsigned int* p = (unsigned int*)info;
+    unsigned char* b = (unsigned char*)info;
+    for (DWORD i = 0; i < cb; ++i)
+        b[i] = 0;
+    /* PROCESS_MEMORY_COUNTERS layout: { cb, PageFaultCount,
+     * PeakWorkingSetSize, WorkingSetSize, ... }. Echo the cb in
+     * slot 0 so callers that print it get a plausible header. */
+    if (cb >= 4)
+        p[0] = cb;
+    return 1;
+}
+
+__declspec(dllexport) BOOL K32QueryWorkingSet(HANDLE hProcess, void* buf, DWORD cb)
+{
+    (void)hProcess;
+    if (buf)
+    {
+        unsigned char* b = (unsigned char*)buf;
+        for (DWORD i = 0; i < cb; ++i)
+            b[i] = 0;
+    }
     return 1;
 }

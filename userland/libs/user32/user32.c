@@ -847,25 +847,45 @@ __declspec(dllexport) ATOM RegisterClassA(const void* wc)
 }
 __declspec(dllexport) ATOM RegisterClassW(const void* wc)
 {
-    /* Can't inspect wide names safely without flattening; v1
-     * accepts and stores with a synthetic name so CreateWindowExW
-     * still succeeds (callers typically pair RegisterClassW with
-     * CreateWindowExW using the same pointer). */
+    /* WNDCLASSW shares lpfnWndProc / lpszClassName slots with
+     * WNDCLASSA in the v0 bridge struct — only the W variant
+     * stores lpszClassName as a wchar_t16*. Flatten the wide
+     * name with a low-byte strip so the registration's stored
+     * name matches what GetClassInfoW(L"...") + UnregisterClassW
+     * will look for later. Falls back to a synthetic procName-
+     * derived label only if the caller passed a NULL or empty
+     * wide name (matches Win32 behaviour: registering with no
+     * name is technically allowed, the class becomes anonymous-
+     * by-atom). */
     if (!wc)
         return 0;
     const struct user32_wndclass_a* c = (const struct user32_wndclass_a*)wc;
-    char dummy[16];
-    dummy[0] = 'W';
-    dummy[1] = '-';
-    /* Embed low 14 bits of the WNDPROC pointer so different
-     * classes with distinct procs stay distinct. */
-    unsigned long long v = (unsigned long long)c->lpfnWndProc;
-    for (int i = 0; i < 13; ++i)
+    char flat[64];
+    int fi = 0;
+    if (c->lpszClassName != 0)
     {
-        dummy[2 + i] = (char)('a' + ((v >> (i * 4)) & 0xF));
+        const wchar_t16* w = (const wchar_t16*)c->lpszClassName;
+        while (fi < (int)sizeof(flat) - 1 && w[fi] != 0)
+        {
+            flat[fi] = (char)(w[fi] & 0xFF);
+            ++fi;
+        }
     }
-    dummy[15] = '\0';
-    return user32_class_register(dummy, c->lpfnWndProc) ? 1 : 0;
+    flat[fi] = '\0';
+    if (fi == 0)
+    {
+        /* No name — fall back to a procName-derived synthetic so
+         * different anonymous classes stay distinct. */
+        flat[0] = 'W';
+        flat[1] = '-';
+        unsigned long long v = (unsigned long long)c->lpfnWndProc;
+        for (int i = 0; i < 13; ++i)
+        {
+            flat[2 + i] = (char)('a' + ((v >> (i * 4)) & 0xF));
+        }
+        flat[15] = '\0';
+    }
+    return user32_class_register(flat, c->lpfnWndProc) ? 1 : 0;
 }
 __declspec(dllexport) ATOM RegisterClassExA(const void* wcex)
 {
@@ -2006,23 +2026,77 @@ __declspec(dllexport) BOOL DdeFreeStringHandle(DWORD inst, void* h)
     return 1;
 }
 
-/* GetClassInfoW — return success when called on registered class
- * via RegisterClassW. We track a single static class atom for v0. */
+/* GetDC / GetWindowDC / ReleaseDC — re-exported from user32 in
+ * addition to gdi32. Real Windows ships GetDC/ReleaseDC in
+ * user32.dll (the WM-side surface) and CreateCompatibleDC etc.
+ * in gdi32.dll (the rendering surface); mingw-w64's headers
+ * import GetDC from user32.dll, so a smoke-test PE built against
+ * standard headers imports user32.dll!GetDC and falls through to
+ * the kernel flat-thunk catch-all when the userland user32 doesn't
+ * export it. The forwarders below mirror gdi32.c's HDC encoding
+ * (HWND | GDI_TAG, 0xDC00000000ULL) so the HDC handed back can
+ * round-trip through gdi32's downstream calls.
+ *
+ * Caveat: GetDC(NULL) returns the bare GDI_TAG sentinel which is
+ * non-zero — that's enough to satisfy "did GetDC succeed?" probes;
+ * actual screen-DC rendering against the desktop framebuffer needs
+ * a real desktop-window registration that doesn't exist in v0. */
+__declspec(dllexport) HANDLE GetDC(HANDLE hwnd)
+{
+    return (HANDLE)((unsigned long long)hwnd | 0xDC00000000ULL);
+}
+
+__declspec(dllexport) HANDLE GetWindowDC(HANDLE hwnd)
+{
+    return GetDC(hwnd);
+}
+
+__declspec(dllexport) int ReleaseDC(HANDLE hwnd, HANDLE dc)
+{
+    (void)hwnd;
+    (void)dc;
+    return 1;
+}
+
+/* GetClassInfoW — succeed iff `class_name` matches a class
+ * previously registered via RegisterClass* (looked up against the
+ * shared `s_classes[]` table that RegisterClassA / RegisterClassW
+ * populate). On hit, zero-fill the caller's WNDCLASSW and copy in
+ * the registered WNDPROC + class name so the caller can hand the
+ * struct back into a CreateWindowEx pair. On miss, return FALSE
+ * cleanly — that's the contract every Win32 GUI app's "is class
+ * registered" probe expects. */
 __declspec(dllexport) BOOL GetClassInfoW(void* hInst, const wchar_t16* class_name, void* wcw)
 {
     (void)hInst;
     if (class_name == (const wchar_t16*)0 || wcw == (void*)0)
         return 0;
-    /* Quick string match against any "*Smoke*" class name. The
-     * real impl would walk the per-process atom table; this v0
-     * stub accepts any non-empty name. */
     if (class_name[0] == 0)
         return 0;
-    /* Zero-fill the WNDCLASSW the caller handed us (it's about
-     * 64 bytes). */
+    /* Flatten the wide name with low-byte strip — same convention
+     * RegisterClassW uses to populate s_classes, so a register +
+     * lookup pair against the same wide name canonicalises. */
+    char flat[64];
+    int i = 0;
+    while (i < (int)sizeof(flat) - 1 && class_name[i] != 0)
+    {
+        flat[i] = (char)(class_name[i] & 0xFF);
+        ++i;
+    }
+    flat[i] = '\0';
+    WNDPROC proc = user32_class_lookup(flat);
+    if (proc == 0)
+        return 0;
+    /* Zero-fill the WNDCLASSW + copy the resolved WNDPROC. The
+     * struct is ~64 bytes (WNDCLASSEXW is ~80); zeroing 80 covers
+     * either form. The first slot is `style`; lpfnWndProc lives
+     * at offset 8 (after the 4-byte style + 4-byte alignment). */
     unsigned char* b = (unsigned char*)wcw;
-    for (int i = 0; i < 80; ++i)
-        b[i] = 0;
+    for (int j = 0; j < 80; ++j)
+        b[j] = 0;
+    /* WNDCLASSW layout: { UINT style; WNDPROC lpfnWndProc; ... }.
+     * lpfnWndProc is at offset 8 on x64 (struct alignment). */
+    *(WNDPROC*)(b + 8) = proc;
     return 1;
 }
 

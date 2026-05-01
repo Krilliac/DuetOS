@@ -140,3 +140,63 @@ __declspec(dllexport) BOOL QueryWorkingSet(HANDLE hProcess, void* buf, DWORD cb)
     }
     return 1;
 }
+
+/* K32* aliases — mingw-w64's psapi.h transparently rewrites
+ * `EnumProcesses` etc. to `K32EnumProcesses` etc. on Vista+, so a
+ * binary built against modern headers imports the K32 form
+ * directly even when the source spells the legacy name. Without
+ * these re-exports every modern Win32 PE that probes psapi falls
+ * through to the catch-all NO-OP stub and the smoke tests FAIL.
+ *
+ * Each forwards 1:1 — same ABI, same return convention. */
+__declspec(dllexport) BOOL K32EnumProcesses(DWORD* pids, DWORD cb, DWORD* cb_needed)
+{
+    return EnumProcesses(pids, cb, cb_needed);
+}
+
+__declspec(dllexport) BOOL K32EnumProcessModules(HANDLE hProcess, HANDLE* modules, DWORD cb, DWORD* cb_needed)
+{
+    return EnumProcessModules(hProcess, modules, cb, cb_needed);
+}
+
+__declspec(dllexport) BOOL K32EnumProcessModulesEx(HANDLE hProcess, HANDLE* modules, DWORD cb, DWORD* cb_needed,
+                                                   DWORD filter)
+{
+    (void)filter; /* LIST_MODULES_DEFAULT is the only meaningful tier in v0. */
+    return EnumProcessModules(hProcess, modules, cb, cb_needed);
+}
+
+__declspec(dllexport) DWORD K32GetMappedFileNameW(HANDLE hProcess, void* addr, wchar_t16* path, DWORD cch)
+{
+    return GetMappedFileNameW(hProcess, addr, path, cch);
+}
+
+__declspec(dllexport) DWORD K32GetModuleBaseNameW(HANDLE hProcess, HANDLE mod, wchar_t16* name, DWORD cch)
+{
+    return GetModuleBaseNameW(hProcess, mod, name, cch);
+}
+
+__declspec(dllexport) DWORD K32GetModuleFileNameExW(HANDLE hProcess, HANDLE mod, wchar_t16* name, DWORD cch)
+{
+    return GetModuleFileNameExW(hProcess, mod, name, cch);
+}
+
+__declspec(dllexport) DWORD K32GetProcessImageFileNameW(HANDLE hProcess, wchar_t16* name, DWORD cch)
+{
+    return GetProcessImageFileNameW(hProcess, name, cch);
+}
+
+__declspec(dllexport) DWORD K32GetProcessImageFileNameA(HANDLE hProcess, char* name, DWORD cch)
+{
+    return GetProcessImageFileNameA(hProcess, name, cch);
+}
+
+__declspec(dllexport) BOOL K32GetProcessMemoryInfo(HANDLE hProcess, void* info, DWORD cb)
+{
+    return GetProcessMemoryInfo(hProcess, info, cb);
+}
+
+__declspec(dllexport) BOOL K32QueryWorkingSet(HANDLE hProcess, void* buf, DWORD cb)
+{
+    return QueryWorkingSet(hProcess, buf, cb);
+}

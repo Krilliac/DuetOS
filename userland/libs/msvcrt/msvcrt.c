@@ -707,7 +707,14 @@ __declspec(dllexport) DUETOS_FILE* fopen(const char* path, const char* mode)
         ++len;
     long long h;
     __asm__ volatile("int $0x80" : "=a"(h) : "a"((long long)20), "D"((long long)path), "S"((long long)len) : "memory");
-    if (h == 0)
+    /* SYS_FILE_OPEN returns 0x100..0x10F on hit, (u64)-1 on miss.
+     * The previous `h == 0` check missed the (u64)-1 case, so
+     * fopen() on a missing path silently returned a FILE* wrapping
+     * a sentinel-poisoned handle that subsequent fread()/fseek()
+     * walked off into the kernel's "unknown handle" reject path.
+     * Range-check matches ucrtbase.c's identical check (the
+     * msvcrt mirror was missing it). */
+    if (h < 0x100 || h >= 0x110)
         return 0;
     /* Allocate a 24-byte FILE struct via SYS_HEAP_ALLOC (op 11). */
     long long fp;

@@ -237,13 +237,35 @@ static HANDLE reg_handle_for_key(const RegKey* k)
  * handle from REG_HANDLE_BASE) to its (root, path) pair. Returns
  * 0 on success and writes into *out_root + *out_path; non-zero on
  * an unrecognised handle. *out_path is "" for predefined HKEYs
- * (caller substitutes the user-provided subkey). */
+ * (caller substitutes the user-provided subkey).
+ *
+ * Caveat: mingw-w64's windows.h defines HKEY_LOCAL_MACHINE etc.
+ * as `((HKEY)(ULONG_PTR)((LONG)0x80000002))` — the cast through
+ * `(LONG)0x80000002` sign-extends to 0xFFFFFFFF80000002 on x64,
+ * not 0x0000000080000002 as the local advapi32 #defines produce.
+ * That mismatch made every Win32 PE that included the standard
+ * windows.h pass a sign-extended HKEY into our reg_resolve_parent,
+ * which fell through the previous `v >= 0x80000000UL && v <=
+ * 0x80000005UL` range check (the upper-32 bits broke the bound).
+ *
+ * Mask to the low 32 bits before the range compare so both forms
+ * (the local UINT_PTR-cast literal and the windows.h sign-extended
+ * literal) land in the same predefined-HKEY bucket. The handle
+ * round-trip below — `*out_root = hKey` — preserves the original
+ * sign-extended value so equality checks against k_reg_keys[i].root
+ * still work as long as those entries also store the sign-extended
+ * form... see the matching mask in reg_lookup_key_a. */
 static int reg_resolve_parent(HANDLE hKey, HANDLE* out_root, const char** out_path)
 {
     UINT_PTR v = (UINT_PTR)hKey;
-    if (v >= 0x80000000UL && v <= 0x80000005UL)
+    UINT_PTR v_low = v & 0xFFFFFFFFu;
+    if (v_low >= 0x80000000UL && v_low <= 0x80000005UL)
     {
-        *out_root = hKey;
+        /* Normalise to the canonical (zero-extended) form so
+         * downstream comparisons against the static k_reg_keys
+         * `.root` field match regardless of how the caller
+         * spelled the predefined HKEY. */
+        *out_root = (HANDLE)v_low;
         *out_path = "";
         return 0;
     }
