@@ -15,6 +15,7 @@ _Last updated: 2026-05-01._
 | 2026-05-01 | P3 #23 Time zone | `kernel/time/timezone.{h,cpp}` — signed minutes offset ([-12 h, +14 h], 30-min steps). Settings shows UTC + LOCAL clocks and the live offset; TZ ± buttons step it. No zoneinfo, no DST, no persistence — documented limits. |
 | 2026-05-01 | P3 #21 Accessibility (magnifier) | `kernel/drivers/video/magnifier.{h,cpp}` — Ctrl+Alt+M toggles a 200×150 inset at top-right showing 2× nearest-neighbour zoom around the cursor. Drops to bottom-right when cursor is in top-right quadrant so it never occludes its own source. Direct framebuffer reads via `FramebufferGet().virt`. |
 | 2026-05-01 | P0 #1 Notes save / load | `kernel/apps/notes_persist.cpp` (new TU) + `kernel/apps/notes_internal.h` (private detail surface) — `NotesSave()` and `NotesLoad()` round-trip the live buffer through `Fat32CreateAtPath` / `Fat32DeleteAtPath` / `Fat32ReadFile` against `NOTES.TXT` on the FAT32 root volume. Wired to Ctrl+S / Ctrl+O when Notes is the active window (`kernel/core/main.cpp`). Boot self-test (`NotesPersistSelfTest`) runs after FAT32 probe and validates a save → load round-trip on a known marker. GAP: non-atomic save (delete-then-create); revisit when FS journaling lands. **The "blocked on FAT32 write" entry in this file was stale — the kernel-side write path was already complete; only app wiring was missing.** |
+| 2026-05-01 | P1 #9 Screenshot | `kernel/apps/screenshot.{h,cpp}` — Ctrl+Alt+P captures the framebuffer to the next `SHOTNNNN.BMP` slot on the FAT32 root volume. 32-bpp top-down BMP (negative DIB height so source rows match framebuffer order, no flip pass). Streams in 64 KiB chunks via `Fat32CreateAtPath` (first) and `Fat32AppendAtPath` (rest) — kernel heap is too small to buffer a full 1024×768 frame at once. Boot self-test exercises the BMP write path with a 4×4 synthetic gradient, verifies on-disk size, and deletes the test file. The deferred "tmpfs slot cap" entry in this file was the pre-FAT32-write design; with persistent storage live, that constraint no longer applies. |
 
 ## Status — blocked on infrastructure
 
@@ -51,7 +52,6 @@ schedule them.
 | P0 #3 USB mouse | xHCI HID class needs report-descriptor parsing for mouse-class endpoints; the keyboard-class path landed in `xhci-hid-keyboard-v0.md` and is the template. No QEMU emulation of USB mouse — has to be tested on physical HW post-merge. | 200-300 LOC |
 | P1 #6 Terminal emulator | Kernel shell is wired to a single global console (ConsoleWrite). A windowed terminal needs a console-multiplex refactor so the shell takes a per-session sink. | Multi-session refactor |
 | P1 #7 Image / PDF / media viewers | Each format needs its own parser + frame loop. Image viewer is the smallest (PNG / BMP, ~500 LOC each). PDF is huge. Audio / video need P0 #2 first. | One-per-format |
-| P1 #9 Screenshot tool | tmpfs slot cap is 512 bytes/slot × 16 slots = 8 KiB total, far below a 1024×768 framebuffer (~3 MiB). Real screenshot save is gated on FAT32 write (P0 #1). | Wait for #1 |
 | P3 #21 Accessibility | Magnifier landed (this commit). Screen reader needs an AT-SPI-equivalent kernel surface; on-screen keyboard needs >32 widget slots (today's cap; bump first). | Per-primitive |
 | P3 #22 IME / non-Latin input | Input-method framework refactor; PS/2 + xHCI HID drivers currently hardcode US layout. | Input refactor |
 | P3 #24 Locale / language switching | UI strings live in C++ literals across every `kernel/apps/*.cpp`. A string-table layer with id → text indirection is the prerequisite. | Refactor across all apps |
@@ -166,12 +166,22 @@ future slice can pick one without re-deriving the field.
   the kernel shell.
 - **Owners:** `kernel/apps/notes.cpp` and clipboard syscall hookup.
 
-### 9. Screenshot tool [BLOCKED on FAT32 write]
-- **Today:** none. PrintScreen is unbound.
-- **Expected:** PrtSc captures the framebuffer to a file in
-  `/disk/screenshots/`.
-- **Owners:** new `kernel/apps/screenshot.{h,cpp}` + framebuffer
-  reader (already used by gfxdemo).
+### 9. Screenshot tool [LANDED 2026-05-01]
+- **Today:** Ctrl+Alt+P captures the framebuffer to the next
+  available `SHOTNNNN.BMP` on the FAT32 root volume.
+  Implementation in `kernel/apps/screenshot.{h,cpp}`. 32-bpp
+  top-down BMP (negative DIB height so source rows match
+  framebuffer order with no flip pass). Streams in 64 KiB
+  chunks via `Fat32CreateAtPath` then `Fat32AppendAtPath` —
+  the 2 MiB kernel heap is too small to buffer a full 1024×768
+  frame at once. Boot self-test exercises the BMP write path
+  with a 4×4 synthetic gradient.
+- **Still missing:** No region-select / window-only capture.
+  No annotation. No clipboard handoff. PNG output (BMP is
+  ~3 MiB at 1024×768 vs ~150 KiB PNG-compressed) is gated on
+  a zlib port — currently DuetOS doesn't have one.
+- **Owners:** `kernel/apps/screenshot.{h,cpp}` for region
+  capture + window mode; new `userland/libs/zlib*` for PNG.
 
 ### 10. Lock screen / screensaver [LANDED 2026-05-01]
 - **Today:** none. Single hardcoded `admin/admin` + `guest`

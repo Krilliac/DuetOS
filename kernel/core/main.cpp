@@ -94,6 +94,7 @@
 #include "apps/files.h"
 #include "apps/gfxdemo.h"
 #include "apps/notes.h"
+#include "apps/screenshot.h"
 #include "apps/settings.h"
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
@@ -342,6 +343,7 @@ void PrintShortcutHelp()
     ConsoleWriteln("    CTRL+ALT+Y        CYCLE THEME");
     ConsoleWriteln("    CTRL+ALT+1..9     PICK THEME DIRECTLY");
     ConsoleWriteln("    CTRL+ALT+F1/F2    SHELL / KLOG CONSOLE");
+    ConsoleWriteln("    CTRL+ALT+P        SCREENSHOT TO SHOTNNNN.BMP");
     ConsoleWriteln("    CTRL+C            INTERRUPT SHELL COMMAND");
     ConsoleWriteln("");
     ConsoleWriteln("  NOTES (WHEN ACTIVE)");
@@ -1861,6 +1863,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // ran before storage was up". Skipped silently if NOTES.TXT
     // pre-exists on the boot image.
     DUETOS_BOOT_SELFTEST(duetos::apps::notes::NotesPersistSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::apps::screenshot::ScreenshotSelfTest());
 
     SerialWrite("[boot] Probing read-only FS shells (ext4 / NTFS / exFAT).\n");
     duetos::fs::ext4::Ext4ScanAll();
@@ -2197,6 +2200,21 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 duetos::drivers::video::NotifyShow(on ? "magnifier on" : "magnifier off");
                 duetos::drivers::video::CompositorUnlock();
                 SerialWrite(on ? "[ui] magnifier on\n" : "[ui] magnifier off\n");
+                continue;
+            }
+            // Ctrl+Alt+P captures the framebuffer to the next
+            // SHOTNNNN.BMP slot on the FAT32 root volume. Holds
+            // the compositor lock across the capture so a draw
+            // doesn't race the row copy. Toast surfaces the
+            // outcome; failure modes (no FAT32, no FB, disk
+            // full) all log a one-line reason to COM1.
+            if (ctrl && alt && (ev.code == 'p' || ev.code == 'P'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const bool ok = duetos::apps::screenshot::ScreenshotCapture();
+                duetos::drivers::video::CompositorUnlock();
+                duetos::drivers::video::NotifyShow(ok ? "screenshot saved" : "screenshot failed");
+                SerialWrite(ok ? "[ui] ^Alt+P screenshot saved\n" : "[ui] ^Alt+P screenshot FAILED\n");
                 continue;
             }
             // Ctrl+Alt+Y cycles the desktop theme. Classic (teal)
