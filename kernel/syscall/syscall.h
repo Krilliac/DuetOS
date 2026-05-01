@@ -1617,6 +1617,18 @@ enum SyscallNumber : u64
     //      what was actually assigned),
     //  -1  on bad copy / oversized blob / bad PrivilegeCount.
     SYS_TOKEN_ADJUST = 169,
+
+    // SYS_WIN_GET_MOUSE_DELTA — drain the kernel's per-event mouse
+    // accumulator. DirectInput's `IDirectInputDevice8::GetDeviceState`
+    // for mouse devices needs raw motion (not poll-to-poll cursor
+    // diffing — programmatic SetCursor warps would corrupt that).
+    //   rdi = user pointer to a 16-byte DIMOUSESTATE-shaped buffer
+    //         { i32 dx, i32 dy, i32 dz_wheel, u8 buttons[4] }.
+    //         dx/dy/dz are accumulated since the last drain and
+    //         zeroed on read; buttons is a snapshot of the current
+    //         button state (not accumulated).
+    //   rax = 1 on success, 0 on bad pointer.
+    SYS_WIN_GET_MOUSE_DELTA = 170,
 };
 
 // Cross-language record returned by SYS_DIR_NEXT. 96 bytes, exact

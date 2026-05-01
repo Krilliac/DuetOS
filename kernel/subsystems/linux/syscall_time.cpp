@@ -323,22 +323,166 @@ i64 DoSettimeofday(u64 user_tv, u64 user_tz)
     return 0;
 }
 
-// STUB: clock_adjtime / adjtimex. Real Linux exposes a 200-byte
-// struct timex with NTP-discipline state (offset, freq, jitter,
-// stability, status flags). v0 has no NTP discipline and no PHC
-// devices; the cap probe runs first so untrusted callers still see
-// -EPERM (matches the pre-slice behaviour), and cap-holders see
-// -EOPNOTSUPP — a clear "not yet implemented" signal that lets a
-// future slice fill in ADJ_SETOFFSET (apply tv_sec/tv_nsec to
-// g_realtime_offset_ns) and the read-only timex fields without
-// changing the dispatch arms.
+// Linux struct timex layout (x86_64, 64-bit long). 200 bytes.
+// We only act on a handful of fields; the rest are accept-and-store
+// (status / constant / tick) or accept-and-ignore (NTP-discipline
+// state we have no machinery for: freq / PLL counters).
+struct LinuxTimex
+{
+    u32 modes;
+    u32 _pad0;
+    i64 offset;
+    i64 freq;
+    i64 maxerror;
+    i64 esterror;
+    i32 status;
+    u32 _pad1;
+    i64 constant;
+    i64 precision;
+    i64 tolerance;
+    i64 time_tv_sec;
+    i64 time_tv_usec;
+    i64 tick;
+    i64 ppsfreq;
+    i64 jitter;
+    i32 shift;
+    u32 _pad2;
+    i64 stabil;
+    i64 jitcnt;
+    i64 calcnt;
+    i64 errcnt;
+    i64 stbcnt;
+    i32 tai;
+    u32 _pad3;
+    u8 reserved[32];
+};
+static_assert(sizeof(LinuxTimex) == 200, "struct timex must be 200 bytes on x86_64");
+
+// adjtimex / clock_adjtime mode bits (subset we recognise).
+constexpr u32 kAdjOffset = 0x0001;
+constexpr u32 kAdjFrequency = 0x0002;
+constexpr u32 kAdjMaxerror = 0x0004;
+constexpr u32 kAdjEsterror = 0x0008;
+constexpr u32 kAdjStatus = 0x0010;
+constexpr u32 kAdjTimeconst = 0x0020;
+constexpr u32 kAdjTai = 0x0080;
+constexpr u32 kAdjSetoffset = 0x0100;
+constexpr u32 kAdjMicro = 0x1000;
+constexpr u32 kAdjNano = 0x2000;
+constexpr u32 kAdjTick = 0x4000;
+
+// Linux time-state return value from adjtimex(2). We always return
+// TIME_ERROR (5) — the clock is unsynchronised because we have no
+// NTP discipline. TIME_OK (0) is the value we'd return once a
+// real discipline source lands.
+constexpr i64 kTimeError = 5;
+
+// Status-flag subset. STA_UNSYNC is the live signal: we have no NTP
+// discipline, so callers that respect this flag (chrony, ntpd) will
+// know not to trust the wall clock.
+constexpr i32 kStaUnsync = 0x0040;
+
+// Persisted NTP-shadow state. Real Linux derives `time` from the
+// running clock and `offset/freq/...` from the kernel's PLL; we
+// just remember whatever the caller wrote so a follow-up read sees
+// it (matches Linux semantics for fields the kernel doesn't reject).
+i32 g_ntp_status = kStaUnsync;
+i64 g_ntp_constant = 2;
+i64 g_ntp_tick = 10000; // 10 ms — matches our scheduler tick (100 Hz)
+i32 g_ntp_tai = 0;
+
 i64 DoClockAdjtime(u64 clk_id, u64 user_buf)
 {
-    (void)clk_id;
-    (void)user_buf;
-    if (const i64 perm = CheckTimeSetCap(); perm != 0)
-        return perm;
-    return kEOPNOTSUPP;
+    // Only CLOCK_REALTIME accepts adjustments. Other clocks read OK
+    // but mode-set bits return EINVAL — matches Linux contract.
+    const bool clock_settable = (clk_id == kClockRealtime);
+
+    if (user_buf == 0)
+        return kEFAULT;
+
+    LinuxTimex tx;
+    if (!mm::CopyFromUser(&tx, reinterpret_cast<const void*>(user_buf), sizeof(tx)))
+        return kEFAULT;
+
+    const u32 modes = tx.modes;
+
+    // Any mode bit that tries to mutate state needs the cap. A
+    // pure-read query (modes == 0) is allowed for everyone — that
+    // matches Linux, which lets unprivileged readers observe
+    // STA_UNSYNC / current time without CAP_SYS_TIME.
+    constexpr u32 kAnyMutate = kAdjOffset | kAdjFrequency | kAdjMaxerror | kAdjEsterror | kAdjStatus | kAdjTimeconst |
+                               kAdjTick | kAdjTai | kAdjSetoffset;
+    if (modes & kAnyMutate)
+    {
+        if (const i64 perm = CheckTimeSetCap(); perm != 0)
+            return perm;
+        if (!clock_settable)
+            return kEINVAL;
+    }
+
+    // ADJ_SETOFFSET: time field carries an addend to apply to the
+    // wall-clock offset. ADJ_NANO selects ns; default is us.
+    if (modes & kAdjSetoffset)
+    {
+        const i64 sec = tx.time_tv_sec;
+        const i64 frac = tx.time_tv_usec;
+        const i64 frac_ns = (modes & kAdjNano) ? frac : frac * 1000;
+        if (frac_ns < 0 || frac_ns >= 1'000'000'000)
+            return kEINVAL;
+        const i64 add_ns = sec * 1'000'000'000ll + frac_ns;
+        g_realtime_offset_ns += add_ns;
+    }
+
+    // ADJ_OFFSET: a one-shot phase nudge. Real Linux feeds it into
+    // the PLL; we have no PLL, so we just apply it directly to the
+    // realtime offset (best behaviour we can offer without slewing).
+    if (modes & kAdjOffset)
+    {
+        const i64 raw = tx.offset;
+        const i64 add_ns = (modes & kAdjNano) ? raw : raw * 1000;
+        g_realtime_offset_ns += add_ns;
+    }
+
+    // Bookkeeping fields — accept-and-store so a follow-up read sees
+    // the same value back. Frequency / PLL fields are accept-and-
+    // ignore (we have no discipline machinery).
+    if (modes & kAdjStatus)
+        g_ntp_status = (tx.status & ~kStaUnsync) | kStaUnsync; // can't clear UNSYNC
+    if (modes & kAdjTimeconst)
+        g_ntp_constant = tx.constant;
+    if (modes & kAdjTick)
+        g_ntp_tick = tx.tick;
+    if (modes & kAdjTai)
+        g_ntp_tai = tx.tai;
+
+    // Fill read-back fields. `time` reports current wall clock at
+    // the moment of the call; the rest reflect persisted state.
+    const u64 now_real_ns = RealtimeNs();
+    LinuxTimex out{};
+    out.modes = modes;
+    out.offset = 0; // we don't accumulate a phase residual
+    out.freq = 0;
+    out.maxerror = 0;
+    out.esterror = 0;
+    out.status = g_ntp_status;
+    out.constant = g_ntp_constant;
+    out.precision = 1;
+    out.tolerance = 0;
+    out.time_tv_sec = static_cast<i64>(now_real_ns / 1'000'000'000ull);
+    out.time_tv_usec = static_cast<i64>((now_real_ns / 1000ull) % 1'000'000ull);
+    if (modes & kAdjMicro)
+        out.time_tv_usec = static_cast<i64>((now_real_ns / 1000ull) % 1'000'000ull);
+    if (modes & kAdjNano)
+        out.time_tv_usec = static_cast<i64>(now_real_ns % 1'000'000'000ull);
+    out.tick = g_ntp_tick;
+    out.tai = g_ntp_tai;
+
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), &out, sizeof(out)))
+        return kEFAULT;
+
+    // Always TIME_ERROR while unsynced — chrony / ntpd treat this as
+    // "I am the discipline source, please don't slew off me."
+    return kTimeError;
 }
 
 i64 DoAdjtimex(u64 user_buf)

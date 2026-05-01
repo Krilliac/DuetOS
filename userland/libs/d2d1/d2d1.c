@@ -172,6 +172,38 @@ static inline void plot_clipped(DxBackBuffer* bb, int x, int y, DWORD packed)
     ((DWORD*)bb->pixels)[y * (int)bb->width + x] = packed;
 }
 
+/* Stamp a (2*hw+1) × (2*hw+1) filled square centred on (x,y) — the
+ * stroke-width primitive every D2D1 outline path goes through. hw=0
+ * degenerates to a single plot. Apps requesting fractional widths
+ * (e.g. 1.5f) round to nearest pixel; sub-pixel coverage is the
+ * antialiasing layer's job, which we don't have. */
+static inline void plot_stamp(DxBackBuffer* bb, int x, int y, int hw, DWORD packed)
+{
+    if (hw <= 0)
+    {
+        plot_clipped(bb, x, y, packed);
+        return;
+    }
+    for (int dy = -hw; dy <= hw; ++dy)
+        for (int dx = -hw; dx <= hw; ++dx)
+            plot_clipped(bb, x + dx, y + dy, packed);
+}
+
+/* Translate a D2D1 stroke_width (float pixels) to an integer half-
+ * width radius for plot_stamp. D2D1 default is 1.0f; we round any
+ * value <= 1.0f down to a single pixel (hw=0). 2.0f → hw=1, 3.0f →
+ * hw=1, 4.0f → hw=2, etc. — i.e. the diameter is the requested
+ * width, rounded down to odd. */
+static inline int stroke_half_width(float stroke_width)
+{
+    if (stroke_width <= 1.5f)
+        return 0;
+    int w = (int)(stroke_width + 0.5f);
+    if (w < 1)
+        w = 1;
+    return w / 2;
+}
+
 /* FillRectangle(rect, brush). rect = D2D1_RECT_F (4x float = 16B). */
 static void rt_FillRectangle(D2dRtImpl* self, const void* rect, D2dBrushImpl* brush)
 {
@@ -197,12 +229,11 @@ static void rt_FillRectangle(D2dRtImpl* self, const void* rect, D2dBrushImpl* br
             px[y * pitch + x] = packed;
 }
 
-/* DrawRectangle outlines the boundary one pixel thick. strokeWidth +
- * style ignored in v0 — apps that want a thick frame call
- * FillRectangle on a slightly inflated outer rect first. */
+/* DrawRectangle outlines the boundary at the requested stroke width
+ * via plot_stamp. Style (dash / cap) still ignored — D2D1 stroke
+ * styles are a separate object the smoke apps don't exercise. */
 static void rt_DrawRectangle(D2dRtImpl* self, const void* rect, D2dBrushImpl* brush, float stroke_width, void* style)
 {
-    (void)stroke_width;
     (void)style;
     if (!self->bb || !rect || !brush)
         return;
@@ -210,26 +241,27 @@ static void rt_DrawRectangle(D2dRtImpl* self, const void* rect, D2dBrushImpl* br
     int x0 = (int)r[0], y0 = (int)r[1], x1 = (int)r[2] - 1, y1 = (int)r[3] - 1;
     if (x1 < x0 || y1 < y0)
         return;
+    const int hw = stroke_half_width(stroke_width);
     DWORD packed = brush_pack_bgra(brush);
     for (int x = x0; x <= x1; ++x)
     {
-        plot_clipped(self->bb, x, y0, packed);
-        plot_clipped(self->bb, x, y1, packed);
+        plot_stamp(self->bb, x, y0, hw, packed);
+        plot_stamp(self->bb, x, y1, hw, packed);
     }
     for (int y = y0; y <= y1; ++y)
     {
-        plot_clipped(self->bb, x0, y, packed);
-        plot_clipped(self->bb, x1, y, packed);
+        plot_stamp(self->bb, x0, y, hw, packed);
+        plot_stamp(self->bb, x1, y, hw, packed);
     }
 }
 
 /* DrawLine(p0, p1, brush, strokeWidth, strokeStyle). MSVC x64 ABI:
  * D2D1_POINT_2F is 2x float = 8B, fits in a register, so each point
- * is passed by value in rdx/r8. Bresenham; stroke + style ignored. */
+ * is passed by value in rdx/r8. Bresenham + plot_stamp for the
+ * requested width; style ignored. */
 static void rt_DrawLine(D2dRtImpl* self, ULONGLONG p0_packed, ULONGLONG p1_packed, D2dBrushImpl* brush,
                         float stroke_width, void* style)
 {
-    (void)stroke_width;
     (void)style;
     if (!self->bb || !brush)
         return;
@@ -251,13 +283,14 @@ static void rt_DrawLine(D2dRtImpl* self, ULONGLONG p0_packed, ULONGLONG p1_packe
         dx_ = -dx_;
     if (dy_ < 0)
         dy_ = -dy_;
+    const int hw = stroke_half_width(stroke_width);
     DWORD packed = brush_pack_bgra(brush);
     int err = dx_ - dy_;
     int x = x0, y = y0;
     int guard = 0;
     while (1)
     {
-        plot_clipped(self->bb, x, y, packed);
+        plot_stamp(self->bb, x, y, hw, packed);
         if (x == x1 && y == y1)
             break;
         if (++guard > 65536) /* clamp on absurd line lengths */
@@ -276,48 +309,50 @@ static void rt_DrawLine(D2dRtImpl* self, ULONGLONG p0_packed, ULONGLONG p1_packe
     }
 }
 
-/* D2D1_ELLIPSE = D2D1_POINT_2F point + float radiusX + float radiusY = 16B */
-static void ellipse_outline_or_fill(DxBackBuffer* bb, float cx, float cy, float rx, float ry, DWORD packed, int fill)
+/* D2D1_ELLIPSE = D2D1_POINT_2F point + float radiusX + float radiusY = 16B.
+ *
+ * Outline mode paints every pixel inside the outer ellipse but
+ * outside the inner ellipse — a band of thickness 2*hw+1 along the
+ * boundary. Fill mode (hw=-1 by convention, never reached via the
+ * outline path) paints everything inside. */
+static void ellipse_outline_or_fill(DxBackBuffer* bb, float cx, float cy, float rx, float ry, DWORD packed, int fill,
+                                    int hw)
 {
     if (rx <= 0 || ry <= 0)
         return;
     int icx = (int)cx, icy = (int)cy, irx = (int)rx, iry = (int)ry;
-    /* 4-connected midpoint ellipse — same integer test the GDI primitive
-     * uses. For each (x,y) inside the bounding box, check if
-     * (x-cx)^2 / rx^2 + (y-cy)^2 / ry^2 <= 1, scaled to integer. */
-    long long rx2 = (long long)irx * irx;
-    long long ry2 = (long long)iry * iry;
-    if (rx2 == 0 || ry2 == 0)
+    /* Outer + inner radii for the band; the inner ellipse degenerates
+     * to a point when hw >= min(irx, iry) — in that case every pixel
+     * inside the outer ellipse passes the outline test. */
+    int orx = irx + (fill ? 0 : hw);
+    int ory = iry + (fill ? 0 : hw);
+    int irx_in = (fill ? 0 : irx - hw - 1);
+    int iry_in = (fill ? 0 : iry - hw - 1);
+    if (irx_in < 0)
+        irx_in = 0;
+    if (iry_in < 0)
+        iry_in = 0;
+    long long orx2 = (long long)orx * orx;
+    long long ory2 = (long long)ory * ory;
+    long long irx2 = (long long)irx_in * irx_in;
+    long long iry2 = (long long)iry_in * iry_in;
+    if (orx2 == 0 || ory2 == 0)
         return;
-    int x0 = icx - irx, x1 = icx + irx, y0 = icy - iry, y1 = icy + iry;
+    int x0 = icx - orx, x1 = icx + orx, y0 = icy - ory, y1 = icy + ory;
     for (int y = y0; y <= y1; ++y)
     {
         for (int x = x0; x <= x1; ++x)
         {
             long long dxd = (long long)(x - icx);
             long long dyd = (long long)(y - icy);
-            long long lhs = dxd * dxd * ry2 + dyd * dyd * rx2;
-            long long rhs = rx2 * ry2;
-            if (lhs > rhs)
+            /* Inside outer ellipse? */
+            if (dxd * dxd * ory2 + dyd * dyd * orx2 > orx2 * ory2)
                 continue;
-            if (!fill)
+            if (!fill && irx2 > 0 && iry2 > 0)
             {
-                /* Outline test: a neighbour outside the ellipse means
-                 * (x,y) is on the boundary. */
-                int outside_neighbour = 0;
-                int nx[4] = {x - 1, x + 1, x, x};
-                int ny[4] = {y, y, y - 1, y + 1};
-                for (int k = 0; k < 4; ++k)
-                {
-                    long long nd1 = (long long)(nx[k] - icx);
-                    long long nd2 = (long long)(ny[k] - icy);
-                    if (nd1 * nd1 * ry2 + nd2 * nd2 * rx2 > rhs)
-                    {
-                        outside_neighbour = 1;
-                        break;
-                    }
-                }
-                if (!outside_neighbour)
+                /* Strictly inside inner ellipse? Skip — that's the
+                 * band's hollow interior. */
+                if (dxd * dxd * iry2 + dyd * dyd * irx2 < irx2 * iry2)
                     continue;
             }
             plot_clipped(bb, x, y, packed);
@@ -327,12 +362,12 @@ static void ellipse_outline_or_fill(DxBackBuffer* bb, float cx, float cy, float 
 
 static void rt_DrawEllipse(D2dRtImpl* self, const void* ellipse, D2dBrushImpl* brush, float stroke_width, void* style)
 {
-    (void)stroke_width;
     (void)style;
     if (!self->bb || !ellipse || !brush)
         return;
     const float* e = (const float*)ellipse;
-    ellipse_outline_or_fill(self->bb, e[0], e[1], e[2], e[3], brush_pack_bgra(brush), 0);
+    const int hw = stroke_half_width(stroke_width);
+    ellipse_outline_or_fill(self->bb, e[0], e[1], e[2], e[3], brush_pack_bgra(brush), 0, hw);
 }
 
 static void rt_FillEllipse(D2dRtImpl* self, const void* ellipse, D2dBrushImpl* brush)
@@ -340,7 +375,7 @@ static void rt_FillEllipse(D2dRtImpl* self, const void* ellipse, D2dBrushImpl* b
     if (!self->bb || !ellipse || !brush)
         return;
     const float* e = (const float*)ellipse;
-    ellipse_outline_or_fill(self->bb, e[0], e[1], e[2], e[3], brush_pack_bgra(brush), 1);
+    ellipse_outline_or_fill(self->bb, e[0], e[1], e[2], e[3], brush_pack_bgra(brush), 1, 0);
 }
 static void rt_Clear(D2dRtImpl* self, const void* color)
 {
