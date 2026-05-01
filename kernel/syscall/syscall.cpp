@@ -3208,6 +3208,33 @@ void SyscallDispatch(arch::TrapFrame* frame)
         frame->rax = static_cast<u64>(rv);
         return;
     }
+
+    case SYS_DLL_BASE_BY_NAME:
+    {
+        // rdi = user pointer to ASCII name, rsi = name length.
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        const u64 user_name = frame->rdi;
+        const u64 name_len = frame->rsi;
+        if (user_name == 0 || name_len == 0 || name_len >= 64)
+        {
+            frame->rax = 0;
+            return;
+        }
+        char kname[64];
+        if (!mm::CopyFromUser(kname, reinterpret_cast<const void*>(user_name), name_len))
+        {
+            frame->rax = 0;
+            return;
+        }
+        kname[name_len] = '\0';
+        frame->rax = ProcessFindDllBaseByName(proc, kname);
+        return;
+    }
     case SYS_WIN_SET_CURSOR:
         subsystems::win32::DoWinSetCursor(frame);
         return;

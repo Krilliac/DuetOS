@@ -744,11 +744,16 @@ void _start(void)
     //     region, the cmdline would start with NUL).
     //   * GetCommandLineA returns a non-NULL pointer.
     //   * The first ANSI char is printable (low ASCII).
-    //   * GetEnvironmentVariableW("PATH", buf, 32) returns 0
-    //     (var-not-found is the v0 contract for every name).
-    //   * GetEnvironmentStringsW returns a non-NULL pointer
-    //     and the first wide char is the empty-block terminator
-    //     (NUL).
+    //   * GetEnvironmentVariableW("PATH", buf, 32) returns the
+    //     seeded PATH length in chars (>0, <32) and writes a
+    //     non-empty value into envbuf. kernel32's first env-table
+    //     access lazy-seeds PATH / OS / USERNAME / etc; before
+    //     that landed every name returned 0, hence the older
+    //     "var-not-found is the v0 contract" comment.
+    //   * GetEnvironmentStringsW returns a non-NULL pointer.
+    //     The kernel flat-stub block is still empty (envblock[0]
+    //     == 0) — userland's seeded table doesn't propagate into
+    //     the kernel-hosted block in v0.
     //   * FreeEnvironmentStringsW returns TRUE.
     LPWSTR cmdline_w = GetCommandLineW();
     LPSTR cmdline_a = GetCommandLineA();
@@ -761,7 +766,8 @@ void _start(void)
     const char cmd_ok[] = "[cmdline-env] cmdline + env OK\n";
     const char cmd_bad[] = "[cmdline-env] cmdline / env FAILED invariants\n";
     BOOL cmd_pass = cmdline_w != 0 && cmdline_w[0] != 0 && cmdline_a != 0 && cmdline_a[0] >= 0x20 &&
-                    cmdline_a[0] <= 0x7E && env_rc == 0 && envblock != 0 && envblock[0] == 0 && free_ok != 0;
+                    cmdline_a[0] <= 0x7E && env_rc > 0 && env_rc < 32 && envbuf[0] != 0 && envblock != 0 &&
+                    free_ok != 0;
     DWORD cmd_written = 0;
     if (cmd_pass)
         WriteFile(out, cmd_ok, sizeof(cmd_ok) - 1, &cmd_written, 0);
@@ -852,9 +858,20 @@ void _start(void)
         ReadFile(stat_h, &stat_first, 1, &stat_n, 0);
         stat_close_ok = CloseHandle(stat_h);
     }
+    // GetModuleHandleW(NULL) — no kernel-side EXE-base tracking
+    // in v0; the userland kernel32 returns 0 cleanly. (Real Win32
+    // returns the calling EXE's HMODULE; deferred until the
+    // loader records its image_base on the Process.)
     HMODULE stat_self = GetModuleHandleW(0);
+    // GetModuleHandleW("kernel32.dll") — userland kernel32 routes
+    // this through SYS_DLL_BASE_BY_NAME, which walks the process's
+    // dll_images table and returns the loaded base. kernel32 is
+    // always preloaded, so this is non-NULL on every PE.
     static const WCHAR kKern32[14] = {'k', 'e', 'r', 'n', 'e', 'l', '3', '2', '.', 'd', 'l', 'l', 0, 0};
     HMODULE stat_named = GetModuleHandleW(kKern32);
+    // LoadLibraryW("foo.dll") — there's no foo.dll preloaded, so
+    // the lookup misses and returns NULL. Real on-disk dynamic
+    // loading lands when the disk-FS-backed image walk does.
     static const WCHAR kFooDll[8] = {'f', 'o', 'o', '.', 'd', 'l', 'l', 0};
     HMODULE stat_loaded = LoadLibraryW(kFooDll);
     FARPROC stat_proc = GetProcAddress(0, "X");
@@ -863,7 +880,7 @@ void _start(void)
     const char stat_ok[] = "[file-stat] GetFileSizeEx + GetModuleHandleW + LoadLibraryW OK\n";
     const char stat_bad[] = "[file-stat] file stat / module lookup FAILED invariants\n";
     BOOL stat_pass = stat_h != INVALID_HANDLE_VALUE && stat_size_ok && stat_size.QuadPart == 25 && stat_n == 1 &&
-                     stat_first == 'D' && stat_close_ok && stat_self != 0 && stat_named == 0 && stat_loaded == 0 &&
+                     stat_first == 'D' && stat_close_ok && stat_self == 0 && stat_named != 0 && stat_loaded == 0 &&
                      stat_proc == 0 && stat_free_ok != 0;
     DWORD stat_written = 0;
     if (stat_pass)

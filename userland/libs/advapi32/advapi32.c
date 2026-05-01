@@ -949,23 +949,62 @@ __declspec(dllexport) void* FreeSid(void* sid)
     return (void*)0; /* Win32 contract: returns NULL on success. */
 }
 
+/* AllocateAndInitializeSid — Win32 SID layout:
+ *   byte 0:    revision (always 1)
+ *   byte 1:    SubAuthorityCount (caller-provided, ≤ 15)
+ *   bytes 2-7: IdentifierAuthority (6 bytes)
+ *   bytes 8+:  SubAuthority[SubAuthorityCount] (4 bytes each)
+ *
+ * Total size = 8 + 4*sub_count bytes. We pull the auth bytes from
+ * the caller's SID_IDENTIFIER_AUTHORITY (6 raw bytes) and the
+ * sub-authorities from sa0..sa7 in order, capped by sub_count.
+ * Allocated from the process heap via SYS_HEAP_ALLOC; the caller
+ * pairs with FreeSid which is a no-op (heap not yet wired to free
+ * for this DLL). The smoke test passes IsValidSid afterward — that
+ * checks revision == 1 and SubAuthorityCount in [0, 15], which is
+ * true for any sub_count we propagate. */
 __declspec(dllexport) BOOL AllocateAndInitializeSid(void* auth, unsigned char sub_count, DWORD sa0, DWORD sa1,
                                                     DWORD sa2, DWORD sa3, DWORD sa4, DWORD sa5, DWORD sa6, DWORD sa7,
                                                     void** sid)
 {
-    (void)auth;
-    (void)sub_count;
-    (void)sa0;
-    (void)sa1;
-    (void)sa2;
-    (void)sa3;
-    (void)sa4;
-    (void)sa5;
-    (void)sa6;
-    (void)sa7;
-    if (sid)
-        *sid = (void*)0;
-    return 0;
+    if (sid == (void**)0)
+        return 0;
+    *sid = (void*)0;
+    if (sub_count > 15)
+        return 0;
+    const DWORD bytes = (DWORD)(8u + 4u * (unsigned)sub_count);
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)11), "D"((long long)bytes) : "memory");
+    if (rv == 0)
+        return 0;
+    unsigned char* b = (unsigned char*)rv;
+    b[0] = 1;         /* revision */
+    b[1] = sub_count; /* sub-authority count */
+    /* IdentifierAuthority: 6 raw bytes. SECURITY_NT_AUTHORITY,
+     * SECURITY_WORLD_SID_AUTHORITY, etc. all live in this layout. */
+    if (auth != (void*)0)
+    {
+        const unsigned char* a = (const unsigned char*)auth;
+        for (int i = 0; i < 6; ++i)
+            b[2 + i] = a[i];
+    }
+    else
+    {
+        for (int i = 0; i < 6; ++i)
+            b[2 + i] = 0;
+    }
+    /* SubAuthority array — DWORDs little-endian. */
+    const DWORD subs[8] = {sa0, sa1, sa2, sa3, sa4, sa5, sa6, sa7};
+    unsigned char* sa_dst = b + 8;
+    for (unsigned ci = 0; ci < (unsigned)sub_count && ci < 8; ++ci)
+    {
+        sa_dst[ci * 4 + 0] = (unsigned char)((subs[ci] >> 0) & 0xFF);
+        sa_dst[ci * 4 + 1] = (unsigned char)((subs[ci] >> 8) & 0xFF);
+        sa_dst[ci * 4 + 2] = (unsigned char)((subs[ci] >> 16) & 0xFF);
+        sa_dst[ci * 4 + 3] = (unsigned char)((subs[ci] >> 24) & 0xFF);
+    }
+    *sid = (void*)rv;
+    return 1;
 }
 
 __declspec(dllexport) BOOL ConvertStringSidToSidA(const char* str, void** sid)
@@ -1071,6 +1110,24 @@ __declspec(dllexport) BOOL RevertToSelf(void)
 {
     return 1;
 }
+
+/* ImpersonateSelf — no impersonation tier in v0 (every thread runs
+ * as the single owning process's SID). The Win32 contract is
+ * "succeed iff the thread can adjust its security context"; with
+ * one effective user, the answer is always yes. Tools that probe
+ * for impersonation as an anti-cheat / privilege gate (the
+ * cap_smoke probe) just need TRUE-on-success. */
+__declspec(dllexport) BOOL ImpersonateSelf(int impersonation_level)
+{
+    (void)impersonation_level;
+    return 1;
+}
+
+/* OpenThreadToken / OpenProcessToken — return a sentinel token
+ * handle that DuplicateToken / RevertToSelf can no-op against.
+ * Already covered above via the existing token path; this entry
+ * exists so the symbol is exported for callers that import only
+ * ImpersonateSelf and not the wider token surface. */
 
 /* Event log: register / report / deregister. v0 doesn't write
  * an event log; ReportEvent is silently dropped, register returns

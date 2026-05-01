@@ -1064,6 +1064,15 @@ u64 ProcessResolveDllExport(const Process* proc, const char* dll_name, const cha
 /// Backs `SYS_DLL_PROC_ADDRESS`.
 u64 ProcessResolveDllExportByBase(const Process* proc, u64 base_va, const char* func_name);
 
+/// Look up a DLL in `proc`'s loaded-image table by name and
+/// return its base VA. Backs SYS_DLL_BASE_BY_NAME →
+/// GetModuleHandleW / LoadLibraryW for any DLL the loader has
+/// already mapped (kernel32.dll, user32.dll, ucrtbase.dll, …).
+/// Case-insensitive; tolerant of `.dll` suffix on either side
+/// (export-table dll_name and caller-supplied lookup don't have
+/// to match in form). Returns 0 on miss.
+u64 ProcessFindDllBaseByName(const Process* proc, const char* dll_name);
+
 /// Self-test of the process model's pure helpers: CapSet bitmap
 /// operations, CapName lookup, the denial rate-limit predicate, and
 /// the boundary checks around kCapNone / kCapCount. Does NOT create

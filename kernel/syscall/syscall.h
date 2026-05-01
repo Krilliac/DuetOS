@@ -1645,6 +1645,17 @@ enum SyscallNumber : u64
     // printable / Enter / Backspace bytes to the registered
     // stdin focus once login is closed.
     SYS_STDIN_READ = 171,
+
+    // SYS_DLL_BASE_BY_NAME — look up a DLL in the calling
+    // process's image table by name and return its base VA. Backs
+    // GetModuleHandleW("kernel32.dll") and LoadLibraryW(known-
+    // preloaded name). Case-insensitive, ignores `.dll` suffix
+    // mismatches so callers can pass either form.
+    //   rdi = user pointer to NUL-terminated ASCII name.
+    //   rsi = name length in bytes (excluding the NUL),
+    //         capped at 63.
+    //   rax = base VA on hit, 0 on miss / bad pointer / oversize.
+    SYS_DLL_BASE_BY_NAME = 172,
 };
 
 // Cross-language record returned by SYS_DIR_NEXT. 96 bytes, exact

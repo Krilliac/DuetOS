@@ -583,6 +583,63 @@ bool DllNameEq(const char* a, const char* b)
 
 } // namespace
 
+u64 ProcessFindDllBaseByName(const Process* proc, const char* dll_name)
+{
+    if (proc == nullptr || dll_name == nullptr)
+        return 0;
+    // Strip any ".dll" / ".DLL" suffix from the lookup so callers
+    // that pass either form match. Win32 convention is "name with
+    // extension"; ld-link sometimes records the bare name in the
+    // export table.
+    char trimmed[64];
+    u32 i = 0;
+    while (dll_name[i] != '\0' && i < sizeof(trimmed) - 1)
+    {
+        trimmed[i] = dll_name[i];
+        ++i;
+    }
+    trimmed[i] = '\0';
+    if (i >= 4)
+    {
+        const char* tail = trimmed + i - 4;
+        if ((tail[0] == '.') && AsciiToLower(tail[1]) == 'd' && AsciiToLower(tail[2]) == 'l' &&
+            AsciiToLower(tail[3]) == 'l')
+        {
+            *(char*)tail = '\0';
+        }
+    }
+    for (u64 j = 0; j < proc->dll_image_count; ++j)
+    {
+        const DllImage& img = proc->dll_images[j];
+        if (!img.has_exports)
+            continue;
+        const char* name = PeExportsDllName(img.exports);
+        if (name == nullptr)
+            continue;
+        // Compare with the same suffix-tolerant rule on both sides.
+        char other[64];
+        u32 oi = 0;
+        while (name[oi] != '\0' && oi < sizeof(other) - 1)
+        {
+            other[oi] = name[oi];
+            ++oi;
+        }
+        other[oi] = '\0';
+        if (oi >= 4)
+        {
+            const char* tail = other + oi - 4;
+            if ((tail[0] == '.') && AsciiToLower(tail[1]) == 'd' && AsciiToLower(tail[2]) == 'l' &&
+                AsciiToLower(tail[3]) == 'l')
+            {
+                *(char*)tail = '\0';
+            }
+        }
+        if (DllNameEq(trimmed, other))
+            return img.base_va;
+    }
+    return 0;
+}
+
 bool ProcessRegisterDllImage(Process* proc, const DllImage& image)
 {
     if (proc == nullptr)

@@ -1244,6 +1244,16 @@ __declspec(dllexport) unsigned long long SetTimer(HANDLE h, unsigned long long i
 }
 __declspec(dllexport) BOOL KillTimer(HANDLE h, unsigned long long id)
 {
+    /* hwnd == NULL → "system timer" cookie produced by SetTimer's
+     * matching NULL-hwnd branch; we never registered it with the
+     * kernel-side timer table, so there's nothing to kill. Return
+     * TRUE — a timer that never fired and won't fire is, by Win32
+     * contract, indistinguishable from one that was just removed. */
+    if (h == (HANDLE)0)
+    {
+        (void)id;
+        return 1;
+    }
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)

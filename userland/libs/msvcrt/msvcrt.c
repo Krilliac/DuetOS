@@ -668,13 +668,19 @@ __declspec(dllexport) int _cputs(const char* s)
     return rv == n ? 0 : -1;
 }
 
-/* signal — store handler in a static slot. */
+/* signal — store handler in a static slot. Table is sized so the
+ * highest valid Microsoft C signal id (SIGABRT = 22) fits — the
+ * earlier 16-slot table SIG_ERR'd every signal(SIGABRT, ...) call
+ * because 22 >= 16. The MSVC signal set tops out at SIGBREAK (= 21)
+ * and SIGABRT (= 22); 32 leaves a comfortable margin for any
+ * application-defined signals up to the POSIX RT range. */
 typedef void (*duetos_sig_handler_t)(int);
-static duetos_sig_handler_t g_sig_handlers[16];
+#define DUETOS_SIG_MAX 32
+static duetos_sig_handler_t g_sig_handlers[DUETOS_SIG_MAX];
 
 __declspec(dllexport) duetos_sig_handler_t signal(int sig, duetos_sig_handler_t h)
 {
-    if (sig < 0 || sig >= 16)
+    if (sig < 0 || sig >= DUETOS_SIG_MAX)
         return (duetos_sig_handler_t)(unsigned long long)-1; /* SIG_ERR */
     duetos_sig_handler_t prev = g_sig_handlers[sig];
     g_sig_handlers[sig] = h;
