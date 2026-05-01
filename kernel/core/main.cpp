@@ -94,6 +94,7 @@
 #include "apps/files.h"
 #include "apps/gfxdemo.h"
 #include "apps/notes.h"
+#include "apps/settings.h"
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
 #include "drivers/video/framebuffer.h"
@@ -103,8 +104,10 @@
 #include "drivers/video/wallpaper.h"
 #include "generated_chrome_font.h"
 #include "drivers/video/calendar.h"
+#include "drivers/video/magnifier.h"
 #include "drivers/video/menu.h"
 #include "drivers/video/netpanel.h"
+#include "drivers/video/notify.h"
 #include "drivers/video/taskbar.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
@@ -134,6 +137,7 @@
 #include "time/clocksource.h"
 #include "time/tick.h"
 #include "time/timekeeper.h"
+#include "time/timezone.h"
 #include "diag/cleanroom_trace.h"
 #include "security/auth.h"
 #include "security/cap_audit.h"
@@ -861,6 +865,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         }
     }
     DUETOS_BOOT_SELFTEST(duetos::drivers::video::ThemeSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::video::NotifySelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::video::MagnifierSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::time::TimezoneSelfTest());
     const auto& theme0 = duetos::drivers::video::ThemeCurrent();
 
     // CALCULATOR — native DuetOS app. Window chrome first,
@@ -1151,6 +1158,22 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::drivers::video::ThemeRegisterWindow(Role::GfxDemo, gfx_handle);
     duetos::apps::gfxdemo::GfxDemoInit(gfx_handle);
     DUETOS_BOOT_SELFTEST(duetos::apps::gfxdemo::GfxDemoSelfTest());
+
+    // SETTINGS — unified panel that wraps the Ctrl+Alt chord
+    // surfaces (theme cycle / direct picker, opacity step, high-
+    // contrast preset, default reset) plus a wall-clock and
+    // about readout. Hidden by default; raised from the Start
+    // menu's SETTINGS entry.
+    duetos::drivers::video::WindowChrome settings_chrome = theme_chrome(Role::Settings);
+    settings_chrome.x = 320;
+    settings_chrome.y = 120;
+    settings_chrome.w = 380;
+    settings_chrome.h = 280;
+    const duetos::drivers::video::WindowHandle settings_handle =
+        duetos::drivers::video::WindowRegister(settings_chrome, "SETTINGS");
+    duetos::drivers::video::ThemeRegisterWindow(Role::Settings, settings_handle);
+    duetos::apps::settings::SettingsInit(settings_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::settings::SettingsSelfTest());
 
     // Framebuffer text console. 80x40 chars of boot log at the
     // bottom of the desktop, under the windows in z-order. Dragging
@@ -1936,9 +1959,49 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             // different shortcut like Ctrl+Alt+T).
             if (ctrl && !alt && (ev.code == 'c' || ev.code == 'C'))
             {
+                // If the active window is Notes, treat Ctrl+C as
+                // "copy entire buffer to the kernel clipboard" so
+                // a fresh user can hand text off to a Win32 PE
+                // that calls GetClipboardData. Falls through to
+                // the shell interrupt only when Notes isn't the
+                // active window — preserves the established
+                // ^C-aborts-shell-command behaviour.
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                const bool notes_focused =
+                    (active != duetos::drivers::video::kWindowInvalid && active == duetos::apps::notes::NotesWindow());
+                duetos::drivers::video::CompositorUnlock();
+                if (notes_focused)
+                {
+                    duetos::apps::notes::NotesCopyToClipboard();
+                    duetos::drivers::video::NotifyShow("copied to clipboard");
+                    SerialWrite("[ui] ^C copy notes -> clipboard\n");
+                    continue;
+                }
                 duetos::core::ShellInterrupt();
                 SerialWrite("[ui] ^C\n");
                 continue;
+            }
+            // Ctrl+V — paste the kernel clipboard into Notes when
+            // Notes is the active window. No-op anywhere else
+            // (the shell doesn't support paste yet, calculator /
+            // files / settings don't accept arbitrary text).
+            if (ctrl && !alt && (ev.code == 'v' || ev.code == 'V'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                if (active != duetos::drivers::video::kWindowInvalid && active == duetos::apps::notes::NotesWindow())
+                {
+                    const duetos::u32 n = duetos::apps::notes::NotesPasteFromClipboard();
+                    duetos::drivers::video::CompositorUnlock();
+                    if (n > 0)
+                    {
+                        duetos::drivers::video::NotifyShow("pasted from clipboard");
+                    }
+                    SerialWrite("[ui] ^V paste -> notes\n");
+                    continue;
+                }
+                duetos::drivers::video::CompositorUnlock();
             }
 
             // F1 (no modifiers) dumps the user-facing keyboard +
@@ -2058,6 +2121,33 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 SerialWrite(duetos::drivers::video::TaskbarIsLocked() ? "locked\n" : "unlocked\n");
                 continue;
             }
+            // Ctrl+Alt+K — lock the screen. Re-opens the GUI login
+            // gate; the next successful login restores the desktop.
+            // Bound separately from Ctrl+Alt+L (taskbar drag-lock)
+            // so muscle-memory for the existing chord stays intact.
+            if (ctrl && alt && (ev.code == 'k' || ev.code == 'K'))
+            {
+                duetos::drivers::video::CompositorLock();
+                duetos::core::AuthLogout();
+                duetos::core::LoginStart(duetos::core::LoginMode::Gui);
+                duetos::drivers::video::CompositorUnlock();
+                SerialWrite("[ui] screen locked\n");
+                continue;
+            }
+            // Ctrl+Alt+M — toggle the magnifier accessibility inset.
+            // 200x150 px viewport at the top-right showing 2x zoom
+            // around the cursor. Drops to bottom-right when the
+            // cursor is in the top-right quadrant so the inset
+            // never occludes its own source region.
+            if (ctrl && alt && (ev.code == 'm' || ev.code == 'M'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const bool on = duetos::drivers::video::MagnifierToggle();
+                duetos::drivers::video::NotifyShow(on ? "magnifier on" : "magnifier off");
+                duetos::drivers::video::CompositorUnlock();
+                SerialWrite(on ? "[ui] magnifier on\n" : "[ui] magnifier off\n");
+                continue;
+            }
             // Ctrl+Alt+Y cycles the desktop theme. Classic (teal)
             // -> Slate10 (Win10 x Unreal Slate hybrid) -> Amber
             // (mono CRT tribute) -> Duet (redesigned palette,
@@ -2070,6 +2160,8 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 duetos::drivers::video::CompositorLock();
                 duetos::drivers::video::ThemeCycle();
                 duetos::drivers::video::ThemeApplyToAll();
+                duetos::drivers::video::NotifyShow(
+                    duetos::drivers::video::ThemeIdName(duetos::drivers::video::ThemeCurrentId()));
                 const bool is_tty =
                     (duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Tty);
                 if (is_tty)
@@ -2135,6 +2227,8 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     duetos::drivers::video::CompositorLock();
                     duetos::drivers::video::ThemeSet(static_cast<duetos::drivers::video::ThemeId>(idx));
                     duetos::drivers::video::ThemeApplyToAll();
+                    duetos::drivers::video::NotifyShow(
+                        duetos::drivers::video::ThemeIdName(duetos::drivers::video::ThemeCurrentId()));
                     const bool is_tty =
                         (duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Tty);
                     if (is_tty)
@@ -2399,6 +2493,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                             {
                                 app_consumed = duetos::apps::gfxdemo::GfxDemoFeedChar(c);
                             }
+                            else if (active == duetos::apps::settings::SettingsWindow())
+                            {
+                                app_consumed = duetos::apps::settings::SettingsFeedChar(c);
+                            }
                         }
                     }
                 }
@@ -2548,6 +2646,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             {"TASK MANAGER", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::TaskManager)},
             {"KERNEL LOG", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::LogView)},
             {"GFX DEMO", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::GfxDemo)},
+            {"SETTINGS", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Settings)},
             {"HELP / SHORTCUTS", 6},
             {"CYCLE WINDOWS", 2},
             {"ABOUT DUETOS", 1},
@@ -3182,6 +3281,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     // kIdBase); non-claiming handlers return false
                     // and the event is just logged above.
                     duetos::apps::calculator::CalculatorOnWidgetEvent(hit);
+                    duetos::apps::settings::SettingsOnWidgetEvent(hit);
                 }
             }
 

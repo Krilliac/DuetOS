@@ -71,6 +71,18 @@ bool NotesFeedChar(char c);
 /// MUST be called with the compositor lock held.
 bool NotesFeedKey(duetos::u16 keycode);
 
+/// Copy the entire buffer contents to the kernel clipboard
+/// (`WindowClipboardSetText`). Truncates at the clipboard cap
+/// — no separate selection model in v0, so "copy" always means
+/// "copy everything". Returns the number of bytes published.
+duetos::u32 NotesCopyToClipboard();
+
+/// Insert the current kernel clipboard text at the cursor,
+/// expanding the buffer in place. Newlines and printable ASCII
+/// are accepted; anything else is dropped. Caller holds the
+/// compositor lock. Returns the number of bytes inserted.
+duetos::u32 NotesPasteFromClipboard();
+
 /// One-shot self-test: exercises insert / backspace / delete
 /// and every navigation binding on a scratch state, asserts
 /// each step, then restores the pre-test buffer. Prints one

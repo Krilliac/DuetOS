@@ -319,6 +319,43 @@ bool NotesFeedKey(u16 keycode)
     }
 }
 
+u32 NotesCopyToClipboard()
+{
+    using duetos::drivers::video::kWindowClipboardMax;
+    char tmp[kWindowClipboardMax + 1];
+    const u32 cap = (g_len < kWindowClipboardMax) ? g_len : kWindowClipboardMax;
+    for (u32 i = 0; i < cap; ++i)
+    {
+        tmp[i] = g_buf[i];
+    }
+    tmp[cap] = '\0';
+    duetos::drivers::video::WindowClipboardSetText(tmp);
+    return cap;
+}
+
+u32 NotesPasteFromClipboard()
+{
+    using duetos::drivers::video::kWindowClipboardMax;
+    char tmp[kWindowClipboardMax + 1];
+    const u32 got = duetos::drivers::video::WindowClipboardGetText(tmp, kWindowClipboardMax);
+    if (got == 0)
+    {
+        return 0;
+    }
+    tmp[got] = '\0';
+    u32 inserted = 0;
+    for (u32 i = 0; i < got; ++i)
+    {
+        const char c = tmp[i];
+        if (c == '\n' || (static_cast<u8>(c) >= 0x20 && static_cast<u8>(c) <= 0x7E))
+        {
+            InsertAtCursor(c);
+            ++inserted;
+        }
+    }
+    return inserted;
+}
+
 void NotesSelfTest()
 {
     using duetos::arch::SerialWrite;
