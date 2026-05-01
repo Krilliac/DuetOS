@@ -66,15 +66,19 @@ IrqFlags SeqLockBeginWrite(SeqLock& lock)
     // to even. The compiler barrier prevents the protected payload's
     // mutations (which the caller is about to perform) from leaking
     // *upwards* past this store in compiled order.
-    const u32 cur = lock.sequence;
+    u32 cur = lock.sequence;
     if ((cur & 1u) != 0)
     {
         // Caught odd sequence at the start of a write — a previous
         // writer must have aborted without releasing, or the lock
-        // was used uninitialised after an `EndWrite` panic. Either
-        // way, the invariant is broken; surface immediately.
-        SpinLockRelease(lock.writer, flags);
-        PanicSeq("BeginWrite found sequence already odd (writer leak?)");
+        // was used uninitialised after an `EndWrite` panic.
+        // Debug: panic and surface the leak. Release: log it, then
+        // force the sequence forward to the next even value so the
+        // recovery write below can proceed; in-flight readers will
+        // retry on their EndRead and re-snapshot.
+        core::DebugPanicOrWarn("sync/seqlock", "BeginWrite found sequence already odd (writer leak?)");
+        lock.sequence = cur + 1u; // even
+        cur = lock.sequence;
     }
     lock.sequence = cur + 1u;
     CompilerBarrier();
@@ -93,9 +97,13 @@ void SeqLockEndWrite(SeqLock& lock, IrqFlags flags)
     {
         // Even at EndWrite — somebody else released the sequence
         // (impossible while we held the inner spinlock) or it was
-        // never bumped. Bug.
+        // never bumped. Debug: panic. Release: log it, skip the
+        // bump (sequence is already at a stable parity), and
+        // release the writer spinlock. The compiler barrier
+        // above already published the payload writes.
+        core::DebugPanicOrWarn("sync/seqlock", "EndWrite found sequence already even");
         SpinLockRelease(lock.writer, flags);
-        PanicSeq("EndWrite found sequence already even");
+        return;
     }
     lock.sequence = cur + 1u;
 

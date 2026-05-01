@@ -86,6 +86,42 @@ unwind that state first (e.g. `MutexUnlock` before
 | `kernel/drivers/pci/pci.cpp:325` (`PciMsixUnmaskEntry` OOB index) | log + value; refuse the write |
 | `kernel/drivers/pci/pci.cpp:336` (`PciMsixEnable` on non-MSI-X device) | log; refuse — driver can fall back |
 
+## Fifth pass (2026-05-01) — SeqLock writer-leak recovery, KFree on foreign pointer
+
+3 more sites — running total 42 across five passes.
+
+### SeqLock writer-leak recovery
+
+The two `PanicSeq` sites in `BeginWrite`/`EndWrite` happen when
+the lock's parity is corrupt: a previous writer aborted without
+releasing, or somebody wrote to `sequence` outside the writer
+spinlock. Both are real bugs, but they don't have to halt the
+kernel — readers retry on inconsistent snapshots, so a recovery
+that forces the parity into a known state is enough to keep
+reading and writing both correct after the fact.
+
+| Site | Recovery shape in release |
+|------|---------------------------|
+| `kernel/sync/seqlock.cpp:77` (`BeginWrite` found odd sequence) | log; force `sequence` forward to the next even value, then bump as normal — readers retry on `EndRead` and re-snapshot |
+| `kernel/sync/seqlock.cpp:98` (`EndWrite` found even sequence) | log; skip the bump (sequence already at a stable parity); release the writer spinlock |
+
+The pre-panic `SpinLockRelease(writer, flags)` was needed only
+to keep the spinlock from being abandoned across the halt; the
+new flow either keeps the spinlock for the recovery write or
+releases it on the way out, depending on which check tripped.
+
+### Heap KFree on foreign pointer
+
+| Site | Recovery shape in release |
+|------|---------------------------|
+| `kernel/mm/kheap.cpp:294` (`KFree` pointer outside heap pool) | log; refuse the free — the pointer is from a different arena (frame allocator, MMIO mapping, etc.) and freeing it would reach into memory the heap doesn't own |
+
+The other heap panics (corrupt magic, double-free magic
+mismatch, wild size, trailing-canary corrupt) all stay as
+hard-panic — they indicate real heap corruption, where
+"continue" would risk handing the same memory to two callers
+or scribbling past the pool.
+
 ## Fourth pass (2026-05-01) — runtime task allocation, PS/2 input
 
 5 more sites — same shape as the third pass.
@@ -272,25 +308,30 @@ What stays as hard `Panic` deliberately:
 
 > Continue the "soften release-build panics" work. The
 > `DebugPanicOrWarn` / `DebugPanicOrWarnWithValue` helpers are in
-> `kernel/core/panic.{h,cpp}`. 39 sites converted across four
+> `kernel/core/panic.{h,cpp}`. 42 sites converted across five
 > passes — see the tables in this file for the full inventory.
 >
-> What's left to triage:
-> - `SeqLock` invariant violations (`sync/seqlock.cpp:77,98`) —
->   continuing past these can produce torn reads, so they need a
->   different recovery shape (perhaps "drop the seqlock-protected
->   subsystem entirely").
-> - `arch/x86_64/smp.cpp:92` (IPI delivery-status bit stuck) —
->   wedge-during-AP-bringup; recovery is unclear without
->   per-AP-IPI tracking.
+> Remaining triage work is small. The IPI delivery-stuck panic
+> at `arch/x86_64/smp.cpp:92` is risky to soften: a lost IPI in
+> a TLB shootdown context can leave a remote CPU with stale
+> mappings and silently corrupt user-mode reads. Until per-IPI
+> tracking can confirm delivery on the failure path, leaving
+> this as a hard panic is the safer trade.
 >
 > Deliberately untouched: heap / frame-allocator / page-table
-> corruption (KEEP); stack-canary mismatch (KEEP — real overflow);
-> ACPI table parse failures (KEEP — fundamental firmware data);
-> LAPIC / IOAPIC init (KEEP — kernel cannot run without them);
-> the boot-task allocation at `sched.cpp:598` (KEEP — scheduler
-> init has nothing to keep running if it fires); the
-> "no runnable task available" invariant at `sched.cpp:946`
-> (KEEP — idle task should always be runnable, so this is true
-> corruption); `*SelfTest` panics (already dead code in release
-> via `DUETOS_BOOT_SELFTEST(call)`).
+> corruption (KEEP); KFree on chunks with corrupt magic, wild
+> size, or violated canary (KEEP — real heap corruption); stack-
+> canary mismatch (KEEP — real overflow); ACPI table parse
+> failures (KEEP — fundamental firmware data); LAPIC / IOAPIC
+> init (KEEP — kernel cannot run without them); the boot-task
+> allocation at `sched.cpp:598` (KEEP — scheduler init has
+> nothing to keep running if it fires); the "no runnable task
+> available" invariant at `sched.cpp:946` (KEEP — idle task
+> should always be runnable, so this is true corruption); the
+> kernel-stack-overflow guard-page hit at `traps.cpp:532` (KEEP
+> — current task is on a corrupted stack); PhysToVirt /
+> VirtToPhys range violations at `mm/page.cpp` (KEEP — wrong
+> translation would corrupt memory); AS-walker page-table
+> invariants at `mm/address_space.cpp` (KEEP — wrong page-table
+> traversal corrupts user/kernel memory); `*SelfTest` panics
+> (already dead code in release via `DUETOS_BOOT_SELFTEST(call)`).
