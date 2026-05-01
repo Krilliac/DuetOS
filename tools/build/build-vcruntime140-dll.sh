@@ -55,15 +55,18 @@ LLD_LINK="${LLD_LINK:-lld-link}"
 
 rm -f "${DLL}"
 
-# /base:0x10030000 — 1 MiB above kernel32.dll's 0x10020000.
-# Preserves the "1 MiB per DLL" spacing used by customdll(1/2)
-# and kernel32.
+# /base:0x10300000 — moved out of the standard 0x10030000 slot
+# because kernel32 has grown past 0x10000 of code+data (it now
+# spans 0x10020000..0x10031000) and was overlapping vcruntime140's
+# old slot with a "virt already mapped" panic at first PE-import
+# DLL load. 0x10300000 is past every DLL in the preload set (the
+# last is dwrite at 0x102d0000) with comfortable headroom.
 set +e
 "${LLD_LINK}" \
     /dll \
     /noentry \
     /nodefaultlib \
-    /base:0x10030000 \
+    /base:0x10300000 \
     /export:memset \
     /export:memcpy \
     /export:memmove \

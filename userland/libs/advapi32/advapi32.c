@@ -420,22 +420,42 @@ static LSTATUS reg_query_value(const RegKey* key, const char* name, DWORD* type,
     return ERROR_FILE_NOT_FOUND;
 }
 
+/* Forward decls for the volatile-tier helpers — definitions
+ * live further down in the file alongside RegCreateKeyExW. */
+struct vol_key_fwd;
+static struct vol_key_fwd* vol_from_handle_fwd(HANDLE h);
+static LSTATUS vol_query(struct vol_key_fwd* vk, const char* name, DWORD* type, unsigned char* data, DWORD* cb);
+
+/* Two-tier query: first check the static k_reg_keys table, then
+ * fall back to the per-process volatile table populated by
+ * RegSetValueEx*. This is the dual of vol_alloc + vol_find paths
+ * RegCreateKeyExW lays down — a key created via RegCreateKeyExW
+ * can only live in the volatile tier (its handle uses the
+ * VOL_HANDLE_BASE range), so RegQueryValueEx* against it lands
+ * here. */
+static LSTATUS reg_query_value_any(HANDLE hKey, const char* name, DWORD* type, unsigned char* data, DWORD* cb)
+{
+    struct vol_key_fwd* vk = vol_from_handle_fwd(hKey);
+    if (vk)
+        return vol_query(vk, name, type, data, cb);
+    const RegKey* key = reg_key_from_handle(hKey);
+    return reg_query_value(key, name, type, data, cb);
+}
+
 __declspec(dllexport) LSTATUS RegQueryValueExA(HANDLE hKey, const char* name, DWORD* reserved, DWORD* type,
                                                unsigned char* data, DWORD* cb)
 {
     (void)reserved;
-    const RegKey* key = reg_key_from_handle(hKey);
-    return reg_query_value(key, name ? name : "", type, data, cb);
+    return reg_query_value_any(hKey, name ? name : "", type, data, cb);
 }
 
 __declspec(dllexport) LSTATUS RegQueryValueExW(HANDLE hKey, const wchar_t16* name, DWORD* reserved, DWORD* type,
                                                unsigned char* data, DWORD* cb)
 {
     (void)reserved;
-    const RegKey* key = reg_key_from_handle(hKey);
     char abuf[128];
     reg_w_to_a(name, abuf, sizeof(abuf));
-    return reg_query_value(key, abuf, type, data, cb);
+    return reg_query_value_any(hKey, abuf, type, data, cb);
 }
 
 /* Default-value queries — Win32 treats `NULL subkey + NULL
@@ -475,36 +495,285 @@ __declspec(dllexport) LSTATUS RegCreateKeyW(HANDLE hKey, const wchar_t16* subkey
     return ERROR_SUCCESS;
 }
 
+/* Per-process volatile registry keys.
+ *
+ * RegCreateKeyExW / RegSetValueExW / RegQueryValueExW need a
+ * read/write tier to round-trip; the static k_reg_keys[] table
+ * is .rodata, so any "create then read back" workflow has to use
+ * a separate transient store. v0 keeps it process-local — that
+ * matches HKCU's volatile-by-default semantics for the Software\
+ * tree under DuetOS (we don't yet persist the registry to disk).
+ *
+ * Layout: an array of {parent-handle, name, values}. Parent handle
+ * is whatever hKey the caller passed to RegCreateKeyExW (a
+ * predefined HKEY or another transient handle). On RegOpenKeyExA
+ * miss against the static table, RegCreateKeyExW falls through
+ * here and RegOpenKeyExA / RegQueryValueExA likewise check this
+ * table when the static lookup fails.
+ *
+ * Caps: 8 transient keys + 8 values per key. Plenty for a smoke-
+ * test workload; real registry workflows will need a kernel-side
+ * persistent store. */
+#define VOL_KEY_CAP 8
+#define VOL_VAL_CAP 8
+
+typedef struct
+{
+    char name[64];
+    DWORD type;
+    DWORD size;
+    unsigned char data[256];
+} vol_value;
+
+typedef struct
+{
+    int in_use;
+    HANDLE parent;
+    char path[128];
+    vol_value values[VOL_VAL_CAP];
+    DWORD value_count;
+} vol_key;
+
+static vol_key g_vol_keys[VOL_KEY_CAP];
+
+#define VOL_HANDLE_BASE 0xC000UL
+
+static int vol_strieq(const char* a, const char* b)
+{
+    while (*a && *b)
+    {
+        char ca = *a, cb = *b;
+        if (ca >= 'A' && ca <= 'Z')
+            ca = (char)(ca + ('a' - 'A'));
+        if (cb >= 'A' && cb <= 'Z')
+            cb = (char)(cb + ('a' - 'A'));
+        if (ca != cb)
+            return 0;
+        ++a;
+        ++b;
+    }
+    return *a == 0 && *b == 0;
+}
+
+static vol_key* vol_find(HANDLE parent, const char* path)
+{
+    if (path == (const char*)0)
+        return (vol_key*)0;
+    for (int i = 0; i < VOL_KEY_CAP; ++i)
+    {
+        if (!g_vol_keys[i].in_use)
+            continue;
+        if (g_vol_keys[i].parent != parent)
+            continue;
+        if (vol_strieq(g_vol_keys[i].path, path))
+            return &g_vol_keys[i];
+    }
+    return (vol_key*)0;
+}
+
+static vol_key* vol_alloc(HANDLE parent, const char* path)
+{
+    for (int i = 0; i < VOL_KEY_CAP; ++i)
+    {
+        if (g_vol_keys[i].in_use)
+            continue;
+        g_vol_keys[i].in_use = 1;
+        g_vol_keys[i].parent = parent;
+        int n = 0;
+        while (n < (int)sizeof(g_vol_keys[i].path) - 1 && path[n] != 0)
+        {
+            g_vol_keys[i].path[n] = path[n];
+            ++n;
+        }
+        g_vol_keys[i].path[n] = 0;
+        g_vol_keys[i].value_count = 0;
+        return &g_vol_keys[i];
+    }
+    return (vol_key*)0;
+}
+
+static HANDLE vol_handle_for(vol_key* k)
+{
+    if (!k)
+        return (HANDLE)0;
+    UINT_PTR idx = (UINT_PTR)(k - g_vol_keys);
+    return (HANDLE)(UINT_PTR)(VOL_HANDLE_BASE + idx);
+}
+
+static vol_key* vol_from_handle(HANDLE h)
+{
+    UINT_PTR v = (UINT_PTR)h;
+    if (v < VOL_HANDLE_BASE || v >= VOL_HANDLE_BASE + VOL_KEY_CAP)
+        return (vol_key*)0;
+    vol_key* k = &g_vol_keys[v - VOL_HANDLE_BASE];
+    if (!k->in_use)
+        return (vol_key*)0;
+    return k;
+}
+
+/* Forward-decl satisfiers exposed to reg_query_value_any (which
+ * lives above the volatile-tier definitions and can't see
+ * `vol_key` directly). The struct alias is opaque to the caller —
+ * vol_from_handle_fwd reinterprets back to `vol_key*` here. */
+struct vol_key_fwd
+{
+    int dummy;
+};
+
+static struct vol_key_fwd* vol_from_handle_fwd(HANDLE h)
+{
+    return (struct vol_key_fwd*)vol_from_handle(h);
+}
+
+static LSTATUS vol_query(struct vol_key_fwd* opaque, const char* name, DWORD* type, unsigned char* data, DWORD* cb)
+{
+    vol_key* vk = (vol_key*)opaque;
+    if (!vk)
+        return ERROR_FILE_NOT_FOUND;
+    for (DWORD i = 0; i < vk->value_count; ++i)
+    {
+        if (!vol_strieq(vk->values[i].name, name))
+            continue;
+        if (type)
+            *type = vk->values[i].type;
+        DWORD cap = cb ? *cb : 0;
+        DWORD want = vk->values[i].size;
+        if (cb)
+            *cb = want;
+        if (data == (unsigned char*)0)
+            return ERROR_SUCCESS;
+        if (cap < want)
+            return ERROR_MORE_DATA;
+        for (DWORD j = 0; j < want; ++j)
+            data[j] = vk->values[i].data[j];
+        return ERROR_SUCCESS;
+    }
+    return ERROR_FILE_NOT_FOUND;
+}
+
 __declspec(dllexport) LSTATUS RegCreateKeyExW(HANDLE hKey, const wchar_t16* subkey, DWORD reserved,
                                               const wchar_t16* cls, DWORD opts, DWORD access, void* sec, HANDLE* out,
                                               DWORD* disp)
 {
-    (void)hKey;
-    (void)subkey;
     (void)reserved;
     (void)cls;
     (void)opts;
     (void)access;
     (void)sec;
-    if (out)
-        *out = (HANDLE)0x200;
+    if (out == (HANDLE*)0)
+        return ERROR_FILE_NOT_FOUND;
+    *out = (HANDLE)0;
+    char abuf[128];
+    reg_w_to_a(subkey, abuf, sizeof(abuf));
+    HANDLE root = (HANDLE)0;
+    const char* parent_path = "";
+    if (reg_resolve_parent(hKey, &root, &parent_path) != 0)
+        return ERROR_FILE_NOT_FOUND;
+    /* Build the absolute lookup path the same way RegOpenKeyExA
+     * does, so a Create followed by an Open with the same
+     * (parent, subkey) pair finds the same volatile slot. */
+    char concat_buf[192];
+    const char* full_path;
+    if (parent_path[0] == 0)
+    {
+        full_path = abuf;
+    }
+    else
+    {
+        if (!reg_concat_path(parent_path, abuf, concat_buf, (DWORD)sizeof(concat_buf)))
+            return ERROR_FILE_NOT_FOUND;
+        full_path = concat_buf;
+    }
+    /* Static-table hit → return that handle (REG_OPENED_EXISTING). */
+    const RegKey* static_hit = reg_lookup_key_a(root, full_path);
+    if (static_hit)
+    {
+        *out = reg_handle_for_key(static_hit);
+        if (disp)
+            *disp = 2; /* REG_OPENED_EXISTING_KEY */
+        return ERROR_SUCCESS;
+    }
+    /* Volatile-table hit → reopen. */
+    vol_key* vk = vol_find(root, full_path);
+    if (vk)
+    {
+        *out = vol_handle_for(vk);
+        if (disp)
+            *disp = 2;
+        return ERROR_SUCCESS;
+    }
+    /* Allocate a new volatile slot. */
+    vk = vol_alloc(root, full_path);
+    if (!vk)
+        return ERROR_FILE_NOT_FOUND;
+    *out = vol_handle_for(vk);
     if (disp)
-        *disp = 2; /* REG_OPENED_EXISTING_KEY */
+        *disp = 1; /* REG_CREATED_NEW_KEY */
     return ERROR_SUCCESS;
 }
 
 __declspec(dllexport) LSTATUS RegDeleteKeyW(HANDLE hKey, const wchar_t16* subkey)
 {
-    (void)hKey;
-    (void)subkey;
+    char abuf[128];
+    reg_w_to_a(subkey, abuf, sizeof(abuf));
+    HANDLE root = (HANDLE)0;
+    const char* parent_path = "";
+    if (reg_resolve_parent(hKey, &root, &parent_path) != 0)
+        return ERROR_FILE_NOT_FOUND;
+    char concat_buf[192];
+    const char* full_path = abuf;
+    if (parent_path[0] != 0)
+    {
+        if (!reg_concat_path(parent_path, abuf, concat_buf, (DWORD)sizeof(concat_buf)))
+            return ERROR_FILE_NOT_FOUND;
+        full_path = concat_buf;
+    }
+    vol_key* vk = vol_find(root, full_path);
+    if (vk)
+    {
+        vk->in_use = 0;
+        return ERROR_SUCCESS;
+    }
+    /* Static keys can't be deleted, but the smoke contract treats
+     * "key not present" as success (idempotent delete). */
     return ERROR_SUCCESS;
 }
 
 __declspec(dllexport) LSTATUS RegDeleteValueW(HANDLE hKey, const wchar_t16* name)
 {
-    (void)hKey;
-    (void)name;
-    return ERROR_SUCCESS;
+    vol_key* vk = vol_from_handle(hKey);
+    if (!vk)
+        return ERROR_SUCCESS; /* static — no-op success */
+    char abuf[64];
+    reg_w_to_a(name, abuf, sizeof(abuf));
+    for (DWORD i = 0; i < vk->value_count; ++i)
+    {
+        if (vol_strieq(vk->values[i].name, abuf))
+        {
+            for (DWORD j = i; j + 1 < vk->value_count; ++j)
+            {
+                /* Field-wise copy — struct assignment would emit
+                 * a memcpy intrinsic that lld can't resolve in
+                 * this freestanding DLL build. */
+                vol_value* dst = &vk->values[j];
+                const vol_value* src = &vk->values[j + 1];
+                int ni = 0;
+                while (src->name[ni] != 0 && ni < (int)sizeof(dst->name) - 1)
+                {
+                    dst->name[ni] = src->name[ni];
+                    ++ni;
+                }
+                dst->name[ni] = 0;
+                dst->type = src->type;
+                dst->size = src->size;
+                for (DWORD di = 0; di < src->size && di < sizeof(dst->data); ++di)
+                    dst->data[di] = src->data[di];
+            }
+            --vk->value_count;
+            return ERROR_SUCCESS;
+        }
+    }
+    return ERROR_FILE_NOT_FOUND;
 }
 
 /* Direct-child predicate mirror — kernel side
@@ -820,16 +1089,65 @@ __declspec(dllexport) LSTATUS RegSetValueW(HANDLE hKey, const wchar_t16* subkey,
     return ERROR_SUCCESS;
 }
 
+/* RegSetValueExW — write a (name, type, data) tuple into the
+ * caller's volatile key. Static keys (the read-only k_reg_keys
+ * table) can't accept writes, so the call returns success but
+ * doesn't store anything; that matches Win32's "writes to HKLM
+ * Software\Microsoft are silently dropped on a non-admin token"
+ * model the smoke tests don't probe past. */
+static LSTATUS reg_set_value_core(HANDLE hKey, const char* name, DWORD type, const unsigned char* data, DWORD cb)
+{
+    vol_key* vk = vol_from_handle(hKey);
+    if (!vk)
+        return ERROR_SUCCESS; /* static-only: no-op success */
+    /* Replace existing slot if name matches. */
+    DWORD slot = vk->value_count;
+    for (DWORD i = 0; i < vk->value_count; ++i)
+    {
+        if (vol_strieq(vk->values[i].name, name))
+        {
+            slot = i;
+            break;
+        }
+    }
+    if (slot >= VOL_VAL_CAP)
+        return ERROR_FILE_NOT_FOUND; /* table full */
+    int n = 0;
+    while (n < (int)sizeof(vk->values[slot].name) - 1 && name[n] != 0)
+    {
+        vk->values[slot].name[n] = name[n];
+        ++n;
+    }
+    vk->values[slot].name[n] = 0;
+    vk->values[slot].type = type;
+    DWORD copy = cb;
+    if (copy > sizeof(vk->values[slot].data))
+        copy = sizeof(vk->values[slot].data);
+    vk->values[slot].size = copy;
+    if (data != (const unsigned char*)0)
+    {
+        for (DWORD j = 0; j < copy; ++j)
+            vk->values[slot].data[j] = data[j];
+    }
+    if (slot == vk->value_count)
+        ++vk->value_count;
+    return ERROR_SUCCESS;
+}
+
+__declspec(dllexport) LSTATUS RegSetValueExA(HANDLE hKey, const char* name, DWORD reserved, DWORD type,
+                                             const unsigned char* data, DWORD cb)
+{
+    (void)reserved;
+    return reg_set_value_core(hKey, name ? name : "", type, data, cb);
+}
+
 __declspec(dllexport) LSTATUS RegSetValueExW(HANDLE hKey, const wchar_t16* name, DWORD reserved, DWORD type,
                                              const unsigned char* data, DWORD cb)
 {
-    (void)hKey;
-    (void)name;
     (void)reserved;
-    (void)type;
-    (void)data;
-    (void)cb;
-    return ERROR_SUCCESS;
+    char abuf[64];
+    reg_w_to_a(name, abuf, sizeof(abuf));
+    return reg_set_value_core(hKey, abuf, type, data, cb);
 }
 
 /* ------------------------------------------------------------------

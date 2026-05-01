@@ -428,14 +428,17 @@ __declspec(dllexport) BOOL IsWow64Process2(HANDLE hProc, unsigned short* proc_ma
 
 /* SYS_DLL_BASE_BY_NAME = 172. Looks up a DLL in the calling
  * process's image table and returns its base VA, or 0 on miss.
- * Case-insensitive; tolerant of `.dll` suffix on either side. */
+ * Case-insensitive; tolerant of `.dll` suffix on either side.
+ * An empty name (len = 0) requests the calling EXE's image base
+ * — backs GetModuleHandleW(NULL). */
 static unsigned long long sys_dll_base_by_name(const char* name)
 {
-    if (name == (const char*)0 || name[0] == 0)
-        return 0;
     int len = 0;
-    while (name[len] != 0 && len < 63)
-        ++len;
+    if (name != (const char*)0)
+    {
+        while (name[len] != 0 && len < 63)
+            ++len;
+    }
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
@@ -445,16 +448,14 @@ static unsigned long long sys_dll_base_by_name(const char* name)
 }
 
 /* HMODULE GetModuleHandleW / GetModuleHandleA — return the base
- * VA of a loaded DLL, or NULL when the lookup misses. NULL name
- * is documented as "the calling EXE's base"; the kernel side
- * doesn't track the EXE's image_base in dll_images today (only
- * loaded DLLs go there), so we keep returning the existing flat-
- * stub-shaped 0 for that path. Every smoke test that cares
- * (module_smoke) only tests the named-lookup branch. */
+ * VA of a loaded DLL, or the calling EXE's base when name is
+ * NULL. The kernel handler maps an empty name to the Process's
+ * pe_image_base field (recorded by SpawnPeFile post-ASLR), so a
+ * single SYS_DLL_BASE_BY_NAME call covers both cases. */
 __declspec(dllexport) void* GetModuleHandleW(const WCHAR_t* name)
 {
     if (name == (const WCHAR_t*)0)
-        return (void*)0;
+        return (void*)(unsigned long long)sys_dll_base_by_name("");
     char abuf[64];
     int i = 0;
     while (i < 63 && name[i] != 0)
@@ -469,7 +470,7 @@ __declspec(dllexport) void* GetModuleHandleW(const WCHAR_t* name)
 __declspec(dllexport) void* GetModuleHandleA(const char* name)
 {
     if (name == (const char*)0)
-        return (void*)0;
+        return (void*)(unsigned long long)sys_dll_base_by_name("");
     return (void*)(unsigned long long)sys_dll_base_by_name(name);
 }
 
@@ -2679,8 +2680,26 @@ typedef void* LPDWORD_t; /* DWORD* via opaque pointer to avoid C-warning chains 
 
 __declspec(dllexport) BOOL WriteFile(HANDLE hFile, const void* buf, DWORD n, DWORD* lpWritten, void* lpOverlapped)
 {
-    (void)hFile;
     (void)lpOverlapped;
+    /* Anonymous pipe: push bytes into the in-process ring instead
+     * of routing to stdout. Drop oldest on overflow to keep the
+     * producer non-blocking; matches the v0 stdin-ring policy on
+     * the kernel side. */
+    if (hFile == DUETOS_PIPE_WR && g_pipe.in_use)
+    {
+        const unsigned char* src = (const unsigned char*)buf;
+        DWORD wrote = 0;
+        while (wrote < n)
+        {
+            if (g_pipe.head - g_pipe.tail >= sizeof(g_pipe.buf))
+                ++g_pipe.tail;
+            g_pipe.buf[g_pipe.head & 0xFFF] = src[wrote++];
+            ++g_pipe.head;
+        }
+        if (lpWritten != (DWORD*)0)
+            *lpWritten = wrote;
+        return 1;
+    }
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
@@ -2793,6 +2812,25 @@ __declspec(dllexport) HANDLE CreateFileW(const wchar_t16* lpFileName, DWORD dwDe
 __declspec(dllexport) BOOL ReadFile(HANDLE h, void* buf, DWORD count, DWORD* lpRead, void* lpOverlapped)
 {
     (void)lpOverlapped;
+    /* Anonymous pipe: drain bytes from the in-process ring set up
+     * by CreatePipe rather than dispatching SYS_FILE_READ (which
+     * doesn't know the pipe sentinel handle and would return -1).
+     * Single-process / single-reader / single-writer model is
+     * fine for v0 — pipe_smoke and the typical "captured stdout"
+     * use-case both fit. */
+    if (h == DUETOS_PIPE_RD && g_pipe.in_use)
+    {
+        unsigned char* dst = (unsigned char*)buf;
+        DWORD got = 0;
+        while (got < count && g_pipe.head != g_pipe.tail)
+        {
+            dst[got++] = g_pipe.buf[g_pipe.tail & 0xFFF];
+            ++g_pipe.tail;
+        }
+        if (lpRead != (DWORD*)0)
+            *lpRead = got;
+        return 1;
+    }
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)

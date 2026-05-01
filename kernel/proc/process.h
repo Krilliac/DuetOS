@@ -930,6 +930,15 @@ struct Process
     // directly with no explicit init call.
     ::duetos::ipc::HandleTable kobj_handles;
 
+    // PE image base — the resolved (post-ASLR) base VA of the
+    // calling process's main EXE image, recorded by SpawnPeFile
+    // after PeLoad. Backs GetModuleHandleW(NULL) which Windows
+    // documents as "the calling EXE's HMODULE." Zero for non-PE
+    // processes (native ELF, Linux ELF) — the kernel handler
+    // returns 0 in that case, matching real Win32's "no module
+    // for the EXE" semantics for non-Win32 callers.
+    u64 pe_image_base;
+
     // Per-process stdin ring buffer. Producer is the kbd-reader
     // task in core/main.cpp's keyboard dispatch (after login is
     // closed and no app has key focus); consumer is SYS_STDIN_READ

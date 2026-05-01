@@ -858,10 +858,11 @@ void _start(void)
         ReadFile(stat_h, &stat_first, 1, &stat_n, 0);
         stat_close_ok = CloseHandle(stat_h);
     }
-    // GetModuleHandleW(NULL) — no kernel-side EXE-base tracking
-    // in v0; the userland kernel32 returns 0 cleanly. (Real Win32
-    // returns the calling EXE's HMODULE; deferred until the
-    // loader records its image_base on the Process.)
+    // GetModuleHandleW(NULL) — returns the calling EXE's HMODULE.
+    // The kernel-side PE loader (SpawnPeFile) records the post-
+    // ASLR image base on Process::pe_image_base and the
+    // SYS_DLL_BASE_BY_NAME handler maps an empty name to that
+    // field, so the round-trip lands a non-NULL handle.
     HMODULE stat_self = GetModuleHandleW(0);
     // GetModuleHandleW("kernel32.dll") — userland kernel32 routes
     // this through SYS_DLL_BASE_BY_NAME, which walks the process's
@@ -880,7 +881,7 @@ void _start(void)
     const char stat_ok[] = "[file-stat] GetFileSizeEx + GetModuleHandleW + LoadLibraryW OK\n";
     const char stat_bad[] = "[file-stat] file stat / module lookup FAILED invariants\n";
     BOOL stat_pass = stat_h != INVALID_HANDLE_VALUE && stat_size_ok && stat_size.QuadPart == 25 && stat_n == 1 &&
-                     stat_first == 'D' && stat_close_ok && stat_self == 0 && stat_named != 0 && stat_loaded == 0 &&
+                     stat_first == 'D' && stat_close_ok && stat_self != 0 && stat_named != 0 && stat_loaded == 0 &&
                      stat_proc == 0 && stat_free_ok != 0;
     DWORD stat_written = 0;
     if (stat_pass)

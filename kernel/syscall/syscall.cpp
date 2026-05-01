@@ -3212,6 +3212,8 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_DLL_BASE_BY_NAME:
     {
         // rdi = user pointer to ASCII name, rsi = name length.
+        // Empty / zero-length name returns the EXE image base
+        // (Win32 GetModuleHandleW(NULL) semantics).
         Process* proc = CurrentProcess();
         if (proc == nullptr)
         {
@@ -3220,9 +3222,15 @@ void SyscallDispatch(arch::TrapFrame* frame)
         }
         const u64 user_name = frame->rdi;
         const u64 name_len = frame->rsi;
-        if (user_name == 0 || name_len == 0 || name_len >= 64)
+        if (name_len >= 64)
         {
             frame->rax = 0;
+            return;
+        }
+        if (name_len == 0 || user_name == 0)
+        {
+            // Empty name → EXE base.
+            frame->rax = ProcessFindDllBaseByName(proc, "");
             return;
         }
         char kname[64];
