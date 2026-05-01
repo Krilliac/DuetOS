@@ -179,13 +179,27 @@ misleading.
    into yet. The dispatcher logs loudly when a `KillProcess`
    reaction would fire. Real impl lands when ring-3 process
    kill arrives.
-2. **No NMI / #MC integration.** `FaultReactReportFromTrap` is
-   safe from NMI (plain stores, no klog, no allocation), but
-   the existing NMI watchdog (`arch::NmiWatchdog*`) panics
-   directly without going through the dispatcher. Following
-   the same migration as the regular trap path is
-   straightforward; deferred until a real NMI workload exists
-   to motivate the change.
+2. **No NMI / #MC integration — and on analysis, the obvious
+   migration is wrong.** Two paths exist; neither is right
+   for the watchdog's confirmed-wedge case:
+   - **Deferred dispatch via `FaultReactReportFromTrap`.**
+     NMI-safe, but the heartbeat drains pending slots, and
+     the watchdog detects exactly the case where the
+     heartbeat is dead (timer IRQ stopped firing →
+     `kheartbeat` won't run). Dispatch never fires.
+   - **Direct `FaultReactDispatch` from NMI.** Dispatcher
+     logs through klog, which is not NMI-safe.
+   The current direct `Panic("nmi-watchdog", ...)` on
+   confirmed wedge is correct: emergency serial output, no
+   klog, no dispatcher state. The dispatcher counters miss
+   the event, but a wedged box is going to halt anyway —
+   counters are recorded in volatile RAM that won't survive
+   the halt. The only real enhancement would be a
+   pre-`Panic` "increment dispatched + halt counter" hook
+   that's NMI-safe (plain atomics, no klog) — niche, not
+   worth the API surface until there's a concrete consumer.
+   The earlier "straightforward migration" framing was
+   wrong; this entry now records why.
 3. **Per-domain single-slot, not a ring.** If a domain hits
    twice before the heartbeat drains, the second overwrites
    the first kind/rip and `FaultReactPendingOverwriteCount()`
@@ -254,11 +268,16 @@ budget.
 > shell command) are all landed. The v0 resume prompt's
 > follow-ups (1)-(3) are done; (4) `KillProcess` real impl
 > stays open until ring-3 process kill exists. Pending v1
-> follow-ups: (a) NMI watchdog migration to
-> `FaultReactReportFromTrap` + `FaultReactDispatch` — same
-> shape as the regular trap path; (b) per-domain pending-slot
-> upgrade to a small ring if `FaultReactPendingOverwriteCount()`
-> shows stress in real workloads; (c) split
+> follow-ups: (a) NMI watchdog migration — analysed and
+> **rejected**: deferred dispatch can't fire (heartbeat is
+> dead by definition when watchdog trips) and direct dispatch
+> from NMI is unsafe (klog isn't NMI-safe); the existing
+> direct `Panic` is correct. A niche pre-`Panic` counter
+> hook is possible but not worth the API surface yet. (b)
+> Per-domain pending-slot upgrade to a small ring if
+> `FaultReactPendingOverwriteCount()` shows stress in real
+> workloads — needs workload data first. (c) Split
 > `fault_react_selftest.cpp` out of `fault_react.cpp` if the
-> file grows further. See the "What v1 still does NOT do"
+> file grows further — at 527 lines today, one cohesive job;
+> defer until it grows. See the "What v1 still does NOT do"
 > section above for full context.
