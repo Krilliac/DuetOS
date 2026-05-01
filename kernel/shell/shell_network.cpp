@@ -35,6 +35,7 @@
 #include "drivers/video/console.h"
 #include "net/stack.h"
 #include "net/wifi.h"
+#include "net/wireless/wifi_diag.h"
 #include "sched/sched.h"
 #include "diag/cleanroom_trace.h"
 #include "loader/firmware_loader.h"
@@ -775,7 +776,41 @@ void CmdWifi(u32 argc, char** argv)
         ConsoleWriteln("WIFI: disconnected");
         return;
     }
-    ConsoleWriteln("WIFI: usage: wifi <status|scan|connect|disconnect>");
+    if (StrEq(argv[1], "diag"))
+    {
+        if (argc >= 3 && StrEq(argv[2], "clear"))
+        {
+            duetos::net::wireless::diag::Clear();
+            ConsoleWriteln("WIFI: diag ring cleared");
+            return;
+        }
+        u32 max = 0;
+        if (argc >= 3)
+        {
+            // Optional event count cap. Parse as decimal.
+            u32 n = 0;
+            for (const char* p = argv[2]; *p != '\0'; ++p)
+            {
+                if (*p < '0' || *p > '9')
+                {
+                    n = 0;
+                    break;
+                }
+                n = n * 10u + static_cast<u32>(*p - '0');
+            }
+            max = n;
+        }
+        ConsoleWrite("WIFI: dumping diag ring (");
+        WriteU64Dec(duetos::net::wireless::diag::EventCount());
+        ConsoleWrite(" retained, ");
+        WriteU64Dec(duetos::net::wireless::diag::TotalRecorded());
+        ConsoleWrite(" total, ");
+        WriteU64Dec(duetos::net::wireless::diag::TotalDropped());
+        ConsoleWriteln(" dropped) — see serial log");
+        duetos::net::wireless::diag::Dump(max);
+        return;
+    }
+    ConsoleWriteln("WIFI: usage: wifi <status|scan|connect|disconnect|diag [N|clear]>");
 }
 
 void CmdFwPolicy(u32 argc, char** argv)

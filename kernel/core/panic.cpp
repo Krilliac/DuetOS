@@ -9,6 +9,7 @@
 #include "time/tick.h"
 #include "cpu/percpu.h"
 #include "debug/probes.h"
+#include "net/wireless/wifi_diag.h"
 #include "diag/diag_decode.h"
 #include "diag/soft_lockup.h"
 #include "diag/hexdump.h"
@@ -429,6 +430,10 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
     DumpHeldLocksLocal();
     DumpLogRing();
     DumpInflightScopes();
+    // Wireless diag ring — only meaningful on hosts with active
+    // Wi-Fi traffic, but the Dump call is safe (single irq-save
+    // spinlock) and a no-op if the ring is empty.
+    duetos::net::wireless::diag::Dump(0);
 }
 
 void Panic(const char* subsystem, const char* message)
