@@ -1955,9 +1955,49 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             // different shortcut like Ctrl+Alt+T).
             if (ctrl && !alt && (ev.code == 'c' || ev.code == 'C'))
             {
+                // If the active window is Notes, treat Ctrl+C as
+                // "copy entire buffer to the kernel clipboard" so
+                // a fresh user can hand text off to a Win32 PE
+                // that calls GetClipboardData. Falls through to
+                // the shell interrupt only when Notes isn't the
+                // active window — preserves the established
+                // ^C-aborts-shell-command behaviour.
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                const bool notes_focused =
+                    (active != duetos::drivers::video::kWindowInvalid && active == duetos::apps::notes::NotesWindow());
+                duetos::drivers::video::CompositorUnlock();
+                if (notes_focused)
+                {
+                    duetos::apps::notes::NotesCopyToClipboard();
+                    duetos::drivers::video::NotifyShow("copied to clipboard");
+                    SerialWrite("[ui] ^C copy notes -> clipboard\n");
+                    continue;
+                }
                 duetos::core::ShellInterrupt();
                 SerialWrite("[ui] ^C\n");
                 continue;
+            }
+            // Ctrl+V — paste the kernel clipboard into Notes when
+            // Notes is the active window. No-op anywhere else
+            // (the shell doesn't support paste yet, calculator /
+            // files / settings don't accept arbitrary text).
+            if (ctrl && !alt && (ev.code == 'v' || ev.code == 'V'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                if (active != duetos::drivers::video::kWindowInvalid && active == duetos::apps::notes::NotesWindow())
+                {
+                    const duetos::u32 n = duetos::apps::notes::NotesPasteFromClipboard();
+                    duetos::drivers::video::CompositorUnlock();
+                    if (n > 0)
+                    {
+                        duetos::drivers::video::NotifyShow("pasted from clipboard");
+                    }
+                    SerialWrite("[ui] ^V paste -> notes\n");
+                    continue;
+                }
+                duetos::drivers::video::CompositorUnlock();
             }
 
             // F1 (no modifiers) dumps the user-facing keyboard +
@@ -2102,8 +2142,8 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 duetos::drivers::video::CompositorLock();
                 duetos::drivers::video::ThemeCycle();
                 duetos::drivers::video::ThemeApplyToAll();
-                duetos::drivers::video::NotifyShow(duetos::drivers::video::ThemeIdName(
-                    duetos::drivers::video::ThemeCurrentId()));
+                duetos::drivers::video::NotifyShow(
+                    duetos::drivers::video::ThemeIdName(duetos::drivers::video::ThemeCurrentId()));
                 const bool is_tty =
                     (duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Tty);
                 if (is_tty)
@@ -2169,8 +2209,8 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     duetos::drivers::video::CompositorLock();
                     duetos::drivers::video::ThemeSet(static_cast<duetos::drivers::video::ThemeId>(idx));
                     duetos::drivers::video::ThemeApplyToAll();
-                    duetos::drivers::video::NotifyShow(duetos::drivers::video::ThemeIdName(
-                        duetos::drivers::video::ThemeCurrentId()));
+                    duetos::drivers::video::NotifyShow(
+                        duetos::drivers::video::ThemeIdName(duetos::drivers::video::ThemeCurrentId()));
                     const bool is_tty =
                         (duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Tty);
                     if (is_tty)
