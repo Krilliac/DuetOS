@@ -1,7 +1,7 @@
 # FaultReact v0/v1 — self-defensive fault-reaction dispatcher
 
 **Type:** Decision + Pattern + Observation
-**Status:** Active — v1 shipped (trap-deferred queue + heartbeat drain + runtime_checker / soft_lockup / ubsan migrated + `inspect fault-react` shell command). v0 followups all landed except `KillProcess` real impl which is genuinely blocked on the ring-3 process model.
+**Status:** Active — v1 shipped (trap-deferred queue + heartbeat drain + runtime_checker / soft_lockup / ubsan migrated + `inspect fault-react` shell command + real `KillProcess`). All v0 follow-ups landed.
 **Last updated:** 2026-05-01
 
 ## What v0 deliberately did NOT do, and what v1 added
@@ -174,11 +174,31 @@ misleading.
 
 ## What v1 still does NOT do
 
-1. **`KillProcess` is still a STUB.** Genuinely blocked on the
-   ring-3 process model — there is no userland process to kill
-   into yet. The dispatcher logs loudly when a `KillProcess`
-   reaction would fire. Real impl lands when ring-3 process
-   kill arrives.
+1. **`KillProcess` is now real.** Earlier doc revisions claimed
+   this was blocked on the ring-3 process model. That was
+   wrong — `core::Process`, `core::CurrentProcess`,
+   `sched::FlagCurrentForKill(KillReason)`, `sched::SchedKillByPid`,
+   and `sched::SchedKillByProcess` were already in by the time
+   v1 landed. The dispatcher's `KillProcess` branch now calls
+   `FlagCurrentForKill(KillReason::UserKill)` against the
+   current task's `Process`. The kill is asynchronous: the
+   flag is set, the next `Schedule()` converts it into a Dead
+   transition, the reaper drops the `Process` ref, and
+   `ProcessRelease` tears down the AS / fds / handles / caps
+   through its existing chain. A new decay rule escalates
+   `KillProcess → Halt` when `CurrentProcess() == nullptr`
+   (boot task / heartbeat drain / kernel-only reporters) —
+   asking for a user-task kill from kernel context is a
+   category mismatch, and the kernel-owned floor errs strict.
+   Self-test verifies: (a) the default policy maps
+   `UserPageFault → KillProcess`, and (b) boot-test context
+   has no current Process (the decay rule would otherwise
+   escalate to Halt and panic the boot — which is exactly
+   why the test does NOT dispatch the evidence directly).
+   No live caller reports `UserPageFault` to FaultReact yet,
+   so the kill path is wired but unexercised on real
+   workloads; first real consumer will be the trap handler's
+   ring-3 #PF path once it's migrated.
 2. **No NMI / #MC integration — and on analysis, the obvious
    migration is wrong.** Two paths exist; neither is right
    for the watchdog's confirmed-wedge case:
@@ -236,12 +256,19 @@ misleading.
 
 Plus three floor-only spot checks for `kernel/mm` prefix,
 `MemoryCorruption` kind, and the recoverable-no-floor case.
+Plus a KillProcess policy spot check (`UserPageFault →
+KillProcess`) and a sanity check that the boot self-test
+runs with `CurrentProcess() == nullptr` — the decay rule
+would escalate to Halt if the test tried to dispatch a
+KillProcess-class evidence directly, so the test verifies
+the policy + the decay precondition without firing the
+panic.
 
 ## Files inventory
 
 ```
-kernel/diag/fault_react.h         228 lines — header (v0+v1 API)
-kernel/diag/fault_react.cpp       527 lines — impl + drain + self-test
+kernel/diag/fault_react.h         229 lines — header (v0+v1 API)
+kernel/diag/fault_react.cpp       571 lines — impl + drain + self-test + real KillProcess
 kernel/diag/recovery.h            203 lines — DriverFault overload
 kernel/diag/recovery.cpp          128 lines — DriverFault overload impl
 kernel/diag/heartbeat.cpp         156 lines — drain call before tick
@@ -265,9 +292,10 @@ budget.
 > overload, boot self-test) plus v1 deliverables (trap-handler
 > deferred queue + heartbeat drain, `runtime_checker` /
 > `soft_lockup` / `ubsan` migrations, `inspect fault-react`
-> shell command) are all landed. The v0 resume prompt's
-> follow-ups (1)-(3) are done; (4) `KillProcess` real impl
-> stays open until ring-3 process kill exists. Pending v1
+> shell command, real `KillProcess` via
+> `sched::FlagCurrentForKill(UserKill)` with decay-to-Halt
+> when current is kernel-only) are all landed. All four v0
+> follow-ups are done. Pending v1
 > follow-ups: (a) NMI watchdog migration — analysed and
 > **rejected**: deferred dispatch can't fire (heartbeat is
 > dead by definition when watchdog trips) and direct dispatch

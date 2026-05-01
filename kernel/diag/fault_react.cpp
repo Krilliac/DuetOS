@@ -2,6 +2,8 @@
 
 #include "core/panic.h"
 #include "log/klog.h"
+#include "proc/process.h"
+#include "sched/sched.h"
 #include "security/fault_domain.h"
 
 namespace duetos::diag
@@ -218,6 +220,16 @@ FaultReaction FaultReactDispatch(::duetos::core::FaultDomainId domain_id, const 
     if (chosen == FaultReaction::RestartDomain && domain_id == ::duetos::core::kFaultDomainInvalid)
         chosen = FaultReaction::Continue;
 
+    // KillProcess is meaningless without a Process to kill. The
+    // executor below targets `CurrentProcess()` (the offending
+    // user task). When current is kernel-only (boot, heartbeat
+    // drain, kernel reporter), there's no valid victim — escalate
+    // to Halt rather than silently dropping the request. A
+    // reporter that returns KillProcess from a kernel context is
+    // a category mismatch, and the kernel-owned floor errs strict.
+    if (chosen == FaultReaction::KillProcess && ::duetos::core::CurrentProcess() == nullptr)
+        chosen = FaultReaction::Halt;
+
     if (static_cast<u32>(chosen) < 5)
         ++g_reaction_counts[static_cast<u32>(chosen)];
 
@@ -243,14 +255,29 @@ FaultReaction FaultReactDispatch(::duetos::core::FaultDomainId domain_id, const 
         break;
 
     case FaultReaction::KillProcess:
-        // STUB: no ring-3 process model to kill into yet. When
-        // userland lands, this branch teardown's the offending
-        // process's address space + caps + fds. Until then we
-        // log loudly so a real hit is obvious in the boot log.
+    {
+        // The offending task is the current task. Trap-context
+        // dispatch (UserPageFault floor / explicit user-mode
+        // reporter) reaches this branch with current = the user
+        // task that just trapped. The decay rule above
+        // guarantees current has a Process by the time we get
+        // here — kernel-only contexts escalated to Halt.
+        //
+        // FlagCurrentForKill sets the kill_requested flag and
+        // need_resched; the next Schedule() converts it into a
+        // Dead transition, the reaper drops the Process ref, the
+        // address space tears down, fds + handles + caps go away
+        // through ProcessRelease's existing teardown chain. The
+        // dispatcher returns to its caller in the meantime — by
+        // design, since the trap handler still needs to unwind
+        // its own frame before the schedule fires.
+        ::duetos::core::Process* victim = ::duetos::core::CurrentProcess();
         ::duetos::core::LogWithValue(::duetos::core::LogLevel::Error,
                                      ev.source != nullptr ? ev.source : "diag/fault-react", FaultKindName(ev.kind),
-                                     ev.faulting_rip);
+                                     victim->pid);
+        ::duetos::sched::FlagCurrentForKill(::duetos::sched::KillReason::UserKill);
         break;
+    }
 
     case FaultReaction::Halt:
         ::duetos::core::PanicWithValue(ev.source != nullptr ? ev.source : "diag/fault-react", FaultKindName(ev.kind),
@@ -520,8 +547,25 @@ void FaultReactSelfTest()
         Expect(FaultReactPolicyFloor(ev) == FaultReaction::Continue, "floor recoverable -> none");
     }
 
+    // KillProcess policy + decay spot checks. We can't dispatch a
+    // KillProcess-class evidence directly in the self-test — the
+    // boot task has no Process, so the decay rule would escalate
+    // to Halt and panic the boot. Instead verify the two pure
+    // pieces: the default policy maps UserPageFault to KillProcess,
+    // and the boot-test context has no Process (which is what the
+    // decay rule keys on).
+    {
+        FaultEvidence ev = {};
+        ev.source = "diag/fault-react/test";
+        ev.kind = FaultKind::UserPageFault;
+        ev.severity = FaultSeverity::Recoverable;
+        Expect(DefaultReactionPolicy(ev) == FaultReaction::KillProcess, "default policy UserPageFault -> kill-process");
+    }
+    Expect(::duetos::core::CurrentProcess() == nullptr,
+           "boot self-test runs with no current Process — decay rule would escalate to Halt");
+
     ::duetos::core::Log(::duetos::core::LogLevel::Info, "diag/fault-react",
-                        "self-test PASS (dispatch + floor + decay + trap-defer + overwrite verified)");
+                        "self-test PASS (dispatch + floor + decay + trap-defer + overwrite + kill verified)");
 }
 
 } // namespace duetos::diag

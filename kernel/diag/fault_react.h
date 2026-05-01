@@ -39,8 +39,9 @@
  *        Continue       -> Warn-log + return.
  *        RetryNow       -> Info-log + return; caller retries.
  *        RestartDomain  -> FaultDomainMarkRestart + Error-log + return.
- *        KillProcess    -> Error-log + return (STUB; ring-3 path
- *                          arrives with the userland process model).
+ *        KillProcess    -> Flag current task for termination
+ *                          (sched::FlagCurrentForKill). Decays
+ *                          to Halt if current is kernel-only.
  *        Halt           -> Panic. Does not return.
  *
  * "Self-reflection + polymorphism" in this file means: the
@@ -119,7 +120,7 @@ enum class FaultReaction : u8
     Continue = 0,  // Log + return. No recovery action.
     RetryNow,      // Caller retries the operation.
     RestartDomain, // Mark the fault domain for deferred restart.
-    KillProcess,   // (STUB until ring-3 process model lands.)
+    KillProcess,   // Flag current user task for termination at next sched.
     Halt,          // Panic. Does not return.
 };
 
