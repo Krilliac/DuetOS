@@ -14,6 +14,7 @@ _Last updated: 2026-05-01._
 | 2026-05-01 | P1 #11 Account management | Settings panel grew a `USERS:` readout listing every account (name + role) and a `LOG OUT` button. Read-only for v0; mutations remain shell-command driven (`useradd`, `passwd`). |
 | 2026-05-01 | P3 #23 Time zone | `kernel/time/timezone.{h,cpp}` — signed minutes offset ([-12 h, +14 h], 30-min steps). Settings shows UTC + LOCAL clocks and the live offset; TZ ± buttons step it. No zoneinfo, no DST, no persistence — documented limits. |
 | 2026-05-01 | P3 #21 Accessibility (magnifier) | `kernel/drivers/video/magnifier.{h,cpp}` — Ctrl+Alt+M toggles a 200×150 inset at top-right showing 2× nearest-neighbour zoom around the cursor. Drops to bottom-right when cursor is in top-right quadrant so it never occludes its own source. Direct framebuffer reads via `FramebufferGet().virt`. |
+| 2026-05-01 | P0 #1 Notes save / load | `kernel/apps/notes_persist.cpp` (new TU) + `kernel/apps/notes_internal.h` (private detail surface) — `NotesSave()` and `NotesLoad()` round-trip the live buffer through `Fat32CreateAtPath` / `Fat32DeleteAtPath` / `Fat32ReadFile` against `NOTES.TXT` on the FAT32 root volume. Wired to Ctrl+S / Ctrl+O when Notes is the active window (`kernel/core/main.cpp`). Boot self-test (`NotesPersistSelfTest`) runs after FAT32 probe and validates a save → load round-trip on a known marker. GAP: non-atomic save (delete-then-create); revisit when FS journaling lands. **The "blocked on FAT32 write" entry in this file was stale — the kernel-side write path was already complete; only app wiring was missing.** |
 
 ## Status — blocked on infrastructure
 
@@ -25,7 +26,6 @@ and finish the user-facing tier.
 
 | Item | Blocker | What lands when the blocker is gone |
 |------|---------|------------------------------------|
-| P0 #1 Persistent file save/load | FAT32 write path (~2000 LOC, called out in `subsystems-status.md`) | Notes save/load, Files copy/move/delete, `userland/libs/*` file-open dialog |
 | P0 #2 Audio output | Intel HDA codec discovery + CORB/RIRB stream programming (probe-only today; `kernel/drivers/audio/audio.cpp:43`) | Settings volume slider, system beep/chime on notifications, WAV / OGG playback app |
 | P0 #4 Wi-Fi connect-to-SSID | Per-vendor firmware loader (does not exist) + 802.11 MLME state machine; `iwlwifi/rtl88xx/bcm43xx` are chip-ID-probe-only | Network flyout SSID picker, Settings → Network → Wi-Fi tab, captive-portal handler |
 | P2 #12 Multi-monitor / resolution change | Per-vendor GPU drivers (Intel/AMD/NVIDIA all probe-only per `render-drivers-v6.md`); EDID parser; mode-set negotiation | Settings → Display tab with resolution / refresh-rate / monitor layout |
@@ -78,14 +78,23 @@ future slice can pick one without re-deriving the field.
 
 ## P0 — workflow blockers (a fresh user hits these in the first 5 minutes)
 
-### 1. Persistent file save / load [BLOCKED on FAT32 write]
-- **Today:** `kernel/apps/notes.{h,cpp}` is keyboard-driven scratch
-  text — no save path, no load. `kernel/apps/files.{h,cpp}` is
-  read-only over ramfs and a read-only `/disk` mount (FAT32 read
-  landed; write didn't — see `storage-and-filesystem-roadmap.md`).
-- **Expected:** edit a note, reboot, note is still there.
-- **Owners:** `kernel/apps/notes.{h,cpp}`, `kernel/fs/fat32.h` (write
-  path), `userland/libs/*` (no file-open dialog primitive).
+### 1. Persistent file save / load [LANDED for Notes 2026-05-01]
+- **Today:** Notes save / load is wired against the FAT32 root
+  volume — Ctrl+S writes the live buffer to `NOTES.TXT`, Ctrl+O
+  loads it back. Implementation in
+  `kernel/apps/notes_persist.cpp`; uses
+  `Fat32CreateAtPath` / `Fat32DeleteAtPath` / `Fat32ReadFile`
+  directly. Boot self-test (`NotesPersistSelfTest`) round-trips
+  a known marker after FAT32 probe. The kernel-side write path
+  (`Fat32WriteInPlace`, `Fat32AppendAtPath`, `SYS_FILE_WRITE`,
+  `SYS_FILE_CREATE`, cap-gated by `kCapFsWrite`) had already
+  landed before this entry was opened — the gap was app wiring.
+- **Still missing:** `kernel/apps/files.{h,cpp}` is still
+  read-only (no copy / move / delete UI). `userland/libs/*`
+  doesn't have a file-open-dialog primitive. Other apps
+  (Settings, Calculator, Clock) don't persist any state yet.
+- **Owners:** `kernel/apps/files.{h,cpp}` for the file-manager
+  UI; userland for the dialog primitive.
 
 ### 2. Audio output [BLOCKED on HDA codec/stream]
 - **Today:** `kernel/drivers/audio/audio.cpp` does HDA register

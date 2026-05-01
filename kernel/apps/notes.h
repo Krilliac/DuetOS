@@ -19,8 +19,12 @@
  * is now authoritative.
  *
  * Scope limits:
- *   - Single document. No save/load — there is no persistent
- *     storage yet.
+ *   - Single document. Save / load round-trip lives at
+ *     `NOTES.TXT` on the FAT32 root volume (Ctrl+S / Ctrl+O,
+ *     wired in `kernel/core/main.cpp`); v0 has no journaling
+ *     and no atomic-rename, so a power loss mid-save can
+ *     truncate the file. Documented as a // GAP in
+ *     notes_persist.cpp.
  *   - Printable ASCII (0x20..0x7E), Enter, Backspace, Delete,
  *     arrow keys, Home, End. No selection, no clipboard, no
  *     undo.
@@ -83,10 +87,38 @@ duetos::u32 NotesCopyToClipboard();
 /// compositor lock. Returns the number of bytes inserted.
 duetos::u32 NotesPasteFromClipboard();
 
+/// Persist the current buffer to the FAT32 root volume as
+/// `NOTES.TXT`. Existing content is replaced (delete-then-
+/// create — non-atomic; v0 has no journaling). Returns true
+/// on success. Returns false and leaves on-disk state alone if
+/// no FAT32 volume is mounted.
+///
+/// Caller MUST hold the compositor lock — the buffer is read
+/// directly without a copy.
+bool NotesSave();
+
+/// Replace the current buffer with the contents of `NOTES.TXT`
+/// from the FAT32 root volume. Bytes outside printable ASCII
+/// + newline are dropped (mirrors NotesPasteFromClipboard).
+/// Cursor lands at end-of-buffer. Returns true on success;
+/// false if there's no FAT32 volume, no NOTES.TXT, or read
+/// I/O fails. The live buffer is untouched on failure.
+///
+/// Caller MUST hold the compositor lock.
+bool NotesLoad();
+
 /// One-shot self-test: exercises insert / backspace / delete
 /// and every navigation binding on a scratch state, asserts
 /// each step, then restores the pre-test buffer. Prints one
 /// PASS/FAIL line to COM1. Safe to call after NotesInit.
 void NotesSelfTest();
+
+/// Round-trip self-test for NotesSave / NotesLoad. Plants a
+/// known marker into a scratch buffer, saves, clears, loads,
+/// and verifies the bytes match. Cleans up the test file at
+/// the end. Skipped silently if no FAT32 volume is mounted or
+/// if `NOTES.TXT` already exists on disk (so a real save isn't
+/// trampled). Prints one PASS / FAIL / SKIP line to COM1.
+void NotesPersistSelfTest();
 
 } // namespace duetos::apps::notes

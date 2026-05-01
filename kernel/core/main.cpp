@@ -343,6 +343,11 @@ void PrintShortcutHelp()
     ConsoleWriteln("    CTRL+ALT+1..9     PICK THEME DIRECTLY");
     ConsoleWriteln("    CTRL+ALT+F1/F2    SHELL / KLOG CONSOLE");
     ConsoleWriteln("    CTRL+C            INTERRUPT SHELL COMMAND");
+    ConsoleWriteln("");
+    ConsoleWriteln("  NOTES (WHEN ACTIVE)");
+    ConsoleWriteln("    CTRL+C / CTRL+V   COPY / PASTE CLIPBOARD");
+    ConsoleWriteln("    CTRL+S            SAVE TO NOTES.TXT (FAT32)");
+    ConsoleWriteln("    CTRL+O            LOAD FROM NOTES.TXT (FAT32)");
     ConsoleWriteln("================================================");
     ConsoleWriteln("");
 }
@@ -1851,6 +1856,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWrite("[boot] Routing Win32 file syscalls through FAT32.\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::routing::SelfTest());
 
+    // Notes save/load round-trip — runs here (post-FAT32-probe) so
+    // the SKIP path stays only "no FAT32 volume" rather than "Notes
+    // ran before storage was up". Skipped silently if NOTES.TXT
+    // pre-exists on the boot image.
+    DUETOS_BOOT_SELFTEST(duetos::apps::notes::NotesPersistSelfTest());
+
     SerialWrite("[boot] Probing read-only FS shells (ext4 / NTFS / exFAT).\n");
     duetos::fs::ext4::Ext4ScanAll();
     duetos::fs::ntfs::NtfsScanAll();
@@ -1999,6 +2010,46 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                         duetos::drivers::video::NotifyShow("pasted from clipboard");
                     }
                     SerialWrite("[ui] ^V paste -> notes\n");
+                    continue;
+                }
+                duetos::drivers::video::CompositorUnlock();
+            }
+
+            // Ctrl+S — persist the Notes buffer to the FAT32 root
+            // as NOTES.TXT. Active-window-gated: anywhere else this
+            // chord is unbound. NotesSave logs success/failure to
+            // COM1; the toast surfaces the same outcome to the user.
+            if (ctrl && !alt && (ev.code == 's' || ev.code == 'S'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                if (active != duetos::drivers::video::kWindowInvalid && active == duetos::apps::notes::NotesWindow())
+                {
+                    const bool ok = duetos::apps::notes::NotesSave();
+                    duetos::drivers::video::CompositorUnlock();
+                    duetos::drivers::video::NotifyShow(ok ? "saved to NOTES.TXT" : "save failed");
+                    SerialWrite(ok ? "[ui] ^S notes saved\n" : "[ui] ^S notes save FAILED\n");
+                    continue;
+                }
+                duetos::drivers::video::CompositorUnlock();
+            }
+
+            // Ctrl+O — replace the Notes buffer with the contents
+            // of NOTES.TXT from the FAT32 root. Active-window-gated.
+            // The pre-load buffer is overwritten without
+            // confirmation; matches the unsaved-by-default
+            // discipline of Notes — there is no "are you sure"
+            // dialog primitive in the WM yet.
+            if (ctrl && !alt && (ev.code == 'o' || ev.code == 'O'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                if (active != duetos::drivers::video::kWindowInvalid && active == duetos::apps::notes::NotesWindow())
+                {
+                    const bool ok = duetos::apps::notes::NotesLoad();
+                    duetos::drivers::video::CompositorUnlock();
+                    duetos::drivers::video::NotifyShow(ok ? "loaded NOTES.TXT" : "load failed (no NOTES.TXT?)");
+                    SerialWrite(ok ? "[ui] ^O notes loaded\n" : "[ui] ^O notes load FAILED\n");
                     continue;
                 }
                 duetos::drivers::video::CompositorUnlock();
