@@ -39,12 +39,14 @@
 #include "drivers/audio/pcspk.h"
 #include "drivers/video/console.h"
 #include "drivers/video/widget.h"
+#include "fs/fat32.h"
 #include "fs/ramfs.h"
 #include "fs/tmpfs.h"
 #include "fs/vfs.h"
+#include "log/klog.h"
+#include "log/klog_persist.h"
 #include "mm/frame_allocator.h"
 #include "sched/sched.h"
-#include "log/klog.h"
 #include "util/random.h"
 
 #include "shell/shell.h"
@@ -887,6 +889,40 @@ void CmdDmesg(u32 argc, char** argv)
         {
             duetos::core::ClearLogRing();
             ConsoleWriteln("-- KERNEL LOG RING CLEARED --");
+            return;
+        }
+        if (c == 'f' || c == 'F')
+        {
+            // File mode: stream the on-disk KERNEL.LOG instead
+            // of the in-memory ring. Captures the full Info+
+            // history since the FAT32 sink came online (rather
+            // than just the last kLogRingCapacity entries).
+            namespace fat = duetos::fs::fat32;
+            duetos::core::KlogPersistFlush();
+            const fat::Volume* v = fat::Fat32Volume(0);
+            if (v == nullptr)
+            {
+                ConsoleWriteln("DMESG: FAT32 NOT MOUNTED");
+                return;
+            }
+            fat::DirEntry e;
+            if (!fat::Fat32LookupPath(v, "KERNEL.LOG", &e))
+            {
+                ConsoleWriteln("DMESG: KERNEL.LOG NOT FOUND");
+                return;
+            }
+            ConsoleWriteln("-- KERNEL.LOG (FAT32) --");
+            fat::Fat32ReadFileStream(
+                v, &e,
+                [](const u8* data, u64 len, void*)
+                {
+                    for (u64 i = 0; i < len; ++i)
+                    {
+                        ConsoleWriteChar(static_cast<char>(data[i]));
+                    }
+                    return true;
+                },
+                nullptr);
             return;
         }
         switch (c)

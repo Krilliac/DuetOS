@@ -145,6 +145,7 @@
 #include "loader/firmware_loader.h"
 #include "diag/heartbeat.h"
 #include "log/klog.h"
+#include "log/klog_persist.h"
 #include "security/login.h"
 #include "core/init.h"
 #include "core/panic.h"
@@ -1865,6 +1866,15 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::apps::notes::NotesPersistSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::apps::screenshot::ScreenshotSelfTest());
 
+    // Install the FAT32 file sink — replaces the early tmpfs
+    // sink (single-slot API). The tmpfs `/tmp/boot.log`
+    // captured the early-boot lines; from here on, every
+    // Info+ log entry goes to `KERNEL.LOG` on the FAT32 root.
+    // Non-fatal if FAT32 is unavailable — Install logs and
+    // returns.
+    duetos::core::KlogPersistInstall();
+    DUETOS_BOOT_SELFTEST(duetos::core::KlogPersistSelfTest());
+
     SerialWrite("[boot] Probing read-only FS shells (ext4 / NTFS / exFAT).\n");
     duetos::fs::ext4::Ext4ScanAll();
     duetos::fs::ntfs::NtfsScanAll();
@@ -2652,6 +2662,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         for (;;)
         {
             duetos::sched::SchedSleepTicks(100);
+            // Drain buffered log chunks to KERNEL.LOG once per
+            // tick. Outside the compositor lock so a slow FAT32
+            // append never stalls the desktop redraw.
+            duetos::core::KlogPersistFlush();
             duetos::drivers::video::CompositorLock();
             // While the login gate is up the full-screen login
             // panel owns the framebuffer. Repaint it from its
