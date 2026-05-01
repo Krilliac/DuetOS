@@ -35,6 +35,8 @@
 #include "arch/x86_64/timer.h"
 #include "time/tick.h"
 #include "drivers/gpu/bochs_vbe.h"
+#include "drivers/gpu/cea861.h"
+#include "drivers/gpu/cvt.h"
 #include "drivers/gpu/edid.h"
 #include "drivers/gpu/gpu.h"
 #include "drivers/gpu/virtio_gpu.h"
@@ -1365,6 +1367,56 @@ void RunSyntheticDump()
 
 } // namespace
 
+void RunCvtDemo(u32 w, u32 h, u32 ref_mhz)
+{
+    duetos::drivers::gpu::CvtRequest req = {};
+    req.h_active = static_cast<u16>(w);
+    req.v_active = static_cast<u16>(h);
+    req.refresh_mhz = ref_mhz;
+    req.mode = duetos::drivers::gpu::CvtMode::ReducedBlankingV1;
+    auto rb = duetos::drivers::gpu::CvtGenerate(req);
+    if (rb.has_value())
+    {
+        const duetos::drivers::gpu::EdidDtd& t = rb.value();
+        ConsoleWrite("  CVT-RB:    ");
+        WriteU64Dec(t.h_active);
+        ConsoleWrite("x");
+        WriteU64Dec(t.v_active);
+        ConsoleWrite("  htotal=");
+        WriteU64Dec(t.h_active + t.h_blanking);
+        ConsoleWrite("  vtotal=");
+        WriteU64Dec(t.v_active + t.v_blanking);
+        ConsoleWrite("  pclk=");
+        WriteU64Dec(t.pixel_clock_khz / 1000);
+        ConsoleWrite(".");
+        WriteU64Dec(t.pixel_clock_khz % 1000);
+        ConsoleWrite(" MHz  refresh=");
+        WriteU64Dec(t.refresh_mhz / 1000);
+        ConsoleWrite(".");
+        WriteU64Dec(t.refresh_mhz % 1000);
+        ConsoleWriteln(" Hz");
+    }
+    req.mode = duetos::drivers::gpu::CvtMode::Standard;
+    auto std_res = duetos::drivers::gpu::CvtGenerate(req);
+    if (std_res.has_value())
+    {
+        const duetos::drivers::gpu::EdidDtd& t = std_res.value();
+        ConsoleWrite("  CVT-STD:   ");
+        WriteU64Dec(t.h_active);
+        ConsoleWrite("x");
+        WriteU64Dec(t.v_active);
+        ConsoleWrite("  htotal=");
+        WriteU64Dec(t.h_active + t.h_blanking);
+        ConsoleWrite("  vtotal=");
+        WriteU64Dec(t.v_active + t.v_blanking);
+        ConsoleWrite("  pclk=");
+        WriteU64Dec(t.pixel_clock_khz / 1000);
+        ConsoleWrite(".");
+        WriteU64Dec(t.pixel_clock_khz % 1000);
+        ConsoleWriteln(" MHz");
+    }
+}
+
 void CmdMonitor(u32 argc, char** argv)
 {
     if (argc == 1)
@@ -1372,14 +1424,21 @@ void CmdMonitor(u32 argc, char** argv)
         ConsoleWriteln("monitor — dump parsed EDID for the system display");
         ConsoleWriteln("");
         ConsoleWriteln("Usage:");
-        ConsoleWriteln("  monitor                 — show synthetic test EDID (no DDC driver yet)");
+        ConsoleWriteln("  monitor                 — show synthetic test EDID + CVT modes");
         ConsoleWriteln("  monitor demo            — same; explicit synonym");
         ConsoleWriteln("  monitor parse <hex>     — parse + decode a 256-hex-digit EDID blob");
+        ConsoleWriteln("  monitor cea <hex>       — parse + decode a 256-hex-digit CEA-861 ext block");
+        ConsoleWriteln("  monitor cvt W H R       — generate a CVT timing for WxH @ R Hz");
         ConsoleWriteln("");
         ConsoleWriteln("NOTE: GPU drivers are probe-only in v0; no DDC/I2C transport is live.");
         ConsoleWriteln("      Once a vendor driver gains DDC, this command will pick up real data.");
         ConsoleWriteln("");
         RunSyntheticDump();
+        ConsoleWriteln("");
+        ConsoleWriteln("CVT timings for common modes:");
+        RunCvtDemo(1920, 1080, 60000);
+        RunCvtDemo(2560, 1440, 60000);
+        RunCvtDemo(3840, 2160, 60000);
         return;
     }
     if (argc == 2 && (argv[1][0] == 'd' || argv[1][0] == 'D'))
@@ -1403,6 +1462,35 @@ void CmdMonitor(u32 argc, char** argv)
             return;
         }
         duetos::drivers::gpu::EdidDumpToConsole(res.value());
+        return;
+    }
+    if (argc >= 3 && argv[1][0] == 'c' && argv[1][1] == 'e')
+    {
+        u8 buf[128];
+        if (!ParseEdidHex(argv[2], buf))
+        {
+            ConsoleWriteln("monitor cea: hex blob must be exactly 256 hex digits (128 bytes).");
+            return;
+        }
+        auto res = duetos::drivers::gpu::Cea861ParseBlock(buf, sizeof(buf));
+        if (!res.has_value())
+        {
+            ConsoleWriteln("monitor cea: parser rejected the input.");
+            return;
+        }
+        duetos::drivers::gpu::Cea861DumpToConsole(res.value());
+        return;
+    }
+    if (argc >= 5 && argv[1][0] == 'c' && argv[1][1] == 'v')
+    {
+        u16 w = 0, h = 0;
+        u16 r = 60;
+        if (!ParseU16Decimal(argv[2], &w) || !ParseU16Decimal(argv[3], &h) || !ParseU16Decimal(argv[4], &r))
+        {
+            ConsoleWriteln("monitor cvt: usage: monitor cvt <width> <height> <refresh-hz>");
+            return;
+        }
+        RunCvtDemo(w, h, static_cast<u32>(r) * 1000u);
         return;
     }
     ConsoleWriteln("monitor: unrecognised arguments — try `monitor` for usage.");
