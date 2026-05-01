@@ -49,7 +49,12 @@ void HpetInit()
     void* mmio = mm::MapMmio(phys, kHpetWindowBytes);
     if (mmio == nullptr)
     {
-        core::Panic("arch/hpet", "MapMmio failed for HPET block");
+        // Debug: panic so the failure surfaces. Release: leave
+        // g_mmio null and return — the timekeeper layer already
+        // falls back to LAPIC timing when HPET is absent
+        // (matches the "no ACPI table" path above).
+        core::DebugPanicOrWarn("arch/hpet", "MapMmio failed for HPET block");
+        return;
     }
     g_mmio = static_cast<volatile u8*>(mmio);
 
@@ -59,10 +64,13 @@ void HpetInit()
     if ((cap & kCapCounterSize64) == 0)
     {
         // 32-bit HPETs are vanishingly rare on x86_64 but the spec
-        // allows them. Rather than write a 32-bit read+retry path
-        // with no hardware to validate against, halt loudly and
-        // leave the driver disabled if we ever see one.
-        core::Panic("arch/hpet", "32-bit HPET counter unsupported — file a bug");
+        // allows them. Debug: panic loudly so the unsupported-hw
+        // bug report writes itself. Release: drop g_mmio and skip
+        // — same fallback story as the MapMmio-failure case
+        // above.
+        core::DebugPanicOrWarn("arch/hpet", "32-bit HPET counter unsupported — file a bug");
+        g_mmio = nullptr;
+        return;
     }
 
     // Halt the counter before writing configuration or the counter

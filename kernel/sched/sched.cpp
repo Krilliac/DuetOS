@@ -652,7 +652,13 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     auto* t = static_cast<Task*>(mm::KMalloc(sizeof(Task)));
     if (t == nullptr)
     {
-        PanicSched("KMalloc failed for Task");
+        // Debug: panic — fail loud so the OOM is impossible to
+        // miss during development. Release: log it and return
+        // nullptr; SchedCreate's signature is already nullable
+        // and every existing caller fire-and-forgets the result.
+        // A failed worker thread is preferable to a halted box.
+        core::DebugPanicOrWarn("sched", "KMalloc failed for Task");
+        return nullptr;
     }
     // Zero the struct first; explicit assignments below overwrite the
     // fields we care about, but any field NOT covered would otherwise
@@ -668,7 +674,12 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     auto* stack = static_cast<u8*>(mm::AllocateKernelStack(kKernelStackBytes));
     if (stack == nullptr)
     {
-        PanicSched("AllocateKernelStack failed for kernel stack");
+        // Same shape as the Task-alloc failure above. The Task
+        // struct was just allocated; KFree it before returning so
+        // we don't leak on the release path.
+        core::DebugPanicOrWarn("sched", "AllocateKernelStack failed for kernel stack");
+        mm::KFree(t);
+        return nullptr;
     }
 
     // Plant the canary at the low edge of the (usable) stack BEFORE
@@ -2368,7 +2379,14 @@ void MutexUnlock(Mutex* m)
     arch::Cli();
     if (m->owner != Current())
     {
-        PanicSched("MutexUnlock by non-owner");
+        // Caller-side contract violation. Debug builds panic so the
+        // bad caller is found; release builds log, re-enable
+        // interrupts, and return without mutating m — touching
+        // owner / waiters from the wrong task would corrupt the
+        // mutex's view for whoever actually holds it.
+        arch::Sti();
+        core::DebugPanicOrWarn("sched", "MutexUnlock by non-owner");
+        return;
     }
     m->owner = nullptr;
 
@@ -2414,7 +2432,15 @@ void CondvarWait(Condvar* cv, Mutex* m)
     arch::Cli();
     if (m->owner != Current())
     {
-        PanicSched("CondvarWait called without the companion mutex held");
+        // Caller broke the condvar contract — must hold the
+        // companion mutex when calling Wait. Debug: panic.
+        // Release: log, re-enable interrupts, and return without
+        // dequeuing onto cv. The caller is buggy, but at least the
+        // kernel doesn't enqueue a wait that could later be woken
+        // and reacquire a mutex this task never owned.
+        arch::Sti();
+        core::DebugPanicOrWarn("sched", "CondvarWait called without the companion mutex held");
+        return;
     }
 
     {
@@ -2474,7 +2500,13 @@ bool CondvarWaitTimeout(Condvar* cv, Mutex* m, u64 ticks)
     arch::Cli();
     if (m->owner != Current())
     {
-        PanicSched("CondvarWaitTimeout called without the companion mutex held");
+        // Same contract as CondvarWait above. Release builds
+        // surface the violation through klog and report a
+        // timeout-style false return so the caller sees a
+        // recoverable signal instead of a phantom wakeup.
+        arch::Sti();
+        core::DebugPanicOrWarn("sched", "CondvarWaitTimeout called without the companion mutex held");
+        return false;
     }
 
     {

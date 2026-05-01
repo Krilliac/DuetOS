@@ -74,8 +74,13 @@ void KSemaphoreRelease(KSemaphore* s, u32 n)
     sched::MutexLock(&s->inner);
     if (s->count + n > s->max_count)
     {
+        // Debug: panic; release: log and refuse the release. The
+        // mutex is already dropped — letting `count` exceed
+        // `max_count` would leak permits past the contract that
+        // every consumer relies on.
         sched::MutexUnlock(&s->inner);
-        core::Panic("ipc/ksemaphore", "release would overflow max_count");
+        core::DebugPanicOrWarn("ipc/ksemaphore", "release would overflow max_count");
+        return;
     }
     s->count += n;
     // Wake up to n waiters. Each will re-check `count > 0` under

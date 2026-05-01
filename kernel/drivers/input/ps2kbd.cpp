@@ -259,14 +259,17 @@ void WaitInputClear()
             return;
         }
     }
-    core::Panic("drivers/ps2kbd", "8042 input buffer never cleared");
+    // Debug: panic — fail loud during development so firmware
+    // regressions surface. Release: log and return — PS/2 init
+    // will quietly fail, leaving USB HID as the input path.
+    core::DebugPanicOrWarn("drivers/ps2kbd", "8042 input buffer never cleared");
 }
 
 u8 WaitOutputFull()
 {
     // Wait for a response byte to be available and return it. Panics
-    // on timeout — a wedged 8042 during init means the PS/2 driver
-    // is unusable, and Class A halt is the right posture.
+    // on timeout in debug; release returns a benign 0 so subsequent
+    // handshake checks fail cleanly and PS/2 init backs out.
     for (u64 i = 0; i < kPollSpinLimit; ++i)
     {
         if ((Inb(kStatusPort) & kStatusOutputFull) != 0)
@@ -274,7 +277,8 @@ u8 WaitOutputFull()
             return Inb(kDataPort);
         }
     }
-    core::Panic("drivers/ps2kbd", "8042 output buffer never filled");
+    core::DebugPanicOrWarn("drivers/ps2kbd", "8042 output buffer never filled");
+    return 0;
 }
 
 void SendCtrlCmd(u8 cmd)
@@ -353,7 +357,11 @@ void ControllerInit()
     const u8 self_test = WaitOutputFull();
     if (self_test != kResponseSelfTestPass)
     {
-        core::PanicWithValue("drivers/ps2kbd", "8042 self-test failed", self_test);
+        // Debug: panic — controller self-test failure during dev
+        // is a real bug. Release: log and bail on PS/2 init.
+        // USB HID still provides keyboard input.
+        core::DebugPanicOrWarnWithValue("drivers/ps2kbd", "8042 self-test failed", self_test);
+        return;
     }
     WriteConfigByte(config);
 

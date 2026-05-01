@@ -78,6 +78,48 @@ void EndCrashDump();
 /// so every halt point produces the same peer-CPU section.
 void DumpPeerCpuSnapshots();
 
+/// Debug-only Panic; release-build error log.
+///
+/// In a debug build this is identical to `Panic` — the CPU halts
+/// and emits a full crash dump, so a fresh bug surfaces loudly
+/// during development.
+///
+/// In a release build it emits a `LogLevel::Error` line through
+/// klog and *returns*. The caller is expected to handle the bad
+/// state by ignoring the request (skipping a release on a freed
+/// mutex, refusing an out-of-bounds MSI-X write, …) so the kernel
+/// keeps running. Returning is the only behavioural difference; the
+/// invariant violation is still reported, the ring buffer still
+/// captures it, and the post-mortem-from-logs story is preserved.
+///
+/// Use ONLY at sites where:
+///   - the violation is a caller-side bug, not corruption of
+///     kernel-owned data structures;
+///   - "do nothing" is a safe outcome (the call site can return
+///     after the warn without leaving any half-mutated state); and
+///   - hard-halting a release box for that bug would lose more
+///     uptime than the hidden misbehaviour costs.
+///
+/// Counter-examples — keep `Panic`/`PanicWithValue` for these:
+///   - heap / frame-allocator / page-table corruption;
+///   - stack-canary mismatch;
+///   - boot-time fatal init (no clocksource, no LAPIC, …) where
+///     "continue" doesn't actually mean anything;
+///   - trap-frame state the kernel can't represent (kernel-stack
+///     overflow caught by guard page).
+///
+/// Why a runtime branch instead of a macro / template: the function
+/// is `[[gnu::cold]]` and out-of-line, so the call site is a single
+/// `call` — the same code-shape as `Panic` today. Keeping the
+/// flavor decision inside one TU means a future build flavor (e.g.
+/// `release-asserts`) can flip it without re-touching every caller.
+[[gnu::cold]] void DebugPanicOrWarn(const char* subsystem, const char* message);
+
+/// Same idea, but renders a single u64 value alongside the message
+/// — used by call sites that already pass the offending pointer /
+/// index / count to `PanicWithValue`.
+[[gnu::cold]] void DebugPanicOrWarnWithValue(const char* subsystem, const char* message, u64 value);
+
 } // namespace duetos::core
 
 // ---------------------------------------------------------------------------

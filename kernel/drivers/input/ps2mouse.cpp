@@ -118,7 +118,12 @@ void WaitInputClear()
 {
     if (!TryWaitInputClear())
     {
-        core::Panic("drivers/ps2mouse", "8042 input buffer never cleared");
+        // Debug: panic so a hardware-stall during development
+        // surfaces immediately. Release: log and return — the
+        // caller's next port write will go out on a stuck
+        // controller and PS/2 init will quietly fail, leaving
+        // USB HID as the input path.
+        core::DebugPanicOrWarn("drivers/ps2mouse", "8042 input buffer never cleared");
     }
 }
 
@@ -143,7 +148,11 @@ u8 WaitOutputFull()
     u8 byte = 0;
     if (!TryWaitOutputFull(&byte))
     {
-        core::Panic("drivers/ps2mouse", "8042 output buffer never filled");
+        // Debug: panic. Release: log and return zero — the
+        // caller will see a 0 byte from the controller, which
+        // is a benign value that fails any subsequent
+        // ID/handshake check; PS/2 init backs out cleanly.
+        core::DebugPanicOrWarn("drivers/ps2mouse", "8042 output buffer never filled");
     }
     return byte;
 }

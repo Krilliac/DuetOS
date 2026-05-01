@@ -293,7 +293,13 @@ void KFree(void* ptr)
     }
     if (!InsidePool(ptr))
     {
-        PanicHeap("KFree pointer outside heap pool");
+        // Caller-side bug — `ptr` was not handed out by KMalloc.
+        // Debug: panic. Release: log and refuse the free. The
+        // pointer might be from an unrelated arena (frame
+        // allocator, MMIO mapping); freeing it would reach into
+        // memory the heap doesn't own.
+        core::DebugPanicOrWarn("mm/kheap", "KFree pointer outside heap pool");
+        return;
     }
 
     auto* chunk = reinterpret_cast<ChunkHeader*>(static_cast<u8*>(ptr) - sizeof(ChunkHeader));

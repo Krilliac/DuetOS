@@ -47,7 +47,14 @@ void RwLockReleaseShared(RwLock& lock)
     sched::MutexLock(&lock.inner);
     if (lock.active_readers == 0)
     {
-        core::Panic("sync/rwlock", "RwLockReleaseShared on lock with no readers");
+        // Debug: hard panic so the offending caller is found.
+        // Release: log, drop the inner mutex, and refuse the
+        // release — an unmatched release is a caller bug, but
+        // pretending to honour it would underflow `active_readers`
+        // and cement the bug into the lock's state.
+        sched::MutexUnlock(&lock.inner);
+        core::DebugPanicOrWarn("sync/rwlock", "RwLockReleaseShared on lock with no readers");
+        return;
     }
     --lock.active_readers;
     if (lock.active_readers == 0 && lock.waiting_writers > 0)
@@ -78,7 +85,12 @@ void RwLockReleaseExclusive(RwLock& lock)
     sched::MutexLock(&lock.inner);
     if (!lock.writer_active)
     {
-        core::Panic("sync/rwlock", "RwLockReleaseExclusive on lock with no writer");
+        // Same recovery shape as RwLockReleaseShared above: drop
+        // the inner mutex and refuse the release in a release
+        // build rather than corrupt the writer-flag.
+        sched::MutexUnlock(&lock.inner);
+        core::DebugPanicOrWarn("sync/rwlock", "RwLockReleaseExclusive on lock with no writer");
+        return;
     }
     lock.writer_active = false;
     if (lock.waiting_writers > 0)

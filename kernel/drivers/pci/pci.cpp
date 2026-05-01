@@ -280,7 +280,12 @@ void PciMsixSetEntry(volatile void* table_base, u16 table_size, u16 index, u8 la
     // turns a capability into an arbitrary-write primitive.
     if (index >= table_size)
     {
-        core::Panic("drivers/pci", "PciMsixSetEntry: index past table_size");
+        // Debug: panic so the bad caller is found. Release:
+        // refuse the write rather than scribble past the mapping
+        // — turning a capability into an arbitrary-write primitive
+        // is exactly the regression this guard exists to stop.
+        core::DebugPanicOrWarnWithValue("drivers/pci", "PciMsixSetEntry: index past table_size", index);
+        return;
     }
 
     auto* table = static_cast<volatile MsixEntry*>(table_base);
@@ -312,7 +317,8 @@ void PciMsixMaskEntry(volatile void* table_base, u16 table_size, u16 index)
 {
     if (index >= table_size)
     {
-        core::Panic("drivers/pci", "PciMsixMaskEntry: index past table_size");
+        core::DebugPanicOrWarnWithValue("drivers/pci", "PciMsixMaskEntry: index past table_size", index);
+        return;
     }
     auto* table = static_cast<volatile MsixEntry*>(table_base);
     table[index].vector_control = 1;
@@ -322,7 +328,8 @@ void PciMsixUnmaskEntry(volatile void* table_base, u16 table_size, u16 index)
 {
     if (index >= table_size)
     {
-        core::Panic("drivers/pci", "PciMsixUnmaskEntry: index past table_size");
+        core::DebugPanicOrWarnWithValue("drivers/pci", "PciMsixUnmaskEntry: index past table_size", index);
+        return;
     }
     auto* table = static_cast<volatile MsixEntry*>(table_base);
     table[index].vector_control = 0;
@@ -333,7 +340,12 @@ void PciMsixEnable(DeviceAddress addr)
     const u8 cap = PciFindCapability(addr, kPciCapMsix);
     if (cap == 0)
     {
-        core::Panic("drivers/pci", "PciMsixEnable on device without MSI-X");
+        // Debug: panic — the caller asked to enable a feature the
+        // device doesn't expose. Release: refuse silently so the
+        // driver gets a chance to fall back (legacy IRQ, MSI) on
+        // a misdetected capability rather than halting the box.
+        core::DebugPanicOrWarn("drivers/pci", "PciMsixEnable on device without MSI-X");
+        return;
     }
     // Read-modify-write message_control: set bit 15 = Enable, clear
     // bit 14 = Function Mask (leave per-entry mask bits as-is).

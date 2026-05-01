@@ -46,12 +46,30 @@ struct ThreadDesc
 
     const u64 kstack_top = sched::SchedCurrentKernelStackTop();
     if (kstack_top == 0)
-        ::duetos::core::Panic("win32/thread", "SchedCurrentKernelStackTop returned 0");
+    {
+        // Debug: panic — kernel-stack bookkeeping is broken before
+        // we even get to ring 3. Release: terminate just this
+        // task. The SchedExit/KFree below is dead code in debug
+        // (Panic is [[noreturn]]); in release it cleans up the
+        // descriptor heap allocation and routes to the reaper.
+        ::duetos::core::DebugPanicOrWarn("win32/thread", "SchedCurrentKernelStackTop returned 0");
+        if (arg != nullptr)
+        {
+            mm::KFree(arg);
+        }
+        sched::SchedExit();
+    }
     arch::TssSetRsp0(kstack_top);
     cpu::CurrentCpu()->kernel_rsp = kstack_top;
 
     if (arg == nullptr)
-        ::duetos::core::Panic("win32/thread", "Ring3ThreadEntry called with null desc");
+    {
+        // Same shape as above: in release, exit this task instead
+        // of the whole kernel. Nothing to free — arg is already
+        // null.
+        ::duetos::core::DebugPanicOrWarn("win32/thread", "Ring3ThreadEntry called with null desc");
+        sched::SchedExit();
+    }
 
     // Copy onto the stack then free the heap allocation — the
     // iretq below doesn't return, so deferring the free to the

@@ -248,7 +248,12 @@ u64 SmpStartAps()
     const u64 tramp_len = static_cast<u64>(ap_trampoline_end - ap_trampoline_start);
     if (tramp_len > 0x1000)
     {
-        core::PanicWithValue("arch/smp", "trampoline image larger than 4 KiB", tramp_len);
+        // Build-time invariant violated. Debug: panic so the
+        // bloat is caught at boot. Release: log it and return 0 —
+        // the BSP keeps running uniprocessor instead of halting
+        // the whole machine over an SMP-only feature.
+        core::DebugPanicOrWarnWithValue("arch/smp", "trampoline image larger than 4 KiB", tramp_len);
+        return 0;
     }
     auto* dst = static_cast<u8*>(TrampVirt());
     for (u64 i = 0; i < tramp_len; ++i)
@@ -290,7 +295,11 @@ u64 SmpStartAps()
         auto* ap_pcpu = static_cast<cpu::PerCpu*>(mm::KMalloc(sizeof(cpu::PerCpu)));
         if (ap_pcpu == nullptr)
         {
-            core::Panic("arch/smp", "KMalloc failed for AP PerCpu");
+            // Per-AP allocation failed. Debug: panic. Release:
+            // log and skip this AP — the BSP and any APs that
+            // already came up keep running.
+            core::DebugPanicOrWarn("arch/smp", "KMalloc failed for AP PerCpu");
+            continue;
         }
         ap_pcpu->cpu_id = cpu_id;
         ap_pcpu->lapic_id = rec.apic_id;
@@ -324,7 +333,14 @@ u64 SmpStartAps()
         auto* stack = static_cast<u8*>(mm::KMalloc(kApStackBytes));
         if (stack == nullptr)
         {
-            core::Panic("arch/smp", "KMalloc failed for AP stack");
+            // Per-AP stack allocation failed. Debug: panic.
+            // Release: undo the PerCpu we just allocated and skip
+            // this AP. Slightly-higher g_cpu_id_limit is harmless
+            // — bounded loops just iterate over an empty slot.
+            core::DebugPanicOrWarn("arch/smp", "KMalloc failed for AP stack");
+            g_ap_percpus[cpu_id] = nullptr;
+            mm::KFree(ap_pcpu);
+            continue;
         }
         TrampU64At(kOffStack) = reinterpret_cast<u64>(stack + kApStackBytes);
         TrampU32At(kOffCpuId) = cpu_id;
