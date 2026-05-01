@@ -104,6 +104,7 @@
 #include "drivers/video/wallpaper.h"
 #include "generated_chrome_font.h"
 #include "drivers/video/calendar.h"
+#include "drivers/video/magnifier.h"
 #include "drivers/video/menu.h"
 #include "drivers/video/netpanel.h"
 #include "drivers/video/notify.h"
@@ -865,6 +866,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     }
     DUETOS_BOOT_SELFTEST(duetos::drivers::video::ThemeSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::video::NotifySelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::video::MagnifierSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::time::TimezoneSelfTest());
     const auto& theme0 = duetos::drivers::video::ThemeCurrent();
 
@@ -2130,6 +2132,20 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 duetos::core::LoginStart(duetos::core::LoginMode::Gui);
                 duetos::drivers::video::CompositorUnlock();
                 SerialWrite("[ui] screen locked\n");
+                continue;
+            }
+            // Ctrl+Alt+M — toggle the magnifier accessibility inset.
+            // 200x150 px viewport at the top-right showing 2x zoom
+            // around the cursor. Drops to bottom-right when the
+            // cursor is in the top-right quadrant so the inset
+            // never occludes its own source region.
+            if (ctrl && alt && (ev.code == 'm' || ev.code == 'M'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const bool on = duetos::drivers::video::MagnifierToggle();
+                duetos::drivers::video::NotifyShow(on ? "magnifier on" : "magnifier off");
+                duetos::drivers::video::CompositorUnlock();
+                SerialWrite(on ? "[ui] magnifier on\n" : "[ui] magnifier off\n");
                 continue;
             }
             // Ctrl+Alt+Y cycles the desktop theme. Classic (teal)

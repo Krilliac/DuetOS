@@ -43,6 +43,7 @@
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/magnifier.h"
 #include "drivers/video/menu.h"
 #include "drivers/video/notify.h"
 #include "drivers/video/ttf.h"
@@ -1661,6 +1662,7 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
     CalendarRedraw();
     NetPanelRedraw();
     NotifyRedraw();
+    MagnifierRedraw();
     // Caret — painted last so it overlays everything, including
     // the taskbar. Blink phase toggles per compose; the ui-
     // ticker's 1 Hz compose produces the blink cadence.
