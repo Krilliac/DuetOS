@@ -517,13 +517,15 @@ void SpawnRing3LinuxFileSmoke()
     AddressSpace* as = AddressSpaceCreate(/*frame_budget=*/16);
     if (as == nullptr)
     {
-        core::Panic("linux/smoke", "AddressSpaceCreate failed");
+        core::DebugPanicOrWarn("linux/smoke", "AddressSpaceCreate failed");
+        return;
     }
     const PhysAddr code_frame = AllocateFrame();
     const PhysAddr stack_frame = AllocateFrame();
     if (code_frame == mm::kNullFrame || stack_frame == mm::kNullFrame)
     {
-        core::Panic("linux/smoke", "frame alloc failed");
+        core::DebugPanicOrWarn("linux/smoke", "frame alloc failed");
+        return;
     }
     auto* code_direct = static_cast<u8*>(mm::PhysToVirt(code_frame));
     for (u64 i = 0; i < mm::kPageSize; ++i)
@@ -543,7 +545,8 @@ void SpawnRing3LinuxFileSmoke()
                                   stack_va, core::kTickBudgetSandbox);
     if (proc == nullptr)
     {
-        core::Panic("linux/smoke", "ProcessCreate failed");
+        core::DebugPanicOrWarn("linux/smoke", "ProcessCreate failed");
+        return;
     }
     proc->abi_flavor = kAbiLinux;
     proc->linux_brk_base = code_va + 0x100'0000ull;
@@ -709,13 +712,15 @@ void SpawnRing3LinuxMmapSmoke()
     AddressSpace* as = AddressSpaceCreate(/*frame_budget=*/16);
     if (as == nullptr)
     {
-        core::Panic("linux/smoke", "AddressSpaceCreate failed");
+        core::DebugPanicOrWarn("linux/smoke", "AddressSpaceCreate failed");
+        return;
     }
     const PhysAddr code_frame = AllocateFrame();
     const PhysAddr stack_frame = AllocateFrame();
     if (code_frame == mm::kNullFrame || stack_frame == mm::kNullFrame)
     {
-        core::Panic("linux/smoke", "frame alloc failed");
+        core::DebugPanicOrWarn("linux/smoke", "frame alloc failed");
+        return;
     }
     auto* code_direct = static_cast<u8*>(mm::PhysToVirt(code_frame));
     for (u64 i = 0; i < mm::kPageSize; ++i)
@@ -735,7 +740,8 @@ void SpawnRing3LinuxMmapSmoke()
                                   stack_va, core::kTickBudgetSandbox);
     if (proc == nullptr)
     {
-        core::Panic("linux/smoke", "ProcessCreate failed");
+        core::DebugPanicOrWarn("linux/smoke", "ProcessCreate failed");
+        return;
     }
     proc->abi_flavor = kAbiLinux;
     proc->linux_brk_base = code_va + 0x100'0000ull;
@@ -760,7 +766,8 @@ void SpawnRing3LinuxElfSmoke()
     const u64 n = BuildLinuxElf(scratch, sizeof(scratch));
     if (n == 0)
     {
-        core::Panic("linux/smoke", "BuildLinuxElf scratch too small");
+        core::DebugPanicOrWarn("linux/smoke", "BuildLinuxElf scratch too small");
+        return;
     }
     const u64 pid = core::SpawnElfLinux("linux-elf-smoke", scratch, n, core::CapSetEmpty(), fs::RamfsSandboxRoot(),
                                         /*frame_budget=*/16, core::kTickBudgetSandbox);
@@ -841,11 +848,13 @@ void SpawnRing3LinuxTranslateSmoke()
 
     AddressSpace* as = AddressSpaceCreate(/*frame_budget=*/16);
     if (as == nullptr)
-        core::Panic("linux/smoke", "AddressSpaceCreate failed");
+        core::DebugPanicOrWarn("linux/smoke", "AddressSpaceCreate failed");
+    return;
     const PhysAddr code_frame = AllocateFrame();
     const PhysAddr stack_frame = AllocateFrame();
     if (code_frame == mm::kNullFrame || stack_frame == mm::kNullFrame)
-        core::Panic("linux/smoke", "frame alloc failed");
+        core::DebugPanicOrWarn("linux/smoke", "frame alloc failed");
+    return;
     auto* code_direct = static_cast<u8*>(mm::PhysToVirt(code_frame));
     for (u64 i = 0; i < mm::kPageSize; ++i)
         code_direct[i] = 0;
@@ -861,7 +870,8 @@ void SpawnRing3LinuxTranslateSmoke()
     Process* proc = ProcessCreate("linux-translate-smoke", as, core::CapSetEmpty(), fs::RamfsSandboxRoot(), code_va,
                                   stack_va, core::kTickBudgetSandbox);
     if (proc == nullptr)
-        core::Panic("linux/smoke", "ProcessCreate failed");
+        core::DebugPanicOrWarn("linux/smoke", "ProcessCreate failed");
+    return;
     proc->abi_flavor = kAbiLinux;
     proc->linux_brk_base = code_va + 0x100'0000ull;
     proc->linux_brk_current = proc->linux_brk_base;
@@ -1062,11 +1072,13 @@ void SpawnRing3LinuxExtendSmoke()
 
     AddressSpace* as = AddressSpaceCreate(/*frame_budget=*/16);
     if (as == nullptr)
-        core::Panic("linux/smoke", "AddressSpaceCreate failed");
+        core::DebugPanicOrWarn("linux/smoke", "AddressSpaceCreate failed");
+    return;
     const PhysAddr code_frame = AllocateFrame();
     const PhysAddr stack_frame = AllocateFrame();
     if (code_frame == mm::kNullFrame || stack_frame == mm::kNullFrame)
-        core::Panic("linux/smoke", "frame alloc failed");
+        core::DebugPanicOrWarn("linux/smoke", "frame alloc failed");
+    return;
     auto* code_direct = static_cast<u8*>(mm::PhysToVirt(code_frame));
     for (u64 i = 0; i < mm::kPageSize; ++i)
         code_direct[i] = 0;
@@ -1081,7 +1093,8 @@ void SpawnRing3LinuxExtendSmoke()
     Process* proc = ProcessCreate("linux-extend-smoke", as, core::CapSetEmpty(), fs::RamfsSandboxRoot(), code_va,
                                   stack_va, core::kTickBudgetSandbox);
     if (proc == nullptr)
-        core::Panic("linux/smoke", "ProcessCreate failed");
+        core::DebugPanicOrWarn("linux/smoke", "ProcessCreate failed");
+    return;
     proc->abi_flavor = kAbiLinux;
     proc->linux_brk_base = code_va + 0x100'0000ull;
     proc->linux_brk_current = proc->linux_brk_base;
@@ -1098,13 +1111,15 @@ void SpawnRing3LinuxSmoke()
     AddressSpace* as = AddressSpaceCreate(/*frame_budget=*/16);
     if (as == nullptr)
     {
-        core::Panic("linux/smoke", "AddressSpaceCreate failed");
+        core::DebugPanicOrWarn("linux/smoke", "AddressSpaceCreate failed");
+        return;
     }
     const PhysAddr code_frame = AllocateFrame();
     const PhysAddr stack_frame = AllocateFrame();
     if (code_frame == mm::kNullFrame || stack_frame == mm::kNullFrame)
     {
-        core::Panic("linux/smoke", "frame allocation failed");
+        core::DebugPanicOrWarn("linux/smoke", "frame allocation failed");
+        return;
     }
 
     // Populate the code page directly via the phys→direct-map alias.
@@ -1128,7 +1143,8 @@ void SpawnRing3LinuxSmoke()
         ProcessCreate("linux-smoke", as, caps, fs::RamfsSandboxRoot(), kCodeVa, kStackVa, core::kTickBudgetSandbox);
     if (proc == nullptr)
     {
-        core::Panic("linux/smoke", "ProcessCreate failed");
+        core::DebugPanicOrWarn("linux/smoke", "ProcessCreate failed");
+        return;
     }
     // Flip ABI flavor — this tells the syscall entry plumbing the
     // task's `syscall` instruction should route through the Linux

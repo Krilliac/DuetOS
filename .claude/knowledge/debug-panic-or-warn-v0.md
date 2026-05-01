@@ -86,6 +86,33 @@ unwind that state first (e.g. `MutexUnlock` before
 | `kernel/drivers/pci/pci.cpp:325` (`PciMsixUnmaskEntry` OOB index) | log + value; refuse the write |
 | `kernel/drivers/pci/pci.cpp:336` (`PciMsixEnable` on non-MSI-X device) | log; refuse — driver can fall back |
 
+## Sixth pass (2026-05-01) — Linux ring-3 smoke OOM
+
+16 more sites — running total 58 across six passes.
+
+`kernel/subsystems/linux/ring3_smoke.cpp` runs unconditionally
+on every boot (not gated by `kBootSelfTests`); it's a real
+end-to-end exercise of the Linux ABI shim, not a self-test. The
+five `Spawn*Smoke` functions all share the same OOM-on-init
+shape: `AddressSpaceCreate` / `AllocateFrame` / `ProcessCreate`
+returns null, panic.
+
+For release stability that's the wrong outcome — a transient
+OOM on a tight-memory boot would halt the kernel over an
+optional smoke. The bulk conversion replaces all 16 panics with
+`DebugPanicOrWarn` + `return` so the smoke skips itself
+quietly and the rest of boot proceeds. (A small leak of the
+already-allocated `AddressSpace` / frames is accepted on the
+release path; the smoke functions are short-running and the
+event is once-per-boot.)
+
+| Site | Recovery shape in release |
+|------|---------------------------|
+| `kernel/subsystems/linux/ring3_smoke.cpp:520` (AS create failed) | log; return |
+| `kernel/subsystems/linux/ring3_smoke.cpp:527` (frame alloc failed) | log; return |
+| `kernel/subsystems/linux/ring3_smoke.cpp:548` (ProcessCreate failed) | log; return |
+| ...and 13 sibling sites in `SpawnRing3LinuxMmapSmoke`, `SpawnRing3LinuxElfSmoke`, `SpawnRing3LinuxTranslateSmoke`, `SpawnRing3LinuxExtendSmoke`, `SpawnRing3LinuxSmoke` | same shape |
+
 ## Fifth pass (2026-05-01) — SeqLock writer-leak recovery, KFree on foreign pointer
 
 3 more sites — running total 42 across five passes.
@@ -308,7 +335,7 @@ What stays as hard `Panic` deliberately:
 
 > Continue the "soften release-build panics" work. The
 > `DebugPanicOrWarn` / `DebugPanicOrWarnWithValue` helpers are in
-> `kernel/core/panic.{h,cpp}`. 42 sites converted across five
+> `kernel/core/panic.{h,cpp}`. 58 sites converted across six
 > passes — see the tables in this file for the full inventory.
 >
 > Remaining triage work is small. The IPI delivery-stuck panic
