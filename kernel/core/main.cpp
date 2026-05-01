@@ -94,6 +94,7 @@
 #include "apps/files.h"
 #include "apps/gfxdemo.h"
 #include "apps/notes.h"
+#include "apps/settings.h"
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
 #include "drivers/video/framebuffer.h"
@@ -1151,6 +1152,22 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::drivers::video::ThemeRegisterWindow(Role::GfxDemo, gfx_handle);
     duetos::apps::gfxdemo::GfxDemoInit(gfx_handle);
     DUETOS_BOOT_SELFTEST(duetos::apps::gfxdemo::GfxDemoSelfTest());
+
+    // SETTINGS — unified panel that wraps the Ctrl+Alt chord
+    // surfaces (theme cycle / direct picker, opacity step, high-
+    // contrast preset, default reset) plus a wall-clock and
+    // about readout. Hidden by default; raised from the Start
+    // menu's SETTINGS entry.
+    duetos::drivers::video::WindowChrome settings_chrome = theme_chrome(Role::Settings);
+    settings_chrome.x = 320;
+    settings_chrome.y = 120;
+    settings_chrome.w = 360;
+    settings_chrome.h = 200;
+    const duetos::drivers::video::WindowHandle settings_handle =
+        duetos::drivers::video::WindowRegister(settings_chrome, "SETTINGS");
+    duetos::drivers::video::ThemeRegisterWindow(Role::Settings, settings_handle);
+    duetos::apps::settings::SettingsInit(settings_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::settings::SettingsSelfTest());
 
     // Framebuffer text console. 80x40 chars of boot log at the
     // bottom of the desktop, under the windows in z-order. Dragging
@@ -2399,6 +2416,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                             {
                                 app_consumed = duetos::apps::gfxdemo::GfxDemoFeedChar(c);
                             }
+                            else if (active == duetos::apps::settings::SettingsWindow())
+                            {
+                                app_consumed = duetos::apps::settings::SettingsFeedChar(c);
+                            }
                         }
                     }
                 }
@@ -2548,6 +2569,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             {"TASK MANAGER", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::TaskManager)},
             {"KERNEL LOG", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::LogView)},
             {"GFX DEMO", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::GfxDemo)},
+            {"SETTINGS", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Settings)},
             {"HELP / SHORTCUTS", 6},
             {"CYCLE WINDOWS", 2},
             {"ABOUT DUETOS", 1},
@@ -3182,6 +3204,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     // kIdBase); non-claiming handlers return false
                     // and the event is just logged above.
                     duetos::apps::calculator::CalculatorOnWidgetEvent(hit);
+                    duetos::apps::settings::SettingsOnWidgetEvent(hit);
                 }
             }
 

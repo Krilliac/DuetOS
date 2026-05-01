@@ -79,6 +79,7 @@ constexpr Theme kClassic = {
             0x00606020, // Files
             0x00203040, // Clock
             0x00702070, // GfxDemo — magenta to flag "this paints pixels"
+            0x00405060, // Settings — slate-grey, matches "tools" convention
         },
     .role_client =
         {
@@ -89,6 +90,7 @@ constexpr Theme kClassic = {
             0x00101828, // Files
             0x00081008, // Clock
             0x00000000, // GfxDemo — black; the demo overpaints every pixel
+            0x00181828, // Settings
         },
 
     .console_fg = 0x0080F088,
@@ -135,6 +137,7 @@ constexpr Theme kAmber = {
             0x00805030, // Files
             0x00402010, // Clock
             0x00A06030, // GfxDemo
+            0x00604018, // Settings — muted amber-bronze
         },
     .role_client =
         {
@@ -145,6 +148,7 @@ constexpr Theme kAmber = {
             0x00100800, // Files
             0x00050200, // Clock — near-black ground for "LEDs"
             0x00000000, // GfxDemo — black; overpainted every frame
+            0x00100800, // Settings
         },
 
     .console_fg = 0x00FFA830,
@@ -195,6 +199,7 @@ constexpr Theme kSlate10 = {
             0x008B6914, // Files        — dark amber / goldenrod
             0x002D2D33, // Clock        — flat dark slate
             0x008B2C8B, // GfxDemo      — magenta accent
+            0x004A4A52, // Settings     — Slate panel grey
         },
     .role_client =
         {
@@ -205,6 +210,7 @@ constexpr Theme kSlate10 = {
             0x00252529, // Files
             0x00101014, // Clock — near-black so 7-seg reads bright
             0x00000000, // GfxDemo — black ground (overpainted)
+            0x00252529, // Settings — Slate panel
         },
 
     .console_fg = 0x00D4D4D4, // VSCode default editor ink
@@ -261,6 +267,7 @@ constexpr Theme kDuet = {
             0x00604818, // Files        — amber-tinted chrome (document storage)
             0x00141822, // Clock        — slate panel (passive widget)
             0x00702070, // GfxDemo      — magenta to flag "this paints pixels"
+            0x002A323C, // Settings     — `--chrome-2` slate
         },
     .role_client =
         {
@@ -271,6 +278,7 @@ constexpr Theme kDuet = {
             0x00141A22, // Files
             0x000B0E13, // Clock — near-black canvas ground for clock face
             0x00000000, // GfxDemo — black; the demo overpaints every pixel
+            0x00141A22, // Settings — slate canvas
         },
 
     .console_fg = 0x00E8EDF2, // `--ink` — JetBrains-Mono ink in the prototype
@@ -327,6 +335,7 @@ constexpr Theme kDuetLight = {
             0x008C5810, // Files        — amber accent
             0x002C323C, // Clock        — slate panel
             0x008B2C8B, // GfxDemo      — magenta marker (kept across themes)
+            0x00343A44, // Settings     — neutral chrome (matches LogView)
         },
     .role_client =
         {
@@ -337,6 +346,7 @@ constexpr Theme kDuetLight = {
             0x00F4F5F7, // Files
             0x00E5E8EC, // Clock        — light canvas ground
             0x00000000, // GfxDemo      — black; overpainted every frame
+            0x00ECEEF1, // Settings     — light panel
         },
 
     .console_fg = 0x00161A20,
@@ -385,16 +395,12 @@ constexpr Theme kDuetBlue = {
             0x00604818, // Files        — amber-tinted (preserved)
             0x00141822, // Clock        — slate panel
             0x00702070, // GfxDemo      — magenta marker
+            0x002A323C, // Settings     — slate panel
         },
     .role_client =
         {
-            0x00141A22,
-            0x00F3F0E6,
-            0x00141A22,
-            0x000F1319,
-            0x00141A22,
-            0x000B0E13,
-            0x00000000,
+            0x00141A22, 0x00F3F0E6, 0x00141A22, 0x000F1319, 0x00141A22, 0x000B0E13, 0x00000000,
+            0x00141A22, // Settings
         },
     .console_fg = 0x00E8EDF2,
     .console_bg = 0x000F1319,
@@ -427,16 +433,12 @@ constexpr Theme kDuetViolet = {
             0x00604818, // Files        — amber (preserved)
             0x00141822, // Clock
             0x00702070, // GfxDemo
+            0x002A323C, // Settings
         },
     .role_client =
         {
-            0x00141A22,
-            0x00F3F0E6,
-            0x00141A22,
-            0x000F1319,
-            0x00141A22,
-            0x000B0E13,
-            0x00000000,
+            0x00141A22, 0x00F3F0E6, 0x00141A22, 0x000F1319, 0x00141A22, 0x000B0E13, 0x00000000,
+            0x00141A22, // Settings
         },
     .console_fg = 0x00E8EDF2,
     .console_bg = 0x000F1319,
@@ -469,16 +471,12 @@ constexpr Theme kDuetGreen = {
             0x00604818, // Files        — amber (preserved)
             0x00141822, // Clock
             0x00702070, // GfxDemo
+            0x002A323C, // Settings
         },
     .role_client =
         {
-            0x00141A22,
-            0x00F3F0E6,
-            0x00141A22,
-            0x000F1319,
-            0x00141A22,
-            0x000B0E13,
-            0x00000000,
+            0x00141A22, 0x00F3F0E6, 0x00141A22, 0x000F1319, 0x00141A22, 0x000B0E13, 0x00000000,
+            0x00141A22, // Settings
         },
     .console_fg = 0x00E8EDF2,
     .console_bg = 0x000F1319,
@@ -530,6 +528,7 @@ constexpr Theme kDuetClassic = {
             0x00604818, // Files        — amber-tinted
             0x00404040, // Clock        — flat grey
             0x00702070, // GfxDemo      — magenta marker
+            0x00404040, // Settings     — flat grey panel
         },
     .role_client =
         {
@@ -540,6 +539,7 @@ constexpr Theme kDuetClassic = {
             0x00C0C0C0, // Files
             0x00000000, // Clock        — black ground for retro 7-seg
             0x00000000, // GfxDemo
+            0x00C0C0C0, // Settings     — Win9x panel grey
         },
 
     .console_fg = 0x00000000,
@@ -589,16 +589,12 @@ constexpr Theme kHighContrast = {
             0x00FFFF00, // Files
             0x00FFFF00, // Clock
             0x00FFFF00, // GfxDemo
+            0x00FFFF00, // Settings
         },
     .role_client =
         {
-            0x00000000,
-            0x00000000,
-            0x00000000,
-            0x00000000,
-            0x00000000,
-            0x00000000,
-            0x00000000,
+            0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+            0x00000000, // Settings
         },
 
     .console_fg = 0x00FFFFFF,
@@ -632,7 +628,8 @@ const Theme* const kThemes[static_cast<u32>(ThemeId::kCount)] = {
 
 constinit ThemeId g_current = ThemeId::Classic;
 constinit WindowHandle g_role_window[static_cast<u32>(ThemeRole::kCount)] = {
-    kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid,
+    kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid,
+    kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid,
 };
 
 } // namespace

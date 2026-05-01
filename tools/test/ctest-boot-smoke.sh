@@ -76,6 +76,7 @@ expected=(
     "[files] self-test OK"
     "[clock] self-test OK"
     "[block] self-test OK"
+    "[settings] self-test OK"
     # klog's value formatter emits compact hex (`0xbeef`) rather
     # than zero-padded — the decimal `(48879)` that follows makes
     # the prefix unique to hello_winapi's sentinel exit code.
@@ -195,6 +196,7 @@ selftest_sigs=(
     "[files] self-test OK"
     "[clock] self-test OK"
     "[block] self-test OK"
+    "[settings] self-test OK"
     "[string-selftest] PASS"
     "[hexdump-selftest] PASS"
     "[process-selftest] PASS"
