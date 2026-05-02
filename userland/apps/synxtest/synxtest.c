@@ -330,19 +330,267 @@ void _start(void)
     TAG("[exe] set_robust_list rc=");
     FMTI(sc2(273 /*set_robust_list*/, 0, 24));
 
-    // === tier 4: deliberately unimplemented (should -ENOSYS via translator) ===
-    // fork / vfork / clone / clone3 / execve / wait4 — all route
-    // through the translator's synthetic:enosys-no-process-create
-    // branch (added previous slice). Verify they still come back
-    // with -ENOSYS = -38.
+    // === tier 5: I/O + memory primitives ===
+    // dup(fd) / dup2(fd, newfd): both should produce a fresh fd
+    {
+        i64 dfd = sc3(2 /*open*/, (u64) "HELLO.TXT", 0, 0);
+        if (dfd >= 0)
+        {
+            TAG("[exe] dup rc=");
+            FMTI(sc1(32 /*dup*/, dfd));
+            TAG("[exe] dup2 rc=");
+            FMTI(sc2(33 /*dup2*/, dfd, 12));
+            sc1(3, 12);
+            sc1(3, dfd);
+        }
+    }
+
+    // fcntl(fd, F_GETFL): kernel reports current flags. Run on
+    // stdout (always-open).
+    TAG("[exe] fcntl(F_GETFL stdout) rc=");
+    FMTI(sc3(72 /*fcntl*/, 1, 3 /*F_GETFL*/, 0));
+
+    // brk(0): asks the kernel for the current break. Returns the
+    // current break address (positive) or -ENOMEM.
+    TAG("[exe] brk(0) rc=");
+    FMTI(sc1(12 /*brk*/, 0));
+
+    // mprotect: change protection on the anonymous mmap'd page
+    // from RW to R-only. Expect 0 on success.
+    if (p > 0)
+    {
+        TAG("[exe] mprotect(R) rc=");
+        FMTI(sc3(10 /*mprotect*/, (u64)p, 4096, 1 /*PROT_READ*/));
+    }
+
+    // munmap: drop the anonymous mmap'd page. Don't dereference p
+    // after this point.
+    if (p > 0)
+    {
+        TAG("[exe] munmap rc=");
+        FMTI(sc2(11 /*munmap*/, (u64)p, 4096));
+    }
+
+    // === tier 6: pipe round-trip + eventfd round-trip + timerfd ===
+    {
+        int pfds[2] = {-1, -1};
+        i64 prc = sc1(22 /*pipe*/, (u64)pfds);
+        TAG("[exe] pipe(create) rc=");
+        FMTI(prc);
+        if (prc == 0 && pfds[0] >= 0 && pfds[1] >= 0)
+        {
+            const char* msg = "ping";
+            i64 wn = sc3(1 /*write*/, pfds[1], (u64)msg, 4);
+            TAG("[exe] pipe.write rc=");
+            FMTI(wn);
+            char rb[8] = {0};
+            i64 rn = sc3(0 /*read*/, pfds[0], (u64)rb, 4);
+            TAG("[exe] pipe.read rc=");
+            FMTI(rn);
+            sc1(3, pfds[0]);
+            sc1(3, pfds[1]);
+        }
+    }
+
+    // eventfd2(initval=5, flags=0). Then read returns the counter.
+    {
+        i64 efd = sc2(290 /*eventfd2*/, 5, 0);
+        TAG("[exe] eventfd2 rc=");
+        FMTI(efd);
+        if (efd >= 0)
+        {
+            unsigned long long buf = 0;
+            i64 rn = sc3(0 /*read*/, efd, (u64)&buf, 8);
+            TAG("[exe] eventfd.read rc=");
+            FMTI(rn);
+            sc1(3, efd);
+        }
+    }
+
+    // timerfd_create(CLOCK_MONOTONIC, 0). No setting; just create+close.
+    {
+        i64 tfd = sc2(283 /*timerfd_create*/, 1 /*CLOCK_MONOTONIC*/, 0);
+        TAG("[exe] timerfd_create rc=");
+        FMTI(tfd);
+        if (tfd >= 0)
+            sc1(3, tfd);
+    }
+
+    // === tier 7: epoll + signalfd + inotify ===
+    {
+        i64 ep = sc1(291 /*epoll_create1*/, 0);
+        TAG("[exe] epoll_create1 rc=");
+        FMTI(ep);
+        if (ep >= 0)
+        {
+            // epoll_wait with timeout=0 should return 0 immediately.
+            char evbuf[16];
+            TAG("[exe] epoll_wait(t=0) rc=");
+            FMTI(sc6(232 /*epoll_wait*/, ep, (u64)evbuf, 1, 0, 0, 0));
+            sc1(3, ep);
+        }
+    }
+
+    // signalfd4(-1, &mask, 8, 0): create a fresh signalfd masked
+    // for SIGUSR1. Reading with no pending signal should return
+    // -EAGAIN.
+    {
+        u64 mask = 1ull << (10 - 1); // SIGUSR1 = 10, bit 9
+        i64 sfd = sc6(289 /*signalfd4*/, (u64)-1, (u64)&mask, 8, 0, 0, 0);
+        TAG("[exe] signalfd4 rc=");
+        FMTI(sfd);
+        if (sfd >= 0)
+            sc1(3, sfd);
+    }
+
+    // inotify_init1 + add_watch + rm_watch
+    {
+        i64 ifd = sc1(294 /*inotify_init1*/, 0);
+        TAG("[exe] inotify_init1 rc=");
+        FMTI(ifd);
+        if (ifd >= 0)
+        {
+            i64 wd = sc3(254 /*inotify_add_watch*/, ifd, (u64) "HELLO.TXT", 0xFFF);
+            TAG("[exe] inotify_add_watch rc=");
+            FMTI(wd);
+            if (wd >= 0)
+            {
+                TAG("[exe] inotify_rm_watch rc=");
+                FMTI(sc2(255 /*inotify_rm_watch*/, ifd, wd));
+            }
+            sc1(3, ifd);
+        }
+    }
+
+    // === tier 8: pidfd + memfd + statx ===
+    {
+        i64 pid_self = sc1(39 /*getpid*/, 0);
+        i64 pfd_self = sc3(434 /*pidfd_open*/, (u64)pid_self, 0, 0);
+        TAG("[exe] pidfd_open(self) rc=");
+        FMTI(pfd_self);
+        if (pfd_self >= 0)
+            sc1(3, pfd_self);
+    }
+
+    // memfd_create("synx", 0): anonymous memory fd. Should be a
+    // fresh fd >= 0.
+    {
+        i64 mfd = sc2(319 /*memfd_create*/, (u64) "synx", 0);
+        TAG("[exe] memfd_create rc=");
+        FMTI(mfd);
+        if (mfd >= 0)
+            sc1(3, mfd);
+    }
+
+    // statx(AT_FDCWD, "HELLO.TXT", AT_NO_AUTOMOUNT, STATX_BASIC_STATS, &buf)
+    {
+        char stxbuf[256];
+        for (int i = 0; i < 256; ++i)
+            stxbuf[i] = 0;
+        TAG("[exe] statx rc=");
+        FMTI(sc6(332 /*statx*/, (u64)-100, (u64) "HELLO.TXT", 0x800 /*NO_AUTOMOUNT*/, 0x7ff /*STATX_BASIC_STATS*/,
+                 (u64)stxbuf, 0));
+    }
+
+    // === tier 9: FS metadata + path probes ===
+    // chdir + getcwd round-trip. Use a path we know to exist.
+    {
+        TAG("[exe] chdir(\"/\") rc=");
+        FMTI(sc1(80 /*chdir*/, (u64) "/"));
+    }
+
+    // readlink on a non-symlink: expect -EINVAL on Linux.
+    {
+        char lbuf[64];
+        TAG("[exe] readlink rc=");
+        FMTI(sc3(89 /*readlink*/, (u64) "HELLO.TXT", (u64)lbuf, sizeof(lbuf)));
+    }
+
+    // === tier 10: signal mask + alt stack (real engines) ===
+    {
+        // rt_sigprocmask(SIG_BLOCK, NULL, &oldset, 8) — query current mask.
+        u64 oldset = 0;
+        TAG("[exe] rt_sigprocmask rc=");
+        FMTI(sc6(14 /*rt_sigprocmask*/, 0 /*SIG_BLOCK*/, 0, (u64)&oldset, 8, 0, 0));
+
+        // sigaltstack(NULL, &oldss) — query current alt stack.
+        char oldss[24] = {0};
+        TAG("[exe] sigaltstack rc=");
+        FMTI(sc2(131 /*sigaltstack*/, 0, (u64)oldss));
+    }
+
+    // === tier 11: -EPERM / -ENOSYS facades (verify honest refusal) ===
+    // bpf — currently -EPERM (matches Linux CAP_SYS_ADMIN gating)
+    TAG("[exe] bpf rc=");
+    FMTI(sc3(321 /*bpf*/, 0, 0, 0));
+
+    // perf_event_open — -EPERM
+    TAG("[exe] perf_event_open rc=");
+    FMTI(sc6(298 /*perf_event_open*/, 0, 0, 0, 0, 0, 0));
+
+    // mount — -EPERM (containers blocked)
+    TAG("[exe] mount rc=");
+    FMTI(sc6(165 /*mount*/, 0, 0, 0, 0, 0, 0));
+
+    // userfaultfd — -ENOSYS (facade only)
+    TAG("[exe] userfaultfd rc=");
+    FMTI(sc1(323 /*userfaultfd*/, 0));
+
+    // io_uring_setup — -ENOSYS
+    TAG("[exe] io_uring_setup rc=");
+    FMTI(sc2(425 /*io_uring_setup*/, 1, 0));
+
+    // landlock_create_ruleset — -ENOSYS (avoids false sandbox advertise)
+    TAG("[exe] landlock_create_ruleset rc=");
+    FMTI(sc3(444 /*landlock_create_ruleset*/, 0, 0, 0));
+
+    // ptrace — kCapDebug-gated; without the cap returns -EPERM
+    TAG("[exe] ptrace rc=");
+    FMTI(sc6(101 /*ptrace*/, 0 /*PTRACE_TRACEME*/, 0, 0, 0, 0, 0));
+
+    // === tier 4: process creation (fork/clone/execve/wait4) ===
+    // fork is LANDED — handle parent/child split so the child
+    // doesn't re-run the entire test body.
+    i64 fpid = sc1(57 /*fork*/, 0);
+    if (fpid == 0)
+    {
+        // Child path: print one line and exit immediately.
+        TAG("[exe] fork.child running\n");
+        sc1(231 /*exit_group*/, 0);
+        __builtin_unreachable();
+    }
+    TAG("[exe] fork rc=");
+    FMTI(fpid);
+    if (fpid > 0)
+    {
+        // Reap the child so we don't leak a zombie.
+        char wstatus[8] = {0};
+        TAG("[exe] wait4(child) rc=");
+        FMTI(sc6(61 /*wait4*/, (u64)fpid, (u64)wstatus, 0, 0, 0, 0));
+    }
+
+    // vfork is wired to the same DoFork — same parent/child rules.
+    i64 vpid = sc1(58 /*vfork*/, 0);
+    if (vpid == 0)
+    {
+        sc1(231 /*exit_group*/, 0);
+        __builtin_unreachable();
+    }
     TAG("[exe] vfork rc=");
-    FMTI(sc1(58 /*vfork*/, 0));
-    TAG("[exe] clone rc=");
+    FMTI(vpid);
+    if (vpid > 0)
+    {
+        char wstatus[8] = {0};
+        sc6(61 /*wait4*/, (u64)vpid, (u64)wstatus, 0, 0, 0, 0);
+    }
+
+    // clone(0,0,0,0,0,0): no flags, no stack — usually -EINVAL.
+    TAG("[exe] clone(0) rc=");
     FMTI(sc6(56 /*clone*/, 0, 0, 0, 0, 0, 0));
+
+    // execve("HELLO.TXT", ...): not a valid ELF/PE, expect failure.
     TAG("[exe] execve rc=");
     FMTI(sc3(59 /*execve*/, (u64) "HELLO.TXT", 0, 0));
-    TAG("[exe] wait4 rc=");
-    FMTI(sc6(61 /*wait4*/, (u64)-1, 0, 0, 0, 0, 0));
 
     // exit_group(0x55)
     TAG("[exe] all done, exit 0x55\n");
