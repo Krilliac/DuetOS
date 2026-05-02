@@ -52,6 +52,18 @@ CFLAGS=(
     -fno-builtin
     -fno-asynchronous-unwind-tables
     -fno-omit-frame-pointer
+    # Disable SSE/MMX/AVX. The kernel doesn't enable CR4.OSFXSR
+    # or wire up #NM handling for user threads, so any movaps /
+    # movdqa / xmm-touching insn the compiler emits (typically
+    # for stack zero-init of `char buf[N] = {0}` or larger
+    # struct copies) takes a #GP at the first user run. Build
+    # synxtest as a strict GPR-only payload to side-step the
+    # whole class of failures until kernel-side FPU enablement
+    # lands. Mirror of build-syscall-stress.sh.
+    -mno-sse
+    -mno-sse2
+    -mno-mmx
+    -mgeneral-regs-only
     -Os
     -Wall -Wextra
 )
