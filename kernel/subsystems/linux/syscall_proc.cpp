@@ -174,13 +174,35 @@ i64 DoGetPpid()
 }
 i64 DoGetPgid(u64 pid)
 {
-    (void)pid;
-    return 0;
+    // v0 has no session/pgid model. Linux convention: each
+    // process's pgid defaults to its pid (single-process group).
+    // Returning the calling process's pid for pid==0 (the
+    // self-query convention) gives a sensible answer for any
+    // glibc routine that does `setpgid(0, getpgid(0))`.
+    if (pid == 0)
+    {
+        const auto* p = core::CurrentProcess();
+        return (p != nullptr) ? static_cast<i64>(p->pid) : 0;
+    }
+    // pid != 0: lookup the target. v0 hasn't built a real
+    // pgid table, so report pid itself (each process is its
+    // own group leader). -ESRCH if pid doesn't exist.
+    if (sched::SchedFindProcessByPid(pid) == nullptr)
+        return kESRCH;
+    return static_cast<i64>(pid);
 }
 i64 DoGetSid(u64 pid)
 {
-    (void)pid;
-    return 0;
+    // Same shape as getpgid — each process is its own session
+    // leader in v0.
+    if (pid == 0)
+    {
+        const auto* p = core::CurrentProcess();
+        return (p != nullptr) ? static_cast<i64>(p->pid) : 0;
+    }
+    if (sched::SchedFindProcessByPid(pid) == nullptr)
+        return kESRCH;
+    return static_cast<i64>(pid);
 }
 i64 DoSetPgid(u64 pid, u64 pgid)
 {
