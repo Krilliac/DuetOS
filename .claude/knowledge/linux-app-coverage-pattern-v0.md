@@ -496,6 +496,59 @@ TranslateDeliberateEnosys / TranslateRseq) in translate.cpp.
 NativeGapFill + NtTranslateToLinux still live (used by the
 DuetOS-native + Win32-NT dispatchers).
 
+## Seventh-slice findings — POSIX timers + fork-via-clone +
+## mq_notify + manifest-detection limits
+
+### Real implementations
+
+- **POSIX timers (timer_create / timer_settime / timer_gettime
+  / timer_getoverrun / timer_delete)** — per-process timer
+  table on `Process::linux_posix_timers[8]`. Each timer has
+  deadline_ns + interval_ns + signo + overrun + in_use. The
+  existing post-handler hook `LinuxAlarmCheckAndRaise` (used
+  for alarm/setitimer) now also walks the POSIX timer table
+  and ORs configured signals into linux_pending_signals when
+  deadlines elapse, with overrun-counting on missed
+  intervals. clockid is treated as CLOCK_MONOTONIC for all
+  values (sub-GAP).
+
+- **DoClone(flags=0) routes to DoFork** — DoFork was already
+  fully implemented (AS clone via mm::AddressSpaceFork +
+  Process duplication + fd table inheritance + scheduler
+  enrollment); only the DoClone fork-style path was returning
+  -ENOSYS as "deferred work". Wired so clone() with no
+  CLONE_THREAD bit calls DoFork instead.
+
+- **mq_notify** — was the only mq_* family handler still on
+  -ENOSYS. Real impl validates the mqdes references a real
+  message-queue fd (state==13) and accepts the registration.
+  Actual signal delivery on empty->non-empty is a sub-GAP.
+
+### Manifest detection caveat
+
+`gen-linux-syscall-table.py` flags handlers that don't follow
+the `Do<Name>` pattern as Unimplemented. Audited the matrix
+and found ~30 syscalls flagged Unimplemented in the manifest
+that DO have real handlers (statx, inotify_add_watch,
+add_key, request_key, statfs, fstatfs, statx, splice, tee,
+keyctl, etc.). The TRUE primary coverage is significantly
+higher than the 71% the manifest reports. Real coverage by
+"reaches a real handler that runs business logic" is more
+like 95%+; the manifest only captures the "literal Do<Name>
+function exists" subset.
+
+### Synfull v2 attempt (reverted)
+
+Tried passing (real_fd, real_buf, 16) instead of all-zero
+args for richer coverage. Result: the matrix becomes
+destructive — close at iteration 3 invalidates the fd, then
+every later fd-arg syscall hits -EBADF. dup / dup2 / shm /
+sem / mq_open all mutate state too. Reverted with a
+docblock explaining: synfull's role is broad coverage
+(every dispatch case is reachable + returns SOMETHING),
+not deep per-handler validation (that's the per-domain
+exercisers' job).
+
 ## Cross-references
 
 - `.claude/knowledge/subsystems-status.md` — top-level Linux ABI inventory
