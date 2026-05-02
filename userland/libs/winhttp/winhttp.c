@@ -67,14 +67,30 @@ __declspec(dllexport) BOOL WinHttpReceiveResponse(HANDLE h, void* rsv)
     (void)rsv;
     return 1;
 }
+/* WinHttpReadData — synthesise a small fixed body on the first
+ * read of each handle, EOF on subsequent reads. Mirrors the
+ * Wininet equivalent; real WinHttp transport over ws2_32 lands
+ * with the same slice that wires Wininet for real. */
+static unsigned char g_winhttp_eof_seen[16];
+
 __declspec(dllexport) BOOL WinHttpReadData(HANDLE h, void* buf, DWORD cb, DWORD* read)
 {
-    (void)h;
-    (void)buf;
-    (void)cb;
-    /* No transport yet — return TRUE with 0 bytes (EOF). */
     if (read)
         *read = 0;
+    if (buf == (void*)0 || cb == 0)
+        return 1;
+    unsigned slot = ((unsigned long long)h) & 0xF;
+    if (g_winhttp_eof_seen[slot])
+        return 1;
+    static const char kBody[] = "DuetOS WinHttp hello";
+    DWORD bodylen = (DWORD)(sizeof(kBody) - 1);
+    DWORD copy = (cb < bodylen) ? cb : bodylen;
+    unsigned char* dst = (unsigned char*)buf;
+    for (DWORD i = 0; i < copy; ++i)
+        dst[i] = (unsigned char)kBody[i];
+    if (read)
+        *read = copy;
+    g_winhttp_eof_seen[slot] = 1;
     return 1;
 }
 __declspec(dllexport) BOOL WinHttpCloseHandle(HANDLE h)

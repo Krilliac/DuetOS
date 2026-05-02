@@ -282,6 +282,7 @@ void* KMalloc(u64 bytes)
     // memory pressure; the caller's nullptr return is the actionable
     // signal. Subsequent OOMs are silent at this layer.
     KLOG_ONCE_WARN("mm/kheap", "pool exhausted (KMalloc returned null)");
+    KLOG_CRITICAL_AV(::duetos::core::LogArea::Memory, "mm/kheap", "KMalloc OOM — pool exhausted, request size", bytes);
     return nullptr;
 }
 

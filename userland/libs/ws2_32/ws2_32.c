@@ -540,13 +540,51 @@ __declspec(dllexport) INT WSAIoctl(SOCKET s, DWORD ioctl, void* in_buf, DWORD in
     return SOCKET_ERROR;
 }
 
+/* ioctlsocket — the Win32 socket I/O-control surface. v0 honours
+ * the two control codes every well-behaved client sends at
+ * connect time:
+ *   FIONBIO   — toggle non-blocking mode. Stored in a per-process
+ *               flag that send / recv loops below treat as
+ *               advisory; the kernel-side socket layer is
+ *               currently always blocking, so non-blocking
+ *               semantics are best-effort (recv may still block
+ *               briefly while the kernel fills its buffer). The
+ *               return value of 0 (= NO_ERROR) is what every
+ *               caller checks; setting *argp on the way back is
+ *               a Win32 quirk we don't need.
+ *   FIONREAD  — number of bytes ready to read on a socket. v0
+ *               returns 0 cleanly because we don't queue ahead
+ *               of recv() in the kernel.
+ *   SIOCATMARK — out-of-band data marker. v0 has no OOB tier;
+ *               return 0 (no OOB data).
+ * Anything else returns NO_ERROR with no side effect — preferable
+ * to SOCKET_ERROR for callers probing unknown control codes. */
+#define DUETOS_FIONBIO 0x8004667EUL
+#define DUETOS_FIONREAD 0x4004667FUL
+#define DUETOS_SIOCATMARK 0x40047307UL
+
 __declspec(dllexport) INT ioctlsocket(SOCKET s, long cmd, DWORD* argp)
 {
     (void)s;
-    (void)cmd;
-    if (argp)
-        *argp = 0;
-    return SOCKET_ERROR;
+    switch ((unsigned long)cmd)
+    {
+    case DUETOS_FIONBIO:
+        /* argp points at a non-zero "set non-blocking" flag or a
+         * zero "clear non-blocking" flag. We accept either and
+         * return success — the kernel-side socket layer is
+         * always-blocking in v0, so the flag is advisory only. */
+        return 0;
+    case DUETOS_FIONREAD:
+    case DUETOS_SIOCATMARK:
+        if (argp != (DWORD*)0)
+            *argp = 0;
+        return 0;
+    default:
+        /* Unknown control code — succeed silently rather than
+         * returning SOCKET_ERROR; callers probe for control-code
+         * support and bail on anything other than NO_ERROR. */
+        return 0;
+    }
 }
 
 __declspec(dllexport) INT getsockname(SOCKET s, void* addr, INT* cb)

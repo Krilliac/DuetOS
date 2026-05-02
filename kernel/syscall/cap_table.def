@@ -69,6 +69,11 @@ X(SYS_BP_REMOVE, (1ULL << ::duetos::core::kCapDebug))
 X(SYS_WIN_GET_KEYSTATE, (1ULL << ::duetos::core::kCapInput))
 X(SYS_WIN_GET_CURSOR, (1ULL << ::duetos::core::kCapInput))
 X(SYS_WIN_GET_MOUSE_DELTA, (1ULL << ::duetos::core::kCapInput))
+// SYS_STDIN_READ — drain bytes from this process's stdin ring.
+// Same kCapInput tier as the polling reads; without the cap a
+// sandboxed binary can't snoop on whatever is currently typed
+// at the (single) ring-3 stdin focus.
+X(SYS_STDIN_READ, (1ULL << ::duetos::core::kCapInput))
 
 // kCapNet — every BSD-socket operation. The gate returns -1 on a
 // missing cap; previously the in-handler check returned -EACCES,

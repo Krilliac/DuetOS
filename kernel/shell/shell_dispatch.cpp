@@ -616,6 +616,7 @@ const char* const kCommandSet[] = {
     "sysinfo",   "source",    "man",     "grep",     "find",     "time",      "which",      "seq",        "sort",
     "uniq",      "cpuid",     "cr",      "rflags",   "tsc",      "hpet",      "ticks",      "msr",        "lapic",
     "smp",       "lspci",     "heap",    "paging",   "fb",       "kbdstats",  "mousestats", "loglevel",   "logcolor",
+    "logarea",
     "kdbg",      "getenv",    "yield",   "reboot",   "halt",     "uname",     "whoami",     "hostname",   "pwd",
     "true",      "false",     "mount",   "lsmod",    "lsblk",    "lsgpt",     "free",       "ps",         "spawn",
     "readelf",   "hexdump",   "stat",    "basename", "dirname",  "cal",       "sleep",      "reset",      "tac",
@@ -1295,6 +1296,17 @@ void Dispatch(char* line)
         if (!RequireAdmin("LOGLEVEL"))
             return;
         CmdLoglevel(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "logarea"))
+    {
+        // Same threat model as `loglevel` — disabling whole log
+        // areas could silence intrusion-detection traces, so
+        // gate the toggle to admin too. The READ form (no argv)
+        // is harmless but stays gated for symmetry.
+        if (!RequireAdmin("LOGAREA"))
+            return;
+        CmdLogarea(argc, argv);
         return;
     }
     if (StrEq(cmd, "tracer"))

@@ -1629,6 +1629,33 @@ enum SyscallNumber : u64
     //         button state (not accumulated).
     //   rax = 1 on success, 0 on bad pointer.
     SYS_WIN_GET_MOUSE_DELTA = 170,
+
+    // SYS_STDIN_READ — drain up to N cooked ASCII bytes from the
+    // calling process's per-process stdin ring. Backs the userland
+    // libc's `read(STDIN_FILENO, buf, len)` call.
+    //   rdi = user pointer to a destination byte buffer.
+    //   rsi = capacity in bytes (must be > 0; values larger than
+    //         the kernel's 256-byte ring are clamped per call —
+    //         POSIX read() returns "as much as is ready," not
+    //         "fill the buffer").
+    //   rax = number of bytes copied (≥ 1 on success), or
+    //         (u64)-1 on bad parameters / bad user pointer.
+    // Blocks until at least one byte is available. The producer
+    // is the kbd-reader task in core/main.cpp, which pushes
+    // printable / Enter / Backspace bytes to the registered
+    // stdin focus once login is closed.
+    SYS_STDIN_READ = 171,
+
+    // SYS_DLL_BASE_BY_NAME — look up a DLL in the calling
+    // process's image table by name and return its base VA. Backs
+    // GetModuleHandleW("kernel32.dll") and LoadLibraryW(known-
+    // preloaded name). Case-insensitive, ignores `.dll` suffix
+    // mismatches so callers can pass either form.
+    //   rdi = user pointer to NUL-terminated ASCII name.
+    //   rsi = name length in bytes (excluding the NUL),
+    //         capped at 63.
+    //   rax = base VA on hit, 0 on miss / bad pointer / oversize.
+    SYS_DLL_BASE_BY_NAME = 172,
 };
 
 // Cross-language record returned by SYS_DIR_NEXT. 96 bytes, exact

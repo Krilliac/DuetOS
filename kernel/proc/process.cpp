@@ -42,6 +42,8 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     auto* p = static_cast<Process*>(mm::KMalloc(sizeof(Process)));
     if (p == nullptr)
     {
+        KLOG_CRITICAL_AS(LogArea::Process, "core/process",
+                         "ProcessCreate: KMalloc(Process) returned null", "name", name);
         return nullptr;
     }
     // Zero the entire Process struct. KMalloc returns memory still
@@ -428,6 +430,12 @@ void ProcessRelease(Process* p)
     ::duetos::ipc::HandleTableDrain(p->kobj_handles);
     arch::SerialWrite("[proc] release: post-HandleTableDrain\n");
 
+    // Drop the stdin focus if this process held it. Without this,
+    // kbd-reader would keep pushing into the freed ring's head
+    // cursor and walking off the heap. No-op for processes that
+    // never called SYS_STDIN_READ.
+    StdinFocusClearIf(p);
+
     mm::KFree(p);
     --g_live_processes;
     arch::SerialWrite("[proc] release: done\n");
@@ -576,6 +584,77 @@ bool DllNameEq(const char* a, const char* b)
 }
 
 } // namespace
+
+u64 ProcessFindDllBaseByName(const Process* proc, const char* dll_name)
+{
+    if (proc == nullptr)
+    {
+        KLOG_DEBUG_A(LogArea::Loader, "core/process", "ProcessFindDllBaseByName: null proc");
+        return 0;
+    }
+    /* NULL or empty name → return the EXE image base (Win32
+     * GetModuleHandleW(NULL) semantics). pe_image_base is zero
+     * for non-PE processes; the caller surfaces that as a NULL
+     * HMODULE which matches the documented "no main module
+     * available" behaviour. */
+    if (dll_name == nullptr || dll_name[0] == '\0')
+    {
+        KLOG_DEBUG_AV(LogArea::Loader, "core/process",
+                      "ProcessFindDllBaseByName: empty name -> EXE pe_image_base", proc->pe_image_base);
+        return proc->pe_image_base;
+    }
+    // Strip any ".dll" / ".DLL" suffix from the lookup so callers
+    // that pass either form match. Win32 convention is "name with
+    // extension"; ld-link sometimes records the bare name in the
+    // export table.
+    char trimmed[64];
+    u32 i = 0;
+    while (dll_name[i] != '\0' && i < sizeof(trimmed) - 1)
+    {
+        trimmed[i] = dll_name[i];
+        ++i;
+    }
+    trimmed[i] = '\0';
+    if (i >= 4)
+    {
+        const char* tail = trimmed + i - 4;
+        if ((tail[0] == '.') && AsciiToLower(tail[1]) == 'd' && AsciiToLower(tail[2]) == 'l' &&
+            AsciiToLower(tail[3]) == 'l')
+        {
+            *(char*)tail = '\0';
+        }
+    }
+    for (u64 j = 0; j < proc->dll_image_count; ++j)
+    {
+        const DllImage& img = proc->dll_images[j];
+        if (!img.has_exports)
+            continue;
+        const char* name = PeExportsDllName(img.exports);
+        if (name == nullptr)
+            continue;
+        // Compare with the same suffix-tolerant rule on both sides.
+        char other[64];
+        u32 oi = 0;
+        while (name[oi] != '\0' && oi < sizeof(other) - 1)
+        {
+            other[oi] = name[oi];
+            ++oi;
+        }
+        other[oi] = '\0';
+        if (oi >= 4)
+        {
+            const char* tail = other + oi - 4;
+            if ((tail[0] == '.') && AsciiToLower(tail[1]) == 'd' && AsciiToLower(tail[2]) == 'l' &&
+                AsciiToLower(tail[3]) == 'l')
+            {
+                *(char*)tail = '\0';
+            }
+        }
+        if (DllNameEq(trimmed, other))
+            return img.base_va;
+    }
+    return 0;
+}
 
 bool ProcessRegisterDllImage(Process* proc, const DllImage& image)
 {
@@ -779,6 +858,126 @@ void ProcessSelfTest()
     Expect(ShouldLogDenial(kSandboxDenialKillThreshold - 4), "denial near threshold logs (96)");
 
     arch::SerialWrite("[process-selftest] PASS (CapSet + CapName + ShouldLogDenial)\n");
+}
+
+// ---------------------------------------------------------------
+// Stdin ring buffer — per-process keyboard input pipe.
+//
+// Producer:  kbd-reader thread in core/main.cpp (single-writer).
+// Consumer:  ring-3 task in SYS_STDIN_READ (single-reader).
+//
+// Lock-free single-writer / single-reader semantics: head moves
+// only inside ProcessFeedStdinChar, tail moves only inside
+// ProcessReadStdinBlocking. Interrupts are masked across the
+// "check empty + block" pair in the reader so a wake from the
+// producer can't slip between the read of `head` and the call
+// into WaitQueueBlock.
+//
+// Overflow policy: drop oldest. The kbd-reader can't usefully
+// back-pressure the IRQ source, and a wedged ring-3 reader
+// shouldn't be able to freeze the pipeline. Treats stdin like a
+// tty input queue.
+// ---------------------------------------------------------------
+
+namespace
+{
+
+// Single-process stdin focus. Set on the first SYS_STDIN_READ
+// from a process; cleared on ProcessRelease for that process.
+// nullptr = no ring-3 consumer is waiting on stdin, so the kbd-
+// reader simply doesn't push anything (printable keys still feed
+// the kernel shell + window-active-app handlers, unchanged).
+constinit Process* g_stdin_focus = nullptr;
+
+} // namespace
+
+void ProcessFeedStdinChar(Process* proc, char c)
+{
+    if (proc == nullptr)
+        return;
+    Process::StdinRing& r = proc->stdin_ring;
+    arch::Cli();
+    // Drop oldest on overflow — keep the producer non-blocking.
+    if (r.head - r.tail >= Process::StdinRing::kCap)
+        ++r.tail;
+    r.buf[r.head & (Process::StdinRing::kCap - 1)] = static_cast<u8>(c);
+    ++r.head;
+    sched::WaitQueueWakeOne(&r.waiters);
+    arch::Sti();
+}
+
+i64 ProcessReadStdinBlocking(Process* proc, void* dst_user, u64 cap)
+{
+    if (proc == nullptr || dst_user == nullptr || cap == 0)
+        return -1;
+    // Claim the stdin focus on the first read. Lets the kbd-reader
+    // start delivering bytes without an explicit registration call.
+    if (g_stdin_focus == nullptr)
+        g_stdin_focus = proc;
+
+    Process::StdinRing& r = proc->stdin_ring;
+    arch::Cli();
+    while (r.head == r.tail)
+    {
+        sched::WaitQueueBlock(&r.waiters);
+        // Returns with interrupts still off. Loop re-checks the
+        // ring in case of a spurious wake.
+    }
+    // Drain whatever's available (cap-bounded). Bytes go into a
+    // small kernel scratch first so CopyToUser is one shot per
+    // call — the user buffer can't be touched with IRQs masked
+    // (page fault on demand-paged user pages would never resolve).
+    const u32 available = static_cast<u32>(r.head - r.tail);
+    const u32 to_copy_u32 = (cap < available) ? static_cast<u32>(cap) : available;
+    u8 scratch[Process::StdinRing::kCap];
+    for (u32 i = 0; i < to_copy_u32; ++i)
+        scratch[i] = r.buf[(r.tail + i) & (Process::StdinRing::kCap - 1)];
+    r.tail += to_copy_u32;
+    arch::Sti();
+
+    if (!mm::CopyToUser(dst_user, scratch, to_copy_u32))
+        return -1;
+    return static_cast<i64>(to_copy_u32);
+}
+
+Process* StdinFocusGet()
+{
+    return g_stdin_focus;
+}
+
+void StdinFocusSet(Process* proc)
+{
+    g_stdin_focus = proc;
+}
+
+void StdinFocusClearIf(Process* proc)
+{
+    arch::Cli();
+    if (g_stdin_focus == proc)
+        g_stdin_focus = nullptr;
+    arch::Sti();
+}
+
+void ProcessFeedStdinFocusChar(char c)
+{
+    // Read the focus pointer and push to the ring under one IRQ-
+    // off section so a reaper running on this CPU can't free the
+    // process between the two operations. The kbd-reader is the
+    // sole caller; the cost (one Cli/Sti pair per byte) is
+    // negligible compared to the IRQ-off hop the kbd-reader
+    // already does to drain the scancode ring.
+    arch::Cli();
+    Process* const proc = g_stdin_focus;
+    if (proc != nullptr)
+    {
+        Process::StdinRing& r = proc->stdin_ring;
+        if (r.head - r.tail >= Process::StdinRing::kCap)
+            ++r.tail;
+        r.buf[r.head & (Process::StdinRing::kCap - 1)] = static_cast<u8>(c);
+        ++r.head;
+        sched::WaitQueueWakeOne(&r.waiters);
+    }
+    arch::Sti();
 }
 
 } // namespace duetos::core

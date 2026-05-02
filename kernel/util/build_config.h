@@ -152,15 +152,16 @@ inline constexpr u64 kCapAuditSampleStride = 1024;
 // The compile-time floor (kKlogMinLevel in klog.h) stays at Trace so
 // release binaries can dial Trace back ON via `loglevel t`. This
 // knob picks the BOOT-TIME default — debug builds want Debug
-// (drivers + IRQ + sched chatter); release builds want Info (warnings
-// and above only).
+// (drivers + IRQ + sched chatter); release builds want Warn
+// (warnings + errors + critical only — clean serial capture for
+// forensic analysis, demote at runtime via `loglevel`).
 //
-// Numeric values match LogLevel: Trace=0 Debug=1 Info=2 Warn=3 Error=4.
+// Numeric values match LogLevel: Trace=0 Debug=1 Info=2 Warn=3 Error=4 Critical=5.
 // -----------------------------------------------------------------
 #ifdef DUETOS_KLOG_DEFAULT
 inline constexpr u8 kKlogDefaultLevel = static_cast<u8>(DUETOS_KLOG_DEFAULT);
 #else
-inline constexpr u8 kKlogDefaultLevel = 2; // Info
+inline constexpr u8 kKlogDefaultLevel = 3; // Warn
 #endif
 
 /// Compile-time klog floor. Mirrors the macro

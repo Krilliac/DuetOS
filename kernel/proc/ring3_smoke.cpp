@@ -2459,6 +2459,10 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     // satisfying the 16n+8 rule.
     proc->user_rsp_init = r.stack_top - 0x48;
     proc->user_gs_base = r.teb_va;
+    /* Record the post-ASLR EXE base so SYS_DLL_BASE_BY_NAME
+     * with an empty / NULL name can return it for
+     * GetModuleHandleW(NULL). */
+    proc->pe_image_base = r.image_base;
     // Transfer any catch-all IAT miss (slot_va -> name) entries
     // the loader queued during ResolveImports. This arms the
     // runtime miss-logger: on the first call to an unstubbed

@@ -426,27 +426,111 @@ __declspec(dllexport) BOOL IsWow64Process2(HANDLE hProc, unsigned short* proc_ma
     return 1;
 }
 
-/* HMODULE GetModuleHandleExW/A — v0 always returns "not found"
- * for non-null names, matching the flat stub. The NULL-arg
- * path (which should return the EXE base) goes through
- * GetModuleHandleW in real Windows, so this HMODULE-by-name
- * variant's flat stub also returned 0. */
-__declspec(dllexport) BOOL GetModuleHandleExW(DWORD flags, const void* name, void** phmodule)
+/* SYS_DLL_BASE_BY_NAME = 172. Looks up a DLL in the calling
+ * process's image table and returns its base VA, or 0 on miss.
+ * Case-insensitive; tolerant of `.dll` suffix on either side.
+ * An empty name (len = 0) requests the calling EXE's image base
+ * — backs GetModuleHandleW(NULL). */
+static unsigned long long sys_dll_base_by_name(const char* name)
+{
+    int len = 0;
+    if (name != (const char*)0)
+    {
+        while (name[len] != 0 && len < 63)
+            ++len;
+    }
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)172), "D"((long long)name), "S"((long long)len)
+                     : "memory");
+    return (unsigned long long)rv;
+}
+
+/* HMODULE GetModuleHandleW / GetModuleHandleA — return the base
+ * VA of a loaded DLL, or the calling EXE's base when name is
+ * NULL. The kernel handler maps an empty name to the Process's
+ * pe_image_base field (recorded by SpawnPeFile post-ASLR), so a
+ * single SYS_DLL_BASE_BY_NAME call covers both cases. */
+__declspec(dllexport) void* GetModuleHandleW(const WCHAR_t* name)
+{
+    if (name == (const WCHAR_t*)0)
+        return (void*)(unsigned long long)sys_dll_base_by_name("");
+    char abuf[64];
+    int i = 0;
+    while (i < 63 && name[i] != 0)
+    {
+        abuf[i] = (char)(name[i] & 0xFF);
+        ++i;
+    }
+    abuf[i] = 0;
+    return (void*)(unsigned long long)sys_dll_base_by_name(abuf);
+}
+
+__declspec(dllexport) void* GetModuleHandleA(const char* name)
+{
+    if (name == (const char*)0)
+        return (void*)(unsigned long long)sys_dll_base_by_name("");
+    return (void*)(unsigned long long)sys_dll_base_by_name(name);
+}
+
+/* LoadLibraryW / LoadLibraryA — v0 only resolves names that are
+ * already in the process's loaded-DLL table (kernel32.dll,
+ * user32.dll, advapi32.dll, ucrtbase.dll, …). Real on-disk
+ * dynamic loading lands when the disk-FS-backed image walk does;
+ * for now this is "give me the handle for a preloaded DLL by
+ * name," which covers GetProcAddress-style late-binding workflows
+ * and the module_smoke probe. */
+__declspec(dllexport) void* LoadLibraryW(const WCHAR_t* name)
+{
+    return GetModuleHandleW(name);
+}
+
+__declspec(dllexport) void* LoadLibraryA(const char* name)
+{
+    return GetModuleHandleA(name);
+}
+
+__declspec(dllexport) void* LoadLibraryExW(const WCHAR_t* name, void* hFile, DWORD flags)
+{
+    (void)hFile;
+    (void)flags;
+    return GetModuleHandleW(name);
+}
+
+__declspec(dllexport) void* LoadLibraryExA(const char* name, void* hFile, DWORD flags)
+{
+    (void)hFile;
+    (void)flags;
+    return GetModuleHandleA(name);
+}
+
+/* GetModuleHandleExW / GetModuleHandleExA — the *Ex* variants
+ * accept the same name set as GetModuleHandleW above and write
+ * the result through the out-pointer; the v0 implementation
+ * delegates to the named-lookup helper rather than the previous
+ * "always not found" stub. The flags argument's pin-or-refcount
+ * tier (GET_MODULE_HANDLE_EX_FLAG_PIN, ..._UNCHANGED_REFCOUNT)
+ * is documented as harmless for static + preloaded DLLs, which
+ * is the only kind we have today. */
+__declspec(dllexport) BOOL GetModuleHandleExW(DWORD flags, const WCHAR_t* name, void** phmodule)
 {
     (void)flags;
-    (void)name;
-    if (phmodule != (void**)0)
-        *phmodule = (void*)0;
-    return 0;
+    if (phmodule == (void**)0)
+        return 0;
+    void* h = GetModuleHandleW(name);
+    *phmodule = h;
+    return h != (void*)0 ? 1 : 0;
 }
 
 __declspec(dllexport) BOOL GetModuleHandleExA(DWORD flags, const char* name, void** phmodule)
 {
     (void)flags;
-    (void)name;
-    if (phmodule != (void**)0)
-        *phmodule = (void*)0;
-    return 0;
+    if (phmodule == (void**)0)
+        return 0;
+    void* h = GetModuleHandleA(name);
+    *phmodule = h;
+    return h != (void*)0 ? 1 : 0;
 }
 
 __declspec(dllexport) BOOL FreeLibrary(void* hModule)
@@ -649,7 +733,7 @@ typedef unsigned short wchar_t16; /* Win32 wchar_t is UTF-16 */
 
 __declspec(dllexport) int lstrlenW(const wchar_t16* s)
 {
-    if (s == (const wchar_t16*)0)
+    if (s == (const WCHAR_t*)0)
         return 0;
     int n = 0;
     while (s[n])
@@ -659,8 +743,8 @@ __declspec(dllexport) int lstrlenW(const wchar_t16* s)
 
 __declspec(dllexport) int lstrcmpW(const wchar_t16* a, const wchar_t16* b)
 {
-    if (a == (const wchar_t16*)0 || b == (const wchar_t16*)0)
-        return (a == b) ? 0 : (a == (const wchar_t16*)0 ? -1 : 1);
+    if (a == (const WCHAR_t*)0 || b == (const WCHAR_t*)0)
+        return (a == b) ? 0 : (a == (const WCHAR_t*)0 ? -1 : 1);
     while (*a && *a == *b)
     {
         ++a;
@@ -671,8 +755,8 @@ __declspec(dllexport) int lstrcmpW(const wchar_t16* a, const wchar_t16* b)
 
 __declspec(dllexport) int lstrcmpiW(const wchar_t16* a, const wchar_t16* b)
 {
-    if (a == (const wchar_t16*)0 || b == (const wchar_t16*)0)
-        return (a == b) ? 0 : (a == (const wchar_t16*)0 ? -1 : 1);
+    if (a == (const WCHAR_t*)0 || b == (const WCHAR_t*)0)
+        return (a == b) ? 0 : (a == (const WCHAR_t*)0 ? -1 : 1);
     for (;; ++a, ++b)
     {
         wchar_t16 ca = *a;
@@ -688,7 +772,7 @@ __declspec(dllexport) int lstrcmpiW(const wchar_t16* a, const wchar_t16* b)
 
 __declspec(dllexport) wchar_t16* lstrcpyW(wchar_t16* dst, const wchar_t16* src)
 {
-    if (dst == (wchar_t16*)0 || src == (const wchar_t16*)0)
+    if (dst == (wchar_t16*)0 || src == (const WCHAR_t*)0)
         return dst;
     wchar_t16* d = dst;
     while ((*d++ = *src++) != 0)
@@ -719,6 +803,82 @@ typedef struct
 } DuetosEnvSlot;
 
 static DuetosEnvSlot g_env_table[DUETOS_ENV_MAX];
+static int g_env_seeded = 0;
+
+/* Wide-string copy with explicit length, used by env_seed. Cannot
+ * call wstr_copy here — it's defined further down in the file
+ * (after GetEnvironmentVariableW); forward-declaring would mean
+ * shuffling dozens of unrelated functions. The duplicated three-
+ * line walk is cheaper than that churn. */
+static void env_seed_one(int slot, const WCHAR_t* name, const wchar_t16* val)
+{
+    int i = 0;
+    while (i < DUETOS_ENV_NAME - 1 && name[i] != 0)
+    {
+        g_env_table[slot].name[i] = name[i];
+        ++i;
+    }
+    g_env_table[slot].name[i] = 0;
+    int j = 0;
+    while (j < DUETOS_ENV_VAL - 1 && val[j] != 0)
+    {
+        g_env_table[slot].val[j] = val[j];
+        ++j;
+    }
+    g_env_table[slot].val[j] = 0;
+    g_env_table[slot].in_use = 1;
+}
+
+/* Lazy-seed a small set of environment variables on the first
+ * Get/Set call in this process. Without this every fresh Win32
+ * PE sees a completely empty environment — `getenv("PATH")`,
+ * `GetEnvironmentVariableW(L"USERNAME", ...)`, and so on all
+ * return 0, even though the kernel-side fixed env block carries
+ * sane values. The seed is per-DLL-instance so each PE gets its
+ * own writable copy (matches Win32 semantics: SetEnvironmentVariable
+ * is process-local). The list mirrors what mini_browser, the smoke
+ * tests, and most CLI tools expect to read at startup. */
+static void env_seed_defaults(void)
+{
+    if (g_env_seeded)
+        return;
+    g_env_seeded = 1;
+    /* Each line: slot index, NAME, VALUE. Order doesn't matter —
+     * lookup walks all slots until in_use && name match. */
+    static const wchar_t16 kPathName[] = {'P', 'A', 'T', 'H', 0};
+    static const wchar_t16 kPathVal[] = {'X', ':', '\\', 'S', 'y', 's', 't',  'e',
+                                         'm', '3', '2',  ';', 'X', ':', '\\', 0};
+    static const wchar_t16 kOsName[] = {'O', 'S', 0};
+    static const wchar_t16 kOsVal[] = {'D', 'u', 'e', 't', 'O', 'S', 0};
+    static const wchar_t16 kUserName[] = {'U', 'S', 'E', 'R', 'N', 'A', 'M', 'E', 0};
+    static const wchar_t16 kUserVal[] = {'u', 's', 'e', 'r', 0};
+    static const wchar_t16 kUserDomName[] = {'U', 'S', 'E', 'R', 'D', 'O', 'M', 'A', 'I', 'N', 0};
+    static const wchar_t16 kUserDomVal[] = {'D', 'U', 'E', 'T', 'O', 'S', 0};
+    static const wchar_t16 kCompName[] = {'C', 'O', 'M', 'P', 'U', 'T', 'E', 'R', 'N', 'A', 'M', 'E', 0};
+    static const wchar_t16 kCompVal[] = {'D', 'U', 'E', 'T', 'O', 'S', 0};
+    static const wchar_t16 kSysName[] = {'S', 'y', 's', 't', 'e', 'm', 'R', 'o', 'o', 't', 0};
+    static const wchar_t16 kSysVal[] = {'X', ':', '\\', 0};
+    static const wchar_t16 kWinName[] = {'w', 'i', 'n', 'd', 'i', 'r', 0};
+    static const wchar_t16 kTempName[] = {'T', 'E', 'M', 'P', 0};
+    static const wchar_t16 kTempVal[] = {'X', ':', '\\', 0};
+    static const wchar_t16 kTmpName[] = {'T', 'M', 'P', 0};
+    static const wchar_t16 kHomeName[] = {'U', 'S', 'E', 'R', 'P', 'R', 'O', 'F', 'I', 'L', 'E', 0};
+    static const wchar_t16 kHomeVal[] = {'X', ':', '\\', 'U', 's', 'e', 'r', 's', '\\', 'u', 's', 'e', 'r', 0};
+    static const wchar_t16 kProcArchName[] = {'P', 'R', 'O', 'C', 'E', 'S', 'S', 'O', 'R', '_', 'A', 'R',
+                                              'C', 'H', 'I', 'T', 'E', 'C', 'T', 'U', 'R', 'E', 0};
+    static const wchar_t16 kProcArchVal[] = {'A', 'M', 'D', '6', '4', 0};
+    env_seed_one(0, kPathName, kPathVal);
+    env_seed_one(1, kOsName, kOsVal);
+    env_seed_one(2, kUserName, kUserVal);
+    env_seed_one(3, kUserDomName, kUserDomVal);
+    env_seed_one(4, kCompName, kCompVal);
+    env_seed_one(5, kSysName, kSysVal);
+    env_seed_one(6, kWinName, kSysVal); /* windir == SystemRoot */
+    env_seed_one(7, kTempName, kTempVal);
+    env_seed_one(8, kTmpName, kTempVal);
+    env_seed_one(9, kHomeName, kHomeVal);
+    env_seed_one(10, kProcArchName, kProcArchVal);
+}
 
 static int wstr_eq_ci(const wchar_t16* a, const wchar_t16* b)
 {
@@ -755,10 +915,11 @@ static void wstr_copy(wchar_t16* dst, const wchar_t16* src, int max)
     dst[i] = 0;
 }
 
-__declspec(dllexport) DWORD GetEnvironmentVariableW(const wchar_t16* name, wchar_t16* buf, DWORD size)
+__declspec(dllexport) DWORD GetEnvironmentVariableW(const WCHAR_t* name, wchar_t16* buf, DWORD size)
 {
-    if (name == (const wchar_t16*)0)
+    if (name == (const WCHAR_t*)0)
         return 0;
+    env_seed_defaults();
     for (int i = 0; i < DUETOS_ENV_MAX; ++i)
     {
         if (!g_env_table[i].in_use)
@@ -779,10 +940,11 @@ __declspec(dllexport) DWORD GetEnvironmentVariableW(const wchar_t16* name, wchar
     return 0;
 }
 
-__declspec(dllexport) BOOL SetEnvironmentVariableW(const wchar_t16* name, const wchar_t16* val)
+__declspec(dllexport) BOOL SetEnvironmentVariableW(const WCHAR_t* name, const wchar_t16* val)
 {
-    if (name == (const wchar_t16*)0)
+    if (name == (const WCHAR_t*)0)
         return 0;
+    env_seed_defaults();
     /* val == NULL means "delete" the variable. */
     /* First, find an existing entry to update or delete. */
     for (int i = 0; i < DUETOS_ENV_MAX; ++i)
@@ -791,7 +953,7 @@ __declspec(dllexport) BOOL SetEnvironmentVariableW(const wchar_t16* name, const 
             continue;
         if (!wstr_eq_ci(g_env_table[i].name, name))
             continue;
-        if (val == (const wchar_t16*)0)
+        if (val == (const WCHAR_t*)0)
         {
             g_env_table[i].in_use = 0;
             return 1;
@@ -799,7 +961,7 @@ __declspec(dllexport) BOOL SetEnvironmentVariableW(const wchar_t16* name, const 
         wstr_copy(g_env_table[i].val, val, DUETOS_ENV_VAL);
         return 1;
     }
-    if (val == (const wchar_t16*)0)
+    if (val == (const WCHAR_t*)0)
         return 1; /* Delete of non-existent == success per docs. */
     /* Allocate a free slot. */
     for (int i = 0; i < DUETOS_ENV_MAX; ++i)
@@ -849,7 +1011,7 @@ __declspec(dllexport) BOOL SetEnvironmentVariableA(const char* name, const char*
         wname[i] = (wchar_t16)(unsigned char)name[i];
     wname[i] = 0;
     if (val == (const char*)0)
-        return SetEnvironmentVariableW(wname, (const wchar_t16*)0);
+        return SetEnvironmentVariableW(wname, (const WCHAR_t*)0);
     for (i = 0; i < DUETOS_ENV_VAL - 1 && val[i] != 0; ++i)
         wval[i] = (wchar_t16)(unsigned char)val[i];
     wval[i] = 0;
@@ -859,7 +1021,7 @@ __declspec(dllexport) BOOL SetEnvironmentVariableA(const char* name, const char*
 __declspec(dllexport) DWORD ExpandEnvironmentStringsW(const wchar_t16* src, wchar_t16* dst, DWORD size)
 {
     /* v0: copy literal text only; %VAR% expansion is unimplemented. */
-    if (src == (const wchar_t16*)0)
+    if (src == (const WCHAR_t*)0)
         return 0;
     int n = wstr_len(src) + 1; /* including NUL */
     if (dst == (wchar_t16*)0 || size == 0)
@@ -1258,42 +1420,102 @@ typedef struct
     DWORD size;
     DWORD protect;
     void* base;
+    /* Optional name (UTF-16, low-byte stripped to ASCII for
+     * comparison). Empty → unnamed mapping; OpenFileMappingW
+     * walks the table for a matching non-empty name. */
+    char name[64];
 } DUETOS_FILEMAPPING;
 
 #define DUETOS_FILEMAPPING_MAX 8
 static DUETOS_FILEMAPPING g_filemappings[DUETOS_FILEMAPPING_MAX];
 static int g_filemapping_count = 0;
 
+static int dfm_name_eq(const char* a, const char* b)
+{
+    int i = 0;
+    while (a[i] && b[i])
+    {
+        if (a[i] != b[i])
+            return 0;
+        ++i;
+    }
+    return a[i] == 0 && b[i] == 0;
+}
+
 __declspec(dllexport) HANDLE CreateFileMappingW(HANDLE hFile, void* sec, DWORD protect, DWORD sizeHigh, DWORD sizeLow,
-                                                const wchar_t16* name)
+                                                const WCHAR_t* name)
 {
     (void)hFile;
     (void)sec;
     (void)name;
-    /* Allocate via SYS_HEAP_ALLOC. */
     if (g_filemapping_count >= DUETOS_FILEMAPPING_MAX)
         return (HANDLE)0;
-    DWORD total = ((unsigned long long)sizeHigh << 32) | sizeLow;
+    unsigned long long total = ((unsigned long long)sizeHigh << 32) | sizeLow;
     if (total == 0)
-        total = 0x10000; /* default 64K if caller passed 0 */
+        total = 0x1000; /* default 4K if caller passed 0 */
+    /* Cap at the per-process heap budget. The Win32 heap in v0 is
+     * 16 pages = 64 KiB total, so any single allocation has to
+     * leave room for the heap header and the slab's own footer.
+     * Cap at 32 KiB so a follow-up alloc within the same process
+     * still has room — that's enough for ipc_smoke (which just
+     * probes the round-trip) and most caller workflows that do
+     * one mapping at a time. Real cross-process shared memory
+     * needs a SYS_VM_* path; deferred. */
+    const unsigned long long kMappingMaxBytes = 0x8000ULL;
+    if (total > kMappingMaxBytes)
+        total = kMappingMaxBytes;
     long long rv;
     __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)11), "D"((long long)total) : "memory");
     if (rv == 0)
         return (HANDLE)0;
     int slot = g_filemapping_count++;
-    g_filemappings[slot].size = total;
+    g_filemappings[slot].size = (DWORD)total;
     g_filemappings[slot].protect = protect;
     g_filemappings[slot].base = (void*)rv;
+    /* Capture the name (low-byte UTF-16 strip) so OpenFileMappingW
+     * can find the same mapping by name later. The slot is
+     * process-local; cross-process named-shm semantics are deferred
+     * (would need a kernel-side named-section table). */
+    int ni = 0;
+    if (name != (const WCHAR_t*)0)
+    {
+        while (ni < 63 && name[ni] != 0)
+        {
+            g_filemappings[slot].name[ni] = (char)(name[ni] & 0xFF);
+            ++ni;
+        }
+    }
+    g_filemappings[slot].name[ni] = 0;
     /* Sentinel handle: 0x6000 + slot. */
     return (HANDLE)(unsigned long long)(0x6000 + slot);
 }
 
-__declspec(dllexport) HANDLE OpenFileMappingW(DWORD desired, BOOL inherit, const wchar_t16* name)
+__declspec(dllexport) HANDLE OpenFileMappingW(DWORD desired, BOOL inherit, const WCHAR_t* name)
 {
     (void)desired;
     (void)inherit;
-    (void)name;
-    /* Named mappings not yet supported — return NULL. */
+    if (name == (const WCHAR_t*)0)
+        return (HANDLE)0;
+    /* UTF-16 → ASCII low-byte strip into a local scratch, then
+     * scan the per-process mapping table for a matching name.
+     * Cross-process lookup requires a kernel-mediated named-
+     * section registry; this v0 path covers the common in-
+     * process pattern (CreateFileMappingW → OpenFileMappingW). */
+    char abuf[64];
+    int i = 0;
+    while (i < 63 && name[i] != 0)
+    {
+        abuf[i] = (char)(name[i] & 0xFF);
+        ++i;
+    }
+    abuf[i] = 0;
+    if (abuf[0] == 0)
+        return (HANDLE)0;
+    for (int s = 0; s < g_filemapping_count; ++s)
+    {
+        if (dfm_name_eq(g_filemappings[s].name, abuf))
+            return (HANDLE)(unsigned long long)(0x6000 + s);
+    }
     return (HANDLE)0;
 }
 
@@ -1321,7 +1543,7 @@ __declspec(dllexport) BOOL UnmapViewOfFile(const void* base)
 /* CreateJobObjectW — opaque sentinel handle. AssignProcessToJobObject
  * accepts and returns success. IsProcessInJob reports FALSE before
  * any assignment in this v0 model. */
-__declspec(dllexport) HANDLE CreateJobObjectW(void* sec, const wchar_t16* name)
+__declspec(dllexport) HANDLE CreateJobObjectW(void* sec, const WCHAR_t* name)
 {
     (void)sec;
     (void)name;
@@ -1443,7 +1665,7 @@ __declspec(dllexport) BOOL DeleteTimerQueue(HANDLE q)
  * which is short enough that returning a pre-signaled event-style
  * handle works in single-thread tests. We reuse the manual-reset
  * Event slot machinery via an actual SYS_HANDLE_CREATE_EVENT call. */
-__declspec(dllexport) HANDLE CreateWaitableTimerW(void* sa, BOOL manualReset, const wchar_t16* name)
+__declspec(dllexport) HANDLE CreateWaitableTimerW(void* sa, BOOL manualReset, const WCHAR_t* name)
 {
     (void)sa;
     (void)name;
@@ -1824,7 +2046,7 @@ __declspec(dllexport) BOOL SetConsoleTitleA(const char* title)
 }
 __declspec(dllexport) BOOL SetConsoleTitleW(const wchar_t16* title)
 {
-    if (title == (const wchar_t16*)0)
+    if (title == (const WCHAR_t*)0)
         return 0;
     int i = 0;
     while (i < 255 && title[i] != 0)
@@ -1866,7 +2088,7 @@ __declspec(dllexport) DWORD GetConsoleTitleW(wchar_t16* title, DWORD size)
 __declspec(dllexport) int FoldStringW(unsigned long flags, const wchar_t16* src, int srclen, wchar_t16* dst, int dstlen)
 {
     (void)flags;
-    if (src == (const wchar_t16*)0)
+    if (src == (const WCHAR_t*)0)
         return 0;
     int n = 0;
     if (srclen < 0)
@@ -2284,7 +2506,7 @@ __declspec(dllexport) DWORD GetFullPathNameW(const wchar_t16* lpFileName, DWORD 
                                              wchar_t16** lpFilePart)
 {
     (void)lpFilePart;
-    if (lpFileName == (const wchar_t16*)0 || lpBuffer == (wchar_t16*)0)
+    if (lpFileName == (const WCHAR_t*)0 || lpBuffer == (wchar_t16*)0)
         return 0;
     int srclen = 0;
     while (lpFileName[srclen] != 0)
@@ -2335,7 +2557,7 @@ __declspec(dllexport) int LCMapStringW(unsigned long Locale, DWORD dwMapFlags, c
                                        wchar_t16* lpDestStr, int cchDest)
 {
     (void)Locale;
-    if (lpSrcStr == (const wchar_t16*)0)
+    if (lpSrcStr == (const WCHAR_t*)0)
         return 0;
     /* Compute source length. */
     int src_len = cchSrc;
@@ -2421,7 +2643,7 @@ __declspec(dllexport) DWORD ExpandEnvironmentStringsA(const char* src, char* dst
 
 __declspec(dllexport) wchar_t16* lstrcatW(wchar_t16* dst, const wchar_t16* src)
 {
-    if (dst == (wchar_t16*)0 || src == (const wchar_t16*)0)
+    if (dst == (wchar_t16*)0 || src == (const WCHAR_t*)0)
         return dst;
     wchar_t16* d = dst;
     while (*d != 0)
@@ -2458,8 +2680,26 @@ typedef void* LPDWORD_t; /* DWORD* via opaque pointer to avoid C-warning chains 
 
 __declspec(dllexport) BOOL WriteFile(HANDLE hFile, const void* buf, DWORD n, DWORD* lpWritten, void* lpOverlapped)
 {
-    (void)hFile;
     (void)lpOverlapped;
+    /* Anonymous pipe: push bytes into the in-process ring instead
+     * of routing to stdout. Drop oldest on overflow to keep the
+     * producer non-blocking; matches the v0 stdin-ring policy on
+     * the kernel side. */
+    if (hFile == DUETOS_PIPE_WR && g_pipe.in_use)
+    {
+        const unsigned char* src = (const unsigned char*)buf;
+        DWORD wrote = 0;
+        while (wrote < n)
+        {
+            if (g_pipe.head - g_pipe.tail >= sizeof(g_pipe.buf))
+                ++g_pipe.tail;
+            g_pipe.buf[g_pipe.head & 0xFFF] = src[wrote++];
+            ++g_pipe.head;
+        }
+        if (lpWritten != (DWORD*)0)
+            *lpWritten = wrote;
+        return 1;
+    }
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
@@ -2488,7 +2728,7 @@ __declspec(dllexport) BOOL WriteConsoleW(HANDLE hConsole, const wchar_t16* buf, 
 {
     (void)hConsole;
     (void)lpReserved;
-    if (buf == (const wchar_t16*)0 || n == 0)
+    if (buf == (const WCHAR_t*)0 || n == 0)
     {
         if (lpWritten != (DWORD*)0)
             *lpWritten = 0;
@@ -2539,7 +2779,7 @@ __declspec(dllexport) HANDLE CreateFileW(const wchar_t16* lpFileName, DWORD dwDe
     (void)dwCreationDisposition;
     (void)dwFlagsAndAttributes;
     (void)hTemplateFile;
-    if (lpFileName == (const wchar_t16*)0)
+    if (lpFileName == (const WCHAR_t*)0)
         return (HANDLE)(long long)-1; /* INVALID_HANDLE_VALUE */
     /* UTF-16 → ASCII; normalise '\\' → '/' so Windows-style paths
      * match the kernel ramfs's POSIX-style lookup. Optional drive
@@ -2572,6 +2812,25 @@ __declspec(dllexport) HANDLE CreateFileW(const wchar_t16* lpFileName, DWORD dwDe
 __declspec(dllexport) BOOL ReadFile(HANDLE h, void* buf, DWORD count, DWORD* lpRead, void* lpOverlapped)
 {
     (void)lpOverlapped;
+    /* Anonymous pipe: drain bytes from the in-process ring set up
+     * by CreatePipe rather than dispatching SYS_FILE_READ (which
+     * doesn't know the pipe sentinel handle and would return -1).
+     * Single-process / single-reader / single-writer model is
+     * fine for v0 — pipe_smoke and the typical "captured stdout"
+     * use-case both fit. */
+    if (h == DUETOS_PIPE_RD && g_pipe.in_use)
+    {
+        unsigned char* dst = (unsigned char*)buf;
+        DWORD got = 0;
+        while (got < count && g_pipe.head != g_pipe.tail)
+        {
+            dst[got++] = g_pipe.buf[g_pipe.tail & 0xFFF];
+            ++g_pipe.tail;
+        }
+        if (lpRead != (DWORD*)0)
+            *lpRead = got;
+        return 1;
+    }
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
@@ -2802,7 +3061,7 @@ __declspec(dllexport) int WideCharToMultiByte(UINT codepage, DWORD dwFlags, cons
     (void)lpDefaultChar;
     if (lpUsedDefaultChar != (BOOL*)0)
         *lpUsedDefaultChar = 0;
-    if (lpWideCharStr == (const wchar_t16*)0)
+    if (lpWideCharStr == (const WCHAR_t*)0)
         return 0;
     int in_len;
     if (cchWideChar < 0)
@@ -2871,7 +3130,7 @@ __declspec(dllexport) BOOL TlsSetValue(DWORD slot, void* value)
  * matching SYS_* call.
  * ------------------------------------------------------------------ */
 
-__declspec(dllexport) HANDLE CreateMutexW(void* sec, BOOL bInitialOwner, const wchar_t16* name)
+__declspec(dllexport) HANDLE CreateMutexW(void* sec, BOOL bInitialOwner, const WCHAR_t* name)
 {
     (void)sec;
     (void)name;
@@ -2883,7 +3142,7 @@ __declspec(dllexport) HANDLE CreateMutexW(void* sec, BOOL bInitialOwner, const w
 __declspec(dllexport) HANDLE CreateMutexA(void* sec, BOOL bInitialOwner, const char* name)
 {
     (void)name;
-    return CreateMutexW(sec, bInitialOwner, (const wchar_t16*)0);
+    return CreateMutexW(sec, bInitialOwner, (const WCHAR_t*)0);
 }
 
 __declspec(dllexport) BOOL ReleaseMutex(HANDLE h)
@@ -2893,7 +3152,7 @@ __declspec(dllexport) BOOL ReleaseMutex(HANDLE h)
     return rv == 0 ? 1 : 0;
 }
 
-__declspec(dllexport) HANDLE CreateEventW(void* sec, BOOL bManualReset, BOOL bInitialState, const wchar_t16* name)
+__declspec(dllexport) HANDLE CreateEventW(void* sec, BOOL bManualReset, BOOL bInitialState, const WCHAR_t* name)
 {
     (void)sec;
     (void)name;
@@ -2908,7 +3167,7 @@ __declspec(dllexport) HANDLE CreateEventW(void* sec, BOOL bManualReset, BOOL bIn
 __declspec(dllexport) HANDLE CreateEventA(void* sec, BOOL bManualReset, BOOL bInitialState, const char* name)
 {
     (void)name;
-    return CreateEventW(sec, bManualReset, bInitialState, (const wchar_t16*)0);
+    return CreateEventW(sec, bManualReset, bInitialState, (const WCHAR_t*)0);
 }
 
 __declspec(dllexport) BOOL SetEvent(HANDLE h)
@@ -2925,7 +3184,7 @@ __declspec(dllexport) BOOL ResetEvent(HANDLE h)
     return rv == 0 ? 1 : 0;
 }
 
-__declspec(dllexport) HANDLE CreateSemaphoreW(void* sec, long initial, long maximum, const wchar_t16* name)
+__declspec(dllexport) HANDLE CreateSemaphoreW(void* sec, long initial, long maximum, const WCHAR_t* name)
 {
     (void)sec;
     (void)name;
@@ -2940,7 +3199,7 @@ __declspec(dllexport) HANDLE CreateSemaphoreW(void* sec, long initial, long maxi
 __declspec(dllexport) HANDLE CreateSemaphoreA(void* sec, long initial, long maximum, const char* name)
 {
     (void)name;
-    return CreateSemaphoreW(sec, initial, maximum, (const wchar_t16*)0);
+    return CreateSemaphoreW(sec, initial, maximum, (const WCHAR_t*)0);
 }
 
 __declspec(dllexport) BOOL ReleaseSemaphore(HANDLE h, long releaseCount, long* lpPreviousCount)
@@ -3712,7 +3971,7 @@ __declspec(dllexport) HANDLE FindFirstFileA(const char* path, void* find_data)
 
 __declspec(dllexport) HANDLE FindFirstFileW(const wchar_t16* path, void* find_data)
 {
-    if (path == (const wchar_t16*)0 || find_data == (void*)0)
+    if (path == (const WCHAR_t*)0 || find_data == (void*)0)
         return (HANDLE)(long long)-1;
     char kpath[64];
     char pattern[64];
@@ -3839,9 +4098,9 @@ __declspec(dllexport) BOOL CreateProcessW(const wchar_t16* lpApplicationName, wc
     for (unsigned i = 0; i < sizeof(path); ++i)
         path[i] = 0;
     const wchar_t16* src = lpApplicationName;
-    if (src == (const wchar_t16*)0)
+    if (src == (const WCHAR_t*)0)
         src = lpCommandLine;
-    if (src == (const wchar_t16*)0)
+    if (src == (const WCHAR_t*)0)
         return 0;
     unsigned i = 0;
     while (i + 1 < sizeof(path) && src[i] != 0)
@@ -3896,7 +4155,7 @@ __declspec(dllexport) BOOL DeleteFileA(const char* path)
 
 __declspec(dllexport) BOOL DeleteFileW(const wchar_t16* path)
 {
-    if (path == (const wchar_t16*)0)
+    if (path == (const WCHAR_t*)0)
         return 0;
     char ascii[256];
     int i = 0;
@@ -3939,7 +4198,7 @@ __declspec(dllexport) BOOL MoveFileA(const char* src, const char* dst)
 
 __declspec(dllexport) BOOL MoveFileW(const wchar_t16* src, const wchar_t16* dst)
 {
-    if (src == (const wchar_t16*)0 || dst == (const wchar_t16*)0)
+    if (src == (const WCHAR_t*)0 || dst == (const WCHAR_t*)0)
         return 0;
     char ascii_src[256];
     char ascii_dst[256];
@@ -3992,7 +4251,7 @@ __declspec(dllexport) DWORD GetFileAttributesA(const char* path)
 
 __declspec(dllexport) DWORD GetFileAttributesW(const wchar_t16* path)
 {
-    if (path == (const wchar_t16*)0)
+    if (path == (const WCHAR_t*)0)
         return 0xFFFFFFFFu;
     char ascii[256];
     int i = 0;
@@ -4126,24 +4385,118 @@ __declspec(dllexport) UINT GetSystemWindowsDirectoryW(wchar_t16* out, UINT cb)
     return write_xcolon_backslash_w(out, cb);
 }
 
+/* GetTempFileNameA / GetTempFileNameW — synthesise a unique
+ * "<dir>\<prefix>NNNN.tmp" path. Win32 contract:
+ *   - Combine dir + prefix + 4-hex-digit unique-id + ".TMP".
+ *   - If `unique == 0`, the impl picks the id (and creates the
+ *     file). v0 doesn't actually create the file (the FS layer
+ *     above us is FAT32 + ramfs; SYS_FILE_CREATE on a temp dir
+ *     isn't a v0 happy path). We just return the constructed
+ *     name and the chosen id, leaving file creation to the
+ *     caller's CreateFileW path.
+ *   - Returns the chosen id (non-zero on success).
+ *   - On caller buffer overflow, returns 0.
+ *
+ * The id rotation is process-local — incrementing static; that
+ * matches Win32's implementation enough that consecutive calls
+ * produce distinct names. */
+static UINT g_temp_unique = 0xA001;
+
 __declspec(dllexport) UINT GetTempFileNameA(const char* dir, const char* prefix, UINT unique, char* out)
 {
-    (void)dir;
-    (void)prefix;
-    (void)unique;
-    if (out)
-        out[0] = 0;
-    return 0;
+    if (out == (char*)0)
+        return 0;
+    UINT id = unique != 0 ? unique : (g_temp_unique++ & 0xFFFF);
+    /* Worst case: dir(MAX_PATH-14) + prefix(3) + 4 hex + ".TMP" + NUL.
+     * The Win32 spec caps dir + prefix at MAX_PATH-14 chars; we don't
+     * enforce the limit beyond a buffer-overflow guard below. */
+    int o = 0;
+    /* Copy dir. */
+    if (dir != (const char*)0)
+    {
+        while (o < 250 && dir[o] != 0)
+        {
+            out[o] = dir[o];
+            ++o;
+        }
+    }
+    /* Ensure trailing backslash. */
+    if (o == 0 || out[o - 1] != '\\')
+    {
+        if (o >= 250)
+            return 0;
+        out[o++] = '\\';
+    }
+    /* Copy prefix (≤ 3 chars). */
+    if (prefix != (const char*)0)
+    {
+        for (int p = 0; p < 3 && prefix[p] != 0; ++p)
+        {
+            if (o >= 250)
+                return 0;
+            out[o++] = prefix[p];
+        }
+    }
+    /* 4-hex unique-id. */
+    static const char hex[] = "0123456789ABCDEF";
+    if (o + 4 > 250)
+        return 0;
+    out[o++] = hex[(id >> 12) & 0xF];
+    out[o++] = hex[(id >> 8) & 0xF];
+    out[o++] = hex[(id >> 4) & 0xF];
+    out[o++] = hex[id & 0xF];
+    /* ".tmp" suffix + NUL. */
+    if (o + 5 > 250)
+        return 0;
+    out[o++] = '.';
+    out[o++] = 't';
+    out[o++] = 'm';
+    out[o++] = 'p';
+    out[o] = 0;
+    return id;
 }
 
 __declspec(dllexport) UINT GetTempFileNameW(const wchar_t16* dir, const wchar_t16* prefix, UINT unique, wchar_t16* out)
 {
-    (void)dir;
-    (void)prefix;
-    (void)unique;
-    if (out)
+    if (out == (wchar_t16*)0)
+        return 0;
+    char abuf[260];
+    char aprefix[8];
+    char adir[260];
+    int n = 0;
+    if (dir != (const wchar_t16*)0)
+    {
+        while (n < 255 && dir[n] != 0)
+        {
+            adir[n] = (char)(dir[n] & 0xFF);
+            ++n;
+        }
+    }
+    adir[n] = 0;
+    n = 0;
+    if (prefix != (const wchar_t16*)0)
+    {
+        while (n < 7 && prefix[n] != 0)
+        {
+            aprefix[n] = (char)(prefix[n] & 0xFF);
+            ++n;
+        }
+    }
+    aprefix[n] = 0;
+    UINT id = GetTempFileNameA(adir, aprefix, unique, abuf);
+    if (id == 0)
+    {
         out[0] = 0;
-    return 0;
+        return 0;
+    }
+    int i = 0;
+    while (i < 259 && abuf[i] != 0)
+    {
+        out[i] = (wchar_t16)(unsigned char)abuf[i];
+        ++i;
+    }
+    out[i] = 0;
+    return id;
 }
 
 __declspec(dllexport) DWORD GetCurrentDirectoryA(DWORD cb, char* out)
@@ -4446,12 +4799,26 @@ __declspec(dllexport) BOOL CheckRemoteDebuggerPresent(HANDLE p, BOOL* present)
     return 1;
 }
 
-/* GetProcessId / GetThreadId — return current via syscall. */
+/* GetProcessId / GetThreadId — return the current process / thread
+ * id regardless of the input handle. v0 doesn't track foreign-
+ * process or foreign-thread identities, so the contract is "for any
+ * handle that names this process, return GetCurrentProcessId(); for
+ * any handle that names a thread of this process, return
+ * GetCurrentThreadId()." That's the case the smoke tests exercise
+ * (GetCurrentProcess() pseudo-handle = -1, GetCurrentThread() = -2).
+ *
+ * Fix history: the previous impl wired these to the wrong syscall
+ * numbers — 5 (SYS_READ, path-based file read) and 6 (SYS_DROPCAPS).
+ * Both clobber-checked their caller's caps and returned -1 on every
+ * v0 PE, breaking [debug_smoke] GetProcessId == self / GetThreadId
+ * == self. The correct paths are SYS_GETPROCID (= 8) for the pid
+ * and SYS_GETPID (= 1) for the scheduler task id, mirroring
+ * GetCurrentProcessId / GetCurrentThreadId. */
 __declspec(dllexport) DWORD GetProcessId(HANDLE p)
 {
     (void)p;
     long long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)5) : "memory");
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)8) : "memory");
     return (DWORD)rv;
 }
 
@@ -4459,7 +4826,7 @@ __declspec(dllexport) DWORD GetThreadId(HANDLE t)
 {
     (void)t;
     long long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)6) : "memory");
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)1) : "memory");
     return (DWORD)rv;
 }
 
@@ -4497,7 +4864,7 @@ __declspec(dllexport) DWORD GetConsoleProcessList(DWORD* pids, DWORD count)
 /* PathCanonicalizeW — collapse "..". */
 __declspec(dllexport) BOOL PathCanonicalizeW(wchar_t16* dst, const wchar_t16* src)
 {
-    if (dst == (wchar_t16*)0 || src == (const wchar_t16*)0)
+    if (dst == (wchar_t16*)0 || src == (const WCHAR_t*)0)
         return 0;
     /* Simple v0: copy everything, then collapse "\\..\\X" → "\\X". */
     int j = 0;
@@ -4532,7 +4899,7 @@ __declspec(dllexport) BOOL PathCanonicalizeW(wchar_t16* dst, const wchar_t16* sr
 /* PathRenameExtensionW — replace extension. */
 __declspec(dllexport) BOOL PathRenameExtensionW(wchar_t16* path, const wchar_t16* new_ext)
 {
-    if (path == (wchar_t16*)0 || new_ext == (const wchar_t16*)0)
+    if (path == (wchar_t16*)0 || new_ext == (const WCHAR_t*)0)
         return 0;
     int n = 0;
     while (path[n] != 0)
@@ -4564,5 +4931,146 @@ __declspec(dllexport) BOOL PathRenameExtensionW(wchar_t16* path, const wchar_t16
 __declspec(dllexport) DWORD GetMaximumProcessorCount(unsigned short group)
 {
     (void)group;
+    return 1;
+}
+
+/* ------------------------------------------------------------------
+ * K32* psapi entry points — duplicated into kernel32.
+ *
+ * Modern Windows (Vista+) duplicates the entire psapi process /
+ * module enumeration API into kernel32 with a `K32` prefix so a
+ * binary built against an updated psapi.h imports from kernel32
+ * directly. mingw-w64's `psapi.h` does the same thing under the
+ * hood. Without these in kernel32, `EnumProcesses` etc. in a
+ * smoke-test PE compile to imports of
+ * `kernel32.dll!K32EnumProcesses` and fall through to the catch-
+ * all NO-OP — the userland psapi.dll's K32* exports are
+ * unreachable because the import-hint DLL is wrong.
+ *
+ * The implementations here are tiny mirrors of psapi.c: report
+ * the calling process / EXE in fixed-size single-element form.
+ * Real cross-process enumeration needs a kernel-side process-
+ * snapshot syscall; deferred. */
+__declspec(dllexport) BOOL K32EnumProcesses(DWORD* pids, DWORD cb, DWORD* cb_needed)
+{
+    if (cb_needed)
+        *cb_needed = sizeof(DWORD);
+    if (pids != (DWORD*)0 && cb >= sizeof(DWORD))
+    {
+        long rv;
+        __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long)8) : "memory"); /* SYS_GETPROCID */
+        pids[0] = (DWORD)rv;
+    }
+    return 1;
+}
+
+__declspec(dllexport) BOOL K32EnumProcessModules(HANDLE hProcess, HANDLE* modules, DWORD cb, DWORD* cb_needed)
+{
+    (void)hProcess;
+    if (cb_needed)
+        *cb_needed = sizeof(HANDLE);
+    if (modules != (HANDLE*)0 && cb >= sizeof(HANDLE))
+        modules[0] = (HANDLE)0x140000000ULL; /* synthetic EXE base */
+    return 1;
+}
+
+__declspec(dllexport) BOOL K32EnumProcessModulesEx(HANDLE hProcess, HANDLE* modules, DWORD cb, DWORD* cb_needed,
+                                                   DWORD filter)
+{
+    (void)filter;
+    return K32EnumProcessModules(hProcess, modules, cb, cb_needed);
+}
+
+__declspec(dllexport) DWORD K32GetMappedFileNameW(HANDLE hProcess, void* addr, wchar_t16* path, DWORD cch)
+{
+    (void)hProcess;
+    (void)addr;
+    if (path != (wchar_t16*)0 && cch > 0)
+        path[0] = 0;
+    return 0;
+}
+
+__declspec(dllexport) DWORD K32GetModuleBaseNameW(HANDLE hProcess, HANDLE mod, wchar_t16* name, DWORD cch)
+{
+    (void)hProcess;
+    (void)mod;
+    static const wchar_t16 base[] = {'r', 'i', 'n', 'g', '3', 0};
+    if (name == (wchar_t16*)0 || cch == 0)
+        return 0;
+    int i = 0;
+    while (i < (int)cch - 1 && base[i] != 0)
+    {
+        name[i] = base[i];
+        ++i;
+    }
+    name[i] = 0;
+    return (DWORD)i;
+}
+
+__declspec(dllexport) DWORD K32GetModuleFileNameExW(HANDLE hProcess, HANDLE mod, wchar_t16* name, DWORD cch)
+{
+    (void)hProcess;
+    (void)mod;
+    static const wchar_t16 path[] = {'C', ':', '\\', 'b', 'i', 'n', '\\', 'r', 'i',
+                                     'n', 'g', '3',  '.', 'e', 'x', 'e',  0};
+    if (name == (wchar_t16*)0 || cch == 0)
+        return 0;
+    int i = 0;
+    while (i < (int)cch - 1 && path[i] != 0)
+    {
+        name[i] = path[i];
+        ++i;
+    }
+    name[i] = 0;
+    return (DWORD)i;
+}
+
+__declspec(dllexport) DWORD K32GetProcessImageFileNameW(HANDLE hProcess, wchar_t16* name, DWORD cch)
+{
+    return K32GetModuleFileNameExW(hProcess, (HANDLE)0, name, cch);
+}
+
+__declspec(dllexport) DWORD K32GetProcessImageFileNameA(HANDLE hProcess, char* name, DWORD cch)
+{
+    (void)hProcess;
+    static const char path[] = "C:\\bin\\ring3.exe";
+    if (name == (char*)0 || cch == 0)
+        return 0;
+    int i = 0;
+    while (i < (int)cch - 1 && path[i] != 0)
+    {
+        name[i] = path[i];
+        ++i;
+    }
+    name[i] = 0;
+    return (DWORD)i;
+}
+
+__declspec(dllexport) BOOL K32GetProcessMemoryInfo(HANDLE hProcess, void* info, DWORD cb)
+{
+    (void)hProcess;
+    if (info == (void*)0 || cb == 0)
+        return 0;
+    unsigned int* p = (unsigned int*)info;
+    unsigned char* b = (unsigned char*)info;
+    for (DWORD i = 0; i < cb; ++i)
+        b[i] = 0;
+    /* PROCESS_MEMORY_COUNTERS layout: { cb, PageFaultCount,
+     * PeakWorkingSetSize, WorkingSetSize, ... }. Echo the cb in
+     * slot 0 so callers that print it get a plausible header. */
+    if (cb >= 4)
+        p[0] = cb;
+    return 1;
+}
+
+__declspec(dllexport) BOOL K32QueryWorkingSet(HANDLE hProcess, void* buf, DWORD cb)
+{
+    (void)hProcess;
+    if (buf)
+    {
+        unsigned char* b = (unsigned char*)buf;
+        for (DWORD i = 0; i < cb; ++i)
+            b[i] = 0;
+    }
     return 1;
 }

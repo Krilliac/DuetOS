@@ -369,9 +369,16 @@ void SessionRestoreSelfTest()
     // FormatPayload without touching the on-disk SESSION.CFG.
     // We don't want this self-test to clobber the user's saved
     // session state, so we operate purely in memory.
+    // Pick a synthetic theme name that's actually registered. The
+    // round-trip needs to switch *to* a different theme than the
+    // current default (Classic), so we pick "amber" — known
+    // registered, distinct from Classic.
+    constexpr const char* kSynthTheme = "amber";
     char synth[64];
     u64 spos = 0;
-    Append(synth, &spos, sizeof(synth), "theme=DARK\nwin.0.x=42\nwin.0.y=84\n");
+    Append(synth, &spos, sizeof(synth), "theme=");
+    Append(synth, &spos, sizeof(synth), kSynthTheme);
+    Append(synth, &spos, sizeof(synth), "\nwin.0.x=42\nwin.0.y=84\n");
     const v::ThemeId orig_theme = v::ThemeCurrentId();
     u32 ox = 0;
     u32 oy = 0;
@@ -382,7 +389,7 @@ void SessionRestoreSelfTest()
 
     bool ok = true;
     v::ThemeId got;
-    if (!v::ThemeIdFromName("DARK", &got) || v::ThemeCurrentId() != got)
+    if (!v::ThemeIdFromName(kSynthTheme, &got) || v::ThemeCurrentId() != got)
     {
         ok = false;
     }

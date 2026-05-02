@@ -395,6 +395,7 @@ void CmdTrace(u32 argc, char** argv);
 void CmdHealth(u32 argc, char** argv);
 void CmdLoglevel(u32 argc, char** argv);
 void CmdLogcolor(u32 argc, char** argv);
+void CmdLogarea(u32 argc, char** argv);
 void CmdKdbg(u32 argc, char** argv);
 void CmdMetrics();
 

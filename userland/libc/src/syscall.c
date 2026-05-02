@@ -23,10 +23,19 @@ ssize_t write(int fd, const void* buf, size_t len)
 
 ssize_t read(int fd, void* buf, size_t len)
 {
+    /* Only fd == STDIN_FILENO is wired in v0. Other fds map onto
+     * the kernel's path-based SYS_READ family which has a
+     * different ABI shape (path + buffer + cap, no fd) — calling
+     * those with a numeric fd would faultily reinterpret the
+     * value as a path pointer. Return -1 cleanly for now; a real
+     * fd-based file read syscall lands when a userland binary
+     * needs to drain a non-stdin handle. */
+    if (fd != STDIN_FILENO)
+        return -1;
     long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"(DUET_SYS_READ), "D"((long)fd), "S"(buf), "d"((long)len)
+                     : "a"(DUET_SYS_STDIN_READ), "D"(buf), "S"((long)len)
                      : "memory", "rcx", "r11");
     return (ssize_t)rv;
 }

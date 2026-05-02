@@ -2839,11 +2839,19 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_SLEEP_MS:
     {
         // rdi = ms. ms == 0 -> equivalent to SchedYield. Otherwise
-        // convert to ticks (round up so a sub-tick request still
-        // sleeps at least one tick — Sleep is "at least", never
-        // "at most") and call SchedSleepTicks. Caller wakes when
-        // the timer has advanced past the deadline; spurious
+        // convert to ticks and call SchedSleepTicks. Caller wakes
+        // when the timer has advanced past the deadline; spurious
         // early wakes are not a thing in v0.
+        //
+        // Win32 Sleep contract: "at least N ms, never less". The
+        // 100 Hz tick is 10 ms wide, and the request lands at an
+        // arbitrary point inside the current tick — so an N-tick
+        // sleep can fire as soon as (N - 1) full ticks have elapsed
+        // in wall time. Round-up alone (`(ms + 9) / 10`) therefore
+        // undershoots for any ms that's already an exact multiple
+        // of the tick (Sleep(50) → 5 ticks → wakes in [40, 50) ms).
+        // Add one extra tick to absorb the partial first tick and
+        // make the bound "at least ms" hold for every input.
         const u64 ms = frame->rdi;
         if (ms == 0)
         {
@@ -2851,9 +2859,8 @@ void SyscallDispatch(arch::TrapFrame* frame)
         }
         else
         {
-            // 100 Hz tick = 10 ms per tick. Round up: (ms + 9) / 10.
             constexpr u64 kMsPerTick = 10;
-            const u64 ticks = (ms + (kMsPerTick - 1)) / kMsPerTick;
+            const u64 ticks = (ms + (kMsPerTick - 1)) / kMsPerTick + 1;
             sched::SchedSleepTicks(ticks);
         }
         frame->rax = 0;
@@ -3178,6 +3185,64 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_WIN_GET_MOUSE_DELTA:
         subsystems::win32::DoWinGetMouseDelta(frame);
         return;
+
+    case SYS_STDIN_READ:
+    {
+        // rdi = user dst buffer, rsi = capacity. Blocks until at
+        // least one byte is available; returns the byte count or
+        // (u64)-1 on a bad parameter.
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 user_dst = frame->rdi;
+        const u64 cap = frame->rsi;
+        if (user_dst == 0 || cap == 0)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const i64 rv = ProcessReadStdinBlocking(proc, reinterpret_cast<void*>(user_dst), cap);
+        frame->rax = static_cast<u64>(rv);
+        return;
+    }
+
+    case SYS_DLL_BASE_BY_NAME:
+    {
+        // rdi = user pointer to ASCII name, rsi = name length.
+        // Empty / zero-length name returns the EXE image base
+        // (Win32 GetModuleHandleW(NULL) semantics).
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        const u64 user_name = frame->rdi;
+        const u64 name_len = frame->rsi;
+        if (name_len >= 64)
+        {
+            frame->rax = 0;
+            return;
+        }
+        if (name_len == 0 || user_name == 0)
+        {
+            // Empty name → EXE base.
+            frame->rax = ProcessFindDllBaseByName(proc, "");
+            return;
+        }
+        char kname[64];
+        if (!mm::CopyFromUser(kname, reinterpret_cast<const void*>(user_name), name_len))
+        {
+            frame->rax = 0;
+            return;
+        }
+        kname[name_len] = '\0';
+        frame->rax = ProcessFindDllBaseByName(proc, kname);
+        return;
+    }
     case SYS_WIN_SET_CURSOR:
         subsystems::win32::DoWinSetCursor(frame);
         return;

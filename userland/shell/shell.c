@@ -12,12 +12,14 @@
  *      up cleanly.
  *   2. Print our own PID via SYS_GETPID — sanity check that the
  *      process model is plumbed end-to-end.
- *   3. Attempt to read a line from stdin (SYS_READ). If the
- *      kernel doesn't yet wire SYS_READ to a per-process queue
- *      (today it returns -ENOSYS for non-trusted callers; the
- *      trusted-spawn path used here may also short-circuit), we
- *      gracefully exit with the PID as the code so the kernel
- *      reaper still logs the round-trip cleanly.
+ *   3. Drive a real read/eval/print loop. `read()` blocks via
+ *      SYS_STDIN_READ on the per-process stdin ring; the kbd-
+ *      reader thread in kernel/core/main.cpp pushes printable
+ *      ASCII + Enter ('\n') + Backspace ('\x7F') bytes into the
+ *      ring once login is closed, so each Enter delivers a full
+ *      line into our line buffer. Backspace edits in place; the
+ *      `dispatch` table runs the line; "exit" terminates the
+ *      shell.
  *
  * No malloc, no printf — just `write()` with hand-formatted
  * decimal expansions. That's fine for the v0 shell; a real
@@ -64,8 +66,7 @@ static void put_int(int v)
     write(STDOUT_FILENO, buf, n);
 }
 
-/* Minimal built-in command dispatcher. Reused by slice 6 once
- * SYS_READ has a per-process queue. */
+/* Minimal built-in command dispatcher. */
 static int dispatch(const char* line)
 {
     if (strcmp(line, "help") == 0)
@@ -107,27 +108,64 @@ int main(void)
     put_str("\n");
     put_str("type 'help' for commands.\n");
 
-    /* Try to read a line. If SYS_READ short-circuits (the v0
-     * trusted-spawn path may not yet have stdin wired), the
-     * loop exits cleanly with the PID as the code. */
+    /* Line-buffered REPL. `read()` returns up to N bytes from
+     * the kernel's per-process stdin ring; we accumulate into
+     * `line` until we see an Enter ('\n'), then dispatch the
+     * complete line. Backspace ('\x7F' from the kbd-reader)
+     * rubs out the last char in the buffer with a CR-erase-CR
+     * echo so the prompt redraw is visible to the user. */
     char line[256];
-    while (1)
+    size_t pos = 0;
+    put_str("duet$ ");
+    for (;;)
     {
-        put_str("duet$ ");
-        ssize_t n = read(STDIN_FILENO, line, sizeof(line) - 1);
+        char chunk[64];
+        ssize_t n = read(STDIN_FILENO, chunk, sizeof(chunk));
         if (n <= 0)
         {
-            put_str("(no stdin yet — exiting)\n");
+            /* Read failed (e.g. stdin closed) — exit cleanly so
+             * the reaper logs a clean round-trip rather than
+             * leaving the task in a busy spin. */
+            put_str("\n[shell] stdin closed — exiting\n");
             break;
         }
-        if (n > (ssize_t)(sizeof(line) - 1))
-            n = sizeof(line) - 1;
-        line[n] = '\0';
-        /* Strip trailing newline. */
-        while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r'))
-            line[--n] = '\0';
-        if (dispatch(line) != 0)
-            break;
+        for (ssize_t i = 0; i < n; ++i)
+        {
+            const char c = chunk[i];
+            if (c == '\n' || c == '\r')
+            {
+                /* Echo the newline so the next prompt starts
+                 * on a fresh line, then dispatch + reprompt. */
+                put_str("\n");
+                line[pos] = '\0';
+                int rc = dispatch(line);
+                pos = 0;
+                if (rc != 0)
+                    return getpid();
+                put_str("duet$ ");
+            }
+            else if (c == '\x7F' || c == '\b')
+            {
+                if (pos > 0)
+                {
+                    --pos;
+                    /* Visual erase: backspace, space, backspace. */
+                    put_str("\b \b");
+                }
+            }
+            else if (pos + 1 < sizeof(line))
+            {
+                line[pos++] = c;
+                /* Echo the character locally — the kbd-reader's
+                 * COM1 mirror happens kernel-side before SYS_
+                 * STDIN_READ delivers, but the userland-visible
+                 * stdout still needs the echo. */
+                char buf[2] = {c, '\0'};
+                put_str(buf);
+            }
+            /* Buffer full — drop the byte silently. A real shell
+             * would beep; we don't have an audible alert tier. */
+        }
     }
     return getpid();
 }

@@ -161,16 +161,20 @@ set(DUETOS_KLOG_COMPILE_FLOOR "${_duetos_klog_floor}" CACHE STRING
     "Compile-time klog severity floor (0=Trace 1=Debug 2=Info 3=Warn 4=Error)")
 add_compile_definitions(DUETOS_KLOG_COMPILE_FLOOR=${DUETOS_KLOG_COMPILE_FLOOR})
 
-# Default klog runtime threshold. The compile-time floor stays at Trace
-# (so release binaries can dial Trace back ON via `loglevel t`); this
-# knob picks the BOOT-TIME runtime threshold. Levels: Trace=0 Debug=1
-# Info=2 Warn=3 Error=4. Debug builds default to Debug; release builds
-# default to Info — release images shouldn't print per-tick driver
-# noise unless the operator asks for it.
+# Default klog runtime threshold. The compile-time floor is set
+# elsewhere (debug→Trace, release→Debug); this knob picks the
+# BOOT-TIME runtime threshold a fresh image starts with. Levels:
+# Trace=0 Debug=1 Info=2 Warn=3 Error=4 Critical=5.
+#
+# Debug builds default to Debug — drivers + IRQ + sched chatter
+# visible by default during development. Release builds default to
+# Warn — release images print only Warn/Error/Critical at boot so
+# the serial log stays compact for forensic capture; operators
+# dial back to Info / Debug / Trace at runtime via `loglevel`.
 if(_duetos_is_debug)
     set(_duetos_klog_default 1)
 else()
-    set(_duetos_klog_default 2)
+    set(_duetos_klog_default 3)
 endif()
 set(DUETOS_KLOG_DEFAULT "${_duetos_klog_default}" CACHE STRING
     "Boot-time runtime klog threshold (0=Trace 1=Debug 2=Info 3=Warn 4=Error)")

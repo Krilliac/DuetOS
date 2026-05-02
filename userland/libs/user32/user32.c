@@ -169,6 +169,10 @@ static void user32_zero_msg_tail(void* msg)
     }
 }
 
+/* Forward decl — defined further down once the per-process
+ * thread-message queue is in scope. */
+static int user32_thread_msg_pop(struct user32_msg_wire* out, int remove);
+
 __declspec(dllexport) BOOL GetMessageA(void* msg, HANDLE h, UINT min, UINT max)
 {
     (void)min;
@@ -187,6 +191,15 @@ __declspec(dllexport) BOOL GetMessageA(void* msg, HANDLE h, UINT min, UINT max)
     if (rv > 0)
     {
         user32_zero_msg_tail(msg);
+        return (BOOL)rv;
+    }
+    /* Drain a thread-posted message if the kernel queue was empty
+     * — matches the PeekMessage fallback so PostThreadMessage +
+     * GetMessage round-trips work without any window registration. */
+    if (rv == 0 && user32_thread_msg_pop((struct user32_msg_wire*)msg, 1))
+    {
+        user32_zero_msg_tail(msg);
+        return 1;
     }
     return (BOOL)rv;
 }
@@ -203,6 +216,17 @@ __declspec(dllexport) BOOL PeekMessageA(void* msg, HANDLE h, UINT min, UINT max,
     (void)max;
     if (!msg)
         return 0;
+    /* Two-tier queue check:
+     *  1. Kernel-side window-message queue (SYS_WIN_PEEK_MSG) — the
+     *     normal source for HWND-targeted messages from the WM
+     *     and the input-event dispatch path.
+     *  2. User-side thread-message queue — populated by
+     *     PostThreadMessage / PostQuitMessage. Drained when (1)
+     *     reports nothing.
+     * The order matches Win32: GetMessage / PeekMessage prioritises
+     * the WM-posted queue over thread messages so input-driven
+     * apps stay responsive even when a posted thread message
+     * accumulates. */
     long long rv;
     const long long remove = (flags & PM_REMOVE) ? 1 : 0;
     __asm__ volatile("int $0x80"
@@ -211,6 +235,12 @@ __declspec(dllexport) BOOL PeekMessageA(void* msg, HANDLE h, UINT min, UINT max,
                        "S"((long long)(unsigned long long)h), "d"(remove)
                      : "memory");
     if (rv == 1)
+    {
+        user32_zero_msg_tail(msg);
+        return 1;
+    }
+    /* Fallback to user-side queue when the kernel reports empty. */
+    if (user32_thread_msg_pop((struct user32_msg_wire*)msg, (int)remove))
     {
         user32_zero_msg_tail(msg);
         return 1;
@@ -402,21 +432,82 @@ __declspec(dllexport) void PostQuitMessage(int code)
         }
     }
 }
-__declspec(dllexport) BOOL PostThreadMessageA(DWORD tid, UINT msg, WPARAM w, LPARAM l)
+/* Per-process thread-message queue.
+ *
+ * Real Win32 keeps one queue per UI thread; PostThreadMessage
+ * pushes onto the target thread's queue, and that thread's
+ * GetMessage / PeekMessage returns from it (msg.hwnd = NULL).
+ *
+ * v0 collapses this to a single per-process queue because there's
+ * effectively one ring-3 thread per process today (SYS_THREAD_CREATE
+ * is wired but smoke tests don't spawn). 8 slots is plenty for
+ * the test workload — typical PostQuitMessage / WM_USER round-trips
+ * push at most 1–2 messages before draining.
+ *
+ * Capture-on-Post / drain-on-Peek with a single producer/consumer
+ * keeps the queue lock-free; the only consumer is the same task
+ * that produced. */
+struct user32_thread_msg
 {
-    (void)tid;
-    (void)msg;
-    (void)w;
-    (void)l;
+    UINT message;
+    WPARAM wparam;
+    LPARAM lparam;
+    DWORD time;
+};
+#define USER32_THREAD_MSG_CAP 8
+static struct user32_thread_msg s_thread_msgs[USER32_THREAD_MSG_CAP];
+static unsigned s_thread_msg_head = 0; /* push cursor */
+static unsigned s_thread_msg_tail = 0; /* pop cursor  */
+
+static int user32_thread_msg_empty(void)
+{
+    return s_thread_msg_head == s_thread_msg_tail;
+}
+
+static void user32_thread_msg_push(UINT msg, WPARAM w, LPARAM l)
+{
+    /* Drop oldest on overflow — keeps the producer non-blocking
+     * even when the consumer is wedged. */
+    if (s_thread_msg_head - s_thread_msg_tail >= USER32_THREAD_MSG_CAP)
+        ++s_thread_msg_tail;
+    unsigned slot = s_thread_msg_head & (USER32_THREAD_MSG_CAP - 1);
+    s_thread_msgs[slot].message = msg;
+    s_thread_msgs[slot].wparam = w;
+    s_thread_msgs[slot].lparam = l;
+    s_thread_msgs[slot].time = 0;
+    ++s_thread_msg_head;
+}
+
+static int user32_thread_msg_pop(struct user32_msg_wire* out, int remove)
+{
+    if (user32_thread_msg_empty())
+        return 0;
+    unsigned slot = s_thread_msg_tail & (USER32_THREAD_MSG_CAP - 1);
+    out->hwnd = (HANDLE)0; /* thread message — no hwnd */
+    out->message = s_thread_msgs[slot].message;
+    out->wParam = s_thread_msgs[slot].wparam;
+    out->lParam = s_thread_msgs[slot].lparam;
+    if (remove)
+        ++s_thread_msg_tail;
     return 1;
 }
+
+__declspec(dllexport) BOOL PostThreadMessageA(DWORD tid, UINT msg, WPARAM w, LPARAM l)
+{
+    /* The tid argument names the target thread. v0 only has one
+     * UI thread per process, so any tid that could plausibly be
+     * a thread of this process (matches GetCurrentThreadId) lands
+     * in our shared queue; cross-thread / cross-process posts are
+     * silently dropped — the kernel-side dispatch hop they need
+     * isn't wired yet. */
+    (void)tid;
+    user32_thread_msg_push(msg, w, l);
+    return 1;
+}
+
 __declspec(dllexport) BOOL PostThreadMessageW(DWORD tid, UINT msg, WPARAM w, LPARAM l)
 {
-    (void)tid;
-    (void)msg;
-    (void)w;
-    (void)l;
-    return 1;
+    return PostThreadMessageA(tid, msg, w, l);
 }
 /* SendMessage is synchronous — it must return the WndProc's
  * result. v1 implements this by pulling the target's WNDPROC
@@ -847,25 +938,45 @@ __declspec(dllexport) ATOM RegisterClassA(const void* wc)
 }
 __declspec(dllexport) ATOM RegisterClassW(const void* wc)
 {
-    /* Can't inspect wide names safely without flattening; v1
-     * accepts and stores with a synthetic name so CreateWindowExW
-     * still succeeds (callers typically pair RegisterClassW with
-     * CreateWindowExW using the same pointer). */
+    /* WNDCLASSW shares lpfnWndProc / lpszClassName slots with
+     * WNDCLASSA in the v0 bridge struct — only the W variant
+     * stores lpszClassName as a wchar_t16*. Flatten the wide
+     * name with a low-byte strip so the registration's stored
+     * name matches what GetClassInfoW(L"...") + UnregisterClassW
+     * will look for later. Falls back to a synthetic procName-
+     * derived label only if the caller passed a NULL or empty
+     * wide name (matches Win32 behaviour: registering with no
+     * name is technically allowed, the class becomes anonymous-
+     * by-atom). */
     if (!wc)
         return 0;
     const struct user32_wndclass_a* c = (const struct user32_wndclass_a*)wc;
-    char dummy[16];
-    dummy[0] = 'W';
-    dummy[1] = '-';
-    /* Embed low 14 bits of the WNDPROC pointer so different
-     * classes with distinct procs stay distinct. */
-    unsigned long long v = (unsigned long long)c->lpfnWndProc;
-    for (int i = 0; i < 13; ++i)
+    char flat[64];
+    int fi = 0;
+    if (c->lpszClassName != 0)
     {
-        dummy[2 + i] = (char)('a' + ((v >> (i * 4)) & 0xF));
+        const wchar_t16* w = (const wchar_t16*)c->lpszClassName;
+        while (fi < (int)sizeof(flat) - 1 && w[fi] != 0)
+        {
+            flat[fi] = (char)(w[fi] & 0xFF);
+            ++fi;
+        }
     }
-    dummy[15] = '\0';
-    return user32_class_register(dummy, c->lpfnWndProc) ? 1 : 0;
+    flat[fi] = '\0';
+    if (fi == 0)
+    {
+        /* No name — fall back to a procName-derived synthetic so
+         * different anonymous classes stay distinct. */
+        flat[0] = 'W';
+        flat[1] = '-';
+        unsigned long long v = (unsigned long long)c->lpfnWndProc;
+        for (int i = 0; i < 13; ++i)
+        {
+            flat[2 + i] = (char)('a' + ((v >> (i * 4)) & 0xF));
+        }
+        flat[15] = '\0';
+    }
+    return user32_class_register(flat, c->lpfnWndProc) ? 1 : 0;
 }
 __declspec(dllexport) ATOM RegisterClassExA(const void* wcex)
 {
@@ -1244,6 +1355,16 @@ __declspec(dllexport) unsigned long long SetTimer(HANDLE h, unsigned long long i
 }
 __declspec(dllexport) BOOL KillTimer(HANDLE h, unsigned long long id)
 {
+    /* hwnd == NULL → "system timer" cookie produced by SetTimer's
+     * matching NULL-hwnd branch; we never registered it with the
+     * kernel-side timer table, so there's nothing to kill. Return
+     * TRUE — a timer that never fired and won't fire is, by Win32
+     * contract, indistinguishable from one that was just removed. */
+    if (h == (HANDLE)0)
+    {
+        (void)id;
+        return 1;
+    }
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
@@ -1996,23 +2117,77 @@ __declspec(dllexport) BOOL DdeFreeStringHandle(DWORD inst, void* h)
     return 1;
 }
 
-/* GetClassInfoW — return success when called on registered class
- * via RegisterClassW. We track a single static class atom for v0. */
+/* GetDC / GetWindowDC / ReleaseDC — re-exported from user32 in
+ * addition to gdi32. Real Windows ships GetDC/ReleaseDC in
+ * user32.dll (the WM-side surface) and CreateCompatibleDC etc.
+ * in gdi32.dll (the rendering surface); mingw-w64's headers
+ * import GetDC from user32.dll, so a smoke-test PE built against
+ * standard headers imports user32.dll!GetDC and falls through to
+ * the kernel flat-thunk catch-all when the userland user32 doesn't
+ * export it. The forwarders below mirror gdi32.c's HDC encoding
+ * (HWND | GDI_TAG, 0xDC00000000ULL) so the HDC handed back can
+ * round-trip through gdi32's downstream calls.
+ *
+ * Caveat: GetDC(NULL) returns the bare GDI_TAG sentinel which is
+ * non-zero — that's enough to satisfy "did GetDC succeed?" probes;
+ * actual screen-DC rendering against the desktop framebuffer needs
+ * a real desktop-window registration that doesn't exist in v0. */
+__declspec(dllexport) HANDLE GetDC(HANDLE hwnd)
+{
+    return (HANDLE)((unsigned long long)hwnd | 0xDC00000000ULL);
+}
+
+__declspec(dllexport) HANDLE GetWindowDC(HANDLE hwnd)
+{
+    return GetDC(hwnd);
+}
+
+__declspec(dllexport) int ReleaseDC(HANDLE hwnd, HANDLE dc)
+{
+    (void)hwnd;
+    (void)dc;
+    return 1;
+}
+
+/* GetClassInfoW — succeed iff `class_name` matches a class
+ * previously registered via RegisterClass* (looked up against the
+ * shared `s_classes[]` table that RegisterClassA / RegisterClassW
+ * populate). On hit, zero-fill the caller's WNDCLASSW and copy in
+ * the registered WNDPROC + class name so the caller can hand the
+ * struct back into a CreateWindowEx pair. On miss, return FALSE
+ * cleanly — that's the contract every Win32 GUI app's "is class
+ * registered" probe expects. */
 __declspec(dllexport) BOOL GetClassInfoW(void* hInst, const wchar_t16* class_name, void* wcw)
 {
     (void)hInst;
     if (class_name == (const wchar_t16*)0 || wcw == (void*)0)
         return 0;
-    /* Quick string match against any "*Smoke*" class name. The
-     * real impl would walk the per-process atom table; this v0
-     * stub accepts any non-empty name. */
     if (class_name[0] == 0)
         return 0;
-    /* Zero-fill the WNDCLASSW the caller handed us (it's about
-     * 64 bytes). */
+    /* Flatten the wide name with low-byte strip — same convention
+     * RegisterClassW uses to populate s_classes, so a register +
+     * lookup pair against the same wide name canonicalises. */
+    char flat[64];
+    int i = 0;
+    while (i < (int)sizeof(flat) - 1 && class_name[i] != 0)
+    {
+        flat[i] = (char)(class_name[i] & 0xFF);
+        ++i;
+    }
+    flat[i] = '\0';
+    WNDPROC proc = user32_class_lookup(flat);
+    if (proc == 0)
+        return 0;
+    /* Zero-fill the WNDCLASSW + copy the resolved WNDPROC. The
+     * struct is ~64 bytes (WNDCLASSEXW is ~80); zeroing 80 covers
+     * either form. The first slot is `style`; lpfnWndProc lives
+     * at offset 8 (after the 4-byte style + 4-byte alignment). */
     unsigned char* b = (unsigned char*)wcw;
-    for (int i = 0; i < 80; ++i)
-        b[i] = 0;
+    for (int j = 0; j < 80; ++j)
+        b[j] = 0;
+    /* WNDCLASSW layout: { UINT style; WNDPROC lpfnWndProc; ... }.
+     * lpfnWndProc is at offset 8 on x64 (struct alignment). */
+    *(WNDPROC*)(b + 8) = proc;
     return 1;
 }
 
