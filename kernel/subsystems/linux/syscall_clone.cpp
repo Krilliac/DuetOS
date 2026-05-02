@@ -292,11 +292,17 @@ i64 DoClone(u64 flags, u64 child_stack, u64 ptid_user, u64 ctid_user, u64 tls)
         return kEPERM;
     }
 
-    // Reject anything other than the CLONE_THREAD same-AS path.
-    // Full fork (CLONE_THREAD clear) needs AS duplication;
-    // that's §11.10 deferred work.
+    // CLONE_THREAD-not-set is the fork-style call: new AS, new
+    // process. DoFork already does that — route there. We
+    // discard ptid_user / child_stack / tls in the fork path
+    // (DoFork inherits the parent's values); a future slice can
+    // honour CLONE_PARENT_SETTID and the child_stack remap.
     if ((flags & (kCloneThread | kCloneVm)) != (kCloneThread | kCloneVm))
-        return kENOSYS;
+    {
+        (void)ptid_user;
+        (void)child_stack;
+        return DoFork();
+    }
     if (child_stack == 0)
         return kEINVAL;
     if ((child_stack & 0xF) != 0)
@@ -359,6 +365,54 @@ i64 DoClone(u64 flags, u64 child_stack, u64 ptid_user, u64 ctid_user, u64 tls)
     arch::SerialWrite("\n");
 
     return static_cast<i64>(child_tid);
+}
+
+// =============================================================
+// clone3 — extended clone with the args bundled in a struct
+// `clone_args`. Translate the new shape into the classic
+// 5-arg clone() and let DoClone do the work.
+//
+// struct clone_args (Linux 5.3+, first 8 fields = 64 bytes):
+//   u64 flags
+//   u64 pidfd               (out, ignored in v0)
+//   u64 child_tid           (CLONE_CHILD_SETTID)
+//   u64 parent_tid          (CLONE_PARENT_SETTID)
+//   u64 exit_signal
+//   u64 stack
+//   u64 stack_size
+//   u64 tls
+//
+// Newer fields (set_tid, set_tid_size, cgroup) are advisory
+// extensions ignored here.
+// =============================================================
+
+i64 DoClone3(u64 user_args, u64 size)
+{
+    constexpr u64 kMinSize = 64;
+    if (user_args == 0 || size < kMinSize)
+        return kEINVAL;
+
+    struct CloneArgs
+    {
+        u64 flags;
+        u64 pidfd;
+        u64 child_tid;
+        u64 parent_tid;
+        u64 exit_signal;
+        u64 stack;
+        u64 stack_size;
+        u64 tls;
+    } args = {};
+
+    const u64 to_copy = size < sizeof(args) ? size : sizeof(args);
+    if (!mm::CopyFromUser(&args, reinterpret_cast<const void*>(user_args), to_copy))
+        return kEFAULT;
+
+    // Classic clone wants child_stack as the TOP of the new
+    // stack region. clone3 gives stack base + stack_size; the
+    // top is stack + stack_size by Linux convention.
+    const u64 child_stack = args.stack + args.stack_size;
+    return DoClone(args.flags, child_stack, args.parent_tid, args.child_tid, args.tls);
 }
 
 } // namespace duetos::subsystems::linux::internal

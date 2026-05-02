@@ -947,4 +947,33 @@ i64 DoEpollPwait(u64 epfd, u64 events, u64 maxevents, u64 timeout_ms, u64 sigmas
     return DoEpollWait(epfd, events, maxevents, timeout_ms);
 }
 
+// =============================================================
+// epoll_pwait2 — same as epoll_pwait but the timeout is a
+// `struct timespec*` (nsec precision) instead of an int (ms).
+// =============================================================
+
+// We round up to milliseconds — v0 has no nanosecond-grain
+// scheduler tick anyway, so the loss is acceptable. NULL
+// timeout = block forever (-1), zero timeout = poll once (0),
+// positive timeout = ceil to ms.
+i64 DoEpollPwait2(u64 epfd, u64 events, u64 maxevents, u64 user_ts, u64 sigmask, u64 sigsetsize)
+{
+    i64 timeout_ms = -1;
+    if (user_ts != 0)
+    {
+        struct Timespec
+        {
+            i64 sec;
+            i64 nsec;
+        } ts = {};
+        if (!mm::CopyFromUser(&ts, reinterpret_cast<const void*>(user_ts), sizeof(ts)))
+            return kEFAULT;
+        if (ts.sec == 0 && ts.nsec == 0)
+            timeout_ms = 0;
+        else
+            timeout_ms = ts.sec * 1000 + (ts.nsec + 999999) / 1000000;
+    }
+    return DoEpollPwait(epfd, events, maxevents, static_cast<u64>(timeout_ms), sigmask, sigsetsize);
+}
+
 } // namespace duetos::subsystems::linux::internal

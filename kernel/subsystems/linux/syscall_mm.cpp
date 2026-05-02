@@ -563,4 +563,33 @@ i64 DoMunlockall()
     return 0;
 }
 
+// =============================================================
+// membarrier + mlock2 — small mm-adjacent calls.
+// =============================================================
+
+// membarrier(cmd, flags) — synchronise memory barriers across
+// threads. cmd=0 is MEMBARRIER_CMD_QUERY which reports the
+// bitmask of supported commands. v0 supports none, so QUERY
+// returns 0 (which IS the documented "no commands" response).
+// Other commands: -EINVAL. Real callers handle this by
+// falling back to atomic-fence intrinsics they generate
+// themselves.
+i64 DoMembarrier(u64 cmd, u64 flags)
+{
+    (void)flags;
+    if (cmd == 0)
+        return 0;
+    return kEINVAL;
+}
+
+// mlock2(addr, len, flags) — pin pages. v0 doesn't swap, so
+// pinning is implicit; accept the call as advisory.
+i64 DoMlock2(u64 addr, u64 len, u64 flags)
+{
+    (void)addr;
+    (void)len;
+    (void)flags;
+    return 0;
+}
+
 } // namespace duetos::subsystems::linux::internal

@@ -15,6 +15,7 @@
 #include "subsystems/linux/syscall_internal.h"
 
 #include "mm/address_space.h"
+#include "mm/paging.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -138,14 +139,65 @@ i64 DoSetgroups(u64 size, u64 user_list)
 // programs initialise without complaining.
 i64 DoCapget(u64 user_hdr, u64 user_data)
 {
-    (void)user_hdr;
-    (void)user_data;
+    // capget needs at least the header (8 bytes: u32 version +
+    // u32 pid). NULL hdr is the canonical Linux -EFAULT case.
+    if (user_hdr == 0)
+        return kEFAULT;
+    struct CapHdr
+    {
+        u32 version;
+        i32 pid;
+    } hdr = {};
+    if (!mm::CopyFromUser(&hdr, reinterpret_cast<const void*>(user_hdr), sizeof(hdr)))
+        return kEFAULT;
+    constexpr u32 kCapV3 = 0x20080522;
+    constexpr u32 kCapV2 = 0x20071026;
+    constexpr u32 kCapV1 = 0x19980330;
+    if (hdr.version != kCapV3 && hdr.version != kCapV2 && hdr.version != kCapV1)
+    {
+        // Linux convention: rewrite header.version to current
+        // and return -EINVAL so libcap can probe + retry.
+        const u32 fixed = kCapV3;
+        (void)mm::CopyToUser(reinterpret_cast<void*>(user_hdr), &fixed, sizeof(fixed));
+        return kEINVAL;
+    }
+    if (user_data != 0)
+    {
+        // Three u32 cap masks (effective / permitted /
+        // inheritable) per "set" — 24 bytes for v3 (two 32-bit
+        // halves), 12 bytes for v1/v2. Report the empty cap
+        // set; v0 doesn't model the Linux ABI capability mask.
+        u32 zeros[6] = {0, 0, 0, 0, 0, 0};
+        const u32 sz = (hdr.version == kCapV3) ? 24 : 12;
+        if (!mm::CopyToUser(reinterpret_cast<void*>(user_data), zeros, sz))
+            return kEFAULT;
+    }
     return 0;
 }
 i64 DoCapset(u64 user_hdr, u64 user_data)
 {
-    (void)user_hdr;
-    (void)user_data;
+    if (user_hdr == 0 || user_data == 0)
+        return kEFAULT;
+    struct CapHdr
+    {
+        u32 version;
+        i32 pid;
+    } hdr = {};
+    if (!mm::CopyFromUser(&hdr, reinterpret_cast<const void*>(user_hdr), sizeof(hdr)))
+        return kEFAULT;
+    constexpr u32 kCapV3 = 0x20080522;
+    constexpr u32 kCapV2 = 0x20071026;
+    constexpr u32 kCapV1 = 0x19980330;
+    if (hdr.version != kCapV3 && hdr.version != kCapV2 && hdr.version != kCapV1)
+    {
+        const u32 fixed = kCapV3;
+        (void)mm::CopyToUser(reinterpret_cast<void*>(user_hdr), &fixed, sizeof(fixed));
+        return kEINVAL;
+    }
+    // v0 doesn't actually mutate the Linux-ABI capability mask
+    // (we have our own kCap* model on Process::caps). Accept
+    // silently — libcap-using daemons proceed, even if their
+    // capability writes are no-ops.
     return 0;
 }
 

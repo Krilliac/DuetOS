@@ -351,33 +351,96 @@ i64 DoCopyFileRange(u64 fd_in, u64 user_off_in, u64 fd_out, u64 user_off_out, u6
             return kEFAULT;
         p->linux_fds[fd_out].offset = static_cast<u64>(out_off);
     }
-    // Bounce through the kernel heap. v0 cap = 4 KiB per call; libc
-    // wraps in a loop. Honest tradeoff: ~10× the page-grant zero-
-    // copy variant, but no kernel-bypass machinery needed.
+    // Bounce through the kernel heap directly via FAT32 primitives.
+    // Earlier v0 went through DoRead / DoWrite on the kernel buffer,
+    // but those call CopyTo/FromUser which reject kernel VAs as
+    // -EFAULT — synfs caught it as `copy_file_range rc=-14` even
+    // though both fds were valid. Using Fat32ReadFile + (Append /
+    // Create)AtPath is a single bounce in kernel-space, no user-VA
+    // checks involved.
     constexpr u64 kStageCap = 4096;
     auto* stage = static_cast<u8*>(mm::KMalloc(kStageCap));
     if (stage == nullptr)
         return kENOMEM;
-    u64 total = 0;
-    while (total < len)
+    const auto* vol = fs::fat32::Fat32Volume(0);
+    if (vol == nullptr)
     {
-        const u64 want = ((len - total) > kStageCap) ? kStageCap : (len - total);
-        const i64 rd = DoRead(fd_in, reinterpret_cast<u64>(stage), want);
+        mm::KFree(stage);
+        return kEIO;
+    }
+    fs::fat32::DirEntry src_e;
+    if (!fs::fat32::Fat32LookupPath(vol, p->linux_fds[fd_in].path, &src_e))
+    {
+        mm::KFree(stage);
+        return kEIO;
+    }
+    const u64 src_size = src_e.size_bytes;
+    u64 src_off = p->linux_fds[fd_in].offset;
+    if (src_off > src_size)
+    {
+        mm::KFree(stage);
+        return 0;
+    }
+    u64 total = 0;
+    while (total < len && src_off < src_size)
+    {
+        const u64 avail = src_size - src_off;
+        u64 want = (len - total < avail) ? (len - total) : avail;
+        if (want > kStageCap)
+            want = kStageCap;
+        // Fat32ReadFile reads from offset 0; for v0's small files
+        // that's adequate — read the prefix up to (src_off + want)
+        // and slice. If the file is larger than kStageCap, we'd
+        // need a streamed read; that's a sub-GAP for now.
+        const u64 read_through = src_off + want;
+        if (read_through > kStageCap)
+        {
+            mm::KFree(stage);
+            return total > 0 ? static_cast<i64>(total) : kEFBIG;
+        }
+        const i64 rd = fs::fat32::Fat32ReadFile(vol, &src_e, stage, read_through);
         if (rd < 0)
         {
             mm::KFree(stage);
-            return total > 0 ? static_cast<i64>(total) : rd;
+            return total > 0 ? static_cast<i64>(total) : kEIO;
         }
-        if (rd == 0)
+        if (static_cast<u64>(rd) <= src_off)
             break;
-        const i64 wr = DoWrite(fd_out, reinterpret_cast<u64>(stage), static_cast<u64>(rd));
+        const u64 chunk = static_cast<u64>(rd) - src_off;
+        const u64 to_write = (chunk < want) ? chunk : want;
+        // Write to dst — pending-create or append.
+        i64 wr = -1;
+        if (p->linux_fds[fd_out].flags & core::Process::kLinuxFdFlagPendingCreate)
+        {
+            wr = fs::fat32::Fat32CreateAtPath(vol, p->linux_fds[fd_out].path, stage + src_off, to_write);
+            if (wr >= 0)
+            {
+                p->linux_fds[fd_out].flags = static_cast<u8>(p->linux_fds[fd_out].flags &
+                                                            ~core::Process::kLinuxFdFlagPendingCreate);
+                fs::fat32::DirEntry de;
+                if (fs::fat32::Fat32LookupPath(vol, p->linux_fds[fd_out].path, &de))
+                {
+                    p->linux_fds[fd_out].first_cluster = de.first_cluster;
+                    p->linux_fds[fd_out].size = de.size_bytes;
+                }
+            }
+        }
+        else
+        {
+            wr = fs::fat32::Fat32AppendAtPath(vol, p->linux_fds[fd_out].path, stage + src_off, to_write);
+            if (wr >= 0)
+                p->linux_fds[fd_out].size += static_cast<u32>(wr);
+        }
         if (wr < 0)
         {
             mm::KFree(stage);
-            return total > 0 ? static_cast<i64>(total) : wr;
+            return total > 0 ? static_cast<i64>(total) : kEIO;
         }
         total += static_cast<u64>(wr);
-        if (wr < rd)
+        src_off += static_cast<u64>(wr);
+        p->linux_fds[fd_in].offset = src_off;
+        p->linux_fds[fd_out].offset += static_cast<u64>(wr);
+        if (static_cast<u64>(wr) < to_write)
             break;
     }
     mm::KFree(stage);

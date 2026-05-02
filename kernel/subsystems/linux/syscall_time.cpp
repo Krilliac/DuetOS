@@ -17,6 +17,7 @@
 #include "arch/x86_64/hpet.h"
 #include "arch/x86_64/timer.h"
 #include "time/tick.h"
+#include "time/timekeeper.h"
 #include "proc/process.h"
 #include "mm/address_space.h"
 #include "sched/sched.h"
@@ -67,8 +68,37 @@ bool ClockHonorsOffset(u64 clk_id)
 // Compose the wall-clock reading: monotonic ns + signed offset.
 // Saturates at zero on negative-offset underflow so userspace
 // can't observe a negative tv_sec.
+//
+// Lazy-seed: g_realtime_offset_ns starts at 0, which means
+// RealtimeNs returns "ns since boot" — wrong for time(2) and
+// gettimeofday(2). On first call we sample the CMOS RTC via
+// time::RealtimeFiletime() and convert to a Unix-epoch offset
+// so subsequent reads land on the actual wall clock.
+//
+// Why lazy: TimekeeperInit may race with very-early boot
+// callers. By the time any user-mode process can call time(),
+// HPET + RTC are both up.
 u64 RealtimeNs()
 {
+    static bool seeded = false;
+    if (!seeded && g_realtime_offset_ns == 0)
+    {
+        // FILETIME = 100-ns ticks since 1601-01-01 UTC.
+        // Unix epoch starts 11644473600 seconds later.
+        constexpr u64 kFiletimeUnixDeltaSec = 11644473600ULL;
+        constexpr u64 kFiletimePerSec = 10000000ULL;
+        const u64 ft = ::duetos::time::RealtimeFiletime();
+        if (ft != 0)
+        {
+            const u64 unix_sec_at_boot =
+                ft / kFiletimePerSec - kFiletimeUnixDeltaSec;
+            const u64 unix_ns_at_boot = unix_sec_at_boot * 1'000'000'000ULL;
+            const u64 mono = NowNs();
+            g_realtime_offset_ns =
+                static_cast<i64>(unix_ns_at_boot) - static_cast<i64>(mono);
+            seeded = true;
+        }
+    }
     const u64 mono = NowNs();
     const i64 off = g_realtime_offset_ns;
     if (off >= 0)

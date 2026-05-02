@@ -322,7 +322,14 @@ struct Process
         // for the non-file states; all non-file callers must
         // ignore size/offset/path.
         u8 state;
-        u8 _pad[3];
+        // Per-fd flag bits. kLinuxFdFlagPendingCreate (0x01) marks a
+        // freshly-opened-with-O_CREAT regular-file fd whose backing
+        // disk entry doesn't exist yet — the first sys_write routes
+        // through Fat32CreateAtPath instead of Fat32AppendAtPath.
+        // (FAT32's append path can't grow a 0-byte file in v0; see
+        // fat32_write.cpp first_cluster<2 guards.)
+        u8 flags;
+        u8 _pad[2];
         u32 first_cluster;
         u32 size;
         u32 _pad2;
@@ -334,6 +341,7 @@ struct Process
         // Cap matches the sys_open copy buffer (63 chars + NUL).
         char path[64];
     };
+    static constexpr u8 kLinuxFdFlagPendingCreate = 0x01;
     LinuxFd linux_fds[16];
 
     // Linux-ABI brk heap. Meaningful only when abi_flavor ==
@@ -824,6 +832,38 @@ struct Process
     // every reader after pushing a pending bit so a blocked
     // signalfd read (post-engine) immediately returns.
     sched::WaitQueue linux_signal_wq;
+
+    // ITIMER_REAL state — backs alarm(2), setitimer(2),
+    // getitimer(2). `linux_alarm_deadline_ns` is the absolute
+    // monotonic-clock deadline at which SIGALRM should be
+    // raised (0 = no alarm armed). `linux_alarm_interval_ns`
+    // is the auto-rearm interval (0 = one-shot). The
+    // dispatcher checks the deadline post-handler and lazily
+    // injects SIGALRM into linux_pending_signals — there's no
+    // per-tick callback in v0, so the signal is observed at
+    // the next syscall return rather than asynchronously.
+    u64 linux_alarm_deadline_ns;
+    u64 linux_alarm_interval_ns;
+
+    // POSIX per-process timers — backs timer_create / timer_settime
+    // / timer_gettime / timer_getoverrun / timer_delete. Each
+    // timer carries a monotonic deadline + auto-rearm interval +
+    // signal-to-deliver. The dispatcher's post-handler hook
+    // (LinuxAlarmCheckAndRaise) walks the table along with the
+    // ITIMER_REAL slot above and ORs the signal into pending.
+    // Cap matches typical glibc usage; eight timers per process is
+    // more than any sane workload needs.
+    struct LinuxPosixTimer
+    {
+        u64 deadline_ns;     // 0 = disarmed
+        u64 interval_ns;     // 0 = one-shot
+        u32 signo;           // signal to raise on expiry (SIGALRM default)
+        u32 overrun;         // missed-fires count, drained by timer_getoverrun
+        u8 in_use;
+        u8 _pad[7];
+    };
+    static constexpr u32 kLinuxTimerCap = 8;
+    LinuxPosixTimer linux_posix_timers[kLinuxTimerCap];
 
     // Linux parent / wait infrastructure — backs wait4 / waitid /
     // SIGCHLD reaping. `linux_parent_pid` is set by DoFork (clone

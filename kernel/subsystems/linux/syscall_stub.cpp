@@ -104,16 +104,21 @@ i64 DoWait4(u64 pid, u64 user_status, u64 options, u64 user_rusage)
         i32 found = FindChildExitMatchLocked(p, target_pid);
         if (found < 0)
         {
-            // Quick check: is this caller even capable of having a
-            // child? wait4() with no outstanding children returns
-            // -ECHILD. We approximate by tagging "no parent linkage
-            // ever" — but a fork-then-immediately-wait race could
-            // hit this branch before the child registers. Real
-            // Linux walks its task-tree; v0 just reports -ECHILD
-            // when the queue is empty AND the caller has no live
-            // children waiting to register. Conservative: only
-            // return -ECHILD if non-blocking; blocking goes on
-            // linux_wait_wq.
+            // POSIX rule: if the caller has NO children at all
+            // (no live ones AND no zombies queued), wait4 returns
+            // -ECHILD immediately, regardless of WNOHANG. The
+            // earlier "block until something registers" was a
+            // bug — it deadlocked single-process exercisers
+            // (synfull's wait4 probe) waiting for a child that
+            // would never exist.
+            arch::Sti();
+            const u64 live_children = sched::SchedCountChildrenOfPid(p->pid);
+            if (live_children == 0)
+                return kECHILD;
+            arch::Cli();
+            // Children exist but none have exited. WNOHANG returns
+            // 0 (no exit available); blocking parks on the wait
+            // queue.
             if (nonblocking)
             {
                 arch::Sti();
@@ -167,6 +172,16 @@ i64 DoWaitid(u64 idtype, u64 id, u64 user_info, u64 options, u64 user_rusage)
         i32 found = FindChildExitMatchLocked(p, target_pid);
         if (found < 0)
         {
+            // POSIX rule (mirrored from DoWait4 above): no
+            // children at all -> -ECHILD immediately, regardless
+            // of WNOHANG. Without this, a single-process exerciser
+            // calling waitid blocks forever on linux_wait_wq for
+            // a child that will never register.
+            arch::Sti();
+            const u64 live_children = sched::SchedCountChildrenOfPid(p->pid);
+            if (live_children == 0)
+                return kECHILD;
+            arch::Cli();
             if (nonblocking)
             {
                 arch::Sti();
@@ -325,10 +340,13 @@ i64 DoSyslog(u64 type, u64 bufp, u64 len)
     return 0;
 }
 
-// vhangup: revoke the controlling terminal. No tty model — 0.
+// vhangup: revoke the controlling terminal. Linux requires
+// CAP_SYS_TTY_CONFIG; an unprivileged caller gets -EPERM. We
+// don't model that capability so unconditional -EPERM matches
+// the user-visible behaviour of an unprivileged Linux process.
 i64 DoVhangup()
 {
-    return 0;
+    return kEPERM;
 }
 
 // acct(filename): BSD process accounting. We do no accounting.
@@ -373,19 +391,23 @@ i64 DoSyncfs(u64 fd)
 // DoRename moved to syscall_fs_mut.cpp (now wires through to
 // fat32 Fat32RenameAtPath via the §11.9 mutation primitives).
 //
-// link / symlink stay -ENOSYS — fat32 has no hardlink concept
-// and v0 has no symlink storage. Sub-GAPs in §11.9.
+// link / symlink: FAT32 has no hardlink concept and v0 has no
+// symlink storage. -EOPNOTSUPP is the spec-correct errno when
+// the FS doesn't support the operation (POSIX EPERM is also
+// allowed; we pick the more specific EOPNOTSUPP so glibc's
+// "fall back to copy-then-rename" path activates instead of
+// the "you're not allowed" error message).
 i64 DoLink(u64 old_path, u64 new_path)
 {
     (void)old_path;
     (void)new_path;
-    return kENOSYS;
+    return kEOPNOTSUPP;
 }
 i64 DoSymlink(u64 target, u64 linkpath)
 {
     (void)target;
     (void)linkpath;
-    return kENOSYS;
+    return kEOPNOTSUPP;
 }
 
 // set_thread_area / get_thread_area: x86_32 LDT entry for TLS.

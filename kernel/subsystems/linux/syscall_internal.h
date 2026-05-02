@@ -34,11 +34,15 @@ inline constexpr i64 kECHILD = -10;
 inline constexpr i64 kENOMEM = -12;
 inline constexpr i64 kEACCES = -13;
 inline constexpr i64 kEFAULT = -14;
+inline constexpr i64 kENOTDIR = -20;
 inline constexpr i64 kEISDIR = -21;
 inline constexpr i64 kEINVAL = -22;
 inline constexpr i64 kENFILE = -23;
 inline constexpr i64 kEMFILE = -24;
 inline constexpr i64 kEAGAIN = -11;
+inline constexpr i64 kEEXIST = -17;
+inline constexpr i64 kEFBIG = -27;
+inline constexpr i64 kENOTEMPTY = -39;
 inline constexpr i64 kEOVERFLOW = -75;
 inline constexpr i64 kEOPNOTSUPP = -95;
 inline constexpr i64 kESTALE = -116;
@@ -561,5 +565,101 @@ i64 DoGetgroups(u64 size, u64 user_list);
 i64 DoSetgroups(u64 size, u64 user_list);
 i64 DoCapget(u64 user_hdr, u64 user_data);
 i64 DoCapset(u64 user_hdr, u64 user_data);
+
+// =============================================================
+// Auxiliary handlers (syscall_aux.cpp) — route-throughs and
+// trivial-but-correct stubs for spec syscalls that don't need
+// a full implementation in v0. See file header for rationale.
+// =============================================================
+i64 DoTkill(u64 tid, u64 sig);
+i64 DoMknodat(i64 dirfd, u64 user_path, u64 mode, u64 dev);
+i64 DoReadlinkat(i64 dirfd, u64 user_path, u64 user_buf, u64 bufsiz);
+i64 DoUtimes(u64 user_path, u64 user_times);
+i64 DoRtTgsigqueueinfo(u64 tgid, u64 tid, u64 sig, u64 user_info);
+i64 DoCreat(u64 user_path, u64 mode);
+
+i64 DoPreadv(u64 fd, u64 user_iov, u64 iovcnt, i64 offset);
+i64 DoPwritev(u64 fd, u64 user_iov, u64 iovcnt, i64 offset);
+i64 DoPreadv2(u64 fd, u64 user_iov, u64 iovcnt, i64 offset, u64 flags);
+i64 DoPwritev2(u64 fd, u64 user_iov, u64 iovcnt, i64 offset, u64 flags);
+
+i64 DoAlarm(u64 seconds);
+i64 DoGetitimer(u64 which, u64 user_value);
+i64 DoSetitimer(u64 which, u64 user_new, u64 user_old);
+i64 DoMembarrier(u64 cmd, u64 flags);
+i64 DoMlock2(u64 addr, u64 len, u64 flags);
+i64 DoFallocate(u64 fd, u64 mode, u64 offset, u64 len);
+i64 DoSyncFileRange(u64 fd, u64 offset, u64 nbytes, u64 flags);
+i64 DoFchmodat2(i64 dirfd, u64 user_path, u64 mode, u64 flags);
+i64 DoOpenat2(i64 dirfd, u64 user_path, u64 user_how, u64 how_size);
+i64 DoEpollPwait2(u64 epfd, u64 events, u64 maxevents, u64 user_ts, u64 sigmask, u64 sigsetsize);
+i64 DoSendfile(u64 out_fd, u64 in_fd, u64 user_offset, u64 count);
+
+// Auxiliary batch 2 — spec-correct errnos for unsupported
+// surfaces (better than -ENOSYS where the API is recognised).
+i64 DoSetxattr(u64 path, u64 name, u64 value, u64 size, u64 flags);
+i64 DoLsetxattr(u64 path, u64 name, u64 value, u64 size, u64 flags);
+i64 DoFsetxattr(u64 fd, u64 name, u64 value, u64 size, u64 flags);
+i64 DoGetxattr(u64 path, u64 name, u64 value, u64 size);
+i64 DoLgetxattr(u64 path, u64 name, u64 value, u64 size);
+i64 DoFgetxattr(u64 fd, u64 name, u64 value, u64 size);
+i64 DoListxattr(u64 path, u64 list, u64 size);
+i64 DoLlistxattr(u64 path, u64 list, u64 size);
+i64 DoFlistxattr(u64 fd, u64 list, u64 size);
+i64 DoRemovexattr(u64 path, u64 name);
+i64 DoLremovexattr(u64 path, u64 name);
+i64 DoFremovexattr(u64 fd, u64 name);
+i64 DoRtSigqueueinfo(u64 tgid, u64 sig, u64 user_info);
+i64 DoUnshare(u64 flags);
+i64 DoSetns(u64 fd, u64 nstype);
+i64 DoModifyLdt(u64 func, u64 ptr, u64 bytecount);
+i64 DoProcessVmReadv(u64 pid, u64 lvec, u64 lcnt, u64 rvec, u64 rcnt, u64 flags);
+i64 DoProcessVmWritev(u64 pid, u64 lvec, u64 lcnt, u64 rvec, u64 rcnt, u64 flags);
+i64 DoKcmp(u64 pid1, u64 pid2, u64 type, u64 idx1, u64 idx2);
+i64 DoSeccomp(u64 op, u64 flags, u64 args);
+i64 DoRestartSyscall();
+i64 DoSchedSetattr(u64 pid, u64 attr, u64 flags);
+i64 DoSchedGetattr(u64 pid, u64 attr, u64 size, u64 flags);
+
+// Auxiliary batch 3 — POSIX timers, legacy / newer-Linux entries.
+i64 DoTimerCreate(u64 clockid, u64 sevp, u64 user_timerid);
+i64 DoTimerSettime(u64 timerid, u64 flags, u64 user_new, u64 user_old);
+i64 DoTimerGettime(u64 timerid, u64 user_curr);
+i64 DoTimerGetoverrun(u64 timerid);
+i64 DoTimerDelete(u64 timerid);
+i64 DoGetdents(u64 fd, u64 user_buf, u64 count);
+i64 DoUselib(u64 library);
+i64 DoRemapFilePages(u64 addr, u64 size, u64 prot, u64 pgoff, u64 flags);
+i64 DoEpollCtlOld(u64 a1, u64 a2, u64 a3, u64 a4);
+i64 DoEpollWaitOld(u64 a1, u64 a2, u64 a3, u64 a4);
+i64 DoFutexWaitv(u64 waiters, u64 nr_futexes, u64 flags, u64 timeout, u64 clockid);
+i64 DoFutexWake(u64 uaddr, u64 mask, u64 nr, u64 flags);
+i64 DoFutexWait(u64 uaddr, u64 val, u64 mask, u64 flags, u64 timeout, u64 clockid);
+i64 DoFutexRequeue(u64 waiters, u64 flags, u64 nr_wake, u64 nr_requeue);
+i64 DoSetMempolicyHomeNode(u64 start, u64 len, u64 home_node, u64 flags);
+i64 DoCachestat(u64 fd, u64 user_range, u64 user_cstat, u64 flags);
+i64 DoMemfdSecret(u64 flags);
+i64 DoMapShadowStack(u64 addr, u64 size, u64 flags);
+i64 DoStatmount(u64 req, u64 buf, u64 bufsize, u64 flags);
+i64 DoListmount(u64 req, u64 buf, u64 bufsize, u64 flags);
+i64 DoLsmGetSelfAttr(u64 attr, u64 ctx, u64 size, u64 flags);
+i64 DoLsmSetSelfAttr(u64 attr, u64 ctx, u64 size, u64 flags);
+i64 DoLsmListModules(u64 ids, u64 size, u64 flags);
+i64 DoQuotactlFd(u64 fd, u64 cmd, u64 id, u64 addr);
+i64 DoIoPgetevents(u64 ctx, u64 min_nr, u64 nr, u64 events, u64 timeout, u64 sig);
+i64 DoRseq(u64 rseq, u64 rseq_len, u64 flags, u64 sig);
+
+// Alarm / itimer hook — called from LinuxSyscallDispatch right
+// before LinuxSignalCheckAndDeliver. If a process's
+// ITIMER_REAL deadline has elapsed, raises SIGALRM so the
+// signal-deliver pass picks it up on this same syscall return.
+void LinuxAlarmCheckAndRaise(::duetos::core::Process* p);
+
+// Vector forms of socket recv/send (syscall_socket.cpp).
+i64 DoRecvmmsg(u64 fd, u64 user_mmsgvec, u64 vlen, u64 flags, u64 user_timeout);
+i64 DoSendmmsg(u64 fd, u64 user_mmsgvec, u64 vlen, u64 flags);
+
+// Extended clone with struct-bundled args (syscall_clone.cpp).
+i64 DoClone3(u64 user_args, u64 size);
 
 } // namespace duetos::subsystems::linux::internal

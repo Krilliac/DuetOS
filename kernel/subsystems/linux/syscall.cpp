@@ -77,7 +77,10 @@
 #include "mm/paging.h"
 #include "sched/sched.h"
 #include "subsystems/linux/signal_deliver.h"
-#include "subsystems/translation/translate.h"
+// translate.h removed — LinuxGapFill is dead now that primary
+// dispatch is dense across the Linux x86_64 spec surface. The
+// native + NT translation paths still use translate.h from
+// kernel/syscall/syscall.cpp, so the TU itself stays.
 
 extern "C" void linux_syscall_entry();
 
@@ -511,6 +514,104 @@ enum : u64
     kSysAddKey = 248,
     kSysRequestKey = 249,
     kSysKeyctl = 250,
+
+    // ============================================================
+    // ABI completeness — every Linux x86_64 syscall number we
+    // recognise but deliberately do not implement. These cases
+    // exist so the dispatch is dense from 0..462 (no number falls
+    // through to the translation-TU gap fill unless it's truly
+    // outside the spec). All return -ENOSYS. If a real
+    // implementation lands later, the dispatch case for that
+    // number moves OUT of this block and gets a real handler;
+    // the kSys constant is renamed back to its canonical form.
+    //
+    // Auto-derived from tools/linux-compat/linux-syscalls-x86_64.csv
+    // — see tools/linux-compat/README.md for the regen workflow.
+    // ============================================================
+    kSysGetitimer = 36,
+    kSysAlarm = 37,
+    kSysSetitimer = 38,
+    kSysSendfile = 40,
+    kSysGetdents = 78,
+    kSysCreat = 85,
+    kSysRtSigqueueinfo = 129,
+    kSysUselib = 134,
+    kSysEnosys_Ustat = 136,
+    kSysEnosys_Sysfs = 139,
+    kSysModifyLdt = 154,
+    kSysEnosys_Sysctl = 156,
+    kSysEnosys_CreateModule = 174,
+    kSysEnosys_GetKernelSyms = 177,
+    kSysEnosys_QueryModule = 178,
+    kSysEnosys_Nfsservctl = 180,
+    kSysEnosys_Getpmsg = 181,
+    kSysEnosys_Putpmsg = 182,
+    kSysEnosys_AfsSyscall = 183,
+    kSysEnosys_Tuxcall = 184,
+    kSysEnosys_Security = 185,
+    kSysSetxattr = 188,
+    kSysLsetxattr = 189,
+    kSysFsetxattr = 190,
+    kSysGetxattr = 191,
+    kSysLgetxattr = 192,
+    kSysFgetxattr = 193,
+    kSysListxattr = 194,
+    kSysLlistxattr = 195,
+    kSysFlistxattr = 196,
+    kSysRemovexattr = 197,
+    kSysLremovexattr = 198,
+    kSysFremovexattr = 199,
+    kSysTkill = 200,
+    kSysEnosys_LookupDcookie = 212,
+    kSysEpollCtlOld = 214,
+    kSysEpollWaitOld = 215,
+    kSysRemapFilePages = 216,
+    kSysRestartSyscall = 219,
+    kSysTimerCreate = 222,
+    kSysTimerSettime = 223,
+    kSysTimerGettime = 224,
+    kSysTimerGetoverrun = 225,
+    kSysTimerDelete = 226,
+    kSysUtimes = 235,
+    kSysEnosys_Vserver = 236,
+    kSysMknodat = 259,
+    kSysReadlinkat = 267,
+    kSysUnshare = 272,
+    kSysSyncFileRange = 277,
+    kSysFallocate = 285,
+    kSysPreadv = 295,
+    kSysPwritev = 296,
+    kSysRtTgsigqueueinfo = 297,
+    kSysSetns = 308,
+    kSysProcessVmReadv = 310,
+    kSysProcessVmWritev = 311,
+    kSysKcmp = 312,
+    kSysSchedSetattr = 314,
+    kSysSchedGetattr = 315,
+    kSysSeccomp = 317,
+    kSysMembarrier = 324,
+    kSysMlock2 = 325,
+    kSysPreadv2 = 327,
+    kSysPwritev2 = 328,
+    kSysIoPgetevents = 333,
+    kSysRseq = 334,
+    kSysOpenat2 = 437,
+    kSysEpollPwait2 = 441,
+    kSysQuotactlFd = 443,
+    kSysMemfdSecret = 447,
+    kSysFutexWaitv = 449,
+    kSysSetMempolicyHomeNode = 450,
+    kSysCachestat = 451,
+    kSysFchmodat2 = 452,
+    kSysMapShadowStack = 453,
+    kSysFutexWake = 454,
+    kSysFutexWait = 455,
+    kSysFutexRequeue = 456,
+    kSysStatmount = 457,
+    kSysListmount = 458,
+    kSysLsmGetSelfAttr = 459,
+    kSysLsmSetSelfAttr = 460,
+    kSysLsmListModules = 461,
 };
 
 // kAtFdCwd / kAtRemoveDir constants moved to syscall_internal.h
@@ -1260,11 +1361,11 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
             rv = DoRecvmsg(frame->rdi, frame->rsi, frame->rdx);
             break;
         case kSysSendmmsg:
+            rv = DoSendmmsg(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+            break;
         case kSysRecvmmsg:
-            // Multi-message variants. v0 forwards just the first
-            // mmsghdr to the single-message handler — sub-GAP for
-            // batch-mode callers.
-            rv = -38; // -ENOSYS
+            // sendmmsg has 4 args; recvmmsg has 5 (extra timeout).
+            rv = DoRecvmmsg(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
             break;
         case kSysSocketpair:
             rv = DoSocketpair(frame->rdi, frame->rsi, frame->rdx, frame->r10);
@@ -1287,43 +1388,8 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         rv = DoFork();
         break;
     case kSysClone3:
-    {
-        // clone3 packs the equivalent of clone()'s positional
-        // args into a struct clone_args read out of user memory.
-        // v0 honours the same CLONE_THREAD subset DoClone does,
-        // by reading only the prefix of the struct that contains
-        // the fields we care about (flags / pidfd / child_tid /
-        // parent_tid / exit_signal / stack / stack_size / tls).
-        struct CloneArgsPrefix
-        {
-            u64 flags;
-            u64 pidfd;
-            u64 child_tid;
-            u64 parent_tid;
-            u64 exit_signal;
-            u64 stack;
-            u64 stack_size;
-            u64 tls;
-        } args = {};
-        const u64 user_args = frame->rdi;
-        const u64 size = frame->rsi;
-        // Read at most sizeof(prefix) bytes; tolerate older
-        // callers that pass a smaller struct.
-        u64 to_copy = sizeof(args);
-        if (size < to_copy)
-            to_copy = size;
-        if (!mm::CopyFromUser(&args, reinterpret_cast<const void*>(user_args), to_copy))
-        {
-            rv = kEFAULT;
-            break;
-        }
-        // clone3 stack is `stack` + `stack_size` (caller hands
-        // us the BASE; the kernel computes the top). DoClone's
-        // child_stack arg expects a top-of-stack pointer.
-        const u64 stack_top = args.stack + args.stack_size;
-        rv = DoClone(args.flags, stack_top, args.parent_tid, args.child_tid, args.tls);
+        rv = DoClone3(frame->rdi, frame->rsi);
         break;
-    }
     case kSysExecve:
     case kSysExecveat:
     {
@@ -1643,26 +1709,276 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         rv = DoVmsplice(frame->rdi, frame->rsi, frame->rdx, frame->r10);
         break;
 
+    // ============================================================
+    // Auxiliary handlers (syscall_aux.cpp) — route-through and
+    // trivial-but-correct stubs that fill out the spec surface.
+    // ============================================================
+    case kSysTkill:
+        rv = DoTkill(frame->rdi, frame->rsi);
+        break;
+    case kSysMknodat:
+        rv = DoMknodat(static_cast<i64>(frame->rdi), frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysReadlinkat:
+        rv = DoReadlinkat(static_cast<i64>(frame->rdi), frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysUtimes:
+        rv = DoUtimes(frame->rdi, frame->rsi);
+        break;
+    case kSysRtTgsigqueueinfo:
+        rv = DoRtTgsigqueueinfo(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysCreat:
+        rv = DoCreat(frame->rdi, frame->rsi);
+        break;
+    case kSysPreadv:
+        rv = DoPreadv(frame->rdi, frame->rsi, frame->rdx, static_cast<i64>(frame->r10));
+        break;
+    case kSysPwritev:
+        rv = DoPwritev(frame->rdi, frame->rsi, frame->rdx, static_cast<i64>(frame->r10));
+        break;
+    case kSysPreadv2:
+        rv = DoPreadv2(frame->rdi, frame->rsi, frame->rdx, static_cast<i64>(frame->r10), frame->r9);
+        break;
+    case kSysPwritev2:
+        rv = DoPwritev2(frame->rdi, frame->rsi, frame->rdx, static_cast<i64>(frame->r10), frame->r9);
+        break;
+    case kSysAlarm:
+        rv = DoAlarm(frame->rdi);
+        break;
+    case kSysGetitimer:
+        rv = DoGetitimer(frame->rdi, frame->rsi);
+        break;
+    case kSysSetitimer:
+        rv = DoSetitimer(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysMembarrier:
+        rv = DoMembarrier(frame->rdi, frame->rsi);
+        break;
+    case kSysMlock2:
+        rv = DoMlock2(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysFallocate:
+        rv = DoFallocate(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysSyncFileRange:
+        rv = DoSyncFileRange(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysFchmodat2:
+        rv = DoFchmodat2(static_cast<i64>(frame->rdi), frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysOpenat2:
+        rv = DoOpenat2(static_cast<i64>(frame->rdi), frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysEpollPwait2:
+        rv = DoEpollPwait2(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9);
+        break;
+    case kSysSendfile:
+        rv = DoSendfile(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+
+    case kSysSetxattr:
+        rv = DoSetxattr(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysLsetxattr:
+        rv = DoLsetxattr(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysFsetxattr:
+        rv = DoFsetxattr(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysGetxattr:
+        rv = DoGetxattr(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysLgetxattr:
+        rv = DoLgetxattr(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysFgetxattr:
+        rv = DoFgetxattr(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysListxattr:
+        rv = DoListxattr(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysLlistxattr:
+        rv = DoLlistxattr(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysFlistxattr:
+        rv = DoFlistxattr(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysRemovexattr:
+        rv = DoRemovexattr(frame->rdi, frame->rsi);
+        break;
+    case kSysLremovexattr:
+        rv = DoLremovexattr(frame->rdi, frame->rsi);
+        break;
+    case kSysFremovexattr:
+        rv = DoFremovexattr(frame->rdi, frame->rsi);
+        break;
+    case kSysRtSigqueueinfo:
+        rv = DoRtSigqueueinfo(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysUnshare:
+        rv = DoUnshare(frame->rdi);
+        break;
+    case kSysSetns:
+        rv = DoSetns(frame->rdi, frame->rsi);
+        break;
+    case kSysModifyLdt:
+        rv = DoModifyLdt(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysProcessVmReadv:
+        rv = DoProcessVmReadv(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9);
+        break;
+    case kSysProcessVmWritev:
+        rv = DoProcessVmWritev(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9);
+        break;
+    case kSysKcmp:
+        rv = DoKcmp(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysSeccomp:
+        rv = DoSeccomp(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysRestartSyscall:
+        rv = DoRestartSyscall();
+        break;
+    case kSysSchedSetattr:
+        rv = DoSchedSetattr(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysSchedGetattr:
+        rv = DoSchedGetattr(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+
+    case kSysTimerCreate:
+        rv = DoTimerCreate(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysTimerSettime:
+        rv = DoTimerSettime(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysTimerGettime:
+        rv = DoTimerGettime(frame->rdi, frame->rsi);
+        break;
+    case kSysTimerGetoverrun:
+        rv = DoTimerGetoverrun(frame->rdi);
+        break;
+    case kSysTimerDelete:
+        rv = DoTimerDelete(frame->rdi);
+        break;
+    case kSysGetdents:
+        rv = DoGetdents(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysUselib:
+        rv = DoUselib(frame->rdi);
+        break;
+    case kSysRemapFilePages:
+        rv = DoRemapFilePages(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysEpollCtlOld:
+        rv = DoEpollCtlOld(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysEpollWaitOld:
+        rv = DoEpollWaitOld(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysFutexWaitv:
+        rv = DoFutexWaitv(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysFutexWake:
+        rv = DoFutexWake(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysFutexWait:
+        rv = DoFutexWait(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9);
+        break;
+    case kSysFutexRequeue:
+        rv = DoFutexRequeue(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysSetMempolicyHomeNode:
+        rv = DoSetMempolicyHomeNode(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysCachestat:
+        rv = DoCachestat(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysMemfdSecret:
+        rv = DoMemfdSecret(frame->rdi);
+        break;
+    case kSysMapShadowStack:
+        rv = DoMapShadowStack(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysStatmount:
+        rv = DoStatmount(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysListmount:
+        rv = DoListmount(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysLsmGetSelfAttr:
+        rv = DoLsmGetSelfAttr(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysLsmSetSelfAttr:
+        rv = DoLsmSetSelfAttr(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysLsmListModules:
+        rv = DoLsmListModules(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysQuotactlFd:
+        rv = DoQuotactlFd(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysIoPgetevents:
+        rv = DoIoPgetevents(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9);
+        break;
+    case kSysRseq:
+        rv = DoRseq(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+
+    // ============================================================
+    // Linux ABI completeness — explicit -ENOSYS for every spec
+    // syscall we don't implement. Keeps the dispatch dense so
+    // the gap-fill TU only fires for truly unknown numbers.
+    // ============================================================
+    case kSysEnosys_Ustat:
+    case kSysEnosys_Sysfs:
+    case kSysEnosys_Sysctl:
+    case kSysEnosys_CreateModule:
+    case kSysEnosys_GetKernelSyms:
+    case kSysEnosys_QueryModule:
+    case kSysEnosys_Nfsservctl:
+    case kSysEnosys_Getpmsg:
+    case kSysEnosys_Putpmsg:
+    case kSysEnosys_AfsSyscall:
+    case kSysEnosys_Tuxcall:
+    case kSysEnosys_Security:
+    case kSysEnosys_LookupDcookie:
+    case kSysEnosys_Vserver:
+        rv = kENOSYS;
+        break;
+
     default:
     {
-        // Primary dispatch missed — offer to the translation unit
-        // before surfacing -ENOSYS. When the TU fills the gap it
-        // logs the specific translation; when it doesn't, it
-        // logs the miss + we fall through to ENOSYS behaviour.
-        const auto t = translation::LinuxGapFill(frame);
-        if (t.handled)
+        // Primary dispatch is dense across the full Linux x86_64
+        // spec surface (374 numbers, 0..462). Reaching this arm
+        // means the caller used a syscall number outside the
+        // spec — `rv` is already kENOSYS, which is exactly what
+        // a real Linux kernel returns for an unknown number.
+        // Log a one-line miss for telemetry; no separate gap-
+        // fill TU is needed (the translation TU's old
+        // LinuxGapFill was made dead by the dense-table slice
+        // and has been removed).
+        if (proc != nullptr)
         {
-            rv = t.rv;
+            arch::SerialWrite("[linux-miss] unknown syscall nr=");
+            arch::SerialWriteHex(nr);
+            arch::SerialWrite(" pid=");
+            arch::SerialWriteHex(pid);
+            arch::SerialWrite("\n");
         }
-        // If the TU didn't handle it, rv is still the kENOSYS
-        // default from above, and the TU already logged the
-        // gap. No further log here — keeps the boot log clean
-        // while still being able to grep "[translate] ...
-        // unimplemented" for the full missing-syscall set.
         break;
     }
     }
     frame->rax = static_cast<u64>(rv);
+
+    // ITIMER_REAL deadline check — if alarm() / setitimer() has
+    // armed a deadline that has now passed, OR SIGALRM into
+    // pending_signals so the signal-deliver pass below picks it
+    // up on this same syscall return. Lazy delivery (no per-tick
+    // callback hook in v0); see kernel/subsystems/linux/
+    // syscall_timer.cpp for the rationale.
+    LinuxAlarmCheckAndRaise(const_cast<core::Process*>(proc));
 
     // Pending-signal check — if a user-installed handler is due,
     // mutate the trap frame so iretq lands at the handler instead

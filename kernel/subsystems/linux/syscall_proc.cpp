@@ -66,17 +66,24 @@ i64 DoExit(u64 status)
     return DoExitGroup(status);
 }
 
-// Linux getpid() / gettid() on our current single-thread-per-process
-// model both map to the scheduler task ID. Keep them separate helpers
-// anyway so the dispatch table names track the Linux ABI directly and
-// the syscall coverage generator can see a concrete DoGetPid handler.
+// Linux getpid() returns the TGID — in our v0 single-thread-per-
+// process model this is the Process pid (Process::pid, the same id
+// SchedFindProcessByPid resolves against). Returning CurrentTaskId()
+// here would hand back the scheduler task tid, which is a different
+// counter; the immediate symptom was pidfd_open(getpid()) coming
+// back -ESRCH because the tid never matched any Process->pid.
 i64 DoGetPid()
 {
     KLOG_TRACE("linux/proc", "DoGetPid: query");
+    if (core::Process* p = core::CurrentProcess(); p != nullptr)
+        return static_cast<i64>(p->pid);
     return static_cast<i64>(sched::CurrentTaskId());
 }
 
-// Linux: gettid. v0 has one task per process, so tid == pid.
+// Linux: gettid returns the per-thread ID (kernel task tid). In a
+// single-thread-per-process model getpid() == gettid() conceptually,
+// but the underlying counters in DuetOS are distinct (Process::pid
+// vs. Task::id), so keep this on CurrentTaskId().
 i64 DoGetTid()
 {
     KLOG_TRACE("linux/proc", "DoGetTid: query");
@@ -163,17 +170,47 @@ i64 DoKill(u64 pid, u64 sig)
 // is silently a no-op.
 i64 DoGetPpid()
 {
-    return 1;
+    // Linux convention: each process knows its parent pid.
+    // v0 records linux_parent_pid on fork; everyone else
+    // (kernel-spawned smoke processes, init) reports 1
+    // (init's pid) which is the canonical "no real parent"
+    // answer in Linux.
+    const auto* p = core::CurrentProcess();
+    if (p == nullptr)
+        return 1;
+    return (p->linux_parent_pid != 0) ? static_cast<i64>(p->linux_parent_pid) : 1;
 }
 i64 DoGetPgid(u64 pid)
 {
-    (void)pid;
-    return 0;
+    // v0 has no session/pgid model. Linux convention: each
+    // process's pgid defaults to its pid (single-process group).
+    // Returning the calling process's pid for pid==0 (the
+    // self-query convention) gives a sensible answer for any
+    // glibc routine that does `setpgid(0, getpgid(0))`.
+    if (pid == 0)
+    {
+        const auto* p = core::CurrentProcess();
+        return (p != nullptr) ? static_cast<i64>(p->pid) : 0;
+    }
+    // pid != 0: lookup the target. v0 hasn't built a real
+    // pgid table, so report pid itself (each process is its
+    // own group leader). -ESRCH if pid doesn't exist.
+    if (sched::SchedFindProcessByPid(pid) == nullptr)
+        return kESRCH;
+    return static_cast<i64>(pid);
 }
 i64 DoGetSid(u64 pid)
 {
-    (void)pid;
-    return 0;
+    // Same shape as getpgid — each process is its own session
+    // leader in v0.
+    if (pid == 0)
+    {
+        const auto* p = core::CurrentProcess();
+        return (p != nullptr) ? static_cast<i64>(p->pid) : 0;
+    }
+    if (sched::SchedFindProcessByPid(pid) == nullptr)
+        return kESRCH;
+    return static_cast<i64>(pid);
 }
 i64 DoSetPgid(u64 pid, u64 pgid)
 {
@@ -192,7 +229,68 @@ i64 DoGetpgrp()
 // stand-in.
 i64 DoSetsid()
 {
-    return 0;
+    // Linux: setsid creates a new session with the calling
+    // process as session leader. The new sid IS the caller's
+    // pid. v0 has no real session model so we don't actually
+    // create one, but returning the pid matches what Linux
+    // userspace observes.
+    const auto* p = core::CurrentProcess();
+    return (p != nullptr) ? static_cast<i64>(p->pid) : 0;
+}
+
+// =============================================================
+// Signal/scheduler entry points whose v0 implementation is a
+// thin shape-adjustment over an existing handler. Real callers
+// see "the syscall worked" — the discarded payload (siginfo for
+// queueinfo variants, extended attrs for sched_setattr) is the
+// documented sub-GAP.
+// =============================================================
+
+// tkill(tid, sig) — single-thread variant of tgkill. Modern
+// Linux kernels treat it as tgkill(getpid(), tid, sig). Our
+// DoTgkill ignores tgid for the purpose of tid -> Process::pid
+// lookup, so passing 0 is harmless.
+i64 DoTkill(u64 tid, u64 sig)
+{
+    return DoTgkill(0, tid, sig);
+}
+
+// rt_tgsigqueueinfo(tgid, tid, sig, info) — tgkill that also
+// delivers a siginfo payload. v0 has no siginfo delivery, so
+// we drop the info pointer and route to tgkill.
+i64 DoRtTgsigqueueinfo(u64 tgid, u64 tid, u64 sig, u64 user_info)
+{
+    (void)user_info;
+    return DoTgkill(tgid, tid, sig);
+}
+
+// rt_sigqueueinfo(tgid, sig, info) — process-wide sibling of
+// rt_tgsigqueueinfo. v0 treats tid==tgid since the process
+// model is single-threaded.
+i64 DoRtSigqueueinfo(u64 tgid, u64 sig, u64 user_info)
+{
+    (void)user_info;
+    return DoTgkill(tgid, tgid, sig);
+}
+
+// sched_setattr / sched_getattr — extended scheduler policy
+// surface (SCHED_DEADLINE etc.). The v0 scheduler is MLFQ-style
+// and doesn't expose deadline attributes; -EINVAL matches the
+// Linux response when the requested policy isn't supported.
+i64 DoSchedSetattr(u64 pid, u64 attr, u64 flags)
+{
+    (void)pid;
+    (void)attr;
+    (void)flags;
+    return kEINVAL;
+}
+i64 DoSchedGetattr(u64 pid, u64 attr, u64 size, u64 flags)
+{
+    (void)pid;
+    (void)attr;
+    (void)size;
+    (void)flags;
+    return kEINVAL;
 }
 
 } // namespace duetos::subsystems::linux::internal

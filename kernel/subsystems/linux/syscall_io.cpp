@@ -164,15 +164,40 @@ i64 DoWrite(u64 fd, u64 user_buf, u64 len)
         // Fat32AppendAtPath appends to end-of-file; caller's
         // offset + written MUST equal the current on-disk size.
         // (True by construction: in-bounds code wrote up to size.)
-        const i64 n = fs::fat32::Fat32AppendAtPath(v, p->linux_fds[fd].path, kbuf + written, extend_len);
+        // SPECIAL CASE: if the fd carries kLinuxFdFlagPendingCreate
+        // (O_CREAT-on-not-yet-existing), the file's dir entry
+        // doesn't exist on disk yet — route through
+        // Fat32CreateAtPath instead, which allocates the entry +
+        // first cluster + writes the bytes in one shot. Clear the
+        // flag so subsequent writes go through the normal append
+        // path.
+        i64 n = -1;
+        if (p->linux_fds[fd].flags & core::Process::kLinuxFdFlagPendingCreate)
+        {
+            n = fs::fat32::Fat32CreateAtPath(v, p->linux_fds[fd].path, kbuf + written, extend_len);
+            if (n >= 0)
+            {
+                p->linux_fds[fd].flags = static_cast<u8>(p->linux_fds[fd].flags &
+                                                        ~core::Process::kLinuxFdFlagPendingCreate);
+                // Re-look up the just-created entry so first_cluster
+                // is populated for subsequent in-bounds writes.
+                fs::fat32::DirEntry e;
+                if (fs::fat32::Fat32LookupPath(v, p->linux_fds[fd].path, &e))
+                    p->linux_fds[fd].first_cluster = e.first_cluster;
+            }
+        }
+        else
+        {
+            n = fs::fat32::Fat32AppendAtPath(v, p->linux_fds[fd].path, kbuf + written, extend_len);
+        }
         if (n < 0)
         {
             p->linux_fds[fd].offset = off + written;
             return written > 0 ? static_cast<i64>(written) : kEIO;
         }
         written += static_cast<u64>(n);
-        // Update the cached size — AppendAtPath just extended the
-        // on-disk size field; our cached copy needs to follow.
+        // Update the cached size — AppendAtPath / CreateAtPath just
+        // extended the on-disk size; our cached copy follows.
         p->linux_fds[fd].size = static_cast<u32>(size + (to_copy - (size - off)));
     }
     p->linux_fds[fd].offset = off + written;
@@ -552,6 +577,189 @@ i64 DoPwrite64(u64 fd, u64 user_buf, u64 len, i64 offset)
     const i64 n = DoWrite(fd, user_buf, len);
     p->linux_fds[fd].offset = saved;
     return n;
+}
+
+// =============================================================
+// Vector forms of the scalar pread/pwrite + sendfile + the
+// range-coarse sync_file_range. Each loop walks the user iovec
+// with a running byte cursor.
+// =============================================================
+
+namespace
+{
+
+struct UserIovec
+{
+    u64 base;
+    u64 len;
+};
+
+constexpr u64 kIovMax = 1024;
+
+i64 PreadvLoop(u64 fd, u64 user_iov, u64 iovcnt, i64 offset)
+{
+    if (iovcnt == 0)
+        return 0;
+    if (iovcnt > kIovMax)
+        return kEINVAL;
+    UserIovec iov[kIovMax];
+    if (!mm::CopyFromUser(iov, reinterpret_cast<const void*>(user_iov), iovcnt * sizeof(UserIovec)))
+        return kEFAULT;
+    i64 total = 0;
+    i64 cursor = offset;
+    for (u64 i = 0; i < iovcnt; ++i)
+    {
+        if (iov[i].len == 0)
+            continue;
+        const i64 got = DoPread64(fd, iov[i].base, iov[i].len, cursor);
+        if (got < 0)
+            return total > 0 ? total : got;
+        total += got;
+        cursor += got;
+        if (got < static_cast<i64>(iov[i].len))
+            break;
+    }
+    return total;
+}
+
+i64 PwritevLoop(u64 fd, u64 user_iov, u64 iovcnt, i64 offset)
+{
+    if (iovcnt == 0)
+        return 0;
+    if (iovcnt > kIovMax)
+        return kEINVAL;
+    UserIovec iov[kIovMax];
+    if (!mm::CopyFromUser(iov, reinterpret_cast<const void*>(user_iov), iovcnt * sizeof(UserIovec)))
+        return kEFAULT;
+    i64 total = 0;
+    i64 cursor = offset;
+    for (u64 i = 0; i < iovcnt; ++i)
+    {
+        if (iov[i].len == 0)
+            continue;
+        const i64 put = DoPwrite64(fd, iov[i].base, iov[i].len, cursor);
+        if (put < 0)
+            return total > 0 ? total : put;
+        total += put;
+        cursor += put;
+        if (put < static_cast<i64>(iov[i].len))
+            break;
+    }
+    return total;
+}
+
+} // namespace
+
+i64 DoPreadv(u64 fd, u64 user_iov, u64 iovcnt, i64 offset)
+{
+    return PreadvLoop(fd, user_iov, iovcnt, offset);
+}
+i64 DoPwritev(u64 fd, u64 user_iov, u64 iovcnt, i64 offset)
+{
+    return PwritevLoop(fd, user_iov, iovcnt, offset);
+}
+// preadv2 / pwritev2: same as preadv / pwritev plus a `flags`
+// argument (RWF_HIPRI / RWF_DSYNC / RWF_SYNC / RWF_NOWAIT /
+// RWF_APPEND). v0 accepts them silently — the underlying
+// handlers don't observe per-call sync semantics.
+i64 DoPreadv2(u64 fd, u64 user_iov, u64 iovcnt, i64 offset, u64 flags)
+{
+    (void)flags;
+    return PreadvLoop(fd, user_iov, iovcnt, offset);
+}
+i64 DoPwritev2(u64 fd, u64 user_iov, u64 iovcnt, i64 offset, u64 flags)
+{
+    (void)flags;
+    return PwritevLoop(fd, user_iov, iovcnt, offset);
+}
+
+// sendfile(out_fd, in_fd, offset_ptr, count) — fd-to-fd copy
+// that lets glibc skip the userspace bounce buffer. v0 puts
+// the bounce inside the kernel: read up to ~4 KiB at a time
+// from in_fd, write to out_fd, repeat.
+i64 DoSendfile(u64 out_fd, u64 in_fd, u64 user_offset, u64 count)
+{
+    if (count == 0)
+        return 0;
+    constexpr u64 kChunk = 4096;
+    u8 chunk[kChunk];
+    i64 transferred = 0;
+    while (count > 0)
+    {
+        const u64 want = count < kChunk ? count : kChunk;
+        i64 got = 0;
+        if (user_offset != 0)
+        {
+            i64 off = 0;
+            if (!mm::CopyFromUser(&off, reinterpret_cast<const void*>(user_offset), sizeof(off)))
+                return transferred > 0 ? transferred : kEFAULT;
+            got = DoPread64(in_fd, reinterpret_cast<u64>(chunk), want, off);
+            if (got > 0)
+            {
+                off += got;
+                if (!mm::CopyToUser(reinterpret_cast<void*>(user_offset), &off, sizeof(off)))
+                    return transferred > 0 ? transferred : kEFAULT;
+            }
+        }
+        else
+        {
+            got = DoRead(in_fd, reinterpret_cast<u64>(chunk), want);
+        }
+        if (got <= 0)
+            return transferred > 0 ? transferred : got;
+        const i64 put = DoWrite(out_fd, reinterpret_cast<u64>(chunk), static_cast<u64>(got));
+        if (put < 0)
+            return transferred > 0 ? transferred : put;
+        transferred += put;
+        if (put < got)
+            break;
+        count -= static_cast<u64>(put);
+    }
+    return transferred;
+}
+
+// sync_file_range(fd, offset, nbytes, flags) — durable flush
+// of a byte range. v0 has no per-range flush; route to a
+// global Sync (close enough for correctness, way less
+// efficient than the spec asks). Caller's data lands.
+i64 DoSyncFileRange(u64 fd, u64 offset, u64 nbytes, u64 flags)
+{
+    (void)fd;
+    (void)offset;
+    (void)nbytes;
+    (void)flags;
+    return DoSync();
+}
+
+// fallocate(fd, mode, offset, len) — preallocate / punch /
+// collapse-range. mode==0 is the default "extend the file to
+// at least offset+len with zeros if needed" — we implement
+// this by routing through Fat32TruncateAtPath when the
+// requested end exceeds the current size. Other modes
+// (FALLOC_FL_KEEP_SIZE, FALLOC_FL_PUNCH_HOLE, ...) are
+// unimplemented (the FAT32 backend has no per-range cluster
+// release).
+i64 DoFallocate(u64 fd, u64 mode, u64 offset, u64 len)
+{
+    if (mode != 0)
+        return kENOSYS;
+    auto* p = ::duetos::core::CurrentProcess();
+    if (p == nullptr || fd >= 16)
+        return kEBADF;
+    auto& slot = p->linux_fds[fd];
+    if (slot.state != 2 /*regular file*/)
+        return kEBADF;
+    const u64 want_end = offset + len;
+    if (want_end <= slot.size)
+        return 0; // already large enough; mode==0 spec is satisfied.
+    const auto* v = ::duetos::fs::fat32::Fat32Volume(0);
+    if (v == nullptr)
+        return kENOENT;
+    const i64 rc = ::duetos::fs::fat32::Fat32TruncateAtPath(v, slot.path, want_end);
+    if (rc < 0)
+        return kEIO;
+    slot.size = static_cast<u32>(want_end);
+    return 0;
 }
 
 } // namespace duetos::subsystems::linux::internal

@@ -28,7 +28,10 @@
 #include "core/panic.h"
 #include "proc/process.h"
 #include "proc/ring3_smoke.h"
-#include "core/generated_synxtest_elf.h"
+#include "generated_synet_elf.h"
+#include "generated_synfs_elf.h"
+#include "generated_synfull_elf.h"
+#include "generated_synxtest_elf.h"
 #include "cpu/percpu.h"
 #include "fs/ramfs.h"
 #include "mm/address_space.h"
@@ -805,6 +808,85 @@ void SpawnSynxTestElf()
     }
 }
 
+void SpawnSynfsElf()
+{
+    KLOG_TRACE_SCOPE("linux/smoke", "SpawnSynfsElf");
+
+    // FS-mutation Linux-ABI exerciser. Same pattern as synxtest but
+    // with kCapFsRead + kCapFsWrite so mkdir/rmdir/rename/chmod/etc.
+    // actually reach the kernel handler (synxtest is caps=<none>).
+    // Boot log surfaces `[fs] <name> rc=<rc>` per call.
+    core::CapSet caps = core::CapSetEmpty();
+    core::CapSetAdd(caps, core::kCapFsRead);
+    core::CapSetAdd(caps, core::kCapFsWrite);
+    const u64 pid = core::SpawnElfLinux("synfs", fs::generated::kBinSynfsElfBytes,
+                                        fs::generated::kBinSynfsElfBytes_len, caps,
+                                        fs::RamfsSandboxRoot(), /*frame_budget=*/32, core::kTickBudgetSandbox);
+    if (pid == 0)
+    {
+        arch::SerialWrite("[linux] SpawnElfLinux FAILED for synfs\n");
+    }
+    else
+    {
+        arch::SerialWrite("[linux] queued synfs: FS-mutation exerciser, expect [fs] lines\n");
+    }
+}
+
+void SpawnSynetElf()
+{
+    KLOG_TRACE_SCOPE("linux/smoke", "SpawnSynetElf");
+
+    // Socket-family Linux-ABI exerciser. kCapNet so socket / bind /
+    // listen / accept / connect / sendto / recvfrom / setsockopt /
+    // getsockopt etc. actually reach the kernel handler. Boot log
+    // surfaces `[net] <name> rc=<rc>` per call.
+    core::CapSet caps = core::CapSetEmpty();
+    core::CapSetAdd(caps, core::kCapNet);
+    const u64 pid = core::SpawnElfLinux("synet", fs::generated::kBinSynetElfBytes,
+                                        fs::generated::kBinSynetElfBytes_len, caps,
+                                        fs::RamfsSandboxRoot(), /*frame_budget=*/32, core::kTickBudgetSandbox);
+    if (pid == 0)
+    {
+        arch::SerialWrite("[linux] SpawnElfLinux FAILED for synet\n");
+    }
+    else
+    {
+        arch::SerialWrite("[linux] queued synet: socket-family exerciser, expect [net] lines\n");
+    }
+}
+
+void SpawnSynfullElf()
+{
+    KLOG_TRACE_SCOPE("linux/smoke", "SpawnSynfullElf");
+
+    // Exhaustive Linux-ABI coverage exerciser. Issues every spec
+    // syscall in 0..462 (modulo a small skip-list of process-
+    // destructive ones) with zero args, prints `[full] <nr>=<rc>`
+    // per call. Spawned with every cap we know about so cap-gated
+    // syscalls actually reach their handler.
+    core::CapSet caps = core::CapSetEmpty();
+    core::CapSetAdd(caps, core::kCapFsRead);
+    core::CapSetAdd(caps, core::kCapFsWrite);
+    core::CapSetAdd(caps, core::kCapNet);
+    core::CapSetAdd(caps, core::kCapSpawnThread);
+    // Larger frame + tick budget — the loop runs ~440 iterations
+    // and each syscall is at least a few page-touches. Budget
+    // matches a heavyweight smoke; if synfull starves itself the
+    // scheduler will kill the slot and the boot log will say so.
+    const u64 pid = core::SpawnElfLinux("synfull", fs::generated::kBinSynfullElfBytes,
+                                        fs::generated::kBinSynfullElfBytes_len, caps,
+                                        fs::RamfsSandboxRoot(), /*frame_budget=*/64,
+                                        core::kTickBudgetSandbox * 4);
+    if (pid == 0)
+    {
+        arch::SerialWrite("[linux] SpawnElfLinux FAILED for synfull\n");
+    }
+    else
+    {
+        arch::SerialWrite("[linux] queued synfull: exhaustive 0..462 exerciser, expect [full] lines\n");
+    }
+}
+
 // Translation-unit exerciser. Three syscalls that the primary
 // Linux dispatcher doesn't handle, so the TU gets a chance:
 //   sys_madvise(0x7f000000, 4096, 0)  -> no-op translation
@@ -848,20 +930,24 @@ void SpawnRing3LinuxTranslateSmoke()
 
     AddressSpace* as = AddressSpaceCreate(/*frame_budget=*/16);
     if (as == nullptr)
+    {
         core::DebugPanicOrWarn("linux/smoke", "AddressSpaceCreate failed");
-    return;
+        return;
+    }
     const PhysAddr code_frame = AllocateFrame();
     const PhysAddr stack_frame = AllocateFrame();
     if (code_frame == mm::kNullFrame || stack_frame == mm::kNullFrame)
+    {
         core::DebugPanicOrWarn("linux/smoke", "frame alloc failed");
-    return;
+        return;
+    }
     auto* code_direct = static_cast<u8*>(mm::PhysToVirt(code_frame));
     for (u64 i = 0; i < mm::kPageSize; ++i)
         code_direct[i] = 0;
     for (u64 i = 0; i < sizeof(kTranslatePayload); ++i)
         code_direct[i] = kTranslatePayload[i];
 
-    // Dedicated VA so this task doesn't collide with the others.
+    // Per-process AS, so VA can match the mmap-smoke without conflict.
     const u64 code_va = 0x0000'6A00'0000'0000ull;
     const u64 stack_va = code_va + 0x10000;
     AddressSpaceMapUserPage(as, code_va, code_frame, mm::kPagePresent | mm::kPageUser);
@@ -870,8 +956,10 @@ void SpawnRing3LinuxTranslateSmoke()
     Process* proc = ProcessCreate("linux-translate-smoke", as, core::CapSetEmpty(), fs::RamfsSandboxRoot(), code_va,
                                   stack_va, core::kTickBudgetSandbox);
     if (proc == nullptr)
+    {
         core::DebugPanicOrWarn("linux/smoke", "ProcessCreate failed");
-    return;
+        return;
+    }
     proc->abi_flavor = kAbiLinux;
     proc->linux_brk_base = code_va + 0x100'0000ull;
     proc->linux_brk_current = proc->linux_brk_base;
@@ -1072,13 +1160,17 @@ void SpawnRing3LinuxExtendSmoke()
 
     AddressSpace* as = AddressSpaceCreate(/*frame_budget=*/16);
     if (as == nullptr)
+    {
         core::DebugPanicOrWarn("linux/smoke", "AddressSpaceCreate failed");
-    return;
+        return;
+    }
     const PhysAddr code_frame = AllocateFrame();
     const PhysAddr stack_frame = AllocateFrame();
     if (code_frame == mm::kNullFrame || stack_frame == mm::kNullFrame)
+    {
         core::DebugPanicOrWarn("linux/smoke", "frame alloc failed");
-    return;
+        return;
+    }
     auto* code_direct = static_cast<u8*>(mm::PhysToVirt(code_frame));
     for (u64 i = 0; i < mm::kPageSize; ++i)
         code_direct[i] = 0;
@@ -1093,8 +1185,10 @@ void SpawnRing3LinuxExtendSmoke()
     Process* proc = ProcessCreate("linux-extend-smoke", as, core::CapSetEmpty(), fs::RamfsSandboxRoot(), code_va,
                                   stack_va, core::kTickBudgetSandbox);
     if (proc == nullptr)
+    {
         core::DebugPanicOrWarn("linux/smoke", "ProcessCreate failed");
-    return;
+        return;
+    }
     proc->abi_flavor = kAbiLinux;
     proc->linux_brk_base = code_va + 0x100'0000ull;
     proc->linux_brk_current = proc->linux_brk_base;

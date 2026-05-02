@@ -155,6 +155,41 @@ duetos_embed_blob(generated_syscall_stress.h
     DEFS_DIR "${CMAKE_SOURCE_DIR}/userland/apps/syscall_stress"
     COMMENT  "Compiling + embedding /bin/syscall_stress.exe (batch 51 API coverage)")
 
+# /bin/synxtest.elf — freestanding Linux-ABI exerciser. No libc, no
+# crt — synxtest.c defines _start and inline syscall asm. The kernel
+# spawns it via SpawnSynxTestElf to print pass/fail tags per Linux
+# syscall, surfacing live coverage of the ABI on every boot.
+duetos_embed_blob(generated_synxtest_elf.h
+    SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-synxtest.sh"
+    SRC     "${CMAKE_SOURCE_DIR}/userland/apps/synxtest/synxtest.c"
+    COMMENT "Compiling + embedding /bin/synxtest.elf (Linux-ABI exerciser)")
+
+# /bin/synfs.elf — sister of synxtest. Targets FS-mutation
+# syscalls (mkdir/rmdir/rename/chmod/truncate/unlink/copy_file_range/...)
+# and runs with kCapFsRead + kCapFsWrite so each call actually
+# reaches the filesystem instead of bouncing off the cap gate.
+duetos_embed_blob(generated_synfs_elf.h
+    SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-synfs.sh"
+    SRC     "${CMAKE_SOURCE_DIR}/userland/apps/synfs/synfs.c"
+    COMMENT "Compiling + embedding /bin/synfs.elf (Linux-ABI FS-mut exerciser)")
+
+# /bin/synet.elf — sister of synfs. Targets socket-family syscalls
+# (socket/bind/listen/accept/connect/sendto/recvfrom/setsockopt/
+# getsockopt/...) and runs with kCapNet so each call actually
+# reaches the kernel handler.
+duetos_embed_blob(generated_synet_elf.h
+    SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-synet.sh"
+    SRC     "${CMAKE_SOURCE_DIR}/userland/apps/synet/synet.c"
+    COMMENT "Compiling + embedding /bin/synet.elf (Linux-ABI socket exerciser)")
+
+# /bin/synfull.elf — exhaustive Linux-ABI exerciser. Issues every
+# spec syscall (0..462) with zero-args, prints rc per call. Spawned
+# with all caps so cap-gated calls reach their real handler.
+duetos_embed_blob(generated_synfull_elf.h
+    SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-synfull.sh"
+    SRC     "${CMAKE_SOURCE_DIR}/userland/apps/synfull/synfull.c"
+    COMMENT "Compiling + embedding /bin/synfull.elf (Linux-ABI exhaustive exerciser)")
+
 duetos_embed_blob(generated_windowed_hello.h
     SCRIPT   "${CMAKE_SOURCE_DIR}/tools/build/build-windowed-hello.sh"
     SRC      "${CMAKE_SOURCE_DIR}/userland/apps/windowed_hello/hello.c"

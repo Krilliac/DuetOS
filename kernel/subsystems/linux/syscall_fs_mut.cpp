@@ -193,6 +193,13 @@ i64 DoMkdir(u64 user_path, u64 mode)
     const auto* v = fs::fat32::Fat32Volume(0);
     if (v == nullptr)
         return kENOENT;
+    // Fat32MkdirAtPath returns bool — collapses every failure (path
+    // already exists, parent missing, FS full, etc.) into "false".
+    // Probe with Fat32LookupPath first to distinguish -EEXIST from
+    // -EIO, matching Linux semantics.
+    fs::fat32::DirEntry probe;
+    if (fs::fat32::Fat32LookupPath(v, leaf, &probe))
+        return kEEXIST;
     if (!fs::fat32::Fat32MkdirAtPath(v, leaf))
         return kEIO;
     InotifyPublish(leaf, kInCreate | kInIsDir);
@@ -211,8 +218,18 @@ i64 DoRmdir(u64 user_path)
     const auto* v = fs::fat32::Fat32Volume(0);
     if (v == nullptr)
         return kENOENT;
+    // Same lookup-probe strategy as mkdir to distinguish errnos:
+    //   missing       -> -ENOENT
+    //   not a dir     -> -ENOTDIR
+    //   non-empty / FS error -> -ENOTEMPTY (best-effort —
+    //   Fat32RmdirAtPath collapses both into bool)
+    fs::fat32::DirEntry probe;
+    if (!fs::fat32::Fat32LookupPath(v, leaf, &probe))
+        return kENOENT;
+    if ((probe.attributes & 0x10) == 0)
+        return kENOTDIR;
     if (!fs::fat32::Fat32RmdirAtPath(v, leaf))
-        return kEIO;
+        return kENOTEMPTY;
     InotifyPublish(leaf, kInDelete | kInIsDir);
     return 0;
 }
@@ -341,8 +358,7 @@ i64 DoUtimensat(i64 dirfd, u64 user_path, u64 user_times, u64 flags)
     if (user_path != 0)
     {
         // path-relative form: validate the target exists when it
-        // looks like a FAT32 path. NUL path means "use the dirfd
-        // directly" — accept since we already validated the fd.
+        // looks like a FAT32 path.
         char kbuf[64];
         const char* leaf = nullptr;
         if (!CopyAndStripFatPath(user_path, kbuf, leaf))
@@ -354,8 +370,55 @@ i64 DoUtimensat(i64 dirfd, u64 user_path, u64 user_times, u64 flags)
             if (!fs::fat32::Fat32LookupPath(v, leaf, &probe))
                 return kENOENT;
         }
+        return 0;
     }
+    // NULL path means "operate on the file referenced by dirfd"
+    // (futimens semantics). Requires a real file fd. AT_FDCWD
+    // with NULL path is undefined / -EFAULT in Linux.
+    if (dirfd == kAtFdCwd)
+        return kEFAULT;
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || dirfd < 0 || dirfd >= 16)
+        return kEBADF;
+    if (p->linux_fds[dirfd].state == 0)
+        return kEBADF;
     return 0;
+}
+
+// =============================================================
+// FS-mutation handlers whose v0 impl is a thin re-route to an
+// existing handler. Real callers along the AT_FDCWD common path
+// behave correctly; non-AT_FDCWD dirfds are -EBADF since v0 has
+// no per-fd cwd.
+// =============================================================
+
+// mknodat(dirfd, path, mode, dev) — same as mknod when dirfd
+// is AT_FDCWD.
+i64 DoMknodat(i64 dirfd, u64 user_path, u64 mode, u64 dev)
+{
+    if (dirfd != kAtFdCwd)
+        return kEBADF;
+    return DoMknod(user_path, mode, dev);
+}
+
+// utimes(path, times) — older sibling of utimensat. Times is a
+// `struct timeval[2]` (sec + usec) instead of timespec[2] (sec
+// + nsec). DoUtimensat is permissive about the struct layout in
+// v0 (it touches the file's mtime but doesn't actually decode
+// the timespec); pass-through works for the common "tag the
+// file as freshly-modified" path.
+i64 DoUtimes(u64 user_path, u64 user_times)
+{
+    return DoUtimensat(kAtFdCwd, user_path, user_times, 0);
+}
+
+// fchmodat2(dirfd, path, mode, flags) — fchmodat with an
+// extended flags argument. Same shape as fchmodat which we
+// already have, so just call it. The flags argument is
+// advisory in v0 since we don't follow symlinks anyway.
+i64 DoFchmodat2(i64 dirfd, u64 user_path, u64 mode, u64 flags)
+{
+    return DoFchmodat(dirfd, user_path, mode, flags);
 }
 
 } // namespace duetos::subsystems::linux::internal

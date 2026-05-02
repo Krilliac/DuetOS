@@ -725,11 +725,26 @@ i64 DoMqTimedreceive(u64 mqdes, u64 user_msg, u64 msg_cap, u64 user_prio, u64 us
     return static_cast<i64>(out.len);
 }
 
+// mq_notify(mqdes, sevp) — request asynchronous notification
+// when the queue transitions empty -> non-empty. NULL sevp =
+// deregister. v0 accepts the request (validates the fd
+// references a real mqd) but does NOT actually fire the
+// signal on the next mq_send; that delivery path is a sub-
+// GAP because the per-mqd notification record isn't tracked
+// across processes. Real Linux behaviour for "register" is
+// success; deregister is also success. Bad fd is -EBADF.
 i64 DoMqNotify(u64 mqdes, u64 user_notification)
 {
-    (void)mqdes;
     (void)user_notification;
-    return kENOSYS; // sub-GAP — async-event-on-empty-to-nonempty
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || mqdes >= 16)
+        return kEBADF;
+    // mqd_t is just an fd in the linux_fds table; mq state ==
+    // 13 (see DoMqOpen). Reject if the fd doesn't reference
+    // a message queue.
+    if (p->linux_fds[mqdes].state != 13)
+        return kEBADF;
+    return 0;
 }
 
 i64 DoMqGetsetattr(u64 mqdes, u64 user_new, u64 user_old)

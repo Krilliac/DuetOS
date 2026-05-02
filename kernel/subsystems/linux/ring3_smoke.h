@@ -51,9 +51,31 @@ void SpawnRing3LinuxMmapSmoke();
 /// Host-compiled static C binary that exercises a spread of Linux
 /// syscalls and prints a pass/fail tag for each. Source lives in
 /// userland/apps/synxtest/synxtest.c; the compiled ELF is embedded
-/// into the kernel image via kernel/core/generated_synxtest_elf.h
-/// (rebuild via tools/build/embed-blob.py if the source changes).
+/// into the kernel image via the CMake-driven build pipeline (see
+/// duetos_embed_blob(generated_synxtest_elf.h ...) in
+/// kernel/CMakeLists.txt + tools/build/build-synxtest.sh).
 void SpawnSynxTestElf();
+
+/// Sister of SpawnSynxTestElf — spawns userland/apps/synfs/synfs.c
+/// with kCapFsRead + kCapFsWrite. Targets FS-mutation syscalls
+/// (mkdir/rmdir/rename/chmod/truncate/unlink/copy_file_range/...)
+/// so each one actually reaches the filesystem instead of bouncing
+/// off the sandbox cap gate the way synxtest's calls do.
+void SpawnSynfsElf();
+
+/// Sister of SpawnSynfsElf — spawns userland/apps/synet/synet.c
+/// with kCapNet. Targets the BSD socket family
+/// (socket/bind/listen/accept/connect/sendto/recvfrom/setsockopt/
+/// getsockopt/...) so each call reaches the v0 net stack instead
+/// of bouncing off the dispatch-level kCapNet gate.
+void SpawnSynetElf();
+
+/// Exhaustive variant — spawns userland/apps/synfull/synfull.c
+/// with every available cap so each Linux x86_64 spec syscall
+/// (0..462, modulo a small skip-list of dangerous ones) reaches
+/// its handler. Prints `[full] <nr>=<rc>` per call so the boot
+/// log carries a complete syscall-coverage matrix.
+void SpawnSynfullElf();
 
 /// Exercises the ABI translation unit. Issues one syscall that
 /// the TU fills with a no-op (sys_madvise) and one it declines

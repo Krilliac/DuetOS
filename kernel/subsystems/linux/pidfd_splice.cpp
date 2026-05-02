@@ -94,6 +94,12 @@ sched::WaitQueue* LinuxPidfdExitWq()
 i64 DoPidfdOpen(u64 pid, u64 flags)
 {
     (void)flags; // PIDFD_NONBLOCK accepted but ignored
+    // pid==0 is invalid in pidfd_open (real Linux returns
+    // -EINVAL since "self" is not addressable that way; the
+    // documented "no pid" sentinel for pidfd_open is just
+    // bad-input).
+    if (static_cast<i64>(pid) <= 0)
+        return kEINVAL;
     core::Process* caller = core::CurrentProcess();
     if (caller == nullptr)
         return kEPERM;

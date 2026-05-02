@@ -334,8 +334,16 @@ i64 DoSelect(u64 nfds, u64 rfds, u64 wfds, u64 efds, u64 timeout)
 i64 DoGetdents64(u64 fd, u64 user_buf, u64 count)
 {
     core::Process* p = core::CurrentProcess();
-    if (p == nullptr || fd >= 16 || p->linux_fds[fd].state != 11)
+    if (p == nullptr || fd >= 16)
         return kEBADF;
+    const u32 state = p->linux_fds[fd].state;
+    if (state == 0)
+        return kEBADF;
+    // Linux distinguishes "bad fd" from "fd is valid but not a
+    // directory": getdents64 on a regular file / pipe / socket
+    // returns -ENOTDIR, not -EBADF.
+    if (state != 11)
+        return kENOTDIR;
     const u32 dslot = p->linux_fds[fd].first_cluster;
     if (dslot >= core::Process::kWin32DirCap)
         return kEINVAL;
@@ -512,14 +520,24 @@ i64 DoPersonality(u64 persona)
 // scheduler — return 0 (neutral nice value); accept set as no-op.
 i64 DoGetpriority(u64 which, u64 who)
 {
-    (void)which;
     (void)who;
-    return 0;
+    // PRIO_PROCESS=0, PRIO_PGRP=1, PRIO_USER=2 — anything else
+    // is invalid input.
+    if (which > 2)
+        return kEINVAL;
+    // Linux returns 20 - actual_nice, where actual_nice is 0
+    // for the default. Userspace decodes it as nice = 20 - rv.
+    // Returning 20 means "default nice (0)" in their idiom.
+    return 20;
 }
 i64 DoSetpriority(u64 which, u64 who, u64 prio)
 {
-    (void)which;
     (void)who;
+    if (which > 2)
+        return kEINVAL;
+    // prio is a 32-bit signed value. Linux clamps to [-20, 19]
+    // and only privileged callers can lower nice. v0 doesn't
+    // model nice; accept any value as no-op.
     (void)prio;
     return 0;
 }
@@ -640,9 +658,168 @@ i64 DoPrctl(u64 option, u64 arg2, u64 arg3, u64 arg4, u64 arg5)
     }
     case kPrSetSeccomp:
         return kEINVAL;
+    // Common-but-niche options accepted as no-ops. v0 doesn't
+    // model these fully (no real cap-bounding-set, no THP, no
+    // no-new-privs enforcement) but real binaries handle the
+    // accept-as-noop response gracefully.
+    case 7:    // PR_GET_KEEPCAPS — capabilities preserved across uid change
+        return 0;
+    case 8:    // PR_SET_KEEPCAPS
+        return 0;
+    case 9:    // PR_GET_FPEMU — FP emulation flag (deprecated)
+        return 0;
+    case 10:   // PR_SET_FPEMU
+        return 0;
+    case 11:   // PR_GET_FPEXC — FP exception mode
+        return 0;
+    case 12:   // PR_SET_FPEXC
+        return 0;
+    case 13:   // PR_GET_TIMING
+        return 0; // PR_TIMING_STATISTICAL
+    case 14:   // PR_SET_TIMING
+        return 0;
+    case 17:   // PR_GET_ENDIAN — process endianness (PPC-specific)
+        return 0; // little-endian (PR_ENDIAN_LITTLE)
+    case 18:   // PR_SET_ENDIAN
+        return 0;
+    case 19:   // PR_GET_SECCOMP — companion to kPrSetSeccomp
+        return 0; // SECCOMP_MODE_DISABLED
+    case 23:   // PR_CAPBSET_READ — bounding-set introspection
+        return 1; // pretend the cap is in the set
+    case 24:   // PR_CAPBSET_DROP
+        return 0;
+    case 25:   // PR_GET_TSC — process TSC access
+        return 0; // PR_TSC_ENABLE
+    case 26:   // PR_SET_TSC
+        return 0;
+    case 27:   // PR_GET_SECUREBITS
+        return 0;
+    case 28:   // PR_SET_SECUREBITS
+        return 0;
+    case 29:   // PR_SET_TIMERSLACK
+        return 0;
+    case 30:   // PR_GET_TIMERSLACK
+        return 50000; // 50us — Linux's default
+    case 35:   // PR_SET_MM — modify MM fields. Accepted as no-op.
+        return 0;
+    case 36:   // PR_SET_PTRACER — limit ptracer pid
+        return 0;
+    case 37:   // PR_SET_CHILD_SUBREAPER
+        return 0;
+    case 38:   // PR_SET_NO_NEW_PRIVS
+        return 0;
+    case 39:   // PR_GET_NO_NEW_PRIVS
+        return 0;
+    case 40:   // PR_GET_TID_ADDRESS
+        return 0;
+    case 41:   // PR_SET_THP_DISABLE
+        return 0;
+    case 42:   // PR_GET_THP_DISABLE
+        return 0;
+    case 47:   // PR_CAP_AMBIENT — ambient capability set
+        return 0;
+    case 53:   // PR_SET_VMA — name a VMA. Accepted no-op.
+        return 0;
+    case 55:   // PR_GET_SPECULATION_CTRL — Spectre / Meltdown
+        return 0;
+    case 56:   // PR_SET_SPECULATION_CTRL
+        return 0;
+    case 57:   // PR_GET_TAGGED_ADDR_CTRL — ARM tagged-addr (x86 N/A)
+        return 0;
+    case 58:   // PR_SET_TAGGED_ADDR_CTRL
+        return 0;
     default:
         return kEINVAL;
     }
+}
+
+// =============================================================
+// readlinkat + legacy getdents.
+// =============================================================
+
+// readlinkat(dirfd, path, buf, bufsiz) — readlink with a dirfd
+// prefix. v0 has no per-fd cwd, so non-AT_FDCWD is -EBADF.
+i64 DoReadlinkat(i64 dirfd, u64 user_path, u64 user_buf, u64 bufsiz)
+{
+    if (dirfd != kAtFdCwd)
+        return kEBADF;
+    return DoReadlink(user_path, user_buf, bufsiz);
+}
+
+// getdents(fd, dirp, count) — pre-2.6.4 directory iteration.
+// The legacy `struct linux_dirent` packs d_type as a hidden
+// trailing byte at offset reclen-1 instead of an explicit
+// field. This is the real format-conversion implementation —
+// we walk the same FAT32 dir entries getdents64 reads, but
+// emit the older record layout so musl/glibc-built-against-
+// 2.6.3 binaries get the bytes they expect.
+//
+// Legacy struct layout:
+//   u64 d_ino
+//   u64 d_off
+//   u16 d_reclen
+//   char d_name[]   (NUL-terminated)
+//   ... padding to align ...
+//   u8 d_type       (LAST byte of the record; offset reclen-1)
+i64 DoGetdents(u64 fd, u64 user_buf, u64 count)
+{
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || fd >= 16)
+        return kEBADF;
+    const u32 state = p->linux_fds[fd].state;
+    if (state == 0)
+        return kEBADF;
+    if (state != 11)
+        return kENOTDIR;
+    const u32 dslot = p->linux_fds[fd].first_cluster;
+    if (dslot >= core::Process::kWin32DirCap)
+        return kEINVAL;
+    auto& dh = p->win32_dirs[dslot];
+    if (!dh.in_use || dh.entries == nullptr)
+        return kEBADF;
+    auto* entries = static_cast<fs::fat32::DirEntry*>(dh.entries);
+    u8 stage[1024];
+    u64 emitted = 0;
+    while (dh.next_index < dh.entry_count)
+    {
+        const auto& e = entries[dh.next_index];
+        u32 nlen = 0;
+        while (nlen < sizeof(e.name) - 1 && e.name[nlen] != '\0')
+            ++nlen;
+        // header(18) + name + NUL + d_type(1)
+        u32 record = 18 + nlen + 1 + 1;
+        record = (record + 7) & ~7u; // align to 8
+        if (emitted + record > count || emitted + record > sizeof(stage))
+            break;
+        u8* r = stage + emitted;
+        const u64 d_ino = static_cast<u64>(e.first_cluster ? e.first_cluster : (dh.next_index + 1));
+        const i64 d_off = static_cast<i64>(dh.next_index + 1);
+        const u16 d_reclen = static_cast<u16>(record);
+        const u8 d_type = (e.attributes & 0x10) ? 4 /*DT_DIR*/ : 8 /*DT_REG*/;
+        for (u32 i = 0; i < 8; ++i)
+            r[i] = static_cast<u8>((d_ino >> (i * 8)) & 0xFF);
+        for (u32 i = 0; i < 8; ++i)
+            r[8 + i] = static_cast<u8>((d_off >> (i * 8)) & 0xFF);
+        r[16] = static_cast<u8>(d_reclen & 0xFF);
+        r[17] = static_cast<u8>((d_reclen >> 8) & 0xFF);
+        // d_name from offset 18.
+        for (u32 i = 0; i < nlen; ++i)
+            r[18 + i] = static_cast<u8>(e.name[i]);
+        r[18 + nlen] = 0;
+        // Zero the alignment tail (between NUL and the d_type
+        // byte at reclen-1).
+        for (u32 i = 18 + nlen + 1; i < record - 1; ++i)
+            r[i] = 0;
+        // d_type as the LAST byte of the record.
+        r[record - 1] = d_type;
+        emitted += record;
+        ++dh.next_index;
+    }
+    if (emitted == 0)
+        return 0;
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), stage, emitted))
+        return kEFAULT;
+    return static_cast<i64>(emitted);
 }
 
 } // namespace duetos::subsystems::linux::internal

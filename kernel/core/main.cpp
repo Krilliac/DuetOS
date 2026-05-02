@@ -3612,17 +3612,36 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         // Linux-ABI proof-of-life. Reaches MSR_LSTAR entry stub →
         // LinuxSyscallDispatch → sys_exit_group. A clean exit here
         // proves the whole plumbing — EFER.SCE, MSR setup, swapgs
-        // dance, iretq return — works end-to-end. Under
-        // profile=Linux this is the ONLY smoke we spawn — the
-        // smoke wrapper script asserts only on the substring
-        // "linux" in the log, and one successful sys_exit_group
-        // covers it. The other six Linux smokes (ElfSmoke,
-        // FileSmoke, MmapSmoke, SynxTestElf, TranslateSmoke,
-        // ExtendSmoke) cumulatively burn ~50s of guest time at
-        // the runner's ~12:1 wall:guest ratio = ~600s of wall,
-        // beyond the per-profile 480s budget; they only run on
-        // bare-metal profile=None (full coverage).
+        // dance, iretq return — works end-to-end.
         duetos::subsystems::linux::SpawnRing3LinuxSmoke();
+
+        // synxtest is the "compile-and-run an executable to see what
+        // works" probe — a single static-C ELF that exercises ~120
+        // Linux syscalls and prints a pass/fail / rc tag per call. We
+        // also run it under profile=Linux because it's bounded
+        // (one process, one exit) and the failure-inventory it prints
+        // is the single most useful Linux-ABI signal in the boot log.
+        // The other five Linux smokes (ElfSmoke / FileSmoke /
+        // MmapSmoke / TranslateSmoke / ExtendSmoke) cumulatively burn
+        // ~50s of guest time at the runner's ~12:1 wall:guest ratio,
+        // so they stay gated on profile=None bare metal.
+        duetos::subsystems::linux::SpawnSynxTestElf();
+        // synfs is synxtest's sister with kCapFsRead + kCapFsWrite —
+        // every FS-mutation syscall (mkdir/rmdir/rename/chmod/
+        // truncate/unlink/copy_file_range/...) actually reaches the
+        // kernel handler. Same `bounded, prints rc per call` shape so
+        // it's safe under TCG.
+        duetos::subsystems::linux::SpawnSynfsElf();
+        // synet is the socket-family sibling. kCapNet so the BSD
+        // socket calls reach the v0 net stack. Same atomic-line
+        // [net] output convention as synfs.
+        duetos::subsystems::linux::SpawnSynetElf();
+        // synfull is the exhaustive variant — issues every spec
+        // syscall (0..462 modulo skip-list) with zero args and
+        // prints `[full] <nr>=<rc>`. Coverage matrix for the
+        // entire Linux ABI surface.
+        duetos::subsystems::linux::SpawnSynfullElf();
+
         if (duetos::test::SmokeProfileGet() == duetos::test::SmokeProfile::None)
         {
             // Same payload wrapped in an ELF64 image loaded via
@@ -3639,13 +3658,6 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             // end-to-end — anonymous mmap was the only shape supported
             // before this slice.
             duetos::subsystems::linux::SpawnRing3LinuxMmapSmoke();
-            // Real host-compiled static C ELF (userland/apps/synxtest) —
-            // exercises ~12 Linux syscalls and prints a pass/fail tag
-            // per call. This is the "compile and run an executable to
-            // see what works" probe; boot log shows which parts of the
-            // Linux ABI actually hold up when a non-hand-rolled binary
-            // does the asking.
-            duetos::subsystems::linux::SpawnSynxTestElf();
             // Translation-unit exercise: fire one syscall that the TU
             // converts to a no-op (madvise) and one it declines with a
             // deliberate -ENOSYS (rseq). Boot log shows [translate]
