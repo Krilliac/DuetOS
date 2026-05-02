@@ -90,12 +90,20 @@ i64 DoFchdir(u64 fd)
         KLOG_WARN_V("linux/path", "DoFchdir: EBADF (fd not open)", fd);
         return kEBADF;
     }
+    // POSIX: fchdir on a non-directory fd returns -ENOTDIR
+    // (not -EINVAL). state==1 (reserved-tty), 3/4 (pipe ends),
+    // 5 (eventfd), 6 (socket) are all not-directories. State
+    // 11 IS a directory; state 2 is a regular file.
+    if (p->linux_fds[fd].state != 11)
+    {
+        KLOG_WARN_V("linux/path", "DoFchdir: ENOTDIR (fd not a directory)", fd);
+        return kENOTDIR;
+    }
     const char* path = p->linux_fds[fd].path;
     if (path[0] == 0)
     {
-        // tty / pipe / unnamed — nothing to chdir to.
-        KLOG_WARN_V("linux/path", "DoFchdir: EINVAL (fd has no path)", fd);
-        return kEINVAL;
+        KLOG_WARN_V("linux/path", "DoFchdir: ENOTDIR (fd has no path)", fd);
+        return kENOTDIR;
     }
     for (u32 i = 0; i < core::Process::kLinuxCwdCap; ++i)
         p->linux_cwd[i] = 0;

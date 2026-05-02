@@ -340,10 +340,13 @@ i64 DoSyslog(u64 type, u64 bufp, u64 len)
     return 0;
 }
 
-// vhangup: revoke the controlling terminal. No tty model — 0.
+// vhangup: revoke the controlling terminal. Linux requires
+// CAP_SYS_TTY_CONFIG; an unprivileged caller gets -EPERM. We
+// don't model that capability so unconditional -EPERM matches
+// the user-visible behaviour of an unprivileged Linux process.
 i64 DoVhangup()
 {
-    return 0;
+    return kEPERM;
 }
 
 // acct(filename): BSD process accounting. We do no accounting.
