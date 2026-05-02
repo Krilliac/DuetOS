@@ -191,6 +191,18 @@ static int is_skipped(int nr)
     return 0;
 }
 
+// Synfull's design choice: pass all-zero args. We tried "valid
+// args" once (a pre-opened fd + real buffer) but that's
+// destructive — close(2)/dup(2)/dup2(2) clobber the fd table,
+// and shm/sem/mqgetset etc. mutate kernel state. Keeping
+// args at zero gives a stable, reproducible matrix where
+// every iteration is independent.
+//
+// For deeper "handler does what it says" coverage, the
+// purpose-built exercisers (synxtest / synfs / synet) pass
+// valid args per-syscall — synfull's role is broader: prove
+// every dispatch case is reachable + returns SOMETHING.
+
 void _start(void)
 {
     puts_raw("[full] start\n");
