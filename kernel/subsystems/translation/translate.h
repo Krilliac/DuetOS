@@ -46,10 +46,12 @@ struct Result
     i64 rv;       // the (already-composed) return value; caller writes to frame->rax
 };
 
-// Fill a Linux syscall the main dispatcher did not handle.
-// Reads arguments from the TrapFrame; returns {handled, rv} so
-// the caller can decide whether to write rv into frame->rax.
-Result LinuxGapFill(arch::TrapFrame* frame);
+// LinuxGapFill REMOVED — the Linux dispatcher now has dense
+// 0..462 spec coverage (every syscall has a kSys constant +
+// case). The gap-fill TU was unreachable for valid Linux
+// ELFs. The Linux dispatcher's default arm now logs a
+// `[linux-miss] unknown syscall nr=...` line directly
+// instead of detouring through this TU.
 
 // Fill a native syscall the core dispatcher did not handle.
 // Symmetric counterpart of LinuxGapFill — translations run in

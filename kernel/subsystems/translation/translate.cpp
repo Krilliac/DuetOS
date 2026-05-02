@@ -308,6 +308,11 @@ void LogMiss(const char* origin, arch::TrapFrame* f, const char* name)
     SerialWrite("]\n");
 }
 
+// LinuxGapFill helpers — only ever called from the Linux gap-fill
+// dispatcher above (now `#if 0`'d out since the Linux dispatcher
+// has dense spec coverage). Wrap in #if 0 so the unused-function
+// warning stays quiet; keep as reference until next refactor.
+#if 0
 // umask(mask) — returns the OLD umask. Linux-standard default is
 // 022. We have no permission model so nothing actually enforces
 // it; the value is purely for compat with programs that track +
@@ -378,6 +383,7 @@ i64 TranslateRseq(arch::TrapFrame* /*f*/)
     // rseq and decided not to wire it up. Log as such.
     return -38;
 }
+#endif
 
 // ----- native → Linux/Win32 translations -----
 
@@ -686,6 +692,12 @@ const HitTable& NativeHitsRead()
     return g_native_hits;
 }
 
+// LinuxGapFill REMOVED — see translate.h. The Linux dispatcher
+// now has dense 0..462 spec coverage; the gap-fill TU was
+// unreachable for valid Linux ELFs. The function below is the
+// last-pre-removal copy for reference; it is no longer
+// declared in translate.h and no caller exists.
+#if 0
 Result LinuxGapFill(arch::TrapFrame* frame)
 {
     KLOG_TRACE_SCOPE("translate", "LinuxGapFill");
@@ -746,6 +758,7 @@ Result LinuxGapFill(arch::TrapFrame* frame)
     BumpOverhead(g_linux_overhead, ReadTsc() - tsc_entry);
     return r;
 }
+#endif
 
 Result NativeGapFill(arch::TrapFrame* frame)
 {
