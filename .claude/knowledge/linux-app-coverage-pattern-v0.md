@@ -389,6 +389,113 @@ unimplemented. The remaining 110 unimplemented split into:
   the dispatch DOES handle them — see kSysReboot, kSysIopl,
   kSysIoperm, kSysQuotactl, etc. that return -EPERM directly.
 
+## Sixth-slice findings — synfull exhaustive exerciser + bug hunt
+
+`userland/apps/synfull/synfull.c` — fourth Linux-ABI exerciser.
+Issues every spec syscall in 0..462 with all-zero args, prints
+`[full] <nr>=<rc>` per call. Atomic-line writes. Spawned with
+kCapFsRead + FsWrite + Net + SpawnThread so cap-gated calls
+reach their handler.
+
+### Skip-list (15 entries)
+
+Process-destructive (clone/fork/exec/exit/kill/tkill/tgkill/
+rt_sigqueueinfo/rt_tgsigqueueinfo) + state-destructive (mmap/
+munmap/brk/mremap/arch_prctl/set_tid_address/set_thread_area/
+get_thread_area) + module-load (init_module/finit_module/
+delete_module/kexec_load/kexec_file_load) + blocking-on-signal
+(pause/rt_sigsuspend/rt_sigtimedwait) + ptrace + reboot.
+
+`rt_sigreturn` (15) is also skipped — it terminates the task
+when called outside a signal handler (kernel behaviour is
+correct; can't issue from a synthetic exerciser).
+
+`wait4` (61) and `waitid` (247) were originally in the
+skip-list but the kernel was the bug — now fixed (see below).
+
+### Bugs caught + fixed by synfull
+
+1. **wait4 / waitid blocked when no children exist.** Kernel
+   was waiting on linux_wait_wq forever. POSIX rule: no
+   children at all -> -ECHILD immediately, regardless of
+   WNOHANG. Fix: check sched::SchedCountChildrenOfPid(self)
+   after empty exit-queue, return -ECHILD if zero.
+
+2. **fchdir on non-directory fd returned -EINVAL.** POSIX
+   says -ENOTDIR. Fix: check `state == 11` (FAT32 dir)
+   upfront; anything else (tty/file/pipe/eventfd/socket/
+   pidfd) gets -ENOTDIR.
+
+3. **vhangup() returned 0.** Linux requires CAP_SYS_TTY_CONFIG;
+   unprivileged callers see -EPERM. We don't model that
+   capability so unconditional -EPERM matches Linux's
+   user-visible behaviour.
+
+4. **pidfd_open(0, 0) returned -ESRCH.** POSIX rule: pid==0
+   (and any negative pid) is invalid input — return -EINVAL
+   before the process lookup.
+
+5. **utimensat(AT_FDCWD, NULL, ...) returned 0.** AT_FDCWD with
+   NULL path is invalid in Linux (futimens semantics need a
+   real fd). Fix: -EFAULT for AT_FDCWD-with-NULL-path,
+   -EBADF for invalid dirfd, success only for the actual
+   futimens path.
+
+6. **time(NULL) returned 30 (seconds-since-boot).** g_realtime_
+   offset_ns started at 0 and was only set by clock_settime
+   (which needs CAP_SYS_TIME). Fix: lazy-seed on first
+   RealtimeNs() call from time::RealtimeFiletime() (CMOS RTC
+   sample, FILETIME epoch). Now `time(NULL) = 1777745989`
+   (real May-2026 epoch second).
+
+### Real implementations added in this slice
+
+- **recvmmsg (299)** — vector recvmsg in syscall_socket.cpp.
+- **sendmmsg (307)** — vector sendmsg in syscall_socket.cpp.
+- **clone3 (435)** — moved out of inline syscall.cpp dispatch
+  into syscall_clone.cpp; reads struct clone_args, routes to
+  DoClone. (Previous inline impl removed.)
+
+### errno corrections
+
+- **link (86) / symlink (88)** moved from -ENOSYS to
+  -EOPNOTSUPP (FS-doesn't-support-this is the right errno;
+  glibc/musl handle EOPNOTSUPP by falling back to copy-then-
+  rename, ENOSYS makes them think the host is exotic).
+
+### Final synfull matrix (after this slice)
+
+463 calls total. Distribution:
+- 139 `-ENOSYS` (-38) — 89 are reserved-range gaps in spec
+  (335..423) where no syscall exists; the other 50 are
+  documented aux entries (deprecated / no-infra / 5.16+
+  fallback).
+- 97 success (0) — real handlers running.
+- 54 `-EBADF` (-9) — NULL fd rejected (handler ran).
+- 52 `-EFAULT` (-14) — NULL ptr rejected (handler ran).
+- 35 skip — exerciser skip-list.
+- 31 `-EINVAL` (-22) — bad args (handler ran).
+- 24 `-EPERM` (-1) — root-cap needed (mknod / chroot /
+  mount / settimeofday / clock_settime / etc — correct).
+- Long tail: small-positive (real fds / pids / tids /
+  msgids / sizes from getpid / gettid / getppid / times /
+  msgget / keyctl / dup / fcntl / umask / inotify_init /
+  eventfd / timerfd_create / epoll_create / fanotify_init /
+  memfd_create), 2 `-ECHILD` (wait4 / waitid after fix),
+  2 `-ENOSPC` (shmget / semget — sysv ipc full), 2
+  `-ENOTDIR` (getdents / getdents64 on non-dir), 3 `-ESRCH`
+  (process_vm_readv / writev — cap not modelled).
+
+### Translation TU clean-up
+
+LinuxGapFill in `kernel/subsystems/translation/translate.cpp`
+became dead code once primary dispatch went dense. Removed
+the symbol from `translate.h`, `#if 0`'d the function body
+plus its four helpers (TranslateUmask / TranslateStatfs /
+TranslateDeliberateEnosys / TranslateRseq) in translate.cpp.
+NativeGapFill + NtTranslateToLinux still live (used by the
+DuetOS-native + Win32-NT dispatchers).
+
 ## Cross-references
 
 - `.claude/knowledge/subsystems-status.md` — top-level Linux ABI inventory
