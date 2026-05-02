@@ -104,6 +104,7 @@ void FwLoaderInit()
     g_init_done = true;
     g_stats.kind = FwBackendKind::Vfs;
     g_stats.policy = FwSourcePolicy::OpenThenVendor;
+    KLOG_INFO("core/fw-loader", "online — backend=VFS (/lib/firmware), policy=OpenThenVendor");
     arch::SerialWrite("[fw-loader] online — backend=VFS (/lib/firmware), policy=OpenThenVendor\n");
 }
 
@@ -111,7 +112,13 @@ void FwLoaderInit()
 {
     KLOG_TRACE_SCOPE("core/fw-loader", "FwLoad");
     if (req.basename == nullptr || req.basename[0] == '\0')
+    {
+        KLOG_WARN("core/fw-loader", "FwLoad: empty basename -> InvalidArgument");
         return ::duetos::core::Err{ErrorCode::InvalidArgument};
+    }
+    KLOG_DEBUG_S("core/fw-loader", "FwLoad request", "basename", req.basename);
+    if (req.vendor != nullptr)
+        KLOG_DEBUG_S("core/fw-loader", "  vendor", "vendor", req.vendor);
     ++g_stats.lookups;
     char path[kFwPathMax] = {};
 
@@ -153,13 +160,18 @@ void FwLoaderInit()
         if (r.has_value())
         {
             ++g_stats.hits;
+            KLOG_INFO_S("core/fw-loader", "firmware HIT", "path", path);
             arch::SerialWrite("[fw-loader] hit ");
             arch::SerialWrite(path);
             arch::SerialWrite("\n");
             return r;
         }
         if (r.error() != ErrorCode::NotFound)
+        {
+            KLOG_WARN_S("core/fw-loader", "firmware path matched but blob REJECTED (corrupt or size cap)", "path",
+                        path);
             return ::duetos::core::Err{r.error()};
+        }
         return ::duetos::core::Err{ErrorCode::NotFound};
     };
 
@@ -197,6 +209,9 @@ void FwLoaderInit()
     }
 
     ++g_stats.misses;
+    KLOG_WARN_S("core/fw-loader", "firmware MISS (no path matched)", "basename", req.basename);
+    if (req.vendor != nullptr)
+        KLOG_WARN_S("core/fw-loader", "  miss vendor", "vendor", req.vendor);
     arch::SerialWrite("[fw-loader] miss vendor=\"");
     arch::SerialWrite(req.vendor != nullptr ? req.vendor : "?");
     arch::SerialWrite("\" basename=\"");

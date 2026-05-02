@@ -29,9 +29,10 @@
 #include "subsystems/linux/syscall_socket.h"
 
 #include "arch/x86_64/serial.h"
-#include "proc/process.h"
 #include "fs/fat32.h"
+#include "log/klog.h"
 #include "mm/address_space.h"
+#include "proc/process.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -53,6 +54,8 @@ constexpr u64 kLinuxIoMax = 4096;
 // predictably.
 i64 DoWrite(u64 fd, u64 user_buf, u64 len)
 {
+    KLOG_TRACE_AV(::duetos::core::LogArea::Linux, "linux/io", "write ENTRY; fd", fd);
+    KLOG_TRACE_AV(::duetos::core::LogArea::Linux, "linux/io", "  len", len);
     // fd 1/2 -> COM1 (unchanged from v0).
     if (fd == 1 || fd == 2)
     {
@@ -61,16 +64,26 @@ i64 DoWrite(u64 fd, u64 user_buf, u64 len)
             return 0;
         u8 kbuf[kLinuxIoMax];
         if (!mm::CopyFromUser(kbuf, reinterpret_cast<const void*>(user_buf), to_copy))
+        {
+            KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/io",
+                         "write(stdout/stderr): CopyFromUser failed -> EFAULT; user_buf", user_buf);
             return kEFAULT;
+        }
         arch::SerialWriteN(reinterpret_cast<const char*>(kbuf), to_copy);
         return static_cast<i64>(to_copy);
     }
     // fd 0 (stdin) rejects write; unused fds too.
     if (fd == 0 || fd >= 16)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/io", "write: fd out of range or stdin -> EBADF; fd", fd);
         return kEBADF;
+    }
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || p->linux_fds[fd].state == 0)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/io", "write: fd not open (state=0) -> EBADF; fd", fd);
         return kEBADF;
+    }
     // Pipe-write end → dispatch to pipe pool.
     if (p->linux_fds[fd].state == 4)
         return PipeWrite(p->linux_fds[fd].first_cluster, user_buf, len);
@@ -97,6 +110,7 @@ i64 DoWrite(u64 fd, u64 user_buf, u64 len)
     // .claude/knowledge/subsystem-isolation-decision-v0.md.
     if (!core::CapSetHas(p->caps, core::kCapFsWrite))
     {
+        KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/io", "write: kCapFsWrite gate REFUSED -> EACCES; fd", fd);
         core::RecordSandboxDenial(core::kCapFsWrite);
         return kEACCES;
     }
@@ -174,6 +188,8 @@ i64 DoWrite(u64 fd, u64 user_buf, u64 len)
 //     slices — simple, bounded by 4 KiB (v0 file cap).
 i64 DoRead(u64 fd, u64 user_buf, u64 len)
 {
+    KLOG_TRACE_AV(::duetos::core::LogArea::Linux, "linux/io", "read ENTRY; fd", fd);
+    KLOG_TRACE_AV(::duetos::core::LogArea::Linux, "linux/io", "  len", len);
     if (fd == 0)
     {
         return 0;
@@ -181,6 +197,7 @@ i64 DoRead(u64 fd, u64 user_buf, u64 len)
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || fd >= 16)
     {
+        KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/io", "read: fd out of range -> EBADF; fd", fd);
         return kEBADF;
     }
     // Pipe-read end → dispatch to pipe pool.
@@ -342,13 +359,22 @@ i64 DoReadv(u64 fd, u64 user_iov, u64 iovcnt)
 // isatty() heuristic works without extra plumbing.
 i64 DoLseek(u64 fd, i64 offset, u64 whence)
 {
+    KLOG_TRACE_AV(::duetos::core::LogArea::Linux, "linux/io", "lseek ENTRY; fd", fd);
+    KLOG_TRACE_AV(::duetos::core::LogArea::Linux, "linux/io", "  offset", static_cast<u64>(offset));
+    KLOG_TRACE_AV(::duetos::core::LogArea::Linux, "linux/io", "  whence", whence);
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || fd >= 16)
         return kEBADF;
     if (p->linux_fds[fd].state == 1)
+    {
+        KLOG_DEBUG_AV(::duetos::core::LogArea::Linux, "linux/io", "lseek on tty -> ESPIPE; fd", fd);
         return kESPIPE; // tty: can't seek
+    }
     if (p->linux_fds[fd].state != 2)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/io", "lseek: fd not a regular file -> EBADF; fd", fd);
         return kEBADF;
+    }
 
     i64 new_off = 0;
     switch (whence)
@@ -386,14 +412,22 @@ i64 DoIoctl(u64 fd, u64 cmd, u64 arg)
     constexpr u64 kTCSETSF = 0x5404;
     constexpr u64 kTIOCGWINSZ = 0x5413;
     constexpr u64 kTIOCGPGRP = 0x540F;
+    KLOG_TRACE_AV(::duetos::core::LogArea::Linux, "linux/io", "ioctl ENTRY; fd", fd);
+    KLOG_TRACE_AV(::duetos::core::LogArea::Linux, "linux/io", "  cmd", cmd);
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || fd >= 16)
         return kEBADF;
     if (p->linux_fds[fd].state == 0)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/io", "ioctl: fd not open -> EBADF; fd", fd);
         return kEBADF;
+    }
     const bool is_tty = (p->linux_fds[fd].state == 1);
     if (!is_tty)
+    {
+        KLOG_DEBUG_AV(::duetos::core::LogArea::Linux, "linux/io", "ioctl: fd is not a tty -> ENOTTY; fd", fd);
         return kENOTTY;
+    }
     switch (cmd)
     {
     case kTCGETS:
