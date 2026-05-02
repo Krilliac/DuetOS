@@ -211,9 +211,15 @@ def main():
 
     dispatcher_symbols = set()
     if args.mapped_from_dispatcher is not None:
-        dispatcher_symbols = build_dispatcher_symbols(
-            args.mapped_from_dispatcher.read_text()
-        )
+        # The syscall dispatch lives in syscall.cpp but the
+        # individual `Do*` handlers are split across the
+        # syscall_<family>.cpp peers (syscall_socket.cpp,
+        # syscall_fd.cpp, syscall_pipe.cpp, ...). Scan the
+        # whole subsystems/linux/ directory for `i64 DoFoo(...)`
+        # bodies, not just the single dispatcher TU.
+        dispatcher_dir = args.mapped_from_dispatcher.parent
+        for cpp in sorted(dispatcher_dir.glob("syscall*.cpp")):
+            dispatcher_symbols |= build_dispatcher_symbols(cpp.read_text())
 
     gap_fill_numbers = set()
     if args.gap_fill_from_translator is not None:

@@ -511,6 +511,104 @@ enum : u64
     kSysAddKey = 248,
     kSysRequestKey = 249,
     kSysKeyctl = 250,
+
+    // ============================================================
+    // ABI completeness — every Linux x86_64 syscall number we
+    // recognise but deliberately do not implement. These cases
+    // exist so the dispatch is dense from 0..462 (no number falls
+    // through to the translation-TU gap fill unless it's truly
+    // outside the spec). All return -ENOSYS. If a real
+    // implementation lands later, the dispatch case for that
+    // number moves OUT of this block and gets a real handler;
+    // the kSys constant is renamed back to its canonical form.
+    //
+    // Auto-derived from tools/linux-compat/linux-syscalls-x86_64.csv
+    // — see tools/linux-compat/README.md for the regen workflow.
+    // ============================================================
+    kSysEnosys_Getitimer = 36,
+    kSysEnosys_Alarm = 37,
+    kSysEnosys_Setitimer = 38,
+    kSysEnosys_Sendfile = 40,
+    kSysEnosys_Getdents = 78,
+    kSysEnosys_Creat = 85,
+    kSysEnosys_RtSigqueueinfo = 129,
+    kSysEnosys_Uselib = 134,
+    kSysEnosys_Ustat = 136,
+    kSysEnosys_Sysfs = 139,
+    kSysEnosys_ModifyLdt = 154,
+    kSysEnosys_Sysctl = 156,
+    kSysEnosys_CreateModule = 174,
+    kSysEnosys_GetKernelSyms = 177,
+    kSysEnosys_QueryModule = 178,
+    kSysEnosys_Nfsservctl = 180,
+    kSysEnosys_Getpmsg = 181,
+    kSysEnosys_Putpmsg = 182,
+    kSysEnosys_AfsSyscall = 183,
+    kSysEnosys_Tuxcall = 184,
+    kSysEnosys_Security = 185,
+    kSysEnosys_Setxattr = 188,
+    kSysEnosys_Lsetxattr = 189,
+    kSysEnosys_Fsetxattr = 190,
+    kSysEnosys_Getxattr = 191,
+    kSysEnosys_Lgetxattr = 192,
+    kSysEnosys_Fgetxattr = 193,
+    kSysEnosys_Listxattr = 194,
+    kSysEnosys_Llistxattr = 195,
+    kSysEnosys_Flistxattr = 196,
+    kSysEnosys_Removexattr = 197,
+    kSysEnosys_Lremovexattr = 198,
+    kSysEnosys_Fremovexattr = 199,
+    kSysEnosys_Tkill = 200,
+    kSysEnosys_LookupDcookie = 212,
+    kSysEnosys_EpollCtlOld = 214,
+    kSysEnosys_EpollWaitOld = 215,
+    kSysEnosys_RemapFilePages = 216,
+    kSysEnosys_RestartSyscall = 219,
+    kSysEnosys_TimerCreate = 222,
+    kSysEnosys_TimerSettime = 223,
+    kSysEnosys_TimerGettime = 224,
+    kSysEnosys_TimerGetoverrun = 225,
+    kSysEnosys_TimerDelete = 226,
+    kSysEnosys_Utimes = 235,
+    kSysEnosys_Vserver = 236,
+    kSysEnosys_Mknodat = 259,
+    kSysEnosys_Readlinkat = 267,
+    kSysEnosys_Unshare = 272,
+    kSysEnosys_SyncFileRange = 277,
+    kSysEnosys_Fallocate = 285,
+    kSysEnosys_Preadv = 295,
+    kSysEnosys_Pwritev = 296,
+    kSysEnosys_RtTgsigqueueinfo = 297,
+    kSysEnosys_Setns = 308,
+    kSysEnosys_ProcessVmReadv = 310,
+    kSysEnosys_ProcessVmWritev = 311,
+    kSysEnosys_Kcmp = 312,
+    kSysEnosys_SchedSetattr = 314,
+    kSysEnosys_SchedGetattr = 315,
+    kSysEnosys_Seccomp = 317,
+    kSysEnosys_Membarrier = 324,
+    kSysEnosys_Mlock2 = 325,
+    kSysEnosys_Preadv2 = 327,
+    kSysEnosys_Pwritev2 = 328,
+    kSysEnosys_IoPgetevents = 333,
+    kSysEnosys_Rseq = 334,
+    kSysEnosys_Openat2 = 437,
+    kSysEnosys_EpollPwait2 = 441,
+    kSysEnosys_QuotactlFd = 443,
+    kSysEnosys_MemfdSecret = 447,
+    kSysEnosys_FutexWaitv = 449,
+    kSysEnosys_SetMempolicyHomeNode = 450,
+    kSysEnosys_Cachestat = 451,
+    kSysEnosys_Fchmodat2 = 452,
+    kSysEnosys_MapShadowStack = 453,
+    kSysEnosys_FutexWake = 454,
+    kSysEnosys_FutexWait = 455,
+    kSysEnosys_FutexRequeue = 456,
+    kSysEnosys_Statmount = 457,
+    kSysEnosys_Listmount = 458,
+    kSysEnosys_LsmGetSelfAttr = 459,
+    kSysEnosys_LsmSetSelfAttr = 460,
+    kSysEnosys_LsmListModules = 461,
 };
 
 // kAtFdCwd / kAtRemoveDir constants moved to syscall_internal.h
@@ -1641,6 +1739,98 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         break;
     case kSysVmsplice:
         rv = DoVmsplice(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+
+    // ============================================================
+    // Linux ABI completeness — explicit -ENOSYS for every spec
+    // syscall we don't implement. Keeps the dispatch dense so
+    // the gap-fill TU only fires for truly unknown numbers.
+    // ============================================================
+    case kSysEnosys_Getitimer:
+    case kSysEnosys_Alarm:
+    case kSysEnosys_Setitimer:
+    case kSysEnosys_Sendfile:
+    case kSysEnosys_Getdents:
+    case kSysEnosys_Creat:
+    case kSysEnosys_RtSigqueueinfo:
+    case kSysEnosys_Uselib:
+    case kSysEnosys_Ustat:
+    case kSysEnosys_Sysfs:
+    case kSysEnosys_ModifyLdt:
+    case kSysEnosys_Sysctl:
+    case kSysEnosys_CreateModule:
+    case kSysEnosys_GetKernelSyms:
+    case kSysEnosys_QueryModule:
+    case kSysEnosys_Nfsservctl:
+    case kSysEnosys_Getpmsg:
+    case kSysEnosys_Putpmsg:
+    case kSysEnosys_AfsSyscall:
+    case kSysEnosys_Tuxcall:
+    case kSysEnosys_Security:
+    case kSysEnosys_Setxattr:
+    case kSysEnosys_Lsetxattr:
+    case kSysEnosys_Fsetxattr:
+    case kSysEnosys_Getxattr:
+    case kSysEnosys_Lgetxattr:
+    case kSysEnosys_Fgetxattr:
+    case kSysEnosys_Listxattr:
+    case kSysEnosys_Llistxattr:
+    case kSysEnosys_Flistxattr:
+    case kSysEnosys_Removexattr:
+    case kSysEnosys_Lremovexattr:
+    case kSysEnosys_Fremovexattr:
+    case kSysEnosys_Tkill:
+    case kSysEnosys_LookupDcookie:
+    case kSysEnosys_EpollCtlOld:
+    case kSysEnosys_EpollWaitOld:
+    case kSysEnosys_RemapFilePages:
+    case kSysEnosys_RestartSyscall:
+    case kSysEnosys_TimerCreate:
+    case kSysEnosys_TimerSettime:
+    case kSysEnosys_TimerGettime:
+    case kSysEnosys_TimerGetoverrun:
+    case kSysEnosys_TimerDelete:
+    case kSysEnosys_Utimes:
+    case kSysEnosys_Vserver:
+    case kSysEnosys_Mknodat:
+    case kSysEnosys_Readlinkat:
+    case kSysEnosys_Unshare:
+    case kSysEnosys_SyncFileRange:
+    case kSysEnosys_Fallocate:
+    case kSysEnosys_Preadv:
+    case kSysEnosys_Pwritev:
+    case kSysEnosys_RtTgsigqueueinfo:
+    case kSysEnosys_Setns:
+    case kSysEnosys_ProcessVmReadv:
+    case kSysEnosys_ProcessVmWritev:
+    case kSysEnosys_Kcmp:
+    case kSysEnosys_SchedSetattr:
+    case kSysEnosys_SchedGetattr:
+    case kSysEnosys_Seccomp:
+    case kSysEnosys_Membarrier:
+    case kSysEnosys_Mlock2:
+    case kSysEnosys_Preadv2:
+    case kSysEnosys_Pwritev2:
+    case kSysEnosys_IoPgetevents:
+    case kSysEnosys_Rseq:
+    case kSysEnosys_Openat2:
+    case kSysEnosys_EpollPwait2:
+    case kSysEnosys_QuotactlFd:
+    case kSysEnosys_MemfdSecret:
+    case kSysEnosys_FutexWaitv:
+    case kSysEnosys_SetMempolicyHomeNode:
+    case kSysEnosys_Cachestat:
+    case kSysEnosys_Fchmodat2:
+    case kSysEnosys_MapShadowStack:
+    case kSysEnosys_FutexWake:
+    case kSysEnosys_FutexWait:
+    case kSysEnosys_FutexRequeue:
+    case kSysEnosys_Statmount:
+    case kSysEnosys_Listmount:
+    case kSysEnosys_LsmGetSelfAttr:
+    case kSysEnosys_LsmSetSelfAttr:
+    case kSysEnosys_LsmListModules:
+        rv = kENOSYS;
         break;
 
     default:
