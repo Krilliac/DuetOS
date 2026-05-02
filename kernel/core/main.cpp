@@ -113,6 +113,7 @@
 #include "fs/ntfs.h"
 #include "apps/calculator.h"
 #include "apps/about.h"
+#include "apps/browser.h"
 #include "apps/clock.h"
 #include "apps/files.h"
 #include "apps/gfxdemo.h"
@@ -395,6 +396,16 @@ void PrintShortcutHelp()
     ConsoleWriteln("  IMAGE VIEWER (WHEN ACTIVE)");
     ConsoleWriteln("    N / P / LEFT/RT   NEXT / PREV BMP");
     ConsoleWriteln("    R                 RESCAN DISK FOR BMPS");
+    ConsoleWriteln("");
+    ConsoleWriteln("  BROWSER (WHEN ACTIVE)");
+    ConsoleWriteln("    U / TAB           ENTER URL EDIT");
+    ConsoleWriteln("    ENTER (URL EDIT)  FETCH; ESC CANCEL");
+    ConsoleWriteln("    B / F             BACK / FORWARD HISTORY");
+    ConsoleWriteln("    R                 RELOAD CURRENT");
+    ConsoleWriteln("    H                 HISTORY LIST");
+    ConsoleWriteln("    L / M             BMARK LIST / MARK CURRENT");
+    ConsoleWriteln("    S                 SAVE BODY TO DLNNNN.HTM");
+    ConsoleWriteln("    J / K / UP / DN   SCROLL");
     ConsoleWriteln("");
     ConsoleWriteln("  SETTINGS BUTTONS");
     ConsoleWriteln("    THEME / OPACITY / TZ / LOG OUT / REBOOT / SHUTDOWN");
@@ -1282,6 +1293,21 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::drivers::video::ThemeRegisterWindow(Role::Help, help_handle);
     duetos::apps::help::HelpInit(help_handle);
     DUETOS_BOOT_SELFTEST(duetos::apps::help::HelpSelfTest());
+
+    // BROWSER — minimal HTTP-only browser. Hidden by default;
+    // raised from the Start menu's BROWSER entry. Each fetch
+    // spawns a one-shot kernel task so the input thread stays
+    // responsive.
+    duetos::drivers::video::WindowChrome browser_chrome = theme_chrome(Role::Browser);
+    browser_chrome.x = 100;
+    browser_chrome.y = 60;
+    browser_chrome.w = 640;
+    browser_chrome.h = 460;
+    const duetos::drivers::video::WindowHandle browser_handle =
+        duetos::drivers::video::WindowRegister(browser_chrome, "BROWSER");
+    duetos::drivers::video::ThemeRegisterWindow(Role::Browser, browser_handle);
+    duetos::apps::browser::BrowserInit(browser_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::browser::BrowserSelfTest());
 
     // Framebuffer text console. 80x40 chars of boot log at the
     // bottom of the desktop, under the windows in z-order. Dragging
@@ -2708,6 +2734,11 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     {
                         app_consumed = duetos::apps::imageview::ImageViewFeedArrow(ev.code == kKeyArrowLeft);
                     }
+                    else if (active == duetos::apps::browser::BrowserWindow() &&
+                             (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown))
+                    {
+                        app_consumed = duetos::apps::browser::BrowserFeedArrow(ev.code);
+                    }
                     else if (active == duetos::apps::notes::NotesWindow() &&
                              (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyArrowLeft ||
                               ev.code == kKeyArrowRight || ev.code == kKeyHome || ev.code == kKeyEnd ||
@@ -2750,6 +2781,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                             else if (active == duetos::apps::imageview::ImageViewWindow())
                             {
                                 app_consumed = duetos::apps::imageview::ImageViewFeedChar(c);
+                            }
+                            else if (active == duetos::apps::browser::BrowserWindow())
+                            {
+                                app_consumed = duetos::apps::browser::BrowserFeedChar(c);
                             }
                         }
                     }
@@ -2929,6 +2964,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             {"IMAGE VIEWER", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::ImageView)},
             {"ABOUT", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::About)},
             {"HELP", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Help)},
+            {"BROWSER", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Browser)},
         };
         static const duetos::drivers::video::MenuItem kStartItemsTrailing[] = {
             {"HELP / SHORTCUTS", 6},

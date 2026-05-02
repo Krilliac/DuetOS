@@ -494,7 +494,12 @@ TcpStats TcpStatsRead();
 /// the first data segment of an accepted connection, then close.
 /// Only one listen slot in v0; a second call replaces the first.
 /// Returns false if `canned_len` exceeds kTcpMaxCannedReply.
-inline constexpr u32 kTcpMaxCannedReply = 512;
+///
+/// 4 KiB lets a real HTTP request (with cookies / a long URL /
+/// a User-Agent and a few headers) fit. The previous 512-byte
+/// cap forced the browser app to truncate its request line on
+/// any non-trivial path.
+inline constexpr u32 kTcpMaxCannedReply = 4096;
 bool TcpListen(u16 local_port, const u8* canned_reply, u32 canned_len);
 
 // -------------------------------------------------------------------
@@ -508,7 +513,7 @@ bool TcpListen(u16 local_port, const u8* canned_reply, u32 canned_len);
 // come wins.
 // -------------------------------------------------------------------
 
-inline constexpr u32 kTcpActiveBufBytes = 2048;
+inline constexpr u32 kTcpActiveBufBytes = 65536;
 
 struct TcpActiveSnapshot
 {

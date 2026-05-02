@@ -83,6 +83,7 @@ constexpr Theme kClassic = {
             0x00306070, // ImageView — muted blue-teal, "viewer" affinity
             0x00405838, // About    — neutral muted green, "info" affinity
             0x00405838, // Help     — same as About; shared "info panel" identity
+            0x00305880, // Browser  — sky blue, "online" hue
         },
     .role_client =
         {
@@ -97,6 +98,7 @@ constexpr Theme kClassic = {
             0x00080808, // ImageView — near-black so any image reads cleanly
             0x00121828, // About — same "info panel" hue as Settings
             0x00121828, // Help  — same as About
+            0x00101828, // Browser — dark blue ground for plain-text reading
         },
 
     .console_fg = 0x0080F088,
@@ -148,6 +150,7 @@ constexpr Theme kAmber = {
             0x00805024, // ImageView — bronze, image-viewer hue
             0x00503818, // About    — deeper bronze, info hue
             0x00503818, // Help     — same as About
+            0x00604024, // Browser  — amber-tinted bronze
         },
     .role_client =
         {
@@ -162,6 +165,7 @@ constexpr Theme kAmber = {
             0x00040200, // ImageView — near-black ground for image
             0x00100800, // About
             0x00100800, // Help
+            0x00100800, // Browser
         },
 
     .console_fg = 0x00FFA830,
@@ -217,6 +221,7 @@ constexpr Theme kSlate10 = {
             0x00266288, // ImageView    — desaturated blue, "media" affinity
             0x00404048, // About        — neutral Slate, info panel
             0x00404048, // Help         — same as About
+            0x000078D7, // Browser      — Win10 system blue, "browser" hue
         },
     .role_client =
         {
@@ -231,6 +236,7 @@ constexpr Theme kSlate10 = {
             0x00141418, // ImageView — deep slate so any image reads cleanly
             0x00252529, // About — Slate panel
             0x00252529, // Help  — Slate panel
+            0x00252529, // Browser — Slate panel
         },
 
     .console_fg = 0x00D4D4D4, // VSCode default editor ink
@@ -292,6 +298,7 @@ constexpr Theme kDuet = {
             0x00264858, // ImageView    — deeper teal-slate, "viewer" hue
             0x002A323C, // About        — same `--chrome-2` slate as Settings
             0x002A323C, // Help         — same as About
+            0x002A323C, // Browser      — slate panel (matches About/Help)
         },
     .role_client =
         {
@@ -306,6 +313,7 @@ constexpr Theme kDuet = {
             0x00080A0E, // ImageView — deep canvas so an image reads cleanly
             0x00141A22, // About
             0x00141A22, // Help
+            0x00141A22, // Browser
         },
 
     .console_fg = 0x00E8EDF2, // `--ink` — JetBrains-Mono ink in the prototype
@@ -366,6 +374,7 @@ constexpr Theme kDuetLight = {
             0x00086A60, // ImageView    — deeper teal so it reads on light bg
             0x00343A44, // About        — neutral chrome
             0x00343A44, // Help         — same as About
+            0x00086A60, // Browser      — deeper teal (matches ImageView accent)
         },
     .role_client =
         {
@@ -380,6 +389,7 @@ constexpr Theme kDuetLight = {
             0x00161A20, // ImageView    — dark canvas (only dark client in light theme — images need contrast ground regardless of theme)
             0x00ECEEF1, // About
             0x00ECEEF1, // Help
+            0x00ECEEF1, // Browser
         },
 
     .console_fg = 0x00161A20,
@@ -432,6 +442,7 @@ constexpr Theme kDuetBlue = {
             0x00204D80, // ImageView    — blue-tinted (matches accent)
             0x002A323C, // About        — slate panel
             0x002A323C, // Help         — same as About
+            0x002A323C, // Browser      — slate panel
         },
     .role_client =
         {
@@ -440,6 +451,7 @@ constexpr Theme kDuetBlue = {
             0x00080A0E, // ImageView
             0x00141A22, // About
             0x00141A22, // Help
+            0x00141A22, // Browser
         },
     .console_fg = 0x00E8EDF2,
     .console_bg = 0x000F1319,
@@ -476,6 +488,7 @@ constexpr Theme kDuetViolet = {
             0x00553788, // ImageView    — violet-tinted
             0x002A323C, // About        — slate panel
             0x002A323C, // Help         — same as About
+            0x002A323C, // Browser      — slate panel
         },
     .role_client =
         {
@@ -484,6 +497,7 @@ constexpr Theme kDuetViolet = {
             0x00080A0E, // ImageView
             0x00141A22, // About
             0x00141A22, // Help
+            0x00141A22, // Browser
         },
     .console_fg = 0x00E8EDF2,
     .console_bg = 0x000F1319,
@@ -520,6 +534,7 @@ constexpr Theme kDuetGreen = {
             0x00256B36, // ImageView    — green-tinted
             0x002A323C, // About        — slate panel
             0x002A323C, // Help         — same as About
+            0x002A323C, // Browser      — slate panel
         },
     .role_client =
         {
@@ -528,6 +543,7 @@ constexpr Theme kDuetGreen = {
             0x00080A0E, // ImageView
             0x00141A22, // About
             0x00141A22, // Help
+            0x00141A22, // Browser
         },
     .console_fg = 0x00E8EDF2,
     .console_bg = 0x000F1319,
@@ -583,6 +599,7 @@ constexpr Theme kDuetClassic = {
             0x00204878, // ImageView    — Win9x dark blue, "viewer" hue
             0x00404040, // About        — flat grey panel
             0x00404040, // Help         — flat grey panel
+            0x00204878, // Browser      — Win9x dark blue (matches ImageView)
         },
     .role_client =
         {
@@ -597,6 +614,7 @@ constexpr Theme kDuetClassic = {
             0x00000000, // ImageView    — black ground for image
             0x00C0C0C0, // About        — Win9x panel grey
             0x00C0C0C0, // Help         — Win9x panel grey
+            0x00FFFFFF, // Browser      — paper white for readability
         },
 
     .console_fg = 0x00000000,
@@ -651,6 +669,7 @@ constexpr Theme kHighContrast = {
             0x00FFFF00, // ImageView
             0x00FFFF00, // About
             0x00FFFF00, // Help
+            0x00FFFF00, // Browser
         },
     .role_client =
         {
@@ -659,6 +678,7 @@ constexpr Theme kHighContrast = {
             0x00000000, // ImageView
             0x00000000, // About
             0x00000000, // Help
+            0x00000000, // Browser
         },
 
     .console_fg = 0x00FFFFFF,
@@ -694,7 +714,7 @@ const Theme* const kThemes[static_cast<u32>(ThemeId::kCount)] = {
 constinit ThemeId g_current = ThemeId::Classic;
 constinit WindowHandle g_role_window[static_cast<u32>(ThemeRole::kCount)] = {
     kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid,
-    kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid,
+    kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid,
 };
 
 } // namespace

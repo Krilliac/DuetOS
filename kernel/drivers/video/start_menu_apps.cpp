@@ -130,6 +130,11 @@ bool ResolveTargetName(const char* s, ThemeRole* out)
         *out = ThemeRole::Help;
         return true;
     }
+    if (StrEqI(s, "browser") || StrEqI(s, "web"))
+    {
+        *out = ThemeRole::Browser;
+        return true;
+    }
     return false;
 }
 

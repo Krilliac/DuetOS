@@ -46,7 +46,7 @@ namespace duetos::net
 inline constexpr u32 kSocketPoolCap = 8;
 inline constexpr u32 kSocketUdpRxQueueCap = 8;      // per-socket RX queue depth
 inline constexpr u32 kSocketDgramPayloadCap = 1500; // standard MTU
-inline constexpr u32 kSocketTcpRxBufBytes = 2048;   // matches kTcpActiveBufBytes
+inline constexpr u32 kSocketTcpRxBufBytes = 65536;  // matches kTcpActiveBufBytes
 
 inline constexpr u16 kSocketDomainInet = 2;
 inline constexpr u32 kSocketTypeStream = 1;

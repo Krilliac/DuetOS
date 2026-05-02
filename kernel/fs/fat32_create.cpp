@@ -790,13 +790,16 @@ bool Fat32RmdirAtPath(const Volume* v, const char* path)
 
 namespace
 {
-// Bounce buffer cap for v0 rename (copy-then-delete). 64 KiB
-// covers every test fixture in the FAT32 selftest + every
-// PE the loader currently asks for. Files over the cap return
-// false from Fat32RenameAtPath; lifting the cap requires a
+// Bounce buffer cap for v0 rename (copy-then-delete). 256 KiB
+// fits Notes documents and small downloads. A typical 1024×768
+// 32-bpp screenshot is ~3 MiB and still exceeds it; the trash
+// path streams to handle those. The previous 64 KiB cap forced
+// even mid-size renames through a streaming fallback that the
+// kernel didn't always have. Files over the cap still return
+// false from Fat32RenameAtPath; lifting it further requires a
 // streaming copy that walks cluster-by-cluster, which is its
 // own sub-GAP.
-constexpr u64 kRenameBounceMax = 64 * 1024;
+constexpr u64 kRenameBounceMax = 256 * 1024;
 } // namespace
 
 bool Fat32RenameAtPath(const Volume* v, const char* src_path, const char* dst_path)
