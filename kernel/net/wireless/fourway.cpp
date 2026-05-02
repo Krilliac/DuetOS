@@ -1,6 +1,7 @@
 #include "net/wireless/fourway.h"
 
 #include "core/panic.h"
+#include "log/klog.h"
 #include "net/wireless/crypto/prf.h"
 #include "net/wireless/wifi_diag.h"
 
@@ -162,6 +163,8 @@ void FourWayInit(FourWayContext& ctx, const u8 pmk[32], const u8 sta_mac[6], con
     ctx.sha256 = sha256;
     ctx.aes_cmac = aes_cmac;
     ctx.state = FourWayState::AwaitingM1;
+    KLOG_INFO_A2V(::duetos::core::LogArea::Wireless, "net/wireless/fourway", "4way init", "sha256",
+                  static_cast<u64>(sha256 ? 1 : 0), "aes_cmac", static_cast<u64>(aes_cmac ? 1 : 0));
     diag::RecordOk(diag::Layer::Eapol, "4way-init", sha256 ? 1 : 0, aes_cmac ? 1 : 0);
 }
 
@@ -178,6 +181,8 @@ void FourWayInit(FourWayContext& ctx, const u8 pmk[32], const u8 sta_mac[6], con
     if (!IsAllZero(ctx.last_replay, kEapolReplayBytes) && !ReplayGt(f.replay_counter, ctx.last_replay))
     {
         ++ctx.retries_seen;
+        KLOG_WARN_A(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
+                    "incoming replay counter <= last seen — frame rejected");
         diag::RecordErr(diag::Layer::Eapol, "4way-replay", static_cast<u32>(::duetos::core::ErrorCode::Corrupt), 0, 0,
                         0);
         return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
@@ -202,6 +207,8 @@ void FourWayInit(FourWayContext& ctx, const u8 pmk[32], const u8 sta_mac[6], con
         if (ctx.state != FourWayState::AwaitingM1)
         {
             ++ctx.unexpected_messages;
+            KLOG_WARN_AS(::duetos::core::LogArea::Wireless, "net/wireless/fourway", "M1 received in unexpected state",
+                         "state", FourWayStateName(ctx.state));
             diag::RecordErr(diag::Layer::Eapol, "4way-m1-unexp", static_cast<u32>(::duetos::core::ErrorCode::BadState),
                             static_cast<u64>(ctx.state), 0, 0);
             return ::duetos::core::Err{::duetos::core::ErrorCode::BadState};
@@ -224,6 +231,8 @@ void FourWayInit(FourWayContext& ctx, const u8 pmk[32], const u8 sta_mac[6], con
             crypto::Prf(ctx.pmk, 32, "Pairwise key expansion", seed, 76, kPtkBytes * 8u, ctx.ptk);
         ctx.ptk_valid = true;
         ctx.state = FourWayState::AwaitingM3;
+        KLOG_INFO_A(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
+                    "M1 processed — PTK derived; awaiting M3");
         diag::RecordOk(diag::Layer::Eapol, "4way-m1-ok", f.key_info, 0, 0);
         return ::duetos::core::Result<void>{};
     }
@@ -233,6 +242,8 @@ void FourWayInit(FourWayContext& ctx, const u8 pmk[32], const u8 sta_mac[6], con
         if (ctx.state != FourWayState::AwaitingM3)
         {
             ++ctx.unexpected_messages;
+            KLOG_WARN_AS(::duetos::core::LogArea::Wireless, "net/wireless/fourway", "M3 received in unexpected state",
+                         "state", FourWayStateName(ctx.state));
             diag::RecordErr(diag::Layer::Eapol, "4way-m3-unexp", static_cast<u32>(::duetos::core::ErrorCode::BadState),
                             static_cast<u64>(ctx.state), 0, 0);
             return ::duetos::core::Err{::duetos::core::ErrorCode::BadState};
@@ -244,6 +255,8 @@ void FourWayInit(FourWayContext& ctx, const u8 pmk[32], const u8 sta_mac[6], con
         {
             ++ctx.mic_failures;
             ctx.state = FourWayState::Failed;
+            KLOG_ERROR_A(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
+                         "M3 MIC verify FAILED — handshake aborted");
             diag::RecordErr(diag::Layer::Eapol, "4way-m3-mic", static_cast<u32>(vr.error()), 0, 0, 0);
             return vr;
         }
@@ -251,6 +264,8 @@ void FourWayInit(FourWayContext& ctx, const u8 pmk[32], const u8 sta_mac[6], con
         // accepts plaintext key data — AES key wrap not landed yet).
         if (encrypted)
         {
+            KLOG_WARN_A(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
+                        "M3 has encrypted key data — AES-KW unwrap not implemented (v0)");
             diag::RecordErr(diag::Layer::Eapol, "4way-m3-need-keywrap",
                             static_cast<u32>(::duetos::core::ErrorCode::Unsupported), 0, 0, 0);
             // Still advance state — production builds will land
@@ -270,18 +285,23 @@ void FourWayInit(FourWayContext& ctx, const u8 pmk[32], const u8 sta_mac[6], con
                 ctx.gtk_len = gtk_len;
                 ctx.gtk_index = gtk_idx;
                 ctx.gtk_valid = true;
+                KLOG_INFO_A2V(::duetos::core::LogArea::Wireless, "net/wireless/fourway", "GTK installed from M3",
+                              "gtk_len", static_cast<u64>(gtk_len), "gtk_index", static_cast<u64>(gtk_idx));
                 diag::RecordOk(diag::Layer::KeyMgmt, "gtk-installed", gtk_len, gtk_idx, 0);
             }
         }
         CopyBytes(ctx.last_replay, f.replay_counter, kEapolReplayBytes);
         ++ctx.messages_processed;
         ctx.state = FourWayState::AwaitingM4Ack;
+        KLOG_INFO_A(::duetos::core::LogArea::Wireless, "net/wireless/fourway", "M3 processed — awaiting M4 ack");
         diag::RecordOk(diag::Layer::Eapol, "4way-m3-ok", f.key_info, f.key_data_len, 0);
         return ::duetos::core::Result<void>{};
     }
     // M2 / M4 are SUPPLICANT-side outgoing — receiving them as a
     // supplicant is a protocol error.
     ++ctx.unexpected_messages;
+    KLOG_WARN_AV(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
+                 "rx of supplicant-side msg (M2/M4) — key_info", static_cast<u64>(f.key_info));
     diag::RecordErr(diag::Layer::Eapol, "4way-rx-unexpected", static_cast<u32>(::duetos::core::ErrorCode::BadState),
                     f.key_info, 0, 0);
     return ::duetos::core::Err{::duetos::core::ErrorCode::BadState};
@@ -319,6 +339,8 @@ void FourWayInit(FourWayContext& ctx, const u8 pmk[32], const u8 sta_mac[6], con
     }
     else
     {
+        KLOG_WARN_AS(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
+                     "BuildOutgoing called from unexpected state", "state", FourWayStateName(ctx.state));
         diag::RecordErr(diag::Layer::Eapol, "4way-build-unexp", static_cast<u32>(::duetos::core::ErrorCode::BadState),
                         static_cast<u64>(ctx.state), 0, 0);
         return ::duetos::core::Err{::duetos::core::ErrorCode::BadState};
@@ -326,15 +348,25 @@ void FourWayInit(FourWayContext& ctx, const u8 pmk[32], const u8 sta_mac[6], con
 
     auto br = EapolKeyBuild(f, out_buf, cap, out_len);
     if (!br.has_value())
+    {
+        KLOG_WARN_A(::duetos::core::LogArea::Wireless, "net/wireless/fourway", "BuildOutgoing: EapolKeyBuild failed");
         return br;
+    }
     if (!ctx.ptk_valid)
+    {
+        KLOG_ERROR_A(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
+                     "BuildOutgoing: PTK not derived — cannot MIC");
         return ::duetos::core::Err{::duetos::core::ErrorCode::BadState};
+    }
     const u16 kdv = ctx.aes_cmac ? kKdvAesCmac : kKdvHmacSha1;
     return EapolMicPatch(out_buf, *out_len, FourWayKck(ctx), kKckBytes, kdv);
 }
 
 void FourWaySelfTest()
 {
+    KLOG_TRACE_SCOPE("net/wireless/fourway", "FourWaySelfTest");
+    KLOG_INFO_A(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
+                "self-test: synthetic 4-way handshake (M1→M2→M3→M4)");
     // Synthetic two-party 4-way handshake. PMK is 32 bytes of
     // 0xAA, SPA = 02:11:22:33:44:55, AA = 02:AA:BB:CC:DD:EE.
     // We construct M1 manually (as the AP would), feed it to the
@@ -434,6 +466,8 @@ void FourWaySelfTest()
     KASSERT(br4.has_value(), "net/wireless/fourway", "M4 build failed");
     auto vr4 = EapolMicVerify(m4_buf, m4_len, FourWayKck(ctx), kKckBytes, kKdvHmacSha1);
     KASSERT(vr4.has_value(), "net/wireless/fourway", "M4 MIC verify failed");
+    KLOG_INFO_A(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
+                "self-test OK (M1+M2+M3+M4 + GTK + MIC verified)");
 }
 
 } // namespace duetos::net::wireless

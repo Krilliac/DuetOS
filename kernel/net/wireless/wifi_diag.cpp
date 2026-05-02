@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "log/klog.h"
 #include "sync/spinlock.h"
 #include "time/tick.h"
 
@@ -91,6 +92,8 @@ void Init()
     g_seq_next = 0;
     g_init_done = true;
     duetos::sync::SpinLockRelease(g_lock, flags);
+    KLOG_INFO_AV(::duetos::core::LogArea::Wireless, "net/wireless/diag", "wifi-diag online; ring capacity",
+                 static_cast<::duetos::u64>(kRingCapacity));
     arch::SerialWrite("[wifi-diag] online — ring capacity ");
     arch::SerialWriteHex(kRingCapacity);
     arch::SerialWrite(" events\n");
@@ -172,6 +175,8 @@ void Clear()
 
 void Dump(u32 max_events)
 {
+    KLOG_INFO_A2V(::duetos::core::LogArea::Wireless, "net/wireless/diag", "ring dump", "retained",
+                  static_cast<::duetos::u64>(g_count), "total", g_total);
     arch::SerialWrite("[wifi-diag] ====== ring dump ======\n");
     arch::SerialWrite("[wifi-diag] retained=");
     arch::SerialWriteHex(g_count);

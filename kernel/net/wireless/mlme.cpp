@@ -1,6 +1,7 @@
 #include "net/wireless/mlme.h"
 
 #include "core/panic.h"
+#include "log/klog.h"
 #include "net/wireless/crypto/pbkdf2.h"
 #include "net/wireless/wifi_diag.h"
 #include "time/tick.h"
@@ -102,9 +103,16 @@ u32 MlmeBuildDefaultRsnIe(u8* out, u32 cap)
 ::duetos::core::Result<u32> MlmeBuildAuthOpenFrame(const u8 sta_mac[6], const u8 ap_mac[6], u8* out, u32 cap)
 {
     if (out == nullptr)
+    {
+        KLOG_WARN_A(::duetos::core::LogArea::Wireless, "net/wireless/mlme", "BuildAuthOpenFrame: null out buffer");
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+    }
     if (cap < kMlmeAuthFrameMaxBytes)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Wireless, "net/wireless/mlme",
+                     "BuildAuthOpenFrame: buffer too small, cap=", static_cast<u64>(cap));
         return ::duetos::core::Err{::duetos::core::ErrorCode::BufferTooSmall};
+    }
     u32 o = BuildMgmtMacHeader(static_cast<u8>(MgmtSubtype::Authentication), ap_mac, sta_mac, ap_mac, out);
     // Auth body: u16 algo (0=open), u16 seq (1), u16 status (0).
     WriteLe16(out, o, 0);
@@ -122,9 +130,17 @@ u32 MlmeBuildDefaultRsnIe(u8* out, u32 cap)
                                                    const u8* rsn_ie, u32 rsn_ie_len, u8* out, u32 cap)
 {
     if (out == nullptr || ssid == nullptr || ssid_len > kSsidMaxBytes || rsn_ie_len > 256)
+    {
+        KLOG_WARN_2V("net/wireless/mlme", "BuildAssocReqFrame: invalid args", "ssid_len", static_cast<u64>(ssid_len),
+                     "rsn_ie_len", static_cast<u64>(rsn_ie_len));
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+    }
     if (cap < 24 + 4 + 2 + ssid_len + 2 + supp_rates_count + rsn_ie_len)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Wireless, "net/wireless/mlme",
+                     "BuildAssocReqFrame: buffer too small, cap=", static_cast<u64>(cap));
         return ::duetos::core::Err{::duetos::core::ErrorCode::BufferTooSmall};
+    }
 
     u32 o = BuildMgmtMacHeader(static_cast<u8>(MgmtSubtype::AssocRequest), ap_mac, sta_mac, ap_mac, out);
     // Capability info: ESS + Privacy + ShortPreamble + ShortSlotTime.
@@ -157,7 +173,11 @@ u32 MlmeBuildDefaultRsnIe(u8* out, u32 cap)
                                                  u32 cap)
 {
     if (out == nullptr || cap < 24 + 2)
+    {
+        KLOG_WARN_A(::duetos::core::LogArea::Wireless, "net/wireless/mlme",
+                    "BuildDeauthFrame: bad args or buffer too small");
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+    }
     u32 o = BuildMgmtMacHeader(static_cast<u8>(MgmtSubtype::Deauthentication), ap_mac, sta_mac, ap_mac, out);
     WriteLe16(out, o, reason_code);
     o += 2;
@@ -167,8 +187,14 @@ u32 MlmeBuildDefaultRsnIe(u8* out, u32 cap)
 
 ::duetos::core::Result<void> MlmeScanAndWait(WirelessDevice* wdev, const WirelessScanRequest& req, u32 timeout_ticks)
 {
+    KLOG_TRACE_SCOPE("net/wireless/mlme", "MlmeScanAndWait");
     if (wdev == nullptr || wdev->ops.Scan == nullptr)
+    {
+        KLOG_WARN_A(::duetos::core::LogArea::Wireless, "net/wireless/mlme", "ScanAndWait: wdev or ops.Scan is null");
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+    }
+    KLOG_INFO_A2V(::duetos::core::LogArea::Wireless, "net/wireless/mlme", "scan starting", "channels",
+                  static_cast<u64>(req.channel_count), "dwell_ms", static_cast<u64>(req.dwell_ms_per_channel));
     diag::RecordOk(diag::Layer::Mlme, "scan-start", req.channel_count, req.dwell_ms_per_channel, wdev->wdev_id);
     WirelessSetState(wdev, WirelessOpState::Scanning);
     wdev->scan_result_count = 0;
@@ -176,6 +202,8 @@ u32 MlmeBuildDefaultRsnIe(u8* out, u32 cap)
     auto sr = wdev->ops.Scan(wdev, req);
     if (!sr.has_value())
     {
+        KLOG_ERROR_AV(::duetos::core::LogArea::Wireless, "net/wireless/mlme", "scan: driver Scan op returned error",
+                      static_cast<u64>(sr.error()));
         diag::RecordErr(diag::Layer::Mlme, "scan-issue-err", static_cast<u32>(sr.error()), 0, 0, 0);
         WirelessSetState(wdev, WirelessOpState::Failed);
         return sr;
@@ -189,6 +217,8 @@ u32 MlmeBuildDefaultRsnIe(u8* out, u32 cap)
         if (wdev->scan_completed_tick > wdev->scan_started_tick && wdev->scan_result_count > 0)
             break;
     }
+    KLOG_INFO_AV(::duetos::core::LogArea::Wireless, "net/wireless/mlme", "scan complete; results",
+                 static_cast<u64>(wdev->scan_result_count));
     diag::RecordOk(diag::Layer::Mlme, "scan-done", wdev->scan_result_count, 0, wdev->wdev_id);
     WirelessSetState(wdev, WirelessOpState::Idle);
     return ::duetos::core::Result<void>{};
@@ -196,8 +226,13 @@ u32 MlmeBuildDefaultRsnIe(u8* out, u32 cap)
 
 ::duetos::core::Result<void> MlmeConnect(WirelessDevice* wdev, const MlmeConnectRequest& req)
 {
+    KLOG_TRACE_SCOPE("net/wireless/mlme", "MlmeConnect");
     if (wdev == nullptr)
+    {
+        KLOG_WARN_A(::duetos::core::LogArea::Wireless, "net/wireless/mlme", "Connect: null wdev");
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+    }
+    KLOG_INFO_AS(::duetos::core::LogArea::Wireless, "net/wireless/mlme", "connect starting", "ssid", req.ssid);
     diag::RecordOk(diag::Layer::Mlme, "connect-start", req.ssid_len, req.desired_channel, wdev->wdev_id, req.ssid);
 
     // Pick a target BSS.
@@ -213,6 +248,8 @@ u32 MlmeBuildDefaultRsnIe(u8* out, u32 cap)
     }
     if (target == nullptr)
     {
+        KLOG_WARN_AS(::duetos::core::LogArea::Wireless, "net/wireless/mlme", "connect: target SSID not in scan results",
+                     "ssid", req.ssid);
         diag::RecordErr(diag::Layer::Mlme, "connect-no-bss", static_cast<u32>(::duetos::core::ErrorCode::NotFound),
                         req.ssid_len, 0, 0, req.ssid);
         return ::duetos::core::Err{::duetos::core::ErrorCode::NotFound};
@@ -230,6 +267,8 @@ u32 MlmeBuildDefaultRsnIe(u8* out, u32 cap)
     }
     else if (target->security != WirelessSecurity::Open)
     {
+        KLOG_WARN_AV(::duetos::core::LogArea::Wireless, "net/wireless/mlme",
+                     "connect: secured network with empty passphrase, security=", static_cast<u64>(target->security));
         diag::RecordErr(diag::Layer::Mlme, "connect-no-psk",
                         static_cast<u32>(::duetos::core::ErrorCode::InvalidArgument),
                         static_cast<u64>(target->security), 0, 0);
@@ -248,6 +287,8 @@ u32 MlmeBuildDefaultRsnIe(u8* out, u32 cap)
         auto r = wdev->ops.Authenticate(wdev, ar);
         if (!r.has_value())
         {
+            KLOG_ERROR_AV(::duetos::core::LogArea::Wireless, "net/wireless/mlme", "Authenticate failed",
+                          static_cast<u64>(r.error()));
             diag::RecordErr(diag::Layer::Mlme, "auth-issue-err", static_cast<u32>(r.error()), 0, 0, 0);
             WirelessSetState(wdev, WirelessOpState::Failed);
             return r;
@@ -271,6 +312,8 @@ u32 MlmeBuildDefaultRsnIe(u8* out, u32 cap)
         auto r = wdev->ops.Associate(wdev, as);
         if (!r.has_value())
         {
+            KLOG_ERROR_AV(::duetos::core::LogArea::Wireless, "net/wireless/mlme", "Associate failed",
+                          static_cast<u64>(r.error()));
             diag::RecordErr(diag::Layer::Mlme, "assoc-issue-err", static_cast<u32>(r.error()), 0, 0, 0);
             WirelessSetState(wdev, WirelessOpState::Failed);
             return r;
@@ -283,6 +326,8 @@ u32 MlmeBuildDefaultRsnIe(u8* out, u32 cap)
     {
         FourWayInit(wdev->fw, pmk, wdev->mac, target->bssid, /*sha256=*/false, /*aes_cmac=*/false);
         WirelessSetState(wdev, WirelessOpState::Handshaking);
+        KLOG_INFO_A(::duetos::core::LogArea::Wireless, "net/wireless/mlme",
+                    "PSK mode — 4-way handshake context initialized");
     }
     else
     {
@@ -293,6 +338,8 @@ u32 MlmeBuildDefaultRsnIe(u8* out, u32 cap)
             wdev->connected_ssid[i] = req.ssid[i];
         wdev->connected_ssid[req.ssid_len] = '\0';
         wdev->connected_security = WirelessSecurity::Open;
+        KLOG_INFO_AS(::duetos::core::LogArea::Wireless, "net/wireless/mlme", "open network — connected", "ssid",
+                     req.ssid);
     }
     diag::RecordOk(diag::Layer::Mlme, "connect-handoff", 0, 0, wdev->wdev_id);
     return ::duetos::core::Result<void>{};
@@ -301,7 +348,12 @@ u32 MlmeBuildDefaultRsnIe(u8* out, u32 cap)
 ::duetos::core::Result<void> MlmeDisconnect(WirelessDevice* wdev, u16 reason)
 {
     if (wdev == nullptr)
+    {
+        KLOG_WARN_A(::duetos::core::LogArea::Wireless, "net/wireless/mlme", "Disconnect: null wdev");
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+    }
+    KLOG_INFO_AV(::duetos::core::LogArea::Wireless, "net/wireless/mlme", "disconnecting; reason",
+                 static_cast<u64>(reason));
     diag::RecordOk(diag::Layer::Mlme, "disconnect", reason, 0, wdev->wdev_id);
     WirelessSetState(wdev, WirelessOpState::Disconnecting);
     if (wdev->ops.Disconnect != nullptr)
@@ -312,6 +364,9 @@ u32 MlmeBuildDefaultRsnIe(u8* out, u32 cap)
 
 void MlmeSelfTest()
 {
+    KLOG_TRACE_SCOPE("net/wireless/mlme", "MlmeSelfTest");
+    KLOG_INFO_A(::duetos::core::LogArea::Wireless, "net/wireless/mlme",
+                "self-test: auth/assoc/deauth frame builders + RSN IE");
     // Build the three frame types into a static buffer; assert
     // header offsets + IE layout.
     const u8 sta[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x55};
@@ -356,6 +411,8 @@ void MlmeSelfTest()
         KASSERT(r.has_value() && r.value() == 26, "net/wireless/mlme", "deauth frame bad length");
         KASSERT(buf[24] == kReasonDeauthLeaving && buf[25] == 0, "net/wireless/mlme", "deauth reason wrong");
     }
+    KLOG_INFO_A(::duetos::core::LogArea::Wireless, "net/wireless/mlme",
+                "self-test OK (auth/assoc/deauth + RSN IE verified)");
 }
 
 } // namespace duetos::net::wireless

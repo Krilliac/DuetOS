@@ -1,6 +1,7 @@
 #include "net/wireless/eapol.h"
 
 #include "core/panic.h"
+#include "log/klog.h"
 #include "net/wireless/crypto/hmac.h"
 #include "net/wireless/wifi_diag.h"
 
@@ -55,12 +56,16 @@ constexpr u32 kMicOffsetInBody = 1u + 2u + 2u + 8u + 32u + 16u + 8u + 8u;
     out->body_length = ReadBe16(frame, 2);
     if (out->packet_type != kEapolPacketTypeKey)
     {
+        KLOG_WARN_AV(::duetos::core::LogArea::Wireless, "net/wireless/eapol", "parse: non-key EAPOL packet_type",
+                     static_cast<u64>(out->packet_type));
         diag::RecordErr(diag::Layer::Eapol, "key-parse-bad-pkt", static_cast<u32>(::duetos::core::ErrorCode::Corrupt),
                         out->packet_type, 0, 0);
         return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
     }
     if (kEapolHdrBytes + static_cast<u32>(out->body_length) > len)
     {
+        KLOG_WARN_2V("net/wireless/eapol", "parse: truncated body", "body_length", static_cast<u64>(out->body_length),
+                     "frame_len", static_cast<u64>(len));
         diag::RecordErr(diag::Layer::Eapol, "key-parse-trunc", static_cast<u32>(::duetos::core::ErrorCode::Corrupt),
                         out->body_length, len, 0);
         return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
@@ -91,6 +96,8 @@ constexpr u32 kMicOffsetInBody = 1u + 2u + 2u + 8u + 32u + 16u + 8u + 8u;
 
     if (off + out->key_data_len > out->body_length)
     {
+        KLOG_WARN_2V("net/wireless/eapol", "parse: key_data overruns body", "key_data_len",
+                     static_cast<u64>(out->key_data_len), "body_length", static_cast<u64>(out->body_length));
         diag::RecordErr(diag::Layer::Eapol, "key-parse-data-trunc",
                         static_cast<u32>(::duetos::core::ErrorCode::Corrupt), out->key_data_len, out->body_length, 0);
         return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
@@ -113,6 +120,8 @@ constexpr u32 kMicOffsetInBody = 1u + 2u + 2u + 8u + 32u + 16u + 8u + 8u;
     const u32 frame_len = kEapolHdrBytes + body_len;
     if (frame_len > cap || f.key_data_len > kEapolKeyDataMaxBytes)
     {
+        KLOG_WARN_2V("net/wireless/eapol", "build: capacity exceeded", "want", static_cast<u64>(frame_len), "cap",
+                     static_cast<u64>(cap));
         diag::RecordErr(diag::Layer::Eapol, "key-build-cap",
                         static_cast<u32>(::duetos::core::ErrorCode::InvalidArgument), frame_len, cap, 0);
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
@@ -179,6 +188,8 @@ constexpr u32 kMicOffsetInBody = 1u + 2u + 2u + 8u + 32u + 16u + 8u + 8u;
     }
     // AES-CMAC MIC (KDV=3) needs an AES core; not implemented in
     // v0. Record + reject.
+    KLOG_WARN_AV(::duetos::core::LogArea::Wireless, "net/wireless/eapol", "mic-patch: unsupported KDV (need AES-CMAC)",
+                 static_cast<u64>(kdv));
     diag::RecordErr(diag::Layer::Eapol, "mic-patch-kdv-unsup", static_cast<u32>(::duetos::core::ErrorCode::Unsupported),
                     kdv, 0, 0);
     return ::duetos::core::Err{::duetos::core::ErrorCode::Unsupported};
@@ -193,6 +204,8 @@ constexpr u32 kMicOffsetInBody = 1u + 2u + 2u + 8u + 32u + 16u + 8u + 8u;
 
     if (kdv != kKdvHmacSha1)
     {
+        KLOG_WARN_AV(::duetos::core::LogArea::Wireless, "net/wireless/eapol", "mic-verify: unsupported KDV",
+                     static_cast<u64>(kdv));
         diag::RecordErr(diag::Layer::Eapol, "mic-verify-kdv-unsup",
                         static_cast<u32>(::duetos::core::ErrorCode::Unsupported), kdv, 0, 0);
         return ::duetos::core::Err{::duetos::core::ErrorCode::Unsupported};
@@ -215,6 +228,8 @@ constexpr u32 kMicOffsetInBody = 1u + 2u + 2u + 8u + 32u + 16u + 8u + 8u;
     {
         if (body[kMicOffsetInBody + i] != expected[i])
         {
+            KLOG_WARN_AV(::duetos::core::LogArea::Wireless, "net/wireless/eapol", "mic-verify: byte mismatch at offset",
+                         static_cast<u64>(i));
             diag::RecordErr(diag::Layer::Eapol, "mic-verify-fail", static_cast<u32>(::duetos::core::ErrorCode::Corrupt),
                             i, body_len, 0);
             return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
@@ -226,6 +241,8 @@ constexpr u32 kMicOffsetInBody = 1u + 2u + 2u + 8u + 32u + 16u + 8u + 8u;
 
 void EapolSelfTest()
 {
+    KLOG_TRACE_SCOPE("net/wireless/eapol", "EapolSelfTest");
+    KLOG_INFO_A(::duetos::core::LogArea::Wireless, "net/wireless/eapol", "self-test: build/patch/verify round-trip");
     // Build → patch (HMAC-SHA1) → verify round-trip.
     EapolKeyFrame in{};
     in.version = 2;
@@ -273,6 +290,8 @@ void EapolSelfTest()
         if (out.key_nonce[i] != in.key_nonce[i])
             nonce_ok = false;
     KASSERT(nonce_ok, "net/wireless/eapol", "EAPOL parse nonce mismatch");
+    KLOG_INFO_A(::duetos::core::LogArea::Wireless, "net/wireless/eapol",
+                "self-test OK (build + patch + verify + parse)");
 }
 
 } // namespace duetos::net::wireless

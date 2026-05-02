@@ -11,10 +11,10 @@
 
 #include "ipc/kevent.h"
 
-#include "arch/x86_64/serial.h"
 #include "core/panic.h"
 #include "ipc/handle_table.h"
 #include "ipc/kobject.h"
+#include "log/klog.h"
 #include "mm/kheap.h"
 #include "sched/sched.h"
 
@@ -48,12 +48,16 @@ void KEventDestroy(KObject* obj)
     auto* e = static_cast<KEvent*>(duetos::mm::KMalloc(sizeof(KEvent)));
     if (e == nullptr)
     {
+        KLOG_ERROR_AV(::duetos::core::LogArea::IPC, "ipc/kevent", "Create: KMalloc failed (OOM)",
+                      static_cast<u64>(sizeof(KEvent)));
         return ::duetos::core::Err{::duetos::core::ErrorCode::OutOfMemory};
     }
     *e = KEvent{};
     KObjectInit(&e->base, KObjectType::Event, &KEventDestroy);
     e->manual_reset = manual_reset;
     e->signaled = initially_signaled;
+    KLOG_TRACE_A(::duetos::core::LogArea::IPC, "ipc/kevent",
+                 manual_reset ? "create ok manual-reset" : "create ok auto-reset");
     return e;
 }
 
@@ -107,7 +111,8 @@ void KEventWait(KEvent* e)
 
 void KEventSelfTest()
 {
-    arch::SerialWrite("[ipc] kevent self-test: state machine + HandleTable round-trip\n");
+    KLOG_TRACE_SCOPE("ipc/kevent", "KEventSelfTest");
+    KLOG_INFO_A(::duetos::core::LogArea::IPC, "ipc/kevent", "self-test: state machine + HandleTable round-trip");
 
     // Manual-reset event, initially signaled. Wait should return
     // immediately (no blocking needed).
@@ -190,7 +195,8 @@ void KEventSelfTest()
         core::Panic("ipc/kevent", "self-test: live count != 0 at end");
     }
 
-    arch::SerialWrite("[ipc] kevent self-test OK (manual + auto reset, Set/Wait/Reset, HandleTable cycle).\n");
+    KLOG_INFO_A(::duetos::core::LogArea::IPC, "ipc/kevent",
+                "self-test OK (manual + auto reset, Set/Wait/Reset, HandleTable cycle)");
 }
 
 } // namespace duetos::ipc

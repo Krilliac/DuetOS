@@ -11,10 +11,10 @@
 
 #include "ipc/ksemaphore.h"
 
-#include "arch/x86_64/serial.h"
 #include "core/panic.h"
 #include "ipc/handle_table.h"
 #include "ipc/kobject.h"
+#include "log/klog.h"
 #include "mm/kheap.h"
 #include "sched/sched.h"
 
@@ -40,17 +40,22 @@ void KSemaphoreDestroy(KObject* obj)
 {
     if (initial_count > max_count)
     {
+        KLOG_WARN_2V("ipc/ksemaphore", "Create: initial > max", "initial", static_cast<u64>(initial_count), "max",
+                     static_cast<u64>(max_count));
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
     }
     auto* s = static_cast<KSemaphore*>(duetos::mm::KMalloc(sizeof(KSemaphore)));
     if (s == nullptr)
     {
+        KLOG_ERROR_AV(::duetos::core::LogArea::IPC, "ipc/ksemaphore", "Create: KMalloc failed (OOM)",
+                      static_cast<u64>(sizeof(KSemaphore)));
         return ::duetos::core::Err{::duetos::core::ErrorCode::OutOfMemory};
     }
     *s = KSemaphore{};
     KObjectInit(&s->base, KObjectType::Semaphore, &KSemaphoreDestroy);
     s->count = initial_count;
     s->max_count = max_count;
+    KLOG_TRACE_AV(::duetos::core::LogArea::IPC, "ipc/ksemaphore", "create ok initial", static_cast<u64>(initial_count));
     return s;
 }
 
@@ -78,7 +83,11 @@ void KSemaphoreRelease(KSemaphore* s, u32 n)
         // mutex is already dropped — letting `count` exceed
         // `max_count` would leak permits past the contract that
         // every consumer relies on.
+        const u32 cur = s->count;
+        const u32 cap = s->max_count;
         sched::MutexUnlock(&s->inner);
+        KLOG_ERROR_2V("ipc/ksemaphore", "release would overflow max_count", "count+n",
+                      static_cast<u64>(cur) + static_cast<u64>(n), "max", static_cast<u64>(cap));
         core::DebugPanicOrWarn("ipc/ksemaphore", "release would overflow max_count");
         return;
     }
@@ -101,7 +110,8 @@ u32 KSemaphoreCount(const KSemaphore* s)
 
 void KSemaphoreSelfTest()
 {
-    arch::SerialWrite("[ipc] ksemaphore self-test: state machine + HandleTable round-trip\n");
+    KLOG_TRACE_SCOPE("ipc/ksemaphore", "KSemaphoreSelfTest");
+    KLOG_INFO_A(::duetos::core::LogArea::IPC, "ipc/ksemaphore", "self-test: state machine + HandleTable round-trip");
 
     // initial=0 with max=2 should reject Acquire-before-Release
     // patterns; we don't test that here (would need a spawned
@@ -180,7 +190,8 @@ void KSemaphoreSelfTest()
         core::Panic("ipc/ksemaphore", "self-test: live count != 0 at end");
     }
 
-    arch::SerialWrite("[ipc] ksemaphore self-test OK (Create + Acquire + Release + clamp + HandleTable cycle).\n");
+    KLOG_INFO_A(::duetos::core::LogArea::IPC, "ipc/ksemaphore",
+                "self-test OK (Create + Acquire + Release + clamp + HandleTable cycle)");
 }
 
 } // namespace duetos::ipc

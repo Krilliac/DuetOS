@@ -19,6 +19,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "diag/cleanroom_trace.h"
+#include "log/klog.h"
 #include "mm/page.h"
 #include "sched/sched.h"
 #include "drivers/usb/xhci_internal.h"
@@ -70,18 +71,33 @@ u64 HidEnqueueNormalTrb(DeviceState* dev, u64 buf_phys, u32 len)
 bool XhciControlIn(u8 slot_id, u8 bmRequestType, u8 bRequest, u16 wValue, u16 wIndex, void* buf, u16 len)
 {
     if ((bmRequestType & 0x80) == 0 || len > mm::kPageSize)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::USB, "drivers/usb/xhci", "ControlIn: bad direction or oversize, len",
+                     static_cast<u64>(len));
         return false;
+    }
     // A non-zero length with a null caller buffer is a caller bug —
     // we'd silently drop the device's IN data. Refuse so the bug
     // surfaces at the call site instead of as a missing read.
     if (buf == nullptr && len > 0)
+    {
+        KLOG_WARN_A(::duetos::core::LogArea::USB, "drivers/usb/xhci", "ControlIn: null buf with non-zero len");
         return false;
+    }
     DeviceState* dev = DeviceForSlot(slot_id);
     if (dev == nullptr)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::USB, "drivers/usb/xhci", "ControlIn: unknown slot",
+                     static_cast<u64>(slot_id));
         return false;
+    }
     Runtime& rt = g_poll_rt[dev->ctrlr_idx];
     if (!DoControlIn(rt, dev, bmRequestType, bRequest, wValue, wIndex, len, "user-control-IN"))
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::USB, "drivers/usb/xhci", "ControlIn: DoControlIn failed; slot",
+                     static_cast<u64>(slot_id));
         return false;
+    }
     if (buf != nullptr && len > 0)
     {
         auto* dst = static_cast<u8*>(buf);
@@ -94,34 +110,57 @@ bool XhciControlIn(u8 slot_id, u8 bmRequestType, u8 bRequest, u16 wValue, u16 wI
 bool XhciControlOut(u8 slot_id, u8 bmRequestType, u8 bRequest, u16 wValue, u16 wIndex, const void* buf, u16 len)
 {
     if ((bmRequestType & 0x80) != 0 || len > mm::kPageSize)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::USB, "drivers/usb/xhci", "ControlOut: bad direction or oversize, len",
+                     static_cast<u64>(len));
         return false;
+    }
     // Symmetric to XhciControlIn: claim len bytes but supply no
     // buffer is a caller bug. Refuse rather than silently degrade
     // to the no-data SETUP path inside ControlOutWithData.
     if (buf == nullptr && len > 0)
+    {
+        KLOG_WARN_A(::duetos::core::LogArea::USB, "drivers/usb/xhci", "ControlOut: null buf with non-zero len");
         return false;
+    }
     DeviceState* dev = DeviceForSlot(slot_id);
     if (dev == nullptr)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::USB, "drivers/usb/xhci", "ControlOut: unknown slot",
+                     static_cast<u64>(slot_id));
         return false;
+    }
     Runtime& rt = g_poll_rt[dev->ctrlr_idx];
     return ControlOutWithData(rt, dev, bmRequestType, bRequest, wValue, wIndex, buf, len, "user-control-OUT");
 }
 
 bool XhciConfigureBulkEndpoint(u8 slot_id, u8 ep_addr, u16 max_packet)
 {
+    KLOG_TRACE_SCOPE("drivers/usb/xhci", "XhciConfigureBulkEndpoint");
     DeviceState* dev = DeviceForSlot(slot_id);
     if (dev == nullptr)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::USB, "drivers/usb/xhci", "ConfigureBulkEndpoint: unknown slot",
+                     static_cast<u64>(slot_id));
         return false;
+    }
     const bool is_in = (ep_addr & 0x80) != 0;
     if (is_in && dev->bulk_in_ready)
         return true;
     if (!is_in && dev->bulk_out_ready)
         return true;
 
+    KLOG_INFO_A2V(::duetos::core::LogArea::USB, "drivers/usb/xhci", "configuring bulk endpoint", "slot",
+                  static_cast<u64>(slot_id), "ep", static_cast<u64>(ep_addr));
+
     mm::PhysAddr ring_phys = 0;
     void* ring_virt = nullptr;
     if (!AllocZeroPage(&ring_phys, &ring_virt))
+    {
+        KLOG_ERROR_A(::duetos::core::LogArea::USB, "drivers/usb/xhci",
+                     "ConfigureBulkEndpoint: ring page allocation failed");
         return false;
+    }
 
     auto* ring = static_cast<Trb*>(ring_virt);
     const u32 slots = mm::kPageSize / sizeof(Trb);
@@ -141,14 +180,23 @@ bool XhciConfigureBulkEndpoint(u8 slot_id, u8 ep_addr, u16 max_packet)
     const u64 cmd_phys = SubmitCmd(rt, kTrbTypeConfigureEndpoint, u32(dev->input_ctx_phys),
                                    u32(dev->input_ctx_phys >> 32), 0, u32(slot_id) << 24);
     if (cmd_phys == 0)
+    {
+        KLOG_ERROR_A(::duetos::core::LogArea::USB, "drivers/usb/xhci", "ConfigureBulkEndpoint: SubmitCmd returned 0");
         return false;
+    }
     u32 cc = 0;
     u8 sl = 0;
     if (!WaitCmdCompletion(rt, cmd_phys, &cc, &sl))
+    {
+        KLOG_ERROR_A(::duetos::core::LogArea::USB, "drivers/usb/xhci",
+                     "ConfigureBulkEndpoint: WaitCmdCompletion timed out");
         return false;
+    }
     const u32 code = (cc >> 24) & 0xFF;
     if (code != kCompletionCodeSuccess)
     {
+        KLOG_ERROR_2V("drivers/usb/xhci", "ConfigureBulkEndpoint: HW rejected", "code", static_cast<u64>(code), "slot",
+                      static_cast<u64>(slot_id));
         arch::SerialWrite("[xhci] bulk-EP configure failed code=");
         arch::SerialWriteHex(code);
         arch::SerialWrite(" (");
@@ -192,14 +240,22 @@ u64 XhciBulkSubmit(u8 slot_id, u8 ep_addr, u64 buf_phys, u32 len)
 {
     DeviceState* dev = DeviceForSlot(slot_id);
     if (dev == nullptr)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::USB, "drivers/usb/xhci", "BulkSubmit: unknown slot",
+                     static_cast<u64>(slot_id));
         return 0;
+    }
     const bool is_in = (ep_addr & 0x80) != 0;
     Runtime& rt = g_poll_rt[dev->ctrlr_idx];
     u64 trb_phys = 0;
     if (is_in)
     {
         if (!dev->bulk_in_ready || ep_addr != dev->bulk_in_ep_addr)
+        {
+            KLOG_WARN_AV(::duetos::core::LogArea::USB, "drivers/usb/xhci",
+                         "BulkSubmit IN: endpoint not configured, ep_addr", static_cast<u64>(ep_addr));
             return 0;
+        }
         trb_phys = EnqueueRingTrb(dev->bulk_in_ring, dev->bulk_in_ring_phys, dev->bulk_in_ring_slots,
                                   dev->bulk_in_ring_idx, dev->bulk_in_ring_cycle, kTrbTypeNormal, u32(buf_phys),
                                   u32(buf_phys >> 32), len, kTrbCtlIoc);
@@ -208,7 +264,11 @@ u64 XhciBulkSubmit(u8 slot_id, u8 ep_addr, u64 buf_phys, u32 len)
     else
     {
         if (!dev->bulk_out_ready || ep_addr != dev->bulk_out_ep_addr)
+        {
+            KLOG_WARN_AV(::duetos::core::LogArea::USB, "drivers/usb/xhci",
+                         "BulkSubmit OUT: endpoint not configured, ep_addr", static_cast<u64>(ep_addr));
             return 0;
+        }
         trb_phys = EnqueueRingTrb(dev->bulk_out_ring, dev->bulk_out_ring_phys, dev->bulk_out_ring_slots,
                                   dev->bulk_out_ring_idx, dev->bulk_out_ring_cycle, kTrbTypeNormal, u32(buf_phys),
                                   u32(buf_phys >> 32), len, kTrbCtlIoc);
@@ -221,7 +281,10 @@ bool XhciBulkPoll(u8 slot_id, u8 ep_addr, u64 trb_phys, u32* out_bytes, u64 time
 {
     DeviceState* dev = DeviceForSlot(slot_id);
     if (dev == nullptr || trb_phys == 0)
+    {
+        KLOG_WARN_A(::duetos::core::LogArea::USB, "drivers/usb/xhci", "BulkPoll: unknown slot or null trb");
         return false;
+    }
 
     // Helper to compute bytes-actually-transferred from the
     // residual byte count + the TRB length we enqueued.
@@ -256,6 +319,7 @@ bool XhciBulkPoll(u8 slot_id, u8 ep_addr, u64 trb_phys, u32* out_bytes, u64 time
         if (timeout_ticks != 0)
             duetos::sched::SchedSleepTicks(1);
     }
+    KLOG_WARN_AV(::duetos::core::LogArea::USB, "drivers/usb/xhci", "BulkPoll: timeout, timeout_us", timeout_us);
     core::CleanroomTraceRecord("xhci", "bulk-timeout", trb_phys, timeout_us, 0);
     return false;
 }

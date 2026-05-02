@@ -11,9 +11,9 @@
 
 #include "ipc/handle_table.h"
 
-#include "arch/x86_64/serial.h"
 #include "core/panic.h"
 #include "ipc/kobject.h"
+#include "log/klog.h"
 #include "sync/spinlock.h"
 #include "util/result.h"
 #include "util/types.h"
@@ -40,6 +40,7 @@ bool HandleInRange(Handle h)
 {
     if (obj == nullptr)
     {
+        KLOG_WARN_A(::duetos::core::LogArea::IPC, "ipc/handle_table", "Insert called with null KObject");
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
     }
 
@@ -50,9 +51,12 @@ bool HandleInRange(Handle h)
         if (table.slots[i].obj == nullptr)
         {
             table.slots[i].obj = obj;
+            KLOG_TRACE_AV(::duetos::core::LogArea::IPC, "ipc/handle_table", "insert ok handle", static_cast<u64>(i));
             return static_cast<Handle>(i);
         }
     }
+    KLOG_WARN_AV(::duetos::core::LogArea::IPC, "ipc/handle_table", "Insert: table full (OOM)",
+                 static_cast<u64>(kHandleTableCapacity));
     return ::duetos::core::Err{::duetos::core::ErrorCode::OutOfMemory};
 }
 
@@ -79,6 +83,8 @@ KObject* HandleTableLookup(HandleTable& table, Handle h, KObjectType expected_ty
 {
     if (!HandleInRange(h))
     {
+        KLOG_WARN_AV(::duetos::core::LogArea::IPC, "ipc/handle_table", "Remove: handle out of range",
+                     static_cast<u64>(h));
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
     }
 
@@ -87,11 +93,13 @@ KObject* HandleTableLookup(HandleTable& table, Handle h, KObjectType expected_ty
         sync::SpinLockGuard guard(table.lock);
         if (table.slots[h].obj == nullptr)
         {
+            KLOG_WARN_AV(::duetos::core::LogArea::IPC, "ipc/handle_table", "Remove: empty slot", static_cast<u64>(h));
             return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
         }
         dropped = table.slots[h].obj;
         table.slots[h].obj = nullptr;
     }
+    KLOG_TRACE_AV(::duetos::core::LogArea::IPC, "ipc/handle_table", "remove ok handle", static_cast<u64>(h));
     // Release outside the table lock — destroy callbacks may
     // touch other handle tables / IPC objects.
     KObjectRelease(dropped);
@@ -102,12 +110,16 @@ KObject* HandleTableLookup(HandleTable& table, Handle h, KObjectType expected_ty
 {
     if (!HandleInRange(h))
     {
+        KLOG_WARN_AV(::duetos::core::LogArea::IPC, "ipc/handle_table", "Duplicate: src handle out of range",
+                     static_cast<u64>(h));
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
     }
 
     KObject* obj = HandleTableLookup(src, h, KObjectType::Invalid);
     if (obj == nullptr)
     {
+        KLOG_WARN_AV(::duetos::core::LogArea::IPC, "ipc/handle_table", "Duplicate: src handle empty",
+                     static_cast<u64>(h));
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
     }
 
@@ -118,9 +130,13 @@ KObject* HandleTableLookup(HandleTable& table, Handle h, KObjectType expected_ty
     auto inserted = HandleTableInsert(dst, obj);
     if (!inserted.has_value())
     {
+        KLOG_WARN_AV(::duetos::core::LogArea::IPC, "ipc/handle_table",
+                     "Duplicate: dst Insert failed, backing out refcount", static_cast<u64>(h));
         KObjectRelease(obj);
         return ::duetos::core::Err{inserted.error()};
     }
+    KLOG_TRACE_AV(::duetos::core::LogArea::IPC, "ipc/handle_table", "duplicate ok new dst handle",
+                  static_cast<u64>(inserted.value()));
     return inserted;
 }
 
@@ -154,6 +170,8 @@ void HandleTableDrain(HandleTable& table)
             }
         }
     }
+    KLOG_INFO_AV(::duetos::core::LogArea::IPC, "ipc/handle_table", "drain releasing handles",
+                 static_cast<u64>(victim_count));
     for (u32 i = 0; i < victim_count; ++i)
     {
         KObjectRelease(victims[i]);
@@ -184,7 +202,8 @@ void StDestroy(KObject* obj)
 
 void HandleTableSelfTest()
 {
-    arch::SerialWrite("[ipc] handle-table self-test: insert/lookup/duplicate/remove/drain\n");
+    KLOG_TRACE_SCOPE("ipc/handle_table", "HandleTableSelfTest");
+    KLOG_INFO_A(::duetos::core::LogArea::IPC, "ipc/handle_table", "self-test: insert/lookup/duplicate/remove/drain");
 
     HandleTable table_a{};
     HandleTable table_b{};
@@ -341,7 +360,8 @@ void HandleTableSelfTest()
         PanicHt("Drain destroy count wrong");
     }
 
-    arch::SerialWrite("[ipc] handle-table self-test OK (capacity, dup, drain, type-tag verified).\n");
+    KLOG_INFO_A(::duetos::core::LogArea::IPC, "ipc/handle_table",
+                "self-test OK (capacity, dup, drain, type-tag verified)");
 }
 
 } // namespace duetos::ipc

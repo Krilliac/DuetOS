@@ -1,6 +1,7 @@
 #include "drivers/net/iwlwifi_upload.h"
 
 #include "core/panic.h"
+#include "log/klog.h"
 #include "net/wireless/wifi_diag.h"
 #include "time/tick.h"
 
@@ -179,28 +180,40 @@ const char* IwlUploadStageName(IwlUploadStage s)
 
 ::duetos::core::Result<void> IwlUploadDrive(NicInfo& n, const IwlFirmwareParsed& parsed, IwlUploadResult* result)
 {
+    KLOG_TRACE_SCOPE("drivers/net/iwlwifi_upload", "IwlUploadDrive");
     if (n.mmio_virt == nullptr)
+    {
+        KLOG_WARN_A(::duetos::core::LogArea::Wireless, "drivers/net/iwlwifi_upload",
+                    "Drive: NicInfo.mmio_virt is null — cannot reach hardware");
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+    }
     if (result != nullptr)
         *result = {};
 
+    KLOG_INFO_AS(::duetos::core::LogArea::Wireless, "drivers/net/iwlwifi_upload", "starting microcode upload", "fw",
+                 parsed.human_readable);
     diag::RecordOk(diag::Layer::FwUpload, "drive-start", parsed.ver_packed, parsed.total_records, n.chip_id,
                    parsed.human_readable);
 
     if (!PrepareCardHw(n, result))
     {
+        KLOG_ERROR_A(::duetos::core::LogArea::Wireless, "drivers/net/iwlwifi_upload",
+                     "PrepareCardHw timed out (MAC clock ready bit)");
         if (result != nullptr)
             result->failed_at = IwlUploadStage::PrepareCard;
         return ::duetos::core::Err{::duetos::core::ErrorCode::Timeout};
     }
     if (!SwReset(n, result))
     {
+        KLOG_ERROR_A(::duetos::core::LogArea::Wireless, "drivers/net/iwlwifi_upload", "SwReset stop-master timed out");
         if (result != nullptr)
             result->failed_at = IwlUploadStage::SwReset;
         return ::duetos::core::Err{::duetos::core::ErrorCode::Timeout};
     }
     if (!NicInit(n))
     {
+        KLOG_ERROR_A(::duetos::core::LogArea::Wireless, "drivers/net/iwlwifi_upload",
+                     "NicInit MAC-access enable timed out");
         if (result != nullptr)
             result->failed_at = IwlUploadStage::NicInit;
         return ::duetos::core::Err{::duetos::core::ErrorCode::Timeout};
@@ -242,6 +255,8 @@ const char* IwlUploadStageName(IwlUploadStage s)
             result->failed_at = IwlUploadStage::AliveWait;
             result->ok = false;
         }
+        KLOG_ERROR_AV(::duetos::core::LogArea::Wireless, "drivers/net/iwlwifi_upload",
+                      "ALIVE notification timeout — firmware did not start; polls", static_cast<u64>(polls));
         diag::RecordErr(diag::Layer::FwUpload, "alive-tmo", static_cast<u32>(::duetos::core::ErrorCode::Timeout), polls,
                         0, 0);
         return ::duetos::core::Err{::duetos::core::ErrorCode::Timeout};
@@ -253,12 +268,14 @@ const char* IwlUploadStageName(IwlUploadStage s)
         result->ok = true;
         result->failed_at = IwlUploadStage::Complete;
     }
+    KLOG_INFO_A(::duetos::core::LogArea::Wireless, "drivers/net/iwlwifi_upload", "firmware ALIVE — upload complete");
     diag::RecordOk(diag::Layer::FwUpload, "alive-ok", polls, 0, n.chip_id);
     return ::duetos::core::Result<void>{};
 }
 
 void IwlUploadSelfTest()
 {
+    KLOG_TRACE_SCOPE("drivers/net/iwlwifi_upload", "IwlUploadSelfTest");
     // The state machine is gated on real MMIO; without an MMIO
     // mapping we exercise the stage-name table + the failure
     // path's contract (returns Err with .failed_at set).
