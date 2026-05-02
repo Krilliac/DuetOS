@@ -5,6 +5,7 @@
 
 #include "core/panic.h"
 #include "diag/perf_profile.h"
+#include "log/klog.h"
 
 namespace duetos::arch
 {
@@ -85,6 +86,8 @@ u64 MaskToWidth(u64 v, u32 width)
 
 void NmiWatchdogInit()
 {
+    KLOG_TRACE_SCOPE("arch/nmi-watchdog", "NmiWatchdogInit");
+
     // CPUID leaf 0xA: architectural performance monitoring.
     // EAX[7:0]   = version
     // EAX[15:8]  = number of general-purpose counters per logical CPU
@@ -96,6 +99,8 @@ void NmiWatchdogInit()
     const u32 width = (eax >> 16) & 0xFF;
     if (version < 1 || n_counters < 1 || width == 0 || width > 64)
     {
+        KLOG_WARN_2V("arch/nmi-watchdog", "perfmon unavailable — disabled", "version", u64(version), "width",
+                     u64(width));
         SerialWrite("[nmi-watchdog] perfmon unavailable (version=");
         SerialWriteHex(u64(version));
         SerialWrite(" counters=");
@@ -105,6 +110,7 @@ void NmiWatchdogInit()
         SerialWrite(") — disabled\n");
         return;
     }
+    KLOG_INFO_2V("arch/nmi-watchdog", "perfmon detected", "version", u64(version), "counters", u64(n_counters));
     // Two's-complement preload so the counter overflows after
     // ~kIntervalCycles of real execution. Writing the masked
     // form keeps us within the counter's declared width.
@@ -139,6 +145,7 @@ void NmiWatchdogInit()
     g_consecutive_unpetted = 0;
     g_enabled = true;
 
+    KLOG_INFO_V("arch/nmi-watchdog", "armed; interval cycles", kIntervalCycles);
     SerialWrite("[nmi-watchdog] armed: perfmon v");
     SerialWriteHex(u64(version));
     SerialWrite(" width=");
@@ -165,6 +172,7 @@ void NmiWatchdogDisable()
     // the counter.
     LapicWrite(kLapicRegLvtPerf, 1U << 16);
     g_enabled = false;
+    KLOG_INFO("arch/nmi-watchdog", "disabled (PerfGlobalCtrl=0, LVT-Perf masked)");
 }
 
 bool NmiWatchdogHandleNmi(u64 interrupted_rip)
@@ -201,6 +209,7 @@ bool NmiWatchdogHandleNmi(u64 interrupted_rip)
             // the panic path can dump diagnostics without
             // re-entering through a subsequent NMI.
             NmiWatchdogDisable();
+            KLOG_CRITICAL_V("arch/nmi-watchdog", "HANG DETECTED — pet counter stuck", pet_now);
             SerialWrite("\n[nmi-watchdog] HANG DETECTED — pet counter stuck at ");
             SerialWriteHex(pet_now);
             SerialWrite(" across ");

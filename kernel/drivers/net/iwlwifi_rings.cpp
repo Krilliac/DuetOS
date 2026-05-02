@@ -1,6 +1,7 @@
 #include "drivers/net/iwlwifi_rings.h"
 
 #include "core/panic.h"
+#include "log/klog.h"
 #include "net/wireless/wifi_diag.h"
 
 namespace duetos::drivers::net
@@ -32,9 +33,16 @@ void Mmio32Write(const NicInfo& n, u32 off, u32 v)
 
 ::duetos::core::Result<void> IwlRingsInit(NicInfo& n, IwlRingState* state)
 {
+    KLOG_TRACE_SCOPE("drivers/net/iwlwifi_rings", "IwlRingsInit");
     if (state == nullptr)
+    {
+        KLOG_WARN_A(::duetos::core::LogArea::Wireless, "drivers/net/iwlwifi_rings", "Init: null state pointer");
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+    }
     *state = {};
+    KLOG_INFO_A2V(::duetos::core::LogArea::Wireless, "drivers/net/iwlwifi_rings", "rings init", "tx_queues",
+                  static_cast<::duetos::u64>(kIwlNumTxQueues), "tx_ring_size",
+                  static_cast<::duetos::u64>(kIwlTxRingSize));
     diag::RecordOk(diag::Layer::Rings, "init-start", kIwlNumTxQueues, kIwlTxRingSize, kIwlRxRingSize);
 
     for (u32 q = 0; q < kIwlNumTxQueues; ++q)
@@ -69,6 +77,8 @@ void Mmio32Write(const NicInfo& n, u32 off, u32 v)
     Mmio32Write(n, kFhRscsrChnl0Wptr, 0);
 
     state->initialized = true;
+    KLOG_ONCE_WARN("drivers/net/iwlwifi_rings",
+                   "rings init: DMA arena not yet provided — TX/RX disabled until kCapDma");
     diag::RecordOk(diag::Layer::Rings, "init-done", 0, 0, 0);
     return ::duetos::core::Result<void>{};
 }
@@ -76,7 +86,11 @@ void Mmio32Write(const NicInfo& n, u32 off, u32 v)
 ::duetos::core::Result<void> IwlRingsTeardown(NicInfo& n, IwlRingState* state)
 {
     if (state == nullptr)
+    {
+        KLOG_WARN_A(::duetos::core::LogArea::Wireless, "drivers/net/iwlwifi_rings", "Teardown: null state pointer");
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+    }
+    KLOG_INFO_A(::duetos::core::LogArea::Wireless, "drivers/net/iwlwifi_rings", "rings teardown");
     diag::RecordOk(diag::Layer::Rings, "teardown", 0, 0, 0);
     Mmio32Write(n, kFhRscsrChnl0Wptr, 0);
     Mmio32Write(n, kFhTcsrChnlTxConfig, 0);
@@ -89,9 +103,16 @@ void Mmio32Write(const NicInfo& n, u32 off, u32 v)
 {
     (void)n;
     if (state == nullptr || queue_id >= kIwlNumTxQueues || frame == nullptr)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Wireless, "drivers/net/iwlwifi_rings", "SubmitTx: bad args; queue_id",
+                     static_cast<u64>(queue_id));
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+    }
     if (!state->initialized)
+    {
+        KLOG_WARN_A(::duetos::core::LogArea::Wireless, "drivers/net/iwlwifi_rings", "SubmitTx: rings not initialized");
         return ::duetos::core::Err{::duetos::core::ErrorCode::BadState};
+    }
 
     IwlTxRing& q = state->tx_queues[queue_id];
     diag::RecordOk(diag::Layer::Tx, "tx-submit-intent", queue_id, frame_len, q.head);
@@ -118,6 +139,9 @@ u32 IwlRingsServiceRx(NicInfo& n, IwlRingState* state)
 
 void IwlRingsSelfTest()
 {
+    KLOG_TRACE_SCOPE("drivers/net/iwlwifi_rings", "IwlRingsSelfTest");
+    KLOG_INFO_A(::duetos::core::LogArea::Wireless, "drivers/net/iwlwifi_rings",
+                "self-test: init/submit/teardown without DMA arena");
     NicInfo n{};
     n.mmio_virt = nullptr;
     IwlRingState s{};
@@ -135,6 +159,8 @@ void IwlRingsSelfTest()
     auto tr = IwlRingsTeardown(n, &s);
     KASSERT(tr.has_value(), "drivers/net/iwlwifi_rings", "teardown failed");
     KASSERT(!s.initialized, "drivers/net/iwlwifi_rings", "rings.initialized=true after teardown");
+    KLOG_INFO_A(::duetos::core::LogArea::Wireless, "drivers/net/iwlwifi_rings",
+                "self-test OK (init + submit-without-DMA + teardown verified)");
 }
 
 } // namespace duetos::drivers::net

@@ -18,6 +18,7 @@
 
 #include "drivers/storage/block.h"
 #include "fs/fat32_internal.h"
+#include "log/klog.h"
 
 namespace duetos::fs::fat32
 {
@@ -28,7 +29,10 @@ i64 Fat32ReadFile(const Volume* v, const DirEntry* e, void* out, u64 max)
 {
     Fat32Guard guard;
     if (v == nullptr || e == nullptr || out == nullptr)
+    {
+        KLOG_WARN_A(::duetos::core::LogArea::FS, "fs/fat32", "ReadFile: null arg");
         return -1;
+    }
     if (max == 0 || e->size_bytes == 0 || e->first_cluster < 2)
         return 0;
 
@@ -57,6 +61,8 @@ i64 Fat32ReadFile(const Volume* v, const DirEntry* e, void* out, u64 max)
             // against the partition's sector_count before dispatch.
             if (drivers::storage::BlockDeviceRead(v->block_handle, lba, v->sectors_per_cluster, dst + written) != 0)
             {
+                KLOG_ERROR_AV(::duetos::core::LogArea::FS, "fs/fat32",
+                              "ReadFile: BlockDeviceRead (full-cluster) failed at lba", lba);
                 return -1;
             }
             written += cluster_bytes;
@@ -68,6 +74,8 @@ i64 Fat32ReadFile(const Volume* v, const DirEntry* e, void* out, u64 max)
             // caller's buffer is never over-filled.
             if (drivers::storage::BlockDeviceRead(v->block_handle, lba, v->sectors_per_cluster, g_scratch) != 0)
             {
+                KLOG_ERROR_AV(::duetos::core::LogArea::FS, "fs/fat32",
+                              "ReadFile: BlockDeviceRead (partial) failed at lba", lba);
                 return -1;
             }
             for (u64 i = 0; i < need; ++i)
@@ -84,7 +92,10 @@ i64 Fat32ReadAt(const Volume* v, const DirEntry* e, u64 offset, void* out, u64 l
 {
     Fat32Guard guard;
     if (v == nullptr || e == nullptr || out == nullptr)
+    {
+        KLOG_WARN_A(::duetos::core::LogArea::FS, "fs/fat32", "ReadAt: null arg");
         return -1;
+    }
     if (len == 0)
         return 0;
     if (offset >= e->size_bytes || e->first_cluster < 2)
@@ -94,7 +105,11 @@ i64 Fat32ReadAt(const Volume* v, const DirEntry* e, u64 offset, void* out, u64 l
     const u64 want = (max_readable < len) ? max_readable : len;
     const u64 cluster_bytes = u64(v->sectors_per_cluster) * u64(v->bytes_per_sector);
     if (cluster_bytes == 0 || v->sectors_per_cluster > sizeof(g_scratch) / 512)
+    {
+        KLOG_ERROR_AV(::duetos::core::LogArea::FS, "fs/fat32", "ReadAt: cluster too big or zero, sectors_per_cluster=",
+                      static_cast<u64>(v->sectors_per_cluster));
         return -1;
+    }
 
     // Walk the FAT chain forward to the cluster containing `offset`.
     // The skip loop is bounded by the same 65536 ceiling the bulk
@@ -104,7 +119,11 @@ i64 Fat32ReadAt(const Volume* v, const DirEntry* e, u64 offset, void* out, u64 l
     for (u64 i = 0; i < skip_clusters; ++i)
     {
         if (cluster < 2 || cluster >= 0x0FFFFFF8u)
+        {
+            KLOG_WARN_AV(::duetos::core::LogArea::FS, "fs/fat32",
+                         "ReadAt: chain ended before reaching offset; bad cluster=", static_cast<u64>(cluster));
             return -1;
+        }
         cluster = ReadFatEntry(*v, cluster);
     }
 
@@ -118,7 +137,10 @@ i64 Fat32ReadAt(const Volume* v, const DirEntry* e, u64 offset, void* out, u64 l
             break;
         const u64 lba = u64(v->data_start_sector) + u64(cluster - 2) * u64(v->sectors_per_cluster);
         if (drivers::storage::BlockDeviceRead(v->block_handle, lba, v->sectors_per_cluster, g_scratch) != 0)
+        {
+            KLOG_ERROR_AV(::duetos::core::LogArea::FS, "fs/fat32", "ReadAt: BlockDeviceRead failed at lba", lba);
             return -1;
+        }
         const u64 avail_in_cluster = cluster_bytes - in_cluster_off;
         const u64 need = want - written;
         const u64 take = (avail_in_cluster < need) ? avail_in_cluster : need;
@@ -135,7 +157,10 @@ bool Fat32ReadFileStream(const Volume* v, const DirEntry* e, ReadChunkCb cb, voi
 {
     Fat32Guard guard;
     if (v == nullptr || e == nullptr || cb == nullptr)
+    {
+        KLOG_WARN_A(::duetos::core::LogArea::FS, "fs/fat32", "ReadFileStream: null arg");
         return false;
+    }
     if (e->size_bytes == 0 || e->first_cluster < 2)
         return true;
 
@@ -150,11 +175,18 @@ bool Fat32ReadFileStream(const Volume* v, const DirEntry* e, ReadChunkCb cb, voi
         if (remaining == 0)
             break;
         if (v->sectors_per_cluster > sizeof(g_scratch) / 512)
-            return false; // cluster bigger than our scratch page
+        {
+            KLOG_ERROR_AV(
+                ::duetos::core::LogArea::FS, "fs/fat32",
+                "ReadFileStream: cluster bigger than scratch page; sectors=", static_cast<u64>(v->sectors_per_cluster));
+            return false;
+        }
 
         const u64 lba = u64(v->data_start_sector) + u64(cluster - 2) * u64(v->sectors_per_cluster);
         if (drivers::storage::BlockDeviceRead(v->block_handle, lba, v->sectors_per_cluster, g_scratch) != 0)
         {
+            KLOG_ERROR_AV(::duetos::core::LogArea::FS, "fs/fat32", "ReadFileStream: BlockDeviceRead failed at lba",
+                          lba);
             return false;
         }
         const u64 chunk = (remaining < cluster_bytes) ? remaining : cluster_bytes;

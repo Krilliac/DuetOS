@@ -17,12 +17,13 @@
 #include "subsystems/linux/syscall_internal.h"
 
 #include "arch/x86_64/serial.h"
-#include "proc/process.h"
 #include "fs/fat32.h"
+#include "log/klog.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
 #include "mm/paging.h"
+#include "proc/process.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -70,10 +71,19 @@ i64 DoMadvise(u64 addr, u64 len, u64 advice)
     constexpr u64 kMadvDontneed = 4;
     constexpr u64 kMadvFree = 8;
     constexpr u64 kMadvRemove = 9;
+    KLOG_TRACE_AV(::duetos::core::LogArea::Linux, "linux/mm", "madvise ENTRY; addr", addr);
+    KLOG_TRACE_AV(::duetos::core::LogArea::Linux, "linux/mm", "  len", len);
+    KLOG_TRACE_AV(::duetos::core::LogArea::Linux, "linux/mm", "  advice", advice);
     if ((addr & (kPageSize - 1)) != 0)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/mm", "madvise: addr not page-aligned -> EINVAL", addr);
         return kEINVAL;
+    }
     if (addr + len < addr)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/mm", "madvise: addr+len overflow -> EINVAL", addr);
         return kEINVAL;
+    }
     if (len == 0)
         return 0;
 
@@ -107,6 +117,7 @@ i64 DoMadvise(u64 addr, u64 len, u64 advice)
     }
     default:
         // Unknown advice — Linux returns -EINVAL.
+        KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/mm", "madvise: unknown advice value -> EINVAL", advice);
         return kEINVAL;
     }
 }
@@ -131,17 +142,36 @@ i64 DoMprotect(u64 addr, u64 len, u64 prot)
 {
     constexpr u64 kPageSize = 4096;
     constexpr u64 kProtValid = 0x7 | 0x01000000ull | 0x02000000ull;
+    KLOG_TRACE_AV(::duetos::core::LogArea::Linux, "linux/mm", "mprotect ENTRY; addr", addr);
+    KLOG_TRACE_AV(::duetos::core::LogArea::Linux, "linux/mm", "  len", len);
+    KLOG_TRACE_AV(::duetos::core::LogArea::Linux, "linux/mm", "  prot", prot);
     if (len == 0)
         return 0;
     if ((addr & (kPageSize - 1)) != 0)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/mm", "mprotect: addr not page-aligned -> EINVAL", addr);
         return kEINVAL;
+    }
     if ((prot & ~kProtValid) != 0)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/mm", "mprotect: prot has reserved bits -> EINVAL", prot);
         return kEINVAL;
+    }
     if (addr + len < addr)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/mm", "mprotect: addr+len overflow -> EINVAL", addr);
         return kEINVAL;
+    }
     constexpr u64 kUserMaxExclusive = 0x0000800000000000ull;
     if (addr >= kUserMaxExclusive || (addr + len) > kUserMaxExclusive)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/mm", "mprotect: addr in kernel half -> EINVAL", addr);
         return kEINVAL;
+    }
+    // v0 accepts mprotect as advisory — surface this once so an
+    // analyst tracing W^X violations doesn't get fooled by the
+    // success return.
+    KLOG_ONCE_WARN("linux/mm", "mprotect accepted as ADVISORY (no real PTE flag flip in v0)");
     return 0;
 }
 
@@ -155,9 +185,11 @@ i64 DoMprotect(u64 addr, u64 len, u64 prot)
 //     does — the caller checks the return == the requested addr.
 i64 DoBrk(u64 new_brk)
 {
+    KLOG_TRACE_AV(::duetos::core::LogArea::Linux, "linux/mm", "brk ENTRY; new_brk", new_brk);
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || p->abi_flavor != core::kAbiLinux)
     {
+        KLOG_DEBUG_A(::duetos::core::LogArea::Linux, "linux/mm", "brk: not a Linux ABI process — returning 0");
         return 0;
     }
     if (new_brk == 0)
@@ -178,6 +210,8 @@ i64 DoBrk(u64 new_brk)
             if (frame == mm::kNullFrame)
             {
                 p->linux_brk_current = va;
+                KLOG_ERROR_AV(::duetos::core::LogArea::Linux, "linux/mm",
+                              "brk: AllocateFrame OOM mid-grow; partial brk", va);
                 return static_cast<i64>(p->linux_brk_current);
             }
             mm::AddressSpaceMapUserPage(p->as, va, frame,
@@ -185,9 +219,7 @@ i64 DoBrk(u64 new_brk)
         }
     }
     p->linux_brk_current = new_brk;
-    arch::SerialWrite("[linux] brk -> ");
-    arch::SerialWriteHex(p->linux_brk_current);
-    arch::SerialWrite("\n");
+    KLOG_INFO_AV(::duetos::core::LogArea::Linux, "linux/mm", "brk OK; new brk", p->linux_brk_current);
     return static_cast<i64>(p->linux_brk_current);
 }
 
@@ -199,20 +231,39 @@ i64 DoBrk(u64 new_brk)
 //      private writable copy.
 i64 DoMmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
 {
+    KLOG_TRACE_AV(::duetos::core::LogArea::Linux, "linux/mm", "mmap ENTRY; len", len);
+    KLOG_TRACE_AV(::duetos::core::LogArea::Linux, "linux/mm", "  prot", prot);
+    KLOG_TRACE_AV(::duetos::core::LogArea::Linux, "linux/mm", "  flags", flags);
+    KLOG_TRACE_AV(::duetos::core::LogArea::Linux, "linux/mm", "  fd", fd);
     (void)addr;
     if ((flags & kMapPrivate) == 0)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/mm",
+                     "mmap: MAP_SHARED rejected (v0 has no page cache); flags", flags);
         return kEINVAL;
+    }
     if (len == 0)
+    {
+        KLOG_WARN_A(::duetos::core::LogArea::Linux, "linux/mm", "mmap: len=0 -> EINVAL");
         return kEINVAL;
+    }
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || p->abi_flavor != core::kAbiLinux)
         return kENOSYS;
+    // RWX detector — Linux mmap with PROT_EXEC | PROT_WRITE is a
+    // canonical JIT-or-shellcode pattern; surface it for analysts.
+    constexpr u64 kProtWrite = 0x2;
+    constexpr u64 kProtExec = 0x4;
+    if ((prot & kProtWrite) != 0 && (prot & kProtExec) != 0)
+    {
+        KLOG_WARN_A(::duetos::core::LogArea::Linux, "linux/mm",
+                    "mmap with PROT_WRITE|PROT_EXEC (RWX) — JIT or shellcode pattern");
+    }
 
     const u64 aligned = PageUp(len);
     const u64 base = p->linux_mmap_cursor;
 
     u64 pte_flags = mm::kPagePresent | mm::kPageUser | mm::kPageWritable;
-    constexpr u64 kProtExec = 0x4;
     if ((prot & kProtExec) == 0)
         pte_flags |= mm::kPageNoExecute;
 
@@ -222,23 +273,29 @@ i64 DoMmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
         {
             const mm::PhysAddr frame = mm::AllocateFrame();
             if (frame == mm::kNullFrame)
+            {
+                KLOG_ERROR_AV(::duetos::core::LogArea::Linux, "linux/mm", "mmap anon: AllocateFrame OOM at va", va);
                 return kENOMEM;
+            }
             mm::AddressSpaceMapUserPage(p->as, va, frame, pte_flags);
         }
         p->linux_mmap_cursor += aligned;
-        arch::SerialWrite("[linux] mmap anon -> ");
-        arch::SerialWriteHex(base);
-        arch::SerialWrite(" len=");
-        arch::SerialWriteHex(aligned);
-        arch::SerialWrite("\n");
+        KLOG_INFO_AV(::duetos::core::LogArea::Linux, "linux/mm", "mmap anon OK; base", base);
+        KLOG_INFO_AV(::duetos::core::LogArea::Linux, "linux/mm", "  aligned len", aligned);
         return static_cast<i64>(base);
     }
 
     // File-backed.
     if (fd >= 16)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/mm", "mmap file: fd out of range -> EBADF; fd", fd);
         return kEBADF;
+    }
     if (p->linux_fds[fd].state != 2)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/mm", "mmap file: fd not open -> EBADF; fd", fd);
         return kEBADF;
+    }
 
     const auto* v = fs::fat32::Fat32Volume(0);
     if (v == nullptr)
@@ -275,15 +332,10 @@ i64 DoMmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
         mm::AddressSpaceMapUserPage(p->as, va, frame, pte_flags);
     }
     p->linux_mmap_cursor += aligned;
-    arch::SerialWrite("[linux] mmap file fd=");
-    arch::SerialWriteHex(fd);
-    arch::SerialWrite(" -> ");
-    arch::SerialWriteHex(base);
-    arch::SerialWrite(" len=");
-    arch::SerialWriteHex(aligned);
-    arch::SerialWrite(" off=");
-    arch::SerialWriteHex(off);
-    arch::SerialWrite("\n");
+    KLOG_INFO_AV(::duetos::core::LogArea::Linux, "linux/mm", "mmap file OK; base", base);
+    KLOG_INFO_AV(::duetos::core::LogArea::Linux, "linux/mm", "  fd", fd);
+    KLOG_INFO_AV(::duetos::core::LogArea::Linux, "linux/mm", "  aligned len", aligned);
+    KLOG_INFO_AV(::duetos::core::LogArea::Linux, "linux/mm", "  file offset", off);
     return static_cast<i64>(base);
 }
 
@@ -294,10 +346,15 @@ i64 DoMmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
 // un-mapped range is a no-op rather than -EINVAL.
 i64 DoMunmap(u64 addr, u64 len)
 {
+    KLOG_TRACE_AV(::duetos::core::LogArea::Linux, "linux/mm", "munmap ENTRY; addr", addr);
+    KLOG_TRACE_AV(::duetos::core::LogArea::Linux, "linux/mm", "  len", len);
     if (len == 0)
         return 0;
     if ((addr & 0xFFF) != 0)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/mm", "munmap: addr not page-aligned -> EINVAL", addr);
         return kEINVAL;
+    }
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || p->as == nullptr)
         return kEINVAL;
@@ -308,13 +365,8 @@ i64 DoMunmap(u64 addr, u64 len)
         if (mm::AddressSpaceUnmapUserPage(p->as, addr + off))
             ++freed;
     }
-    arch::SerialWrite("[linux] munmap addr=");
-    arch::SerialWriteHex(addr);
-    arch::SerialWrite(" len=");
-    arch::SerialWriteHex(aligned_len);
-    arch::SerialWrite(" pages_released=");
-    arch::SerialWriteHex(freed);
-    arch::SerialWrite("\n");
+    KLOG_INFO_AV(::duetos::core::LogArea::Linux, "linux/mm", "munmap OK; addr", addr);
+    KLOG_INFO_AV(::duetos::core::LogArea::Linux, "linux/mm", "  pages_released", freed);
     return 0;
 }
 

@@ -388,7 +388,7 @@ void ControllerInit()
     // the port stays usable.
     if (!KbdSendAndAck(0xFF))
     {
-        core::Log(core::LogLevel::Warn, "drivers/ps2kbd", "device RESET (0xFF) not ACKed — continuing");
+        KLOG_WARN("drivers/ps2kbd", "device RESET (0xFF) not ACKed — likely USB-legacy emulator; continuing");
     }
     else
     {
@@ -481,6 +481,11 @@ void IrqHandler()
         // queue of many.
         if (g_ring_head - g_ring_tail >= kRingSize)
         {
+            // Once-warn: dropping scan codes is a real bug (consumer
+            // not draining fast enough). Subsequent drops still bump
+            // g_bytes_dropped; the metrics counter stays the running
+            // tally, the log line just surfaces the FIRST drop.
+            KLOG_ONCE_WARN("drivers/ps2kbd", "scan-code ring full — discarding OLDEST byte (consumer too slow)");
             ++g_ring_tail; // discard oldest
             ++g_bytes_dropped;
         }

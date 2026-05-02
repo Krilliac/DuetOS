@@ -12,8 +12,8 @@
 #include "sync/rcu.h"
 
 #include "arch/x86_64/cpu.h"
-#include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "log/klog.h"
 #include "util/types.h"
 
 namespace duetos::sync
@@ -45,12 +45,14 @@ bool RcuCall(RcuCallback cb, void* arg)
 {
     if (cb == nullptr)
     {
+        KLOG_WARN("sync/rcu", "RcuCall: null callback rejected");
         return false;
     }
     arch::Cli();
     if (g_count >= kRcuQueueDepth)
     {
         arch::Sti();
+        KLOG_ONCE_WARN("sync/rcu", "RcuCall: queue full — callback DROPPED, will leak (raise kRcuQueueDepth)");
         return false;
     }
     g_queue[g_head] = {cb, arg, g_ticks};
@@ -123,7 +125,8 @@ void TestCb(void* arg)
 
 void RcuSelfTest()
 {
-    arch::SerialWrite("[sync] rcu self-test: queue + reclaim cycle\n");
+    KLOG_TRACE_SCOPE("sync/rcu", "RcuSelfTest");
+    KLOG_INFO("sync/rcu", "self-test: queue + reclaim cycle");
 
     g_test_counter = 0;
     const u64 baseline_q = g_calls_queued;
@@ -171,7 +174,7 @@ void RcuSelfTest()
         core::Panic("sync/rcu", "self-test: reclaim on empty queue non-zero");
     }
 
-    arch::SerialWrite("[sync] rcu self-test OK (enqueue + grace + reclaim verified).\n");
+    KLOG_INFO("sync/rcu", "self-test OK (enqueue + grace + reclaim verified)");
 }
 
 } // namespace duetos::sync

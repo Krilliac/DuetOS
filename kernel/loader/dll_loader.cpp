@@ -376,6 +376,8 @@ DllLoadResult DllLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as
 
     const u64 base_va = h.image_base + aslr_delta;
 
+    KLOG_INFO_2V("loader/dll", "DLL load BEGIN", "base_va", base_va, "size", h.image_size);
+    KLOG_DEBUG_V("loader/dll", "DLL sections+chars; sections", static_cast<u64>(h.section_count));
     SerialWrite("[dll-load] begin base_va=");
     SerialWriteHex(base_va);
     SerialWrite(" size=");
@@ -406,6 +408,7 @@ DllLoadResult DllLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as
 
     if (!ApplyRelocations(file, file_len, h, as, base_va, aslr_delta))
     {
+        KLOG_ERROR_V("loader/dll", "RelocFailed at base_va", base_va);
         r.status = DllLoadStatus::RelocFailed;
         return r;
     }
@@ -417,6 +420,7 @@ DllLoadResult DllLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as
     const PeExportStatus pes = PeParseExports(file, file_len, exp);
     if (pes != PeExportStatus::Ok && pes != PeExportStatus::NoExportDirectory)
     {
+        KLOG_ERROR_S("loader/dll", "export parse FAILED", "pes", PeExportStatusName(pes));
         SerialWrite("[dll-load] export parse fail: ");
         SerialWrite(PeExportStatusName(pes));
         SerialWrite("\n");
@@ -434,6 +438,8 @@ DllLoadResult DllLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as
         r.image.exports = exp;
     r.status = DllLoadStatus::Ok;
 
+    KLOG_INFO_2V("loader/dll", "DLL load OK", "entry_rva", static_cast<u64>(h.entry_rva), "has_exports",
+                 static_cast<u64>(r.image.has_exports ? 1 : 0));
     SerialWrite("[dll-load] OK entry_rva=");
     SerialWriteHex(h.entry_rva);
     SerialWrite(" has_exports=");
@@ -445,25 +451,52 @@ DllLoadResult DllLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as
 u64 DllResolveExport(const DllImage& dll, const char* name)
 {
     if (!dll.has_exports || name == nullptr)
+    {
+        KLOG_DEBUG("loader/dll", "ResolveExport: DLL has no exports or null name");
         return 0;
+    }
     PeExport e{};
     if (!PeExportLookupName(dll.exports, name, e))
+    {
+        KLOG_DEBUG_S("loader/dll", "ResolveExport: name MISS (export not in EAT)", "name", name);
         return 0;
+    }
     if (e.is_forwarder)
-        return 0; // caller must chase — not yet implemented
-    return dll.base_va + u64(e.rva);
+    {
+        // Forwarder: function is re-exported from another DLL. v0
+        // doesn't chase, but logging the fact reveals the import
+        // chain a debugger would otherwise have to discover by
+        // walking strings in the DLL image.
+        KLOG_WARN_S("loader/dll", "ResolveExport: forwarder NOT chased (returns 0)", "name", name);
+        return 0;
+    }
+    const u64 va = dll.base_va + u64(e.rva);
+    KLOG_TRACE_V("loader/dll", "ResolveExport hit; va", va);
+    return va;
 }
 
 u64 DllResolveOrdinal(const DllImage& dll, u32 ordinal)
 {
     if (!dll.has_exports)
+    {
+        KLOG_DEBUG("loader/dll", "ResolveOrdinal: DLL has no exports");
         return 0;
+    }
     PeExport e{};
     if (!PeExportLookupOrdinal(dll.exports, ordinal, e))
+    {
+        KLOG_DEBUG_V("loader/dll", "ResolveOrdinal: ordinal MISS", static_cast<u64>(ordinal));
         return 0;
+    }
     if (e.is_forwarder)
+    {
+        KLOG_WARN_V("loader/dll", "ResolveOrdinal: forwarder NOT chased (returns 0); ordinal",
+                    static_cast<u64>(ordinal));
         return 0;
-    return dll.base_va + u64(e.rva);
+    }
+    const u64 va = dll.base_va + u64(e.rva);
+    KLOG_TRACE_V("loader/dll", "ResolveOrdinal hit; va", va);
+    return va;
 }
 
 } // namespace duetos::core

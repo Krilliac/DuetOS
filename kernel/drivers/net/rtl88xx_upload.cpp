@@ -1,6 +1,7 @@
 #include "drivers/net/rtl88xx_upload.h"
 
 #include "core/panic.h"
+#include "log/klog.h"
 #include "net/wireless/wifi_diag.h"
 #include "time/tick.h"
 
@@ -101,11 +102,18 @@ const char* RtlUploadStageName(RtlUploadStage s)
 
 ::duetos::core::Result<void> RtlUploadDrive(NicInfo& n, const RtlFirmwareParsed& parsed, RtlUploadResult* result)
 {
+    KLOG_TRACE_SCOPE("drivers/net/rtl88xx_upload", "RtlUploadDrive");
     if (n.mmio_virt == nullptr)
+    {
+        KLOG_WARN_A(::duetos::core::LogArea::Wireless, "drivers/net/rtl88xx_upload",
+                    "Drive: NicInfo.mmio_virt is null — cannot reach hardware");
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+    }
     if (result != nullptr)
         *result = {};
 
+    KLOG_INFO_A2V(::duetos::core::LogArea::Wireless, "drivers/net/rtl88xx_upload", "rtl upload start", "sig",
+                  static_cast<u64>(parsed.signature), "size", static_cast<u64>(parsed.payload_size));
     diag::RecordOk(diag::Layer::FwUpload, "rtl-drive-start", parsed.signature, parsed.payload_size,
                    static_cast<u64>(parsed.generation));
 
@@ -116,6 +124,8 @@ const char* RtlUploadStageName(RtlUploadStage s)
     {
         if (result != nullptr)
             result->failed_at = RtlUploadStage::EnableFwDl;
+        KLOG_ERROR_AV(::duetos::core::LogArea::Wireless, "drivers/net/rtl88xx_upload",
+                      "EnableFwDl: timeout waiting for FwDlReady; polls", static_cast<u64>(polls));
         diag::RecordErr(diag::Layer::FwUpload, "rtl-fwdl-tmo", static_cast<u32>(::duetos::core::ErrorCode::Timeout),
                         polls, 0, 0);
         return ::duetos::core::Err{::duetos::core::ErrorCode::Timeout};
@@ -140,6 +150,8 @@ const char* RtlUploadStageName(RtlUploadStage s)
             result->failed_at = RtlUploadStage::ChecksumWait;
             result->chksum_wait_polls = polls;
         }
+        KLOG_ERROR_AV(::duetos::core::LogArea::Wireless, "drivers/net/rtl88xx_upload",
+                      "ChecksumWait: ROM_DLREADY timeout; polls", static_cast<u64>(polls));
         return ::duetos::core::Err{::duetos::core::ErrorCode::Timeout};
     }
     if (result != nullptr)
@@ -156,6 +168,8 @@ const char* RtlUploadStageName(RtlUploadStage s)
             result->h2c_init_polls = polls;
             result->last_mcu_fwdl = Mmio8Read(n, kRtlRegMcuFwDl);
         }
+        KLOG_ERROR_AV(::duetos::core::LogArea::Wireless, "drivers/net/rtl88xx_upload",
+                      "H2cInit: H2C_INIT_OK timeout; polls", static_cast<u64>(polls));
         return ::duetos::core::Err{::duetos::core::ErrorCode::Timeout};
     }
     if (result != nullptr)
@@ -164,6 +178,8 @@ const char* RtlUploadStageName(RtlUploadStage s)
         result->ok = true;
         result->failed_at = RtlUploadStage::Complete;
     }
+    KLOG_INFO_A(::duetos::core::LogArea::Wireless, "drivers/net/rtl88xx_upload",
+                "rtl firmware upload complete (H2C init ack)");
     diag::RecordOk(diag::Layer::FwUpload, "rtl-h2c-init-ok", polls, 0, 0);
     return ::duetos::core::Result<void>{};
 }

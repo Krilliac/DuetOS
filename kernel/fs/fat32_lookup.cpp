@@ -19,6 +19,7 @@
 
 #include "diag/kdbg.h"
 #include "fs/fat32_internal.h"
+#include "log/klog.h"
 
 namespace duetos::fs::fat32
 {
@@ -53,8 +54,12 @@ bool Fat32LookupPath(const Volume* v, const char* path, DirEntry* out)
 {
     Fat32Guard guard;
     if (v == nullptr || path == nullptr || out == nullptr)
+    {
+        KLOG_WARN_A(::duetos::core::LogArea::FS, "fs/fat32", "lookup: null volume / path / out");
         return false;
+    }
     KDBG_S(Fat32Lookup, "fs/fat32", "lookup", "path", path);
+    KLOG_DEBUG_AS(::duetos::core::LogArea::FS, "fs/fat32", "lookup", "path", path);
 
     // Synthetic "root" entry: directory at v->root_cluster.
     DirEntry cur;
@@ -85,7 +90,10 @@ bool Fat32LookupPath(const Volume* v, const char* path, DirEntry* out)
         while (*path != 0 && *path != '/')
         {
             if (n >= sizeof(comp) - 1)
+            {
+                KLOG_WARN_A(::duetos::core::LogArea::FS, "fs/fat32", "lookup: path component exceeds 127-char LFN cap");
                 return false; // component exceeds LFN cap
+            }
             comp[n++] = *path++;
         }
         comp[n] = 0;
@@ -95,16 +103,27 @@ bool Fat32LookupPath(const Volume* v, const char* path, DirEntry* out)
             ++path;
 
         if ((cur.attributes & kAttrDirectory) == 0)
+        {
+            KLOG_WARN_AS(::duetos::core::LogArea::FS, "fs/fat32",
+                         "lookup: traversing INTO a regular file (not a directory)", "comp", comp);
             return false; // walking INTO a regular file
+        }
 
         FindCtx ctx;
         ctx.want = comp;
         ctx.found = false;
         VZero(&ctx.match, sizeof(ctx.match));
         if (!WalkDirChain(*v, cur.first_cluster, &FindVisitor, &ctx))
+        {
+            KLOG_WARN_AS(::duetos::core::LogArea::FS, "fs/fat32", "lookup: WalkDirChain failed mid-component", "comp",
+                         comp);
             return false;
+        }
         if (!ctx.found)
+        {
+            KLOG_DEBUG_AS(::duetos::core::LogArea::FS, "fs/fat32", "lookup: component not found", "comp", comp);
             return false;
+        }
         CopyEntry(cur, ctx.match);
     }
 

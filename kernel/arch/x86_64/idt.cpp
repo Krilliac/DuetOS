@@ -3,6 +3,7 @@
 #include "arch/x86_64/gdt.h"
 
 #include "core/panic.h"
+#include "log/klog.h"
 
 /*
  * The exception + IRQ stubs in exceptions.S publish their addresses
@@ -65,6 +66,9 @@ void SetGate(u8 vector, u64 handler, u8 type_attr)
 
 void IdtInit()
 {
+    KLOG_TRACE_SCOPE("arch/idt", "IdtInit");
+    KLOG_INFO("arch/idt", "installing 256 IDT gates from isr_stub_table");
+
     // Install every IDT vector. Slots 0..31 are CPU exceptions
     // (real handlers in TrapDispatch); 32..47 are the remapped
     // IRQs (registered handler or "[irq] unhandled vector N" log);
@@ -86,6 +90,7 @@ void IdtInit()
     g_idt_pointer.base = reinterpret_cast<u64>(&g_idt[0]);
 
     asm volatile("lidt %0" : : "m"(g_idt_pointer) : "memory");
+    KLOG_INFO_V("arch/idt", "lidt loaded, base=", g_idt_pointer.base);
 }
 
 void IdtSetGate(u8 vector, u64 handler)
@@ -95,6 +100,7 @@ void IdtSetGate(u8 vector, u64 handler)
     // diagnostic. Require callers to pass a real ISR stub.
     KASSERT_WITH_VALUE(handler != 0, "arch/idt", "IdtSetGate null handler", static_cast<u64>(vector));
 
+    KLOG_TRACE_V("arch/idt", "set kernel gate vector", static_cast<u64>(vector));
     SetGate(vector, handler, kGateInterruptDpl0);
 }
 
@@ -102,6 +108,7 @@ void IdtSetUserGate(u8 vector, u64 handler)
 {
     KASSERT_WITH_VALUE(handler != 0, "arch/idt", "IdtSetUserGate null handler", static_cast<u64>(vector));
 
+    KLOG_INFO_V("arch/idt", "set user-reachable gate vector", static_cast<u64>(vector));
     SetGate(vector, handler, kGateInterruptDpl3);
 }
 
@@ -113,6 +120,7 @@ void IdtSetIst(u8 vector, u8 ist)
     // a non-zero value — disabling would mean the caller meant to
     // SetGate instead.
     KASSERT_WITH_VALUE(ist >= 1 && ist <= 7, "arch/idt", "IdtSetIst index out of range", static_cast<u64>(ist));
+    KLOG_TRACE_V("arch/idt", "set IST index for vector", static_cast<u64>(vector));
     g_idt[vector].ist = static_cast<u8>(ist & 0x7);
 }
 

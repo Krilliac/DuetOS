@@ -28,8 +28,8 @@
 
 #include "sync/seqlock.h"
 
-#include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "log/klog.h"
 #include "sched/sched.h"
 #include "sync/spinlock.h"
 #include "util/types.h"
@@ -76,6 +76,8 @@ IrqFlags SeqLockBeginWrite(SeqLock& lock)
         // force the sequence forward to the next even value so the
         // recovery write below can proceed; in-flight readers will
         // retry on their EndRead and re-snapshot.
+        KLOG_ERROR_2V("sync/seqlock", "BeginWrite found sequence ALREADY ODD — previous writer leaked", "lock",
+                      reinterpret_cast<u64>(&lock), "seq", static_cast<u64>(cur));
         core::DebugPanicOrWarn("sync/seqlock", "BeginWrite found sequence already odd (writer leak?)");
         lock.sequence = cur + 1u; // even
         cur = lock.sequence;
@@ -101,6 +103,8 @@ void SeqLockEndWrite(SeqLock& lock, IrqFlags flags)
         // bump (sequence is already at a stable parity), and
         // release the writer spinlock. The compiler barrier
         // above already published the payload writes.
+        KLOG_ERROR_2V("sync/seqlock", "EndWrite found sequence ALREADY EVEN — invariant broken", "lock",
+                      reinterpret_cast<u64>(&lock), "seq", static_cast<u64>(cur));
         core::DebugPanicOrWarn("sync/seqlock", "EndWrite found sequence already even");
         SpinLockRelease(lock.writer, flags);
         return;
@@ -144,7 +148,8 @@ bool SeqLockEndRead(const SeqLock& lock, u32 snapshot)
 
 void SeqLockSelfTest()
 {
-    arch::SerialWrite("[sync] seqlock self-test: sequence parity + reader retry paths\n");
+    KLOG_TRACE_SCOPE("sync/seqlock", "SeqLockSelfTest");
+    KLOG_INFO("sync/seqlock", "self-test: sequence parity + reader retry paths");
 
     SeqLock lock{};
 
@@ -292,7 +297,7 @@ void SeqLockSelfTest()
         }
     }
 
-    arch::SerialWrite("[sync] seqlock self-test OK (parity + retry + guard verified).\n");
+    KLOG_INFO("sync/seqlock", "self-test OK (parity + retry + guard verified)");
 }
 
 namespace
@@ -339,7 +344,8 @@ void SeqWriterTask(void* arg)
 
 void SeqLockContentionSelfTest()
 {
-    arch::SerialWrite("[sync] seqlock contention self-test: concurrent writer + reader\n");
+    KLOG_TRACE_SCOPE("sync/seqlock", "SeqLockContentionSelfTest");
+    KLOG_INFO("sync/seqlock", "contention self-test: concurrent writer + reader");
 
     // Reset shared state. Reader runs in the calling thread;
     // writer is a kernel-spawned thread. Seed the payload so the
@@ -444,9 +450,7 @@ void SeqLockContentionSelfTest()
         core::Panic("sync/seqlock", "contention test: reader never retried (no observed contention)");
     }
 
-    arch::SerialWrite("[sync] seqlock contention self-test OK (writer cycles done, reader observed ");
-    arch::SerialWriteHex(retries);
-    arch::SerialWrite(" retries).\n");
+    KLOG_INFO_V("sync/seqlock", "contention self-test OK; reader retries observed", static_cast<u64>(retries));
 }
 
 } // namespace duetos::sync

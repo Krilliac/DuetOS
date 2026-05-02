@@ -26,6 +26,7 @@ constexpr u64 kMsPerTick = 10; // scheduler runs at 100 Hz
 
 void DoMutexCreate(arch::TrapFrame* frame)
 {
+    KLOG_TRACE_AV(::duetos::core::LogArea::Win32, "win32/mutex", "NtCreateMutant ENTRY; bInitialOwner", frame->rdi);
     // Allocate a mutex slot; record the calling task as the
     // initial owner if rdi == 1 (Win32 bInitialOwner).
     core::Process* proc = core::CurrentProcess();
@@ -67,19 +68,16 @@ void DoMutexCreate(arch::TrapFrame* frame)
     }
     arch::Sti();
     const u64 handle = core::Process::kWin32MutexBase + slot;
-    arch::SerialWrite("[sys] mutex_create ok pid=");
-    arch::SerialWriteHex(proc->pid);
-    arch::SerialWrite(" handle=");
-    arch::SerialWriteHex(handle);
-    arch::SerialWrite(" initial_owner=");
-    arch::SerialWriteHex(frame->rdi);
-    arch::SerialWrite("\n");
+    KLOG_INFO_AV(::duetos::core::LogArea::Win32, "win32/mutex", "NtCreateMutant OK; handle", handle);
     custom::OnHandleAlloc(proc, handle, static_cast<u32>(core::SYS_MUTEX_CREATE), frame->rip);
     frame->rax = handle;
 }
 
 void DoMutexWait(arch::TrapFrame* frame)
 {
+    KLOG_TRACE_AV(::duetos::core::LogArea::Win32, "win32/mutex", "NtWaitForSingleObject(mutex) ENTRY; handle",
+                  frame->rdi);
+    KLOG_TRACE_AV(::duetos::core::LogArea::Win32, "win32/mutex", "  timeout_ms", frame->rsi & 0xFFFFFFFFu);
     // Acquire-or-block-with-timeout. Recursive owner check first;
     // otherwise WaitQueueBlockTimeout. Hand-off in DoMutexRelease
     // sets m.owner = us BEFORE waking so a successful wake means
@@ -94,11 +92,8 @@ void DoMutexWait(arch::TrapFrame* frame)
     if (handle < core::Process::kWin32MutexBase ||
         handle >= core::Process::kWin32MutexBase + core::Process::kWin32MutexCap)
     {
-        arch::SerialWrite("[sys] mutex_wait bad_handle pid=");
-        arch::SerialWriteHex(proc->pid);
-        arch::SerialWrite(" handle=");
-        arch::SerialWriteHex(handle);
-        arch::SerialWrite("\n");
+        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/mutex", "NtWaitForSingleObject: bad mutex handle; handle",
+                     handle);
         frame->rax = static_cast<u64>(-1);
         return;
     }
@@ -106,11 +101,8 @@ void DoMutexWait(arch::TrapFrame* frame)
     core::Process::Win32MutexHandle& m = proc->win32_mutexes[slot];
     if (!m.in_use)
     {
-        arch::SerialWrite("[sys] mutex_wait closed_handle pid=");
-        arch::SerialWriteHex(proc->pid);
-        arch::SerialWrite(" handle=");
-        arch::SerialWriteHex(handle);
-        arch::SerialWrite("\n");
+        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/mutex",
+                     "NtWaitForSingleObject: closed mutex handle; handle", handle);
         frame->rax = static_cast<u64>(-1);
         return;
     }
@@ -159,6 +151,7 @@ void DoMutexWait(arch::TrapFrame* frame)
 
 void DoMutexRelease(arch::TrapFrame* frame)
 {
+    KLOG_TRACE_AV(::duetos::core::LogArea::Win32, "win32/mutex", "NtReleaseMutant ENTRY; handle", frame->rdi);
     core::Process* proc = core::CurrentProcess();
     if (proc == nullptr)
     {
@@ -169,11 +162,7 @@ void DoMutexRelease(arch::TrapFrame* frame)
     if (handle < core::Process::kWin32MutexBase ||
         handle >= core::Process::kWin32MutexBase + core::Process::kWin32MutexCap)
     {
-        arch::SerialWrite("[sys] mutex_release bad_handle pid=");
-        arch::SerialWriteHex(proc->pid);
-        arch::SerialWrite(" handle=");
-        arch::SerialWriteHex(handle);
-        arch::SerialWrite("\n");
+        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/mutex", "NtReleaseMutant: bad handle; handle", handle);
         frame->rax = static_cast<u64>(-1);
         return;
     }
@@ -186,13 +175,8 @@ void DoMutexRelease(arch::TrapFrame* frame)
     if (!was_in_use || !owns)
     {
         arch::Sti();
-        arch::SerialWrite("[sys] mutex_release ");
-        arch::SerialWrite(!was_in_use ? "closed_handle" : "not_owner");
-        arch::SerialWrite(" pid=");
-        arch::SerialWriteHex(proc->pid);
-        arch::SerialWrite(" handle=");
-        arch::SerialWriteHex(handle);
-        arch::SerialWrite("\n");
+        KLOG_WARN_AS(::duetos::core::LogArea::Win32, "win32/mutex", "NtReleaseMutant rejected", "reason",
+                     !was_in_use ? "closed_handle" : "not_owner");
         frame->rax = static_cast<u64>(-1);
         return;
     }

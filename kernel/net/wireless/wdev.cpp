@@ -1,6 +1,7 @@
 #include "net/wireless/wdev.h"
 
 #include "core/panic.h"
+#include "log/klog.h"
 #include "net/wireless/wifi_diag.h"
 #include "time/tick.h"
 
@@ -61,6 +62,8 @@ const char* WirelessOpStateName(WirelessOpState s)
 {
     if (g_count >= kWdevMaxDevices)
     {
+        KLOG_ERROR_AV(::duetos::core::LogArea::Wireless, "net/wireless/wdev", "register: device table full, capacity",
+                      static_cast<u64>(kWdevMaxDevices));
         diag::RecordErr(diag::Layer::Wdev, "register-full", static_cast<u32>(::duetos::core::ErrorCode::OutOfMemory),
                         kWdevMaxDevices, 0, 0);
         return ::duetos::core::Err{::duetos::core::ErrorCode::OutOfMemory};
@@ -68,6 +71,7 @@ const char* WirelessOpStateName(WirelessOpState s)
     g_devices[g_count] = proto;
     g_devices[g_count].wdev_id = g_next_id++;
     g_devices[g_count].op_state = WirelessOpState::Down;
+    KLOG_INFO_AS(::duetos::core::LogArea::Wireless, "net/wireless/wdev", "device registered", "name", proto.name);
     diag::RecordOk(diag::Layer::Wdev, "register", g_devices[g_count].wdev_id, 0, 0, proto.name);
     return g_devices[g_count++].wdev_id;
 }
@@ -95,9 +99,17 @@ WirelessDevice* WirelessDeviceAt(u32 index)
 ::duetos::core::Result<void> WirelessSetState(WirelessDevice* wdev, WirelessOpState s)
 {
     if (wdev == nullptr)
+    {
+        KLOG_WARN_A(::duetos::core::LogArea::Wireless, "net/wireless/wdev", "SetState: null wdev");
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+    }
     const auto prev = wdev->op_state;
     wdev->op_state = s;
+    if (prev != s)
+    {
+        KLOG_INFO_A2V(::duetos::core::LogArea::Wireless, "net/wireless/wdev", "wdev op_state change", "from",
+                      static_cast<u64>(prev), "to", static_cast<u64>(s));
+    }
     diag::RecordOk(diag::Layer::Wdev, "state-change", static_cast<u64>(prev), static_cast<u64>(s), wdev->wdev_id);
     return ::duetos::core::Result<void>{};
 }
@@ -110,6 +122,8 @@ WirelessDevice* WirelessDeviceAt(u32 index)
     auto pr = BeaconParse(f.frame, f.frame_len, &parsed);
     if (!pr.has_value())
     {
+        KLOG_WARN_AV(::duetos::core::LogArea::Wireless, "net/wireless/wdev", "beacon parse failed; frame_len",
+                     static_cast<u64>(f.frame_len));
         diag::RecordErr(diag::Layer::Rx, "beacon-parse", static_cast<u32>(pr.error()), f.frame_len, 0, 0);
         return pr;
     }
@@ -127,11 +141,14 @@ WirelessDevice* WirelessDeviceAt(u32 index)
     if (wdev->scan_result_count < kWdevMaxScanResults)
     {
         wdev->scan_results[wdev->scan_result_count++] = parsed;
+        KLOG_TRACE_AV(::duetos::core::LogArea::Wireless, "net/wireless/wdev", "scan-result added; channel",
+                      static_cast<u64>(parsed.channel));
         diag::RecordOk(diag::Layer::Rx, "beacon-new", parsed.channel, wdev->scan_result_count - 1, wdev->wdev_id,
                        parsed.ssid);
     }
     else
     {
+        KLOG_ONCE_WARN("net/wireless/wdev", "scan-result table full — dropping beacons");
         diag::RecordErr(diag::Layer::Rx, "beacon-full", static_cast<u32>(::duetos::core::ErrorCode::OutOfMemory),
                         kWdevMaxScanResults, 0, 0);
     }
@@ -159,6 +176,8 @@ WirelessDevice* WirelessDeviceAt(u32 index)
     auto pr = FourWayProcessIncoming(wdev->fw, f.frame, f.frame_len);
     if (!pr.has_value())
     {
+        KLOG_WARN_AV(::duetos::core::LogArea::Wireless, "net/wireless/wdev", "EAPOL incoming process failed",
+                     static_cast<u64>(pr.error()));
         diag::RecordErr(diag::Layer::Eapol, "eapol-rx-err", static_cast<u32>(pr.error()), 0, 0, 0);
         return pr;
     }
@@ -179,13 +198,18 @@ WirelessDevice* WirelessDeviceAt(u32 index)
         auto br = FourWayBuildOutgoing(wdev->fw, rsn, sizeof(rsn), m2, sizeof(m2), &m2_len);
         if (!br.has_value())
         {
+            KLOG_ERROR_AV(::duetos::core::LogArea::Wireless, "net/wireless/wdev", "M2 build failed",
+                          static_cast<u64>(br.error()));
             diag::RecordErr(diag::Layer::Eapol, "m2-build-err", static_cast<u32>(br.error()), 0, 0, 0);
             return br;
         }
+        KLOG_INFO_AV(::duetos::core::LogArea::Wireless, "net/wireless/wdev", "TX M2; len", static_cast<u64>(m2_len));
         diag::RecordOk(diag::Layer::Eapol, "m2-tx", m2_len, 0, wdev->wdev_id);
         auto sr = wdev->ops.SendEapolFrame(wdev, m2, m2_len);
         if (!sr.has_value())
         {
+            KLOG_ERROR_AV(::duetos::core::LogArea::Wireless, "net/wireless/wdev", "M2 TX failed",
+                          static_cast<u64>(sr.error()));
             diag::RecordErr(diag::Layer::Eapol, "m2-tx-err", static_cast<u32>(sr.error()), 0, 0, 0);
             return sr;
         }
@@ -208,10 +232,13 @@ WirelessDevice* WirelessDeviceAt(u32 index)
             auto kr = wdev->ops.InstallKey(wdev, k);
             if (!kr.has_value())
             {
+                KLOG_ERROR_AV(::duetos::core::LogArea::Wireless, "net/wireless/wdev", "TK install failed",
+                              static_cast<u64>(kr.error()));
                 diag::RecordErr(diag::Layer::KeyMgmt, "tk-install-err", static_cast<u32>(kr.error()), 0, 0, 0);
                 WirelessSetState(wdev, WirelessOpState::Failed);
                 return kr;
             }
+            KLOG_INFO_A(::duetos::core::LogArea::Wireless, "net/wireless/wdev", "pairwise TK installed");
             diag::RecordOk(diag::Layer::KeyMgmt, "tk-installed", k.key_len, 0, wdev->wdev_id);
         }
         if (wdev->fw.gtk_valid && wdev->ops.InstallKey != nullptr)
@@ -227,10 +254,13 @@ WirelessDevice* WirelessDeviceAt(u32 index)
             auto kr = wdev->ops.InstallKey(wdev, gk);
             if (!kr.has_value())
             {
+                KLOG_WARN_AV(::duetos::core::LogArea::Wireless, "net/wireless/wdev", "GTK install failed",
+                             static_cast<u64>(kr.error()));
                 diag::RecordErr(diag::Layer::KeyMgmt, "gtk-install-err", static_cast<u32>(kr.error()), 0, 0, 0);
             }
             else
             {
+                KLOG_INFO_A(::duetos::core::LogArea::Wireless, "net/wireless/wdev", "group GTK installed");
                 diag::RecordOk(diag::Layer::KeyMgmt, "gtk-installed", gk.key_len, gk.key_index, wdev->wdev_id);
             }
         }
@@ -246,13 +276,18 @@ WirelessDevice* WirelessDeviceAt(u32 index)
         auto br = FourWayBuildOutgoing(wdev->fw, nullptr, 0, m4, sizeof(m4), &m4_len);
         if (!br.has_value())
         {
+            KLOG_ERROR_AV(::duetos::core::LogArea::Wireless, "net/wireless/wdev", "M4 build failed",
+                          static_cast<u64>(br.error()));
             diag::RecordErr(diag::Layer::Eapol, "m4-build-err", static_cast<u32>(br.error()), 0, 0, 0);
             return br;
         }
+        KLOG_INFO_AV(::duetos::core::LogArea::Wireless, "net/wireless/wdev", "TX M4; len", static_cast<u64>(m4_len));
         diag::RecordOk(diag::Layer::Eapol, "m4-tx", m4_len, 0, wdev->wdev_id);
         auto sr = wdev->ops.SendEapolFrame(wdev, m4, m4_len);
         if (!sr.has_value())
         {
+            KLOG_ERROR_AV(::duetos::core::LogArea::Wireless, "net/wireless/wdev", "M4 TX failed",
+                          static_cast<u64>(sr.error()));
             diag::RecordErr(diag::Layer::Eapol, "m4-tx-err", static_cast<u32>(sr.error()), 0, 0, 0);
             return sr;
         }
@@ -263,6 +298,8 @@ WirelessDevice* WirelessDeviceAt(u32 index)
         // because there's no explicit ack signal back from the AP.
         wdev->fw.state = FourWayState::Established;
         WirelessSetState(wdev, WirelessOpState::Connected);
+        KLOG_INFO_A(::duetos::core::LogArea::Wireless, "net/wireless/wdev",
+                    "4-way handshake established — link CONNECTED");
     }
     if (wdev->fw.state == FourWayState::Established)
         WirelessSetState(wdev, WirelessOpState::Connected);
@@ -271,6 +308,9 @@ WirelessDevice* WirelessDeviceAt(u32 index)
 
 void WdevSelfTest()
 {
+    KLOG_TRACE_SCOPE("net/wireless/wdev", "WdevSelfTest");
+    KLOG_INFO_A(::duetos::core::LogArea::Wireless, "net/wireless/wdev",
+                "self-test: register + deliver-beacon + dedupe");
     // Register a fake device, deliver a synthetic beacon, verify
     // it lands in the scan-results table.
     WirelessDevice proto{};
@@ -322,6 +362,8 @@ void WdevSelfTest()
     auto db2 = WirelessDeliverBeacon(wdev, rxf);
     KASSERT(db2.has_value(), "net/wireless/wdev", "second deliver-beacon failed");
     KASSERT(wdev->scan_result_count == 1, "net/wireless/wdev", "dedupe failed");
+    KLOG_INFO_A(::duetos::core::LogArea::Wireless, "net/wireless/wdev",
+                "self-test OK (register + beacon delivery + dedupe verified)");
 }
 
 } // namespace duetos::net::wireless
