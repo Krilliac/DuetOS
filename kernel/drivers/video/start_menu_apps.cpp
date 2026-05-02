@@ -120,6 +120,11 @@ bool ResolveTargetName(const char* s, ThemeRole* out)
         *out = ThemeRole::ImageView;
         return true;
     }
+    if (StrEqI(s, "about") || StrEqI(s, "sysinfo"))
+    {
+        *out = ThemeRole::About;
+        return true;
+    }
     return false;
 }
 

@@ -112,6 +112,7 @@
 #include "fs/gpt.h"
 #include "fs/ntfs.h"
 #include "apps/calculator.h"
+#include "apps/about.h"
 #include "apps/clock.h"
 #include "apps/files.h"
 #include "apps/gfxdemo.h"
@@ -371,12 +372,29 @@ void PrintShortcutHelp()
     ConsoleWriteln("    CTRL+ALT+1..9     PICK THEME DIRECTLY");
     ConsoleWriteln("    CTRL+ALT+F1/F2    SHELL / KLOG CONSOLE");
     ConsoleWriteln("    CTRL+ALT+P        SCREENSHOT TO SHOTNNNN.BMP");
+    ConsoleWriteln("    CTRL+ALT+M        TOGGLE MAGNIFIER");
+    ConsoleWriteln("    CTRL+ALT+K        LOCK SCREEN");
     ConsoleWriteln("    CTRL+C            INTERRUPT SHELL COMMAND");
     ConsoleWriteln("");
     ConsoleWriteln("  NOTES (WHEN ACTIVE)");
     ConsoleWriteln("    CTRL+C / CTRL+V   COPY / PASTE CLIPBOARD");
     ConsoleWriteln("    CTRL+S            SAVE TO NOTES.TXT (FAT32)");
     ConsoleWriteln("    CTRL+O            LOAD FROM NOTES.TXT (FAT32)");
+    ConsoleWriteln("");
+    ConsoleWriteln("  FILES (WHEN ACTIVE)");
+    ConsoleWriteln("    UP / DN           MOVE SELECTION");
+    ConsoleWriteln("    ENTER             OPEN (DESCEND DIR / DISPATCH)");
+    ConsoleWriteln("    B / BACKSPACE     UP ONE LEVEL (RAM MODE)");
+    ConsoleWriteln("    D / M             SWITCH DISK / RAM VIEW");
+    ConsoleWriteln("    R                 RESCAN DISK ROOT");
+    ConsoleWriteln("    X THEN Y          DELETE SELECTED DISK FILE");
+    ConsoleWriteln("");
+    ConsoleWriteln("  IMAGE VIEWER (WHEN ACTIVE)");
+    ConsoleWriteln("    N / P / LEFT/RT   NEXT / PREV BMP");
+    ConsoleWriteln("    R                 RESCAN DISK FOR BMPS");
+    ConsoleWriteln("");
+    ConsoleWriteln("  SETTINGS BUTTONS");
+    ConsoleWriteln("    THEME / OPACITY / TZ / LOG OUT / REBOOT / SHUTDOWN");
     ConsoleWriteln("================================================");
     ConsoleWriteln("");
 }
@@ -1230,6 +1248,21 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::drivers::video::ThemeRegisterWindow(Role::ImageView, image_handle);
     duetos::apps::imageview::ImageViewInit(image_handle);
     DUETOS_BOOT_SELFTEST(duetos::apps::imageview::ImageViewSelfTest());
+
+    // ABOUT — windowed system-info readout. Replaces the legacy
+    // two-line "ABOUT DUETOS" console message; raised from the
+    // Start menu's ABOUT entry. Refreshes on every compositor
+    // tick so uptime + heap counters update visibly.
+    duetos::drivers::video::WindowChrome about_chrome = theme_chrome(Role::About);
+    about_chrome.x = 360;
+    about_chrome.y = 140;
+    about_chrome.w = 360;
+    about_chrome.h = 200;
+    const duetos::drivers::video::WindowHandle about_handle =
+        duetos::drivers::video::WindowRegister(about_chrome, "ABOUT DUETOS");
+    duetos::drivers::video::ThemeRegisterWindow(Role::About, about_handle);
+    duetos::apps::about::AboutInit(about_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::about::AboutSelfTest());
 
     // Framebuffer text console. 80x40 chars of boot log at the
     // bottom of the desktop, under the windows in z-order. Dragging
@@ -2857,6 +2890,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             {"GFX DEMO", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::GfxDemo)},
             {"SETTINGS", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Settings)},
             {"IMAGE VIEWER", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::ImageView)},
+            {"ABOUT", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::About)},
         };
         static const duetos::drivers::video::MenuItem kStartItemsTrailing[] = {
             {"HELP / SHORTCUTS", 6},
@@ -3000,10 +3034,23 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     switch (action)
                     {
                     case 1: // ABOUT DUETOS
-                        duetos::drivers::video::ConsoleWriteln("");
-                        duetos::drivers::video::ConsoleWriteln("-> DUETOS v0 — WINDOWED DESKTOP SHELL");
-                        duetos::drivers::video::ConsoleWriteln("   KEYBOARD + MOUSE + FRAMEBUFFER ALL LIVE");
+                    {
+                        const duetos::drivers::video::WindowHandle ah =
+                            duetos::drivers::video::ThemeRoleWindow(duetos::drivers::video::ThemeRole::About);
+                        if (ah != duetos::drivers::video::kWindowInvalid)
+                        {
+                            duetos::drivers::video::WindowRaise(ah);
+                            duetos::drivers::video::ConsoleWriteln("-> ABOUT WINDOW RAISED");
+                        }
+                        else
+                        {
+                            // Fallback for the unlikely registration-fail
+                            // path — keeps the action observable even if
+                            // the window slot is somehow gone.
+                            duetos::drivers::video::ConsoleWriteln("-> DUETOS v0 — WINDOWED DESKTOP SHELL");
+                        }
                         break;
+                    }
                     case 2: // CYCLE WINDOWS
                         duetos::drivers::video::WindowCycleActive();
                         duetos::drivers::video::ConsoleWriteln("-> CYCLED ACTIVE WINDOW");
