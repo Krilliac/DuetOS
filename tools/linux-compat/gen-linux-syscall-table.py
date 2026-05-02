@@ -43,9 +43,10 @@ HEADER_TEMPLATE = """// AUTO-GENERATED — do not edit by hand.
 //
 // Source data: tools/linux-compat/linux-syscalls-x86_64.csv
 // Total syscalls listed: {total}
-// Primary handlers implemented in kernel/subsystems/linux/syscall.cpp: {primary}
-// Effective coverage (primary + LinuxGapFill in translation/translate.cpp): {effective}
-// Coverage (primary): {primary_pct}%
+// Implemented (Do<Name> body in some syscall_*.cpp): {primary}
+// Dispatched (kSys<Name> case but no Do<Name>; inline impl): {dispatched}
+// Effective coverage (Implemented + Dispatched + LinuxGapFill): {effective}
+// Coverage (implemented): {primary_pct}%
 // Coverage (effective): {effective_pct}%
 //
 // See tools/linux-compat/README.md for provenance.
@@ -60,8 +61,13 @@ namespace duetos::subsystems::linux
 enum class HandlerState : u8
 {{
     Unknown = 0,     // number outside the known ABI range
-    Unimplemented,   // known name, no Do* in syscall.cpp
-    Implemented,     // known name, matching Do* handler exists
+    Unimplemented,   // deliberate -ENOSYS (kSysEnosys_-block) or no kSys constant at all
+    Dispatched,      // kSys<Name> case exists in dispatch but no Do<Name> body
+                     // (inline impl, alias to non-Do<Name> fn, etc.). Returns a
+                     // coherent value to userspace, just not via the Do<Name>
+                     // convention the script's heuristic looks for.
+    Implemented,     // known name, matching Do<Name> handler exists in some
+                     // syscall_*.cpp peer.
 }};
 
 struct LinuxSyscallEntry
@@ -147,18 +153,58 @@ def snake_to_camel(name):
 
 
 def build_dispatcher_symbols(source_text):
-    # Every handler body in syscall.cpp is declared as
+    # Every handler body in syscall_*.cpp is declared as
     # `i64 DoFoo(...)`. Grep them out.
     return set(re.findall(r"\bi64\s+(Do[A-Za-z0-9_]+)\s*\(", source_text))
 
 
-def classify(name, dispatcher_symbols):
+def build_dispatched_numbers(source_text):
+    """Return the set of syscall numbers reachable through the
+    primary dispatcher's switch — anything with a `case kSysX:`
+    that ISN'T inside the kSysEnosys_-only block at the bottom.
+
+    The kSysEnosys_<Name> = N constants live in the enum next to
+    the canonical kSys<Name>; their cases all collapse onto a
+    single `rv = kENOSYS; break;` arm. Numbers in that arm are
+    deliberately unimplemented (deprecated / never-released
+    surfaces); numbers OUTSIDE it have either a real Do<Name>
+    handler or an inline impl that returns something other than
+    -ENOSYS.
+    """
+    name_to_num = {}
+    for m in re.finditer(r"\b(kSys[A-Za-z0-9_]+)\s*=\s*(\d+)\s*,", source_text):
+        name_to_num[m.group(1)] = int(m.group(2))
+    enosys_numbers = {n for name, n in name_to_num.items() if name.startswith("kSysEnosys_")}
+    case_names = set(re.findall(r"\bcase\s+(kSys[A-Za-z0-9_]+)\s*:", source_text))
+    dispatched = set()
+    for name in case_names:
+        nr = name_to_num.get(name)
+        if nr is not None and nr not in enosys_numbers:
+            dispatched.add(nr)
+    return dispatched
+
+
+def classify(name, number, dispatcher_symbols, dispatched_numbers):
+    """Three states:
+       Implemented   — a Do<Name> body exists in some syscall_*.cpp.
+       Dispatched    — kSys<Name> has a switch case in the dispatcher
+                       (inline impl, alias to a non-Do<Name> function,
+                       or routes through a sub-namespace fn) but no
+                       Do<Name> body exists. Reaches the user with a
+                       coherent return value, just not via the
+                       Do<Name> convention.
+       Unimplemented — neither of the above. Includes the
+                       kSysEnosys_* deliberate-ENOSYS block plus any
+                       syscall that has no kSys constant at all.
+    """
     sym = NAME_ALIASES.get(name)
     if sym and sym in dispatcher_symbols:
         return "Implemented"
     sym = f"Do{snake_to_camel(name)}"
     if sym in dispatcher_symbols:
         return "Implemented"
+    if number in dispatched_numbers:
+        return "Dispatched"
     return "Unimplemented"
 
 
@@ -210,16 +256,22 @@ def main():
     args = ap.parse_args()
 
     dispatcher_symbols = set()
+    dispatched_numbers = set()
     if args.mapped_from_dispatcher is not None:
         # The syscall dispatch lives in syscall.cpp but the
         # individual `Do*` handlers are split across the
-        # syscall_<family>.cpp peers (syscall_socket.cpp,
-        # syscall_fd.cpp, syscall_pipe.cpp, ...). Scan the
-        # whole subsystems/linux/ directory for `i64 DoFoo(...)`
+        # syscall_<family>.cpp peers. Scan the whole
+        # subsystems/linux/ directory for `i64 DoFoo(...)`
         # bodies, not just the single dispatcher TU.
         dispatcher_dir = args.mapped_from_dispatcher.parent
         for cpp in sorted(dispatcher_dir.glob("syscall*.cpp")):
             dispatcher_symbols |= build_dispatcher_symbols(cpp.read_text())
+        # The dispatcher TU is the canonical source for
+        # "which kSys numbers have a switch case that isn't
+        # the kSysEnosys_-only collapsed arm".
+        dispatched_numbers = build_dispatched_numbers(
+            args.mapped_from_dispatcher.read_text()
+        )
 
     gap_fill_numbers = set()
     if args.gap_fill_from_translator is not None:
@@ -237,13 +289,15 @@ def main():
                 args_n = int(r.get("args", "0"))
             except ValueError:
                 args_n = 0
-            state = classify(name, dispatcher_symbols)
+            state = classify(name, nr, dispatcher_symbols, dispatched_numbers)
             rows.append((nr, name, args_n, state))
 
     rows.sort(key=lambda r: r[0])
 
     primary = sum(1 for _, _, _, s in rows if s == "Implemented")
-    effective = sum(1 for nr, _, _, s in rows if (s == "Implemented") or (nr in gap_fill_numbers))
+    dispatched = sum(1 for _, _, _, s in rows if s == "Dispatched")
+    effective = sum(1 for nr, _, _, s in rows if s in ("Implemented", "Dispatched")
+                                              or (nr in gap_fill_numbers))
     total = len(rows)
     max_nr = max((nr for nr, _, _, _ in rows), default=0)
     primary_pct = (100 * primary // total) if total else 0
@@ -269,6 +323,7 @@ def main():
         HEADER_TEMPLATE.format(
             total=total,
             primary=primary,
+            dispatched=dispatched,
             effective=effective,
             primary_pct=primary_pct,
             effective_pct=effective_pct,
@@ -280,9 +335,10 @@ def main():
     )
     print(f"wrote {args.out}")
     print(f"  total syscalls : {total}")
-    print(f"  primary        : {primary} ({primary_pct}%)")
+    print(f"  implemented    : {primary} ({primary_pct}%)")
+    print(f"  dispatched     : {dispatched}")
     print(f"  effective      : {effective} ({effective_pct}%)")
-    print(f"  unimplemented  : {total - primary}")
+    print(f"  unimplemented  : {total - effective}")
 
 
 if __name__ == "__main__":
