@@ -334,8 +334,16 @@ i64 DoSelect(u64 nfds, u64 rfds, u64 wfds, u64 efds, u64 timeout)
 i64 DoGetdents64(u64 fd, u64 user_buf, u64 count)
 {
     core::Process* p = core::CurrentProcess();
-    if (p == nullptr || fd >= 16 || p->linux_fds[fd].state != 11)
+    if (p == nullptr || fd >= 16)
         return kEBADF;
+    const u32 state = p->linux_fds[fd].state;
+    if (state == 0)
+        return kEBADF;
+    // Linux distinguishes "bad fd" from "fd is valid but not a
+    // directory": getdents64 on a regular file / pipe / socket
+    // returns -ENOTDIR, not -EBADF.
+    if (state != 11)
+        return kENOTDIR;
     const u32 dslot = p->linux_fds[fd].first_cluster;
     if (dslot >= core::Process::kWin32DirCap)
         return kEINVAL;
