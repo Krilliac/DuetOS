@@ -549,6 +549,48 @@ docblock explaining: synfull's role is broad coverage
 not deep per-handler validation (that's the per-domain
 exercisers' job).
 
+## Eighth-slice findings — broader handler coverage + return-value corrections
+
+### Wider fcntl + prctl coverage
+
+- **fcntl** picked up F_DUPFD_CLOEXEC, F_GETLK/SETLK/SETLKW (locks
+  as no-op), F_SETOWN/GETOWN/SETSIG/GETSIG (async-IO ownership),
+  F_SETLEASE/GETLEASE, F_NOTIFY (deprecated dnotify), F_SETPIPE_SZ
+  /GETPIPE_SZ (4 KiB fixed), F_ADD_SEALS/GET_SEALS (memfd seals,
+  no enforcement). About 13 new cmds; -EINVAL for everything else
+  remains.
+
+- **prctl** picked up ~30 common options as no-ops returning 0
+  (or sensible defaults — TIMERSLACK reports 50us, TSC reports
+  enabled, KEEPCAPS / NO_NEW_PRIVS / THP_DISABLE / SECUREBITS /
+  CAP_AMBIENT / SET_VMA / SPECULATION_CTRL / TAGGED_ADDR_CTRL).
+  glibc/musl probe these before deciding whether to use them;
+  accepting unblocks the probe path.
+
+### Return-value corrections (Linux convention compliance)
+
+- **getppid** was hardcoded to 1; now returns `linux_parent_pid`
+  if set, else 1 (init's pid as the canonical "no parent" value).
+- **setsid** was returning 0; now returns the calling pid (the
+  new session leader's pid is the calling pid).
+- **getpgid / getsid** were returning 0 unconditionally; now
+  follow Linux convention "each process is its own group/session
+  leader by default" — pid==0 returns the calling pid, non-zero
+  pid validates via SchedFindProcessByPid (-ESRCH on miss).
+- **sched_setaffinity** was returning 0 for all inputs including
+  NULL mask; now validates -EFAULT for NULL, -EINVAL for empty
+  mask or zero size, accepts non-empty masks (advisory in v0).
+
+### Pattern: "spec-correct stub" beats "silent zero"
+
+Several handlers were returning 0 (silent success) for inputs
+that Linux would reject. The fix in each case: validate the
+input as Linux does (NULL ptr -> -EFAULT, zero size -> -EINVAL,
+bad pid -> -ESRCH), then return 0 only for the actual happy
+path. This matters because glibc/musl test functions assume
+the documented errno surfaces — silent-zero confuses callers
+into believing a feature works when it doesn't.
+
 ## Cross-references
 
 - `.claude/knowledge/subsystems-status.md` — top-level Linux ABI inventory
