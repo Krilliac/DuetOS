@@ -82,8 +82,13 @@ void FillStatFromEntry(const fs::fat32::DirEntry& e, u8* out_144)
 // Returns the new fd on success, -errno otherwise.
 i64 DoOpen(u64 user_path, u64 flags, u64 mode)
 {
-    (void)flags;
     (void)mode;
+    // Linux open flags we care about for the FAT32-backed v0 path.
+    // kSysOpen and kSysOpenat both come through here, so the same
+    // bits mean the same thing.
+    constexpr u64 kO_CREAT = 0x40;
+    constexpr u64 kO_EXCL = 0x80;
+    constexpr u64 kO_TRUNC = 0x200;
     char path[64];
     for (u32 i = 0; i < sizeof(path); ++i)
         path[i] = 0;
@@ -113,10 +118,40 @@ i64 DoOpen(u64 user_path, u64 flags, u64 mode)
     }
     fs::fat32::DirEntry entry;
     const char* leaf = StripFatPrefix(path);
-    if (!fs::fat32::Fat32LookupPath(v, leaf, &entry))
+    bool exists = fs::fat32::Fat32LookupPath(v, leaf, &entry);
+    bool pending_create = false;
+    if (!exists)
     {
-        return kENOENT;
+        if ((flags & kO_CREAT) == 0)
+        {
+            return kENOENT;
+        }
+        // O_CREAT path: don't physically create the file yet —
+        // FAT32's AppendInDir explicitly refuses to grow zero-byte
+        // files (first_cluster<2 guards in fat32_write.cpp), so a
+        // 0-byte create followed by a write would fail with -EIO.
+        // Mark the fd as pending-create; DoWrite then routes the
+        // FIRST extending write through Fat32CreateAtPath, which
+        // allocates clusters as part of the create. cap_gate gated
+        // kCapFsWrite at the syscall entry; the caller is allowed.
+        pending_create = true;
+        // Synthesise a dir-entry shape so the fd-bind code below
+        // sees zero size + zero first_cluster.
+        for (u64 i = 0; i < sizeof(entry.name); ++i)
+            entry.name[i] = 0;
+        entry.attributes = 0;
+        entry.first_cluster = 0;
+        entry.size_bytes = 0;
     }
+    else if ((flags & kO_EXCL) != 0 && (flags & kO_CREAT) != 0)
+    {
+        // O_CREAT|O_EXCL on an existing file is an error.
+        return -17 /*-EEXIST*/;
+    }
+    // O_TRUNC on an existing regular file is a sub-GAP — Fat32 has
+    // a TruncateAtPath but it can't shrink past first_cluster<2
+    // either. Real callers rarely combine O_TRUNC with non-empty
+    // existing files in synxtest/synfs scope; revisit when one does.
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
     {
@@ -175,6 +210,7 @@ i64 DoOpen(u64 user_path, u64 flags, u64 mode)
         if (p->linux_fds[i].state == 0)
         {
             p->linux_fds[i].state = 2;
+            p->linux_fds[i].flags = pending_create ? core::Process::kLinuxFdFlagPendingCreate : 0;
             p->linux_fds[i].first_cluster = entry.first_cluster;
             p->linux_fds[i].size = entry.size_bytes;
             p->linux_fds[i].offset = 0;

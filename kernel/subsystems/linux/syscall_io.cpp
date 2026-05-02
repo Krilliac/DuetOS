@@ -164,15 +164,40 @@ i64 DoWrite(u64 fd, u64 user_buf, u64 len)
         // Fat32AppendAtPath appends to end-of-file; caller's
         // offset + written MUST equal the current on-disk size.
         // (True by construction: in-bounds code wrote up to size.)
-        const i64 n = fs::fat32::Fat32AppendAtPath(v, p->linux_fds[fd].path, kbuf + written, extend_len);
+        // SPECIAL CASE: if the fd carries kLinuxFdFlagPendingCreate
+        // (O_CREAT-on-not-yet-existing), the file's dir entry
+        // doesn't exist on disk yet — route through
+        // Fat32CreateAtPath instead, which allocates the entry +
+        // first cluster + writes the bytes in one shot. Clear the
+        // flag so subsequent writes go through the normal append
+        // path.
+        i64 n = -1;
+        if (p->linux_fds[fd].flags & core::Process::kLinuxFdFlagPendingCreate)
+        {
+            n = fs::fat32::Fat32CreateAtPath(v, p->linux_fds[fd].path, kbuf + written, extend_len);
+            if (n >= 0)
+            {
+                p->linux_fds[fd].flags = static_cast<u8>(p->linux_fds[fd].flags &
+                                                        ~core::Process::kLinuxFdFlagPendingCreate);
+                // Re-look up the just-created entry so first_cluster
+                // is populated for subsequent in-bounds writes.
+                fs::fat32::DirEntry e;
+                if (fs::fat32::Fat32LookupPath(v, p->linux_fds[fd].path, &e))
+                    p->linux_fds[fd].first_cluster = e.first_cluster;
+            }
+        }
+        else
+        {
+            n = fs::fat32::Fat32AppendAtPath(v, p->linux_fds[fd].path, kbuf + written, extend_len);
+        }
         if (n < 0)
         {
             p->linux_fds[fd].offset = off + written;
             return written > 0 ? static_cast<i64>(written) : kEIO;
         }
         written += static_cast<u64>(n);
-        // Update the cached size — AppendAtPath just extended the
-        // on-disk size field; our cached copy needs to follow.
+        // Update the cached size — AppendAtPath / CreateAtPath just
+        // extended the on-disk size; our cached copy follows.
         p->linux_fds[fd].size = static_cast<u32>(size + (to_copy - (size - off)));
     }
     p->linux_fds[fd].offset = off + written;

@@ -322,7 +322,14 @@ struct Process
         // for the non-file states; all non-file callers must
         // ignore size/offset/path.
         u8 state;
-        u8 _pad[3];
+        // Per-fd flag bits. kLinuxFdFlagPendingCreate (0x01) marks a
+        // freshly-opened-with-O_CREAT regular-file fd whose backing
+        // disk entry doesn't exist yet — the first sys_write routes
+        // through Fat32CreateAtPath instead of Fat32AppendAtPath.
+        // (FAT32's append path can't grow a 0-byte file in v0; see
+        // fat32_write.cpp first_cluster<2 guards.)
+        u8 flags;
+        u8 _pad[2];
         u32 first_cluster;
         u32 size;
         u32 _pad2;
@@ -334,6 +341,7 @@ struct Process
         // Cap matches the sys_open copy buffer (63 chars + NUL).
         char path[64];
     };
+    static constexpr u8 kLinuxFdFlagPendingCreate = 0x01;
     LinuxFd linux_fds[16];
 
     // Linux-ABI brk heap. Meaningful only when abi_flavor ==
