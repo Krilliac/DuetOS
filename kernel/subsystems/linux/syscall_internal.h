@@ -595,4 +595,30 @@ i64 DoOpenat2(i64 dirfd, u64 user_path, u64 user_how, u64 how_size);
 i64 DoEpollPwait2(u64 epfd, u64 events, u64 maxevents, u64 user_ts, u64 sigmask, u64 sigsetsize);
 i64 DoSendfile(u64 out_fd, u64 in_fd, u64 user_offset, u64 count);
 
+// Auxiliary batch 2 — spec-correct errnos for unsupported
+// surfaces (better than -ENOSYS where the API is recognised).
+i64 DoSetxattr(u64 path, u64 name, u64 value, u64 size, u64 flags);
+i64 DoLsetxattr(u64 path, u64 name, u64 value, u64 size, u64 flags);
+i64 DoFsetxattr(u64 fd, u64 name, u64 value, u64 size, u64 flags);
+i64 DoGetxattr(u64 path, u64 name, u64 value, u64 size);
+i64 DoLgetxattr(u64 path, u64 name, u64 value, u64 size);
+i64 DoFgetxattr(u64 fd, u64 name, u64 value, u64 size);
+i64 DoListxattr(u64 path, u64 list, u64 size);
+i64 DoLlistxattr(u64 path, u64 list, u64 size);
+i64 DoFlistxattr(u64 fd, u64 list, u64 size);
+i64 DoRemovexattr(u64 path, u64 name);
+i64 DoLremovexattr(u64 path, u64 name);
+i64 DoFremovexattr(u64 fd, u64 name);
+i64 DoRtSigqueueinfo(u64 tgid, u64 sig, u64 user_info);
+i64 DoUnshare(u64 flags);
+i64 DoSetns(u64 fd, u64 nstype);
+i64 DoModifyLdt(u64 func, u64 ptr, u64 bytecount);
+i64 DoProcessVmReadv(u64 pid, u64 lvec, u64 lcnt, u64 rvec, u64 rcnt, u64 flags);
+i64 DoProcessVmWritev(u64 pid, u64 lvec, u64 lcnt, u64 rvec, u64 rcnt, u64 flags);
+i64 DoKcmp(u64 pid1, u64 pid2, u64 type, u64 idx1, u64 idx2);
+i64 DoSeccomp(u64 op, u64 flags, u64 args);
+i64 DoRestartSyscall();
+i64 DoSchedSetattr(u64 pid, u64 attr, u64 flags);
+i64 DoSchedGetattr(u64 pid, u64 attr, u64 size, u64 flags);
+
 } // namespace duetos::subsystems::linux::internal

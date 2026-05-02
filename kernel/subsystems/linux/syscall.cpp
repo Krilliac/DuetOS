@@ -531,11 +531,11 @@ enum : u64
     kSysSendfile = 40,
     kSysEnosys_Getdents = 78,
     kSysCreat = 85,
-    kSysEnosys_RtSigqueueinfo = 129,
+    kSysRtSigqueueinfo = 129,
     kSysEnosys_Uselib = 134,
     kSysEnosys_Ustat = 136,
     kSysEnosys_Sysfs = 139,
-    kSysEnosys_ModifyLdt = 154,
+    kSysModifyLdt = 154,
     kSysEnosys_Sysctl = 156,
     kSysEnosys_CreateModule = 174,
     kSysEnosys_GetKernelSyms = 177,
@@ -546,24 +546,24 @@ enum : u64
     kSysEnosys_AfsSyscall = 183,
     kSysEnosys_Tuxcall = 184,
     kSysEnosys_Security = 185,
-    kSysEnosys_Setxattr = 188,
-    kSysEnosys_Lsetxattr = 189,
-    kSysEnosys_Fsetxattr = 190,
-    kSysEnosys_Getxattr = 191,
-    kSysEnosys_Lgetxattr = 192,
-    kSysEnosys_Fgetxattr = 193,
-    kSysEnosys_Listxattr = 194,
-    kSysEnosys_Llistxattr = 195,
-    kSysEnosys_Flistxattr = 196,
-    kSysEnosys_Removexattr = 197,
-    kSysEnosys_Lremovexattr = 198,
-    kSysEnosys_Fremovexattr = 199,
+    kSysSetxattr = 188,
+    kSysLsetxattr = 189,
+    kSysFsetxattr = 190,
+    kSysGetxattr = 191,
+    kSysLgetxattr = 192,
+    kSysFgetxattr = 193,
+    kSysListxattr = 194,
+    kSysLlistxattr = 195,
+    kSysFlistxattr = 196,
+    kSysRemovexattr = 197,
+    kSysLremovexattr = 198,
+    kSysFremovexattr = 199,
     kSysTkill = 200,
     kSysEnosys_LookupDcookie = 212,
     kSysEnosys_EpollCtlOld = 214,
     kSysEnosys_EpollWaitOld = 215,
     kSysEnosys_RemapFilePages = 216,
-    kSysEnosys_RestartSyscall = 219,
+    kSysRestartSyscall = 219,
     kSysEnosys_TimerCreate = 222,
     kSysEnosys_TimerSettime = 223,
     kSysEnosys_TimerGettime = 224,
@@ -573,19 +573,19 @@ enum : u64
     kSysEnosys_Vserver = 236,
     kSysMknodat = 259,
     kSysReadlinkat = 267,
-    kSysEnosys_Unshare = 272,
+    kSysUnshare = 272,
     kSysSyncFileRange = 277,
     kSysFallocate = 285,
     kSysPreadv = 295,
     kSysPwritev = 296,
     kSysRtTgsigqueueinfo = 297,
-    kSysEnosys_Setns = 308,
-    kSysEnosys_ProcessVmReadv = 310,
-    kSysEnosys_ProcessVmWritev = 311,
-    kSysEnosys_Kcmp = 312,
-    kSysEnosys_SchedSetattr = 314,
-    kSysEnosys_SchedGetattr = 315,
-    kSysEnosys_Seccomp = 317,
+    kSysSetns = 308,
+    kSysProcessVmReadv = 310,
+    kSysProcessVmWritev = 311,
+    kSysKcmp = 312,
+    kSysSchedSetattr = 314,
+    kSysSchedGetattr = 315,
+    kSysSeccomp = 317,
     kSysMembarrier = 324,
     kSysMlock2 = 325,
     kSysPreadv2 = 327,
@@ -1809,17 +1809,85 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         rv = DoSendfile(frame->rdi, frame->rsi, frame->rdx, frame->r10);
         break;
 
+    case kSysSetxattr:
+        rv = DoSetxattr(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysLsetxattr:
+        rv = DoLsetxattr(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysFsetxattr:
+        rv = DoFsetxattr(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysGetxattr:
+        rv = DoGetxattr(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysLgetxattr:
+        rv = DoLgetxattr(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysFgetxattr:
+        rv = DoFgetxattr(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysListxattr:
+        rv = DoListxattr(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysLlistxattr:
+        rv = DoLlistxattr(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysFlistxattr:
+        rv = DoFlistxattr(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysRemovexattr:
+        rv = DoRemovexattr(frame->rdi, frame->rsi);
+        break;
+    case kSysLremovexattr:
+        rv = DoLremovexattr(frame->rdi, frame->rsi);
+        break;
+    case kSysFremovexattr:
+        rv = DoFremovexattr(frame->rdi, frame->rsi);
+        break;
+    case kSysRtSigqueueinfo:
+        rv = DoRtSigqueueinfo(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysUnshare:
+        rv = DoUnshare(frame->rdi);
+        break;
+    case kSysSetns:
+        rv = DoSetns(frame->rdi, frame->rsi);
+        break;
+    case kSysModifyLdt:
+        rv = DoModifyLdt(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysProcessVmReadv:
+        rv = DoProcessVmReadv(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9);
+        break;
+    case kSysProcessVmWritev:
+        rv = DoProcessVmWritev(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9);
+        break;
+    case kSysKcmp:
+        rv = DoKcmp(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysSeccomp:
+        rv = DoSeccomp(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysRestartSyscall:
+        rv = DoRestartSyscall();
+        break;
+    case kSysSchedSetattr:
+        rv = DoSchedSetattr(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysSchedGetattr:
+        rv = DoSchedGetattr(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+
     // ============================================================
     // Linux ABI completeness — explicit -ENOSYS for every spec
     // syscall we don't implement. Keeps the dispatch dense so
     // the gap-fill TU only fires for truly unknown numbers.
     // ============================================================
     case kSysEnosys_Getdents:
-    case kSysEnosys_RtSigqueueinfo:
     case kSysEnosys_Uselib:
     case kSysEnosys_Ustat:
     case kSysEnosys_Sysfs:
-    case kSysEnosys_ModifyLdt:
     case kSysEnosys_Sysctl:
     case kSysEnosys_CreateModule:
     case kSysEnosys_GetKernelSyms:
@@ -1830,37 +1898,16 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
     case kSysEnosys_AfsSyscall:
     case kSysEnosys_Tuxcall:
     case kSysEnosys_Security:
-    case kSysEnosys_Setxattr:
-    case kSysEnosys_Lsetxattr:
-    case kSysEnosys_Fsetxattr:
-    case kSysEnosys_Getxattr:
-    case kSysEnosys_Lgetxattr:
-    case kSysEnosys_Fgetxattr:
-    case kSysEnosys_Listxattr:
-    case kSysEnosys_Llistxattr:
-    case kSysEnosys_Flistxattr:
-    case kSysEnosys_Removexattr:
-    case kSysEnosys_Lremovexattr:
-    case kSysEnosys_Fremovexattr:
     case kSysEnosys_LookupDcookie:
     case kSysEnosys_EpollCtlOld:
     case kSysEnosys_EpollWaitOld:
     case kSysEnosys_RemapFilePages:
-    case kSysEnosys_RestartSyscall:
     case kSysEnosys_TimerCreate:
     case kSysEnosys_TimerSettime:
     case kSysEnosys_TimerGettime:
     case kSysEnosys_TimerGetoverrun:
     case kSysEnosys_TimerDelete:
     case kSysEnosys_Vserver:
-    case kSysEnosys_Unshare:
-    case kSysEnosys_Setns:
-    case kSysEnosys_ProcessVmReadv:
-    case kSysEnosys_ProcessVmWritev:
-    case kSysEnosys_Kcmp:
-    case kSysEnosys_SchedSetattr:
-    case kSysEnosys_SchedGetattr:
-    case kSysEnosys_Seccomp:
     case kSysEnosys_IoPgetevents:
     case kSysEnosys_Rseq:
     case kSysEnosys_QuotactlFd:

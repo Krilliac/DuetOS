@@ -418,4 +418,209 @@ i64 DoSendfile(u64 out_fd, u64 in_fd, u64 user_offset, u64 count)
     return transferred;
 }
 
+// =============================================================
+// Batch 2 — more correct errnos for spec-defined-but-unsupported
+// surfaces. These are NOT -ENOSYS because the API is recognised;
+// we just don't have the underlying mechanism (xattr storage,
+// namespaces, LDT, cross-process VM, ...). Picking the spec's
+// "feature unsupported" errno over -ENOSYS makes glibc and
+// musl take the documented fallback path instead of treating
+// the host as exotic.
+// =============================================================
+
+// xattr family (set/get/list/remove × {/, l, f}). Linux's
+// rule: if the FS doesn't grok extended attributes at all, the
+// kernel returns -EOPNOTSUPP (== -ENOTSUP). Most setxattr-using
+// libraries (libacl, libcap, attr) handle this gracefully.
+i64 DoSetxattr(u64 path, u64 name, u64 value, u64 size, u64 flags)
+{
+    (void)path;
+    (void)name;
+    (void)value;
+    (void)size;
+    (void)flags;
+    return kEOPNOTSUPP;
+}
+i64 DoLsetxattr(u64 path, u64 name, u64 value, u64 size, u64 flags)
+{
+    return DoSetxattr(path, name, value, size, flags);
+}
+i64 DoFsetxattr(u64 fd, u64 name, u64 value, u64 size, u64 flags)
+{
+    (void)fd;
+    return DoSetxattr(0, name, value, size, flags);
+}
+i64 DoGetxattr(u64 path, u64 name, u64 value, u64 size)
+{
+    (void)path;
+    (void)name;
+    (void)value;
+    (void)size;
+    return kEOPNOTSUPP;
+}
+i64 DoLgetxattr(u64 path, u64 name, u64 value, u64 size)
+{
+    return DoGetxattr(path, name, value, size);
+}
+i64 DoFgetxattr(u64 fd, u64 name, u64 value, u64 size)
+{
+    (void)fd;
+    return DoGetxattr(0, name, value, size);
+}
+i64 DoListxattr(u64 path, u64 list, u64 size)
+{
+    (void)path;
+    (void)list;
+    (void)size;
+    return kEOPNOTSUPP;
+}
+i64 DoLlistxattr(u64 path, u64 list, u64 size)
+{
+    return DoListxattr(path, list, size);
+}
+i64 DoFlistxattr(u64 fd, u64 list, u64 size)
+{
+    (void)fd;
+    return DoListxattr(0, list, size);
+}
+i64 DoRemovexattr(u64 path, u64 name)
+{
+    (void)path;
+    (void)name;
+    return kEOPNOTSUPP;
+}
+i64 DoLremovexattr(u64 path, u64 name)
+{
+    return DoRemovexattr(path, name);
+}
+i64 DoFremovexattr(u64 fd, u64 name)
+{
+    (void)fd;
+    return DoRemovexattr(0, name);
+}
+
+// rt_sigqueueinfo(tgid, sig, info) — like rt_tgsigqueueinfo
+// but addresses the whole thread group. Drop info and route
+// to tgkill with tid==tgid (the v0 process model treats them
+// as the same id).
+i64 DoRtSigqueueinfo(u64 tgid, u64 sig, u64 user_info)
+{
+    (void)user_info;
+    return DoTgkill(tgid, tgid, sig);
+}
+
+// unshare(flags) — detach pieces of the calling process's
+// execution context. v0 has no namespaces, so flags=0 is a
+// no-op (zero unshares = nothing to do; succeeds), and any
+// non-zero flags request something we can't deliver.
+i64 DoUnshare(u64 flags)
+{
+    if (flags == 0)
+        return 0;
+    return kEINVAL;
+}
+
+// setns(fd, nstype) — switch a namespace. We have no
+// namespaces; -EINVAL is what Linux returns when the fd isn't
+// a namespace fd, which is always true for us.
+i64 DoSetns(u64 fd, u64 nstype)
+{
+    (void)fd;
+    (void)nstype;
+    return kEINVAL;
+}
+
+// modify_ldt(func, ptr, bytecount) — read/write the LDT for
+// 32-bit segment registers. v0 is 64-bit-only and has no LDT;
+// func==0 (read) returns 0 bytes (empty LDT); other funcs are
+// -ENOSYS.
+i64 DoModifyLdt(u64 func, u64 ptr, u64 bytecount)
+{
+    (void)ptr;
+    (void)bytecount;
+    if (func == 0)
+        return 0; // read of empty LDT
+    return kENOSYS;
+}
+
+// process_vm_readv / process_vm_writev (310/311) — copy iovec
+// data between the calling process and another process's
+// address space. v0 has no cross-process VM peering; -ESRCH
+// is the Linux errno when the target pid doesn't exist or
+// isn't readable, which is always the case for us.
+i64 DoProcessVmReadv(u64 pid, u64 lvec, u64 lcnt, u64 rvec, u64 rcnt, u64 flags)
+{
+    (void)pid;
+    (void)lvec;
+    (void)lcnt;
+    (void)rvec;
+    (void)rcnt;
+    (void)flags;
+    return kESRCH;
+}
+i64 DoProcessVmWritev(u64 pid, u64 lvec, u64 lcnt, u64 rvec, u64 rcnt, u64 flags)
+{
+    return DoProcessVmReadv(pid, lvec, lcnt, rvec, rcnt, flags);
+}
+
+// kcmp(pid1, pid2, type, idx1, idx2) — compare resources
+// between two processes. v0 returns -EPERM (which is what
+// Linux returns when /proc/sys/kernel/yama/ptrace_scope locks
+// it out); a real implementation needs ptrace-equivalent caps
+// we don't model.
+i64 DoKcmp(u64 pid1, u64 pid2, u64 type, u64 idx1, u64 idx2)
+{
+    (void)pid1;
+    (void)pid2;
+    (void)type;
+    (void)idx1;
+    (void)idx2;
+    return kEPERM;
+}
+
+// seccomp(operation, flags, args) — syscall filtering. v0
+// supports only the introspection commands that don't change
+// state: SECCOMP_GET_ACTION_AVAIL (cmd 2) returns 0 to mean
+// "the requested action is available" so glibc's TSan-tries-
+// seccomp dance proceeds without panic. Other commands -EINVAL.
+i64 DoSeccomp(u64 op, u64 flags, u64 args)
+{
+    (void)flags;
+    (void)args;
+    if (op == 2 /*SECCOMP_GET_ACTION_AVAIL*/)
+        return 0;
+    return kEINVAL;
+}
+
+// restart_syscall — internal Linux ABI used by the kernel to
+// resume a syscall after EINTR. Userspace should never call
+// it directly; if they do, we mirror Linux's documented
+// behaviour: -EINTR (caller's syscall was interrupted, we
+// don't have the saved state to restart).
+i64 DoRestartSyscall()
+{
+    return kEINTR;
+}
+
+// sched_setattr(pid, attr, flags) / sched_getattr(pid, attr,
+// size, flags) — extended sched policy/priority queries. v0
+// has a simpler scheduler that doesn't expose deadline /
+// SCHED_DEADLINE attributes; -EINVAL is the proper Linux
+// response when the requested policy isn't supported.
+i64 DoSchedSetattr(u64 pid, u64 attr, u64 flags)
+{
+    (void)pid;
+    (void)attr;
+    (void)flags;
+    return kEINVAL;
+}
+i64 DoSchedGetattr(u64 pid, u64 attr, u64 size, u64 flags)
+{
+    (void)pid;
+    (void)attr;
+    (void)size;
+    (void)flags;
+    return kEINVAL;
+}
+
 } // namespace duetos::subsystems::linux::internal

@@ -6,10 +6,10 @@
 //
 // Source data: tools/linux-compat/linux-syscalls-x86_64.csv
 // Total syscalls listed: 374
-// Primary handlers implemented in kernel/subsystems/linux/syscall.cpp: 215
-// Effective coverage (primary + LinuxGapFill in translation/translate.cpp): 222
-// Coverage (primary): 57%
-// Coverage (effective): 59%
+// Primary handlers implemented in kernel/subsystems/linux/syscall.cpp: 238
+// Effective coverage (primary + LinuxGapFill in translation/translate.cpp): 245
+// Coverage (primary): 63%
+// Coverage (effective): 65%
 //
 // See tools/linux-compat/README.md for provenance.
 
@@ -166,7 +166,7 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {126, 2, HandlerState::Implemented, "capset"},
     {127, 2, HandlerState::Implemented, "rt_sigpending"},
     {128, 4, HandlerState::Implemented, "rt_sigtimedwait"},
-    {129, 3, HandlerState::Unimplemented, "rt_sigqueueinfo"},
+    {129, 3, HandlerState::Implemented, "rt_sigqueueinfo"},
     {130, 2, HandlerState::Implemented, "rt_sigsuspend"},
     {131, 2, HandlerState::Implemented, "sigaltstack"},
     {132, 2, HandlerState::Implemented, "utime"},
@@ -191,7 +191,7 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {151, 1, HandlerState::Implemented, "mlockall"},
     {152, 0, HandlerState::Implemented, "munlockall"},
     {153, 0, HandlerState::Implemented, "vhangup"},
-    {154, 3, HandlerState::Unimplemented, "modify_ldt"},
+    {154, 3, HandlerState::Implemented, "modify_ldt"},
     {155, 2, HandlerState::Unimplemented, "pivot_root"},
     {156, 1, HandlerState::Unimplemented, "_sysctl"},
     {157, 5, HandlerState::Implemented, "prctl"},
@@ -225,18 +225,18 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {185, 0, HandlerState::Unimplemented, "security"},
     {186, 0, HandlerState::Implemented, "gettid"},
     {187, 3, HandlerState::Implemented, "readahead"},
-    {188, 5, HandlerState::Unimplemented, "setxattr"},
-    {189, 5, HandlerState::Unimplemented, "lsetxattr"},
-    {190, 5, HandlerState::Unimplemented, "fsetxattr"},
-    {191, 4, HandlerState::Unimplemented, "getxattr"},
-    {192, 4, HandlerState::Unimplemented, "lgetxattr"},
-    {193, 4, HandlerState::Unimplemented, "fgetxattr"},
-    {194, 3, HandlerState::Unimplemented, "listxattr"},
-    {195, 3, HandlerState::Unimplemented, "llistxattr"},
-    {196, 3, HandlerState::Unimplemented, "flistxattr"},
-    {197, 2, HandlerState::Unimplemented, "removexattr"},
-    {198, 2, HandlerState::Unimplemented, "lremovexattr"},
-    {199, 2, HandlerState::Unimplemented, "fremovexattr"},
+    {188, 5, HandlerState::Implemented, "setxattr"},
+    {189, 5, HandlerState::Implemented, "lsetxattr"},
+    {190, 5, HandlerState::Implemented, "fsetxattr"},
+    {191, 4, HandlerState::Implemented, "getxattr"},
+    {192, 4, HandlerState::Implemented, "lgetxattr"},
+    {193, 4, HandlerState::Implemented, "fgetxattr"},
+    {194, 3, HandlerState::Implemented, "listxattr"},
+    {195, 3, HandlerState::Implemented, "llistxattr"},
+    {196, 3, HandlerState::Implemented, "flistxattr"},
+    {197, 2, HandlerState::Implemented, "removexattr"},
+    {198, 2, HandlerState::Implemented, "lremovexattr"},
+    {199, 2, HandlerState::Implemented, "fremovexattr"},
     {200, 2, HandlerState::Implemented, "tkill"},
     {201, 1, HandlerState::Implemented, "time"},
     {202, 6, HandlerState::Implemented, "futex"},
@@ -256,7 +256,7 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {216, 5, HandlerState::Unimplemented, "remap_file_pages"},
     {217, 3, HandlerState::Implemented, "getdents64"},
     {218, 1, HandlerState::Implemented, "set_tid_address"},
-    {219, 0, HandlerState::Unimplemented, "restart_syscall"},
+    {219, 0, HandlerState::Implemented, "restart_syscall"},
     {220, 4, HandlerState::Unimplemented, "semtimedop"},
     {221, 4, HandlerState::Implemented, "fadvise64"},
     {222, 3, HandlerState::Unimplemented, "timer_create"},
@@ -309,7 +309,7 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {269, 3, HandlerState::Implemented, "faccessat"},
     {270, 6, HandlerState::Implemented, "pselect6"},
     {271, 5, HandlerState::Implemented, "ppoll"},
-    {272, 1, HandlerState::Unimplemented, "unshare"},
+    {272, 1, HandlerState::Implemented, "unshare"},
     {273, 2, HandlerState::Implemented, "set_robust_list"},
     {274, 3, HandlerState::Implemented, "get_robust_list"},
     {275, 6, HandlerState::Unimplemented, "splice"},
@@ -345,16 +345,16 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {305, 2, HandlerState::Implemented, "clock_adjtime"},
     {306, 1, HandlerState::Implemented, "syncfs"},
     {307, 4, HandlerState::Unimplemented, "sendmmsg"},
-    {308, 2, HandlerState::Unimplemented, "setns"},
+    {308, 2, HandlerState::Implemented, "setns"},
     {309, 3, HandlerState::Implemented, "getcpu"},
-    {310, 6, HandlerState::Unimplemented, "process_vm_readv"},
-    {311, 6, HandlerState::Unimplemented, "process_vm_writev"},
-    {312, 5, HandlerState::Unimplemented, "kcmp"},
+    {310, 6, HandlerState::Implemented, "process_vm_readv"},
+    {311, 6, HandlerState::Implemented, "process_vm_writev"},
+    {312, 5, HandlerState::Implemented, "kcmp"},
     {313, 3, HandlerState::Unimplemented, "finit_module"},
-    {314, 3, HandlerState::Unimplemented, "sched_setattr"},
-    {315, 4, HandlerState::Unimplemented, "sched_getattr"},
+    {314, 3, HandlerState::Implemented, "sched_setattr"},
+    {315, 4, HandlerState::Implemented, "sched_getattr"},
     {316, 5, HandlerState::Implemented, "renameat2"},
-    {317, 3, HandlerState::Unimplemented, "seccomp"},
+    {317, 3, HandlerState::Implemented, "seccomp"},
     {318, 3, HandlerState::Implemented, "getrandom"},
     {319, 2, HandlerState::Unimplemented, "memfd_create"},
     {320, 5, HandlerState::Unimplemented, "kexec_file_load"},
@@ -886,9 +886,9 @@ inline constexpr const LinuxSyscallEntry* kLinuxSyscallByNumber[] = {
     &kLinuxSyscalls[373],
 };
 
-inline constexpr u32 kLinuxSyscallHandlersImplemented = 215;
-inline constexpr u32 kLinuxSyscallHandlersImplementedPrimary = 215;
-inline constexpr u32 kLinuxSyscallHandlersImplementedEffective = 222;
+inline constexpr u32 kLinuxSyscallHandlersImplemented = 238;
+inline constexpr u32 kLinuxSyscallHandlersImplementedPrimary = 238;
+inline constexpr u32 kLinuxSyscallHandlersImplementedEffective = 245;
 
 /// Look up `nr` in the dense by-number index. Returns nullptr if unknown.
 inline const LinuxSyscallEntry* LinuxSyscallLookup(u64 nr)
