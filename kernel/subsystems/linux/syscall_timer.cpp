@@ -85,27 +85,51 @@ constexpr u64 kItimerProf = 2;
 // Called by the dispatcher after each syscall returns and
 // before LinuxSignalCheckAndDeliver. If the alarm deadline
 // has been reached, raise SIGALRM (and re-arm if interval
-// timer).
+// timer). Also walks the per-process POSIX timer table and
+// fires each elapsed timer's configured signal.
 void LinuxAlarmCheckAndRaise(::duetos::core::Process* p)
 {
-    if (p == nullptr || p->linux_alarm_deadline_ns == 0)
+    if (p == nullptr)
         return;
     const u64 now = ::duetos::time::MonotonicNs();
-    if (now < p->linux_alarm_deadline_ns)
-        return;
-    // Deadline reached — raise SIGALRM.
-    p->linux_pending_signals |= (1ULL << kSigAlrm);
-    if (p->linux_alarm_interval_ns > 0)
+
+    // ITIMER_REAL slot.
+    if (p->linux_alarm_deadline_ns != 0 && now >= p->linux_alarm_deadline_ns)
     {
-        // Auto-rearm. Round forward by integer multiples of
-        // the interval so we don't re-fire 100 times in a row
-        // for a long-blocked process.
-        u64 missed = (now - p->linux_alarm_deadline_ns) / p->linux_alarm_interval_ns + 1;
-        p->linux_alarm_deadline_ns += missed * p->linux_alarm_interval_ns;
+        p->linux_pending_signals |= (1ULL << kSigAlrm);
+        if (p->linux_alarm_interval_ns > 0)
+        {
+            u64 missed = (now - p->linux_alarm_deadline_ns) / p->linux_alarm_interval_ns + 1;
+            p->linux_alarm_deadline_ns += missed * p->linux_alarm_interval_ns;
+        }
+        else
+        {
+            p->linux_alarm_deadline_ns = 0;
+        }
     }
-    else
+
+    // POSIX per-process timer table.
+    for (u32 i = 0; i < ::duetos::core::Process::kLinuxTimerCap; ++i)
     {
-        p->linux_alarm_deadline_ns = 0;
+        auto& t = p->linux_posix_timers[i];
+        if (!t.in_use || t.deadline_ns == 0 || now < t.deadline_ns)
+            continue;
+        // Fire — OR signal into pending and tick the overrun
+        // counter for every interval the process slept past
+        // the deadline (Linux's "overrun" semantics).
+        const u32 signo = (t.signo == 0) ? static_cast<u32>(kSigAlrm) : t.signo;
+        if (signo < 64)
+            p->linux_pending_signals |= (1ULL << signo);
+        if (t.interval_ns > 0)
+        {
+            const u64 missed = (now - t.deadline_ns) / t.interval_ns + 1;
+            t.overrun += static_cast<u32>(missed > 0xFFFFFFFFu ? 0xFFFFFFFFu : missed);
+            t.deadline_ns += missed * t.interval_ns;
+        }
+        else
+        {
+            t.deadline_ns = 0;
+        }
     }
 }
 
@@ -217,49 +241,203 @@ i64 DoSetitimer(u64 which, u64 user_new, u64 user_old)
 }
 
 // =============================================================
-// POSIX timers (timer_create / timer_settime / ...).
+// POSIX timers (timer_create / timer_settime / ...). Real
+// implementation backed by Process::linux_posix_timers[8].
+// Each timer carries a deadline + interval + signo; the
+// LinuxAlarmCheckAndRaise hook above walks the table on
+// every syscall return and fires elapsed timers.
 // =============================================================
 
-// timer_create needs a per-process timer table to allocate ids
-// from. v0 doesn't have one yet; -ENOSYS is the documented
-// Linux response when CONFIG_POSIX_TIMERS is off, and is what
-// glibc handles by falling back to alarm/setitimer (which we
-// DO implement properly). When per-process timer storage
-// lands, this becomes a real allocation.
-i64 DoTimerCreate(u64 clockid, u64 sevp, u64 user_timerid)
+namespace
 {
-    (void)clockid;
-    (void)sevp;
-    (void)user_timerid;
-    return kENOSYS;
+
+// struct sigevent layout — 64 bytes on 64-bit. We only read
+// sigev_signo (offset 0) and sigev_notify (offset 4); the
+// notify_function / notify_attributes / notify_thread_id
+// fields are advisory (we don't fork a notification thread
+// in v0).
+struct UserSigevent
+{
+    u32 sigev_signo;
+    u32 sigev_notify;
+    u64 sigev_value;
+    u64 _pad[6];
+};
+
+struct UserItimerspec
+{
+    UserTimespec it_interval;
+    UserTimespec it_value;
+};
+
+i32 AllocTimerSlot(::duetos::core::Process* p)
+{
+    for (u32 i = 0; i < ::duetos::core::Process::kLinuxTimerCap; ++i)
+    {
+        if (!p->linux_posix_timers[i].in_use)
+            return static_cast<i32>(i);
+    }
+    return -1;
 }
 
-// timer_settime / timer_gettime / timer_getoverrun / timer_delete:
-// since timer_create returns -ENOSYS, no valid timerid exists;
-// any reference is invalid -> -EINVAL.
+bool ValidTimerId(::duetos::core::Process* p, u64 timerid)
+{
+    return timerid < ::duetos::core::Process::kLinuxTimerCap &&
+           p->linux_posix_timers[timerid].in_use;
+}
+
+} // namespace
+
+// timer_create(clockid, sevp, &timer_id) — allocate a slot,
+// stash the configured signo (default SIGALRM if sevp NULL),
+// hand back the slot index as the timer_id. The timer is
+// disarmed (deadline_ns=0) until timer_settime arms it.
+i64 DoTimerCreate(u64 clockid, u64 sevp, u64 user_timerid)
+{
+    (void)clockid; // We treat all clockids as CLOCK_MONOTONIC for the deadline check.
+    auto* p = ::duetos::core::CurrentProcess();
+    if (p == nullptr)
+        return kEPERM;
+    const i32 slot = AllocTimerSlot(p);
+    if (slot < 0)
+        return kEAGAIN;
+
+    u32 signo = static_cast<u32>(kSigAlrm);
+    if (sevp != 0)
+    {
+        UserSigevent sev = {};
+        if (!mm::CopyFromUser(&sev, reinterpret_cast<const void*>(sevp), sizeof(sev)))
+            return kEFAULT;
+        if (sev.sigev_signo > 0 && sev.sigev_signo < 64)
+            signo = sev.sigev_signo;
+    }
+
+    auto& t = p->linux_posix_timers[slot];
+    t.deadline_ns = 0;
+    t.interval_ns = 0;
+    t.signo = signo;
+    t.overrun = 0;
+    t.in_use = 1;
+
+    if (user_timerid != 0)
+    {
+        const u64 id = static_cast<u64>(slot);
+        if (!mm::CopyToUser(reinterpret_cast<void*>(user_timerid), &id, sizeof(id)))
+        {
+            t.in_use = 0;
+            return kEFAULT;
+        }
+    }
+    return 0;
+}
+
+// timer_settime(timerid, flags, new_value, old_value) — arm /
+// disarm. flags: 0 = relative new_value.it_value, TIMER_ABSTIME
+// (1) = absolute. old_value (if non-NULL) reports prior remaining
+// + interval.
 i64 DoTimerSettime(u64 timerid, u64 flags, u64 user_new, u64 user_old)
 {
-    (void)timerid;
-    (void)flags;
-    (void)user_new;
-    (void)user_old;
-    return kEINVAL;
+    auto* p = ::duetos::core::CurrentProcess();
+    if (p == nullptr || !ValidTimerId(p, timerid))
+        return kEINVAL;
+
+    UserItimerspec new_val = {};
+    if (user_new == 0)
+        return kEFAULT;
+    if (!mm::CopyFromUser(&new_val, reinterpret_cast<const void*>(user_new), sizeof(new_val)))
+        return kEFAULT;
+
+    auto& t = p->linux_posix_timers[timerid];
+    const u64 now = ::duetos::time::MonotonicNs();
+
+    // Capture old state first.
+    if (user_old != 0)
+    {
+        UserItimerspec old_val = {};
+        u64 remaining = 0;
+        if (t.deadline_ns > now)
+            remaining = t.deadline_ns - now;
+        NsToTimevalParts(remaining, old_val.it_value.sec, old_val.it_value.nsec);
+        // Note: it_value.nsec stores nsec already (timespec is sec+nsec, not sec+usec).
+        old_val.it_value.nsec = static_cast<i64>(remaining % kNsPerSec);
+        old_val.it_value.sec = static_cast<i64>(remaining / kNsPerSec);
+        old_val.it_interval.sec = static_cast<i64>(t.interval_ns / kNsPerSec);
+        old_val.it_interval.nsec = static_cast<i64>(t.interval_ns % kNsPerSec);
+        if (!mm::CopyToUser(reinterpret_cast<void*>(user_old), &old_val, sizeof(old_val)))
+            return kEFAULT;
+    }
+
+    const u64 new_value_ns =
+        static_cast<u64>(new_val.it_value.sec) * kNsPerSec + static_cast<u64>(new_val.it_value.nsec);
+    const u64 new_interval_ns =
+        static_cast<u64>(new_val.it_interval.sec) * kNsPerSec + static_cast<u64>(new_val.it_interval.nsec);
+
+    if (new_value_ns == 0)
+    {
+        t.deadline_ns = 0;
+        t.interval_ns = 0;
+    }
+    else
+    {
+        constexpr u64 kTimerAbstime = 1;
+        if ((flags & kTimerAbstime) != 0)
+            t.deadline_ns = new_value_ns; // absolute monotonic time
+        else
+            t.deadline_ns = now + new_value_ns;
+        t.interval_ns = new_interval_ns;
+        t.overrun = 0;
+    }
+    return 0;
 }
+
+// timer_gettime(timerid, curr_value) — read remaining + interval.
 i64 DoTimerGettime(u64 timerid, u64 user_curr)
 {
-    (void)timerid;
-    (void)user_curr;
-    return kEINVAL;
+    auto* p = ::duetos::core::CurrentProcess();
+    if (p == nullptr || !ValidTimerId(p, timerid))
+        return kEINVAL;
+    if (user_curr == 0)
+        return kEFAULT;
+
+    auto& t = p->linux_posix_timers[timerid];
+    const u64 now = ::duetos::time::MonotonicNs();
+    u64 remaining = 0;
+    if (t.deadline_ns > now)
+        remaining = t.deadline_ns - now;
+    UserItimerspec out = {};
+    out.it_value.sec = static_cast<i64>(remaining / kNsPerSec);
+    out.it_value.nsec = static_cast<i64>(remaining % kNsPerSec);
+    out.it_interval.sec = static_cast<i64>(t.interval_ns / kNsPerSec);
+    out.it_interval.nsec = static_cast<i64>(t.interval_ns % kNsPerSec);
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_curr), &out, sizeof(out)))
+        return kEFAULT;
+    return 0;
 }
+
+// timer_getoverrun(timerid) — drain the missed-fires count for
+// the most recent expiration. Linux returns the count and resets
+// the per-timer counter to zero.
 i64 DoTimerGetoverrun(u64 timerid)
 {
-    (void)timerid;
-    return kEINVAL;
+    auto* p = ::duetos::core::CurrentProcess();
+    if (p == nullptr || !ValidTimerId(p, timerid))
+        return kEINVAL;
+    const u32 n = p->linux_posix_timers[timerid].overrun;
+    p->linux_posix_timers[timerid].overrun = 0;
+    return static_cast<i64>(n);
 }
+
+// timer_delete(timerid) — release the slot.
 i64 DoTimerDelete(u64 timerid)
 {
-    (void)timerid;
-    return kEINVAL;
+    auto* p = ::duetos::core::CurrentProcess();
+    if (p == nullptr || !ValidTimerId(p, timerid))
+        return kEINVAL;
+    p->linux_posix_timers[timerid].in_use = 0;
+    p->linux_posix_timers[timerid].deadline_ns = 0;
+    p->linux_posix_timers[timerid].interval_ns = 0;
+    p->linux_posix_timers[timerid].overrun = 0;
+    return 0;
 }
 
 } // namespace duetos::subsystems::linux::internal
