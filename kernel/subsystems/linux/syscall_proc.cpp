@@ -170,7 +170,15 @@ i64 DoKill(u64 pid, u64 sig)
 // is silently a no-op.
 i64 DoGetPpid()
 {
-    return 1;
+    // Linux convention: each process knows its parent pid.
+    // v0 records linux_parent_pid on fork; everyone else
+    // (kernel-spawned smoke processes, init) reports 1
+    // (init's pid) which is the canonical "no real parent"
+    // answer in Linux.
+    const auto* p = core::CurrentProcess();
+    if (p == nullptr)
+        return 1;
+    return (p->linux_parent_pid != 0) ? static_cast<i64>(p->linux_parent_pid) : 1;
 }
 i64 DoGetPgid(u64 pid)
 {
@@ -221,7 +229,13 @@ i64 DoGetpgrp()
 // stand-in.
 i64 DoSetsid()
 {
-    return 0;
+    // Linux: setsid creates a new session with the calling
+    // process as session leader. The new sid IS the caller's
+    // pid. v0 has no real session model so we don't actually
+    // create one, but returning the pid matches what Linux
+    // userspace observes.
+    const auto* p = core::CurrentProcess();
+    return (p != nullptr) ? static_cast<i64>(p->pid) : 0;
 }
 
 // =============================================================
