@@ -6,10 +6,10 @@
 //
 // Source data: tools/linux-compat/linux-syscalls-x86_64.csv
 // Total syscalls listed: 374
-// Primary handlers implemented in kernel/subsystems/linux/syscall.cpp: 238
-// Effective coverage (primary + LinuxGapFill in translation/translate.cpp): 245
-// Coverage (primary): 63%
-// Coverage (effective): 65%
+// Primary handlers implemented in kernel/subsystems/linux/syscall.cpp: 264
+// Effective coverage (primary + LinuxGapFill in translation/translate.cpp): 270
+// Coverage (primary): 70%
+// Coverage (effective): 72%
 //
 // See tools/linux-compat/README.md for provenance.
 
@@ -115,7 +115,7 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {75, 1, HandlerState::Implemented, "fdatasync"},
     {76, 2, HandlerState::Implemented, "truncate"},
     {77, 2, HandlerState::Implemented, "ftruncate"},
-    {78, 3, HandlerState::Unimplemented, "getdents"},
+    {78, 3, HandlerState::Implemented, "getdents"},
     {79, 2, HandlerState::Implemented, "getcwd"},
     {80, 1, HandlerState::Implemented, "chdir"},
     {81, 1, HandlerState::Implemented, "fchdir"},
@@ -171,7 +171,7 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {131, 2, HandlerState::Implemented, "sigaltstack"},
     {132, 2, HandlerState::Implemented, "utime"},
     {133, 3, HandlerState::Implemented, "mknod"},
-    {134, 1, HandlerState::Unimplemented, "uselib"},
+    {134, 1, HandlerState::Implemented, "uselib"},
     {135, 1, HandlerState::Implemented, "personality"},
     {136, 2, HandlerState::Unimplemented, "ustat"},
     {137, 2, HandlerState::Unimplemented, "statfs"},
@@ -251,19 +251,19 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {211, 1, HandlerState::Implemented, "get_thread_area"},
     {212, 3, HandlerState::Unimplemented, "lookup_dcookie"},
     {213, 1, HandlerState::Implemented, "epoll_create"},
-    {214, 0, HandlerState::Unimplemented, "epoll_ctl_old"},
-    {215, 0, HandlerState::Unimplemented, "epoll_wait_old"},
-    {216, 5, HandlerState::Unimplemented, "remap_file_pages"},
+    {214, 0, HandlerState::Implemented, "epoll_ctl_old"},
+    {215, 0, HandlerState::Implemented, "epoll_wait_old"},
+    {216, 5, HandlerState::Implemented, "remap_file_pages"},
     {217, 3, HandlerState::Implemented, "getdents64"},
     {218, 1, HandlerState::Implemented, "set_tid_address"},
     {219, 0, HandlerState::Implemented, "restart_syscall"},
     {220, 4, HandlerState::Unimplemented, "semtimedop"},
     {221, 4, HandlerState::Implemented, "fadvise64"},
-    {222, 3, HandlerState::Unimplemented, "timer_create"},
-    {223, 4, HandlerState::Unimplemented, "timer_settime"},
-    {224, 2, HandlerState::Unimplemented, "timer_gettime"},
-    {225, 1, HandlerState::Unimplemented, "timer_getoverrun"},
-    {226, 1, HandlerState::Unimplemented, "timer_delete"},
+    {222, 3, HandlerState::Implemented, "timer_create"},
+    {223, 4, HandlerState::Implemented, "timer_settime"},
+    {224, 2, HandlerState::Implemented, "timer_gettime"},
+    {225, 1, HandlerState::Implemented, "timer_getoverrun"},
+    {226, 1, HandlerState::Implemented, "timer_delete"},
     {227, 2, HandlerState::Implemented, "clock_settime"},
     {228, 2, HandlerState::Implemented, "clock_gettime"},
     {229, 2, HandlerState::Implemented, "clock_getres"},
@@ -370,8 +370,8 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {330, 2, HandlerState::Unimplemented, "pkey_alloc"},
     {331, 1, HandlerState::Unimplemented, "pkey_free"},
     {332, 5, HandlerState::Unimplemented, "statx"},
-    {333, 6, HandlerState::Unimplemented, "io_pgetevents"},
-    {334, 4, HandlerState::Unimplemented, "rseq"},
+    {333, 6, HandlerState::Implemented, "io_pgetevents"},
+    {334, 4, HandlerState::Implemented, "rseq"},
     {424, 4, HandlerState::Unimplemented, "pidfd_send_signal"},
     {425, 2, HandlerState::Unimplemented, "io_uring_setup"},
     {426, 6, HandlerState::Unimplemented, "io_uring_enter"},
@@ -391,25 +391,25 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {440, 5, HandlerState::Unimplemented, "process_madvise"},
     {441, 6, HandlerState::Implemented, "epoll_pwait2"},
     {442, 5, HandlerState::Unimplemented, "mount_setattr"},
-    {443, 4, HandlerState::Unimplemented, "quotactl_fd"},
+    {443, 4, HandlerState::Implemented, "quotactl_fd"},
     {444, 3, HandlerState::Unimplemented, "landlock_create_ruleset"},
     {445, 4, HandlerState::Unimplemented, "landlock_add_rule"},
     {446, 2, HandlerState::Unimplemented, "landlock_restrict_self"},
-    {447, 1, HandlerState::Unimplemented, "memfd_secret"},
+    {447, 1, HandlerState::Implemented, "memfd_secret"},
     {448, 2, HandlerState::Unimplemented, "process_mrelease"},
-    {449, 5, HandlerState::Unimplemented, "futex_waitv"},
-    {450, 4, HandlerState::Unimplemented, "set_mempolicy_home_node"},
-    {451, 4, HandlerState::Unimplemented, "cachestat"},
+    {449, 5, HandlerState::Implemented, "futex_waitv"},
+    {450, 4, HandlerState::Implemented, "set_mempolicy_home_node"},
+    {451, 4, HandlerState::Implemented, "cachestat"},
     {452, 4, HandlerState::Implemented, "fchmodat2"},
-    {453, 3, HandlerState::Unimplemented, "map_shadow_stack"},
-    {454, 4, HandlerState::Unimplemented, "futex_wake"},
-    {455, 6, HandlerState::Unimplemented, "futex_wait"},
-    {456, 4, HandlerState::Unimplemented, "futex_requeue"},
-    {457, 4, HandlerState::Unimplemented, "statmount"},
-    {458, 4, HandlerState::Unimplemented, "listmount"},
-    {459, 4, HandlerState::Unimplemented, "lsm_get_self_attr"},
-    {460, 4, HandlerState::Unimplemented, "lsm_set_self_attr"},
-    {461, 3, HandlerState::Unimplemented, "lsm_list_modules"},
+    {453, 3, HandlerState::Implemented, "map_shadow_stack"},
+    {454, 4, HandlerState::Implemented, "futex_wake"},
+    {455, 6, HandlerState::Implemented, "futex_wait"},
+    {456, 4, HandlerState::Implemented, "futex_requeue"},
+    {457, 4, HandlerState::Implemented, "statmount"},
+    {458, 4, HandlerState::Implemented, "listmount"},
+    {459, 4, HandlerState::Implemented, "lsm_get_self_attr"},
+    {460, 4, HandlerState::Implemented, "lsm_set_self_attr"},
+    {461, 3, HandlerState::Implemented, "lsm_list_modules"},
     {462, 3, HandlerState::Unimplemented, "mseal"},
 };
 
@@ -886,9 +886,9 @@ inline constexpr const LinuxSyscallEntry* kLinuxSyscallByNumber[] = {
     &kLinuxSyscalls[373],
 };
 
-inline constexpr u32 kLinuxSyscallHandlersImplemented = 238;
-inline constexpr u32 kLinuxSyscallHandlersImplementedPrimary = 238;
-inline constexpr u32 kLinuxSyscallHandlersImplementedEffective = 245;
+inline constexpr u32 kLinuxSyscallHandlersImplemented = 264;
+inline constexpr u32 kLinuxSyscallHandlersImplementedPrimary = 264;
+inline constexpr u32 kLinuxSyscallHandlersImplementedEffective = 270;
 
 /// Look up `nr` in the dense by-number index. Returns nullptr if unknown.
 inline const LinuxSyscallEntry* LinuxSyscallLookup(u64 nr)

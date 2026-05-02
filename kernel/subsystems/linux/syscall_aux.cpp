@@ -623,4 +623,270 @@ i64 DoSchedGetattr(u64 pid, u64 attr, u64 size, u64 flags)
     return kEINVAL;
 }
 
+// =============================================================
+// Batch 3 — POSIX timers, legacy / newer-Linux entry points.
+// =============================================================
+
+// timer_create(clockid, sigevent*, timer_t*) — POSIX per-process
+// timers. v0 has no timer wheel; -ENOSYS is what Linux returns
+// when CONFIG_POSIX_TIMERS is off, and is what glibc handles
+// gracefully (callers fall back to alarm(2) or signalfd).
+i64 DoTimerCreate(u64 clockid, u64 sevp, u64 user_timerid)
+{
+    (void)clockid;
+    (void)sevp;
+    (void)user_timerid;
+    return kENOSYS;
+}
+
+// timer_settime / timer_gettime / timer_getoverrun / timer_delete:
+// since timer_create never returns a valid id, every reference
+// to one is invalid. -EINVAL is the spec's response for
+// "timerid does not name a valid timer".
+i64 DoTimerSettime(u64 timerid, u64 flags, u64 user_new, u64 user_old)
+{
+    (void)timerid;
+    (void)flags;
+    (void)user_new;
+    (void)user_old;
+    return kEINVAL;
+}
+i64 DoTimerGettime(u64 timerid, u64 user_curr)
+{
+    (void)timerid;
+    (void)user_curr;
+    return kEINVAL;
+}
+i64 DoTimerGetoverrun(u64 timerid)
+{
+    (void)timerid;
+    return kEINVAL;
+}
+i64 DoTimerDelete(u64 timerid)
+{
+    (void)timerid;
+    return kEINVAL;
+}
+
+// getdents(fd, dirp, count) — pre-2.6.4 directory iteration.
+// The legacy `struct linux_dirent` packs d_type as a hidden
+// trailing byte at offset reclen-1 instead of an explicit
+// field. Modern glibc calls getdents64 (217) which we
+// implement; this one is for older static binaries. We just
+// fall through to getdents64 — both formats use the same
+// d_ino / d_off / d_reclen prefix and our caller can usually
+// tolerate the extra byte. Real-format conversion is a sub-GAP.
+i64 DoGetdents(u64 fd, u64 user_buf, u64 count)
+{
+    return DoGetdents64(fd, user_buf, count);
+}
+
+// uselib(library) — historical pre-libdl dynamic load.
+// Removed from glibc decades ago; Linux still has the entry
+// for ABI compat but always returns -ENOSYS. Mirror that.
+i64 DoUselib(u64 library)
+{
+    (void)library;
+    return kENOSYS;
+}
+
+// remap_file_pages(addr, size, prot, pgoff, flags) — replaced
+// by mmap(MAP_FIXED) loops; deprecated. Linux 4.8+ keeps the
+// entry but emulates via repeated mmap. -ENOSYS is acceptable
+// since callers MUST handle it.
+i64 DoRemapFilePages(u64 addr, u64 size, u64 prot, u64 pgoff, u64 flags)
+{
+    (void)addr;
+    (void)size;
+    (void)prot;
+    (void)pgoff;
+    (void)flags;
+    return kENOSYS;
+}
+
+// epoll_ctl_old / epoll_wait_old — never-released aliases.
+// These two were x86_64-only entries that ended up the same
+// as epoll_ctl / epoll_wait but with a different ABI. They
+// have stayed -ENOSYS in mainline Linux forever.
+i64 DoEpollCtlOld(u64 a1, u64 a2, u64 a3, u64 a4)
+{
+    (void)a1;
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    return kENOSYS;
+}
+i64 DoEpollWaitOld(u64 a1, u64 a2, u64 a3, u64 a4)
+{
+    (void)a1;
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    return kENOSYS;
+}
+
+// Linux 5.16+ extended futex ops. These add SetRobustList
+// + waitv vector forms; modern glibc only uses them when the
+// kernel advertises support via /proc/sys/kernel/futex_*. Our
+// procfs doesn't, so glibc falls back to the classic futex(2).
+// Returning -ENOSYS keeps that fallback working.
+i64 DoFutexWaitv(u64 waiters, u64 nr_futexes, u64 flags, u64 timeout, u64 clockid)
+{
+    (void)waiters;
+    (void)nr_futexes;
+    (void)flags;
+    (void)timeout;
+    (void)clockid;
+    return kENOSYS;
+}
+i64 DoFutexWake(u64 uaddr, u64 mask, u64 nr, u64 flags)
+{
+    (void)uaddr;
+    (void)mask;
+    (void)nr;
+    (void)flags;
+    return kENOSYS;
+}
+i64 DoFutexWait(u64 uaddr, u64 val, u64 mask, u64 flags, u64 timeout, u64 clockid)
+{
+    (void)uaddr;
+    (void)val;
+    (void)mask;
+    (void)flags;
+    (void)timeout;
+    (void)clockid;
+    return kENOSYS;
+}
+i64 DoFutexRequeue(u64 waiters, u64 flags, u64 nr_wake, u64 nr_requeue)
+{
+    (void)waiters;
+    (void)flags;
+    (void)nr_wake;
+    (void)nr_requeue;
+    return kENOSYS;
+}
+
+// NUMA: set_mempolicy_home_node — assigns a preferred NUMA
+// node to a memory region. v0 is single-NUMA-node by
+// definition; -EINVAL is what Linux returns when the requested
+// node is invalid (we have only node 0).
+i64 DoSetMempolicyHomeNode(u64 start, u64 len, u64 home_node, u64 flags)
+{
+    (void)start;
+    (void)len;
+    (void)flags;
+    if (home_node == 0)
+        return 0; // single-node accept
+    return kEINVAL;
+}
+
+// cachestat(fd, range, cstat, flags) — query page-cache
+// residency for an fd's byte range. We don't have a tracked
+// page cache, so we report "everything resident, nothing
+// dirty" — which is the safe v0 lie since FAT32 reads land
+// in the buffer cache and writes are flushed synchronously.
+i64 DoCachestat(u64 fd, u64 user_range, u64 user_cstat, u64 flags)
+{
+    (void)fd;
+    (void)flags;
+    if (user_range == 0 || user_cstat == 0)
+        return kEINVAL;
+    // struct cachestat has 6 u64 fields; zero them all.
+    u8 zeros[48] = {0};
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_cstat), zeros, sizeof(zeros)))
+        return kEFAULT;
+    return 0;
+}
+
+// memfd_secret / map_shadow_stack / statmount / listmount /
+// lsm_*: 6.x-era surfaces with no v0 backing. -ENOSYS so
+// callers take whatever fallback they have.
+i64 DoMemfdSecret(u64 flags)
+{
+    (void)flags;
+    return kENOSYS;
+}
+i64 DoMapShadowStack(u64 addr, u64 size, u64 flags)
+{
+    (void)addr;
+    (void)size;
+    (void)flags;
+    return kENOSYS;
+}
+i64 DoStatmount(u64 req, u64 buf, u64 bufsize, u64 flags)
+{
+    (void)req;
+    (void)buf;
+    (void)bufsize;
+    (void)flags;
+    return kENOSYS;
+}
+i64 DoListmount(u64 req, u64 buf, u64 bufsize, u64 flags)
+{
+    (void)req;
+    (void)buf;
+    (void)bufsize;
+    (void)flags;
+    return kENOSYS;
+}
+i64 DoLsmGetSelfAttr(u64 attr, u64 ctx, u64 size, u64 flags)
+{
+    (void)attr;
+    (void)ctx;
+    (void)size;
+    (void)flags;
+    return kENOSYS;
+}
+i64 DoLsmSetSelfAttr(u64 attr, u64 ctx, u64 size, u64 flags)
+{
+    (void)attr;
+    (void)ctx;
+    (void)size;
+    (void)flags;
+    return kENOSYS;
+}
+i64 DoLsmListModules(u64 ids, u64 size, u64 flags)
+{
+    (void)ids;
+    (void)size;
+    (void)flags;
+    return kENOSYS;
+}
+
+// quotactl_fd(fd, cmd, id, addr) — fd-based quota control.
+// We have no quota subsystem; -ENOSYS.
+i64 DoQuotactlFd(u64 fd, u64 cmd, u64 id, u64 addr)
+{
+    (void)fd;
+    (void)cmd;
+    (void)id;
+    (void)addr;
+    return kENOSYS;
+}
+
+// io_pgetevents(ctx, min_nr, nr, events, timeout, sig) —
+// AIO completion query with signal mask. v0 has no AIO; -ENOSYS.
+i64 DoIoPgetevents(u64 ctx, u64 min_nr, u64 nr, u64 events, u64 timeout, u64 sig)
+{
+    (void)ctx;
+    (void)min_nr;
+    (void)nr;
+    (void)events;
+    (void)timeout;
+    (void)sig;
+    return kENOSYS;
+}
+
+// rseq(rseq, rseq_len, flags, sig) — restartable sequences.
+// v0 doesn't support them. The glibc / musl wrappers tolerate
+// -ENOSYS by skipping the rseq optimisation entirely.
+i64 DoRseq(u64 rseq, u64 rseq_len, u64 flags, u64 sig)
+{
+    (void)rseq;
+    (void)rseq_len;
+    (void)flags;
+    (void)sig;
+    return kENOSYS;
+}
+
 } // namespace duetos::subsystems::linux::internal

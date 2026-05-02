@@ -621,4 +621,32 @@ i64 DoRestartSyscall();
 i64 DoSchedSetattr(u64 pid, u64 attr, u64 flags);
 i64 DoSchedGetattr(u64 pid, u64 attr, u64 size, u64 flags);
 
+// Auxiliary batch 3 — POSIX timers, legacy / newer-Linux entries.
+i64 DoTimerCreate(u64 clockid, u64 sevp, u64 user_timerid);
+i64 DoTimerSettime(u64 timerid, u64 flags, u64 user_new, u64 user_old);
+i64 DoTimerGettime(u64 timerid, u64 user_curr);
+i64 DoTimerGetoverrun(u64 timerid);
+i64 DoTimerDelete(u64 timerid);
+i64 DoGetdents(u64 fd, u64 user_buf, u64 count);
+i64 DoUselib(u64 library);
+i64 DoRemapFilePages(u64 addr, u64 size, u64 prot, u64 pgoff, u64 flags);
+i64 DoEpollCtlOld(u64 a1, u64 a2, u64 a3, u64 a4);
+i64 DoEpollWaitOld(u64 a1, u64 a2, u64 a3, u64 a4);
+i64 DoFutexWaitv(u64 waiters, u64 nr_futexes, u64 flags, u64 timeout, u64 clockid);
+i64 DoFutexWake(u64 uaddr, u64 mask, u64 nr, u64 flags);
+i64 DoFutexWait(u64 uaddr, u64 val, u64 mask, u64 flags, u64 timeout, u64 clockid);
+i64 DoFutexRequeue(u64 waiters, u64 flags, u64 nr_wake, u64 nr_requeue);
+i64 DoSetMempolicyHomeNode(u64 start, u64 len, u64 home_node, u64 flags);
+i64 DoCachestat(u64 fd, u64 user_range, u64 user_cstat, u64 flags);
+i64 DoMemfdSecret(u64 flags);
+i64 DoMapShadowStack(u64 addr, u64 size, u64 flags);
+i64 DoStatmount(u64 req, u64 buf, u64 bufsize, u64 flags);
+i64 DoListmount(u64 req, u64 buf, u64 bufsize, u64 flags);
+i64 DoLsmGetSelfAttr(u64 attr, u64 ctx, u64 size, u64 flags);
+i64 DoLsmSetSelfAttr(u64 attr, u64 ctx, u64 size, u64 flags);
+i64 DoLsmListModules(u64 ids, u64 size, u64 flags);
+i64 DoQuotactlFd(u64 fd, u64 cmd, u64 id, u64 addr);
+i64 DoIoPgetevents(u64 ctx, u64 min_nr, u64 nr, u64 events, u64 timeout, u64 sig);
+i64 DoRseq(u64 rseq, u64 rseq_len, u64 flags, u64 sig);
+
 } // namespace duetos::subsystems::linux::internal
