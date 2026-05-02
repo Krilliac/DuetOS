@@ -38,6 +38,13 @@ namespace duetos::apps::files
 /// one child was discovered.
 void FilesInit(duetos::drivers::video::WindowHandle handle);
 
+/// Promote the default mode to FAT32 disk view once a volume
+/// becomes available. Called from main.cpp after `Fat32Probe`
+/// succeeds (FilesInit runs before the probe so its own check
+/// always sees `Fat32Volume(0) == nullptr`). No-op if the user
+/// has already switched modes or there is still no volume.
+void FilesPromoteToDisk();
+
 /// Handle of the Files window.
 duetos::drivers::video::WindowHandle FilesWindow();
 

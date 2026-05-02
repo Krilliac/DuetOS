@@ -121,6 +121,7 @@
 #include "apps/notes.h"
 #include "apps/screenshot.h"
 #include "apps/settings.h"
+#include "apps/trash.h"
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
 #include "drivers/video/framebuffer.h"
@@ -386,9 +387,10 @@ void PrintShortcutHelp()
     ConsoleWriteln("    UP / DN           MOVE SELECTION");
     ConsoleWriteln("    ENTER             OPEN (DESCEND DIR / DISPATCH)");
     ConsoleWriteln("    B / BACKSPACE     UP ONE LEVEL (RAM MODE)");
-    ConsoleWriteln("    D / M             SWITCH DISK / RAM VIEW");
-    ConsoleWriteln("    R                 RESCAN DISK ROOT");
-    ConsoleWriteln("    X THEN Y          DELETE SELECTED DISK FILE");
+    ConsoleWriteln("    D / M / T         SWITCH DISK / RAM / TRASH VIEW");
+    ConsoleWriteln("    R                 RESCAN (DISK) / RESTORE (TRASH)");
+    ConsoleWriteln("    X THEN Y          DISK: TO TRASH; TRASH: PERM-DEL");
+    ConsoleWriteln("    E THEN Y          EMPTY TRASH (TRASH VIEW ONLY)");
     ConsoleWriteln("");
     ConsoleWriteln("  IMAGE VIEWER (WHEN ACTIVE)");
     ConsoleWriteln("    N / P / LEFT/RT   NEXT / PREV BMP");
@@ -1990,6 +1992,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // pre-exists on the boot image.
     DUETOS_BOOT_SELFTEST(duetos::apps::notes::NotesPersistSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::apps::screenshot::ScreenshotSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::apps::trash::TrashSelfTest());
+
+    // FAT32 is online. Promote the Files app's default view from
+    // RAM to DISK so the first time a user clicks Start -> FILES
+    // they see what's actually on the volume (notes / screenshots
+    // / logs) rather than the read-only ramfs tree. The user can
+    // still toggle back with M (memory).
+    duetos::apps::files::FilesPromoteToDisk();
 
     // Install the FAT32 file sink — replaces the early tmpfs
     // sink (single-slot API). The tmpfs `/tmp/boot.log`
