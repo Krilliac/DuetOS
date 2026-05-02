@@ -39,8 +39,27 @@ constexpr i64 kSchedIdle = 5;
 i64 DoSchedSetaffinity(u64 pid, u64 cpusetsize, u64 user_mask)
 {
     (void)pid;
-    (void)cpusetsize;
-    (void)user_mask;
+    if (user_mask == 0)
+        return kEFAULT;
+    if (cpusetsize == 0)
+        return kEINVAL;
+    // v0 has a single-CPU scheduler — accept any mask that has
+    // at least one bit set. Read up to 8 bytes (covers 64
+    // CPUs) and verify non-empty.
+    u8 mask[8] = {0};
+    const u64 to_copy = cpusetsize < sizeof(mask) ? cpusetsize : sizeof(mask);
+    if (!mm::CopyFromUser(mask, reinterpret_cast<const void*>(user_mask), to_copy))
+        return kEFAULT;
+    bool any_set = false;
+    for (u32 i = 0; i < to_copy; ++i)
+        if (mask[i] != 0)
+        {
+            any_set = true;
+            break;
+        }
+    if (!any_set)
+        return kEINVAL;
+    // Affinity is advisory in v0 (we don't actually pin to CPU N).
     return 0;
 }
 
