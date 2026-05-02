@@ -193,6 +193,13 @@ i64 DoMkdir(u64 user_path, u64 mode)
     const auto* v = fs::fat32::Fat32Volume(0);
     if (v == nullptr)
         return kENOENT;
+    // Fat32MkdirAtPath returns bool — collapses every failure (path
+    // already exists, parent missing, FS full, etc.) into "false".
+    // Probe with Fat32LookupPath first to distinguish -EEXIST from
+    // -EIO, matching Linux semantics.
+    fs::fat32::DirEntry probe;
+    if (fs::fat32::Fat32LookupPath(v, leaf, &probe))
+        return kEEXIST;
     if (!fs::fat32::Fat32MkdirAtPath(v, leaf))
         return kEIO;
     InotifyPublish(leaf, kInCreate | kInIsDir);
@@ -211,8 +218,18 @@ i64 DoRmdir(u64 user_path)
     const auto* v = fs::fat32::Fat32Volume(0);
     if (v == nullptr)
         return kENOENT;
+    // Same lookup-probe strategy as mkdir to distinguish errnos:
+    //   missing       -> -ENOENT
+    //   not a dir     -> -ENOTDIR
+    //   non-empty / FS error -> -ENOTEMPTY (best-effort —
+    //   Fat32RmdirAtPath collapses both into bool)
+    fs::fat32::DirEntry probe;
+    if (!fs::fat32::Fat32LookupPath(v, leaf, &probe))
+        return kENOENT;
+    if ((probe.attributes & 0x10) == 0)
+        return kENOTDIR;
     if (!fs::fat32::Fat32RmdirAtPath(v, leaf))
-        return kEIO;
+        return kENOTEMPTY;
     InotifyPublish(leaf, kInDelete | kInIsDir);
     return 0;
 }
