@@ -224,6 +224,52 @@ rename/renameat2, copy_file_range, unlink (3 forms),
 unlinkat(AT_REMOVEDIR), sync/syncfs. Honest unprivileged: mknod
 (-EPERM). Facades: link/symlink (-ENOSYS).
 
+## Third-slice findings — synet (kCapNet socket exerciser)
+
+`userland/apps/synet/synet.c` — third Linux-ABI exerciser. Same
+freestanding-ELF pipeline + atomic-line-write convention, but spawned
+with `kCapNet` so socket-family syscalls reach their handler instead
+of bouncing off the dispatch-level kCapNet cap gate. Targets ~20
+socket calls: socket() across the AF/SOCK matrix
+(INET/UNIX/INET6 × STREAM/DGRAM/RAW), bind, listen, getsockname,
+getpeername (unconnected -> -ENOTCONN), sendto,
+recvfrom(MSG_DONTWAIT), setsockopt + getsockopt(SO_REUSEADDR) round-
+trip, shutdown, close, socketpair, sendmsg.
+
+### Bug caught
+
+**`DoRecvfrom` ignored its `flags` argument** (`(void)flags;`) so
+MSG_DONTWAIT (0x40) didn't propagate. Synet's first non-block recv
+HUNG the boot — `SocketRecvDgram` blocks on `read_wq` when
+`udp_count==0`. Fixed by peeking `s->udp_count` before the call:
+return -EAGAIN when MSG_DONTWAIT && empty && !SHUT_RD. For
+SOCK_STREAM, short-circuit non-block when !connected or SHUT_RD;
+the connected-but-no-data path is a sub-GAP until a public
+"stream rx available" probe exists.
+
+### Workflow gap caught (not a code bug)
+
+`connect()` to a port with no listener spins
+`SocketConnect`'s slot-acquire + SYN-retry + handshake-wait loops
+for ~3s total because the v0 TCP active-connect machine has no
+fast-fail "peer never answered" path. Synet skips connect() — the
+kernel's own net-smoke proves the connect path against a real peer.
+This is the "scope of test ≠ scope of API" rule: synet's role is to
+prove the syscall surface is wired, not to re-prove the TCP state
+machine.
+
+### Resulting `[net]` matrix
+
+Real implementations: socket(INET/STREAM,DGRAM), bind, listen,
+getsockname, sendto (returned bytes), recvfrom(MSG_DONTWAIT)
+-> -EAGAIN, setsockopt + getsockopt(SO_REUSEADDR), shutdown, close,
+sendmsg.
+
+Honest unsupported: socket(INET/RAW) -> -EPROTONOSUPPORT(-93);
+socket(UNIX/STREAM) -> -EAFNOSUPPORT(-97); socket(INET6/DGRAM)
+-> -EAFNOSUPPORT(-97); socketpair(UNIX) -> -EOPNOTSUPP(-95);
+getpeername(unconnected) -> -ENOTCONN(-107).
+
 ## Cross-references
 
 - `.claude/knowledge/subsystems-status.md` — top-level Linux ABI inventory
