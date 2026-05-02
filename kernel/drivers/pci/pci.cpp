@@ -651,7 +651,7 @@ void CacheDevice(DeviceAddress addr, u32 vendor_device, u32 class_reg, u32 heade
 {
     if (g_device_count >= kMaxDevices)
     {
-        core::Log(core::LogLevel::Warn, "drivers/pci", "device table full; further devices ignored");
+        KLOG_ONCE_WARN("drivers/pci", "device table full; further devices ignored");
         return;
     }
     Device& d = g_devices[g_device_count++];
@@ -663,6 +663,16 @@ void CacheDevice(DeviceAddress addr, u32 vendor_device, u32 class_reg, u32 heade
     d.subclass = static_cast<u8>((class_reg >> 16) & 0xFF);
     d.class_code = static_cast<u8>((class_reg >> 24) & 0xFF);
     d.header_type = static_cast<u8>((header_reg >> 16) & 0xFF);
+    // Structured per-device log line — gives an analyst a single
+    // grep-able record per discovered device. The verbose dump in
+    // PciEnumerate stays for the human-readable boot log.
+    KLOG_DEBUG_AS(::duetos::core::LogArea::PCI, "drivers/pci", "device discovered", "vendor",
+                  ::duetos::core::PciVendorName(d.vendor_id));
+    KLOG_DEBUG_AV(::duetos::core::LogArea::PCI, "drivers/pci", "  vid:did packed",
+                  (static_cast<u64>(d.vendor_id) << 16) | static_cast<u64>(d.device_id));
+    KLOG_DEBUG_AV(::duetos::core::LogArea::PCI, "drivers/pci", "  class:sub:progif packed",
+                  (static_cast<u64>(d.class_code) << 16) | (static_cast<u64>(d.subclass) << 8) |
+                      static_cast<u64>(d.prog_if));
 }
 
 // Probe a single (bus, device, function). Returns true if a device was
@@ -709,6 +719,8 @@ void EnumerateFunction(u8 bus, u8 dev, u8 fn, u8& highest_bus_seen)
         const u8 secondary = PciConfigRead8(addr, 0x19);
         if (secondary != 0 && secondary != bus)
         {
+            KLOG_INFO_AV(::duetos::core::LogArea::PCI, "drivers/pci", "descending P2P bridge — secondary bus",
+                         static_cast<u64>(secondary));
             arch::SerialWrite("  pci: descending P2P bridge ");
             arch::SerialWriteHex(bus);
             arch::SerialWrite(":");

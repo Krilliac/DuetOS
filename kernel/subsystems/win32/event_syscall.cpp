@@ -23,9 +23,12 @@ constexpr u64 kMsPerTick = 10;
 void DoEventCreate(arch::TrapFrame* frame)
 {
     // rdi = manual_reset, rsi = initial_state.
+    KLOG_TRACE_AV(::duetos::core::LogArea::Win32, "win32/event", "NtCreateEvent ENTRY; manual_reset", frame->rdi);
+    KLOG_TRACE_AV(::duetos::core::LogArea::Win32, "win32/event", "NtCreateEvent ENTRY; initial_state", frame->rsi);
     core::Process* proc = core::CurrentProcess();
     if (proc == nullptr)
     {
+        KLOG_WARN_A(::duetos::core::LogArea::Win32, "win32/event", "NtCreateEvent: no current process");
         frame->rax = static_cast<u64>(-1);
         return;
     }
@@ -55,21 +58,14 @@ void DoEventCreate(arch::TrapFrame* frame)
     e.waiters.tail = nullptr;
     arch::Sti();
     const u64 handle = core::Process::kWin32EventBase + slot;
-    arch::SerialWrite("[sys] event_create ok pid=");
-    arch::SerialWriteHex(proc->pid);
-    arch::SerialWrite(" handle=");
-    arch::SerialWriteHex(handle);
-    arch::SerialWrite(" manual=");
-    arch::SerialWriteHex(e.manual_reset ? 1 : 0);
-    arch::SerialWrite(" signaled=");
-    arch::SerialWriteHex(e.signaled ? 1 : 0);
-    arch::SerialWrite("\n");
+    KLOG_INFO_AV(::duetos::core::LogArea::Win32, "win32/event", "NtCreateEvent OK; handle", handle);
     custom::OnHandleAlloc(proc, handle, static_cast<u32>(core::SYS_EVENT_CREATE), frame->rip);
     frame->rax = handle;
 }
 
 void DoEventSet(arch::TrapFrame* frame)
 {
+    KLOG_TRACE_AV(::duetos::core::LogArea::Win32, "win32/event", "NtSetEvent ENTRY; handle", frame->rdi);
     core::Process* proc = core::CurrentProcess();
     if (proc == nullptr)
     {
@@ -80,11 +76,8 @@ void DoEventSet(arch::TrapFrame* frame)
     if (handle < core::Process::kWin32EventBase ||
         handle >= core::Process::kWin32EventBase + core::Process::kWin32EventCap)
     {
-        arch::SerialWrite("[sys] event_set bad_handle pid=");
-        arch::SerialWriteHex(proc->pid);
-        arch::SerialWrite(" handle=");
-        arch::SerialWriteHex(handle);
-        arch::SerialWrite("\n");
+        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event",
+                     "NtSetEvent: bad handle (out of valid event range); handle", handle);
         frame->rax = static_cast<u64>(-1);
         return;
     }
@@ -93,11 +86,8 @@ void DoEventSet(arch::TrapFrame* frame)
     if (!e.in_use)
     {
         arch::Sti();
-        arch::SerialWrite("[sys] event_set closed_handle pid=");
-        arch::SerialWriteHex(proc->pid);
-        arch::SerialWrite(" handle=");
-        arch::SerialWriteHex(handle);
-        arch::SerialWrite("\n");
+        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event",
+                     "NtSetEvent: closed handle (use-after-NtClose); handle", handle);
         frame->rax = static_cast<u64>(-1);
         return;
     }
@@ -120,6 +110,7 @@ void DoEventSet(arch::TrapFrame* frame)
 
 void DoEventReset(arch::TrapFrame* frame)
 {
+    KLOG_TRACE_AV(::duetos::core::LogArea::Win32, "win32/event", "NtResetEvent ENTRY; handle", frame->rdi);
     core::Process* proc = core::CurrentProcess();
     if (proc == nullptr)
     {
@@ -130,11 +121,7 @@ void DoEventReset(arch::TrapFrame* frame)
     if (handle < core::Process::kWin32EventBase ||
         handle >= core::Process::kWin32EventBase + core::Process::kWin32EventCap)
     {
-        arch::SerialWrite("[sys] event_reset bad_handle pid=");
-        arch::SerialWriteHex(proc->pid);
-        arch::SerialWrite(" handle=");
-        arch::SerialWriteHex(handle);
-        arch::SerialWrite("\n");
+        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event", "NtResetEvent: bad handle; handle", handle);
         frame->rax = static_cast<u64>(-1);
         return;
     }
@@ -146,17 +133,16 @@ void DoEventReset(arch::TrapFrame* frame)
     arch::Sti();
     if (!was_in_use)
     {
-        arch::SerialWrite("[sys] event_reset closed_handle pid=");
-        arch::SerialWriteHex(proc->pid);
-        arch::SerialWrite(" handle=");
-        arch::SerialWriteHex(handle);
-        arch::SerialWrite("\n");
+        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event", "NtResetEvent: closed handle; handle", handle);
     }
     frame->rax = was_in_use ? 0 : static_cast<u64>(-1);
 }
 
 void DoEventWait(arch::TrapFrame* frame)
 {
+    KLOG_TRACE_AV(::duetos::core::LogArea::Win32, "win32/event", "NtWaitForSingleObject(event) ENTRY; handle",
+                  frame->rdi);
+    KLOG_TRACE_AV(::duetos::core::LogArea::Win32, "win32/event", "  timeout_ms", frame->rsi & 0xFFFFFFFFu);
     core::Process* proc = core::CurrentProcess();
     if (proc == nullptr)
     {
@@ -167,11 +153,8 @@ void DoEventWait(arch::TrapFrame* frame)
     if (handle < core::Process::kWin32EventBase ||
         handle >= core::Process::kWin32EventBase + core::Process::kWin32EventCap)
     {
-        arch::SerialWrite("[sys] event_wait bad_handle pid=");
-        arch::SerialWriteHex(proc->pid);
-        arch::SerialWrite(" handle=");
-        arch::SerialWriteHex(handle);
-        arch::SerialWrite("\n");
+        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event", "NtWaitForSingleObject: bad event handle; handle",
+                     handle);
         frame->rax = static_cast<u64>(-1);
         return;
     }
@@ -180,11 +163,8 @@ void DoEventWait(arch::TrapFrame* frame)
     if (!e.in_use)
     {
         arch::Sti();
-        arch::SerialWrite("[sys] event_wait closed_handle pid=");
-        arch::SerialWriteHex(proc->pid);
-        arch::SerialWrite(" handle=");
-        arch::SerialWriteHex(handle);
-        arch::SerialWrite("\n");
+        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event",
+                     "NtWaitForSingleObject: closed event handle; handle", handle);
         frame->rax = static_cast<u64>(-1);
         return;
     }
