@@ -19,7 +19,6 @@
 
 #include "sync/rwlock.h"
 
-#include "arch/x86_64/serial.h"
 #include "core/panic.h"
 #include "log/klog.h"
 #include "sched/sched.h"
@@ -53,6 +52,7 @@ void RwLockReleaseShared(RwLock& lock)
         // pretending to honour it would underflow `active_readers`
         // and cement the bug into the lock's state.
         sched::MutexUnlock(&lock.inner);
+        KLOG_ERROR_V("sync/rwlock", "ReleaseShared on lock with 0 readers; lock=", reinterpret_cast<u64>(&lock));
         core::DebugPanicOrWarn("sync/rwlock", "RwLockReleaseShared on lock with no readers");
         return;
     }
@@ -89,6 +89,7 @@ void RwLockReleaseExclusive(RwLock& lock)
         // the inner mutex and refuse the release in a release
         // build rather than corrupt the writer-flag.
         sched::MutexUnlock(&lock.inner);
+        KLOG_ERROR_V("sync/rwlock", "ReleaseExclusive on lock with no writer; lock=", reinterpret_cast<u64>(&lock));
         core::DebugPanicOrWarn("sync/rwlock", "RwLockReleaseExclusive on lock with no writer");
         return;
     }
@@ -158,7 +159,8 @@ namespace
 
 void RwLockSelfTest()
 {
-    arch::SerialWrite("[sync] rwlock self-test: state-machine paths\n");
+    KLOG_TRACE_SCOPE("sync/rwlock", "RwLockSelfTest");
+    KLOG_INFO("sync/rwlock", "self-test: state-machine paths");
 
     RwLock lock{};
 
@@ -240,7 +242,7 @@ void RwLockSelfTest()
         PanicRw("counters not zero at end of self-test");
     }
 
-    arch::SerialWrite("[sync] rwlock self-test OK (free/shared/exclusive transitions verified).\n");
+    KLOG_INFO("sync/rwlock", "self-test OK (free/shared/exclusive transitions verified)");
 }
 
 namespace
@@ -308,7 +310,8 @@ bool WaitForCount(volatile u32& counter, u32 target)
 
 void RwLockContentionSelfTest()
 {
-    arch::SerialWrite("[sync] rwlock contention self-test: blocking + wakeup paths\n");
+    KLOG_TRACE_SCOPE("sync/rwlock", "RwLockContentionSelfTest");
+    KLOG_INFO("sync/rwlock", "contention self-test: blocking + wakeup paths");
 
     // Reset shared state — the static is reused across the two
     // sub-tests below so resetting between scenarios keeps the
@@ -378,7 +381,7 @@ void RwLockContentionSelfTest()
         core::Panic("sync/rwlock", "contention test: lock not free at end");
     }
 
-    arch::SerialWrite("[sync] rwlock contention self-test OK (blocking + wakeup paths verified).\n");
+    KLOG_INFO("sync/rwlock", "contention self-test OK (blocking + wakeup paths verified)");
 }
 
 } // namespace duetos::sync

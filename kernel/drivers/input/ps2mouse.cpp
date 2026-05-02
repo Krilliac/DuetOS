@@ -268,6 +268,9 @@ void PushPacket(const MousePacket& p)
 {
     if (g_ring_head - g_ring_tail >= kRingSize)
     {
+        // Once-warn: dropping mouse packets means the consumer (the
+        // window manager) is not draining fast enough.
+        KLOG_ONCE_WARN("drivers/ps2mouse", "mouse packet ring full — discarding OLDEST (consumer too slow)");
         ++g_ring_tail; // drop oldest — same policy as the keyboard ring
         ++g_bytes_dropped;
     }
@@ -305,6 +308,11 @@ void IrqHandler()
         // resync by discarding bytes until we see a valid byte 0.
         if (g_packet_cursor == 0 && (byte & (1U << 3)) == 0)
         {
+            // Out-of-phase byte 0: surfaces firmware/IRQ-routing
+            // bugs, since a healthy stream never desyncs after the
+            // initial reset+enable. Once-warn keeps the IRQ path
+            // quiet under sustained miswire.
+            KLOG_ONCE_WARN("drivers/ps2mouse", "first-packet-byte missing sync bit (3) — resyncing stream");
             ++g_bytes_dropped;
             continue;
         }

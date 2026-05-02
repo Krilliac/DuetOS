@@ -5,6 +5,7 @@
 
 #include "subsystems/win32/section.h"
 
+#include "log/klog.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
 #include "mm/kheap.h"
@@ -71,10 +72,13 @@ u64 ProtectToPteFlags(u32 win32_protect)
         // hollowing tests can use NtProtectVirtualMemory
         // to flip pages to RX in a separate step (when that
         // syscall lands).
+        KLOG_ONCE_WARN("subsystems/win32/section", "PAGE_EXECUTE_READWRITE refused (W^X) — downgraded to RW+NX");
         flags |= mm::kPageWritable | mm::kPageNoExecute;
         break;
     default:
         // Unknown protection — treat as RW.
+        KLOG_WARN_V("subsystems/win32/section", "unknown PAGE_* protect, treating as RW",
+                    static_cast<u64>(win32_protect));
         flags |= mm::kPageWritable | mm::kPageNoExecute;
         break;
     }
@@ -86,7 +90,10 @@ u64 ProtectToPteFlags(u32 win32_protect)
 i32 SectionCreate(u64 size_bytes, u32 page_protect)
 {
     if (size_bytes == 0 || size_bytes > kSectionMaxBytes)
+    {
+        KLOG_WARN_V("subsystems/win32/section", "SectionCreate: size_bytes out of range, size_bytes=", size_bytes);
         return -1;
+    }
     const u64 aligned = PageUp(size_bytes);
     const u32 num_pages = static_cast<u32>(aligned / mm::kPageSize);
 
@@ -100,12 +107,20 @@ i32 SectionCreate(u64 size_bytes, u32 page_protect)
         }
     }
     if (idx == kSectionPoolCap)
+    {
+        KLOG_ERROR_V("subsystems/win32/section", "SectionCreate: pool exhausted, capacity",
+                     static_cast<u64>(kSectionPoolCap));
         return -1;
+    }
 
     Section& s = g_pool[idx];
     s.frames = static_cast<mm::PhysAddr*>(mm::KMalloc(sizeof(mm::PhysAddr) * num_pages));
     if (s.frames == nullptr)
+    {
+        KLOG_ERROR_V("subsystems/win32/section", "SectionCreate: KMalloc for frames table failed (OOM); pages",
+                     static_cast<u64>(num_pages));
         return -1;
+    }
     for (u32 i = 0; i < num_pages; ++i)
         s.frames[i] = mm::kNullFrame;
     for (u32 i = 0; i < num_pages; ++i)
@@ -114,6 +129,8 @@ i32 SectionCreate(u64 size_bytes, u32 page_protect)
         if (f == mm::kNullFrame)
         {
             // OOM mid-creation — roll back.
+            KLOG_ERROR_2V("subsystems/win32/section", "SectionCreate: AllocateFrame OOM mid-creation — rolling back",
+                          "page_index", static_cast<u64>(i), "of", static_cast<u64>(num_pages));
             for (u32 j = 0; j < i; ++j)
                 mm::FreeFrame(s.frames[j]);
             mm::KFree(s.frames);
@@ -167,10 +184,17 @@ void SectionRelease(u32 idx)
 bool SectionMap(u32 idx, mm::AddressSpace* target_as, u64 base_va, u32 view_protect)
 {
     if (idx >= kSectionPoolCap || target_as == nullptr || (base_va & 0xFFF) != 0)
+    {
+        KLOG_WARN_V("subsystems/win32/section",
+                    "SectionMap: bad args (idx oor / null AS / unaligned VA); base_va=", base_va);
         return false;
+    }
     Section& s = g_pool[idx];
     if (!s.in_use)
+    {
+        KLOG_WARN_V("subsystems/win32/section", "SectionMap: idx not in use, idx=", static_cast<u64>(idx));
         return false;
+    }
     const u64 flags = ProtectToPteFlags(view_protect);
     for (u32 i = 0; i < s.num_pages; ++i)
     {
@@ -179,6 +203,8 @@ bool SectionMap(u32 idx, mm::AddressSpace* target_as, u64 base_va, u32 view_prot
         {
             // PTE conflict — roll back the partial map so the AS
             // doesn't end up with a half-installed view.
+            KLOG_ERROR_2V("subsystems/win32/section", "SectionMap: MapBorrowedPage PTE conflict — rolling back partial",
+                          "page", static_cast<u64>(i), "va", va);
             for (u32 j = 0; j < i; ++j)
             {
                 mm::AddressSpaceUnmapBorrowedPage(target_as, base_va + static_cast<u64>(j) * mm::kPageSize);
