@@ -3626,6 +3626,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         // ~50s of guest time at the runner's ~12:1 wall:guest ratio,
         // so they stay gated on profile=None bare metal.
         duetos::subsystems::linux::SpawnSynxTestElf();
+        // synfs is synxtest's sister with kCapFsRead + kCapFsWrite —
+        // every FS-mutation syscall (mkdir/rmdir/rename/chmod/
+        // truncate/unlink/copy_file_range/...) actually reaches the
+        // kernel handler. Same `bounded, prints rc per call` shape so
+        // it's safe under TCG.
+        duetos::subsystems::linux::SpawnSynfsElf();
 
         if (duetos::test::SmokeProfileGet() == duetos::test::SmokeProfile::None)
         {

@@ -28,6 +28,7 @@
 #include "core/panic.h"
 #include "proc/process.h"
 #include "proc/ring3_smoke.h"
+#include "generated_synfs_elf.h"
 #include "generated_synxtest_elf.h"
 #include "cpu/percpu.h"
 #include "fs/ramfs.h"
@@ -802,6 +803,30 @@ void SpawnSynxTestElf()
     else
     {
         arch::SerialWrite("[linux] queued synxtest: compiled-C Linux-ABI exerciser, expect [exe] lines\n");
+    }
+}
+
+void SpawnSynfsElf()
+{
+    KLOG_TRACE_SCOPE("linux/smoke", "SpawnSynfsElf");
+
+    // FS-mutation Linux-ABI exerciser. Same pattern as synxtest but
+    // with kCapFsRead + kCapFsWrite so mkdir/rmdir/rename/chmod/etc.
+    // actually reach the kernel handler (synxtest is caps=<none>).
+    // Boot log surfaces `[fs] <name> rc=<rc>` per call.
+    core::CapSet caps = core::CapSetEmpty();
+    core::CapSetAdd(caps, core::kCapFsRead);
+    core::CapSetAdd(caps, core::kCapFsWrite);
+    const u64 pid = core::SpawnElfLinux("synfs", fs::generated::kBinSynfsElfBytes,
+                                        fs::generated::kBinSynfsElfBytes_len, caps,
+                                        fs::RamfsSandboxRoot(), /*frame_budget=*/32, core::kTickBudgetSandbox);
+    if (pid == 0)
+    {
+        arch::SerialWrite("[linux] SpawnElfLinux FAILED for synfs\n");
+    }
+    else
+    {
+        arch::SerialWrite("[linux] queued synfs: FS-mutation exerciser, expect [fs] lines\n");
     }
 }
 

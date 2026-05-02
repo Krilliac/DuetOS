@@ -56,6 +56,13 @@ void SpawnRing3LinuxMmapSmoke();
 /// kernel/CMakeLists.txt + tools/build/build-synxtest.sh).
 void SpawnSynxTestElf();
 
+/// Sister of SpawnSynxTestElf — spawns userland/apps/synfs/synfs.c
+/// with kCapFsRead + kCapFsWrite. Targets FS-mutation syscalls
+/// (mkdir/rmdir/rename/chmod/truncate/unlink/copy_file_range/...)
+/// so each one actually reaches the filesystem instead of bouncing
+/// off the sandbox cap gate the way synxtest's calls do.
+void SpawnSynfsElf();
+
 /// Exercises the ABI translation unit. Issues one syscall that
 /// the TU fills with a no-op (sys_madvise) and one it declines
 /// with a deliberate -ENOSYS (sys_rseq), then exits. Expected
