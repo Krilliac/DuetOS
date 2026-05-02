@@ -525,12 +525,12 @@ enum : u64
     // Auto-derived from tools/linux-compat/linux-syscalls-x86_64.csv
     // — see tools/linux-compat/README.md for the regen workflow.
     // ============================================================
-    kSysEnosys_Getitimer = 36,
-    kSysEnosys_Alarm = 37,
-    kSysEnosys_Setitimer = 38,
-    kSysEnosys_Sendfile = 40,
+    kSysGetitimer = 36,
+    kSysAlarm = 37,
+    kSysSetitimer = 38,
+    kSysSendfile = 40,
     kSysEnosys_Getdents = 78,
-    kSysEnosys_Creat = 85,
+    kSysCreat = 85,
     kSysEnosys_RtSigqueueinfo = 129,
     kSysEnosys_Uselib = 134,
     kSysEnosys_Ustat = 136,
@@ -558,7 +558,7 @@ enum : u64
     kSysEnosys_Removexattr = 197,
     kSysEnosys_Lremovexattr = 198,
     kSysEnosys_Fremovexattr = 199,
-    kSysEnosys_Tkill = 200,
+    kSysTkill = 200,
     kSysEnosys_LookupDcookie = 212,
     kSysEnosys_EpollCtlOld = 214,
     kSysEnosys_EpollWaitOld = 215,
@@ -569,16 +569,16 @@ enum : u64
     kSysEnosys_TimerGettime = 224,
     kSysEnosys_TimerGetoverrun = 225,
     kSysEnosys_TimerDelete = 226,
-    kSysEnosys_Utimes = 235,
+    kSysUtimes = 235,
     kSysEnosys_Vserver = 236,
-    kSysEnosys_Mknodat = 259,
-    kSysEnosys_Readlinkat = 267,
+    kSysMknodat = 259,
+    kSysReadlinkat = 267,
     kSysEnosys_Unshare = 272,
-    kSysEnosys_SyncFileRange = 277,
-    kSysEnosys_Fallocate = 285,
-    kSysEnosys_Preadv = 295,
-    kSysEnosys_Pwritev = 296,
-    kSysEnosys_RtTgsigqueueinfo = 297,
+    kSysSyncFileRange = 277,
+    kSysFallocate = 285,
+    kSysPreadv = 295,
+    kSysPwritev = 296,
+    kSysRtTgsigqueueinfo = 297,
     kSysEnosys_Setns = 308,
     kSysEnosys_ProcessVmReadv = 310,
     kSysEnosys_ProcessVmWritev = 311,
@@ -586,20 +586,20 @@ enum : u64
     kSysEnosys_SchedSetattr = 314,
     kSysEnosys_SchedGetattr = 315,
     kSysEnosys_Seccomp = 317,
-    kSysEnosys_Membarrier = 324,
-    kSysEnosys_Mlock2 = 325,
-    kSysEnosys_Preadv2 = 327,
-    kSysEnosys_Pwritev2 = 328,
+    kSysMembarrier = 324,
+    kSysMlock2 = 325,
+    kSysPreadv2 = 327,
+    kSysPwritev2 = 328,
     kSysEnosys_IoPgetevents = 333,
     kSysEnosys_Rseq = 334,
-    kSysEnosys_Openat2 = 437,
-    kSysEnosys_EpollPwait2 = 441,
+    kSysOpenat2 = 437,
+    kSysEpollPwait2 = 441,
     kSysEnosys_QuotactlFd = 443,
     kSysEnosys_MemfdSecret = 447,
     kSysEnosys_FutexWaitv = 449,
     kSysEnosys_SetMempolicyHomeNode = 450,
     kSysEnosys_Cachestat = 451,
-    kSysEnosys_Fchmodat2 = 452,
+    kSysFchmodat2 = 452,
     kSysEnosys_MapShadowStack = 453,
     kSysEnosys_FutexWake = 454,
     kSysEnosys_FutexWait = 455,
@@ -1742,16 +1742,79 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         break;
 
     // ============================================================
+    // Auxiliary handlers (syscall_aux.cpp) — route-through and
+    // trivial-but-correct stubs that fill out the spec surface.
+    // ============================================================
+    case kSysTkill:
+        rv = DoTkill(frame->rdi, frame->rsi);
+        break;
+    case kSysMknodat:
+        rv = DoMknodat(static_cast<i64>(frame->rdi), frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysReadlinkat:
+        rv = DoReadlinkat(static_cast<i64>(frame->rdi), frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysUtimes:
+        rv = DoUtimes(frame->rdi, frame->rsi);
+        break;
+    case kSysRtTgsigqueueinfo:
+        rv = DoRtTgsigqueueinfo(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysCreat:
+        rv = DoCreat(frame->rdi, frame->rsi);
+        break;
+    case kSysPreadv:
+        rv = DoPreadv(frame->rdi, frame->rsi, frame->rdx, static_cast<i64>(frame->r10));
+        break;
+    case kSysPwritev:
+        rv = DoPwritev(frame->rdi, frame->rsi, frame->rdx, static_cast<i64>(frame->r10));
+        break;
+    case kSysPreadv2:
+        rv = DoPreadv2(frame->rdi, frame->rsi, frame->rdx, static_cast<i64>(frame->r10), frame->r9);
+        break;
+    case kSysPwritev2:
+        rv = DoPwritev2(frame->rdi, frame->rsi, frame->rdx, static_cast<i64>(frame->r10), frame->r9);
+        break;
+    case kSysAlarm:
+        rv = DoAlarm(frame->rdi);
+        break;
+    case kSysGetitimer:
+        rv = DoGetitimer(frame->rdi, frame->rsi);
+        break;
+    case kSysSetitimer:
+        rv = DoSetitimer(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysMembarrier:
+        rv = DoMembarrier(frame->rdi, frame->rsi);
+        break;
+    case kSysMlock2:
+        rv = DoMlock2(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysFallocate:
+        rv = DoFallocate(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysSyncFileRange:
+        rv = DoSyncFileRange(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysFchmodat2:
+        rv = DoFchmodat2(static_cast<i64>(frame->rdi), frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysOpenat2:
+        rv = DoOpenat2(static_cast<i64>(frame->rdi), frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysEpollPwait2:
+        rv = DoEpollPwait2(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9);
+        break;
+    case kSysSendfile:
+        rv = DoSendfile(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+
+    // ============================================================
     // Linux ABI completeness — explicit -ENOSYS for every spec
     // syscall we don't implement. Keeps the dispatch dense so
     // the gap-fill TU only fires for truly unknown numbers.
     // ============================================================
-    case kSysEnosys_Getitimer:
-    case kSysEnosys_Alarm:
-    case kSysEnosys_Setitimer:
-    case kSysEnosys_Sendfile:
     case kSysEnosys_Getdents:
-    case kSysEnosys_Creat:
     case kSysEnosys_RtSigqueueinfo:
     case kSysEnosys_Uselib:
     case kSysEnosys_Ustat:
@@ -1779,7 +1842,6 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
     case kSysEnosys_Removexattr:
     case kSysEnosys_Lremovexattr:
     case kSysEnosys_Fremovexattr:
-    case kSysEnosys_Tkill:
     case kSysEnosys_LookupDcookie:
     case kSysEnosys_EpollCtlOld:
     case kSysEnosys_EpollWaitOld:
@@ -1790,16 +1852,8 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
     case kSysEnosys_TimerGettime:
     case kSysEnosys_TimerGetoverrun:
     case kSysEnosys_TimerDelete:
-    case kSysEnosys_Utimes:
     case kSysEnosys_Vserver:
-    case kSysEnosys_Mknodat:
-    case kSysEnosys_Readlinkat:
     case kSysEnosys_Unshare:
-    case kSysEnosys_SyncFileRange:
-    case kSysEnosys_Fallocate:
-    case kSysEnosys_Preadv:
-    case kSysEnosys_Pwritev:
-    case kSysEnosys_RtTgsigqueueinfo:
     case kSysEnosys_Setns:
     case kSysEnosys_ProcessVmReadv:
     case kSysEnosys_ProcessVmWritev:
@@ -1807,20 +1861,13 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
     case kSysEnosys_SchedSetattr:
     case kSysEnosys_SchedGetattr:
     case kSysEnosys_Seccomp:
-    case kSysEnosys_Membarrier:
-    case kSysEnosys_Mlock2:
-    case kSysEnosys_Preadv2:
-    case kSysEnosys_Pwritev2:
     case kSysEnosys_IoPgetevents:
     case kSysEnosys_Rseq:
-    case kSysEnosys_Openat2:
-    case kSysEnosys_EpollPwait2:
     case kSysEnosys_QuotactlFd:
     case kSysEnosys_MemfdSecret:
     case kSysEnosys_FutexWaitv:
     case kSysEnosys_SetMempolicyHomeNode:
     case kSysEnosys_Cachestat:
-    case kSysEnosys_Fchmodat2:
     case kSysEnosys_MapShadowStack:
     case kSysEnosys_FutexWake:
     case kSysEnosys_FutexWait:

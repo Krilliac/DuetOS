@@ -6,10 +6,10 @@
 //
 // Source data: tools/linux-compat/linux-syscalls-x86_64.csv
 // Total syscalls listed: 374
-// Primary handlers implemented in kernel/subsystems/linux/syscall.cpp: 194
-// Effective coverage (primary + LinuxGapFill in translation/translate.cpp): 201
-// Coverage (primary): 51%
-// Coverage (effective): 53%
+// Primary handlers implemented in kernel/subsystems/linux/syscall.cpp: 215
+// Effective coverage (primary + LinuxGapFill in translation/translate.cpp): 222
+// Coverage (primary): 57%
+// Coverage (effective): 59%
 //
 // See tools/linux-compat/README.md for provenance.
 
@@ -73,11 +73,11 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {33, 2, HandlerState::Implemented, "dup2"},
     {34, 0, HandlerState::Implemented, "pause"},
     {35, 2, HandlerState::Implemented, "nanosleep"},
-    {36, 2, HandlerState::Unimplemented, "getitimer"},
-    {37, 1, HandlerState::Unimplemented, "alarm"},
-    {38, 3, HandlerState::Unimplemented, "setitimer"},
+    {36, 2, HandlerState::Implemented, "getitimer"},
+    {37, 1, HandlerState::Implemented, "alarm"},
+    {38, 3, HandlerState::Implemented, "setitimer"},
     {39, 0, HandlerState::Implemented, "getpid"},
-    {40, 4, HandlerState::Unimplemented, "sendfile"},
+    {40, 4, HandlerState::Implemented, "sendfile"},
     {41, 3, HandlerState::Implemented, "socket"},
     {42, 3, HandlerState::Implemented, "connect"},
     {43, 3, HandlerState::Implemented, "accept"},
@@ -122,7 +122,7 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {82, 2, HandlerState::Implemented, "rename"},
     {83, 2, HandlerState::Implemented, "mkdir"},
     {84, 1, HandlerState::Implemented, "rmdir"},
-    {85, 2, HandlerState::Unimplemented, "creat"},
+    {85, 2, HandlerState::Implemented, "creat"},
     {86, 2, HandlerState::Implemented, "link"},
     {87, 1, HandlerState::Implemented, "unlink"},
     {88, 2, HandlerState::Implemented, "symlink"},
@@ -237,7 +237,7 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {197, 2, HandlerState::Unimplemented, "removexattr"},
     {198, 2, HandlerState::Unimplemented, "lremovexattr"},
     {199, 2, HandlerState::Unimplemented, "fremovexattr"},
-    {200, 2, HandlerState::Unimplemented, "tkill"},
+    {200, 2, HandlerState::Implemented, "tkill"},
     {201, 1, HandlerState::Implemented, "time"},
     {202, 6, HandlerState::Implemented, "futex"},
     {203, 3, HandlerState::Implemented, "sched_setaffinity"},
@@ -272,7 +272,7 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {232, 4, HandlerState::Implemented, "epoll_wait"},
     {233, 4, HandlerState::Implemented, "epoll_ctl"},
     {234, 3, HandlerState::Implemented, "tgkill"},
-    {235, 2, HandlerState::Unimplemented, "utimes"},
+    {235, 2, HandlerState::Implemented, "utimes"},
     {236, 0, HandlerState::Unimplemented, "vserver"},
     {237, 6, HandlerState::Unimplemented, "mbind"},
     {238, 3, HandlerState::Unimplemented, "set_mempolicy"},
@@ -296,7 +296,7 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {256, 4, HandlerState::Unimplemented, "migrate_pages"},
     {257, 4, HandlerState::Implemented, "openat"},
     {258, 3, HandlerState::Implemented, "mkdirat"},
-    {259, 4, HandlerState::Unimplemented, "mknodat"},
+    {259, 4, HandlerState::Implemented, "mknodat"},
     {260, 5, HandlerState::Implemented, "fchownat"},
     {261, 3, HandlerState::Implemented, "futimesat"},
     {262, 4, HandlerState::Implemented, "newfstatat"},
@@ -304,7 +304,7 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {264, 4, HandlerState::Implemented, "renameat"},
     {265, 5, HandlerState::Implemented, "linkat"},
     {266, 3, HandlerState::Implemented, "symlinkat"},
-    {267, 4, HandlerState::Unimplemented, "readlinkat"},
+    {267, 4, HandlerState::Implemented, "readlinkat"},
     {268, 3, HandlerState::Implemented, "fchmodat"},
     {269, 3, HandlerState::Implemented, "faccessat"},
     {270, 6, HandlerState::Implemented, "pselect6"},
@@ -314,7 +314,7 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {274, 3, HandlerState::Implemented, "get_robust_list"},
     {275, 6, HandlerState::Unimplemented, "splice"},
     {276, 4, HandlerState::Unimplemented, "tee"},
-    {277, 4, HandlerState::Unimplemented, "sync_file_range"},
+    {277, 4, HandlerState::Implemented, "sync_file_range"},
     {278, 4, HandlerState::Unimplemented, "vmsplice"},
     {279, 6, HandlerState::Unimplemented, "move_pages"},
     {280, 4, HandlerState::Implemented, "utimensat"},
@@ -322,7 +322,7 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {282, 3, HandlerState::Implemented, "signalfd"},
     {283, 2, HandlerState::Implemented, "timerfd_create"},
     {284, 1, HandlerState::Implemented, "eventfd"},
-    {285, 4, HandlerState::Unimplemented, "fallocate"},
+    {285, 4, HandlerState::Implemented, "fallocate"},
     {286, 4, HandlerState::Implemented, "timerfd_settime"},
     {287, 2, HandlerState::Implemented, "timerfd_gettime"},
     {288, 4, HandlerState::Implemented, "accept4"},
@@ -332,9 +332,9 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {292, 3, HandlerState::Implemented, "dup3"},
     {293, 2, HandlerState::Implemented, "pipe2"},
     {294, 1, HandlerState::Unimplemented, "inotify_init1"},
-    {295, 5, HandlerState::Unimplemented, "preadv"},
-    {296, 5, HandlerState::Unimplemented, "pwritev"},
-    {297, 4, HandlerState::Unimplemented, "rt_tgsigqueueinfo"},
+    {295, 5, HandlerState::Implemented, "preadv"},
+    {296, 5, HandlerState::Implemented, "pwritev"},
+    {297, 4, HandlerState::Implemented, "rt_tgsigqueueinfo"},
     {298, 5, HandlerState::Unimplemented, "perf_event_open"},
     {299, 5, HandlerState::Unimplemented, "recvmmsg"},
     {300, 2, HandlerState::Unimplemented, "fanotify_init"},
@@ -361,11 +361,11 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {321, 3, HandlerState::Unimplemented, "bpf"},
     {322, 5, HandlerState::Unimplemented, "execveat"},
     {323, 1, HandlerState::Unimplemented, "userfaultfd"},
-    {324, 2, HandlerState::Unimplemented, "membarrier"},
-    {325, 3, HandlerState::Unimplemented, "mlock2"},
+    {324, 2, HandlerState::Implemented, "membarrier"},
+    {325, 3, HandlerState::Implemented, "mlock2"},
     {326, 6, HandlerState::Unimplemented, "copy_file_range"},
-    {327, 6, HandlerState::Unimplemented, "preadv2"},
-    {328, 6, HandlerState::Unimplemented, "pwritev2"},
+    {327, 6, HandlerState::Implemented, "preadv2"},
+    {328, 6, HandlerState::Implemented, "pwritev2"},
     {329, 4, HandlerState::Unimplemented, "pkey_mprotect"},
     {330, 2, HandlerState::Unimplemented, "pkey_alloc"},
     {331, 1, HandlerState::Unimplemented, "pkey_free"},
@@ -385,11 +385,11 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {434, 2, HandlerState::Unimplemented, "pidfd_open"},
     {435, 2, HandlerState::Unimplemented, "clone3"},
     {436, 3, HandlerState::Unimplemented, "close_range"},
-    {437, 4, HandlerState::Unimplemented, "openat2"},
+    {437, 4, HandlerState::Implemented, "openat2"},
     {438, 3, HandlerState::Unimplemented, "pidfd_getfd"},
     {439, 4, HandlerState::Implemented, "faccessat2"},
     {440, 5, HandlerState::Unimplemented, "process_madvise"},
-    {441, 6, HandlerState::Unimplemented, "epoll_pwait2"},
+    {441, 6, HandlerState::Implemented, "epoll_pwait2"},
     {442, 5, HandlerState::Unimplemented, "mount_setattr"},
     {443, 4, HandlerState::Unimplemented, "quotactl_fd"},
     {444, 3, HandlerState::Unimplemented, "landlock_create_ruleset"},
@@ -400,7 +400,7 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {449, 5, HandlerState::Unimplemented, "futex_waitv"},
     {450, 4, HandlerState::Unimplemented, "set_mempolicy_home_node"},
     {451, 4, HandlerState::Unimplemented, "cachestat"},
-    {452, 4, HandlerState::Unimplemented, "fchmodat2"},
+    {452, 4, HandlerState::Implemented, "fchmodat2"},
     {453, 3, HandlerState::Unimplemented, "map_shadow_stack"},
     {454, 4, HandlerState::Unimplemented, "futex_wake"},
     {455, 6, HandlerState::Unimplemented, "futex_wait"},
@@ -886,9 +886,9 @@ inline constexpr const LinuxSyscallEntry* kLinuxSyscallByNumber[] = {
     &kLinuxSyscalls[373],
 };
 
-inline constexpr u32 kLinuxSyscallHandlersImplemented = 194;
-inline constexpr u32 kLinuxSyscallHandlersImplementedPrimary = 194;
-inline constexpr u32 kLinuxSyscallHandlersImplementedEffective = 201;
+inline constexpr u32 kLinuxSyscallHandlersImplemented = 215;
+inline constexpr u32 kLinuxSyscallHandlersImplementedPrimary = 215;
+inline constexpr u32 kLinuxSyscallHandlersImplementedEffective = 222;
 
 /// Look up `nr` in the dense by-number index. Returns nullptr if unknown.
 inline const LinuxSyscallEntry* LinuxSyscallLookup(u64 nr)

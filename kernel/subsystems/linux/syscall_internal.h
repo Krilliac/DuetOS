@@ -566,4 +566,33 @@ i64 DoSetgroups(u64 size, u64 user_list);
 i64 DoCapget(u64 user_hdr, u64 user_data);
 i64 DoCapset(u64 user_hdr, u64 user_data);
 
+// =============================================================
+// Auxiliary handlers (syscall_aux.cpp) — route-throughs and
+// trivial-but-correct stubs for spec syscalls that don't need
+// a full implementation in v0. See file header for rationale.
+// =============================================================
+i64 DoTkill(u64 tid, u64 sig);
+i64 DoMknodat(i64 dirfd, u64 user_path, u64 mode, u64 dev);
+i64 DoReadlinkat(i64 dirfd, u64 user_path, u64 user_buf, u64 bufsiz);
+i64 DoUtimes(u64 user_path, u64 user_times);
+i64 DoRtTgsigqueueinfo(u64 tgid, u64 tid, u64 sig, u64 user_info);
+i64 DoCreat(u64 user_path, u64 mode);
+
+i64 DoPreadv(u64 fd, u64 user_iov, u64 iovcnt, i64 offset);
+i64 DoPwritev(u64 fd, u64 user_iov, u64 iovcnt, i64 offset);
+i64 DoPreadv2(u64 fd, u64 user_iov, u64 iovcnt, i64 offset, u64 flags);
+i64 DoPwritev2(u64 fd, u64 user_iov, u64 iovcnt, i64 offset, u64 flags);
+
+i64 DoAlarm(u64 seconds);
+i64 DoGetitimer(u64 which, u64 user_value);
+i64 DoSetitimer(u64 which, u64 user_new, u64 user_old);
+i64 DoMembarrier(u64 cmd, u64 flags);
+i64 DoMlock2(u64 addr, u64 len, u64 flags);
+i64 DoFallocate(u64 fd, u64 mode, u64 offset, u64 len);
+i64 DoSyncFileRange(u64 fd, u64 offset, u64 nbytes, u64 flags);
+i64 DoFchmodat2(i64 dirfd, u64 user_path, u64 mode, u64 flags);
+i64 DoOpenat2(i64 dirfd, u64 user_path, u64 user_how, u64 how_size);
+i64 DoEpollPwait2(u64 epfd, u64 events, u64 maxevents, u64 user_ts, u64 sigmask, u64 sigsetsize);
+i64 DoSendfile(u64 out_fd, u64 in_fd, u64 user_offset, u64 count);
+
 } // namespace duetos::subsystems::linux::internal
