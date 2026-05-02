@@ -270,6 +270,48 @@ socket(UNIX/STREAM) -> -EAFNOSUPPORT(-97); socket(INET6/DGRAM)
 -> -EAFNOSUPPORT(-97); socketpair(UNIX) -> -EOPNOTSUPP(-95);
 getpeername(unconnected) -> -ENOTCONN(-107).
 
+## Fourth-slice findings — dense ABI dispatch table
+
+After three slice-driven exerciser passes (synxtest / synfs / synet),
+the dispatcher still relied on `LinuxGapFill` + the kENOSYS default
+to absorb syscall numbers we don't implement. The "did we forget X?"
+audit was an open-ended scan. Closed by inserting an explicit
+`kSysEnosys_<Name>` constant + dispatch case for every Linux x86_64
+syscall the CSV covers (374 total).
+
+### Naming convention for "spec-defined, intentionally not implemented"
+
+Constants for unimplemented spec syscalls use the form
+`kSysEnosys_<PascalName>` (e.g. `kSysEnosys_Setxattr`,
+`kSysEnosys_FutexWaitv`). The `Enosys_` prefix is a grep target —
+a future slice implementing a real handler renames the constant
+back to its canonical form (`kSysSetxattr`), moves the case out of
+the ENOSYS group, and points it at the new `Do<Name>` handler. The
+prefix prevents the case from being silently re-promoted by accident.
+
+### Generator gotcha — syscall handlers are sharded
+
+`tools/linux-compat/gen-linux-syscall-table.py` originally scanned
+just `syscall.cpp` for `i64 Do<Name>(...)` bodies. The codebase has
+since split handlers across `syscall_<family>.cpp` peers
+(syscall_socket.cpp, syscall_fd.cpp, syscall_pipe.cpp, ...). The old
+"single-file" rule reported 0 primary handlers — wildly wrong. The
+fixed rule: glob `syscall*.cpp` in the same directory as the
+dispatcher. After the fix the manifest reports 194 primary / 201
+effective / 374 total = 51% / 53% coverage.
+
+### When NOT to add a handler
+
+If a syscall has no plausible mapping to a DuetOS primitive
+(`kSysEnosys_AfsSyscall`, `kSysEnosys_Tuxcall`, `kSysEnosys_Vserver`,
+the older `kSysEnosys_TimerCreate` family that we don't intend to
+support), leaving the constant in the ENOSYS group IS the answer.
+The ENOSYS path is a contract: real Linux ELFs that call these
+deprecated/dead syscalls expect -ENOSYS. The audit signal is "is
+the kSys constant present?" — Yes for every spec syscall, even the
+zombies. The implementation signal is "is it in the ENOSYS block?"
+— Yes for the ~180 unimplemented entries.
+
 ## Cross-references
 
 - `.claude/knowledge/subsystems-status.md` — top-level Linux ABI inventory
