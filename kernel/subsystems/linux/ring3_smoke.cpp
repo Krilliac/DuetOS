@@ -28,7 +28,7 @@
 #include "core/panic.h"
 #include "proc/process.h"
 #include "proc/ring3_smoke.h"
-#include "core/generated_synxtest_elf.h"
+#include "generated_synxtest_elf.h"
 #include "cpu/percpu.h"
 #include "fs/ramfs.h"
 #include "mm/address_space.h"

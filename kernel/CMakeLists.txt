@@ -155,6 +155,15 @@ duetos_embed_blob(generated_syscall_stress.h
     DEFS_DIR "${CMAKE_SOURCE_DIR}/userland/apps/syscall_stress"
     COMMENT  "Compiling + embedding /bin/syscall_stress.exe (batch 51 API coverage)")
 
+# /bin/synxtest.elf — freestanding Linux-ABI exerciser. No libc, no
+# crt — synxtest.c defines _start and inline syscall asm. The kernel
+# spawns it via SpawnSynxTestElf to print pass/fail tags per Linux
+# syscall, surfacing live coverage of the ABI on every boot.
+duetos_embed_blob(generated_synxtest_elf.h
+    SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-synxtest.sh"
+    SRC     "${CMAKE_SOURCE_DIR}/userland/apps/synxtest/synxtest.c"
+    COMMENT "Compiling + embedding /bin/synxtest.elf (Linux-ABI exerciser)")
+
 duetos_embed_blob(generated_windowed_hello.h
     SCRIPT   "${CMAKE_SOURCE_DIR}/tools/build/build-windowed-hello.sh"
     SRC      "${CMAKE_SOURCE_DIR}/userland/apps/windowed_hello/hello.c"

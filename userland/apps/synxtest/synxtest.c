@@ -4,6 +4,26 @@
 typedef unsigned long u64;
 typedef long i64;
 
+// Compiler-emitted helpers for zero-init of stack arrays. clang
+// emits implicit calls to memset/memcpy for `char buf[N] = {0}`
+// even with -fno-builtin; provide the symbols ourselves so the
+// freestanding link stays self-contained (no libc, no libgcc).
+__attribute__((used)) void* memset(void* d, int c, unsigned long n)
+{
+    unsigned char* p = (unsigned char*)d;
+    for (unsigned long i = 0; i < n; ++i)
+        p[i] = (unsigned char)c;
+    return d;
+}
+__attribute__((used)) void* memcpy(void* d, const void* s, unsigned long n)
+{
+    unsigned char* dp = (unsigned char*)d;
+    const unsigned char* sp = (const unsigned char*)s;
+    for (unsigned long i = 0; i < n; ++i)
+        dp[i] = sp[i];
+    return d;
+}
+
 static inline i64 sc1(long nr, u64 a1)
 {
     i64 r;

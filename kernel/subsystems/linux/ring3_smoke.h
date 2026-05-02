@@ -51,8 +51,9 @@ void SpawnRing3LinuxMmapSmoke();
 /// Host-compiled static C binary that exercises a spread of Linux
 /// syscalls and prints a pass/fail tag for each. Source lives in
 /// userland/apps/synxtest/synxtest.c; the compiled ELF is embedded
-/// into the kernel image via kernel/core/generated_synxtest_elf.h
-/// (rebuild via tools/build/embed-blob.py if the source changes).
+/// into the kernel image via the CMake-driven build pipeline (see
+/// duetos_embed_blob(generated_synxtest_elf.h ...) in
+/// kernel/CMakeLists.txt + tools/build/build-synxtest.sh).
 void SpawnSynxTestElf();
 
 /// Exercises the ABI translation unit. Issues one syscall that
