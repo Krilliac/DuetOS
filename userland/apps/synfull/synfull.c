@@ -145,12 +145,6 @@ static int is_skipped(int nr)
               // saved signal frame (which there isn't outside a
               // handler). The kernel's behaviour is correct; we
               // just can't issue this from a synthetic exerciser.
-        61,  // wait4 — DoWait4 with pid=0, options=0 (no WNOHANG)
-              // blocks on linux_wait_wq waiting for a child to exit.
-              // Synfull has no children, so it blocks forever.
-              // (Kernel BUG: should -ECHILD when no children
-              // exist, regardless of WNOHANG. Tracked separately.)
-        247, // waitid — same blocking issue as wait4.
         13,  // rt_sigaction — installing signal handlers without
               // matching them with rt_sigreturn changes the
               // process's signal disposition in ways that can

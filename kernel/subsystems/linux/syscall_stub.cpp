@@ -104,16 +104,21 @@ i64 DoWait4(u64 pid, u64 user_status, u64 options, u64 user_rusage)
         i32 found = FindChildExitMatchLocked(p, target_pid);
         if (found < 0)
         {
-            // Quick check: is this caller even capable of having a
-            // child? wait4() with no outstanding children returns
-            // -ECHILD. We approximate by tagging "no parent linkage
-            // ever" — but a fork-then-immediately-wait race could
-            // hit this branch before the child registers. Real
-            // Linux walks its task-tree; v0 just reports -ECHILD
-            // when the queue is empty AND the caller has no live
-            // children waiting to register. Conservative: only
-            // return -ECHILD if non-blocking; blocking goes on
-            // linux_wait_wq.
+            // POSIX rule: if the caller has NO children at all
+            // (no live ones AND no zombies queued), wait4 returns
+            // -ECHILD immediately, regardless of WNOHANG. The
+            // earlier "block until something registers" was a
+            // bug — it deadlocked single-process exercisers
+            // (synfull's wait4 probe) waiting for a child that
+            // would never exist.
+            arch::Sti();
+            const u64 live_children = sched::SchedCountChildrenOfPid(p->pid);
+            if (live_children == 0)
+                return kECHILD;
+            arch::Cli();
+            // Children exist but none have exited. WNOHANG returns
+            // 0 (no exit available); blocking parks on the wait
+            // queue.
             if (nonblocking)
             {
                 arch::Sti();
@@ -167,6 +172,16 @@ i64 DoWaitid(u64 idtype, u64 id, u64 user_info, u64 options, u64 user_rusage)
         i32 found = FindChildExitMatchLocked(p, target_pid);
         if (found < 0)
         {
+            // POSIX rule (mirrored from DoWait4 above): no
+            // children at all -> -ECHILD immediately, regardless
+            // of WNOHANG. Without this, a single-process exerciser
+            // calling waitid blocks forever on linux_wait_wq for
+            // a child that will never register.
+            arch::Sti();
+            const u64 live_children = sched::SchedCountChildrenOfPid(p->pid);
+            if (live_children == 0)
+                return kECHILD;
+            arch::Cli();
             if (nonblocking)
             {
                 arch::Sti();
