@@ -63,6 +63,13 @@ void SpawnSynxTestElf();
 /// off the sandbox cap gate the way synxtest's calls do.
 void SpawnSynfsElf();
 
+/// Sister of SpawnSynfsElf — spawns userland/apps/synet/synet.c
+/// with kCapNet. Targets the BSD socket family
+/// (socket/bind/listen/accept/connect/sendto/recvfrom/setsockopt/
+/// getsockopt/...) so each call reaches the v0 net stack instead
+/// of bouncing off the dispatch-level kCapNet gate.
+void SpawnSynetElf();
+
 /// Exercises the ABI translation unit. Issues one syscall that
 /// the TU fills with a no-op (sys_madvise) and one it declines
 /// with a deliberate -ENOSYS (sys_rseq), then exits. Expected

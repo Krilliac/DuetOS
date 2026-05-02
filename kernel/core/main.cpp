@@ -3632,6 +3632,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         // kernel handler. Same `bounded, prints rc per call` shape so
         // it's safe under TCG.
         duetos::subsystems::linux::SpawnSynfsElf();
+        // synet is the socket-family sibling. kCapNet so the BSD
+        // socket calls reach the v0 net stack. Same atomic-line
+        // [net] output convention as synfs.
+        duetos::subsystems::linux::SpawnSynetElf();
 
         if (duetos::test::SmokeProfileGet() == duetos::test::SmokeProfile::None)
         {

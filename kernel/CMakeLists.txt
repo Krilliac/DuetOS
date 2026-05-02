@@ -173,6 +173,15 @@ duetos_embed_blob(generated_synfs_elf.h
     SRC     "${CMAKE_SOURCE_DIR}/userland/apps/synfs/synfs.c"
     COMMENT "Compiling + embedding /bin/synfs.elf (Linux-ABI FS-mut exerciser)")
 
+# /bin/synet.elf — sister of synfs. Targets socket-family syscalls
+# (socket/bind/listen/accept/connect/sendto/recvfrom/setsockopt/
+# getsockopt/...) and runs with kCapNet so each call actually
+# reaches the kernel handler.
+duetos_embed_blob(generated_synet_elf.h
+    SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-synet.sh"
+    SRC     "${CMAKE_SOURCE_DIR}/userland/apps/synet/synet.c"
+    COMMENT "Compiling + embedding /bin/synet.elf (Linux-ABI socket exerciser)")
+
 duetos_embed_blob(generated_windowed_hello.h
     SCRIPT   "${CMAKE_SOURCE_DIR}/tools/build/build-windowed-hello.sh"
     SRC      "${CMAKE_SOURCE_DIR}/userland/apps/windowed_hello/hello.c"

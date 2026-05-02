@@ -28,6 +28,7 @@
 #include "core/panic.h"
 #include "proc/process.h"
 #include "proc/ring3_smoke.h"
+#include "generated_synet_elf.h"
 #include "generated_synfs_elf.h"
 #include "generated_synxtest_elf.h"
 #include "cpu/percpu.h"
@@ -827,6 +828,29 @@ void SpawnSynfsElf()
     else
     {
         arch::SerialWrite("[linux] queued synfs: FS-mutation exerciser, expect [fs] lines\n");
+    }
+}
+
+void SpawnSynetElf()
+{
+    KLOG_TRACE_SCOPE("linux/smoke", "SpawnSynetElf");
+
+    // Socket-family Linux-ABI exerciser. kCapNet so socket / bind /
+    // listen / accept / connect / sendto / recvfrom / setsockopt /
+    // getsockopt etc. actually reach the kernel handler. Boot log
+    // surfaces `[net] <name> rc=<rc>` per call.
+    core::CapSet caps = core::CapSetEmpty();
+    core::CapSetAdd(caps, core::kCapNet);
+    const u64 pid = core::SpawnElfLinux("synet", fs::generated::kBinSynetElfBytes,
+                                        fs::generated::kBinSynetElfBytes_len, caps,
+                                        fs::RamfsSandboxRoot(), /*frame_budget=*/32, core::kTickBudgetSandbox);
+    if (pid == 0)
+    {
+        arch::SerialWrite("[linux] SpawnElfLinux FAILED for synet\n");
+    }
+    else
+    {
+        arch::SerialWrite("[linux] queued synet: socket-family exerciser, expect [net] lines\n");
     }
 }
 

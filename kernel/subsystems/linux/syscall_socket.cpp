@@ -294,7 +294,11 @@ i64 DoSendto(u64 fd, u64 user_buf, u64 len, u64 flags, u64 user_dest_addr, u64 a
 
 i64 DoRecvfrom(u64 fd, u64 user_buf, u64 len, u64 flags, u64 user_src_addr, u64 user_addrlen)
 {
-    (void)flags;
+    // Linux MSG_DONTWAIT bit. The underlying SocketRecvDgram /
+    // SocketRecvStream both block on an empty queue; without
+    // honoring MSG_DONTWAIT here, a real Linux ELF that asks for
+    // a non-blocking read hangs forever (synet caught this).
+    constexpr u64 kMsgDontwait = 0x40;
     auto* p = ::duetos::core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
@@ -310,6 +314,8 @@ i64 DoRecvfrom(u64 fd, u64 user_buf, u64 len, u64 flags, u64 user_src_addr, u64 
     u8 stage[kStageCap];
     if (s->type == ::duetos::net::kSocketTypeDgram)
     {
+        if ((flags & kMsgDontwait) != 0 && s->udp_count == 0 && (s->shutdown_flags & 0x1) == 0)
+            return kEAGAIN;
         ::duetos::net::Ipv4Address src_ip = {};
         u16 src_port = 0;
         u32 truth = 0;
@@ -321,6 +327,21 @@ i64 DoRecvfrom(u64 fd, u64 user_buf, u64 len, u64 flags, u64 user_src_addr, u64 
         if (user_src_addr != 0 && user_addrlen != 0)
             WriteSockaddrIn(user_src_addr, user_addrlen, src_ip, src_port);
         return got;
+    }
+    if ((flags & kMsgDontwait) != 0)
+    {
+        // For TCP, the kernel-side stream check looks at the
+        // active TCP snapshot's response_len vs. our consumed
+        // cursor. Approximate non-blocking by peeking via the
+        // socket's connected/shutdown state — if we can prove
+        // there's nothing to read RIGHT NOW (not connected, or
+        // shutdown), short-circuit. Otherwise fall through.
+        if (!s->connected || (s->shutdown_flags & 0x1) != 0)
+            return 0; // SHUT_RD or never-connected → EOF-ish
+        // Sub-GAP: a connected stream with no buffered bytes
+        // would still block here because we don't have a
+        // public "stream_rx_available" probe. Real callers
+        // hitting this can be unblocked once that probe lands.
     }
     const i64 got = ::duetos::net::SocketRecvStream(idx, stage, static_cast<u32>(len));
     if (got > 0 && !mm::CopyToUser(reinterpret_cast<void*>(user_buf), stage, static_cast<u64>(got)))
