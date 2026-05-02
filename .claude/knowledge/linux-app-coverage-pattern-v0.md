@@ -312,6 +312,83 @@ the kSys constant present?" — Yes for every spec syscall, even the
 zombies. The implementation signal is "is it in the ENOSYS block?"
 — Yes for the ~180 unimplemented entries.
 
+## Fifth-slice findings — syscall_aux.cpp (70 new handlers)
+
+Followed the dense-dispatch slice with three back-to-back batches in
+a new TU `kernel/subsystems/linux/syscall_aux.cpp`. The TU's name
+deliberately advertises "this is not a new subsystem — it's a thin
+compatibility surface". Coverage went 51% → 70% primary in three
+commits.
+
+### Batch shapes (the four kinds of aux handlers)
+
+1. **Route-through to existing scalar Do<Name>**: tkill→tgkill,
+   mknodat→mknod (AT_FDCWD only), readlinkat→readlink, utimes→
+   utimensat, rt_tgsigqueueinfo→tgkill (drops siginfo),
+   creat→open(O_CREAT|O_WRONLY|O_TRUNC).
+2. **Vector form of an existing scalar**: preadv/pwritev (loop
+   over user iovec, calling pread64/pwrite64 with running offset);
+   preadv2/pwritev2 (same but ignore RWF_* flags).
+3. **Trivial-but-correct stub**: alarm/getitimer/setitimer (zero
+   itimerval, rc=0); membarrier(QUERY)→0; mlock2→0;
+   fallocate(mode==0)→0; sync_file_range→DoSync; fchmodat2→
+   fchmodat (flags pass-through).
+4. **Spec-correct errno over -ENOSYS**: xattr family →
+   -EOPNOTSUPP (-95); namespaces → -EINVAL or -ESRCH; LDT →
+   -ENOSYS only for non-zero func; cross-process VM → -ESRCH;
+   POSIX timer ops on never-created timerids → -EINVAL;
+   restart_syscall → -EINTR.
+
+### Why -EOPNOTSUPP, not -ENOSYS, for xattr
+
+Linux's documented behaviour for an FS without xattr storage is
+-EOPNOTSUPP, not -ENOSYS. Picking the right errno matters:
+libacl/libcap/attr handle -EOPNOTSUPP gracefully (treat the file
+as having no attrs and continue); -ENOSYS makes them think the
+host kernel is exotic and bail. Same logic applies to
+cross-process VM (-ESRCH means "no such pid") and namespaces
+(-EINVAL means "not a namespace fd"). The general principle:
+return the errno that says "feature recognised, target doesn't
+have one" rather than "syscall not recognised at all" wherever
+the userspace fallback is documented.
+
+### Pattern: Linux 5.16+ extended futex deserves -ENOSYS
+
+futex_waitv/wake/wait/requeue (449/454/455/456) are 5.16+ extended
+ops. glibc/musl probe via /proc/sys/kernel/futex_* (which we don't
+expose) and fall back to classic futex(2) (which we DO
+implement). Returning -ENOSYS keeps the fallback path alive. This
+is a place where -ENOSYS is genuinely correct, not a placeholder.
+
+### When NOT to keep adding handlers
+
+The remaining ~14 ENOSYS-block entries are all genuinely deprecated /
+never-released Linux syscalls (afs_syscall, tuxcall, getpmsg/putpmsg,
+nfsservctl, security, vserver, ustat, sysfs, sysctl, modify_ldt,
+lookup_dcookie, create_module/get_kernel_syms/query_module). Mainline
+Linux returns -ENOSYS for these too. Adding handlers would be wrong:
+the spec contract IS -ENOSYS.
+
+### Generator gotcha — second pass
+
+After re-running gen-linux-syscall-table.py post-batches, primary
+went 51 → 57 → 63 → 70%. The script counts a syscall as
+"Implemented" iff a Do<Name> body exists in any syscall*.cpp peer.
+That's correct now (after the multi-TU scan fix in slice 4). New
+handlers in syscall_aux.cpp pick up automatically.
+
+### Manifest after fifth slice
+
+374 total / 264 primary (70%) / 270 effective (72%) / 110
+unimplemented. The remaining 110 unimplemented split into:
+- ~14 hand-written ENOSYS-block entries (deprecated)
+- ~96 syscalls reachable only via the LinuxGapFill path or whose
+  dispatch case calls something other than `Do<Name>` (fall-back
+  handlers, cap-gated -EPERM cases, etc.). The manifest counts
+  these as "Unimplemented" because no `Do<Name>` body exists, but
+  the dispatch DOES handle them — see kSysReboot, kSysIopl,
+  kSysIoperm, kSysQuotactl, etc. that return -EPERM directly.
+
 ## Cross-references
 
 - `.claude/knowledge/subsystems-status.md` — top-level Linux ABI inventory
