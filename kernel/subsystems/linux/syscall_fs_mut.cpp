@@ -375,4 +375,40 @@ i64 DoUtimensat(i64 dirfd, u64 user_path, u64 user_times, u64 flags)
     return 0;
 }
 
+// =============================================================
+// FS-mutation handlers whose v0 impl is a thin re-route to an
+// existing handler. Real callers along the AT_FDCWD common path
+// behave correctly; non-AT_FDCWD dirfds are -EBADF since v0 has
+// no per-fd cwd.
+// =============================================================
+
+// mknodat(dirfd, path, mode, dev) — same as mknod when dirfd
+// is AT_FDCWD.
+i64 DoMknodat(i64 dirfd, u64 user_path, u64 mode, u64 dev)
+{
+    if (dirfd != kAtFdCwd)
+        return kEBADF;
+    return DoMknod(user_path, mode, dev);
+}
+
+// utimes(path, times) — older sibling of utimensat. Times is a
+// `struct timeval[2]` (sec + usec) instead of timespec[2] (sec
+// + nsec). DoUtimensat is permissive about the struct layout in
+// v0 (it touches the file's mtime but doesn't actually decode
+// the timespec); pass-through works for the common "tag the
+// file as freshly-modified" path.
+i64 DoUtimes(u64 user_path, u64 user_times)
+{
+    return DoUtimensat(kAtFdCwd, user_path, user_times, 0);
+}
+
+// fchmodat2(dirfd, path, mode, flags) — fchmodat with an
+// extended flags argument. Same shape as fchmodat which we
+// already have, so just call it. The flags argument is
+// advisory in v0 since we don't follow symlinks anyway.
+i64 DoFchmodat2(i64 dirfd, u64 user_path, u64 mode, u64 flags)
+{
+    return DoFchmodat(dirfd, user_path, mode, flags);
+}
+
 } // namespace duetos::subsystems::linux::internal

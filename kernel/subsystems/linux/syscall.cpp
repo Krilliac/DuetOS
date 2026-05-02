@@ -2001,6 +2001,14 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
     }
     frame->rax = static_cast<u64>(rv);
 
+    // ITIMER_REAL deadline check — if alarm() / setitimer() has
+    // armed a deadline that has now passed, OR SIGALRM into
+    // pending_signals so the signal-deliver pass below picks it
+    // up on this same syscall return. Lazy delivery (no per-tick
+    // callback hook in v0); see kernel/subsystems/linux/
+    // syscall_timer.cpp for the rationale.
+    LinuxAlarmCheckAndRaise(const_cast<core::Process*>(proc));
+
     // Pending-signal check — if a user-installed handler is due,
     // mutate the trap frame so iretq lands at the handler instead
     // of the original syscall caller. The handler eventually

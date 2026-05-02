@@ -649,4 +649,10 @@ i64 DoQuotactlFd(u64 fd, u64 cmd, u64 id, u64 addr);
 i64 DoIoPgetevents(u64 ctx, u64 min_nr, u64 nr, u64 events, u64 timeout, u64 sig);
 i64 DoRseq(u64 rseq, u64 rseq_len, u64 flags, u64 sig);
 
+// Alarm / itimer hook — called from LinuxSyscallDispatch right
+// before LinuxSignalCheckAndDeliver. If a process's
+// ITIMER_REAL deadline has elapsed, raises SIGALRM so the
+// signal-deliver pass picks it up on this same syscall return.
+void LinuxAlarmCheckAndRaise(::duetos::core::Process* p);
+
 } // namespace duetos::subsystems::linux::internal

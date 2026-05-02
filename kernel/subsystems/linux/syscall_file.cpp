@@ -422,4 +422,42 @@ i64 DoNewFstatat(i64 dirfd, u64 user_path, u64 user_buf, u64 flags)
     return DoStat(user_path, user_buf);
 }
 
+// =============================================================
+// creat + openat2 — re-shapes of open/openat for legacy and
+// extended-flags callers.
+// =============================================================
+
+// creat(path, mode) — equivalent to open(path,
+// O_CREAT|O_WRONLY|O_TRUNC, mode). Linux's libc stopped using
+// this ages ago but ld.so and a couple of legacy build tools
+// still reach for it on bootstrap.
+i64 DoCreat(u64 user_path, u64 mode)
+{
+    constexpr u64 kOCreat = 0x40;
+    constexpr u64 kOWrOnly = 0x1;
+    constexpr u64 kOTrunc = 0x200;
+    return DoOpen(user_path, kOCreat | kOWrOnly | kOTrunc, mode);
+}
+
+// openat2(dirfd, path, how_struct, how_size) — extended openat
+// where the open arguments are bundled in a `struct open_how`
+// (flags, mode, resolve). v0 reads the first two fields and
+// passes them to DoOpenat; resolve flags (RESOLVE_NO_SYMLINKS,
+// RESOLVE_BENEATH, ...) are advisory and quietly ignored.
+i64 DoOpenat2(i64 dirfd, u64 user_path, u64 user_how, u64 how_size)
+{
+    if (how_size < 24)
+        return kEINVAL;
+    struct OpenHow
+    {
+        u64 flags;
+        u64 mode;
+        u64 resolve;
+    } how = {};
+    const u64 to_copy = how_size < sizeof(how) ? how_size : sizeof(how);
+    if (!mm::CopyFromUser(&how, reinterpret_cast<const void*>(user_how), to_copy))
+        return kEFAULT;
+    return DoOpenat(dirfd, user_path, how.flags, how.mode);
+}
+
 } // namespace duetos::subsystems::linux::internal

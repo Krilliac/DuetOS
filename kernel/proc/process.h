@@ -833,6 +833,18 @@ struct Process
     // signalfd read (post-engine) immediately returns.
     sched::WaitQueue linux_signal_wq;
 
+    // ITIMER_REAL state — backs alarm(2), setitimer(2),
+    // getitimer(2). `linux_alarm_deadline_ns` is the absolute
+    // monotonic-clock deadline at which SIGALRM should be
+    // raised (0 = no alarm armed). `linux_alarm_interval_ns`
+    // is the auto-rearm interval (0 = one-shot). The
+    // dispatcher checks the deadline post-handler and lazily
+    // injects SIGALRM into linux_pending_signals — there's no
+    // per-tick callback in v0, so the signal is observed at
+    // the next syscall return rather than asynchronously.
+    u64 linux_alarm_deadline_ns;
+    u64 linux_alarm_interval_ns;
+
     // Linux parent / wait infrastructure — backs wait4 / waitid /
     // SIGCHLD reaping. `linux_parent_pid` is set by DoFork (clone
     // without CLONE_THREAD); 0 means "no Linux parent" (kernel-

@@ -653,4 +653,93 @@ i64 DoPrctl(u64 option, u64 arg2, u64 arg3, u64 arg4, u64 arg5)
     }
 }
 
+// =============================================================
+// readlinkat + legacy getdents.
+// =============================================================
+
+// readlinkat(dirfd, path, buf, bufsiz) — readlink with a dirfd
+// prefix. v0 has no per-fd cwd, so non-AT_FDCWD is -EBADF.
+i64 DoReadlinkat(i64 dirfd, u64 user_path, u64 user_buf, u64 bufsiz)
+{
+    if (dirfd != kAtFdCwd)
+        return kEBADF;
+    return DoReadlink(user_path, user_buf, bufsiz);
+}
+
+// getdents(fd, dirp, count) — pre-2.6.4 directory iteration.
+// The legacy `struct linux_dirent` packs d_type as a hidden
+// trailing byte at offset reclen-1 instead of an explicit
+// field. This is the real format-conversion implementation —
+// we walk the same FAT32 dir entries getdents64 reads, but
+// emit the older record layout so musl/glibc-built-against-
+// 2.6.3 binaries get the bytes they expect.
+//
+// Legacy struct layout:
+//   u64 d_ino
+//   u64 d_off
+//   u16 d_reclen
+//   char d_name[]   (NUL-terminated)
+//   ... padding to align ...
+//   u8 d_type       (LAST byte of the record; offset reclen-1)
+i64 DoGetdents(u64 fd, u64 user_buf, u64 count)
+{
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || fd >= 16)
+        return kEBADF;
+    const u32 state = p->linux_fds[fd].state;
+    if (state == 0)
+        return kEBADF;
+    if (state != 11)
+        return kENOTDIR;
+    const u32 dslot = p->linux_fds[fd].first_cluster;
+    if (dslot >= core::Process::kWin32DirCap)
+        return kEINVAL;
+    auto& dh = p->win32_dirs[dslot];
+    if (!dh.in_use || dh.entries == nullptr)
+        return kEBADF;
+    auto* entries = static_cast<fs::fat32::DirEntry*>(dh.entries);
+    u8 stage[1024];
+    u64 emitted = 0;
+    while (dh.next_index < dh.entry_count)
+    {
+        const auto& e = entries[dh.next_index];
+        u32 nlen = 0;
+        while (nlen < sizeof(e.name) - 1 && e.name[nlen] != '\0')
+            ++nlen;
+        // header(18) + name + NUL + d_type(1)
+        u32 record = 18 + nlen + 1 + 1;
+        record = (record + 7) & ~7u; // align to 8
+        if (emitted + record > count || emitted + record > sizeof(stage))
+            break;
+        u8* r = stage + emitted;
+        const u64 d_ino = static_cast<u64>(e.first_cluster ? e.first_cluster : (dh.next_index + 1));
+        const i64 d_off = static_cast<i64>(dh.next_index + 1);
+        const u16 d_reclen = static_cast<u16>(record);
+        const u8 d_type = (e.attributes & 0x10) ? 4 /*DT_DIR*/ : 8 /*DT_REG*/;
+        for (u32 i = 0; i < 8; ++i)
+            r[i] = static_cast<u8>((d_ino >> (i * 8)) & 0xFF);
+        for (u32 i = 0; i < 8; ++i)
+            r[8 + i] = static_cast<u8>((d_off >> (i * 8)) & 0xFF);
+        r[16] = static_cast<u8>(d_reclen & 0xFF);
+        r[17] = static_cast<u8>((d_reclen >> 8) & 0xFF);
+        // d_name from offset 18.
+        for (u32 i = 0; i < nlen; ++i)
+            r[18 + i] = static_cast<u8>(e.name[i]);
+        r[18 + nlen] = 0;
+        // Zero the alignment tail (between NUL and the d_type
+        // byte at reclen-1).
+        for (u32 i = 18 + nlen + 1; i < record - 1; ++i)
+            r[i] = 0;
+        // d_type as the LAST byte of the record.
+        r[record - 1] = d_type;
+        emitted += record;
+        ++dh.next_index;
+    }
+    if (emitted == 0)
+        return 0;
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), stage, emitted))
+        return kEFAULT;
+    return static_cast<i64>(emitted);
+}
+
 } // namespace duetos::subsystems::linux::internal

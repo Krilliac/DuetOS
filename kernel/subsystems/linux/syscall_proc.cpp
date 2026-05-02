@@ -202,4 +202,59 @@ i64 DoSetsid()
     return 0;
 }
 
+// =============================================================
+// Signal/scheduler entry points whose v0 implementation is a
+// thin shape-adjustment over an existing handler. Real callers
+// see "the syscall worked" — the discarded payload (siginfo for
+// queueinfo variants, extended attrs for sched_setattr) is the
+// documented sub-GAP.
+// =============================================================
+
+// tkill(tid, sig) — single-thread variant of tgkill. Modern
+// Linux kernels treat it as tgkill(getpid(), tid, sig). Our
+// DoTgkill ignores tgid for the purpose of tid -> Process::pid
+// lookup, so passing 0 is harmless.
+i64 DoTkill(u64 tid, u64 sig)
+{
+    return DoTgkill(0, tid, sig);
+}
+
+// rt_tgsigqueueinfo(tgid, tid, sig, info) — tgkill that also
+// delivers a siginfo payload. v0 has no siginfo delivery, so
+// we drop the info pointer and route to tgkill.
+i64 DoRtTgsigqueueinfo(u64 tgid, u64 tid, u64 sig, u64 user_info)
+{
+    (void)user_info;
+    return DoTgkill(tgid, tid, sig);
+}
+
+// rt_sigqueueinfo(tgid, sig, info) — process-wide sibling of
+// rt_tgsigqueueinfo. v0 treats tid==tgid since the process
+// model is single-threaded.
+i64 DoRtSigqueueinfo(u64 tgid, u64 sig, u64 user_info)
+{
+    (void)user_info;
+    return DoTgkill(tgid, tgid, sig);
+}
+
+// sched_setattr / sched_getattr — extended scheduler policy
+// surface (SCHED_DEADLINE etc.). The v0 scheduler is MLFQ-style
+// and doesn't expose deadline attributes; -EINVAL matches the
+// Linux response when the requested policy isn't supported.
+i64 DoSchedSetattr(u64 pid, u64 attr, u64 flags)
+{
+    (void)pid;
+    (void)attr;
+    (void)flags;
+    return kEINVAL;
+}
+i64 DoSchedGetattr(u64 pid, u64 attr, u64 size, u64 flags)
+{
+    (void)pid;
+    (void)attr;
+    (void)size;
+    (void)flags;
+    return kEINVAL;
+}
+
 } // namespace duetos::subsystems::linux::internal
