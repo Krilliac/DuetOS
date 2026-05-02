@@ -80,6 +80,7 @@ constexpr Theme kClassic = {
             0x00203040, // Clock
             0x00702070, // GfxDemo — magenta to flag "this paints pixels"
             0x00405060, // Settings — slate-grey, matches "tools" convention
+            0x00306070, // ImageView — muted blue-teal, "viewer" affinity
         },
     .role_client =
         {
@@ -91,6 +92,7 @@ constexpr Theme kClassic = {
             0x00081008, // Clock
             0x00000000, // GfxDemo — black; the demo overpaints every pixel
             0x00181828, // Settings
+            0x00080808, // ImageView — near-black so any image reads cleanly
         },
 
     .console_fg = 0x0080F088,
@@ -139,6 +141,7 @@ constexpr Theme kAmber = {
             0x00402010, // Clock
             0x00A06030, // GfxDemo
             0x00604018, // Settings — muted amber-bronze
+            0x00805024, // ImageView — bronze, image-viewer hue
         },
     .role_client =
         {
@@ -150,6 +153,7 @@ constexpr Theme kAmber = {
             0x00050200, // Clock — near-black ground for "LEDs"
             0x00000000, // GfxDemo — black; overpainted every frame
             0x00100800, // Settings
+            0x00040200, // ImageView — near-black ground for image
         },
 
     .console_fg = 0x00FFA830,
@@ -202,6 +206,7 @@ constexpr Theme kSlate10 = {
             0x002D2D33, // Clock        — flat dark slate
             0x008B2C8B, // GfxDemo      — magenta accent
             0x004A4A52, // Settings     — Slate panel grey
+            0x00266288, // ImageView    — desaturated blue, "media" affinity
         },
     .role_client =
         {
@@ -213,6 +218,7 @@ constexpr Theme kSlate10 = {
             0x00101014, // Clock — near-black so 7-seg reads bright
             0x00000000, // GfxDemo — black ground (overpainted)
             0x00252529, // Settings — Slate panel
+            0x00141418, // ImageView — deep slate so any image reads cleanly
         },
 
     .console_fg = 0x00D4D4D4, // VSCode default editor ink
@@ -271,6 +277,7 @@ constexpr Theme kDuet = {
             0x00141822, // Clock        — slate panel (passive widget)
             0x00702070, // GfxDemo      — magenta to flag "this paints pixels"
             0x002A323C, // Settings     — `--chrome-2` slate
+            0x00264858, // ImageView    — deeper teal-slate, "viewer" hue
         },
     .role_client =
         {
@@ -282,6 +289,7 @@ constexpr Theme kDuet = {
             0x000B0E13, // Clock — near-black canvas ground for clock face
             0x00000000, // GfxDemo — black; the demo overpaints every pixel
             0x00141A22, // Settings — slate canvas
+            0x00080A0E, // ImageView — deep canvas so an image reads cleanly
         },
 
     .console_fg = 0x00E8EDF2, // `--ink` — JetBrains-Mono ink in the prototype
@@ -339,6 +347,7 @@ constexpr Theme kDuetLight = {
             0x002C323C, // Clock        — slate panel
             0x008B2C8B, // GfxDemo      — magenta marker (kept across themes)
             0x00343A44, // Settings     — neutral chrome (matches LogView)
+            0x00086A60, // ImageView    — deeper teal so it reads on light bg
         },
     .role_client =
         {
@@ -350,6 +359,7 @@ constexpr Theme kDuetLight = {
             0x00E5E8EC, // Clock        — light canvas ground
             0x00000000, // GfxDemo      — black; overpainted every frame
             0x00ECEEF1, // Settings     — light panel
+            0x00161A20, // ImageView    — dark canvas (only dark client in light theme — images need contrast ground regardless of theme)
         },
 
     .console_fg = 0x00161A20,
@@ -399,11 +409,13 @@ constexpr Theme kDuetBlue = {
             0x00141822, // Clock        — slate panel
             0x00702070, // GfxDemo      — magenta marker
             0x002A323C, // Settings     — slate panel
+            0x00204D80, // ImageView    — blue-tinted (matches accent)
         },
     .role_client =
         {
             0x00141A22, 0x00F3F0E6, 0x00141A22, 0x000F1319, 0x00141A22, 0x000B0E13, 0x00000000,
             0x00141A22, // Settings
+            0x00080A0E, // ImageView
         },
     .console_fg = 0x00E8EDF2,
     .console_bg = 0x000F1319,
@@ -437,11 +449,13 @@ constexpr Theme kDuetViolet = {
             0x00141822, // Clock
             0x00702070, // GfxDemo
             0x002A323C, // Settings
+            0x00553788, // ImageView    — violet-tinted
         },
     .role_client =
         {
             0x00141A22, 0x00F3F0E6, 0x00141A22, 0x000F1319, 0x00141A22, 0x000B0E13, 0x00000000,
             0x00141A22, // Settings
+            0x00080A0E, // ImageView
         },
     .console_fg = 0x00E8EDF2,
     .console_bg = 0x000F1319,
@@ -475,11 +489,13 @@ constexpr Theme kDuetGreen = {
             0x00141822, // Clock
             0x00702070, // GfxDemo
             0x002A323C, // Settings
+            0x00256B36, // ImageView    — green-tinted
         },
     .role_client =
         {
             0x00141A22, 0x00F3F0E6, 0x00141A22, 0x000F1319, 0x00141A22, 0x000B0E13, 0x00000000,
             0x00141A22, // Settings
+            0x00080A0E, // ImageView
         },
     .console_fg = 0x00E8EDF2,
     .console_bg = 0x000F1319,
@@ -532,6 +548,7 @@ constexpr Theme kDuetClassic = {
             0x00404040, // Clock        — flat grey
             0x00702070, // GfxDemo      — magenta marker
             0x00404040, // Settings     — flat grey panel
+            0x00204878, // ImageView    — Win9x dark blue, "viewer" hue
         },
     .role_client =
         {
@@ -543,6 +560,7 @@ constexpr Theme kDuetClassic = {
             0x00000000, // Clock        — black ground for retro 7-seg
             0x00000000, // GfxDemo
             0x00C0C0C0, // Settings     — Win9x panel grey
+            0x00000000, // ImageView    — black ground for image
         },
 
     .console_fg = 0x00000000,
@@ -594,11 +612,13 @@ constexpr Theme kHighContrast = {
             0x00FFFF00, // Clock
             0x00FFFF00, // GfxDemo
             0x00FFFF00, // Settings
+            0x00FFFF00, // ImageView
         },
     .role_client =
         {
             0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
             0x00000000, // Settings
+            0x00000000, // ImageView
         },
 
     .console_fg = 0x00FFFFFF,
@@ -633,7 +653,7 @@ const Theme* const kThemes[static_cast<u32>(ThemeId::kCount)] = {
 
 constinit ThemeId g_current = ThemeId::Classic;
 constinit WindowHandle g_role_window[static_cast<u32>(ThemeRole::kCount)] = {
-    kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid,
+    kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid,
     kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid,
 };
 

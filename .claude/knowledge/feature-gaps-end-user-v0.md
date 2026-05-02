@@ -1,12 +1,13 @@
 # End-user feature gaps v0
 
 _Type: Observation + Decision (gap inventory)._
-_Last updated: 2026-05-01._
+_Last updated: 2026-05-02._
 
 ## Status — landed slices
 
 | Date | Item | Effect |
 |------|------|--------|
+| 2026-05-02 | P1 #7 Image viewer (BMP) | `kernel/apps/imageview.{h,cpp}` — native kernel app reads 32-bpp uncompressed BMPs from the FAT32 root and paints them in a window. Pairs naturally with the Screenshot app: every `Ctrl+Alt+P` capture lands as a `SHOTNNNN.BMP` this viewer accepts byte-for-byte. Decode is streaming via `Fat32ReadFileStream` so a 1024×768 (~3 MiB) capture fits in the 2 MiB kernel heap; nearest-neighbour downsample with aspect-preserving fit, no upscale; both top-down (negative `biHeight`) and bottom-up DIBs supported. New `ThemeRole::ImageView` + 10-theme palette extension; Start menu entry "IMAGE VIEWER"; arrow Left/Right + N/P/R keybinds; boot self-test exercises the BMP header round-trip + aspect-fit math + magic / 24-bpp / sign-flip negative cases. 24-bpp / PNG / JPEG / subdir walk deferred. See `.claude/knowledge/imageview-bmp-v0.md`. |
 | 2026-05-01 | P2 #12 EDID parser (one of the three blockers) | `kernel/drivers/gpu/edid.{h,cpp}` — clean-room VESA E-EDID 1.3/1.4 base-block parser + `edid_selftest.cpp` 5-fixture boot self-test (1080p digital + analog 1024 + bad-checksum + short-buffer + bad-header) + `monitor` shell command. Pure compute, no DMA, no DDC dependency. Caught a `refresh_mhz` unit bug while landing (formula was missing a factor of 1000; host-side test fixture asserted `>= 59900 && <= 60100` for a 60.000 Hz mode and rejected the 60-Hz integer truncation). See `.claude/knowledge/edid-parser-v0.md`. |
 | 2026-05-01 | P0 #4 Wi-Fi loopback test + host fuzz harness (verifies the previously-HW-only-testable control tier) | `kernel/net/wireless/test/{fake_ap,loopback_driver,wireless_e2e_test}.{h,cpp}` — software AP peer + fake `WirelessDeviceOps` driver + 4-case boot self-test. **Success case asserts TK and GTK match byte-for-byte between AP and STA endpoints** (proves PRF / nonces / PMK / MAC ordering all agree across both sides of the handshake). Wrong-PSK rejection, replay-counter rejection, MIC-tamper rejection. **Bugs caught while landing this slice:** (1) PBKDF2 KAT had wrong reference value (kernel impl was correct; test fixture was wrong); (2) `WirelessDeliverEapol` never sent M2/M4 — fixed by adding `SendEapolFrame` op + auto-build paths in wdev. Also `tests/fuzz/` — standalone Makefile + `host_shim/` + 5 libFuzzer drivers (beacon, eapol, iwl_fw, rtl_fw, bcm_fw) under ASan+UBSan. ~95M total executions in ~225s, **zero crashes**. See `.claude/knowledge/wireless-loopback-and-fuzz-v0.md`. |
 | 2026-05-01 | P0 #4 Wi-Fi control tier (Phases 2/4/5/6/7 — HW-untested) | Full wireless control tier: `kernel/net/wireless/wifi_diag.{h,cpp}` (512-event diag ring, panic-dumped, exposed via `wifi diag` shell command) + crypto primitives (`crypto/sha1.cpp` SHA-1, `sha256.cpp` SHA-256, `hmac.cpp` HMAC-SHA1/SHA256, `pbkdf2.cpp` PBKDF2-WPA, `prf.cpp` 802.11 PRF + KDF-SHA256, all KAT-verified at boot) + `eapol.{h,cpp}` (EAPOL-Key frame parse/build/MIC patch/MIC verify) + `fourway.{h,cpp}` (WPA2 4-way handshake state machine — PMK→PTK derivation, M1/M3 processing, M2/M4 build, GTK KDE extraction, replay-counter validation; full handshake KAT-tested with synthetic AP) + `wdev.{h,cpp}` (cfg80211-equivalent WirelessDevice + ops vtable, scan-result dedupe, key-install dispatch on M3) + `mlme.{h,cpp}` (auth/assoc/deauth frame builders + MlmeConnect/Disconnect/ScanAndWait flow + default RSN IE) + per-vendor upload state machines (`iwlwifi_upload.{h,cpp}` Intel CSR reset → NicInit → section walk → ALIVE wait, `rtl88xx_upload.{h,cpp}` Realtek FWDL → page write → CHKSUM_RPT → H2C_INIT, `bcm43xx_upload.{h,cpp}` Broadcom stop-MAC → SHM upload → start-ucode) + `iwlwifi_rings.{h,cpp}` (TFD/RBD ring scaffolds). 13 new boot self-tests gated by `DUETOS_BOOT_SELFTESTS`; every register write + every state transition recorded to wifi-diag ring; ring dumped from panic handler. **HW runtime untested** — every per-vendor section-copy short-circuits to `Unsupported` until DMA-coherent allocation lands. See `.claude/knowledge/wireless-control-tier-v0.md`. |
@@ -58,7 +59,7 @@ schedule them.
 |------|--------|--------------|
 | P0 #3 USB mouse | xHCI HID class needs report-descriptor parsing for mouse-class endpoints; the keyboard-class path landed in `xhci-hid-keyboard-v0.md` and is the template. No QEMU emulation of USB mouse — has to be tested on physical HW post-merge. | 200-300 LOC |
 | P1 #6 Terminal emulator | Kernel shell is wired to a single global console (ConsoleWrite). A windowed terminal needs a console-multiplex refactor so the shell takes a per-session sink. | Multi-session refactor |
-| P1 #7 Image / PDF / media viewers | Each format needs its own parser + frame loop. Image viewer is the smallest (PNG / BMP, ~500 LOC each). PDF is huge. Audio / video need P0 #2 first. | One-per-format |
+| P1 #7 Image / PDF / media viewers (PARTIAL — BMP landed 2026-05-02) | BMP is in (`kernel/apps/imageview.{h,cpp}`, see `imageview-bmp-v0.md`). PNG / JPEG each need their own parser TU; the existing app is structured to dispatch by extension. PDF is huge. Audio / video need P0 #2 first. | One-per-remaining-format |
 | P3 #21 Accessibility | Magnifier landed (this commit). Screen reader needs an AT-SPI-equivalent kernel surface; on-screen keyboard needs >32 widget slots (today's cap; bump first). | Per-primitive |
 | P3 #22 IME / non-Latin input | Input-method framework refactor; PS/2 + xHCI HID drivers currently hardcode US layout. | Input refactor |
 | P3 #24 Locale / language switching | UI strings live in C++ literals across every `kernel/apps/*.cpp`. A string-table layer with id → text indirection is the prerequisite. | Refactor across all apps |
@@ -185,14 +186,23 @@ future slice can pick one without re-deriving the field.
   user-mode process.
 - **Owners:** `userland/shell/`, plus a PTY layer (does not exist).
 
-### 7. Image / PDF / media viewers [DEFERRED — per-format parsers + storage]
-- **Today:** none. `mini_browser` is a smoke test, not a default
-  browser app (`mini-browser-runs-on-duetos-v0.md`).
-- **Expected:** image viewer (PNG/JPEG), PDF reader, audio/video
-  player. Likely Win32 PE apps once GDI/D3D acceleration improves,
-  or native kernel-resident apps.
-- **Owners:** new `kernel/apps/imgview.{h,cpp}` etc., or PE apps
-  installed under `userland/apps/`.
+### 7. Image / PDF / media viewers [PARTIAL — BMP landed 2026-05-02]
+- **Today (2026-05-02):** BMP viewer landed at
+  `kernel/apps/imageview.{h,cpp}`. Pairs with Screenshot:
+  every `Ctrl+Alt+P` capture is a 32-bpp top-down BMP this
+  viewer reads byte-for-byte. Streaming decode via
+  `Fat32ReadFileStream`, aspect-preserving NN downsample, no
+  upscale. N/P/R + Left/Right keybinds, Start-menu entry,
+  boot self-test. See `.claude/knowledge/imageview-bmp-v0.md`.
+- **Still missing:** PNG / JPEG / GIF (each wants its own
+  parser TU; the existing app dispatches by extension once
+  parsers exist). PDF (huge). Audio / video need P0 #2 first.
+  `mini_browser` is a smoke test, not a default browser app
+  (`mini-browser-runs-on-duetos-v0.md`).
+- **Expected:** native PNG/JPEG/PDF viewer apps; audio/video
+  player once HDA lands.
+- **Owners:** `kernel/apps/imageview*.cpp` (extend with PNG /
+  JPEG dispatch); separate apps for PDF and media.
 
 ### 8. Clipboard + drag-and-drop wired into apps [LANDED 2026-05-01]
 - **Today:** clipboard smoke tests exist; no kernel app uses the

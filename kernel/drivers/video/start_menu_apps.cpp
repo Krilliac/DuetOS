@@ -115,6 +115,11 @@ bool ResolveTargetName(const char* s, ThemeRole* out)
         *out = ThemeRole::LogView;
         return true;
     }
+    if (StrEqI(s, "imageview") || StrEqI(s, "imageviewer"))
+    {
+        *out = ThemeRole::ImageView;
+        return true;
+    }
     return false;
 }
 

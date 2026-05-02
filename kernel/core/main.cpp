@@ -115,6 +115,7 @@
 #include "apps/clock.h"
 #include "apps/files.h"
 #include "apps/gfxdemo.h"
+#include "apps/imageview.h"
 #include "apps/notes.h"
 #include "apps/screenshot.h"
 #include "apps/settings.h"
@@ -1213,6 +1214,22 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::drivers::video::ThemeRegisterWindow(Role::Settings, settings_handle);
     duetos::apps::settings::SettingsInit(settings_handle);
     DUETOS_BOOT_SELFTEST(duetos::apps::settings::SettingsSelfTest());
+
+    // IMAGE VIEWER — opens BMP files from the FAT32 root volume.
+    // Pairs with the Screenshot app (Ctrl+Alt+P): every capture
+    // lands as a 32-bpp top-down BMP this viewer accepts byte-
+    // for-byte. Hidden by default; raised from the Start menu's
+    // IMAGE VIEWER entry. N/P cycle images, R re-scans the root.
+    duetos::drivers::video::WindowChrome image_chrome = theme_chrome(Role::ImageView);
+    image_chrome.x = 280;
+    image_chrome.y = 90;
+    image_chrome.w = 460;
+    image_chrome.h = 360;
+    const duetos::drivers::video::WindowHandle image_handle =
+        duetos::drivers::video::WindowRegister(image_chrome, "IMAGE VIEWER");
+    duetos::drivers::video::ThemeRegisterWindow(Role::ImageView, image_handle);
+    duetos::apps::imageview::ImageViewInit(image_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::imageview::ImageViewSelfTest());
 
     // Framebuffer text console. 80x40 chars of boot log at the
     // bottom of the desktop, under the windows in z-order. Dragging
@@ -2616,6 +2633,11 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     {
                         app_consumed = duetos::apps::files::FilesFeedArrow(ev.code == kKeyArrowUp);
                     }
+                    else if (active == duetos::apps::imageview::ImageViewWindow() &&
+                             (ev.code == kKeyArrowLeft || ev.code == kKeyArrowRight))
+                    {
+                        app_consumed = duetos::apps::imageview::ImageViewFeedArrow(ev.code == kKeyArrowLeft);
+                    }
                     else if (active == duetos::apps::notes::NotesWindow() &&
                              (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyArrowLeft ||
                               ev.code == kKeyArrowRight || ev.code == kKeyHome || ev.code == kKeyEnd ||
@@ -2654,6 +2676,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                             else if (active == duetos::apps::settings::SettingsWindow())
                             {
                                 app_consumed = duetos::apps::settings::SettingsFeedChar(c);
+                            }
+                            else if (active == duetos::apps::imageview::ImageViewWindow())
+                            {
+                                app_consumed = duetos::apps::imageview::ImageViewFeedChar(c);
                             }
                         }
                     }
@@ -2830,6 +2856,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             {"KERNEL LOG", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::LogView)},
             {"GFX DEMO", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::GfxDemo)},
             {"SETTINGS", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Settings)},
+            {"IMAGE VIEWER", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::ImageView)},
         };
         static const duetos::drivers::video::MenuItem kStartItemsTrailing[] = {
             {"HELP / SHORTCUTS", 6},
