@@ -68,6 +68,15 @@ bool ImageViewFeedChar(char c);
 /// consumed (i.e. we have at least one image to navigate).
 bool ImageViewFeedArrow(bool left);
 
+/// Re-scan the FAT32 root, find a BMP whose 8.3 name matches
+/// `name` (case-insensitive), and select it as the current
+/// image. Used by the Files app's "open with ImageView" hand-off
+/// when a user hits Enter on a `.BMP` entry — the caller still
+/// has to raise the ImageView window separately (e.g. via
+/// `WindowRaise(ImageViewWindow())`). Returns true iff the file
+/// was found and queued for decode on the next paint.
+bool ImageViewSelectByName(const char* name);
+
 /// Boot self-test. Synthesises a 4×4 32-bpp BMP in memory through
 /// the same byte layout the Screenshot app writes, parses it via
 /// the in-process header decoder, and asserts width/height/bpp

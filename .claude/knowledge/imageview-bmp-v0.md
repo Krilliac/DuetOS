@@ -145,6 +145,19 @@ existing kernel app uses it), and the keyboard-router pattern
 novel surface is the BMP header decoder + the streaming
 row-sampler, both covered by the boot self-test.
 
+## Cross-app dispatch (added 2026-05-02)
+
+`ImageViewSelectByName(const char* name)` — public entrypoint
+that re-scans the FAT32 root, finds a BMP whose 8.3 name
+matches case-insensitively, and queues it for decode on the
+next paint. Returns true iff the file was found. The Files
+app uses it for "open with ImageView": when the user hits
+Enter on a `.BMP` entry in disk view, Files calls
+`ImageViewSelectByName(e.name)` then
+`WindowRaise(ThemeRoleWindow(ImageView))`. This keeps the
+hand-off cheap — no new IPC, no plumbing through ring 3, just
+a function call inside the kernel-resident app namespace.
+
 ## Resume prompt
 
 > Read `.claude/knowledge/imageview-bmp-v0.md`. The image
@@ -156,4 +169,7 @@ row-sampler, both covered by the boot self-test.
 > To add PNG, write `kernel/apps/imageview_png.cpp` and
 > dispatch from `imageview.cpp` by extension; the existing
 > filename scan can keep its single-extension test or grow a
-> second branch.
+> second branch. The `ImageViewSelectByName` entrypoint is
+> the cross-app hand-off — Files calls it for Enter on
+> `.BMP`; future apps (e.g. shell `view <file>`) can do the
+> same.

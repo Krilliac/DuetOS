@@ -690,6 +690,31 @@ bool ImageViewFeedArrow(bool left)
     return true;
 }
 
+bool ImageViewSelectByName(const char* name)
+{
+    if (name == nullptr || name[0] == '\0')
+        return false;
+    RescanRoot();
+    auto up = [](char c) { return (c >= 'a' && c <= 'z') ? static_cast<char>(c - ('a' - 'A')) : c; };
+    for (u32 i = 0; i < g_state.count; ++i)
+    {
+        const char* a = g_state.names[i];
+        u32 k = 0;
+        for (; a[k] != '\0' && name[k] != '\0'; ++k)
+        {
+            if (up(a[k]) != up(name[k]))
+                break;
+        }
+        if (a[k] == '\0' && name[k] == '\0')
+        {
+            g_state.index = i;
+            g_state.needs_decode = true;
+            return true;
+        }
+    }
+    return false;
+}
+
 void ImageViewSelfTest()
 {
     using arch::SerialWrite;

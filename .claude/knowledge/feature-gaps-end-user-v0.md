@@ -7,6 +7,7 @@ _Last updated: 2026-05-02._
 
 | Date | Item | Effect |
 |------|------|--------|
+| 2026-05-02 | P1 #7 Files app — FAT32 disk view + cross-app .BMP open | `kernel/apps/files.cpp` extended with a second backend mode: existing ramfs view kept (default), new FAT32 root view toggleable via 'D' (disk) / 'M' (memory) keys. Header shows `RAM:/` or `DISK:/` so users always know where they are. Disk view enumerates the FAT32 root via `Fat32ListDirByCluster`, paints each entry with the same `[D]/[F]` row format as ramfs, supports rescan via 'R'. **Cross-app dispatch**: hitting Enter on a `.BMP` entry calls new `ImageViewSelectByName()`, raises the ImageView window via `ThemeRoleWindow(ImageView) + WindowRaise` — so user takes a screenshot, opens Files, switches to disk view, hits Enter on `SHOT0001.BMP` and the screenshot opens. Boot self-test exercises ramfs descend+back, mode toggle, and the extension-match helper used by the dispatch. Closes the "Files is read-only / FAT32 invisible" half of the P0 #1 follow-up. |
 | 2026-05-02 | P1 #7 Image viewer (BMP) | `kernel/apps/imageview.{h,cpp}` — native kernel app reads 32-bpp uncompressed BMPs from the FAT32 root and paints them in a window. Pairs naturally with the Screenshot app: every `Ctrl+Alt+P` capture lands as a `SHOTNNNN.BMP` this viewer accepts byte-for-byte. Decode is streaming via `Fat32ReadFileStream` so a 1024×768 (~3 MiB) capture fits in the 2 MiB kernel heap; nearest-neighbour downsample with aspect-preserving fit, no upscale; both top-down (negative `biHeight`) and bottom-up DIBs supported. New `ThemeRole::ImageView` + 10-theme palette extension; Start menu entry "IMAGE VIEWER"; arrow Left/Right + N/P/R keybinds; boot self-test exercises the BMP header round-trip + aspect-fit math + magic / 24-bpp / sign-flip negative cases. 24-bpp / PNG / JPEG / subdir walk deferred. See `.claude/knowledge/imageview-bmp-v0.md`. |
 | 2026-05-01 | P2 #12 EDID parser (one of the three blockers) | `kernel/drivers/gpu/edid.{h,cpp}` — clean-room VESA E-EDID 1.3/1.4 base-block parser + `edid_selftest.cpp` 5-fixture boot self-test (1080p digital + analog 1024 + bad-checksum + short-buffer + bad-header) + `monitor` shell command. Pure compute, no DMA, no DDC dependency. Caught a `refresh_mhz` unit bug while landing (formula was missing a factor of 1000; host-side test fixture asserted `>= 59900 && <= 60100` for a 60.000 Hz mode and rejected the 60-Hz integer truncation). See `.claude/knowledge/edid-parser-v0.md`. |
 | 2026-05-01 | P0 #4 Wi-Fi loopback test + host fuzz harness (verifies the previously-HW-only-testable control tier) | `kernel/net/wireless/test/{fake_ap,loopback_driver,wireless_e2e_test}.{h,cpp}` — software AP peer + fake `WirelessDeviceOps` driver + 4-case boot self-test. **Success case asserts TK and GTK match byte-for-byte between AP and STA endpoints** (proves PRF / nonces / PMK / MAC ordering all agree across both sides of the handshake). Wrong-PSK rejection, replay-counter rejection, MIC-tamper rejection. **Bugs caught while landing this slice:** (1) PBKDF2 KAT had wrong reference value (kernel impl was correct; test fixture was wrong); (2) `WirelessDeliverEapol` never sent M2/M4 — fixed by adding `SendEapolFrame` op + auto-build paths in wdev. Also `tests/fuzz/` — standalone Makefile + `host_shim/` + 5 libFuzzer drivers (beacon, eapol, iwl_fw, rtl_fw, bcm_fw) under ASan+UBSan. ~95M total executions in ~225s, **zero crashes**. See `.claude/knowledge/wireless-loopback-and-fuzz-v0.md`. |
@@ -86,7 +87,7 @@ future slice can pick one without re-deriving the field.
 
 ## P0 — workflow blockers (a fresh user hits these in the first 5 minutes)
 
-### 1. Persistent file save / load [LANDED for Notes 2026-05-01]
+### 1. Persistent file save / load [LANDED for Notes 2026-05-01; Files-FAT32 view 2026-05-02]
 - **Today:** Notes save / load is wired against the FAT32 root
   volume — Ctrl+S writes the live buffer to `NOTES.TXT`, Ctrl+O
   loads it back. Implementation in
@@ -97,12 +98,23 @@ future slice can pick one without re-deriving the field.
   (`Fat32WriteInPlace`, `Fat32AppendAtPath`, `SYS_FILE_WRITE`,
   `SYS_FILE_CREATE`, cap-gated by `kCapFsWrite`) had already
   landed before this entry was opened — the gap was app wiring.
-- **Still missing:** `kernel/apps/files.{h,cpp}` is still
-  read-only (no copy / move / delete UI). `userland/libs/*`
-  doesn't have a file-open-dialog primitive. Other apps
-  (Settings, Calculator, Clock) don't persist any state yet.
+- **Today (2026-05-02):** Files app grew a FAT32 disk view —
+  'D' switches into `DISK:/` mode (root listing, name + size +
+  type tag), 'M' switches back to the ramfs view. 'R' rescans
+  so newly-written files (fresh screenshots, log entries,
+  saved notes) appear without restart. Enter on a `.BMP`
+  dispatches to ImageView (raises the window + selects that
+  file). See `imageview-bmp-v0.md` for the receiving end and
+  the table row above.
+- **Still missing:** `kernel/apps/files.{h,cpp}` has no
+  copy / move / delete UI yet (FAT32 has the primitives; the
+  app needs a confirmation modal + key bindings). FAT32
+  subdirectory descent in disk view is deferred (root only
+  in v0). `userland/libs/*` doesn't have a file-open-dialog
+  primitive. Other apps (Settings, Calculator, Clock) don't
+  persist any state yet.
 - **Owners:** `kernel/apps/files.{h,cpp}` for the file-manager
-  UI; userland for the dialog primitive.
+  mutation UI; userland for the dialog primitive.
 
 ### 2. Audio output [BLOCKED on HDA codec/stream]
 - **Today:** `kernel/drivers/audio/audio.cpp` does HDA register
