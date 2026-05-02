@@ -520,14 +520,24 @@ i64 DoPersonality(u64 persona)
 // scheduler — return 0 (neutral nice value); accept set as no-op.
 i64 DoGetpriority(u64 which, u64 who)
 {
-    (void)which;
     (void)who;
-    return 0;
+    // PRIO_PROCESS=0, PRIO_PGRP=1, PRIO_USER=2 — anything else
+    // is invalid input.
+    if (which > 2)
+        return kEINVAL;
+    // Linux returns 20 - actual_nice, where actual_nice is 0
+    // for the default. Userspace decodes it as nice = 20 - rv.
+    // Returning 20 means "default nice (0)" in their idiom.
+    return 20;
 }
 i64 DoSetpriority(u64 which, u64 who, u64 prio)
 {
-    (void)which;
     (void)who;
+    if (which > 2)
+        return kEINVAL;
+    // prio is a 32-bit signed value. Linux clamps to [-20, 19]
+    // and only privileged callers can lower nice. v0 doesn't
+    // model nice; accept any value as no-op.
     (void)prio;
     return 0;
 }
