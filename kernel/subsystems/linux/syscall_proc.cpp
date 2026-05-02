@@ -66,17 +66,24 @@ i64 DoExit(u64 status)
     return DoExitGroup(status);
 }
 
-// Linux getpid() / gettid() on our current single-thread-per-process
-// model both map to the scheduler task ID. Keep them separate helpers
-// anyway so the dispatch table names track the Linux ABI directly and
-// the syscall coverage generator can see a concrete DoGetPid handler.
+// Linux getpid() returns the TGID — in our v0 single-thread-per-
+// process model this is the Process pid (Process::pid, the same id
+// SchedFindProcessByPid resolves against). Returning CurrentTaskId()
+// here would hand back the scheduler task tid, which is a different
+// counter; the immediate symptom was pidfd_open(getpid()) coming
+// back -ESRCH because the tid never matched any Process->pid.
 i64 DoGetPid()
 {
     KLOG_TRACE("linux/proc", "DoGetPid: query");
+    if (core::Process* p = core::CurrentProcess(); p != nullptr)
+        return static_cast<i64>(p->pid);
     return static_cast<i64>(sched::CurrentTaskId());
 }
 
-// Linux: gettid. v0 has one task per process, so tid == pid.
+// Linux: gettid returns the per-thread ID (kernel task tid). In a
+// single-thread-per-process model getpid() == gettid() conceptually,
+// but the underlying counters in DuetOS are distinct (Process::pid
+// vs. Task::id), so keep this on CurrentTaskId().
 i64 DoGetTid()
 {
     KLOG_TRACE("linux/proc", "DoGetTid: query");
