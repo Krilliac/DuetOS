@@ -159,6 +159,71 @@ When you do, mirror the embed pipeline: `tools/build/build-<name>.sh`
 `kernel/core/main.cpp`. Force-add the build script (`git add -f`)
 because `tools/build/` matches the repo-wide `build/` ignore pattern.
 
+## Second-slice findings — synfs (kCapFsRead+Write FS-mut exerciser)
+
+Same workflow, different cap set. `userland/apps/synfs/synfs.c` is
+spawned with `kCapFsRead | kCapFsWrite` so each FS mutation actually
+reaches the kernel handler. Targets ~30 FS-mut syscalls: access (4
+forms), statfs / fstatfs, mkdir / rmdir + dup calls, openat(O_CREAT),
+write, ftruncate (shrink+grow), fchmod / fchown / fsync / fdatasync,
+chmod / chown / truncate, utimensat, rename / renameat2,
+copy_file_range, unlink (3 forms), unlinkat(AT_REMOVEDIR), sync /
+syncfs, mknod, link, symlink.
+
+### Output convention diverges from synxtest
+
+Synxtest's TAG-then-FMTI pattern leaves a syscall (and its kernel
+logs) BETWEEN the prefix and the rc, so on a busy serial port the rc
+lands on a separate line from the `[exe]` prefix and `^\[exe\]` greps
+miss it. Synfs uses `report_rc(label, v)` to build the entire
+`[fs] <label> rc=<v>\n` line in one buffer and writes it with a
+single `sc3(SYS_write)` — atomic-line writes side-step the whole
+class of interleaving. Future exercisers should adopt this pattern.
+
+### Bugs the synfs inventory caught
+
+1. **`DoOpen()` ignored its `flags`** (`(void)flags;`) —
+   `openat(SYNFS.TMP, O_WRONLY|O_CREAT, 0644)` returned -ENOENT
+   instead of creating. Cascaded ~10 follow-on tests to -2/-5.
+
+2. **`Fat32AppendAtPath` refuses zero-byte files** (fat32_write.cpp
+   `first_cluster<2` guards). The "obvious" fix — Fat32CreateAtPath
+   with len=0 on O_CREAT — is a trap because the next write hits the
+   AppendInDir rejection. Combined fix: don't materialise on O_CREAT;
+   add a per-fd `flags` byte on `Process::LinuxFd` with
+   `kLinuxFdFlagPendingCreate` (0x01); DoWrite's extend branch routes
+   the FIRST extending write through Fat32CreateAtPath instead, then
+   clears the flag and re-looks-up the entry to populate
+   first_cluster for subsequent in-bounds writes.
+
+3. **`Fat32{Mkdir,Rmdir}AtPath` collapse every error to bool false**
+   — DoMkdir / DoRmdir mapped to `-EIO` for every failure. Fixed by
+   probing with Fat32LookupPath first:
+   - mkdir: lookup-exists -> -EEXIST. !lookup && !mkdir -> -EIO.
+   - rmdir: !lookup -> -ENOENT. lookup-not-dir -> -ENOTDIR.
+     lookup-but-rmdir-fails -> -ENOTEMPTY (best-effort).
+   Added `kEEXIST=-17`, `kENOTEMPTY=-39`, `kEFBIG=-27` to
+   `syscall_internal.h`.
+
+4. **`copy_file_range` returned -EFAULT** even with two valid fds.
+   `DoCopyFileRange` used DoRead/DoWrite as kernel helpers with a
+   KMalloc'd bounce buffer; CopyToUser/CopyFromUser inside reject
+   kernel-direct-map VAs. Rewrote to call Fat32ReadFile +
+   Fat32CreateAtPath / Fat32AppendAtPath directly on a kernel buffer,
+   no user-VA validation involved. Threaded pending-create resolution
+   into the dst path. Sub-GAP: src reads start from offset 0 every
+   iteration (Fat32ReadFile is no-offset; v0 caps stage at 4 KiB so
+   prefix-then-slice works for small files; larger files get -EFBIG).
+
+### Resulting `[fs]` matrix (post-fixes)
+
+Passing: access (4 forms), statfs/fstatfs, mkdir+duplicate, rmdir+
+non-existent (correct errnos), openat(O_CREAT)+write+ftruncate+
+fchmod/fchown/fsync/fdatasync, chmod/chown/truncate/utimensat,
+rename/renameat2, copy_file_range, unlink (3 forms),
+unlinkat(AT_REMOVEDIR), sync/syncfs. Honest unprivileged: mknod
+(-EPERM). Facades: link/symlink (-ENOSYS).
+
 ## Cross-references
 
 - `.claude/knowledge/subsystems-status.md` — top-level Linux ABI inventory
