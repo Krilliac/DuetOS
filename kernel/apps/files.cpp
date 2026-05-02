@@ -1,6 +1,7 @@
 #include "apps/files.h"
 
 #include "apps/imageview.h"
+#include "apps/notes.h"
 #include "arch/x86_64/serial.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/notify.h"
@@ -48,9 +49,17 @@ struct State
     duetos::fs::fat32::DirEntry fat_entries[kFatMax];
     u32 fat_count;
     u32 fat_selection;
+
+    // Delete confirmation. Two-step: first 'X' arms the prompt
+    // by storing the selection's index; second key resolves it
+    // ('Y' = delete, anything else = cancel). Cleared on any
+    // navigation event so an arrow keypress unambiguously
+    // unwinds an accidental arm.
+    bool delete_armed;
+    u32 delete_armed_idx;
 };
 
-constinit State g_state = {duetos::drivers::video::kWindowInvalid, Mode::Ramfs, {}, 0, 0, {}, 0, 0};
+constinit State g_state = {duetos::drivers::video::kWindowInvalid, Mode::Ramfs, {}, 0, 0, {}, 0, 0, false, 0};
 
 u32 CountChildren(const duetos::fs::RamfsNode* dir)
 {
@@ -278,9 +287,28 @@ void DrawFat32(u32 cx, u32 cy, u32 cw, u32 ch)
         const bool is_dir = (e.attributes & 0x10) != 0;
         DrawRowGeneric(cx, list_top + i * kRowH, cw, is_dir, e.name, e.size_bytes, idx == g_state.fat_selection);
     }
-    if (ch > kRowH + 2)
+    // Delete prompt overlays the footer row when armed; mirrors
+    // the bg colour so a stale prompt can't visually persist
+    // through a rescan or selection change.
+    if (g_state.delete_armed && g_state.delete_armed_idx < g_state.fat_count && ch > kRowH + 2)
     {
-        FramebufferDrawString(cx + 4, cy + ch - kRowH - 1, "UP/DN ENTER:OPEN R:RESCAN M:RAM", kInkDim, kBg);
+        const auto& e = g_state.fat_entries[g_state.delete_armed_idx];
+        char prompt[80];
+        u32 p = 0;
+        const char* lead = "DELETE ";
+        for (u32 i = 0; lead[i] != '\0' && p + 1 < sizeof(prompt); ++i)
+            prompt[p++] = lead[i];
+        for (u32 i = 0; e.name[i] != '\0' && p + 1 < sizeof(prompt); ++i)
+            prompt[p++] = e.name[i];
+        const char* tail = "? Y:CONFIRM ANY:CANCEL";
+        for (u32 i = 0; tail[i] != '\0' && p + 1 < sizeof(prompt); ++i)
+            prompt[p++] = tail[i];
+        prompt[p] = '\0';
+        FramebufferDrawString(cx + 4, cy + ch - kRowH - 1, prompt, 0x00FF8080, kBg);
+    }
+    else if (ch > kRowH + 2)
+    {
+        FramebufferDrawString(cx + 4, cy + ch - kRowH - 1, "UP/DN ENTER:OPEN R:RESCAN X:DELETE M:RAM", kInkDim, kBg);
     }
 }
 
@@ -323,9 +351,75 @@ bool OpenFat32Selected()
         }
         return true;
     }
+    if (EndsWithCi(e.name, ".TXT"))
+    {
+        if (duetos::apps::notes::NotesLoadFile(e.name))
+        {
+            const duetos::drivers::video::WindowHandle nh =
+                duetos::drivers::video::ThemeRoleWindow(duetos::drivers::video::ThemeRole::Notes);
+            if (nh != duetos::drivers::video::kWindowInvalid)
+            {
+                duetos::drivers::video::WindowRaise(nh);
+            }
+            duetos::drivers::video::NotifyShow("opened in notes");
+            duetos::arch::SerialWrite("[files] open TXT -> Notes: ");
+            duetos::arch::SerialWrite(e.name);
+            duetos::arch::SerialWrite("\n");
+        }
+        else
+        {
+            duetos::drivers::video::NotifyShow("notes: load failed");
+        }
+        return true;
+    }
     duetos::arch::SerialWrite("[files] open file (no handler): ");
     duetos::arch::SerialWrite(e.name);
     duetos::arch::SerialWrite("\n");
+    return true;
+}
+
+bool DeleteFat32Selected()
+{
+    namespace fat = fs::fat32;
+    if (g_state.fat_selection >= g_state.fat_count)
+        return false;
+    const auto& e = g_state.fat_entries[g_state.fat_selection];
+    if ((e.attributes & 0x10) != 0)
+    {
+        // Refuse to delete a directory in v0 — Fat32DeleteAtPath
+        // is only intended for files; directory teardown wants a
+        // recursive walk we haven't written.
+        duetos::drivers::video::NotifyShow("cannot delete directories");
+        return true;
+    }
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+        return false;
+    char saved_name[fat::kMaxDirEntries > 0 ? 16 : 16];
+    u32 i = 0;
+    for (; i + 1 < sizeof(saved_name) && e.name[i] != '\0'; ++i)
+        saved_name[i] = e.name[i];
+    saved_name[i] = '\0';
+    const bool ok = fat::Fat32DeleteAtPath(v, saved_name);
+    duetos::arch::SerialWrite(ok ? "[files] delete OK: " : "[files] delete FAILED: ");
+    duetos::arch::SerialWrite(saved_name);
+    duetos::arch::SerialWrite("\n");
+    if (ok)
+    {
+        duetos::drivers::video::NotifyShow("file deleted");
+        // Drop selection by one if we just removed the last
+        // entry; after rescan the count may have shifted.
+        const u32 prev = g_state.fat_selection;
+        RescanFat32();
+        if (prev >= g_state.fat_count)
+        {
+            g_state.fat_selection = (g_state.fat_count > 0) ? (g_state.fat_count - 1) : 0;
+        }
+    }
+    else
+    {
+        duetos::drivers::video::NotifyShow("delete failed");
+    }
     return true;
 }
 
@@ -355,6 +449,9 @@ duetos::drivers::video::WindowHandle FilesWindow()
 
 bool FilesFeedArrow(bool up)
 {
+    // Any navigation cancels a pending delete prompt — keeps the
+    // confirmation flow strictly modal at the caret.
+    g_state.delete_armed = false;
     const u32 n = ModeCount();
     if (n == 0)
         return true;
@@ -374,10 +471,42 @@ bool FilesFeedArrow(bool up)
 
 bool FilesFeedChar(char c)
 {
+    // Pending delete-prompt: 'Y' confirms, anything else cancels.
+    // This branch comes first so a stale 'X' followed by an
+    // unrelated key cleanly disarms.
+    if (g_state.delete_armed)
+    {
+        g_state.delete_armed = false;
+        if (c == 'y' || c == 'Y')
+        {
+            DeleteFat32Selected();
+        }
+        else
+        {
+            duetos::drivers::video::NotifyShow("delete cancelled");
+        }
+        return true;
+    }
     if (c == 'j' || c == 'J')
         return FilesFeedArrow(false);
     if (c == 'k' || c == 'K')
         return FilesFeedArrow(true);
+    if (c == 'x' || c == 'X')
+    {
+        if (g_state.mode == Mode::Fat32 && g_state.fat_selection < g_state.fat_count)
+        {
+            const auto& e = g_state.fat_entries[g_state.fat_selection];
+            if ((e.attributes & 0x10) != 0)
+            {
+                duetos::drivers::video::NotifyShow("cannot delete directories");
+                return true;
+            }
+            g_state.delete_armed = true;
+            g_state.delete_armed_idx = g_state.fat_selection;
+            duetos::drivers::video::NotifyShow("press Y to confirm delete");
+        }
+        return true;
+    }
     if (c == 'd' || c == 'D')
     {
         if (g_state.mode != Mode::Fat32)
@@ -503,18 +632,33 @@ void FilesSelfTest()
     if (g_state.mode != Mode::Ramfs)
         pass = false;
 
-    // Extension-match helper sanity (used by Files->ImageView dispatch).
+    // Extension-match helper sanity (used by Files->ImageView dispatch
+    // and Files->Notes dispatch).
     if (!EndsWithCi("SHOT0001.BMP", ".bmp"))
         pass = false;
     if (!EndsWithCi("readme.BMP", ".bmp"))
         pass = false;
     if (EndsWithCi("notes.txt", ".bmp"))
         pass = false;
+    if (!EndsWithCi("README.TXT", ".txt"))
+        pass = false;
+    if (!EndsWithCi("session.cfg", ".CFG"))
+        pass = false;
+    if (EndsWithCi("AB", ".bmp"))
+        pass = false;
+
+    // Delete-armed flow: a navigation event must clear the
+    // pending prompt. Touch-test only (no FAT32 write involved).
+    g_state.delete_armed = true;
+    g_state.delete_armed_idx = 0;
+    FilesFeedArrow(true);
+    if (g_state.delete_armed)
+        pass = false;
 
     g_state.ramfs_depth = saved_depth;
     g_state.ramfs_selection = saved_sel;
     g_state.mode = saved_mode;
-    SerialWrite(pass ? "[files] self-test OK (ramfs descend+back, mode toggle, ext match)\n"
+    SerialWrite(pass ? "[files] self-test OK (ramfs descend+back, mode toggle, ext match, delete-disarm)\n"
                      : "[files] self-test FAILED\n");
 }
 

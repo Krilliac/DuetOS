@@ -1206,9 +1206,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // menu's SETTINGS entry.
     duetos::drivers::video::WindowChrome settings_chrome = theme_chrome(Role::Settings);
     settings_chrome.x = 320;
-    settings_chrome.y = 120;
+    settings_chrome.y = 100;
     settings_chrome.w = 380;
-    settings_chrome.h = 280;
+    settings_chrome.h = 340;
     const duetos::drivers::video::WindowHandle settings_handle =
         duetos::drivers::video::WindowRegister(settings_chrome, "SETTINGS");
     duetos::drivers::video::ThemeRegisterWindow(Role::Settings, settings_handle);

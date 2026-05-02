@@ -7,6 +7,8 @@ _Last updated: 2026-05-02._
 
 | Date | Item | Effect |
 |------|------|--------|
+| 2026-05-02 | P0 #5 Settings — SHUTDOWN + REBOOT buttons | `kernel/apps/settings.{h,cpp}` grew two new buttons: `REBOOT` (calls `core::KernelReboot()` after `SessionRestoreSave()`) and `SHUTDOWN` (calls `acpi::AcpiShutdown()`, falls through to `arch::Halt()` on QEMU TCG where S5 isn't honoured). Both flush the session-restore payload to `SESSION.CFG` first so the next boot lands in the same layout. `kIdCount` bumped 9→11; Settings window grew 280px→340px to fit the column. Closes the user-visible "no clean exit from the desktop" gap — previously power off required dropping to the kernel shell. |
+| 2026-05-02 | P0 #1 Files — X-then-Y delete + .TXT→Notes dispatch | `kernel/apps/files.cpp` extended the FAT32 disk view with file mutation: `X` arms a delete prompt for the selected file, `Y` confirms (calls `Fat32DeleteAtPath` + rescan + selection clamp), any other key cancels. Footer hint switches to `DELETE <name>? Y:CONFIRM ANY:CANCEL` when armed. Navigation cancels a stale arm so an arrow keypress unambiguously disarms. Cross-app dispatch grew `.TXT` → Notes: `Enter` on a `.TXT` entry calls new `apps::notes::NotesLoadFile(path)` (a path-aware extraction of the existing NotesLoad helper) and raises the Notes window via `ThemeRoleWindow + WindowRaise`, mirroring the existing `.BMP` → ImageView pattern. Self-test exercises ext-match for `.TXT` / `.CFG` / negative cases plus the delete-armed-then-disarm-on-arrow round trip. **NOTE:** `files.cpp` is now 665 LOC, over the 500-line guideline; logically cohesive (all "file browser actions" sharing state) but a split into `files_ramfs.cpp` / `files_fat32.cpp` is defensible and should be reconsidered if a fifth concern lands. |
 | 2026-05-02 | P1 #7 Files app — FAT32 disk view + cross-app .BMP open | `kernel/apps/files.cpp` extended with a second backend mode: existing ramfs view kept (default), new FAT32 root view toggleable via 'D' (disk) / 'M' (memory) keys. Header shows `RAM:/` or `DISK:/` so users always know where they are. Disk view enumerates the FAT32 root via `Fat32ListDirByCluster`, paints each entry with the same `[D]/[F]` row format as ramfs, supports rescan via 'R'. **Cross-app dispatch**: hitting Enter on a `.BMP` entry calls new `ImageViewSelectByName()`, raises the ImageView window via `ThemeRoleWindow(ImageView) + WindowRaise` — so user takes a screenshot, opens Files, switches to disk view, hits Enter on `SHOT0001.BMP` and the screenshot opens. Boot self-test exercises ramfs descend+back, mode toggle, and the extension-match helper used by the dispatch. Closes the "Files is read-only / FAT32 invisible" half of the P0 #1 follow-up. |
 | 2026-05-02 | P1 #7 Image viewer (BMP) | `kernel/apps/imageview.{h,cpp}` — native kernel app reads 32-bpp uncompressed BMPs from the FAT32 root and paints them in a window. Pairs naturally with the Screenshot app: every `Ctrl+Alt+P` capture lands as a `SHOTNNNN.BMP` this viewer accepts byte-for-byte. Decode is streaming via `Fat32ReadFileStream` so a 1024×768 (~3 MiB) capture fits in the 2 MiB kernel heap; nearest-neighbour downsample with aspect-preserving fit, no upscale; both top-down (negative `biHeight`) and bottom-up DIBs supported. New `ThemeRole::ImageView` + 10-theme palette extension; Start menu entry "IMAGE VIEWER"; arrow Left/Right + N/P/R keybinds; boot self-test exercises the BMP header round-trip + aspect-fit math + magic / 24-bpp / sign-flip negative cases. 24-bpp / PNG / JPEG / subdir walk deferred. See `.claude/knowledge/imageview-bmp-v0.md`. |
 | 2026-05-01 | P2 #12 EDID parser (one of the three blockers) | `kernel/drivers/gpu/edid.{h,cpp}` — clean-room VESA E-EDID 1.3/1.4 base-block parser + `edid_selftest.cpp` 5-fixture boot self-test (1080p digital + analog 1024 + bad-checksum + short-buffer + bad-header) + `monitor` shell command. Pure compute, no DMA, no DDC dependency. Caught a `refresh_mhz` unit bug while landing (formula was missing a factor of 1000; host-side test fixture asserted `>= 59900 && <= 60100` for a 60.000 Hz mode and rejected the 60-Hz integer truncation). See `.claude/knowledge/edid-parser-v0.md`. |
@@ -170,22 +172,20 @@ future slice can pick one without re-deriving the field.
   `/lib/firmware` is a ramfs node — that's fine for dev,
   needs FAT32-mount support for shipping installs).
 
-### 5. Settings panel [LANDED 2026-05-01]
-- **Today (2026-05-01):** v0 landed. New kernel app at
-  `kernel/apps/settings.{h,cpp}` registers a window under
-  `ThemeRole::Settings`, exposes six buttons (THEME PREV / NEXT,
-  OPACITY -/+, HIGH CTRST, DEFAULT) plus a readout pane (theme
-  name, active-window opacity hex, wall-clock from RtcRead,
-  build banner). Reachable from Start menu → SETTINGS, or
-  keyboard chars `t`/`h`/`-`/`+`/`0` while focused. Mutations
-  flow through the existing `Theme*` and `WindowSetOpacity`
-  APIs — no new authoritative state. Boot self-test asserts
-  char dispatch + theme round-trip + id-range gating.
+### 5. Settings panel [LANDED 2026-05-01; SHUTDOWN+REBOOT 2026-05-02]
+- **Today:** v0 landed 2026-05-01 with theme cycle / opacity /
+  high-contrast / default / log-out / TZ buttons. 2026-05-02
+  added `REBOOT` (via `core::KernelReboot`) and `SHUTDOWN` (via
+  `acpi::AcpiShutdown` → `arch::Halt`) so the user has a clean
+  desktop-level exit path. Both flush `SessionRestoreSave()`
+  first so window positions / theme survive the cycle. Window
+  grew 280px → 340px to fit the 11-button column. `kIdCount`
+  bumped 9 → 11.
 - **Still missing:** Display brightness (no backlight driver).
   Sound (no audio driver). Keyboard layout (US hardcoded).
-  Time zone (UTC only). Language (English hardcoded). Wi-Fi
-  picker (no driver). Bluetooth pairing. Printer setup. Power
-  settings.
+  Language (English hardcoded). Wi-Fi picker (no driver).
+  Bluetooth pairing. Printer setup. Sleep / hibernate (S3
+  / S0ix gated on ACPI AML).
 - **Owners:** `kernel/apps/settings.{h,cpp}` (extend), plus the
   per-surface drivers when they land.
 
