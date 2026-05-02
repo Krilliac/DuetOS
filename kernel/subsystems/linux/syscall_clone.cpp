@@ -292,11 +292,17 @@ i64 DoClone(u64 flags, u64 child_stack, u64 ptid_user, u64 ctid_user, u64 tls)
         return kEPERM;
     }
 
-    // Reject anything other than the CLONE_THREAD same-AS path.
-    // Full fork (CLONE_THREAD clear) needs AS duplication;
-    // that's §11.10 deferred work.
+    // CLONE_THREAD-not-set is the fork-style call: new AS, new
+    // process. DoFork already does that — route there. We
+    // discard ptid_user / child_stack / tls in the fork path
+    // (DoFork inherits the parent's values); a future slice can
+    // honour CLONE_PARENT_SETTID and the child_stack remap.
     if ((flags & (kCloneThread | kCloneVm)) != (kCloneThread | kCloneVm))
-        return kENOSYS;
+    {
+        (void)ptid_user;
+        (void)child_stack;
+        return DoFork();
+    }
     if (child_stack == 0)
         return kEINVAL;
     if ((child_stack & 0xF) != 0)
