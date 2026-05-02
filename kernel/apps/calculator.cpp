@@ -252,6 +252,85 @@ void HandleClear()
     SetDisplayLiteral("0");
 }
 
+// Negate the current display value. Acts on whatever's typed (or
+// the accumulator if `fresh_entry` is set, since the display is
+// then showing the last result). Toggles sign in place by rewriting
+// the display via SetDisplayI64 — keeps formatting consistent with
+// every other path.
+void HandleSignToggle()
+{
+    if (g_state.error)
+        return;
+    const i64 cur = ReadDisplayAsI64();
+    if (cur == 0)
+        return; // -0 == 0; no point flipping
+    SetDisplayI64(-cur);
+    // Once sign-toggled, the digit-typing path should not append
+    // to the existing string — that would produce e.g. "-50" + "1"
+    // = "-501" which is fine, but more usefully a fresh op
+    // commits the new sign. Leaving fresh_entry alone preserves
+    // the ability to type more digits if the user is mid-entry.
+}
+
+// Pop the last digit (or sign) off the display. Mirrors the
+// Backspace key on a real calculator. No-op when the display is
+// already showing a single character or after an error.
+void HandleBackspace()
+{
+    if (g_state.error)
+        return;
+    if (g_state.fresh_entry)
+    {
+        // Backspace after `=` / op should clear the accumulator
+        // view rather than chip away at the previous result.
+        g_state.display_len = 0;
+        g_state.display[0] = '\0';
+        return;
+    }
+    if (g_state.display_len == 0)
+        return;
+    --g_state.display_len;
+    g_state.display[g_state.display_len] = '\0';
+    if (g_state.display_len == 0 || (g_state.display_len == 1 && g_state.display[0] == '-'))
+    {
+        g_state.display[0] = '\0';
+        g_state.display_len = 0;
+    }
+}
+
+// Percent: two semantics depending on whether an op is pending.
+// With a pending op (the common bank-calc convention): treat the
+// display value as a percentage OF the accumulator and combine
+// per the pending op. Examples:
+//     200 + 15 % =       -> 230  (i.e. 200 + 200*15/100)
+//     400 - 10 % =       -> 360
+//     100 * 50 % =       -> 50   (rare, but matches Win10 calc)
+// Without a pending op: divide the display by 100, integer-trunc.
+void HandlePercent()
+{
+    if (g_state.error)
+        return;
+    const i64 cur = ReadDisplayAsI64();
+    if (g_state.has_pending)
+    {
+        // Compute (lhs * cur) / 100 with overflow-resistant order:
+        // do the multiply first so the % of small numbers stays
+        // accurate; integer i64 holds up to 9.2e18 so even with
+        // a 10-digit operand we don't overflow.
+        const i64 lhs = g_state.accumulator;
+        const i64 scaled = (lhs * cur) / 100;
+        SetDisplayI64(scaled);
+    }
+    else
+    {
+        SetDisplayI64(cur / 100);
+    }
+    // Following calc convention, percent leaves the result on the
+    // display but doesn't auto-commit — the user still hits `=` to
+    // close the expression.
+    g_state.fresh_entry = false;
+}
+
 void DispatchKey(char k)
 {
     if (k >= '0' && k <= '9')
@@ -262,6 +341,12 @@ void DispatchKey(char k)
         HandleEquals();
     else if (k == 'C' || k == 'c')
         HandleClear();
+    else if (k == '%')
+        HandlePercent();
+    else if (k == 'n' || k == 'N' || k == '_')
+        HandleSignToggle();
+    else if (static_cast<u8>(k) == 0x08) // ASCII Backspace
+        HandleBackspace();
 }
 
 // Content-draw callback: paints the display strip across the
@@ -421,7 +506,9 @@ bool CalculatorOnWidgetEvent(u32 id)
 
 bool CalculatorFeedChar(char c)
 {
-    if ((c >= '0' && c <= '9') || c == '+' || c == '-' || c == '*' || c == '/' || c == '=' || c == 'c' || c == 'C')
+    const u8 uc = static_cast<u8>(c);
+    if ((c >= '0' && c <= '9') || c == '+' || c == '-' || c == '*' || c == '/' || c == '=' || c == 'c' || c == 'C' ||
+        c == '%' || c == 'n' || c == 'N' || c == '_' || uc == 0x08)
     {
         DispatchKey(c);
         return true;
@@ -429,11 +516,6 @@ bool CalculatorFeedChar(char c)
     if (static_cast<u8>(c) == 0x0A) // Enter -> '='
     {
         DispatchKey('=');
-        return true;
-    }
-    if (static_cast<u8>(c) == 0x08) // Backspace -> Clear
-    {
-        DispatchKey('C');
         return true;
     }
     return false;
@@ -455,6 +537,17 @@ void CalculatorSelfTest()
         {"2+3=", 5},
         {"9-4=", 5},
         {"6*7=", 42},
+        // Sign toggle: 5n produces -5; another n flips back to 5.
+        {"5n=", -5},
+        {"5nn=", 5},
+        // Backspace ('\b' = 0x08): "1234" then BS twice -> "12".
+        {"1234\b\b=", 12},
+        // Percent without pending op: 200% -> 2 (integer trunc).
+        {"200%=", 2},
+        // Percent with pending op: 200 + 15% = 230 (200 + 200*15/100).
+        {"200+15%=", 230},
+        // Percent with subtract: 400 - 10% = 360.
+        {"400-10%=", 360},
     };
     bool all_pass = true;
     for (const Case& tc : cases)

@@ -125,6 +125,11 @@ bool ResolveTargetName(const char* s, ThemeRole* out)
         *out = ThemeRole::About;
         return true;
     }
+    if (StrEqI(s, "help") || StrEqI(s, "shortcuts"))
+    {
+        *out = ThemeRole::Help;
+        return true;
+    }
     return false;
 }
 

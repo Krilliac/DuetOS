@@ -111,7 +111,8 @@ enum class ThemeRole : u8
     Settings = 7,
     ImageView = 8,
     About = 9,
-    kCount = 10,
+    Help = 10,
+    kCount = 11,
 };
 
 struct Theme

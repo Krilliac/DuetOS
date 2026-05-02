@@ -177,6 +177,22 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     DrawLine(cx, y, line, fg, bg);
     y += kRowH;
 
+    // Git commit hash (captured at configure time). Trailing '+'
+    // means the working tree was dirty when CMake configured —
+    // the running image is the named commit *plus* uncommitted
+    // edits. "unknown" means CMake couldn't reach git (not a
+    // checkout, or git not installed during configure).
+    p = 0;
+    AppendStr(line, &p, sizeof(line), "COMMIT:   ");
+#if defined(DUETOS_GIT_HASH)
+    AppendStr(line, &p, sizeof(line), DUETOS_GIT_HASH);
+#else
+    AppendStr(line, &p, sizeof(line), "(undefined)");
+#endif
+    line[p] = '\0';
+    DrawLine(cx, y, line, fg, bg);
+    y += kRowH;
+
     // Uptime.
     p = 0;
     AppendStr(line, &p, sizeof(line), "UPTIME:   ");

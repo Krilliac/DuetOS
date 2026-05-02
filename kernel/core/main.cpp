@@ -116,6 +116,7 @@
 #include "apps/clock.h"
 #include "apps/files.h"
 #include "apps/gfxdemo.h"
+#include "apps/help.h"
 #include "apps/imageview.h"
 #include "apps/notes.h"
 #include "apps/screenshot.h"
@@ -1257,12 +1258,28 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     about_chrome.x = 360;
     about_chrome.y = 140;
     about_chrome.w = 360;
-    about_chrome.h = 200;
+    about_chrome.h = 220;
     const duetos::drivers::video::WindowHandle about_handle =
         duetos::drivers::video::WindowRegister(about_chrome, "ABOUT DUETOS");
     duetos::drivers::video::ThemeRegisterWindow(Role::About, about_handle);
     duetos::apps::about::AboutInit(about_handle);
     DUETOS_BOOT_SELFTEST(duetos::apps::about::AboutSelfTest());
+
+    // HELP — windowed shortcut reference. F1 + Start-menu HELP /
+    // SHORTCUTS still print to the framebuffer console (so the
+    // text survives a console scrollback); this window is the
+    // discovery surface for someone seeing DuetOS for the first
+    // time. Static content list — see kernel/apps/help.cpp.
+    duetos::drivers::video::WindowChrome help_chrome = theme_chrome(Role::Help);
+    help_chrome.x = 200;
+    help_chrome.y = 50;
+    help_chrome.w = 380;
+    help_chrome.h = 480;
+    const duetos::drivers::video::WindowHandle help_handle =
+        duetos::drivers::video::WindowRegister(help_chrome, "HELP");
+    duetos::drivers::video::ThemeRegisterWindow(Role::Help, help_handle);
+    duetos::apps::help::HelpInit(help_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::help::HelpSelfTest());
 
     // Framebuffer text console. 80x40 chars of boot log at the
     // bottom of the desktop, under the windows in z-order. Dragging
@@ -2199,6 +2216,16 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             if (!ctrl && !alt && ev.code == kKeyF1)
             {
                 duetos::drivers::video::CompositorLock();
+                // Raise the windowed Help reference; new users see
+                // a persistent panel they can leave open. Falls
+                // through to PrintShortcutHelp so the framebuffer
+                // console scrollback also carries the same text.
+                const duetos::drivers::video::WindowHandle hh =
+                    duetos::drivers::video::ThemeRoleWindow(duetos::drivers::video::ThemeRole::Help);
+                if (hh != duetos::drivers::video::kWindowInvalid)
+                {
+                    duetos::drivers::video::WindowRaise(hh);
+                }
                 PrintShortcutHelp();
                 duetos::drivers::video::CursorHide();
                 duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
@@ -2891,6 +2918,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             {"SETTINGS", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Settings)},
             {"IMAGE VIEWER", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::ImageView)},
             {"ABOUT", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::About)},
+            {"HELP", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Help)},
         };
         static const duetos::drivers::video::MenuItem kStartItemsTrailing[] = {
             {"HELP / SHORTCUTS", 6},
@@ -3077,6 +3105,18 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                                                   0x00000000);
                         break;
                     case 6: // HELP / SHORTCUTS
+                        // Raise the windowed Help reference and ALSO
+                        // print to the console — the window is the
+                        // discovery surface, the console is the
+                        // scrollback / search surface.
+                        {
+                            const duetos::drivers::video::WindowHandle hh =
+                                duetos::drivers::video::ThemeRoleWindow(duetos::drivers::video::ThemeRole::Help);
+                            if (hh != duetos::drivers::video::kWindowInvalid)
+                            {
+                                duetos::drivers::video::WindowRaise(hh);
+                            }
+                        }
                         PrintShortcutHelp();
                         break;
                     case 10: // RAISE <ctx>
