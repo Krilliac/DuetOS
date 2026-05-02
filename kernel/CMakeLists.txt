@@ -182,6 +182,14 @@ duetos_embed_blob(generated_synet_elf.h
     SRC     "${CMAKE_SOURCE_DIR}/userland/apps/synet/synet.c"
     COMMENT "Compiling + embedding /bin/synet.elf (Linux-ABI socket exerciser)")
 
+# /bin/synfull.elf — exhaustive Linux-ABI exerciser. Issues every
+# spec syscall (0..462) with zero-args, prints rc per call. Spawned
+# with all caps so cap-gated calls reach their real handler.
+duetos_embed_blob(generated_synfull_elf.h
+    SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-synfull.sh"
+    SRC     "${CMAKE_SOURCE_DIR}/userland/apps/synfull/synfull.c"
+    COMMENT "Compiling + embedding /bin/synfull.elf (Linux-ABI exhaustive exerciser)")
+
 duetos_embed_blob(generated_windowed_hello.h
     SCRIPT   "${CMAKE_SOURCE_DIR}/tools/build/build-windowed-hello.sh"
     SRC      "${CMAKE_SOURCE_DIR}/userland/apps/windowed_hello/hello.c"

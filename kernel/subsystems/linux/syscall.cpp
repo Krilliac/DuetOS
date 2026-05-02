@@ -77,7 +77,10 @@
 #include "mm/paging.h"
 #include "sched/sched.h"
 #include "subsystems/linux/signal_deliver.h"
-#include "subsystems/translation/translate.h"
+// translate.h removed — LinuxGapFill is dead now that primary
+// dispatch is dense across the Linux x86_64 spec surface. The
+// native + NT translation paths still use translate.h from
+// kernel/syscall/syscall.cpp, so the TU itself stays.
 
 extern "C" void linux_syscall_entry();
 
@@ -1982,20 +1985,23 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
 
     default:
     {
-        // Primary dispatch missed — offer to the translation unit
-        // before surfacing -ENOSYS. When the TU fills the gap it
-        // logs the specific translation; when it doesn't, it
-        // logs the miss + we fall through to ENOSYS behaviour.
-        const auto t = translation::LinuxGapFill(frame);
-        if (t.handled)
+        // Primary dispatch is dense across the full Linux x86_64
+        // spec surface (374 numbers, 0..462). Reaching this arm
+        // means the caller used a syscall number outside the
+        // spec — `rv` is already kENOSYS, which is exactly what
+        // a real Linux kernel returns for an unknown number.
+        // Log a one-line miss for telemetry; no separate gap-
+        // fill TU is needed (the translation TU's old
+        // LinuxGapFill was made dead by the dense-table slice
+        // and has been removed).
+        if (proc != nullptr)
         {
-            rv = t.rv;
+            arch::SerialWrite("[linux-miss] unknown syscall nr=");
+            arch::SerialWriteHex(nr);
+            arch::SerialWrite(" pid=");
+            arch::SerialWriteHex(pid);
+            arch::SerialWrite("\n");
         }
-        // If the TU didn't handle it, rv is still the kENOSYS
-        // default from above, and the TU already logged the
-        // gap. No further log here — keeps the boot log clean
-        // while still being able to grep "[translate] ...
-        // unimplemented" for the full missing-syscall set.
         break;
     }
     }

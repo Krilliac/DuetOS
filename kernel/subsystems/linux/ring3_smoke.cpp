@@ -30,6 +30,7 @@
 #include "proc/ring3_smoke.h"
 #include "generated_synet_elf.h"
 #include "generated_synfs_elf.h"
+#include "generated_synfull_elf.h"
 #include "generated_synxtest_elf.h"
 #include "cpu/percpu.h"
 #include "fs/ramfs.h"
@@ -851,6 +852,38 @@ void SpawnSynetElf()
     else
     {
         arch::SerialWrite("[linux] queued synet: socket-family exerciser, expect [net] lines\n");
+    }
+}
+
+void SpawnSynfullElf()
+{
+    KLOG_TRACE_SCOPE("linux/smoke", "SpawnSynfullElf");
+
+    // Exhaustive Linux-ABI coverage exerciser. Issues every spec
+    // syscall in 0..462 (modulo a small skip-list of process-
+    // destructive ones) with zero args, prints `[full] <nr>=<rc>`
+    // per call. Spawned with every cap we know about so cap-gated
+    // syscalls actually reach their handler.
+    core::CapSet caps = core::CapSetEmpty();
+    core::CapSetAdd(caps, core::kCapFsRead);
+    core::CapSetAdd(caps, core::kCapFsWrite);
+    core::CapSetAdd(caps, core::kCapNet);
+    core::CapSetAdd(caps, core::kCapSpawnThread);
+    // Larger frame + tick budget — the loop runs ~440 iterations
+    // and each syscall is at least a few page-touches. Budget
+    // matches a heavyweight smoke; if synfull starves itself the
+    // scheduler will kill the slot and the boot log will say so.
+    const u64 pid = core::SpawnElfLinux("synfull", fs::generated::kBinSynfullElfBytes,
+                                        fs::generated::kBinSynfullElfBytes_len, caps,
+                                        fs::RamfsSandboxRoot(), /*frame_budget=*/64,
+                                        core::kTickBudgetSandbox * 4);
+    if (pid == 0)
+    {
+        arch::SerialWrite("[linux] SpawnElfLinux FAILED for synfull\n");
+    }
+    else
+    {
+        arch::SerialWrite("[linux] queued synfull: exhaustive 0..462 exerciser, expect [full] lines\n");
     }
 }
 

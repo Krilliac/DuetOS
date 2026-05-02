@@ -3636,6 +3636,11 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         // socket calls reach the v0 net stack. Same atomic-line
         // [net] output convention as synfs.
         duetos::subsystems::linux::SpawnSynetElf();
+        // synfull is the exhaustive variant — issues every spec
+        // syscall (0..462 modulo skip-list) with zero args and
+        // prints `[full] <nr>=<rc>`. Coverage matrix for the
+        // entire Linux ABI surface.
+        duetos::subsystems::linux::SpawnSynfullElf();
 
         if (duetos::test::SmokeProfileGet() == duetos::test::SmokeProfile::None)
         {
