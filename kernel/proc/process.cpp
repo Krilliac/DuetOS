@@ -42,6 +42,8 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     auto* p = static_cast<Process*>(mm::KMalloc(sizeof(Process)));
     if (p == nullptr)
     {
+        KLOG_CRITICAL_AS(LogArea::Process, "core/process",
+                         "ProcessCreate: KMalloc(Process) returned null", "name", name);
         return nullptr;
     }
     // Zero the entire Process struct. KMalloc returns memory still
@@ -586,14 +588,21 @@ bool DllNameEq(const char* a, const char* b)
 u64 ProcessFindDllBaseByName(const Process* proc, const char* dll_name)
 {
     if (proc == nullptr)
+    {
+        KLOG_DEBUG_A(LogArea::Loader, "core/process", "ProcessFindDllBaseByName: null proc");
         return 0;
+    }
     /* NULL or empty name → return the EXE image base (Win32
      * GetModuleHandleW(NULL) semantics). pe_image_base is zero
      * for non-PE processes; the caller surfaces that as a NULL
      * HMODULE which matches the documented "no main module
      * available" behaviour. */
     if (dll_name == nullptr || dll_name[0] == '\0')
+    {
+        KLOG_DEBUG_AV(LogArea::Loader, "core/process",
+                      "ProcessFindDllBaseByName: empty name -> EXE pe_image_base", proc->pe_image_base);
         return proc->pe_image_base;
+    }
     // Strip any ".dll" / ".DLL" suffix from the lookup so callers
     // that pass either form match. Win32 convention is "name with
     // extension"; ld-link sometimes records the bare name in the

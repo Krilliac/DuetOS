@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
+#include "log/klog.h"
 #include "arch/x86_64/traps.h"
 #include "proc/process.h"
 #include "syscall/syscall.h"
@@ -41,6 +42,8 @@ void DoEventCreate(arch::TrapFrame* frame)
     if (slot == core::Process::kWin32EventCap)
     {
         arch::Sti();
+        ::duetos::core::LogAWithValue(::duetos::core::LogLevel::Warn, ::duetos::core::LogArea::Win32, "win32/event",
+                                      "event_create: out of slots in pid", proc->pid);
         frame->rax = static_cast<u64>(-1);
         return;
     }

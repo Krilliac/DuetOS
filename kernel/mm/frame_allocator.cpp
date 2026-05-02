@@ -491,8 +491,11 @@ PhysAddr AllocateFrame()
     }
     // Physical memory exhausted. Warn once per boot — repeat spam
     // during a sustained OOM storm helps nobody. Callers get the
-    // kNullFrame return value to react to.
+    // kNullFrame return value to react to. Critical-level too:
+    // an OOM is a degraded-but-running event and should pop above
+    // any per-area Warn-and-below filters operators set.
     KLOG_ONCE_WARN("mm/frame", "out of physical frames (AllocateFrame)");
+    KLOG_CRITICAL_A(::duetos::core::LogArea::Memory, "mm/frame", "AllocateFrame: physical OOM");
     KDBG(Mm, "mm/frame", "AllocateFrame OOM");
     return kNullFrame;
 }

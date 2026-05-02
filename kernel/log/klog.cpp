@@ -64,6 +64,17 @@ constinit u64 g_log_ring_count = 0; // saturates at kLogRingCapacity
 
 constinit bool g_color_enabled = true;
 
+// Runtime area mask. Default `LogArea::All` (every bit set) means
+// every legacy / new call site emits as-before. Operators dial it
+// down via `logarea off <name>` to suppress chatter from a single
+// subsystem while keeping the rest visible.
+constinit u32 g_log_area_mask = static_cast<u32>(LogArea::All);
+
+// Per-area minimum level. `Trace` (or absence) means "use the
+// global threshold." Indexed by bit position. ~32 areas × 1 byte =
+// 32 bytes; a no-op when no override is set.
+constinit u8 g_log_area_levels[32] = {};
+
 // Runtime severity threshold — set via SetLogThreshold. Lines with
 // level < max(threshold, kKlogMinLevel) are silently dropped.
 // Default is read from `core::kKlogDefaultLevel` (build_config.h),
@@ -203,6 +214,8 @@ inline const char* LevelTag(LogLevel level)
         return "[W] ";
     case LogLevel::Error:
         return "[E] ";
+    case LogLevel::Critical:
+        return "[C] ";
     default:
         return "[?] ";
     }
@@ -228,6 +241,8 @@ inline const char* LevelColorPrefix(LogLevel level)
         return "\x1b[33m"; // yellow
     case LogLevel::Error:
         return "\x1b[1;31m"; // bold red
+    case LogLevel::Critical:
+        return "\x1b[1;37;41m"; // bold white on red — louder than Error
     default:
         return "";
     }
@@ -271,6 +286,166 @@ inline bool LevelEnabled(LogLevel level)
     const u8 runtime = static_cast<u8>(g_log_threshold);
     const u8 effective = floor > runtime ? floor : runtime;
     return static_cast<u8>(level) >= effective;
+}
+
+// Position of the lowest set bit in `area`. Returns 32 for None
+// (used as a sentinel "no slot" marker).
+inline u32 AreaBitIndex(LogArea area)
+{
+    const u32 v = static_cast<u32>(area);
+    if (v == 0)
+        return 32;
+    // Single-bit count-trailing-zeros. Bit-twiddle (no __builtin
+    // outside of debug — keep this freestanding-friendly).
+    u32 idx = 0;
+    u32 t = v;
+    while ((t & 1u) == 0u && idx < 31)
+    {
+        t >>= 1;
+        ++idx;
+    }
+    return idx;
+}
+
+inline bool AreaPasses(LogArea area, LogLevel level)
+{
+    // Combined-mask values (e.g. LogArea::All) have multiple bits.
+    // The mask AND is still meaningful: any overlap with the active
+    // mask means at least one of the named areas is enabled. Per-
+    // area level overrides only apply to single-bit values.
+    const u32 area_bits = static_cast<u32>(area);
+    if ((area_bits & g_log_area_mask) == 0u)
+        return false;
+    // Single-bit area: check per-area level override on top of the
+    // global threshold. The HIGHER of the two wins so overrides
+    // can only RAISE the bar for a given area, not lower it below
+    // the global. (If you need to LOWER below global, set the
+    // global to that level too.)
+    if ((area_bits & (area_bits - 1u)) == 0u)
+    {
+        const u32 idx = AreaBitIndex(area);
+        if (idx < 32)
+        {
+            const u8 area_min = g_log_area_levels[idx];
+            if (area_min > 0 && static_cast<u8>(level) < area_min)
+                return false;
+        }
+    }
+    return true;
+}
+
+inline bool LevelAndAreaEnabled(LogLevel level, LogArea area)
+{
+    return LevelEnabled(level) && AreaPasses(area, level);
+}
+
+// Subsystem-string → LogArea mapping. Used by the legacy non-A
+// macros so existing call sites pick up an area without source
+// changes. Prefix-match against the subsystem path (the convention
+// is "kernel-tree path sans `kernel/`" — see klog.h's design
+// note). Order matters: first hit wins, so put the most specific
+// prefixes first (e.g. "drivers/net/" before "drivers/").
+struct AreaPrefix
+{
+    const char* prefix;
+    LogArea area;
+};
+
+constinit const AreaPrefix kAreaPrefixes[] = {
+    // Most specific first.
+    {"drivers/net/wireless", LogArea::Wireless},
+    {"net/wireless", LogArea::Wireless},
+    {"drivers/storage/", LogArea::Storage},
+    {"drivers/usb/", LogArea::USB},
+    {"drivers/gpu/", LogArea::GPU},
+    {"drivers/video/", LogArea::Graphics},
+    {"drivers/input/", LogArea::Input},
+    {"drivers/audio/", LogArea::Audio},
+    {"drivers/net/", LogArea::Net},
+    {"drivers/pci", LogArea::PCI},
+    {"drivers/power", LogArea::Power},
+    {"drivers/", LogArea::Driver},
+    {"subsystems/win32/", LogArea::Win32},
+    {"subsystems/linux/", LogArea::Linux},
+    {"subsystems/translation", LogArea::Linux},
+    {"subsystems/graphics", LogArea::Graphics},
+    {"subsystems/audio", LogArea::Audio},
+    {"subsystems/", LogArea::Linux}, // catch-all for less-tagged TUs
+    {"loader/", LogArea::Loader},
+    {"pe-load", LogArea::Loader},
+    {"pe-resolve", LogArea::Loader},
+    {"pe-report", LogArea::Loader},
+    {"dll-load", LogArea::Loader},
+    {"elf-load", LogArea::Loader},
+    {"sched/", LogArea::Sched},
+    {"sched", LogArea::Sched},
+    {"proc/", LogArea::Process},
+    {"proc", LogArea::Process},
+    {"win32/", LogArea::Win32},
+    {"win32-", LogArea::Win32},
+    {"win32", LogArea::Win32},
+    {"linux/", LogArea::Linux},
+    {"net/", LogArea::Net},
+    {"net-", LogArea::Net},
+    {"net", LogArea::Net},
+    {"fs/", LogArea::FS},
+    {"fs-", LogArea::FS},
+    {"klog", LogArea::Diag},
+    {"mm/", LogArea::Memory},
+    {"mm", LogArea::Memory},
+    {"heap", LogArea::Memory},
+    {"frame-allocator", LogArea::Memory},
+    {"paging", LogArea::Memory},
+    {"slab", LogArea::Memory},
+    {"syscall/", LogArea::Syscall},
+    {"syscall", LogArea::Syscall},
+    {"syscall-gate", LogArea::Syscall},
+    {"sys", LogArea::Syscall},
+    {"cap-", LogArea::Security},
+    {"security/", LogArea::Security},
+    {"security", LogArea::Security},
+    {"acpi/", LogArea::ACPI},
+    {"acpi", LogArea::ACPI},
+    {"pci", LogArea::PCI},
+    {"time/", LogArea::Time},
+    {"timer", LogArea::Time},
+    {"hpet", LogArea::Time},
+    {"tick", LogArea::Time},
+    {"power/", LogArea::Power},
+    {"debug/", LogArea::Diag},
+    {"diag/", LogArea::Diag},
+    {"ipc/", LogArea::IPC},
+    {"ipc", LogArea::IPC},
+    {"ring3", LogArea::Ring3},
+    {"thread", LogArea::Process},
+    {"task", LogArea::Sched},
+    {"apps/", LogArea::App},
+    {"app/", LogArea::App},
+    {"selftest", LogArea::Test},
+    {"smoke", LogArea::Test},
+    {"boot", LogArea::Boot},
+    {"init", LogArea::Boot},
+    {"core/", LogArea::Boot},
+    {"arch/", LogArea::Boot},
+};
+
+inline LogArea AreaFromSubsystemImpl(const char* subsystem)
+{
+    if (subsystem == nullptr)
+        return LogArea::General;
+    for (const auto& entry : kAreaPrefixes)
+    {
+        const char* a = subsystem;
+        const char* b = entry.prefix;
+        while (*a != '\0' && *b != '\0' && *a == *b)
+        {
+            ++a;
+            ++b;
+        }
+        if (*b == '\0')
+            return entry.area;
+    }
+    return LogArea::General;
 }
 
 // Timestamp rendering. We format wall time since boot — in
@@ -405,7 +580,7 @@ LogLevel GetLogThreshold()
 
 void Log(LogLevel level, const char* subsystem, const char* message)
 {
-    if (!LevelEnabled(level))
+    if (!LevelAndAreaEnabled(level, AreaFromSubsystemImpl(subsystem)))
     {
         return;
     }
@@ -445,7 +620,7 @@ void Log(LogLevel level, const char* subsystem, const char* message)
 
 void LogWithValue(LogLevel level, const char* subsystem, const char* message, u64 value)
 {
-    if (!LevelEnabled(level))
+    if (!LevelAndAreaEnabled(level, AreaFromSubsystemImpl(subsystem)))
     {
         return;
     }
@@ -482,7 +657,7 @@ void LogWithValue(LogLevel level, const char* subsystem, const char* message, u6
 
 void LogWithString(LogLevel level, const char* subsystem, const char* message, const char* label, const char* value_str)
 {
-    if (!LevelEnabled(level))
+    if (!LevelAndAreaEnabled(level, AreaFromSubsystemImpl(subsystem)))
     {
         return;
     }
@@ -535,7 +710,7 @@ void LogWithString(LogLevel level, const char* subsystem, const char* message, c
 void LogWith2Values(LogLevel level, const char* subsystem, const char* message, const char* a_label, u64 a_value,
                     const char* b_label, u64 b_value)
 {
-    if (!LevelEnabled(level))
+    if (!LevelAndAreaEnabled(level, AreaFromSubsystemImpl(subsystem)))
     {
         return;
     }
@@ -896,9 +1071,11 @@ void KLogSelfTest()
     KLOG_INFO("core/klog", "info-level sanity line");
     KLOG_WARN("core/klog", "warn-level sanity line");
     KLOG_ERROR("core/klog", "error-level sanity line");
+    KLOG_CRITICAL("core/klog", "critical-level sanity line");
     KLOG_INFO_V("core/klog", "value-form sanity line", 0xCAFEBABE);
     KLOG_INFO_S("core/klog", "string-form sanity line", "who", "DuetOS");
     KLOG_INFO_2V("core/klog", "two-value sanity line", "a", 0x8000, "b", 512);
+    KLOG_INFO_A(LogArea::Diag, "core/klog", "area-tagged sanity line (Diag)");
     // Fire the same once-macro call site from a loop — the static
     // guard is per-site, so only the first iteration should emit.
     for (int i = 0; i < 3; ++i)
@@ -911,6 +1088,305 @@ void KLogSelfTest()
     {
         KLOG_TRACE_SCOPE("core/klog", "self-test-scope");
     }
+}
+
+// -----------------------------------------------------------------
+// Area-aware Log* implementations.
+//
+// Same body as the non-A variants above, but the gate consults the
+// caller-provided area instead of the AreaFromSubsystemImpl
+// inference. Saves one strncmp-style walk per call when the caller
+// already knows their area, and lets a single TU emit lines from
+// multiple areas (e.g. a syscall handler logging Memory + Sched
+// inside its body).
+// -----------------------------------------------------------------
+void LogA(LogLevel level, LogArea area, const char* subsystem, const char* message)
+{
+    if (!LevelAndAreaEnabled(level, area))
+        return;
+    if (subsystem == nullptr)
+        subsystem = "<null-subsys>";
+    if (message == nullptr)
+        message = "<null-msg>";
+    g_current_log_level = level;
+    const char* tag = LevelTag(level);
+    WriteTimestampPrefix();
+    OpenColor(level);
+    arch::SerialWrite(tag);
+    CloseColor(level);
+    arch::SerialWrite(subsystem);
+    arch::SerialWrite(" : ");
+    arch::SerialWrite(message);
+    arch::SerialWrite("\n");
+    Tee(tag);
+    Tee(subsystem);
+    Tee(" : ");
+    Tee(message);
+    Tee("\n");
+    PushEntry(level, subsystem, message, 0, false);
+}
+
+void LogAWithValue(LogLevel level, LogArea area, const char* subsystem, const char* message, u64 value)
+{
+    if (!LevelAndAreaEnabled(level, area))
+        return;
+    if (subsystem == nullptr)
+        subsystem = "<null-subsys>";
+    if (message == nullptr)
+        message = "<null-msg>";
+    g_current_log_level = level;
+    const char* tag = LevelTag(level);
+    WriteTimestampPrefix();
+    OpenColor(level);
+    arch::SerialWrite(tag);
+    CloseColor(level);
+    arch::SerialWrite(subsystem);
+    arch::SerialWrite(" : ");
+    arch::SerialWrite(message);
+    arch::SerialWrite("   val=");
+    WriteCompactHex(value);
+    MaybeAppendDecimal(value);
+    arch::SerialWrite("\n");
+    Tee(tag);
+    Tee(subsystem);
+    Tee(" : ");
+    Tee(message);
+    Tee("\n");
+    PushEntry(level, subsystem, message, value, true);
+}
+
+void LogAWithString(LogLevel level, LogArea area, const char* subsystem, const char* message, const char* label,
+                    const char* value_str)
+{
+    if (!LevelAndAreaEnabled(level, area))
+        return;
+    if (subsystem == nullptr)
+        subsystem = "<null-subsys>";
+    if (message == nullptr)
+        message = "<null-msg>";
+    if (label == nullptr)
+        label = "<null-label>";
+    if (value_str == nullptr)
+        value_str = "<null>";
+    g_current_log_level = level;
+    const char* tag = LevelTag(level);
+    WriteTimestampPrefix();
+    OpenColor(level);
+    arch::SerialWrite(tag);
+    CloseColor(level);
+    arch::SerialWrite(subsystem);
+    arch::SerialWrite(" : ");
+    arch::SerialWrite(message);
+    arch::SerialWrite("   ");
+    arch::SerialWrite(label);
+    arch::SerialWrite("=\"");
+    arch::SerialWrite(value_str);
+    arch::SerialWrite("\"\n");
+    Tee(tag);
+    Tee(subsystem);
+    Tee(" : ");
+    Tee(message);
+    Tee("\n");
+    PushEntry(level, subsystem, message, 0, false);
+}
+
+void LogAWith2Values(LogLevel level, LogArea area, const char* subsystem, const char* message, const char* a_label,
+                     u64 a_value, const char* b_label, u64 b_value)
+{
+    if (!LevelAndAreaEnabled(level, area))
+        return;
+    if (subsystem == nullptr)
+        subsystem = "<null-subsys>";
+    if (message == nullptr)
+        message = "<null-msg>";
+    if (a_label == nullptr)
+        a_label = "a";
+    if (b_label == nullptr)
+        b_label = "b";
+    g_current_log_level = level;
+    const char* tag = LevelTag(level);
+    WriteTimestampPrefix();
+    OpenColor(level);
+    arch::SerialWrite(tag);
+    CloseColor(level);
+    arch::SerialWrite(subsystem);
+    arch::SerialWrite(" : ");
+    arch::SerialWrite(message);
+    arch::SerialWrite("   ");
+    arch::SerialWrite(a_label);
+    arch::SerialWrite("=");
+    WriteCompactHex(a_value);
+    MaybeAppendDecimal(a_value);
+    arch::SerialWrite("   ");
+    arch::SerialWrite(b_label);
+    arch::SerialWrite("=");
+    WriteCompactHex(b_value);
+    MaybeAppendDecimal(b_value);
+    arch::SerialWrite("\n");
+    Tee(tag);
+    Tee(subsystem);
+    Tee(" : ");
+    Tee(message);
+    Tee("\n");
+    PushEntry(level, subsystem, message, a_value, true);
+}
+
+// -----------------------------------------------------------------
+// Area control APIs.
+// -----------------------------------------------------------------
+void SetLogAreaMask(u32 mask)
+{
+    g_log_area_mask = mask;
+}
+
+u32 GetLogAreaMask()
+{
+    return g_log_area_mask;
+}
+
+void EnableLogArea(LogArea area)
+{
+    g_log_area_mask |= static_cast<u32>(area);
+}
+
+void DisableLogArea(LogArea area)
+{
+    g_log_area_mask &= ~static_cast<u32>(area);
+}
+
+bool IsLogAreaEnabled(LogArea area)
+{
+    return (g_log_area_mask & static_cast<u32>(area)) != 0;
+}
+
+void SetLogAreaLevel(LogArea area, LogLevel level)
+{
+    const u32 idx = AreaBitIndex(area);
+    if (idx >= 32)
+        return;
+    g_log_area_levels[idx] = static_cast<u8>(level);
+}
+
+LogLevel GetLogAreaLevel(LogArea area)
+{
+    const u32 idx = AreaBitIndex(area);
+    if (idx >= 32)
+        return LogLevel::Trace;
+    return static_cast<LogLevel>(g_log_area_levels[idx]);
+}
+
+LogArea AreaFromSubsystem(const char* subsystem)
+{
+    return AreaFromSubsystemImpl(subsystem);
+}
+
+const char* LogAreaName(LogArea area)
+{
+    switch (area)
+    {
+    case LogArea::None:
+        return "none";
+    case LogArea::General:
+        return "general";
+    case LogArea::Boot:
+        return "boot";
+    case LogArea::Memory:
+        return "memory";
+    case LogArea::Sched:
+        return "sched";
+    case LogArea::Process:
+        return "process";
+    case LogArea::Syscall:
+        return "syscall";
+    case LogArea::Loader:
+        return "loader";
+    case LogArea::FS:
+        return "fs";
+    case LogArea::Net:
+        return "net";
+    case LogArea::Storage:
+        return "storage";
+    case LogArea::USB:
+        return "usb";
+    case LogArea::GPU:
+        return "gpu";
+    case LogArea::Input:
+        return "input";
+    case LogArea::Audio:
+        return "audio";
+    case LogArea::IPC:
+        return "ipc";
+    case LogArea::Win32:
+        return "win32";
+    case LogArea::Linux:
+        return "linux";
+    case LogArea::Time:
+        return "time";
+    case LogArea::Power:
+        return "power";
+    case LogArea::Security:
+        return "security";
+    case LogArea::Diag:
+        return "diag";
+    case LogArea::Ring3:
+        return "ring3";
+    case LogArea::App:
+        return "app";
+    case LogArea::Driver:
+        return "driver";
+    case LogArea::ACPI:
+        return "acpi";
+    case LogArea::PCI:
+        return "pci";
+    case LogArea::Wireless:
+        return "wireless";
+    case LogArea::Graphics:
+        return "graphics";
+    case LogArea::Test:
+        return "test";
+    case LogArea::Arith:
+        return "arith";
+    case LogArea::All:
+        return "all";
+    default:
+        return "?";
+    }
+}
+
+LogArea LogAreaFromName(const char* name)
+{
+    if (name == nullptr)
+        return LogArea::None;
+    auto eq = [](const char* a, const char* b) {
+        while (*a != '\0' && *b != '\0')
+        {
+            char ca = *a;
+            char cb = *b;
+            if (ca >= 'A' && ca <= 'Z')
+                ca = static_cast<char>(ca + ('a' - 'A'));
+            if (cb >= 'A' && cb <= 'Z')
+                cb = static_cast<char>(cb + ('a' - 'A'));
+            if (ca != cb)
+                return false;
+            ++a;
+            ++b;
+        }
+        return *a == '\0' && *b == '\0';
+    };
+    constexpr LogArea kAll[] = {
+        LogArea::General,  LogArea::Boot,    LogArea::Memory, LogArea::Sched,    LogArea::Process,  LogArea::Syscall,
+        LogArea::Loader,   LogArea::FS,      LogArea::Net,    LogArea::Storage,  LogArea::USB,      LogArea::GPU,
+        LogArea::Input,    LogArea::Audio,   LogArea::IPC,    LogArea::Win32,    LogArea::Linux,    LogArea::Time,
+        LogArea::Power,    LogArea::Security, LogArea::Diag,  LogArea::Ring3,    LogArea::App,      LogArea::Driver,
+        LogArea::ACPI,     LogArea::PCI,     LogArea::Wireless, LogArea::Graphics, LogArea::Test,   LogArea::Arith,
+        LogArea::All,
+    };
+    for (LogArea a : kAll)
+    {
+        if (eq(name, LogAreaName(a)))
+            return a;
+    }
+    return LogArea::None;
 }
 
 } // namespace duetos::core

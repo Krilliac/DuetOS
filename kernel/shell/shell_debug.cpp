@@ -1886,12 +1886,63 @@ void CmdLoglevel(u32 argc, char** argv)
         case duetos::core::LogLevel::Error:
             ConsoleWriteln("ERROR (show only errors)");
             break;
+        case duetos::core::LogLevel::Critical:
+            ConsoleWriteln("CRITICAL (only catastrophic events)");
+            break;
         default:
             ConsoleWriteln("?");
             break;
         }
-        ConsoleWriteln("USAGE: LOGLEVEL [T|D|I|W|E]");
+        ConsoleWriteln("USAGE: LOGLEVEL [T|D|I|W|E|C]");
+        ConsoleWriteln("       LOGLEVEL <area-name> [T|D|I|W|E|C]   (per-area override)");
+        ConsoleWriteln("RUN `LOGAREA` TO LIST AREAS.");
         return;
+    }
+    // Two-arg form: per-area level. Parse the first as an area
+    // name; if it matches, treat the second as the level. Allows
+    // operators to e.g. "loglevel net w" to silence everything
+    // below Warn from the Net area while leaving other areas alone.
+    if (argc >= 3)
+    {
+        const auto area = duetos::core::LogAreaFromName(argv[1]);
+        if (area != duetos::core::LogArea::None && area != duetos::core::LogArea::All)
+        {
+            const char c2 = argv[2][0];
+            duetos::core::LogLevel lvl2 = duetos::core::LogLevel::Trace;
+            switch (c2)
+            {
+            case 't':
+            case 'T':
+                lvl2 = duetos::core::LogLevel::Trace;
+                break;
+            case 'd':
+            case 'D':
+                lvl2 = duetos::core::LogLevel::Debug;
+                break;
+            case 'i':
+            case 'I':
+                lvl2 = duetos::core::LogLevel::Info;
+                break;
+            case 'w':
+            case 'W':
+                lvl2 = duetos::core::LogLevel::Warn;
+                break;
+            case 'e':
+            case 'E':
+                lvl2 = duetos::core::LogLevel::Error;
+                break;
+            case 'c':
+            case 'C':
+                lvl2 = duetos::core::LogLevel::Critical;
+                break;
+            default:
+                ConsoleWriteln("LOGLEVEL: USE T / D / I / W / E / C");
+                return;
+            }
+            duetos::core::SetLogAreaLevel(area, lvl2);
+            ConsoleWriteln("PER-AREA LEVEL UPDATED");
+            return;
+        }
     }
     const char c = argv[1][0];
     duetos::core::LogLevel lvl = duetos::core::LogLevel::Info;
@@ -1917,12 +1968,85 @@ void CmdLoglevel(u32 argc, char** argv)
     case 'E':
         lvl = duetos::core::LogLevel::Error;
         break;
+    case 'c':
+    case 'C':
+        lvl = duetos::core::LogLevel::Critical;
+        break;
     default:
-        ConsoleWriteln("LOGLEVEL: USE T / D / I / W / E");
+        ConsoleWriteln("LOGLEVEL: USE T / D / I / W / E / C");
         return;
     }
     duetos::core::SetLogThreshold(lvl);
     ConsoleWriteln("LOG THRESHOLD UPDATED");
+}
+
+// LOGAREA — list / toggle log-area mask.
+//   LOGAREA              — print current mask + per-area names
+//   LOGAREA ALL ON       — enable every area
+//   LOGAREA ALL OFF      — disable every area (only general remains)
+//   LOGAREA <name> ON    — enable single area
+//   LOGAREA <name> OFF   — disable single area
+//
+// Areas: general boot memory sched process syscall loader fs net
+// storage usb gpu input audio ipc win32 linux time power security
+// diag ring3 app driver acpi pci wireless graphics test arith.
+void CmdLogarea(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        const u32 mask = duetos::core::GetLogAreaMask();
+        ConsoleWrite("LOG AREA MASK: 0x");
+        char hex[9];
+        const char* h = "0123456789abcdef";
+        for (int i = 7; i >= 0; --i)
+            hex[7 - i] = h[(mask >> (i * 4)) & 0xF];
+        hex[8] = '\0';
+        ConsoleWriteln(hex);
+        ConsoleWriteln("ENABLED AREAS:");
+        constexpr duetos::core::LogArea kSingles[] = {
+            duetos::core::LogArea::General,  duetos::core::LogArea::Boot,    duetos::core::LogArea::Memory,
+            duetos::core::LogArea::Sched,    duetos::core::LogArea::Process, duetos::core::LogArea::Syscall,
+            duetos::core::LogArea::Loader,   duetos::core::LogArea::FS,      duetos::core::LogArea::Net,
+            duetos::core::LogArea::Storage,  duetos::core::LogArea::USB,     duetos::core::LogArea::GPU,
+            duetos::core::LogArea::Input,    duetos::core::LogArea::Audio,   duetos::core::LogArea::IPC,
+            duetos::core::LogArea::Win32,    duetos::core::LogArea::Linux,   duetos::core::LogArea::Time,
+            duetos::core::LogArea::Power,    duetos::core::LogArea::Security,
+            duetos::core::LogArea::Diag,     duetos::core::LogArea::Ring3,   duetos::core::LogArea::App,
+            duetos::core::LogArea::Driver,   duetos::core::LogArea::ACPI,    duetos::core::LogArea::PCI,
+            duetos::core::LogArea::Wireless, duetos::core::LogArea::Graphics, duetos::core::LogArea::Test,
+            duetos::core::LogArea::Arith,
+        };
+        for (auto a : kSingles)
+        {
+            ConsoleWrite(" ");
+            ConsoleWrite(duetos::core::LogAreaName(a));
+            ConsoleWrite(" ");
+            ConsoleWriteln(duetos::core::IsLogAreaEnabled(a) ? "[on]" : "[off]");
+        }
+        ConsoleWriteln("USAGE: LOGAREA [<name> ON|OFF]   (or  LOGAREA ALL ON|OFF)");
+        return;
+    }
+    const auto area = duetos::core::LogAreaFromName(argv[1]);
+    if (area == duetos::core::LogArea::None)
+    {
+        ConsoleWrite("LOGAREA: UNKNOWN AREA \"");
+        ConsoleWrite(argv[1]);
+        ConsoleWriteln("\". RUN `LOGAREA` FOR THE FULL LIST.");
+        return;
+    }
+    if (argc < 3)
+    {
+        ConsoleWrite(duetos::core::LogAreaName(area));
+        ConsoleWriteln(duetos::core::IsLogAreaEnabled(area) ? " ON" : " OFF");
+        return;
+    }
+    const char c = argv[2][0];
+    const bool turn_on = (c == 'o' || c == 'O') ? (argv[2][1] == 'n' || argv[2][1] == 'N') : false;
+    if (turn_on)
+        duetos::core::EnableLogArea(area);
+    else
+        duetos::core::DisableLogArea(area);
+    ConsoleWriteln("LOG AREA UPDATED");
 }
 
 void CmdLogcolor(u32 argc, char** argv)
