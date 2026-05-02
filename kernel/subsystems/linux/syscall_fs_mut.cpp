@@ -358,8 +358,7 @@ i64 DoUtimensat(i64 dirfd, u64 user_path, u64 user_times, u64 flags)
     if (user_path != 0)
     {
         // path-relative form: validate the target exists when it
-        // looks like a FAT32 path. NUL path means "use the dirfd
-        // directly" — accept since we already validated the fd.
+        // looks like a FAT32 path.
         char kbuf[64];
         const char* leaf = nullptr;
         if (!CopyAndStripFatPath(user_path, kbuf, leaf))
@@ -371,7 +370,18 @@ i64 DoUtimensat(i64 dirfd, u64 user_path, u64 user_times, u64 flags)
             if (!fs::fat32::Fat32LookupPath(v, leaf, &probe))
                 return kENOENT;
         }
+        return 0;
     }
+    // NULL path means "operate on the file referenced by dirfd"
+    // (futimens semantics). Requires a real file fd. AT_FDCWD
+    // with NULL path is undefined / -EFAULT in Linux.
+    if (dirfd == kAtFdCwd)
+        return kEFAULT;
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || dirfd < 0 || dirfd >= 16)
+        return kEBADF;
+    if (p->linux_fds[dirfd].state == 0)
+        return kEBADF;
     return 0;
 }
 

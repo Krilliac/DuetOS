@@ -388,19 +388,23 @@ i64 DoSyncfs(u64 fd)
 // DoRename moved to syscall_fs_mut.cpp (now wires through to
 // fat32 Fat32RenameAtPath via the §11.9 mutation primitives).
 //
-// link / symlink stay -ENOSYS — fat32 has no hardlink concept
-// and v0 has no symlink storage. Sub-GAPs in §11.9.
+// link / symlink: FAT32 has no hardlink concept and v0 has no
+// symlink storage. -EOPNOTSUPP is the spec-correct errno when
+// the FS doesn't support the operation (POSIX EPERM is also
+// allowed; we pick the more specific EOPNOTSUPP so glibc's
+// "fall back to copy-then-rename" path activates instead of
+// the "you're not allowed" error message).
 i64 DoLink(u64 old_path, u64 new_path)
 {
     (void)old_path;
     (void)new_path;
-    return kENOSYS;
+    return kEOPNOTSUPP;
 }
 i64 DoSymlink(u64 target, u64 linkpath)
 {
     (void)target;
     (void)linkpath;
-    return kENOSYS;
+    return kEOPNOTSUPP;
 }
 
 // set_thread_area / get_thread_area: x86_32 LDT entry for TLS.

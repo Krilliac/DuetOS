@@ -1361,11 +1361,11 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
             rv = DoRecvmsg(frame->rdi, frame->rsi, frame->rdx);
             break;
         case kSysSendmmsg:
+            rv = DoSendmmsg(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+            break;
         case kSysRecvmmsg:
-            // Multi-message variants. v0 forwards just the first
-            // mmsghdr to the single-message handler — sub-GAP for
-            // batch-mode callers.
-            rv = -38; // -ENOSYS
+            // sendmmsg has 4 args; recvmmsg has 5 (extra timeout).
+            rv = DoRecvmmsg(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
             break;
         case kSysSocketpair:
             rv = DoSocketpair(frame->rdi, frame->rsi, frame->rdx, frame->r10);
@@ -1388,43 +1388,8 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         rv = DoFork();
         break;
     case kSysClone3:
-    {
-        // clone3 packs the equivalent of clone()'s positional
-        // args into a struct clone_args read out of user memory.
-        // v0 honours the same CLONE_THREAD subset DoClone does,
-        // by reading only the prefix of the struct that contains
-        // the fields we care about (flags / pidfd / child_tid /
-        // parent_tid / exit_signal / stack / stack_size / tls).
-        struct CloneArgsPrefix
-        {
-            u64 flags;
-            u64 pidfd;
-            u64 child_tid;
-            u64 parent_tid;
-            u64 exit_signal;
-            u64 stack;
-            u64 stack_size;
-            u64 tls;
-        } args = {};
-        const u64 user_args = frame->rdi;
-        const u64 size = frame->rsi;
-        // Read at most sizeof(prefix) bytes; tolerate older
-        // callers that pass a smaller struct.
-        u64 to_copy = sizeof(args);
-        if (size < to_copy)
-            to_copy = size;
-        if (!mm::CopyFromUser(&args, reinterpret_cast<const void*>(user_args), to_copy))
-        {
-            rv = kEFAULT;
-            break;
-        }
-        // clone3 stack is `stack` + `stack_size` (caller hands
-        // us the BASE; the kernel computes the top). DoClone's
-        // child_stack arg expects a top-of-stack pointer.
-        const u64 stack_top = args.stack + args.stack_size;
-        rv = DoClone(args.flags, stack_top, args.parent_tid, args.child_tid, args.tls);
+        rv = DoClone3(frame->rdi, frame->rsi);
         break;
-    }
     case kSysExecve:
     case kSysExecveat:
     {

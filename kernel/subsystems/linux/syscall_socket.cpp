@@ -604,4 +604,99 @@ bool SocketFdReadReady(u32 idx)
     return s->connected;
 }
 
+// =============================================================
+// recvmmsg / sendmmsg — vector forms over the scalar
+// recvmsg / sendmsg. Each iteration walks one struct mmsghdr
+// (an msghdr + a u32 msg_len), invokes the scalar handler,
+// and writes back the byte count if successful. The flags arg
+// MSG_WAITFORONE bit means "block on the first datagram, then
+// return non-block for the rest"; v0 always uses non-block
+// after the first iteration since we can't park a partially-
+// completed vector.
+// =============================================================
+
+namespace
+{
+
+// Linux struct mmsghdr layout: 56-byte msghdr + u32 msg_len + 4
+// bytes of pad. Total 64 bytes.
+constexpr u64 kMmsghdrSize = 64;
+constexpr u32 kVlenMax = 16;
+
+} // namespace
+
+i64 DoRecvmmsg(u64 fd, u64 user_mmsgvec, u64 vlen, u64 flags, u64 user_timeout)
+{
+    (void)user_timeout; // Per-vector timeout — sub-GAP (per-call non-block via flags is honored).
+    if (vlen == 0)
+        return 0;
+    if (vlen > kVlenMax)
+        vlen = kVlenMax;
+    auto* p = ::duetos::core::CurrentProcess();
+    if (p == nullptr)
+        return kEPERM;
+    u32 idx;
+    if (!FdIsSocket(p, fd, idx))
+        return kEBADF;
+
+    // First iteration uses caller's flags as-is; subsequent
+    // iterations OR in MSG_DONTWAIT so we don't block on a
+    // half-filled vector.
+    constexpr u64 kMsgDontwait = 0x40;
+    u32 received = 0;
+    for (u32 i = 0; i < vlen; ++i)
+    {
+        const u64 mmsg_addr = user_mmsgvec + i * kMmsghdrSize;
+        const u64 hdr_addr = mmsg_addr;        // msghdr embedded at offset 0
+        const u64 len_addr = mmsg_addr + 56;   // msg_len at offset 56
+        const u64 call_flags = (i == 0) ? flags : (flags | kMsgDontwait);
+        const i64 rc = DoRecvmsg(fd, hdr_addr, call_flags);
+        if (rc < 0)
+        {
+            if (received > 0)
+                return static_cast<i64>(received);
+            return rc;
+        }
+        const u32 msg_len = static_cast<u32>(rc);
+        if (!mm::CopyToUser(reinterpret_cast<void*>(len_addr), &msg_len, sizeof(msg_len)))
+            return received > 0 ? static_cast<i64>(received) : kEFAULT;
+        ++received;
+    }
+    return static_cast<i64>(received);
+}
+
+i64 DoSendmmsg(u64 fd, u64 user_mmsgvec, u64 vlen, u64 flags)
+{
+    if (vlen == 0)
+        return 0;
+    if (vlen > kVlenMax)
+        vlen = kVlenMax;
+    auto* p = ::duetos::core::CurrentProcess();
+    if (p == nullptr)
+        return kEPERM;
+    u32 idx;
+    if (!FdIsSocket(p, fd, idx))
+        return kEBADF;
+
+    u32 sent = 0;
+    for (u32 i = 0; i < vlen; ++i)
+    {
+        const u64 mmsg_addr = user_mmsgvec + i * kMmsghdrSize;
+        const u64 hdr_addr = mmsg_addr;
+        const u64 len_addr = mmsg_addr + 56;
+        const i64 rc = DoSendmsg(fd, hdr_addr, flags);
+        if (rc < 0)
+        {
+            if (sent > 0)
+                return static_cast<i64>(sent);
+            return rc;
+        }
+        const u32 msg_len = static_cast<u32>(rc);
+        if (!mm::CopyToUser(reinterpret_cast<void*>(len_addr), &msg_len, sizeof(msg_len)))
+            return sent > 0 ? static_cast<i64>(sent) : kEFAULT;
+        ++sent;
+    }
+    return static_cast<i64>(sent);
+}
+
 } // namespace duetos::subsystems::linux::internal

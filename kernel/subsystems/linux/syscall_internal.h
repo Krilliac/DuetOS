@@ -655,4 +655,11 @@ i64 DoRseq(u64 rseq, u64 rseq_len, u64 flags, u64 sig);
 // signal-deliver pass picks it up on this same syscall return.
 void LinuxAlarmCheckAndRaise(::duetos::core::Process* p);
 
+// Vector forms of socket recv/send (syscall_socket.cpp).
+i64 DoRecvmmsg(u64 fd, u64 user_mmsgvec, u64 vlen, u64 flags, u64 user_timeout);
+i64 DoSendmmsg(u64 fd, u64 user_mmsgvec, u64 vlen, u64 flags);
+
+// Extended clone with struct-bundled args (syscall_clone.cpp).
+i64 DoClone3(u64 user_args, u64 size);
+
 } // namespace duetos::subsystems::linux::internal

@@ -6,9 +6,9 @@
 //
 // Source data: tools/linux-compat/linux-syscalls-x86_64.csv
 // Total syscalls listed: 374
-// Primary handlers implemented in kernel/subsystems/linux/syscall.cpp: 264
-// Effective coverage (primary + LinuxGapFill in translation/translate.cpp): 270
-// Coverage (primary): 70%
+// Primary handlers implemented in kernel/subsystems/linux/syscall.cpp: 267
+// Effective coverage (primary + LinuxGapFill in translation/translate.cpp): 272
+// Coverage (primary): 71%
 // Coverage (effective): 72%
 //
 // See tools/linux-compat/README.md for provenance.
@@ -336,7 +336,7 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {296, 5, HandlerState::Implemented, "pwritev"},
     {297, 4, HandlerState::Implemented, "rt_tgsigqueueinfo"},
     {298, 5, HandlerState::Unimplemented, "perf_event_open"},
-    {299, 5, HandlerState::Unimplemented, "recvmmsg"},
+    {299, 5, HandlerState::Implemented, "recvmmsg"},
     {300, 2, HandlerState::Unimplemented, "fanotify_init"},
     {301, 5, HandlerState::Unimplemented, "fanotify_mark"},
     {302, 4, HandlerState::Implemented, "prlimit64"},
@@ -344,7 +344,7 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {304, 3, HandlerState::Unimplemented, "open_by_handle_at"},
     {305, 2, HandlerState::Implemented, "clock_adjtime"},
     {306, 1, HandlerState::Implemented, "syncfs"},
-    {307, 4, HandlerState::Unimplemented, "sendmmsg"},
+    {307, 4, HandlerState::Implemented, "sendmmsg"},
     {308, 2, HandlerState::Implemented, "setns"},
     {309, 3, HandlerState::Implemented, "getcpu"},
     {310, 6, HandlerState::Implemented, "process_vm_readv"},
@@ -383,7 +383,7 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {432, 3, HandlerState::Unimplemented, "fsmount"},
     {433, 3, HandlerState::Unimplemented, "fspick"},
     {434, 2, HandlerState::Unimplemented, "pidfd_open"},
-    {435, 2, HandlerState::Unimplemented, "clone3"},
+    {435, 2, HandlerState::Implemented, "clone3"},
     {436, 3, HandlerState::Unimplemented, "close_range"},
     {437, 4, HandlerState::Implemented, "openat2"},
     {438, 3, HandlerState::Unimplemented, "pidfd_getfd"},
@@ -886,9 +886,9 @@ inline constexpr const LinuxSyscallEntry* kLinuxSyscallByNumber[] = {
     &kLinuxSyscalls[373],
 };
 
-inline constexpr u32 kLinuxSyscallHandlersImplemented = 264;
-inline constexpr u32 kLinuxSyscallHandlersImplementedPrimary = 264;
-inline constexpr u32 kLinuxSyscallHandlersImplementedEffective = 270;
+inline constexpr u32 kLinuxSyscallHandlersImplemented = 267;
+inline constexpr u32 kLinuxSyscallHandlersImplementedPrimary = 267;
+inline constexpr u32 kLinuxSyscallHandlersImplementedEffective = 272;
 
 /// Look up `nr` in the dense by-number index. Returns nullptr if unknown.
 inline const LinuxSyscallEntry* LinuxSyscallLookup(u64 nr)
