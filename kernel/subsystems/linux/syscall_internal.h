@@ -41,6 +41,7 @@ inline constexpr i64 kENFILE = -23;
 inline constexpr i64 kEMFILE = -24;
 inline constexpr i64 kEAGAIN = -11;
 inline constexpr i64 kEEXIST = -17;
+inline constexpr i64 kEFBIG = -27;
 inline constexpr i64 kENOTEMPTY = -39;
 inline constexpr i64 kEOVERFLOW = -75;
 inline constexpr i64 kEOPNOTSUPP = -95;
