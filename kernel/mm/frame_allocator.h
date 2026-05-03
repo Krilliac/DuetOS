@@ -67,6 +67,15 @@ inline ::duetos::core::Result<PhysAddr> TryAllocateFrame()
 /// contiguous DMA buffer.
 PhysAddr AllocateContiguousFrames(u64 count);
 
+/// Allocate `count` physically-contiguous 4 KiB frames whose entire run
+/// sits strictly below `max_phys`. The contiguous-run sibling of
+/// `AllocateFrameInRange`, used by `mm::AllocDmaCoherent` to honour the
+/// per-zone DMA window (16 MiB for legacy ISA, 4 GiB for 32-bit-PCIe).
+/// `max_phys == 0` is treated as "no upper bound" and is identical to
+/// `AllocateContiguousFrames(count)`. Returns kNullFrame if no in-range
+/// run of that length is free.
+PhysAddr AllocateContiguousFramesInRange(u64 count, PhysAddr max_phys);
+
 /// Result-shaped sibling of `AllocateContiguousFrames`. Maps the
 /// null-frame sentinel to `ErrorCode::OutOfMemory` (run not
 /// available) and `count==0` to `ErrorCode::InvalidArgument`.
