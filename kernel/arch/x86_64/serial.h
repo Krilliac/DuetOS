@@ -54,6 +54,13 @@ void SerialWriteN(const char* data, u64 len);
 /// the function level.
 void SerialWriteHex(u64 value);
 
+/// Non-blocking read of one byte from COM1. Returns the received byte
+/// in the low 8 bits, or -1 if the receive buffer is empty. The serial
+/// receive path is intentionally lock-free: only the per-CPU input
+/// pump task calls this, so contention is impossible. Costs one INB on
+/// the LSR + (when ready) one INB on the RBR.
+duetos::i32 SerialReadByteNonblocking();
+
 /// Bypass the serial spinlock from this point on. Called by core::Panic
 /// before the panic banner so a panic that fires while another CPU was
 /// already mid-SerialWrite still gets its output. Once set, never

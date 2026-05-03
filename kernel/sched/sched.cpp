@@ -912,6 +912,12 @@ const char* KillReasonName(KillReason r)
         return "SandboxDenialThreshold";
     case KillReason::UserKill:
         return "UserKill";
+    case KillReason::FsWriteRateExceeded:
+        return "FsWriteRateExceeded";
+    case KillReason::CanaryFileTouched:
+        return "CanaryFileTouched";
+    case KillReason::PersistenceDrop:
+        return "PersistenceDrop";
     default:
         KLOG_ONCE_WARN("sched", "KillReasonName: unrecognised KillReason enumerator");
         return "<unknown>";

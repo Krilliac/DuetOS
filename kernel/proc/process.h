@@ -270,6 +270,41 @@ struct Process
     // task would be caught by ticks, a retrying task by denials.
     u64 sandbox_denials;
 
+    // FS write rate-limit windows (multi-tier).
+    //
+    // Three rolling windows at decreasing granularities defend
+    // against the full range of mass-file-rewrite strategies:
+    //
+    //   [0] burst    — 1 s   /  16 MiB : catches "go full speed".
+    //   [1] sustained — 5 min /  256 MiB : catches "stay just under
+    //                                       the burst cap forever".
+    //   [2] long     — 1 h   /   2 GiB : catches "stay under
+    //                                     sustained too" (≤ ~700 KiB/s
+    //                                     averaged across an hour).
+    //
+    // An attacker who reads our open-source threshold constants
+    // can stay under any single window with patience; staying
+    // under all three at once requires moving so little data the
+    // attack stops being worthwhile. The three caps do NOT
+    // cumulate — a process is killed the moment ANY one of them
+    // is breached.
+    //
+    // Each successful file-write syscall (Win32 SYS_FILE_WRITE,
+    // SYS_FILE_CREATE init bytes, Linux sys_write to a regular
+    // file, copy_file_range) calls `RecordFsWrite`, which adds
+    // bytes to every window's running counter, rolls any window
+    // past its tick budget, and on threshold-cross flags the
+    // calling task for kill via `KillReason::FsWriteRateExceeded`.
+    // `fs_write_bytes_total` is the cumulative lifetime counter
+    // for telemetry only — never gates anything by itself.
+    //
+    // Threat model: trusted process IS the attacker (compromised
+    // PE / ELF, smuggled installer). No cap-based exemption.
+    static constexpr u32 kFsWriteWindowCount = 3;
+    u64 fs_write_bytes_total;
+    u64 fs_write_window_bytes[kFsWriteWindowCount];
+    u64 fs_write_window_start_tick[kFsWriteWindowCount];
+
     // Win32 last-error slot. Read + written by the kernel32
     // GetLastError / SetLastError stubs via SYS_GETLASTERROR /
     // SYS_SETLASTERROR. In real Windows this lives in the TEB
@@ -342,6 +377,13 @@ struct Process
         char path[64];
     };
     static constexpr u8 kLinuxFdFlagPendingCreate = 0x01;
+    // Canary flag: set at open / O_CREAT time when the path
+    // matched `security::CanaryMatchesPath`. Read on every
+    // sys_write (and copy_file_range / sendfile sinks) so an
+    // in-place overwrite of an existing canary file trips the
+    // wall even though the syscall doesn't re-evaluate the
+    // path. Mirrors `Win32FileHandle::is_canary`.
+    static constexpr u8 kLinuxFdFlagCanary = 0x02;
     LinuxFd linux_fds[16];
 
     // Linux-ABI brk heap. Meaningful only when abi_flavor ==
@@ -459,6 +501,14 @@ struct Process
         u32 fat32_volume_idx;            // valid iff kind == Fat32
         fs::fat32::DirEntry fat32_entry; // valid iff kind == Fat32 (snapshot at open time)
         u64 cursor;                      // current read position in bytes
+        // Canary flag stamped at open / create time when the
+        // resolved path matched `security::CanaryMatchesPath` or
+        // `CanaryMatchesSuspiciousExtension`. Read on every
+        // SYS_FILE_WRITE so an in-place overwrite of an existing
+        // canary file (which doesn't carry a path string into
+        // the write call) still trips the wall. Stamped once at
+        // open; never cleared (handles are short-lived).
+        bool is_canary;
     };
     static constexpr u64 kWin32HandleCap = 16;
     static constexpr u64 kWin32HandleBase = 0x100;
@@ -855,10 +905,10 @@ struct Process
     // more than any sane workload needs.
     struct LinuxPosixTimer
     {
-        u64 deadline_ns;     // 0 = disarmed
-        u64 interval_ns;     // 0 = one-shot
-        u32 signo;           // signal to raise on expiry (SIGALRM default)
-        u32 overrun;         // missed-fires count, drained by timer_getoverrun
+        u64 deadline_ns; // 0 = disarmed
+        u64 interval_ns; // 0 = one-shot
+        u32 signo;       // signal to raise on expiry (SIGALRM default)
+        u32 overrun;     // missed-fires count, drained by timer_getoverrun
         u8 in_use;
         u8 _pad[7];
     };
@@ -1023,6 +1073,40 @@ inline constexpr u64 kTickBudgetTrusted = 1ULL << 40; // ~12 decades at 100 Hz =
 // under this — but anything higher is a hostile retry loop.
 inline constexpr u64 kSandboxDenialKillThreshold = 100;
 
+// FS write-rate windows (multi-tier). One row per window level
+// — index matches `Process::fs_write_window_bytes[i]` and
+// `fs_write_window_start_tick[i]`. All three checks run on
+// every successful write; first cap-cross kills the caller.
+//
+// Tick rate is 100 Hz (kernel/time/tick.h kTickHz). Tuning
+// principle: each row's byte_cap / window_ticks is the
+// MAXIMUM legitimate sustained throughput tolerated. The burst
+// row is generous (16 MiB/s — a typical installer's peak
+// extraction rate); sustained narrows that to ~850 KiB/s; long
+// to ~580 KiB/s. Legitimate userland workloads (text editing,
+// cache writes, compile output) sit at ~10s of KiB/s averaged
+// across a session.
+inline constexpr u64 kFsWriteWindowTicksByLevel[3] = {
+    100ULL,           // 1 s    @ 100 Hz   (burst)
+    100ULL * 60 * 5,  // 5 min  @ 100 Hz   (sustained)
+    100ULL * 60 * 60, // 1 h    @ 100 Hz   (long-tail)
+};
+inline constexpr u64 kFsWriteWindowByteCapByLevel[3] = {
+    16ULL * 1024 * 1024,       // burst    : 16 MiB / 1 s
+    256ULL * 1024 * 1024,      // sustained: 256 MiB / 5 min
+    2ULL * 1024 * 1024 * 1024, // long     :  2 GiB / 1 h
+};
+inline constexpr const char* kFsWriteWindowLabels[3] = {
+    "1s/16MiB",
+    "5min/256MiB",
+    "1h/2GiB",
+};
+
+// Back-compat aliases for the burst level (preserve existing
+// callers that pre-date the multi-window split).
+inline constexpr u64 kFsWriteWindowTicks = kFsWriteWindowTicksByLevel[0];
+inline constexpr u64 kFsWriteWindowByteCap = kFsWriteWindowByteCapByLevel[0];
+
 /// Allocate a Process and take ownership of `as`. Does NOT bump
 /// `as`'s refcount — ProcessCreate assumes the caller hands over
 /// the one reference AddressSpaceCreate returned. On ProcessRelease,
@@ -1065,6 +1149,43 @@ const char* CapName(Cap c);
 /// counting but the task is flagged exactly once. `cap`
 /// argument is just for the log line; no functional effect.
 void RecordSandboxDenial(Cap cap);
+
+/// FS write rate-limit hook. Call from every successful
+/// file-write syscall site (Win32 SYS_FILE_WRITE, Linux
+/// sys_write to a regular file) AFTER the bytes have actually
+/// landed on backing storage. Bumps per-process counters,
+/// rolls the rate-limit window, and on threshold crossing:
+///   1) bumps the global `MassFsWriteRate` health counter,
+///   2) flags the calling task for kill via FlagCurrentForKill
+///      with `KillReason::FsWriteRateExceeded`.
+///
+/// Idempotent past the threshold — repeated calls keep
+/// counting and re-flagging, but the kill flag is itself
+/// idempotent so the cost is just one extra log line per
+/// over-cap call (which is desirable: the operator wants to
+/// see how badly the rogue process pushed past the cap).
+///
+/// `bytes == 0` is a no-op (matches `write(2)` semantics where
+/// a zero-length write is a query, not a transfer). `p ==
+/// nullptr` is a no-op for kernel-only paths that don't have a
+/// Process attached.
+void RecordFsWrite(Process* p, u64 bytes);
+
+/// Pure-bookkeeping variant of RecordFsWrite. Updates every
+/// per-process window's running counter + rolls each one's
+/// timestamp, and returns true if any window crossed its cap.
+/// Does NOT bump global counters and does NOT flag the current
+/// task for kill — useful for the attacker-simulation suite
+/// where we want to verify the threshold logic without killing
+/// the kernel main task that's running the test.
+bool RecordFsWriteCheck(Process* p, u64 bytes);
+
+/// Same as RecordFsWriteCheck but returns the INDEX of the
+/// first window level that tripped (0..kFsWriteWindowCount-1)
+/// or -1 if every window is still under cap. Lets test paths
+/// distinguish which timescale fired without re-deriving from
+/// raw bytes.
+i32 RecordFsWriteCheckLevel(Process* p, u64 bytes);
 
 /// Rate-limit predicate for denial log output. Call sites check
 /// this after incrementing the counter (see

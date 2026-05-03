@@ -27,6 +27,7 @@
 #include "proc/process.h"
 #include "fs/fat32.h"
 #include "mm/address_space.h"
+#include "security/canary.h"
 #include "subsystems/win32/dir_syscall.h"
 
 namespace duetos::subsystems::linux::internal
@@ -126,6 +127,15 @@ i64 DoOpen(u64 user_path, u64 flags, u64 mode)
         {
             return kENOENT;
         }
+        // Canary wall: O_CREAT means "create this path". Same
+        // policy as Win32 SYS_FILE_CREATE — refuse if the path
+        // is a canary or has a suspicious extension.
+        if (::duetos::security::CanaryCheck(leaf, "open-O_CREAT"))
+            return kEACCES;
+        // Persistence-drop detector. Advisory by default; the
+        // counter bumps even when the writer is allowed through.
+        if (::duetos::security::PersistenceCheck(leaf, "open-O_CREAT"))
+            return kEACCES;
         // O_CREAT path: don't physically create the file yet —
         // FAT32's AppendInDir explicitly refuses to grow zero-byte
         // files (first_cluster<2 guards in fat32_write.cpp), so a
@@ -205,12 +215,22 @@ i64 DoOpen(u64 user_path, u64 flags, u64 mode)
         ::duetos::subsystems::win32::SysDirClose(p, static_cast<u64>(dh));
         return kEMFILE;
     }
+    // Stamp the canary flag at open time — same wall the Win32
+    // SYS_FILE_OPEN path uses (see file_route.cpp). Pending-
+    // create paths already failed the CanaryCheck above (the
+    // O_CREAT branch ran the matcher before falling here), so
+    // those handles are by-construction not canaries; existing
+    // files we just check.
+    const bool open_canary = !pending_create && ::duetos::security::CanaryMatchesPath(leaf);
     for (u32 i = 3; i < LinuxFdEffectiveMax(p); ++i)
     {
         if (p->linux_fds[i].state == 0)
         {
             p->linux_fds[i].state = 2;
-            p->linux_fds[i].flags = pending_create ? core::Process::kLinuxFdFlagPendingCreate : 0;
+            u8 fd_flags = pending_create ? core::Process::kLinuxFdFlagPendingCreate : 0;
+            if (open_canary)
+                fd_flags |= core::Process::kLinuxFdFlagCanary;
+            p->linux_fds[i].flags = fd_flags;
             p->linux_fds[i].first_cluster = entry.first_cluster;
             p->linux_fds[i].size = entry.size_bytes;
             p->linux_fds[i].offset = 0;

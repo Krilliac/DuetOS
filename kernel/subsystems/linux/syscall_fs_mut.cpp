@@ -25,6 +25,7 @@
 
 #include "proc/process.h"
 #include "fs/fat32.h"
+#include "security/canary.h"
 #include "subsystems/linux/inotify.h"
 
 namespace duetos::subsystems::linux::internal
@@ -171,6 +172,13 @@ i64 DoUnlink(u64 user_path)
     const char* leaf = nullptr;
     if (!CopyAndStripFatPath(user_path, kbuf, leaf))
         return kEFAULT;
+    // Canary wall: a Linux ELF deleting a canary file dies the
+    // same way a Win32 PE does. Subsystem isolation means the
+    // canary check must live on every ABI's mutation path.
+    if (::duetos::security::CanaryCheck(leaf, "unlink"))
+        return kEACCES;
+    if (::duetos::security::PersistenceCheck(leaf, "unlink"))
+        return kEACCES;
     const auto* v = fs::fat32::Fat32Volume(0);
     if (v == nullptr)
         return kENOENT;
@@ -261,6 +269,16 @@ i64 DoRename(u64 user_old, u64 user_new)
         return kEFAULT;
     if (!CopyAndStripFatPath(user_new, new_buf, new_leaf))
         return kEFAULT;
+    // Canary wall: trip on either endpoint. See RenameForProcess
+    // in kernel/fs/file_route.cpp for the rationale.
+    if (::duetos::security::CanaryCheck(old_leaf, "rename-src"))
+        return kEACCES;
+    if (::duetos::security::CanaryCheck(new_leaf, "rename-dst"))
+        return kEACCES;
+    if (::duetos::security::PersistenceCheck(old_leaf, "rename-src"))
+        return kEACCES;
+    if (::duetos::security::PersistenceCheck(new_leaf, "rename-dst"))
+        return kEACCES;
     const auto* v = fs::fat32::Fat32Volume(0);
     if (v == nullptr)
         return kENOENT;

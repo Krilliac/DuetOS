@@ -122,4 +122,14 @@ void ConsoleBeginCapture(char* buf, u32 cap, u32* len_out);
 /// the scrollback.
 void ConsoleEndCapture();
 
+/// Toggle COM1 mirroring of the shell console. When on, every
+/// byte the shell writes to its scrollback also goes out the
+/// 16550 — a host terminal connected via QEMU's `-serial stdio`
+/// then sees the shell's responses (otherwise the framebuffer
+/// is the only sink and `-display none` makes it invisible).
+/// Idempotent; safe to call before or after the framebuffer is
+/// online. The serial-input pump (core/serial_input.cpp) flips
+/// this on at startup.
+void ConsoleEnableSerialMirror(bool on);
+
 } // namespace duetos::drivers::video

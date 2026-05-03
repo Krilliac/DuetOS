@@ -427,6 +427,9 @@ void CmdKill(u32 argc, char** argv);
 void CmdSpawn(u32 argc, char** argv);
 void CmdGuard(u32 argc, char** argv);
 void CmdAttackSim();
+void CmdSecEvents(u32 argc, char** argv);
+void CmdPolicy(u32 argc, char** argv);
+void CmdPurple();
 
 // ---------------------------------------------------------------
 // Misc trivial utility commands (shell_utilities.cpp). Commands

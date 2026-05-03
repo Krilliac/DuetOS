@@ -4,6 +4,7 @@
 #include "arch/x86_64/serial.h"
 #include "diag/hexdump.h"
 #include "diag/log_names.h"
+#include "diag/runtime_checker.h"
 #include "debug/probes.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
@@ -14,6 +15,9 @@
 #include "log/klog.h"
 #include "core/panic.h"
 #include "loader/pe_loader.h"
+#include "security/event_ring.h"
+#include "security/ir_runbook.h"
+#include "time/tick.h"
 
 namespace duetos::core
 {
@@ -42,8 +46,8 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     auto* p = static_cast<Process*>(mm::KMalloc(sizeof(Process)));
     if (p == nullptr)
     {
-        KLOG_CRITICAL_AS(LogArea::Process, "core/process",
-                         "ProcessCreate: KMalloc(Process) returned null", "name", name);
+        KLOG_CRITICAL_AS(LogArea::Process, "core/process", "ProcessCreate: KMalloc(Process) returned null", "name",
+                         name);
         return nullptr;
     }
     // Zero the entire Process struct. KMalloc returns memory still
@@ -507,6 +511,10 @@ void RecordSandboxDenial(Cap cap)
         arch::SerialWrite(" denials (last cap=");
         arch::SerialWrite(CapName(cap));
         arch::SerialWrite(") — terminating as malicious\n");
+        const u32 pid = static_cast<u32>(p->pid);
+        ::duetos::security::EventRingPublishKind(::duetos::security::EventKind::SandboxDenialKill, pid,
+                                                 static_cast<u64>(cap), p->sandbox_denials, CapName(cap));
+        ::duetos::security::IrRunbookEmit(::duetos::security::EventKind::SandboxDenialKill, pid);
         sched::FlagCurrentForKill(sched::KillReason::SandboxDenialThreshold);
     }
 }
@@ -525,6 +533,94 @@ bool ShouldLogDenial(u64 denial_index)
     // lines at the threshold; tune if future workloads spam
     // the log at a different rate.
     return denial_index == 1 || (denial_index & 31) == 0;
+}
+
+i32 RecordFsWriteCheckLevel(Process* p, u64 bytes)
+{
+    if (p == nullptr || bytes == 0)
+        return -1;
+    p->fs_write_bytes_total += bytes;
+
+    // Walk every window level. TickCount is monotonic, so a
+    // "now older than start by >= window" check covers both
+    // the fresh-window (start_tick == 0) case and the legitimate
+    // roll case in one expression. We deliberately reset to
+    // `bytes` (not 0) on roll so a single oversized write is
+    // still counted toward the new window — an attacker cannot
+    // evade the cap by pacing one >cap write per window.
+    //
+    // Returns the index of the FIRST level that tripped, or -1
+    // if all three are still within budget. Returning the index
+    // (instead of bool) lets the caller log which timescale's
+    // wall just fired — an attacker who tripped the long-tail
+    // wall is materially different from one who tripped the
+    // burst wall, and operators care about the difference.
+    const u64 now = ::duetos::time::TickCount();
+    i32 first_tripped = -1;
+    for (u32 lvl = 0; lvl < Process::kFsWriteWindowCount; ++lvl)
+    {
+        const u64 ticks = kFsWriteWindowTicksByLevel[lvl];
+        const u64 cap = kFsWriteWindowByteCapByLevel[lvl];
+        const u64 start = p->fs_write_window_start_tick[lvl];
+        if (start == 0 || now - start >= ticks)
+        {
+            p->fs_write_window_start_tick[lvl] = now;
+            p->fs_write_window_bytes[lvl] = bytes;
+        }
+        else
+        {
+            p->fs_write_window_bytes[lvl] += bytes;
+        }
+        if (first_tripped < 0 && p->fs_write_window_bytes[lvl] > cap)
+            first_tripped = static_cast<i32>(lvl);
+    }
+    return first_tripped;
+}
+
+bool RecordFsWriteCheck(Process* p, u64 bytes)
+{
+    return RecordFsWriteCheckLevel(p, bytes) >= 0;
+}
+
+void RecordFsWrite(Process* p, u64 bytes)
+{
+    const i32 lvl = RecordFsWriteCheckLevel(p, bytes);
+    if (lvl < 0)
+        return;
+    // Threshold crossed. Log every over-cap call so the operator
+    // sees how badly the rogue process pushed past the limit;
+    // FlagCurrentForKill is itself idempotent so repeated calls
+    // before the scheduler reaps cost nothing beyond the log.
+    arch::SerialWrite("[fsguard] pid=");
+    arch::SerialWriteHex(p->pid);
+    arch::SerialWrite(" name=\"");
+    arch::SerialWrite(p->name != nullptr ? p->name : "<null>");
+    arch::SerialWrite("\" tripped ");
+    arch::SerialWrite(kFsWriteWindowLabels[lvl]);
+    arch::SerialWrite(" cap (window_bytes=");
+    arch::SerialWriteHex(p->fs_write_window_bytes[lvl]);
+    arch::SerialWrite(") — terminating (suspected ransomware)\n");
+    RuntimeCheckerNoteFsWriteRateExceeded(static_cast<u32>(lvl));
+    {
+        const u32 pid = static_cast<u32>(p->pid);
+        ::duetos::security::EventKind kind;
+        switch (lvl)
+        {
+        case 0:
+            kind = ::duetos::security::EventKind::FsWriteRateBurst;
+            break;
+        case 1:
+            kind = ::duetos::security::EventKind::FsWriteRateSustained;
+            break;
+        default:
+            kind = ::duetos::security::EventKind::FsWriteRateLong;
+            break;
+        }
+        ::duetos::security::EventRingPublishKind(kind, pid, p->fs_write_window_bytes[lvl], static_cast<u64>(lvl),
+                                                 p->name != nullptr ? p->name : "?");
+        ::duetos::security::IrRunbookEmit(kind, pid);
+    }
+    sched::FlagCurrentForKill(sched::KillReason::FsWriteRateExceeded);
 }
 
 const char* CapName(Cap c)
@@ -599,8 +695,8 @@ u64 ProcessFindDllBaseByName(const Process* proc, const char* dll_name)
      * available" behaviour. */
     if (dll_name == nullptr || dll_name[0] == '\0')
     {
-        KLOG_DEBUG_AV(LogArea::Loader, "core/process",
-                      "ProcessFindDllBaseByName: empty name -> EXE pe_image_base", proc->pe_image_base);
+        KLOG_DEBUG_AV(LogArea::Loader, "core/process", "ProcessFindDllBaseByName: empty name -> EXE pe_image_base",
+                      proc->pe_image_base);
         return proc->pe_image_base;
     }
     // Strip any ".dll" / ".DLL" suffix from the lookup so callers
