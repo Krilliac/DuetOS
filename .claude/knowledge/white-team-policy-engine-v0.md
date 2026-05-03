@@ -1,17 +1,17 @@
 # White team — policy engine v0
 
 **Type:** Decision + Pattern
-**Status:** Active
+**Status:** Active — landed in commit bb13b98 on
+`claude/improve-os-security-T74TX`
 **Last updated:** 2026-05-03
 
 ## What it is
 
 A single set of operator-facing profiles that composes every
 per-subsystem security mode into a coherent posture. Today the
-operator has to flip ~6 independent switches — image guard mode,
-persistence-drop mode, blockguard mode, sandbox-denial threshold,
-canary-kill enabled/disabled, FaultReact policy floor — and there
-is no atomic way to say "be production-strict" or "be lab-permissive".
+operator has to flip ~3 independent switches — image guard mode,
+persistence-drop mode, blockguard write mode — and there is no
+atomic way to say "be production-strict" or "be lab-permissive".
 
 The policy engine fixes that. One command:
 
@@ -19,120 +19,123 @@ The policy engine fixes that. One command:
 policy set production
 ```
 
-flips every per-subsystem switch to its production-coherent value
-in a single operation, publishes a `PolicyChanged` event, and
-records the chosen profile in a kernel-readable variable so
-boot-time subsystems can query "what posture am I in?" before
-deciding their own defaults.
+flips every per-subsystem switch to its production-coherent
+value in a single operation, publishes a `PolicyChanged` event
++ per-subsystem `*ModeChanged` events, and updates the recorded
+profile.
 
-## API shape
+## API (as shipped)
 
 ```cpp
 namespace duetos::security {
 
 enum class PolicyProfile : u16
 {
-    Default = 0,    // matches today's behaviour exactly — bytewise no-op for
-                    //   a freshly booted system. Existence prevents
-                    //   accidentally regressing to a "no policy chosen" state.
-    Lab,            // Permissive: image guard Advisory, persistence Advisory,
-                    //   blockguard Audit, sandbox-denial threshold 1000 (10x),
-                    //   canary-kill on, FaultReact floor Continue.
-    Production,     // Strict default: image guard Enforce, persistence Deny,
-                    //   blockguard Block, sandbox-denial threshold 100,
-                    //   canary-kill on, FaultReact floor RetryThenKill.
-    Forensic,       // Maximum: every wall enforces; FaultReact floor Halt
-                    //   (any unhandled fault panics for crashdump);
-                    //   every wall trip publishes runbook + freezes process.
-                    //   Used after a confirmed incident.
+    Default = 0, // bytewise no-op snapshot of whatever each subsystem
+                 // chose for itself; existence prevents a "no profile"
+                 // inconsistent state.
+    Lab,         // permissive: Advisory everywhere
+    Production,  // strict default: Enforce / Deny everywhere
+    Forensic,    // maximum: every wall enforces; same shape as Production
+                 // today, but kept distinct so future runbook-driven knobs
+                 // (verbose logging, every-trip event publication) can
+                 // attach without reshuffling.
+    Count,
 };
 
 struct PolicySnapshot
 {
-    PolicyProfile     profile;
-    GuardMode         guard_mode;          // from existing guard.h
-    PersistenceMode   persistence_mode;    // from existing canary.h
-    BlockguardMode    blockguard_mode;     // from existing fs/blockguard.h
-    u32               sandbox_denial_threshold;
-    bool              canary_kill_enabled;
-    FaultReactPolicy  fault_react_floor;
-    u64               applied_at_uptime_ns;
-    u32               applied_by_pid;       // 0 = boot init
+    PolicyProfile profile;
+    Mode guard_mode;
+    PersistenceMode persistence_mode;
+    drivers::storage::WriteGuardMode write_guard_mode;
+    u64 applied_at_uptime_ns;
+    u32 applied_by_pid;       // 0 = boot init / kernel
 };
 
 PolicySnapshot PolicyCurrent();
+void           PolicySet(PolicyProfile, u32 actor_pid);
+PolicyProfile  PolicyCurrentProfileHint();
+PolicySnapshot PolicyResolve(PolicyProfile profile);
+const char*    PolicyProfileName(PolicyProfile);
+void           PolicyInit();
+void           PolicySelfTest();
 
-// Apply a profile atomically — sets every per-subsystem mode in one critical
-// section and publishes a PolicyChanged event.
-core::Result<void, core::ErrorCode> PolicySet(PolicyProfile profile, u32 actor_pid);
-
-// Subsystems that want to make boot-time decisions (e.g. "should I enable
-// extra logging?") can read this. NOT a security gate — the per-subsystem
-// modes are the gates; this is just a hint for ergonomics / verbosity.
-PolicyProfile PolicyCurrentProfileHint();
-
-// Boot-time init — sets profile to Default. The boot path may opt to upgrade
-// to Production after init via a kernel cmdline `policy=production`.
-void PolicyInit();
-
-const char* PolicyProfileName(PolicyProfile p);
-
-// Self-test: applies each profile in sequence, reads back via PolicyCurrent,
-// asserts every per-subsystem mode is what the profile demands, then restores
-// the original profile. Runs at boot iff DUETOS_DEBUG.
-void PolicySelfTest();
-
-} // namespace duetos::security
+} // namespace
 ```
 
-## Profile composition matrix
+## Profile composition matrix (as shipped)
 
 | Subsystem mode | Default | Lab | Production | Forensic |
 |---|---|---|---|---|
-| Guard image-load | Advisory | Advisory | Enforce | Enforce |
-| Persistence drops | Advisory | Advisory | Deny | Deny |
-| Blockguard | Audit | Audit | Block | Block |
-| Sandbox-denial threshold | 100 | 1000 | 100 | 50 |
-| Canary kill | on | on | on | on |
-| FaultReact floor | Continue | Continue | RetryThenKill | Halt |
-| Runbook publish on trip | on | off (verbose ↘ noise) | on | on |
-| Event ring on every klog Warn | off | off | off | on |
+| Guard image-load | (sampled) | Advisory | Enforce | Enforce |
+| Persistence drops | (sampled) | Advisory | Deny | Deny |
+| Blockguard | (sampled) | Advisory | Deny | Deny |
 
-## Wiring (boot)
+Default = "snapshot whatever each subsystem chose for itself" —
+a bytewise no-op so the policy engine is optional. Operators
+who never call `policy set` see no change.
 
-`PolicyInit()` is called from `core::main` **after** every per-
-subsystem default is established (so profile application can
-safely read-then-overwrite each mode), but **before** ring-3 is
-launched. Kernel cmdline `policy=<name>` can override.
+## Why these three subsystems and not others
+
+Three knobs are settable today:
+- `SetGuardMode(Mode)` — Off / Advisory / Enforce
+- `PersistenceSetMode(PersistenceMode)` — Advisory / Deny
+- `BlockWriteGuardSetMode(WriteGuardMode)` — Off / Advisory / Deny
+
+Other knobs the design doc considered but punted on:
+- **Sandbox-denial threshold** (`kSandboxDenialKillThreshold`)
+  is `inline constexpr u64 = 100` — not runtime-settable. Adding
+  a setter is a future enhancement.
+- **FsWrite-rate caps** are constexpr per-window thresholds in
+  process.cpp — same story.
+- **FaultReact floor** is internal logic in `FaultReactPolicyFloor`,
+  not exposed as a settable mode.
+
+Once any of those gain runtime setters, the policy table is the
+right place to add columns.
+
+## Wiring
+
+- `PolicyInit()` runs at boot in `core::main` after Guard/Canary
+  init but before AP bring-up. Reads each subsystem's chosen
+  mode and stores the Default snapshot.
+- `PolicySet(profile, actor_pid)` walks the resolved profile,
+  calls each subsystem's setter for fields that actually
+  differ, publishes `PolicyChanged` + per-subsystem
+  `*ModeChanged` events, refreshes the snapshot.
+- `PolicySelfTest` cycles through Lab / Production / Forensic,
+  asserts every per-subsystem mode matches expectation, then
+  restores the original modes + snapshots Default.
 
 ## Shell command
 
 ```
-policy show              — print current profile + the resolved per-subsystem modes
-policy set <name>        — flip profile (lab / production / forensic / default)
-policy diff <name>       — show what would change if you set <name>; doesn't apply
+policy show              — print current profile + per-subsystem modes
+policy set <profile>     — flip profile (default | lab | production | prod | forensic); admin-gated
+policy diff <profile>    — placeholder; routes through COM1 in v0
 ```
 
-## Why "Default" exists
+## What this does NOT do
 
-Without an explicit Default value, the boot path would either:
+- It does NOT decide policy autonomously. The runbook recommends;
+  the operator (or a future "auto-escalate on confirmed compromise"
+  hook) decides.
+- It does NOT persist across reboots. Profile resets to Default
+  every boot. Adding kernel-cmdline `policy=production` is a
+  cheap follow-up.
+- It does NOT remove the per-subsystem shell commands
+  (`guard enforce`, `persistence deny`, etc.). Those still work
+  and silently leave the profile name pointing at the prior
+  selection — a future enhancement could flip to `Custom`.
 
-1. Boot with no profile applied → operator runs `policy show` and
-   gets an inconsistent picture (some modes set, some not),
-2. Or boot with Production → forces operators to explicitly opt out
-   for a "I'm hacking on a bring-up driver" workflow.
+## Future extensions
 
-`Default = no-op snapshot of whatever each subsystem chose for
-itself` keeps the policy engine optional. Operators who never
-touch it see no change. Operators who type `policy set production`
-get one-flip strict mode.
-
-## Future extensions (out of scope for v0)
-
-- **Per-process profile overrides** — pin a known-malicious binary
-  to Forensic posture even when system policy is Lab.
-- **Time-bound policy** — `policy set forensic until 2026-05-04T18:00`
+- **Per-process profile overrides** — pin a known-suspicious
+  binary to Forensic posture even when system policy is Lab.
+- **Time-bound policy** — `policy set forensic until <uptime>`
   with auto-revert.
-- **Policy diff as runbook** — when a wall keeps tripping under
-  Lab, the IR runbook can suggest "Production would have blocked
-  this earlier — `policy diff production` to see the delta".
+- **Auto-escalate on confirmed compromise** — when
+  IdtModified / KernelTextModified / SyscallMsrHijacked fires
+  twice in a row across Heal cycles, automatically
+  `policy set forensic` and emit a runbook step.
