@@ -46,6 +46,7 @@
 #include "util/cpio.h"
 #include "util/datetime.h"
 #include "util/posix_tz.h"
+#include "util/tar.h"
 #include "util/tga.h"
 #include "util/types.h"
 #include "util/unicode.h"
@@ -1944,6 +1945,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::util::DateTimeSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::PosixTzSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::CpioSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::TarSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::WavSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Sha1SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Sha256SelfTest());
