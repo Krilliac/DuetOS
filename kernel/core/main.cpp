@@ -53,6 +53,7 @@
 #include "util/psf.h"
 #include "util/tar.h"
 #include "util/tga.h"
+#include "util/tzif.h"
 #include "util/types.h"
 #include "util/unicode.h"
 #include "util/wav.h"
@@ -1961,6 +1962,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::util::Lz4SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::DeflateSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::GzipZlibSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::TzifSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::PsfSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::Adler32SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Sha1SelfTest());
