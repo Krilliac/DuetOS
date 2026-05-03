@@ -28,6 +28,15 @@ struct DmaSlot
 constinit DmaSlot g_tx_dma[kIwlNumTxQueues] = {};
 constinit DmaSlot g_rx_dma = {};
 
+// RX data-buffer pool. The RBD ring itself only carries 256 ×
+// 8-byte phys-addr descriptors; each descriptor points at a 4 KiB
+// buffer the chip writes received frames into. We allocate the
+// pool as one contiguous 1 MiB run so the per-buffer phys addrs
+// are deterministic (pool_base + 4 KiB × i) and the driver doesn't
+// need to track a list of independent allocations.
+inline constexpr u32 kRxDataBufBytes = 4096;
+constinit DmaSlot g_rx_data_dma = {};
+
 void Mmio32Write(const NicInfo& n, u32 off, u32 v)
 {
     if (n.mmio_virt == nullptr)
@@ -60,6 +69,27 @@ void FreeAllRings()
         mm::FreeDmaCoherent(g_rx_dma.buf);
         g_rx_dma = {};
     }
+    if (g_rx_data_dma.live)
+    {
+        mm::FreeDmaCoherent(g_rx_data_dma.buf);
+        g_rx_data_dma = {};
+    }
+}
+
+// Populate the RBD ring with one phys-addr per slot pointing into
+// the contiguous data-buffer pool. Modern iwlwifi (7000-series and
+// later) treats each RBD as a 64-bit physical address; legacy
+// chips use a 32-bit-shifted-by-8 form. v0 writes 64-bit and
+// captures the legacy variant as a GAP — every chip in the
+// supported matrix is 7000-series+.
+// GAP: legacy < 7000-series RBD format (32-bit, shifted 8).
+void PopulateRbdRing(IwlRxRing& rx, mm::PhysAddr data_pool_base)
+{
+    auto* rbd = static_cast<volatile u64*>(rx.virt_base);
+    for (u32 i = 0; i < rx.size; ++i)
+        rbd[i] = data_pool_base + static_cast<u64>(i) * kRxDataBufBytes;
+    mm::DmaBuffer tmp{0, rx.virt_base, static_cast<u64>(rx.size) * kIwlRbdBytes, mm::Zone::Dma32};
+    mm::DmaSyncForDevice(tmp, 0, tmp.bytes);
 }
 
 } // namespace
@@ -108,14 +138,7 @@ void FreeAllRings()
                        static_cast<u32>(r.value().phys));
     }
 
-    // RX descriptor ring: 256-entry × 8 B = 2 KiB. Real RX buffers
-    // (one 4 KiB buffer per descriptor, 1 MiB total) are a separate
-    // slice — the descriptors point at them. The bring-up here is
-    // sufficient for the chip to see a valid ring base and accept
-    // the FH program; service starts once the per-descriptor
-    // buffer wiring lands.
-    // GAP: per-RBD data buffers (256 × 4 KiB) — needed before any
-    //   real RX traffic is observable.
+    // RX descriptor ring: 256-entry × 8 B = 2 KiB.
     {
         const u64 kRxBytes = static_cast<u64>(kIwlRxRingSize) * kIwlRbdBytes;
         auto r = mm::AllocDmaCoherent(kRxBytes, kRingZone);
@@ -135,6 +158,29 @@ void FreeAllRings()
                        static_cast<u32>(r.value().phys), 0);
     }
 
+    // RX data-buffer pool: one contiguous 1 MiB Dma32 run carved
+    // into 256 × 4 KiB slots (slot i lives at pool_base + 4 KiB·i).
+    // Each RBD entry is populated with the per-slot phys addr;
+    // the chip writes received frames into the slot pointed to by
+    // RBD[read_index] then advances. The driver hands buffers back
+    // to the chip by re-publishing them and bumping the write
+    // pointer. v0 hands all 256 to the chip up-front.
+    {
+        const u64 kPoolBytes = static_cast<u64>(kIwlRxRingSize) * kRxDataBufBytes;
+        auto r = mm::AllocDmaCoherent(kPoolBytes, kRingZone);
+        if (!r.has_value())
+        {
+            diag::RecordErr(diag::Layer::Rings, "rx-data-pool-fail", static_cast<u32>(r.error()),
+                            static_cast<u32>(kPoolBytes), 0, 0);
+            FreeAllRings();
+            return ::duetos::core::Err{r.error()};
+        }
+        g_rx_data_dma = {r.value(), true};
+        diag::RecordOk(diag::Layer::Rings, "rx-data-pool-allocated", static_cast<u32>(kPoolBytes),
+                       static_cast<u32>(r.value().phys), 0);
+        PopulateRbdRing(state->rx_ring, r.value().phys);
+    }
+
     // Program FH base registers with the real ring 0 physical
     // addresses (queue 0 is the command queue). Other queues are
     // mapped via per-queue base regs that don't exist as constants
@@ -145,7 +191,14 @@ void FreeAllRings()
     Mmio32Write(n, kFhTfdbBaseHigh, static_cast<u32>(tfd0 >> 32));
     Mmio32Write(n, kFhRscsrChnl0Rbdcb, static_cast<u32>(state->rx_ring.dma_addr & 0xFFFFFFFFu));
     Mmio32Write(n, kFhRscsrChnl0Sbrb, 0);
-    Mmio32Write(n, kFhRscsrChnl0Wptr, 0);
+    // Advance the RX write pointer to (size - 1) so the chip sees
+    // every RBD slot as ready-to-fill. Read pointer starts at 0;
+    // hardware advances it as it fills slots, then the driver bumps
+    // the write pointer past the position it has finished
+    // processing. v0 publishes all 256 up-front and the bottom-half
+    // (when it lands) re-publishes one slot at a time.
+    Mmio32Write(n, kFhRscsrChnl0Wptr, kIwlRxRingSize - 1);
+    state->rx_ring.read_index = 0;
 
     state->initialized = true;
     diag::RecordOk(diag::Layer::Rings, "init-done", 0, 0, 0);
@@ -247,13 +300,26 @@ void IwlRingsSelfTest()
     KASSERT(!sr.has_value(), "drivers/net/iwlwifi_rings", "submit must fail until TFD-build lands");
 
     KASSERT(IwlRingsServiceRx(n, &s) == 0, "drivers/net/iwlwifi_rings", "rx service should be empty");
+
+    // RBD ring populated with monotonically-increasing buffer phys
+    // addrs over a contiguous 1 MiB pool. RBD[i] - RBD[0] should be
+    // exactly i × 4 KiB.
+    {
+        auto* rbd = static_cast<volatile u64*>(s.rx_ring.virt_base);
+        const u64 base = rbd[0];
+        KASSERT(base != 0, "drivers/net/iwlwifi_rings", "rbd[0] not populated");
+        KASSERT(rbd[1] == base + kRxDataBufBytes, "drivers/net/iwlwifi_rings", "rbd[1] not contiguous with rbd[0]");
+        KASSERT(rbd[kIwlRxRingSize - 1] == base + (kIwlRxRingSize - 1) * static_cast<u64>(kRxDataBufBytes),
+                "drivers/net/iwlwifi_rings", "rbd[last] phys mismatch");
+    }
+
     auto tr = IwlRingsTeardown(n, &s);
     KASSERT(tr.has_value(), "drivers/net/iwlwifi_rings", "teardown failed");
     KASSERT(!s.initialized, "drivers/net/iwlwifi_rings", "rings.initialized=true after teardown");
     KASSERT(s.tx_queues[0].dma_addr == 0, "drivers/net/iwlwifi_rings", "tx[0] dma_addr leaked after teardown");
     KASSERT(s.rx_ring.dma_addr == 0, "drivers/net/iwlwifi_rings", "rx dma_addr leaked after teardown");
     KLOG_INFO_A(::duetos::core::LogArea::Wireless, "drivers/net/iwlwifi_rings",
-                "self-test OK (init + DMA-coherent rings + Dma32 ceiling + teardown verified)");
+                "self-test OK (init + DMA + RBD pool + Dma32 ceiling + teardown verified)");
 }
 
 } // namespace duetos::drivers::net
