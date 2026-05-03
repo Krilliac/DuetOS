@@ -59,11 +59,15 @@ bool NotesSave()
         SerialWrite("[notes] save: create failed\n");
         return false;
     }
+    detail::g_dirty = false;
     SerialWrite("[notes] save: NOTES.TXT written\n");
     return true;
 }
 
-bool NotesLoad()
+namespace
+{
+
+bool LoadFromPath(const char* path)
 {
     namespace fat = duetos::fs::fat32;
     using duetos::arch::SerialWrite;
@@ -74,14 +78,14 @@ bool NotesLoad()
         return false;
     }
     fat::DirEntry e;
-    if (!fat::Fat32LookupPath(v, detail::kSaveFile, &e))
+    if (!fat::Fat32LookupPath(v, path, &e))
     {
-        SerialWrite("[notes] load: NOTES.TXT not found\n");
+        SerialWrite("[notes] load: file not found\n");
         return false;
     }
     if (e.attributes & 0x10) // ATTR_DIRECTORY
     {
-        SerialWrite("[notes] load: NOTES.TXT is a directory\n");
+        SerialWrite("[notes] load: target is a directory\n");
         return false;
     }
     char tmp[detail::kBufCap];
@@ -107,8 +111,23 @@ bool NotesLoad()
         }
     }
     detail::g_cursor = detail::g_len;
-    SerialWrite("[notes] load: NOTES.TXT read\n");
+    detail::g_dirty = false;
+    SerialWrite("[notes] load OK\n");
     return true;
+}
+
+} // namespace
+
+bool NotesLoad()
+{
+    return LoadFromPath(detail::kSaveFile);
+}
+
+bool NotesLoadFile(const char* path)
+{
+    if (path == nullptr || path[0] == '\0')
+        return false;
+    return LoadFromPath(path);
 }
 
 void NotesPersistSelfTest()

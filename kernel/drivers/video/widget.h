@@ -554,16 +554,37 @@ void WindowReleaseCapture();
 WindowHandle WindowGetCapture();
 
 constexpr u32 kWindowClipboardMax = 1024;
+constexpr u32 kWindowClipboardHistoryDepth = 8;
 
 /// Replace the clipboard text. `text` is copied in bounded to
 /// `kWindowClipboardMax` ASCII bytes (non-ASCII stored as '?').
-/// A null pointer clears the clipboard.
+/// A null pointer clears the clipboard. The previous value is
+/// pushed onto the history ring (deduped — setting the same text
+/// twice in a row leaves the ring unchanged).
 void WindowClipboardSetText(const char* text);
 
 /// Copy current clipboard text into `dst` (cap = buffer size
 /// including NUL). Returns the stored length (bytes without
 /// NUL), always ≤ cap - 1 once the call returns.
 u32 WindowClipboardGetText(char* dst, u32 cap);
+
+/// History-ring depth, in entries. The ring stores up to
+/// `kWindowClipboardHistoryDepth` previous clipboard payloads
+/// (deduped). Index 0 is the most recently displaced, increasing
+/// indices reach further back in time.
+u32 WindowClipboardHistoryCount();
+
+/// Copy entry `idx` of the history ring into `dst`. Returns the
+/// stored length (bytes without NUL); 0 if `idx` is out of range
+/// or the slot is empty. Does not touch the active clipboard.
+u32 WindowClipboardHistoryGet(u32 idx, char* dst, u32 cap);
+
+/// Rotate the history ring by one step: the active clipboard is
+/// pushed onto the history ring (front), and entry 0 of the ring
+/// is promoted to the active slot. With nothing in the ring this
+/// is a no-op. Bound to Ctrl+Shift+V so the user can step backwards
+/// through recent clips. Returns true iff the rotation happened.
+bool WindowClipboardHistoryRotate();
 
 // ---------------------------------------------------------------
 // Per-window timer table. `SetTimer` registers (hwnd, timer_id,

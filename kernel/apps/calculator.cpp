@@ -69,9 +69,14 @@ struct State
     bool has_pending;
     bool fresh_entry; // true iff next digit starts a new number (post-op or post-=)
     bool error;       // sticky — cleared by 'C'
+    // Memory register — survives 'C' (only MC clears it). When
+    // `memory_set` is true and `memory != 0` the display gains
+    // an "M" indicator so the user knows there's a stash.
+    i64 memory;
+    bool memory_set;
 };
 
-constinit State g_state = {duetos::drivers::video::kWindowInvalid, {}, 0, 0, 0, false, true, false};
+constinit State g_state = {duetos::drivers::video::kWindowInvalid, {}, 0, 0, 0, false, true, false, 0, false};
 
 // Copy a literal NUL-terminated string into the display.
 void SetDisplayLiteral(const char* s)
@@ -252,6 +257,135 @@ void HandleClear()
     SetDisplayLiteral("0");
 }
 
+// Negate the current display value. Acts on whatever's typed (or
+// the accumulator if `fresh_entry` is set, since the display is
+// then showing the last result). Toggles sign in place by rewriting
+// the display via SetDisplayI64 — keeps formatting consistent with
+// every other path.
+void HandleSignToggle()
+{
+    if (g_state.error)
+        return;
+    const i64 cur = ReadDisplayAsI64();
+    if (cur == 0)
+        return; // -0 == 0; no point flipping
+    SetDisplayI64(-cur);
+    // Once sign-toggled, the digit-typing path should not append
+    // to the existing string — that would produce e.g. "-50" + "1"
+    // = "-501" which is fine, but more usefully a fresh op
+    // commits the new sign. Leaving fresh_entry alone preserves
+    // the ability to type more digits if the user is mid-entry.
+}
+
+// Pop the last digit (or sign) off the display. Mirrors the
+// Backspace key on a real calculator. No-op when the display is
+// already showing a single character or after an error.
+void HandleBackspace()
+{
+    if (g_state.error)
+        return;
+    if (g_state.fresh_entry)
+    {
+        // Backspace after `=` / op should clear the accumulator
+        // view rather than chip away at the previous result.
+        g_state.display_len = 0;
+        g_state.display[0] = '\0';
+        return;
+    }
+    if (g_state.display_len == 0)
+        return;
+    --g_state.display_len;
+    g_state.display[g_state.display_len] = '\0';
+    if (g_state.display_len == 0 || (g_state.display_len == 1 && g_state.display[0] == '-'))
+    {
+        g_state.display[0] = '\0';
+        g_state.display_len = 0;
+    }
+}
+
+// Percent: two semantics depending on whether an op is pending.
+// With a pending op (the common bank-calc convention): treat the
+// display value as a percentage OF the accumulator and combine
+// per the pending op. Examples:
+//     200 + 15 % =       -> 230  (i.e. 200 + 200*15/100)
+//     400 - 10 % =       -> 360
+//     100 * 50 % =       -> 50   (rare, but matches Win10 calc)
+// Without a pending op: divide the display by 100, integer-trunc.
+void HandlePercent()
+{
+    if (g_state.error)
+        return;
+    const i64 cur = ReadDisplayAsI64();
+    if (g_state.has_pending)
+    {
+        // Compute (lhs * cur) / 100 with overflow-resistant order:
+        // do the multiply first so the % of small numbers stays
+        // accurate; integer i64 holds up to 9.2e18 so even with
+        // a 10-digit operand we don't overflow.
+        const i64 lhs = g_state.accumulator;
+        const i64 scaled = (lhs * cur) / 100;
+        SetDisplayI64(scaled);
+    }
+    else
+    {
+        SetDisplayI64(cur / 100);
+    }
+    // Following calc convention, percent leaves the result on the
+    // display but doesn't auto-commit — the user still hits `=` to
+    // close the expression.
+    g_state.fresh_entry = false;
+}
+
+// Memory recall (MR): pull the stored memory register into the
+// display, marking fresh_entry so the next digit starts a new
+// number. No-op if memory has never been written.
+void HandleMemRecall()
+{
+    if (g_state.error)
+        return;
+    if (!g_state.memory_set)
+        return;
+    SetDisplayI64(g_state.memory);
+    g_state.fresh_entry = true;
+}
+
+// Memory store (MS): copy the current display value into the
+// memory register. Does NOT clear the display or alter pending
+// op state — same convention as physical bank calculators.
+void HandleMemStore()
+{
+    if (g_state.error)
+        return;
+    g_state.memory = ReadDisplayAsI64();
+    g_state.memory_set = true;
+}
+
+// Memory clear (MC): reset the register and drop the indicator.
+void HandleMemClear()
+{
+    g_state.memory = 0;
+    g_state.memory_set = false;
+}
+
+// Memory add (M+): memory += display. Same display behaviour as
+// MS — leaves the visible value alone, lifts memory.
+void HandleMemAdd()
+{
+    if (g_state.error)
+        return;
+    g_state.memory += ReadDisplayAsI64();
+    g_state.memory_set = true;
+}
+
+// Memory subtract (M-): memory -= display. Mirror of M+.
+void HandleMemSub()
+{
+    if (g_state.error)
+        return;
+    g_state.memory -= ReadDisplayAsI64();
+    g_state.memory_set = true;
+}
+
 void DispatchKey(char k)
 {
     if (k >= '0' && k <= '9')
@@ -262,6 +396,22 @@ void DispatchKey(char k)
         HandleEquals();
     else if (k == 'C' || k == 'c')
         HandleClear();
+    else if (k == '%')
+        HandlePercent();
+    else if (k == 'n' || k == 'N' || k == '_')
+        HandleSignToggle();
+    else if (static_cast<u8>(k) == 0x08) // ASCII Backspace
+        HandleBackspace();
+    else if (k == 'm' || k == 'M')
+        HandleMemRecall();
+    else if (k == 's' || k == 'S')
+        HandleMemStore();
+    else if (k == 'l' || k == 'L')
+        HandleMemClear();
+    else if (k == 'a' || k == 'A')
+        HandleMemAdd();
+    else if (k == 'b' || k == 'B')
+        HandleMemSub();
 }
 
 // Content-draw callback: paints the display strip across the
@@ -286,6 +436,15 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 /*ch*/, void* /*cookie*/)
     constexpr u32 kDisplayBorder = 0x00081018;
     FramebufferFillRect(x, y, w, kDisplayH, kDisplayBg);
     FramebufferDrawRect(x, y, w, kDisplayH, kDisplayBorder, 1);
+    // Memory indicator: small "M" in the top-left of the display
+    // strip when the register has a non-zero value. Painted before
+    // the right-aligned number so it doesn't get pushed off-screen
+    // on long results.
+    if (g_state.memory_set && g_state.memory != 0)
+    {
+        constexpr u32 kMemFg = 0x00FFC848; // amber, distinguishes from main fg
+        FramebufferDrawString(x + 4, y + 2, "M", kMemFg, kDisplayBg);
+    }
     // Right-align the text: calculators always push digits to
     // the right margin so the next digit appears on the left.
     const char* s = (g_state.display_len == 0) ? "0" : g_state.display;
@@ -421,7 +580,10 @@ bool CalculatorOnWidgetEvent(u32 id)
 
 bool CalculatorFeedChar(char c)
 {
-    if ((c >= '0' && c <= '9') || c == '+' || c == '-' || c == '*' || c == '/' || c == '=' || c == 'c' || c == 'C')
+    const u8 uc = static_cast<u8>(c);
+    if ((c >= '0' && c <= '9') || c == '+' || c == '-' || c == '*' || c == '/' || c == '=' || c == 'c' || c == 'C' ||
+        c == '%' || c == 'n' || c == 'N' || c == '_' || uc == 0x08 || c == 'm' || c == 'M' || c == 's' || c == 'S' ||
+        c == 'l' || c == 'L' || c == 'a' || c == 'A' || c == 'b' || c == 'B')
     {
         DispatchKey(c);
         return true;
@@ -429,11 +591,6 @@ bool CalculatorFeedChar(char c)
     if (static_cast<u8>(c) == 0x0A) // Enter -> '='
     {
         DispatchKey('=');
-        return true;
-    }
-    if (static_cast<u8>(c) == 0x08) // Backspace -> Clear
-    {
-        DispatchKey('C');
         return true;
     }
     return false;
@@ -455,6 +612,17 @@ void CalculatorSelfTest()
         {"2+3=", 5},
         {"9-4=", 5},
         {"6*7=", 42},
+        // Sign toggle: 5n produces -5; another n flips back to 5.
+        {"5n=", -5},
+        {"5nn=", 5},
+        // Backspace ('\b' = 0x08): "1234" then BS twice -> "12".
+        {"1234\b\b=", 12},
+        // Percent without pending op: 200% -> 2 (integer trunc).
+        {"200%=", 2},
+        // Percent with pending op: 200 + 15% = 230 (200 + 200*15/100).
+        {"200+15%=", 230},
+        // Percent with subtract: 400 - 10% = 360.
+        {"400-10%=", 360},
     };
     bool all_pass = true;
     for (const Case& tc : cases)
@@ -469,8 +637,58 @@ void CalculatorSelfTest()
             break;
         }
     }
+
+    // Memory-register self-test: walk through MS / MR / M+ / M- /
+    // MC and verify the register state at each step. Done outside
+    // the table-driven loop because the keys produce side effects
+    // on g_state.memory that the table format doesn't capture.
     HandleClear();
-    SerialWrite(all_pass ? "[calc] self-test OK (2+3=5, 9-4=5, 6*7=42)\n" : "[calc] self-test FAILED\n");
+    HandleMemClear();
+    if (g_state.memory_set || g_state.memory != 0)
+        all_pass = false;
+
+    // 50 MS — store 50, register = 50.
+    DispatchKey('5');
+    DispatchKey('0');
+    DispatchKey('s');
+    if (!g_state.memory_set || g_state.memory != 50)
+        all_pass = false;
+
+    // C, then 25 A — memory += 25 → 75. Display unchanged.
+    HandleClear();
+    DispatchKey('2');
+    DispatchKey('5');
+    DispatchKey('a');
+    if (g_state.memory != 75)
+        all_pass = false;
+
+    // C, then 10 B — memory -= 10 → 65.
+    HandleClear();
+    DispatchKey('1');
+    DispatchKey('0');
+    DispatchKey('b');
+    if (g_state.memory != 65)
+        all_pass = false;
+
+    // m — recall puts 65 on the display.
+    DispatchKey('m');
+    if (ReadDisplayAsI64() != 65)
+        all_pass = false;
+
+    // l — clear drops the indicator and zeroes the register.
+    DispatchKey('l');
+    if (g_state.memory_set || g_state.memory != 0)
+        all_pass = false;
+
+    // After MC the recall is a no-op (display stays where it was).
+    DispatchKey('m');
+    if (ReadDisplayAsI64() != 65)
+        all_pass = false;
+
+    HandleClear();
+    HandleMemClear();
+    SerialWrite(all_pass ? "[calc] self-test OK (arith + percent + sign + backspace + memory)\n"
+                         : "[calc] self-test FAILED\n");
 }
 
 } // namespace duetos::apps::calculator

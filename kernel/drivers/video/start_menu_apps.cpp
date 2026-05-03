@@ -115,6 +115,31 @@ bool ResolveTargetName(const char* s, ThemeRole* out)
         *out = ThemeRole::LogView;
         return true;
     }
+    if (StrEqI(s, "imageview") || StrEqI(s, "imageviewer"))
+    {
+        *out = ThemeRole::ImageView;
+        return true;
+    }
+    if (StrEqI(s, "about") || StrEqI(s, "sysinfo"))
+    {
+        *out = ThemeRole::About;
+        return true;
+    }
+    if (StrEqI(s, "help") || StrEqI(s, "shortcuts"))
+    {
+        *out = ThemeRole::Help;
+        return true;
+    }
+    if (StrEqI(s, "browser") || StrEqI(s, "web"))
+    {
+        *out = ThemeRole::Browser;
+        return true;
+    }
+    if (StrEqI(s, "calendar") || StrEqI(s, "cal"))
+    {
+        *out = ThemeRole::Calendar;
+        return true;
+    }
     return false;
 }
 

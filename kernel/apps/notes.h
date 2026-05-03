@@ -107,6 +107,14 @@ bool NotesSave();
 /// Caller MUST hold the compositor lock.
 bool NotesLoad();
 
+/// Same as NotesLoad but reads from an arbitrary FAT32 path
+/// (used by the Files app's Enter-on-`.TXT` dispatch). The
+/// path is interpreted by Fat32LookupPath, so a leading '/'
+/// is tolerated and the format is the 8.3-component form. On
+/// success, the live buffer is replaced with the file's
+/// printable bytes; on failure, the live buffer is untouched.
+bool NotesLoadFile(const char* path);
+
 /// One-shot self-test: exercises insert / backspace / delete
 /// and every navigation binding on a scratch state, asserts
 /// each step, then restores the pre-test buffer. Prints one

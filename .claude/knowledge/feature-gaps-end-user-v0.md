@@ -1,12 +1,22 @@
 # End-user feature gaps v0
 
 _Type: Observation + Decision (gap inventory)._
-_Last updated: 2026-05-01._
+_Last updated: 2026-05-03._
 
 ## Status — landed slices
 
 | Date | Item | Effect |
 |------|------|--------|
+| 2026-05-03 | P3 (new) Notes status footer + Calculator memory ops | Two coupled QOL slices in one batch. **(1) Notes status footer** — `kernel/apps/notes.{cpp}` + `notes_internal.h` + `notes_persist.cpp`. New `detail::g_dirty` flag flipped true on every mutation (`InsertAtCursor` / `DeleteAtCursor` / `BackspaceAtCursor`), cleared on successful `NotesSave` / `NotesLoad{File}` round-trip. Boot greeting in `NotesInit` resets the flag so the desktop comes up "clean". `DrawFn` reserves one glyph row + 2px separator at the bottom of the client area for a status band painted in `kStatusBg = 0x00C8C8B8`; format is `L:line/total  C:col  CHARS:NN  WORDS:NN` with logical (newline-delimited, NOT wrap-aware) line + col counts both 1-indexed, plus a right-aligned `*MOD` tag in red (`0x00B82020`) when dirty. New helpers: `LogicalCursor` (Zeller-style walk to current cursor index), `LogicalLineCount` (newline + 1, matches VS Code/vim convention), `WordCount` (whitespace-delimited maximal-run counter — space/tab/newline all count as separators). `AppendStr` / `AppendU32` are bounded sprintf-style formatters for the footer string. Self-test extended with 6 new checks: dirty starts false on a fresh test buffer, dirty true after edits, LogicalCursor 1:5 at the right index, LogicalLineCount = 2 for "abZc\nef", WordCount = 2 there + stays 2 after typing whitespace + bumps to 3 on a non-ws after ws. **(2) Calculator memory** — `kernel/apps/calculator.cpp`. `State` grew `i64 memory; bool memory_set` + 5 new keys: `m`/`M` MR (memory recall, pulls register into display, sets fresh_entry), `s`/`S` MS (display → memory), `l`/`L` MC (zero + drop indicator), `a`/`A` M+ (memory += display), `b`/`B` M- (memory -= display). `HandleClear` does NOT touch memory — only `MC` clears it, matching every physical bank calculator. `DrawFn` paints a small amber `M` indicator at the top-left of the display strip when memory is set + non-zero (skipped on zero so a stored-zero doesn't visually clutter). `CalculatorFeedChar` gate extended to accept the 10 new key codes. Self-test extended with a memory-ops walk: 50 MS → memory=50, C 25 A → memory=75, C 10 B → memory=65, m → display=65, l → memory_set false, m after MC is no-op (display unchanged at 65). Closes the user-visible "Notes has no edit-state cue" gap and the "Calculator has no memory register" gap in one slice. **Note**: notes.cpp is now ~705 LOC, calculator.cpp ~694 LOC — both over the 500-line guideline but each TU is one cohesive concern (one editor, one calculator). Logical splits exist (notes_input.cpp / notes_paint.cpp; calculator_arith.cpp / calculator_memory.cpp) but are deferred until a third concern lands per the bloat checklist. |
+| 2026-05-03 | P3 (new) Calendar app + clipboard-history ring | Two coupled QOL slices in one batch. **(1) Calendar app** — new `kernel/apps/calendar.{h,cpp}` (~490 LOC). Windowed month-view sibling of the read-only `drivers/video/calendar` taskbar-clock popup. Bindings: `[`/`]` or Left/Right step a month, `{`/`}` or Up/Down step a year, `T` jumps back to today. The view tracks the live RTC until the user navigates; once they do, it stays where they left it (re-entering RTC tracking on `T`). Today's cell is highlighted with the theme accent, current-month weekends carry a faint inactive-tab tint, days from neighbouring months render dimmed. Year clamped to [1, 9999] so the navigation can't overflow. New `ThemeRole::Calendar = 12`, `kCount = 13`; all 10 theme palettes extended (info-panel family — same hex as Browser/About/Help across every theme). Start-menu `CALENDAR` entry; `start_menu_apps.cpp` accepts `target=calendar` / `cal`. Self-test exercises Zeller's-congruence weekday round-trip (Fri 2026-05-01, Sat 2000-01-01, Thu 2024-02-29), `DaysInMonth` with all four leap-year rules (4-yes, 100-no, 400-yes, default-no), and `Step` navigation across year boundaries + the [1, 9999] clamps. **(2) Clipboard history ring** — `kernel/drivers/video/widget.{h,cpp}` extended with an 8-entry ring (`kWindowClipboardHistoryDepth = 8`). `WindowClipboardSetText` snapshots the previous payload and pushes it onto the ring front before overwriting (deduped — identical-set is a no-op). New `WindowClipboardHistoryCount` / `WindowClipboardHistoryGet` / `WindowClipboardHistoryRotate` accessors. **Ctrl+Shift+V** in `main.cpp`'s key dispatch rotates the ring (active ↔ ring[0]; remaining shift down) so the user steps backwards through recent clips; toast shows a 40-char preview of the new active, with `clip history empty` when the ring has no entries. The handler runs before the bare Ctrl+V Notes-paste branch so the modifier combo is claimed. Help text + Help window's row table refreshed for the new binding; `PrintShortcutHelp` learns `CTRL+SHIFT+V`. Closes the "Notes paste only ever sees the last copy" gap. **Hard limit still in place**: ring entries cap at `kWindowClipboardMax` (1024 bytes) per slot — same as the active clipboard; long captures truncate identically. **Browser streaming download deferred** — needs a state machine to chunk HTTP body to disk during fetch; safer once QEMU testing is wired up. |
+| 2026-05-02 | P0 (new) Basic browser + buffer-cap lift | New `kernel/apps/browser.{h,cpp}` — minimal HTTP-only browser. URL bar + four modes (View / UrlEdit / History / Bookmarks). HTML stripper drops tags + decodes entities (`&amp;` `&lt;` `&gt;` `&quot;` `&apos;` `&nbsp;` + numeric `&#NN;` / `&#xHH;`) + skips `<script>` content + emits newlines on block-level closes. History (32-deep ring with Chrome-style truncate-on-fork-back), bookmarks persisted to FAT32 `BOOKMARK.TXT` (load on first L, save after every mutation), Save (S) writes the body to next-free `DLNNNN.HTM` slot. Each fetch spawns a one-shot kernel task via `SchedCreate` so the input thread stays responsive while DNS + TCP run with timeout. **Buffer-cap lifts (in-tree API limitations the user asked to extend):** `net/stack.h` `kTcpActiveBufBytes` 2048 → **65536** so real HTML pages fit (most home pages are ~30 KiB), `kTcpMaxCannedReply` 512 → **4096** so HTTP requests with cookies / long URLs / additional headers fit. `net/socket.h` `kSocketTcpRxBufBytes` mirror updated. `fs/fat32_create.cpp` `kRenameBounceMax` 64 KiB → **256 KiB** so mid-size renames don't fall back to streaming. Browser scratch buffer (64 KiB) + bookmark serialize/parse buffers heap-allocated via KMalloc to keep the kernel stack small. `BookmarkContains` skips duplicate bookmark insertion. Self-test exercises URL parse (4 forms incl. https reject), dotted-quad parser (positive + 3 negative), HTML strip (entity decode + block break + script-content drop). New `ThemeRole::Browser = 11`, `kCount = 12`; all 10 themes extended. Help text + Help window's row table refreshed for the new bindings. **Hard limit still in place**: HTTPS not supported (no TLS); v0 strictly HTTP-GET. The 64 KiB single-slot TCP buffer covers most pages but downloading binaries larger than 64 KiB still truncates — full streaming download is the next slice. **Note**: `browser.cpp` is ~1400 LOC, well over the 500-line guideline. Single TU now; logical split candidates are `browser_url.cpp` (parse + dotted-quad), `browser_html.cpp` (strip + entities), `browser_net.cpp` (DNS + HTTP + worker), `browser_persist.cpp` (bookmarks + download), `browser_ui.cpp` (paint + dispatch). Deferred until a fifth concern lands. |
+| 2026-05-02 | P0 (new) Trash bin + Files defaults to disk view | New `kernel/apps/trash.{h,cpp}` — Recycle-Bin tier on `/TRASH/`. Five primitives: `TrashEnsureDir` (lazy mkdir), `TrashMove(name)` (streaming copy via `Fat32ReadFileStream` + `Fat32CreateAtPath` + `Fat32AppendAtPath`, then source delete; falls back to `Fat32RenameAtPath` for files ≤64 KiB), `TrashRestore(name)` (reverse path), `TrashPermDelete(name)` (just `Fat32DeleteAtPath` on the trash entry), `TrashEmpty` (walk + delete every regular file). Streaming was required because screenshots (~3 MiB) exceed `kRenameBounceMax` (64 KiB); without it screenshots couldn't be trashed. Files app refactored: 3rd Mode (Trash) alongside Ramfs/Fat32, generalized Pending state machine (DeleteToTrash / PermDeleteFromTrash / EmptyTrash) replacing the single-purpose `delete_armed` boolean, new T toggle for trash view, R in trash view restores instead of rescans, E-then-Y empties the bin. Disk view's X-then-Y now SOFT-deletes (move to trash) instead of permanent delete — user has a recovery path. Default mode promoted to Fat32 disk view via new `FilesPromoteToDisk()` called from main.cpp after `Fat32Probe` (FilesInit runs before storage is up, so Init alone can't see the volume). TRASH directory hidden from the Fat32 view's listing so users reach it through T. Help text + Help window's row table refreshed for D/M/T/R/X/E bindings. Trash boot self-test plants a synthetic file, moves it to trash, verifies absence in root + presence in trash, restores it, byte-compares the restored content against the original payload, then re-trashes + perm-deletes. Closes the user-visible "delete is final" gap and the "Files only shows ramfs by default" gap in one batch. |
+| 2026-05-02 | P3 (new) Help window + Calculator polish + git hash in About | Three small slices in one batch. (1) New `kernel/apps/help.{h,cpp}` — windowed shortcut reference paralleling About. Static row table grouped by section header (`is_section` flag flips the painter to the dim banner colour). F1 + Start-menu HELP both raise it AND keep the existing `PrintShortcutHelp` console output (window for discovery, console for scrollback). New `ThemeRole::Help = 10`, `kCount = 11`; all 10 themes extended (shares About's panel hue across every theme). `start_menu_apps.cpp` accepts `target=help` / `shortcuts`. Self-test asserts every section header is followed by at least one binding row. (2) `kernel/apps/calculator.cpp` grew three keyboard-only operators: `%` (with-pending-op uses bank-calculator `lhs * rhs / 100` semantics, no-pending-op divides display by 100), `n` / `N` / `_` (sign toggle), Backspace (pop last digit; clears display when fresh-entry). Self-test extended with 6 new cases covering all three. The legacy Backspace→Clear shim removed. (3) `CMakeLists.txt` captures `git rev-parse --short=10 HEAD` at configure time, appends `+` if the working tree is dirty, exposes via `DUETOS_GIT_HASH` define. About panel grew a `COMMIT:` row showing it. Falls back to `unknown` outside a git checkout. About window height bumped 200px → 220px to fit the new row. |
+| 2026-05-02 | P3 (new) About / System Info window + help-text refresh | New `kernel/apps/about.{h,cpp}` — windowed system-info readout: build banner + flags (DEBUG/RELEASE + KASLR + ASSERT), uptime via `time::TickCount()` / `time::TickHz()` (HH:MM:SS, capped at 99:59:59), active theme name, framebuffer resolution + bpp, FAT32 mount status + root entry count, kernel-heap stats (used / free / pool, alloc / free / fragmentation counters), live window count vs total slots. Refreshes on every compositor tick so uptime + heap counters update visibly. New `ThemeRole::About = 9`, `kCount = 10`; all 10 themes' `role_title` + `role_client` extended. Start-menu `ABOUT` entry now raises this window instead of printing two console lines (action 1 dispatch updated; falls back to console if window registration somehow fails). `start_menu_apps.cpp` accepts `target=about` / `sysinfo` in /APPS/*.MNF. Self-test exercises u64-decimal, byte-suffix tier picker (B / KiB / MiB / GiB boundaries), uptime HH:MM:SS round-trip + cap + hz==0 sentinel. Help-text in `kernel/core/main.cpp::PrintShortcutHelp` refreshed to cover all bindings landed since the last update: Files D / M / R / X-then-Y, ImageView N / P / Left / Right / R, Settings REBOOT / SHUTDOWN / TZ / LOG OUT, Ctrl+Alt+M (magnifier), Ctrl+Alt+K (lock screen). Closes the "ABOUT prints two lines to a console nobody reads" gap and the "help text rotted as new bindings landed" gap in one slice. |
+| 2026-05-02 | P0 #5 Settings — SHUTDOWN + REBOOT buttons | `kernel/apps/settings.{h,cpp}` grew two new buttons: `REBOOT` (calls `core::KernelReboot()` after `SessionRestoreSave()`) and `SHUTDOWN` (calls `acpi::AcpiShutdown()`, falls through to `arch::Halt()` on QEMU TCG where S5 isn't honoured). Both flush the session-restore payload to `SESSION.CFG` first so the next boot lands in the same layout. `kIdCount` bumped 9→11; Settings window grew 280px→340px to fit the column. Closes the user-visible "no clean exit from the desktop" gap — previously power off required dropping to the kernel shell. |
+| 2026-05-02 | P0 #1 Files — X-then-Y delete + .TXT→Notes dispatch | `kernel/apps/files.cpp` extended the FAT32 disk view with file mutation: `X` arms a delete prompt for the selected file, `Y` confirms (calls `Fat32DeleteAtPath` + rescan + selection clamp), any other key cancels. Footer hint switches to `DELETE <name>? Y:CONFIRM ANY:CANCEL` when armed. Navigation cancels a stale arm so an arrow keypress unambiguously disarms. Cross-app dispatch grew `.TXT` → Notes: `Enter` on a `.TXT` entry calls new `apps::notes::NotesLoadFile(path)` (a path-aware extraction of the existing NotesLoad helper) and raises the Notes window via `ThemeRoleWindow + WindowRaise`, mirroring the existing `.BMP` → ImageView pattern. Self-test exercises ext-match for `.TXT` / `.CFG` / negative cases plus the delete-armed-then-disarm-on-arrow round trip. **NOTE:** `files.cpp` is now 665 LOC, over the 500-line guideline; logically cohesive (all "file browser actions" sharing state) but a split into `files_ramfs.cpp` / `files_fat32.cpp` is defensible and should be reconsidered if a fifth concern lands. |
+| 2026-05-02 | P1 #7 Files app — FAT32 disk view + cross-app .BMP open | `kernel/apps/files.cpp` extended with a second backend mode: existing ramfs view kept (default), new FAT32 root view toggleable via 'D' (disk) / 'M' (memory) keys. Header shows `RAM:/` or `DISK:/` so users always know where they are. Disk view enumerates the FAT32 root via `Fat32ListDirByCluster`, paints each entry with the same `[D]/[F]` row format as ramfs, supports rescan via 'R'. **Cross-app dispatch**: hitting Enter on a `.BMP` entry calls new `ImageViewSelectByName()`, raises the ImageView window via `ThemeRoleWindow(ImageView) + WindowRaise` — so user takes a screenshot, opens Files, switches to disk view, hits Enter on `SHOT0001.BMP` and the screenshot opens. Boot self-test exercises ramfs descend+back, mode toggle, and the extension-match helper used by the dispatch. Closes the "Files is read-only / FAT32 invisible" half of the P0 #1 follow-up. |
+| 2026-05-02 | P1 #7 Image viewer (BMP) | `kernel/apps/imageview.{h,cpp}` — native kernel app reads 32-bpp uncompressed BMPs from the FAT32 root and paints them in a window. Pairs naturally with the Screenshot app: every `Ctrl+Alt+P` capture lands as a `SHOTNNNN.BMP` this viewer accepts byte-for-byte. Decode is streaming via `Fat32ReadFileStream` so a 1024×768 (~3 MiB) capture fits in the 2 MiB kernel heap; nearest-neighbour downsample with aspect-preserving fit, no upscale; both top-down (negative `biHeight`) and bottom-up DIBs supported. New `ThemeRole::ImageView` + 10-theme palette extension; Start menu entry "IMAGE VIEWER"; arrow Left/Right + N/P/R keybinds; boot self-test exercises the BMP header round-trip + aspect-fit math + magic / 24-bpp / sign-flip negative cases. 24-bpp / PNG / JPEG / subdir walk deferred. See `.claude/knowledge/imageview-bmp-v0.md`. |
 | 2026-05-01 | P2 #12 EDID parser (one of the three blockers) | `kernel/drivers/gpu/edid.{h,cpp}` — clean-room VESA E-EDID 1.3/1.4 base-block parser + `edid_selftest.cpp` 5-fixture boot self-test (1080p digital + analog 1024 + bad-checksum + short-buffer + bad-header) + `monitor` shell command. Pure compute, no DMA, no DDC dependency. Caught a `refresh_mhz` unit bug while landing (formula was missing a factor of 1000; host-side test fixture asserted `>= 59900 && <= 60100` for a 60.000 Hz mode and rejected the 60-Hz integer truncation). See `.claude/knowledge/edid-parser-v0.md`. |
 | 2026-05-01 | P0 #4 Wi-Fi loopback test + host fuzz harness (verifies the previously-HW-only-testable control tier) | `kernel/net/wireless/test/{fake_ap,loopback_driver,wireless_e2e_test}.{h,cpp}` — software AP peer + fake `WirelessDeviceOps` driver + 4-case boot self-test. **Success case asserts TK and GTK match byte-for-byte between AP and STA endpoints** (proves PRF / nonces / PMK / MAC ordering all agree across both sides of the handshake). Wrong-PSK rejection, replay-counter rejection, MIC-tamper rejection. **Bugs caught while landing this slice:** (1) PBKDF2 KAT had wrong reference value (kernel impl was correct; test fixture was wrong); (2) `WirelessDeliverEapol` never sent M2/M4 — fixed by adding `SendEapolFrame` op + auto-build paths in wdev. Also `tests/fuzz/` — standalone Makefile + `host_shim/` + 5 libFuzzer drivers (beacon, eapol, iwl_fw, rtl_fw, bcm_fw) under ASan+UBSan. ~95M total executions in ~225s, **zero crashes**. See `.claude/knowledge/wireless-loopback-and-fuzz-v0.md`. |
 | 2026-05-01 | P0 #4 Wi-Fi control tier (Phases 2/4/5/6/7 — HW-untested) | Full wireless control tier: `kernel/net/wireless/wifi_diag.{h,cpp}` (512-event diag ring, panic-dumped, exposed via `wifi diag` shell command) + crypto primitives (`crypto/sha1.cpp` SHA-1, `sha256.cpp` SHA-256, `hmac.cpp` HMAC-SHA1/SHA256, `pbkdf2.cpp` PBKDF2-WPA, `prf.cpp` 802.11 PRF + KDF-SHA256, all KAT-verified at boot) + `eapol.{h,cpp}` (EAPOL-Key frame parse/build/MIC patch/MIC verify) + `fourway.{h,cpp}` (WPA2 4-way handshake state machine — PMK→PTK derivation, M1/M3 processing, M2/M4 build, GTK KDE extraction, replay-counter validation; full handshake KAT-tested with synthetic AP) + `wdev.{h,cpp}` (cfg80211-equivalent WirelessDevice + ops vtable, scan-result dedupe, key-install dispatch on M3) + `mlme.{h,cpp}` (auth/assoc/deauth frame builders + MlmeConnect/Disconnect/ScanAndWait flow + default RSN IE) + per-vendor upload state machines (`iwlwifi_upload.{h,cpp}` Intel CSR reset → NicInit → section walk → ALIVE wait, `rtl88xx_upload.{h,cpp}` Realtek FWDL → page write → CHKSUM_RPT → H2C_INIT, `bcm43xx_upload.{h,cpp}` Broadcom stop-MAC → SHM upload → start-ucode) + `iwlwifi_rings.{h,cpp}` (TFD/RBD ring scaffolds). 13 new boot self-tests gated by `DUETOS_BOOT_SELFTESTS`; every register write + every state transition recorded to wifi-diag ring; ring dumped from panic handler. **HW runtime untested** — every per-vendor section-copy short-circuits to `Unsupported` until DMA-coherent allocation lands. See `.claude/knowledge/wireless-control-tier-v0.md`. |
@@ -58,7 +68,7 @@ schedule them.
 |------|--------|--------------|
 | P0 #3 USB mouse | xHCI HID class needs report-descriptor parsing for mouse-class endpoints; the keyboard-class path landed in `xhci-hid-keyboard-v0.md` and is the template. No QEMU emulation of USB mouse — has to be tested on physical HW post-merge. | 200-300 LOC |
 | P1 #6 Terminal emulator | Kernel shell is wired to a single global console (ConsoleWrite). A windowed terminal needs a console-multiplex refactor so the shell takes a per-session sink. | Multi-session refactor |
-| P1 #7 Image / PDF / media viewers | Each format needs its own parser + frame loop. Image viewer is the smallest (PNG / BMP, ~500 LOC each). PDF is huge. Audio / video need P0 #2 first. | One-per-format |
+| P1 #7 Image / PDF / media viewers (PARTIAL — BMP landed 2026-05-02) | BMP is in (`kernel/apps/imageview.{h,cpp}`, see `imageview-bmp-v0.md`). PNG / JPEG each need their own parser TU; the existing app is structured to dispatch by extension. PDF is huge. Audio / video need P0 #2 first. | One-per-remaining-format |
 | P3 #21 Accessibility | Magnifier landed (this commit). Screen reader needs an AT-SPI-equivalent kernel surface; on-screen keyboard needs >32 widget slots (today's cap; bump first). | Per-primitive |
 | P3 #22 IME / non-Latin input | Input-method framework refactor; PS/2 + xHCI HID drivers currently hardcode US layout. | Input refactor |
 | P3 #24 Locale / language switching | UI strings live in C++ literals across every `kernel/apps/*.cpp`. A string-table layer with id → text indirection is the prerequisite. | Refactor across all apps |
@@ -85,7 +95,7 @@ future slice can pick one without re-deriving the field.
 
 ## P0 — workflow blockers (a fresh user hits these in the first 5 minutes)
 
-### 1. Persistent file save / load [LANDED for Notes 2026-05-01]
+### 1. Persistent file save / load [LANDED for Notes 2026-05-01; Files-FAT32 view 2026-05-02]
 - **Today:** Notes save / load is wired against the FAT32 root
   volume — Ctrl+S writes the live buffer to `NOTES.TXT`, Ctrl+O
   loads it back. Implementation in
@@ -96,12 +106,23 @@ future slice can pick one without re-deriving the field.
   (`Fat32WriteInPlace`, `Fat32AppendAtPath`, `SYS_FILE_WRITE`,
   `SYS_FILE_CREATE`, cap-gated by `kCapFsWrite`) had already
   landed before this entry was opened — the gap was app wiring.
-- **Still missing:** `kernel/apps/files.{h,cpp}` is still
-  read-only (no copy / move / delete UI). `userland/libs/*`
-  doesn't have a file-open-dialog primitive. Other apps
-  (Settings, Calculator, Clock) don't persist any state yet.
+- **Today (2026-05-02):** Files app grew a FAT32 disk view —
+  'D' switches into `DISK:/` mode (root listing, name + size +
+  type tag), 'M' switches back to the ramfs view. 'R' rescans
+  so newly-written files (fresh screenshots, log entries,
+  saved notes) appear without restart. Enter on a `.BMP`
+  dispatches to ImageView (raises the window + selects that
+  file). See `imageview-bmp-v0.md` for the receiving end and
+  the table row above.
+- **Still missing:** `kernel/apps/files.{h,cpp}` has no
+  copy / move / delete UI yet (FAT32 has the primitives; the
+  app needs a confirmation modal + key bindings). FAT32
+  subdirectory descent in disk view is deferred (root only
+  in v0). `userland/libs/*` doesn't have a file-open-dialog
+  primitive. Other apps (Settings, Calculator, Clock) don't
+  persist any state yet.
 - **Owners:** `kernel/apps/files.{h,cpp}` for the file-manager
-  UI; userland for the dialog primitive.
+  mutation UI; userland for the dialog primitive.
 
 ### 2. Audio output [BLOCKED on HDA codec/stream]
 - **Today:** `kernel/drivers/audio/audio.cpp` does HDA register
@@ -157,22 +178,20 @@ future slice can pick one without re-deriving the field.
   `/lib/firmware` is a ramfs node — that's fine for dev,
   needs FAT32-mount support for shipping installs).
 
-### 5. Settings panel [LANDED 2026-05-01]
-- **Today (2026-05-01):** v0 landed. New kernel app at
-  `kernel/apps/settings.{h,cpp}` registers a window under
-  `ThemeRole::Settings`, exposes six buttons (THEME PREV / NEXT,
-  OPACITY -/+, HIGH CTRST, DEFAULT) plus a readout pane (theme
-  name, active-window opacity hex, wall-clock from RtcRead,
-  build banner). Reachable from Start menu → SETTINGS, or
-  keyboard chars `t`/`h`/`-`/`+`/`0` while focused. Mutations
-  flow through the existing `Theme*` and `WindowSetOpacity`
-  APIs — no new authoritative state. Boot self-test asserts
-  char dispatch + theme round-trip + id-range gating.
+### 5. Settings panel [LANDED 2026-05-01; SHUTDOWN+REBOOT 2026-05-02]
+- **Today:** v0 landed 2026-05-01 with theme cycle / opacity /
+  high-contrast / default / log-out / TZ buttons. 2026-05-02
+  added `REBOOT` (via `core::KernelReboot`) and `SHUTDOWN` (via
+  `acpi::AcpiShutdown` → `arch::Halt`) so the user has a clean
+  desktop-level exit path. Both flush `SessionRestoreSave()`
+  first so window positions / theme survive the cycle. Window
+  grew 280px → 340px to fit the 11-button column. `kIdCount`
+  bumped 9 → 11.
 - **Still missing:** Display brightness (no backlight driver).
   Sound (no audio driver). Keyboard layout (US hardcoded).
-  Time zone (UTC only). Language (English hardcoded). Wi-Fi
-  picker (no driver). Bluetooth pairing. Printer setup. Power
-  settings.
+  Language (English hardcoded). Wi-Fi picker (no driver).
+  Bluetooth pairing. Printer setup. Sleep / hibernate (S3
+  / S0ix gated on ACPI AML).
 - **Owners:** `kernel/apps/settings.{h,cpp}` (extend), plus the
   per-surface drivers when they land.
 
@@ -185,14 +204,23 @@ future slice can pick one without re-deriving the field.
   user-mode process.
 - **Owners:** `userland/shell/`, plus a PTY layer (does not exist).
 
-### 7. Image / PDF / media viewers [DEFERRED — per-format parsers + storage]
-- **Today:** none. `mini_browser` is a smoke test, not a default
-  browser app (`mini-browser-runs-on-duetos-v0.md`).
-- **Expected:** image viewer (PNG/JPEG), PDF reader, audio/video
-  player. Likely Win32 PE apps once GDI/D3D acceleration improves,
-  or native kernel-resident apps.
-- **Owners:** new `kernel/apps/imgview.{h,cpp}` etc., or PE apps
-  installed under `userland/apps/`.
+### 7. Image / PDF / media viewers [PARTIAL — BMP landed 2026-05-02]
+- **Today (2026-05-02):** BMP viewer landed at
+  `kernel/apps/imageview.{h,cpp}`. Pairs with Screenshot:
+  every `Ctrl+Alt+P` capture is a 32-bpp top-down BMP this
+  viewer reads byte-for-byte. Streaming decode via
+  `Fat32ReadFileStream`, aspect-preserving NN downsample, no
+  upscale. N/P/R + Left/Right keybinds, Start-menu entry,
+  boot self-test. See `.claude/knowledge/imageview-bmp-v0.md`.
+- **Still missing:** PNG / JPEG / GIF (each wants its own
+  parser TU; the existing app dispatches by extension once
+  parsers exist). PDF (huge). Audio / video need P0 #2 first.
+  `mini_browser` is a smoke test, not a default browser app
+  (`mini-browser-runs-on-duetos-v0.md`).
+- **Expected:** native PNG/JPEG/PDF viewer apps; audio/video
+  player once HDA lands.
+- **Owners:** `kernel/apps/imageview*.cpp` (extend with PNG /
+  JPEG dispatch); separate apps for PDF and media.
 
 ### 8. Clipboard + drag-and-drop wired into apps [LANDED 2026-05-01]
 - **Today:** clipboard smoke tests exist; no kernel app uses the

@@ -109,7 +109,12 @@ enum class ThemeRole : u8
     Clock = 5,
     GfxDemo = 6,
     Settings = 7,
-    kCount = 8,
+    ImageView = 8,
+    About = 9,
+    Help = 10,
+    Browser = 11,
+    Calendar = 12,
+    kCount = 13,
 };
 
 struct Theme

@@ -83,6 +83,43 @@ else()
     add_compile_definitions(DUETOS_BUILD_FLAVOR=2)
 endif()
 
+# Git short hash + dirty flag baked in at configure time. Surfaced in
+# the About / System Info window via DUETOS_GIT_HASH so a user can
+# match a running build against a commit without booting + checking
+# the kernel log. The hash is captured at configure time, not build
+# time, so an in-tree edit between configure and build keeps the
+# hash stable; the dirty suffix is appended when `git status` reports
+# any tracked change so the user sees `1757083+` (a working tree
+# diverged from the named commit) instead of mistaking it for the
+# pristine commit. Falls back to "unknown" outside a git checkout.
+find_package(Git QUIET)
+set(_duetos_git_hash "unknown")
+if(GIT_FOUND)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} rev-parse --short=10 HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE _duetos_git_hash_raw
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE _duetos_git_rc
+    )
+    if(_duetos_git_rc EQUAL 0 AND NOT "${_duetos_git_hash_raw}" STREQUAL "")
+        set(_duetos_git_hash "${_duetos_git_hash_raw}")
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} status --porcelain
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            OUTPUT_VARIABLE _duetos_git_dirty
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+        if(NOT "${_duetos_git_dirty}" STREQUAL "")
+            set(_duetos_git_hash "${_duetos_git_hash}+")
+        endif()
+    endif()
+endif()
+add_compile_definitions(DUETOS_GIT_HASH="${_duetos_git_hash}")
+message(STATUS "  git hash             : ${_duetos_git_hash}")
+
 # Per-flavor option blocks. Each option's default falls out of the build
 # type; the user can flip them explicitly on the cmake command line or
 # in a derived preset (see CMakePresets.json).

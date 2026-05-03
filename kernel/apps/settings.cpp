@@ -1,5 +1,7 @@
 #include "apps/settings.h"
 
+#include "acpi/acpi.h"
+#include "arch/x86_64/cpu.h"
 #include "arch/x86_64/rtc.h"
 #include "arch/x86_64/serial.h"
 #include "drivers/video/framebuffer.h"
@@ -7,6 +9,7 @@
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
 #include "core/session_restore.h"
+#include "power/reboot.h"
 #include "security/auth.h"
 #include "security/login.h"
 #include "time/timezone.h"
@@ -125,6 +128,43 @@ void DoTzUp()
     duetos::time::TimezoneStep(true);
 }
 
+[[noreturn]] void DoShutdown()
+{
+    // Persist theme + window positions before the firmware-level
+    // shutdown — same discipline as DoLogOut. If S5 honours the
+    // request the buffer hits FAT before the chip cuts power; if
+    // not, we fall through to Halt and the caller's last known
+    // session is still on disk.
+    duetos::core::SessionRestoreSave();
+    duetos::drivers::video::NotifyShow("shutting down...");
+    duetos::arch::SerialWrite("[settings] user invoked shutdown\n");
+    duetos::acpi::AcpiShutdown();
+    duetos::arch::Halt();
+}
+
+[[noreturn]] void DoReboot()
+{
+    duetos::core::SessionRestoreSave();
+    duetos::drivers::video::NotifyShow("rebooting...");
+    duetos::arch::SerialWrite("[settings] user invoked reboot\n");
+    duetos::core::KernelReboot();
+}
+
+// Settings actions are nullary; the [[noreturn]] shutdown / reboot
+// helpers don't fit that signature. Wrap them in tiny shims so the
+// dispatch table can hold a uniform `void()` pointer. The shim is
+// itself [[noreturn]] but the table entry doesn't need to advertise
+// that — callers just invoke and never come back.
+void DoShutdownShim()
+{
+    DoShutdown();
+}
+
+void DoRebootShim()
+{
+    DoReboot();
+}
+
 constexpr Action kActions[kIdCount] = {
     {"THEME PREV", DoThemePrev},
     {"THEME NEXT", DoThemeNext},
@@ -135,6 +175,8 @@ constexpr Action kActions[kIdCount] = {
     {"LOG OUT", DoLogOut},
     {"TZ -", DoTzDown},
     {"TZ +", DoTzUp},
+    {"REBOOT", DoRebootShim},
+    {"SHUTDOWN", DoShutdownShim},
 };
 
 struct State

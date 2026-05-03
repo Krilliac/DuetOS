@@ -112,12 +112,18 @@
 #include "fs/gpt.h"
 #include "fs/ntfs.h"
 #include "apps/calculator.h"
+#include "apps/about.h"
+#include "apps/browser.h"
+#include "apps/calendar.h"
 #include "apps/clock.h"
 #include "apps/files.h"
 #include "apps/gfxdemo.h"
+#include "apps/help.h"
+#include "apps/imageview.h"
 #include "apps/notes.h"
 #include "apps/screenshot.h"
 #include "apps/settings.h"
+#include "apps/trash.h"
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
 #include "drivers/video/framebuffer.h"
@@ -370,12 +376,54 @@ void PrintShortcutHelp()
     ConsoleWriteln("    CTRL+ALT+1..9     PICK THEME DIRECTLY");
     ConsoleWriteln("    CTRL+ALT+F1/F2    SHELL / KLOG CONSOLE");
     ConsoleWriteln("    CTRL+ALT+P        SCREENSHOT TO SHOTNNNN.BMP");
+    ConsoleWriteln("    CTRL+ALT+M        TOGGLE MAGNIFIER");
+    ConsoleWriteln("    CTRL+ALT+K        LOCK SCREEN");
     ConsoleWriteln("    CTRL+C            INTERRUPT SHELL COMMAND");
+    ConsoleWriteln("    CTRL+SHIFT+V      ROTATE CLIPBOARD HISTORY");
     ConsoleWriteln("");
     ConsoleWriteln("  NOTES (WHEN ACTIVE)");
     ConsoleWriteln("    CTRL+C / CTRL+V   COPY / PASTE CLIPBOARD");
     ConsoleWriteln("    CTRL+S            SAVE TO NOTES.TXT (FAT32)");
     ConsoleWriteln("    CTRL+O            LOAD FROM NOTES.TXT (FAT32)");
+    ConsoleWriteln("    STATUS FOOTER     L:line C:col  CHARS  WORDS  *MOD");
+    ConsoleWriteln("");
+    ConsoleWriteln("  CALCULATOR (WHEN ACTIVE)");
+    ConsoleWriteln("    0..9 + - * / =    BASIC ARITHMETIC");
+    ConsoleWriteln("    C  %  N/_  BS     CLEAR / PERCENT / SIGN / BACKSPACE");
+    ConsoleWriteln("    M / S             MEMORY RECALL / STORE");
+    ConsoleWriteln("    A / B             MEMORY ADD / SUBTRACT");
+    ConsoleWriteln("    L                 MEMORY CLEAR");
+    ConsoleWriteln("");
+    ConsoleWriteln("  FILES (WHEN ACTIVE)");
+    ConsoleWriteln("    UP / DN           MOVE SELECTION");
+    ConsoleWriteln("    ENTER             OPEN (DESCEND DIR / DISPATCH)");
+    ConsoleWriteln("    B / BACKSPACE     UP ONE LEVEL (RAM MODE)");
+    ConsoleWriteln("    D / M / T         SWITCH DISK / RAM / TRASH VIEW");
+    ConsoleWriteln("    R                 RESCAN (DISK) / RESTORE (TRASH)");
+    ConsoleWriteln("    X THEN Y          DISK: TO TRASH; TRASH: PERM-DEL");
+    ConsoleWriteln("    E THEN Y          EMPTY TRASH (TRASH VIEW ONLY)");
+    ConsoleWriteln("");
+    ConsoleWriteln("  IMAGE VIEWER (WHEN ACTIVE)");
+    ConsoleWriteln("    N / P / LEFT/RT   NEXT / PREV BMP");
+    ConsoleWriteln("    R                 RESCAN DISK FOR BMPS");
+    ConsoleWriteln("");
+    ConsoleWriteln("  BROWSER (WHEN ACTIVE)");
+    ConsoleWriteln("    U / TAB           ENTER URL EDIT");
+    ConsoleWriteln("    ENTER (URL EDIT)  FETCH; ESC CANCEL");
+    ConsoleWriteln("    B / F             BACK / FORWARD HISTORY");
+    ConsoleWriteln("    R                 RELOAD CURRENT");
+    ConsoleWriteln("    H                 HISTORY LIST");
+    ConsoleWriteln("    L / M             BMARK LIST / MARK CURRENT");
+    ConsoleWriteln("    S                 SAVE BODY TO DLNNNN.HTM");
+    ConsoleWriteln("    J / K / UP / DN   SCROLL");
+    ConsoleWriteln("");
+    ConsoleWriteln("  CALENDAR (WHEN ACTIVE)");
+    ConsoleWriteln("    [ / ]  / LEFT/RT   PREV / NEXT MONTH");
+    ConsoleWriteln("    { / }  / UP / DN   PREV / NEXT YEAR");
+    ConsoleWriteln("    T                  JUMP TO TODAY");
+    ConsoleWriteln("");
+    ConsoleWriteln("  SETTINGS BUTTONS");
+    ConsoleWriteln("    THEME / OPACITY / TZ / LOG OUT / REBOOT / SHUTDOWN");
     ConsoleWriteln("================================================");
     ConsoleWriteln("");
 }
@@ -1205,14 +1253,91 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // menu's SETTINGS entry.
     duetos::drivers::video::WindowChrome settings_chrome = theme_chrome(Role::Settings);
     settings_chrome.x = 320;
-    settings_chrome.y = 120;
+    settings_chrome.y = 100;
     settings_chrome.w = 380;
-    settings_chrome.h = 280;
+    settings_chrome.h = 340;
     const duetos::drivers::video::WindowHandle settings_handle =
         duetos::drivers::video::WindowRegister(settings_chrome, "SETTINGS");
     duetos::drivers::video::ThemeRegisterWindow(Role::Settings, settings_handle);
     duetos::apps::settings::SettingsInit(settings_handle);
     DUETOS_BOOT_SELFTEST(duetos::apps::settings::SettingsSelfTest());
+
+    // IMAGE VIEWER — opens BMP files from the FAT32 root volume.
+    // Pairs with the Screenshot app (Ctrl+Alt+P): every capture
+    // lands as a 32-bpp top-down BMP this viewer accepts byte-
+    // for-byte. Hidden by default; raised from the Start menu's
+    // IMAGE VIEWER entry. N/P cycle images, R re-scans the root.
+    duetos::drivers::video::WindowChrome image_chrome = theme_chrome(Role::ImageView);
+    image_chrome.x = 280;
+    image_chrome.y = 90;
+    image_chrome.w = 460;
+    image_chrome.h = 360;
+    const duetos::drivers::video::WindowHandle image_handle =
+        duetos::drivers::video::WindowRegister(image_chrome, "IMAGE VIEWER");
+    duetos::drivers::video::ThemeRegisterWindow(Role::ImageView, image_handle);
+    duetos::apps::imageview::ImageViewInit(image_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::imageview::ImageViewSelfTest());
+
+    // ABOUT — windowed system-info readout. Replaces the legacy
+    // two-line "ABOUT DUETOS" console message; raised from the
+    // Start menu's ABOUT entry. Refreshes on every compositor
+    // tick so uptime + heap counters update visibly.
+    duetos::drivers::video::WindowChrome about_chrome = theme_chrome(Role::About);
+    about_chrome.x = 360;
+    about_chrome.y = 140;
+    about_chrome.w = 360;
+    about_chrome.h = 220;
+    const duetos::drivers::video::WindowHandle about_handle =
+        duetos::drivers::video::WindowRegister(about_chrome, "ABOUT DUETOS");
+    duetos::drivers::video::ThemeRegisterWindow(Role::About, about_handle);
+    duetos::apps::about::AboutInit(about_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::about::AboutSelfTest());
+
+    // HELP — windowed shortcut reference. F1 + Start-menu HELP /
+    // SHORTCUTS still print to the framebuffer console (so the
+    // text survives a console scrollback); this window is the
+    // discovery surface for someone seeing DuetOS for the first
+    // time. Static content list — see kernel/apps/help.cpp.
+    duetos::drivers::video::WindowChrome help_chrome = theme_chrome(Role::Help);
+    help_chrome.x = 200;
+    help_chrome.y = 50;
+    help_chrome.w = 380;
+    help_chrome.h = 480;
+    const duetos::drivers::video::WindowHandle help_handle =
+        duetos::drivers::video::WindowRegister(help_chrome, "HELP");
+    duetos::drivers::video::ThemeRegisterWindow(Role::Help, help_handle);
+    duetos::apps::help::HelpInit(help_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::help::HelpSelfTest());
+
+    // BROWSER — minimal HTTP-only browser. Hidden by default;
+    // raised from the Start menu's BROWSER entry. Each fetch
+    // spawns a one-shot kernel task so the input thread stays
+    // responsive.
+    duetos::drivers::video::WindowChrome browser_chrome = theme_chrome(Role::Browser);
+    browser_chrome.x = 100;
+    browser_chrome.y = 60;
+    browser_chrome.w = 640;
+    browser_chrome.h = 460;
+    const duetos::drivers::video::WindowHandle browser_handle =
+        duetos::drivers::video::WindowRegister(browser_chrome, "BROWSER");
+    duetos::drivers::video::ThemeRegisterWindow(Role::Browser, browser_handle);
+    duetos::apps::browser::BrowserInit(browser_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::browser::BrowserSelfTest());
+
+    // CALENDAR — windowed month-view sibling of the read-only
+    // taskbar-clock popup. Lets the user page through past / future
+    // months. Hidden by default; raised from the Start menu's
+    // CALENDAR entry. T jumps back to today.
+    duetos::drivers::video::WindowChrome calendar_chrome = theme_chrome(Role::Calendar);
+    calendar_chrome.x = 240;
+    calendar_chrome.y = 80;
+    calendar_chrome.w = 360;
+    calendar_chrome.h = 280;
+    const duetos::drivers::video::WindowHandle calendar_handle =
+        duetos::drivers::video::WindowRegister(calendar_chrome, "CALENDAR");
+    duetos::drivers::video::ThemeRegisterWindow(Role::Calendar, calendar_handle);
+    duetos::apps::calendar::CalendarInit(calendar_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::calendar::CalendarSelfTest());
 
     // Framebuffer text console. 80x40 chars of boot log at the
     // bottom of the desktop, under the windows in z-order. Dragging
@@ -1923,6 +2048,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // pre-exists on the boot image.
     DUETOS_BOOT_SELFTEST(duetos::apps::notes::NotesPersistSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::apps::screenshot::ScreenshotSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::apps::trash::TrashSelfTest());
+
+    // FAT32 is online. Promote the Files app's default view from
+    // RAM to DISK so the first time a user clicks Start -> FILES
+    // they see what's actually on the volume (notes / screenshots
+    // / logs) rather than the read-only ramfs tree. The user can
+    // still toggle back with M (memory).
+    duetos::apps::files::FilesPromoteToDisk();
 
     // Install the FAT32 file sink — replaces the early tmpfs
     // sink (single-slot API). The tmpfs `/tmp/boot.log`
@@ -2079,6 +2212,47 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 SerialWrite("[ui] ^C\n");
                 continue;
             }
+            // Ctrl+Shift+V — rotate the clipboard history one step.
+            // Bring the most recently displaced clip back to the
+            // active slot; the previous active gets pushed onto
+            // the history ring so a second rotate cycles back.
+            // Bound globally so a user can roll the clipboard from
+            // any focus context, then Ctrl+V into Notes.
+            if (ctrl && shift && !alt && (ev.code == 'v' || ev.code == 'V'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const bool ok = duetos::drivers::video::WindowClipboardHistoryRotate();
+                duetos::drivers::video::CompositorUnlock();
+                if (ok)
+                {
+                    char preview[48];
+                    const duetos::u32 n = duetos::drivers::video::WindowClipboardGetText(preview, sizeof(preview));
+                    char toast[80];
+                    duetos::u32 o = 0;
+                    const char* prefix = "clip: ";
+                    for (duetos::u32 k = 0; prefix[k] != '\0' && o + 1 < sizeof(toast); ++k)
+                        toast[o++] = prefix[k];
+                    duetos::u32 take = n;
+                    if (take > sizeof(toast) - o - 4)
+                        take = sizeof(toast) - o - 4;
+                    for (duetos::u32 k = 0; k < take; ++k)
+                        toast[o++] = preview[k];
+                    if (n > take)
+                    {
+                        toast[o++] = '.';
+                        toast[o++] = '.';
+                        toast[o++] = '.';
+                    }
+                    toast[o] = '\0';
+                    duetos::drivers::video::NotifyShow(toast);
+                }
+                else
+                {
+                    duetos::drivers::video::NotifyShow("clip history empty");
+                }
+                SerialWrite("[ui] ^+V clipboard rotate\n");
+                continue;
+            }
             // Ctrl+V — paste the kernel clipboard into Notes when
             // Notes is the active window. No-op anywhere else
             // (the shell doesn't support paste yet, calculator /
@@ -2149,6 +2323,16 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             if (!ctrl && !alt && ev.code == kKeyF1)
             {
                 duetos::drivers::video::CompositorLock();
+                // Raise the windowed Help reference; new users see
+                // a persistent panel they can leave open. Falls
+                // through to PrintShortcutHelp so the framebuffer
+                // console scrollback also carries the same text.
+                const duetos::drivers::video::WindowHandle hh =
+                    duetos::drivers::video::ThemeRoleWindow(duetos::drivers::video::ThemeRole::Help);
+                if (hh != duetos::drivers::video::kWindowInvalid)
+                {
+                    duetos::drivers::video::WindowRaise(hh);
+                }
                 PrintShortcutHelp();
                 duetos::drivers::video::CursorHide();
                 duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
@@ -2616,6 +2800,22 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     {
                         app_consumed = duetos::apps::files::FilesFeedArrow(ev.code == kKeyArrowUp);
                     }
+                    else if (active == duetos::apps::imageview::ImageViewWindow() &&
+                             (ev.code == kKeyArrowLeft || ev.code == kKeyArrowRight))
+                    {
+                        app_consumed = duetos::apps::imageview::ImageViewFeedArrow(ev.code == kKeyArrowLeft);
+                    }
+                    else if (active == duetos::apps::browser::BrowserWindow() &&
+                             (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown))
+                    {
+                        app_consumed = duetos::apps::browser::BrowserFeedArrow(ev.code);
+                    }
+                    else if (active == duetos::apps::calendar::CalendarWindow() &&
+                             (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyArrowLeft ||
+                              ev.code == kKeyArrowRight))
+                    {
+                        app_consumed = duetos::apps::calendar::CalendarFeedArrow(static_cast<duetos::u16>(ev.code));
+                    }
                     else if (active == duetos::apps::notes::NotesWindow() &&
                              (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyArrowLeft ||
                               ev.code == kKeyArrowRight || ev.code == kKeyHome || ev.code == kKeyEnd ||
@@ -2654,6 +2854,18 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                             else if (active == duetos::apps::settings::SettingsWindow())
                             {
                                 app_consumed = duetos::apps::settings::SettingsFeedChar(c);
+                            }
+                            else if (active == duetos::apps::imageview::ImageViewWindow())
+                            {
+                                app_consumed = duetos::apps::imageview::ImageViewFeedChar(c);
+                            }
+                            else if (active == duetos::apps::browser::BrowserWindow())
+                            {
+                                app_consumed = duetos::apps::browser::BrowserFeedChar(c);
+                            }
+                            else if (active == duetos::apps::calendar::CalendarWindow())
+                            {
+                                app_consumed = duetos::apps::calendar::CalendarFeedChar(c);
                             }
                         }
                     }
@@ -2830,6 +3042,11 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             {"KERNEL LOG", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::LogView)},
             {"GFX DEMO", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::GfxDemo)},
             {"SETTINGS", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Settings)},
+            {"IMAGE VIEWER", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::ImageView)},
+            {"ABOUT", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::About)},
+            {"HELP", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Help)},
+            {"BROWSER", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Browser)},
+            {"CALENDAR", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Calendar)},
         };
         static const duetos::drivers::video::MenuItem kStartItemsTrailing[] = {
             {"HELP / SHORTCUTS", 6},
@@ -2973,10 +3190,23 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     switch (action)
                     {
                     case 1: // ABOUT DUETOS
-                        duetos::drivers::video::ConsoleWriteln("");
-                        duetos::drivers::video::ConsoleWriteln("-> DUETOS v0 — WINDOWED DESKTOP SHELL");
-                        duetos::drivers::video::ConsoleWriteln("   KEYBOARD + MOUSE + FRAMEBUFFER ALL LIVE");
+                    {
+                        const duetos::drivers::video::WindowHandle ah =
+                            duetos::drivers::video::ThemeRoleWindow(duetos::drivers::video::ThemeRole::About);
+                        if (ah != duetos::drivers::video::kWindowInvalid)
+                        {
+                            duetos::drivers::video::WindowRaise(ah);
+                            duetos::drivers::video::ConsoleWriteln("-> ABOUT WINDOW RAISED");
+                        }
+                        else
+                        {
+                            // Fallback for the unlikely registration-fail
+                            // path — keeps the action observable even if
+                            // the window slot is somehow gone.
+                            duetos::drivers::video::ConsoleWriteln("-> DUETOS v0 — WINDOWED DESKTOP SHELL");
+                        }
                         break;
+                    }
                     case 2: // CYCLE WINDOWS
                         duetos::drivers::video::WindowCycleActive();
                         duetos::drivers::video::ConsoleWriteln("-> CYCLED ACTIVE WINDOW");
@@ -3003,6 +3233,18 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                                                   0x00000000);
                         break;
                     case 6: // HELP / SHORTCUTS
+                        // Raise the windowed Help reference and ALSO
+                        // print to the console — the window is the
+                        // discovery surface, the console is the
+                        // scrollback / search surface.
+                        {
+                            const duetos::drivers::video::WindowHandle hh =
+                                duetos::drivers::video::ThemeRoleWindow(duetos::drivers::video::ThemeRole::Help);
+                            if (hh != duetos::drivers::video::kWindowInvalid)
+                            {
+                                duetos::drivers::video::WindowRaise(hh);
+                            }
+                        }
                         PrintShortcutHelp();
                         break;
                     case 10: // RAISE <ctx>
