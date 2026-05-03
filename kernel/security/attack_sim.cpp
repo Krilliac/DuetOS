@@ -332,6 +332,7 @@ void RestoreEferNxe()
 // The byte is restored before the next attack runs, so the spot
 // hash is back to baseline for subsequent suite entries.
 extern "C" const u8 _text_start[];
+extern "C" const u8 _text_end[];
 constexpr u64 kTextPatchOffset = 0x40;
 constinit u8 g_saved_text_byte = 0;
 
@@ -655,6 +656,158 @@ constinit duetos::u64 g_saved_stack_canary = 0;
         __stack_chk_guard = g_saved_stack_canary;
 }
 
+// ---- function branch NOP-patch (cap-gate bypass) ----
+//
+// Models the most surgical kernel-rootkit move on the menu: don't
+// redirect a vector, don't replace a whole function, just NOP the
+// conditional jump *inside* a gate. The gate's cap test still runs
+// and still produces ZF/CF the same way — but the `jcc` that turns
+// that flag into a deny path is gone, so the success path is taken
+// regardless. Every caller passes the gate.
+//
+// Real-world parallel: kernel/syscall/syscall.cpp:458 reads
+//     if (!SyscallGate(num, dispatch_proc).has_value()) return -1;
+// which compiles to a `test`+`jcc` pair downstream of the `call
+// SyscallGate` site. NOPing that two-byte short `jcc` would turn
+// the central capability gate into an unconditional accept on every
+// syscall — defeating the whole `kCap*` model regardless of how
+// correctly each handler honours its declared cap.
+//
+// We define the gated function ourselves in a global asm block, for
+// three reasons:
+//   1. We own the exact byte layout. No surprise `cmov` collapsing
+//      the branch (which GCC's -O2 cheerfully does for short bodies).
+//   2. The patch site is a labeled symbol — no opcode scanner, no
+//      heuristic — so the probe is deterministic across rebuilds.
+//   3. The function lives in this TU's slice of `.text`, which links
+//      in the middle of the kernel image. That's the *interesting*
+//      placement: it surfaces the gap below.
+//
+// EXPECTED RED-TEAM FINDING: `ComputeTextSpotHash` (see
+// kernel/diag/runtime_checker.cpp:801) only FNV-hashes the first
+// 4 KiB and last 4 KiB of `.text`. A patch in the middle is
+// invisible to it. So this attack reports `FailNoDetect` — and that
+// FailNoDetect is the *payload* of the slice, not a regression. It
+// motivates the next defensive slice: a full-text or rolling-page
+// content hash (or, better, a CR0.WP-write-protected `.text` region
+// with a periodic re-verify against the load-time digest), which a
+// future runtime-checker iteration will own.
+//
+// We log `BYPASS LANDED` separately so the operator can see that
+// the *attack* worked (gate flipped from -1 to 0) even when the
+// detector misses the *modification* (no `KernelTextModified` bump).
+
+extern "C" i32 AttackSimGatedAccess(u64 fake_caps, u64 cap_bit);
+extern "C" const u8 AttackSimGatedAccess_jcc[];
+
+asm(".pushsection .text\n"
+    ".global AttackSimGatedAccess\n"
+    ".global AttackSimGatedAccess_jcc\n"
+    ".type AttackSimGatedAccess, @function\n"
+    ".balign 64\n"
+    "AttackSimGatedAccess:\n"
+    "    test %rsi, %rdi\n"
+    "AttackSimGatedAccess_jcc:\n"
+    "    je AttackSimGatedAccess_fail\n"
+    "    xor %eax, %eax\n"
+    "    ret\n"
+    "AttackSimGatedAccess_fail:\n"
+    "    mov $-1, %eax\n"
+    "    ret\n"
+    ".size AttackSimGatedAccess, . - AttackSimGatedAccess\n"
+    ".popsection\n");
+
+constinit u8 g_saved_branch_byte0 = 0;
+constinit u8 g_saved_branch_byte1 = 0;
+constinit i32 g_branch_baseline_rc = 1; // sentinel — neither -1 nor 0
+constinit i32 g_branch_post_rc = 1;
+constinit u64 g_branch_patch_offset = 0;
+constinit bool g_branch_in_spot_window = false;
+
+// Mirrors the head/tail-only window inside ComputeTextSpotHash. If
+// the patch address lands here, the existing detector should fire;
+// otherwise the modification is invisible to the current spot hash.
+bool BranchPatchInSpotWindow(u64 patch_va)
+{
+    constexpr u64 kSpotBytes = 4096;
+    const u64 ts = reinterpret_cast<u64>(_text_start);
+    const u64 te = reinterpret_cast<u64>(_text_end);
+    if (patch_va < ts || patch_va >= te)
+        return false;
+    const u64 size = te - ts;
+    const u64 off = patch_va - ts;
+    if (off < kSpotBytes)
+        return true;
+    if (size > 2 * kSpotBytes && off >= size - kSpotBytes)
+        return true;
+    return false;
+}
+
+void AttackBranchNopPatch()
+{
+    auto* p = const_cast<u8*>(AttackSimGatedAccess_jcc);
+    g_branch_patch_offset = reinterpret_cast<u64>(p) - reinterpret_cast<u64>(_text_start);
+    g_branch_in_spot_window = BranchPatchInSpotWindow(reinterpret_cast<u64>(p));
+
+    // Baseline: caps=0, asking for cap_bit=1 → gate denies → -1.
+    // Done before the patch so we have an honest "this gate works"
+    // anchor for the post-patch comparison.
+    g_branch_baseline_rc = AttackSimGatedAccess(0, 1);
+
+    u64 rflags;
+    asm volatile("pushfq; pop %0" : "=r"(rflags));
+    asm volatile("cli");
+    const u64 cr0 = ReadCr0();
+    WriteCr0(cr0 & ~kCr0Wp);
+    g_saved_branch_byte0 = p[0];
+    g_saved_branch_byte1 = p[1];
+    p[0] = 0x90; // NOP
+    p[1] = 0x90; // NOP
+    // Intel SDM Vol 3 §8.1.3: a serializing instruction is required
+    // between modifying code and executing the modified bytes on
+    // the same CPU. cpuid is the canonical full serializer.
+    asm volatile("xor %%eax, %%eax; cpuid" : : : "eax", "ebx", "ecx", "edx");
+    WriteCr0(cr0);
+    if ((rflags & kRflagsIf) != 0)
+        asm volatile("sti");
+
+    // Same call, same args: caps=0, cap_bit=1. The `test` still
+    // sets ZF=1, but with the `jcc` NOPed the success path is
+    // taken unconditionally. Returns 0 — gate bypassed.
+    g_branch_post_rc = AttackSimGatedAccess(0, 1);
+
+    arch::SerialWrite("[attacksim]   branch-nop: patch_off=0x");
+    arch::SerialWriteHex(g_branch_patch_offset);
+    if (g_branch_in_spot_window)
+        arch::SerialWrite(" (HEAD/TAIL .text — spot hash should detect)\n");
+    else
+        arch::SerialWrite(" (MIDDLE .text — outside spot hash window)\n");
+    arch::SerialWrite("[attacksim]   branch-nop: baseline rc=");
+    arch::SerialWriteHex(static_cast<u64>(static_cast<u32>(g_branch_baseline_rc)));
+    arch::SerialWrite(" post-patch rc=");
+    arch::SerialWriteHex(static_cast<u64>(static_cast<u32>(g_branch_post_rc)));
+    if (g_branch_baseline_rc == -1 && g_branch_post_rc == 0)
+        arch::SerialWrite("\n[attacksim]   branch-nop: BYPASS LANDED — cap-gate flipped open\n");
+    else
+        arch::SerialWrite("\n[attacksim]   branch-nop: bypass did NOT land — patch ineffective\n");
+}
+
+void RestoreBranchNopPatch()
+{
+    auto* p = const_cast<u8*>(AttackSimGatedAccess_jcc);
+    u64 rflags;
+    asm volatile("pushfq; pop %0" : "=r"(rflags));
+    asm volatile("cli");
+    const u64 cr0 = ReadCr0();
+    WriteCr0(cr0 & ~kCr0Wp);
+    p[0] = g_saved_branch_byte0;
+    p[1] = g_saved_branch_byte1;
+    asm volatile("xor %%eax, %%eax; cpuid" : : : "eax", "ebx", "ecx", "edx");
+    WriteCr0(cr0);
+    if ((rflags & kRflagsIf) != 0)
+        asm volatile("sti");
+}
+
 } // namespace
 
 const char* AttackOutcomeName(AttackOutcome o)
@@ -710,7 +863,7 @@ void AttackSimRun()
     // re-assert the cleared bit on the next scan; our explicit
     // Restore is a safety net. Kernel-text patch holds IRQs off
     // across its WP-clear window — see AttackKernelTextPatch.
-    static constinit const Spec kSpecs[16] = {
+    static constinit const Spec kSpecs[17] = {
         {"Bootkit LBA 0 write", "BootSectorModified", core::HealthIssue::BootSectorModified, nullptr, AttackBootSector,
          RestoreBootSector},
         {"IDT hijack", "IdtModified", core::HealthIssue::IdtModified, nullptr, AttackIdt, RestoreIdt},
@@ -741,6 +894,17 @@ void AttackSimRun()
          nullptr, AttackPersistenceDrop, RestorePersistenceDrop},
         {"Stack canary defang", "StackCanaryZero", core::HealthIssue::StackCanaryZero, nullptr, AttackStackCanaryZero,
          RestoreStackCanaryZero},
+        // Function-branch NOP patch on a synthetic cap-style gate.
+        // Honest red-team finding: ComputeTextSpotHash only inspects
+        // the first/last 4 KiB of `.text`, and AttackSimGatedAccess
+        // links into the middle, so KernelTextModified is expected
+        // NOT to fire. The slice's deliverable is the FailNoDetect
+        // outcome plus the BYPASS-LANDED log line proving the cap
+        // gate was actually flipped open. Ticketed in
+        // `.claude/knowledge/branch-nop-attack-v0.md` for the
+        // follow-up "full-text or rolling-page hash" detector slice.
+        {"Function branch NOP patch (cap-gate bypass)", "KernelTextModified", core::HealthIssue::KernelTextModified,
+         nullptr, AttackBranchNopPatch, RestoreBranchNopPatch},
         // Deferred — each needs its own slice with bespoke handling:
         //
         //   "Stack canary defang"  — zeroing __stack_chk_guard while
