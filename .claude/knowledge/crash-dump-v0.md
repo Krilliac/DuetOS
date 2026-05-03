@@ -111,12 +111,13 @@ annotation when the value falls in plausible kernel code range — surfaces
 stale callback pointers / vtable spills / saved-RIP residue without forcing
 the operator to re-symbolize by hand.
 
-The schema is v4 (v1 → v2 added the `return-address pointers`
+The schema is v5 (v1 → v2 added the `return-address pointers`
 section; v2 → v3 added the `page-walk` block for cr2 and rip;
-v3 → v4 added the `LBR (last-branch records)` block between the
-return-address-pointer scan and the held-locks block). Bump
-`kDumpSchemaVersion` in `core/panic.cpp` when the layout changes
-in a way a parser would care about. The bit-decoded suffixes (e.g. `[PE|WP|PG]`)
+v3 → v4 added the `LBR (last-branch records)` block; v4 → v5
+added the per-task syscall trail block — only emitted when the
+current task's ring is non-empty). Bump `kDumpSchemaVersion`
+in `core/panic.cpp` when the layout changes in a way a parser
+would care about. The bit-decoded suffixes (e.g. `[PE|WP|PG]`)
 live on the SAME line as the existing `<label> : <hex>` token sequence,
 so a parser that anchors on `<label> : 0x[0-9a-f]+` keeps working;
 human readers get the meaning for free.
@@ -274,6 +275,59 @@ backtrace (which is fast but FPO-fragile).
 AP support is deferred. `LbrInitBsp` only configures the BSP;
 APs that crash today emit the "(unavailable)" form. Per-AP
 enablement will land alongside SMP runqueue stabilisation.
+
+### Per-task syscall trail
+
+`sched::Task` carries a small inline ring (8 entries × 56 bytes
+= 448 bytes/task) capturing the most recent syscalls the task
+issued. Each entry: `(abi, nr, args[4], ret, ts_tick)`. ABI is
+`native` (int 0x80, both DuetOS-native and Win32 SYS_WIN_*),
+`linux` (Linux ABI), or `win32` (currently unused — Win32 PEs
+go through the native dispatcher).
+
+`sched::SyscallTrailRecord(abi, nr, a0..a3, ret)` is called from
+each dispatcher just before returning to the caller:
+
+- **Native**: an RAII guard at the top of
+  `core::SyscallDispatch` (in `kernel/syscall/syscall.cpp`)
+  fires on every return path of the case-switch dispatcher,
+  capturing the args saved at entry and the rax the case body
+  populated. RAII ensures every return path records — covers
+  the dozens of `frame->rax = ...; return;` exit points.
+- **Linux**: a single explicit call right after the
+  `frame->rax = static_cast<u64>(rv)` line in
+  `subsystems::linux::LinuxSyscallDispatch`. The Linux
+  dispatcher uses single-exit so one record point is enough.
+
+`sched::DumpCurrentTaskSyscallTrail` is wired into the panic
+path between the LBR block and `DumpHeldLocksLocal`. The
+section is only emitted when the calling task's `trail_count`
+is non-zero — kernel-only tasks never call into the
+dispatcher, their rings stay all-zeros, and the dumper skips
+them silently rather than emitting empty headers.
+
+Boot self-test (`SyscallTrailSelfTest`, run from `kernel_main`
+right after `SchedInit` when `kBootSelfTests` is on): records
+3 synthetic events with distinct ABIs, asserts head/count
+ordering, fills another 8 entries to exercise wrap-around,
+then restores the pre-test state so a later panic doesn't
+surface synthetic data. Surfaces a `[sched] syscall-trail
+self-test OK` line at boot and panics on mismatch.
+
+What this surfaces in a real panic:
+
+- A user task that crashed in `read(fd, buf, len)`-style code
+  shows the full syscall sequence that led there — which file
+  was last opened, what its return value was (-EBADF? -EFAULT?
+  the buffer length?), how many writes happened first.
+- A Win32 PE that crashed inside a SYS_WIN_* path shows the
+  trail of UI / window / heap calls that preceded the fault,
+  named by syscall number (operator looks up names against
+  the SYS_WIN enum).
+- Kernel-thread panics (the panic-demo case today) emit no
+  trail section at all — the absence is the diagnostic
+  signal: "this crash was a kernel-internal invariant break,
+  no userspace trajectory matters".
 
 Human-readable decoders live in `kernel/core/diag_decode.{h,cpp}`:
 `WriteCr0Bits` / `WriteCr4Bits` / `WriteRflagsBits` / `WriteEferBits` /

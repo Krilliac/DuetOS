@@ -430,6 +430,25 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     }
     const u64 num = frame->rax;
+    // Capture the syscall args at entry so an RAII guard (below)
+    // can push the (nr, args, ret, ts) entry into the calling
+    // task's trail ring on every return path. Reading from `frame`
+    // directly in the destructor would race with handlers that
+    // mutate frame->rdi/rsi/etc. before returning (e.g. SYS_EXIT
+    // doesn't touch them but signal-delivery does).
+    struct SyscallTrailGuard
+    {
+        arch::TrapFrame* f;
+        u64 num;
+        u64 a0, a1, a2, a3;
+        ~SyscallTrailGuard()
+        {
+            ::duetos::sched::SyscallTrailRecord(::duetos::sched::kSyscallAbiNative, static_cast<u32>(num), a0, a1, a2,
+                                                a3, f->rax);
+        }
+    };
+    SyscallTrailGuard trail_guard{frame, num, frame->rdi, frame->rsi, frame->rdx, frame->r10};
+
     // Outer-scope process pointer for the dispatcher header. Renamed
     // away from `proc` so the per-case `Process* proc = ...`
     // declarations in the switch below don't trip -Wshadow.

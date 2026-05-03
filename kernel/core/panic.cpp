@@ -15,6 +15,7 @@
 #include "diag/soft_lockup.h"
 #include "diag/hexdump.h"
 #include "log/klog.h"
+#include "sched/sched.h"
 #include "util/build_config.h"
 #include "util/symbols.h"
 
@@ -80,7 +81,12 @@ constexpr const char* kDumpEndMarker = "=== DUETOS CRASH DUMP END ===\n";
 // symbolized. On TCG QEMU / pre-Goldmont-Plus / AMD it emits
 // a single "(unavailable)" line so the section's absence is
 // explicit.
-constexpr u64 kDumpSchemaVersion = 4;
+//
+// v5 (2026-05-03): per-task syscall trail (last 8 syscalls)
+// emitted after the LBR block, only when the current task has
+// recorded entries (kernel-only tasks stay silent). Each line
+// is `[idx] abi=<ABI> nr=0xN args=(0xN,0xN,0xN,0xN) -> ret=0xN tick=0xN`.
+constexpr u64 kDumpSchemaVersion = 5;
 
 void WriteLabelled(const char* label, u64 value)
 {
@@ -570,6 +576,7 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
     DumpStack(rsp, 16);
     DumpReturnAddressPointers(rsp);
     DumpLbr();
+    sched::DumpCurrentTaskSyscallTrail();
     DumpHeldLocksLocal();
     DumpLogRing();
     DumpInflightScopes();

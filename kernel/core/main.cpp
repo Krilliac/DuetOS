@@ -1806,6 +1806,18 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Bringing up scheduler.\n");
     duetos::sched::SchedInit();
+    // Per-task syscall-trail self-test — exercises the ring
+    // logic on the current (kboot) task before any user task
+    // can populate it. Restores the pre-test state on exit so
+    // a panic that fires later doesn't surface synthetic
+    // entries. Cheap and gives us boot-time evidence the dump
+    // section's mechanism works (the section itself only
+    // appears on a panic from a task that issued syscalls,
+    // which kboot itself never does).
+    if constexpr (duetos::core::kBootSelfTests)
+    {
+        duetos::sched::SyscallTrailSelfTest();
+    }
     // Idle task FIRST so the runqueue is never empty — even if the
     // reaper or any subsequent worker blocks before the boot task
     // spawns anything else, Schedule() always has a fallback to
