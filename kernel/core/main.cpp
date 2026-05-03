@@ -39,7 +39,9 @@
  *   long readable function wins.
  */
 
+#include "util/base64.h"
 #include "util/build_config.h"
+#include "util/crc32.h"
 #include "util/types.h"
 #include "acpi/acpi.h"
 #include "acpi/aml.h"
@@ -84,6 +86,7 @@
 #include "net/wireless/crypto/aes.h"
 #include "net/wireless/crypto/aes_keywrap.h"
 #include "net/wireless/crypto/hmac.h"
+#include "net/wireless/crypto/md5.h"
 #include "net/wireless/crypto/pbkdf2.h"
 #include "net/wireless/crypto/prf.h"
 #include "net/wireless/crypto/sha1.h"
@@ -588,6 +591,8 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWrite("[boot] Seeding kernel entropy pool.\n");
     duetos::core::RandomInit();
     DUETOS_BOOT_SELFTEST(duetos::core::RandomSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::Crc32SelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::Base64SelfTest());
     // NOTE: The stack canary has already been randomized from RDTSC
     // in boot.S before kernel_main was called. The C++ helper
     // `RandomizeStackCanary` in stack_canary.cpp is kept as an API
@@ -1925,6 +1930,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::BeaconSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::crypto::Sha1SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::crypto::Sha256SelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::wireless::crypto::Md5SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::crypto::HmacSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::crypto::Pbkdf2SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::crypto::PrfSelfTest());

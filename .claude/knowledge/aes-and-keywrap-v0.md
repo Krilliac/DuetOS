@@ -117,13 +117,14 @@ It also closes the `porting-candidates-v0.md` rows:
 ## Follow-up not in this slice
 
 1. **Wire keywrap into the EAPOL M3 KeyData decryption path** —
-   `kernel/net/wireless/eapol.{h,cpp}` and `fourway.{h,cpp}`. Today
-   M3 is processed but the encrypted KeyData is parsed as plaintext
-   (works for the loopback test fixture which doesn't encrypt).
-   The integration is "if KeyData encryption flag is set in the
-   key info field, run `AesKeyUnwrap` over the KeyData with the
-   first 16 bytes of the PTK as KEK; reject the M3 on integrity
-   failure". Bounded to ~50 LOC + a ciphered 4-way KAT.
+   LANDED 2026-05-03. See
+   `crc32-md5-base64-and-eapol-keywrap-v0.md`. `FourWayProcessIncoming`
+   detects `KeyInfo.Encrypted`, derives KEK = upper 16 bytes of
+   PTK, runs `AesKeyUnwrap` against a 256-byte stack scratch,
+   walks the decrypted KDEs through the existing `ExtractGtkKde`,
+   and treats integrity failure as a MIC-equivalent fault
+   (state→Failed + mic_failures++). Ciphered-M3 + tamper-detect
+   KAT runs at boot.
 2. **AES-NI hardware path**. CPUID-gated. Replace the namespace-
    private implementations of `AesEncryptBlock` / `AesDecryptBlock`
    with dispatch by feature bit at `AesKeyExpand*` time. The KAT

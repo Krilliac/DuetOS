@@ -1,8 +1,9 @@
 #include "fs/gpt.h"
 
 #include "arch/x86_64/serial.h"
-#include "log/klog.h"
 #include "drivers/storage/block.h"
+#include "log/klog.h"
+#include "util/crc32.h"
 
 namespace duetos::fs::gpt
 {
@@ -10,43 +11,7 @@ namespace duetos::fs::gpt
 namespace
 {
 
-// --- CRC32 (IEEE 802.3, reflected, poly 0xEDB88320) -------------------------
-//
-// One table for both the GPT header CRC and the entry-array CRC. 1 KiB
-// of .rodata, built on first use. The compiler could do this at compile
-// time with a constexpr loop, but a runtime lazy-init keeps the code
-// short and the .rodata hot. No thread-safety concern — the first
-// caller runs in task context before anything else touches the table.
-
-constinit u32 g_crc_table[256] = {};
-constinit bool g_crc_table_ready = false;
-
-void Crc32TableInit()
-{
-    if (g_crc_table_ready)
-        return;
-    for (u32 i = 0; i < 256; ++i)
-    {
-        u32 c = i;
-        for (int j = 0; j < 8; ++j)
-        {
-            c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
-        }
-        g_crc_table[i] = c;
-    }
-    g_crc_table_ready = true;
-}
-
-u32 Crc32(const u8* data, u64 len)
-{
-    Crc32TableInit();
-    u32 c = 0xFFFFFFFFu;
-    for (u64 i = 0; i < len; ++i)
-    {
-        c = g_crc_table[(c ^ data[i]) & 0xFFu] ^ (c >> 8);
-    }
-    return c ^ 0xFFFFFFFFu;
-}
+using duetos::util::Crc32;
 
 // --- GPT on-disk structures -------------------------------------------------
 
