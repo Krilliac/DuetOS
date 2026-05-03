@@ -293,7 +293,12 @@ WIFI: dumping diag ring (37 retained, 37 total, 0 dropped)
 - **GTK extraction expects plaintext key data on M3.** Real APs
   encrypt M3 key data with AES key wrap (RFC 3394). v0 detects
   the Encrypted bit and rejects with `Unsupported` rather than
-  silently delivering garbage; a future AES-KW slice fixes that.
+  silently delivering garbage. The AES + AES-KW primitives landed
+  2026-05-03 (`aes-and-keywrap-v0.md`); the integration step —
+  reading the Encrypted bit from M3 KeyInfo, deriving KEK from the
+  PTK, calling `AesKeyUnwrap` over the KeyData buffer, and
+  rejecting M3 on integrity failure — is the next bounded slice
+  (~50 LOC + a ciphered 4-way KAT).
 - **State machine accepts only supplicant-side flow.** AP-side
   M2/M4 reception is rejected as `BadState` rather than
   silently advancing — this is intentional, since the kernel

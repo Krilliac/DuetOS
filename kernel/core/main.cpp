@@ -81,6 +81,8 @@
 #include "drivers/net/rtl88xx_fw.h"
 #include "drivers/net/rtl88xx_upload.h"
 #include "net/wireless/beacon.h"
+#include "net/wireless/crypto/aes.h"
+#include "net/wireless/crypto/aes_keywrap.h"
 #include "net/wireless/crypto/hmac.h"
 #include "net/wireless/crypto/pbkdf2.h"
 #include "net/wireless/crypto/prf.h"
@@ -1926,6 +1928,8 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::crypto::HmacSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::crypto::Pbkdf2SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::crypto::PrfSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::wireless::crypto::AesSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::wireless::crypto::AesKeyWrapSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::EapolSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::FourWaySelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::WdevSelfTest());
