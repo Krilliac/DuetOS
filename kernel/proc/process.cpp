@@ -4,6 +4,7 @@
 #include "arch/x86_64/serial.h"
 #include "diag/hexdump.h"
 #include "diag/log_names.h"
+#include "diag/runtime_checker.h"
 #include "debug/probes.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
@@ -14,6 +15,7 @@
 #include "log/klog.h"
 #include "core/panic.h"
 #include "loader/pe_loader.h"
+#include "time/tick.h"
 
 namespace duetos::core
 {
@@ -42,8 +44,8 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     auto* p = static_cast<Process*>(mm::KMalloc(sizeof(Process)));
     if (p == nullptr)
     {
-        KLOG_CRITICAL_AS(LogArea::Process, "core/process",
-                         "ProcessCreate: KMalloc(Process) returned null", "name", name);
+        KLOG_CRITICAL_AS(LogArea::Process, "core/process", "ProcessCreate: KMalloc(Process) returned null", "name",
+                         name);
         return nullptr;
     }
     // Zero the entire Process struct. KMalloc returns memory still
@@ -527,6 +529,54 @@ bool ShouldLogDenial(u64 denial_index)
     return denial_index == 1 || (denial_index & 31) == 0;
 }
 
+bool RecordFsWriteCheck(Process* p, u64 bytes)
+{
+    if (p == nullptr || bytes == 0)
+        return false;
+    p->fs_write_bytes_total += bytes;
+
+    // Roll the window: TickCount is monotonic, so a "now older
+    // than start by >= window" check covers both the fresh-window
+    // (start_tick == 0) case and the legitimate roll case in one
+    // expression. We deliberately reset to `bytes` (not 0) on
+    // roll so a single oversized write is still counted toward
+    // the new window — an attacker cannot evade the cap by
+    // pacing one >cap write per window.
+    const u64 now = ::duetos::time::TickCount();
+    const u64 start = p->fs_write_window_start_tick;
+    if (start == 0 || now - start >= kFsWriteWindowTicks)
+    {
+        p->fs_write_window_start_tick = now;
+        p->fs_write_window_bytes = bytes;
+    }
+    else
+    {
+        p->fs_write_window_bytes += bytes;
+    }
+    return p->fs_write_window_bytes > kFsWriteWindowByteCap;
+}
+
+void RecordFsWrite(Process* p, u64 bytes)
+{
+    if (!RecordFsWriteCheck(p, bytes))
+        return;
+    // Threshold crossed. Log every over-cap call so the operator
+    // sees how badly the rogue process pushed past the limit;
+    // FlagCurrentForKill is itself idempotent so repeated calls
+    // before the scheduler reaps cost nothing beyond the log.
+    arch::SerialWrite("[fsguard] pid=");
+    arch::SerialWriteHex(p->pid);
+    arch::SerialWrite(" name=\"");
+    arch::SerialWrite(p->name != nullptr ? p->name : "<null>");
+    arch::SerialWrite("\" wrote ");
+    arch::SerialWriteHex(p->fs_write_window_bytes);
+    arch::SerialWrite(" bytes / ");
+    arch::SerialWriteHex(kFsWriteWindowTicks);
+    arch::SerialWrite("-tick window — terminating (suspected ransomware)\n");
+    RuntimeCheckerNoteFsWriteRateExceeded();
+    sched::FlagCurrentForKill(sched::KillReason::FsWriteRateExceeded);
+}
+
 const char* CapName(Cap c)
 {
     switch (c)
@@ -599,8 +649,8 @@ u64 ProcessFindDllBaseByName(const Process* proc, const char* dll_name)
      * available" behaviour. */
     if (dll_name == nullptr || dll_name[0] == '\0')
     {
-        KLOG_DEBUG_AV(LogArea::Loader, "core/process",
-                      "ProcessFindDllBaseByName: empty name -> EXE pe_image_base", proc->pe_image_base);
+        KLOG_DEBUG_AV(LogArea::Loader, "core/process", "ProcessFindDllBaseByName: empty name -> EXE pe_image_base",
+                      proc->pe_image_base);
         return proc->pe_image_base;
     }
     // Strip any ".dll" / ".DLL" suffix from the lookup so callers

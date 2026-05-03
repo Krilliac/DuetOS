@@ -314,6 +314,12 @@ u64 WriteForProcess(::duetos::core::Process* proc, u64 handle, const void* src, 
     if (wrote < 0)
         return u64(-1);
     h.cursor += u64(wrote);
+    // Ransomware-rate guard. Bumps per-process counters; if this
+    // call pushes the calling process past `kFsWriteWindowByteCap`
+    // bytes within the rolling window, it flags the current task
+    // for kill via FlagCurrentForKill. See `RecordFsWrite` in
+    // kernel/proc/process.cpp for the threshold + window math.
+    ::duetos::core::RecordFsWrite(proc, u64(wrote));
     return u64(wrote);
 }
 
@@ -387,6 +393,13 @@ u64 CreateForProcess(::duetos::core::Process* proc, const char* path, const void
     h.fat32_volume_idx = disk_idx;
     CopyDirEntry(h.fat32_entry, entry);
     h.cursor = 0;
+    // Ransomware-rate guard. Counts the create's init_bytes
+    // payload toward the calling process's window — a typical
+    // encrypt-loop is "create new file with encrypted contents"
+    // followed by unlink-of-original, so the create surface
+    // matters as much as the in-place write surface.
+    if (init_len > 0)
+        ::duetos::core::RecordFsWrite(proc, init_len);
     ::duetos::subsystems::linux::internal::InotifyPublish(disk_rest, ::duetos::subsystems::linux::internal::kInCreate);
     const u64 handle = Process::kWin32HandleBase + slot;
     SerialWrite("[fs/route] create ok pid=");

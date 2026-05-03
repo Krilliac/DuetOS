@@ -177,8 +177,8 @@ i64 DoWrite(u64 fd, u64 user_buf, u64 len)
             n = fs::fat32::Fat32CreateAtPath(v, p->linux_fds[fd].path, kbuf + written, extend_len);
             if (n >= 0)
             {
-                p->linux_fds[fd].flags = static_cast<u8>(p->linux_fds[fd].flags &
-                                                        ~core::Process::kLinuxFdFlagPendingCreate);
+                p->linux_fds[fd].flags =
+                    static_cast<u8>(p->linux_fds[fd].flags & ~core::Process::kLinuxFdFlagPendingCreate);
                 // Re-look up the just-created entry so first_cluster
                 // is populated for subsequent in-bounds writes.
                 fs::fat32::DirEntry e;
@@ -201,6 +201,11 @@ i64 DoWrite(u64 fd, u64 user_buf, u64 len)
         p->linux_fds[fd].size = static_cast<u32>(size + (to_copy - (size - off)));
     }
     p->linux_fds[fd].offset = off + written;
+    // Ransomware-rate guard. Same hook the Win32 SYS_FILE_WRITE
+    // path uses (see kernel/fs/file_route.cpp WriteForProcess).
+    // Subsystem isolation: a Linux ELF turning malicious has to
+    // pass the same byte-rate cap as a native or Win32 PE.
+    ::duetos::core::RecordFsWrite(p, written);
     return static_cast<i64>(written);
 }
 

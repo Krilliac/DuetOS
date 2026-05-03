@@ -180,6 +180,16 @@ enum class HealthIssue : u32
     // silently until something catches them.
     IrqStorm,
 
+    // A user process pushed past `kFsWriteWindowByteCap` bytes
+    // written within `kFsWriteWindowTicks`. Defends against
+    // ransomware-style mass file rewrites by a trusted-but-
+    // compromised process. Counted globally; the kill itself is
+    // enacted at the syscall site (see `RecordFsWrite` in
+    // kernel/proc/process.cpp), so this finding's purpose is
+    // operator visibility — every increment represents one
+    // ransomware-style burst the kernel actively shut down.
+    MassFsWriteRate,
+
     // Count sentinel
     Count,
 };
@@ -255,6 +265,18 @@ u64 RuntimeCheckerScan();
 /// Exactly equivalent to calling `RuntimeCheckerScan()` and
 /// ignoring the return value.
 void RuntimeCheckerTick();
+
+/// Note that a process has just crossed the FS write-rate cap.
+/// Called from `RecordFsWrite` (kernel/proc/process.cpp) when the
+/// per-process window byte count exceeds `kFsWriteWindowByteCap`.
+/// Bumps the `MassFsWriteRate` counter through the standard
+/// `Report` path so the response policy + counter snapshot stay
+/// consistent with the periodic-scan detectors.
+///
+/// Safe from any context: bumps a counter and writes a log line.
+/// Does NOT itself flag the calling task — kill enforcement is
+/// the caller's responsibility (see `RecordFsWrite`).
+void RuntimeCheckerNoteFsWriteRateExceeded();
 
 /// Current stats snapshot. Returned by const-reference to avoid
 /// copying the 128-byte per-issue array on every call (kernel

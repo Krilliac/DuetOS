@@ -415,8 +415,8 @@ i64 DoCopyFileRange(u64 fd_in, u64 user_off_in, u64 fd_out, u64 user_off_out, u6
             wr = fs::fat32::Fat32CreateAtPath(vol, p->linux_fds[fd_out].path, stage + src_off, to_write);
             if (wr >= 0)
             {
-                p->linux_fds[fd_out].flags = static_cast<u8>(p->linux_fds[fd_out].flags &
-                                                            ~core::Process::kLinuxFdFlagPendingCreate);
+                p->linux_fds[fd_out].flags =
+                    static_cast<u8>(p->linux_fds[fd_out].flags & ~core::Process::kLinuxFdFlagPendingCreate);
                 fs::fat32::DirEntry de;
                 if (fs::fat32::Fat32LookupPath(vol, p->linux_fds[fd_out].path, &de))
                 {
@@ -458,6 +458,12 @@ i64 DoCopyFileRange(u64 fd_in, u64 user_off_in, u64 fd_out, u64 user_off_out, u6
         (void)mm::CopyToUser(reinterpret_cast<void*>(user_off_out), &final_out, sizeof(final_out));
         p->linux_fds[fd_out].offset = static_cast<u64>(saved_out);
     }
+    // Ransomware-rate guard. copy_file_range bypasses DoWrite —
+    // it issues Fat32{Create,Append}AtPath directly — so the
+    // rate hook in DoWrite doesn't see these bytes. Count the
+    // total transferred here so a kernel-side fd-to-fd copy
+    // attack can't evade the cap by routing around DoWrite.
+    ::duetos::core::RecordFsWrite(p, total);
     return static_cast<i64>(total);
 }
 

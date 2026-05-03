@@ -270,6 +270,26 @@ struct Process
     // task would be caught by ticks, a retrying task by denials.
     u64 sandbox_denials;
 
+    // FS write rate-limit window. Defends against ransomware-
+    // style mass file rewrites: a trusted process that turned
+    // malicious can otherwise grind through every file on disk
+    // unimpeded since it has kCapFsWrite. Each successful file
+    // write (Win32 SYS_FILE_WRITE, Linux sys_write to a regular
+    // file) bumps `fs_write_window_bytes`; once that crosses
+    // `kFsWriteWindowByteCap` within `kFsWriteWindowTicks`, the
+    // syscall site flags the calling task for kill with
+    // `KillReason::FsWriteRateExceeded`. `fs_write_bytes_total`
+    // is the cumulative lifetime counter for telemetry.
+    //
+    // Threshold is generous enough that legitimate file copies /
+    // installer payloads fit easily, but tight enough that a
+    // sustained encrypt-loop trips within ~1 s of going rogue.
+    // No exemption for trusted processes — the threat model
+    // assumes the trusted process IS the attacker.
+    u64 fs_write_bytes_total;
+    u64 fs_write_window_bytes;
+    u64 fs_write_window_start_tick;
+
     // Win32 last-error slot. Read + written by the kernel32
     // GetLastError / SetLastError stubs via SYS_GETLASTERROR /
     // SYS_SETLASTERROR. In real Windows this lives in the TEB
@@ -855,10 +875,10 @@ struct Process
     // more than any sane workload needs.
     struct LinuxPosixTimer
     {
-        u64 deadline_ns;     // 0 = disarmed
-        u64 interval_ns;     // 0 = one-shot
-        u32 signo;           // signal to raise on expiry (SIGALRM default)
-        u32 overrun;         // missed-fires count, drained by timer_getoverrun
+        u64 deadline_ns; // 0 = disarmed
+        u64 interval_ns; // 0 = one-shot
+        u32 signo;       // signal to raise on expiry (SIGALRM default)
+        u32 overrun;     // missed-fires count, drained by timer_getoverrun
         u8 in_use;
         u8 _pad[7];
     };
@@ -1023,6 +1043,20 @@ inline constexpr u64 kTickBudgetTrusted = 1ULL << 40; // ~12 decades at 100 Hz =
 // under this — but anything higher is a hostile retry loop.
 inline constexpr u64 kSandboxDenialKillThreshold = 100;
 
+// FS write-rate window: 100 scheduler ticks (1 second @ 100 Hz).
+inline constexpr u64 kFsWriteWindowTicks = 100;
+
+// Per-process byte budget within a single window. 16 MiB/s is
+// well above any legitimate userland workload the system runs
+// today (the largest install asset on disk is the kernel's own
+// few-MiB ISO; userland builds copy at most a few hundred KiB).
+// A trusted PE turning ransomware would need to pump entire
+// directories through `WriteFile` — every realistic encrypt-loop
+// cracks this within ~1 s of going rogue. Easy to retune at the
+// constant; defining it inline keeps the threshold reviewable
+// alongside the cap inventory.
+inline constexpr u64 kFsWriteWindowByteCap = 16ULL * 1024ULL * 1024ULL;
+
 /// Allocate a Process and take ownership of `as`. Does NOT bump
 /// `as`'s refcount — ProcessCreate assumes the caller hands over
 /// the one reference AddressSpaceCreate returned. On ProcessRelease,
@@ -1065,6 +1099,36 @@ const char* CapName(Cap c);
 /// counting but the task is flagged exactly once. `cap`
 /// argument is just for the log line; no functional effect.
 void RecordSandboxDenial(Cap cap);
+
+/// FS write rate-limit hook. Call from every successful
+/// file-write syscall site (Win32 SYS_FILE_WRITE, Linux
+/// sys_write to a regular file) AFTER the bytes have actually
+/// landed on backing storage. Bumps per-process counters,
+/// rolls the rate-limit window, and on threshold crossing:
+///   1) bumps the global `MassFsWriteRate` health counter,
+///   2) flags the calling task for kill via FlagCurrentForKill
+///      with `KillReason::FsWriteRateExceeded`.
+///
+/// Idempotent past the threshold — repeated calls keep
+/// counting and re-flagging, but the kill flag is itself
+/// idempotent so the cost is just one extra log line per
+/// over-cap call (which is desirable: the operator wants to
+/// see how badly the rogue process pushed past the cap).
+///
+/// `bytes == 0` is a no-op (matches `write(2)` semantics where
+/// a zero-length write is a query, not a transfer). `p ==
+/// nullptr` is a no-op for kernel-only paths that don't have a
+/// Process attached.
+void RecordFsWrite(Process* p, u64 bytes);
+
+/// Pure-bookkeeping variant of RecordFsWrite. Updates the
+/// per-process counters + rolls the window and returns true if
+/// THIS call pushed the process over `kFsWriteWindowByteCap`.
+/// Does NOT bump global counters and does NOT flag the current
+/// task for kill — useful for the attacker-simulation suite
+/// where we want to verify the threshold logic without killing
+/// the kernel main task that's running the test.
+bool RecordFsWriteCheck(Process* p, u64 bytes);
 
 /// Rate-limit predicate for denial log output. Call sites check
 /// this after incrementing the counter (see

@@ -1256,6 +1256,8 @@ const char* HealthIssueName(HealthIssue i)
         return "Machine Check bank reported a hardware error (IA32_MCi_STATUS.VAL set)";
     case HealthIssue::IrqStorm:
         return "IRQ vector firing above rate ceiling (chattering line or runaway handler)";
+    case HealthIssue::MassFsWriteRate:
+        return "process exceeded FS write-rate cap (suspected ransomware; task killed)";
     default:
         return "(unnamed issue)";
     }
@@ -1381,6 +1383,17 @@ u64 RuntimeCheckerScan()
 void RuntimeCheckerTick()
 {
     (void)RuntimeCheckerScan();
+}
+
+void RuntimeCheckerNoteFsWriteRateExceeded()
+{
+    // Route through Report so the per-issue counter, last_issue
+    // tracking, and the standard log line all stay consistent
+    // with the periodic-scan detectors. Response policy for
+    // MassFsWriteRate falls through to LogOnly (default branch
+    // in ResponseFor) — actual kill enforcement is done by the
+    // syscall site, not the checker.
+    Report(HealthIssue::MassFsWriteRate);
 }
 
 const HealthReport& RuntimeCheckerStatusRead()

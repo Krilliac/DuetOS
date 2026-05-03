@@ -164,6 +164,7 @@ enum class KillReason : u8
     TickBudget = 1,             // CPU-tick budget exhausted
     SandboxDenialThreshold = 2, // too many cap-denials
     UserKill = 3,               // shell `kill <pid>` / operator-initiated
+    FsWriteRateExceeded = 4,    // ransomware-style mass file-write flood
     // Add new reasons at the end.
 };
 

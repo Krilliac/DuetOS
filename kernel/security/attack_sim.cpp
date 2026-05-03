@@ -4,6 +4,8 @@
 #include "log/klog.h"
 #include "diag/runtime_checker.h"
 #include "drivers/storage/block.h"
+#include "proc/process.h"
+#include "util/string.h"
 
 namespace duetos::security
 {
@@ -408,6 +410,74 @@ void RestoreBootSector()
     g_boot_dev = 0xFFFFFFFFu;
 }
 
+// ---- ransomware FS write-rate flood ----
+//
+// The runtime cap is per-process (`kFsWriteWindowByteCap` =
+// 16 MiB / s), enforced at every successful file-write syscall
+// site. Validating the threshold logic from kernel context can't
+// drive the real syscall path — that would route through the
+// CALLING task (kernel main thread) and FlagCurrentForKill would
+// terminate the suite mid-flight. Instead we build a synthetic
+// Process struct and exercise the bookkeeping API directly,
+// then bump the global health counter through the documented
+// note hook so this attack matches the standard
+// "expect counter to increment" pattern.
+//
+// The synthetic Process lives in a static buffer to keep KMalloc
+// out of the test (the freestanding kernel has no heap-failure
+// recovery story for an attack that's supposed to be safe).
+alignas(8) constinit u8 g_ransom_proc_storage[sizeof(::duetos::core::Process)] = {};
+
+void AttackRansomwareWriteRate()
+{
+    using ::duetos::core::kFsWriteWindowByteCap;
+    using ::duetos::core::Process;
+    auto* p = reinterpret_cast<Process*>(g_ransom_proc_storage);
+    // Re-zero each run — earlier suite invocations may have left
+    // residue, and the bookkeeping relies on a fresh window
+    // start_tick == 0 to start a clean window.
+    for (u64 i = 0; i < sizeof(g_ransom_proc_storage); ++i)
+        g_ransom_proc_storage[i] = 0;
+    p->pid = 0xFADE'C0DEull; // synthetic; never enters the scheduler
+    p->name = "ransom-sim";
+
+    // 4 KiB per call. (kFsWriteWindowByteCap / 4096) + 1 = 4097
+    // calls puts us guaranteed-over the cap on the LAST call,
+    // not before. The test cares about "did the threshold trip
+    // exactly once at the right moment", not throughput.
+    constexpr u64 kChunk = 4096;
+    constexpr u64 kCalls = (kFsWriteWindowByteCap / kChunk) + 1;
+    bool tripped = false;
+    for (u64 i = 0; i < kCalls; ++i)
+    {
+        if (::duetos::core::RecordFsWriteCheck(p, kChunk))
+        {
+            tripped = true;
+            break;
+        }
+    }
+    if (!tripped)
+    {
+        // Bookkeeping bug — test failed before the standard
+        // counter check would even run. Log + leave; the
+        // before/after compare will catch the no-bump.
+        arch::SerialWrite("[attacksim]   ransom: bookkeeping never tripped (cap math?)\n");
+        return;
+    }
+    // Threshold tripped — bump the global counter the same way
+    // RecordFsWrite (the production hook) does. The attack
+    // harness's before/after compare on MassFsWriteRate will see
+    // the increment and report PASS.
+    ::duetos::core::RuntimeCheckerNoteFsWriteRateExceeded();
+}
+
+void RestoreRansomwareWriteRate()
+{
+    // Synthetic Process struct — nothing to restore. Zeroing
+    // happens at the start of the next AttackRansomwareWriteRate
+    // call, so consecutive AttackSimRun() invocations stay clean.
+}
+
 } // namespace
 
 const char* AttackOutcomeName(AttackOutcome o)
@@ -463,7 +533,7 @@ void AttackSimRun()
     // re-assert the cleared bit on the next scan; our explicit
     // Restore is a safety net. Kernel-text patch holds IRQs off
     // across its WP-clear window — see AttackKernelTextPatch.
-    static constinit const Spec kSpecs[11] = {
+    static constinit const Spec kSpecs[12] = {
         {"Bootkit LBA 0 write", "BootSectorModified", core::HealthIssue::BootSectorModified, nullptr, AttackBootSector,
          RestoreBootSector},
         {"IDT hijack", "IdtModified", core::HealthIssue::IdtModified, nullptr, AttackIdt, RestoreIdt},
@@ -484,6 +554,8 @@ void AttackSimRun()
          AttackEferNxe, RestoreEferNxe},
         {"Kernel .text inline-hook (1-byte patch)", "KernelTextModified", core::HealthIssue::KernelTextModified,
          nullptr, AttackKernelTextPatch, RestoreKernelTextPatch},
+        {"Ransomware FS write-rate flood", "MassFsWriteRate", core::HealthIssue::MassFsWriteRate, nullptr,
+         AttackRansomwareWriteRate, RestoreRansomwareWriteRate},
         // Deferred — each needs its own slice with bespoke handling:
         //
         //   "Stack canary defang"  — zeroing __stack_chk_guard while

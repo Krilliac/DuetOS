@@ -104,6 +104,7 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | qemu-smoke #DE flake at PicDisable — held legacy IRQ delivered to master 8259 pre-init vector base 0; fixed via mask-first + CLI-around in PicDisable; smoke retry-on-flake tier removed so future crashes always fail | [knowledge/qemu-smoke-pic-de-flake-v0.md](knowledge/qemu-smoke-pic-de-flake-v0.md) | Issue + Pattern | Fixed | 2026-04-30 |
 | KMalloc-zero-init pattern — every kernel struct with embedded sync primitives must memset before use | [knowledge/kmalloc-zero-init-pattern.md](knowledge/kmalloc-zero-init-pattern.md) | Pattern + Issue | Active | 2026-04-28 |
 | Build flavors v0 — central debug/release configuration (build_config.h + DEBUG_ASSERT + cap-audit + boot banner + new presets) | [knowledge/build-flavors-v0.md](knowledge/build-flavors-v0.md) | Decision + Pattern | Active | 2026-04-29 |
+| FS write-rate guard v0 — per-process ransomware defense (16 MiB / 1 s cap; new `MassFsWriteRate` health issue + `KillReason::FsWriteRateExceeded`; wired into Win32 SYS_FILE_WRITE/CREATE, Linux sys_write/copy_file_range; `AttackRansomwareWriteRate` in attack_sim) | [knowledge/fs-write-rate-guard-v0.md](knowledge/fs-write-rate-guard-v0.md) | Decision + Pattern + Observation | Active | 2026-05-03 |
 
 ## Quick Reference
 

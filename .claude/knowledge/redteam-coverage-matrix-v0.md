@@ -71,7 +71,7 @@ Legend: ✅ tested today · ⚠️ partial · ❌ gap · ⏸ deferred (rationale
 | Keylogger | — | no `kCapInput` exists; kbd input not capability-gated | ❌ |
 | Screen scraper | — | no `kCapFramebuffer` exists; FB not capability-gated | ❌ |
 | RAT (network bind / reverse shell) | — | no `kCapNet` exists; sockets not capability-gated | ❌ |
-| Ransomware (mass FS encrypt) | — | no FS write-rate detector; no in-kernel crypto exposed to userland | ❌ |
+| Ransomware (mass FS encrypt) | `attack_sim` AttackRansomwareWriteRate (kernel-side bookkeeping test) + per-process write-rate guard hooked into Win32 SYS_FILE_WRITE/CREATE + Linux sys_write / copy_file_range | `MassFsWriteRate` finding + `FlagCurrentForKill(FsWriteRateExceeded)` at the syscall site | ✅ |
 | Persistence drop (autostart, fake driver) | ⚠️ partial via `kernel/security/guard.cpp` import-blacklist on load | per-image vetting on next boot | ⚠️ |
 | Anti-analysis (timing, VM detection) | — | informational only — measurement, not a defence | n/a |
 
