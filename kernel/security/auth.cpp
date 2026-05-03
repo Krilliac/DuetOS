@@ -1,8 +1,8 @@
 #include "security/auth.h"
 
-#include "log/klog.h"
 #include "core/panic.h"
-#include "util/random.h"
+#include "log/klog.h"
+#include "security/password_hash.h"
 
 namespace duetos::core
 {
@@ -13,9 +13,9 @@ namespace
 struct Account
 {
     bool in_use;
+    bool has_password;
     AuthRole role;
-    u8 salt[8];
-    u64 hash; // iterated FNV-1a 64-bit, zero iff password is empty
+    duetos::security::PasswordHashRecord record;
     char name[kAuthNameMax];
 };
 
@@ -30,15 +30,21 @@ struct Session
 
 constinit Session g_session = {};
 
-// Iteration count for the KDF. Deliberately modest — the hash is
-// FNV, not a real PBKDF, and we want login latency under a tick
-// on slow CPUs. Matches the "named seam" note in the header:
-// bumping this or swapping the primitive is a one-file change.
-constexpr u32 kHashIterations = 4096;
-
-// FNV-1a 64-bit — offset basis + prime per the canonical spec.
-constexpr u64 kFnvOffset = 0xCBF29CE484222325ULL;
-constexpr u64 kFnvPrime = 0x100000001B3ULL;
+// A "decoy" hash record kept for constant-time verifies against
+// inputs that have no real account behind them. PasswordHashVerify
+// always runs the full PBKDF2 chain then a constant-time compare,
+// so calling it with the decoy burns the same wall-clock as a real
+// verify and the return value is discarded. The decoy uses the
+// default iteration count, an all-zeros salt, and an all-zeros
+// hash; no real password derives to that record (~2^-256). The
+// same record is also used to flatten the timing of "this account
+// exists but has no password set" — see VerifyPasswordOnAccount.
+constinit duetos::security::PasswordHashRecord g_decoy_record = {
+    duetos::security::PasswordAlgorithm::Pbkdf2HmacSha256,
+    duetos::security::kPasswordDefaultIterations,
+    {0},
+    {0},
+};
 
 u32 StrLen(const char* s)
 {
@@ -111,45 +117,44 @@ bool IsValidAuthString(const char* s, u32 cap, bool allow_empty)
     return true;
 }
 
-// Produce a salted iterated FNV-1a hash of `password`. Empty
-// passwords short-circuit to 0 — callers compare against 0 to
-// detect "no password set". Non-empty passwords always get a
-// full iteration pass so the timing is independent of password
-// length across the iteration count.
-u64 HashPassword(const char* password, const u8 salt[8])
+// Set the (possibly empty) password on an account slot. Empty
+// password ⇒ has_password = false and the record is zeroed; the
+// account can be logged into by supplying an empty password (the
+// guest seed relies on this). Non-empty password ⇒ a fresh
+// PBKDF2-HMAC-SHA256 record is derived through the kernel entropy
+// pool's salt and the default iteration count.
+void SetAccountPassword(Account* a, const char* password)
 {
-    if (password == nullptr || password[0] == '\0')
+    const u32 pw_len = StrLen(password);
+    if (pw_len == 0)
     {
-        return 0;
+        a->has_password = false;
+        a->record = duetos::security::PasswordHashRecord{};
+        return;
     }
-    u64 h = kFnvOffset;
-    for (u32 i = 0; i < 8; ++i)
-    {
-        h ^= static_cast<u64>(salt[i]);
-        h *= kFnvPrime;
-    }
-    for (u32 i = 0; password[i] != '\0'; ++i)
-    {
-        h ^= static_cast<u64>(static_cast<u8>(password[i]));
-        h *= kFnvPrime;
-    }
-    // Iterate on the running hash to burn a fixed time budget.
-    for (u32 k = 0; k < kHashIterations; ++k)
-    {
-        h ^= (h >> 27);
-        h *= kFnvPrime;
-        h ^= (h << 13);
-    }
-    return h;
+    duetos::security::PasswordHashCreate(password, pw_len, &a->record);
+    a->has_password = true;
 }
 
-void GenerateSalt(u8 out[8])
+// Verify a supplied password against an existing account in
+// constant-ish time. Always performs a full PBKDF2 derivation
+// (against the account record if one exists, against the decoy
+// otherwise) so "wrong password" and "no password set, caller
+// supplied a non-empty password" take the same wall-clock.
+bool VerifyPasswordOnAccount(const Account* a, const char* password)
 {
-    const u64 r = RandomU64();
-    for (u32 i = 0; i < 8; ++i)
+    const char* pw = password != nullptr ? password : "";
+    const u32 pw_len = StrLen(pw);
+    const bool pbkdf2_match =
+        duetos::security::PasswordHashVerify(pw, pw_len, a->has_password ? a->record : g_decoy_record);
+    if (a->has_password)
     {
-        out[i] = static_cast<u8>((r >> (i * 8)) & 0xFF);
+        return pbkdf2_match;
     }
+    // The PBKDF2 result is intentionally discarded for no-password
+    // accounts — only an empty supplied password authenticates.
+    (void)pbkdf2_match;
+    return pw_len == 0;
 }
 
 Account* FindAccount(const char* username)
@@ -184,8 +189,7 @@ bool StoreAccount(Account* a, const char* username, const char* password, AuthRo
 {
     a->in_use = true;
     a->role = role;
-    GenerateSalt(a->salt);
-    a->hash = HashPassword(password, a->salt);
+    SetAccountPassword(a, password);
     StrCopy(a->name, username, kAuthNameMax);
     return true;
 }
@@ -216,7 +220,7 @@ void AuthInit()
     StoreAccount(a, "admin", "admin", AuthRole::Admin);
     a = AllocAccount();
     StoreAccount(a, "guest", "", AuthRole::Guest);
-    KLOG_INFO("auth", "seeded default accounts (admin, guest)");
+    KLOG_INFO("auth", "seeded default accounts (admin, guest) — PBKDF2-HMAC-SHA256 hashed");
 }
 
 bool AuthIsAuthenticated()
@@ -244,15 +248,14 @@ bool AuthVerify(const char* username, const char* password)
     const Account* a = FindAccount(username);
     if (a == nullptr)
     {
-        // Burn an equivalent hash cycle against a throwaway salt
-        // so a missing user doesn't respond faster than a bad
+        // Burn an equivalent PBKDF2 cycle against the decoy record
+        // so an unknown user doesn't respond faster than a bad
         // password against a real user.
-        const u8 bogus_salt[8] = {};
-        (void)HashPassword(password != nullptr ? password : "", bogus_salt);
+        const char* pw = password != nullptr ? password : "";
+        (void)duetos::security::PasswordHashVerify(pw, StrLen(pw), g_decoy_record);
         return false;
     }
-    const u64 computed = HashPassword(password, a->salt);
-    return computed == a->hash;
+    return VerifyPasswordOnAccount(a, password);
 }
 
 bool AuthLogin(const char* username, const char* password)
@@ -315,9 +318,7 @@ bool AuthDeleteUser(const char* username)
         return false;
     }
     const bool was_session_user = g_session.active && StrEq(g_session.name, a->name);
-    a->in_use = false;
-    a->hash = 0;
-    a->name[0] = '\0';
+    *a = Account{};
     if (was_session_user)
     {
         AuthLogout();
@@ -338,14 +339,12 @@ bool AuthChangePassword(const char* username, const char* old_password, const ch
     }
     if (old_password != nullptr)
     {
-        const u64 old_hash = HashPassword(old_password, a->salt);
-        if (old_hash != a->hash)
+        if (!VerifyPasswordOnAccount(a, old_password))
         {
             return false;
         }
     }
-    GenerateSalt(a->salt);
-    a->hash = HashPassword(new_password, a->salt);
+    SetAccountPassword(a, new_password);
     return true;
 }
 
@@ -379,7 +378,7 @@ bool AuthAccountAt(u32 idx, AccountView* view)
         {
             view->username = g_accounts[i].name;
             view->role = g_accounts[i].role;
-            view->has_password = (g_accounts[i].hash != 0);
+            view->has_password = g_accounts[i].has_password;
             return true;
         }
         ++seen;
@@ -396,7 +395,7 @@ bool AuthAccountByName(const char* username, AccountView* view)
     }
     view->username = a->name;
     view->role = a->role;
-    view->has_password = (a->hash != 0);
+    view->has_password = a->has_password;
     return true;
 }
 
@@ -417,6 +416,19 @@ void AuthSelfTest()
     if (!AuthVerify("guest", ""))
     {
         Panic("auth", "self-test: empty password for guest rejected");
+    }
+    if (AuthVerify("guest", "x"))
+    {
+        Panic("auth", "self-test: non-empty password accepted for empty-password guest");
+    }
+    AccountView v{};
+    if (!AuthAccountByName("admin", &v) || !v.has_password)
+    {
+        Panic("auth", "self-test: admin account view missing has_password");
+    }
+    if (!AuthAccountByName("guest", &v) || v.has_password)
+    {
+        Panic("auth", "self-test: guest account view reports has_password");
     }
     KLOG_INFO("auth", "self-test OK");
 }
