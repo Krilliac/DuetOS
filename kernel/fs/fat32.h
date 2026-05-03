@@ -288,4 +288,30 @@ bool Fat32RmdirAtPath(const Volume* v, const char* path);
 /// builder wrote it.
 void Fat32SelfTest();
 
+/// Lay down a fresh FAT32 file system on `block_handle` starting
+/// at the partition's LBA 0. Pre-conditions:
+///   - The handle is writable (`BlockDeviceIsWritable`).
+///   - `partition_sector_count >= 65600` — enough room for one
+///     reserved + two FATs + the data area's first cluster.
+///     mkfs.fat refuses anything below ~32 MiB at 512 b/sector;
+///     we pick the same floor.
+///
+/// Lays down per Microsoft FAT spec:
+///   - LBA 0: BPB / boot sector with the canonical "FAT32   "
+///     filesystem-type byte string and 0x55 0xAA at the tail.
+///   - LBA 1: FSInfo (free count + next-free hint).
+///   - LBA 6: backup boot sector (mirrors LBA 0 byte-for-byte).
+///   - LBA `reserved`..`reserved + fat_size - 1`: FAT #1, zeroed
+///     except for the reserved entries [0]=0x0FFFFFF8,
+///     [1]=0x0FFFFFFF and the root cluster's EOC marker at [2].
+///   - LBA `reserved + fat_size`..end of FAT #2: FAT #2 (mirror).
+///   - First data cluster (cluster 2): zeroed.
+///
+/// Returns true on success; false (with a one-line klog reason)
+/// on any precondition violation or block-write failure.
+///
+/// **DESTRUCTIVE.** Caller is responsible for the user-typed
+/// confirmation step before reaching here.
+bool Fat32Format(u32 block_handle, u64 partition_sector_count);
+
 } // namespace duetos::fs::fat32

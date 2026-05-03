@@ -656,6 +656,36 @@ void Fat32SelfTest()
         return;
     }
     SerialWrite("[fs/fat32] self-test OK (dir create+delete loop x8 + teardown)\n");
+
+    // ---- Fat32Format → Fat32Probe round-trip on a fresh RAM disk.
+    // 64 MiB at 512 b/sector = 131072 sectors — comfortably above
+    // the 32 MiB / 65525-cluster floor enforced by Fat32Format, and
+    // small enough that the FAT zero-fill loop completes promptly.
+    constexpr u64 kFmtSectorCount = 131072;
+    const u32 fmt_h = drivers::storage::RamBlockDeviceCreate("ramfat32", 512, kFmtSectorCount);
+    if (fmt_h == drivers::storage::kBlockHandleInvalid)
+    {
+        SerialWrite("[fs/fat32] format-self-test SKIP: ramdisk create failed\n");
+        return;
+    }
+    if (!Fat32Format(fmt_h, kFmtSectorCount))
+    {
+        SerialWrite("[fs/fat32] format-self-test FAILED: Fat32Format returned false\n");
+        return;
+    }
+    u32 fmt_idx = 0;
+    if (!Fat32Probe(fmt_h, &fmt_idx))
+    {
+        SerialWrite("[fs/fat32] format-self-test FAILED: post-format probe rejected\n");
+        return;
+    }
+    const Volume* fmt_v = Fat32Volume(fmt_idx);
+    if (fmt_v == nullptr || fmt_v->bytes_per_sector != 512 || fmt_v->num_fats != 2 || fmt_v->root_cluster != 2)
+    {
+        SerialWrite("[fs/fat32] format-self-test FAILED: BPB fields didn't round-trip\n");
+        return;
+    }
+    SerialWrite("[fs/fat32] format-self-test OK (Fat32Format -> Fat32Probe round-trip)\n");
 }
 
 } // namespace duetos::fs::fat32
