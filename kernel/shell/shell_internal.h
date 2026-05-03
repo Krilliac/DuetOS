@@ -486,6 +486,36 @@ void CmdLsgpt();
 void CmdLsmod();
 
 // ---------------------------------------------------------------
+// Extended get/set/manipulate commands (shell_extra.cpp).
+// Coreutils-flavour additions that round out the shell's day-to-
+// day surface — directory create/remove that routes between tmpfs
+// and FAT, file truncate, path canonicalisation, identity readouts
+// (id / groups / nproc / arch / tty), POSIX aliases (type /
+// printenv), filesystem-usage views (df / du), scheduler load,
+// history wipe, blocking pause, generator (yes), sync placeholder,
+// raw x86 I/O port access (admin-gated).
+// ---------------------------------------------------------------
+void CmdMkdir(u32 argc, char** argv);
+void CmdRmdir(u32 argc, char** argv);
+void CmdTruncate(u32 argc, char** argv);
+void CmdRealpath(u32 argc, char** argv);
+void CmdId();
+void CmdGroups();
+void CmdNproc();
+void CmdArch();
+void CmdTty();
+void CmdType(u32 argc, char** argv);
+void CmdPrintenv(u32 argc, char** argv);
+void CmdDf();
+void CmdDu(u32 argc, char** argv);
+void CmdLoadavg();
+void CmdClearhist();
+void CmdPause();
+void CmdYes(u32 argc, char** argv);
+void CmdSync();
+void CmdPort(u32 argc, char** argv);
+
+// ---------------------------------------------------------------
 // Process / scheduler / memory observability (shell_process.cpp).
 // ps / top render the per-task scheduler enumeration; free reports
 // memory-frame and kernel-heap totals. (Spawn / Kill / Exec /

@@ -213,6 +213,27 @@ void CmdHelp()
     ConsoleWriteln("  CHECKSUM P   FNV1A-32 HASH OF FILE CONTENT");
     ConsoleWriteln("  REPEAT N CMD RUN CMD N TIMES (^C ABORTS)");
     ConsoleWriteln("");
+    ConsoleWriteln("EXTENDED GET/SET/MANIPULATE:");
+    ConsoleWriteln("  MKDIR P / RMDIR P  CREATE / REMOVE DIRECTORY (/fat ONLY)");
+    ConsoleWriteln("  TRUNCATE P SIZE    RESIZE A /tmp FILE (ZERO-FILLS ON GROW)");
+    ConsoleWriteln("  REALPATH P         CANONICALISE PATH (RESOLVE . AND ..)");
+    ConsoleWriteln("  ID                 CURRENT USER + ROLE");
+    ConsoleWriteln("  GROUPS             ACTIVE ROLE");
+    ConsoleWriteln("  NPROC              ONLINE CPU COUNT");
+    ConsoleWriteln("  ARCH               ARCHITECTURE TAG (x86_64)");
+    ConsoleWriteln("  TTY                CONSOLE DEVICE NAME");
+    ConsoleWriteln("  TYPE NAME          IS NAME A BUILTIN OR ALIAS?");
+    ConsoleWriteln("  PRINTENV [NAME]    DUMP ENV (OR ONE VAR'S VALUE)");
+    ConsoleWriteln("  DF                 FILESYSTEM USAGE (TMPFS / RAMFS / BLOCKDEVS)");
+    ConsoleWriteln("  DU PATH            FILE SIZE IN BYTES");
+    ConsoleWriteln("  LOADAVG            TASK COUNTS (TOTAL / READY / CPUS)");
+    ConsoleWriteln("  CLEARHIST          WIPE COMMAND HISTORY RING");
+    ConsoleWriteln("  PAUSE              BLOCK UNTIL CTRL+C");
+    ConsoleWriteln("  YES [STR]          PRINT STR REPEATEDLY (CAP 100, ^C ABORTS)");
+    ConsoleWriteln("  SYNC               FLUSH FS BUFFERS (NO-OP IN V0)");
+    ConsoleWriteln("  PORT R PORT        READ ONE BYTE FROM I/O PORT (ADMIN)");
+    ConsoleWriteln("  PORT W PORT VAL    WRITE ONE BYTE TO I/O PORT (ADMIN)");
+    ConsoleWriteln("");
     ConsoleWriteln("KEYS:  UP/DOWN = HISTORY   TAB = COMPLETE");
     ConsoleWriteln("       CTRL+ALT+T = TOGGLE MODE");
     ConsoleWriteln("       CTRL+ALT+F1 = SHELL   CTRL+ALT+F2 = KLOG");
@@ -610,25 +631,28 @@ u32 Tokenize(char* buf, char** argv)
 // New commands added here + dispatched in Dispatch — keeping
 // the two in sync is the price of not having reflection.
 const char* const kCommandSet[] = {
-    "help",     "about",     "version",   "clear",   "uptime",    "date",     "windows",    "mode",      "ls",
-    "cat",      "touch",     "rm",        "echo",    "cp",        "mv",       "wc",         "head",      "tail",
-    "dmesg",    "stats",     "mem",       "history", "set",       "unset",    "env",        "alias",     "unalias",
-    "sysinfo",  "source",    "man",       "grep",    "find",      "time",     "which",      "seq",       "sort",
-    "uniq",     "cpuid",     "cr",        "rflags",  "tsc",       "hpet",     "ticks",      "msr",       "lapic",
-    "smp",      "lspci",     "heap",      "paging",  "fb",        "kbdstats", "mousestats", "loglevel",  "logcolor",
-    "logarea",  "kdbg",      "getenv",    "yield",   "reboot",    "halt",     "uname",      "whoami",    "hostname",
-    "pwd",      "true",      "false",     "mount",   "lsmod",     "lsblk",    "lsgpt",      "free",      "ps",
-    "spawn",    "readelf",   "hexdump",   "stat",    "basename",  "dirname",  "cal",        "sleep",     "reset",
-    "tac",      "nl",        "rev",       "expr",    "color",     "rand",     "flushtlb",   "checksum",  "repeat",
-    "kill",     "exec",      "metrics",   "trace",   "read",      "guard",    "top",        "fatcat",    "fatls",
-    "fatwrite", "fatappend", "fatnew",    "fatrm",   "fattrunc",  "fatmkdir", "fatrmdir",   "linuxexec", "translate",
-    "smbios",   "power",     "battery",   "thermal", "temp",      "gpu",      "lsgpu",      "gfx",       "nic",
-    "lsnic",    "ip",        "arp",       "ipv4",    "uuid",      "uuidgen",  "health",     "checkup",   "attacksim",
-    "redteam",  "memdump",   "ifconfig",  "netinfo", "dhcp",      "route",    "netscan",    "wifi",      "fwpolicy",
-    "fwtrace",  "crtrace",   "crprobe",   "net",     "usbnet",    "instr",    "dumpstate",  "bp",        "breakpoint",
-    "login",    "logout",    "passwd",    "useradd", "userdel",   "users",    "who",        "su",        "hwmon",
-    "vbe",      "ping",      "nslookup",  "ntp",     "http",      "shutdown", "poweroff",   "beep",      "inspect",
-    "theme",    "addr2sym",  "cap-audit", "monitor", "secevents", "events",   "policy",     "purple",    "purpleteam",
+    "help",     "about",     "version",   "clear",    "uptime",    "date",      "windows",    "mode",      "ls",
+    "cat",      "touch",     "rm",        "echo",     "cp",        "mv",        "wc",         "head",      "tail",
+    "dmesg",    "stats",     "mem",       "history",  "set",       "unset",     "env",        "alias",     "unalias",
+    "sysinfo",  "source",    "man",       "grep",     "find",      "time",      "which",      "seq",       "sort",
+    "uniq",     "cpuid",     "cr",        "rflags",   "tsc",       "hpet",      "ticks",      "msr",       "lapic",
+    "smp",      "lspci",     "heap",      "paging",   "fb",        "kbdstats",  "mousestats", "loglevel",  "logcolor",
+    "logarea",  "kdbg",      "getenv",    "yield",    "reboot",    "halt",      "uname",      "whoami",    "hostname",
+    "pwd",      "true",      "false",     "mount",    "lsmod",     "lsblk",     "lsgpt",      "free",      "ps",
+    "spawn",    "readelf",   "hexdump",   "stat",     "basename",  "dirname",   "cal",        "sleep",     "reset",
+    "tac",      "nl",        "rev",       "expr",     "color",     "rand",      "flushtlb",   "checksum",  "repeat",
+    "kill",     "exec",      "metrics",   "trace",    "read",      "guard",     "top",        "fatcat",    "fatls",
+    "fatwrite", "fatappend", "fatnew",    "fatrm",    "fattrunc",  "fatmkdir",  "fatrmdir",   "linuxexec", "translate",
+    "smbios",   "power",     "battery",   "thermal",  "temp",      "gpu",       "lsgpu",      "gfx",       "nic",
+    "lsnic",    "ip",        "arp",       "ipv4",     "uuid",      "uuidgen",   "health",     "checkup",   "attacksim",
+    "redteam",  "memdump",   "ifconfig",  "netinfo",  "dhcp",      "route",     "netscan",    "wifi",      "fwpolicy",
+    "fwtrace",  "crtrace",   "crprobe",   "net",      "usbnet",    "instr",     "dumpstate",  "bp",        "breakpoint",
+    "login",    "logout",    "passwd",    "useradd",  "userdel",   "users",     "who",        "su",        "hwmon",
+    "vbe",      "ping",      "nslookup",  "ntp",      "http",      "shutdown",  "poweroff",   "beep",      "inspect",
+    "theme",    "addr2sym",  "cap-audit", "monitor",  "secevents", "events",    "policy",     "purple",    "purpleteam",
+    "mkdir",    "rmdir",     "truncate",  "realpath", "id",        "groups",    "nproc",      "arch",      "tty",
+    "type",     "printenv",  "df",        "du",       "loadavg",   "clearhist", "pause",      "yes",       "sync",
+    "port",
 };
 const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1739,6 +1763,107 @@ void Dispatch(char* line)
     if (StrEq(cmd, "beep"))
     {
         CmdBeep(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "mkdir"))
+    {
+        CmdMkdir(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "rmdir"))
+    {
+        CmdRmdir(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "truncate"))
+    {
+        CmdTruncate(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "realpath"))
+    {
+        CmdRealpath(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "id"))
+    {
+        CmdId();
+        return;
+    }
+    if (StrEq(cmd, "groups"))
+    {
+        CmdGroups();
+        return;
+    }
+    if (StrEq(cmd, "nproc"))
+    {
+        CmdNproc();
+        return;
+    }
+    if (StrEq(cmd, "arch"))
+    {
+        CmdArch();
+        return;
+    }
+    if (StrEq(cmd, "tty"))
+    {
+        CmdTty();
+        return;
+    }
+    if (StrEq(cmd, "type"))
+    {
+        CmdType(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "printenv"))
+    {
+        CmdPrintenv(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "df"))
+    {
+        CmdDf();
+        return;
+    }
+    if (StrEq(cmd, "du"))
+    {
+        CmdDu(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "loadavg"))
+    {
+        CmdLoadavg();
+        return;
+    }
+    if (StrEq(cmd, "clearhist"))
+    {
+        CmdClearhist();
+        return;
+    }
+    if (StrEq(cmd, "pause"))
+    {
+        CmdPause();
+        return;
+    }
+    if (StrEq(cmd, "yes"))
+    {
+        CmdYes(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "sync"))
+    {
+        CmdSync();
+        return;
+    }
+    if (StrEq(cmd, "port"))
+    {
+        // Raw I/O port write can mask the PIC, kick the keyboard
+        // controller into a reset, or scribble CMOS shutdown bytes.
+        // Reads aren't free either (some controllers latch state on
+        // read). Gate the whole verb to admin.
+        if (!RequireAdmin("PORT"))
+            return;
+        CmdPort(argc, argv);
         return;
     }
     ConsoleWrite("COMMAND NOT FOUND: ");
