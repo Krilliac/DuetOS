@@ -43,6 +43,7 @@
 #include "util/build_config.h"
 #include "util/crc32.h"
 #include "util/types.h"
+#include "util/unicode.h"
 #include "acpi/acpi.h"
 #include "acpi/aml.h"
 #include "arch/x86_64/cpu.h"
@@ -1929,6 +1930,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::RtlFirmwareSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::BcmFirmwareSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::BeaconSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::UnicodeSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Sha1SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Sha256SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Md5SelfTest());

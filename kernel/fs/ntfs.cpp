@@ -3,6 +3,7 @@
 #include "arch/x86_64/serial.h"
 #include "log/klog.h"
 #include "drivers/storage/block.h"
+#include "util/unicode.h"
 
 namespace duetos::fs::ntfs
 {
@@ -82,17 +83,6 @@ bool MatchesOem(const u8* sect)
     return true;
 }
 
-// Translate UTF-16LE to safe ASCII; non-ASCII or control chars
-// become '?'.
-char Utf16ToSafeAscii(u16 cp)
-{
-    if (cp == 0)
-        return '\0';
-    if (cp >= 0x20 && cp < 0x7F)
-        return char(cp);
-    return '?';
-}
-
 // BPB's clusters_per_mft_record is a signed byte. Positive: that
 // many clusters per record. Negative N: record size = 2^(-N).
 u32 DecodeMftRecordSize(i8 raw, u32 bytes_per_cluster)
@@ -146,7 +136,7 @@ bool ExtractFileName(const u8* rec, u32 rec_size, char* out_name, u64 out_cap)
                             if (byte_off + 2 > val_len)
                                 break;
                             const u16 cp = LeU16(fn + byte_off);
-                            const char c = Utf16ToSafeAscii(cp);
+                            const char c = duetos::util::Utf16CpToSafeAscii(u32(cp));
                             if (c == '\0')
                                 break;
                             if (write_pos + 1 < out_cap)

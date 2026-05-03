@@ -42,6 +42,7 @@ for the next session.
 | 2026-05-03 | MD5 (RFC 1321) — legacy interop only | `crc32-md5-base64-and-eapol-keywrap-v0.md` |
 | 2026-05-03 | Base64 encode/decode (RFC 4648) | `crc32-md5-base64-and-eapol-keywrap-v0.md` |
 | 2026-05-03 | HMAC-MD5 (RFC 2104 + RFC 1321) — legacy interop | `crc32-md5-base64-and-eapol-keywrap-v0.md` (extended) |
+| 2026-05-03 | Unicode UTF-8 / UTF-16 codepoint conversions (RFC 3629 + Unicode 15) | `kernel/util/unicode.{h,cpp}` (collapses exfat+ntfs ad-hoc helpers) |
 
 ## Display + GPU
 
@@ -131,7 +132,7 @@ for the next session.
 | **POSIX TZ string parser** | POSIX.1-2008 §8.3 | musl | TZ env var | ~150 |
 | **Gregorian↔ Julian day conversion** | (well-known) | musl, glibc | calendar app | ~80 |
 | **ISO 8601 datetime parser/printer** | ISO 8601 | musl strftime | logging | ~200 |
-| **Unicode UTF-8/UTF-16 conversions** | Unicode TR1 | musl mbtowc | Win32 wide strings | ~150 |
+| ~~Unicode UTF-8/UTF-16 conversions~~ LANDED 2026-05-03 | RFC 3629 + Unicode 15 §3.9 | musl mbtowc | Win32 wide strings, exfat/ntfs filename decode | ~300 |
 | **Unicode case folding (Unicode 15)** | Unicode case-folding tables | ICU mini | text compare | ~500 |
 | **PCRE-lite regex** | (subset of POSIX BRE) | musl regex.c | shell pattern match | ~600 |
 
