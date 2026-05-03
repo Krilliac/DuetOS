@@ -114,6 +114,7 @@
 #include "apps/calculator.h"
 #include "apps/about.h"
 #include "apps/browser.h"
+#include "apps/calendar.h"
 #include "apps/clock.h"
 #include "apps/files.h"
 #include "apps/gfxdemo.h"
@@ -378,6 +379,7 @@ void PrintShortcutHelp()
     ConsoleWriteln("    CTRL+ALT+M        TOGGLE MAGNIFIER");
     ConsoleWriteln("    CTRL+ALT+K        LOCK SCREEN");
     ConsoleWriteln("    CTRL+C            INTERRUPT SHELL COMMAND");
+    ConsoleWriteln("    CTRL+SHIFT+V      ROTATE CLIPBOARD HISTORY");
     ConsoleWriteln("");
     ConsoleWriteln("  NOTES (WHEN ACTIVE)");
     ConsoleWriteln("    CTRL+C / CTRL+V   COPY / PASTE CLIPBOARD");
@@ -406,6 +408,11 @@ void PrintShortcutHelp()
     ConsoleWriteln("    L / M             BMARK LIST / MARK CURRENT");
     ConsoleWriteln("    S                 SAVE BODY TO DLNNNN.HTM");
     ConsoleWriteln("    J / K / UP / DN   SCROLL");
+    ConsoleWriteln("");
+    ConsoleWriteln("  CALENDAR (WHEN ACTIVE)");
+    ConsoleWriteln("    [ / ]  / LEFT/RT   PREV / NEXT MONTH");
+    ConsoleWriteln("    { / }  / UP / DN   PREV / NEXT YEAR");
+    ConsoleWriteln("    T                  JUMP TO TODAY");
     ConsoleWriteln("");
     ConsoleWriteln("  SETTINGS BUTTONS");
     ConsoleWriteln("    THEME / OPACITY / TZ / LOG OUT / REBOOT / SHUTDOWN");
@@ -1309,6 +1316,21 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::apps::browser::BrowserInit(browser_handle);
     DUETOS_BOOT_SELFTEST(duetos::apps::browser::BrowserSelfTest());
 
+    // CALENDAR — windowed month-view sibling of the read-only
+    // taskbar-clock popup. Lets the user page through past / future
+    // months. Hidden by default; raised from the Start menu's
+    // CALENDAR entry. T jumps back to today.
+    duetos::drivers::video::WindowChrome calendar_chrome = theme_chrome(Role::Calendar);
+    calendar_chrome.x = 240;
+    calendar_chrome.y = 80;
+    calendar_chrome.w = 360;
+    calendar_chrome.h = 280;
+    const duetos::drivers::video::WindowHandle calendar_handle =
+        duetos::drivers::video::WindowRegister(calendar_chrome, "CALENDAR");
+    duetos::drivers::video::ThemeRegisterWindow(Role::Calendar, calendar_handle);
+    duetos::apps::calendar::CalendarInit(calendar_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::calendar::CalendarSelfTest());
+
     // Framebuffer text console. 80x40 chars of boot log at the
     // bottom of the desktop, under the windows in z-order. Dragging
     // a window over it occludes; moving away restores.
@@ -2182,6 +2204,47 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 SerialWrite("[ui] ^C\n");
                 continue;
             }
+            // Ctrl+Shift+V — rotate the clipboard history one step.
+            // Bring the most recently displaced clip back to the
+            // active slot; the previous active gets pushed onto
+            // the history ring so a second rotate cycles back.
+            // Bound globally so a user can roll the clipboard from
+            // any focus context, then Ctrl+V into Notes.
+            if (ctrl && shift && !alt && (ev.code == 'v' || ev.code == 'V'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const bool ok = duetos::drivers::video::WindowClipboardHistoryRotate();
+                duetos::drivers::video::CompositorUnlock();
+                if (ok)
+                {
+                    char preview[48];
+                    const duetos::u32 n = duetos::drivers::video::WindowClipboardGetText(preview, sizeof(preview));
+                    char toast[80];
+                    duetos::u32 o = 0;
+                    const char* prefix = "clip: ";
+                    for (duetos::u32 k = 0; prefix[k] != '\0' && o + 1 < sizeof(toast); ++k)
+                        toast[o++] = prefix[k];
+                    duetos::u32 take = n;
+                    if (take > sizeof(toast) - o - 4)
+                        take = sizeof(toast) - o - 4;
+                    for (duetos::u32 k = 0; k < take; ++k)
+                        toast[o++] = preview[k];
+                    if (n > take)
+                    {
+                        toast[o++] = '.';
+                        toast[o++] = '.';
+                        toast[o++] = '.';
+                    }
+                    toast[o] = '\0';
+                    duetos::drivers::video::NotifyShow(toast);
+                }
+                else
+                {
+                    duetos::drivers::video::NotifyShow("clip history empty");
+                }
+                SerialWrite("[ui] ^+V clipboard rotate\n");
+                continue;
+            }
             // Ctrl+V — paste the kernel clipboard into Notes when
             // Notes is the active window. No-op anywhere else
             // (the shell doesn't support paste yet, calculator /
@@ -2739,6 +2802,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     {
                         app_consumed = duetos::apps::browser::BrowserFeedArrow(ev.code);
                     }
+                    else if (active == duetos::apps::calendar::CalendarWindow() &&
+                             (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyArrowLeft ||
+                              ev.code == kKeyArrowRight))
+                    {
+                        app_consumed = duetos::apps::calendar::CalendarFeedArrow(static_cast<duetos::u16>(ev.code));
+                    }
                     else if (active == duetos::apps::notes::NotesWindow() &&
                              (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyArrowLeft ||
                               ev.code == kKeyArrowRight || ev.code == kKeyHome || ev.code == kKeyEnd ||
@@ -2785,6 +2854,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                             else if (active == duetos::apps::browser::BrowserWindow())
                             {
                                 app_consumed = duetos::apps::browser::BrowserFeedChar(c);
+                            }
+                            else if (active == duetos::apps::calendar::CalendarWindow())
+                            {
+                                app_consumed = duetos::apps::calendar::CalendarFeedChar(c);
                             }
                         }
                     }
@@ -2965,6 +3038,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             {"ABOUT", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::About)},
             {"HELP", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Help)},
             {"BROWSER", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Browser)},
+            {"CALENDAR", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Calendar)},
         };
         static const duetos::drivers::video::MenuItem kStartItemsTrailing[] = {
             {"HELP / SHORTCUTS", 6},

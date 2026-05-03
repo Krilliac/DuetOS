@@ -135,6 +135,11 @@ bool ResolveTargetName(const char* s, ThemeRole* out)
         *out = ThemeRole::Browser;
         return true;
     }
+    if (StrEqI(s, "calendar") || StrEqI(s, "cal"))
+    {
+        *out = ThemeRole::Calendar;
+        return true;
+    }
     return false;
 }
 

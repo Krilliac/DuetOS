@@ -343,6 +343,20 @@ constinit bool g_caret_on = false; // current blink phase
 constinit char g_clipboard[kWindowClipboardMax] = {};
 constinit u32 g_clipboard_len = 0;
 
+// History ring for the clipboard. Each slot holds up to
+// kWindowClipboardMax bytes plus a null terminator. The ring is
+// front-loaded — slot 0 is the most recently displaced, slot
+// kWindowClipboardHistoryDepth-1 is the oldest. New entries push
+// in at slot 0 and shift older ones down; if the ring fills, the
+// oldest falls off the end.
+struct ClipboardHistorySlot
+{
+    char text[kWindowClipboardMax];
+    u32 len;
+    bool used;
+};
+constinit ClipboardHistorySlot g_clipboard_hist[kWindowClipboardHistoryDepth] = {};
+
 // Per-process timer table. `remaining_ticks` counts down each
 // scheduler tick; on zero, a WM_TIMER is posted to `hwnd` with
 // wParam = timer_id, and `remaining_ticks` is reset to
@@ -2252,8 +2266,57 @@ WindowHandle WindowGetCapture()
 
 // --- Clipboard ----------------------------------------------------
 
+namespace
+{
+
+bool ClipboardEqual(const char* a, u32 a_len, const char* b, u32 b_len)
+{
+    if (a_len != b_len)
+        return false;
+    for (u32 i = 0; i < a_len; ++i)
+    {
+        if (a[i] != b[i])
+            return false;
+    }
+    return true;
+}
+
+// Push the current active clipboard onto the front of the history
+// ring. Dedupes against slot 0 — setting the same payload twice
+// leaves the ring unchanged. Caller must hold the compositor /
+// clipboard discipline (which today amounts to "called from the
+// keyboard reader thread").
+void ClipboardHistoryPushFront(const char* text, u32 len)
+{
+    if (len == 0)
+        return;
+    if (g_clipboard_hist[0].used && ClipboardEqual(g_clipboard_hist[0].text, g_clipboard_hist[0].len, text, len))
+        return;
+    // Shift slots [0..N-2] down to [1..N-1]; oldest falls off.
+    for (u32 i = kWindowClipboardHistoryDepth - 1; i > 0; --i)
+    {
+        g_clipboard_hist[i] = g_clipboard_hist[i - 1];
+    }
+    auto& s = g_clipboard_hist[0];
+    s.used = true;
+    s.len = len;
+    for (u32 i = 0; i < len; ++i)
+        s.text[i] = text[i];
+    s.text[len] = '\0';
+}
+
+} // namespace
+
 void WindowClipboardSetText(const char* text)
 {
+    // Capture the previous content first so we can promote it to
+    // history before overwriting. An empty previous slot is not
+    // pushed (nothing to remember).
+    char prev[kWindowClipboardMax];
+    const u32 prev_len = g_clipboard_len;
+    for (u32 i = 0; i < prev_len; ++i)
+        prev[i] = g_clipboard[i];
+
     u32 i = 0;
     if (text != nullptr)
     {
@@ -2265,6 +2328,13 @@ void WindowClipboardSetText(const char* text)
     }
     g_clipboard[i] = '\0';
     g_clipboard_len = i;
+
+    // Don't push if the new content is identical to the old —
+    // that's just a no-op set, not a clipboard transition.
+    if (!ClipboardEqual(prev, prev_len, g_clipboard, g_clipboard_len))
+    {
+        ClipboardHistoryPushFront(prev, prev_len);
+    }
 }
 
 u32 WindowClipboardGetText(char* dst, u32 cap)
@@ -2282,6 +2352,75 @@ u32 WindowClipboardGetText(char* dst, u32 cap)
     }
     dst[n] = '\0';
     return n;
+}
+
+u32 WindowClipboardHistoryCount()
+{
+    u32 n = 0;
+    for (u32 i = 0; i < kWindowClipboardHistoryDepth; ++i)
+    {
+        if (g_clipboard_hist[i].used)
+            ++n;
+    }
+    return n;
+}
+
+u32 WindowClipboardHistoryGet(u32 idx, char* dst, u32 cap)
+{
+    if (dst == nullptr || cap == 0)
+        return 0;
+    if (idx >= kWindowClipboardHistoryDepth)
+        return 0;
+    const auto& s = g_clipboard_hist[idx];
+    if (!s.used)
+        return 0;
+    u32 n = s.len;
+    if (n > cap - 1)
+        n = cap - 1;
+    for (u32 i = 0; i < n; ++i)
+        dst[i] = s.text[i];
+    dst[n] = '\0';
+    return n;
+}
+
+bool WindowClipboardHistoryRotate()
+{
+    // Rotate: active <- ring[0]; ring shifts left so older entries
+    // become reachable. The displaced active is pushed onto the
+    // ring front (so re-rotating cycles the most recent two).
+    if (!g_clipboard_hist[0].used)
+        return false;
+
+    char old_active[kWindowClipboardMax];
+    const u32 old_active_len = g_clipboard_len;
+    for (u32 i = 0; i < old_active_len; ++i)
+        old_active[i] = g_clipboard[i];
+    old_active[old_active_len] = '\0';
+
+    // Promote ring[0] to active.
+    const u32 nl = g_clipboard_hist[0].len;
+    for (u32 i = 0; i < nl; ++i)
+        g_clipboard[i] = g_clipboard_hist[0].text[i];
+    g_clipboard[nl] = '\0';
+    g_clipboard_len = nl;
+
+    // Shift the rest of the ring down, freeing the tail slot.
+    for (u32 i = 0; i + 1 < kWindowClipboardHistoryDepth; ++i)
+    {
+        g_clipboard_hist[i] = g_clipboard_hist[i + 1];
+    }
+    auto& tail = g_clipboard_hist[kWindowClipboardHistoryDepth - 1];
+    tail.used = false;
+    tail.len = 0;
+    tail.text[0] = '\0';
+
+    // The displaced active goes to the new ring front so the user
+    // can rotate back to it.
+    if (old_active_len > 0)
+    {
+        ClipboardHistoryPushFront(old_active, old_active_len);
+    }
+    return true;
 }
 
 // --- Timer table --------------------------------------------------
