@@ -17,6 +17,7 @@ constexpr u16 kRegLineControl = 3;  // LCR
 constexpr u16 kRegModemControl = 4; // MCR
 constexpr u16 kRegLineStatus = 5;   // LSR
 
+constexpr u8 kLsrDataReady = 1u << 0;
 constexpr u8 kLsrTransmitEmpty = 1u << 5;
 constexpr u8 kLcrDlab = 1u << 7;
 constexpr u8 kLcr8N1 = 0b00000011;
@@ -95,6 +96,19 @@ void SerialInit()
     // Assert RTS and DTR, enable auxiliary output 2 (required for IRQ routing
     // on real hardware even though we don't use interrupts here).
     Outb(kCom1Port + kRegModemControl, 0x0B);
+}
+
+i32 SerialReadByteNonblocking()
+{
+    // Read-side path — no spinlock. Only the serial-input pump
+    // task calls this (see kernel/core/serial_input.cpp), so
+    // there's no concurrent reader to race the LSR + RBR sequence.
+    // Two INBs total per byte; one INB per empty poll.
+    if ((Inb(kCom1Port + kRegLineStatus) & kLsrDataReady) == 0)
+    {
+        return -1;
+    }
+    return static_cast<i32>(Inb(kCom1Port + kRegData));
 }
 
 void SerialEnterPanicMode()

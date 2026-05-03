@@ -1,5 +1,6 @@
 #include "drivers/video/console.h"
 
+#include "arch/x86_64/serial.h"
 #include "drivers/video/font8x8.h"
 #include "drivers/video/framebuffer.h"
 
@@ -45,6 +46,14 @@ constinit u32 g_render_target = kConsoleShellIdx;
 // unaffected. Used by the shell's pipe dispatch to route
 // segment N's output to segment N+1's input.
 constinit char* g_capture_buf = nullptr;
+
+// When non-zero, every shell-slot write is mirrored to COM1
+// byte-for-byte. Set by ConsoleEnableSerialMirror once the
+// serial-input pump is online so a host terminal connected via
+// `-serial stdio` sees the shell's responses (the framebuffer is
+// a memory target only under `-display none`). Reads/writes are
+// monotonic flag flips — no atomicity required.
+constinit u32 g_shell_serial_mirror = 0;
 constinit u32 g_capture_cap = 0;
 constinit u32* g_capture_len = nullptr;
 
@@ -100,6 +109,15 @@ void AdvanceCursor(ConsoleState& cs)
 
 void WriteCharImpl(ConsoleState& cs, char c)
 {
+    // Shell-slot writes mirror to COM1 when the serial-input
+    // pump is online (boot=tty + headless host). Mirror happens
+    // even under capture mode — the operator still wants to
+    // see what their command is producing, even if a script is
+    // also collecting it into a buffer.
+    if (&cs == &g_consoles[kConsoleShellIdx] && g_shell_serial_mirror != 0)
+    {
+        arch::SerialWriteByte(static_cast<u8>(c));
+    }
     // Shell-slot writes under capture mode divert to the
     // buffer instead of the scrollback. Klog-slot writes
     // always take the normal path so kernel activity still
@@ -309,6 +327,11 @@ void ConsoleEndCapture()
     g_capture_buf = nullptr;
     g_capture_cap = 0;
     g_capture_len = nullptr;
+}
+
+void ConsoleEnableSerialMirror(bool on)
+{
+    g_shell_serial_mirror = on ? 1u : 0u;
 }
 
 } // namespace duetos::drivers::video

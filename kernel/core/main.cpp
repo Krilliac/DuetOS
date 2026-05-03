@@ -179,6 +179,7 @@
 #include "security/login.h"
 #include "core/init.h"
 #include "core/panic.h"
+#include "core/serial_input.h"
 #include "core/session_restore.h"
 #include "syscall/cap_gate.h"
 #include "proc/process.h"
@@ -2986,6 +2987,15 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         }
     };
     duetos::sched::SchedCreate(kbd_reader, nullptr, "kbd-reader");
+
+    // Serial-input pump: lets a host terminal connected via
+    // QEMU's `-serial stdio` drive the shell — typed bytes
+    // arrive on COM1 and feed the same ShellFeedChar /
+    // ShellSubmit / ShellHistoryPrev API as PS/2 keystrokes.
+    // The pump is read-only (it only translates inbound RBR
+    // bytes into shell calls), so it composes cleanly with
+    // every output-side serial caller.
+    duetos::core::SerialInputStart();
 
     // UI ticker: once per second, re-composite so the taskbar's
     // uptime / wall-clock counter advances even when the user
