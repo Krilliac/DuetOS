@@ -104,6 +104,41 @@ shell around three additions:
   with zero warnings (the pre-existing `gzip.cpp` unused-const
   warning is unrelated).
 
+### Adversarial probe — `AuthBruteForceProbe`
+
+`kernel/security/auth_pentest.{h,cpp}` runs at boot under
+`DUETOS_BOOT_SELFTEST` immediately after `AuthSelfTest`. The
+probe hammers the seeded admin account with random wrong
+passwords drawn from `RandomU64`, then prints structured
+results to COM1. Reviewable serial log (one boot, captured
+2026-05-03):
+
+```
+[auth-pentest] phase1 attempts         = 0x08    (8 wrong-password attempts)
+[auth-pentest] phase1 successes        = 0x00    (zero leaked through)
+[auth-pentest] phase1 lockout-fired-at = 0x05    (exactly kAuthLockoutThreshold)
+[auth-pentest] admin failed_attempts   = 0x05
+[auth-pentest] admin locked            = 0x01
+[auth-pentest] phase2 correct-pw-while-locked accepted = 0x00
+[auth-pentest] phase3 successes        = 0x00    (3 more attempts, all refused)
+[auth-pentest] phase3 admin still locked = 0x01
+[auth-pentest] phase4 legit-after-unlock = 0x01  (real user not stranded)
+[auth-pentest] events: AuthLoginFailure   = 0x0c (12 = 8 + 1 + 3 attempts)
+[auth-pentest] events: AuthAccountLocked  = 0x01
+[auth-pentest] events: AuthAccountUnlocked= 0x01
+[auth-pentest] events: AuthLoginSuccess   = 0x01
+```
+
+Cost: ~12 PBKDF2 derivations at the 100 000-iteration default
+≈ 30 s on QEMU TCG, ≈ 3 s on a modern x86 core. Phase counts
+sized so the entire probe + the rest of the boot completes
+well inside a 400 s smoke-test budget.
+
+If a future change ever lets the lockout leak (correct password
+accepted while armed, or threshold drifts past 5), the probe
+catches it on every boot — phase 2 prints a loud
+`!!! REGRESSION !!!` banner.
+
 ## Out of scope (intentional)
 
 - **Persistence** — accounts still vanish on reboot. The shape
