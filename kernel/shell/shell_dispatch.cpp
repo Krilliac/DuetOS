@@ -415,6 +415,7 @@ void CmdSource(u32 argc, char** argv)
 {
     if (argc < 2)
     {
+        ShellSetExit(2);
         ConsoleWriteln("SOURCE: MISSING PATH");
         return;
     }
@@ -422,44 +423,31 @@ void CmdSource(u32 argc, char** argv)
     const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
     if (n == static_cast<u32>(-1))
     {
+        ShellSetExit(1);
         ConsoleWrite("SOURCE: NO SUCH FILE: ");
         ConsoleWriteln(argv[1]);
         return;
     }
-    // Walk the content line by line. Each line dispatches
-    // through the full shell pipeline (alias expansion, env
-    // substitution, redirects). Lines starting with '#' are
-    // comments. Blank lines are silently skipped.
-    char line_buf[kInputMax];
-    u32 i = 0;
-    while (i < n)
+    // Hand the body to the script interpreter. ScriptSplitLines
+    // breaks `scratch` into a fixed-size array of trimmed lines;
+    // ScriptExecute walks that array honouring control-flow blocks
+    // (if/elif/else/fi, while/do/done, for VAR in ... do/done).
+    // Comments + blank lines are skipped inside the executor.
+    //
+    // Stack-allocated (~4 KiB) so nested `source` invocations get
+    // their own buffer — kernel stacks are 64 KiB so a few levels of
+    // recursion are fine.
+    char script_lines[kScriptMaxLines][kScriptLineMax];
+    const u32 lc = ScriptSplitLines(scratch, n, script_lines, kScriptMaxLines);
+    if (lc == kScriptMaxLines)
     {
-        u32 j = 0;
-        while (i < n && scratch[i] != '\n' && j + 1 < sizeof(line_buf))
-        {
-            line_buf[j++] = scratch[i++];
-        }
-        // Skip to end-of-line if the line was too long.
-        while (i < n && scratch[i] != '\n')
-        {
-            ++i;
-        }
-        if (i < n)
-        {
-            ++i; // consume '\n'
-        }
-        line_buf[j] = '\0';
-        // Trim trailing whitespace for cleaner dispatch.
-        while (j > 0 && (line_buf[j - 1] == ' ' || line_buf[j - 1] == '\t' || line_buf[j - 1] == '\r'))
-        {
-            line_buf[--j] = '\0';
-        }
-        if (j == 0 || line_buf[0] == '#')
-        {
-            continue;
-        }
-        Dispatch(line_buf);
+        // We may have truncated the file at the line cap. Warn but
+        // still execute what we have — refusing to run a partial
+        // script is more annoying than the truncation itself, and
+        // the warning surfaces through the klog as well.
+        ConsoleWriteln("SOURCE: WARNING — script exceeded line cap; trailing lines ignored");
     }
+    ScriptExecute(script_lines, lc);
 }
 
 void CmdSysinfo()
