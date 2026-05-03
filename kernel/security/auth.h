@@ -3,7 +3,7 @@
 #include "util/types.h"
 
 /*
- * DuetOS — user accounts + authentication, v0.
+ * DuetOS — user accounts + authentication, v1.
  *
  * Fixed-size in-memory account table. Passwords are stored as
  * `duetos::security::PasswordHashRecord` (PBKDF2-HMAC-SHA256 over
@@ -15,7 +15,34 @@
  * deriving them at boot. Every verify path runs a full PBKDF2
  * derivation (against either the stored record or a decoy) so the
  * wall-clock bound is uniform across "user not found", "user found
- * with wrong password", and "user found with right password".
+ * with wrong password", "user found with right password", and
+ * "user found but locked out".
+ *
+ * Each account row carries metadata alongside the hash:
+ *   - created_ns      — MonotonicNs at AuthAddUser / AuthInit time
+ *   - last_login_ns   — MonotonicNs of most recent successful auth
+ *   - last_attempt_ns — MonotonicNs of most recent verify (any leaf)
+ *   - failed_attempts — consecutive bad-password count since last
+ *                       success or unlock
+ *   - total_logins    — lifetime count of successful logins
+ *   - locked_until_ns — 0 if unlocked; otherwise the MonotonicNs at
+ *                       which the lockout expires
+ *
+ * Brute-force lockout: after `kAuthLockoutThreshold` consecutive
+ * failed attempts (default 5) an account is locked for
+ * `kAuthLockoutDurationNs` (default 60 s). Locked accounts reject
+ * AuthVerify even with the correct password until the lockout
+ * expires; a successful verify resets the failed-attempt counter.
+ * Admins can clear lockout immediately via AuthUnlockUser.
+ *
+ * Auth events publish to the security event ring (see event_ring.h):
+ *   - AuthLoginSuccess     on successful AuthLogin
+ *   - AuthLoginFailure     on rejected AuthVerify (any leaf)
+ *   - AuthAccountLocked    when threshold crosses
+ *   - AuthAccountUnlocked  when admin clears or lockout expires
+ *   - AuthAccountCreated   on AuthAddUser
+ *   - AuthAccountDeleted   on AuthDeleteUser
+ *   - AuthPasswordChanged  on AuthChangePassword
  *
  * Session model: a single currently-logged-in user (session id +
  * username + admin flag). Terminal and GUI login both flip this
@@ -29,13 +56,15 @@
  *     reboot; defaults are re-seeded on every AuthInit.
  *   - No per-user home dirs, no UID/GID mapping into the VFS.
  *     Capability-gated commands use `AuthIsAdmin()` only.
- *   - No login record / lastlog.
+ *   - Lockout policy is global; no per-account override.
  *
  * Init ordering: `AuthInit` calls `PasswordHashCreate` while
  * seeding the built-in admin account, which draws salt bytes from
  * the kernel entropy pool. `RandomInit` therefore MUST have run
  * before `AuthInit`. The boot sequence in `kernel/core/main.cpp`
- * already enforces this ordering.
+ * already enforces this ordering. The security event ring storage
+ * is `constinit` so AuthInit is also free to publish before the
+ * event ring's own Init runs.
  *
  * Context: kernel. Mutated from the login and shell paths (both
  * in task context under the compositor lock or serialised by
@@ -49,6 +78,13 @@ constexpr u32 kAuthMaxAccounts = 16;
 constexpr u32 kAuthNameMax = 32;
 constexpr u32 kAuthPasswordMax = 64;
 
+// Brute-force lockout policy. After this many consecutive failed
+// AuthVerify calls against a given account, the account is locked
+// for kAuthLockoutDurationNs. A successful verify or an explicit
+// AuthUnlockUser zeros the failed-attempts counter.
+constexpr u32 kAuthLockoutThreshold = 5;
+constexpr u64 kAuthLockoutDurationNs = 60ull * 1000ull * 1000ull * 1000ull; // 60 s
+
 enum class AuthRole : u8
 {
     Guest = 0, // login only
@@ -61,6 +97,13 @@ struct AccountView
     const char* username;
     AuthRole role;
     bool has_password;
+    bool locked;         // locked_until_ns is in the future
+    u64 created_ns;      // when AuthAddUser / AuthInit allocated the row
+    u64 last_login_ns;   // 0 if never logged in
+    u64 last_attempt_ns; // 0 if never attempted
+    u64 locked_until_ns; // 0 if not locked
+    u32 failed_attempts; // consecutive failures since last success / unlock
+    u32 total_logins;    // lifetime successful logins
 };
 
 /// Seed the account table with the two built-in accounts:
@@ -84,16 +127,20 @@ AuthRole AuthCurrentRole();
 bool AuthIsAdmin();
 
 /// Verify credentials against the table without mutating session.
-/// Returns true on exact username + password match. Internally
-/// runs a full PBKDF2-HMAC-SHA256 derivation against either the
-/// stored hash record or a decoy record (when the username does
-/// not exist) so the wall-clock cost is independent of which leaf
-/// of the lookup the caller landed on; the final compare is
-/// constant-time across the digest.
+/// Returns true on exact username + password match against an
+/// account that is not currently locked out. Internally runs a
+/// full PBKDF2-HMAC-SHA256 derivation against either the stored
+/// hash record or a decoy record (when the username does not
+/// exist) so the wall-clock cost is independent of which leaf of
+/// the lookup the caller landed on; the final compare is
+/// constant-time across the digest. Updates per-account metadata
+/// (last_attempt_ns, failed_attempts, locked_until_ns) and
+/// publishes the matching event-ring entry.
 bool AuthVerify(const char* username, const char* password);
 
 /// Verify credentials AND set the session to the matched user.
-/// Returns false (leaves session untouched) on bad credentials.
+/// Returns false (leaves session untouched) on bad credentials or
+/// a locked account.
 bool AuthLogin(const char* username, const char* password);
 
 /// Clear the session slot. Idempotent — no-op when nothing is
@@ -115,7 +162,19 @@ bool AuthDeleteUser(const char* username);
 /// Change an account's password. If `old_password` is non-null,
 /// it must match (self-service flow). Admins may pass nullptr
 /// for `old_password` to force-reset another user's password.
+/// A successful change clears any existing lockout on the account.
 bool AuthChangePassword(const char* username, const char* old_password, const char* new_password);
+
+/// Clear lockout state on an account: zeroes the failed-attempts
+/// counter and lifts any active timed lockout. Returns false if
+/// the user does not exist. Caller-side policy (admin-only) is
+/// enforced by the shell command. Publishes AuthAccountUnlocked
+/// only when the account was actually locked at call time.
+bool AuthUnlockUser(const char* username);
+
+/// True iff the named account is currently locked out (verify
+/// would refuse). False for unknown users.
+bool AuthIsLocked(const char* username);
 
 /// Total number of active accounts (<= kAuthMaxAccounts).
 u32 AuthAccountCount();
@@ -129,8 +188,10 @@ bool AuthAccountAt(u32 idx, AccountView* view);
 bool AuthAccountByName(const char* username, AccountView* view);
 
 /// Boot-time self-test — verifies the seeded admin/guest accounts
-/// accept their default creds and reject a wrong password. Panics
-/// on failure (the auth path is a security primitive; silent
+/// accept their default creds and reject a wrong password,
+/// exercises the lockout state machine end-to-end, and confirms
+/// auth events make it onto the security event ring. Panics on
+/// failure (the auth path is a security primitive; silent
 /// breakage is unacceptable).
 void AuthSelfTest();
 

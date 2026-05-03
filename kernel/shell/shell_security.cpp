@@ -99,12 +99,44 @@ void CmdUsers()
         {
             ConsoleWrite("  (no password)");
         }
+        if (v.locked)
+        {
+            ConsoleWrite("  LOCKED");
+        }
+        if (v.failed_attempts > 0)
+        {
+            ConsoleWrite("  fails=");
+            WriteU64Dec(v.failed_attempts);
+        }
+        ConsoleWrite("  logins=");
+        WriteU64Dec(v.total_logins);
         if (active[0] != '\0' && StrEq(active, v.username))
         {
             ConsoleWrite("  *");
         }
         ConsoleWriteChar('\n');
     }
+}
+
+void CmdUnlock(u32 argc, char** argv)
+{
+    if (!AuthIsAdmin())
+    {
+        ConsoleWriteln("UNLOCK: PERMISSION DENIED (ADMIN ONLY)");
+        return;
+    }
+    if (argc < 2)
+    {
+        ConsoleWriteln("UNLOCK: USAGE: UNLOCK <NAME>");
+        return;
+    }
+    if (!AuthUnlockUser(argv[1]))
+    {
+        ConsoleWriteln("UNLOCK: FAILED (UNKNOWN USER)");
+        return;
+    }
+    ConsoleWrite("UNLOCK: CLEARED LOCKOUT FOR ");
+    ConsoleWriteln(argv[1]);
 }
 
 void CmdUseradd(u32 argc, char** argv)

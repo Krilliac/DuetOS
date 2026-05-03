@@ -1475,6 +1475,11 @@ void Dispatch(char* line)
         CmdUserdel(argc, argv);
         return;
     }
+    if (StrEq(cmd, "unlock"))
+    {
+        CmdUnlock(argc, argv);
+        return;
+    }
     if (StrEq(cmd, "passwd"))
     {
         CmdPasswd(argc, argv);

@@ -82,6 +82,13 @@ const char* const kEventKindNames[] = {
     "BlockguardModeChanged",
     "AttackSimRun",
     "IrRunbookEmitted",
+    "AuthLoginSuccess",
+    "AuthLoginFailure",
+    "AuthAccountLocked",
+    "AuthAccountUnlocked",
+    "AuthAccountCreated",
+    "AuthAccountDeleted",
+    "AuthPasswordChanged",
 };
 
 static_assert(sizeof(kEventKindNames) / sizeof(kEventKindNames[0]) == static_cast<u32>(EventKind::Count),
