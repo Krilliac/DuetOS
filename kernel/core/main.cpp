@@ -209,8 +209,12 @@
 #include "sched/sched.h"
 #include "security/attack_sim.h"
 #include "security/canary.h"
+#include "security/event_ring.h"
 #include "security/guard.h"
+#include "security/ir_runbook.h"
 #include "security/pentest_gui.h"
+#include "security/policy.h"
+#include "security/purple_team.h"
 #include "test/smoke_profile.h"
 
 /*
@@ -2025,6 +2029,15 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::drivers::storage::AhciInit();
     DUETOS_BOOT_SELFTEST(duetos::drivers::storage::AhciSelfTest());
 
+    // Security event ring + IR runbook: stand up the structured
+    // event surface BEFORE any wall TU starts publishing. Storage
+    // is constinit so a stray pre-init publish is safe; this call
+    // just zeroes counters + logs the init.
+    SerialWrite("[boot] Starting security event ring.\n");
+    duetos::security::EventRingInit();
+    DUETOS_BOOT_SELFTEST(duetos::security::EventRingSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::security::IrRunbookSelfTest());
+
     // Security guard must be live BEFORE any loader runs. Advisory
     // mode at boot: scans + logs, never blocks. Flip to Enforce via
     // the shell `guard enforce` once the boot-log is clean.
@@ -2039,6 +2052,15 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // registry matches.
     SerialWrite("[boot] Seeding per-boot canary names.\n");
     duetos::security::CanaryInit();
+
+    // Policy engine: snapshot the per-subsystem modes Guard /
+    // Canary / Blockguard chose for themselves. Profile starts at
+    // Default; operators flip to Lab/Production/Forensic via the
+    // `policy` shell command.
+    SerialWrite("[boot] Initializing security policy engine.\n");
+    duetos::security::PolicyInit();
+    DUETOS_BOOT_SELFTEST(duetos::security::PolicySelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::security::PurpleTeamSelfTest());
 
     DUETOS_BOOT_SELFTEST(duetos::fs::TmpFsSelfTest());
 
@@ -4084,7 +4106,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // guard to Enforce + blockguard to Deny — stateful
     // side-effects that would poison subsequent image loads /
     // sensitive-LBA writes for the rest of the boot.
-    duetos::security::AttackSimRun();
+    // Run the suite under the purple-team scorecard wrapper. The
+    // wrapper calls AttackSimRun internally and brackets it with
+    // event-ring snapshots + a per-suite coverage percentage.
+    duetos::security::PurpleTeamRunAll();
 #endif
 
 #ifdef DUETOS_PANIC_DEMO

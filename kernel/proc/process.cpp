@@ -15,6 +15,8 @@
 #include "log/klog.h"
 #include "core/panic.h"
 #include "loader/pe_loader.h"
+#include "security/event_ring.h"
+#include "security/ir_runbook.h"
 #include "time/tick.h"
 
 namespace duetos::core
@@ -509,6 +511,10 @@ void RecordSandboxDenial(Cap cap)
         arch::SerialWrite(" denials (last cap=");
         arch::SerialWrite(CapName(cap));
         arch::SerialWrite(") — terminating as malicious\n");
+        const u32 pid = static_cast<u32>(p->pid);
+        ::duetos::security::EventRingPublishKind(::duetos::security::EventKind::SandboxDenialKill, pid,
+                                                 static_cast<u64>(cap), p->sandbox_denials, CapName(cap));
+        ::duetos::security::IrRunbookEmit(::duetos::security::EventKind::SandboxDenialKill, pid);
         sched::FlagCurrentForKill(sched::KillReason::SandboxDenialThreshold);
     }
 }
@@ -595,6 +601,25 @@ void RecordFsWrite(Process* p, u64 bytes)
     arch::SerialWriteHex(p->fs_write_window_bytes[lvl]);
     arch::SerialWrite(") — terminating (suspected ransomware)\n");
     RuntimeCheckerNoteFsWriteRateExceeded(static_cast<u32>(lvl));
+    {
+        const u32 pid = static_cast<u32>(p->pid);
+        ::duetos::security::EventKind kind;
+        switch (lvl)
+        {
+        case 0:
+            kind = ::duetos::security::EventKind::FsWriteRateBurst;
+            break;
+        case 1:
+            kind = ::duetos::security::EventKind::FsWriteRateSustained;
+            break;
+        default:
+            kind = ::duetos::security::EventKind::FsWriteRateLong;
+            break;
+        }
+        ::duetos::security::EventRingPublishKind(kind, pid, p->fs_write_window_bytes[lvl], static_cast<u64>(lvl),
+                                                 p->name != nullptr ? p->name : "?");
+        ::duetos::security::IrRunbookEmit(kind, pid);
+    }
     sched::FlagCurrentForKill(sched::KillReason::FsWriteRateExceeded);
 }
 

@@ -17,7 +17,10 @@
 #include "arch/x86_64/serial.h"
 #include "drivers/video/console.h"
 #include "security/attack_sim.h"
+#include "security/event_ring.h"
 #include "security/guard.h"
+#include "security/policy.h"
+#include "security/purple_team.h"
 #include "log/klog.h"
 
 namespace duetos::core::shell::internal
@@ -338,6 +341,109 @@ void CmdAttackSim()
         ConsoleWrite(" -> ");
         ConsoleWriteln(s.results[i].detector);
     }
+}
+
+void CmdSecEvents(u32 argc, char** argv)
+{
+    namespace sec = duetos::security;
+    u64 n = 32;
+    if (argc >= 2)
+    {
+        // Parse a small unsigned decimal. Bad input falls back to default.
+        u64 parsed = 0;
+        bool any = false;
+        for (const char* p = argv[1]; *p != '\0'; ++p)
+        {
+            if (*p < '0' || *p > '9')
+            {
+                any = false;
+                break;
+            }
+            parsed = parsed * 10 + static_cast<u64>(*p - '0');
+            any = true;
+        }
+        if (any)
+            n = parsed;
+    }
+    const auto stats = sec::EventRingStatsRead();
+    ConsoleWrite("SECEVENTS: published=");
+    WriteU64Dec(stats.published_total);
+    ConsoleWrite(" dropped_oldest=");
+    WriteU64Dec(stats.dropped_oldest);
+    ConsoleWrite(" capacity=");
+    WriteU64Dec(stats.capacity);
+    ConsoleWriteln("");
+    ConsoleWriteln("(detailed event lines on COM1)");
+    sec::EventRingDumpRecent(n);
+}
+
+void CmdPolicy(u32 argc, char** argv)
+{
+    namespace sec = duetos::security;
+    if (argc < 2 || StrEq(argv[1], "show"))
+    {
+        const auto snap = sec::PolicyCurrent();
+        ConsoleWrite("POLICY PROFILE : ");
+        ConsoleWriteln(sec::PolicyProfileName(snap.profile));
+        ConsoleWrite("GUARD          : ");
+        ConsoleWriteln(sec::GuardModeName(snap.guard_mode));
+        ConsoleWrite("PERSISTENCE    : ");
+        ConsoleWriteln(snap.persistence_mode == sec::PersistenceMode::Deny ? "DENY" : "ADVISORY");
+        ConsoleWrite("BLOCKGUARD     : ");
+        ConsoleWriteln(snap.write_guard_mode == duetos::drivers::storage::WriteGuardMode::Deny       ? "DENY"
+                       : snap.write_guard_mode == duetos::drivers::storage::WriteGuardMode::Advisory ? "ADVISORY"
+                                                                                                     : "OFF");
+        ConsoleWriteln("USAGE: POLICY [SHOW|SET <PROFILE>|DIFF <PROFILE>]");
+        return;
+    }
+    if (StrEq(argv[1], "set") && argc >= 3)
+    {
+        if (!RequireAdmin("POLICY SET"))
+            return;
+        sec::PolicyProfile p = sec::PolicyProfile::Default;
+        if (StrEq(argv[2], "default") || StrEq(argv[2], "DEFAULT"))
+            p = sec::PolicyProfile::Default;
+        else if (StrEq(argv[2], "lab") || StrEq(argv[2], "LAB"))
+            p = sec::PolicyProfile::Lab;
+        else if (StrEq(argv[2], "production") || StrEq(argv[2], "PRODUCTION") || StrEq(argv[2], "prod"))
+            p = sec::PolicyProfile::Production;
+        else if (StrEq(argv[2], "forensic") || StrEq(argv[2], "FORENSIC"))
+            p = sec::PolicyProfile::Forensic;
+        else
+        {
+            ConsoleWriteln("POLICY: UNKNOWN PROFILE (use default|lab|production|forensic)");
+            return;
+        }
+        sec::PolicySet(p, 0);
+        ConsoleWrite("POLICY SET TO ");
+        ConsoleWriteln(sec::PolicyProfileName(p));
+        return;
+    }
+    if (StrEq(argv[1], "diff") && argc >= 3)
+    {
+        ConsoleWriteln("(policy diff: see COM1 — not yet wired into console)");
+        return;
+    }
+    ConsoleWriteln("POLICY: UNKNOWN SUBCOMMAND");
+}
+
+void CmdPurple()
+{
+    if (!RequireAdmin("PURPLE"))
+        return;
+    const auto s = duetos::security::PurpleTeamRunAll();
+    ConsoleWrite("PURPLE: attacks=");
+    WriteU64Dec(s.attacks_run);
+    ConsoleWrite(" passed=");
+    WriteU64Dec(s.attacks_passed);
+    ConsoleWrite(" coverage=");
+    WriteU64Dec(s.coverage_pct);
+    ConsoleWriteln("%");
+    ConsoleWrite("PURPLE: events_observed=");
+    WriteU64Dec(s.events_observed);
+    ConsoleWrite(" runbooks=");
+    WriteU64Dec(s.runbooks_emitted);
+    ConsoleWriteln("");
 }
 
 } // namespace duetos::core::shell::internal

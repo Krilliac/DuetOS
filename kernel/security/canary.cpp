@@ -18,7 +18,10 @@
 #include "arch/x86_64/serial.h"
 #include "diag/runtime_checker.h"
 #include "log/klog.h"
+#include "proc/process.h"
 #include "sched/sched.h"
+#include "security/event_ring.h"
+#include "security/ir_runbook.h"
 #include "util/random.h"
 
 namespace duetos::security
@@ -339,6 +342,10 @@ void CanaryTrip(const char* path, const char* op)
     // scan detectors. The Report-side log line is at Warn level
     // and includes the HealthIssueName.
     ::duetos::core::RuntimeCheckerNoteCanaryFileTouched();
+    ::duetos::core::Process* p = ::duetos::core::CurrentProcess();
+    const u32 pid = (p != nullptr) ? static_cast<u32>(p->pid) : 0u;
+    EventRingPublishKind(EventKind::CanaryTouch, pid, 0, 0, op != nullptr ? op : "?");
+    IrRunbookEmit(EventKind::CanaryTouch, pid);
     sched::FlagCurrentForKill(sched::KillReason::CanaryFileTouched);
 }
 
@@ -427,6 +434,12 @@ bool PersistenceNote(const char* path, const char* op)
     arch::SerialWrite(path != nullptr ? path : "<null>");
     arch::SerialWrite("\"\n");
     ::duetos::core::RuntimeCheckerNotePersistenceDrop();
+    ::duetos::core::Process* p = ::duetos::core::CurrentProcess();
+    const u32 pid = (p != nullptr) ? static_cast<u32>(p->pid) : 0u;
+    EventRingPublishKind(EventKind::PersistenceDrop, pid,
+                         static_cast<u64>(g_persistence_mode == PersistenceMode::Deny ? 1u : 0u), 0,
+                         op != nullptr ? op : "?");
+    IrRunbookEmit(EventKind::PersistenceDrop, pid);
     if (g_persistence_mode == PersistenceMode::Deny)
     {
         ++g_persistence_stats.notes_denied;

@@ -28,6 +28,8 @@
 #include "security/guard.h"
 
 #include "arch/x86_64/cpu.h"
+#include "security/event_ring.h"
+#include "security/ir_runbook.h"
 #include "arch/x86_64/hpet.h"
 #include "arch/x86_64/serial.h"
 #include "log/klog.h"
@@ -750,6 +752,23 @@ bool Gate(const ImageDescriptor& desc)
     const Report r = Inspect(desc);
     CopyReport(g_last_report, r);
     LogReport(desc, r);
+
+    // Publish a structured event for Warn / Deny verdicts so the
+    // event ring carries the loader-side signal (the canary +
+    // persistence walls publish their own when they fire later
+    // in the image's lifetime).
+    if (r.verdict == Verdict::Warn)
+    {
+        EventRingPublishKind(EventKind::ImageWarned, 0, static_cast<u64>(r.finding_count), 0,
+                             desc.name != nullptr ? desc.name : "<unnamed>");
+        IrRunbookEmit(EventKind::ImageWarned, 0);
+    }
+    else if (r.verdict == Verdict::Deny)
+    {
+        EventRingPublishKind(EventKind::ImageRejected, 0, static_cast<u64>(r.finding_count), 0,
+                             desc.name != nullptr ? desc.name : "<unnamed>");
+        IrRunbookEmit(EventKind::ImageRejected, 0);
+    }
 
     switch (r.verdict)
     {
