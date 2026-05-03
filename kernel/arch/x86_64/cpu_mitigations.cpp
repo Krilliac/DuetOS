@@ -127,6 +127,25 @@ void CpuMitigationsProbe()
     SerialWrite(" ");
     Log("taa", g_mit.needs_taa_flush);
     SerialWrite("\n");
+
+    // High-visibility WARN block when the silicon is Meltdown-
+    // vulnerable. KPTI is deliberately NOT implemented (see
+    // `.claude/knowledge/kpti-meltdown-decision-v0.md` for the
+    // settled decision + trigger conditions); the user should at
+    // minimum know that this kernel does not mitigate the attack.
+    // Serial-only, deliberately — EventRing is not yet up at the
+    // point CpuMitigationsProbe runs.
+    if (g_mit.needs_kpti)
+    {
+        SerialWrite("[cpu] WARN ============================================================\n");
+        SerialWrite("[cpu] WARN Meltdown silicon-bit RDCL_NO=0: this CPU IS vulnerable.\n");
+        SerialWrite("[cpu] WARN This kernel does NOT implement KPTI (Kernel Page Table\n");
+        SerialWrite("[cpu] WARN Isolation). Untrusted ring-3 code can speculatively read\n");
+        SerialWrite("[cpu] WARN kernel memory via cache side channel. Do not run\n");
+        SerialWrite("[cpu] WARN untrusted PE/ELF binaries on this hardware.\n");
+        SerialWrite("[cpu] WARN See knowledge/kpti-meltdown-decision-v0.md for context.\n");
+        SerialWrite("[cpu] WARN ============================================================\n");
+    }
 }
 
 const CpuMitigations& CpuMitigationsGet()
