@@ -47,6 +47,11 @@ inline constexpr u32 kFhRscsrChnl0Wptr = 0x1BC0;
 inline constexpr u32 kFhRscsrChnl0Rbdcb = 0x1BC8;
 inline constexpr u32 kFhRscsrChnl0Sbrb = 0x1BCC;
 
+// HBUS target write-pointer register — the TX doorbell. Modern
+// iwlwifi (7000-series and later) writes (queue_id << 8) | new_wptr
+// to this single MMIO offset to publish a freshly-built TFD.
+inline constexpr u32 kHbusTargWrptr = 0x460;
+
 struct IwlTxRing
 {
     u32 queue_id;
