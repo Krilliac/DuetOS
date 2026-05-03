@@ -45,6 +45,17 @@ if(DUETOS_CRTRACE_SURVEY)
     add_compile_definitions(DUETOS_CRTRACE_SURVEY=1)
 endif()
 
+# Shell-script smoke. Bakes /etc/selftest.sh into ramfs and auto-sources
+# it after /etc/profile so a headless boot exercises the scripting v0
+# control-flow keywords (if/while/for/$?/exit) and emits PASS/FAIL
+# markers grep-able from the serial log. Lets a CI run or an AI-assisted
+# debug session verify the scripting language hasn't regressed without
+# typing at the prompt. See kernel/fs/ramfs.cpp for the script body.
+option(DUETOS_SHELL_SELFTEST "Bake /etc/selftest.sh into ramfs and auto-source on boot" OFF)
+if(DUETOS_SHELL_SELFTEST)
+    add_compile_definitions(DUETOS_SHELL_SELFTEST=1)
+endif()
+
 # ----------------------------------------------------------------------------
 # Build flavor — the central per-build-type axis.
 #

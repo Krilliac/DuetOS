@@ -33,6 +33,26 @@
 namespace duetos::core::shell::internal
 {
 
+// Script-side `exit N` is implemented as a sticky flag the executor
+// polls before each statement. Cleared at ScriptExecute() entry so
+// stale state from a prior `source` doesn't leak forward. Used by
+// CmdExit (shell_extra.cpp) and the loop / if-block walkers below.
+namespace
+{
+constinit bool g_script_exit_requested = false;
+}
+
+void ScriptRequestExit(i32 code)
+{
+    g_script_exit_requested = true;
+    ShellSetExit(code);
+}
+
+bool ScriptExitRequested()
+{
+    return g_script_exit_requested;
+}
+
 namespace
 {
 
@@ -213,6 +233,8 @@ void ExecuteRange(char (*lines)[kScriptLineMax], u32 from, u32 to)
     u32 i = from;
     while (i < to)
     {
+        if (g_script_exit_requested)
+            return;
         if (ShellInterruptRequested())
         {
             ConsoleWriteln("^C");
@@ -312,6 +334,8 @@ u32 ExecuteWhileBlock(char (*lines)[kScriptLineMax], u32 n, u32 idx)
     constexpr u32 kIterCap = 10000;
     for (u32 it = 0; it < kIterCap; ++it)
     {
+        if (g_script_exit_requested)
+            return done + 1;
         if (ShellInterruptRequested())
         {
             ConsoleWriteln("^C");
@@ -389,6 +413,8 @@ u32 ExecuteForBlock(char (*lines)[kScriptLineMax], u32 n, u32 idx)
             ConsoleWriteln("SCRIPT: ENV TABLE FULL (for-loop)");
             return done + 1;
         }
+        if (g_script_exit_requested)
+            return done + 1;
         if (ShellInterruptRequested())
         {
             ConsoleWriteln("^C");
@@ -403,7 +429,13 @@ u32 ExecuteForBlock(char (*lines)[kScriptLineMax], u32 n, u32 idx)
 
 void ScriptExecute(char (*body_lines)[kScriptLineMax], u32 body_n)
 {
+    // Reset the sticky exit-requested flag at every script entry —
+    // a previous `source` that ran `exit N` shouldn't poison this
+    // run. The exit code itself stays in $? until the next command
+    // overwrites it (POSIX flavour).
+    g_script_exit_requested = false;
     ExecuteRange(body_lines, 0, body_n);
+    g_script_exit_requested = false;
 }
 
 u32 ScriptSplitLines(const char* scratch, u32 n, char (*out_lines)[kScriptLineMax], u32 cap)

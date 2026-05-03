@@ -740,4 +740,42 @@ void CmdScript(u32 argc, char** argv)
     ShellSetExit(inner);
 }
 
+void CmdExit(u32 argc, char** argv)
+{
+    // `exit [N]` — short-circuit the enclosing script with code N
+    // (default 0). Outside a script (typed at the prompt) this is
+    // a no-op apart from setting $?: the kernel shell IS the user
+    // surface, there is no parent process to terminate.
+    i32 code = 0;
+    if (argc >= 2)
+    {
+        const char* s = argv[1];
+        bool neg = false;
+        if (*s == '-')
+        {
+            neg = true;
+            ++s;
+        }
+        if (*s == '\0')
+        {
+            ShellSetExit(2);
+            ConsoleWriteln("EXIT: BAD CODE");
+            return;
+        }
+        i32 v = 0;
+        for (u32 i = 0; s[i] != '\0'; ++i)
+        {
+            if (s[i] < '0' || s[i] > '9')
+            {
+                ShellSetExit(2);
+                ConsoleWriteln("EXIT: BAD CODE");
+                return;
+            }
+            v = v * 10 + i32(s[i] - '0');
+        }
+        code = neg ? -v : v;
+    }
+    ScriptRequestExit(code);
+}
+
 } // namespace duetos::core::shell::internal

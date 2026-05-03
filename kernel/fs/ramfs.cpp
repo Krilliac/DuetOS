@@ -191,6 +191,10 @@ constexpr u8 kEtcMotdBytes[] = "------------------------------------------------
 // Under DUETOS_CRTRACE_SURVEY the profile also runs `crtrace show
 // 256` so a headless boot dumps the cleanroom-trace ring without
 // needing keyboard input. See tools/cleanroom/run-trace-survey.sh.
+//
+// Under DUETOS_SHELL_SELFTEST the profile also sources
+// /etc/selftest.sh — same self-validation pattern as the trace
+// survey, scoped to the scripting v0 surface.
 constexpr u8 kEtcProfileBytes[] = "# DuetOS default profile\n"
                                   "# Runs every time the shell starts.\n"
                                   "set PS1 duetos> \n"
@@ -201,7 +205,57 @@ constexpr u8 kEtcProfileBytes[] = "# DuetOS default profile\n"
                                   "crprobe\n"
                                   "crtrace show 256\n"
 #endif
+#ifdef DUETOS_SHELL_SELFTEST
+                                  "source /etc/selftest.sh\n"
+#endif
     ;
+
+// Scripting v0 self-test. Always baked into ramfs (it doubles as
+// reference / demo material — the wiki points at this file), but
+// only auto-sourced when DUETOS_SHELL_SELFTEST=1 is set on the
+// build. Exercises every control-flow keyword the v0 interpreter
+// supports + the `exit N` short-circuit. PASS/FAIL markers go to
+// the console (and serial under -nographic), so a headless boot
+// produces a grep-able trace that "shell scripting v0 still works"
+// without anyone typing at the prompt.
+//
+// Lines stay under 64 bytes (kScriptLineMax) and the file stays
+// under 64 lines (kScriptMaxLines). Bumping either would silently
+// truncate at source-time — keep it tight.
+constexpr u8 kEtcSelftestBytes[] = "# DuetOS scripting v0 self-test.\n"
+                                   "echo SELFTEST BEGIN\n"
+                                   "true\n"
+                                   "assert true\n"
+                                   "if true ; then\n"
+                                   "echo SELFTEST IF-TRUE OK\n"
+                                   "fi\n"
+                                   "if false ; then\n"
+                                   "echo SELFTEST FAIL: if-false took true\n"
+                                   "exit 1\n"
+                                   "fi\n"
+                                   "if false ; then\n"
+                                   "exit 1\n"
+                                   "elif true ; then\n"
+                                   "echo SELFTEST ELIF OK\n"
+                                   "else\n"
+                                   "exit 1\n"
+                                   "fi\n"
+                                   "if false ; then\n"
+                                   "exit 1\n"
+                                   "else\n"
+                                   "echo SELFTEST ELSE OK\n"
+                                   "fi\n"
+                                   "for n in alpha beta gamma ; do\n"
+                                   "echo SELFTEST FOR $n\n"
+                                   "done\n"
+                                   "touch /tmp/STLOOP\n"
+                                   "while cat /tmp/STLOOP ; do\n"
+                                   "echo SELFTEST WHILE TICK\n"
+                                   "rm /tmp/STLOOP\n"
+                                   "done\n"
+                                   "echo SELFTEST EXIT-OK\n"
+                                   "exit 0\n"
+                                   "echo SELFTEST FAIL: exit did not stop\n";
 
 // Man pages — plain-text per-command help. Each file here lands
 // at /etc/man/<name> and is read by the shell's `man` command
@@ -290,6 +344,14 @@ constinit RamfsNode k_trusted_etc_profile = {
     .file_size = sizeof(kEtcProfileBytes) - 1,
 };
 
+constinit RamfsNode k_trusted_etc_selftest = {
+    .name = "selftest.sh",
+    .type = RamfsNodeType::kFile,
+    .children = nullptr,
+    .file_bytes = kEtcSelftestBytes,
+    .file_size = sizeof(kEtcSelftestBytes) - 1,
+};
+
 // /etc/man — one RamfsNode per page. Macro-tight since the
 // shape is identical for every entry.
 #define MAN_NODE(name_str, bytes_sym)                                                                                  \
@@ -339,7 +401,8 @@ constinit RamfsNode k_trusted_etc_man_dir = {
 };
 
 constinit const RamfsNode* const k_trusted_etc_children[] = {
-    &k_trusted_etc_version, &k_trusted_etc_motd, &k_trusted_etc_profile, &k_trusted_etc_man_dir, nullptr,
+    &k_trusted_etc_version,  &k_trusted_etc_motd,    &k_trusted_etc_profile,
+    &k_trusted_etc_selftest, &k_trusted_etc_man_dir, nullptr,
 };
 
 constinit RamfsNode k_trusted_etc_dir = {

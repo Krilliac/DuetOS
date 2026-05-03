@@ -238,6 +238,7 @@ void CmdHelp()
     ConsoleWriteln("  ASSERT CMD ARGS    RUN CMD; PASS IF $? = 0, ELSE PRINT FAIL");
     ConsoleWriteln("  WATCH SECS CMD     RE-RUN CMD EVERY SECS SECONDS (^C ABORTS)");
     ConsoleWriteln("  SCRIPT /tmp/X CMD  RUN CMD WITH OUTPUT CAPTURED TO /tmp/X");
+    ConsoleWriteln("  EXIT [N]           SHORT-CIRCUIT THE ENCLOSING SCRIPT (CODE N, DEFAULT 0)");
     ConsoleWriteln("  $?                 EXIT CODE OF THE LAST DISPATCHED COMMAND");
     ConsoleWriteln("");
     ConsoleWriteln("KEYS:  UP/DOWN = HISTORY   TAB = COMPLETE");
@@ -646,7 +647,7 @@ const char* const kCommandSet[] = {
     "theme",    "addr2sym",  "cap-audit", "monitor",  "secevents", "events",    "policy",     "purple",    "purpleteam",
     "mkdir",    "rmdir",     "truncate",  "realpath", "id",        "groups",    "nproc",      "arch",      "tty",
     "type",     "printenv",  "df",        "du",       "loadavg",   "clearhist", "pause",      "yes",       "sync",
-    "port",     "assert",    "watch",     "script",
+    "port",     "assert",    "watch",     "script",   "exit",
 };
 const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1917,6 +1918,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "script"))
     {
         CmdScript(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "exit"))
+    {
+        CmdExit(argc, argv);
         return;
     }
     ShellSetExit(127);

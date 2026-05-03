@@ -530,6 +530,7 @@ void CmdPort(u32 argc, char** argv);
 void CmdAssert(u32 argc, char** argv);
 void CmdWatch(u32 argc, char** argv);
 void CmdScript(u32 argc, char** argv);
+void CmdExit(u32 argc, char** argv);
 
 // ---------------------------------------------------------------
 // Scripting language v0 (shell_script.cpp).
@@ -575,6 +576,19 @@ void ScriptExecute(char (*body_lines)[kScriptLineMax], u32 body_n);
 // number of lines populated (capped at `cap`). Lines longer than
 // kScriptLineMax-1 are truncated and a warning is klogged.
 u32 ScriptSplitLines(const char* scratch, u32 n, char (*out_lines)[kScriptLineMax], u32 cap);
+
+// Script-side `exit N`. Sets a sticky flag the script executor
+// checks before each statement; once set, the surrounding
+// ExecuteRange / ExecuteIfBlock / ExecuteWhileBlock / ExecuteForBlock
+// unwind cleanly and ScriptExecute returns. The exit code lands in
+// $? for the caller (CmdSource → outer Dispatch). Outside a script
+// (i.e. typed at the prompt) `exit N` just sets $? — there is no
+// shell process to terminate.
+//
+// ScriptExecute() resets the flag at entry so a stale request from
+// a previous script doesn't pollute a fresh `source`.
+void ScriptRequestExit(i32 code);
+bool ScriptExitRequested();
 
 // ---------------------------------------------------------------
 // Process / scheduler / memory observability (shell_process.cpp).

@@ -315,6 +315,7 @@ existing kernel API.
 | `assert <cmd...>` | Run CMD; print PASS / FAIL based on `$?` | `shell_extra.cpp` |
 | `watch <secs> <cmd...>` | Re-run CMD every SECS seconds (^C aborts, cap 1000) | `shell_extra.cpp` |
 | `script /tmp/<name> <cmd...>` | Run CMD with output captured to a tmpfs file | `shell_extra.cpp` |
+| `exit [N]` | Short-circuit the enclosing script with code N (default 0) | `shell_extra.cpp` |
 
 ## Scripting
 
@@ -336,7 +337,7 @@ summary:
 - **Source files** — `source <path>` (or `.`) runs the file as a
   script. Used by `/etc/profile` at shell startup.
 
-Three commands target script authors directly:
+Four commands target script authors directly:
 
 - `assert <cmd>` — run CMD and report PASS / FAIL. Used as the
   per-line marker in self-test scripts.
@@ -344,6 +345,9 @@ Three commands target script authors directly:
   it changes" workflows.
 - `script <path> <cmd>` — capture CMD's output to a tmpfs file
   alongside live console output.
+- `exit [N]` — bail out of the enclosing `source` (or inline block)
+  with code N. Unwinds cleanly through nested blocks; outside a
+  script just sets `$?`.
 
 ---
 
