@@ -46,6 +46,7 @@ for the next session.
 | 2026-05-03 | TGA 2.0 uncompressed 24/32-bpp decoder (Truevision TGA) | `kernel/util/tga.{h,cpp}` (RLE deferred to v1; ImageView wiring deferred to follow-up slice) |
 | 2026-05-03 | Gregorian↔Julian-Day + ISO 8601 datetime parser/printer (Fliegel & Van Flandern + ISO 8601:2019) | `kernel/util/datetime.{h,cpp}` |
 | 2026-05-03 | BMP encoder + parser util TU (32-bpp BI_RGB) — pulled out of screenshot.cpp + imageview.cpp into `kernel/util/bmp` | `kernel/util/bmp.{h,cpp}` |
+| 2026-05-03 | CPIO newc / newc-CRC archive walker (POSIX.1-1988 SVR4 portable, magic 070701/070702) | `kernel/util/cpio.{h,cpp}` (initramfs unpacker is its own future slice) |
 
 ## Display + GPU
 
@@ -145,7 +146,7 @@ for the next session.
 |-------|------|-----------|----------|----------|
 | **DEFLATE / RFC 1951 inflater** | RFC 1951 | tinfl.c, miniz | gzip, png, zip, kernel-image | ~600 |
 | **GZIP container** | RFC 1952 | (above) | initramfs.gz, http content | ~100 |
-| **CPIO archive (newc/odc)** | POSIX.1-1988 | Linux init/initramfs.c | initramfs prereq | ~150 |
+| ~~CPIO newc / newc-CRC walker~~ LANDED 2026-05-03 (newc only — old binary 070707 deliberately rejected) | POSIX.1-1988 | Linux init/initramfs.c | initramfs prereq | ~330 |
 | **TAR ustar / pax** | POSIX.1-2001 | libarchive | distribution tarballs | ~200 |
 | **ZIP archive read-only** | PKWARE APPNOTE | minizip | Win32 install MSIs | ~250 |
 | **Cabinet (.cab) read-only** | MS-CAB | libmspack | Windows install | ~600 |

@@ -43,6 +43,7 @@
 #include "util/build_config.h"
 #include "util/crc32.h"
 #include "util/bmp.h"
+#include "util/cpio.h"
 #include "util/datetime.h"
 #include "util/tga.h"
 #include "util/types.h"
@@ -1937,6 +1938,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::util::BmpSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::TgaSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::DateTimeSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::CpioSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Sha1SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Sha256SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Md5SelfTest());
