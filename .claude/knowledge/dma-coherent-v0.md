@@ -159,11 +159,25 @@ CMake auto-picks up the new `.cpp` (the kernel uses `GLOB_RECURSE`).
 
 | Slice | What lands | Status |
 |-------|------------|--------|
-| iwlwifi TFD descriptor build + doorbell program | `IwlRingsSubmitTx` returns Ok and rings the chip's TX doorbell | not started |
-| iwlwifi per-RBD data buffers (256 × 4 KiB) | RX side can actually receive | not started |
-| AHCI command-list + FIS-receive area allocation | `kernel/drivers/storage/ahci.cpp` exits probe-only | not started |
-| Intel HDA CORB / RIRB / per-stream BDL | `kernel/drivers/audio/audio.cpp` exits probe-only — closes P0 #2 in `feature-gaps-end-user-v0.md` | not started |
-| Per-vendor GPU command-buffer allocation | unblocks the GPU-acceleration tier in `render-drivers-v6.md` | not started |
+| iwlwifi per-RBD data buffers | 256 × 4 KiB Dma32 pool as one contiguous run; RBD ring populated; RX write pointer advanced to size-1 so chip sees every slot ready | **Landed `f8cd41f`** (2026-05-03) |
+| iwlwifi TFD descriptor build + SubmitTx + doorbell | TFD layout per Linux iwl-fh.h ABI (byte 3 num_tbs + 20 × 6-byte TBs); per-queue 4 KiB scratch; SubmitTx copies frame, builds TFD, advances head, writes HBUS_TARG_WRPTR; flips return from -ENOSYS → Ok. TX completion polling deferred to its own slice | **Landed `c8a809a`** (2026-05-03) |
+| AHCI migrate to mm::AllocDmaCoherent | AHCI was already fully wired (read+write DMA EXT) but allocated through the older `mm::AllocateFrame()`; migrated to `AllocDmaCoherent(Dma32)` for zone-clamped contract + automatic zero. No behavioural delta, surface alignment only | **Landed `a0e88a7`** (2026-05-03) |
+| Intel HDA CORB/RIRB + first GET_PARAMETER | Exits probe-only: GCTL.CRST out-of-reset poll; STATESTS latch+clear; `AllocDmaCoherent(Dma32, 4 KiB)` for 1 KiB CORB + 2 KiB RIRB; programs base/size/RP/WP for both rings; starts CORBCTL.RUN + RIRBCTL.DMAEN; issues `GET_PARAMETER(VENDOR_ID)` per codec slot reported by STATESTS, polls RIRBWP advance with bounded spin (~1 ms) and records vendor ID. Codec tree walk + stream programming + mixer = next slices. Closes "exit probe-only" half of P0 #2 audio | **Landed `f27f253`** (2026-05-03) |
+| Per-vendor GPU command-buffer allocation | **Deferred — not a single bounded slice.** Per the AHCI/HDA/GPU survey: `kernel/drivers/gpu/{intel,amd,nvidia}*` are pure probe-only with no shared scaffold (unlike `iwlwifi_rings.h` which provided a wireless landing pad). Each vendor's "exit probe-only" is >2000 LOC of per-vendor RE: BAR programming, GTT/GART setup, ring + batch buffer formats, fence/IRQ wiring. NVIDIA has no QEMU emulation. virtio-gpu (`drivers/gpu/virtio_gpu.cpp`) and Bochs VBE already cover the QEMU framebuffer + 2D-accel cases. A meaningful slice here needs its own plan + per-vendor knowledge file before any code lands | Deferred (see reasoning) |
+
+### iwlwifi TX completion + RX bottom-half (next iwlwifi slice)
+
+The two iwlwifi slices above ship structurally complete but
+HW-untested (consistent with `wireless-control-tier-v0.md`). The
+next bounded continuation is:
+
+- TX completion polling: read the per-queue completion status and
+  reclaim the scratch buffer once the chip has acknowledged.
+- RX bottom-half: walk RBDs with a closed_rb_num-driven cursor,
+  hand received frames to `BeaconParse` / the wireless rx path,
+  re-publish slots back to the chip.
+- IRQ wiring on per-vendor MSI/MSI-X (currently every wireless
+  driver polls in a tight loop instead of taking interrupts).
 
 ## Resume prompt
 
