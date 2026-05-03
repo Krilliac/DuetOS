@@ -5,6 +5,7 @@
 #include "drivers/video/notify.h"
 #include "fs/fat32.h"
 #include "mm/kheap.h"
+#include "util/bmp.h"
 #include "util/tga.h"
 
 namespace duetos::apps::imageview
@@ -27,79 +28,22 @@ constexpr u32 kStatusCap = 96;
 constexpr u32 kRowH = 10;      // 8x8 glyph + 2 px padding
 constexpr u32 kHeaderRows = 2; // status line + filename / pos line
 
-// BMP-format constants (BITMAPFILEHEADER + BITMAPINFOHEADER).
-constexpr u64 kBmpFileHeaderBytes = 14;
-constexpr u64 kBmpInfoHeaderBytes = 40;
-constexpr u64 kBmpHeaderBytes = kBmpFileHeaderBytes + kBmpInfoHeaderBytes;
+// BMP-format constants (BITMAPFILEHEADER + BITMAPINFOHEADER) +
+// header parser now live in `kernel/util/bmp.h`. The aliases
+// below keep the existing call sites unchanged.
+using duetos::util::BmpInfo;
+using duetos::util::kBmpFileHeaderBytes;
+using duetos::util::kBmpHeaderBytes;
+using duetos::util::kBmpInfoHeaderBytes;
 
 constexpr u32 kInkFg = 0x00D0D8E0;
 constexpr u32 kInkDim = 0x00808890;
 constexpr u32 kInkErr = 0x00E08070;
 constexpr u32 kBg = 0x00080A0E;
 
-inline u16 LoadU16(const u8* p)
+inline BmpInfo ParseBmpHeader(const u8* hdr)
 {
-    return static_cast<u16>(static_cast<u16>(p[0]) | (static_cast<u16>(p[1]) << 8));
-}
-
-inline u32 LoadU32(const u8* p)
-{
-    return static_cast<u32>(p[0]) | (static_cast<u32>(p[1]) << 8) | (static_cast<u32>(p[2]) << 16) |
-           (static_cast<u32>(p[3]) << 24);
-}
-
-// Result of parsing the 54-byte BMP header. Negative `signed_height`
-// signals a top-down DIB; we flip the sign before storing
-// `height` and remember the orientation in `top_down`.
-struct BmpInfo
-{
-    u32 width;
-    u32 height;
-    u32 bpp;          // bits per pixel (we accept 32; reject others)
-    u32 compression;  // 0 = BI_RGB, anything else rejected
-    u32 pixel_offset; // byte offset of the pixel array (from BITMAPFILEHEADER's bf_off)
-    bool top_down;    // true when DIB height was negative
-    bool ok;
-};
-
-// Parse the 54-byte canonical BMP header. Tolerant: accepts any
-// BITMAPINFOHEADER size >= 40 (the additional fields just shift
-// the pixel offset, which we read directly from bf_off).
-BmpInfo ParseBmpHeader(const u8* hdr)
-{
-    BmpInfo info = {};
-    if (hdr[0] != 'B' || hdr[1] != 'M')
-    {
-        return info;
-    }
-    info.pixel_offset = LoadU32(hdr + 10);
-    const u32 dib_size = LoadU32(hdr + 14);
-    if (dib_size < 40)
-    {
-        return info;
-    }
-    info.width = LoadU32(hdr + 18);
-    const i32 signed_height = static_cast<i32>(LoadU32(hdr + 22));
-    if (signed_height < 0)
-    {
-        info.height = static_cast<u32>(-signed_height);
-        info.top_down = true;
-    }
-    else
-    {
-        info.height = static_cast<u32>(signed_height);
-        info.top_down = false;
-    }
-    info.bpp = LoadU16(hdr + 28);
-    info.compression = LoadU32(hdr + 30);
-    // Sanity bounds: a 4 GiB-pixel image is hostile / corrupt.
-    constexpr u32 kMaxDim = 16384;
-    if (info.width == 0 || info.height == 0 || info.width > kMaxDim || info.height > kMaxDim)
-    {
-        return info;
-    }
-    info.ok = true;
-    return info;
+    return duetos::util::BmpParseHeader(hdr);
 }
 
 struct State

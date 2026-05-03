@@ -4,6 +4,7 @@
 #include "drivers/video/framebuffer.h"
 #include "fs/fat32.h"
 #include "mm/kheap.h"
+#include "util/bmp.h"
 
 namespace duetos::apps::screenshot
 {
@@ -17,56 +18,9 @@ namespace
 // 2 MiB heap easily.
 constexpr u64 kScratchBytes = 65536;
 
-constexpr u64 kBmpFileHeaderBytes = 14;
-constexpr u64 kBmpInfoHeaderBytes = 40;
-constexpr u64 kBmpHeaderBytes = kBmpFileHeaderBytes + kBmpInfoHeaderBytes;
-
-// Little-endian byte stores. Reinterpret-cast onto a u8* would
-// fail on builds that strict-alias; this is portable and the
-// compiler folds it into single MOVs.
-inline void StoreU16(u8* p, u16 v)
-{
-    p[0] = static_cast<u8>(v);
-    p[1] = static_cast<u8>(v >> 8);
-}
-
-inline void StoreU32(u8* p, u32 v)
-{
-    p[0] = static_cast<u8>(v);
-    p[1] = static_cast<u8>(v >> 8);
-    p[2] = static_cast<u8>(v >> 16);
-    p[3] = static_cast<u8>(v >> 24);
-}
-
-// 32-bpp top-down BMP: BITMAPFILEHEADER + BITMAPINFOHEADER. The
-// negative DIB height tells decoders the rows are stored in
-// framebuffer order (no flip), matching how we copy them out.
-void WriteBmpHeader(u8* out, u32 width, u32 height)
-{
-    const u32 pixel_bytes = width * height * 4;
-    const u32 file_size = static_cast<u32>(kBmpHeaderBytes) + pixel_bytes;
-
-    // BITMAPFILEHEADER (14 bytes)
-    out[0] = 'B';
-    out[1] = 'M';
-    StoreU32(out + 2, file_size);
-    StoreU16(out + 6, 0); // reserved
-    StoreU16(out + 8, 0); // reserved
-    StoreU32(out + 10, static_cast<u32>(kBmpHeaderBytes));
-
-    // BITMAPINFOHEADER (40 bytes)
-    StoreU32(out + 14, static_cast<u32>(kBmpInfoHeaderBytes));
-    StoreU32(out + 18, width);
-    StoreU32(out + 22, static_cast<u32>(-static_cast<i32>(height)));
-    StoreU16(out + 26, 1);  // planes
-    StoreU16(out + 28, 32); // bpp
-    StoreU32(out + 30, 0);  // BI_RGB (uncompressed)
-    StoreU32(out + 34, pixel_bytes);
-    StoreU32(out + 38, 2835); // ~72 DPI in pixels-per-metre
-    StoreU32(out + 42, 2835);
-    StoreU32(out + 46, 0); // colors used
-    StoreU32(out + 50, 0); // colors important
-}
+using duetos::util::kBmpFileHeaderBytes;
+using duetos::util::kBmpHeaderBytes;
+using duetos::util::kBmpInfoHeaderBytes;
 
 // Format `n` (0..9999) into the four-digit slot of an SHOTNNNN
 // filename buffer. Fills out[4..7]. Buffer convention is the
@@ -139,7 +93,7 @@ bool StreamBmp(const fs::fat32::Volume* v, const char* path, u32 width, u32 heig
         return false;
     }
 
-    WriteBmpHeader(scratch, width, height);
+    duetos::util::BmpWriteHeader32(scratch, width, height, /*top_down=*/true);
     u64 used = kBmpHeaderBytes;
     const u64 row_bytes = static_cast<u64>(width) * 4;
 
