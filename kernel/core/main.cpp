@@ -65,6 +65,7 @@
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/ioapic.h"
 #include "arch/x86_64/lapic.h"
+#include "arch/x86_64/lbr.h"
 #include "arch/x86_64/nmi_watchdog.h"
 #include "arch/x86_64/pic.h"
 #include "arch/x86_64/rtc.h"
@@ -1742,6 +1743,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Installing BSP per-CPU struct.\n");
     duetos::cpu::PerCpuInitBsp();
+
+    // Architectural LBR — start the per-CPU branch trace ring as
+    // early as practical so a panic during late init still has
+    // useful records to dump. No-op + serial line on CPUs that
+    // don't advertise the feature (TCG QEMU, pre-Goldmont-Plus
+    // Intel, AMD).
+    duetos::arch::LbrInitBsp();
 
     // Centralised syscall capability gate (plan A4). Walks every
     // row of `kSyscallCapTable` against synthetic empty / trusted

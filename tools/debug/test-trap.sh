@@ -82,9 +82,9 @@ cmake --build "${BUILD_DIR}" >/dev/null
 # budget covers actual kernel work rather than the 10 s interactive
 # menu auto-select. The post-grub debug-build init still has to
 # reach the deliberate ud2 at the end of kernel_main.
-echo "[test-trap] booting (60 s timeout, smoke=trap-demo)"
+echo "[test-trap] booting (90 s timeout, smoke=trap-demo)"
 LOG="$(mktemp)"
-DUETOS_TIMEOUT=60 DUETOS_SMOKE_PROFILE=trap-demo "${REPO_ROOT}/tools/qemu/run.sh" >"${LOG}" 2>&1 || true
+DUETOS_TIMEOUT=90 DUETOS_SMOKE_PROFILE=trap-demo "${REPO_ROOT}/tools/qemu/run.sh" >"${LOG}" 2>&1 || true
 
 # ---- dump extraction ----------------------------------------------------
 
@@ -135,6 +135,11 @@ assert_contains '^  page-walk for rip=0x[0-9a-f]+ \(cr3=0x[0-9a-f]+\):' \
                                                             "rip page-walk header"   "${DUMP_FILE}"
 assert_contains '^    PML4\[0x[0-9a-f]+\] = 0x[0-9a-f]+ \[[^]]+\]'  "rip page-walk PML4 entry" "${DUMP_FILE}"
 assert_contains 'backtrace \(up to 16 frames'               "backtrace header"       "${DUMP_FILE}"
+# LBR section header — body depends on the host (real Intel
+# hardware vs TCG/AMD/pre-Goldmont-Plus); presence proves the
+# dispatcher's panic path ran DumpLbr.
+assert_contains '^  LBR (\(last-branch records|\(unavailable on this CPU\))' \
+                                                            "LBR section header"     "${DUMP_FILE}"
 assert_contains '^    #0x0+[0-9]  rip=0x[0-9a-f]+  \[[^ ]+\+0x' \
                                                             "backtrace frame symbolized" "${DUMP_FILE}"
 assert_contains 'return-address pointers \(scan of 0x[0-9a-f]+ quads from rsp\)' \

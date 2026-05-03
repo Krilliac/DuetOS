@@ -111,11 +111,12 @@ annotation when the value falls in plausible kernel code range — surfaces
 stale callback pointers / vtable spills / saved-RIP residue without forcing
 the operator to re-symbolize by hand.
 
-The schema is v3 (v1 → v2 added the `return-address pointers` section
-between the raw stack quads and the held-locks block; v2 → v3 added
-the `page-walk` block for cr2 and rip after the register dump and
-before the backtrace). Bump `kDumpSchemaVersion` in `core/panic.cpp`
-when the layout changes in a way a parser would care about. The bit-decoded suffixes (e.g. `[PE|WP|PG]`)
+The schema is v4 (v1 → v2 added the `return-address pointers`
+section; v2 → v3 added the `page-walk` block for cr2 and rip;
+v3 → v4 added the `LBR (last-branch records)` block between the
+return-address-pointer scan and the held-locks block). Bump
+`kDumpSchemaVersion` in `core/panic.cpp` when the layout changes
+in a way a parser would care about. The bit-decoded suffixes (e.g. `[PE|WP|PG]`)
 live on the SAME line as the existing `<label> : <hex>` token sequence,
 so a parser that anchors on `<label> : 0x[0-9a-f]+` keeps working;
 human readers get the meaning for free.
@@ -219,6 +220,60 @@ What it surfaces for free:
   corruption itself (an entry pointing into MMIO / non-RAM
   phys), which would otherwise either panic during the walk or
   silently misread.
+
+### Architectural Last-Branch-Records (LBR)
+
+`arch::LbrInitBsp` (in `kernel/arch/x86_64/lbr.cpp`) detects
+Architectural LBR at boot via `CPUID.(EAX=07H,ECX=00H):EDX[19]`
+(same bit Linux uses for `X86_FEATURE_ARCH_LBR`) and, if
+present, programs the BSP's branch trace ring:
+
+- `IA32_LBR_DEPTH` (MSR 0x14CF) — read for max supported depth,
+  written to select usable depth.
+- `IA32_LBR_CTL` (MSR 0x14CE) — set to `LBREn|OS|USR` (every
+  taken branch, ring 0 + ring 3, no filter).
+
+Per-entry MSRs (one row of three per record):
+- `MSR_ARCH_LBR_FROM_n` = 0x1500 + n
+- `MSR_ARCH_LBR_TO_n`   = 0x1600 + n
+- `MSR_ARCH_LBR_INFO_n` = 0x1200 + n
+
+`arch::LbrFreeze` clears `LBR_CTL.LBREn` so further branches
+between panic entry and the dump don't pollute the snapshot.
+Wired into both `core::Panic` and the trap dispatcher's panic
+path (`arch/x86_64/traps.cpp`) immediately after
+`NmiWatchdogDisable`.
+
+`core::DumpLbr` (in `kernel/core/panic.cpp`) emits the section
+between `DumpReturnAddressPointers` and `DumpHeldLocksLocal`:
+
+```
+  LBR (last-branch records, 0x20 entries, newest first; ctl=0x...):
+    #0x00  from=0x...  [callerFn+0xOFF (file:line)]
+           to  =0x...  [calleeFn+0xOFF (file:line)]
+    #0x01  from=0x...  ...
+    ...
+```
+
+On hardware that doesn't support Architectural LBR (TCG QEMU,
+pre-Goldmont-Plus Intel, AMD), the section is replaced by a
+single line:
+
+```
+  LBR (last-branch records): (unavailable on this CPU)
+```
+
+Why LBR is worth dumping when it's available: it's the **only**
+backtrace source that survives frame-pointer omission, asm
+trampolines, and rbp-chain corruption — the records are the
+CPU's own ground truth about every taken branch since the last
+freeze. Pairs especially well with the return-address-pointer
+scan (which finds the residue on the stack) and the rbp-chain
+backtrace (which is fast but FPO-fragile).
+
+AP support is deferred. `LbrInitBsp` only configures the BSP;
+APs that crash today emit the "(unavailable)" form. Per-AP
+enablement will land alongside SMP runqueue stabilisation.
 
 Human-readable decoders live in `kernel/core/diag_decode.{h,cpp}`:
 `WriteCr0Bits` / `WriteCr4Bits` / `WriteRflagsBits` / `WriteEferBits` /

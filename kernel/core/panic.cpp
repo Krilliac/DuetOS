@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/gdt.h"
+#include "arch/x86_64/lbr.h"
 #include "arch/x86_64/nmi_watchdog.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/smp.h"
@@ -70,7 +71,16 @@ constexpr const char* kDumpEndMarker = "=== DUETOS CRASH DUMP END ===\n";
 // `-> stop: <reason>` (NotPresent at level / non-canonical /
 // out-of-direct-map). Answers "why did this fault?" without
 // forcing the operator to walk by hand.
-constexpr u64 kDumpSchemaVersion = 3;
+//
+// v4 (2026-05-03): LBR (Architectural Last-Branch-Records)
+// section emitted between the return-address-pointer scan and
+// the held-locks block. On Intel CPUs that support
+// CPUID.7.0.EDX[19] (Goldmont Plus / Ice Lake / etc.) it lists
+// each captured `from -> to` branch with both addresses
+// symbolized. On TCG QEMU / pre-Goldmont-Plus / AMD it emits
+// a single "(unavailable)" line so the section's absence is
+// explicit.
+constexpr u64 kDumpSchemaVersion = 4;
 
 void WriteLabelled(const char* label, u64 value)
 {
@@ -257,6 +267,56 @@ void DumpReturnAddressPointers(u64 rsp)
     if (found == 0)
     {
         arch::SerialWrite("    (none)\n");
+    }
+}
+
+// Dump the per-CPU Architectural LBR ring. On hardware that
+// supports the feature each entry is `from -> to` with both
+// addresses symbolized when they fall inside known kernel
+// functions. Entry 0 is the youngest branch — i.e. the most
+// recent jump/call/ret/branch the CPU took before LbrFreeze
+// silenced further captures. Sees through frame-pointer omission,
+// asm thunks, and rbp-chain corruption because the records are
+// the CPU's own ground truth.
+//
+// On TCG QEMU and pre-Goldmont-Plus Intel parts (and AMD), LBR
+// is unavailable. The dump emits a single "(LBR unavailable...)"
+// line so the section's absence isn't ambiguous.
+void DumpLbr()
+{
+    if (!arch::LbrAvailable())
+    {
+        arch::SerialWrite("  LBR (last-branch records): (unavailable on this CPU)\n");
+        return;
+    }
+    arch::LbrSnapshot snap;
+    arch::LbrCapture(snap);
+    arch::SerialWrite("  LBR (last-branch records, ");
+    arch::SerialWriteHex(static_cast<u64>(snap.depth));
+    arch::SerialWrite(" entries, newest first; ctl=");
+    arch::SerialWriteHex(snap.ctl_at_capture);
+    arch::SerialWrite("):\n");
+    if (snap.depth == 0)
+    {
+        arch::SerialWrite("    (no entries)\n");
+        return;
+    }
+    for (u32 i = 0; i < snap.depth; ++i)
+    {
+        // Skip empty slots — silicon may report depth N but only
+        // N-k populated records (e.g. fewer than depth taken
+        // branches since LBR was enabled).
+        if (snap.from[i] == 0 && snap.to[i] == 0)
+        {
+            continue;
+        }
+        arch::SerialWrite("    #");
+        arch::SerialWriteHex(static_cast<u64>(i));
+        arch::SerialWrite("  from=");
+        WriteAddressWithSymbol(snap.from[i]);
+        arch::SerialWrite("\n         to  =");
+        WriteAddressWithSymbol(snap.to[i]);
+        arch::SerialWrite("\n");
     }
 }
 
@@ -509,6 +569,7 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
     DumpBacktrace(rbp);
     DumpStack(rsp, 16);
     DumpReturnAddressPointers(rsp);
+    DumpLbr();
     DumpHeldLocksLocal();
     DumpLogRing();
     DumpInflightScopes();
@@ -537,6 +598,10 @@ void Panic(const char* subsystem, const char* message)
     // DumpDiagnostics is writing.
     arch::NmiWatchdogDisable();
     duetos::diag::SoftLockupDisable();
+    // Freeze the per-CPU LBR ring NOW so the dump-emission code
+    // path itself doesn't push every SerialWrite call into the
+    // most-recent slot. No-op when LBR isn't supported.
+    arch::LbrFreeze();
 
     // Bypass the serial spinlock for the rest of this function.
     // A panic that fires while a peer CPU was already mid-
@@ -581,6 +646,10 @@ void PanicWithValue(const char* subsystem, const char* message, u64 value)
     arch::Cli();
     arch::NmiWatchdogDisable();
     duetos::diag::SoftLockupDisable();
+    // Freeze the per-CPU LBR ring NOW so the dump-emission code
+    // path itself doesn't push every SerialWrite call into the
+    // most-recent slot. No-op when LBR isn't supported.
+    arch::LbrFreeze();
     // See Panic() above for why we bypass the serial spinlock from
     // here on.
     arch::SerialEnterPanicMode();

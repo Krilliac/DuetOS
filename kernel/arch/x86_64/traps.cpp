@@ -32,6 +32,7 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/lapic.h"
+#include "arch/x86_64/lbr.h"
 #include "arch/x86_64/nmi_watchdog.h"
 #include "arch/x86_64/serial.h"
 
@@ -786,6 +787,10 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // watchdog interval; a PMI overflow during the dump would
     // re-enter the trap dispatcher and scramble the output.
     NmiWatchdogDisable();
+    // Freeze the LBR ring before any further branches in this
+    // dispatcher push real call sites out of the most-recent
+    // entries. No-op when LBR isn't available.
+    LbrFreeze();
     // Halt peer CPUs the same way `core::Panic` does — they're
     // running against potentially-corrupt shared state once we've
     // taken a fault in kernel mode, and their NMI handlers commit

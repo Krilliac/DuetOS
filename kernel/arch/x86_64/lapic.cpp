@@ -29,19 +29,9 @@ constexpr u8 kSpuriousVector = 0xFF;
 
 constinit volatile u32* g_lapic_mmio = nullptr;
 
-inline u64 ReadMsr(u32 msr)
-{
-    u32 lo, hi;
-    asm volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
-    return (static_cast<u64>(hi) << 32) | lo;
-}
-
-inline void WriteMsr(u32 msr, u64 value)
-{
-    const u32 lo = static_cast<u32>(value & 0xFFFFFFFF);
-    const u32 hi = static_cast<u32>(value >> 32);
-    asm volatile("wrmsr" : : "c"(msr), "a"(lo), "d"(hi));
-}
+// MSR helpers live in `arch/x86_64/cpu.h` now (same namespace);
+// the local copies that used to sit here would shadow-collide
+// with the canonical ones once both are visible at this scope.
 
 // CPUID leaf 1, EDX bit 9 = APIC-on-chip.
 bool CpuidApicPresent()

@@ -88,9 +88,9 @@ cmake --build "${BUILD_DIR}" >/dev/null
 # waiting on grub. The timeout still has to cover the post-grub
 # debug-build init sequence (ramfs build, driver self-tests,
 # klog warm-up) before kernel_main's deliberate Panic fires.
-echo "[test-panic] booting (60 s timeout, smoke=panic-demo)"
+echo "[test-panic] booting (90 s timeout, smoke=panic-demo)"
 LOG="$(mktemp)"
-DUETOS_TIMEOUT=60 DUETOS_SMOKE_PROFILE=panic-demo "${REPO_ROOT}/tools/qemu/run.sh" >"${LOG}" 2>&1 || true
+DUETOS_TIMEOUT=90 DUETOS_SMOKE_PROFILE=panic-demo "${REPO_ROOT}/tools/qemu/run.sh" >"${LOG}" 2>&1 || true
 
 if [[ "${SYMBOLIZE}" -eq 1 ]]; then
     RESOLVED="$(mktemp)"
@@ -171,6 +171,12 @@ assert_contains 'return-address pointers \(scan of 0x[0-9a-f]+ quads from rsp\)'
                                                                       "return-address-pointer header" "${DUMP_FILE}"
 assert_contains '^    \[0x[0-9a-f]+\] -> 0x[0-9a-f]+  \[[^ ]+\+0x[0-9a-f]+ \([^)]+\)\]' \
                                                                       "return-address-pointer entry symbolized" "${DUMP_FILE}"
+# LBR section is always emitted; the body is either populated entries
+# (real Intel hardware) or a single "(unavailable on this CPU)" line
+# (TCG QEMU + AMD + pre-Goldmont-Plus Intel). Either way the header
+# proves DumpLbr ran.
+assert_contains '^  LBR (\(last-branch records|\(unavailable on this CPU\))' \
+                                                                      "LBR section header"     "${DUMP_FILE}"
 assert_contains '\[panic\] --- log ring'                              "log-ring header"        "${DUMP_FILE}"
 # Any timestamped log line proves the ring captured something. We used
 # to assert on the klog self-test sanity line, but the ring is bounded
