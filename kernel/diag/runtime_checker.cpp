@@ -41,6 +41,7 @@
 #include "drivers/storage/block.h"
 #include "mm/frame_allocator.h"
 #include "mm/kheap.h"
+#include "mm/paging.h"
 #include "sched/sched.h"
 #include "security/guard.h"
 #include "diag/fault_react.h"
@@ -88,6 +89,25 @@ constinit u64 g_baseline_text_full_hash = 0;
 // false and always get full coverage. Read by `CheckBootSectors`
 // to decide whether the emulator-side disk-read throttle applies.
 constinit bool g_scan_from_heartbeat = false;
+
+// Synthetic function-pointer table baseline. Captured at
+// `RuntimeCheckerInit`; checked every scan via the
+// `AttackSimVtableHash` helper exposed by attack_sim.cpp. The
+// helper hashes the table's bytes; a single-slot rewrite changes
+// the hash. Only meaningful when the attack-sim suite has been
+// compiled in — otherwise the symbol is a stub that returns 0
+// and the check trivially holds.
+constinit u64 g_baseline_attack_sim_vtable_hash = 0;
+
+// Per-page PTE-flag baseline for a small set of `_rodata` pages
+// hand-picked at `RuntimeCheckerInit`. Each baseline is the
+// 12-bit attribute tail (NX bit included via the high-bit OR
+// folded down) — a real attacker who flips NX off or W on for
+// any of these pages would change the captured value.
+constexpr u32 kPteWatchSlots = 4;
+constinit u64 g_baseline_pte_va[kPteWatchSlots] = {};
+constinit u64 g_baseline_pte_attrs[kPteWatchSlots] = {};
+constinit u32 g_baseline_pte_count = 0;
 // Syscall MSR baselines. These are the post-boot "golden"
 // values; any later change signals a syscall-hook rootkit.
 // LSTAR = Linux 64-bit SYSCALL entry (IA32_LSTAR, 0xC0000082)
@@ -909,6 +929,131 @@ bool CheckKernelText()
     return false;
 }
 
+// ---------- function-pointer table integrity ----------
+//
+// The attack-sim TU defines a synthetic function-pointer table
+// (`AttackSimVtable`) in writable kernel data and exports
+// `AttackSimVtableHash()`. We baseline that hash at
+// `RuntimeCheckerInit` and recompute on every scan. A real-world
+// rootkit overwriting one slot of `driver_ops`, `bus_ops`, or any
+// other live dispatch table changes the hash.
+//
+// The symbol is a plain `extern "C"` so this TU has no
+// dependency on `<security/...>` headers. If a future build
+// drops the attack-sim TU, the link-time stub returns 0 and the
+// check trivially holds (baseline 0 vs. now 0).
+extern "C" u64 AttackSimVtableHash();
+
+bool CheckAttackSimVtable()
+{
+    const u64 now = AttackSimVtableHash();
+    if (now != g_baseline_attack_sim_vtable_hash)
+    {
+        arch::SerialWrite("[health] attack-sim vtable hash drifted: baseline=");
+        arch::SerialWriteHex(g_baseline_attack_sim_vtable_hash);
+        arch::SerialWrite(" now=");
+        arch::SerialWriteHex(now);
+        arch::SerialWrite("\n");
+        Report(HealthIssue::KernelFnTableModified);
+        return false;
+    }
+    return true;
+}
+
+// ---------- saved-RIP integrity (current kernel stack) ----------
+//
+// Walks the RBP chain on the calling thread's stack, asserting
+// that every saved RIP slot points into kernel `.text`. The
+// kernel is built `-fno-omit-frame-pointer`, so the chain is
+// reliable.
+//
+// Detection model: any saved RIP outside [_text_start, _text_end)
+// is corruption — either an attacker stack-smashed a frame to
+// redirect a `ret`, or a wild-pointer store scribbled the slot.
+// The chain is bounded to a fixed depth (32 frames) so a
+// circular RBP can't loop forever; chain breaks on a non-canonical
+// or non-higher-half RBP.
+//
+// `[[gnu::noinline]]` keeps this function as its own frame so
+// the walk's "skip self + RuntimeCheckerScan" math stays stable.
+[[gnu::noinline]] bool CheckTaskStackRips()
+{
+    u64* rbp;
+    asm volatile("mov %%rbp, %0" : "=r"(rbp));
+    constexpr u32 kMaxFrames = 32;
+    constexpr u64 kHigherHalf = 0xFFFF800000000000ULL;
+    const u64 ts = reinterpret_cast<u64>(_text_start);
+    const u64 te = reinterpret_cast<u64>(_text_end);
+    for (u32 i = 0; i < kMaxFrames; ++i)
+    {
+        if (rbp == nullptr)
+            return true;
+        const u64 rbp_va = reinterpret_cast<u64>(rbp);
+        // Sanity-check the RBP itself is plausible — a corrupted
+        // chain that leads us into user-VA or invalid kernel
+        // space is a stop condition, not a finding.
+        if (rbp_va < kHigherHalf)
+            return true;
+        const u64 saved_rip = rbp[1];
+        if (saved_rip == 0)
+            return true; // bottom-of-stack sentinel
+        if (saved_rip < ts || saved_rip >= te)
+        {
+            arch::SerialWrite("[health] saved RIP outside .text: frame=");
+            arch::SerialWriteHex(i);
+            arch::SerialWrite(" rip=");
+            arch::SerialWriteHex(saved_rip);
+            arch::SerialWrite("\n");
+            Report(HealthIssue::TaskStackRipCorrupt);
+            return false;
+        }
+        rbp = reinterpret_cast<u64*>(rbp[0]);
+    }
+    return true;
+}
+
+// ---------- per-page PTE flag baseline ----------
+//
+// At boot we sample a handful of `.rodata` pages, capture each
+// page's PTE attribute tail, and on every scan re-read each
+// PTE — any drift fires `KernelPteWxFlipped`. The CR0.WP and
+// EFER.NXE detectors are global; this catches the per-page flip
+// that those don't see (e.g. clearing NX on a single `.rodata`
+// page so an attacker can execute its bytes).
+//
+// Watch-list size is intentionally tiny (`kPteWatchSlots = 4`)
+// so every scan stays O(1); the slots are spread across the
+// `.rodata` range so a contiguous-block flip lands in at least
+// one of them. If a future slice grows the watch list (e.g. one
+// slot per `.rodata` page), the per-scan cost stays bounded by
+// the slot count, not the section size.
+extern "C" const u8 _rodata_start[];
+extern "C" const u8 _rodata_end[];
+
+bool CheckPteFlags()
+{
+    bool any_drift = false;
+    for (u32 i = 0; i < g_baseline_pte_count; ++i)
+    {
+        const u64 va = g_baseline_pte_va[i];
+        const u64 baseline = g_baseline_pte_attrs[i];
+        const u64 now = mm::GetPteFlags4K(va);
+        if (now != baseline)
+        {
+            arch::SerialWrite("[health] PTE flags drifted: va=");
+            arch::SerialWriteHex(va);
+            arch::SerialWrite(" baseline=");
+            arch::SerialWriteHex(baseline);
+            arch::SerialWrite(" now=");
+            arch::SerialWriteHex(now);
+            arch::SerialWrite("\n");
+            Report(HealthIssue::KernelPteWxFlipped);
+            any_drift = true;
+        }
+    }
+    return !any_drift;
+}
+
 // Verify that a counter hasn't gone backwards between scans.
 // Logs the name so the operator sees WHICH counter drifted.
 void VerifyMonotonic(const char* name, u64 prev, u64 now, bool& any_backwards)
@@ -1240,6 +1385,16 @@ HealthResponse ResponseFor(HealthIssue issue)
     case HealthIssue::FramesOverflow:
         return HealthResponse::Panic;
 
+    // KernelFnTableModified, TaskStackRipCorrupt, KernelPteWxFlipped:
+    // route through the default LogOnly arm. Each is structurally
+    // Panic-class, but production response is owned by a future
+    // slice that grows golden-baseline restoration / per-page heal /
+    // stack frame fix-up. For now, the counter increment + log line
+    // are the operator signal — same shape as other test-only issues
+    // (CanaryFileTouched, PersistenceDropDetected). The attack-sim
+    // suite needs these in LogOnly so RunAttack's own scan doesn't
+    // halt the kernel mid-test.
+
     // LogOnly: everything else. Not recoverable by heal and
     // not catastrophic — operator signal only. Some of these
     // MAY be legitimate (FramesAllAllocated on a deliberately-
@@ -1340,6 +1495,12 @@ const char* HealthIssueName(HealthIssue i)
         return "process touched a canary / suspicious-extension path (task killed)";
     case HealthIssue::PersistenceDropDetected:
         return "process mutated an autostart-equivalent path (potential persistence drop)";
+    case HealthIssue::KernelFnTableModified:
+        return "kernel function-pointer table hash drifted (rootkit slot rewrite)";
+    case HealthIssue::TaskStackRipCorrupt:
+        return "saved RIP on the current kernel stack points outside .text (stack smash / wild store)";
+    case HealthIssue::KernelPteWxFlipped:
+        return "monitored kernel page's PTE flags drifted (per-page W^X bypass)";
     default:
         return "(unnamed issue)";
     }
@@ -1355,6 +1516,40 @@ void RuntimeCheckerInit()
     g_baseline_gdt_hash = arch::GdtHash();
     g_baseline_text_spot_hash = ComputeTextSpotHash();
     g_baseline_text_full_hash = ComputeTextFullHash();
+    g_baseline_attack_sim_vtable_hash = AttackSimVtableHash();
+    // Sample a small number of `.rodata` pages — head, tail, and
+    // two interior offsets. The watch list intentionally stops at
+    // 4; a future slice can grow it if telemetry shows attackers
+    // hitting non-watched regions, at which point the per-scan
+    // cost is still O(watchlist).
+    {
+        const u64 rs = reinterpret_cast<u64>(_rodata_start);
+        const u64 re = reinterpret_cast<u64>(_rodata_end);
+        const u64 size = (re > rs) ? (re - rs) : 0;
+        if (size >= 4096)
+        {
+            const u64 candidates[kPteWatchSlots] = {
+                rs,                      // head
+                rs + (size / 4),         // first quartile
+                rs + (size / 2),         // midpoint
+                (re - 4096) & ~0xFFFULL, // tail page
+            };
+            u32 slot = 0;
+            for (u32 i = 0; i < kPteWatchSlots; ++i)
+            {
+                const u64 va = candidates[i] & ~0xFFFULL;
+                const u64 attrs = mm::GetPteFlags4K(va);
+                // Skip slots whose lookup failed (e.g. address still
+                // in a 2 MiB-PS region the boot map hasn't split).
+                if (attrs == 0)
+                    continue;
+                g_baseline_pte_va[slot] = va;
+                g_baseline_pte_attrs[slot] = attrs;
+                ++slot;
+            }
+            g_baseline_pte_count = slot;
+        }
+    }
     g_baseline_lstar = ReadMsr(kMsrIa32Lstar);
     g_baseline_star = ReadMsr(kMsrIa32Star);
     g_baseline_cstar = ReadMsr(kMsrIa32Cstar);
@@ -1446,6 +1641,9 @@ u64 RuntimeCheckerScan()
         (void)CheckIdt();
         (void)CheckGdt();
         (void)CheckKernelText();
+        (void)CheckAttackSimVtable();
+        (void)CheckTaskStackRips();
+        (void)CheckPteFlags();
     }
     (void)CheckCanary();
     (void)CheckTaskStacks();

@@ -185,6 +185,20 @@ void ProtectKernelImage();
 /// care — a long-lived writable .text is a W^X hole.
 void SetPteFlags4K(u64 virt, u64 new_flags);
 
+/// Read the current 4 KiB PTE flags for the page containing
+/// `virt`. Walks the active PML4 down to the leaf entry. Returns
+/// 0 if the address is unmapped, sits inside a 2 MiB-PS region,
+/// or otherwise can't be resolved at the 4 KiB level — callers
+/// that care MUST distinguish 0 from "PTE present but all flags
+/// happen to be clear" by asserting `kPagePresent` in the
+/// returned mask.
+///
+/// The runtime invariant checker uses this to baseline the
+/// attribute tail of selected `.rodata` / `.text` pages at boot
+/// and detect later per-page W^X flips that the global CR0.WP /
+/// EFER.NXE detectors are blind to.
+u64 GetPteFlags4K(u64 virt);
+
 /*
  * User-pointer copy helpers.
  *

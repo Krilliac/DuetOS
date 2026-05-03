@@ -2,7 +2,7 @@
 
 **Type:** Observation + Pattern
 **Status:** Active
-**Last updated:** 2026-04-26
+**Last updated:** 2026-05-03
 
 ## What it is
 
@@ -36,7 +36,7 @@ Each attack follows the same five-step recipe (`RunAttack`):
    pre-attack baseline, restore the world. A second post-restore scan
    prevents the next attack inheriting a still-pending detection.
 
-## Suite inventory (11 active + 5 deferred)
+## Suite inventory (20 active + 5 deferred)
 
 | # | Attack | Detector that fires | Notes |
 |---|---|---|---|
@@ -52,6 +52,9 @@ Each attack follows the same five-step recipe (`RunAttack`):
 | 10 | EFER.NXE defang (data exec) | `EferNxeCleared` | Auto-healed |
 | 11 | Kernel `.text` 1-byte patch | `KernelTextModified` | IRQ-off + CR0.WP toggle bracket the write window. Patches `_text_start + 0x40` (dormant boot stub) |
 | 17 | Function-branch NOP patch (cap-gate bypass) | `KernelTextModified` | Patches a 2-byte `je` inside a synthetic cap-style gate to `90 90`. Lives in middle `.text` (716 KiB into a 1.14 MiB section). Originally surfaced a detection gap (spot hash blind to mid-section); same slice closed the gap by adding `g_baseline_text_full_hash` + `ComputeTextFullHash` to `runtime_checker.cpp`. Now reports `Pass` with serial-log line `[health] kernel text drift: FULL-only …`. See `branch-nop-attack-v0.md`. |
+| 18 | Function-pointer table slot overwrite | `KernelFnTableModified` | Synthetic `g_attack_sim_vtable` (4 function pointers in writable kernel data) modelled on `driver_ops` / `bus_ops`. Attack flips slot 2 to `0xDEADBEEFCAFEBABE`. Detector: `extern "C" AttackSimVtableHash()` (FNV-1a over the table bytes) compared against `g_baseline_attack_sim_vtable_hash` captured at `RuntimeCheckerInit`. |
+| 19 | Saved-RIP overwrite (return-address smash) | `TaskStackRipCorrupt` | Walks 2 RBP frames back from the attack's frame, writes `0x0000BAD0C0DE0001` to `AttackSimRun`'s saved-RIP slot. Detector: `CheckTaskStackRips()` walks the active RBP chain (≤32 frames), reports if any saved RIP is outside `[_text_start, _text_end)`. Restore happens before any return through the corrupted frame. Requires `-fno-omit-frame-pointer` (already set). |
+| 20 | PTE W^X flip (per-page attribute rewrite) | `KernelPteWxFlipped` | Picks the head `.rodata` page, drops NX + sets W via `mm::SetPteFlags4K`. Detector: `CheckPteFlags()` re-reads up to 4 watch-list PTEs against per-page baselines captured at `RuntimeCheckerInit`. Distinct from the global `Cr0WpCleared` / `EferNxeCleared` detectors — those are CPU-wide bits, this is per-page. |
 
 **Deferred (each needs its own slice):**
 
