@@ -1,4 +1,4 @@
-#include "net/wireless/crypto/aes.h"
+#include "crypto/aes.h"
 
 #include "core/panic.h"
 
@@ -15,7 +15,7 @@
  * appears.
  */
 
-namespace duetos::net::wireless::crypto
+namespace duetos::crypto
 {
 
 namespace
@@ -315,11 +315,11 @@ void AesSelfTest()
         u8 ct[16];
         AesEncryptBlock(ctx, pt, ct);
         for (u32 i = 0; i < 16; ++i)
-            KASSERT(ct[i] == want[i], "net/wireless/crypto/aes", "AES-128 FIPS 197 Appendix B encrypt mismatch");
+            KASSERT(ct[i] == want[i], "crypto/aes", "AES-128 FIPS 197 Appendix B encrypt mismatch");
         u8 rt[16];
         AesDecryptBlock(ctx, ct, rt);
         for (u32 i = 0; i < 16; ++i)
-            KASSERT(rt[i] == pt[i], "net/wireless/crypto/aes", "AES-128 FIPS 197 Appendix B decrypt mismatch");
+            KASSERT(rt[i] == pt[i], "crypto/aes", "AES-128 FIPS 197 Appendix B decrypt mismatch");
     }
 
     // FIPS 197 Appendix C.1 — AES-128 with key 00..0F, plaintext 00..FF.
@@ -336,11 +336,11 @@ void AesSelfTest()
         u8 ct[16];
         AesEncryptBlock(ctx, pt, ct);
         for (u32 i = 0; i < 16; ++i)
-            KASSERT(ct[i] == want[i], "net/wireless/crypto/aes", "AES-128 FIPS 197 Appendix C.1 encrypt mismatch");
+            KASSERT(ct[i] == want[i], "crypto/aes", "AES-128 FIPS 197 Appendix C.1 encrypt mismatch");
         u8 rt[16];
         AesDecryptBlock(ctx, ct, rt);
         for (u32 i = 0; i < 16; ++i)
-            KASSERT(rt[i] == pt[i], "net/wireless/crypto/aes", "AES-128 FIPS 197 Appendix C.1 decrypt mismatch");
+            KASSERT(rt[i] == pt[i], "crypto/aes", "AES-128 FIPS 197 Appendix C.1 decrypt mismatch");
     }
 
     // FIPS 197 Appendix C.3 — AES-256 with key 00..1F, plaintext 00..FF.
@@ -358,12 +358,12 @@ void AesSelfTest()
         u8 ct[16];
         AesEncryptBlock(ctx, pt, ct);
         for (u32 i = 0; i < 16; ++i)
-            KASSERT(ct[i] == want[i], "net/wireless/crypto/aes", "AES-256 FIPS 197 Appendix C.3 encrypt mismatch");
+            KASSERT(ct[i] == want[i], "crypto/aes", "AES-256 FIPS 197 Appendix C.3 encrypt mismatch");
         u8 rt[16];
         AesDecryptBlock(ctx, ct, rt);
         for (u32 i = 0; i < 16; ++i)
-            KASSERT(rt[i] == pt[i], "net/wireless/crypto/aes", "AES-256 FIPS 197 Appendix C.3 decrypt mismatch");
+            KASSERT(rt[i] == pt[i], "crypto/aes", "AES-256 FIPS 197 Appendix C.3 decrypt mismatch");
     }
 }
 
-} // namespace duetos::net::wireless::crypto
+} // namespace duetos::crypto

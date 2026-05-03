@@ -1,8 +1,8 @@
 #include "net/wireless/test/fake_ap.h"
 
 #include "core/panic.h"
-#include "net/wireless/crypto/pbkdf2.h"
-#include "net/wireless/crypto/prf.h"
+#include "crypto/pbkdf2.h"
+#include "crypto/prf.h"
 #include "net/wireless/wifi_diag.h"
 
 namespace duetos::net::wireless::test
@@ -159,7 +159,7 @@ const char* FakeApStateName(FakeApState s)
     CopyBytes(ap->mac, mac, 6);
     ap->channel = channel;
     if (ap->wpa2)
-        crypto::WpaPmkDerive(ap->passphrase, ap->ssid, ap->ssid_len, ap->pmk);
+        duetos::crypto::WpaPmkDerive(ap->passphrase, ap->ssid, ap->ssid_len, ap->pmk);
     // Pre-compute a deterministic GTK so the test can compare
     // STA-installed against AP-locked-in.
     for (u32 i = 0; i < 16; ++i)
@@ -316,7 +316,7 @@ u32 FakeApBuildAssocResponse(FakeAp* ap, const u8 sta_mac[6], u8* out, u32 cap)
     CopyBytes(snonce, fm.key_nonce, 32);
     u8 seed[76];
     BuildPrfSeed(ap->sta_mac, ap->mac, snonce, ap->anonce, seed);
-    crypto::Prf(ap->pmk, 32, "Pairwise key expansion", seed, 76, kPtkBytes * 8u, ap->ptk);
+    duetos::crypto::Prf(ap->pmk, 32, "Pairwise key expansion", seed, 76, kPtkBytes * 8u, ap->ptk);
     ap->ptk_valid = true;
 
     // Verify M2 MIC against our derived KCK (first 16 bytes of PTK).

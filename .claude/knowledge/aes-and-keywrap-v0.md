@@ -6,7 +6,7 @@ _Last updated: 2026-05-03._
 
 ## What landed
 
-Two coupled crypto primitives in `kernel/net/wireless/crypto/`:
+Two coupled crypto primitives in `kernel/crypto/`:
 
 - **`aes.{h,cpp}`** — AES-128 + AES-256 block cipher per FIPS 197.
   - `AesCtx` holds up to 240 bytes of round keys plus `num_rounds`
@@ -137,10 +137,10 @@ It also closes the `porting-candidates-v0.md` rows:
 
 ## Files
 
-- `kernel/net/wireless/crypto/aes.h` — public surface (~65 LOC).
-- `kernel/net/wireless/crypto/aes.cpp` — block + KAT (~330 LOC).
-- `kernel/net/wireless/crypto/aes_keywrap.h` — public surface (~55 LOC).
-- `kernel/net/wireless/crypto/aes_keywrap.cpp` — wrap/unwrap + KAT (~225 LOC).
+- `kernel/crypto/aes.h` — public surface (~65 LOC).
+- `kernel/crypto/aes.cpp` — block + KAT (~330 LOC).
+- `kernel/crypto/aes_keywrap.h` — public surface (~55 LOC).
+- `kernel/crypto/aes_keywrap.cpp` — wrap/unwrap + KAT (~225 LOC).
 - `kernel/core/main.cpp` — added two `DUETOS_BOOT_SELFTEST` lines + two `#include`s.
 
 Total: ~675 LOC across four new files plus a tiny edit to main.cpp.

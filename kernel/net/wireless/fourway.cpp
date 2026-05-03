@@ -2,9 +2,9 @@
 
 #include "core/panic.h"
 #include "log/klog.h"
-#include "net/wireless/crypto/aes.h"
-#include "net/wireless/crypto/aes_keywrap.h"
-#include "net/wireless/crypto/prf.h"
+#include "crypto/aes.h"
+#include "crypto/aes_keywrap.h"
+#include "crypto/prf.h"
 #include "net/wireless/wifi_diag.h"
 
 namespace duetos::net::wireless
@@ -227,9 +227,9 @@ void FourWayInit(FourWayContext& ctx, const u8 pmk[32], const u8 sta_mac[6], con
         u8 seed[76];
         BuildPrfSeed(ctx.sta_mac, ctx.ap_mac, ctx.snonce, ctx.anonce, seed);
         if (ctx.sha256)
-            crypto::KdfSha256(ctx.pmk, 32, "Pairwise key expansion", seed, 76, kPtkBytes * 8u, ctx.ptk);
+            duetos::crypto::KdfSha256(ctx.pmk, 32, "Pairwise key expansion", seed, 76, kPtkBytes * 8u, ctx.ptk);
         else
-            crypto::Prf(ctx.pmk, 32, "Pairwise key expansion", seed, 76, kPtkBytes * 8u, ctx.ptk);
+            duetos::crypto::Prf(ctx.pmk, 32, "Pairwise key expansion", seed, 76, kPtkBytes * 8u, ctx.ptk);
         ctx.ptk_valid = true;
         ctx.state = FourWayState::AwaitingM3;
         KLOG_INFO_A(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
@@ -296,9 +296,9 @@ void FourWayInit(FourWayContext& ctx, const u8 pmk[32], const u8 sta_mac[6], con
                                 static_cast<u32>(::duetos::core::ErrorCode::Corrupt), plain_len, 0, 0);
                 return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
             }
-            crypto::AesCtx kek_ctx;
-            crypto::AesKeyExpand128(kek_ctx, FourWayKek(ctx));
-            if (!crypto::AesKeyUnwrap(kek_ctx, f.key_data, f.key_data_len, unwrapped))
+            duetos::crypto::AesCtx kek_ctx;
+            duetos::crypto::AesKeyExpand128(kek_ctx, FourWayKek(ctx));
+            if (!duetos::crypto::AesKeyUnwrap(kek_ctx, f.key_data, f.key_data_len, unwrapped))
             {
                 ++ctx.mic_failures;
                 ctx.state = FourWayState::Failed;
@@ -537,9 +537,9 @@ void FourWaySelfTest()
             plain_kd[i] = 0x00;
 
         u8 wrapped_kd[40]; // 32 plaintext + 8 IV semi-block
-        crypto::AesCtx wrap_ctx;
-        crypto::AesKeyExpand128(wrap_ctx, FourWayKek(c2));
-        const bool wrap_ok = crypto::AesKeyWrap(wrap_ctx, plain_kd, 32, wrapped_kd);
+        duetos::crypto::AesCtx wrap_ctx;
+        duetos::crypto::AesKeyExpand128(wrap_ctx, FourWayKek(c2));
+        const bool wrap_ok = duetos::crypto::AesKeyWrap(wrap_ctx, plain_kd, 32, wrapped_kd);
         KASSERT(wrap_ok, "net/wireless/fourway", "AES-KW wrap of synthetic key data failed");
 
         EapolKeyFrame m3e{};

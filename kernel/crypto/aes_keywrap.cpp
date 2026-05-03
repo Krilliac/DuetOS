@@ -1,4 +1,4 @@
-#include "net/wireless/crypto/aes_keywrap.h"
+#include "crypto/aes_keywrap.h"
 
 #include "core/panic.h"
 
@@ -26,7 +26,7 @@
  * extra heap or large stack allocation.
  */
 
-namespace duetos::net::wireless::crypto
+namespace duetos::crypto
 {
 
 namespace
@@ -159,14 +159,14 @@ void AesKeyWrapSelfTest()
         AesKeyExpand128(ctx, kek);
         u8 ct[24];
         const bool wrap_ok = AesKeyWrap(ctx, pt, 16, ct);
-        KASSERT(wrap_ok, "net/wireless/crypto/aes_keywrap", "RFC 3394 §4.1 wrap rejected valid input");
+        KASSERT(wrap_ok, "crypto/aes_keywrap", "RFC 3394 §4.1 wrap rejected valid input");
         for (u32 i = 0; i < 24; ++i)
-            KASSERT(ct[i] == want[i], "net/wireless/crypto/aes_keywrap", "RFC 3394 §4.1 wrap mismatch");
+            KASSERT(ct[i] == want[i], "crypto/aes_keywrap", "RFC 3394 §4.1 wrap mismatch");
         u8 rt[16];
         const bool unwrap_ok = AesKeyUnwrap(ctx, ct, 24, rt);
-        KASSERT(unwrap_ok, "net/wireless/crypto/aes_keywrap", "RFC 3394 §4.1 unwrap integrity check failed");
+        KASSERT(unwrap_ok, "crypto/aes_keywrap", "RFC 3394 §4.1 unwrap integrity check failed");
         for (u32 i = 0; i < 16; ++i)
-            KASSERT(rt[i] == pt[i], "net/wireless/crypto/aes_keywrap", "RFC 3394 §4.1 round-trip mismatch");
+            KASSERT(rt[i] == pt[i], "crypto/aes_keywrap", "RFC 3394 §4.1 round-trip mismatch");
     }
 
     // RFC 3394 §4.3 — Wrap 128 bits of Key Data with a 256-bit KEK.
@@ -182,14 +182,14 @@ void AesKeyWrapSelfTest()
         AesKeyExpand256(ctx, kek);
         u8 ct[24];
         const bool wrap_ok = AesKeyWrap(ctx, pt, 16, ct);
-        KASSERT(wrap_ok, "net/wireless/crypto/aes_keywrap", "RFC 3394 §4.3 wrap rejected valid input");
+        KASSERT(wrap_ok, "crypto/aes_keywrap", "RFC 3394 §4.3 wrap rejected valid input");
         for (u32 i = 0; i < 24; ++i)
-            KASSERT(ct[i] == want[i], "net/wireless/crypto/aes_keywrap", "RFC 3394 §4.3 wrap mismatch");
+            KASSERT(ct[i] == want[i], "crypto/aes_keywrap", "RFC 3394 §4.3 wrap mismatch");
         u8 rt[16];
         const bool unwrap_ok = AesKeyUnwrap(ctx, ct, 24, rt);
-        KASSERT(unwrap_ok, "net/wireless/crypto/aes_keywrap", "RFC 3394 §4.3 unwrap integrity check failed");
+        KASSERT(unwrap_ok, "crypto/aes_keywrap", "RFC 3394 §4.3 unwrap integrity check failed");
         for (u32 i = 0; i < 16; ++i)
-            KASSERT(rt[i] == pt[i], "net/wireless/crypto/aes_keywrap", "RFC 3394 §4.3 round-trip mismatch");
+            KASSERT(rt[i] == pt[i], "crypto/aes_keywrap", "RFC 3394 §4.3 round-trip mismatch");
     }
 
     // RFC 3394 §4.6 — Wrap 256 bits with a 256-bit KEK (n=4 path).
@@ -208,14 +208,14 @@ void AesKeyWrapSelfTest()
         AesKeyExpand256(ctx, kek);
         u8 ct[40];
         const bool wrap_ok = AesKeyWrap(ctx, pt, 32, ct);
-        KASSERT(wrap_ok, "net/wireless/crypto/aes_keywrap", "RFC 3394 §4.6 wrap rejected valid input");
+        KASSERT(wrap_ok, "crypto/aes_keywrap", "RFC 3394 §4.6 wrap rejected valid input");
         for (u32 i = 0; i < 40; ++i)
-            KASSERT(ct[i] == want[i], "net/wireless/crypto/aes_keywrap", "RFC 3394 §4.6 wrap mismatch");
+            KASSERT(ct[i] == want[i], "crypto/aes_keywrap", "RFC 3394 §4.6 wrap mismatch");
         u8 rt[32];
         const bool unwrap_ok = AesKeyUnwrap(ctx, ct, 40, rt);
-        KASSERT(unwrap_ok, "net/wireless/crypto/aes_keywrap", "RFC 3394 §4.6 unwrap integrity check failed");
+        KASSERT(unwrap_ok, "crypto/aes_keywrap", "RFC 3394 §4.6 unwrap integrity check failed");
         for (u32 i = 0; i < 32; ++i)
-            KASSERT(rt[i] == pt[i], "net/wireless/crypto/aes_keywrap", "RFC 3394 §4.6 round-trip mismatch");
+            KASSERT(rt[i] == pt[i], "crypto/aes_keywrap", "RFC 3394 §4.6 round-trip mismatch");
     }
 
     // Tamper detection: flipping a bit in the wrapped IV must
@@ -232,7 +232,7 @@ void AesKeyWrapSelfTest()
         ct[0] ^= 0x01;
         u8 rt[16];
         const bool unwrap_ok = AesKeyUnwrap(ctx, ct, 24, rt);
-        KASSERT(!unwrap_ok, "net/wireless/crypto/aes_keywrap",
+        KASSERT(!unwrap_ok, "crypto/aes_keywrap",
                 "RFC 3394 unwrap accepted tampered ciphertext (integrity check broken)");
     }
 
@@ -245,13 +245,13 @@ void AesKeyWrapSelfTest()
         AesKeyExpand128(ctx, kek);
         u8 buf[24];
         const u8 dummy[16] = {0};
-        KASSERT(!AesKeyWrap(ctx, dummy, 0, buf), "net/wireless/crypto/aes_keywrap", "wrap accepted len=0");
-        KASSERT(!AesKeyWrap(ctx, dummy, 7, buf), "net/wireless/crypto/aes_keywrap", "wrap accepted len=7 (not %8)");
-        KASSERT(!AesKeyWrap(ctx, dummy, 8, buf), "net/wireless/crypto/aes_keywrap",
+        KASSERT(!AesKeyWrap(ctx, dummy, 0, buf), "crypto/aes_keywrap", "wrap accepted len=0");
+        KASSERT(!AesKeyWrap(ctx, dummy, 7, buf), "crypto/aes_keywrap", "wrap accepted len=7 (not %8)");
+        KASSERT(!AesKeyWrap(ctx, dummy, 8, buf), "crypto/aes_keywrap",
                 "wrap accepted single-semi-block input (n=1)");
-        KASSERT(!AesKeyUnwrap(ctx, buf, 16, buf), "net/wireless/crypto/aes_keywrap",
+        KASSERT(!AesKeyUnwrap(ctx, buf, 16, buf), "crypto/aes_keywrap",
                 "unwrap accepted len=16 (need ≥ 24)");
     }
 }
 
-} // namespace duetos::net::wireless::crypto
+} // namespace duetos::crypto

@@ -26,7 +26,7 @@ Boot KAT covers:
 - Single `0x00` byte → `0xD202EF8D`.
 - Single `0xFF` byte → `0xFF000000`.
 
-### 2. MD5 — `kernel/net/wireless/crypto/md5.{h,cpp}`
+### 2. MD5 — `kernel/crypto/md5.{h,cpp}`
 
 RFC 1321 implementation. Same context-update-final shape as the
 existing SHA-1 / SHA-256 modules. Header carries an explicit
@@ -144,7 +144,7 @@ MSI/MSI-X IRQ wiring; both are HW-gated, not software-gated.
 - `kernel/util/crc32.{h,cpp}` — hoisted module (~80 LOC).
 - `kernel/util/base64.{h,cpp}` — encode + decode + 12-case KAT
   (~280 LOC).
-- `kernel/net/wireless/crypto/md5.{h,cpp}` — MD5 + 7-case KAT
+- `kernel/crypto/md5.{h,cpp}` — MD5 + 7-case KAT
   (~225 LOC).
 - `kernel/net/wireless/fourway.cpp` — M3 unwrap branch + ciphered
   KAT (~80 LOC delta).

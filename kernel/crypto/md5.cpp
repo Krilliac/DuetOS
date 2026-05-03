@@ -1,4 +1,4 @@
-#include "net/wireless/crypto/md5.h"
+#include "crypto/md5.h"
 
 #include "core/panic.h"
 
@@ -13,7 +13,7 @@
  * `md5.h` for the policy.
  */
 
-namespace duetos::net::wireless::crypto
+namespace duetos::crypto
 {
 
 namespace
@@ -212,8 +212,8 @@ void Md5SelfTest()
         u8 got[16];
         Md5Hash(reinterpret_cast<const u8*>(vectors[v].msg), vectors[v].len, got);
         for (u32 i = 0; i < 16; ++i)
-            KASSERT(got[i] == vectors[v].want[i], "net/wireless/crypto/md5", "RFC 1321 Appendix A.5 vector mismatch");
+            KASSERT(got[i] == vectors[v].want[i], "crypto/md5", "RFC 1321 Appendix A.5 vector mismatch");
     }
 }
 
-} // namespace duetos::net::wireless::crypto
+} // namespace duetos::crypto

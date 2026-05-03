@@ -21,7 +21,7 @@
  * SHA-1 for authentication; use HMAC-SHA1 from `hmac.h`.
  */
 
-namespace duetos::net::wireless::crypto
+namespace duetos::crypto
 {
 
 inline constexpr u32 kSha1DigestBytes = 20;
@@ -46,4 +46,4 @@ void Sha1Hash(const u8* data, u32 length, u8 out[kSha1DigestBytes]);
 /// vectors ("abc", million-a, etc.). Panics on mismatch.
 void Sha1SelfTest();
 
-} // namespace duetos::net::wireless::crypto
+} // namespace duetos::crypto

@@ -23,7 +23,7 @@
  * allocation, no global state.
  */
 
-namespace duetos::net::wireless::crypto
+namespace duetos::crypto
 {
 
 inline constexpr u32 kMd5DigestBytes = 16;
@@ -44,4 +44,4 @@ void Md5Hash(const u8* data, u32 length, u8 out[kMd5DigestBytes]);
 
 void Md5SelfTest();
 
-} // namespace duetos::net::wireless::crypto
+} // namespace duetos::crypto

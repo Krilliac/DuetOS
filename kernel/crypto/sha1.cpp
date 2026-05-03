@@ -1,8 +1,8 @@
-#include "net/wireless/crypto/sha1.h"
+#include "crypto/sha1.h"
 
 #include "core/panic.h"
 
-namespace duetos::net::wireless::crypto
+namespace duetos::crypto
 {
 
 namespace
@@ -162,7 +162,7 @@ void Sha1SelfTest()
         const u8 want[20] = {0xA9, 0x99, 0x3E, 0x36, 0x47, 0x06, 0x81, 0x6A, 0xBA, 0x3E,
                              0x25, 0x71, 0x78, 0x50, 0xC2, 0x6C, 0x9C, 0xD0, 0xD8, 0x9D};
         for (u32 i = 0; i < 20; ++i)
-            KASSERT(d[i] == want[i], "net/wireless/crypto/sha1", "sha1 KAT \"abc\" mismatch");
+            KASSERT(d[i] == want[i], "crypto/sha1", "sha1 KAT \"abc\" mismatch");
     }
     // FIPS 180-1 Appendix A.2:
     // "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
@@ -173,7 +173,7 @@ void Sha1SelfTest()
         const u8 want[20] = {0x84, 0x98, 0x3E, 0x44, 0x1C, 0x3B, 0xD2, 0x6E, 0xBA, 0xAE,
                              0x4A, 0xA1, 0xF9, 0x51, 0x29, 0xE5, 0xE5, 0x46, 0x70, 0xF1};
         for (u32 i = 0; i < 20; ++i)
-            KASSERT(d[i] == want[i], "net/wireless/crypto/sha1", "sha1 KAT 56-byte mismatch");
+            KASSERT(d[i] == want[i], "crypto/sha1", "sha1 KAT 56-byte mismatch");
     }
     // Empty string vector.
     {
@@ -182,8 +182,8 @@ void Sha1SelfTest()
         const u8 want[20] = {0xDA, 0x39, 0xA3, 0xEE, 0x5E, 0x6B, 0x4B, 0x0D, 0x32, 0x55,
                              0xBF, 0xEF, 0x95, 0x60, 0x18, 0x90, 0xAF, 0xD8, 0x07, 0x09};
         for (u32 i = 0; i < 20; ++i)
-            KASSERT(d[i] == want[i], "net/wireless/crypto/sha1", "sha1 KAT empty mismatch");
+            KASSERT(d[i] == want[i], "crypto/sha1", "sha1 KAT empty mismatch");
     }
 }
 
-} // namespace duetos::net::wireless::crypto
+} // namespace duetos::crypto

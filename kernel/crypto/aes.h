@@ -14,7 +14,7 @@
  *   - AES-GCM (NIST SP 800-38D) for 802.11 GCMP frame encryption.
  *   - Future: TLS 1.2 AES-CBC + TLS 1.3 AES-GCM.
  *
- * Same shape as the rest of `net/wireless/crypto/`: zero allocation,
+ * Same shape as the rest of `kernel/crypto/`: zero allocation,
  * caller-owned context, KAT-driven self-test wired from
  * `core/main.cpp`.
  *
@@ -24,7 +24,7 @@
  * `AesKeyExpand` plus a constant change. Don't pre-pay that cost.
  */
 
-namespace duetos::net::wireless::crypto
+namespace duetos::crypto
 {
 
 inline constexpr u32 kAesBlockBytes = 16;
@@ -55,4 +55,4 @@ void AesDecryptBlock(const AesCtx& ctx, const u8 in[kAesBlockBytes], u8 out[kAes
 
 void AesSelfTest();
 
-} // namespace duetos::net::wireless::crypto
+} // namespace duetos::crypto

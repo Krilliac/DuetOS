@@ -1,6 +1,6 @@
 #pragma once
 
-#include "net/wireless/crypto/aes.h"
+#include "crypto/aes.h"
 #include "util/types.h"
 
 /*
@@ -26,7 +26,7 @@
  * `ctx.num_rounds`.
  */
 
-namespace duetos::net::wireless::crypto
+namespace duetos::crypto
 {
 
 inline constexpr u32 kAesKwSemiBlockBytes = 8;
@@ -57,4 +57,4 @@ bool AesKeyUnwrap(const AesCtx& kek, const u8* ciphertext, u32 ciphertext_bytes,
 
 void AesKeyWrapSelfTest();
 
-} // namespace duetos::net::wireless::crypto
+} // namespace duetos::crypto

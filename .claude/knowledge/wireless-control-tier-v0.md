@@ -41,19 +41,19 @@ data is flowing".*
 
 ### Cryptographic primitives (all KAT-verified at boot)
 
-- `kernel/net/wireless/crypto/sha1.{h,cpp}` — SHA-1 per FIPS
+- `kernel/crypto/sha1.{h,cpp}` — SHA-1 per FIPS
   180-1 with three test vectors (`"abc"`, the 56-byte string,
   empty).
-- `kernel/net/wireless/crypto/sha256.{h,cpp}` — SHA-256 per
+- `kernel/crypto/sha256.{h,cpp}` — SHA-256 per
   FIPS 180-2 with two test vectors.
-- `kernel/net/wireless/crypto/hmac.{h,cpp}` — HMAC-SHA1 +
+- `kernel/crypto/hmac.{h,cpp}` — HMAC-SHA1 +
   HMAC-SHA256 per RFC 2104 / RFC 6234. KAT against RFC 2202
   vector 1 (HMAC-SHA1) and RFC 4231 vector 1 (HMAC-SHA256).
-- `kernel/net/wireless/crypto/pbkdf2.{h,cpp}` — PBKDF2-HMAC-SHA1
+- `kernel/crypto/pbkdf2.{h,cpp}` — PBKDF2-HMAC-SHA1
   per RFC 2898. WPA2 PSK→PMK derivation (4096 iterations, SSID
   as salt). KAT against IEEE 802.11i Annex H vectors:
   `("password", "IEEE")` and `("ThisIsAPassword", "ThisIsASSID")`.
-- `kernel/net/wireless/crypto/prf.{h,cpp}` — IEEE 802.11i PRF-X
+- `kernel/crypto/prf.{h,cpp}` — IEEE 802.11i PRF-X
   (HMAC-SHA1-based, used for legacy / CCMP-PSK PTK derivation)
   + KDF-Hash-SHA256 (used for SHA-256-suite AKMs and WPA3-SAE).
   KAT covers determinism + counter-prefix invariant.

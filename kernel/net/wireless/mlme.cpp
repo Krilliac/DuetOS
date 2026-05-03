@@ -2,7 +2,7 @@
 
 #include "core/panic.h"
 #include "log/klog.h"
-#include "net/wireless/crypto/pbkdf2.h"
+#include "crypto/pbkdf2.h"
 #include "net/wireless/wifi_diag.h"
 #include "time/tick.h"
 
@@ -261,7 +261,7 @@ u32 MlmeBuildDefaultRsnIe(u8* out, u32 cap)
     if (req.passphrase[0] != '\0' &&
         (target->security == WirelessSecurity::Wpa2 || target->security == WirelessSecurity::Wpa))
     {
-        crypto::WpaPmkDerive(req.passphrase, req.ssid, req.ssid_len, pmk);
+        duetos::crypto::WpaPmkDerive(req.passphrase, req.ssid, req.ssid_len, pmk);
         psk_mode = true;
         diag::RecordOk(diag::Layer::Mlme, "pmk-derived", req.ssid_len, 0, wdev->wdev_id);
     }

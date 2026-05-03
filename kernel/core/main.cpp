@@ -83,14 +83,14 @@
 #include "drivers/net/rtl88xx_fw.h"
 #include "drivers/net/rtl88xx_upload.h"
 #include "net/wireless/beacon.h"
-#include "net/wireless/crypto/aes.h"
-#include "net/wireless/crypto/aes_keywrap.h"
-#include "net/wireless/crypto/hmac.h"
-#include "net/wireless/crypto/md5.h"
-#include "net/wireless/crypto/pbkdf2.h"
-#include "net/wireless/crypto/prf.h"
-#include "net/wireless/crypto/sha1.h"
-#include "net/wireless/crypto/sha256.h"
+#include "crypto/aes.h"
+#include "crypto/aes_keywrap.h"
+#include "crypto/hmac.h"
+#include "crypto/md5.h"
+#include "crypto/pbkdf2.h"
+#include "crypto/prf.h"
+#include "crypto/sha1.h"
+#include "crypto/sha256.h"
 #include "net/wireless/eapol.h"
 #include "net/wireless/fourway.h"
 #include "net/wireless/mlme.h"
@@ -218,6 +218,7 @@
 #include "security/event_ring.h"
 #include "security/guard.h"
 #include "security/ir_runbook.h"
+#include "security/password_hash.h"
 #include "security/pentest_gui.h"
 #include "security/policy.h"
 #include "security/purple_team.h"
@@ -1928,14 +1929,15 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::RtlFirmwareSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::BcmFirmwareSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::BeaconSelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::net::wireless::crypto::Sha1SelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::net::wireless::crypto::Sha256SelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::net::wireless::crypto::Md5SelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::net::wireless::crypto::HmacSelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::net::wireless::crypto::Pbkdf2SelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::net::wireless::crypto::PrfSelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::net::wireless::crypto::AesSelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::net::wireless::crypto::AesKeyWrapSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::Sha1SelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::Sha256SelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::Md5SelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::HmacSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::Pbkdf2SelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::PrfSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::AesSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::AesKeyWrapSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::security::PasswordHashSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::EapolSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::FourWaySelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::WdevSelfTest());
