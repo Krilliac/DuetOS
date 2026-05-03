@@ -6,6 +6,7 @@
 #include "fs/fat32.h"
 #include "mm/kheap.h"
 #include "util/bmp.h"
+#include "util/png.h"
 #include "util/tga.h"
 
 namespace duetos::apps::imageview
@@ -114,13 +115,14 @@ void StatusAppendStr(const char* s)
 }
 
 // ImageFormat — set from the filename extension during scan;
-// used by DecodeCurrent to dispatch to the BMP-streamed or TGA-
-// in-memory decoder.
+// used by DecodeCurrent to dispatch to the BMP-streamed,
+// TGA-in-memory, or PNG-in-memory decoder.
 enum class ImageFormat : u8
 {
     Unknown = 0,
     Bmp = 1,
     Tga = 2,
+    Png = 3,
 };
 
 ImageFormat ClassifyByName(const char* name)
@@ -140,6 +142,8 @@ ImageFormat ClassifyByName(const char* name)
         return ImageFormat::Bmp;
     if (e0 == 'T' && e1 == 'G' && e2 == 'A')
         return ImageFormat::Tga;
+    if (e0 == 'P' && e1 == 'N' && e2 == 'G')
+        return ImageFormat::Png;
     return ImageFormat::Unknown;
 }
 
@@ -591,6 +595,123 @@ bool DecodeTga(const fs::fat32::Volume* v, const fs::fat32::DirEntry* e, const c
     return true;
 }
 
+// PNG decode path — same full-file-load shape as TGA. Caps file
+// size so a malformed IHDR can't make us allocate gigabytes; the
+// scratch budget is the bigger constraint and is bounded by the
+// filtered-scanline byte count derived from IHDR.
+constexpr u32 kPngMaxFileBytes = 4u * 1024u * 1024u + 4096u;
+
+bool DecodePng(const fs::fat32::Volume* v, const fs::fat32::DirEntry* e, const char* name, u32 cw, u32 ch)
+{
+    namespace fat = fs::fat32;
+    if (e->size_bytes > kPngMaxFileBytes)
+    {
+        StatusSet("PNG too large (>4 MiB): ");
+        StatusAppendStr(name);
+        return false;
+    }
+    if (e->size_bytes < duetos::util::kPngSignatureBytes + 8 + 13 + 4)
+    {
+        StatusSet("PNG truncated: ");
+        StatusAppendStr(name);
+        return false;
+    }
+    void* file_alloc = mm::KMalloc(e->size_bytes);
+    if (file_alloc == nullptr)
+    {
+        StatusSet("out of kheap memory");
+        return false;
+    }
+    u8* file_buf = static_cast<u8*>(file_alloc);
+    const i64 read = fat::Fat32ReadFile(v, e, file_buf, e->size_bytes);
+    if (read < static_cast<i64>(duetos::util::kPngSignatureBytes + 8 + 13 + 4))
+    {
+        mm::KFree(file_alloc);
+        StatusSet("PNG read failed: ");
+        StatusAppendStr(name);
+        return false;
+    }
+
+    duetos::util::PngInfo info = duetos::util::PngParseHeader(file_buf, static_cast<u32>(read));
+    if (!info.ok)
+    {
+        mm::KFree(file_alloc);
+        StatusSet("not a supported PNG (need 8-bit RGB/RGBA, non-interlaced): ");
+        StatusAppendStr(name);
+        return false;
+    }
+
+    // PngDecode wants scratch large enough for IDAT-bytes +
+    // (width*4 + 1) * height filtered scanlines. file_buf already
+    // holds the IDAT; we add the filtered-rows bound.
+    const u64 filtered_bytes = (static_cast<u64>(info.width) * 4 + 1) * info.height;
+    const u64 scratch_bytes = filtered_bytes + read; // generous upper bound
+    void* scratch_alloc = mm::KMalloc(scratch_bytes);
+    void* inter_alloc = mm::KMalloc(static_cast<u64>(info.width) * info.height * 4);
+    if (scratch_alloc == nullptr || inter_alloc == nullptr)
+    {
+        mm::KFree(file_alloc);
+        if (scratch_alloc)
+            mm::KFree(scratch_alloc);
+        if (inter_alloc)
+            mm::KFree(inter_alloc);
+        StatusSet("out of kheap memory");
+        return false;
+    }
+    u32* inter = static_cast<u32*>(inter_alloc);
+    const bool ok = duetos::util::PngDecode(file_buf, static_cast<u32>(read), info, static_cast<u8*>(scratch_alloc),
+                                            static_cast<u32>(scratch_bytes), inter);
+    mm::KFree(scratch_alloc);
+    mm::KFree(file_alloc);
+    if (!ok)
+    {
+        mm::KFree(inter_alloc);
+        StatusSet("PNG decode FAILED: ");
+        StatusAppendStr(name);
+        return false;
+    }
+
+    u32 dst_w = 0;
+    u32 dst_h = 0;
+    FitThumbnail(info.width, info.height, cw, ch, &dst_w, &dst_h);
+    if (!AllocThumbnail(dst_w, dst_h))
+    {
+        mm::KFree(inter_alloc);
+        StatusSet("out of kheap memory");
+        return false;
+    }
+
+    // Same NN-downsample + BGRA→0x00RRGGBB swap as the TGA path.
+    u32* dst = g_state.pixels;
+    for (u32 dy = 0; dy < dst_h; ++dy)
+    {
+        const u32 sy = (dy * info.height) / dst_h;
+        u32* drow = dst + static_cast<u64>(dy) * dst_w;
+        const u32* srow = inter + static_cast<u64>(sy) * info.width;
+        for (u32 dx = 0; dx < dst_w; ++dx)
+        {
+            const u32 sx = (dx * info.width) / dst_w;
+            const u32 px = srow[sx];
+            const u32 b = px & 0xFFu;
+            const u32 g = (px >> 8) & 0xFFu;
+            const u32 r = (px >> 16) & 0xFFu;
+            drow[dx] = b | (g << 8) | (r << 16);
+        }
+    }
+
+    mm::KFree(inter_alloc);
+
+    g_state.disp_w = dst_w;
+    g_state.disp_h = dst_h;
+    StatusSet(name);
+    StatusAppendStr("  ");
+    StatusAppendDec(info.width);
+    StatusAppendStr("x");
+    StatusAppendDec(info.height);
+    StatusAppendStr(" PNG");
+    return true;
+}
+
 // Decode the currently-selected file into g_state.pixels at the
 // largest size that fits a (cw, ch) content rect. Returns true on
 // success; on failure clears pixels and writes a status line.
@@ -628,6 +749,8 @@ bool DecodeCurrent(u32 cw, u32 ch)
         return DecodeBmp(v, &e, name, cw, ch);
     case ImageFormat::Tga:
         return DecodeTga(v, &e, name, cw, ch);
+    case ImageFormat::Png:
+        return DecodePng(v, &e, name, cw, ch);
     case ImageFormat::Unknown:
     default:
         StatusSet("unsupported extension: ");
