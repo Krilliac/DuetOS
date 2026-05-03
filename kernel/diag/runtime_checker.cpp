@@ -70,6 +70,15 @@ constinit u64 g_baseline_efer = 0;
 constinit u64 g_baseline_idt_hash = 0;
 constinit u64 g_baseline_gdt_hash = 0;
 constinit u64 g_baseline_text_spot_hash = 0;
+// Full-`.text` FNV-1a baseline. The spot hash above only covers
+// the first/last 4 KiB; a surgical attacker who knows that gap
+// (e.g. the function-branch NOP-patch attack in attack_sim.cpp)
+// can land a single-byte modification anywhere in the middle of
+// `.text` and stay invisible to the spot hash. The full hash
+// closes that gap. Cost: ~1 ms per scan on a ~1 MiB section, so
+// ~0.02% scheduler overhead at the 5 s scan cadence — cheap
+// enough to pay every scan rather than once-per-N.
+constinit u64 g_baseline_text_full_hash = 0;
 // Syscall MSR baselines. These are the post-boot "golden"
 // values; any later change signals a syscall-hook rootkit.
 // LSTAR = Linux 64-bit SYSCALL entry (IA32_LSTAR, 0xC0000082)
@@ -824,15 +833,49 @@ u64 ComputeTextSpotHash()
     return h;
 }
 
+// Full-`.text` FNV-1a. Walks every byte from `_text_start` to
+// `_text_end`. Only called from `CheckKernelText` (once per scan),
+// so the ~1 ms it costs per ~1 MiB pays straight against the
+// detection-gap that the spot-hash version cannot close.
+u64 ComputeTextFullHash()
+{
+    constexpr u64 kFnvOffset = 0xcbf29ce484222325ULL;
+    constexpr u64 kFnvPrime = 0x100000001b3ULL;
+    u64 h = kFnvOffset;
+    const u8* s = _text_start;
+    const u8* e = _text_end;
+    for (const u8* p = s; p < e; ++p)
+    {
+        h ^= *p;
+        h *= kFnvPrime;
+    }
+    return h;
+}
+
 bool CheckKernelText()
 {
-    const u64 now = ComputeTextSpotHash();
-    if (now != g_baseline_text_spot_hash)
-    {
-        Report(HealthIssue::KernelTextModified);
-        return false;
-    }
-    return true;
+    // Spot hash first — fast-path catch for the 99% case (boot
+    // stub / trailing handler tampering). If it fires we still
+    // run the full hash so the report log can disambiguate
+    // head/tail-only vs. broader modification.
+    const u64 spot = ComputeTextSpotHash();
+    const bool spot_drift = (spot != g_baseline_text_spot_hash);
+    const u64 full = ComputeTextFullHash();
+    const bool full_drift = (full != g_baseline_text_full_hash);
+    if (!spot_drift && !full_drift)
+        return true;
+    // Log which hash detected the drift so a future operator can
+    // tell whether the modification was in the spot windows or
+    // hidden in the middle of `.text` (the gap the full hash was
+    // added to close).
+    if (spot_drift && full_drift)
+        arch::SerialWrite("[health] kernel text drift: SPOT+FULL (head/tail mod or wide rewrite)\n");
+    else if (spot_drift)
+        arch::SerialWrite("[health] kernel text drift: SPOT-only (head/tail .text byte changed)\n");
+    else
+        arch::SerialWrite("[health] kernel text drift: FULL-only (mid-.text byte changed; spot windows clean)\n");
+    Report(HealthIssue::KernelTextModified);
+    return false;
 }
 
 // Verify that a counter hasn't gone backwards between scans.
@@ -1280,6 +1323,7 @@ void RuntimeCheckerInit()
     g_baseline_idt_hash = arch::IdtHash();
     g_baseline_gdt_hash = arch::GdtHash();
     g_baseline_text_spot_hash = ComputeTextSpotHash();
+    g_baseline_text_full_hash = ComputeTextFullHash();
     g_baseline_lstar = ReadMsr(kMsrIa32Lstar);
     g_baseline_star = ReadMsr(kMsrIa32Star);
     g_baseline_cstar = ReadMsr(kMsrIa32Cstar);
@@ -1343,6 +1387,8 @@ void RuntimeCheckerInit()
     arch::SerialWriteHex(g_baseline_gdt_hash);
     arch::SerialWrite(" text_spot=");
     arch::SerialWriteHex(g_baseline_text_spot_hash);
+    arch::SerialWrite(" text_full=");
+    arch::SerialWriteHex(g_baseline_text_full_hash);
     arch::SerialWrite("\n[health] lstar=");
     arch::SerialWriteHex(g_baseline_lstar);
     arch::SerialWrite(" star=");

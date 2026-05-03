@@ -51,7 +51,7 @@ Each attack follows the same five-step recipe (`RunAttack`):
 | 9 | CR4.SMAP defang (user-mem read) | `Cr4SmapCleared` | Skipped if CPU lacks SMAP |
 | 10 | EFER.NXE defang (data exec) | `EferNxeCleared` | Auto-healed |
 | 11 | Kernel `.text` 1-byte patch | `KernelTextModified` | IRQ-off + CR0.WP toggle bracket the write window. Patches `_text_start + 0x40` (dormant boot stub) |
-| 17 | Function-branch NOP patch (cap-gate bypass) | `KernelTextModified` | Patches a 2-byte `je` inside a synthetic cap-style gate to `90 90`. Lives in middle `.text` (716 KiB into a 1.14 MiB section); spot hash misses it → reports `FailNoDetect` *by design*. See `branch-nop-attack-v0.md` for the gap-finding rationale and the next-slice options (full-text rolling hash or per-page CRC vs. boot baseline). |
+| 17 | Function-branch NOP patch (cap-gate bypass) | `KernelTextModified` | Patches a 2-byte `je` inside a synthetic cap-style gate to `90 90`. Lives in middle `.text` (716 KiB into a 1.14 MiB section). Originally surfaced a detection gap (spot hash blind to mid-section); same slice closed the gap by adding `g_baseline_text_full_hash` + `ComputeTextFullHash` to `runtime_checker.cpp`. Now reports `Pass` with serial-log line `[health] kernel text drift: FULL-only …`. See `branch-nop-attack-v0.md`. |
 
 **Deferred (each needs its own slice):**
 

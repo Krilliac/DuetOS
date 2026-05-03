@@ -1,11 +1,19 @@
 #include "security/password_hash.h"
 
+#include "arch/x86_64/hypervisor.h"
 #include "core/panic.h"
 #include "crypto/pbkdf2.h"
 #include "util/random.h"
 
 namespace duetos::security
 {
+
+u32 PasswordDefaultIterations()
+{
+    // 100× cheaper PBKDF2 under any VMM. Cuts ~50 wall-seconds off
+    // boot time on QEMU TCG without losing algorithmic coverage.
+    return arch::IsEmulator() ? kPasswordEmulatorIterations : kPasswordDefaultIterations;
+}
 
 bool ConstantTimeEqual(const u8* a, const u8* b, u32 len)
 {
@@ -39,7 +47,7 @@ void PasswordHashCreate(const char* password, u32 password_len, PasswordHashReco
         return;
     u8 salt[kPasswordSaltBytes];
     duetos::core::RandomFillBytes(salt, kPasswordSaltBytes);
-    PasswordHashCreateExplicit(password, password_len, salt, kPasswordDefaultIterations, out);
+    PasswordHashCreateExplicit(password, password_len, salt, PasswordDefaultIterations(), out);
 }
 
 bool PasswordHashVerify(const char* password, u32 password_len, const PasswordHashRecord& record)

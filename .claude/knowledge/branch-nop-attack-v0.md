@@ -1,7 +1,7 @@
 # Function-branch NOP-patch attack — v0
 
 **Type:** Observation + Decision + Pattern
-**Status:** Active — attack landed, detection gap recorded
+**Status:** Active — attack landed, detection gap closed in the same slice
 **Last updated:** 2026-05-03
 
 ## What it is
@@ -89,11 +89,11 @@ A paired baseline call BEFORE the patch is the honest anchor —
 without it, "`post_rc == 0`" could be explained by an environmental
 fluke. The probe logs both side by side.
 
-## Red-team finding (the slice's payload)
+## Red-team finding (originally surfaced, then closed in the same slice)
 
-`ComputeTextSpotHash` (kernel/diag/runtime_checker.cpp:801) only
-FNV-1a hashes the **first 4 KiB and last 4 KiB** of `.text`. The
-comment there is honest about the choice: full-text would take
+The first cut of `ComputeTextSpotHash` (kernel/diag/runtime_checker.cpp:801)
+only FNV-1a hashed the **first 4 KiB and last 4 KiB** of `.text`. The
+comment there was honest about the choice: full-text would take
 ~1 ms per scan, the spot hash takes ~2 µs and catches the boot-path
 + tail-end handler modifications that account for the 99% case.
 
@@ -107,20 +107,46 @@ on a debug build:
 - Spot windows = `[0, 4 KiB)` and `[text_size − 4 KiB, text_size)`
 
 The patch lands ~700 KiB into a 1.14 MiB section. Outside both
-windows. **`CheckKernelText` cannot see it.** The runtime checker
-runs every 5 seconds, scans the section in 2 µs, and reports green.
-Meanwhile the gate is unconditionally open.
+windows. The pre-fix `CheckKernelText` could not see it.
 
-So this attack is expected to:
+### The fix (landed in this slice)
+
+`runtime_checker.cpp` now keeps **two** baselines and checks both
+on every scan:
+
+- `g_baseline_text_spot_hash` — head + tail 4 KiB FNV-1a (existing,
+  fast-path early warning, ~2 µs per scan).
+- `g_baseline_text_full_hash` — entire `.text` FNV-1a (new, closes
+  the middle-section gap, ~1 ms per scan on a 1.14 MiB section ≈
+  0.02% scheduler overhead at the 5 s scan cadence).
+
+`CheckKernelText` reports `KernelTextModified` if **either** drifts.
+Three diagnostic log shapes distinguish the cases:
+
+```
+[health] kernel text drift: SPOT+FULL  (head/tail mod or wide rewrite)
+[health] kernel text drift: SPOT-only  (head/tail .text byte changed)
+[health] kernel text drift: FULL-only  (mid-.text byte changed; spot windows clean)
+```
+
+Boot-time baseline log gained a `text_full=…` field next to the
+existing `text_spot=…` so an operator can confirm the second
+baseline was captured.
+
+### Expected outcome of this attack now
 
 - **Bypass the gate** — `BYPASS LANDED` log line, `baseline_rc=-1`,
-  `post_rc=0`.
-- **Not trip `KernelTextModified`** — `RunAttack` reports
-  `FailNoDetect`.
+  `post_rc=0`. The patch itself still lands; the *defense* is the
+  detector, not the inability of the attacker to write the bytes.
+- **Detector fires** — `[health] kernel text drift: FULL-only …`
+  serial line, `KernelTextModified` counter bumps, `RunAttack`
+  reports `Pass`.
 
-That `FailNoDetect` is the slice's *payload*, not a regression. The
-suite-level summary intentionally surfaces it so the next defensive
-slice is funded with a real motivation rather than a hypothetical.
+If a future regression silently turns the full-hash check off (e.g.
+someone shortcuts `CheckKernelText` to "just check the spot hash
+because that's faster"), this attack flips back to `FailNoDetect`
+and the `BYPASS LANDED` log line stays — the suite re-surfaces the
+gap loudly without anyone having to remember it was ever there.
 
 ## Wiring
 
@@ -128,33 +154,35 @@ slice is funded with a real motivation rather than a hypothetical.
   (global asm), `AttackBranchNopPatch` / `RestoreBranchNopPatch`,
   `BranchPatchInSpotWindow` predicate, and one new entry in
   `kSpecs[]` (size grew 16 → 17; `kMaxAttackResults` already 24).
-- `_text_end` extern declaration added next to the existing
+  `_text_end` extern declaration added next to the existing
   `_text_start` decl (so the in-spot-window predicate can run).
+- `kernel/diag/runtime_checker.cpp` — `g_baseline_text_full_hash`,
+  `ComputeTextFullHash`, `CheckKernelText` rewritten to consult
+  both spot + full hashes and log the drift class. Baseline
+  capture in `RuntimeCheckerInit` and serial summary in the boot
+  banner both extended to carry the new value.
 
-No other TUs touched. No header surface change. No new `HealthIssue`
-enum value (the slice deliberately reports through the existing
-`KernelTextModified` issue so the FailNoDetect outcome is the
-operator-visible signal).
+No header surface change. No new `HealthIssue` enum value (a
+middle-`.text` modification is still a kernel-text modification —
+the existing `KernelTextModified` issue is the right channel).
 
-## Follow-on (the next slice)
+## Follow-on (still open)
 
-Two non-exclusive options for closing the gap. Pick whichever fits
-the next slice's risk budget:
+The chosen fix is the cheaper of the two options on the table —
+full FNV-1a every scan. The page-CRC alternative remains an
+attractive future slice if the workload ever outgrows the ~1 ms
+per scan budget:
 
-1. **Full-text rolling hash.** `CheckKernelText` walks the entire
-   `.text` section once per N scans (e.g. one full hash every
-   minute, spot hash every 5 seconds). Cost: ~1 ms per minute of
-   scheduler time. Catches every middle-`.text` modification but
-   has the latency of the rolling window.
-2. **Periodic page-CRC against the load-time digest.** At boot,
-   capture a CRC32 per executable page in the kernel image. The
-   runtime checker walks one page per scan (round-robin), comparing
-   live CRC to the boot baseline. ~256 µs per scan; full coverage
-   in `text_pages × 5 seconds` (`~1 minute for a 1 MiB section
-   at 4 KiB pages`). Bonus: pinpoints the modified page.
-
-Either makes this attack `Pass` instead of `FailNoDetect`. Until
-one lands, this slice's `FailNoDetect` is the canary.
+- **Periodic page-CRC against the load-time digest.** At boot,
+  capture a CRC32 per executable page in the kernel image. The
+  runtime checker walks one page per scan (round-robin), comparing
+  live CRC to the boot baseline. ~256 µs per scan; full coverage
+  in `text_pages × 5 seconds` (~1 minute for a 1 MiB section at
+  4 KiB pages). Bonus: pinpoints the modified page so the operator
+  log can name it. Worth doing if either (a) `.text` grows past
+  ~10 MiB and the per-scan cost crosses 10 ms, or (b) we want
+  scan-to-scan deterministic latency rather than the current "1 ms
+  every scan" model.
 
 ## Patterns this entry validates
 
