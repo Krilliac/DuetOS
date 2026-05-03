@@ -49,6 +49,7 @@
 #include "util/tga.h"
 #include "util/types.h"
 #include "util/unicode.h"
+#include "util/wav.h"
 #include "acpi/acpi.h"
 #include "acpi/aml.h"
 #include "arch/x86_64/cpu.h"
@@ -1943,6 +1944,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::util::DateTimeSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::PosixTzSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::CpioSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::WavSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Sha1SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Sha256SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Md5SelfTest());
