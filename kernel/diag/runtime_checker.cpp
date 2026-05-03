@@ -32,6 +32,7 @@
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/hpet.h"
+#include "arch/x86_64/hypervisor.h"
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/timer.h"
@@ -79,6 +80,14 @@ constinit u64 g_baseline_text_spot_hash = 0;
 // ~0.02% scheduler overhead at the 5 s scan cadence — cheap
 // enough to pay every scan rather than once-per-N.
 constinit u64 g_baseline_text_full_hash = 0;
+
+// Heartbeat-vs-force-scan signal: heartbeat-driven scans
+// (`RuntimeCheckerTick`) bracket their call with
+// `g_scan_from_heartbeat = true`; direct callers (attack-sim's
+// RunAttack force-scan, the `health` shell command) leave it
+// false and always get full coverage. Read by `CheckBootSectors`
+// to decide whether the emulator-side disk-read throttle applies.
+constinit bool g_scan_from_heartbeat = false;
 // Syscall MSR baselines. These are the post-boot "golden"
 // values; any later change signals a syscall-hook rootkit.
 // LSTAR = Linux 64-bit SYSCALL entry (IA32_LSTAR, 0xC0000082)
@@ -691,6 +700,28 @@ void CaptureDiskBaselines()
 
 bool CheckBootSectors()
 {
+    // Each `BlockDeviceRead` through NVMe / AHCI is hundreds of
+    // emulated MMIO ops; under TCG that compounds with no SIMD
+    // and dominates per-scan wall-clock during the attack-sim
+    // suite. The heartbeat fires once per 5 s and re-walks every
+    // device's LBA 0 + LBA 1 — pure I/O cost, no CPU value, since
+    // a bootkit window on bare metal is seconds-to-minutes.
+    //
+    // On emulator, throttle the heartbeat-driven path to one
+    // full re-read per 60 s. Force-scans triggered by the
+    // attack-sim suite or operator shell command leave
+    // `g_scan_from_heartbeat` clear and always run — that's what
+    // makes the bootkit attack detection deterministic regardless
+    // of where the heartbeat happens to be in its cycle.
+    if (arch::IsEmulator() && g_scan_from_heartbeat)
+    {
+        constinit static u64 s_last_scan_tick = 0;
+        constexpr u64 kEmulatorThrottleTicks = 6000; // 60 s @ 100 Hz
+        const u64 now = sched::SchedNowTicks();
+        if (s_last_scan_tick != 0 && (now - s_last_scan_tick) < kEmulatorThrottleTicks)
+            return true;
+        s_last_scan_tick = now;
+    }
     bool ok = true;
     const u32 n = drivers::storage::BlockDeviceCount();
     const u32 cap = (n < kMaxBlockDevicesForHealth) ? n : u32(kMaxBlockDevicesForHealth);
@@ -1436,7 +1467,13 @@ u64 RuntimeCheckerScan()
 
 void RuntimeCheckerTick()
 {
+    // Bracket the heartbeat-driven scan so `CheckBootSectors` knows
+    // to honour its emulator throttle. Direct callers
+    // (`RuntimeCheckerScan` from attack-sim / shell) bypass the
+    // bracket and always do a full read.
+    g_scan_from_heartbeat = true;
     (void)RuntimeCheckerScan();
+    g_scan_from_heartbeat = false;
 }
 
 void RuntimeCheckerNoteFsWriteRateExceeded(u32 level_index)

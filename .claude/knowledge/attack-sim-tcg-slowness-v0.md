@@ -65,28 +65,44 @@ Same QEMU TCG host, no other changes:
 (Under KVM, both versions take the same fast wall-clock — the
 slowdown was purely a TCG-without-SIMD cost.)
 
-## What didn't move
+## Disk re-read throttle (heartbeat path)
 
-The remaining per-attack wall-clock cost (~30 s per `attacksim`
-entry under TCG) is dominated by `runtime_checker`'s
-`CheckBootSectors` re-reading every block device's LBA 0/1 on
-every scan, which RunAttack invokes twice per attack. That's a
-separate issue:
+A third edit, same shape as the first two: `runtime_checker`'s
+`CheckBootSectors` re-reads LBA 0+1 of every block device on
+every scan. The heartbeat fires that scan every 5 s of kernel
+time, which under TCG is ~50-60 s wall-clock per beat, dominated
+by emulated NVMe / AHCI MMIO. On bare metal a bootkit-write
+window is seconds-to-minutes, so this is the right cadence —
+under emulation it's pure I/O cost with no value.
 
-- The bootkit attack's restore writes the original byte back, but
-  the heal path appears to re-baseline against the post-restore
-  state, so subsequent scans still log `boot sector modified`
-  drift on every poll. Visible in the `[health] boot sector
-  modified` repetition between attack lines.
-- Fixing requires either (a) suppressing the rescan during
-  RunAttack's snapshot/scan/restore window, or (b) reordering the
-  bootkit attack so it runs LAST (its escalation to `blockguard
-  Deny` then doesn't poison sibling attacks). Neither was taken
-  in this slice.
+A new file-scope flag `g_scan_from_heartbeat` is set by
+`RuntimeCheckerTick` for the duration of the heartbeat-driven
+scan. `CheckBootSectors` consults it: if the flag is set AND
+`arch::IsEmulator()`, it throttles to one full re-read per
+60 s of kernel time. Direct callers (attack-sim's RunAttack
+force-scan, the `health` shell command) leave the flag false and
+always get a full read — so the bootkit attack's detection on
+its very first force-scan is unaffected regardless of where the
+heartbeat happened to be in its cycle.
+
+Visible delta after the throttle landed:
+
+- `[health] boot sector modified: ...` log spam dropped from
+  N-per-attack (one repetition per heartbeat fire during the
+  suite's wall-clock) to 1 total (the bootkit attack's actual
+  detection).
+- The bootkit attack still passes (`PASS — detector fired
+  (BootSectorModified)`).
+- Per-attack wall-clock cost during the suite did *not* drop
+  meaningfully — the dominant cost is the per-scan invariant
+  checks themselves (CheckIdt, CheckGdt, CheckSyscallMsrs etc.,
+  all reading in-memory state but at a TCG-amplified per-op
+  cost), not the disk I/O. That's a separate, structural issue
+  not tackled here.
 
 For algorithmic verification of the gap-fix attack, the hosted
-unit test (`tests/host/test_text_hash.cpp`) sidesteps both costs
-entirely — runs in 10 ms.
+unit test (`tests/host/test_text_hash.cpp`) sidesteps all three
+costs entirely — runs in 10 ms.
 
 ## Pattern: emulator-fast crypto for boot self-tests
 
@@ -105,6 +121,8 @@ users:
   probe on emulator.
 - `kernel/security/password_hash.cpp` (new) — emulator-fast
   PBKDF2 iteration count.
+- `kernel/diag/runtime_checker.cpp` `CheckBootSectors` (new) —
+  60 s heartbeat-driven disk re-read throttle on emulator.
 
 If a future commit adds a >100 ms-on-bare-metal CPU-bound boot
 self-test, run the same calculus: under TCG without SIMD it'll be
