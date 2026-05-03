@@ -25,11 +25,13 @@ else
     echo "neither file is present"
 fi
 
-# While loop.
-set count 0
-while expr $count - 3 ; do
-    echo $count
-    set count $(expr $count + 1)
+# While loop. v0 has no command substitution, so loop state has
+# to live in the filesystem (or some other observable side effect)
+# until $(...) lands. The simplest pattern is a tmpfs flag:
+touch /tmp/loop
+while cat /tmp/loop ; do
+    echo "ticking"
+    rm /tmp/loop      # exits the loop next iteration
 done
 
 # For loop over a whitespace-split word list.
@@ -142,6 +144,12 @@ denial, parse error, file not found, no-match) are wired today —
   at 1000 iterations.
 - `script <path> <cmd...>` — run CMD with output captured into a
   tmpfs file. Inner exit code propagates.
+- `exit [N]` — short-circuit the enclosing script with code N
+  (default 0). Outside a script (typed at the prompt) it just sets
+  `$?` — the kernel shell IS the user surface, there is no parent
+  to terminate. Unwinds cleanly through nested `if` / `while` /
+  `for` blocks; the next command run by `source` / inline block
+  resets the request.
 - `repeat <N> <cmd...>` — run CMD N times in succession.
 - `source <path>` (or `.`) — execute a file as a script. Calls
   through the same interpreter as inline blocks.
@@ -188,10 +196,12 @@ for n in one two three ; do
     echo "  $n"
 done
 
-set i 0
-while expr $i - 3 ; do
-    echo "  iter $i"
-    set i $(expr $i + 1)
+# v0 has no $() substitution; use a tmpfs flag for while bodies
+# that need to terminate.
+touch /tmp/loop
+while cat /tmp/loop ; do
+    echo "  iter"
+    rm /tmp/loop
 done
 
 echo "== done =="
@@ -212,9 +222,56 @@ Items deferred from v0, in rough priority order:
 3. **Multi-line `then` / `do`** blocks.
 4. **Command substitution** `$(...)` and arithmetic `$((...))`.
 5. **Larger script buffer** (configurable cap).
-6. **`exit N`** to short-circuit a script with a specific code.
-7. **`return N`** for the eventual function support.
-8. **BAT (`cmd.exe`) interpreter** in the Win32 subsystem.
+6. **`return N`** for the eventual function support.
+7. **BAT (`cmd.exe`) interpreter** in the Win32 subsystem.
+
+Landed since v0:
+
+- **`exit N`** — short-circuit a script with a specific code.
+  Implemented in `shell_script.cpp` via a sticky executor flag the
+  block walkers poll between statements. See `CmdExit` in
+  `shell_extra.cpp`.
+
+## Built-in self-test
+
+`/etc/selftest.sh` ships in ramfs and exercises every control-flow
+keyword + `exit N` short-circuit. The script body lives in
+`kEtcSelftestBytes` (`kernel/fs/ramfs.cpp`) and doubles as
+reference / demo material — read it for a known-good shape.
+
+Two ways to run it:
+
+- **Manual**: at the prompt, `source /etc/selftest.sh`. Look for
+  `SELFTEST BEGIN` / `SELFTEST IF-TRUE OK` / `SELFTEST EXIT-OK`.
+- **Auto**: configure with `-DDUETOS_SHELL_SELFTEST=ON` and the
+  default `/etc/profile` will chain-source the self-test on every
+  shell init. The mirror-to-COM1 flag is briefly armed around the
+  dispatch so a headless `tools/qemu/run.sh` captures the markers
+  in the serial log:
+
+  ```bash
+  cmake --preset x86_64-release -DDUETOS_SHELL_SELFTEST=ON
+  cmake --build build/x86_64-release --target duetos-iso
+  DUETOS_TIMEOUT=20 tools/qemu/run.sh | grep SELFTEST
+  ```
+
+  Expected output (one line per assertion, plus the final
+  `SELFTEST EXIT-OK`):
+
+  ```
+  SELFTEST BEGIN
+  SELFTEST IF-TRUE OK
+  SELFTEST ELIF OK
+  SELFTEST ELSE OK
+  SELFTEST FOR alpha
+  SELFTEST FOR beta
+  SELFTEST FOR gamma
+  SELFTEST WHILE TICK
+  SELFTEST EXIT-OK
+  ```
+
+  A line containing `SELFTEST FAIL:` or absence of `SELFTEST
+  EXIT-OK` is the regression signal.
 
 ## Source-of-truth pointers
 
@@ -222,3 +279,7 @@ Items deferred from v0, in rough priority order:
 - Surface declarations + scope-limit constants: `kernel/shell/shell_internal.h`
 - Source command + line buffer: `CmdSource` in `kernel/shell/shell_dispatch.cpp`
 - Default profile auto-sourced at boot: `kEtcProfileBytes` in `kernel/fs/ramfs.cpp`
+- Built-in self-test body: `kEtcSelftestBytes` in `kernel/fs/ramfs.cpp`
+- `exit N` handler: `CmdExit` in `kernel/shell/shell_extra.cpp`
+- `exit N` flag plumbing: `g_script_exit_requested` /
+  `ScriptRequestExit` in `kernel/shell/shell_script.cpp`

@@ -171,11 +171,23 @@ void ShellInit()
     // no-op if the file doesn't exist. Goes through the dispatcher
     // (rather than calling CmdSource directly) so the latter can
     // stay TU-private to shell_dispatch.cpp.
+    //
+    // Under DUETOS_SHELL_SELFTEST the profile chain-sources
+    // /etc/selftest.sh; the serial mirror isn't normally on yet
+    // (SerialInputStart runs much later), so headless callers
+    // would lose the markers. Pre-arm + restore the mirror around
+    // the dispatch so the SELFTEST PASS/FAIL lines reach COM1.
     const auto* prof = duetos::fs::VfsLookup(duetos::fs::RamfsTrustedRoot(), "/etc/profile", 64);
     if (prof != nullptr && prof->type == duetos::fs::RamfsNodeType::kFile)
     {
+#ifdef DUETOS_SHELL_SELFTEST
+        duetos::drivers::video::ConsoleEnableSerialMirror(true);
+#endif
         char source_line[] = "source /etc/profile";
         Dispatch(source_line);
+#ifdef DUETOS_SHELL_SELFTEST
+        duetos::drivers::video::ConsoleEnableSerialMirror(false);
+#endif
     }
 
     Prompt();
