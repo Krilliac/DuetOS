@@ -10,6 +10,7 @@
 #include "security/purple_team.h"
 
 #include "arch/x86_64/serial.h"
+#include "security/canary.h"
 #include "sync/spinlock.h"
 #include "time/timekeeper.h"
 
@@ -136,25 +137,79 @@ void PurpleTeamSelfTest()
 {
     const EventRingStats before = EventRingStatsRead();
 
-    // Simulate a "run" by publishing 5 synthetic events.
+    // Phase 1: ring pass-through. Publish 5 synthetic events to
+    // confirm the ring + observed-count math works.
     EventRingPublishKind(EventKind::AttackSimRun, 0, 0xCAFE, 0, "self-test-begin");
     EventRingPublishKind(EventKind::CanaryTouch, 1, 0, 0, "self-test-1");
     EventRingPublishKind(EventKind::PersistenceDrop, 2, 0, 0, "self-test-2");
     EventRingPublishKind(EventKind::IrRunbookEmitted, 1, static_cast<u64>(EventKind::CanaryTouch), 0, "CanaryTouch");
     EventRingPublishKind(EventKind::AttackSimRun, 0, 0xCAFE, 0, "self-test-end");
 
-    const EventRingStats after = EventRingStatsRead();
-    const u64 observed = after.published_total - before.published_total;
-
-    if (observed == 5)
+    const EventRingStats mid = EventRingStatsRead();
+    const u64 phase1_observed = mid.published_total - before.published_total;
+    if (phase1_observed != 5)
     {
-        arch::SerialWrite("[purple] self-test PASS (events_observed=5)\n");
+        arch::SerialWrite("[purple] self-test FAIL: phase1 events_observed=");
+        arch::SerialWriteHex(phase1_observed);
+        arch::SerialWrite(" (expected 5)\n");
+        return;
+    }
+
+    // Phase 2: real publish wire. Drive PersistenceNote in Advisory
+    // mode (safe — Advisory does not flag the current task for kill)
+    // through a registered autostart-equivalent path. The note path
+    // calls IrRunbookEmit, which itself publishes IrRunbookEmitted.
+    // Expected ring delta: 1 PersistenceDrop + 1 IrRunbookEmitted.
+    const PersistenceMode saved = PersistenceModeRead();
+    PersistenceSetMode(PersistenceMode::Advisory);
+
+    constexpr const char* kProbePath = "/etc/init.d/wiring-self-test";
+    const bool matched = PersistenceMatchesPath(kProbePath);
+    if (matched)
+    {
+        (void)PersistenceNote(kProbePath, "self-test");
+    }
+    PersistenceSetMode(saved);
+
+    const EventRingStats after = EventRingStatsRead();
+    const u64 phase2_observed = after.published_total - mid.published_total;
+
+    // Walk the ring counting the kinds we expect from phase 2.
+    struct Counts
+    {
+        u32 persistence;
+        u32 runbook;
+        u64 since_seq;
+    } c{0, 0, mid.published_total};
+
+    EventRingForEach(
+        [](const Event& e, void* cookie)
+        {
+            auto* cp = static_cast<Counts*>(cookie);
+            if (e.seq <= cp->since_seq)
+                return;
+            if (e.kind == EventKind::PersistenceDrop)
+                ++cp->persistence;
+            else if (e.kind == EventKind::IrRunbookEmitted)
+                ++cp->runbook;
+        },
+        &c);
+
+    if (matched && phase2_observed >= 2 && c.persistence >= 1 && c.runbook >= 1)
+    {
+        arch::SerialWrite("[purple] self-test PASS (phase1=5 phase2_persistence=1+ phase2_runbook=1+)\n");
     }
     else
     {
-        arch::SerialWrite("[purple] self-test FAIL: events_observed=");
-        arch::SerialWriteHex(observed);
-        arch::SerialWrite(" (expected 5)\n");
+        arch::SerialWrite("[purple] self-test FAIL: phase2 matched=");
+        arch::SerialWriteHex(matched ? 1 : 0);
+        arch::SerialWrite(" observed=");
+        arch::SerialWriteHex(phase2_observed);
+        arch::SerialWrite(" persistence=");
+        arch::SerialWriteHex(c.persistence);
+        arch::SerialWrite(" runbook=");
+        arch::SerialWriteHex(c.runbook);
+        arch::SerialWrite("\n");
     }
 }
 
