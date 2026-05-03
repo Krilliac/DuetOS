@@ -5,6 +5,7 @@
 #include "drivers/input/ps2kbd.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/theme.h"
+#include "util/datetime.h"
 
 namespace duetos::apps::calendar
 {
@@ -20,6 +21,8 @@ using duetos::drivers::video::ThemeCurrent;
 using duetos::drivers::video::ThemeRole;
 using duetos::drivers::video::WindowHandle;
 using duetos::drivers::video::WindowSetContentDraw;
+using duetos::util::IsoWeekDate;
+using duetos::util::IsoYearWeek;
 
 constexpr u32 kCellW = 36;
 constexpr u32 kCellH = 26;
@@ -207,7 +210,7 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     // 14 glyphs × 8 px = 112 px.
     FramebufferFillRect(ox, oy, panel_w, kHeaderH, header_bg);
     {
-        char title[24];
+        char title[40];
         u32 o = 0;
         const char* mn =
             (g_state.view_month >= 1 && g_state.view_month <= 12) ? kMonthNames[g_state.view_month] : "???";
@@ -218,6 +221,23 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
         FormatU16Dec4(ybuf, g_state.view_year);
         for (u32 i = 0; ybuf[i] != '\0' && o + 1 < sizeof(title); ++i)
             title[o++] = ybuf[i];
+        // ISO week-of-year for the first day of the displayed month.
+        // ISO weeks straddle calendar-year boundaries, so the printed
+        // year is iso.year (which can be view_year-1 in early January
+        // or view_year+1 in late December — see ISO 8601:2019 §4.4.4).
+        if (g_state.view_month >= 1 && g_state.view_month <= 12)
+        {
+            const IsoWeekDate iso = IsoYearWeek(i32(g_state.view_year), u8(g_state.view_month), 1);
+            if (iso.week >= 1 && iso.week <= 53 && o + 8 < sizeof(title))
+            {
+                const char sep[6] = {' ', '-', ' ', 'W', 'k', ' '};
+                for (u32 i = 0; i < sizeof(sep) && o + 1 < sizeof(title); ++i)
+                    title[o++] = sep[i];
+                if (iso.week >= 10)
+                    title[o++] = char('0' + (iso.week / 10));
+                title[o++] = char('0' + (iso.week % 10));
+            }
+        }
         title[o] = '\0';
         const u32 title_w = o * 8;
         const u32 tx = ox + (panel_w > title_w ? (panel_w - title_w) / 2 : 0);

@@ -28,6 +28,7 @@
 #include "log/klog.h"
 
 #include "arch/x86_64/hpet.h"
+#include "arch/x86_64/rtc.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/timer.h"
 #include "time/tick.h"
@@ -35,6 +36,7 @@
 #include "mm/kheap.h"
 #include "sched/sched.h"
 #include "util/build_config.h"
+#include "util/datetime.h"
 
 namespace duetos::core
 {
@@ -63,6 +65,16 @@ constinit u64 g_log_ring_next = 0;  // monotonically increasing write cursor
 constinit u64 g_log_ring_count = 0; // saturates at kLogRingCapacity
 
 constinit bool g_color_enabled = true;
+
+// Wall-clock anchor: Unix-epoch seconds at the moment WallClockInit
+// sampled the RTC, captured alongside the elapsed-microseconds reading
+// at the same instant. Live timestamps are derived as:
+//   wall_secs = boot_unix_secs + (now_us - boot_us) / 1_000_000
+// This avoids the per-line CMOS UIP wait (~1 ms) RtcRead would impose.
+constinit u64 g_wall_clock_boot_unix_secs = 0;
+constinit u64 g_wall_clock_boot_us = 0;
+constinit bool g_wall_clock_anchored = false;
+constinit bool g_wall_clock_enabled = false;
 
 // Runtime area mask. Default `LogArea::All` (every bit set) means
 // every legacy / new call site emits as-before. Operators dial it
@@ -484,8 +496,26 @@ inline u64 ElapsedMicros()
     return counter / ticks_per_us;
 }
 
+inline void MaybeWriteWallClockPrefix()
+{
+    if (!g_wall_clock_enabled || !g_wall_clock_anchored)
+        return;
+    const u64 elapsed_us = ElapsedMicros();
+    const u64 wall_secs = g_wall_clock_boot_unix_secs +
+                          (elapsed_us > g_wall_clock_boot_us ? (elapsed_us - g_wall_clock_boot_us) / 1000000ull : 0);
+    const ::duetos::util::DateTime dt = ::duetos::util::DateTimeFromUnixSecs(wall_secs);
+    char buf[24];
+    if (::duetos::util::FormatIso8601(dt, buf, sizeof(buf)) > 0)
+    {
+        arch::SerialWrite("[");
+        arch::SerialWrite(buf);
+        arch::SerialWrite("] ");
+    }
+}
+
 inline void WriteTimestampPrefix()
 {
+    MaybeWriteWallClockPrefix();
     const u64 us = ElapsedMicros();
     if (us != 0)
     {
@@ -770,6 +800,31 @@ void SetLogColor(bool enabled)
 bool GetLogColor()
 {
     return g_color_enabled;
+}
+
+void WallClockInit()
+{
+    arch::RtcTime rtc;
+    arch::RtcRead(&rtc);
+    if (rtc.year < 1970 || rtc.year > 2099)
+        return; // CMOS junk — refuse to anchor against it
+    const ::duetos::util::DateTime dt = {i32(rtc.year), rtc.month, rtc.day, rtc.hour, rtc.minute, rtc.second};
+    const u64 unix_secs = ::duetos::util::UnixSecsFromDateTime(dt);
+    if (unix_secs == ::duetos::util::kJulianDayInvalid)
+        return;
+    g_wall_clock_boot_unix_secs = unix_secs;
+    g_wall_clock_boot_us = ElapsedMicros();
+    g_wall_clock_anchored = true;
+}
+
+void SetLogWallClock(bool enabled)
+{
+    g_wall_clock_enabled = enabled;
+}
+
+bool GetLogWallClock()
+{
+    return g_wall_clock_enabled;
 }
 
 void ClearLogRing()

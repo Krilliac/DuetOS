@@ -7,14 +7,13 @@
 /*
  * DuetOS — HMAC-SHA1 + HMAC-SHA256 per RFC 2104.
  *
- * The 802.11 stack uses HMAC-SHA1 for:
- *   - PBKDF2-HMAC-SHA1: passphrase + SSID → 32-byte PMK.
- *   - PRF-X (X ∈ {128, 384, 512}): PMK + nonces + MACs → PTK.
- *   - EAPOL Key MIC verification (legacy WPA2-CCMP MIC =
- *     truncated HMAC-SHA1 of the EAPOL key frame).
- *
- * HMAC-SHA256 is required when AKM uses a SHA-256 suite
- * (`PSK-SHA256`, `802.1X-SHA256`, FT-...) or for WPA3-SAE.
+ * Used by the 802.11 stack:
+ *   - HMAC-SHA1: PBKDF2-HMAC-SHA1 (passphrase + SSID → 32-byte
+ *     PMK), PRF-X (PMK + nonces + MACs → PTK), EAPOL Key MIC
+ *     verification (legacy WPA2-CCMP MIC = truncated HMAC-SHA1
+ *     of the EAPOL key frame).
+ *   - HMAC-SHA256: WPA3-SAE PMK derivation, AKM SHA-256
+ *     suites (`PSK-SHA256`, `802.1X-SHA256`, FT-...).
  *
  * Both APIs follow the same shape: `HmacShaXHash(key, key_len,
  * data, data_len, out)`. The longer-form context-update flow

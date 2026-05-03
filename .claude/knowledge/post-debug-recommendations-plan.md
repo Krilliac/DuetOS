@@ -1,6 +1,6 @@
 # Post-recommendations follow-on plan
 
-## Status (2026-05-01)
+## Status (2026-05-03)
 
 The 18-item kernel-debug recommendations plan closed on
 2026-04-28 with every numbered item landed and most followups
@@ -11,6 +11,14 @@ that plan's end — items whose name was "followup" but whose
 scope is a multi-commit slice on its own. Each entry below is
 a future plan in miniature: what it is, what blocks it, and
 what triggers it.
+
+**2026-05-03 audit:** None of the seven remaining items landed
+this round; each is genuinely a multi-commit slice or hardware /
+runtime gated. The 2026-05-03 batch on
+`claude/cleanup-stale-documents-2lhGO` worked through bounded
+porting-candidate rows (`kernel-util-libraries-v0.md`) instead.
+Resume rule unchanged: pick one item below and write its own
+slice plan if it grows past a single commit.
 
 ### Landed since this plan was opened
 
@@ -67,23 +75,22 @@ software-enforced CFI on top of the silicon's built-in
 protection. Probe (`arch::CetGet`) is in place to gate the
 enable code on a real signal.
 
-### E2-followup — Enable KPTI / Meltdown mitigation
+### ~~E2-followup — Enable KPTI / Meltdown mitigation~~ — GRADUATED 2026-05-03
 
-**Scope**: split per-process PML4 into a kernel-only and a
+**Was**: split per-process PML4 into a kernel-only and a
 user-only view; trampoline syscall entry/exit through CR3
 swaps; trampolines in their own page that's mapped in both.
 
-**Blocks on**: paging-layer rework, syscall entry stub
-rewrite, IST stack-switch updates, full TLB-shootdown
-ordering with SMP.
-
-**When to land**: when a `RDCL_NO=0` machine enters the test
-fleet, OR when a workload demands defence-in-depth even on
-silicon-safe CPUs. `arch::CpuMitigationsGet().needs_kpti` is
-the live signal already in place.
-
-See `.claude/knowledge/kpti-meltdown-investigation-v0.md` for
-the project's recorded position.
+**Outcome**: graduated from "deferred follow-on" to a settled
+decision in `kpti-meltdown-decision-v0.md`. The runtime probe
+(`arch::CpuMitigationsGet().needs_kpti`) is in tree; on a
+`RDCL_NO=0` boot the probe now also emits a loud serial WARN
+block stating the mitigation is not implemented. The full KPTI
+implementation stays unbuilt because every CPU in
+`hardware-target-matrix.md` reports `RDCL_NO=1` in silicon,
+making KPTI a 5-30% syscall cost mitigating an attack the
+hardware already prevents. Re-open triggers (hardware, workload,
+or spec change) listed in the decision doc.
 
 ### ~~C1-followup~~ Real per-zone allocator — LANDED 2026-05-01
 

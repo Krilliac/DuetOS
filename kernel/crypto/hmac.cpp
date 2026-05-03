@@ -14,9 +14,7 @@ constexpr u8 kHmacOPad = 0x5C;
 
 // Generic HMAC over a hash whose block size is 64 bytes (true for
 // both SHA-1 and SHA-256). The `digest_bytes` parameter selects
-// which digest to use; the implementation just dispatches to the
-// matching primitives. v0 keeps two specializations for
-// readability; common code shape stays in a static helper.
+// which underlying hash to use.
 void HmacInner(const u8* key, u32 key_len, const u8* data, u32 data_len, u8* out, u32 digest_bytes)
 {
     u8 ipad_key[kHmacBlockBytes];

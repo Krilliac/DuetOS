@@ -4,6 +4,8 @@
 #include "drivers/video/framebuffer.h"
 #include "fs/fat32.h"
 #include "mm/kheap.h"
+#include "util/bmp.h"
+#include "util/tga.h"
 
 namespace duetos::apps::screenshot
 {
@@ -17,61 +19,13 @@ namespace
 // 2 MiB heap easily.
 constexpr u64 kScratchBytes = 65536;
 
-constexpr u64 kBmpFileHeaderBytes = 14;
-constexpr u64 kBmpInfoHeaderBytes = 40;
-constexpr u64 kBmpHeaderBytes = kBmpFileHeaderBytes + kBmpInfoHeaderBytes;
+using duetos::util::kBmpFileHeaderBytes;
+using duetos::util::kBmpHeaderBytes;
+using duetos::util::kBmpInfoHeaderBytes;
 
-// Little-endian byte stores. Reinterpret-cast onto a u8* would
-// fail on builds that strict-alias; this is portable and the
-// compiler folds it into single MOVs.
-inline void StoreU16(u8* p, u16 v)
-{
-    p[0] = static_cast<u8>(v);
-    p[1] = static_cast<u8>(v >> 8);
-}
-
-inline void StoreU32(u8* p, u32 v)
-{
-    p[0] = static_cast<u8>(v);
-    p[1] = static_cast<u8>(v >> 8);
-    p[2] = static_cast<u8>(v >> 16);
-    p[3] = static_cast<u8>(v >> 24);
-}
-
-// 32-bpp top-down BMP: BITMAPFILEHEADER + BITMAPINFOHEADER. The
-// negative DIB height tells decoders the rows are stored in
-// framebuffer order (no flip), matching how we copy them out.
-void WriteBmpHeader(u8* out, u32 width, u32 height)
-{
-    const u32 pixel_bytes = width * height * 4;
-    const u32 file_size = static_cast<u32>(kBmpHeaderBytes) + pixel_bytes;
-
-    // BITMAPFILEHEADER (14 bytes)
-    out[0] = 'B';
-    out[1] = 'M';
-    StoreU32(out + 2, file_size);
-    StoreU16(out + 6, 0); // reserved
-    StoreU16(out + 8, 0); // reserved
-    StoreU32(out + 10, static_cast<u32>(kBmpHeaderBytes));
-
-    // BITMAPINFOHEADER (40 bytes)
-    StoreU32(out + 14, static_cast<u32>(kBmpInfoHeaderBytes));
-    StoreU32(out + 18, width);
-    StoreU32(out + 22, static_cast<u32>(-static_cast<i32>(height)));
-    StoreU16(out + 26, 1);  // planes
-    StoreU16(out + 28, 32); // bpp
-    StoreU32(out + 30, 0);  // BI_RGB (uncompressed)
-    StoreU32(out + 34, pixel_bytes);
-    StoreU32(out + 38, 2835); // ~72 DPI in pixels-per-metre
-    StoreU32(out + 42, 2835);
-    StoreU32(out + 46, 0); // colors used
-    StoreU32(out + 50, 0); // colors important
-}
-
-// Format `n` (0..9999) into the four-digit slot of an SHOTNNNN
-// filename buffer. Fills out[4..7]. Buffer convention is the
-// 13-byte SHOTNNNN.BMP\0 form.
-void FormatShotName(char* out, u32 n)
+// Format `n` (0..9999) + extension into a 13-byte SHOTNNNN.XXX
+// filename buffer. Used by both the BMP and TGA capture paths.
+void FormatShotName(char* out, u32 n, char e0, char e1, char e2)
 {
     out[0] = 'S';
     out[1] = 'H';
@@ -82,15 +36,18 @@ void FormatShotName(char* out, u32 n)
     out[6] = static_cast<char>('0' + (n / 10) % 10);
     out[7] = static_cast<char>('0' + n % 10);
     out[8] = '.';
-    out[9] = 'B';
-    out[10] = 'M';
-    out[11] = 'P';
+    out[9] = e0;
+    out[10] = e1;
+    out[11] = e2;
     out[12] = '\0';
 }
 
-// Scan the FAT32 root for SHOTNNNN.BMP entries; return the next
-// unused index (max+1, or 1 if none). Returns 0 when the next
-// index would exceed 9999.
+// Scan the FAT32 root for SHOTNNNN.{BMP,TGA} entries; return the
+// next unused index (max+1 across both extensions, or 1 if none).
+// Returns 0 when the next index would exceed 9999. Sharing the
+// counter across formats means a sequence of mixed BMP/TGA captures
+// produces strictly-increasing numbers — useful for after-the-fact
+// chronological sorting.
 u32 NextShotIndex(const fs::fat32::Volume* v)
 {
     namespace fat = fs::fat32;
@@ -116,7 +73,11 @@ u32 NextShotIndex(const fs::fat32::Volume* v)
         }
         if (!digits_ok)
             continue;
-        if (name[8] != '.' || name[9] != 'B' || name[10] != 'M' || name[11] != 'P' || name[12] != '\0')
+        if (name[8] != '.')
+            continue;
+        const bool is_bmp = (name[9] == 'B' && name[10] == 'M' && name[11] == 'P');
+        const bool is_tga = (name[9] == 'T' && name[10] == 'G' && name[11] == 'A');
+        if (!(is_bmp || is_tga) || name[12] != '\0')
             continue;
         if (num > max_idx)
             max_idx = num;
@@ -126,21 +87,15 @@ u32 NextShotIndex(const fs::fat32::Volume* v)
 }
 
 // Stream `width × height` pixels from `src_rows` (one pointer per
-// row) to `path`. First chunk uses Fat32CreateAtPath (also
-// emitting the BMP header), the rest use Fat32AppendAtPath.
-// On any I/O failure deletes the partial file. Returns true iff
+// row) to `path`, prefixed by a caller-provided header (BMP or
+// TGA) of `header_len` bytes already laid down at scratch[0..]. On
+// any I/O failure deletes the partial file. Returns true iff
 // every chunk wrote successfully.
-bool StreamBmp(const fs::fat32::Volume* v, const char* path, u32 width, u32 height, const u8* const* src_rows)
+bool StreamRows(const fs::fat32::Volume* v, const char* path, u32 width, u32 height, u8* scratch, u64 header_len,
+                const u8* const* src_rows)
 {
     namespace fat = fs::fat32;
-    u8* scratch = static_cast<u8*>(mm::KMalloc(kScratchBytes));
-    if (scratch == nullptr)
-    {
-        return false;
-    }
-
-    WriteBmpHeader(scratch, width, height);
-    u64 used = kBmpHeaderBytes;
+    u64 used = header_len;
     const u64 row_bytes = static_cast<u64>(width) * 4;
 
     u32 row = 0;
@@ -211,7 +166,7 @@ bool ScreenshotCapture()
         return false;
     }
     char path[16];
-    FormatShotName(path, idx);
+    FormatShotName(path, idx, 'B', 'M', 'P');
 
     // Build a per-row pointer table on the stack. 1024 rows × 8 B
     // = 8 KiB on the kernel stack; 4096 rows would exceed the
@@ -230,13 +185,83 @@ bool ScreenshotCapture()
         rows[r] = fb_bytes + static_cast<u64>(r) * fb.pitch;
     }
 
-    if (!StreamBmp(v, path, fb.width, fb.height, rows))
+    u8* scratch = static_cast<u8*>(mm::KMalloc(kScratchBytes));
+    if (scratch == nullptr)
+    {
+        SerialWrite("[shot] capture: scratch alloc failed\n");
+        return false;
+    }
+    duetos::util::BmpWriteHeader32(scratch, fb.width, fb.height, /*top_down=*/true);
+    if (!StreamRows(v, path, fb.width, fb.height, scratch, kBmpHeaderBytes, rows))
     {
         SerialWrite("[shot] capture: write failed (disk full?)\n");
         return false;
     }
 
     SerialWrite("[shot] capture: ");
+    SerialWrite(path);
+    SerialWrite("\n");
+    return true;
+}
+
+bool ScreenshotCaptureTga()
+{
+    namespace fat = fs::fat32;
+    using arch::SerialWrite;
+
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        SerialWrite("[shot] tga: no FAT32 volume\n");
+        return false;
+    }
+    const auto fb = drivers::video::FramebufferGet();
+    if (fb.virt == nullptr || fb.width == 0 || fb.height == 0 || fb.bpp != 32)
+    {
+        SerialWrite("[shot] tga: no usable 32-bpp framebuffer\n");
+        return false;
+    }
+    const u32 idx = NextShotIndex(v);
+    if (idx == 0)
+    {
+        SerialWrite("[shot] tga: filename counter exhausted (>9999)\n");
+        return false;
+    }
+    char path[16];
+    FormatShotName(path, idx, 'T', 'G', 'A');
+
+    constexpr u32 kMaxRows = 2048;
+    if (fb.height > kMaxRows)
+    {
+        SerialWrite("[shot] tga: framebuffer too tall (>2048 rows)\n");
+        return false;
+    }
+    const u8* rows[kMaxRows];
+    const auto* fb_bytes = static_cast<const u8*>(fb.virt);
+    for (u32 r = 0; r < fb.height; ++r)
+    {
+        rows[r] = fb_bytes + static_cast<u64>(r) * fb.pitch;
+    }
+
+    u8* scratch = static_cast<u8*>(mm::KMalloc(kScratchBytes));
+    if (scratch == nullptr)
+    {
+        SerialWrite("[shot] tga: scratch alloc failed\n");
+        return false;
+    }
+    if (!duetos::util::TgaWriteHeader32(scratch, fb.width, fb.height))
+    {
+        mm::KFree(scratch);
+        SerialWrite("[shot] tga: header build failed (oversize dim?)\n");
+        return false;
+    }
+    if (!StreamRows(v, path, fb.width, fb.height, scratch, duetos::util::kTgaHeaderBytes, rows))
+    {
+        SerialWrite("[shot] tga: write failed (disk full?)\n");
+        return false;
+    }
+
+    SerialWrite("[shot] tga: ");
     SerialWrite(path);
     SerialWrite("\n");
     return true;
@@ -283,7 +308,13 @@ void ScreenshotSelfTest()
         rows[y] = row_data[y];
     }
 
-    const bool wrote = StreamBmp(v, kTestPath, kW, kH, rows);
+    u8* test_scratch = static_cast<u8*>(mm::KMalloc(kScratchBytes));
+    bool wrote = false;
+    if (test_scratch != nullptr)
+    {
+        duetos::util::BmpWriteHeader32(test_scratch, kW, kH, /*top_down=*/true);
+        wrote = StreamRows(v, kTestPath, kW, kH, test_scratch, kBmpHeaderBytes, rows);
+    }
 
     // Verify the file landed at the expected size.
     bool size_ok = false;

@@ -275,6 +275,26 @@ void LogAWith2Values(LogLevel level, LogArea area, const char* subsystem, const 
 void SetLogColor(bool enabled);
 bool GetLogColor();
 
+/// Sample the RTC once and remember the wall-clock time at boot.
+/// After this call, subsequent log lines may carry an ISO 8601
+/// `[2026-05-03T14:07:30Z]` prefix in addition to the uptime
+/// `[t=…ms]` prefix — controlled by `SetLogWallClock`.
+///
+/// Intended to run exactly once during early boot, after the RTC
+/// driver is up but before the first interesting log line.
+/// Subsequent calls overwrite the boot anchor (cheap, no harm).
+/// Reading the RTC per-line would be wasteful (the CMOS UIP wait
+/// can busy-spin up to ~1 ms); this anchor + ElapsedMicros offset
+/// is the same trick Linux uses for `dmesg --time-format iso`.
+void WallClockInit();
+
+/// Toggle the ISO 8601 wall-clock prefix. Defaults to OFF so
+/// existing log scanners are not surprised. When ON and
+/// `WallClockInit` has run, every emitted log line carries
+/// `[YYYY-MM-DDTHH:MM:SSZ]` immediately after the uptime prefix.
+void SetLogWallClock(bool enabled);
+bool GetLogWallClock();
+
 // -----------------------------------------------------------------
 // Trace / scope instrumentation.
 //

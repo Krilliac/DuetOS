@@ -1,17 +1,20 @@
-# Image Viewer — v0 (BMP only)
+# Image Viewer — v0 (BMP + TGA)
 
 _Type: Observation + Decision._
-_Last updated: 2026-05-02._
+_Last updated: 2026-05-03._
 
 ## What landed
 
-A native kernel app that reads 32-bpp uncompressed BMP files from
-the FAT32 root volume and paints them in a window. Closes the
-"P1 #7 image / PDF / media viewers" gap on the BMP side
+A native kernel app that reads 32-bpp uncompressed BMP files and
+24/32-bpp uncompressed Truevision TGA 2.0 files from the FAT32
+root volume and paints them in a window. Closes the "P1 #7
+image / PDF / media viewers" gap on the BMP+TGA side
 (`feature-gaps-end-user-v0.md`), and is the first viewer to pair
 naturally with the Screenshot app — every `Ctrl+Alt+P` capture
 already lands as a `SHOTNNNN.BMP` whose layout this viewer accepts
-byte-for-byte.
+byte-for-byte. TGA support added 2026-05-03 in the same imageview
+TU using `kernel/util/tga` for the parse/decode and a 4 MiB
+full-file-load cap for the in-memory path.
 
 Files:
 

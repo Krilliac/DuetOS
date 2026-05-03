@@ -3,6 +3,7 @@
 #include "arch/x86_64/serial.h"
 #include "log/klog.h"
 #include "drivers/storage/block.h"
+#include "util/unicode.h"
 
 namespace duetos::fs::exfat
 {
@@ -77,18 +78,6 @@ bool MatchesFsName(const u8* sect)
     return true;
 }
 
-// Translate a UTF-16LE code unit to a safe ASCII byte. Non-ASCII
-// or control characters become '?'. We never emit NUL inside a
-// name.
-char Utf16ToSafeAscii(u16 cp)
-{
-    if (cp == 0)
-        return '\0';
-    if (cp >= 0x20 && cp < 0x7F)
-        return char(cp);
-    return '?';
-}
-
 // Parse one "entry set" starting at `start_idx` within `buf`.
 // Returns the number of 32-byte slots consumed (SecondaryCount +
 // 1), or 0 if this isn't a usable file entry. `buf_entries` is
@@ -140,7 +129,7 @@ u32 ParseFileEntrySet(const u8* buf, u32 start_idx, u32 buf_entries, DirEntry* o
         for (u32 u = 0; u < 15 && remaining_units > 0; ++u, --remaining_units)
         {
             const u16 cp = LeU16(name_ent + 2 + u * 2);
-            const char c = Utf16ToSafeAscii(cp);
+            const char c = duetos::util::Utf16CpToSafeAscii(u32(cp));
             if (c == '\0')
                 break;
             if (name_pos + 1 < sizeof(out->name))

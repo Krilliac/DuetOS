@@ -39,10 +39,18 @@
  *   long readable function wins.
  */
 
+#include "util/adler32.h"
 #include "util/base64.h"
 #include "util/build_config.h"
 #include "util/crc32.h"
+#include "util/bmp.h"
+#include "util/datetime.h"
+#include "util/deflate.h"
+#include "util/gzip.h"
+#include "util/png.h"
+#include "util/tga.h"
 #include "util/types.h"
+#include "util/unicode.h"
 #include "acpi/acpi.h"
 #include "acpi/aml.h"
 #include "arch/x86_64/cpu.h"
@@ -70,6 +78,7 @@
 #include "drivers/audio/audio.h"
 #include "drivers/gpu/cea861.h"
 #include "drivers/gpu/cvt.h"
+#include "drivers/gpu/dpms.h"
 #include "drivers/gpu/edid.h"
 #include "drivers/gpu/gpu.h"
 #include "drivers/input/ps2kbd.h"
@@ -86,7 +95,6 @@
 #include "crypto/aes.h"
 #include "crypto/aes_keywrap.h"
 #include "crypto/hmac.h"
-#include "crypto/md5.h"
 #include "crypto/pbkdf2.h"
 #include "crypto/prf.h"
 #include "crypto/sha1.h"
@@ -876,6 +884,11 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // SelfTest functions. (A1-followup, 2026-04-28.)
     SerialWrite("[boot] Bringing up framebuffer (if present).\n");
     duetos::drivers::video::FramebufferInit(multiboot_info);
+    // Initialise the DPMS bookkeeper (record state = On, no driver
+    // hook). Settings shutdown/reboot transition to Off before the
+    // firmware-level shutdown, so any on-screen state matches the
+    // power request.
+    duetos::drivers::gpu::DpmsInit();
     if constexpr (duetos::core::kBootSelfTests)
     {
         duetos::core::InitcallRegister(duetos::core::Phase::Drivers, "framebuffer-selftest",
@@ -1699,6 +1712,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         SerialWrite(" (UTC)\n");
     }
 
+    // Anchor klog's wall-clock prefix to the RTC reading we just
+    // took. After this call, `klog::SetLogWallClock(true)` will
+    // surface a `[YYYY-MM-DDTHH:MM:SSZ]` prefix on every log line.
+    // Defaults to OFF so existing log scanners are not surprised;
+    // shell `klog wallclock on` and the boot-config knob can flip
+    // it.
+    duetos::core::WallClockInit();
+
     // CMOS is a 128-byte nvram that survives power-off; firmware
     // stashes BIOS setup + POST diagnostic codes + (on some
     // laptops) battery / thermal hints here. Dump it once at boot
@@ -1920,6 +1941,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::EdidSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::CvtSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::DpmsSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::Cea861SelfTest());
 
     SerialWrite("[boot] Bringing up firmware loader (scaffold).\n");
@@ -1929,9 +1951,16 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::RtlFirmwareSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::BcmFirmwareSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::BeaconSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::UnicodeSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::BmpSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::TgaSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::DateTimeSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::DeflateSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::GzipZlibSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::PngSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::Adler32SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Sha1SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Sha256SelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::crypto::Md5SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::HmacSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Pbkdf2SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::PrfSelfTest());
@@ -2532,6 +2561,21 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 duetos::drivers::video::CompositorUnlock();
                 duetos::drivers::video::NotifyShow(ok ? "screenshot saved" : "screenshot failed");
                 SerialWrite(ok ? "[ui] ^Alt+P screenshot saved\n" : "[ui] ^Alt+P screenshot FAILED\n");
+                continue;
+            }
+            // Ctrl+Alt+T captures the framebuffer to the next
+            // SHOTNNNN.TGA slot. Same pixel layout as the BMP path
+            // (BGRA8888, top-down) — only the 18-byte header
+            // differs. The shared filename counter means BMP and
+            // TGA captures interleave with strictly-increasing
+            // numbers.
+            if (ctrl && alt && (ev.code == 't' || ev.code == 'T'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const bool ok_tga = duetos::apps::screenshot::ScreenshotCaptureTga();
+                duetos::drivers::video::CompositorUnlock();
+                duetos::drivers::video::NotifyShow(ok_tga ? "screenshot (TGA) saved" : "screenshot (TGA) failed");
+                SerialWrite(ok_tga ? "[ui] ^Alt+T screenshot (TGA) saved\n" : "[ui] ^Alt+T screenshot (TGA) FAILED\n");
                 continue;
             }
             // Ctrl+Alt+Y cycles the desktop theme. Classic (teal)
