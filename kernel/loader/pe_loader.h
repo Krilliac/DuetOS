@@ -88,6 +88,10 @@ enum class PeStatus : u8
                              // load beats silently skipping init a real
                              // Windows PE's main() might depend on.
     StubsPageAllocFail,      // Could not allocate the Win32 stubs page during load.
+    ImageBaseOutOfRange,     // ImageBase or ImageBase+SizeOfImage lands outside the canonical
+                             // user low half (>0x00007FFFFFFFFFFF). A malicious PE with a
+                             // kernel-half ImageBase would otherwise drive AddressSpaceMapUserPage
+                             // into PanicAs and DoS the kernel from any execve-style spawn path.
 };
 
 const char* PeStatusName(PeStatus s);

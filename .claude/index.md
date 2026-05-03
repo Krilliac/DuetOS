@@ -6,6 +6,7 @@ _Read this at every session start (after git sync). Each row links to a detailed
 
 | Topic | File | Type | Status | Last Updated |
 |-------|------|------|--------|--------------|
+| Live security-testing pass — deflate canary, PBKDF2 boot DoS, VM-syscall+PE/DLL ImageBase user-range pre-checks | [knowledge/security-testing-fixes-2026-05-03.md](knowledge/security-testing-fixes-2026-05-03.md) | Issue + Pattern + Decision | Active | 2026-05-03 |
 | AI bloat pattern and countermeasures | [knowledge/ai-bloat-pattern.md](knowledge/ai-bloat-pattern.md) | Observation | Active | 2026-04-20 |
 | clang-format — CI-matching invocation | [knowledge/clang-format.md](knowledge/clang-format.md) | Pattern | Active | 2026-04-20 |
 | Git rebase conflict resolution | [knowledge/git-rebase-conflicts.md](knowledge/git-rebase-conflicts.md) | Pattern | Active | 2026-04-20 |

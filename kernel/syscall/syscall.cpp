@@ -1063,6 +1063,16 @@ void SyscallDispatch(arch::TrapFrame* frame)
         {
             base_va &= ~(page_size - 1);
         }
+        // Reject ranges that aren't fully inside the canonical user low
+        // half. Without this gate a hostile (or buggy) caller can pass
+        // hint_va in kernel-half and drive AddressSpaceMapUserPage into
+        // PanicAs — a DoS available to any process even without caps.
+        constexpr u64 kVmUserMax = 0x00007FFFFFFFFFFFULL;
+        if (base_va > kVmUserMax || aligned_size == 0 || (aligned_size - 1) > (kVmUserMax - base_va))
+        {
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
         for (u64 va = base_va; va < base_va + aligned_size; va += page_size)
         {
             const mm::PhysAddr fp = mm::AllocateFrame();
@@ -1183,6 +1193,15 @@ void SyscallDispatch(arch::TrapFrame* frame)
         const u64 page_size = mm::kPageSize;
         const u64 aligned_size = (size + page_size - 1) & ~(page_size - 1);
         const u64 aligned_base = base & ~(page_size - 1);
+        // Same gate as SYS_VM_ALLOCATE: AddressSpaceProtectUserPage
+        // panics on a kernel-half virt, so refuse out-of-range inputs
+        // here instead of letting an unprivileged caller DoS the kernel.
+        constexpr u64 kVmUserMax = 0x00007FFFFFFFFFFFULL;
+        if (aligned_base > kVmUserMax || aligned_size == 0 || (aligned_size - 1) > (kVmUserMax - aligned_base))
+        {
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
         u32 first_old_protect = 0x04; // best-effort: PAGE_READWRITE
         for (u64 va = aligned_base; va < aligned_base + aligned_size; va += page_size)
         {
