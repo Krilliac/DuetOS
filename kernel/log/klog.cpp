@@ -1024,10 +1024,12 @@ void DumpInflightScopes()
 
 void LogMetrics(LogLevel level, const char* subsystem, const char* label)
 {
-    if (!LevelEnabled(level))
-    {
-        return;
-    }
+    // Metrics are landmark snapshots — boot-phase checkpoints and
+    // user-requested shell dumps. They emit unconditionally, even
+    // when the runtime threshold would normally suppress `level`
+    // (release builds default to Warn, which would otherwise drop
+    // the Info-tagged boot/bringup-complete checkpoint that CI and
+    // forensic boot logs both grep for).
     const auto heap = mm::KernelHeapStatsRead();
     const u64 free_frames = mm::FreeFramesCount();
     const auto sched_stats = sched::SchedStatsRead();
@@ -1357,7 +1359,8 @@ LogArea LogAreaFromName(const char* name)
 {
     if (name == nullptr)
         return LogArea::None;
-    auto eq = [](const char* a, const char* b) {
+    auto eq = [](const char* a, const char* b)
+    {
         while (*a != '\0' && *b != '\0')
         {
             char ca = *a;
@@ -1374,11 +1377,11 @@ LogArea LogAreaFromName(const char* name)
         return *a == '\0' && *b == '\0';
     };
     constexpr LogArea kAll[] = {
-        LogArea::General,  LogArea::Boot,    LogArea::Memory, LogArea::Sched,    LogArea::Process,  LogArea::Syscall,
-        LogArea::Loader,   LogArea::FS,      LogArea::Net,    LogArea::Storage,  LogArea::USB,      LogArea::GPU,
-        LogArea::Input,    LogArea::Audio,   LogArea::IPC,    LogArea::Win32,    LogArea::Linux,    LogArea::Time,
-        LogArea::Power,    LogArea::Security, LogArea::Diag,  LogArea::Ring3,    LogArea::App,      LogArea::Driver,
-        LogArea::ACPI,     LogArea::PCI,     LogArea::Wireless, LogArea::Graphics, LogArea::Test,   LogArea::Arith,
+        LogArea::General, LogArea::Boot,     LogArea::Memory,   LogArea::Sched,    LogArea::Process, LogArea::Syscall,
+        LogArea::Loader,  LogArea::FS,       LogArea::Net,      LogArea::Storage,  LogArea::USB,     LogArea::GPU,
+        LogArea::Input,   LogArea::Audio,    LogArea::IPC,      LogArea::Win32,    LogArea::Linux,   LogArea::Time,
+        LogArea::Power,   LogArea::Security, LogArea::Diag,     LogArea::Ring3,    LogArea::App,     LogArea::Driver,
+        LogArea::ACPI,    LogArea::PCI,      LogArea::Wireless, LogArea::Graphics, LogArea::Test,    LogArea::Arith,
         LogArea::All,
     };
     for (LogArea a : kAll)

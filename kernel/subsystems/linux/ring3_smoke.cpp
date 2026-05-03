@@ -819,9 +819,8 @@ void SpawnSynfsElf()
     core::CapSet caps = core::CapSetEmpty();
     core::CapSetAdd(caps, core::kCapFsRead);
     core::CapSetAdd(caps, core::kCapFsWrite);
-    const u64 pid = core::SpawnElfLinux("synfs", fs::generated::kBinSynfsElfBytes,
-                                        fs::generated::kBinSynfsElfBytes_len, caps,
-                                        fs::RamfsSandboxRoot(), /*frame_budget=*/32, core::kTickBudgetSandbox);
+    const u64 pid = core::SpawnElfLinux("synfs", fs::generated::kBinSynfsElfBytes, fs::generated::kBinSynfsElfBytes_len,
+                                        caps, fs::RamfsSandboxRoot(), /*frame_budget=*/32, core::kTickBudgetSandbox);
     if (pid == 0)
     {
         arch::SerialWrite("[linux] SpawnElfLinux FAILED for synfs\n");
@@ -842,9 +841,8 @@ void SpawnSynetElf()
     // surfaces `[net] <name> rc=<rc>` per call.
     core::CapSet caps = core::CapSetEmpty();
     core::CapSetAdd(caps, core::kCapNet);
-    const u64 pid = core::SpawnElfLinux("synet", fs::generated::kBinSynetElfBytes,
-                                        fs::generated::kBinSynetElfBytes_len, caps,
-                                        fs::RamfsSandboxRoot(), /*frame_budget=*/32, core::kTickBudgetSandbox);
+    const u64 pid = core::SpawnElfLinux("synet", fs::generated::kBinSynetElfBytes, fs::generated::kBinSynetElfBytes_len,
+                                        caps, fs::RamfsSandboxRoot(), /*frame_budget=*/32, core::kTickBudgetSandbox);
     if (pid == 0)
     {
         arch::SerialWrite("[linux] SpawnElfLinux FAILED for synet\n");
@@ -873,10 +871,9 @@ void SpawnSynfullElf()
     // and each syscall is at least a few page-touches. Budget
     // matches a heavyweight smoke; if synfull starves itself the
     // scheduler will kill the slot and the boot log will say so.
-    const u64 pid = core::SpawnElfLinux("synfull", fs::generated::kBinSynfullElfBytes,
-                                        fs::generated::kBinSynfullElfBytes_len, caps,
-                                        fs::RamfsSandboxRoot(), /*frame_budget=*/64,
-                                        core::kTickBudgetSandbox * 4);
+    const u64 pid =
+        core::SpawnElfLinux("synfull", fs::generated::kBinSynfullElfBytes, fs::generated::kBinSynfullElfBytes_len, caps,
+                            fs::RamfsSandboxRoot(), /*frame_budget=*/64, core::kTickBudgetSandbox * 4);
     if (pid == 0)
     {
         arch::SerialWrite("[linux] SpawnElfLinux FAILED for synfull\n");

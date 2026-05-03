@@ -662,71 +662,71 @@ i64 DoPrctl(u64 option, u64 arg2, u64 arg3, u64 arg4, u64 arg5)
     // model these fully (no real cap-bounding-set, no THP, no
     // no-new-privs enforcement) but real binaries handle the
     // accept-as-noop response gracefully.
-    case 7:    // PR_GET_KEEPCAPS — capabilities preserved across uid change
+    case 7: // PR_GET_KEEPCAPS — capabilities preserved across uid change
         return 0;
-    case 8:    // PR_SET_KEEPCAPS
+    case 8: // PR_SET_KEEPCAPS
         return 0;
-    case 9:    // PR_GET_FPEMU — FP emulation flag (deprecated)
+    case 9: // PR_GET_FPEMU — FP emulation flag (deprecated)
         return 0;
-    case 10:   // PR_SET_FPEMU
+    case 10: // PR_SET_FPEMU
         return 0;
-    case 11:   // PR_GET_FPEXC — FP exception mode
+    case 11: // PR_GET_FPEXC — FP exception mode
         return 0;
-    case 12:   // PR_SET_FPEXC
+    case 12: // PR_SET_FPEXC
         return 0;
-    case 13:   // PR_GET_TIMING
+    case 13:      // PR_GET_TIMING
         return 0; // PR_TIMING_STATISTICAL
-    case 14:   // PR_SET_TIMING
+    case 14:      // PR_SET_TIMING
         return 0;
-    case 17:   // PR_GET_ENDIAN — process endianness (PPC-specific)
+    case 17:      // PR_GET_ENDIAN — process endianness (PPC-specific)
         return 0; // little-endian (PR_ENDIAN_LITTLE)
-    case 18:   // PR_SET_ENDIAN
+    case 18:      // PR_SET_ENDIAN
         return 0;
-    case 19:   // PR_GET_SECCOMP — companion to kPrSetSeccomp
+    case 19:      // PR_GET_SECCOMP — companion to kPrSetSeccomp
         return 0; // SECCOMP_MODE_DISABLED
-    case 23:   // PR_CAPBSET_READ — bounding-set introspection
+    case 23:      // PR_CAPBSET_READ — bounding-set introspection
         return 1; // pretend the cap is in the set
-    case 24:   // PR_CAPBSET_DROP
+    case 24:      // PR_CAPBSET_DROP
         return 0;
-    case 25:   // PR_GET_TSC — process TSC access
+    case 25:      // PR_GET_TSC — process TSC access
         return 0; // PR_TSC_ENABLE
-    case 26:   // PR_SET_TSC
+    case 26:      // PR_SET_TSC
         return 0;
-    case 27:   // PR_GET_SECUREBITS
+    case 27: // PR_GET_SECUREBITS
         return 0;
-    case 28:   // PR_SET_SECUREBITS
+    case 28: // PR_SET_SECUREBITS
         return 0;
-    case 29:   // PR_SET_TIMERSLACK
+    case 29: // PR_SET_TIMERSLACK
         return 0;
-    case 30:   // PR_GET_TIMERSLACK
+    case 30:          // PR_GET_TIMERSLACK
         return 50000; // 50us — Linux's default
-    case 35:   // PR_SET_MM — modify MM fields. Accepted as no-op.
+    case 35:          // PR_SET_MM — modify MM fields. Accepted as no-op.
         return 0;
-    case 36:   // PR_SET_PTRACER — limit ptracer pid
+    case 36: // PR_SET_PTRACER — limit ptracer pid
         return 0;
-    case 37:   // PR_SET_CHILD_SUBREAPER
+    case 37: // PR_SET_CHILD_SUBREAPER
         return 0;
-    case 38:   // PR_SET_NO_NEW_PRIVS
+    case 38: // PR_SET_NO_NEW_PRIVS
         return 0;
-    case 39:   // PR_GET_NO_NEW_PRIVS
+    case 39: // PR_GET_NO_NEW_PRIVS
         return 0;
-    case 40:   // PR_GET_TID_ADDRESS
+    case 40: // PR_GET_TID_ADDRESS
         return 0;
-    case 41:   // PR_SET_THP_DISABLE
+    case 41: // PR_SET_THP_DISABLE
         return 0;
-    case 42:   // PR_GET_THP_DISABLE
+    case 42: // PR_GET_THP_DISABLE
         return 0;
-    case 47:   // PR_CAP_AMBIENT — ambient capability set
+    case 47: // PR_CAP_AMBIENT — ambient capability set
         return 0;
-    case 53:   // PR_SET_VMA — name a VMA. Accepted no-op.
+    case 53: // PR_SET_VMA — name a VMA. Accepted no-op.
         return 0;
-    case 55:   // PR_GET_SPECULATION_CTRL — Spectre / Meltdown
+    case 55: // PR_GET_SPECULATION_CTRL — Spectre / Meltdown
         return 0;
-    case 56:   // PR_SET_SPECULATION_CTRL
+    case 56: // PR_SET_SPECULATION_CTRL
         return 0;
-    case 57:   // PR_GET_TAGGED_ADDR_CTRL — ARM tagged-addr (x86 N/A)
+    case 57: // PR_GET_TAGGED_ADDR_CTRL — ARM tagged-addr (x86 N/A)
         return 0;
-    case 58:   // PR_SET_TAGGED_ADDR_CTRL
+    case 58: // PR_SET_TAGGED_ADDR_CTRL
         return 0;
     default:
         return kEINVAL;

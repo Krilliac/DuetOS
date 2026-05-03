@@ -2004,17 +2004,16 @@ void CmdLogarea(u32 argc, char** argv)
         ConsoleWriteln(hex);
         ConsoleWriteln("ENABLED AREAS:");
         constexpr duetos::core::LogArea kSingles[] = {
-            duetos::core::LogArea::General,  duetos::core::LogArea::Boot,    duetos::core::LogArea::Memory,
-            duetos::core::LogArea::Sched,    duetos::core::LogArea::Process, duetos::core::LogArea::Syscall,
-            duetos::core::LogArea::Loader,   duetos::core::LogArea::FS,      duetos::core::LogArea::Net,
-            duetos::core::LogArea::Storage,  duetos::core::LogArea::USB,     duetos::core::LogArea::GPU,
-            duetos::core::LogArea::Input,    duetos::core::LogArea::Audio,   duetos::core::LogArea::IPC,
-            duetos::core::LogArea::Win32,    duetos::core::LogArea::Linux,   duetos::core::LogArea::Time,
-            duetos::core::LogArea::Power,    duetos::core::LogArea::Security,
-            duetos::core::LogArea::Diag,     duetos::core::LogArea::Ring3,   duetos::core::LogArea::App,
-            duetos::core::LogArea::Driver,   duetos::core::LogArea::ACPI,    duetos::core::LogArea::PCI,
-            duetos::core::LogArea::Wireless, duetos::core::LogArea::Graphics, duetos::core::LogArea::Test,
-            duetos::core::LogArea::Arith,
+            duetos::core::LogArea::General,  duetos::core::LogArea::Boot,     duetos::core::LogArea::Memory,
+            duetos::core::LogArea::Sched,    duetos::core::LogArea::Process,  duetos::core::LogArea::Syscall,
+            duetos::core::LogArea::Loader,   duetos::core::LogArea::FS,       duetos::core::LogArea::Net,
+            duetos::core::LogArea::Storage,  duetos::core::LogArea::USB,      duetos::core::LogArea::GPU,
+            duetos::core::LogArea::Input,    duetos::core::LogArea::Audio,    duetos::core::LogArea::IPC,
+            duetos::core::LogArea::Win32,    duetos::core::LogArea::Linux,    duetos::core::LogArea::Time,
+            duetos::core::LogArea::Power,    duetos::core::LogArea::Security, duetos::core::LogArea::Diag,
+            duetos::core::LogArea::Ring3,    duetos::core::LogArea::App,      duetos::core::LogArea::Driver,
+            duetos::core::LogArea::ACPI,     duetos::core::LogArea::PCI,      duetos::core::LogArea::Wireless,
+            duetos::core::LogArea::Graphics, duetos::core::LogArea::Test,     duetos::core::LogArea::Arith,
         };
         for (auto a : kSingles)
         {

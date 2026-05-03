@@ -647,8 +647,8 @@ i64 DoRecvmmsg(u64 fd, u64 user_mmsgvec, u64 vlen, u64 flags, u64 user_timeout)
     for (u32 i = 0; i < vlen; ++i)
     {
         const u64 mmsg_addr = user_mmsgvec + i * kMmsghdrSize;
-        const u64 hdr_addr = mmsg_addr;        // msghdr embedded at offset 0
-        const u64 len_addr = mmsg_addr + 56;   // msg_len at offset 56
+        const u64 hdr_addr = mmsg_addr;      // msghdr embedded at offset 0
+        const u64 len_addr = mmsg_addr + 56; // msg_len at offset 56
         const u64 call_flags = (i == 0) ? flags : (flags | kMsgDontwait);
         const i64 rc = DoRecvmsg(fd, hdr_addr, call_flags);
         if (rc < 0)

@@ -282,8 +282,7 @@ i32 AllocTimerSlot(::duetos::core::Process* p)
 
 bool ValidTimerId(::duetos::core::Process* p, u64 timerid)
 {
-    return timerid < ::duetos::core::Process::kLinuxTimerCap &&
-           p->linux_posix_timers[timerid].in_use;
+    return timerid < ::duetos::core::Process::kLinuxTimerCap && p->linux_posix_timers[timerid].in_use;
 }
 
 } // namespace
