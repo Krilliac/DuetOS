@@ -24,9 +24,11 @@
 #include "diag/kdbg.h"
 #include "log/klog.h"
 #include "core/panic.h"
+#include "mm/dma.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
 #include "mm/paging.h"
+#include "mm/zone.h"
 #include "drivers/pci/pci.h"
 #include "drivers/storage/block.h"
 
@@ -163,8 +165,9 @@ struct Port
     volatile u8* regs; // per-port MMIO window (hba + 0x100 + idx*0x80)
     u32 port_idx;
     u32 ctrl_idx;              // which AHCI controller this port lives on
-    mm::PhysAddr scratch_phys; // 4 KiB frame holding cmd list + FIS + cmd table
-    u8* scratch_virt;          // direct-map alias
+    mm::DmaBuffer scratch_dma; // owns the 4 KiB DMA-coherent allocation
+    mm::PhysAddr scratch_phys; // mirror of scratch_dma.phys for tight call sites
+    u8* scratch_virt;          // mirror of scratch_dma.virt for tight call sites
     u64 sector_count;          // from IDENTIFY
     u32 block_handle;          // block layer handle, or kBlockHandleInvalid
     char name[12];             // "sata0".."sata7"
@@ -459,15 +462,22 @@ bool BringUpPort(volatile u8* hba_base, u32 port_idx, u32 ctrl_idx)
     p.block_handle = kBlockHandleInvalid;
     NamePort(p, g_port_count);
 
-    // Allocate the shared 4 KiB DMA frame and zero it.
-    p.scratch_phys = mm::AllocateFrame();
-    if (p.scratch_phys == mm::kNullFrame)
+    // Allocate the shared 4 KiB DMA-coherent region. AHCI is 32-bit
+    // DMA-addressable for command-list / FIS-receive / command-table
+    // pointers (the actual data buffers can be 64-bit), so Dma32 is
+    // the right zone. AllocDmaCoherent zeroes the buffer for us.
     {
-        core::Log(core::LogLevel::Error, "drivers/ahci", "port OOM: AllocateFrame failed");
-        return false;
+        auto r = mm::AllocDmaCoherent(mm::kPageSize, mm::Zone::Dma32);
+        if (!r.has_value())
+        {
+            core::LogWithValue(core::LogLevel::Error, "drivers/ahci", "port OOM: AllocDmaCoherent failed",
+                               static_cast<u64>(r.error()));
+            return false;
+        }
+        p.scratch_dma = r.value();
+        p.scratch_phys = p.scratch_dma.phys;
+        p.scratch_virt = static_cast<u8*>(p.scratch_dma.virt);
     }
-    p.scratch_virt = static_cast<u8*>(mm::PhysToVirt(p.scratch_phys));
-    VolatileZero(p.scratch_virt, mm::kPageSize);
 
     // Stop the port, program CLB/FB, clear error bits, re-start.
     PortStop(port_regs);
@@ -484,7 +494,7 @@ bool BringUpPort(volatile u8* hba_base, u32 port_idx, u32 ctrl_idx)
     if (!PortStart(port_regs))
     {
         core::LogWithValue(core::LogLevel::Error, "drivers/ahci", "port start (BSY/DRQ stuck) idx", port_idx);
-        mm::FreeFrame(p.scratch_phys);
+        mm::FreeDmaCoherent(p.scratch_dma);
         return false;
     }
 
@@ -492,7 +502,7 @@ bool BringUpPort(volatile u8* hba_base, u32 port_idx, u32 ctrl_idx)
     {
         core::LogWithValue(core::LogLevel::Error, "drivers/ahci", "IDENTIFY DEVICE failed idx", port_idx);
         PortStop(port_regs);
-        mm::FreeFrame(p.scratch_phys);
+        mm::FreeDmaCoherent(p.scratch_dma);
         return false;
     }
 
@@ -508,7 +518,7 @@ bool BringUpPort(volatile u8* hba_base, u32 port_idx, u32 ctrl_idx)
     {
         core::Log(core::LogLevel::Error, "drivers/ahci", "block registry full");
         PortStop(port_regs);
-        mm::FreeFrame(p.scratch_phys);
+        mm::FreeDmaCoherent(p.scratch_dma);
         return false;
     }
     p.online = true;

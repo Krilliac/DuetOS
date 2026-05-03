@@ -158,6 +158,7 @@
 #include "fs/tmpfs.h"
 #include "fs/vfs.h"
 #include "mm/address_space.h"
+#include "mm/dma.h"
 #include "mm/frame_allocator.h"
 #include "mm/zone.h"
 #include "ipc/handle_table.h"
@@ -806,6 +807,16 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                        []()
                                        {
                                            ZoneSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
+        // mm/dma — DMA-coherent buffer allocation. Sits on top of
+        // the per-zone contiguous-frame allocator; the first real
+        // consumers are the iwlwifi TFD/RBD rings + (when they
+        // land) AHCI + Intel HDA CORB. See `dma-coherent-v0.md`.
+        duetos::core::InitcallRegister(duetos::core::Phase::PhysMem, "dma-selftest",
+                                       []()
+                                       {
+                                           DmaSelfTest();
                                            return duetos::core::Result<void>{};
                                        });
     }

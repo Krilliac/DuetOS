@@ -595,6 +595,51 @@ PhysAddr AllocateContiguousFrames(u64 count)
     return kNullFrame;
 }
 
+PhysAddr AllocateContiguousFramesInRange(u64 count, PhysAddr max_phys)
+{
+    if (count == 0 || count > g_bitmap_frames)
+    {
+        return kNullFrame;
+    }
+    // max_phys == 0 == no upper bound, matching AllocateFrameInRange.
+    u64 max_frames = g_bitmap_frames;
+    if (max_phys != 0)
+    {
+        max_frames = max_phys >> kPageSizeLog2;
+        if (max_frames > g_bitmap_frames)
+            max_frames = g_bitmap_frames;
+    }
+    if (count > max_frames)
+        return kNullFrame;
+
+    // Same linear scan as AllocateContiguousFrames, clamped at
+    // max_frames so the WHOLE run sits strictly below max_phys (the
+    // last frame in the run is at index max_frames-1, whose physical
+    // base is (max_frames-1) << 12 — guaranteed < max_phys because
+    // max_frames was rounded down).
+    u64 run_start = 0;
+    u64 run_len = 0;
+    for (u64 frame = 0; frame < max_frames; ++frame)
+    {
+        if (BitmapIsUsed(frame))
+        {
+            run_len = 0;
+            continue;
+        }
+        if (run_len == 0)
+            run_start = frame;
+        ++run_len;
+        if (run_len == count)
+        {
+            for (u64 f = run_start; f < run_start + count; ++f)
+                BitmapMarkUsed(f);
+            return run_start << kPageSizeLog2;
+        }
+    }
+    KLOG_WARN_V("mm/frame", "no in-range contiguous run available; requested frames", count);
+    return kNullFrame;
+}
+
 void FreeContiguousFrames(PhysAddr base, u64 count)
 {
     if (base == kNullFrame || count == 0)
