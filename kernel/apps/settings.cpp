@@ -4,6 +4,7 @@
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/rtc.h"
 #include "arch/x86_64/serial.h"
+#include "drivers/gpu/dpms.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/notify.h"
 #include "drivers/video/theme.h"
@@ -138,6 +139,13 @@ void DoTzUp()
     duetos::core::SessionRestoreSave();
     duetos::drivers::video::NotifyShow("shutting down...");
     duetos::arch::SerialWrite("[settings] user invoked shutdown\n");
+    // Move the DPMS state machine to Off so any registered driver
+    // hook (e.g. eDP power-down on real GPUs, once one is wired)
+    // gets the chance to drop power before ACPI shutdown. On v0
+    // there is no driver hook so this is bookkeeper-only — the
+    // recorded state still matches the user's request, which makes
+    // the inspect-shell history coherent.
+    duetos::drivers::gpu::DpmsSetState(duetos::drivers::gpu::DpmsState::Off);
     duetos::acpi::AcpiShutdown();
     duetos::arch::Halt();
 }
@@ -147,6 +155,11 @@ void DoTzUp()
     duetos::core::SessionRestoreSave();
     duetos::drivers::video::NotifyShow("rebooting...");
     duetos::arch::SerialWrite("[settings] user invoked reboot\n");
+    // Reboot transitions through Standby → Off so a future driver
+    // hook can implement a graceful blank then full power-down. The
+    // bookkeeper-only path is identical to DoShutdown for now.
+    duetos::drivers::gpu::DpmsSetState(duetos::drivers::gpu::DpmsState::Standby);
+    duetos::drivers::gpu::DpmsSetState(duetos::drivers::gpu::DpmsState::Off);
     duetos::core::KernelReboot();
 }
 

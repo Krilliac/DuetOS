@@ -896,6 +896,11 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // SelfTest functions. (A1-followup, 2026-04-28.)
     SerialWrite("[boot] Bringing up framebuffer (if present).\n");
     duetos::drivers::video::FramebufferInit(multiboot_info);
+    // Initialise the DPMS bookkeeper (record state = On, no driver
+    // hook). Settings shutdown/reboot transition to Off before the
+    // firmware-level shutdown, so any on-screen state matches the
+    // power request.
+    duetos::drivers::gpu::DpmsInit();
     if constexpr (duetos::core::kBootSelfTests)
     {
         duetos::core::InitcallRegister(duetos::core::Phase::Drivers, "framebuffer-selftest",
