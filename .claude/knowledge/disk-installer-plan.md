@@ -1,8 +1,16 @@
 # Disk installer plan (P2 #16) — blocked on infrastructure
 
-## Status (2026-05-01)
+## Status (2026-05-03)
 
 **Landed:** none. Plan only.
+
+**2026-05-03 audit:** Re-confirmed each prerequisite still
+absent — `git grep -nE 'GptWrite|GptInitDisk|Fat32Format'`
+returns nothing. The 2026-05-03 batch did not touch this slice.
+A relevant-but-tangential adjacency: `kernel/util/cpio.{h,cpp}`
+(landed today) gives a future image-generator a clean way to
+build initramfs payloads, but that's an installer-payload
+helper, not a precondition.
 
 **Deferred — strictly blocking:**
 - GPT write surface (`kernel/fs/gpt.cpp` is probe-only; no

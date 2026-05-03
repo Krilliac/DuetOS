@@ -1,6 +1,6 @@
 # Post-recommendations follow-on plan
 
-## Status (2026-05-01)
+## Status (2026-05-03)
 
 The 18-item kernel-debug recommendations plan closed on
 2026-04-28 with every numbered item landed and most followups
@@ -11,6 +11,14 @@ that plan's end — items whose name was "followup" but whose
 scope is a multi-commit slice on its own. Each entry below is
 a future plan in miniature: what it is, what blocks it, and
 what triggers it.
+
+**2026-05-03 audit:** None of the seven remaining items landed
+this round; each is genuinely a multi-commit slice or hardware /
+runtime gated. The 2026-05-03 batch on
+`claude/cleanup-stale-documents-2lhGO` worked through bounded
+porting-candidate rows (`kernel-util-libraries-v0.md`) instead.
+Resume rule unchanged: pick one item below and write its own
+slice plan if it grows past a single commit.
 
 ### Landed since this plan was opened
 

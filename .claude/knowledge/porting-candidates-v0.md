@@ -2,7 +2,7 @@
 
 _Type: Plan + Observation._
 _Status: Active — open list. Each session can pick from this._
-_Last updated: 2026-05-03._
+_Last updated: 2026-05-03 (batch landed: HMAC-MD5, Unicode UTF, TGA decoder, datetime, BMP util, CPIO walker — see `kernel-util-libraries-v0.md`)._
 
 This file enumerates discrete features whose primary work is
 **clean-room porting from a public spec** rather than novel
@@ -28,6 +28,12 @@ for the next session.
 > net / crypto / FS / time / archives). The row gives you the spec,
 > the prior art, the eventual consumer, and the size estimate.
 > Commit with a "LANDED" note in this file before pushing.
+>
+> The 2026-05-03 batch added a "Status — landed slices" row for
+> every TU it shipped; the long-form companion is
+> `kernel-util-libraries-v0.md`. If a follow-up consumer matters
+> more than a fresh slice, the candidates with no live caller yet
+> are HMAC-MD5 (NTLMv1 thunk) and CPIO (initramfs unpacker).
 
 ## Status — landed slices
 
