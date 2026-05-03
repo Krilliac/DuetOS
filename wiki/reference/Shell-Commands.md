@@ -312,6 +312,38 @@ existing kernel API.
 | `sync` | Flush placeholder (v0 backends are synchronous) | `shell_extra.cpp` |
 | `port r <port>` | Read one byte from x86 I/O port (admin) | `shell_extra.cpp` |
 | `port w <port> <val>` | Write one byte to x86 I/O port (admin) | `shell_extra.cpp` |
+| `assert <cmd...>` | Run CMD; print PASS / FAIL based on `$?` | `shell_extra.cpp` |
+| `watch <secs> <cmd...>` | Re-run CMD every SECS seconds (^C aborts, cap 1000) | `shell_extra.cpp` |
+| `script /tmp/<name> <cmd...>` | Run CMD with output captured to a tmpfs file | `shell_extra.cpp` |
+
+## Scripting
+
+The shell understands a small POSIX-flavoured scripting language (see
+[Shell-Scripting](Shell-Scripting.md) for the full grammar). Quick
+summary:
+
+- **Exit codes** — every command sets `$?`. `0` = success, `1` =
+  generic failure, `2` = misuse, `127` = command not found. Read it
+  back via `$?` in any later argv token.
+- **Comments** — lines starting with `#` are skipped.
+- **Conditionals** — `if CMD ; then ... [elif CMD ; then ... ]
+  [else ... ] fi`. The condition's `$?` decides which branch runs.
+- **While loops** — `while CMD ; do ... done`. Loops while the
+  condition's `$?` is `0`. Capped at 10 000 iterations.
+- **For loops** — `for VAR in W1 W2 W3 ; do ... done`. Iterates the
+  whitespace-split word list, writing each value into `$VAR` via the
+  env table.
+- **Source files** — `source <path>` (or `.`) runs the file as a
+  script. Used by `/etc/profile` at shell startup.
+
+Three commands target script authors directly:
+
+- `assert <cmd>` — run CMD and report PASS / FAIL. Used as the
+  per-line marker in self-test scripts.
+- `watch <secs> <cmd>` — periodic re-run for "tail this output until
+  it changes" workflows.
+- `script <path> <cmd>` — capture CMD's output to a tmpfs file
+  alongside live console output.
 
 ---
 
