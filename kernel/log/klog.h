@@ -49,7 +49,7 @@ namespace duetos::core
 
 enum class LogLevel : u8
 {
-    Trace = 0,    // finest-grained — function enter/exit + timing
+    Trace = 0, // finest-grained — function enter/exit + timing
     Debug = 1,
     Info = 2,
     Warn = 3,
@@ -88,36 +88,36 @@ enum class LogLevel : u8
 enum class LogArea : u32
 {
     None = 0,
-    General = 1u << 0,    // default for legacy KLOG_* without an area
-    Boot = 1u << 1,       // kernel_main, init phases, bringup
-    Memory = 1u << 2,     // mm/ — frame allocator, paging, heap, slabs
-    Sched = 1u << 3,      // sched/ — task lifecycle, runqueues, locks
-    Process = 1u << 4,    // proc/ — Process create/release, caps
-    Syscall = 1u << 5,    // syscall/ — dispatcher, cap-gate, individual handlers
-    Loader = 1u << 6,     // loader/ — PE/ELF/DLL loading, relocations
-    FS = 1u << 7,         // fs/ — VFS, ramfs, FAT32, ext4, NTFS, exFAT
-    Net = 1u << 8,        // net/, drivers/net/ — packet, TCP/IP, ARP, DHCP
-    Storage = 1u << 9,    // drivers/storage/ — NVMe, AHCI, GPT
-    USB = 1u << 10,       // drivers/usb/ — xHCI, HID, mass-storage
-    GPU = 1u << 11,       // drivers/gpu/, drivers/video/ — render path
-    Input = 1u << 12,     // drivers/input/ — PS/2, USB HID
-    Audio = 1u << 13,     // drivers/audio/ — HDA, AC97
-    IPC = 1u << 14,       // ipc/, kernel/subsystems/linux/sysv_ipc, pipes, sections
-    Win32 = 1u << 15,     // subsystems/win32/ — NT syscalls, Win32 thunks, registry
-    Linux = 1u << 16,     // subsystems/linux/ — Linux ABI translation
-    Time = 1u << 17,      // time/, arch/x86_64/timer.cpp, hpet.cpp
-    Power = 1u << 18,     // power/, drivers/power
-    Security = 1u << 19,  // security/ — auth, canaries, fault domains, pentest
-    Diag = 1u << 20,      // debug/, diag/ — breakpoints, runtime checker, hexdump
-    Ring3 = 1u << 21,     // ring-3 entry/exit, user-mode trampolines
-    App = 1u << 22,       // kernel/apps/ — in-kernel applications
-    Driver = 1u << 23,    // generic driver bring-up before subsystem-specific buckets
-    ACPI = 1u << 24,      // acpi/
-    PCI = 1u << 25,       // drivers/pci/
-    Wireless = 1u << 26,  // kernel/net/wireless/, drivers/net/wireless/
-    Graphics = 1u << 27,  // drivers/video/ compositor / framebuffer / theme
-    Test = 1u << 28,      // self-tests, smoke harnesses
-    Arith = 1u << 29,     // arithmetic / math helpers (fewer, separate so they're easy to silence)
+    General = 1u << 0,   // default for legacy KLOG_* without an area
+    Boot = 1u << 1,      // kernel_main, init phases, bringup
+    Memory = 1u << 2,    // mm/ — frame allocator, paging, heap, slabs
+    Sched = 1u << 3,     // sched/ — task lifecycle, runqueues, locks
+    Process = 1u << 4,   // proc/ — Process create/release, caps
+    Syscall = 1u << 5,   // syscall/ — dispatcher, cap-gate, individual handlers
+    Loader = 1u << 6,    // loader/ — PE/ELF/DLL loading, relocations
+    FS = 1u << 7,        // fs/ — VFS, ramfs, FAT32, ext4, NTFS, exFAT
+    Net = 1u << 8,       // net/, drivers/net/ — packet, TCP/IP, ARP, DHCP
+    Storage = 1u << 9,   // drivers/storage/ — NVMe, AHCI, GPT
+    USB = 1u << 10,      // drivers/usb/ — xHCI, HID, mass-storage
+    GPU = 1u << 11,      // drivers/gpu/, drivers/video/ — render path
+    Input = 1u << 12,    // drivers/input/ — PS/2, USB HID
+    Audio = 1u << 13,    // drivers/audio/ — HDA, AC97
+    IPC = 1u << 14,      // ipc/, kernel/subsystems/linux/sysv_ipc, pipes, sections
+    Win32 = 1u << 15,    // subsystems/win32/ — NT syscalls, Win32 thunks, registry
+    Linux = 1u << 16,    // subsystems/linux/ — Linux ABI translation
+    Time = 1u << 17,     // time/, arch/x86_64/timer.cpp, hpet.cpp
+    Power = 1u << 18,    // power/, drivers/power
+    Security = 1u << 19, // security/ — auth, canaries, fault domains, pentest
+    Diag = 1u << 20,     // debug/, diag/ — breakpoints, runtime checker, hexdump
+    Ring3 = 1u << 21,    // ring-3 entry/exit, user-mode trampolines
+    App = 1u << 22,      // kernel/apps/ — in-kernel applications
+    Driver = 1u << 23,   // generic driver bring-up before subsystem-specific buckets
+    ACPI = 1u << 24,     // acpi/
+    PCI = 1u << 25,      // drivers/pci/
+    Wireless = 1u << 26, // kernel/net/wireless/, drivers/net/wireless/
+    Graphics = 1u << 27, // drivers/video/ compositor / framebuffer / theme
+    Test = 1u << 28,     // self-tests, smoke harnesses
+    Arith = 1u << 29,    // arithmetic / math helpers (fewer, separate so they're easy to silence)
     All = 0xFFFFFFFFu,
 };
 

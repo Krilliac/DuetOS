@@ -23,20 +23,20 @@ namespace duetos::subsystems::linux
 
 enum class HandlerState : u8
 {
-    Unknown = 0,     // number outside the known ABI range
-    Unimplemented,   // deliberate -ENOSYS (kSysEnosys_-block) or no kSys constant at all
-    Dispatched,      // kSys<Name> case exists in dispatch but no Do<Name> body
-                     // (inline impl, alias to non-Do<Name> fn, etc.). Returns a
-                     // coherent value to userspace, just not via the Do<Name>
-                     // convention the script's heuristic looks for.
-    Implemented,     // known name, matching Do<Name> handler exists in some
-                     // syscall_*.cpp peer.
+    Unknown = 0,   // number outside the known ABI range
+    Unimplemented, // deliberate -ENOSYS (kSysEnosys_-block) or no kSys constant at all
+    Dispatched,    // kSys<Name> case exists in dispatch but no Do<Name> body
+                   // (inline impl, alias to non-Do<Name> fn, etc.). Returns a
+                   // coherent value to userspace, just not via the Do<Name>
+                   // convention the script's heuristic looks for.
+    Implemented,   // known name, matching Do<Name> handler exists in some
+                   // syscall_*.cpp peer.
 };
 
 struct LinuxSyscallEntry
 {
     u16 number;
-    u8 args;            // 0..6
+    u8 args; // 0..6
     HandlerState state;
     const char* name;
 };
@@ -419,8 +419,7 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {462, 3, HandlerState::Dispatched, "mseal"},
 };
 
-inline constexpr u32 kLinuxSyscallCount =
-    sizeof(kLinuxSyscalls) / sizeof(kLinuxSyscalls[0]);
+inline constexpr u32 kLinuxSyscallCount = sizeof(kLinuxSyscalls) / sizeof(kLinuxSyscalls[0]);
 
 inline constexpr u32 kLinuxSyscallMaxNumber = 462;
 

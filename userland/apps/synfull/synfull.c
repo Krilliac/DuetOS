@@ -142,14 +142,14 @@ static int is_skipped(int nr)
 {
     static const int skip[] = {
         15,  // rt_sigreturn — terminates the task when there's no
-              // saved signal frame (which there isn't outside a
-              // handler). The kernel's behaviour is correct; we
-              // just can't issue this from a synthetic exerciser.
+             // saved signal frame (which there isn't outside a
+             // handler). The kernel's behaviour is correct; we
+             // just can't issue this from a synthetic exerciser.
         13,  // rt_sigaction — installing signal handlers without
-              // matching them with rt_sigreturn changes the
-              // process's signal disposition in ways that can
-              // break later iterations. Safe-ish but we skip to
-              // keep the matrix predictable.
+             // matching them with rt_sigreturn changes the
+             // process's signal disposition in ways that can
+             // break later iterations. Safe-ish but we skip to
+             // keep the matrix predictable.
         56,  // clone
         57,  // fork
         58,  // vfork
@@ -181,8 +181,8 @@ static int is_skipped(int nr)
         128, // rt_sigtimedwait
         101, // ptrace
         219, // restart_syscall — internal-ABI, should never be issued
-              // directly but it's a no-op that returns -EINTR so
-              // safe to keep
+             // directly but it's a no-op that returns -EINTR so
+             // safe to keep
         -1,  // sentinel
     };
     for (int i = 0; skip[i] >= 0; ++i)

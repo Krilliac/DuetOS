@@ -490,8 +490,8 @@ void _start(void)
         char stxbuf[256];
         for (int i = 0; i < 256; ++i)
             stxbuf[i] = 0;
-        RC("statx", sc6(332 /*statx*/, (u64)-100, (u64) "HELLO.TXT", 0x800 /*NO_AUTOMOUNT*/, 0x7ff /*STATX_BASIC_STATS*/,
-                 (u64)stxbuf, 0));
+        RC("statx", sc6(332 /*statx*/, (u64)-100, (u64) "HELLO.TXT", 0x800 /*NO_AUTOMOUNT*/,
+                        0x7ff /*STATX_BASIC_STATS*/, (u64)stxbuf, 0));
     }
 
     // === tier 9: FS metadata + path probes ===

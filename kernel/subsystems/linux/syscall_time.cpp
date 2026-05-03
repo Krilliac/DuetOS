@@ -90,12 +90,10 @@ u64 RealtimeNs()
         const u64 ft = ::duetos::time::RealtimeFiletime();
         if (ft != 0)
         {
-            const u64 unix_sec_at_boot =
-                ft / kFiletimePerSec - kFiletimeUnixDeltaSec;
+            const u64 unix_sec_at_boot = ft / kFiletimePerSec - kFiletimeUnixDeltaSec;
             const u64 unix_ns_at_boot = unix_sec_at_boot * 1'000'000'000ULL;
             const u64 mono = NowNs();
-            g_realtime_offset_ns =
-                static_cast<i64>(unix_ns_at_boot) - static_cast<i64>(mono);
+            g_realtime_offset_ns = static_cast<i64>(unix_ns_at_boot) - static_cast<i64>(mono);
             seeded = true;
         }
     }

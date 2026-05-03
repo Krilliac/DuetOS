@@ -154,11 +154,11 @@ i64 DoFcntl(u64 fd, u64 cmd, u64 arg)
         return 2; // O_RDWR
     case 4:       // F_SETFL
         return 0;
-    case 1030:    // F_DUPFD_CLOEXEC — same as F_DUPFD in v0 (we
-                  // don't track per-fd CLOEXEC; the fd table
-                  // wholesale survives exec). The dup behaviour
-                  // is identical to F_DUPFD; the CLOEXEC bit is
-                  // a documented sub-GAP.
+    case 1030: // F_DUPFD_CLOEXEC — same as F_DUPFD in v0 (we
+               // don't track per-fd CLOEXEC; the fd table
+               // wholesale survives exec). The dup behaviour
+               // is identical to F_DUPFD; the CLOEXEC bit is
+               // a documented sub-GAP.
     {
         const u32 fd_max = LinuxFdEffectiveMax(p);
         const u32 start = (arg < 3) ? 3 : (arg >= fd_max ? fd_max : static_cast<u32>(arg));
@@ -172,30 +172,30 @@ i64 DoFcntl(u64 fd, u64 cmd, u64 arg)
         }
         return kEMFILE;
     }
-    case 5:    // F_GETLK — record-locking query. v0 has no
-               // record locks; report "no conflict" (l_type
-               // F_UNLCK==2) by leaving the user-supplied
-               // struct alone. Return 0 = success.
+    case 5: // F_GETLK — record-locking query. v0 has no
+        // record locks; report "no conflict" (l_type
+        // F_UNLCK==2) by leaving the user-supplied
+        // struct alone. Return 0 = success.
         return 0;
-    case 6:    // F_SETLK — try to acquire lock without blocking.
+    case 6: // F_SETLK — try to acquire lock without blocking.
         return 0;
-    case 7:    // F_SETLKW — acquire (blocking). v0 doesn't block.
+    case 7: // F_SETLKW — acquire (blocking). v0 doesn't block.
         return 0;
-    case 8:    // F_SETOWN — async-IO recipient. Accepted no-op.
+    case 8: // F_SETOWN — async-IO recipient. Accepted no-op.
         return 0;
-    case 9:    // F_GETOWN
+    case 9: // F_GETOWN
         return 0;
-    case 10:   // F_SETSIG — async-IO signum. Accepted no-op.
+    case 10: // F_SETSIG — async-IO signum. Accepted no-op.
         return 0;
-    case 11:   // F_GETSIG
+    case 11: // F_GETSIG
         return 0;
     case 1024: // F_SETLEASE — file lease. We don't lease; -EINVAL
         return kEINVAL;
-    case 1025: // F_GETLEASE
+    case 1025:    // F_GETLEASE
         return 2; // F_UNLCK — no lease held
-    case 1026: // F_NOTIFY — directory notification (deprecated;
-               // inotify is the modern replacement). Accept as
-               // no-op success.
+    case 1026:    // F_NOTIFY — directory notification (deprecated;
+                  // inotify is the modern replacement). Accept as
+                  // no-op success.
         return 0;
     case 1031: // F_SETPIPE_SZ — pipe buffer resize. Our pipes
                // are fixed-size; honour the request as no-op.

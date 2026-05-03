@@ -48,7 +48,10 @@ static inline i64 sc5(long nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5)
     i64 r;
     register u64 r10 __asm__("r10") = a4;
     register u64 r8 __asm__("r8") = a5;
-    __asm__ volatile("syscall" : "=a"(r) : "a"(nr), "D"(a1), "S"(a2), "d"(a3), "r"(r10), "r"(r8) : "rcx", "r11", "memory");
+    __asm__ volatile("syscall"
+                     : "=a"(r)
+                     : "a"(nr), "D"(a1), "S"(a2), "d"(a3), "r"(r10), "r"(r8)
+                     : "rcx", "r11", "memory");
     return r;
 }
 static inline i64 sc6(long nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6)
@@ -189,11 +192,13 @@ void _start(void)
         unsigned int slen = 16;
         for (int i = 0; i < 16; ++i)
             gsa[i] = 0;
-        report_rc("recvfrom(udp,MSG_DONTWAIT)", sc6(45 /*recvfrom*/, udp_fd, (u64)rbuf, 64, 0x40 /*MSG_DONTWAIT*/, (u64)gsa, (u64)&slen));
+        report_rc("recvfrom(udp,MSG_DONTWAIT)",
+                  sc6(45 /*recvfrom*/, udp_fd, (u64)rbuf, 64, 0x40 /*MSG_DONTWAIT*/, (u64)gsa, (u64)&slen));
 
         // === setsockopt SO_REUSEADDR / getsockopt round-trip ===
         int one = 1;
-        report_rc("setsockopt(SO_REUSEADDR=1)", sc5(54 /*setsockopt*/, udp_fd, 1 /*SOL_SOCKET*/, 2 /*SO_REUSEADDR*/, (u64)&one, sizeof(one)));
+        report_rc("setsockopt(SO_REUSEADDR=1)",
+                  sc5(54 /*setsockopt*/, udp_fd, 1 /*SOL_SOCKET*/, 2 /*SO_REUSEADDR*/, (u64)&one, sizeof(one)));
         int got = 0;
         unsigned int got_len = sizeof(got);
         report_rc("getsockopt(SO_REUSEADDR)", sc5(55 /*getsockopt*/, udp_fd, 1, 2, (u64)&got, (u64)&got_len));
