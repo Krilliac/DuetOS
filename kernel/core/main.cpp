@@ -90,6 +90,7 @@
 #include "net/wireless/beacon.h"
 #include "crypto/aes.h"
 #include "crypto/aes_keywrap.h"
+#include "crypto/chacha20poly1305.h"
 #include "crypto/hmac.h"
 #include "crypto/md5.h"
 #include "crypto/pbkdf2.h"
@@ -1947,6 +1948,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::crypto::PrfSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::AesSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::AesKeyWrapSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::ChaCha20Poly1305SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::security::PasswordHashSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::EapolSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::FourWaySelfTest());
