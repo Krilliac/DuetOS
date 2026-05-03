@@ -317,6 +317,36 @@ constexpr IrRunbookEntry kEntries[] = {
         },
         nullptr,
     },
+    {
+        EventKind::AuthLoginFailure,
+        "AuthLoginFailure — credentials rejected at the login gate",
+        "A single failure is normal (typo, wrong account). A run of failures across "
+        "different usernames or against the same user looks like brute force.",
+        {
+            "Run `secevents kind=AuthLoginFailure` to see the cluster.",
+            "If the same username keeps recurring, check if it's a real account.",
+            "If many usernames, expect an attacker enumerating; tighten console access.",
+            "Watch for the matching AuthAccountLocked event — auto-lockout fires at 5.",
+            nullptr,
+            nullptr,
+        },
+        nullptr,
+    },
+    {
+        EventKind::AuthAccountLocked,
+        "AuthAccountLocked — failed-attempt threshold crossed; account temporarily frozen",
+        "The auth subsystem auto-locked an account after kAuthLockoutThreshold consecutive "
+        "bad passwords. Either a real user fat-fingered repeatedly, or someone is guessing.",
+        {
+            "Run `secevents kind=AuthLoginFailure` to see the lead-up.",
+            "If the user is at the console and reports the lockout, run `unlock <name>`.",
+            "If no real user explains it, the lockout itself is the defense — let it sit.",
+            "Repeated lockouts on the same account from idle: investigate physical access.",
+            nullptr,
+            nullptr,
+        },
+        nullptr,
+    },
 };
 
 constexpr u32 kEntryCount = sizeof(kEntries) / sizeof(kEntries[0]);
@@ -333,6 +363,16 @@ constexpr EventKind kOptOut[] = {
     EventKind::BlockguardModeChanged,
     EventKind::AttackSimRun,
     EventKind::IrRunbookEmitted,
+    // Auth bookkeeping / operator-driven events: the actor is the
+    // auth subsystem itself or an admin invoking a shell command,
+    // so there is nothing to investigate after the fact. Real
+    // attack signal goes through AuthLoginFailure / AuthAccountLocked
+    // (entries above).
+    EventKind::AuthLoginSuccess,
+    EventKind::AuthAccountUnlocked,
+    EventKind::AuthAccountCreated,
+    EventKind::AuthAccountDeleted,
+    EventKind::AuthPasswordChanged,
 };
 constexpr u32 kOptOutCount = sizeof(kOptOut) / sizeof(kOptOut[0]);
 

@@ -5,11 +5,12 @@
 /*
  * DuetOS — account password hashing.
  *
- * Future replacement for `kernel/security/auth.{h,cpp}`'s hard-coded
- * cleartext credentials. The transition lands here as a self-contained
- * primitive — a reviewable, KAT-driven hash + verify pair — so the
- * eventual auth.cpp swap is a one-call substitution rather than a
- * cryptographic redesign.
+ * Backing primitive for `kernel/security/auth.{h,cpp}`. Every
+ * password stored or verified by the account subsystem flows
+ * through `PasswordHashCreate` / `PasswordHashVerify`. The pair is
+ * KAT-driven and fail-closed — Verify rejects unknown algorithm
+ * codes and unreasonable iteration counts so a corrupt on-disk
+ * record can never make the kernel spin or accept a bogus hash.
  *
  * Construction:
  *   - Algorithm: PBKDF2-HMAC-SHA256.

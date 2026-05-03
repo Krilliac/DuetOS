@@ -2,7 +2,9 @@
 
 #include "core/panic.h"
 #include "log/klog.h"
+#include "security/event_ring.h"
 #include "security/password_hash.h"
+#include "time/timekeeper.h"
 
 namespace duetos::core
 {
@@ -17,6 +19,15 @@ struct Account
     AuthRole role;
     duetos::security::PasswordHashRecord record;
     char name[kAuthNameMax];
+
+    // Audit + lockout metadata. All zero-initialised when the slot
+    // is allocated; updated on the relevant verify / login paths.
+    u64 created_ns;
+    u64 last_login_ns;
+    u64 last_attempt_ns;
+    u64 locked_until_ns;
+    u32 failed_attempts;
+    u32 total_logins;
 };
 
 constinit Account g_accounts[kAuthMaxAccounts] = {};
@@ -117,6 +128,34 @@ bool IsValidAuthString(const char* s, u32 cap, bool allow_empty)
     return true;
 }
 
+u64 NowNs()
+{
+    return duetos::time::MonotonicNs();
+}
+
+// True iff `a->locked_until_ns` is in the future relative to the
+// supplied wall clock. Side effect: if the lockout has expired,
+// clear it (and the failed-attempt counter) and publish an
+// AuthAccountUnlocked event. The expiry path is intentionally
+// inline here so every entry into AuthVerify / AuthIsLocked
+// auto-thaws an expired lockout without needing a separate sweep.
+bool AccountIsLocked(Account* a, u64 now_ns)
+{
+    if (a->locked_until_ns == 0)
+    {
+        return false;
+    }
+    if (now_ns < a->locked_until_ns)
+    {
+        return true;
+    }
+    a->locked_until_ns = 0;
+    a->failed_attempts = 0;
+    duetos::security::EventRingPublishKind(duetos::security::EventKind::AuthAccountUnlocked, 0, 0,
+                                           static_cast<u64>(a->role), a->name);
+    return false;
+}
+
 // Set the (possibly empty) password on an account slot. Empty
 // password ⇒ has_password = false and the record is zeroed; the
 // account can be logged into by supplying an empty password (the
@@ -187,10 +226,12 @@ Account* AllocAccount()
 
 bool StoreAccount(Account* a, const char* username, const char* password, AuthRole role)
 {
+    *a = Account{};
     a->in_use = true;
     a->role = role;
     SetAccountPassword(a, password);
     StrCopy(a->name, username, kAuthNameMax);
+    a->created_ns = NowNs();
     return true;
 }
 
@@ -205,6 +246,20 @@ u32 CountAdmins()
         }
     }
     return n;
+}
+
+void PopulateView(const Account* a, u64 now_ns, AccountView* view)
+{
+    view->username = a->name;
+    view->role = a->role;
+    view->has_password = a->has_password;
+    view->locked = a->locked_until_ns != 0 && now_ns < a->locked_until_ns;
+    view->created_ns = a->created_ns;
+    view->last_login_ns = a->last_login_ns;
+    view->last_attempt_ns = a->last_attempt_ns;
+    view->locked_until_ns = a->locked_until_ns;
+    view->failed_attempts = a->failed_attempts;
+    view->total_logins = a->total_logins;
 }
 
 } // namespace
@@ -245,17 +300,57 @@ bool AuthIsAdmin()
 
 bool AuthVerify(const char* username, const char* password)
 {
-    const Account* a = FindAccount(username);
+    namespace sec = duetos::security;
+    const u64 now_ns = NowNs();
+    Account* a = FindAccount(username);
     if (a == nullptr)
     {
         // Burn an equivalent PBKDF2 cycle against the decoy record
         // so an unknown user doesn't respond faster than a bad
         // password against a real user.
         const char* pw = password != nullptr ? password : "";
-        (void)duetos::security::PasswordHashVerify(pw, StrLen(pw), g_decoy_record);
+        (void)sec::PasswordHashVerify(pw, StrLen(pw), g_decoy_record);
+        sec::EventRingPublishKind(sec::EventKind::AuthLoginFailure, 0, 0, 0, username != nullptr ? username : "");
         return false;
     }
-    return VerifyPasswordOnAccount(a, password);
+
+    a->last_attempt_ns = now_ns;
+
+    // Locked-out account: still burn a PBKDF2 cycle so the wall
+    // clock doesn't betray the lock state, then refuse.
+    if (AccountIsLocked(a, now_ns))
+    {
+        const char* pw = password != nullptr ? password : "";
+        (void)sec::PasswordHashVerify(pw, StrLen(pw), g_decoy_record);
+        sec::EventRingPublishKind(sec::EventKind::AuthLoginFailure, 0, 1 /*locked*/, 0, a->name);
+        return false;
+    }
+
+    if (!VerifyPasswordOnAccount(a, password))
+    {
+        if (a->failed_attempts < 0xFFFFFFFFu)
+        {
+            ++a->failed_attempts;
+        }
+        if (a->failed_attempts >= kAuthLockoutThreshold && a->locked_until_ns == 0)
+        {
+            a->locked_until_ns = now_ns + kAuthLockoutDurationNs;
+            sec::EventRingPublishKind(sec::EventKind::AuthAccountLocked, 0, a->failed_attempts, kAuthLockoutDurationNs,
+                                      a->name);
+            KLOG_WARN("auth", "account locked (consecutive failures)");
+        }
+        sec::EventRingPublishKind(sec::EventKind::AuthLoginFailure, 0, 0, a->failed_attempts, a->name);
+        return false;
+    }
+
+    a->failed_attempts = 0;
+    a->last_login_ns = now_ns;
+    if (a->total_logins < 0xFFFFFFFFu)
+    {
+        ++a->total_logins;
+    }
+    sec::EventRingPublishKind(sec::EventKind::AuthLoginSuccess, 0, static_cast<u64>(a->role), a->total_logins, a->name);
+    return true;
 }
 
 bool AuthLogin(const char* username, const char* password)
@@ -303,7 +398,10 @@ bool AuthAddUser(const char* username, const char* password, AuthRole role)
     {
         return false;
     }
-    return StoreAccount(a, username, password, role);
+    StoreAccount(a, username, password, role);
+    duetos::security::EventRingPublishKind(duetos::security::EventKind::AuthAccountCreated, 0, static_cast<u64>(role),
+                                           a->has_password ? 1 : 0, a->name);
+    return true;
 }
 
 bool AuthDeleteUser(const char* username)
@@ -318,7 +416,12 @@ bool AuthDeleteUser(const char* username)
         return false;
     }
     const bool was_session_user = g_session.active && StrEq(g_session.name, a->name);
+    char name_copy[kAuthNameMax];
+    StrCopy(name_copy, a->name, kAuthNameMax);
+    const AuthRole role = a->role;
     *a = Account{};
+    duetos::security::EventRingPublishKind(duetos::security::EventKind::AuthAccountDeleted, 0, static_cast<u64>(role),
+                                           0, name_copy);
     if (was_session_user)
     {
         AuthLogout();
@@ -345,7 +448,44 @@ bool AuthChangePassword(const char* username, const char* old_password, const ch
         }
     }
     SetAccountPassword(a, new_password);
+    // Password change is a clean slate: zero the failure counter
+    // and lift any standing lockout. A user who just demonstrated
+    // they hold the old password (self-service) or an admin who
+    // just force-reset deserves a working account.
+    a->failed_attempts = 0;
+    a->locked_until_ns = 0;
+    duetos::security::EventRingPublishKind(duetos::security::EventKind::AuthPasswordChanged, 0,
+                                           old_password != nullptr ? 0 : 1 /*forced*/, a->has_password ? 1 : 0,
+                                           a->name);
     return true;
+}
+
+bool AuthUnlockUser(const char* username)
+{
+    Account* a = FindAccount(username);
+    if (a == nullptr)
+    {
+        return false;
+    }
+    const bool was_locked = a->locked_until_ns != 0;
+    a->failed_attempts = 0;
+    a->locked_until_ns = 0;
+    if (was_locked)
+    {
+        duetos::security::EventRingPublishKind(duetos::security::EventKind::AuthAccountUnlocked, 0, 1 /*manual*/,
+                                               static_cast<u64>(a->role), a->name);
+    }
+    return true;
+}
+
+bool AuthIsLocked(const char* username)
+{
+    Account* a = FindAccount(username);
+    if (a == nullptr)
+    {
+        return false;
+    }
+    return AccountIsLocked(a, NowNs());
 }
 
 u32 AuthAccountCount()
@@ -367,6 +507,7 @@ bool AuthAccountAt(u32 idx, AccountView* view)
     {
         return false;
     }
+    const u64 now_ns = NowNs();
     u32 seen = 0;
     for (u32 i = 0; i < kAuthMaxAccounts; ++i)
     {
@@ -376,9 +517,7 @@ bool AuthAccountAt(u32 idx, AccountView* view)
         }
         if (seen == idx)
         {
-            view->username = g_accounts[i].name;
-            view->role = g_accounts[i].role;
-            view->has_password = g_accounts[i].has_password;
+            PopulateView(&g_accounts[i], now_ns, view);
             return true;
         }
         ++seen;
@@ -393,9 +532,7 @@ bool AuthAccountByName(const char* username, AccountView* view)
     {
         return false;
     }
-    view->username = a->name;
-    view->role = a->role;
-    view->has_password = a->has_password;
+    PopulateView(a, NowNs(), view);
     return true;
 }
 
@@ -430,6 +567,51 @@ void AuthSelfTest()
     {
         Panic("auth", "self-test: guest account view reports has_password");
     }
+
+    // Lockout state machine: drive a probe account through the
+    // threshold, confirm it locks, confirm AuthUnlockUser releases
+    // it, confirm a successful verify after unlock zeros the
+    // failure counter.
+    if (!AuthAddUser("probe", "p4ss", AuthRole::User))
+    {
+        Panic("auth", "self-test: failed to seed probe account");
+    }
+    for (u32 i = 0; i < kAuthLockoutThreshold; ++i)
+    {
+        if (AuthVerify("probe", "wrong"))
+        {
+            Panic("auth", "self-test: probe accepted wrong password during lockout drive");
+        }
+    }
+    if (!AuthIsLocked("probe"))
+    {
+        Panic("auth", "self-test: probe failed to lock after threshold");
+    }
+    if (AuthVerify("probe", "p4ss"))
+    {
+        Panic("auth", "self-test: locked probe accepted correct password");
+    }
+    if (!AuthUnlockUser("probe"))
+    {
+        Panic("auth", "self-test: AuthUnlockUser refused known account");
+    }
+    if (AuthIsLocked("probe"))
+    {
+        Panic("auth", "self-test: probe still reports locked after unlock");
+    }
+    if (!AuthVerify("probe", "p4ss"))
+    {
+        Panic("auth", "self-test: unlocked probe rejected correct password");
+    }
+    if (!AuthAccountByName("probe", &v) || v.failed_attempts != 0 || v.total_logins == 0)
+    {
+        Panic("auth", "self-test: probe metadata wrong after success");
+    }
+    if (!AuthDeleteUser("probe"))
+    {
+        Panic("auth", "self-test: failed to delete probe account");
+    }
+
     KLOG_INFO("auth", "self-test OK");
 }
 

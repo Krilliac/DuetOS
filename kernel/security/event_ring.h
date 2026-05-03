@@ -74,6 +74,15 @@ enum class EventKind : u16
     AttackSimRun,     // attack_sim suite invocation
     IrRunbookEmitted, // runbook line emitted for finding
 
+    // Account / authentication:
+    AuthLoginSuccess,    // AuthLogin returned true; session flipped
+    AuthLoginFailure,    // AuthVerify rejected creds (any leaf)
+    AuthAccountLocked,   // failed-attempt threshold crossed; lockout armed
+    AuthAccountUnlocked, // explicit admin clear or lockout expired
+    AuthAccountCreated,  // AuthAddUser slot allocated
+    AuthAccountDeleted,  // AuthDeleteUser slot freed
+    AuthPasswordChanged, // AuthChangePassword wrote a new record
+
     Count, // sentinel — keep last
 };
 

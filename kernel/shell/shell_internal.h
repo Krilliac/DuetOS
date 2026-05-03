@@ -483,6 +483,7 @@ void CmdMan(u32 argc, char** argv);
 void CmdUsers();
 void CmdUseradd(u32 argc, char** argv);
 void CmdUserdel(u32 argc, char** argv);
+void CmdUnlock(u32 argc, char** argv);
 void CmdPasswd(u32 argc, char** argv);
 void CmdLogout();
 void CmdSu(u32 argc, char** argv);

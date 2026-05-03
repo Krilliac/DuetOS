@@ -185,6 +185,7 @@
 #include "time/timezone.h"
 #include "diag/cleanroom_trace.h"
 #include "security/auth.h"
+#include "security/auth_pentest.h"
 #include "security/cap_audit.h"
 #include "loader/firmware_loader.h"
 #include "diag/heartbeat.h"
@@ -1477,6 +1478,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // account table, so AuthInit must precede LoginStart.
     duetos::core::AuthInit();
     DUETOS_BOOT_SELFTEST(duetos::core::AuthSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::security::AuthBruteForceProbe());
 
     // Shell welcome + initial prompt. Landing here after every
     // subsystem init line keeps the boot log visible above the
