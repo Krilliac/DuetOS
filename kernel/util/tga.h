@@ -86,6 +86,13 @@ TgaInfo TgaParseHeader(const u8* hdr);
 /// would have flagged via `info.ok = false` already.
 bool TgaDecodeUncompressed(const u8* src, u32 src_len, const TgaInfo& info, u32* out_pixels);
 
+/// Write the canonical 18-byte uncompressed 32-bpp top-down TGA
+/// header into `out`. `out` must hold at least `kTgaHeaderBytes`.
+/// Returns true on success; false if dimensions are out of range.
+/// Streaming consumers (e.g. the Screenshot writer) emit this
+/// header first, then append BGRA-row bytes verbatim.
+bool TgaWriteHeader32(u8 out[kTgaHeaderBytes], u32 width, u32 height);
+
 /// Encode a 32-bpp uncompressed top-down TGA image. `pixels` is
 /// `width × height` BGRA8888 u32 elements (same format
 /// `TgaDecodeUncompressed` produces). `out` must hold at least

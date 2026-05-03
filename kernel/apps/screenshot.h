@@ -51,6 +51,12 @@ namespace duetos::apps::screenshot
 /// corrupted entries.
 bool ScreenshotCapture();
 
+/// Same as `ScreenshotCapture` but writes a Truevision TGA 2.0
+/// uncompressed 32-bpp top-down image to `SHOTNNNN.TGA`. The
+/// pixel data is identical to the BMP path (BGRA8888 native);
+/// only the 18-byte header differs. Bound to Ctrl+Alt+T.
+bool ScreenshotCaptureTga();
+
 /// Boot self-test: skipped silently if FAT32 isn't mounted.
 /// Synthesises a 4×4 BMP via the same write path
 /// ScreenshotCapture uses (against `SHOTTEST.BMP` to avoid

@@ -122,6 +122,22 @@ bool TgaDecodeUncompressed(const u8* src, u32 src_len, const TgaInfo& info, u32*
     return true;
 }
 
+bool TgaWriteHeader32(u8 out[kTgaHeaderBytes], u32 width, u32 height)
+{
+    if (width == 0 || height == 0 || width > kTgaMaxDim || height > kTgaMaxDim)
+        return false;
+    for (u32 i = 0; i < kTgaHeaderBytes; ++i)
+        out[i] = 0;
+    out[kHdrImageType] = u8(kImageTypeUncompressedTrueColor);
+    out[kHdrImageWidth] = u8(width);
+    out[kHdrImageWidth + 1] = u8(width >> 8);
+    out[kHdrImageHeight] = u8(height);
+    out[kHdrImageHeight + 1] = u8(height >> 8);
+    out[kHdrPixelDepth] = 32;
+    out[kHdrImageDescriptor] = u8(kDescriptorOriginTop | 0x08); // top-down + 8-bit alpha
+    return true;
+}
+
 u32 TgaEncode32(const u32* pixels, u32 width, u32 height, u8* out, u32 out_cap)
 {
     if (width == 0 || height == 0 || width > kTgaMaxDim || height > kTgaMaxDim)
@@ -130,17 +146,8 @@ u32 TgaEncode32(const u32* pixels, u32 width, u32 height, u8* out, u32 out_cap)
     const u64 total = u64(kTgaHeaderBytes) + pixel_bytes;
     if (total > u64(out_cap))
         return 0;
-    // Header: image type 2, no colormap, top-down origin (descriptor
-    // bit 5 set), 32-bpp, alpha-channel-bits in low nibble = 8.
-    for (u32 i = 0; i < 18; ++i)
-        out[i] = 0;
-    out[kHdrImageType] = u8(kImageTypeUncompressedTrueColor);
-    out[kHdrImageWidth] = u8(width);
-    out[kHdrImageWidth + 1] = u8(width >> 8);
-    out[kHdrImageHeight] = u8(height);
-    out[kHdrImageHeight + 1] = u8(height >> 8);
-    out[kHdrPixelDepth] = 32;
-    out[kHdrImageDescriptor] = u8(kDescriptorOriginTop | 0x08); // 8-bit alpha
+    if (!TgaWriteHeader32(out, width, height))
+        return 0;
     // Pixels: BGRA8888 LE u32 → spec-required B G R A byte order.
     u8* dst = out + kTgaHeaderBytes;
     for (u32 y = 0; y < height; ++y)

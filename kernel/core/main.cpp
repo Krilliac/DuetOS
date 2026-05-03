@@ -2587,6 +2587,21 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 SerialWrite(ok ? "[ui] ^Alt+P screenshot saved\n" : "[ui] ^Alt+P screenshot FAILED\n");
                 continue;
             }
+            // Ctrl+Alt+T captures the framebuffer to the next
+            // SHOTNNNN.TGA slot. Same pixel layout as the BMP path
+            // (BGRA8888, top-down) — only the 18-byte header
+            // differs. The shared filename counter means BMP and
+            // TGA captures interleave with strictly-increasing
+            // numbers.
+            if (ctrl && alt && (ev.code == 't' || ev.code == 'T'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const bool ok_tga = duetos::apps::screenshot::ScreenshotCaptureTga();
+                duetos::drivers::video::CompositorUnlock();
+                duetos::drivers::video::NotifyShow(ok_tga ? "screenshot (TGA) saved" : "screenshot (TGA) failed");
+                SerialWrite(ok_tga ? "[ui] ^Alt+T screenshot (TGA) saved\n" : "[ui] ^Alt+T screenshot (TGA) FAILED\n");
+                continue;
+            }
             // Ctrl+Alt+Y cycles the desktop theme. Classic (teal)
             // -> Slate10 (Win10 x Unreal Slate hybrid) -> Amber
             // (mono CRT tribute) -> Duet (redesigned palette,
