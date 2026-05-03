@@ -1,65 +1,46 @@
 # Kernel pure-compute utility libraries v0
 
 _Type: Observation + Decision._
-_Status: Active — 24 clean-room TUs landed across three same-day
-batches in `kernel/util/`, `kernel/crypto/`, and `kernel/drivers/gpu/`._
-_Last updated: 2026-05-03 (evening batch)._
+_Status: Active — 13 clean-room TUs in `kernel/util/`,
+`kernel/crypto/`, and `kernel/drivers/gpu/` after the
+2026-05-03 prune of unconsumed surfaces._
+_Last updated: 2026-05-03 (post-prune)._
 
 ## Why this entry
 
-Six bounded clean-room slices landed on
-`claude/cleanup-stale-documents-2lhGO` in one batch, each
-implementing a public spec, each gated by a boot KAT, and each
-small enough to be a single TU. The aggregate is too granular to
-deserve one knowledge file per library, so they live here as
-one cross-referenced inventory. Each library appears as a LANDED
-row in `porting-candidates-v0.md`.
+The 2026-05-03 morning + afternoon + evening batches landed
+24 clean-room TUs across `kernel/util/`, `kernel/crypto/`, and
+`kernel/drivers/gpu/`. Then, per the user's directive ("fully
+implement anything the OS legitimately needs, otherwise trash
+it"), 14 of them were deleted in commit `1a236aa` because they
+had no live consumer in tree and no realistic path to one in
+the project's near-term scope (no TLS, no NTLM, no audio
+backend, no initramfs, no Linux strftime thunks, no pre-CVT
+CRT in the test fleet, etc.).
 
-The pattern is identical to the AES / AES-KW / Base64 / MD5 /
-CRC32 batch that landed earlier on 2026-05-03 and was captured
-in `crc32-md5-base64-and-eapol-keywrap-v0.md`: pure compute,
-KAT-verified at boot, no allocation, no global state, callers
-arrive in follow-up slices.
+What remains is the set that EITHER drives a live caller in
+tree today OR sits one slice away from one. Each row below
+names that consumer.
 
 ## Inventory
 
-### Morning batch (six TUs)
-
-| Library | Header / TU | Spec | KAT count | Eventual consumer |
-|---------|-------------|------|-----------|-------------------|
-| HMAC-MD5 | `kernel/crypto/hmac.{h,cpp}` (extended) | RFC 2104 + RFC 1321 | 3 (RFC 2202 vectors 1, 2, 6) | NTLMv1 / HTTP Digest auth |
-| Unicode UTF-8 / UTF-16 | `kernel/util/unicode.{h,cpp}` | RFC 3629 + Unicode 15.0 §3.9 | 14 (encode + decode round-trips for all length classes; 5 negative UTF-8; 3 negative UTF-16; UTF-16LE buffer smoke) | exfat / ntfs filename decode (active); future Win32 wide-string thunks |
-| TGA 2.0 decoder | `kernel/util/tga.{h,cpp}` | Truevision TGA 2.0 | 7 (32-bpp + 24-bpp round-trips, 5 negative cases) | ImageView (active) |
-| Gregorian ↔ Julian + ISO 8601 | `kernel/util/datetime.{h,cpp}` | Fliegel & Van Flandern (1968) + ISO 8601:2019 | 17 (4 JDN refs, 3 round-trips, 4 DOW, 3 ISO-week incl. 2020/53 boundary, format+parse round-trip, 3 tolerance forms, 5 rejections) | calendar week-of-year display, klog wall-clock timestamps, Linux ABI strftime/strptime |
-| BMP encoder + parser | `kernel/util/bmp.{h,cpp}` | Microsoft BITMAPINFOHEADER | 5 (top-down + bottom-up round-trips, bad-sig / DIB<40 / oversize rejections) | screenshot writer (active), ImageView decoder (active) |
-| CPIO newc walker | `kernel/util/cpio.{h,cpp}` | POSIX.1-1988 SVR4 portable (070701/070702) | 5 (2-entry happy path, bad magic, truncated header, missing trailer, visitor early-stop) | future initramfs unpacker |
-
-### Afternoon batch (eleven slices, including the KPTI close-out)
-
-| Library | Header / TU | Spec | KAT count | Eventual consumer |
-|---------|-------------|------|-----------|-------------------|
-| KPTI close-out (loud-WARN on `RDCL_NO=0`) | `kernel/arch/x86_64/cpu_mitigations.cpp` (extended) | n/a | n/a (settled decision) | n/a — full KPTI deliberately not built; see `kpti-meltdown-decision-v0.md` |
-| ChaCha20 + Poly1305 + AEAD | `kernel/crypto/chacha20poly1305.{h,cpp}` | RFC 8439 §2.3 / §2.5 / §2.8 | 3 RFC 8439 reference vectors (§2.4.2 keystream, §2.5.2 MAC, §2.8.2 AEAD with tag + ciphertext + decrypt round-trip + 2 tamper-rejects) | TLS 1.3 `TLS_CHACHA20_POLY1305_SHA256` |
-| AES-GCM (128/256) | `kernel/crypto/aes_gcm.{h,cpp}` | NIST SP 800-38D | 4 NIST 800-38D test cases (1, 2, 3, 13) including ciphertext + tag + decrypt + tamper | 802.11 GCMP (WPA3), TLS 1.2/1.3 AES-GCM, sealed storage |
-| POSIX TZ string parser | `kernel/util/posix_tz.{h,cpp}` | POSIX.1-2008 §8.3 | 6 happy-path forms + 9 negative cases | Linux ABI strftime/strptime/mktime/localtime |
-| WAV (RIFF) parser/writer | `kernel/util/wav.{h,cpp}` | Microsoft WAVE / RIFF | 3 round-trips + tolerant LIST-skip + 5 negatives | future sound-effect player (HDA / AC'97) |
-| TAR ustar walker | `kernel/util/tar.{h,cpp}` | POSIX.1-2001 ustar | happy 2-entry + 4 negatives | distribution tarball extraction |
-| LZ4 raw-block decoder | `kernel/util/lz4.{h,cpp}` | LZ4 spec | 3 happy paths (literals, overlap match, length extension) + 4 negatives | future kernel-image self-decompression, .lz4-compressed archives |
-| GTF timing generator | `kernel/drivers/gpu/gtf.{h,cpp}` | VESA GTF 1.1 | 2 well-known modes (640×480@60, 1024×768@70) + 3 negatives | mode-set fall-back for legacy monitors that pre-date CVT |
-| DPMS state machine | `kernel/drivers/gpu/dpms.{h,cpp}` | VESA DPMS + X.Org DPMS | full state-machine walk including hook veto + bookkeeper-only mode | screensaver, power-policy / lid-switch, Win32 SetMonitorPowerSetting |
-| PSF1 / PSF2 font parser | `kernel/util/psf.{h,cpp}` | Linux PSF v1 + v2 | PSF1-256, PSF1-512+unicode, PSF2-100, 3 negatives | future `setfont`-style userland app |
-| TGA 32-bpp encoder | `kernel/util/tga.{h,cpp}` (extended) | Truevision TGA 2.0 | encode-then-decode 2×2 mosaic round-trip + out-cap negative | ImageView (decoder side already wired); screenshot extension |
-
-### Evening batch (seven slices)
-
-| Library | Header / TU | Spec | KAT count | Eventual consumer |
-|---------|-------------|------|-----------|-------------------|
-| Adler-32 checksum | `kernel/util/adler32.{h,cpp}` | RFC 1950 §9 | 5 (RFC reference "Wikipedia" vector, empty input, single byte, streaming-split, 6 KB-zeros boundary) | zlib stream wrapper (active) |
-| SHA-384 + SHA-512 | `kernel/crypto/sha512.{h,cpp}` | FIPS 180-4 §6.4 / §6.5 | 4 (SHA-512 "abc", SHA-512 "", SHA-384 "abc", SHA-512 1000×'a' multi-block prefix) | TLS 1.2/1.3 SHA-384 cipher suites, future Ed448 |
-| AES-CCM (128/256) | `kernel/crypto/aes_ccm.{h,cpp}` | NIST SP 800-38C | round-trip + tag tamper + ciphertext tamper for AES-128, AES-256 round-trip, tag-length validation | 802.11 CCMP TX/RX dispatch |
-| DEFLATE inflater | `kernel/util/deflate.{h,cpp}` | RFC 1951 | 5 (stored happy, empty stored, fixed-Huffman EOB-only, bad-NLEN, reserved BTYPE=11) | gzip / zlib / PNG IDAT |
-| GZIP + zlib wrappers | `kernel/util/gzip.{h,cpp}` | RFC 1952 + RFC 1950 | 6 (GZIP happy, GZIP CRC tamper, GZIP ISIZE mismatch, zlib happy, zlib FCHECK mismatch, zlib Adler tamper) | kernel-image self-decompression, PNG, HTTP gzip |
-| TZif binary timezone parser | `kernel/util/tzif.{h,cpp}` | RFC 8536 v1 block | happy 2-transition synth + 5 negatives (bad magic, truncation, bad transition_type idx, typecnt=0, v2 byte still parses v1) | Linux ABI strftime/localtime over POSIX-TZ string parser |
+| Library | Header / TU | Spec | Consumer in tree |
+|---------|-------------|------|------------------|
+| Unicode UTF-8 / UTF-16 | `kernel/util/unicode.{h,cpp}` | RFC 3629 + Unicode 15.0 §3.9 | `kernel/fs/exfat.cpp` + `kernel/fs/ntfs.cpp` filename decode |
+| TGA 2.0 decoder + 32-bpp encoder | `kernel/util/tga.{h,cpp}` | Truevision TGA 2.0 | ImageView dispatch on `.TGA` (decoder); Ctrl+Alt+T screenshot path (encoder) |
+| Gregorian↔Julian + ISO 8601 + Unix-epoch | `kernel/util/datetime.{h,cpp}` | Fliegel & Van Flandern (1968) + ISO 8601:2019 | klog wall-clock prefix (`SetLogWallClock`); Calendar app week-of-year title |
+| BMP encoder + parser (32-bpp BI_RGB) | `kernel/util/bmp.{h,cpp}` | Microsoft BITMAPINFOHEADER | Screenshot writer + ImageView decoder |
+| CRC32 (IEEE 802.3 reflected) | `kernel/util/crc32.{h,cpp}` | IEEE 802.3 | GPT header + entries CRC; PNG chunk CRC |
+| Adler-32 | `kernel/util/adler32.{h,cpp}` | RFC 1950 §9 | zlib stream tail (validated when PNG IDAT inflates) |
+| Base64 encode/decode | `kernel/util/base64.{h,cpp}` | RFC 4648 | (existing tree consumer; pre-2026-05-03) |
+| DEFLATE inflater | `kernel/util/deflate.{h,cpp}` | RFC 1951 | zlib wrapper → PNG IDAT |
+| GZIP + zlib stream wrappers | `kernel/util/gzip.{h,cpp}` | RFC 1952 + RFC 1950 | PNG IDAT decompression (`ZlibInflate`) |
+| PNG decoder (8-bit RGB/RGBA) | `kernel/util/png.{h,cpp}` | RFC 2083 / W3C PNG 2nd Ed. | ImageView dispatch on `.PNG` |
+| AES + AES Key Wrap | `kernel/crypto/aes.{h,cpp}` + `aes_keywrap.{h,cpp}` | FIPS 197 + RFC 3394 | Wireless 4-way handshake KEK / GTK unwrap |
+| HMAC-SHA1 + HMAC-SHA256 | `kernel/crypto/hmac.{h,cpp}` | RFC 2104 | Wireless PBKDF2 / PRF (HMAC-SHA1); password hashing (HMAC-SHA256) |
+| SHA-1, SHA-256, PBKDF2, PRF | `kernel/crypto/{sha1,sha256,pbkdf2,prf}.{h,cpp}` | FIPS 180-4 / RFC 7914 / 802.11 PRF-X | Wireless 4-way handshake; password hashing |
+| DPMS state machine | `kernel/drivers/gpu/dpms.{h,cpp}` | VESA DPMS + X.Org DPMS | Settings shutdown/reboot transitions |
+| EDID + CVT + CEA-861 (existing) | `kernel/drivers/gpu/{edid,cvt,cea861}.{h,cpp}` | VESA E-EDID + CVT 1.1/1.2 + CEA-861-E/F | mode-set when GPU drivers want to program a panel |
 
 ## Conventions every TU follows
 
@@ -69,78 +50,82 @@ arrive in follow-up slices.
    without worrying about heap pressure.
 
 2. **Reject-by-default for v0.** When the spec admits a feature
-   (e.g. TGA RLE, CPIO old-binary, BMP RLE) that we don't need
-   yet, the parser surfaces the rejection cleanly via `info.ok =
-   false` rather than half-implementing it. Future slices light
-   up the rejected path explicitly.
+   (e.g. PNG palette colour-type, BMP RLE, TGA RLE) that no
+   consumer needs, the parser surfaces the rejection cleanly via
+   `info.ok = false` rather than half-implementing it.
 
-3. **Boot KAT is the live caller.** A library can land before
-   any production caller exists as long as the KAT exercises
-   every code path. Examples: HMAC-MD5 (NTLM not landed),
-   datetime (logging hasn't switched to ISO 8601 yet), CPIO
-   (initramfs unpacker not landed). This is the same pattern AES
-   and AES-KW used earlier.
+3. **Named consumer or it doesn't ship.** A library lives in
+   tree only if a caller exists today or will exist in the same
+   slice that introduces it. The 2026-05-03 prune removed every
+   library that violated this rule.
 
-4. **One KAT entry covers structural negatives, not every
-   field permutation.** Self-tests assert the contract, not the
-   spec's full universe. If a future bug surfaces, add a vector
-   to the existing self-test, don't write a new one.
+4. **One KAT entry covers structural negatives, not every field
+   permutation.** Self-tests assert the contract, not the spec's
+   full universe.
 
-## Wiring
+## Wiring summary
 
 - `kernel/core/main.cpp` — `DUETOS_BOOT_SELFTEST` invocations
-  for `UnicodeSelfTest`, `BmpSelfTest`, `TgaSelfTest`,
-  `DateTimeSelfTest`, `CpioSelfTest` (slot order matches
-  declaration in this file). HMAC-MD5 vectors are inside the
-  existing `HmacSelfTest`.
-- `kernel/fs/exfat.cpp` and `kernel/fs/ntfs.cpp` — the per-TU
-  `Utf16ToSafeAscii` helpers were collapsed onto
+  for every `*SelfTest` symbol in the inventory (in declaration
+  order).
+- `kernel/fs/exfat.cpp`, `kernel/fs/ntfs.cpp` — share
   `duetos::util::Utf16CpToSafeAscii`. The two file systems
-  share the same code path now, with surrogate-pair-aware
-  collapsing (which the BMP-only ad-hoc helpers couldn't do).
-- `kernel/apps/screenshot.cpp` — `WriteBmpHeader` is gone;
-  callers go through `duetos::util::BmpWriteHeader32(out, w, h,
-  top_down=true)`. The DIB-height sign flip is now an explicit
-  flag, no longer hard-coded inside the encoder.
-- `kernel/apps/imageview.cpp` — local `BmpInfo` + `ParseBmpHeader`
-  replaced by `using duetos::util::BmpInfo` + a one-line inline
-  shim over `BmpParseHeader`. Existing decode paths and the
-  4×4 self-test compile unchanged. Also gains a TGA dispatch
-  branch via `kernel/util/tga` for any `.TGA` file in the FAT32
-  root (full-file-load capped at 4 MiB, NN-downsample into the
-  thumbnail).
+  use the same surrogate-pair-aware fold path.
+- `kernel/apps/screenshot.cpp` — `BmpWriteHeader32` for
+  `Ctrl+Alt+P`, `TgaWriteHeader32` for `Ctrl+Alt+T`.
+- `kernel/apps/imageview.cpp` — `BmpParseHeader` (BMP path),
+  `TgaParseHeader` + `TgaDecodeUncompressed` (TGA path),
+  `PngParseHeader` + `PngDecode` (PNG path). Each format gets
+  its own `Decode<Fmt>` helper inside ImageView.
+- `kernel/log/klog.cpp` — `WallClockInit` samples the RTC at
+  boot; live-emit prefix uses `DateTimeFromUnixSecs` +
+  `FormatIso8601` when `SetLogWallClock(true)`.
+- `kernel/apps/calendar.cpp` — `IsoYearWeek` for the
+  `MAY 2026 - Wk 18`-style title.
+- `kernel/apps/settings.cpp` — `DpmsSetState(Off)` before
+  `AcpiShutdown` / `KernelReboot`.
+- `kernel/security/password_hash.cpp` — `HmacSha256` +
+  `Pbkdf2HmacSha256` underpin every account password verify.
+- `kernel/net/wireless/*` — `HmacSha1` + `Pbkdf2HmacSha1` +
+  `Sha1Hash` + `AesKeyWrapUnwrap` underpin the WPA2-Personal
+  4-way handshake.
 
-## Out of scope (deliberate, future slices)
+## Out of scope (deliberate, deleted on 2026-05-03)
 
-- TGA RLE (image type 10), colormapped (1), grayscale (3), 16
-  bpp. Parser rejects all of them.
-- BMP 24-bpp / 16-bpp / palette / RLE. ImageView's parser
-  flags these and the status line shows the reason. Encoder
-  is 32-bpp BI_RGB only.
-- CPIO old-binary (070707) and old-ASCII variants. Parser
-  rejects them.
-- Unicode normalization (NFC / NFD), case folding,
-  bidirectional algorithm, Unicode 15 case-folding tables —
-  each its own porting-candidates row.
-- ISO 8601 time-zone offsets (+HH:MM). Parser rejects.
-  Separate row: POSIX TZ string parser.
+The following 14 TUs were deleted because they had no live
+consumer in tree:
+
+- `kernel/crypto/chacha20poly1305` (TLS 1.3 ciphersuite — TLS not in tree)
+- `kernel/crypto/aes_gcm` (TLS, WPA3-GCMP — neither wired)
+- `kernel/crypto/aes_ccm` (WPA2-CCMP TX/RX — unwired, HW-untested)
+- `kernel/crypto/sha512` (TLS SHA-384 transcript)
+- `kernel/crypto/md5` (only valid consumer was HMAC-MD5)
+- `crypto/hmac::HmacMd5 / HmacSha384 / HmacSha512` (no caller)
+- `kernel/util/posix_tz` + `kernel/util/tzif` (Linux strftime thunks not in tree)
+- `kernel/util/wav` (no audio backend)
+- `kernel/util/cpio` (no initramfs)
+- `kernel/util/tar` (no install-seed model)
+- `kernel/util/lz4` (no compressed assets)
+- `kernel/util/psf` (no `setfont` userland app)
+- `kernel/drivers/gpu/gtf` (CVT covers every panel in scope; no pre-CVT CRT)
+
+If a future slice creates a real consumer, the deleted TU can
+be re-introduced from git history alongside its first caller in
+the same commit. Don't pre-pay the implementation cost of
+speculation.
 
 ## See also
 
-- `porting-candidates-v0.md` — landed-row table; this entry is
-  the long-form companion.
-- `crc32-md5-base64-and-eapol-keywrap-v0.md` — the earlier
-  same-day batch (CRC32 hoist, MD5, Base64, EAPOL keywrap).
-- `aes-and-keywrap-v0.md` — same-day AES + AES-KW batch.
-- `imageview-bmp-v0.md` — the kernel app that consumes both
-  `kernel/util/bmp` and `kernel/util/tga`.
+- `porting-candidates-v0.md` — the LANDED row table + the
+  remaining open work the OS legitimately needs (currently
+  GPT write, FAT32 mkfs, AHCI write, virtio-blk).
+- `imageview-bmp-v0.md` — the kernel app that consumes BMP +
+  TGA + PNG.
 
 ## Resume prompt
 
-> Read `.claude/knowledge/kernel-util-libraries-v0.md`. Six
-> clean-room utility TUs landed: HMAC-MD5, Unicode UTF-8/UTF-16,
-> TGA decoder, datetime (Gregorian↔JDN + ISO 8601), BMP encoder
-> + parser, CPIO newc walker. Each has a boot KAT. Pick a
-> follow-up consumer to wire in next: NTLMv1 thunk for HMAC-MD5;
-> Win32 wide-string conversion for Unicode; klog ISO 8601
-> timestamps for datetime; initramfs unpacker for CPIO.
+> Read `kernel-util-libraries-v0.md`. The 13 TUs listed here
+> all have live in-tree consumers. The "Out of scope" list at
+> the bottom is what was deleted on 2026-05-03 and should NOT
+> be re-introduced without a named first caller in the same
+> commit.

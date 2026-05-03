@@ -1,283 +1,141 @@
 # Porting / re-creation candidates v0
 
 _Type: Plan + Observation._
-_Status: Active — open list. Each session can pick from this._
-_Last updated: 2026-05-03 (three same-day batches landed: morning — HMAC-MD5, Unicode UTF, TGA decoder, datetime, BMP util, CPIO walker; afternoon — KPTI close-out, ChaCha20+Poly1305+AEAD, AES-GCM, POSIX TZ, WAV, TAR, LZ4, GTF, DPMS, PSF, TGA encoder; evening — Adler-32, SHA-384/SHA-512, AES-CCM, DEFLATE inflater, GZIP+zlib wrappers, TZif binary timezone parser. See `kernel-util-libraries-v0.md` for the long-form companion)._
+_Status: Active — pruned 2026-05-03 to "what the OS legitimately
+needs." Speculative rows removed; deletion rationale per
+`Out of scope` below._
+_Last updated: 2026-05-03 (post-prune)._
 
-This file enumerates discrete features whose primary work is
-**clean-room porting from a public spec** rather than novel
-architecture work. Items here have:
+This file used to enumerate ~80 clean-room porting candidates by
+category. Most were speculative — they had no consumer in tree
+and no realistic path to one in the project's near-term scope.
+The current pillars (run PE binaries on commodity x86_64,
+boot from FAT32, run typical desktop apps) are well served by
+the kernel as it stands; what remains here is the small set of
+slices that genuinely move that scope forward.
 
-1. **A public spec** (no IP entanglement, no NDA),
-2. **A clean-room path** (Linux/FreeBSD/Wine/ReactOS prior art is
-   reference-only, never the source of code),
-3. **An eventual consumer** in DuetOS (a feature gap, a Linux ABI
-   call, a Win32 thunk, etc), and
-4. **Bounded size** — each row is one slice's worth of work
-   (≈200–600 LOC).
-
-When you land one, mark its row "LANDED YYYY-MM-DD → <commit-hash>"
-and record the knowledge entry that supersedes it. Do not delete
-rows: history of considered-but-not-picked is itself useful data
-for the next session.
+When you land one, mark its row "LANDED YYYY-MM-DD → <commit>".
 
 ## Resume prompt
 
-> Read `.claude/knowledge/porting-candidates-v0.md`. Pick a row that
-> matches the current session's interest (display / audio / storage /
-> net / crypto / FS / time / archives). The row gives you the spec,
-> the prior art, the eventual consumer, and the size estimate.
-> Commit with a "LANDED" note in this file before pushing.
->
-> The 2026-05-03 batch added a "Status — landed slices" row for
-> every TU it shipped; the long-form companion is
-> `kernel-util-libraries-v0.md`. If a follow-up consumer matters
-> more than a fresh slice, the candidates with no live caller yet
-> are HMAC-MD5 (NTLMv1 thunk) and CPIO (initramfs unpacker).
+> Read `.claude/knowledge/porting-candidates-v0.md`. Either pick
+> a row from `Open work` (each has a named in-tree consumer),
+> add a row whose consumer you can name, or stop. The
+> `Out of scope` list below is *not* a TODO — those rows were
+> deliberately pruned because the project does not need them.
+> If your task makes one of them suddenly needed, raise it as a
+> new entry with the consumer named.
 
-## Status — landed slices
+## Status — landed slices that survive the prune
 
 | Date | Row | Knowledge file |
 |------|-----|----------------|
 | 2026-05-01 | EDID 1.3/1.4 base-block parser | `edid-parser-v0.md` |
-| 2026-05-01 | CVT 1.1 / 1.2 RBv1 timing generator | this slice (see commit) |
-| 2026-05-01 | CEA-861 EDID extension parser (HDMI VSDB / video / audio / HDR) | this slice (see commit) |
+| 2026-05-01 | CVT 1.1 / 1.2 RBv1 timing generator | `cvt-cea861-v0.md` |
+| 2026-05-01 | CEA-861 EDID extension parser (HDMI VSDB / video / audio / HDR) | `cvt-cea861-v0.md` |
 | 2026-05-03 | AES-128 / AES-256 block cipher (FIPS 197) | `aes-and-keywrap-v0.md` |
 | 2026-05-03 | AES Key Wrap (RFC 3394) | `aes-and-keywrap-v0.md` |
 | 2026-05-03 | CRC32 hoist out of `gpt.cpp` (IEEE 802.3 reflected) | `crc32-md5-base64-and-eapol-keywrap-v0.md` |
-| 2026-05-03 | MD5 (RFC 1321) — legacy interop only | `crc32-md5-base64-and-eapol-keywrap-v0.md` |
 | 2026-05-03 | Base64 encode/decode (RFC 4648) | `crc32-md5-base64-and-eapol-keywrap-v0.md` |
-| 2026-05-03 | HMAC-MD5 (RFC 2104 + RFC 1321) — legacy interop | `crc32-md5-base64-and-eapol-keywrap-v0.md` (extended) |
-| 2026-05-03 | Unicode UTF-8 / UTF-16 codepoint conversions (RFC 3629 + Unicode 15) | `kernel/util/unicode.{h,cpp}` (collapses exfat+ntfs ad-hoc helpers) |
-| 2026-05-03 | TGA 2.0 uncompressed 24/32-bpp decoder (Truevision TGA) | `kernel/util/tga.{h,cpp}` (RLE deferred to v1; ImageView wiring deferred to follow-up slice) |
-| 2026-05-03 | Gregorian↔Julian-Day + ISO 8601 datetime parser/printer (Fliegel & Van Flandern + ISO 8601:2019) | `kernel/util/datetime.{h,cpp}` |
-| 2026-05-03 | BMP encoder + parser util TU (32-bpp BI_RGB) — pulled out of screenshot.cpp + imageview.cpp into `kernel/util/bmp` | `kernel/util/bmp.{h,cpp}` |
-| 2026-05-03 | CPIO newc / newc-CRC archive walker (POSIX.1-1988 SVR4 portable, magic 070701/070702) | `kernel/util/cpio.{h,cpp}` (initramfs unpacker is its own future slice) |
-| 2026-05-03 | ChaCha20 + Poly1305 + ChaCha20-Poly1305 AEAD (RFC 8439) | `kernel/crypto/chacha20poly1305.{h,cpp}` |
-| 2026-05-03 | AES-GCM 128/256 (NIST SP 800-38D) | `kernel/crypto/aes_gcm.{h,cpp}` |
-| 2026-05-03 | POSIX TZ env-var string parser (POSIX.1-2008 §8.3) | `kernel/util/posix_tz.{h,cpp}` |
-| 2026-05-03 | WAV / RIFF PCM parser + writer | `kernel/util/wav.{h,cpp}` |
-| 2026-05-03 | TAR ustar archive walker (POSIX.1-2001) | `kernel/util/tar.{h,cpp}` |
-| 2026-05-03 | LZ4 raw-block decoder | `kernel/util/lz4.{h,cpp}` (frame format deferred) |
-| 2026-05-03 | GTF (Generalized Timing Formula) generator | `kernel/drivers/gpu/gtf.{h,cpp}` |
-| 2026-05-03 | DPMS state machine + driver-hook surface | `kernel/drivers/gpu/dpms.{h,cpp}` |
-| 2026-05-03 | PSF1 / PSF2 console-font header parser | `kernel/util/psf.{h,cpp}` |
-| 2026-05-03 | TGA 32-bpp encoder (paired with prior decoder) | `kernel/util/tga.{h,cpp}` (extended) |
-| 2026-05-03 | Adler-32 (RFC 1950 §9) | `kernel/util/adler32.{h,cpp}` |
-| 2026-05-03 | SHA-384 + SHA-512 (FIPS 180-4 §6.4 / §6.5) | `kernel/crypto/sha512.{h,cpp}` |
-| 2026-05-03 | AES-CCM 128/256 (NIST SP 800-38C) | `kernel/crypto/aes_ccm.{h,cpp}` |
-| 2026-05-03 | DEFLATE inflater (RFC 1951) | `kernel/util/deflate.{h,cpp}` |
-| 2026-05-03 | GZIP container + zlib stream (RFC 1952 + RFC 1950) over DEFLATE | `kernel/util/gzip.{h,cpp}` |
-| 2026-05-03 | TZif binary timezone parser (RFC 8536, v1 block) | `kernel/util/tzif.{h,cpp}` |
+| 2026-05-03 | Unicode UTF-8 / UTF-16 codepoint conversions (RFC 3629 + Unicode 15) | `kernel-util-libraries-v0.md` (collapses exfat+ntfs ad-hoc helpers) |
+| 2026-05-03 | TGA 2.0 uncompressed 24/32-bpp decoder + 32-bpp encoder | `kernel-util-libraries-v0.md` (ImageView + Ctrl+Alt+T screenshot) |
+| 2026-05-03 | Gregorian↔Julian-Day + ISO 8601 + Unix-epoch helpers | `kernel-util-libraries-v0.md` (klog wall-clock prefix + Calendar week display) |
+| 2026-05-03 | BMP encoder + parser util TU (32-bpp BI_RGB) | `kernel-util-libraries-v0.md` (screenshot writer + ImageView decoder) |
+| 2026-05-03 | DPMS state machine + driver-hook surface | `kernel-util-libraries-v0.md` (Settings shutdown/reboot transitions) |
+| 2026-05-03 | Adler-32 (RFC 1950 §9) | `kernel-util-libraries-v0.md` (zlib stream tail validation) |
+| 2026-05-03 | DEFLATE inflater (RFC 1951) | `kernel-util-libraries-v0.md` (PNG IDAT decompression) |
+| 2026-05-03 | GZIP container + zlib stream wrapper (RFC 1952 + RFC 1950) | `kernel-util-libraries-v0.md` (PNG IDAT decompression) |
+| 2026-05-03 | PNG decoder (RFC 2083, 8-bit RGB/RGBA) | `kernel-util-libraries-v0.md` (ImageView dispatch on `.PNG`) |
 
-## Display + GPU
+## Status — deleted slices (originally landed, then pruned 2026-05-03)
 
-| Slice | Spec | Prior art (reference only) | Consumer | Est. LOC |
-|-------|------|----------------------------|----------|----------|
-| ~~EDID 1.3/1.4 base block~~ LANDED 2026-05-01 | VESA E-EDID A2 | Linux drm_edid, X.Org | P2 #12 | ~600 |
-| ~~CVT timing generator~~ LANDED 2026-05-01 | VESA CVT 1.1/1.2 | libxcvt, X.Org cvt(1) | mode-set | ~400 |
-| ~~CEA-861 ext block~~ LANDED 2026-05-01 | CEA-861-E/F | Linux drm_edid_cea | HDMI audio, HDR | ~600 |
-| ~~GTF (Generalized Timing Formula)~~ LANDED 2026-05-03 | VESA GTF 1.1 | X.Org gtf(1) | legacy CRT modes | ~250 |
-| **DisplayID 1.3 / 2.0** — successor to EDID | VESA DisplayID | Linux drm_displayid | post-2014 monitors | ~500 |
-| **CTA-861-G / 861-H VIC table extension** | CTA-861-G | Linux drm_edid | HDMI 2.1 modes | ~200 |
-| ~~DPMS state machine~~ LANDED 2026-05-03 | VESA DPMS | X.Org DPMS ext | screen-saver, power | ~150 |
-| **Mode-pool dedup + best-fit selector** | (DuetOS-internal) | Linux drm_modes.c | mode-set syscall | ~300 |
-| **DDC/I²C bit-banged transport** | VESA DDC2B | Linux drm_dp_helper | feeds EDID | per-vendor |
-| **AUX channel for DisplayPort** | DP 1.4 | Linux drm_dp_aux | DP modes | per-vendor |
+The following 14 TUs landed earlier on 2026-05-03 but were
+removed in commit `1a236aa` because they had no live consumer
+in the tree and no realistic path to one in the project's
+near-term scope. Recoverable from git history if a future slice
+needs them.
 
-## Audio
+| TU | Spec | Why deleted |
+|----|------|-------------|
+| HMAC-MD5 (RFC 2104+1321) | RFC 2202 | No NTLMv1, no HTTP Digest in tree |
+| MD5 (RFC 1321) | FIPS-deprecated | Only consumer was HMAC-MD5 |
+| SHA-384 / SHA-512 (FIPS 180-4) | FIPS 180-4 | TLS not in tree; no consumer |
+| HMAC-SHA384 / HMAC-SHA512 | RFC 4231 | Same — built on SHA-512 |
+| AES-GCM (NIST SP 800-38D) | NIST SP 800-38D | TLS not in tree, WPA3-GCMP TX/RX unwired |
+| AES-CCM (NIST SP 800-38C) | NIST SP 800-38C | WPA2-CCMP data-frame TX/RX unwired (HW-untested anyway) |
+| ChaCha20 + Poly1305 + AEAD | RFC 8439 | TLS 1.3 not in tree |
+| POSIX TZ string parser | POSIX.1-2008 §8.3 | Linux strftime thunk not in tree |
+| TZif binary timezone parser | RFC 8536 | Same |
+| WAV / RIFF parser+writer | Microsoft WAVEFORMATEX | No audio backend in tree |
+| CPIO newc walker | POSIX.1-1988 SVR4 | No initramfs in tree |
+| TAR ustar walker | POSIX.1-2001 | No tar-based install seed |
+| LZ4 raw-block decoder | LZ4 spec | No lz4 assets in tree |
+| PSF1 / PSF2 font parser | Linux PSF v1+v2 | No `setfont` userland app |
+| GTF (VESA Generalized Timing Formula 1.1) | VESA GTF 1.1 | CVT covers every panel in scope; no pre-CVT CRT in fleet |
 
-| Slice | Spec | Prior art | Consumer | Est. LOC |
-|-------|------|-----------|----------|----------|
-| **AC'97 codec init + BDL** | AC'97 spec rev 2.3 | FreeBSD `ich.c`, ALSA `intel8x0` | P0 #2 | ~600 |
-| **HDA controller reset + CORB/RIRB** | Intel HDA spec | ALSA hda_controller, FreeBSD hda | P0 #2 | ~700 |
-| **HDA codec verb table** | Intel HDA spec §7.3 | ALSA hda_codec | P0 #2 | ~300 |
-| ~~WAV (RIFF) parser/writer~~ LANDED 2026-05-03 | RFC + Microsoft WAVEFORMATEX | libsndfile | sound effects | ~330 |
-| **Vorbis comment parser** | Xiph spec | libvorbis | metadata | ~120 |
-| **OGG container** | RFC 3533 | libogg | streaming | ~250 |
-| **FLAC stream decoder** | xiph FLAC spec | libFLAC | lossless audio | ~600 |
-| **MP3 frame decoder** (LayerIII) | ISO 11172-3 | libmpg123, dr_mp3 | audio playback | ~1500 |
+## Open work — slices the OS legitimately needs
 
-## Storage + Filesystems
+Each row below names an explicit in-tree consumer that exists
+*today* and is gated on this slice landing.
 
-| Slice | Spec | Prior art | Consumer | Est. LOC |
-|-------|------|-----------|----------|----------|
-| **AHCI write path** | AHCI 1.3 + SATA spec | Linux libata, FreeBSD ahci | already-built read path | ~300 |
-| **ext4 write path** | ext4 wiki | Linux fs/ext4 | subsystems-status gap | ~2000 |
-| **ext4 journaling (jbd2)** | ext3 / ext4 journal spec | Linux fs/jbd2 | crash safety | ~1500 |
-| **NTFS read parsing completion** | NTFS spec (Anderson) | Linux fs/ntfs3, ntfs-3g | Windows interop | ~1500 |
-| **NTFS write path** | (same) | (same) | (same) | ~2000 |
-| **ISO 9660 / Joliet / Rock Ridge** | ECMA-119 + RFC 4101 | Linux fs/isofs | mount CD-ROM | ~400 |
-| **UDF (DVD/Blu-ray)** | OSTA UDF 2.60 | Linux fs/udf | mount DVDs | ~1200 |
-| **F2FS read** | Samsung F2FS spec | Linux fs/f2fs | flash storage | ~1500 |
-| **Btrfs read-only** | btrfs wiki | Linux fs/btrfs | enthusiast FS | ~2500 |
-| **9P (Plan 9 protocol)** | 9P2000 RFC | Linux fs/9p, FreeBSD virtfs | QEMU virtfs | ~400 |
-| **virtio-blk** | virtio 1.2 spec | Linux drivers/block/virtio_blk | QEMU storage | ~300 |
-| **virtio-rng** | virtio 1.2 spec | Linux drivers/char/hw_random | entropy source | ~80 |
-| **virtio-fs** | virtio 1.2 spec | Linux fs/fuse/virtio_fs | host-shared FS | ~600 |
-| **TPM 2.0 (TIS interface)** | TCG PC Client TIS | Linux drivers/char/tpm | secure boot, sealed storage | ~500 |
+| Slice | Spec | Consumer in tree | Est. LOC |
+|-------|------|------------------|----------|
+| **GPT partition write surface** | UEFI GPT | `disk-installer-plan.md` (P2 #16) — no installer can land without `GptInitDisk` / `GptWritePartition` | ~400 |
+| **FAT32 mkfs / format** | Microsoft FAT spec | Same — needs to lay down BPB / FAT region / root cluster on a blank partition | ~300 |
+| **AHCI write path** | AHCI 1.3 + SATA | The existing AHCI read driver in tree; FAT32 writes would route through AHCI on real SATA media | ~300 |
+| **virtio-blk + virtio-rng** | virtio 1.2 | QEMU testing throughput — current dev path is NVMe-in-QEMU, virtio-blk would let us test the storage stack against a second backend | ~400 |
 
-## Networking + Crypto
+Anything else that wants to land needs a **named in-tree
+consumer**. "Future TLS will need this" is not a consumer; if a
+TLS slice is approved, the matching crypto primitives can be
+re-introduced as part of *that* slice with their first caller
+in the same commit.
 
-| Slice | Spec | Prior art | Consumer | Est. LOC |
-|-------|------|-----------|----------|----------|
-| ~~AES-128/256 block cipher~~ LANDED 2026-05-03 | FIPS 197 | OpenSSL, ARM Cryptolib | Wi-Fi, future TLS | ~250 |
-| ~~AES-GCM + AES-CCM modes~~ LANDED 2026-05-03 | NIST SP 800-38D + 38C | mbedTLS | Wi-Fi WPA2 CCMP + WPA3 GCMP, TLS | ~700 |
-| ~~AES key wrap (RFC 3394)~~ LANDED 2026-05-03 | RFC 3394 | mbedTLS, BoringSSL | Wi-Fi M3 GTK | ~100 |
-| ~~MD5~~ LANDED 2026-05-03 | RFC 1321 | mbedTLS | legacy interop | ~100 |
-| ~~ChaCha20 + Poly1305 + AEAD~~ LANDED 2026-05-03 | RFC 8439 | BoringSSL | TLS 1.3 ciphersuite | ~580 |
-| _(see Landed slices: MD5 — RFC 1321, 2026-05-03)_ | | | | |
-| **Curve25519 / X25519** | RFC 7748 | TweetNaCl | Wi-Fi WPA3-SAE, TLS | ~300 |
-| **Ed25519 signature verify** | RFC 8032 | TweetNaCl | code-sign verify | ~400 |
-| ~~CRC32 hoist out of `gpt.cpp`~~ LANDED 2026-05-03 | IEEE 802.3 polynomial | (already present) | broad cleanup | ~50 |
-| ~~Base64 encode/decode~~ LANDED 2026-05-03 | RFC 4648 | musl, glibc | HTTP auth, MIME | ~100 |
-| ~~HMAC-MD5~~ LANDED 2026-05-03 | RFC 2104 + RFC 1321 | mbedTLS | NTLM (when added) | ~80 |
-| **TLS 1.2 client (no cert verify)** | RFC 5246 | mbedTLS | https:// | ~3000 |
-| **TLS 1.3 client** | RFC 8446 | mbedTLS, BoringSSL | https:// | ~3500 |
-| **DNS-over-TLS / DoH** | RFC 8484 | systemd-resolved | secure DNS | ~250 |
-| **HTTP/2 client** | RFC 7540 | nghttp2 | modern HTTPS | ~2000 |
-| **WebSocket framing** | RFC 6455 | (own) | live-update apps | ~300 |
-| **mDNS responder + querier** | RFC 6762 + 6763 | Avahi, Bonjour | service discovery | ~600 |
-| **SSDP (UPnP discovery)** | UPnP Forum | gupnp | local-net discovery | ~300 |
-| **DHCPv6** | RFC 8415 | systemd-networkd | IPv6 | ~500 |
-| **SLAAC (IPv6 stateless)** | RFC 4862 | Linux net/ipv6 | IPv6 | ~300 |
-| **ICMPv6 NDP** | RFC 4861 | Linux net/ipv6 | IPv6 | ~400 |
-| **IPv6 stack proper** | RFC 8200 | Linux net/ipv6 | subsystems-status gap | ~1500 |
-| **SMBv2 client (read-only)** | MS-SMB2 | Linux fs/cifs | Windows file sharing | ~2000 |
-| **NFSv3 client** | RFC 1813 | Linux fs/nfs | UNIX file sharing | ~1500 |
-| **CDC-NCM (USB Ethernet)** | USB IF NCM 1.0 | Linux drivers/net/usb/cdc_ncm | newer phones | ~400 |
-| **EAP-PEAP / EAP-TTLS** | RFC 5247 | wpa_supplicant | enterprise Wi-Fi | ~600 |
-| **WPA3-SAE handshake** | IEEE 802.11-2020 | hostapd | modern Wi-Fi | ~500 |
-| **TFTP client** | RFC 1350 | (own) | PXE / firmware download | ~150 |
+## Out of scope — deliberately not tracked
 
-## Time + Internationalisation
+The following categories were enumerated in earlier revisions
+of this file and have been pruned. They are out of scope until
+the project's pillars expand:
 
-| Slice | Spec | Prior art | Consumer | Est. LOC |
-|-------|------|-----------|----------|----------|
-| ~~TZif (Olson zoneinfo) parser~~ LANDED 2026-05-03 (v1 block; v2/v3 64-bit deferred) | RFC 8536 (TZif v3) | musl `__tzset.c`, glibc tzfile.c | Linux ABI gap | ~310 |
-| ~~POSIX TZ string parser~~ LANDED 2026-05-03 | POSIX.1-2008 §8.3 | musl | TZ env var | ~470 |
-| **Gregorian↔ Julian day conversion** | (well-known) | musl, glibc | calendar app | ~80 |
-| **ISO 8601 datetime parser/printer** | ISO 8601 | musl strftime | logging | ~200 |
-| ~~Unicode UTF-8/UTF-16 conversions~~ LANDED 2026-05-03 | RFC 3629 + Unicode 15 §3.9 | musl mbtowc | Win32 wide strings, exfat/ntfs filename decode | ~300 |
-| **Unicode case folding (Unicode 15)** | Unicode case-folding tables | ICU mini | text compare | ~500 |
-| **PCRE-lite regex** | (subset of POSIX BRE) | musl regex.c | shell pattern match | ~600 |
+- **Display / GPU beyond the EDID + CVT + DPMS already landed**:
+  DisplayID, CTA-861-G, DDC/I²C transport, DisplayPort AUX. All
+  gated on a per-vendor GPU driver that doesn't exist.
+- **Audio**: AC'97, HDA, WAV, Vorbis, OGG, FLAC, MP3. Gated on
+  the audio backend, which isn't in tree.
+- **Filesystems beyond the read-only tier already landed**:
+  ISO 9660 / UDF / F2FS / Btrfs / 9P / virtio-fs / NFSv3 / SMBv2.
+  Gated on a per-FS workload that doesn't exist.
+- **Crypto beyond AES + AES-KW + SHA-1 + SHA-256 + HMAC-SHA1/256
+  + PBKDF2-SHA1/256**: Curve25519 / Ed25519 / TLS 1.2 / TLS 1.3 /
+  DoH / HTTP/2 / WebSocket / mDNS / SSDP / DHCPv6 / SLAAC /
+  ICMPv6 NDP / IPv6 stack / EAP-PEAP / EAP-TTLS / WPA3-SAE.
+  Each is gated on a higher-level subsystem (TLS client, IPv6
+  stack, enterprise Wi-Fi) that isn't in scope.
+- **Time + i18n beyond the Gregorian↔Julian + ISO 8601 already
+  landed**: TZif / POSIX TZ / Unicode case folding / PCRE.
+  Gated on the Linux strftime thunks, which aren't in tree.
+- **Compression beyond DEFLATE + GZIP + zlib + Adler-32 + CRC32
+  already landed**: ZIP / Cabinet (.cab) / Zstandard / LZ4.
+  Gated on a workload (PNG already covered, no other compressed
+  asset in tree).
+- **Image formats beyond BMP + TGA + PNG already landed**:
+  GIF / JPEG / WebP. Each is 1500+ LOC; gated on a real consumer.
+- **Font formats beyond the existing TTF**: PCF / PSF1 / PSF2.
+  Gated on a `setfont`-style userland app.
+- **Linux ABI gaps**: ptrace / userfaultfd / io_uring / BPF /
+  eBPF / landlock / seccomp-bpf / mremap MREMAP_FIXED /
+  clock_adjtime / rseq / splice. Each is gated on a Linux ELF
+  caller exercising it.
+- **Win32 / NT facade gaps**: NtCreateSection (file-backed) /
+  ALPC / ETW / Mailslot / NamedPipe (full) / NtSetInformationFile
+  (full) / KTM transactions / WNF / AdjustPrivileges proper.
+  Each is gated on a PE caller exercising it.
+- **ACPI / power**: AML interpreter (subset), EC, S3 sleep, S0ix
+  modern standby, P-states. Each is hardware-touching with no
+  current test machine that would benefit.
+- **Boot / firmware beyond UEFI loader already landed**:
+  EFI runtime services, EFI variables, PE32+ EFI loader rework.
+  Gated on a firmware feature that isn't in scope.
 
-## Archives + Compression
-
-| Slice | Spec | Prior art | Consumer | Est. LOC |
-|-------|------|-----------|----------|----------|
-| ~~DEFLATE inflater (decode-only)~~ LANDED 2026-05-03 | RFC 1951 | puff.c | gzip, png, zip, kernel-image | ~470 |
-| ~~GZIP container + zlib stream wrapper~~ LANDED 2026-05-03 | RFC 1952 + RFC 1950 | (above) | initramfs.gz, http content, PNG IDAT | ~300 |
-| ~~CPIO newc / newc-CRC walker~~ LANDED 2026-05-03 (newc only — old binary 070707 deliberately rejected) | POSIX.1-1988 | Linux init/initramfs.c | initramfs prereq | ~330 |
-| ~~TAR ustar~~ LANDED 2026-05-03 (pax extensions still pending) | POSIX.1-2001 | libarchive | distribution tarballs | ~400 |
-| **ZIP archive read-only** | PKWARE APPNOTE | minizip | Win32 install MSIs | ~250 |
-| **Cabinet (.cab) read-only** | MS-CAB | libmspack | Windows install | ~600 |
-| ~~LZ4 raw-block decoder~~ LANDED 2026-05-03 (frame format deferred) | LZ4 spec | lz4 ref | fast decompression | ~220 |
-| **Zstandard decoder** | RFC 8478 | zstd lib | modern compression | ~1500 |
-
-## Image + Font formats
-
-| Slice | Spec | Prior art | Consumer | Est. LOC |
-|-------|------|-----------|----------|----------|
-| ~~TGA decoder + 32-bpp encoder~~ LANDED 2026-05-03 (RLE still deferred) | TGA 2.0 spec | stb_image | wallpapers, icons | ~350 |
-| ~~BMP encoder + parser util TU (32-bpp BI_RGB)~~ LANDED 2026-05-03 | Microsoft BITMAPINFOHEADER | stb_image | screenshot writer + ImageView | ~200 |
-| **PNG decoder** | RFC 2083 | stb_image, libpng | image viewer | ~300 (+DEFLATE) |
-| **PNG encoder** | RFC 2083 | (same) | screenshot upgrade | ~200 (+DEFLATE) |
-| **GIF87a/89a decoder + LZW** | W3C GIF spec | stb_image | animated icons | ~400 |
-| **JPEG baseline decoder** | ITU-T T.81 | stb_image, jpeg-turbo | photo viewer | ~1500 |
-| **WebP decoder (lossless)** | RFC 9649 | libwebp | modern photo | ~1500 |
-| ~~PSF1/PSF2 font parser~~ LANDED 2026-05-03 | linux Documentation/fb/, kbd-tools | linux console_psf | console font customisation | ~280 |
-| **PCF bitmap font parser** | X Logical Font Description | libXfont | classic X bitmap fonts | ~250 |
-| **TrueType shaping enhancement** | OpenType spec | stb_truetype | smoother text rendering | (existing ttf.cpp) |
-
-## Linux ABI gaps (subsystems-status.md cross-reference)
-
-| Slice | Surface | Est. LOC |
-|-------|---------|----------|
-| **Real ptrace state machine** | PTRACE_TRACEME / ATTACH / DETACH / SETOPTIONS / CONT / SINGLESTEP | ~600 |
-| **userfaultfd minimal** | UFFDIO_API / REGISTER / COPY | ~400 |
-| **io_uring submission queue** | IORING_OP_READ/WRITE/SENDMSG | ~1500 |
-| **BPF CLASSIC packet filter** | BPF_PROG_TYPE_SOCKET_FILTER | ~500 |
-| **eBPF skeleton (hardcoded prog)** | bpf(BPF_PROG_LOAD) | ~800 |
-| **landlock restrict-self** | LANDLOCK_RULE_PATH_BENEATH | ~300 |
-| **seccomp-bpf filter execution** | SECCOMP_SET_MODE_FILTER | ~500 |
-| **mremap MREMAP_FIXED** | (extends current mremap) | ~150 |
-| **clock_adjtime / adjtimex** | struct timex / NTP discipline | ~250 |
-| **rseq (restartable sequences)** | (currently -ENOSYS facade) | ~400 |
-| **splice / tee real zero-copy file↔pipe** | (currently pipe→pipe only) | ~300 |
-
-## Win32 / NT facade gaps (subsystems-status.md cross-reference)
-
-| Slice | Surface | Est. LOC |
-|-------|---------|----------|
-| **NtCreateSection (file-backed)** | section→file mapping with offset+length view | ~400 |
-| **NtCreatePort / Connect / Request / Reply** | LPC / ALPC backbone | ~800 |
-| **EtwTrace*** | NtTrace / TraceEvent | ~600 |
-| **NtCreateMailslot** | mailslot file path | ~200 |
-| **NtCreateNamedPipeFile (full)** | named-pipe semantics | ~400 |
-| **NtSetInformationFile** beyond FilePositionInformation | rename / disposition / EOF / link / mode-page | ~600 |
-| **KTM transactions** | NtCreateTransaction etc. | ~1000 |
-| **WNF** (Windows Notification Facility) | NtRegisterWnfStateName | ~400 |
-| **AdjustPrivileges proper** | Token privileges → kernel cap mapping | ~200 |
-
-## ACPI / power
-
-| Slice | Spec | Prior art | Consumer | Est. LOC |
-|-------|------|-----------|----------|----------|
-| **AML interpreter (subset)** | ACPI 6.5 §20 | ACPICA | Battery, suspend | ~3000 |
-| **EC (Embedded Controller)** | ACPI 6.5 §12 | Linux drivers/acpi/ec | brightness, battery | ~500 |
-| **S3 sleep / wake** | ACPI §16 | Linux kernel/power | suspend | ~700 |
-| **S0ix modern standby** | Microsoft platform reference | Linux x86 platform | laptop sleep | ~500 |
-| **Performance states (P-states)** | ACPI §8.4 | Linux cpufreq | power management | ~400 |
-
-## Boot + Firmware
-
-| Slice | Spec | Prior art | Consumer | Est. LOC |
-|-------|------|-----------|----------|----------|
-| **EFI runtime services calls** | UEFI 2.10 | EDK2 | reset, get-time, variable | ~300 |
-| **EFI variables read/write** | UEFI 2.10 | EDK2 | boot config | ~250 |
-| **PE32+ EFI loader (kernel)** | UEFI PE32+ | EDK2 | UEFI boot path | ~400 |
-| **GPT partition write** | UEFI GPT | gdisk | P2 #16 disk installer | ~400 |
-| **FAT32 mkfs** | Microsoft FAT spec | mkfs.fat | P2 #16 | ~300 |
-
-## How to pick
-
-A row qualifies for a session when:
-
-1. The reference spec is reachable (no NDA, public document).
-2. The eventual consumer in DuetOS is named (don't pick rows that
-   are pure speculation — that's CLAUDE.md "Anti-Bloat" violation).
-3. The size estimate fits one slice (split if it's > 800 LOC).
-4. Pre-existing kernel infrastructure isn't blocking — for instance
-   AC'97 audio is gated on a DMA-coherent allocator that doesn't
-   exist; the row stays in the table but the per-slice plan needs to
-   include the prerequisite (`mm::AllocDmaCoherent`).
-
-## Lifecycle
-
-When you land a row:
-
-1. Add a "LANDED YYYY-MM-DD" prefix in the table.
-2. Cross-link the new knowledge file by name (not URL).
-3. Update `feature-gaps-end-user-v0.md` (if user-visible) or
-   `subsystems-status.md` (if ABI-related).
-4. Commit this file in the same PR as the slice.
-
-When all rows in a category are LANDED, you can graduate that
-category section into its own knowledge file and remove from here —
-but only if the category really is exhausted. (For example, Display
-+ GPU still has ~10 unstruck rows; not graduating it.)
-
-## Out-of-scope items deliberately not listed
-
-- **JPEG / WebP / H.264 / H.265 decoders** beyond stub-level — these
-  are 10k+ LOC each and gated on hardware acceleration to be
-  practical. Defer until a Vulkan ICD lands and a real video player
-  is on the board.
-- **OpenGL ES 3.x ICD** — Vulkan-first per CLAUDE.md project pillars.
-- **Bluetooth full stack** — listed as P2 #18 in feature-gaps but
-  spans HCI + L2CAP + RFCOMM + GATT + profiles, each its own slice.
-  Don't pull in until the use case lands first (mouse / headset).
-- **Printing** — P2 #19; same reason.
-- **DRM (cinema-DRM, not the Linux DRM module)** — explicitly
-  rejected per project goals; no Widevine, no PlayReady, no FairPlay.
+If any of these become needed, add them back with a named
+consumer. Don't pre-pay the implementation cost of speculation.
