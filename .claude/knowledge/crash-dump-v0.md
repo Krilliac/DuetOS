@@ -111,11 +111,12 @@ annotation when the value falls in plausible kernel code range — surfaces
 stale callback pointers / vtable spills / saved-RIP residue without forcing
 the operator to re-symbolize by hand.
 
-The schema is v5 (v1 → v2 added the `return-address pointers`
-section; v2 → v3 added the `page-walk` block for cr2 and rip;
-v3 → v4 added the `LBR (last-branch records)` block; v4 → v5
-added the per-task syscall trail block — only emitted when the
-current task's ring is non-empty). Bump `kDumpSchemaVersion`
+The schema is v6 (v1 → v2 added `return-address pointers`;
+v2 → v3 added the `page-walk` block; v3 → v4 added the LBR
+block; v4 → v5 added the per-task syscall trail; v5 → v6 added
+the per-process VM-info block — both syscall-trail and VM-info
+are conditional on the current task being a user task and only
+emit when there's something to say). Bump `kDumpSchemaVersion`
 in `core/panic.cpp` when the layout changes in a way a parser
 would care about. The bit-decoded suffixes (e.g. `[PE|WP|PG]`)
 live on the SAME line as the existing `<label> : <hex>` token sequence,
@@ -328,6 +329,54 @@ What this surfaces in a real panic:
   trail section at all — the absence is the diagnostic
   signal: "this crash was a kernel-internal invariant break,
   no userspace trajectory matters".
+
+### Per-process VM info + loaded modules
+
+`core::DumpProcessVmInfo` (in `kernel/core/panic.cpp`) emits
+the current task's owning process's VM state, but only when
+`CurrentProcess()` is non-null (i.e. the panicking task is a
+user task, not a kernel thread). Layout:
+
+```
+  process VM info:
+    pid=0x...  name="..."
+    pml4_phys=0x...  regions=0x...  budget=0x...
+    vmap span: [0x... .. 0x...)  pages=0x...
+  loaded modules (N DLLs):
+    [0x... .. 0x...)  size=0x...  ntdll.dll
+    [0x... .. 0x...)  size=0x...  kernel32.dll
+    ...
+```
+
+Sources:
+
+- `pid` / `name` from `core::Process::pid` / `Process::name`.
+- `pml4_phys` / `region_count` / `frame_budget` from
+  `Process::as` (the per-process `mm::AddressSpace`).
+- `vmap span` is the min/max user vaddr across the AS's
+  per-page region list. We deliberately don't dump every
+  individual mapped page (up to 1024 per process) — the span
+  + page count tells an operator whether rip / rsp fall
+  inside the mapped range; per-page detail is available via
+  shell at post-mortem time.
+- `loaded modules` walks `Process::dll_images[]` (capped at
+  `Process::kDllImageCap = 48`); the DLL name is read out of
+  the image's PE export directory via
+  `loader::PeExportsDllName`. Falls back to
+  `<no export name>` for DLLs without an export table or with
+  a clipped name string.
+
+Why this matters: bare hex `rip=0x100012a4` plus
+`[region=user-canonical]` says "this fault is in user space"
+but doesn't say WHICH binary. With the module table, an rip in
+`[0x10000000..0x10004000) kernel32.dll` reads as exactly that
+even before the operator runs an off-box symbolizer, and the
+vmap span surfaces "rsp=0x... — outside the AS's mapped range"
+as a clear stack-blow-out signal.
+
+Kernel-thread panics emit nothing for this section, same as
+the syscall trail — the absence carries the same "kernel
+internal" diagnostic signal.
 
 Human-readable decoders live in `kernel/core/diag_decode.{h,cpp}`:
 `WriteCr0Bits` / `WriteCr4Bits` / `WriteRflagsBits` / `WriteEferBits` /

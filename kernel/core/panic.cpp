@@ -14,7 +14,11 @@
 #include "diag/diag_decode.h"
 #include "diag/soft_lockup.h"
 #include "diag/hexdump.h"
+#include "loader/dll_loader.h"
+#include "loader/pe_exports.h"
 #include "log/klog.h"
+#include "mm/address_space.h"
+#include "proc/process.h"
 #include "sched/sched.h"
 #include "util/build_config.h"
 #include "util/symbols.h"
@@ -86,7 +90,15 @@ constexpr const char* kDumpEndMarker = "=== DUETOS CRASH DUMP END ===\n";
 // emitted after the LBR block, only when the current task has
 // recorded entries (kernel-only tasks stay silent). Each line
 // is `[idx] abi=<ABI> nr=0xN args=(0xN,0xN,0xN,0xN) -> ret=0xN tick=0xN`.
-constexpr u64 kDumpSchemaVersion = 5;
+//
+// v6 (2026-05-03): per-process VM info block emitted after the
+// syscall trail, only when CurrentProcess is non-null. Lists
+// pid + name, AddressSpace pml4_phys + region count + budget,
+// vmap span (min/max mapped user VA), and the loaded-DLL
+// table (name + base_va..base_va+size per entry). Lets a
+// reader resolve a user-space rip against the right module
+// without a separate symbolizer pass.
+constexpr u64 kDumpSchemaVersion = 6;
 
 void WriteLabelled(const char* label, u64 value)
 {
@@ -356,6 +368,98 @@ void DumpTask()
     }
 }
 
+// Dump the current process's VM info: pid, name, AS pointer +
+// region count, vmap min/max VA, and the loaded-DLL table.
+// No-op for kernel-only tasks (CurrentProcess returns null) —
+// the section's absence is itself a signal that the panic
+// happened in a kernel thread, not a user process.
+//
+// Why this matters: bare hex `rip=0x...` plus `[region=
+// user-canonical]` tells the operator "this fault is in user
+// space" but not WHICH binary. With the DLL table, an rip in
+// the range of `kernel32.dll` reads as exactly that — even
+// before the operator runs an off-box symbolizer.
+void DumpProcessVmInfo()
+{
+    Process* proc = CurrentProcess();
+    if (proc == nullptr)
+    {
+        return;
+    }
+    arch::SerialWrite("  process VM info:\n    pid=");
+    arch::SerialWriteHex(proc->pid);
+    arch::SerialWrite(" name=\"");
+    arch::SerialWrite(proc->name != nullptr ? proc->name : "<noname>");
+    arch::SerialWrite("\"\n");
+
+    mm::AddressSpace* as = proc->as;
+    if (as == nullptr)
+    {
+        arch::SerialWrite("    (no address space — kernel-AS task)\n");
+        return;
+    }
+    arch::SerialWrite("    pml4_phys=");
+    arch::SerialWriteHex(as->pml4_phys);
+    arch::SerialWrite("  regions=");
+    arch::SerialWriteHex(static_cast<u64>(as->region_count));
+    arch::SerialWrite("  budget=");
+    arch::SerialWriteHex(as->frame_budget);
+    arch::SerialWrite("\n");
+
+    // Region span — min / max user VA + total page count. We
+    // deliberately don't print every single mapped page (up to
+    // 1024 of them per process) because the resulting block
+    // would dwarf the rest of the dump. The span + count tells
+    // an operator whether rip / rsp fall inside the mapped
+    // user range; per-page detail is available via shell at
+    // post-mortem time.
+    if (as->region_count > 0)
+    {
+        u64 vmin = ~static_cast<u64>(0);
+        u64 vmax = 0;
+        for (u8 i = 0; i < as->region_count; ++i)
+        {
+            const u64 v = as->regions[i].vaddr;
+            if (v < vmin)
+            {
+                vmin = v;
+            }
+            if (v > vmax)
+            {
+                vmax = v;
+            }
+        }
+        arch::SerialWrite("    vmap span: [");
+        arch::SerialWriteHex(vmin);
+        arch::SerialWrite(" .. ");
+        arch::SerialWriteHex(vmax + 0x1000);
+        arch::SerialWrite(")  pages=");
+        arch::SerialWriteHex(static_cast<u64>(as->region_count));
+        arch::SerialWrite("\n");
+    }
+
+    if (proc->dll_image_count > 0)
+    {
+        arch::SerialWrite("  loaded modules (");
+        arch::SerialWriteHex(proc->dll_image_count);
+        arch::SerialWrite(" DLLs):\n");
+        for (u64 i = 0; i < proc->dll_image_count; ++i)
+        {
+            const DllImage& dll = proc->dll_images[i];
+            const char* name = dll.has_exports ? PeExportsDllName(dll.exports) : nullptr;
+            arch::SerialWrite("    [");
+            arch::SerialWriteHex(dll.base_va);
+            arch::SerialWrite(" .. ");
+            arch::SerialWriteHex(dll.base_va + dll.size);
+            arch::SerialWrite(")  size=");
+            arch::SerialWriteHex(dll.size);
+            arch::SerialWrite("  ");
+            arch::SerialWrite(name != nullptr ? name : "<no export name>");
+            arch::SerialWrite("\n");
+        }
+    }
+}
+
 } // namespace
 
 void DumpPeerCpuSnapshots()
@@ -577,6 +681,7 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
     DumpReturnAddressPointers(rsp);
     DumpLbr();
     sched::DumpCurrentTaskSyscallTrail();
+    DumpProcessVmInfo();
     DumpHeldLocksLocal();
     DumpLogRing();
     DumpInflightScopes();
