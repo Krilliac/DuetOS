@@ -6,11 +6,16 @@
  * DuetOS — user accounts + authentication, v0.
  *
  * Fixed-size in-memory account table. Passwords are stored as
- * salt + iterated FNV-1a 64-bit hashes — not cryptographic, but
- * an order of magnitude better than storing plaintext, and it
- * gives us a named seam to swap a real PBKDF into once kcrypto
- * lands. Every verify path pays the same iteration cost so the
- * wall-clock bound is uniform across good/bad usernames.
+ * `duetos::security::PasswordHashRecord` (PBKDF2-HMAC-SHA256 over
+ * a 16-byte random salt drawn from the kernel entropy pool, with
+ * the default iteration count locked in `password_hash.h`). The
+ * record is the same 56-byte shape that will eventually serialise
+ * to disk once a persistent user table lands — at that point this
+ * file's only change is to read the records from disk instead of
+ * deriving them at boot. Every verify path runs a full PBKDF2
+ * derivation (against either the stored record or a decoy) so the
+ * wall-clock bound is uniform across "user not found", "user found
+ * with wrong password", and "user found with right password".
  *
  * Session model: a single currently-logged-in user (session id +
  * username + admin flag). Terminal and GUI login both flip this
@@ -25,6 +30,12 @@
  *   - No per-user home dirs, no UID/GID mapping into the VFS.
  *     Capability-gated commands use `AuthIsAdmin()` only.
  *   - No login record / lastlog.
+ *
+ * Init ordering: `AuthInit` calls `PasswordHashCreate` while
+ * seeding the built-in admin account, which draws salt bytes from
+ * the kernel entropy pool. `RandomInit` therefore MUST have run
+ * before `AuthInit`. The boot sequence in `kernel/core/main.cpp`
+ * already enforces this ordering.
  *
  * Context: kernel. Mutated from the login and shell paths (both
  * in task context under the compositor lock or serialised by
@@ -73,9 +84,12 @@ AuthRole AuthCurrentRole();
 bool AuthIsAdmin();
 
 /// Verify credentials against the table without mutating session.
-/// Returns true on exact username + password match. The hash
-/// comparison is constant-time against the stored digest length
-/// to avoid a trivial timing oracle on the password field.
+/// Returns true on exact username + password match. Internally
+/// runs a full PBKDF2-HMAC-SHA256 derivation against either the
+/// stored hash record or a decoy record (when the username does
+/// not exist) so the wall-clock cost is independent of which leaf
+/// of the lookup the caller landed on; the final compare is
+/// constant-time across the digest.
 bool AuthVerify(const char* username, const char* password);
 
 /// Verify credentials AND set the session to the matched user.

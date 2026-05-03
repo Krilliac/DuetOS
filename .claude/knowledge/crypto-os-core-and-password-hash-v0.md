@@ -1,7 +1,7 @@
 # Crypto graduates to OS core + password-hash module v0
 
 _Type: Decision + Pattern + Observation._
-_Status: Active. Crypto modules moved out of `kernel/net/wireless/crypto/` to `kernel/crypto/`; new password-hash primitive lays groundwork for the eventual `auth.cpp` overhaul._
+_Status: Active. Crypto modules moved out of `kernel/net/wireless/crypto/` to `kernel/crypto/`; password-hash primitive in place; **`auth.cpp` now consumes it** — the in-memory account table stores `PasswordHashRecord` per row and every verify path runs PBKDF2-HMAC-SHA256 + constant-time compare. User-table-on-disk is the next bounded slice._
 _Last updated: 2026-05-03._
 
 ## What landed
@@ -123,21 +123,63 @@ Boot self-test (`PasswordHashSelfTest`) covers:
   feeding the salt is alive + deterministic chaining works for
   random salts too).
 
-### 4. Why this lays groundwork for `auth.cpp`
+### 4. `auth.cpp` overhaul — landed
 
-`kernel/security/auth.{h,cpp}` today carries hard-coded
-cleartext credentials (`admin/admin`, `guest`). The transition
-to hashed passwords is a one-call swap once a user table exists:
+`kernel/security/auth.{h,cpp}` previously stored a salted
+iterated FNV-1a/64 of each password in 16 fixed-size in-memory
+account rows. As of this slice it stores a
+`duetos::security::PasswordHashRecord` per row instead — the
+same 56-byte shape that will eventually serialise to disk — and
+every verify path runs PBKDF2-HMAC-SHA256 (100 000 iterations
+over a 16-byte random salt) followed by a constant-time
+compare. The FNV constants (`kFnvOffset`, `kFnvPrime`,
+`kHashIterations`) were file-private and have been deleted; no
+external caller knew about them so the API surface is
+unchanged.
 
-- `AuthLoginAttempt(user, password)` → currently does a
-  cleartext `strcmp`. Becomes `PasswordHashVerify(password,
-  password_len, user.stored_record)`.
-- New-user creation calls `PasswordHashCreate` and stores the
-  resulting `PasswordHashRecord`.
-- The user table itself (with rows of name + role +
-  `PasswordHashRecord`) is the next bounded slice. Until that
-  lands the password-hash module sits as a self-tested primitive
-  with no live caller — the boot KAT keeps it honest.
+Concrete changes:
+
+- **`Account` struct** now holds `bool has_password` + a
+  `PasswordHashRecord record`. The 8-byte salt + `u64 hash`
+  pair is gone.
+- **`SetAccountPassword(Account*, const char*)`** is the single
+  internal helper that mutates a slot's credentials. Empty
+  password → `has_password=false`, record zeroed (the guest
+  account uses this). Non-empty → `PasswordHashCreate` derives
+  a fresh record from the kernel entropy pool.
+- **`VerifyPasswordOnAccount(Account*, const char*)`** always
+  runs `PasswordHashVerify` against either the stored record or
+  a file-private decoy record (empty-password accounts), so the
+  wall-clock cost of "wrong password" matches "no password set,
+  caller supplied a non-empty password". The PBKDF2 result is
+  discarded for the no-password case; only an empty supplied
+  password authenticates that case.
+- **`AuthVerify` for unknown user** burns an equivalent PBKDF2
+  cycle against the same decoy record and returns false, so an
+  unknown username doesn't respond faster than a bad password
+  against a real user.
+- **`AuthSelfTest`** retains the four original assertions plus
+  two new ones: a non-empty password is rejected for the
+  empty-password guest, and `AccountView::has_password` reports
+  the right value for both seeded accounts. Total ~6 PBKDF2
+  derivations at 100 000 iterations each (~300 ms boot delta on
+  a modern x86 core); acceptable for v0.
+
+Init ordering: `AuthInit` calls `PasswordHashCreate`, which
+draws salt bytes via `RandomFillBytes`. `kernel/core/main.cpp`
+already runs `RandomInit` (line 593) well before `AuthInit`
+(line 1454); the auth header documents this ordering
+requirement so a future reorganiser doesn't accidentally invert
+it.
+
+What stays out of scope:
+
+- **User-table-on-disk** is the next bounded slice. Until that
+  lands, runtime-added accounts still disappear on reboot and
+  `AuthInit` re-derives the seeded admin record from PBKDF2 +
+  fresh entropy on every boot.
+- **Argon2id** still pending — the `PasswordAlgorithm` enum has
+  the case wired but the algorithm itself is a future module.
 
 ## Verification
 
@@ -161,24 +203,29 @@ to hashed passwords is a one-call swap once a user table exists:
 - `kernel/crypto/pbkdf2.{h,cpp}` — added `Pbkdf2HmacSha256` + 2
   RFC 7914 KAT vectors (~50 LOC delta).
 - `kernel/security/password_hash.{h,cpp}` — new module (~210 LOC).
+- `kernel/security/auth.{h,cpp}` — Account row now embeds a
+  `PasswordHashRecord` instead of `salt[8] + u64 hash`; FNV/64
+  constants removed; `AuthVerify` runs `PasswordHashVerify`
+  through a decoy-record fallback for unknown users +
+  no-password accounts.
 - `kernel/core/main.cpp` — namespace updates + 1 new self-test +
   1 new include.
 - `kernel/net/wireless/eapol.cpp`, `fourway.cpp`, `mlme.cpp`,
   `test/fake_ap.cpp` — `crypto::X` → `duetos::crypto::X`.
 
-Total: 16 file moves + 2 new files + 6 files lightly edited.
-
 ## Follow-up not in this slice
 
 1. **User table on disk**. Persistent storage for accounts (name +
-   role + PasswordHashRecord) so credentials survive reboot. The
-   existing `kernel/security/auth.{h,cpp}` is in-memory + hard-
-   coded; once a user table lands, swap `strcmp` for
-   `PasswordHashVerify`. ~150 LOC + a FAT32-write integration.
+   role + PasswordHashRecord) so credentials survive reboot. With
+   the in-memory `auth.cpp` already speaking `PasswordHashRecord`,
+   the on-disk slice is now a serialise/deserialise plus a
+   FAT32-write integration — no further cryptographic work.
 2. **Argon2id** as `PasswordAlgorithm::Argon2id`. Stronger than
    PBKDF2 but ~1500 LOC + its own KAT vectors. Land when there's
    a real-world reason (e.g. a power-user complaining about GPU
    crackers).
 3. **Account-management shell commands** (`useradd`, `userdel`,
-   `passwd`) wired to the new module. Today these don't exist;
-   credentials live in a hardcoded array.
+   `passwd`) already exist in `kernel/shell/shell_security.cpp`
+   and now transparently produce / verify
+   `PasswordHashRecord`-backed accounts via the unchanged
+   `Auth*` API. No further wiring needed.
