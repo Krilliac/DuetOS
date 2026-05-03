@@ -63,6 +63,20 @@ namespace duetos::security
 inline constexpr u32 kPasswordSaltBytes = 16;
 inline constexpr u32 kPasswordHashBytes = 32;
 inline constexpr u32 kPasswordDefaultIterations = 100'000u;
+// Under TCG / KVM / any VMM, the kernel boots ~10× slower per
+// instruction and (in this build) without SIMD acceleration. With
+// the production iteration count, seeding `admin` + `guest` plus
+// the auth + brute-force self-tests fires ~10× PBKDF2(100 000)
+// during boot — which costs ~3-6 wall-seconds each on TCG without
+// SSE, summing to a multi-minute boot delay before the kernel
+// reaches its first interactive prompt. Using a much smaller
+// count under emulation keeps the algorithm exercised + the
+// self-tests valid (the produced hash is still PBKDF2-HMAC-SHA256
+// against the seeded salt) while shrinking the per-call cost
+// 100×. Bare metal stays on the full count — IsEmulator() is the
+// runtime gate.
+inline constexpr u32 kPasswordEmulatorIterations = 1'000u;
+u32 PasswordDefaultIterations();
 
 enum class PasswordAlgorithm : u32
 {

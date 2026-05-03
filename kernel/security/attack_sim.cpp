@@ -4,6 +4,7 @@
 #include "log/klog.h"
 #include "diag/runtime_checker.h"
 #include "drivers/storage/block.h"
+#include "mm/paging.h"
 #include "proc/process.h"
 #include "security/canary.h"
 #include "util/string.h"
@@ -332,6 +333,7 @@ void RestoreEferNxe()
 // The byte is restored before the next attack runs, so the spot
 // hash is back to baseline for subsequent suite entries.
 extern "C" const u8 _text_start[];
+extern "C" const u8 _text_end[];
 constexpr u64 kTextPatchOffset = 0x40;
 constinit u8 g_saved_text_byte = 0;
 
@@ -655,6 +657,350 @@ constinit duetos::u64 g_saved_stack_canary = 0;
         __stack_chk_guard = g_saved_stack_canary;
 }
 
+// ---- function branch NOP-patch (cap-gate bypass) ----
+//
+// Models the most surgical kernel-rootkit move on the menu: don't
+// redirect a vector, don't replace a whole function, just NOP the
+// conditional jump *inside* a gate. The gate's cap test still runs
+// and still produces ZF/CF the same way — but the `jcc` that turns
+// that flag into a deny path is gone, so the success path is taken
+// regardless. Every caller passes the gate.
+//
+// Real-world parallel: kernel/syscall/syscall.cpp:458 reads
+//     if (!SyscallGate(num, dispatch_proc).has_value()) return -1;
+// which compiles to a `test`+`jcc` pair downstream of the `call
+// SyscallGate` site. NOPing that two-byte short `jcc` would turn
+// the central capability gate into an unconditional accept on every
+// syscall — defeating the whole `kCap*` model regardless of how
+// correctly each handler honours its declared cap.
+//
+// We define the gated function ourselves in a global asm block, for
+// three reasons:
+//   1. We own the exact byte layout. No surprise `cmov` collapsing
+//      the branch (which GCC's -O2 cheerfully does for short bodies).
+//   2. The patch site is a labeled symbol — no opcode scanner, no
+//      heuristic — so the probe is deterministic across rebuilds.
+//   3. The function lives in this TU's slice of `.text`, which links
+//      in the middle of the kernel image. That's the *interesting*
+//      placement: it surfaces the gap below.
+//
+// EXPECTED RED-TEAM FINDING: `ComputeTextSpotHash` (see
+// kernel/diag/runtime_checker.cpp:801) only FNV-hashes the first
+// 4 KiB and last 4 KiB of `.text`. A patch in the middle is
+// invisible to it. So this attack reports `FailNoDetect` — and that
+// FailNoDetect is the *payload* of the slice, not a regression. It
+// motivates the next defensive slice: a full-text or rolling-page
+// content hash (or, better, a CR0.WP-write-protected `.text` region
+// with a periodic re-verify against the load-time digest), which a
+// future runtime-checker iteration will own.
+//
+// We log `BYPASS LANDED` separately so the operator can see that
+// the *attack* worked (gate flipped from -1 to 0) even when the
+// detector misses the *modification* (no `KernelTextModified` bump).
+
+extern "C" i32 AttackSimGatedAccess(u64 fake_caps, u64 cap_bit);
+extern "C" const u8 AttackSimGatedAccess_jcc[];
+
+asm(".pushsection .text\n"
+    ".global AttackSimGatedAccess\n"
+    ".global AttackSimGatedAccess_jcc\n"
+    ".type AttackSimGatedAccess, @function\n"
+    ".balign 64\n"
+    "AttackSimGatedAccess:\n"
+    "    test %rsi, %rdi\n"
+    "AttackSimGatedAccess_jcc:\n"
+    "    je AttackSimGatedAccess_fail\n"
+    "    xor %eax, %eax\n"
+    "    ret\n"
+    "AttackSimGatedAccess_fail:\n"
+    "    mov $-1, %eax\n"
+    "    ret\n"
+    ".size AttackSimGatedAccess, . - AttackSimGatedAccess\n"
+    ".popsection\n");
+
+constinit u8 g_saved_branch_byte0 = 0;
+constinit u8 g_saved_branch_byte1 = 0;
+constinit i32 g_branch_baseline_rc = 1; // sentinel — neither -1 nor 0
+constinit i32 g_branch_post_rc = 1;
+constinit u64 g_branch_patch_offset = 0;
+constinit bool g_branch_in_spot_window = false;
+
+// Mirrors the head/tail-only window inside ComputeTextSpotHash. If
+// the patch address lands here, the existing detector should fire;
+// otherwise the modification is invisible to the current spot hash.
+bool BranchPatchInSpotWindow(u64 patch_va)
+{
+    constexpr u64 kSpotBytes = 4096;
+    const u64 ts = reinterpret_cast<u64>(_text_start);
+    const u64 te = reinterpret_cast<u64>(_text_end);
+    if (patch_va < ts || patch_va >= te)
+        return false;
+    const u64 size = te - ts;
+    const u64 off = patch_va - ts;
+    if (off < kSpotBytes)
+        return true;
+    if (size > 2 * kSpotBytes && off >= size - kSpotBytes)
+        return true;
+    return false;
+}
+
+void AttackBranchNopPatch()
+{
+    auto* p = const_cast<u8*>(AttackSimGatedAccess_jcc);
+    g_branch_patch_offset = reinterpret_cast<u64>(p) - reinterpret_cast<u64>(_text_start);
+    g_branch_in_spot_window = BranchPatchInSpotWindow(reinterpret_cast<u64>(p));
+
+    // Baseline: caps=0, asking for cap_bit=1 → gate denies → -1.
+    // Done before the patch so we have an honest "this gate works"
+    // anchor for the post-patch comparison.
+    g_branch_baseline_rc = AttackSimGatedAccess(0, 1);
+
+    u64 rflags;
+    asm volatile("pushfq; pop %0" : "=r"(rflags));
+    asm volatile("cli");
+    const u64 cr0 = ReadCr0();
+    WriteCr0(cr0 & ~kCr0Wp);
+    g_saved_branch_byte0 = p[0];
+    g_saved_branch_byte1 = p[1];
+    p[0] = 0x90; // NOP
+    p[1] = 0x90; // NOP
+    // Intel SDM Vol 3 §8.1.3: a serializing instruction is required
+    // between modifying code and executing the modified bytes on
+    // the same CPU. cpuid is the canonical full serializer.
+    asm volatile("xor %%eax, %%eax; cpuid" : : : "eax", "ebx", "ecx", "edx");
+    WriteCr0(cr0);
+    if ((rflags & kRflagsIf) != 0)
+        asm volatile("sti");
+
+    // Same call, same args: caps=0, cap_bit=1. The `test` still
+    // sets ZF=1, but with the `jcc` NOPed the success path is
+    // taken unconditionally. Returns 0 — gate bypassed.
+    g_branch_post_rc = AttackSimGatedAccess(0, 1);
+
+    arch::SerialWrite("[attacksim]   branch-nop: patch_off=0x");
+    arch::SerialWriteHex(g_branch_patch_offset);
+    if (g_branch_in_spot_window)
+        arch::SerialWrite(" (HEAD/TAIL .text — spot hash should detect)\n");
+    else
+        arch::SerialWrite(" (MIDDLE .text — outside spot hash window)\n");
+    arch::SerialWrite("[attacksim]   branch-nop: baseline rc=");
+    arch::SerialWriteHex(static_cast<u64>(static_cast<u32>(g_branch_baseline_rc)));
+    arch::SerialWrite(" post-patch rc=");
+    arch::SerialWriteHex(static_cast<u64>(static_cast<u32>(g_branch_post_rc)));
+    if (g_branch_baseline_rc == -1 && g_branch_post_rc == 0)
+        arch::SerialWrite("\n[attacksim]   branch-nop: BYPASS LANDED — cap-gate flipped open\n");
+    else
+        arch::SerialWrite("\n[attacksim]   branch-nop: bypass did NOT land — patch ineffective\n");
+}
+
+void RestoreBranchNopPatch()
+{
+    auto* p = const_cast<u8*>(AttackSimGatedAccess_jcc);
+    u64 rflags;
+    asm volatile("pushfq; pop %0" : "=r"(rflags));
+    asm volatile("cli");
+    const u64 cr0 = ReadCr0();
+    WriteCr0(cr0 & ~kCr0Wp);
+    p[0] = g_saved_branch_byte0;
+    p[1] = g_saved_branch_byte1;
+    asm volatile("xor %%eax, %%eax; cpuid" : : : "eax", "ebx", "ecx", "edx");
+    WriteCr0(cr0);
+    if ((rflags & kRflagsIf) != 0)
+        asm volatile("sti");
+}
+
+// ====================================================================
+// Attack: saved-RIP overwrite (return-address smash on a deep frame)
+// ====================================================================
+//
+// Walks two RBP links back from this function's own frame to find
+// `AttackSimRun`'s saved-RIP slot — i.e. the address inside the
+// suite's caller that AttackSimRun will eventually return to.
+// Overwrites it with a sentinel non-`.text` value, force-scans
+// (the detector finds the bad RIP while walking the active RBP
+// chain), then restores before any code unwinds through it.
+//
+// Why two frames back, not one: corrupting `RunAttack`'s saved
+// RIP would make `RunAttack` itself crash on return, including
+// the rest of `RunAttack`'s body that runs the post-attack scan
+// + restore. Two frames back targets the suite-level frame,
+// which we don't return through until the entire suite finishes
+// — by which point Restore has already fixed it.
+//
+// `[[gnu::noinline, gnu::no_stack_protector]]` keeps the frame
+// layout deterministic: noinline so the function exists as a
+// real frame, no_stack_protector so the prologue doesn't read
+// `__stack_chk_guard` (which we don't want to interact with on
+// this path).
+//
+// `-fno-omit-frame-pointer` is set in the kernel build, so every
+// kernel frame maintains the RBP chain we walk.
+
+constinit u64* g_saved_rip_slot = nullptr;
+constinit u64 g_saved_rip_value = 0;
+
+[[gnu::noinline, gnu::no_stack_protector]] void AttackSavedRipOverwrite()
+{
+    u64* my_rbp;
+    asm volatile("mov %%rbp, %0" : "=r"(my_rbp));
+    // Frame chain (innermost first):
+    //   *my_rbp        = RunAttack's RBP
+    //   *my_rbp + 8    = saved RIP of THIS function (= addr inside RunAttack)
+    //   **my_rbp       = AttackSimRun's RBP
+    //   **my_rbp + 8   = saved RIP of RunAttack (= addr inside AttackSimRun)
+    //   ***my_rbp + 8  = saved RIP of AttackSimRun (= addr inside its caller)
+    //
+    // We target the AttackSimRun saved-RIP slot. That's two RBP
+    // walks back, then +1 word for the saved RIP.
+    u64* run_attack_rbp = reinterpret_cast<u64*>(my_rbp[0]);
+    u64* attack_sim_run_rbp = reinterpret_cast<u64*>(run_attack_rbp[0]);
+    g_saved_rip_slot = attack_sim_run_rbp + 1;
+    g_saved_rip_value = *g_saved_rip_slot;
+    // Sentinel chosen so it's: (a) clearly non-canonical text,
+    // (b) recognisable in a panic dump if Restore ever fails to
+    // run, (c) not a valid mapping so any actual return through
+    // it surfaces as a #PF rather than wandering execution.
+    *g_saved_rip_slot = 0x0000'BAD0'C0DE'0001ULL;
+}
+
+[[gnu::noinline, gnu::no_stack_protector]] void RestoreSavedRipOverwrite()
+{
+    if (g_saved_rip_slot != nullptr)
+    {
+        *g_saved_rip_slot = g_saved_rip_value;
+        g_saved_rip_slot = nullptr;
+    }
+}
+
+// ====================================================================
+// Attack: per-page PTE W^X flip
+// ====================================================================
+//
+// Pick the very page the runtime checker baselines as its head
+// `.rodata` slot, flip its NX bit off + W bit on, force-scan,
+// restore. Distinct from the `AttackKernelTextPatch` byte-level
+// .text patch in two ways:
+//   1. .text patch needs CR0.WP toggle; this needs no global CR
+//      flip — just a single PTE-flag rewrite.
+//   2. .text patch lights up `KernelTextModified`; this is invisible
+//      to the .text spot/full hash detector and to the `Cr0WpCleared`
+//      detector — only the new per-page PTE check fires.
+//
+// Real-world parallel: the cleanest "make `.rodata` writable"
+// rootkit move on a kernel without enforced-RO-data is exactly
+// this — flip the page attribute, scribble whatever you want,
+// flip back. No CR0.WP toggle, no IPI shootdown to peer CPUs
+// because PTE writes are private to the writing CPU's TLB until
+// the next reload.
+
+extern "C" const u8 _rodata_start[];
+
+constinit u64 g_pte_attack_va = 0;
+constinit u64 g_pte_saved_attrs = 0;
+
+void AttackPteFlagsFlip()
+{
+    g_pte_attack_va = reinterpret_cast<u64>(_rodata_start) & ~0xFFFULL;
+    g_pte_saved_attrs = mm::GetPteFlags4K(g_pte_attack_va);
+    if (g_pte_saved_attrs == 0)
+    {
+        arch::SerialWrite("[attacksim]   pte-flip: target PTE not 4K-resolvable; skipping\n");
+        return;
+    }
+    // Drop the NX bit + add Writable. In the process we also
+    // strip every other attribute except Present — that's enough
+    // to prove the detector can spot the drift without us
+    // pretending to keep cache / global / accessed bits stable.
+    constexpr u64 kNewFlags = mm::kPagePresent | mm::kPageWritable;
+    mm::SetPteFlags4K(g_pte_attack_va, kNewFlags);
+}
+
+void RestorePteFlagsFlip()
+{
+    if (g_pte_attack_va != 0 && g_pte_saved_attrs != 0)
+    {
+        // `g_pte_saved_attrs` includes the high NX bit. Re-OR
+        // `kPagePresent` defensively — `SetPteFlags4K` already
+        // does it, but the explicit OR keeps the call site
+        // readable.
+        mm::SetPteFlags4K(g_pte_attack_va, g_pte_saved_attrs | mm::kPagePresent);
+        g_pte_attack_va = 0;
+        g_pte_saved_attrs = 0;
+    }
+}
+
+} // namespace
+
+// ====================================================================
+// Synthetic function-pointer table + AttackSimVtableHash.
+//
+// Kept at outer `duetos::security` scope (not in the anonymous
+// namespace) so `runtime_checker.cpp` can reach
+// `AttackSimVtableHash` via a plain `extern "C"` declaration —
+// no `<security/...>` header dependency from the diag layer.
+//
+// The table models a kernel dispatch table — `driver_ops`,
+// `bus_ops`, a syscall shim, etc. Real rootkits prefer flipping
+// one slot of such a table over patching the called function,
+// because dispatch-table writes are quieter (no `.text` modification,
+// no CR0.WP toggle). We model this by sitting in writable data
+// and letting the attack flip a slot. The detector hashes the
+// table bytes on every scan; a single-slot rewrite changes the
+// hash.
+// ====================================================================
+
+void AttackSimVtableEntry0() {}
+void AttackSimVtableEntry1() {}
+void AttackSimVtableEntry2() {}
+void AttackSimVtableEntry3() {}
+
+using AttackSimVtableFn = void (*)();
+constinit AttackSimVtableFn g_attack_sim_vtable[4] = {
+    AttackSimVtableEntry0,
+    AttackSimVtableEntry1,
+    AttackSimVtableEntry2,
+    AttackSimVtableEntry3,
+};
+
+} // namespace duetos::security
+
+extern "C" duetos::u64 AttackSimVtableHash()
+{
+    constexpr duetos::u64 kFnvOffset = 0xcbf29ce484222325ULL;
+    constexpr duetos::u64 kFnvPrime = 0x100000001b3ULL;
+    duetos::u64 h = kFnvOffset;
+    const duetos::u8* p = reinterpret_cast<const duetos::u8*>(&::duetos::security::g_attack_sim_vtable);
+    for (duetos::u64 i = 0; i < sizeof(::duetos::security::g_attack_sim_vtable); ++i)
+    {
+        h ^= p[i];
+        h *= kFnvPrime;
+    }
+    return h;
+}
+
+namespace duetos::security
+{
+namespace
+{
+
+constinit AttackSimVtableFn g_saved_vtable_slot = nullptr;
+constexpr u32 kVtableAttackSlot = 2;
+
+void AttackVtableSlotOverwrite()
+{
+    g_saved_vtable_slot = g_attack_sim_vtable[kVtableAttackSlot];
+    g_attack_sim_vtable[kVtableAttackSlot] = reinterpret_cast<AttackSimVtableFn>(0xDEAD'BEEF'CAFE'BABEULL);
+}
+
+void RestoreVtableSlotOverwrite()
+{
+    if (g_saved_vtable_slot != nullptr)
+    {
+        g_attack_sim_vtable[kVtableAttackSlot] = g_saved_vtable_slot;
+        g_saved_vtable_slot = nullptr;
+    }
+}
+
 } // namespace
 
 const char* AttackOutcomeName(AttackOutcome o)
@@ -710,7 +1056,7 @@ void AttackSimRun()
     // re-assert the cleared bit on the next scan; our explicit
     // Restore is a safety net. Kernel-text patch holds IRQs off
     // across its WP-clear window — see AttackKernelTextPatch.
-    static constinit const Spec kSpecs[16] = {
+    static constinit const Spec kSpecs[20] = {
         {"Bootkit LBA 0 write", "BootSectorModified", core::HealthIssue::BootSectorModified, nullptr, AttackBootSector,
          RestoreBootSector},
         {"IDT hijack", "IdtModified", core::HealthIssue::IdtModified, nullptr, AttackIdt, RestoreIdt},
@@ -741,6 +1087,34 @@ void AttackSimRun()
          nullptr, AttackPersistenceDrop, RestorePersistenceDrop},
         {"Stack canary defang", "StackCanaryZero", core::HealthIssue::StackCanaryZero, nullptr, AttackStackCanaryZero,
          RestoreStackCanaryZero},
+        // Function-branch NOP patch on a synthetic cap-style gate.
+        // Honest red-team finding: ComputeTextSpotHash only inspects
+        // the first/last 4 KiB of `.text`, and AttackSimGatedAccess
+        // links into the middle, so KernelTextModified is expected
+        // NOT to fire. The slice's deliverable is the FailNoDetect
+        // outcome plus the BYPASS-LANDED log line proving the cap
+        // gate was actually flipped open. Ticketed in
+        // `.claude/knowledge/branch-nop-attack-v0.md` for the
+        // follow-up "full-text or rolling-page hash" detector slice.
+        {"Function branch NOP patch (cap-gate bypass)", "KernelTextModified", core::HealthIssue::KernelTextModified,
+         nullptr, AttackBranchNopPatch, RestoreBranchNopPatch},
+        // Function-pointer dispatch table slot overwrite. Models
+        // a rootkit hooking `driver_ops` / `bus_ops` by flipping
+        // one slot to its shim pointer. Detector hashes the
+        // synthetic `g_attack_sim_vtable` on every scan.
+        {"Function-pointer table slot overwrite", "KernelFnTableModified", core::HealthIssue::KernelFnTableModified,
+         nullptr, AttackVtableSlotOverwrite, RestoreVtableSlotOverwrite},
+        // Saved-RIP overwrite. Walks two RBP frames back from the
+        // attack's own frame (= AttackSimRun's saved RIP slot) and
+        // writes a sentinel non-`.text` value. Detector walks the
+        // active RBP chain at scan time.
+        {"Saved RIP overwrite (return-address smash)", "TaskStackRipCorrupt", core::HealthIssue::TaskStackRipCorrupt,
+         nullptr, AttackSavedRipOverwrite, RestoreSavedRipOverwrite},
+        // Per-page PTE flag flip. Drops NX + adds W on the head
+        // `.rodata` page. Detector compares the live PTE attribute
+        // tail against the per-page baseline captured at boot.
+        {"PTE W^X flip (per-page attribute rewrite)", "KernelPteWxFlipped", core::HealthIssue::KernelPteWxFlipped,
+         nullptr, AttackPteFlagsFlip, RestorePteFlagsFlip},
         // Deferred — each needs its own slice with bespoke handling:
         //
         //   "Stack canary defang"  — zeroing __stack_chk_guard while

@@ -221,6 +221,34 @@ enum class HealthIssue : u32
     // that survived a reboot.
     PersistenceDropDetected,
 
+    // A monitored kernel function-pointer table drifted from its
+    // boot-time hash. Real-world parallel: a rootkit overwrites a
+    // single slot in `driver_ops` / `bus_ops` / a syscall dispatch
+    // shim so calls through that pointer land at the rootkit's
+    // hook. The detector hashes registered tables on every scan;
+    // a single-byte slot rewrite changes the hash.
+    KernelFnTableModified,
+
+    // A saved return address on the current kernel stack pointed
+    // outside the kernel `.text` range. Either a stack-smash that
+    // overwrote a frame's saved RIP with attacker-controlled data,
+    // or a wild-pointer store that scribbled a saved RIP slot. The
+    // next return through that frame would either crash or — if
+    // the attacker chose a controllable target — divert kernel
+    // control flow. Detected by walking the active RBP chain at
+    // scan time.
+    TaskStackRipCorrupt,
+
+    // A monitored kernel page's page-table-entry attribute bits
+    // diverged from baseline (e.g. a `.rodata` page that was
+    // baselined NX+RO is now NX-clear or W-set). Real-world
+    // parallel: a rootkit flips a page from RX to RWX so it can
+    // hot-patch executable bytes without paying the CR0.WP /
+    // direct-map costs the simpler `.text` patch attack does.
+    // The CR0.WP detector cannot see this — that bit is global,
+    // PTE attributes are per-page.
+    KernelPteWxFlipped,
+
     // Count sentinel
     Count,
 };

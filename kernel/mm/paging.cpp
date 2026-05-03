@@ -810,6 +810,20 @@ void SetPteFlags4K(u64 virt, u64 new_flags)
     Invlpg(virt);
 }
 
+u64 GetPteFlags4K(u64 virt)
+{
+    // 4 KiB read-only sibling of `SetPteFlags4K`. Walks down the
+    // active PML4 the same way; on any "can't reach a leaf entry"
+    // condition (unmapped, inside a still-2 MiB-PS region) returns
+    // 0 instead of panicking. The runtime checker uses 0 as the
+    // sentinel for "skip this slot" so an early baseline against
+    // a not-yet-split address doesn't crash the boot.
+    u64* pte = WalkToPte(g_pml4, virt, /*create=*/false);
+    if (pte == nullptr)
+        return 0;
+    return *pte & ~kAddrMask; // physical-frame bits stripped, flags only
+}
+
 void ProtectKernelImage()
 {
     KLOG_TRACE_SCOPE("mm/paging", "ProtectKernelImage");
