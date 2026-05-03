@@ -377,6 +377,13 @@ struct Process
         char path[64];
     };
     static constexpr u8 kLinuxFdFlagPendingCreate = 0x01;
+    // Canary flag: set at open / O_CREAT time when the path
+    // matched `security::CanaryMatchesPath`. Read on every
+    // sys_write (and copy_file_range / sendfile sinks) so an
+    // in-place overwrite of an existing canary file trips the
+    // wall even though the syscall doesn't re-evaluate the
+    // path. Mirrors `Win32FileHandle::is_canary`.
+    static constexpr u8 kLinuxFdFlagCanary = 0x02;
     LinuxFd linux_fds[16];
 
     // Linux-ABI brk heap. Meaningful only when abi_flavor ==
@@ -494,6 +501,14 @@ struct Process
         u32 fat32_volume_idx;            // valid iff kind == Fat32
         fs::fat32::DirEntry fat32_entry; // valid iff kind == Fat32 (snapshot at open time)
         u64 cursor;                      // current read position in bytes
+        // Canary flag stamped at open / create time when the
+        // resolved path matched `security::CanaryMatchesPath` or
+        // `CanaryMatchesSuspiciousExtension`. Read on every
+        // SYS_FILE_WRITE so an in-place overwrite of an existing
+        // canary file (which doesn't carry a path string into
+        // the write call) still trips the wall. Stamped once at
+        // open; never cleared (handles are short-lived).
+        bool is_canary;
     };
     static constexpr u64 kWin32HandleCap = 16;
     static constexpr u64 kWin32HandleBase = 0x100;

@@ -889,6 +889,93 @@ void SpawnHostileProbe()
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-hostile-syscall", proc);
 }
 
+// Cross-PID VM-write probe. A sandbox process without kCapDebug
+// spams `SYS_PROCESS_OPEN(pid=1)` — the entry point a malicious
+// PE would use to grab a handle to another process before
+// dropping into NtWriteVirtualMemory / NtSuspendThread /
+// NtSetContextThread (the classic "thread hijack" sequence).
+// Each call hits the kCapDebug gate, returns 0 (no handle),
+// bumps `sandbox_denials`, and after kSandboxDenialKillThreshold
+// the task is reaped via `KillReason::SandboxDenialThreshold`.
+//
+// What this proves: a ring-3 attacker that doesn't already have
+// kCapDebug cannot OPEN another process — and without an open
+// handle, every downstream cross-process syscall (VM_WRITE,
+// THREAD_SUSPEND, THREAD_SET_CONTEXT) is unreachable. Closes
+// the redteam matrix gap on cross-process tampering.
+//
+// Payload (16 bytes):
+//   offset 0x00: pause                                    (2 bytes)
+//   offset 0x02: mov eax, 131  (SYS_PROCESS_OPEN = 0x83)  (5 bytes)
+//   offset 0x07: mov edi, 1    (target pid = 1)           (5 bytes)
+//   offset 0x0C: int 0x80      (denied by kCapDebug gate) (2 bytes)
+//   offset 0x0E: jmp -14       (back to mov eax)          (2 bytes)
+//
+// next_rip after jmp = 0x10. disp = target(0x02) - 0x10 = -14 = 0xF2.
+//
+// clang-format off
+constexpr u8 kCrossPidProbeBytes[] = {
+    0xF3, 0x90,                                                   // pause
+    0xB8, 0x83, 0x00, 0x00, 0x00,                                 // mov eax, 131 (SYS_PROCESS_OPEN)
+    0xBF, 0x01, 0x00, 0x00, 0x00,                                 // mov edi, 1   (target pid)
+    0xCD, 0x80,                                                   // int 0x80
+    0xEB, 0xF2,                                                   // jmp -14
+};
+// clang-format on
+
+void SpawnCrossPidProbe()
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    using namespace duetos::mm;
+
+    const u64 code_va = AslrPickBase();
+    const u64 stack_va = code_va + kStackOffsetFromCode;
+
+    AddressSpace* as = AddressSpaceCreate(kFrameBudgetSandbox);
+    if (as == nullptr)
+    {
+        Panic("core/ring3", "AS create failed for cross-pid probe");
+    }
+    const PhysAddr code_frame = AllocateFrame();
+    if (code_frame == kNullFrame)
+    {
+        Panic("core/ring3", "code frame alloc failed for cross-pid probe");
+    }
+    auto* code_direct = static_cast<u8*>(PhysToVirt(code_frame));
+    for (u64 i = 0; i < mm::kPageSize; ++i)
+    {
+        code_direct[i] = 0;
+    }
+    for (u64 i = 0; i < sizeof(kCrossPidProbeBytes); ++i)
+    {
+        code_direct[i] = kCrossPidProbeBytes[i];
+    }
+    const PhysAddr stack_frame = AllocateFrame();
+    if (stack_frame == kNullFrame)
+    {
+        Panic("core/ring3", "stack frame alloc failed for cross-pid probe");
+    }
+    AddressSpaceMapUserPage(as, code_va, code_frame, kPagePresent | kPageUser);
+    AddressSpaceMapUserPage(as, stack_va, stack_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
+
+    // Empty caps — kCapDebug is the gate we're testing. Without
+    // it SYS_PROCESS_OPEN returns 0; after 100 such denials the
+    // sandbox-denial threshold kills the task. PASS criterion:
+    // [sandbox] pid=N hit 0x64 denials (last cap=Debug) — no
+    // foreign-process handle was ever returned.
+    Process* proc = ProcessCreate("ring3-cross-pid-probe", as, CapSetEmpty(), fs::RamfsSandboxRoot(), code_va, stack_va,
+                                  kTickBudgetSandbox);
+    if (proc == nullptr)
+    {
+        Panic("core/ring3", "ProcessCreate failed for cross-pid probe");
+    }
+    SerialWrite("[ring3] queued cross-pid probe pid=");
+    SerialWriteHex(proc->pid);
+    SerialWrite(" (SYS_PROCESS_OPEN flood, expect kCapDebug denials)\n");
+    sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-cross-pid-probe", proc);
+}
+
 // Dedicated CPU-hog payload: spins in a tight `jmp $` loop so the
 // scheduler's tick-budget check eventually triggers. A sandbox with
 // a 50-tick budget reaches [sched] tick budget exhausted after
@@ -2573,6 +2660,11 @@ bool SpawnOnDemand(const char* kind)
         SpawnHostileProbe();
         return true;
     }
+    if (LocalStrEq(kind, "crosspid"))
+    {
+        SpawnCrossPidProbe();
+        return true;
+    }
     if (LocalStrEq(kind, "dropcaps"))
     {
         SpawnDropcapsProbe();
@@ -2738,6 +2830,13 @@ void StartRing3SmokeTask()
         // After 100 cap denials, the sandbox-denial threshold kills
         // the task. Boot log shows `[sandbox] pid=N hit 100 denials`.
         SpawnHostileProbe();
+        // Cross-PID probe: retries SYS_PROCESS_OPEN(pid=1) forever
+        // without kCapDebug. The cap gate denies every call; after
+        // 100 denials the task is reaped. Closes the redteam matrix
+        // gap on classic Win32 cross-process tampering (any
+        // attacker reaching VM_WRITE / SUSPEND / SET_CONTEXT must
+        // first OPEN, and OPEN is gated).
+        SpawnCrossPidProbe();
         // Dropcaps demo: trusted task drops its caps mid-flight and
         // verifies subsequent SYS_WRITE is denied.
         SpawnDropcapsProbe();

@@ -166,6 +166,7 @@ enum class KillReason : u8
     UserKill = 3,               // shell `kill <pid>` / operator-initiated
     FsWriteRateExceeded = 4,    // ransomware-style mass file-write flood
     CanaryFileTouched = 5,      // attempted access to a canary / honey path
+    PersistenceDrop = 6,        // wrote to autostart-equivalent path under Deny mode
     // Add new reasons at the end.
 };
 

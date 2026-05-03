@@ -208,6 +208,7 @@
 #include "mm/paging.h"
 #include "sched/sched.h"
 #include "security/attack_sim.h"
+#include "security/canary.h"
 #include "security/guard.h"
 #include "security/pentest_gui.h"
 #include "test/smoke_profile.h"
@@ -2030,6 +2031,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWrite("[boot] Starting security guard.\n");
     duetos::security::GuardInit();
     DUETOS_BOOT_SELFTEST(duetos::security::GuardSelfTest());
+
+    // Canary file-self-defense init: seed per-boot dynamic
+    // canary names from kernel entropy. MUST follow RandomInit
+    // (already on the boot path above). Without this the
+    // dynamic-canary slots stay empty and only the static
+    // registry matches.
+    SerialWrite("[boot] Seeding per-boot canary names.\n");
+    duetos::security::CanaryInit();
 
     DUETOS_BOOT_SELFTEST(duetos::fs::TmpFsSelfTest());
 

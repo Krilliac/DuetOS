@@ -177,6 +177,8 @@ i64 DoUnlink(u64 user_path)
     // canary check must live on every ABI's mutation path.
     if (::duetos::security::CanaryCheck(leaf, "unlink"))
         return kEACCES;
+    if (::duetos::security::PersistenceCheck(leaf, "unlink"))
+        return kEACCES;
     const auto* v = fs::fat32::Fat32Volume(0);
     if (v == nullptr)
         return kENOENT;
@@ -272,6 +274,10 @@ i64 DoRename(u64 user_old, u64 user_new)
     if (::duetos::security::CanaryCheck(old_leaf, "rename-src"))
         return kEACCES;
     if (::duetos::security::CanaryCheck(new_leaf, "rename-dst"))
+        return kEACCES;
+    if (::duetos::security::PersistenceCheck(old_leaf, "rename-src"))
+        return kEACCES;
+    if (::duetos::security::PersistenceCheck(new_leaf, "rename-dst"))
         return kEACCES;
     const auto* v = fs::fat32::Fat32Volume(0);
     if (v == nullptr)

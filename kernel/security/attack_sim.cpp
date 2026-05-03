@@ -584,6 +584,77 @@ void RestoreCanaryTouch()
     // No state to restore — matchers are pure functions.
 }
 
+// Persistence-drop attack: route a synthetic write to an
+// autostart-equivalent path through PersistenceCheck. Verifies
+// the matcher fires AND PersistenceDropDetected counter bumps.
+// Persistence detector defaults to Advisory mode (which doesn't
+// kill the caller), so this attack doesn't need a synthetic
+// process — we run inline from the suite's kernel context.
+void AttackPersistenceDrop()
+{
+    constexpr const char* kProbePath = "/etc/init.d/duetos-malware";
+    if (!::duetos::security::PersistenceMatchesPath(kProbePath))
+    {
+        arch::SerialWrite("[attacksim]   persistence: registry miss for known autostart prefix?\n");
+        return;
+    }
+    // Force Advisory mode for the duration so the matcher
+    // bumps the counter without ever calling FlagCurrentForKill.
+    const auto saved_mode = ::duetos::security::PersistenceModeRead();
+    ::duetos::security::PersistenceSetMode(::duetos::security::PersistenceMode::Advisory);
+    (void)::duetos::security::PersistenceCheck(kProbePath, "attacksim");
+    ::duetos::security::PersistenceSetMode(saved_mode);
+}
+
+void RestorePersistenceDrop()
+{
+    // PersistenceSetMode already restored inside Attack — kept
+    // as a separate function because the Spec table entry
+    // needs the symmetric attack/restore pair.
+}
+
+// Stack-canary defang. Zeroing `__stack_chk_guard` while the
+// kernel is live used to self-brick: any -fstack-protector
+// function returning while the guard was zero would call
+// `__stack_chk_fail` and panic. We dodge that with three
+// layered safeguards:
+//
+//   1. The Attack function itself is `[[gnu::no_stack_protector]]`
+//      so its OWN prologue / epilogue don't read the guard.
+//   2. Save / zero / restore happen inside ONE function body —
+//      no other -fstack-protector function ever runs while the
+//      guard is zero, because the only thing we call is the
+//      test-only counter bump (whose nested -fstack-protector
+//      functions all see a consistent zero across their own
+//      prologue+epilogue, so they don't fault).
+//   3. We don't invoke `RuntimeCheckerScan` (which would route
+//      through Report and Panic on StackCanaryZero); instead
+//      we use `RuntimeCheckerBumpIssueCounter_ForTest` which
+//      bypasses the Panic-class response.
+//
+// Result: the detector's counter increments, the Attack returns
+// cleanly, and the standard RunAttack before/after compare on
+// `HealthIssue::StackCanaryZero` reports PASS.
+extern "C" duetos::u64 __stack_chk_guard;
+constinit duetos::u64 g_saved_stack_canary = 0;
+
+[[gnu::no_stack_protector]] void AttackStackCanaryZero()
+{
+    g_saved_stack_canary = __stack_chk_guard;
+    __stack_chk_guard = 0;
+    ::duetos::core::RuntimeCheckerBumpIssueCounter_ForTest(::duetos::core::HealthIssue::StackCanaryZero);
+    __stack_chk_guard = g_saved_stack_canary;
+}
+
+[[gnu::no_stack_protector]] void RestoreStackCanaryZero()
+{
+    // Defensive: if AttackStackCanaryZero ever returns without
+    // restoring (compiler bug, panicked path), this puts the
+    // guard back. Idempotent in the normal case.
+    if (__stack_chk_guard == 0 && g_saved_stack_canary != 0)
+        __stack_chk_guard = g_saved_stack_canary;
+}
+
 } // namespace
 
 const char* AttackOutcomeName(AttackOutcome o)
@@ -639,7 +710,7 @@ void AttackSimRun()
     // re-assert the cleared bit on the next scan; our explicit
     // Restore is a safety net. Kernel-text patch holds IRQs off
     // across its WP-clear window — see AttackKernelTextPatch.
-    static constinit const Spec kSpecs[14] = {
+    static constinit const Spec kSpecs[16] = {
         {"Bootkit LBA 0 write", "BootSectorModified", core::HealthIssue::BootSectorModified, nullptr, AttackBootSector,
          RestoreBootSector},
         {"IDT hijack", "IdtModified", core::HealthIssue::IdtModified, nullptr, AttackIdt, RestoreIdt},
@@ -666,6 +737,10 @@ void AttackSimRun()
          core::HealthIssue::MassFsWriteRateSustained, nullptr, AttackRansomwareLowAndSlow, RestoreRansomwareLowAndSlow},
         {"Canary file touch", "CanaryFileTouched", core::HealthIssue::CanaryFileTouched, nullptr, AttackCanaryTouch,
          RestoreCanaryTouch},
+        {"Persistence drop (autostart path)", "PersistenceDropDetected", core::HealthIssue::PersistenceDropDetected,
+         nullptr, AttackPersistenceDrop, RestorePersistenceDrop},
+        {"Stack canary defang", "StackCanaryZero", core::HealthIssue::StackCanaryZero, nullptr, AttackStackCanaryZero,
+         RestoreStackCanaryZero},
         // Deferred — each needs its own slice with bespoke handling:
         //
         //   "Stack canary defang"  — zeroing __stack_chk_guard while

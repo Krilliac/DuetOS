@@ -199,6 +199,14 @@ u64 OpenForProcess(::duetos::core::Process* proc, const char* path)
         h.fat32_volume_idx = disk_idx;
         CopyDirEntry(h.fat32_entry, entry);
         h.cursor = 0;
+        // Stamp the canary flag at open time. We only consult
+        // the path-match side (CanaryMatchesPath) — suspicious-
+        // extension matching at open is a false-positive
+        // generator (existing files with these extensions
+        // already on disk shouldn't all be quarantined; only
+        // CREATE-time matches that, and CreateForProcess
+        // already runs the full CanaryCheck before plant).
+        h.is_canary = ::duetos::security::CanaryMatchesPath(disk_rest);
         const u64 handle = Process::kWin32HandleBase + slot;
         SerialWrite("[fs/route] open ok pid=");
         SerialWriteHex(proc->pid);
@@ -227,6 +235,7 @@ u64 OpenForProcess(::duetos::core::Process* proc, const char* path)
     h.ramfs_node = n;
     h.fat32_volume_idx = 0;
     h.cursor = 0;
+    h.is_canary = ::duetos::security::CanaryMatchesPath(path);
     const u64 handle = Process::kWin32HandleBase + slot;
     SerialWrite("[fs/route] open ok pid=");
     SerialWriteHex(proc->pid);
@@ -294,6 +303,18 @@ u64 WriteForProcess(::duetos::core::Process* proc, u64 handle, const void* src, 
         return u64(-1);
     if (len == 0)
         return 0;
+    // Canary wall — handle-stamped variant. Closes the
+    // "write-to-existing-canary" gap the path-only check
+    // couldn't cover (the write syscall doesn't carry a path
+    // string; only the file handle). The flag was stamped at
+    // open time by `OpenForProcess`. CanaryTrip flags the
+    // calling task for kill; we report short-write of 0 so
+    // the syscall surfaces the failure consistently.
+    if (h.is_canary)
+    {
+        ::duetos::security::CanaryTrip("<by-handle>", "write-existing");
+        return u64(-1);
+    }
 
     if (h.kind == Process::FsBackingKind::Ramfs)
         return u64(-1); // ramfs is .rodata
@@ -354,6 +375,12 @@ u64 CreateForProcess(::duetos::core::Process* proc, const char* path, const void
     // return anyway, but the contract is consistent).
     if (::duetos::security::CanaryCheck(disk_rest, "create"))
         return u64(-1);
+    // Persistence-drop detector. Default Advisory mode logs +
+    // bumps the counter; Deny mode (escalated by the guard on
+    // a security-critical event) kills the writer. Returns
+    // true when we should short-circuit.
+    if (::duetos::security::PersistenceCheck(disk_rest, "create"))
+        return u64(-1);
 
     const fat32::Volume* vol = fat32::Fat32Volume(disk_idx);
     if (vol == nullptr)
@@ -405,6 +432,11 @@ u64 CreateForProcess(::duetos::core::Process* proc, const char* path, const void
     h.fat32_volume_idx = disk_idx;
     CopyDirEntry(h.fat32_entry, entry);
     h.cursor = 0;
+    // The create-path canary check ran above, before the plant —
+    // any create that landed here got a clean verdict, so the
+    // handle's is_canary is false. Stash it explicitly so the
+    // write path doesn't read uninitialized state.
+    h.is_canary = false;
     // Ransomware-rate guard. Counts the create's init_bytes
     // payload toward the calling process's window — a typical
     // encrypt-loop is "create new file with encrypted contents"
@@ -522,6 +554,11 @@ bool UnlinkForProcess(::duetos::core::Process* proc, const char* path)
     // copy, so the unlink surface is as important as create.
     if (::duetos::security::CanaryCheck(rest, "unlink"))
         return false;
+    // Persistence-drop: deleting an autostart entry is a tell
+    // (malware sometimes wipes alternative startup hooks). Note
+    // it; in Deny mode the writer is killed.
+    if (::duetos::security::PersistenceCheck(rest, "unlink"))
+        return false;
     const fat32::Volume* v = fat32::Fat32Volume(idx);
     if (v == nullptr)
         return false;
@@ -587,6 +624,10 @@ bool RenameForProcess(::duetos::core::Process* proc, const char* src, const char
     if (::duetos::security::CanaryCheck(src_rest, "rename-src"))
         return false;
     if (::duetos::security::CanaryCheck(dst_rest, "rename-dst"))
+        return false;
+    if (::duetos::security::PersistenceCheck(src_rest, "rename-src"))
+        return false;
+    if (::duetos::security::PersistenceCheck(dst_rest, "rename-dst"))
         return false;
     if (src_idx != dst_idx)
         return false; // cross-volume rename not supported in v0

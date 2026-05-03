@@ -3,58 +3,47 @@
 #include "util/types.h"
 
 /*
- * DuetOS — file-canary self-defense, v0.
+ * DuetOS — filesystem self-defense walls, v1.
  *
- * Companion wall to the FS write-rate guard
- * (kernel/proc/process.h). The rate guard says "any process
- * that writes too much, too fast, dies." This wall says "any
- * process that touches a sensitive path AT ALL dies — no
- * thresholds, no math."
+ * Three layered walls sit between userland and on-disk state.
+ * Each catches a different attacker strategy; the rate guard
+ * (kernel/proc/process.h) handles the volume axis, this TU
+ * handles the location axis:
  *
- * Why both: an attacker who reads our open-source threshold
- * constants can stay just under the rate cap by pacing their
- * writes (15 MiB/s indefinitely; or 16 MiB then sleep). Canaries
- * are immune to that strategy because they don't measure rate;
- * touching the path once is the trip. The ransomware's encrypt-
- * loop has no way to know which files are canaries without
- * decoding kernel symbols (and even then we can rotate at boot).
- *
- * v0 scope
- * --------
- * - Static path list: a small set of names + path prefixes
- *   compiled into the kernel. Operators extend by editing the
- *   array; a runtime-registration syscall is reserved for v1.
- * - Two matchers: exact path/leaf compare (for known canaries),
- *   and suspicious-extension compare (for "any new file with a
- *   ransomware-typical extension is hostile"). Both are
- *   case-insensitive ASCII.
- * - Trip-on-first-touch: a single match is enough to flag the
- *   calling task for kill. No threshold counters.
- * - Wired into every path-bearing FS-mutation syscall site
- *   (create, write to existing, unlink, rename). The hooks are
- *   path-string based — no filesystem support needed for the
- *   canary "files" to exist on disk.
+ *   1. Canary path wall — first touch of a registered canary or
+ *      suspicious-extension path = kill. Includes a per-boot
+ *      randomized salt so the attacker can't pre-compute the
+ *      canary list from kernel symbols.
+ *   2. Persistence-drop detector — writes to autostart-
+ *      equivalent paths (/etc/init.d/, /.duetos/autostart/,
+ *      registry Run keys) raise the `PersistenceDropDetected`
+ *      health flag. Mode-dependent: Advisory logs, Deny kills.
  *
  * Threat model
  * ------------
- * Closes the "low-and-slow" rate-limit-evasion attack a
- * sophisticated open-source-aware ransomware can mount: pacing
- * writes under the cap. The canary wall trips on the first byte
- * landing on the wrong path, regardless of pace. It does NOT
- * close determined-stealthy attackers who know the canary list
- * (compile-time-leaked symbol) and steer around it; for that we
- * want randomized per-boot canary names + decoy file planting,
- * which is reserved for v1.
+ * - Open-source-aware attacker who reads the canary list:
+ *   covered by the per-boot salt entries (CanaryInit randomizes
+ *   four extra registry slots from kernel entropy).
+ * - "Encrypt-and-stay-resident" malware that drops a service
+ *   so it survives reboot: covered by the persistence detector.
+ * - "Encrypt-in-place" ransomware that stays under the rate
+ *   cap and never touches a registered canary: NOT covered by
+ *   this TU — the rate guard's sustained / long-tail tiers
+ *   catch it instead.
  *
- * Context: kernel. All matchers are read-only walks of constexpr
- * data; safe from any context (IRQ, NMI, task). The Trip path
- * calls FlagCurrentForKill, which itself is no-op-when-no-task,
- * so calling Trip from a kernel-only context is safe (just
- * doesn't kill anything).
+ * Context: kernel. All matchers are read-only walks of (mostly)
+ * constexpr data; safe from any context (IRQ, NMI, task). The
+ * Trip / Note paths call FlagCurrentForKill, which itself is
+ * no-op-when-no-task, so calling them from a kernel-only
+ * context is safe (just doesn't kill anything).
  */
 
 namespace duetos::security
 {
+
+// ===================================================================
+// Canary path wall.
+// ===================================================================
 
 /// Returns true if `path` (full path or basename) matches a
 /// registered canary entry. Walks the canary list once; the
@@ -108,5 +97,78 @@ const CanaryStats& CanaryStatsRead();
 /// Convenience for syscall sites that don't care which kind of
 /// match fired — they just need "is this access forbidden?"
 bool CanaryCheck(const char* path, const char* op);
+
+/// Boot-time init. Pulls 8 bytes from the kernel entropy pool
+/// (kernel/util/random.h `RandomU64`) and folds them into four
+/// dynamic canary names like `DUETOS_HONEY_<8-hex-chars>.DAT`.
+/// Subsequent `CanaryMatchesPath` calls test against both the
+/// static `kCanaryPaths[]` list AND the per-boot dynamic
+/// names. Result: a kernel binary leaked to an attacker no
+/// longer hands them a canary registry — they have to guess
+/// 64 bits of randomness per boot or scrape the live memory
+/// for the names.
+///
+/// Safe single-init. MUST be called after `RandomInit`.
+void CanaryInit();
+
+// ===================================================================
+// Persistence-drop detector.
+// ===================================================================
+//
+// Most malware that wants to survive reboot drops a file in an
+// autostart-equivalent path: a Linux init script, a Windows
+// "Run" registry key value, a DuetOS startup config. Catching
+// THESE writes specifically — separate from the volume / location
+// rate signals — means even a single quiet write that didn't
+// trip any other wall surfaces as a `PersistenceDropDetected`
+// event.
+//
+// Mode discipline:
+//   - Advisory (default): log + bump counter; legitimate
+//     installers writing here are common, killing them is too
+//     aggressive for v0.
+//   - Deny: kill the writer. The guard subsystem escalates
+//     into Deny on any security-critical kernel finding (IDT
+//     hijack, syscall MSR drift, etc.) — at that point we no
+//     longer trust ANY process to be writing autostart paths.
+
+enum class PersistenceMode : u8
+{
+    Advisory = 0, // log + counter; the writer keeps running
+    Deny,         // log + counter + kill the writer
+};
+
+/// Returns true if `path` lives under (or equals) one of the
+/// registered persistence-equivalent paths. Same matcher rules
+/// as CanaryMatchesPath: full-string equal, basename equal, or
+/// path begins with a registered prefix.
+bool PersistenceMatchesPath(const char* path);
+
+/// Note that `path` is being mutated by an op tagged `op`
+/// ("create", "write", "unlink", "rename-src", "rename-dst").
+/// In Advisory mode just bumps the counter + logs. In Deny
+/// mode also flags the calling task for kill via
+/// `KillReason::PersistenceDrop`. Returns true if the caller
+/// should short-circuit (Deny mode). Idempotent; safe from any
+/// context.
+bool PersistenceNote(const char* path, const char* op);
+
+/// Combined helper — does the path match? if so, route through
+/// PersistenceNote. Returns true if the caller should bail
+/// (Deny mode and a match). Mirrors CanaryCheck's shape so the
+/// syscall sites can call both walls back-to-back.
+bool PersistenceCheck(const char* path, const char* op);
+
+/// Read / set the persistence detector's response mode.
+PersistenceMode PersistenceModeRead();
+void PersistenceSetMode(PersistenceMode m);
+
+struct PersistenceStats
+{
+    u64 notes_total;    // every match, regardless of mode
+    u64 notes_advisory; // matches that DIDN'T kill (Advisory)
+    u64 notes_denied;   // matches that DID kill (Deny)
+};
+const PersistenceStats& PersistenceStatsRead();
 
 } // namespace duetos::security

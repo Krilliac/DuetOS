@@ -59,7 +59,7 @@ struct AttackResult
     AttackOutcome outcome;
 };
 
-inline constexpr u64 kMaxAttackResults = 16;
+inline constexpr u64 kMaxAttackResults = 24;
 
 struct AttackSummary
 {

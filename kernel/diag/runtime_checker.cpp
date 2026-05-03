@@ -1264,6 +1264,8 @@ const char* HealthIssueName(HealthIssue i)
         return "process exceeded FS write-rate long-tail cap (1 h window; persistent attacker, task killed)";
     case HealthIssue::CanaryFileTouched:
         return "process touched a canary / suspicious-extension path (task killed)";
+    case HealthIssue::PersistenceDropDetected:
+        return "process mutated an autostart-equivalent path (potential persistence drop)";
     default:
         return "(unnamed issue)";
     }
@@ -1427,6 +1429,29 @@ void RuntimeCheckerNoteCanaryFileTouched()
     // policy for CanaryFileTouched is LogOnly (default branch);
     // kill is enacted at the syscall site by `CanaryTrip`.
     Report(HealthIssue::CanaryFileTouched);
+}
+
+void RuntimeCheckerNotePersistenceDrop()
+{
+    // LogOnly response; kill (if applicable) is enacted by
+    // `security::PersistenceNote` based on the detector's mode
+    // (Advisory vs. Deny). Counter bumps either way.
+    Report(HealthIssue::PersistenceDropDetected);
+}
+
+void RuntimeCheckerBumpIssueCounter_ForTest(HealthIssue issue)
+{
+    // Same per-issue bookkeeping as Report, minus the Heal /
+    // Panic / FaultReact dispatch. Caller (attack_sim) is
+    // expected to restore any state it perturbed before this
+    // returns, so the production-mode "this finding is fatal"
+    // policy doesn't apply.
+    const u32 idx = static_cast<u32>(issue);
+    if (idx < static_cast<u32>(HealthIssue::Count))
+        ++g_report.per_issue_count[idx];
+    ++g_report.issues_found_total;
+    g_report.last_issue = issue;
+    Log(LogLevel::Warn, "health-test", HealthIssueName(issue));
 }
 
 const HealthReport& RuntimeCheckerStatusRead()

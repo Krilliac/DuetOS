@@ -33,6 +33,7 @@
 #include "log/klog.h"
 #include "mm/address_space.h"
 #include "proc/process.h"
+#include "security/canary.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -103,6 +104,16 @@ i64 DoWrite(u64 fd, u64 user_buf, u64 len)
         return kEISDIR;
     if (p->linux_fds[fd].state != 2)
         return kEBADF;
+    // Canary wall — handle-stamped variant. Stamped at open
+    // time by `DoOpen`; closes the in-place-overwrite gap the
+    // O_CREAT-time check couldn't cover. CanaryTrip will flag
+    // the calling task for kill; we surface -EACCES so the
+    // caller's strerror is consistent with other denials.
+    if ((p->linux_fds[fd].flags & core::Process::kLinuxFdFlagCanary) != 0)
+    {
+        ::duetos::security::CanaryTrip(p->linux_fds[fd].path, "write-existing");
+        return kEACCES;
+    }
     // Subsystem isolation: file mutation requires kCapFsWrite —
     // same gate the native ABI's SYS_FILE_WRITE enforces. Linux
     // ELF binaries don't get to skip the gate by entering through

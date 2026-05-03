@@ -916,6 +916,8 @@ const char* KillReasonName(KillReason r)
         return "FsWriteRateExceeded";
     case KillReason::CanaryFileTouched:
         return "CanaryFileTouched";
+    case KillReason::PersistenceDrop:
+        return "PersistenceDrop";
     default:
         KLOG_ONCE_WARN("sched", "KillReasonName: unrecognised KillReason enumerator");
         return "<unknown>";

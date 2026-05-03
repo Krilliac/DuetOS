@@ -39,12 +39,12 @@ Legend: ✅ tested today · ⚠️ partial · ❌ gap · ⏸ deferred (rationale
 | CR4.SMAP defang (user-mem read) | `attack_sim` AttackCr4Smap | `Cr4SmapCleared` | ✅ |
 | EFER.NXE defang (data exec) | `attack_sim` AttackEferNxe | `EferNxeCleared` | ✅ |
 | Kernel `.text` inline hook | `attack_sim` AttackKernelTextPatch | `KernelTextModified` | ✅ |
-| Stack canary defang | — | `StackCanaryZero` | ⏸ self-bricks — needs no-stack-protector island |
+| Stack canary defang | `attack_sim` AttackStackCanaryZero (no-stack-protector island via `[[gnu::no_stack_protector]]`; bypasses Panic-class via `RuntimeCheckerBumpIssueCounter_ForTest`) | `StackCanaryZero` | ✅ |
 | IA32_FEATURE_CONTROL unlock | — | `FeatureControlUnlocked` | ⏸ locked MSR refuses write; un-triggerable on locked firmware |
 | Kernel heap pool corruption | — | `HeapPoolMismatch` / `HeapUnderflow` | ⏸ corrupts allocator bookkeeping; needs scratch heap |
 | IRQ storm DoS | — | `IrqStorm` | ⏸ needs >25k software ints; pollutes IRQ stats |
 | Task stack overflow / saved-rsp scribble | — | `TaskStackOverflow` / `TaskRspOutOfRange` | ⏸ needs scheduler-quiesce primitive |
-| Cross-process VM read/write | — | (none — would need new detector) | ❌ no kernel-side probe yet; user-mode path needs unimplemented NT syscalls |
+| Cross-process VM read/write | `ring3_smoke` SpawnCrossPidProbe (sandboxed task spams SYS_PROCESS_OPEN; cap-gate denies, sandbox-denial threshold reaps) | `kCapDebug` denial counter + `KillReason::SandboxDenialThreshold` | ✅ (gate-side; per-target ACL still deferred for kCapDebug holders) |
 
 ### Ring-3 user-mode malware techniques
 
@@ -62,117 +62,105 @@ Legend: ✅ tested today · ⚠️ partial · ❌ gap · ⏸ deferred (rationale
 | CPU-burn DoS | `ring3_smoke` SpawnCpuHogProbe | scheduler tick-budget kill | ✅ |
 | Voluntary cap drop + retry | `ring3_smoke` SpawnDropcapsProbe | dropped op denied after SYS_DROPCAPS | ✅ |
 | Image-load malware (W+X PE / suspicious imports) | `kernel/security/guard.cpp` (image vetting on every load) | Guard verdict Allow/Warn/Deny | ✅ |
-| Cross-process WriteProcessMemory | — | NT syscalls not implemented (NtWriteVirtualMemory→SYS_WRITE collision; NtOpenProcess kSysNtNotImpl) | ❌ |
-| Thread hijack (Suspend / SetContext / Resume) | — | NtSuspendThread / NtSetContextThread kSysNtNotImpl | ❌ |
-| Foreign-process DR set | — | needs ring-3 DR setter that targets *another* PID | ❌ |
-| Classic DLL injection (CreateRemoteThread + LoadLibrary) | — | NtCreateThreadEx kSysNtNotImpl | ❌ |
-| Process hollowing | — | NtMapViewOfSection / NtUnmapViewOfSection kSysNtNotImpl | ❌ |
-| Reflective DLL load | — | needs in-process VirtualAlloc(RWX) — would hit NX gate; doable as a self-inject probe | ⚠️ partial (NX probe covers exec-from-RW) |
-| Keylogger | — | no `kCapInput` exists; kbd input not capability-gated | ❌ |
-| Screen scraper | — | no `kCapFramebuffer` exists; FB not capability-gated | ❌ |
-| RAT (network bind / reverse shell) | — | no `kCapNet` exists; sockets not capability-gated | ❌ |
+| Cross-process WriteProcessMemory | `ring3_smoke` SpawnCrossPidProbe + handler in syscall.cpp `SYS_PROCESS_VM_WRITE` (cap-gated on `kCapDebug`) | sandbox without kCapDebug: kCapDebug denial → 100-deny threshold reap | ✅ (gate-side; per-target ACL deferred) |
+| Thread hijack (Suspend / SetContext / Resume) | handler `SYS_THREAD_SET_CONTEXT` cap-gated on `kCapDebug`; foreign-thread handle table requires SYS_PROCESS_OPEN (also `kCapDebug`) so SUSPEND/RESUME are gated by-construction | sandbox cannot reach a foreign thread handle | ✅ (gate-side; per-target ACL deferred) |
+| Foreign-process DR set | SYS_BP_INSTALL is scoped to caller-only by construction (per-task DR save/restore on context switch); cap-gated on `kCapDebug` | sandbox without kCapDebug denied at gate; even with kCapDebug, BP only rides caller's task | ✅ |
+| Classic DLL injection (CreateRemoteThread + LoadLibrary) | NtCreateThreadEx → SYS_THREAD_CREATE; thread spawned in CALLER's AS, not foreign — true cross-process injection requires SYS_THREAD_CREATE_REMOTE which is `kSysNtNotImpl` | by-construction caller-only | ⚠️ partial (NtCreateThreadEx hits same-process create; remote-thread variant deferred) |
+| Process hollowing | NtMapViewOfSection / NtUnmapViewOfSection (SYS_SECTION_MAP / SYS_SECTION_UNMAP) — cross-AS map gated on `kCapDebug` (see syscall.cpp cap check inside SYS_SECTION_MAP) | sandbox without kCapDebug denied at gate | ✅ (gate-side) |
+| Reflective DLL load | `ring3_smoke` SpawnNxProbeTask (jump into RW page) + `mm::AddressSpaceMapUserPage` W^X gate panics on RWX map + `subsystems::linux::DoMprotect` is advisory (no PTE flip) | NX trap kills task; W^X gate prevents RWX mapping; mprotect can't grant exec to writable | ✅ |
+| Keylogger | `kCapInput` cap (process.h:147) gates SYS_WIN_GET_KEYSTATE / SYS_WIN_GET_CURSOR / SYS_WIN_GET_MOUSE_DELTA / SYS_STDIN_READ via cap_table.def | sandbox profile lacks kCapInput → denial | ✅ |
+| Screen scraper | by-construction: no user-mode syscall exposes raw framebuffer pixels (Screenshot is in-kernel app only); cross-process VM read gated on kCapDebug | no surface to read others' rendered windows | ✅ (by-construction; document; add kCapFramebuffer later if a SYS_FB_READ ever lands) |
+| RAT (network bind / reverse shell) | `kCapNet` cap (process.h:129) gates SYS_SOCKET_OP via cap_table.def | sandbox profile lacks kCapNet → denial | ✅ |
 | Ransomware (mass FS encrypt) | `attack_sim` × 3 (burst-tier, low-and-slow sustained-tier, canary-touch) + multi-window per-process write-rate guard (1 s / 5 min / 1 h tiers) hooked into Win32 SYS_FILE_WRITE/CREATE + Linux sys_write / copy_file_range; canary / suspicious-extension wall hooked into Win32 + Linux create / unlink / rename / openat-O_CREAT | `MassFsWriteRate{,Sustained,Long}` + `CanaryFileTouched` findings + `FlagCurrentForKill(FsWriteRateExceeded \| CanaryFileTouched)` | ✅ |
-| Persistence drop (autostart, fake driver) | ⚠️ partial via `kernel/security/guard.cpp` import-blacklist on load | per-image vetting on next boot | ⚠️ |
+| Persistence drop (autostart, fake driver) | `attack_sim` AttackPersistenceDrop + `kernel/security/canary.cpp` PersistenceCheck wired into Win32 + Linux create / unlink / rename / openat-O_CREAT (autostart-equivalent path registry: /etc/init.d/, /.duetos/autostart/, registry Run keys, boot.ini) + image-load vetting via guard.cpp on next boot | `PersistenceDropDetected` HealthIssue (Advisory: log+counter; Deny: kill via `KillReason::PersistenceDrop`) | ✅ |
 | Anti-analysis (timing, VM detection) | — | informational only — measurement, not a defence | n/a |
 
-## Gap analysis — what each ❌ needs
+## Gap analysis — what's still open
 
-### 1. Cross-process tampering (WPM / thread hijack / hollowing)
+### 1. Per-target ACL for kCapDebug holders
 
-**Blocker:** `NtOpenProcess`, `NtWriteVirtualMemory` (mis-mapped to
-SYS_WRITE), `NtSuspendThread`, `NtSetContextThread`, `NtGetContextThread`,
-`NtCreateThreadEx`, `NtMapViewOfSection`, `NtUnmapViewOfSection` are
-all `kSysNtNotImpl`.
-
-**To fix:**
-- Implement these NT syscalls against the existing Process / handle
-  table (kernel/proc/process.{h,cpp}). Each needs a capability check
-  (e.g. `kCapDebug` for cross-process VM access) and a per-target
-  ACL.
-- Then add ring-3 PE payloads under `userland/apps/redteam/` that
-  attempt each technique; pass = denial / kill.
-- Realistic scope: ~6 syscalls × ~80 LOC each + 4 PE payloads.
-  One PR per syscall family.
-
-### 2. Keylogger / Screen scraper / RAT
-
-**Blocker:** No capability framework for input devices, framebuffer,
-or network sockets. Currently any user process that can syscall can
-read kbd / fb / open sockets.
+**Status:** Gates are correct (sandbox without kCapDebug cannot
+reach SYS_PROCESS_OPEN / VM_WRITE / SECTION_MAP /
+THREAD_SET_CONTEXT). What's still missing is a per-target ACL
+once a process HAS kCapDebug — it can currently open ANY pid.
 
 **To fix:**
-- Add `kCapInput`, `kCapFramebuffer`, `kCapNet` to
-  `kernel/proc/process.h`.
-- Gate the relevant syscalls (kbd-read, fb-mmap, socket creation)
-  on the new caps.
-- Update `CapSetTrusted()` and `CapSetEmpty()` defaults.
-- Update existing apps that legitimately use these surfaces to
-  request the cap.
-- Then add ring-3 probes that try the operations without the cap.
-- Realistic scope: ~3 caps + ~10 syscall touch-ups + 3 probes.
-  Cross-cutting; needs careful sequencing to avoid breaking
-  existing apps.
+- Add a per-Process `debug_target_acl` (a small list of pid
+  prefixes / explicit pids the holder may target).
+- Check at SYS_PROCESS_OPEN.
+- Realistic scope: ~120 LOC + 1 probe.
 
-### 3. Ransomware (mass FS encrypt)
+### 2. Heap pool corruption / IRQ storm / Task stack overflow
 
-**Blocker:** No FS-write-rate detector, and no policy for "this
-process just wrote 1 GiB in 5 seconds — kill it."
+**Status:** Detectors all live; what's missing is non-self-bricking
+attack drivers.
 
-**To fix:**
-- Add a per-process FS write-rate counter to
-  `core::Process` and a `MassFsWriteRate` `HealthIssue`.
-- Gate the response on a configurable threshold (Advisory =
-  log; Enforce = kill task).
-- The ransomware probe can then be a synthetic in-sandbox flood
-  (no real crypto needed — the test is the rate, not the algorithm).
-- Realistic scope: ~150 LOC across runtime_checker + process +
-  ring3_smoke. Self-contained.
+**To fix (heap):** Allocate a scratch heap pool, scribble its
+header, run scan, restore. Needs a `HeapCreatePool` API the
+allocator doesn't have today.
 
-### 4. Persistence
+**To fix (IRQ storm):** Issue `int $vec` × N from a kernel
+context, but FIRST snapshot per-vector counters and restore
+afterwards so the periodic scan's monotonic guards don't fire
+spuriously.
 
-**Partial today:** `guard.cpp` checks every image at load time and
-can deny based on signature / import / entropy. So a persisted
-malicious image that re-runs at next boot would be caught **if**
-guard is in Enforce mode.
+**To fix (task stack):** Pick a non-running task, scribble its
+bottom canary, run scan, restore. Needs a scheduler-quiesce
+primitive that doesn't yet exist.
 
-**Gaps:** No detection of *how* the persistence was achieved — i.e.
-which write to which path planted the autostart file.
+### 3. Reflective DLL — variant test
 
-**To fix:**
-- Add path-write tracking in VFS for paths that are autostart-
-  equivalent (init scripts, registry-equivalent under DuetOS).
-- Add a `PersistenceDropDetected` `HealthIssue`.
-- Realistic scope: ~80 LOC. Low risk.
+**Status:** ✅ via NX probe + W^X gate + advisory mprotect (no
+PTE flip in v0). A determined attacker who finds a future PTE-
+flipping VirtualProtect implementation would re-open this; for
+now it's structurally closed.
 
-## Recommended slice order
+### 4. NtCreateThreadEx remote variant
 
-If the user wants to keep extending coverage, the cheapest →
-most-expensive order is:
+**Status:** ⚠️ partial — same-process create works (and is
+properly cap-gated); a remote-thread variant where the new
+thread starts in a foreign Process's AS is `kSysNtNotImpl`.
+Closing it would let a probe verify that even with kCapDebug,
+the per-target ACL (item 1) gates remote thread injection.
 
-1. **Stack canary defang** (deferred kernel attack) — adds the last
-   easy-to-test detector. Needs a no-stack-protector island (~50 LOC).
-2. **FS write-rate detector + ransomware probe** — self-contained,
-   one new detector + one new ring-3 probe (~150 LOC).
-3. **Persistence path-write tracking + drop probe** — adds
-   `PersistenceDropDetected` (~80 LOC).
-4. **Capability framework expansion** (kCapInput / kCapFramebuffer /
-   kCapNet) + 3 ring-3 probes — cross-cutting, needs care
-   (~400 LOC across kernel + apps).
-5. **Implement the 6 cross-process NT syscalls** — biggest lift, but
-   unlocks the entire "Windows malware threat model" set
-   (~500 LOC + 4 PE payloads).
-6. **Heap / IRQ storm / task stack** kernel attacks — each needs
-   bespoke quiesce / scratch state (~200 LOC each).
+### 5. Coordinated multi-process FS write attack
+
+**Status:** Per-process rate caps are tight; a fork-bomb that
+spawns N processes each staying just under the cap is not
+covered. Needs a global rate counter + a fork-rate detector.
+Estimated ~250 LOC.
+
+### 6. Future: random per-boot kernel-internal canary symbol
+
+**Status:** v1 randomized 4 dynamic canary FILE names per boot.
+The kernel's static `kCanaryPaths[]` registry is still source-
+readable. v2 idea: compress the static list into a hash table
+hashed under the per-boot salt so even reading the kernel
+binary doesn't disclose the hash inputs. Out of scope today.
 
 ## Wiring summary
 
-- `kernel/security/attack_sim.cpp` — 11 in-suite kernel attacks
-  (5 deferred, documented inline)
-- `kernel/proc/ring3_smoke.cpp` — 11 ring-3 hostile probes,
-  dispatched via `redteam` shell command + boot smoke list
-- `kernel/diag/runtime_checker.cpp` — ~25 `HealthIssue` detectors,
-  scanned every 5 s + on demand via `RuntimeCheckerScan()`
-- `kernel/security/guard.cpp` — image-load vetting (W+X, suspicious
-  imports, packer entropy)
+- `kernel/security/attack_sim.cpp` — 16 in-suite kernel attacks
+  (canary + persistence + stack-canary + ransomware-burst +
+  ransomware-low-and-slow + 11 v0 attacks); deferred attacks
+  for heap / IRQ storm / task stack documented inline.
+- `kernel/security/canary.cpp` — canary path wall + per-boot
+  salt + persistence-drop detector. Wired into Win32 routing
+  (CreateForProcess / UnlinkForProcess / RenameForProcess /
+  WriteForProcess via handle is_canary) + Linux paths
+  (DoUnlink / DoRename / DoOpen O_CREAT / DoWrite via fd
+  kLinuxFdFlagCanary).
+- `kernel/proc/ring3_smoke.cpp` — 12 ring-3 hostile probes
+  (added: cross-pid SYS_PROCESS_OPEN flood); dispatched via
+  `redteam` / `ring3` shell commands + boot smoke list.
+- `kernel/diag/runtime_checker.cpp` — ~28 `HealthIssue`
+  detectors, scanned every 5 s + on demand via
+  `RuntimeCheckerScan()`. New: `MassFsWriteRateSustained`,
+  `MassFsWriteRateLong`, `CanaryFileTouched`,
+  `PersistenceDropDetected`. New helper:
+  `RuntimeCheckerBumpIssueCounter_ForTest` for attack_sim
+  bypass of Panic-class response.
+- `kernel/security/guard.cpp` — image-load vetting (W+X,
+  suspicious imports, packer entropy).
 - `kernel/security/pentest_gui.cpp` — operator-facing GUI for
   running the suites with verdicts

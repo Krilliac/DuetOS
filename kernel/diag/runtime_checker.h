@@ -211,6 +211,16 @@ enum class HealthIssue : u32
     // operator-visible counter.
     CanaryFileTouched,
 
+    // A process wrote to (or otherwise mutated) an autostart-
+    // equivalent path: init scripts, registry "Run" keys,
+    // boot config files. Default Advisory mode logs but lets
+    // the write through (legitimate installers do this); Deny
+    // mode kills the writer via `KillReason::PersistenceDrop`.
+    // Either way the counter increments — operators correlate
+    // these events against image-load logs to find malware
+    // that survived a reboot.
+    PersistenceDropDetected,
+
     // Count sentinel
     Count,
 };
@@ -309,6 +319,26 @@ void RuntimeCheckerNoteFsWriteRateExceeded(u32 level_index);
 /// Bumps the `CanaryFileTouched` HealthIssue counter through
 /// the standard `Report` path. Safe from any context.
 void RuntimeCheckerNoteCanaryFileTouched();
+
+/// Note that a persistence-equivalent path has been written.
+/// Called from `security::PersistenceNote` when a create /
+/// unlink / rename hits the autostart registry. Bumps the
+/// `PersistenceDropDetected` HealthIssue counter regardless of
+/// the persistence detector's mode (Advisory vs. Deny) — the
+/// counter is the operator-visible signal; the kill (if any)
+/// happens at the syscall site.
+void RuntimeCheckerNotePersistenceDrop();
+
+/// Test-only counter bump. Increments the per-issue count +
+/// total + last_issue WITHOUT invoking `ResponseFor` — so a
+/// Panic-class HealthIssue can be exercised by attack_sim
+/// without halting the kernel mid-test. The standard production
+/// `Report` path is the right one for everywhere else.
+///
+/// Marked _ForTest in the name so a code reviewer notices any
+/// non-attack-sim caller. Logging stays at Warn level so the
+/// boot log still surfaces the event.
+void RuntimeCheckerBumpIssueCounter_ForTest(HealthIssue issue);
 
 /// Current stats snapshot. Returned by const-reference to avoid
 /// copying the 128-byte per-issue array on every call (kernel
