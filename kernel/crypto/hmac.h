@@ -3,6 +3,7 @@
 #include "crypto/md5.h"
 #include "crypto/sha1.h"
 #include "crypto/sha256.h"
+#include "crypto/sha512.h"
 #include "util/types.h"
 
 /*
@@ -41,6 +42,15 @@ void HmacSha256(const u8* key, u32 key_len, const u8* data, u32 data_len, u8 out
 /// HMAC-MD5 (RFC 2104 + RFC 1321). Legacy interop only — see
 /// header banner. `out` must be at least 16 bytes.
 void HmacMd5(const u8* key, u32 key_len, const u8* data, u32 data_len, u8 out[kMd5DigestBytes]);
+
+/// HMAC-SHA384 (RFC 4231). 128-byte block size; uses the SHA-512
+/// underlying hash with a truncated 48-byte digest. `out` must be
+/// at least 48 bytes.
+void HmacSha384(const u8* key, u32 key_len, const u8* data, u32 data_len, u8 out[kSha384DigestBytes]);
+
+/// HMAC-SHA512 (RFC 4231). 128-byte block size. `out` must be
+/// at least 64 bytes.
+void HmacSha512(const u8* key, u32 key_len, const u8* data, u32 data_len, u8 out[kSha512DigestBytes]);
 
 void HmacSelfTest();
 
