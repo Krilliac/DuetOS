@@ -1,152 +1,200 @@
-# FS write-rate guard v0 — ransomware defense
+# FS write-rate guard + canary wall — v1
 
 **Type:** Decision + Pattern + Observation
-**Status:** Active
+**Status:** Active — v1 lands two compounding walls
 **Last updated:** 2026-05-03
 
 ## What it is
 
-Per-process file-write rate cap, enforced at every successful
-file-write syscall site. Closes the
-"Ransomware (mass FS encrypt)" gap from
-`.claude/knowledge/redteam-coverage-matrix-v0.md` — previously
-listed as a ❌ user-mode gap because no FS-write-rate detector
-existed and no policy could fire "this process just wrote 1 GiB
-in 5 seconds — kill it." The threat model assumes the trusted
-process IS the attacker (compromised app, smuggled installer),
-so there is **no exemption for trusted caps**.
+Layered self-defense against ransomware-style file mutation:
 
-## Window + threshold
+1. **Multi-window FS write-rate guard** — three rolling
+   per-process byte caps at decreasing granularities (burst /
+   sustained / long-tail). Catches the full range of pacing
+   strategies, including the open-source-aware low-and-slow
+   evasion an attacker can mount once they read our threshold
+   constants.
+2. **Canary / honey-path wall** — a static registry of
+   "forbidden" file paths and ransomware-typical suffix
+   extensions. Any process that creates / writes / unlinks /
+   renames a matched path dies on the first touch. No
+   thresholds, so an attacker who paces under the rate caps
+   still trips this wall the moment they hit a canary.
 
-- Window: `kFsWriteWindowTicks` = 100 scheduler ticks = 1 s @
-  100 Hz.
-- Cap: `kFsWriteWindowByteCap` = 16 MiB per window per process.
-- Both constants are `inline constexpr` in
-  `kernel/proc/process.h` so retuning is a one-line edit + a
-  rebuild.
+The two walls cover orthogonal evasion strategies:
 
-A process that writes ≤ 16 MiB/s sees zero overhead beyond a
-single `TickCount()` read and one add. A process that exceeds the
-cap is flagged for kill on the offending syscall via
-`FlagCurrentForKill(KillReason::FsWriteRateExceeded)`. The
-scheduler converts the flag to a Dead transition on the task's
-next re-enqueue (same path the sandbox-denial-threshold and
-tick-budget kills use), so the kill is observably "the next
-write returns and the task never runs again."
+| Attacker strategy | Rate guard | Canary wall |
+|---|---|---|
+| "Encrypt as fast as possible" | ✅ catches at burst tier | ✅ trips on first canary file in path |
+| "Stay under burst cap, sustained pace" | ✅ catches at sustained tier | ✅ same |
+| "Stay under sustained cap, hour-long pace" | ✅ catches at long-tail tier | ✅ same |
+| "Stay under all three rate caps + steer around canary list" | ❌ silent | ⚠️ only if attacker decoded the list |
 
-## Plumbing
+Closes the "Ransomware (mass FS encrypt)" gap from
+`.claude/knowledge/redteam-coverage-matrix-v0.md` plus the
+"low-and-slow rate-cap evasion" gap a v0 design left open.
 
-- `Process` (in `kernel/proc/process.h`) gains three counters:
-  `fs_write_bytes_total` (lifetime), `fs_write_window_bytes`
-  (current window), `fs_write_window_start_tick`. Zeroed by the
-  ProcessCreate `memset` — no extra init.
-- `RecordFsWrite(Process*, u64)` is the production syscall-site
-  hook. Bumps counters, rolls the window, and on threshold cross
-  bumps `MassFsWriteRate` + flags the calling task for kill.
-- `RecordFsWriteCheck(Process*, u64)` is the pure-bookkeeping
-  variant — same window math, returns true if the call pushed
-  the process over cap. No global counter side-effect, no kill.
-  Used by `attack_sim` to verify the threshold logic without
-  killing the kernel main thread that's running the test.
-- `MassFsWriteRate` is the new `HealthIssue` enumerator. Its
-  `ResponseFor` policy falls through to `LogOnly` (the default
-  branch) — actual kill enforcement happens at the syscall
-  site, the checker just provides operator visibility.
-- `RuntimeCheckerNoteFsWriteRateExceeded()` is the documented
-  global counter hook called by `RecordFsWrite` on threshold
-  cross. Routes through `Report` so all the standard logging /
-  per-issue counter / last_issue tracking stays consistent.
-- `KillReason::FsWriteRateExceeded = 4` (`kernel/sched/sched.h`)
-  is the new termination reason; appears as
-  `[task-kill] reason=FsWriteRateExceeded` in serial logs.
+## Multi-window rate guard
 
-## Wired-in syscall sites
+Three rolling windows, all checked on every successful file
+write. First cap-cross kills the caller (no cumulative scoring
+— any single window over budget is enough).
 
-Every path that lands attacker-controlled bytes on backing
-storage routes through `RecordFsWrite`:
+| Level | Window ticks | Window | Byte cap | Effective rate ceiling |
+|---|---|---|---|---|
+| 0 — burst    | 100        | 1 s    | 16 MiB  | 16 MiB/s peak |
+| 1 — sustained | 30 000     | 5 min  | 256 MiB | ~850 KiB/s avg |
+| 2 — long      | 360 000    | 1 h    | 2 GiB   | ~580 KiB/s avg |
 
-- **Win32 `SYS_FILE_WRITE`**: `fs::routing::WriteForProcess` in
-  `kernel/fs/file_route.cpp` calls `RecordFsWrite(proc, wrote)`
-  after a successful `Fat32WriteInPlace`.
-- **Win32 `SYS_FILE_CREATE`**: `fs::routing::CreateForProcess`
-  counts the `init_bytes` payload toward the calling process's
-  window — encrypt-loops typically follow a "create new file
-  with encrypted contents → unlink original" pattern, so the
-  create surface matters as much as the in-place write surface.
-- **Linux `sys_write`**: `subsystems::linux::DoWrite` in
-  `kernel/subsystems/linux/syscall_io.cpp` records `written`
-  after the write loop. `DoWritev`/`DoPwrite64`/`DoPwritev*`/
-  `DoSendfile` all funnel through `DoWrite`, so they inherit the
-  hook automatically.
-- **Linux `copy_file_range`**: `extra_syscalls.cpp`
-  `DoCopyFileRange` issues `Fat32CreateAtPath` /
-  `Fat32AppendAtPath` directly (bypassing `DoWrite` for kernel-
-  buffer reasons documented in that file). Records `total` after
-  the loop so a kernel-side fd-to-fd attack can't evade the cap.
+Tunable as `kFsWriteWindowTicksByLevel[]` /
+`kFsWriteWindowByteCapByLevel[]` in `kernel/proc/process.h`.
+Process struct holds parallel arrays
+`fs_write_window_bytes[3]` / `fs_write_window_start_tick[3]`;
+`fs_write_bytes_total` is the lifetime telemetry counter (no
+gate).
 
-The ramfs backing path is intentionally unhooked — ramfs is
-read-only (`WriteForProcess` returns `u64(-1)` on a ramfs
-handle), so no bytes ever land. Pipes, sockets, eventfds, and
-the other non-file fd kinds are excluded too: ransomware writes
-to *files*, and a flooding socket is a separate threat already
-covered by the cap-gate side of the network stack.
+`RecordFsWriteCheckLevel(p, bytes)` returns the index of the
+first level that tripped, or -1. Existing `RecordFsWriteCheck`
+keeps its `bool` shape for back-compat. `RecordFsWrite`
+(production) calls the level variant, logs the matched level
+label (e.g. "5min/256MiB"), bumps the matching HealthIssue
+counter, and flags the calling task for kill.
+
+Three new HealthIssues — `MassFsWriteRate` (burst, the original
+v0 issue), `MassFsWriteRateSustained`, `MassFsWriteRateLong` —
+let operators tell which timescale's wall fired. An attacker
+who tripped the long-tail wall is materially different from one
+who tripped burst.
+
+`KillReason::FsWriteRateExceeded = 4` is unchanged — the kill
+reason is a single value because the three tiers are different
+shades of the same defense.
+
+## Canary wall
+
+Static registry in `kernel/security/canary.h`:
+
+- `kCanaryPaths[]` — 16 entries today: DuetOS-native sentinels
+  (`/canary/`, `DUETOS_CANARY.DAT`, `DO_NOT_DELETE.TXT`,
+  `DUETOS_HONEY`) + ransomware-bait names (`WALLET.DAT`,
+  `PASSWORDS.TXT`, `BACKUP.ZIP`, `ID_RSA`, `PAYROLL.XLS`,
+  `INVOICES.PDF`, `SECRET.TXT`, `IMPORTANT.{DOC,DOCX,TXT}`).
+- `kCanarySuspiciousExtensions[]` — 18 entries: the trailing
+  `.<ext>` substrings real-world ransomware families append to
+  encrypted output (`.locked`, `.encrypted`, `.crypto`,
+  `.crypt`, `.crypted`, `.enc`, `.encrypt`, `.lock`, `.ransom`,
+  `.wcry`, `.wncry`, `.cerber`, `.thor`, `.aes`, `.rsa`,
+  `.pay`, `.paymrts`, `.doxxed`).
+
+Both matchers are case-insensitive ASCII. Path matcher tries
+three rules in order:
+
+1. Whole-string equals a registered exact path.
+2. Basename (after last `/` or `\\`) equals a registered name.
+3. Path begins with a registered prefix (e.g. anything under
+   `/canary/`).
+
+`CanaryCheck(path, op)` runs both matchers and trips on the
+first hit. `CanaryTrip` does the kill: bumps the
+`CanaryFileTouched` HealthIssue, logs the event with the op
+tag (`create` / `unlink` / `rename-src` / `rename-dst` /
+`open-O_CREAT`), and flags the caller for kill via
+`KillReason::CanaryFileTouched = 5`.
+
+### Wired-in syscall sites
+
+Every path-bearing FS-mutation syscall site, on both ABIs:
+
+| Syscall | TU | Hook site |
+|---|---|---|
+| Win32 `SYS_FILE_CREATE` | `kernel/fs/file_route.cpp` `CreateForProcess` | before the on-disk plant |
+| Win32 unlink | `kernel/fs/file_route.cpp` `UnlinkForProcess` | before `Fat32DeleteAtPath` |
+| Win32 rename | `kernel/fs/file_route.cpp` `RenameForProcess` | both src and dst paths |
+| Linux `unlink` / `unlinkat` | `kernel/subsystems/linux/syscall_fs_mut.cpp` `DoUnlink` | after path strip |
+| Linux `rename` / `renameat` | `kernel/subsystems/linux/syscall_fs_mut.cpp` `DoRename` | both endpoints |
+| Linux `open` / `openat` with `O_CREAT` | `kernel/subsystems/linux/syscall_file.cpp` `DoOpen` | inside the `!exists && O_CREAT` branch |
+
+The Win32 write-to-existing path (`WriteForProcess`) is NOT
+canary-checked because handles don't carry their open-time
+path; canary-tripping ransomware on the in-place-overwrite
+strategy currently relies on the rate guard. A v1 follow-up
+that stamps `is_canary` on `Win32FileHandle` at create/open
+time would close this without needing a per-write path lookup.
+
+### What's intentionally not covered
+
+- **Random per-boot canary names**. The list is compile-time,
+  visible in the kernel symbol table, so a determined attacker
+  who reads the binary can steer around. v1 follow-up: register
+  the list at boot from a kernel-entropy-derived randomized
+  salt + plant decoy files at the names so dir-enumerator
+  ransomware picks them up before user data.
+- **Decoy files on disk**. The matcher trips on path strings
+  alone, even if the file doesn't exist. Real on-disk decoys
+  would lure ransomware that enumerates dirs first; deferred
+  until FAT32 mkfs lands cleanly.
+- **Cross-process aggregate**. The rate guard is per-process by
+  design. A coordinated multi-process attack that keeps each
+  pid under the cap is theoretically possible. A global
+  per-system rate counter would close that but needs a fork-
+  rate detector to be useful (without one, the attacker just
+  forks-bombs to scale up).
 
 ## Test wiring (attack_sim)
 
-`AttackRansomwareWriteRate` is a kernel-side test that:
+Three attacks added to `kernel/security/attack_sim.cpp`:
 
-1. Builds a synthetic `Process` on a static buffer. Re-zeros at
-   each run so consecutive `AttackSimRun` invocations stay
-   clean.
-2. Loops `(kFsWriteWindowByteCap / 4096) + 1` calls of
-   `RecordFsWriteCheck(p, 4096)`. The last call is guaranteed-
-   over-cap; everything before it is within budget.
-3. On `RecordFsWriteCheck` returning true, calls
-   `RuntimeCheckerNoteFsWriteRateExceeded()` — the same hook
-   `RecordFsWrite` (the production path) calls.
-4. The standard `RunAttack` harness's before/after compare on
-   `MassFsWriteRate` sees the increment and reports PASS.
+1. **Ransomware FS write-rate flood (burst tier)** —
+   `AttackRansomwareWriteRate`. Hammers the synthetic process
+   with 4 KiB writes until it tips past the 16 MiB / 1 s cap.
+   Verifies `RecordFsWriteCheckLevel` returns 0 (burst tier)
+   and bumps `MassFsWriteRate`.
+2. **Ransomware low-and-slow (sustained tier)** —
+   `AttackRansomwareLowAndSlow`. Writes the burst-cap value
+   per iteration but back-dates the burst window's start_tick
+   between iterations to simulate "the attacker waited 1 s
+   between bursts." After 16 iterations the sustained window
+   trips — verifying that the open-source-aware pacing
+   strategy gets caught by tier 1 even when tier 0 stays
+   green. Bumps `MassFsWriteRateSustained`.
+3. **Canary file touch** — `AttackCanaryTouch`. Calls the
+   path matcher against `WALLET.DAT` (registry hit) and the
+   suspicious-extension matcher against
+   `/disk0/Documents/notes.encrypted` — verifies both fire,
+   bumps `CanaryFileTouched`.
 
-Synthetic Process (no ProcessCreate, no kheap, no ring 3) is
-deliberate: the production path runs `FlagCurrentForKill`,
-which would terminate the kernel main task that's running the
-suite. Splitting the bookkeeping out into `RecordFsWriteCheck`
-gives us a no-side-effect surface to test without that hazard.
+All three use a synthetic `Process` on a static buffer (no
+KMalloc, no scheduler, no FlagCurrentForKill — the production
+hooks would terminate the kernel main task running the suite).
+The standard `RunAttack` before/after counter compare reports
+PASS when the matching health counter incremented.
 
-## What's intentionally not covered
+Total spec table grows from 12 → 14 entries (still under
+`kMaxAttackResults = 16` ceiling).
 
-- Pipes / sockets / eventfds — not the ransomware threat
-  surface; their flooding behaviour is a separate concern.
-- ramfs writes — ramfs is read-only; no bytes ever land.
-- A coordinated attack that spawns many processes each staying
-  just under the per-process cap. The cap is per-process by
-  design (matches sandbox_denials' per-process discipline); a
-  global counter would need its own slice plus a fork-rate
-  detector to be useful. Captured here so a future operator
-  who notices the gap doesn't have to re-derive it.
-- Real ring-3 PE / ELF probe that writes to a real disk file in
-  a tight loop. Doable now (the syscall path is wired) but
-  needs a per-test FS volume reserved as scratch — otherwise
-  the probe would either write to the live kernel image's
-  partition (bad) or run out of space if it actually pushed past
-  16 MiB. Defer until the install-/scratch-volume work lands.
+## Files touched (this slice)
 
-## Files touched
+New:
 
-- `kernel/sched/sched.h` — added `KillReason::FsWriteRateExceeded`
-- `kernel/sched/sched.cpp` — added `KillReasonName` case
-- `kernel/proc/process.h` — added counters + window constants +
-  `RecordFsWrite` / `RecordFsWriteCheck` decls
-- `kernel/proc/process.cpp` — implementation of the two
-  bookkeeping functions
-- `kernel/diag/runtime_checker.h` — added `MassFsWriteRate` enum
-  + `RuntimeCheckerNoteFsWriteRateExceeded` decl
-- `kernel/diag/runtime_checker.cpp` — `HealthIssueName` case +
-  `RuntimeCheckerNoteFsWriteRateExceeded` implementation
-- `kernel/fs/file_route.cpp` — hook into `WriteForProcess` +
-  `CreateForProcess` (init_bytes payload)
-- `kernel/subsystems/linux/syscall_io.cpp` — hook into `DoWrite`
-- `kernel/subsystems/linux/extra_syscalls.cpp` — hook into
-  `DoCopyFileRange`
-- `kernel/security/attack_sim.cpp` — `AttackRansomwareWriteRate`
-  + `RestoreRansomwareWriteRate` + spec table entry
+- `kernel/security/canary.h` — public API
+- `kernel/security/canary.cpp` — registry + matchers + trip
+
+Modified:
+
+- `kernel/sched/sched.h` / `sched.cpp` — `KillReason::CanaryFileTouched`
+- `kernel/proc/process.h` — multi-window arrays, constants,
+  `RecordFsWriteCheckLevel` decl
+- `kernel/proc/process.cpp` — multi-window logic
+- `kernel/diag/runtime_checker.h` / `.cpp` — three new
+  HealthIssues (`MassFsWriteRateSustained`, `MassFsWriteRateLong`,
+  `CanaryFileTouched`), `RuntimeCheckerNoteFsWriteRate-
+  Exceeded(level)` extended, new `RuntimeCheckerNoteCanaryFile-
+  Touched`
+- `kernel/fs/file_route.cpp` — canary checks on create / unlink /
+  rename
+- `kernel/subsystems/linux/syscall_fs_mut.cpp` — canary checks on
+  Linux unlink + rename
+- `kernel/subsystems/linux/syscall_file.cpp` — canary check on
+  Linux open with O_CREAT
+- `kernel/security/attack_sim.cpp` — three new attacks +
+  spec-table entries

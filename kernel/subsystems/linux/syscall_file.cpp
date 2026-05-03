@@ -27,6 +27,7 @@
 #include "proc/process.h"
 #include "fs/fat32.h"
 #include "mm/address_space.h"
+#include "security/canary.h"
 #include "subsystems/win32/dir_syscall.h"
 
 namespace duetos::subsystems::linux::internal
@@ -126,6 +127,11 @@ i64 DoOpen(u64 user_path, u64 flags, u64 mode)
         {
             return kENOENT;
         }
+        // Canary wall: O_CREAT means "create this path". Same
+        // policy as Win32 SYS_FILE_CREATE — refuse if the path
+        // is a canary or has a suspicious extension.
+        if (::duetos::security::CanaryCheck(leaf, "open-O_CREAT"))
+            return kEACCES;
         // O_CREAT path: don't physically create the file yet —
         // FAT32's AppendInDir explicitly refuses to grow zero-byte
         // files (first_cluster<2 guards in fat32_write.cpp), so a

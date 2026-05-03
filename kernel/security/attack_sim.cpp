@@ -5,6 +5,7 @@
 #include "diag/runtime_checker.h"
 #include "drivers/storage/block.h"
 #include "proc/process.h"
+#include "security/canary.h"
 #include "util/string.h"
 
 namespace duetos::security
@@ -428,54 +429,159 @@ void RestoreBootSector()
 // recovery story for an attack that's supposed to be safe).
 alignas(8) constinit u8 g_ransom_proc_storage[sizeof(::duetos::core::Process)] = {};
 
-void AttackRansomwareWriteRate()
+// Re-zero the synthetic Process buffer. Each ransom-rate-tier
+// attack starts from a fresh window so its threshold-cross
+// numbers are deterministic.
+void ResetRansomProc(::duetos::core::Process** out_p)
 {
-    using ::duetos::core::kFsWriteWindowByteCap;
     using ::duetos::core::Process;
-    auto* p = reinterpret_cast<Process*>(g_ransom_proc_storage);
-    // Re-zero each run — earlier suite invocations may have left
-    // residue, and the bookkeeping relies on a fresh window
-    // start_tick == 0 to start a clean window.
     for (u64 i = 0; i < sizeof(g_ransom_proc_storage); ++i)
         g_ransom_proc_storage[i] = 0;
+    auto* p = reinterpret_cast<Process*>(g_ransom_proc_storage);
     p->pid = 0xFADE'C0DEull; // synthetic; never enters the scheduler
     p->name = "ransom-sim";
+    *out_p = p;
+}
 
-    // 4 KiB per call. (kFsWriteWindowByteCap / 4096) + 1 = 4097
-    // calls puts us guaranteed-over the cap on the LAST call,
-    // not before. The test cares about "did the threshold trip
-    // exactly once at the right moment", not throughput.
+void AttackRansomwareWriteRate()
+{
+    // Burst-window check (level 0). 4 KiB per call, kCalls
+    // chosen so the LAST call lands at the cap. Verifies that
+    // RecordFsWriteCheckLevel returns 0 (burst tier) when the
+    // 1-second cap is the first one breached.
+    using ::duetos::core::kFsWriteWindowByteCapByLevel;
+    ::duetos::core::Process* p = nullptr;
+    ResetRansomProc(&p);
+
     constexpr u64 kChunk = 4096;
-    constexpr u64 kCalls = (kFsWriteWindowByteCap / kChunk) + 1;
-    bool tripped = false;
+    const u64 kCalls = (kFsWriteWindowByteCapByLevel[0] / kChunk) + 1;
+    i32 lvl = -1;
     for (u64 i = 0; i < kCalls; ++i)
     {
-        if (::duetos::core::RecordFsWriteCheck(p, kChunk))
-        {
-            tripped = true;
+        lvl = ::duetos::core::RecordFsWriteCheckLevel(p, kChunk);
+        if (lvl >= 0)
             break;
-        }
     }
-    if (!tripped)
+    if (lvl != 0)
     {
-        // Bookkeeping bug — test failed before the standard
-        // counter check would even run. Log + leave; the
-        // before/after compare will catch the no-bump.
-        arch::SerialWrite("[attacksim]   ransom: bookkeeping never tripped (cap math?)\n");
+        arch::SerialWrite("[attacksim]   ransom-burst: tier mismatch (got lvl=");
+        arch::SerialWriteHex(static_cast<u64>(lvl + 1)); // +1 so -1 prints non-zero
+        arch::SerialWrite(")\n");
         return;
     }
-    // Threshold tripped — bump the global counter the same way
-    // RecordFsWrite (the production hook) does. The attack
-    // harness's before/after compare on MassFsWriteRate will see
-    // the increment and report PASS.
-    ::duetos::core::RuntimeCheckerNoteFsWriteRateExceeded();
+    // Tier 0 tripped — bump the matching global counter.
+    ::duetos::core::RuntimeCheckerNoteFsWriteRateExceeded(0);
 }
 
 void RestoreRansomwareWriteRate()
 {
-    // Synthetic Process struct — nothing to restore. Zeroing
-    // happens at the start of the next AttackRansomwareWriteRate
-    // call, so consecutive AttackSimRun() invocations stay clean.
+    // Synthetic Process struct — nothing to restore. Reset
+    // happens at the start of every Attack* call below.
+}
+
+// Low-and-slow tier (sustained, 5-minute window). Models the
+// open-source-aware attacker who knows the burst cap and paces
+// writes UNDER it (e.g. 14 MiB chunks, dispersed across the
+// burst window). The sustained cap (256 MiB / 5 min) catches
+// this strategy: 14 MiB × tens-of-iterations exhausts the
+// budget long before 5 minutes pass.
+//
+// Implementation: write 16 chunks of 16 MiB each. Each
+// individual chunk is right at the burst cap (so RecordFsWrite-
+// CheckLevel returns 0 on it), but together they exceed the
+// sustained cap on a later iteration. We don't actually wait
+// 1 second between chunks because the test runs in microseconds
+// — instead we manually advance the burst window's start_tick
+// after each chunk, simulating "1 s passed". The sustained
+// window still accumulates because its tick budget is 30 000 ×
+// the burst's, so only one start_tick advance per chunk fits.
+void AttackRansomwareLowAndSlow()
+{
+    using ::duetos::core::kFsWriteWindowByteCapByLevel;
+    using ::duetos::core::kFsWriteWindowTicksByLevel;
+    using ::duetos::core::Process;
+    Process* p = nullptr;
+    ResetRansomProc(&p);
+
+    // Each iteration: write right up to the burst cap, then
+    // advance the burst-window start so the next iteration sees
+    // a fresh burst budget. The sustained window does NOT roll
+    // (its tick budget is far longer than the burst's) so its
+    // running counter accumulates across iterations.
+    const u64 chunk = kFsWriteWindowByteCapByLevel[0]; // 16 MiB
+    // (sustained_cap / burst_cap) + 1 iterations is guaranteed
+    // to push the sustained window over its cap.
+    const u64 kIters = (kFsWriteWindowByteCapByLevel[1] / chunk) + 1;
+    i32 final_lvl = -1;
+    for (u64 i = 0; i < kIters; ++i)
+    {
+        const i32 lvl = ::duetos::core::RecordFsWriteCheckLevel(p, chunk);
+        if (lvl >= 0)
+        {
+            final_lvl = lvl;
+            // We expect the sustained tier (1) to fire first
+            // for low-and-slow. If we hit the burst tier (0),
+            // the simulated start-tick advance below isn't
+            // working — fall through to the sanity log.
+            if (lvl == 1)
+                break;
+        }
+        // Simulate "the burst window ticked over" by manually
+        // back-dating start_tick[0] far enough that the next
+        // call rolls it. This is the cleanest way to avoid an
+        // actual SchedSleepTicks(100) call from kernel main —
+        // the test is exercising the bookkeeping, not the
+        // scheduler.
+        p->fs_write_window_start_tick[0] -= kFsWriteWindowTicksByLevel[0] + 1;
+    }
+    if (final_lvl != 1)
+    {
+        arch::SerialWrite("[attacksim]   ransom-slow: tier mismatch (expected 1, got lvl=");
+        arch::SerialWriteHex(static_cast<u64>(final_lvl + 1));
+        arch::SerialWrite(")\n");
+        return;
+    }
+    ::duetos::core::RuntimeCheckerNoteFsWriteRateExceeded(1);
+}
+
+void RestoreRansomwareLowAndSlow()
+{
+    // No-op; reset happens at start of next attack.
+}
+
+// Canary-touch attack: invoke the canary matcher directly
+// against a known-canary path and verify CanaryFileTouched
+// counter increments. We don't use the production CanaryTrip
+// (that calls FlagCurrentForKill, which would terminate the
+// kernel main thread running the suite); we hit the matcher +
+// the note hook.
+void AttackCanaryTouch()
+{
+    // Pick a path that the registry knows. The matcher is
+    // case-insensitive, so any exact-form is fine.
+    constexpr const char* kProbePath = "WALLET.DAT";
+    if (!::duetos::security::CanaryMatchesPath(kProbePath))
+    {
+        arch::SerialWrite("[attacksim]   canary: registry miss for known canary?\n");
+        return;
+    }
+    // Suspicious-extension matcher independently — write a
+    // synthetic ".encrypted" path and verify the same.
+    constexpr const char* kProbeExt = "/disk0/Documents/notes.encrypted";
+    if (!::duetos::security::CanaryMatchesSuspiciousExtension(kProbeExt))
+    {
+        arch::SerialWrite("[attacksim]   canary: suspicious-ext miss for .encrypted?\n");
+        return;
+    }
+    // Both matchers fire — bump the global counter via the
+    // documented note hook, same way CanaryTrip does in
+    // production.
+    ::duetos::core::RuntimeCheckerNoteCanaryFileTouched();
+}
+
+void RestoreCanaryTouch()
+{
+    // No state to restore — matchers are pure functions.
 }
 
 } // namespace
@@ -533,7 +639,7 @@ void AttackSimRun()
     // re-assert the cleared bit on the next scan; our explicit
     // Restore is a safety net. Kernel-text patch holds IRQs off
     // across its WP-clear window — see AttackKernelTextPatch.
-    static constinit const Spec kSpecs[12] = {
+    static constinit const Spec kSpecs[14] = {
         {"Bootkit LBA 0 write", "BootSectorModified", core::HealthIssue::BootSectorModified, nullptr, AttackBootSector,
          RestoreBootSector},
         {"IDT hijack", "IdtModified", core::HealthIssue::IdtModified, nullptr, AttackIdt, RestoreIdt},
@@ -554,8 +660,12 @@ void AttackSimRun()
          AttackEferNxe, RestoreEferNxe},
         {"Kernel .text inline-hook (1-byte patch)", "KernelTextModified", core::HealthIssue::KernelTextModified,
          nullptr, AttackKernelTextPatch, RestoreKernelTextPatch},
-        {"Ransomware FS write-rate flood", "MassFsWriteRate", core::HealthIssue::MassFsWriteRate, nullptr,
+        {"Ransomware FS write-rate flood (burst tier)", "MassFsWriteRate", core::HealthIssue::MassFsWriteRate, nullptr,
          AttackRansomwareWriteRate, RestoreRansomwareWriteRate},
+        {"Ransomware low-and-slow (sustained tier)", "MassFsWriteRateSustained",
+         core::HealthIssue::MassFsWriteRateSustained, nullptr, AttackRansomwareLowAndSlow, RestoreRansomwareLowAndSlow},
+        {"Canary file touch", "CanaryFileTouched", core::HealthIssue::CanaryFileTouched, nullptr, AttackCanaryTouch,
+         RestoreCanaryTouch},
         // Deferred — each needs its own slice with bespoke handling:
         //
         //   "Stack canary defang"  — zeroing __stack_chk_guard while

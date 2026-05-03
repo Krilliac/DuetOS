@@ -529,36 +529,57 @@ bool ShouldLogDenial(u64 denial_index)
     return denial_index == 1 || (denial_index & 31) == 0;
 }
 
-bool RecordFsWriteCheck(Process* p, u64 bytes)
+i32 RecordFsWriteCheckLevel(Process* p, u64 bytes)
 {
     if (p == nullptr || bytes == 0)
-        return false;
+        return -1;
     p->fs_write_bytes_total += bytes;
 
-    // Roll the window: TickCount is monotonic, so a "now older
-    // than start by >= window" check covers both the fresh-window
-    // (start_tick == 0) case and the legitimate roll case in one
-    // expression. We deliberately reset to `bytes` (not 0) on
-    // roll so a single oversized write is still counted toward
-    // the new window — an attacker cannot evade the cap by
-    // pacing one >cap write per window.
+    // Walk every window level. TickCount is monotonic, so a
+    // "now older than start by >= window" check covers both
+    // the fresh-window (start_tick == 0) case and the legitimate
+    // roll case in one expression. We deliberately reset to
+    // `bytes` (not 0) on roll so a single oversized write is
+    // still counted toward the new window — an attacker cannot
+    // evade the cap by pacing one >cap write per window.
+    //
+    // Returns the index of the FIRST level that tripped, or -1
+    // if all three are still within budget. Returning the index
+    // (instead of bool) lets the caller log which timescale's
+    // wall just fired — an attacker who tripped the long-tail
+    // wall is materially different from one who tripped the
+    // burst wall, and operators care about the difference.
     const u64 now = ::duetos::time::TickCount();
-    const u64 start = p->fs_write_window_start_tick;
-    if (start == 0 || now - start >= kFsWriteWindowTicks)
+    i32 first_tripped = -1;
+    for (u32 lvl = 0; lvl < Process::kFsWriteWindowCount; ++lvl)
     {
-        p->fs_write_window_start_tick = now;
-        p->fs_write_window_bytes = bytes;
+        const u64 ticks = kFsWriteWindowTicksByLevel[lvl];
+        const u64 cap = kFsWriteWindowByteCapByLevel[lvl];
+        const u64 start = p->fs_write_window_start_tick[lvl];
+        if (start == 0 || now - start >= ticks)
+        {
+            p->fs_write_window_start_tick[lvl] = now;
+            p->fs_write_window_bytes[lvl] = bytes;
+        }
+        else
+        {
+            p->fs_write_window_bytes[lvl] += bytes;
+        }
+        if (first_tripped < 0 && p->fs_write_window_bytes[lvl] > cap)
+            first_tripped = static_cast<i32>(lvl);
     }
-    else
-    {
-        p->fs_write_window_bytes += bytes;
-    }
-    return p->fs_write_window_bytes > kFsWriteWindowByteCap;
+    return first_tripped;
+}
+
+bool RecordFsWriteCheck(Process* p, u64 bytes)
+{
+    return RecordFsWriteCheckLevel(p, bytes) >= 0;
 }
 
 void RecordFsWrite(Process* p, u64 bytes)
 {
-    if (!RecordFsWriteCheck(p, bytes))
+    const i32 lvl = RecordFsWriteCheckLevel(p, bytes);
+    if (lvl < 0)
         return;
     // Threshold crossed. Log every over-cap call so the operator
     // sees how badly the rogue process pushed past the limit;
@@ -568,12 +589,12 @@ void RecordFsWrite(Process* p, u64 bytes)
     arch::SerialWriteHex(p->pid);
     arch::SerialWrite(" name=\"");
     arch::SerialWrite(p->name != nullptr ? p->name : "<null>");
-    arch::SerialWrite("\" wrote ");
-    arch::SerialWriteHex(p->fs_write_window_bytes);
-    arch::SerialWrite(" bytes / ");
-    arch::SerialWriteHex(kFsWriteWindowTicks);
-    arch::SerialWrite("-tick window — terminating (suspected ransomware)\n");
-    RuntimeCheckerNoteFsWriteRateExceeded();
+    arch::SerialWrite("\" tripped ");
+    arch::SerialWrite(kFsWriteWindowLabels[lvl]);
+    arch::SerialWrite(" cap (window_bytes=");
+    arch::SerialWriteHex(p->fs_write_window_bytes[lvl]);
+    arch::SerialWrite(") — terminating (suspected ransomware)\n");
+    RuntimeCheckerNoteFsWriteRateExceeded(static_cast<u32>(lvl));
     sched::FlagCurrentForKill(sched::KillReason::FsWriteRateExceeded);
 }
 

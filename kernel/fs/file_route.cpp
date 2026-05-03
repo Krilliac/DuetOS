@@ -32,6 +32,7 @@
 #include "fs/vfs.h"
 #include "log/klog.h"
 #include "proc/process.h"
+#include "security/canary.h"
 #include "subsystems/linux/inotify.h"
 
 namespace duetos::fs::routing
@@ -343,6 +344,17 @@ u64 CreateForProcess(::duetos::core::Process* proc, const char* path, const void
         return u64(-1);
     }
 
+    // Canary wall: refuse the create if the path matches a
+    // registered canary or a suspicious-extension pattern. Trip
+    // happens BEFORE the on-disk plant — a ransomware that
+    // tries to write its encrypted-output file dies before its
+    // bytes ever land. CanaryCheck flags the calling task for
+    // kill; we still return failure so the syscall reports
+    // -1 to the caller (it'll be reaped before it sees the
+    // return anyway, but the contract is consistent).
+    if (::duetos::security::CanaryCheck(disk_rest, "create"))
+        return u64(-1);
+
     const fat32::Volume* vol = fat32::Fat32Volume(disk_idx);
     if (vol == nullptr)
     {
@@ -505,6 +517,11 @@ bool UnlinkForProcess(::duetos::core::Process* proc, const char* path)
     const char* rest = nullptr;
     if (!ParseDiskPath(path, &idx, &rest))
         return false;
+    // Canary wall: refuse unlink of a canary path. Ransomware
+    // typically deletes the original after writing the encrypted
+    // copy, so the unlink surface is as important as create.
+    if (::duetos::security::CanaryCheck(rest, "unlink"))
+        return false;
     const fat32::Volume* v = fat32::Fat32Volume(idx);
     if (v == nullptr)
         return false;
@@ -561,6 +578,15 @@ bool RenameForProcess(::duetos::core::Process* proc, const char* src, const char
     if (!ParseDiskPath(src, &src_idx, &src_rest))
         return false;
     if (!ParseDiskPath(dst, &dst_idx, &dst_rest))
+        return false;
+    // Canary wall: refuse rename if EITHER endpoint is a canary
+    // / suspicious-extension target. Ransomware that does
+    // "rename X to X.encrypted" trips the dst-side check; an
+    // attacker masquerading "rename canary to something safe"
+    // trips the src-side check.
+    if (::duetos::security::CanaryCheck(src_rest, "rename-src"))
+        return false;
+    if (::duetos::security::CanaryCheck(dst_rest, "rename-dst"))
         return false;
     if (src_idx != dst_idx)
         return false; // cross-volume rename not supported in v0

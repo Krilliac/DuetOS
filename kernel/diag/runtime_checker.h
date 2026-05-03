@@ -180,8 +180,8 @@ enum class HealthIssue : u32
     // silently until something catches them.
     IrqStorm,
 
-    // A user process pushed past `kFsWriteWindowByteCap` bytes
-    // written within `kFsWriteWindowTicks`. Defends against
+    // A user process pushed past the burst-window FS write cap
+    // (1 s / `kFsWriteWindowByteCapByLevel[0]`). Defends against
     // ransomware-style mass file rewrites by a trusted-but-
     // compromised process. Counted globally; the kill itself is
     // enacted at the syscall site (see `RecordFsWrite` in
@@ -189,6 +189,27 @@ enum class HealthIssue : u32
     // operator visibility — every increment represents one
     // ransomware-style burst the kernel actively shut down.
     MassFsWriteRate,
+
+    // A process exceeded the SUSTAINED-window FS write cap
+    // (5 min / `kFsWriteWindowByteCapByLevel[1]`). Catches the
+    // low-and-slow attacker who reads our open-source threshold
+    // constants and paces writes to stay under the burst cap;
+    // even at 14 MiB/s sustained the 5-minute budget runs out.
+    MassFsWriteRateSustained,
+
+    // A process exceeded the LONG-window FS write cap
+    // (1 h / `kFsWriteWindowByteCapByLevel[2]`). Final wall
+    // against an attacker pacing under both prior windows —
+    // even 700 KiB/s averaged over an hour blows past 2 GiB.
+    MassFsWriteRateLong,
+
+    // A process touched (created / wrote-to / unlinked /
+    // renamed) a registered canary or suspicious-extension
+    // path. No threshold — first touch trips. The kill is
+    // enacted at the syscall site (see `CanaryTrip` in
+    // kernel/security/canary.cpp); this finding is the
+    // operator-visible counter.
+    CanaryFileTouched,
 
     // Count sentinel
     Count,
@@ -266,17 +287,28 @@ u64 RuntimeCheckerScan();
 /// ignoring the return value.
 void RuntimeCheckerTick();
 
-/// Note that a process has just crossed the FS write-rate cap.
-/// Called from `RecordFsWrite` (kernel/proc/process.cpp) when the
-/// per-process window byte count exceeds `kFsWriteWindowByteCap`.
-/// Bumps the `MassFsWriteRate` counter through the standard
-/// `Report` path so the response policy + counter snapshot stay
-/// consistent with the periodic-scan detectors.
+/// Note that a process has just crossed an FS write-rate cap.
+/// Called from `RecordFsWrite` (kernel/proc/process.cpp) when
+/// the per-process window byte count exceeds the cap for the
+/// indicated level. `level_index` selects which HealthIssue is
+/// bumped:
+///   0 -> MassFsWriteRate            (1 s burst window)
+///   1 -> MassFsWriteRateSustained   (5 min sustained window)
+///   2 -> MassFsWriteRateLong        (1 h long-tail window)
+/// Out-of-range indices route to the burst counter as a safe
+/// default (no out-of-bounds risk).
 ///
 /// Safe from any context: bumps a counter and writes a log line.
 /// Does NOT itself flag the calling task — kill enforcement is
 /// the caller's responsibility (see `RecordFsWrite`).
-void RuntimeCheckerNoteFsWriteRateExceeded();
+void RuntimeCheckerNoteFsWriteRateExceeded(u32 level_index);
+
+/// Note that a canary path has been touched. Called from
+/// `security::CanaryTrip` (kernel/security/canary.cpp) when a
+/// matched syscall site detected a forbidden-path access.
+/// Bumps the `CanaryFileTouched` HealthIssue counter through
+/// the standard `Report` path. Safe from any context.
+void RuntimeCheckerNoteCanaryFileTouched();
 
 /// Current stats snapshot. Returned by const-reference to avoid
 /// copying the 128-byte per-issue array on every call (kernel

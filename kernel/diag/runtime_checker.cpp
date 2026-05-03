@@ -1257,7 +1257,13 @@ const char* HealthIssueName(HealthIssue i)
     case HealthIssue::IrqStorm:
         return "IRQ vector firing above rate ceiling (chattering line or runaway handler)";
     case HealthIssue::MassFsWriteRate:
-        return "process exceeded FS write-rate cap (suspected ransomware; task killed)";
+        return "process exceeded FS write-rate burst cap (1 s window; suspected ransomware, task killed)";
+    case HealthIssue::MassFsWriteRateSustained:
+        return "process exceeded FS write-rate sustained cap (5 min window; low-and-slow ransomware, task killed)";
+    case HealthIssue::MassFsWriteRateLong:
+        return "process exceeded FS write-rate long-tail cap (1 h window; persistent attacker, task killed)";
+    case HealthIssue::CanaryFileTouched:
+        return "process touched a canary / suspicious-extension path (task killed)";
     default:
         return "(unnamed issue)";
     }
@@ -1385,15 +1391,42 @@ void RuntimeCheckerTick()
     (void)RuntimeCheckerScan();
 }
 
-void RuntimeCheckerNoteFsWriteRateExceeded()
+void RuntimeCheckerNoteFsWriteRateExceeded(u32 level_index)
 {
+    // Map window-level index -> HealthIssue. Out-of-range falls
+    // back to the burst counter (no out-of-bounds risk; defensive
+    // default that still surfaces the event).
+    HealthIssue issue;
+    switch (level_index)
+    {
+    case 0:
+        issue = HealthIssue::MassFsWriteRate;
+        break;
+    case 1:
+        issue = HealthIssue::MassFsWriteRateSustained;
+        break;
+    case 2:
+        issue = HealthIssue::MassFsWriteRateLong;
+        break;
+    default:
+        issue = HealthIssue::MassFsWriteRate;
+        break;
+    }
     // Route through Report so the per-issue counter, last_issue
     // tracking, and the standard log line all stay consistent
-    // with the periodic-scan detectors. Response policy for
-    // MassFsWriteRate falls through to LogOnly (default branch
+    // with the periodic-scan detectors. Response policy for the
+    // mass-write tier falls through to LogOnly (default branch
     // in ResponseFor) — actual kill enforcement is done by the
     // syscall site, not the checker.
-    Report(HealthIssue::MassFsWriteRate);
+    Report(issue);
+}
+
+void RuntimeCheckerNoteCanaryFileTouched()
+{
+    // Same path: bump the standard counter via Report. Response
+    // policy for CanaryFileTouched is LogOnly (default branch);
+    // kill is enacted at the syscall site by `CanaryTrip`.
+    Report(HealthIssue::CanaryFileTouched);
 }
 
 const HealthReport& RuntimeCheckerStatusRead()
