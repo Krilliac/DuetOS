@@ -1,8 +1,8 @@
-# GPT parser v0 — PMBR + primary header + entry array, CRC-validated
+# GPT parser v0 + write surface — PMBR + primary/backup header + entry array, CRC-validated
 
-**Last updated:** 2026-04-21
+**Last updated:** 2026-05-03 (write surface added)
 **Type:** Observation
-**Status:** Active
+**Status:** Active — read + write paths both wired
 
 ## Description
 
@@ -12,6 +12,35 @@ entry array from any registered block device, validates the
 magic + CRC32s, and caches the resulting partition list so the
 next slice (FAT32 mount) can pick a partition by type GUID and
 hand its sector range to a filesystem driver.
+
+## 2026-05-03 — write surface
+
+`GptInitDisk(block_handle, disk_sector_count, disk_guid, parts,
+part_count)` now lays down a fresh GPT on a writable block
+device per UEFI 2.10 §5.3:
+
+  - LBA 0:        Protective MBR (single 0xEE entry, 0x55AA tail).
+  - LBA 1:        Primary GPT header.
+  - LBA 2..33:    Primary entries array (canonical 128 × 128 bytes).
+  - LBA N-33..N-2: Backup entries array (byte-for-byte mirror).
+  - LBA N-1:      Backup GPT header.
+
+Header + entries-array CRC32s computed via the in-tree
+`util/crc32` module (header_crc32 zeroed during the calculation,
+restored after — the same convention the parser uses).
+
+Pre-conditions enforced before touching the disk:
+  - Handle is `BlockDeviceIsWritable`.
+  - `disk_sector_count >= 67` (1 PMBR + 1 hdr + 32 entries +
+    1 data + 32 backup entries + 1 backup hdr).
+  - `part_count <= 128`.
+  - Every per-partition LBA range falls inside `[34, N-34]`.
+
+Marked DESTRUCTIVE — caller responsible for the user-typed
+confirmation step. Round-trip verified by the boot self-test:
+creates a 256-sector RAM disk via `RamBlockDeviceCreate`, calls
+`GptInitDisk` with one ESP partition (LBA 64..200), then runs
+`GptProbe` and asserts the partition fields parse back exactly.
 
 Completes **stage 4** of `.claude/knowledge/storage-and-filesystem-roadmap.md`.
 
