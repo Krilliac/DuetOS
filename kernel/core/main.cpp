@@ -106,6 +106,7 @@
 #include "crypto/prf.h"
 #include "crypto/sha1.h"
 #include "crypto/sha256.h"
+#include "crypto/sha512.h"
 #include "net/wireless/eapol.h"
 #include "net/wireless/fourway.h"
 #include "net/wireless/mlme.h"
@@ -1959,6 +1960,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::util::Adler32SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Sha1SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Sha256SelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::Sha512SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Md5SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::HmacSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Pbkdf2SelfTest());
