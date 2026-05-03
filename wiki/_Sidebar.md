@@ -71,6 +71,8 @@
 - [Design Decisions Log](reference/Design-Decisions.md)
 - [Directory Layout](reference/Directory-Layout.md)
 - [Knowledge Base Index](reference/Knowledge-Base-Index.md)
+- [Shell Commands](reference/Shell-Commands.md)
+- [Shell Scripting](reference/Shell-Scripting.md)
 
 ### Advanced
 - [Contributing](advanced/Contributing.md)

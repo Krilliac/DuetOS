@@ -578,18 +578,21 @@ void CmdExpr(u32 argc, char** argv)
 {
     if (argc < 4)
     {
+        ShellSetExit(2);
         ConsoleWriteln("EXPR: USAGE: EXPR A OP B   (OP = + - * / %)");
         return;
     }
     i64 a = 0, b = 0;
     if (!ParseI64(argv[1], &a) || !ParseI64(argv[3], &b))
     {
+        ShellSetExit(2);
         ConsoleWriteln("EXPR: BAD NUMBER");
         return;
     }
     const char* op = argv[2];
     if (op[1] != '\0')
     {
+        ShellSetExit(2);
         ConsoleWriteln("EXPR: BAD OPERATOR");
         return;
     }
@@ -608,6 +611,7 @@ void CmdExpr(u32 argc, char** argv)
     case '/':
         if (b == 0)
         {
+            ShellSetExit(2);
             ConsoleWriteln("EXPR: DIVIDE BY ZERO");
             return;
         }
@@ -615,6 +619,7 @@ void CmdExpr(u32 argc, char** argv)
         // panic the kernel — refuse the call instead.
         if (a == static_cast<i64>(0x8000000000000000ULL) && b == -1)
         {
+            ShellSetExit(2);
             ConsoleWriteln("EXPR: OVERFLOW");
             return;
         }
@@ -623,17 +628,20 @@ void CmdExpr(u32 argc, char** argv)
     case '%':
         if (b == 0)
         {
+            ShellSetExit(2);
             ConsoleWriteln("EXPR: DIVIDE BY ZERO");
             return;
         }
         if (a == static_cast<i64>(0x8000000000000000ULL) && b == -1)
         {
+            ShellSetExit(2);
             ConsoleWriteln("EXPR: OVERFLOW");
             return;
         }
         r = a % b;
         break;
     default:
+        ShellSetExit(2);
         ConsoleWriteln("EXPR: BAD OPERATOR");
         return;
     }

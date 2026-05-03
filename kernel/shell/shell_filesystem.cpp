@@ -188,12 +188,14 @@ void CmdCp(u32 argc, char** argv)
 {
     if (argc < 3)
     {
+        ShellSetExit(2);
         ConsoleWriteln("CP: USAGE: CP SRC DST");
         return;
     }
     const char* dst_leaf = TmpLeaf(argv[2]);
     if (dst_leaf == nullptr || *dst_leaf == '\0')
     {
+        ShellSetExit(1);
         ConsoleWriteln("CP: DST MUST BE /tmp/<NAME>");
         return;
     }
@@ -201,12 +203,14 @@ void CmdCp(u32 argc, char** argv)
     const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
     if (n == static_cast<u32>(-1))
     {
+        ShellSetExit(1);
         ConsoleWrite("CP: CANNOT READ: ");
         ConsoleWriteln(argv[1]);
         return;
     }
     if (!duetos::fs::TmpFsWrite(dst_leaf, scratch, n))
     {
+        ShellSetExit(1);
         ConsoleWrite("CP: WRITE FAILED: ");
         ConsoleWriteln(argv[2]);
     }
@@ -216,6 +220,7 @@ void CmdMv(u32 argc, char** argv)
 {
     if (argc < 3)
     {
+        ShellSetExit(2);
         ConsoleWriteln("MV: USAGE: MV SRC DST");
         return;
     }
@@ -223,6 +228,7 @@ void CmdMv(u32 argc, char** argv)
     const char* dst_leaf = TmpLeaf(argv[2]);
     if (src_leaf == nullptr || *src_leaf == '\0' || dst_leaf == nullptr || *dst_leaf == '\0')
     {
+        ShellSetExit(1);
         ConsoleWriteln("MV: SRC AND DST MUST BOTH BE /tmp/<NAME>");
         return;
     }
@@ -230,6 +236,7 @@ void CmdMv(u32 argc, char** argv)
     u32 len = 0;
     if (!duetos::fs::TmpFsRead(src_leaf, &bytes, &len))
     {
+        ShellSetExit(1);
         ConsoleWrite("MV: NO SUCH FILE: ");
         ConsoleWriteln(argv[1]);
         return;
@@ -245,6 +252,7 @@ void CmdMv(u32 argc, char** argv)
     }
     if (!duetos::fs::TmpFsWrite(dst_leaf, scratch, n))
     {
+        ShellSetExit(1);
         ConsoleWrite("MV: WRITE FAILED: ");
         ConsoleWriteln(argv[2]);
         return;
@@ -258,6 +266,7 @@ void CmdWc(u32 argc, char** argv)
 {
     if (argc < 2)
     {
+        ShellSetExit(2);
         ConsoleWriteln("WC: MISSING PATH");
         return;
     }
@@ -265,6 +274,7 @@ void CmdWc(u32 argc, char** argv)
     const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
     if (n == static_cast<u32>(-1))
     {
+        ShellSetExit(1);
         ConsoleWrite("WC: NO SUCH FILE: ");
         ConsoleWriteln(argv[1]);
         return;
@@ -312,6 +322,7 @@ void CmdHead(u32 argc, char** argv)
     const u32 want = ParseLineCount(argc, argv, 5, &path_idx);
     if (path_idx >= argc)
     {
+        ShellSetExit(2);
         ConsoleWriteln("HEAD: MISSING PATH");
         return;
     }
@@ -319,6 +330,7 @@ void CmdHead(u32 argc, char** argv)
     const u32 n = ReadFileToBuf(argv[path_idx], scratch, sizeof(scratch));
     if (n == static_cast<u32>(-1))
     {
+        ShellSetExit(1);
         ConsoleWrite("HEAD: NO SUCH FILE: ");
         ConsoleWriteln(argv[path_idx]);
         return;
@@ -344,6 +356,7 @@ void CmdTail(u32 argc, char** argv)
     const u32 want = ParseLineCount(argc, argv, 5, &path_idx);
     if (path_idx >= argc)
     {
+        ShellSetExit(2);
         ConsoleWriteln("TAIL: MISSING PATH");
         return;
     }
@@ -351,6 +364,7 @@ void CmdTail(u32 argc, char** argv)
     const u32 n = ReadFileToBuf(argv[path_idx], scratch, sizeof(scratch));
     if (n == static_cast<u32>(-1))
     {
+        ShellSetExit(1);
         ConsoleWrite("TAIL: NO SUCH FILE: ");
         ConsoleWriteln(argv[path_idx]);
         return;
@@ -394,6 +408,7 @@ void CmdSort(u32 argc, char** argv)
 {
     if (argc < 2)
     {
+        ShellSetExit(2);
         ConsoleWriteln("SORT: MISSING PATH");
         return;
     }
@@ -401,6 +416,7 @@ void CmdSort(u32 argc, char** argv)
     const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
     if (n == static_cast<u32>(-1))
     {
+        ShellSetExit(1);
         ConsoleWrite("SORT: NO SUCH FILE: ");
         ConsoleWriteln(argv[1]);
         return;
@@ -442,6 +458,7 @@ void CmdUniq(u32 argc, char** argv)
 {
     if (argc < 2)
     {
+        ShellSetExit(2);
         ConsoleWriteln("UNIQ: MISSING PATH");
         return;
     }
@@ -449,6 +466,7 @@ void CmdUniq(u32 argc, char** argv)
     const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
     if (n == static_cast<u32>(-1))
     {
+        ShellSetExit(1);
         ConsoleWrite("UNIQ: NO SUCH FILE: ");
         ConsoleWriteln(argv[1]);
         return;
@@ -487,6 +505,7 @@ void CmdGrep(u32 argc, char** argv)
 {
     if (argc < 3)
     {
+        ShellSetExit(2);
         ConsoleWriteln("GREP: USAGE: GREP PATTERN PATH");
         return;
     }
@@ -496,14 +515,17 @@ void CmdGrep(u32 argc, char** argv)
     const u32 n = ReadFileToBuf(path, scratch, sizeof(scratch));
     if (n == static_cast<u32>(-1))
     {
+        ShellSetExit(1);
         ConsoleWrite("GREP: NO SUCH FILE: ");
         ConsoleWriteln(path);
         return;
     }
     // Walk line by line. A line runs from the last newline+1 to
     // the next newline (or EOF). For each line, substring-match
-    // on `pattern`.
+    // on `pattern`. Track whether any line matched so we can set
+    // POSIX-flavoured `$?` (= 1 if no match, = 0 if at least one).
     u32 start = 0;
+    bool any = false;
     for (u32 i = 0; i <= n; ++i)
     {
         const bool at_end = (i == n);
@@ -512,6 +534,7 @@ void CmdGrep(u32 argc, char** argv)
             const u32 len = i - start;
             if (SubstringPresent(&scratch[start], len, pattern))
             {
+                any = true;
                 for (u32 j = 0; j < len; ++j)
                 {
                     ConsoleWriteChar(scratch[start + j]);
@@ -521,12 +544,15 @@ void CmdGrep(u32 argc, char** argv)
             start = i + 1;
         }
     }
+    if (!any)
+        ShellSetExit(1);
 }
 
 void CmdFind(u32 argc, char** argv)
 {
     if (argc < 2)
     {
+        ShellSetExit(2);
         ConsoleWriteln("FIND: USAGE: FIND NAME");
         return;
     }
@@ -698,6 +724,7 @@ void CmdCat(u32 argc, char** argv)
 {
     if (argc < 2)
     {
+        ShellSetExit(2);
         ConsoleWriteln("CAT: MISSING PATH");
         return;
     }
@@ -711,6 +738,7 @@ void CmdCat(u32 argc, char** argv)
         u32 len = 0;
         if (!duetos::fs::TmpFsRead(tmp_leaf, &bytes, &len))
         {
+            ShellSetExit(1);
             ConsoleWrite("CAT: NO SUCH FILE: ");
             ConsoleWriteln(path);
             return;
@@ -732,18 +760,21 @@ void CmdCat(u32 argc, char** argv)
         const fat::Volume* v = fat::Fat32Volume(0);
         if (v == nullptr)
         {
+            ShellSetExit(1);
             ConsoleWriteln("CAT: FAT32 NOT MOUNTED");
             return;
         }
         fat::DirEntry entry;
         if (!fat::Fat32LookupPath(v, fat_leaf, &entry))
         {
+            ShellSetExit(1);
             ConsoleWrite("CAT: NO SUCH FILE: ");
             ConsoleWriteln(path);
             return;
         }
         if (entry.attributes & 0x10)
         {
+            ShellSetExit(1);
             ConsoleWrite("CAT: IS A DIRECTORY: ");
             ConsoleWriteln(path);
             return;
@@ -819,17 +850,20 @@ void CmdTouch(u32 argc, char** argv)
 {
     if (argc < 2)
     {
+        ShellSetExit(2);
         ConsoleWriteln("TOUCH: MISSING PATH");
         return;
     }
     const char* leaf = TmpLeaf(argv[1]);
     if (leaf == nullptr || *leaf == '\0')
     {
+        ShellSetExit(1);
         ConsoleWriteln("TOUCH: ONLY /tmp/<NAME> IS WRITABLE");
         return;
     }
     if (!duetos::fs::TmpFsTouch(leaf))
     {
+        ShellSetExit(1);
         ConsoleWrite("TOUCH: FAILED: ");
         ConsoleWriteln(argv[1]);
     }
@@ -839,17 +873,20 @@ void CmdRm(u32 argc, char** argv)
 {
     if (argc < 2)
     {
+        ShellSetExit(2);
         ConsoleWriteln("RM: MISSING PATH");
         return;
     }
     const char* leaf = TmpLeaf(argv[1]);
     if (leaf == nullptr || *leaf == '\0')
     {
+        ShellSetExit(1);
         ConsoleWriteln("RM: ONLY /tmp/<NAME> IS WRITABLE");
         return;
     }
     if (!duetos::fs::TmpFsUnlink(leaf))
     {
+        ShellSetExit(1);
         ConsoleWrite("RM: NO SUCH FILE: ");
         ConsoleWriteln(argv[1]);
     }

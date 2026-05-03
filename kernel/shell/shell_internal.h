@@ -168,6 +168,19 @@ extern bool g_interrupt;
 void ReplaceLine(const char* text);
 
 // ---------------------------------------------------------------
+// Exit code of the most recently dispatched command. Surfaced to
+// scripts via the special `$?` token in $VAR substitution.
+// Definition lives in shell_state.cpp.
+//
+// Convention: 0 = success, 1 = generic failure, 2 = misuse of
+// shell builtin (POSIX flavour), 127 = command not found.
+// Handlers are not required to call ShellSetExit on success — the
+// dispatcher resets to 0 before each command runs.
+// ---------------------------------------------------------------
+i32 ShellLastExit();
+void ShellSetExit(i32 code);
+
+// ---------------------------------------------------------------
 // Top-level dispatcher (shell_dispatch.cpp). Splits a submitted
 // line into pipe stages, expands `!` history references and the
 // $VAR token-substitution, then walks the if/else chain that
@@ -484,6 +497,84 @@ void CmdMount();
 void CmdLsblk();
 void CmdLsgpt();
 void CmdLsmod();
+
+// ---------------------------------------------------------------
+// Extended get/set/manipulate commands (shell_extra.cpp).
+// Coreutils-flavour additions that round out the shell's day-to-
+// day surface — directory create/remove that routes between tmpfs
+// and FAT, file truncate, path canonicalisation, identity readouts
+// (id / groups / nproc / arch / tty), POSIX aliases (type /
+// printenv), filesystem-usage views (df / du), scheduler load,
+// history wipe, blocking pause, generator (yes), sync placeholder,
+// raw x86 I/O port access (admin-gated).
+// ---------------------------------------------------------------
+void CmdMkdir(u32 argc, char** argv);
+void CmdRmdir(u32 argc, char** argv);
+void CmdTruncate(u32 argc, char** argv);
+void CmdRealpath(u32 argc, char** argv);
+void CmdId();
+void CmdGroups();
+void CmdNproc();
+void CmdArch();
+void CmdTty();
+void CmdType(u32 argc, char** argv);
+void CmdPrintenv(u32 argc, char** argv);
+void CmdDf();
+void CmdDu(u32 argc, char** argv);
+void CmdLoadavg();
+void CmdClearhist();
+void CmdPause();
+void CmdYes(u32 argc, char** argv);
+void CmdSync();
+void CmdPort(u32 argc, char** argv);
+void CmdAssert(u32 argc, char** argv);
+void CmdWatch(u32 argc, char** argv);
+void CmdScript(u32 argc, char** argv);
+
+// ---------------------------------------------------------------
+// Scripting language v0 (shell_script.cpp).
+//
+// A small line-indexed interpreter that adds POSIX-shell-flavoured
+// control flow on top of the existing Dispatch() pipeline. Supports:
+//
+//   # comments
+//   if CMD ; then ... [elif CMD ; then ... ] [else ... ] fi
+//   while CMD ; do ... done
+//   for VAR in WORD1 WORD2 ... ; do ... done
+//
+// Plain command lines are handed straight to Dispatch(). Branch
+// conditions read $? after running their CMD: $? == 0 => true.
+// Block keywords must lead a line ("if " / "while " / "for " / "fi"
+// / "done" / "elif " / "else" / "then" / "do") — mid-line keywords
+// are not parsed in v0. The `; then` and `; do` clauses must sit on
+// the same line as their introducer (split across lines is v1).
+//
+// Scope limits (intentional):
+//   - 64 lines per script (kScriptMaxLines), 64 bytes per line
+//     (matches kInputMax). Source files larger than that get a
+//     "TOO LONG" diagnostic.
+//   - No functions; aliases cover the common cases.
+//   - No quoting yet — for-words are whitespace-split.
+//   - No here-docs, no command substitution, no backgrounding.
+//
+// Used by CmdSource. The tokeniser ScriptSplitLines() is exposed so
+// future commands (e.g. a future `eval` or REPL-time block) can also
+// feed the executor.
+// ---------------------------------------------------------------
+inline constexpr u32 kScriptMaxLines = 64;
+inline constexpr u32 kScriptLineMax = kInputMax;
+
+// Walk `body[0..body_n)` and execute it as a script. `body_lines` is
+// a parallel array of nul-terminated string pointers, length
+// `body_n`. Returns nothing — control flow is observable through
+// $? on exit and through the side effects of each Dispatch() call.
+void ScriptExecute(char (*body_lines)[kScriptLineMax], u32 body_n);
+
+// Read `n` bytes from `scratch` and split into lines, copying each
+// into `out_lines`. Drops trailing whitespace per line. Returns the
+// number of lines populated (capped at `cap`). Lines longer than
+// kScriptLineMax-1 are truncated and a warning is klogged.
+u32 ScriptSplitLines(const char* scratch, u32 n, char (*out_lines)[kScriptLineMax], u32 cap);
 
 // ---------------------------------------------------------------
 // Process / scheduler / memory observability (shell_process.cpp).

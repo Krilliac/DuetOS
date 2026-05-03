@@ -213,6 +213,33 @@ void CmdHelp()
     ConsoleWriteln("  CHECKSUM P   FNV1A-32 HASH OF FILE CONTENT");
     ConsoleWriteln("  REPEAT N CMD RUN CMD N TIMES (^C ABORTS)");
     ConsoleWriteln("");
+    ConsoleWriteln("EXTENDED GET/SET/MANIPULATE:");
+    ConsoleWriteln("  MKDIR P / RMDIR P  CREATE / REMOVE DIRECTORY (/fat ONLY)");
+    ConsoleWriteln("  TRUNCATE P SIZE    RESIZE A /tmp FILE (ZERO-FILLS ON GROW)");
+    ConsoleWriteln("  REALPATH P         CANONICALISE PATH (RESOLVE . AND ..)");
+    ConsoleWriteln("  ID                 CURRENT USER + ROLE");
+    ConsoleWriteln("  GROUPS             ACTIVE ROLE");
+    ConsoleWriteln("  NPROC              ONLINE CPU COUNT");
+    ConsoleWriteln("  ARCH               ARCHITECTURE TAG (x86_64)");
+    ConsoleWriteln("  TTY                CONSOLE DEVICE NAME");
+    ConsoleWriteln("  TYPE NAME          IS NAME A BUILTIN OR ALIAS?");
+    ConsoleWriteln("  PRINTENV [NAME]    DUMP ENV (OR ONE VAR'S VALUE)");
+    ConsoleWriteln("  DF                 FILESYSTEM USAGE (TMPFS / RAMFS / BLOCKDEVS)");
+    ConsoleWriteln("  DU PATH            FILE SIZE IN BYTES");
+    ConsoleWriteln("  LOADAVG            TASK COUNTS (TOTAL / READY / CPUS)");
+    ConsoleWriteln("  CLEARHIST          WIPE COMMAND HISTORY RING");
+    ConsoleWriteln("  PAUSE              BLOCK UNTIL CTRL+C");
+    ConsoleWriteln("  YES [STR]          PRINT STR REPEATEDLY (CAP 100, ^C ABORTS)");
+    ConsoleWriteln("  SYNC               FLUSH FS BUFFERS (NO-OP IN V0)");
+    ConsoleWriteln("  PORT R PORT        READ ONE BYTE FROM I/O PORT (ADMIN)");
+    ConsoleWriteln("  PORT W PORT VAL    WRITE ONE BYTE TO I/O PORT (ADMIN)");
+    ConsoleWriteln("");
+    ConsoleWriteln("SCRIPTING:");
+    ConsoleWriteln("  ASSERT CMD ARGS    RUN CMD; PASS IF $? = 0, ELSE PRINT FAIL");
+    ConsoleWriteln("  WATCH SECS CMD     RE-RUN CMD EVERY SECS SECONDS (^C ABORTS)");
+    ConsoleWriteln("  SCRIPT /tmp/X CMD  RUN CMD WITH OUTPUT CAPTURED TO /tmp/X");
+    ConsoleWriteln("  $?                 EXIT CODE OF THE LAST DISPATCHED COMMAND");
+    ConsoleWriteln("");
     ConsoleWriteln("KEYS:  UP/DOWN = HISTORY   TAB = COMPLETE");
     ConsoleWriteln("       CTRL+ALT+T = TOGGLE MODE");
     ConsoleWriteln("       CTRL+ALT+F1 = SHELL   CTRL+ALT+F2 = KLOG");
@@ -388,6 +415,7 @@ void CmdSource(u32 argc, char** argv)
 {
     if (argc < 2)
     {
+        ShellSetExit(2);
         ConsoleWriteln("SOURCE: MISSING PATH");
         return;
     }
@@ -395,44 +423,31 @@ void CmdSource(u32 argc, char** argv)
     const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
     if (n == static_cast<u32>(-1))
     {
+        ShellSetExit(1);
         ConsoleWrite("SOURCE: NO SUCH FILE: ");
         ConsoleWriteln(argv[1]);
         return;
     }
-    // Walk the content line by line. Each line dispatches
-    // through the full shell pipeline (alias expansion, env
-    // substitution, redirects). Lines starting with '#' are
-    // comments. Blank lines are silently skipped.
-    char line_buf[kInputMax];
-    u32 i = 0;
-    while (i < n)
+    // Hand the body to the script interpreter. ScriptSplitLines
+    // breaks `scratch` into a fixed-size array of trimmed lines;
+    // ScriptExecute walks that array honouring control-flow blocks
+    // (if/elif/else/fi, while/do/done, for VAR in ... do/done).
+    // Comments + blank lines are skipped inside the executor.
+    //
+    // Stack-allocated (~4 KiB) so nested `source` invocations get
+    // their own buffer — kernel stacks are 64 KiB so a few levels of
+    // recursion are fine.
+    char script_lines[kScriptMaxLines][kScriptLineMax];
+    const u32 lc = ScriptSplitLines(scratch, n, script_lines, kScriptMaxLines);
+    if (lc == kScriptMaxLines)
     {
-        u32 j = 0;
-        while (i < n && scratch[i] != '\n' && j + 1 < sizeof(line_buf))
-        {
-            line_buf[j++] = scratch[i++];
-        }
-        // Skip to end-of-line if the line was too long.
-        while (i < n && scratch[i] != '\n')
-        {
-            ++i;
-        }
-        if (i < n)
-        {
-            ++i; // consume '\n'
-        }
-        line_buf[j] = '\0';
-        // Trim trailing whitespace for cleaner dispatch.
-        while (j > 0 && (line_buf[j - 1] == ' ' || line_buf[j - 1] == '\t' || line_buf[j - 1] == '\r'))
-        {
-            line_buf[--j] = '\0';
-        }
-        if (j == 0 || line_buf[0] == '#')
-        {
-            continue;
-        }
-        Dispatch(line_buf);
+        // We may have truncated the file at the line cap. Warn but
+        // still execute what we have — refusing to run a partial
+        // script is more annoying than the truncation itself, and
+        // the warning surfaces through the klog as well.
+        ConsoleWriteln("SOURCE: WARNING — script exceeded line cap; trailing lines ignored");
     }
+    ScriptExecute(script_lines, lc);
 }
 
 void CmdSysinfo()
@@ -610,25 +625,28 @@ u32 Tokenize(char* buf, char** argv)
 // New commands added here + dispatched in Dispatch — keeping
 // the two in sync is the price of not having reflection.
 const char* const kCommandSet[] = {
-    "help",     "about",     "version",   "clear",   "uptime",    "date",     "windows",    "mode",      "ls",
-    "cat",      "touch",     "rm",        "echo",    "cp",        "mv",       "wc",         "head",      "tail",
-    "dmesg",    "stats",     "mem",       "history", "set",       "unset",    "env",        "alias",     "unalias",
-    "sysinfo",  "source",    "man",       "grep",    "find",      "time",     "which",      "seq",       "sort",
-    "uniq",     "cpuid",     "cr",        "rflags",  "tsc",       "hpet",     "ticks",      "msr",       "lapic",
-    "smp",      "lspci",     "heap",      "paging",  "fb",        "kbdstats", "mousestats", "loglevel",  "logcolor",
-    "logarea",  "kdbg",      "getenv",    "yield",   "reboot",    "halt",     "uname",      "whoami",    "hostname",
-    "pwd",      "true",      "false",     "mount",   "lsmod",     "lsblk",    "lsgpt",      "free",      "ps",
-    "spawn",    "readelf",   "hexdump",   "stat",    "basename",  "dirname",  "cal",        "sleep",     "reset",
-    "tac",      "nl",        "rev",       "expr",    "color",     "rand",     "flushtlb",   "checksum",  "repeat",
-    "kill",     "exec",      "metrics",   "trace",   "read",      "guard",    "top",        "fatcat",    "fatls",
-    "fatwrite", "fatappend", "fatnew",    "fatrm",   "fattrunc",  "fatmkdir", "fatrmdir",   "linuxexec", "translate",
-    "smbios",   "power",     "battery",   "thermal", "temp",      "gpu",      "lsgpu",      "gfx",       "nic",
-    "lsnic",    "ip",        "arp",       "ipv4",    "uuid",      "uuidgen",  "health",     "checkup",   "attacksim",
-    "redteam",  "memdump",   "ifconfig",  "netinfo", "dhcp",      "route",    "netscan",    "wifi",      "fwpolicy",
-    "fwtrace",  "crtrace",   "crprobe",   "net",     "usbnet",    "instr",    "dumpstate",  "bp",        "breakpoint",
-    "login",    "logout",    "passwd",    "useradd", "userdel",   "users",    "who",        "su",        "hwmon",
-    "vbe",      "ping",      "nslookup",  "ntp",     "http",      "shutdown", "poweroff",   "beep",      "inspect",
-    "theme",    "addr2sym",  "cap-audit", "monitor", "secevents", "events",   "policy",     "purple",    "purpleteam",
+    "help",     "about",     "version",   "clear",    "uptime",    "date",      "windows",    "mode",      "ls",
+    "cat",      "touch",     "rm",        "echo",     "cp",        "mv",        "wc",         "head",      "tail",
+    "dmesg",    "stats",     "mem",       "history",  "set",       "unset",     "env",        "alias",     "unalias",
+    "sysinfo",  "source",    "man",       "grep",     "find",      "time",      "which",      "seq",       "sort",
+    "uniq",     "cpuid",     "cr",        "rflags",   "tsc",       "hpet",      "ticks",      "msr",       "lapic",
+    "smp",      "lspci",     "heap",      "paging",   "fb",        "kbdstats",  "mousestats", "loglevel",  "logcolor",
+    "logarea",  "kdbg",      "getenv",    "yield",    "reboot",    "halt",      "uname",      "whoami",    "hostname",
+    "pwd",      "true",      "false",     "mount",    "lsmod",     "lsblk",     "lsgpt",      "free",      "ps",
+    "spawn",    "readelf",   "hexdump",   "stat",     "basename",  "dirname",   "cal",        "sleep",     "reset",
+    "tac",      "nl",        "rev",       "expr",     "color",     "rand",      "flushtlb",   "checksum",  "repeat",
+    "kill",     "exec",      "metrics",   "trace",    "read",      "guard",     "top",        "fatcat",    "fatls",
+    "fatwrite", "fatappend", "fatnew",    "fatrm",    "fattrunc",  "fatmkdir",  "fatrmdir",   "linuxexec", "translate",
+    "smbios",   "power",     "battery",   "thermal",  "temp",      "gpu",       "lsgpu",      "gfx",       "nic",
+    "lsnic",    "ip",        "arp",       "ipv4",     "uuid",      "uuidgen",   "health",     "checkup",   "attacksim",
+    "redteam",  "memdump",   "ifconfig",  "netinfo",  "dhcp",      "route",     "netscan",    "wifi",      "fwpolicy",
+    "fwtrace",  "crtrace",   "crprobe",   "net",      "usbnet",    "instr",     "dumpstate",  "bp",        "breakpoint",
+    "login",    "logout",    "passwd",    "useradd",  "userdel",   "users",     "who",        "su",        "hwmon",
+    "vbe",      "ping",      "nslookup",  "ntp",      "http",      "shutdown",  "poweroff",   "beep",      "inspect",
+    "theme",    "addr2sym",  "cap-audit", "monitor",  "secevents", "events",    "policy",     "purple",    "purpleteam",
+    "mkdir",    "rmdir",     "truncate",  "realpath", "id",        "groups",    "nproc",      "arch",      "tty",
+    "type",     "printenv",  "df",        "du",       "loadavg",   "clearhist", "pause",      "yes",       "sync",
+    "port",     "assert",    "watch",     "script",
 };
 const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -809,18 +827,62 @@ void Dispatch(char* line)
 
     // $VAR substitution — only for whole-token matches. `$PATH`
     // becomes its env value; `/etc/$PATH` stays verbatim. Empty
-    // value (undefined var) substitutes as "". Keeping the
-    // whole-token rule makes substitution trivial + safe; a real
-    // parser lands when someone needs quoted / concatenated
-    // expansions.
+    // value (undefined var) substitutes as "". `$?` is special-
+    // cased to the last command's exit code, decimal-formatted into
+    // a TU-static scratch buffer. Keeping the whole-token rule
+    // makes substitution trivial + safe; a real parser lands when
+    // someone needs quoted / concatenated expansions.
     static char env_empty[1] = {'\0'};
+    static char exit_buf[12] = {'\0'};
     for (u32 i = 1; i < argc; ++i)
     {
         if (argv[i][0] != '$' || argv[i][1] == '\0')
             continue;
+        if (argv[i][1] == '?' && argv[i][2] == '\0')
+        {
+            // Format the last exit code into the static scratch.
+            // Single shared slot is fine — `$?` doesn't appear in
+            // an argv twice with different values, and this runs
+            // single-threaded inside the shell task.
+            i32 v = ShellLastExit();
+            u32 n = 0;
+            if (v < 0)
+            {
+                exit_buf[n++] = '-';
+                v = -v;
+            }
+            char digits[11];
+            u32 d = 0;
+            if (v == 0)
+            {
+                digits[d++] = '0';
+            }
+            else
+            {
+                while (v > 0)
+                {
+                    digits[d++] = static_cast<char>('0' + (v % 10));
+                    v /= 10;
+                }
+            }
+            while (d > 0 && n + 1 < sizeof(exit_buf))
+            {
+                exit_buf[n++] = digits[--d];
+            }
+            exit_buf[n] = '\0';
+            argv[i] = exit_buf;
+            continue;
+        }
         EnvSlot* s = EnvFind(argv[i] + 1);
         argv[i] = (s != nullptr) ? s->value : env_empty;
     }
+
+    // Reset the exit-code slot before dispatch. Handlers that want
+    // to report failure call ShellSetExit() in their failure path;
+    // success is the implicit default. A handler may also report
+    // a non-failure non-zero (rare) — `false` is the only current
+    // builtin that does.
+    ShellSetExit(0);
 
     const char* cmd = argv[0];
     duetos::core::CleanroomTraceRecord("shell", "command", duetos::core::CleanroomTraceHashToken(cmd), argc,
@@ -1741,6 +1803,123 @@ void Dispatch(char* line)
         CmdBeep(argc, argv);
         return;
     }
+    if (StrEq(cmd, "mkdir"))
+    {
+        CmdMkdir(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "rmdir"))
+    {
+        CmdRmdir(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "truncate"))
+    {
+        CmdTruncate(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "realpath"))
+    {
+        CmdRealpath(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "id"))
+    {
+        CmdId();
+        return;
+    }
+    if (StrEq(cmd, "groups"))
+    {
+        CmdGroups();
+        return;
+    }
+    if (StrEq(cmd, "nproc"))
+    {
+        CmdNproc();
+        return;
+    }
+    if (StrEq(cmd, "arch"))
+    {
+        CmdArch();
+        return;
+    }
+    if (StrEq(cmd, "tty"))
+    {
+        CmdTty();
+        return;
+    }
+    if (StrEq(cmd, "type"))
+    {
+        CmdType(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "printenv"))
+    {
+        CmdPrintenv(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "df"))
+    {
+        CmdDf();
+        return;
+    }
+    if (StrEq(cmd, "du"))
+    {
+        CmdDu(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "loadavg"))
+    {
+        CmdLoadavg();
+        return;
+    }
+    if (StrEq(cmd, "clearhist"))
+    {
+        CmdClearhist();
+        return;
+    }
+    if (StrEq(cmd, "pause"))
+    {
+        CmdPause();
+        return;
+    }
+    if (StrEq(cmd, "yes"))
+    {
+        CmdYes(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "sync"))
+    {
+        CmdSync();
+        return;
+    }
+    if (StrEq(cmd, "port"))
+    {
+        // Raw I/O port write can mask the PIC, kick the keyboard
+        // controller into a reset, or scribble CMOS shutdown bytes.
+        // Reads aren't free either (some controllers latch state on
+        // read). Gate the whole verb to admin.
+        if (!RequireAdmin("PORT"))
+            return;
+        CmdPort(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "assert"))
+    {
+        CmdAssert(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "watch"))
+    {
+        CmdWatch(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "script"))
+    {
+        CmdScript(argc, argv);
+        return;
+    }
+    ShellSetExit(127);
     ConsoleWrite("COMMAND NOT FOUND: ");
     ConsoleWriteln(cmd);
     ConsoleWriteln("TYPE HELP FOR A LIST OF COMMANDS.");

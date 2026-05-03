@@ -65,6 +65,9 @@ bool RequireAdmin(const char* cmd)
     {
         return true;
     }
+    // Denial = non-zero exit so scripts can react. POSIX `sudo`
+    // returns 1 on auth failure; mirror that.
+    ShellSetExit(1);
     ConsoleWrite("DENIED: ");
     ConsoleWrite(cmd);
     ConsoleWriteln(" REQUIRES ADMIN");

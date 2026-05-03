@@ -122,13 +122,17 @@ void CmdPwd()
 
 void CmdTrue()
 {
-    // No-op success — useful in scripts: `cmd && true`.
+    // Explicit success — `$?` after this is 0. Dispatcher's
+    // pre-dispatch reset already sets it, but call it for clarity
+    // so readers don't wonder if `true` is special-cased somewhere.
+    ShellSetExit(0);
 }
 
 void CmdFalse()
 {
-    // No-op failure placeholder. No exit codes yet; the
-    // visual-only marker prints nothing (matches /bin/false).
+    // Explicit failure — `$?` after this is 1. Same shape as
+    // /bin/false in POSIX.
+    ShellSetExit(1);
 }
 
 void CmdHostname()
