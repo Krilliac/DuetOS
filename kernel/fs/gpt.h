@@ -98,4 +98,48 @@ const Disk* GptDisk(u32 index);
 /// a legitimate state for ramtest0; the LOG is the signal.
 void GptSelfTest();
 
+/// One partition's worth of input to `GptInitDisk`. Caller fills
+/// type_guid + unique_guid (must come from the entropy pool — the
+/// disk-installer plan mandates a freshly-random unique GUID per
+/// partition), the inclusive LBA range, attributes (typically 0),
+/// and the UTF-16LE name padded to 72 bytes.
+struct PartitionSpec
+{
+    const u8* type_guid;   // 16 bytes
+    const u8* unique_guid; // 16 bytes
+    u64 first_lba;
+    u64 last_lba; // inclusive
+    u64 attributes;
+    const u8* name_utf16le; // 72 bytes (kPartitionNameChars × 2), zero-padded
+};
+
+/// Lay down a fresh GPT on `block_handle`: PMBR at LBA 0, primary
+/// header at LBA 1, primary entries array at LBA 2..33, partition
+/// data area, backup entries at LBA N-33..N-2, backup header at
+/// LBA N-1. Header + entries-array CRC32s are computed and stored
+/// per UEFI 2.10 §5.3.
+///
+/// Pre-conditions:
+///   - The handle is writable (`BlockDeviceIsWritable`).
+///   - `disk_sector_count >= 67` (1 PMBR + 1 header + 32 entries +
+///     1 data + 32 backup entries + 1 backup header — minimum
+///     viable disk).
+///   - `part_count <= kCanonicalPartitionCount` (128).
+///   - Every `parts[i].first_lba >= 34` and `last_lba <= disk_sector_count - 34`.
+///   - `disk_guid` is a 16-byte buffer containing a freshly-random GUID.
+///
+/// **DESTRUCTIVE.** This is the disk-installer's GPT-write entry
+/// point — calling it on a disk with existing data overwrites
+/// the partition table. Caller is responsible for the user-
+/// confirmation step (`disk-installer-plan.md` mandates a typed
+/// "ERASE" confirmation before reaching here).
+///
+/// Returns true on success; false (with a one-line klog reason)
+/// on any precondition violation or block-write failure.
+bool GptInitDisk(u32 block_handle, u64 disk_sector_count, const u8 disk_guid[kGuidBytes], const PartitionSpec* parts,
+                 u32 part_count);
+
+inline constexpr u32 kCanonicalPartitionCount = 128;
+inline constexpr u32 kCanonicalEntryBytes = 128;
+
 } // namespace duetos::fs::gpt

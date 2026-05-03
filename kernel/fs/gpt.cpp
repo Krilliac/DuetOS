@@ -3,6 +3,7 @@
 #include "arch/x86_64/serial.h"
 #include "drivers/storage/block.h"
 #include "log/klog.h"
+#include "mm/kheap.h"
 #include "util/crc32.h"
 
 namespace duetos::fs::gpt
@@ -455,6 +456,194 @@ const Disk* GptDisk(u32 index)
     return &g_disks[index];
 }
 
+namespace
+{
+
+// Compute header CRC per UEFI 2.10 §5.3.1 — header_crc32 field is
+// zeroed for the duration of the calculation.
+u32 ComputeHeaderCrc(GptHeader& hdr)
+{
+    const u32 saved = hdr.header_crc32;
+    hdr.header_crc32 = 0;
+    const u32 crc = Crc32(reinterpret_cast<const u8*>(&hdr), kGptHeaderSize);
+    hdr.header_crc32 = saved;
+    return crc;
+}
+
+// Minimal Protective MBR (UEFI 2.10 §5.2.3): one MBR partition entry
+// of type 0xEE spanning LBA 1..(disk_size_sectors - 1) (clamped to
+// 0xFFFFFFFF), boot signature 0x55AA at byte 510. Everything else
+// zeroed.
+void BuildPmbr(u8 sector[512], u64 disk_sector_count)
+{
+    for (u32 i = 0; i < 512; ++i)
+        sector[i] = 0;
+    // Partition entry 0 at byte 446.
+    sector[446 + 0] = 0;    // boot indicator (non-bootable)
+    sector[446 + 1] = 0x00; // start CHS (head)
+    sector[446 + 2] = 0x02; // start CHS (sector|cylinder)
+    sector[446 + 3] = 0x00; // start CHS (cylinder)
+    sector[446 + 4] = 0xEE; // type = GPT protective
+    sector[446 + 5] = 0xFF; // end CHS (head)
+    sector[446 + 6] = 0xFF; // end CHS (sector|cylinder)
+    sector[446 + 7] = 0xFF; // end CHS (cylinder)
+    // First LBA = 1 (LE u32).
+    sector[446 + 8] = 1;
+    // Sector count = min(disk_size - 1, 0xFFFFFFFF) (LE u32).
+    const u64 span = disk_sector_count - 1;
+    const u32 span32 = (span > 0xFFFFFFFFull) ? 0xFFFFFFFFu : u32(span);
+    sector[446 + 12] = u8(span32);
+    sector[446 + 13] = u8(span32 >> 8);
+    sector[446 + 14] = u8(span32 >> 16);
+    sector[446 + 15] = u8(span32 >> 24);
+    // MBR signature.
+    sector[510] = 0x55;
+    sector[511] = 0xAA;
+}
+
+} // namespace
+
+bool GptInitDisk(u32 block_handle, u64 disk_sector_count, const u8 disk_guid[kGuidBytes], const PartitionSpec* parts,
+                 u32 part_count)
+{
+    if (!drivers::storage::BlockDeviceIsWritable(block_handle))
+    {
+        core::Log(core::LogLevel::Warn, "fs/gpt", "GptInitDisk: handle not writable");
+        return false;
+    }
+    if (disk_sector_count < 67)
+    {
+        core::Log(core::LogLevel::Warn, "fs/gpt", "GptInitDisk: disk too small (<67 sectors)");
+        return false;
+    }
+    if (part_count > kCanonicalPartitionCount)
+    {
+        core::Log(core::LogLevel::Warn, "fs/gpt", "GptInitDisk: part_count > 128");
+        return false;
+    }
+
+    constexpr u32 kSectorSize = 512;
+    constexpr u32 kEntriesArrayBytes = kCanonicalPartitionCount * kCanonicalEntryBytes; // 16384
+    constexpr u32 kEntriesArraySectors = kEntriesArrayBytes / kSectorSize;              // 32
+    const u64 backup_entries_lba = disk_sector_count - 1 - kEntriesArraySectors;
+    const u64 backup_header_lba = disk_sector_count - 1;
+    const u64 first_usable_lba = 2 + kEntriesArraySectors; // 34
+    const u64 last_usable_lba = backup_entries_lba - 1;    // disk_size - 34
+
+    // Validate per-partition LBA ranges before touching the disk.
+    for (u32 i = 0; i < part_count; ++i)
+    {
+        const PartitionSpec& p = parts[i];
+        if (p.first_lba < first_usable_lba || p.last_lba > last_usable_lba || p.first_lba > p.last_lba)
+        {
+            core::Log(core::LogLevel::Warn, "fs/gpt", "GptInitDisk: partition LBA range out of bounds");
+            return false;
+        }
+    }
+
+    // Build entries array on the heap (16 KiB; the kernel kheap satisfies
+    // this comfortably, and stack would be too tight).
+    u8* entries_buf = static_cast<u8*>(mm::KMalloc(kEntriesArrayBytes));
+    if (entries_buf == nullptr)
+    {
+        core::Log(core::LogLevel::Warn, "fs/gpt", "GptInitDisk: entries-buffer alloc failed");
+        return false;
+    }
+    for (u32 i = 0; i < kEntriesArrayBytes; ++i)
+        entries_buf[i] = 0;
+    for (u32 i = 0; i < part_count; ++i)
+    {
+        const PartitionSpec& p = parts[i];
+        GptEntry* e = reinterpret_cast<GptEntry*>(entries_buf + u64(i) * kCanonicalEntryBytes);
+        for (u32 b = 0; b < kGuidBytes; ++b)
+            e->type_guid[b] = p.type_guid[b];
+        for (u32 b = 0; b < kGuidBytes; ++b)
+            e->unique_guid[b] = p.unique_guid[b];
+        e->first_lba = p.first_lba;
+        e->last_lba = p.last_lba;
+        e->attributes = p.attributes;
+        for (u32 b = 0; b < sizeof(e->name_utf16le); ++b)
+            e->name_utf16le[b] = (p.name_utf16le != nullptr) ? p.name_utf16le[b] : 0;
+    }
+    const u32 entries_crc = Crc32(entries_buf, kEntriesArrayBytes);
+
+    // Build primary header.
+    GptHeader primary{};
+    primary.signature = kGptSignature;
+    primary.revision = kGptRevision1;
+    primary.header_size = kGptHeaderSize;
+    primary.header_crc32 = 0;
+    primary.reserved = 0;
+    primary.my_lba = 1;
+    primary.alternate_lba = backup_header_lba;
+    primary.first_usable_lba = first_usable_lba;
+    primary.last_usable_lba = last_usable_lba;
+    for (u32 b = 0; b < kGuidBytes; ++b)
+        primary.disk_guid[b] = disk_guid[b];
+    primary.partition_entry_lba = 2;
+    primary.num_partition_entries = kCanonicalPartitionCount;
+    primary.partition_entry_size = kCanonicalEntryBytes;
+    primary.partition_entries_crc32 = entries_crc;
+    primary.header_crc32 = ComputeHeaderCrc(primary);
+
+    // Build backup header — same fields swapped for my_lba / alternate_lba
+    // / partition_entry_lba.
+    GptHeader backup = primary;
+    backup.my_lba = backup_header_lba;
+    backup.alternate_lba = 1;
+    backup.partition_entry_lba = backup_entries_lba;
+    backup.header_crc32 = 0;
+    backup.header_crc32 = ComputeHeaderCrc(backup);
+
+    // Lay down the four regions. PMBR + headers each fit in one 512-byte
+    // sector; entries arrays are 32 sectors.
+    u8 sector[kSectorSize];
+    BuildPmbr(sector, disk_sector_count);
+    if (drivers::storage::BlockDeviceWrite(block_handle, 0, 1, sector) < 0)
+    {
+        mm::KFree(entries_buf);
+        core::Log(core::LogLevel::Error, "fs/gpt", "GptInitDisk: PMBR write failed");
+        return false;
+    }
+    for (u32 i = 0; i < kSectorSize; ++i)
+        sector[i] = 0;
+    auto write_header = [&](u64 lba, const GptHeader& hdr) -> bool
+    {
+        for (u32 i = 0; i < kSectorSize; ++i)
+            sector[i] = 0;
+        for (u32 i = 0; i < kGptHeaderSize; ++i)
+            sector[i] = reinterpret_cast<const u8*>(&hdr)[i];
+        return drivers::storage::BlockDeviceWrite(block_handle, lba, 1, sector) >= 0;
+    };
+    if (!write_header(1, primary))
+    {
+        mm::KFree(entries_buf);
+        core::Log(core::LogLevel::Error, "fs/gpt", "GptInitDisk: primary header write failed");
+        return false;
+    }
+    if (drivers::storage::BlockDeviceWrite(block_handle, 2, kEntriesArraySectors, entries_buf) < 0)
+    {
+        mm::KFree(entries_buf);
+        core::Log(core::LogLevel::Error, "fs/gpt", "GptInitDisk: primary entries write failed");
+        return false;
+    }
+    if (drivers::storage::BlockDeviceWrite(block_handle, backup_entries_lba, kEntriesArraySectors, entries_buf) < 0)
+    {
+        mm::KFree(entries_buf);
+        core::Log(core::LogLevel::Error, "fs/gpt", "GptInitDisk: backup entries write failed");
+        return false;
+    }
+    if (!write_header(backup_header_lba, backup))
+    {
+        mm::KFree(entries_buf);
+        core::Log(core::LogLevel::Error, "fs/gpt", "GptInitDisk: backup header write failed");
+        return false;
+    }
+    mm::KFree(entries_buf);
+    core::Log(core::LogLevel::Info, "fs/gpt", "GptInitDisk: GPT layout written");
+    return true;
+}
+
 void GptSelfTest()
 {
     KLOG_TRACE_SCOPE("fs/gpt", "GptSelfTest");
@@ -481,6 +670,65 @@ void GptSelfTest()
             arch::SerialWrite("[fs/gpt]   -> not a GPT disk (or parse failed)\n");
         }
     }
+
+    // ---- Round-trip GptInitDisk → GptProbe on a fresh RAM disk.
+    // The RAM-disk fixture is large enough to host a real GPT (67-
+    // sector minimum + a small data area). 256 sectors at 512 b/sec
+    // = 128 KiB, comfortably within kheap.
+    constexpr u64 kTestSectorCount = 256;
+    const u32 ram_h = drivers::storage::RamBlockDeviceCreate("ramgpt", 512, kTestSectorCount);
+    if (ram_h == drivers::storage::kBlockHandleInvalid)
+    {
+        arch::SerialWrite("[fs/gpt]   -> ramdisk create failed; SKIP write self-test\n");
+        return;
+    }
+
+    // ESP type GUID from UEFI 2.10: C12A7328-F81F-11D2-BA4B-00A0C93EC93B.
+    // Stored in the GPT entry "mixed-endian" form (LE u32, LE u16,
+    // LE u16, BE u8[2], BE u8[6]).
+    const u8 esp_type_guid[16] = {
+        0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11, 0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B,
+    };
+    const u8 unique_guid[16] = {
+        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x01,
+    };
+    const u8 disk_guid[16] = {
+        0xA1, 0xA2, 0xA3, 0xA4, 0xB1, 0xB2, 0xC1, 0xC2, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8,
+    };
+    u8 part_name[72] = {};
+    // "ESP\0" in UTF-16LE.
+    part_name[0] = 'E';
+    part_name[2] = 'S';
+    part_name[4] = 'P';
+
+    PartitionSpec specs[1];
+    specs[0].type_guid = esp_type_guid;
+    specs[0].unique_guid = unique_guid;
+    specs[0].first_lba = 64;
+    specs[0].last_lba = 200;
+    specs[0].attributes = 0;
+    specs[0].name_utf16le = part_name;
+
+    const bool wrote = GptInitDisk(ram_h, kTestSectorCount, disk_guid, specs, 1);
+    if (!wrote)
+    {
+        arch::SerialWrite("[fs/gpt]   -> GptInitDisk FAILED\n");
+        return;
+    }
+    u32 disk_idx = 0;
+    const bool reread = GptProbe(ram_h, &disk_idx);
+    if (!reread)
+    {
+        arch::SerialWrite("[fs/gpt]   -> round-trip GptProbe FAILED\n");
+        return;
+    }
+    const Disk* d = GptDisk(disk_idx);
+    if (d == nullptr || d->partition_count != 1 || d->partitions[0].first_lba != 64 || d->partitions[0].last_lba != 200)
+    {
+        arch::SerialWrite("[fs/gpt]   -> round-trip partition fields wrong\n");
+        return;
+    }
+    arch::SerialWrite("[fs/gpt]   -> GptInitDisk + reparse PASS (1 partition, LBA 64..200)\n");
 }
 
 } // namespace duetos::fs::gpt
