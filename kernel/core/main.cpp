@@ -39,6 +39,7 @@
  *   long readable function wins.
  */
 
+#include "util/adler32.h"
 #include "util/base64.h"
 #include "util/build_config.h"
 #include "util/crc32.h"
@@ -1955,6 +1956,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::util::WavSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::Lz4SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::PsfSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::Adler32SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Sha1SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Sha256SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Md5SelfTest());
