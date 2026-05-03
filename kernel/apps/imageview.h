@@ -6,30 +6,37 @@
 /*
  * DuetOS Image Viewer — v0.
  *
- * Reads 32-bpp uncompressed BMP files from the FAT32 root volume
- * and paints them in a window. The format choice mirrors what the
- * Screenshot app already writes: every Ctrl+Alt+P capture lands as
- * a `SHOTNNNN.BMP` whose layout this viewer accepts byte-for-byte
- * (BITMAPFILEHEADER + 40-byte BITMAPINFOHEADER + raw BGRA rows,
- * top-down DIB height supported, also bottom-up via positive
- * height).
+ * Reads 32-bpp uncompressed BMP files (mirroring the Screenshot
+ * writer's `SHOTNNNN.BMP` format) and Truevision TGA 2.0
+ * uncompressed 24/32-bpp files from the FAT32 root volume, then
+ * paints them in a window.
+ *
+ * Format support:
+ *   - BMP: BITMAPFILEHEADER + 40-byte BITMAPINFOHEADER + raw BGRA
+ *     rows, top-down or bottom-up. Streamed cluster-by-cluster
+ *     so a 1024×768 (~3 MiB) screenshot doesn't need to fit in
+ *     the kheap budget.
+ *   - TGA: image type 2 (uncompressed True-color) at 24 or 32
+ *     bpp, top-down or bottom-up, right-to-left bit honoured.
+ *     Decoded in-memory after a full-file load (capped at 4 MiB
+ *     so a malformed header can't exhaust the heap). RLE
+ *     (image type 10) is deferred to a future slice — the
+ *     parser currently rejects it cleanly.
  *
  * Scope:
  *   - One window, one image at a time.
- *   - Input: the BMP files in the FAT32 root (no subdirectory walk
- *     yet). Filenames cached at scan time; navigation steps the
- *     index, then reloads.
- *   - Decoding: uses Fat32ReadFileStream to walk clusters without
- *     buffering the whole file (a 1024×768 screenshot is ~3 MiB,
- *     larger than the kernel heap budget).
- *   - Display: nearest-neighbour downscale into a content-area-sized
- *     scratch buffer. No upscaling — small images render 1:1
- *     centred.
+ *   - Input: every `.BMP` and `.TGA` file in the FAT32 root
+ *     (no subdirectory walk yet). Filenames cached at scan
+ *     time; navigation steps the index, then reloads.
+ *   - Display: nearest-neighbour downscale into a content-area-
+ *     sized scratch buffer. No upscaling — small images render
+ *     1:1 centred.
  *
  * Out of scope (explicitly):
- *   - 24-bpp / 16-bpp / palette / RLE BMPs. The selftest emits a
- *     classification line for each unsupported subformat so future
- *     slices know what to add.
+ *   - 24/16-bpp / palette / RLE BMPs. The parser flags these
+ *     and the status line shows the reason.
+ *   - TGA RLE (type 10), colormapped (type 1), or grayscale
+ *     (type 3). All rejected.
  *   - PNG / JPEG / GIF (each needs its own parser; would belong in
  *     its own TU, with this app dispatching).
  *   - Subdirectory walk; thumbnail strip; rotate / zoom controls.
@@ -37,7 +44,7 @@
  * Input keys (when ImageView is the focused window):
  *   - 'n' / 'N' / Right     — next image
  *   - 'p' / 'P' / Left      — previous image
- *   - 'r' / 'R'             — re-scan root for new BMPs
+ *   - 'r' / 'R'             — re-scan root for new images
  *
  * Context: kernel. Caller MUST hold the compositor lock — same
  * discipline as the other content-draw apps (Notes, Calculator,
@@ -68,11 +75,12 @@ bool ImageViewFeedChar(char c);
 /// consumed (i.e. we have at least one image to navigate).
 bool ImageViewFeedArrow(bool left);
 
-/// Re-scan the FAT32 root, find a BMP whose 8.3 name matches
-/// `name` (case-insensitive), and select it as the current
-/// image. Used by the Files app's "open with ImageView" hand-off
-/// when a user hits Enter on a `.BMP` entry — the caller still
-/// has to raise the ImageView window separately (e.g. via
+/// Re-scan the FAT32 root, find an image whose 8.3 name matches
+/// `name` (case-insensitive, supports `.BMP` and `.TGA`), and
+/// select it as the current image. Used by the Files app's
+/// "open with ImageView" hand-off when a user hits Enter on a
+/// `.BMP` or `.TGA` entry — the caller still has to raise the
+/// ImageView window separately (e.g. via
 /// `WindowRaise(ImageViewWindow())`). Returns true iff the file
 /// was found and queued for decode on the next paint.
 bool ImageViewSelectByName(const char* name);

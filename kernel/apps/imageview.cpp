@@ -5,6 +5,7 @@
 #include "drivers/video/notify.h"
 #include "fs/fat32.h"
 #include "mm/kheap.h"
+#include "util/tga.h"
 
 namespace duetos::apps::imageview
 {
@@ -168,20 +169,39 @@ void StatusAppendStr(const char* s)
     g_state.status[len] = '\0';
 }
 
-bool EndsWithBmpCi(const char* name)
+// ImageFormat — set from the filename extension during scan;
+// used by DecodeCurrent to dispatch to the BMP-streamed or TGA-
+// in-memory decoder.
+enum class ImageFormat : u8
+{
+    Unknown = 0,
+    Bmp = 1,
+    Tga = 2,
+};
+
+ImageFormat ClassifyByName(const char* name)
 {
     u32 len = 0;
     while (name[len] != '\0' && len < kNameCap)
         ++len;
     if (len < 5)
-        return false;
+        return ImageFormat::Unknown;
     auto up = [](char c) { return (c >= 'a' && c <= 'z') ? static_cast<char>(c - ('a' - 'A')) : c; };
-    return name[len - 4] == '.' && up(name[len - 3]) == 'B' && up(name[len - 2]) == 'M' && up(name[len - 1]) == 'P';
+    if (name[len - 4] != '.')
+        return ImageFormat::Unknown;
+    const char e0 = up(name[len - 3]);
+    const char e1 = up(name[len - 2]);
+    const char e2 = up(name[len - 1]);
+    if (e0 == 'B' && e1 == 'M' && e2 == 'P')
+        return ImageFormat::Bmp;
+    if (e0 == 'T' && e1 == 'G' && e2 == 'A')
+        return ImageFormat::Tga;
+    return ImageFormat::Unknown;
 }
 
-// Re-scan FAT32 root for *.BMP filenames into g_state.names. Caps
-// at kMaxFiles. Preserves the current selection by name when
-// possible; otherwise resets to 0.
+// Re-scan FAT32 root for *.BMP and *.TGA filenames into
+// g_state.names. Caps at kMaxFiles. Preserves the current
+// selection by name when possible; otherwise resets to 0.
 void RescanRoot()
 {
     namespace fat = fs::fat32;
@@ -208,7 +228,7 @@ void RescanRoot()
     {
         if ((entries[i].attributes & 0x10) != 0)
             continue;
-        if (!EndsWithBmpCi(entries[i].name))
+        if (ClassifyByName(entries[i].name) == ImageFormat::Unknown)
             continue;
         const char* src = entries[i].name;
         char* dst = g_state.names[g_state.count];
@@ -418,42 +438,35 @@ void FitThumbnail(u32 src_w, u32 src_h, u32 cw, u32 ch, u32* out_w, u32* out_h)
     *out_h = h;
 }
 
-// Decode the currently-selected file into g_state.pixels at the
-// largest size that fits a (cw, ch) content rect. Returns true on
-// success; on failure clears pixels and writes a status line.
-bool DecodeCurrent(u32 cw, u32 ch)
+// Allocate + bg-prefill the thumbnail; sets g_state.pixels et al
+// on success. Returns true if the allocation succeeded; the
+// caller must populate the pixels and set g_state.disp_w/h.
+bool AllocThumbnail(u32 dst_w, u32 dst_h)
+{
+    if (dst_w == 0 || dst_h == 0)
+        return false;
+    const u64 dst_bytes = static_cast<u64>(dst_w) * dst_h * 4;
+    void* dst_alloc = mm::KMalloc(dst_bytes);
+    if (dst_alloc == nullptr)
+        return false;
+    u32* dst = static_cast<u32*>(dst_alloc);
+    for (u64 k = 0; k < static_cast<u64>(dst_w) * dst_h; ++k)
+    {
+        dst[k] = kBg;
+    }
+    g_state.pixels = dst;
+    g_state.alloc_w = dst_w;
+    g_state.alloc_h = dst_h;
+    return true;
+}
+
+// BMP decode path — uses the streaming Fat32ReadFileStream so a
+// 3 MiB screenshot doesn't have to fit in kheap.
+bool DecodeBmp(const fs::fat32::Volume* v, const fs::fat32::DirEntry* e, const char* name, u32 cw, u32 ch)
 {
     namespace fat = fs::fat32;
-    FreePixels();
-    StatusSet("");
-    if (g_state.count == 0)
-    {
-        StatusSet("(no .BMP files in root)");
-        return false;
-    }
-    if (g_state.index >= g_state.count)
-    {
-        g_state.index = 0;
-    }
-    const fat::Volume* v = fat::Fat32Volume(0);
-    if (v == nullptr)
-    {
-        StatusSet("(no FAT32 volume)");
-        return false;
-    }
-    const char* name = g_state.names[g_state.index];
-    fat::DirEntry e;
-    if (!fat::Fat32LookupPath(v, name, &e))
-    {
-        StatusSet("lookup FAILED: ");
-        StatusAppendStr(name);
-        return false;
-    }
-
-    // Quick header pre-flight via Fat32ReadAt so we don't allocate
-    // a thumbnail for an unsupported subformat.
     u8 hdr[kBmpHeaderBytes];
-    const i64 got = fat::Fat32ReadAt(v, &e, 0, hdr, kBmpHeaderBytes);
+    const i64 got = fat::Fat32ReadAt(v, e, 0, hdr, kBmpHeaderBytes);
     if (got < static_cast<i64>(kBmpHeaderBytes))
     {
         StatusSet("read header FAILED");
@@ -477,65 +490,206 @@ bool DecodeCurrent(u32 cw, u32 ch)
         return false;
     }
 
-    // Thumbnail target.
     u32 dst_w = 0;
     u32 dst_h = 0;
     FitThumbnail(info.width, info.height, cw, ch, &dst_w, &dst_h);
-    if (dst_w == 0 || dst_h == 0)
+    if (!AllocThumbnail(dst_w, dst_h))
     {
-        StatusSet("content area too small for thumbnail");
-        return false;
-    }
-    const u64 dst_bytes = static_cast<u64>(dst_w) * dst_h * 4;
-    const u64 row_bytes = static_cast<u64>(info.width) * 4;
-    void* dst_alloc = mm::KMalloc(dst_bytes);
-    void* row_alloc = mm::KMalloc(row_bytes);
-    if (dst_alloc == nullptr || row_alloc == nullptr)
-    {
-        if (dst_alloc != nullptr)
-            mm::KFree(dst_alloc);
-        if (row_alloc != nullptr)
-            mm::KFree(row_alloc);
         StatusSet("out of kheap memory");
         return false;
     }
-    // Pre-fill thumbnail with bg colour so any unrendered pixels
-    // (e.g. truncated file) show as the panel ground rather than
-    // garbage from a freshly-allocated chunk.
-    u32* dst = static_cast<u32*>(dst_alloc);
-    for (u64 k = 0; k < static_cast<u64>(dst_w) * dst_h; ++k)
+    const u64 row_bytes = static_cast<u64>(info.width) * 4;
+    void* row_alloc = mm::KMalloc(row_bytes);
+    if (row_alloc == nullptr)
     {
-        dst[k] = kBg;
+        FreePixels();
+        StatusSet("out of kheap memory");
+        return false;
     }
 
     DecodeCtx ctx = {};
     ctx.row_buf = static_cast<u8*>(row_alloc);
-    ctx.dst = dst;
+    ctx.dst = g_state.pixels;
     ctx.dst_w = dst_w;
     ctx.dst_h = dst_h;
-    const bool stream_ok = fat::Fat32ReadFileStream(v, &e, DecodeChunkCb, &ctx);
+    const bool stream_ok = fat::Fat32ReadFileStream(v, e, DecodeChunkCb, &ctx);
 
     mm::KFree(row_alloc);
 
     if (!stream_ok || ctx.fatal)
     {
-        mm::KFree(dst_alloc);
+        FreePixels();
         StatusSet("decode FAILED: ");
         StatusAppendStr(name);
         return false;
     }
 
-    g_state.pixels = dst;
     g_state.disp_w = dst_w;
     g_state.disp_h = dst_h;
-    g_state.alloc_w = dst_w;
-    g_state.alloc_h = dst_h;
     StatusSet(name);
     StatusAppendStr("  ");
     StatusAppendDec(info.width);
     StatusAppendStr("x");
     StatusAppendDec(info.height);
     return true;
+}
+
+// Cap on a TGA full-file load. 4 MiB covers any sane wallpaper /
+// icon (a 1024×1024 32-bpp uncompressed file is exactly 4 MiB +
+// 18 header bytes). Larger files are rejected before allocation
+// so a malformed header can't exhaust the kernel heap.
+constexpr u32 kTgaMaxFileBytes = 4u * 1024u * 1024u + 4096u;
+
+// TGA decode path — reads the entire file into a kheap buffer,
+// parses, decodes into a temporary intermediate, and nearest-
+// neighbour-downsamples into the thumbnail.
+bool DecodeTga(const fs::fat32::Volume* v, const fs::fat32::DirEntry* e, const char* name, u32 cw, u32 ch)
+{
+    namespace fat = fs::fat32;
+    if (e->size_bytes > kTgaMaxFileBytes)
+    {
+        StatusSet("TGA too large (>4 MiB): ");
+        StatusAppendStr(name);
+        return false;
+    }
+    if (e->size_bytes < duetos::util::kTgaHeaderBytes)
+    {
+        StatusSet("TGA truncated: ");
+        StatusAppendStr(name);
+        return false;
+    }
+    void* file_alloc = mm::KMalloc(e->size_bytes);
+    if (file_alloc == nullptr)
+    {
+        StatusSet("out of kheap memory");
+        return false;
+    }
+    u8* file_buf = static_cast<u8*>(file_alloc);
+    const i64 read = fat::Fat32ReadFile(v, e, file_buf, e->size_bytes);
+    if (read < static_cast<i64>(duetos::util::kTgaHeaderBytes))
+    {
+        mm::KFree(file_alloc);
+        StatusSet("TGA read failed: ");
+        StatusAppendStr(name);
+        return false;
+    }
+
+    duetos::util::TgaInfo info = duetos::util::TgaParseHeader(file_buf);
+    if (!info.ok)
+    {
+        mm::KFree(file_alloc);
+        StatusSet("not a supported TGA: ");
+        StatusAppendStr(name);
+        return false;
+    }
+
+    // Allocate the intermediate full-resolution decode buffer.
+    const u64 inter_bytes = static_cast<u64>(info.width) * info.height * 4;
+    void* inter_alloc = mm::KMalloc(inter_bytes);
+    if (inter_alloc == nullptr)
+    {
+        mm::KFree(file_alloc);
+        StatusSet("out of kheap memory");
+        return false;
+    }
+    u32* inter = static_cast<u32*>(inter_alloc);
+    const bool ok = duetos::util::TgaDecodeUncompressed(file_buf, static_cast<u32>(read), info, inter);
+    mm::KFree(file_alloc);
+    if (!ok)
+    {
+        mm::KFree(inter_alloc);
+        StatusSet("TGA decode FAILED: ");
+        StatusAppendStr(name);
+        return false;
+    }
+
+    u32 dst_w = 0;
+    u32 dst_h = 0;
+    FitThumbnail(info.width, info.height, cw, ch, &dst_w, &dst_h);
+    if (!AllocThumbnail(dst_w, dst_h))
+    {
+        mm::KFree(inter_alloc);
+        StatusSet("out of kheap memory");
+        return false;
+    }
+
+    // NN-downsample BGRA32 intermediate → RGB888 thumbnail. The
+    // tga.cpp output already has B in low byte / R in high byte,
+    // but the framebuffer wants 0x00RRGGBB, so we swap channels
+    // here just like the BMP path's EmitSourceRow does.
+    u32* dst = g_state.pixels;
+    for (u32 dy = 0; dy < dst_h; ++dy)
+    {
+        const u32 sy = (dy * info.height) / dst_h;
+        u32* drow = dst + static_cast<u64>(dy) * dst_w;
+        const u32* srow = inter + static_cast<u64>(sy) * info.width;
+        for (u32 dx = 0; dx < dst_w; ++dx)
+        {
+            const u32 sx = (dx * info.width) / dst_w;
+            const u32 px = srow[sx];
+            const u32 b = px & 0xFFu;
+            const u32 g = (px >> 8) & 0xFFu;
+            const u32 r = (px >> 16) & 0xFFu;
+            drow[dx] = b | (g << 8) | (r << 16);
+        }
+    }
+
+    mm::KFree(inter_alloc);
+
+    g_state.disp_w = dst_w;
+    g_state.disp_h = dst_h;
+    StatusSet(name);
+    StatusAppendStr("  ");
+    StatusAppendDec(info.width);
+    StatusAppendStr("x");
+    StatusAppendDec(info.height);
+    StatusAppendStr(" TGA");
+    return true;
+}
+
+// Decode the currently-selected file into g_state.pixels at the
+// largest size that fits a (cw, ch) content rect. Returns true on
+// success; on failure clears pixels and writes a status line.
+bool DecodeCurrent(u32 cw, u32 ch)
+{
+    namespace fat = fs::fat32;
+    FreePixels();
+    StatusSet("");
+    if (g_state.count == 0)
+    {
+        StatusSet("(no .BMP/.TGA files in root)");
+        return false;
+    }
+    if (g_state.index >= g_state.count)
+    {
+        g_state.index = 0;
+    }
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        StatusSet("(no FAT32 volume)");
+        return false;
+    }
+    const char* name = g_state.names[g_state.index];
+    fat::DirEntry e;
+    if (!fat::Fat32LookupPath(v, name, &e))
+    {
+        StatusSet("lookup FAILED: ");
+        StatusAppendStr(name);
+        return false;
+    }
+    switch (ClassifyByName(name))
+    {
+    case ImageFormat::Bmp:
+        return DecodeBmp(v, &e, name, cw, ch);
+    case ImageFormat::Tga:
+        return DecodeTga(v, &e, name, cw, ch);
+    case ImageFormat::Unknown:
+    default:
+        StatusSet("unsupported extension: ");
+        StatusAppendStr(name);
+        return false;
+    }
 }
 
 void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
