@@ -200,6 +200,17 @@ i64 DoBrk(u64 new_brk)
     {
         return static_cast<i64>(p->linux_brk_current);
     }
+    // Reject brk targets in the kernel half — without this an
+    // unprivileged Linux ABI process can pass new_brk =
+    // 0xFFFFFFFF80000000 and drive AddressSpaceMapUserPage into
+    // PanicAs (kernel DoS via mm/address_space.cpp:315). Real Linux
+    // returns the current brk on failure rather than -1.
+    constexpr u64 kBrkUserMaxExclusive = 0x0000800000000000ULL;
+    if (new_brk >= kBrkUserMaxExclusive)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/mm", "brk: new_brk in kernel half — refused", new_brk);
+        return static_cast<i64>(p->linux_brk_current);
+    }
     const u64 cur_aligned = PageUp(p->linux_brk_current);
     const u64 new_aligned = PageUp(new_brk);
     if (new_aligned > cur_aligned)
@@ -262,6 +273,18 @@ i64 DoMmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
 
     const u64 aligned = PageUp(len);
     const u64 base = p->linux_mmap_cursor;
+
+    // Defense-in-depth: refuse if the requested mapping would extend
+    // beyond the canonical user low half. Without this an extreme
+    // `len` driven by a runaway caller could push `va` into the
+    // kernel half and trigger AddressSpaceMapUserPage's PanicAs.
+    constexpr u64 kMmapUserMaxExclusive = 0x0000800000000000ULL;
+    if (aligned == 0 || base >= kMmapUserMaxExclusive || aligned > (kMmapUserMaxExclusive - base))
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/mm", "mmap: span exits user range -> ENOMEM; aligned",
+                     aligned);
+        return kENOMEM;
+    }
 
     u64 pte_flags = mm::kPagePresent | mm::kPageUser | mm::kPageWritable;
     if ((prot & kProtExec) == 0)
@@ -432,6 +455,14 @@ i64 DoMremap(u64 old_addr, u64 old_len, u64 new_len, u64 flags, u64 new_addr)
 
     const u64 base = p->linux_mmap_cursor;
     const u64 pte_flags = mm::kPagePresent | mm::kPageUser | mm::kPageWritable | mm::kPageNoExecute;
+
+    // Defense-in-depth — same kUserMax gate as DoMmap. If new_pages
+    // is large enough to push the mapping into the kernel half,
+    // refuse before AddressSpaceMapUserPage panics.
+    constexpr u64 kMremapUserMaxExclusive = 0x0000800000000000ULL;
+    const u64 want_bytes = new_pages * kPageSize;
+    if (base >= kMremapUserMaxExclusive || want_bytes > (kMremapUserMaxExclusive - base))
+        return kENOMEM;
 
     // Allocate new frames for the entire new range.
     for (u64 i = 0; i < new_pages; ++i)

@@ -75,6 +75,50 @@ parser, and re-validate post-ASLR-shift in `PeLoad` /
 rejection in the PE diagnostic line. ELF loader was already correct
 (elf_loader.cpp:145).
 
+### 5. SYS_SECTION_MAP kernel-DoS via attacker-controlled hint_va
+*kernel/syscall/syscall.cpp*
+
+`NtMapViewOfSection` accepted a caller-supplied `hint_va` that flowed
+straight into `subsystems::win32::section::SectionMap` →
+`AddressSpaceMapBorrowedPage`, which panics on out-of-range
+`virt`. Any process holding a section handle (handles are local to
+the caller, so even a sandbox can create one) could DoS the kernel.
+
+Fix: pre-check `base_va + section_view_size <= kUserMax + 1` in the
+syscall handler and return `kStatusInvalidParameter` on rejection.
+
+### 6. Linux brk() kernel-DoS via attacker-controlled new_brk
+*kernel/subsystems/linux/syscall_mm.cpp*
+
+`DoBrk` accepted any `new_brk >= linux_brk_base` and walked
+`MapUserPage` over `[brk_current, new_brk)`. A Linux ABI process
+could pass `new_brk = 0xFFFFFFFF80000000`, walk into kernel-half
+VAs, and PanicAs.
+
+Fix: refuse `new_brk >= 0x0000800000000000ULL` (canonical user max,
+exclusive) and return the current brk (Linux convention for brk
+failure).
+
+### 7. Linux SysV shmat() kernel-DoS via attacker-controlled shmaddr
+*kernel/subsystems/linux/sysv_ipc.cpp*
+
+`DoShmat` accepted `shmaddr` from user, page-aligned it, and fed it
+to `AddressSpaceMapBorrowedPage`. Same DoS shape as #5: a user with
+a SysV `shm_key` (creatable freely by any Linux ABI process) could
+trigger the panic.
+
+Fix: gate `base + page_count*kPage <= kUserMaxExclusive` before the
+map loop; return `-EINVAL` on rejection.
+
+### 8. Defensive-depth: Linux mmap()/mremap() cursor-overflow gate
+*kernel/subsystems/linux/syscall_mm.cpp*
+
+`DoMmap` and `DoMremap` use the trusted `linux_mmap_cursor` for the
+base, but a runaway `len` could push the page-walk into the kernel
+half before AllocateFrame OOM'd. Added the same `kUserMaxExclusive`
+check as the other paths so even a future cursor bug can't escalate
+into a panic.
+
 ## Pattern — kUserMax gates panic; syscall surfaces must pre-check
 
 The kernel's `AddressSpaceMapUserPage` /`AddressSpaceProtectUserPage`

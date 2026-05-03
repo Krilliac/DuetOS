@@ -1948,6 +1948,18 @@ void SyscallDispatch(arch::TrapFrame* frame)
             base_va = target->linux_mmap_cursor;
         }
 
+        // Reject out-of-range base_va before SectionMap drives
+        // AddressSpaceMapBorrowedPage past its kUserMax panic gate.
+        // Without this an unprivileged caller with a section handle
+        // could DoS the kernel by passing a kernel-half hint.
+        const u64 view_size_pre = subsystems::win32::section::SectionViewSize(static_cast<u32>(pool_idx));
+        constexpr u64 kSectionUserMax = 0x00007FFFFFFFFFFFULL;
+        if (view_size_pre == 0 || base_va > kSectionUserMax || (view_size_pre - 1) > (kSectionUserMax - base_va))
+        {
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
+
         if (!subsystems::win32::section::SectionMap(static_cast<u32>(pool_idx), target->as, base_va, view_protect))
         {
             frame->rax = kStatusConflictingAddresses;
