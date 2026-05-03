@@ -114,6 +114,32 @@ IsoWeekDate IsoYearWeek(i32 year, u8 month, u8 day)
     return out;
 }
 
+u64 UnixSecsFromDateTime(const DateTime& dt)
+{
+    const u64 jdn = JulianDayFromYmd(dt.year, dt.month, dt.day);
+    if (jdn == kJulianDayInvalid)
+        return kJulianDayInvalid;
+    if (jdn < kJulianDayUnixEpoch)
+        return kJulianDayInvalid; // pre-1970 not representable as u64
+    if (!TimeValid(dt.hour, dt.minute, dt.second))
+        return kJulianDayInvalid;
+    const u64 days = jdn - kJulianDayUnixEpoch;
+    return days * 86400ull + u64(dt.hour) * 3600ull + u64(dt.minute) * 60ull + u64(dt.second);
+}
+
+DateTime DateTimeFromUnixSecs(u64 secs)
+{
+    DateTime dt = {};
+    const u64 day = secs / 86400ull;
+    const u64 sec_in_day = secs % 86400ull;
+    const u64 jdn = kJulianDayUnixEpoch + day;
+    YmdFromJulianDay(jdn, dt.year, dt.month, dt.day);
+    dt.hour = u8(sec_in_day / 3600ull);
+    dt.minute = u8((sec_in_day / 60ull) % 60ull);
+    dt.second = u8(sec_in_day % 60ull);
+    return dt;
+}
+
 u32 FormatIso8601(const DateTime& dt, char* out, u32 out_cap)
 {
     if (out_cap < 21)
@@ -330,6 +356,38 @@ void DateTimeSelfTest()
         KASSERT(ParseIso8601("2026-05-03T14:07:30.123Z", 24, out), "util/datetime", "frac-sec parse failed");
         KASSERT(out.second == 30, "util/datetime", "frac-sec second field wrong");
     }
+    // ----- Unix epoch round-trips.
+    {
+        // 1970-01-01T00:00:00Z = unix 0.
+        const DateTime epoch = {1970, 1, 1, 0, 0, 0};
+        KASSERT(UnixSecsFromDateTime(epoch) == 0, "util/datetime", "Unix epoch should be 0");
+        const DateTime back = DateTimeFromUnixSecs(0);
+        KASSERT(back.year == 1970 && back.month == 1 && back.day == 1 && back.hour == 0 && back.minute == 0 &&
+                    back.second == 0,
+                "util/datetime", "Unix epoch round-trip wrong");
+
+        // 2000-01-01T12:00:00Z = unix 946728000.
+        const DateTime y2k = {2000, 1, 1, 12, 0, 0};
+        const u64 want_y2k = 946728000ull;
+        KASSERT(UnixSecsFromDateTime(y2k) == want_y2k, "util/datetime", "Y2K Unix secs wrong");
+        const DateTime y2k_back = DateTimeFromUnixSecs(want_y2k);
+        KASSERT(y2k_back.year == 2000 && y2k_back.month == 1 && y2k_back.day == 1 && y2k_back.hour == 12,
+                "util/datetime", "Y2K round-trip wrong");
+
+        // 2026-05-03T14:07:30Z — used elsewhere as today's reference.
+        const DateTime today = {2026, 5, 3, 14, 7, 30};
+        const u64 today_secs = UnixSecsFromDateTime(today);
+        const DateTime today_back = DateTimeFromUnixSecs(today_secs);
+        KASSERT(today_back.year == today.year && today_back.month == today.month && today_back.day == today.day &&
+                    today_back.hour == today.hour && today_back.minute == today.minute &&
+                    today_back.second == today.second,
+                "util/datetime", "today round-trip wrong");
+
+        // Pre-1970 must reject.
+        const DateTime old = {1969, 12, 31, 23, 59, 59};
+        KASSERT(UnixSecsFromDateTime(old) == kJulianDayInvalid, "util/datetime", "pre-1970 not rejected");
+    }
+
     // ----- Parse rejection.
     {
         DateTime out;

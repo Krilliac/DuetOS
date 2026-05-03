@@ -66,6 +66,21 @@ struct IsoWeekDate
 /// return `kJulianDayInvalid`.
 u64 JulianDayFromYmd(i32 year, u8 month, u8 day);
 
+/// Julian Day Number of the Unix epoch (1970-01-01 00:00:00 UTC).
+/// Equal to `JulianDayFromYmd(1970, 1, 1)`; exposed as a constant
+/// so callers in klog can do arithmetic without a runtime helper.
+inline constexpr u64 kJulianDayUnixEpoch = 2440588;
+
+/// Convert a calendar `DateTime` (UTC) to Unix epoch seconds.
+/// Returns `kJulianDayInvalid` for malformed input. The output
+/// type is `u64`, so dates before 1970 are not representable.
+u64 UnixSecsFromDateTime(const DateTime& dt);
+
+/// Convert Unix epoch seconds (UTC) to a calendar `DateTime`.
+/// Sub-second precision is dropped — call sites that need it
+/// carry a separate fractional component.
+DateTime DateTimeFromUnixSecs(u64 secs);
+
 /// Inverse: decode a Julian Day Number into proleptic Gregorian
 /// year/month/day. Writes through the pointers; values are well-
 /// defined for any `jdn` that came from `JulianDayFromYmd`.

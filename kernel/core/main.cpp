@@ -1719,6 +1719,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         SerialWrite(" (UTC)\n");
     }
 
+    // Anchor klog's wall-clock prefix to the RTC reading we just
+    // took. After this call, `klog::SetLogWallClock(true)` will
+    // surface a `[YYYY-MM-DDTHH:MM:SSZ]` prefix on every log line.
+    // Defaults to OFF so existing log scanners are not surprised;
+    // shell `klog wallclock on` and the boot-config knob can flip
+    // it.
+    duetos::core::WallClockInit();
+
     // CMOS is a 128-byte nvram that survives power-off; firmware
     // stashes BIOS setup + POST diagnostic codes + (on some
     // laptops) battery / thermal hints here. Dump it once at boot
