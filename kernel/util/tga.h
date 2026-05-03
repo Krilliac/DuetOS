@@ -86,6 +86,14 @@ TgaInfo TgaParseHeader(const u8* hdr);
 /// would have flagged via `info.ok = false` already.
 bool TgaDecodeUncompressed(const u8* src, u32 src_len, const TgaInfo& info, u32* out_pixels);
 
+/// Encode a 32-bpp uncompressed top-down TGA image. `pixels` is
+/// `width × height` BGRA8888 u32 elements (same format
+/// `TgaDecodeUncompressed` produces). `out` must hold at least
+/// `kTgaHeaderBytes + width × height × 4` bytes. Returns the
+/// total bytes written, or 0 if `out_cap` is insufficient or
+/// dimensions are out of range.
+u32 TgaEncode32(const u32* pixels, u32 width, u32 height, u8* out, u32 out_cap);
+
 void TgaSelfTest();
 
 } // namespace duetos::util

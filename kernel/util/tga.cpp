@@ -122,6 +122,43 @@ bool TgaDecodeUncompressed(const u8* src, u32 src_len, const TgaInfo& info, u32*
     return true;
 }
 
+u32 TgaEncode32(const u32* pixels, u32 width, u32 height, u8* out, u32 out_cap)
+{
+    if (width == 0 || height == 0 || width > kTgaMaxDim || height > kTgaMaxDim)
+        return 0;
+    const u64 pixel_bytes = u64(width) * height * 4;
+    const u64 total = u64(kTgaHeaderBytes) + pixel_bytes;
+    if (total > u64(out_cap))
+        return 0;
+    // Header: image type 2, no colormap, top-down origin (descriptor
+    // bit 5 set), 32-bpp, alpha-channel-bits in low nibble = 8.
+    for (u32 i = 0; i < 18; ++i)
+        out[i] = 0;
+    out[kHdrImageType] = u8(kImageTypeUncompressedTrueColor);
+    out[kHdrImageWidth] = u8(width);
+    out[kHdrImageWidth + 1] = u8(width >> 8);
+    out[kHdrImageHeight] = u8(height);
+    out[kHdrImageHeight + 1] = u8(height >> 8);
+    out[kHdrPixelDepth] = 32;
+    out[kHdrImageDescriptor] = u8(kDescriptorOriginTop | 0x08); // 8-bit alpha
+    // Pixels: BGRA8888 LE u32 → spec-required B G R A byte order.
+    u8* dst = out + kTgaHeaderBytes;
+    for (u32 y = 0; y < height; ++y)
+    {
+        const u32* src_row = pixels + u64(y) * width;
+        u8* dst_row = dst + u64(y) * width * 4;
+        for (u32 x = 0; x < width; ++x)
+        {
+            const u32 px = src_row[x];
+            dst_row[x * 4 + 0] = u8(px);
+            dst_row[x * 4 + 1] = u8(px >> 8);
+            dst_row[x * 4 + 2] = u8(px >> 16);
+            dst_row[x * 4 + 3] = u8(px >> 24);
+        }
+    }
+    return u32(total);
+}
+
 namespace
 {
 
@@ -285,6 +322,29 @@ void TgaSelfTest()
         KASSERT(info.ok, "util/tga", "valid header should parse");
         u32 px[16] = {};
         KASSERT(!TgaDecodeUncompressed(buf, sizeof(buf), info, px), "util/tga", "truncated decode not rejected");
+    }
+
+    // ----- Encode → Decode round-trip for a 2×2 mosaic.
+    {
+        const u32 mosaic[4] = {0xFFFF0000u, 0xFF00FF00u, 0xFF0000FFu, 0xFFFFFFFFu};
+        u8 enc[kTgaHeaderBytes + 16];
+        const u32 n = TgaEncode32(mosaic, 2, 2, enc, sizeof(enc));
+        KASSERT(n == kTgaHeaderBytes + 16, "util/tga", "encode byte count wrong");
+        const TgaInfo info = TgaParseHeader(enc);
+        KASSERT(info.ok && info.bpp == 32 && info.width == 2 && info.height == 2, "util/tga",
+                "encode header parse wrong");
+        KASSERT(info.top_down, "util/tga", "encode must be top-down");
+        u32 round[4] = {};
+        KASSERT(TgaDecodeUncompressed(enc, n, info, round), "util/tga", "encode round-trip decode failed");
+        for (u32 i = 0; i < 4; ++i)
+            KASSERT(round[i] == mosaic[i], "util/tga", "encode round-trip pixel mismatch");
+    }
+
+    // ----- Encoder negative case: out_cap too small.
+    {
+        const u32 px = 0xFFFFFFFFu;
+        u8 small[10];
+        KASSERT(TgaEncode32(&px, 1, 1, small, sizeof(small)) == 0, "util/tga", "encode out_cap underflow not rejected");
     }
 }
 
