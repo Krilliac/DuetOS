@@ -20,8 +20,9 @@ constexpr u32 kFieldTypeflag = 156;
 constexpr u32 kFieldLinkname = 157; // 100 bytes
 constexpr u32 kFieldMagic = 257;    // 6 bytes ("ustar\0" or "ustar ")
 constexpr u32 kFieldVersion = 263;  // 2 bytes
-constexpr u32 kFieldUname = 265;    // 32 bytes
-constexpr u32 kFieldGname = 297;    // 32 bytes
+// uname @ 265 (32 bytes) + gname @ 297 (32 bytes) — present in
+// the spec but not consumed by v0; reintroduce constants when
+// we surface the user/group name fields to the visitor.
 constexpr u32 kFieldPrefix = 345;   // 155 bytes
 
 // Read an N-byte ASCII-octal field. Spaces and NUL terminate.
