@@ -89,6 +89,7 @@ void CmdMkdir(u32 argc, char** argv)
 {
     if (argc < 2)
     {
+        ShellSetExit(2);
         ConsoleWriteln("MKDIR: USAGE: MKDIR PATH");
         return;
     }
@@ -101,9 +102,11 @@ void CmdMkdir(u32 argc, char** argv)
     }
     if (IsTmpPath(argv[1]))
     {
+        ShellSetExit(1);
         ConsoleWriteln("MKDIR: TMPFS IS FLAT (NO DIRECTORIES)");
         return;
     }
+    ShellSetExit(1);
     ConsoleWriteln("MKDIR: ONLY /fat/<PATH> SUPPORTS DIRECTORIES");
 }
 
@@ -111,6 +114,7 @@ void CmdRmdir(u32 argc, char** argv)
 {
     if (argc < 2)
     {
+        ShellSetExit(2);
         ConsoleWriteln("RMDIR: USAGE: RMDIR PATH");
         return;
     }
@@ -123,9 +127,11 @@ void CmdRmdir(u32 argc, char** argv)
     }
     if (IsTmpPath(argv[1]))
     {
+        ShellSetExit(1);
         ConsoleWriteln("RMDIR: TMPFS IS FLAT (NO DIRECTORIES)");
         return;
     }
+    ShellSetExit(1);
     ConsoleWriteln("RMDIR: ONLY /fat/<PATH> SUPPORTS DIRECTORIES");
 }
 
@@ -142,18 +148,21 @@ void CmdTruncate(u32 argc, char** argv)
 {
     if (argc < 3)
     {
+        ShellSetExit(2);
         ConsoleWriteln("TRUNCATE: USAGE: TRUNCATE /tmp/<NAME> SIZE");
         return;
     }
     const char* leaf = TmpLeaf(argv[1]);
     if (leaf == nullptr || *leaf == '\0')
     {
+        ShellSetExit(1);
         ConsoleWriteln("TRUNCATE: ONLY /tmp/<NAME> IS WRITABLE (USE FATTRUNC FOR /fat)");
         return;
     }
     u64 size_u64 = 0;
     if (!ParseU64Str(argv[2], &size_u64) || size_u64 > duetos::fs::kTmpFsContentMax)
     {
+        ShellSetExit(2);
         ConsoleWrite("TRUNCATE: BAD SIZE (MAX ");
         WriteU64Dec(duetos::fs::kTmpFsContentMax);
         ConsoleWriteln(")");
@@ -170,6 +179,7 @@ void CmdTruncate(u32 argc, char** argv)
             scratch[i] = '\0';
         if (!duetos::fs::TmpFsWrite(leaf, scratch, size))
         {
+            ShellSetExit(1);
             ConsoleWriteln("TRUNCATE: WRITE FAILED");
         }
         return;
@@ -194,6 +204,7 @@ void CmdRealpath(u32 argc, char** argv)
 {
     if (argc < 2)
     {
+        ShellSetExit(2);
         ConsoleWriteln("REALPATH: USAGE: REALPATH PATH");
         return;
     }
@@ -309,6 +320,7 @@ void CmdType(u32 argc, char** argv)
 {
     if (argc < 2)
     {
+        ShellSetExit(2);
         ConsoleWriteln("TYPE: USAGE: TYPE NAME");
         return;
     }
@@ -327,6 +339,8 @@ void CmdType(u32 argc, char** argv)
             return;
         }
     }
+    // POSIX `type`: no-match exits 1 so scripts can branch.
+    ShellSetExit(1);
     ConsoleWrite(argv[1]);
     ConsoleWriteln(": not found");
 }
@@ -394,6 +408,7 @@ void CmdDu(u32 argc, char** argv)
 {
     if (argc < 2)
     {
+        ShellSetExit(2);
         ConsoleWriteln("DU: USAGE: DU PATH");
         return;
     }
@@ -401,6 +416,7 @@ void CmdDu(u32 argc, char** argv)
     const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
     if (n == static_cast<u32>(-1))
     {
+        ShellSetExit(1);
         ConsoleWrite("DU: NO SUCH FILE: ");
         ConsoleWriteln(argv[1]);
         return;
@@ -519,12 +535,14 @@ void CmdPort(u32 argc, char** argv)
 {
     if (argc < 3)
     {
+        ShellSetExit(2);
         ConsoleWriteln("PORT: USAGE: PORT R PORT  |  PORT W PORT VALUE  (PORT and VALUE in 0x hex or decimal)");
         return;
     }
     u64 port_u64 = 0;
     if (!ParseU64Str(argv[2], &port_u64) || port_u64 > 0xFFFF)
     {
+        ShellSetExit(2);
         ConsoleWriteln("PORT: BAD PORT (0..0xFFFF)");
         return;
     }
@@ -543,12 +561,14 @@ void CmdPort(u32 argc, char** argv)
     {
         if (argc < 4)
         {
+            ShellSetExit(2);
             ConsoleWriteln("PORT: WRITE NEEDS A VALUE BYTE");
             return;
         }
         u64 val_u64 = 0;
         if (!ParseU64Str(argv[3], &val_u64) || val_u64 > 0xFF)
         {
+            ShellSetExit(2);
             ConsoleWriteln("PORT: BAD VALUE (0..0xFF)");
             return;
         }
@@ -560,6 +580,7 @@ void CmdPort(u32 argc, char** argv)
         ConsoleWriteChar('\n');
         return;
     }
+    ShellSetExit(2);
     ConsoleWriteln("PORT: UNKNOWN MODE (USE R OR W)");
 }
 

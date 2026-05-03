@@ -168,6 +168,19 @@ extern bool g_interrupt;
 void ReplaceLine(const char* text);
 
 // ---------------------------------------------------------------
+// Exit code of the most recently dispatched command. Surfaced to
+// scripts via the special `$?` token in $VAR substitution.
+// Definition lives in shell_state.cpp.
+//
+// Convention: 0 = success, 1 = generic failure, 2 = misuse of
+// shell builtin (POSIX flavour), 127 = command not found.
+// Handlers are not required to call ShellSetExit on success — the
+// dispatcher resets to 0 before each command runs.
+// ---------------------------------------------------------------
+i32 ShellLastExit();
+void ShellSetExit(i32 code);
+
+// ---------------------------------------------------------------
 // Top-level dispatcher (shell_dispatch.cpp). Splits a submitted
 // line into pipe stages, expands `!` history references and the
 // $VAR token-substitution, then walks the if/else chain that

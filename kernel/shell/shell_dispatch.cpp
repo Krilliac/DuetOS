@@ -833,18 +833,62 @@ void Dispatch(char* line)
 
     // $VAR substitution — only for whole-token matches. `$PATH`
     // becomes its env value; `/etc/$PATH` stays verbatim. Empty
-    // value (undefined var) substitutes as "". Keeping the
-    // whole-token rule makes substitution trivial + safe; a real
-    // parser lands when someone needs quoted / concatenated
-    // expansions.
+    // value (undefined var) substitutes as "". `$?` is special-
+    // cased to the last command's exit code, decimal-formatted into
+    // a TU-static scratch buffer. Keeping the whole-token rule
+    // makes substitution trivial + safe; a real parser lands when
+    // someone needs quoted / concatenated expansions.
     static char env_empty[1] = {'\0'};
+    static char exit_buf[12] = {'\0'};
     for (u32 i = 1; i < argc; ++i)
     {
         if (argv[i][0] != '$' || argv[i][1] == '\0')
             continue;
+        if (argv[i][1] == '?' && argv[i][2] == '\0')
+        {
+            // Format the last exit code into the static scratch.
+            // Single shared slot is fine — `$?` doesn't appear in
+            // an argv twice with different values, and this runs
+            // single-threaded inside the shell task.
+            i32 v = ShellLastExit();
+            u32 n = 0;
+            if (v < 0)
+            {
+                exit_buf[n++] = '-';
+                v = -v;
+            }
+            char digits[11];
+            u32 d = 0;
+            if (v == 0)
+            {
+                digits[d++] = '0';
+            }
+            else
+            {
+                while (v > 0)
+                {
+                    digits[d++] = static_cast<char>('0' + (v % 10));
+                    v /= 10;
+                }
+            }
+            while (d > 0 && n + 1 < sizeof(exit_buf))
+            {
+                exit_buf[n++] = digits[--d];
+            }
+            exit_buf[n] = '\0';
+            argv[i] = exit_buf;
+            continue;
+        }
         EnvSlot* s = EnvFind(argv[i] + 1);
         argv[i] = (s != nullptr) ? s->value : env_empty;
     }
+
+    // Reset the exit-code slot before dispatch. Handlers that want
+    // to report failure call ShellSetExit() in their failure path;
+    // success is the implicit default. A handler may also report
+    // a non-failure non-zero (rare) — `false` is the only current
+    // builtin that does.
+    ShellSetExit(0);
 
     const char* cmd = argv[0];
     duetos::core::CleanroomTraceRecord("shell", "command", duetos::core::CleanroomTraceHashToken(cmd), argc,
@@ -1866,6 +1910,7 @@ void Dispatch(char* line)
         CmdPort(argc, argv);
         return;
     }
+    ShellSetExit(127);
     ConsoleWrite("COMMAND NOT FOUND: ");
     ConsoleWriteln(cmd);
     ConsoleWriteln("TYPE HELP FOR A LIST OF COMMANDS.");

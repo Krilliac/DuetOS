@@ -179,6 +179,25 @@ constinit char g_input[kInputMax] = {};
 constinit u32 g_len = 0;
 constinit bool g_interrupt = false;
 
+// Exit code of the most recently dispatched command. Reset to 0
+// by Dispatch() before each command runs; failure paths inside
+// individual handlers call ShellSetExit() to report their result.
+// Surfaced to scripts via the special `$?` token in $VAR
+// substitution. The value is u8 in spirit (0..255 like POSIX) but
+// stored as i32 so handlers can use ordinary -1/+N math without
+// noise; the substitution path clamps + decimals it.
+constinit i32 g_last_exit = 0;
+
+i32 ShellLastExit()
+{
+    return g_last_exit;
+}
+
+void ShellSetExit(i32 code)
+{
+    g_last_exit = code;
+}
+
 // Wipe the visible line (echo '\b' g_len times) and load `text`
 // into the edit buffer. `nullptr` just clears the line.
 void ReplaceLine(const char* text)
