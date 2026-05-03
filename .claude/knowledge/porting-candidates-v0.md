@@ -2,7 +2,7 @@
 
 _Type: Plan + Observation._
 _Status: Active — open list. Each session can pick from this._
-_Last updated: 2026-05-03 (two batches landed: morning batch — HMAC-MD5, Unicode UTF, TGA decoder, datetime, BMP util, CPIO walker; afternoon batch — KPTI close-out, ChaCha20+Poly1305+AEAD, AES-GCM, POSIX TZ, WAV, TAR, LZ4, GTF, DPMS, PSF, TGA encoder. See `kernel-util-libraries-v0.md` for the long-form companion)._
+_Last updated: 2026-05-03 (three same-day batches landed: morning — HMAC-MD5, Unicode UTF, TGA decoder, datetime, BMP util, CPIO walker; afternoon — KPTI close-out, ChaCha20+Poly1305+AEAD, AES-GCM, POSIX TZ, WAV, TAR, LZ4, GTF, DPMS, PSF, TGA encoder; evening — Adler-32, SHA-384/SHA-512, AES-CCM, DEFLATE inflater, GZIP+zlib wrappers, TZif binary timezone parser. See `kernel-util-libraries-v0.md` for the long-form companion)._
 
 This file enumerates discrete features whose primary work is
 **clean-room porting from a public spec** rather than novel
@@ -63,6 +63,12 @@ for the next session.
 | 2026-05-03 | DPMS state machine + driver-hook surface | `kernel/drivers/gpu/dpms.{h,cpp}` |
 | 2026-05-03 | PSF1 / PSF2 console-font header parser | `kernel/util/psf.{h,cpp}` |
 | 2026-05-03 | TGA 32-bpp encoder (paired with prior decoder) | `kernel/util/tga.{h,cpp}` (extended) |
+| 2026-05-03 | Adler-32 (RFC 1950 §9) | `kernel/util/adler32.{h,cpp}` |
+| 2026-05-03 | SHA-384 + SHA-512 (FIPS 180-4 §6.4 / §6.5) | `kernel/crypto/sha512.{h,cpp}` |
+| 2026-05-03 | AES-CCM 128/256 (NIST SP 800-38C) | `kernel/crypto/aes_ccm.{h,cpp}` |
+| 2026-05-03 | DEFLATE inflater (RFC 1951) | `kernel/util/deflate.{h,cpp}` |
+| 2026-05-03 | GZIP container + zlib stream (RFC 1952 + RFC 1950) over DEFLATE | `kernel/util/gzip.{h,cpp}` |
+| 2026-05-03 | TZif binary timezone parser (RFC 8536, v1 block) | `kernel/util/tzif.{h,cpp}` |
 
 ## Display + GPU
 
@@ -116,7 +122,7 @@ for the next session.
 | Slice | Spec | Prior art | Consumer | Est. LOC |
 |-------|------|-----------|----------|----------|
 | ~~AES-128/256 block cipher~~ LANDED 2026-05-03 | FIPS 197 | OpenSSL, ARM Cryptolib | Wi-Fi, future TLS | ~250 |
-| ~~AES-GCM mode~~ LANDED 2026-05-03 (AES-CCM still pending) | NIST SP 800-38D | mbedTLS | Wi-Fi WPA3 / TLS | ~330 |
+| ~~AES-GCM + AES-CCM modes~~ LANDED 2026-05-03 | NIST SP 800-38D + 38C | mbedTLS | Wi-Fi WPA2 CCMP + WPA3 GCMP, TLS | ~700 |
 | ~~AES key wrap (RFC 3394)~~ LANDED 2026-05-03 | RFC 3394 | mbedTLS, BoringSSL | Wi-Fi M3 GTK | ~100 |
 | ~~MD5~~ LANDED 2026-05-03 | RFC 1321 | mbedTLS | legacy interop | ~100 |
 | ~~ChaCha20 + Poly1305 + AEAD~~ LANDED 2026-05-03 | RFC 8439 | BoringSSL | TLS 1.3 ciphersuite | ~580 |
@@ -148,7 +154,7 @@ for the next session.
 
 | Slice | Spec | Prior art | Consumer | Est. LOC |
 |-------|------|-----------|----------|----------|
-| **TZif (Olson zoneinfo) parser** | RFC 8536 (TZif v3) | musl `__tzset.c`, glibc tzfile.c | Linux ABI gap | ~300 |
+| ~~TZif (Olson zoneinfo) parser~~ LANDED 2026-05-03 (v1 block; v2/v3 64-bit deferred) | RFC 8536 (TZif v3) | musl `__tzset.c`, glibc tzfile.c | Linux ABI gap | ~310 |
 | ~~POSIX TZ string parser~~ LANDED 2026-05-03 | POSIX.1-2008 §8.3 | musl | TZ env var | ~470 |
 | **Gregorian↔ Julian day conversion** | (well-known) | musl, glibc | calendar app | ~80 |
 | **ISO 8601 datetime parser/printer** | ISO 8601 | musl strftime | logging | ~200 |
@@ -160,8 +166,8 @@ for the next session.
 
 | Slice | Spec | Prior art | Consumer | Est. LOC |
 |-------|------|-----------|----------|----------|
-| **DEFLATE / RFC 1951 inflater** | RFC 1951 | tinfl.c, miniz | gzip, png, zip, kernel-image | ~600 |
-| **GZIP container** | RFC 1952 | (above) | initramfs.gz, http content | ~100 |
+| ~~DEFLATE inflater (decode-only)~~ LANDED 2026-05-03 | RFC 1951 | puff.c | gzip, png, zip, kernel-image | ~470 |
+| ~~GZIP container + zlib stream wrapper~~ LANDED 2026-05-03 | RFC 1952 + RFC 1950 | (above) | initramfs.gz, http content, PNG IDAT | ~300 |
 | ~~CPIO newc / newc-CRC walker~~ LANDED 2026-05-03 (newc only — old binary 070707 deliberately rejected) | POSIX.1-1988 | Linux init/initramfs.c | initramfs prereq | ~330 |
 | ~~TAR ustar~~ LANDED 2026-05-03 (pax extensions still pending) | POSIX.1-2001 | libarchive | distribution tarballs | ~400 |
 | **ZIP archive read-only** | PKWARE APPNOTE | minizip | Win32 install MSIs | ~250 |

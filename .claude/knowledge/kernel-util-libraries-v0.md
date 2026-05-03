@@ -1,9 +1,9 @@
 # Kernel pure-compute utility libraries v0
 
 _Type: Observation + Decision._
-_Status: Active — 17 clean-room TUs landed across two same-day
+_Status: Active — 24 clean-room TUs landed across three same-day
 batches in `kernel/util/`, `kernel/crypto/`, and `kernel/drivers/gpu/`._
-_Last updated: 2026-05-03 (afternoon batch)._
+_Last updated: 2026-05-03 (evening batch)._
 
 ## Why this entry
 
@@ -49,6 +49,17 @@ arrive in follow-up slices.
 | DPMS state machine | `kernel/drivers/gpu/dpms.{h,cpp}` | VESA DPMS + X.Org DPMS | full state-machine walk including hook veto + bookkeeper-only mode | screensaver, power-policy / lid-switch, Win32 SetMonitorPowerSetting |
 | PSF1 / PSF2 font parser | `kernel/util/psf.{h,cpp}` | Linux PSF v1 + v2 | PSF1-256, PSF1-512+unicode, PSF2-100, 3 negatives | future `setfont`-style userland app |
 | TGA 32-bpp encoder | `kernel/util/tga.{h,cpp}` (extended) | Truevision TGA 2.0 | encode-then-decode 2×2 mosaic round-trip + out-cap negative | ImageView (decoder side already wired); screenshot extension |
+
+### Evening batch (seven slices)
+
+| Library | Header / TU | Spec | KAT count | Eventual consumer |
+|---------|-------------|------|-----------|-------------------|
+| Adler-32 checksum | `kernel/util/adler32.{h,cpp}` | RFC 1950 §9 | 5 (RFC reference "Wikipedia" vector, empty input, single byte, streaming-split, 6 KB-zeros boundary) | zlib stream wrapper (active) |
+| SHA-384 + SHA-512 | `kernel/crypto/sha512.{h,cpp}` | FIPS 180-4 §6.4 / §6.5 | 4 (SHA-512 "abc", SHA-512 "", SHA-384 "abc", SHA-512 1000×'a' multi-block prefix) | TLS 1.2/1.3 SHA-384 cipher suites, future Ed448 |
+| AES-CCM (128/256) | `kernel/crypto/aes_ccm.{h,cpp}` | NIST SP 800-38C | round-trip + tag tamper + ciphertext tamper for AES-128, AES-256 round-trip, tag-length validation | 802.11 CCMP TX/RX dispatch |
+| DEFLATE inflater | `kernel/util/deflate.{h,cpp}` | RFC 1951 | 5 (stored happy, empty stored, fixed-Huffman EOB-only, bad-NLEN, reserved BTYPE=11) | gzip / zlib / PNG IDAT |
+| GZIP + zlib wrappers | `kernel/util/gzip.{h,cpp}` | RFC 1952 + RFC 1950 | 6 (GZIP happy, GZIP CRC tamper, GZIP ISIZE mismatch, zlib happy, zlib FCHECK mismatch, zlib Adler tamper) | kernel-image self-decompression, PNG, HTTP gzip |
+| TZif binary timezone parser | `kernel/util/tzif.{h,cpp}` | RFC 8536 v1 block | happy 2-transition synth + 5 negatives (bad magic, truncation, bad transition_type idx, typecnt=0, v2 byte still parses v1) | Linux ABI strftime/localtime over POSIX-TZ string parser |
 
 ## Conventions every TU follows
 
