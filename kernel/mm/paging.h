@@ -199,6 +199,49 @@ void SetPteFlags4K(u64 virt, u64 new_flags);
 /// EFER.NXE detectors are blind to.
 u64 GetPteFlags4K(u64 virt);
 
+/// Snapshot of an x86_64 4-level page-table walk for `virt`. Filled
+/// by `SnapshotPageWalk`; consumed by the crash-dump page-walk
+/// emitter so a #PF dump can show *why* the access faulted (which
+/// level the walk stopped at, what flags the leaf had).
+///
+/// Allocation-free, panic-free. Designed to be safe to call from
+/// the trap dispatcher / panic path: a corrupted page-table entry
+/// pointing outside the 1 GiB direct map causes `stop = OutOfDirectMap`
+/// rather than a recursive fault.
+enum class PageWalkStop : u8
+{
+    FourKiB,        // walked PML4 → PDPT → PD → PT, leaf in entry_pt
+    TwoMiB,         // PD entry has PS bit, leaf in entry_pd
+    OneGiB,         // PDPT entry has PS bit, leaf in entry_pdpt
+    NotPresentPml4, // PML4 entry !P
+    NotPresentPdpt, // PDPT entry !P
+    NotPresentPd,   // PD entry !P
+    NotPresentPt,   // PT entry !P
+    NonCanonical,   // VA isn't canonical (bits 63..48 don't sign-extend bit 47)
+    OutOfDirectMap, // intermediate-table phys addr would land outside [0..1 GiB)
+};
+
+struct PageWalkSnapshot
+{
+    u64 cr3;           // CR3 at the time of the walk
+    u64 virt;          // queried VA
+    u16 idx_pml4;      // PML4 index (bits 47..39)
+    u16 idx_pdpt;      // PDPT index (bits 38..30)
+    u16 idx_pd;        // PD   index (bits 29..21)
+    u16 idx_pt;        // PT   index (bits 20..12)
+    u64 entry_pml4;    // raw PML4E (0 if walk stopped above)
+    u64 entry_pdpt;    // raw PDPTE
+    u64 entry_pd;      // raw PDE
+    u64 entry_pt;      // raw PTE
+    u64 leaf_phys;     // resolved physical address (only meaningful when stop == FourKiB/TwoMiB/OneGiB)
+    PageWalkStop stop; // where the walk stopped
+};
+
+/// Walk the active CR3's PML4 for `virt` and return a structured
+/// snapshot of every level visited. NEVER allocates, NEVER panics.
+/// Safe from panic / trap / IRQ context.
+PageWalkSnapshot SnapshotPageWalk(u64 virt);
+
 /*
  * User-pointer copy helpers.
  *

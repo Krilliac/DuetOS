@@ -61,7 +61,16 @@ constexpr const char* kDumpEndMarker = "=== DUETOS CRASH DUMP END ===\n";
 // and lists only stack slots whose value resolves to a kernel
 // symbol — a focused pointer-to-return-address scan that
 // complements the rbp-chain backtrace and the 16-quad raw dump.
-constexpr u64 kDumpSchemaVersion = 2;
+//
+// v3 (2026-05-03): page-walk block emitted for cr2 (when non-zero)
+// and rip after the register dump and before the backtrace. Each
+// emitted level reads as
+//     PML4[0xIDX] = 0xENTRY [P|RW|...|NX]
+// terminating in `-> phys=0x...` for a successful walk or
+// `-> stop: <reason>` (NotPresent at level / non-canonical /
+// out-of-direct-map). Answers "why did this fault?" without
+// forcing the operator to walk by hand.
+constexpr u64 kDumpSchemaVersion = 3;
 
 void WriteLabelled(const char* label, u64 value)
 {
@@ -484,6 +493,19 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
     // via PlausibleKernelAddress; a wild RIP simply emits a
     // skipped-line and diagnostics continue.
     DumpInstructionBytes("panic-rip", rip, 16);
+    // 4-level page-table walk for the two addresses that most
+    // often answer "why did this fault?". cr2 is the faulting
+    // VA on a #PF (stale outside one, but the walk is still safe
+    // to compute and the leaf entry is informative). rip's walk
+    // surfaces NX / not-present / PS leaves around the failing
+    // fetch — invaluable for #PF on instruction fetch and #UD on
+    // a ripped-out code page. Both calls are allocation-free /
+    // panic-free.
+    if (cr2 != 0)
+    {
+        WritePageWalk("cr2", cr2);
+    }
+    WritePageWalk("rip", rip);
     DumpBacktrace(rbp);
     DumpStack(rsp, 16);
     DumpReturnAddressPointers(rsp);

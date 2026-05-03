@@ -824,6 +824,114 @@ u64 GetPteFlags4K(u64 virt)
     return *pte & ~kAddrMask; // physical-frame bits stripped, flags only
 }
 
+PageWalkSnapshot SnapshotPageWalk(u64 virt)
+{
+    // Allocation-free, panic-free 4-level walk for the crash-dump
+    // path. WalkToPte panics on PS-page hits and uses PhysToVirt
+    // (which itself panics outside the 1 GiB direct map) — neither
+    // is acceptable when we may already be inside a panic. Roll a
+    // local walker that returns structured "stop reasons" instead.
+    PageWalkSnapshot s{};
+    s.virt = virt;
+    s.cr3 = ReadCr3();
+    s.idx_pml4 = static_cast<u16>(IndexPml4(virt));
+    s.idx_pdpt = static_cast<u16>(IndexPdpt(virt));
+    s.idx_pd = static_cast<u16>(IndexPd(virt));
+    s.idx_pt = static_cast<u16>(IndexPt(virt));
+
+    // Canonical-form check. Bits 63..48 must equal bit 47.
+    {
+        const u64 high = virt >> 47;
+        if (high != 0 && high != 0x1FFFFULL)
+        {
+            s.stop = PageWalkStop::NonCanonical;
+            return s;
+        }
+    }
+
+    auto safe_table_ptr = [](u64 phys) -> u64*
+    {
+        // Equivalent to PhysToVirt but returns nullptr instead of
+        // panicking when phys is outside the 1 GiB direct map.
+        if (phys >= kDirectMapBytes)
+            return nullptr;
+        return reinterpret_cast<u64*>(static_cast<uptr>(phys) + kKernelVirtualBase);
+    };
+
+    u64* pml4 = safe_table_ptr(s.cr3 & kAddrMask);
+    if (pml4 == nullptr)
+    {
+        s.stop = PageWalkStop::OutOfDirectMap;
+        return s;
+    }
+
+    s.entry_pml4 = pml4[s.idx_pml4];
+    if ((s.entry_pml4 & kPagePresent) == 0)
+    {
+        s.stop = PageWalkStop::NotPresentPml4;
+        return s;
+    }
+
+    u64* pdpt = safe_table_ptr(s.entry_pml4 & kAddrMask);
+    if (pdpt == nullptr)
+    {
+        s.stop = PageWalkStop::OutOfDirectMap;
+        return s;
+    }
+
+    s.entry_pdpt = pdpt[s.idx_pdpt];
+    if ((s.entry_pdpt & kPagePresent) == 0)
+    {
+        s.stop = PageWalkStop::NotPresentPdpt;
+        return s;
+    }
+    if (s.entry_pdpt & kPageHugeOrPat)
+    {
+        // 1 GiB PS leaf: phys = entry_pdpt[51:30] | virt[29:0]
+        s.leaf_phys = (s.entry_pdpt & 0x000FFFFFC0000000ULL) | (virt & 0x3FFFFFFFULL);
+        s.stop = PageWalkStop::OneGiB;
+        return s;
+    }
+
+    u64* pd = safe_table_ptr(s.entry_pdpt & kAddrMask);
+    if (pd == nullptr)
+    {
+        s.stop = PageWalkStop::OutOfDirectMap;
+        return s;
+    }
+
+    s.entry_pd = pd[s.idx_pd];
+    if ((s.entry_pd & kPagePresent) == 0)
+    {
+        s.stop = PageWalkStop::NotPresentPd;
+        return s;
+    }
+    if (s.entry_pd & kPageHugeOrPat)
+    {
+        // 2 MiB PS leaf: phys = entry_pd[51:21] | virt[20:0]
+        s.leaf_phys = (s.entry_pd & 0x000FFFFFFFE00000ULL) | (virt & 0x1FFFFFULL);
+        s.stop = PageWalkStop::TwoMiB;
+        return s;
+    }
+
+    u64* pt = safe_table_ptr(s.entry_pd & kAddrMask);
+    if (pt == nullptr)
+    {
+        s.stop = PageWalkStop::OutOfDirectMap;
+        return s;
+    }
+
+    s.entry_pt = pt[s.idx_pt];
+    if ((s.entry_pt & kPagePresent) == 0)
+    {
+        s.stop = PageWalkStop::NotPresentPt;
+        return s;
+    }
+    s.leaf_phys = (s.entry_pt & kAddrMask) | (virt & kPageMask);
+    s.stop = PageWalkStop::FourKiB;
+    return s;
+}
+
 void ProtectKernelImage()
 {
     KLOG_TRACE_SCOPE("mm/paging", "ProtectKernelImage");

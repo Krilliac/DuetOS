@@ -156,6 +156,9 @@ assert_contains '^  rflags[[:space:]]+:'                              "rflags fi
 assert_contains '^  efer[[:space:]]+:'                                "efer field"             "${DUMP_FILE}"
 assert_contains '^  rip[[:space:]]+: 0x[0-9a-f]+  \[[^ ]+\+0x[0-9a-f]+ \([^)]+\)\]' \
                                                                       "rip symbolized inline"  "${DUMP_FILE}"
+assert_contains '^  page-walk for rip=0x[0-9a-f]+ \(cr3=0x[0-9a-f]+\):' \
+                                                                      "rip page-walk header"   "${DUMP_FILE}"
+assert_contains '^    PML4\[0x[0-9a-f]+\] = 0x[0-9a-f]+ \[[^]]+\]'    "rip page-walk PML4 entry" "${DUMP_FILE}"
 assert_contains 'backtrace \(up to 16 frames'                         "backtrace header"       "${DUMP_FILE}"
 assert_contains '^    #0x0+[0-9]  rip=0x[0-9a-f]+  \[[^ ]+\+0x' \
                                                                       "backtrace frame symbolized" "${DUMP_FILE}"

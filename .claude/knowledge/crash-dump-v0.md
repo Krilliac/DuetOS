@@ -111,10 +111,11 @@ annotation when the value falls in plausible kernel code range — surfaces
 stale callback pointers / vtable spills / saved-RIP residue without forcing
 the operator to re-symbolize by hand.
 
-The schema is v2 (v1 → v2 added the `return-address pointers` section
-between the raw stack quads and the held-locks block). Bump
-`kDumpSchemaVersion` in `core/panic.cpp` when the layout changes in a way
-a parser would care about. The bit-decoded suffixes (e.g. `[PE|WP|PG]`)
+The schema is v3 (v1 → v2 added the `return-address pointers` section
+between the raw stack quads and the held-locks block; v2 → v3 added
+the `page-walk` block for cr2 and rip after the register dump and
+before the backtrace). Bump `kDumpSchemaVersion` in `core/panic.cpp`
+when the layout changes in a way a parser would care about. The bit-decoded suffixes (e.g. `[PE|WP|PG]`)
 live on the SAME line as the existing `<label> : <hex>` token sequence,
 so a parser that anchors on `<label> : 0x[0-9a-f]+` keeps working;
 human readers get the meaning for free.
@@ -161,6 +162,63 @@ Bounded by `PlausibleStackPointer` so a wild rsp halts the scan
 cleanly instead of dereffing into an unmapped page; emits
 `(none)` when zero slots resolve so the section's presence is
 unambiguous.
+
+### Page-walk for cr2 and rip
+
+`mm::SnapshotPageWalk(virt)` (in `kernel/mm/paging.cpp`) walks
+the active CR3's PML4 four levels down for `virt` and returns a
+structured `PageWalkSnapshot` covering every visited level (raw
+entry, index, leaf physical address) plus a `PageWalkStop`
+reason explaining where the walk terminated. Allocation-free,
+panic-free — the boot direct map is reached via a local
+`safe_table_ptr` that returns `nullptr` on out-of-range phys
+instead of panicking like `mm::PhysToVirt` would.
+
+`core::WritePageWalk(label, virt)` (in `kernel/diag/diag_decode.cpp`)
+formats the snapshot for the crash dump:
+
+```
+  page-walk for rip=0xffffffff80130964 (cr3=0x0000000000102000):
+    PML4[0x1ff] = 0x0000000000104023 [P|RW|A]
+    PDPT[0x1fe] = 0x0000000000105023 [P|RW|A]
+    PD  [0x000] = 0x00000000007b3023 [P|RW|A]
+    PT  [0x130] = 0x0000000000130021 [P|A]
+    -> phys=0x0000000000130964 (4 KiB)
+```
+
+Wired into `DumpDiagnostics` between the IST canary line and the
+backtrace. cr2 walk is skipped when cr2 is zero (no recent fault
+on this CPU); rip walk fires unconditionally because every panic
+has a meaningful rip and an NX/non-present rip page is the
+shortest path to "why did the CPU stop?".
+
+What it surfaces for free:
+
+- `[P|A]` (no `RW`) on a `.text` PT entry confirms W^X is intact
+  on the failing page; presence of `RW` on a `.text` PT is the
+  signature of an attacker who flipped the bit (the
+  branch-NOP-attack-v0 detector class).
+- `[P|RW|US|...|NX]` on a user-space PT entry shows whether NX
+  was honoured on a #PF(instr) — the `instr` bit in the page-
+  fault error code stops being a mystery.
+- `-> stop: PML4 entry not present` (or PDPT/PD/PT) names the
+  exact level where the page table walk gave up — a #PF on a
+  freshly-allocated address that the kernel forgot to map shows
+  `NotPresentPdpt` (entire 1 GiB region missing) versus `NotPresentPt`
+  (single page missing) and a reader can route diagnosis without
+  re-running the walker by hand.
+- `2 MiB PS leaf` / `1 GiB PS leaf` make the boot direct-map
+  / huge-page mappings legible — distinguishes "you faulted on
+  a 2 MiB superpage in the direct map" from "you faulted on a
+  4 KiB user page".
+- `non-canonical VA` short-circuits before the walk for any
+  address in the canonical hole — surfaces obviously-corrupt
+  pointers (uninitialised stack data, freed-then-reused
+  vtable slots) as a category instead of "walk gave up at PML4".
+- `intermediate-table phys outside direct map` flags page-table
+  corruption itself (an entry pointing into MMIO / non-RAM
+  phys), which would otherwise either panic during the walk or
+  silently misread.
 
 Human-readable decoders live in `kernel/core/diag_decode.{h,cpp}`:
 `WriteCr0Bits` / `WriteCr4Bits` / `WriteRflagsBits` / `WriteEferBits` /

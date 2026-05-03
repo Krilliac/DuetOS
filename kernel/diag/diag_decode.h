@@ -126,6 +126,16 @@ void WriteVaRegion(u64 va);
 /// diag self-tests.
 void VaRegionSelfTest();
 
+/// Emit the result of an x86_64 4-level page-walk for `virt` to
+/// serial under the heading `<label>` (typically "cr2" or "rip"
+/// on a fault dump). Calls `mm::SnapshotPageWalk` and renders
+/// each visited level's index + raw entry + flag decode + leaf
+/// physical address. On `NotPresent*` / `NonCanonical` /
+/// `OutOfDirectMap` stops, names the failure reason inline so an
+/// operator can read the dump without re-deriving the walk by
+/// hand. Allocation-free, panic-free, safe from any context.
+void WritePageWalk(const char* label, u64 virt);
+
 /// Emit a one-shot bracketed mm-map summary to serial:
 ///   === DUETOS KERNEL MM MAP ===
 ///     k.text        : 0x... .. 0x...   (N KiB)
