@@ -265,6 +265,15 @@ i64 DoShmat(u64 shmid, u64 shmaddr, u64 shmflg)
     if ((base & (kPage - 1)) != 0)
         return -22; // misaligned
 
+    // Reject attach targets in the kernel half — without this an
+    // attacker holding a SysV shm key can pass shmaddr =
+    // 0xFFFFFFFF80000000 and drive AddressSpaceMapBorrowedPage past
+    // its kUserMax PanicAs gate (kernel DoS via mm/address_space.cpp).
+    constexpr u64 kShmUserMaxExclusive = 0x0000800000000000ULL;
+    const u64 want_bytes = static_cast<u64>(page_count) * kPage;
+    if (base >= kShmUserMaxExclusive || want_bytes > (kShmUserMaxExclusive - base))
+        return -22; // -EINVAL
+
     // Map every frame.
     arch::Cli();
     auto& seg = g_shm_pool[idx];

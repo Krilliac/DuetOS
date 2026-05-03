@@ -104,6 +104,15 @@ bool ParseHeaders(const u8* file, u64 file_len, DllHeaders& out)
     out.image_size = LeU32(opt + kOptHeaderSizeOfImage);
     out.sizeof_headers = LeU32(opt + kOptHeaderSizeOfHeaders);
     out.entry_rva = LeU32(opt + kOptHeaderAddressOfEntryPoint);
+    // Reject DLLs whose preferred ImageBase + SizeOfImage extends out of
+    // the canonical user low half. Same DoS path as the PE loader: a
+    // hostile DLL would otherwise reach AddressSpaceMapUserPage with a
+    // kernel-half VA and PanicAs the kernel.
+    constexpr u64 kDllUserMax = 0x00007FFFFFFFFFFFULL;
+    if (out.image_base > kDllUserMax)
+        return false;
+    if (out.image_size > 0 && (u64(out.image_size) - 1) > (kDllUserMax - out.image_base))
+        return false;
     out.section_base = out.opt_base + out.opt_header_size;
     const u64 sect_bytes = u64(out.section_count) * kSectionHeaderSize;
     if (out.section_base + sect_bytes > file_len)
@@ -375,6 +384,17 @@ DllLoadResult DllLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as
     }
 
     const u64 base_va = h.image_base + aslr_delta;
+    // Re-validate after ASLR shift: the parser checked the preferred
+    // base, but the caller-supplied delta could push us across the
+    // user/kernel boundary.
+    {
+        constexpr u64 kDllUserMax = 0x00007FFFFFFFFFFFULL;
+        if (base_va > kDllUserMax || (h.image_size > 0 && (u64(h.image_size) - 1) > (kDllUserMax - base_va)))
+        {
+            r.status = DllLoadStatus::MapFailed;
+            return r;
+        }
+    }
 
     KLOG_INFO_2V("loader/dll", "DLL load BEGIN", "base_va", base_va, "size", h.image_size);
     KLOG_DEBUG_V("loader/dll", "DLL sections+chars; sections", static_cast<u64>(h.section_count));

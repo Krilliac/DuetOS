@@ -9,7 +9,12 @@ namespace
 {
 
 constexpr u32 kMaxBits = 15;
+// Dynamic-Huffman litlen alphabet caps at 286 valid symbols (RFC 1951 §3.2.5),
+// but the fixed-Huffman code-book in §3.2.6 assigns lengths to symbols 0..287
+// (286 and 287 are reserved/unused but still occupy code slots). The Huffman
+// table storage must therefore accommodate the fixed-table worst case of 288.
 constexpr u32 kMaxLitLenSymbols = 286;
+constexpr u32 kFixedLitLenSymbols = 288;
 constexpr u32 kMaxDistSymbols = 30;
 constexpr u32 kMaxCodeLengthSymbols = 19;
 
@@ -51,8 +56,8 @@ void AlignToByte(BitReader& r)
 // Canonical Huffman table — built from a code-length array.
 struct Huffman
 {
-    u16 count[kMaxBits + 1];       // count[len] = number of codes with this length
-    u16 symbol[kMaxLitLenSymbols]; // symbols sorted by (length, original-index)
+    u16 count[kMaxBits + 1];         // count[len] = number of codes with this length
+    u16 symbol[kFixedLitLenSymbols]; // symbols sorted by (length, original-index); sized for fixed-Huffman 288
 };
 
 bool BuildHuffman(Huffman& h, const u16* lengths, u32 n)

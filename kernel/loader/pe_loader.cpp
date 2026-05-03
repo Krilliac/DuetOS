@@ -274,6 +274,18 @@ PeStatus ParseHeaders(const u8* file, u64 file_len, PeHeaders& out)
     out.entry_rva = LeU32(opt + kOptHeaderAddressOfEntryPoint);
     out.image_size = LeU32(opt + kOptHeaderSizeOfImage);
 
+    // ImageBase + SizeOfImage must fit in the canonical low half. Without
+    // this gate, a hostile PE specifying ImageBase = 0xFFFFFFFF80000000
+    // (kernel-half) would reach MapHeaders → AddressSpaceMapUserPage,
+    // which PanicAs's on a kernel-half virt — DoS-ing the kernel from any
+    // execve-style spawn path (mm/address_space.cpp:315). Validate here
+    // instead, before any allocation.
+    constexpr u64 kPeUserMax = 0x00007FFFFFFFFFFFULL;
+    if (out.image_base > kPeUserMax)
+        return PeStatus::ImageBaseOutOfRange;
+    if (out.image_size > 0 && (u64(out.image_size) - 1) > (kPeUserMax - out.image_base))
+        return PeStatus::ImageBaseOutOfRange;
+
     // Section headers follow the optional header. Populate
     // `out.section_base` BEFORE any rejection check so PeReport
     // can walk the section table even on "rejected" PEs — the
@@ -467,6 +479,8 @@ const char* PeStatusName(PeStatus s)
         return "TlsCallbacksUnsupported";
     case PeStatus::StubsPageAllocFail:
         return "StubsPageAllocFail";
+    case PeStatus::ImageBaseOutOfRange:
+        return "ImageBaseOutOfRange";
     default:
         KLOG_ONCE_WARN("loader/pe", "PeStatusName: unrecognised PeStatus enumerator");
         return "?";
@@ -1327,6 +1341,20 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     // Zero delta is the v0 path (no ASLR).
     const u64 preferred_base = h.image_base;
     h.image_base += aslr_delta;
+
+    // ParseHeaders validated image_base+image_size against the user
+    // canonical low half, but the ASLR shift here can push the final
+    // base back across the boundary if the caller passes a wide delta.
+    // Re-validate so we never reach AddressSpaceMapUserPage with a
+    // kernel-half VA — that would PanicAs and DoS the kernel.
+    {
+        constexpr u64 kPeUserMax = 0x00007FFFFFFFFFFFULL;
+        if (h.image_base > kPeUserMax || (h.image_size > 0 && (u64(h.image_size) - 1) > (kPeUserMax - h.image_base)))
+        {
+            SerialWrite("[pe-load] FAIL ImageBase out of user range after ASLR\n");
+            return r;
+        }
+    }
 
     SerialWrite("[pe-load] begin status=");
     SerialWrite(PeStatusName(ps));
