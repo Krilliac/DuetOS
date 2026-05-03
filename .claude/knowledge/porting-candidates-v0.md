@@ -43,6 +43,7 @@ for the next session.
 | 2026-05-03 | Base64 encode/decode (RFC 4648) | `crc32-md5-base64-and-eapol-keywrap-v0.md` |
 | 2026-05-03 | HMAC-MD5 (RFC 2104 + RFC 1321) — legacy interop | `crc32-md5-base64-and-eapol-keywrap-v0.md` (extended) |
 | 2026-05-03 | Unicode UTF-8 / UTF-16 codepoint conversions (RFC 3629 + Unicode 15) | `kernel/util/unicode.{h,cpp}` (collapses exfat+ntfs ad-hoc helpers) |
+| 2026-05-03 | TGA 2.0 uncompressed 24/32-bpp decoder (Truevision TGA) | `kernel/util/tga.{h,cpp}` (RLE deferred to v1; ImageView wiring deferred to follow-up slice) |
 
 ## Display + GPU
 
@@ -153,7 +154,7 @@ for the next session.
 
 | Slice | Spec | Prior art | Consumer | Est. LOC |
 |-------|------|-----------|----------|----------|
-| **TGA decoder/encoder** | TGA 2.0 spec | stb_image | wallpapers, icons | ~120 |
+| TGA decoder (uncompressed 24/32-bpp): LANDED 2026-05-03; encoder + RLE deferred | TGA 2.0 spec | stb_image | wallpapers, icons (ImageView wiring still TODO) | ~280 |
 | **BMP decoder** | Microsoft BITMAPINFOHEADER | stb_image | pairs with screenshot writer | ~150 |
 | **PNG decoder** | RFC 2083 | stb_image, libpng | image viewer | ~300 (+DEFLATE) |
 | **PNG encoder** | RFC 2083 | (same) | screenshot upgrade | ~200 (+DEFLATE) |
