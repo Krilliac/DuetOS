@@ -20,6 +20,7 @@ constinit duetos::u32 g_len = 0;
 // caret is visually drawn to the left of g_buf[g_cursor] (or
 // at the final trailing position when g_cursor == g_len).
 constinit duetos::u32 g_cursor = 0;
+constinit bool g_dirty = false;
 
 // Path walker tolerates a missing leading slash (verified in
 // shell_filesystem.cpp's CmdFatappend handling).
@@ -36,6 +37,7 @@ bool InsertAtCursor(char c)
     g_buf[g_cursor] = c;
     ++g_len;
     ++g_cursor;
+    g_dirty = true;
     return true;
 }
 
@@ -46,6 +48,7 @@ namespace
 
 using detail::g_buf;
 using detail::g_cursor;
+using detail::g_dirty;
 using detail::g_len;
 using detail::InsertAtCursor;
 using detail::kBufCap;
@@ -80,6 +83,7 @@ bool DeleteAtCursor()
         g_buf[i] = g_buf[i + 1];
     }
     --g_len;
+    detail::g_dirty = true;
     return true;
 }
 
@@ -205,18 +209,124 @@ VisualPos ComputeVisualPos(u32 target, u32 max_col)
     return p;
 }
 
+// Append `s` (NUL-terminated) onto `dst` at offset `*o`, capped
+// at `cap - 1` bytes. Stops early if either runs out. Helper for
+// the status-footer formatter.
+void AppendStr(char* dst, u32 cap, u32* o, const char* s)
+{
+    while (*s != '\0' && *o + 1 < cap)
+    {
+        dst[(*o)++] = *s++;
+    }
+}
+
+// Append a u32 in decimal. Same cap discipline as AppendStr.
+void AppendU32(char* dst, u32 cap, u32* o, u32 v)
+{
+    char tmp[12];
+    u32 n = 0;
+    if (v == 0)
+    {
+        tmp[n++] = '0';
+    }
+    else
+    {
+        while (v > 0 && n < sizeof(tmp))
+        {
+            tmp[n++] = static_cast<char>('0' + (v % 10));
+            v /= 10;
+        }
+    }
+    while (n > 0 && *o + 1 < cap)
+    {
+        dst[(*o)++] = tmp[--n];
+    }
+}
+
+// Logical line + column of the cursor — \n-delimited, NOT wrap
+// aware. Both 1-indexed for the user-facing footer ("L:1 C:1"
+// at the start of the buffer).
+struct LogicalPos
+{
+    u32 line;
+    u32 col;
+};
+
+LogicalPos LogicalCursor()
+{
+    LogicalPos p{1, 1};
+    for (u32 i = 0; i < g_cursor; ++i)
+    {
+        if (g_buf[i] == '\n')
+        {
+            ++p.line;
+            p.col = 1;
+        }
+        else
+        {
+            ++p.col;
+        }
+    }
+    return p;
+}
+
+// Total logical line count: newline count + 1 (an empty buffer
+// reports "1 line", same convention as VS Code / vim's `set
+// nonumber` status).
+u32 LogicalLineCount()
+{
+    u32 n = 1;
+    for (u32 i = 0; i < g_len; ++i)
+    {
+        if (g_buf[i] == '\n')
+            ++n;
+    }
+    return n;
+}
+
+// Whitespace-delimited word count. A "word" is a maximal run of
+// non-whitespace; transitions whitespace → non-whitespace
+// increment the counter. Newlines, spaces, and tabs all count
+// as separators.
+u32 WordCount()
+{
+    u32 n = 0;
+    bool in_word = false;
+    for (u32 i = 0; i < g_len; ++i)
+    {
+        const char c = g_buf[i];
+        const bool ws = (c == ' ' || c == '\t' || c == '\n');
+        if (!ws && !in_word)
+        {
+            ++n;
+            in_word = true;
+        }
+        else if (ws)
+        {
+            in_word = false;
+        }
+    }
+    return n;
+}
+
 void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 {
     using duetos::drivers::video::FramebufferDrawChar;
+    using duetos::drivers::video::FramebufferDrawString;
+    using duetos::drivers::video::FramebufferFillRect;
     // Reserve a small inset so text doesn't touch the window's
     // border — matches the padding the kernel-log viewer uses.
     constexpr u32 kPad = 4;
-    if (cw <= 2 * kPad || ch <= 2 * kPad)
+    // Reserve one glyph row + two pixels of separator at the
+    // bottom for the status footer (line:col, counts, modified
+    // flag). Text wraps inside the upper region only.
+    constexpr u32 kStatusH = kGlyphH + 2;
+    if (cw <= 2 * kPad || ch <= 2 * kPad + kStatusH)
         return;
     const u32 x0 = cx + kPad;
     const u32 y0 = cy + kPad;
     const u32 max_col = (cw - 2 * kPad) / kGlyphW;
-    const u32 max_row = (ch - 2 * kPad) / kGlyphH;
+    const u32 max_row = (ch - 2 * kPad - kStatusH) / kGlyphH;
     if (max_col == 0 || max_row == 0)
         return;
 
@@ -258,6 +368,49 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     {
         FramebufferDrawChar(x0 + cp.col * kGlyphW, y0 + cp.row * kGlyphH, '_', kInkColour, kPaperColour);
     }
+
+    // Status footer: paint a thin band along the bottom of the
+    // client area showing the cursor's logical line:col, total
+    // line count, character count, word count, and a "*MOD"
+    // flag when the buffer is dirty since the last save / load.
+    const u32 status_y = cy + ch - kStatusH;
+    const u32 status_band_h = kStatusH - 1;
+    constexpr u32 kStatusBg = 0x00C8C8B8; // a tone darker than kPaperColour
+    constexpr u32 kStatusFg = 0x00181828;
+    constexpr u32 kStatusFgDirty = 0x00B82020; // red-ish for "*MOD"
+    FramebufferFillRect(cx, status_y, cw, status_band_h, kStatusBg);
+
+    char buf[80];
+    u32 o = 0;
+    const LogicalPos lp = LogicalCursor();
+    AppendStr(buf, sizeof(buf), &o, "L:");
+    AppendU32(buf, sizeof(buf), &o, lp.line);
+    AppendStr(buf, sizeof(buf), &o, "/");
+    AppendU32(buf, sizeof(buf), &o, LogicalLineCount());
+    AppendStr(buf, sizeof(buf), &o, "  C:");
+    AppendU32(buf, sizeof(buf), &o, lp.col);
+    AppendStr(buf, sizeof(buf), &o, "  CHARS:");
+    AppendU32(buf, sizeof(buf), &o, g_len);
+    AppendStr(buf, sizeof(buf), &o, "  WORDS:");
+    AppendU32(buf, sizeof(buf), &o, WordCount());
+    buf[o] = '\0';
+
+    const u32 sx = cx + kPad;
+    const u32 sy = status_y + 1;
+    FramebufferDrawString(sx, sy, buf, kStatusFg, kStatusBg);
+
+    if (g_dirty)
+    {
+        // Right-align the "*MOD" tag inside the status band so it
+        // never collides with the running counts on the left.
+        constexpr const char* kModTag = "*MOD";
+        constexpr u32 kModW = 4 * kGlyphW;
+        if (cw > kModW + 2 * kPad)
+        {
+            const u32 mx = cx + cw - kPad - kModW;
+            FramebufferDrawString(mx, sy, kModTag, kStatusFgDirty, kStatusBg);
+        }
+    }
 }
 
 } // namespace
@@ -276,6 +429,10 @@ void NotesInit(duetos::drivers::video::WindowHandle handle)
     {
         InsertAtCursor(*p);
     }
+    // The boot greeting is a fresh-state seed, not a user edit —
+    // clear the dirty flag so the status footer doesn't show
+    // "*MOD" the moment the desktop comes up.
+    g_dirty = false;
 }
 
 duetos::drivers::video::WindowHandle NotesWindow()
@@ -394,8 +551,11 @@ void NotesSelfTest()
         saved_buf[i] = g_buf[i];
     }
 
+    const bool saved_dirty = g_dirty;
+
     g_len = 0;
     g_cursor = 0;
+    g_dirty = false;
 
     bool pass = true;
     u32 failed_step = 0;
@@ -409,6 +569,9 @@ void NotesSelfTest()
             failed_step = step;
         }
     };
+
+    // Dirty flag starts false on a fresh test buffer.
+    check(!g_dirty); // dirty/0
 
     // Build "abc\ndef": two lines, cursor should end at 7.
     NotesFeedChar('a');
@@ -472,9 +635,35 @@ void NotesSelfTest()
     MoveEnd();
     check(g_cursor == 4); // 15
 
+    // Dirty flag is true after edits.
+    check(g_dirty); // 16
+
+    // LogicalCursor reports L:1 C:5 here (line 1, column 5 of
+    // "abZcZ\nef" — wait, the buffer is "abZc\nef" — cursor at
+    // index 4 is the '\n', logical col 5 of line 1).
+    {
+        const auto lp = LogicalCursor();
+        check(lp.line == 1 && lp.col == 5); // 17
+    }
+    // Total logical lines = 2.
+    check(LogicalLineCount() == 2); // 18
+
+    // Word count for "abZc\nef" — two whitespace-delimited words.
+    check(WordCount() == 2); // 19
+
+    // Inserting whitespace doesn't bump word count.
+    NotesFeedChar(' ');
+    NotesFeedChar(' ');
+    check(WordCount() == 2); // 20
+
+    // ...but a non-ws after a ws starts a new word.
+    NotesFeedChar('X');
+    check(WordCount() == 3); // 21
+
     // Restore pre-test state.
     g_len = saved_len;
     g_cursor = saved_cursor;
+    g_dirty = saved_dirty;
     for (u32 i = 0; i < saved_len; ++i)
     {
         g_buf[i] = saved_buf[i];
@@ -482,7 +671,7 @@ void NotesSelfTest()
 
     if (pass)
     {
-        SerialWrite("[notes] self-test OK (insert + backspace + delete + every nav binding)\n");
+        SerialWrite("[notes] self-test OK (insert + nav + dirty flag + status counts)\n");
     }
     else
     {

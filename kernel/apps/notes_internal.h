@@ -23,6 +23,13 @@ extern char g_buf[kBufCap];
 extern duetos::u32 g_len;
 extern duetos::u32 g_cursor;
 
+// Modified-since-last-save indicator. Set true on every
+// mutation primitive (Insert / Delete / Backspace), cleared
+// on a successful Save / Load round-trip. Drives the "*MOD"
+// flag in the status footer + lets a future "save before
+// closing" prompt know whether the buffer needs persisting.
+extern bool g_dirty;
+
 // Filename used by NotesSave / NotesLoad on the FAT32 root
 // volume. 8.3 form so v0 doesn't need LFN emission. Defined
 // in notes.cpp.

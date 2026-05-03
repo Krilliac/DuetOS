@@ -385,6 +385,14 @@ void PrintShortcutHelp()
     ConsoleWriteln("    CTRL+C / CTRL+V   COPY / PASTE CLIPBOARD");
     ConsoleWriteln("    CTRL+S            SAVE TO NOTES.TXT (FAT32)");
     ConsoleWriteln("    CTRL+O            LOAD FROM NOTES.TXT (FAT32)");
+    ConsoleWriteln("    STATUS FOOTER     L:line C:col  CHARS  WORDS  *MOD");
+    ConsoleWriteln("");
+    ConsoleWriteln("  CALCULATOR (WHEN ACTIVE)");
+    ConsoleWriteln("    0..9 + - * / =    BASIC ARITHMETIC");
+    ConsoleWriteln("    C  %  N/_  BS     CLEAR / PERCENT / SIGN / BACKSPACE");
+    ConsoleWriteln("    M / S             MEMORY RECALL / STORE");
+    ConsoleWriteln("    A / B             MEMORY ADD / SUBTRACT");
+    ConsoleWriteln("    L                 MEMORY CLEAR");
     ConsoleWriteln("");
     ConsoleWriteln("  FILES (WHEN ACTIVE)");
     ConsoleWriteln("    UP / DN           MOVE SELECTION");

@@ -59,6 +59,7 @@ bool NotesSave()
         SerialWrite("[notes] save: create failed\n");
         return false;
     }
+    detail::g_dirty = false;
     SerialWrite("[notes] save: NOTES.TXT written\n");
     return true;
 }
@@ -110,6 +111,7 @@ bool LoadFromPath(const char* path)
         }
     }
     detail::g_cursor = detail::g_len;
+    detail::g_dirty = false;
     SerialWrite("[notes] load OK\n");
     return true;
 }
