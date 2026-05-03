@@ -54,7 +54,14 @@ constexpr const char* kDumpEndMarker = "=== DUETOS CRASH DUMP END ===\n";
 // lines between BEGIN/END changes in a way a parser would care about.
 // Host-side tools should read this first line and refuse dumps from a
 // newer kernel than they know.
-constexpr u64 kDumpSchemaVersion = 1;
+//
+// v2 (2026-05-03): added "return-address pointers" section between
+// the raw stack-quad dump and the held-locks section. Each line is
+// of shape `[slot] -> value [name+0xOFF (file:line)] [region=...]`
+// and lists only stack slots whose value resolves to a kernel
+// symbol — a focused pointer-to-return-address scan that
+// complements the rbp-chain backtrace and the 16-quad raw dump.
+constexpr u64 kDumpSchemaVersion = 2;
 
 void WriteLabelled(const char* label, u64 value)
 {
@@ -189,6 +196,58 @@ void DumpStack(u64 rsp, int count)
         arch::SerialWrite("] = ");
         WriteAddressWithSymbol(value);
         arch::SerialWrite("\n");
+    }
+}
+
+// Scan a wider window of the kernel stack than DumpStack (which
+// caps at 16 quads) and emit only the slots whose value resolves
+// against the embedded symbol table. Each surviving line lists
+// the stack address of the slot — the *pointer to the return
+// address* — alongside the resolved target. Useful when:
+//
+//   - DumpBacktrace's rbp chain stops short (frame-pointer-omitted
+//     leaf functions, corrupted saved-rbp link, hand-written asm
+//     thunks that don't keep an rbp record),
+//   - DumpStack's 16-quad window doesn't reach the real call sites
+//     (locals + spilled registers consume the first frame),
+//   - an investigator wants the slot pointer itself to correlate
+//     against rsp+offset for tampering analysis.
+//
+// 0x80 quads = 1 KiB, comfortably within a 16 KiB kernel stack;
+// PlausibleStackPointer halts the scan cleanly if rsp is wild
+// instead of dereffing into an unmapped page.
+void DumpReturnAddressPointers(u64 rsp)
+{
+    constexpr int kScanQuads = 0x80;
+    arch::SerialWrite("  return-address pointers (scan of ");
+    arch::SerialWriteHex(static_cast<u64>(kScanQuads));
+    arch::SerialWrite(" quads from rsp):\n");
+    int found = 0;
+    for (int i = 0; i < kScanQuads; ++i)
+    {
+        const u64 slot = rsp + static_cast<u64>(i) * 8;
+        if (!PlausibleStackPointer(slot))
+        {
+            break;
+        }
+        const u64 value = *reinterpret_cast<const u64*>(slot);
+        SymbolResolution res{};
+        if (!ResolveAddress(value, &res))
+        {
+            continue;
+        }
+        arch::SerialWrite("    [");
+        arch::SerialWriteHex(slot);
+        arch::SerialWrite("] -> ");
+        arch::SerialWriteHex(value);
+        WriteResolvedAddress(res);
+        WriteVaRegion(value);
+        arch::SerialWrite("\n");
+        ++found;
+    }
+    if (found == 0)
+    {
+        arch::SerialWrite("    (none)\n");
     }
 }
 
@@ -427,6 +486,7 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
     DumpInstructionBytes("panic-rip", rip, 16);
     DumpBacktrace(rbp);
     DumpStack(rsp, 16);
+    DumpReturnAddressPointers(rsp);
     DumpHeldLocksLocal();
     DumpLogRing();
     DumpInflightScopes();

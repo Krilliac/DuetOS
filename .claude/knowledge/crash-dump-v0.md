@@ -2,7 +2,7 @@
 
 **Type**: Observation
 **Status**: Active
-**Last updated**: 2026-04-25
+**Last updated**: 2026-05-03
 **Commit**: (see current branch HEAD)
 
 ## Summary
@@ -96,6 +96,9 @@ the crash dump, so BSS drift is irrelevant.
   stack (0x10 quads from rsp):
     [0xNN] = 0xNN  [fn+0xOFF (file:line)]
     ...
+  return-address pointers (scan of 0x80 quads from rsp):
+    [0xSLOT] -> 0xVALUE  [fn+0xOFF (file:line)] [region=k.text]
+    ...
 [panic] --- log ring (last 0xNN entries, oldest first) ---
   [I] ...
   ...
@@ -108,11 +111,56 @@ annotation when the value falls in plausible kernel code range — surfaces
 stale callback pointers / vtable spills / saved-RIP residue without forcing
 the operator to re-symbolize by hand.
 
-The schema is v1. Bump `kDumpSchemaVersion` in `core/panic.cpp` when the layout
-changes in a way a parser would care about. The bit-decoded suffixes (e.g.
-`[PE|WP|PG]`) live on the SAME line as the existing `<label> : <hex>` token
-sequence, so a parser that anchors on `<label> : 0x[0-9a-f]+` keeps working;
+The schema is v2 (v1 → v2 added the `return-address pointers` section
+between the raw stack quads and the held-locks block). Bump
+`kDumpSchemaVersion` in `core/panic.cpp` when the layout changes in a way
+a parser would care about. The bit-decoded suffixes (e.g. `[PE|WP|PG]`)
+live on the SAME line as the existing `<label> : <hex>` token sequence,
+so a parser that anchors on `<label> : 0x[0-9a-f]+` keeps working;
 human readers get the meaning for free.
+
+### Return-address pointer scan
+
+`DumpReturnAddressPointers(rsp)` (in `kernel/core/panic.cpp`)
+complements the 16-frame `DumpBacktrace` (rbp-chain walker) and the
+16-quad `DumpStack` (raw quad dump) by scanning a wider window —
+0x80 quads = 1 KiB — and emitting **only** the slots whose value
+resolves against the embedded symbol table. Each surviving line
+prints the **stack pointer of the slot** alongside the resolved
+target:
+
+```
+  return-address pointers (scan of 0x80 quads from rsp):
+    [0xffffffff801099e8] -> 0xffffffff80130964  [kernel_main+0x21c4 (kernel/core/main.cpp:456)] [region=k.text]
+    [0xffffffff801099f8] -> 0xffffffff80138f17  [duetos::core::Panic+0xa7 (kernel/core/panic.cpp:500)] [region=k.text]
+    ...
+```
+
+Why the slot pointer matters as well as the value:
+
+- An rbp chain that stops short (frame-pointer-omitted leaf
+  function, corrupted saved-rbp link, hand-written asm thunk
+  without an rbp record) leaves the deeper frames invisible to
+  `DumpBacktrace`. The scan finds them anyway — every `call`
+  instruction leaves its return address on the stack regardless
+  of frame-pointer discipline.
+- The 16-quad raw dump bottoms out before reaching the real
+  call sites once locals + spilled registers consume the first
+  frame. 1 KiB is comfortably within a 16 KiB kernel stack and
+  catches typical 8+ deep init-list / closure chains.
+- Filtering to "value resolves to kernel code" focuses the
+  output: register spills, local variables, and stack-painted
+  cookies are skipped. What's left is exclusively return-address
+  shaped.
+- Naming the **slot pointer** lets an investigator correlate
+  against `rsp+offset` for tampering analysis (e.g. saved-RIP
+  smash detection — `held lock acquired-rip` already does this
+  but only for lock-acquire sites).
+
+Bounded by `PlausibleStackPointer` so a wild rsp halts the scan
+cleanly instead of dereffing into an unmapped page; emits
+`(none)` when zero slots resolve so the section's presence is
+unambiguous.
 
 Human-readable decoders live in `kernel/core/diag_decode.{h,cpp}`:
 `WriteCr0Bits` / `WriteCr4Bits` / `WriteRflagsBits` / `WriteEferBits` /

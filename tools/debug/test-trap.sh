@@ -78,9 +78,13 @@ cmake --preset "${PRESET}" -DDUETOS_TRAP_DEMO=ON >/dev/null
 echo "[test-trap] building"
 cmake --build "${BUILD_DIR}" >/dev/null
 
-echo "[test-trap] booting (10 s timeout)"
+# Boot via the qemu-smoke fast-path (timeout=0 grub.cfg) so the
+# budget covers actual kernel work rather than the 10 s interactive
+# menu auto-select. The post-grub debug-build init still has to
+# reach the deliberate ud2 at the end of kernel_main.
+echo "[test-trap] booting (60 s timeout, smoke=trap-demo)"
 LOG="$(mktemp)"
-DUETOS_TIMEOUT=10 "${REPO_ROOT}/tools/qemu/run.sh" >"${LOG}" 2>&1 || true
+DUETOS_TIMEOUT=60 DUETOS_SMOKE_PROFILE=trap-demo "${REPO_ROOT}/tools/qemu/run.sh" >"${LOG}" 2>&1 || true
 
 # ---- dump extraction ----------------------------------------------------
 
@@ -130,6 +134,8 @@ assert_contains '^  rip[[:space:]]+: 0x[0-9a-f]+  \[[^ ]+\+0x[0-9a-f]+ \([^)]+\)
 assert_contains 'backtrace \(up to 16 frames'               "backtrace header"       "${DUMP_FILE}"
 assert_contains '^    #0x0+[0-9]  rip=0x[0-9a-f]+  \[[^ ]+\+0x' \
                                                             "backtrace frame symbolized" "${DUMP_FILE}"
+assert_contains 'return-address pointers \(scan of 0x[0-9a-f]+ quads from rsp\)' \
+                                                            "return-address-pointer header" "${DUMP_FILE}"
 assert_contains '\[panic\] --- log ring'                    "log-ring header"        "${DUMP_FILE}"
 
 if [[ "${fail}" -ne 0 ]]; then

@@ -82,9 +82,15 @@ cmake --preset "${PRESET}" -DDUETOS_PANIC_DEMO=ON >/dev/null
 echo "[test-panic] building"
 cmake --build "${BUILD_DIR}" >/dev/null
 
-echo "[test-panic] booting (10 s timeout)"
+# Boot via the qemu-smoke fast-path: a single-entry grub.cfg with
+# timeout=0 instead of the 10 s interactive menu, so the QEMU run
+# spends its budget actually reaching kernel_main rather than
+# waiting on grub. The timeout still has to cover the post-grub
+# debug-build init sequence (ramfs build, driver self-tests,
+# klog warm-up) before kernel_main's deliberate Panic fires.
+echo "[test-panic] booting (60 s timeout, smoke=panic-demo)"
 LOG="$(mktemp)"
-DUETOS_TIMEOUT=10 "${REPO_ROOT}/tools/qemu/run.sh" >"${LOG}" 2>&1 || true
+DUETOS_TIMEOUT=60 DUETOS_SMOKE_PROFILE=panic-demo "${REPO_ROOT}/tools/qemu/run.sh" >"${LOG}" 2>&1 || true
 
 if [[ "${SYMBOLIZE}" -eq 1 ]]; then
     RESOLVED="$(mktemp)"
@@ -154,9 +160,20 @@ assert_contains 'backtrace \(up to 16 frames'                         "backtrace
 assert_contains '^    #0x0+[0-9]  rip=0x[0-9a-f]+  \[[^ ]+\+0x' \
                                                                       "backtrace frame symbolized" "${DUMP_FILE}"
 assert_contains 'stack \(0x[0-9a-f]+ quads from rsp\)'                "stack-dump header"      "${DUMP_FILE}"
-assert_contains '^    \[0x0'                                          "at least one stack quad" "${DUMP_FILE}"
+# Stack pointer can live in either the boot identity map (low VA) or the
+# higher-half kernel stack arena depending on when the panic fires; match
+# either form rather than anchoring on a specific high nibble.
+assert_contains '^    \[0x[0-9a-f]+\] = 0x[0-9a-f]+'                  "at least one stack quad" "${DUMP_FILE}"
+assert_contains 'return-address pointers \(scan of 0x[0-9a-f]+ quads from rsp\)' \
+                                                                      "return-address-pointer header" "${DUMP_FILE}"
+assert_contains '^    \[0x[0-9a-f]+\] -> 0x[0-9a-f]+  \[[^ ]+\+0x[0-9a-f]+ \([^)]+\)\]' \
+                                                                      "return-address-pointer entry symbolized" "${DUMP_FILE}"
 assert_contains '\[panic\] --- log ring'                              "log-ring header"        "${DUMP_FILE}"
-assert_contains '\[D\] core/klog : debug-level sanity line'           "log-ring entry (klog selftest)" "${DUMP_FILE}"
+# Any timestamped log line proves the ring captured something. We used
+# to assert on the klog self-test sanity line, but the ring is bounded
+# (last 64 entries) and a longer boot pushes that line off — the boot
+# trail itself is plenty of evidence the ring is wired in.
+assert_contains '^\[t=[0-9.]+ms\]'                                    "log-ring has at least one timestamped entry" "${DUMP_FILE}"
 
 if [[ "${fail}" -ne 0 ]]; then
     echo "[test-panic] FAIL — full log below:"
