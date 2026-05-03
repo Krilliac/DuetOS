@@ -1,8 +1,8 @@
-#include "net/wireless/crypto/sha256.h"
+#include "crypto/sha256.h"
 
 #include "core/panic.h"
 
-namespace duetos::net::wireless::crypto
+namespace duetos::crypto
 {
 
 namespace
@@ -166,7 +166,7 @@ void Sha256SelfTest()
                              0xDE, 0x5D, 0xAE, 0x22, 0x23, 0xB0, 0x03, 0x61, 0xA3, 0x96, 0x17,
                              0x7A, 0x9C, 0xB4, 0x10, 0xFF, 0x61, 0xF2, 0x00, 0x15, 0xAD};
         for (u32 i = 0; i < 32; ++i)
-            KASSERT(d[i] == want[i], "net/wireless/crypto/sha256", "sha256 KAT \"abc\" mismatch");
+            KASSERT(d[i] == want[i], "crypto/sha256", "sha256 KAT \"abc\" mismatch");
     }
     // Empty string.
     {
@@ -176,8 +176,8 @@ void Sha256SelfTest()
                              0xC8, 0x99, 0x6F, 0xB9, 0x24, 0x27, 0xAE, 0x41, 0xE4, 0x64, 0x9B,
                              0x93, 0x4C, 0xA4, 0x95, 0x99, 0x1B, 0x78, 0x52, 0xB8, 0x55};
         for (u32 i = 0; i < 32; ++i)
-            KASSERT(d[i] == want[i], "net/wireless/crypto/sha256", "sha256 KAT empty mismatch");
+            KASSERT(d[i] == want[i], "crypto/sha256", "sha256 KAT empty mismatch");
     }
 }
 
-} // namespace duetos::net::wireless::crypto
+} // namespace duetos::crypto

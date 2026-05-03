@@ -1,7 +1,7 @@
 #pragma once
 
-#include "net/wireless/crypto/sha1.h"
-#include "net/wireless/crypto/sha256.h"
+#include "crypto/sha1.h"
+#include "crypto/sha256.h"
 #include "util/types.h"
 
 /*
@@ -22,7 +22,7 @@
  * Linux mac80211 keymgmt sources.
  */
 
-namespace duetos::net::wireless::crypto
+namespace duetos::crypto
 {
 
 /// HMAC-SHA1 (RFC 2104). `out` must be at least 20 bytes.
@@ -33,4 +33,4 @@ void HmacSha256(const u8* key, u32 key_len, const u8* data, u32 data_len, u8 out
 
 void HmacSelfTest();
 
-} // namespace duetos::net::wireless::crypto
+} // namespace duetos::crypto

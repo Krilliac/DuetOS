@@ -2,7 +2,7 @@
 
 _Type: Plan + Observation._
 _Status: Active — open list. Each session can pick from this._
-_Last updated: 2026-05-01._
+_Last updated: 2026-05-03._
 
 This file enumerates discrete features whose primary work is
 **clean-room porting from a public spec** rather than novel
@@ -36,6 +36,11 @@ for the next session.
 | 2026-05-01 | EDID 1.3/1.4 base-block parser | `edid-parser-v0.md` |
 | 2026-05-01 | CVT 1.1 / 1.2 RBv1 timing generator | this slice (see commit) |
 | 2026-05-01 | CEA-861 EDID extension parser (HDMI VSDB / video / audio / HDR) | this slice (see commit) |
+| 2026-05-03 | AES-128 / AES-256 block cipher (FIPS 197) | `aes-and-keywrap-v0.md` |
+| 2026-05-03 | AES Key Wrap (RFC 3394) | `aes-and-keywrap-v0.md` |
+| 2026-05-03 | CRC32 hoist out of `gpt.cpp` (IEEE 802.3 reflected) | `crc32-md5-base64-and-eapol-keywrap-v0.md` |
+| 2026-05-03 | MD5 (RFC 1321) — legacy interop only | `crc32-md5-base64-and-eapol-keywrap-v0.md` |
+| 2026-05-03 | Base64 encode/decode (RFC 4648) | `crc32-md5-base64-and-eapol-keywrap-v0.md` |
 
 ## Display + GPU
 
@@ -88,15 +93,16 @@ for the next session.
 
 | Slice | Spec | Prior art | Consumer | Est. LOC |
 |-------|------|-----------|----------|----------|
-| **AES-128/256 block cipher** | FIPS 197 | OpenSSL, ARM Cryptolib | Wi-Fi, future TLS | ~250 |
+| ~~AES-128/256 block cipher~~ LANDED 2026-05-03 | FIPS 197 | OpenSSL, ARM Cryptolib | Wi-Fi, future TLS | ~250 |
 | **AES-GCM / AES-CCM modes** | NIST SP 800-38D | mbedTLS | Wi-Fi WPA3 / TLS | ~200 |
-| **AES key wrap (RFC 3394)** | RFC 3394 | mbedTLS, BoringSSL | Wi-Fi M3 GTK | ~100 |
+| ~~AES key wrap (RFC 3394)~~ LANDED 2026-05-03 | RFC 3394 | mbedTLS, BoringSSL | Wi-Fi M3 GTK | ~100 |
+| ~~MD5~~ LANDED 2026-05-03 | RFC 1321 | mbedTLS | legacy interop | ~100 |
 | **ChaCha20 + Poly1305** | RFC 8439 | BoringSSL | TLS 1.3 ciphersuite | ~250 |
-| **MD5** | RFC 1321 | mbedTLS | legacy interop | ~100 |
+| _(see Landed slices: MD5 — RFC 1321, 2026-05-03)_ | | | | |
 | **Curve25519 / X25519** | RFC 7748 | TweetNaCl | Wi-Fi WPA3-SAE, TLS | ~300 |
 | **Ed25519 signature verify** | RFC 8032 | TweetNaCl | code-sign verify | ~400 |
-| **CRC32 hoist out of `gpt.cpp`** | IEEE 802.3 polynomial | (already present) | broad cleanup | ~50 |
-| **Base64 encode/decode** | RFC 4648 | musl, glibc | HTTP auth, MIME | ~100 |
+| ~~CRC32 hoist out of `gpt.cpp`~~ LANDED 2026-05-03 | IEEE 802.3 polynomial | (already present) | broad cleanup | ~50 |
+| ~~Base64 encode/decode~~ LANDED 2026-05-03 | RFC 4648 | musl, glibc | HTTP auth, MIME | ~100 |
 | **HMAC-MD5** | RFC 2104 + RFC 1321 | mbedTLS | NTLM | ~80 |
 | **TLS 1.2 client (no cert verify)** | RFC 5246 | mbedTLS | https:// | ~3000 |
 | **TLS 1.3 client** | RFC 8446 | mbedTLS, BoringSSL | https:// | ~3500 |

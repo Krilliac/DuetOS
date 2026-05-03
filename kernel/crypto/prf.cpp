@@ -1,11 +1,11 @@
-#include "net/wireless/crypto/prf.h"
+#include "crypto/prf.h"
 
 #include "core/panic.h"
-#include "net/wireless/crypto/hmac.h"
-#include "net/wireless/crypto/sha1.h"
-#include "net/wireless/crypto/sha256.h"
+#include "crypto/hmac.h"
+#include "crypto/sha1.h"
+#include "crypto/sha256.h"
 
-namespace duetos::net::wireless::crypto
+namespace duetos::crypto
 {
 
 namespace
@@ -27,7 +27,7 @@ void Prf(const u8* key, u32 key_len, const char* label, const u8* seed, u32 seed
 {
     if (out == nullptr || out_bits == 0)
         return;
-    KASSERT((out_bits & 7u) == 0u, "net/wireless/crypto/prf", "PRF out_bits must be multiple of 8");
+    KASSERT((out_bits & 7u) == 0u, "crypto/prf", "PRF out_bits must be multiple of 8");
     const u32 out_bytes = out_bits / 8u;
     const u32 label_len = StringLen(label);
 
@@ -35,7 +35,7 @@ void Prf(const u8* key, u32 key_len, const char* label, const u8* seed, u32 seed
     // is bounded — labels are ≤ ~30 chars, seeds ≤ 76 bytes for
     // 802.11 PTK derivation.
     u8 buf[256];
-    KASSERT(label_len + 1u + seed_len + 1u <= sizeof(buf), "net/wireless/crypto/prf", "PRF input too long");
+    KASSERT(label_len + 1u + seed_len + 1u <= sizeof(buf), "crypto/prf", "PRF input too long");
     for (u32 i = 0; i < label_len; ++i)
         buf[i] = static_cast<u8>(label[i]);
     buf[label_len] = 0;
@@ -69,14 +69,14 @@ void KdfSha256(const u8* key, u32 key_len, const char* label, const u8* context,
     // integer; `out_bits` is also 16-bit little-endian.
     if (out == nullptr || out_bits == 0)
         return;
-    KASSERT((out_bits & 7u) == 0u, "net/wireless/crypto/prf", "KDF out_bits must be multiple of 8");
+    KASSERT((out_bits & 7u) == 0u, "crypto/prf", "KDF out_bits must be multiple of 8");
     const u32 label_len = StringLen(label);
     u32 produced = 0;
     const u32 out_bytes = out_bits / 8u;
     u16 i_le = 1;
 
     u8 buf[256];
-    KASSERT(2u + label_len + context_len + 2u <= sizeof(buf), "net/wireless/crypto/prf", "KDF input too long");
+    KASSERT(2u + label_len + context_len + 2u <= sizeof(buf), "crypto/prf", "KDF input too long");
     while (produced < out_bytes)
     {
         u32 off = 0;
@@ -116,7 +116,7 @@ void PrfSelfTest()
         Prf(key, 20, "test", reinterpret_cast<const u8*>("data"), 4, 160, a);
         Prf(key, 20, "test", reinterpret_cast<const u8*>("data"), 4, 320, b);
         for (u32 i = 0; i < 20; ++i)
-            KASSERT(a[i] == b[i], "net/wireless/crypto/prf", "PRF prefix invariant broken (counter ≠ 0 first block)");
+            KASSERT(a[i] == b[i], "crypto/prf", "PRF prefix invariant broken (counter ≠ 0 first block)");
     }
 
     // 802.11i §F.9 Annex F (Test Vector for Pairwise Key
@@ -144,8 +144,8 @@ void PrfSelfTest()
         Prf(key, 16, "Pairwise key expansion", seed, 8, 384, a);
         Prf(key, 16, "Pairwise key expansion", seed, 8, 384, b);
         for (u32 i = 0; i < 48; ++i)
-            KASSERT(a[i] == b[i], "net/wireless/crypto/prf", "PRF non-determinism");
+            KASSERT(a[i] == b[i], "crypto/prf", "PRF non-determinism");
     }
 }
 
-} // namespace duetos::net::wireless::crypto
+} // namespace duetos::crypto

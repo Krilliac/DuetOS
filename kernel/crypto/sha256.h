@@ -13,7 +13,7 @@
  * Same interface shape as `sha1.h`. No allocation, no global state.
  */
 
-namespace duetos::net::wireless::crypto
+namespace duetos::crypto
 {
 
 inline constexpr u32 kSha256DigestBytes = 32;
@@ -34,4 +34,4 @@ void Sha256Hash(const u8* data, u32 length, u8 out[kSha256DigestBytes]);
 
 void Sha256SelfTest();
 
-} // namespace duetos::net::wireless::crypto
+} // namespace duetos::crypto

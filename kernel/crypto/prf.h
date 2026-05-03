@@ -24,7 +24,7 @@
  * §12.7.1.7 (KDF-Hash).
  */
 
-namespace duetos::net::wireless::crypto
+namespace duetos::crypto
 {
 
 /// PRF-X with HMAC-SHA1. Used for CCMP-PSK PTK (X=384) and the
@@ -44,4 +44,4 @@ void KdfSha256(const u8* key, u32 key_len, const char* label, const u8* context,
 
 void PrfSelfTest();
 
-} // namespace duetos::net::wireless::crypto
+} // namespace duetos::crypto

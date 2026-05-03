@@ -2,7 +2,7 @@
 
 #include "core/panic.h"
 #include "log/klog.h"
-#include "net/wireless/crypto/hmac.h"
+#include "crypto/hmac.h"
 #include "net/wireless/wifi_diag.h"
 
 namespace duetos::net::wireless
@@ -179,7 +179,7 @@ constexpr u32 kMicOffsetInBody = 1u + 2u + 2u + 8u + 32u + 16u + 8u + 8u;
     if (kdv == kKdvHmacSha1)
     {
         u8 mac[20];
-        crypto::HmacSha1(kck, kck_len, body, body_len, mac);
+        duetos::crypto::HmacSha1(kck, kck_len, body, body_len, mac);
         // EAPOL-Key MIC for HMAC-SHA1 is the first 16 bytes.
         for (u32 i = 0; i < kEapolMicBytes; ++i)
             body[kMicOffsetInBody + i] = mac[i];
@@ -223,7 +223,7 @@ constexpr u32 kMicOffsetInBody = 1u + 2u + 2u + 8u + 32u + 16u + 8u + 8u;
     ZeroBytes(work + kMicOffsetInBody, kEapolMicBytes);
 
     u8 expected[20];
-    crypto::HmacSha1(kck, kck_len, work, body_len, expected);
+    duetos::crypto::HmacSha1(kck, kck_len, work, body_len, expected);
     for (u32 i = 0; i < kEapolMicBytes; ++i)
     {
         if (body[kMicOffsetInBody + i] != expected[i])

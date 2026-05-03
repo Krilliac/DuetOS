@@ -2,7 +2,9 @@
 
 #include "core/panic.h"
 #include "log/klog.h"
-#include "net/wireless/crypto/prf.h"
+#include "crypto/aes.h"
+#include "crypto/aes_keywrap.h"
+#include "crypto/prf.h"
 #include "net/wireless/wifi_diag.h"
 
 namespace duetos::net::wireless
@@ -194,7 +196,6 @@ void FourWayInit(FourWayContext& ctx, const u8 pmk[32], const u8 sta_mac[6], con
     const bool secure = (f.key_info & kKiSecure) != 0;
     const bool encrypted = (f.key_info & kKiEncrypted) != 0;
     (void)secure;
-    (void)encrypted;
 
     // Classify message:
     //   M1: ACK=1, MIC=0           (pairwise install bit may be 0)
@@ -226,9 +227,9 @@ void FourWayInit(FourWayContext& ctx, const u8 pmk[32], const u8 sta_mac[6], con
         u8 seed[76];
         BuildPrfSeed(ctx.sta_mac, ctx.ap_mac, ctx.snonce, ctx.anonce, seed);
         if (ctx.sha256)
-            crypto::KdfSha256(ctx.pmk, 32, "Pairwise key expansion", seed, 76, kPtkBytes * 8u, ctx.ptk);
+            duetos::crypto::KdfSha256(ctx.pmk, 32, "Pairwise key expansion", seed, 76, kPtkBytes * 8u, ctx.ptk);
         else
-            crypto::Prf(ctx.pmk, 32, "Pairwise key expansion", seed, 76, kPtkBytes * 8u, ctx.ptk);
+            duetos::crypto::Prf(ctx.pmk, 32, "Pairwise key expansion", seed, 76, kPtkBytes * 8u, ctx.ptk);
         ctx.ptk_valid = true;
         ctx.state = FourWayState::AwaitingM3;
         KLOG_INFO_A(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
@@ -260,26 +261,63 @@ void FourWayInit(FourWayContext& ctx, const u8 pmk[32], const u8 sta_mac[6], con
             diag::RecordErr(diag::Layer::Eapol, "4way-m3-mic", static_cast<u32>(vr.error()), 0, 0, 0);
             return vr;
         }
-        // Extract GTK if present (encrypted key data normally; v0
-        // accepts plaintext key data — AES key wrap not landed yet).
+        // Decide which buffer + length we're walking for KDEs. If
+        // KeyInfo.Encrypted is set, the KeyData is AES-KW-wrapped
+        // under the KEK (upper half of the PTK); we unwrap into a
+        // stack-local buffer and walk that instead. Plain KeyData
+        // (no Encrypted flag) walks `f.key_data` directly.
+        const u8* keydata = f.key_data;
+        u32 keydata_len = f.key_data_len;
+        // 256 bytes covers a GTK KDE + IGTK KDE + 802.11i pad. The
+        // hard ceiling lives at `kAesKwMaxSemiBlocks * 8 = 512` in
+        // the AES-KW module; keeping this smaller avoids a
+        // kernel-stack hog on the M3 path.
+        constexpr u32 kUnwrapScratchMax = 256;
+        u8 unwrapped[kUnwrapScratchMax];
         if (encrypted)
         {
-            KLOG_WARN_A(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
-                        "M3 has encrypted key data — AES-KW unwrap not implemented (v0)");
-            diag::RecordErr(diag::Layer::Eapol, "4way-m3-need-keywrap",
-                            static_cast<u32>(::duetos::core::ErrorCode::Unsupported), 0, 0, 0);
-            // Still advance state — production builds will land
-            // AES-KW first. v0 returns Unsupported but keeps the
-            // PTK so unicast TX can continue.
-            ctx.state = FourWayState::AwaitingM4Ack;
-            return ::duetos::core::Err{::duetos::core::ErrorCode::Unsupported};
+            if (f.key_data_len < 24u || (f.key_data_len % 8u) != 0u)
+            {
+                ++ctx.mic_failures;
+                ctx.state = FourWayState::Failed;
+                KLOG_ERROR_AV(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
+                              "M3 encrypted key-data length invalid", static_cast<u64>(f.key_data_len));
+                diag::RecordErr(diag::Layer::Eapol, "4way-m3-keydata-len",
+                                static_cast<u32>(::duetos::core::ErrorCode::Corrupt), f.key_data_len, 0, 0);
+                return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
+            }
+            const u32 plain_len = f.key_data_len - 8u;
+            if (plain_len > kUnwrapScratchMax)
+            {
+                ctx.state = FourWayState::Failed;
+                KLOG_ERROR_AV(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
+                              "M3 encrypted key-data exceeds unwrap scratch — refusing", static_cast<u64>(plain_len));
+                diag::RecordErr(diag::Layer::Eapol, "4way-m3-keydata-too-big",
+                                static_cast<u32>(::duetos::core::ErrorCode::Corrupt), plain_len, 0, 0);
+                return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
+            }
+            duetos::crypto::AesCtx kek_ctx;
+            duetos::crypto::AesKeyExpand128(kek_ctx, FourWayKek(ctx));
+            if (!duetos::crypto::AesKeyUnwrap(kek_ctx, f.key_data, f.key_data_len, unwrapped))
+            {
+                ++ctx.mic_failures;
+                ctx.state = FourWayState::Failed;
+                KLOG_ERROR_A(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
+                             "M3 AES-KW unwrap integrity check FAILED — handshake aborted");
+                diag::RecordErr(diag::Layer::Eapol, "4way-m3-kw-fail",
+                                static_cast<u32>(::duetos::core::ErrorCode::Corrupt), f.key_data_len, 0, 0);
+                return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
+            }
+            keydata = unwrapped;
+            keydata_len = plain_len;
+            diag::RecordOk(diag::Layer::Eapol, "4way-m3-kw-ok", plain_len, 0, 0);
         }
-        if (f.key_data_len > 0)
+        if (keydata_len > 0)
         {
             u8 gtk[kGtkMaxBytes];
             u32 gtk_len = 0;
             u8 gtk_idx = 0;
-            if (ExtractGtkKde(f.key_data, f.key_data_len, gtk, sizeof(gtk), &gtk_len, &gtk_idx))
+            if (ExtractGtkKde(keydata, keydata_len, gtk, sizeof(gtk), &gtk_len, &gtk_idx))
             {
                 CopyBytes(ctx.gtk, gtk, gtk_len);
                 ctx.gtk_len = gtk_len;
@@ -466,8 +504,102 @@ void FourWaySelfTest()
     KASSERT(br4.has_value(), "net/wireless/fourway", "M4 build failed");
     auto vr4 = EapolMicVerify(m4_buf, m4_len, FourWayKck(ctx), kKckBytes, kKdvHmacSha1);
     KASSERT(vr4.has_value(), "net/wireless/fourway", "M4 MIC verify failed");
+
+    // ---------------------------------------------------------------
+    // Encrypted-M3 path: a real AP wraps M3 KeyData with AES-KW under
+    // the KEK before transmitting. Before AES-KW landed we rejected
+    // such M3s with Unsupported. Now we run a second handshake whose
+    // M3 ships the same GTK KDE wrapped under the freshly-derived
+    // KEK, asserting that:
+    //   1. AesKeyUnwrap succeeds on properly-wrapped data.
+    //   2. The GTK comes out byte-identical to the pre-wrap KDE.
+    //   3. A tampered ciphertext fails integrity, marks the context
+    //      Failed, and increments mic_failures.
+    {
+        FourWayContext c2{};
+        FourWayInit(c2, pmk, spa, aa, /*sha256=*/false, /*aes_cmac=*/false);
+        auto pr_a = FourWayProcessIncoming(c2, m1_buf, m1_len);
+        KASSERT(pr_a.has_value(), "net/wireless/fourway", "encrypted M1 process failed");
+        KASSERT(c2.ptk_valid, "net/wireless/fourway", "encrypted PTK not derived after M1");
+
+        // Wrap the same plaintext key data we used in the plaintext
+        // M3 above. Wrap input must be a multiple of 8; m3_keydata
+        // is 30 bytes (KDE 24 + GTK 16 already aligned -> wait,
+        // 2 (header) + 6 (OUI/type/id/resv) + 16 (GTK) = 24 -> kd
+        // ends at 24). Pad with the 802.11i 0xDD/0x00 pad to make
+        // the input 32 bytes.
+        u8 plain_kd[32];
+        for (u32 i = 0; i < 24; ++i)
+            plain_kd[i] = m3_keydata[i];
+        // 802.11i KeyData pad: 0xDD then zeros.
+        plain_kd[24] = 0xDD;
+        for (u32 i = 25; i < 32; ++i)
+            plain_kd[i] = 0x00;
+
+        u8 wrapped_kd[40]; // 32 plaintext + 8 IV semi-block
+        duetos::crypto::AesCtx wrap_ctx;
+        duetos::crypto::AesKeyExpand128(wrap_ctx, FourWayKek(c2));
+        const bool wrap_ok = duetos::crypto::AesKeyWrap(wrap_ctx, plain_kd, 32, wrapped_kd);
+        KASSERT(wrap_ok, "net/wireless/fourway", "AES-KW wrap of synthetic key data failed");
+
+        EapolKeyFrame m3e{};
+        m3e.version = 2;
+        m3e.packet_type = kEapolPacketTypeKey;
+        m3e.descriptor_type = kEapolKeyDescriptorRsn;
+        m3e.key_info = kKiKeyType | kKiAck | kKiMic | kKiInstall | kKiSecure | kKiEncrypted | kKdvHmacSha1;
+        m3e.key_length = 16;
+        for (u32 i = 0; i < 32; ++i)
+            m3e.key_nonce[i] = m1.key_nonce[i];
+        for (u32 i = 0; i < 8; ++i)
+            m3e.replay_counter[i] = static_cast<u8>(i + 2);
+        m3e.key_data_len = 40;
+        m3e.key_data = wrapped_kd;
+
+        u8 m3e_buf[256] = {};
+        u32 m3e_len = 0;
+        auto br3e = EapolKeyBuild(m3e, m3e_buf, sizeof(m3e_buf), &m3e_len);
+        KASSERT(br3e.has_value(), "net/wireless/fourway", "encrypted M3 build failed");
+        auto pp_e = EapolMicPatch(m3e_buf, m3e_len, FourWayKck(c2), kKckBytes, kKdvHmacSha1);
+        KASSERT(pp_e.has_value(), "net/wireless/fourway", "encrypted M3 MIC patch failed");
+
+        auto pr_e = FourWayProcessIncoming(c2, m3e_buf, m3e_len);
+        KASSERT(pr_e.has_value(), "net/wireless/fourway", "encrypted M3 process failed");
+        KASSERT(c2.state == FourWayState::AwaitingM4Ack, "net/wireless/fourway",
+                "encrypted M3 didn't advance to AwaitingM4Ack");
+        KASSERT(c2.gtk_valid && c2.gtk_len == 16, "net/wireless/fourway", "encrypted M3 didn't extract GTK");
+        for (u32 i = 0; i < 16; ++i)
+            KASSERT(c2.gtk[i] == static_cast<u8>(0xE0 + i), "net/wireless/fourway",
+                    "encrypted M3 GTK bytes mismatch (unwrap output corrupt)");
+
+        // Tampered-M3 negative case — flip a byte in the wrapped IV
+        // and assert the unwrap integrity check rejects it. Use a
+        // FRESH context (the previous one already advanced past M3).
+        FourWayContext c3{};
+        FourWayInit(c3, pmk, spa, aa, /*sha256=*/false, /*aes_cmac=*/false);
+        auto pr_b = FourWayProcessIncoming(c3, m1_buf, m1_len);
+        KASSERT(pr_b.has_value(), "net/wireless/fourway", "tampered-M3 prereq M1 failed");
+
+        u8 wrapped_tamper[40];
+        for (u32 i = 0; i < 40; ++i)
+            wrapped_tamper[i] = wrapped_kd[i];
+        wrapped_tamper[0] ^= 0x01; // flip a bit in the wrapped IV
+
+        EapolKeyFrame m3t = m3e;
+        m3t.key_data = wrapped_tamper;
+        u8 m3t_buf[256] = {};
+        u32 m3t_len = 0;
+        auto br3t = EapolKeyBuild(m3t, m3t_buf, sizeof(m3t_buf), &m3t_len);
+        KASSERT(br3t.has_value(), "net/wireless/fourway", "tampered M3 build failed");
+        auto pp_t = EapolMicPatch(m3t_buf, m3t_len, FourWayKck(c3), kKckBytes, kKdvHmacSha1);
+        KASSERT(pp_t.has_value(), "net/wireless/fourway", "tampered M3 MIC patch failed");
+        const u32 mic_before = c3.mic_failures;
+        auto pr_t = FourWayProcessIncoming(c3, m3t_buf, m3t_len);
+        KASSERT(!pr_t.has_value(), "net/wireless/fourway", "tampered M3 was accepted (AES-KW integrity check broken)");
+        KASSERT(c3.state == FourWayState::Failed, "net/wireless/fourway", "tampered M3 didn't move state to Failed");
+        KASSERT(c3.mic_failures == mic_before + 1u, "net/wireless/fourway", "tampered M3 didn't bump mic_failures");
+    }
     KLOG_INFO_A(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
-                "self-test OK (M1+M2+M3+M4 + GTK + MIC verified)");
+                "self-test OK (M1+M2+M3+M4 + GTK + MIC + encrypted M3 + tamper-detect verified)");
 }
 
 } // namespace duetos::net::wireless

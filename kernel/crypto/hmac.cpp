@@ -1,8 +1,8 @@
-#include "net/wireless/crypto/hmac.h"
+#include "crypto/hmac.h"
 
 #include "core/panic.h"
 
-namespace duetos::net::wireless::crypto
+namespace duetos::crypto
 {
 
 namespace
@@ -98,7 +98,7 @@ void HmacSelfTest()
         const u8 want[20] = {0xB6, 0x17, 0x31, 0x86, 0x55, 0x05, 0x72, 0x64, 0xE2, 0x8B,
                              0xC0, 0xB6, 0xFB, 0x37, 0x8C, 0x8E, 0xF1, 0x46, 0xBE, 0x00};
         for (u32 i = 0; i < 20; ++i)
-            KASSERT(mac[i] == want[i], "net/wireless/crypto/hmac", "HMAC-SHA1 RFC 2202 vector 1 mismatch");
+            KASSERT(mac[i] == want[i], "crypto/hmac", "HMAC-SHA1 RFC 2202 vector 1 mismatch");
     }
     // RFC 4231 test vector 1: HMAC-SHA256 with key 20 × 0x0B and
     // data "Hi There" → 0xB0344C61D8DB38535CA8AFCEAF0BF12B881DC200C9833DA726E9376C2E32CFF7
@@ -113,8 +113,8 @@ void HmacSelfTest()
                              0xCE, 0xAF, 0x0B, 0xF1, 0x2B, 0x88, 0x1D, 0xC2, 0x00, 0xC9, 0x83,
                              0x3D, 0xA7, 0x26, 0xE9, 0x37, 0x6C, 0x2E, 0x32, 0xCF, 0xF7};
         for (u32 i = 0; i < 32; ++i)
-            KASSERT(mac[i] == want[i], "net/wireless/crypto/hmac", "HMAC-SHA256 RFC 4231 vector 1 mismatch");
+            KASSERT(mac[i] == want[i], "crypto/hmac", "HMAC-SHA256 RFC 4231 vector 1 mismatch");
     }
 }
 
-} // namespace duetos::net::wireless::crypto
+} // namespace duetos::crypto
