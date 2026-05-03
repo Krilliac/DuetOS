@@ -611,12 +611,24 @@ void CmdExpr(u32 argc, char** argv)
             ConsoleWriteln("EXPR: DIVIDE BY ZERO");
             return;
         }
+        // INT64_MIN / -1 raises #DE on x86 (signed-overflow) and would
+        // panic the kernel — refuse the call instead.
+        if (a == static_cast<i64>(0x8000000000000000ULL) && b == -1)
+        {
+            ConsoleWriteln("EXPR: OVERFLOW");
+            return;
+        }
         r = a / b;
         break;
     case '%':
         if (b == 0)
         {
             ConsoleWriteln("EXPR: DIVIDE BY ZERO");
+            return;
+        }
+        if (a == static_cast<i64>(0x8000000000000000ULL) && b == -1)
+        {
+            ConsoleWriteln("EXPR: OVERFLOW");
             return;
         }
         r = a % b;
