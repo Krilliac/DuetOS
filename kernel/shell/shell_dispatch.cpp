@@ -234,6 +234,12 @@ void CmdHelp()
     ConsoleWriteln("  PORT R PORT        READ ONE BYTE FROM I/O PORT (ADMIN)");
     ConsoleWriteln("  PORT W PORT VAL    WRITE ONE BYTE TO I/O PORT (ADMIN)");
     ConsoleWriteln("");
+    ConsoleWriteln("SCRIPTING:");
+    ConsoleWriteln("  ASSERT CMD ARGS    RUN CMD; PASS IF $? = 0, ELSE PRINT FAIL");
+    ConsoleWriteln("  WATCH SECS CMD     RE-RUN CMD EVERY SECS SECONDS (^C ABORTS)");
+    ConsoleWriteln("  SCRIPT /tmp/X CMD  RUN CMD WITH OUTPUT CAPTURED TO /tmp/X");
+    ConsoleWriteln("  $?                 EXIT CODE OF THE LAST DISPATCHED COMMAND");
+    ConsoleWriteln("");
     ConsoleWriteln("KEYS:  UP/DOWN = HISTORY   TAB = COMPLETE");
     ConsoleWriteln("       CTRL+ALT+T = TOGGLE MODE");
     ConsoleWriteln("       CTRL+ALT+F1 = SHELL   CTRL+ALT+F2 = KLOG");
@@ -652,7 +658,7 @@ const char* const kCommandSet[] = {
     "theme",    "addr2sym",  "cap-audit", "monitor",  "secevents", "events",    "policy",     "purple",    "purpleteam",
     "mkdir",    "rmdir",     "truncate",  "realpath", "id",        "groups",    "nproc",      "arch",      "tty",
     "type",     "printenv",  "df",        "du",       "loadavg",   "clearhist", "pause",      "yes",       "sync",
-    "port",
+    "port",     "assert",    "watch",     "script",
 };
 const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1908,6 +1914,21 @@ void Dispatch(char* line)
         if (!RequireAdmin("PORT"))
             return;
         CmdPort(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "assert"))
+    {
+        CmdAssert(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "watch"))
+    {
+        CmdWatch(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "script"))
+    {
+        CmdScript(argc, argv);
         return;
     }
     ShellSetExit(127);

@@ -584,4 +584,160 @@ void CmdPort(u32 argc, char** argv)
     ConsoleWriteln("PORT: UNKNOWN MODE (USE R OR W)");
 }
 
+// ---------------------------------------------------------------
+// Scripting helpers: assert / watch / script.
+//
+// All three rebuild the rest-of-argv into a command line and recurse
+// through Dispatch(). Sharing one helper keeps the bounded-buffer
+// arithmetic in one spot — the per-handler paths just supply the
+// surrounding wrapper logic (PASS/FAIL, periodic re-run, output
+// capture).
+// ---------------------------------------------------------------
+
+namespace
+{
+
+// Join argv[start..argc-1] with single spaces into `out`. Caps at
+// `cap` bytes and always nul-terminates. Returns the byte count
+// written (excluding the nul). Used by assert / watch / script to
+// reconstruct a command line the dispatcher can re-tokenise.
+u32 JoinArgsToBuf(u32 argc, char** argv, u32 start, char* out, u32 cap)
+{
+    if (cap == 0)
+        return 0;
+    u32 n = 0;
+    for (u32 i = start; i < argc; ++i)
+    {
+        if (i > start && n + 1 < cap)
+            out[n++] = ' ';
+        for (u32 k = 0; argv[i][k] != '\0' && n + 1 < cap; ++k)
+            out[n++] = argv[i][k];
+    }
+    out[n] = '\0';
+    return n;
+}
+
+} // namespace
+
+void CmdAssert(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ShellSetExit(2);
+        ConsoleWriteln("ASSERT: USAGE: ASSERT CMD [ARGS...]");
+        return;
+    }
+    char buf[kInputMax];
+    JoinArgsToBuf(argc, argv, 1, buf, sizeof(buf));
+    Dispatch(buf);
+    const i32 inner = ShellLastExit();
+    if (inner == 0)
+    {
+        ConsoleWrite("ASSERT PASS: ");
+        ConsoleWriteln(buf);
+        ShellSetExit(0);
+    }
+    else
+    {
+        ConsoleWrite("ASSERT FAIL (exit=");
+        WriteI64Dec(inner);
+        ConsoleWrite("): ");
+        ConsoleWriteln(buf);
+        ShellSetExit(1);
+    }
+}
+
+void CmdWatch(u32 argc, char** argv)
+{
+    if (argc < 3)
+    {
+        ShellSetExit(2);
+        ConsoleWriteln("WATCH: USAGE: WATCH SECONDS CMD [ARGS...]");
+        return;
+    }
+    u32 secs = 0;
+    for (u32 i = 0; argv[1][i] != '\0'; ++i)
+    {
+        if (argv[1][i] < '0' || argv[1][i] > '9')
+        {
+            ShellSetExit(2);
+            ConsoleWriteln("WATCH: BAD INTERVAL");
+            return;
+        }
+        secs = secs * 10 + u32(argv[1][i] - '0');
+    }
+    if (secs == 0)
+        secs = 1; // 0 would be a hot loop; bash watch defaults to 2
+    char buf[kInputMax];
+    JoinArgsToBuf(argc, argv, 2, buf, sizeof(buf));
+    // Bound iterations so a wedged terminal doesn't loop forever.
+    constexpr u32 kCap = 1000;
+    for (u32 it = 0; it < kCap; ++it)
+    {
+        if (ShellInterruptRequested())
+        {
+            ConsoleWriteln("^C");
+            return;
+        }
+        // Re-tokenise needs a writable copy each time; Dispatch
+        // mutates its argument when it splits args.
+        char run[kInputMax];
+        for (u32 k = 0; k < sizeof(run); ++k)
+            run[k] = buf[k];
+        Dispatch(run);
+        for (u32 s = 0; s < secs; ++s)
+        {
+            if (ShellInterruptRequested())
+            {
+                ConsoleWriteln("^C");
+                return;
+            }
+            duetos::sched::SchedSleepTicks(100);
+        }
+    }
+    ShellSetExit(0);
+}
+
+void CmdScript(u32 argc, char** argv)
+{
+    if (argc < 3)
+    {
+        ShellSetExit(2);
+        ConsoleWriteln("SCRIPT: USAGE: SCRIPT /tmp/<NAME> CMD [ARGS...]");
+        return;
+    }
+    const char* leaf = TmpLeaf(argv[1]);
+    if (leaf == nullptr || *leaf == '\0')
+    {
+        ShellSetExit(1);
+        ConsoleWriteln("SCRIPT: TARGET MUST BE /tmp/<NAME>");
+        return;
+    }
+    char cmd[kInputMax];
+    JoinArgsToBuf(argc, argv, 2, cmd, sizeof(cmd));
+    // Capture into a stack buffer sized to the tmpfs slot cap, then
+    // commit in one TmpFsWrite. ConsoleBeginCapture mirrors writes
+    // into our buffer while still emitting them to the live console
+    // — same pattern the pipe operator uses.
+    char capbuf[duetos::fs::kTmpFsContentMax];
+    u32 cap_used = 0;
+    duetos::drivers::video::ConsoleBeginCapture(capbuf, sizeof(capbuf), &cap_used);
+    Dispatch(cmd);
+    const i32 inner = ShellLastExit();
+    duetos::drivers::video::ConsoleEndCapture();
+    if (!duetos::fs::TmpFsWrite(leaf, capbuf, cap_used))
+    {
+        ShellSetExit(1);
+        ConsoleWriteln("SCRIPT: COULD NOT WRITE CAPTURE FILE");
+        return;
+    }
+    ConsoleWrite("SCRIPT: wrote ");
+    WriteU64Dec(cap_used);
+    ConsoleWrite(" bytes to ");
+    ConsoleWriteln(argv[1]);
+    // Propagate the inner command's exit code so scripts can chain
+    // `script /tmp/log foo && bar`.
+    ShellSetExit(inner);
+}
+
 } // namespace duetos::core::shell::internal

@@ -527,6 +527,9 @@ void CmdPause();
 void CmdYes(u32 argc, char** argv);
 void CmdSync();
 void CmdPort(u32 argc, char** argv);
+void CmdAssert(u32 argc, char** argv);
+void CmdWatch(u32 argc, char** argv);
+void CmdScript(u32 argc, char** argv);
 
 // ---------------------------------------------------------------
 // Process / scheduler / memory observability (shell_process.cpp).
