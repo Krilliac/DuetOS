@@ -2,7 +2,7 @@
 
 _Type: Plan + Observation._
 _Status: Active — open list. Each session can pick from this._
-_Last updated: 2026-05-03 (batch landed: HMAC-MD5, Unicode UTF, TGA decoder, datetime, BMP util, CPIO walker — see `kernel-util-libraries-v0.md`)._
+_Last updated: 2026-05-03 (two batches landed: morning batch — HMAC-MD5, Unicode UTF, TGA decoder, datetime, BMP util, CPIO walker; afternoon batch — KPTI close-out, ChaCha20+Poly1305+AEAD, AES-GCM, POSIX TZ, WAV, TAR, LZ4, GTF, DPMS, PSF, TGA encoder. See `kernel-util-libraries-v0.md` for the long-form companion)._
 
 This file enumerates discrete features whose primary work is
 **clean-room porting from a public spec** rather than novel
@@ -53,6 +53,16 @@ for the next session.
 | 2026-05-03 | Gregorian↔Julian-Day + ISO 8601 datetime parser/printer (Fliegel & Van Flandern + ISO 8601:2019) | `kernel/util/datetime.{h,cpp}` |
 | 2026-05-03 | BMP encoder + parser util TU (32-bpp BI_RGB) — pulled out of screenshot.cpp + imageview.cpp into `kernel/util/bmp` | `kernel/util/bmp.{h,cpp}` |
 | 2026-05-03 | CPIO newc / newc-CRC archive walker (POSIX.1-1988 SVR4 portable, magic 070701/070702) | `kernel/util/cpio.{h,cpp}` (initramfs unpacker is its own future slice) |
+| 2026-05-03 | ChaCha20 + Poly1305 + ChaCha20-Poly1305 AEAD (RFC 8439) | `kernel/crypto/chacha20poly1305.{h,cpp}` |
+| 2026-05-03 | AES-GCM 128/256 (NIST SP 800-38D) | `kernel/crypto/aes_gcm.{h,cpp}` |
+| 2026-05-03 | POSIX TZ env-var string parser (POSIX.1-2008 §8.3) | `kernel/util/posix_tz.{h,cpp}` |
+| 2026-05-03 | WAV / RIFF PCM parser + writer | `kernel/util/wav.{h,cpp}` |
+| 2026-05-03 | TAR ustar archive walker (POSIX.1-2001) | `kernel/util/tar.{h,cpp}` |
+| 2026-05-03 | LZ4 raw-block decoder | `kernel/util/lz4.{h,cpp}` (frame format deferred) |
+| 2026-05-03 | GTF (Generalized Timing Formula) generator | `kernel/drivers/gpu/gtf.{h,cpp}` |
+| 2026-05-03 | DPMS state machine + driver-hook surface | `kernel/drivers/gpu/dpms.{h,cpp}` |
+| 2026-05-03 | PSF1 / PSF2 console-font header parser | `kernel/util/psf.{h,cpp}` |
+| 2026-05-03 | TGA 32-bpp encoder (paired with prior decoder) | `kernel/util/tga.{h,cpp}` (extended) |
 
 ## Display + GPU
 
@@ -61,10 +71,10 @@ for the next session.
 | ~~EDID 1.3/1.4 base block~~ LANDED 2026-05-01 | VESA E-EDID A2 | Linux drm_edid, X.Org | P2 #12 | ~600 |
 | ~~CVT timing generator~~ LANDED 2026-05-01 | VESA CVT 1.1/1.2 | libxcvt, X.Org cvt(1) | mode-set | ~400 |
 | ~~CEA-861 ext block~~ LANDED 2026-05-01 | CEA-861-E/F | Linux drm_edid_cea | HDMI audio, HDR | ~600 |
-| **GTF (Generalized Timing Formula)** — pre-CVT timings | VESA GTF 1.1 | X.Org gtf(1) | legacy CRT modes | ~250 |
+| ~~GTF (Generalized Timing Formula)~~ LANDED 2026-05-03 | VESA GTF 1.1 | X.Org gtf(1) | legacy CRT modes | ~250 |
 | **DisplayID 1.3 / 2.0** — successor to EDID | VESA DisplayID | Linux drm_displayid | post-2014 monitors | ~500 |
 | **CTA-861-G / 861-H VIC table extension** | CTA-861-G | Linux drm_edid | HDMI 2.1 modes | ~200 |
-| **DPMS state machine** | VESA DPMS | X.Org DPMS ext | screen-saver, power | ~150 |
+| ~~DPMS state machine~~ LANDED 2026-05-03 | VESA DPMS | X.Org DPMS ext | screen-saver, power | ~150 |
 | **Mode-pool dedup + best-fit selector** | (DuetOS-internal) | Linux drm_modes.c | mode-set syscall | ~300 |
 | **DDC/I²C bit-banged transport** | VESA DDC2B | Linux drm_dp_helper | feeds EDID | per-vendor |
 | **AUX channel for DisplayPort** | DP 1.4 | Linux drm_dp_aux | DP modes | per-vendor |
@@ -76,7 +86,7 @@ for the next session.
 | **AC'97 codec init + BDL** | AC'97 spec rev 2.3 | FreeBSD `ich.c`, ALSA `intel8x0` | P0 #2 | ~600 |
 | **HDA controller reset + CORB/RIRB** | Intel HDA spec | ALSA hda_controller, FreeBSD hda | P0 #2 | ~700 |
 | **HDA codec verb table** | Intel HDA spec §7.3 | ALSA hda_codec | P0 #2 | ~300 |
-| **WAV (RIFF) parser/writer** | RFC + Microsoft WAVEFORMATEX | libsndfile | sound effects | ~150 |
+| ~~WAV (RIFF) parser/writer~~ LANDED 2026-05-03 | RFC + Microsoft WAVEFORMATEX | libsndfile | sound effects | ~330 |
 | **Vorbis comment parser** | Xiph spec | libvorbis | metadata | ~120 |
 | **OGG container** | RFC 3533 | libogg | streaming | ~250 |
 | **FLAC stream decoder** | xiph FLAC spec | libFLAC | lossless audio | ~600 |
@@ -106,10 +116,10 @@ for the next session.
 | Slice | Spec | Prior art | Consumer | Est. LOC |
 |-------|------|-----------|----------|----------|
 | ~~AES-128/256 block cipher~~ LANDED 2026-05-03 | FIPS 197 | OpenSSL, ARM Cryptolib | Wi-Fi, future TLS | ~250 |
-| **AES-GCM / AES-CCM modes** | NIST SP 800-38D | mbedTLS | Wi-Fi WPA3 / TLS | ~200 |
+| ~~AES-GCM mode~~ LANDED 2026-05-03 (AES-CCM still pending) | NIST SP 800-38D | mbedTLS | Wi-Fi WPA3 / TLS | ~330 |
 | ~~AES key wrap (RFC 3394)~~ LANDED 2026-05-03 | RFC 3394 | mbedTLS, BoringSSL | Wi-Fi M3 GTK | ~100 |
 | ~~MD5~~ LANDED 2026-05-03 | RFC 1321 | mbedTLS | legacy interop | ~100 |
-| **ChaCha20 + Poly1305** | RFC 8439 | BoringSSL | TLS 1.3 ciphersuite | ~250 |
+| ~~ChaCha20 + Poly1305 + AEAD~~ LANDED 2026-05-03 | RFC 8439 | BoringSSL | TLS 1.3 ciphersuite | ~580 |
 | _(see Landed slices: MD5 — RFC 1321, 2026-05-03)_ | | | | |
 | **Curve25519 / X25519** | RFC 7748 | TweetNaCl | Wi-Fi WPA3-SAE, TLS | ~300 |
 | **Ed25519 signature verify** | RFC 8032 | TweetNaCl | code-sign verify | ~400 |
@@ -139,7 +149,7 @@ for the next session.
 | Slice | Spec | Prior art | Consumer | Est. LOC |
 |-------|------|-----------|----------|----------|
 | **TZif (Olson zoneinfo) parser** | RFC 8536 (TZif v3) | musl `__tzset.c`, glibc tzfile.c | Linux ABI gap | ~300 |
-| **POSIX TZ string parser** | POSIX.1-2008 §8.3 | musl | TZ env var | ~150 |
+| ~~POSIX TZ string parser~~ LANDED 2026-05-03 | POSIX.1-2008 §8.3 | musl | TZ env var | ~470 |
 | **Gregorian↔ Julian day conversion** | (well-known) | musl, glibc | calendar app | ~80 |
 | **ISO 8601 datetime parser/printer** | ISO 8601 | musl strftime | logging | ~200 |
 | ~~Unicode UTF-8/UTF-16 conversions~~ LANDED 2026-05-03 | RFC 3629 + Unicode 15 §3.9 | musl mbtowc | Win32 wide strings, exfat/ntfs filename decode | ~300 |
@@ -153,24 +163,24 @@ for the next session.
 | **DEFLATE / RFC 1951 inflater** | RFC 1951 | tinfl.c, miniz | gzip, png, zip, kernel-image | ~600 |
 | **GZIP container** | RFC 1952 | (above) | initramfs.gz, http content | ~100 |
 | ~~CPIO newc / newc-CRC walker~~ LANDED 2026-05-03 (newc only — old binary 070707 deliberately rejected) | POSIX.1-1988 | Linux init/initramfs.c | initramfs prereq | ~330 |
-| **TAR ustar / pax** | POSIX.1-2001 | libarchive | distribution tarballs | ~200 |
+| ~~TAR ustar~~ LANDED 2026-05-03 (pax extensions still pending) | POSIX.1-2001 | libarchive | distribution tarballs | ~400 |
 | **ZIP archive read-only** | PKWARE APPNOTE | minizip | Win32 install MSIs | ~250 |
 | **Cabinet (.cab) read-only** | MS-CAB | libmspack | Windows install | ~600 |
-| **LZ4 decoder** | LZ4 frame spec | lz4 ref | fast decompression | ~200 |
+| ~~LZ4 raw-block decoder~~ LANDED 2026-05-03 (frame format deferred) | LZ4 spec | lz4 ref | fast decompression | ~220 |
 | **Zstandard decoder** | RFC 8478 | zstd lib | modern compression | ~1500 |
 
 ## Image + Font formats
 
 | Slice | Spec | Prior art | Consumer | Est. LOC |
 |-------|------|-----------|----------|----------|
-| TGA decoder (uncompressed 24/32-bpp): LANDED 2026-05-03; encoder + RLE deferred | TGA 2.0 spec | stb_image | wallpapers, icons (ImageView wiring still TODO) | ~280 |
+| ~~TGA decoder + 32-bpp encoder~~ LANDED 2026-05-03 (RLE still deferred) | TGA 2.0 spec | stb_image | wallpapers, icons | ~350 |
 | ~~BMP encoder + parser util TU (32-bpp BI_RGB)~~ LANDED 2026-05-03 | Microsoft BITMAPINFOHEADER | stb_image | screenshot writer + ImageView | ~200 |
 | **PNG decoder** | RFC 2083 | stb_image, libpng | image viewer | ~300 (+DEFLATE) |
 | **PNG encoder** | RFC 2083 | (same) | screenshot upgrade | ~200 (+DEFLATE) |
 | **GIF87a/89a decoder + LZW** | W3C GIF spec | stb_image | animated icons | ~400 |
 | **JPEG baseline decoder** | ITU-T T.81 | stb_image, jpeg-turbo | photo viewer | ~1500 |
 | **WebP decoder (lossless)** | RFC 9649 | libwebp | modern photo | ~1500 |
-| **PSF1/PSF2 font parser** | linux Documentation/fb/, kbd-tools | linux console_psf | console font customisation | ~120 |
+| ~~PSF1/PSF2 font parser~~ LANDED 2026-05-03 | linux Documentation/fb/, kbd-tools | linux console_psf | console font customisation | ~280 |
 | **PCF bitmap font parser** | X Logical Font Description | libXfont | classic X bitmap fonts | ~250 |
 | **TrueType shaping enhancement** | OpenType spec | stb_truetype | smoother text rendering | (existing ttf.cpp) |
 
