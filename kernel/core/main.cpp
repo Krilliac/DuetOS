@@ -44,20 +44,13 @@
 #include "util/build_config.h"
 #include "util/crc32.h"
 #include "util/bmp.h"
-#include "util/cpio.h"
 #include "util/datetime.h"
 #include "util/deflate.h"
 #include "util/gzip.h"
-#include "util/lz4.h"
 #include "util/png.h"
-#include "util/posix_tz.h"
-#include "util/psf.h"
-#include "util/tar.h"
 #include "util/tga.h"
-#include "util/tzif.h"
 #include "util/types.h"
 #include "util/unicode.h"
-#include "util/wav.h"
 #include "acpi/acpi.h"
 #include "acpi/aml.h"
 #include "arch/x86_64/cpu.h"
@@ -86,7 +79,6 @@
 #include "drivers/gpu/cea861.h"
 #include "drivers/gpu/cvt.h"
 #include "drivers/gpu/dpms.h"
-#include "drivers/gpu/gtf.h"
 #include "drivers/gpu/edid.h"
 #include "drivers/gpu/gpu.h"
 #include "drivers/input/ps2kbd.h"
@@ -101,17 +93,12 @@
 #include "drivers/net/rtl88xx_upload.h"
 #include "net/wireless/beacon.h"
 #include "crypto/aes.h"
-#include "crypto/aes_ccm.h"
-#include "crypto/aes_gcm.h"
 #include "crypto/aes_keywrap.h"
-#include "crypto/chacha20poly1305.h"
 #include "crypto/hmac.h"
-#include "crypto/md5.h"
 #include "crypto/pbkdf2.h"
 #include "crypto/prf.h"
 #include "crypto/sha1.h"
 #include "crypto/sha256.h"
-#include "crypto/sha512.h"
 #include "net/wireless/eapol.h"
 #include "net/wireless/fourway.h"
 #include "net/wireless/mlme.h"
@@ -1954,7 +1941,6 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::EdidSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::CvtSelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::GtfSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::DpmsSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::Cea861SelfTest());
 
@@ -1969,29 +1955,17 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::util::BmpSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::TgaSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::DateTimeSelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::util::PosixTzSelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::util::CpioSelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::util::TarSelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::util::WavSelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::util::Lz4SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::DeflateSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::GzipZlibSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::PngSelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::util::TzifSelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::util::PsfSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::Adler32SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Sha1SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Sha256SelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::crypto::Sha512SelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::crypto::Md5SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::HmacSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Pbkdf2SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::PrfSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::AesSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::AesKeyWrapSelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::crypto::AesGcmSelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::crypto::AesCcmSelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::crypto::ChaCha20Poly1305SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::security::PasswordHashSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::EapolSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::FourWaySelfTest());
