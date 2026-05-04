@@ -781,7 +781,10 @@ recorded=… declared=… after=…` line via SYS_DEBUG_PRINT for
 the first three mismatches; ALIASING / UAV are no-op
 success), 29 SetComputeRootSignature (no-op),
 30 SetGraphicsRootSignature, 43 IASetIndexBuffer, 44
-IASetVertexBuffers, 46 OMSetRenderTargets, 47
+IASetVertexBuffers (walks `n` views from `start_slot`,
+populating each of the 32 IA slots independently so the
+PSO's per-element InputSlot can pick the right VB per
+attribute), 46 OMSetRenderTargets, 47
 ClearDepthStencilView (no-op), 48 ClearRenderTargetView.
 
 STUB: every other slot (all root-table / root-32-bit /
@@ -1106,10 +1109,13 @@ did. PE imports of these names fail at PeLoad today.
   not honoured by the rasterizer.
 - **Compute** — `Dispatch`, UAVs, structured buffers — STUB.
 - **Indirect draws** — `DrawInstancedIndirect` etc. — STUB.
-- **Multi-stream input layouts** — D3D11 honours all 32 slots
-  (per-element `InputSlot` picks the right VB). D3D12 still
-  reads VB slot 0 only — same approach can land there but
-  hasn't yet.
+- **Multi-stream input layouts** — both D3D11 and D3D12 honour
+  all 32 slots: the PSO / input-layout records each element's
+  `InputSlot`, the command list / context keeps a 32-entry
+  `current_vb_address / size / stride` array, and `Draw*` /
+  `DrawIndexed*` route each attribute to the right VB. The
+  dx\_demo's `test_d3d12_multistream` covers POSITION on slot 0
+  + COLOR on slot 3 end-to-end.
 - **Tessellation** — hull / domain / GS shaders not run.
 
 ### Process / threading
@@ -1232,12 +1238,9 @@ short list:
 
 1. **`SymGetLineFromAddr64`** in dbghelp — would let
    `process_smoke` print real source-line crash dumps.
-2. **D3D12 multi-stream input** — same per-element InputSlot
-   refactor that landed in D3D11; the PSO already extracts
-   the field. Use the same 32-slot array shape.
-3. **`ws2_32!WSAEventSelect`** — back into our message-
+2. **`ws2_32!WSAEventSelect`** — back into our message-
    queue + waitable-event primitives.
-4. **`d2d1!DrawText`** — wire DWrite's monospace metrics
+3. **`d2d1!DrawText`** — wire DWrite's monospace metrics
    into the existing FillRect path so single-line text
    renders.
 

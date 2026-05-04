@@ -1333,6 +1333,225 @@ static int test_d3d11_multistream(void)
     return 0;
 }
 
+/* ---------------------------------------------------------------- *
+ * D3D12 multi-stream input — same cube as the single-stream test    *
+ * but with positions in slot 0 and colours in slot 3. Proves        *
+ * IASetVertexBuffers honours start_slot != 0 and the PSO's per-     *
+ * element InputSlot. Mirrors test_d3d11_multistream.                *
+ * ---------------------------------------------------------------- */
+
+static int test_d3d12_multistream(void)
+{
+    Out("[dx_demo] --- D3D12 multi-stream (pos slot 0 / color slot 3) ---\r\n");
+    void* dev = NULL;
+    long hr = D3D12CreateDevice(NULL, 0xb000, &kIidD12Device, &dev);
+    if (hr != 0 || !dev)
+    {
+        Out("[dx_demo] d3d12 multi-stream: CreateDevice FAIL\r\n");
+        return 0;
+    }
+    void** dev_vt = *(void***)dev;
+    D12QDesc qd = {0, 0, 0, 0};
+    void* queue = NULL;
+    typedef long (*PFN_CQ)(void*, const void*, const GUID*, void**);
+    ((PFN_CQ)dev_vt[8])(dev, &qd, NULL, &queue);
+    void* alloc = NULL;
+    typedef long (*PFN_CA)(void*, UINT, const GUID*, void**);
+    ((PFN_CA)dev_vt[9])(dev, 0, NULL, &alloc);
+    void* list = NULL;
+    typedef long (*PFN_CL)(void*, UINT, UINT, void*, void*, const GUID*, void**);
+    ((PFN_CL)dev_vt[12])(dev, 0, 0, alloc, NULL, NULL, &list);
+
+    D12HDesc hd = {2, 1, 0, 0};
+    void* heap = NULL;
+    typedef long (*PFN_CH)(void*, const void*, const GUID*, void**);
+    ((PFN_CH)dev_vt[14])(dev, &hd, NULL, &heap);
+    void** heap_vt = *(void***)heap;
+    typedef SIZE_T (*PFN_GetCPU)(void*);
+    SIZE_T cpu_h = ((PFN_GetCPU)heap_vt[9])(heap);
+
+    D12HProps hp = {1, 0, 0, 0, 0};
+    D12RDesc rd = {0};
+    rd.Dimension = 4;
+    rd.Width = BB_W;
+    rd.Height = BB_H;
+    rd.DepthOrArraySize = 1;
+    rd.MipLevels = 1;
+    rd.Format = 87;
+    void* rt = NULL;
+    typedef long (*PFN_CR)(void*, const void*, UINT, const void*, UINT, const void*, const GUID*, void**);
+    ((PFN_CR)dev_vt[27])(dev, &hp, 0, &rd, 4, NULL, NULL, &rt);
+    typedef void (*PFN_CRTV)(void*, void*, const void*, SIZE_T);
+    ((PFN_CRTV)dev_vt[20])(dev, rt, NULL, cpu_h);
+
+    /* Two parallel arrays — positions and colours stay separate. */
+    M4 mvp = build_mvp(BB_W, BB_H);
+    static float pos_only[24 * 3];
+    static DWORD col_only[24];
+    for (int i = 0; i < 24; ++i)
+    {
+        float in[4] = {kCubeVerts[i].x, kCubeVerts[i].y, kCubeVerts[i].z, 1.0f};
+        float out[4];
+        vec4_xform(out, in, &mvp);
+        pos_only[i * 3 + 0] = out[3] != 0.0f ? out[0] / out[3] : 0.f;
+        pos_only[i * 3 + 1] = out[3] != 0.0f ? out[1] / out[3] : 0.f;
+        pos_only[i * 3 + 2] = 0.f;
+        col_only[i] = kCubeVerts[i].argb;
+    }
+
+    /* Per-stream buffers */
+    typedef long (*PFN_Map)(void*, UINT, const void*, void**);
+    typedef void (*PFN_Unmap)(void*, UINT, const void*);
+    typedef UINT64 (*PFN_GetGPUVA)(void*);
+    D12RDesc bdesc = {0};
+    bdesc.Dimension = 1;
+    bdesc.Height = 1;
+    bdesc.DepthOrArraySize = 1;
+    bdesc.MipLevels = 1;
+    bdesc.Width = sizeof(pos_only);
+    void* vb_pos = NULL;
+    ((PFN_CR)dev_vt[27])(dev, &hp, 0, &bdesc, 0, NULL, NULL, &vb_pos);
+    void** pos_vt = *(void***)vb_pos;
+    void* pos_data = NULL;
+    ((PFN_Map)pos_vt[8])(vb_pos, 0, NULL, &pos_data);
+    {
+        BYTE* d = (BYTE*)pos_data;
+        const BYTE* s = (const BYTE*)pos_only;
+        for (UINT i = 0; i < sizeof(pos_only); ++i)
+            d[i] = s[i];
+    }
+    ((PFN_Unmap)pos_vt[9])(vb_pos, 0, NULL);
+    UINT64 pos_va = ((PFN_GetGPUVA)pos_vt[11])(vb_pos);
+
+    bdesc.Width = sizeof(col_only);
+    void* vb_col = NULL;
+    ((PFN_CR)dev_vt[27])(dev, &hp, 0, &bdesc, 0, NULL, NULL, &vb_col);
+    void** col_vt = *(void***)vb_col;
+    void* col_data = NULL;
+    ((PFN_Map)col_vt[8])(vb_col, 0, NULL, &col_data);
+    {
+        BYTE* d = (BYTE*)col_data;
+        const BYTE* s = (const BYTE*)col_only;
+        for (UINT i = 0; i < sizeof(col_only); ++i)
+            d[i] = s[i];
+    }
+    ((PFN_Unmap)col_vt[9])(vb_col, 0, NULL);
+    UINT64 col_va = ((PFN_GetGPUVA)col_vt[11])(vb_col);
+
+    /* Index buffer */
+    bdesc.Width = sizeof(kCubeIndices);
+    void* ib = NULL;
+    ((PFN_CR)dev_vt[27])(dev, &hp, 0, &bdesc, 0, NULL, NULL, &ib);
+    void** ib_vt = *(void***)ib;
+    void* ib_data = NULL;
+    ((PFN_Map)ib_vt[8])(ib, 0, NULL, &ib_data);
+    {
+        BYTE* d = (BYTE*)ib_data;
+        const BYTE* s = (const BYTE*)kCubeIndices;
+        for (UINT i = 0; i < sizeof(kCubeIndices); ++i)
+            d[i] = s[i];
+    }
+    ((PFN_Unmap)ib_vt[9])(ib, 0, NULL);
+    UINT64 ib_va = ((PFN_GetGPUVA)ib_vt[11])(ib);
+
+    /* PSO with input layout — POSITION at slot 0, COLOR at slot 3. */
+    static const char kPos[] = "POSITION";
+    static const char kCol[] = "COLOR";
+    BYTE ied[64] = {0};
+    *(const char**)(ied + 0) = kPos;
+    *(UINT*)(ied + 12) = 6; /* R32G32B32_FLOAT */
+    *(UINT*)(ied + 16) = 0; /* InputSlot 0 */
+    *(UINT*)(ied + 20) = 0;
+    *(const char**)(ied + 32) = kCol;
+    *(UINT*)(ied + 44) = 87; /* B8G8R8A8_UNORM */
+    *(UINT*)(ied + 48) = 3;  /* InputSlot 3 */
+    *(UINT*)(ied + 52) = 0;
+    BYTE psodesc[400] = {0};
+    *(const void**)(psodesc + 348) = (const void*)ied;
+    *(UINT*)(psodesc + 356) = 2;
+    *(UINT*)(psodesc + 368) = 3; /* TRIANGLE */
+    void* pso = NULL;
+    typedef long (*PFN_GPSO)(void*, const void*, const GUID*, void**);
+    ((PFN_GPSO)dev_vt[10])(dev, psodesc, NULL, &pso);
+
+    /* Record */
+    void** list_vt = *(void***)list;
+    typedef void (*PFN_OMSet)(void*, UINT, const void*, BOOL, const void*);
+    ((PFN_OMSet)list_vt[46])(list, 1, &cpu_h, TRUE, NULL);
+    float bg[4] = {0.125f, 0.125f, 0.125f, 1.0f};
+    typedef void (*PFN_ClearRTV)(void*, SIZE_T, const float*, UINT, const void*);
+    ((PFN_ClearRTV)list_vt[48])(list, cpu_h, bg, 0, NULL);
+    typedef void (*PFN_SetPSO)(void*, void*);
+    ((PFN_SetPSO)list_vt[25])(list, pso);
+    typedef void (*PFN_IASetTopo)(void*, UINT);
+    ((PFN_IASetTopo)list_vt[20])(list, 4);
+    float vp[6] = {0.f, 0.f, (float)BB_W, (float)BB_H, 0.f, 1.f};
+    typedef void (*PFN_RSVP)(void*, UINT, const void*);
+    ((PFN_RSVP)list_vt[21])(list, 1, vp);
+
+    /* Bind slot 0 = positions (12-byte stride), slot 3 = colours
+     * (4-byte stride) via two separate IASetVertexBuffers calls. */
+    BYTE pos_view[16];
+    *(UINT64*)(pos_view + 0) = pos_va;
+    *(UINT*)(pos_view + 8) = sizeof(pos_only);
+    *(UINT*)(pos_view + 12) = 12;
+    typedef void (*PFN_IAVB)(void*, UINT, UINT, const void*);
+    ((PFN_IAVB)list_vt[44])(list, 0, 1, pos_view);
+    BYTE col_view[16];
+    *(UINT64*)(col_view + 0) = col_va;
+    *(UINT*)(col_view + 8) = sizeof(col_only);
+    *(UINT*)(col_view + 12) = 4;
+    ((PFN_IAVB)list_vt[44])(list, 3, 1, col_view);
+
+    BYTE ibview[16];
+    *(UINT64*)(ibview + 0) = ib_va;
+    *(UINT*)(ibview + 8) = sizeof(kCubeIndices);
+    *(UINT*)(ibview + 12) = 57;
+    typedef void (*PFN_IAIB)(void*, const void*);
+    ((PFN_IAIB)list_vt[43])(list, ibview);
+    typedef void (*PFN_DII)(void*, UINT, UINT, UINT, INT, UINT);
+    ((PFN_DII)list_vt[13])(list, 36, 1, 0, 0, 0);
+
+    typedef long (*PFN_Close)(void*);
+    ((PFN_Close)list_vt[9])(list);
+    void** q_vt = *(void***)queue;
+    void* lists[1] = {list};
+    typedef void (*PFN_Exec)(void*, UINT, void* const*);
+    ((PFN_Exec)q_vt[10])(queue, 1, lists);
+
+    void** rt_vt = *(void***)rt;
+    typedef long (*PFN_RMap)(void*, UINT, const void*, void**);
+    void* rt_pixels = NULL;
+    ((PFN_RMap)rt_vt[8])(rt, 0, NULL, &rt_pixels);
+    int faces = 0;
+    if (rt_pixels)
+        faces = verify_cube_render("d3d12-multistream", (const DWORD*)rt_pixels, BB_W, BB_H);
+    typedef void (*PFN_RUnmap)(void*, UINT, const void*);
+    ((PFN_RUnmap)rt_vt[9])(rt, 0, NULL);
+
+    typedef ULONG (*PFN_Rel)(void*);
+    ((PFN_Rel)((void**)(*(void***)pso))[2])(pso);
+    ((PFN_Rel)ib_vt[2])(ib);
+    ((PFN_Rel)col_vt[2])(vb_col);
+    ((PFN_Rel)pos_vt[2])(vb_pos);
+    ((PFN_Rel)rt_vt[2])(rt);
+    ((PFN_Rel)heap_vt[2])(heap);
+    ((PFN_Rel)list_vt[2])(list);
+    ((PFN_Rel)((void**)(*(void***)alloc))[2])(alloc);
+    ((PFN_Rel)q_vt[2])(queue);
+    ((PFN_Rel)dev_vt[2])(dev);
+
+    if (faces >= 1)
+    {
+        Out("[dx_demo] d3d12 multi-stream: ");
+        OutDec((unsigned)faces);
+        Out(" face(s) visible — PASS\r\n");
+        return 1;
+    }
+    Out("[dx_demo] d3d12 multi-stream: NO FACES — FAIL\r\n");
+    return 0;
+}
+
 void __cdecl mainCRTStartup(void)
 {
     g_stdout = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -1347,6 +1566,8 @@ void __cdecl mainCRTStartup(void)
     pass += test_d3d11_multistream();
     total++;
     pass += test_d3d12_cube();
+    total++;
+    pass += test_d3d12_multistream();
     total++;
     pass += test_d3d9_cube();
     total++;
