@@ -42,6 +42,7 @@ constexpr ProbeRow kProbeTable[] = {
     {ProbeId::kHeapAllocFail, "mm.heap_alloc_fail", ProbeArm::ArmedLog},
     {ProbeId::kPhysAllocFail, "mm.phys_alloc_fail", ProbeArm::ArmedLog},
     {ProbeId::kSmpApOnline, "smp.ap_online", ProbeArm::ArmedLog},
+    {ProbeId::kBootSelftestFail, "boot.selftest_fail", ProbeArm::ArmedLog},
     {ProbeId::kRing3Spawn, "ring3.spawn", ProbeArm::Disarmed},
     {ProbeId::kProcessCreate, "proc.create", ProbeArm::Disarmed},
     {ProbeId::kProcessDestroy, "proc.destroy", ProbeArm::Disarmed},

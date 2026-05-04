@@ -12,7 +12,7 @@
  * Called once from `kernel_main` so the boot serial log shows
  * concrete data flowing through every recorded surface — the
  * Win32 PE smoke crashes early on this build so we can't yet
- * rely on a real ProcessRelease to fire DumpOnAbnormalExit.
+ * rely on a real ProcessRelease to fire DumpExitDiagnostics.
  *
  * Allocates a synthetic Process with just enough fields populated
  * to satisfy the hooks (pid + win32_custom_state), drives each
@@ -175,7 +175,7 @@ void Win32CustomSelfTest()
 
     // 6. Heap quarantine — push two freed blocks while QuarantineFree
     //    is OFF (default tier-2), then flip it on and demonstrate
-    //    IsQuarantined returns true. Restore policy at end so DumpOnAbnormalExit
+    //    IsQuarantined returns true. Restore policy at end so DumpExitDiagnostics
     //    is consistent.
     {
         Heading("HEAP QUARANTINE (opt-in tier-2 demo)");
@@ -216,8 +216,8 @@ void Win32CustomSelfTest()
     }
 
     // 8. Call the same dump path real PE exits will use.
-    Heading("DumpOnAbnormalExit (this is what every Win32 PE exit will emit)");
-    DumpOnAbnormalExit(proc);
+    Heading("DumpExitDiagnostics (this is what every Win32 PE exit will emit)");
+    DumpExitDiagnostics(proc);
 
     // Cleanup.
     CleanupProcess(proc);

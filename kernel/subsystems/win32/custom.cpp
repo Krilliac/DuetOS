@@ -549,13 +549,19 @@ bool StrictRwxRejectsSection(core::Process* proc, u32 characteristics)
     return (characteristics & kExec) != 0 && (characteristics & kWrite) != 0;
 }
 
-// ---------- Crash-dump path ----------
-void DumpOnAbnormalExit(core::Process* proc)
+// ---------- Exit-diagnostics path ----------
+//
+// Fires for every Win32 PE exit — success and abnormal alike.
+// The flight recorder + handle ledger emitted here is what makes
+// post-mortem diffs cheap: a clean run and a faulting run leave
+// the same shape on the serial log, so the divergence point is
+// unambiguous.
+void DumpExitDiagnostics(core::Process* proc)
 {
     auto* s = GetState(proc);
     if (s == nullptr)
         return;
-    arch::SerialWrite("[w32-custom] abnormal-exit dump pid=");
+    arch::SerialWrite("[w32-custom] exit-diagnostics pid=");
     arch::SerialWriteHex(proc->pid);
     arch::SerialWrite(" policy=");
     arch::SerialWriteHex(s->policy);
@@ -667,12 +673,12 @@ void DoCustom(arch::TrapFrame* frame)
     case kOpDumpInputReplay:
     {
         // All "dump" ops emit to the serial console — the post-
-        // mortem path is the same as DumpOnAbnormalExit but
+        // mortem path is the same as DumpExitDiagnostics but
         // gated to the requested section. rsi=0 means "this
-        // section only"; reusing DumpOnAbnormalExit for the
+        // section only"; reusing DumpExitDiagnostics for the
         // simplicity of one code path is fine because every
         // section's gate is its own policy bit.
-        DumpOnAbnormalExit(proc);
+        DumpExitDiagnostics(proc);
         if (op == kOpDumpQuarantine)
         {
             const auto* s = GetState(proc);

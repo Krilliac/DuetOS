@@ -750,13 +750,21 @@ void WindowMoveTo(WindowHandle h, u32 x, u32 y)
     {
         return;
     }
-    const auto info = FramebufferGet();
-    const u32 max_x = (info.width > g_windows[h].chrome.w) ? info.width - g_windows[h].chrome.w : 0;
-    const u32 max_y = (info.height > g_windows[h].chrome.h) ? info.height - g_windows[h].chrome.h : 0;
-    if (x > max_x)
-        x = max_x;
-    if (y > max_y)
-        y = max_y;
+    // Clamp into the framebuffer extent only when the framebuffer is
+    // actually live. Pre-FramebufferInit (early boot, or headless
+    // self-tests that move windows before the compositor comes up)
+    // info.width/height are zero, which would otherwise force every
+    // nonzero (x, y) to clamp back to the origin.
+    if (FramebufferAvailable())
+    {
+        const auto info = FramebufferGet();
+        const u32 max_x = (info.width > g_windows[h].chrome.w) ? info.width - g_windows[h].chrome.w : 0;
+        const u32 max_y = (info.height > g_windows[h].chrome.h) ? info.height - g_windows[h].chrome.h : 0;
+        if (x > max_x)
+            x = max_x;
+        if (y > max_y)
+            y = max_y;
+    }
     g_windows[h].chrome.x = x;
     g_windows[h].chrome.y = y;
 }

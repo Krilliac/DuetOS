@@ -295,6 +295,25 @@ __declspec(dllexport) INT select(INT nfds, void* rfd, void* wfd, void* efd, cons
     (void)tv;
     return 0;
 }
+
+/* Backing function for the FD_ISSET macro. mingw-w64's winsock2.h
+ * lays out fd_set as { u_int fd_count; SOCKET fd_array[FD_SETSIZE]; }
+ * where SOCKET is UINT_PTR (8 bytes on x64), so fd_array starts at
+ * offset 8 (4-byte fd_count + 4 bytes of padding). Walk fd_count
+ * entries with 8-byte stride matching the caller's struct. */
+__declspec(dllexport) INT __WSAFDIsSet(unsigned long long s, void* set)
+{
+    if (set == 0)
+        return 0;
+    unsigned int count = *(unsigned int*)set;
+    unsigned long long* arr = (unsigned long long*)((unsigned char*)set + 8);
+    for (unsigned int i = 0; i < count; ++i)
+    {
+        if (arr[i] == s)
+            return 1;
+    }
+    return 0;
+}
 __declspec(dllexport) USHORT htons(USHORT v)
 {
     return (USHORT)((v << 8) | (v >> 8));

@@ -1,6 +1,7 @@
 #include "core/session_restore.h"
 
 #include "arch/x86_64/serial.h"
+#include "debug/probes.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
 #include "fs/fat32.h"
@@ -389,25 +390,59 @@ void SessionRestoreSelfTest()
 
     bool ok = true;
     v::ThemeId got;
-    if (!v::ThemeIdFromName(kSynthTheme, &got) || v::ThemeCurrentId() != got)
+    const bool theme_known = v::ThemeIdFromName(kSynthTheme, &got);
+    const bool theme_applied = theme_known && (v::ThemeCurrentId() == got);
+    if (!theme_applied)
     {
         ok = false;
+        // Sub-check failure detail. WARN so it always surfaces in any
+        // sensible klog level, but routed through klog (not raw serial)
+        // so it respects loglevel demotion in production builds.
+        KLOG_WARN("session", "self-test: theme sub-check FAILED");
+        KLOG_DEBUG_S("session", "  theme known", "want", kSynthTheme);
+        KLOG_DEBUG_S("session", "  theme current", "current", v::ThemeIdName(v::ThemeCurrentId()));
+        KLOG_DEBUG_V("session", "  theme known flag", theme_known ? 1u : 0u);
     }
+    bool win_ok = true;
+    u32 nx_dbg = 0;
+    u32 ny_dbg = 0;
+    bool got_bounds = false;
     if (have_calc)
     {
-        u32 nx = 0;
-        u32 ny = 0;
-        if (!v::WindowGetBounds(calc, &nx, &ny, nullptr, nullptr) || nx != 42 || ny != 84)
+        got_bounds = v::WindowGetBounds(calc, &nx_dbg, &ny_dbg, nullptr, nullptr);
+        if (!got_bounds || nx_dbg != 42 || ny_dbg != 84)
         {
             ok = false;
+            win_ok = false;
         }
         // Restore original calc position.
         v::WindowMoveTo(calc, ox, oy);
     }
+    if (!win_ok)
+    {
+        KLOG_WARN("session", "self-test: window-position sub-check FAILED");
+        KLOG_DEBUG_V("session", "  have_calc", have_calc ? 1u : 0u);
+        KLOG_DEBUG_V("session", "  got_bounds", got_bounds ? 1u : 0u);
+        KLOG_DEBUG_V("session", "  observed nx", nx_dbg);
+        KLOG_DEBUG_V("session", "  observed ny", ny_dbg);
+    }
     // Restore original theme.
     v::ThemeSet(orig_theme);
 
-    SerialWrite(ok ? "[session] self-test OK (theme + window position round-trip)\n" : "[session] self-test FAILED\n");
+    if (ok)
+    {
+        SerialWrite("[session] self-test OK (theme + window position round-trip)\n");
+    }
+    else
+    {
+        SerialWrite("[session] self-test FAILED (see preceding sub-check log)\n");
+        // Fire the GDB-attachable probe so a debugger session catches
+        // the exact frame where the regression first surfaces. Encoded
+        // value packs the two sub-check flags so the probe row tells
+        // an at-a-glance reader which leg failed without re-greping.
+        const u64 fail_value = (theme_applied ? 0u : 0x01u) | (win_ok ? 0u : 0x02u);
+        KBP_PROBE_V(::duetos::debug::ProbeId::kBootSelftestFail, fail_value);
+    }
 }
 
 } // namespace duetos::core

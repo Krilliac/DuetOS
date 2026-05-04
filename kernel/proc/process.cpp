@@ -403,8 +403,8 @@ void ProcessRelease(Process* p)
     // observability tier is auto-on, so this fires for every Win32
     // PE exit and gives a post-mortem record without anyone having
     // to know the dump syscall exists.
-    subsystems::win32::custom::DumpOnAbnormalExit(p);
-    arch::SerialWrite("[proc] release: post-DumpOnAbnormalExit\n");
+    subsystems::win32::custom::DumpExitDiagnostics(p);
+    arch::SerialWrite("[proc] release: post-exit-diagnostics\n");
 
     // Free the Win32 custom-diagnostics state if any was allocated.
     // No-op when the process never opted into any custom-Win32
