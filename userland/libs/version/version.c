@@ -161,3 +161,108 @@ __declspec(dllexport) DWORD VerLanguageNameW(DWORD lang, wchar_t16* buf, DWORD b
     buf[i] = 0;
     return i;
 }
+
+/* GetFileVersionInfoSizeExA / W — Vista+. Same canned size. */
+__declspec(dllexport) DWORD GetFileVersionInfoSizeExA(DWORD flags, const char* file, DWORD* hnd)
+{
+    (void)flags;
+    (void)file;
+    if (hnd)
+        *hnd = 0;
+    return DUET_VERINFO_SIZE;
+}
+
+__declspec(dllexport) DWORD GetFileVersionInfoSizeExW(DWORD flags, const wchar_t16* file, DWORD* hnd)
+{
+    (void)flags;
+    (void)file;
+    if (hnd)
+        *hnd = 0;
+    return DUET_VERINFO_SIZE;
+}
+
+/* VerFindFileA / W — Win-Setup helper. Always reports
+ * "use the destination dir" so the caller drops the file in
+ * place rather than searching system paths. */
+__declspec(dllexport) DWORD VerFindFileA(DWORD flags, const char* file_name, const char* win_dir, const char* app_dir,
+                                         char* cur_dir, DWORD* cur_dir_len, char* dest_dir, DWORD* dest_dir_len)
+{
+    (void)flags;
+    (void)file_name;
+    (void)win_dir;
+    if (cur_dir && cur_dir_len && *cur_dir_len > 0)
+    {
+        cur_dir[0] = 0;
+    }
+    if (cur_dir_len)
+        *cur_dir_len = 0;
+    if (dest_dir && dest_dir_len && *dest_dir_len > 0)
+    {
+        DWORD i = 0;
+        if (app_dir)
+        {
+            for (; app_dir[i] != 0 && i + 1 < *dest_dir_len; ++i)
+                dest_dir[i] = app_dir[i];
+        }
+        dest_dir[i] = 0;
+    }
+    if (dest_dir_len)
+        *dest_dir_len = 0;
+    return 0; /* VFF_CURNEDEST = neither set */
+}
+
+__declspec(dllexport) DWORD VerFindFileW(DWORD flags, const wchar_t16* file_name, const wchar_t16* win_dir,
+                                         const wchar_t16* app_dir, wchar_t16* cur_dir, DWORD* cur_dir_len,
+                                         wchar_t16* dest_dir, DWORD* dest_dir_len)
+{
+    (void)flags;
+    (void)file_name;
+    (void)win_dir;
+    (void)app_dir;
+    if (cur_dir && cur_dir_len && *cur_dir_len > 0)
+        cur_dir[0] = 0;
+    if (cur_dir_len)
+        *cur_dir_len = 0;
+    if (dest_dir && dest_dir_len && *dest_dir_len > 0)
+        dest_dir[0] = 0;
+    if (dest_dir_len)
+        *dest_dir_len = 0;
+    return 0;
+}
+
+/* VerInstallFileA / W — installer helper. Reports "ok, no
+ * extra work needed" so the install path completes quietly. */
+__declspec(dllexport) DWORD VerInstallFileA(DWORD flags, const char* src_file_name, const char* dest_file_name,
+                                            const char* src_dir, const char* dest_dir, const char* cur_dir,
+                                            char* tmp_file, DWORD* tmp_file_len)
+{
+    (void)flags;
+    (void)src_file_name;
+    (void)dest_file_name;
+    (void)src_dir;
+    (void)dest_dir;
+    (void)cur_dir;
+    if (tmp_file && tmp_file_len && *tmp_file_len > 0)
+        tmp_file[0] = 0;
+    if (tmp_file_len)
+        *tmp_file_len = 0;
+    return 0;
+}
+
+__declspec(dllexport) DWORD VerInstallFileW(DWORD flags, const wchar_t16* src_file_name,
+                                            const wchar_t16* dest_file_name, const wchar_t16* src_dir,
+                                            const wchar_t16* dest_dir, const wchar_t16* cur_dir, wchar_t16* tmp_file,
+                                            DWORD* tmp_file_len)
+{
+    (void)flags;
+    (void)src_file_name;
+    (void)dest_file_name;
+    (void)src_dir;
+    (void)dest_dir;
+    (void)cur_dir;
+    if (tmp_file && tmp_file_len && *tmp_file_len > 0)
+        tmp_file[0] = 0;
+    if (tmp_file_len)
+        *tmp_file_len = 0;
+    return 0;
+}

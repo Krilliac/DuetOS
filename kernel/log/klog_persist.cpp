@@ -113,14 +113,27 @@ bool KlogPersistInstall()
         return false;
     }
 
-    // Truncate any prior KERNEL.LOG so each boot starts fresh.
-    // GAP: no cross-boot rotation. Each reboot wipes the file.
-    // Revisit when log-rotation lands (size-cap + KERNEL.0,
-    // KERNEL.1 round-robin).
+    // Single-rotation: keep the previous boot's log as KERNEL.0
+    // so a post-mortem can read the prior session even though
+    // KERNEL.LOG itself starts fresh. Drop any older KERNEL.0
+    // first to make room.
+    constexpr const char kRotPath[] = "KERNEL.0";
+    fat::DirEntry rot_existing;
+    if (fat::Fat32LookupPath(v, kRotPath, &rot_existing))
+    {
+        fat::Fat32DeleteAtPath(v, kRotPath);
+    }
     fat::DirEntry pre;
     if (fat::Fat32LookupPath(v, kLogPath, &pre))
     {
-        fat::Fat32DeleteAtPath(v, kLogPath);
+        if (!fat::Fat32RenameAtPath(v, kLogPath, kRotPath))
+        {
+            // Rename failed (e.g. dir full, name collision races).
+            // Fall back to the prior behaviour of dropping the old
+            // log so the create below can succeed.
+            arch::SerialWrite("[klog-persist] rotate KERNEL.LOG -> KERNEL.0 failed; dropping\n");
+            fat::Fat32DeleteAtPath(v, kLogPath);
+        }
     }
 
     // The first byte must come from a Create — Fat32AppendAtPath

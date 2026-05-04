@@ -205,3 +205,309 @@ __declspec(dllexport) BOOL IsThemeDialogTextureEnabled(HANDLE wnd)
     (void)wnd;
     return 0;
 }
+
+#define E_NOTIMPL 0x80004001UL
+
+/* SetWindowThemeAttribute — modern attribute setter
+ * (e.g. WTNCA_NODRAWCAPTION). v0 silently accepts. */
+__declspec(dllexport) HRESULT SetWindowThemeAttribute(HANDLE wnd, int attr, void* data, DWORD size)
+{
+    (void)wnd;
+    (void)attr;
+    (void)data;
+    (void)size;
+    return S_OK;
+}
+
+/* GetThemeBitmap — fetch a theme part's bitmap. With no theme
+ * engine, return NULL handle + S_OK so the caller treats the
+ * part as "no bitmap defined" (the standard fallback). */
+__declspec(dllexport) HRESULT GetThemeBitmap(HANDLE theme, INT part, INT state, INT prop, DWORD flags, HANDLE* bmp)
+{
+    (void)theme;
+    (void)part;
+    (void)state;
+    (void)prop;
+    (void)flags;
+    if (bmp)
+        *bmp = (HANDLE)0;
+    return S_OK;
+}
+
+/* DrawThemeParentBackground / DrawThemeParentBackgroundEx —
+ * paint the parent's background under a transparent control.
+ * v0 has no theme paint; succeed quietly so the caller's
+ * subsequent foreground paint is correctly stacked. */
+__declspec(dllexport) HRESULT DrawThemeParentBackground(HANDLE wnd, HANDLE dc, const void* rect)
+{
+    (void)wnd;
+    (void)dc;
+    (void)rect;
+    return S_OK;
+}
+
+__declspec(dllexport) HRESULT DrawThemeParentBackgroundEx(HANDLE wnd, HANDLE dc, DWORD flags, const void* rect)
+{
+    (void)wnd;
+    (void)dc;
+    (void)flags;
+    (void)rect;
+    return S_OK;
+}
+
+/* BufferedPaint{Init,UnInit} — buffered paint API. Counted
+ * call: each Init balanced by UnInit. v0 has no buffer pool —
+ * succeed both. */
+__declspec(dllexport) HRESULT BufferedPaintInit(void)
+{
+    return S_OK;
+}
+
+__declspec(dllexport) HRESULT BufferedPaintUnInit(void)
+{
+    return S_OK;
+}
+
+/* BeginBufferedPaint — would create an off-screen buffer and
+ * return its DC. v0 returns NULL handle; callers fall back to
+ * direct-DC paint. */
+__declspec(dllexport) HANDLE BeginBufferedPaint(HANDLE target_dc, const void* target_rect, DWORD format, void* params,
+                                                HANDLE* buffer_dc)
+{
+    (void)target_dc;
+    (void)target_rect;
+    (void)format;
+    (void)params;
+    if (buffer_dc)
+        *buffer_dc = (HANDLE)0;
+    return (HANDLE)0;
+}
+
+__declspec(dllexport) HRESULT EndBufferedPaint(HANDLE buffer, BOOL update)
+{
+    (void)buffer;
+    (void)update;
+    return S_OK;
+}
+
+/* BufferedPaintClear — clear a buffer region. */
+__declspec(dllexport) HRESULT BufferedPaintClear(HANDLE buffer, const void* rect)
+{
+    (void)buffer;
+    (void)rect;
+    return S_OK;
+}
+
+/* BufferedPaintSetAlpha — alpha post-process. */
+__declspec(dllexport) HRESULT BufferedPaintSetAlpha(HANDLE buffer, const void* rect, unsigned char alpha)
+{
+    (void)buffer;
+    (void)rect;
+    (void)alpha;
+    return S_OK;
+}
+
+/* GetThemeInt / GetThemeBool / GetThemeRect — small theme
+ * property getters. Return zero / FALSE / empty rect + S_OK so
+ * callers proceed with their fallback values. */
+__declspec(dllexport) HRESULT GetThemeInt(HANDLE theme, INT part, INT state, INT prop, INT* val)
+{
+    (void)theme;
+    (void)part;
+    (void)state;
+    (void)prop;
+    if (val)
+        *val = 0;
+    return S_OK;
+}
+
+__declspec(dllexport) HRESULT GetThemeBool(HANDLE theme, INT part, INT state, INT prop, BOOL* val)
+{
+    (void)theme;
+    (void)part;
+    (void)state;
+    (void)prop;
+    if (val)
+        *val = 0;
+    return S_OK;
+}
+
+__declspec(dllexport) HRESULT GetThemeRect(HANDLE theme, INT part, INT state, INT prop, void* rect)
+{
+    (void)theme;
+    (void)part;
+    (void)state;
+    (void)prop;
+    if (rect)
+    {
+        unsigned char* p = (unsigned char*)rect;
+        for (int i = 0; i < 16; ++i) /* RECT = 4 LONGs */
+            p[i] = 0;
+    }
+    return S_OK;
+}
+
+/* GetThemeBackgroundContentRect — content area inside a part. */
+__declspec(dllexport) HRESULT GetThemeBackgroundContentRect(HANDLE theme, HANDLE dc, INT part, INT state,
+                                                            const void* bound_rect, void* content_rect)
+{
+    (void)theme;
+    (void)dc;
+    (void)part;
+    (void)state;
+    if (content_rect)
+    {
+        if (bound_rect)
+        {
+            const unsigned char* src = (const unsigned char*)bound_rect;
+            unsigned char* dst = (unsigned char*)content_rect;
+            for (int i = 0; i < 16; ++i)
+                dst[i] = src[i];
+        }
+        else
+        {
+            unsigned char* p = (unsigned char*)content_rect;
+            for (int i = 0; i < 16; ++i)
+                p[i] = 0;
+        }
+    }
+    return S_OK;
+}
+
+/* GetThemeTextExtent / GetThemeTextMetrics — text measurement.
+ * v0 returns zero metrics + S_OK so callers fall back to
+ * GDI-direct measurement (which we do support). */
+__declspec(dllexport) HRESULT GetThemeTextExtent(HANDLE theme, HANDLE dc, INT part, INT state, const void* text,
+                                                 INT chars, DWORD flags, const void* bound_rect, void* extent_rect)
+{
+    (void)theme;
+    (void)dc;
+    (void)part;
+    (void)state;
+    (void)text;
+    (void)chars;
+    (void)flags;
+    (void)bound_rect;
+    if (extent_rect)
+    {
+        unsigned char* p = (unsigned char*)extent_rect;
+        for (int i = 0; i < 16; ++i)
+            p[i] = 0;
+    }
+    return S_OK;
+}
+
+__declspec(dllexport) HRESULT GetThemeTextMetrics(HANDLE theme, HANDLE dc, INT part, INT state, void* metrics)
+{
+    (void)theme;
+    (void)dc;
+    (void)part;
+    (void)state;
+    if (metrics)
+    {
+        unsigned char* p = (unsigned char*)metrics;
+        for (int i = 0; i < 60; ++i) /* TEXTMETRIC */
+            p[i] = 0;
+    }
+    return S_OK;
+}
+
+/* HitTestThemeBackground — hit-test a part region. v0 reports
+ * "miss" so callers default to client-area dispatch. */
+__declspec(dllexport) HRESULT HitTestThemeBackground(HANDLE theme, HANDLE dc, INT part, INT state, DWORD options,
+                                                     const void* rect, HANDLE clip, void* point, unsigned short* code)
+{
+    (void)theme;
+    (void)dc;
+    (void)part;
+    (void)state;
+    (void)options;
+    (void)rect;
+    (void)clip;
+    (void)point;
+    if (code)
+        *code = 1; /* HTNOWHERE */
+    return S_OK;
+}
+
+/* DrawThemeEdge / DrawThemeIcon — common painters. Succeed
+ * silently so paint chains continue. */
+__declspec(dllexport) HRESULT DrawThemeEdge(HANDLE theme, HANDLE dc, INT part, INT state, const void* rect,
+                                            unsigned int edge, unsigned int flags, void* content_rect)
+{
+    (void)theme;
+    (void)dc;
+    (void)part;
+    (void)state;
+    (void)rect;
+    (void)edge;
+    (void)flags;
+    (void)content_rect;
+    return S_OK;
+}
+
+__declspec(dllexport) HRESULT DrawThemeIcon(HANDLE theme, HANDLE dc, INT part, INT state, const void* rect, HANDLE list,
+                                            INT image_index)
+{
+    (void)theme;
+    (void)dc;
+    (void)part;
+    (void)state;
+    (void)rect;
+    (void)list;
+    (void)image_index;
+    return S_OK;
+}
+
+/* GetThemeFilename / GetThemeStream — file-path getters. v0
+ * returns empty + S_OK. */
+__declspec(dllexport) HRESULT GetThemeFilename(HANDLE theme, INT part, INT state, INT prop, wchar_t16* file,
+                                               INT file_max)
+{
+    (void)theme;
+    (void)part;
+    (void)state;
+    (void)prop;
+    if (file && file_max > 0)
+        file[0] = 0;
+    return S_OK;
+}
+
+__declspec(dllexport) HRESULT GetThemeStream(HANDLE theme, INT part, INT state, INT prop, void** stream, DWORD* size,
+                                             HANDLE inst)
+{
+    (void)theme;
+    (void)part;
+    (void)state;
+    (void)prop;
+    (void)inst;
+    if (stream)
+        *stream = (void*)0;
+    if (size)
+        *size = 0;
+    return E_NOTIMPL;
+}
+
+/* BeginPanningFeedback / EndPanningFeedback / UpdatePanningFeedback —
+ * touch panning UX. v0 reports success; no visual feedback. */
+__declspec(dllexport) BOOL BeginPanningFeedback(HANDLE wnd)
+{
+    (void)wnd;
+    return 1;
+}
+
+__declspec(dllexport) BOOL EndPanningFeedback(HANDLE wnd, BOOL animate)
+{
+    (void)wnd;
+    (void)animate;
+    return 1;
+}
+
+__declspec(dllexport) BOOL UpdatePanningFeedback(HANDLE wnd, long dx, long dy, BOOL in_inertia)
+{
+    (void)wnd;
+    (void)dx;
+    (void)dy;
+    (void)in_inertia;
+    return 1;
+}
