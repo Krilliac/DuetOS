@@ -333,11 +333,13 @@ struct WinGdiPrim
 };
 
 // Per-window staging pool for BitBlt-style pixel data. Each Blit
-// primitive references a byte range inside this pool. 16 KiB holds
-// 4 KiB px at 32 bpp — up to a 64×64 blit, or four 32×32 blits.
-// The pool resets every time `prim_count` resets (i.e. on every
-// fresh frame the window records); see `PrimListAppend`.
-inline constexpr u32 kWinBlitPoolBytes = 16 * 1024;
+// primitive references a byte range inside this pool. 256 KiB
+// holds 64 Ki px at 32 bpp — up to a 256×256 blit, four 128×128
+// blits, or sixteen 64×64 blits. Sized to fit the dx_demo_window
+// PE's 256x256 D3D back buffer in one shot. The pool resets every
+// time `prim_count` resets (i.e. on every fresh frame the window
+// records); see `PrimListAppend`.
+inline constexpr u32 kWinBlitPoolBytes = 256 * 1024;
 
 /// Set the owning pid on `h`. Ring-3-created windows call this
 /// from the SYS_WIN_CREATE handler; boot-time windows leave it at

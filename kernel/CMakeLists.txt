@@ -397,6 +397,11 @@ duetos_embed_smoke_pe(dwrite_smoke   kBinDwriteSmokeBytes)
 # D3D12 (CPU-pretransformed verts), then reads back the back-buffer
 # pixels and asserts at least one cube face is visible per backend.
 duetos_embed_smoke_pe(dx_demo        kBinDxDemoBytes)
+# dx_demo_window: visible 3D cube — renders the same cube as dx_demo
+# into a real CreateWindowExA-spawned compositor window via a
+# D3D11 swap chain bound to that HWND. Sleep(17s) keeps it on screen
+# for the screenshot harness. Skipped under -enable-kvm (boot smoke).
+duetos_embed_smoke_pe(dx_demo_window kBinDxDemoWindowBytes)
 
 # Chrome font — Liberation Sans Regular (SIL OFL 1.1). Embedded as
 # bytes for the TTF rasterizer; the boot path hands these to

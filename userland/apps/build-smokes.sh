@@ -146,6 +146,7 @@ declare -A APPS=(
     [d2d1_smoke]="-lkernel32 -ld2d1"
     [dwrite_smoke]="-lkernel32 -ldwrite"
     [dx_demo]="-lkernel32 -ld3d9 -ld3d11 -ld3d12 -ldxgi -ld2d1 -ldwrite -ldinput8 -lxinput1_4"
+    [dx_demo_window]="-lkernel32 -luser32 -ld3d11"
 )
 
 for app in "${!APPS[@]}"; do
