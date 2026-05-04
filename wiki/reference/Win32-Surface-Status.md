@@ -475,12 +475,25 @@ every other call accepts. `IsThemeActive` returns TRUE.
 inventory above. `PathCanonicalizeW` is GAP for `..` walks
 above the drive root.
 
-### shell32.dll  (~290 LOC, ~13 exports)
+### shell32.dll  (~410 LOC, ~13 exports)
 
-`CommandLineToArgvW` — REAL (the only export the boot smoke
-exercises end-to-end). `SHGetFolderPathW`, `SHGetKnownFolderPath`
-— GAP: return canned `C:\Users\admin` / `C:\Windows`.
-`ShellExecuteW`, `ShellExecuteExW`, `SHFileOperationW` — STUB.
+`CommandLineToArgvW` — REAL. `SHGetFolderPathW` /
+`SHGetFolderPathA` / `SHGetSpecialFolderPathW` /
+`SHGetSpecialFolderPathA` — REAL: dispatch the masked
+CSIDL value (`CSIDL_FLAG_MASK = 0xFF00`) against a per-CSIDL
+path table covering APPDATA / LOCAL\_APPDATA / PROGRAM\_FILES /
+PROGRAM\_FILES\_COMMON / WINDOWS / SYSTEM / FONTS / DESKTOP /
+PERSONAL / MYMUSIC / MYVIDEO / MYPICTURES / FAVORITES /
+PROFILE / COMMON\_APPDATA (= ProgramData) and the Start-Menu /
+Recent / SendTo / Templates / Cookies / History / INetCache
+sub-trees, all rooted at `X:\Users\duetos` to match the
+USERPROFILE convention in `userenv.c`. Unrecognised CSIDLs
+fall through to the profile root. `SHGetKnownFolderPath` is
+still STUB — it returns `E_FAIL` because the API allocates
+the path through `CoTaskMemAlloc`, which shell32 doesn't
+import; modern callers should fall back to
+`SHGetFolderPathW`. `ShellExecuteW`, `ShellExecuteExW`,
+`SHFileOperationW` — STUB.
 
 ### version.dll  (~290 LOC, ~16 exports)
 
@@ -1206,23 +1219,20 @@ short list:
 
 1. **`SymGetLineFromAddr64`** in dbghelp — would let
    `process_smoke` print real source-line crash dumps.
-2. **`SHGetFolderPathW(CSIDL_APPDATA)`** — return a real
-   per-user path under `C:\Users\admin\AppData\Roaming`
-   (we already have ramfs entries for those names).
-3. **D3D11 `Map(D3D11_MAP_WRITE_DISCARD)` on a buffer** —
+2. **D3D11 `Map(D3D11_MAP_WRITE_DISCARD)` on a buffer** —
    currently REAL; extend to `D3D11_MAP_WRITE_NO_OVERWRITE`
    (lock semantics).
-4. **`gdi32!ExtTextOutA` clip-rectangle parameter** —
+3. **`gdi32!ExtTextOutA` clip-rectangle parameter** —
    currently ignored; the rect is right there in the
    primitive.
-5. **`dwrite!IDWriteTextLayout::HitTestPoint`** — use the
+4. **`dwrite!IDWriteTextLayout::HitTestPoint`** — use the
    monospace metrics we already compute.
-6. **D3D12 multi-stream input** — same per-element InputSlot
+5. **D3D12 multi-stream input** — same per-element InputSlot
    refactor that landed in D3D11; the PSO already extracts
    the field. Use the same 32-slot array shape.
-7. **`ws2_32!WSAEventSelect`** — back into our message-
+6. **`ws2_32!WSAEventSelect`** — back into our message-
    queue + waitable-event primitives.
-8. **`d2d1!DrawText`** — wire DWrite's monospace metrics
+7. **`d2d1!DrawText`** — wire DWrite's monospace metrics
    into the existing FillRect path so single-line text
    renders.
 

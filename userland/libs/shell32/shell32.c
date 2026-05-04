@@ -107,38 +107,166 @@ __declspec(dllexport) int SHFileOperationW(void* lpFileOp)
     return 5;
 }
 
-/* SHGetFolderPathA/W: pre-Vista folder lookup. v0 returns
- * "X:\Users\duetos" for any folder so callers that need a real
- * answer (writable config dir, app-data, etc.) get something. */
-static const char kFolder[] = "X:\\Users\\duetos";
+/* SHGetFolderPathA/W / SHGetSpecialFolderPathA/W: pre-Vista folder
+ * lookup. CSIDL is masked of its CSIDL_FLAG_* bits (0xFF00) and
+ * dispatched against a per-CSIDL canonical path table. The user-
+ * profile root mirrors userenv.c's USERPROFILE convention
+ * (X:\Users\duetos); paths under it follow Windows Vista+ naming
+ * (e.g. CSIDL_APPDATA → AppData\Roaming) so PE binaries get
+ * the layout they expect. Unrecognised CSIDLs fall through to the
+ * profile root — the same "give me ANY path" behaviour the v0
+ * thunk had, just labelled. */
+#define CSIDL_FLAG_MASK 0xFF00
+#define CSIDL_DESKTOP 0x0000
+#define CSIDL_PROGRAMS 0x0002
+#define CSIDL_PERSONAL 0x0005 /* aka MYDOCUMENTS */
+#define CSIDL_FAVORITES 0x0006
+#define CSIDL_STARTUP 0x0007
+#define CSIDL_RECENT 0x0008
+#define CSIDL_SENDTO 0x0009
+#define CSIDL_STARTMENU 0x000B
+#define CSIDL_MYDOCUMENTS 0x000C
+#define CSIDL_MYMUSIC 0x000D
+#define CSIDL_MYVIDEO 0x000E
+#define CSIDL_DESKTOPDIRECTORY 0x0010
+#define CSIDL_FONTS 0x0014
+#define CSIDL_TEMPLATES 0x0015
+#define CSIDL_COMMON_STARTMENU 0x0016
+#define CSIDL_COMMON_PROGRAMS 0x0017
+#define CSIDL_COMMON_STARTUP 0x0018
+#define CSIDL_COMMON_DESKTOPDIRECTORY 0x0019
+#define CSIDL_APPDATA 0x001A
+#define CSIDL_PRINTHOOD 0x001B
+#define CSIDL_LOCAL_APPDATA 0x001C
+#define CSIDL_INTERNET_CACHE 0x0020
+#define CSIDL_COOKIES 0x0021
+#define CSIDL_HISTORY 0x0022
+#define CSIDL_COMMON_APPDATA 0x0023
+#define CSIDL_WINDOWS 0x0024
+#define CSIDL_SYSTEM 0x0025
+#define CSIDL_PROGRAM_FILES 0x0026
+#define CSIDL_MYPICTURES 0x0027
+#define CSIDL_PROFILE 0x0028
+#define CSIDL_PROGRAM_FILES_COMMON 0x002B
+#define CSIDL_COMMON_DOCUMENTS 0x002E
+#define CSIDL_COMMON_ADMINTOOLS 0x002F
+#define CSIDL_ADMINTOOLS 0x0030
+
+static const char kProfileRoot[] = "X:\\Users\\duetos";
+
+static const char* csidl_to_path(int csidl)
+{
+    const int c = csidl & ~CSIDL_FLAG_MASK;
+    switch (c)
+    {
+    case CSIDL_DESKTOP:
+    case CSIDL_DESKTOPDIRECTORY:
+        return "X:\\Users\\duetos\\Desktop";
+    case CSIDL_PROGRAMS:
+        return "X:\\Users\\duetos\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs";
+    case CSIDL_PERSONAL:
+    case CSIDL_MYDOCUMENTS:
+        return "X:\\Users\\duetos\\Documents";
+    case CSIDL_FAVORITES:
+        return "X:\\Users\\duetos\\Favorites";
+    case CSIDL_STARTUP:
+        return "X:\\Users\\duetos\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup";
+    case CSIDL_RECENT:
+        return "X:\\Users\\duetos\\AppData\\Roaming\\Microsoft\\Windows\\Recent";
+    case CSIDL_SENDTO:
+        return "X:\\Users\\duetos\\AppData\\Roaming\\Microsoft\\Windows\\SendTo";
+    case CSIDL_STARTMENU:
+        return "X:\\Users\\duetos\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu";
+    case CSIDL_MYMUSIC:
+        return "X:\\Users\\duetos\\Music";
+    case CSIDL_MYVIDEO:
+        return "X:\\Users\\duetos\\Videos";
+    case CSIDL_FONTS:
+        return "X:\\Windows\\Fonts";
+    case CSIDL_TEMPLATES:
+        return "X:\\Users\\duetos\\AppData\\Roaming\\Microsoft\\Windows\\Templates";
+    case CSIDL_COMMON_STARTMENU:
+        return "X:\\ProgramData\\Microsoft\\Windows\\Start Menu";
+    case CSIDL_COMMON_PROGRAMS:
+        return "X:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs";
+    case CSIDL_COMMON_STARTUP:
+        return "X:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Startup";
+    case CSIDL_COMMON_DESKTOPDIRECTORY:
+        return "X:\\Users\\Public\\Desktop";
+    case CSIDL_APPDATA:
+        return "X:\\Users\\duetos\\AppData\\Roaming";
+    case CSIDL_PRINTHOOD:
+        return "X:\\Users\\duetos\\AppData\\Roaming\\Microsoft\\Windows\\Printer Shortcuts";
+    case CSIDL_LOCAL_APPDATA:
+        return "X:\\Users\\duetos\\AppData\\Local";
+    case CSIDL_INTERNET_CACHE:
+        return "X:\\Users\\duetos\\AppData\\Local\\Microsoft\\Windows\\INetCache";
+    case CSIDL_COOKIES:
+        return "X:\\Users\\duetos\\AppData\\Local\\Microsoft\\Windows\\INetCookies";
+    case CSIDL_HISTORY:
+        return "X:\\Users\\duetos\\AppData\\Local\\Microsoft\\Windows\\History";
+    case CSIDL_COMMON_APPDATA:
+        return "X:\\ProgramData";
+    case CSIDL_WINDOWS:
+        return "X:\\Windows";
+    case CSIDL_SYSTEM:
+        return "X:\\Windows\\System32";
+    case CSIDL_PROGRAM_FILES:
+        return "X:\\Program Files";
+    case CSIDL_MYPICTURES:
+        return "X:\\Users\\duetos\\Pictures";
+    case CSIDL_PROFILE:
+        return kProfileRoot;
+    case CSIDL_PROGRAM_FILES_COMMON:
+        return "X:\\Program Files\\Common Files";
+    case CSIDL_COMMON_DOCUMENTS:
+        return "X:\\Users\\Public\\Documents";
+    case CSIDL_COMMON_ADMINTOOLS:
+        return "X:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Administrative Tools";
+    case CSIDL_ADMINTOOLS:
+        return "X:\\Users\\duetos\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Administrative Tools";
+    default:
+        return kProfileRoot;
+    }
+}
+
+static int copy_str_a(const char* src, char* dst, int max)
+{
+    int i = 0;
+    for (; src[i] && i < max - 1; ++i)
+        dst[i] = src[i];
+    dst[i] = 0;
+    return i;
+}
+
+static int copy_str_w(const char* src, wchar_t16* dst, int max)
+{
+    int i = 0;
+    for (; src[i] && i < max - 1; ++i)
+        dst[i] = (wchar_t16)(unsigned char)src[i];
+    dst[i] = 0;
+    return i;
+}
 
 __declspec(dllexport) HRESULT SHGetFolderPathA(HANDLE hWnd, int folder, HANDLE hToken, DWORD flags, char* path)
 {
     (void)hWnd;
-    (void)folder;
     (void)hToken;
     (void)flags;
     if (!path)
         return E_FAIL;
-    int i = 0;
-    for (; kFolder[i] && i < 259; ++i)
-        path[i] = kFolder[i];
-    path[i] = 0;
+    copy_str_a(csidl_to_path(folder), path, 260);
     return S_OK;
 }
 
 __declspec(dllexport) HRESULT SHGetFolderPathW(HANDLE hWnd, int folder, HANDLE hToken, DWORD flags, wchar_t16* path)
 {
     (void)hWnd;
-    (void)folder;
     (void)hToken;
     (void)flags;
     if (!path)
         return E_FAIL;
-    int i = 0;
-    for (; kFolder[i] && i < 259; ++i)
-        path[i] = (wchar_t16)kFolder[i];
-    path[i] = 0;
+    copy_str_w(csidl_to_path(folder), path, 260);
     return S_OK;
 }
 
@@ -166,28 +294,20 @@ __declspec(dllexport) BOOL SHGetPathFromIDListW(const void* pidl, wchar_t16* pat
 __declspec(dllexport) BOOL SHGetSpecialFolderPathW(HANDLE hWnd, wchar_t16* path, int csidl, BOOL create)
 {
     (void)hWnd;
-    (void)csidl;
     (void)create;
     if (!path)
         return 0;
-    int i = 0;
-    for (; kFolder[i] && i < 259; ++i)
-        path[i] = (wchar_t16)kFolder[i];
-    path[i] = 0;
+    copy_str_w(csidl_to_path(csidl), path, 260);
     return 1;
 }
 
 __declspec(dllexport) BOOL SHGetSpecialFolderPathA(HANDLE hWnd, char* path, int csidl, BOOL create)
 {
     (void)hWnd;
-    (void)csidl;
     (void)create;
     if (!path)
         return 0;
-    int i = 0;
-    for (; kFolder[i] && i < 259; ++i)
-        path[i] = kFolder[i];
-    path[i] = 0;
+    copy_str_a(csidl_to_path(csidl), path, 260);
     return 1;
 }
 
