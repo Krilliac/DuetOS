@@ -32,6 +32,7 @@
 #include "fs/tmpfs.h"
 #include "log/klog.h"
 #include "log/klog_persist.h"
+#include "sched/loadavg.h"
 #include "sched/sched.h"
 #include "security/auth.h"
 
@@ -441,9 +442,28 @@ void CmdDu(u32 argc, char** argv)
 
 void CmdLoadavg()
 {
-    // GAP: no rolling 1/5/15-minute decay yet; emit instantaneous
-    // counts so scripts can still distinguish "nothing running"
-    // from "saturated".
+    // Linux-style "X.YY X.YY X.YY tasks total=N ready=N cpus=N" line.
+    // The three averages are EWMAs sampled every 5 seconds from the
+    // scheduler tick handler — see kernel/sched/loadavg.cpp. Until
+    // the first 5-second boundary after boot all three read 0.00,
+    // which is also what Linux reports on a freshly-booted system.
+    u32 one = 0;
+    u32 five = 0;
+    u32 fifteen = 0;
+    duetos::sched::LoadavgSnapshot(&one, &five, &fifteen);
+    char buf[16];
+    duetos::sched::LoadavgFormat(buf, sizeof(buf), one);
+    ConsoleWrite(buf);
+    ConsoleWriteChar(' ');
+    duetos::sched::LoadavgFormat(buf, sizeof(buf), five);
+    ConsoleWrite(buf);
+    ConsoleWriteChar(' ');
+    duetos::sched::LoadavgFormat(buf, sizeof(buf), fifteen);
+    ConsoleWrite(buf);
+
+    // Keep the instantaneous counts as a trailing summary — useful
+    // for scripts that want a one-line status without parsing the
+    // moving averages.
     u32 slots[2] = {0, 0}; // [0]=total, [1]=ready
     duetos::sched::SchedEnumerate(
         [](const duetos::sched::SchedTaskInfo& info, void* cookie)
@@ -457,11 +477,11 @@ void CmdLoadavg()
             }
         },
         slots);
-    ConsoleWrite("tasks total=");
+    ConsoleWrite("  tasks total=");
     WriteU64Dec(slots[0]);
-    ConsoleWrite("  ready=");
+    ConsoleWrite(" ready=");
     WriteU64Dec(slots[1]);
-    ConsoleWrite("  cpus=");
+    ConsoleWrite(" cpus=");
     WriteU64Dec(duetos::arch::SmpCpusOnline());
     ConsoleWriteChar('\n');
 }

@@ -244,8 +244,6 @@ cases that the v0 happy path skips:
   RBD format; TX completion polling.
 - `kernel/mm/dma.cpp` — ARM64 port (`dsb ishst` + per-line
   `dc cvac`).
-- `kernel/shell/shell_extra.cpp` — rolling 1/5/15-minute load
-  decay.
 - `kernel/subsystems/translation/translate.cpp` — `rseq`
   (restartable sequences).
 
