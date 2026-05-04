@@ -631,10 +631,12 @@ SSPI facade. `AcquireCredentialsHandleA/W`,
 `BCryptOpenAlgorithmProvider`, `BCryptCloseAlgorithmProvider`,
 `BCryptCreateHash`, `BCryptHashData`, `BCryptFinishHash`,
 `BCryptDestroyHash`, `BCryptGetProperty`, `BCryptGenRandom`
-— REAL for SHA-256, AES-CBC, AES-GCM, RNG.
+— REAL for SHA-256, SHA-1, MD5, AES-CBC, AES-GCM, RNG.
 
-GAP: SHA-1 (returns SHA-256 — caller hash mismatch),
-RSA / ECC key import — STUB.
+GAP: SHA-384 / SHA-512 not in the algorithm table.
+`BCryptHashData` slots are single-threaded (one global per
+algorithm), so concurrent hashing breaks. RSA / ECC key
+import / sign / verify — STUB.
 
 ---
 
@@ -746,7 +748,9 @@ REAL: 0..2 IUnknown, 8 GetType, 9 Close, 10 Reset, 12
 DrawInstanced, 13 DrawIndexedInstanced, 20
 IASetPrimitiveTopology, 21 RSSetViewports, 22
 RSSetScissorRects (no-op), 25 SetPipelineState, 26
-ResourceBarrier (no-op), 29 SetComputeRootSignature (no-op),
+ResourceBarrier (records `current_state` per resource —
+TRANSITION barriers update it; ALIASING / UAV are no-op
+success), 29 SetComputeRootSignature (no-op),
 30 SetGraphicsRootSignature, 43 IASetIndexBuffer, 44
 IASetVertexBuffers, 46 OMSetRenderTargets, 47
 ClearDepthStencilView (no-op), 48 ClearRenderTargetView.
@@ -1069,8 +1073,10 @@ did. PE imports of these names fail at PeLoad today.
   not honoured by the rasterizer.
 - **Compute** — `Dispatch`, UAVs, structured buffers — STUB.
 - **Indirect draws** — `DrawInstancedIndirect` etc. — STUB.
-- **Multi-stream input layouts** — only stream slot 0
-  honoured.
+- **Multi-stream input layouts** — D3D11 honours all 32 slots
+  (per-element `InputSlot` picks the right VB). D3D12 still
+  reads VB slot 0 only — same approach can land there but
+  hasn't yet.
 - **Tessellation** — hull / domain / GS shaders not run.
 
 ### Process / threading
@@ -1199,20 +1205,23 @@ short list:
 3. **D3D11 `Map(D3D11_MAP_WRITE_DISCARD)` on a buffer** —
    currently REAL; extend to `D3D11_MAP_WRITE_NO_OVERWRITE`
    (lock semantics).
-4. **D3D11 vertex-stream slot 1 / 2** — wire
-   `IASetVertexBuffers` to honour `start_slot != 0`.
-5. **`gdi32!ExtTextOutA` clip-rectangle parameter** —
+4. **`gdi32!ExtTextOutA` clip-rectangle parameter** —
    currently ignored; the rect is right there in the
    primitive.
-6. **`dwrite!IDWriteTextLayout::HitTestPoint`** — use the
+5. **`dwrite!IDWriteTextLayout::HitTestPoint`** — use the
    monospace metrics we already compute.
-7. **`d3d12!ID3D12CommandList::ResourceBarrier`** — track
-   the state transitions so subsequent draws can sanity-
-   check the resource is in the right state.
+6. **D3D12 multi-stream input** — same per-element InputSlot
+   refactor that landed in D3D11; the PSO already extracts
+   the field. Use the same 32-slot array shape.
+7. **D3D12 `ResourceBarrier` validation** — the new
+   `current_state` field is untouched after the barrier
+   updates; check that `StateBefore` matches the recorded
+   state and surface a debug print on mismatch.
 8. **`ws2_32!WSAEventSelect`** — back into our message-
    queue + waitable-event primitives.
-9. **`bcrypt!BCryptCreateHash` for SHA-1** — algorithm-
-   table extension is small.
+9. **`bcrypt`** — add SHA-384 / SHA-512 to the algorithm
+   table (SHA-256 reference is right there; the FIPS 180-4
+   delta is the constant table + bigger word size).
 10. **`d2d1!DrawText`** — wire DWrite's monospace metrics
     into the existing FillRect path so single-line text
     renders.

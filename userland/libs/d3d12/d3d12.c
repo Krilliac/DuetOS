@@ -73,7 +73,8 @@ struct D12ResImpl
 {
     void* const* lpVtbl;
     ULONG refcount;
-    UINT kind; /* 0 = texture (BGRA8 2D), 1 = buffer (linear bytes) */
+    UINT kind;          /* 0 = texture (BGRA8 2D), 1 = buffer (linear bytes) */
+    UINT current_state; /* D3D12_RESOURCE_STATES bitmask, updated by ResourceBarrier */
     DxBackBuffer* bb;
     BOOL owns_bb;
     UINT format;
@@ -198,7 +199,7 @@ static void res_init_vtbl_once(void)
     g_res_vtbl[11] = (void*)res_GetGPUVirtualAddress;
 }
 
-static D12ResImpl* res_alloc_tex2d(UINT w, UINT h, UINT format)
+static D12ResImpl* res_alloc_tex2d(UINT w, UINT h, UINT format, UINT initial_state)
 {
     res_init_vtbl_once();
     D12ResImpl* r = (D12ResImpl*)dx_heap_alloc(sizeof(*r));
@@ -208,6 +209,7 @@ static D12ResImpl* res_alloc_tex2d(UINT w, UINT h, UINT format)
     r->lpVtbl = g_res_vtbl;
     r->refcount = 1;
     r->kind = 0;
+    r->current_state = initial_state;
     r->bb = dx_bb_create(NULL, w ? w : 1, h ? h : 1);
     if (!r->bb)
     {
@@ -221,7 +223,7 @@ static D12ResImpl* res_alloc_tex2d(UINT w, UINT h, UINT format)
     return r;
 }
 
-static D12ResImpl* res_alloc_buffer(UINT bytes)
+static D12ResImpl* res_alloc_buffer(UINT bytes, UINT initial_state)
 {
     res_init_vtbl_once();
     if (bytes == 0)
@@ -233,6 +235,7 @@ static D12ResImpl* res_alloc_buffer(UINT bytes)
     r->lpVtbl = g_res_vtbl;
     r->refcount = 1;
     r->kind = 1;
+    r->current_state = initial_state;
     r->linear = (BYTE*)dx_heap_alloc(bytes);
     if (!r->linear)
     {
@@ -827,11 +830,45 @@ static HRESULT list_Reset(D12ListImpl* self, void* alloc, void* pso)
     self->current_pso = (pso && ((D12PsoImpl*)pso)->lpVtbl == g_pso_vtbl) ? (D12PsoImpl*)pso : NULL;
     return DX_S_OK;
 }
+/* ResourceBarrier(numBarriers, *barriers) — slot 26.
+ *
+ * D3D12_RESOURCE_BARRIER (40 B):
+ *   +0  D3D12_RESOURCE_BARRIER_TYPE Type   (UINT)
+ *   +4  D3D12_RESOURCE_BARRIER_FLAGS Flags (UINT)
+ *   +8  union (32 B):
+ *     TRANSITION:
+ *       +8  ID3D12Resource* pResource  (8 B)
+ *       +16 UINT Subresource           (4 B)
+ *       +20 D3D12_RESOURCE_STATES Before(4 B)
+ *       +24 D3D12_RESOURCE_STATES After (4 B)
+ *     ALIASING:
+ *       +8  ID3D12Resource* pBefore    (8 B)
+ *       +16 ID3D12Resource* pAfter     (8 B)
+ *     UAV:
+ *       +8  ID3D12Resource* pResource  (8 B)
+ *
+ * v0 only honours TRANSITION (Type == 0); ALIASING / UAV are
+ * no-op success. Real D3D12 would also enforce the StateBefore
+ * matches the resource's current state and surface the validation
+ * error — we record the new state and trust the caller's
+ * sequencing for now. */
 static void list_ResourceBarrier(D12ListImpl* self, UINT n, const void* barriers)
 {
     (void)self;
-    (void)n;
-    (void)barriers;
+    if (n == 0 || !barriers)
+        return;
+    const BYTE* p = (const BYTE*)barriers;
+    for (UINT i = 0; i < n; ++i)
+    {
+        const BYTE* b = p + (SIZE_T)i * 40;
+        UINT type = *(const UINT*)(b + 0);
+        if (type != 0) /* TRANSITION = 0 */
+            continue;
+        D12ResImpl* res = *(D12ResImpl* const*)(b + 8);
+        UINT state_after = *(const UINT*)(b + 24);
+        if (res && res->lpVtbl == g_res_vtbl)
+            res->current_state = state_after;
+    }
 }
 
 /* IASetPrimitiveTopology(topology) — slot 20. */
@@ -1525,7 +1562,6 @@ static HRESULT d12dev_CreateCommittedResource(D12DeviceImpl* self, const void* h
     (void)self;
     (void)heap_props;
     (void)heap_flags;
-    (void)initial_state;
     (void)opt_clear;
     (void)riid;
     if (!out)
@@ -1541,7 +1577,7 @@ static HRESULT d12dev_CreateCommittedResource(D12DeviceImpl* self, const void* h
     UINT w = (UINT)(w64 & 0xFFFFFFFFu);
     if (dim == 1)
     {
-        D12ResImpl* r = res_alloc_buffer(w);
+        D12ResImpl* r = res_alloc_buffer(w, initial_state);
         if (!r)
             return DX_E_OUTOFMEMORY;
         *out = r;
@@ -1551,7 +1587,7 @@ static HRESULT d12dev_CreateCommittedResource(D12DeviceImpl* self, const void* h
         w = 1;
     if (h == 0)
         h = 1;
-    D12ResImpl* r = res_alloc_tex2d(w, h, fmt);
+    D12ResImpl* r = res_alloc_tex2d(w, h, fmt, initial_state);
     if (!r)
         return DX_E_OUTOFMEMORY;
     *out = r;
@@ -1901,4 +1937,19 @@ __declspec(dllexport) HRESULT D3D12SerializeRootSignature(const void* root_sig, 
     b->size = 8;
     *blob = b;
     return DX_S_OK;
+}
+
+/* Non-Win32 introspection helper: read back an ID3D12Resource's
+ * current_state. Used by the dx_demo to verify ResourceBarrier
+ * actually updates the field. Callers must hold a reference to
+ * the resource for the duration of the call. Returns 0xFFFFFFFF
+ * if the pointer doesn't look like one of our resources. */
+__declspec(dllexport) UINT DuetOS_D3D12_PeekResourceState(void* resource)
+{
+    if (!resource)
+        return 0xFFFFFFFFu;
+    D12ResImpl* r = (D12ResImpl*)resource;
+    if (r->lpVtbl != g_res_vtbl)
+        return 0xFFFFFFFFu;
+    return r->current_state;
 }

@@ -1002,6 +1002,30 @@ static int test_d3d12_cube(void)
     typedef void (*PFN_DII)(void*, UINT, UINT, UINT, INT, UINT);
     ((PFN_DII)list_vt[13])(list, 36, 1, 0, 0, 0);
 
+    /* ResourceBarrier exercise: transition the render target from
+     * RENDER_TARGET (state 4) to PRESENT (state 0). Verify via the
+     * peek helper that the state field actually flipped. */
+    BYTE barrier[40] = {0};
+    *(UINT*)(barrier + 0) = 0; /* TRANSITION */
+    *(UINT*)(barrier + 4) = 0; /* Flags = NONE */
+    *(void**)(barrier + 8) = rt;
+    *(UINT*)(barrier + 16) = 0xFFFFFFFFu; /* Subresource = ALL */
+    *(UINT*)(barrier + 20) = 4;           /* StateBefore = RENDER_TARGET */
+    *(UINT*)(barrier + 24) = 0;           /* StateAfter  = PRESENT */
+    typedef void (*PFN_Barrier)(void*, UINT, const void*);
+    ((PFN_Barrier)list_vt[26])(list, 1, barrier);
+    HMODULE d12_mod = LoadLibraryA("d3d12.dll");
+    typedef UINT (*PFN_PeekState)(void*);
+    PFN_PeekState peek_state =
+        d12_mod ? (PFN_PeekState)GetProcAddress(d12_mod, "DuetOS_D3D12_PeekResourceState") : NULL;
+    if (peek_state)
+    {
+        UINT s = peek_state(rt);
+        Out("[dx_demo] d3d12: ResourceBarrier RT->PRESENT, peek state=");
+        OutHex32(s);
+        Out(s == 0 ? " PASS\r\n" : " FAIL\r\n");
+    }
+
     typedef long (*PFN_Close)(void*);
     ((PFN_Close)list_vt[9])(list);
     void** q_vt = *(void***)queue;
@@ -1084,6 +1108,172 @@ static int test_misc(void)
     return 1;
 }
 
+/* ---------------------------------------------------------------- *
+ * D3D11 multi-stream input — same cube, but split between two       *
+ * vertex buffers: positions in slot 0, colours in slot 1. Proves    *
+ * IASetVertexBuffers honours `start_slot != 0` and the input        *
+ * layout's per-element InputSlot.                                   *
+ * ---------------------------------------------------------------- */
+
+static int test_d3d11_multistream(void)
+{
+    Out("[dx_demo] --- D3D11 multi-stream (pos slot 0 / color slot 1) ---\r\n");
+    ScDesc11 desc = {0};
+    BYTE* pdesc = (BYTE*)&desc;
+    for (UINT i = 0; i < sizeof(desc); ++i)
+        pdesc[i] = 0;
+    desc.Width = BB_W;
+    desc.Height = BB_H;
+    desc.Format = 87;
+    desc.SampleCount = 1;
+    desc.BufferUsage = 0x20;
+    desc.BufferCount = 1;
+    desc.OutputWindow = NULL;
+    desc.Windowed = TRUE;
+
+    void* sc = NULL;
+    void* dev = NULL;
+    void* ctx = NULL;
+    UINT got_fl = 0;
+    long hr = D3D11CreateDeviceAndSwapChain(NULL, 0, NULL, 0, NULL, 0, 0, &desc, &sc, &dev, &got_fl, &ctx);
+    if (hr != 0 || !sc || !dev || !ctx)
+    {
+        Out("[dx_demo] d3d11 multi-stream: CreateDeviceAndSwapChain FAIL\r\n");
+        return 0;
+    }
+    void** sc_vt = *(void***)sc;
+    void** dev_vt = *(void***)dev;
+    void** ctx_vt = *(void***)ctx;
+
+    void* tex = NULL;
+    typedef long (*PFN_GetBuf)(void*, UINT, const GUID*, void**);
+    ((PFN_GetBuf)sc_vt[9])(sc, 0, &kIidTex2D, &tex);
+    void* rtv = NULL;
+    typedef long (*PFN_CRTV)(void*, void*, const void*, void**);
+    ((PFN_CRTV)dev_vt[9])(dev, tex, NULL, &rtv);
+    void* rtvs[1] = {rtv};
+    typedef void (*PFN_OMSet)(void*, UINT, void* const*, void*);
+    ((PFN_OMSet)ctx_vt[33])(ctx, 1, rtvs, NULL);
+
+    float bg[4] = {0.125f, 0.125f, 0.125f, 1.0f};
+    typedef void (*PFN_ClearRTV)(void*, void*, const float*);
+    ((PFN_ClearRTV)ctx_vt[50])(ctx, rtv, bg);
+
+    /* Build two parallel arrays — positions and colours stay
+     * separate. Same MVP as the single-stream test so the resulting
+     * cube has identical pixel-counts. */
+    M4 mvp = build_mvp(BB_W, BB_H);
+    static float pos_only[24 * 12 / 4]; /* 24 verts * (3 floats) */
+    static DWORD col_only[24];
+    for (int i = 0; i < 24; ++i)
+    {
+        float in[4] = {kCubeVerts[i].x, kCubeVerts[i].y, kCubeVerts[i].z, 1.0f};
+        float out[4];
+        vec4_xform(out, in, &mvp);
+        pos_only[i * 3 + 0] = out[3] != 0.0f ? out[0] / out[3] : 0.f;
+        pos_only[i * 3 + 1] = out[3] != 0.0f ? out[1] / out[3] : 0.f;
+        pos_only[i * 3 + 2] = 0.f;
+        col_only[i] = kCubeVerts[i].argb;
+    }
+
+    BYTE bdesc[24] = {0};
+    *(UINT*)(bdesc + 0) = sizeof(pos_only);
+    *(UINT*)(bdesc + 8) = 0x1;
+    BYTE srd[16] = {0};
+    *(const void**)(srd + 0) = (const void*)pos_only;
+    void* vb_pos = NULL;
+    typedef long (*PFN_CB)(void*, const void*, const void*, void**);
+    ((PFN_CB)dev_vt[3])(dev, bdesc, srd, &vb_pos);
+
+    *(UINT*)(bdesc + 0) = sizeof(col_only);
+    *(const void**)(srd + 0) = (const void*)col_only;
+    void* vb_col = NULL;
+    ((PFN_CB)dev_vt[3])(dev, bdesc, srd, &vb_col);
+
+    BYTE ibdesc[24] = {0};
+    *(UINT*)(ibdesc + 0) = sizeof(kCubeIndices);
+    *(UINT*)(ibdesc + 8) = 0x2;
+    BYTE ibsrd[16] = {0};
+    *(const void**)(ibsrd + 0) = (const void*)kCubeIndices;
+    void* ib = NULL;
+    ((PFN_CB)dev_vt[3])(dev, ibdesc, ibsrd, &ib);
+
+    /* Input layout: POSITION lives in slot 0 (offset 0), COLOR
+     * lives in slot 1 (offset 0). The two streams have different
+     * strides — 12 bytes for pos, 4 bytes for argb. */
+    static const char kPos[] = "POSITION";
+    static const char kCol[] = "COLOR";
+    BYTE ied[64] = {0};
+    *(const char**)(ied + 0) = kPos;
+    *(UINT*)(ied + 12) = 6; /* R32G32B32_FLOAT */
+    *(UINT*)(ied + 16) = 0; /* InputSlot 0 */
+    *(UINT*)(ied + 20) = 0;
+    *(const char**)(ied + 32) = kCol;
+    *(UINT*)(ied + 44) = 87; /* B8G8R8A8_UNORM */
+    *(UINT*)(ied + 48) = 1;  /* InputSlot 1 */
+    *(UINT*)(ied + 52) = 0;
+    void* il = NULL;
+    typedef long (*PFN_CIL)(void*, const void*, UINT, const void*, SIZE_T, void**);
+    ((PFN_CIL)dev_vt[11])(dev, ied, 2, NULL, 0, &il);
+
+    typedef void (*PFN_IASetIL)(void*, void*);
+    ((PFN_IASetIL)ctx_vt[17])(ctx, il);
+    /* Bind slot 0 = positions, slot 1 = colors via TWO calls (one
+     * per slot — exercises the start_slot != 0 path the way real
+     * apps tend to). */
+    void* vbs0[1] = {vb_pos};
+    UINT strides0[1] = {12};
+    UINT offsets0[1] = {0};
+    typedef void (*PFN_IASetVB)(void*, UINT, UINT, void* const*, const UINT*, const UINT*);
+    ((PFN_IASetVB)ctx_vt[18])(ctx, 0, 1, vbs0, strides0, offsets0);
+    void* vbs1[1] = {vb_col};
+    UINT strides1[1] = {4};
+    UINT offsets1[1] = {0};
+    ((PFN_IASetVB)ctx_vt[18])(ctx, 1, 1, vbs1, strides1, offsets1);
+
+    typedef void (*PFN_IASetIB)(void*, void*, UINT, UINT);
+    ((PFN_IASetIB)ctx_vt[19])(ctx, ib, 57, 0);
+    typedef void (*PFN_IASetTopo)(void*, UINT);
+    ((PFN_IASetTopo)ctx_vt[24])(ctx, 4);
+    float vp[6] = {0.f, 0.f, (float)BB_W, (float)BB_H, 0.f, 1.f};
+    typedef void (*PFN_RSVP)(void*, UINT, const void*);
+    ((PFN_RSVP)ctx_vt[44])(ctx, 1, vp);
+    typedef void (*PFN_DI)(void*, UINT, UINT, INT);
+    ((PFN_DI)ctx_vt[12])(ctx, 36, 0, 0);
+
+    BYTE mapped[24] = {0};
+    typedef long (*PFN_Map)(void*, void*, UINT, UINT, UINT, void*);
+    int faces = 0;
+    if (((PFN_Map)ctx_vt[14])(ctx, tex, 0, 1, 0, mapped) == 0)
+    {
+        const DWORD* pixels = *(const DWORD**)(mapped + 0);
+        faces = verify_cube_render("d3d11-multistream", pixels, BB_W, BB_H);
+        typedef void (*PFN_Unmap)(void*, void*, UINT);
+        ((PFN_Unmap)ctx_vt[15])(ctx, tex, 0);
+    }
+
+    typedef ULONG (*PFN_Rel)(void*);
+    ((PFN_Rel)((void**)(*(void***)il))[2])(il);
+    ((PFN_Rel)((void**)(*(void***)ib))[2])(ib);
+    ((PFN_Rel)((void**)(*(void***)vb_col))[2])(vb_col);
+    ((PFN_Rel)((void**)(*(void***)vb_pos))[2])(vb_pos);
+    ((PFN_Rel)((void**)(*(void***)rtv))[2])(rtv);
+    ((PFN_Rel)((void**)(*(void***)tex))[2])(tex);
+    ((PFN_Rel)ctx_vt[2])(ctx);
+    ((PFN_Rel)sc_vt[2])(sc);
+    ((PFN_Rel)dev_vt[2])(dev);
+
+    if (faces >= 1)
+    {
+        Out("[dx_demo] d3d11 multi-stream: ");
+        OutDec((unsigned)faces);
+        Out(" face(s) visible — PASS\r\n");
+        return 1;
+    }
+    Out("[dx_demo] d3d11 multi-stream: NO FACES — FAIL\r\n");
+    return 0;
+}
+
 void __cdecl mainCRTStartup(void)
 {
     g_stdout = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -1094,6 +1284,8 @@ void __cdecl mainCRTStartup(void)
     pass += test_dxgi();
     total++;
     pass += test_d3d11_cube();
+    total++;
+    pass += test_d3d11_multistream();
     total++;
     pass += test_d3d12_cube();
     total++;

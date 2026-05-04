@@ -563,8 +563,8 @@ static ID3D11BufferImpl* buf_alloc(UINT bytes, UINT bind_flags, UINT cpu_access,
  * inputSlotClass, instanceDataStepRate). v0 keeps just the offsets *
  * + format kind we need to decode positions and colours from a     *
  * vertex buffer:                                                   *
- *   - position_offset (0xFFFF = none)                              *
- *   - color_offset    (0xFFFF = none)                              *
+ *   - position_offset (0xFFFF = none) + position_slot              *
+ *   - color_offset    (0xFFFF = none) + color_slot                 *
  *   - color_kind      (0 = R32G32B32A32_FLOAT, 1 = B8G8R8A8_UNORM, *
  *                      2 = R8G8B8A8_UNORM)                         *
  * Stride is stored on the buffer side via IASetVertexBuffers.      *
@@ -580,7 +580,9 @@ typedef struct ID3D11InputLayoutImpl
     void* const* lpVtbl;
     ULONG refcount;
     UINT position_offset;
+    UINT position_slot;
     UINT color_offset;
+    UINT color_slot;
     UINT color_kind;
 } ID3D11InputLayoutImpl;
 
@@ -662,7 +664,9 @@ static ID3D11InputLayoutImpl* il_alloc_from_desc(const void* descs, UINT n)
     il->lpVtbl = g_il_vtbl;
     il->refcount = 1;
     il->position_offset = 0xFFFF;
+    il->position_slot = 0;
     il->color_offset = 0xFFFF;
+    il->color_slot = 0;
     il->color_kind = 0;
     if (descs)
     {
@@ -672,12 +676,17 @@ static ID3D11InputLayoutImpl* il_alloc_from_desc(const void* descs, UINT n)
             const BYTE* e = p + (SIZE_T)i * 32;
             const char* name = *(const char* const*)(e + 0);
             UINT format = *(const UINT*)(e + 12);
+            UINT input_slot = *(const UINT*)(e + 16);
             UINT offset = *(const UINT*)(e + 20);
             if (il_name_eq(name, "POSITION") || il_name_eq(name, "SV_POSITION"))
+            {
                 il->position_offset = offset;
+                il->position_slot = input_slot;
+            }
             else if (il_name_eq(name, "COLOR") || il_name_eq(name, "COLOUR"))
             {
                 il->color_offset = offset;
+                il->color_slot = input_slot;
                 /* DXGI_FORMAT: 2 = R32G32B32A32_FLOAT, 28 = R8G8B8A8_UNORM,
                  * 87 = B8G8R8A8_UNORM. */
                 if (format == 2)
@@ -906,9 +915,15 @@ struct ID3D11ContextImpl
     ID3D11InputLayoutImpl* current_il;
     ID3D11ShaderImpl* current_vs;
     ID3D11ShaderImpl* current_ps;
-    ID3D11BufferImpl* current_vb; /* slot 0 only — multi-stream is gated below the v0 cut-line */
-    UINT current_vb_stride;
-    UINT current_vb_offset;
+    /* Per-slot vertex-buffer bindings. D3D11 hard caps at 32 slots
+     * (D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT); we keep the same
+     * cap so apps that bind the spec-max don't silently truncate.
+     * Slots not bound stay NULL/0 and the input layout's
+     * position_slot / color_slot fields say which slot a given
+     * element lives in (default 0 if the element didn't specify). */
+    ID3D11BufferImpl* current_vb[32];
+    UINT current_vb_stride[32];
+    UINT current_vb_offset[32];
     ID3D11BufferImpl* current_ib;
     UINT current_ib_offset;
     UINT current_ib_format; /* DXGI_FORMAT_R16_UINT = 57, R32_UINT = 42 */
@@ -1000,17 +1015,25 @@ static void ctx_IASetInputLayout(ID3D11ContextImpl* self, ID3D11InputLayoutImpl*
 }
 
 /* IASetVertexBuffers(startSlot, numBuffers, ppVB, pStrides, pOffsets) — slot 18.
- * v0 only honours slot 0 (single-stream). */
+ * Walks `n` slots starting at `start_slot`, populating each one
+ * independently so the input layout's per-element InputSlot can
+ * pick the right buffer per attribute. Slots beyond the 32-slot
+ * cap are silently ignored (matches the D3D11 spec's hard limit). */
 static void ctx_IASetVertexBuffers(ID3D11ContextImpl* self, UINT start_slot, UINT n, ID3D11BufferImpl* const* buffers,
                                    const UINT* strides, const UINT* offsets)
 {
-    (void)start_slot;
     if (!self || n == 0 || !buffers)
         return;
-    ID3D11BufferImpl* b = buffers[0];
-    self->current_vb = (b && b->lpVtbl == g_buf_vtbl) ? b : NULL;
-    self->current_vb_stride = strides ? strides[0] : 0;
-    self->current_vb_offset = offsets ? offsets[0] : 0;
+    for (UINT i = 0; i < n; ++i)
+    {
+        UINT s = start_slot + i;
+        if (s >= 32)
+            break;
+        ID3D11BufferImpl* b = buffers[i];
+        self->current_vb[s] = (b && b->lpVtbl == g_buf_vtbl) ? b : NULL;
+        self->current_vb_stride[s] = strides ? strides[i] : 0;
+        self->current_vb_offset[s] = offsets ? offsets[i] : 0;
+    }
 }
 
 /* IASetIndexBuffer(buffer, format, offset) — slot 19. */
@@ -1049,23 +1072,31 @@ static void ctx_PSSetShader(ID3D11ContextImpl* self, ID3D11ShaderImpl* shader, v
     self->current_ps = (shader && shader->lpVtbl == g_ps_vtbl) ? shader : NULL;
 }
 
-/* Pull (x, y) screen-space from a vertex via the bound input layout +
- * VB. Returns 0 if the layout / buffer / offset can't satisfy the
- * read; caller drops the triangle. dxr_project handles the NDC →
- * pixel map. */
+/* Pull (x, y) screen-space from a vertex via the bound input layout
+ * + per-slot vertex buffers. Each input element carries a slot
+ * index (default 0); the position element's slot picks which VB
+ * holds the xyz, the colour element's slot picks which VB holds
+ * the colour. Returns 0 if the slot's buffer isn't bound or the
+ * read would land out of range; caller drops the triangle. */
 static int ctx_read_vertex(ID3D11ContextImpl* self, UINT idx, int* out_x, int* out_y, DWORD* out_color)
 {
-    if (!self || !self->current_vb || !self->current_il || self->current_vb_stride == 0)
+    if (!self || !self->current_il)
         return 0;
-    ID3D11BufferImpl* vb = self->current_vb;
-    SIZE_T base = (SIZE_T)self->current_vb_offset + (SIZE_T)idx * self->current_vb_stride;
     if (self->current_il->position_offset == 0xFFFF)
         return 0;
-    SIZE_T pos_off = base + self->current_il->position_offset;
-    if (pos_off + 12 > vb->bytes)
+    UINT pos_slot = self->current_il->position_slot;
+    if (pos_slot >= 32)
+        return 0;
+    ID3D11BufferImpl* pos_vb = self->current_vb[pos_slot];
+    UINT pos_stride = self->current_vb_stride[pos_slot];
+    UINT pos_base_off = self->current_vb_offset[pos_slot];
+    if (!pos_vb || pos_stride == 0)
+        return 0;
+    SIZE_T pos_off = (SIZE_T)pos_base_off + (SIZE_T)idx * pos_stride + self->current_il->position_offset;
+    if (pos_off + 12 > pos_vb->bytes)
         return 0;
     float xyz[3];
-    dx_memcpy(xyz, vb->storage + pos_off, 12);
+    dx_memcpy(xyz, pos_vb->storage + pos_off, 12);
     DxVec4 clip;
     clip.x = xyz[0];
     clip.y = xyz[1];
@@ -1092,17 +1123,25 @@ static int ctx_read_vertex(ID3D11ContextImpl* self, UINT idx, int* out_x, int* o
     {
         if (self->current_il->color_offset != 0xFFFF)
         {
-            SIZE_T col_off = base + self->current_il->color_offset;
-            if (self->current_il->color_kind == 0 && col_off + 16 <= vb->bytes)
+            UINT col_slot = self->current_il->color_slot;
+            ID3D11BufferImpl* col_vb = (col_slot < 32) ? self->current_vb[col_slot] : NULL;
+            UINT col_stride = (col_slot < 32) ? self->current_vb_stride[col_slot] : 0;
+            UINT col_base_off = (col_slot < 32) ? self->current_vb_offset[col_slot] : 0;
+            SIZE_T col_off = (SIZE_T)col_base_off + (SIZE_T)idx * col_stride + self->current_il->color_offset;
+            if (!col_vb || col_stride == 0)
+            {
+                *out_color = 0xFFFFFFFFu;
+            }
+            else if (self->current_il->color_kind == 0 && col_off + 16 <= col_vb->bytes)
             {
                 float c[4];
-                dx_memcpy(c, vb->storage + col_off, 16);
+                dx_memcpy(c, col_vb->storage + col_off, 16);
                 *out_color = dxr_pack_rgba(c[0], c[1], c[2], c[3]);
             }
-            else if (col_off + 4 <= vb->bytes)
+            else if (col_off + 4 <= col_vb->bytes)
             {
                 DWORD c;
-                dx_memcpy(&c, vb->storage + col_off, 4);
+                dx_memcpy(&c, col_vb->storage + col_off, 4);
                 if (self->current_il->color_kind == 1)
                     *out_color = c; /* already BGRA */
                 else
