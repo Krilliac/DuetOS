@@ -642,14 +642,45 @@ static int test_d3d11_cube(void)
     /* Map the back buffer to read pixels */
     BYTE mapped[24] = {0};
     typedef long (*PFN_Map)(void*, void*, UINT, UINT, UINT, void*);
+    typedef void (*PFN_Unmap)(void*, void*, UINT);
     hr = ((PFN_Map)ctx_vt[14])(ctx, tex, 0, 1, 0, mapped);
     int faces = 0;
     if (hr == 0)
     {
         const DWORD* pixels = *(const DWORD**)(mapped + 0);
         faces = verify_cube_render("d3d11", pixels, BB_W, BB_H);
-        typedef void (*PFN_Unmap)(void*, void*, UINT);
         ((PFN_Unmap)ctx_vt[15])(ctx, tex, 0);
+    }
+
+    /* Map(WRITE_NO_OVERWRITE = 5) probes:
+     *   (a) on a buffer: succeeds, PeekBufferMapType reports 5
+     *   (b) on a texture: rejected with E_INVALIDARG (NO_OVERWRITE
+     *       is buffer-only per D3D11 spec)
+     *   (c) after Unmap, PeekBufferMapType reports 0           */
+    HMODULE d11_mod = LoadLibraryA("d3d11.dll");
+    typedef UINT (*PFN_PeekMap)(void*);
+    PFN_PeekMap peek_map = d11_mod ? (PFN_PeekMap)GetProcAddress(d11_mod, "DuetOS_D3D11_PeekBufferMapType") : NULL;
+    if (peek_map)
+    {
+        BYTE m2[24] = {0};
+        long mhr = ((PFN_Map)ctx_vt[14])(ctx, vb, 0, 5, 0, m2);
+        UINT pt = peek_map(vb);
+        Out("[dx_demo] d3d11: Map(VB, NO_OVERWRITE) -> hr=");
+        OutHex32((DWORD)mhr);
+        Out(" peek=");
+        OutDec(pt);
+        Out((mhr == 0 && pt == 5) ? " PASS\r\n" : " FAIL\r\n");
+        ((PFN_Unmap)ctx_vt[15])(ctx, vb, 0);
+        UINT pt_unmapped = peek_map(vb);
+        Out("[dx_demo] d3d11: peek after Unmap = ");
+        OutDec(pt_unmapped);
+        Out(pt_unmapped == 0 ? " PASS\r\n" : " FAIL\r\n");
+
+        BYTE m3[24] = {0};
+        long thr = ((PFN_Map)ctx_vt[14])(ctx, tex, 0, 5, 0, m3);
+        Out("[dx_demo] d3d11: Map(TEX, NO_OVERWRITE) -> hr=");
+        OutHex32((DWORD)thr);
+        Out(thr != 0 ? " PASS (rejected)\r\n" : " FAIL (should reject)\r\n");
     }
 
     /* Cleanup */

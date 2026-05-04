@@ -723,7 +723,13 @@ CreateCounter, 27 CreateDeferredContext, 28 OpenSharedResource.
 
 **ID3D11DeviceContext** (canonical d3d11.h order) — REAL: 0..2
 IUnknown, 9 PSSetShader, 11 VSSetShader, 12 DrawIndexed, 13
-Draw, 14 Map, 15 Unmap, 17 IASetInputLayout, 18
+Draw, 14 Map (validates `map_type` ∈ {READ, WRITE, READ\_WRITE,
+WRITE\_DISCARD, WRITE\_NO\_OVERWRITE}; routes WRITE\_NO\_OVERWRITE
+on buffers to the same backing storage; rejects
+WRITE\_NO\_OVERWRITE on textures with `E_INVALIDARG`; records
+the last map\_type per buffer for read-back via
+`DuetOS_D3D11_PeekBufferMapType`), 15 Unmap, 17
+IASetInputLayout, 18
 IASetVertexBuffers, 19 IASetIndexBuffer, 20
 DrawIndexedInstanced, 21 DrawInstanced, 24
 IASetPrimitiveTopology, 33 OMSetRenderTargets, 35
@@ -1226,15 +1232,12 @@ short list:
 
 1. **`SymGetLineFromAddr64`** in dbghelp — would let
    `process_smoke` print real source-line crash dumps.
-2. **D3D11 `Map(D3D11_MAP_WRITE_DISCARD)` on a buffer** —
-   currently REAL; extend to `D3D11_MAP_WRITE_NO_OVERWRITE`
-   (lock semantics).
-3. **D3D12 multi-stream input** — same per-element InputSlot
+2. **D3D12 multi-stream input** — same per-element InputSlot
    refactor that landed in D3D11; the PSO already extracts
    the field. Use the same 32-slot array shape.
-4. **`ws2_32!WSAEventSelect`** — back into our message-
+3. **`ws2_32!WSAEventSelect`** — back into our message-
    queue + waitable-event primitives.
-5. **`d2d1!DrawText`** — wire DWrite's monospace metrics
+4. **`d2d1!DrawText`** — wire DWrite's monospace metrics
    into the existing FillRect path so single-line text
    renders.
 

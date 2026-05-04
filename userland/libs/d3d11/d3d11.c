@@ -471,6 +471,11 @@ typedef struct ID3D11BufferImpl
     UINT bytes;
     UINT bind_flags;
     UINT cpu_access;
+    /* Last map_type the caller passed to ctx_Map. Reset to 0 on
+     * ctx_Unmap. Read back via DuetOS_D3D11_PeekBufferMapType so the
+     * dx_demo can verify the dispatch picked the right path
+     * (WRITE_DISCARD = 4, WRITE_NO_OVERWRITE = 5). */
+    UINT last_map_type;
     BYTE storage[1]; /* `bytes` of payload follow the struct head */
 } ID3D11BufferImpl;
 
@@ -1313,15 +1318,34 @@ static void ctx_DrawIndexedInstanced(ID3D11ContextImpl* self, UINT icount, UINT 
         ctx_DrawIndexed(self, icount, istart, base_vertex);
 }
 
-/* Map(resource, sub, mapType, flags, mapped) — slot 14. v0 only
- * supports Map on an ID3D11Buffer; other resources return E_FAIL.
+/* Map(resource, sub, mapType, flags, mapped) — slot 14.
+ * mapType (D3D11_MAP):
+ *   1 READ — buffer must have CPU_ACCESS_READ (we don't enforce it
+ *           for textures since dx_demo reads back the back-buffer).
+ *   2 WRITE — buffer must have CPU_ACCESS_WRITE.
+ *   3 READ_WRITE — both flags required.
+ *   4 WRITE_DISCARD — buffer must have CPU_ACCESS_WRITE; the
+ *           contract is the caller will overwrite everything (the
+ *           v0 software path returns the same storage; with no GPU
+ *           there's no rename to do).
+ *   5 WRITE_NO_OVERWRITE — buffer must have CPU_ACCESS_WRITE; the
+ *           contract is the caller won't write any region the GPU
+ *           is reading. ID3D11Texture2D rejects this with
+ *           E_INVALIDARG to match real D3D11 (NO_OVERWRITE is only
+ *           valid for vertex/index/constant buffers).
+ *
  * Mapped layout (D3D11_MAPPED_SUBRESOURCE = 24 B):
  *   void* pData (8) | UINT RowPitch (4) | UINT DepthPitch (4). */
+#define D3D11_MAP_READ 1u
+#define D3D11_MAP_WRITE 2u
+#define D3D11_MAP_READ_WRITE 3u
+#define D3D11_MAP_WRITE_DISCARD 4u
+#define D3D11_MAP_WRITE_NO_OVERWRITE 5u
+
 static HRESULT ctx_Map(ID3D11ContextImpl* self, void* resource, UINT sub, UINT map_type, UINT flags, void* mapped)
 {
     (void)self;
     (void)sub;
-    (void)map_type;
     (void)flags;
     if (!mapped)
         return DX_E_POINTER;
@@ -1329,12 +1353,15 @@ static HRESULT ctx_Map(ID3D11ContextImpl* self, void* resource, UINT sub, UINT m
     dx_memzero(m, 24);
     if (!resource)
         return DX_E_INVALIDARG;
+    if (map_type < D3D11_MAP_READ || map_type > D3D11_MAP_WRITE_NO_OVERWRITE)
+        return DX_E_INVALIDARG;
     /* Sniff the vtable to decide buffer vs texture. lpVtbl is the
      * first 8 bytes of every COM impl in this DLL. */
     const void* vt = *(const void* const*)resource;
     if (vt == (const void*)g_buf_vtbl)
     {
         ID3D11BufferImpl* b = (ID3D11BufferImpl*)resource;
+        b->last_map_type = map_type;
         *(void**)(m + 0) = b->storage;
         *(UINT*)(m + 8) = b->bytes;
         *(UINT*)(m + 12) = b->bytes;
@@ -1342,6 +1369,11 @@ static HRESULT ctx_Map(ID3D11ContextImpl* self, void* resource, UINT sub, UINT m
     }
     if (vt == (const void*)&g_tx_vtbl)
     {
+        /* WRITE_NO_OVERWRITE is buffer-only per D3D11 spec —
+         * texture mappings legitimately need a rename when the GPU
+         * is reading, so the NO_OVERWRITE shortcut doesn't apply. */
+        if (map_type == D3D11_MAP_WRITE_NO_OVERWRITE)
+            return DX_E_INVALIDARG;
         ID3D11Texture2DImpl* t = (ID3D11Texture2DImpl*)resource;
         if (!t->bb)
             return DX_E_FAIL;
@@ -1355,8 +1387,15 @@ static HRESULT ctx_Map(ID3D11ContextImpl* self, void* resource, UINT sub, UINT m
 static void ctx_Unmap(ID3D11ContextImpl* self, void* resource, UINT sub)
 {
     (void)self;
-    (void)resource;
     (void)sub;
+    if (!resource)
+        return;
+    /* Clear the buffer's last_map_type so a peek after Unmap reports
+     * "not mapped" (0) rather than the stale state from the last
+     * Map call. Textures don't track this. */
+    const void* vt = *(const void* const*)resource;
+    if (vt == (const void*)g_buf_vtbl)
+        ((ID3D11BufferImpl*)resource)->last_map_type = 0;
 }
 
 /* UpdateSubresource(resource, sub, box, src, srcRowPitch, srcDepthPitch) — slot 48.
@@ -1891,4 +1930,20 @@ __declspec(dllexport) HRESULT D3D11CreateDeviceAndSwapChain(void* adapter, INT d
     else
         d3d11sc_Release(sc);
     return DX_S_OK;
+}
+
+/* Non-Win32 introspection helper: read back an ID3D11Buffer's
+ * last map_type. Returns 0 if the buffer is not currently mapped,
+ * or 1..5 for the D3D11_MAP value of the last Map call. Returns
+ * 0xFFFFFFFF if the pointer doesn't look like one of our buffers.
+ * Used by the dx_demo to verify the dispatch picked the
+ * WRITE_DISCARD vs WRITE_NO_OVERWRITE path. */
+__declspec(dllexport) UINT DuetOS_D3D11_PeekBufferMapType(void* buffer)
+{
+    if (!buffer)
+        return 0xFFFFFFFFu;
+    ID3D11BufferImpl* b = (ID3D11BufferImpl*)buffer;
+    if (b->lpVtbl != (void* const*)g_buf_vtbl)
+        return 0xFFFFFFFFu;
+    return b->last_map_type;
 }
