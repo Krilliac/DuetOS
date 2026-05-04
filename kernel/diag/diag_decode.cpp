@@ -426,6 +426,144 @@ void WritePteFlags(u64 flags)
 namespace
 {
 
+void WritePageWalkLevel(const char* level, u64 idx, u64 entry)
+{
+    arch::SerialWrite("    ");
+    arch::SerialWrite(level);
+    arch::SerialWrite("[0x");
+    // 3 hex digits — table indices are 9-bit (0..0x1FF).
+    static constexpr char kHex[] = "0123456789abcdef";
+    arch::SerialWriteByte(static_cast<duetos::u8>(kHex[(idx >> 8) & 0xF]));
+    arch::SerialWriteByte(static_cast<duetos::u8>(kHex[(idx >> 4) & 0xF]));
+    arch::SerialWriteByte(static_cast<duetos::u8>(kHex[idx & 0xF]));
+    arch::SerialWrite("] = ");
+    arch::SerialWriteHex(entry);
+    WritePteFlags(entry);
+}
+
+const char* PageWalkStopName(::duetos::mm::PageWalkStop s)
+{
+    using S = ::duetos::mm::PageWalkStop;
+    switch (s)
+    {
+    case S::FourKiB:
+        return "4 KiB leaf";
+    case S::TwoMiB:
+        return "2 MiB PS leaf";
+    case S::OneGiB:
+        return "1 GiB PS leaf";
+    case S::NotPresentPml4:
+        return "PML4 entry not present";
+    case S::NotPresentPdpt:
+        return "PDPT entry not present";
+    case S::NotPresentPd:
+        return "PD entry not present";
+    case S::NotPresentPt:
+        return "PT entry not present";
+    case S::NonCanonical:
+        return "non-canonical VA";
+    case S::OutOfDirectMap:
+        return "intermediate-table phys outside direct map";
+    }
+    return "?";
+}
+
+} // namespace
+
+void WritePageWalk(const char* label, u64 virt)
+{
+    using S = ::duetos::mm::PageWalkStop;
+    const auto snap = ::duetos::mm::SnapshotPageWalk(virt);
+
+    arch::SerialWrite("  page-walk for ");
+    arch::SerialWrite(label);
+    arch::SerialWrite("=");
+    arch::SerialWriteHex(virt);
+    arch::SerialWrite(" (cr3=");
+    arch::SerialWriteHex(snap.cr3);
+    arch::SerialWrite("):\n");
+
+    if (snap.stop == S::NonCanonical)
+    {
+        arch::SerialWrite("    [");
+        arch::SerialWrite(PageWalkStopName(snap.stop));
+        arch::SerialWrite("]\n");
+        return;
+    }
+    if (snap.stop == S::OutOfDirectMap && snap.entry_pml4 == 0)
+    {
+        arch::SerialWrite("    [cr3 phys outside direct map]\n");
+        return;
+    }
+
+    WritePageWalkLevel("PML4", snap.idx_pml4, snap.entry_pml4);
+    arch::SerialWrite("\n");
+    if (snap.stop == S::NotPresentPml4)
+    {
+        arch::SerialWrite("    -> stop: ");
+        arch::SerialWrite(PageWalkStopName(snap.stop));
+        arch::SerialWrite("\n");
+        return;
+    }
+
+    WritePageWalkLevel("PDPT", snap.idx_pdpt, snap.entry_pdpt);
+    if (snap.stop == S::OneGiB)
+    {
+        arch::SerialWrite("  (1 GiB PS leaf)\n    -> phys=");
+        arch::SerialWriteHex(snap.leaf_phys);
+        arch::SerialWrite("\n");
+        return;
+    }
+    arch::SerialWrite("\n");
+    if (snap.stop == S::NotPresentPdpt)
+    {
+        arch::SerialWrite("    -> stop: ");
+        arch::SerialWrite(PageWalkStopName(snap.stop));
+        arch::SerialWrite("\n");
+        return;
+    }
+
+    WritePageWalkLevel("PD  ", snap.idx_pd, snap.entry_pd);
+    if (snap.stop == S::TwoMiB)
+    {
+        arch::SerialWrite("  (2 MiB PS leaf)\n    -> phys=");
+        arch::SerialWriteHex(snap.leaf_phys);
+        arch::SerialWrite("\n");
+        return;
+    }
+    arch::SerialWrite("\n");
+    if (snap.stop == S::NotPresentPd)
+    {
+        arch::SerialWrite("    -> stop: ");
+        arch::SerialWrite(PageWalkStopName(snap.stop));
+        arch::SerialWrite("\n");
+        return;
+    }
+
+    WritePageWalkLevel("PT  ", snap.idx_pt, snap.entry_pt);
+    arch::SerialWrite("\n");
+    if (snap.stop == S::NotPresentPt)
+    {
+        arch::SerialWrite("    -> stop: ");
+        arch::SerialWrite(PageWalkStopName(snap.stop));
+        arch::SerialWrite("\n");
+        return;
+    }
+    if (snap.stop == S::OutOfDirectMap)
+    {
+        arch::SerialWrite("    -> stop: ");
+        arch::SerialWrite(PageWalkStopName(snap.stop));
+        arch::SerialWrite("\n");
+        return;
+    }
+    arch::SerialWrite("    -> phys=");
+    arch::SerialWriteHex(snap.leaf_phys);
+    arch::SerialWrite(" (4 KiB)\n");
+}
+
+namespace
+{
+
 // Lower bound of the canonical higher-half on x86_64 (sign-extended
 // bit 47). Anything between [0x0000_8000_0000_0000 .. this) is in the
 // non-canonical hole and a kernel access through it would have #GP'd

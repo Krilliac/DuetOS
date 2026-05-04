@@ -65,6 +65,7 @@
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/ioapic.h"
 #include "arch/x86_64/lapic.h"
+#include "arch/x86_64/lbr.h"
 #include "arch/x86_64/nmi_watchdog.h"
 #include "arch/x86_64/pic.h"
 #include "arch/x86_64/rtc.h"
@@ -164,7 +165,8 @@
 #include "ipc/handle_table.h"
 #include "diag/event_trace.h"
 #include "diag/fault_react.h"
-#include "diag/gdb_stub.h"
+#include "diag/gdb_server.h"
+#include "diag/minidump.h"
 #include "diag/perf_profile.h"
 #include "diag/soft_lockup.h"
 #include "ipc/kevent.h"
@@ -644,6 +646,27 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     }
     (void)duetos::core::RunPhase(duetos::core::Phase::Idt);
 
+#ifdef DUETOS_GDB_SERVER
+    // Wire COM2 to the in-kernel GDB stub as early as possible —
+    // immediately after the IDT comes online so the trap-dispatch
+    // path (which routes int3 / #DB into the stop loop) is itself
+    // armed. Gated behind DUETOS_GDB_SERVER because a wired stub
+    // with no attached debugger would hang the kernel on the
+    // first int3 (the stop loop blocks waiting for packets that
+    // will never arrive).
+    duetos::diag::gdb::GdbServerInitCom2();
+    SerialWrite("[gdb-stub] COM2 wired (115200 8N1) — connect via QEMU's tcp::1234 server\n");
+#endif
+
+    // The DUETOS_GDB_DEMO int3 fires LATER in kernel_main, after
+    // BpInit() (so debug::BpInstallSoftware works — GDB's Z0
+    // patches int3 into .text via that subsystem, which itself
+    // needs paging.SetPteFlags4K to flip the page writable, which
+    // needs paging.SplitPsPage to split the boot 2 MiB
+    // superpage). Wiring the demo too early panics with
+    // `mm/paging: SplitPsPage: PML4 entry not present` because
+    // PagingInit hasn't installed g_pml4 yet.
+
     // Kernel extable — scoped fault recovery. Register before any
     // subsystem tries to install its own rows; the user-copy
     // helpers are always entry 0 / 1.
@@ -884,6 +907,19 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     {
         SerialWrite("[boot] WARN: breakpoint self-test failed — see serial log\n");
     }
+
+#ifdef DUETOS_GDB_DEMO
+    // Deliberate int3 so the AI / dev can exercise the full
+    // attach + inspect + continue cycle without staging a real
+    // crash. Fires HERE (after BpInit) so GDB's Z0 packets can
+    // round-trip through debug::BpInstallSoftware → PokeByte →
+    // SetPteFlags4K — every layer is now online. The stop loop
+    // blocks until GDB attaches AND issues `c` / `D` / `k`.
+    // Build with -DDUETOS_GDB_DEMO=ON to enable.
+    SerialWrite("[gdb-demo] firing int3 — kernel pauses until GDB attaches + continues\n");
+    asm volatile("int3");
+    SerialWrite("[gdb-demo] resumed from GDB int3 — kernel_main continues\n");
+#endif
     // Static probes — KBP_PROBE(...) call sites sprinkled across
     // the kernel. Rare+useful events (panic, sandbox denial,
     // Win32 stub miss, kernel #PF) are armed-log by default so
@@ -1743,6 +1779,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWrite("[boot] Installing BSP per-CPU struct.\n");
     duetos::cpu::PerCpuInitBsp();
 
+    // Architectural LBR — start the per-CPU branch trace ring as
+    // early as practical so a panic during late init still has
+    // useful records to dump. No-op + serial line on CPUs that
+    // don't advertise the feature (TCG QEMU, pre-Goldmont-Plus
+    // Intel, AMD).
+    duetos::arch::LbrInitBsp();
+
     // Centralised syscall capability gate (plan A4). Walks every
     // row of `kSyscallCapTable` against synthetic empty / trusted
     // processes; asserts empty fails, trusted passes, and that
@@ -1798,6 +1841,24 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Bringing up scheduler.\n");
     duetos::sched::SchedInit();
+    // Per-task syscall-trail self-test — exercises the ring
+    // logic on the current (kboot) task before any user task
+    // can populate it. Restores the pre-test state on exit so
+    // a panic that fires later doesn't surface synthetic
+    // entries. Cheap and gives us boot-time evidence the dump
+    // section's mechanism works (the section itself only
+    // appears on a panic from a task that issued syscalls,
+    // which kboot itself never does).
+    if constexpr (duetos::core::kBootSelfTests)
+    {
+        duetos::sched::SyscallTrailSelfTest();
+        // Minidump self-test — validates the .dmp builder's
+        // header / version / stream-count shape against a
+        // synthetic context. Builds into the static buffer but
+        // does NOT egress to debugcon, so a clean boot leaves
+        // the host's `duetos.dmp` file empty.
+        duetos::diag::minidump::MinidumpSelfTest();
+    }
     // Idle task FIRST so the runqueue is never empty — even if the
     // reaper or any subsequent worker blocks before the boot task
     // spawns anything else, Schedule() always has a fallback to
@@ -1894,7 +1955,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         duetos::core::InitcallRegister(duetos::core::Phase::Sched, "gdb-stub-selftest",
                                        []()
                                        {
-                                           duetos::diag::gdb::GdbStubSelfTest();
+                                           duetos::diag::gdb::GdbServerSelfTest();
                                            return duetos::core::Result<void>{};
                                        });
     }

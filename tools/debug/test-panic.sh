@@ -82,9 +82,15 @@ cmake --preset "${PRESET}" -DDUETOS_PANIC_DEMO=ON >/dev/null
 echo "[test-panic] building"
 cmake --build "${BUILD_DIR}" >/dev/null
 
-echo "[test-panic] booting (10 s timeout)"
+# Boot via the qemu-smoke fast-path: a single-entry grub.cfg with
+# timeout=0 instead of the 10 s interactive menu, so the QEMU run
+# spends its budget actually reaching kernel_main rather than
+# waiting on grub. The timeout still has to cover the post-grub
+# debug-build init sequence (ramfs build, driver self-tests,
+# klog warm-up) before kernel_main's deliberate Panic fires.
+echo "[test-panic] booting (90 s timeout, smoke=panic-demo)"
 LOG="$(mktemp)"
-DUETOS_TIMEOUT=10 "${REPO_ROOT}/tools/qemu/run.sh" >"${LOG}" 2>&1 || true
+DUETOS_TIMEOUT=90 DUETOS_SMOKE_PROFILE=panic-demo "${REPO_ROOT}/tools/qemu/run.sh" >"${LOG}" 2>&1 || true
 
 if [[ "${SYMBOLIZE}" -eq 1 ]]; then
     RESOLVED="$(mktemp)"
@@ -150,13 +156,51 @@ assert_contains '^  rflags[[:space:]]+:'                              "rflags fi
 assert_contains '^  efer[[:space:]]+:'                                "efer field"             "${DUMP_FILE}"
 assert_contains '^  rip[[:space:]]+: 0x[0-9a-f]+  \[[^ ]+\+0x[0-9a-f]+ \([^)]+\)\]' \
                                                                       "rip symbolized inline"  "${DUMP_FILE}"
+assert_contains '^  page-walk for rip=0x[0-9a-f]+ \(cr3=0x[0-9a-f]+\):' \
+                                                                      "rip page-walk header"   "${DUMP_FILE}"
+assert_contains '^    PML4\[0x[0-9a-f]+\] = 0x[0-9a-f]+ \[[^]]+\]'    "rip page-walk PML4 entry" "${DUMP_FILE}"
 assert_contains 'backtrace \(up to 16 frames'                         "backtrace header"       "${DUMP_FILE}"
 assert_contains '^    #0x0+[0-9]  rip=0x[0-9a-f]+  \[[^ ]+\+0x' \
                                                                       "backtrace frame symbolized" "${DUMP_FILE}"
 assert_contains 'stack \(0x[0-9a-f]+ quads from rsp\)'                "stack-dump header"      "${DUMP_FILE}"
-assert_contains '^    \[0x0'                                          "at least one stack quad" "${DUMP_FILE}"
+# Stack pointer can live in either the boot identity map (low VA) or the
+# higher-half kernel stack arena depending on when the panic fires; match
+# either form rather than anchoring on a specific high nibble.
+assert_contains '^    \[0x[0-9a-f]+\] = 0x[0-9a-f]+'                  "at least one stack quad" "${DUMP_FILE}"
+assert_contains 'return-address pointers \(scan of 0x[0-9a-f]+ quads from rsp\)' \
+                                                                      "return-address-pointer header" "${DUMP_FILE}"
+assert_contains '^    \[0x[0-9a-f]+\] -> 0x[0-9a-f]+  \[[^ ]+\+0x[0-9a-f]+ \([^)]+\)\]' \
+                                                                      "return-address-pointer entry symbolized" "${DUMP_FILE}"
+# LBR section is always emitted; the body is either populated entries
+# (real Intel hardware) or a single "(unavailable on this CPU)" line
+# (TCG QEMU + AMD + pre-Goldmont-Plus Intel). Either way the header
+# proves DumpLbr ran.
+assert_contains '^  LBR (\(last-branch records|\(unavailable on this CPU\))' \
+                                                                      "LBR section header"     "${DUMP_FILE}"
 assert_contains '\[panic\] --- log ring'                              "log-ring header"        "${DUMP_FILE}"
-assert_contains '\[D\] core/klog : debug-level sanity line'           "log-ring entry (klog selftest)" "${DUMP_FILE}"
+# Any timestamped log line proves the ring captured something. We used
+# to assert on the klog self-test sanity line, but the ring is bounded
+# (last 64 entries) and a longer boot pushes that line off — the boot
+# trail itself is plenty of evidence the ring is wired in.
+assert_contains '^\[t=[0-9.]+ms\]'                                    "log-ring has at least one timestamped entry" "${DUMP_FILE}"
+
+# Binary minidump assertion. The kernel emits a Windows .dmp via
+# debugcon (port 0xE9 → ${BUILD_DIR}/duetos.dmp) on every panic /
+# trap. The file should be non-empty and start with the four-byte
+# 'MDMP' signature so any debugger (Visual Studio / WinDbg /
+# VSCode-cppvsdbg) can open it.
+MINIDUMP="${BUILD_DIR}/duetos.dmp"
+if [[ ! -s "${MINIDUMP}" ]]; then
+    echo "[test-panic] MISSING: minidump file is empty or absent: ${MINIDUMP}"
+    fail=1
+elif [[ "$(head -c 4 "${MINIDUMP}")" != "MDMP" ]]; then
+    echo "[test-panic] MISSING: minidump magic mismatch (expected 'MDMP'); first 16 bytes:"
+    od -An -tx1 -N 16 "${MINIDUMP}"
+    fail=1
+else
+    SIZE=$(stat -c %s "${MINIDUMP}")
+    echo "[test-panic] minidump OK: ${MINIDUMP} (${SIZE} bytes, MDMP signature verified)"
+fi
 
 if [[ "${fail}" -ne 0 ]]; then
     echo "[test-panic] FAIL — full log below:"

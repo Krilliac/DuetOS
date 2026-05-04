@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/gdt.h"
+#include "arch/x86_64/lbr.h"
 #include "arch/x86_64/nmi_watchdog.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/smp.h"
@@ -13,7 +14,13 @@
 #include "diag/diag_decode.h"
 #include "diag/soft_lockup.h"
 #include "diag/hexdump.h"
+#include "diag/minidump.h"
+#include "loader/dll_loader.h"
+#include "loader/pe_exports.h"
 #include "log/klog.h"
+#include "mm/address_space.h"
+#include "proc/process.h"
+#include "sched/sched.h"
 #include "util/build_config.h"
 #include "util/symbols.h"
 
@@ -54,7 +61,45 @@ constexpr const char* kDumpEndMarker = "=== DUETOS CRASH DUMP END ===\n";
 // lines between BEGIN/END changes in a way a parser would care about.
 // Host-side tools should read this first line and refuse dumps from a
 // newer kernel than they know.
-constexpr u64 kDumpSchemaVersion = 1;
+//
+// v2 (2026-05-03): added "return-address pointers" section between
+// the raw stack-quad dump and the held-locks section. Each line is
+// of shape `[slot] -> value [name+0xOFF (file:line)] [region=...]`
+// and lists only stack slots whose value resolves to a kernel
+// symbol — a focused pointer-to-return-address scan that
+// complements the rbp-chain backtrace and the 16-quad raw dump.
+//
+// v3 (2026-05-03): page-walk block emitted for cr2 (when non-zero)
+// and rip after the register dump and before the backtrace. Each
+// emitted level reads as
+//     PML4[0xIDX] = 0xENTRY [P|RW|...|NX]
+// terminating in `-> phys=0x...` for a successful walk or
+// `-> stop: <reason>` (NotPresent at level / non-canonical /
+// out-of-direct-map). Answers "why did this fault?" without
+// forcing the operator to walk by hand.
+//
+// v4 (2026-05-03): LBR (Architectural Last-Branch-Records)
+// section emitted between the return-address-pointer scan and
+// the held-locks block. On Intel CPUs that support
+// CPUID.7.0.EDX[19] (Goldmont Plus / Ice Lake / etc.) it lists
+// each captured `from -> to` branch with both addresses
+// symbolized. On TCG QEMU / pre-Goldmont-Plus / AMD it emits
+// a single "(unavailable)" line so the section's absence is
+// explicit.
+//
+// v5 (2026-05-03): per-task syscall trail (last 8 syscalls)
+// emitted after the LBR block, only when the current task has
+// recorded entries (kernel-only tasks stay silent). Each line
+// is `[idx] abi=<ABI> nr=0xN args=(0xN,0xN,0xN,0xN) -> ret=0xN tick=0xN`.
+//
+// v6 (2026-05-03): per-process VM info block emitted after the
+// syscall trail, only when CurrentProcess is non-null. Lists
+// pid + name, AddressSpace pml4_phys + region count + budget,
+// vmap span (min/max mapped user VA), and the loaded-DLL
+// table (name + base_va..base_va+size per entry). Lets a
+// reader resolve a user-space rip against the right module
+// without a separate symbolizer pass.
+constexpr u64 kDumpSchemaVersion = 6;
 
 void WriteLabelled(const char* label, u64 value)
 {
@@ -192,6 +237,108 @@ void DumpStack(u64 rsp, int count)
     }
 }
 
+// Scan a wider window of the kernel stack than DumpStack (which
+// caps at 16 quads) and emit only the slots whose value resolves
+// against the embedded symbol table. Each surviving line lists
+// the stack address of the slot — the *pointer to the return
+// address* — alongside the resolved target. Useful when:
+//
+//   - DumpBacktrace's rbp chain stops short (frame-pointer-omitted
+//     leaf functions, corrupted saved-rbp link, hand-written asm
+//     thunks that don't keep an rbp record),
+//   - DumpStack's 16-quad window doesn't reach the real call sites
+//     (locals + spilled registers consume the first frame),
+//   - an investigator wants the slot pointer itself to correlate
+//     against rsp+offset for tampering analysis.
+//
+// 0x80 quads = 1 KiB, comfortably within a 16 KiB kernel stack;
+// PlausibleStackPointer halts the scan cleanly if rsp is wild
+// instead of dereffing into an unmapped page.
+void DumpReturnAddressPointers(u64 rsp)
+{
+    constexpr int kScanQuads = 0x80;
+    arch::SerialWrite("  return-address pointers (scan of ");
+    arch::SerialWriteHex(static_cast<u64>(kScanQuads));
+    arch::SerialWrite(" quads from rsp):\n");
+    int found = 0;
+    for (int i = 0; i < kScanQuads; ++i)
+    {
+        const u64 slot = rsp + static_cast<u64>(i) * 8;
+        if (!PlausibleStackPointer(slot))
+        {
+            break;
+        }
+        const u64 value = *reinterpret_cast<const u64*>(slot);
+        SymbolResolution res{};
+        if (!ResolveAddress(value, &res))
+        {
+            continue;
+        }
+        arch::SerialWrite("    [");
+        arch::SerialWriteHex(slot);
+        arch::SerialWrite("] -> ");
+        arch::SerialWriteHex(value);
+        WriteResolvedAddress(res);
+        WriteVaRegion(value);
+        arch::SerialWrite("\n");
+        ++found;
+    }
+    if (found == 0)
+    {
+        arch::SerialWrite("    (none)\n");
+    }
+}
+
+// Dump the per-CPU Architectural LBR ring. On hardware that
+// supports the feature each entry is `from -> to` with both
+// addresses symbolized when they fall inside known kernel
+// functions. Entry 0 is the youngest branch — i.e. the most
+// recent jump/call/ret/branch the CPU took before LbrFreeze
+// silenced further captures. Sees through frame-pointer omission,
+// asm thunks, and rbp-chain corruption because the records are
+// the CPU's own ground truth.
+//
+// On TCG QEMU and pre-Goldmont-Plus Intel parts (and AMD), LBR
+// is unavailable. The dump emits a single "(LBR unavailable...)"
+// line so the section's absence isn't ambiguous.
+void DumpLbr()
+{
+    if (!arch::LbrAvailable())
+    {
+        arch::SerialWrite("  LBR (last-branch records): (unavailable on this CPU)\n");
+        return;
+    }
+    arch::LbrSnapshot snap;
+    arch::LbrCapture(snap);
+    arch::SerialWrite("  LBR (last-branch records, ");
+    arch::SerialWriteHex(static_cast<u64>(snap.depth));
+    arch::SerialWrite(" entries, newest first; ctl=");
+    arch::SerialWriteHex(snap.ctl_at_capture);
+    arch::SerialWrite("):\n");
+    if (snap.depth == 0)
+    {
+        arch::SerialWrite("    (no entries)\n");
+        return;
+    }
+    for (u32 i = 0; i < snap.depth; ++i)
+    {
+        // Skip empty slots — silicon may report depth N but only
+        // N-k populated records (e.g. fewer than depth taken
+        // branches since LBR was enabled).
+        if (snap.from[i] == 0 && snap.to[i] == 0)
+        {
+            continue;
+        }
+        arch::SerialWrite("    #");
+        arch::SerialWriteHex(static_cast<u64>(i));
+        arch::SerialWrite("  from=");
+        WriteAddressWithSymbol(snap.from[i]);
+        arch::SerialWrite("\n         to  =");
+        WriteAddressWithSymbol(snap.to[i]);
+        arch::SerialWrite("\n");
+    }
+}
+
 void DumpTask()
 {
     // Only safe once PerCpu is installed; before that GSBASE is zero
@@ -219,6 +366,98 @@ void DumpTask()
         arch::SerialWrite("  task     : ");
         WriteCurrentTaskLabel();
         arch::SerialWrite("\n");
+    }
+}
+
+// Dump the current process's VM info: pid, name, AS pointer +
+// region count, vmap min/max VA, and the loaded-DLL table.
+// No-op for kernel-only tasks (CurrentProcess returns null) —
+// the section's absence is itself a signal that the panic
+// happened in a kernel thread, not a user process.
+//
+// Why this matters: bare hex `rip=0x...` plus `[region=
+// user-canonical]` tells the operator "this fault is in user
+// space" but not WHICH binary. With the DLL table, an rip in
+// the range of `kernel32.dll` reads as exactly that — even
+// before the operator runs an off-box symbolizer.
+void DumpProcessVmInfo()
+{
+    Process* proc = CurrentProcess();
+    if (proc == nullptr)
+    {
+        return;
+    }
+    arch::SerialWrite("  process VM info:\n    pid=");
+    arch::SerialWriteHex(proc->pid);
+    arch::SerialWrite(" name=\"");
+    arch::SerialWrite(proc->name != nullptr ? proc->name : "<noname>");
+    arch::SerialWrite("\"\n");
+
+    mm::AddressSpace* as = proc->as;
+    if (as == nullptr)
+    {
+        arch::SerialWrite("    (no address space — kernel-AS task)\n");
+        return;
+    }
+    arch::SerialWrite("    pml4_phys=");
+    arch::SerialWriteHex(as->pml4_phys);
+    arch::SerialWrite("  regions=");
+    arch::SerialWriteHex(static_cast<u64>(as->region_count));
+    arch::SerialWrite("  budget=");
+    arch::SerialWriteHex(as->frame_budget);
+    arch::SerialWrite("\n");
+
+    // Region span — min / max user VA + total page count. We
+    // deliberately don't print every single mapped page (up to
+    // 1024 of them per process) because the resulting block
+    // would dwarf the rest of the dump. The span + count tells
+    // an operator whether rip / rsp fall inside the mapped
+    // user range; per-page detail is available via shell at
+    // post-mortem time.
+    if (as->region_count > 0)
+    {
+        u64 vmin = ~static_cast<u64>(0);
+        u64 vmax = 0;
+        for (u8 i = 0; i < as->region_count; ++i)
+        {
+            const u64 v = as->regions[i].vaddr;
+            if (v < vmin)
+            {
+                vmin = v;
+            }
+            if (v > vmax)
+            {
+                vmax = v;
+            }
+        }
+        arch::SerialWrite("    vmap span: [");
+        arch::SerialWriteHex(vmin);
+        arch::SerialWrite(" .. ");
+        arch::SerialWriteHex(vmax + 0x1000);
+        arch::SerialWrite(")  pages=");
+        arch::SerialWriteHex(static_cast<u64>(as->region_count));
+        arch::SerialWrite("\n");
+    }
+
+    if (proc->dll_image_count > 0)
+    {
+        arch::SerialWrite("  loaded modules (");
+        arch::SerialWriteHex(proc->dll_image_count);
+        arch::SerialWrite(" DLLs):\n");
+        for (u64 i = 0; i < proc->dll_image_count; ++i)
+        {
+            const DllImage& dll = proc->dll_images[i];
+            const char* name = dll.has_exports ? PeExportsDllName(dll.exports) : nullptr;
+            arch::SerialWrite("    [");
+            arch::SerialWriteHex(dll.base_va);
+            arch::SerialWrite(" .. ");
+            arch::SerialWriteHex(dll.base_va + dll.size);
+            arch::SerialWrite(")  size=");
+            arch::SerialWriteHex(dll.size);
+            arch::SerialWrite("  ");
+            arch::SerialWrite(name != nullptr ? name : "<no export name>");
+            arch::SerialWrite("\n");
+        }
     }
 }
 
@@ -425,8 +664,25 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
     // via PlausibleKernelAddress; a wild RIP simply emits a
     // skipped-line and diagnostics continue.
     DumpInstructionBytes("panic-rip", rip, 16);
+    // 4-level page-table walk for the two addresses that most
+    // often answer "why did this fault?". cr2 is the faulting
+    // VA on a #PF (stale outside one, but the walk is still safe
+    // to compute and the leaf entry is informative). rip's walk
+    // surfaces NX / not-present / PS leaves around the failing
+    // fetch — invaluable for #PF on instruction fetch and #UD on
+    // a ripped-out code page. Both calls are allocation-free /
+    // panic-free.
+    if (cr2 != 0)
+    {
+        WritePageWalk("cr2", cr2);
+    }
+    WritePageWalk("rip", rip);
     DumpBacktrace(rbp);
     DumpStack(rsp, 16);
+    DumpReturnAddressPointers(rsp);
+    DumpLbr();
+    sched::DumpCurrentTaskSyscallTrail();
+    DumpProcessVmInfo();
     DumpHeldLocksLocal();
     DumpLogRing();
     DumpInflightScopes();
@@ -455,6 +711,10 @@ void Panic(const char* subsystem, const char* message)
     // DumpDiagnostics is writing.
     arch::NmiWatchdogDisable();
     duetos::diag::SoftLockupDisable();
+    // Freeze the per-CPU LBR ring NOW so the dump-emission code
+    // path itself doesn't push every SerialWrite call into the
+    // most-recent slot. No-op when LBR isn't supported.
+    arch::LbrFreeze();
 
     // Bypass the serial spinlock for the rest of this function.
     // A panic that fires while a peer CPU was already mid-
@@ -490,6 +750,16 @@ void Panic(const char* subsystem, const char* message)
     DumpPeerCpuSnapshots();
 
     EndCrashDump();
+
+    // Binary minidump egress AFTER the human-readable text dump
+    // has fully printed: the textual record is the highest-
+    // priority artefact (it's all an operator on real hardware
+    // gets), so it must finish first. The .dmp goes out via
+    // debugcon (port 0xE9 → host file under QEMU); on real
+    // hardware the OUTBs go nowhere and this is a no-op cost.
+    duetos::diag::minidump::EmitMinidump(reinterpret_cast<u64>(__builtin_return_address(0)), arch::ReadRsp(),
+                                         arch::ReadRbp(), /*exception_code=*/0);
+
     arch::SerialWrite("[panic] CPU halted — no recovery.\n");
     arch::Halt();
 }
@@ -499,6 +769,10 @@ void PanicWithValue(const char* subsystem, const char* message, u64 value)
     arch::Cli();
     arch::NmiWatchdogDisable();
     duetos::diag::SoftLockupDisable();
+    // Freeze the per-CPU LBR ring NOW so the dump-emission code
+    // path itself doesn't push every SerialWrite call into the
+    // most-recent slot. No-op when LBR isn't supported.
+    arch::LbrFreeze();
     // See Panic() above for why we bypass the serial spinlock from
     // here on.
     arch::SerialEnterPanicMode();
@@ -518,6 +792,16 @@ void PanicWithValue(const char* subsystem, const char* message, u64 value)
     DumpPeerCpuSnapshots();
 
     EndCrashDump();
+
+    // Binary minidump egress AFTER the human-readable text dump
+    // has fully printed: the textual record is the highest-
+    // priority artefact (it's all an operator on real hardware
+    // gets), so it must finish first. The .dmp goes out via
+    // debugcon (port 0xE9 → host file under QEMU); on real
+    // hardware the OUTBs go nowhere and this is a no-op cost.
+    duetos::diag::minidump::EmitMinidump(reinterpret_cast<u64>(__builtin_return_address(0)), arch::ReadRsp(),
+                                         arch::ReadRbp(), /*exception_code=*/0);
+
     arch::SerialWrite("[panic] CPU halted — no recovery.\n");
     arch::Halt();
 }

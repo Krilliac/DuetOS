@@ -58,6 +58,7 @@
 #include "mm/kstack.h"
 #include "mm/paging.h"
 #include "sync/spinlock.h"
+#include "time/tick.h"
 #include "util/debug_assert.h"
 #include "util/string.h"
 
@@ -211,6 +212,28 @@ struct Task
     // sched lock; reads outside the scheduler are racy by design
     // (a snapshot for diagnostics is fine).
     u32 suspend_count;
+
+    // Per-task syscall trail. Ring of the most recent
+    // kSyscallTrailSize syscalls (newest at trail_head - 1, mod
+    // size). Pushed by SyscallTrailRecord from each dispatcher,
+    // consumed by DumpCurrentTaskSyscallTrail on panic. Storage
+    // is inline so kernel-only tasks pay the (modest) memory
+    // cost but never write to it; the dumper skips empty rings.
+    struct SyscallTrailEntry
+    {
+        u32 nr;
+        u8 abi;
+        u8 _pad[3];
+        u64 args[4];
+        u64 ret;
+        u64 ts_tick;
+    };
+    SyscallTrailEntry trail[kSyscallTrailSize];
+    // Next slot to write; the most recent entry is `trail[(trail_head - 1) % size]`
+    // and `trail_count` clamps how many entries are valid (so the
+    // dumper doesn't walk into pre-init zeros).
+    u32 trail_head;
+    u32 trail_count;
 };
 
 namespace
@@ -1369,6 +1392,139 @@ const char* TaskName(const Task* t)
         return "<null>";
     }
     return (t->name != nullptr) ? t->name : "<noname>";
+}
+
+namespace
+{
+
+const char* SyscallAbiName(u8 abi)
+{
+    switch (abi)
+    {
+    case kSyscallAbiNative:
+        return "native";
+    case kSyscallAbiLinux:
+        return "linux";
+    case kSyscallAbiWin32:
+        return "win32";
+    }
+    return "?";
+}
+
+} // namespace
+
+void SyscallTrailRecord(u8 abi, u32 nr, u64 arg0, u64 arg1, u64 arg2, u64 arg3, u64 ret)
+{
+    Task* self = Current();
+    if (self == nullptr)
+    {
+        return; // pre-SchedInit syscall, or non-task context — drop
+    }
+    const u32 idx = self->trail_head % kSyscallTrailSize;
+    Task::SyscallTrailEntry& e = self->trail[idx];
+    e.nr = nr;
+    e.abi = abi;
+    e.args[0] = arg0;
+    e.args[1] = arg1;
+    e.args[2] = arg2;
+    e.args[3] = arg3;
+    e.ret = ret;
+    e.ts_tick = ::duetos::time::TickCount();
+    self->trail_head = idx + 1;
+    if (self->trail_count < kSyscallTrailSize)
+    {
+        self->trail_count++;
+    }
+}
+
+void SyscallTrailSelfTest()
+{
+    Task* self = Current();
+    if (self == nullptr)
+    {
+        arch::SerialWrite("[sched] syscall-trail self-test SKIPPED (no current task)\n");
+        return;
+    }
+    // Snapshot existing state and restore on exit so the test
+    // never destroys live trail data.
+    const u32 saved_head = self->trail_head;
+    const u32 saved_count = self->trail_count;
+
+    self->trail_head = 0;
+    self->trail_count = 0;
+
+    SyscallTrailRecord(kSyscallAbiNative, /*nr=*/1, 0xa, 0xb, 0xc, 0xd, 0x100);
+    SyscallTrailRecord(kSyscallAbiLinux, /*nr=*/2, 0x1, 0x2, 0x3, 0x4, 0x200);
+    SyscallTrailRecord(kSyscallAbiWin32, /*nr=*/3, 0xfeed, 0xbeef, 0xdead, 0xcafe, 0x300);
+
+    if (self->trail_count != 3 || self->trail_head != 3)
+    {
+        core::PanicWithValue("sched/trail", "self-test: count/head mismatch", self->trail_count);
+    }
+    const Task::SyscallTrailEntry& newest = self->trail[2];
+    if (newest.nr != 3 || newest.abi != kSyscallAbiWin32 || newest.ret != 0x300)
+    {
+        core::PanicWithValue("sched/trail", "self-test: newest entry wrong", newest.ret);
+    }
+    // Wrap-around test: push kSyscallTrailSize more entries,
+    // verify count clamps and head wraps.
+    for (u32 i = 0; i < kSyscallTrailSize; ++i)
+    {
+        SyscallTrailRecord(kSyscallAbiNative, 100 + i, 0, 0, 0, 0, 0xfa00 + i);
+    }
+    if (self->trail_count != kSyscallTrailSize)
+    {
+        core::PanicWithValue("sched/trail", "self-test: count not clamped to size", self->trail_count);
+    }
+    arch::SerialWrite("[sched] syscall-trail self-test OK (record + wrap + count clamp)\n");
+
+    // Wipe synthetic data + restore pre-test state.
+    for (u32 i = 0; i < kSyscallTrailSize; ++i)
+    {
+        self->trail[i] = Task::SyscallTrailEntry{};
+    }
+    self->trail_head = saved_head;
+    self->trail_count = saved_count;
+}
+
+void DumpCurrentTaskSyscallTrail()
+{
+    Task* self = Current();
+    if (self == nullptr || self->trail_count == 0)
+    {
+        return;
+    }
+    arch::SerialWrite("  syscall trail (last ");
+    arch::SerialWriteHex(static_cast<u64>(self->trail_count));
+    arch::SerialWrite(" syscalls, newest first):\n");
+    // Walk newest -> oldest. trail_head points at the next slot
+    // to write; the most recent entry is at (trail_head - 1).
+    const u32 count = self->trail_count;
+    for (u32 i = 0; i < count; ++i)
+    {
+        const u32 idx = (self->trail_head + kSyscallTrailSize - 1 - i) % kSyscallTrailSize;
+        const Task::SyscallTrailEntry& e = self->trail[idx];
+        arch::SerialWrite("    [");
+        arch::SerialWriteHex(static_cast<u64>(i));
+        arch::SerialWrite("] abi=");
+        arch::SerialWrite(SyscallAbiName(e.abi));
+        arch::SerialWrite(" nr=");
+        arch::SerialWriteHex(static_cast<u64>(e.nr));
+        arch::SerialWrite(" args=(");
+        for (u32 a = 0; a < 4; ++a)
+        {
+            if (a != 0)
+            {
+                arch::SerialWrite(", ");
+            }
+            arch::SerialWriteHex(e.args[a]);
+        }
+        arch::SerialWrite(") -> ret=");
+        arch::SerialWriteHex(e.ret);
+        arch::SerialWrite(" tick=");
+        arch::SerialWriteHex(e.ts_tick);
+        arch::SerialWrite("\n");
+    }
 }
 
 u64 SchedCurrentKernelStackTop()

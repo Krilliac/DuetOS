@@ -246,6 +246,54 @@ u64 TaskId(const Task* t);
 /// the crash-dump path to label the current task on a panic.
 const char* TaskName(const Task* t);
 
+// ---------------------------------------------------------------------------
+// Per-task syscall trail
+// ---------------------------------------------------------------------------
+//
+// A small ring of the most recent SYS_*/Linux/Win32-NT syscalls
+// the calling task issued, captured at dispatcher entry/exit.
+// Used by the panic dump to answer "what was this task doing
+// just before it crashed?" — frame backtraces only tell you the
+// kernel call chain at the moment of the fault, not the syscall
+// trajectory that led there.
+//
+// One ring per task. Storage is inline in the Task struct (no
+// extra allocation, no per-task pointer chase). Kernel-only
+// tasks never push entries because they don't issue syscalls;
+// their ring stays all-zeros and the dumper skips them.
+
+enum SyscallAbi : duetos::u8
+{
+    kSyscallAbiNative = 0, // int 0x80 — kernel/syscall/syscall.cpp
+    kSyscallAbiLinux = 1,  // syscall — kernel/subsystems/linux/syscall.cpp
+    kSyscallAbiWin32 = 2,  // NT thunks — kernel/subsystems/win32/...
+};
+
+inline constexpr duetos::u32 kSyscallTrailSize = 8;
+
+/// Record one syscall event into the calling task's trail ring.
+/// Called from each dispatcher just before returning. Cheap (one
+/// store per field, one ring index update). Safe from any context
+/// the dispatcher itself can run in. No-op when CurrentTask is
+/// null (pre-SchedInit) — the dispatch tables are wired through
+/// SchedInit so this is a defensive belt.
+void SyscallTrailRecord(duetos::u8 abi, duetos::u32 nr, duetos::u64 arg0, duetos::u64 arg1, duetos::u64 arg2,
+                        duetos::u64 arg3, duetos::u64 ret);
+
+/// Emit the calling task's syscall trail to serial (newest first).
+/// Called from the panic dump path. Skips tasks with empty rings
+/// silently — kernel threads have nothing to report and their
+/// section header would just be noise.
+void DumpCurrentTaskSyscallTrail();
+
+/// Boot-time check: stamp the calling task's trail with a known
+/// pattern, verify the ring head + count + ordering, then reset
+/// the trail to empty so subsequent crash dumps don't carry
+/// synthetic noise. Panics on mismatch. Cheap (a few stores +
+/// reads). Called from kernel_main alongside the other diag
+/// self-tests when DUETOS_BOOT_SELFTESTS is on.
+void SyscallTrailSelfTest();
+
 /// Top (high address) of the current task's kernel stack. Returns 0 for
 /// the boot task (it never had a scheduler-managed kernel stack — it
 /// runs on the boot.S stack, which is irrelevant for ring-3 RSP0

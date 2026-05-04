@@ -33,9 +33,38 @@ namespace duetos::arch
 /// COM1 I/O base port on standard PC hardware.
 inline constexpr u16 kCom1Port = 0x3F8;
 
+/// COM2 I/O base port — used by the GDB remote-serial-protocol stub
+/// (see `kernel/diag/gdb_server.{h,cpp}`). Kept off the human log
+/// stream on COM1 so kernel printf and a live GDB session don't
+/// fight for the same wire.
+inline constexpr u16 kCom2Port = 0x2F8;
+
 /// Initialize COM1 to 115200 baud, 8N1, FIFO enabled, interrupts disabled.
 /// Safe to call before any other subsystem.
 void SerialInit();
+
+/// Same shape as `SerialInit` but for COM2. Idempotent. Wired
+/// from `kernel_main` only when DUETOS_GDB_SERVER is enabled —
+/// otherwise the port stays untouched (and the GDB stub stays
+/// dormant).
+void SerialCom2Init();
+
+/// Write one byte to COM2, polling LSR until the THR is empty.
+/// No locking — the GDB stub is single-flight by construction
+/// (one CPU is paused in the stop loop while peers are NMI-halted
+/// or simply not driving the stub).
+void SerialCom2WriteByte(u8 byte);
+
+/// Block until a byte arrives on COM2's RBR, then return it.
+/// Used by the GDB stub's stop loop to pump bytes from the
+/// remote debugger.
+u8 SerialCom2ReadByteBlocking();
+
+/// Non-blocking COM2 read. Returns the byte in the low 8 bits,
+/// or -1 if the RBR is empty. Lets the stub poll for "is there
+/// a control packet waiting?" without committing to a blocking
+/// wait.
+duetos::i32 SerialCom2ReadByteNonblocking();
 
 /// Write a single byte to COM1 (polling — blocks until THR is empty).
 /// Acquires the serial spinlock for the duration of one byte.

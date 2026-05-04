@@ -21,7 +21,8 @@
             "displayName": "x86_64 kernel + userland, debug",
             "inherits": "x86_64-base",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Debug"
+                "CMAKE_BUILD_TYPE": "Debug",
+                "DUETOS_GDB_SERVER": "ON"
             }
         },
         {

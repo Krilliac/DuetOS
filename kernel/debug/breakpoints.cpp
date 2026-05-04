@@ -78,6 +78,13 @@ struct BpEntry
     u64 stopped_task_id;
     arch::TrapFrame* stopped_frame;
     mm::AddressSpace* stopped_as;
+
+    // Optional trap-context callback fired on hit (after the
+    // reinsert / accounting). Used by the GDB stub to enter the
+    // stop loop on a hit; nullptr for normal kernel-installed
+    // BPs. Stored as a plain function pointer (no captures) to
+    // keep the hot path branch-free when unused.
+    BpHitCallback on_hit;
 };
 
 // Tagged with `kLockClassBreakpoints` for lockdep.
@@ -321,7 +328,7 @@ void BpInit()
     KLOG_INFO("debug/bp", "breakpoint subsystem online");
 }
 
-BreakpointId BpInstallSoftware(u64 kernel_va, bool suspend_on_hit, BpError* err)
+BreakpointId BpInstallSoftware(u64 kernel_va, bool suspend_on_hit, BpError* err, BpHitCallback on_hit)
 {
     auto set_err = [&](BpError e)
     {
@@ -363,13 +370,15 @@ BreakpointId BpInstallSoftware(u64 kernel_va, bool suspend_on_hit, BpError* err)
     slot->stopped_task_id = 0;
     slot->stopped_frame = nullptr;
     slot->stopped_as = nullptr;
+    slot->on_hit = on_hit;
     PokeByte(kernel_va, 0xCC);
     KLOG_INFO_2V("debug/bp", "SW BP installed", "addr", kernel_va, "id", slot->id);
     set_err(BpError::None);
     return {slot->id};
 }
 
-BreakpointId BpInstallHardware(u64 va, BpKind kind, BpLen len, u64 owner_pid, bool suspend_on_hit, BpError* err)
+BreakpointId BpInstallHardware(u64 va, BpKind kind, BpLen len, u64 owner_pid, bool suspend_on_hit, BpError* err,
+                               BpHitCallback on_hit)
 {
     auto set_err = [&](BpError e)
     {
@@ -426,6 +435,7 @@ BreakpointId BpInstallHardware(u64 va, BpKind kind, BpLen len, u64 owner_pid, bo
     e->stopped_task_id = 0;
     e->stopped_frame = nullptr;
     e->stopped_as = nullptr;
+    e->on_hit = on_hit;
     ApplyDrSlot(u8(s), va, KindToRw(kind), LenToDr7(len));
     KLOG_INFO_2V("debug/bp", "HW BP installed", "addr", va, "id", e->id);
     set_err(BpError::None);
@@ -688,6 +698,7 @@ bool BpHandleBreakpoint(arch::TrapFrame* frame)
     // so the patched address is rip - 1.
     const u64 bp_addr = frame->rip - 1;
     u32 hit_id = 0;
+    BpHitCallback hit_callback = nullptr;
     {
         sync::SpinLockGuard g(g_lock);
         BpEntry* e = FindSwByAddr(bp_addr);
@@ -709,9 +720,16 @@ bool BpHandleBreakpoint(arch::TrapFrame* frame)
         g_reinsert.orig_byte = e->orig_byte;
         KLOG_INFO_2V("debug/bp", "SW BP hit", "addr", bp_addr, "hits", e->hit_count);
         hit_id = e->id;
+        hit_callback = e->on_hit;
     }
-    // Drop g_lock before the potential block — the inspector
-    // (`bp regs` / `BpResume`) needs to be able to acquire it.
+    // Drop g_lock before invoking the on-hit callback OR the
+    // potential block — both can re-enter through APIs that
+    // need the lock (the inspector for MaybeSuspend; the GDB
+    // stop loop for the callback).
+    if (hit_callback != nullptr)
+    {
+        hit_callback({hit_id}, frame);
+    }
     MaybeSuspend(hit_id, frame);
     return true;
 }
@@ -754,6 +772,8 @@ bool BpHandleDebug(arch::TrapFrame* frame)
 
     // Hardware-breakpoint hits. B0..B3 map to DR0..DR3; sticky
     // until software clears them by writing DR6.
+    BpHitCallback hit_callback = nullptr;
+    u32 hit_callback_id = 0;
     if ((dr6 & dr::kDr6Bn) != 0)
     {
         sync::SpinLockGuard g(g_lock);
@@ -772,6 +792,11 @@ bool BpHandleDebug(arch::TrapFrame* frame)
             claimed = true;
             if (e->suspend_on_hit && suspend_id == 0)
                 suspend_id = e->id;
+            if (e->on_hit != nullptr && hit_callback == nullptr)
+            {
+                hit_callback = e->on_hit;
+                hit_callback_id = e->id;
+            }
         }
         // For instruction (execute) breakpoints the Intel SDM says
         // the CPU sets RFLAGS.RF (Resume Flag) in the pushed image
@@ -787,6 +812,15 @@ bool BpHandleDebug(arch::TrapFrame* frame)
     // CPU set survive iretq and would surface as a phantom hit
     // on the next unrelated #DB.
     dr::WriteDr6(dr::kDr6InitValue);
+
+    // GDB-style on-hit callback runs AFTER DR6 clear (so a
+    // GDB session can read DR6 and see the cleared state if it
+    // wants to) and BEFORE MaybeSuspend (the wait-queue path
+    // would compete for the trap-context).
+    if (hit_callback != nullptr)
+    {
+        hit_callback({hit_callback_id}, frame);
+    }
 
     // Suspend-on-hit runs AFTER DR6 clear so the task resumes with
     // a clean status register next time it runs an instruction.

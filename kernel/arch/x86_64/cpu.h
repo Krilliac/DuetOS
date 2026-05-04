@@ -161,4 +161,18 @@ inline u64 ReadEfer()
     return (static_cast<u64>(hi) << 32) | lo;
 }
 
+inline u64 ReadMsr(u32 msr)
+{
+    u32 lo, hi;
+    asm volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
+    return (static_cast<u64>(hi) << 32) | lo;
+}
+
+inline void WriteMsr(u32 msr, u64 value)
+{
+    const u32 lo = static_cast<u32>(value & 0xFFFFFFFFu);
+    const u32 hi = static_cast<u32>(value >> 32);
+    asm volatile("wrmsr" : : "c"(msr), "a"(lo), "d"(hi));
+}
+
 } // namespace duetos::arch

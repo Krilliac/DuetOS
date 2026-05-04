@@ -1972,6 +1972,14 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
     }
     frame->rax = static_cast<u64>(rv);
 
+    // Per-task syscall trail — captures (nr, args[4], ret, ts)
+    // for the panic dump. Reads args from the current frame; the
+    // dispatcher's own translations to/from u64 keep these stable
+    // across the switch (the handlers receive the typed copies,
+    // not the live frame). One push per dispatch — cheap.
+    ::duetos::sched::SyscallTrailRecord(::duetos::sched::kSyscallAbiLinux, static_cast<u32>(nr), frame->rdi, frame->rsi,
+                                        frame->rdx, frame->r10, frame->rax);
+
     // ITIMER_REAL deadline check — if alarm() / setitimer() has
     // armed a deadline that has now passed, OR SIGALRM into
     // pending_signals so the signal-deliver pass below picks it

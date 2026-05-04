@@ -78,9 +78,13 @@ cmake --preset "${PRESET}" -DDUETOS_TRAP_DEMO=ON >/dev/null
 echo "[test-trap] building"
 cmake --build "${BUILD_DIR}" >/dev/null
 
-echo "[test-trap] booting (10 s timeout)"
+# Boot via the qemu-smoke fast-path (timeout=0 grub.cfg) so the
+# budget covers actual kernel work rather than the 10 s interactive
+# menu auto-select. The post-grub debug-build init still has to
+# reach the deliberate ud2 at the end of kernel_main.
+echo "[test-trap] booting (90 s timeout, smoke=trap-demo)"
 LOG="$(mktemp)"
-DUETOS_TIMEOUT=10 "${REPO_ROOT}/tools/qemu/run.sh" >"${LOG}" 2>&1 || true
+DUETOS_TIMEOUT=90 DUETOS_SMOKE_PROFILE=trap-demo "${REPO_ROOT}/tools/qemu/run.sh" >"${LOG}" 2>&1 || true
 
 # ---- dump extraction ----------------------------------------------------
 
@@ -127,10 +131,38 @@ assert_contains '^  symtab_entries : 0x[0-9a-f]*[1-9a-f][0-9a-f]*' \
                                                             "symbol table populated" "${DUMP_FILE}"
 assert_contains '^  rip[[:space:]]+: 0x[0-9a-f]+  \[[^ ]+\+0x[0-9a-f]+ \([^)]+\)\]' \
                                                             "rip symbolized inline"  "${DUMP_FILE}"
+assert_contains '^  page-walk for rip=0x[0-9a-f]+ \(cr3=0x[0-9a-f]+\):' \
+                                                            "rip page-walk header"   "${DUMP_FILE}"
+assert_contains '^    PML4\[0x[0-9a-f]+\] = 0x[0-9a-f]+ \[[^]]+\]'  "rip page-walk PML4 entry" "${DUMP_FILE}"
 assert_contains 'backtrace \(up to 16 frames'               "backtrace header"       "${DUMP_FILE}"
+# LBR section header — body depends on the host (real Intel
+# hardware vs TCG/AMD/pre-Goldmont-Plus); presence proves the
+# dispatcher's panic path ran DumpLbr.
+assert_contains '^  LBR (\(last-branch records|\(unavailable on this CPU\))' \
+                                                            "LBR section header"     "${DUMP_FILE}"
 assert_contains '^    #0x0+[0-9]  rip=0x[0-9a-f]+  \[[^ ]+\+0x' \
                                                             "backtrace frame symbolized" "${DUMP_FILE}"
+assert_contains 'return-address pointers \(scan of 0x[0-9a-f]+ quads from rsp\)' \
+                                                            "return-address-pointer header" "${DUMP_FILE}"
 assert_contains '\[panic\] --- log ring'                    "log-ring header"        "${DUMP_FILE}"
+
+# Binary minidump assertion. The kernel emits a Windows .dmp via
+# debugcon (port 0xE9 → ${BUILD_DIR}/duetos.dmp) on every panic /
+# trap. The file should be non-empty and start with the four-byte
+# 'MDMP' signature so any debugger (Visual Studio / WinDbg /
+# VSCode-cppvsdbg) can open it.
+MINIDUMP="${BUILD_DIR}/duetos.dmp"
+if [[ ! -s "${MINIDUMP}" ]]; then
+    echo "[test-trap] MISSING: minidump file is empty or absent: ${MINIDUMP}"
+    fail=1
+elif [[ "$(head -c 4 "${MINIDUMP}")" != "MDMP" ]]; then
+    echo "[test-trap] MISSING: minidump magic mismatch (expected 'MDMP'); first 16 bytes:"
+    od -An -tx1 -N 16 "${MINIDUMP}"
+    fail=1
+else
+    SIZE=$(stat -c %s "${MINIDUMP}")
+    echo "[test-trap] minidump OK: ${MINIDUMP} (${SIZE} bytes, MDMP signature verified)"
+fi
 
 if [[ "${fail}" -ne 0 ]]; then
     echo "[test-trap] FAIL — full log below:"

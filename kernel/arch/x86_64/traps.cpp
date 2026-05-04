@@ -32,15 +32,17 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/lapic.h"
+#include "arch/x86_64/lbr.h"
 #include "arch/x86_64/nmi_watchdog.h"
 #include "arch/x86_64/serial.h"
 
 #include "diag/diag_decode.h"
 #include "diag/event_trace.h"
 #include "diag/fault_react.h"
-#include "diag/gdb_stub.h"
+#include "diag/gdb_server.h"
 #include "security/fault_domain.h"
 #include "diag/hexdump.h"
+#include "diag/minidump.h"
 #include "diag/log_names.h"
 #include "core/panic.h"
 #include "util/symbols.h"
@@ -635,6 +637,20 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     {
         return;
     }
+    // After the in-kernel breakpoints subsystem said "not mine",
+    // route to the GDB stub IF an external debugger has been
+    // wired up via DUETOS_GDB_SERVER. The stub's RouteToStopLoop
+    // returns false when no sink is published, in which case the
+    // existing recoverable-trap path below picks the int3 / #DB
+    // up the same way it always did.
+    if (frame->vector == 3 && ::duetos::diag::gdb::HandleSoftwareBreakpoint(frame))
+    {
+        return;
+    }
+    if (frame->vector == 1 && ::duetos::diag::gdb::HandleDebugException(frame))
+    {
+        return;
+    }
 
     const TrapResponse policy = TrapResponseFor(frame->vector, from_user);
 
@@ -733,7 +749,7 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // attach (or a stop-at-fault GDB session) sees the real
     // register values from the moment of fault. Single struct
     // copy + pointer publish; cheap. (D7-followup, 2026-04-28.)
-    static ::duetos::diag::gdb::GdbRegSnapshot s_gdb_snap;
+    static ::duetos::diag::gdb::GdbServerRegSnapshot s_gdb_snap;
     s_gdb_snap.rax = frame->rax;
     s_gdb_snap.rbx = frame->rbx;
     s_gdb_snap.rcx = frame->rcx;
@@ -758,13 +774,13 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     s_gdb_snap.es = 0;
     s_gdb_snap.fs = 0;
     s_gdb_snap.gs = 0;
-    ::duetos::diag::gdb::GdbStubPublishRegisters(&s_gdb_snap);
+    ::duetos::diag::gdb::GdbServerPublishRegisters(&s_gdb_snap);
     // Also publish as writable so a connected GDB session's `G`
     // packet can apply edits before the operator continues. The
     // edits land in s_gdb_snap; copying them back into the trap
     // frame on resume is the next D7-followup once a stop-at-
     // fault flow exists.
-    ::duetos::diag::gdb::GdbStubPublishWritableRegisters(&s_gdb_snap);
+    ::duetos::diag::gdb::GdbServerPublishWritableRegisters(&s_gdb_snap);
     //
     // Fire the kernel-page-fault probe specifically for vec 14 so
     // the log ring records this as a structured event before the
@@ -786,6 +802,10 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // watchdog interval; a PMI overflow during the dump would
     // re-enter the trap dispatcher and scramble the output.
     NmiWatchdogDisable();
+    // Freeze the LBR ring before any further branches in this
+    // dispatcher push real call sites out of the most-recent
+    // entries. No-op when LBR isn't available.
+    LbrFreeze();
     // Halt peer CPUs the same way `core::Panic` does — they're
     // running against potentially-corrupt shared state once we've
     // taken a fault in kernel mode, and their NMI handlers commit
@@ -904,6 +924,24 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     core::DumpPeerCpuSnapshots();
 
     core::EndCrashDump();
+
+    // Binary minidump egress — see core::Panic for rationale.
+    // For traps we know the exception vector, so map it to a
+    // recognisable NTSTATUS code so a debugger that opens the
+    // .dmp shows the right exception kind:
+    //   #UD (vector 6)  → STATUS_ILLEGAL_INSTRUCTION 0xC000001D
+    //   #PF (vector 14) → STATUS_ACCESS_VIOLATION    0xC0000005
+    //   else            → STATUS_BREAKPOINT          0x80000003 (fallback)
+    // Use the TrapFrame-aware overload so all 16 GPRs + segment
+    // selectors + rflags land in the dump's CONTEXT_X64 — not
+    // just rip/rsp/rbp like the soft-panic path.
+    u32 ntstatus = 0x80000003;
+    if (frame->vector == 6)
+        ntstatus = 0xC000001D;
+    else if (frame->vector == 14)
+        ntstatus = 0xC0000005;
+    duetos::diag::minidump::EmitMinidumpFromTrapFrame(frame, ntstatus);
+
     SerialWrite("[panic] Halting CPU.\n");
     Halt();
 }

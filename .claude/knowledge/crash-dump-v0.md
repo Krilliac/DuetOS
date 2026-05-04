@@ -2,7 +2,7 @@
 
 **Type**: Observation
 **Status**: Active
-**Last updated**: 2026-04-25
+**Last updated**: 2026-05-03
 **Commit**: (see current branch HEAD)
 
 ## Summary
@@ -96,6 +96,9 @@ the crash dump, so BSS drift is irrelevant.
   stack (0x10 quads from rsp):
     [0xNN] = 0xNN  [fn+0xOFF (file:line)]
     ...
+  return-address pointers (scan of 0x80 quads from rsp):
+    [0xSLOT] -> 0xVALUE  [fn+0xOFF (file:line)] [region=k.text]
+    ...
 [panic] --- log ring (last 0xNN entries, oldest first) ---
   [I] ...
   ...
@@ -108,11 +111,378 @@ annotation when the value falls in plausible kernel code range — surfaces
 stale callback pointers / vtable spills / saved-RIP residue without forcing
 the operator to re-symbolize by hand.
 
-The schema is v1. Bump `kDumpSchemaVersion` in `core/panic.cpp` when the layout
-changes in a way a parser would care about. The bit-decoded suffixes (e.g.
-`[PE|WP|PG]`) live on the SAME line as the existing `<label> : <hex>` token
-sequence, so a parser that anchors on `<label> : 0x[0-9a-f]+` keeps working;
+The schema is v6 (v1 → v2 added `return-address pointers`;
+v2 → v3 added the `page-walk` block; v3 → v4 added the LBR
+block; v4 → v5 added the per-task syscall trail; v5 → v6 added
+the per-process VM-info block — both syscall-trail and VM-info
+are conditional on the current task being a user task and only
+emit when there's something to say). Bump `kDumpSchemaVersion`
+in `core/panic.cpp` when the layout changes in a way a parser
+would care about. The bit-decoded suffixes (e.g. `[PE|WP|PG]`)
+live on the SAME line as the existing `<label> : <hex>` token sequence,
+so a parser that anchors on `<label> : 0x[0-9a-f]+` keeps working;
 human readers get the meaning for free.
+
+### Return-address pointer scan
+
+`DumpReturnAddressPointers(rsp)` (in `kernel/core/panic.cpp`)
+complements the 16-frame `DumpBacktrace` (rbp-chain walker) and the
+16-quad `DumpStack` (raw quad dump) by scanning a wider window —
+0x80 quads = 1 KiB — and emitting **only** the slots whose value
+resolves against the embedded symbol table. Each surviving line
+prints the **stack pointer of the slot** alongside the resolved
+target:
+
+```
+  return-address pointers (scan of 0x80 quads from rsp):
+    [0xffffffff801099e8] -> 0xffffffff80130964  [kernel_main+0x21c4 (kernel/core/main.cpp:456)] [region=k.text]
+    [0xffffffff801099f8] -> 0xffffffff80138f17  [duetos::core::Panic+0xa7 (kernel/core/panic.cpp:500)] [region=k.text]
+    ...
+```
+
+Why the slot pointer matters as well as the value:
+
+- An rbp chain that stops short (frame-pointer-omitted leaf
+  function, corrupted saved-rbp link, hand-written asm thunk
+  without an rbp record) leaves the deeper frames invisible to
+  `DumpBacktrace`. The scan finds them anyway — every `call`
+  instruction leaves its return address on the stack regardless
+  of frame-pointer discipline.
+- The 16-quad raw dump bottoms out before reaching the real
+  call sites once locals + spilled registers consume the first
+  frame. 1 KiB is comfortably within a 16 KiB kernel stack and
+  catches typical 8+ deep init-list / closure chains.
+- Filtering to "value resolves to kernel code" focuses the
+  output: register spills, local variables, and stack-painted
+  cookies are skipped. What's left is exclusively return-address
+  shaped.
+- Naming the **slot pointer** lets an investigator correlate
+  against `rsp+offset` for tampering analysis (e.g. saved-RIP
+  smash detection — `held lock acquired-rip` already does this
+  but only for lock-acquire sites).
+
+Bounded by `PlausibleStackPointer` so a wild rsp halts the scan
+cleanly instead of dereffing into an unmapped page; emits
+`(none)` when zero slots resolve so the section's presence is
+unambiguous.
+
+### Page-walk for cr2 and rip
+
+`mm::SnapshotPageWalk(virt)` (in `kernel/mm/paging.cpp`) walks
+the active CR3's PML4 four levels down for `virt` and returns a
+structured `PageWalkSnapshot` covering every visited level (raw
+entry, index, leaf physical address) plus a `PageWalkStop`
+reason explaining where the walk terminated. Allocation-free,
+panic-free — the boot direct map is reached via a local
+`safe_table_ptr` that returns `nullptr` on out-of-range phys
+instead of panicking like `mm::PhysToVirt` would.
+
+`core::WritePageWalk(label, virt)` (in `kernel/diag/diag_decode.cpp`)
+formats the snapshot for the crash dump:
+
+```
+  page-walk for rip=0xffffffff80130964 (cr3=0x0000000000102000):
+    PML4[0x1ff] = 0x0000000000104023 [P|RW|A]
+    PDPT[0x1fe] = 0x0000000000105023 [P|RW|A]
+    PD  [0x000] = 0x00000000007b3023 [P|RW|A]
+    PT  [0x130] = 0x0000000000130021 [P|A]
+    -> phys=0x0000000000130964 (4 KiB)
+```
+
+Wired into `DumpDiagnostics` between the IST canary line and the
+backtrace. cr2 walk is skipped when cr2 is zero (no recent fault
+on this CPU); rip walk fires unconditionally because every panic
+has a meaningful rip and an NX/non-present rip page is the
+shortest path to "why did the CPU stop?".
+
+What it surfaces for free:
+
+- `[P|A]` (no `RW`) on a `.text` PT entry confirms W^X is intact
+  on the failing page; presence of `RW` on a `.text` PT is the
+  signature of an attacker who flipped the bit (the
+  branch-NOP-attack-v0 detector class).
+- `[P|RW|US|...|NX]` on a user-space PT entry shows whether NX
+  was honoured on a #PF(instr) — the `instr` bit in the page-
+  fault error code stops being a mystery.
+- `-> stop: PML4 entry not present` (or PDPT/PD/PT) names the
+  exact level where the page table walk gave up — a #PF on a
+  freshly-allocated address that the kernel forgot to map shows
+  `NotPresentPdpt` (entire 1 GiB region missing) versus `NotPresentPt`
+  (single page missing) and a reader can route diagnosis without
+  re-running the walker by hand.
+- `2 MiB PS leaf` / `1 GiB PS leaf` make the boot direct-map
+  / huge-page mappings legible — distinguishes "you faulted on
+  a 2 MiB superpage in the direct map" from "you faulted on a
+  4 KiB user page".
+- `non-canonical VA` short-circuits before the walk for any
+  address in the canonical hole — surfaces obviously-corrupt
+  pointers (uninitialised stack data, freed-then-reused
+  vtable slots) as a category instead of "walk gave up at PML4".
+- `intermediate-table phys outside direct map` flags page-table
+  corruption itself (an entry pointing into MMIO / non-RAM
+  phys), which would otherwise either panic during the walk or
+  silently misread.
+
+### Architectural Last-Branch-Records (LBR)
+
+`arch::LbrInitBsp` (in `kernel/arch/x86_64/lbr.cpp`) detects
+Architectural LBR at boot via `CPUID.(EAX=07H,ECX=00H):EDX[19]`
+(same bit Linux uses for `X86_FEATURE_ARCH_LBR`) and, if
+present, programs the BSP's branch trace ring:
+
+- `IA32_LBR_DEPTH` (MSR 0x14CF) — read for max supported depth,
+  written to select usable depth.
+- `IA32_LBR_CTL` (MSR 0x14CE) — set to `LBREn|OS|USR` (every
+  taken branch, ring 0 + ring 3, no filter).
+
+Per-entry MSRs (one row of three per record):
+- `MSR_ARCH_LBR_FROM_n` = 0x1500 + n
+- `MSR_ARCH_LBR_TO_n`   = 0x1600 + n
+- `MSR_ARCH_LBR_INFO_n` = 0x1200 + n
+
+`arch::LbrFreeze` clears `LBR_CTL.LBREn` so further branches
+between panic entry and the dump don't pollute the snapshot.
+Wired into both `core::Panic` and the trap dispatcher's panic
+path (`arch/x86_64/traps.cpp`) immediately after
+`NmiWatchdogDisable`.
+
+`core::DumpLbr` (in `kernel/core/panic.cpp`) emits the section
+between `DumpReturnAddressPointers` and `DumpHeldLocksLocal`:
+
+```
+  LBR (last-branch records, 0x20 entries, newest first; ctl=0x...):
+    #0x00  from=0x...  [callerFn+0xOFF (file:line)]
+           to  =0x...  [calleeFn+0xOFF (file:line)]
+    #0x01  from=0x...  ...
+    ...
+```
+
+On hardware that doesn't support Architectural LBR (TCG QEMU,
+pre-Goldmont-Plus Intel, AMD), the section is replaced by a
+single line:
+
+```
+  LBR (last-branch records): (unavailable on this CPU)
+```
+
+Why LBR is worth dumping when it's available: it's the **only**
+backtrace source that survives frame-pointer omission, asm
+trampolines, and rbp-chain corruption — the records are the
+CPU's own ground truth about every taken branch since the last
+freeze. Pairs especially well with the return-address-pointer
+scan (which finds the residue on the stack) and the rbp-chain
+backtrace (which is fast but FPO-fragile).
+
+AP support is deferred. `LbrInitBsp` only configures the BSP;
+APs that crash today emit the "(unavailable)" form. Per-AP
+enablement will land alongside SMP runqueue stabilisation.
+
+### Per-task syscall trail
+
+`sched::Task` carries a small inline ring (8 entries × 56 bytes
+= 448 bytes/task) capturing the most recent syscalls the task
+issued. Each entry: `(abi, nr, args[4], ret, ts_tick)`. ABI is
+`native` (int 0x80, both DuetOS-native and Win32 SYS_WIN_*),
+`linux` (Linux ABI), or `win32` (currently unused — Win32 PEs
+go through the native dispatcher).
+
+`sched::SyscallTrailRecord(abi, nr, a0..a3, ret)` is called from
+each dispatcher just before returning to the caller:
+
+- **Native**: an RAII guard at the top of
+  `core::SyscallDispatch` (in `kernel/syscall/syscall.cpp`)
+  fires on every return path of the case-switch dispatcher,
+  capturing the args saved at entry and the rax the case body
+  populated. RAII ensures every return path records — covers
+  the dozens of `frame->rax = ...; return;` exit points.
+- **Linux**: a single explicit call right after the
+  `frame->rax = static_cast<u64>(rv)` line in
+  `subsystems::linux::LinuxSyscallDispatch`. The Linux
+  dispatcher uses single-exit so one record point is enough.
+
+`sched::DumpCurrentTaskSyscallTrail` is wired into the panic
+path between the LBR block and `DumpHeldLocksLocal`. The
+section is only emitted when the calling task's `trail_count`
+is non-zero — kernel-only tasks never call into the
+dispatcher, their rings stay all-zeros, and the dumper skips
+them silently rather than emitting empty headers.
+
+Boot self-test (`SyscallTrailSelfTest`, run from `kernel_main`
+right after `SchedInit` when `kBootSelfTests` is on): records
+3 synthetic events with distinct ABIs, asserts head/count
+ordering, fills another 8 entries to exercise wrap-around,
+then restores the pre-test state so a later panic doesn't
+surface synthetic data. Surfaces a `[sched] syscall-trail
+self-test OK` line at boot and panics on mismatch.
+
+What this surfaces in a real panic:
+
+- A user task that crashed in `read(fd, buf, len)`-style code
+  shows the full syscall sequence that led there — which file
+  was last opened, what its return value was (-EBADF? -EFAULT?
+  the buffer length?), how many writes happened first.
+- A Win32 PE that crashed inside a SYS_WIN_* path shows the
+  trail of UI / window / heap calls that preceded the fault,
+  named by syscall number (operator looks up names against
+  the SYS_WIN enum).
+- Kernel-thread panics (the panic-demo case today) emit no
+  trail section at all — the absence is the diagnostic
+  signal: "this crash was a kernel-internal invariant break,
+  no userspace trajectory matters".
+
+### Per-process VM info + loaded modules
+
+`core::DumpProcessVmInfo` (in `kernel/core/panic.cpp`) emits
+the current task's owning process's VM state, but only when
+`CurrentProcess()` is non-null (i.e. the panicking task is a
+user task, not a kernel thread). Layout:
+
+```
+  process VM info:
+    pid=0x...  name="..."
+    pml4_phys=0x...  regions=0x...  budget=0x...
+    vmap span: [0x... .. 0x...)  pages=0x...
+  loaded modules (N DLLs):
+    [0x... .. 0x...)  size=0x...  ntdll.dll
+    [0x... .. 0x...)  size=0x...  kernel32.dll
+    ...
+```
+
+Sources:
+
+- `pid` / `name` from `core::Process::pid` / `Process::name`.
+- `pml4_phys` / `region_count` / `frame_budget` from
+  `Process::as` (the per-process `mm::AddressSpace`).
+- `vmap span` is the min/max user vaddr across the AS's
+  per-page region list. We deliberately don't dump every
+  individual mapped page (up to 1024 per process) — the span
+  + page count tells an operator whether rip / rsp fall
+  inside the mapped range; per-page detail is available via
+  shell at post-mortem time.
+- `loaded modules` walks `Process::dll_images[]` (capped at
+  `Process::kDllImageCap = 48`); the DLL name is read out of
+  the image's PE export directory via
+  `loader::PeExportsDllName`. Falls back to
+  `<no export name>` for DLLs without an export table or with
+  a clipped name string.
+
+Why this matters: bare hex `rip=0x100012a4` plus
+`[region=user-canonical]` says "this fault is in user space"
+but doesn't say WHICH binary. With the module table, an rip in
+`[0x10000000..0x10004000) kernel32.dll` reads as exactly that
+even before the operator runs an off-box symbolizer, and the
+vmap span surfaces "rsp=0x... — outside the AS's mapped range"
+as a clear stack-blow-out signal.
+
+Kernel-thread panics emit nothing for this section, same as
+the syscall trail — the absence carries the same "kernel
+internal" diagnostic signal.
+
+### Binary Windows minidump (`.dmp`) on every panic
+
+Alongside the human-readable text dump on COM1, every panic /
+trap path now emits a structurally-valid Windows minidump
+(`MDMP`-magic file) over a separate binary channel. The
+emitter lives in `kernel/diag/minidump.{h,cpp}` and ships out
+via `kernel/diag/debugcon.{h,cpp}` (port 0xE9 = QEMU's Bochs
+debug console).
+
+Streams included:
+
+- **SystemInfoStream (7)**: AMD64, Win32_NT, version-shaped
+  metadata so debuggers that gate on platform fields accept
+  the file.
+- **ExceptionStream (6)**: ExceptionAddress = rip,
+  ExceptionCode = NTSTATUS for the trap (#PF →
+  STATUS_ACCESS_VIOLATION 0xC0000005, #UD →
+  STATUS_ILLEGAL_INSTRUCTION 0xC000001D, soft panic →
+  STATUS_BREAKPOINT 0x80000003).
+- **ThreadListStream (3)**: one thread (the faulting CPU's
+  current task) with a full CONTEXT_X64 (1232-byte block,
+  ContextFlags = CONTEXT_AMD64|CONTROL|INTEGER|SEGMENTS).
+- **ModuleListStream (4)**: every Process::dll_images entry
+  with name resolved via PeExportsDllName.
+- **MemoryListStream (5)**: ~16 KiB stack starting at the
+  page containing rsp + 4 KiB page containing rip — enough
+  for VS to do disassembly + a stack walk.
+
+FP / SSE state is intentionally zero-filled and the
+CONTEXT_FLOATING_POINT bit is NOT set in ContextFlags — the
+kernel runs `-mno-sse` so the FP block is meaningless and
+asserting "valid" would lie to the debugger.
+
+Two emit paths cover the two kinds of dump:
+
+- `EmitMinidump(rip, rsp, rbp, code)` — the **soft-panic**
+  path (`core::Panic` / `core::PanicWithValue`). Only the
+  three caller-known registers are real; the remaining
+  GPRs go in as zero. Segment selectors are sampled live
+  with `mov %%cs, %0` etc. so they reflect the panicking
+  CPU's actual state.
+
+- `EmitMinidumpFromTrapFrame(frame, code)` — the
+  **CPU-exception** path. Reads `rax..r15`, `cs`, `ss`,
+  `rflags`, `rip`, `rsp`, `rbp` straight out of the
+  TrapFrame the dispatcher already built. `ds/es/fs/gs`
+  are sampled live (the CPU doesn't push them on
+  interrupt). With this in place a `.dmp` from a #PF or
+  #UD shows the full 16-GPR register file, so a debugger
+  can correlate register-dependent faults (bad cr2 vs
+  garbage rdi vs stale vtable in r10) without the
+  operator falling back to the text dump's GPR section.
+
+Transport:
+- Guest writes one byte at a time via `outb 0xE9, %al`.
+- QEMU's `-debugcon file:<path>` (added in `tools/qemu/run.sh`)
+  appends every byte to a host file — `${BUILD_DIR}/duetos.dmp`.
+- On a clean boot the file stays at zero bytes (the kernel
+  truncates it via `: > "${MINIDUMP_FILE}"` on each run, and
+  the boot self-test calls a `BuildMinidumpInto` path that
+  fills the static buffer but does NOT egress).
+- On panic the file materialises a real .dmp that Visual
+  Studio / WinDbg / VSCode-cppvsdbg open directly.
+
+End-to-end verification (validated against the trap-demo
+path under TCG): a 22 KiB .dmp parses cleanly with the
+Python `minidump` library, exposes the correct rip/rsp/rbp
+in CONTEXT_X64, and lists the 16 KiB stack + 4 KiB rip-page
+in the MemoryList.
+
+#### Real-hardware persistence (deferred)
+
+Port 0xE9 has no behaviour on real PCs — the OUTBs go
+nowhere and the .dmp is lost. Two remediation paths are on
+deck:
+
+1. **Raw block write to a reserved LBA range** (the Windows
+   "pagefile crash dump" pattern). A fixed partition / LBA
+   range serves as the dump scratch. Panic path goes through
+   the NVMe / AHCI driver directly, bypassing the VFS so
+   shared locks held by other tasks don't matter. Next-boot
+   init copies the bytes out into a normal file.
+2. **FAT32 file write on a dedicated partition**. Cleaner
+   format but riskier — FS state could be mid-mutation when
+   we panic.
+
+Path (1) is the planned v1; today the code carries no
+GAP/STUB markers because the `// GAP:` policy is for
+handler-shape gaps, not for whole future-tier features.
+
+#### Files
+
+- `kernel/diag/debugcon.{h,cpp}` — port 0xE9 byte writer.
+- `kernel/diag/minidump.{h,cpp}` — the format builder, static
+  256 KiB buffer, MinidumpSelfTest at boot, EmitMinidump on
+  panic.
+- `kernel/core/panic.cpp` — calls EmitMinidump after the text
+  dump's EndCrashDump for both `Panic` and `PanicWithValue`.
+- `kernel/arch/x86_64/traps.cpp` — calls EmitMinidump after
+  the trap-path EndCrashDump with the trap-vector→NTSTATUS
+  mapping.
+- `tools/qemu/run.sh` — sets `MINIDUMP_FILE`, truncates per
+  run, passes `-debugcon file:${MINIDUMP_FILE}` to QEMU.
+- `tools/debug/test-panic.sh` / `test-trap.sh` — assert the
+  file is non-empty and the first four bytes are `MDMP`.
 
 Human-readable decoders live in `kernel/core/diag_decode.{h,cpp}`:
 `WriteCr0Bits` / `WriteCr4Bits` / `WriteRflagsBits` / `WriteEferBits` /
