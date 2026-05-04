@@ -95,27 +95,27 @@ void __cdecl mainCRTStartup(void)
 
     void** dev_vt = *(void***)dev;
 
-    /* slot 16 = BeginScene */
+    /* slot 41 = BeginScene (canonical d3d9.h ordering) */
     typedef long (*PFN_HR)(void*);
-    hr = ((PFN_HR)dev_vt[16])(dev);
+    hr = ((PFN_HR)dev_vt[41])(dev);
     Out("[d3d9_smoke] Device::BeginScene       = ");
     Out((hr == 0) ? "PASS\r\n" : "FAIL\r\n");
 
-    /* slot 18 = Clear(count, rects, flags, color, z, stencil)
+    /* slot 43 = Clear(count, rects, flags, color, z, stencil)
      * D3DCOLOR is 0xAARRGGBB → 0xffff0000 = opaque red */
     typedef long (*PFN_Clear)(void*, DWORD, const void*, DWORD, DWORD, float, DWORD);
-    hr = ((PFN_Clear)dev_vt[18])(dev, 0, NULL, 1 /*D3DCLEAR_TARGET*/, 0xffff0000, 1.0f, 0);
+    hr = ((PFN_Clear)dev_vt[43])(dev, 0, NULL, 1 /*D3DCLEAR_TARGET*/, 0xffff0000, 1.0f, 0);
     Out("[d3d9_smoke] Device::Clear(red)       = ");
     Out((hr == 0) ? "PASS\r\n" : "FAIL\r\n");
 
-    /* slot 17 = EndScene */
-    hr = ((PFN_HR)dev_vt[17])(dev);
+    /* slot 42 = EndScene */
+    hr = ((PFN_HR)dev_vt[42])(dev);
     Out("[d3d9_smoke] Device::EndScene         = ");
     Out((hr == 0) ? "PASS\r\n" : "FAIL\r\n");
 
-    /* slot 42 = Present(srcRect, dstRect, hwndOverride, dirtyRgn) */
+    /* slot 17 = Present(srcRect, dstRect, hwndOverride, dirtyRgn) */
     typedef long (*PFN_Present)(void*, const void*, const void*, HWND, const void*);
-    hr = ((PFN_Present)dev_vt[42])(dev, NULL, NULL, NULL, NULL);
+    hr = ((PFN_Present)dev_vt[17])(dev, NULL, NULL, NULL, NULL);
     Out("[d3d9_smoke] Device::Present          = ");
     Out((hr == 0) ? "PASS\r\n" : "FAIL\r\n");
 

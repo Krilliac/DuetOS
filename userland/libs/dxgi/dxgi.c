@@ -281,19 +281,114 @@ static ULONG out_Release(IDXGIOutputImpl* self)
 static HRESULT out_GetDesc(IDXGIOutputImpl* self, void* desc)
 {
     (void)self;
-    /* DXGI_OUTPUT_DESC is 96 bytes; zero it. The DeviceName field
-     * (first 32 bytes wchar_t[32]) is left as a NUL-terminated
-     * empty string, which matches what a headless software output
-     * would carry. */
-    if (desc)
-        dx_memzero(desc, 96);
+    /* DXGI_OUTPUT_DESC is 96 bytes. Layout:
+     *   wchar_t DeviceName[32]   (64 B)
+     *   RECT DesktopCoordinates  (16 B at +64)
+     *   BOOL AttachedToDesktop   (4  B at +80)
+     *   DXGI_MODE_ROTATION       (4  B at +84)
+     *   HMONITOR Monitor         (8  B at +88)
+     * The smoke apps mostly read DeviceName + AttachedToDesktop. */
+    if (!desc)
+        return DX_E_POINTER;
+    BYTE* d = (BYTE*)desc;
+    dx_memzero(d, 96);
+    static const WORD kName[] = {'D', 'u', 'e', 't', 'O', 'S', 0};
+    WORD* dst = (WORD*)d;
+    for (UINT i = 0; i < (sizeof(kName) / sizeof(kName[0])) && i < 32; ++i)
+        dst[i] = kName[i];
+    /* DesktopCoordinates: 0,0 → 1280,720. */
+    *(LONG*)(d + 64) = 0;
+    *(LONG*)(d + 68) = 0;
+    *(LONG*)(d + 72) = 1280;
+    *(LONG*)(d + 76) = 720;
+    *(BOOL*)(d + 80) = 1; /* AttachedToDesktop */
+    *(UINT*)(d + 84) = 0; /* Rotation = UNSPECIFIED */
+    return DX_S_OK;
+}
+
+/* GetDisplayModeList(format, flags, *numModes, *modes) — slot 8.
+ * On the first call (modes == NULL) the caller passes *numModes
+ * unread and we report how many modes the output supports. On the
+ * second call (modes != NULL) we fill the array up to *numModes.
+ * v0 advertises a single 1280x720 mode at 60 Hz. */
+static HRESULT out_GetDisplayModeList(IDXGIOutputImpl* self, UINT format, UINT flags, UINT* num, void* modes)
+{
+    (void)self;
+    (void)format;
+    (void)flags;
+    if (!num)
+        return DX_E_POINTER;
+    if (!modes)
+    {
+        *num = 1;
+        return DX_S_OK;
+    }
+    if (*num < 1)
+        return DXGI_ERROR_INVALID_CALL;
+    /* DXGI_MODE_DESC (28 B):
+     *   UINT Width(0), UINT Height(4),
+     *   DXGI_RATIONAL RefreshRate { UINT Numerator(8), Denominator(12) },
+     *   DXGI_FORMAT Format(16),
+     *   DXGI_MODE_SCANLINE_ORDER ScanlineOrdering(20),
+     *   DXGI_MODE_SCALING Scaling(24). */
+    BYTE* m = (BYTE*)modes;
+    dx_memzero(m, 28);
+    *(UINT*)(m + 0) = 1280;
+    *(UINT*)(m + 4) = 720;
+    *(UINT*)(m + 8) = 60;
+    *(UINT*)(m + 12) = 1;
+    *(UINT*)(m + 16) = 87; /* B8G8R8A8_UNORM */
+    *num = 1;
+    return DX_S_OK;
+}
+
+/* FindClosestMatchingMode(input, output, ?concernedDevice) — slot 9.
+ * v0 returns the same one-mode table as GetDisplayModeList. */
+static HRESULT out_FindClosestMatchingMode(IDXGIOutputImpl* self, const void* input, void* out, void* dev)
+{
+    (void)self;
+    (void)input;
+    (void)dev;
+    if (!out)
+        return DX_E_POINTER;
+    BYTE* m = (BYTE*)out;
+    dx_memzero(m, 28);
+    *(UINT*)(m + 0) = 1280;
+    *(UINT*)(m + 4) = 720;
+    *(UINT*)(m + 8) = 60;
+    *(UINT*)(m + 12) = 1;
+    *(UINT*)(m + 16) = 87;
+    return DX_S_OK;
+}
+
+/* WaitForVBlank — slot 10. Software output → no real vblank to wait
+ * on; success-immediate matches what apps want. */
+static HRESULT out_WaitForVBlank(IDXGIOutputImpl* self)
+{
+    (void)self;
     return DX_S_OK;
 }
 
 static const IDXGIOutputVtbl g_out_vtbl = {
-    out_QueryInterface, out_AddRef, out_Release, DX_HSTUB, DX_HSTUB, DX_HSTUB, DX_HSTUB,
-    out_GetDesc,        DX_HSTUB,   DX_HSTUB,    DX_HSTUB, DX_HSTUB, DX_HSTUB, DX_HSTUB,
-    DX_HSTUB,           DX_HSTUB,   DX_HSTUB,    DX_HSTUB, DX_HSTUB,
+    out_QueryInterface,
+    out_AddRef,
+    out_Release,
+    DX_HSTUB,
+    DX_HSTUB,
+    DX_HSTUB,
+    DX_HSTUB,
+    out_GetDesc,
+    out_GetDisplayModeList,
+    out_FindClosestMatchingMode,
+    out_WaitForVBlank,
+    DX_HSTUB,
+    DX_HSTUB,
+    DX_HSTUB,
+    DX_HSTUB,
+    DX_HSTUB,
+    DX_HSTUB,
+    DX_HSTUB,
+    DX_HSTUB,
 };
 
 static IDXGIOutputImpl* output_alloc(void)
@@ -375,7 +470,7 @@ static HRESULT ad_EnumOutputs(IDXGIAdapterImpl* self, UINT idx, void** out)
     return DX_S_OK;
 }
 
-/* DXGI_ADAPTER_DESC layout (256 bytes total):
+/* DXGI_ADAPTER_DESC layout (304 bytes total):
  *   wchar_t Description[128]    (256 bytes)
  *   UINT VendorId               (4)
  *   UINT DeviceId               (4)
@@ -385,19 +480,33 @@ static HRESULT ad_EnumOutputs(IDXGIAdapterImpl* self, UINT idx, void** out)
  *   SIZE_T DedicatedSystemMemory(8)
  *   SIZE_T SharedSystemMemory   (8)
  *   LUID AdapterLuid            (8)
- * = 304 bytes; zero-fill is the safe path. */
+ * = 304 bytes. */
 static HRESULT ad_GetDesc(IDXGIAdapterImpl* self, void* desc)
 {
     (void)self;
     if (!desc)
         return DX_E_POINTER;
-    dx_memzero(desc, 304);
+    BYTE* d = (BYTE*)desc;
+    dx_memzero(d, 304);
     /* "DuetOS Software Adapter" in UTF-16 LE, hand-encoded. */
     static const WORD kName[] = {'D', 'u', 'e', 't', 'O', 'S', ' ', 'S', 'o', 'f', 't', 'w',
                                  'a', 'r', 'e', ' ', 'A', 'd', 'a', 'p', 't', 'e', 'r', 0};
-    WORD* dst = (WORD*)desc;
+    WORD* dst = (WORD*)d;
     for (UINT i = 0; i < (sizeof(kName) / sizeof(kName[0])) && i < 128; ++i)
         dst[i] = kName[i];
+    /* The Microsoft software-adapter PCI tuple. WARP / Basic Render
+     * use 0x1414/0x008C; we reuse 0x1414 + a unique device id so apps
+     * can distinguish a DuetOS-software adapter from a real GPU. */
+    *(UINT*)(d + 256) = 0x1414;      /* VendorId = Microsoft */
+    *(UINT*)(d + 260) = 0xD0E5;      /* DeviceId = "DuET-Software" tag */
+    *(UINT*)(d + 264) = 0;           /* SubSysId */
+    *(UINT*)(d + 268) = 0;           /* Revision */
+    *(SIZE_T*)(d + 272) = 0;         /* DedicatedVideoMemory */
+    *(SIZE_T*)(d + 280) = 0;         /* DedicatedSystemMemory */
+    *(SIZE_T*)(d + 288) = 64u << 20; /* SharedSystemMemory = 64 MiB */
+    /* AdapterLuid: any nonzero pair is fine; some apps hash on it. */
+    *(UINT*)(d + 296) = 0xD0E50001;
+    *(UINT*)(d + 300) = 0;
     return DX_S_OK;
 }
 

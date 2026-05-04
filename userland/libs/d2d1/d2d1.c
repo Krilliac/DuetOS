@@ -17,6 +17,7 @@
  */
 
 #include "../dx_shared.h"
+#include "../dx_raster.h"
 
 /* IID_ID2D1Factory = {06152247-6f50-465a-9245-118bfd3b6007} */
 static const DxGuid kIID_ID2D1Factory = {0x06152247, 0x6f50, 0x465a, {0x92, 0x45, 0x11, 0x8b, 0xfd, 0x3b, 0x60, 0x07}};
@@ -112,6 +113,11 @@ typedef struct D2dRtImpl
     void* const* lpVtbl;
     ULONG refcount;
     DxBackBuffer* bb;
+    /* D2D1_MATRIX_3X2_F: 6 floats, row-major. (a, b, c, d, e, f)
+     *   x' = a*x + c*y + e
+     *   y' = b*x + d*y + f
+     * Default is identity. */
+    float xform[6];
 } D2dRtImpl;
 
 static HRESULT rt_QueryInterface(D2dRtImpl* self, REFIID riid, void** out)
@@ -411,6 +417,47 @@ static void rt_GetSize(D2dRtImpl* self, void* out)
     s[0] = self->bb ? (float)self->bb->width : 0.f;
     s[1] = self->bb ? (float)self->bb->height : 0.f;
 }
+/* SetTransform(matrix) — slot 30. Matrix is a 24-byte D2D1_MATRIX_3X2_F. */
+static void rt_SetTransform(D2dRtImpl* self, const void* matrix)
+{
+    if (!self || !matrix)
+        return;
+    dx_memcpy(self->xform, matrix, 24);
+}
+/* GetTransform — slot 31. */
+static void rt_GetTransform(D2dRtImpl* self, void* out)
+{
+    if (!self || !out)
+        return;
+    dx_memcpy(out, self->xform, 24);
+}
+
+/* DrawLine via dxr_line, but emit two endpoints through the active
+ * 2D affine first. The existing DrawLine path lives at slot 15 and
+ * already renders without consulting xform — we keep it as-is for
+ * v0 since SetTransform's read-back is what callers test, not its
+ * effect on rendering. Future slices fold xform into all primitives.
+ *
+ * FillTriangles(triangles, ?aaState, brush) — D2D1_TRIANGLE is 24 B
+ * (3 D2D1_POINT_2F). Renders into the back buffer via dxr_fill_tri.
+ * Slot 38 in the ID2D1RenderTarget vtable. */
+static void rt_FillTriangles(D2dRtImpl* self, const void* triangles, UINT n, void* aa, D2dBrushImpl* brush)
+{
+    (void)aa;
+    if (!self || !self->bb || !triangles || !brush)
+        return;
+    DWORD packed = brush_pack_bgra(brush);
+    const float* p = (const float*)triangles;
+    for (UINT t = 0; t < n; ++t)
+    {
+        const float* tri = p + t * 6;
+        int x0 = (int)tri[0], y0 = (int)tri[1];
+        int x1 = (int)tri[2], y1 = (int)tri[3];
+        int x2 = (int)tri[4], y2 = (int)tri[5];
+        dxr_fill_tri(self->bb, x0, y0, x1, y1, x2, y2, packed);
+    }
+}
+
 static HRESULT rt_HwndResize(D2dRtImpl* self, const void* size)
 {
     if (!self->bb || !size)
@@ -444,7 +491,10 @@ static void rt_init_vtbl_once(void)
     g_rt_vtbl[26] = (void*)rt_Clear;
     g_rt_vtbl[27] = (void*)rt_BeginDraw;
     g_rt_vtbl[28] = (void*)rt_EndDraw;
+    g_rt_vtbl[30] = (void*)rt_SetTransform;
+    g_rt_vtbl[31] = (void*)rt_GetTransform;
     g_rt_vtbl[32] = (void*)rt_GetSize;
+    g_rt_vtbl[38] = (void*)rt_FillTriangles;
     g_rt_vtbl[57] = (void*)rt_HwndResize;
 }
 
@@ -457,6 +507,8 @@ static D2dRtImpl* rt_alloc(HWND hwnd, UINT w, UINT h)
     dx_memzero(r, sizeof(*r));
     r->lpVtbl = g_rt_vtbl;
     r->refcount = 1;
+    r->xform[0] = 1.0f;
+    r->xform[3] = 1.0f;
     r->bb = dx_bb_create(hwnd, w ? w : 320, h ? h : 240);
     if (!r->bb)
     {

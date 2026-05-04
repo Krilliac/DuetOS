@@ -23,6 +23,7 @@
  */
 
 #include "../dx_shared.h"
+#include "../dx_raster.h"
 
 /* ---------------------------------------------------------------- *
  * IIDs                                                             *
@@ -449,6 +450,415 @@ static D3D11SwapChainImpl* d3d11_swap_alloc(HWND hwnd, UINT w, UINT h)
 }
 
 /* ---------------------------------------------------------------- *
+ * ID3D11Buffer — vertex / index / constant buffer with backing     *
+ * storage. The buffer's bytes live immediately after the COM head  *
+ * so a single dx_heap_alloc owns both. CreateBuffer's optional     *
+ * initial-data pointer (D3D11_SUBRESOURCE_DATA->pSysMem) is copied *
+ * in at construction; UpdateSubresource paths write into the same  *
+ * backing memory. Vtable layout:                                   *
+ *   IUnknown(3) + ID3D11DeviceChild(4=GetDevice + 3 priv-data) +   *
+ *   ID3D11Resource(3) + ID3D11Buffer(1=GetDesc). 12 slots.         *
+ * ---------------------------------------------------------------- */
+
+#define BUF_VTBL_SLOTS 12
+
+static const DxGuid kIID_ID3D11Buffer = {0x48570b85, 0xd1ee, 0x4fcd, {0xa2, 0x50, 0xeb, 0x35, 0x07, 0x22, 0xb0, 0x37}};
+
+typedef struct ID3D11BufferImpl
+{
+    void* const* lpVtbl;
+    ULONG refcount;
+    UINT bytes;
+    UINT bind_flags;
+    UINT cpu_access;
+    BYTE storage[1]; /* `bytes` of payload follow the struct head */
+} ID3D11BufferImpl;
+
+static void* g_buf_vtbl[BUF_VTBL_SLOTS];
+
+static HRESULT buf_QueryInterface(ID3D11BufferImpl* self, REFIID riid, void** out)
+{
+    if (!out)
+        return DX_E_POINTER;
+    if (dx_guid_eq(riid, &kIID_IUnknown) || dx_guid_eq(riid, &kIID_ID3D11Resource) ||
+        dx_guid_eq(riid, &kIID_ID3D11Buffer))
+    {
+        self->refcount++;
+        *out = self;
+        return DX_S_OK;
+    }
+    *out = NULL;
+    return DX_E_NOINTERFACE;
+}
+static ULONG buf_AddRef(ID3D11BufferImpl* self)
+{
+    return ++self->refcount;
+}
+static ULONG buf_Release(ID3D11BufferImpl* self)
+{
+    if (--self->refcount == 0)
+    {
+        dx_heap_free(self);
+        return 0;
+    }
+    return self->refcount;
+}
+static void buf_GetType(ID3D11BufferImpl* self, UINT* type)
+{
+    (void)self;
+    if (type)
+        *type = 1; /* D3D11_RESOURCE_DIMENSION_BUFFER */
+}
+/* D3D11_BUFFER_DESC: ByteWidth(0), Usage(4), BindFlags(8),
+ * CPUAccessFlags(12), MiscFlags(16), StructureByteStride(20). */
+static void buf_GetDesc(ID3D11BufferImpl* self, void* desc)
+{
+    if (!desc)
+        return;
+    BYTE* d = (BYTE*)desc;
+    dx_memzero(d, 24);
+    *(UINT*)(d + 0) = self->bytes;
+    *(UINT*)(d + 8) = self->bind_flags;
+    *(UINT*)(d + 12) = self->cpu_access;
+}
+
+static void buf_init_vtbl_once(void)
+{
+    static int g_inited = 0;
+    if (g_inited)
+        return;
+    g_inited = 1;
+    for (int i = 0; i < BUF_VTBL_SLOTS; ++i)
+        g_buf_vtbl[i] = DX_HSTUB;
+    g_buf_vtbl[0] = (void*)buf_QueryInterface;
+    g_buf_vtbl[1] = (void*)buf_AddRef;
+    g_buf_vtbl[2] = (void*)buf_Release;
+    g_buf_vtbl[7] = (void*)buf_GetType; /* ID3D11Resource::GetType */
+    g_buf_vtbl[10] = (void*)DX_VSTUB;   /* SetEvictionPriority */
+    g_buf_vtbl[11] = (void*)buf_GetDesc;
+}
+
+static ID3D11BufferImpl* buf_alloc(UINT bytes, UINT bind_flags, UINT cpu_access, const void* initial)
+{
+    buf_init_vtbl_once();
+    if (bytes == 0)
+        return NULL;
+    ID3D11BufferImpl* b = (ID3D11BufferImpl*)dx_heap_alloc(sizeof(ID3D11BufferImpl) + bytes);
+    if (!b)
+        return NULL;
+    dx_memzero(b, sizeof(ID3D11BufferImpl));
+    b->lpVtbl = g_buf_vtbl;
+    b->refcount = 1;
+    b->bytes = bytes;
+    b->bind_flags = bind_flags;
+    b->cpu_access = cpu_access;
+    if (initial)
+        dx_memcpy(b->storage, initial, bytes);
+    return b;
+}
+
+/* ---------------------------------------------------------------- *
+ * ID3D11InputLayout — element descriptor table. Each element is    *
+ * (semanticName, semanticIndex, format, inputSlot, alignedByteOff, *
+ * inputSlotClass, instanceDataStepRate). v0 keeps just the offsets *
+ * + format kind we need to decode positions and colours from a     *
+ * vertex buffer:                                                   *
+ *   - position_offset (0xFFFF = none)                              *
+ *   - color_offset    (0xFFFF = none)                              *
+ *   - color_kind      (0 = R32G32B32A32_FLOAT, 1 = B8G8R8A8_UNORM, *
+ *                      2 = R8G8B8A8_UNORM)                         *
+ * Stride is stored on the buffer side via IASetVertexBuffers.      *
+ * ---------------------------------------------------------------- */
+
+#define IL_VTBL_SLOTS 7
+
+static const DxGuid kIID_ID3D11InputLayout = {
+    0xe4819ddc, 0x4cf0, 0x4025, {0xbd, 0x26, 0x5d, 0xe8, 0x2a, 0x3e, 0x07, 0xb7}};
+
+typedef struct ID3D11InputLayoutImpl
+{
+    void* const* lpVtbl;
+    ULONG refcount;
+    UINT position_offset;
+    UINT color_offset;
+    UINT color_kind;
+} ID3D11InputLayoutImpl;
+
+static void* g_il_vtbl[IL_VTBL_SLOTS];
+
+static HRESULT il_QueryInterface(ID3D11InputLayoutImpl* self, REFIID riid, void** out)
+{
+    if (!out)
+        return DX_E_POINTER;
+    if (dx_guid_eq(riid, &kIID_IUnknown) || dx_guid_eq(riid, &kIID_ID3D11InputLayout))
+    {
+        self->refcount++;
+        *out = self;
+        return DX_S_OK;
+    }
+    *out = NULL;
+    return DX_E_NOINTERFACE;
+}
+static ULONG il_AddRef(ID3D11InputLayoutImpl* self)
+{
+    return ++self->refcount;
+}
+static ULONG il_Release(ID3D11InputLayoutImpl* self)
+{
+    if (--self->refcount == 0)
+    {
+        dx_heap_free(self);
+        return 0;
+    }
+    return self->refcount;
+}
+static void il_init_vtbl_once(void)
+{
+    static int g_inited = 0;
+    if (g_inited)
+        return;
+    g_inited = 1;
+    for (int i = 0; i < IL_VTBL_SLOTS; ++i)
+        g_il_vtbl[i] = DX_HSTUB;
+    g_il_vtbl[0] = (void*)il_QueryInterface;
+    g_il_vtbl[1] = (void*)il_AddRef;
+    g_il_vtbl[2] = (void*)il_Release;
+}
+
+/* Compare the SemanticName field (an ASCIIZ pointer in the
+ * D3D11_INPUT_ELEMENT_DESC) without pulling in <string.h>. */
+static int il_name_eq(const char* a, const char* b)
+{
+    if (!a || !b)
+        return 0;
+    while (*a && *b)
+    {
+        char ca = *a++, cb = *b++;
+        if (ca >= 'a' && ca <= 'z')
+            ca = (char)(ca - 32);
+        if (cb >= 'a' && cb <= 'z')
+            cb = (char)(cb - 32);
+        if (ca != cb)
+            return 0;
+    }
+    return *a == *b;
+}
+
+/* D3D11_INPUT_ELEMENT_DESC layout (32 bytes on x86_64):
+ *   const char* SemanticName        (8)
+ *   UINT SemanticIndex              (4)
+ *   DXGI_FORMAT Format              (4)
+ *   UINT InputSlot                  (4)
+ *   UINT AlignedByteOffset          (4)
+ *   D3D11_INPUT_CLASSIFICATION Cls  (4)
+ *   UINT InstanceDataStepRate       (4) — pads to 32 with align(8). */
+static ID3D11InputLayoutImpl* il_alloc_from_desc(const void* descs, UINT n)
+{
+    il_init_vtbl_once();
+    ID3D11InputLayoutImpl* il = (ID3D11InputLayoutImpl*)dx_heap_alloc(sizeof(*il));
+    if (!il)
+        return NULL;
+    dx_memzero(il, sizeof(*il));
+    il->lpVtbl = g_il_vtbl;
+    il->refcount = 1;
+    il->position_offset = 0xFFFF;
+    il->color_offset = 0xFFFF;
+    il->color_kind = 0;
+    if (descs)
+    {
+        const BYTE* p = (const BYTE*)descs;
+        for (UINT i = 0; i < n; ++i)
+        {
+            const BYTE* e = p + (SIZE_T)i * 32;
+            const char* name = *(const char* const*)(e + 0);
+            UINT format = *(const UINT*)(e + 12);
+            UINT offset = *(const UINT*)(e + 20);
+            if (il_name_eq(name, "POSITION") || il_name_eq(name, "SV_POSITION"))
+                il->position_offset = offset;
+            else if (il_name_eq(name, "COLOR") || il_name_eq(name, "COLOUR"))
+            {
+                il->color_offset = offset;
+                /* DXGI_FORMAT: 2 = R32G32B32A32_FLOAT, 28 = R8G8B8A8_UNORM,
+                 * 87 = B8G8R8A8_UNORM. */
+                if (format == 2)
+                    il->color_kind = 0;
+                else if (format == 87)
+                    il->color_kind = 1;
+                else
+                    il->color_kind = 2;
+            }
+        }
+    }
+    return il;
+}
+
+/* ---------------------------------------------------------------- *
+ * ID3D11VertexShader / ID3D11PixelShader — opaque shader handles.  *
+ * v0 doesn't compile or run HLSL; we keep a single tag value so    *
+ * callers can swap shaders and the bound shader pointer flows      *
+ * through to Draw* (where it's currently ignored). 7 slot vtable.  *
+ * ---------------------------------------------------------------- */
+
+#define SHADER_VTBL_SLOTS 7
+
+static const DxGuid kIID_ID3D11VertexShader = {
+    0x3b301d64, 0xd678, 0x4289, {0x88, 0x97, 0x22, 0xf8, 0x92, 0x8b, 0x72, 0xf3}};
+static const DxGuid kIID_ID3D11PixelShader = {
+    0xea82e40d, 0x51dc, 0x4f33, {0x93, 0xd4, 0xdb, 0x7c, 0x91, 0x25, 0xae, 0x8c}};
+
+typedef struct ID3D11ShaderImpl
+{
+    void* const* lpVtbl;
+    ULONG refcount;
+    UINT kind; /* 0 = VS, 1 = PS */
+} ID3D11ShaderImpl;
+
+static void* g_vs_vtbl[SHADER_VTBL_SLOTS];
+static void* g_ps_vtbl[SHADER_VTBL_SLOTS];
+
+static HRESULT shader_QueryInterface(ID3D11ShaderImpl* self, REFIID riid, void** out)
+{
+    if (!out)
+        return DX_E_POINTER;
+    if (dx_guid_eq(riid, &kIID_IUnknown) || (self->kind == 0 && dx_guid_eq(riid, &kIID_ID3D11VertexShader)) ||
+        (self->kind == 1 && dx_guid_eq(riid, &kIID_ID3D11PixelShader)))
+    {
+        self->refcount++;
+        *out = self;
+        return DX_S_OK;
+    }
+    *out = NULL;
+    return DX_E_NOINTERFACE;
+}
+static ULONG shader_AddRef(ID3D11ShaderImpl* self)
+{
+    return ++self->refcount;
+}
+static ULONG shader_Release(ID3D11ShaderImpl* self)
+{
+    if (--self->refcount == 0)
+    {
+        dx_heap_free(self);
+        return 0;
+    }
+    return self->refcount;
+}
+static void shader_init_vtbl_once(void)
+{
+    static int g_inited = 0;
+    if (g_inited)
+        return;
+    g_inited = 1;
+    for (int i = 0; i < SHADER_VTBL_SLOTS; ++i)
+    {
+        g_vs_vtbl[i] = DX_HSTUB;
+        g_ps_vtbl[i] = DX_HSTUB;
+    }
+    g_vs_vtbl[0] = (void*)shader_QueryInterface;
+    g_vs_vtbl[1] = (void*)shader_AddRef;
+    g_vs_vtbl[2] = (void*)shader_Release;
+    g_ps_vtbl[0] = (void*)shader_QueryInterface;
+    g_ps_vtbl[1] = (void*)shader_AddRef;
+    g_ps_vtbl[2] = (void*)shader_Release;
+}
+
+static ID3D11ShaderImpl* shader_alloc(UINT kind)
+{
+    shader_init_vtbl_once();
+    ID3D11ShaderImpl* s = (ID3D11ShaderImpl*)dx_heap_alloc(sizeof(*s));
+    if (!s)
+        return NULL;
+    dx_memzero(s, sizeof(*s));
+    s->lpVtbl = (kind == 0) ? g_vs_vtbl : g_ps_vtbl;
+    s->refcount = 1;
+    s->kind = kind;
+    return s;
+}
+
+/* ---------------------------------------------------------------- *
+ * Pipeline state objects — RasterizerState / BlendState /          *
+ * DepthStencilState / SamplerState. Opaque handles with refcounts; *
+ * v0 stores no state since none of it changes the pure-software    *
+ * raster path's behaviour. The COM shape is required so callers    *
+ * can RSSetState(rs); rs->Release() without crashing.              *
+ * ---------------------------------------------------------------- */
+
+#define D11_STATE_VTBL_SLOTS 7
+
+static const DxGuid kIID_ID3D11RasterizerState = {
+    0x9bb4ab81, 0xab1a, 0x4d8f, {0xb5, 0x06, 0xfc, 0x04, 0x20, 0x0b, 0x6e, 0xe7}};
+static const DxGuid kIID_ID3D11BlendState = {
+    0x75b68faa, 0x347d, 0x4159, {0x8f, 0x45, 0xa0, 0x64, 0x0f, 0x01, 0xcd, 0x9a}};
+static const DxGuid kIID_ID3D11DepthStencilState = {
+    0x03823efb, 0x8d8f, 0x4e1c, {0x9a, 0xa2, 0xf6, 0x4b, 0xb2, 0xcb, 0xfd, 0xf1}};
+static const DxGuid kIID_ID3D11SamplerState = {
+    0xda6fea51, 0x564c, 0x4487, {0x98, 0x10, 0xf0, 0xd0, 0xf9, 0xb4, 0xe3, 0xa5}};
+
+typedef struct ID3D11StateImpl
+{
+    void* const* lpVtbl;
+    ULONG refcount;
+    UINT kind; /* 0 = RS, 1 = BS, 2 = DSS, 3 = SS */
+} ID3D11StateImpl;
+
+static void* g_state_vtbl[D11_STATE_VTBL_SLOTS];
+
+static HRESULT state_QueryInterface(ID3D11StateImpl* self, REFIID riid, void** out)
+{
+    if (!out)
+        return DX_E_POINTER;
+    if (dx_guid_eq(riid, &kIID_IUnknown) || (self->kind == 0 && dx_guid_eq(riid, &kIID_ID3D11RasterizerState)) ||
+        (self->kind == 1 && dx_guid_eq(riid, &kIID_ID3D11BlendState)) ||
+        (self->kind == 2 && dx_guid_eq(riid, &kIID_ID3D11DepthStencilState)) ||
+        (self->kind == 3 && dx_guid_eq(riid, &kIID_ID3D11SamplerState)))
+    {
+        self->refcount++;
+        *out = self;
+        return DX_S_OK;
+    }
+    *out = NULL;
+    return DX_E_NOINTERFACE;
+}
+static ULONG state_AddRef(ID3D11StateImpl* self)
+{
+    return ++self->refcount;
+}
+static ULONG state_Release(ID3D11StateImpl* self)
+{
+    if (--self->refcount == 0)
+    {
+        dx_heap_free(self);
+        return 0;
+    }
+    return self->refcount;
+}
+static void state_init_vtbl_once(void)
+{
+    static int g_inited = 0;
+    if (g_inited)
+        return;
+    g_inited = 1;
+    for (int i = 0; i < D11_STATE_VTBL_SLOTS; ++i)
+        g_state_vtbl[i] = DX_HSTUB;
+    g_state_vtbl[0] = (void*)state_QueryInterface;
+    g_state_vtbl[1] = (void*)state_AddRef;
+    g_state_vtbl[2] = (void*)state_Release;
+}
+
+static ID3D11StateImpl* state_alloc(UINT kind)
+{
+    state_init_vtbl_once();
+    ID3D11StateImpl* s = (ID3D11StateImpl*)dx_heap_alloc(sizeof(*s));
+    if (!s)
+        return NULL;
+    dx_memzero(s, sizeof(*s));
+    s->lpVtbl = g_state_vtbl;
+    s->refcount = 1;
+    s->kind = kind;
+    return s;
+}
+
+/* ---------------------------------------------------------------- *
  * ID3D11DeviceContext                                              *
  *                                                                  *
  * Vtable layout: IUnknown(3) + DeviceChild(GetDevice,GetPrivate*)  *
@@ -459,6 +869,24 @@ static D3D11SwapChainImpl* d3d11_swap_alloc(HWND hwnd, UINT w, UINT h)
  *   slot 44: RSSetViewports                                        *
  *   slot 51: ClearDepthStencilView (no-op success)                 *
  *   slot 110: Flush                                                *
+ *                                                                  *
+ * v0.1 adds a minimal vertex-buffer / draw path:                   *
+ *   slot  9: PSSetShader                                           *
+ *   slot 11: VSSetShader                                           *
+ *   slot 12: DrawIndexed                                           *
+ *   slot 13: Draw                                                  *
+ *   slot 14: Map / 15: Unmap (write-discard on a buffer)           *
+ *   slot 17: IASetInputLayout                                      *
+ *   slot 18: IASetVertexBuffers                                    *
+ *   slot 19: IASetIndexBuffer                                      *
+ *   slot 20: DrawIndexedInstanced                                  *
+ *   slot 21: DrawInstanced                                         *
+ *   slot 24: IASetPrimitiveTopology                                *
+ *   slot 35: OMSetBlendState   (no-op success)                     *
+ *   slot 36: OMSetDepthStencilState (no-op success)                *
+ *   slot 43: RSSetState        (no-op success)                     *
+ *   slot 45: RSSetScissorRects (no-op success)                     *
+ *   slot 48: UpdateSubresource (write into an ID3D11Buffer)        *
  * Other slots → DX_HSTUB / DX_VSTUB.                                *
  * ---------------------------------------------------------------- */
 
@@ -469,6 +897,27 @@ struct ID3D11ContextImpl
     void* const* lpVtbl;
     ULONG refcount;
     ID3D11RTVImpl* current_rtv;
+
+    /* Pipeline state — set by IASet* / VSSetShader / RSSetViewports
+     * and consumed by Draw / DrawIndexed. Refcounts on bound objects
+     * are NOT taken; the caller is required to keep the resource
+     * alive for the duration of the draw. (Real D3D11 does the same;
+     * the device-context binding is "weak.") */
+    ID3D11InputLayoutImpl* current_il;
+    ID3D11ShaderImpl* current_vs;
+    ID3D11ShaderImpl* current_ps;
+    ID3D11BufferImpl* current_vb; /* slot 0 only — multi-stream is gated below the v0 cut-line */
+    UINT current_vb_stride;
+    UINT current_vb_offset;
+    ID3D11BufferImpl* current_ib;
+    UINT current_ib_offset;
+    UINT current_ib_format; /* DXGI_FORMAT_R16_UINT = 57, R32_UINT = 42 */
+    UINT current_topology;  /* D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST = 4, STRIP = 5 */
+
+    /* Viewport from RSSetViewports — used by the rasterizer to map
+     * NDC to pixels. Default to a sentinel so the first Draw before
+     * RSSetViewports falls back to the back-buffer extents. */
+    int viewport_x, viewport_y, viewport_w, viewport_h;
 };
 
 static HRESULT ctx_QueryInterface(ID3D11ContextImpl* self, REFIID riid, void** out)
@@ -528,12 +977,367 @@ static void ctx_OMSetRenderTargets(ID3D11ContextImpl* self, UINT n, ID3D11RTVImp
     }
 }
 
-/* RSSetViewports(num, viewports) — slot 44. v0 stores nothing. */
+/* RSSetViewports(num, viewports) — slot 44. D3D11_VIEWPORT layout
+ * (24 B): TopLeftX(0,f32), TopLeftY(4,f32), Width(8,f32), Height
+ * (12,f32), MinDepth(16,f32), MaxDepth(20,f32). */
 static void ctx_RSSetViewports(ID3D11ContextImpl* self, UINT n, const void* vp)
 {
-    (void)self;
+    if (!self || n == 0 || !vp)
+        return;
+    const float* v = (const float*)vp;
+    self->viewport_x = (int)v[0];
+    self->viewport_y = (int)v[1];
+    self->viewport_w = (int)v[2];
+    self->viewport_h = (int)v[3];
+}
+
+/* IASetInputLayout(layout) — slot 17. */
+static void ctx_IASetInputLayout(ID3D11ContextImpl* self, ID3D11InputLayoutImpl* il)
+{
+    if (!self)
+        return;
+    self->current_il = (il && il->lpVtbl == g_il_vtbl) ? il : NULL;
+}
+
+/* IASetVertexBuffers(startSlot, numBuffers, ppVB, pStrides, pOffsets) — slot 18.
+ * v0 only honours slot 0 (single-stream). */
+static void ctx_IASetVertexBuffers(ID3D11ContextImpl* self, UINT start_slot, UINT n, ID3D11BufferImpl* const* buffers,
+                                   const UINT* strides, const UINT* offsets)
+{
+    (void)start_slot;
+    if (!self || n == 0 || !buffers)
+        return;
+    ID3D11BufferImpl* b = buffers[0];
+    self->current_vb = (b && b->lpVtbl == g_buf_vtbl) ? b : NULL;
+    self->current_vb_stride = strides ? strides[0] : 0;
+    self->current_vb_offset = offsets ? offsets[0] : 0;
+}
+
+/* IASetIndexBuffer(buffer, format, offset) — slot 19. */
+static void ctx_IASetIndexBuffer(ID3D11ContextImpl* self, ID3D11BufferImpl* buffer, UINT format, UINT offset)
+{
+    if (!self)
+        return;
+    self->current_ib = (buffer && buffer->lpVtbl == g_buf_vtbl) ? buffer : NULL;
+    self->current_ib_format = format;
+    self->current_ib_offset = offset;
+}
+
+/* IASetPrimitiveTopology(topology) — slot 24. */
+static void ctx_IASetPrimitiveTopology(ID3D11ContextImpl* self, UINT topology)
+{
+    if (self)
+        self->current_topology = topology;
+}
+
+/* VSSetShader / PSSetShader — slots 11 / 9. The class-instance + count
+ * params are ignored; D3D11 class-linkage isn't a v0 feature. */
+static void ctx_VSSetShader(ID3D11ContextImpl* self, ID3D11ShaderImpl* shader, void* class_instances, UINT n)
+{
+    (void)class_instances;
     (void)n;
-    (void)vp;
+    if (!self)
+        return;
+    self->current_vs = (shader && shader->lpVtbl == g_vs_vtbl) ? shader : NULL;
+}
+static void ctx_PSSetShader(ID3D11ContextImpl* self, ID3D11ShaderImpl* shader, void* class_instances, UINT n)
+{
+    (void)class_instances;
+    (void)n;
+    if (!self)
+        return;
+    self->current_ps = (shader && shader->lpVtbl == g_ps_vtbl) ? shader : NULL;
+}
+
+/* Pull (x, y) screen-space from a vertex via the bound input layout +
+ * VB. Returns 0 if the layout / buffer / offset can't satisfy the
+ * read; caller drops the triangle. dxr_project handles the NDC →
+ * pixel map. */
+static int ctx_read_vertex(ID3D11ContextImpl* self, UINT idx, int* out_x, int* out_y, DWORD* out_color)
+{
+    if (!self || !self->current_vb || !self->current_il || self->current_vb_stride == 0)
+        return 0;
+    ID3D11BufferImpl* vb = self->current_vb;
+    SIZE_T base = (SIZE_T)self->current_vb_offset + (SIZE_T)idx * self->current_vb_stride;
+    if (self->current_il->position_offset == 0xFFFF)
+        return 0;
+    SIZE_T pos_off = base + self->current_il->position_offset;
+    if (pos_off + 12 > vb->bytes)
+        return 0;
+    float xyz[3];
+    dx_memcpy(xyz, vb->storage + pos_off, 12);
+    DxVec4 clip;
+    clip.x = xyz[0];
+    clip.y = xyz[1];
+    clip.z = xyz[2];
+    clip.w = 1.0f;
+    int vp_x = self->viewport_x, vp_y = self->viewport_y;
+    int vp_w = self->viewport_w, vp_h = self->viewport_h;
+    if (vp_w <= 0 || vp_h <= 0)
+    {
+        /* No viewport set — fall back to the back buffer's full
+         * extent so a Clear-then-Draw smoke test still hits visible
+         * pixels. */
+        DxBackBuffer* bb = self->current_rtv && self->current_rtv->tex ? self->current_rtv->tex->bb : NULL;
+        if (!bb)
+            return 0;
+        vp_x = 0;
+        vp_y = 0;
+        vp_w = (int)bb->width;
+        vp_h = (int)bb->height;
+    }
+    if (!dxr_project(&clip, vp_x, vp_y, vp_w, vp_h, out_x, out_y))
+        return 0;
+    if (out_color)
+    {
+        if (self->current_il->color_offset != 0xFFFF)
+        {
+            SIZE_T col_off = base + self->current_il->color_offset;
+            if (self->current_il->color_kind == 0 && col_off + 16 <= vb->bytes)
+            {
+                float c[4];
+                dx_memcpy(c, vb->storage + col_off, 16);
+                *out_color = dxr_pack_rgba(c[0], c[1], c[2], c[3]);
+            }
+            else if (col_off + 4 <= vb->bytes)
+            {
+                DWORD c;
+                dx_memcpy(&c, vb->storage + col_off, 4);
+                if (self->current_il->color_kind == 1)
+                    *out_color = c; /* already BGRA */
+                else
+                {
+                    /* RGBA8 → BGRA8 byte-swap. */
+                    BYTE r = (BYTE)(c & 0xFF);
+                    BYTE g = (BYTE)((c >> 8) & 0xFF);
+                    BYTE b = (BYTE)((c >> 16) & 0xFF);
+                    BYTE a = (BYTE)((c >> 24) & 0xFF);
+                    *out_color = ((DWORD)a << 24) | ((DWORD)r << 16) | ((DWORD)g << 8) | (DWORD)b;
+                }
+            }
+            else
+            {
+                *out_color = 0xFFFFFFFFu;
+            }
+        }
+        else
+        {
+            *out_color = 0xFFFFFFFFu; /* white */
+        }
+    }
+    return 1;
+}
+
+/* Walk the bound IB and translate idx → vertex index, honouring the
+ * 16/32-bit format and the buffer offset. base_vertex is added on
+ * after the index lookup. Returns 0 on out-of-range. */
+static int ctx_read_index(ID3D11ContextImpl* self, UINT idx, INT base_vertex, UINT* out_vertex_index)
+{
+    if (!self || !self->current_ib)
+        return 0;
+    ID3D11BufferImpl* ib = self->current_ib;
+    UINT stride = (self->current_ib_format == 42) ? 4 : 2; /* R32_UINT vs R16_UINT */
+    SIZE_T off = (SIZE_T)self->current_ib_offset + (SIZE_T)idx * stride;
+    if (off + stride > ib->bytes)
+        return 0;
+    UINT v;
+    if (stride == 4)
+    {
+        dx_memcpy(&v, ib->storage + off, 4);
+    }
+    else
+    {
+        WORD vw;
+        dx_memcpy(&vw, ib->storage + off, 2);
+        v = vw;
+    }
+    long long vi = (long long)v + (long long)base_vertex;
+    if (vi < 0)
+        return 0;
+    if (out_vertex_index)
+        *out_vertex_index = (UINT)vi;
+    return 1;
+}
+
+/* Rasterize a single triangle from three vertex indices. */
+static void ctx_emit_tri(ID3D11ContextImpl* self, UINT i0, UINT i1, UINT i2)
+{
+    int x0, y0, x1, y1, x2, y2;
+    DWORD c0, c1, c2;
+    if (!ctx_read_vertex(self, i0, &x0, &y0, &c0))
+        return;
+    if (!ctx_read_vertex(self, i1, &x1, &y1, &c1))
+        return;
+    if (!ctx_read_vertex(self, i2, &x2, &y2, &c2))
+        return;
+    if (!self->current_rtv || !self->current_rtv->tex || !self->current_rtv->tex->bb)
+        return;
+    DxBackBuffer* bb = self->current_rtv->tex->bb;
+    if (c0 == c1 && c1 == c2)
+        dxr_fill_tri(bb, x0, y0, x1, y1, x2, y2, c0);
+    else
+        dxr_shade_tri(bb, x0, y0, x1, y1, x2, y2, c0, c1, c2);
+}
+
+/* Draw(VertexCount, StartVertexLocation) — slot 13. v0 supports
+ * triangle list (topology 4) and triangle strip (topology 5). Other
+ * topologies fall through to "draw nothing" — matches the contract
+ * for "primitive class we haven't wired in." */
+static void ctx_Draw(ID3D11ContextImpl* self, UINT count, UINT start)
+{
+    if (!self || count == 0)
+        return;
+    if (self->current_topology == 4)
+    {
+        UINT triangles = count / 3;
+        for (UINT t = 0; t < triangles; ++t)
+            ctx_emit_tri(self, start + t * 3, start + t * 3 + 1, start + t * 3 + 2);
+    }
+    else if (self->current_topology == 5)
+    {
+        /* triangle strip: alternating winding */
+        if (count < 3)
+            return;
+        for (UINT t = 0; t + 2 < count; ++t)
+        {
+            UINT a = start + t, b = start + t + 1, c = start + t + 2;
+            if (t & 1)
+            {
+                UINT tmp = b;
+                b = c;
+                c = tmp;
+            }
+            ctx_emit_tri(self, a, b, c);
+        }
+    }
+}
+
+/* DrawIndexed(IndexCount, StartIndexLocation, BaseVertexLocation) — slot 12. */
+static void ctx_DrawIndexed(ID3D11ContextImpl* self, UINT count, UINT start, INT base_vertex)
+{
+    if (!self || count == 0)
+        return;
+    if (self->current_topology == 4)
+    {
+        UINT triangles = count / 3;
+        for (UINT t = 0; t < triangles; ++t)
+        {
+            UINT a, b, c;
+            if (!ctx_read_index(self, start + t * 3, base_vertex, &a))
+                continue;
+            if (!ctx_read_index(self, start + t * 3 + 1, base_vertex, &b))
+                continue;
+            if (!ctx_read_index(self, start + t * 3 + 2, base_vertex, &c))
+                continue;
+            ctx_emit_tri(self, a, b, c);
+        }
+    }
+    else if (self->current_topology == 5)
+    {
+        if (count < 3)
+            return;
+        for (UINT t = 0; t + 2 < count; ++t)
+        {
+            UINT a, b, c;
+            if (!ctx_read_index(self, start + t, base_vertex, &a))
+                continue;
+            if (!ctx_read_index(self, start + t + 1, base_vertex, &b))
+                continue;
+            if (!ctx_read_index(self, start + t + 2, base_vertex, &c))
+                continue;
+            if (t & 1)
+            {
+                UINT tmp = b;
+                b = c;
+                c = tmp;
+            }
+            ctx_emit_tri(self, a, b, c);
+        }
+    }
+}
+
+/* DrawInstanced / DrawIndexedInstanced — slots 21 / 20. Per-instance
+ * data isn't read from a stream-1 vertex buffer; we replay the same
+ * draw N times so apps that do an instanced clear-test still see
+ * something. */
+static void ctx_DrawInstanced(ID3D11ContextImpl* self, UINT vcount, UINT icount, UINT vstart, UINT istart)
+{
+    (void)istart;
+    for (UINT i = 0; i < icount; ++i)
+        ctx_Draw(self, vcount, vstart);
+}
+static void ctx_DrawIndexedInstanced(ID3D11ContextImpl* self, UINT icount, UINT instance_count, UINT istart,
+                                     INT base_vertex, UINT inst_start)
+{
+    (void)inst_start;
+    for (UINT i = 0; i < instance_count; ++i)
+        ctx_DrawIndexed(self, icount, istart, base_vertex);
+}
+
+/* Map(resource, sub, mapType, flags, mapped) — slot 14. v0 only
+ * supports Map on an ID3D11Buffer; other resources return E_FAIL.
+ * Mapped layout (D3D11_MAPPED_SUBRESOURCE = 24 B):
+ *   void* pData (8) | UINT RowPitch (4) | UINT DepthPitch (4). */
+static HRESULT ctx_Map(ID3D11ContextImpl* self, void* resource, UINT sub, UINT map_type, UINT flags, void* mapped)
+{
+    (void)self;
+    (void)sub;
+    (void)map_type;
+    (void)flags;
+    if (!mapped)
+        return DX_E_POINTER;
+    BYTE* m = (BYTE*)mapped;
+    dx_memzero(m, 24);
+    if (!resource)
+        return DX_E_INVALIDARG;
+    /* Sniff the vtable to decide buffer vs texture. lpVtbl is the
+     * first 8 bytes of every COM impl in this DLL. */
+    const void* vt = *(const void* const*)resource;
+    if (vt == (const void*)g_buf_vtbl)
+    {
+        ID3D11BufferImpl* b = (ID3D11BufferImpl*)resource;
+        *(void**)(m + 0) = b->storage;
+        *(UINT*)(m + 8) = b->bytes;
+        *(UINT*)(m + 12) = b->bytes;
+        return DX_S_OK;
+    }
+    if (vt == (const void*)&g_tx_vtbl)
+    {
+        ID3D11Texture2DImpl* t = (ID3D11Texture2DImpl*)resource;
+        if (!t->bb)
+            return DX_E_FAIL;
+        *(void**)(m + 0) = t->bb->pixels;
+        *(UINT*)(m + 8) = t->bb->pitch_bytes;
+        *(UINT*)(m + 12) = t->bb->buffer_bytes;
+        return DX_S_OK;
+    }
+    return DX_E_INVALIDARG;
+}
+static void ctx_Unmap(ID3D11ContextImpl* self, void* resource, UINT sub)
+{
+    (void)self;
+    (void)resource;
+    (void)sub;
+}
+
+/* UpdateSubresource(resource, sub, box, src, srcRowPitch, srcDepthPitch) — slot 48.
+ * Only ID3D11Buffer is honoured; box is ignored (full overwrite). */
+static void ctx_UpdateSubresource(ID3D11ContextImpl* self, void* resource, UINT sub, const void* box, const void* src,
+                                  UINT row_pitch, UINT depth_pitch)
+{
+    (void)self;
+    (void)sub;
+    (void)box;
+    (void)row_pitch;
+    (void)depth_pitch;
+    if (!resource || !src)
+        return;
+    const void* vt = *(const void* const*)resource;
+    if (vt == (const void*)g_buf_vtbl)
+    {
+        ID3D11BufferImpl* b = (ID3D11BufferImpl*)resource;
+        dx_memcpy(b->storage, src, b->bytes);
+    }
 }
 
 /* Flush — slot 110. Software path: nothing to flush. */
@@ -570,8 +1374,28 @@ static void ctx_init_vtbl_once(void)
     g_ctx_vtbl[0] = (void*)ctx_QueryInterface;
     g_ctx_vtbl[1] = (void*)ctx_AddRef;
     g_ctx_vtbl[2] = (void*)ctx_Release;
+    g_ctx_vtbl[9] = (void*)ctx_PSSetShader;
+    g_ctx_vtbl[11] = (void*)ctx_VSSetShader;
+    g_ctx_vtbl[12] = (void*)ctx_DrawIndexed;
+    g_ctx_vtbl[13] = (void*)ctx_Draw;
+    g_ctx_vtbl[14] = (void*)ctx_Map;
+    g_ctx_vtbl[15] = (void*)ctx_Unmap;
+    g_ctx_vtbl[17] = (void*)ctx_IASetInputLayout;
+    g_ctx_vtbl[18] = (void*)ctx_IASetVertexBuffers;
+    g_ctx_vtbl[19] = (void*)ctx_IASetIndexBuffer;
+    g_ctx_vtbl[20] = (void*)ctx_DrawIndexedInstanced;
+    g_ctx_vtbl[21] = (void*)ctx_DrawInstanced;
+    g_ctx_vtbl[24] = (void*)ctx_IASetPrimitiveTopology;
     g_ctx_vtbl[33] = (void*)ctx_OMSetRenderTargets;
+    /* OMSetBlendState / OMSetDepthStencilState — bound objects are
+     * tracked weakly; we don't expose them through Get*State, so the
+     * simplest correct binding is to do nothing. */
+    g_ctx_vtbl[35] = (void*)DX_VSTUB; /* OMSetBlendState */
+    g_ctx_vtbl[36] = (void*)DX_VSTUB; /* OMSetDepthStencilState */
+    g_ctx_vtbl[43] = (void*)DX_VSTUB; /* RSSetState */
     g_ctx_vtbl[44] = (void*)ctx_RSSetViewports;
+    g_ctx_vtbl[45] = (void*)DX_VSTUB; /* RSSetScissorRects */
+    g_ctx_vtbl[48] = (void*)ctx_UpdateSubresource;
     g_ctx_vtbl[50] = (void*)ctx_ClearRenderTargetView;
     /* Flush */
     g_ctx_vtbl[110] = (void*)ctx_Flush;
@@ -645,30 +1469,149 @@ static ULONG dev_Release(ID3D11DeviceImpl* self)
     return self->refcount;
 }
 
-/* CreateBuffer(desc, initial, ppBuffer) — slot 3. */
+/* CreateBuffer(desc, initial, ppBuffer) — slot 3.
+ * D3D11_BUFFER_DESC: ByteWidth(0), Usage(4), BindFlags(8),
+ * CPUAccessFlags(12), MiscFlags(16), StructureByteStride(20).
+ * D3D11_SUBRESOURCE_DATA: pSysMem(0), SysMemPitch(8), SysMemSlicePitch(12). */
 static HRESULT dev_CreateBuffer(ID3D11DeviceImpl* self, const void* desc, const void* init, void** out)
 {
     (void)self;
-    (void)init;
     if (!out)
         return DX_E_POINTER;
     *out = NULL;
     if (!desc)
         return DX_E_INVALIDARG;
-    /* D3D11_BUFFER_DESC: ByteWidth(0), Usage(4), BindFlags(8), ... */
-    UINT bytes = *(const UINT*)desc;
+    const BYTE* d = (const BYTE*)desc;
+    UINT bytes = *(const UINT*)(d + 0);
+    UINT bind_flags = *(const UINT*)(d + 8);
+    UINT cpu_access = *(const UINT*)(d + 12);
     if (bytes == 0)
         return DX_E_INVALIDARG;
-    /* Allocate a "buffer" object: refcount + size + payload. We use
-     * the texture vtable as a generic resource container — the GUID
-     * comparison gates make sure nothing tries to cast it to a tex2d. */
-    BYTE* mem = (BYTE*)dx_heap_alloc(sizeof(ULONG) + sizeof(UINT) + bytes);
-    if (!mem)
+    const void* initial = NULL;
+    if (init)
+        initial = *(const void* const*)init; /* SUBRESOURCE_DATA::pSysMem */
+    ID3D11BufferImpl* b = buf_alloc(bytes, bind_flags, cpu_access, initial);
+    if (!b)
         return DX_E_OUTOFMEMORY;
-    dx_memzero(mem, sizeof(ULONG) + sizeof(UINT));
-    *(ULONG*)mem = 1;
-    *(UINT*)(mem + sizeof(ULONG)) = bytes;
-    *out = mem;
+    *out = b;
+    return DX_S_OK;
+}
+
+/* CreateInputLayout(descs, n, vsBytecode, vsBytecodeLen, ppLayout) — slot 11.
+ * v0 ignores the VS bytecode and only inspects the element descs to
+ * pull POSITION + (optional) COLOR offsets. */
+static HRESULT dev_CreateInputLayout(ID3D11DeviceImpl* self, const void* descs, UINT n, const void* vs, SIZE_T vs_len,
+                                     void** out)
+{
+    (void)self;
+    (void)vs;
+    (void)vs_len;
+    if (!out)
+        return DX_E_POINTER;
+    *out = NULL;
+    ID3D11InputLayoutImpl* il = il_alloc_from_desc(descs, n);
+    if (!il)
+        return DX_E_OUTOFMEMORY;
+    *out = il;
+    return DX_S_OK;
+}
+
+/* CreateVertexShader(byteCode, byteCodeLen, classLinkage, ppVS) — slot 12. */
+static HRESULT dev_CreateVertexShader(ID3D11DeviceImpl* self, const void* code, SIZE_T code_len, void* linkage,
+                                      void** out)
+{
+    (void)self;
+    (void)code;
+    (void)code_len;
+    (void)linkage;
+    if (!out)
+        return DX_E_POINTER;
+    *out = NULL;
+    ID3D11ShaderImpl* s = shader_alloc(0);
+    if (!s)
+        return DX_E_OUTOFMEMORY;
+    *out = s;
+    return DX_S_OK;
+}
+
+/* CreatePixelShader(byteCode, byteCodeLen, classLinkage, ppPS) — slot 15. */
+static HRESULT dev_CreatePixelShader(ID3D11DeviceImpl* self, const void* code, SIZE_T code_len, void* linkage,
+                                     void** out)
+{
+    (void)self;
+    (void)code;
+    (void)code_len;
+    (void)linkage;
+    if (!out)
+        return DX_E_POINTER;
+    *out = NULL;
+    ID3D11ShaderImpl* s = shader_alloc(1);
+    if (!s)
+        return DX_E_OUTOFMEMORY;
+    *out = s;
+    return DX_S_OK;
+}
+
+/* Pipeline state object factories — slots 20 / 21 / 22 / 23. The
+ * descriptors are ignored; these are opaque tracking handles. */
+static HRESULT dev_CreateBlendState(ID3D11DeviceImpl* self, const void* desc, void** out)
+{
+    (void)self;
+    (void)desc;
+    if (!out)
+        return DX_E_POINTER;
+    ID3D11StateImpl* s = state_alloc(1);
+    if (!s)
+    {
+        *out = NULL;
+        return DX_E_OUTOFMEMORY;
+    }
+    *out = s;
+    return DX_S_OK;
+}
+static HRESULT dev_CreateDepthStencilState(ID3D11DeviceImpl* self, const void* desc, void** out)
+{
+    (void)self;
+    (void)desc;
+    if (!out)
+        return DX_E_POINTER;
+    ID3D11StateImpl* s = state_alloc(2);
+    if (!s)
+    {
+        *out = NULL;
+        return DX_E_OUTOFMEMORY;
+    }
+    *out = s;
+    return DX_S_OK;
+}
+static HRESULT dev_CreateRasterizerState(ID3D11DeviceImpl* self, const void* desc, void** out)
+{
+    (void)self;
+    (void)desc;
+    if (!out)
+        return DX_E_POINTER;
+    ID3D11StateImpl* s = state_alloc(0);
+    if (!s)
+    {
+        *out = NULL;
+        return DX_E_OUTOFMEMORY;
+    }
+    *out = s;
+    return DX_S_OK;
+}
+static HRESULT dev_CreateSamplerState(ID3D11DeviceImpl* self, const void* desc, void** out)
+{
+    (void)self;
+    (void)desc;
+    if (!out)
+        return DX_E_POINTER;
+    ID3D11StateImpl* s = state_alloc(3);
+    if (!s)
+    {
+        *out = NULL;
+        return DX_E_OUTOFMEMORY;
+    }
+    *out = s;
     return DX_S_OK;
 }
 
@@ -790,6 +1733,13 @@ static void dev_init_vtbl_once(void)
     g_dev_vtbl[3] = (void*)dev_CreateBuffer;
     g_dev_vtbl[5] = (void*)dev_CreateTexture2D;
     g_dev_vtbl[9] = (void*)dev_CreateRenderTargetView;
+    g_dev_vtbl[11] = (void*)dev_CreateInputLayout;
+    g_dev_vtbl[12] = (void*)dev_CreateVertexShader;
+    g_dev_vtbl[15] = (void*)dev_CreatePixelShader;
+    g_dev_vtbl[20] = (void*)dev_CreateBlendState;
+    g_dev_vtbl[21] = (void*)dev_CreateDepthStencilState;
+    g_dev_vtbl[22] = (void*)dev_CreateRasterizerState;
+    g_dev_vtbl[23] = (void*)dev_CreateSamplerState;
     g_dev_vtbl[29] = (void*)dev_CheckFormatSupport;
     g_dev_vtbl[30] = (void*)dev_CheckMultisampleQualityLevels;
     g_dev_vtbl[33] = (void*)dev_CheckFeatureSupport;

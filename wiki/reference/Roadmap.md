@@ -263,8 +263,15 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
 
 ### DirectX real device backends
 
-- **Today:** D3D9/11/12 DLLs ship real COM-vtable shapes;
-  underlying device returns `E_FAIL` on real submits.
+- **Today:** D3D9/11/12 DLLs ship real COM-vtable shapes at
+  canonical Win SDK ABI slot positions, with a shared software
+  rasterizer (`userland/libs/dx_raster.h`) honouring `Draw*` /
+  `DrawIndexed*` / `DrawPrimitive*`. Vertex/index buffers carry
+  real backing storage; input layouts pull POSITION + COLOR from
+  the bound VB; triangle list / strip / fan all rasterize.
+- **Still gated:** HLSL compilation, texture sampling, geometry/
+  hull/domain/compute shaders, multi-stream input, Z-buffer,
+  D3D9 fixed-function lighting, real GPU command-ring submission.
 - **Blocks on:** per-vendor GPU drivers landing real command-
   ring submission; Vulkan-first ICD then D3D translation layer.
 

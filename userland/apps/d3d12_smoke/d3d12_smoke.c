@@ -17,7 +17,10 @@
  *   ID3D12Fence::GetCompletedValue → 1
  *   release everything
  *
- * Slot indices match the d12*_init_vtbl_once() tables in d3d12.c.
+ * Slot indices follow the canonical Win SDK d3d12.h vtable layout
+ * (IUnknown 0..2, ID3D12Object 3..6, ID3D12DeviceChild 7, ...).
+ * Earlier off-by-N drift was fixed in d3d12.c so a real Win32 PE
+ * compiled against d3d12.h works the same as this smoke test.
  */
 #include <windows.h>
 
@@ -86,46 +89,46 @@ void __cdecl mainCRTStartup(void)
 
     void** dev_vt = *(void***)dev;
 
-    /* slot 9 = CreateCommandQueue */
+    /* slot 8 = CreateCommandQueue */
     QueueDesc qd = {0, 0, 0, 0}; /* DIRECT */
     void* queue = NULL;
     typedef long (*PFN_CreateQueue)(void*, const void*, const GUID*, void**);
-    hr = ((PFN_CreateQueue)dev_vt[9])(dev, &qd, NULL, &queue);
+    hr = ((PFN_CreateQueue)dev_vt[8])(dev, &qd, NULL, &queue);
     Out("[d3d12_smoke] CreateCommandQueue    = ");
     Out((hr == 0 && queue) ? "PASS\r\n" : "FAIL\r\n");
 
-    /* slot 10 = CreateCommandAllocator(type, riid, **out) */
+    /* slot 9 = CreateCommandAllocator(type, riid, **out) */
     void* alloc = NULL;
     typedef long (*PFN_CreateAlloc)(void*, UINT, const GUID*, void**);
-    hr = ((PFN_CreateAlloc)dev_vt[10])(dev, 0, NULL, &alloc);
+    hr = ((PFN_CreateAlloc)dev_vt[9])(dev, 0, NULL, &alloc);
     Out("[d3d12_smoke] CreateCommandAllocator= ");
     Out((hr == 0 && alloc) ? "PASS\r\n" : "FAIL\r\n");
 
-    /* slot 13 = CreateCommandList(mask, type, alloc, pso, riid, **out) */
+    /* slot 12 = CreateCommandList(mask, type, alloc, pso, riid, **out) */
     void* list = NULL;
     typedef long (*PFN_CreateList)(void*, UINT, UINT, void*, void*, const GUID*, void**);
-    hr = ((PFN_CreateList)dev_vt[13])(dev, 0, 0, alloc, NULL, NULL, &list);
+    hr = ((PFN_CreateList)dev_vt[12])(dev, 0, 0, alloc, NULL, NULL, &list);
     Out("[d3d12_smoke] CreateCommandList     = ");
     Out((hr == 0 && list) ? "PASS\r\n" : "FAIL\r\n");
 
-    /* slot 22 = CreateFence(initial, flags, riid, **out) */
+    /* slot 36 = CreateFence(initial, flags, riid, **out) */
     void* fence = NULL;
     typedef long (*PFN_CreateFence)(void*, UINT64, UINT, const GUID*, void**);
-    hr = ((PFN_CreateFence)dev_vt[22])(dev, 0, 0, NULL, &fence);
+    hr = ((PFN_CreateFence)dev_vt[36])(dev, 0, 0, NULL, &fence);
     Out("[d3d12_smoke] CreateFence           = ");
     Out((hr == 0 && fence) ? "PASS\r\n" : "FAIL\r\n");
 
-    /* slot 15 = CreateDescriptorHeap(desc, riid, **out) */
+    /* slot 14 = CreateDescriptorHeap(desc, riid, **out) */
     HeapDesc hd = {2, 1, 0, 0}; /* type=RTV, num=1 */
     void* heap = NULL;
     typedef long (*PFN_CreateHeap)(void*, const void*, const GUID*, void**);
-    hr = ((PFN_CreateHeap)dev_vt[15])(dev, &hd, NULL, &heap);
+    hr = ((PFN_CreateHeap)dev_vt[14])(dev, &hd, NULL, &heap);
     Out("[d3d12_smoke] CreateDescriptorHeap  = ");
     Out((hr == 0 && heap) ? "PASS\r\n" : "FAIL\r\n");
 
-    /* slot 16 = GetDescriptorHandleIncrementSize(type) */
+    /* slot 15 = GetDescriptorHandleIncrementSize(type) */
     typedef UINT (*PFN_GetInc)(void*, UINT);
-    UINT inc = ((PFN_GetInc)dev_vt[16])(dev, 2);
+    UINT inc = ((PFN_GetInc)dev_vt[15])(dev, 2);
     Out("[d3d12_smoke] GetDescIncSize        = ");
     Out((inc != 0) ? "PASS\r\n" : "FAIL\r\n");
 
@@ -155,25 +158,25 @@ void __cdecl mainCRTStartup(void)
     Out("[d3d12_smoke] Heap::GetCPUStart     = ");
     Out((cpu_handle != 0) ? "PASS\r\n" : "FAIL\r\n");
 
-    /* slot 28 = CreateRenderTargetView(resource, desc, cpu_handle) */
+    /* slot 20 = CreateRenderTargetView(resource, desc, cpu_handle) */
     typedef void (*PFN_CreateRTV)(void*, void*, const void*, SIZE_T);
-    ((PFN_CreateRTV)dev_vt[28])(dev, res, NULL, cpu_handle);
+    ((PFN_CreateRTV)dev_vt[20])(dev, res, NULL, cpu_handle);
     Out("[d3d12_smoke] CreateRTV             = PASS (returned)\r\n");
 
-    /* List vtable: slot 23 = ClearRenderTargetView */
+    /* List vtable: slot 48 = ClearRenderTargetView */
     void** list_vt = *(void***)list;
     float green[4] = {0.0f, 1.0f, 0.0f, 1.0f};
     typedef void (*PFN_ClearRTV)(void*, SIZE_T, const float*, UINT, const void*);
-    ((PFN_ClearRTV)list_vt[23])(list, cpu_handle, green, 0, NULL);
+    ((PFN_ClearRTV)list_vt[48])(list, cpu_handle, green, 0, NULL);
     Out("[d3d12_smoke] List::ClearRTV(green) = PASS (returned)\r\n");
 
-    /* slot 8 = Close */
+    /* slot 9 = Close */
     typedef long (*PFN_Close)(void*);
-    hr = ((PFN_Close)list_vt[8])(list);
+    hr = ((PFN_Close)list_vt[9])(list);
     Out("[d3d12_smoke] List::Close           = ");
     Out((hr == 0) ? "PASS\r\n" : "FAIL\r\n");
 
-    /* Queue vtable: slot 10 = ExecuteCommandLists, slot 11 = Signal */
+    /* Queue vtable: slot 10 = ExecuteCommandLists, slot 14 = Signal */
     void** q_vt = *(void***)queue;
     void* lists[1] = {list};
     typedef void (*PFN_Exec)(void*, UINT, void* const*);
@@ -181,7 +184,7 @@ void __cdecl mainCRTStartup(void)
     Out("[d3d12_smoke] Queue::ExecLists      = PASS (returned)\r\n");
 
     typedef long (*PFN_Signal)(void*, void*, UINT64);
-    hr = ((PFN_Signal)q_vt[11])(queue, fence, 1);
+    hr = ((PFN_Signal)q_vt[14])(queue, fence, 1);
     Out("[d3d12_smoke] Queue::Signal(fence,1)= ");
     Out((hr == 0) ? "PASS\r\n" : "FAIL\r\n");
 
