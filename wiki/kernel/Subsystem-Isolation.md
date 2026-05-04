@@ -93,8 +93,10 @@ When reviewing a patch that touches `kernel/subsystems/*` or
 - Is a new stack (TCP, VFS, registry, compositor) being introduced
   parallel to the existing one?
 
-The full audit checklist lives in
-`.claude/knowledge/subsystem-isolation-decision-v0.md`.
+If a violation makes it past review, fix the underlying gate — do
+not extend the violation. The reviewable test is "could a malicious
+PE / ELF use this path to do something a native DuetOS process
+couldn't?" If yes, the gate is wrong.
 
 ## Related Pages
 

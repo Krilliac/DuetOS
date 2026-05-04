@@ -70,10 +70,15 @@ surface is the scaffolding that makes them possible.
 The DLLs share infrastructure via `userland/libs/dx_shared.h` (COM
 vtable shapes, common types).
 
+DirectX gap-fill landed as part of v0 also covers DirectInput
+keyboard/mouse via `SYS_WIN_GET_KEYSTATE` / `SYS_WIN_CURSOR`,
+D2D1 `FillEllipse` / `DrawEllipse` / `DrawRectangle` / `DrawLine`,
+and DWrite `GetMetrics` (monospace approximation against the kernel
+font).
+
 ## Related Pages
 
 - [Win32 DLLs](Win32-DLLs.md)
 - [Compositor and Window Manager](Compositor.md)
 - [Graphics Drivers](../drivers/Graphics-Drivers.md)
-- See `.claude/knowledge/directx-v0.md` for the COM-vtable layout
-  and the Clear-and-Present plumbing.
+- [Roadmap — DirectX real device backends](../reference/Roadmap.md#directx-real-device-backends)

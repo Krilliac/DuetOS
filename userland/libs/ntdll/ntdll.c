@@ -4859,7 +4859,7 @@ __declspec(dllexport) NTSTATUS ZwQueryInformationProcess(HANDLE ProcessHandle, U
  * (0xC0000002). The x64 calling convention places caller args in
  * RCX/RDX/R8/R9/stack; we ignore them and only set RAX.
  *
- * Architectural rule (subsystem-isolation-decision-v0.md):
+ * Architectural rule (wiki/kernel/Subsystem-Isolation.md):
  * Win32 is a façade for executing PE binaries — NotImpl thunks
  * satisfy malware-shape probes without offering any real DuetOS
  * effect. Real implementations replace each stub when the

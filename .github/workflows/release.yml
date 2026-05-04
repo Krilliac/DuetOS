@@ -427,7 +427,7 @@ jobs:
 
             Reach for one of the flavors below only when you have a
             specific reason. See
-            [`.claude/knowledge/build-flavors-v0.md`](https://github.com/Krilliac/duetos/blob/main/.claude/knowledge/build-flavors-v0.md)
+            [`wiki/tooling/Build-System.md`](https://github.com/Krilliac/duetos/blob/main/wiki/tooling/Build-System.md)
             for the per-knob matrix.
 
             ## Available flavors

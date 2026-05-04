@@ -138,8 +138,7 @@ KNOWN_MAPPINGS = {
     # is no journal to flush and no change-notification machinery.
     # NtWriteVirtualMemory / NtReadVirtualMemory / NtQueryVirtualMemory:
     # promoted from NotImpl to real syscalls (SYS_PROCESS_VM_*) above.
-    # The historical buggy mappings (SYS_WRITE / SYS_READ) are gone;
-    # see .claude/knowledge/stub-gap-inventory-v0.md §11.6.
+    # The historical buggy mappings (SYS_WRITE / SYS_READ) are gone.
     #
     # NtCreateSemaphore / NtReleaseSemaphore: NotImpl on purpose.
     # Previous mappings (SYS_EVENT_CREATE / SYS_EVENT_SET) collapsed

@@ -38,17 +38,27 @@ panic dumps interactively.
 - `inspect arm` — latch the next spawn so we scan whatever gets
   loaded next.
 
-See `.claude/knowledge/inspect-umbrella-v0.md`.
+The kernel shell also exposes ~15 `inspect *` subcommands that read
+cheap counter accessors across every subsystem (sched / mm / fs /
+net / sync / lockdep / event-trace / perf / nmi-watchdog), plus
+`domain list` / `domain restart` for live driver-domain control,
+`cpufeatures` rollup, and `tracer dump|kind|reset` / `perf dump` /
+`lockdep panic on|off`.
 
 ### Breakpoints
 
 `kernel/debug/breakpoints.cpp` exposes a kernel-mode breakpoint
 subsystem with hardware DR gates. Phase 4 added static `KBP_PROBE`
 macros that compile to a single `int3` if the matching breakpoint is
-armed.
+armed; today there are sites at `panic.enter`, `sandbox.denial`,
+`win32.stub_miss`, `mm.kernel_pagefault`, `trap.kernel_gpf`,
+`trap.kernel_ud`, `mm.heap_alloc_fail`, `mm.phys_alloc_fail`,
+`smp.ap_online`, `ring3.spawn`, `proc.create`, `proc.destroy`,
+`loader.pe_load`, `loader.elf_load`, `sched.thread_exit`,
+`sched.context_switch`, plus 8 `KBP_PROBE` sites covering kernel-fault,
+OOM, SMP, loader, and exit edges.
 
-`SYS_DEBUG` is gated by `kCapDebug`. See
-`.claude/knowledge/breakpoints-v0.md`.
+`SYS_DEBUG` is gated by `kCapDebug`.
 
 ### Runtime Invariant Checker
 
@@ -60,9 +70,11 @@ armed.
 - CRx register sanity
 - Stack canary integrity
 - Stack-overflow approach detection
+- `.text` baseline hash (`g_baseline_text_full_hash` covers the
+  full `.text`; the spot hash covers `kernel_main`-anchored hot
+  windows; both must match)
 
-A violation raises a panic with the failing invariant named. See
-`.claude/knowledge/runtime-invariant-checker-v0.md`.
+A violation raises a panic with the failing invariant named.
 
 ## Off-target Tooling
 
@@ -72,29 +84,58 @@ A violation raises a panic with the failing invariant named. See
   around an address from a kernel ELF.
 - **`decode-panic.sh <serial.log>`** — parse a panic dump and emit a
   cleaned-up stack trace with symbols resolved.
+- **`duetos-gdb-attach.sh`** + **`duetos-gdb-cmd.sh`** — attach to
+  the in-kernel GDB server (TCP, QEMU pty / software null-modem, or
+  USB-UART to real iron).
 
-See `.claude/knowledge/debug-tooling-symbol-disasm.md`.
+## Live Debug — In-kernel GDB Server
+
+`DUETOS_GDB_SERVER` (default-ON in `x86_64-debug`) exposes a feature-
+complete GDB server inside the kernel. Supported packets: `qSupported
+/ qXfer:features:read` (24-reg `target.xml`) `/ g/G/m/M/H/c/s/Z0..Z4/
+z0..z4/D/k/vCont/vCont? + qfThreadInfo/qsThreadInfo/qC/T`. Trap-frame
+plumbing rolls RIP back on `#BP` and clears TF on `#DB`. SW + HW
+breakpoints route through `kernel/debug/breakpoints`; install errors
+translate `BpError → distinct GDB E1n codes` (E12 = NoHwSlot for the
+5th-watchpoint case).
+
+Three transports: TCP (default), QEMU pty (software null-modem),
+real `/dev/ttyUSB*` (USB-UART cable to iron). Async Ctrl-C stop, SMP
+NMI rendezvous, multi-thread visibility (peers as GDB threads with
+read+write registers via `Hg`+`G`+commit-on-release), and `vCont`
+resume verb all landed.
+
+VSCode one-click attach via `.vscode/launch.json` +
+`tools/debug/vscode-{start,stop}-qemu.sh`. The only deferred item is
+`vCont;s` step on a peer thread — see [Roadmap](../reference/Roadmap.md#gdb-stub-completion-peer-thread-step).
 
 ## Crash Dump
 
 The crash dump path lives in `kernel/diag/` (`diag_decode.cpp`,
 `recovery.cpp`, supporting modules). On any unhandled exception it:
 
-- Dumps GPRs with symbol resolution
-- Decodes register bits (CR0, CR4, EFER, RFLAGS)
-- Symbolizes RIP, RSP, RBP, CR2 against the embedded symbol table
-- Tags VA regions (cr2/rsp/rbp/rip vs known mm regions)
-- Prints peer-CPU NMI snapshots (when SMP lands)
-- Prints per-CPU held-locks
-- Prints the last N klog ring entries inline
-
-See `.claude/knowledge/crash-dump-v0.md`.
+- Dumps GPRs with symbol resolution.
+- Decodes register bits (CR0, CR4, EFER, RFLAGS).
+- Symbolizes RIP, RSP, RBP, CR2 against the embedded symbol table.
+- Tags VA regions (cr2/rsp/rbp/rip vs known mm regions).
+- Prints peer-CPU NMI snapshots (when SMP lands).
+- Prints per-CPU held-locks.
+- Prints the last N klog ring entries inline.
+- Snapshots Architectural LBR (when CPU supports it).
+- Records per-task syscall trail and per-process VM info.
+- Emits a structurally-valid Windows minidump (`.dmp`,
+  `MDMP`-magic, `CONTEXT_X64` + `ThreadList` + `ModuleList` +
+  `MemoryList` + `ExceptionStream` + `SystemInfo`) over QEMU's
+  debugcon (port `0xE9 → ${BUILD_DIR}/duetos.dmp`). Loadable in
+  WinDbg / Visual Studio / VSCode-cppvsdbg / Python `minidump`
+  library / Mozilla `minidump-stackwalk`.
 
 ## Cleanroom Trace Boot Survey
 
-The first live read of the trace ring buffer is documented in
-`.claude/knowledge/cleanroom-trace-boot-survey-v0.md`. Useful template
-for adding new trace scopes.
+The cleanroom-trace surface reads the trace ring buffer without
+bumping reader cursors so a boot-time survey is non-destructive.
+Useful template for adding new trace scopes — see
+`kernel/diag/cleanroom_trace.cpp`.
 
 ## Related Pages
 

@@ -1,12 +1,16 @@
 # DuetOS — Design Decisions Log
 
-_Last updated: 2026-04-25_
+_Last updated: 2026-05-04_
 
-_Note (2026-04-25): the latest formal entries are 042 (HPET self-test).
-Decisions made during the windowing / GDI / USB / network / deferred-
-task work between 2026-04-21 and 2026-04-25 are captured per-slice in
-`.claude/knowledge/` rather than reformatted into this log; rebuild
-the cumulative view from `.claude/index.md` if needed._
+The most recent formal entries below run through 042 (HPET self-test);
+slices that landed during 2026-04-25 → 2026-05-04 (windowing / GDI /
+USB / network / DirectX / wireless control tier / FS-write rate guard /
+crash-dump minidump / GDB server / desktop apps / build flavours / DMA
+coherent / account-system v1 / etc.) are summarised in the
+[`History`](../getting-started/History.md) timeline and tracked
+subsystem-by-subsystem in their owning wiki page. New formal entries
+get appended here when a decision genuinely rules out an alternative
+the next slice could otherwise pick.
 
 ## Purpose
 

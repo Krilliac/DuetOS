@@ -39,6 +39,7 @@ category.
 
 - [Browse the full sidebar](./_Sidebar.md)
 - [Syscall ABI reference](specifications/Syscall-ABI.md)
+- [Roadmap](reference/Roadmap.md)
 - [Design decisions log](reference/Design-Decisions.md)
 - [Project history](getting-started/History.md)
 

@@ -7,7 +7,7 @@
 [![Build flavors](https://img.shields.io/github/v/release/krilliac/duetos?include_prereleases&display_name=tag&filter=latest-flavors&label=build%20flavors&color=lightgrey)](https://github.com/krilliac/duetos/releases/tag/latest-flavors)
 [![Lifetime downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fkrilliac%2Fduetos%2Fstats%2Flifetime-downloads.json)](https://github.com/krilliac/duetos/releases)
 
-**Front-runner downloads:** [release ISO](https://github.com/krilliac/duetos/releases/download/latest-release/duetos-release.iso) for production / shipping; [debug ISO](https://github.com/krilliac/duetos/releases/download/latest-debug/duetos-debug.iso) for development. Specialized variants (release-asserts, release-audit for forensic post-incident capture, release-lto, debug-fast) live in the [`latest-flavors`](https://github.com/krilliac/duetos/releases/tag/latest-flavors) channel — see the per-preset notes there or the [build flavors guide](.claude/knowledge/build-flavors-v0.md).
+**Front-runner downloads:** [release ISO](https://github.com/krilliac/duetos/releases/download/latest-release/duetos-release.iso) for production / shipping; [debug ISO](https://github.com/krilliac/duetos/releases/download/latest-debug/duetos-debug.iso) for development. Specialized variants (release-asserts, release-audit for forensic post-incident capture, release-lto, debug-fast) live in the [`latest-flavors`](https://github.com/krilliac/duetos/releases/tag/latest-flavors) channel — see the per-preset notes there or the [build system guide](wiki/tooling/Build-System.md).
 
 Click a **channel** badge to open the release page, or an **iso ↓** badge to download the ISO directly. The "this release" counter resets when CI re-publishes the rolling channel; "lifetime downloads" sums every asset download across all channels and never resets.
 
@@ -114,8 +114,7 @@ the e1000 transmit ring.
 > boundary. NT/Linux thunks translate ABI shapes; they do not extend
 > the kernel's authority. See
 > [Subsystem Isolation](wiki/kernel/Subsystem-Isolation.md) for the full
-> rule set and `.claude/knowledge/subsystem-isolation-decision-v0.md`
-> for the audit checklist.
+> rule set and the audit checklist.
 
 ---
 
@@ -142,7 +141,7 @@ host cross-compiler for the userland Windows PE toolchain).
 
 The two main presets (`x86_64-debug`, `x86_64-release`) are the
 defaults; five derived presets exercise specific instrumentation
-axes. See [`.claude/knowledge/build-flavors-v0.md`](.claude/knowledge/build-flavors-v0.md)
+axes. See [`wiki/tooling/Build-System.md`](wiki/tooling/Build-System.md)
 for the per-knob matrix.
 
 | Preset | Use when |
@@ -271,8 +270,8 @@ The same `FramebufferPutPixel` / `FramebufferFillRect` / `FillRgba`
 primitive set is what the DirectX v0 DLLs (`d3d9` / `d3d11` /
 `d3d12` / `dxgi`) call into when an MSVC PE goes
 `D3D11CreateDeviceAndSwapChain → ClearRenderTargetView → Present`.
-See [`.claude/knowledge/directx-v0.md`](.claude/knowledge/directx-v0.md)
-for the COM-vtable layout and the Clear-and-Present plumbing.
+See [`wiki/subsystems/DirectX.md`](wiki/subsystems/DirectX.md) for
+the COM-vtable layout and the Clear-and-Present plumbing.
 
 ### Windows PE on the serial console
 
@@ -407,9 +406,8 @@ tools/         build helpers, QEMU launcher, embed-blob, gen-symbols,
                wiki check scripts
 docs/          screenshots, theme prototypes, ABI data files (csv/json),
                sync-wiki.sh
-wiki/          public-facing reference (start at wiki/Home.md)
+wiki/          canonical documentation home (start at wiki/Home.md)
 tests/         hosted + on-target tests
-.claude/       working notes kept from development
 ```
 
 ---

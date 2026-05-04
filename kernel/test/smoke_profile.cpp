@@ -268,9 +268,10 @@ void SmokeProfileSleepAndExit()
 
     // Log the live scheduler stats AT entry so a CI failure
     // shows what state we were in. Intentionally verbose —
-    // the .claude/knowledge/kmalloc-zero-init-pattern entry
-    // documents that latent uninit-state bugs manifest as
-    // silent hangs that only diagnostic logs can localise.
+    // latent uninit-state bugs manifest as silent hangs that
+    // only diagnostic logs can localise (see the kmalloc
+    // zero-init pattern documented in
+    // wiki/tooling/Coding-Standards.md).
     {
         const auto stats = sched::SchedStatsRead();
         arch::SerialWrite("[smoke] sched stats at entry: live=");

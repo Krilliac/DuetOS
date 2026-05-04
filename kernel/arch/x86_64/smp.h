@@ -22,10 +22,11 @@ struct PerCpu;
  *     its LAPIC; BSP polls with a bounded timeout before moving on.
  *   - AP-side C++ entry halts with interrupts masked — the AP's
  *     LAPIC is live, but the scheduler is not SMP-safe across
- *     context-switch yet (the lock-passing half of
- *     `smp-ap-bringup-scope.md` Commit D is still pending).
+ *     context-switch yet (the lock-passing half of the SMP
+ *     bring-up plan, Commit D, is still pending — see
+ *     `wiki/advanced/SMP-AP-Bringup-Scope.md`).
  *
- * Deferred (see `docs/knowledge/smp-ap-bringup-scope.md`):
+ * Deferred (see `wiki/advanced/SMP-AP-Bringup-Scope.md`):
  *   - Lock-passing across `ContextSwitch` so a peer CPU can safely
  *     wake tasks that this CPU is about to switch away from.
  *   - `SchedEnterOnAp` — each AP calls `SchedStartIdle("idle-apN")`,

@@ -47,7 +47,7 @@ Output trees:
 - **NASM 2.16+** if/when hand-written boot ASM lands; not required
   today
 - **Rust** via rustup nightly pinned in `rust-toolchain.toml` (when
-  Rust subsystems land — see `.claude/knowledge/rust-bringup-plan.md`)
+  Rust subsystems land — see [Roadmap > Rust bring-up](../reference/Roadmap.md#rust-bring-up))
 
 ## Live-test Tooling — Install on Demand
 
@@ -79,7 +79,7 @@ Counts as "legitimately requires":
 Does **not** count:
 
 - Pure refactors with no behavioural delta.
-- Docs / CLAUDE.md / `wiki/` / `.claude/knowledge/` changes only.
+- Docs / CLAUDE.md / `wiki/` changes only.
 - Code that compiles but is not yet wired into any live path.
 
 ## Run
@@ -114,15 +114,25 @@ CI is wired in `.github/workflows/`:
   resets to zero every time CI republishes a rolling channel,
   because `softprops/action-gh-release@v2 overwrite_files: true`
   deletes the old asset object and uploads a fresh one with
-  `download_count = 0`. See
-  `.claude/knowledge/lifetime-downloads-tally-v0.md`.
+  `download_count = 0`. The workflow runs before each publish to
+  fold accumulated downloads into the tally, plus on a 30-minute
+  schedule for organic downloads.
 
 See [Architecture Overview > CI topology](../getting-started/Architecture-Overview.md#14-ci-topology-and-artifact-channels).
 
 ## Build Optimisations
 
-Effective speedups documented in `.claude/knowledge/build-optimizations.md`
-and `.claude/knowledge/clang-format.md` (CI-matching invocation).
+Effective speedups in current use:
+
+- **`-DCMAKE_C_COMPILER_LAUNCHER=ccache`** + `-DCMAKE_CXX_COMPILER_LAUNCHER=ccache`
+  for incremental rebuilds.
+- **`-fuse-ld=lld`** as the linker; `lld` is ~2× `ld.bfd` on the
+  full kernel link.
+- **Parallel build** with `--parallel $(nproc)`.
+- **clang-format**: `find kernel drivers subsystems userland \(
+  -name '*.h' -o -name '*.hpp' -o -name '*.c' -o -name '*.cpp' \)
+  | xargs clang-format -i` for the bulk format pass; CI runs
+  `--dry-run --Werror` over the same set to enforce.
 
 ## Related Pages
 

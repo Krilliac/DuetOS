@@ -34,9 +34,7 @@ The QEMU smoke gate is the canonical "did it run?" test. See
 
 ## On-Target Self-Tests
 
-Each subsystem owns its own self-test. The pattern (per
-`.claude/knowledge/native-apps-v0.md` and the various `*-v0.md`
-docs):
+Each subsystem owns its own self-test. The pattern is:
 
 - Self-test runs once during init.
 - Output is `[<subsys>] self-test ...` lines on the serial console.
@@ -72,8 +70,10 @@ sanitizers; line coverage is a follow-up item.
   called from the subsystem's `Init()`. Keep output terse — every
   line costs serial bandwidth on every boot.
 - **Pentest probe**: add to `kernel/security/pentest/` following
-  the existing probe pattern. See
-  `.claude/knowledge/pentest-ring3-adversarial-v0.md`.
+  the existing probe pattern — `jail`, `nx`, `priv`, `badint`,
+  `kread`, and `crosspid` are the templates. Each probe runs in
+  ring 3 with `CapSetEmpty`, fires the syscall under test, and
+  records a sandbox-denial event the kernel side asserts on.
 
 ## Related Pages
 

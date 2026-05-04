@@ -718,8 +718,8 @@ void AcpiInit(uptr multiboot_info_phys)
     // DSDT was discovered via FADT.dsdt (above). SSDTs are
     // separate XSDT/RSDT entries — walk once more and cache
     // every one for the future AML interpreter. The interpreter
-    // itself is deferred (see .claude/knowledge/driver-shells-
-    // v0.md), but having the addresses surfaced at boot lets
+    // itself is deferred (see wiki/reference/Roadmap.md, "Battery
+    // + ACPI suspend"), but surfacing the addresses at boot lets
     // follow-on slices land without re-walking.
     CollectSsdts(*rsdp);
 

@@ -37,10 +37,9 @@ tools/
   win32-compat/       Win32 compatibility tooling
   linux-compat/       Linux ABI tooling
 tests/                unit tests (hosted) + kernel self-tests (on-target)
-docs/                 architecture, history, ABI matrix, design notes, theme spec
-                      Also: sync-wiki.sh, screenshots, theme prototypes
-wiki/                 the wiki you're reading right now
-.claude/              persistent AI context (knowledge base + prompt notes)
+docs/                 boot-log examples, ABI matrix, theme prototypes,
+                      sync-wiki.sh, screenshots
+wiki/                 canonical documentation home (you are here)
 .github/              CI workflows, repo templates
 cmake/                CMake helpers
 ```

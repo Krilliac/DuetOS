@@ -90,9 +90,7 @@ If you discover a subsystem that is built but not wired in:
 
 ## The AI Bloat Pattern
 
-The persistent observation log
-(`.claude/knowledge/ai-bloat-pattern.md`) tracks the specific
-failure modes that recur when an LLM is the author. They include:
+Specific failure modes that recur when an LLM is the author:
 
 - Adding a "future-proof" abstraction the next slice will need to
   delete
@@ -104,6 +102,11 @@ failure modes that recur when an LLM is the author. They include:
   rule out
 - Inventing a feature flag for a binary decision the user already
   made
+- Re-introducing a deleted utility because a new caller wanted it
+  back rather than rebuilding the pattern that originally
+  justified the deletion
+- Building a "config / preferences" struct around a single tunable
+  whose call site already names the value
 
 Recognise the pattern; refuse the urge.
 

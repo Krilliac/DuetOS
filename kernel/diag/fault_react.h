@@ -9,7 +9,7 @@
  * checker, watchdogs, retry-exhausted paths) and the existing
  * recovery taxonomy (halt / driver-restart / process-kill /
  * retry / reject / object-reset — see
- * `docs/knowledge/runtime-recovery-strategy.md`).
+ * `wiki/security/Runtime-Recovery.md`).
  *
  * Today every reporter picks its own reaction ad-hoc:
  *   - DriverFault logs and counts.

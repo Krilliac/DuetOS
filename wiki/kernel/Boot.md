@@ -26,9 +26,9 @@ UEFI firmware
 
 Today the canonical boot path is **Multiboot2 + GRUB**. The hybrid ISO
 boots both SeaBIOS (legacy CSM) and UEFI (OVMF in QEMU; native firmware
-on real hardware) from a single image. See
-[`.claude/knowledge/uefi-hybrid-iso-v0.md`](../../.claude/knowledge/uefi-hybrid-iso-v0.md)
-for the ISO-build details.
+on real hardware) from a single image: `tools/build/iso/grub.cfg`
+declares both `multiboot2` and `chainloader` paths, and `grub-mkrescue`
+embeds the El-Torito boot record alongside the EFI System Partition.
 
 ## Kernel execution order at boot
 
@@ -62,8 +62,8 @@ The boot stack is mapped twice during early boot — once at the
 identity-mapped low address used by the AP entry trampoline and once at
 the higher-half VMA the kernel actually runs at. Without the alias,
 the first task switch out of the boot context double-faults on the
-first user CR3 load. See
-[`.claude/knowledge/boot-stack-high-vma-fix.md`](../../.claude/knowledge/boot-stack-high-vma-fix.md).
+first user CR3 load (the in-flight stack pointer dereferences a
+no-longer-mapped low VA).
 
 ## Verification
 

@@ -1752,7 +1752,7 @@ void SpawnPtrFuzzProbeTask()
 // routine) and the control print would be missing.
 //
 // This closes the CopyToUser half of the pointer-validator story
-// flagged in .claude/knowledge/pentest-ring3-adversarial-v0.md.
+// for the ring-3 adversarial pentest suite.
 
 // clang-format off
 constexpr char kWriteFuzzPath[] = "/etc/version";
@@ -2892,8 +2892,7 @@ void StartRing3SmokeTask()
     }
     // First Win32 PE that gets RESOLVED (not just reported)
     // by the kernel. Imports kernel32.dll!ExitProcess, hits
-    // the stub page, exits with code 42. See
-    // .claude/knowledge/win32-subsystem-v0.md.
+    // the stub page, exits with code 42.
     if (::duetos::test::SmokeProfileShouldSpawn(::duetos::test::SmokeTarget::PeWinapi))
     {
         SpawnPeFile("ring3-hello-winapi", fs::generated::kBinHelloWinapiBytes, fs::generated::kBinHelloWinapiBytes_len,
@@ -2942,7 +2941,7 @@ void StartRing3SmokeTask()
     // Real-world Windows PE diagnostic attempt. Expected to
     // reject (most imports unresolved) — the value is the
     // PeReport log line showing the full import / reloc / TLS
-    // gap. See .claude/knowledge/pe-subsystem-v0.md.
+    // gap.
     if (::duetos::test::SmokeProfileShouldSpawn(::duetos::test::SmokeTarget::PeWinkill))
     {
         SpawnPeFile("ring3-winkill", fs::generated::kBinWinKillBytes, fs::generated::kBinWinKillBytes_len,
@@ -2958,7 +2957,6 @@ void StartRing3SmokeTask()
                 CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     // Surface-coverage smoke PEs. Each prints a per-API PASS/FAIL
     // line on serial; the boot transcript is the gap inventory.
-    // See .claude/knowledge/smoke-pe-suite-v0.md.
     SpawnPeFile("ring3-crypto-smoke", fs::generated::kBinCryptoSmokeBytes, fs::generated::kBinCryptoSmokeBytes_len,
                 CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     SpawnPeFile("ring3-paths-smoke", fs::generated::kBinPathsSmokeBytes, fs::generated::kBinPathsSmokeBytes_len,

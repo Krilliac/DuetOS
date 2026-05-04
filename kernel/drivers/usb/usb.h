@@ -21,9 +21,7 @@
  *   - BAR 0 mapped as MMIO for each controller.
  *   - Class-driver hooks (HID, MSC) stubbed but not wired —
  *     they need real host-controller enumeration of the bus
- *     topology first, which is the whole-enchilada xHCI slice
- *     that's explicitly deferred (`docs/knowledge/usb-xhci-
- *     scope-estimate.md`).
+ *     topology first.
  *
  * The USB stack above the host controllers is structured as:
  *

@@ -21,9 +21,13 @@ Native DuetOS apps and Win32 PE windows compose into the same
 framebuffer:
 
 - **Native apps** (`kernel/apps/`): Calculator, Notepad, Files, Task
-  Manager, Kernel Log, Clock, GFX Demo. Each is an in-kernel native
-  app following the pattern in
-  `.claude/knowledge/native-apps-v0.md`.
+  Manager, Kernel Log, Clock, GFX Demo, About / System Info, Help,
+  Calendar, Image Viewer, Browser (HTTP only), Trash. Each is an
+  in-kernel native app, registered via a `ThemeRole` enum entry +
+  per-theme palette extension; the compositor scans the role table
+  on every recompose and the Start menu's `/APPS/*.MNF` enumerator
+  raises the matching window when a manifest specifies
+  `target=<role>`.
 - **Win32 PE windows**: `windowed_hello` paints with `Rectangle` /
   `Ellipse` / `DrawTextW` / `FillRect`, dispatches `WM_PAINT` /
   `WM_TIMER` / `WM_LBUTTONDOWN` through a user-registered `WndProc`,
@@ -80,13 +84,13 @@ Recent compositor work:
 - Round-rect outline primitive
 - Filled circle primitive
 
-See `.claude/knowledge/desktop-chrome-polish-v0.md`.
-
 ## Network Flyout
 
 Bottom-right Wi-Fi-style popup with hover preview, exposing the
-network state from `kernel/net/`. See
-`.claude/knowledge/network-flyout-panel-v0.md`.
+network state from `kernel/net/`. The flyout reads the live `netifs`
+list and per-NIC TX/RX byte counters; a single tick polls each path
+state and refreshes the per-row tooltip without blocking the main
+compose pass.
 
 ## Known Limits / GAPs
 

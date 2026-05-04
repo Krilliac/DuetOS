@@ -46,9 +46,6 @@ HTTP fetch and asserts a 2xx / 3xx response.
   of the broader crypto track.
 - **IPv6** is not the default and not heavily exercised.
 
-See `.claude/knowledge/live-internet-connectivity-v0.md` for the v0
-bringup notes.
-
 ## Related Pages
 
 - [Network Stack](Network-Stack.md)

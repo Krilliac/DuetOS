@@ -9,8 +9,8 @@
 ## Overview
 
 Catalogue of failure modes seen often enough to deserve a documented
-fix. For session-specific issues, search `.claude/knowledge/` —
-issue postmortems live there.
+fix. For one-off failure shapes, the kernel shell's `inspect` and
+`klog` commands are usually faster than grepping git history.
 
 ## Build Failures
 
@@ -53,8 +53,7 @@ actually ships, this is informational.
 `boot.S` regression — some new code in the 32-bit boot path clobbered
 `edi` or `esi`, which hold the Multiboot2 boot magic and info-struct
 pointer respectively. Fix: use `ebx`, `ebp`, or `edx` for scratch in
-boot.S. See `.claude/knowledge/frame-allocator-v0.md` for the
-historical bug.
+boot.S.
 
 ### `[panic] mm/kheap: ...`
 
@@ -76,8 +75,6 @@ Page-table walker regression. The most likely failure modes are:
   inside the boot direct map.
 - `MapPage: virtual address already mapped` — bump cursor desynced
   from actual mappings.
-
-See `.claude/knowledge/paging-v0.md`.
 
 ### Workers print exactly once, then kernel goes silent
 
@@ -143,4 +140,4 @@ exists. Either fix the path or remove the dead reference.
 - [QEMU Smoke Tests](../tooling/QEMU-Smoke.md)
 - [Boot Path](../kernel/Boot.md)
 - [Logging and Tracing](../kernel/Logging-And-Tracing.md)
-- [Knowledge Base Index](../reference/Knowledge-Base-Index.md)
+- [Roadmap](../reference/Roadmap.md)

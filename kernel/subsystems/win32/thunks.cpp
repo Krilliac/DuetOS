@@ -679,9 +679,8 @@ bool IsLikelyDataImport(const char* func)
     // of at a code thunk that faults on store.
     //
     // The list is short on purpose: only globals that real-world
-    // PEs actually import. Add new names as the gap inventory
-    // surfaces them — see .claude/knowledge/live-test-fixes-...
-    // for the workflow.
+    // PEs actually import. Add new names as live-test boots surface
+    // them.
     static const char* const kCrtDataNames[] = {
         "_commode",   "_fmode",      "_environ",   "_wenviron",      "__argc",          "__argv",        "__wargv",
         "_acmdln",    "_wcmdln",     "_pgmptr",    "_wpgmptr",       "__mb_cur_max",    "___mb_cur_max", "_iob",

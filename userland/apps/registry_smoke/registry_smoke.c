@@ -12,8 +12,7 @@
  * DuetOS ships a static prefix-tree registry under HKLM with at
  * least HKLM\Software\Microsoft\Windows NT\CurrentVersion +
  * HKLM\Hardware\Description\System\CentralProcessor\0 — see
- * .claude/knowledge/registry-prefix-tree-v0.md for the full
- * inventory.
+ * wiki/subsystems/Win32-DLLs.md for the registry surface.
  */
 #include <windows.h>
 

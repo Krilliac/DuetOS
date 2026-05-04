@@ -56,8 +56,7 @@ DuetOS reaches Google over a real connection:
 4. TCP connect to port 80 succeeds.
 5. HTTP `GET /` returns a real response.
 
-See [Live Internet Verification](Live-Internet.md) and
-`.claude/knowledge/live-internet-connectivity-v0.md`.
+See [Live Internet Verification](Live-Internet.md).
 
 ## Shell Commands
 
@@ -69,7 +68,7 @@ The kernel shell exposes:
 - `netscan` — local scan
 - `net <addr>` — quick reach test
 
-See `.claude/knowledge/network-shell-commands-v0.md`.
+See [Shell Commands](../reference/Shell-Commands.md) for the full list.
 
 ## Capability Surface
 

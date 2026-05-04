@@ -52,9 +52,10 @@ struct VendorEntry
     const char* tier;
 };
 
-// Tier mapping — matches docs/knowledge/hardware-target-matrix.md.
-// Unknown vendors fall through to the default-case "unknown" tier
-// and are still recorded + logged so the gap is visible.
+// Tier mapping — matches the Hardware Target Matrix in
+// wiki/drivers/Driver-Overview.md. Unknown vendors fall through to
+// the default-case "unknown" tier and are still recorded + logged
+// so the gap is visible.
 constexpr VendorEntry kVendors[] = {
     {kVendorIntel, "Intel", "tier1-intel-igpu"},   {kVendorAmd, "AMD", "tier1-amd-radeon"},
     {kVendorNvidia, "NVIDIA", "tier1-nvidia"},     {kVendorVmware, "VMware-SVGA", "tier3-vm"},

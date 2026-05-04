@@ -7,7 +7,7 @@
  * DuetOS — runtime recovery infrastructure.
  *
  * Implements the API surface defined in
- * `docs/knowledge/runtime-recovery-strategy.md`. See that doc for
+ * `wiki/security/Runtime-Recovery.md`. See that doc for
  * the full taxonomy (Class A halt / B driver restart / C process
  * kill / D retry / E reject / F object reset).
  *

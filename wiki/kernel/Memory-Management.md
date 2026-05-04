@@ -45,7 +45,14 @@ Bitmap-backed, one bit per 4 KiB frame.
 Highest usable address ignores reserved MMIO (otherwise QEMU q35's
 1 TiB pflash region would balloon the bitmap to 32 MiB).
 
-See `.claude/knowledge/frame-allocator-v0.md` for the full bring-up notes.
+The allocator gained `AllocateFrameInRange(PhysAddr max_phys)` for
+zone-clamped allocations: a bitmap search that clamps the highest
+frame considered to `max_phys >> kPageSizeLog2`. `kernel/mm/zone.cpp`'s
+`AllocateZoneFrame` picks the ceiling per zone (16 MiB for `kZoneDma`,
+4 GiB for `kZoneDma32`, no ceiling for `kZoneNormal`) and routes
+through this API. The boot self-test panics with the offending physical
+address if a Dma frame above 16 MiB or a Dma32 frame above 4 GiB ever
+escapes.
 
 ## Higher-half Kernel + Direct Map
 
@@ -58,8 +65,6 @@ within that window and panic on out-of-range input.
 0xFFFFFFFF80000000 .. 0xFFFFFFFFC0000000   higher-half direct map (1 GiB)
 0xFFFFFFFFC0000000 .. 0xFFFFFFFFE0000000   kernel MMIO arena (512 MiB)
 ```
-
-See `.claude/knowledge/higher-half-kernel-v0.md`.
 
 ## Managed Paging API
 
@@ -75,8 +80,6 @@ W^X.
 Splitting 2 MiB PS pages into 4 KiB PTEs is **not** supported in v0 —
 the boot direct map never wants 4 KiB granularity, and there are no
 other PS users.
-
-See `.claude/knowledge/paging-v0.md`.
 
 ## Kernel Heap
 
@@ -95,8 +98,21 @@ First-fit + coalescing freelist over a 2 MiB pool.
 KMalloc/KFree are **not yet IRQ-safe and not yet SMP-safe**. SMP bring-up
 will add `spin_lock_irqsave`. Until then, document on every caller.
 
-See `.claude/knowledge/kernel-heap-v0.md` and
-`.claude/knowledge/kmalloc-zero-init-pattern.md`.
+**Zero-init pattern**: every kernel struct that embeds sync primitives
+(`SpinLock`, `Mutex`, etc.) must be `memset(0)` before first use. The
+allocator returns potentially-dirty memory; primitives expect zeroed
+storage to be unlocked. See [`Coding-Standards`](../tooling/Coding-Standards.md).
+
+## DMA-coherent allocation
+
+`mm::AllocDmaCoherent(bytes, zone)` returns zone-clamped contiguous
+frames with a cached direct-map alias on x86_64. PCIe is HW-coherent so
+no UC remap or cache flush is needed; `DmaSync*` are mfence/lfence on
+x86. ARM64 will require `dsb ishst` + per-line `dc cvac` (tracked as a
+`// GAP:` in `kernel/mm/dma.cpp`). Boot self-test asserts MMIO reject,
+zero-byte reject, per-zone alloc, ceiling, write/read round-trip, and
+reuse-after-free. First consumer: iwlwifi TFD/RBD rings (4 × 32 KiB TX
++ 1 × 2 KiB RX in `kZoneDma32`).
 
 ## Per-process Address Spaces
 
@@ -106,15 +122,13 @@ task's address space differs from the current one. Userland mappings
 live in the low half; kernel mappings live in the high half and stay
 identical across every address space.
 
-See `.claude/knowledge/per-process-address-space-v0.md`.
-
 ## Kernel Stack Guard Pages
 
 Every task has an unmapped low-edge guard page on its kernel stack.
 Stack overflow into the guard takes a `#PF` instead of silently
-clobbering the next allocation. See
-`.claude/knowledge/kernel-stack-guard-v0.md` and
-`.claude/knowledge/boot-stack-high-vma-fix.md`.
+clobbering the next allocation. The boot stack additionally uses a
+high-VMA alias so the early CR3 swap to a per-process PML4 doesn't
+unmap the active stack mid-call.
 
 ## Known Limits / GAPs
 
@@ -123,9 +137,8 @@ clobbering the next allocation. See
   single-CPU assumption today.
 - **No 2 MiB / 1 GiB PS support for new mappings** — straightforward
   add when the framebuffer driver demands it.
-- **No buddy / slab allocator** on top of the freelist heap. Real
-  per-zone allocator + slab + KASAN graduated to
-  `.claude/knowledge/post-debug-recommendations-plan.md`.
+- **No buddy / slab allocator** on top of the freelist heap. See the
+  [Roadmap](../reference/Roadmap.md#slab-allocator--freed-object-poison--real-kasan).
 - **No reclaim or compaction.** `FreeFrame` is the only path frames
   re-enter the pool.
 

@@ -548,7 +548,7 @@ i64 DoSetValue(arch::TrapFrame* frame)
     // change. Cap-gate on kCapFsWrite — same gate that protects
     // FAT32 writes — so a sandboxed PE can't alter the shared
     // kernel-side hive without explicit clearance. See
-    // .claude/knowledge/subsystem-isolation-decision-v0.md.
+    // wiki/kernel/Subsystem-Isolation.md.
     if (!core::CapSetHas(proc->caps, core::kCapFsWrite))
     {
         core::RecordSandboxDenial(core::kCapFsWrite);

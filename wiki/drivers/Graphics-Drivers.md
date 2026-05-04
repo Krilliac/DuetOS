@@ -35,8 +35,12 @@ primitives). See [Compositor and Window Manager](../subsystems/Compositor.md).
 - Used as the default GPU for QEMU smoke tests
   (`-vga virtio` / `-display sdl,gl=on`).
 
-See `.claude/knowledge/render-drivers-v6.md` for the current state of
-the render stack.
+The compositor presents through this scanout: `WindowCompose`
+collects per-window dirty rectangles, paints them into the
+framebuffer-backed back buffer, and a `RESOURCE_FLUSH` IOCTL marks
+the rectangle as the current scanout image. EDID parsing, CVT
+timing, and CEA-861 extension blocks are decoded but mode-set
+negotiation against a vendor-specific GPU driver is roadmap work.
 
 ## GPU Discovery
 
@@ -47,9 +51,8 @@ the render stack.
 - Maps BARs (deferred MMIO probe).
 - Records the device for future driver bringup.
 
-Real driver implementations beyond discovery are not landed — see
-`.claude/knowledge/gpu-discovery-v0.md` and
-`.claude/knowledge/driver-shells-v0.md`.
+Real driver implementations beyond discovery are roadmap work — see
+[Roadmap](../reference/Roadmap.md#multi-monitor--runtime-resolution-change).
 
 ## Compositor Primitives
 
@@ -65,9 +68,7 @@ These are the same primitives the DirectX v0 DLLs (`d3d9` / `d3d11` /
 `d3d12` / `dxgi`) call into when an MSVC PE goes
 `D3D11CreateDeviceAndSwapChain -> ClearRenderTargetView -> Present`.
 
-See [DirectX v0 Path](../subsystems/DirectX.md) and
-`.claude/knowledge/desktop-chrome-polish-v0.md` /
-`.claude/knowledge/gfxdemo-multimode-v0.md`.
+See [DirectX v0 Path](../subsystems/DirectX.md).
 
 ## Themes
 

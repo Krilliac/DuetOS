@@ -28,10 +28,10 @@
  *   - User-mode API (Vulkan ICD, D3D translation).
  *   - Interrupt handling (MSI/MSI-X table programming).
  *
- * The tier mapping matches
- * `docs/knowledge/hardware-target-matrix.md`. Any device that
- * doesn't match a known vendor lands in the "unknown" tier — it's
- * still logged so the boot log documents the gap.
+ * The tier mapping matches the Hardware Target Matrix in
+ * wiki/drivers/Driver-Overview.md. Any device that doesn't match a
+ * known vendor lands in the "unknown" tier — it's still logged so
+ * the boot log documents the gap.
  *
  * Context: kernel. `GpuInit` runs once at boot after `PciEnumerate`.
  * Accessors are read-only after.

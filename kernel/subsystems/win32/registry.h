@@ -10,8 +10,7 @@
  * the duplication is intentional in v0: advapi32 is a
  * standalone freestanding userland DLL that doesn't include
  * kernel headers, and unifying the two sources of truth is a
- * separate refactor (see .claude/knowledge/stub-gap-inventory-v0.md
- * §5 / §11.5).
+ * separate refactor.
  *
  * What works:
  *   - NtOpenKey on HKLM\Software\Microsoft\Windows NT\CurrentVersion,

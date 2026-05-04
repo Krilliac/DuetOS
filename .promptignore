@@ -52,5 +52,4 @@ docs/html/
 docs/xml/
 docs/api/
 
-# NOTE: Do NOT exclude .claude/ — it is intentionally visible so Claude
-# can load persistent context at session start.
+# Canonical documentation home is wiki/. Keep it visible to AI context.

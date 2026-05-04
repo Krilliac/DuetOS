@@ -30,8 +30,6 @@
 - Address Device + Get Descriptor(Device) on enumeration.
 - Bulk-transfer API shared with class drivers.
 
-See `.claude/knowledge/xhci-enumeration-v0.md`.
-
 ## HID Boot Keyboard
 
 `kernel/drivers/usb/class/hid/keyboard/`.
@@ -41,8 +39,6 @@ End-to-end USB keyboard input on boot. The boot-protocol report layout
 into the input subsystem. Key events feed the kernel shell + the
 compositor's focused window.
 
-See `.claude/knowledge/xhci-hid-keyboard-v0.md`.
-
 ## CDC-ECM
 
 `kernel/drivers/usb/class/cdc-ecm/`.
@@ -51,8 +47,7 @@ USB Communications Device Class — Ethernet Control Model. Presents a
 USB device as a netif via the kernel net stack. Used by USB Ethernet
 adapters.
 
-GAP: probe is not yet auto-called (deferred to a follow-up). See
-`.claude/knowledge/usb-cdc-ecm-driver-v0.md`.
+GAP: probe is not yet auto-called (deferred to a follow-up).
 
 ## RNDIS
 
@@ -63,8 +58,9 @@ ethernet protocol. Control plane (initialize / set OID / query OID)
 works. Bulk RX delivers every `RNDIS_PACKET_MSG` per bulk transfer
 (was: only the first).
 
-GAP: bulk-poll concurrency. See
-`.claude/knowledge/usb-rndis-driver-v0.md`.
+GAP: bulk-poll concurrency. The control plane is single-threaded, but
+the bulk RX path can race with class-side teardown if a host hot-plugs
+mid-poll.
 
 ## Known Limits / GAPs
 

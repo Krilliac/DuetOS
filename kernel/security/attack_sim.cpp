@@ -1090,12 +1090,11 @@ void AttackSimRun()
         // Function-branch NOP patch on a synthetic cap-style gate.
         // Honest red-team finding: ComputeTextSpotHash only inspects
         // the first/last 4 KiB of `.text`, and AttackSimGatedAccess
-        // links into the middle, so KernelTextModified is expected
-        // NOT to fire. The slice's deliverable is the FailNoDetect
-        // outcome plus the BYPASS-LANDED log line proving the cap
-        // gate was actually flipped open. Ticketed in
-        // `.claude/knowledge/branch-nop-attack-v0.md` for the
-        // follow-up "full-text or rolling-page hash" detector slice.
+        // links into the middle, so the spot detector is expected
+        // NOT to fire. ComputeTextFullHash covers the gap so the
+        // `KernelTextModified` event fires from the full-text scan.
+        // Drift class (SPOT-only / FULL-only / SPOT+FULL) is logged
+        // alongside the BYPASS-LANDED line.
         {"Function branch NOP patch (cap-gate bypass)", "KernelTextModified", core::HealthIssue::KernelTextModified,
          nullptr, AttackBranchNopPatch, RestoreBranchNopPatch},
         // Function-pointer dispatch table slot overwrite. Models

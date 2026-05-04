@@ -302,9 +302,10 @@ constinit u64 g_tasks_exited = 0;
 // On single CPU today this is a no-op: callers that matter are
 // already CLI'd, so there's no concurrency to guard against. The
 // value is enforcing a single locking discipline across every
-// mutation point so SMP bring-up (Commit D in smp-ap-bringup-scope)
-// has uniform ground truth — "this lock protects the runqueue" —
-// rather than a per-site bolt-on.
+// mutation point so SMP bring-up (Commit D in the SMP plan — see
+// wiki/advanced/SMP-AP-Bringup-Scope.md) has uniform ground truth
+// — "this lock protects the runqueue" — rather than a per-site
+// bolt-on.
 //
 // IMPORTANT gap: Schedule() does NOT hold this lock across the
 // ContextSwitch call. The lock covers RunqueuePop/Push and the

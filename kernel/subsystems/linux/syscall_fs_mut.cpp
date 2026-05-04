@@ -38,7 +38,7 @@ namespace duetos::subsystems::linux::internal
 // SYS_FILE_CREATE / SYS_FILE_UNLINK / SYS_FILE_RENAME paths
 // enforce — Linux ELF binaries don't get to skip the gate by
 // entering through their ABI front-end. See
-// .claude/knowledge/subsystem-isolation-decision-v0.md.
+// wiki/kernel/Subsystem-Isolation.md.
 static inline bool RequireFsWrite(core::Process* p)
 {
     if (p == nullptr || !core::CapSetHas(p->caps, core::kCapFsWrite))

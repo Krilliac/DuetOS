@@ -17,7 +17,7 @@
  * time self-test — preventing detectors from sliding in without
  * follow-up guidance.
  *
- * See `.claude/knowledge/blue-team-ir-runbook-v0.md` for the
+ * See wiki/security/Attack-Simulation.md for the IR runbook
  * design rationale and the per-EventKind step inventory.
  *
  * Context: kernel. Same constraints as event_ring publishes —

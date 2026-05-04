@@ -35,10 +35,10 @@ add when a real workload demands recovery from primary corruption).
 
 - **No backup header fallback.** Primary header is the source of
   truth.
-- **No partition writes.** Partitioning a disk is out of scope for
-  the current FS milestone.
-
-See `.claude/knowledge/gpt-parser-v0.md` for the bringup notes.
+- **No partition writes.** `GptInitDisk` round-trips through
+  `GptProbe` on a RAM-disk fixture so the layout-and-checksum logic is
+  exercised, but installing onto a real disk requires per-vendor
+  bootloader copy + GPT write. See [Roadmap](../reference/Roadmap.md#disk-installer).
 
 ## Related Pages
 

@@ -64,7 +64,7 @@ return value.
 ## Sandboxing Walls
 
 A process running with `CapSetEmpty` is bounded by **five orthogonal
-walls** (per `.claude/knowledge/sandbox-overview-v0.md`):
+walls**:
 
 1. **Per-process address space** — private PML4, kernel half mirrored.
 2. **Capability-gated syscalls** — `Process::caps` checked at every

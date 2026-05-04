@@ -14,8 +14,7 @@
 # Scope today: trivially-pure kernel TUs whose behavior is fully
 # determined by their inputs (no MMIO, no MSRs, no kernel state).
 # As the kernel matures and more TUs grow `#ifdef DUETOS_HOST_TEST`
-# shims around hardware accessors, the coverage here grows. See
-# .claude/knowledge/host-tests-v0.md for the planned expansion.
+# shims around hardware accessors, the coverage here grows.
 #
 # Standalone project — NOT included from the root CMakeLists.txt.
 # Build via:

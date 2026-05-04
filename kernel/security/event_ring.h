@@ -27,8 +27,8 @@
  * the lock is held for the duration of one struct-copy and the
  * head/tail pointer update.
  *
- * See `.claude/knowledge/blue-team-event-ring-v0.md` for the
- * design rationale.
+ * See wiki/security/Attack-Simulation.md for the
+ * blue-team event-ring design rationale.
  */
 
 namespace duetos::security

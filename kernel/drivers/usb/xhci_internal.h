@@ -1,11 +1,10 @@
 #pragma once
 
 // Private cross-TU surface for the xHCI driver. xhci.cpp is being
-// decomposed into per-aspect sibling translation units (see the
-// refactor plan in .claude/knowledge/refactor-codebase-plan.md);
-// anything in `namespace duetos::drivers::usb::xhci::internal` is
-// intended for those TUs only — never include this header from
-// outside kernel/drivers/usb/.
+// decomposed into per-aspect sibling translation units; anything in
+// `namespace duetos::drivers::usb::xhci::internal` is intended for
+// those TUs only — never include this header from outside
+// kernel/drivers/usb/.
 //
 // Slice 1 (this commit): completion-code → human-name lookup.
 // Future slices will lift the shared structs (Trb, ErstEntry,

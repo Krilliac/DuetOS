@@ -26,8 +26,6 @@ Three NIC paths feed the same kernel net stack today:
 - Real packet I/O: DHCP, ARP, ICMP, TCP all live on this path.
 - Used as the default for QEMU smoke tests (`-netdev user,model=e1000`).
 
-See `.claude/knowledge/e1000-driver-v0.md`.
-
 ## USB Network (CDC-ECM + RNDIS)
 
 USB-attached Ethernet adapters present through xHCI. Both path types
@@ -45,9 +43,15 @@ scaffolding wired in:
 - **rtl88xx** (Realtek)
 - **bcm43xx** (Broadcom)
 
-GAP: each is a chip-detection probe today. Real association /
-authentication / data plane is deferred — the design plan is
-captured in `.claude/knowledge/wireless-drivers-v0.md`.
+The data-decode tier (per-vendor envelope parsers + 802.11 frame
+headers + beacon walker), the control tier (crypto + EAPOL + 4-way
+handshake + wdev/MLME + per-vendor upload state machines + ring
+scaffolds), DMA-coherent ring allocation, and AES key-wrap for
+encrypted M3 KeyData all landed; 13 boot self-tests pass and ~95M
+libFuzzer executions completed with zero crashes. Real-hardware
+verification (per-vendor MSI/MSI-X IRQ wiring, iwlwifi TFD descriptor
+build / doorbell / per-RBD data buffers, MLME runtime correctness) is
+roadmap work — see [Roadmap](../reference/Roadmap.md#wireless--real-hardware-verification).
 
 ## Network Stack
 
@@ -56,17 +60,17 @@ and is shared by every driver above. See
 [Network Stack](../networking/Network-Stack.md).
 
 Shell commands `ifconfig`, `dhcp`, `route`, `netscan`, `net` exercise
-the stack from the kernel shell. See
-`.claude/knowledge/network-shell-commands-v0.md` and
-`.claude/knowledge/network-flyout-panel-v0.md`.
+the stack from the kernel shell — see [Shell Commands](../reference/Shell-Commands.md).
+The taskbar's bottom-right network flyout exposes the same status
+through a hover-preview popup.
 
 ## Known Limits / GAPs
 
 - **Wireless data plane** is not implemented — only chip discovery.
 - **No NIC bonding / failover**.
 - **RNDIS bulk concurrency**: control plane is fine; bulk RX/TX
-  serialization gap documented in
-  `.claude/knowledge/usb-rndis-driver-v0.md`.
+  serialization gap — control is single-threaded but RX can race
+  with class-side teardown if a host hot-plugs mid-poll.
 
 ## Related Pages
 

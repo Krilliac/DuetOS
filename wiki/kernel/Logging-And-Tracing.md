@@ -40,8 +40,9 @@ shell can adjust at runtime (`klog scope mm trace`, etc.).
   bringup. Color codes are emitted as ANSI when the host terminal
   supports them.
 - **Ring buffer sink** — fixed-size lock-free in-RAM ring. Crash dump
-  prints the last N entries inline. The cleanroom-trace boot survey
-  reads the ring (see `.claude/knowledge/cleanroom-trace-boot-survey-v0.md`).
+  prints the last N entries inline. The cleanroom-trace surface reads
+  the ring without bumping reader cursors so the boot survey is
+  non-destructive.
 - **Window sink** — once the compositor is up, a Kernel Log window
   (rendered through `kernel/apps/`) tails the ring into a window.
 
@@ -72,9 +73,8 @@ git grep -nE "// (STUB|GAP):"
 
 ## Crash Dump
 
-The crash dump path lives in `kernel/diag/` (see
-`.claude/knowledge/crash-dump-v0.md`). Triggered on any unhandled
-exception, it:
+The crash dump path lives in `kernel/diag/`. Triggered on any
+unhandled exception, it:
 
 - Dumps GPRs with symbol resolution (`addr2sym`-style).
 - Decodes register bits (CR0, CR4, EFER, RFLAGS).
@@ -84,6 +84,18 @@ exception, it:
 - Prints peer-CPU NMI snapshots once SMP lands.
 - Prints per-CPU held-locks.
 - Prints the last N klog ring entries inline.
+- Walks page tables for `cr2` and `rip`.
+- Snapshots Architectural LBR if CPU supports it.
+- Records per-task syscall trail and per-process VM info.
+
+It also emits a structurally-valid Windows minidump (`.dmp`,
+`MDMP`-magic, `CONTEXT_X64` + `ThreadList` + `ModuleList` +
+`MemoryList` + `ExceptionStream` + `SystemInfo`) byte-by-byte over
+QEMU's debugcon (port `0xE9` → `${BUILD_DIR}/duetos.dmp` on the
+host). Loadable in Visual Studio / WinDbg / VSCode-cppvsdbg / Python
+`minidump` library / Mozilla `minidump-stackwalk`. Real-hardware
+persistence (raw-block write to a reserved LBA) is on the
+[Roadmap](../reference/Roadmap.md#crash-dump-persistence-to-disk).
 
 ## Related Pages
 

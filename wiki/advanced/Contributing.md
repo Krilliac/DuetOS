@@ -62,10 +62,13 @@ Don't add a page when:
 
 - The topic is a one-paragraph addendum to an existing page —
   amend that page instead.
-- The topic is a session-specific finding — that goes in
-  `.claude/knowledge/`.
-- The topic is a transient TODO — that goes in a plan file under
-  `.claude/knowledge/<slug>-plan.md`.
+- The topic is a session-specific finding that doesn't change a
+  documented behaviour — keep it in the relevant PR description
+  and commit message; don't manufacture a wiki page for transient
+  context.
+- The topic is a transient TODO that doesn't yet have an owning
+  subsystem page — add a row to
+  [`reference/Roadmap`](../reference/Roadmap.md) instead.
 
 ## Page Lifecycle
 
@@ -84,4 +87,4 @@ Don't add a page when:
 - [Git Workflow](../tooling/Git-Workflow.md)
 - [Build System](../tooling/Build-System.md)
 - [QEMU Smoke Tests](../tooling/QEMU-Smoke.md)
-- [Knowledge Base Index](../reference/Knowledge-Base-Index.md)
+- [Roadmap](../reference/Roadmap.md)

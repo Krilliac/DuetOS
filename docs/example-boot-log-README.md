@@ -46,12 +46,22 @@ including ANSI colour codes and GRUB UI sequences at the very top.
 
 The boot intentionally triggers a number of `[W]` lines on serial.
 They're not bugs — they're either probe-emitted self-tests asserting
-detection paths fire, or they document v0 implementation gaps.
-The five-bucket taxonomy lives in
-`.claude/knowledge/format-and-test-2026-05-01-runtime-report.md`
-under the "Remaining runtime warnings" table. If you see a `[W]`
-line that doesn't match any of those buckets, that's worth a closer
-look.
+detection paths fire, or they document v0 implementation gaps. The
+canonical buckets are:
+
+1. **Probe sanity** — `[W] core/klog : warn-level sanity line` and
+   similar — the klog channel-sanity self-test.
+2. **Subsystem-not-up** — drivers that report "no controller
+   present" or "no device discovered" on the QEMU profile in use.
+3. **CPU mitigations** — `KPTI not implemented` block on a
+   `RDCL_NO=0` boot (see [Roadmap](../wiki/reference/Roadmap.md)).
+4. **PE loader** — `pe reject` reasons on PEs whose imports are
+   intentionally unresolved.
+5. **Network** — DHCP timeout / ARP retransmits when the QEMU
+   `slirp` backend is slow to respond.
+
+If you see a `[W]` line that doesn't match any of these, that's
+worth a closer look.
 
 ## When to update this file
 
