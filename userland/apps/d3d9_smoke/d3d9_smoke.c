@@ -113,6 +113,32 @@ void __cdecl mainCRTStartup(void)
     Out("[d3d9_smoke] Device::EndScene         = ");
     Out((hr == 0) ? "PASS\r\n" : "FAIL\r\n");
 
+    /* ----- v0.1: cover the FF geometry path ---------------------- *
+     * D3DFVF_XYZRHW (4) | D3DFVF_DIFFUSE (0x40) = 0x44 — pre-transformed
+     * verts so we don't need a real projection matrix. */
+    typedef long (*PFN_SetFVF)(void*, DWORD);
+    hr = ((PFN_SetFVF)dev_vt[89])(dev, 0x44);
+    Out("[d3d9_smoke] Device::SetFVF(XYZRHW|DIFFUSE) = ");
+    Out((hr == 0) ? "PASS\r\n" : "FAIL\r\n");
+
+    typedef struct
+    {
+        float x, y, z, rhw;
+        DWORD argb;
+    } D9Vert; /* 20 B */
+    /* Triangle in screen space (will hit the back buffer). */
+    D9Vert verts[3] = {
+        {4.0f, 28.0f, 0.f, 1.f, 0xFFFF0000},
+        {16.0f, 4.0f, 0.f, 1.f, 0xFF00FF00},
+        {28.0f, 28.0f, 0.f, 1.f, 0xFF0000FF},
+    };
+    /* slot 83 = DrawPrimitiveUP(type, primCount, vertexData, stride)
+     * D3DPT_TRIANGLELIST = 4. */
+    typedef long (*PFN_DrawUP)(void*, UINT, UINT, const void*, UINT);
+    hr = ((PFN_DrawUP)dev_vt[83])(dev, 4, 1, verts, sizeof(D9Vert));
+    Out("[d3d9_smoke] Device::DrawPrimitiveUP  = ");
+    Out((hr == 0) ? "PASS\r\n" : "FAIL\r\n");
+
     /* slot 17 = Present(srcRect, dstRect, hwndOverride, dirtyRgn) */
     typedef long (*PFN_Present)(void*, const void*, const void*, HWND, const void*);
     hr = ((PFN_Present)dev_vt[17])(dev, NULL, NULL, NULL, NULL);
