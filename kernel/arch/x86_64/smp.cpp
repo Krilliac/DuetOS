@@ -6,6 +6,7 @@
 #include "arch/x86_64/timer.h"
 
 #include "acpi/acpi.h"
+#include "debug/probes.h"
 #include "log/klog.h"
 #include "core/panic.h"
 #include "cpu/percpu.h"
@@ -289,6 +290,7 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
     TrampU32At(kOffOnlineFlag) = 1;
 
     core::LogWithValue(core::LogLevel::Info, "arch/smp", "AP online cpu_id", static_cast<u64>(cpu_id));
+    KBP_PROBE_V(::duetos::debug::ProbeId::kSmpApOnline, cpu_id);
 
     // Halt forever with IRQs enabled — timer IRQs that land here are
     // harmless noise (no IDT entry for the AP's perspective? actually

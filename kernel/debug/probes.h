@@ -47,12 +47,20 @@ enum class ProbeId : u8
     kSandboxDenialCap, // a capability-gated syscall was denied
     kWin32StubMiss,    // an unresolved Win32 import got hit
     kKernelPageFault,  // #PF from ring 0 — always a bug, always logged
+    kKernelGpf,        // #GP from ring 0 — always a bug, always logged
+    kKernelUd,         // #UD from ring 0 — invalid opcode, always a bug
+    kHeapAllocFail,    // KMalloc returned nullptr (kheap pool exhausted)
+    kPhysAllocFail,    // AllocateFrame returned kNullFrame (physical OOM)
+    kSmpApOnline,      // a secondary CPU finished bring-up; boot diagnostic
 
     // Medium-frequency events — disarmed by default, the
     // operator arms these when hunting a specific issue.
     kRing3Spawn,     // SpawnRing3Task finished queuing a task
     kProcessCreate,  // ProcessCreate built a Process struct
     kProcessDestroy, // ProcessDestroy freed one
+    kPeLoadOk,       // PeLoad finished a successful PE/COFF image load
+    kElfLoadOk,      // ElfLoad finished a successful native ELF image load
+    kThreadExit,     // SchedExit transitioned a task to TaskState::Dead
 
     // High-frequency events — disarmed by default. Arming one
     // of these during normal boot floods the serial log; only

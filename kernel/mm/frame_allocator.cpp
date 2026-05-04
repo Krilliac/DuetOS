@@ -34,6 +34,7 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
+#include "debug/probes.h"
 #include "diag/kdbg.h"
 #include "log/klog.h"
 #include "core/panic.h"
@@ -497,6 +498,7 @@ PhysAddr AllocateFrame()
     KLOG_ONCE_WARN("mm/frame", "out of physical frames (AllocateFrame)");
     KLOG_CRITICAL_A(::duetos::core::LogArea::Memory, "mm/frame", "AllocateFrame: physical OOM");
     KDBG(Mm, "mm/frame", "AllocateFrame OOM");
+    KBP_PROBE(::duetos::debug::ProbeId::kPhysAllocFail);
     return kNullFrame;
 }
 

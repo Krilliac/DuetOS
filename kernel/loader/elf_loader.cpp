@@ -1,5 +1,6 @@
 #include "loader/elf_loader.h"
 
+#include "debug/probes.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
@@ -355,6 +356,7 @@ ElfLoadResult ElfLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as
     r.entry_va = ElfEntry(file);
     r.stack_va = kV0StackVa;
     r.stack_top = kV0StackVa + kPageSize;
+    KBP_PROBE_V(::duetos::debug::ProbeId::kElfLoadOk, r.entry_va);
     return r;
 }
 

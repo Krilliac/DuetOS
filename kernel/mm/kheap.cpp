@@ -6,6 +6,7 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
+#include "debug/probes.h"
 #include "log/klog.h"
 #include "core/panic.h"
 #include "util/debug_assert.h"
@@ -283,6 +284,7 @@ void* KMalloc(u64 bytes)
     // signal. Subsequent OOMs are silent at this layer.
     KLOG_ONCE_WARN("mm/kheap", "pool exhausted (KMalloc returned null)");
     KLOG_CRITICAL_AV(::duetos::core::LogArea::Memory, "mm/kheap", "KMalloc OOM — pool exhausted, request size", bytes);
+    KBP_PROBE_V(::duetos::debug::ProbeId::kHeapAllocFail, bytes);
     return nullptr;
 }
 
