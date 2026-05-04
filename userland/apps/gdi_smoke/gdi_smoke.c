@@ -70,6 +70,31 @@ void __cdecl mainCRTStartup(void)
         Out(w > 0 && h > 0 ? "PASS\r\n" : "FAIL/STUB\r\n");
     }
 
+    /* ExtTextOutA with three clip-rect probes against the desktop
+     * DC. Visual output isn't checked here — just that the early-out
+     * paths return TRUE (call succeeded at drawing the trimmed
+     * substring) instead of FALSE (call failed). */
+    if (hdc_screen != NULL)
+    {
+        const char* msg = "ABC";
+        /* (a) no clip flag → just draw, must succeed. */
+        BOOL r1 = ExtTextOutA(hdc_screen, 0, 0, 0, NULL, msg, 3, NULL);
+        Out("[gdi_smoke] ExtTextOutA(no-clip)  = ");
+        Out(r1 ? "PASS\r\n" : "FAIL\r\n");
+        /* (b) ETO_CLIPPED with rect that fully rejects → return TRUE,
+         *     drew nothing. Rect right < x means no horizontal room. */
+        RECT rj = {0, 0, 0, 0};
+        BOOL r2 = ExtTextOutA(hdc_screen, 100, 100, 0x4 /* ETO_CLIPPED */, &rj, msg, 3, NULL);
+        Out("[gdi_smoke] ExtTextOutA(reject)   = ");
+        Out(r2 ? "PASS\r\n" : "FAIL\r\n");
+        /* (c) ETO_CLIPPED with rect that admits 2 of 3 cells (16 px wide
+         *     starting at x=0) → return TRUE, draws the first two chars. */
+        RECT rt = {0, 0, 16, 16};
+        BOOL r3 = ExtTextOutA(hdc_screen, 0, 0, 0x4, &rt, msg, 3, NULL);
+        Out("[gdi_smoke] ExtTextOutA(trunc)    = ");
+        Out(r3 ? "PASS\r\n" : "FAIL\r\n");
+    }
+
     /* DeleteObject + DeleteDC + ReleaseDC. */
     if (bmp != NULL)
     {

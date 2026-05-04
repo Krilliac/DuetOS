@@ -414,7 +414,10 @@ WinDbg client API, `SymLoadModuleEx`.
   `Ellipse`, `LineTo`, `MoveToEx`,
   `Polygon`, `Polyline`, `BitBlt`, `StretchBlt`,
   `SetPixel`, `SetPixelV`, `GetPixel`,
-  `TextOutA/W`, `ExtTextOutA/W`, `DrawTextA/W`
+  `TextOutA/W`, `ExtTextOutA/W` (honours `ETO_CLIPPED` + the
+  `lprc` clip-rect by trimming the (text, x) pair to the
+  visible columns at the kernel font's 8 px cell width;
+  `ETO_OPAQUE` still STUB), `DrawTextA/W`
 - State: `SetBkColor`, `SetBkMode`, `SetMapMode`,
   `SetTextColor`, `SetTextAlign`
 
@@ -1226,15 +1229,12 @@ short list:
 2. **D3D11 `Map(D3D11_MAP_WRITE_DISCARD)` on a buffer** —
    currently REAL; extend to `D3D11_MAP_WRITE_NO_OVERWRITE`
    (lock semantics).
-3. **`gdi32!ExtTextOutA` clip-rectangle parameter** —
-   currently ignored; the rect is right there in the
-   primitive.
-4. **D3D12 multi-stream input** — same per-element InputSlot
+3. **D3D12 multi-stream input** — same per-element InputSlot
    refactor that landed in D3D11; the PSO already extracts
    the field. Use the same 32-slot array shape.
-5. **`ws2_32!WSAEventSelect`** — back into our message-
+4. **`ws2_32!WSAEventSelect`** — back into our message-
    queue + waitable-event primitives.
-6. **`d2d1!DrawText`** — wire DWrite's monospace metrics
+5. **`d2d1!DrawText`** — wire DWrite's monospace metrics
    into the existing FillRect path so single-line text
    renders.
 
