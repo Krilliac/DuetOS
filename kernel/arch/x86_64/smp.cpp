@@ -390,6 +390,7 @@ u64 SmpStartAps()
         ap_pcpu->gdb_snapshot_rip = 0;
         ap_pcpu->gdb_snapshot_rsp = 0;
         ap_pcpu->gdb_snapshot_rflags = 0;
+        ap_pcpu->gdb_frozen_frame = nullptr;
         g_ap_percpus[cpu_id] = ap_pcpu;
         if (cpu_id + 1 > g_cpu_id_limit)
         {

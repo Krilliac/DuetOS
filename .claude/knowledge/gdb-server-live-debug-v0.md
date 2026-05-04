@@ -104,7 +104,7 @@ Implemented (live):
 - `D` — detach (kernel resumes from the current PC).
 - `k` — kill (same effect as detach today; kernel resumes).
 
-Implemented (2026-05-04 follow-on slice):
+Implemented (2026-05-04 follow-on slices):
 - **Async stop (Ctrl-C)** via `gdb::PollAsyncStop(frame)`. Hooked
   into `arch::TrapDispatch`'s IRQ branch, after EOI and before
   the resched check. On every IRQ — most commonly the LAPIC
@@ -119,17 +119,31 @@ Implemented (2026-05-04 follow-on slice):
   NMI-broadcasts to all-excluding-self. The vector-2 NMI handler
   in `traps.cpp` checks the flag BEFORE the panic-halt path: when
   set, captures `frame->rip / rsp / rflags` into the per-CPU
-  `gdb_snapshot_*` fields, flips `gdb_frozen = 1`, then spins on
-  the same flag with `pause` until the BSP clears it. On release,
-  the peer iretq's back to whatever it was running.
+  `gdb_snapshot_*` fields and parks the live frame pointer in
+  `gdb_frozen_frame`, flips `gdb_frozen = 1`, then spins on the
+  same flag with `pause` until the BSP clears it. On release, the
+  peer iretq's back to whatever it was running.
   `GdbServerEnterAndWait` wraps its existing wait loop in
   `SmpStopBroadcastNmi` / `SmpStopReleaseNmi` and emits each peer's
   snapshot to COM1 so the operator sees what every other CPU was
   doing when the stop landed.
-
-Not implemented: full multi-thread GDB visibility (peers visible
-via `qThreadInfo` + `H` thread switching) — peer state today is
-kernel-log only, not in the GDB `g`-reply.
+- **Multi-thread GDB visibility** — peer CPUs surface in the
+  debugger as separate threads. `qfThreadInfo` / `qsThreadInfo`
+  enumerate online CPUs; `qC` reports the current selection; `T<tid>`
+  is alive-check; `Hg <tid>` switches the next `g` reply to the
+  selected CPU's snapshot (BSP reads the running CPU's
+  `g_trap_snapshot`, peers populate
+  `g_peer_snapshots[cpu_id]` from `gdb_frozen_frame` on demand).
+  Read-only for peers (`G` is gated to the running CPU); `c` / `s`
+  always operate on the running CPU's frame so a `Hg <peer>` +
+  `c` continues the kernel cleanly.
+- **VSCode integration** — `.vscode/launch.json` + `.vscode/tasks.json`
+  + `tools/debug/vscode-{start,stop}-qemu.sh`. Two configurations:
+  "Attach (live)" boots normally; "Attach (demo int3)" rebuilds
+  with `DUETOS_GDB_DEMO=ON` and pauses at the int3 in `kernel_main`.
+  Background tasks build, start QEMU, wait for `tcp::1234 ready`,
+  then VSCode attaches. PostDebugTask kills the QEMU process so
+  cleanup is automatic.
 
 ## TrapFrame plumbing
 
@@ -238,16 +252,16 @@ instead of "QEMU TCP server". The helper scripts assume QEMU.
 
 ## Revisit when
 
-- **Multi-thread GDB visibility on SMP** — DEFERRED: peer-CPU
-  freeze + per-CPU snapshot capture LANDED, but the snapshots
-  surface only on COM1 / klog. To make peers visible in the
-  debugger UI, the server needs `qfThreadInfo` / `qsThreadInfo`
-  enumeration of the online CPU IDs as thread IDs, plus
-  `H g <tid>` switching to a peer's `gdb_snapshot_*` for the
-  next `g` reply. Mechanically straightforward; punted because
-  it's pure GDB-protocol scaffolding and the COM1 dump already
-  satisfies "what was every CPU doing when the stop landed".
-- **Source-line stepping**: GDB's `next` already works because
-  symbols + DWARF in the kernel ELF give it line tables; the
-  server doesn't need to do anything extra. A cleaner integration
-  with VSCode's launch.json would still be nice.
+- **Writable peer registers** — `G` is gated to the running CPU
+  today because writing back across an NMI freeze is risky (peer's
+  trap frame on its own kernel stack; modifying it then resuming
+  changes the peer's pre-NMI RIP). A future slice could allow it
+  if there's a clear use case (e.g. forcing a peer out of a stuck
+  spinlock during incident response).
+- **`vCont` packet** — GDB's modern resume verb. We accept the
+  legacy `c` / `s` — adding `vCont;c:1;s:2` style fanout would let
+  the debugger explicitly continue some threads and step others.
+  Unblocked once the writable-peer-registers item lands.
+- **Hardware-watchpoint coalescing** — the kernel BP subsystem owns
+  4 DR slots; setting >4 hardware BPs / watchpoints from GDB
+  silently fails the 5th. Mid-priority polish.

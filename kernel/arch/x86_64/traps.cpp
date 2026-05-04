@@ -510,6 +510,12 @@ extern "C" void TrapDispatch(TrapFrame* frame)
                 p->gdb_snapshot_rip = frame->rip;
                 p->gdb_snapshot_rsp = frame->rsp;
                 p->gdb_snapshot_rflags = frame->rflags;
+                // Publish the live trap frame so the BSP's GDB stop
+                // loop can populate a register snapshot for this
+                // peer on demand (Hg <tid> + g). The frame lives on
+                // this CPU's kernel stack and stays valid for the
+                // entire freeze spin below.
+                p->gdb_frozen_frame = frame;
                 asm volatile("" ::: "memory");
                 p->gdb_frozen = 1;
             }
@@ -527,6 +533,7 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             {
                 asm volatile("" ::: "memory");
                 p->gdb_frozen = 0;
+                p->gdb_frozen_frame = nullptr;
             }
             return; // resume the interrupted code on this peer
         }

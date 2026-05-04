@@ -1,0 +1,71 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "duetos: start qemu (debug)",
+            "type": "shell",
+            "command": "${workspaceFolder}/tools/debug/vscode-start-qemu.sh",
+            "args": ["debug"],
+            "isBackground": true,
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated",
+                "showReuseMessage": false
+            },
+            "problemMatcher": {
+                "owner": "duetos-qemu",
+                "pattern": [
+                    {
+                        "regexp": "^$",
+                        "file": 1,
+                        "location": 2,
+                        "message": 3
+                    }
+                ],
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": ".*starting QEMU.*",
+                    "endsPattern": ".*tcp::1234 ready.*"
+                }
+            }
+        },
+        {
+            "label": "duetos: start qemu (demo)",
+            "type": "shell",
+            "command": "${workspaceFolder}/tools/debug/vscode-start-qemu.sh",
+            "args": ["demo"],
+            "isBackground": true,
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated",
+                "showReuseMessage": false
+            },
+            "problemMatcher": {
+                "owner": "duetos-qemu",
+                "pattern": [
+                    {
+                        "regexp": "^$",
+                        "file": 1,
+                        "location": 2,
+                        "message": 3
+                    }
+                ],
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": ".*starting QEMU.*",
+                    "endsPattern": ".*tcp::1234 ready.*"
+                }
+            }
+        },
+        {
+            "label": "duetos: stop qemu",
+            "type": "shell",
+            "command": "${workspaceFolder}/tools/debug/vscode-stop-qemu.sh",
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated",
+                "showReuseMessage": false
+            }
+        }
+    ]
+}

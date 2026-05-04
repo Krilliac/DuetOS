@@ -1,0 +1,57 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "DuetOS: Attach (live, normal boot)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/x86_64-debug/kernel/duetos-kernel.elf",
+            "miDebuggerServerAddress": "localhost:1234",
+            "miDebuggerPath": "/usr/bin/gdb",
+            "cwd": "${workspaceFolder}",
+            "MIMode": "gdb",
+            "preLaunchTask": "duetos: start qemu (debug)",
+            "postDebugTask": "duetos: stop qemu",
+            "setupCommands": [
+                {
+                    "description": "Disable address-space randomisation in GDB (kernel is already KASLR'd)",
+                    "text": "set disable-randomization off",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "Pretty-print containers when they land",
+                    "text": "set print pretty on",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "Don't ask before continue/detach/quit",
+                    "text": "set confirm off",
+                    "ignoreFailures": true
+                }
+            ],
+            "stopAtConnect": false,
+            "externalConsole": false
+        },
+        {
+            "name": "DuetOS: Attach (demo int3 — pauses at end of kernel_main)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/x86_64-debug/kernel/duetos-kernel.elf",
+            "miDebuggerServerAddress": "localhost:1234",
+            "miDebuggerPath": "/usr/bin/gdb",
+            "cwd": "${workspaceFolder}",
+            "MIMode": "gdb",
+            "preLaunchTask": "duetos: start qemu (demo)",
+            "postDebugTask": "duetos: stop qemu",
+            "setupCommands": [
+                {
+                    "description": "Don't ask before continue/detach/quit",
+                    "text": "set confirm off",
+                    "ignoreFailures": true
+                }
+            ],
+            "stopAtConnect": true,
+            "externalConsole": false
+        }
+    ]
+}

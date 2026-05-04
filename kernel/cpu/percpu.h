@@ -28,6 +28,11 @@ namespace duetos::mm
 struct AddressSpace; // forward decl; defined in kernel/mm/address_space.h
 }
 
+namespace duetos::arch
+{
+struct TrapFrame; // forward decl; defined in kernel/arch/x86_64/traps.h
+}
+
 namespace duetos::cpu
 {
 
@@ -92,17 +97,24 @@ struct PerCpu
     // path freezes them on a release flag and resumes them when
     // the BSP exits its stop loop. The vector-2 handler checks
     // arch::SmpGdbStopActive() and, when set, captures rip/rsp
-    // here BEFORE spinning on the same flag. The CPU running the
-    // GDB stop loop walks every peer's slot and emits the captures
-    // to klog so the operator sees what each peer was doing when
-    // the stop landed. `gdb_frozen` flips 0 → 1 once a peer has
-    // entered the freeze spin so the BSP knows the rendezvous
-    // converged before pumping packets.
+    // here BEFORE spinning on the same flag. `gdb_frozen` flips
+    // 0 → 1 once a peer has entered the freeze spin so the BSP
+    // knows the rendezvous converged before pumping packets.
+    //
+    // `gdb_frozen_frame` points at the peer's live trap frame
+    // (on its kernel stack) for the duration of the freeze spin.
+    // The CPU running the GDB stop loop reads it through
+    // arch::SmpGetPercpu(peer_id)->gdb_frozen_frame to populate
+    // a per-CPU register snapshot when the operator switches
+    // threads via `Hg <tid>` — that's the multi-thread GDB
+    // surface peers show up in. Cleared back to nullptr when the
+    // peer exits the freeze spin.
     u8 gdb_frozen;
     u8 _pad4[7];
     u64 gdb_snapshot_rip;
     u64 gdb_snapshot_rsp;
     u64 gdb_snapshot_rflags;
+    arch::TrapFrame* gdb_frozen_frame;
 
     // Everything below this line will grow as SMP matures:
     //   - per-CPU runqueue head/tail + spinlock

@@ -31,6 +31,14 @@ namespace duetos::diag::gdb
 // internal linkage.
 static void OnGdbBpHit(debug::BreakpointId id, arch::TrapFrame* frame);
 
+// Same scoping trick for the trap-frame snapshot the stop loop
+// publishes. Defined here at file-internal-namespace scope so the
+// H/g/G handlers (first anon ns) and TrapFrameToSnapshot /
+// RouteToStopLoop (second anon ns) all see the same storage. The
+// stop loop blocks the CPU so a single buffer suffices for the
+// running CPU; per-peer scratch lives in g_peer_snapshots.
+static GdbServerRegSnapshot g_trap_snapshot{};
+
 namespace
 {
 
@@ -88,6 +96,25 @@ constinit ResumeAction g_resume_pending = ResumeAction::Continue;
 constinit bool g_resume_signalled = false;
 constinit ResumeAction g_last_resume = ResumeAction::Continue;
 
+// Multi-thread surface. The kernel exposes one GDB thread per
+// online CPU: thread id N maps to cpu_id (N-1). Thread ids start
+// at 1 because GDB special-cases 0 ("any") and -1 ("all"). The
+// running CPU's thread id is g_running_thread_id; it's the
+// default `Hg`/`Hc` target until the operator switches.
+//
+// `g_current_thread_id` tracks what `Hg <tid>` selected. While
+// it equals the running CPU's id, `g_regs`/`g_regs_writable`
+// point at g_trap_snapshot (the BSP's own snapshot). When it
+// names a peer, we populate g_peer_snapshots[peer_cpu_id] from
+// the peer's frozen TrapFrame and repoint g_regs at it. Writes
+// (`G`) are gated on the thread being the running CPU — modifying
+// a frozen peer's registers across the NMI freeze is risky and
+// not a v0 surface.
+constexpr u32 kMaxCpuThreads = 32; // matches acpi::kMaxCpus
+constinit GdbServerRegSnapshot g_peer_snapshots[kMaxCpuThreads]{};
+constinit u32 g_running_thread_id = 1; // updated on stop entry to match the running CPU
+constinit u32 g_current_thread_id = 1;
+
 bool IsHexDigit(u8 c)
 {
     return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
@@ -115,6 +142,132 @@ void EmitByte(u8 b)
     {
         g_sink(b);
     }
+}
+
+// Populate `snap` from a peer CPU's frozen trap frame. Mirror of
+// TrapFrameToSnapshot but lives in the anonymous namespace so the
+// packet handlers can call it without a forward decl into the
+// outer (non-anonymous) namespace block where TrapFrameToSnapshot
+// lives. Same field layout — kept in sync by hand.
+void PeerFrameToSnapshot(const arch::TrapFrame* f, GdbServerRegSnapshot& snap)
+{
+    snap.rax = f->rax;
+    snap.rbx = f->rbx;
+    snap.rcx = f->rcx;
+    snap.rdx = f->rdx;
+    snap.rsi = f->rsi;
+    snap.rdi = f->rdi;
+    snap.rbp = f->rbp;
+    snap.rsp = f->rsp;
+    snap.r8 = f->r8;
+    snap.r9 = f->r9;
+    snap.r10 = f->r10;
+    snap.r11 = f->r11;
+    snap.r12 = f->r12;
+    snap.r13 = f->r13;
+    snap.r14 = f->r14;
+    snap.r15 = f->r15;
+    snap.rip = f->rip;
+    snap.rflags = f->rflags;
+    snap.cs = static_cast<u32>(f->cs);
+    snap.ss = static_cast<u32>(f->ss);
+    // Peer's data segments would require an NMI-side capture
+    // (the segment selectors aren't on the trap frame). Reading
+    // ours and reporting them as the peer's would lie. Zero out;
+    // GDB only uses these for source-level introspection that
+    // doesn't depend on segment values in long mode.
+    snap.ds = 0;
+    snap.es = 0;
+    snap.fs = 0;
+    snap.gs = 0;
+}
+
+// Resolve thread id `tid` (1-based; 0 / -1 = "any" / "all") to a
+// cpu_id, returning kMaxCpuThreads on out-of-range. tid 0 / -1
+// keep g_current_thread_id at the running thread's id (no switch).
+u32 ThreadIdToCpuId(i64 tid, u32 fallback_cpu)
+{
+    if (tid <= 0)
+        return fallback_cpu;
+    const u32 cpu = static_cast<u32>(tid - 1);
+    if (cpu >= kMaxCpuThreads)
+        return kMaxCpuThreads;
+    return cpu;
+}
+
+// Repoint g_regs / g_regs_writable based on g_current_thread_id.
+// Called from the H handler after thread-id parsing. For the
+// running CPU, points at g_trap_snapshot (the BSP-side snapshot
+// the trap path filled). For peers, populates the per-peer
+// scratch buffer from the peer's frozen TrapFrame and points
+// g_regs there; g_regs_writable goes nullptr because writing
+// back across the NMI freeze isn't supported.
+void ResyncSnapshotForCurrentThread()
+{
+    const u32 cpu_id = (g_current_thread_id == 0) ? (g_running_thread_id - 1) : (g_current_thread_id - 1);
+
+    // Running CPU: original behaviour — read+write the same
+    // snapshot the trap path is using. RouteToStopLoop writes
+    // any GDB edits back to the live TrapFrame on resume.
+    if ((cpu_id + 1) == g_running_thread_id)
+    {
+        g_regs = &g_trap_snapshot;
+        g_regs_writable = &g_trap_snapshot;
+        return;
+    }
+
+    // Peer CPU: read-only snapshot populated from the peer's
+    // frozen TrapFrame on every switch (the peer is held in its
+    // NMI handler so the frame is stable). G is gated below.
+    if (cpu_id >= kMaxCpuThreads)
+    {
+        // Out-of-range tid: keep pointing at the running CPU's
+        // snapshot to avoid undefined behaviour from a bogus H.
+        g_regs = &g_trap_snapshot;
+        g_regs_writable = &g_trap_snapshot;
+        return;
+    }
+
+    cpu::PerCpu* peer = arch::SmpGetPercpu(cpu_id);
+    if (peer == nullptr || peer->gdb_frozen_frame == nullptr)
+    {
+        // Peer slot empty (not online, or never frozen). Zero out
+        // the scratch buffer so a `g` reply doesn't leak the
+        // previous selection's state.
+        g_peer_snapshots[cpu_id] = GdbServerRegSnapshot{};
+        g_regs = &g_peer_snapshots[cpu_id];
+        g_regs_writable = nullptr;
+        return;
+    }
+    PeerFrameToSnapshot(peer->gdb_frozen_frame, g_peer_snapshots[cpu_id]);
+    g_regs = &g_peer_snapshots[cpu_id];
+    g_regs_writable = nullptr;
+}
+
+// Parse a hex thread-id from `body[start..end)`. Returns -1 for
+// "all" (raw "-1"). Returns 0 for "any" (raw "0"). Returns the
+// 1-based positive value otherwise.
+i64 ParseHexThreadId(const u8* body, u32 start, u32 end)
+{
+    if (start >= end)
+        return 0;
+    bool negative = false;
+    u32 i = start;
+    if (body[i] == '-')
+    {
+        negative = true;
+        ++i;
+    }
+    u64 v = 0;
+    while (i < end)
+    {
+        const u8 c = body[i];
+        if (c < '0' || (c > '9' && c < 'A') || (c > 'F' && c < 'a') || c > 'f')
+            break;
+        v = (v << 4) | ((c >= '0' && c <= '9') ? (c - '0') : (c >= 'a' && c <= 'f') ? (10 + c - 'a') : (10 + c - 'A'));
+        ++i;
+    }
+    return negative ? -static_cast<i64>(v) : static_cast<i64>(v);
 }
 
 bool MatchPrefix(const u8* body, u32 len, const char* prefix)
@@ -290,6 +443,88 @@ void HandlePacket()
                                              "</feature>"
                                              "</target>";
         SendReply(kTargetXml, sizeof(kTargetXml) - 1);
+        return;
+    }
+    if (MatchPrefix(g_packet, g_packet_len, "qfThreadInfo"))
+    {
+        // First chunk of the thread list. We expose one thread per
+        // online CPU; thread id N maps to cpu_id (N-1). 'm' prefix
+        // means "more in this chunk"; the next qsThreadInfo gets
+        // the 'l' (last) reply. 32 CPUs * "ff,ff,..." worst case is
+        // < 200 bytes, fits in one chunk so we always hand out the
+        // entire list here.
+        char buf[256];
+        u32 off = 0;
+        buf[off++] = 'm';
+        const u32 limit = arch::SmpCpuIdLimit();
+        bool first = true;
+        for (u32 cpu = 0; cpu < limit && cpu < kMaxCpuThreads; ++cpu)
+        {
+            // Skip slots that aren't online — gaps would advertise
+            // a thread the operator can't actually inspect.
+            if (cpu != 0 && arch::SmpGetPercpu(cpu) == nullptr)
+                continue;
+            if (!first)
+                buf[off++] = ',';
+            const u32 tid = cpu + 1;
+            // Hex encode the thread id (variable width — GDB accepts
+            // either upper or lower case; emit lower).
+            char tmp[8];
+            u32 tlen = 0;
+            u32 v = tid;
+            do
+            {
+                tmp[tlen++] = HexDigitChar(static_cast<u8>(v & 0xF));
+                v >>= 4;
+            } while (v != 0);
+            // tmp holds the digits in reverse; emit in forward order.
+            while (tlen > 0)
+                buf[off++] = tmp[--tlen];
+            first = false;
+        }
+        SendReply(buf, off);
+        return;
+    }
+    if (MatchPrefix(g_packet, g_packet_len, "qsThreadInfo"))
+    {
+        // We packed everything into the qfThreadInfo reply already.
+        SendCStr("l");
+        return;
+    }
+    if (g_packet_len == 2 && g_packet[0] == 'q' && g_packet[1] == 'C')
+    {
+        // Current-thread query. Reply "QC<tid>".
+        char buf[16];
+        u32 off = 0;
+        buf[off++] = 'Q';
+        buf[off++] = 'C';
+        u32 tid = (g_current_thread_id == 0) ? g_running_thread_id : g_current_thread_id;
+        char tmp[8];
+        u32 tlen = 0;
+        do
+        {
+            tmp[tlen++] = HexDigitChar(static_cast<u8>(tid & 0xF));
+            tid >>= 4;
+        } while (tid != 0);
+        while (tlen > 0)
+            buf[off++] = tmp[--tlen];
+        SendReply(buf, off);
+        return;
+    }
+    if (g_packet[0] == 'T' && g_packet_len > 1)
+    {
+        // Thread-alive query: T<tid>. Reply "OK" if alive, "E01"
+        // otherwise. A thread is "alive" if its cpu_id has a
+        // PerCpu installed (BSP for cpu 0, allocated for AP cpu_id).
+        const i64 tid = ParseHexThreadId(g_packet, 1, g_packet_len);
+        const u32 cpu = ThreadIdToCpuId(tid, g_running_thread_id - 1);
+        if (cpu >= kMaxCpuThreads)
+        {
+            SendCStr("E01");
+            return;
+        }
+        cpu::PerCpu* p = arch::SmpGetPercpu(cpu);
+        SendCStr((p != nullptr) ? "OK" : "E01");
         return;
     }
     if (g_packet[0] == '?')
@@ -570,6 +805,43 @@ void HandlePacket()
     }
     if (g_packet[0] == 'H')
     {
+        // H <op> <tid>. <op> is 'g' (subsequent g/G/m/M apply to
+        // this thread), 'c' (subsequent c/s apply). For 'c' we
+        // accept the request but only the running CPU's resume
+        // is meaningful — peers are NMI-frozen and don't have a
+        // resumable PC of their own. For 'g' we actually switch
+        // g_regs / g_regs_writable to point at the selected
+        // thread's snapshot.
+        if (g_packet_len < 2)
+        {
+            SendCStr("E01");
+            return;
+        }
+        const u8 op = g_packet[1];
+        const i64 tid = ParseHexThreadId(g_packet, 2, g_packet_len);
+        if (op == 'g')
+        {
+            // tid 0 / -1: "any" — keep the running CPU selected.
+            // Positive tid: switch to that CPU's snapshot.
+            if (tid <= 0)
+            {
+                g_current_thread_id = g_running_thread_id;
+            }
+            else
+            {
+                const u32 cpu = static_cast<u32>(tid - 1);
+                if (cpu >= kMaxCpuThreads)
+                {
+                    SendCStr("E01");
+                    return;
+                }
+                g_current_thread_id = static_cast<u32>(tid);
+            }
+            ResyncSnapshotForCurrentThread();
+        }
+        // 'c' (and any other op) is accepted as OK — see comment
+        // above. The continue/step handlers always operate on the
+        // running CPU's TrapFrame regardless.
         SendCStr("OK");
         return;
     }
@@ -586,13 +858,11 @@ void HandlePacket()
     {
         // Continue. No reply now — the stop loop exits and the
         // trap returns; the *next* stop (breakpoint / step) will
-        // send a fresh `T05`.
-        if (g_regs_writable != nullptr)
-        {
-            // Make sure single-step is OFF on a plain continue —
-            // a previous `s` may have left RFLAGS.TF set.
-            g_regs_writable->rflags &= ~kRflagsTf;
-        }
+        // send a fresh `T05`. TF clear targets g_trap_snapshot
+        // directly (the running CPU's snapshot) — not
+        // g_regs_writable, which a previous `Hg <peer>` may have
+        // pointed at a peer's read-only buffer.
+        g_trap_snapshot.rflags &= ~kRflagsTf;
         g_resume_pending = ResumeAction::Continue;
         g_resume_signalled = true;
         return;
@@ -602,11 +872,10 @@ void HandlePacket()
         // Single-step. Set RFLAGS.TF so the *next* instruction
         // raises #DB, which re-enters the trap dispatcher and
         // calls GdbServerEnterAndWait again — at which point we
-        // send a fresh stop packet to GDB. No reply now.
-        if (g_regs_writable != nullptr)
-        {
-            g_regs_writable->rflags |= kRflagsTf;
-        }
+        // send a fresh stop packet to GDB. No reply now. TF set
+        // targets g_trap_snapshot directly for the same reason
+        // as `c` above.
+        g_trap_snapshot.rflags |= kRflagsTf;
         g_resume_pending = ResumeAction::Step;
         g_resume_signalled = true;
         return;
@@ -1135,10 +1404,9 @@ void GdbServerSelfTest()
 namespace
 {
 
-// One global TrapFrame-shadow. The stop loop blocks the CPU so
-// only one is needed; we publish g_regs / g_regs_writable to
-// point at it for the duration of EnterAndWait.
-constinit GdbServerRegSnapshot g_trap_snapshot{};
+// g_trap_snapshot is declared at file-internal-namespace scope
+// near the top of this TU (next to OnGdbBpHit) so the H handler
+// in the first anon ns can also reach it.
 
 // Mirror trap-frame state into the GdbServerRegSnapshot the stub reads.
 // The CPU pushes data segments only via mov; ds/es/fs/gs are
@@ -1219,6 +1487,14 @@ bool RouteToStopLoop(arch::TrapFrame* frame, StopReason reason, bool rollback_ri
         // path then writes the GDB-edited RIP back to the frame.
         g_trap_snapshot.rip -= 1;
     }
+    // Latch the running CPU's GDB thread id (cpu_id + 1) and
+    // default the current selection to it. Any prior session
+    // selection is dropped — peers from a previous stop are
+    // either still frozen (next broadcast captures fresh state)
+    // or long resumed.
+    const u32 cpu_id = cpu::BspInstalled() && cpu::CurrentCpu() ? cpu::CurrentCpu()->cpu_id : 0;
+    g_running_thread_id = cpu_id + 1;
+    g_current_thread_id = g_running_thread_id;
     GdbServerPublishRegisters(&g_trap_snapshot);
     GdbServerPublishWritableRegisters(&g_trap_snapshot);
     GdbServerEnterAndWait(reason);
