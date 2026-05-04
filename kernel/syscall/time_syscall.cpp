@@ -25,12 +25,19 @@ u64 RtcToFileTime(const arch::RtcTime& t)
     auto is_leap = [](u32 y) { return (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0); };
     constexpr u32 kDaysBeforeMonth[12] = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334};
 
+    // Defensive: a year before 1970 would underflow the day accumulator
+    // (since the loop runs zero times) and then the 1970→1601 add at
+    // the end would yield a wall-clock from before the Windows epoch,
+    // which the FILETIME format can't represent. Cap to the epoch so
+    // the result is a valid (if implausible) timestamp.
+    const u32 year = (t.year >= 1970) ? t.year : 1970;
+    const u32 year_capped = (year <= 9999) ? year : 9999;
     u64 days = 0;
-    for (u32 y = 1970; y < t.year; ++y)
+    for (u32 y = 1970; y < year_capped; ++y)
         days += is_leap(y) ? 366 : 365;
     const u32 m = (t.month >= 1 && t.month <= 12) ? (t.month - 1) : 0;
     days += kDaysBeforeMonth[m];
-    if (m >= 2 && is_leap(t.year))
+    if (m >= 2 && is_leap(year_capped))
         days += 1;
     days += (t.day >= 1) ? (t.day - 1) : 0;
 
@@ -124,6 +131,11 @@ void DoGetTimeSt(arch::TrapFrame* frame)
     // `time::BrokenDownTime`; sample directly into the user's slot
     // via a kernel-side staging copy. The Zeller's-congruence DOW
     // computation moved into time/timekeeper.cpp with this slice.
+    if (frame == nullptr)
+    {
+        KLOG_ONCE_WARN("syscall/time", "DoGetTimeSt: null trap frame");
+        return;
+    }
     KLOG_TRACE_V("syscall/time", "DoGetTimeSt: user SYSTEMTIME* out", frame->rdi);
     ::duetos::time::BrokenDownTime bdt = {};
     ::duetos::time::RealtimeBrokenDown(&bdt);
@@ -140,6 +152,11 @@ void DoGetTimeSt(arch::TrapFrame* frame)
 void DoStToFt(arch::TrapFrame* frame)
 {
     // rdi = user SYSTEMTIME* in, rsi = user FILETIME* out.
+    if (frame == nullptr)
+    {
+        KLOG_ONCE_WARN("syscall/time", "DoStToFt: null trap frame");
+        return;
+    }
     KLOG_TRACE_V("syscall/time", "DoStToFt: SYSTEMTIME -> FILETIME conversion", frame->rdi);
     SystemTime st = {};
     if (!mm::CopyFromUser(&st, reinterpret_cast<const void*>(frame->rdi), sizeof(st)))
@@ -148,7 +165,13 @@ void DoStToFt(arch::TrapFrame* frame)
         frame->rax = static_cast<u64>(-1);
         return;
     }
-    if (st.year < 1601 || st.month == 0 || st.month > 12 || st.day == 0 || st.day > 31)
+    // Per MSDN SYSTEMTIME: year [1601, 30827], month [1,12], day [1,31],
+    // hour [0,23], minute/second [0,59], milliseconds [0,999]. RtcToFileTime
+    // caps year at 9999 internally; reject anything outside the documented
+    // input range so a malformed st survives only the validation path,
+    // never the FILETIME-arithmetic path.
+    if (st.year < 1601 || st.year > 9999 || st.month == 0 || st.month > 12 || st.day == 0 || st.day > 31 ||
+        st.hour > 23 || st.minute > 59 || st.second > 59 || st.milliseconds > 999)
     {
         KLOG_WARN_V("syscall/time", "DoStToFt: SYSTEMTIME out of range, year", st.year);
         frame->rax = static_cast<u64>(-1);
@@ -175,6 +198,11 @@ void DoStToFt(arch::TrapFrame* frame)
 void DoFtToSt(arch::TrapFrame* frame)
 {
     // rdi = user FILETIME* in, rsi = user SYSTEMTIME* out.
+    if (frame == nullptr)
+    {
+        KLOG_ONCE_WARN("syscall/time", "DoFtToSt: null trap frame");
+        return;
+    }
     KLOG_TRACE_V("syscall/time", "DoFtToSt: FILETIME -> SYSTEMTIME conversion", frame->rdi);
     u64 ft = 0;
     if (!mm::CopyFromUser(&ft, reinterpret_cast<const void*>(frame->rdi), sizeof(ft)))
