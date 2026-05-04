@@ -846,10 +846,14 @@ shape. Brush colour mutate / opacity / transform are STUB
 CreateFontFileReference, CreateFontFace,
 CreateTextAnalyzer, the rendering-parameter family.
 
-**IDWriteTextLayout** — REAL: GetMaxWidth, GetMaxHeight,
-GetMetrics (monospace approximation, fixed cell sizes from the
-kernel font). STUB: GetClusterMetrics, HitTestPoint, every
-range-property setter.
+**IDWriteTextLayout** — REAL: GetMaxWidth (slot 42),
+GetMaxHeight (slot 43), GetMetrics (slot 60 — monospace
+approximation, fixed cell sizes derived from the requested
+font size), HitTestPoint (slot 64 — single-line monospace,
+returns column = floor(pointX / cell\_w), trailing-half flag,
+inside-bounds flag, and a populated DWRITE\_HIT\_TEST\_METRICS).
+STUB: GetClusterMetrics, HitTestTextPosition,
+HitTestTextRange, every range-property setter.
 
 ### dinput8.dll  (~545 LOC) — `DirectInput8Create`
 
@@ -1225,14 +1229,12 @@ short list:
 3. **`gdi32!ExtTextOutA` clip-rectangle parameter** —
    currently ignored; the rect is right there in the
    primitive.
-4. **`dwrite!IDWriteTextLayout::HitTestPoint`** — use the
-   monospace metrics we already compute.
-5. **D3D12 multi-stream input** — same per-element InputSlot
+4. **D3D12 multi-stream input** — same per-element InputSlot
    refactor that landed in D3D11; the PSO already extracts
    the field. Use the same 32-slot array shape.
-6. **`ws2_32!WSAEventSelect`** — back into our message-
+5. **`ws2_32!WSAEventSelect`** — back into our message-
    queue + waitable-event primitives.
-7. **`d2d1!DrawText`** — wire DWrite's monospace metrics
+6. **`d2d1!DrawText`** — wire DWrite's monospace metrics
    into the existing FillRect path so single-line text
    renders.
 
