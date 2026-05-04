@@ -749,6 +749,14 @@ set +e
     /export:RtlCaptureStackBackTrace \
     /export:RtlUnwind \
     /export:RtlUnwindEx \
+    /export:RtlComputeCrc32 \
+    /export:RtlGenRandom \
+    /export:RtlSecureZeroMemory \
+    `# Pure-compute IPv4 helpers (parsing happens in-process)` \
+    /export:RtlIpv4StringToAddressA \
+    /export:RtlIpv4StringToAddressW \
+    /export:RtlIpv4AddressToStringA \
+    /export:RtlIpv4AddressToStringW \
     /out:"${DLL}" \
     "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}

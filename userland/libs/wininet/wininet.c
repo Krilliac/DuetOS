@@ -438,24 +438,286 @@ __declspec(dllexport) BOOL InternetGetCookieExW(const wchar_t16* url, const wcha
     return InternetGetCookieW(url, name, data, size);
 }
 
-/* InternetCrackUrlA / W — URL parsing. v0 reports failure so
- * callers fall back to strchr-based parsing. */
+/* URL_COMPONENTSA / W layout (Win32 — same shape modulo char width).
+ *   +0    DWORD  dwStructSize
+ *   +8    LPSTR  lpszScheme
+ *   +16   DWORD  dwSchemeLength
+ *   +20   INTERNET_SCHEME nScheme
+ *   +24   LPSTR  lpszHostName
+ *   +32   DWORD  dwHostNameLength
+ *   +36   WORD   nPort
+ *   +40   LPSTR  lpszUserName
+ *   +48   DWORD  dwUserNameLength
+ *   +56   LPSTR  lpszPassword
+ *   +64   DWORD  dwPasswordLength
+ *   +72   LPSTR  lpszUrlPath
+ *   +80   DWORD  dwUrlPathLength
+ *   +88   LPSTR  lpszExtraInfo
+ *   +96   DWORD  dwExtraInfoLength
+ * The "pointer" / "length" fields follow the same convention as
+ * WinHttpCrackUrl: a NULL pointer + zero length means "skip"; a
+ * non-NULL pointer means "set to a pointer into the input URL". */
+
+/* Locate the scheme + first significant offset. Returns the index
+ * past "scheme://" or 0 if no scheme found. Also fills out the
+ * default port and INTERNET_SCHEME enum value. */
+static int crack_scheme(const char* url, DWORD len, DWORD* scheme_off, DWORD* scheme_len, int* n_scheme,
+                        DWORD* port_default)
+{
+    *scheme_off = 0;
+    *scheme_len = 0;
+    *n_scheme = 0;
+    *port_default = 0;
+    DWORD i = 0;
+    while (i < len && url[i] != ':' && url[i] != '/' && url[i] != '?' && url[i] != '#')
+        ++i;
+    if (i + 2 < len && url[i] == ':' && url[i + 1] == '/' && url[i + 2] == '/')
+    {
+        *scheme_len = i;
+        char c0 = url[0];
+        if (c0 >= 'A' && c0 <= 'Z')
+            c0 = (char)(c0 - 'A' + 'a');
+        char c1 = i > 1 ? url[1] : 0;
+        if (c1 >= 'A' && c1 <= 'Z')
+            c1 = (char)(c1 - 'A' + 'a');
+        if (i == 4 && c0 == 'h')
+        {
+            *n_scheme = 1; /* http */
+            *port_default = 80;
+        }
+        else if (i == 5 && c0 == 'h')
+        {
+            *n_scheme = 2; /* https */
+            *port_default = 443;
+        }
+        else if (i == 3 && c0 == 'f' && c1 == 't')
+        {
+            *n_scheme = 3; /* ftp */
+            *port_default = 21;
+        }
+        else if (i == 4 && c0 == 'f')
+        {
+            *n_scheme = 6; /* file */
+            *port_default = 0;
+        }
+        return (int)(i + 3);
+    }
+    return 0;
+}
+
 __declspec(dllexport) BOOL InternetCrackUrlA(const char* url, DWORD url_len, DWORD flags, void* components)
 {
-    (void)url;
-    (void)url_len;
     (void)flags;
-    (void)components;
-    return 0;
+    if (!url || !components)
+        return 0;
+    if (url_len == 0)
+        for (url_len = 0; url[url_len]; ++url_len)
+            ;
+    DWORD sch_off, sch_len, port_default;
+    int n_sch;
+    int after_sch = crack_scheme(url, url_len, &sch_off, &sch_len, &n_sch, &port_default);
+    DWORD i = (DWORD)after_sch;
+    DWORD user_off = 0, user_len = 0, pass_off = 0, pass_len = 0;
+    DWORD scan = i, at = (DWORD)-1;
+    while (scan < url_len && url[scan] != '/' && url[scan] != '?' && url[scan] != '#')
+    {
+        if (url[scan] == '@')
+            at = scan;
+        ++scan;
+    }
+    if (at != (DWORD)-1)
+    {
+        DWORD col = (DWORD)-1;
+        for (DWORD j = i; j < at; ++j)
+            if (url[j] == ':')
+            {
+                col = j;
+                break;
+            }
+        if (col != (DWORD)-1)
+        {
+            user_off = i;
+            user_len = col - i;
+            pass_off = col + 1;
+            pass_len = at - col - 1;
+        }
+        else
+        {
+            user_off = i;
+            user_len = at - i;
+        }
+        i = at + 1;
+    }
+    DWORD host_off = i;
+    while (i < url_len && url[i] != ':' && url[i] != '/' && url[i] != '?' && url[i] != '#')
+        ++i;
+    DWORD host_len = i - host_off;
+    unsigned short port = (unsigned short)port_default;
+    if (i < url_len && url[i] == ':')
+    {
+        ++i;
+        unsigned int p = 0;
+        while (i < url_len && url[i] >= '0' && url[i] <= '9')
+        {
+            p = p * 10 + (unsigned int)(url[i] - '0');
+            ++i;
+        }
+        if (p > 0xFFFF)
+            p = 0xFFFF;
+        port = (unsigned short)p;
+    }
+    DWORD path_off = i;
+    while (i < url_len && url[i] != '?' && url[i] != '#')
+        ++i;
+    DWORD path_len = i - path_off;
+    DWORD extra_off = i;
+    DWORD extra_len = url_len - i;
+    unsigned char* c = (unsigned char*)components;
+    typedef struct
+    {
+        unsigned char ptr_off;
+        unsigned char len_off;
+    } Field;
+    Field fields[] = {{8, 16}, {24, 32}, {40, 48}, {56, 64}, {72, 80}, {88, 96}};
+    DWORD offs[] = {sch_off, host_off, user_off, pass_off, path_off, extra_off};
+    DWORD lens[] = {sch_len, host_len, user_len, pass_len, path_len, extra_len};
+    for (int f = 0; f < 6; ++f)
+    {
+        const char** pp = (const char**)(c + fields[f].ptr_off);
+        DWORD* pl = (DWORD*)(c + fields[f].len_off);
+        if (*pp == (const char*)0 && *pl == 0)
+            continue;
+        *pp = url + offs[f];
+        *pl = lens[f];
+    }
+    *(unsigned short*)(c + 36) = port;
+    *(int*)(c + 20) = n_sch;
+    return 1;
 }
 
 __declspec(dllexport) BOOL InternetCrackUrlW(const wchar_t16* url, DWORD url_len, DWORD flags, void* components)
 {
-    (void)url;
-    (void)url_len;
     (void)flags;
-    (void)components;
-    return 0;
+    if (!url || !components)
+        return 0;
+    if (url_len == 0)
+        for (url_len = 0; url[url_len]; ++url_len)
+            ;
+    /* Walk the wide URL inline (mirrors the ANSI form, just with
+     * 16-bit elements). */
+    DWORD i = 0;
+    while (i < url_len && url[i] != ':' && url[i] != '/' && url[i] != '?' && url[i] != '#')
+        ++i;
+    DWORD sch_off = 0, sch_len = 0, port_default = 0;
+    int n_sch = 0;
+    if (i + 2 < url_len && url[i] == ':' && url[i + 1] == '/' && url[i + 2] == '/')
+    {
+        sch_len = i;
+        wchar_t16 c0 = url[0];
+        if (c0 >= 'A' && c0 <= 'Z')
+            c0 = (wchar_t16)(c0 - 'A' + 'a');
+        if (sch_len == 4 && c0 == 'h')
+        {
+            n_sch = 1;
+            port_default = 80;
+        }
+        else if (sch_len == 5 && c0 == 'h')
+        {
+            n_sch = 2;
+            port_default = 443;
+        }
+        else if (sch_len == 3 && c0 == 'f')
+        {
+            n_sch = 3;
+            port_default = 21;
+        }
+        else if (sch_len == 4 && c0 == 'f')
+        {
+            n_sch = 6;
+            port_default = 0;
+        }
+        i += 3;
+    }
+    else
+    {
+        i = 0;
+    }
+    DWORD user_off = 0, user_len = 0, pass_off = 0, pass_len = 0;
+    DWORD scan = i, at = (DWORD)-1;
+    while (scan < url_len && url[scan] != '/' && url[scan] != '?' && url[scan] != '#')
+    {
+        if (url[scan] == '@')
+            at = scan;
+        ++scan;
+    }
+    if (at != (DWORD)-1)
+    {
+        DWORD col = (DWORD)-1;
+        for (DWORD j = i; j < at; ++j)
+            if (url[j] == ':')
+            {
+                col = j;
+                break;
+            }
+        if (col != (DWORD)-1)
+        {
+            user_off = i;
+            user_len = col - i;
+            pass_off = col + 1;
+            pass_len = at - col - 1;
+        }
+        else
+        {
+            user_off = i;
+            user_len = at - i;
+        }
+        i = at + 1;
+    }
+    DWORD host_off = i;
+    while (i < url_len && url[i] != ':' && url[i] != '/' && url[i] != '?' && url[i] != '#')
+        ++i;
+    DWORD host_len = i - host_off;
+    unsigned short port = (unsigned short)port_default;
+    if (i < url_len && url[i] == ':')
+    {
+        ++i;
+        unsigned int p = 0;
+        while (i < url_len && url[i] >= '0' && url[i] <= '9')
+        {
+            p = p * 10 + (unsigned int)(url[i] - '0');
+            ++i;
+        }
+        if (p > 0xFFFF)
+            p = 0xFFFF;
+        port = (unsigned short)p;
+    }
+    DWORD path_off = i;
+    while (i < url_len && url[i] != '?' && url[i] != '#')
+        ++i;
+    DWORD path_len = i - path_off;
+    DWORD extra_off = i;
+    DWORD extra_len = url_len - i;
+    unsigned char* c = (unsigned char*)components;
+    typedef struct
+    {
+        unsigned char ptr_off;
+        unsigned char len_off;
+    } Field;
+    Field fields[] = {{8, 16}, {24, 32}, {40, 48}, {56, 64}, {72, 80}, {88, 96}};
+    DWORD offs[] = {sch_off, host_off, user_off, pass_off, path_off, extra_off};
+    DWORD lens[] = {sch_len, host_len, user_len, pass_len, path_len, extra_len};
+    for (int f = 0; f < 6; ++f)
+    {
+        const wchar_t16** pp = (const wchar_t16**)(c + fields[f].ptr_off);
+        DWORD* pl = (DWORD*)(c + fields[f].len_off);
+        if (*pp == (const wchar_t16*)0 && *pl == 0)
+            continue;
+        *pp = url + offs[f];
+        *pl = lens[f];
+    }
+    *(unsigned short*)(c + 36) = port;
+    *(int*)(c + 20) = n_sch;
+    return 1;
 }
 
 __declspec(dllexport) BOOL InternetCanonicalizeUrlA(const char* url, char* buf, DWORD* buf_len, DWORD flags)
