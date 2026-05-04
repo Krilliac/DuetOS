@@ -87,6 +87,23 @@ struct PerCpu
     void* held_locks[kPerCpuMaxHeldLocks];
     u64 held_lock_rips[kPerCpuMaxHeldLocks];
 
+    // GDB stop-rendezvous snapshot. Distinct from panic_snapshot_*
+    // because the panic path halts peers forever — the GDB stop
+    // path freezes them on a release flag and resumes them when
+    // the BSP exits its stop loop. The vector-2 handler checks
+    // arch::SmpGdbStopActive() and, when set, captures rip/rsp
+    // here BEFORE spinning on the same flag. The CPU running the
+    // GDB stop loop walks every peer's slot and emits the captures
+    // to klog so the operator sees what each peer was doing when
+    // the stop landed. `gdb_frozen` flips 0 → 1 once a peer has
+    // entered the freeze spin so the BSP knows the rendezvous
+    // converged before pumping packets.
+    u8 gdb_frozen;
+    u8 _pad4[7];
+    u64 gdb_snapshot_rip;
+    u64 gdb_snapshot_rsp;
+    u64 gdb_snapshot_rflags;
+
     // Everything below this line will grow as SMP matures:
     //   - per-CPU runqueue head/tail + spinlock
     //   - per-CPU heap magazine (when the heap grows per-CPU caching)

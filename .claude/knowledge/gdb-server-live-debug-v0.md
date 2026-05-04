@@ -104,9 +104,32 @@ Implemented (live):
 - `D` — detach (kernel resumes from the current PC).
 - `k` — kill (same effect as detach today; kernel resumes).
 
-Not implemented: `Z1..Z4` (hardware breakpoints / watchpoints —
-fall through to the empty reply, GDB synthesises them via `M`
-/ `Z0`), async stop on Ctrl-C (no IRQ-driven RX yet).
+Implemented (2026-05-04 follow-on slice):
+- **Async stop (Ctrl-C)** via `gdb::PollAsyncStop(frame)`. Hooked
+  into `arch::TrapDispatch`'s IRQ branch, after EOI and before
+  the resched check. On every IRQ — most commonly the LAPIC
+  timer — does one INB on the COM2 LSR; on a 0x03 (ETX) byte,
+  routes the IRQ's `TrapFrame` through the same `RouteToStopLoop`
+  that #BP / #DB use, with reason `UserHalt`. The resulting GDB
+  stop reflects the interrupted code's RIP — exactly "where the
+  kernel actually was" — not the polling thread.
+- **SMP stop rendezvous** via `arch::SmpStopBroadcastNmi()` /
+  `SmpStopReleaseNmi()`. Distinct from `PanicBroadcastNmi` (which
+  halts peers forever). Sets a global `g_gdb_stop_active` flag,
+  NMI-broadcasts to all-excluding-self. The vector-2 NMI handler
+  in `traps.cpp` checks the flag BEFORE the panic-halt path: when
+  set, captures `frame->rip / rsp / rflags` into the per-CPU
+  `gdb_snapshot_*` fields, flips `gdb_frozen = 1`, then spins on
+  the same flag with `pause` until the BSP clears it. On release,
+  the peer iretq's back to whatever it was running.
+  `GdbServerEnterAndWait` wraps its existing wait loop in
+  `SmpStopBroadcastNmi` / `SmpStopReleaseNmi` and emits each peer's
+  snapshot to COM1 so the operator sees what every other CPU was
+  doing when the stop landed.
+
+Not implemented: full multi-thread GDB visibility (peers visible
+via `qThreadInfo` + `H` thread switching) — peer state today is
+kernel-log only, not in the GDB `g`-reply.
 
 ## TrapFrame plumbing
 
@@ -215,24 +238,15 @@ instead of "QEMU TCP server". The helper scripts assume QEMU.
 
 ## Revisit when
 
-- **Async stop (Ctrl-C)** — DEFERRED: today the stop loop is
-  purely reactive — the kernel only enters it on int3 / #DB.
-  To pause a freely-running kernel on demand, options are:
-  (a) IRQ-driven COM2 RX detecting 0x03 + scheduled int3 at
-  next safe point; (b) timer-tick poll of COM2 RX + the same.
-  Both need access to the interrupted code's TrapFrame so
-  the resulting stop reflects "where the kernel actually was"
-  rather than "inside the polling thread". Until this lands,
-  the `--demo` flag is the practical way to get a guaranteed
-  stop point.
-- **Per-CPU stop on SMP** — DEFERRED: current single-CPU model
-  freezes the calling CPU only. Multi-CPU live debug needs an
-  NMI broadcast on stop entry (mirrors `core::PanicBroadcastNmi`)
-  PLUS a release path so peers can resume on `c` / `D` (the
-  panic NMI broadcast halts forever — that's not what we want
-  here). Adds: per-CPU "frozen" state, a release IPI, and a
-  rendezvous so peer state is published in the GDB snapshot
-  alongside the BSP's.
+- **Multi-thread GDB visibility on SMP** — DEFERRED: peer-CPU
+  freeze + per-CPU snapshot capture LANDED, but the snapshots
+  surface only on COM1 / klog. To make peers visible in the
+  debugger UI, the server needs `qfThreadInfo` / `qsThreadInfo`
+  enumeration of the online CPU IDs as thread IDs, plus
+  `H g <tid>` switching to a peer's `gdb_snapshot_*` for the
+  next `g` reply. Mechanically straightforward; punted because
+  it's pure GDB-protocol scaffolding and the COM1 dump already
+  satisfies "what was every CPU doing when the stop landed".
 - **Source-line stepping**: GDB's `next` already works because
   symbols + DWARF in the kernel ELF give it line tables; the
   server doesn't need to do anything extra. A cleaner integration

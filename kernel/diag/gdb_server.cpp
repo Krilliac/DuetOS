@@ -10,9 +10,12 @@
 #include "diag/gdb_server.h"
 
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/smp.h"
 #include "arch/x86_64/traps.h"
 #include "core/panic.h"
+#include "cpu/percpu.h"
 #include "debug/breakpoints.h"
+#include "log/klog.h"
 
 namespace duetos::diag::gdb
 {
@@ -948,6 +951,44 @@ void GdbServerEnterAndWait(StopReason reason)
         // looping forever waiting for bytes that won't arrive.
         return;
     }
+
+    // SMP rendezvous: NMI-broadcast a freeze to every other CPU so
+    // they can't keep mutating shared state while this CPU is paused
+    // in the GDB stop loop. Each peer's vector-2 NMI handler captures
+    // its rip/rsp into PerCpu::gdb_snapshot_* and spins on the
+    // global stop-active flag. No-op on single-CPU systems (the
+    // all-excluding-self ICR shorthand simply matches zero targets).
+    arch::SmpStopBroadcastNmi();
+
+    // Emit the peer captures to the kernel log so the operator sees
+    // what every other CPU was doing when the stop landed. GDB's
+    // multi-thread surface (qThreadInfo + H switching to peers) is
+    // a follow-on; for now klog is the visibility channel — and
+    // it's the same channel the post-mortem `.dmp` uses, so the
+    // existing tooling for reading peer-CPU snapshots applies.
+    if (cpu::BspInstalled())
+    {
+        const u32 self_id = cpu::CurrentCpu() ? cpu::CurrentCpu()->cpu_id : 0;
+        const u32 limit = arch::SmpCpuIdLimit();
+        for (u32 id = 0; id < limit; ++id)
+        {
+            if (id == self_id)
+                continue;
+            cpu::PerCpu* peer = arch::SmpGetPercpu(id);
+            if (peer == nullptr)
+                continue;
+            arch::SerialWrite("[gdb-server] peer cpu_id=");
+            arch::SerialWriteHex(id);
+            arch::SerialWrite(" frozen=");
+            arch::SerialWriteHex(peer->gdb_frozen);
+            arch::SerialWrite(" rip=");
+            arch::SerialWriteHex(peer->gdb_snapshot_rip);
+            arch::SerialWrite(" rsp=");
+            arch::SerialWriteHex(peer->gdb_snapshot_rsp);
+            arch::SerialWrite("\n");
+        }
+    }
+
     g_resume_signalled = false;
     g_resume_pending = ResumeAction::Continue;
     SendStop(reason);
@@ -962,6 +1003,11 @@ void GdbServerEnterAndWait(StopReason reason)
         GdbServerReceiveByte(byte);
     }
     g_last_resume = g_resume_pending;
+
+    // Release peers: they're spinning on arch::SmpGdbStopActive()
+    // — clearing it lets each one exit its NMI handler and resume
+    // whatever it was doing.
+    arch::SmpStopReleaseNmi();
 }
 
 ResumeAction GdbServerLastResume()
@@ -1238,6 +1284,38 @@ bool HandleDebugException(arch::TrapFrame* frame)
     // unless GDB explicitly asks (the `s` handler re-sets it).
     frame->rflags &= ~(1ULL << 8);
     return RouteToStopLoop(frame, StopReason::SingleStep, /*rollback_rip=*/false);
+}
+
+bool PollAsyncStop(arch::TrapFrame* frame)
+{
+    // No GDB sink? Nothing to talk to; bail.
+    if (g_sink == nullptr)
+    {
+        return false;
+    }
+
+    // GDB signals async-stop with a single ETX (0x03) byte sent
+    // OUTSIDE any `$packet#csum` framing — never mid-packet. So
+    // we can peek the UART and act on a bare 0x03 directly,
+    // without feeding the byte through the packet parser. Any
+    // other byte we see between sessions is either left over
+    // from a torn-down session (`+` ACK, `-` NAK, garbage from
+    // a re-attach) or noise on the line — drop it on the floor.
+    const i32 b = arch::SerialCom2ReadByteNonblocking();
+    if (b < 0)
+    {
+        return false; // no byte ready — common case, fast path
+    }
+    if ((b & 0xFF) != 0x03)
+    {
+        return false; // not a Ctrl-C; ignore
+    }
+
+    // Route the IRQ's trap frame into the stop loop. UserHalt
+    // tells GDB SIGINT-equivalent, but our stop packet still
+    // sends S05 (T05) — close enough for GDB's "user-requested
+    // halt" UI, and avoids growing the StopReason enum.
+    return RouteToStopLoop(frame, StopReason::UserHalt, /*rollback_rip=*/false);
 }
 
 } // namespace duetos::diag::gdb

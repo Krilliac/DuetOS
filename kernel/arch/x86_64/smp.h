@@ -91,4 +91,32 @@ cpu::PerCpu* SmpGetPercpu(u32 cpu_id);
 /// BSP has come up.
 u32 SmpCpuIdLimit();
 
+/// GDB stop-rendezvous broadcast. Sets the global stop-active flag,
+/// then NMI-broadcasts to all CPUs except the caller. Each peer's
+/// vector-2 handler observes the flag and enters a release-spin
+/// (capturing rip/rsp into its PerCpu's `gdb_snapshot_*` fields)
+/// instead of taking the panic-halt path. The calling CPU returns
+/// once the IPI has been delivered; the peers stay frozen until
+/// SmpStopReleaseNmi clears the flag.
+///
+/// Distinct from PanicBroadcastNmi — that one halts peers forever
+/// because the calling CPU is committed to going down. This one
+/// freezes peers temporarily on a release flag so the calling CPU
+/// can safely run the GDB stop loop without peers stomping on
+/// shared state, then resume them on debugger continue.
+void SmpStopBroadcastNmi();
+
+/// Pair of SmpStopBroadcastNmi: clear the stop-active flag. Each
+/// peer is spinning on it and exits its NMI handler the moment
+/// it observes the clear, returning to the code it was running
+/// when the NMI fired.
+void SmpStopReleaseNmi();
+
+/// Read of the stop-active flag for the vector-2 NMI handler. Set
+/// by SmpStopBroadcastNmi, cleared by SmpStopReleaseNmi. Plain
+/// load — the broadcast/release pair issues memory barriers around
+/// the flip, so an NMI that arrives between the LAPIC ICR write
+/// and this read sees a consistent value.
+bool SmpGdbStopActive();
+
 } // namespace duetos::arch

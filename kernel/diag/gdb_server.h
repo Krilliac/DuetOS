@@ -205,4 +205,25 @@ bool HandleSoftwareBreakpoint(arch::TrapFrame* frame);
 /// and got #DB; this routes the new state back to the debugger.
 bool HandleDebugException(arch::TrapFrame* frame);
 
+/// IRQ-dispatcher hook for asynchronous stop (GDB Ctrl-C).
+///
+/// Polls COM2 RX non-blocking for an ETX (0x03) byte — the way
+/// GDB signals "interrupt the target" mid-run, outside the
+/// `$packet#csum` framing. When seen, routes `frame` through the
+/// stop loop with reason `UserHalt`, so the resulting GDB stop
+/// reflects "where the kernel actually was when the IRQ fired"
+/// (the interrupted code's RIP) rather than "inside the polling
+/// thread". The kernel resumes from the IRQ normally once the
+/// debugger issues `c` / `D` / `k` / `s`.
+///
+/// Returns true iff a stop was injected. Caller should still
+/// proceed with EOI / resched / iretq after the call returns —
+/// the stop loop blocks the calling CPU until the debugger
+/// resumes, then this function returns.
+///
+/// Cheap when no Ctrl-C is pending (one INB on the COM2 LSR).
+/// Safe to call from any IRQ context; re-entrancy is impossible
+/// because the stop loop runs with IF=0.
+bool PollAsyncStop(arch::TrapFrame* frame);
+
 } // namespace duetos::diag::gdb
