@@ -824,6 +824,25 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             duetos::drivers::video::FramebufferTeardown();
             return {};
         });
+    // PCI bus enumeration — the parent of every PCIe device
+    // driver in the tree. Restart is useful after the operator
+    // hot-plugs a device through QEMU's monitor (or a real
+    // PCIe slot) and wants the device table re-walked without
+    // rebooting; downstream drivers (nvme / ahci / xhci /
+    // e1000 / gpu) need their own restarts to pick up the new
+    // BAR / MSI-X assignments.
+    duetos::security::RegisterDriverDomain(
+        "pci",
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::drivers::pci::PciEnumerate();
+            return {};
+        },
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::drivers::pci::PciTeardown();
+            return {};
+        });
 
     // Init-call registry self-test (plan A1). Exercises register +
     // RunPhase + bad-argument + failing-callback paths against the
