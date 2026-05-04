@@ -843,6 +843,24 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             duetos::drivers::pci::PciTeardown();
             return {};
         });
+    // AHCI / SATA — the storage controller for every
+    // pre-NVMe drive in the supported HW matrix. Restart
+    // frees per-port DMA scratch buffers + re-walks PCI for
+    // newly-attached SATA drives. Block-device handles leak
+    // until the block layer grows an Unregister (documented
+    // in AhciTeardown).
+    duetos::security::RegisterDriverDomain(
+        "ahci",
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::drivers::storage::AhciInit();
+            return {};
+        },
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::drivers::storage::AhciTeardown();
+            return {};
+        });
 
     // Init-call registry self-test (plan A1). Exercises register +
     // RunPhase + bad-argument + failing-callback paths against the

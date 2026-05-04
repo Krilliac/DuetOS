@@ -683,7 +683,10 @@ void AhciInit()
     KLOG_TRACE_SCOPE("drivers/ahci", "AhciInit");
     if (g_init_done)
     {
-        core::Log(core::LogLevel::Warn, "drivers/ahci", "AhciInit called twice (ignored)");
+        // Idempotent: a re-init without an intervening AhciTeardown
+        // is a no-op so single-call boot paths keep their fast
+        // return. The driver-fault-domain restart path runs
+        // Teardown first which clears g_init_done.
         return;
     }
     g_init_done = true;
@@ -708,6 +711,35 @@ void AhciInit()
     }
     core::LogWith2Values(core::LogLevel::Info, "drivers/ahci", "summary", "controllers", found, "sata_ports_online",
                          g_port_count);
+}
+
+void AhciTeardown()
+{
+    KLOG_TRACE_SCOPE("drivers/ahci", "AhciTeardown");
+    if (!g_init_done)
+    {
+        return;
+    }
+    // Free every per-port DMA-coherent scratch buffer + reset
+    // the row to its constinit defaults. The block-layer handle
+    // (p.block_handle) leaks because BlockDeviceRegister has no
+    // matching BlockDeviceUnregister yet — same caveat the
+    // framebuffer / pci teardowns document for their MMIO
+    // mappings; a future block-layer slice can wire in the
+    // matching unregister hook here.
+    for (u32 i = 0; i < g_port_count; ++i)
+    {
+        Port& p = g_ports[i];
+        if (p.scratch_dma.virt != nullptr)
+        {
+            mm::FreeDmaCoherent(p.scratch_dma);
+        }
+        p = Port{};
+        p.block_handle = kBlockHandleInvalid;
+    }
+    g_port_count = 0;
+    g_init_done = false;
+    KLOG_INFO("drivers/ahci", "teardown — all SATA ports offline");
 }
 
 void AhciSelfTest()

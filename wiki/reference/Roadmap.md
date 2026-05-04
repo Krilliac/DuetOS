@@ -73,11 +73,11 @@ the same commit** that delivers the code.
 
 ### Driver fault-domain registration
 
-- **Scope:** write teardown functions for `nvme`, `ahci`,
-  `xhci`, `e1000`, `ramfs`, `fat32`. Currently 10 driver fault
-  domains are registered (soft-lockup / lockdep / event-trace /
-  perf / nmi-watchdog / cleanroom-trace / runtime-checker /
-  breakpoints / framebuffer / pci).
+- **Scope:** write teardown functions for `nvme`, `xhci`,
+  `e1000`, `ramfs`, `fat32`. Currently 11 driver fault domains
+  are registered (soft-lockup / lockdep / event-trace / perf
+  / nmi-watchdog / cleanroom-trace / runtime-checker /
+  breakpoints / framebuffer / pci / ahci).
 - **Blocks on:** each driver's teardown story — most drivers
   were written assuming run-once-at-boot semantics. Adding a
   clean teardown for each is the actual work.
