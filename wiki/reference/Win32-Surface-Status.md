@@ -58,7 +58,7 @@ When a slice ADDS a new DLL or new method:
 - **Shipping DLLs:** 38 (Win32 user-mode + DirectX peripheral)
 - **Approximate exports:** ~1100 across all shipping DLLs
 - **Source LOC across `userland/libs/`:** ~38 000
-- **Live STUB / GAP markers** (`git grep -nE "// (STUB|GAP):"`): 7
+- **Live STUB / GAP markers** (`git grep -nE "// (STUB|GAP):"`): 4
 - **Win32 PE smoke coverage:** 127 PE smoke apps boot-tested per run
 
 The marker count is a lower bound on known-stub paths — most stubs
@@ -309,7 +309,11 @@ math (sqrt, pow, exp, log, sin, cos, tan via Taylor series).
 **STUB / GAP:**
 - Multi-byte conversion: `mbtowc`, `wctomb` — STUB ASCII passthrough
 - Locale-aware printf (`_l` family) — STUB returns same as non-_l
-- Threading: `_beginthreadex` works, `_beginthread` GAP
+- Threading: `_beginthread`, `_beginthreadex`, `_endthread`,
+  `_endthreadex` — REAL via SYS_THREAD_CREATE / SYS_EXIT
+  (both flavours route to the same kernel surface; the
+  signature difference is purely C-level — kernel doesn't
+  care about the start function's return type)
 - Atomic helpers — real (forward to compiler intrinsics)
 
 ### dbghelp.dll  (~490 LOC, ~30 exports)

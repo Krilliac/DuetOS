@@ -105,6 +105,8 @@ set +e
     /export:rand /export:srand \
     /export:getenv /export:_putenv /export:_putenv_s \
     /export:_errno \
+    /export:_beginthread /export:_beginthreadex \
+    /export:_endthread /export:_endthreadex \
     /out:"${DLL}" \
     "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}
