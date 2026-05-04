@@ -39,6 +39,45 @@ static void OnGdbBpHit(debug::BreakpointId id, arch::TrapFrame* frame);
 // running CPU; per-peer scratch lives in g_peer_snapshots.
 static GdbServerRegSnapshot g_trap_snapshot{};
 
+// Multi-thread state — same scoping rationale as g_trap_snapshot.
+// EnterAndWait (public scope) commits dirty peer snapshots back to
+// peer frames before SmpStopReleaseNmi; the H/G handlers (first
+// anon ns) populate them. File-internal-static keeps the symbols
+// shared across both scopes without exposing them to other TUs.
+static constexpr u32 kMaxCpuThreadsFs = 32;
+static GdbServerRegSnapshot g_peer_snapshots[kMaxCpuThreadsFs]{};
+static bool g_peer_dirty[kMaxCpuThreadsFs]{};
+static u32 g_running_thread_id = 1;
+static u32 g_current_thread_id = 1;
+
+// Commit a (possibly G-edited) peer register snapshot back to its
+// frozen trap frame. Called by GdbServerEnterAndWait (public scope)
+// for any peer whose dirty flag is set, just before
+// SmpStopReleaseNmi lets the peers iretq. Segments are not written
+// — touching CS/SS would invalidate the iretq frame and isn't a
+// useful debugger surface. Mirrors SnapshotToTrapFrame.
+static void CommitPeerSnapshotToFrame(const GdbServerRegSnapshot& snap, arch::TrapFrame* f)
+{
+    f->rax = snap.rax;
+    f->rbx = snap.rbx;
+    f->rcx = snap.rcx;
+    f->rdx = snap.rdx;
+    f->rsi = snap.rsi;
+    f->rdi = snap.rdi;
+    f->rbp = snap.rbp;
+    f->rsp = snap.rsp;
+    f->r8 = snap.r8;
+    f->r9 = snap.r9;
+    f->r10 = snap.r10;
+    f->r11 = snap.r11;
+    f->r12 = snap.r12;
+    f->r13 = snap.r13;
+    f->r14 = snap.r14;
+    f->r15 = snap.r15;
+    f->rip = snap.rip;
+    f->rflags = snap.rflags;
+}
+
 namespace
 {
 
@@ -99,21 +138,9 @@ constinit ResumeAction g_last_resume = ResumeAction::Continue;
 // Multi-thread surface. The kernel exposes one GDB thread per
 // online CPU: thread id N maps to cpu_id (N-1). Thread ids start
 // at 1 because GDB special-cases 0 ("any") and -1 ("all"). The
-// running CPU's thread id is g_running_thread_id; it's the
-// default `Hg`/`Hc` target until the operator switches.
-//
-// `g_current_thread_id` tracks what `Hg <tid>` selected. While
-// it equals the running CPU's id, `g_regs`/`g_regs_writable`
-// point at g_trap_snapshot (the BSP's own snapshot). When it
-// names a peer, we populate g_peer_snapshots[peer_cpu_id] from
-// the peer's frozen TrapFrame and repoint g_regs at it. Writes
-// (`G`) are gated on the thread being the running CPU — modifying
-// a frozen peer's registers across the NMI freeze is risky and
-// not a v0 surface.
-constexpr u32 kMaxCpuThreads = 32; // matches acpi::kMaxCpus
-constinit GdbServerRegSnapshot g_peer_snapshots[kMaxCpuThreads]{};
-constinit u32 g_running_thread_id = 1; // updated on stop entry to match the running CPU
-constinit u32 g_current_thread_id = 1;
+// state lives at file-internal-namespace scope (above this anon
+// ns) so EnterAndWait can commit dirty peer snapshots on release.
+constexpr u32 kMaxCpuThreads = kMaxCpuThreadsFs;
 
 bool IsHexDigit(u8 c)
 {
@@ -200,8 +227,10 @@ u32 ThreadIdToCpuId(i64 tid, u32 fallback_cpu)
 // running CPU, points at g_trap_snapshot (the BSP-side snapshot
 // the trap path filled). For peers, populates the per-peer
 // scratch buffer from the peer's frozen TrapFrame and points
-// g_regs there; g_regs_writable goes nullptr because writing
-// back across the NMI freeze isn't supported.
+// g_regs / g_regs_writable both at it. Writes (`G`) flip
+// g_peer_dirty[cpu] so the EnterAndWait release path knows to
+// commit the snapshot back to the peer's TrapFrame before the
+// freeze releases.
 void ResyncSnapshotForCurrentThread()
 {
     const u32 cpu_id = (g_current_thread_id == 0) ? (g_running_thread_id - 1) : (g_current_thread_id - 1);
@@ -216,9 +245,6 @@ void ResyncSnapshotForCurrentThread()
         return;
     }
 
-    // Peer CPU: read-only snapshot populated from the peer's
-    // frozen TrapFrame on every switch (the peer is held in its
-    // NMI handler so the frame is stable). G is gated below.
     if (cpu_id >= kMaxCpuThreads)
     {
         // Out-of-range tid: keep pointing at the running CPU's
@@ -233,15 +259,25 @@ void ResyncSnapshotForCurrentThread()
     {
         // Peer slot empty (not online, or never frozen). Zero out
         // the scratch buffer so a `g` reply doesn't leak the
-        // previous selection's state.
+        // previous selection's state. G writes still hit the
+        // scratch but won't be committed — there's no frame to
+        // commit them to.
         g_peer_snapshots[cpu_id] = GdbServerRegSnapshot{};
+        g_peer_dirty[cpu_id] = false;
         g_regs = &g_peer_snapshots[cpu_id];
         g_regs_writable = nullptr;
         return;
     }
-    PeerFrameToSnapshot(peer->gdb_frozen_frame, g_peer_snapshots[cpu_id]);
+    // Only re-populate from the live frame if the operator hasn't
+    // already mutated this slot via `G` during this stop session.
+    // Without the dirty guard, `Hg <other>` then `Hg <peer>` would
+    // discard prior writes — surprising and footgun-y.
+    if (!g_peer_dirty[cpu_id])
+    {
+        PeerFrameToSnapshot(peer->gdb_frozen_frame, g_peer_snapshots[cpu_id]);
+    }
     g_regs = &g_peer_snapshots[cpu_id];
-    g_regs_writable = nullptr;
+    g_regs_writable = &g_peer_snapshots[cpu_id];
 }
 
 // Parse a hex thread-id from `body[start..end)`. Returns -1 for
@@ -325,7 +361,7 @@ void HandlePacket()
         //                          amd64 register set (~150 regs
         //                          including AVX/AVX-512) and
         //                          rejects our 24-reg `g` reply.
-        SendCStr("PacketSize=1000;swbreak+;qXfer:features:read+");
+        SendCStr("PacketSize=1000;swbreak+;qXfer:features:read+;vContSupported+");
         return;
     }
     if (MatchPrefix(g_packet, g_packet_len, "qXfer:features:read:target.xml:"))
@@ -685,6 +721,19 @@ void HandlePacket()
             g_regs_writable->es = take_u32(seg_off + 3 * 8);
             g_regs_writable->fs = take_u32(seg_off + 4 * 8);
             g_regs_writable->gs = take_u32(seg_off + 5 * 8);
+            // Mark the peer snapshot dirty so the EnterAndWait
+            // release path commits it back to the peer's frame.
+            // The running CPU's writes go to g_trap_snapshot, which
+            // RouteToStopLoop already writes back via SnapshotToTrapFrame
+            // — no per-CPU dirty tracking needed for that path.
+            for (u32 cpu = 0; cpu < kMaxCpuThreads; ++cpu)
+            {
+                if (g_regs_writable == &g_peer_snapshots[cpu])
+                {
+                    g_peer_dirty[cpu] = true;
+                    break;
+                }
+            }
         }
         SendCStr("OK");
         return;
@@ -851,6 +900,100 @@ void HandlePacket()
         // loop drops out and the trap dispatcher returns instead
         // of waiting for further packets that will never come.
         g_resume_pending = ResumeAction::Killed;
+        g_resume_signalled = true;
+        return;
+    }
+    if (MatchPrefix(g_packet, g_packet_len, "vCont?"))
+    {
+        // GDB probe: tell us which actions you support. The
+        // legacy `c` / `s` plus the modern `C<sig>` / `S<sig>`
+        // (continue/step with signal) cover everything our resume
+        // loop can do — the signal is ignored on our side because
+        // there's no signal-routing for kernel mode.
+        SendCStr("vCont;c;C;s;S");
+        return;
+    }
+    if (MatchPrefix(g_packet, g_packet_len, "vCont;"))
+    {
+        // vCont;<action>[:<tid>][;<action>[:<tid>]]... — multi-
+        // thread resume verb. We pick the first action that
+        // applies to the running CPU (or "all"=any) and apply it,
+        // since only the running CPU has a resumable PC; peers
+        // are NMI-frozen and resume on freeze release regardless.
+        //
+        // Action 'c' / 'C<sig>' = continue. Signal byte is parsed
+        // but ignored.
+        // Action 's' / 'S<sig>' = step.
+        // Anything else: empty reply (GDB falls back to legacy
+        // c/s handlers).
+        u32 i = 6; // skip "vCont;"
+        ResumeAction picked = ResumeAction::Continue;
+        bool found_match = false;
+        bool any_action = false;
+        while (i < g_packet_len)
+        {
+            const u8 act = g_packet[i++];
+            // Skip optional signal-byte for C/S.
+            if (act == 'C' || act == 'S')
+            {
+                if (i + 1 < g_packet_len && IsHexDigit(g_packet[i]) && IsHexDigit(g_packet[i + 1]))
+                    i += 2;
+            }
+            // Optional :<tid> or default = "all".
+            i64 tid = 0;
+            bool has_tid = false;
+            if (i < g_packet_len && g_packet[i] == ':')
+            {
+                ++i;
+                u32 tid_start = i;
+                while (i < g_packet_len && g_packet[i] != ';')
+                    ++i;
+                tid = ParseHexThreadId(g_packet, tid_start, i);
+                has_tid = true;
+            }
+            // Skip ';' separator.
+            if (i < g_packet_len && g_packet[i] == ';')
+                ++i;
+
+            if (act != 'c' && act != 'C' && act != 's' && act != 'S')
+                continue; // unsupported action; try the next
+            any_action = true;
+
+            // Does this action apply to the running CPU? "All"
+            // (no tid, or tid <= 0) always applies. A specific tid
+            // applies iff it matches g_running_thread_id.
+            const bool applies = !has_tid || tid <= 0 || static_cast<u32>(tid) == g_running_thread_id;
+            if (!applies)
+                continue;
+
+            picked = (act == 's' || act == 'S') ? ResumeAction::Step : ResumeAction::Continue;
+            found_match = true;
+            break;
+        }
+
+        if (!any_action)
+        {
+            SendCStr("E01");
+            return;
+        }
+
+        // No matching action for the running CPU: GDB asked us to
+        // resume only some other thread. Default to continue
+        // since "do nothing on the running CPU" isn't a valid
+        // outcome (we're paused; the CPU has to either continue
+        // or step) — and continuing is the strictly less-invasive
+        // choice between the two.
+        if (!found_match)
+            picked = ResumeAction::Continue;
+
+        // Apply RFLAGS.TF to g_trap_snapshot — same rationale as
+        // the legacy `c` / `s` handlers: peer selections from a
+        // previous Hg don't affect the running CPU's resume.
+        if (picked == ResumeAction::Step)
+            g_trap_snapshot.rflags |= kRflagsTf;
+        else
+            g_trap_snapshot.rflags &= ~kRflagsTf;
+        g_resume_pending = picked;
         g_resume_signalled = true;
         return;
     }
@@ -1031,7 +1174,44 @@ void HandlePacket()
             }
             if (berr != debug::BpError::None)
             {
-                SendCStr("E11"); // generic install failure
+                // Translate BpError into a stable GDB error code
+                // so the operator's UI distinguishes "out of DR
+                // slots" (the recurring hardware-watchpoint case)
+                // from address-validation rejects from invariant
+                // violations. GDB renders the code verbatim, so
+                // these become the "Cannot insert breakpoint:
+                // E1<n>" message in the prompt.
+                //   E11 — generic install failure (default)
+                //   E12 — all 4 DR slots in use (HW BP/watchpoint)
+                //   E13 — SW BP table full (32 slots)
+                //   E14 — invalid address (caught above too;
+                //         BpInstall* may also return this for
+                //         addresses outside .text)
+                //   E15 — bad kind/len combo
+                //   E16 — multi-CPU install rejected
+                const char* err_code = "E11";
+                switch (berr)
+                {
+                case debug::BpError::NoHwSlot:
+                    err_code = "E12";
+                    break;
+                case debug::BpError::TableFull:
+                    err_code = "E13";
+                    break;
+                case debug::BpError::InvalidAddress:
+                    err_code = "E14";
+                    break;
+                case debug::BpError::BadKind:
+                    err_code = "E15";
+                    break;
+                case debug::BpError::SmpUnsupported:
+                    err_code = "E16";
+                    break;
+                case debug::BpError::None:
+                case debug::BpError::NotInstalled:
+                    break;
+                }
+                SendCStr(err_code);
                 return;
             }
             g_breakpoints[slot].in_use = true;
@@ -1258,6 +1438,16 @@ void GdbServerEnterAndWait(StopReason reason)
         }
     }
 
+    // Reset the dirty bookkeeping: any leftover marks from a prior
+    // stop session must not persist (their snapshots have long
+    // since gone stale, peer frames are gone). Done here so
+    // ResyncSnapshotForCurrentThread can rely on the dirty bit
+    // being meaningful within a single stop session.
+    for (u32 i = 0; i < kMaxCpuThreadsFs; ++i)
+    {
+        g_peer_dirty[i] = false;
+    }
+
     g_resume_signalled = false;
     g_resume_pending = ResumeAction::Continue;
     SendStop(reason);
@@ -1272,6 +1462,22 @@ void GdbServerEnterAndWait(StopReason reason)
         GdbServerReceiveByte(byte);
     }
     g_last_resume = g_resume_pending;
+
+    // Commit any G-edited peer snapshots back to their frames
+    // BEFORE releasing the freeze, so the peer iretq's with the
+    // operator's edits in place. Risk: writing back invalid
+    // values can wedge a peer; the operator owns that risk
+    // when they issue `G`.
+    for (u32 cpu = 0; cpu < kMaxCpuThreadsFs; ++cpu)
+    {
+        if (!g_peer_dirty[cpu])
+            continue;
+        cpu::PerCpu* peer = arch::SmpGetPercpu(cpu);
+        if (peer == nullptr || peer->gdb_frozen_frame == nullptr)
+            continue;
+        CommitPeerSnapshotToFrame(g_peer_snapshots[cpu], peer->gdb_frozen_frame);
+        g_peer_dirty[cpu] = false;
+    }
 
     // Release peers: they're spinning on arch::SmpGdbStopActive()
     // — clearing it lets each one exit its NMI handler and resume

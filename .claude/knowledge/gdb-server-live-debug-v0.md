@@ -144,6 +144,31 @@ Implemented (2026-05-04 follow-on slices):
   Background tasks build, start QEMU, wait for `tcp::1234 ready`,
   then VSCode attaches. PostDebugTask kills the QEMU process so
   cleanup is automatic.
+- **Writable peer registers** — `Hg <peer_tid>` followed by `G`
+  edits the peer's snapshot, and the EnterAndWait release path
+  commits any "dirty" peer snapshots back to the peer's frozen
+  `TrapFrame` before clearing the stop-active flag, so the peer
+  iretq's with the operator's edits in place. A per-peer dirty
+  bit prevents an `Hg <other> ; Hg <peer>` round-trip from
+  silently re-reading the frame and discarding writes mid-session.
+  Risk is on the operator: writing back invalid values can wedge
+  a peer.
+- **vCont packet** — modern resume verb. `vContSupported+`
+  advertised in `qSupported`; `vCont?` enumerates `c;C;s;S` as
+  supported actions; `vCont;<action>[:<tid>]...` picks the first
+  action that applies to the running CPU (or "all"=any) and
+  applies it. Signal bytes are parsed but ignored (no kernel-mode
+  signal routing). `c`/`s` legacy handlers stay for older GDB
+  builds. Drop-in upgrade for any GDB that picks the modern
+  resume verb when both are advertised.
+- **HW-BP error reporting** — Z-packet install failures now
+  return distinct GDB error codes per `debug::BpError`:
+  `E12 = NoHwSlot` (4 DR slots exhausted),
+  `E13 = TableFull` (32 SW BP slots exhausted),
+  `E14 = InvalidAddress`, `E15 = BadKind`, `E16 = SmpUnsupported`.
+  The operator's UI now distinguishes "all 4 DR slots in use"
+  from a generic install reject — cuts the diagnosis loop on
+  the recurring hardware-watchpoint case.
 
 ## TrapFrame plumbing
 
@@ -252,16 +277,17 @@ instead of "QEMU TCP server". The helper scripts assume QEMU.
 
 ## Revisit when
 
-- **Writable peer registers** — `G` is gated to the running CPU
-  today because writing back across an NMI freeze is risky (peer's
-  trap frame on its own kernel stack; modifying it then resuming
-  changes the peer's pre-NMI RIP). A future slice could allow it
-  if there's a clear use case (e.g. forcing a peer out of a stuck
-  spinlock during incident response).
-- **`vCont` packet** — GDB's modern resume verb. We accept the
-  legacy `c` / `s` — adding `vCont;c:1;s:2` style fanout would let
-  the debugger explicitly continue some threads and step others.
-  Unblocked once the writable-peer-registers item lands.
-- **Hardware-watchpoint coalescing** — the kernel BP subsystem owns
-  4 DR slots; setting >4 hardware BPs / watchpoints from GDB
-  silently fails the 5th. Mid-priority polish.
+_All scheduled items have landed. v0 is feature-complete from the
+debugger-protocol side; further work is hardware-only._
+
+- **Real-hardware (non-QEMU) attach** — `-serial tcp::1234` is a
+  QEMU convenience. On real PCs the host side becomes a null-modem
+  cable + a USB-UART. The kernel-side stub is unchanged; only the
+  helper scripts assume QEMU. A "duetos-gdb-attach.sh --com /dev/ttyUSB0"
+  variant is a small follow-up if anyone tests this on iron.
+- **Multi-thread step on SMP** — `vCont;s:N` where N is a peer
+  would require single-stepping the peer through its frozen NMI
+  exit, not just the BSP. Deferred because there's no clear use
+  case: a stopped peer + run-to-cursor on the BSP gets you the
+  same root-cause data without the hairy "step a frozen thread"
+  semantics.
