@@ -878,6 +878,26 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             duetos::drivers::storage::NvmeTeardown();
             return {};
         });
+    // RAM filesystem — the immutable trusted + sandbox trees
+    // are constinit, so init has no work; restart's interesting
+    // surface is the mutable snapshot buffers reachable through
+    // /proc and /sys (boottrace, syscalls, abi/native, abi/win32,
+    // cpuhist, inspect slots). Teardown wipes their file_size
+    // markers + cursors so the next Snapshot* call starts fresh
+    // — useful when an operator wants to re-baseline what /proc
+    // exposes after a triage session.
+    duetos::security::RegisterDriverDomain(
+        "ramfs",
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::fs::RamfsInit();
+            return {};
+        },
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::fs::RamfsTeardown();
+            return {};
+        });
 
     // Init-call registry self-test (plan A1). Exercises register +
     // RunPhase + bad-argument + failing-callback paths against the

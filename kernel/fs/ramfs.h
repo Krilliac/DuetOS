@@ -63,6 +63,15 @@ struct RamfsNode
 /// cache, ID allocation) has a home.
 void RamfsInit();
 
+/// Reset every mutable snapshot buffer reachable through /proc
+/// and /sys (boottrace, syscalls, abi/native, abi/win32, cpuhist,
+/// inspect slots): cursor → 0 so the next Snapshot starts from
+/// the head, and the corresponding RamfsNode.file_size → 0 so a
+/// `cat` between Teardown and the next Snapshot reads empty.
+/// The constinit trusted + sandbox trees are not touched.
+/// Idempotent.
+void RamfsTeardown();
+
 /// Root of the rich "trusted" tree. Stable pointer for the lifetime
 /// of the kernel.
 const RamfsNode* RamfsTrustedRoot();
