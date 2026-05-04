@@ -1788,7 +1788,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             return {};
         };
         auto aml_teardown = []() -> duetos::core::Result<void> { return duetos::acpi::AmlNamespaceShutdown(); };
-        duetos::core::FaultDomainRegister("acpi/aml", aml_init, aml_teardown);
+        duetos::security::RegisterDriverDomain("acpi/aml", aml_init, aml_teardown);
     }
 
     SerialWrite("[boot] Disabling 8259 PIC.\n");
@@ -2120,7 +2120,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             return {};
         };
         auto gpu_teardown = []() -> duetos::core::Result<void> { return duetos::drivers::gpu::GpuShutdown(); };
-        duetos::core::FaultDomainRegister("drivers/gpu", gpu_init, gpu_teardown);
+        duetos::security::RegisterDriverDomain("drivers/gpu", gpu_init, gpu_teardown);
     }
 
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::EdidSelfTest());
@@ -2174,7 +2174,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             return {};
         };
         auto net_teardown = []() -> duetos::core::Result<void> { return duetos::drivers::net::NetShutdown(); };
-        duetos::core::FaultDomainRegister("drivers/net", net_init, net_teardown);
+        duetos::security::RegisterDriverDomain("drivers/net", net_init, net_teardown);
     }
 
     SerialWrite("[boot] Detecting USB host controllers.\n");
@@ -2190,7 +2190,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             return {};
         };
         auto xhci_teardown = []() -> duetos::core::Result<void> { return duetos::drivers::usb::xhci::XhciShutdown(); };
-        duetos::core::FaultDomainRegister("drivers/usb/xhci", xhci_init, xhci_teardown);
+        duetos::security::RegisterDriverDomain("drivers/usb/xhci", xhci_init, xhci_teardown);
     }
     // Probe USB-Ethernet adapters now that xHCI enumeration is
     // complete. CDC-ECM is the USB standard — works with QEMU's
@@ -2222,7 +2222,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             return {};
         };
         auto audio_teardown = []() -> duetos::core::Result<void> { return duetos::drivers::audio::AudioShutdown(); };
-        duetos::core::FaultDomainRegister("drivers/audio", audio_init, audio_teardown);
+        duetos::security::RegisterDriverDomain("drivers/audio", audio_init, audio_teardown);
     }
 
     SerialWrite("[boot] Bringing up power / thermal shell.\n");
