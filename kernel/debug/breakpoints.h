@@ -105,6 +105,21 @@ struct BpInfo
 /// are no-ops).
 void BpInit();
 
+/// Trap-context callback fired AFTER the reinsert dance (for SW
+/// BPs: original byte restored, RIP rolled back, RFLAGS.TF set;
+/// for HW BPs: just the hit accounting). Runs on the CPU that
+/// took the trap, with interrupts still disabled, before any
+/// `suspend_on_hit` parking. Used by the GDB stub to enter its
+/// stop loop in trap context — kernel-mode hits work this way
+/// without needing the wait-queue suspend (which today rejects
+/// ring-0 hits).
+///
+/// The callback may freely mutate `*frame` (RIP / RFLAGS / GPRs)
+/// — those edits ride out via the iretq stack image when the
+/// trap returns. Returning from the callback continues the
+/// existing reinsert flow normally.
+using BpHitCallback = void (*)(BreakpointId id, arch::TrapFrame* frame);
+
 /// Install a software (int3) breakpoint at `kernel_va`. `kernel_va`
 /// must lie inside the kernel .text range; the byte there is
 /// saved and overwritten with 0xCC. Returns a stable ID on
@@ -117,7 +132,10 @@ void BpInit();
 /// safely without an IRQ-depth accessor, which is still stubbed);
 /// a kernel hit with suspend_on_hit set logs + resumes with a
 /// "suspend rejected" warning.
-BreakpointId BpInstallSoftware(u64 kernel_va, bool suspend_on_hit, BpError* err);
+///
+/// `on_hit` — optional trap-context callback (see BpHitCallback
+/// above). nullptr = no callback (default behaviour).
+BreakpointId BpInstallSoftware(u64 kernel_va, bool suspend_on_hit, BpError* err, BpHitCallback on_hit = nullptr);
 
 /// Install a hardware breakpoint via the next free DR slot.
 /// `va` may be any canonical VA — data breakpoints work on any
@@ -128,7 +146,11 @@ BreakpointId BpInstallSoftware(u64 kernel_va, bool suspend_on_hit, BpError* err)
 ///
 /// `suspend_on_hit` — see BpInstallSoftware; same semantics,
 /// same kernel-safety fallback.
-BreakpointId BpInstallHardware(u64 va, BpKind kind, BpLen len, u64 owner_pid, bool suspend_on_hit, BpError* err);
+///
+/// `on_hit` — optional trap-context callback (see BpHitCallback
+/// above). nullptr = no callback (default behaviour).
+BreakpointId BpInstallHardware(u64 va, BpKind kind, BpLen len, u64 owner_pid, bool suspend_on_hit, BpError* err,
+                               BpHitCallback on_hit = nullptr);
 
 /// Remove a previously-installed breakpoint. `requester_pid` must
 /// match the BP's owner_pid (or be 0 for kernel-privileged

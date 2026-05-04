@@ -658,19 +658,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWrite("[gdb-stub] COM2 wired (115200 8N1) — connect via QEMU's tcp::1234 server\n");
 #endif
 
-#ifdef DUETOS_GDB_DEMO
-    // Deliberate int3 so the AI / dev can exercise the full
-    // attach + inspect + continue cycle without having to set up
-    // a workload that crashes naturally. Fires here — right after
-    // the IDT phase — instead of at end of kernel_main so the
-    // demo is reachable in a few seconds of TCG boot, not the
-    // minute+ a full init takes. The stop loop blocks until GDB
-    // attaches AND issues `c` / `D` / `k`. Build with
-    // -DDUETOS_GDB_DEMO=ON to enable.
-    SerialWrite("[gdb-demo] firing int3 — kernel pauses until GDB attaches + continues\n");
-    asm volatile("int3");
-    SerialWrite("[gdb-demo] resumed from GDB int3 — kernel_main continues\n");
-#endif
+    // The DUETOS_GDB_DEMO int3 fires LATER in kernel_main, after
+    // BpInit() (so debug::BpInstallSoftware works — GDB's Z0
+    // patches int3 into .text via that subsystem, which itself
+    // needs paging.SetPteFlags4K to flip the page writable, which
+    // needs paging.SplitPsPage to split the boot 2 MiB
+    // superpage). Wiring the demo too early panics with
+    // `mm/paging: SplitPsPage: PML4 entry not present` because
+    // PagingInit hasn't installed g_pml4 yet.
 
     // Kernel extable — scoped fault recovery. Register before any
     // subsystem tries to install its own rows; the user-copy
@@ -912,6 +907,19 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     {
         SerialWrite("[boot] WARN: breakpoint self-test failed — see serial log\n");
     }
+
+#ifdef DUETOS_GDB_DEMO
+    // Deliberate int3 so the AI / dev can exercise the full
+    // attach + inspect + continue cycle without staging a real
+    // crash. Fires HERE (after BpInit) so GDB's Z0 packets can
+    // round-trip through debug::BpInstallSoftware → PokeByte →
+    // SetPteFlags4K — every layer is now online. The stop loop
+    // blocks until GDB attaches AND issues `c` / `D` / `k`.
+    // Build with -DDUETOS_GDB_DEMO=ON to enable.
+    SerialWrite("[gdb-demo] firing int3 — kernel pauses until GDB attaches + continues\n");
+    asm volatile("int3");
+    SerialWrite("[gdb-demo] resumed from GDB int3 — kernel_main continues\n");
+#endif
     // Static probes — KBP_PROBE(...) call sites sprinkled across
     // the kernel. Rare+useful events (panic, sandbox denial,
     // Win32 stub miss, kernel #PF) are armed-log by default so

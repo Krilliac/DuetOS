@@ -12,9 +12,21 @@
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/traps.h"
 #include "core/panic.h"
+#include "debug/breakpoints.h"
 
 namespace duetos::diag::gdb
 {
+
+// File-internal forward declaration. The function definition
+// lives in a later anonymous-namespace block (the one with
+// RouteToStopLoop), and it's referenced from a different
+// anonymous-namespace block (the one with the Z packet handler).
+// Anonymous namespaces in the same TU are NOT the same scope, so
+// a forward decl inside the first one wouldn't find a definition
+// in the second. Marking it `static` at file-internal-namespace
+// scope sidesteps the issue while keeping the symbol with
+// internal linkage.
+static void OnGdbBpHit(debug::BreakpointId id, arch::TrapFrame* frame);
 
 namespace
 {
@@ -45,18 +57,27 @@ constinit u64 g_packets_handled = 0;
 // RFLAGS.TF — set on `s` (single-step), cleared on `c`.
 constexpr u64 kRflagsTf = 1ULL << 8;
 
-// Software-breakpoint table. Each entry holds the patched
-// address and the byte we replaced with int3. Bounded — 32
-// breakpoints is well above what an interactive session ever
-// needs at once. Inserted by the `Z0` handler, removed by `z0`.
-struct SwBreakpoint
+// GDB-installed breakpoint table — slot maps `(addr, kind)` to
+// the BreakpointId returned by the kernel's debug::Bp subsystem,
+// so a `z<type>,addr` removal can find the right ID without
+// adding a "find-by-address" public API to that subsystem.
+//
+// We delegate the actual int3 patch / DR slot management to
+// debug::BpInstall{Software,Hardware}, which already owns the
+// reinsert-via-TF dance + DR0..3+DR7 setup + all the multi-CPU
+// concerns. Each install passes a callback that re-enters the
+// GDB stop loop on hit; without it the BP subsystem would just
+// reinsert + continue silently.
+struct GdbOwnedBp
 {
     bool in_use;
     u64 addr;
-    u8 original;
+    u8 type; // 0=sw, 1=hw-execute, 2=hw-write, 3=hw-readwrite, 4=hw-access
+    debug::BreakpointId id;
 };
-constexpr u32 kMaxSwBreakpoints = 32;
-constinit SwBreakpoint g_breakpoints[kMaxSwBreakpoints]{};
+constexpr u32 kMaxGdbBps = 32;
+constinit GdbOwnedBp g_breakpoints[kMaxGdbBps]{};
+
 
 // Set by the `c` / `s` / `D` / `k` handlers; read by the wait
 // loop to decide when to exit. The loop clears it on entry.
@@ -184,88 +205,87 @@ void HandlePacket()
         // bare-typed regs. xmm regs need the vec128 union (GDB
         // amd64-tdep insists). Total ~3500 bytes, fits inside
         // GDB's 4091-byte qXfer chunk.
-        static constexpr char kTargetXml[] =
-            "l<?xml version=\"1.0\"?>"
-            "<!DOCTYPE target SYSTEM \"gdb-target.dtd\">"
-            "<target>"
-            "<architecture>i386:x86-64</architecture>"
-            "<feature name=\"org.gnu.gdb.i386.core\">"
-            "<reg name=\"rax\" bitsize=\"64\"/>"
-            "<reg name=\"rbx\" bitsize=\"64\"/>"
-            "<reg name=\"rcx\" bitsize=\"64\"/>"
-            "<reg name=\"rdx\" bitsize=\"64\"/>"
-            "<reg name=\"rsi\" bitsize=\"64\"/>"
-            "<reg name=\"rdi\" bitsize=\"64\"/>"
-            "<reg name=\"rbp\" bitsize=\"64\"/>"
-            "<reg name=\"rsp\" bitsize=\"64\"/>"
-            "<reg name=\"r8\" bitsize=\"64\"/>"
-            "<reg name=\"r9\" bitsize=\"64\"/>"
-            "<reg name=\"r10\" bitsize=\"64\"/>"
-            "<reg name=\"r11\" bitsize=\"64\"/>"
-            "<reg name=\"r12\" bitsize=\"64\"/>"
-            "<reg name=\"r13\" bitsize=\"64\"/>"
-            "<reg name=\"r14\" bitsize=\"64\"/>"
-            "<reg name=\"r15\" bitsize=\"64\"/>"
-            "<reg name=\"rip\" bitsize=\"64\" type=\"code_ptr\"/>"
-            "<reg name=\"eflags\" bitsize=\"32\"/>"
-            "<reg name=\"cs\" bitsize=\"32\"/>"
-            "<reg name=\"ss\" bitsize=\"32\"/>"
-            "<reg name=\"ds\" bitsize=\"32\"/>"
-            "<reg name=\"es\" bitsize=\"32\"/>"
-            "<reg name=\"fs\" bitsize=\"32\"/>"
-            "<reg name=\"gs\" bitsize=\"32\"/>"
-            "<reg name=\"st0\" bitsize=\"64\"/>"
-            "<reg name=\"st1\" bitsize=\"64\"/>"
-            "<reg name=\"st2\" bitsize=\"64\"/>"
-            "<reg name=\"st3\" bitsize=\"64\"/>"
-            "<reg name=\"st4\" bitsize=\"64\"/>"
-            "<reg name=\"st5\" bitsize=\"64\"/>"
-            "<reg name=\"st6\" bitsize=\"64\"/>"
-            "<reg name=\"st7\" bitsize=\"64\"/>"
-            "<reg name=\"fctrl\" bitsize=\"32\"/>"
-            "<reg name=\"fstat\" bitsize=\"32\"/>"
-            "<reg name=\"ftag\" bitsize=\"32\"/>"
-            "<reg name=\"fiseg\" bitsize=\"32\"/>"
-            "<reg name=\"fioff\" bitsize=\"32\"/>"
-            "<reg name=\"foseg\" bitsize=\"32\"/>"
-            "<reg name=\"fooff\" bitsize=\"32\"/>"
-            "<reg name=\"fop\" bitsize=\"32\"/>"
-            "</feature>"
-            "<feature name=\"org.gnu.gdb.i386.sse\">"
-            "<vector id=\"v2d\" type=\"ieee_double\" count=\"2\"/>"
-            "<vector id=\"v4f\" type=\"ieee_single\" count=\"4\"/>"
-            "<vector id=\"v2i64\" type=\"int64\" count=\"2\"/>"
-            "<vector id=\"v4i32\" type=\"int32\" count=\"4\"/>"
-            "<vector id=\"v8i16\" type=\"int16\" count=\"8\"/>"
-            "<vector id=\"v16i8\" type=\"int8\" count=\"16\"/>"
-            "<union id=\"vec128\">"
-            "<field name=\"v4_float\" type=\"v4f\"/>"
-            "<field name=\"v2_double\" type=\"v2d\"/>"
-            "<field name=\"v16_int8\" type=\"v16i8\"/>"
-            "<field name=\"v8_int16\" type=\"v8i16\"/>"
-            "<field name=\"v4_int32\" type=\"v4i32\"/>"
-            "<field name=\"v2_int64\" type=\"v2i64\"/>"
-            "<field name=\"uint128\" type=\"uint128\"/>"
-            "</union>"
-            "<reg name=\"xmm0\" bitsize=\"128\" type=\"vec128\"/>"
-            "<reg name=\"xmm1\" bitsize=\"128\" type=\"vec128\"/>"
-            "<reg name=\"xmm2\" bitsize=\"128\" type=\"vec128\"/>"
-            "<reg name=\"xmm3\" bitsize=\"128\" type=\"vec128\"/>"
-            "<reg name=\"xmm4\" bitsize=\"128\" type=\"vec128\"/>"
-            "<reg name=\"xmm5\" bitsize=\"128\" type=\"vec128\"/>"
-            "<reg name=\"xmm6\" bitsize=\"128\" type=\"vec128\"/>"
-            "<reg name=\"xmm7\" bitsize=\"128\" type=\"vec128\"/>"
-            "<reg name=\"xmm8\" bitsize=\"128\" type=\"vec128\"/>"
-            "<reg name=\"xmm9\" bitsize=\"128\" type=\"vec128\"/>"
-            "<reg name=\"xmm10\" bitsize=\"128\" type=\"vec128\"/>"
-            "<reg name=\"xmm11\" bitsize=\"128\" type=\"vec128\"/>"
-            "<reg name=\"xmm12\" bitsize=\"128\" type=\"vec128\"/>"
-            "<reg name=\"xmm13\" bitsize=\"128\" type=\"vec128\"/>"
-            "<reg name=\"xmm14\" bitsize=\"128\" type=\"vec128\"/>"
-            "<reg name=\"xmm15\" bitsize=\"128\" type=\"vec128\"/>"
-            "<reg name=\"mxcsr\" bitsize=\"32\"/>"
-            "</feature>"
-            "</target>";
+        static constexpr char kTargetXml[] = "l<?xml version=\"1.0\"?>"
+                                             "<!DOCTYPE target SYSTEM \"gdb-target.dtd\">"
+                                             "<target>"
+                                             "<architecture>i386:x86-64</architecture>"
+                                             "<feature name=\"org.gnu.gdb.i386.core\">"
+                                             "<reg name=\"rax\" bitsize=\"64\"/>"
+                                             "<reg name=\"rbx\" bitsize=\"64\"/>"
+                                             "<reg name=\"rcx\" bitsize=\"64\"/>"
+                                             "<reg name=\"rdx\" bitsize=\"64\"/>"
+                                             "<reg name=\"rsi\" bitsize=\"64\"/>"
+                                             "<reg name=\"rdi\" bitsize=\"64\"/>"
+                                             "<reg name=\"rbp\" bitsize=\"64\"/>"
+                                             "<reg name=\"rsp\" bitsize=\"64\"/>"
+                                             "<reg name=\"r8\" bitsize=\"64\"/>"
+                                             "<reg name=\"r9\" bitsize=\"64\"/>"
+                                             "<reg name=\"r10\" bitsize=\"64\"/>"
+                                             "<reg name=\"r11\" bitsize=\"64\"/>"
+                                             "<reg name=\"r12\" bitsize=\"64\"/>"
+                                             "<reg name=\"r13\" bitsize=\"64\"/>"
+                                             "<reg name=\"r14\" bitsize=\"64\"/>"
+                                             "<reg name=\"r15\" bitsize=\"64\"/>"
+                                             "<reg name=\"rip\" bitsize=\"64\" type=\"code_ptr\"/>"
+                                             "<reg name=\"eflags\" bitsize=\"32\"/>"
+                                             "<reg name=\"cs\" bitsize=\"32\"/>"
+                                             "<reg name=\"ss\" bitsize=\"32\"/>"
+                                             "<reg name=\"ds\" bitsize=\"32\"/>"
+                                             "<reg name=\"es\" bitsize=\"32\"/>"
+                                             "<reg name=\"fs\" bitsize=\"32\"/>"
+                                             "<reg name=\"gs\" bitsize=\"32\"/>"
+                                             "<reg name=\"st0\" bitsize=\"64\"/>"
+                                             "<reg name=\"st1\" bitsize=\"64\"/>"
+                                             "<reg name=\"st2\" bitsize=\"64\"/>"
+                                             "<reg name=\"st3\" bitsize=\"64\"/>"
+                                             "<reg name=\"st4\" bitsize=\"64\"/>"
+                                             "<reg name=\"st5\" bitsize=\"64\"/>"
+                                             "<reg name=\"st6\" bitsize=\"64\"/>"
+                                             "<reg name=\"st7\" bitsize=\"64\"/>"
+                                             "<reg name=\"fctrl\" bitsize=\"32\"/>"
+                                             "<reg name=\"fstat\" bitsize=\"32\"/>"
+                                             "<reg name=\"ftag\" bitsize=\"32\"/>"
+                                             "<reg name=\"fiseg\" bitsize=\"32\"/>"
+                                             "<reg name=\"fioff\" bitsize=\"32\"/>"
+                                             "<reg name=\"foseg\" bitsize=\"32\"/>"
+                                             "<reg name=\"fooff\" bitsize=\"32\"/>"
+                                             "<reg name=\"fop\" bitsize=\"32\"/>"
+                                             "</feature>"
+                                             "<feature name=\"org.gnu.gdb.i386.sse\">"
+                                             "<vector id=\"v2d\" type=\"ieee_double\" count=\"2\"/>"
+                                             "<vector id=\"v4f\" type=\"ieee_single\" count=\"4\"/>"
+                                             "<vector id=\"v2i64\" type=\"int64\" count=\"2\"/>"
+                                             "<vector id=\"v4i32\" type=\"int32\" count=\"4\"/>"
+                                             "<vector id=\"v8i16\" type=\"int16\" count=\"8\"/>"
+                                             "<vector id=\"v16i8\" type=\"int8\" count=\"16\"/>"
+                                             "<union id=\"vec128\">"
+                                             "<field name=\"v4_float\" type=\"v4f\"/>"
+                                             "<field name=\"v2_double\" type=\"v2d\"/>"
+                                             "<field name=\"v16_int8\" type=\"v16i8\"/>"
+                                             "<field name=\"v8_int16\" type=\"v8i16\"/>"
+                                             "<field name=\"v4_int32\" type=\"v4i32\"/>"
+                                             "<field name=\"v2_int64\" type=\"v2i64\"/>"
+                                             "<field name=\"uint128\" type=\"uint128\"/>"
+                                             "</union>"
+                                             "<reg name=\"xmm0\" bitsize=\"128\" type=\"vec128\"/>"
+                                             "<reg name=\"xmm1\" bitsize=\"128\" type=\"vec128\"/>"
+                                             "<reg name=\"xmm2\" bitsize=\"128\" type=\"vec128\"/>"
+                                             "<reg name=\"xmm3\" bitsize=\"128\" type=\"vec128\"/>"
+                                             "<reg name=\"xmm4\" bitsize=\"128\" type=\"vec128\"/>"
+                                             "<reg name=\"xmm5\" bitsize=\"128\" type=\"vec128\"/>"
+                                             "<reg name=\"xmm6\" bitsize=\"128\" type=\"vec128\"/>"
+                                             "<reg name=\"xmm7\" bitsize=\"128\" type=\"vec128\"/>"
+                                             "<reg name=\"xmm8\" bitsize=\"128\" type=\"vec128\"/>"
+                                             "<reg name=\"xmm9\" bitsize=\"128\" type=\"vec128\"/>"
+                                             "<reg name=\"xmm10\" bitsize=\"128\" type=\"vec128\"/>"
+                                             "<reg name=\"xmm11\" bitsize=\"128\" type=\"vec128\"/>"
+                                             "<reg name=\"xmm12\" bitsize=\"128\" type=\"vec128\"/>"
+                                             "<reg name=\"xmm13\" bitsize=\"128\" type=\"vec128\"/>"
+                                             "<reg name=\"xmm14\" bitsize=\"128\" type=\"vec128\"/>"
+                                             "<reg name=\"xmm15\" bitsize=\"128\" type=\"vec128\"/>"
+                                             "<reg name=\"mxcsr\" bitsize=\"32\"/>"
+                                             "</feature>"
+                                             "</target>";
         SendReply(kTargetXml, sizeof(kTargetXml) - 1);
         return;
     }
@@ -411,8 +431,16 @@ void HandlePacket()
             g_regs_writable->r14 = take_u64(14);
             g_regs_writable->r15 = take_u64(15);
             g_regs_writable->rip = take_u64(16);
-            g_regs_writable->rflags = take_u64(17);
-            const u32 seg_off = body_off + 18 * 16;
+            // After the 16 GPRs (16*16 hex) + rip (16 hex) the
+            // packet has eflags as 32-bit (8 hex), then 6 ×
+            // 32-bit segment selectors (8 hex each). The earlier
+            // g-reply emit path matches this — take_u64 here
+            // would over-read by 8 hex chars and corrupt the
+            // seg_off arithmetic AND leave eflags with the cs
+            // value in its high 32 bits.
+            const u32 eflags_hex = body_off + 17 * 16;
+            g_regs_writable->rflags = take_u32(eflags_hex);
+            const u32 seg_off = eflags_hex + 8;
             g_regs_writable->cs = take_u32(seg_off + 0 * 8);
             g_regs_writable->ss = take_u32(seg_off + 1 * 8);
             g_regs_writable->ds = take_u32(seg_off + 2 * 8);
@@ -591,15 +619,26 @@ void HandlePacket()
     if (g_packet[0] == 'Z' || g_packet[0] == 'z')
     {
         // Z<type>,<addr>,<kind> — set/clear breakpoint.
-        // Z0 is software (int3); Z1..Z4 are hardware. We support
-        // Z0 only today; other types fall through to the empty
-        // reply, which GDB interprets as "use software-emulated
-        // breakpoints" and inserts via the M (write memory)
-        // packet instead.
+        // type 0: software (int3) — debug::BpInstallSoftware
+        // type 1: hardware execute — debug::BpInstallHardware (HwExecute)
+        // type 2: hardware write   — debug::BpInstallHardware (HwWrite)
+        // type 3: hardware read    — fold to HwReadWrite (debug
+        //                            subsystem doesn't separate read-only)
+        // type 4: hardware access  — debug::BpInstallHardware (HwReadWrite)
+        // The kernel BP subsystem owns the actual int3-patch /
+        // DR-slot management, including the reinsert-via-TF
+        // dance that lets the same BP fire repeatedly across
+        // GDB `continue`s.
         const bool insert = g_packet[0] == 'Z';
-        if (g_packet_len < 4 || g_packet[1] != '0')
+        if (g_packet_len < 4)
         {
-            SendCStr(""); // unsupported breakpoint kind
+            SendCStr("E01");
+            return;
+        }
+        const u8 type = g_packet[1];
+        if (type < '0' || type > '4')
+        {
+            SendCStr(""); // unsupported breakpoint type
             return;
         }
         if (g_packet[2] != ',')
@@ -616,48 +655,127 @@ void HandlePacket()
             addr = (addr << 4) | HexDigitValue(g_packet[i]);
             ++i;
         }
-        // We don't read the kind — int3 is always 1 byte on x86_64.
+        // Parse the kind (byte length for HW BPs; ignored for SW
+        // since int3 is always 1 byte). Skip the leading ','.
+        u64 kind_bytes = 1;
+        if (i < g_packet_len && g_packet[i] == ',')
+        {
+            ++i;
+            kind_bytes = 0;
+            while (i < g_packet_len && g_packet[i] != ';')
+            {
+                if (!IsHexDigit(g_packet[i]))
+                    break;
+                kind_bytes = (kind_bytes << 4) | HexDigitValue(g_packet[i]);
+                ++i;
+            }
+            if (kind_bytes == 0)
+                kind_bytes = 1;
+        }
         const u64 high = addr >> 47;
         if (high != 0 && high != 0x1FFFF)
         {
             SendCStr("E14");
             return;
         }
+        const u8 numeric_type = static_cast<u8>(type - '0');
         if (insert)
         {
-            // Find a free slot, save the original byte, patch int3.
-            for (u32 s = 0; s < kMaxSwBreakpoints; ++s)
+            // Already set? GDB sometimes re-Z's the same address.
+            for (u32 s = 0; s < kMaxGdbBps; ++s)
             {
-                if (g_breakpoints[s].in_use && g_breakpoints[s].addr == addr)
+                if (g_breakpoints[s].in_use && g_breakpoints[s].addr == addr && g_breakpoints[s].type == numeric_type)
                 {
-                    SendCStr("OK"); // already set
-                    return;
-                }
-            }
-            for (u32 s = 0; s < kMaxSwBreakpoints; ++s)
-            {
-                if (!g_breakpoints[s].in_use)
-                {
-                    u8* p = reinterpret_cast<u8*>(addr);
-                    g_breakpoints[s].in_use = true;
-                    g_breakpoints[s].addr = addr;
-                    g_breakpoints[s].original = *p;
-                    *p = 0xCC; // int3
                     SendCStr("OK");
                     return;
                 }
             }
-            SendCStr("E10"); // no slots
+            // Find a free slot to track the (addr → BreakpointId)
+            // mapping so a later `z<type>,addr` can find the right
+            // ID to remove.
+            u32 slot = kMaxGdbBps;
+            for (u32 s = 0; s < kMaxGdbBps; ++s)
+            {
+                if (!g_breakpoints[s].in_use)
+                {
+                    slot = s;
+                    break;
+                }
+            }
+            if (slot == kMaxGdbBps)
+            {
+                SendCStr("E10"); // no tracking slots left
+                return;
+            }
+            debug::BpError berr = debug::BpError::None;
+            debug::BreakpointId id = debug::kBpIdNone;
+            if (numeric_type == 0)
+            {
+                id = debug::BpInstallSoftware(addr, /*suspend_on_hit=*/false, &berr, &OnGdbBpHit);
+            }
+            else
+            {
+                debug::BpKind kind = debug::BpKind::HwExecute;
+                debug::BpLen len = debug::BpLen::One;
+                switch (numeric_type)
+                {
+                case 1:
+                    kind = debug::BpKind::HwExecute;
+                    len = debug::BpLen::One;
+                    break;
+                case 2:
+                    kind = debug::BpKind::HwWrite;
+                    break;
+                case 3:
+                    kind = debug::BpKind::HwReadWrite;
+                    break;
+                case 4:
+                    kind = debug::BpKind::HwReadWrite;
+                    break;
+                }
+                if (numeric_type != 1)
+                {
+                    switch (kind_bytes)
+                    {
+                    case 1:
+                        len = debug::BpLen::One;
+                        break;
+                    case 2:
+                        len = debug::BpLen::Two;
+                        break;
+                    case 4:
+                        len = debug::BpLen::Four;
+                        break;
+                    case 8:
+                        len = debug::BpLen::Eight;
+                        break;
+                    default:
+                        SendCStr("E01");
+                        return;
+                    }
+                }
+                id = debug::BpInstallHardware(addr, kind, len, /*owner_pid=*/0,
+                                              /*suspend_on_hit=*/false, &berr, &OnGdbBpHit);
+            }
+            if (berr != debug::BpError::None)
+            {
+                SendCStr("E11"); // generic install failure
+                return;
+            }
+            g_breakpoints[slot].in_use = true;
+            g_breakpoints[slot].addr = addr;
+            g_breakpoints[slot].type = numeric_type;
+            g_breakpoints[slot].id = id;
+            SendCStr("OK");
             return;
         }
         else
         {
-            for (u32 s = 0; s < kMaxSwBreakpoints; ++s)
+            for (u32 s = 0; s < kMaxGdbBps; ++s)
             {
-                if (g_breakpoints[s].in_use && g_breakpoints[s].addr == addr)
+                if (g_breakpoints[s].in_use && g_breakpoints[s].addr == addr && g_breakpoints[s].type == numeric_type)
                 {
-                    u8* p = reinterpret_cast<u8*>(addr);
-                    *p = g_breakpoints[s].original;
+                    (void)debug::BpRemove(g_breakpoints[s].id, /*requester_pid=*/0);
                     g_breakpoints[s].in_use = false;
                     SendCStr("OK");
                     return;
@@ -1066,9 +1184,48 @@ bool RouteToStopLoop(arch::TrapFrame* frame, StopReason reason, bool rollback_ri
 
 } // namespace
 
+static void OnGdbBpHit(debug::BreakpointId id, arch::TrapFrame* frame)
+{
+    // The BP subsystem has already done its reinsert prep — for
+    // SW BPs that means RIP rolled back to the int3 site, original
+    // byte restored, RFLAGS.TF set. So we DON'T need RouteToStopLoop
+    // to roll RIP back again (rollback_rip=false). Pick the stop
+    // reason from the BP type so GDB shows the right cause.
+    //
+    // The trap returns *after* this callback returns, at which
+    // point the CPU executes the original instruction, takes #DB
+    // (because TF was set), the BP subsystem re-patches the int3,
+    // and execution continues. From GDB's POV this is one
+    // continue-resumes-and-the-BP-stays-armed cycle, which is
+    // exactly what `swbreak+` semantics promise.
+    StopReason reason = StopReason::SoftBreak;
+    for (u32 s = 0; s < kMaxGdbBps; ++s)
+    {
+        if (g_breakpoints[s].in_use && g_breakpoints[s].id.value == id.value)
+        {
+            if (g_breakpoints[s].type != 0)
+                reason = StopReason::Trap; // hwbreak — GDB falls back to T05
+            break;
+        }
+    }
+    (void)RouteToStopLoop(frame, reason, /*rollback_rip=*/false);
+}
+
 bool HandleSoftwareBreakpoint(arch::TrapFrame* frame)
 {
-    return RouteToStopLoop(frame, StopReason::SoftBreak, /*rollback_rip=*/true);
+    // NO rollback for the bare-int3 path. This routine only runs
+    // when debug::BpHandleBreakpoint already said "not mine" —
+    // i.e. this int3 is a literal `int3` instruction in the
+    // kernel binary (the DUETOS_GDB_DEMO marker, or a future
+    // KASSERT-style int3), NOT a Z0-installed software BP. For
+    // those, GDB's `c` doesn't get auto-advanced past the int3
+    // (no `Z0` was sent → no `z0` will undo it), so rolling RIP
+    // back to the int3 byte would just re-execute it forever.
+    // Keep RIP at the post-int3 byte; GDB shows "stopped past
+    // line N" and `c` resumes cleanly. Z0-installed BPs go
+    // through OnGdbBpHit (with the BP subsystem's own rollback
+    // already applied) — that path keeps rollback_rip=false.
+    return RouteToStopLoop(frame, StopReason::SoftBreak, /*rollback_rip=*/false);
 }
 
 bool HandleDebugException(arch::TrapFrame* frame)

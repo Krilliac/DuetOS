@@ -48,6 +48,18 @@ cover both modes of debugging:
 
 ## Packet support
 
+## Backed by `kernel/debug/breakpoints`
+
+GDB's `Z0` / `z0` (software) and `Z1..Z4` (hardware) packets
+delegate to `debug::BpInstallSoftware` / `BpInstallHardware`
++ `BpRemove`, getting the existing reinsert-via-TF dance + DR0..3
+slot management for free. The BP subsystem grew a new
+`BpHitCallback on_hit` field — the GDB stub registers a callback
+(`OnGdbBpHit`) that enters the stop loop on every hit. From the
+operator's POV: BPs set via the kernel `bp` shell command and
+BPs set via GDB coexist in the same registration table; both fire
+correctly and don't stomp on each other.
+
 Implemented (live):
 - `qSupported` — advertises `PacketSize=1000;swbreak+;qXfer:features:read+`.
 - `qXfer:features:read:target.xml:OFF,LEN` — serves an inline
@@ -67,7 +79,16 @@ Implemented (live):
 - `s` — single-step. Sets RFLAGS.TF; the next instruction
   raises #DB which re-enters the stop loop.
 - `Z0,<addr>,<kind>` / `z0,<addr>,<kind>` — software (int3)
-  breakpoint set / clear. 32-slot table; rejects on overflow.
+  breakpoint set / clear. Backed by `debug::BpInstallSoftware`
+  (the kernel BP subsystem owns int3 patching + reinsert).
+- `Z1,<addr>,<kind>` / `z1,...` — hardware execute (DR0..3,
+  R/W=00, LEN=1). `debug::BpInstallHardware(HwExecute, One)`.
+- `Z2,<addr>,<kind>` / `z2,...` — hardware write (R/W=01).
+  `debug::BpInstallHardware(HwWrite, ...)`.
+- `Z3,<addr>,<kind>` / `z3,...` — hardware read (folded to
+  read-write since the BP subsystem doesn't separate read-only).
+- `Z4,<addr>,<kind>` / `z4,...` — hardware access (R/W=11).
+  `debug::BpInstallHardware(HwReadWrite, ...)`.
 - `D` — detach (kernel resumes from the current PC).
 - `k` — kill (same effect as detach today; kernel resumes).
 
