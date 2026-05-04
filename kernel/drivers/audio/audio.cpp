@@ -137,6 +137,25 @@ constexpr u64 kHdaScratchBytes = mm::kPageSize; // CORB + RIRB + 1 KiB pad
 // | (verb[19:8] << 8) | data[7:0].
 constexpr u32 kHdaVerbGetParameter = 0xF00;
 constexpr u32 kHdaParamVendorId = 0x00;
+constexpr u32 kHdaParamRevisionId = 0x02;
+constexpr u32 kHdaParamSubordinateNodeCount = 0x04;
+constexpr u32 kHdaParamFunctionGroupType = 0x05;
+constexpr u32 kHdaParamAudioWidgetCaps = 0x09;
+
+// Widget type codes packed into bits [23:20] of AudioWidgetCaps.
+constexpr u32 kHdaWidgetAudioOutput = 0x0;
+constexpr u32 kHdaWidgetAudioInput = 0x1;
+constexpr u32 kHdaWidgetAudioMixer = 0x2;
+constexpr u32 kHdaWidgetAudioSelector = 0x3;
+constexpr u32 kHdaWidgetPinComplex = 0x4;
+constexpr u32 kHdaWidgetPower = 0x5;
+constexpr u32 kHdaWidgetVolumeKnob = 0x6;
+constexpr u32 kHdaWidgetBeepGen = 0x7;
+constexpr u32 kHdaWidgetVendorDefined = 0xF;
+
+// Function-group types reported by GET_PARAMETER(FUNCTION_GROUP_TYPE).
+constexpr u32 kHdaFunctionGroupAudio = 0x01;
+constexpr u32 kHdaFunctionGroupModem = 0x02;
 
 u32 HdaEncodeVerb(u8 codec, u8 node, u32 verb12, u8 data8)
 {
@@ -153,9 +172,146 @@ struct HdaState
     bool live;
     u16 corb_wp;          // mirror of CORBWP after our last write
     u32 codec_vendor[15]; // root-node vendor ID per SDI slot, 0 = absent
+    u32 codec_dac_count[15];
+    u32 codec_adc_count[15];
+    u32 codec_pin_count[15];
     bool brought_up;
 };
 constinit HdaState g_hda = {};
+
+// Forward declaration — HdaIssueVerbAndPoll is defined further
+// down (after the bring-up record) but the codec walker needs
+// to call it.
+u32 HdaIssueVerbAndPoll(const AudioControllerInfo& a, u8 codec, u8 node, u32 verb12, u8 data8);
+
+const char* HdaWidgetTypeName(u32 type_code)
+{
+    switch (type_code)
+    {
+    case kHdaWidgetAudioOutput:
+        return "audio-output";
+    case kHdaWidgetAudioInput:
+        return "audio-input";
+    case kHdaWidgetAudioMixer:
+        return "mixer";
+    case kHdaWidgetAudioSelector:
+        return "selector";
+    case kHdaWidgetPinComplex:
+        return "pin-complex";
+    case kHdaWidgetPower:
+        return "power";
+    case kHdaWidgetVolumeKnob:
+        return "volume-knob";
+    case kHdaWidgetBeepGen:
+        return "beep-gen";
+    case kHdaWidgetVendorDefined:
+        return "vendor";
+    default:
+        return "unknown";
+    }
+}
+
+// Walk a codec's function group + widget tree. Encodes each
+// widget's type so the next slice (output stream wiring) can
+// pick a DAC + pin pair without re-walking. Returns the count
+// of audio function groups discovered (0 means modem-only or
+// quiescent codec).
+u32 HdaWalkCodec(const AudioControllerInfo& a, u8 slot)
+{
+    // SUBORDINATE_NODE_COUNT on root node 0 returns
+    //   bits [23:16] = starting subnode id
+    //   bits [7:0]   = number of function groups
+    const u32 root_subordinates = HdaIssueVerbAndPoll(a, slot, 0, kHdaVerbGetParameter, kHdaParamSubordinateNodeCount);
+    const u32 fg_start = (root_subordinates >> 16) & 0xFF;
+    const u32 fg_count = root_subordinates & 0xFF;
+
+    arch::SerialWrite("[hda]   slot=");
+    arch::SerialWriteHex(slot);
+    arch::SerialWrite(" function-groups: start=");
+    arch::SerialWriteHex(fg_start);
+    arch::SerialWrite(" count=");
+    arch::SerialWriteHex(fg_count);
+    arch::SerialWrite("\n");
+
+    if (fg_count == 0 || fg_start == 0)
+        return 0;
+
+    u32 audio_fg_count = 0;
+    u32 dac = 0;
+    u32 adc = 0;
+    u32 pin = 0;
+    // Bound the walk: even pathological codecs have ≤ 4 function
+    // groups. The whole-tree limit (kept loose at 64) protects
+    // against malformed responses.
+    const u32 fg_walk_limit = (fg_count > 4) ? 4 : fg_count;
+    for (u32 fg_idx = 0; fg_idx < fg_walk_limit; ++fg_idx)
+    {
+        const u8 fg_node = static_cast<u8>(fg_start + fg_idx);
+        const u32 fg_type = HdaIssueVerbAndPoll(a, slot, fg_node, kHdaVerbGetParameter, kHdaParamFunctionGroupType);
+        const u32 fg_type_code = fg_type & 0x7F;
+        arch::SerialWrite("[hda]     fg node=");
+        arch::SerialWriteHex(fg_node);
+        arch::SerialWrite(" type=");
+        arch::SerialWriteHex(fg_type_code);
+        if (fg_type_code == kHdaFunctionGroupAudio)
+            arch::SerialWrite(" (audio)");
+        else if (fg_type_code == kHdaFunctionGroupModem)
+            arch::SerialWrite(" (modem)");
+        arch::SerialWrite("\n");
+
+        if (fg_type_code != kHdaFunctionGroupAudio)
+            continue;
+        ++audio_fg_count;
+
+        const u32 fg_subnodes =
+            HdaIssueVerbAndPoll(a, slot, fg_node, kHdaVerbGetParameter, kHdaParamSubordinateNodeCount);
+        const u32 widget_start = (fg_subnodes >> 16) & 0xFF;
+        const u32 widget_count = fg_subnodes & 0xFF;
+        // 64-widget cap matches what mainstream codecs (ALC892,
+        // CX20585, IDT 92HD90B etc.) report. A pathological
+        // response that claims more is a sign of a stuck RIRB —
+        // bail rather than spend the rest of boot polling.
+        const u32 widget_walk_limit = (widget_count > 64) ? 64 : widget_count;
+        for (u32 w_idx = 0; w_idx < widget_walk_limit; ++w_idx)
+        {
+            const u8 widget_node = static_cast<u8>(widget_start + w_idx);
+            const u32 caps = HdaIssueVerbAndPoll(a, slot, widget_node, kHdaVerbGetParameter, kHdaParamAudioWidgetCaps);
+            const u32 wtype = (caps >> 20) & 0xF;
+            switch (wtype)
+            {
+            case kHdaWidgetAudioOutput:
+                ++dac;
+                break;
+            case kHdaWidgetAudioInput:
+                ++adc;
+                break;
+            case kHdaWidgetPinComplex:
+                ++pin;
+                break;
+            default:
+                break;
+            }
+            // Per-widget log only at high verbosity — keep boot
+            // log readable. The summary below is enough to
+            // diagnose "codec found a DAC vs not".
+            (void)HdaWidgetTypeName(wtype);
+        }
+    }
+
+    g_hda.codec_dac_count[slot] = dac;
+    g_hda.codec_adc_count[slot] = adc;
+    g_hda.codec_pin_count[slot] = pin;
+    arch::SerialWrite("[hda]     slot=");
+    arch::SerialWriteHex(slot);
+    arch::SerialWrite(" widgets: dac=");
+    arch::SerialWriteHex(dac);
+    arch::SerialWrite(" adc=");
+    arch::SerialWriteHex(adc);
+    arch::SerialWrite(" pin=");
+    arch::SerialWriteHex(pin);
+    arch::SerialWrite("\n");
+    return audio_fg_count;
+}
 
 void DecodeHdaCaps(const AudioControllerInfo& a)
 {
@@ -328,10 +484,17 @@ u32 HdaIssueVerbAndPoll(const AudioControllerInfo& a, u8 codec, u8 node, u32 ver
     Mmio8Write(a, kHdaRegRirbctl, kHdaRirbctlDmaen);
 
     // 8) For every codec slot the controller saw at boot, issue
-    // GET_PARAMETER(VENDOR_ID) on root node 0. Stores the response
-    // for diagnostics (next slice walks the codec tree to find
-    // output converters + pin widgets).
-    // GAP: codec tree walk (subnodes / amp caps / connections).
+    // GET_PARAMETER(VENDOR_ID) on root node 0, then walk the
+    // function-group + widget tree to discover DAC/ADC/Pin
+    // counts. Stream / amp / connection programming lands as
+    // a follow-up slice; this much already lets boot diagnostics
+    // distinguish "codec is wired up but mute" from "codec
+    // never responded".
+    // GAP: per-widget amplifier capabilities (GET_PARAMETER
+    // 0x0D / 0x12) and connection lists (GET_PARAMETER 0x0E +
+    // GET_CONNECTION_LIST_ENTRY 0xF02) — needed to actually
+    // route a stream to a speaker pin. Revisit when stream
+    // playback lands.
     u32 found = 0;
     for (u32 slot = 0; slot < 15; ++slot)
     {
@@ -346,8 +509,16 @@ u32 HdaIssueVerbAndPoll(const AudioControllerInfo& a, u8 codec, u8 node, u32 ver
         arch::SerialWrite(" vendor_id=");
         arch::SerialWriteHex(vendor);
         if (vendor == 0)
-            arch::SerialWrite(" (no response — codec absent or timeout)");
+        {
+            arch::SerialWrite(" (no response — codec absent or timeout)\n");
+            continue;
+        }
+        const u32 revision =
+            HdaIssueVerbAndPoll(a, static_cast<u8>(slot), 0, kHdaVerbGetParameter, kHdaParamRevisionId);
+        arch::SerialWrite(" revision=");
+        arch::SerialWriteHex(revision);
         arch::SerialWrite("\n");
+        HdaWalkCodec(a, static_cast<u8>(slot));
     }
     core::LogWith2Values(core::LogLevel::Info, "drivers/audio", "  hda bring-up", "rings_phys", g_hda.dma.phys,
                          "codecs_responded", found);

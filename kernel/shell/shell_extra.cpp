@@ -31,6 +31,7 @@
 #include "drivers/video/console.h"
 #include "fs/tmpfs.h"
 #include "log/klog.h"
+#include "log/klog_persist.h"
 #include "sched/sched.h"
 #include "security/auth.h"
 
@@ -298,9 +299,17 @@ void CmdNproc()
 
 void CmdArch()
 {
-    // STUB: hard-coded; ARM64 is on the roadmap and will need this
-    // to read a build-time arch tag.
+#if defined(__aarch64__)
+    ConsoleWriteln("aarch64");
+#elif defined(__x86_64__) || defined(_M_X64)
     ConsoleWriteln("x86_64");
+#elif defined(__i386__) || defined(_M_IX86)
+    ConsoleWriteln("i386");
+#elif defined(__riscv) && (__riscv_xlen == 64)
+    ConsoleWriteln("riscv64");
+#else
+    ConsoleWriteln("unknown");
+#endif
 }
 
 void CmdTty()
@@ -518,12 +527,17 @@ void CmdYes(u32 argc, char** argv)
 
 void CmdSync()
 {
-    // STUB: every storage backend is synchronous in v0 (writes
-    // return after the device acks), so there's nothing to flush.
-    // Keep the command so portable scripts that rely on it don't
-    // fail; revisit when an async block layer or page cache lands.
-    duetos::core::Log(duetos::core::LogLevel::Info, "shell", "sync (no-op in v0)");
-    ConsoleWriteln("SYNC: OK (v0 backends are synchronous).");
+    // Every storage backend in v0 is synchronous — block-layer
+    // writes return only after the device ACKs, and there is no
+    // page cache to flush. So `sync` reduces to a structural
+    // checkpoint: explicitly flush the persisted-log sink so any
+    // buffered klog bytes hit FAT32 before the caller proceeds.
+    // When an async block layer / page cache lands, additional
+    // flush points (per-FS journal, dirty-page writeback) get
+    // chained here.
+    duetos::core::KlogPersistFlush();
+    duetos::core::Log(duetos::core::LogLevel::Info, "shell", "sync: klog flushed; backends are synchronous");
+    ConsoleWriteln("SYNC: OK (klog flushed; v0 backends are synchronous).");
 }
 
 // ---------------------------------------------------------------

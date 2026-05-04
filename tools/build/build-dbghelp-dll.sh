@@ -61,6 +61,31 @@ set +e
     /export:SymFunctionTableAccess64 \
     /export:SymGetModuleBase64 \
     /export:MiniDumpWriteDump \
+    /export:SymGetModuleInfo64 \
+    /export:SymGetOptions \
+    /export:SymSetOptions \
+    /export:SymRefreshModuleList \
+    /export:SymUnloadModule64 \
+    /export:SymEnumSymbols \
+    /export:SymEnumSymbolsW \
+    /export:UnDecorateSymbolName \
+    /export:SymGetSearchPath \
+    /export:SymSetSearchPath \
+    /export:SymGetSearchPathW \
+    /export:SymSetSearchPathW \
+    /export:MakeSureDirectoryPathExists \
+    /export:ImageNtHeader \
+    /export:ImageRvaToVa \
+    /export:ImageDirectoryEntryToData \
+    /export:SymRegisterCallback \
+    /export:SymRegisterCallback64 \
+    /export:SymEnumerateModules64 \
+    /export:EnumerateLoadedModules \
+    /export:EnumerateLoadedModules64 \
+    /export:SymGetTypeInfo \
+    /export:SymSearch \
+    /export:SymGetHomeDirectoryW \
+    /export:SymFindFileInPath \
     /out:"${DLL}" \
     "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}

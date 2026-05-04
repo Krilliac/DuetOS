@@ -149,7 +149,8 @@ constexpr u32 kSidecarDataMax = 256;
 struct SidecarValue
 {
     bool in_use;
-    u8 _pad[3];
+    bool tombstone; // true → this name is "deleted" and shadows any same-named static value
+    u8 _pad[2];
     const RegKey* key; // pointer into kRegKeys[]; unique per (root, path)
     u32 type;          // REG_*
     u32 size;          // bytes valid in data[]
@@ -475,8 +476,13 @@ i64 DoQueryValue(arch::TrapFrame* frame)
 
     // Sidecar first — a prior NtSetValueKey shadows any same-
     // named static value for as long as the sidecar entry lives.
+    // A tombstoned entry shadows the static value the same way
+    // but reports STATUS_OBJECT_NAME_NOT_FOUND so the caller sees
+    // the deletion.
     if (const SidecarValue* sv = SidecarFind(key, name_buf); sv != nullptr)
     {
+        if (sv->tombstone)
+            return kNtStatusObjectNameNotFound;
         const u32 want = sv->size;
         if (out_va != 0)
         {
@@ -579,6 +585,10 @@ i64 DoSetValue(arch::TrapFrame* frame)
         sv->key = key;
         sv->in_use = true;
     }
+    // A SetValue on a tombstoned name "resurrects" the value (now
+    // pointing at sidecar bytes — the static value stays shadowed
+    // until the sidecar slot is freed).
+    sv->tombstone = false;
     sv->type = type;
     sv->size = static_cast<u32>(size);
     if (size > 0)
@@ -590,6 +600,7 @@ i64 DoSetValue(arch::TrapFrame* frame)
             // value (which would silently corrupt subsequent
             // queries).
             sv->in_use = false;
+            sv->tombstone = false;
             sv->key = nullptr;
             sv->name[0] = '\0';
             sv->size = 0;
@@ -623,23 +634,62 @@ i64 DoDeleteValue(arch::TrapFrame* frame)
     SidecarValue* sv = SidecarFind(key, name_buf);
     if (sv != nullptr)
     {
-        sv->in_use = false;
-        sv->key = nullptr;
-        sv->name[0] = '\0';
-        sv->size = 0;
+        // Already a sidecar entry. If it shadows a static value
+        // we have to leave it occupied as a tombstone so the
+        // shadowing persists across the delete. Otherwise we can
+        // free the slot outright.
+        bool shadows_static = false;
+        for (u32 i = 0; i < key->value_count; ++i)
+        {
+            if (PathEqualCi(key->values[i].name, name_buf))
+            {
+                shadows_static = true;
+                break;
+            }
+        }
+        if (shadows_static)
+        {
+            sv->tombstone = true;
+            sv->type = 0;
+            sv->size = 0;
+        }
+        else
+        {
+            sv->in_use = false;
+            sv->tombstone = false;
+            sv->key = nullptr;
+            sv->name[0] = '\0';
+            sv->size = 0;
+        }
         return kNtStatusSuccess;
     }
-    // GAP: cannot delete static values — they live in .rodata.
-    // Real Windows registries don't have this distinction; v0's
-    // tier separation surfaces as ObjectNameNotFound for any
-    // name that hasn't been Set'd into the sidecar yet, even
-    // when the static tree carries a same-named value. This
-    // matches the "if you didn't Set it, you can't Delete it"
-    // model — sub-GAP documented in §11.5.
+    // No sidecar entry yet — see if the name resolves to a static
+    // value. If so, plant a tombstone so subsequent Query / Enum
+    // calls behave as if the value were genuinely deleted.
+    bool is_static_value = false;
     for (u32 i = 0; i < key->value_count; ++i)
     {
         if (PathEqualCi(key->values[i].name, name_buf))
+        {
+            is_static_value = true;
+            break;
+        }
+    }
+    if (is_static_value)
+    {
+        SidecarValue* tomb = SidecarAlloc();
+        if (tomb == nullptr)
             return kNtStatusInsufficientResources;
+        u32 i = 0;
+        for (; i + 1 < kSidecarNameMax && name_buf[i] != '\0'; ++i)
+            tomb->name[i] = name_buf[i];
+        tomb->name[i] = '\0';
+        tomb->key = key;
+        tomb->in_use = true;
+        tomb->tombstone = true;
+        tomb->type = 0;
+        tomb->size = 0;
+        return kNtStatusSuccess;
     }
     return kNtStatusObjectNameNotFound;
 }
@@ -653,9 +703,27 @@ i64 DoFlushKey(arch::TrapFrame* frame)
     return kNtStatusSuccess;
 }
 
+// True iff `key` has a sidecar tombstone for `name`. Used to
+// skip static values that have been deleted via DoDeleteValue.
+bool StaticValueIsTombstoned(const RegKey* key, const char* name)
+{
+    for (u32 i = 0; i < kSidecarValueCap; ++i)
+    {
+        if (!g_sidecar[i].in_use || g_sidecar[i].key != key)
+            continue;
+        if (!g_sidecar[i].tombstone)
+            continue;
+        if (PathEqualCi(g_sidecar[i].name, name))
+            return true;
+    }
+    return false;
+}
+
 // Walk the values of an opened key and return the one at
-// `index`. Static values come first, then sidecar entries with
-// matching RegKey. Out shape (32-byte header + name body):
+// `index`. Static values come first (skipping any whose name
+// has been tombstoned), then live sidecar entries with matching
+// RegKey (skipping tombstones themselves). Out shape (32-byte
+// header + name body):
 //   [0..4)   index (u32)
 //   [4..8)   type  (u32, REG_*)
 //   [8..12)  data_size (u32, bytes)
@@ -677,37 +745,41 @@ i64 DoEnumerateValue(arch::TrapFrame* frame)
     if (buf_va == 0 || buf_cap < 32)
         return kNtStatusInvalidParameter;
 
-    // Position `index` in the unified list. Skip if past the
-    // total — the caller's enumeration loop terminates on
-    // STATUS_NO_MORE_ENTRIES.
-    if (index < key->value_count)
+    // Walk the unified (static-then-sidecar) list, skipping
+    // tombstoned entries. Position the caller's `index` against
+    // the surviving (exposed) sequence.
+    u32 visible = 0;
+    for (u32 i = 0; i < key->value_count; ++i)
     {
-        const RegValue& v = key->values[index];
-        u64 packed[4] = {0, 0, 0, 0};
-        u32 name_chars = 0;
-        while (v.name[name_chars] != '\0')
-            ++name_chars;
-        const u64 hdr = 32;
-        if (buf_cap < hdr + name_chars + 1)
-            return kNtStatusBufferTooSmall;
-        packed[0] = (static_cast<u64>(v.type) << 32) | static_cast<u64>(index);
-        packed[1] = (static_cast<u64>(name_chars) << 32) | static_cast<u64>(v.size);
-        packed[2] = 0;
-        packed[3] = 0;
-        if (!duetos::mm::CopyToUser(reinterpret_cast<void*>(buf_va), packed, sizeof(packed)))
-            return kNtStatusInvalidParameter;
-        if (!duetos::mm::CopyToUser(reinterpret_cast<void*>(buf_va + hdr), v.name, name_chars + 1))
-            return kNtStatusInvalidParameter;
-        return kNtStatusSuccess;
+        const RegValue& v = key->values[i];
+        if (StaticValueIsTombstoned(key, v.name))
+            continue;
+        if (visible == index)
+        {
+            u32 name_chars = 0;
+            while (v.name[name_chars] != '\0')
+                ++name_chars;
+            const u64 hdr = 32;
+            if (buf_cap < hdr + name_chars + 1)
+                return kNtStatusBufferTooSmall;
+            u64 packed[4] = {0, 0, 0, 0};
+            packed[0] = (static_cast<u64>(v.type) << 32) | static_cast<u64>(index);
+            packed[1] = (static_cast<u64>(name_chars) << 32) | static_cast<u64>(v.size);
+            if (!duetos::mm::CopyToUser(reinterpret_cast<void*>(buf_va), packed, sizeof(packed)))
+                return kNtStatusInvalidParameter;
+            if (!duetos::mm::CopyToUser(reinterpret_cast<void*>(buf_va + hdr), v.name, name_chars + 1))
+                return kNtStatusInvalidParameter;
+            return kNtStatusSuccess;
+        }
+        ++visible;
     }
-    // Past static values — walk the sidecar.
-    u32 sidecar_idx = index - key->value_count;
-    u32 hits = 0;
     for (u32 i = 0; i < kSidecarValueCap; ++i)
     {
         if (!g_sidecar[i].in_use || g_sidecar[i].key != key)
             continue;
-        if (hits == sidecar_idx)
+        if (g_sidecar[i].tombstone)
+            continue;
+        if (visible == index)
         {
             const SidecarValue& sv = g_sidecar[i];
             u32 name_chars = 0;
@@ -725,7 +797,7 @@ i64 DoEnumerateValue(arch::TrapFrame* frame)
                 return kNtStatusInvalidParameter;
             return kNtStatusSuccess;
         }
-        ++hits;
+        ++visible;
     }
     // STATUS_NO_MORE_ENTRIES = 0x8000001A. Caller's loop ends.
     return static_cast<i64>(static_cast<u32>(0x8000001A));
@@ -807,13 +879,17 @@ u32 MaxSubkeyNameChars(const RegKey* key)
 
 // Longest value-name + value-data lengths across both the static
 // table and any matching sidecar entries. Backs
-// KEY_FULL_INFORMATION.MaxValueNameLen / MaxValueDataLen.
+// KEY_FULL_INFORMATION.MaxValueNameLen / MaxValueDataLen. Skips
+// tombstoned static values + tombstone sidecar entries so the
+// reported maxima reflect what enum will actually surface.
 void MaxValueLens(const RegKey* key, u32* max_name_chars, u32* max_data_bytes)
 {
     u32 best_name = 0;
     u32 best_data = 0;
     for (u32 i = 0; i < key->value_count; ++i)
     {
+        if (StaticValueIsTombstoned(key, key->values[i].name))
+            continue;
         const u32 nl = StrLenAscii(key->values[i].name);
         if (nl > best_name)
             best_name = nl;
@@ -823,6 +899,8 @@ void MaxValueLens(const RegKey* key, u32* max_name_chars, u32* max_data_bytes)
     for (u32 i = 0; i < kSidecarValueCap; ++i)
     {
         if (!g_sidecar[i].in_use || g_sidecar[i].key != key)
+            continue;
+        if (g_sidecar[i].tombstone)
             continue;
         const u32 nl = StrLenAscii(g_sidecar[i].name);
         if (nl > best_name)
@@ -859,19 +937,29 @@ i64 DoQueryKey(arch::TrapFrame* frame)
         return kNtStatusInvalidHandle;
     if (buf_va == 0 || buf_cap < 16)
         return kNtStatusInvalidParameter;
+    // Visible sidecar entries (not tombstones) AND visible static
+    // values (those without a matching tombstone). The exposed
+    // total drives the caller's enumeration loop.
     u32 sidecar_count = 0;
+    u32 tombstone_count = 0;
     for (u32 i = 0; i < kSidecarValueCap; ++i)
     {
-        if (g_sidecar[i].in_use && g_sidecar[i].key == key)
+        if (!g_sidecar[i].in_use || g_sidecar[i].key != key)
+            continue;
+        if (g_sidecar[i].tombstone)
+            ++tombstone_count;
+        else
             ++sidecar_count;
     }
     u32 max_value_name_chars = 0;
     u32 max_value_data_bytes = 0;
     MaxValueLens(key, &max_value_name_chars, &max_value_data_bytes);
 
+    const u32 visible_static = (key->value_count >= tombstone_count) ? (key->value_count - tombstone_count) : 0;
+
     u64 packed[5];
     packed[0] = static_cast<u64>(CountSubkeys(key));
-    packed[1] = static_cast<u64>(key->value_count + sidecar_count);
+    packed[1] = static_cast<u64>(visible_static + sidecar_count);
     packed[2] = static_cast<u64>(MaxSubkeyNameChars(key));
     packed[3] = static_cast<u64>(max_value_name_chars);
     packed[4] = static_cast<u64>(max_value_data_bytes);

@@ -39,28 +39,47 @@ bool NotesSave()
         SerialWrite("[notes] save: no FAT32 volume mounted\n");
         return false;
     }
-    // GAP: non-atomic save — delete-then-create. v0 has no
-    // journaling, and Fat32CreateAtPath rejects duplicate
-    // names per its contract. A power loss between the delete
-    // and the create truncates the file. Revisit when FS
-    // journaling lands.
+    // Atomic save via NOTES.TMP + rename. Window of vulnerability
+    // shrinks from "delete-then-create" (where a power loss between
+    // the two leaves no file at all) to "rename" (where a power
+    // loss before the rename leaves the previous content intact and
+    // a stale NOTES.TMP that the next save will overwrite). Real
+    // crash safety requires a journaling FS — that's out of scope
+    // for v0 — but the rename is enough to defeat the common case.
+    constexpr const char kTmpFile[] = "NOTES.TMP";
+    fat::DirEntry tmp_existing;
+    if (fat::Fat32LookupPath(v, kTmpFile, &tmp_existing))
+    {
+        // Stale temp from a previous interrupted save. Drop it so
+        // the create below succeeds.
+        fat::Fat32DeleteAtPath(v, kTmpFile);
+    }
+    const i64 rc = fat::Fat32CreateAtPath(v, kTmpFile, detail::g_buf, detail::g_len);
+    if (rc < 0)
+    {
+        SerialWrite("[notes] save: create NOTES.TMP failed\n");
+        return false;
+    }
+    // Now swap the temp into place. Delete-target is required by
+    // Fat32RenameAtPath's no-overwrite contract.
     fat::DirEntry existing;
     if (fat::Fat32LookupPath(v, detail::kSaveFile, &existing))
     {
         if (!fat::Fat32DeleteAtPath(v, detail::kSaveFile))
         {
-            SerialWrite("[notes] save: delete-existing failed\n");
+            // Couldn't make room for the rename — leave NOTES.TMP
+            // around so the user / next save can recover by hand.
+            SerialWrite("[notes] save: delete-existing failed; NOTES.TMP retained\n");
             return false;
         }
     }
-    const i64 rc = fat::Fat32CreateAtPath(v, detail::kSaveFile, detail::g_buf, detail::g_len);
-    if (rc < 0)
+    if (!fat::Fat32RenameAtPath(v, kTmpFile, detail::kSaveFile))
     {
-        SerialWrite("[notes] save: create failed\n");
+        SerialWrite("[notes] save: rename NOTES.TMP -> NOTES.TXT failed\n");
         return false;
     }
     detail::g_dirty = false;
-    SerialWrite("[notes] save: NOTES.TXT written\n");
+    SerialWrite("[notes] save: NOTES.TXT written (atomic via NOTES.TMP)\n");
     return true;
 }
 
