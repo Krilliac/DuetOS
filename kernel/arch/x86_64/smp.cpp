@@ -161,6 +161,69 @@ void PanicBroadcastNmi()
     core::Log(core::LogLevel::Warn, "arch/smp", "NMI broadcast ICR stuck; peer CPUs may keep running");
 }
 
+// GDB stop-rendezvous flag. Set by SmpStopBroadcastNmi, cleared
+// by SmpStopReleaseNmi. Read by the vector-2 NMI handler in
+// traps.cpp via SmpGdbStopActive(). Plain volatile + asm fence —
+// the NMI handler runs with IF=0 so atomic-RMW machinery isn't
+// needed; we just need the compiler to actually issue the load
+// each time and the store to be visible across cores.
+constinit volatile u32 g_gdb_stop_active = 0;
+
+void SmpStopBroadcastNmi()
+{
+    if (!LapicIsReady())
+    {
+        // Pre-LAPIC stop request — only the calling CPU exists
+        // anyway (no APs without LAPIC). Set the flag for symmetry
+        // and return.
+        g_gdb_stop_active = 1;
+        asm volatile("" ::: "memory");
+        return;
+    }
+
+    // Order matters: peers must see the flag = 1 BEFORE the NMI
+    // fires, otherwise a peer NMI handler that wins the race would
+    // see flag = 0 and take the panic-halt path. Fence then write
+    // then fence — the LAPIC ICR write itself is a serialising
+    // operation per Intel SDM, but be explicit.
+    asm volatile("" ::: "memory");
+    g_gdb_stop_active = 1;
+    asm volatile("mfence" ::: "memory");
+
+    constexpr u32 kIcrDeliveryNmi = 4U << 8;
+    constexpr u32 kIcrDstShorthandAllExSelf = 3U << 18;
+    constexpr u32 icr_low = kIcrDeliveryNmi | kIcrLevelAssert | kIcrDstShorthandAllExSelf;
+
+    LapicWrite(kLapicRegIcrHigh, 0);
+    LapicWrite(kLapicRegIcrLow, icr_low);
+
+    // Bounded wait for delivery — same shape as PanicBroadcastNmi
+    // but we don't need to recursion-proof against a panic-in-panic
+    // funhouse here. If the IPI gets stuck, log and proceed anyway:
+    // the BSP-side stop loop will work with whatever peers froze.
+    for (u64 spin = 0; spin < 1'000'000; ++spin)
+    {
+        if ((LapicRead(kLapicRegIcrLow) & kIcrDeliveryPending) == 0)
+        {
+            return;
+        }
+        asm volatile("pause" ::: "memory");
+    }
+    core::Log(core::LogLevel::Warn, "arch/smp", "stop-NMI ICR stuck; peer CPUs may not have frozen");
+}
+
+void SmpStopReleaseNmi()
+{
+    asm volatile("mfence" ::: "memory");
+    g_gdb_stop_active = 0;
+    asm volatile("" ::: "memory");
+}
+
+bool SmpGdbStopActive()
+{
+    return g_gdb_stop_active != 0;
+}
+
 u64 SmpCpusOnline()
 {
     return g_cpus_online;
@@ -321,6 +384,13 @@ u64 SmpStartAps()
             ap_pcpu->held_locks[hl] = nullptr;
             ap_pcpu->held_lock_rips[hl] = 0;
         }
+        // GDB stop-rendezvous fields. Zero — peer hasn't been
+        // NMI-frozen yet on this AP.
+        ap_pcpu->gdb_frozen = 0;
+        ap_pcpu->gdb_snapshot_rip = 0;
+        ap_pcpu->gdb_snapshot_rsp = 0;
+        ap_pcpu->gdb_snapshot_rflags = 0;
+        ap_pcpu->gdb_frozen_frame = nullptr;
         g_ap_percpus[cpu_id] = ap_pcpu;
         if (cpu_id + 1 > g_cpu_id_limit)
         {

@@ -104,9 +104,88 @@ Implemented (live):
 - `D` — detach (kernel resumes from the current PC).
 - `k` — kill (same effect as detach today; kernel resumes).
 
-Not implemented: `Z1..Z4` (hardware breakpoints / watchpoints —
-fall through to the empty reply, GDB synthesises them via `M`
-/ `Z0`), async stop on Ctrl-C (no IRQ-driven RX yet).
+Implemented (2026-05-04 follow-on slices):
+- **Async stop (Ctrl-C)** via `gdb::PollAsyncStop(frame)`. Hooked
+  into `arch::TrapDispatch`'s IRQ branch, after EOI and before
+  the resched check. On every IRQ — most commonly the LAPIC
+  timer — does one INB on the COM2 LSR; on a 0x03 (ETX) byte,
+  routes the IRQ's `TrapFrame` through the same `RouteToStopLoop`
+  that #BP / #DB use, with reason `UserHalt`. The resulting GDB
+  stop reflects the interrupted code's RIP — exactly "where the
+  kernel actually was" — not the polling thread.
+- **SMP stop rendezvous** via `arch::SmpStopBroadcastNmi()` /
+  `SmpStopReleaseNmi()`. Distinct from `PanicBroadcastNmi` (which
+  halts peers forever). Sets a global `g_gdb_stop_active` flag,
+  NMI-broadcasts to all-excluding-self. The vector-2 NMI handler
+  in `traps.cpp` checks the flag BEFORE the panic-halt path: when
+  set, captures `frame->rip / rsp / rflags` into the per-CPU
+  `gdb_snapshot_*` fields and parks the live frame pointer in
+  `gdb_frozen_frame`, flips `gdb_frozen = 1`, then spins on the
+  same flag with `pause` until the BSP clears it. On release, the
+  peer iretq's back to whatever it was running.
+  `GdbServerEnterAndWait` wraps its existing wait loop in
+  `SmpStopBroadcastNmi` / `SmpStopReleaseNmi` and emits each peer's
+  snapshot to COM1 so the operator sees what every other CPU was
+  doing when the stop landed.
+- **Multi-thread GDB visibility** — peer CPUs surface in the
+  debugger as separate threads. `qfThreadInfo` / `qsThreadInfo`
+  enumerate online CPUs; `qC` reports the current selection; `T<tid>`
+  is alive-check; `Hg <tid>` switches the next `g` reply to the
+  selected CPU's snapshot (BSP reads the running CPU's
+  `g_trap_snapshot`, peers populate
+  `g_peer_snapshots[cpu_id]` from `gdb_frozen_frame` on demand).
+  Read-only for peers (`G` is gated to the running CPU); `c` / `s`
+  always operate on the running CPU's frame so a `Hg <peer>` +
+  `c` continues the kernel cleanly.
+- **VSCode integration** — `.vscode/launch.json` + `.vscode/tasks.json`
+  + `tools/debug/vscode-{start,stop}-qemu.sh`. Two configurations:
+  "Attach (live)" boots normally; "Attach (demo int3)" rebuilds
+  with `DUETOS_GDB_DEMO=ON` and pauses at the int3 in `kernel_main`.
+  Background tasks build, start QEMU, wait for `tcp::1234 ready`,
+  then VSCode attaches. PostDebugTask kills the QEMU process so
+  cleanup is automatic.
+- **Writable peer registers** — `Hg <peer_tid>` followed by `G`
+  edits the peer's snapshot, and the EnterAndWait release path
+  commits any "dirty" peer snapshots back to the peer's frozen
+  `TrapFrame` before clearing the stop-active flag, so the peer
+  iretq's with the operator's edits in place. A per-peer dirty
+  bit prevents an `Hg <other> ; Hg <peer>` round-trip from
+  silently re-reading the frame and discarding writes mid-session.
+  Risk is on the operator: writing back invalid values can wedge
+  a peer.
+- **vCont packet** — modern resume verb. `vContSupported+`
+  advertised in `qSupported`; `vCont?` enumerates `c;C;s;S` as
+  supported actions; `vCont;<action>[:<tid>]...` picks the first
+  action that applies to the running CPU (or "all"=any) and
+  applies it. Signal bytes are parsed but ignored (no kernel-mode
+  signal routing). `c`/`s` legacy handlers stay for older GDB
+  builds. Drop-in upgrade for any GDB that picks the modern
+  resume verb when both are advertised.
+- **HW-BP error reporting** — Z-packet install failures now
+  return distinct GDB error codes per `debug::BpError`:
+  `E12 = NoHwSlot` (4 DR slots exhausted),
+  `E13 = TableFull` (32 SW BP slots exhausted),
+  `E14 = InvalidAddress`, `E15 = BadKind`, `E16 = SmpUnsupported`.
+  The operator's UI now distinguishes "all 4 DR slots in use"
+  from a generic install reject — cuts the diagnosis loop on
+  the recurring hardware-watchpoint case.
+- **Software null-modem (QEMU pty backend)** — `tools/qemu/run.sh`
+  now reads `DUETOS_GDB_TRANSPORT` (tcp / pty / stdio).
+  In `pty` mode QEMU exposes COM2 as a host pty (e.g.
+  `/dev/pts/4`) instead of a TCP server, and GDB attaches via
+  `target remote /dev/pts/4`. This is the software equivalent of
+  a USB-UART + null-modem cable on real hardware: identical UART
+  driver path on the kernel side, identical `target remote
+  <device>` path on the GDB side. Lets us prove the
+  serial-device-file attach path under QEMU without buying a
+  USB-UART. Wrapped by `duetos-gdb-attach.sh --via-pty` —
+  one-shot: spawn QEMU, scrape the "char device redirected to
+  /dev/pts/N" line from QEMU's log, attach.
+- **Real-hardware (null-modem) attach** — `duetos-gdb-attach.sh
+  --com /dev/ttyUSB0` skips QEMU entirely and runs `target remote
+  /dev/ttyUSB0` against a real serial device. Same script handles
+  both — QEMU TCP, QEMU pty (software null-modem), and physical
+  USB-UART cable. `DUETOS_GDB_BAUD` overrides the default 115200.
 
 ## TrapFrame plumbing
 
@@ -191,13 +270,33 @@ Three independent channels stay out of each other's way. A
 panic dump never races with a live GDB session because they
 use different ports.
 
-## Real-hardware caveat
+## Three transports — same kernel-side stub
 
-`-serial tcp::1234` is QEMU-only. On real PCs COM2 is a
-physical serial port at 0x2F8, so attaching means a
-null-modem cable + a host-side UART. The kernel-side stub is
-unchanged; only the host-side transport is "physical UART"
-instead of "QEMU TCP server". The helper scripts assume QEMU.
+| Mode | Setup | GDB attach line |
+|---|---|---|
+| TCP (default) | `tools/qemu/run.sh` | `target remote :1234` |
+| Software null-modem | `DUETOS_GDB_TRANSPORT=pty tools/qemu/run.sh` | `target remote /dev/pts/N` |
+| Real iron | physical USB-UART on host, COM2 on board | `target remote /dev/ttyUSB0` |
+
+The kernel-side stub doesn't care: it drives the 16550 at
+0x2F8 the same way regardless of what the host does with the
+serial bytes. The pty mode is the proof-of-concept for the
+serial-device-file path under QEMU — set `DUETOS_GDB_TRANSPORT=pty`
+and QEMU emits `char device redirected to /dev/pts/N` in its
+stderr; pass that path to `target remote` and you're talking to
+the in-kernel server through a proper character device, exactly
+as you would with a USB-UART on iron.
+
+`tools/debug/duetos-gdb-attach.sh` wraps all three:
+
+| Flag | Transport | Notes |
+|---|---|---|
+| (none) | TCP | spawns QEMU; default path |
+| `--via-pty` | QEMU pty | spawns QEMU + scrapes pty path from log |
+| `--com /dev/ttyUSB0` | real iron | does NOT spawn QEMU |
+
+`DUETOS_GDB_BAUD` overrides the default 115200 baud (matches the
+kernel's COM2 init).
 
 ## Files
 
@@ -215,25 +314,11 @@ instead of "QEMU TCP server". The helper scripts assume QEMU.
 
 ## Revisit when
 
-- **Async stop (Ctrl-C)** — DEFERRED: today the stop loop is
-  purely reactive — the kernel only enters it on int3 / #DB.
-  To pause a freely-running kernel on demand, options are:
-  (a) IRQ-driven COM2 RX detecting 0x03 + scheduled int3 at
-  next safe point; (b) timer-tick poll of COM2 RX + the same.
-  Both need access to the interrupted code's TrapFrame so
-  the resulting stop reflects "where the kernel actually was"
-  rather than "inside the polling thread". Until this lands,
-  the `--demo` flag is the practical way to get a guaranteed
-  stop point.
-- **Per-CPU stop on SMP** — DEFERRED: current single-CPU model
-  freezes the calling CPU only. Multi-CPU live debug needs an
-  NMI broadcast on stop entry (mirrors `core::PanicBroadcastNmi`)
-  PLUS a release path so peers can resume on `c` / `D` (the
-  panic NMI broadcast halts forever — that's not what we want
-  here). Adds: per-CPU "frozen" state, a release IPI, and a
-  rendezvous so peer state is published in the GDB snapshot
-  alongside the BSP's.
-- **Source-line stepping**: GDB's `next` already works because
-  symbols + DWARF in the kernel ELF give it line tables; the
-  server doesn't need to do anything extra. A cleaner integration
-  with VSCode's launch.json would still be nice.
+_All scheduled items have landed. v0 is feature-complete._
+
+- **Multi-thread step on SMP** — `vCont;s:N` where N is a peer
+  would require single-stepping the peer through its frozen NMI
+  exit, not just the BSP. Deferred because there's no clear use
+  case: a stopped peer + run-to-cursor on the BSP gets you the
+  same root-cause data without the hairy "step a frozen thread"
+  semantics.

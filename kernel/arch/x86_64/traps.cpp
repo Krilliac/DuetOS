@@ -415,6 +415,16 @@ extern "C" void TrapDispatch(TrapFrame* frame)
                 LapicEoi();
             }
 
+            // Async-stop hook. After EOI (so the LAPIC is clean
+            // for the duration of any pause) and before the
+            // resched check (so the GDB user sees the kernel at
+            // the IRQ's interruption point, not after a context
+            // switch). On most IRQs this is a single INB on the
+            // COM2 LSR — when GDB sends 0x03, this routes the
+            // current trap frame into the stop loop and returns
+            // once the debugger resumes.
+            (void)::duetos::diag::gdb::PollAsyncStop(frame);
+
             // Preemption point. Only after a REAL IRQ handler ran —
             // a software-triggered stray (e.g. the boot `int 0x42`
             // probe, debug probes) must never touch the scheduler,
@@ -485,6 +495,48 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     {
         if (NmiWatchdogHandleNmi(frame->rip))
             return;
+
+        // GDB stop-rendezvous broadcast (recoverable). Distinct from
+        // the panic-broadcast halt path below: the calling CPU will
+        // clear arch::SmpGdbStopActive() once its stop loop exits,
+        // and we want to RESUME from the NMI at that point — not
+        // halt. Capture our state into the per-CPU gdb snapshot,
+        // flip the gdb_frozen flag, then spin until the flag clears.
+        if (cpu::BspInstalled() && arch::SmpGdbStopActive())
+        {
+            cpu::PerCpu* p = cpu::CurrentCpu();
+            if (p != nullptr)
+            {
+                p->gdb_snapshot_rip = frame->rip;
+                p->gdb_snapshot_rsp = frame->rsp;
+                p->gdb_snapshot_rflags = frame->rflags;
+                // Publish the live trap frame so the BSP's GDB stop
+                // loop can populate a register snapshot for this
+                // peer on demand (Hg <tid> + g). The frame lives on
+                // this CPU's kernel stack and stays valid for the
+                // entire freeze spin below.
+                p->gdb_frozen_frame = frame;
+                asm volatile("" ::: "memory");
+                p->gdb_frozen = 1;
+            }
+            // Bounded by the BSP's release: it clears the global
+            // flag the moment its stop loop exits (continue / detach
+            // / kill / step). We re-read with a `pause` to be polite
+            // to the SMT sibling. No timeout — the BSP is the only
+            // path that can release us, and if it never does, the
+            // kernel is wedged anyway and the operator will reset.
+            while (arch::SmpGdbStopActive())
+            {
+                asm volatile("pause" ::: "memory");
+            }
+            if (p != nullptr)
+            {
+                asm volatile("" ::: "memory");
+                p->gdb_frozen = 0;
+                p->gdb_frozen_frame = nullptr;
+            }
+            return; // resume the interrupted code on this peer
+        }
 
         // Cross-CPU panic broadcast (or any unclaimed NMI). Capture
         // our state into the per-CPU snapshot buffer BEFORE halting

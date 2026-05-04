@@ -189,21 +189,45 @@ MINIDUMP_FILE="${BUILD_DIR}/duetos.dmp"
 : > "${MINIDUMP_FILE}"
 echo "[run.sh] minidump sink=${MINIDUMP_FILE}" >&2
 
+# COM2 transport selector. Set DUETOS_GDB_TRANSPORT to:
+#   tcp  (default) — TCP server on DUETOS_GDB_PORT (1234).
+#   pty  — host pty whose name QEMU prints to stderr; GDB
+#          attaches via `target remote /dev/pts/N`. This is the
+#          software null-modem path — same UART code path the
+#          kernel would drive on real hardware over USB-UART.
+#   stdio — when the human log isn't on COM1 anyway. Rare;
+#           supported for completeness.
+case "${DUETOS_GDB_TRANSPORT:-tcp}" in
+    tcp)   DUETOS_GDB_TRANSPORT_QEMU="tcp::${DUETOS_GDB_PORT:-1234},server=on,wait=off" ;;
+    pty)   DUETOS_GDB_TRANSPORT_QEMU="pty" ;;
+    stdio) DUETOS_GDB_TRANSPORT_QEMU="stdio" ;;
+    *)
+        echo "[run.sh] error: unsupported DUETOS_GDB_TRANSPORT=${DUETOS_GDB_TRANSPORT}" >&2
+        exit 2
+        ;;
+esac
+echo "[run.sh] gdb transport=${DUETOS_GDB_TRANSPORT:-tcp} -> ${DUETOS_GDB_TRANSPORT_QEMU}" >&2
+
 QEMU_ARGS=(
     -machine  "q35,accel=${ACCEL}"
     -cpu      max
     -m        512M
     -display  "${DISPLAY_MODE}"
     -serial   stdio
-    # COM2 → host TCP server on ${DUETOS_GDB_PORT} (default 1234).
-    # `wait=off` so QEMU doesn't block waiting for a GDB connection
-    # at boot — the kernel's GDB stub stays silent until the
-    # debugger actually attaches. This is a separate channel from
-    # QEMU's own `-gdb` flag (which exposes QEMU's hypervisor-side
-    # debugger) — ours speaks to the in-kernel stub at the guest
-    # OS's level: attach to it and you debug the running DuetOS
-    # kernel, not QEMU's emulator state.
-    -serial   "tcp::${DUETOS_GDB_PORT:-1234},server=on,wait=off"
+    # COM2 → GDB transport. Default is a TCP server on
+    # ${DUETOS_GDB_PORT} (1234) — the canonical attach path under
+    # QEMU. Set DUETOS_GDB_TRANSPORT=pty to instead create a
+    # host-side pty (path printed in QEMU's stderr line `char
+    # device redirected to /dev/pts/N`); GDB then attaches via
+    # `target remote /dev/pts/N`. The pty mode is the software
+    # equivalent of a null-modem cable + USB-UART on real hardware
+    # — the kernel-side stub drives the same 16550 register set,
+    # so this exercises the exact same code path that an iron
+    # attach would. `wait=off` so QEMU doesn't block waiting for a
+    # GDB connection at boot — the kernel's GDB stub stays silent
+    # until the debugger actually attaches. Separate from QEMU's
+    # `-gdb` flag (which is QEMU's hypervisor-side debugger).
+    -serial   "${DUETOS_GDB_TRANSPORT_QEMU}"
     -no-reboot
     -no-shutdown
     -d        int,cpu_reset
