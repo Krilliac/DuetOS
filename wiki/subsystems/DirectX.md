@@ -1,19 +1,24 @@
-# DirectX v0 Path
+# DirectX v0.1 Path
 
 > **Audience:** PE/Win32 devs, graphics hackers
 >
-> **Execution context:** Userland (D3D DLLs) -> SYS_GDI_BITBLT -> compositor
+> **Execution context:** Userland (D3D DLLs) -> shared software rasterizer -> SYS_GDI_BITBLT -> compositor
 >
-> **Maturity:** v0 — `D3D11CreateDevice` -> `Clear` -> `Present` works; real `Draw*` returns `E_NOTIMPL`
+> **Maturity:** v0.1 — `D3D{9,11,12}CreateDevice` -> `Clear` + `Draw*` -> `Present` works on the canonical Win SDK ABI; no real GPU, no shaders, no Z-buffer.
 
 ## Overview
 
-`d3d9`, `d3d11`, `d3d12`, and `dxgi` userland DLLs in `userland/libs/`
-hand out real COM objects with vtables.
+`d3d9`, `d3d11`, `d3d12`, `dxgi`, `d2d1` userland DLLs in
+`userland/libs/` hand out real COM objects whose vtables match the
+canonical Win SDK slot layout (an off-by-N drift in earlier d3d9 /
+d3d12 revisions was fixed in v0.1).
+
 `D3D11CreateDeviceAndSwapChain`, `IDXGIFactory*::CreateSwapChain*`,
-`D3D12CreateDevice`, `Direct3DCreate9` all work.
-`ClearRenderTargetView` fills a BGRA8 back buffer in user-mode memory
-and `Present` BitBlts it to the owning HWND via `SYS_GDI_BITBLT`.
+`D3D12CreateDevice`, `Direct3DCreate9`, `D2D1CreateFactory` all work
+end-to-end. Beyond `Clear` + `Present`, v0.1 adds a shared software
+rasterizer (`userland/libs/dx_raster.h`) that lets `Draw*` /
+`DrawIndexed*` / `DrawPrimitive*` actually rasterize triangles into
+the BGRA8 back buffer.
 
 ## What Works
 
@@ -34,22 +39,51 @@ device->CreateRenderTargetView(backbuf, NULL, &rtv);
 float color[4] = {0.1f, 0.2f, 0.3f, 1.0f};
 ctx->ClearRenderTargetView(rtv, color);
 
+// v0.1 — real geometry:
+D3D11_BUFFER_DESC bd = { sizeof(verts), D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER, ... };
+D3D11_SUBRESOURCE_DATA srd = { verts };
+ID3D11Buffer* vb;
+device->CreateBuffer(&bd, &srd, &vb);
+
+D3D11_INPUT_ELEMENT_DESC ied[] = {
+    { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, ... },
+    { "COLOR",    0, DXGI_FORMAT_R8G8B8A8_UNORM,  0, 12, ... },
+};
+ID3D11InputLayout* il;
+device->CreateInputLayout(ied, 2, NULL, 0, &il);
+
+UINT stride = 16, offset = 0;
+ctx->IASetInputLayout(il);
+ctx->IASetVertexBuffers(0, 1, &vb, &stride, &offset);
+ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+ctx->OMSetRenderTargets(1, &rtv, NULL);
+D3D11_VIEWPORT vp = { 0, 0, 640, 480, 0, 1 };
+ctx->RSSetViewports(1, &vp);
+ctx->Draw(3, 0);
+
 swap->Present(0, 0);
 ```
 
-This calls down through `SYS_GDI_BITBLT` and the BGRA8 back buffer
-appears in the owning HWND via the same compositor path the native
-apps use.
+This rasterizes a coloured triangle into the back buffer and
+BitBlts it to the owning HWND via `SYS_GDI_BITBLT`.
 
 ## What Returns E_NOTIMPL
 
-- Vertex / pixel shaders
-- Real `Draw*` calls (`DrawIndexed`, `DrawInstanced`, …)
-- Fence-driven GPU sync
-- Cross-DLL DXGI <-> D3D11/12 swap-chain marriage
+- HLSL compilation (vertex / pixel shaders are tracked but their
+  bytecode is ignored — the rasterizer always uses pass-through
+  position + per-vertex colour).
+- Texture sampling (SRVs, samplers).
+- Geometry / hull / domain / compute shaders.
+- Multi-stream input (only slot 0 of `IASetVertexBuffers` honoured).
+- Cross-DLL DXGI <-> D3D11/12 swap-chain marriage (each DLL's
+  swap chain is self-contained today).
+- Fence-driven GPU sync beyond software-immediate completion.
+- Z-buffer / depth test (the rasterizer paints in submission
+  order — no `OMSetDepthStencilState` effect).
+- D3D9 fixed-function lighting / texture stages.
 
-Each of those is its own multi-slice implementation track. The DLL
-surface is the scaffolding that makes them possible.
+Each of those is its own multi-slice implementation track. The
+DLL surface is the scaffolding that makes them possible.
 
 ## Architecture
 
@@ -60,6 +94,8 @@ surface is the scaffolding that makes them possible.
         |
 [ Per-frame: ClearRenderTargetView -> back buffer fill in user memory ]
         |
+[ Per-frame: Draw / DrawIndexed -> dx_raster.h triangle fill into back buffer ]
+        |
 [ Present -> SYS_GDI_BITBLT ]
         |
 [ Kernel compositor BitBlt path ]                  kernel/drivers/video/
@@ -67,14 +103,34 @@ surface is the scaffolding that makes them possible.
 [ Framebuffer / virtio-gpu scanout ]
 ```
 
-The DLLs share infrastructure via `userland/libs/dx_shared.h` (COM
-vtable shapes, common types).
+The DLLs share infrastructure via:
 
-DirectX gap-fill landed as part of v0 also covers DirectInput
+- `userland/libs/dx_shared.h` — COM vtable shapes, syscall thunks,
+  `DxBackBuffer` (BGRA8 row-major back buffer).
+- `userland/libs/dx_raster.h` — header-only software rasterizer
+  (Pineda triangle fill with top-left rule, Bresenham line, 4x4
+  matrix math, NDC -> viewport mapping).
+
+DirectX gap-fill landed in v0 also covers DirectInput
 keyboard/mouse via `SYS_WIN_GET_KEYSTATE` / `SYS_WIN_CURSOR`,
-D2D1 `FillEllipse` / `DrawEllipse` / `DrawRectangle` / `DrawLine`,
-and DWrite `GetMetrics` (monospace approximation against the kernel
-font).
+D2D1 `FillEllipse` / `DrawEllipse` / `DrawRectangle` / `DrawLine`
+(now joined by `FillTriangles` and `Set/GetTransform`), and DWrite
+`GetMetrics` (monospace approximation against the kernel font).
+
+## Canonical ABI alignment
+
+D3D9 and D3D12 vtable slot numbers in v0.1 follow the canonical
+Win SDK `d3d9.h` / `d3d12.h` declaration order. Earlier revisions
+of these DLLs had off-by-N slot drift (e.g. D3D12's
+`ClearRenderTargetView` was at slot 23 instead of 48); a real
+Win32 PE compiled against the canonical headers would have called
+the wrong methods. The smoke tests in
+`userland/apps/d3d{9,12}_smoke/` were updated together with the
+DLLs to use canonical slot numbers, so they continue to pass and
+also validate the canonical ABI.
+
+D3D11's vtable was canonical from v0; nothing changed there beyond
+the new method additions.
 
 ## Related Pages
 

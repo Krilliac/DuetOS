@@ -125,6 +125,87 @@ void __cdecl mainCRTStartup(void)
     ((PFN_ClearRTV)ctx_vt[50])(ctx, rtv, blue);
     Out("[d3d11_smoke] Context::ClearRTV       = PASS (returned)\r\n");
 
+    /* ----- v0.1: cover the geometry path ------------------------- *
+     * slot 3 = CreateBuffer(desc, init, **out)
+     * D3D11_BUFFER_DESC: ByteWidth(0), Usage(4), BindFlags(8),
+     *   CPUAccessFlags(12), MiscFlags(16), StructureByteStride(20).
+     * D3D11_SUBRESOURCE_DATA: pSysMem(0), SysMemPitch(8), SysMemSlicePitch(12). */
+    typedef struct
+    {
+        float x, y, z;
+        DWORD argb;
+    } Vert; /* 16 B per vertex */
+    Vert verts[3] = {
+        {-0.6f, -0.6f, 0.0f, 0xFFFF0000}, /* red bottom-left  */
+        {0.0f, 0.6f, 0.0f, 0xFF00FF00},   /* green top        */
+        {0.6f, -0.6f, 0.0f, 0xFF0000FF},  /* blue bottom-right */
+    };
+    BYTE bdesc[24] = {0};
+    *(UINT*)(bdesc + 0) = sizeof(verts);
+    *(UINT*)(bdesc + 8) = 0x1; /* D3D11_BIND_VERTEX_BUFFER */
+    BYTE srd[16] = {0};
+    *(const void**)(srd + 0) = (const void*)verts;
+    void* vb = NULL;
+    typedef long (*PFN_CreateBuf)(void*, const void*, const void*, void**);
+    hr = ((PFN_CreateBuf)dev_vt[3])(dev, bdesc, srd, &vb);
+    Out("[d3d11_smoke] Device::CreateBuffer    = ");
+    Out((hr == 0 && vb) ? "PASS\r\n" : "FAIL\r\n");
+
+    /* slot 11 = CreateInputLayout(descs, n, vsCode, vsLen, **out)
+     * D3D11_INPUT_ELEMENT_DESC (32 B):
+     *   const char* SemanticName  (8)
+     *   UINT SemanticIndex        (4)
+     *   DXGI_FORMAT Format        (4)
+     *   UINT InputSlot            (4)
+     *   UINT AlignedByteOffset    (4)
+     *   D3D11_INPUT_CLASSIFICATION (4)
+     *   UINT InstanceDataStepRate (4) */
+    static const char kPos[] = "POSITION";
+    static const char kCol[] = "COLOR";
+    BYTE ied[64];
+    for (UINT i = 0; i < sizeof(ied); ++i)
+        ied[i] = 0;
+    *(const char**)(ied + 0) = kPos;
+    *(UINT*)(ied + 12) = 6; /* DXGI_FORMAT_R32G32B32_FLOAT */
+    *(UINT*)(ied + 20) = 0; /* offset 0 */
+    *(const char**)(ied + 32) = kCol;
+    *(UINT*)(ied + 44) = 87; /* DXGI_FORMAT_B8G8R8A8_UNORM */
+    *(UINT*)(ied + 52) = 12; /* offset 12 (after xyz) */
+    void* il = NULL;
+    typedef long (*PFN_CreateIL)(void*, const void*, UINT, const void*, SIZE_T, void**);
+    hr = ((PFN_CreateIL)dev_vt[11])(dev, ied, 2, NULL, 0, &il);
+    Out("[d3d11_smoke] Device::CreateInputLay  = ");
+    Out((hr == 0 && il) ? "PASS\r\n" : "FAIL\r\n");
+
+    /* slot 17 = IASetInputLayout(il) */
+    typedef void (*PFN_IASetIL)(void*, void*);
+    ((PFN_IASetIL)ctx_vt[17])(ctx, il);
+    Out("[d3d11_smoke] Context::IASetIL        = PASS (returned)\r\n");
+
+    /* slot 18 = IASetVertexBuffers(start, n, ppVB, pStride, pOffset) */
+    void* vbs[1] = {vb};
+    UINT strides[1] = {16};
+    UINT offsets[1] = {0};
+    typedef void (*PFN_IASetVB)(void*, UINT, UINT, void* const*, const UINT*, const UINT*);
+    ((PFN_IASetVB)ctx_vt[18])(ctx, 0, 1, vbs, strides, offsets);
+    Out("[d3d11_smoke] Context::IASetVB        = PASS (returned)\r\n");
+
+    /* slot 24 = IASetPrimitiveTopology — TRIANGLELIST = 4 */
+    typedef void (*PFN_IASetTopo)(void*, UINT);
+    ((PFN_IASetTopo)ctx_vt[24])(ctx, 4);
+    Out("[d3d11_smoke] Context::IASetTopo      = PASS (returned)\r\n");
+
+    /* slot 44 = RSSetViewports — full back buffer */
+    float vp[6] = {0.f, 0.f, 32.f, 32.f, 0.f, 1.f};
+    typedef void (*PFN_RSSetVP)(void*, UINT, const void*);
+    ((PFN_RSSetVP)ctx_vt[44])(ctx, 1, vp);
+    Out("[d3d11_smoke] Context::RSSetVP        = PASS (returned)\r\n");
+
+    /* slot 13 = Draw(VertexCount, StartVertex) — rasterizes the triangle */
+    typedef void (*PFN_Draw)(void*, UINT, UINT);
+    ((PFN_Draw)ctx_vt[13])(ctx, 3, 0);
+    Out("[d3d11_smoke] Context::Draw(3)        = PASS (returned)\r\n");
+
     /* slot 8 = Present */
     typedef long (*PFN_Present)(void*, UINT, UINT);
     hr = ((PFN_Present)sc_vt[8])(sc, 0, 0);
@@ -146,6 +227,8 @@ void __cdecl mainCRTStartup(void)
 
     /* Release in reverse order. slot 2 = Release. */
     typedef unsigned long (*PFN_Release)(void*);
+    ((PFN_Release)((void**)(*(void***)il))[2])(il);
+    ((PFN_Release)((void**)(*(void***)vb))[2])(vb);
     ((PFN_Release)((void**)(*(void***)rtv))[2])(rtv);
     ((PFN_Release)((void**)(*(void***)tex))[2])(tex);
     ((PFN_Release)ctx_vt[2])(ctx);

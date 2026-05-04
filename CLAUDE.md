@@ -54,7 +54,7 @@ Sync your branch with the latest upstream `main` branch. This is the **first thi
 
 **Step 2 — Read the wiki:**
 
-The single canonical documentation home is [`wiki/`](wiki/). Start at [`wiki/Home.md`](wiki/Home.md) or [`wiki/_Sidebar.md`](wiki/_Sidebar.md) for the table of contents. Pending and deferred work lives in [`wiki/reference/Roadmap.md`](wiki/reference/Roadmap.md).
+The single canonical documentation home is [`wiki/`](wiki/). Start at [`wiki/Home.md`](wiki/Home.md) or [`wiki/_Sidebar.md`](wiki/_Sidebar.md) for the table of contents. Pending and deferred work lives in [`wiki/reference/Roadmap.md`](wiki/reference/Roadmap.md). The per-DLL / per-method "what's REAL vs STUB vs MISSING" inventory lives in [`wiki/reference/Win32-Surface-Status.md`](wiki/reference/Win32-Surface-Status.md) — keep it in sync when a slice flips a row.
 
 **Step 3 — Bloat check (once the tree has real code):**
 

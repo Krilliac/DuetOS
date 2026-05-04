@@ -74,6 +74,7 @@
 - [Knowledge Base Index](reference/Knowledge-Base-Index.md)
 - [Shell Commands](reference/Shell-Commands.md)
 - [Shell Scripting](reference/Shell-Scripting.md)
+- [Win32 / DirectX Surface Status](reference/Win32-Surface-Status.md)
 
 ### Advanced
 - [Contributing](advanced/Contributing.md)
