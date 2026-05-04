@@ -771,6 +771,8 @@ u16 Ipv4HeaderChecksum(const void* buf, u64 len)
 
 bool Ipv4HeaderValid(const void* buf, u64 len)
 {
+    if (buf == nullptr)
+        return false;
     const auto* p = static_cast<const u8*>(buf);
     if (len < sizeof(Ipv4Header))
         return false;

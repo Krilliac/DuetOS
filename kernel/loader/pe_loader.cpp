@@ -178,6 +178,8 @@ const char* BoundedCString(const u8* file, u64 file_len, u64 off)
 // already bounds-checked.
 u64 RvaToFile(const u8* file, const PeHeaders& h, u32 rva)
 {
+    if (file == nullptr)
+        return ~u64(0);
     for (u16 i = 0; i < h.section_count; ++i)
     {
         const u8* sec = file + h.section_base + u64(i) * kSectionHeaderSize;
@@ -185,7 +187,11 @@ u64 RvaToFile(const u8* file, const PeHeaders& h, u32 rva)
         const u32 raw_size = LeU32(sec + kSectionHeaderSizeOfRawData);
         const u32 virt_size = LeU32(sec + kSectionHeaderVirtualSize);
         const u32 extent = raw_size > virt_size ? raw_size : virt_size;
-        if (rva >= va && rva < va + extent)
+        // Subtractive bound: a hostile section with va near UINT32_MAX
+        // and a non-zero extent would otherwise wrap `va + extent` past
+        // zero and bracket every RVA. Guard `extent > 0` because a
+        // zero-length section legitimately covers no RVAs.
+        if (rva >= va && extent > 0 && rva - va < extent)
         {
             const u32 raw_off = LeU32(sec + kSectionHeaderPointerToRawData);
             return u64(raw_off) + u64(rva - va);
@@ -204,6 +210,8 @@ struct PeDataDir
 };
 PeDataDir ReadDataDir(const u8* file, const PeHeaders& h, u64 idx)
 {
+    if (file == nullptr)
+        return {0, 0};
     const u8* opt = file + h.opt_base;
     const u32 num_dirs = LeU32(opt + kOptHeaderNumberOfRvaAndSizes);
     if (idx >= num_dirs)

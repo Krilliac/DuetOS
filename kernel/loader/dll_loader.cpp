@@ -81,7 +81,12 @@ bool ParseHeaders(const u8* file, u64 file_len, DllHeaders& out)
     if (LeU16(file) != kDosMagic)
         return false;
     const u32 e_lfanew = LeU32(file + 0x3C);
-    if (u64(e_lfanew) + 4 + kFileHeaderSize > file_len)
+    // Overflow-safe: e_lfanew is a u32, the addends are small constants,
+    // but we still phrase the bound subtractively in case file_len is
+    // smaller than the constant prefix on a truncated header.
+    if (file_len < u64(4) + kFileHeaderSize)
+        return false;
+    if (u64(e_lfanew) > file_len - 4 - kFileHeaderSize)
         return false;
     if (LeU32(file + e_lfanew) != kPeSignature)
         return false;
@@ -92,7 +97,7 @@ bool ParseHeaders(const u8* file, u64 file_len, DllHeaders& out)
     out.opt_header_size = LeU16(fh + 16);
     out.characteristics = LeU16(fh + kFileHeaderCharacteristics);
     out.opt_base = u64(e_lfanew) + 4 + kFileHeaderSize;
-    if (out.opt_base + out.opt_header_size > file_len)
+    if (out.opt_base > file_len || out.opt_header_size > file_len - out.opt_base)
         return false;
     const u8* opt = file + out.opt_base;
     if (LeU16(opt) != kOptMagicPe32Plus)
@@ -104,6 +109,15 @@ bool ParseHeaders(const u8* file, u64 file_len, DllHeaders& out)
     out.image_size = LeU32(opt + kOptHeaderSizeOfImage);
     out.sizeof_headers = LeU32(opt + kOptHeaderSizeOfHeaders);
     out.entry_rva = LeU32(opt + kOptHeaderAddressOfEntryPoint);
+    // ImageBase must be page-aligned per the PE/COFF spec; an unaligned
+    // base added to a page-aligned section RVA would map the section
+    // bytes shifted relative to their declared file offsets.
+    if ((out.image_base & u64(kPageMask)) != 0)
+        return false;
+    // sizeof_headers must fit inside the file or the per-page header
+    // copy below would walk past the buffer end.
+    if (out.sizeof_headers > file_len)
+        return false;
     // Reject DLLs whose preferred ImageBase + SizeOfImage extends out of
     // the canonical user low half. Same DoS path as the PE loader: a
     // hostile DLL would otherwise reach AddressSpaceMapUserPage with a
@@ -114,8 +128,11 @@ bool ParseHeaders(const u8* file, u64 file_len, DllHeaders& out)
     if (out.image_size > 0 && (u64(out.image_size) - 1) > (kDllUserMax - out.image_base))
         return false;
     out.section_base = out.opt_base + out.opt_header_size;
+    // Bound section_count BEFORE the multiplication so a u16 max
+    // (~65535) × kSectionHeaderSize (40) cannot overflow into a small
+    // value that re-passes the file-size check on the line below.
     const u64 sect_bytes = u64(out.section_count) * kSectionHeaderSize;
-    if (out.section_base + sect_bytes > file_len)
+    if (out.section_base > file_len || sect_bytes > file_len - out.section_base)
         return false;
     // Cross-check every section's raw extent fits in the file.
     for (u16 i = 0; i < out.section_count; ++i)
@@ -123,7 +140,10 @@ bool ParseHeaders(const u8* file, u64 file_len, DllHeaders& out)
         const u8* sec = file + out.section_base + u64(i) * kSectionHeaderSize;
         const u32 raw_off = LeU32(sec + kSectionHeaderPointerToRawData);
         const u32 raw_sz = LeU32(sec + kSectionHeaderSizeOfRawData);
-        if (u64(raw_off) + u64(raw_sz) > file_len)
+        // Subtractive bound — u32 + u32 can overflow into a small u64
+        // that passes a naive `<` check while raw_off itself is past
+        // the file end.
+        if (u64(raw_off) > file_len || u64(raw_sz) > file_len - u64(raw_off))
             return false;
     }
     return true;
@@ -131,6 +151,8 @@ bool ParseHeaders(const u8* file, u64 file_len, DllHeaders& out)
 
 u64 RvaToFile(const u8* file, const DllHeaders& h, u32 rva)
 {
+    if (file == nullptr)
+        return ~u64(0);
     for (u16 i = 0; i < h.section_count; ++i)
     {
         const u8* sec = file + h.section_base + u64(i) * kSectionHeaderSize;
@@ -138,7 +160,10 @@ u64 RvaToFile(const u8* file, const DllHeaders& h, u32 rva)
         const u32 raw_size = LeU32(sec + kSectionHeaderSizeOfRawData);
         const u32 virt_size = LeU32(sec + kSectionHeaderVirtualSize);
         const u32 extent = raw_size > virt_size ? raw_size : virt_size;
-        if (rva >= va && rva < va + extent)
+        // Phrase the upper bound subtractively so a (va == UINT32_MAX
+        // intentional) hostile DLL can't wrap `va + extent` into a
+        // small number that brackets every RVA.
+        if (rva >= va && (extent > 0 && rva - va < extent))
         {
             const u32 raw_off = LeU32(sec + kSectionHeaderPointerToRawData);
             return u64(raw_off) + u64(rva - va);
@@ -150,6 +175,8 @@ u64 RvaToFile(const u8* file, const DllHeaders& h, u32 rva)
 bool MapHeadersPage(const u8* file, u64 sizeof_headers, u64 base_va, duetos::mm::AddressSpace* as)
 {
     using namespace duetos::mm;
+    if (file == nullptr || as == nullptr)
+        return false;
     const u64 start = base_va & ~kPageMask;
     const u64 end = (base_va + sizeof_headers + kPageMask) & ~kPageMask;
     if (end <= start)
@@ -175,6 +202,8 @@ bool MapHeadersPage(const u8* file, u64 sizeof_headers, u64 base_va, duetos::mm:
 bool MapSection(const u8* file, const u8* sec, u64 base_va, duetos::mm::AddressSpace* as)
 {
     using namespace duetos::mm;
+    if (file == nullptr || sec == nullptr || as == nullptr)
+        return false;
     const u32 virt_addr = LeU32(sec + kSectionHeaderVirtualAddress);
     const u32 virt_size = LeU32(sec + kSectionHeaderVirtualSize);
     const u32 raw_size = LeU32(sec + kSectionHeaderSizeOfRawData);

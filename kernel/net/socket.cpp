@@ -405,6 +405,14 @@ i64 SocketSendDgram(u32 idx, Ipv4Address dst_ip, u16 dst_port, const u8* data, u
         KLOG_WARN_V("net/socket", "SocketSendDgram: EBADF idx", idx);
         return -9; // EBADF
     }
+    // A non-zero length with a null buffer is a caller-side bug: NetUdpSend
+    // would dereference `data` later. Reject at the API gate so the failure
+    // is attributable instead of a downstream null-deref.
+    if (len > 0 && data == nullptr)
+    {
+        KLOG_WARN_V("net/socket", "SocketSendDgram: EFAULT null data with non-zero len", len);
+        return -14; // EFAULT
+    }
     Socket& s = g_pool[idx];
     if (!s.in_use || s.type != kSocketTypeDgram)
     {
@@ -464,6 +472,11 @@ i64 SocketRecvDgram(u32 idx, u8* out, u32 cap, u32* out_len, Ipv4Address* out_sr
 {
     if (idx >= kSocketPoolCap)
         return -9;
+    // Non-zero capacity requires a real buffer. Without this guard the
+    // copy loop below writes through `out` unconditionally, faulting in
+    // ring 0 if a kernel-side caller passes a null sink.
+    if (cap > 0 && out == nullptr)
+        return -14; // EFAULT
     Socket& s = g_pool[idx];
     if (!s.in_use || s.type != kSocketTypeDgram)
         return -88;
@@ -504,6 +517,8 @@ i64 SocketSendStream(u32 idx, const u8* data, u32 len)
 {
     if (idx >= kSocketPoolCap)
         return -9;
+    if (len > 0 && data == nullptr)
+        return -14; // EFAULT — non-zero send with a null buffer
     Socket& s = g_pool[idx];
     if (!s.in_use || s.type != kSocketTypeStream)
         return -88;
@@ -530,6 +545,11 @@ i64 SocketRecvStream(u32 idx, u8* out, u32 cap)
 {
     if (idx >= kSocketPoolCap)
         return -9;
+    // NetTcpActiveReadAt unconditionally writes through `out` even on a
+    // zero-byte transfer path; refuse a null sink up-front so the
+    // failure is a clean EFAULT instead of a kernel page fault.
+    if (cap > 0 && out == nullptr)
+        return -14; // EFAULT
     Socket& s = g_pool[idx];
     if (!s.in_use || s.type != kSocketTypeStream)
         return -88;
@@ -612,6 +632,12 @@ void SocketGetPeer(u32 idx, Ipv4Address* out_ip, u16* out_port)
 bool SocketUdpDispatch(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, const void* payload, u64 len)
 {
     (void)iface_index;
+    // The IP stack delivers (payload, len) from a parsed UDP datagram.
+    // A null payload with non-zero len would index past low memory in
+    // the copy loop below; treat it as "not for us" so the caller's
+    // dispatch fan-out continues to the next bound port handler.
+    if (payload == nullptr && len > 0)
+        return false;
     arch::Cli();
     const u32 owner_idx = FindUdpBoundPort(dst_port);
     if (owner_idx == kSocketPoolCap)
