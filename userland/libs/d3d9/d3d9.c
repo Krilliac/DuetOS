@@ -956,3 +956,24 @@ __declspec(dllexport) HRESULT Direct3DCreate9Ex(UINT sdk_version, void** out)
     *out = p;
     return DX_S_OK;
 }
+
+/* Non-Win32 introspection helper for the dx_demo / smoke-test
+ * harness. D3D9 has no easy back-buffer Map (a real implementation
+ * goes through GetRenderTargetData → IDirect3DSurface9::LockRect),
+ * so this export hands the caller the raw BGRA8 pixel pointer +
+ * dimensions of the device's back buffer. v0 only — apps that need
+ * the real D3D9 read-back path should not use this. */
+__declspec(dllexport) int DuetOS_D3D9_PeekBackBuffer(void* device, void** out_pixels, UINT* out_w, UINT* out_h)
+{
+    if (!device || !out_pixels || !out_w || !out_h)
+        return 0;
+    D9DeviceImpl* d = (D9DeviceImpl*)device;
+    if (d->lpVtbl != g_d9d_vtbl)
+        return 0;
+    if (!d->bb || !d->bb->pixels)
+        return 0;
+    *out_pixels = d->bb->pixels;
+    *out_w = d->bb->width;
+    *out_h = d->bb->height;
+    return 1;
+}

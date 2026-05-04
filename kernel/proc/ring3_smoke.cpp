@@ -225,6 +225,7 @@
 #include "generated_dinput8_smoke_pe.h"
 #include "generated_dsound_smoke_pe.h"
 #include "generated_dwrite_smoke_pe.h"
+#include "generated_dx_demo_pe.h"
 #include "generated_xaudio2_smoke_pe.h"
 #include "generated_xinput_smoke_pe.h"
 #include "mm/address_space.h"
@@ -3233,6 +3234,13 @@ void StartRing3SmokeTask()
                 CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     SpawnPeFile("ring3-dwrite-smoke", fs::generated::kBinDwriteSmokeBytes, fs::generated::kBinDwriteSmokeBytes_len,
                 CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    // dx_demo: the comprehensive DirectX exercise — pre-transforms a
+    // 24-vertex cube to clip space and rasterizes it through D3D9 (FF
+    // transforms), D3D11 and D3D12 (CPU-pretransformed verts), then
+    // reads back the back-buffer pixels and asserts at least one face
+    // is visible per backend.
+    SpawnPeFile("ring3-dx-demo", fs::generated::kBinDxDemoBytes, fs::generated::kBinDxDemoBytes_len, CapSetTrusted(),
+                fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     // Windowing v0 proof: a freestanding PE that imports
     // user32!CreateWindowExA + ShowWindow + MessageBoxA and
     // calls them. The Win32 → SYS_WIN_CREATE bridge turns

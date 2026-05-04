@@ -392,6 +392,11 @@ duetos_embed_smoke_pe(dsound_smoke   kBinDsoundSmokeBytes)
 duetos_embed_smoke_pe(ddraw_smoke    kBinDdrawSmokeBytes)
 duetos_embed_smoke_pe(d2d1_smoke     kBinD2d1SmokeBytes)
 duetos_embed_smoke_pe(dwrite_smoke   kBinDwriteSmokeBytes)
+# dx_demo: comprehensive DX exercise that pre-transforms a 24-vertex
+# unit cube and rasterizes it through D3D9 (FF transforms), D3D11 and
+# D3D12 (CPU-pretransformed verts), then reads back the back-buffer
+# pixels and asserts at least one cube face is visible per backend.
+duetos_embed_smoke_pe(dx_demo        kBinDxDemoBytes)
 
 # Chrome font — Liberation Sans Regular (SIL OFL 1.1). Embedded as
 # bytes for the TTF rasterizer; the boot path hands these to
@@ -523,7 +528,7 @@ duetos_stub_dll(psapi 0x10110000 "EnumProcesses,EnumProcessModules,GetMappedFile
 
 # DirectX v0 — real COM-vtable d3d9/d3d11/d3d12/dxgi DLLs that produce working
 # Clear-and-Present pipelines via SYS_GDI_BITBLT.
-duetos_stub_dll(d3d9 0x10120000 "Direct3DCreate9,Direct3DCreate9Ex")
+duetos_stub_dll(d3d9 0x10120000 "Direct3DCreate9,Direct3DCreate9Ex,DuetOS_D3D9_PeekBackBuffer")
 duetos_stub_dll(d3d11 0x10130000 "D3D11CreateDevice,D3D11CreateDeviceAndSwapChain")
 duetos_stub_dll(d3d12 0x10140000 "D3D12CreateDevice,D3D12GetDebugInterface,D3D12SerializeRootSignature")
 duetos_stub_dll(dxgi 0x10150000 "CreateDXGIFactory,CreateDXGIFactory1,CreateDXGIFactory2,DXGIGetDebugInterface,DXGIGetDebugInterface1,DXGIDeclareAdapterRemovalSupport")
