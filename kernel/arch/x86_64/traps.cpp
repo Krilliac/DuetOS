@@ -918,12 +918,15 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     //   #UD (vector 6)  → STATUS_ILLEGAL_INSTRUCTION 0xC000001D
     //   #PF (vector 14) → STATUS_ACCESS_VIOLATION    0xC0000005
     //   else            → STATUS_BREAKPOINT          0x80000003 (fallback)
+    // Use the TrapFrame-aware overload so all 16 GPRs + segment
+    // selectors + rflags land in the dump's CONTEXT_X64 — not
+    // just rip/rsp/rbp like the soft-panic path.
     u32 ntstatus = 0x80000003;
     if (frame->vector == 6)
         ntstatus = 0xC000001D;
     else if (frame->vector == 14)
         ntstatus = 0xC0000005;
-    duetos::diag::minidump::EmitMinidump(frame->rip, frame->rsp, frame->rbp, ntstatus);
+    duetos::diag::minidump::EmitMinidumpFromTrapFrame(frame, ntstatus);
 
     SerialWrite("[panic] Halting CPU.\n");
     Halt();

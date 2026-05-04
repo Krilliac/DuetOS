@@ -37,13 +37,23 @@
  * negligible in QEMU.
  */
 
+namespace duetos::arch
+{
+struct TrapFrame;
+}
+
 namespace duetos::diag::minidump
 {
 
 inline constexpr u64 kMinidumpBufBytes = 256 * 1024;
 
-/// Build and emit a complete minidump for the current panic.
-///   - rip / rsp / rbp: the faulting context's frame.
+/// Build and emit a complete minidump for a *soft* panic — i.e.
+/// `core::Panic` / `core::PanicWithValue` where there is no
+/// TrapFrame and only the call-site RIP / RSP / RBP are known.
+/// All other GPRs are written as zero in the resulting CONTEXT
+/// block. For trap-fired dumps prefer EmitMinidumpFromTrapFrame
+/// below — it preserves rax..r15 + segment regs + rflags.
+///
 ///   - exception_code: NTSTATUS-shaped reason (e.g. STATUS_ACCESS_VIOLATION
 ///     0xC0000005 for a #PF, STATUS_ILLEGAL_INSTRUCTION 0xC000001D for
 ///     a #UD). Pass 0 for non-trap panics — the ExceptionStream
@@ -53,6 +63,17 @@ inline constexpr u64 kMinidumpBufBytes = 256 * 1024;
 /// the current task's kernel stack page and the page around RIP
 /// into MemoryListStream entries.
 void EmitMinidump(u64 rip, u64 rsp, u64 rbp, u32 exception_code);
+
+/// TrapFrame-aware minidump emit. Used by the CPU-exception
+/// dispatcher path so the resulting CONTEXT_X64 carries the full
+/// 16-GPR register file + cs / ss segment selectors + rflags
+/// the hardware pushed on entry — not just rip/rsp/rbp. With
+/// this in place a `.dmp` from a trap shows real register
+/// values to a debugger and the stackwalker can correlate
+/// register-dependent faults (bad cr2 vs garbage rdi vs stale
+/// vtable in r10, etc.) instead of seeing every non-control
+/// register as zero.
+void EmitMinidumpFromTrapFrame(const arch::TrapFrame* frame, u32 exception_code);
 
 /// Boot-time check: build a minimal-content minidump into the
 /// buffer, validate the header signature + stream directory

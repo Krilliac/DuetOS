@@ -411,6 +411,26 @@ CONTEXT_FLOATING_POINT bit is NOT set in ContextFlags — the
 kernel runs `-mno-sse` so the FP block is meaningless and
 asserting "valid" would lie to the debugger.
 
+Two emit paths cover the two kinds of dump:
+
+- `EmitMinidump(rip, rsp, rbp, code)` — the **soft-panic**
+  path (`core::Panic` / `core::PanicWithValue`). Only the
+  three caller-known registers are real; the remaining
+  GPRs go in as zero. Segment selectors are sampled live
+  with `mov %%cs, %0` etc. so they reflect the panicking
+  CPU's actual state.
+
+- `EmitMinidumpFromTrapFrame(frame, code)` — the
+  **CPU-exception** path. Reads `rax..r15`, `cs`, `ss`,
+  `rflags`, `rip`, `rsp`, `rbp` straight out of the
+  TrapFrame the dispatcher already built. `ds/es/fs/gs`
+  are sampled live (the CPU doesn't push them on
+  interrupt). With this in place a `.dmp` from a #PF or
+  #UD shows the full 16-GPR register file, so a debugger
+  can correlate register-dependent faults (bad cr2 vs
+  garbage rdi vs stale vtable in r10) without the
+  operator falling back to the text dump's GPR section.
+
 Transport:
 - Guest writes one byte at a time via `outb 0xE9, %al`.
 - QEMU's `-debugcon file:<path>` (added in `tools/qemu/run.sh`)

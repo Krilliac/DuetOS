@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/traps.h"
 #include "core/panic.h"
 #include "diag/debugcon.h"
 #include "loader/dll_loader.h"
@@ -238,26 +239,48 @@ u32 WriteString(Cursor& c, const char* s)
     return rva;
 }
 
+// Snapshot of the registers we want to put in CONTEXT_X64.
+// Populated by callers from either a soft-panic call site
+// (only rip/rsp/rbp known, rest defaulted to 0) or from a
+// CPU-exception TrapFrame (every field meaningful).
+struct ContextRegs
+{
+    u64 rax;
+    u64 rcx;
+    u64 rdx;
+    u64 rbx;
+    u64 rsp;
+    u64 rbp;
+    u64 rsi;
+    u64 rdi;
+    u64 r8;
+    u64 r9;
+    u64 r10;
+    u64 r11;
+    u64 r12;
+    u64 r13;
+    u64 r14;
+    u64 r15;
+    u64 rip;
+    u64 rflags;
+    u16 cs;
+    u16 ds;
+    u16 es;
+    u16 fs;
+    u16 gs;
+    u16 ss;
+};
+
 // Write a CONTEXT_X64 block (1232 bytes) for the faulting frame
 // and return the RVA of its start. Layout follows the public
 // Windows CONTEXT structure exactly. Only the bits we set in
-// ContextFlags carry meaningful values; everything else is
-// zero-padded.
-u32 WriteContextX64(Cursor& c, u64 rip, u64 rsp, u64 rbp)
+// ContextFlags carry meaningful values; FP / vector regions
+// stay zero (kernel runs `-mno-sse`).
+u32 WriteContextX64(Cursor& c, const ContextRegs& r)
 {
     const u32 rva = c.Tell();
     if (!c.Reserve(kContextX64Bytes))
         return rva;
-
-    // Read the live trap-frame-equivalent registers so the dump
-    // captures more than just RIP/RSP/RBP. The remaining GPRs
-    // come from the live CPU state — for a Panic() call site
-    // they're the values the panicking function had when it
-    // called Panic; for a trap they'd already be on a TrapFrame
-    // (which the trap dispatcher passes via a richer overload —
-    // see EmitMinidump's signature).
-    const u64 cr3 = arch::ReadCr3();
-    (void)cr3; // not part of CONTEXT but useful elsewhere
 
     // 0x000..0x030: P{1..6}Home (6 × u64, zero-fill).
     c.Pad(0x30);
@@ -266,38 +289,36 @@ u32 WriteContextX64(Cursor& c, u64 rip, u64 rsp, u64 rbp)
     // 0x034: MxCsr
     c.WriteU32(0);
     // 0x038..0x044: CS / DS / ES / FS / GS / SS
-    // Use kernel selectors as placeholders; debugger doesn't
-    // strictly need real values for a stack-only walk.
-    c.WriteU16(0x08); // CS
-    c.WriteU16(0x10); // DS
-    c.WriteU16(0x10); // ES
-    c.WriteU16(0x10); // FS
-    c.WriteU16(0x10); // GS
-    c.WriteU16(0x10); // SS
+    c.WriteU16(r.cs);
+    c.WriteU16(r.ds);
+    c.WriteU16(r.es);
+    c.WriteU16(r.fs);
+    c.WriteU16(r.gs);
+    c.WriteU16(r.ss);
     // 0x044: EFlags
-    c.WriteU32(static_cast<u32>(arch::ReadRflags() & 0xFFFFFFFFu));
+    c.WriteU32(static_cast<u32>(r.rflags & 0xFFFFFFFFu));
     // 0x048..0x078: Dr0..Dr7 (Dr4/Dr5 reserved → not in struct;
     // layout is Dr0,Dr1,Dr2,Dr3,Dr6,Dr7).
     for (u32 i = 0; i < 6; ++i)
         c.WriteU64(0);
     // 0x078..0x100: Rax, Rcx, Rdx, Rbx, Rsp, Rbp, Rsi, Rdi, R8..R15, Rip
-    c.WriteU64(0);   // Rax
-    c.WriteU64(0);   // Rcx
-    c.WriteU64(0);   // Rdx
-    c.WriteU64(0);   // Rbx
-    c.WriteU64(rsp); // Rsp
-    c.WriteU64(rbp); // Rbp
-    c.WriteU64(0);   // Rsi
-    c.WriteU64(0);   // Rdi
-    c.WriteU64(0);   // R8
-    c.WriteU64(0);   // R9
-    c.WriteU64(0);   // R10
-    c.WriteU64(0);   // R11
-    c.WriteU64(0);   // R12
-    c.WriteU64(0);   // R13
-    c.WriteU64(0);   // R14
-    c.WriteU64(0);   // R15
-    c.WriteU64(rip); // Rip
+    c.WriteU64(r.rax);
+    c.WriteU64(r.rcx);
+    c.WriteU64(r.rdx);
+    c.WriteU64(r.rbx);
+    c.WriteU64(r.rsp);
+    c.WriteU64(r.rbp);
+    c.WriteU64(r.rsi);
+    c.WriteU64(r.rdi);
+    c.WriteU64(r.r8);
+    c.WriteU64(r.r9);
+    c.WriteU64(r.r10);
+    c.WriteU64(r.r11);
+    c.WriteU64(r.r12);
+    c.WriteU64(r.r13);
+    c.WriteU64(r.r14);
+    c.WriteU64(r.r15);
+    c.WriteU64(r.rip);
     // 0x100..0x300: XMM_SAVE_AREA32 (FltSave) — zero-fill;
     // CONTEXT_FLOATING_POINT not set, so debugger ignores.
     c.Pad(0x200);
@@ -461,6 +482,79 @@ u32 WriteMemoryListStream(Cursor& c, const MemoryEntry* mems, u32 count)
 } // namespace
 
 // Build the dump into the static buffer without egressing it.
+// Build a ContextRegs from a soft-panic call site: only rip/rsp/rbp
+// are caller-known. Segment selectors are read live from the CPU
+// (we're still on the same CPU as the panicking code, segments
+// haven't moved). rflags is the live value too. All other GPRs
+// stay zero — for the soft-panic path the calling function's
+// locals would have to be reconstructed from the rbp chain anyway.
+ContextRegs RegsFromSoftPanic(u64 rip, u64 rsp, u64 rbp)
+{
+    ContextRegs r{};
+    r.rip = rip;
+    r.rsp = rsp;
+    r.rbp = rbp;
+    r.rflags = arch::ReadRflags();
+    // Read live segment selectors so the dump matches the actual
+    // CPU state at panic time, not a guess.
+    u16 cs = 0, ds = 0, es = 0, fs = 0, gs = 0, ss = 0;
+    asm volatile("mov %%cs, %0" : "=r"(cs));
+    asm volatile("mov %%ds, %0" : "=r"(ds));
+    asm volatile("mov %%es, %0" : "=r"(es));
+    asm volatile("mov %%fs, %0" : "=r"(fs));
+    asm volatile("mov %%gs, %0" : "=r"(gs));
+    asm volatile("mov %%ss, %0" : "=r"(ss));
+    r.cs = cs;
+    r.ds = ds;
+    r.es = es;
+    r.fs = fs;
+    r.gs = gs;
+    r.ss = ss;
+    return r;
+}
+
+// Build a ContextRegs from a CPU-exception TrapFrame. Every GPR
+// the hardware/exceptions.S preserved is real — `rax..r15` from
+// the manual save sequence, `rip / cs / rflags / rsp / ss` from
+// the CPU's own iretq frame.
+ContextRegs RegsFromTrapFrame(const arch::TrapFrame* f)
+{
+    ContextRegs r{};
+    r.rax = f->rax;
+    r.rcx = f->rcx;
+    r.rdx = f->rdx;
+    r.rbx = f->rbx;
+    r.rsp = f->rsp;
+    r.rbp = f->rbp;
+    r.rsi = f->rsi;
+    r.rdi = f->rdi;
+    r.r8 = f->r8;
+    r.r9 = f->r9;
+    r.r10 = f->r10;
+    r.r11 = f->r11;
+    r.r12 = f->r12;
+    r.r13 = f->r13;
+    r.r14 = f->r14;
+    r.r15 = f->r15;
+    r.rip = f->rip;
+    r.rflags = f->rflags;
+    r.cs = static_cast<u16>(f->cs);
+    r.ss = static_cast<u16>(f->ss);
+    // Data segments aren't on the trap frame (they're not pushed
+    // by the CPU on an interrupt). Read them live — we're still
+    // on the kernel's data-segment configuration.
+    u16 ds = 0, es = 0, fs = 0, gs = 0;
+    asm volatile("mov %%ds, %0" : "=r"(ds));
+    asm volatile("mov %%es, %0" : "=r"(es));
+    asm volatile("mov %%fs, %0" : "=r"(fs));
+    asm volatile("mov %%gs, %0" : "=r"(gs));
+    r.ds = ds;
+    r.es = es;
+    r.fs = fs;
+    r.gs = gs;
+    return r;
+}
+
 // Split out from EmitMinidump so the self-test can validate the
 // shape without polluting the host's debugcon file (every byte
 // pushed via outb 0xE9 is appended to that file by QEMU — an
@@ -468,8 +562,10 @@ u32 WriteMemoryListStream(Cursor& c, const MemoryEntry* mems, u32 count)
 // panic to the host extractor).
 namespace
 {
-u64 BuildMinidumpInto(u64 rip, u64 rsp, u64 rbp, u32 exception_code)
+u64 BuildMinidumpInto(const ContextRegs& regs, u32 exception_code)
 {
+    const u64 rip = regs.rip;
+    const u64 rsp = regs.rsp;
     Cursor c;
     c.Reset();
 
@@ -508,7 +604,7 @@ u64 BuildMinidumpInto(u64 rip, u64 rsp, u64 rbp, u32 exception_code)
     // ---------- Phase 3: out-of-line blobs ----------
 
     // CONTEXT for the faulting thread.
-    const u32 context_rva = WriteContextX64(c, rip, rsp, rbp);
+    const u32 context_rva = WriteContextX64(c, regs);
 
     // Stack capture: ~16 KiB starting at rsp, snapped to page.
     // SafeReadInto handles unmapped pages.
@@ -628,10 +724,31 @@ u64 BuildMinidumpInto(u64 rip, u64 rsp, u64 rbp, u32 exception_code)
 
 void EmitMinidump(u64 rip, u64 rsp, u64 rbp, u32 exception_code)
 {
-    const u64 bytes = BuildMinidumpInto(rip, rsp, rbp, exception_code);
+    const ContextRegs regs = RegsFromSoftPanic(rip, rsp, rbp);
+    const u64 bytes = BuildMinidumpInto(regs, exception_code);
     arch::SerialWrite("[minidump] emitting ");
     arch::SerialWriteHex(bytes);
-    arch::SerialWrite(" bytes via debugcon (port 0xE9)\n");
+    arch::SerialWrite(" bytes via debugcon (port 0xE9) [soft panic]\n");
+    debugcon::Write(g_buf, bytes);
+    arch::SerialWrite("[minidump] done\n");
+}
+
+void EmitMinidumpFromTrapFrame(const arch::TrapFrame* frame, u32 exception_code)
+{
+    if (frame == nullptr)
+    {
+        // Defensive: no frame to capture from. Fall back to a
+        // soft-panic-shaped dump anchored at the panic call
+        // site so the operator still gets *some* artefact.
+        EmitMinidump(reinterpret_cast<u64>(__builtin_return_address(0)), arch::ReadRsp(), arch::ReadRbp(),
+                     exception_code);
+        return;
+    }
+    const ContextRegs regs = RegsFromTrapFrame(frame);
+    const u64 bytes = BuildMinidumpInto(regs, exception_code);
+    arch::SerialWrite("[minidump] emitting ");
+    arch::SerialWriteHex(bytes);
+    arch::SerialWrite(" bytes via debugcon (port 0xE9) [trap frame]\n");
     debugcon::Write(g_buf, bytes);
     arch::SerialWrite("[minidump] done\n");
 }
@@ -639,11 +756,20 @@ void EmitMinidump(u64 rip, u64 rsp, u64 rbp, u32 exception_code)
 void MinidumpSelfTest()
 {
     // Build into the buffer WITHOUT egressing — host-side
-    // debugcon file stays empty for clean boots.
-    (void)BuildMinidumpInto(/*rip=*/0xFFFFFFFF80100000ULL,
-                            /*rsp=*/0xFFFFFFFFE0001000ULL,
-                            /*rbp=*/0xFFFFFFFFE0001008ULL,
-                            /*exception_code=*/0xC0000005);
+    // debugcon file stays empty for clean boots. Synthetic
+    // ContextRegs covers every CONTEXT field so the writer's
+    // full GPR + segment plumbing is exercised at boot.
+    ContextRegs synth{};
+    synth.rip = 0xFFFFFFFF80100000ULL;
+    synth.rsp = 0xFFFFFFFFE0001000ULL;
+    synth.rbp = 0xFFFFFFFFE0001008ULL;
+    synth.rax = 0xDEADBEEFCAFEBABEULL;
+    synth.rdi = 0x1111111111111111ULL;
+    synth.rflags = 0x202;
+    synth.cs = 0x08;
+    synth.ds = 0x10;
+    synth.ss = 0x10;
+    (void)BuildMinidumpInto(synth, /*exception_code=*/0xC0000005);
 
     // Verify the magic bytes at offset 0..3.
     const u32 sig = static_cast<u32>(g_buf[0]) | (static_cast<u32>(g_buf[1]) << 8) |
