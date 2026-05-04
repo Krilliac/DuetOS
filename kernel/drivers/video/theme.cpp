@@ -7,6 +7,7 @@
 #include "drivers/video/menu.h"
 #include "drivers/video/netpanel.h"
 #include "drivers/video/taskbar.h"
+#include "drivers/video/tray_flyout.h"
 #include "drivers/video/widget.h"
 
 namespace duetos::drivers::video
@@ -731,7 +732,12 @@ const Theme* const kThemes[static_cast<u32>(ThemeId::kCount)] = {
 // re-chrome every live window in one pass.
 // ---------------------------------------------------------------
 
-constinit ThemeId g_current = ThemeId::Classic;
+// Duet is the default — the redesigned palette is now the primary
+// face of DuetOS. Classic / Slate10 / Amber / DuetLight / the accent
+// variants stay reachable through Ctrl+Alt+Y or the kernel cmdline,
+// but a fresh boot lands in the dual-accent slate world the
+// prototype calls home.
+constinit ThemeId g_current = ThemeId::Duet;
 constinit WindowHandle g_role_window[static_cast<u32>(ThemeRole::kCount)] = {
     kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid,
     kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid,
@@ -851,6 +857,33 @@ void ThemeApplyToAll()
     // start menu, with a button colour that matches the title-bar
     // accent (the RENEW button reads as a callable affordance).
     NetPanelSetColours(t.taskbar_tab_inactive, t.taskbar_border, t.taskbar_accent, t.taskbar_fg, t.taskbar_accent);
+
+    // Tray flyout (chevron-up popup): shares the menu / calendar
+    // body palette so all popups feel like siblings. Both
+    // accents (primary + secondary) flow through so the row
+    // values can highlight in the appropriate hue (online =
+    // primary teal, dhcp pending = secondary amber, etc.).
+    {
+        // The Duet-family theme stores its secondary accent as
+        // a fixed amber across all variants — pick it up from the
+        // taskbar_accent when the variant isn't a Duet (so
+        // non-Duet themes get a sensible fallback that doesn't
+        // clash with their primary). On Duet-family palettes the
+        // secondary accent is always 0x00F5B73A; we encode that
+        // as a constant here rather than threading another field
+        // through Theme.
+        const ThemeId tid = ThemeCurrentId();
+        const bool is_duet_family = tid == ThemeId::Duet || tid == ThemeId::DuetLight || tid == ThemeId::DuetBlue ||
+                                    tid == ThemeId::DuetViolet || tid == ThemeId::DuetGreen ||
+                                    tid == ThemeId::DuetClassic;
+        const u32 accent_2 = is_duet_family ? 0x00F5B73A : t.taskbar_accent;
+        TrayFlyoutSetColours(t.taskbar_tab_inactive, t.taskbar_border, t.taskbar_fg,
+                             // Dim ink — derived from `taskbar_fg` by mixing toward
+                             // the chrome bg. Same approximation the prototype uses
+                             // for `--ink-3`.
+                             ((t.taskbar_fg >> 1) & 0x007F7F7F) + ((t.taskbar_bg >> 1) & 0x007F7F7F), t.taskbar_accent,
+                             accent_2);
+    }
 }
 
 void ThemeSelfTest()
