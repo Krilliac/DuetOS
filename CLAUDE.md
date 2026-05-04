@@ -353,6 +353,22 @@ A system that exists but is never initialized, called, or connected is **worse t
 
 If you discover a subsystem that is built but not wired in: **either wire it in immediately, or delete it**.
 
+## Diagnostic Logging — Keep It, Gate It, Probe It
+
+When diagnosing a bug you almost always end up adding fresh log lines to localise the failure. **Don't strip those out once the bug is fixed.** They are exactly the lines a future debugger (you, in three months) will want when the next regression appears in the same area. The discipline is:
+
+1. **Keep the diagnostic.** If a log line was useful enough to add during the fix, it's useful enough to leave in. Deleting it just guarantees the next session re-derives it from scratch.
+2. **Gate it appropriately.** The diagnostic must respect the kernel's log-level system so it doesn't flood the serial console in production:
+   - Use `KLOG_WARN(subsys, msg)` for the failure summary line — surfaces in any sensible log level, gets a `[W]` colour, respects `loglevel` demotion in release builds.
+   - Use `KLOG_DEBUG_V(subsys, msg, value)` / `KLOG_DEBUG_S(subsys, msg, label, str)` for the verbose detail (observed values, hex dumps, sub-flag breakdowns). Debug-level lines are compiled out under `DUETOS_KLOG_COMPILE_FLOOR > 0` and runtime-suppressed under release defaults — so the heavy detail only shows when an operator explicitly turns it on.
+   - Avoid raw `arch::SerialWrite(...)` for new diagnostic output. Raw serial bypasses log levels and shows up forever, on every boot, in every flavour. Reserve it for the boot bring-up path that runs before klog is online and for the structural sentinels (`[smoke] profile=… complete`) that CI greps for.
+3. **Hook the GDB / breakpoint subsystem on the failure path.** The kernel's `KBP_PROBE(...)` / `KBP_PROBE_V(...)` macros (see `kernel/debug/probes.h`) let an attached GDB break the moment a regression first surfaces. When you add a new self-test or assert, fire a probe in its failure leg:
+   - For one-off self-test failures, fire `kBootSelftestFail` with a value that encodes which sub-check tripped.
+   - For new categories of failure, extend `ProbeId` + `kProbeTable` (one row each in `probes.h` + `probes.cpp`) and pick `ProbeArm::ArmedLog` so a clean run logs nothing but a regression run shows up immediately.
+   - Pair the probe with the live GDB stub (`DUETOS_GDB_SERVER=ON`, attach via `tools/debug/duetos-gdb-attach.sh`) — set `b duetos::debug::ProbeFire` and the debugger halts at the exact frame the regression appeared in.
+
+The contract: a clean boot stays quiet at default log levels; a regression boot leaves a WARN sentinel + a probe fire + DEBUG-gated detail behind it, all without an operator having to re-add print statements. If the diagnostic you're considering doesn't earn its place under those rules (one-shot value, not actionable, or already implied by an existing log), don't add it — but if it does, gate it and leave it in.
+
 ## Persistence Context Database
 
 The `.claude/` directory is persistent AI memory — a knowledge base that Claude reads and writes across sessions. It captures issue fixes, effective workflows, optimizations, codebase observations, and project decisions. See `.claude/README.md` for entry format, rules, and directory structure.

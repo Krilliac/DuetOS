@@ -55,19 +55,21 @@ namespace duetos::win32
 // in separate address spaces.
 inline constexpr u64 kWin32HeapVa = 0x50000000ULL;
 
-// Pages mapped at process load. 16 × 4 KiB = 64 KiB total
-// heap. Small but enough for everything hello_winapi and its
-// kin want: a few KiB of allocations, no long-running growth.
+// Pages mapped at process load. 64 × 4 KiB = 256 KiB total
+// heap. Was 16 pages (64 KiB) for the hello_winapi / windowed_hello
+// generation; bumped 4× to 64 in 2026-05-04 because NASM 2.16.03
+// prints "critical: nasm: out of memory!" and exits with rc=2
+// when its internal pool allocator can't fit. 256 KiB is enough
+// for the no-args usage path of NASM and 7-Zip without exceeding
+// the kFrameBudgetTrusted = 1024 frame ceiling once a 1.29 MiB
+// PE's section + DLL preload pages are also accounted for.
 //
-// IMPORTANT: AddressSpace::region_count is u8-typed (max 255
-// regions), and a typical Win32 PE already burns ~200 region
-// slots on PE image + DLL preload + stack + TEB. Bumping this
-// past ~32 will overflow u8 and corrupt the region table —
-// see kernel/mm/address_space.h. If real DirectX surfaces
-// (>64 KiB swap chains, RTV textures) need more heap, the fix
-// is to widen region_count (slice unblocked elsewhere) and
-// to revisit per-process budgeting; not to crank this constant.
-inline constexpr u64 kWin32HeapPages = 16;
+// HISTORICAL: this number used to be capped by the u8-typed
+// region_count, which silently wrapped past 255 mappings and
+// overwrote earlier rows in the AS region table. region_count
+// was widened to u16 in 2026-05-04 (the slice that landed
+// 7za.exe under DuetOS), removing the implicit cap.
+inline constexpr u64 kWin32HeapPages = 64;
 
 /// Stand up the per-process heap: allocate kWin32HeapPages
 /// frames, map them RW+NX at kWin32HeapVa, seed the free list

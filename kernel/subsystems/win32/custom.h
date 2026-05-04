@@ -354,12 +354,14 @@ void InputReplayPush(core::Process* owner_proc, u32 hwnd_biased, u32 message, u6
 // sections normally.
 bool StrictRwxRejectsSection(core::Process* proc, u32 characteristics);
 
-// ---------- Crash-dump hooks ----------
+// ---------- Exit-diagnostics dump ----------
 //
-// Called by the panic / exit path when a process is dying
-// abnormally. Emits the flight recorder + handle ledger to the
-// serial log so a post-mortem reader sees full context.
-void DumpOnAbnormalExit(core::Process* proc);
+// Called by ProcessRelease for every Win32 PE exit (success or
+// abnormal). Emits the flight recorder + handle ledger to the
+// serial log so a post-mortem reader sees full context — and so
+// successful runs leave the same diagnostic shape as failures,
+// which makes "what changed?" diffs easy.
+void DumpExitDiagnostics(core::Process* proc);
 
 // ---------- Syscall handler ----------
 //

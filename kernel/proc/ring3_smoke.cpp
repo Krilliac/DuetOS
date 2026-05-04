@@ -2522,6 +2522,18 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     const PeLoadResult r = PeLoad(pe_bytes, pe_len, as, name, aslr_delta, dll_array, preloaded_count);
     if (!r.ok)
     {
+        // PeLoad rejected the image. Without surfacing this, a
+        // failing spawn vanishes silently — there's no log line
+        // between "starting spawn" and the next process's banner.
+        // KLOG_WARN so it always shows in any sensible loglevel
+        // and respects production demotion; the verbose detail
+        // (entry/stack/image_base) goes to KLOG_DEBUG so it only
+        // surfaces in debug builds when an operator's hunting.
+        KLOG_WARN("ring3", "PeLoad failed");
+        KLOG_DEBUG_S("ring3", "  failing image", "name", name);
+        KLOG_DEBUG_V("ring3", "  observed entry_va", r.entry_va);
+        KLOG_DEBUG_V("ring3", "  observed stack_va", r.stack_va);
+        KLOG_DEBUG_V("ring3", "  observed image_base", r.image_base);
         AddressSpaceRelease(as);
         return 0;
     }

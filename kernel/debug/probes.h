@@ -52,6 +52,9 @@ enum class ProbeId : u8
     kHeapAllocFail,    // KMalloc returned nullptr (kheap pool exhausted)
     kPhysAllocFail,    // AllocateFrame returned kNullFrame (physical OOM)
     kSmpApOnline,      // a secondary CPU finished bring-up; boot diagnostic
+    kBootSelftestFail, // a boot-time self-test reported FAIL; armed-log so
+                       // GDB can `b duetos::debug::ProbeFire` and break
+                       // immediately when a smoke regression first appears
 
     // Medium-frequency events — disarmed by default, the
     // operator arms these when hunting a specific issue.

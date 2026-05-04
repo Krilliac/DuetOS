@@ -366,13 +366,20 @@ constexpr u32 kOffGdiDrawTextW = 0x1019; // render/drivers — 25 bytes
 // System palette entry points.
 constexpr u32 kOffGetSysColor = 0x1032;      // render/drivers — 11 bytes
 constexpr u32 kOffGetSysColorBrush = 0x103D; // render/drivers — 11 bytes
+// MSVCRT stdio thunks (real SYS_WRITE to fd=1).
+constexpr u32 kOffFputs = 0x1048;  // 34 bytes (also msvcrt!puts via alias)
+constexpr u32 kOffFwrite = 0x106A; // 28 bytes
+constexpr u32 kOffFputc = 0x1086;  // 21 bytes (returns c, not 0 — see comment)
+// MSVCRT CRT-startup thunks that read from proc-env page.
+constexpr u32 kOffGetMainArgs = 0x109B; // 36 bytes — populates argc/argv/env
+constexpr u32 kOffPErrno = 0x10BF;      // 6 bytes — returns ptr to errno scratch
 
 constexpr u8 kThunksBytes[] = {
 #include "subsystems/win32/thunks_bytecode.inc"
 };
 
 static_assert(sizeof(kThunksBytes) <= 8192, "Win32 thunks page fits in two 4 KiB pages");
-static_assert(sizeof(kThunksBytes) == 0x1048, "thunk layout drifted; update kOff* constants");
+static_assert(sizeof(kThunksBytes) == 0x10C5, "thunk layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The thunk
 // bytes encode 0x65000000 and 0x65000008 directly; if proc_env.h
@@ -595,9 +602,110 @@ bool Win32ThunksLookupDataCatchAll(u64* out_va)
     return true;
 }
 
+bool Win32ThunksLookupDataNamed(const char* func, u64* out_va)
+{
+    // Per-name overrides for the data-import path. The catch-all
+    // points every unrecognised data import at the zero pad — fine
+    // for "unused" globals where the program only reads zero, but
+    // wrong for the well-known CRT data globals that the runtime
+    // actually consumes. For those we return a slot inside the
+    // proc-env page that's pre-populated with sensible content.
+    //
+    // The IAT slot ends up holding the returned VA. The CRT then
+    // does `value = *iat_slot` to read the global's value, and
+    // (for char**/etc.) walks the resulting pointer chain.
+    //
+    // Without these, busybox-w32's CRT walks `__argv` (= NULL)
+    // and faults at cr2=1 trying to probe argv[0]'s second char
+    // for a Windows drive-letter prefix.
+    if (out_va == nullptr || func == nullptr || func[0] == '\0')
+        return false;
+
+    auto strEq = [](const char* a, const char* b)
+    {
+        while (*a != '\0' && *b != '\0' && *a == *b)
+        {
+            ++a;
+            ++b;
+        }
+        return *a == '\0' && *b == '\0';
+    };
+
+    // __argv → proc_env.argv_ptr slot. CRT does
+    //   `argv = *(char***)&__argv;` which loads the value of the
+    //   __argv global. The value at proc_env+0x08 is the user-VA
+    //   of the argv array (proc_env+0x20).
+    if (strEq(func, "__argv") || strEq(func, "_argv"))
+    {
+        *out_va = kProcEnvVa + kProcEnvArgvPtrOff;
+        return true;
+    }
+    // __argc lives in proc_env at offset 0 as a u32. CRT reads
+    //   it as `argc = *(int*)&__argc;`.
+    if (strEq(func, "__argc") || strEq(func, "_argc"))
+    {
+        *out_va = kProcEnvVa + kProcEnvArgcOff;
+        return true;
+    }
+    // _acmdln / _wcmdln: pointer slots holding the command-line
+    // string in narrow / wide form. proc-env populates both at
+    // offset 0x380 / 0x300.
+    if (strEq(func, "_acmdln"))
+    {
+        *out_va = kProcEnvVa + kProcEnvCmdlineAOff;
+        return true;
+    }
+    if (strEq(func, "_wcmdln"))
+    {
+        *out_va = kProcEnvVa + kProcEnvCmdlineWOff;
+        return true;
+    }
+    return false;
+}
+
 bool IsLikelyDataImport(const char* func)
 {
-    if (func == nullptr || func[0] != '?')
+    if (func == nullptr || func[0] == '\0')
+        return false;
+
+    // Plain-C data exports from the MSVC CRT (msvcrt.dll /
+    // ucrtbase.dll). Modern MSVC code links against the
+    // accessor-function form (e.g. __p__commode), but older
+    // MSVC-built PEs still import the underlying global by name
+    // and the CRT init code stores process-mode flags directly
+    // into them via `mov %eax,(%rcx)`. Surfacing them as data
+    // makes the resolver point the IAT slot at the proc-env
+    // landing pad (8-byte zero-initialised, writable) instead
+    // of at a code thunk that faults on store.
+    //
+    // The list is short on purpose: only globals that real-world
+    // PEs actually import. Add new names as the gap inventory
+    // surfaces them — see .claude/knowledge/live-test-fixes-...
+    // for the workflow.
+    static const char* const kCrtDataNames[] = {
+        "_commode",   "_fmode",      "_environ",   "_wenviron",      "__argc",          "__argv",        "__wargv",
+        "_acmdln",    "_wcmdln",     "_pgmptr",    "_wpgmptr",       "__mb_cur_max",    "___mb_cur_max", "_iob",
+        "__iob_func", "_osplatform", "_osver",     "_winver",        "_winmajor",       "_winminor",     "_aexit_rtn",
+        "__progname", "_HUGE",       "__threadid", "__threadhandle", "__sys_errlist",   "__sys_nerr",    "_timezone",
+        "_daylight",  "_tzname",     "__timezone", "__daylight",     "__tzname",        "__initenv",     "_winitenv",
+        "_amblksiz",  "__badioinfo", "__pioinfo",  "__lc_codepage",  "__lc_collate_cp",
+    };
+    for (const char* name : kCrtDataNames)
+    {
+        const char* a = func;
+        const char* b = name;
+        while (*a != '\0' && *b != '\0' && *a == *b)
+        {
+            ++a;
+            ++b;
+        }
+        if (*a == '\0' && *b == '\0')
+        {
+            return true;
+        }
+    }
+
+    if (func[0] != '?')
         return false;
     // MSVC mangling for a static/global data symbol is
     // ?<name>@[<scope>@...]@@3<type-spec>[<type-modifiers>]

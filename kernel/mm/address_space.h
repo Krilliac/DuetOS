@@ -125,7 +125,16 @@ struct AddressSpace
     // fixed-size array capacity); the AS's frame_budget caps usage
     // within that array to an even smaller number for untrusted
     // processes. Destroy walks the first `region_count` entries.
-    u8 region_count;
+    //
+    // u16 (not u8): kMaxUserVmRegionsPerAs is 1024 — well past
+    // 255. A 1.29 MiB PE like 7za.exe needs ~325 page mappings
+    // for sections alone, plus per-process stack/TEB/heap/preloaded
+    // DLLs. With a u8 counter the increment wrapped past 255 and
+    // silently overwrote earlier rows; the page tables stayed
+    // mapped, but AddressSpaceLookupUserFrame's linear scan over
+    // `regions[0..region_count)` lost the early entries (.rdata,
+    // IAT) and ResolveImports failed with "IAT slot VA not mapped".
+    u16 region_count;
     AddressSpaceUserRegion regions[kMaxUserVmRegionsPerAs];
 
     // RwLock for concurrent access to `regions[]` + `region_count`

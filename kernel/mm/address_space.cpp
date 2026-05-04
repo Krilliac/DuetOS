@@ -399,8 +399,8 @@ bool AddressSpaceUnmapUserPage(AddressSpace* as, u64 virt)
     // Find the region. Linear scan over region_count — typical
     // region_count is small (≤128), and munmap is infrequent; this
     // stays cheaper than building an index.
-    u8 found = u8(-1);
-    for (u8 i = 0; i < as->region_count; ++i)
+    u16 found = u16(-1);
+    for (u16 i = 0; i < as->region_count; ++i)
     {
         if (as->regions[i].vaddr == virt)
         {
@@ -408,7 +408,7 @@ bool AddressSpaceUnmapUserPage(AddressSpace* as, u64 virt)
             break;
         }
     }
-    if (found == u8(-1))
+    if (found == u16(-1))
     {
         return false;
     }
@@ -436,7 +436,7 @@ bool AddressSpaceUnmapUserPage(AddressSpace* as, u64 virt)
     // Compact the region table — swap the dying slot with the last
     // in-use slot. Order doesn't matter; destroy walks `region_count`
     // entries.
-    const u8 last = u8(as->region_count - 1);
+    const u16 last = u16(as->region_count - 1);
     if (found != last)
     {
         as->regions[found] = as->regions[last];
@@ -522,7 +522,7 @@ AddressSpace* AddressSpaceFork(const AddressSpace* parent)
     AddressSpace* child = AddressSpaceCreate(parent->frame_budget);
     if (child == nullptr)
         return nullptr;
-    for (u8 i = 0; i < parent->region_count; ++i)
+    for (u16 i = 0; i < parent->region_count; ++i)
     {
         const u64 va = parent->regions[i].vaddr;
         const PhysAddr parent_frame = parent->regions[i].frame;
@@ -637,7 +637,7 @@ PhysAddr AddressSpaceLookupUserFrame(const AddressSpace* as, u64 virt)
     if (as == nullptr)
         return kNullFrame;
     const u64 page_va = virt & ~(kPageSize - 1);
-    for (u8 i = 0; i < as->region_count; ++i)
+    for (u16 i = 0; i < as->region_count; ++i)
     {
         if (as->regions[i].vaddr == page_va)
             return as->regions[i].frame;
@@ -701,7 +701,7 @@ void AddressSpaceRelease(AddressSpace* as)
     // about to free the entire table tree), but draining the region
     // table makes the freed-frame ledger easy to audit in the
     // FrameAllocator stats: regions.count + page-table frames freed.
-    for (u8 i = 0; i < as->region_count; ++i)
+    for (u16 i = 0; i < as->region_count; ++i)
     {
         FreeFrame(as->regions[i].frame);
     }

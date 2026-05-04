@@ -1,13 +1,11 @@
-    // console I/O
-    {"kernel32.dll", "ExitProcess", kOffExitProcess},
-    {"kernel32.dll", "GetStdHandle", kOffGetStdHandle},
+// console I/O
+{"kernel32.dll", "ExitProcess", kOffExitProcess}, {"kernel32.dll", "GetStdHandle", kOffGetStdHandle},
     // WriteFile and WriteConsoleA share the same stub — both
     // take the same 5-arg shape and we ignore the handle +
     // trailing arg anyway. Aliasing keeps the stubs page
     // small and means any improvement (clamping, error
     // codes, real handle dispatch) lands in both at once.
-    {"kernel32.dll", "WriteFile", kOffWriteFile},
-    {"kernel32.dll", "WriteConsoleA", kOffWriteFile},
+    {"kernel32.dll", "WriteFile", kOffWriteFile}, {"kernel32.dll", "WriteConsoleA", kOffWriteFile},
     // process/thread lifecycle
     {"kernel32.dll", "GetCurrentProcess", kOffGetCurrentProcess},
     {"kernel32.dll", "GetCurrentThread", kOffGetCurrentThread},
@@ -15,8 +13,7 @@
     {"kernel32.dll", "GetCurrentThreadId", kOffGetCurrentThreadId},
     {"kernel32.dll", "TerminateProcess", kOffTerminateProcess},
     // last-error slot
-    {"kernel32.dll", "GetLastError", kOffGetLastError},
-    {"kernel32.dll", "SetLastError", kOffSetLastError},
+    {"kernel32.dll", "GetLastError", kOffGetLastError}, {"kernel32.dll", "SetLastError", kOffSetLastError},
     // critical sections (v0 no-ops)
     {"kernel32.dll", "InitializeCriticalSection", kOffInitCritSec},
     {"kernel32.dll", "InitializeCriticalSectionEx", kOffInitCritSec},
@@ -32,8 +29,7 @@
     {"vcruntime140.dll", "memmove", kOffMemmove},
     // memcpy is safe to alias to memmove — memmove is a strict
     // superset (handles overlap), same return value contract.
-    {"vcruntime140.dll", "memcpy", kOffMemmove},
-    {"vcruntime140.dll", "memset", kOffMemset},
+    {"vcruntime140.dll", "memcpy", kOffMemmove}, {"vcruntime140.dll", "memset", kOffMemset},
 
     // UCRT CRT-startup shims.
     //
@@ -78,8 +74,7 @@
     {"api-ms-win-crt-runtime-l1-1-0.dll", "terminate", kOffTerminate},
     {"api-ms-win-crt-runtime-l1-1-0.dll", "_invalid_parameter_noinfo_noreturn", kOffInvalidParam},
     // Same functions surface directly under ucrtbase too.
-    {"ucrtbase.dll", "exit", kOffExitProcess},
-    {"ucrtbase.dll", "_exit", kOffExitProcess},
+    {"ucrtbase.dll", "exit", kOffExitProcess}, {"ucrtbase.dll", "_exit", kOffExitProcess},
     {"ucrtbase.dll", "terminate", kOffTerminate},
 
     // CRT string intrinsics. Pure functions; no
@@ -90,17 +85,11 @@
     {"api-ms-win-crt-string-l1-1-0.dll", "strlen", kOffStrlen},
     {"api-ms-win-crt-string-l1-1-0.dll", "wcslen", kOffWcslen},
     {"api-ms-win-crt-string-l1-1-0.dll", "strchr", kOffStrchr},
-    {"api-ms-win-crt-string-l1-1-0.dll", "strcpy", kOffStrcpy},
-    {"ucrtbase.dll", "strcmp", kOffStrcmp},
-    {"ucrtbase.dll", "strlen", kOffStrlen},
-    {"ucrtbase.dll", "wcslen", kOffWcslen},
-    {"ucrtbase.dll", "strchr", kOffStrchr},
-    {"ucrtbase.dll", "strcpy", kOffStrcpy},
-    {"msvcrt.dll", "strcmp", kOffStrcmp},
-    {"msvcrt.dll", "strlen", kOffStrlen},
-    {"msvcrt.dll", "wcslen", kOffWcslen},
-    {"msvcrt.dll", "strchr", kOffStrchr},
-    {"msvcrt.dll", "strcpy", kOffStrcpy},
+    {"api-ms-win-crt-string-l1-1-0.dll", "strcpy", kOffStrcpy}, {"ucrtbase.dll", "strcmp", kOffStrcmp},
+    {"ucrtbase.dll", "strlen", kOffStrlen}, {"ucrtbase.dll", "wcslen", kOffWcslen},
+    {"ucrtbase.dll", "strchr", kOffStrchr}, {"ucrtbase.dll", "strcpy", kOffStrcpy},
+    {"msvcrt.dll", "strcmp", kOffStrcmp}, {"msvcrt.dll", "strlen", kOffStrlen}, {"msvcrt.dll", "wcslen", kOffWcslen},
+    {"msvcrt.dll", "strchr", kOffStrchr}, {"msvcrt.dll", "strcpy", kOffStrcpy},
 
     // kernel32 "safe ignore" shims. These functions
     // do real work on Windows but can safely return a sentinel
@@ -123,8 +112,7 @@
     // image base instead of always-zero. The Win32ThunksLookup walk
     // returns the first match, so the real entries take precedence
     // by appearing earlier in the table.
-    {"kernel32.dll", "IsDebuggerPresent", kOffReturnZero},
-    {"kernel32.dll", "IsDebuggerPresent", kOffReturnZero},
+    {"kernel32.dll", "IsDebuggerPresent", kOffReturnZero}, {"kernel32.dll", "IsDebuggerPresent", kOffReturnZero},
     // IsProcessorFeaturePresent(dwFeature) → claim every queried
     // feature is present. x86_64 universally has SSE / SSE2 / CMPXCHG16B
     // / NX; AES / PCLMUL / AVX / AVX2 / RDRAND / RDSEED are visible in
@@ -145,10 +133,8 @@
     // / SYS_FILE_SEEK. CloseHandle is the file-close path —
     // also harmlessly handles non-file handles (the kernel
     // SYS_FILE_CLOSE returns 0 for an unrecognised handle).
-    {"kernel32.dll", "CreateFileW", kOffCreateFileW},
-    {"kernel32.dll", "ReadFile", kOffReadFile},
-    {"kernel32.dll", "CloseHandle", kOffCloseHandle},
-    {"kernel32.dll", "SetFilePointerEx", kOffSetFilePtrEx},
+    {"kernel32.dll", "CreateFileW", kOffCreateFileW}, {"kernel32.dll", "ReadFile", kOffReadFile},
+    {"kernel32.dll", "CloseHandle", kOffCloseHandle}, {"kernel32.dll", "SetFilePointerEx", kOffSetFilePtrEx},
 
     // file stat + module lookup. GetFileSizeEx is
     // backed by SYS_FILE_FSTAT (non-destructive size).
@@ -162,12 +148,9 @@
     {"kernel32.dll", "GetFileSize", kOffGetFileSizeEx}, // close enough for callers w/ small files
     {"kernel32.dll", "GetModuleHandleW", kOffGetModuleHandleW},
     {"kernel32.dll", "GetModuleHandleA", kOffGetModuleHandleW}, // ASCII path also accepts NULL
-    {"kernel32.dll", "GetModuleHandleExW", kOffReturnZero},
-    {"kernel32.dll", "GetModuleHandleExA", kOffReturnZero},
-    {"kernel32.dll", "LoadLibraryW", kOffReturnZero},
-    {"kernel32.dll", "LoadLibraryA", kOffReturnZero},
-    {"kernel32.dll", "LoadLibraryExW", kOffReturnZero},
-    {"kernel32.dll", "LoadLibraryExA", kOffReturnZero},
+    {"kernel32.dll", "GetModuleHandleExW", kOffReturnZero}, {"kernel32.dll", "GetModuleHandleExA", kOffReturnZero},
+    {"kernel32.dll", "LoadLibraryW", kOffReturnZero}, {"kernel32.dll", "LoadLibraryA", kOffReturnZero},
+    {"kernel32.dll", "LoadLibraryExW", kOffReturnZero}, {"kernel32.dll", "LoadLibraryExA", kOffReturnZero},
     {"kernel32.dll", "FreeLibrary", kOffReturnOne}, // pretend success
     // GetProcAddress — real trampoline into SYS_DLL_PROC_ADDRESS
     //. Returns the exported VA out of the
@@ -185,35 +168,27 @@
     // SYS_MUTEX_RELEASE. All three are recursive (Win32 contract).
     // CloseHandle handles mutex slots too via range
     // dispatch in SYS_FILE_CLOSE.
-    {"kernel32.dll", "CreateMutexW", kOffCreateMutexW},
-    {"kernel32.dll", "CreateMutexA", kOffCreateMutexW},
+    {"kernel32.dll", "CreateMutexW", kOffCreateMutexW}, {"kernel32.dll", "CreateMutexA", kOffCreateMutexW},
     {"kernel32.dll", "CreateMutexExW", kOffCreateMutexW},     // ignores extra Ex args
     {"kernel32.dll", "WaitForSingleObject", kOffWaitForObj4}, // upgrade
-    {"kernel32.dll", "WaitForSingleObjectEx", kOffWaitForObj4},
-    {"kernel32.dll", "ReleaseMutex", kOffReleaseMutex},
+    {"kernel32.dll", "WaitForSingleObjectEx", kOffWaitForObj4}, {"kernel32.dll", "ReleaseMutex", kOffReleaseMutex},
 
     // Real event handles. Replaces the kOffReturnOne
     // no-op CreateEventW / SetEvent / ResetEvent from the
     // earlier kernel32 binding.
     // Per-process event table at 0x300..0x307.
-    {"kernel32.dll", "CreateEventW", kOffCreateEventReal},
-    {"kernel32.dll", "CreateEventA", kOffCreateEventReal},
+    {"kernel32.dll", "CreateEventW", kOffCreateEventReal}, {"kernel32.dll", "CreateEventA", kOffCreateEventReal},
     {"kernel32.dll", "CreateEventExW", kOffCreateEventReal}, // ignores extra Ex args
-    {"kernel32.dll", "CreateEventExA", kOffCreateEventReal},
-    {"kernel32.dll", "SetEvent", kOffSetEventReal},
+    {"kernel32.dll", "CreateEventExA", kOffCreateEventReal}, {"kernel32.dll", "SetEvent", kOffSetEventReal},
     {"kernel32.dll", "ResetEvent", kOffResetEventReal},
 
     // real TLS. Replaces 's alias-to-
     // TLS_OUT_OF_INDEXES TlsAlloc. Per-process 64-slot table.
     // Fls* aliases to the same storage (v0 has no fibers).
-    {"kernel32.dll", "TlsAlloc", kOffTlsAllocReal},
-    {"kernel32.dll", "TlsFree", kOffTlsFreeReal},
-    {"kernel32.dll", "TlsGetValue", kOffTlsGetValueReal},
-    {"kernel32.dll", "TlsSetValue", kOffTlsSetValueReal},
-    {"kernel32.dll", "FlsAlloc", kOffTlsAllocReal},
-    {"kernel32.dll", "FlsFree", kOffTlsFreeReal},
-    {"kernel32.dll", "FlsGetValue", kOffTlsGetValueReal},
-    {"kernel32.dll", "FlsSetValue", kOffTlsSetValueReal},
+    {"kernel32.dll", "TlsAlloc", kOffTlsAllocReal}, {"kernel32.dll", "TlsFree", kOffTlsFreeReal},
+    {"kernel32.dll", "TlsGetValue", kOffTlsGetValueReal}, {"kernel32.dll", "TlsSetValue", kOffTlsSetValueReal},
+    {"kernel32.dll", "FlsAlloc", kOffTlsAllocReal}, {"kernel32.dll", "FlsFree", kOffTlsFreeReal},
+    {"kernel32.dll", "FlsGetValue", kOffTlsGetValueReal}, {"kernel32.dll", "FlsSetValue", kOffTlsSetValueReal},
 
     // console APIs. WriteConsoleW is the major
     // Unicode-output entry point; the stub UTF-16-strips to
@@ -222,12 +197,9 @@
     // GetConsoleCP / GetConsoleOutputCP hand back plausible
     // constants (VT processing enabled, UTF-8 code page). The
     // Set* counterparts are no-ops that return TRUE.
-    {"kernel32.dll", "WriteConsoleW", kOffWriteConsoleW},
-    {"kernel32.dll", "GetConsoleMode", kOffGetConsoleMode},
-    {"kernel32.dll", "SetConsoleMode", kOffReturnOne},
-    {"kernel32.dll", "GetConsoleCP", kOffGetConsoleCP},
-    {"kernel32.dll", "GetConsoleOutputCP", kOffGetConsoleCP},
-    {"kernel32.dll", "SetConsoleCP", kOffReturnOne},
+    {"kernel32.dll", "WriteConsoleW", kOffWriteConsoleW}, {"kernel32.dll", "GetConsoleMode", kOffGetConsoleMode},
+    {"kernel32.dll", "SetConsoleMode", kOffReturnOne}, {"kernel32.dll", "GetConsoleCP", kOffGetConsoleCP},
+    {"kernel32.dll", "GetConsoleOutputCP", kOffGetConsoleCP}, {"kernel32.dll", "SetConsoleCP", kOffReturnOne},
     {"kernel32.dll", "SetConsoleOutputCP", kOffReturnOne},
     // OutputDebugString* is a debugger-notification call. Real
     // Windows silently drops when no debugger is attached. We
@@ -250,10 +222,8 @@
     // workload needs it.
     {"kernel32.dll", "VirtualAlloc", kOffVirtualAlloc},
     {"kernel32.dll", "VirtualAllocEx", kOffVirtualAlloc}, // ignores the extra HANDLE arg
-    {"kernel32.dll", "VirtualFree", kOffVirtualFree},
-    {"kernel32.dll", "VirtualFreeEx", kOffVirtualFree},
-    {"kernel32.dll", "VirtualProtect", kOffVirtualProtect},
-    {"kernel32.dll", "VirtualProtectEx", kOffVirtualProtect},
+    {"kernel32.dll", "VirtualFree", kOffVirtualFree}, {"kernel32.dll", "VirtualFreeEx", kOffVirtualFree},
+    {"kernel32.dll", "VirtualProtect", kOffVirtualProtect}, {"kernel32.dll", "VirtualProtectEx", kOffVirtualProtect},
     {"kernel32.dll", "VirtualQuery", kOffReturnZero}, // v0 query returns 0 = failed
     {"kernel32.dll", "VirtualQueryEx", kOffReturnZero},
 
@@ -263,8 +233,7 @@
     // case-fold, not stubbed). lstrlen has a hard cap of
     // effectively "until NUL" — a wild unterminated string
     // scans forever, matching the documented Win32 behaviour.
-    {"kernel32.dll", "lstrlenW", kOffLstrlenW},
-    {"kernel32.dll", "lstrcmpW", kOffLstrcmpW},
+    {"kernel32.dll", "lstrlenW", kOffLstrlenW}, {"kernel32.dll", "lstrcmpW", kOffLstrcmpW},
     {"kernel32.dll", "lstrcpyW", kOffLstrcpyW},
 
     // system-info probes. IsWow64Process returns FALSE
@@ -280,8 +249,7 @@
 
     // ANSI-byte string helpers. Symmetric to
     // but for LPCSTR. Pure compute, no syscalls.
-    {"kernel32.dll", "lstrlenA", kOffLstrlenA},
-    {"kernel32.dll", "lstrcmpA", kOffLstrcmpA},
+    {"kernel32.dll", "lstrlenA", kOffLstrlenA}, {"kernel32.dll", "lstrcmpA", kOffLstrcmpA},
     {"kernel32.dll", "lstrcpyA", kOffLstrcpyA},
 
     // path-query stubs. All v0 paths report a single
@@ -299,8 +267,7 @@
     // encoding converters. v0 handles ASCII-range
     // content perfectly (byte-extend / byte-truncate); non-ASCII
     // UTF-8 sequences lose high-plane data.
-    {"kernel32.dll", "MultiByteToWideChar", kOffMBtoWC},
-    {"kernel32.dll", "WideCharToMultiByte", kOffWCtoMB},
+    {"kernel32.dll", "MultiByteToWideChar", kOffMBtoWC}, {"kernel32.dll", "WideCharToMultiByte", kOffWCtoMB},
 
     // identity queries. Fixed-string stubs.
     // kernel32 hosts GetComputerNameW; advapi32 hosts
@@ -318,10 +285,8 @@
     // GetSystemDirectoryW have (buffer, size) — separate stub.
     // All report "X:\\" as v0's single system path.
     {"kernel32.dll", "GetTempPathW", kOffGetCurrentDirW}, // alias: same sig
-    {"kernel32.dll", "GetTempPathA", kOffGetCurrentDirW},
-    {"kernel32.dll", "GetWindowsDirectoryW", kOffGetWinDirW},
-    {"kernel32.dll", "GetWindowsDirectoryA", kOffGetWinDirW},
-    {"kernel32.dll", "GetSystemDirectoryW", kOffGetWinDirW},
+    {"kernel32.dll", "GetTempPathA", kOffGetCurrentDirW}, {"kernel32.dll", "GetWindowsDirectoryW", kOffGetWinDirW},
+    {"kernel32.dll", "GetWindowsDirectoryA", kOffGetWinDirW}, {"kernel32.dll", "GetSystemDirectoryW", kOffGetWinDirW},
     {"kernel32.dll", "GetSystemDirectoryA", kOffGetWinDirW},
     {"kernel32.dll", "GetSystemWindowsDirectoryW", kOffGetWinDirW},
     {"kernel32.dll", "GetSystemWindowsDirectoryA", kOffGetWinDirW},
@@ -332,17 +297,14 @@
     // SetErrorMode / GetErrorMode return 0 (no special mode).
     // FormatMessage{W,A} returns 0 — callers usually fall
     // back to their own format-by-code path.
-    {"kernel32.dll", "GetLogicalDrives", kOffGetLogicalDrives},
-    {"kernel32.dll", "GetDriveTypeW", kOffGetDriveType},
-    {"kernel32.dll", "GetDriveTypeA", kOffGetDriveType},
-    {"kernel32.dll", "SetErrorMode", kOffReturnZero},
+    {"kernel32.dll", "GetLogicalDrives", kOffGetLogicalDrives}, {"kernel32.dll", "GetDriveTypeW", kOffGetDriveType},
+    {"kernel32.dll", "GetDriveTypeA", kOffGetDriveType}, {"kernel32.dll", "SetErrorMode", kOffReturnZero},
     {"kernel32.dll", "GetErrorMode", kOffReturnZero},
     {"kernel32.dll", "SetThreadErrorMode", kOffReturnOne}, // return TRUE, ignore mode
     // FormatMessageW stays NO-OP: our v0 stub writes ASCII bytes
     // which would corrupt a WCHAR* buffer. A proper UTF-16 variant
     // is a follow-up.
-    {"kernel32.dll", "FormatMessageW", kOffReturnZero},
-    {"kernel32.dll", "FormatMessageA", kOffFormatMessageA},
+    {"kernel32.dll", "FormatMessageW", kOffReturnZero}, {"kernel32.dll", "FormatMessageA", kOffFormatMessageA},
 
     // registry + file-attribute no-op stubs.
     // Reg open / read family returns ERROR_FILE_NOT_FOUND (2),
@@ -351,34 +313,23 @@
     // GetFileAttributesW returns INVALID_FILE_ATTRIBUTES (-1)
     // — caller treats as "file not present".
     // SetFileAttributesW returns TRUE (pretend success).
-    {"advapi32.dll", "RegOpenKeyW", kOffReturnTwo},
-    {"advapi32.dll", "RegOpenKeyA", kOffReturnTwo},
-    {"advapi32.dll", "RegOpenKeyExW", kOffReturnTwo},
-    {"advapi32.dll", "RegOpenKeyExA", kOffReturnTwo},
-    {"advapi32.dll", "RegQueryValueW", kOffReturnTwo},
-    {"advapi32.dll", "RegQueryValueA", kOffReturnTwo},
-    {"advapi32.dll", "RegQueryValueExW", kOffReturnTwo},
-    {"advapi32.dll", "RegQueryValueExA", kOffReturnTwo},
-    {"advapi32.dll", "RegEnumKeyW", kOffReturnTwo},
-    {"advapi32.dll", "RegEnumKeyExW", kOffReturnTwo},
+    {"advapi32.dll", "RegOpenKeyW", kOffReturnTwo}, {"advapi32.dll", "RegOpenKeyA", kOffReturnTwo},
+    {"advapi32.dll", "RegOpenKeyExW", kOffReturnTwo}, {"advapi32.dll", "RegOpenKeyExA", kOffReturnTwo},
+    {"advapi32.dll", "RegQueryValueW", kOffReturnTwo}, {"advapi32.dll", "RegQueryValueA", kOffReturnTwo},
+    {"advapi32.dll", "RegQueryValueExW", kOffReturnTwo}, {"advapi32.dll", "RegQueryValueExA", kOffReturnTwo},
+    {"advapi32.dll", "RegEnumKeyW", kOffReturnTwo}, {"advapi32.dll", "RegEnumKeyExW", kOffReturnTwo},
     {"advapi32.dll", "RegEnumValueW", kOffReturnTwo},
     {"advapi32.dll", "RegCreateKeyW", kOffReturnZero}, // pretend success
-    {"advapi32.dll", "RegCreateKeyExW", kOffReturnZero},
-    {"advapi32.dll", "RegSetValueW", kOffReturnZero},
-    {"advapi32.dll", "RegSetValueExW", kOffReturnZero},
-    {"advapi32.dll", "RegCloseKey", kOffReturnZero},
-    {"advapi32.dll", "RegDeleteKeyW", kOffReturnZero},
-    {"advapi32.dll", "RegDeleteValueW", kOffReturnZero},
-    {"kernel32.dll", "GetFileAttributesW", kOffReturnMinus1},
-    {"kernel32.dll", "GetFileAttributesA", kOffReturnMinus1},
+    {"advapi32.dll", "RegCreateKeyExW", kOffReturnZero}, {"advapi32.dll", "RegSetValueW", kOffReturnZero},
+    {"advapi32.dll", "RegSetValueExW", kOffReturnZero}, {"advapi32.dll", "RegCloseKey", kOffReturnZero},
+    {"advapi32.dll", "RegDeleteKeyW", kOffReturnZero}, {"advapi32.dll", "RegDeleteValueW", kOffReturnZero},
+    {"kernel32.dll", "GetFileAttributesW", kOffReturnMinus1}, {"kernel32.dll", "GetFileAttributesA", kOffReturnMinus1},
     {"kernel32.dll", "GetFileAttributesExW", kOffReturnZero}, // BOOL FALSE = "file not found"
     {"kernel32.dll", "SetFileAttributesW", kOffReturnOne},    // pretend success
     {"kernel32.dll", "SetFileAttributesA", kOffReturnOne},
     {"kernel32.dll", "DeleteFileW", kOffReturnOne}, // pretend success
-    {"kernel32.dll", "DeleteFileA", kOffReturnOne},
-    {"kernel32.dll", "CopyFileW", kOffReturnOne},
-    {"kernel32.dll", "MoveFileW", kOffReturnOne},
-    {"kernel32.dll", "CreateDirectoryW", kOffReturnOne},
+    {"kernel32.dll", "DeleteFileA", kOffReturnOne}, {"kernel32.dll", "CopyFileW", kOffReturnOne},
+    {"kernel32.dll", "MoveFileW", kOffReturnOne}, {"kernel32.dll", "CreateDirectoryW", kOffReturnOne},
     {"kernel32.dll", "RemoveDirectoryW", kOffReturnOne},
 
     // locale / processor / time-zone probes. All
@@ -392,12 +343,9 @@
     // query — use fallback"), safer than TRUE + uninit out.
     // GetStartupInfoW -> kOffCritSecNop (void return, 1-byte ret).
     // VerifyVersionInfoW -> TRUE (version probe passes).
-    {"kernel32.dll", "GetACP", kOffGetConsoleCP},
-    {"kernel32.dll", "GetOEMCP", kOffGetConsoleCP},
-    {"kernel32.dll", "IsValidCodePage", kOffReturnOne},
-    {"kernel32.dll", "GetThreadLocale", kOffReturnZero},
-    {"kernel32.dll", "SetThreadLocale", kOffReturnOne},
-    {"kernel32.dll", "GetUserDefaultLCID", kOffReturnZero},
+    {"kernel32.dll", "GetACP", kOffGetConsoleCP}, {"kernel32.dll", "GetOEMCP", kOffGetConsoleCP},
+    {"kernel32.dll", "IsValidCodePage", kOffReturnOne}, {"kernel32.dll", "GetThreadLocale", kOffReturnZero},
+    {"kernel32.dll", "SetThreadLocale", kOffReturnOne}, {"kernel32.dll", "GetUserDefaultLCID", kOffReturnZero},
     {"kernel32.dll", "GetSystemDefaultLCID", kOffReturnZero},
     {"kernel32.dll", "GetUserDefaultUILanguage", kOffReturnZero},
     {"kernel32.dll", "GetSystemDefaultUILanguage", kOffReturnZero},
@@ -411,17 +359,14 @@
     // 104-byte STARTUPINFO and set cb = 104 (the nop previously
     // here left the buffer uninitialised — callers read a wild
     // pointer from lpDesktop / hStdInput and faulted).
-    {"kernel32.dll", "GetStartupInfoW", kOffGetStartupInfo},
-    {"kernel32.dll", "GetStartupInfoA", kOffGetStartupInfo},
-    {"kernel32.dll", "VerSetConditionMask", kOffReturnZero},
-    {"kernel32.dll", "VerifyVersionInfoW", kOffReturnOne},
+    {"kernel32.dll", "GetStartupInfoW", kOffGetStartupInfo}, {"kernel32.dll", "GetStartupInfoA", kOffGetStartupInfo},
+    {"kernel32.dll", "VerSetConditionMask", kOffReturnZero}, {"kernel32.dll", "VerifyVersionInfoW", kOffReturnOne},
     {"kernel32.dll", "VerifyVersionInfoA", kOffReturnOne},
     // Paired with 's InitializeSListHead — more InterlockedX
     // SList ops all no-op (return NULL = empty list).
     {"kernel32.dll", "InterlockedPushEntrySList", kOffReturnZero},
     {"kernel32.dll", "InterlockedPopEntrySList", kOffReturnZero},
-    {"kernel32.dll", "InterlockedFlushSList", kOffReturnZero},
-    {"kernel32.dll", "QueryDepthSList", kOffReturnZero},
+    {"kernel32.dll", "InterlockedFlushSList", kOffReturnZero}, {"kernel32.dll", "QueryDepthSList", kOffReturnZero},
     // Misc memory / CPU / numa probes.
     // GlobalMemoryStatusEx → real SYS_MEM_STATUS;
     // GetSystemTimes → zero-fill stub.
@@ -429,8 +374,7 @@
     {"kernel32.dll", "GetSystemTimes", kOffGetSystemTimes},
     // GetSystemInfo / GetNativeSystemInfo populate a
     // Win32 SYSTEM_INFO struct with x86_64 constants.
-    {"kernel32.dll", "GetSystemInfo", kOffGetSystemInfo},
-    {"kernel32.dll", "GetNativeSystemInfo", kOffGetSystemInfo},
+    {"kernel32.dll", "GetSystemInfo", kOffGetSystemInfo}, {"kernel32.dll", "GetNativeSystemInfo", kOffGetSystemInfo},
     {"kernel32.dll", "GetNumaHighestNodeNumber", kOffReturnZero},
 
     // process priority / TLS / file-type aliases.
@@ -449,17 +393,14 @@
     // ExitThread routes to SYS_EXIT (kills just this
     // task). FreeLibraryAndExitThread aliases to ExitThread — the
     // FreeLibrary half is a no-op in v0 (no DLL unload path).
-    {"kernel32.dll", "ExitThread", kOffExitThread},
-    {"kernel32.dll", "FreeLibraryAndExitThread", kOffExitThread},
+    {"kernel32.dll", "ExitThread", kOffExitThread}, {"kernel32.dll", "FreeLibraryAndExitThread", kOffExitThread},
     // WaitForMultipleObjects via SYS_WAIT_MULTI.
     {"kernel32.dll", "WaitForMultipleObjects", kOffWaitForMultipleObjects},
     {"kernel32.dll", "WaitForMultipleObjectsEx", kOffWaitForMultipleObjects},
     // RaiseException → SYS_EXIT. DecodePointer /
     // EncodePointer → identity (round-trip preserved).
-    {"kernel32.dll", "RaiseException", kOffRaiseException},
-    {"kernel32.dll", "DecodePointer", kOffDecodePointer},
-    {"kernel32.dll", "EncodePointer", kOffDecodePointer},
-    {"kernel32.dll", "RtlDecodePointer", kOffDecodePointer},
+    {"kernel32.dll", "RaiseException", kOffRaiseException}, {"kernel32.dll", "DecodePointer", kOffDecodePointer},
+    {"kernel32.dll", "EncodePointer", kOffDecodePointer}, {"kernel32.dll", "RtlDecodePointer", kOffDecodePointer},
     {"kernel32.dll", "RtlEncodePointer", kOffDecodePointer},
     // Semaphore family — CreateSemaphore(W/A/ExW) route
     // through SYS_SEM_CREATE; ReleaseSemaphore through SYS_SEM_RELEASE;
@@ -480,8 +421,7 @@
     // NULL (not supported — callers see CreateFileMapping fail
     // and fall back to non-mapped I/O). Wiring these through the
     // existing shared stubs costs no stub-page bytes.
-    {"kernel32.dll", "InitializeSRWLock", kOffSrwInit},
-    {"kernel32.dll", "AcquireSRWLockExclusive", kOffSrwAcquireExcl},
+    {"kernel32.dll", "InitializeSRWLock", kOffSrwInit}, {"kernel32.dll", "AcquireSRWLockExclusive", kOffSrwAcquireExcl},
     // Shared variants degrade to exclusive acquire in v0 — we
     // don't track reader counts yet, so letting concurrent
     // readers through would violate the reader/writer barrier
@@ -498,23 +438,15 @@
     {"kernel32.dll", "SleepConditionVariableSRW", kOffReturnOne},
     // InitOnceInitialize zeroes the 8-byte INIT_ONCE slot. Same
     // byte sequence as InitializeSRWLock, so share the stub.
-    {"kernel32.dll", "InitOnceInitialize", kOffSrwInit},
-    {"kernel32.dll", "InitializeInitOnce", kOffCritSecNop},
-    {"kernel32.dll", "InitOnceComplete", kOffReturnOne},
-    {"kernel32.dll", "InitOnceExecuteOnce", kOffInitOnceExec},
+    {"kernel32.dll", "InitOnceInitialize", kOffSrwInit}, {"kernel32.dll", "InitializeInitOnce", kOffCritSecNop},
+    {"kernel32.dll", "InitOnceComplete", kOffReturnOne}, {"kernel32.dll", "InitOnceExecuteOnce", kOffInitOnceExec},
     {"kernel32.dll", "InitOnceBeginInitialize", kOffReturnOne},
-    {"kernel32.dll", "CreateWaitableTimerW", kOffReturnZero},
-    {"kernel32.dll", "CreateWaitableTimerA", kOffReturnZero},
-    {"kernel32.dll", "CreateWaitableTimerExW", kOffReturnZero},
-    {"kernel32.dll", "SetWaitableTimer", kOffReturnZero},
-    {"kernel32.dll", "SetWaitableTimerEx", kOffReturnZero},
-    {"kernel32.dll", "CancelWaitableTimer", kOffReturnZero},
-    {"kernel32.dll", "CreateFileMappingW", kOffReturnZero},
-    {"kernel32.dll", "CreateFileMappingA", kOffReturnZero},
-    {"kernel32.dll", "OpenFileMappingW", kOffReturnZero},
-    {"kernel32.dll", "OpenFileMappingA", kOffReturnZero},
-    {"kernel32.dll", "OpenThread", kOffReturnZero},
-    {"kernel32.dll", "GetThreadId", kOffReturnZero},
+    {"kernel32.dll", "CreateWaitableTimerW", kOffReturnZero}, {"kernel32.dll", "CreateWaitableTimerA", kOffReturnZero},
+    {"kernel32.dll", "CreateWaitableTimerExW", kOffReturnZero}, {"kernel32.dll", "SetWaitableTimer", kOffReturnZero},
+    {"kernel32.dll", "SetWaitableTimerEx", kOffReturnZero}, {"kernel32.dll", "CancelWaitableTimer", kOffReturnZero},
+    {"kernel32.dll", "CreateFileMappingW", kOffReturnZero}, {"kernel32.dll", "CreateFileMappingA", kOffReturnZero},
+    {"kernel32.dll", "OpenFileMappingW", kOffReturnZero}, {"kernel32.dll", "OpenFileMappingA", kOffReturnZero},
+    {"kernel32.dll", "OpenThread", kOffReturnZero}, {"kernel32.dll", "GetThreadId", kOffReturnZero},
     {"kernel32.dll", "DuplicateHandle", kOffReturnZero},
     // QueryInterruptTime / QueryUnbiasedInterruptTime NOT wired:
     // both fill an LPULONGLONG output that kOffCritSecNop wouldn't
@@ -527,50 +459,37 @@
     // multi-CPU affinity knobs (v0 is uni-processor from the user
     // angle — AffinityMask set always "succeeds"), no fibers (real
     // stack-swap fibers need SwapContext which isn't hooked up).
-    {"kernel32.dll", "LockFile", kOffReturnOne},
-    {"kernel32.dll", "LockFileEx", kOffReturnOne},
-    {"kernel32.dll", "UnlockFile", kOffReturnOne},
-    {"kernel32.dll", "UnlockFileEx", kOffReturnOne},
-    {"kernel32.dll", "CancelIo", kOffReturnOne},
-    {"kernel32.dll", "CancelIoEx", kOffReturnOne},
-    {"kernel32.dll", "CancelSynchronousIo", kOffReturnOne},
-    {"kernel32.dll", "GetOverlappedResult", kOffReturnOne},
-    {"kernel32.dll", "GetOverlappedResultEx", kOffReturnOne},
-    {"kernel32.dll", "SetThreadAffinityMask", kOffReturnOne},
+    {"kernel32.dll", "LockFile", kOffReturnOne}, {"kernel32.dll", "LockFileEx", kOffReturnOne},
+    {"kernel32.dll", "UnlockFile", kOffReturnOne}, {"kernel32.dll", "UnlockFileEx", kOffReturnOne},
+    {"kernel32.dll", "CancelIo", kOffReturnOne}, {"kernel32.dll", "CancelIoEx", kOffReturnOne},
+    {"kernel32.dll", "CancelSynchronousIo", kOffReturnOne}, {"kernel32.dll", "GetOverlappedResult", kOffReturnOne},
+    {"kernel32.dll", "GetOverlappedResultEx", kOffReturnOne}, {"kernel32.dll", "SetThreadAffinityMask", kOffReturnOne},
     {"kernel32.dll", "SetProcessAffinityMask", kOffReturnOne},
     {"kernel32.dll", "SetThreadIdealProcessor", kOffReturnZero}, // prev ideal = 0
     {"kernel32.dll", "GetThreadIdealProcessorEx", kOffReturnOne},
-    {"kernel32.dll", "DisableThreadLibraryCalls", kOffReturnOne},
-    {"kernel32.dll", "CreateFiber", kOffReturnZero},
-    {"kernel32.dll", "CreateFiberEx", kOffReturnZero},
-    {"kernel32.dll", "ConvertThreadToFiber", kOffReturnZero},
-    {"kernel32.dll", "ConvertThreadToFiberEx", kOffReturnZero},
-    {"kernel32.dll", "ConvertFiberToThread", kOffReturnOne},
+    {"kernel32.dll", "DisableThreadLibraryCalls", kOffReturnOne}, {"kernel32.dll", "CreateFiber", kOffReturnZero},
+    {"kernel32.dll", "CreateFiberEx", kOffReturnZero}, {"kernel32.dll", "ConvertThreadToFiber", kOffReturnZero},
+    {"kernel32.dll", "ConvertThreadToFiberEx", kOffReturnZero}, {"kernel32.dll", "ConvertFiberToThread", kOffReturnOne},
     {"kernel32.dll", "SwitchToFiber", kOffCritSecNop}, // void
     {"kernel32.dll", "DeleteFiber", kOffCritSecNop},   // void
     {"kernel32.dll", "IsThreadAFiber", kOffReturnZero},
     {"kernel32.dll", "DebugBreak", kOffCritSecNop}, // void — no int3 (would kill us)
-    {"kernel32.dll", "DebugActiveProcess", kOffReturnZero},
-    {"kernel32.dll", "DebugActiveProcessStop", kOffReturnZero},
+    {"kernel32.dll", "DebugActiveProcess", kOffReturnZero}, {"kernel32.dll", "DebugActiveProcessStop", kOffReturnZero},
     // GetSystemTimePreciseAsFileTime has the same shape as
     // GetSystemTimeAsFileTime — reuse the existing real stub.
     {"kernel32.dll", "GetSystemTimePreciseAsFileTime", kOffGetSysTimeFTReal},
     // Named pipes: unsupported — all return FALSE / NULL / invalid.
     {"kernel32.dll", "CreateNamedPipeW", kOffReturnMinus1}, // INVALID_HANDLE_VALUE
-    {"kernel32.dll", "CreateNamedPipeA", kOffReturnMinus1},
-    {"kernel32.dll", "ConnectNamedPipe", kOffReturnZero},
-    {"kernel32.dll", "DisconnectNamedPipe", kOffReturnOne},
-    {"kernel32.dll", "WaitNamedPipeW", kOffReturnZero},
-    {"kernel32.dll", "WaitNamedPipeA", kOffReturnZero},
-    {"kernel32.dll", "PeekConsoleInputW", kOffReturnZero},
+    {"kernel32.dll", "CreateNamedPipeA", kOffReturnMinus1}, {"kernel32.dll", "ConnectNamedPipe", kOffReturnZero},
+    {"kernel32.dll", "DisconnectNamedPipe", kOffReturnOne}, {"kernel32.dll", "WaitNamedPipeW", kOffReturnZero},
+    {"kernel32.dll", "WaitNamedPipeA", kOffReturnZero}, {"kernel32.dll", "PeekConsoleInputW", kOffReturnZero},
     {"kernel32.dll", "GetLogicalProcessorInformation", kOffReturnZero},
     {"kernel32.dll", "GetLogicalProcessorInformationEx", kOffReturnZero},
     {"kernel32.dll", "GetSystemFirmwareTable", kOffReturnZero}, // 0 = size unavailable
     {"kernel32.dll", "EnumSystemFirmwareTables", kOffReturnZero},
     {"kernel32.dll", "RegisterApplicationRestart", kOffReturnZero}, // S_OK
     {"kernel32.dll", "UnregisterApplicationRestart", kOffReturnZero},
-    {"kernel32.dll", "SetSearchPathMode", kOffReturnOne},
-    {"kernel32.dll", "SetDefaultDllDirectories", kOffReturnOne},
+    {"kernel32.dll", "SetSearchPathMode", kOffReturnOne}, {"kernel32.dll", "SetDefaultDllDirectories", kOffReturnOne},
     {"kernel32.dll", "AddDllDirectory", kOffReturnZero}, // NULL cookie
     {"kernel32.dll", "RemoveDllDirectory", kOffReturnOne},
     // Tls/Fls now route through real per-process storage —
@@ -603,8 +522,7 @@
     // frames > 4 KiB. DuetOS maps the full user stack up-
     // front at PE load, so no probe is needed — just ret. RAX
     // holds the requested size; we preserve it by doing nothing.
-    {"vcruntime140.dll", "__chkstk", kOffCritSecNop},
-    {"ntdll.dll", "__chkstk", kOffCritSecNop},
+    {"vcruntime140.dll", "__chkstk", kOffCritSecNop}, {"ntdll.dll", "__chkstk", kOffCritSecNop},
     // 64-bit variants
     {"kernel32.dll", "InterlockedIncrement64", kOffInterlockedInc64},
     {"kernel32.dll", "InterlockedDecrement64", kOffInterlockedDec64},
@@ -615,10 +533,8 @@
     // backed by LOCK CMPXCHG — correct under SMP + timer-tick
     // preemption. Return the ORIGINAL pre-modify value per Win32
     // contract.
-    {"kernel32.dll", "InterlockedAnd", kOffInterlockedAnd},
-    {"kernel32.dll", "InterlockedOr", kOffInterlockedOr},
-    {"kernel32.dll", "InterlockedXor", kOffInterlockedXor},
-    {"kernel32.dll", "InterlockedAnd64", kOffInterlockedAnd64},
+    {"kernel32.dll", "InterlockedAnd", kOffInterlockedAnd}, {"kernel32.dll", "InterlockedOr", kOffInterlockedOr},
+    {"kernel32.dll", "InterlockedXor", kOffInterlockedXor}, {"kernel32.dll", "InterlockedAnd64", kOffInterlockedAnd64},
     {"kernel32.dll", "InterlockedOr64", kOffInterlockedOr64},
     {"kernel32.dll", "InterlockedXor64", kOffInterlockedXor64},
     {"vcruntime140.dll", "_InterlockedIncrement64", kOffInterlockedInc64},
@@ -649,22 +565,15 @@
     // that don't cross the kernel boundary on real Windows.
     // RtlGetLastWin32Error has the same sig as GetLastError →
     // alias. RtlSetLastWin32Error aliases to SetLastError.
-    {"ntdll.dll", "NtClose", kOffCloseHandle},
-    {"ntdll.dll", "ZwClose", kOffCloseHandle}, // Zw == Nt in user mode
-    {"ntdll.dll", "NtYieldExecution", kOffCritSecNop},
-    {"ntdll.dll", "ZwYieldExecution", kOffCritSecNop},
-    {"ntdll.dll", "RtlGetLastWin32Error", kOffGetLastError},
-    {"ntdll.dll", "RtlSetLastWin32Error", kOffSetLastError},
+    {"ntdll.dll", "NtClose", kOffCloseHandle}, {"ntdll.dll", "ZwClose", kOffCloseHandle}, // Zw == Nt in user mode
+    {"ntdll.dll", "NtYieldExecution", kOffCritSecNop}, {"ntdll.dll", "ZwYieldExecution", kOffCritSecNop},
+    {"ntdll.dll", "RtlGetLastWin32Error", kOffGetLastError}, {"ntdll.dll", "RtlSetLastWin32Error", kOffSetLastError},
     {"ntdll.dll", "RtlNtStatusToDosError", kOffReturnZero}, // 0 = ERROR_SUCCESS
     // Everything else returns STATUS_NOT_IMPLEMENTED.
-    {"ntdll.dll", "NtCreateFile", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "ZwCreateFile", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "NtOpenFile", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "ZwOpenFile", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "NtReadFile", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "ZwReadFile", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "NtWriteFile", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "ZwWriteFile", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtCreateFile", kOffReturnStatusNotImpl}, {"ntdll.dll", "ZwCreateFile", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtOpenFile", kOffReturnStatusNotImpl}, {"ntdll.dll", "ZwOpenFile", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtReadFile", kOffReturnStatusNotImpl}, {"ntdll.dll", "ZwReadFile", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtWriteFile", kOffReturnStatusNotImpl}, {"ntdll.dll", "ZwWriteFile", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtDeviceIoControlFile", kOffReturnStatusNotImpl},
     {"ntdll.dll", "ZwDeviceIoControlFile", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtQueryInformationFile", kOffReturnStatusNotImpl},
@@ -684,21 +593,16 @@
     {"ntdll.dll", "ZwProtectVirtualMemory", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtQueryVirtualMemory", kOffReturnStatusNotImpl},
     {"ntdll.dll", "ZwQueryVirtualMemory", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "NtCreateEvent", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "ZwCreateEvent", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtCreateEvent", kOffReturnStatusNotImpl}, {"ntdll.dll", "ZwCreateEvent", kOffReturnStatusNotImpl},
     // Signature-compatible enough with SetEvent/ResetEvent:
     // Nt* variants carry an optional "previous state" out-pointer
     // in rdx that our v0 ignores.
-    {"ntdll.dll", "NtSetEvent", kOffSetEventReal},
-    {"ntdll.dll", "ZwSetEvent", kOffSetEventReal},
-    {"ntdll.dll", "NtResetEvent", kOffResetEventReal},
-    {"ntdll.dll", "ZwResetEvent", kOffResetEventReal},
-    {"ntdll.dll", "NtCreateMutant", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "ZwCreateMutant", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtSetEvent", kOffSetEventReal}, {"ntdll.dll", "ZwSetEvent", kOffSetEventReal},
+    {"ntdll.dll", "NtResetEvent", kOffResetEventReal}, {"ntdll.dll", "ZwResetEvent", kOffResetEventReal},
+    {"ntdll.dll", "NtCreateMutant", kOffReturnStatusNotImpl}, {"ntdll.dll", "ZwCreateMutant", kOffReturnStatusNotImpl},
     // NtReleaseMutant(handle, prevCount*) is close enough to
     // ReleaseMutex(handle) for v0; prevCount is ignored.
-    {"ntdll.dll", "NtReleaseMutant", kOffReleaseMutex},
-    {"ntdll.dll", "ZwReleaseMutant", kOffReleaseMutex},
+    {"ntdll.dll", "NtReleaseMutant", kOffReleaseMutex}, {"ntdll.dll", "ZwReleaseMutant", kOffReleaseMutex},
     {"ntdll.dll", "NtWaitForSingleObject", kOffReturnStatusNotImpl},
     {"ntdll.dll", "ZwWaitForSingleObject", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtWaitForMultipleObjects", kOffReturnStatusNotImpl},
@@ -724,16 +628,11 @@
     {"ntdll.dll", "NtTerminateProcess", kOffReturnStatusNotImpl},
     {"ntdll.dll", "ZwTerminateProcess", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtTerminateThread", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "ZwTerminateThread", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "NtContinue", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "ZwContinue", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "NtOpenKey", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "ZwOpenKey", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "NtQueryValueKey", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "ZwQueryValueKey", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "NtQueryKey", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "ZwQueryKey", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "NtEnumerateKey", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwTerminateThread", kOffReturnStatusNotImpl}, {"ntdll.dll", "NtContinue", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwContinue", kOffReturnStatusNotImpl}, {"ntdll.dll", "NtOpenKey", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwOpenKey", kOffReturnStatusNotImpl}, {"ntdll.dll", "NtQueryValueKey", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwQueryValueKey", kOffReturnStatusNotImpl}, {"ntdll.dll", "NtQueryKey", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwQueryKey", kOffReturnStatusNotImpl}, {"ntdll.dll", "NtEnumerateKey", kOffReturnStatusNotImpl},
     {"ntdll.dll", "ZwEnumerateKey", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtEnumerateValueKey", kOffReturnStatusNotImpl},
     {"ntdll.dll", "ZwEnumerateValueKey", kOffReturnStatusNotImpl},
@@ -758,45 +657,31 @@
     // reachable from ring 3 yet, so every user32 entry either
     // returns failure or a benign constant.
     {"user32.dll", "MessageBoxW", kOffReturnOne}, // IDOK (1) — caller proceeds
-    {"user32.dll", "MessageBoxA", kOffReturnOne},
-    {"user32.dll", "MessageBoxExW", kOffReturnOne},
-    {"user32.dll", "GetDesktopWindow", kOffReturnZero},
-    {"user32.dll", "GetProcessWindowStation", kOffReturnZero},
-    {"user32.dll", "GetSysColor", kOffGetSysColor},
-    {"user32.dll", "GetSysColorBrush", kOffGetSysColorBrush},
+    {"user32.dll", "MessageBoxA", kOffReturnOne}, {"user32.dll", "MessageBoxExW", kOffReturnOne},
+    {"user32.dll", "GetDesktopWindow", kOffReturnZero}, {"user32.dll", "GetProcessWindowStation", kOffReturnZero},
+    {"user32.dll", "GetSysColor", kOffGetSysColor}, {"user32.dll", "GetSysColorBrush", kOffGetSysColorBrush},
     {"user32.dll", "GetSystemMetrics", kOffReturnZero},
     {"user32.dll", "OpenClipboard", kOffReturnZero}, // FALSE — unavailable
-    {"user32.dll", "CloseClipboard", kOffReturnOne},
-    {"user32.dll", "EmptyClipboard", kOffReturnOne},
-    {"user32.dll", "GetClipboardData", kOffReturnZero},
-    {"user32.dll", "SetClipboardData", kOffReturnZero},
+    {"user32.dll", "CloseClipboard", kOffReturnOne}, {"user32.dll", "EmptyClipboard", kOffReturnOne},
+    {"user32.dll", "GetClipboardData", kOffReturnZero}, {"user32.dll", "SetClipboardData", kOffReturnZero},
     {"user32.dll", "LoadStringW", kOffReturnZero}, // 0 chars copied
-    {"user32.dll", "CharUpperW", kOffReturnZero},
-    {"user32.dll", "CharLowerW", kOffReturnZero},
-    {"user32.dll", "IsWindow", kOffReturnZero},
-    {"user32.dll", "GetActiveWindow", kOffReturnZero},
+    {"user32.dll", "CharUpperW", kOffReturnZero}, {"user32.dll", "CharLowerW", kOffReturnZero},
+    {"user32.dll", "IsWindow", kOffReturnZero}, {"user32.dll", "GetActiveWindow", kOffReturnZero},
     {"user32.dll", "GetForegroundWindow", kOffReturnZero},
 
     // kernel32 — handle / file-mapping / env extensions.
-    {"kernel32.dll", "SetHandleInformation", kOffReturnOne},
-    {"kernel32.dll", "GetHandleInformation", kOffReturnZero},
+    {"kernel32.dll", "SetHandleInformation", kOffReturnOne}, {"kernel32.dll", "GetHandleInformation", kOffReturnZero},
     {"kernel32.dll", "DuplicateHandle", kOffReturnZero}, // FALSE
-    {"kernel32.dll", "CreateFileMappingW", kOffReturnZero},
-    {"kernel32.dll", "CreateFileMappingA", kOffReturnZero},
-    {"kernel32.dll", "OpenFileMappingW", kOffReturnZero},
-    {"kernel32.dll", "MapViewOfFile", kOffReturnZero},
-    {"kernel32.dll", "MapViewOfFileEx", kOffReturnZero},
-    {"kernel32.dll", "UnmapViewOfFile", kOffReturnOne},
-    {"kernel32.dll", "FlushViewOfFile", kOffReturnOne},
-    {"kernel32.dll", "ExpandEnvironmentStringsW", kOffReturnZero},
+    {"kernel32.dll", "CreateFileMappingW", kOffReturnZero}, {"kernel32.dll", "CreateFileMappingA", kOffReturnZero},
+    {"kernel32.dll", "OpenFileMappingW", kOffReturnZero}, {"kernel32.dll", "MapViewOfFile", kOffReturnZero},
+    {"kernel32.dll", "MapViewOfFileEx", kOffReturnZero}, {"kernel32.dll", "UnmapViewOfFile", kOffReturnOne},
+    {"kernel32.dll", "FlushViewOfFile", kOffReturnOne}, {"kernel32.dll", "ExpandEnvironmentStringsW", kOffReturnZero},
     {"kernel32.dll", "ExpandEnvironmentStringsA", kOffReturnZero},
     {"kernel32.dll", "GetEnvironmentStringsA", kOffReturnZero},
-    {"kernel32.dll", "FreeEnvironmentStringsA", kOffReturnOne},
-    {"kernel32.dll", "SetStdHandle", kOffReturnOne},
+    {"kernel32.dll", "FreeEnvironmentStringsA", kOffReturnOne}, {"kernel32.dll", "SetStdHandle", kOffReturnOne},
     {"kernel32.dll", "GetConsoleScreenBufferInfo", kOffGetConsoleScreenBufferInfo},
     {"kernel32.dll", "GetNumberOfConsoleInputEvents", kOffReturnZero},
-    {"kernel32.dll", "PeekConsoleInputW", kOffReturnZero},
-    {"kernel32.dll", "ReadConsoleInputW", kOffReturnZero},
+    {"kernel32.dll", "PeekConsoleInputW", kOffReturnZero}, {"kernel32.dll", "ReadConsoleInputW", kOffReturnZero},
     {"kernel32.dll", "WaitForInputIdle", kOffReturnZero}, // 0 = WAIT_OBJECT_0
     {"kernel32.dll", "PeekNamedPipe", kOffReturnZero},
 
@@ -805,19 +690,13 @@
     // it as a 3-way compare see "equal" — the conservative
     // fallback that avoids misordering.
     {"kernel32.dll", "CompareStringW", kOffReturnTwo}, // CSTR_EQUAL
-    {"kernel32.dll", "CompareStringA", kOffReturnTwo},
-    {"kernel32.dll", "CompareStringEx", kOffReturnTwo},
-    {"kernel32.dll", "LCMapStringW", kOffReturnZero},
-    {"kernel32.dll", "LCMapStringA", kOffReturnZero},
-    {"kernel32.dll", "LCMapStringEx", kOffReturnZero},
-    {"kernel32.dll", "GetLocaleInfoW", kOffReturnZero},
-    {"kernel32.dll", "GetLocaleInfoA", kOffReturnZero},
-    {"kernel32.dll", "GetLocaleInfoEx", kOffReturnZero},
+    {"kernel32.dll", "CompareStringA", kOffReturnTwo}, {"kernel32.dll", "CompareStringEx", kOffReturnTwo},
+    {"kernel32.dll", "LCMapStringW", kOffReturnZero}, {"kernel32.dll", "LCMapStringA", kOffReturnZero},
+    {"kernel32.dll", "LCMapStringEx", kOffReturnZero}, {"kernel32.dll", "GetLocaleInfoW", kOffReturnZero},
+    {"kernel32.dll", "GetLocaleInfoA", kOffReturnZero}, {"kernel32.dll", "GetLocaleInfoEx", kOffReturnZero},
     {"kernel32.dll", "EnumSystemLocalesW", kOffReturnOne}, // pretend iteration done
-    {"kernel32.dll", "EnumSystemLocalesA", kOffReturnOne},
-    {"kernel32.dll", "GetStringTypeW", kOffReturnOne},
-    {"kernel32.dll", "GetStringTypeA", kOffReturnOne},
-    {"kernel32.dll", "GetStringTypeExW", kOffReturnOne},
+    {"kernel32.dll", "EnumSystemLocalesA", kOffReturnOne}, {"kernel32.dll", "GetStringTypeW", kOffReturnOne},
+    {"kernel32.dll", "GetStringTypeA", kOffReturnOne}, {"kernel32.dll", "GetStringTypeExW", kOffReturnOne},
     {"kernel32.dll", "IsDBCSLeadByte", kOffReturnZero}, // FALSE — no DBCS
 
     // === shell32 / ole32 / winmm / shlwapi / psapi ==
@@ -827,75 +706,45 @@
     // result" so callers fall back cleanly.
 
     // shell32 — folder paths + shell-execute.
-    {"shell32.dll", "SHGetFolderPathW", kOffReturnZero},
-    {"shell32.dll", "SHGetFolderPathA", kOffReturnZero},
-    {"shell32.dll", "SHGetKnownFolderPath", kOffReturnZero},
-    {"shell32.dll", "SHCreateDirectoryW", kOffReturnZero},
-    {"shell32.dll", "SHCreateDirectoryExW", kOffReturnZero},
-    {"shell32.dll", "SHGetPathFromIDListW", kOffReturnOne},
-    {"shell32.dll", "CommandLineToArgvW", kOffReturnZero},
-    {"shell32.dll", "ShellExecuteW", kOffReturnOne},
-    {"shell32.dll", "ShellExecuteExW", kOffReturnOne},
-    {"shell32.dll", "SHGetSpecialFolderPathW", kOffReturnOne},
-    {"shell32.dll", "SHFileOperationW", kOffReturnZero},
-    {"shell32.dll", "ExtractIconW", kOffReturnZero},
+    {"shell32.dll", "SHGetFolderPathW", kOffReturnZero}, {"shell32.dll", "SHGetFolderPathA", kOffReturnZero},
+    {"shell32.dll", "SHGetKnownFolderPath", kOffReturnZero}, {"shell32.dll", "SHCreateDirectoryW", kOffReturnZero},
+    {"shell32.dll", "SHCreateDirectoryExW", kOffReturnZero}, {"shell32.dll", "SHGetPathFromIDListW", kOffReturnOne},
+    {"shell32.dll", "CommandLineToArgvW", kOffReturnZero}, {"shell32.dll", "ShellExecuteW", kOffReturnOne},
+    {"shell32.dll", "ShellExecuteExW", kOffReturnOne}, {"shell32.dll", "SHGetSpecialFolderPathW", kOffReturnOne},
+    {"shell32.dll", "SHFileOperationW", kOffReturnZero}, {"shell32.dll", "ExtractIconW", kOffReturnZero},
     {"shell32.dll", "ExtractIconExW", kOffReturnZero},
 
     // ole32 + oleaut32 — COM.
-    {"ole32.dll", "CoInitialize", kOffReturnZero},
-    {"ole32.dll", "CoInitializeEx", kOffReturnZero},
-    {"ole32.dll", "CoUninitialize", kOffCritSecNop},
-    {"ole32.dll", "CoCreateInstance", kOffHresultEFail},
-    {"ole32.dll", "CoCreateInstanceEx", kOffHresultEFail},
-    {"ole32.dll", "CoGetClassObject", kOffHresultEFail},
-    {"ole32.dll", "CoTaskMemAlloc", kOffReturnZero},
-    {"ole32.dll", "CoTaskMemFree", kOffCritSecNop},
-    {"ole32.dll", "CoTaskMemRealloc", kOffReturnZero},
-    {"ole32.dll", "OleInitialize", kOffReturnZero},
-    {"ole32.dll", "OleUninitialize", kOffCritSecNop},
-    {"ole32.dll", "CLSIDFromString", kOffHresultEFail},
-    {"ole32.dll", "CLSIDFromProgID", kOffHresultEFail},
-    {"ole32.dll", "StringFromCLSID", kOffHresultEFail},
-    {"ole32.dll", "IIDFromString", kOffHresultEFail},
-    {"oleaut32.dll", "SysAllocString", kOffReturnZero},
-    {"oleaut32.dll", "SysFreeString", kOffCritSecNop},
-    {"oleaut32.dll", "SysStringLen", kOffReturnZero},
-    {"oleaut32.dll", "VariantInit", kOffCritSecNop},
-    {"oleaut32.dll", "VariantClear", kOffReturnZero},
+    {"ole32.dll", "CoInitialize", kOffReturnZero}, {"ole32.dll", "CoInitializeEx", kOffReturnZero},
+    {"ole32.dll", "CoUninitialize", kOffCritSecNop}, {"ole32.dll", "CoCreateInstance", kOffHresultEFail},
+    {"ole32.dll", "CoCreateInstanceEx", kOffHresultEFail}, {"ole32.dll", "CoGetClassObject", kOffHresultEFail},
+    {"ole32.dll", "CoTaskMemAlloc", kOffReturnZero}, {"ole32.dll", "CoTaskMemFree", kOffCritSecNop},
+    {"ole32.dll", "CoTaskMemRealloc", kOffReturnZero}, {"ole32.dll", "OleInitialize", kOffReturnZero},
+    {"ole32.dll", "OleUninitialize", kOffCritSecNop}, {"ole32.dll", "CLSIDFromString", kOffHresultEFail},
+    {"ole32.dll", "CLSIDFromProgID", kOffHresultEFail}, {"ole32.dll", "StringFromCLSID", kOffHresultEFail},
+    {"ole32.dll", "IIDFromString", kOffHresultEFail}, {"oleaut32.dll", "SysAllocString", kOffReturnZero},
+    {"oleaut32.dll", "SysFreeString", kOffCritSecNop}, {"oleaut32.dll", "SysStringLen", kOffReturnZero},
+    {"oleaut32.dll", "VariantInit", kOffCritSecNop}, {"oleaut32.dll", "VariantClear", kOffReturnZero},
 
     // winmm — timer + multimedia.
-    {"winmm.dll", "timeGetTime", kOffGetTickCount},
-    {"winmm.dll", "timeBeginPeriod", kOffReturnZero},
-    {"winmm.dll", "timeEndPeriod", kOffReturnZero},
-    {"winmm.dll", "timeGetDevCaps", kOffReturnZero},
-    {"winmm.dll", "PlaySoundW", kOffReturnOne},
-    {"winmm.dll", "mciSendStringW", kOffReturnZero},
+    {"winmm.dll", "timeGetTime", kOffGetTickCount}, {"winmm.dll", "timeBeginPeriod", kOffReturnZero},
+    {"winmm.dll", "timeEndPeriod", kOffReturnZero}, {"winmm.dll", "timeGetDevCaps", kOffReturnZero},
+    {"winmm.dll", "PlaySoundW", kOffReturnOne}, {"winmm.dll", "mciSendStringW", kOffReturnZero},
 
     // shlwapi — path / string helpers.
-    {"shlwapi.dll", "PathFileExistsW", kOffReturnZero},
-    {"shlwapi.dll", "PathFileExistsA", kOffReturnZero},
-    {"shlwapi.dll", "PathFindFileNameW", kOffReturnZero},
-    {"shlwapi.dll", "PathFindFileNameA", kOffReturnZero},
-    {"shlwapi.dll", "PathFindExtensionW", kOffReturnZero},
-    {"shlwapi.dll", "PathFindExtensionA", kOffReturnZero},
-    {"shlwapi.dll", "PathCombineW", kOffReturnZero},
-    {"shlwapi.dll", "PathIsDirectoryW", kOffReturnZero},
-    {"shlwapi.dll", "PathRemoveFileSpecW", kOffReturnZero},
-    {"shlwapi.dll", "PathStripPathW", kOffCritSecNop},
-    {"shlwapi.dll", "PathAppendW", kOffReturnZero},
-    {"shlwapi.dll", "PathAddBackslashW", kOffReturnZero},
-    {"shlwapi.dll", "StrStrW", kOffReturnZero},
-    {"shlwapi.dll", "StrStrIW", kOffReturnZero},
-    {"shlwapi.dll", "StrCmpNW", kOffReturnZero},
-    {"shlwapi.dll", "StrCmpW", kOffReturnZero},
+    {"shlwapi.dll", "PathFileExistsW", kOffReturnZero}, {"shlwapi.dll", "PathFileExistsA", kOffReturnZero},
+    {"shlwapi.dll", "PathFindFileNameW", kOffReturnZero}, {"shlwapi.dll", "PathFindFileNameA", kOffReturnZero},
+    {"shlwapi.dll", "PathFindExtensionW", kOffReturnZero}, {"shlwapi.dll", "PathFindExtensionA", kOffReturnZero},
+    {"shlwapi.dll", "PathCombineW", kOffReturnZero}, {"shlwapi.dll", "PathIsDirectoryW", kOffReturnZero},
+    {"shlwapi.dll", "PathRemoveFileSpecW", kOffReturnZero}, {"shlwapi.dll", "PathStripPathW", kOffCritSecNop},
+    {"shlwapi.dll", "PathAppendW", kOffReturnZero}, {"shlwapi.dll", "PathAddBackslashW", kOffReturnZero},
+    {"shlwapi.dll", "StrStrW", kOffReturnZero}, {"shlwapi.dll", "StrStrIW", kOffReturnZero},
+    {"shlwapi.dll", "StrCmpNW", kOffReturnZero}, {"shlwapi.dll", "StrCmpW", kOffReturnZero},
 
     // psapi — process/module enumeration.
-    {"psapi.dll", "EnumProcesses", kOffReturnZero},
-    {"psapi.dll", "EnumProcessModules", kOffReturnZero},
-    {"psapi.dll", "GetModuleBaseNameW", kOffReturnZero},
-    {"psapi.dll", "GetModuleFileNameExW", kOffReturnZero},
-    {"psapi.dll", "GetProcessMemoryInfo", kOffReturnZero},
-    {"psapi.dll", "GetMappedFileNameW", kOffReturnZero},
+    {"psapi.dll", "EnumProcesses", kOffReturnZero}, {"psapi.dll", "EnumProcessModules", kOffReturnZero},
+    {"psapi.dll", "GetModuleBaseNameW", kOffReturnZero}, {"psapi.dll", "GetModuleFileNameExW", kOffReturnZero},
+    {"psapi.dll", "GetProcessMemoryInfo", kOffReturnZero}, {"psapi.dll", "GetMappedFileNameW", kOffReturnZero},
     {"psapi.dll", "QueryWorkingSet", kOffReturnZero},
 
     // === kernelbase / bcrypt / dbghelp / extended ntdll ===
@@ -908,50 +757,33 @@
     // built against the Win8+ SDK bind directly to kernelbase.
     // Aliasing to the same internal stubs means they work
     // identically.
-    {"kernelbase.dll", "GetLastError", kOffGetLastError},
-    {"kernelbase.dll", "SetLastError", kOffSetLastError},
+    {"kernelbase.dll", "GetLastError", kOffGetLastError}, {"kernelbase.dll", "SetLastError", kOffSetLastError},
     {"kernelbase.dll", "GetCurrentProcess", kOffGetCurrentProcess},
     {"kernelbase.dll", "GetCurrentProcessId", kOffGetCurrentProcessId},
     {"kernelbase.dll", "GetCurrentThreadId", kOffGetCurrentThreadId},
-    {"kernelbase.dll", "ExitProcess", kOffExitProcess},
-    {"kernelbase.dll", "WriteFile", kOffWriteFile},
-    {"kernelbase.dll", "ReadFile", kOffReadFile},
-    {"kernelbase.dll", "CloseHandle", kOffCloseHandle},
-    {"kernelbase.dll", "CreateFileW", kOffCreateFileW},
-    {"kernelbase.dll", "HeapAlloc", kOffHeapAlloc},
-    {"kernelbase.dll", "HeapFree", kOffHeapFree},
-    {"kernelbase.dll", "GetProcessHeap", kOffGetProcessHeap},
-    {"kernelbase.dll", "GetStdHandle", kOffGetStdHandle},
-    {"kernelbase.dll", "VirtualAlloc", kOffVirtualAlloc},
-    {"kernelbase.dll", "VirtualFree", kOffVirtualFree},
-    {"kernelbase.dll", "VirtualProtect", kOffVirtualProtect},
-    {"kernelbase.dll", "CreateMutexW", kOffCreateMutexW},
-    {"kernelbase.dll", "WaitForSingleObject", kOffWaitForObj4},
-    {"kernelbase.dll", "WaitForSingleObjectEx", kOffWaitForObj4},
-    {"kernelbase.dll", "ReleaseMutex", kOffReleaseMutex},
-    {"kernelbase.dll", "CreateEventW", kOffCreateEventReal},
-    {"kernelbase.dll", "SetEvent", kOffSetEventReal},
-    {"kernelbase.dll", "ResetEvent", kOffResetEventReal},
-    {"kernelbase.dll", "Sleep", kOffSleep},
-    {"kernelbase.dll", "SwitchToThread", kOffSwitchToThread},
-    {"kernelbase.dll", "GetCommandLineW", kOffGetCmdLineW},
+    {"kernelbase.dll", "ExitProcess", kOffExitProcess}, {"kernelbase.dll", "WriteFile", kOffWriteFile},
+    {"kernelbase.dll", "ReadFile", kOffReadFile}, {"kernelbase.dll", "CloseHandle", kOffCloseHandle},
+    {"kernelbase.dll", "CreateFileW", kOffCreateFileW}, {"kernelbase.dll", "HeapAlloc", kOffHeapAlloc},
+    {"kernelbase.dll", "HeapFree", kOffHeapFree}, {"kernelbase.dll", "GetProcessHeap", kOffGetProcessHeap},
+    {"kernelbase.dll", "GetStdHandle", kOffGetStdHandle}, {"kernelbase.dll", "VirtualAlloc", kOffVirtualAlloc},
+    {"kernelbase.dll", "VirtualFree", kOffVirtualFree}, {"kernelbase.dll", "VirtualProtect", kOffVirtualProtect},
+    {"kernelbase.dll", "CreateMutexW", kOffCreateMutexW}, {"kernelbase.dll", "WaitForSingleObject", kOffWaitForObj4},
+    {"kernelbase.dll", "WaitForSingleObjectEx", kOffWaitForObj4}, {"kernelbase.dll", "ReleaseMutex", kOffReleaseMutex},
+    {"kernelbase.dll", "CreateEventW", kOffCreateEventReal}, {"kernelbase.dll", "SetEvent", kOffSetEventReal},
+    {"kernelbase.dll", "ResetEvent", kOffResetEventReal}, {"kernelbase.dll", "Sleep", kOffSleep},
+    {"kernelbase.dll", "SwitchToThread", kOffSwitchToThread}, {"kernelbase.dll", "GetCommandLineW", kOffGetCmdLineW},
     {"kernelbase.dll", "GetCommandLineA", kOffGetCmdLineA},
     {"kernelbase.dll", "GetModuleHandleW", kOffGetModuleHandleW},
-    {"kernelbase.dll", "GetModuleFileNameW", kOffGetModFileNameW},
-    {"kernelbase.dll", "TlsAlloc", kOffTlsAllocReal},
-    {"kernelbase.dll", "TlsFree", kOffTlsFreeReal},
-    {"kernelbase.dll", "TlsGetValue", kOffTlsGetValueReal},
+    {"kernelbase.dll", "GetModuleFileNameW", kOffGetModFileNameW}, {"kernelbase.dll", "TlsAlloc", kOffTlsAllocReal},
+    {"kernelbase.dll", "TlsFree", kOffTlsFreeReal}, {"kernelbase.dll", "TlsGetValue", kOffTlsGetValueReal},
     {"kernelbase.dll", "TlsSetValue", kOffTlsSetValueReal},
     {"kernelbase.dll", "InterlockedIncrement", kOffInterlockedInc},
     {"kernelbase.dll", "InterlockedDecrement", kOffInterlockedDec},
     {"kernelbase.dll", "InterlockedCompareExchange", kOffInterlockedCmpXchg},
     {"kernelbase.dll", "InterlockedExchange", kOffInterlockedExchg},
-    {"kernelbase.dll", "VerifyVersionInfoW", kOffReturnOne},
-    {"kernelbase.dll", "IsWow64Process", kOffIsWow64},
-    {"kernelbase.dll", "GetVersionExW", kOffGetVersionExW},
-    {"kernelbase.dll", "lstrlenW", kOffLstrlenW},
-    {"kernelbase.dll", "lstrcmpW", kOffLstrcmpW},
-    {"kernelbase.dll", "MultiByteToWideChar", kOffMBtoWC},
+    {"kernelbase.dll", "VerifyVersionInfoW", kOffReturnOne}, {"kernelbase.dll", "IsWow64Process", kOffIsWow64},
+    {"kernelbase.dll", "GetVersionExW", kOffGetVersionExW}, {"kernelbase.dll", "lstrlenW", kOffLstrlenW},
+    {"kernelbase.dll", "lstrcmpW", kOffLstrcmpW}, {"kernelbase.dll", "MultiByteToWideChar", kOffMBtoWC},
     {"kernelbase.dll", "WideCharToMultiByte", kOffWCtoMB},
 
     // bcrypt.dll — CNG crypto. All "no-op success" for v0; real
@@ -963,43 +795,32 @@
     {"bcrypt.dll", "BCryptGenRandom", kOffReturnStatusNotImpl},
     {"bcrypt.dll", "BCryptCreateHash", kOffReturnStatusNotImpl},
     {"bcrypt.dll", "BCryptHashData", kOffReturnStatusNotImpl},
-    {"bcrypt.dll", "BCryptFinishHash", kOffReturnStatusNotImpl},
-    {"bcrypt.dll", "BCryptDestroyHash", kOffReturnZero},
+    {"bcrypt.dll", "BCryptFinishHash", kOffReturnStatusNotImpl}, {"bcrypt.dll", "BCryptDestroyHash", kOffReturnZero},
     {"bcrypt.dll", "BCryptGetProperty", kOffReturnStatusNotImpl},
     // advapi32 has a legacy crypto entry that some CRT builds probe.
     {"advapi32.dll", "SystemFunction036", kOffReturnOne}, // RtlGenRandom — return TRUE, buf untouched
 
     // dbghelp.dll — symbolic debugging. Everything stubbed to
     // "not available"; programs usually fall back to raw addresses.
-    {"dbghelp.dll", "SymInitialize", kOffReturnOne},
-    {"dbghelp.dll", "SymInitializeW", kOffReturnOne},
-    {"dbghelp.dll", "SymCleanup", kOffReturnOne},
-    {"dbghelp.dll", "SymFromAddr", kOffReturnZero},
-    {"dbghelp.dll", "SymFromAddrW", kOffReturnZero},
-    {"dbghelp.dll", "SymGetLineFromAddr64", kOffReturnZero},
-    {"dbghelp.dll", "SymLoadModule64", kOffReturnZero},
-    {"dbghelp.dll", "StackWalk64", kOffReturnZero},
-    {"dbghelp.dll", "SymFunctionTableAccess64", kOffReturnZero},
-    {"dbghelp.dll", "SymGetModuleBase64", kOffReturnZero},
+    {"dbghelp.dll", "SymInitialize", kOffReturnOne}, {"dbghelp.dll", "SymInitializeW", kOffReturnOne},
+    {"dbghelp.dll", "SymCleanup", kOffReturnOne}, {"dbghelp.dll", "SymFromAddr", kOffReturnZero},
+    {"dbghelp.dll", "SymFromAddrW", kOffReturnZero}, {"dbghelp.dll", "SymGetLineFromAddr64", kOffReturnZero},
+    {"dbghelp.dll", "SymLoadModule64", kOffReturnZero}, {"dbghelp.dll", "StackWalk64", kOffReturnZero},
+    {"dbghelp.dll", "SymFunctionTableAccess64", kOffReturnZero}, {"dbghelp.dll", "SymGetModuleBase64", kOffReturnZero},
     {"dbghelp.dll", "MiniDumpWriteDump", kOffReturnZero},
 
     // More ntdll Rtl* — pure user-mode helpers often touched
     // even from kernel32-using apps. Most return 0/success.
-    {"ntdll.dll", "RtlInitUnicodeString", kOffCritSecNop}, // void
-    {"ntdll.dll", "RtlInitAnsiString", kOffCritSecNop},    // void
-    {"ntdll.dll", "RtlFreeUnicodeString", kOffCritSecNop},
-    {"ntdll.dll", "RtlAllocateHeap", kOffHeapAlloc}, // real heap
-    {"ntdll.dll", "RtlFreeHeap", kOffHeapFree},      // real heap
-    {"ntdll.dll", "RtlSizeHeap", kOffHeapSize},
-    {"ntdll.dll", "RtlReAllocateHeap", kOffHeapRealloc},
+    {"ntdll.dll", "RtlInitUnicodeString", kOffCritSecNop},                                                  // void
+    {"ntdll.dll", "RtlInitAnsiString", kOffCritSecNop},                                                     // void
+    {"ntdll.dll", "RtlFreeUnicodeString", kOffCritSecNop}, {"ntdll.dll", "RtlAllocateHeap", kOffHeapAlloc}, // real heap
+    {"ntdll.dll", "RtlFreeHeap", kOffHeapFree},                                                             // real heap
+    {"ntdll.dll", "RtlSizeHeap", kOffHeapSize}, {"ntdll.dll", "RtlReAllocateHeap", kOffHeapRealloc},
     {"ntdll.dll", "RtlCreateHeap", kOffReturnZero}, // NULL
-    {"ntdll.dll", "RtlDestroyHeap", kOffReturnZero},
-    {"ntdll.dll", "RtlCompareMemory", kOffReturnZero},
-    {"ntdll.dll", "RtlZeroMemory", kOffCritSecNop}, // void
-    {"ntdll.dll", "RtlFillMemory", kOffCritSecNop},
-    {"ntdll.dll", "RtlCopyMemory", kOffMemmove}, // real memcpy
-    {"ntdll.dll", "RtlMoveMemory", kOffMemmove},
-    {"ntdll.dll", "RtlEnterCriticalSection", kOffEnterCritSecReal},
+    {"ntdll.dll", "RtlDestroyHeap", kOffReturnZero}, {"ntdll.dll", "RtlCompareMemory", kOffReturnZero},
+    {"ntdll.dll", "RtlZeroMemory", kOffCritSecNop},                                              // void
+    {"ntdll.dll", "RtlFillMemory", kOffCritSecNop}, {"ntdll.dll", "RtlCopyMemory", kOffMemmove}, // real memcpy
+    {"ntdll.dll", "RtlMoveMemory", kOffMemmove}, {"ntdll.dll", "RtlEnterCriticalSection", kOffEnterCritSecReal},
     {"ntdll.dll", "RtlLeaveCriticalSection", kOffLeaveCritSecReal},
     {"ntdll.dll", "RtlInitializeCriticalSection", kOffInitCritSec},
     {"ntdll.dll", "RtlDeleteCriticalSection", kOffCritSecNop},
@@ -1008,8 +829,7 @@
     // exact name — programs hit it through the Rtl alias above or
     // via the (unstubbed) kernel32!TryEnterCriticalSection thunk.
     {"kernel32.dll", "TryEnterCriticalSection", kOffTryEnterCritSecReal},
-    {"ntdll.dll", "LdrLoadDll", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "LdrGetDllHandle", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "LdrLoadDll", kOffReturnStatusNotImpl}, {"ntdll.dll", "LdrGetDllHandle", kOffReturnStatusNotImpl},
     {"ntdll.dll", "LdrGetProcedureAddress", kOffReturnStatusNotImpl},
     {"ntdll.dll", "RtlRunOnceExecuteOnce", kOffReturnZero}, // S_OK
 
@@ -1020,27 +840,23 @@
     // kernel32 heap exports: take a HANDLE arg that v0
     // ignores — GetProcessHeap returns the same cookie
     // HeapAlloc ignores, so it's internally consistent.
-    {"kernel32.dll", "GetProcessHeap", kOffGetProcessHeap},
-    {"kernel32.dll", "HeapAlloc", kOffHeapAlloc},
+    {"kernel32.dll", "GetProcessHeap", kOffGetProcessHeap}, {"kernel32.dll", "HeapAlloc", kOffHeapAlloc},
     {"kernel32.dll", "HeapFree", kOffHeapFree},
     // HeapCreate: Win32 normally creates a private heap.
     // v0 collapses to the shared process heap — same handle
     // as GetProcessHeap. HeapDestroy is a no-op returning
     // TRUE (we never actually free the heap pages).
-    {"kernel32.dll", "HeapCreate", kOffGetProcessHeap},
-    {"kernel32.dll", "HeapDestroy", kOffReturnOne},
+    {"kernel32.dll", "HeapCreate", kOffGetProcessHeap}, {"kernel32.dll", "HeapDestroy", kOffReturnOne},
     // HeapReAlloc / HeapSize: backed by SYS_HEAP_REALLOC +
     // SYS_HEAP_SIZE as of — block header carries the
     // rounded-up size so we can translate both operations
     // without extra per-block bookkeeping.
-    {"kernel32.dll", "HeapReAlloc", kOffHeapRealloc},
-    {"kernel32.dll", "HeapSize", kOffHeapSize},
+    {"kernel32.dll", "HeapReAlloc", kOffHeapRealloc}, {"kernel32.dll", "HeapSize", kOffHeapSize},
 
     // UCRT / msvcrt / apiset heap names — all forward to the
     // same syscall-backed stubs. realloc returns NULL; malloc
     // and free are straight-through.
-    {"api-ms-win-crt-heap-l1-1-0.dll", "malloc", kOffMalloc},
-    {"api-ms-win-crt-heap-l1-1-0.dll", "free", kOffFree},
+    {"api-ms-win-crt-heap-l1-1-0.dll", "malloc", kOffMalloc}, {"api-ms-win-crt-heap-l1-1-0.dll", "free", kOffFree},
     {"api-ms-win-crt-heap-l1-1-0.dll", "calloc", kOffCalloc},
     {"api-ms-win-crt-heap-l1-1-0.dll", "realloc", kOffRealloc},
     // _aligned_malloc / _aligned_free: v0 ignores alignment.
@@ -1051,16 +867,11 @@
     {"api-ms-win-crt-heap-l1-1-0.dll", "_aligned_malloc", kOffMalloc},
     {"api-ms-win-crt-heap-l1-1-0.dll", "_aligned_free", kOffFree},
 
-    {"ucrtbase.dll", "malloc", kOffMalloc},
-    {"ucrtbase.dll", "free", kOffFree},
-    {"ucrtbase.dll", "calloc", kOffCalloc},
-    {"ucrtbase.dll", "realloc", kOffRealloc},
-    {"ucrtbase.dll", "_aligned_malloc", kOffMalloc},
+    {"ucrtbase.dll", "malloc", kOffMalloc}, {"ucrtbase.dll", "free", kOffFree}, {"ucrtbase.dll", "calloc", kOffCalloc},
+    {"ucrtbase.dll", "realloc", kOffRealloc}, {"ucrtbase.dll", "_aligned_malloc", kOffMalloc},
     {"ucrtbase.dll", "_aligned_free", kOffFree},
 
-    {"msvcrt.dll", "malloc", kOffMalloc},
-    {"msvcrt.dll", "free", kOffFree},
-    {"msvcrt.dll", "calloc", kOffCalloc},
+    {"msvcrt.dll", "malloc", kOffMalloc}, {"msvcrt.dll", "free", kOffFree}, {"msvcrt.dll", "calloc", kOffCalloc},
     {"msvcrt.dll", "realloc", kOffRealloc},
 
     // advapi32 privilege/token + kernel32 event /
@@ -1142,18 +953,15 @@
     // QueryPerformance{Counter,Frequency} upgraded to
     // HPET-backed nanosecond resolution. The old stubs at 0x1F6
     // / 0x206 stay in the page as dead bytes.
-    {"kernel32.dll", "QueryPerformanceCounter", kOffQpcNs},
-    {"kernel32.dll", "QueryPerformanceFrequency", kOffQpfNs},
-    {"kernel32.dll", "GetTickCount", kOffGetTickCount},
-    {"kernel32.dll", "GetTickCount64", kOffGetTickCount},
+    {"kernel32.dll", "QueryPerformanceCounter", kOffQpcNs}, {"kernel32.dll", "QueryPerformanceFrequency", kOffQpfNs},
+    {"kernel32.dll", "GetTickCount", kOffGetTickCount}, {"kernel32.dll", "GetTickCount64", kOffGetTickCount},
 
     // Sleep + SwitchToThread (timer + voluntary yield).
     // Sleep routes to SYS_SLEEP_MS; SwitchToThread routes to
     // SYS_YIELD. SleepEx ignores its bAlertable arg and aliases
     // to Sleep — no APC delivery in v0, so the alertable form
     // would never actually fire user-mode APCs anyway.
-    {"kernel32.dll", "Sleep", kOffSleep},
-    {"kernel32.dll", "SleepEx", kOffSleep},
+    {"kernel32.dll", "Sleep", kOffSleep}, {"kernel32.dll", "SleepEx", kOffSleep},
     {"kernel32.dll", "SwitchToThread", kOffSwitchToThread},
 
     // command line + environment (proc-env page reads).
@@ -1165,8 +973,7 @@
     // any caller that has a default. GetEnvironmentStringsW
     // returns a pointer to an empty block (two NUL bytes).
     // FreeEnvironmentStringsW is a no-op returning TRUE.
-    {"kernel32.dll", "GetCommandLineW", kOffGetCmdLineW},
-    {"kernel32.dll", "GetCommandLineA", kOffGetCmdLineA},
+    {"kernel32.dll", "GetCommandLineW", kOffGetCmdLineW}, {"kernel32.dll", "GetCommandLineA", kOffGetCmdLineA},
     {"kernel32.dll", "GetEnvironmentVariableW", kOffReturnZero},
     {"kernel32.dll", "GetEnvironmentVariableA", kOffReturnZero},
     {"kernel32.dll", "GetEnvironmentStringsW", kOffGetEnvBlockW},
@@ -1177,22 +984,16 @@
     {"kernel32.dll", "SetEnvironmentVariableA", kOffReturnOne},
 
     // Rtl* unwind (v0: empty / not-found sentinels)
-    {"kernel32.dll", "RtlCaptureStackBackTrace", kOffReturnZero},
-    {"kernel32.dll", "RtlCaptureContext", kOffReturnZero},
-    {"kernel32.dll", "RtlLookupFunctionEntry", kOffReturnZero},
-    {"kernel32.dll", "RtlVirtualUnwind", kOffReturnZero},
+    {"kernel32.dll", "RtlCaptureStackBackTrace", kOffReturnZero}, {"kernel32.dll", "RtlCaptureContext", kOffReturnZero},
+    {"kernel32.dll", "RtlLookupFunctionEntry", kOffReturnZero}, {"kernel32.dll", "RtlVirtualUnwind", kOffReturnZero},
 
     // Toolhelp32 + thread management (empty snapshot / no
     // ops). Real implementation requires the kernel to
     // expose the process table to ring 3 — deferred.
-    {"kernel32.dll", "CreateToolhelp32Snapshot", kOffReturnOne},
-    {"kernel32.dll", "Process32First", kOffReturnZero},
-    {"kernel32.dll", "Process32FirstW", kOffReturnZero},
-    {"kernel32.dll", "Process32Next", kOffReturnZero},
-    {"kernel32.dll", "Process32NextW", kOffReturnZero},
-    {"kernel32.dll", "CreateRemoteThread", kOffReturnZero},
-    {"kernel32.dll", "ResumeThread", kOffReturnZero},
-    {"kernel32.dll", "GetExitCodeProcess", kOffGetExitCodeThread},
+    {"kernel32.dll", "CreateToolhelp32Snapshot", kOffReturnOne}, {"kernel32.dll", "Process32First", kOffReturnZero},
+    {"kernel32.dll", "Process32FirstW", kOffReturnZero}, {"kernel32.dll", "Process32Next", kOffReturnZero},
+    {"kernel32.dll", "Process32NextW", kOffReturnZero}, {"kernel32.dll", "CreateRemoteThread", kOffReturnZero},
+    {"kernel32.dll", "ResumeThread", kOffReturnZero}, {"kernel32.dll", "GetExitCodeProcess", kOffGetExitCodeThread},
 
     // dbghelp + vcruntime SEH + UCRT convert.
     // All aliases to existing stubs; no new bytecode.
@@ -1201,8 +1002,7 @@
     // is the safe stub semantic for crash loggers that call
     // SymFromAddr — they'll print "address=0x???" instead of
     // "file:line", but never fault.
-    {"dbghelp.dll", "SymInitialize", kOffReturnOne},
-    {"dbghelp.dll", "SymCleanup", kOffReturnOne},
+    {"dbghelp.dll", "SymInitialize", kOffReturnOne}, {"dbghelp.dll", "SymCleanup", kOffReturnOne},
     {"dbghelp.dll", "SymFromAddr", kOffReturnZero},
 
     // vcruntime SEH / C++ ABI — any program that actually
@@ -1212,8 +1012,7 @@
     // ones return 0.
     {"vcruntime140.dll", "__CxxFrameHandler3", kOffTerminate},
     {"vcruntime140.dll", "__C_specific_handler", kOffTerminate},
-    {"vcruntime140.dll", "_CxxThrowException", kOffTerminate},
-    {"vcruntime140.dll", "_purecall", kOffTerminate},
+    {"vcruntime140.dll", "_CxxThrowException", kOffTerminate}, {"vcruntime140.dll", "_purecall", kOffTerminate},
     {"vcruntime140.dll", "__std_terminate", kOffTerminate},
     {"vcruntime140.dll", "__std_exception_copy", kOffReturnZero},
     {"vcruntime140.dll", "__std_exception_destroy", kOffReturnZero},
@@ -1226,14 +1025,10 @@
     {"api-ms-win-crt-convert-l1-1-0.dll", "strtoul", kOffReturnZero},
     {"api-ms-win-crt-convert-l1-1-0.dll", "strtol", kOffReturnZero},
     {"api-ms-win-crt-convert-l1-1-0.dll", "atoi", kOffReturnZero},
-    {"api-ms-win-crt-convert-l1-1-0.dll", "atol", kOffReturnZero},
-    {"ucrtbase.dll", "strtoul", kOffReturnZero},
-    {"ucrtbase.dll", "strtol", kOffReturnZero},
-    {"ucrtbase.dll", "atoi", kOffReturnZero},
-    {"ucrtbase.dll", "atol", kOffReturnZero},
-    {"msvcrt.dll", "strtoul", kOffReturnZero},
-    {"msvcrt.dll", "strtol", kOffReturnZero},
-    {"msvcrt.dll", "atoi", kOffReturnZero},
+    {"api-ms-win-crt-convert-l1-1-0.dll", "atol", kOffReturnZero}, {"ucrtbase.dll", "strtoul", kOffReturnZero},
+    {"ucrtbase.dll", "strtol", kOffReturnZero}, {"ucrtbase.dll", "atoi", kOffReturnZero},
+    {"ucrtbase.dll", "atol", kOffReturnZero}, {"msvcrt.dll", "strtoul", kOffReturnZero},
+    {"msvcrt.dll", "strtol", kOffReturnZero}, {"msvcrt.dll", "atoi", kOffReturnZero},
     {"msvcrt.dll", "atol", kOffReturnZero},
 
     // MSVCP140 throw helpers + small-return helpers.
@@ -1279,10 +1074,8 @@
     // ucrtbase is where the code lives, msvcrt is the legacy
     // name.
     {"api-ms-win-crt-runtime-l1-1-0.dll", "__p___argc", kOffPArgc},
-    {"api-ms-win-crt-runtime-l1-1-0.dll", "__p___argv", kOffPArgv},
-    {"ucrtbase.dll", "__p___argc", kOffPArgc},
-    {"ucrtbase.dll", "__p___argv", kOffPArgv},
-    {"msvcrt.dll", "__p___argc", kOffPArgc},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "__p___argv", kOffPArgv}, {"ucrtbase.dll", "__p___argc", kOffPArgc},
+    {"ucrtbase.dll", "__p___argv", kOffPArgv}, {"msvcrt.dll", "__p___argc", kOffPArgc},
     {"msvcrt.dll", "__p___argv", kOffPArgv},
 
     // UCRT stdio accessors. `__p__commode` returns
@@ -1292,12 +1085,67 @@
     // new-handler trampoline; v0 always "no handler set" so
     // the caller throws bad_alloc or returns failure — aliased
     // to the shared return-zero stub.
-    {"api-ms-win-crt-stdio-l1-1-0.dll", "__p__commode", kOffPCommode},
-    {"ucrtbase.dll", "__p__commode", kOffPCommode},
-    {"msvcrt.dll", "__p__commode", kOffPCommode},
-    {"api-ms-win-crt-heap-l1-1-0.dll", "_callnewh", kOffReturnZero},
-    {"ucrtbase.dll", "_callnewh", kOffReturnZero},
-    {"msvcrt.dll", "_callnewh", kOffReturnZero},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "__p__commode", kOffPCommode}, {"ucrtbase.dll", "__p__commode", kOffPCommode},
+    {"msvcrt.dll", "__p__commode", kOffPCommode}, {"api-ms-win-crt-heap-l1-1-0.dll", "_callnewh", kOffReturnZero},
+    {"ucrtbase.dll", "_callnewh", kOffReturnZero}, {"msvcrt.dll", "_callnewh", kOffReturnZero},
+
+    // CRT termination + init. 7za.exe (and most older MSVC PEs)
+    // import these from msvcrt.dll directly. Without `exit`, the
+    // entry function falls through `return 0;` and `ret`s to a
+    // NULL stack-bottom RIP — the program faults with #PF at
+    // rip=0 instead of exiting cleanly. Map to kOffExitProcess
+    // (which forwards arg1 in RCX → SYS_EXIT(RDI=rc)) so the
+    // exit code the program passes survives into the kernel —
+    // kOffTerminate would clobber it with the std::terminate
+    // sentinel value 3.
+    {"msvcrt.dll", "exit", kOffExitProcess}, {"msvcrt.dll", "_exit", kOffExitProcess},
+    // MSVCRT stdio — real SYS_WRITE to fd=1, ignore FILE*.
+    {"msvcrt.dll", "fputs", kOffFputs}, {"msvcrt.dll", "puts", kOffFputs}, // close enough for the help-text path
+    {"msvcrt.dll", "fwrite", kOffFwrite},
+    {"msvcrt.dll", "fputc", kOffFputc}, // returns c (not 0) so help-print continues
+    {"msvcrt.dll", "putchar", kOffFputc}, {"msvcrt.dll", "fflush", kOffReturnZero},
+    {"msvcrt.dll", "fgetc", kOffReturnMinus1}, // EOF
+    // Same stdio surface registered under the modern UCRT
+    // apiset DLL name + ucrtbase.dll. NASM (UCRT-based)
+    // imports from the apiset; without these its `fputs(...)
+    // stderr` for the no-args usage line NO-OP'd and the
+    // program exited with rc=2 silently.
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "fputs", kOffFputs}, {"api-ms-win-crt-stdio-l1-1-0.dll", "puts", kOffFputs},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "fwrite", kOffFwrite}, {"api-ms-win-crt-stdio-l1-1-0.dll", "fputc", kOffFputc},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "putchar", kOffFputc},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "fflush", kOffReturnZero},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "fgetc", kOffReturnMinus1},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "feof", kOffReturnOne},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "ferror", kOffReturnZero},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "fclose", kOffReturnZero},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "fread", kOffReturnZero},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "getc", kOffReturnMinus1}, {"ucrtbase.dll", "fputs", kOffFputs},
+    {"ucrtbase.dll", "puts", kOffFputs}, {"ucrtbase.dll", "fwrite", kOffFwrite}, {"ucrtbase.dll", "fputc", kOffFputc},
+    {"ucrtbase.dll", "putchar", kOffFputc}, {"ucrtbase.dll", "fflush", kOffReturnZero},
+    {"ucrtbase.dll", "fgetc", kOffReturnMinus1}, {"msvcrt.dll", "_cexit", kOffReturnZero}, // CRT cleanup; safe to no-op
+    {"msvcrt.dll", "_c_exit", kOffReturnZero}, // CRT cleanup (no exit); no-op
+    // _initterm walks an array of function pointers calling each
+    // non-null entry — used for static-init dispatch. We can't
+    // run real ctors yet (no static-init runtime), but a ret-only
+    // stub is correct: any program that depends on its ctors
+    // running won't get them, but at least won't fault here.
+    {"msvcrt.dll", "_initterm", kOffReturnZero}, {"msvcrt.dll", "_initterm_e", kOffReturnZero},
+    // __getmainargs / __wgetmainargs: populate argc/argv/env from
+    // proc-env so the CRT's argv-parsing path doesn't deref NULL.
+    // ReturnZero stub left a NULL argv in place and busybox-w32
+    // faulted at the first cmdline-walk step (cr2=1).
+    {"msvcrt.dll", "__getmainargs", kOffGetMainArgs}, {"msvcrt.dll", "__wgetmainargs", kOffGetMainArgs},
+    {"ucrtbase.dll", "__getmainargs", kOffGetMainArgs},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "__getmainargs", kOffGetMainArgs},
+
+    // _errno: thread-errno accessor. Shares one scratch slot in
+    // v0 (proc-env data-miss pad). Without this NASM crashes
+    // at the first stdio call: `call _errno; mov eax, [rax]`
+    // → mov eax, [0] when _errno returns 0.
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_errno", kOffPErrno}, {"ucrtbase.dll", "_errno", kOffPErrno},
+    {"msvcrt.dll", "_errno", kOffPErrno}, {"msvcrt.dll", "__set_app_type", kOffReturnZero},
+    {"msvcrt.dll", "__setusermatherr", kOffReturnZero}, {"msvcrt.dll", "_XcptFilter", kOffReturnZero},
+    {"msvcrt.dll", "_onexit", kOffReturnZero}, {"msvcrt.dll", "__dllonexit", kOffReturnZero},
 
     // MSVCP140 iostream methods. Direct-call paths
     // (via IAT) now do the right thing; virtual-dispatch paths
@@ -1375,18 +1223,14 @@
     {"d3d12.dll", "D3D12CreateDevice", kOffD3d12CreateStub},
     {"d3d12.dll", "D3D12GetDebugInterface", kOffD3d12CreateStub},
     {"d3d12.dll", "D3D12SerializeRootSignature", kOffD3d12CreateStub},
-    {"D3D12.dll", "D3D12CreateDevice", kOffD3d12CreateStub},
-    {"dxgi.dll", "CreateDXGIFactory", kOffDxgiCreateStub},
-    {"dxgi.dll", "CreateDXGIFactory1", kOffDxgiCreateStub},
-    {"dxgi.dll", "CreateDXGIFactory2", kOffDxgiCreateStub},
-    {"DXGI.dll", "CreateDXGIFactory", kOffDxgiCreateStub},
-    {"DXGI.dll", "CreateDXGIFactory1", kOffDxgiCreateStub},
+    {"D3D12.dll", "D3D12CreateDevice", kOffD3d12CreateStub}, {"dxgi.dll", "CreateDXGIFactory", kOffDxgiCreateStub},
+    {"dxgi.dll", "CreateDXGIFactory1", kOffDxgiCreateStub}, {"dxgi.dll", "CreateDXGIFactory2", kOffDxgiCreateStub},
+    {"DXGI.dll", "CreateDXGIFactory", kOffDxgiCreateStub}, {"DXGI.dll", "CreateDXGIFactory1", kOffDxgiCreateStub},
     {"DXGI.dll", "CreateDXGIFactory2", kOffDxgiCreateStub},
     // d3d9 predates HRESULT-first API — it returns an interface
     // pointer, NULL = failure. Alias to the shared return-zero
     // stub rather than E_FAIL.
-    {"d3d9.dll", "Direct3DCreate9", kOffReturnZero},
-    {"d3d9.dll", "Direct3DCreate9Ex", kOffHresultEFail},
+    {"d3d9.dll", "Direct3DCreate9", kOffReturnZero}, {"d3d9.dll", "Direct3DCreate9Ex", kOffHresultEFail},
 
     // -----------------------------------------------------------------
     // GUI pass-through: user32 + gdi32 + a handful of kernel32/winmm
@@ -1416,161 +1260,103 @@
     // sentinel anyway.
 
     // kernel32: locale / code-page sanity probes.
-    {"kernel32.dll", "IsValidLocale", kOffReturnOne},
-    {"kernel32.dll", "GetCPInfo", kOffReturnOne},
-    {"kernel32.dll", "GetCPInfoExA", kOffReturnOne},
-    {"kernel32.dll", "GetCPInfoExW", kOffReturnOne},
+    {"kernel32.dll", "IsValidLocale", kOffReturnOne}, {"kernel32.dll", "GetCPInfo", kOffReturnOne},
+    {"kernel32.dll", "GetCPInfoExA", kOffReturnOne}, {"kernel32.dll", "GetCPInfoExW", kOffReturnOne},
 
     // winmm: multimedia-timer — fake a valid timer ID + silent kill.
-    {"winmm.dll", "timeSetEvent", kOffReturnOne},
-    {"winmm.dll", "timeKillEvent", kOffReturnZero},
+    {"winmm.dll", "timeSetEvent", kOffReturnOne}, {"winmm.dll", "timeKillEvent", kOffReturnZero},
 
     // user32: window class + window lifecycle.
-    {"user32.dll", "RegisterClassA", kOffReturnOne},
-    {"user32.dll", "RegisterClassW", kOffReturnOne},
-    {"user32.dll", "RegisterClassExA", kOffReturnOne},
-    {"user32.dll", "RegisterClassExW", kOffReturnOne},
-    {"user32.dll", "UnregisterClassA", kOffReturnOne},
-    {"user32.dll", "UnregisterClassW", kOffReturnOne},
-    {"user32.dll", "CreateWindowExA", kOffReturnOne},
-    {"user32.dll", "CreateWindowExW", kOffReturnOne},
-    {"user32.dll", "DestroyWindow", kOffReturnOne},
-    {"user32.dll", "DefWindowProcA", kOffReturnZero},
-    {"user32.dll", "DefWindowProcW", kOffReturnZero},
-    {"user32.dll", "CallWindowProcA", kOffReturnZero},
-    {"user32.dll", "CallWindowProcW", kOffReturnZero},
-    {"user32.dll", "ShowWindow", kOffReturnZero},
-    {"user32.dll", "UpdateWindow", kOffWinUpdateWindow},
-    {"user32.dll", "GetClientRect", kOffReturnOne},
-    {"user32.dll", "GetWindowRect", kOffReturnOne},
-    {"user32.dll", "MoveWindow", kOffReturnOne},
-    {"user32.dll", "SetWindowPos", kOffReturnOne},
-    {"user32.dll", "InvalidateRect", kOffWinInvalidateRect},
-    {"user32.dll", "BeginPaint", kOffWinBeginPaint},
-    {"user32.dll", "EndPaint", kOffWinEndPaint},
-    {"user32.dll", "GetDC", kOffWinGetDC},
-    {"user32.dll", "ReleaseDC", kOffWinReleaseDC},
+    {"user32.dll", "RegisterClassA", kOffReturnOne}, {"user32.dll", "RegisterClassW", kOffReturnOne},
+    {"user32.dll", "RegisterClassExA", kOffReturnOne}, {"user32.dll", "RegisterClassExW", kOffReturnOne},
+    {"user32.dll", "UnregisterClassA", kOffReturnOne}, {"user32.dll", "UnregisterClassW", kOffReturnOne},
+    {"user32.dll", "CreateWindowExA", kOffReturnOne}, {"user32.dll", "CreateWindowExW", kOffReturnOne},
+    {"user32.dll", "DestroyWindow", kOffReturnOne}, {"user32.dll", "DefWindowProcA", kOffReturnZero},
+    {"user32.dll", "DefWindowProcW", kOffReturnZero}, {"user32.dll", "CallWindowProcA", kOffReturnZero},
+    {"user32.dll", "CallWindowProcW", kOffReturnZero}, {"user32.dll", "ShowWindow", kOffReturnZero},
+    {"user32.dll", "UpdateWindow", kOffWinUpdateWindow}, {"user32.dll", "GetClientRect", kOffReturnOne},
+    {"user32.dll", "GetWindowRect", kOffReturnOne}, {"user32.dll", "MoveWindow", kOffReturnOne},
+    {"user32.dll", "SetWindowPos", kOffReturnOne}, {"user32.dll", "InvalidateRect", kOffWinInvalidateRect},
+    {"user32.dll", "BeginPaint", kOffWinBeginPaint}, {"user32.dll", "EndPaint", kOffWinEndPaint},
+    {"user32.dll", "GetDC", kOffWinGetDC}, {"user32.dll", "ReleaseDC", kOffWinReleaseDC},
 
     // user32: message loop. GetMessage returns 0 so the canonical
     // `while (GetMessage(...)) DispatchMessage(...)` loop sees
     // WM_QUIT on the first iteration and exits cleanly. PeekMessage
     // returns 0 (no message available) for the variant that spins.
-    {"user32.dll", "GetMessageA", kOffGetMessageA},
-    {"user32.dll", "GetMessageW", kOffGetMessageA},
-    {"user32.dll", "PeekMessageA", kOffPeekMessageA},
-    {"user32.dll", "PeekMessageW", kOffPeekMessageA},
-    {"user32.dll", "DispatchMessageA", kOffDispatchMessageA},
-    {"user32.dll", "DispatchMessageW", kOffDispatchMessageA},
-    {"user32.dll", "TranslateMessage", kOffReturnZero},
-    {"user32.dll", "TranslateAcceleratorA", kOffReturnZero},
-    {"user32.dll", "TranslateAcceleratorW", kOffReturnZero},
-    {"user32.dll", "PostMessageA", kOffReturnOne},
-    {"user32.dll", "PostMessageW", kOffReturnOne},
-    {"user32.dll", "SendMessageA", kOffReturnZero},
-    {"user32.dll", "SendMessageW", kOffReturnZero},
-    {"user32.dll", "PostQuitMessage", kOffReturnZero},
-    {"user32.dll", "PostThreadMessageA", kOffReturnOne},
-    {"user32.dll", "PostThreadMessageW", kOffReturnOne},
+    {"user32.dll", "GetMessageA", kOffGetMessageA}, {"user32.dll", "GetMessageW", kOffGetMessageA},
+    {"user32.dll", "PeekMessageA", kOffPeekMessageA}, {"user32.dll", "PeekMessageW", kOffPeekMessageA},
+    {"user32.dll", "DispatchMessageA", kOffDispatchMessageA}, {"user32.dll", "DispatchMessageW", kOffDispatchMessageA},
+    {"user32.dll", "TranslateMessage", kOffReturnZero}, {"user32.dll", "TranslateAcceleratorA", kOffReturnZero},
+    {"user32.dll", "TranslateAcceleratorW", kOffReturnZero}, {"user32.dll", "PostMessageA", kOffReturnOne},
+    {"user32.dll", "PostMessageW", kOffReturnOne}, {"user32.dll", "SendMessageA", kOffReturnZero},
+    {"user32.dll", "SendMessageW", kOffReturnZero}, {"user32.dll", "PostQuitMessage", kOffReturnZero},
+    {"user32.dll", "PostThreadMessageA", kOffReturnOne}, {"user32.dll", "PostThreadMessageW", kOffReturnOne},
 
     // user32: resource loaders — fake non-zero HICON/HCURSOR/HBITMAP.
-    {"user32.dll", "LoadIconA", kOffReturnOne},
-    {"user32.dll", "LoadIconW", kOffReturnOne},
-    {"user32.dll", "LoadCursorA", kOffReturnOne},
-    {"user32.dll", "LoadCursorW", kOffReturnOne},
-    {"user32.dll", "LoadImageA", kOffReturnOne},
-    {"user32.dll", "LoadImageW", kOffReturnOne},
-    {"user32.dll", "LoadBitmapA", kOffReturnOne},
-    {"user32.dll", "LoadBitmapW", kOffReturnOne},
-    {"user32.dll", "LoadMenuA", kOffReturnOne},
-    {"user32.dll", "LoadMenuW", kOffReturnOne},
-    {"user32.dll", "LoadAcceleratorsA", kOffReturnOne},
-    {"user32.dll", "LoadAcceleratorsW", kOffReturnOne},
-    {"user32.dll", "LoadStringA", kOffReturnZero},
-    {"user32.dll", "LoadStringW", kOffReturnZero},
+    {"user32.dll", "LoadIconA", kOffReturnOne}, {"user32.dll", "LoadIconW", kOffReturnOne},
+    {"user32.dll", "LoadCursorA", kOffReturnOne}, {"user32.dll", "LoadCursorW", kOffReturnOne},
+    {"user32.dll", "LoadImageA", kOffReturnOne}, {"user32.dll", "LoadImageW", kOffReturnOne},
+    {"user32.dll", "LoadBitmapA", kOffReturnOne}, {"user32.dll", "LoadBitmapW", kOffReturnOne},
+    {"user32.dll", "LoadMenuA", kOffReturnOne}, {"user32.dll", "LoadMenuW", kOffReturnOne},
+    {"user32.dll", "LoadAcceleratorsA", kOffReturnOne}, {"user32.dll", "LoadAcceleratorsW", kOffReturnOne},
+    {"user32.dll", "LoadStringA", kOffReturnZero}, {"user32.dll", "LoadStringW", kOffReturnZero},
 
     // user32: cursor + caret + misc — most callers treat non-zero
     // as "ok, previous state returned".
-    {"user32.dll", "SetCursor", kOffReturnZero},
-    {"user32.dll", "ShowCursor", kOffReturnZero},
-    {"user32.dll", "GetCursorPos", kOffReturnOne},
-    {"user32.dll", "SetCursorPos", kOffReturnOne},
-    {"user32.dll", "ClipCursor", kOffReturnOne},
-    {"user32.dll", "GetSystemMetrics", kOffReturnZero},
-    {"user32.dll", "MessageBoxA", kOffReturnOne},
-    {"user32.dll", "MessageBoxW", kOffReturnOne},
-    {"user32.dll", "MessageBoxExA", kOffReturnOne},
-    {"user32.dll", "MessageBoxExW", kOffReturnOne},
+    {"user32.dll", "SetCursor", kOffReturnZero}, {"user32.dll", "ShowCursor", kOffReturnZero},
+    {"user32.dll", "GetCursorPos", kOffReturnOne}, {"user32.dll", "SetCursorPos", kOffReturnOne},
+    {"user32.dll", "ClipCursor", kOffReturnOne}, {"user32.dll", "GetSystemMetrics", kOffReturnZero},
+    {"user32.dll", "MessageBoxA", kOffReturnOne}, {"user32.dll", "MessageBoxW", kOffReturnOne},
+    {"user32.dll", "MessageBoxExA", kOffReturnOne}, {"user32.dll", "MessageBoxExW", kOffReturnOne},
 
     // gdi32: device contexts — DC-less entry points still return a
     // non-zero fake handle; CreateCompatibleDC / DeleteDC go through
     // the real GDI object table so memory DCs are real.
-    {"gdi32.dll", "GetDC", kOffReturnOne},
-    {"gdi32.dll", "GetWindowDC", kOffReturnOne},
-    {"gdi32.dll", "ReleaseDC", kOffReturnOne},
-    {"gdi32.dll", "CreateCompatibleDC", kOffGdiCreateCompatDC},
-    {"gdi32.dll", "DeleteDC", kOffGdiDeleteDC},
-    {"gdi32.dll", "SaveDC", kOffReturnOne},
+    {"gdi32.dll", "GetDC", kOffReturnOne}, {"gdi32.dll", "GetWindowDC", kOffReturnOne},
+    {"gdi32.dll", "ReleaseDC", kOffReturnOne}, {"gdi32.dll", "CreateCompatibleDC", kOffGdiCreateCompatDC},
+    {"gdi32.dll", "DeleteDC", kOffGdiDeleteDC}, {"gdi32.dll", "SaveDC", kOffReturnOne},
     {"gdi32.dll", "RestoreDC", kOffReturnOne},
 
     // gdi32: object table — real handle registry. SelectObject
     // tracks the currently-selected HBITMAP per memory DC; stock
     // + solid brushes live in the brush registry.
-    {"gdi32.dll", "SelectObject", kOffGdiSelectObject},
-    {"gdi32.dll", "DeleteObject", kOffGdiDeleteObject},
-    {"gdi32.dll", "GetStockObject", kOffGdiGetStockObject},
-    {"gdi32.dll", "GetObjectA", kOffReturnOne},
+    {"gdi32.dll", "SelectObject", kOffGdiSelectObject}, {"gdi32.dll", "DeleteObject", kOffGdiDeleteObject},
+    {"gdi32.dll", "GetStockObject", kOffGdiGetStockObject}, {"gdi32.dll", "GetObjectA", kOffReturnOne},
     {"gdi32.dll", "GetObjectW", kOffReturnOne},
 
     // gdi32: bitmap + brush creation. CompatibleBitmap + SolidBrush
     // allocate real kernel state; the rest remain dummies until we
     // need them.
-    {"gdi32.dll", "CreateBitmap", kOffReturnOne},
-    {"gdi32.dll", "CreateCompatibleBitmap", kOffGdiCreateCompatBmp},
-    {"gdi32.dll", "CreateDIBitmap", kOffReturnOne},
-    {"gdi32.dll", "CreateDIBSection", kOffReturnOne},
-    {"gdi32.dll", "CreateSolidBrush", kOffGdiCreateSolidBrush},
-    {"gdi32.dll", "CreateBrushIndirect", kOffReturnOne},
-    {"gdi32.dll", "CreatePen", kOffGdiCreatePen},
-    {"gdi32.dll", "CreateFontA", kOffReturnOne},
-    {"gdi32.dll", "CreateFontW", kOffReturnOne},
-    {"gdi32.dll", "CreateFontIndirectA", kOffReturnOne},
+    {"gdi32.dll", "CreateBitmap", kOffReturnOne}, {"gdi32.dll", "CreateCompatibleBitmap", kOffGdiCreateCompatBmp},
+    {"gdi32.dll", "CreateDIBitmap", kOffReturnOne}, {"gdi32.dll", "CreateDIBSection", kOffReturnOne},
+    {"gdi32.dll", "CreateSolidBrush", kOffGdiCreateSolidBrush}, {"gdi32.dll", "CreateBrushIndirect", kOffReturnOne},
+    {"gdi32.dll", "CreatePen", kOffGdiCreatePen}, {"gdi32.dll", "CreateFontA", kOffReturnOne},
+    {"gdi32.dll", "CreateFontW", kOffReturnOne}, {"gdi32.dll", "CreateFontIndirectA", kOffReturnOne},
     {"gdi32.dll", "CreateFontIndirectW", kOffReturnOne},
 
     // gdi32: drawing primitives — all boolean, return TRUE so the
     // caller's "draw succeeded" flag is set.
-    {"gdi32.dll", "BitBlt", kOffGdiBitBltDC},
-    {"gdi32.dll", "StretchBlt", kOffGdiStretchBltDC},
-    {"gdi32.dll", "MoveToEx", kOffGdiMoveToEx},
-    {"gdi32.dll", "LineTo", kOffGdiLineTo},
+    {"gdi32.dll", "BitBlt", kOffGdiBitBltDC}, {"gdi32.dll", "StretchBlt", kOffGdiStretchBltDC},
+    {"gdi32.dll", "MoveToEx", kOffGdiMoveToEx}, {"gdi32.dll", "LineTo", kOffGdiLineTo},
     // Rectangle / Ellipse now default to the filled variants (which
     // match Win32's fill-with-current-brush + outline-with-current-
     // pen semantics). The outline-only offsets stay around for
     // callers that want them explicitly.
-    {"gdi32.dll", "Rectangle", kOffGdiRectangleFilled},
-    {"gdi32.dll", "Ellipse", kOffGdiEllipseFilled},
-    {"gdi32.dll", "SetPixel", kOffGdiSetPixel},
-    {"gdi32.dll", "SetPixelV", kOffGdiSetPixel},
-    {"gdi32.dll", "PatBlt", kOffGdiPatBlt},
-    {"gdi32.dll", "Polygon", kOffReturnOne},
+    {"gdi32.dll", "Rectangle", kOffGdiRectangleFilled}, {"gdi32.dll", "Ellipse", kOffGdiEllipseFilled},
+    {"gdi32.dll", "SetPixel", kOffGdiSetPixel}, {"gdi32.dll", "SetPixelV", kOffGdiSetPixel},
+    {"gdi32.dll", "PatBlt", kOffGdiPatBlt}, {"gdi32.dll", "Polygon", kOffReturnOne},
     {"gdi32.dll", "Polyline", kOffReturnOne},
     // FillRect is technically a user32 export (not gdi32) in real
     // Windows, but we honour whichever DLL a PE imports it from.
-    {"gdi32.dll", "FillRect", kOffGdiFillRectUser},
-    {"user32.dll", "FillRect", kOffGdiFillRectUser},
-    {"gdi32.dll", "FrameRect", kOffReturnOne},
-    {"gdi32.dll", "TextOutA", kOffGdiTextOutA},
-    {"gdi32.dll", "TextOutW", kOffGdiTextOutW},
-    {"gdi32.dll", "ExtTextOutA", kOffReturnOne},
-    {"gdi32.dll", "ExtTextOutW", kOffReturnOne},
-    {"gdi32.dll", "DrawTextA", kOffGdiDrawTextA},
-    {"user32.dll", "DrawTextA", kOffGdiDrawTextA},
-    {"gdi32.dll", "DrawTextW", kOffGdiDrawTextW},
-    {"user32.dll", "DrawTextW", kOffGdiDrawTextW},
-    {"gdi32.dll", "SetBkMode", kOffGdiSetBkMode},
-    {"gdi32.dll", "SetBkColor", kOffGdiSetBkColor},
-    {"gdi32.dll", "SetTextColor", kOffGdiSetTextColor},
-    {"gdi32.dll", "SetMapMode", kOffReturnOne},
-    {"gdi32.dll", "SetTextAlign", kOffReturnZero},
+    {"gdi32.dll", "FillRect", kOffGdiFillRectUser}, {"user32.dll", "FillRect", kOffGdiFillRectUser},
+    {"gdi32.dll", "FrameRect", kOffReturnOne}, {"gdi32.dll", "TextOutA", kOffGdiTextOutA},
+    {"gdi32.dll", "TextOutW", kOffGdiTextOutW}, {"gdi32.dll", "ExtTextOutA", kOffReturnOne},
+    {"gdi32.dll", "ExtTextOutW", kOffReturnOne}, {"gdi32.dll", "DrawTextA", kOffGdiDrawTextA},
+    {"user32.dll", "DrawTextA", kOffGdiDrawTextA}, {"gdi32.dll", "DrawTextW", kOffGdiDrawTextW},
+    {"user32.dll", "DrawTextW", kOffGdiDrawTextW}, {"gdi32.dll", "SetBkMode", kOffGdiSetBkMode},
+    {"gdi32.dll", "SetBkColor", kOffGdiSetBkColor}, {"gdi32.dll", "SetTextColor", kOffGdiSetTextColor},
+    {"gdi32.dll", "SetMapMode", kOffReturnOne}, {"gdi32.dll", "SetTextAlign", kOffReturnZero},
 
     // -----------------------------------------------------------------
     // Real stubs for pointer-output time APIs — the ones
@@ -1580,7 +1366,299 @@
     // new SYS_GETTIME_ST / SYS_ST_TO_FT / SYS_FT_TO_ST syscalls
     // (40..42).
     // -----------------------------------------------------------------
-    {"kernel32.dll", "GetSystemTime", kOffGetSystemTimeSt},
-    {"kernel32.dll", "GetLocalTime", kOffGetSystemTimeSt},
+    {"kernel32.dll", "GetSystemTime", kOffGetSystemTimeSt}, {"kernel32.dll", "GetLocalTime", kOffGetSystemTimeSt},
     {"kernel32.dll", "SystemTimeToFileTime", kOffSystemTimeToFileTime},
     {"kernel32.dll", "FileTimeToSystemTime", kOffFileTimeToSystemTime},
+
+    // -----------------------------------------------------------------
+    // Batched NO-OP routings.
+    //
+    // Every entry below points an unresolved import surfaced by a
+    // real-world Windows PE bring-up (7-Zip 23.01, busybox-w32,
+    // NASM 2.16.03) at the closest-shape constant returner so the
+    // catch-all NO-OP / data-miss zero pad doesn't fire. The
+    // semantics are wrong-but-not-fatal: the program sees a plausible
+    // success/failure value, the runtime doesn't crash trying to
+    // dereference a NULL function pointer or a stub-page address.
+    //
+    // What "closest shape" means in practice:
+    //   - kOffReturnZero  -> BOOL FALSE / DWORD 0 / handle-NULL / errcode 0
+    //                        (success codes for "not found" / "no events").
+    //                        Also for `void` returns where the contract
+    //                        says nothing about the return register.
+    //   - kOffReturnOne   -> BOOL TRUE  / DWORD 1 / "yes I did it".
+    //   - kOffReturnMinus1-> -1 / EOF / INVALID_HANDLE_VALUE / SOCKET_ERROR.
+    //   - kOffReturnTwo   -> 2  (ERROR_FILE_NOT_FOUND).
+    //   - kOffStrcmp      -> case-sensitive substitute for stricmp/strnicmp
+    //                        (different semantics; works for ASCII compares
+    //                        that happen to match case).
+    //   - kOffPErrno      -> returns proc-env writable scratch — used for
+    //                        any `__p_*` / `__acrt_iob_func` accessor whose
+    //                        callers do `*p = value` or `value = *p`.
+    //   - kOffCritSecNop  -> bare `ret` for void-returning init/teardown
+    //                        helpers whose sole job is bookkeeping.
+    //
+    // Promote any entry to a real thunk the moment a real consumer
+    // depends on the actual semantics. Everything here is "shaped
+    // like the truth"; nothing here is the truth.
+    // -----------------------------------------------------------------
+
+    // ---- KERNEL32 file / directory / volume ----
+    {"kernel32.dll", "AreFileApisANSI", kOffReturnOne},     // ANSI assumed
+    {"kernel32.dll", "CreateFileA", kOffReturnMinus1},      // INVALID_HANDLE_VALUE
+    {"kernel32.dll", "CreateFileW", kOffReturnMinus1},      // belt-and-suspenders
+    {"kernel32.dll", "FindFirstFileExW", kOffReturnMinus1}, // INVALID_HANDLE_VALUE
+    {"kernel32.dll", "FindFirstFileExA", kOffReturnMinus1}, {"kernel32.dll", "FindResourceW", kOffReturnZero},
+    {"kernel32.dll", "FindResourceA", kOffReturnZero}, {"kernel32.dll", "FindResourceExW", kOffReturnZero},
+    {"kernel32.dll", "FindVolumeClose", kOffReturnOne}, {"kernel32.dll", "FindFirstVolumeW", kOffReturnMinus1},
+    {"kernel32.dll", "FindNextVolumeW", kOffReturnZero},
+    {"kernel32.dll", "GetCompressedFileSizeA", kOffReturnMinus1}, // INVALID_FILE_SIZE
+    {"kernel32.dll", "GetCompressedFileSizeW", kOffReturnMinus1},
+    {"kernel32.dll", "GetDiskFreeSpaceExA", kOffReturnOne}, {"kernel32.dll", "GetDiskFreeSpaceA", kOffReturnOne},
+    {"kernel32.dll", "GetFileAttributesExA", kOffReturnZero}, {"kernel32.dll", "GetFileAttributesExW", kOffReturnZero},
+    {"kernel32.dll", "GetFullPathNameA", kOffReturnZero}, // 0 = caller's buf too small / error
+    {"kernel32.dll", "GetVolumeInformationA", kOffReturnOne}, {"kernel32.dll", "GetVolumeInformationW", kOffReturnOne},
+    {"kernel32.dll", "MoveFileExA", kOffReturnOne}, {"kernel32.dll", "MoveFileExW", kOffReturnOne},
+    {"kernel32.dll", "MoveFileA", kOffReturnOne}, {"kernel32.dll", "ReadDirectoryChangesW", kOffReturnZero},
+    {"kernel32.dll", "DeviceIoControl", kOffReturnZero}, // FALSE — not supported
+    {"kernel32.dll", "SetFileTime", kOffReturnOne}, {"kernel32.dll", "SetSystemTime", kOffReturnOne},
+    {"kernel32.dll", "SizeofResource", kOffReturnZero}, {"kernel32.dll", "LoadResource", kOffReturnZero},
+    {"kernel32.dll", "LockResource", kOffReturnZero}, {"kernel32.dll", "VirtualLock", kOffReturnOne},
+    {"kernel32.dll", "VirtualUnlock", kOffReturnOne}, {"kernel32.dll", "HeapCompact", kOffReturnZero},
+
+    // ---- KERNEL32 console alt-screen-buffer / input ----
+    {"kernel32.dll", "CreateConsoleScreenBuffer", kOffReturnMinus1},
+    {"kernel32.dll", "FlushConsoleInputBuffer", kOffReturnOne}, {"kernel32.dll", "ReadConsoleInputA", kOffReturnZero},
+    {"kernel32.dll", "ReadConsoleInputW", kOffReturnZero}, {"kernel32.dll", "ReadConsoleA", kOffReturnZero},
+    {"kernel32.dll", "ReadConsoleW", kOffReturnZero}, {"kernel32.dll", "SetConsoleActiveScreenBuffer", kOffReturnOne},
+    {"kernel32.dll", "SetConsoleScreenBufferSize", kOffReturnOne},
+    {"kernel32.dll", "SetConsoleCursorPosition", kOffReturnOne},
+    {"kernel32.dll", "SetConsoleTextAttribute", kOffReturnOne},
+    {"kernel32.dll", "FillConsoleOutputAttribute", kOffReturnOne},
+    {"kernel32.dll", "FillConsoleOutputCharacterA", kOffReturnOne},
+    {"kernel32.dll", "FillConsoleOutputCharacterW", kOffReturnOne},
+    {"kernel32.dll", "GetNumberOfConsoleInputEvents", kOffReturnOne},
+
+    // ---- KERNEL32 misc helpers ----
+    {"kernel32.dll", "IsBadWritePtr", kOffReturnZero}, // FALSE — pointer is good
+    {"kernel32.dll", "IsBadReadPtr", kOffReturnZero}, {"kernel32.dll", "IsBadStringPtrA", kOffReturnZero},
+    {"kernel32.dll", "IsBadStringPtrW", kOffReturnZero}, {"kernel32.dll", "IsBadCodePtr", kOffReturnZero},
+    {"kernel32.dll", "ReadProcessMemory", kOffReturnZero},  // FALSE — not allowed
+    {"kernel32.dll", "WriteProcessMemory", kOffReturnZero}, // FALSE — not allowed
+    {"kernel32.dll", "MsgWaitForMultipleObjects", kOffReturnZero},
+    {"kernel32.dll", "MsgWaitForMultipleObjectsEx", kOffReturnZero},
+
+    // ---- KERNEL32 file-pointer (legacy form). The 64-bit form
+    //      kOffSetFilePtrEx is real; the 32-bit form returns the
+    //      low-DWORD-of-position. Returning 0 = "rewind to start".
+    {"kernel32.dll", "SetFilePointer", kOffReturnZero},
+
+    // ---- ADVAPI32 security / token / event tracing ----
+    {"advapi32.dll", "AccessCheck", kOffReturnOne}, // grant access
+    {"advapi32.dll", "CheckTokenMembership", kOffReturnOne},
+    {"advapi32.dll", "OpenServiceW", kOffReturnZero}, // NULL handle
+    {"advapi32.dll", "OpenServiceA", kOffReturnZero},
+    {"advapi32.dll", "GetSecurityInfo", kOffReturnZero}, // ERROR_SUCCESS
+    {"advapi32.dll", "SetSecurityInfo", kOffReturnZero},
+    {"advapi32.dll", "RegFlushKey", kOffReturnZero}, // ERROR_SUCCESS
+    {"advapi32.dll", "SaferComputeTokenFromLevel", kOffReturnZero},
+    {"advapi32.dll", "SaferCreateLevel", kOffReturnZero}, {"advapi32.dll", "SaferCloseLevel", kOffReturnOne},
+    {"advapi32.dll", "EventRegister", kOffReturnZero}, // ERROR_SUCCESS
+    {"advapi32.dll", "EventUnregister", kOffReturnZero}, {"advapi32.dll", "EventWrite", kOffReturnZero},
+    {"advapi32.dll", "EventWriteTransfer", kOffReturnZero}, {"advapi32.dll", "EventEnabled", kOffReturnZero}, // FALSE
+    {"advapi32.dll", "EventActivityIdControl", kOffReturnZero},
+    {"advapi32.dll", "CryptAcquireContextA", kOffReturnZero}, // FALSE — no provider
+    {"advapi32.dll", "CryptReleaseContext", kOffReturnOne}, {"advapi32.dll", "CryptCreateHash", kOffReturnZero},
+    {"advapi32.dll", "CryptDestroyHash", kOffReturnOne}, {"advapi32.dll", "CryptHashData", kOffReturnZero},
+    {"advapi32.dll", "CryptGetHashParam", kOffReturnZero},
+
+    // ---- USER32 query / clipboard / window state ----
+    {"user32.dll", "AnyPopup", kOffReturnZero},                                                // FALSE
+    {"user32.dll", "BlockInput", kOffReturnZero}, {"user32.dll", "GetCursor", kOffReturnZero}, // NULL
+    {"user32.dll", "GetSystemMenu", kOffReturnZero}, {"user32.dll", "IsClipboardFormatAvailable", kOffReturnZero},
+    {"user32.dll", "CountClipboardFormats", kOffReturnZero}, {"user32.dll", "EnumClipboardFormats", kOffReturnZero},
+    {"user32.dll", "IsWindowEnabled", kOffReturnOne}, {"user32.dll", "IsWindowVisible", kOffReturnOne},
+    {"user32.dll", "IsIconic", kOffReturnZero}, {"user32.dll", "IsZoomed", kOffReturnZero},
+    {"user32.dll", "EnableWindow", kOffReturnZero}, // returns prior state = FALSE
+    {"user32.dll", "FlashWindow", kOffReturnZero}, {"user32.dll", "FlashWindowEx", kOffReturnZero},
+
+    // ---- WS2_32 socket events / async ----
+    {"ws2_32.dll", "WSAEnumNetworkEvents", kOffReturnZero}, // success, no events
+    {"ws2_32.dll", "WSAEventSelect", kOffReturnZero}, {"ws2_32.dll", "WSAAsyncSelect", kOffReturnZero},
+    {"ws2_32.dll", "WSASocketA", kOffReturnMinus1}, // INVALID_SOCKET
+    {"ws2_32.dll", "WSASocketW", kOffReturnMinus1}, {"ws2_32.dll", "WSAWaitForMultipleEvents", kOffReturnZero},
+    {"ws2_32.dll", "WSARecv", kOffReturnZero}, {"ws2_32.dll", "WSASend", kOffReturnZero},
+
+    // ---- GDIPLUS lifecycle (no real GDI+) ----
+    {"gdiplus.dll", "GdiplusStartup", kOffReturnZero}, // Status::Ok
+    {"gdiplus.dll", "GdiplusShutdown", kOffCritSecNop},
+
+    // ---- SHLWAPI string helpers ----
+    {"shlwapi.dll", "StrCmpIW", kOffStrcmp}, // case-sensitive substitute
+    {"shlwapi.dll", "StrCmpIA", kOffStrcmp}, {"shlwapi.dll", "StrCmpNIW", kOffStrcmp},
+    {"shlwapi.dll", "StrCmpNIA", kOffStrcmp},
+
+    // ---- UXTHEME (we have no theming engine) ----
+    {"uxtheme.dll", "GetThemeAppProperties", kOffReturnZero}, {"uxtheme.dll", "SetThemeAppProperties", kOffCritSecNop},
+    {"uxtheme.dll", "BufferedPaintInit", kOffReturnZero}, {"uxtheme.dll", "BufferedPaintUnInit", kOffReturnZero},
+
+    // ---- UCRT data accessors (`__p_*`) — return scratch ptr.
+    //      Callers do `*__p_xxx() = value;` (write) or
+    //      `value = *__p_xxx();` (read) — both work against the
+    //      shared proc-env writable pad.
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "__p__fmode", kOffPErrno},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "__p__commode", kOffPCommode}, // real slot
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "__p__environ", kOffPErrno},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "__p__wenviron", kOffPErrno},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "__p___argc", kOffPArgc},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "__p___argv", kOffPArgv},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "__p___wargv", kOffPErrno}, {"ucrtbase.dll", "__p__fmode", kOffPErrno},
+    {"ucrtbase.dll", "__p__environ", kOffPErrno}, {"ucrtbase.dll", "__p__wenviron", kOffPErrno},
+    {"ucrtbase.dll", "__p___wargv", kOffPErrno}, {"msvcrt.dll", "__p__fmode", kOffPErrno},
+    {"msvcrt.dll", "__p__environ", kOffPErrno}, {"msvcrt.dll", "__p__wenviron", kOffPErrno},
+    {"msvcrt.dll", "__p___wargv", kOffPErrno},
+    // __acrt_iob_func(idx) -> FILE*. We hand back the writable pad;
+    // callers' fwrite(stream, ...) ends up storing transient buf-ptr
+    // state in scratch, then our fwrite/fputs thunks ignore the FILE*
+    // entirely and write to fd=1 directly.
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "__acrt_iob_func", kOffPErrno}, {"ucrtbase.dll", "__acrt_iob_func", kOffPErrno},
+    // ___mb_cur_max_func returns int (= 1 in v0 single-byte locale).
+    {"api-ms-win-crt-locale-l1-1-0.dll", "___mb_cur_max_func", kOffReturnOne},
+    {"ucrtbase.dll", "___mb_cur_max_func", kOffReturnOne}, {"msvcrt.dll", "___mb_cur_max_func", kOffReturnOne},
+    {"msvcrt.dll", "__mb_cur_max_func", kOffReturnOne},
+
+    // ---- UCRT formatted I/O (real impl deferred — see plan) ----
+    // __stdio_common_vfprintf(opts, stream, fmt, locale, va_list)
+    // returns count written. We can't format yet; return 0 ("wrote 0").
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "__stdio_common_vfprintf", kOffReturnZero},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "__stdio_common_vfwprintf", kOffReturnZero},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "__stdio_common_vsprintf", kOffReturnZero},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "__stdio_common_vsnprintf_s", kOffReturnZero},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "__stdio_common_vsscanf", kOffReturnZero},
+    {"ucrtbase.dll", "__stdio_common_vfprintf", kOffReturnZero},
+    {"ucrtbase.dll", "__stdio_common_vfwprintf", kOffReturnZero},
+
+    // ---- UCRT stdio / file handle helpers ----
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "_chsize_s", kOffReturnZero},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "_fileno", kOffReturnMinus1},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "_fseeki64", kOffReturnZero},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "_ftelli64", kOffReturnMinus1},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "_setmode", kOffReturnZero}, // returns prior mode (= 0 = O_TEXT)
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "ungetc", kOffReturnMinus1},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "setvbuf", kOffReturnZero}, // 0 success
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "_lock_file", kOffCritSecNop},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "_unlock_file", kOffCritSecNop},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "_wfopen", kOffReturnZero},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "fgets", kOffReturnZero}, {"ucrtbase.dll", "_fileno", kOffReturnMinus1},
+    {"ucrtbase.dll", "_fseeki64", kOffReturnZero}, {"ucrtbase.dll", "_ftelli64", kOffReturnMinus1},
+    {"ucrtbase.dll", "_setmode", kOffReturnZero}, {"ucrtbase.dll", "_wfopen", kOffReturnZero},
+
+    // ---- UCRT runtime / abort / errno / FP state ----
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "abort", kOffTerminate},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_set_invalid_parameter_handler", kOffReturnZero},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_get_invalid_parameter_handler", kOffReturnZero},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_clearfp", kOffReturnZero},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_statusfp", kOffReturnZero},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_controlfp", kOffReturnZero},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_controlfp_s", kOffReturnZero},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_crt_at_quick_exit", kOffReturnZero},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_configure_wide_argv", kOffReturnZero},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_initialize_wide_environment", kOffReturnZero},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_get_initial_wide_environment", kOffReturnZero},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "__C_specific_handler", kOffReturnZero}, // ExceptionContinueSearch
+    {"ucrtbase.dll", "abort", kOffTerminate}, {"ucrtbase.dll", "_set_invalid_parameter_handler", kOffReturnZero},
+    {"ucrtbase.dll", "_clearfp", kOffReturnZero}, {"ucrtbase.dll", "_statusfp", kOffReturnZero},
+    {"ucrtbase.dll", "__C_specific_handler", kOffReturnZero},
+    {"vcruntime140.dll", "__C_specific_handler", kOffReturnZero}, {"msvcrt.dll", "abort", kOffTerminate},
+    {"msvcrt.dll", "_set_invalid_parameter_handler", kOffReturnZero}, {"msvcrt.dll", "_clearfp", kOffReturnZero},
+    {"msvcrt.dll", "_statusfp", kOffReturnZero}, {"msvcrt.dll", "_controlfp", kOffReturnZero},
+
+    // ---- UCRT string helpers (case-insensitive -> case-sensitive sub) ----
+    {"api-ms-win-crt-string-l1-1-0.dll", "_stricmp", kOffStrcmp},
+    {"api-ms-win-crt-string-l1-1-0.dll", "_strnicmp", kOffStrcmp},
+    {"api-ms-win-crt-string-l1-1-0.dll", "_wcsicmp", kOffStrcmp},
+    {"api-ms-win-crt-string-l1-1-0.dll", "_wcsnicmp", kOffStrcmp}, {"ucrtbase.dll", "_stricmp", kOffStrcmp},
+    {"ucrtbase.dll", "_strnicmp", kOffStrcmp}, {"msvcrt.dll", "_stricmp", kOffStrcmp},
+    {"msvcrt.dll", "_strnicmp", kOffStrcmp},
+
+    // ---- UCRT character classifiers (ctype). All return 0 = "not in
+    //      class". Lossy for parsers that want isspace/isalpha; safe
+    //      for code that uses them as filters that will call other
+    //      thunks downstream.
+    {"api-ms-win-crt-string-l1-1-0.dll", "isalpha", kOffReturnZero},
+    {"api-ms-win-crt-string-l1-1-0.dll", "iscntrl", kOffReturnZero},
+    {"api-ms-win-crt-string-l1-1-0.dll", "ispunct", kOffReturnZero},
+    {"api-ms-win-crt-string-l1-1-0.dll", "isspace", kOffReturnZero},
+    {"api-ms-win-crt-string-l1-1-0.dll", "isxdigit", kOffReturnZero},
+    {"api-ms-win-crt-string-l1-1-0.dll", "isalnum", kOffReturnZero},
+    {"api-ms-win-crt-string-l1-1-0.dll", "isdigit", kOffReturnZero},
+    {"api-ms-win-crt-string-l1-1-0.dll", "islower", kOffReturnZero},
+    {"api-ms-win-crt-string-l1-1-0.dll", "isupper", kOffReturnZero},
+    {"api-ms-win-crt-string-l1-1-0.dll", "isprint", kOffReturnZero},
+    {"api-ms-win-crt-string-l1-1-0.dll", "tolower", kOffReturnZero},
+    {"api-ms-win-crt-string-l1-1-0.dll", "toupper", kOffReturnZero},
+    {"api-ms-win-crt-string-l1-1-0.dll", "iswalpha", kOffReturnZero},
+    {"api-ms-win-crt-string-l1-1-0.dll", "iswspace", kOffReturnZero},
+    {"api-ms-win-crt-string-l1-1-0.dll", "iswdigit", kOffReturnZero},
+
+    // ---- UCRT environment / time ----
+    {"api-ms-win-crt-environment-l1-1-0.dll", "getenv", kOffReturnZero}, // NULL — env var not found
+    {"api-ms-win-crt-environment-l1-1-0.dll", "_wgetenv", kOffReturnZero},
+    {"api-ms-win-crt-environment-l1-1-0.dll", "_putenv", kOffReturnZero}, {"ucrtbase.dll", "getenv", kOffReturnZero},
+    {"msvcrt.dll", "getenv", kOffReturnZero}, {"api-ms-win-crt-time-l1-1-0.dll", "_time64", kOffReturnZero}, // epoch 0
+    {"api-ms-win-crt-time-l1-1-0.dll", "_gmtime64", kOffReturnZero},
+    {"api-ms-win-crt-time-l1-1-0.dll", "_localtime64", kOffReturnZero},
+    {"api-ms-win-crt-time-l1-1-0.dll", "_tzset", kOffCritSecNop},
+    {"api-ms-win-crt-time-l1-1-0.dll", "clock", kOffReturnZero},
+
+    // ---- UCRT filesystem / stat ----
+    {"api-ms-win-crt-filesystem-l1-1-0.dll", "_waccess", kOffReturnMinus1},
+    {"api-ms-win-crt-filesystem-l1-1-0.dll", "_access", kOffReturnMinus1},
+    {"api-ms-win-crt-filesystem-l1-1-0.dll", "_wstat64", kOffReturnMinus1},
+    {"api-ms-win-crt-filesystem-l1-1-0.dll", "_stat64", kOffReturnMinus1},
+    {"api-ms-win-crt-filesystem-l1-1-0.dll", "_fstat64", kOffReturnMinus1},
+    {"api-ms-win-crt-filesystem-l1-1-0.dll", "_fullpath", kOffReturnZero},
+    {"api-ms-win-crt-filesystem-l1-1-0.dll", "_unlink", kOffReturnMinus1},
+    {"api-ms-win-crt-filesystem-l1-1-0.dll", "_wunlink", kOffReturnMinus1},
+    {"api-ms-win-crt-filesystem-l1-1-0.dll", "remove", kOffReturnMinus1},
+
+    // ---- UCRT private (locale internals) ----
+    {"api-ms-win-crt-private-l1-1-0.dll", "_initialize_onexit_table", kOffReturnZero},
+    {"api-ms-win-crt-private-l1-1-0.dll", "_register_onexit_function", kOffReturnZero},
+    {"api-ms-win-crt-private-l1-1-0.dll", "_execute_onexit_table", kOffReturnZero},
+    {"api-ms-win-crt-locale-l1-1-0.dll", "localeconv", kOffReturnZero},
+    {"api-ms-win-crt-locale-l1-1-0.dll", "setlocale", kOffReturnZero},
+    {"api-ms-win-crt-locale-l1-1-0.dll", "_create_locale", kOffReturnZero},
+    {"api-ms-win-crt-locale-l1-1-0.dll", "_free_locale", kOffCritSecNop},
+
+    // ---- UCRT convert (atoi etc — already handled for msvcrt) ----
+    {"api-ms-win-crt-convert-l1-1-0.dll", "atoi", kOffReturnZero},
+    {"api-ms-win-crt-convert-l1-1-0.dll", "atol", kOffReturnZero},
+    {"api-ms-win-crt-convert-l1-1-0.dll", "atoll", kOffReturnZero},
+    {"api-ms-win-crt-convert-l1-1-0.dll", "strtol", kOffReturnZero},
+    {"api-ms-win-crt-convert-l1-1-0.dll", "strtoul", kOffReturnZero},
+    {"api-ms-win-crt-convert-l1-1-0.dll", "strtoll", kOffReturnZero},
+    {"api-ms-win-crt-convert-l1-1-0.dll", "strtoull", kOffReturnZero},
+    {"api-ms-win-crt-convert-l1-1-0.dll", "wcstol", kOffReturnZero},
+    {"api-ms-win-crt-convert-l1-1-0.dll", "_atoi64", kOffReturnZero},
+
+    // ---- UCRT utility / heap details ----
+    {"api-ms-win-crt-utility-l1-1-0.dll", "qsort", kOffCritSecNop}, // pretend "sorted in-place"
+    {"api-ms-win-crt-heap-l1-1-0.dll", "_msize", kOffReturnZero}, {"ucrtbase.dll", "_msize", kOffReturnZero},
+    {"msvcrt.dll", "_msize", kOffReturnZero}, {"api-ms-win-crt-heap-l1-1-0.dll", "_aligned_malloc", kOffMalloc},
+    {"api-ms-win-crt-heap-l1-1-0.dll", "_aligned_free", kOffFree}, {"ucrtbase.dll", "_aligned_malloc", kOffMalloc},
+    {"ucrtbase.dll", "_aligned_free", kOffFree},
+
+    // ---- UCRT math (real engine deferred; constant returners) ----
+    {"api-ms-win-crt-math-l1-1-0.dll", "_dclass", kOffReturnZero}, // FP_NORMAL
+    {"api-ms-win-crt-math-l1-1-0.dll", "_finite", kOffReturnOne},
+    {"api-ms-win-crt-math-l1-1-0.dll", "_isnan", kOffReturnZero},
+
+    // ---- UCRT runtime — wide-env helpers + alias names ----
+    {"ucrtbase.dll", "_initterm", kOffReturnZero}, {"ucrtbase.dll", "_initterm_e", kOffReturnZero},
+    {"ucrtbase.dll", "_register_thread_local_exe_atexit_callback", kOffReturnZero},
+    {"ucrtbase.dll", "_seh_filter_exe", kOffReturnZero},
+
+    // ---- vcruntime140 — exception-handler aliases ----
+    {"vcruntime140.dll", "_purecall", kOffTerminate}, // pure-virtual call -> abort
+    {"vcruntime140.dll", "memchr", kOffReturnZero},   // not-found
