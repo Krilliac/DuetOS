@@ -912,6 +912,173 @@ __declspec(dllexport) void* RtlSecureZeroMemory(void* dst, SIZE_T n)
     return dst;
 }
 
+/* RtlIpv4StringToAddressA / W — parse "a.b.c.d" into a 32-bit IN_ADDR.
+ * Strict==TRUE rejects shorthand forms (a, a.b, a.b.c); strict==FALSE
+ * tolerates them per the original inet_addr semantics:
+ *   "a"        -> 0.0.0.0 with high 32 = a
+ *   "a.b"      -> a.0.0.b
+ *   "a.b.c"    -> a.b.0.c
+ *   "a.b.c.d"  -> a.b.c.d
+ * Returns NTSTATUS 0 (STATUS_SUCCESS) on success, STATUS_INVALID_PARAMETER
+ * (0xC000000D) otherwise. *terminator points past the last consumed byte. */
+__declspec(dllexport) NTSTATUS RtlIpv4StringToAddressA(const char* s, BOOL strict, const char** terminator,
+                                                       unsigned char* addr_be)
+{
+    if (!s || !addr_be)
+        return 0xC000000DUL;
+    unsigned int parts[4];
+    int part_count = 0;
+    const char* p = s;
+    while (part_count < 4)
+    {
+        if (*p < '0' || *p > '9')
+            return 0xC000000DUL;
+        unsigned int n = 0;
+        int hex = 0, octal = 0;
+        if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X') && !strict)
+        {
+            hex = 1;
+            p += 2;
+            while ((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') || (*p >= 'A' && *p <= 'F'))
+            {
+                int v = (*p >= '0' && *p <= '9') ? *p - '0' : ((*p | 0x20) - 'a' + 10);
+                if (n > 0xFFFFFFFFu / 16u)
+                    return 0xC000000DUL;
+                n = n * 16 + (unsigned int)v;
+                ++p;
+            }
+        }
+        else if (p[0] == '0' && p[1] >= '0' && p[1] <= '7' && !strict)
+        {
+            octal = 1;
+            ++p;
+            while (*p >= '0' && *p <= '7')
+            {
+                if (n > 0xFFFFFFFFu / 8u)
+                    return 0xC000000DUL;
+                n = n * 8 + (unsigned int)(*p - '0');
+                ++p;
+            }
+        }
+        else
+        {
+            while (*p >= '0' && *p <= '9')
+            {
+                if (n > 0xFFFFFFFFu / 10u)
+                    return 0xC000000DUL;
+                n = n * 10 + (unsigned int)(*p - '0');
+                ++p;
+            }
+        }
+        (void)hex;
+        (void)octal;
+        parts[part_count++] = n;
+        if (*p != '.')
+            break;
+        ++p;
+    }
+    if (strict && part_count != 4)
+        return 0xC000000DUL;
+    unsigned int out;
+    switch (part_count)
+    {
+    case 1:
+        out = parts[0];
+        break;
+    case 2:
+        if (parts[0] > 0xFF || parts[1] > 0xFFFFFFu)
+            return 0xC000000DUL;
+        out = (parts[0] << 24) | parts[1];
+        break;
+    case 3:
+        if (parts[0] > 0xFF || parts[1] > 0xFF || parts[2] > 0xFFFFu)
+            return 0xC000000DUL;
+        out = (parts[0] << 24) | (parts[1] << 16) | parts[2];
+        break;
+    case 4:
+        if (parts[0] > 0xFF || parts[1] > 0xFF || parts[2] > 0xFF || parts[3] > 0xFF)
+            return 0xC000000DUL;
+        out = (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3];
+        break;
+    default:
+        return 0xC000000DUL;
+    }
+    addr_be[0] = (unsigned char)((out >> 24) & 0xFF);
+    addr_be[1] = (unsigned char)((out >> 16) & 0xFF);
+    addr_be[2] = (unsigned char)((out >> 8) & 0xFF);
+    addr_be[3] = (unsigned char)(out & 0xFF);
+    if (terminator)
+        *terminator = p;
+    return 0;
+}
+
+__declspec(dllexport) NTSTATUS RtlIpv4StringToAddressW(const wchar_t16* s, BOOL strict, const wchar_t16** terminator,
+                                                       unsigned char* addr_be)
+{
+    if (!s || !addr_be)
+        return 0xC000000DUL;
+    /* Re-encode to ASCII on the stack — IPv4 strings are at most
+     * 15 chars + NUL; cap at 64 to be defensive. */
+    char buf[64];
+    int i = 0;
+    for (; i < 63 && s[i]; ++i)
+    {
+        if (s[i] > 0x7F)
+            return 0xC000000DUL;
+        buf[i] = (char)s[i];
+    }
+    buf[i] = 0;
+    const char* term = (const char*)0;
+    NTSTATUS rc = RtlIpv4StringToAddressA(buf, strict, &term, addr_be);
+    if (rc == 0 && terminator)
+        *terminator = s + (term - buf);
+    return rc;
+}
+
+/* RtlIpv4AddressToStringA / W — print 4-byte BE IPv4 as "a.b.c.d".
+ * Returns pointer past the last char written (per Windows docs). */
+__declspec(dllexport) char* RtlIpv4AddressToStringA(const unsigned char* addr_be, char* out)
+{
+    if (!addr_be || !out)
+        return out;
+    char* p = out;
+    for (int i = 0; i < 4; ++i)
+    {
+        unsigned int v = addr_be[i];
+        if (v >= 100)
+        {
+            *p++ = '0' + (v / 100);
+            *p++ = '0' + (v / 10) % 10;
+            *p++ = '0' + v % 10;
+        }
+        else if (v >= 10)
+        {
+            *p++ = '0' + (v / 10);
+            *p++ = '0' + v % 10;
+        }
+        else
+        {
+            *p++ = '0' + v;
+        }
+        if (i < 3)
+            *p++ = '.';
+    }
+    *p = 0;
+    return p;
+}
+
+__declspec(dllexport) wchar_t16* RtlIpv4AddressToStringW(const unsigned char* addr_be, wchar_t16* out)
+{
+    if (!addr_be || !out)
+        return out;
+    char tmp[16];
+    char* end = RtlIpv4AddressToStringA(addr_be, tmp);
+    int n = (int)(end - tmp);
+    for (int i = 0; i <= n; ++i)
+        out[i] = (wchar_t16)(unsigned char)tmp[i];
+    return out + n;
+}
+
 /* ------------------------------------------------------------------
  * Registry — NtOpenKey + NtQueryValueKey
  *

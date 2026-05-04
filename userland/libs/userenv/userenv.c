@@ -71,13 +71,52 @@ __declspec(dllexport) BOOL GetProfilesDirectoryW(wchar_t16* path, DWORD* size)
 {
     return profile_w(path, size);
 }
+/* CreateEnvironmentBlock allocates a UTF-16-LE block of "VAR=value\0..."
+ * pairs terminated by a double-NUL. v0 returns a static block with the
+ * minimal set of variables most Windows apps probe at startup
+ * (USERPROFILE, USERNAME, COMPUTERNAME, PATH, PUBLIC, ALLUSERSPROFILE,
+ * TEMP, TMP). Real Windows builds this from the user's profile registry
+ * hive — we don't have one yet, so a fixed block is the truth for now.
+ * Source is an ASCII template; the helper widens to UTF-16 on first
+ * call. DestroyEnvironmentBlock no-ops since the block lives in BSS. */
+static const char kEnvSource[] = "USERPROFILE=X:\\Users\\duetos\0"
+                                 "USERNAME=duetos\0"
+                                 "COMPUTERNAME=DUETOS\0"
+                                 "HOMEDRIVE=X:\0"
+                                 "HOMEPATH=\\Users\\duetos\0"
+                                 "PATH=X:\\bin\0"
+                                 "PUBLIC=X:\\Users\\Public\0"
+                                 "ALLUSERSPROFILE=X:\\Users\\Public\0"
+                                 "SystemDrive=X:\0"
+                                 "SystemRoot=X:\\Windows\0"
+                                 "TEMP=X:\\Temp\0"
+                                 "TMP=X:\\Temp\0";
+
+#define ENV_BLOCK_CHARS (sizeof(kEnvSource) + 1)
+static wchar_t16 g_env_block[ENV_BLOCK_CHARS];
+static int g_env_block_built = 0;
+
+static const wchar_t16* env_block_get(void)
+{
+    if (!g_env_block_built)
+    {
+        DWORD i = 0;
+        for (; i < sizeof(kEnvSource); ++i)
+            g_env_block[i] = (wchar_t16)(unsigned char)kEnvSource[i];
+        g_env_block[i] = 0; /* extra terminator after the trailing NUL */
+        g_env_block_built = 1;
+    }
+    return g_env_block;
+}
+
 __declspec(dllexport) BOOL CreateEnvironmentBlock(void** env_block, HANDLE token, BOOL inherit)
 {
     (void)token;
     (void)inherit;
-    if (env_block)
-        *env_block = (void*)0;
-    return 0;
+    if (!env_block)
+        return 0;
+    *env_block = (void*)env_block_get();
+    return 1;
 }
 __declspec(dllexport) BOOL DestroyEnvironmentBlock(void* env_block)
 {

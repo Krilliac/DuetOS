@@ -79,20 +79,106 @@ __declspec(dllexport) HRESULT CoGetClassObject(const void* rclsid, DWORD dwClsCt
     return CLASS_E_CLASSNOTAVAILABLE;
 }
 
+/* Parse a single hex nibble. Returns 0..15 on success, -1 on miss. */
+static int clsid_hex_nibble(wchar_t16 c)
+{
+    if (c >= '0' && c <= '9')
+        return (int)(c - '0');
+    if (c >= 'a' && c <= 'f')
+        return (int)(c - 'a') + 10;
+    if (c >= 'A' && c <= 'F')
+        return (int)(c - 'A') + 10;
+    return -1;
+}
+
+/* Reads `count` hex chars from sz starting at *idx, packs them as
+ * a big-endian unsigned. Returns 1 on success, 0 on parse error.
+ * Advances *idx past the consumed chars. */
+static int clsid_read_hex(const wchar_t16* sz, int* idx, int count, unsigned long long* out)
+{
+    unsigned long long v = 0;
+    for (int i = 0; i < count; ++i)
+    {
+        int n = clsid_hex_nibble(sz[*idx + i]);
+        if (n < 0)
+            return 0;
+        v = (v << 4) | (unsigned long long)n;
+    }
+    *idx += count;
+    *out = v;
+    return 1;
+}
+
 __declspec(dllexport) HRESULT CLSIDFromString(const wchar_t16* sz, void* out)
 {
-    (void)sz;
-    if (out)
+    if (!out)
+        return E_INVALIDARG;
+    unsigned char* b = (unsigned char*)out;
+    for (int i = 0; i < 16; ++i)
+        b[i] = 0;
+    if (!sz)
+        return E_INVALIDARG;
+    /* Accept either "{XXXX...XXXX}" (38 chars) or unbraced "XXXX...XXXX" (36). */
+    int i = 0;
+    int has_brace = 0;
+    if (sz[i] == '{')
     {
-        unsigned char* b = (unsigned char*)out;
-        for (int i = 0; i < 16; ++i)
-            b[i] = 0;
+        has_brace = 1;
+        ++i;
     }
-    return E_NOTIMPL;
+    unsigned long long d1, d2, d3;
+    if (!clsid_read_hex(sz, &i, 8, &d1))
+        return 0x800401F9UL; /* CO_E_CLASSSTRING */
+    if (sz[i++] != '-')
+        return 0x800401F9UL;
+    if (!clsid_read_hex(sz, &i, 4, &d2))
+        return 0x800401F9UL;
+    if (sz[i++] != '-')
+        return 0x800401F9UL;
+    if (!clsid_read_hex(sz, &i, 4, &d3))
+        return 0x800401F9UL;
+    if (sz[i++] != '-')
+        return 0x800401F9UL;
+    unsigned long long d4hi;
+    if (!clsid_read_hex(sz, &i, 4, &d4hi))
+        return 0x800401F9UL;
+    if (sz[i++] != '-')
+        return 0x800401F9UL;
+    /* data4 last 6 bytes = 12 hex chars. */
+    unsigned long long d4lo_a, d4lo_b, d4lo_c;
+    if (!clsid_read_hex(sz, &i, 4, &d4lo_a))
+        return 0x800401F9UL;
+    if (!clsid_read_hex(sz, &i, 4, &d4lo_b))
+        return 0x800401F9UL;
+    if (!clsid_read_hex(sz, &i, 4, &d4lo_c))
+        return 0x800401F9UL;
+    if (has_brace && sz[i++] != '}')
+        return 0x800401F9UL;
+    /* GUID memory layout: data1 (LE u32), data2 (LE u16), data3 (LE u16), data4 (8 bytes BE). */
+    b[0] = (unsigned char)(d1 & 0xFF);
+    b[1] = (unsigned char)((d1 >> 8) & 0xFF);
+    b[2] = (unsigned char)((d1 >> 16) & 0xFF);
+    b[3] = (unsigned char)((d1 >> 24) & 0xFF);
+    b[4] = (unsigned char)(d2 & 0xFF);
+    b[5] = (unsigned char)((d2 >> 8) & 0xFF);
+    b[6] = (unsigned char)(d3 & 0xFF);
+    b[7] = (unsigned char)((d3 >> 8) & 0xFF);
+    b[8] = (unsigned char)((d4hi >> 8) & 0xFF);
+    b[9] = (unsigned char)(d4hi & 0xFF);
+    b[10] = (unsigned char)((d4lo_a >> 8) & 0xFF);
+    b[11] = (unsigned char)(d4lo_a & 0xFF);
+    b[12] = (unsigned char)((d4lo_b >> 8) & 0xFF);
+    b[13] = (unsigned char)(d4lo_b & 0xFF);
+    b[14] = (unsigned char)((d4lo_c >> 8) & 0xFF);
+    b[15] = (unsigned char)(d4lo_c & 0xFF);
+    return S_OK;
 }
 
 __declspec(dllexport) HRESULT CLSIDFromProgID(const wchar_t16* id, void* clsid)
 {
+    /* No registry-backed ProgID -> CLSID lookup yet. Real Windows reads
+     * HKCR\<id>\CLSID; we'd need a registry implementation. Return the
+     * "ProgID not registered" status so callers can fall through. */
     (void)id;
     if (clsid)
     {
@@ -100,7 +186,7 @@ __declspec(dllexport) HRESULT CLSIDFromProgID(const wchar_t16* id, void* clsid)
         for (int i = 0; i < 16; ++i)
             b[i] = 0;
     }
-    return E_NOTIMPL;
+    return 0x800401F3UL; /* CO_E_CLASSSTRING */
 }
 
 __declspec(dllexport) HRESULT IIDFromString(const wchar_t16* sz, void* iid)

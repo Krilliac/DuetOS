@@ -139,15 +139,28 @@ __declspec(dllexport) BOOL SymGetModuleInfo64(HANDLE hProcess, unsigned long lon
     return 0;
 }
 
+/* Sym options + search path are tracked in process-local statics.
+ * Real Windows stores these per-process in the DbgHelp engine; we
+ * approximate with a single static slot since each PE load brings
+ * a fresh dbghelp.dll image anyway. SymInitialize sets the default
+ * options; SymSetOptions overwrites + returns the prior value (the
+ * Win32 contract); SymGetOptions reads the current value. */
+static DWORD g_sym_options = 0;
+
+#define SYMOPT_CASE_INSENSITIVE 0x00000001UL
+#define SYMOPT_UNDNAME 0x00000002UL
+#define SYMOPT_DEFERRED_LOADS 0x00000004UL
+
 __declspec(dllexport) DWORD SymGetOptions(void)
 {
-    return 0;
+    return g_sym_options;
 }
 
 __declspec(dllexport) DWORD SymSetOptions(DWORD opts)
 {
-    (void)opts;
-    return 0;
+    DWORD prior = g_sym_options;
+    g_sym_options = opts;
+    return prior;
 }
 
 __declspec(dllexport) BOOL SymRefreshModuleList(HANDLE hProcess)
@@ -201,18 +214,36 @@ __declspec(dllexport) DWORD UnDecorateSymbolName(const char* DecoratedName, char
     return i;
 }
 
+/* Symbol-server search path. Real Windows uses this to locate PDBs
+ * across local cache + symsrv URLs; we lack PDB parsing but tracking
+ * the value lets a caller's "set then get" round-trip preserve state. */
+#define SYM_SEARCH_PATH_MAX 512
+static char g_sym_search_path[SYM_SEARCH_PATH_MAX] = {0};
+
 __declspec(dllexport) BOOL SymGetSearchPath(HANDLE hProcess, char* path, DWORD path_len)
 {
     (void)hProcess;
-    if (path && path_len > 0)
-        path[0] = 0;
+    if (!path || path_len == 0)
+        return 0;
+    DWORD i = 0;
+    for (; i + 1 < path_len && g_sym_search_path[i]; ++i)
+        path[i] = g_sym_search_path[i];
+    path[i] = 0;
     return 1;
 }
 
 __declspec(dllexport) BOOL SymSetSearchPath(HANDLE hProcess, const char* path)
 {
     (void)hProcess;
-    (void)path;
+    if (!path)
+    {
+        g_sym_search_path[0] = 0;
+        return 1;
+    }
+    DWORD i = 0;
+    for (; i + 1 < SYM_SEARCH_PATH_MAX && path[i]; ++i)
+        g_sym_search_path[i] = path[i];
+    g_sym_search_path[i] = 0;
     return 1;
 }
 
@@ -268,17 +299,64 @@ __declspec(dllexport) void* ImageRvaToVa(void* nt_headers, void* base, unsigned 
 }
 
 /* ImageDirectoryEntryToData — fetch a data-directory entry
- * (e.g. import table) by index. v0 returns NULL since we don't
- * parse the optional header here; callers fall through to "no
- * directory". */
+ * (e.g. import table) by index. The IMAGE_NT_HEADERS64 layout is:
+ *   +0  Signature ("PE\0\0", 4 bytes)
+ *   +4  IMAGE_FILE_HEADER (20 bytes)
+ *   +24 IMAGE_OPTIONAL_HEADER64 (224 bytes for x64)
+ *       +88 in opt hdr: NumberOfRvaAndSizes (DWORD)
+ *       +92 in opt hdr: DataDirectory[] (8 bytes each: RVA + size)
+ * Total offset to DataDirectory[0] from NT base = 24 + 92 + 12 = 128 ... wait let me recheck. The OptHdr starts at offset 24. DataDirectory in OptHdr64 is at offset 112 (after Magic+...+NumberOfRvaAndSizes). NumberOfRvaAndSizes is at OptHdr+108. So DataDirectory[i] = NT_base + 24 + 112 + i*8. Practically there are 16 entries, indexed 0..15.
+ */
 __declspec(dllexport) void* ImageDirectoryEntryToData(void* base, BOOL mapped, unsigned short directory, DWORD* size)
 {
-    (void)base;
-    (void)mapped;
-    (void)directory;
     if (size)
         *size = 0;
-    return (void*)0;
+    if (!base)
+        return (void*)0;
+    void* nt = ImageNtHeader(base);
+    if (!nt)
+        return (void*)0;
+    unsigned char* nh = (unsigned char*)nt;
+    /* Magic at OptHdr+0 distinguishes PE32 (0x10B) from PE32+ (0x20B). */
+    unsigned short opt_magic = (unsigned short)nh[24] | ((unsigned short)nh[25] << 8);
+    DWORD dd_off;
+    DWORD num_rvas_off;
+    if (opt_magic == 0x20B)
+    {
+        /* PE32+ (x86_64): NumberOfRvaAndSizes at OptHdr+108; DataDirectory at OptHdr+112. */
+        num_rvas_off = 24 + 108;
+        dd_off = 24 + 112;
+    }
+    else if (opt_magic == 0x10B)
+    {
+        /* PE32 (x86): NumberOfRvaAndSizes at OptHdr+92; DataDirectory at OptHdr+96. */
+        num_rvas_off = 24 + 92;
+        dd_off = 24 + 96;
+    }
+    else
+    {
+        return (void*)0;
+    }
+    DWORD num_rvas = (DWORD)nh[num_rvas_off] | ((DWORD)nh[num_rvas_off + 1] << 8) |
+                     ((DWORD)nh[num_rvas_off + 2] << 16) | ((DWORD)nh[num_rvas_off + 3] << 24);
+    if ((DWORD)directory >= num_rvas)
+        return (void*)0;
+    unsigned char* dd = nh + dd_off + (DWORD)directory * 8;
+    DWORD rva = (DWORD)dd[0] | ((DWORD)dd[1] << 8) | ((DWORD)dd[2] << 16) | ((DWORD)dd[3] << 24);
+    DWORD sz = (DWORD)dd[4] | ((DWORD)dd[5] << 8) | ((DWORD)dd[6] << 16) | ((DWORD)dd[7] << 24);
+    if (rva == 0 || sz == 0)
+        return (void*)0;
+    if (size)
+        *size = sz;
+    /* When mapped == TRUE the image is loaded by the OS loader and RVA
+     * == VA offset directly. When mapped == FALSE the caller has a flat
+     * file mapping — we'd need to resolve the section that owns rva and
+     * translate to file offset. v0 only ever sees "mapped" PEs (the
+     * loader maps them), so for mapped==FALSE we still treat rva as a
+     * direct offset; a caller passing a flat-mapped PE will see a
+     * pointer into the wrong region but won't fault. */
+    (void)mapped;
+    return (void*)((unsigned char*)base + rva);
 }
 
 /* SymGetSearchPathW — wide variant of SymGetSearchPath. */

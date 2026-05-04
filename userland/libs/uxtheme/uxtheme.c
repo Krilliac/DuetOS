@@ -1,4 +1,9 @@
-/* uxtheme.dll — visual styles. No theming; all stubs. */
+/* uxtheme.dll — visual styles. No real theme engine, but theme handles
+ * are now tracked so a `OpenThemeData / Get* / CloseThemeData` lifecycle
+ * round-trips correctly: the open returns a non-NULL handle (real Win32
+ * apps gate paint on a non-NULL theme), the close validates and frees
+ * the slot, and IsThemePartDefined / queries against an open handle return
+ * the same shape as a real engine even though the contents are zero. */
 typedef int BOOL;
 typedef unsigned long DWORD;
 typedef int INT;
@@ -8,15 +13,47 @@ typedef unsigned short wchar_t16;
 
 #define S_OK 0UL
 
+#define UX_THEME_SLOTS 16
+#define UX_THEME_HANDLE_BASE 0x07F12000UL
+typedef struct
+{
+    unsigned int in_use;
+    HANDLE wnd;
+} UxThemeSlot;
+static UxThemeSlot g_ux_themes[UX_THEME_SLOTS];
+
+static int ux_handle_to_slot(HANDLE h)
+{
+    unsigned long long v = (unsigned long long)h;
+    if (v < UX_THEME_HANDLE_BASE || v >= UX_THEME_HANDLE_BASE + UX_THEME_SLOTS)
+        return -1;
+    int idx = (int)(v - UX_THEME_HANDLE_BASE);
+    if (!g_ux_themes[idx].in_use)
+        return -1;
+    return idx;
+}
+
 __declspec(dllexport) HANDLE OpenThemeData(HANDLE wnd, const wchar_t16* class_list)
 {
-    (void)wnd;
     (void)class_list;
+    for (int i = 1; i < UX_THEME_SLOTS; ++i)
+    {
+        if (!g_ux_themes[i].in_use)
+        {
+            g_ux_themes[i].in_use = 1;
+            g_ux_themes[i].wnd = wnd;
+            return (HANDLE)(unsigned long long)(UX_THEME_HANDLE_BASE + i);
+        }
+    }
     return (HANDLE)0;
 }
 __declspec(dllexport) HRESULT CloseThemeData(HANDLE theme)
 {
-    (void)theme;
+    int idx = ux_handle_to_slot(theme);
+    if (idx < 0)
+        return 0x80070006UL; /* E_HANDLE */
+    g_ux_themes[idx].in_use = 0;
+    g_ux_themes[idx].wnd = (HANDLE)0;
     return S_OK;
 }
 __declspec(dllexport) BOOL IsThemeActive(void)

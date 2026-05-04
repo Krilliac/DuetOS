@@ -8,15 +8,62 @@ typedef unsigned short wchar_t16;
 #define ERROR_NOT_SUPPORTED 50UL
 #define ERROR_NO_DATA 232UL
 
-/* IP_ADAPTER_INFO is large (~640 bytes). For v0 we report
- * "no adapters" via ERROR_NO_DATA which the smoke test accepts
- * as PASS. (The docs allow it.) */
+/* IP_ADAPTER_INFO layout (relevant fields, sized for v0):
+ *   +0    Next pointer (8 bytes)
+ *   +8    ComboIndex (DWORD)
+ *   +12   AdapterName[260]
+ *   +272  Description[132]
+ *   +404  AddressLength (UINT)
+ *   +408  Address[8]
+ *   +416  Index (DWORD)
+ *   +420  Type (UINT)
+ *   +424  DhcpEnabled (UINT)
+ *   +428  CurrentIpAddress (ptr)
+ *   +436  IpAddressList (IP_ADDR_STRING: 4+16+16+4 = 40 bytes)
+ *   ... rest zero-filled
+ * Real Windows reports a chain of all NICs; v0 reports a single
+ * "DuetOS Loopback" entry so any caller that just gates on
+ * "any adapter present" makes progress. */
+#define IPHLP_ADAPTER_INFO_SIZE 640
 __declspec(dllexport) DWORD GetAdaptersInfo(void* adapter_info, ULONG* out_buf_len)
 {
-    (void)adapter_info;
-    if (out_buf_len)
-        *out_buf_len = 0;
-    return ERROR_NO_DATA;
+    if (!out_buf_len)
+        return 87; /* ERROR_INVALID_PARAMETER */
+    ULONG needed = IPHLP_ADAPTER_INFO_SIZE;
+    if (!adapter_info || *out_buf_len < needed)
+    {
+        *out_buf_len = needed;
+        return 111; /* ERROR_BUFFER_OVERFLOW */
+    }
+    unsigned char* b = (unsigned char*)adapter_info;
+    for (ULONG i = 0; i < needed; ++i)
+        b[i] = 0;
+    /* AdapterName at +12 = "Loopback" */
+    static const char kName[] = "Loopback";
+    for (int i = 0; kName[i]; ++i)
+        b[12 + i] = (unsigned char)kName[i];
+    /* Description at +272 = "DuetOS Loopback" */
+    static const char kDesc[] = "DuetOS Loopback";
+    for (int i = 0; kDesc[i]; ++i)
+        b[272 + i] = (unsigned char)kDesc[i];
+    /* AddressLength at +404 = 6 (MAC). */
+    b[404] = 6;
+    /* MAC at +408: 02:00:00:00:00:01 (locally administered). */
+    b[408 + 0] = 0x02;
+    b[408 + 5] = 0x01;
+    /* Index at +416 = 1. */
+    b[416] = 1;
+    /* Type at +420 = MIB_IF_TYPE_LOOPBACK (24). */
+    b[420] = 24;
+    /* IpAddressList: IpAddress[16] = "127.0.0.1\0", IpMask[16] = "255.0.0.0\0". */
+    static const char kIp[] = "127.0.0.1";
+    for (int i = 0; kIp[i]; ++i)
+        b[436 + 8 + i] = (unsigned char)kIp[i];
+    static const char kMask[] = "255.0.0.0";
+    for (int i = 0; kMask[i]; ++i)
+        b[436 + 8 + 16 + i] = (unsigned char)kMask[i];
+    *out_buf_len = needed;
+    return 0;
 }
 __declspec(dllexport) DWORD GetAdaptersAddresses(ULONG family, ULONG flags, void* rsv, void* adapter_addrs,
                                                  ULONG* out_buf_len)
@@ -40,7 +87,7 @@ __declspec(dllexport) DWORD GetIfTable(void* if_table, ULONG* size, BOOL order)
 __declspec(dllexport) DWORD GetNumberOfInterfaces(DWORD* num_if)
 {
     if (num_if)
-        *num_if = 0;
+        *num_if = 1; /* loopback */
     return 0;
 }
 __declspec(dllexport) DWORD IcmpSendEcho(HANDLE icmp, ULONG dst, void* req, unsigned short req_size, void* opts,

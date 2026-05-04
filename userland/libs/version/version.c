@@ -89,46 +89,67 @@ __declspec(dllexport) BOOL GetFileVersionInfoW(const wchar_t16* file, DWORD hnd,
     (void)hnd;
     return duet_make_verinfo((unsigned char*)data, len) != 0 ? 1 : 0;
 }
+/* Both VerQueryValue forms recognise the root selector "\\" (which
+ * Win32 uses to fetch the VS_FIXEDFILEINFO sub-struct) and return a
+ * pointer into the supplied block + the struct's length. Other
+ * sub-selectors ("\\StringFileInfo\\<lcp>\\<key>", "\\VarFileInfo\\
+ * Translation") aren't populated by duet_make_verinfo, so we fall
+ * through to FALSE — the caller treats the field as "absent" and
+ * uses its compile-time defaults. */
 __declspec(dllexport) BOOL VerQueryValueA(const void* block, const char* sub, void** ptr, unsigned int* len)
 {
-    (void)block;
-    (void)sub;
-    if (ptr)
-        *ptr = (void*)0;
-    if (len)
-        *len = 0;
+    if (!block || !sub || !ptr || !len)
+        return 0;
+    *ptr = (void*)0;
+    *len = 0;
+    /* sub == "\\" => return FIXEDFILEINFO (52 bytes at offset 40). */
+    if (sub[0] == '\\' && sub[1] == 0)
+    {
+        const unsigned char* b = (const unsigned char*)block;
+        /* Sanity: signature dwSignature == 0xFEEF04BD at offset 40. */
+        if (b[40] != 0xBD || b[41] != 0x04 || b[42] != 0xEF || b[43] != 0xFE)
+            return 0;
+        *ptr = (void*)(b + 40);
+        *len = 52;
+        return 1;
+    }
     return 0;
 }
 __declspec(dllexport) BOOL VerQueryValueW(const void* block, const wchar_t16* sub, void** ptr, unsigned int* len)
 {
-    (void)block;
-    (void)sub;
-    if (ptr)
-        *ptr = (void*)0;
-    if (len)
-        *len = 0;
+    if (!block || !sub || !ptr || !len)
+        return 0;
+    *ptr = (void*)0;
+    *len = 0;
+    if (sub[0] == '\\' && sub[1] == 0)
+    {
+        const unsigned char* b = (const unsigned char*)block;
+        if (b[40] != 0xBD || b[41] != 0x04 || b[42] != 0xEF || b[43] != 0xFE)
+            return 0;
+        *ptr = (void*)(b + 40);
+        *len = 52;
+        return 1;
+    }
     return 0;
 }
 
 /* GetFileVersionInfoExW(flags, file, hnd, len, data) — newer Win32
- * 8.1+ entry point, same v0 stub semantics. */
+ * 8.1+ entry point. Same canned VS_VERSIONINFO block as the legacy
+ * variants — modern callers use the Ex form for flags like
+ * FILE_VER_GET_NEUTRAL but accept the same payload. */
 __declspec(dllexport) BOOL GetFileVersionInfoExW(DWORD flags, const wchar_t16* file, DWORD hnd, DWORD len, void* data)
 {
     (void)flags;
     (void)file;
     (void)hnd;
-    (void)len;
-    (void)data;
-    return 0;
+    return duet_make_verinfo((unsigned char*)data, len) != 0 ? 1 : 0;
 }
 __declspec(dllexport) BOOL GetFileVersionInfoExA(DWORD flags, const char* file, DWORD hnd, DWORD len, void* data)
 {
     (void)flags;
     (void)file;
     (void)hnd;
-    (void)len;
-    (void)data;
-    return 0;
+    return duet_make_verinfo((unsigned char*)data, len) != 0 ? 1 : 0;
 }
 
 /* VerLanguageNameA/W: human-readable name for a language ID.

@@ -145,28 +145,311 @@ static void Sha256Final(Sha256* s, unsigned char* out32)
     }
 }
 
-/* Algorithm IDs come in as UTF-16. We compare against L"SHA256". */
-static int IsSha256(const wchar_t16* algid)
+/* SHA-1 reference. ~50 lines. */
+typedef struct
 {
-    if (algid == 0)
+    unsigned int h[5];
+    unsigned char buf[64];
+    unsigned long long bitlen;
+    unsigned int buflen;
+} Sha1;
+
+static unsigned int rotl32(unsigned int x, unsigned int n)
+{
+    return (x << n) | (x >> (32 - n));
+}
+
+static void Sha1Init(Sha1* s)
+{
+    s->h[0] = 0x67452301;
+    s->h[1] = 0xEFCDAB89;
+    s->h[2] = 0x98BADCFE;
+    s->h[3] = 0x10325476;
+    s->h[4] = 0xC3D2E1F0;
+    s->buflen = 0;
+    s->bitlen = 0;
+}
+
+static void Sha1Block(Sha1* s, const unsigned char* p)
+{
+    unsigned int w[80];
+    for (int i = 0; i < 16; ++i)
+        w[i] = ((unsigned int)p[i * 4] << 24) | ((unsigned int)p[i * 4 + 1] << 16) | ((unsigned int)p[i * 4 + 2] << 8) |
+               (unsigned int)p[i * 4 + 3];
+    for (int i = 16; i < 80; ++i)
+        w[i] = rotl32(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+    unsigned int a = s->h[0], b = s->h[1], c = s->h[2], d = s->h[3], e = s->h[4];
+    for (int i = 0; i < 80; ++i)
+    {
+        unsigned int f, k;
+        if (i < 20)
+        {
+            f = (b & c) | (~b & d);
+            k = 0x5A827999;
+        }
+        else if (i < 40)
+        {
+            f = b ^ c ^ d;
+            k = 0x6ED9EBA1;
+        }
+        else if (i < 60)
+        {
+            f = (b & c) | (b & d) | (c & d);
+            k = 0x8F1BBCDC;
+        }
+        else
+        {
+            f = b ^ c ^ d;
+            k = 0xCA62C1D6;
+        }
+        unsigned int t = rotl32(a, 5) + f + e + k + w[i];
+        e = d;
+        d = c;
+        c = rotl32(b, 30);
+        b = a;
+        a = t;
+    }
+    s->h[0] += a;
+    s->h[1] += b;
+    s->h[2] += c;
+    s->h[3] += d;
+    s->h[4] += e;
+}
+
+static void Sha1Update(Sha1* s, const unsigned char* p, unsigned int n)
+{
+    s->bitlen += (unsigned long long)n * 8ULL;
+    while (n)
+    {
+        unsigned int room = 64 - s->buflen;
+        unsigned int take = n < room ? n : room;
+        for (unsigned int i = 0; i < take; ++i)
+            s->buf[s->buflen + i] = p[i];
+        s->buflen += take;
+        p += take;
+        n -= take;
+        if (s->buflen == 64)
+        {
+            Sha1Block(s, s->buf);
+            s->buflen = 0;
+        }
+    }
+}
+
+static void Sha1Final(Sha1* s, unsigned char* out20)
+{
+    s->buf[s->buflen++] = 0x80;
+    if (s->buflen > 56)
+    {
+        while (s->buflen < 64)
+            s->buf[s->buflen++] = 0;
+        Sha1Block(s, s->buf);
+        s->buflen = 0;
+    }
+    while (s->buflen < 56)
+        s->buf[s->buflen++] = 0;
+    unsigned long long bl = s->bitlen;
+    for (int i = 7; i >= 0; --i)
+        s->buf[56 + i] = (unsigned char)(bl >> ((7 - i) * 8));
+    Sha1Block(s, s->buf);
+    for (int i = 0; i < 5; ++i)
+    {
+        out20[i * 4 + 0] = (unsigned char)(s->h[i] >> 24);
+        out20[i * 4 + 1] = (unsigned char)(s->h[i] >> 16);
+        out20[i * 4 + 2] = (unsigned char)(s->h[i] >> 8);
+        out20[i * 4 + 3] = (unsigned char)(s->h[i] >> 0);
+    }
+}
+
+/* MD5 reference. */
+typedef struct
+{
+    unsigned int a, b, c, d;
+    unsigned char buf[64];
+    unsigned long long bitlen;
+    unsigned int buflen;
+} Md5;
+
+static const unsigned int kMd5K[64] = {
+    0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
+    0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
+    0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
+    0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed, 0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
+    0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
+    0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
+    0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+    0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391};
+
+static const unsigned int kMd5R[64] = {7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+                                       5, 9,  14, 20, 5, 9,  14, 20, 5, 9,  14, 20, 5, 9,  14, 20,
+                                       4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+                                       6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21};
+
+static void Md5Init(Md5* s)
+{
+    s->a = 0x67452301;
+    s->b = 0xefcdab89;
+    s->c = 0x98badcfe;
+    s->d = 0x10325476;
+    s->buflen = 0;
+    s->bitlen = 0;
+}
+
+static void Md5Block(Md5* s, const unsigned char* p)
+{
+    unsigned int M[16];
+    for (int i = 0; i < 16; ++i)
+        M[i] = (unsigned int)p[i * 4] | ((unsigned int)p[i * 4 + 1] << 8) | ((unsigned int)p[i * 4 + 2] << 16) |
+               ((unsigned int)p[i * 4 + 3] << 24);
+    unsigned int a = s->a, b = s->b, c = s->c, d = s->d;
+    for (int i = 0; i < 64; ++i)
+    {
+        unsigned int f, g;
+        if (i < 16)
+        {
+            f = (b & c) | (~b & d);
+            g = (unsigned int)i;
+        }
+        else if (i < 32)
+        {
+            f = (d & b) | (~d & c);
+            g = (5u * (unsigned int)i + 1u) & 15u;
+        }
+        else if (i < 48)
+        {
+            f = b ^ c ^ d;
+            g = (3u * (unsigned int)i + 5u) & 15u;
+        }
+        else
+        {
+            f = c ^ (b | ~d);
+            g = (7u * (unsigned int)i) & 15u;
+        }
+        unsigned int t = d;
+        d = c;
+        c = b;
+        b = b + rotl32(a + f + kMd5K[i] + M[g], kMd5R[i]);
+        a = t;
+    }
+    s->a += a;
+    s->b += b;
+    s->c += c;
+    s->d += d;
+}
+
+static void Md5Update(Md5* s, const unsigned char* p, unsigned int n)
+{
+    s->bitlen += (unsigned long long)n * 8ULL;
+    while (n)
+    {
+        unsigned int room = 64 - s->buflen;
+        unsigned int take = n < room ? n : room;
+        for (unsigned int i = 0; i < take; ++i)
+            s->buf[s->buflen + i] = p[i];
+        s->buflen += take;
+        p += take;
+        n -= take;
+        if (s->buflen == 64)
+        {
+            Md5Block(s, s->buf);
+            s->buflen = 0;
+        }
+    }
+}
+
+static void Md5Final(Md5* s, unsigned char* out16)
+{
+    s->buf[s->buflen++] = 0x80;
+    if (s->buflen > 56)
+    {
+        while (s->buflen < 64)
+            s->buf[s->buflen++] = 0;
+        Md5Block(s, s->buf);
+        s->buflen = 0;
+    }
+    while (s->buflen < 56)
+        s->buf[s->buflen++] = 0;
+    unsigned long long bl = s->bitlen;
+    for (int i = 0; i < 8; ++i)
+        s->buf[56 + i] = (unsigned char)(bl >> (i * 8));
+    Md5Block(s, s->buf);
+    unsigned int v[4] = {s->a, s->b, s->c, s->d};
+    for (int i = 0; i < 4; ++i)
+    {
+        out16[i * 4 + 0] = (unsigned char)(v[i] >> 0);
+        out16[i * 4 + 1] = (unsigned char)(v[i] >> 8);
+        out16[i * 4 + 2] = (unsigned char)(v[i] >> 16);
+        out16[i * 4 + 3] = (unsigned char)(v[i] >> 24);
+    }
+}
+
+/* Algorithm-id matching: BCryptOpenAlgorithmProvider passes a UTF-16
+ * algorithm name (e.g. L"SHA256", L"SHA1", L"MD5"). Each match
+ * function checks for exact equality. */
+static int wstr_eq(const wchar_t16* a, const char* b)
+{
+    if (!a)
         return 0;
-    static const wchar_t16 kSha256[] = {'S', 'H', 'A', '2', '5', '6', 0};
     for (int i = 0;; ++i)
     {
-        if (algid[i] != kSha256[i])
+        if (a[i] != (wchar_t16)(unsigned char)b[i])
             return 0;
-        if (kSha256[i] == 0)
+        if (b[i] == 0)
             return 1;
     }
 }
 
-/* One static SHA-256 slot. Single-threaded callers only — same
- * scope as the rest of the v0 bcrypt surface. */
-static Sha256 g_sha256_slot;
-static int g_sha256_in_use;
+static int IsSha256(const wchar_t16* algid)
+{
+    return wstr_eq(algid, "SHA256");
+}
+static int IsSha1(const wchar_t16* algid)
+{
+    return wstr_eq(algid, "SHA1");
+}
+static int IsMd5(const wchar_t16* algid)
+{
+    return wstr_eq(algid, "MD5");
+}
 
-#define BCRYPT_HANDLE_SHA256 ((HANDLE)0x3001)
-#define BCRYPT_HANDLE_GENERIC ((HANDLE)0x3000)
+/* Per-algorithm hash slot. Single-threaded callers only. The slot
+ * union holds whichever digest is live; g_hash_kind selects the
+ * dispatcher branch. */
+typedef enum
+{
+    HK_NONE = 0,
+    HK_SHA256 = 1,
+    HK_SHA1 = 2,
+    HK_MD5 = 3,
+} HashKind;
+
+#define BCRYPT_ALG_SHA256 ((HANDLE)0x2001)
+#define BCRYPT_ALG_SHA1 ((HANDLE)0x2002)
+#define BCRYPT_ALG_MD5 ((HANDLE)0x2003)
+#define BCRYPT_ALG_GENERIC ((HANDLE)0x2000)
+
+#define BCRYPT_HASH_SHA256 ((HANDLE)0x3001)
+#define BCRYPT_HASH_SHA1 ((HANDLE)0x3002)
+#define BCRYPT_HASH_MD5 ((HANDLE)0x3003)
+#define BCRYPT_HASH_GENERIC ((HANDLE)0x3000)
+
+static Sha256 g_sha256_slot;
+static Sha1 g_sha1_slot;
+static Md5 g_md5_slot;
+static int g_sha256_in_use;
+static int g_sha1_in_use;
+static int g_md5_in_use;
+
+static unsigned int hash_size_for_alg(HANDLE alg)
+{
+    if (alg == BCRYPT_ALG_SHA256)
+        return 32;
+    if (alg == BCRYPT_ALG_SHA1)
+        return 20;
+    if (alg == BCRYPT_ALG_MD5)
+        return 16;
+    return 0;
+}
 
 __declspec(dllexport) NTSTATUS BCryptOpenAlgorithmProvider(HANDLE* h, const wchar_t16* algid,
                                                            const wchar_t16* implementation, ULONG flags)
@@ -176,13 +459,13 @@ __declspec(dllexport) NTSTATUS BCryptOpenAlgorithmProvider(HANDLE* h, const wcha
     if (h == 0)
         return STATUS_INVALID_PARAMETER;
     if (IsSha256(algid))
-    {
-        *h = (HANDLE)0x2001; /* Sentinel for SHA-256 alg-provider. */
-    }
+        *h = BCRYPT_ALG_SHA256;
+    else if (IsSha1(algid))
+        *h = BCRYPT_ALG_SHA1;
+    else if (IsMd5(algid))
+        *h = BCRYPT_ALG_MD5;
     else
-    {
-        *h = (HANDLE)0x2000;
-    }
+        *h = BCRYPT_ALG_GENERIC;
     return STATUS_SUCCESS;
 }
 
@@ -203,15 +486,27 @@ __declspec(dllexport) NTSTATUS BCryptCreateHash(HANDLE alg, HANDLE* hash, unsign
     (void)flags;
     if (hash == 0)
         return STATUS_INVALID_PARAMETER;
-    if (alg == (HANDLE)0x2001)
+    if (alg == BCRYPT_ALG_SHA256)
     {
         Sha256Init(&g_sha256_slot);
         g_sha256_in_use = 1;
-        *hash = BCRYPT_HANDLE_SHA256;
+        *hash = BCRYPT_HASH_SHA256;
+    }
+    else if (alg == BCRYPT_ALG_SHA1)
+    {
+        Sha1Init(&g_sha1_slot);
+        g_sha1_in_use = 1;
+        *hash = BCRYPT_HASH_SHA1;
+    }
+    else if (alg == BCRYPT_ALG_MD5)
+    {
+        Md5Init(&g_md5_slot);
+        g_md5_in_use = 1;
+        *hash = BCRYPT_HASH_MD5;
     }
     else
     {
-        *hash = BCRYPT_HANDLE_GENERIC;
+        *hash = BCRYPT_HASH_GENERIC;
     }
     return STATUS_SUCCESS;
 }
@@ -219,10 +514,12 @@ __declspec(dllexport) NTSTATUS BCryptCreateHash(HANDLE alg, HANDLE* hash, unsign
 __declspec(dllexport) NTSTATUS BCryptHashData(HANDLE h, unsigned char* in, ULONG len, ULONG flags)
 {
     (void)flags;
-    if (h == BCRYPT_HANDLE_SHA256 && g_sha256_in_use)
-    {
+    if (h == BCRYPT_HASH_SHA256 && g_sha256_in_use)
         Sha256Update(&g_sha256_slot, in, len);
-    }
+    else if (h == BCRYPT_HASH_SHA1 && g_sha1_in_use)
+        Sha1Update(&g_sha1_slot, in, len);
+    else if (h == BCRYPT_HASH_MD5 && g_md5_in_use)
+        Md5Update(&g_md5_slot, in, len);
     return STATUS_SUCCESS;
 }
 
@@ -231,7 +528,7 @@ __declspec(dllexport) NTSTATUS BCryptFinishHash(HANDLE h, unsigned char* out, UL
     (void)flags;
     if (out == 0)
         return STATUS_INVALID_PARAMETER;
-    if (h == BCRYPT_HANDLE_SHA256 && g_sha256_in_use)
+    if (h == BCRYPT_HASH_SHA256 && g_sha256_in_use)
     {
         unsigned char tmp[32];
         Sha256Final(&g_sha256_slot, tmp);
@@ -241,7 +538,26 @@ __declspec(dllexport) NTSTATUS BCryptFinishHash(HANDLE h, unsigned char* out, UL
             out[i] = tmp[i];
         return STATUS_SUCCESS;
     }
-    /* Non-SHA-256 algorithms: zero-fill (legacy stub behaviour). */
+    if (h == BCRYPT_HASH_SHA1 && g_sha1_in_use)
+    {
+        unsigned char tmp[20];
+        Sha1Final(&g_sha1_slot, tmp);
+        g_sha1_in_use = 0;
+        ULONG cap = (len < 20) ? len : 20;
+        for (ULONG i = 0; i < cap; ++i)
+            out[i] = tmp[i];
+        return STATUS_SUCCESS;
+    }
+    if (h == BCRYPT_HASH_MD5 && g_md5_in_use)
+    {
+        unsigned char tmp[16];
+        Md5Final(&g_md5_slot, tmp);
+        g_md5_in_use = 0;
+        ULONG cap = (len < 16) ? len : 16;
+        for (ULONG i = 0; i < cap; ++i)
+            out[i] = tmp[i];
+        return STATUS_SUCCESS;
+    }
     for (ULONG i = 0; i < len; ++i)
         out[i] = 0;
     return STATUS_SUCCESS;
@@ -249,18 +565,58 @@ __declspec(dllexport) NTSTATUS BCryptFinishHash(HANDLE h, unsigned char* out, UL
 
 __declspec(dllexport) NTSTATUS BCryptDestroyHash(HANDLE h)
 {
-    if (h == BCRYPT_HANDLE_SHA256)
+    if (h == BCRYPT_HASH_SHA256)
         g_sha256_in_use = 0;
+    else if (h == BCRYPT_HASH_SHA1)
+        g_sha1_in_use = 0;
+    else if (h == BCRYPT_HASH_MD5)
+        g_md5_in_use = 0;
     return STATUS_SUCCESS;
 }
 
+/* BCryptGetProperty handles the property names Windows callers most
+ * often query: "HashDigestLength", "ObjectLength", "BlockLength".
+ * Other properties return STATUS_NOT_FOUND. */
 __declspec(dllexport) NTSTATUS BCryptGetProperty(HANDLE h, const wchar_t16* prop, unsigned char* out, ULONG len,
                                                  ULONG* result_len, ULONG flags)
 {
-    (void)h;
-    (void)prop;
-    (void)out;
     (void)flags;
+    if (!prop)
+        return STATUS_INVALID_PARAMETER;
+    unsigned int sz = hash_size_for_alg(h);
+    if (sz == 0 && (h == BCRYPT_HASH_SHA256 || h == BCRYPT_HASH_SHA1 || h == BCRYPT_HASH_MD5))
+    {
+        sz = (h == BCRYPT_HASH_SHA256) ? 32 : (h == BCRYPT_HASH_SHA1) ? 20 : 16;
+    }
+    if (wstr_eq(prop, "HashDigestLength"))
+    {
+        if (result_len)
+            *result_len = 4;
+        if (!out)
+            return STATUS_SUCCESS;
+        if (len < 4)
+            return STATUS_INVALID_PARAMETER;
+        out[0] = (unsigned char)(sz & 0xFF);
+        out[1] = (unsigned char)((sz >> 8) & 0xFF);
+        out[2] = 0;
+        out[3] = 0;
+        return STATUS_SUCCESS;
+    }
+    if (wstr_eq(prop, "ObjectLength") || wstr_eq(prop, "BlockLength"))
+    {
+        unsigned int v = wstr_eq(prop, "BlockLength") ? 64 : (unsigned int)sizeof(Sha256);
+        if (result_len)
+            *result_len = 4;
+        if (!out)
+            return STATUS_SUCCESS;
+        if (len < 4)
+            return STATUS_INVALID_PARAMETER;
+        out[0] = (unsigned char)(v & 0xFF);
+        out[1] = (unsigned char)((v >> 8) & 0xFF);
+        out[2] = (unsigned char)((v >> 16) & 0xFF);
+        out[3] = (unsigned char)((v >> 24) & 0xFF);
+        return STATUS_SUCCESS;
+    }
     if (result_len)
         *result_len = len;
     return STATUS_NOT_FOUND;
