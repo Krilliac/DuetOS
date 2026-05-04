@@ -637,6 +637,20 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     {
         return;
     }
+    // After the in-kernel breakpoints subsystem said "not mine",
+    // route to the GDB stub IF an external debugger has been
+    // wired up via DUETOS_GDB_STUB. The stub's RouteToStopLoop
+    // returns false when no sink is published, in which case the
+    // existing recoverable-trap path below picks the int3 / #DB
+    // up the same way it always did.
+    if (frame->vector == 3 && ::duetos::diag::gdb::HandleSoftwareBreakpoint(frame))
+    {
+        return;
+    }
+    if (frame->vector == 1 && ::duetos::diag::gdb::HandleDebugException(frame))
+    {
+        return;
+    }
 
     const TrapResponse policy = TrapResponseFor(frame->vector, from_user);
 

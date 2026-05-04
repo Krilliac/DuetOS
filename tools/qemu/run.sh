@@ -195,6 +195,15 @@ QEMU_ARGS=(
     -m        512M
     -display  "${DISPLAY_MODE}"
     -serial   stdio
+    # COM2 → host TCP server on ${DUETOS_GDB_PORT} (default 1234).
+    # `wait=off` so QEMU doesn't block waiting for a GDB connection
+    # at boot — the kernel's GDB stub stays silent until the
+    # debugger actually attaches. This is a separate channel from
+    # QEMU's own `-gdb` flag (which exposes QEMU's hypervisor-side
+    # debugger) — ours speaks to the in-kernel stub at the guest
+    # OS's level: attach to it and you debug the running DuetOS
+    # kernel, not QEMU's emulator state.
+    -serial   "tcp::${DUETOS_GDB_PORT:-1234},server=on,wait=off"
     -no-reboot
     -no-shutdown
     -d        int,cpu_reset

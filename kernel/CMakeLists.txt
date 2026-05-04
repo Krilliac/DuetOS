@@ -681,6 +681,31 @@ if(DUETOS_TRAP_DEMO)
     target_compile_definitions(duetos-kernel-stage1   PRIVATE DUETOS_TRAP_DEMO=1)
 endif()
 
+# DUETOS_GDB_STUB — wire COM2 to the in-kernel GDB Remote
+# Serial Protocol stub (kernel/diag/gdb_stub.{h,cpp}). When ON,
+# int3 (#BP) and #DB in kernel code route to the GDB stop loop
+# instead of the existing log-and-continue path; the kernel
+# halts until an external debugger attached to QEMU's COM2 →
+# tcp::1234 issues `c` / `D` / `k`. When OFF, the stub stays
+# dormant and int3 is recoverable as before — IMPORTANT because
+# a stub-wired build with no debugger attached would hang on
+# any int3.
+option(DUETOS_GDB_STUB "Wire COM2 to the in-kernel GDB stub (live debug via tcp::1234)" OFF)
+if(DUETOS_GDB_STUB)
+    target_compile_definitions(duetos-kernel          PRIVATE DUETOS_GDB_STUB=1)
+    target_compile_definitions(duetos-kernel-stage1   PRIVATE DUETOS_GDB_STUB=1)
+endif()
+
+# DUETOS_GDB_DEMO — fire `int3` at end of kernel_main so an
+# external GDB session can exercise the attach + inspect +
+# continue cycle. Implies DUETOS_GDB_STUB. Used by
+# tools/debug/duetos-gdb-attach.sh + tools/debug/duetos-gdb-cmd.sh.
+option(DUETOS_GDB_DEMO "Fire int3 at end of kernel_main to wait for GDB attach (implies _STUB)" OFF)
+if(DUETOS_GDB_DEMO)
+    target_compile_definitions(duetos-kernel          PRIVATE DUETOS_GDB_DEMO=1 DUETOS_GDB_STUB=1)
+    target_compile_definitions(duetos-kernel-stage1   PRIVATE DUETOS_GDB_DEMO=1 DUETOS_GDB_STUB=1)
+endif()
+
 
 # Initial boot mode: desktop (windowed shell) vs TTY (fullscreen
 # framebuffer console). Runtime toggle with Ctrl+Alt+T works

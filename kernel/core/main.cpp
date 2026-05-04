@@ -646,6 +646,32 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     }
     (void)duetos::core::RunPhase(duetos::core::Phase::Idt);
 
+#ifdef DUETOS_GDB_STUB
+    // Wire COM2 to the in-kernel GDB stub as early as possible —
+    // immediately after the IDT comes online so the trap-dispatch
+    // path (which routes int3 / #DB into the stop loop) is itself
+    // armed. Gated behind DUETOS_GDB_STUB because a wired stub
+    // with no attached debugger would hang the kernel on the
+    // first int3 (the stop loop blocks waiting for packets that
+    // will never arrive).
+    duetos::diag::gdb::GdbStubInitCom2();
+    SerialWrite("[gdb-stub] COM2 wired (115200 8N1) — connect via QEMU's tcp::1234 server\n");
+#endif
+
+#ifdef DUETOS_GDB_DEMO
+    // Deliberate int3 so the AI / dev can exercise the full
+    // attach + inspect + continue cycle without having to set up
+    // a workload that crashes naturally. Fires here — right after
+    // the IDT phase — instead of at end of kernel_main so the
+    // demo is reachable in a few seconds of TCG boot, not the
+    // minute+ a full init takes. The stop loop blocks until GDB
+    // attaches AND issues `c` / `D` / `k`. Build with
+    // -DDUETOS_GDB_DEMO=ON to enable.
+    SerialWrite("[gdb-demo] firing int3 — kernel pauses until GDB attaches + continues\n");
+    asm volatile("int3");
+    SerialWrite("[gdb-demo] resumed from GDB int3 — kernel_main continues\n");
+#endif
+
     // Kernel extable — scoped fault recovery. Register before any
     // subsystem tries to install its own rows; the user-copy
     // helpers are always entry 0 / 1.

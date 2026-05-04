@@ -235,4 +235,47 @@ void SerialWriteHex(u64 value)
     g_serial_in_progress = 0;
 }
 
+// ---------------------------------------------------------------------------
+// COM2 — dedicated to the GDB stub. No locking: the stop loop has
+// exclusive ownership when GDB is attached, and the rest of the
+// kernel never writes to this port.
+// ---------------------------------------------------------------------------
+void SerialCom2Init()
+{
+    Outb(kCom2Port + kRegInterruptEn, 0x00); // poll, no IRQ
+    Outb(kCom2Port + kRegLineControl, kLcrDlab);
+    Outb(kCom2Port + kRegData, 0x01); // divisor low — 115200 baud
+    Outb(kCom2Port + kRegInterruptEn, 0x00);
+    Outb(kCom2Port + kRegLineControl, kLcr8N1);
+    Outb(kCom2Port + kRegFifoControl, 0xC7);
+    Outb(kCom2Port + kRegModemControl, 0x0B);
+}
+
+void SerialCom2WriteByte(u8 byte)
+{
+    while ((Inb(kCom2Port + kRegLineStatus) & kLsrTransmitEmpty) == 0)
+    {
+        // spin
+    }
+    Outb(kCom2Port + kRegData, byte);
+}
+
+u8 SerialCom2ReadByteBlocking()
+{
+    while ((Inb(kCom2Port + kRegLineStatus) & kLsrDataReady) == 0)
+    {
+        // spin
+    }
+    return Inb(kCom2Port + kRegData);
+}
+
+duetos::i32 SerialCom2ReadByteNonblocking()
+{
+    if ((Inb(kCom2Port + kRegLineStatus) & kLsrDataReady) == 0)
+    {
+        return -1;
+    }
+    return static_cast<duetos::i32>(Inb(kCom2Port + kRegData));
+}
+
 } // namespace duetos::arch
