@@ -1214,6 +1214,7 @@ void SchedExit()
     self->state = TaskState::Dead;
     ++g_tasks_exited;
     --g_tasks_live;
+    KBP_PROBE_V(::duetos::debug::ProbeId::kThreadExit, self->id);
 
     // Recovery Class C extension point — ring-3 process kill will grow
     // this to tear down address space / fds / caps / ipc.

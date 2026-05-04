@@ -1,6 +1,6 @@
 # Kernel breakpoint subsystem v0 (phase 1)
 
-**Last updated:** 2026-04-22
+**Last updated:** 2026-05-04
 **Type:** Observation
 **Status:** Active — SW + HW breakpoints land, `bp` shell command
 wired, self-test runs at boot. Phases 2 (per-task syscall API) and
@@ -253,18 +253,36 @@ baked into the kernel image (a `KBP_PROBE(tag)` macro); runtime
 arming is a per-entry byte the operator can flip from the
 `probe` shell command.
 
-### Probes sprinkled (8 sites)
+### Probes sprinkled (16 sites)
 
-| Probe                     | Site                              | Default      |
-|---------------------------|-----------------------------------|--------------|
-| `panic.enter`             | first line of `core::Panic`       | ArmedLog     |
-| `sandbox.denial`          | `RecordSandboxDenial` (throttled) | ArmedLog     |
-| `win32.stub_miss`         | `SYS_WIN32_MISS_LOG`              | ArmedLog     |
-| `mm.kernel_pagefault`     | vec-14 panic path in traps.cpp    | ArmedLog     |
-| `ring3.spawn`             | `SchedCreateUser` tail            | Disarmed     |
-| `proc.create`             | `ProcessCreate` tail              | Disarmed     |
-| `proc.destroy`            | `ProcessDestroy` body             | Disarmed     |
-| `sched.context_switch`    | `Schedule` right before ContextSw | Disarmed     |
+| Probe                     | Site                                                   | Default      |
+|---------------------------|--------------------------------------------------------|--------------|
+| `panic.enter`             | first line of `core::Panic`                            | ArmedLog     |
+| `sandbox.denial`          | `RecordSandboxDenial` (throttled)                      | ArmedLog     |
+| `win32.stub_miss`         | `SYS_WIN32_MISS_LOG`                                   | ArmedLog     |
+| `mm.kernel_pagefault`     | vec-14 panic path in traps.cpp                         | ArmedLog     |
+| `trap.kernel_gpf`         | vec-13 panic path in traps.cpp                         | ArmedLog     |
+| `trap.kernel_ud`          | vec-6 panic path in traps.cpp                          | ArmedLog     |
+| `mm.heap_alloc_fail`      | `KMalloc` pool-exhausted return in kheap.cpp           | ArmedLog     |
+| `mm.phys_alloc_fail`      | `AllocateFrame` OOM return in frame_allocator.cpp      | ArmedLog     |
+| `smp.ap_online`           | AP entry in smp.cpp, just after BSP-online signal      | ArmedLog     |
+| `ring3.spawn`             | `SchedCreateUser` tail                                 | Disarmed     |
+| `proc.create`             | `ProcessCreate` tail                                   | Disarmed     |
+| `proc.destroy`            | `ProcessDestroy` body                                  | Disarmed     |
+| `loader.pe_load`          | `PeLoad` success tail in pe_loader.cpp                 | Disarmed     |
+| `loader.elf_load`         | `ElfLoad` success tail in elf_loader.cpp               | Disarmed     |
+| `sched.thread_exit`       | `SchedExit` right after Dead-state transition          | Disarmed     |
+| `sched.context_switch`    | `Schedule` right before ContextSw                      | Disarmed     |
+
+The new tier-1 (ArmedLog) additions land on every clean boot at
+most once each: `smp.ap_online` fires per secondary CPU brought up;
+the kernel-fault and OOM probes fire only when the kernel itself
+takes a fault or runs out of memory (zero on a healthy boot). The
+new tier-2 (Disarmed) additions complement the existing spawn /
+process-create / process-destroy probes: `loader.pe_load` and
+`loader.elf_load` carry the loaded image base / entry as their
+value, and `sched.thread_exit` closes the spawn/exit pair so the
+operator can confirm Dead-state accounting at runtime.
 
 Output format:
 `[t=<ms>] [I] debug/probes : <name> rip=<caller> val=<u64>`.

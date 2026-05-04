@@ -43,6 +43,7 @@
 #include "loader/pe_loader.h"
 
 #include "arch/x86_64/serial.h"
+#include "debug/probes.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
@@ -1557,6 +1558,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     r.image_base = h.image_base;
     r.image_size = h.image_size;
     r.teb_va = teb_va;
+    KBP_PROBE_V(::duetos::debug::ProbeId::kPeLoadOk, h.image_base);
     return r;
 }
 

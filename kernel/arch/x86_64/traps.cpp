@@ -834,20 +834,26 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // fault flow exists.
     ::duetos::diag::gdb::GdbServerPublishWritableRegisters(&s_gdb_snap);
     //
-    // Fire the kernel-page-fault probe specifically for vec 14 so
-    // the log ring records this as a structured event before the
-    // panic dump; other kernel exceptions are already distinct
-    // enough by name that they don't need a dedicated probe.
+    // Fire the per-vector probe so the log ring records this as a
+    // structured event before the panic dump. Each kernel-mode CPU
+    // exception that has a distinct shape gets its own probe; the
+    // operator can disarm noisy ones in isolation. #PF additionally
+    // emits a D2 EventTrace so a subsequent `tracer dump` shows the
+    // fault in its chronological place.
     if (frame->vector == 14)
     {
         KBP_PROBE_V(::duetos::debug::ProbeId::kKernelPageFault, frame->rip);
-        // D2 instrumentation. arg0 = CR2 (faulting VA),
-        // arg1 = error_code. Emitted before the panic path so a
-        // subsequent `tracer dump` shows the #PF in its
-        // chronological place.
         u64 cr2;
         asm volatile("mov %%cr2, %0" : "=r"(cr2));
         ::duetos::diag::EventTrace(::duetos::diag::kEventPageFault, cr2, frame->error_code);
+    }
+    else if (frame->vector == 13)
+    {
+        KBP_PROBE_V(::duetos::debug::ProbeId::kKernelGpf, frame->rip);
+    }
+    else if (frame->vector == 6)
+    {
+        KBP_PROBE_V(::duetos::debug::ProbeId::kKernelUd, frame->rip);
     }
     // Quiet the NMI watchdog before the dump. DumpDiagnostics +
     // symbol resolution + serial I/O can easily exceed one
