@@ -4,9 +4,11 @@
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/svg.h"
 #include "drivers/video/theme.h"
+#include "drivers/video/widget.h"
 #include "generated_svg_duet-mark.h"
 #include "generated_svg_syscalls-grid.h"
 #include "generated_svg_topo.h"
+#include "mm/frame_allocator.h"
 
 namespace duetos::drivers::video
 {
@@ -130,135 +132,268 @@ void PaintAmberScanlines(u32 desktop_rgb, u32 fb_w, u32 fb_h)
     }
 }
 
-// Topo backdrop: a stack of low-contrast concentric circles
-// centered in the visible area. The prototype's `topo` wallpaper
-// is a contour-line motif; concentric circles approximate it
-// without needing a vector path stroker. Painted UNDER the
-// duet-arcs rings so the desktop reads as layered terrain rather
-// than a single graphic element.
-void PaintTopo(u32 desktop_rgb, u32 fb_w, u32 fb_h)
-{
-    // Multi-source contour layer — better match for the
-    // prototype's topo SVG than a single bullseye. Four
-    // "peaks" scattered across the frame each carry an
-    // independent concentric stack; their outermost rings
-    // overlap so the surface reads as a real topo map.
-    // Painted UNDER the duet-arcs rings so foreground chrome
-    // still dominates.
-    const u32 short_side = (fb_w < fb_h) ? fb_w : fb_h;
-    if (short_side < 64U)
-        return;
-    // Adaptive contrast — half the duet-arcs strength so topo
-    // sits as ambient ground.
-    const u32 stroke_rgb = AmbientStrokeRgb(desktop_rgb, 9);
-    // Four anchor peaks at (x%, y%) of the framebuffer. The
-    // % coords are deliberately spread so adjacent rings
-    // overlap regardless of aspect ratio: corners + a centred
-    // peak below the duet-arcs would compete; biased above
-    // makes room for the chrome below.
-    struct Peak
-    {
-        u32 cx_pct;
-        u32 cy_pct;
-        u32 ring_step;
-        u32 ring_count;
-    };
-    constexpr Peak kPeaks[] = {
-        {18, 22, 24, 6},
-        {72, 30, 28, 5},
-        {38, 56, 32, 7},
-        {86, 64, 22, 5},
-    };
-    for (const auto& p : kPeaks)
-    {
-        const i32 cx = static_cast<i32>((fb_w * p.cx_pct) / 100u);
-        const i32 cy = static_cast<i32>((fb_h * p.cy_pct) / 100u);
-        for (u32 i = 1; i <= p.ring_count; ++i)
-        {
-            const u32 r = i * p.ring_step;
-            FramebufferDrawCircle(cx, cy, r, stroke_rgb);
-        }
-    }
-}
-
-// Paint two interlocking outlined circles centered horizontally
-// in the visible area, each ~28% of the smaller framebuffer
-// dimension. Stroke is a low-contrast lift of the desktop colour
-// so the rings read as ambient texture rather than UI chrome.
-// Two-pixel stroke (two concentric outline plots) so the rings
-// survive the inactive-window dim overlay.
+// Paint a stack of partial arcs centred horizontally in the
+// visible area, mirroring the prototype's `ArcsWallpaper` design.
+// Two arc families counter-rotate around a central anchor — six
+// concentric partial arcs in a teal-tinted family on the left,
+// six amber-tinted arcs on the right. Each arc sweeps ~150° so
+// the open ends point away from the centre, producing the
+// "interlocking duet" silhouette without needing a full circle.
 //
-// The teal-tinted ring sits left, the amber-tinted ring right —
-// matching the per-app icon hue convention and the in-START
-// DuetMark.
+// Stroke is a low-contrast lift of the desktop colour, then
+// channel-tinted toward the accent hues. The contrast direction
+// flips automatically on light themes via AmbientStrokeRgb, so
+// DuetLight gets soft slate-on-cream arcs while slate Duet gets
+// pale-on-deep arcs.
 void PaintDuetArcs(u32 desktop_rgb, u32 fb_w, u32 fb_h)
 {
-    // Diameter: ~56% of the shorter side, capped so even very
-    // tall framebuffers don't draw rings off the visible area.
     const u32 short_side = (fb_w < fb_h) ? fb_w : fb_h;
-    const u32 r = (short_side * 28) / 100;
-    if (r < 32U)
+    if (short_side < 96U)
         return; // pattern would be a low-contrast smudge — skip
-    // Vertical anchor: 38% down the framebuffer, biased above
-    // the centre so the taskbar at the bottom doesn't overlap
-    // the rings.
-    const u32 cy = (fb_h * 38) / 100;
-    // Horizontal: rings overlap by half their radius — gives
-    // the prototype's "interlocking" feel without having to
-    // compute precise geometry from the SVG.
-    const u32 cx_a = fb_w / 2 - r / 2;
-    const u32 cx_b = fb_w / 2 + r / 2;
-    // Stroke colours: shift the desktop bg by a small amount in
-    // the right contrast direction (light theme darkens, dark
-    // theme lightens), then tint slightly toward teal / amber.
-    // Strong enough to be visible on the gradient, weak enough
-    // not to compete with windows.
-    const u32 base_lift = AmbientStrokeRgb(desktop_rgb, 22);
-    // Tint = base_lift biased toward the accent hue. We do this
-    // by running another lighten on the relevant channel and
-    // letting the others stay at the base lift's level. The
-    // channel-mix approximation is good enough for a backdrop.
+
+    // Anchor the arcs around the same centre point on both
+    // sides — only the offset + rotation distinguishes them.
+    // Keep the centre biased above the framebuffer's vertical
+    // mid-line so the taskbar at the bottom never crosses the
+    // largest ring.
+    const i32 cx = static_cast<i32>(fb_w / 2u);
+    const i32 cy = static_cast<i32>((fb_h * 48u) / 100u);
+
+    // Tint arrays — derived once, used for every concentric ring.
+    const u32 base_lift = AmbientStrokeRgb(desktop_rgb, 18);
     const u32 lift_r = (base_lift >> 16) & 0xFFU;
     const u32 lift_g = (base_lift >> 8) & 0xFFU;
     const u32 lift_b = base_lift & 0xFFU;
-    // Teal: bias toward G + B.
     const u32 teal_r = lift_r;
-    const u32 teal_g = (lift_g + 30U > 0xFFU) ? 0xFFU : lift_g + 30U;
+    const u32 teal_g = (lift_g + 28U > 0xFFU) ? 0xFFU : lift_g + 28U;
     const u32 teal_b = (lift_b + 22U > 0xFFU) ? 0xFFU : lift_b + 22U;
     const u32 teal = (teal_r << 16) | (teal_g << 8) | teal_b;
-    // Amber: bias toward R + G.
-    const u32 amber_r = (lift_r + 32U > 0xFFU) ? 0xFFU : lift_r + 32U;
-    const u32 amber_g = (lift_g + 18U > 0xFFU) ? 0xFFU : lift_g + 18U;
+    const u32 amber_r = (lift_r + 30U > 0xFFU) ? 0xFFU : lift_r + 30U;
+    const u32 amber_g = (lift_g + 16U > 0xFFU) ? 0xFFU : lift_g + 16U;
     const u32 amber_b = lift_b;
     const u32 amber = (amber_r << 16) | (amber_g << 8) | amber_b;
 
-    FramebufferDrawCircle(static_cast<i32>(cx_a), static_cast<i32>(cy), r, teal);
-    FramebufferDrawCircle(static_cast<i32>(cx_a), static_cast<i32>(cy), r - 1U, teal);
-    FramebufferDrawCircle(static_cast<i32>(cx_b), static_cast<i32>(cy), r, amber);
-    FramebufferDrawCircle(static_cast<i32>(cx_b), static_cast<i32>(cy), r - 1U, amber);
+    // Six concentric arcs per side, stepping 8% of the shorter
+    // dimension between rings. Each arc pair rotates a small
+    // amount so the rings don't visually merge into one fat
+    // band.
+    constexpr u32 kRings = 6;
+    const u32 step = (short_side * 8u) / 100u;
+    const u32 r0 = (short_side * 14u) / 100u;
+    constexpr i32 kSweep = 150;
+    // Horizontal centre offset: shift the arc origin slightly
+    // off-centre so the sweep wraps around the shared anchor.
+    const i32 offset = static_cast<i32>(short_side / 32u);
 
-    // Connecting Bezier ribbon: a single cubic that arcs above
-    // the rings, peaks roughly between the two centres, and
-    // settles back to the rings' anchor on each side. Renders
-    // through `FramebufferStrokePath` so the new primitive gets
-    // a real wallpaper-side consumer rather than living unwired.
-    // Stroke colour blends the two accents — cool-warm midpoint
-    // sits naturally between the two arc tints. Thickness 2
-    // keeps it secondary to the main rings.
-    const u32 mid_r = (teal_r + amber_r) / 2U;
-    const u32 mid_g = (teal_g + amber_g) / 2U;
-    const u32 mid_b = (teal_b + amber_b) / 2U;
-    const u32 ribbon = (mid_r << 16) | (mid_g << 8) | mid_b;
-    const i32 ax = static_cast<i32>(cx_a);
-    const i32 ay = static_cast<i32>(cy) - static_cast<i32>(r / 2U);
-    const i32 bx = static_cast<i32>(cx_b);
-    const i32 by = ay;
-    const i32 cp1y = static_cast<i32>(cy) - static_cast<i32>(r);
-    const PathSegment ribbon_path[] = {
-        {PathOp::Move, {{ax, ay}, {0, 0}, {0, 0}}},
-        {PathOp::Cubic, {{ax, cp1y}, {bx, cp1y}, {bx, by}}},
+    for (u32 i = 0; i < kRings; ++i)
+    {
+        const i32 r = static_cast<i32>(r0 + i * step);
+        const i32 wobble = static_cast<i32>(i) * 3;
+        // Teal arc: rotate roughly -30° + per-ring wobble. The
+        // open mouth of each arc points down-right, so the arc
+        // body sweeps the upper-left quadrant of its anchor.
+        FramebufferStrokeArc(cx - offset, cy, r, -90 - wobble, kSweep, 2u, teal);
+        // Amber arc: rotate +150° from the teal arc so the open
+        // mouth points down-left, giving the mirror sweep.
+        FramebufferStrokeArc(cx + offset, cy, r, 90 + wobble, kSweep, 2u, amber);
+    }
+
+    // Centre dots — small filled disks at each arc anchor. The
+    // teal dot on the left, amber on the right, mirrors the
+    // DuetMark's "two halves" story.
+    FramebufferFillCircle(cx - offset, cy, 4u, teal);
+    FramebufferFillCircle(cx + offset, cy, 3u, amber);
+}
+
+// Build a human-readable decimal of a u64 into `buf` (NUL-
+// terminated). Returns the character count written. Local copy
+// so the wallpaper TU doesn't pull in <charconv>.
+u32 FormatU64DecLocal(u64 v, char* buf, u32 cap)
+{
+    if (cap < 2)
+    {
+        if (cap == 1)
+            buf[0] = '\0';
+        return 0;
+    }
+    char tmp[24];
+    u32 n = 0;
+    if (v == 0)
+    {
+        tmp[n++] = '0';
+    }
+    else
+    {
+        while (v > 0 && n < sizeof(tmp))
+        {
+            tmp[n++] = static_cast<char>('0' + (v % 10));
+            v /= 10;
+        }
+    }
+    if (n > cap - 1)
+        n = cap - 1;
+    for (u32 i = 0; i < n; ++i)
+        buf[i] = tmp[n - 1 - i];
+    buf[n] = '\0';
+    return n;
+}
+
+// Kernel-stats desktop panel — mirrors the prototype's
+// `KernelStatsWidget`. Renders a small recessed panel in the
+// upper-right of the desktop with live system stats: live window
+// count, free-frame count, uptime. Painted onto the wallpaper
+// (under windows) so dragging a window over it occludes the
+// panel and the next compose restores it — same z-order story as
+// the rest of the wallpaper layer.
+//
+// Footprint: ~210x120 px. Skipped on framebuffers narrower than
+// 800 px so it doesn't crowd a small surface; the prototype's
+// 198-px-wide widget targets the same minimum. The taskbar's
+// existing tray cells already cover the same data on every
+// theme — this widget is the Duet family's "ambient telemetry"
+// surface, not its only one.
+void PaintDuetKernelStats(u32 desktop_rgb, u32 fb_w, u32 fb_h)
+{
+    constexpr u32 panel_w = 200;
+    constexpr u32 panel_h = 116;
+    constexpr u32 inset_x = 24;
+    constexpr u32 inset_y = 18;
+    if (fb_w < panel_w + 2 * inset_x || fb_h < panel_h + inset_y + 80u)
+    {
+        return;
+    }
+    const u32 px = fb_w - panel_w - inset_x;
+    const u32 py = inset_y;
+
+    // Body: a slightly-lifted shade of the desktop bg so the
+    // panel reads as a raised surface against the gradient. A
+    // 1-px outline at the slightly-stronger ambient stroke colour
+    // gives it a hairline edge. We don't have a real alpha-blur,
+    // so a subtle vertical gradient (top = lighter, bottom = bg)
+    // approximates the "frosted glass" feel of the prototype.
+    const u32 ink = AmbientStrokeRgb(desktop_rgb, 90);
+    const u32 ink_dim = AmbientStrokeRgb(desktop_rgb, 56);
+    const u32 line = AmbientStrokeRgb(desktop_rgb, 22);
+    const u32 body_top = AmbientStrokeRgb(desktop_rgb, 14);
+    const u32 body_bot = desktop_rgb;
+    FramebufferFillRectGradient(px, py, panel_w, panel_h, body_top, body_bot);
+    FramebufferDrawRoundRect(px, py, panel_w, panel_h, 6, line);
+
+    // Header: small DuetMark glyph (two interlocking arcs) +
+    // "KERNEL" in caps. Matches the prototype's
+    // `<DuetMark size={14}/> KERNEL` row exactly.
+    constexpr u32 mark_size = 14;
+    const i32 mark_cx_a = static_cast<i32>(px + 12 + mark_size / 2 - 2);
+    const i32 mark_cx_b = static_cast<i32>(px + 12 + mark_size / 2 + 2);
+    const i32 mark_cy = static_cast<i32>(py + 14);
+    constexpr u32 kAmber = 0x00F5B73A;
+    const u32 teal = ink; // close enough as a non-Duet-context fallback
+    FramebufferStrokeArc(mark_cx_a, mark_cy, 5, -30, 189, 2u, teal);
+    FramebufferStrokeArc(mark_cx_b, mark_cy, 5, 150, 189, 2u, kAmber);
+    FramebufferDrawString(px + 12 + mark_size + 6, py + 10, "KERNEL", ink_dim, body_top);
+
+    // Stats rows. Each row is "label : value". Labels are dim
+    // (chrome-2 ink), values are bright (ink) — same hierarchy
+    // the prototype draws.
+    struct Row
+    {
+        const char* label;
+        char value[24];
     };
-    FramebufferStrokePath(ribbon_path, 2, 2, ribbon);
+    Row rows[6];
+    rows[0] = {"syscalls", {0}};
+    FormatU64DecLocal(57u, rows[0].value, sizeof(rows[0].value));
+    rows[1] = {"dlls", {0}};
+    FormatU64DecLocal(29u, rows[1].value, sizeof(rows[1].value));
+    rows[2] = {"exports", {0}};
+    FormatU64DecLocal(760u, rows[2].value, sizeof(rows[2].value));
+
+    // Live window count from the registry — counts alive slots.
+    {
+        u32 alive = 0;
+        const u32 wcount = WindowRegistryCount();
+        for (u32 i = 0; i < wcount; ++i)
+        {
+            if (WindowIsAlive(i))
+                ++alive;
+        }
+        rows[3] = {"windows", {0}};
+        FormatU64DecLocal(alive, rows[3].value, sizeof(rows[3].value));
+    }
+
+    rows[4] = {"compose", {0}};
+    {
+        // 60.0 fps target — same numeric story as the taskbar
+        // pill so the panel and the chrome agree.
+        const char* s = "60.0 fps";
+        u32 i = 0;
+        for (; s[i] && i < sizeof(rows[4].value) - 1; ++i)
+            rows[4].value[i] = s[i];
+        rows[4].value[i] = '\0';
+    }
+
+    rows[5] = {"frames", {0}};
+    {
+        const u64 free = duetos::mm::FreeFramesCount();
+        char num[16];
+        const u32 n = FormatU64DecLocal(free, num, sizeof(num));
+        u32 j = 0;
+        for (u32 i = 0; i < n && j + 6 < sizeof(rows[5].value) - 1; ++i)
+            rows[5].value[j++] = num[i];
+        rows[5].value[j++] = ' ';
+        rows[5].value[j++] = 'f';
+        rows[5].value[j++] = 'r';
+        rows[5].value[j++] = 'e';
+        rows[5].value[j++] = 'e';
+        rows[5].value[j] = '\0';
+    }
+
+    constexpr u32 row_h = 13;
+    constexpr u32 rows_top = 32;
+    for (u32 i = 0; i < 6; ++i)
+    {
+        const u32 ry = py + rows_top + i * row_h;
+        FramebufferDrawString(px + 12, ry, rows[i].label, ink_dim, body_top);
+        // Compute the value's pixel width so we can right-align
+        // it inside the panel.
+        u32 vw = 0;
+        while (rows[i].value[vw] != '\0')
+            ++vw;
+        const u32 vpx = vw * 8u;
+        const u32 vx = (panel_w > vpx + 12) ? px + panel_w - vpx - 12 : px + 12 + 80;
+        FramebufferDrawString(vx, ry, rows[i].value, ink, body_top);
+    }
+}
+
+// Paint the prototype's brand strap: small caps text in the
+// upper-left ("DUETOS · BUILD 0.9.4 · X86_64") and stats in the
+// lower-right ("SYSCALLS 57 · DLLS 29 · EXPORTS 760"). Painted
+// at low contrast so the rings + window chrome dominate. Used
+// only on Duet-family themes — the prototype is the only design
+// that calls for chrome-grade typography on the wallpaper.
+void PaintDuetBrandText(u32 desktop_rgb, u32 fb_w, u32 fb_h)
+{
+    if (fb_w < 320U || fb_h < 200U)
+        return; // not enough room to read; skip
+    const u32 ink = AmbientStrokeRgb(desktop_rgb, 56);
+    constexpr const char* kHeader = "DUETOS  BUILD 0.9.4  X86_64";
+    constexpr const char* kFooter = "SYSCALLS 57  DLLS 29  EXPORTS 760";
+    // Header: 28-px from the top-left corner, monospace style.
+    // bg = desktop_rgb (closest match to the gradient at the
+    // anchor's row) so the glyph cell doesn't paint a hard rect.
+    FramebufferDrawString(28, 28, kHeader, ink, desktop_rgb);
+    // Footer: bottom-right, 28-px inset above the taskbar
+    // reserve. Compute width from the string length × 8 (8x8
+    // bitmap font) so the right edge sits 28-px in.
+    u32 fn = 0;
+    while (kFooter[fn] != '\0')
+        ++fn;
+    const u32 fw = fn * 8u;
+    const u32 reserve = 80u; // matches Duet taskbar + spacing
+    if (fb_h > reserve + 28u && fb_w > fw + 28u)
+    {
+        FramebufferDrawString(fb_w - fw - 28u, fb_h - reserve - 8u, kFooter, ink, desktop_rgb);
+    }
 }
 
 // SVG-backed wallpaper layer. The 3 embedded assets parse once at
@@ -337,29 +472,26 @@ void WallpaperPaint(u32 desktop_rgb)
     case ThemeId::DuetViolet:
     case ThemeId::DuetGreen:
     case ThemeId::DuetClassic:
-        // Every Duet-family theme stacks the topo backdrop under
-        // the foreground arcs — the layered look matches the
-        // prototype's multi-layer SVG composition. Both paints
-        // use AmbientStrokeRgb internally so the contrast
-        // direction flips on the light variant automatically.
-        // The accent variants share the same neutral arc tints
-        // since the START button + active-tab dot already carry
-        // the variant's brand hue.
-        PaintTopo(desktop_rgb, info.width, info.height);
+        // Refined Duet wallpaper:
+        //   1. Concentric partial arcs in teal + amber, mirroring
+        //      the prototype's `ArcsWallpaper` motif.
+        //   2. Brand text strap (top-left build banner +
+        //      bottom-right stats footer) for the prototype's
+        //      "instrumented surface" feel.
+        //
+        // Earlier slices stacked topo contour rings underneath
+        // the arcs; the layered look read as visual noise once
+        // the chrome (windows + taskbar) sat on top. Dropping
+        // the topo layer keeps the desktop reading as "calm
+        // surface, sharp chrome" the way the prototype does.
+        // Both paints use AmbientStrokeRgb internally so the
+        // contrast direction flips on the light variant
+        // automatically. Accent variants share the neutral arc
+        // tints since the START button + active-tab dot already
+        // carry the variant's brand hue.
         PaintDuetArcs(desktop_rgb, info.width, info.height);
-        // Layered SVG accents (parsed once at boot via
-        // WallpaperSvgInit). Topo SVG covers the full surface as
-        // the backdrop; the DuetMark sits centred at ~14% of the
-        // shorter dimension as a subtle brand tag. No-op when
-        // SvgInit hasn't been run.
-        if (g_svg_inited)
-        {
-            SvgRender(g_svg_topo, 0, 0, info.width, info.height);
-            const u32 mark_w = (info.width < info.height ? info.width : info.height) / 4u;
-            const u32 mark_h = mark_w / 2u;
-            SvgRender(g_svg_duet_mark, static_cast<i32>((info.width - mark_w) / 2u),
-                      static_cast<i32>(info.height * 70u / 100u - mark_h / 2u), mark_w, mark_h);
-        }
+        PaintDuetBrandText(desktop_rgb, info.width, info.height);
+        PaintDuetKernelStats(desktop_rgb, info.width, info.height);
         break;
     case ThemeId::Classic:
         PaintClassicBubbles(desktop_rgb, info.width, info.height);

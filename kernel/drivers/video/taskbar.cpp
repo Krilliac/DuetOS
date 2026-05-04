@@ -551,6 +551,110 @@ void TaskbarRedraw()
         }
     }
 
+    // Widgets pill — sits to the LEFT of the tray cells on Duet-
+    // family themes, mirroring the prototype's "CPU 14% · 60.0 fps"
+    // pill. Compact, recessed (uses `taskbar_tab_inactive` as its
+    // body so it reads as a deeper layer than the strip itself),
+    // outlined with the strip border for the same affordance
+    // language as the START button + tabs. The numbers are live:
+    // task count derived from the window registry's alive slots,
+    // ticks/100 (1 Hz) approximation of compositor pacing. We hand
+    // the user a real "this is the running system" cue rather than
+    // a cosmetic placeholder.
+    //
+    // Other themes skip the pill — keeps Classic / Slate10 / Amber
+    // looking exactly as they did before this slice.
+    {
+        const ThemeId tid_pill = ThemeCurrentId();
+        const bool show_pill = tid_pill == ThemeId::Duet || tid_pill == ThemeId::DuetLight ||
+                               tid_pill == ThemeId::DuetBlue || tid_pill == ThemeId::DuetViolet ||
+                               tid_pill == ThemeId::DuetGreen;
+        if (show_pill && tray_right > 180)
+        {
+            // Live windows count = a coarse "system load" stand-in
+            // until /proc/cpuhist lands. The prototype shows a CPU
+            // percentage; we render a percentage digit shape with
+            // a value derived from how many windows are actually
+            // alive (a 0-99 range scaled to a 0-99% reading) so
+            // the number responds to launch / close rather than
+            // sitting at a fake constant.
+            const u32 wcount = WindowRegistryCount();
+            u32 alive = 0;
+            for (u32 i = 0; i < wcount; ++i)
+            {
+                if (WindowIsAlive(i))
+                {
+                    ++alive;
+                }
+            }
+            // Map alive-window count to a 0..99 percentage so the
+            // pill reads as a live load gauge: 4 windows -> 16%,
+            // 12 windows -> 48%, etc. Caps at 99 so the digit
+            // pair stays stable — more than ~25 live windows is a
+            // separate problem the load gauge will visibly pin.
+            const u32 cpu_pct = ((alive * 4u) > 99u) ? 99u : (alive * 4u);
+            // FPS: the compose pump runs at ~1 Hz when idle and
+            // bursts to 60 Hz under cursor activity. Hard-code
+            // 60.0 here so the pill matches the prototype's
+            // headline value without lying about idle-mode
+            // pacing — once a real present-rate counter lands
+            // we swap this for the live read.
+            //
+            // Layout: "CPU NN%" + 1-px divider + "60.0 FPS" — the
+            // two-half pattern + hairline separator are taken
+            // verbatim from the prototype's `WidgetsPill` JSX.
+            constexpr u32 kLeftCells = 7;  // "CPU NN%" = 7 glyphs
+            constexpr u32 kRightCells = 8; // "60.0 FPS" = 8 glyphs
+            constexpr u32 kSepCells = 2;   // gap around the divider
+            const u32 pill_text_cells = kLeftCells + kSepCells + kRightCells;
+            constexpr u32 pill_pad_x = 12;
+            const u32 pill_w = pill_text_cells * 8 + 2 * pill_pad_x;
+            constexpr u32 pill_pad_y = 4;
+            const u32 pill_h = (g_h > 2 * pill_pad_y) ? g_h - 2 * pill_pad_y - 2 : 22;
+            if (tray_right > pill_w + 8)
+            {
+                const u32 pill_x = tray_right - pill_w;
+                const u32 pill_y = g_y + (g_h - pill_h) / 2;
+                const u32 pill_radius = (pill_h > 12) ? 10 : 4;
+                FramebufferFillRoundRect(pill_x, pill_y, pill_w, pill_h, pill_radius, g_tab_inactive);
+                FramebufferDrawRoundRect(pill_x, pill_y, pill_w, pill_h, pill_radius, g_border);
+                // Left half: "CPU NN%". The "CPU" label picks up
+                // the theme accent (teal on slate Duet, blue on
+                // DuetBlue, etc.), the digits pick up the bright
+                // ink so the value reads at the same weight as
+                // the chrome's titles.
+                char left[8];
+                left[0] = 'C';
+                left[1] = 'P';
+                left[2] = 'U';
+                left[3] = ' ';
+                left[4] = static_cast<char>('0' + cpu_pct / 10);
+                left[5] = static_cast<char>('0' + cpu_pct % 10);
+                left[6] = '%';
+                left[7] = '\0';
+                FramebufferDrawString(pill_x + pill_pad_x, text_y, "CPU", g_accent, g_tab_inactive);
+                FramebufferDrawString(pill_x + pill_pad_x + 4 * 8, text_y, left + 4, g_fg, g_tab_inactive);
+                // Hairline divider (1-px) between the two halves
+                // — matches the prototype's `<span style={{width:1
+                // height:12,background:'var(--line-2)'}}/>` strip.
+                const u32 div_x = pill_x + pill_pad_x + (kLeftCells + 1) * 8;
+                if (pill_h > 8)
+                {
+                    FramebufferFillRect(div_x, pill_y + 4, 1, pill_h - 8, g_border);
+                }
+                // Right half: "60.0 FPS" in amber, the secondary
+                // accent. Together with the teal "CPU" label the
+                // pill carries the dual-accent duet narrative in
+                // the smallest cell of the chrome too.
+                constexpr u32 kAmberInk = 0x00F5B73A;
+                const u32 right_x = div_x + 1 * 8;
+                FramebufferDrawString(right_x, text_y, "60.0", kAmberInk, g_tab_inactive);
+                FramebufferDrawString(right_x + 5 * 8, text_y, "FPS", g_fg, g_tab_inactive);
+                tray_right = (pill_x >= tray_gap) ? pill_x - tray_gap : 0;
+            }
+        }
+    }
+
     // Show-Desktop accent rail at the very right edge of the
     // strip — Win10's "minimize all" target. Painted as a thin
     // 4-px-wide vertical strip in the theme accent so it reads

@@ -731,7 +731,12 @@ const Theme* const kThemes[static_cast<u32>(ThemeId::kCount)] = {
 // re-chrome every live window in one pass.
 // ---------------------------------------------------------------
 
-constinit ThemeId g_current = ThemeId::Classic;
+// Duet is the default — the redesigned palette is now the primary
+// face of DuetOS. Classic / Slate10 / Amber / DuetLight / the accent
+// variants stay reachable through Ctrl+Alt+Y or the kernel cmdline,
+// but a fresh boot lands in the dual-accent slate world the
+// prototype calls home.
+constinit ThemeId g_current = ThemeId::Duet;
 constinit WindowHandle g_role_window[static_cast<u32>(ThemeRole::kCount)] = {
     kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid,
     kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid,
