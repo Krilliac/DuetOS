@@ -1,11 +1,11 @@
-    // --- ExitProcess (offset 0x00, 9 bytes) --------------------
-    // Windows x64 ABI: first arg (uExitCode) in RCX.
-    // DuetOS native ABI: syscall # in RAX, first arg in RDI,
-    // SYS_EXIT = 0.
-    0x48, 0x89, 0xCF, // 0x00 mov rdi, rcx ; code
-    0x31, 0xC0,       // 0x03 xor eax, eax ; rax = 0 = SYS_EXIT
-    0xCD, 0x80,       // 0x05 int 0x80
-    0x0F, 0x0B,       // 0x07 ud2 ; [[noreturn]]
+// --- ExitProcess (offset 0x00, 9 bytes) --------------------
+// Windows x64 ABI: first arg (uExitCode) in RCX.
+// DuetOS native ABI: syscall # in RAX, first arg in RDI,
+// SYS_EXIT = 0.
+0x48, 0x89, 0xCF, // 0x00 mov rdi, rcx ; code
+    0x31, 0xC0,   // 0x03 xor eax, eax ; rax = 0 = SYS_EXIT
+    0xCD, 0x80,   // 0x05 int 0x80
+    0x0F, 0x0B,   // 0x07 ud2 ; [[noreturn]]
 
     // --- GetStdHandle (offset 0x09, 3 bytes) -------------------
     // Win32: HANDLE GetStdHandle(DWORD nStdHandle).
@@ -3443,3 +3443,82 @@
     0xB8, 0x80, 0x00, 0x00, 0x00, // 0x1040 mov eax, 128 ; SYS_GDI_GET_SYS_COLOR_BRUSH
     0xCD, 0x80,                   // 0x1045 int 0x80
     0xC3,                         // 0x1047 ret
+
+    // === MSVCRT stdio (puts / fputs) ===========================
+
+    // --- fputs (offset 0x1048, 34 bytes) -----------------------
+    // int fputs(const char* s, FILE* stream)
+    //   rcx = s   (stream in rdx is ignored)
+    // Strips the FILE* argument, computes strlen(s), and routes
+    // to SYS_WRITE(fd=1, s, strlen(s)). Returns 0 on success
+    // (caller uses non-negative as success indicator). Win64
+    // ABI: rdi/rsi are callee-saved — push/pop around the
+    // syscall. Used by msvcrt.dll!fputs and the equivalent
+    // puts variant (which appends '\n'); 7za.exe's help-text
+    // path goes through here.
+    0x56,       // 0x1048 push rsi
+    0x57,       // 0x1049 push rdi
+    0x31, 0xC0, // 0x104A xor eax, eax         ; len counter
+    // strlen loop: while (s[len] != 0) ++len;
+    0x80, 0x3C, 0x01, 0x00, // 0x104C cmp byte [rcx+rax], 0
+    0x74, 0x05,             // 0x1050 je +5                ; -> 0x1057
+    0x48, 0xFF, 0xC0,       // 0x1052 inc rax
+    0xEB, 0xF5,             // 0x1055 jmp -11              ; -> 0x104C
+    // strlen_done at 0x1057:
+    0x48, 0x89, 0xCE, // 0x1057 mov rsi, rcx         ; buf
+    0x48, 0x89, 0xC2, // 0x105A mov rdx, rax         ; len
+    0x6A, 0x01,       // 0x105D push 1
+    0x5F,             // 0x105F pop rdi              ; fd = 1
+    0x6A, 0x02,       // 0x1060 push 2
+    0x58,             // 0x1062 pop rax              ; SYS_WRITE
+    0xCD, 0x80,       // 0x1063 int 0x80
+    0x31, 0xC0,       // 0x1065 xor eax, eax         ; return 0
+    0x5F,             // 0x1067 pop rdi
+    0x5E,             // 0x1068 pop rsi
+    0xC3,             // 0x1069 ret
+
+    // --- fwrite (offset 0x106A, 28 bytes) -----------------------
+    // size_t fwrite(const void* ptr, size_t sz, size_t n, FILE*)
+    //   rcx = ptr, rdx = sz, r8 = n, r9 = stream (ignored)
+    // Routes to SYS_WRITE(fd=1, ptr, sz*n) and returns n
+    // (success ratio reported as full-write so the caller's
+    // "rc == n ?" check passes).
+    0x56,             // 0x106A push rsi
+    0x57,             // 0x106B push rdi
+    0x48, 0x89, 0xCE, // 0x106C mov rsi, rcx         ; buf
+    0x48, 0x89, 0xD0, // 0x106F mov rax, rdx         ; sz
+    0x49, 0xF7, 0xE0, // 0x1072 mul r8               ; rax = sz * n
+    0x48, 0x89, 0xC2, // 0x1075 mov rdx, rax         ; len
+    0x6A, 0x01,       // 0x1078 push 1
+    0x5F,             // 0x107A pop rdi              ; fd = 1
+    0x6A, 0x02,       // 0x107B push 2
+    0x58,             // 0x107D pop rax              ; SYS_WRITE
+    0xCD, 0x80,       // 0x107E int 0x80
+    0x4C, 0x89, 0xC0, // 0x1080 mov rax, r8          ; return n
+    0x5F,             // 0x1083 pop rdi
+    0x5E,             // 0x1084 pop rsi
+    0xC3,             // 0x1085 ret
+
+    // --- fputc (offset 0x1086, 21 bytes) ------------------------
+    // int fputc(int c, FILE* stream)
+    //   ecx = c, rdx = stream (ignored)
+    // Stores c on stack, SYS_WRITE(fd=1, &c, 1), returns c in
+    // RAX. NB: returning c (not 0) matters because the standard
+    // contract is "return c on success, EOF on error" and 7za's
+    // help-print path checks `if (fputc(...) != c) bail` — a
+    // ReturnZero stub silently aborts the help text mid-line.
+    0x56,             // 0x1086 push rsi
+    0x57,             // 0x1087 push rdi
+    0x51,             // 0x1088 push rcx              ; c on stack
+    0x48, 0x89, 0xE6, // 0x1089 mov rsi, rsp          ; &c
+    0x6A, 0x01,       // 0x108C push 1
+    0x5A,             // 0x108E pop rdx               ; len = 1
+    0x6A, 0x01,       // 0x108F push 1
+    0x5F,             // 0x1091 pop rdi               ; fd = 1
+    0x6A, 0x02,       // 0x1092 push 2
+    0x58,             // 0x1094 pop rax               ; SYS_WRITE
+    0xCD, 0x80,       // 0x1095 int 0x80
+    0x58,             // 0x1097 pop rax               ; return c
+    0x5F,             // 0x1098 pop rdi
+    0x5E,             // 0x1099 pop rsi
+    0xC3,             // 0x109A ret

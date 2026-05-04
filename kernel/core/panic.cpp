@@ -418,7 +418,7 @@ void DumpProcessVmInfo()
     {
         u64 vmin = ~static_cast<u64>(0);
         u64 vmax = 0;
-        for (u8 i = 0; i < as->region_count; ++i)
+        for (u16 i = 0; i < as->region_count; ++i)
         {
             const u64 v = as->regions[i].vaddr;
             if (v < vmin)

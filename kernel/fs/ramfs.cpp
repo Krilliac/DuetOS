@@ -32,6 +32,10 @@
 // subsystem) but PeReport still dumps the full gap on boot.
 #include "generated_winkill_pe.h"
 
+// 7-Zip 23.01 x64 standalone (1.29 MiB, 138 imports) — embedded
+// from userland/apps/seven_zip/7za.exe.
+#include "generated_sevenzip_pe.h"
+
 /*
  * Seed trees are declared at file scope as constinit data so the
  * whole structure lives in .rodata. Children arrays are similarly
@@ -454,6 +458,17 @@ constinit RamfsNode k_trusted_bin_winkill = {
     .file_size = generated::kBinWinKillBytes_len,
 };
 
+// /bin/7za.exe — 7-Zip 23.01 x64 standalone (1.29 MiB, 138 imports
+// across 5 DLLs). The "really complicated" PE smoke target —
+// substantially heavier than windows-kill, real-world MSVC C++.
+constinit RamfsNode k_trusted_bin_sevenzip = {
+    .name = "7za.exe",
+    .type = RamfsNodeType::kFile,
+    .children = nullptr,
+    .file_bytes = generated::kBinSevenZipBytes,
+    .file_size = generated::kBinSevenZipBytes_len,
+};
+
 constinit RamfsNode k_trusted_bin_hello_winapi = {
     .name = "hello_winapi.exe",
     .type = RamfsNodeType::kFile,
@@ -513,17 +528,10 @@ constinit RamfsNode k_trusted_bin_usershell = {
 };
 
 constinit const RamfsNode* const k_trusted_bin_children[] = {
-    &k_trusted_bin_hello,
-    &k_trusted_bin_exit_elf,
-    &k_trusted_bin_hello_pe,
-    &k_trusted_bin_winkill,
-    &k_trusted_bin_hello_winapi,
-    &k_trusted_bin_thread_stress,
-    &k_trusted_bin_syscall_stress,
-    &k_trusted_bin_customdll_test,
-    &k_trusted_bin_windowed_hello,
-    &k_trusted_bin_usershell,
-    nullptr,
+    &k_trusted_bin_hello,          &k_trusted_bin_exit_elf,       &k_trusted_bin_hello_pe,
+    &k_trusted_bin_winkill,        &k_trusted_bin_sevenzip,       &k_trusted_bin_hello_winapi,
+    &k_trusted_bin_thread_stress,  &k_trusted_bin_syscall_stress, &k_trusted_bin_customdll_test,
+    &k_trusted_bin_windowed_hello, &k_trusted_bin_usershell,      nullptr,
 };
 
 constinit RamfsNode k_trusted_bin_dir = {

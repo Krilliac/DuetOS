@@ -366,13 +366,17 @@ constexpr u32 kOffGdiDrawTextW = 0x1019; // render/drivers — 25 bytes
 // System palette entry points.
 constexpr u32 kOffGetSysColor = 0x1032;      // render/drivers — 11 bytes
 constexpr u32 kOffGetSysColorBrush = 0x103D; // render/drivers — 11 bytes
+// MSVCRT stdio thunks (real SYS_WRITE to fd=1).
+constexpr u32 kOffFputs = 0x1048;  // 34 bytes (also msvcrt!puts via alias)
+constexpr u32 kOffFwrite = 0x106A; // 28 bytes
+constexpr u32 kOffFputc = 0x1086;  // 21 bytes (returns c, not 0 — see comment)
 
 constexpr u8 kThunksBytes[] = {
 #include "subsystems/win32/thunks_bytecode.inc"
 };
 
 static_assert(sizeof(kThunksBytes) <= 8192, "Win32 thunks page fits in two 4 KiB pages");
-static_assert(sizeof(kThunksBytes) == 0x1048, "thunk layout drifted; update kOff* constants");
+static_assert(sizeof(kThunksBytes) == 0x109B, "thunk layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The thunk
 // bytes encode 0x65000000 and 0x65000008 directly; if proc_env.h
@@ -597,7 +601,46 @@ bool Win32ThunksLookupDataCatchAll(u64* out_va)
 
 bool IsLikelyDataImport(const char* func)
 {
-    if (func == nullptr || func[0] != '?')
+    if (func == nullptr || func[0] == '\0')
+        return false;
+
+    // Plain-C data exports from the MSVC CRT (msvcrt.dll /
+    // ucrtbase.dll). Modern MSVC code links against the
+    // accessor-function form (e.g. __p__commode), but older
+    // MSVC-built PEs still import the underlying global by name
+    // and the CRT init code stores process-mode flags directly
+    // into them via `mov %eax,(%rcx)`. Surfacing them as data
+    // makes the resolver point the IAT slot at the proc-env
+    // landing pad (8-byte zero-initialised, writable) instead
+    // of at a code thunk that faults on store.
+    //
+    // The list is short on purpose: only globals that real-world
+    // PEs actually import. Add new names as the gap inventory
+    // surfaces them — see .claude/knowledge/live-test-fixes-...
+    // for the workflow.
+    static const char* const kCrtDataNames[] = {
+        "_commode",    "_fmode",     "_environ",       "_wenviron",     "__argc",       "__argv",     "__wargv",
+        "_acmdln",     "_wcmdln",    "_pgmptr",        "_wpgmptr",      "__mb_cur_max", "_iob",       "__iob_func",
+        "_osplatform", "_osver",     "_winver",        "_winmajor",     "_winminor",    "_aexit_rtn", "__progname",
+        "_HUGE",       "__threadid", "__threadhandle", "__sys_errlist", "__sys_nerr",   "_timezone",  "_daylight",
+        "_tzname",     "__initenv",  "_winitenv",      "_amblksiz",     "__badioinfo",  "__pioinfo",
+    };
+    for (const char* name : kCrtDataNames)
+    {
+        const char* a = func;
+        const char* b = name;
+        while (*a != '\0' && *b != '\0' && *a == *b)
+        {
+            ++a;
+            ++b;
+        }
+        if (*a == '\0' && *b == '\0')
+        {
+            return true;
+        }
+    }
+
+    if (func[0] != '?')
         return false;
     // MSVC mangling for a static/global data symbol is
     // ?<name>@[<scope>@...]@@3<type-spec>[<type-modifiers>]

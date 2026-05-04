@@ -121,6 +121,7 @@
 #include "generated_winhttp_smoke_pe.h"
 #include "generated_wininet_smoke_pe.h"
 #include "generated_winkill_pe.h"
+#include "generated_sevenzip_pe.h"
 #include "generated_atom_smoke_pe.h"
 #include "generated_console_smoke_pe.h"
 #include "generated_critsec_smoke_pe.h"
@@ -2522,6 +2523,18 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     const PeLoadResult r = PeLoad(pe_bytes, pe_len, as, name, aslr_delta, dll_array, preloaded_count);
     if (!r.ok)
     {
+        // PeLoad rejected the image. Without surfacing this, a
+        // failing spawn vanishes silently — there's no log line
+        // between "starting spawn" and the next process's banner.
+        // KLOG_WARN so it always shows in any sensible loglevel
+        // and respects production demotion; the verbose detail
+        // (entry/stack/image_base) goes to KLOG_DEBUG so it only
+        // surfaces in debug builds when an operator's hunting.
+        KLOG_WARN("ring3", "PeLoad failed");
+        KLOG_DEBUG_S("ring3", "  failing image", "name", name);
+        KLOG_DEBUG_V("ring3", "  observed entry_va", r.entry_va);
+        KLOG_DEBUG_V("ring3", "  observed stack_va", r.stack_va);
+        KLOG_DEBUG_V("ring3", "  observed image_base", r.image_base);
         AddressSpaceRelease(as);
         return 0;
     }
@@ -2934,6 +2947,18 @@ void StartRing3SmokeTask()
     if (::duetos::test::SmokeProfileShouldSpawn(::duetos::test::SmokeTarget::PeWinkill))
     {
         SpawnPeFile("ring3-winkill", fs::generated::kBinWinKillBytes, fs::generated::kBinWinKillBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    }
+    // 7-Zip 23.01 x64 standalone — the "really complicated" PE.
+    // 1.29 MiB binary, 138 imports across KERNEL32 / msvcrt /
+    // ADVAPI32 / OLEAUT32 / USER32. Console subsystem; with no
+    // command-line args it prints help text and exits cleanly.
+    // The first slice that lands this is gap-finding by design;
+    // missing imports / unresolved ordinals / unimplemented
+    // syscalls all surface as serial-log lines we can iterate on.
+    if (::duetos::test::SmokeProfileShouldSpawn(::duetos::test::SmokeTarget::PeSevenZip))
+    {
+        SpawnPeFile("ring3-7za", fs::generated::kBinSevenZipBytes, fs::generated::kBinSevenZipBytes_len,
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     }
     // mini_browser.exe — minimal WinSock 2 PE that does an HTTP/1.0

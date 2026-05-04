@@ -6,6 +6,7 @@ _Read this at every session start (after git sync). Each row links to a detailed
 
 | Topic | File | Type | Status | Last Updated |
 |-------|------|------|--------|--------------|
+| **7-Zip 23.01 (x64) runs on DuetOS** — 1.29 MiB MSVC console PE prints full ~3 KiB help text + exits cleanly. Bugs surfaced + fixed: AS region_count u8 overflow (silent IAT mapping loss + double-free on destroy), IsLikelyDataImport plain-C CRT exports, msvcrt CRT thunks (exit/_exit/_initterm/__getmainargs/_XcptFilter/etc.), real fputs/fputc/fwrite SYS_WRITE thunks, kSyscallWriteMax bumped 256→4096 | [knowledge/seven-zip-runs-on-duetos-v0.md](knowledge/seven-zip-runs-on-duetos-v0.md) | Issue + Pattern + Decision + Observation | Active | 2026-05-04 |
 | Live boot + executable smoke pass — `__WSAFDIsSet` ws2_32 export, `WindowMoveTo` pre-FB clamp fix, `DumpOnAbnormalExit` → `DumpExitDiagnostics` rename, diagnostic-logging discipline + `kBootSelftestFail` probe | [knowledge/live-test-fixes-2026-05-04.md](knowledge/live-test-fixes-2026-05-04.md) | Issue + Pattern + Decision | Active | 2026-05-04 |
 | Live security-testing pass — deflate canary, PBKDF2 boot DoS, VM-syscall+PE/DLL ImageBase user-range pre-checks | [knowledge/security-testing-fixes-2026-05-03.md](knowledge/security-testing-fixes-2026-05-03.md) | Issue + Pattern + Decision | Active | 2026-05-03 |
 | AI bloat pattern and countermeasures | [knowledge/ai-bloat-pattern.md](knowledge/ai-bloat-pattern.md) | Observation | Active | 2026-04-20 |

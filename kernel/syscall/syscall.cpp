@@ -116,7 +116,16 @@ constexpr u8 kSyscallVector = 0x80;
 // plenty of headroom on a 16 KiB kernel stack. Larger writes get
 // truncated to this length and the returned byte count reflects
 // the truncation — standard POSIX write() semantics.
-constexpr u64 kSyscallWriteMax = 256;
+//
+// Bumped 256 -> 4096 for 7za.exe's help-text path: 7-Zip prints
+// its full usage block as a single ~3 KiB fputs/fwrite call. With
+// the 256-byte cap the help text was truncated mid-line at "  h :
+// Calculate hash v". 4 KiB is one page, still bounded, and stays
+// well inside the 16 KiB kernel stack budget. Real-world stdio
+// rarely exceeds a page in a single call; programs that do (mmap
+// dumps, large memcpy-into-stdout) will see correct truncation +
+// partial-write semantics from POSIX-style retry loops.
+constexpr u64 kSyscallWriteMax = 4096;
 // kSyscallPathMax now in syscall.h
 
 // Cross-AS VM transfer direction. Read = target → caller buffer;
@@ -2421,7 +2430,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         Process* proc = CurrentProcess();
         if (proc != nullptr && proc->as != nullptr)
         {
-            for (u8 i = 0; i < proc->as->region_count; ++i)
+            for (u16 i = 0; i < proc->as->region_count; ++i)
                 mapped_bytes += mm::kPageSize;
         }
         st.ullAvailVirtual = (kUserVirtualBytes >= mapped_bytes) ? (kUserVirtualBytes - mapped_bytes) : 0;

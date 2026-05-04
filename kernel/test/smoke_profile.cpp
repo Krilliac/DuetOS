@@ -102,6 +102,8 @@ u64 ProfileSleepTicks(SmokeProfile profile)
         return kTicksPerSecond * 12; // comprehensive PE + many probes
     case SmokeProfile::PeWinkill:
         return kTicksPerSecond * 10; // real-world MSVC PE w/ DLL preload
+    case SmokeProfile::PeSevenZip:
+        return kTicksPerSecond * 30; // 1.29 MiB PE: load + reloc + 138 imports + run
     case SmokeProfile::Linux:
         return kTicksPerSecond * 5; // single Linux ABI smoke
     default:
@@ -156,6 +158,10 @@ SmokeProfile SmokeProfileInit(const char* cmdline)
     {
         g_profile = SmokeProfile::PeWinkill;
     }
+    else if (TokenMatches(value, end, "pe-sevenzip"))
+    {
+        g_profile = SmokeProfile::PeSevenZip;
+    }
     else if (TokenMatches(value, end, "linux"))
     {
         g_profile = SmokeProfile::Linux;
@@ -189,6 +195,8 @@ const char* SmokeProfileName(SmokeProfile profile)
         return "pe-winapi";
     case SmokeProfile::PeWinkill:
         return "pe-winkill";
+    case SmokeProfile::PeSevenZip:
+        return "pe-sevenzip";
     case SmokeProfile::Linux:
         return "linux";
     default:
@@ -221,6 +229,10 @@ bool SmokeProfileShouldSpawn(SmokeTarget target)
         case SmokeTarget::PeWinapi:
         case SmokeTarget::PeWinkill:
             return true;
+        case SmokeTarget::PeSevenZip:
+            // 1.29 MiB load + 138 imports under TCG is ~10s extra
+            // wall on default boot. Skip on emulator; bare metal runs.
+            return !duetos::arch::IsEmulator();
         case SmokeTarget::PeOther:
         case SmokeTarget::Linux:
             return !duetos::arch::IsEmulator();
@@ -240,6 +252,8 @@ bool SmokeProfileShouldSpawn(SmokeTarget target)
         return p == SmokeProfile::PeWinapi;
     case SmokeTarget::PeWinkill:
         return p == SmokeProfile::PeWinkill;
+    case SmokeTarget::PeSevenZip:
+        return p == SmokeProfile::PeSevenZip;
     case SmokeTarget::PeOther:
         return false; // never under a smoke profile
     case SmokeTarget::Linux:

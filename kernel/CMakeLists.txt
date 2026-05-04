@@ -227,6 +227,23 @@ add_custom_command(
     VERBATIM)
 list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_WINKILL_HEADER}")
 
+# Real Windows PE — 7za.exe (1.29 MiB, x86_64 console, 138 imports
+# across 5 DLLs: KERNEL32 / msvcrt / ADVAPI32 / OLEAUT32 / USER32).
+# 7-Zip 23.01 standalone build — substantially heavier than
+# windows-kill, exercising the loader against a real-world MSVC
+# C++ codebase. License: LGPL + unRAR (see seven_zip/LICENSE.txt).
+set(DUETOS_SEVENZIP_SRC    "${CMAKE_SOURCE_DIR}/userland/apps/seven_zip/7za.exe")
+set(DUETOS_SEVENZIP_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_sevenzip_pe.h")
+add_custom_command(
+    OUTPUT "${DUETOS_SEVENZIP_HEADER}"
+    COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
+            "${DUETOS_SEVENZIP_SRC}" "${DUETOS_SEVENZIP_HEADER}"
+            kBinSevenZipBytes --namespace "duetos::fs::generated"
+    DEPENDS "${DUETOS_SEVENZIP_SRC}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Embedding real Windows PE /bin/7za.exe"
+    VERBATIM)
+list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_SEVENZIP_HEADER}")
+
 # mini_browser.exe — minimal WinSock 2 PE that does an HTTP/1.0 GET to
 # www.google.com. Source is userland/apps/mini_browser/browser.c; the
 # prebuilt PE checked into the tree is what gets embedded so the

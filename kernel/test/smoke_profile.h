@@ -60,6 +60,12 @@ enum class SmokeProfile : duetos::u8
     /// "Windows Kill ". Sentinel + exit.
     PeWinkill,
 
+    /// `smoke=pe-sevenzip`: spawn ring3-7za (7-Zip 23.01 x64
+    /// standalone — "really complicated" real-world MSVC PE,
+    /// 1.29 MiB, 138 imports across KERNEL32 / msvcrt / ADVAPI32 /
+    /// OLEAUT32 / USER32). Sentinel + exit.
+    PeSevenZip,
+
     /// `smoke=linux`: spawn the seven Linux ABI smokes. Sentinel + exit.
     Linux,
 };
@@ -69,13 +75,14 @@ enum class SmokeProfile : duetos::u8
 /// what the call site is, a "Profile" is what the user asked for.
 enum class SmokeTarget : duetos::u8
 {
-    Ring3,     // ring3-smoke-A/B/sandbox
-    PeHello,   // ring3-hello-pe
-    PeWinapi,  // ring3-hello-winapi
-    PeWinkill, // ring3-winkill
-    PeOther,   // ring3-thread-stress, ring3-customdll-test, etc.
-               //   (only enabled in profile=None bare-metal full boot)
-    Linux,     // SpawnRing3LinuxSmoke and friends
+    Ring3,      // ring3-smoke-A/B/sandbox
+    PeHello,    // ring3-hello-pe
+    PeWinapi,   // ring3-hello-winapi
+    PeWinkill,  // ring3-winkill
+    PeSevenZip, // ring3-7za (7-Zip 23.01 x64 standalone)
+    PeOther,    // ring3-thread-stress, ring3-customdll-test, etc.
+                //   (only enabled in profile=None bare-metal full boot)
+    Linux,      // SpawnRing3LinuxSmoke and friends
 };
 
 /// Parse `smoke=<profile>` from the boot cmdline once. Returns the
