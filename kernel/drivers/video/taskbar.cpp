@@ -5,7 +5,6 @@
 #include "drivers/power/power.h"
 #include "mm/frame_allocator.h"
 #include "net/stack.h"
-#include "sched/sched.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
@@ -58,6 +57,17 @@ constinit u32 g_show_desktop_y = 0;
 constinit u32 g_show_desktop_w = 0;
 constinit u32 g_show_desktop_h = 0;
 
+// Chevron-up "show hidden icons" button — the leftmost tray
+// cell on Duet-family themes. Bounds are exposed for the mouse
+// reader's hover + click handlers; `g_chevron_hover` carries the
+// "cursor is currently over me" flag so the redraw can paint a
+// larger glyph (the prototype's "expand a bit on hover" cue).
+constinit u32 g_chevron_x = 0;
+constinit u32 g_chevron_y = 0;
+constinit u32 g_chevron_w = 0;
+constinit u32 g_chevron_h = 0;
+constinit bool g_chevron_hover = false;
+
 // Last-painted tab layout. Updated by TaskbarRedraw; consumed by
 // TaskbarTabAt. Capacity matches kMaxWindows so tabs and window
 // slots are in 1:1 correspondence.
@@ -69,44 +79,6 @@ struct TabSlot
 };
 constinit TabSlot g_tabs[kMaxTabs] = {};
 constinit u32 g_tab_count = 0;
-
-// Format an unsigned u64 as a decimal ASCII string into `buf`.
-// Writes at most `cap - 1` bytes + NUL. Returns the number of
-// characters written (excluding NUL). Simple, no float / %d.
-u32 FormatU64Dec(u64 v, char* buf, u32 cap)
-{
-    if (cap < 2)
-    {
-        if (cap == 1)
-            buf[0] = '\0';
-        return 0;
-    }
-    // Reverse-print, then reverse in place.
-    char tmp[24];
-    u32 n = 0;
-    if (v == 0)
-    {
-        tmp[n++] = '0';
-    }
-    else
-    {
-        while (v > 0 && n < sizeof(tmp))
-        {
-            tmp[n++] = static_cast<char>('0' + (v % 10));
-            v /= 10;
-        }
-    }
-    if (n > cap - 1)
-    {
-        n = cap - 1;
-    }
-    for (u32 i = 0; i < n; ++i)
-    {
-        buf[i] = tmp[n - 1 - i];
-    }
-    buf[n] = '\0';
-    return n;
-}
 
 // Vertically centre a row of 8-px glyphs inside the taskbar.
 u32 TextRowY()
@@ -316,9 +288,22 @@ void TaskbarRedraw()
     // side uptime reserve.
     constexpr u32 tab_w = 170;
     constexpr u32 tab_gap = 4;
-    constexpr u32 uptime_reserve = 128; // space for "UP NNNNs"
+    // Reserve space on the right for the cluster of widgets that
+    // sits beyond the tabs — time card + tray icons + chevron +
+    // (Duet only) the CPU/FPS pill. Sized so tabs never get
+    // clipped by the rightmost paint pass.
+    //
+    //   Duet family: pill (~180) + tray (~100) + time (~80) +
+    //                rail (~6) + gaps (~30) = ~400
+    //   Other themes: tray (~70) + time (~80) + rail (~6) +
+    //                 gaps (~14) = ~170
+    const ThemeId tid_reserve = ThemeCurrentId();
+    const bool reserve_for_pill = tid_reserve == ThemeId::Duet || tid_reserve == ThemeId::DuetLight ||
+                                  tid_reserve == ThemeId::DuetBlue || tid_reserve == ThemeId::DuetViolet ||
+                                  tid_reserve == ThemeId::DuetGreen;
+    const u32 right_reserve = reserve_for_pill ? 400u : 180u;
     u32 tab_x = start_w + 16;
-    const u32 tabs_right_limit = (fbw > uptime_reserve) ? fbw - uptime_reserve : fbw;
+    const u32 tabs_right_limit = (fbw > right_reserve) ? fbw - right_reserve : fbw;
 
     g_tab_count = 0;
     const u32 count = WindowRegistryCount();
@@ -381,11 +366,19 @@ void TaskbarRedraw()
 
     // --- Right edge: system tray + date + clock + uptime. ---
     //
-    // Layout right-to-left from the framebuffer's right edge so
-    // new widgets can land left of existing ones without shifting
+    // Layout right-to-left from the framebuffer's right edge —
+    // new widgets land left of existing ones without shifting
     // the clock:
     //
-    //   [ ...tabs ... ]  [NET][CPU][MEM]  MON 23 APR 2026  HH:MM:SS  UP Ns
+    //   [ ...tabs ... ]  [pill]  [chev][icons]   HH:MM
+    //                                            DDD M/D
+    //
+    // The clock + date form a vertically-stacked block (Win10
+    // tray convention) so the right-edge cluster is half as wide
+    // as a single-line "HH:MM:SS  WWW DD MMM YYYY" run. The old
+    // "UP NNNNs" uptime counter has moved into the chevron-flyout
+    // panel — it's a developer-grade reading, not a glanceable
+    // chrome cell.
     //
     // Clock bounds are captured into g_clock_* so the mouse reader
     // can toggle the calendar popup on click.
@@ -393,51 +386,21 @@ void TaskbarRedraw()
     duetos::arch::RtcTime rtc{};
     duetos::arch::RtcRead(&rtc);
 
-    // Uptime goes at the far right; the clock gets its own rect
-    // so the mouse reader has a tight hit-test target.
-    char upbuf[16];
-    u32 up_off = 0;
-    upbuf[up_off++] = 'U';
-    upbuf[up_off++] = 'P';
-    upbuf[up_off++] = ' ';
-    const u64 ticks = duetos::sched::SchedNowTicks();
-    const u64 secs = ticks / 100;
-    up_off += FormatU64Dec(secs, upbuf + up_off, sizeof(upbuf) - up_off - 2);
-    upbuf[up_off++] = 's';
-    upbuf[up_off] = '\0';
-    const u32 up_text_w = up_off * 8;
-    const u32 up_x = (fbw > up_text_w + 8) ? fbw - up_text_w - 8 : 0;
-    FramebufferDrawString(up_x, text_y, upbuf, g_fg, g_bg);
-
-    // Wall clock left of the uptime.
-    char clk[9];
+    // HH:MM (no seconds — they don't survive the 1 Hz compose
+    // pump cleanly anyway, and Win10 / macOS both drop them).
+    char clk[6];
     clk[0] = char('0' + rtc.hour / 10);
     clk[1] = char('0' + rtc.hour % 10);
     clk[2] = ':';
     clk[3] = char('0' + rtc.minute / 10);
     clk[4] = char('0' + rtc.minute % 10);
-    clk[5] = ':';
-    clk[6] = char('0' + rtc.second / 10);
-    clk[7] = char('0' + rtc.second % 10);
-    clk[8] = '\0';
-    const u32 clk_text_w = 8 * 8;
-    const u32 clk_x = (up_x > clk_text_w + 12) ? up_x - clk_text_w - 12 : 0;
-    FramebufferDrawString(clk_x, text_y, clk, g_fg, g_bg);
-    // Publish a whole-cell hit-test rect around the clock so a
-    // user can click anywhere vertically on the widget and have
-    // the calendar pop up.
-    g_clock_x = (clk_x >= 4) ? clk_x - 4 : 0;
-    g_clock_y = g_y + 4;
-    g_clock_w = clk_text_w + 8;
-    g_clock_h = (g_h > 8) ? g_h - 8 : g_h;
+    clk[5] = '\0';
+    const u32 clk_text_w = 5 * 8;
 
-    // Date display left of the clock, format "WWW DD MMM YYYY".
-    // Three-letter weekday (derived from a Zeller-ish computation
-    // rather than requiring the RTC to provide one; QEMU's RTC
-    // doesn't populate .weekday reliably).
+    // Date row underneath: "WWW M/D" (e.g. "MON 5/4"). Compact —
+    // 7 chars × 8 px = 56 px, less than the clock above so the
+    // block reads as a stacked time card.
     static const char* kWd[7] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
-    static const char* kMo[13] = {"???", "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
-                                  "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"};
     u32 wy = rtc.year;
     u32 wm = rtc.month;
     const u32 wd_day = rtc.day;
@@ -452,56 +415,171 @@ void TaskbarRedraw()
     const u32 J = wy / 100;
     const u32 h_zeller = (wd_day + (13 * (wm + 1)) / 5 + K + K / 4 + J / 4 + 5 * J) % 7;
     const u32 dow = (h_zeller + 6) % 7;
-    const u32 mo_for_name = (rtc.month >= 1 && rtc.month <= 12) ? rtc.month : 0;
-    char date[16];
-    u32 d = 0;
-    date[d++] = kWd[dow][0];
-    date[d++] = kWd[dow][1];
-    date[d++] = kWd[dow][2];
-    date[d++] = ' ';
-    date[d++] = char('0' + rtc.day / 10);
-    date[d++] = char('0' + rtc.day % 10);
-    date[d++] = ' ';
-    date[d++] = kMo[mo_for_name][0];
-    date[d++] = kMo[mo_for_name][1];
-    date[d++] = kMo[mo_for_name][2];
-    date[d++] = ' ';
-    date[d++] = char('0' + (rtc.year / 1000) % 10);
-    date[d++] = char('0' + (rtc.year / 100) % 10);
-    date[d++] = char('0' + (rtc.year / 10) % 10);
-    date[d++] = char('0' + rtc.year % 10);
-    date[d] = '\0';
-    const u32 date_text_w = d * 8;
-    const u32 date_x = (clk_x > date_text_w + 12) ? clk_x - date_text_w - 12 : 0;
-    FramebufferDrawString(date_x, text_y, date, g_fg, g_bg);
+    char date[12];
+    u32 d_off = 0;
+    date[d_off++] = kWd[dow][0];
+    date[d_off++] = kWd[dow][1];
+    date[d_off++] = kWd[dow][2];
+    date[d_off++] = ' ';
+    if (rtc.month >= 10)
+    {
+        date[d_off++] = char('0' + rtc.month / 10);
+    }
+    date[d_off++] = char('0' + rtc.month % 10);
+    date[d_off++] = '/';
+    if (rtc.day >= 10)
+    {
+        date[d_off++] = char('0' + rtc.day / 10);
+    }
+    date[d_off++] = char('0' + rtc.day % 10);
+    date[d_off] = '\0';
+    const u32 date_text_w = d_off * 8;
 
-    // --- System tray: left of the date. Three tiny cells 20×20
-    // each with a label + status colour, laid out right-to-left.
-    constexpr u32 tray_cell = 20;
-    constexpr u32 tray_gap = 6;
+    // Block geometry: take the wider of the two rows + 12 px right
+    // inset, anchored to the framebuffer's right edge.
+    const u32 block_text_w = (clk_text_w > date_text_w) ? clk_text_w : date_text_w;
+    const u32 block_w = block_text_w + 12;
+    const u32 block_x = (fbw > block_w) ? fbw - block_w : 0;
+    // Two-row stack inside the taskbar height — top row above the
+    // strip's vertical centre, bottom row below.
+    const u32 row_top_y = g_y + (g_h / 2) - 8;
+    const u32 row_bot_y = g_y + (g_h / 2) + 1;
+    // Right-align each row inside the block.
+    const u32 clk_x = block_x + (block_text_w - clk_text_w);
+    const u32 date_x = block_x + (block_text_w - date_text_w);
+    FramebufferDrawString(clk_x, row_top_y, clk, g_fg, g_bg);
+    FramebufferDrawString(date_x, row_bot_y, date, g_fg, g_bg);
+
+    // Publish a whole-cell hit-test rect around the stacked block
+    // so a click anywhere in the time card opens the calendar.
+    g_clock_x = (block_x >= 4) ? block_x - 4 : 0;
+    g_clock_y = g_y + 4;
+    g_clock_w = block_w + 4;
+    g_clock_h = (g_h > 8) ? g_h - 8 : g_h;
+
+    // --- System tray: left of the date. Compact icon cells laid
+    // out right-to-left, ending with a chevron-up overflow button
+    // on Duet-family themes. Replaces the original M/C/N letter
+    // cells with proper stroked icons (Wi-Fi, volume, battery)
+    // and a status dot in the cell's bottom-right corner.
+    //
+    // Cell metric: 22 px square, 4 px gap. Each icon paints a
+    // 14-px stroke glyph centered inside the cell; the status
+    // dot is a 3-px filled square in the bottom-right pinning
+    // the cell's contextual colour without flooding the body.
+    constexpr u32 tray_cell = 22;
+    constexpr u32 tray_gap = 4;
     const u32 tray_y = g_y + (g_h > tray_cell ? (g_h - tray_cell) / 2 : 0);
-    u32 tray_right = (date_x > tray_gap + 4) ? date_x - tray_gap : 0;
+    // Tray sits to the LEFT of the time card. Anchor the
+    // rightmost tray cell against the time card's left edge.
+    u32 tray_right = (block_x > tray_gap + 4) ? block_x - tray_gap : 0;
 
     // Reset cached cell bounds; we re-publish only the cells that
     // actually got placed on this redraw (e.g. NET cell skipped
     // entirely if the strip ran out of horizontal room).
     g_net_cell_x = g_net_cell_y = g_net_cell_w = g_net_cell_h = 0;
+    g_chevron_x = g_chevron_y = g_chevron_w = g_chevron_h = 0;
 
-    auto draw_tray_cell = [&](const char* label, u32 body_rgb, u32* out_x, u32* out_y, u32* out_w, u32* out_h)
+    // --- Icon-drawing helpers. Each takes the (x, y) origin of
+    // the 14-px glyph area + an ink colour, and strokes the icon
+    // with framebuffer primitives. Sized so the glyph reads at
+    // 14 px. All have a 4-px margin inside the 22-px cell.
+    constexpr u32 kGlyph = 14;
+
+    // Wi-Fi: three stacked partial arcs above a tiny dot at the
+    // bottom centre. Sweep is 100° centred at -90° so the arc
+    // opens upward (matching standard Wi-Fi glyphs).
+    auto draw_wifi = [&](u32 ox, u32 oy, u32 ink)
+    {
+        const i32 cx = static_cast<i32>(ox + kGlyph / 2);
+        const i32 cy = static_cast<i32>(oy + kGlyph - 2);
+        FramebufferStrokeArc(cx, cy, 6, -140, 100, 1u, ink);
+        FramebufferStrokeArc(cx, cy, 4, -140, 100, 1u, ink);
+        FramebufferStrokeArc(cx, cy, 2, -140, 100, 1u, ink);
+        FramebufferFillRect(static_cast<u32>(cx) - 1, static_cast<u32>(cy) - 1, 2, 2, ink);
+    };
+
+    // Volume: a small speaker (filled trapezoid) on the left + 1-2
+    // sound waves on the right. Drawn with stacked horizontal
+    // rects for the cone + arcs for the waves.
+    auto draw_volume = [&](u32 ox, u32 oy, u32 ink)
+    {
+        // Speaker box (square): 4×4 at left. Cone: triangle of
+        // stacked horizontal lines reaching toward the centre.
+        FramebufferFillRect(ox + 1, oy + 5, 3, 4, ink);
+        // Cone — 3 tapered rows.
+        FramebufferFillRect(ox + 4, oy + 4, 1, 6, ink);
+        FramebufferFillRect(ox + 5, oy + 3, 1, 8, ink);
+        FramebufferFillRect(ox + 6, oy + 2, 1, 10, ink);
+        // Two outward sound-wave arcs.
+        const i32 cx = static_cast<i32>(ox + 6);
+        const i32 cy = static_cast<i32>(oy + kGlyph / 2);
+        FramebufferStrokeArc(cx, cy, 3, -50, 100, 1u, ink);
+        FramebufferStrokeArc(cx, cy, 5, -50, 100, 1u, ink);
+    };
+
+    // Battery: outline rect + inner fill showing charge level.
+    // 12×6 outline with a 1×2 contact stub on the right edge.
+    auto draw_battery = [&](u32 ox, u32 oy, u32 ink, u32 charge_pct)
+    {
+        const u32 bx = ox + 1;
+        const u32 by = oy + 4;
+        constexpr u32 bw = 11;
+        constexpr u32 bh = 6;
+        FramebufferDrawRect(bx, by, bw, bh, ink, 1);
+        // Contact stub (positive terminal) on the right.
+        FramebufferFillRect(bx + bw, by + 2, 1, 2, ink);
+        // Charge fill — proportional to charge_pct, capped at the
+        // outline's inside (bw - 2 wide max).
+        const u32 fill_max = bw - 2;
+        const u32 fill_w = (charge_pct >= 100u) ? fill_max : (fill_max * charge_pct) / 100u;
+        if (fill_w > 0)
+        {
+            FramebufferFillRect(bx + 1, by + 1, fill_w, bh - 2, ink);
+        }
+    };
+
+    // Chevron up: V-shape rotated 180° (`^`). Drawn with three
+    // diagonal lines per side for a 3-px stroke so the glyph
+    // reads as a clear affordance even at idle. The hovered
+    // state grows the glyph by 2 px in each direction (mirrors
+    // the prototype's "expand a bit on hover" cue).
+    auto draw_chevron_up = [&](u32 ox, u32 oy, u32 ink, bool hovered)
+    {
+        const u32 grow = hovered ? 2u : 0u;
+        const i32 left_x = static_cast<i32>(ox + 1 - (grow > 1u ? 1u : grow));
+        const i32 right_x = static_cast<i32>(ox + kGlyph - 2 + (grow > 1u ? 1u : grow));
+        const i32 mid_x = static_cast<i32>(ox + kGlyph / 2);
+        const i32 bot_y = static_cast<i32>(oy + kGlyph / 2 + 3 + grow);
+        const i32 top_y = static_cast<i32>(oy + kGlyph / 2 - 2 - grow);
+        // 3-pixel-thick stroke per side — drawn as three parallel
+        // lines so the chevron has visible weight at the 14-px
+        // glyph size.
+        for (i32 dy = 0; dy < 3; ++dy)
+        {
+            FramebufferDrawLine(left_x, bot_y + dy, mid_x, top_y + dy, ink);
+            FramebufferDrawLine(mid_x, top_y + dy, right_x, bot_y + dy, ink);
+        }
+    };
+
+    // Common cell painter — body + status dot + record-bounds.
+    // The body is transparent in idle state (the taskbar gradient
+    // shows through), with a soft hover lift when the cursor is
+    // over the cell. The status dot is 3×3 in the bottom-right
+    // corner, painted in `dot_rgb`.
+    auto place_cell = [&](u32 dot_rgb, u32* out_x, u32* out_y, u32* out_w, u32* out_h) -> bool
     {
         if (tray_right < tray_cell + 4)
-            return;
+            return false;
         const u32 cx = tray_right - tray_cell;
-        FramebufferFillRect(cx, tray_y, tray_cell, tray_cell, body_rgb);
-        FramebufferDrawRect(cx, tray_y, tray_cell, tray_cell, g_border, 1);
-        // 3-char label centred ~ (20 - 8)/2, but we only have
-        // 8x8 glyphs so we place one glyph for 1-char labels and
-        // stack two glyphs for 2-char ones.
-        const u32 len = (label[0] == '\0' ? 0 : label[1] == '\0' ? 1 : 2);
-        const u32 tw = len * 8;
-        const u32 tx = cx + (tray_cell - tw) / 2;
-        const u32 ty = tray_y + (tray_cell - 8) / 2;
-        FramebufferDrawString(tx, ty, label, 0x00FFFFFF, body_rgb);
+        // Status dot: 4×4 in the bottom-right inset from the cell
+        // edge by 2 px on each side. The dot encodes the
+        // network/battery/etc. state colour without pasting a
+        // body fill across the whole cell.
+        if (dot_rgb != 0)
+        {
+            FramebufferFillRect(cx + tray_cell - 6, tray_y + tray_cell - 6, 4, 4, dot_rgb);
+        }
         if (out_x != nullptr)
             *out_x = cx;
         if (out_y != nullptr)
@@ -511,43 +589,95 @@ void TaskbarRedraw()
         if (out_h != nullptr)
             *out_h = tray_cell;
         tray_right = (cx >= tray_gap) ? cx - tray_gap : 0;
+        return true;
     };
 
-    // MEM: green once the allocator has > 1024 free frames
-    // (4 MiB) — a rough "we're not starving" threshold. Turns red
-    // when free frames drop below that as a gross pressure signal.
-    {
-        const u64 free_frames = duetos::mm::FreeFramesCount();
-        const bool healthy = free_frames > 1024;
-        draw_tray_cell("M", healthy ? 0x0040803C : 0x00C04040, nullptr, nullptr, nullptr, nullptr);
-    }
-    // CPU: always green while scheduler is running.
-    draw_tray_cell("C", 0x0040803C, nullptr, nullptr, nullptr, nullptr);
-    // NET: green if at least one NIC is bound to the stack AND has
-    // a DHCP lease; amber while a NIC is up but DHCP hasn't bound;
-    // grey if no NIC was discovered. The flyout panel hangs off
-    // this cell — we publish its bounds so the mouse reader can
-    // hover-preview and click-toggle it.
-    {
-        const bool have_nic = duetos::drivers::net::NicCount() > 0;
-        const auto lease = duetos::net::DhcpLeaseRead();
-        u32 colour;
-        if (!have_nic)
-            colour = 0x00505058;
-        else if (lease.valid)
-            colour = 0x0040803C; // green — online
-        else
-            colour = 0x00C0A040; // amber — link up, DHCP pending
-        draw_tray_cell("N", colour, &g_net_cell_x, &g_net_cell_y, &g_net_cell_w, &g_net_cell_h);
-    }
     // Battery (only shown if power driver decided a battery is
-    // present — laptops; skipped on desktops).
+    // present — laptops; skipped on desktops). Drawn rightmost
+    // so it sits at the right edge of the tray, closest to the
+    // clock — matches the Win10/macOS bottom-right convention.
     {
         const auto snap = duetos::drivers::power::PowerSnapshotRead();
         if (snap.battery.state != duetos::drivers::power::kBatNotPresent)
         {
-            const u32 colour = (snap.ac == duetos::drivers::power::kAcOnline) ? 0x003C9060 : 0x00C09040;
-            draw_tray_cell("B", colour, nullptr, nullptr, nullptr, nullptr);
+            const u32 dot = (snap.ac == duetos::drivers::power::kAcOnline) ? 0x003C9060 : 0x00C09040;
+            u32 cx = 0;
+            if (place_cell(dot, &cx, nullptr, nullptr, nullptr))
+            {
+                const u32 ox = cx + (tray_cell - kGlyph) / 2;
+                const u32 oy = tray_y + (tray_cell - kGlyph) / 2;
+                const u32 pct = (snap.battery.percent <= 100u) ? snap.battery.percent : 100u;
+                draw_battery(ox, oy, g_fg, pct);
+            }
+        }
+    }
+    // Volume — placeholder dot in the accent (no audio mixer
+    // yet). Drawn second-from-right.
+    {
+        u32 cx = 0;
+        if (place_cell(0, &cx, nullptr, nullptr, nullptr))
+        {
+            const u32 ox = cx + (tray_cell - kGlyph) / 2;
+            const u32 oy = tray_y + (tray_cell - kGlyph) / 2;
+            draw_volume(ox, oy, g_fg);
+        }
+    }
+    // Network cell — Wi-Fi waves icon + status dot. Status dot
+    // colour reflects DHCP lease state same way as before.
+    {
+        const bool have_nic = duetos::drivers::net::NicCount() > 0;
+        const auto lease = duetos::net::DhcpLeaseRead();
+        u32 dot;
+        if (!have_nic)
+            dot = 0x00505058;
+        else if (lease.valid)
+            dot = 0x0040803C;
+        else
+            dot = 0x00C0A040;
+        u32 cx = 0;
+        if (place_cell(dot, &cx, nullptr, nullptr, nullptr))
+        {
+            g_net_cell_x = cx;
+            g_net_cell_y = tray_y;
+            g_net_cell_w = tray_cell;
+            g_net_cell_h = tray_cell;
+            const u32 ox = cx + (tray_cell - kGlyph) / 2;
+            const u32 oy = tray_y + (tray_cell - kGlyph) / 2;
+            draw_wifi(ox, oy, g_fg);
+        }
+    }
+
+    // Chevron-up overflow button — sits at the LEFT of the tray
+    // (drawn last in the right-to-left layout). Hovered state
+    // paints the glyph slightly larger and lifts the cell body
+    // with a soft accent fill, mirroring Windows' tray expand
+    // affordance. Only painted on Duet-family themes.
+    {
+        const ThemeId tid_chev = ThemeCurrentId();
+        const bool show_chevron = tid_chev == ThemeId::Duet || tid_chev == ThemeId::DuetLight ||
+                                  tid_chev == ThemeId::DuetBlue || tid_chev == ThemeId::DuetViolet ||
+                                  tid_chev == ThemeId::DuetGreen;
+        if (show_chevron)
+        {
+            u32 cx = 0;
+            if (place_cell(0, &cx, nullptr, nullptr, nullptr))
+            {
+                g_chevron_x = cx;
+                g_chevron_y = tray_y;
+                g_chevron_w = tray_cell;
+                g_chevron_h = tray_cell;
+                if (g_chevron_hover)
+                {
+                    // Soft accent fill on hover so the user
+                    // sees the cell light up before they click.
+                    FramebufferFillRoundRect(cx, tray_y, tray_cell, tray_cell, 4, (g_accent & 0x00FFFFFFU));
+                    FramebufferDrawRoundRect(cx, tray_y, tray_cell, tray_cell, 4, g_accent);
+                }
+                const u32 ox = cx + (tray_cell - kGlyph) / 2;
+                const u32 oy = tray_y + (tray_cell - kGlyph) / 2;
+                const u32 ink = g_chevron_hover ? 0x00FFFFFF : g_fg;
+                draw_chevron_up(ox, oy, ink, g_chevron_hover);
+            }
         }
     }
 
@@ -734,6 +864,28 @@ void TaskbarNetCellBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)
         *w_out = g_net_cell_w;
     if (h_out)
         *h_out = g_net_cell_h;
+}
+
+void TaskbarChevronBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)
+{
+    if (x_out)
+        *x_out = g_chevron_x;
+    if (y_out)
+        *y_out = g_chevron_y;
+    if (w_out)
+        *w_out = g_chevron_w;
+    if (h_out)
+        *h_out = g_chevron_h;
+}
+
+void TaskbarChevronSetHover(bool hovered)
+{
+    g_chevron_hover = hovered;
+}
+
+bool TaskbarChevronHovered()
+{
+    return g_chevron_hover;
 }
 
 void TaskbarShowDesktopBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)

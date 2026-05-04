@@ -86,6 +86,21 @@ void TaskbarClockBounds(u32* x, u32* y, u32* w, u32* h);
 /// framebuffer-absolute.
 void TaskbarNetCellBounds(u32* x, u32* y, u32* w, u32* h);
 
+/// Bounds of the chevron-up "show hidden tray icons" button —
+/// the leftmost cell of the tray on themes that paint it (Duet
+/// family today). Used by the mouse reader to hover-expand and
+/// click-open the tray flyout panel. Returns `w == 0` when the
+/// chevron hasn't been laid out (theme doesn't paint it, or
+/// `TaskbarRedraw` hasn't run yet).
+void TaskbarChevronBounds(u32* x, u32* y, u32* w, u32* h);
+
+/// Set the hover state on the chevron — the mouse reader calls
+/// this every packet from its hover-poll path. The chevron
+/// renders larger when hovered, mirroring the Windows tray's
+/// "expand a touch on hover, expand more on click" gesture.
+void TaskbarChevronSetHover(bool hovered);
+bool TaskbarChevronHovered();
+
 /// Bounds of the "Show Desktop" sliver — a thin accent rail at
 /// the very right edge of the taskbar. Spec calls for a Win10-
 /// style minimize-all click target; v0 paints it but the click

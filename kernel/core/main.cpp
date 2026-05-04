@@ -154,6 +154,7 @@
 #include "drivers/video/notify.h"
 #include "drivers/video/taskbar.h"
 #include "drivers/video/theme.h"
+#include "drivers/video/tray_flyout.h"
 #include "drivers/video/widget.h"
 #include "fs/ramfs.h"
 #include "fs/tmpfs.h"
@@ -3601,6 +3602,53 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                          !duetos::drivers::video::NetPanelContains(cx, cy))
                 {
                     duetos::drivers::video::NetPanelClose();
+                }
+            }
+
+            // --- Tray flyout (chevron-up overflow button) -----------
+            //
+            // Hover-expand + click-toggle on the chevron at the
+            // left of the system tray. Mirrors Win10/Win11's "show
+            // hidden icons" pattern: hover lifts the chevron's
+            // glyph slightly, click opens a popup with detailed
+            // status rows (network, volume, battery, memory,
+            // CPU, uptime).
+            {
+                duetos::u32 chx = 0, chy = 0, chw = 0, chh = 0;
+                duetos::drivers::video::TaskbarChevronBounds(&chx, &chy, &chw, &chh);
+                const bool over_chev = (chw > 0) && cx >= chx && cx < chx + chw && cy >= chy && cy < chy + chh;
+
+                // Hover state — runs every packet (no press_edge
+                // gate). The taskbar redraw consults this on the
+                // next compose to decide whether to enlarge the
+                // chevron glyph.
+                duetos::drivers::video::TaskbarChevronSetHover(over_chev);
+                duetos::drivers::video::TrayFlyoutSetHover(over_chev);
+
+                // Click on the chevron toggles the flyout.
+                if (press_edge && !menu_handled && over_chev)
+                {
+                    if (duetos::drivers::video::TrayFlyoutIsOpen())
+                    {
+                        duetos::drivers::video::TrayFlyoutClose();
+                        SerialWrite("[ui] tray flyout close (chevron)\n");
+                    }
+                    else
+                    {
+                        // Anchor the flyout's bottom edge against
+                        // the chevron's top — the popup paints
+                        // ABOVE the anchor.
+                        duetos::drivers::video::TrayFlyoutOpen(chx, chy);
+                        SerialWrite("[ui] tray flyout open\n");
+                    }
+                    menu_handled = true;
+                }
+                // Click outside an open flyout dismisses it.
+                else if (press_edge && !menu_handled && duetos::drivers::video::TrayFlyoutIsOpen() &&
+                         !duetos::drivers::video::TrayFlyoutContains(cx, cy))
+                {
+                    duetos::drivers::video::TrayFlyoutClose();
+                    SerialWrite("[ui] tray flyout close (click outside)\n");
                 }
             }
 

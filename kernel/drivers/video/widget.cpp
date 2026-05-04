@@ -51,6 +51,7 @@
 #include "drivers/video/netpanel.h"
 #include "drivers/video/taskbar.h"
 #include "drivers/video/theme.h"
+#include "drivers/video/tray_flyout.h"
 #include "drivers/video/wallpaper.h"
 
 namespace duetos::drivers::video
@@ -1683,6 +1684,7 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
     MenuRedraw();
     CalendarRedraw();
     NetPanelRedraw();
+    TrayFlyoutRedraw();
     NotifyRedraw();
     MagnifierRedraw();
     // Caret — painted last so it overlays everything, including
