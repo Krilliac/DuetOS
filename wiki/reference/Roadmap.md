@@ -141,12 +141,6 @@ In rough priority:
 3. **NTFS read-only** — required by the Windows-PE pillar once
    we want to load a `.exe` from a real NTFS partition.
 
-### ext4 leaf-extent depth > 0
-
-- **Today:** ext4 root-dir walk iterates every leaf-extent
-  block; depth>0 extent-tree walk still deferred.
-- **Owner:** `kernel/fs/ext4/`.
-
 ### Crash-dump persistence to disk
 
 - **Today:** Windows-format `.dmp` files are emitted byte-by-byte
