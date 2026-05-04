@@ -915,6 +915,15 @@ bool RegisterAsBlockDevice()
 void NvmeInit()
 {
     KLOG_TRACE_SCOPE("drivers/nvme", "NvmeInit");
+    if (g_ctrl.online)
+    {
+        // Idempotent: a re-init without an intervening
+        // NvmeTeardown reuses the existing controller state.
+        // The fault-domain restart path runs Teardown first, which
+        // clears g_ctrl.online so the next call here actually
+        // re-discovers the device.
+        return;
+    }
     const pci::Device* dev = FindNvme();
     if (dev == nullptr)
     {
@@ -1038,6 +1047,54 @@ void NvmeInit()
 
     g_ctrl.online = true;
     core::Log(core::LogLevel::Info, "drivers/nvme", "online as nvme0n1");
+}
+
+void NvmeTeardown()
+{
+    KLOG_TRACE_SCOPE("drivers/nvme", "NvmeTeardown");
+    // Mark offline first so any concurrent SubmitAndWait /
+    // BlockDeviceRead path bails at the !online guard before
+    // we yank the queues.
+    g_ctrl.online = false;
+    // Free the DMA-page-backed queues + staging + PRP list.
+    // Each came from mm::AllocateContiguousFrames or
+    // AllocZeroedPage (one frame). FreeFrame / FreeContiguousFrames
+    // are no-ops on a 0 phys, so the early-exit init paths that
+    // never allocated anything are still safe through here.
+    if (g_ctrl.admin.sq_phys != 0)
+    {
+        mm::FreeFrame(g_ctrl.admin.sq_phys);
+    }
+    if (g_ctrl.admin.cq_phys != 0)
+    {
+        mm::FreeFrame(g_ctrl.admin.cq_phys);
+    }
+    if (g_ctrl.io.sq_phys != 0)
+    {
+        mm::FreeFrame(g_ctrl.io.sq_phys);
+    }
+    if (g_ctrl.io.cq_phys != 0)
+    {
+        mm::FreeFrame(g_ctrl.io.cq_phys);
+    }
+    if (g_ctrl.io_buf_virt != nullptr)
+    {
+        const mm::PhysAddr stage_phys = mm::VirtToPhys(g_ctrl.io_buf_virt);
+        if (stage_phys != 0)
+        {
+            mm::FreeContiguousFrames(stage_phys, kIoBufPages);
+        }
+    }
+    if (g_ctrl.prp_list_phys != 0)
+    {
+        mm::FreeFrame(g_ctrl.prp_list_phys);
+    }
+    // The MMIO mapping on the controller's BAR0 leaks (same
+    // caveat ahci / pci / framebuffer document — kernel arena
+    // is a bump allocator). The block-layer handle leaks too
+    // until BlockDeviceUnregister lands. Reset everything else
+    // so the next NvmeInit re-walks PCI and re-binds MMIO + MSI-X.
+    g_ctrl = Controller{};
 }
 
 void NvmeSelfTest()

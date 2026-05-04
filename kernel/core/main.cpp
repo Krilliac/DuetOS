@@ -861,6 +861,23 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             duetos::drivers::storage::AhciTeardown();
             return {};
         });
+    // NVMe — modern PCIe storage controller. Teardown frees
+    // the admin + I/O queue pages, the staging buffer (16
+    // contiguous frames), and the PRP list. MMIO + block
+    // handle leak with the same caveat as the other storage
+    // drivers.
+    duetos::security::RegisterDriverDomain(
+        "nvme",
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::drivers::storage::NvmeInit();
+            return {};
+        },
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::drivers::storage::NvmeTeardown();
+            return {};
+        });
 
     // Init-call registry self-test (plan A1). Exercises register +
     // RunPhase + bad-argument + failing-callback paths against the
