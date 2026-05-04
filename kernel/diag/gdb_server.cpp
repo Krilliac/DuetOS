@@ -7,7 +7,7 @@
  * can attach a real GDB session against this scaffold.
  */
 
-#include "diag/gdb_stub.h"
+#include "diag/gdb_server.h"
 
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/traps.h"
@@ -46,9 +46,9 @@ constinit u32 g_packet_len = 0;
 constinit u8 g_csum_calc = 0;
 constinit u8 g_csum_recv = 0;
 
-constinit GdbStubWriteByte g_sink = nullptr;
-constinit const GdbRegSnapshot* g_regs = nullptr;
-constinit GdbRegSnapshot* g_regs_writable = nullptr;
+constinit GdbServerWriteByte g_sink = nullptr;
+constinit const GdbServerRegSnapshot* g_regs = nullptr;
+constinit GdbServerRegSnapshot* g_regs_writable = nullptr;
 
 constinit u64 g_packets_received = 0;
 constinit u64 g_packets_bad_csum = 0;
@@ -339,8 +339,8 @@ void HandlePacket()
                 buf[off++] = HexDigitChar(b & 0xF);
             }
         };
-        const GdbRegSnapshot z{};
-        const GdbRegSnapshot& r = (g_regs != nullptr) ? *g_regs : z;
+        const GdbServerRegSnapshot z{};
+        const GdbServerRegSnapshot& r = (g_regs != nullptr) ? *g_regs : z;
         put_u64(r.rax);
         put_u64(r.rbx);
         put_u64(r.rcx);
@@ -598,7 +598,7 @@ void HandlePacket()
     {
         // Single-step. Set RFLAGS.TF so the *next* instruction
         // raises #DB, which re-enters the trap dispatcher and
-        // calls GdbStubEnterAndWait again — at which point we
+        // calls GdbServerEnterAndWait again — at which point we
         // send a fresh stop packet to GDB. No reply now.
         if (g_regs_writable != nullptr)
         {
@@ -799,22 +799,22 @@ void ResetParser()
 
 } // namespace
 
-void GdbStubSetSink(GdbStubWriteByte sink)
+void GdbServerSetSink(GdbServerWriteByte sink)
 {
     g_sink = sink;
 }
 
-void GdbStubPublishRegisters(const GdbRegSnapshot* snap)
+void GdbServerPublishRegisters(const GdbServerRegSnapshot* snap)
 {
     g_regs = snap;
 }
 
-void GdbStubPublishWritableRegisters(GdbRegSnapshot* snap)
+void GdbServerPublishWritableRegisters(GdbServerRegSnapshot* snap)
 {
     g_regs_writable = snap;
 }
 
-void GdbStubReceiveByte(u8 byte)
+void GdbServerReceiveByte(u8 byte)
 {
     switch (g_state)
     {
@@ -884,17 +884,17 @@ void GdbStubReceiveByte(u8 byte)
     }
 }
 
-u64 GdbStubPacketsReceived()
+u64 GdbServerPacketsReceived()
 {
     return g_packets_received;
 }
 
-u64 GdbStubPacketsBadChecksum()
+u64 GdbServerPacketsBadChecksum()
 {
     return g_packets_bad_csum;
 }
 
-u64 GdbStubPacketsHandled()
+u64 GdbServerPacketsHandled()
 {
     return g_packets_handled;
 }
@@ -903,10 +903,10 @@ u64 GdbStubPacketsHandled()
 // COM2 wiring + stop loop
 // ---------------------------------------------------------------------------
 
-void GdbStubInitCom2()
+void GdbServerInitCom2()
 {
     arch::SerialCom2Init();
-    GdbStubSetSink(&arch::SerialCom2WriteByte);
+    GdbServerSetSink(&arch::SerialCom2WriteByte);
 }
 
 namespace
@@ -939,7 +939,7 @@ void SendStop(StopReason reason)
 
 } // namespace
 
-void GdbStubEnterAndWait(StopReason reason)
+void GdbServerEnterAndWait(StopReason reason)
 {
     if (g_sink == nullptr)
     {
@@ -959,12 +959,12 @@ void GdbStubEnterAndWait(StopReason reason)
     while (!g_resume_signalled)
     {
         const u8 byte = arch::SerialCom2ReadByteBlocking();
-        GdbStubReceiveByte(byte);
+        GdbServerReceiveByte(byte);
     }
     g_last_resume = g_resume_pending;
 }
 
-ResumeAction GdbStubLastResume()
+ResumeAction GdbServerLastResume()
 {
     return g_last_resume;
 }
@@ -989,7 +989,7 @@ void FeedString(const char* s)
 {
     for (u32 i = 0; s[i] != '\0'; ++i)
     {
-        GdbStubReceiveByte(static_cast<u8>(s[i]));
+        GdbServerReceiveByte(static_cast<u8>(s[i]));
     }
 }
 
@@ -1023,15 +1023,15 @@ bool CaptureContains(const char* needle)
 
 } // namespace
 
-void GdbStubSelfTest()
+void GdbServerSelfTest()
 {
     arch::SerialWrite("[gdb-stub] self-test: framing + checksum + qSupported handler\n");
 
     // Save existing state so the self-test is re-runnable.
-    GdbStubWriteByte saved_sink = g_sink;
+    GdbServerWriteByte saved_sink = g_sink;
     ResetParser();
     g_capture_len = 0;
-    GdbStubSetSink(CaptureSink);
+    GdbServerSetSink(CaptureSink);
 
     // qSupported: "$qSupported#" + checksum.
     // Sum of "qSupported" = 0x71+0x53+0x75+0x70+0x70+0x6f+0x72+0x74+0x65+0x64
@@ -1079,7 +1079,7 @@ void GdbStubSelfTest()
     }
 
     // Restore the original sink.
-    GdbStubSetSink(saved_sink);
+    GdbServerSetSink(saved_sink);
     ResetParser();
     g_capture_len = 0;
 
@@ -1092,12 +1092,12 @@ namespace
 // One global TrapFrame-shadow. The stop loop blocks the CPU so
 // only one is needed; we publish g_regs / g_regs_writable to
 // point at it for the duration of EnterAndWait.
-constinit GdbRegSnapshot g_trap_snapshot{};
+constinit GdbServerRegSnapshot g_trap_snapshot{};
 
-// Mirror trap-frame state into the GdbRegSnapshot the stub reads.
+// Mirror trap-frame state into the GdbServerRegSnapshot the stub reads.
 // The CPU pushes data segments only via mov; ds/es/fs/gs are
 // sampled live so they reflect the current kernel-mode values.
-void TrapFrameToSnapshot(const arch::TrapFrame* f, GdbRegSnapshot& snap)
+void TrapFrameToSnapshot(const arch::TrapFrame* f, GdbServerRegSnapshot& snap)
 {
     snap.rax = f->rax;
     snap.rbx = f->rbx;
@@ -1135,7 +1135,7 @@ void TrapFrameToSnapshot(const arch::TrapFrame* f, GdbRegSnapshot& snap)
 // Segment selectors are NOT written back — touching CS/SS during
 // trap return would invalidate the iretq frame and is not what
 // a debugger session changes anyway.
-void SnapshotToTrapFrame(const GdbRegSnapshot& snap, arch::TrapFrame* f)
+void SnapshotToTrapFrame(const GdbServerRegSnapshot& snap, arch::TrapFrame* f)
 {
     f->rax = snap.rax;
     f->rbx = snap.rbx;
@@ -1173,11 +1173,11 @@ bool RouteToStopLoop(arch::TrapFrame* frame, StopReason reason, bool rollback_ri
         // path then writes the GDB-edited RIP back to the frame.
         g_trap_snapshot.rip -= 1;
     }
-    GdbStubPublishRegisters(&g_trap_snapshot);
-    GdbStubPublishWritableRegisters(&g_trap_snapshot);
-    GdbStubEnterAndWait(reason);
-    GdbStubPublishRegisters(nullptr);
-    GdbStubPublishWritableRegisters(nullptr);
+    GdbServerPublishRegisters(&g_trap_snapshot);
+    GdbServerPublishWritableRegisters(&g_trap_snapshot);
+    GdbServerEnterAndWait(reason);
+    GdbServerPublishRegisters(nullptr);
+    GdbServerPublishWritableRegisters(nullptr);
     SnapshotToTrapFrame(g_trap_snapshot, frame);
     return true;
 }

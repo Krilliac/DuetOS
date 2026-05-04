@@ -39,7 +39,7 @@
 #include "diag/diag_decode.h"
 #include "diag/event_trace.h"
 #include "diag/fault_react.h"
-#include "diag/gdb_stub.h"
+#include "diag/gdb_server.h"
 #include "security/fault_domain.h"
 #include "diag/hexdump.h"
 #include "diag/minidump.h"
@@ -639,7 +639,7 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     }
     // After the in-kernel breakpoints subsystem said "not mine",
     // route to the GDB stub IF an external debugger has been
-    // wired up via DUETOS_GDB_STUB. The stub's RouteToStopLoop
+    // wired up via DUETOS_GDB_SERVER. The stub's RouteToStopLoop
     // returns false when no sink is published, in which case the
     // existing recoverable-trap path below picks the int3 / #DB
     // up the same way it always did.
@@ -749,7 +749,7 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // attach (or a stop-at-fault GDB session) sees the real
     // register values from the moment of fault. Single struct
     // copy + pointer publish; cheap. (D7-followup, 2026-04-28.)
-    static ::duetos::diag::gdb::GdbRegSnapshot s_gdb_snap;
+    static ::duetos::diag::gdb::GdbServerRegSnapshot s_gdb_snap;
     s_gdb_snap.rax = frame->rax;
     s_gdb_snap.rbx = frame->rbx;
     s_gdb_snap.rcx = frame->rcx;
@@ -774,13 +774,13 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     s_gdb_snap.es = 0;
     s_gdb_snap.fs = 0;
     s_gdb_snap.gs = 0;
-    ::duetos::diag::gdb::GdbStubPublishRegisters(&s_gdb_snap);
+    ::duetos::diag::gdb::GdbServerPublishRegisters(&s_gdb_snap);
     // Also publish as writable so a connected GDB session's `G`
     // packet can apply edits before the operator continues. The
     // edits land in s_gdb_snap; copying them back into the trap
     // frame on resume is the next D7-followup once a stop-at-
     // fault flow exists.
-    ::duetos::diag::gdb::GdbStubPublishWritableRegisters(&s_gdb_snap);
+    ::duetos::diag::gdb::GdbServerPublishWritableRegisters(&s_gdb_snap);
     //
     // Fire the kernel-page-fault probe specifically for vec 14 so
     // the log ring records this as a structured event before the

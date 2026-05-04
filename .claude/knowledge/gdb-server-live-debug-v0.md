@@ -1,4 +1,4 @@
-# Live debug via in-kernel GDB stub — v0
+# Live debug via in-kernel GDB server — v0
 
 **Type**: Observation + Pattern
 **Status**: Active
@@ -6,13 +6,25 @@
 
 ## Summary
 
-DuetOS exposes a GDB Remote Serial Protocol (RSP) stub on COM2.
-Under QEMU, COM2 is wired to a TCP server on localhost:1234 (set
-in `tools/qemu/run.sh`). An external debugger — Visual Studio
-(via Remote GDB), VSCode (via the C/C++ extension's `cppdbg`),
-`gdb` directly — connects, halts the kernel on int3, and gets
-the full live-debug interaction surface: step / break / continue
-/ inspect registers / read+write memory / disassemble.
+DuetOS exposes a GDB Remote Serial Protocol (RSP) **server**
+on COM2 — a complete protocol implementation, not a thin
+stub. Under QEMU, COM2 is wired to a TCP server on
+localhost:1234 (set in `tools/qemu/run.sh`). An external
+debugger — Visual Studio (via Remote GDB), VSCode (via the
+C/C++ extension's `cppdbg`), `gdb` directly — connects,
+halts the kernel on int3, and gets the full live-debug
+interaction surface: step / break / continue / inspect
+registers / read+write memory / disassemble, with software
+AND hardware breakpoints backed by the existing
+`kernel/debug/breakpoints` subsystem.
+
+(Naming: the term "stub" is conventional in GDB / kernel-
+debug land for "the protocol speaker on the target side" —
+even Linux's complete kgdb is technically a stub by that
+definition. We renamed to "server" anyway because the
+implementation does enough work — full packet handler set,
+target-description XML, swbreak+ semantics, BP-subsystem
+integration — that "stub" undersells what's there.)
 
 Pairs with the `.dmp` minidump path (post-mortem). Together they
 cover both modes of debugging:
@@ -25,11 +37,11 @@ cover both modes of debugging:
 ```
 +------------+      COM2/0x2F8     +-------+    TCP    +--------+
 | kernel     | ⇄ outb/inb 16550  ⇄ | QEMU  | ⇄ :1234 ⇄ | gdb +  |
-| gdb_stub   |                     | -serial| 127.0.0.1 | host   |
+| gdb_server   |                     | -serial| 127.0.0.1 | host   |
 +------------+                     +-------+           +--------+
 ```
 
-- `kernel/diag/gdb_stub.{h,cpp}` — RSP parser, packet handlers,
+- `kernel/diag/gdb_server.{h,cpp}` — RSP parser, packet handlers,
   TrapFrame ⇄ register-snapshot plumbing, stop loop.
 - `kernel/arch/x86_64/serial.{h,cpp}` — `kCom2Port = 0x2F8`,
   `SerialCom2Init` / `SerialCom2WriteByte` /
@@ -43,8 +55,8 @@ cover both modes of debugging:
 
 | Flag | Effect |
 |------|--------|
-| `DUETOS_GDB_STUB=ON`  | Wire COM2 to the stub at boot. Without this flag the stub stays dormant and int3 routes to the existing recoverable handler — IMPORTANT, because a stub-wired build with no debugger attached would hang on every int3 (the stop loop blocks on a COM2 read that won't arrive). |
-| `DUETOS_GDB_DEMO=ON`  | Implies `_STUB`. Adds a deliberate `int3` right after the IDT phase in `kernel_main` so the dev/AI can exercise attach + inspect + continue without staging a real crash. The kernel pauses at the int3 until a debugger attaches AND issues `c` / `D` / `k`. |
+| `DUETOS_GDB_SERVER=ON`  | Wire COM2 to the GDB server at boot. **Default-ON in the x86_64-debug preset** — debug builds are dev-loop builds where you might want to attach at any moment. Release keeps it OFF. Without this flag the server stays dormant and int3 routes to the existing recoverable handler — IMPORTANT, because a server-wired build with no debugger attached would hang on every int3 (the stop loop blocks on a COM2 read that won't arrive). |
+| `DUETOS_GDB_DEMO=ON`  | Implies `_SERVER`. Adds a deliberate `int3` right after the IDT phase in `kernel_main` so the dev/AI can exercise attach + inspect + continue **without staging a real crash**. The kernel pauses at the int3 until a debugger attaches AND issues `c` / `D` / `k`. **Test/demo only — not needed for normal use of the GDB server**, just for exercising the attach plumbing without an actual bug to break in on. |
 
 ## Packet support
 
@@ -189,13 +201,13 @@ instead of "QEMU TCP server". The helper scripts assume QEMU.
 
 ## Files
 
-- `kernel/diag/gdb_stub.{h,cpp}` — RSP parser + handlers + stop
+- `kernel/diag/gdb_server.{h,cpp}` — RSP parser + handlers + stop
   loop.
 - `kernel/arch/x86_64/serial.{h,cpp}` — COM2 init / write / read.
 - `kernel/arch/x86_64/traps.cpp` — int3 / #DB → GDB stub route.
-- `kernel/core/main.cpp` — boot-time `GdbStubInitCom2` + the
+- `kernel/core/main.cpp` — boot-time `GdbServerInitCom2` + the
   `DUETOS_GDB_DEMO` int3.
-- `kernel/CMakeLists.txt` — `DUETOS_GDB_STUB` / `DUETOS_GDB_DEMO`
+- `kernel/CMakeLists.txt` — `DUETOS_GDB_SERVER` / `DUETOS_GDB_DEMO`
   options.
 - `tools/qemu/run.sh` — `-serial tcp::${DUETOS_GDB_PORT}`.
 - `tools/debug/duetos-gdb-attach.sh` / `duetos-gdb-cmd.sh` —
@@ -203,19 +215,25 @@ instead of "QEMU TCP server". The helper scripts assume QEMU.
 
 ## Revisit when
 
-- **Async stop (Ctrl-C)**: today the stop loop is purely
-  reactive — the kernel only enters it on int3 / #DB. To pause
-  a freely-running kernel on demand we need an IRQ-driven COM2
-  RX path that detects a 0x03 byte from GDB and triggers a
-  software breakpoint at the next safe instruction.
-- **Hardware breakpoints / watchpoints**: `Z1..Z4` need DR0..3
-  + DR7 setup and a #DB trigger-cause decode. Useful for
-  data-only breakpoints (catch a variable change without
-  patching code).
-- **Per-CPU stop on SMP**: current single-CPU model freezes
-  the calling CPU only. Multi-CPU live debug needs an NMI
-  broadcast on stop entry (mirrors `core::PanicBroadcastNmi`).
+- **Async stop (Ctrl-C)** — DEFERRED: today the stop loop is
+  purely reactive — the kernel only enters it on int3 / #DB.
+  To pause a freely-running kernel on demand, options are:
+  (a) IRQ-driven COM2 RX detecting 0x03 + scheduled int3 at
+  next safe point; (b) timer-tick poll of COM2 RX + the same.
+  Both need access to the interrupted code's TrapFrame so
+  the resulting stop reflects "where the kernel actually was"
+  rather than "inside the polling thread". Until this lands,
+  the `--demo` flag is the practical way to get a guaranteed
+  stop point.
+- **Per-CPU stop on SMP** — DEFERRED: current single-CPU model
+  freezes the calling CPU only. Multi-CPU live debug needs an
+  NMI broadcast on stop entry (mirrors `core::PanicBroadcastNmi`)
+  PLUS a release path so peers can resume on `c` / `D` (the
+  panic NMI broadcast halts forever — that's not what we want
+  here). Adds: per-CPU "frozen" state, a release IPI, and a
+  rendezvous so peer state is published in the GDB snapshot
+  alongside the BSP's.
 - **Source-line stepping**: GDB's `next` already works because
   symbols + DWARF in the kernel ELF give it line tables; the
-  stub doesn't need to do anything extra. A cleaner integration
+  server doesn't need to do anything extra. A cleaner integration
   with VSCode's launch.json would still be nice.

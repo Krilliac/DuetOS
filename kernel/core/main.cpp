@@ -165,7 +165,7 @@
 #include "ipc/handle_table.h"
 #include "diag/event_trace.h"
 #include "diag/fault_react.h"
-#include "diag/gdb_stub.h"
+#include "diag/gdb_server.h"
 #include "diag/minidump.h"
 #include "diag/perf_profile.h"
 #include "diag/soft_lockup.h"
@@ -646,15 +646,15 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     }
     (void)duetos::core::RunPhase(duetos::core::Phase::Idt);
 
-#ifdef DUETOS_GDB_STUB
+#ifdef DUETOS_GDB_SERVER
     // Wire COM2 to the in-kernel GDB stub as early as possible —
     // immediately after the IDT comes online so the trap-dispatch
     // path (which routes int3 / #DB into the stop loop) is itself
-    // armed. Gated behind DUETOS_GDB_STUB because a wired stub
+    // armed. Gated behind DUETOS_GDB_SERVER because a wired stub
     // with no attached debugger would hang the kernel on the
     // first int3 (the stop loop blocks waiting for packets that
     // will never arrive).
-    duetos::diag::gdb::GdbStubInitCom2();
+    duetos::diag::gdb::GdbServerInitCom2();
     SerialWrite("[gdb-stub] COM2 wired (115200 8N1) — connect via QEMU's tcp::1234 server\n");
 #endif
 
@@ -1955,7 +1955,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         duetos::core::InitcallRegister(duetos::core::Phase::Sched, "gdb-stub-selftest",
                                        []()
                                        {
-                                           duetos::diag::gdb::GdbStubSelfTest();
+                                           duetos::diag::gdb::GdbServerSelfTest();
                                            return duetos::core::Result<void>{};
                                        });
     }

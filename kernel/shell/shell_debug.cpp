@@ -29,7 +29,7 @@
 #include "core/init.h"
 #include "diag/event_trace.h"
 #include "diag/fault_react.h"
-#include "diag/gdb_stub.h"
+#include "diag/gdb_server.h"
 #include "ipc/kobject.h"
 #include "util/random.h"
 #include "diag/hexdump.h"
@@ -413,11 +413,11 @@ void CmdInspectCounters()
     WriteU64Dec(duetos::diag::PerfTotalSamples());
     ConsoleWriteChar('\n');
     ConsoleWrite("  gdb-stub    received=");
-    WriteU64Dec(duetos::diag::gdb::GdbStubPacketsReceived());
+    WriteU64Dec(duetos::diag::gdb::GdbServerPacketsReceived());
     ConsoleWrite(" handled=");
-    WriteU64Dec(duetos::diag::gdb::GdbStubPacketsHandled());
+    WriteU64Dec(duetos::diag::gdb::GdbServerPacketsHandled());
     ConsoleWrite(" bad-csum=");
-    WriteU64Dec(duetos::diag::gdb::GdbStubPacketsBadChecksum());
+    WriteU64Dec(duetos::diag::gdb::GdbServerPacketsBadChecksum());
     ConsoleWriteChar('\n');
     ConsoleWrite("  ubsan       reports=");
     WriteU64Dec(duetos::diag::UbsanReportsEmitted());
@@ -479,11 +479,11 @@ void CmdInspectTracerStats()
 void CmdInspectGdb()
 {
     ConsoleWrite("INSPECT GDB: received=");
-    WriteU64Dec(duetos::diag::gdb::GdbStubPacketsReceived());
+    WriteU64Dec(duetos::diag::gdb::GdbServerPacketsReceived());
     ConsoleWrite(" handled=");
-    WriteU64Dec(duetos::diag::gdb::GdbStubPacketsHandled());
+    WriteU64Dec(duetos::diag::gdb::GdbServerPacketsHandled());
     ConsoleWrite(" bad-csum=");
-    WriteU64Dec(duetos::diag::gdb::GdbStubPacketsBadChecksum());
+    WriteU64Dec(duetos::diag::gdb::GdbServerPacketsBadChecksum());
     ConsoleWriteChar('\n');
 }
 

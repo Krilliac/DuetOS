@@ -6,9 +6,11 @@
 # the output, detaches, and exits.
 #
 # Boots the kernel with DUETOS_GDB_DEMO=ON so the kernel halts
-# on int3 at end of kernel_main, then runs the supplied
-# commands against the paused kernel. Defaults to a useful
-# inspection set if no commands are given.
+# on int3 early in kernel_main and the script has a guaranteed
+# stop point to run commands against. The DUETOS_GDB_SERVER
+# wiring (the actual GDB protocol server on COM2) is independent
+# of DEMO and stays on for the x86_64-debug preset by default —
+# DEMO is only the "make attach trivially testable" convenience.
 #
 # Usage:
 #   tools/debug/duetos-gdb-cmd.sh                   # default cmds

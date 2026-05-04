@@ -34,7 +34,7 @@ namespace duetos::arch
 inline constexpr u16 kCom1Port = 0x3F8;
 
 /// COM2 I/O base port — used by the GDB remote-serial-protocol stub
-/// (see `kernel/diag/gdb_stub.{h,cpp}`). Kept off the human log
+/// (see `kernel/diag/gdb_server.{h,cpp}`). Kept off the human log
 /// stream on COM1 so kernel printf and a live GDB session don't
 /// fight for the same wire.
 inline constexpr u16 kCom2Port = 0x2F8;
@@ -44,7 +44,7 @@ inline constexpr u16 kCom2Port = 0x2F8;
 void SerialInit();
 
 /// Same shape as `SerialInit` but for COM2. Idempotent. Wired
-/// from `kernel_main` only when DUETOS_GDB_STUB is enabled —
+/// from `kernel_main` only when DUETOS_GDB_SERVER is enabled —
 /// otherwise the port stays untouched (and the GDB stub stays
 /// dormant).
 void SerialCom2Init();

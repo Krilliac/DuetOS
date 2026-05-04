@@ -28,7 +28,7 @@
  *       Hg / Hc          — set thread; v0 OK.
  *       k                — kill / detach; v0 OK then disconnects.
  *     Anything else returns the empty packet `$#00` ("unsupported").
- *   - Single-byte input source: `GdbStubReceiveByte(b)` is the
+ *   - Single-byte input source: `GdbServerReceiveByte(b)` is the
  *     canonical entry point. v0 doesn't yet hook this into the
  *     serial RX path — landing the parser first lets the wiring
  *     be a one-line call from the COM2 IRQ handler when GDB
@@ -69,11 +69,11 @@ inline constexpr u32 kPacketMax = 4096;
 /// over the serial line. v0 caller wires this to a
 /// `arch::SerialWritePort(byte)` via a function pointer so the
 /// stub TU stays portable across COM ports.
-using GdbStubWriteByte = void (*)(u8 byte);
+using GdbServerWriteByte = void (*)(u8 byte);
 
 /// Configure the output sink. Call once at boot before the
 /// first byte arrives; later changes are racy.
-void GdbStubSetSink(GdbStubWriteByte sink);
+void GdbServerSetSink(GdbServerWriteByte sink);
 
 /// Snapshot of the 16 general-purpose x86_64 registers + RIP +
 /// RFLAGS that GDB's `g` packet returns. Layout matches GDB's
@@ -81,7 +81,7 @@ void GdbStubSetSink(GdbStubWriteByte sink);
 /// / rdi / rbp / rsp / r8..r15 / rip / rflags / cs / ss / ds /
 /// es / fs / gs). v0 reports zeros for the segment registers
 /// since the trap-frame snapshot doesn't preserve them today.
-struct GdbRegSnapshot
+struct GdbServerRegSnapshot
 {
     u64 rax, rbx, rcx, rdx;
     u64 rsi, rdi, rbp, rsp;
@@ -100,42 +100,42 @@ struct GdbRegSnapshot
 /// `mut_snap` is the same pointer kept as a non-const sibling
 /// for `G` (write registers) — when non-null, GDB writes apply
 /// in-place; when null, `G` is silently dropped.
-void GdbStubPublishRegisters(const GdbRegSnapshot* snap);
+void GdbServerPublishRegisters(const GdbServerRegSnapshot* snap);
 
 /// Publish a writable register snapshot for the `G` packet
 /// (GDB writes back the register state). Pass nullptr to make
 /// `G` a silent no-op (returns OK without applying). Typical
 /// pairing: one trap-frame snapshot used for both Get and
 /// Set.
-void GdbStubPublishWritableRegisters(GdbRegSnapshot* snap);
+void GdbServerPublishWritableRegisters(GdbServerRegSnapshot* snap);
 
 /// Feed one received byte to the parser. The state machine
 /// recognises the `$` / `#` framing, accumulates the body,
 /// validates the trailing checksum, and on a complete packet
 /// dispatches to the relevant handler. Cheap; safe from any
 /// context including IRQ.
-void GdbStubReceiveByte(u8 byte);
+void GdbServerReceiveByte(u8 byte);
 
 /// Diagnostic counters.
-u64 GdbStubPacketsReceived();
-u64 GdbStubPacketsBadChecksum();
-u64 GdbStubPacketsHandled();
+u64 GdbServerPacketsReceived();
+u64 GdbServerPacketsBadChecksum();
+u64 GdbServerPacketsHandled();
 
 /// Boot-time self-test. Drives a synthesised conversation
 /// (operator sends `qSupported`, halt-reason, `g`) through
-/// `GdbStubReceiveByte` with a capturing sink; asserts the
+/// `GdbServerReceiveByte` with a capturing sink; asserts the
 /// reply for each is well-framed and the checksum matches.
 /// Panics on mismatch.
-void GdbStubSelfTest();
+void GdbServerSelfTest();
 
 // ---------------------------------------------------------------------------
 // Live-debug stop loop
 // ---------------------------------------------------------------------------
 
-/// Wire the stub's I/O to COM2 (GdbStubSetSink → SerialCom2WriteByte
+/// Wire the stub's I/O to COM2 (GdbServerSetSink → SerialCom2WriteByte
 /// + RX pump fed from SerialCom2ReadByteBlocking). Idempotent. Call
-/// from kernel_main when DUETOS_GDB_STUB is enabled.
-void GdbStubInitCom2();
+/// from kernel_main when DUETOS_GDB_SERVER is enabled.
+void GdbServerInitCom2();
 
 /// Reason a stop packet was sent — feeds the `T<sig>` payload.
 enum class StopReason : duetos::u8
@@ -154,14 +154,14 @@ enum class StopReason : duetos::u8
 ///
 /// Caller must:
 ///   - Have already published a writable register snapshot via
-///     GdbStubPublishRegisters + GdbStubPublishWritableRegisters
+///     GdbServerPublishRegisters + GdbServerPublishWritableRegisters
 ///     so `g`/`G` see the live trap-frame and `c` can pick up
 ///     register edits the debugger made.
 ///   - Know that the `s` (step) handler sets RFLAGS.TF in the
 ///     writable snapshot — the next iretq exits the stop loop and
 ///     the next instruction triggers #DB, which re-enters this
 ///     same routine through the trap path.
-void GdbStubEnterAndWait(StopReason reason);
+void GdbServerEnterAndWait(StopReason reason);
 
 /// Read what the most recent stop loop's resume command was.
 /// Used by the trap dispatcher to decide whether to wire a single
@@ -173,7 +173,7 @@ enum class ResumeAction : duetos::u8
     Detached,
     Killed,
 };
-ResumeAction GdbStubLastResume();
+ResumeAction GdbServerLastResume();
 
 } // namespace duetos::diag::gdb
 
