@@ -769,6 +769,43 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             duetos::core::CleanroomTraceClear();
             return {};
         });
+    // Runtime checker — boot-baseline + per-scan integrity checks.
+    // Restart re-captures the baseline (control regs, IDT/GDT
+    // hashes, .text spot hashes, etc.) — useful after an operator
+    // legitimately mutated something the checker would otherwise
+    // flag, e.g. swapping a stale IDT entry during a triage
+    // session. Teardown clears the baseline-captured gate so the
+    // next init's KASSERT passes.
+    duetos::security::RegisterDriverDomain(
+        "runtime-checker",
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::core::RuntimeCheckerInit();
+            return {};
+        },
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::core::RuntimeCheckerTeardown();
+            return {};
+        });
+    // Breakpoint subsystem — software int3 + hardware DR-slot
+    // tables backing the kernel debugger and GDB stub. Restart
+    // disarms every DR slot, drops every table row, and clears
+    // the inited flag so a fresh BpInit runs cleanly. Useful
+    // after a flaky GDB session left orphaned int3 traps the
+    // operator wants to clear without rebooting.
+    duetos::security::RegisterDriverDomain(
+        "breakpoints",
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::debug::BpInit();
+            return {};
+        },
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::debug::BpTeardown();
+            return {};
+        });
 
     // Init-call registry self-test (plan A1). Exercises register +
     // RunPhase + bad-argument + failing-callback paths against the
