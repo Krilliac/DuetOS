@@ -378,6 +378,92 @@ Kernel-thread panics emit nothing for this section, same as
 the syscall trail — the absence carries the same "kernel
 internal" diagnostic signal.
 
+### Binary Windows minidump (`.dmp`) on every panic
+
+Alongside the human-readable text dump on COM1, every panic /
+trap path now emits a structurally-valid Windows minidump
+(`MDMP`-magic file) over a separate binary channel. The
+emitter lives in `kernel/diag/minidump.{h,cpp}` and ships out
+via `kernel/diag/debugcon.{h,cpp}` (port 0xE9 = QEMU's Bochs
+debug console).
+
+Streams included:
+
+- **SystemInfoStream (7)**: AMD64, Win32_NT, version-shaped
+  metadata so debuggers that gate on platform fields accept
+  the file.
+- **ExceptionStream (6)**: ExceptionAddress = rip,
+  ExceptionCode = NTSTATUS for the trap (#PF →
+  STATUS_ACCESS_VIOLATION 0xC0000005, #UD →
+  STATUS_ILLEGAL_INSTRUCTION 0xC000001D, soft panic →
+  STATUS_BREAKPOINT 0x80000003).
+- **ThreadListStream (3)**: one thread (the faulting CPU's
+  current task) with a full CONTEXT_X64 (1232-byte block,
+  ContextFlags = CONTEXT_AMD64|CONTROL|INTEGER|SEGMENTS).
+- **ModuleListStream (4)**: every Process::dll_images entry
+  with name resolved via PeExportsDllName.
+- **MemoryListStream (5)**: ~16 KiB stack starting at the
+  page containing rsp + 4 KiB page containing rip — enough
+  for VS to do disassembly + a stack walk.
+
+FP / SSE state is intentionally zero-filled and the
+CONTEXT_FLOATING_POINT bit is NOT set in ContextFlags — the
+kernel runs `-mno-sse` so the FP block is meaningless and
+asserting "valid" would lie to the debugger.
+
+Transport:
+- Guest writes one byte at a time via `outb 0xE9, %al`.
+- QEMU's `-debugcon file:<path>` (added in `tools/qemu/run.sh`)
+  appends every byte to a host file — `${BUILD_DIR}/duetos.dmp`.
+- On a clean boot the file stays at zero bytes (the kernel
+  truncates it via `: > "${MINIDUMP_FILE}"` on each run, and
+  the boot self-test calls a `BuildMinidumpInto` path that
+  fills the static buffer but does NOT egress).
+- On panic the file materialises a real .dmp that Visual
+  Studio / WinDbg / VSCode-cppvsdbg open directly.
+
+End-to-end verification (validated against the trap-demo
+path under TCG): a 22 KiB .dmp parses cleanly with the
+Python `minidump` library, exposes the correct rip/rsp/rbp
+in CONTEXT_X64, and lists the 16 KiB stack + 4 KiB rip-page
+in the MemoryList.
+
+#### Real-hardware persistence (deferred)
+
+Port 0xE9 has no behaviour on real PCs — the OUTBs go
+nowhere and the .dmp is lost. Two remediation paths are on
+deck:
+
+1. **Raw block write to a reserved LBA range** (the Windows
+   "pagefile crash dump" pattern). A fixed partition / LBA
+   range serves as the dump scratch. Panic path goes through
+   the NVMe / AHCI driver directly, bypassing the VFS so
+   shared locks held by other tasks don't matter. Next-boot
+   init copies the bytes out into a normal file.
+2. **FAT32 file write on a dedicated partition**. Cleaner
+   format but riskier — FS state could be mid-mutation when
+   we panic.
+
+Path (1) is the planned v1; today the code carries no
+GAP/STUB markers because the `// GAP:` policy is for
+handler-shape gaps, not for whole future-tier features.
+
+#### Files
+
+- `kernel/diag/debugcon.{h,cpp}` — port 0xE9 byte writer.
+- `kernel/diag/minidump.{h,cpp}` — the format builder, static
+  256 KiB buffer, MinidumpSelfTest at boot, EmitMinidump on
+  panic.
+- `kernel/core/panic.cpp` — calls EmitMinidump after the text
+  dump's EndCrashDump for both `Panic` and `PanicWithValue`.
+- `kernel/arch/x86_64/traps.cpp` — calls EmitMinidump after
+  the trap-path EndCrashDump with the trap-vector→NTSTATUS
+  mapping.
+- `tools/qemu/run.sh` — sets `MINIDUMP_FILE`, truncates per
+  run, passes `-debugcon file:${MINIDUMP_FILE}` to QEMU.
+- `tools/debug/test-panic.sh` / `test-trap.sh` — assert the
+  file is non-empty and the first four bytes are `MDMP`.
+
 Human-readable decoders live in `kernel/core/diag_decode.{h,cpp}`:
 `WriteCr0Bits` / `WriteCr4Bits` / `WriteRflagsBits` / `WriteEferBits` /
 `WriteCr3Decoded` / `WriteSegmentSelectorBits` / `WritePageFaultErrBits` /

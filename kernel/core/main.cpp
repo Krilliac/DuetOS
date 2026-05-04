@@ -166,6 +166,7 @@
 #include "diag/event_trace.h"
 #include "diag/fault_react.h"
 #include "diag/gdb_stub.h"
+#include "diag/minidump.h"
 #include "diag/perf_profile.h"
 #include "diag/soft_lockup.h"
 #include "ipc/kevent.h"
@@ -1817,6 +1818,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     if constexpr (duetos::core::kBootSelfTests)
     {
         duetos::sched::SyscallTrailSelfTest();
+        // Minidump self-test — validates the .dmp builder's
+        // header / version / stream-count shape against a
+        // synthetic context. Builds into the static buffer but
+        // does NOT egress to debugcon, so a clean boot leaves
+        // the host's `duetos.dmp` file empty.
+        duetos::diag::minidump::MinidumpSelfTest();
     }
     // Idle task FIRST so the runqueue is never empty — even if the
     // reaper or any subsequent worker blocks before the boot task

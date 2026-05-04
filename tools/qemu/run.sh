@@ -177,6 +177,18 @@ fi
 # after the fact.
 echo "[run.sh] qemu accel=${ACCEL}" >&2
 
+# Per-run binary minidump file. The kernel's crash-dump path
+# emits a Windows-format .dmp via `outb 0xE9, %al` (port 0xE9
+# is QEMU's `-debugcon` channel); QEMU appends each byte to
+# this file as it arrives. On a successful boot with no panic
+# the file stays empty / zero bytes — no harm. On a panic it
+# materialises a real .dmp that Visual Studio / WinDbg /
+# VSCode-cppvsdbg open directly. Truncate per-run so a stale
+# dump from a prior boot doesn't masquerade as the current one.
+MINIDUMP_FILE="${BUILD_DIR}/duetos.dmp"
+: > "${MINIDUMP_FILE}"
+echo "[run.sh] minidump sink=${MINIDUMP_FILE}" >&2
+
 QEMU_ARGS=(
     -machine  "q35,accel=${ACCEL}"
     -cpu      max
@@ -187,6 +199,7 @@ QEMU_ARGS=(
     -no-shutdown
     -d        int,cpu_reset
     -D        qemu.log
+    -debugcon "file:${MINIDUMP_FILE}"
     # isa-debug-exit: a tiny device that lets the guest exit QEMU
     # cleanly. Writing an OUT byte B to port 0xf4 terminates QEMU
     # with exit status (B<<1)|1. arch::TestExit (kernel/arch/x86_64/

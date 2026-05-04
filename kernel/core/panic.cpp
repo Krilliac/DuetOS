@@ -14,6 +14,7 @@
 #include "diag/diag_decode.h"
 #include "diag/soft_lockup.h"
 #include "diag/hexdump.h"
+#include "diag/minidump.h"
 #include "loader/dll_loader.h"
 #include "loader/pe_exports.h"
 #include "log/klog.h"
@@ -749,6 +750,16 @@ void Panic(const char* subsystem, const char* message)
     DumpPeerCpuSnapshots();
 
     EndCrashDump();
+
+    // Binary minidump egress AFTER the human-readable text dump
+    // has fully printed: the textual record is the highest-
+    // priority artefact (it's all an operator on real hardware
+    // gets), so it must finish first. The .dmp goes out via
+    // debugcon (port 0xE9 → host file under QEMU); on real
+    // hardware the OUTBs go nowhere and this is a no-op cost.
+    duetos::diag::minidump::EmitMinidump(reinterpret_cast<u64>(__builtin_return_address(0)), arch::ReadRsp(),
+                                         arch::ReadRbp(), /*exception_code=*/0);
+
     arch::SerialWrite("[panic] CPU halted — no recovery.\n");
     arch::Halt();
 }
@@ -781,6 +792,16 @@ void PanicWithValue(const char* subsystem, const char* message, u64 value)
     DumpPeerCpuSnapshots();
 
     EndCrashDump();
+
+    // Binary minidump egress AFTER the human-readable text dump
+    // has fully printed: the textual record is the highest-
+    // priority artefact (it's all an operator on real hardware
+    // gets), so it must finish first. The .dmp goes out via
+    // debugcon (port 0xE9 → host file under QEMU); on real
+    // hardware the OUTBs go nowhere and this is a no-op cost.
+    duetos::diag::minidump::EmitMinidump(reinterpret_cast<u64>(__builtin_return_address(0)), arch::ReadRsp(),
+                                         arch::ReadRbp(), /*exception_code=*/0);
+
     arch::SerialWrite("[panic] CPU halted — no recovery.\n");
     arch::Halt();
 }

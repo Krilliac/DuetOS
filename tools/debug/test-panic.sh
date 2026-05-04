@@ -184,6 +184,24 @@ assert_contains '\[panic\] --- log ring'                              "log-ring 
 # trail itself is plenty of evidence the ring is wired in.
 assert_contains '^\[t=[0-9.]+ms\]'                                    "log-ring has at least one timestamped entry" "${DUMP_FILE}"
 
+# Binary minidump assertion. The kernel emits a Windows .dmp via
+# debugcon (port 0xE9 → ${BUILD_DIR}/duetos.dmp) on every panic /
+# trap. The file should be non-empty and start with the four-byte
+# 'MDMP' signature so any debugger (Visual Studio / WinDbg /
+# VSCode-cppvsdbg) can open it.
+MINIDUMP="${BUILD_DIR}/duetos.dmp"
+if [[ ! -s "${MINIDUMP}" ]]; then
+    echo "[test-panic] MISSING: minidump file is empty or absent: ${MINIDUMP}"
+    fail=1
+elif [[ "$(head -c 4 "${MINIDUMP}")" != "MDMP" ]]; then
+    echo "[test-panic] MISSING: minidump magic mismatch (expected 'MDMP'); first 16 bytes:"
+    od -An -tx1 -N 16 "${MINIDUMP}"
+    fail=1
+else
+    SIZE=$(stat -c %s "${MINIDUMP}")
+    echo "[test-panic] minidump OK: ${MINIDUMP} (${SIZE} bytes, MDMP signature verified)"
+fi
+
 if [[ "${fail}" -ne 0 ]]; then
     echo "[test-panic] FAIL — full log below:"
     cat "${LOG}"

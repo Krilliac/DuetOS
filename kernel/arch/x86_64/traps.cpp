@@ -42,6 +42,7 @@
 #include "diag/gdb_stub.h"
 #include "security/fault_domain.h"
 #include "diag/hexdump.h"
+#include "diag/minidump.h"
 #include "diag/log_names.h"
 #include "core/panic.h"
 #include "util/symbols.h"
@@ -909,6 +910,21 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     core::DumpPeerCpuSnapshots();
 
     core::EndCrashDump();
+
+    // Binary minidump egress — see core::Panic for rationale.
+    // For traps we know the exception vector, so map it to a
+    // recognisable NTSTATUS code so a debugger that opens the
+    // .dmp shows the right exception kind:
+    //   #UD (vector 6)  → STATUS_ILLEGAL_INSTRUCTION 0xC000001D
+    //   #PF (vector 14) → STATUS_ACCESS_VIOLATION    0xC0000005
+    //   else            → STATUS_BREAKPOINT          0x80000003 (fallback)
+    u32 ntstatus = 0x80000003;
+    if (frame->vector == 6)
+        ntstatus = 0xC000001D;
+    else if (frame->vector == 14)
+        ntstatus = 0xC0000005;
+    duetos::diag::minidump::EmitMinidump(frame->rip, frame->rsp, frame->rbp, ntstatus);
+
     SerialWrite("[panic] Halting CPU.\n");
     Halt();
 }
