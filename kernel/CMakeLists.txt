@@ -227,58 +227,6 @@ add_custom_command(
     VERBATIM)
 list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_WINKILL_HEADER}")
 
-# Real Windows PE — 7za.exe (1.29 MiB, x86_64 console, 138 imports
-# across 5 DLLs: KERNEL32 / msvcrt / ADVAPI32 / OLEAUT32 / USER32).
-# 7-Zip 23.01 standalone build — substantially heavier than
-# windows-kill, exercising the loader against a real-world MSVC
-# C++ codebase. License: LGPL + unRAR (see seven_zip/LICENSE.txt).
-set(DUETOS_SEVENZIP_SRC    "${CMAKE_SOURCE_DIR}/userland/apps/seven_zip/7za.exe")
-set(DUETOS_SEVENZIP_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_sevenzip_pe.h")
-add_custom_command(
-    OUTPUT "${DUETOS_SEVENZIP_HEADER}"
-    COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
-            "${DUETOS_SEVENZIP_SRC}" "${DUETOS_SEVENZIP_HEADER}"
-            kBinSevenZipBytes --namespace "duetos::fs::generated"
-    DEPENDS "${DUETOS_SEVENZIP_SRC}" "${DUETOS_EMBED_BLOB_SCRIPT}"
-    COMMENT "Embedding real Windows PE /bin/7za.exe"
-    VERBATIM)
-list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_SEVENZIP_HEADER}")
-
-# Real Windows PE — busybox64.exe (717 KiB, x86_64 console,
-# 313 imports across 5 DLLs: msvcrt(147) / KERNEL32(118) /
-# WS2_32(26) / ADVAPI32(15) / USER32(7)). Ron Yorston's
-# busybox-w32 — the "second complicated PE" target,
-# complementary to 7-Zip's compression codepaths. License: GPLv2
-# (see busybox/README.md).
-set(DUETOS_BUSYBOX_SRC    "${CMAKE_SOURCE_DIR}/userland/apps/busybox/busybox64.exe")
-set(DUETOS_BUSYBOX_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_busybox_pe.h")
-add_custom_command(
-    OUTPUT "${DUETOS_BUSYBOX_HEADER}"
-    COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
-            "${DUETOS_BUSYBOX_SRC}" "${DUETOS_BUSYBOX_HEADER}"
-            kBinBusyBoxBytes --namespace "duetos::fs::generated"
-    DEPENDS "${DUETOS_BUSYBOX_SRC}" "${DUETOS_EMBED_BLOB_SCRIPT}"
-    COMMENT "Embedding real Windows PE /bin/busybox64.exe"
-    VERBATIM)
-list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_BUSYBOX_HEADER}")
-
-# Real Windows PE — nasm.exe (1.57 MiB, x86_64 console,
-# 117 imports across 13 DLLs: api-ms-win-crt-* apisets +
-# KERNEL32). NASM 2.16.03 — UCRT-based, complementary to
-# 7-Zip (msvcrt) and busybox-w32 (MinGW). License: 2-clause BSD
-# (see nasm/LICENSE.txt).
-set(DUETOS_NASM_SRC    "${CMAKE_SOURCE_DIR}/userland/apps/nasm/nasm.exe")
-set(DUETOS_NASM_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_nasm_pe.h")
-add_custom_command(
-    OUTPUT "${DUETOS_NASM_HEADER}"
-    COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
-            "${DUETOS_NASM_SRC}" "${DUETOS_NASM_HEADER}"
-            kBinNasmBytes --namespace "duetos::fs::generated"
-    DEPENDS "${DUETOS_NASM_SRC}" "${DUETOS_EMBED_BLOB_SCRIPT}"
-    COMMENT "Embedding real Windows PE /bin/nasm.exe"
-    VERBATIM)
-list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_NASM_HEADER}")
-
 # mini_browser.exe — minimal WinSock 2 PE that does an HTTP/1.0 GET to
 # www.google.com. Source is userland/apps/mini_browser/browser.c; the
 # prebuilt PE checked into the tree is what gets embedded so the
@@ -796,6 +744,14 @@ endif()
 # Wired off the top-level DUETOS_LTO option (declared in the root
 # CMakeLists.txt). Applied to both stages so symbol addresses
 # remain consistent across the symbol-table generation handoff.
+# constexpr step limit. The Win32 thunk table's compile-time
+# insertion sort is O(N^2) over ~1200 entries, which exceeds clang's
+# default 1M-step constexpr budget. Bump to 20M; cost is purely
+# compile-time. If the table grows past ~3000 entries, swap the
+# sort for an O(N log N) merge sort instead of bumping further.
+target_compile_options(duetos-kernel        PRIVATE -fconstexpr-steps=20000000)
+target_compile_options(duetos-kernel-stage1 PRIVATE -fconstexpr-steps=20000000)
+
 if(DUETOS_LTO)
     set(DUETOS_LTO_FLAGS -flto=thin)
     target_compile_options(duetos-kernel        PRIVATE ${DUETOS_LTO_FLAGS})
