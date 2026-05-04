@@ -383,6 +383,171 @@ static void Md5Final(Md5* s, unsigned char* out16)
     }
 }
 
+/* SHA-512 reference (FIPS 180-4 §6.4). Same shape as SHA-256 but
+ * 64-bit words, 80 rounds, 1024-bit blocks, 128-bit length pad.
+ * SHA-384 reuses the entire core — only the eight initial-hash
+ * values and the truncated output (48 bytes vs 64) differ. The
+ * 128-bit length field is encoded as { 8 zero bytes, 8 bytes of
+ * bitlen big-endian } since `bitlen` is a u64 (callers are bounded
+ * by 2^61 input bytes, well below the 2^125-byte limit). */
+typedef struct
+{
+    unsigned long long h[8];
+    unsigned char buf[128];
+    unsigned long long bitlen;
+    unsigned int buflen;
+} Sha512;
+
+static const unsigned long long kSha512K[80] = {
+    0x428a2f98d728ae22ULL, 0x7137449123ef65cdULL, 0xb5c0fbcfec4d3b2fULL, 0xe9b5dba58189dbbcULL, 0x3956c25bf348b538ULL,
+    0x59f111f1b605d019ULL, 0x923f82a4af194f9bULL, 0xab1c5ed5da6d8118ULL, 0xd807aa98a3030242ULL, 0x12835b0145706fbeULL,
+    0x243185be4ee4b28cULL, 0x550c7dc3d5ffb4e2ULL, 0x72be5d74f27b896fULL, 0x80deb1fe3b1696b1ULL, 0x9bdc06a725c71235ULL,
+    0xc19bf174cf692694ULL, 0xe49b69c19ef14ad2ULL, 0xefbe4786384f25e3ULL, 0x0fc19dc68b8cd5b5ULL, 0x240ca1cc77ac9c65ULL,
+    0x2de92c6f592b0275ULL, 0x4a7484aa6ea6e483ULL, 0x5cb0a9dcbd41fbd4ULL, 0x76f988da831153b5ULL, 0x983e5152ee66dfabULL,
+    0xa831c66d2db43210ULL, 0xb00327c898fb213fULL, 0xbf597fc7beef0ee4ULL, 0xc6e00bf33da88fc2ULL, 0xd5a79147930aa725ULL,
+    0x06ca6351e003826fULL, 0x142929670a0e6e70ULL, 0x27b70a8546d22ffcULL, 0x2e1b21385c26c926ULL, 0x4d2c6dfc5ac42aedULL,
+    0x53380d139d95b3dfULL, 0x650a73548baf63deULL, 0x766a0abb3c77b2a8ULL, 0x81c2c92e47edaee6ULL, 0x92722c851482353bULL,
+    0xa2bfe8a14cf10364ULL, 0xa81a664bbc423001ULL, 0xc24b8b70d0f89791ULL, 0xc76c51a30654be30ULL, 0xd192e819d6ef5218ULL,
+    0xd69906245565a910ULL, 0xf40e35855771202aULL, 0x106aa07032bbd1b8ULL, 0x19a4c116b8d2d0c8ULL, 0x1e376c085141ab53ULL,
+    0x2748774cdf8eeb99ULL, 0x34b0bcb5e19b48a8ULL, 0x391c0cb3c5c95a63ULL, 0x4ed8aa4ae3418acbULL, 0x5b9cca4f7763e373ULL,
+    0x682e6ff3d6b2b8a3ULL, 0x748f82ee5defb2fcULL, 0x78a5636f43172f60ULL, 0x84c87814a1f0ab72ULL, 0x8cc702081a6439ecULL,
+    0x90befffa23631e28ULL, 0xa4506cebde82bde9ULL, 0xbef9a3f7b2c67915ULL, 0xc67178f2e372532bULL, 0xca273eceea26619cULL,
+    0xd186b8c721c0c207ULL, 0xeada7dd6cde0eb1eULL, 0xf57d4f7fee6ed178ULL, 0x06f067aa72176fbaULL, 0x0a637dc5a2c898a6ULL,
+    0x113f9804bef90daeULL, 0x1b710b35131c471bULL, 0x28db77f523047d84ULL, 0x32caab7b40c72493ULL, 0x3c9ebe0a15c9bebcULL,
+    0x431d67c49c100d4cULL, 0x4cc5d4becb3e42b6ULL, 0x597f299cfc657e2aULL, 0x5fcb6fab3ad6faecULL, 0x6c44198c4a475817ULL};
+
+static unsigned long long rotr64(unsigned long long x, unsigned int n)
+{
+    return (x >> n) | (x << (64 - n));
+}
+
+static void Sha512Init(Sha512* s)
+{
+    s->h[0] = 0x6a09e667f3bcc908ULL;
+    s->h[1] = 0xbb67ae8584caa73bULL;
+    s->h[2] = 0x3c6ef372fe94f82bULL;
+    s->h[3] = 0xa54ff53a5f1d36f1ULL;
+    s->h[4] = 0x510e527fade682d1ULL;
+    s->h[5] = 0x9b05688c2b3e6c1fULL;
+    s->h[6] = 0x1f83d9abfb41bd6bULL;
+    s->h[7] = 0x5be0cd19137e2179ULL;
+    s->bitlen = 0;
+    s->buflen = 0;
+}
+
+static void Sha384Init(Sha512* s)
+{
+    s->h[0] = 0xcbbb9d5dc1059ed8ULL;
+    s->h[1] = 0x629a292a367cd507ULL;
+    s->h[2] = 0x9159015a3070dd17ULL;
+    s->h[3] = 0x152fecd8f70e5939ULL;
+    s->h[4] = 0x67332667ffc00b31ULL;
+    s->h[5] = 0x8eb44a8768581511ULL;
+    s->h[6] = 0xdb0c2e0d64f98fa7ULL;
+    s->h[7] = 0x47b5481dbefa4fa4ULL;
+    s->bitlen = 0;
+    s->buflen = 0;
+}
+
+static void Sha512Block(Sha512* s, const unsigned char* p)
+{
+    unsigned long long w[80];
+    for (int i = 0; i < 16; ++i)
+        w[i] = ((unsigned long long)p[i * 8] << 56) | ((unsigned long long)p[i * 8 + 1] << 48) |
+               ((unsigned long long)p[i * 8 + 2] << 40) | ((unsigned long long)p[i * 8 + 3] << 32) |
+               ((unsigned long long)p[i * 8 + 4] << 24) | ((unsigned long long)p[i * 8 + 5] << 16) |
+               ((unsigned long long)p[i * 8 + 6] << 8) | (unsigned long long)p[i * 8 + 7];
+    for (int i = 16; i < 80; ++i)
+    {
+        unsigned long long s0 = rotr64(w[i - 15], 1) ^ rotr64(w[i - 15], 8) ^ (w[i - 15] >> 7);
+        unsigned long long s1 = rotr64(w[i - 2], 19) ^ rotr64(w[i - 2], 61) ^ (w[i - 2] >> 6);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    unsigned long long a = s->h[0], b = s->h[1], c = s->h[2], d = s->h[3];
+    unsigned long long e = s->h[4], f = s->h[5], g = s->h[6], hh = s->h[7];
+    for (int i = 0; i < 80; ++i)
+    {
+        unsigned long long S1 = rotr64(e, 14) ^ rotr64(e, 18) ^ rotr64(e, 41);
+        unsigned long long ch = (e & f) ^ (~e & g);
+        unsigned long long t1 = hh + S1 + ch + kSha512K[i] + w[i];
+        unsigned long long S0 = rotr64(a, 28) ^ rotr64(a, 34) ^ rotr64(a, 39);
+        unsigned long long mj = (a & b) ^ (a & c) ^ (b & c);
+        unsigned long long t2 = S0 + mj;
+        hh = g;
+        g = f;
+        f = e;
+        e = d + t1;
+        d = c;
+        c = b;
+        b = a;
+        a = t1 + t2;
+    }
+    s->h[0] += a;
+    s->h[1] += b;
+    s->h[2] += c;
+    s->h[3] += d;
+    s->h[4] += e;
+    s->h[5] += f;
+    s->h[6] += g;
+    s->h[7] += hh;
+}
+
+static void Sha512Update(Sha512* s, const unsigned char* p, unsigned int n)
+{
+    s->bitlen += (unsigned long long)n * 8;
+    while (n > 0)
+    {
+        unsigned int take = 128 - s->buflen;
+        if (take > n)
+            take = n;
+        for (unsigned int i = 0; i < take; ++i)
+            s->buf[s->buflen + i] = p[i];
+        s->buflen += take;
+        p += take;
+        n -= take;
+        if (s->buflen == 128)
+        {
+            Sha512Block(s, s->buf);
+            s->buflen = 0;
+        }
+    }
+}
+
+/* Common finaliser. out_len must be 48 (SHA-384) or 64 (SHA-512). */
+static void Sha512Final(Sha512* s, unsigned char* out, unsigned int out_len)
+{
+    s->buf[s->buflen++] = 0x80;
+    if (s->buflen > 112)
+    {
+        while (s->buflen < 128)
+            s->buf[s->buflen++] = 0;
+        Sha512Block(s, s->buf);
+        s->buflen = 0;
+    }
+    while (s->buflen < 112)
+        s->buf[s->buflen++] = 0;
+    /* High 64 bits of the 128-bit length always zero (capped at 2^61
+     * input bytes by bitlen's u64 width). Low 64 bits are bitlen big-endian. */
+    for (int i = 0; i < 8; ++i)
+        s->buf[112 + i] = 0;
+    unsigned long long bl = s->bitlen;
+    for (int i = 7; i >= 0; --i)
+        s->buf[120 + i] = (unsigned char)(bl >> ((7 - i) * 8));
+    Sha512Block(s, s->buf);
+    const unsigned int words = out_len / 8;
+    for (unsigned int i = 0; i < words; ++i)
+    {
+        out[i * 8 + 0] = (unsigned char)(s->h[i] >> 56);
+        out[i * 8 + 1] = (unsigned char)(s->h[i] >> 48);
+        out[i * 8 + 2] = (unsigned char)(s->h[i] >> 40);
+        out[i * 8 + 3] = (unsigned char)(s->h[i] >> 32);
+        out[i * 8 + 4] = (unsigned char)(s->h[i] >> 24);
+        out[i * 8 + 5] = (unsigned char)(s->h[i] >> 16);
+        out[i * 8 + 6] = (unsigned char)(s->h[i] >> 8);
+        out[i * 8 + 7] = (unsigned char)(s->h[i] >> 0);
+    }
+}
+
 /* Algorithm-id matching: BCryptOpenAlgorithmProvider passes a UTF-16
  * algorithm name (e.g. L"SHA256", L"SHA1", L"MD5"). Each match
  * function checks for exact equality. */
@@ -403,6 +568,14 @@ static int IsSha256(const wchar_t16* algid)
 {
     return wstr_eq(algid, "SHA256");
 }
+static int IsSha384(const wchar_t16* algid)
+{
+    return wstr_eq(algid, "SHA384");
+}
+static int IsSha512(const wchar_t16* algid)
+{
+    return wstr_eq(algid, "SHA512");
+}
 static int IsSha1(const wchar_t16* algid)
 {
     return wstr_eq(algid, "SHA1");
@@ -421,24 +594,34 @@ typedef enum
     HK_SHA256 = 1,
     HK_SHA1 = 2,
     HK_MD5 = 3,
+    HK_SHA384 = 4,
+    HK_SHA512 = 5,
 } HashKind;
 
 #define BCRYPT_ALG_SHA256 ((HANDLE)0x2001)
 #define BCRYPT_ALG_SHA1 ((HANDLE)0x2002)
 #define BCRYPT_ALG_MD5 ((HANDLE)0x2003)
+#define BCRYPT_ALG_SHA384 ((HANDLE)0x2004)
+#define BCRYPT_ALG_SHA512 ((HANDLE)0x2005)
 #define BCRYPT_ALG_GENERIC ((HANDLE)0x2000)
 
 #define BCRYPT_HASH_SHA256 ((HANDLE)0x3001)
 #define BCRYPT_HASH_SHA1 ((HANDLE)0x3002)
 #define BCRYPT_HASH_MD5 ((HANDLE)0x3003)
+#define BCRYPT_HASH_SHA384 ((HANDLE)0x3004)
+#define BCRYPT_HASH_SHA512 ((HANDLE)0x3005)
 #define BCRYPT_HASH_GENERIC ((HANDLE)0x3000)
 
 static Sha256 g_sha256_slot;
 static Sha1 g_sha1_slot;
 static Md5 g_md5_slot;
+static Sha512 g_sha384_slot;
+static Sha512 g_sha512_slot;
 static int g_sha256_in_use;
 static int g_sha1_in_use;
 static int g_md5_in_use;
+static int g_sha384_in_use;
+static int g_sha512_in_use;
 
 static unsigned int hash_size_for_alg(HANDLE alg)
 {
@@ -448,6 +631,10 @@ static unsigned int hash_size_for_alg(HANDLE alg)
         return 20;
     if (alg == BCRYPT_ALG_MD5)
         return 16;
+    if (alg == BCRYPT_ALG_SHA384)
+        return 48;
+    if (alg == BCRYPT_ALG_SHA512)
+        return 64;
     return 0;
 }
 
@@ -460,6 +647,10 @@ __declspec(dllexport) NTSTATUS BCryptOpenAlgorithmProvider(HANDLE* h, const wcha
         return STATUS_INVALID_PARAMETER;
     if (IsSha256(algid))
         *h = BCRYPT_ALG_SHA256;
+    else if (IsSha384(algid))
+        *h = BCRYPT_ALG_SHA384;
+    else if (IsSha512(algid))
+        *h = BCRYPT_ALG_SHA512;
     else if (IsSha1(algid))
         *h = BCRYPT_ALG_SHA1;
     else if (IsMd5(algid))
@@ -492,6 +683,18 @@ __declspec(dllexport) NTSTATUS BCryptCreateHash(HANDLE alg, HANDLE* hash, unsign
         g_sha256_in_use = 1;
         *hash = BCRYPT_HASH_SHA256;
     }
+    else if (alg == BCRYPT_ALG_SHA384)
+    {
+        Sha384Init(&g_sha384_slot);
+        g_sha384_in_use = 1;
+        *hash = BCRYPT_HASH_SHA384;
+    }
+    else if (alg == BCRYPT_ALG_SHA512)
+    {
+        Sha512Init(&g_sha512_slot);
+        g_sha512_in_use = 1;
+        *hash = BCRYPT_HASH_SHA512;
+    }
     else if (alg == BCRYPT_ALG_SHA1)
     {
         Sha1Init(&g_sha1_slot);
@@ -516,6 +719,10 @@ __declspec(dllexport) NTSTATUS BCryptHashData(HANDLE h, unsigned char* in, ULONG
     (void)flags;
     if (h == BCRYPT_HASH_SHA256 && g_sha256_in_use)
         Sha256Update(&g_sha256_slot, in, len);
+    else if (h == BCRYPT_HASH_SHA384 && g_sha384_in_use)
+        Sha512Update(&g_sha384_slot, in, len);
+    else if (h == BCRYPT_HASH_SHA512 && g_sha512_in_use)
+        Sha512Update(&g_sha512_slot, in, len);
     else if (h == BCRYPT_HASH_SHA1 && g_sha1_in_use)
         Sha1Update(&g_sha1_slot, in, len);
     else if (h == BCRYPT_HASH_MD5 && g_md5_in_use)
@@ -534,6 +741,26 @@ __declspec(dllexport) NTSTATUS BCryptFinishHash(HANDLE h, unsigned char* out, UL
         Sha256Final(&g_sha256_slot, tmp);
         g_sha256_in_use = 0;
         ULONG cap = (len < 32) ? len : 32;
+        for (ULONG i = 0; i < cap; ++i)
+            out[i] = tmp[i];
+        return STATUS_SUCCESS;
+    }
+    if (h == BCRYPT_HASH_SHA384 && g_sha384_in_use)
+    {
+        unsigned char tmp[48];
+        Sha512Final(&g_sha384_slot, tmp, 48);
+        g_sha384_in_use = 0;
+        ULONG cap = (len < 48) ? len : 48;
+        for (ULONG i = 0; i < cap; ++i)
+            out[i] = tmp[i];
+        return STATUS_SUCCESS;
+    }
+    if (h == BCRYPT_HASH_SHA512 && g_sha512_in_use)
+    {
+        unsigned char tmp[64];
+        Sha512Final(&g_sha512_slot, tmp, 64);
+        g_sha512_in_use = 0;
+        ULONG cap = (len < 64) ? len : 64;
         for (ULONG i = 0; i < cap; ++i)
             out[i] = tmp[i];
         return STATUS_SUCCESS;
@@ -567,6 +794,10 @@ __declspec(dllexport) NTSTATUS BCryptDestroyHash(HANDLE h)
 {
     if (h == BCRYPT_HASH_SHA256)
         g_sha256_in_use = 0;
+    else if (h == BCRYPT_HASH_SHA384)
+        g_sha384_in_use = 0;
+    else if (h == BCRYPT_HASH_SHA512)
+        g_sha512_in_use = 0;
     else if (h == BCRYPT_HASH_SHA1)
         g_sha1_in_use = 0;
     else if (h == BCRYPT_HASH_MD5)
@@ -584,10 +815,24 @@ __declspec(dllexport) NTSTATUS BCryptGetProperty(HANDLE h, const wchar_t16* prop
     if (!prop)
         return STATUS_INVALID_PARAMETER;
     unsigned int sz = hash_size_for_alg(h);
-    if (sz == 0 && (h == BCRYPT_HASH_SHA256 || h == BCRYPT_HASH_SHA1 || h == BCRYPT_HASH_MD5))
+    if (sz == 0)
     {
-        sz = (h == BCRYPT_HASH_SHA256) ? 32 : (h == BCRYPT_HASH_SHA1) ? 20 : 16;
+        if (h == BCRYPT_HASH_SHA256)
+            sz = 32;
+        else if (h == BCRYPT_HASH_SHA384)
+            sz = 48;
+        else if (h == BCRYPT_HASH_SHA512)
+            sz = 64;
+        else if (h == BCRYPT_HASH_SHA1)
+            sz = 20;
+        else if (h == BCRYPT_HASH_MD5)
+            sz = 16;
     }
+    /* SHA-384 / SHA-512 use a 1024-bit (128 B) block; everything else
+     * we ship is 512-bit (64 B). Object-length is sized for the worst
+     * case our slots actually hold. */
+    const int is_sha512_family =
+        (h == BCRYPT_ALG_SHA384 || h == BCRYPT_ALG_SHA512 || h == BCRYPT_HASH_SHA384 || h == BCRYPT_HASH_SHA512);
     if (wstr_eq(prop, "HashDigestLength"))
     {
         if (result_len)
@@ -604,7 +849,11 @@ __declspec(dllexport) NTSTATUS BCryptGetProperty(HANDLE h, const wchar_t16* prop
     }
     if (wstr_eq(prop, "ObjectLength") || wstr_eq(prop, "BlockLength"))
     {
-        unsigned int v = wstr_eq(prop, "BlockLength") ? 64 : (unsigned int)sizeof(Sha256);
+        unsigned int v;
+        if (wstr_eq(prop, "BlockLength"))
+            v = is_sha512_family ? 128 : 64;
+        else
+            v = is_sha512_family ? (unsigned int)sizeof(Sha512) : (unsigned int)sizeof(Sha256);
         if (result_len)
             *result_len = 4;
         if (!out)

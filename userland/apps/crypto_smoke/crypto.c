@@ -107,6 +107,55 @@ void __cdecl mainCRTStartup(void)
         BCryptCloseAlgorithmProvider(alg, 0);
     }
 
+    /* Step 2b: SHA-384 / SHA-512 of "abc" — FIPS 180-4 test vectors:
+     *   SHA-384: cb00753f45a35e8bb5a03d699ac65007272c32ab0eded163
+     *            1a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7
+     *   SHA-512: ddaf35a193617abacc417349ae20413112e6fa4e89a97ea2
+     *            0a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd
+     *            454d4423643ce80e2a9ac94fa54ca49f                 */
+    static const struct
+    {
+        LPCWSTR algid;
+        const char* label;
+        DWORD digest_len;
+    } kSha2Vectors[] = {
+        {BCRYPT_SHA384_ALGORITHM, "[crypto_smoke] BCryptFinishHash(SHA384,\"abc\") =", 48},
+        {BCRYPT_SHA512_ALGORITHM, "[crypto_smoke] BCryptFinishHash(SHA512,\"abc\") =", 64},
+    };
+    for (int v = 0; v < (int)(sizeof(kSha2Vectors) / sizeof(kSha2Vectors[0])); ++v)
+    {
+        BCRYPT_ALG_HANDLE alg2 = NULL;
+        s = BCryptOpenAlgorithmProvider(&alg2, kSha2Vectors[v].algid, NULL, 0);
+        if (s != 0)
+        {
+            Out(kSha2Vectors[v].label);
+            Out(" FAIL (open)\r\n");
+            continue;
+        }
+        BCRYPT_HASH_HANDLE h2 = NULL;
+        s = BCryptCreateHash(alg2, &h2, NULL, 0, NULL, 0, 0);
+        if (s == 0)
+        {
+            const char* msg = "abc";
+            BCryptHashData(h2, (PUCHAR)msg, 3, 0);
+            unsigned char digest[64] = {0};
+            s = BCryptFinishHash(h2, digest, kSha2Vectors[v].digest_len, 0);
+            Out(kSha2Vectors[v].label);
+            if (s == 0)
+            {
+                Out(" PASS digest=");
+                OutHex(digest, kSha2Vectors[v].digest_len);
+                Out("\r\n");
+            }
+            else
+            {
+                Out(" FAIL\r\n");
+            }
+            BCryptDestroyHash(h2);
+        }
+        BCryptCloseAlgorithmProvider(alg2, 0);
+    }
+
     /* Step 3: legacy advapi32 CryptGenRandom — many older apps still use it. */
     HCRYPTPROV prov = 0;
     BOOL ok = CryptAcquireContextW(&prov, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT);

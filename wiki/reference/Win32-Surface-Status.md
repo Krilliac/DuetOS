@@ -622,20 +622,22 @@ SSPI facade. `AcquireCredentialsHandleA/W`,
 
 ## 5. Crypto / RNG
 
-### bcrypt.dll  (~700 LOC, ~10 exports)
+### bcrypt.dll  (~870 LOC, ~10 exports)
 
 > **Status:** REAL for the algorithm set most callers want.
 > Backed by the kernel's `SYS_RANDOM_BYTES` and an in-tree
-> SHA-256 / AES.
+> SHA-256 / SHA-384 / SHA-512 / AES.
 
 `BCryptOpenAlgorithmProvider`, `BCryptCloseAlgorithmProvider`,
 `BCryptCreateHash`, `BCryptHashData`, `BCryptFinishHash`,
 `BCryptDestroyHash`, `BCryptGetProperty`, `BCryptGenRandom`
-— REAL for SHA-256, SHA-1, MD5, AES-CBC, AES-GCM, RNG.
+— REAL for SHA-256, SHA-384, SHA-512, SHA-1, MD5, AES-CBC,
+AES-GCM, RNG. SHA-384 and SHA-512 share one FIPS 180-4 §6.4
+core; SHA-384 differs only in the eight initial-hash values
+and the truncated 48-byte output.
 
-GAP: SHA-384 / SHA-512 not in the algorithm table.
-`BCryptHashData` slots are single-threaded (one global per
-algorithm), so concurrent hashing breaks. RSA / ECC key
+GAP: `BCryptHashData` slots are single-threaded (one global
+per algorithm), so concurrent hashing breaks. RSA / ECC key
 import / sign / verify — STUB.
 
 ---
@@ -1220,10 +1222,7 @@ short list:
    the field. Use the same 32-slot array shape.
 7. **`ws2_32!WSAEventSelect`** — back into our message-
    queue + waitable-event primitives.
-8. **`bcrypt`** — add SHA-384 / SHA-512 to the algorithm
-   table (SHA-256 reference is right there; the FIPS 180-4
-   delta is the constant table + bigger word size).
-9. **`d2d1!DrawText`** — wire DWrite's monospace metrics
+8. **`d2d1!DrawText`** — wire DWrite's monospace metrics
    into the existing FillRect path so single-line text
    renders.
 
