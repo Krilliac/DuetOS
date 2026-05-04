@@ -71,15 +71,6 @@ the same commit** that delivers the code.
   (KMutex / KEvent / KSemaphore / KMailbox / KWaitable / KFile)
   are landed. Next slice is the SYS_* surface migration itself.
 
-### GDB stub completion (peer-thread step)
-
-- **Scope:** `vCont;s` step on a peer thread (no clear use
-  case today, but the only remaining gap in the stub).
-- **Blocks on:** nothing structural; needs a use case to drive
-  the design (current step path is BSP-only).
-- **When to land:** when a multi-thread workload genuinely
-  benefits from per-thread step control.
-
 ### Driver fault-domain registration
 
 - **Scope:** write teardown functions for `framebuffer`, `pci`,
