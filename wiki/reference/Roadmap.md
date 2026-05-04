@@ -237,8 +237,9 @@ In rough priority:
 The following `// GAP:` markers in source code track edge
 cases that the v0 happy path skips:
 
-- `kernel/drivers/audio/audio.cpp` — per-widget amplifier
-  capabilities (Linux HDA codec depth).
+- `kernel/drivers/audio/audio.cpp` — connection-list ENTRY
+  walk (verb 0xF02) — LENGTH probing already lands; entries
+  are needed to actually program a DAC → pin route.
 - `kernel/drivers/net/iwlwifi_rings.cpp` — legacy <7000-series
   RBD format; TX completion polling.
 - `kernel/mm/dma.cpp` — ARM64 port (`dsb ishst` + per-line
