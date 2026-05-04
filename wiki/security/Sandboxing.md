@@ -31,8 +31,7 @@ The malicious EXE can probe every byte of its 128 TiB canonical low
 half and find only what we mapped. That's the "sandbox is the OS"
 property at the MMU layer.
 
-Files: `kernel/mm/address_space.{h,cpp}`. See
-`.claude/knowledge/per-process-address-space-v0.md`.
+Files: `kernel/mm/address_space.{h,cpp}`.
 
 ### 2. Capability-gated syscalls — `core::Process::caps`
 
@@ -106,8 +105,11 @@ process is marked dead.
   not impossible-to-read by construction.
 - **Audio**: same story as compositor — audio output bypass is
   capability-gated, not yet IPC-isolated.
-- **Side-channels**: KASAN-equivalent and KASLR are on; KPTI deferred
-  (see `.claude/knowledge/kpti-meltdown-investigation-v0.md`).
+- **Side-channels**: KASAN-equivalent and KASLR are on; KPTI is a
+  settled non-implementation decision because every CPU in the
+  hardware target matrix reports `RDCL_NO=1` in silicon. See
+  [W^X / NX Enforcement](WX-Enforcement.md) and
+  [Roadmap > KPTI enable](../reference/Roadmap.md#kpti-enable-settled--deferred).
 
 ## Related Pages
 

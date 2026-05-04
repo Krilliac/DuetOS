@@ -22,7 +22,8 @@
  *     wiring. The upper network stack (TCP/IP, ARP, DHCP) is a
  *     later track entirely (kernel/net/).
  *
- * The device tier maps to `docs/knowledge/hardware-target-matrix.md`:
+ * The device tier maps to wiki/drivers/Driver-Overview.md (Hardware
+ * Target Matrix):
  *   Tier 1: Intel e1000 / e1000e (commodity wired NICs)
  *   Tier 2: Realtek rtl8169, Broadcom bcm57xx
  *   Tier 3: virtio-net (dev only)

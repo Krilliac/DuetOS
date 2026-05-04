@@ -215,12 +215,10 @@ The "What doesn't work" list from the end of Phase 5 has shrunk. As of
   WndProc, round-trips `SendMessage`, queries focus / styles / sys
   palette, and exits cleanly. The compositor renders into a virtio-gpu
   scanout (kernel framebuffer) and the present hook flushes per
-  compose. See `.claude/knowledge/win32-windowing-v1.4.md` and
-  `render-drivers-v6.md`.
+  compose.
 - **Networking is live.** Intel e1000 wired NIC + USB CDC-ECM + USB
   RNDIS drivers, full TCP/UDP/IP/ARP stack, DHCP client, DNS
-  resolver. DuetOS reaches Google over a real connection (see
-  `.claude/knowledge/live-internet-connectivity-v0.md`). RNDIS now
+  resolver. DuetOS reaches Google over a real connection. RNDIS now
   delivers every `RNDIS_PACKET_MSG` per bulk transfer (was: only the
   first).
 - **PE loader stage 2 closed several gaps.** Forwarders chase
@@ -274,8 +272,6 @@ subsystem at a time.
   PeReport.
 - `kernel/loader/pe_exports.cpp` — EAT parser.
 - `kernel/loader/dll_loader.cpp` — DLL loader and via-DLL resolver.
-- `userland/libs/*/` — the 29 userland DLL sources.
-- `.claude/knowledge/` — working notes accumulated during development.
-  Many of these reference internal slice/batch numbering that does not
-  appear in public-facing code comments; they are kept as a historical
-  log, not as current specification.
+- `userland/libs/*/` — the userland DLL sources.
+- [`reference/Roadmap`](../reference/Roadmap.md) — pending and
+  deferred work items grouped by subsystem.

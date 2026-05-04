@@ -178,12 +178,12 @@ inline constexpr u8 kKlogCompileFloor = 1; // Debug — matches klog.h fallback
 // -----------------------------------------------------------------
 // KASLR — random-base kernel-image relocation at boot.
 //
-// Today this knob is a placeholder: the real KASLR pass is on
-// .claude/knowledge/post-debug-recommendations-plan.md. The flag is
-// in place so a future implementation can read from one source of
-// truth without touching every TU that wants to know "is my address
-// space randomized?". Defaults to ON in both flavors; flip OFF for
-// the rare reproducible-RIP debug session.
+// Today this knob is a placeholder: the real KASLR pass is roadmap
+// work (see wiki/reference/Roadmap.md). The flag is in place so a
+// future implementation can read from one source of truth without
+// touching every TU that wants to know "is my address space
+// randomized?". Defaults to ON in both flavors; flip OFF for the
+// rare reproducible-RIP debug session.
 // -----------------------------------------------------------------
 #ifdef DUETOS_KASLR
 inline constexpr bool kKaslrEnabled = (DUETOS_KASLR != 0);

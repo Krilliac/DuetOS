@@ -36,8 +36,9 @@
  * once each subsystem provides a setter; v0 only flips what's
  * already adjustable.
  *
- * See `.claude/knowledge/white-team-policy-engine-v0.md` for the
- * full rationale and the per-subsystem composition matrix.
+ * See wiki/security/Attack-Simulation.md (white-team policy
+ * engine) for the full rationale and the per-subsystem
+ * composition matrix.
  *
  * Context: kernel. Mode setters are task-context only — block
  * write-guard's setter logs at klog scope. Do NOT call PolicySet

@@ -44,7 +44,7 @@ Concrete rules every subsystem TU and userland DLL must follow:
 
 Violations of these rules are bugs even if they compile. If you find code that bypasses cap-gating or mutates kernel state from a subsystem, fix it — don't extend the violation. The reviewable signal: "could a malicious PE / ELF use this path to do something a native DuetOS process couldn't?" If yes, the gate is wrong, not the workload.
 
-See `.claude/knowledge/subsystem-isolation-decision-v0.md` for the full rationale and the audit checklist.
+The full rationale and the audit checklist live in [`wiki/kernel/Subsystem-Isolation.md`](wiki/kernel/Subsystem-Isolation.md).
 
 ## Session start (run at the beginning of every session)
 
@@ -52,13 +52,9 @@ See `.claude/knowledge/subsystem-isolation-decision-v0.md` for the full rational
 
 Sync your branch with the latest upstream `main` branch. This is the **first thing** to do — before reading code, before making changes, before anything else. Feature branches diverge as other PRs merge; without rebasing you'll be working on stale code.
 
-**Step 2 — Load persistent context:**
+**Step 2 — Read the wiki:**
 
-```bash
-cat .claude/index.md
-```
-
-Scan the index for topics relevant to the current task. Read those knowledge files before proceeding.
+The single canonical documentation home is [`wiki/`](wiki/). Start at [`wiki/Home.md`](wiki/Home.md) or [`wiki/_Sidebar.md`](wiki/_Sidebar.md) for the table of contents. Pending and deferred work lives in [`wiki/reference/Roadmap.md`](wiki/reference/Roadmap.md).
 
 **Step 3 — Bloat check (once the tree has real code):**
 
@@ -116,7 +112,7 @@ These are **guidelines for when to pause and think**, not absolute rules. A clea
 - **Zero warnings**: `-Wall -Wextra -Wpedantic -Werror` on GCC/Clang; `/W4 /WX` on MSVC.
 - **No naked `new`/`delete`** in portable code. Kernel allocations go through the slab/page allocators explicitly, never through a global `operator new`.
 - **No global mutable state** outside the kernel's explicit per-CPU areas. If something looks like a singleton, it is probably a per-CPU or per-process structure.
-- **Stub markers**: any handler / thunk / DLL function whose v0 implementation deliberately omits the real semantics carries a `// STUB:` comment on or immediately above the line that bakes in the omission. A handler that correctly implements its contract but with a known limitation carries `// GAP: <what's missing> — <when to revisit>`. Both forms are greppable: the audit cadence in `.claude/knowledge/stub-gap-inventory-v0.md` re-derives the inventory from `git grep -nE "// (STUB|GAP):"` once enough markers have landed to make the structural scan obsolete.
+- **Stub markers**: any handler / thunk / DLL function whose v0 implementation deliberately omits the real semantics carries a `// STUB:` comment on or immediately above the line that bakes in the omission. A handler that correctly implements its contract but with a known limitation carries `// GAP: <what's missing> — <when to revisit>`. Both forms are greppable: re-derive the live inventory with `git grep -nE "// (STUB|GAP):"`.
   - `// STUB:` — handler returns a constant / does nothing / returns `-ENOSYS` / returns the wrong target. Real callers WILL behave incorrectly. The marker stays until a real implementation lands.
   - `// GAP: <missing> — <revisit>` — handler is correct for the v0 happy path but a documented edge case is unimplemented (e.g. "no IPv6", "no LFN", "no oversize"). Real callers along the happy path work; the marker pins the known limit so a future audit can find it cheaply.
   - **Do not** pepper STUB/GAP markers on code that does its job — the convention exists to bound the gap inventory, not to annotate every line. If removing the marker wouldn't change a maintainer's belief about what works, don't write it.
@@ -192,8 +188,8 @@ tools/
   qemu/                   — QEMU launch scripts, debug helpers
   test/                   — Integration test harnesses
 tests/                    — Unit tests (hosted) + kernel self-tests (on-target)
-docs/                     — Architecture docs, ABI specs, design notes
-.claude/                  — Persistent AI context (this repo's memory)
+docs/                     — Misc docs not part of the wiki (boot-log examples, sync scripts)
+wiki/                     — Canonical documentation home (subsystem pages, specs, roadmap)
 ```
 
 ### Boot path (x86_64)
@@ -264,7 +260,7 @@ Count as "legitimately requires":
 Do NOT install for:
 
 - Pure refactors with no behavioural delta.
-- Docs / CLAUDE.md / `.claude/knowledge/` changes only.
+- Docs / CLAUDE.md / `wiki/` changes only.
 - Code that compiles but is not yet wired into any live path.
 
 After install, `DUETOS_TIMEOUT=20 tools/qemu/run.sh` is the
@@ -296,9 +292,9 @@ git rebase origin/main                         # if behind, rebase
 
 Run checks **appropriate to the files you changed**.
 
-### Docs-only changes (`.md`, `docs/`, `.claude/`)
+### Docs-only changes (`.md`, `docs/`, `wiki/`)
 
-Proofread. Run any doc generators that exist at the time.
+Proofread. Run any doc generators that exist at the time (`docs/sync-wiki.sh sync`, `tools/check-wiki-nav.sh`, `tools/check-wiki-quality.sh`).
 
 ### Code changes (`.h`, `.hpp`, `.c`, `.cpp`, `.rs`, `.asm`, `CMakeLists.txt`)
 
@@ -332,7 +328,7 @@ If any step fails, fix before committing. CI (once wired up) will enforce clang-
 
 After creating or pushing to a PR, **always** poll CI and fix failures before moving on. Use the GitHub MCP tools available in this environment — do not shell out to `gh`.
 
-See `.claude/knowledge/github-api-pr-checks.md` for the polling workflow and `.claude/knowledge/ci-reproducible-builds.md` (once written) for local reproduction commands.
+See [`wiki/tooling/Git-Workflow.md`](wiki/tooling/Git-Workflow.md) for the polling workflow.
 
 ## Stream Timeout Prevention
 
@@ -369,44 +365,35 @@ When diagnosing a bug you almost always end up adding fresh log lines to localis
 
 The contract: a clean boot stays quiet at default log levels; a regression boot leaves a WARN sentinel + a probe fire + DEBUG-gated detail behind it, all without an operator having to re-add print statements. If the diagnostic you're considering doesn't earn its place under those rules (one-shot value, not actionable, or already implied by an existing log), don't add it — but if it does, gate it and leave it in.
 
-## Persistence Context Database
+## Documentation home
 
-The `.claude/` directory is persistent AI memory — a knowledge base that Claude reads and writes across sessions. It captures issue fixes, effective workflows, optimizations, codebase observations, and project decisions. See `.claude/README.md` for entry format, rules, and directory structure.
+The single canonical documentation home is [`wiki/`](wiki/). Subsystem pages, specifications, the design-decisions log, the shell-command surface, and the project history all live there. The [`Sidebar`](wiki/_Sidebar.md) is the table of contents.
 
-### When to write a new entry
+### When to write a new wiki page
 
-| Trigger | Entry type |
-|---------|-----------|
-| A problem required multiple attempts to solve | **Issue** |
-| A workflow or approach proved consistently effective | **Pattern** |
-| A faster/better way to do something was discovered | **Optimization** |
-| A non-obvious codebase/tooling fact was discovered | **Observation** |
-| An architectural or style decision was made | **Decision** |
-| A multi-step / multi-session work plan was drafted | **Plan** |
+A new page is worth adding when:
 
-After writing, update `.claude/index.md` and commit both alongside code changes.
+- A new subsystem lands and is wired into the boot path.
+- A new driver class is added under `kernel/drivers/`.
+- A new userland Win32 DLL is added under `userland/libs/`.
+- A new specification (ABI, file format, protocol) is committed to the repo.
+- A standalone topic accumulates enough cross-page references that inlining everywhere is worse than one canonical page.
 
-### Plan files
+A new page is **not** the right answer when:
 
-Any plan that spans more than the current session — refactor sequences, multi-PR feature builds, deferred-task batches — must be persisted into `.claude/knowledge/<slug>-plan.md` and added to `.claude/index.md`. Harness-local plan files (under `/root/.claude/plans/`) do not survive a session boundary; the next session won't know the plan exists.
+- The topic is a one-paragraph addendum to an existing page — amend that page.
+- The topic is a transient TODO — add a row to [`wiki/reference/Roadmap.md`](wiki/reference/Roadmap.md) instead.
+- The topic is a one-off slice postmortem whose conclusions are already captured in the relevant subsystem page or in the commit message.
 
-A plan file owns three things:
+### Updating roadmap items
 
-1. **Status preamble** — a `## Status (YYYY-MM-DD)` block at the top with a "Landed" table (commit hash + effect) and a "Deferred" list. Update it in the same commit as the work that changes which items are landed vs. deferred. Never let the status drift behind the code.
-2. **Resume prompt** — a one-paragraph quote a fresh session can paste back to pick up where the last left off.
-3. **The plan itself** — the durable design content (file-by-file targets, conventions, verification steps, risk mitigations).
+When a slice lands an item from [`wiki/reference/Roadmap.md`](wiki/reference/Roadmap.md):
 
-Lifecycle rules:
-
-- **Mark off as you go.** Move a deferred item into the Landed table the moment its commit lands; do not batch updates across multiple commits.
-- **Delete only when fully done.** A plan file may be deleted only once every item in it is marked landed AND the plan generated no follow-up work that warrants its own entry. If any "deferred" entry, "follow-up", "out of scope but next time" item, or open question remains, the file stays.
-- **On deletion**, also remove its row from `.claude/index.md` in the same commit.
+1. **Delete its section** from the Roadmap in the same commit that delivers the code.
+2. **Update the owning subsystem page** (`wiki/<area>/...`) to reflect the new state.
+3. **Append to [`wiki/reference/Design-Decisions.md`](wiki/reference/Design-Decisions.md)** if the decision rules out an alternative the next slice could otherwise pick.
+4. **Update [`wiki/getting-started/History.md`](wiki/getting-started/History.md)** if the landing changes a project-level milestone.
 
 ### At session end
 
-Review whether anything learned warrants a new or updated entry — especially optimizations, patterns, and observations discovered incidentally. Positive learning is equally worth recording.
-
-**Rules:**
-- Do not exclude `.claude/` from `.promptignore`
-- Always commit context changes — future sessions on any branch benefit
-- Prefer updating an existing entry over creating a new one for the same topic
+If you discovered something that durably changes a wiki page (a new known-limit, a new threshold, a deprecation), update that page in the same commit as the code. Don't accumulate a separate notes file.

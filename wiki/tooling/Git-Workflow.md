@@ -40,7 +40,7 @@ git rebase origin/main                         # if behind, rebase
 
 Run checks **appropriate to the files you changed**.
 
-### Docs-only changes (`.md`, `docs/`, `.claude/`, `wiki/`)
+### Docs-only changes (`.md`, `docs/`, `wiki/`)
 
 Proofread. Run any doc generators that exist at the time:
 
@@ -87,16 +87,30 @@ file to `clang-format -i` — it will parse it as C++ and mangle it.
 
 After creating or pushing to a PR, **always** poll CI and fix failures
 before moving on. Use the GitHub MCP tools available in the
-harness — do not shell out to `gh`.
+harness — do not shell out to `gh`. The polling workflow is:
 
-See `.claude/knowledge/github-api-pr-checks.md` for the polling
-workflow.
+1. List recent runs (`mcp__github__list_*` for the workflow).
+2. Wait until the run completes (do not poll in tight loops; the
+   webhook subscription described in `CLAUDE.md` arrives without a
+   sleep).
+3. On failure, read the failed step's log via the GitHub MCP and
+   diagnose locally with the same commands the workflow runs.
 
 ## Conflict Resolution
 
-For rebase conflicts, see `.claude/knowledge/git-rebase-conflicts.md`
-— a curated list of conflict shapes seen in this repo and the
-canonical resolution for each.
+For rebase conflicts, the canonical recipe is:
+
+1. Stop on conflict; read each `<<<<<<< HEAD` block in turn.
+2. **Auto-generated sections** (`<!-- AUTO:* -->`): always take the
+   upstream side; they regenerate.
+3. **Knowledge / wiki cross-references**: usually take both — both
+   are append-only.
+4. **Code conflicts**: prefer behavioural correctness over syntactic
+   convenience; rerun the relevant self-test if the conflict is in a
+   covered path.
+
+Never use `git checkout --theirs` / `--ours` blanket-style across
+multiple files; review each.
 
 ## Related Pages
 

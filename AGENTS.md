@@ -5,10 +5,11 @@ Scope: entire repository (`DuetOS`).
 For every new session/chat in this repo:
 
 1. Read `CLAUDE.md` first.
-2. Then read `.claude/index.md`.
-3. Use those two files as persistent project context for workflow, conventions, and task execution.
+2. Then skim the wiki — start at `wiki/Home.md` or `wiki/_Sidebar.md` for the table of contents.
+3. Pending and deferred work is tracked in `wiki/reference/Roadmap.md`.
+4. Use `CLAUDE.md` plus the relevant wiki pages as persistent project context for workflow, conventions, and task execution.
 
-If either file is missing, report that clearly and continue with available context.
+If `CLAUDE.md` is missing, report that clearly and continue with available context.
 
 ## Project summary for agents
 

@@ -24,7 +24,7 @@ The dedicated `kernel/ipc/` directory is planned. Today, IPC primitives
 land per-subsystem as they're needed:
 
 - **Wait queues + mutexes**: `kernel/sched/sched.{h,cpp}` and
-  `kernel/sync/`. See `.claude/knowledge/sched-blocking-primitives-v0.md`.
+  `kernel/sync/`.
 - **Shared event syscalls** (Win32-shaped: `SYS_EVENT_*`,
   `SYS_MUTEX_*`, `SYS_TLS_*`): `kernel/syscall/syscall.cpp` plus the
   per-DLL stubs.

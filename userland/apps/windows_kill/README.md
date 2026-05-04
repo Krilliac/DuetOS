@@ -22,8 +22,8 @@ imports on boot, producing a concrete measurement of the gap
 between what we have (v0 freestanding-only) and what running a
 real Windows program would require.
 
-See `.claude/knowledge/pe-subsystem-v0.md` for the full
-analysis of the diagnostic output.
+See [Win32 PE Subsystem](../../../wiki/subsystems/Win32-PE-Subsystem.md)
+for the diagnostic output and the surrounding loader contract.
 
 ## Provenance
 

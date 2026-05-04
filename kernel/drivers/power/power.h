@@ -27,7 +27,7 @@
  *
  * Not in scope:
  *   - ACPI AML interpreter — the gate for real battery readings.
- *     docs/knowledge/ notes the future slice.
+ *     See wiki/reference/Roadmap.md ("Battery + ACPI suspend").
  *   - Embedded Controller (EC) access — laptop-specific SMBus or
  *     direct-IO interface that many devices use instead of AML
  *     methods. Requires vendor-specific quirks per laptop model.

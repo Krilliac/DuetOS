@@ -71,8 +71,11 @@ PCI_REGISTER_DRIVER("nvme", nvme_match, NvmeProbe);
 - **MSI/MSI-X**: capability list is parsed; full programming is
   driver-specific (NVMe and e1000 use MSI-X today).
 
-See `.claude/knowledge/pci-enum-v0.md` and
-`.claude/knowledge/gpu-discovery-v0.md` for the full bringup notes.
+GPU discovery uses class `0x03` (display controller). The probe
+records BAR0 (framebuffer), BAR2 (config / I/O), and the capability
+chain. Vendor classification (Intel iGPU / AMD GFX / NVIDIA) is by
+PCI vendor-ID bit pattern and used by [Graphics Drivers](Graphics-Drivers.md)
+to dispatch to the per-vendor probe.
 
 ## Related Pages
 

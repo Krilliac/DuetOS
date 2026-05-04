@@ -22,8 +22,9 @@ DUETOS_TIMEOUT=30 tools/qemu/run.sh build/x86_64-debug/duetos.iso
 The smoke harness was redesigned from a monolithic single-job into
 **per-profile parallel jobs** — each profile (BIOS+i440FX, BIOS+q35,
 UEFI+q35, virtio-gpu, e1000-net, etc.) runs in parallel, isolated
-from the others. See
-`.claude/knowledge/qemu-smoke-profile-matrix-v0.md`.
+from the others. Each profile reports its result through a
+structural sentinel (`[smoke] profile=<name> complete`) on the
+serial log so CI can grep the stream and assert pass/fail.
 
 The CTest entry point is:
 

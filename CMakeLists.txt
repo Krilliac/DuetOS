@@ -231,8 +231,8 @@ add_compile_definitions(DUETOS_KLOG_DEFAULT=${DUETOS_KLOG_DEFAULT})
 # KASLR — the kernel-image randomization pass at boot. ON in both
 # flavors by default, but flip-able for the rare debug session where
 # reproducible RIPs across reboots beat probabilistic protection.
-# (Today this is a placeholder define; the actual KASLR implementation
-# is tracked in .claude/knowledge/post-debug-recommendations-plan.md.)
+# (Today this is a placeholder define; the actual KASLR
+# implementation is tracked in wiki/reference/Roadmap.md.)
 option(DUETOS_KASLR
     "Randomize the kernel image base on boot (placeholder; ON by default)"
     ON)

@@ -68,6 +68,7 @@
 - [Duet Theme Spec](specifications/Duet-Theme-Spec.md)
 
 ### Reference
+- [Roadmap](reference/Roadmap.md)
 - [Design Decisions Log](reference/Design-Decisions.md)
 - [Directory Layout](reference/Directory-Layout.md)
 - [Knowledge Base Index](reference/Knowledge-Base-Index.md)

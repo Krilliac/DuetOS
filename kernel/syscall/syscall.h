@@ -560,8 +560,7 @@ enum SyscallNumber : u64
     // implemented).
     //
     // Part of the DLL-loader work. Replaces the
-    // return-zero GetProcAddress stub. See
-    // .claude/knowledge/pe-eat-dll-loader-v0.md.
+    // return-zero GetProcAddress stub.
     SYS_DLL_PROC_ADDRESS = 57,
 
     // Windowing family — bridge user32.dll's CreateWindowExA/W /

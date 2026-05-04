@@ -79,7 +79,22 @@ current task to the tail and pop the head.
 
 `SchedSleepTicks`, `WaitQueue`, and `Mutex` were added on top of the
 core scheduler. They share the task state machine but have their own
-invariants. See `.claude/knowledge/sched-blocking-primitives-v0.md`.
+invariants:
+
+- `SchedSleepTicks(n)` enqueues the current task on a sleep timer
+  list, blocks, and is woken by the timer IRQ when its deadline
+  expires.
+- `WaitQueue::Block` enqueues the current task on a queue and yields;
+  `WaitQueue::WakeOne` / `WakeAll` move tasks back to the runqueue.
+- `Mutex` is implemented over `WaitQueue` — uncontended fast path is
+  a CAS, contended path blocks on the queue.
+- `WaitQueueBlockTimeout(deadline_ticks)` couples the two: woken
+  whichever fires first (signal vs timeout). Used by driver
+  command-completion paths.
+
+The contract: every block-yields-to-scheduler primitive must clear
+`Running` before pushing onto a wait list, and the corresponding wake
+must transition `Ready` and re-enqueue.
 
 ## Known Limits / GAPs
 

@@ -121,7 +121,7 @@ const char* FaultReactionName(FaultReaction r)
 FaultReaction DefaultReactionPolicy(const FaultEvidence& ev)
 {
     // Conservative defaults — every entry is documented in
-    // docs/knowledge/runtime-recovery-strategy.md (Class A-F).
+    // wiki/security/Runtime-Recovery.md (Class A-F).
     // Subsystems that want different behaviour register an
     // override via FaultReactSetPolicy.
     switch (ev.kind)

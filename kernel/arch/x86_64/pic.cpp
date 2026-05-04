@@ -36,9 +36,8 @@ void PicDisable()
     // is implementation-defined: some 8259 variants and some QEMU TCG
     // configurations have been observed to deliver a held line to the
     // PRE-init vector base. If that base is 0 (firmware never programmed
-    // it), the IRQ lands at vector 0 = #DE handler. This is the root
-    // cause of the CI flake captured in
-    // `.claude/knowledge/qemu-smoke-pic-de-flake-v0.md`.
+    // it), the IRQ lands at vector 0 = #DE handler. This was the root
+    // cause of an early CI flake on QEMU TCG.
     //
     // Defence: hard-mask interrupts at the CPU level for the entire
     // sequence, AND mask every line at the chip level BEFORE the init

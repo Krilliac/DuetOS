@@ -22,8 +22,7 @@ walker:
   embedded extent header.
 
 GAP: depth > 0 extent tree walks (large files with many extents,
-indirect blocks). See the ext4 entry in
-`.claude/knowledge/deferred-task-batch-2026-04-25.md`.
+indirect blocks) — see [Roadmap](../reference/Roadmap.md#ext4-leaf-extent-depth--0).
 
 ## Root Directory Walk
 

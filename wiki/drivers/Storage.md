@@ -40,8 +40,6 @@ sectors at LBA" interface.
 Plenty of headroom for a real interrupt-driven path; deferred until
 real workloads make polling expensive.
 
-See `.claude/knowledge/nvme-driver-v0.md`.
-
 ## AHCI v0
 
 `kernel/drivers/storage/ahci/`.
@@ -53,7 +51,7 @@ See `.claude/knowledge/nvme-driver-v0.md`.
 
 ## GPT v0
 
-`kernel/fs/gpt.{h,cpp}` (see `.claude/knowledge/gpt-parser-v0.md`).
+`kernel/fs/gpt.{h,cpp}` — see [GPT](../filesystem/GPT.md).
 
 - Validates the protective MBR.
 - Parses the primary GPT header + entry array, CRC-validated.
@@ -67,7 +65,7 @@ See `.claude/knowledge/nvme-driver-v0.md`.
   the 8.3 name).
 - **ext4**: read path live. Root-dir walk iterates every leaf-extent
   block; depth>0 extent-tree walk still deferred (see
-  `.claude/knowledge/deferred-task-batch-2026-04-25.md`).
+  [Roadmap](../reference/Roadmap.md#ext4-leaf-extent-depth--0)).
 - **NTFS**: read-only tier in progress.
 - **ramfs**: in-memory tree used as the boot root and per-process
   jail.

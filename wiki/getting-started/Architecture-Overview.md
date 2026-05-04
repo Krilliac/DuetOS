@@ -373,8 +373,12 @@ The repository keeps CI/release automation in-tree as the source of truth:
     the tally before the asset object is replaced
   - Also runs on a 30-minute schedule to catch organic downloads
     between publishes
-  - Rationale + delta arithmetic in
-    `.claude/knowledge/lifetime-downloads-tally-v0.md`
+  - Rationale: each release publish swaps the asset object, so any
+    downloads accrued on the asset that's about to be replaced have
+    to be folded into the persistent tally first; the workflow reads
+    the per-asset `download_count` via the GitHub API, sums across
+    every channel, deltas against the last recorded value, and
+    commits the new total to the `stats` branch.
 
 Artifact channels are intentionally split:
 

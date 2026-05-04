@@ -23,8 +23,8 @@ on:
     paths-ignore:
       - '**/*.md'
       - 'LICENSE'
-      - '.claude/**'
       - 'docs/**'
+      - 'wiki/**'
   pull_request:
     branches: [main]
 

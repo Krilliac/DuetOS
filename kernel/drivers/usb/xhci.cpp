@@ -22,8 +22,7 @@
  *   Class-driver dispatch is by USB class code in the device
  *   descriptor; first match wins, no driver loops. Bulk
  *   transfer concurrency is serialised today (one outstanding
- *   per device) to avoid a TRB-queue race noted in
- *   .claude/knowledge/usb-rndis-driver-v0.md.
+ *   per device) to avoid a TRB-queue race.
  *
  * WHY THIS FILE IS LARGE
  *   xHCI is intricate — context arrays, TRB types, ring

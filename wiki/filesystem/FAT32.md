@@ -42,8 +42,11 @@ the standard manner. The driver reads the FAT in 4 KiB chunks
   interoperability — exFAT is a separate code path and a separate
   slice.
 
-See the FAT32 LFN-checksum entry in
-`.claude/knowledge/deferred-task-batch-2026-04-25.md`.
+The kernel-side write API has landed (`Fat32WriteInPlace`,
+`Fat32AppendAtPath`, `Fat32CreateAtPath`, `Fat32DeleteAtPath`,
+`Fat32RenameAtPath`) and is exercised by Notes / Files / Screenshot /
+session restore. Mid-file writes that grow a cluster chain are still
+roadmap work — see [Roadmap](../reference/Roadmap.md).
 
 ## Related Pages
 

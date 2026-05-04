@@ -41,11 +41,10 @@
  * needs to know which it's running on before deciding to land
  * software mitigations like KPTI / SSBD / TAA-flush.
  *
- * See `.claude/knowledge/kpti-meltdown-investigation-v0.md` for
- * the project's recorded position on KPTI itself: the mitigation
- * is not implemented; this probe surfaces the question so the
- * follow-up implementation can branch on a real signal rather
- * than a hard-coded assumption.
+ * See wiki/security/WX-Enforcement.md for the project's recorded
+ * position on KPTI itself: the mitigation is not implemented; this
+ * probe surfaces the question so the follow-up implementation can
+ * branch on a real signal rather than a hard-coded assumption.
  */
 
 namespace duetos::arch

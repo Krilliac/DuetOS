@@ -28,8 +28,8 @@
  * raise EventKind Y, attack Z SHOULD raise EventKind W") once
  * runtime_checker.cpp publishes EventKind-labelled events.
  *
- * See `.claude/knowledge/purple-team-coverage-scorecard-v0.md`
- * for the full design.
+ * See wiki/security/Attack-Simulation.md (purple-team coverage
+ * scorecard) for the full design.
  *
  * Context: kernel. Same constraints as AttackSimRun — task
  * context only.

@@ -73,8 +73,6 @@ See [Capabilities](../security/Capabilities.md).
   need a real mount table.
 - **No file caching layer** between VFS and FS backends.
 
-See `.claude/knowledge/vfs-namespace-v0.md` for the v0 bringup notes.
-
 ## Related Pages
 
 - [FAT32](FAT32.md)

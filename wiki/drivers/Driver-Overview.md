@@ -29,6 +29,22 @@ directly.
 | Video | `kernel/drivers/video/` | Framebuffer, compositor primitives, theme |
 | Power | `kernel/drivers/power/` | Reboot / shutdown |
 
+## Hardware Target Matrix
+
+The kernel uses these tiers for vendor matching across drivers; per
+class, tier 1 is the "must work" target, tier 2 the "nice to have",
+tier 3 the dev/QEMU-only path.
+
+| Class | Tier 1 | Tier 2 | Tier 3 (dev) |
+|-------|--------|--------|--------------|
+| CPU | Intel x86_64 (Coffee Lake → Sapphire Rapids), AMD Zen+ | Intel pre-Coffee Lake, AMD pre-Zen+ | QEMU TCG |
+| GPU | Intel iGPU (Gen9+), AMD Radeon (GFX9+), NVIDIA (Turing+) | Older Intel/AMD/NVIDIA | virtio-gpu |
+| NIC | Intel e1000 / e1000e | Realtek rtl8169, Broadcom bcm57xx | virtio-net |
+| Wi-Fi | iwlwifi (Intel), rtl88xx, bcm43xx | (none yet) | (none) |
+| USB | xHCI 1.0+ | EHCI (legacy fallback) | (none) |
+| Storage | NVMe, AHCI/SATA | (legacy IDE deferred) | virtio-blk |
+| Audio | Intel HDA | AC'97 (deferred) | (none) |
+
 ## Driver Lifecycle
 
 1. **Bus enumeration** discovers candidate devices (PCI walks the bus,

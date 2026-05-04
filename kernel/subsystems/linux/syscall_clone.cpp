@@ -254,7 +254,7 @@ i64 DoFork()
     // Zero-init: KMalloc returns 0xDE-poisoned bytes; any field
     // not assigned below would carry the poison. Same pattern as
     // ProcessCreate / SchedCreateInternal / AddressSpaceCreate.
-    // See .claude/knowledge/kmalloc-zero-init-pattern.md.
+    // See wiki/tooling/Coding-Standards.md (kmalloc zero-init).
     memset(desc, 0, sizeof(LinuxCloneDesc));
     desc->user_rip = parent_tf->rip;
     desc->user_rsp = parent_tf->rsp;
@@ -320,7 +320,8 @@ i64 DoClone(u64 flags, u64 child_stack, u64 ptid_user, u64 ctid_user, u64 tls)
     auto* desc = static_cast<LinuxCloneDesc*>(mm::KMalloc(sizeof(LinuxCloneDesc)));
     if (desc == nullptr)
         return kENOMEM;
-    // Zero-init — see .claude/knowledge/kmalloc-zero-init-pattern.md.
+    // Zero-init — KMalloc returns poisoned bytes (see
+    // wiki/tooling/Coding-Standards.md).
     memset(desc, 0, sizeof(LinuxCloneDesc));
     desc->user_rip = parent_tf->rip;
     desc->user_rsp = child_stack;

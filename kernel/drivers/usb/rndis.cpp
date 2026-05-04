@@ -17,8 +17,7 @@
  *   packet inside a `RNDIS_PACKET_MSG` header; the framer/
  *   deframer lives here.
  *
- *   A bulk-poll serialisation gap is documented in
- *   .claude/knowledge/usb-rndis-driver-v0.md — multiple in-flight
+ *   A bulk-poll serialisation gap remains: multiple in-flight
  *   bulk transfers race on the xHCI TRB queue. Until that's
  *   fixed, RX is one-at-a-time.
  */

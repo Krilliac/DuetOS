@@ -33,7 +33,14 @@ window.
 Used as the default input device when `-machine` doesn't expose USB
 HID (e.g. some legacy QEMU configurations).
 
-See `.claude/knowledge/ps2-keyboard-v0.md`.
+The PS/2 driver also runs an in-driver scan-code-set-1 → ASCII
+translator over the existing raw byte ring. `Ps2KeyboardReadChar`
+drains scan codes in task context, handles make/break edges, tracks
+LShift/RShift + Caps Lock, consumes 0xE0-prefixed extended scans
+silently, and returns only on a real press resolving to a printable
+US-QWERTY character. The IRQ path and `Ps2KeyboardRead` (raw bytes)
+remain untouched for any future consumer that needs set-2 decoding,
+debugger-side view, or alternate keymap.
 
 ## USB HID Boot Keyboard
 
@@ -41,8 +48,6 @@ See `.claude/knowledge/ps2-keyboard-v0.md`.
 
 - 8-byte boot-protocol HID report decoded into key events.
 - Routes events into the same queue PS/2 uses.
-
-See `.claude/knowledge/xhci-hid-keyboard-v0.md`.
 
 ## Mouse
 

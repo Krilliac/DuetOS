@@ -52,8 +52,7 @@ holds:
 - Try a kernel-shellcode write into a `.text` page -- expect SMEP/SMAP
   trap.
 
-See [Attack Simulation](Attack-Simulation.md) and
-`.claude/knowledge/dep-nx-v0.md`.
+See [Attack Simulation](Attack-Simulation.md).
 
 ## Related Defences
 
@@ -67,7 +66,7 @@ See [Attack Simulation](Attack-Simulation.md) and
 | ASLR | On (per-process) | `AddressSpace` image-load offset |
 | Stack canary | On | Compiler-emitted; `__stack_chk_fail` panic |
 | CFI / retpoline | On | Compiler flags |
-| KPTI | Deferred | See `.claude/knowledge/kpti-meltdown-investigation-v0.md` |
+| KPTI | Settled — not implemented | Every target CPU reports `RDCL_NO=1` in silicon; KPTI would be a 5–30% syscall cost mitigating an attack the hardware already prevents. Runtime probe (`arch::CpuMitigationsGet().needs_kpti`) is in tree; on a `RDCL_NO=0` boot the probe emits a loud serial WARN block. See [Roadmap](../reference/Roadmap.md#kpti-enable-settled--deferred). |
 
 ## Known Limits / GAPs
 
@@ -75,10 +74,9 @@ See [Attack Simulation](Attack-Simulation.md) and
   today. That's a documented W^X gap on the kernel image itself,
   scheduled to fix when kernel `.text` moves to managed 4 KiB
   mappings (the gate that enables splitting PS pages without
-  hurting boot direct-map performance). Tracked in
-  `.claude/knowledge/paging-v0.md` Notes.
-- **KPTI** is deferred — see the Meltdown investigation entry. Not a
-  W^X issue per se but listed here for the layered-defence picture.
+  hurting boot direct-map performance).
+- **KPTI** is settled-not-implemented (see table above). Not a W^X
+  issue per se but listed for the layered-defence picture.
 
 ## Related Pages
 
