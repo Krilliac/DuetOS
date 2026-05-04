@@ -383,43 +383,311 @@ __declspec(dllexport) BOOL InternetReadFileExW(HANDLE h, void* buffers, DWORD fl
     return InternetReadFileExA(h, buffers, flags, ctx);
 }
 
-/* InternetGetCookieA / W — cookie cache. v0 reports "no cookie". */
+/* InternetGetCookieA / W + InternetSetCookieA / W — in-memory
+ * cookie store backing the four classic cookie APIs. v0 keeps a
+ * fixed-size table (16 entries × 256 chars) shared across the
+ * whole process — sufficient for the sites the boot HTTP smoke
+ * exercises and a small browser flow. Real browsers persist
+ * cookies to disk across runs and partition them per profile;
+ * this is in-memory only and clears at process exit.
+ *
+ * Lookup matches on host + name (case-insensitive on host as
+ * RFC 6265 requires); LRU eviction when full. Path / domain /
+ * Secure / HttpOnly / SameSite attributes are dropped — Set
+ * just stashes the (host, name, value) triple. Real cookie
+ * scoping needs a follow-up. */
+
+#define COOKIE_TABLE_ENTRIES 16
+#define COOKIE_HOST_BYTES 64
+#define COOKIE_NAME_BYTES 32
+#define COOKIE_VALUE_BYTES 192
+
+typedef struct
+{
+    char host[COOKIE_HOST_BYTES];
+    char name[COOKIE_NAME_BYTES];
+    char value[COOKIE_VALUE_BYTES];
+    DWORD lru_seq; // higher = more recent
+    BOOL in_use;
+} CookieEntry;
+
+static CookieEntry g_cookie_table[COOKIE_TABLE_ENTRIES] = {0};
+static DWORD g_cookie_lru_counter = 0;
+
+/* ASCII-lowercase a single byte. */
+static char wininet_tolower_byte(char c)
+{
+    if (c >= 'A' && c <= 'Z')
+        return (char)(c - 'A' + 'a');
+    return c;
+}
+
+/* Case-insensitive compare on hostnames. Returns 0 if equal. */
+static int wininet_host_eq(const char* a, const char* b)
+{
+    while (*a || *b)
+    {
+        if (wininet_tolower_byte(*a) != wininet_tolower_byte(*b))
+            return 0;
+        ++a;
+        ++b;
+    }
+    return 1;
+}
+
+/* Extract the host component from a URL like
+ *   "http://host.com:80/path?q"
+ *   "https://user@host.com/path"
+ * into `out` (NUL-terminated, max `out_max - 1` chars). Returns
+ * 1 on success, 0 if the URL is malformed (no scheme separator). */
+static int wininet_extract_host(const char* url, char* out, DWORD out_max)
+{
+    if (!url || !out || out_max == 0)
+        return 0;
+    /* Skip the scheme: search for "://". */
+    const char* p = url;
+    const char* sep = (const char*)0;
+    for (; *p; ++p)
+    {
+        if (p[0] == ':' && p[1] == '/' && p[2] == '/')
+        {
+            sep = p + 3;
+            break;
+        }
+    }
+    if (!sep)
+        return 0;
+    /* Skip optional userinfo "user@" prefix. */
+    const char* host_start = sep;
+    for (const char* q = sep; *q && *q != '/' && *q != '?' && *q != '#'; ++q)
+    {
+        if (*q == '@')
+        {
+            host_start = q + 1;
+            break;
+        }
+    }
+    /* Copy until '/', '?', '#', ':' (port), or NUL. */
+    DWORD i = 0;
+    for (; host_start[i] && i + 1 < out_max; ++i)
+    {
+        const char c = host_start[i];
+        if (c == '/' || c == '?' || c == '#' || c == ':')
+            break;
+        out[i] = c;
+    }
+    out[i] = 0;
+    return i > 0;
+}
+
+/* Find a matching slot. Returns slot index or -1. */
+static int wininet_cookie_find(const char* host, const char* name)
+{
+    for (int i = 0; i < COOKIE_TABLE_ENTRIES; ++i)
+    {
+        if (!g_cookie_table[i].in_use)
+            continue;
+        if (!wininet_host_eq(g_cookie_table[i].host, host))
+            continue;
+        /* Cookie names are case-sensitive per RFC 6265. */
+        const char* a = g_cookie_table[i].name;
+        const char* b = name;
+        BOOL eq = 1;
+        while (*a || *b)
+        {
+            if (*a != *b)
+            {
+                eq = 0;
+                break;
+            }
+            ++a;
+            ++b;
+        }
+        if (eq)
+            return i;
+    }
+    return -1;
+}
+
+/* Find the least-recently-used (or unused) slot. */
+static int wininet_cookie_evict_target(void)
+{
+    int oldest = 0;
+    for (int i = 0; i < COOKIE_TABLE_ENTRIES; ++i)
+    {
+        if (!g_cookie_table[i].in_use)
+            return i;
+        if (g_cookie_table[i].lru_seq < g_cookie_table[oldest].lru_seq)
+            oldest = i;
+    }
+    return oldest;
+}
+
+/* Strict copy + truncate. Returns bytes written excluding NUL. */
+static DWORD wininet_str_copy_capped(char* dst, DWORD dst_max, const char* src)
+{
+    if (dst_max == 0)
+        return 0;
+    DWORD i = 0;
+    for (; src[i] && i + 1 < dst_max; ++i)
+        dst[i] = src[i];
+    dst[i] = 0;
+    return i;
+}
+
+/* Parse "name=value" out of `data`. The caller pre-extracts name
+ * via the explicit `name` arg; otherwise we split at the first
+ * '=' in `data`. Returns 1 on success. */
+static int wininet_parse_namevalue(const char* data, char* name_buf, DWORD name_max, char* value_buf, DWORD value_max)
+{
+    if (!data)
+        return 0;
+    const char* eq = (const char*)0;
+    for (const char* p = data; *p; ++p)
+    {
+        if (*p == '=')
+        {
+            eq = p;
+            break;
+        }
+    }
+    if (!eq)
+    {
+        /* No '=': treat the whole `data` as the value. */
+        if (name_max > 0)
+            name_buf[0] = 0;
+        wininet_str_copy_capped(value_buf, value_max, data);
+        return 1;
+    }
+    DWORD n = 0;
+    for (const char* p = data; p < eq && n + 1 < name_max; ++p, ++n)
+        name_buf[n] = *p;
+    name_buf[n] = 0;
+    wininet_str_copy_capped(value_buf, value_max, eq + 1);
+    return 1;
+}
+
 __declspec(dllexport) BOOL InternetGetCookieA(const char* url, const char* name, char* data, DWORD* size)
 {
-    (void)url;
-    (void)name;
-    if (data && size && *size > 0)
-        data[0] = 0;
-    if (size)
+    char host[COOKIE_HOST_BYTES];
+    if (!wininet_extract_host(url, host, sizeof(host)))
+        return 0;
+    if (!size)
+        return 0;
+    /* Look up the named cookie for this host. */
+    const int slot = (name && *name) ? wininet_cookie_find(host, name) : -1;
+    if (slot < 0)
+    {
+        /* No name → concatenate all cookies for the host. v0
+         * scope skips the concat path and returns "no cookie";
+         * a real browser would build "name1=value1; name2=value2"
+         * here. */
+        if (data && *size > 0)
+            data[0] = 0;
         *size = 0;
-    return 0;
+        return 0;
+    }
+    g_cookie_table[slot].lru_seq = ++g_cookie_lru_counter;
+    const DWORD wrote = wininet_str_copy_capped(data, *size, g_cookie_table[slot].value);
+    *size = wrote;
+    return data != (char*)0;
 }
 
 __declspec(dllexport) BOOL InternetGetCookieW(const wchar_t16* url, const wchar_t16* name, wchar_t16* data, DWORD* size)
 {
-    (void)url;
-    (void)name;
-    if (data && size && *size > 0)
-        data[0] = 0;
+    /* Flatten the wide URL + name to ASCII (cookies in v0 are
+     * ASCII-only — international domain names go through Punycode
+     * before reaching here in real browsers). */
+    char url_a[256] = {0};
+    char name_a[COOKIE_NAME_BYTES] = {0};
+    if (url)
+    {
+        DWORD i = 0;
+        for (; url[i] && i + 1 < sizeof(url_a); ++i)
+            url_a[i] = (char)(url[i] & 0xFF);
+    }
+    if (name)
+    {
+        DWORD i = 0;
+        for (; name[i] && i + 1 < sizeof(name_a); ++i)
+            name_a[i] = (char)(name[i] & 0xFF);
+    }
+    char value_a[COOKIE_VALUE_BYTES] = {0};
+    DWORD asize = sizeof(value_a);
+    const BOOL ok = InternetGetCookieA(url_a, name_a[0] ? name_a : (const char*)0, value_a, &asize);
     if (size)
-        *size = 0;
-    return 0;
+    {
+        if (data && *size > 0)
+        {
+            DWORD i = 0;
+            for (; i < asize && i + 1 < *size; ++i)
+                data[i] = (wchar_t16)(unsigned char)value_a[i];
+            data[i] = 0;
+            *size = i;
+        }
+        else
+        {
+            *size = asize;
+        }
+    }
+    return ok;
 }
 
 __declspec(dllexport) BOOL InternetSetCookieA(const char* url, const char* name, const char* data)
 {
-    (void)url;
-    (void)name;
-    (void)data;
+    char host[COOKIE_HOST_BYTES];
+    if (!wininet_extract_host(url, host, sizeof(host)))
+        return 0;
+    if (!data)
+        return 0;
+    char name_buf[COOKIE_NAME_BYTES] = {0};
+    char value_buf[COOKIE_VALUE_BYTES] = {0};
+    if (name && *name)
+    {
+        wininet_str_copy_capped(name_buf, sizeof(name_buf), name);
+        wininet_str_copy_capped(value_buf, sizeof(value_buf), data);
+    }
+    else
+    {
+        wininet_parse_namevalue(data, name_buf, sizeof(name_buf), value_buf, sizeof(value_buf));
+    }
+    /* If a cookie with the same (host, name) exists, overwrite
+     * its value; otherwise pick the LRU slot. */
+    int slot = wininet_cookie_find(host, name_buf);
+    if (slot < 0)
+        slot = wininet_cookie_evict_target();
+    wininet_str_copy_capped(g_cookie_table[slot].host, sizeof(g_cookie_table[slot].host), host);
+    wininet_str_copy_capped(g_cookie_table[slot].name, sizeof(g_cookie_table[slot].name), name_buf);
+    wininet_str_copy_capped(g_cookie_table[slot].value, sizeof(g_cookie_table[slot].value), value_buf);
+    g_cookie_table[slot].in_use = 1;
+    g_cookie_table[slot].lru_seq = ++g_cookie_lru_counter;
     return 1;
 }
 
 __declspec(dllexport) BOOL InternetSetCookieW(const wchar_t16* url, const wchar_t16* name, const wchar_t16* data)
 {
-    (void)url;
-    (void)name;
-    (void)data;
-    return 1;
+    char url_a[256] = {0};
+    char name_a[COOKIE_NAME_BYTES] = {0};
+    char data_a[COOKIE_VALUE_BYTES + COOKIE_NAME_BYTES + 4] = {0};
+    if (url)
+    {
+        DWORD i = 0;
+        for (; url[i] && i + 1 < sizeof(url_a); ++i)
+            url_a[i] = (char)(url[i] & 0xFF);
+    }
+    if (name)
+    {
+        DWORD i = 0;
+        for (; name[i] && i + 1 < sizeof(name_a); ++i)
+            name_a[i] = (char)(name[i] & 0xFF);
+    }
+    if (data)
+    {
+        DWORD i = 0;
+        for (; data[i] && i + 1 < sizeof(data_a); ++i)
+            data_a[i] = (char)(data[i] & 0xFF);
+    }
+    return InternetSetCookieA(url_a, name_a[0] ? name_a : (const char*)0, data_a);
 }
 
 __declspec(dllexport) BOOL InternetGetCookieExA(const char* url, const char* name, char* data, DWORD* size, DWORD flags,

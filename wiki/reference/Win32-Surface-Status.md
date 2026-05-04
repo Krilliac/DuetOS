@@ -596,7 +596,15 @@ canned values for username / domain / station). The rest STUB.
 — REAL for HTTP/1.0 + simple Content-Length flow.
 
 `InternetWriteFile` — GAP (no chunked POST). FTP family — STUB.
-Cookie family (`InternetGetCookieA/W`) — STUB.
+Cookie family (`InternetGetCookieA/W` /
+`InternetSetCookieA/W` / their `Ex*` variants) — REAL via a
+small in-process cookie store: a 16-entry LRU table of
+`(host, name, value)` triples, host extracted from the URL by
+parsing `scheme://[userinfo@]host[:port]/...`, host compare
+case-insensitive per RFC 6265. Path / domain / Secure /
+HttpOnly / SameSite attributes are dropped — Set just stashes
+the triple. Cleared at process exit (no on-disk
+persistence).
 
 ### winhttp.dll  (~690 LOC, ~35 exports)
 
