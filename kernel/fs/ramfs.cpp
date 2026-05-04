@@ -36,6 +36,14 @@
 // from userland/apps/seven_zip/7za.exe.
 #include "generated_sevenzip_pe.h"
 
+// busybox-w32 x64 (717 KiB, 313 imports) — embedded from
+// userland/apps/busybox/busybox64.exe.
+#include "generated_busybox_pe.h"
+
+// NASM 2.16.03 x64 (1.57 MiB, 117 imports, UCRT-based) —
+// embedded from userland/apps/nasm/nasm.exe.
+#include "generated_nasm_pe.h"
+
 /*
  * Seed trees are declared at file scope as constinit data so the
  * whole structure lives in .rodata. Children arrays are similarly
@@ -469,6 +477,30 @@ constinit RamfsNode k_trusted_bin_sevenzip = {
     .file_size = generated::kBinSevenZipBytes_len,
 };
 
+// /bin/busybox64.exe — busybox-w32 x64 (717 KiB, 313 imports
+// across 5 DLLs). Second "really complicated" PE — complementary
+// to 7-Zip's compression codepaths; exercises a much heavier
+// msvcrt surface (147 imports vs 7za's 38) plus WS2_32.
+constinit RamfsNode k_trusted_bin_busybox = {
+    .name = "busybox64.exe",
+    .type = RamfsNodeType::kFile,
+    .children = nullptr,
+    .file_bytes = generated::kBinBusyBoxBytes,
+    .file_size = generated::kBinBusyBoxBytes_len,
+};
+
+// /bin/nasm.exe — NASM 2.16.03 x64 (1.57 MiB, 117 imports
+// against the modern UCRT apisets). Complementary to 7-Zip
+// (msvcrt) and busybox (MinGW msvcrt) — exercises the
+// api-ms-win-crt-* surface that current MSVC builds emit.
+constinit RamfsNode k_trusted_bin_nasm = {
+    .name = "nasm.exe",
+    .type = RamfsNodeType::kFile,
+    .children = nullptr,
+    .file_bytes = generated::kBinNasmBytes,
+    .file_size = generated::kBinNasmBytes_len,
+};
+
 constinit RamfsNode k_trusted_bin_hello_winapi = {
     .name = "hello_winapi.exe",
     .type = RamfsNodeType::kFile,
@@ -529,9 +561,10 @@ constinit RamfsNode k_trusted_bin_usershell = {
 
 constinit const RamfsNode* const k_trusted_bin_children[] = {
     &k_trusted_bin_hello,          &k_trusted_bin_exit_elf,       &k_trusted_bin_hello_pe,
-    &k_trusted_bin_winkill,        &k_trusted_bin_sevenzip,       &k_trusted_bin_hello_winapi,
-    &k_trusted_bin_thread_stress,  &k_trusted_bin_syscall_stress, &k_trusted_bin_customdll_test,
-    &k_trusted_bin_windowed_hello, &k_trusted_bin_usershell,      nullptr,
+    &k_trusted_bin_winkill,        &k_trusted_bin_sevenzip,       &k_trusted_bin_busybox,
+    &k_trusted_bin_nasm,           &k_trusted_bin_hello_winapi,   &k_trusted_bin_thread_stress,
+    &k_trusted_bin_syscall_stress, &k_trusted_bin_customdll_test, &k_trusted_bin_windowed_hello,
+    &k_trusted_bin_usershell,      nullptr,
 };
 
 constinit RamfsNode k_trusted_bin_dir = {

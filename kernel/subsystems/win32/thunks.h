@@ -182,6 +182,14 @@ bool Win32ThunksLookupCatchAll(u64* out_va);
 /// the miss-logger and data imports don't.
 bool Win32ThunksLookupDataCatchAll(u64* out_va);
 
+/// Per-name override for well-known CRT data globals (`__argv`,
+/// `__argc`, `_acmdln`, `_wcmdln`). Returns the proc-env page
+/// slot that holds the populated value, so the CRT's `argv =
+/// *(char***)&__argv;` pattern reads a real argv pointer instead
+/// of zero. Returns false for any name the override table doesn't
+/// know — caller falls through to `Win32ThunksLookupDataCatchAll`.
+bool Win32ThunksLookupDataNamed(const char* func, u64* out_va);
+
 /// Heuristic: does the mangled import name look like a DATA import
 /// rather than a function import? Used by the PE loader to pick
 /// between the two catch-all helpers when an import name isn't in

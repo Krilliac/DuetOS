@@ -122,6 +122,8 @@
 #include "generated_wininet_smoke_pe.h"
 #include "generated_winkill_pe.h"
 #include "generated_sevenzip_pe.h"
+#include "generated_busybox_pe.h"
+#include "generated_nasm_pe.h"
 #include "generated_atom_smoke_pe.h"
 #include "generated_console_smoke_pe.h"
 #include "generated_critsec_smoke_pe.h"
@@ -2959,6 +2961,26 @@ void StartRing3SmokeTask()
     if (::duetos::test::SmokeProfileShouldSpawn(::duetos::test::SmokeTarget::PeSevenZip))
     {
         SpawnPeFile("ring3-7za", fs::generated::kBinSevenZipBytes, fs::generated::kBinSevenZipBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    }
+    // busybox-w32 x64 — the second "really complicated" PE.
+    // 717 KiB, 313 imports across msvcrt / KERNEL32 / WS2_32 /
+    // ADVAPI32 / USER32. Heavy POSIX-style CRT surface (147
+    // msvcrt entries) complementary to 7-Zip's compression
+    // codepaths. With no args, busybox prints its applet list.
+    if (::duetos::test::SmokeProfileShouldSpawn(::duetos::test::SmokeTarget::PeBusyBox))
+    {
+        SpawnPeFile("ring3-busybox", fs::generated::kBinBusyBoxBytes, fs::generated::kBinBusyBoxBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    }
+    // NASM 2.16.03 x64 — the third "really complicated" PE.
+    // 1.57 MiB, 117 imports against the modern UCRT apisets
+    // (api-ms-win-crt-stdio/runtime/string/heap/...). With no
+    // args, NASM prints "type `nasm -h' for help". Complementary
+    // to 7-Zip (msvcrt) and busybox (MinGW msvcrt).
+    if (::duetos::test::SmokeProfileShouldSpawn(::duetos::test::SmokeTarget::PeNasm))
+    {
+        SpawnPeFile("ring3-nasm", fs::generated::kBinNasmBytes, fs::generated::kBinNasmBytes_len,
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     }
     // mini_browser.exe — minimal WinSock 2 PE that does an HTTP/1.0

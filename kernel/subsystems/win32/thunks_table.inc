@@ -1105,6 +1105,30 @@
     {"msvcrt.dll", "fputc", kOffFputc}, // returns c (not 0) so help-print continues
     {"msvcrt.dll", "putchar", kOffFputc}, {"msvcrt.dll", "fflush", kOffReturnZero},
     {"msvcrt.dll", "fgetc", kOffReturnMinus1}, // EOF
+    // Same stdio surface registered under the modern UCRT
+    // apiset DLL name + ucrtbase.dll. NASM (UCRT-based)
+    // imports from the apiset; without these its `fputs(...)
+    // stderr` for the no-args usage line NO-OP'd and the
+    // program exited with rc=2 silently.
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "fputs", kOffFputs},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "puts", kOffFputs},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "fwrite", kOffFwrite},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "fputc", kOffFputc},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "putchar", kOffFputc},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "fflush", kOffReturnZero},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "fgetc", kOffReturnMinus1},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "feof", kOffReturnOne},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "ferror", kOffReturnZero},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "fclose", kOffReturnZero},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "fread", kOffReturnZero},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "getc", kOffReturnMinus1},
+    {"ucrtbase.dll", "fputs", kOffFputs},
+    {"ucrtbase.dll", "puts", kOffFputs},
+    {"ucrtbase.dll", "fwrite", kOffFwrite},
+    {"ucrtbase.dll", "fputc", kOffFputc},
+    {"ucrtbase.dll", "putchar", kOffFputc},
+    {"ucrtbase.dll", "fflush", kOffReturnZero},
+    {"ucrtbase.dll", "fgetc", kOffReturnMinus1},
     {"msvcrt.dll", "_cexit", kOffReturnZero},  // CRT cleanup; safe to no-op
     {"msvcrt.dll", "_c_exit", kOffReturnZero}, // CRT cleanup (no exit); no-op
     // _initterm walks an array of function pointers calling each
@@ -1113,7 +1137,22 @@
     // stub is correct: any program that depends on its ctors
     // running won't get them, but at least won't fault here.
     {"msvcrt.dll", "_initterm", kOffReturnZero}, {"msvcrt.dll", "_initterm_e", kOffReturnZero},
-    {"msvcrt.dll", "__getmainargs", kOffReturnZero}, {"msvcrt.dll", "__wgetmainargs", kOffReturnZero},
+    // __getmainargs / __wgetmainargs: populate argc/argv/env from
+    // proc-env so the CRT's argv-parsing path doesn't deref NULL.
+    // ReturnZero stub left a NULL argv in place and busybox-w32
+    // faulted at the first cmdline-walk step (cr2=1).
+    {"msvcrt.dll", "__getmainargs", kOffGetMainArgs},
+    {"msvcrt.dll", "__wgetmainargs", kOffGetMainArgs},
+    {"ucrtbase.dll", "__getmainargs", kOffGetMainArgs},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "__getmainargs", kOffGetMainArgs},
+
+    // _errno: thread-errno accessor. Shares one scratch slot in
+    // v0 (proc-env data-miss pad). Without this NASM crashes
+    // at the first stdio call: `call _errno; mov eax, [rax]`
+    // → mov eax, [0] when _errno returns 0.
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_errno", kOffPErrno},
+    {"ucrtbase.dll", "_errno", kOffPErrno},
+    {"msvcrt.dll", "_errno", kOffPErrno},
     {"msvcrt.dll", "__set_app_type", kOffReturnZero}, {"msvcrt.dll", "__setusermatherr", kOffReturnZero},
     {"msvcrt.dll", "_XcptFilter", kOffReturnZero}, {"msvcrt.dll", "_onexit", kOffReturnZero},
     {"msvcrt.dll", "__dllonexit", kOffReturnZero},

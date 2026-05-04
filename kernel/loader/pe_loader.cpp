@@ -1201,8 +1201,16 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
                 // Picking the right bucket is a name-mangling
                 // heuristic (`?...@@3...` == MSVC global data).
                 const bool is_data = win32::IsLikelyDataImport(fn_name);
-                const bool ok = is_data ? win32::Win32ThunksLookupDataCatchAll(&stub_va)
-                                        : win32::Win32ThunksLookupCatchAll(&stub_va);
+                // Per-name override for the well-known CRT data
+                // globals (`__argv`, `__argc`, `_acmdln`, `_wcmdln`)
+                // takes precedence over the all-zeros catch-all.
+                // The IAT then holds the proc-env slot VA holding
+                // the populated value, so the CRT's argv-walk
+                // pattern reads a real argv pointer instead of zero.
+                const bool data_named = is_data && win32::Win32ThunksLookupDataNamed(fn_name, &stub_va);
+                const bool ok = data_named ? true
+                              : is_data    ? win32::Win32ThunksLookupDataCatchAll(&stub_va)
+                                           : win32::Win32ThunksLookupCatchAll(&stub_va);
                 if (!ok)
                 {
                     core::CleanroomTraceRecord("pe-loader", "import-unresolved-fatal", h.image_base, first_thunk,
@@ -1213,8 +1221,9 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
                     return false;
                 }
                 is_noop_stub = true;
-                const char* msg =
-                    is_data ? "unknown import -> data-miss zero pad" : "unknown import -> catch-all NO-OP";
+                const char* msg = data_named ? "data import -> proc-env named slot"
+                                : is_data    ? "unknown import -> data-miss zero pad"
+                                             : "unknown import -> catch-all NO-OP";
                 core::LogWithString(core::LogLevel::Warn, "pe-resolve", msg, "fn", fn_name);
                 core::LogWithString(core::LogLevel::Warn, "pe-resolve", "  from", "dll", dll_name);
                 // Only FUNCTION catch-alls need an IAT-slot-name

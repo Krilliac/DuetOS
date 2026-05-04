@@ -3522,3 +3522,45 @@
     0x5F,             // 0x1098 pop rdi
     0x5E,             // 0x1099 pop rsi
     0xC3,             // 0x109A ret
+
+    // --- __getmainargs (offset 0x109B, 36 bytes) ----------------
+    // int __getmainargs(int* p_argc, char*** p_argv, char*** p_env,
+    //                   int doWildCard, _startupinfo* info)
+    //   rcx = p_argc, rdx = p_argv, r8 = p_env
+    // Populates the caller's pointers from the proc-env page
+    // (kProcEnvVa = 0x65000000):
+    //   *p_argc = proc_env.argc        (offset 0x00, u32)
+    //   *p_argv = proc_env.argv_ptr    (offset 0x08, u64; points
+    //                                   to argv[] array at 0x20)
+    //   *p_env  = &proc_env.env_block  (offset 0x400, empty)
+    // Returns 0. Without this, busybox-w32 (and any classic-MSVC
+    // CRT) walks a null argv and faults at cr2=1 when probing
+    // the second char of the (NULL) argv[0] for a Windows path
+    // marker.
+    0xB8, 0x00, 0x00, 0x00, 0x65, // 0x109B mov eax, 0x65000000   ; rax = proc_env base
+    0x44, 0x8B, 0x10,             // 0x10A0 mov r10d, [rax]        ; r10 = argc (u32)
+    0x44, 0x89, 0x11,             // 0x10A3 mov [rcx], r10d        ; *p_argc = argc
+    0x4C, 0x8B, 0x50, 0x08,       // 0x10A6 mov r10, [rax + 8]     ; r10 = argv ptr
+    0x4C, 0x89, 0x12,             // 0x10AA mov [rdx], r10         ; *p_argv = argv ptr
+    0x4D, 0x85, 0xC0,             // 0x10AD test r8, r8            ; env ptr non-null?
+    0x74, 0x0A,                   // 0x10B0 je +10                 ; -> 0x10BC
+    0x4C, 0x8D, 0x90, 0x00, 0x04, // 0x10B2 lea r10, [rax + 0x400] ; r10 = &env block
+    0x00, 0x00,                   //
+    0x4D, 0x89, 0x10,             // 0x10B9 mov [r8], r10          ; *p_env = &env block
+    // 0x10BC: skip_env
+    0x31, 0xC0,                   // 0x10BC xor eax, eax           ; return 0
+    0xC3,                         // 0x10BE ret
+
+    // --- _errno (offset 0x10BF, 6 bytes) ------------------------
+    // int* _errno(void). Returns a pointer to the thread-local
+    // (in real Windows) errno location. v0 single-threaded model
+    // shares one errno across the process — return the proc-env
+    // data-miss zero pad VA (proc_env + 0x800), which is
+    // page-aligned-writable scratch. Callers do
+    // `*_errno() = EINVAL;` (write) and `if (*_errno() == EAGAIN)`
+    // (read) — both work against the shared scratch.
+    // Without this NASM faults at cr2=0 in its first stdio call:
+    // `call _errno; mov eax, [rax]` → mov eax, [0]. Same
+    // fix shape as kOffPCommode.
+    0xB8, 0x00, 0x08, 0x00, 0x65, // 0x10BF mov eax, 0x65000800
+    0xC3,                         // 0x10C4 ret

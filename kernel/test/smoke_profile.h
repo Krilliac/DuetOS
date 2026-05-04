@@ -66,6 +66,19 @@ enum class SmokeProfile : duetos::u8
     /// OLEAUT32 / USER32). Sentinel + exit.
     PeSevenZip,
 
+    /// `smoke=pe-busybox`: spawn ring3-busybox (busybox-w32 x64,
+    /// 717 KiB, 313 imports across msvcrt / KERNEL32 / WS2_32 /
+    /// ADVAPI32 / USER32 — heavy POSIX-style CRT surface
+    /// complementary to 7-Zip). Sentinel + exit.
+    PeBusyBox,
+
+    /// `smoke=pe-nasm`: spawn ring3-nasm (NASM 2.16.03 x64,
+    /// 1.57 MiB, 117 imports against the modern UCRT apisets
+    /// — `api-ms-win-crt-*` surface complementary to 7-Zip's
+    /// classic msvcrt and busybox's MinGW msvcrt). Sentinel +
+    /// exit.
+    PeNasm,
+
     /// `smoke=linux`: spawn the seven Linux ABI smokes. Sentinel + exit.
     Linux,
 };
@@ -80,6 +93,8 @@ enum class SmokeTarget : duetos::u8
     PeWinapi,   // ring3-hello-winapi
     PeWinkill,  // ring3-winkill
     PeSevenZip, // ring3-7za (7-Zip 23.01 x64 standalone)
+    PeBusyBox,  // ring3-busybox (busybox-w32 x64)
+    PeNasm,     // ring3-nasm (NASM 2.16.03 x64, UCRT apisets)
     PeOther,    // ring3-thread-stress, ring3-customdll-test, etc.
                 //   (only enabled in profile=None bare-metal full boot)
     Linux,      // SpawnRing3LinuxSmoke and friends

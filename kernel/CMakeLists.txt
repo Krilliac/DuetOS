@@ -244,6 +244,41 @@ add_custom_command(
     VERBATIM)
 list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_SEVENZIP_HEADER}")
 
+# Real Windows PE — busybox64.exe (717 KiB, x86_64 console,
+# 313 imports across 5 DLLs: msvcrt(147) / KERNEL32(118) /
+# WS2_32(26) / ADVAPI32(15) / USER32(7)). Ron Yorston's
+# busybox-w32 — the "second complicated PE" target,
+# complementary to 7-Zip's compression codepaths. License: GPLv2
+# (see busybox/README.md).
+set(DUETOS_BUSYBOX_SRC    "${CMAKE_SOURCE_DIR}/userland/apps/busybox/busybox64.exe")
+set(DUETOS_BUSYBOX_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_busybox_pe.h")
+add_custom_command(
+    OUTPUT "${DUETOS_BUSYBOX_HEADER}"
+    COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
+            "${DUETOS_BUSYBOX_SRC}" "${DUETOS_BUSYBOX_HEADER}"
+            kBinBusyBoxBytes --namespace "duetos::fs::generated"
+    DEPENDS "${DUETOS_BUSYBOX_SRC}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Embedding real Windows PE /bin/busybox64.exe"
+    VERBATIM)
+list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_BUSYBOX_HEADER}")
+
+# Real Windows PE — nasm.exe (1.57 MiB, x86_64 console,
+# 117 imports across 13 DLLs: api-ms-win-crt-* apisets +
+# KERNEL32). NASM 2.16.03 — UCRT-based, complementary to
+# 7-Zip (msvcrt) and busybox-w32 (MinGW). License: 2-clause BSD
+# (see nasm/LICENSE.txt).
+set(DUETOS_NASM_SRC    "${CMAKE_SOURCE_DIR}/userland/apps/nasm/nasm.exe")
+set(DUETOS_NASM_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_nasm_pe.h")
+add_custom_command(
+    OUTPUT "${DUETOS_NASM_HEADER}"
+    COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
+            "${DUETOS_NASM_SRC}" "${DUETOS_NASM_HEADER}"
+            kBinNasmBytes --namespace "duetos::fs::generated"
+    DEPENDS "${DUETOS_NASM_SRC}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Embedding real Windows PE /bin/nasm.exe"
+    VERBATIM)
+list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_NASM_HEADER}")
+
 # mini_browser.exe — minimal WinSock 2 PE that does an HTTP/1.0 GET to
 # www.google.com. Source is userland/apps/mini_browser/browser.c; the
 # prebuilt PE checked into the tree is what gets embedded so the
