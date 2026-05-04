@@ -22,6 +22,14 @@ using mm::MultibootTagHeader;
 constinit bool g_available = false;
 constinit bool g_init_called = false;
 constinit FramebufferInfo g_info{};
+// Multiboot2 info physical address captured by the first call to
+// FramebufferInit. Re-used by FramebufferReinit so a driver fault-
+// domain restart can find the framebuffer tag again without
+// thread-ing the address through every call site.
+constinit uptr g_saved_mb_info = 0;
+// Forward decl — the storage lives further down the TU next to the
+// hook accessor pair, but FramebufferTeardown needs to clear it.
+extern FramebufferPresentFn g_present_hook;
 
 // Offscreen shadow surface — see `FramebufferBeginCompose`. Sized to
 // the live framebuffer (`g_info.width * g_info.height * 4` bytes,
@@ -88,6 +96,10 @@ void FramebufferInit(uptr multiboot_info_phys)
         return; // idempotent
     }
     g_init_called = true;
+    // Stash for FramebufferReinit. Done before any early-return so
+    // a re-init after teardown still has the multiboot pointer
+    // even if the first call ended up disabled (no tag, etc.).
+    g_saved_mb_info = multiboot_info_phys;
 
     if (multiboot_info_phys == 0)
     {
@@ -169,6 +181,44 @@ void FramebufferInit(uptr multiboot_info_phys)
     SerialWrite(" pitch=");
     SerialWriteHex(tag->pitch);
     SerialWrite("\n");
+}
+
+void FramebufferTeardown()
+{
+    // Mark the surface unavailable first so any draw call racing
+    // with the teardown bails out at the !Available() guard.
+    g_available = false;
+    // Drop every cached parameter. The MMIO arena is a bump
+    // allocator so the previous mapping leaks — documented as
+    // "cheap" (a 1024x768x32 buffer is 3 MiB out of a 512 MiB
+    // arena). A future slice that adds an actual unmap path can
+    // wire it in here.
+    g_info = FramebufferInfo{};
+    // Compose state — drop the shadow buffer reference. The
+    // backing pages stay allocated (we don't free here either)
+    // but the next BeginCompose/EndCompose pair runs through the
+    // lazy-allocate path and re-creates the shadow at the new
+    // dimensions if Reinit picked a different mode.
+    g_shadow_base = nullptr;
+    g_shadow_pitch = 0;
+    g_compose_active = false;
+    // Present hook + the init guard. Re-init re-arms the hook
+    // through whatever backend (virtio-gpu, etc.) registers
+    // again on its own restart path.
+    g_present_hook = nullptr;
+    g_init_called = false;
+    SerialWrite("[video/fb] teardown — surface offline\n");
+}
+
+void FramebufferReinit()
+{
+    // Driver fault-domain init lambdas take no args, so the saved
+    // multiboot info phys (captured on the first FramebufferInit)
+    // gets threaded through here. If the first init never ran
+    // (boot took a path that disabled the framebuffer entirely),
+    // g_saved_mb_info stays 0 and FramebufferInit handles that
+    // case the same way it does at boot — log + leave disabled.
+    FramebufferInit(g_saved_mb_info);
 }
 
 bool FramebufferAvailable()

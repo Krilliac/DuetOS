@@ -806,6 +806,24 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             duetos::debug::BpTeardown();
             return {};
         });
+    // Linear framebuffer — the firmware-handoff direct-pixel
+    // surface every console / splash / compositor path lowers
+    // onto. Restart is useful after a virtio-gpu mode-set
+    // attempt left the surface in a half-configured state, or
+    // when an operator wants to re-snapshot the boot-time
+    // baseline without a reboot.
+    duetos::security::RegisterDriverDomain(
+        "framebuffer",
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::drivers::video::FramebufferReinit();
+            return {};
+        },
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::drivers::video::FramebufferTeardown();
+            return {};
+        });
 
     // Init-call registry self-test (plan A1). Exercises register +
     // RunPhase + bad-argument + failing-callback paths against the
