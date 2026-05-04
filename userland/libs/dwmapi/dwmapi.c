@@ -64,18 +64,50 @@ __declspec(dllexport) HRESULT DwmEnableBlurBehindWindow(HANDLE wnd, const void* 
     return S_OK;
 }
 
+/* Thumbnail registry. Each slot tracks {dst, src} so Unregister can
+ * confirm the handle is genuine and free the slot. The handle value
+ * is `kThumbHandleBase + slot_index`; slot 0 stays empty so a value
+ * of 0 always means "invalid handle". */
+#define DWM_THUMB_SLOTS 16
+#define DWM_THUMB_HANDLE_BASE 0x0DC11000UL
+typedef struct
+{
+    HANDLE dst;
+    HANDLE src;
+    unsigned int in_use;
+} DwmThumbSlot;
+static DwmThumbSlot g_dwm_thumbs[DWM_THUMB_SLOTS];
+
 __declspec(dllexport) HRESULT DwmRegisterThumbnail(HANDLE dst, HANDLE src, HANDLE* thumb)
 {
-    (void)dst;
-    (void)src;
-    if (thumb)
-        *thumb = (HANDLE)0;
-    return 0x80004001UL; /* E_NOTIMPL */
+    if (!thumb)
+        return 0x80070057UL; /* E_INVALIDARG */
+    *thumb = (HANDLE)0;
+    for (unsigned int i = 1; i < DWM_THUMB_SLOTS; ++i)
+    {
+        if (!g_dwm_thumbs[i].in_use)
+        {
+            g_dwm_thumbs[i].dst = dst;
+            g_dwm_thumbs[i].src = src;
+            g_dwm_thumbs[i].in_use = 1;
+            *thumb = (HANDLE)(unsigned long long)(DWM_THUMB_HANDLE_BASE + i);
+            return S_OK;
+        }
+    }
+    return 0x8007000EUL; /* E_OUTOFMEMORY */
 }
 
 __declspec(dllexport) HRESULT DwmUnregisterThumbnail(HANDLE thumb)
 {
-    (void)thumb;
+    unsigned long long v = (unsigned long long)thumb;
+    if (v < DWM_THUMB_HANDLE_BASE || v >= DWM_THUMB_HANDLE_BASE + DWM_THUMB_SLOTS)
+        return 0x80070057UL; /* E_INVALIDARG */
+    unsigned int idx = (unsigned int)(v - DWM_THUMB_HANDLE_BASE);
+    if (!g_dwm_thumbs[idx].in_use)
+        return 0x80070057UL;
+    g_dwm_thumbs[idx].in_use = 0;
+    g_dwm_thumbs[idx].dst = (HANDLE)0;
+    g_dwm_thumbs[idx].src = (HANDLE)0;
     return S_OK;
 }
 
@@ -159,20 +191,57 @@ __declspec(dllexport) HRESULT DwmShowContact(DWORD pointer_id, DWORD events)
 }
 
 /* DwmAttachMilContent / DwmDetachMilContent — Direct3D MIL
- * binding. v0 has no MIL; report "not implemented" so callers
- * fall through to GDI-only paint. */
+ * binding. v0 has no MIL surface, but the Win10+ shell expects
+ * S_OK from these calls during window setup; failure here cancels
+ * the whole frame-pacing handshake. Track an attach count per HWND
+ * so Detach can fail an over-detach (which Windows surfaces as
+ * a debug-only assert but doesn't fault on). */
 #define E_NOTIMPL 0x80004001UL
+#define DWM_MIL_SLOTS 8
+typedef struct
+{
+    HANDLE wnd;
+    unsigned int refs;
+} DwmMilSlot;
+static DwmMilSlot g_dwm_mil[DWM_MIL_SLOTS];
 
 __declspec(dllexport) HRESULT DwmAttachMilContent(HANDLE wnd)
 {
-    (void)wnd;
-    return E_NOTIMPL;
+    if (!wnd)
+        return 0x80070057UL; /* E_INVALIDARG */
+    int free_slot = -1;
+    for (int i = 0; i < DWM_MIL_SLOTS; ++i)
+    {
+        if (g_dwm_mil[i].refs > 0 && g_dwm_mil[i].wnd == wnd)
+        {
+            ++g_dwm_mil[i].refs;
+            return S_OK;
+        }
+        if (g_dwm_mil[i].refs == 0 && free_slot < 0)
+            free_slot = i;
+    }
+    if (free_slot < 0)
+        return 0x8007000EUL; /* E_OUTOFMEMORY */
+    g_dwm_mil[free_slot].wnd = wnd;
+    g_dwm_mil[free_slot].refs = 1;
+    return S_OK;
 }
 
 __declspec(dllexport) HRESULT DwmDetachMilContent(HANDLE wnd)
 {
-    (void)wnd;
-    return E_NOTIMPL;
+    if (!wnd)
+        return 0x80070057UL;
+    for (int i = 0; i < DWM_MIL_SLOTS; ++i)
+    {
+        if (g_dwm_mil[i].refs > 0 && g_dwm_mil[i].wnd == wnd)
+        {
+            --g_dwm_mil[i].refs;
+            if (g_dwm_mil[i].refs == 0)
+                g_dwm_mil[i].wnd = (HANDLE)0;
+            return S_OK;
+        }
+    }
+    return 0x80070490UL; /* ERROR_NOT_FOUND as HRESULT */
 }
 
 /* DwmGetCompositionTimingInfo — frame-pacing telemetry. v0

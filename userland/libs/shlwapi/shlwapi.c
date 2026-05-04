@@ -347,6 +347,42 @@ __declspec(dllexport) NO_BUILTIN_LOOPS wchar_t16* StrStrIW(const wchar_t16* hays
     return (wchar_t16*)0;
 }
 
+__declspec(dllexport) NO_BUILTIN_LOOPS int StrCmpIW(const wchar_t16* a, const wchar_t16* b)
+{
+    if (!a || !b)
+        return (a == b) ? 0 : (a ? 1 : -1);
+    while (*a && *b)
+    {
+        wchar_t16 ca = *a, cb = *b;
+        if (ca >= 'A' && ca <= 'Z')
+            ca = (wchar_t16)(ca + ('a' - 'A'));
+        if (cb >= 'A' && cb <= 'Z')
+            cb = (wchar_t16)(cb + ('a' - 'A'));
+        if (ca != cb)
+            return (int)ca - (int)cb;
+        ++a;
+        ++b;
+    }
+    return (int)*a - (int)*b;
+}
+
+__declspec(dllexport) NO_BUILTIN_LOOPS int StrCmpNIW(const wchar_t16* a, const wchar_t16* b, int n)
+{
+    if (!a || !b)
+        return (a == b) ? 0 : (a ? 1 : -1);
+    for (int i = 0; i < n; ++i)
+    {
+        wchar_t16 ca = a[i], cb = b[i];
+        if (ca >= 'A' && ca <= 'Z')
+            ca = (wchar_t16)(ca + ('a' - 'A'));
+        if (cb >= 'A' && cb <= 'Z')
+            cb = (wchar_t16)(cb + ('a' - 'A'));
+        if (!ca || ca != cb)
+            return (int)ca - (int)cb;
+    }
+    return 0;
+}
+
 /* ---- ANSI string helpers ---- */
 
 __declspec(dllexport) NO_BUILTIN_LOOPS int StrCmpA(const char* a, const char* b)
@@ -407,6 +443,50 @@ __declspec(dllexport) NO_BUILTIN_LOOPS int StrCmpNIA(const char* a, const char* 
             return (int)(unsigned char)ca - (int)(unsigned char)cb;
     }
     return 0;
+}
+
+__declspec(dllexport) NO_BUILTIN_LOOPS char* StrStrA(const char* haystack, const char* needle)
+{
+    if (!haystack || !needle)
+        return (char*)0;
+    if (!needle[0])
+        return (char*)haystack;
+    for (size_t i = 0; haystack[i]; ++i)
+    {
+        size_t j = 0;
+        while (needle[j] && haystack[i + j] == needle[j])
+            ++j;
+        if (!needle[j])
+            return (char*)(haystack + i);
+    }
+    return (char*)0;
+}
+
+__declspec(dllexport) NO_BUILTIN_LOOPS char* StrStrIA(const char* haystack, const char* needle)
+{
+    if (!haystack || !needle)
+        return (char*)0;
+    if (!needle[0])
+        return (char*)haystack;
+    for (size_t i = 0; haystack[i]; ++i)
+    {
+        size_t j = 0;
+        while (needle[j])
+        {
+            char h = haystack[i + j];
+            char n = needle[j];
+            if (h >= 'A' && h <= 'Z')
+                h = (char)(h + ('a' - 'A'));
+            if (n >= 'A' && n <= 'Z')
+                n = (char)(n + ('a' - 'A'));
+            if (h != n)
+                break;
+            ++j;
+        }
+        if (!needle[j])
+            return (char*)(haystack + i);
+    }
+    return (char*)0;
 }
 
 __declspec(dllexport) NO_BUILTIN_LOOPS char* StrChrA(const char* s, int c)
