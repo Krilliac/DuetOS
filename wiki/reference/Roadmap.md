@@ -179,14 +179,27 @@ In rough priority:
 - **Owner:** `kernel/drivers/net/wireless/` (per-vendor upload +
   ring setup), `kernel/net/wireless/` (MLME state machine).
 
-### USB mouse (xHCI HID class)
+### USB mouse — beyond boot protocol
 
-- **Today:** xHCI keyboard works; mouse class is probe-only.
-  Keyboard path is the template.
-- **Blocks on:** report-descriptor parsing for mouse-class
-  endpoints. No QEMU emulation — has to be tested on physical HW.
-- **Effort:** ~200–300 LOC.
-- **Owner:** `kernel/drivers/usb/class/hid*`.
+- **Today:** boot-protocol mouse is fully wired end-to-end —
+  `xhci_descparse.cpp` recognises `kIfaceProtocolMouse`,
+  `xhci_enum.cpp` flags the device, `xhci_init.cpp`'s polling
+  loop routes 3-byte reports to `HidMouseInject` in
+  `xhci_input.cpp`, which packs them into the same
+  `MousePacket` queue PS/2 mice use. Boot protocol gives 3
+  axes + 3 buttons; that's enough for the desktop-prototype
+  WM and most older USB mice.
+- **Deferred:** report-descriptor-driven mouse decoding —
+  scroll wheel (Z axis), 4th / 5th buttons, high-dpi
+  pointers, tilt wheels. The descriptor parser exists
+  (`HidParseDescriptor` in `hid_descriptor.cpp`); the
+  remaining work is wiring it into `xhci_init.cpp`'s
+  polling-report decode so non-boot reports get parsed by
+  field rather than by fixed 3-byte layout.
+- **Blocks on:** a workload that legitimately needs scroll
+  or extra-button support — boot protocol is the right
+  default until then.
+- **Owner:** `kernel/drivers/usb/`.
 
 ### Multi-monitor / runtime resolution change
 
