@@ -169,6 +169,23 @@ Implemented (2026-05-04 follow-on slices):
   The operator's UI now distinguishes "all 4 DR slots in use"
   from a generic install reject — cuts the diagnosis loop on
   the recurring hardware-watchpoint case.
+- **Software null-modem (QEMU pty backend)** — `tools/qemu/run.sh`
+  now reads `DUETOS_GDB_TRANSPORT` (tcp / pty / stdio).
+  In `pty` mode QEMU exposes COM2 as a host pty (e.g.
+  `/dev/pts/4`) instead of a TCP server, and GDB attaches via
+  `target remote /dev/pts/4`. This is the software equivalent of
+  a USB-UART + null-modem cable on real hardware: identical UART
+  driver path on the kernel side, identical `target remote
+  <device>` path on the GDB side. Lets us prove the
+  serial-device-file attach path under QEMU without buying a
+  USB-UART. Wrapped by `duetos-gdb-attach.sh --via-pty` —
+  one-shot: spawn QEMU, scrape the "char device redirected to
+  /dev/pts/N" line from QEMU's log, attach.
+- **Real-hardware (null-modem) attach** — `duetos-gdb-attach.sh
+  --com /dev/ttyUSB0` skips QEMU entirely and runs `target remote
+  /dev/ttyUSB0` against a real serial device. Same script handles
+  both — QEMU TCP, QEMU pty (software null-modem), and physical
+  USB-UART cable. `DUETOS_GDB_BAUD` overrides the default 115200.
 
 ## TrapFrame plumbing
 
@@ -253,13 +270,33 @@ Three independent channels stay out of each other's way. A
 panic dump never races with a live GDB session because they
 use different ports.
 
-## Real-hardware caveat
+## Three transports — same kernel-side stub
 
-`-serial tcp::1234` is QEMU-only. On real PCs COM2 is a
-physical serial port at 0x2F8, so attaching means a
-null-modem cable + a host-side UART. The kernel-side stub is
-unchanged; only the host-side transport is "physical UART"
-instead of "QEMU TCP server". The helper scripts assume QEMU.
+| Mode | Setup | GDB attach line |
+|---|---|---|
+| TCP (default) | `tools/qemu/run.sh` | `target remote :1234` |
+| Software null-modem | `DUETOS_GDB_TRANSPORT=pty tools/qemu/run.sh` | `target remote /dev/pts/N` |
+| Real iron | physical USB-UART on host, COM2 on board | `target remote /dev/ttyUSB0` |
+
+The kernel-side stub doesn't care: it drives the 16550 at
+0x2F8 the same way regardless of what the host does with the
+serial bytes. The pty mode is the proof-of-concept for the
+serial-device-file path under QEMU — set `DUETOS_GDB_TRANSPORT=pty`
+and QEMU emits `char device redirected to /dev/pts/N` in its
+stderr; pass that path to `target remote` and you're talking to
+the in-kernel server through a proper character device, exactly
+as you would with a USB-UART on iron.
+
+`tools/debug/duetos-gdb-attach.sh` wraps all three:
+
+| Flag | Transport | Notes |
+|---|---|---|
+| (none) | TCP | spawns QEMU; default path |
+| `--via-pty` | QEMU pty | spawns QEMU + scrapes pty path from log |
+| `--com /dev/ttyUSB0` | real iron | does NOT spawn QEMU |
+
+`DUETOS_GDB_BAUD` overrides the default 115200 baud (matches the
+kernel's COM2 init).
 
 ## Files
 
@@ -277,14 +314,8 @@ instead of "QEMU TCP server". The helper scripts assume QEMU.
 
 ## Revisit when
 
-_All scheduled items have landed. v0 is feature-complete from the
-debugger-protocol side; further work is hardware-only._
+_All scheduled items have landed. v0 is feature-complete._
 
-- **Real-hardware (non-QEMU) attach** — `-serial tcp::1234` is a
-  QEMU convenience. On real PCs the host side becomes a null-modem
-  cable + a USB-UART. The kernel-side stub is unchanged; only the
-  helper scripts assume QEMU. A "duetos-gdb-attach.sh --com /dev/ttyUSB0"
-  variant is a small follow-up if anyone tests this on iron.
 - **Multi-thread step on SMP** — `vCont;s:N` where N is a peer
   would require single-stepping the peer through its frozen NMI
   exit, not just the BSP. Deferred because there's no clear use
