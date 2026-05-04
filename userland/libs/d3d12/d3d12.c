@@ -784,6 +784,13 @@ struct D12ListImpl
     UINT current_ib_format; /* DXGI_FORMAT_R16_UINT = 57, R32_UINT = 42 */
     int viewport_x, viewport_y, viewport_w, viewport_h;
     D12ResImpl* current_rt;
+
+    /* Bumped by ResourceBarrier when a TRANSITION barrier's StateBefore
+     * doesn't match the resource's recorded current_state. Read back via
+     * DuetOS_D3D12_PeekBarrierMismatchCount so the dx_demo can verify
+     * the validation fires on a deliberate mismatch and stays at zero
+     * on a clean transition. */
+    UINT barrier_mismatch_count;
 };
 
 static HRESULT list_QueryInterface(D12ListImpl* self, REFIID riid, void** out)
@@ -830,6 +837,37 @@ static HRESULT list_Reset(D12ListImpl* self, void* alloc, void* pso)
     self->current_pso = (pso && ((D12PsoImpl*)pso)->lpVtbl == g_pso_vtbl) ? (D12PsoImpl*)pso : NULL;
     return DX_S_OK;
 }
+/* Emit a single mismatch diagnostic via SYS_DEBUG_PRINT. The DX DLLs
+ * don't link a printf, so the formatting is done by hand into a
+ * stack buffer. Format:
+ *   "[d3d12] ResourceBarrier StateBefore mismatch: recorded=0xXXXXXXXX
+ *    declared=0xXXXXXXXX after=0xXXXXXXXX"
+ * Throttled by the caller (first three mismatches per list) so a
+ * pathological caller can't flood the serial log. */
+static void list_emit_barrier_mismatch(UINT recorded, UINT declared, UINT after)
+{
+    static const char kHex[] = "0123456789abcdef";
+    char buf[112];
+    UINT i = 0;
+    const char* prefix = "[d3d12] ResourceBarrier StateBefore mismatch: recorded=0x";
+    for (UINT k = 0; prefix[k]; ++k)
+        buf[i++] = prefix[k];
+    for (int k = 0; k < 8; ++k)
+        buf[i++] = kHex[(recorded >> ((7 - k) * 4)) & 0xF];
+    const char* mid1 = " declared=0x";
+    for (UINT k = 0; mid1[k]; ++k)
+        buf[i++] = mid1[k];
+    for (int k = 0; k < 8; ++k)
+        buf[i++] = kHex[(declared >> ((7 - k) * 4)) & 0xF];
+    const char* mid2 = " after=0x";
+    for (UINT k = 0; mid2[k]; ++k)
+        buf[i++] = mid2[k];
+    for (int k = 0; k < 8; ++k)
+        buf[i++] = kHex[(after >> ((7 - k) * 4)) & 0xF];
+    buf[i] = 0;
+    dx_dbg(buf);
+}
+
 /* ResourceBarrier(numBarriers, *barriers) — slot 26.
  *
  * D3D12_RESOURCE_BARRIER (40 B):
@@ -848,14 +886,16 @@ static HRESULT list_Reset(D12ListImpl* self, void* alloc, void* pso)
  *       +8  ID3D12Resource* pResource  (8 B)
  *
  * v0 only honours TRANSITION (Type == 0); ALIASING / UAV are
- * no-op success. Real D3D12 would also enforce the StateBefore
- * matches the resource's current state and surface the validation
- * error — we record the new state and trust the caller's
- * sequencing for now. */
+ * no-op success. For TRANSITION barriers we now also validate
+ * that StateBefore matches the resource's recorded current_state;
+ * mismatches bump self->barrier_mismatch_count and surface a
+ * one-line diagnostic on the first three (throttled to keep the
+ * log bounded). The state update lands either way so a caller that
+ * gets the sequencing wrong stays consistent on the next barrier
+ * — the counter is the regression signal, not a hard error. */
 static void list_ResourceBarrier(D12ListImpl* self, UINT n, const void* barriers)
 {
-    (void)self;
-    if (n == 0 || !barriers)
+    if (!self || n == 0 || !barriers)
         return;
     const BYTE* p = (const BYTE*)barriers;
     for (UINT i = 0; i < n; ++i)
@@ -865,9 +905,18 @@ static void list_ResourceBarrier(D12ListImpl* self, UINT n, const void* barriers
         if (type != 0) /* TRANSITION = 0 */
             continue;
         D12ResImpl* res = *(D12ResImpl* const*)(b + 8);
+        UINT state_before = *(const UINT*)(b + 20);
         UINT state_after = *(const UINT*)(b + 24);
         if (res && res->lpVtbl == g_res_vtbl)
+        {
+            if (res->current_state != state_before)
+            {
+                self->barrier_mismatch_count++;
+                if (self->barrier_mismatch_count <= 3)
+                    list_emit_barrier_mismatch(res->current_state, state_before, state_after);
+            }
             res->current_state = state_after;
+        }
     }
 }
 
@@ -1952,4 +2001,20 @@ __declspec(dllexport) UINT DuetOS_D3D12_PeekResourceState(void* resource)
     if (r->lpVtbl != g_res_vtbl)
         return 0xFFFFFFFFu;
     return r->current_state;
+}
+
+/* Non-Win32 introspection helper: read back the count of TRANSITION
+ * barriers a command list has seen whose StateBefore did not match
+ * the resource's recorded current_state. Used by the dx_demo to
+ * verify the validation fires on a deliberate mismatch and stays at
+ * zero on a clean transition. Returns 0xFFFFFFFF if the pointer
+ * doesn't look like one of our command lists. */
+__declspec(dllexport) UINT DuetOS_D3D12_PeekBarrierMismatchCount(void* list)
+{
+    if (!list)
+        return 0xFFFFFFFFu;
+    D12ListImpl* l = (D12ListImpl*)list;
+    if (l->lpVtbl != g_list_vtbl)
+        return 0xFFFFFFFFu;
+    return l->barrier_mismatch_count;
 }

@@ -1018,12 +1018,40 @@ static int test_d3d12_cube(void)
     typedef UINT (*PFN_PeekState)(void*);
     PFN_PeekState peek_state =
         d12_mod ? (PFN_PeekState)GetProcAddress(d12_mod, "DuetOS_D3D12_PeekResourceState") : NULL;
+    PFN_PeekState peek_mismatch =
+        d12_mod ? (PFN_PeekState)GetProcAddress(d12_mod, "DuetOS_D3D12_PeekBarrierMismatchCount") : NULL;
     if (peek_state)
     {
         UINT s = peek_state(rt);
         Out("[dx_demo] d3d12: ResourceBarrier RT->PRESENT, peek state=");
         OutHex32(s);
         Out(s == 0 ? " PASS\r\n" : " FAIL\r\n");
+    }
+
+    /* StateBefore validation probe: after the legitimate transition
+     * above the mismatch count must be zero. Then issue a barrier
+     * whose StateBefore deliberately doesn't match (resource is now
+     * in PRESENT=0 but we declare RENDER_TARGET=4) and verify the
+     * counter increments. */
+    if (peek_mismatch)
+    {
+        UINT clean = peek_mismatch(list);
+        Out("[dx_demo] d3d12: ResourceBarrier mismatch count after clean transition=");
+        OutDec((unsigned)clean);
+        Out(clean == 0 ? " PASS\r\n" : " FAIL\r\n");
+
+        BYTE bad[40] = {0};
+        *(UINT*)(bad + 0) = 0; /* TRANSITION */
+        *(UINT*)(bad + 4) = 0; /* Flags = NONE */
+        *(void**)(bad + 8) = rt;
+        *(UINT*)(bad + 16) = 0xFFFFFFFFu; /* Subresource = ALL */
+        *(UINT*)(bad + 20) = 4;           /* StateBefore = RENDER_TARGET (wrong: rt is PRESENT) */
+        *(UINT*)(bad + 24) = 4;           /* StateAfter  = RENDER_TARGET */
+        ((PFN_Barrier)list_vt[26])(list, 1, bad);
+        UINT dirty = peek_mismatch(list);
+        Out("[dx_demo] d3d12: ResourceBarrier mismatch count after deliberate mismatch=");
+        OutDec((unsigned)dirty);
+        Out(dirty == 1 ? " PASS\r\n" : " FAIL\r\n");
     }
 
     typedef long (*PFN_Close)(void*);

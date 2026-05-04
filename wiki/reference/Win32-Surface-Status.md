@@ -749,7 +749,12 @@ DrawInstanced, 13 DrawIndexedInstanced, 20
 IASetPrimitiveTopology, 21 RSSetViewports, 22
 RSSetScissorRects (no-op), 25 SetPipelineState, 26
 ResourceBarrier (records `current_state` per resource —
-TRANSITION barriers update it; ALIASING / UAV are no-op
+TRANSITION barriers update it AND validate StateBefore
+matches the recorded state, bumping a per-list mismatch
+counter (`DuetOS_D3D12_PeekBarrierMismatchCount`) and
+emitting one `[d3d12] ResourceBarrier StateBefore mismatch:
+recorded=… declared=… after=…` line via SYS_DEBUG_PRINT for
+the first three mismatches; ALIASING / UAV are no-op
 success), 29 SetComputeRootSignature (no-op),
 30 SetGraphicsRootSignature, 43 IASetIndexBuffer, 44
 IASetVertexBuffers, 46 OMSetRenderTargets, 47
@@ -1213,18 +1218,14 @@ short list:
 6. **D3D12 multi-stream input** — same per-element InputSlot
    refactor that landed in D3D11; the PSO already extracts
    the field. Use the same 32-slot array shape.
-7. **D3D12 `ResourceBarrier` validation** — the new
-   `current_state` field is untouched after the barrier
-   updates; check that `StateBefore` matches the recorded
-   state and surface a debug print on mismatch.
-8. **`ws2_32!WSAEventSelect`** — back into our message-
+7. **`ws2_32!WSAEventSelect`** — back into our message-
    queue + waitable-event primitives.
-9. **`bcrypt`** — add SHA-384 / SHA-512 to the algorithm
+8. **`bcrypt`** — add SHA-384 / SHA-512 to the algorithm
    table (SHA-256 reference is right there; the FIPS 180-4
    delta is the constant table + bigger word size).
-10. **`d2d1!DrawText`** — wire DWrite's monospace metrics
-    into the existing FillRect path so single-line text
-    renders.
+9. **`d2d1!DrawText`** — wire DWrite's monospace metrics
+   into the existing FillRect path so single-line text
+   renders.
 
 Each row is a small slice that flips one STUB / GAP to REAL
 and adds a smoke / dx_demo coverage probe.
