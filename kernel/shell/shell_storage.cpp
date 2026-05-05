@@ -16,6 +16,7 @@
 #include "drivers/storage/block.h"
 #include "drivers/video/console.h"
 #include "fs/gpt.h"
+#include "fs/mount.h"
 
 namespace duetos::core::shell::internal
 {
@@ -50,10 +51,42 @@ void WriteHexCol(u64 v, u32 digits = 16)
 
 void CmdMount()
 {
-    // Show every mounted backend. v0: ramfs at /, tmpfs at
-    // /tmp. Real mount table lands with multi-backend VFS.
+    // Built-in roots that always exist regardless of the
+    // registered mount table — these are the kernel's static
+    // namespace (constinit ramfs trees + the tmpfs slot
+    // backend).
     ConsoleWriteln("ramfs on /       type=ramfs (ro)");
     ConsoleWriteln("tmpfs on /tmp    type=tmpfs (rw, 16 slots, 512B each)");
+    // Walk the VfsMount registry. Stage-6 first slice landed
+    // the registry; the lookup-routing slice that switches
+    // backends at mount points lands separately. Until then,
+    // these entries are bookkeeping only — but listing them
+    // here gives the operator the same one-line view of the
+    // mount surface real Linux's `mount` provides.
+    using duetos::fs::FsTypeName;
+    using duetos::fs::MountEntry;
+    using duetos::fs::MountId;
+    using duetos::fs::VfsMountCount;
+    using duetos::fs::VfsMountEnumerate;
+    if (VfsMountCount() > 0)
+    {
+        VfsMountEnumerate(
+            [](const MountEntry& e, MountId id, void* /*cookie*/) -> bool
+            {
+                ConsoleWrite(FsTypeName(e.fs_type));
+                ConsoleWrite(" on ");
+                ConsoleWrite(e.mount_point);
+                ConsoleWrite("  type=");
+                ConsoleWrite(FsTypeName(e.fs_type));
+                ConsoleWrite(" (id=");
+                WriteHexCol(static_cast<u64>(id), 2);
+                ConsoleWrite(" blk=");
+                WriteHexCol(static_cast<u64>(e.block_handle), 2);
+                ConsoleWriteln(")");
+                return true;
+            },
+            nullptr);
+    }
 }
 
 void CmdLsblk()
