@@ -316,9 +316,14 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
   `DrawIndexed*` / `DrawPrimitive*`. Vertex/index buffers carry
   real backing storage; input layouts pull POSITION + COLOR from
   the bound VB; triangle list / strip / fan all rasterize.
-- **Still gated:** HLSL compilation, texture sampling, geometry/
-  hull/domain/compute shaders, multi-stream input, Z-buffer,
-  D3D9 fixed-function lighting, real GPU command-ring submission.
+- **Compiler landed (frontend only):** `d3dcompiler.dll` lexes +
+  parses a tiny HLSL subset and emits a deterministic DXBC-shaped
+  blob (SHEX/ISGN/OSGN/STAT). The d3d11 / d3d12 draw path still
+  ignores the bytecode — execution is the next slice.
+- **Still gated:** HLSL bytecode execution, texture sampling,
+  geometry/hull/domain/compute shaders, multi-stream input,
+  Z-buffer, D3D9 fixed-function lighting, real GPU command-ring
+  submission.
 - **Blocks on:** per-vendor GPU drivers landing real command-
   ring submission; Vulkan-first ICD then D3D translation layer.
 

@@ -58,6 +58,7 @@
 #include "generated_d3d11_dll.h"
 #include "generated_d3d12_dll.h"
 #include "generated_d3d9_dll.h"
+#include "generated_d3dcompiler_dll.h"
 #include "generated_dbghelp_dll.h"
 #include "generated_dxgi_dll.h"
 #include "generated_gdi32_dll.h"
@@ -2412,6 +2413,8 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
          /*essential=*/true},
         {"dxgi.dll", fs::generated::kBinDxgiDllBytes, fs::generated::kBinDxgiDllBytes_len,
          /*essential=*/true},
+        {"d3dcompiler.dll", fs::generated::kBinD3dcompilerDllBytes, fs::generated::kBinD3dcompilerDllBytes_len,
+         /*essential=*/false},
         {"user32.dll", fs::generated::kBinUser32DllBytes, fs::generated::kBinUser32DllBytes_len,
          /*essential=*/true},
         {"gdi32.dll", fs::generated::kBinGdi32DllBytes, fs::generated::kBinGdi32DllBytes_len,

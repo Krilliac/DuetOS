@@ -46,6 +46,7 @@ case "${DLL_NAME}" in
     d3d9)      SYMBOL_NAME=kBinD3d9DllBytes ;;
     d3d11)     SYMBOL_NAME=kBinD3d11DllBytes ;;
     d3d12)     SYMBOL_NAME=kBinD3d12DllBytes ;;
+    d3dcompiler) SYMBOL_NAME=kBinD3dcompilerDllBytes ;;
     dxgi)      SYMBOL_NAME=kBinDxgiDllBytes ;;
     user32)    SYMBOL_NAME=kBinUser32DllBytes ;;
     gdi32)     SYMBOL_NAME=kBinGdi32DllBytes ;;

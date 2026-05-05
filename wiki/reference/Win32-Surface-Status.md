@@ -1027,8 +1027,14 @@ did. PE imports of these names fail at PeLoad today.
 - **d3d10.dll** / **d3d10core.dll** / **d3d10_1.dll** —
   Direct3D 10. Mostly subsumed by D3D11 callers but a few
   legacy apps still link these.
-- **d3dcompiler_47.dll** — HLSL compiler. The single biggest
-  missing piece for "real DX apps."
+- **d3dcompiler.dll** — REAL (frontend). `D3DCompile` /
+  `D3DCompile2` / `D3DCreateBlob` / `D3DReflect` /
+  `D3DDisassemble` lex + parse a small HLSL subset and emit a
+  deterministic DXBC-shaped blob. The blob is not yet **executed**
+  by the d3d11/d3d12 draw path — that wires up next.
+- **d3dcompiler_47.dll** — versioned alias of the above is
+  available by adding `d3dcompiler_47` to the duetos_stub_dll
+  list. Not built today.
 - **d3dx*.dll** (d3dx9_43, d3dx10_43, d3dx11_43) — utility
   helpers (mesh loaders, texture loaders, math helpers).
   Many older games still depend on a specific d3dx version.
@@ -1139,9 +1145,12 @@ did. PE imports of these names fail at PeLoad today.
 
 ### Foundational
 
-- **HLSL / DXC compiler** — `D3DCompile`, `D3DCompileFromFile`,
-  the full DXIL toolchain. No shader code runs — the closest
-  we get is the FF transform pipeline in D3D9.
+- **HLSL / DXC compiler** — `D3DCompile` / `D3DCompile2` are
+  real in `userland/libs/d3dcompiler/`: lex + parse + DXBC-
+  shaped blob emission. `D3DCompileFromFile` and the full DXIL
+  toolchain are still missing, and the d3d11/d3d12 draw path
+  still ignores the bytecode (closest the GPU gets is the
+  pass-through rasterizer in `dx_raster.h`).
 - **Real GPU drivers** — DXGK / WDDM, vendor-specific kernel
   miniports (NVIDIA, AMD, Intel). Our "GPU" is a CPU
   rasterizer.

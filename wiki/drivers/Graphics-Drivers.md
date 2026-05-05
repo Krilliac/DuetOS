@@ -51,8 +51,36 @@ negotiation against a vendor-specific GPU driver is roadmap work.
 - Maps BARs (deferred MMIO probe).
 - Records the device for future driver bringup.
 
-Real driver implementations beyond discovery are roadmap work — see
-[Roadmap](../reference/Roadmap.md#multi-monitor--runtime-resolution-change).
+## Discrete GPU driver scaffolds
+
+Each tier-1 vendor now has a dedicated driver TU under
+`kernel/drivers/gpu/`:
+
+- `intel_gpu.{h,cpp}` — Gen9..Gen13 register map, RCS ring scaffold
+  at MMIO 0x2000.
+- `amd_gpu.{h,cpp}` — GFX9+ scaffold; opportunistically maps BAR5
+  (the register file lives there, not at BAR0 like Intel) and
+  reads `mmGRBM_STATUS` / `mmRLC_GPM_STAT`.
+- `nvidia_gpu.{h,cpp}` — Turing+ scaffold; reads `PMC_BOOT_0`,
+  `PMC_INTR_EN_0`, `PFIFO_INTR`, and `PFB_PRI_RD` for diagnostics.
+
+Each driver exposes:
+
+- `Probe(GpuInfo&)` — pure observation: register reads stored in
+  the per-controller `GpuInfo` record. Called by
+  `gpu::RunVendorProbe` after BAR0 is mapped.
+- `Bringup(GpuInfo&)` — allocates a 4 KiB DMA-coherent ring/
+  pushbuffer, logs the would-be ring program, frees the buffer,
+  and returns `Unsupported`. The skeleton stays gated until the
+  vendor-specific firmware loaders (Intel GuC/HuC, AMD MEC/RLC,
+  NVIDIA GSP) land. The dispatch surface is in place so
+  follow-up slices flip a known set of register pokes rather
+  than re-derive the bring-up shape.
+- `IsBroughtUp()` — diagnostic accessor.
+
+`gpu.cpp` no longer hosts vendor-specific register pokes; it
+dispatches into the per-vendor TUs and only retains
+`NvidiaArchName` (used by the cross-vendor diagnostic line).
 
 ## Compositor Primitives
 
