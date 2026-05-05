@@ -119,10 +119,19 @@ the same commit** that delivers the code.
 
 ### Stage 6 — VFS mount path
 
-- **Scope:** `fs::VfsMount(BlockDeviceHandle, FsType,
-  mount_point) -> MountId`. First consumer: the shell gains a
-  `mount` command that takes `/dev/nvme0p1` and attaches it at
-  `/mnt/...`.
+- **First slice landed:** `fs::VfsMount(mount_point, FsType,
+  block_handle) -> MountId` registry — fixed-size table of 16
+  mounts, dup-mount-point rejection, ramfs-needs-zero-handle
+  validation, plus `VfsUmount` / `VfsMountFind` /
+  `VfsMountEnumerate` and a boot self-test. The registry is
+  bookkeeping only today: lookups still go through the
+  constinit ramfs trees.
+- **Remaining work:** teach `VfsLookup` to consult the mount
+  table when path resolution crosses a mount-point — switch
+  to the mount entry's per-FS-type lookup vtable. That's the
+  Stage 6 second slice. Until then, `VfsMount` is a registry
+  + telemetry surface (the kernel shell's eventual `mount`
+  command will list registered mounts).
 - **Per-process namespace roots** continue to work — `Process::root`
   stays a `const RamfsNode*` today, but grows into a generic
   `VfsDir*` handle once on-disk FS is mountable.

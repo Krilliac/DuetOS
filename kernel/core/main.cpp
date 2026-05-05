@@ -158,6 +158,7 @@
 #include "drivers/video/widget.h"
 #include "fs/ramfs.h"
 #include "fs/tmpfs.h"
+#include "fs/mount.h"
 #include "fs/vfs.h"
 #include "mm/address_space.h"
 #include "mm/dma.h"
@@ -1792,6 +1793,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                        []()
                                        {
                                            duetos::fs::VfsSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
+        duetos::core::InitcallRegister(duetos::core::Phase::Vfs, "vfs-mount-selftest",
+                                       []()
+                                       {
+                                           duetos::fs::VfsMountSelfTest();
                                            return duetos::core::Result<void>{};
                                        });
     }
