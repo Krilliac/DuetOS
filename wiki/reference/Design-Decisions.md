@@ -612,6 +612,41 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 119 — Shell `lastdump` operator readout for the last minidump
+
+- **Scope:** `kernel/shell/shell_storage.cpp` (`CmdLastdump`),
+  `kernel/shell/shell_internal.h` (prototype),
+  `kernel/shell/shell_dispatch.cpp` (dispatch + name).
+- **Decision:** Add a `lastdump` shell command that reads the
+  byte-buffer `AccessLastMinidump` exposes and prints
+  size + the "MDMP" signature + version word. On QEMU the
+  dump bytes egress via debugcon (port 0xE9) on every emit;
+  on real hardware those writes go nowhere, so an in-system
+  command that confirms a dump was emitted (and how big it
+  was) is the only operator-facing surface that survives.
+  Prints "no minidump emitted this boot" when
+  `AccessLastMinidump` returns false.
+- **Why:** Real-hardware crash diagnostics. Today the only
+  way to see whether a minidump fired was to grep the serial
+  log for `[minidump] emitting`; on a board without serial
+  capture that log is invisible. `lastdump` reads the same
+  static buffer the debugcon path emits so the operator
+  always has a "did the dump happen" answer reachable from
+  the shell.
+- **Rules out / defers:** Writing the bytes to disk (the
+  Roadmap's "Crash-dump persistence to disk" entry is still
+  open — that's the FAT32 / reserved-LBA writer slice).
+  Pretty-printing the ExceptionStream / ThreadList /
+  ModuleList contents (each is a separate parser; deferred
+  until an in-system debugger needs them).
+- **Revisit when:** A reserved-LBA panic-time writer lands
+  and `lastdump` grows a `--save` flag to copy the bytes
+  to that LBA range from the post-boot operator session.
+- **Related tracks:** Track 1 (Diagnostics), Track 11
+  (Shell — operator commands).
+
+---
+
 ## 118 — ReadFile dispatches by handle range (mirrors WriteFile)
 
 - **Scope:** `userland/libs/kernel32/kernel32.c` (`ReadFile`).

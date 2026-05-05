@@ -648,6 +648,7 @@ const char* const kCommandSet[] = {
     "mkdir",    "rmdir",     "truncate",  "realpath", "id",        "groups",    "nproc",      "arch",      "tty",
     "type",     "printenv",  "df",        "du",       "loadavg",   "clearhist", "pause",      "yes",       "sync",
     "port",     "assert",    "watch",     "script",   "exit",      "mkfs",
+    "lastdump",
 };
 const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1545,6 +1546,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "mkfs"))
     {
         CmdMkfs(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "lastdump"))
+    {
+        CmdLastdump();
         return;
     }
     if (StrEq(cmd, "metrics"))

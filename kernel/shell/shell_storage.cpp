@@ -13,6 +13,7 @@
 
 #include "shell/shell_internal.h"
 
+#include "diag/minidump.h"
 #include "drivers/storage/block.h"
 #include "drivers/video/console.h"
 #include "fs/fat32.h"
@@ -248,6 +249,48 @@ void CmdMkfs(u32 argc, char** argv)
     else
     {
         ConsoleWriteln("mkfs: laid down BPB but re-probe rejected — please file a bug");
+    }
+}
+
+// `lastdump` — operator readout for the last-built minidump.
+// On QEMU the dump bytes egress via debugcon (port 0xE9) on every
+// emit; on real hardware those writes go nowhere, so an
+// in-system command that confirms a dump WAS emitted (and how
+// big it was) is the only surface that survives. Prints
+// "no dump this boot" when AccessLastMinidump returns false.
+void CmdLastdump()
+{
+    namespace md = duetos::diag::minidump;
+    const duetos::u8* bytes = nullptr;
+    duetos::u64 len = 0;
+    if (!md::AccessLastMinidump(&bytes, &len) || bytes == nullptr || len == 0)
+    {
+        ConsoleWriteln("lastdump: no minidump emitted this boot");
+        return;
+    }
+    ConsoleWrite("lastdump: ");
+    WriteHexCol(len, 0);
+    ConsoleWriteln(" bytes resident in the kernel buffer");
+    // First 4 bytes of a minidump are "MDMP" (0x504D444D LE) per
+    // the Microsoft format. Surface them so an operator can sanity-
+    // check the header without a debugger attached.
+    ConsoleWrite("  signature: ");
+    if (len >= 4)
+    {
+        for (duetos::u32 i = 0; i < 4; ++i)
+        {
+            const char c = static_cast<char>(bytes[i]);
+            ConsoleWriteChar((c >= 0x20 && c < 0x7F) ? c : '?');
+        }
+    }
+    ConsoleWriteln("");
+    if (len >= 8)
+    {
+        // Bytes 4..7 are version (low 16) + revision (high 16).
+        ConsoleWrite("  version: ");
+        const duetos::u16 ver = static_cast<duetos::u16>(bytes[4] | (bytes[5] << 8));
+        WriteHexCol(static_cast<duetos::u64>(ver), 4);
+        ConsoleWriteln("");
     }
 }
 
