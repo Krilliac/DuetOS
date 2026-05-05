@@ -32,6 +32,7 @@
 #include "log/klog.h"
 #include "core/panic.h"
 #include "sched/sched.h"
+#include "security/login.h"
 
 // Defined in exceptions.S — the stub for vector 0x21 that pushes a zero
 // error code, pushes the vector, and jumps to isr_common (which calls
@@ -1085,6 +1086,7 @@ void KeyboardInjectEvent(const KeyEvent& ev)
     g_inject_ring[g_inject_head & kInjectRingMask] = ev;
     ++g_inject_head;
     arch::Sti();
+    duetos::core::InputActivityStamp();
     duetos::sched::WaitQueueWakeOne(&g_readers);
 }
 

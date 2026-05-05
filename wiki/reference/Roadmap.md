@@ -355,19 +355,6 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
 
 ## End-user features
 
-### Firewall subsystem
-
-- **Today:** no kernel firewall — every packet a bound NIC
-  accepts reaches the stack. The Start menu's FIREWALL entry
-  opens an empty-state placeholder window
-  (`kernel/apps/firewall.cpp`) that documents the gap.
-- **Blocks on:** filter hook points at L2 ingress / L3 egress,
-  a rule table data structure, and a `kCapNetAdmin` capability
-  for editing.
-- **Owner:** `kernel/net/` plus a real `kernel/apps/firewall.cpp`
-  body. Roadmap detail in
-  [Firewall Roadmap](../networking/Firewall-Roadmap.md).
-
 ### ACPI S5 / soft-off shutdown
 
 - **Today:** Start menu's SHUT DOWN action calls `KernelHalt`
@@ -378,32 +365,30 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
   `\_S5_`. Without that we can't drive the chipset's soft-off
   state. Same blocker the per-CPU sleep state work has.
 
-### Lock screen — same-user-only unlock
+### Device Manager — virtio + eject + hot-unplug
 
-- **Today:** Start menu's LOCK action calls `LoginLock` which
-  brings the gate up without clearing the auth session. Any
-  valid user can unlock (Win9x-style).
-- **Blocks on:** per-user lock policy + idle-timeout auto-lock
-  + on-screen "switch user" affordance distinct from logout.
+- **Today:** Device Manager renders two sections: a PCI
+  device table (vendor:device, class label) and a USB
+  device table that walks every xHCI controller's port
+  records (vendor:product, speed, class label,
+  HID kbd/mouse hint). Read-only.
+- **Blocks on:** virtio child enumeration to merge in (no
+  virtio bus walker exists today), `Eject` capability
+  gating, and a hot-unplug driver path that the AHCI /
+  xHCI controllers don't yet support.
 
-### Device Manager — class tree + eject
+### Network Status — Wi-Fi scan
 
-- **Today:** read-only flat PCI list backing the Start menu's
-  DEVICE MANAGER entry (`kernel/apps/devicemgr.cpp`).
-- **Blocks on:** USB / virtio child enumeration to merge into
-  a single tree, `Eject` capability gating, and a hot-unplug
-  driver path that the AHCI / xHCI controllers don't yet
-  support.
-
-### Network Status — per-iface counters and Wi-Fi scan
-
-- **Today:** read-only iface table (index, MAC, IPv4, bound
-  state) backing the Start menu's NETWORK STATUS entry
-  (`kernel/apps/netstatus.cpp`).
-- **Blocks on:** rx/tx counters in the L2 driver layer (NICs
-  don't aggregate them yet), Wi-Fi scan results from
-  `kernel/net/wifi.cpp`, and a routing/DNS surface for the
-  display layer.
+- **Today:** Iface table (index, MAC, IPv4, bound state),
+  rx/tx packet + byte counters, the firewall's per-iface
+  `tx_dropped_firewall` column, and a routing/DNS section
+  (gateway + DNS resolver + DHCP server + lease seconds)
+  pulled from `DhcpLeaseRead()` back the Start menu's
+  NETWORK STATUS entry (`kernel/apps/netstatus.cpp`).
+- **Blocks on:** Wi-Fi scan results from `kernel/net/wifi.cpp`
+  for an SSID picker. Routing surface is single-lease
+  today — multi-iface lease tracking happens when more than
+  one DHCP transaction can be live at once.
 
 ### Terminal emulator (windowed userland shell)
 

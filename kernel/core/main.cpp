@@ -114,6 +114,7 @@
 #include "drivers/usb/usb.h"
 #include "drivers/usb/xhci.h"
 #include "net/net_smoke.h"
+#include "net/firewall.h"
 #include "net/stack.h"
 #include "subsystems/graphics/graphics.h"
 #include "drivers/storage/ahci.h"
@@ -2729,6 +2730,8 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Bringing up network stack skeleton.\n");
     duetos::net::NetStackInit();
+    DUETOS_BOOT_SELFTEST(duetos::net::firewall::FwSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::core::IdleLockSelfTest());
     // Smoke test runs in its own task. It owns the (single) TCP
     // slot during its run and installs the boot HTTP listener
     // afterwards via NetSmokeInstallBootListener — so an active
@@ -2944,6 +2947,20 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             // ticker nor the mouse reader.
             if (duetos::core::LoginIsActive())
             {
+                // Ctrl+Alt+S on a LOCKED gate is the "switch user"
+                // affordance: clears the lock, logs the locker out,
+                // re-opens the gate so any account can sign in.
+                // Available only while locked — on a fresh boot
+                // (LoginIsActive but !LoginIsLocked) the chord
+                // routes into LoginFeedKey along with everything
+                // else.
+                if (ctrl && alt && duetos::core::LoginIsLocked() && (ev.code == 's' || ev.code == 'S'))
+                {
+                    duetos::drivers::video::CompositorLock();
+                    duetos::core::LoginSwitchUser();
+                    duetos::drivers::video::CompositorUnlock();
+                    continue;
+                }
                 duetos::drivers::video::CompositorLock();
                 const bool still_active = duetos::core::LoginFeedKey(ev.code);
                 if (!still_active)
@@ -4068,6 +4085,58 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         }
     };
     duetos::sched::SchedCreate(kbd_reader, nullptr, "kbd-reader");
+
+    // Idle-timeout auto-lock watcher. Wakes once a second and
+    // calls LoginLock when the active session has been idle past
+    // the configured threshold (default 600s; override via
+    // `idlelock=<seconds>` on the boot cmdline; 0 disables).
+    {
+        const char* boot_cmdline = FindBootCmdline(multiboot_info);
+        if (boot_cmdline != nullptr)
+        {
+            const char* p = boot_cmdline;
+            while (*p != '\0')
+            {
+                while (*p == ' ' || *p == '\t')
+                {
+                    ++p;
+                }
+                if (*p == '\0')
+                {
+                    break;
+                }
+                const char* token = p;
+                while (*p != '\0' && *p != ' ' && *p != '\t')
+                {
+                    ++p;
+                }
+                const char* prefix = "idlelock=";
+                const char* k = prefix;
+                const char* t = token;
+                while (*k != '\0' && t < p && *t == *k)
+                {
+                    ++k;
+                    ++t;
+                }
+                if (*k == '\0')
+                {
+                    duetos::u32 n = 0;
+                    bool any_digit = false;
+                    while (t < p && *t >= '0' && *t <= '9')
+                    {
+                        n = n * 10 + duetos::u32(*t - '0');
+                        ++t;
+                        any_digit = true;
+                    }
+                    if (any_digit && t == p)
+                    {
+                        duetos::core::IdleLockSetThresholdSeconds(n);
+                    }
+                }
+            }
+        }
+    }
+    duetos::core::IdleLockTaskStart();
 
     // Serial-input pump: lets a host terminal connected via
     // QEMU's `-serial stdio` drive the shell — typed bytes

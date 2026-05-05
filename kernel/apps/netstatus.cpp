@@ -12,7 +12,6 @@ namespace
 
 constexpr u32 kRowH = 14;
 constexpr u32 kMargin = 12;
-constexpr u32 kFg = 0x00C8D0DA;
 constexpr u32 kFgDim = 0x00808890;
 constexpr u32 kHeaderFg = 0x00FFFFFF;
 constexpr u32 kBg = 0x00101820;
@@ -33,6 +32,37 @@ void Dec3(char* out, u8 v)
     out[0] = static_cast<char>('0' + (v / 100));
     out[1] = static_cast<char>('0' + ((v / 10) % 10));
     out[2] = static_cast<char>('0' + (v % 10));
+}
+
+// Right-align a u64 into a fixed-width column. Truncates the
+// leading digits if the value exceeds `width` — UI-only, the
+// raw counters remain accurate via InterfaceCountersRead.
+void U64Col(char* out, u32 width, u64 v)
+{
+    char tmp[32];
+    u32 t = 0;
+    if (v == 0)
+    {
+        tmp[t++] = '0';
+    }
+    while (v != 0 && t < sizeof(tmp))
+    {
+        tmp[t++] = static_cast<char>('0' + (v % 10));
+        v /= 10;
+    }
+    if (t > width)
+    {
+        t = width;
+    }
+    const u32 pad = width - t;
+    for (u32 i = 0; i < pad; ++i)
+    {
+        out[i] = ' ';
+    }
+    for (u32 i = 0; i < t; ++i)
+    {
+        out[pad + i] = tmp[t - 1 - i];
+    }
 }
 
 void FormatMac(const duetos::net::MacAddress& mac, char* out)
@@ -68,7 +98,10 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     u32 y = cy + kMargin;
     FramebufferDrawString(cx + kMargin, y, "NETWORK INTERFACES", kHeaderFg, kBg);
     y += kRowH + 4;
-    FramebufferDrawString(cx + kMargin, y, "IDX  MAC                IPV4             STATE", kFgDim, kBg);
+    FramebufferDrawString(
+        cx + kMargin, y,
+        "IDX  MAC                IPV4             STATE  RX-PKT     RX-BYTE    TX-PKT     TX-BYTE    FW-DROP", kFgDim,
+        kBg);
     y += kRowH;
 
     const u64 n = duetos::net::InterfaceCount();
@@ -80,7 +113,7 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 
     for (u32 i = 0; i < n && y + kRowH < cy + ch; ++i)
     {
-        char line[80];
+        char line[160];
         u32 o = 0;
         line[o++] = ' ';
         line[o++] = static_cast<char>('0' + (i / 10));
@@ -108,15 +141,136 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
         }
 
         const bool bound = duetos::net::InterfaceIsBound(i);
-        const char* state_str = bound ? "BOUND" : "DOWN";
+        const char* state_str = bound ? "BOUND" : "DOWN ";
         u32 s = 0;
         while (state_str[s] != '\0')
             line[o++] = state_str[s++];
+        line[o++] = ' ';
+        line[o++] = ' ';
+
+        const auto cnt = duetos::net::InterfaceCountersRead(i);
+        U64Col(line + o, 10, cnt.rx_packets);
+        o += 10;
+        line[o++] = ' ';
+        U64Col(line + o, 10, cnt.rx_bytes);
+        o += 10;
+        line[o++] = ' ';
+        U64Col(line + o, 10, cnt.tx_packets);
+        o += 10;
+        line[o++] = ' ';
+        U64Col(line + o, 10, cnt.tx_bytes);
+        o += 10;
+        line[o++] = ' ';
+        U64Col(line + o, 10, cnt.tx_dropped_firewall);
+        o += 10;
         line[o] = '\0';
 
         FramebufferDrawString(cx + kMargin, y, line, bound ? kBound : kUnbound, kBg);
         y += kRowH;
     }
+
+    // Routing / DNS — pulled from the most recent DHCP lease. v0
+    // is single-lease (the stack tracks one transaction at a time)
+    // so a single GATEWAY / DNS line is enough; once multiple
+    // leases coexist the app grows a per-iface section.
+    y += kRowH;
+    if (y + kRowH >= cy + ch)
+    {
+        return;
+    }
+    const auto lease = duetos::net::DhcpLeaseRead();
+    FramebufferDrawString(cx + kMargin, y, "ROUTING / DNS", kHeaderFg, kBg);
+    y += kRowH + 4;
+
+    char line[80];
+    u32 o = 0;
+    auto append_str = [&line, &o](const char* s)
+    {
+        while (*s != '\0' && o + 1 < sizeof(line))
+        {
+            line[o++] = *s++;
+        }
+    };
+    auto append_ip = [&line, &o](duetos::net::Ipv4Address ip)
+    {
+        char buf[20];
+        u32 b = 0;
+        for (u32 i = 0; i < 4; ++i)
+        {
+            const u8 v = ip.octets[i];
+            if (v >= 100)
+            {
+                buf[b++] = static_cast<char>('0' + (v / 100));
+            }
+            if (v >= 10)
+            {
+                buf[b++] = static_cast<char>('0' + ((v / 10) % 10));
+            }
+            buf[b++] = static_cast<char>('0' + (v % 10));
+            if (i < 3)
+            {
+                buf[b++] = '.';
+            }
+        }
+        for (u32 i = 0; i < b && o + 1 < sizeof(line); ++i)
+        {
+            line[o++] = buf[i];
+        }
+    };
+
+    if (!lease.valid)
+    {
+        FramebufferDrawString(cx + kMargin, y, "  (no DHCP lease — gateway / DNS unknown)", kFgDim, kBg);
+        return;
+    }
+
+    o = 0;
+    append_str("GATEWAY  : ");
+    append_ip(lease.router);
+    line[o] = '\0';
+    FramebufferDrawString(cx + kMargin, y, line, kBound, kBg);
+    y += kRowH;
+    if (y + kRowH >= cy + ch)
+    {
+        return;
+    }
+
+    o = 0;
+    append_str("DNS      : ");
+    append_ip(lease.dns);
+    line[o] = '\0';
+    FramebufferDrawString(cx + kMargin, y, line, kBound, kBg);
+    y += kRowH;
+    if (y + kRowH >= cy + ch)
+    {
+        return;
+    }
+
+    o = 0;
+    append_str("DHCP SVR : ");
+    append_ip(lease.server);
+    append_str("   LEASE: ");
+    {
+        u64 v = lease.lease_secs;
+        char buf[16];
+        u32 b = 0;
+        if (v == 0)
+        {
+            buf[b++] = '0';
+        }
+        while (v != 0 && b < sizeof(buf))
+        {
+            buf[b++] = static_cast<char>('0' + (v % 10));
+            v /= 10;
+        }
+        while (b != 0 && o + 1 < sizeof(line))
+        {
+            line[o++] = buf[--b];
+        }
+    }
+    append_str("s");
+    line[o] = '\0';
+    FramebufferDrawString(cx + kMargin, y, line, kFgDim, kBg);
 }
 
 } // namespace

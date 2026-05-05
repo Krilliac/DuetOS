@@ -4575,3 +4575,343 @@ Don't delete superseded entries. If a decision is replaced, add a
 `**Superseded by #M (commit hash)**` note at the top of entry #N.
 Both stay in git history regardless; keeping them in the rendered
 doc helps future readers audit the trail.
+
+---
+
+## 104 — Firewall v0 (rule table + IPv4 in/out hooks + kCapNetAdmin)
+
+- **Scope:** `kernel/net/firewall.{h,cpp}`,
+  `kernel/net/stack.{h,cpp}` (per-iface counters +
+  `IfaceTx` egress helper + ingress hook in
+  `Ipv4HandleIncoming`), `kernel/proc/process.{h,cpp}`
+  (`kCapNetAdmin`), `kernel/apps/firewall.cpp` (read-only
+  rule list + per-rule hits), `kernel/apps/netstatus.cpp`
+  (rx/tx packet + byte columns).
+- **Decision:** Static fixed-capacity rule table (32
+  entries) evaluated first-match-wins. Each rule carries
+  direction, protocol (Any / ICMP / TCP / UDP), src + dst
+  prefix, src + dst port range, action (Allow / Deny),
+  active flag, hit counter. Default policies are per
+  direction and configurable; default to Allow / Allow at
+  boot so the existing DHCP / DNS / TCP smoke paths keep
+  working. Read access is unprivileged; edit operations
+  (FwAdd / FwRemove / FwToggle / FwSetDefaultPolicy) are
+  gated on a brand-new `kCapNetAdmin` capability —
+  distinct from `kCapNet` so a process can be allowed to
+  USE the network without being allowed to RECONFIGURE
+  it. Hooks live at IPv4 ingress (after header
+  validation) and IPv4 egress (inside `IfaceTx`, the new
+  helper every TX site routes through). Per-iface
+  counters (`rx_packets`, `rx_bytes`, `tx_packets`,
+  `tx_bytes`, `tx_dropped_firewall`, `tx_dropped_unbound`)
+  share the same plumbing.
+- **Why:** Adding a packet filter without a chokepoint
+  invites bypasses — three of the existing TX call
+  sites already had subtle differences. Funnelling them
+  through `IfaceTx` makes the firewall + counter
+  invariants uniform: there is no way to send a frame
+  out a bound interface without consulting them. Keeping
+  the rule capacity static avoids a kernel allocation
+  on every rule edit and matches the v0 expectation
+  that a workstation has a small handful of explicit
+  rules; promoting to dynamic is reserved for a real
+  workload that actually exhausts 32 slots.
+- **What it rules out:** Connection tracking ("established
+  + related" semantics) is not v0 — flipping the
+  default-deny inbound policy on without it would break
+  every TCP connect we initiated, since the peer's reply
+  would arrive unsolicited. We default Allow inbound
+  until conntrack lands. Logging hooks (a bounded ring of
+  recent denials for the kernel shell to surface) and an
+  editor surface in the desktop firewall app are also
+  deferred — the kernel-shell command driver is the v0
+  edit path.
+- **Revisit when:** A workload demands per-process socket
+  policy keyed on `Process::caps` (deny network egress
+  for sandboxed PEs entirely) — that's the next major
+  slice and unlocks "default-deny inbound + sandbox
+  egress lockdown". Conntrack lands when an operator
+  legitimately wants Windows-style default-deny inbound
+  and a TCP active-open path no longer breaks.
+- **Related tracks:** Track 6 (Networking — protocols
+  + interfaces), Track 12 (Security — capability gating).
+
+---
+
+## 105 — Lock screen: same-user-only unlock policy
+
+- **Scope:** `kernel/security/login.{h,cpp}`.
+- **Decision:** `LoginLock` captures the active username
+  (via `AuthCurrentUserName`) into a new `locked_user`
+  field on the login state and sets a `locked` flag. Both
+  the TTY and GUI submit paths short-circuit before
+  `AuthLogin` if `locked` is true and the submitted
+  username doesn't match `locked_user`, displaying a
+  "LOCKED — USE THE SAME USER OR LOG OUT TO SWITCH" status
+  and emitting a serial diagnostic. Successful unlock
+  clears both fields; `LoginReopen` (the path the existing
+  `logout` shell command takes) also clears them so a
+  fresh login is unconstrained. If `LoginLock` fires with
+  no active session (programmer error — locking an empty
+  desktop), the lock policy is not engaged so the box
+  doesn't become unreachable.
+- **Why:** Win9x-style "any valid user can unlock" was a
+  documented gap on the LOCK action — useful for v0 boot
+  bring-up but a clear regression once multi-user accounts
+  landed in the auth database. The fix is small (one
+  policy field plus one short-circuit on the submit path)
+  but couldn't be retrofitted without committing to
+  capturing the active user at lock time, which means a
+  defined behaviour for locking an empty desktop.
+- **What it rules out:** Idle-timeout auto-lock (no kernel
+  idle source today; needs a per-input-event timestamp +
+  a scheduler-tick comparator) and an on-screen "switch
+  user" affordance distinct from `logout` (a different
+  user must currently log out the locker first to reach
+  the gate, mirroring an early-Windows-NT discipline).
+- **Revisit when:** A workload demands automatic lock
+  after N minutes of input idle, or an on-screen
+  affordance that does what `LoginReopen` does without
+  the locker having to type the `logout` command first.
+- **Related tracks:** Track 12 (Security — auth gate).
+
+---
+
+## 106 — Device Manager: USB section + Network Status FW-DROP column
+
+- **Scope:** `kernel/apps/devicemgr.cpp`,
+  `kernel/apps/netstatus.cpp`.
+- **Decision:** Device Manager renders two sections — PCI
+  devices (existing) and USB devices (new) — by walking
+  `XhciControllerAt(i)->ports[]` per xHCI controller and
+  printing `controller_idx port_num VID:PID speed
+  class_label hid_hint` for every connected port. Network
+  Status grows a `FW-DROP` column reading
+  `InterfaceCountersRead(i).tx_dropped_firewall`. Both
+  reads are unprivileged — these surfaces are diagnostic.
+- **Why:** Decision 104 added per-iface counters and the
+  firewall verdict path but stopped short of surfacing
+  `tx_dropped_firewall` in the app — it stayed a
+  diagnostic on the kernel side. Closing that loop costs
+  one column. Device Manager's PCI-only view was a known
+  gap; xHCI already populates `PortRecord` with
+  vendor/product/class/HID-classifier on every successful
+  enumeration, so adding the second section is a render
+  change, not a discovery change.
+- **What it rules out:** The new sections do not merge
+  hot-unplug events (no driver path supports it) and do
+  not yet render virtio child enumeration (no virtio bus
+  walker today). `Eject` is also not gated yet — the
+  whole surface is read-only by design until the
+  unplug-capable path lands.
+- **Revisit when:** A virtio bus walker lands and it makes
+  sense to merge its devices into the same tree, or
+  hot-unplug becomes possible and the surface needs an
+  `Eject` button (gated on a new `kCapDeviceAdmin`).
+- **Related tracks:** Track 9 (Drivers — buses), Track 13
+  (UX — apps).
+
+---
+
+## 107 — Firewall shell command + Network Status routing/DNS surface
+
+- **Scope:** `kernel/shell/shell_network.cpp`,
+  `kernel/shell/shell_dispatch.cpp`,
+  `kernel/shell/shell_internal.h`,
+  `kernel/apps/netstatus.cpp`.
+- **Decision:** A new `firewall` shell command exposes
+  every `FwAdd` / `FwRemove` / `FwToggle` /
+  `FwSetDefaultPolicy` / `FwSnapshot` / `FwStatsRead` /
+  `FwInit` operation through a uniform argv parser. Names
+  are deliberately distinct from the existing `fwpolicy`
+  / `fwtrace` commands (which target firmware loading,
+  not the packet filter). Network Status grows a routing
+  / DNS section pulled from `DhcpLeaseRead()` showing
+  GATEWAY, DNS resolver, DHCP server, and lease seconds.
+  Both surfaces are unprivileged reads (configuration is
+  not secret); edit operations through the shell run in
+  the trusted profile so `kCapNetAdmin` is satisfied
+  automatically.
+- **Why:** The firewall API landed in #104 with no
+  text-mode operator surface — only the read-only
+  desktop app. A real audit ("did the rule I added
+  actually take effect? what's been denied so far?")
+  needs a kernel-shell equivalent. Network Status
+  similarly had counters but no routing context — a
+  user looking at "why doesn't ping reach the gateway"
+  needed an external command to see what gateway the
+  stack thought it had.
+- **What it rules out:** Per-iface DHCP lease (only one
+  global lease today — the stack tracks one transaction
+  at a time) and a desktop firewall editor. The shell
+  driver is the v0 edit path; promoting to a desktop
+  widget waits for an interactive widget framework
+  bound to caps.
+- **Revisit when:** Multiple concurrent DHCP transactions
+  ship and per-iface lease tracking lands, or a workload
+  needs an interactive desktop firewall editor that
+  doesn't reach through the kernel shell.
+- **Related tracks:** Track 6 (Networking), Track 13
+  (UX — apps).
+
+---
+
+## 108 — Lock-screen idle-timeout auto-lock
+
+- **Scope:** `kernel/security/login.{h,cpp}`,
+  `kernel/drivers/input/ps2kbd.cpp`,
+  `kernel/drivers/input/ps2mouse.cpp`,
+  `kernel/core/main.cpp`.
+- **Decision:** Every kbd / mouse ingest path stamps a
+  global `g_input_last_activity_ticks` via
+  `core::InputActivityStamp`. A dedicated `idle-lock`
+  task (`SchedSleepTicks(100)` per iteration — 1 Hz at
+  the scheduler's 100 Hz tick) computes
+  `now - last_activity` and calls `LoginLock()` once the
+  gap exceeds the configured threshold AND a session is
+  active AND the gate isn't already up. Threshold
+  defaults to 600 seconds (10 minutes) and is
+  configurable per-boot via the `idlelock=<seconds>`
+  kernel cmdline token; 0 disables auto-lock entirely.
+  The activity stamp is a single 64-bit aligned
+  variable; reads use a single load, writes happen
+  inside the existing Cli/Sti bracket of each input
+  driver — no new lock. The watcher takes
+  `CompositorLock` itself when it transitions to
+  locked, matching the discipline the kbd-reader thread
+  uses for `LoginFeedKey`.
+- **Why:** The same-user-only unlock policy from #105
+  closed the "any user can unlock a locked desktop"
+  hole, but the gap that comes BEFORE that — "operator
+  walks away, screen never locks" — was still open.
+  The roadmap entry called out the dependency on a
+  per-input-event timestamp and a tick comparator;
+  both are cheap and well-defined. Sticking the watcher
+  in its own task avoids inflating the keyboard-reader
+  thread's responsibilities and keeps the periodic
+  check off the IRQ path.
+- **What it rules out:** An on-screen "switch user"
+  affordance distinct from `logout` — that's still
+  pending. The auto-lock fires only on full operator
+  idleness; no per-feature exemptions (e.g. "don't
+  lock during a long-running build" requires the
+  application to call `InputActivityStamp` itself
+  periodically, which we explicitly chose NOT to ship
+  as a syscall in v0 — granting a process the ability
+  to defer lock would require a cap and a UX
+  affordance).
+- **Revisit when:** A workload needs per-feature lock
+  exemption (a media player suppressing screensaver
+  during playback, etc.), or the on-screen switch-user
+  affordance lands and needs to interact with the
+  auto-lock timing.
+- **Related tracks:** Track 12 (Security — auth gate),
+  Track 4 (Input — kbd / mouse pipelines).
+
+---
+
+## 109 — Firewall conntrack-lite + denial-log ring + Ctrl+Alt+S switch-user
+
+- **Scope:** `kernel/net/firewall.{h,cpp}`,
+  `kernel/shell/shell_network.cpp`,
+  `kernel/security/login.{h,cpp}`,
+  `kernel/core/main.cpp`.
+- **Decision:** Three layered additions to the firewall
+  + auth gate:
+  1. **Conntrack v0** — every egress packet whose proto
+     is TCP / UDP and that no rule explicitly matched
+     registers a `(proto, local_ip, local_port, peer_ip,
+     peer_port)` entry. Capacity 64; LRU eviction; TTLs
+     300 s (TCP) / 60 s (UDP); refresh on each match.
+     On ingress, when no rule matches AND the default
+     policy would be Deny, the firewall consults
+     conntrack for the reverse-direction tuple before
+     logging — a hit yields Allow. Models "established
+     connections accepted" without doing real TCP-state
+     tracking.
+  2. **Denial log** — bounded ring (32 slots) capturing
+     every Deny verdict with its 5-tuple, direction,
+     timestamp, and matched rule index (or `kFwMaxRules`
+     when the default policy fired). Surfaced via
+     `FwLogSnapshot` / `FwLogTotalCount` and the new
+     `firewall log` shell subcommand. `firewall stats`
+     gains conntrack counters
+     (`inserts`/`hits`/`evictions`).
+  3. **Switch-user affordance** — `Ctrl+Alt+S` on a
+     locked GUI (active session, gate up because
+     `LoginLock` fired) clears the lock policy, calls
+     `AuthLogout`, and re-opens the gate. The locked
+     GUI grows a footer hint identifying the locker
+     and the chord. On a non-locked gate (fresh boot,
+     no active session) the chord routes to
+     `LoginFeedKey` like every other keystroke.
+- **Why:** With conntrack in place an operator can
+  finally `firewall default in deny` without breaking
+  outbound TCP / UDP replies. The denial log closes the
+  observability hole the rule table created — without
+  it, a "why is this connection failing" question
+  needs an external sniffer. The switch-user chord
+  fills the last gap from #105 / #108: the locker
+  could trap a different user under their lock policy
+  with no escape short of `logout` (which they
+  couldn't reach without unlocking).
+- **What it rules out:** Real TCP-state-aware conntrack
+  (SYN / FIN / RST observation, half-open timeouts).
+  Per-process socket policy keyed on `Process::caps`.
+  An interactive desktop firewall editor. All three are
+  follow-up slices.
+- **Revisit when:** A real workload exercises the
+  default-deny inbound policy long enough that the
+  TTL-only conntrack lets stuck half-opens leak;
+  per-process firewall comes when a sandboxed PE
+  needs network egress restricted but not denied
+  outright.
+- **Related tracks:** Track 6 (Networking), Track 12
+  (Security — auth gate).
+
+---
+
+## 110 — TCP-state-aware conntrack + firewall app log/conntrack panels
+
+- **Scope:** `kernel/net/firewall.{h,cpp}`,
+  `kernel/net/stack.cpp`, `kernel/apps/firewall.cpp`.
+- **Decision:** `FwEvaluate` grew a `tcp_flags` u8
+  argument that the IPv4 ingress / egress hooks fill
+  from the TCP header (offset 13). Conntrack entries
+  carry a `TcpState` enum (NEW / Established / FinWait
+  / Closed); transitions are driven by SYN / SYN+ACK /
+  FIN / RST observation per direction. Per-state TTLs
+  replace fixed proto TTLs: NEW=30 s (catches
+  abandoned half-opens), Established=300 s, FinWait=
+  60 s, Closed=10 s (drains the slot quickly after
+  clean teardown). UDP / Any keep a single fixed TTL
+  in Established. The desktop firewall app now renders
+  the active conntrack entries (proto + state + local
+  + peer, top 4) and the recent-denials list (top 4)
+  underneath the rule table.
+- **Why:** Decision 109's conntrack-lite was a
+  TTL-only timer; a stuck half-open kept its slot for
+  the full Established TTL, and there was no signal to
+  the operator that the connection had progressed past
+  setup. Folding state observation into the same
+  refresh path costs one byte of struct + a
+  six-line state machine and makes the LRU eviction
+  pressure proportional to how connections are
+  actually used. The firewall-app panels close the
+  observability loop the kernel-shell `firewall log`
+  / `firewall conntrack` opened in #109 — an operator
+  with a desktop session no longer has to drop to the
+  kernel shell to see why a connection failed.
+- **What it rules out:** Window scaling / sequence-
+  number tracking, real conntrack helpers (FTP control
+  channel triggering data channels, etc.), and SYN
+  cookies. Those land if a workload demands them; the
+  v0 state machine intentionally stays a
+  short-and-correct subset.
+- **Revisit when:** A workload exposes timing edges
+  the four-state machine misses — e.g. simultaneous
+  open, half-close-then-data, or RST-after-FIN
+  pathologies. Standard recommendation is to grow
+  the enum first, then revisit per-state TTLs.
+- **Related tracks:** Track 6 (Networking), Track 13
+  (UX — apps).

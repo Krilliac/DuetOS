@@ -33,6 +33,7 @@
 #include "drivers/usb/cdc_ecm.h"
 #include "drivers/usb/rndis.h"
 #include "drivers/video/console.h"
+#include "net/firewall.h"
 #include "net/stack.h"
 #include "net/wifi.h"
 #include "net/wireless/wifi_diag.h"
@@ -1206,6 +1207,484 @@ void CmdUsbNet(u32 argc, char** argv)
         return;
     }
     ConsoleWriteln("USBNET: usage: usbnet <probe|status>");
+}
+
+namespace
+{
+
+bool ParseFwDirection(const char* s, duetos::net::firewall::Direction* out)
+{
+    if (StrEq(s, "in") || StrEq(s, "ingress"))
+    {
+        *out = duetos::net::firewall::Direction::Ingress;
+        return true;
+    }
+    if (StrEq(s, "out") || StrEq(s, "egress"))
+    {
+        *out = duetos::net::firewall::Direction::Egress;
+        return true;
+    }
+    return false;
+}
+
+bool ParseFwProto(const char* s, duetos::net::firewall::Proto* out)
+{
+    if (StrEq(s, "any"))
+    {
+        *out = duetos::net::firewall::Proto::Any;
+        return true;
+    }
+    if (StrEq(s, "icmp"))
+    {
+        *out = duetos::net::firewall::Proto::Icmp;
+        return true;
+    }
+    if (StrEq(s, "tcp"))
+    {
+        *out = duetos::net::firewall::Proto::Tcp;
+        return true;
+    }
+    if (StrEq(s, "udp"))
+    {
+        *out = duetos::net::firewall::Proto::Udp;
+        return true;
+    }
+    return false;
+}
+
+bool ParseFwAction(const char* s, duetos::net::firewall::Action* out)
+{
+    if (StrEq(s, "allow"))
+    {
+        *out = duetos::net::firewall::Action::Allow;
+        return true;
+    }
+    if (StrEq(s, "deny"))
+    {
+        *out = duetos::net::firewall::Action::Deny;
+        return true;
+    }
+    return false;
+}
+
+// Parse "1.2.3.4" or "1.2.3.4/24" — bare addr defaults to /32.
+bool ParseFwPrefix(const char* s, duetos::net::firewall::Ipv4Prefix* out)
+{
+    char addr_buf[32];
+    u32 i = 0;
+    while (s[i] != '\0' && s[i] != '/' && i < sizeof(addr_buf) - 1)
+    {
+        addr_buf[i] = s[i];
+        ++i;
+    }
+    addr_buf[i] = '\0';
+    if (!ParseIpv4(addr_buf, &out->addr))
+    {
+        return false;
+    }
+    if (s[i] == '\0')
+    {
+        out->mask_bits = 32;
+        return true;
+    }
+    if (s[i] != '/')
+    {
+        return false;
+    }
+    const i64 mask = ParseInt(s + i + 1);
+    if (mask < 0 || mask > 32)
+    {
+        return false;
+    }
+    out->mask_bits = static_cast<u8>(mask);
+    return true;
+}
+
+// Parse "lo-hi" or bare "n" (== n-n) or "any".
+bool ParseFwPortRange(const char* s, duetos::net::firewall::PortRange* out)
+{
+    if (StrEq(s, "any"))
+    {
+        out->lo = 0;
+        out->hi = 0xFFFF;
+        return true;
+    }
+    char buf[16];
+    u32 i = 0;
+    while (s[i] != '\0' && s[i] != '-' && i < sizeof(buf) - 1)
+    {
+        buf[i] = s[i];
+        ++i;
+    }
+    buf[i] = '\0';
+    const i64 lo = ParseInt(buf);
+    if (lo < 0 || lo > 0xFFFF)
+    {
+        return false;
+    }
+    if (s[i] == '\0')
+    {
+        out->lo = static_cast<u16>(lo);
+        out->hi = static_cast<u16>(lo);
+        return true;
+    }
+    const i64 hi = ParseInt(s + i + 1);
+    if (hi < lo || hi > 0xFFFF)
+    {
+        return false;
+    }
+    out->lo = static_cast<u16>(lo);
+    out->hi = static_cast<u16>(hi);
+    return true;
+}
+
+const char* DirectionLabel(duetos::net::firewall::Direction d)
+{
+    return d == duetos::net::firewall::Direction::Ingress ? "in " : "out";
+}
+
+const char* ProtoLabel(duetos::net::firewall::Proto p)
+{
+    using duetos::net::firewall::Proto;
+    switch (p)
+    {
+    case Proto::Icmp:
+        return "icmp";
+    case Proto::Tcp:
+        return "tcp ";
+    case Proto::Udp:
+        return "udp ";
+    case Proto::Any:
+    default:
+        return "any ";
+    }
+}
+
+void WriteFwPrefix(const duetos::net::firewall::Ipv4Prefix& p)
+{
+    WriteIpv4(p.addr);
+    ConsoleWriteChar('/');
+    WriteU64Dec(p.mask_bits);
+}
+
+void WriteFwPortRange(const duetos::net::firewall::PortRange& r)
+{
+    if (r.lo == 0 && r.hi == 0xFFFF)
+    {
+        ConsoleWrite("any");
+        return;
+    }
+    WriteU64Dec(r.lo);
+    if (r.lo != r.hi)
+    {
+        ConsoleWriteChar('-');
+        WriteU64Dec(r.hi);
+    }
+}
+
+void FirewallList()
+{
+    duetos::net::firewall::Rule snap[duetos::net::firewall::kFwMaxRules];
+    const u32 n = duetos::net::firewall::FwSnapshot(snap, duetos::net::firewall::kFwMaxRules);
+    ConsoleWrite("DEFAULT in=");
+    ConsoleWrite(duetos::net::firewall::FwDefaultPolicy(duetos::net::firewall::Direction::Ingress) ==
+                         duetos::net::firewall::Action::Allow
+                     ? "allow"
+                     : "deny");
+    ConsoleWrite("  out=");
+    ConsoleWriteln(duetos::net::firewall::FwDefaultPolicy(duetos::net::firewall::Direction::Egress) ==
+                           duetos::net::firewall::Action::Allow
+                       ? "allow"
+                       : "deny");
+    ConsoleWriteln("IDX DIR PROTO SRC                DST                SPORT     DPORT     ACTION HITS");
+    bool any = false;
+    for (u32 i = 0; i < n; ++i)
+    {
+        if (!snap[i].active)
+        {
+            continue;
+        }
+        any = true;
+        WriteU64Dec(i);
+        ConsoleWrite("   ");
+        ConsoleWrite(DirectionLabel(snap[i].dir));
+        ConsoleWriteChar(' ');
+        ConsoleWrite(ProtoLabel(snap[i].proto));
+        ConsoleWriteChar(' ');
+        WriteFwPrefix(snap[i].src);
+        ConsoleWrite("        ");
+        WriteFwPrefix(snap[i].dst);
+        ConsoleWriteChar(' ');
+        WriteFwPortRange(snap[i].src_port);
+        ConsoleWrite("    ");
+        WriteFwPortRange(snap[i].dst_port);
+        ConsoleWrite("    ");
+        ConsoleWrite(snap[i].action == duetos::net::firewall::Action::Allow ? "allow" : "deny ");
+        ConsoleWriteChar(' ');
+        WriteU64Dec(snap[i].hits);
+        ConsoleWriteln("");
+    }
+    if (!any)
+    {
+        ConsoleWriteln("(no active rules — only defaults apply)");
+    }
+}
+
+void FirewallStats()
+{
+    const auto s = duetos::net::firewall::FwStatsRead();
+    ConsoleWrite("FIREWALL: in checked=");
+    WriteU64Dec(s.ingress_checked);
+    ConsoleWrite(" denied=");
+    WriteU64Dec(s.ingress_denied);
+    ConsoleWrite("  out checked=");
+    WriteU64Dec(s.egress_checked);
+    ConsoleWrite(" denied=");
+    WriteU64Dec(s.egress_denied);
+    ConsoleWriteln("");
+    ConsoleWrite("CONNTRACK: inserts=");
+    WriteU64Dec(s.conntrack_inserts);
+    ConsoleWrite(" hits=");
+    WriteU64Dec(s.conntrack_hits);
+    ConsoleWrite(" evictions=");
+    WriteU64Dec(s.conntrack_evictions);
+    ConsoleWriteln("");
+}
+
+void FirewallLog()
+{
+    duetos::net::firewall::DenialRecord rec[duetos::net::firewall::kFwLogCap];
+    const u32 n = duetos::net::firewall::FwLogSnapshot(rec, duetos::net::firewall::kFwLogCap);
+    if (n == 0)
+    {
+        ConsoleWrite("FIREWALL: no denials recorded (total=");
+        WriteU64Dec(duetos::net::firewall::FwLogTotalCount());
+        ConsoleWriteln(")");
+        return;
+    }
+    ConsoleWrite("FIREWALL: ");
+    WriteU64Dec(n);
+    ConsoleWrite(" of ");
+    WriteU64Dec(duetos::net::firewall::FwLogTotalCount());
+    ConsoleWriteln(" recent denials (oldest first):");
+    ConsoleWriteln("SEQ      TICK       DIR PROTO SRC                    DST                    RULE");
+    for (u32 i = 0; i < n; ++i)
+    {
+        const auto& r = rec[i];
+        WriteU64Dec(r.sequence);
+        ConsoleWrite("  ");
+        WriteU64Dec(r.ticks);
+        ConsoleWrite("  ");
+        ConsoleWrite(DirectionLabel(r.dir));
+        ConsoleWriteChar(' ');
+        ConsoleWrite(ProtoLabel(r.proto));
+        ConsoleWriteChar(' ');
+        WriteIpv4(r.src_ip);
+        ConsoleWriteChar(':');
+        WriteU64Dec(r.src_port);
+        ConsoleWrite("    ");
+        WriteIpv4(r.dst_ip);
+        ConsoleWriteChar(':');
+        WriteU64Dec(r.dst_port);
+        ConsoleWrite("    ");
+        if (r.matched_rule == duetos::net::firewall::kFwMaxRules)
+        {
+            ConsoleWrite("default");
+        }
+        else
+        {
+            WriteU64Dec(r.matched_rule);
+        }
+        ConsoleWriteln("");
+    }
+}
+
+void FirewallConntrack()
+{
+    duetos::net::firewall::ConntrackEntry entries[duetos::net::firewall::kConntrackCap];
+    const u32 n = duetos::net::firewall::ConntrackSnapshot(entries, duetos::net::firewall::kConntrackCap);
+    if (n == 0)
+    {
+        ConsoleWriteln("FIREWALL: no active conntrack entries");
+        return;
+    }
+    ConsoleWrite("FIREWALL: ");
+    WriteU64Dec(n);
+    ConsoleWriteln(" active conntrack entries:");
+    ConsoleWriteln("PROTO LOCAL                  PEER                   EXPIRY-TICK");
+    for (u32 i = 0; i < n; ++i)
+    {
+        const auto& e = entries[i];
+        ConsoleWrite(ProtoLabel(e.proto));
+        ConsoleWriteChar(' ');
+        WriteIpv4(e.local_ip);
+        ConsoleWriteChar(':');
+        WriteU64Dec(e.local_port);
+        ConsoleWrite("    ");
+        WriteIpv4(e.peer_ip);
+        ConsoleWriteChar(':');
+        WriteU64Dec(e.peer_port);
+        ConsoleWrite("    ");
+        WriteU64Dec(e.expiry_ticks);
+        ConsoleWriteln("");
+    }
+}
+
+void FirewallUsage()
+{
+    ConsoleWriteln("FIREWALL: usage:");
+    ConsoleWriteln("  firewall list");
+    ConsoleWriteln("  firewall stats");
+    ConsoleWriteln("  firewall log");
+    ConsoleWriteln("  firewall conntrack");
+    ConsoleWriteln("  firewall add <in|out> <any|tcp|udp|icmp> <src/mask> <dst/mask> "
+                   "<sport|sport-range|any> <dport|dport-range|any> <allow|deny>");
+    ConsoleWriteln("  firewall del <idx>");
+    ConsoleWriteln("  firewall toggle <idx>");
+    ConsoleWriteln("  firewall default <in|out> <allow|deny>");
+    ConsoleWriteln("  firewall reset");
+}
+
+} // namespace
+
+void CmdFirewall(u32 argc, char** argv)
+{
+    if (argc < 2 || StrEq(argv[1], "list") || StrEq(argv[1], "ls"))
+    {
+        FirewallList();
+        return;
+    }
+    if (StrEq(argv[1], "stats"))
+    {
+        FirewallStats();
+        return;
+    }
+    if (StrEq(argv[1], "log"))
+    {
+        FirewallLog();
+        return;
+    }
+    if (StrEq(argv[1], "conntrack") || StrEq(argv[1], "ct"))
+    {
+        FirewallConntrack();
+        return;
+    }
+    if (StrEq(argv[1], "reset"))
+    {
+        duetos::net::firewall::FwInit();
+        ConsoleWriteln("FIREWALL: rule table reset; defaults=allow/allow");
+        return;
+    }
+    if (StrEq(argv[1], "default"))
+    {
+        if (argc < 4)
+        {
+            FirewallUsage();
+            return;
+        }
+        duetos::net::firewall::Direction dir;
+        duetos::net::firewall::Action act;
+        if (!ParseFwDirection(argv[2], &dir) || !ParseFwAction(argv[3], &act))
+        {
+            FirewallUsage();
+            return;
+        }
+        duetos::net::firewall::FwSetDefaultPolicy(dir, act);
+        ConsoleWrite("FIREWALL: default ");
+        ConsoleWrite(DirectionLabel(dir));
+        ConsoleWrite(" set to ");
+        ConsoleWriteln(act == duetos::net::firewall::Action::Allow ? "allow" : "deny");
+        return;
+    }
+    if (StrEq(argv[1], "del") || StrEq(argv[1], "remove"))
+    {
+        if (argc < 3)
+        {
+            FirewallUsage();
+            return;
+        }
+        const i64 idx = ParseInt(argv[2]);
+        if (idx < 0 || idx >= static_cast<i64>(duetos::net::firewall::kFwMaxRules))
+        {
+            ConsoleWriteln("FIREWALL: index out of range");
+            return;
+        }
+        duetos::net::firewall::FwRemove(static_cast<u32>(idx));
+        ConsoleWriteln("FIREWALL: rule removed");
+        return;
+    }
+    if (StrEq(argv[1], "toggle"))
+    {
+        if (argc < 3)
+        {
+            FirewallUsage();
+            return;
+        }
+        const i64 idx = ParseInt(argv[2]);
+        if (idx < 0 || idx >= static_cast<i64>(duetos::net::firewall::kFwMaxRules))
+        {
+            ConsoleWriteln("FIREWALL: index out of range");
+            return;
+        }
+        duetos::net::firewall::FwToggle(static_cast<u32>(idx));
+        ConsoleWriteln("FIREWALL: rule toggled");
+        return;
+    }
+    if (StrEq(argv[1], "add"))
+    {
+        if (argc < 9)
+        {
+            FirewallUsage();
+            return;
+        }
+        duetos::net::firewall::Rule r{};
+        if (!ParseFwDirection(argv[2], &r.dir))
+        {
+            ConsoleWriteln("FIREWALL: bad direction (expected in / out)");
+            return;
+        }
+        if (!ParseFwProto(argv[3], &r.proto))
+        {
+            ConsoleWriteln("FIREWALL: bad protocol (expected any / tcp / udp / icmp)");
+            return;
+        }
+        if (!ParseFwPrefix(argv[4], &r.src))
+        {
+            ConsoleWriteln("FIREWALL: bad src prefix");
+            return;
+        }
+        if (!ParseFwPrefix(argv[5], &r.dst))
+        {
+            ConsoleWriteln("FIREWALL: bad dst prefix");
+            return;
+        }
+        if (!ParseFwPortRange(argv[6], &r.src_port))
+        {
+            ConsoleWriteln("FIREWALL: bad src port range");
+            return;
+        }
+        if (!ParseFwPortRange(argv[7], &r.dst_port))
+        {
+            ConsoleWriteln("FIREWALL: bad dst port range");
+            return;
+        }
+        if (!ParseFwAction(argv[8], &r.action))
+        {
+            ConsoleWriteln("FIREWALL: bad action (expected allow / deny)");
+            return;
+        }
+        const u32 idx = duetos::net::firewall::FwAdd(r);
+        if (idx >= duetos::net::firewall::kFwMaxRules)
+        {
+            ConsoleWriteln("FIREWALL: rule table full");
+            return;
+        }
+        ConsoleWrite("FIREWALL: rule added at index ");
+        WriteU64Dec(idx);
+        ConsoleWriteln("");
+        return;
+    }
+    FirewallUsage();
 }
 
 } // namespace duetos::core::shell::internal

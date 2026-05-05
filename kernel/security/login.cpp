@@ -29,8 +29,10 @@
 #include "drivers/video/console.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/widget.h"
-#include "security/auth.h"
 #include "log/klog.h"
+#include "sched/sched.h"
+#include "security/auth.h"
+#include "time/tick.h"
 
 namespace duetos::core
 {
@@ -67,6 +69,15 @@ struct State
     u32 password_len;
     const char* status; // non-null string shown beneath the form
     u32 attempts;
+
+    // Lock-screen same-user-only policy. When `locked` is true the
+    // gate is up because LoginLock fired (vs. LoginStart on a fresh
+    // boot or LoginReopen after a logout). `locked_user` holds the
+    // username that was active at lock time so the unlock path can
+    // refuse credentials for any other account. Cleared on
+    // successful unlock and on LoginReopen.
+    bool locked;
+    char locked_user[kFieldMax];
 };
 
 constinit State g_login = {};
@@ -92,6 +103,37 @@ void ClearField(char* buf, u32* len)
 {
     buf[0] = '\0';
     *len = 0;
+}
+
+bool LockedSameUser(const char* submitted)
+{
+    if (!g_login.locked)
+    {
+        return true;
+    }
+    const char* a = g_login.locked_user;
+    const char* b = submitted;
+    while (*a != '\0' && *b != '\0' && *a == *b)
+    {
+        ++a;
+        ++b;
+    }
+    return *a == *b;
+}
+
+void CopyName(char* dst, const char* src, u32 cap)
+{
+    if (cap == 0)
+    {
+        return;
+    }
+    u32 i = 0;
+    while (i + 1 < cap && src[i] != '\0')
+    {
+        dst[i] = src[i];
+        ++i;
+    }
+    dst[i] = '\0';
 }
 
 void FieldAppend(char* buf, u32* len, char c)
@@ -190,6 +232,20 @@ bool TtySubmit()
     }
     // password field — try to authenticate
     ConsoleWriteln("");
+    if (!LockedSameUser(g_login.username))
+    {
+        ++g_login.attempts;
+        ConsoleWrite("LOCKED FOR USER: ");
+        ConsoleWriteln(g_login.locked_user);
+        ConsoleWriteln("UNLOCK REQUIRES THE SAME USER. LOG OUT TO SWITCH USERS.");
+        ConsoleWriteln("");
+        ClearField(g_login.username, &g_login.username_len);
+        ClearField(g_login.password, &g_login.password_len);
+        g_login.focus = Field::Username;
+        ConsoleWrite("USERNAME: ");
+        KLOG_WARN("login", "tty unlock attempted for different user");
+        return true;
+    }
     if (AuthLogin(g_login.username, g_login.password))
     {
         ConsoleWrite("WELCOME, ");
@@ -199,6 +255,8 @@ bool TtySubmit()
         ClearField(g_login.password, &g_login.password_len);
         g_login.active = false;
         g_login.focus = Field::Username;
+        g_login.locked = false;
+        g_login.locked_user[0] = '\0';
         KLOG_INFO("login", "tty session opened");
         return false;
     }
@@ -384,7 +442,36 @@ void GuiRepaint()
     FramebufferDrawString(l.panel_x + 24, l.hint_y, "TAB TO SWITCH FIELD   ENTER TO LOG IN", kHint, kPanel);
 
     const u32 y_hint = l.fb_h - 22;
-    FramebufferDrawString(16, y_hint, "DEFAULT ACCOUNTS: ADMIN/ADMIN  GUEST/(EMPTY)", 0x00C0D0E0, kBgBottom);
+    if (g_login.locked)
+    {
+        char locked_msg[96];
+        u32 o = 0;
+        const char* prefix = "LOCKED FOR ";
+        for (u32 i = 0; prefix[i] != '\0' && o + 1 < sizeof(locked_msg); ++i)
+        {
+            locked_msg[o++] = prefix[i];
+        }
+        for (u32 i = 0; g_login.locked_user[i] != '\0' && o + 1 < sizeof(locked_msg); ++i)
+        {
+            char c = g_login.locked_user[i];
+            if (c >= 'a' && c <= 'z')
+            {
+                c = static_cast<char>(c - 'a' + 'A');
+            }
+            locked_msg[o++] = c;
+        }
+        const char* suffix = "  -  CTRL+ALT+S TO SWITCH USER (LOGS OUT)";
+        for (u32 i = 0; suffix[i] != '\0' && o + 1 < sizeof(locked_msg); ++i)
+        {
+            locked_msg[o++] = suffix[i];
+        }
+        locked_msg[o] = '\0';
+        FramebufferDrawString(16, y_hint, locked_msg, 0x00FFC080, kBgBottom);
+    }
+    else
+    {
+        FramebufferDrawString(16, y_hint, "DEFAULT ACCOUNTS: ADMIN/ADMIN  GUEST/(EMPTY)", 0x00C0D0E0, kBgBottom);
+    }
 
     // Push the freshly-painted login surface to the active backend
     // (virtio-gpu TRANSFER_TO_HOST_2D + RESOURCE_FLUSH; no-op for
@@ -403,6 +490,16 @@ bool GuiTrySubmit()
         GuiRepaint();
         return true;
     }
+    if (!LockedSameUser(g_login.username))
+    {
+        ++g_login.attempts;
+        g_login.status = "LOCKED — USE THE SAME USER OR LOG OUT TO SWITCH";
+        duetos::arch::SerialWrite("[login] gui unlock attempted for different user; locked_user=\"");
+        duetos::arch::SerialWrite(g_login.locked_user);
+        duetos::arch::SerialWrite("\"\n");
+        GuiRepaint();
+        return true;
+    }
     if (AuthLogin(g_login.username, g_login.password))
     {
         ClearField(g_login.username, &g_login.username_len);
@@ -410,6 +507,8 @@ bool GuiTrySubmit()
         g_login.active = false;
         g_login.focus = Field::Username;
         g_login.status = nullptr;
+        g_login.locked = false;
+        g_login.locked_user[0] = '\0';
         KLOG_INFO("login", "gui session opened");
         return false;
     }
@@ -588,21 +687,216 @@ void LoginReopen()
     ClearField(g_login.password, &g_login.password_len);
     g_login.status = nullptr;
     g_login.focus = Field::Username;
+    // A full logout drops the lock policy — the next user is
+    // free to log in. Lock policy only fires after an explicit
+    // LoginLock call.
+    g_login.locked = false;
+    g_login.locked_user[0] = '\0';
     LoginStart(mode);
+}
+
+bool LoginIsLocked()
+{
+    return g_login.locked;
+}
+
+void LoginSwitchUser()
+{
+    if (!g_login.locked)
+    {
+        // Caller assumed the gate is locked; if it isn't,
+        // LoginReopen still does the right thing (logs out +
+        // re-opens), but log the surprise so a misuse surfaces.
+        KLOG_WARN("login", "LoginSwitchUser called outside of locked state");
+    }
+    KLOG_INFO_S("login", "switch-user requested from locked gate", "previous", g_login.locked_user);
+    LoginReopen();
 }
 
 void LoginLock()
 {
     // Same as LoginReopen minus the AuthLogout — the session
     // stays valid under the hood, the gate just intercepts kbd
-    // until credentials are re-entered.
+    // until credentials are re-entered. Capture the active user
+    // so the unlock submit path can refuse credentials for any
+    // other account (Windows-style same-user lock policy). If
+    // no session is active when LoginLock fires (programmer
+    // error — locking an empty desktop), fall back to a regular
+    // login gate without the same-user constraint so the box
+    // doesn't become unreachable.
     const LoginMode mode = g_login.mode;
+    const char* active = AuthCurrentUserName();
+    if (active != nullptr && active[0] != '\0')
+    {
+        g_login.locked = true;
+        CopyName(g_login.locked_user, active, kFieldMax);
+    }
+    else
+    {
+        g_login.locked = false;
+        g_login.locked_user[0] = '\0';
+    }
     ClearField(g_login.username, &g_login.username_len);
     ClearField(g_login.password, &g_login.password_len);
     g_login.status = nullptr;
     g_login.focus = Field::Username;
     LoginStart(mode);
-    KLOG_INFO("login", "screen locked (session preserved)");
+    if (g_login.locked)
+    {
+        KLOG_INFO_S("login", "screen locked (same-user-only)", "user", g_login.locked_user);
+    }
+    else
+    {
+        KLOG_WARN("login", "LoginLock with no active session — no same-user constraint");
+    }
+}
+
+// ---------------------------------------------------------------
+// Idle-timeout auto-lock.
+// ---------------------------------------------------------------
+
+namespace
+{
+
+// Default threshold: 600 seconds == 10 minutes. Matches the
+// Windows / GNOME default. 0 disables auto-lock entirely.
+constexpr u32 kDefaultIdleSeconds = 600;
+constexpr u32 kSchedulerHz = 100;
+constexpr u64 kIdleCheckIntervalTicks = kSchedulerHz; // 1 s
+
+constinit u64 g_input_last_activity_ticks = 0;
+constinit u32 g_idle_threshold_secs = kDefaultIdleSeconds;
+constinit bool g_idle_task_started = false;
+
+bool IdleLockCheckAt(u64 now_ticks)
+{
+    const u32 threshold = g_idle_threshold_secs;
+    if (threshold == 0)
+    {
+        return false; // auto-lock disabled
+    }
+    if (LoginIsActive())
+    {
+        return false; // gate already up
+    }
+    if (!AuthIsAuthenticated())
+    {
+        return false; // nobody logged in to lock against
+    }
+    const u64 last = g_input_last_activity_ticks;
+    if (now_ticks <= last)
+    {
+        return false;
+    }
+    const u64 elapsed_ticks = now_ticks - last;
+    const u64 threshold_ticks = u64(threshold) * kSchedulerHz;
+    if (elapsed_ticks < threshold_ticks)
+    {
+        return false;
+    }
+    KLOG_INFO_V("login", "idle-lock threshold crossed; locking", elapsed_ticks);
+    duetos::drivers::video::CompositorLock();
+    LoginLock();
+    duetos::drivers::video::CompositorUnlock();
+    return true;
+}
+
+void IdleLockTask(void* /*arg*/)
+{
+    for (;;)
+    {
+        ::duetos::sched::SchedSleepTicks(kIdleCheckIntervalTicks);
+        IdleLockCheckAt(::duetos::time::TickCount());
+    }
+}
+
+} // namespace
+
+void InputActivityStamp()
+{
+    g_input_last_activity_ticks = ::duetos::time::TickCount();
+}
+
+u64 InputLastActivityTicks()
+{
+    return g_input_last_activity_ticks;
+}
+
+void IdleLockSetThresholdSeconds(u32 seconds)
+{
+    g_idle_threshold_secs = seconds;
+    KLOG_INFO_V("login", "idle-lock threshold set (seconds)", seconds);
+}
+
+u32 IdleLockThresholdSeconds()
+{
+    return g_idle_threshold_secs;
+}
+
+void IdleLockTaskStart()
+{
+    if (g_idle_task_started)
+    {
+        return;
+    }
+    g_idle_task_started = true;
+    // Stamp once so the first idle window starts now rather than
+    // counting from 0. The task itself wakes once a second; the
+    // watch is cheap enough to coexist with other 1Hz consumers.
+    InputActivityStamp();
+    ::duetos::sched::SchedCreate(IdleLockTask, nullptr, "idle-lock");
+}
+
+bool IdleLockCheckOnce()
+{
+    return IdleLockCheckAt(::duetos::time::TickCount());
+}
+
+namespace
+{
+
+void IdleExpect(bool cond, const char* what)
+{
+    if (!cond)
+    {
+        KLOG_WARN("login", what);
+    }
+}
+
+} // namespace
+
+void IdleLockSelfTest()
+{
+    KLOG_TRACE_SCOPE("login", "IdleLockSelfTest");
+
+    // Threshold accessor round-trips.
+    const u32 saved = IdleLockThresholdSeconds();
+    IdleLockSetThresholdSeconds(60);
+    IdleExpect(IdleLockThresholdSeconds() == 60, "threshold round-trip");
+    IdleLockSetThresholdSeconds(0);
+    IdleExpect(IdleLockThresholdSeconds() == 0, "threshold zero round-trip");
+    IdleLockSetThresholdSeconds(saved);
+
+    // Activity stamp is monotonic.
+    const u64 t0 = InputLastActivityTicks();
+    InputActivityStamp();
+    const u64 t1 = InputLastActivityTicks();
+    IdleExpect(t1 >= t0, "stamp monotonic");
+
+    // Synthetic "way past threshold" timestamp without an active
+    // session — should NOT fire (no session to lock against).
+    // This run is at boot before any login, so the path
+    // short-circuits cleanly.
+    g_input_last_activity_ticks = 1; // ancient
+    const u32 t = IdleLockThresholdSeconds();
+    const u64 huge_now = u64(t + 1000) * kSchedulerHz + 100;
+    const bool fired = IdleLockCheckAt(huge_now);
+    IdleExpect(!fired, "no auto-lock without active session");
+
+    // Re-stamp so the watcher's first real check has a fresh
+    // window.
+    InputActivityStamp();
+    KLOG_INFO("login", "idle-lock self-test ok");
 }
 
 } // namespace duetos::core

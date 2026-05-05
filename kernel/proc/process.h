@@ -146,6 +146,15 @@ enum Cap : u32
     // keylogger.
     kCapInput = 7,
 
+    // Mutate the firewall rule table. Read access (snapshot the
+    // rule list, observe per-rule hit counters) is unprivileged —
+    // configuration, not secrets — but FwAdd / FwRemove / FwToggle
+    // / FwSetDefaultPolicy are gated on this cap so a sandboxed PE
+    // cannot disable a deny rule that's blocking it. Distinct from
+    // kCapNet so a process can be allowed to USE the network
+    // without being allowed to RECONFIGURE it.
+    kCapNetAdmin = 8,
+
     // Sentinel: keep this as the last entry so kProfileTrusted can
     // be built by a loop that iterates [1 .. kCapCount). Do NOT
     // use kCapCount as a live cap — it's a boundary marker.

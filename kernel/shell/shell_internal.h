@@ -379,6 +379,7 @@ void CmdDhcp(u32 argc, char** argv);
 void CmdRoute(u32 argc, char** argv);
 void CmdNetscan();
 void CmdWifi(u32 argc, char** argv);
+void CmdFirewall(u32 argc, char** argv);
 void CmdFwPolicy(u32 argc, char** argv);
 void CmdFwTrace(u32 argc, char** argv);
 void CmdCrTrace(u32 argc, char** argv);

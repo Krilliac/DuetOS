@@ -72,7 +72,45 @@ See [Shell Commands](../reference/Shell-Commands.md) for the full list.
 
 ## Capability Surface
 
-- `kCapNet` — `SYS_SOCK_*`, raw socket, listen, connect
+- `kCapNet` — `SYS_SOCK_*`, raw socket, listen, connect.
+- `kCapNetAdmin` — firewall edit operations (`FwAdd`,
+  `FwRemove`, `FwToggle`, `FwSetDefaultPolicy`). Read access
+  to the rule table and per-iface counters is unprivileged.
+
+## Operator Surface
+
+The kernel shell exposes the firewall via a `firewall`
+command (`firewall list / stats / add / del / toggle /
+default / reset`) — see the Firewall page for syntax and
+examples.
+
+## Firewall (v0)
+
+A static rule table in `kernel/net/firewall.{h,cpp}` runs at
+two hook points:
+
+- **Ingress:** `Ipv4HandleIncoming` consults the firewall
+  after IPv4 header validation and drops a Deny verdict
+  before any per-protocol dispatch.
+- **Egress:** `IfaceTx` (the helper every TX site routes
+  through) parses the IPv4 header, runs the firewall, and
+  bumps `tx_dropped_firewall` on a Deny.
+
+Rules are evaluated first-match-wins on the 5-tuple
+`(direction, proto, src_prefix, dst_prefix, src_port_range,
+dst_port_range)`. Default policies are configurable per
+direction and default to Allow / Allow at boot so existing
+DHCP / DNS / TCP smoke paths keep working without explicit
+allow-list rules.
+
+## Per-interface Counters
+
+`InterfaceCountersRead(iface_index)` returns a snapshot of
+`{ rx_packets, rx_bytes, tx_packets, tx_bytes,
+tx_dropped_firewall, tx_dropped_unbound }`. Counters are
+bumped at `NetStackInjectRx` (rx side) and `IfaceTx` (tx
+side). The Network Status app polls them for per-iface
+throughput display.
 
 ## Known Limits / GAPs
 
@@ -82,7 +120,13 @@ See [Shell Commands](../reference/Shell-Commands.md) for the full list.
   IOCP — none implemented. Synchronous BSD-socket subset works.
 - **TCP is single-stream-friendly.** Real congestion control is
   basic; bulk-transfer throughput optimisation is deferred.
-- **No firewall / packet filter** in the kernel.
+- **No connection tracking** in the firewall — flipping the
+  default-deny inbound policy on without it would break TCP
+  connects we initiated, since the peer's reply would arrive
+  unsolicited. v0 defaults Allow inbound for that reason.
+- **No firewall logging ring** for recent denials; the
+  per-rule hit counters are the only signal an operator can
+  read today.
 
 ## Related Pages
 
