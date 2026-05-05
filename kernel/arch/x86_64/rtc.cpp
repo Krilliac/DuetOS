@@ -154,6 +154,100 @@ void RtcRead(RtcTime* out)
     out->year = static_cast<u16>(2000 + y1);
 }
 
+namespace
+{
+void WriteRaw(u8 reg, u8 v)
+{
+    Outb(kCmosIndex, reg);
+    Outb(kCmosData, v);
+}
+
+u8 BinaryToBcd(u8 v)
+{
+    return static_cast<u8>(((v / 10) << 4) | (v % 10));
+}
+} // namespace
+
+bool RtcWrite(const RtcTime* in)
+{
+    if (in == nullptr)
+        return false;
+    // Bound checks — a wedged caller mustn't write garbage to
+    // the chip.
+    if (in->hour > 23 || in->minute > 59 || in->second > 59)
+        return false;
+    if (in->month < 1 || in->month > 12 || in->day < 1 || in->day > 31)
+        return false;
+    if (in->year < 2000 || in->year > 2099)
+        return false;
+
+    // Wait for not-in-update so we don't program mid-cycle.
+    for (u32 i = 0; i < 1'000'000; ++i)
+    {
+        if (!UpdateInProgress())
+            break;
+    }
+
+    const u8 status_b = ReadRaw(kRegStatusB);
+    const bool binary_mode = (status_b & kStatusBBinaryMode) != 0;
+    const bool hour_24 = (status_b & kStatusB24HourMode) != 0;
+
+    // Build hour value in the chip's expected format. 12-hour
+    // mode: 12 → 12 AM (no PM bit); 0 → 12 AM; 1..11 stay; 12
+    // → 12 PM (set PM bit); 13..23 → (h-12) PM.
+    u8 h_out = in->hour;
+    bool pm = false;
+    if (!hour_24)
+    {
+        if (in->hour == 0)
+        {
+            h_out = 12;
+            pm = false;
+        }
+        else if (in->hour == 12)
+        {
+            h_out = 12;
+            pm = true;
+        }
+        else if (in->hour > 12)
+        {
+            h_out = static_cast<u8>(in->hour - 12);
+            pm = true;
+        }
+    }
+
+    u8 sec = in->second;
+    u8 min = in->minute;
+    u8 day = in->day;
+    u8 mon = in->month;
+    u8 yr = static_cast<u8>(in->year - 2000);
+    if (!binary_mode)
+    {
+        sec = BinaryToBcd(sec);
+        min = BinaryToBcd(min);
+        h_out = BinaryToBcd(h_out);
+        day = BinaryToBcd(day);
+        mon = BinaryToBcd(mon);
+        yr = BinaryToBcd(yr);
+    }
+    if (!hour_24 && pm)
+    {
+        h_out |= 0x80;
+    }
+
+    // Freeze updates: set Status-B bit 7 (SET). Clear it after.
+    constexpr u8 kStatusBSet = 0x80;
+    WriteRaw(kRegStatusB, status_b | kStatusBSet);
+    WriteRaw(kRegSeconds, sec);
+    WriteRaw(kRegMinutes, min);
+    WriteRaw(kRegHours, h_out);
+    WriteRaw(kRegDay, day);
+    WriteRaw(kRegMonth, mon);
+    WriteRaw(kRegYear, yr);
+    WriteRaw(kRegStatusB, status_b);
+    return true;
+}
+
 u8 CmosReadByte(u8 index)
 {
     // Mask to 7 bits so we never set the NMI-disable bit.

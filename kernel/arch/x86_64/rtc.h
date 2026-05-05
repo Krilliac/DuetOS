@@ -47,6 +47,15 @@ struct RtcTime
 /// Safe no-op on nullptr.
 void RtcRead(RtcTime* out);
 
+/// Program the RTC's six visible fields. Reads Status-B to
+/// determine binary-vs-BCD + 24-hour-vs-12-hour, converts the
+/// input to that format, freezes updates via the SET bit,
+/// writes the six fields, then clears SET. Year is stored
+/// modulo 100 — same century-window convention RtcRead uses.
+/// Safe no-op on nullptr or out-of-range fields. Returns true
+/// on success.
+bool RtcWrite(const RtcTime* in);
+
 /// Read a single CMOS RAM byte via the 0x70 / 0x71 index/data
 /// port pair. `index` is a 7-bit address (0..127); bit 7 of the
 /// index port controls NMI disable — we always leave it clear.
