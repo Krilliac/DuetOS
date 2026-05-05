@@ -874,6 +874,23 @@ void ImageViewInit(WindowHandle handle)
     g_state.needs_decode = true;
     RescanRoot();
     WindowSetContentDraw(handle, DrawFn, nullptr);
+    duetos::drivers::video::WindowSetWheelHandler(handle, ImageViewOnWheel);
+}
+
+void ImageViewOnWheel(duetos::i32 dz)
+{
+    if (dz == 0)
+        return;
+    // Wheel down (dz < 0) steps forward through the list;
+    // wheel up steps back. One tick per image is right at the
+    // typical wheel resolution — large dz values are rare and
+    // the dispatcher already clamps to ±8.
+    const bool forward = (dz < 0);
+    const duetos::i32 steps = (dz > 0) ? dz : -dz;
+    for (duetos::i32 i = 0; i < steps; ++i)
+    {
+        StepIndex(forward);
+    }
 }
 
 WindowHandle ImageViewWindow()

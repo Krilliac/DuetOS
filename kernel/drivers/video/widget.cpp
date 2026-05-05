@@ -225,6 +225,24 @@ void WidgetDrawAll()
     }
 }
 
+bool WidgetCursorOverButton(u32 cx, u32 cy)
+{
+    for (u32 i = 0; i < g_widget_count; ++i)
+    {
+        const ButtonWidget& b = g_widgets[i];
+        u32 bx = 0, by = 0;
+        if (!EffectiveButtonPos(b, &bx, &by))
+        {
+            continue;
+        }
+        if (cx >= bx && cx < bx + b.w && cy >= by && cy < by + b.h)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 namespace
 {
 
@@ -252,7 +270,8 @@ struct RegisteredWindow
     char mut_subtitle[kWindowSubtitleStorage];
     WindowContentFn content_fn; // nullable per-window content drawer
     void* content_cookie;
-    u64 owner_pid; // 0 = kernel-owned boot window, >0 = ring-3 pid
+    WindowWheelFn wheel_fn; // nullable per-window wheel handler
+    u64 owner_pid;          // 0 = kernel-owned boot window, >0 = ring-3 pid
     WindowMsgRing msgs;
     WinGdiPrim prims[kWinDisplayListDepth];
     u32 prim_count;
@@ -652,6 +671,7 @@ WindowHandle WindowRegister(const WindowChrome& chrome, const char* title)
     g_windows[h].blit_pool_used = 0;
     g_windows[h].content_fn = nullptr;
     g_windows[h].content_cookie = nullptr;
+    g_windows[h].wheel_fn = nullptr;
     for (u32 i = 0; i < kWinLongSlots; ++i)
     {
         g_windows[h].longs[i] = 0;
@@ -1114,6 +1134,43 @@ void WindowSetContentDraw(WindowHandle h, WindowContentFn fn, void* cookie)
     }
     g_windows[h].content_fn = fn;
     g_windows[h].content_cookie = cookie;
+}
+
+void WindowSetWheelHandler(WindowHandle h, WindowWheelFn fn)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    g_windows[h].wheel_fn = fn;
+}
+
+void WindowDispatchWheel(WindowHandle h, i32 /*client_x*/, i32 /*client_y*/, i32 dz, u32 screen_x, u32 screen_y,
+                         u64 mk_buttons)
+{
+    if (!WindowValid(h) || dz == 0)
+    {
+        return;
+    }
+    if (g_windows[h].owner_pid > 0)
+    {
+        // Win32 contract: high word of wparam is signed delta in
+        // multiples of WHEEL_DELTA (120); low word is button mask
+        // (MK_LBUTTON / MK_RBUTTON / MK_SHIFT / ...). lParam packs
+        // the screen-coord click point: low word = x, high word = y.
+        constexpr u32 kWmMouseWheel = 0x020A;
+        const i32 wheel_delta = dz * 120;
+        const u64 wparam = ((static_cast<u64>(static_cast<u16>(static_cast<i16>(wheel_delta))) << 16) & 0xFFFF0000U) |
+                           (mk_buttons & 0xFFFFU);
+        const u64 lparam = (static_cast<u64>(screen_x & 0xFFFFU)) | ((static_cast<u64>(screen_y & 0xFFFFU)) << 16);
+        WindowPostMessage(h, kWmMouseWheel, wparam, lparam);
+        WindowMsgWakeAll();
+        return;
+    }
+    if (g_windows[h].wheel_fn != nullptr)
+    {
+        g_windows[h].wheel_fn(dz);
+    }
 }
 
 void WindowDrawAllOrdered()

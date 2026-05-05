@@ -2,8 +2,10 @@
 
 #include "apps/notes_internal.h"
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/timer.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/theme.h"
 
 namespace duetos::apps::notes
 {
@@ -21,6 +23,8 @@ constinit duetos::u32 g_len = 0;
 // at the final trailing position when g_cursor == g_len).
 constinit duetos::u32 g_cursor = 0;
 constinit bool g_dirty = false;
+// Selection anchor — see notes_internal.h for semantics.
+constinit duetos::i32 g_sel_anchor = kNoSelection;
 
 // Path walker tolerates a missing leading slash (verified in
 // shell_filesystem.cpp's CmdFatappend handling).
@@ -38,6 +42,11 @@ bool InsertAtCursor(char c)
     ++g_len;
     ++g_cursor;
     g_dirty = true;
+    // Any insert clears a pending selection — typing anywhere
+    // is a non-shifted edit. (A future "type-replaces-selection"
+    // semantic would delete the selected range first; v1 keeps
+    // the simpler clear-and-insert behaviour.)
+    g_sel_anchor = kNoSelection;
     return true;
 }
 
@@ -50,8 +59,82 @@ using detail::g_buf;
 using detail::g_cursor;
 using detail::g_dirty;
 using detail::g_len;
+using detail::g_sel_anchor;
 using detail::InsertAtCursor;
 using detail::kBufCap;
+using detail::kNoSelection;
+
+// Undo ring. Each frame snapshots the live buffer + cursor +
+// selection state at the moment a mutation lands. The ring is
+// 16 deep; the oldest frame is dropped silently when an insert
+// would otherwise overflow. NotesUndo pops the most-recent
+// frame off the head.
+constexpr u32 kUndoCap = 16;
+
+struct UndoFrame
+{
+    char buf[kBufCap];
+    u32 len;
+    u32 cursor;
+    i32 sel_anchor;
+    u64 tick; // arch::TimerTicks() at push time — drives 250 ms coalesce
+};
+
+constinit UndoFrame g_undo[kUndoCap] = {};
+constinit u32 g_undo_count = 0;
+
+// Coalesce window — see PushUndo. Wall-clock-equivalent
+// 250ms at the kernel's 100Hz scheduler tick rate, so 25
+// ticks. Tunable on the first user complaint about either
+// too-greedy or too-fine-grained undo steps.
+constexpr u64 kUndoCoalesceTicks = 25;
+
+// Capture the live state into the head undo frame. Coalesce
+// rule: if the previous push happened within 250 ms AND the
+// content delta is "additive within one word" (length differs
+// by ±1 and the cursor moved by ±1), overwrite the previous
+// frame instead of pushing a new one. Keeps the 16-slot ring
+// useful for word-level undo without wasting frames on every
+// keystroke.
+void PushUndo()
+{
+    const u64 now = duetos::arch::TimerTicks();
+    if (g_undo_count > 0)
+    {
+        UndoFrame& last = g_undo[g_undo_count - 1];
+        const bool fresh = (now - last.tick) <= kUndoCoalesceTicks;
+        const i32 dlen = static_cast<i32>(g_len) - static_cast<i32>(last.len);
+        const bool small_delta = (dlen >= -1 && dlen <= 1);
+        if (fresh && small_delta)
+        {
+            // Overwrite head frame — keep its older content as
+            // the snapshot we'd undo back to.
+            last.tick = now;
+            return;
+        }
+    }
+    if (g_undo_count == kUndoCap)
+    {
+        // Ring full. Drop the oldest by shifting everything down
+        // one slot. 16 entries × 4 KiB = 64 KiB total — the shift
+        // is rare enough (each gesture, not each keystroke) and
+        // small enough that a memmove-equivalent is fine.
+        for (u32 i = 1; i < kUndoCap; ++i)
+        {
+            g_undo[i - 1] = g_undo[i];
+        }
+        g_undo_count = kUndoCap - 1;
+    }
+    UndoFrame& f = g_undo[g_undo_count++];
+    f.len = g_len;
+    f.cursor = g_cursor;
+    f.sel_anchor = g_sel_anchor;
+    f.tick = now;
+    for (u32 i = 0; i < g_len && i < kBufCap; ++i)
+    {
+        f.buf[i] = g_buf[i];
+    }
+}
 
 // Backwards-compatible alias for the cap. Kept so the body of
 // this TU reads as it did before the persistence split.
@@ -84,6 +167,7 @@ bool DeleteAtCursor()
     }
     --g_len;
     detail::g_dirty = true;
+    g_sel_anchor = kNoSelection;
     return true;
 }
 
@@ -173,6 +257,104 @@ void MoveDown()
     const u32 next_end = LineEnd(next_start);
     const u32 next_len = next_end - next_start;
     g_cursor = next_start + (col < next_len ? col : next_len);
+}
+
+// Word-class for Ctrl+arrow word-wise navigation. v0 splits
+// on transitions between alphanumeric runs and everything
+// else — same heuristic every editor in this category uses.
+bool IsWordChar(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+// Walk one word to the left: skip the run of non-word chars
+// immediately to the left, then skip the run of word chars.
+// Lands on the first char of the leftward word boundary, or 0
+// if the cursor was already at the start.
+void MoveWordLeft()
+{
+    if (g_cursor == 0)
+        return;
+    u32 i = g_cursor;
+    while (i > 0 && !IsWordChar(g_buf[i - 1]))
+        --i;
+    while (i > 0 && IsWordChar(g_buf[i - 1]))
+        --i;
+    g_cursor = i;
+}
+
+// Mirror of MoveWordLeft.
+void MoveWordRight()
+{
+    if (g_cursor >= g_len)
+        return;
+    u32 i = g_cursor;
+    while (i < g_len && IsWordChar(g_buf[i]))
+        ++i;
+    while (i < g_len && !IsWordChar(g_buf[i]))
+        ++i;
+    g_cursor = i;
+}
+
+// Step the cursor by N visual lines. Reuses MoveUp/Down so
+// column-preservation discipline matches single-line motion.
+// PageUp / PageDown bind to a fixed step count; the v0 status
+// footer doesn't expose visible-row count, so 8 lines is a
+// reasonable static page (matches a typical 200-px content
+// area at the existing 10-px row stride).
+constexpr u32 kPageStep = 8;
+
+void MovePage(bool up)
+{
+    for (u32 i = 0; i < kPageStep; ++i)
+    {
+        if (up)
+            MoveUp();
+        else
+            MoveDown();
+    }
+}
+
+void MoveDocStart()
+{
+    g_cursor = 0;
+}
+
+void MoveDocEnd()
+{
+    g_cursor = g_len;
+}
+
+// Selection-aware delete: if a selection is live, drop the
+// selected range and clear the anchor. Returns true iff
+// something was deleted. Callers branch on this so a Backspace
+// or Delete with a live selection consumes the selection
+// rather than the single char before/after the cursor.
+bool DeleteSelectionIfAny()
+{
+    if (g_sel_anchor == kNoSelection || static_cast<u32>(g_sel_anchor) == g_cursor)
+    {
+        g_sel_anchor = kNoSelection;
+        return false;
+    }
+    u32 lo = static_cast<u32>(g_sel_anchor);
+    u32 hi = g_cursor;
+    if (lo > hi)
+    {
+        const u32 t = lo;
+        lo = hi;
+        hi = t;
+    }
+    const u32 span = hi - lo;
+    for (u32 i = lo; i + span < g_len; ++i)
+    {
+        g_buf[i] = g_buf[i + span];
+    }
+    g_len -= span;
+    g_cursor = lo;
+    g_sel_anchor = kNoSelection;
+    detail::g_dirty = true;
+    return true;
 }
 
 // Walk the buffer to the index `target` using the same wrap
@@ -330,6 +512,21 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     if (max_col == 0 || max_row == 0)
         return;
 
+    // Selection range — half-open [sel_lo, sel_hi). When no
+    // selection is live both bounds collapse to g_cursor and
+    // the in-range test in the loop is always false, so the
+    // historic non-highlighted draw path reduces to the same
+    // pixels.
+    u32 sel_lo = g_cursor;
+    u32 sel_hi = g_cursor;
+    if (g_sel_anchor != kNoSelection)
+    {
+        const u32 a = static_cast<u32>(g_sel_anchor);
+        sel_lo = (a < g_cursor) ? a : g_cursor;
+        sel_hi = (a > g_cursor) ? a : g_cursor;
+    }
+    const u32 sel_paper = duetos::drivers::video::ThemeCurrent().taskbar_accent;
+
     u32 col = 0;
     u32 row = 0;
     for (u32 i = 0; i < g_len; ++i)
@@ -337,6 +534,7 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
         if (row >= max_row)
             break;
         const char c = g_buf[i];
+        const bool in_sel = (i >= sel_lo && i < sel_hi);
         if (c == '\n')
         {
             ++row;
@@ -350,7 +548,8 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
             if (row >= max_row)
                 break;
         }
-        FramebufferDrawChar(x0 + col * kGlyphW, y0 + row * kGlyphH, c, kInkColour, kPaperColour);
+        const u32 paper = in_sel ? sel_paper : kPaperColour;
+        FramebufferDrawChar(x0 + col * kGlyphW, y0 + row * kGlyphH, c, kInkColour, paper);
         ++col;
     }
 
@@ -415,10 +614,43 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 
 } // namespace
 
+void NotesOnWheel(duetos::i32 dz)
+{
+    using namespace duetos::drivers::input;
+    // Step the cursor by |dz| rows — wheel up moves toward
+    // line 0, wheel down toward end-of-buffer. Keeps the v1
+    // implementation viewport-free; the cursor stays visible
+    // because the buffer (kBufCap = 4096) fits comfortably
+    // in the rendered region for any realistic note.
+    if (dz > 0)
+    {
+        for (duetos::i32 i = 0; i < dz; ++i)
+        {
+            MoveUp();
+        }
+    }
+    else if (dz < 0)
+    {
+        for (duetos::i32 i = 0; i < -dz; ++i)
+        {
+            MoveDown();
+        }
+    }
+}
+
+bool NotesOnDoubleClick(duetos::u32 /*cx*/, duetos::u32 /*cy*/)
+{
+    // GAP: Notes has no double-click semantics (no token /
+    // word selection model in v1). Reserved for a future
+    // word-select-on-DBL slice.
+    return false;
+}
+
 void NotesInit(duetos::drivers::video::WindowHandle handle)
 {
     g_handle = handle;
     duetos::drivers::video::WindowSetContentDraw(handle, DrawFn, nullptr);
+    duetos::drivers::video::WindowSetWheelHandler(handle, NotesOnWheel);
 
     // Seed with a short greeting so the window isn't blank at
     // boot — also gives the smoke harness a deterministic
@@ -444,62 +676,161 @@ bool NotesFeedChar(char c)
 {
     if (static_cast<u8>(c) == 0x08)
     {
+        PushUndo();
+        if (DeleteSelectionIfAny())
+            return true;
         BackspaceAtCursor();
         return true;
     }
     if (c == 0x0A)
     {
+        PushUndo();
+        DeleteSelectionIfAny();
         InsertAtCursor('\n');
         return true;
     }
     const u8 uc = static_cast<u8>(c);
     if (uc >= 0x20 && uc <= 0x7E)
     {
+        PushUndo();
+        DeleteSelectionIfAny();
         InsertAtCursor(c);
         return true;
     }
     return false;
 }
 
-bool NotesFeedKey(u16 keycode)
+bool NotesFeedKey(u16 keycode, u8 modifiers)
 {
     using namespace duetos::drivers::input;
+    const bool shift = (modifiers & kKeyModShift) != 0;
+    const bool ctrl = (modifiers & kKeyModCtrl) != 0;
+
+    // Pre-motion bookkeeping: shift extends a selection from
+    // a remembered anchor; non-shift movement clears it. Set
+    // anchor BEFORE moving so the anchor reflects the caret's
+    // pre-move position.
+    auto pre_motion = [&]()
+    {
+        if (shift)
+        {
+            if (g_sel_anchor == kNoSelection)
+                g_sel_anchor = static_cast<i32>(g_cursor);
+        }
+        else
+        {
+            g_sel_anchor = kNoSelection;
+        }
+    };
+
     switch (keycode)
     {
     case kKeyArrowLeft:
-        MoveLeft();
+        pre_motion();
+        if (ctrl)
+            MoveWordLeft();
+        else
+            MoveLeft();
         return true;
     case kKeyArrowRight:
-        MoveRight();
+        pre_motion();
+        if (ctrl)
+            MoveWordRight();
+        else
+            MoveRight();
         return true;
     case kKeyArrowUp:
+        pre_motion();
         MoveUp();
         return true;
     case kKeyArrowDown:
+        pre_motion();
         MoveDown();
         return true;
+    case kKeyPageUp:
+        pre_motion();
+        MovePage(true);
+        return true;
+    case kKeyPageDown:
+        pre_motion();
+        MovePage(false);
+        return true;
     case kKeyHome:
-        MoveHome();
+        pre_motion();
+        if (ctrl)
+            MoveDocStart();
+        else
+            MoveHome();
         return true;
     case kKeyEnd:
-        MoveEnd();
+        pre_motion();
+        if (ctrl)
+            MoveDocEnd();
+        else
+            MoveEnd();
         return true;
     case kKeyDelete:
-        DeleteAtCursor();
+        PushUndo();
+        if (!DeleteSelectionIfAny())
+            DeleteAtCursor();
         return true;
     default:
         return false;
     }
 }
 
+bool NotesUndo()
+{
+    if (g_undo_count == 0)
+        return false;
+    --g_undo_count;
+    const UndoFrame& f = g_undo[g_undo_count];
+    g_len = (f.len < kBufCap) ? f.len : kBufCap;
+    for (u32 i = 0; i < g_len; ++i)
+    {
+        g_buf[i] = f.buf[i];
+    }
+    g_cursor = (f.cursor <= g_len) ? f.cursor : g_len;
+    g_sel_anchor = f.sel_anchor;
+    // Undo doesn't clear the dirty flag — the buffer still
+    // differs from disk after popping. A subsequent Save
+    // clears it normally.
+    return true;
+}
+
+bool NotesIsDirty()
+{
+    return g_dirty;
+}
+
 u32 NotesCopyToClipboard()
 {
     using duetos::drivers::video::kWindowClipboardMax;
     char tmp[kWindowClipboardMax + 1];
-    const u32 cap = (g_len < kWindowClipboardMax) ? g_len : kWindowClipboardMax;
+    // Selection-aware copy: when a selection is live + non-empty,
+    // copy [min(anchor, cursor), max(anchor, cursor)) instead of
+    // the whole buffer. The empty-selection / no-selection
+    // fallback preserves the v0 "Ctrl+C copies everything"
+    // behaviour so a fresh user always gets something useful on
+    // the clipboard.
+    u32 lo = 0;
+    u32 hi = g_len;
+    if (g_sel_anchor != kNoSelection && static_cast<u32>(g_sel_anchor) != g_cursor)
+    {
+        lo = static_cast<u32>(g_sel_anchor);
+        hi = g_cursor;
+        if (lo > hi)
+        {
+            const u32 t = lo;
+            lo = hi;
+            hi = t;
+        }
+    }
+    const u32 span = (hi > lo) ? hi - lo : 0;
+    const u32 cap = (span < kWindowClipboardMax) ? span : kWindowClipboardMax;
     for (u32 i = 0; i < cap; ++i)
     {
-        tmp[i] = g_buf[i];
+        tmp[i] = g_buf[lo + i];
     }
     tmp[cap] = '\0';
     duetos::drivers::video::WindowClipboardSetText(tmp);

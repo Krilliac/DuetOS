@@ -67,13 +67,46 @@ duetos::drivers::video::WindowHandle NotesWindow();
 /// MUST be called with the compositor lock held.
 bool NotesFeedChar(char c);
 
-/// Feed a non-ASCII key (arrows, Home, End, Delete) into the
-/// notes buffer. `keycode` is one of the kKey* values from
-/// `drivers/input/ps2kbd.h`. Returns true iff the key was
-/// consumed (i.e. matched a navigation binding).
+/// Feed a non-ASCII key (arrows, Home, End, Delete, PageUp,
+/// PageDown) into the notes buffer. `keycode` is one of the
+/// kKey* values from `drivers/input/ps2kbd.h`. `modifiers` is a
+/// bitmask of `kKeyMod*` values: Shift extends a selection
+/// range from a remembered anchor; Ctrl turns Left/Right into
+/// word-wise navigation and Home/End into document-wise jumps.
+/// Returns true iff the key was consumed (i.e. matched a
+/// navigation binding).
 ///
 /// MUST be called with the compositor lock held.
-bool NotesFeedKey(duetos::u16 keycode);
+bool NotesFeedKey(duetos::u16 keycode, duetos::u8 modifiers = 0);
+
+/// Undo the last text mutation. Pops the most recent frame
+/// off the 16-entry undo ring, restoring buffer contents,
+/// length, cursor position, and selection anchor. Returns
+/// true iff an undo step was taken. No-op if the ring is
+/// empty. Bound to Ctrl+Z by the kbd-reader.
+bool NotesUndo();
+
+/// True iff the live buffer has been edited since the last
+/// successful Save / Load. The "discard unsaved changes?"
+/// close-prompt path reads this to decide whether the second
+/// Alt+F4 press needs a confirmation toast.
+bool NotesIsDirty();
+
+/// Mouse-wheel handler. `dz` is the clamped wheel-tick delta
+/// (positive = scroll up). v1 maps wheel motion to cursor
+/// stepping (one logical line per tick) — keeps the buffer
+/// small enough for v0 (`kBufCap = 4096`) to render the cursor
+/// in view without separate viewport state. Registered as the
+/// Notes window's WindowWheelFn at NotesInit time.
+void NotesOnWheel(duetos::i32 dz);
+
+/// Mouse double-click on the Notes window — currently a no-op
+/// (Notes has no list / icon model that benefits from double-
+/// click). Reserved entry point so the kernel's compositor-side
+/// dispatch can fan to every native app uniformly without
+/// per-app conditionals. Returns true iff the click was
+/// consumed.
+bool NotesOnDoubleClick(duetos::u32 cx, duetos::u32 cy);
 
 /// Copy the entire buffer contents to the kernel clipboard
 /// (`WindowClipboardSetText`). Truncates at the clipboard cap

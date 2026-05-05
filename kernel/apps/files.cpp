@@ -661,6 +661,19 @@ void FilesInit(duetos::drivers::video::WindowHandle handle)
         g_state.mode = Mode::Ramfs;
     }
     duetos::drivers::video::WindowSetContentDraw(handle, DrawFn, nullptr);
+    duetos::drivers::video::WindowSetWheelHandler(handle, FilesOnWheel);
+}
+
+void FilesOnWheel(duetos::i32 dz)
+{
+    if (dz == 0)
+        return;
+    const bool up = (dz > 0);
+    const duetos::i32 steps = (dz > 0) ? dz : -dz;
+    for (duetos::i32 i = 0; i < steps; ++i)
+    {
+        FilesFeedArrow(up);
+    }
 }
 
 duetos::drivers::video::WindowHandle FilesWindow()
@@ -963,9 +976,13 @@ namespace
 // shipped disabled — there is no text-input modal in v0.
 constinit duetos::drivers::video::MenuItem kFilesContextMenuItems[] = {
     {"OPEN", 30, 0, nullptr, 0},
+    // STUB: rename — needs a text-input modal (deferred dialog
+    // primitive). Fat32RenameAtPath already exists; only the UI
+    // half is missing.
     {"RENAME (GAP)", 31, duetos::drivers::video::kMenuItemFlagDisabled, nullptr, 0},
     {"DELETE", 32, 0, nullptr, 0},
     {"PROPERTIES", 33, 0, nullptr, 0},
+    {"REFRESH", 34, 0, nullptr, 0},
 };
 constexpr duetos::u32 kFilesContextMenuItemsN = sizeof(kFilesContextMenuItems) / sizeof(kFilesContextMenuItems[0]);
 
@@ -1007,6 +1024,26 @@ duetos::i32 FilesRowAt(duetos::u32 sx, duetos::u32 sy)
     if (idx >= n)
         return -1;
     return static_cast<duetos::i32>(idx);
+}
+
+bool FilesOnDoubleClick(duetos::u32 sx, duetos::u32 sy)
+{
+    // FAT32 mode is the only mode with a click-to-row hit-test
+    // today. Trash / ramfs DC could be wired the same way — keep
+    // them GAP'd until those modes get a real RowAt helper, so a
+    // double-click in those modes simply doesn't open anything
+    // (it doesn't misfire).
+    if (g_state.mode != Mode::Fat32)
+        return false;
+    const duetos::i32 row = FilesRowAt(sx, sy);
+    if (row < 0)
+        return false;
+    g_state.fat_selection = static_cast<duetos::u32>(row);
+    OpenFat32Selected();
+    duetos::arch::SerialWrite("[files] double-click open row=");
+    duetos::arch::SerialWriteHex(static_cast<duetos::u64>(row));
+    duetos::arch::SerialWrite("\n");
+    return true;
 }
 
 bool FilesOnRightClick(duetos::u32 sx, duetos::u32 sy)
@@ -1088,6 +1125,17 @@ void FilesDispatchContextAction(duetos::u32 action, duetos::u32 ctx)
         duetos::arch::SerialWriteHex(e.attributes);
         duetos::arch::SerialWrite("\n");
         duetos::drivers::video::NotifyShow(e.name);
+        break;
+    }
+    case 34: // REFRESH — re-scan FAT32 root, clamp selection.
+    {
+        RescanFat32();
+        if (g_state.fat_selection >= g_state.fat_count && g_state.fat_count > 0)
+            g_state.fat_selection = g_state.fat_count - 1;
+        duetos::drivers::video::NotifyShow("refreshed");
+        duetos::arch::SerialWrite("[files] refresh via context menu, count=");
+        duetos::arch::SerialWriteHex(g_state.fat_count);
+        duetos::arch::SerialWrite("\n");
         break;
     }
     default:

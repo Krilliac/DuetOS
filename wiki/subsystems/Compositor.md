@@ -71,6 +71,57 @@ and [Duet Theme Spec](../specifications/Duet-Theme-Spec.md).
 `Ctrl+Alt+Y` (or `theme=<name>` on the kernel cmdline / `theme <name>`
 in the kernel shell) hot-swaps every chrome colour.
 
+## Mouse Wheel
+
+`MousePacket::dz` is captured by the PS/2 driver
+(`ps2mouse.cpp`) and the xHCI HID decode
+(`xhci_input.cpp`) and surfaced to consumers via
+`WindowDispatchWheel(hwnd, client_x, client_y, dz, screen_x, screen_y, mk_buttons)`
+in `widget.{h,cpp}`. The dispatcher fans out:
+
+- **PE owners** — posts `WM_MOUSEWHEEL` (`0x020A`) with the
+  Win32-canonical `wparam = (i16(dz * 120) << 16) | mk_buttons`,
+  `lparam = (screen_y << 16) | screen_x`. Standard Win32
+  message-pump handling applies.
+- **Native owners** — calls the per-window `WindowWheelFn`
+  registered via `WindowSetWheelHandler`. v1 consumers: Files
+  (selection step), Notes (cursor step), Browser (body /
+  selection scroll), ImageView (next/prev image).
+
+The kernel's mouse loop clamps `|dz| <= 8` per packet to defang
+fast-wheel runaway and recomposes after each dispatch.
+
+## Double-Click
+
+Press-edge double-click detection lives in
+`kernel/core/main.cpp` mouse loop. Fires on two press edges
+within `kDblClickTicks` (50 ticks @ 100 Hz ≈ 500 ms) at the
+same pixel on the same HWND. Three independent detectors:
+
+- **PE client area** — posts `WM_LBUTTONDBLCLK` (`0x0203`).
+- **Native client area** — calls per-app `OnDoubleClick(cx, cy)`
+  (`FilesOnDoubleClick` opens row by extension;
+  `BrowserOnDoubleClick` follows a bookmark; others are no-ops).
+- **Title bar (any window)** — toggles
+  `WindowMaximize` / `WindowRestore`. The detector lives in the
+  chrome branch so it short-circuits the drag-start.
+
+## Cursor Shapes
+
+`cursor.{h,cpp}` carries four 12×20 sprite tables — `Arrow`,
+`IBeam`, `Hand`, `Wait` — selectable via `CursorSetShape(s)`.
+The mouse loop runs a hit-test on every packet:
+
+- Over a button widget → `Hand`
+- Over Notes / Browser client area → `IBeam`
+- Otherwise → `Arrow`
+
+The change-gate (`if (new != current)`) keeps the per-packet
+test cheap when the shape doesn't change. `CursorPushWait()` /
+`CursorPopWait()` are refcounted hooks for long-running
+operations (used by `screenshot.cpp` around the FAT32 streaming
+write); the pre-Wait shape is restored on the last balance.
+
 ## Chrome Polish
 
 Recent compositor work:
@@ -171,6 +222,28 @@ Action-id allocation:
 - **Files-app rename**: GAP. No text-input modal exists yet; the
   RENAME row notifies "rename: not in v0 UI". A modal-text-input
   primitive replaces the notify when it lands.
+  `Fat32RenameAtPath` is already in tree (`kernel/fs/fat32.h`);
+  only the dialog half is missing.
+- **Common dialogs (MessageBox / InputBox)**: GAP. The "discard
+  unsaved changes?" prompt for Notes is a two-step Alt+F4
+  pattern (notify on first press, close on second within 3 s).
+  A real synchronous modal dialog primitive would replace this
+  in a follow-up slice.
+- **PE `SetCursor`**: GAP. Native windows can change cursor
+  shape via `CursorSetShape`, but PE apps have no
+  `SYS_GDI_SETCURSOR` to request a shape change. Cursor shape
+  is owned entirely by the kernel hit-test today.
+- **Resize cursors + edge-drag-to-resize**: not in scope for
+  v1. The cursor enum has slots for `IBeam` / `Hand` / `Wait`
+  but no resize variants because no consumer would set them
+  (windows still rely on `Ctrl+Alt+Shift+Arrow` for resize).
+- **Notes wheel = cursor step, not viewport scroll**: a viewport
+  scroll requires tracking visible-row offset state in the draw
+  loop; v1 maps wheel ticks to `MoveUp`/`MoveDown` calls. Works
+  for a typical 4 KiB Notes buffer; a longer document would
+  need real viewport tracking.
+- **ImageView wheel = next/prev only**: zoom is deferred until
+  ImageView grows zoom state.
 - **Trash / ramfs mode in Files**: only FAT32 mode has a v0
   context menu; other modes fall through to the kernel-window menu.
 - **Modal dialogs, common controls, scroll bars, outline fonts,

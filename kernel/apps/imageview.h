@@ -75,6 +75,14 @@ bool ImageViewFeedChar(char c);
 /// consumed (i.e. we have at least one image to navigate).
 bool ImageViewFeedArrow(bool left);
 
+/// Mouse-wheel handler. Each wheel tick steps to the next /
+/// previous image — wheel-down advances forward (matches the
+/// "scroll through a list" mental model), wheel-up steps back.
+/// v0 has no zoom state, so wheel does not zoom; a future
+/// slice can add a Ctrl+wheel branch. Registered as the
+/// ImageView window's WindowWheelFn at ImageViewInit time.
+void ImageViewOnWheel(duetos::i32 dz);
+
 /// Re-scan the FAT32 root, find an image whose 8.3 name matches
 /// `name` (case-insensitive, supports `.BMP` and `.TGA`), and
 /// select it as the current image. Used by the Files app's

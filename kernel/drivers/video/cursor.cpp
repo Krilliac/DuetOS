@@ -27,7 +27,7 @@ enum : u8
 };
 
 // clang-format off
-constinit const u8 kCursorMask[kCursorHeight][kCursorWidth] = {
+constinit const u8 kArrowMask[kCursorHeight][kCursorWidth] = {
     {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, // row 0  #
     {1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, //        ##
     {1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0}, //        #.#
@@ -49,6 +49,93 @@ constinit const u8 kCursorMask[kCursorHeight][kCursorWidth] = {
     {0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0},
     {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
 };
+
+// I-beam: vertical bar with serifs top + bottom. Hot spot is
+// the middle column (col 5/6); the centre rows define a thin
+// fill flanked by outline.
+constinit const u8 kIBeamMask[kCursorHeight][kCursorWidth] = {
+    {0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0}, // row 0  serif top
+    {0, 0, 0, 0, 1, 2, 2, 2, 1, 0, 0, 0}, //        ###
+    {0, 0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0}, //         #
+    {0, 0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0},
+    {0, 0, 0, 0, 1, 2, 2, 2, 1, 0, 0, 0}, //        ###
+    {0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0}, //        serif bot
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+};
+
+// Pointing hand: outlined index finger + thumb stub. Hot spot
+// at the fingertip (col 4 row 0). 12×20 is tight for a hand —
+// this is a stylised glyph, not a photographic copy.
+constinit const u8 kHandMask[kCursorHeight][kCursorWidth] = {
+    {0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0}, // row 0   ##
+    {0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0, 0}, //         #.#
+    {0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 1, 2, 1, 1, 1, 0, 0, 0}, //         #.### (knuckles)
+    {0, 0, 0, 0, 1, 2, 2, 2, 2, 1, 0, 0}, //         #....#
+    {0, 1, 1, 0, 1, 2, 2, 2, 2, 2, 1, 0}, //        ## #.....#
+    {1, 2, 2, 1, 1, 2, 2, 2, 2, 2, 1, 0}, //        #..##.....#
+    {1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0}, //        #.........#
+    {1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0},
+    {1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0},
+    {0, 1, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0}, //         #........#
+    {0, 1, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0}, //         #.......#
+    {0, 0, 1, 2, 2, 2, 2, 2, 2, 1, 0, 0},
+    {0, 0, 1, 2, 2, 2, 2, 2, 2, 1, 0, 0},
+    {0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+};
+
+// Hourglass / "wait" shape. Two stacked triangles.
+constinit const u8 kWaitMask[kCursorHeight][kCursorWidth] = {
+    {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0}, // row 0 — top bar
+    {1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0}, //        full sand
+    {0, 1, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0},
+    {0, 0, 1, 2, 2, 2, 2, 2, 1, 0, 0, 0}, //        narrowing
+    {0, 0, 0, 1, 2, 2, 2, 1, 0, 0, 0, 0},
+    {0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0, 0}, //        waist
+    {0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0, 0}, //        widening
+    {0, 0, 0, 1, 2, 2, 2, 1, 0, 0, 0, 0},
+    {0, 0, 1, 2, 2, 2, 2, 2, 1, 0, 0, 0},
+    {0, 1, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0},
+    {1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0}, //        full sand
+    {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0}, //        bottom bar
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+};
+
+// Active mask is dispatched on every Save / Restore / Draw. The
+// pointer is updated by CursorSetShape; the table picks one of
+// the four sprites declared above.
+constinit const u8 (*g_active_mask)[kCursorWidth] = kArrowMask;
+constinit CursorShape g_active_shape = CursorShape::Arrow;
+// Wait stack — refcounted. CursorPushWait increments + sets
+// shape to Wait; CursorPopWait decrements and restores the
+// pre-push shape on the last balance.
+constinit u32 g_wait_depth = 0;
+constinit CursorShape g_pre_wait_shape = CursorShape::Arrow;
 // clang-format on
 
 // Default colours match the v0 hardcoded behaviour (black
@@ -111,7 +198,7 @@ void SaveAt(u32 x, u32 y)
     {
         for (u32 xi = 0; xi < kCursorWidth; ++xi)
         {
-            if (kCursorMask[yi][xi] == kPxTransparent)
+            if (g_active_mask[yi][xi] == kPxTransparent)
             {
                 continue;
             }
@@ -131,7 +218,7 @@ void RestoreAt(u32 x, u32 y)
     {
         for (u32 xi = 0; xi < kCursorWidth; ++xi)
         {
-            if (kCursorMask[yi][xi] == kPxTransparent)
+            if (g_active_mask[yi][xi] == kPxTransparent)
             {
                 continue;
             }
@@ -146,7 +233,7 @@ void DrawAt(u32 x, u32 y)
     {
         for (u32 xi = 0; xi < kCursorWidth; ++xi)
         {
-            const u8 kind = kCursorMask[yi][xi];
+            const u8 kind = g_active_mask[yi][xi];
             if (kind == kPxTransparent)
             {
                 continue;
@@ -264,6 +351,78 @@ void CursorSetColours(u32 outline_rgb, u32 fill_rgb)
     if (g_ready)
     {
         DrawAt(g_x, g_y);
+    }
+}
+
+namespace
+{
+
+const u8 (*MaskFor(CursorShape s))[kCursorWidth]
+{
+    switch (s)
+    {
+    case CursorShape::IBeam:
+        return kIBeamMask;
+    case CursorShape::Hand:
+        return kHandMask;
+    case CursorShape::Wait:
+        return kWaitMask;
+    case CursorShape::Arrow:
+    default:
+        return kArrowMask;
+    }
+}
+
+} // namespace
+
+void CursorSetShape(CursorShape s)
+{
+    if (s == g_active_shape)
+    {
+        return;
+    }
+    // Restore the backing under the OLD sprite before swapping
+    // masks — the masks differ pixel-for-pixel, so a Save under
+    // the new mask without restoring the old leaks ghost pixels
+    // around the cursor edges.
+    if (g_ready)
+    {
+        RestoreAt(g_x, g_y);
+    }
+    g_active_shape = s;
+    g_active_mask = MaskFor(s);
+    if (g_ready)
+    {
+        SaveAt(g_x, g_y);
+        DrawAt(g_x, g_y);
+    }
+}
+
+CursorShape CursorGetShape()
+{
+    return g_active_shape;
+}
+
+void CursorPushWait()
+{
+    if (g_wait_depth == 0)
+    {
+        g_pre_wait_shape = g_active_shape;
+        CursorSetShape(CursorShape::Wait);
+    }
+    ++g_wait_depth;
+}
+
+void CursorPopWait()
+{
+    if (g_wait_depth == 0)
+    {
+        return; // unbalanced — silently ignore
+    }
+    --g_wait_depth;
+    if (g_wait_depth == 0)
+    {
+        CursorSetShape(g_pre_wait_shape);
     }
 }
 

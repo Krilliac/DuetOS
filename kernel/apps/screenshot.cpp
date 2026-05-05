@@ -1,7 +1,9 @@
 #include "apps/screenshot.h"
 
 #include "arch/x86_64/serial.h"
+#include "drivers/video/cursor.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/notify.h"
 #include "fs/fat32.h"
 #include "mm/kheap.h"
 #include "util/bmp.h"
@@ -144,11 +146,15 @@ bool ScreenshotCapture()
 {
     namespace fat = fs::fat32;
     using arch::SerialWrite;
+    using drivers::video::CursorPopWait;
+    using drivers::video::CursorPushWait;
+    using drivers::video::NotifyShow;
 
     const fat::Volume* v = fat::Fat32Volume(0);
     if (v == nullptr)
     {
         SerialWrite("[shot] capture: no FAT32 volume\n");
+        NotifyShow("screenshot: no disk");
         return false;
     }
 
@@ -156,13 +162,21 @@ bool ScreenshotCapture()
     if (fb.virt == nullptr || fb.width == 0 || fb.height == 0 || fb.bpp != 32)
     {
         SerialWrite("[shot] capture: no usable 32-bpp framebuffer\n");
+        NotifyShow("screenshot: no framebuffer");
         return false;
     }
+
+    // Hourglass for the duration of the FAT32 streaming write —
+    // a multi-MiB framebuffer dump can take long enough that the
+    // user wonders if the keystroke registered.
+    CursorPushWait();
 
     const u32 idx = NextShotIndex(v);
     if (idx == 0)
     {
         SerialWrite("[shot] capture: filename counter exhausted (>9999)\n");
+        CursorPopWait();
+        NotifyShow("screenshot: filename slots exhausted");
         return false;
     }
     char path[16];
@@ -176,6 +190,8 @@ bool ScreenshotCapture()
     if (fb.height > kMaxRows)
     {
         SerialWrite("[shot] capture: framebuffer too tall (>2048 rows)\n");
+        CursorPopWait();
+        NotifyShow("screenshot: too tall (>2048 rows)");
         return false;
     }
     const u8* rows[kMaxRows];
@@ -189,18 +205,39 @@ bool ScreenshotCapture()
     if (scratch == nullptr)
     {
         SerialWrite("[shot] capture: scratch alloc failed\n");
+        CursorPopWait();
+        NotifyShow("screenshot: out of memory");
         return false;
     }
     duetos::util::BmpWriteHeader32(scratch, fb.width, fb.height, /*top_down=*/true);
     if (!StreamRows(v, path, fb.width, fb.height, scratch, kBmpHeaderBytes, rows))
     {
         SerialWrite("[shot] capture: write failed (disk full?)\n");
+        CursorPopWait();
+        NotifyShow("screenshot: write failed");
         return false;
     }
 
     SerialWrite("[shot] capture: ");
     SerialWrite(path);
     SerialWrite("\n");
+    CursorPopWait();
+    // Toast the saved filename — the operator otherwise has no
+    // confirmation the F-key actually wrote anything.
+    char toast[40];
+    u32 to = 0;
+    const char* prefix = "saved ";
+    while (prefix[to] != '\0' && to + 1 < sizeof(toast))
+    {
+        toast[to] = prefix[to];
+        ++to;
+    }
+    for (u32 j = 0; path[j] != '\0' && to + 1 < sizeof(toast); ++j)
+    {
+        toast[to++] = path[j];
+    }
+    toast[to] = '\0';
+    NotifyShow(toast);
     return true;
 }
 
@@ -208,23 +245,31 @@ bool ScreenshotCaptureTga()
 {
     namespace fat = fs::fat32;
     using arch::SerialWrite;
+    using drivers::video::CursorPopWait;
+    using drivers::video::CursorPushWait;
+    using drivers::video::NotifyShow;
 
     const fat::Volume* v = fat::Fat32Volume(0);
     if (v == nullptr)
     {
         SerialWrite("[shot] tga: no FAT32 volume\n");
+        NotifyShow("screenshot: no disk");
         return false;
     }
     const auto fb = drivers::video::FramebufferGet();
     if (fb.virt == nullptr || fb.width == 0 || fb.height == 0 || fb.bpp != 32)
     {
         SerialWrite("[shot] tga: no usable 32-bpp framebuffer\n");
+        NotifyShow("screenshot: no framebuffer");
         return false;
     }
+    CursorPushWait();
     const u32 idx = NextShotIndex(v);
     if (idx == 0)
     {
         SerialWrite("[shot] tga: filename counter exhausted (>9999)\n");
+        CursorPopWait();
+        NotifyShow("screenshot: filename slots exhausted");
         return false;
     }
     char path[16];
@@ -234,6 +279,8 @@ bool ScreenshotCaptureTga()
     if (fb.height > kMaxRows)
     {
         SerialWrite("[shot] tga: framebuffer too tall (>2048 rows)\n");
+        CursorPopWait();
+        NotifyShow("screenshot: too tall (>2048 rows)");
         return false;
     }
     const u8* rows[kMaxRows];
@@ -247,23 +294,44 @@ bool ScreenshotCaptureTga()
     if (scratch == nullptr)
     {
         SerialWrite("[shot] tga: scratch alloc failed\n");
+        CursorPopWait();
+        NotifyShow("screenshot: out of memory");
         return false;
     }
     if (!duetos::util::TgaWriteHeader32(scratch, fb.width, fb.height))
     {
         mm::KFree(scratch);
         SerialWrite("[shot] tga: header build failed (oversize dim?)\n");
+        CursorPopWait();
+        NotifyShow("screenshot: tga header failed");
         return false;
     }
     if (!StreamRows(v, path, fb.width, fb.height, scratch, duetos::util::kTgaHeaderBytes, rows))
     {
         SerialWrite("[shot] tga: write failed (disk full?)\n");
+        CursorPopWait();
+        NotifyShow("screenshot: write failed");
         return false;
     }
 
     SerialWrite("[shot] tga: ");
     SerialWrite(path);
     SerialWrite("\n");
+    CursorPopWait();
+    char toast[40];
+    u32 to = 0;
+    const char* prefix = "saved ";
+    while (prefix[to] != '\0' && to + 1 < sizeof(toast))
+    {
+        toast[to] = prefix[to];
+        ++to;
+    }
+    for (u32 j = 0; path[j] != '\0' && to + 1 < sizeof(toast); ++j)
+    {
+        toast[to++] = path[j];
+    }
+    toast[to] = '\0';
+    NotifyShow(toast);
     return true;
 }
 

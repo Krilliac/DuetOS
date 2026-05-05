@@ -93,6 +93,25 @@ bool BrowserFeedChar(char c);
 /// History/Bookmarks; Left/Right are unused in v0.
 bool BrowserFeedArrow(u16 keycode);
 
+/// Mouse-wheel handler. In View mode, scrolls the body up/down
+/// by `dz` rows; in History/Bookmarks mode, steps the list
+/// selection. Registered as the Browser window's WindowWheelFn
+/// at BrowserInit time.
+void BrowserOnWheel(duetos::i32 dz);
+
+/// Mouse double-click handler. In Bookmarks mode, follows the
+/// hit row's URL via `StartFetch`. Other modes — no-op (returns
+/// false). Hit-test geometry mirrors `DrawFn`.
+bool BrowserOnDoubleClick(duetos::u32 cx, duetos::u32 cy);
+
+/// Switch to URL-edit mode and place the caret at end-of-URL —
+/// the v0 backing for the conventional "Ctrl+L" focus-URL
+/// shortcut. Bound by main.cpp's keyboard reader when Browser
+/// is the active window. Same effect as the existing `U` /
+/// `Tab` keys but accessible without losing modifier muscle
+/// memory.
+void BrowserFocusUrl();
+
 /// Boot self-test — pure compute. Validates URL parsing
 /// (scheme/host/port/path extraction), HTML tag stripper +
 /// entity decoder. No network I/O so it runs unconditionally.

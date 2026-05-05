@@ -78,6 +78,12 @@ void WidgetDrawAll();
 /// a single button bit).
 u32 WidgetRouteMouse(u32 cursor_x, u32 cursor_y, u8 button_mask);
 
+/// Cursor-shape hit-test. True iff (cx, cy) lands inside any
+/// alive button widget's bounds AND the button's owner window
+/// (if any) is alive + visible. Used by the mouse loop to flip
+/// the cursor sprite to `Hand` when hovering a clickable.
+bool WidgetCursorOverButton(u32 cx, u32 cy);
+
 // ---------------------------------------------------------------
 // Window chrome + registry.
 //
@@ -268,6 +274,26 @@ const char* WindowTitle(WindowHandle h);
 /// cookie is passed back unchanged.
 using WindowContentFn = void (*)(u32 x, u32 y, u32 w, u32 h, void* cookie);
 void WindowSetContentDraw(WindowHandle handle, WindowContentFn fn, void* cookie);
+
+/// Per-window mouse-wheel callback. `dz` is the signed wheel-tick
+/// delta (positive = scroll up / away from user) clamped to ±8 by
+/// the dispatcher. Native windows register a handler to consume
+/// wheel motion when the cursor is over their client area;
+/// PE-owned windows ignore this and receive `WM_MOUSEWHEEL` via
+/// the message queue instead.
+using WindowWheelFn = void (*)(i32 dz);
+void WindowSetWheelHandler(WindowHandle h, WindowWheelFn fn);
+
+/// Deliver a wheel event to `h`. Native owner → calls the
+/// registered `WindowWheelFn` (no-op if none). PE owner
+/// (`owner_pid > 0`) → posts `WM_MOUSEWHEEL` (0x020A) with
+/// `wparam = (i16(dz * 120) << 16) | mk_buttons`,
+/// `lparam = (screen_y << 16) | screen_x` per Win32 contract.
+/// `client_x` / `client_y` are unused today but reserved so a
+/// future scroll-zone-aware widget layer can hit-test inside the
+/// client area without recomputing screen coords.
+void WindowDispatchWheel(WindowHandle h, i32 client_x, i32 client_y, i32 dz, u32 screen_x, u32 screen_y,
+                         u64 mk_buttons);
 
 // ---------------------------------------------------------------
 // Per-window ownership + message queue + GDI display list.

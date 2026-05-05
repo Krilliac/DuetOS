@@ -3042,6 +3042,43 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 duetos::drivers::video::CompositorUnlock();
             }
 
+            // Ctrl+L — focus the Browser URL bar, web-browser
+            // convention. Only fires when Browser is active so
+            // it doesn't shadow other apps' single-letter keys.
+            if (ctrl && !alt && !shift && (ev.code == 'l' || ev.code == 'L'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                if (active != duetos::drivers::video::kWindowInvalid &&
+                    active == duetos::apps::browser::BrowserWindow())
+                {
+                    duetos::apps::browser::BrowserFocusUrl();
+                    duetos::drivers::video::CompositorUnlock();
+                    SerialWrite("[ui] ^L browser focus url\n");
+                    continue;
+                }
+                duetos::drivers::video::CompositorUnlock();
+            }
+
+            // Ctrl+Z — undo the last Notes edit. Pops one frame
+            // off the 16-entry undo ring (with 250 ms coalesce so
+            // typing a word counts as one undoable step). Active-
+            // window-gated.
+            if (ctrl && !alt && !shift && (ev.code == 'z' || ev.code == 'Z'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                if (active != duetos::drivers::video::kWindowInvalid && active == duetos::apps::notes::NotesWindow())
+                {
+                    const bool ok = duetos::apps::notes::NotesUndo();
+                    duetos::drivers::video::CompositorUnlock();
+                    duetos::drivers::video::NotifyShow(ok ? "undo" : "nothing to undo");
+                    SerialWrite(ok ? "[ui] ^Z undo notes\n" : "[ui] ^Z notes undo (empty)\n");
+                    continue;
+                }
+                duetos::drivers::video::CompositorUnlock();
+            }
+
             // Ctrl+O — replace the Notes buffer with the contents
             // of NOTES.TXT from the FAT32 root. Active-window-gated.
             // The pre-load buffer is overwritten without
@@ -3473,6 +3510,38 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 const auto active = duetos::drivers::video::WindowActive();
                 if (active != duetos::drivers::video::kWindowInvalid)
                 {
+                    // Notes dirty-close two-step. If the active
+                    // window is Notes AND the buffer has unsaved
+                    // edits, the first Alt+F4 just notifies +
+                    // arms a "press again to discard" gate; a
+                    // second Alt+F4 within ~3 seconds (30 ticks
+                    // @ 100 Hz) actually closes. The gate also
+                    // releases on any other key event, so a user
+                    // who intended to keep editing can just resume
+                    // typing. This is the "dialog-free" close
+                    // confirmation pattern — a richer MessageBox
+                    // primitive replaces it in a future slice.
+                    constexpr duetos::u64 kDirtyCloseArmTicks = 300; // ~3 s
+                    static duetos::u64 s_dirty_close_armed_tick = 0;
+                    static duetos::drivers::video::WindowHandle s_dirty_close_armed_hwnd =
+                        duetos::drivers::video::kWindowInvalid;
+                    const bool is_notes = (active == duetos::apps::notes::NotesWindow());
+                    const bool dirty = is_notes && duetos::apps::notes::NotesIsDirty();
+                    const duetos::u64 now_tick = duetos::arch::TimerTicks();
+                    const bool armed = (s_dirty_close_armed_hwnd == active) &&
+                                       (now_tick - s_dirty_close_armed_tick <= kDirtyCloseArmTicks);
+                    if (dirty && !armed)
+                    {
+                        s_dirty_close_armed_tick = now_tick;
+                        s_dirty_close_armed_hwnd = active;
+                        duetos::drivers::video::CompositorUnlock();
+                        duetos::drivers::video::NotifyShow("Unsaved changes. Press Alt+F4 again to discard.");
+                        SerialWrite("[ui] alt-f4 dirty-close armed window=");
+                        SerialWriteHex(active);
+                        SerialWrite("\n");
+                        continue;
+                    }
+                    s_dirty_close_armed_hwnd = duetos::drivers::video::kWindowInvalid;
                     duetos::drivers::video::WindowClose(active);
                     SerialWrite("[ui] alt-f4 close window=");
                     SerialWriteHex(active);
@@ -3582,9 +3651,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     else if (active == duetos::apps::notes::NotesWindow() &&
                              (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyArrowLeft ||
                               ev.code == kKeyArrowRight || ev.code == kKeyHome || ev.code == kKeyEnd ||
-                              ev.code == kKeyDelete))
+                              ev.code == kKeyDelete || ev.code == kKeyPageUp || ev.code == kKeyPageDown))
                     {
-                        app_consumed = duetos::apps::notes::NotesFeedKey(ev.code);
+                        app_consumed = duetos::apps::notes::NotesFeedKey(ev.code, ev.modifiers);
                     }
                     else
                     {
@@ -3952,6 +4021,33 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             // compose paints it. The recompose itself is forced
             // below if the cursor moved while a menu was open.
             duetos::drivers::video::MenuTrackHoverAt(cx, cy);
+
+            // Cursor-shape hit-test. Skipped while Wait is active
+            // (the long-op holder owns the shape). Otherwise:
+            // hovering a button widget → Hand; hovering Notes /
+            // Browser editable client area → IBeam; everywhere
+            // else → Arrow. The CursorSetShape change-gate keeps
+            // per-packet calls cheap when the shape doesn't move.
+            if (duetos::drivers::video::CursorGetShape() != duetos::drivers::video::CursorShape::Wait)
+            {
+                using duetos::drivers::video::CursorShape;
+                CursorShape want = CursorShape::Arrow;
+                if (duetos::drivers::video::WidgetCursorOverButton(cx, cy))
+                {
+                    want = CursorShape::Hand;
+                }
+                else
+                {
+                    const auto over = duetos::drivers::video::WindowTopmostAt(cx, cy);
+                    if (over != duetos::drivers::video::kWindowInvalid &&
+                        !duetos::drivers::video::WindowPointInTitle(over, cx, cy) &&
+                        (over == duetos::apps::notes::NotesWindow() || over == duetos::apps::browser::BrowserWindow()))
+                    {
+                        want = CursorShape::IBeam;
+                    }
+                }
+                duetos::drivers::video::CursorSetShape(want);
+            }
 
             const bool left_down = (p.buttons & duetos::drivers::input::kMouseButtonLeft) != 0;
             const bool press_edge = left_down && !prev_left;
@@ -4427,13 +4523,52 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                         const bool in_title = duetos::drivers::video::WindowPointInTitle(hit, cx, cy);
                         if (in_title)
                         {
-                            drag.active = true;
-                            drag.window = hit;
-                            drag.grab_offset_x = cx - wx;
-                            drag.grab_offset_y = cy - wy;
-                            SerialWrite("[ui] drag begin window=");
-                            SerialWriteHex(hit);
-                            SerialWrite("\n");
+                            // Title-bar double-click toggles
+                            // maximize/restore — the gesture every
+                            // desktop OS converges on. Detected here
+                            // (not in the routing block below)
+                            // because the title-bar branch swallows
+                            // press edges before the routing block
+                            // sees them; without this the second
+                            // click would just re-arm the drag.
+                            constexpr duetos::u64 kTitleDblClickTicks = 50; // ~500ms
+                            static duetos::u64 s_title_dc_tick = 0;
+                            static duetos::drivers::video::WindowHandle s_title_dc_hwnd =
+                                duetos::drivers::video::kWindowInvalid;
+                            const duetos::u64 now_tick = duetos::arch::TimerTicks();
+                            const bool is_title_dbl =
+                                (s_title_dc_hwnd == hit) && (now_tick - s_title_dc_tick <= kTitleDblClickTicks);
+                            if (is_title_dbl)
+                            {
+                                if (duetos::drivers::video::WindowIsMaximized(hit))
+                                {
+                                    duetos::drivers::video::WindowRestore(hit);
+                                    SerialWrite("[ui] title-bar dblclk -> restore window=");
+                                }
+                                else
+                                {
+                                    duetos::drivers::video::WindowMaximize(hit);
+                                    SerialWrite("[ui] title-bar dblclk -> maximize window=");
+                                }
+                                SerialWriteHex(hit);
+                                SerialWrite("\n");
+                                // Consume the second click so a fast
+                                // triple-click doesn't fire a third
+                                // toggle in the same gesture.
+                                s_title_dc_hwnd = duetos::drivers::video::kWindowInvalid;
+                            }
+                            else
+                            {
+                                s_title_dc_tick = now_tick;
+                                s_title_dc_hwnd = hit;
+                                drag.active = true;
+                                drag.window = hit;
+                                drag.grab_offset_x = cx - wx;
+                                drag.grab_offset_y = cy - wy;
+                                SerialWrite("[ui] drag begin window=");
+                                SerialWriteHex(hit);
+                                SerialWrite("\n");
+                            }
                         }
                         else
                         {
@@ -4576,6 +4711,79 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                         SerialWrite("\n");
                     }
                     duetos::drivers::video::WindowMsgWakeAll();
+                }
+                else if (pe_hit != duetos::drivers::video::kWindowInvalid && press_edge)
+                {
+                    // Native-window double-click dispatch. Only
+                    // fires on press_edge for owner_pid == 0
+                    // windows (kernel apps). Same 500ms / same-
+                    // pixel / same-hwnd discipline as the PE DC
+                    // path above. Title-bar DC is handled in the
+                    // chrome branch (maximize/restore toggle), so
+                    // a hit here is always client-area.
+                    constexpr duetos::u64 kNativeDblClickTicks = 50;
+                    static duetos::u64 s_native_dc_tick = 0;
+                    static duetos::drivers::video::WindowHandle s_native_dc_hwnd =
+                        duetos::drivers::video::kWindowInvalid;
+                    static duetos::u32 s_native_dc_x = 0;
+                    static duetos::u32 s_native_dc_y = 0;
+                    const duetos::u64 now_tick = duetos::arch::TimerTicks();
+                    const bool is_dbl = (s_native_dc_hwnd == pe_hit) &&
+                                        (now_tick - s_native_dc_tick <= kNativeDblClickTicks) &&
+                                        (s_native_dc_x == cx) && (s_native_dc_y == cy);
+                    if (is_dbl)
+                    {
+                        if (pe_hit == duetos::apps::files::FilesWindow())
+                        {
+                            duetos::apps::files::FilesOnDoubleClick(cx, cy);
+                        }
+                        else if (pe_hit == duetos::apps::browser::BrowserWindow())
+                        {
+                            duetos::apps::browser::BrowserOnDoubleClick(cx, cy);
+                        }
+                        // Other native apps: NotesOnDoubleClick is
+                        // a documented no-op (no word-select model
+                        // in v0). Calculator / Calendar / Clock /
+                        // ImageView don't have a DC entry point —
+                        // those gestures aren't part of their UX.
+                        s_native_dc_hwnd = duetos::drivers::video::kWindowInvalid;
+                        duetos::drivers::video::CursorHide();
+                        duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                        duetos::drivers::video::CursorShow();
+                    }
+                    else
+                    {
+                        s_native_dc_tick = now_tick;
+                        s_native_dc_hwnd = pe_hit;
+                        s_native_dc_x = cx;
+                        s_native_dc_y = cy;
+                    }
+                }
+
+                // Wheel dispatch — works for native AND PE owners.
+                // The dispatcher fans out: PE windows get
+                // WM_MOUSEWHEEL posted; native windows invoke their
+                // registered WindowWheelFn handler.
+                if (p.dz != 0 && pe_hit != duetos::drivers::video::kWindowInvalid)
+                {
+                    duetos::i32 dz = p.dz;
+                    if (dz > 8)
+                        dz = 8;
+                    if (dz < -8)
+                        dz = -8;
+                    duetos::u32 wx = 0, wy = 0;
+                    duetos::drivers::video::WindowGetBounds(pe_hit, &wx, &wy, nullptr, nullptr);
+                    const duetos::i32 client_x = static_cast<duetos::i32>(cx) - static_cast<duetos::i32>(wx) - 2;
+                    const duetos::i32 client_y = static_cast<duetos::i32>(cy) - static_cast<duetos::i32>(wy) - 22 - 2;
+                    duetos::u64 mk = 0;
+                    if (left_down)
+                        mk |= 0x0001U;
+                    if (right_down)
+                        mk |= 0x0002U;
+                    duetos::drivers::video::WindowDispatchWheel(pe_hit, client_x, client_y, dz, cx, cy, mk);
+                    duetos::drivers::video::CursorHide();
+                    duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                    duetos::drivers::video::CursorShow();
                 }
             }
 

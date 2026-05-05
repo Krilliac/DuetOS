@@ -83,6 +83,19 @@ duetos::i32 FilesRowAt(duetos::u32 cx, duetos::u32 cy);
 /// caller's surrounding flow does.
 bool FilesOnRightClick(duetos::u32 cx, duetos::u32 cy);
 
+/// Mouse-wheel handler. `dz > 0` (wheel up) steps the selection
+/// toward row 0; `dz < 0` (wheel down) steps it toward the
+/// listing tail. Equivalent to repeated FilesFeedArrow calls.
+/// Registered as the Files window's WindowWheelFn at
+/// FilesInit time.
+void FilesOnWheel(duetos::i32 dz);
+
+/// Mouse double-click handler. If `cx`/`cy` resolves to a row,
+/// opens that row: directories descend (when supported),
+/// `.TXT` opens in Notes, `.BMP/.PNG/.TGA` opens in ImageView.
+/// Returns true iff the click was consumed.
+bool FilesOnDoubleClick(duetos::u32 cx, duetos::u32 cy);
+
 /// Dispatch a Files-app context-menu action. Called from the
 /// shared menu dispatcher in main.cpp once the menu fires. The
 /// action ids are 30..33; ctx is the row index captured at

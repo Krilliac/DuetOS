@@ -82,4 +82,41 @@ void CursorSetDesktopBackground(u32 rgb);
 /// without waiting for motion.
 void CursorSetColours(u32 outline_rgb, u32 fill_rgb);
 
+/// Pointer-shape variants. `Wait` is a programmatic toggle —
+/// callers `CursorPushWait()` before a long operation and
+/// `CursorPopWait()` after. Arrow / IBeam / Hand are picked by
+/// the mouse-loop's hit-test based on what's under the cursor:
+/// buttons → Hand, text-input regions → IBeam, everywhere else
+/// → Arrow. All four sprites are 12×20 so the backing-store
+/// allocation never moves.
+enum class CursorShape : u8
+{
+    Arrow = 0,
+    IBeam = 1,
+    Hand = 2,
+    Wait = 3,
+};
+
+/// Pick the active sprite. Repaints in place so the new shape
+/// shows immediately without waiting for motion. No-op if `s`
+/// is already the active shape.
+void CursorSetShape(CursorShape s);
+
+/// Read the current shape. Returns `Arrow` before the cursor
+/// is initialised.
+CursorShape CursorGetShape();
+
+/// Push a `Wait` overlay onto the active shape. Refcounted —
+/// nested CursorPushWait / CursorPopWait calls compose: the
+/// shape stays Wait until the last Pop balances. The shape
+/// underneath is restored on the final Pop. Used by long-
+/// running code paths (screenshot save, FAT32 write) so the
+/// hourglass appears for the whole operation.
+void CursorPushWait();
+
+/// Pop one Wait overlay. The cursor reverts to whatever shape
+/// the hit-test was setting before the push, OR remains Wait
+/// if other pushes are still outstanding.
+void CursorPopWait();
+
 } // namespace duetos::drivers::video

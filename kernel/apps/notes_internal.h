@@ -23,6 +23,16 @@ extern char g_buf[kBufCap];
 extern duetos::u32 g_len;
 extern duetos::u32 g_cursor;
 
+// Selection anchor — `-1` (`kNoSelection`) when no selection
+// is active. Set to the caret position on the first shifted
+// movement; cleared on any non-shifted movement, on insert /
+// delete, and on save/load. The selected range is
+// `[min(anchor, cursor), max(anchor, cursor))` — half-open at
+// the upper end so a fresh shift-arrow that lands on the same
+// caret position renders no selection.
+constexpr duetos::i32 kNoSelection = -1;
+extern duetos::i32 g_sel_anchor;
+
 // Modified-since-last-save indicator. Set true on every
 // mutation primitive (Insert / Delete / Backspace), cleared
 // on a successful Save / Load round-trip. Drives the "*MOD"
