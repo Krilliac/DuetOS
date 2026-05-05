@@ -2752,6 +2752,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWrite("[boot] Bringing up NVMe controller.\n");
     duetos::drivers::storage::NvmeInit();
     DUETOS_BOOT_SELFTEST(duetos::drivers::storage::NvmeSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::diag::minidump::DiskPersistSelfTest());
 
     SerialWrite("[boot] Bringing up AHCI controller(s).\n");
     duetos::drivers::storage::AhciInit();

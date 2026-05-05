@@ -15,6 +15,7 @@
 
 #include "diag/minidump.h"
 #include "drivers/storage/block.h"
+#include "drivers/storage/nvme.h"
 #include "drivers/video/console.h"
 #include "fs/fat32.h"
 #include "fs/gpt.h"
@@ -291,6 +292,44 @@ void CmdLastdump()
         const duetos::u16 ver = static_cast<duetos::u16>(bytes[4] | (bytes[5] << 8));
         WriteHexCol(static_cast<duetos::u64>(ver), 4);
         ConsoleWriteln("");
+    }
+
+    // NVMe persistence — reports whether the panic path landed
+    // a copy on the reserved LBA region of namespace 1. The dump
+    // file name on the host (debugcon channel) is the FIRST
+    // copy; this is the second, which survives a host without
+    // the QEMU debugcon flag set.
+    namespace stor = duetos::drivers::storage;
+    if (stor::NvmeAvailable())
+    {
+        const duetos::u64 lba = stor::NvmeDumpReservedLba();
+        ConsoleWrite("  disk persist: ");
+        if (stor::NvmePanicWriteSucceededLast())
+        {
+            ConsoleWrite("OK at LBA ");
+            WriteU64Dec(lba);
+            ConsoleWrite(" (");
+            WriteU64Dec(stor::NvmePanicLastWriteBytes());
+            ConsoleWriteln(" bytes)");
+        }
+        else if (stor::NvmePanicLastWriteBytes() != 0)
+        {
+            ConsoleWrite("PARTIAL at LBA ");
+            WriteU64Dec(lba);
+            ConsoleWrite(" (");
+            WriteU64Dec(stor::NvmePanicLastWriteBytes());
+            ConsoleWriteln(" bytes written)");
+        }
+        else
+        {
+            ConsoleWrite("not yet attempted (reserved LBA=");
+            WriteU64Dec(lba);
+            ConsoleWriteln(", region writes only on panic)");
+        }
+    }
+    else
+    {
+        ConsoleWriteln("  disk persist: no NVMe namespace");
     }
 }
 
