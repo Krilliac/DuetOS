@@ -157,9 +157,16 @@ In rough priority:
 - **Today:** Windows-format `.dmp` files are emitted byte-by-byte
   over QEMU's debugcon (port 0xE9 → `${BUILD_DIR}/duetos.dmp`
   host file). Loadable in WinDbg / VSCode / Python `minidump`.
+  The built dump bytes are exposed via
+  `diag::minidump::AccessLastMinidump(*out_bytes, *out_len)` so
+  any panic-time consumer (disk writer, network pusher, etc.)
+  can ship the same bytes the debugcon path already wrote.
 - **Deferred:** real-hardware persistence (raw-block write to a
-  reserved LBA range). Needs a panic-time block writer that
-  runs without the slab allocator or scheduler.
+  reserved LBA range). The bytes-access foundation is in place;
+  remaining work is the panic-time block writer that runs
+  without the slab allocator or scheduler — likely an
+  NVMe / AHCI polled-completion path that bypasses the regular
+  block layer.
 
 ---
 

@@ -82,4 +82,18 @@ void EmitMinidumpFromTrapFrame(const arch::TrapFrame* frame, u32 exception_code)
 /// Panics on any structural mismatch.
 void MinidumpSelfTest();
 
+/// Read-back accessor for the last successfully-built minidump's
+/// byte range inside the static buffer. Used by future panic-time
+/// persistence consumers (a reserved-LBA disk writer, a
+/// network-pushed crash report, etc.) so the same bytes the
+/// debugcon path emitted can be re-shipped without re-walking
+/// the trap state.
+///
+/// Returns false (and clears `*out_*`) if no minidump has been
+/// built yet this boot. The pointer is stable until the next
+/// `EmitMinidump` / `EmitMinidumpFromTrapFrame` call — typical
+/// callers run on the panic path between the emit and the next
+/// reboot, so the lifetime is "uptime".
+bool AccessLastMinidump(const u8** out_bytes, u64* out_len);
+
 } // namespace duetos::diag::minidump
