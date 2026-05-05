@@ -85,6 +85,19 @@ void KEventReset(KEvent* e);
 /// already signaled at the time of the call.
 void KEventWait(KEvent* e);
 
+/// Timed variant. Blocks at most `ticks` timer ticks for the
+/// event to signal. Returns true if the wait consumed a signal
+/// (auto-reset cleared, manual-reset stayed signaled), false on
+/// timeout. The deadline is computed once at entry and respected
+/// across spurious wakeups + race-losses against other waiters.
+/// `ticks == 0` is "test only" — returns true iff the event is
+/// already signaled at call time (and consumes it on auto-reset).
+///
+/// Backs the timed-wait variant of WaitForSingleObject on an
+/// event handle; the SYS_EVENT_WAIT migration in the roadmap
+/// routes through here.
+bool KEventWaitTimed(KEvent* e, u64 ticks);
+
 /// Boot-time self-test. Allocates one auto-reset and one
 /// manual-reset KEvent on the heap, inserts both into a synthetic
 /// HandleTable, exercises the Set / Reset / consume semantics

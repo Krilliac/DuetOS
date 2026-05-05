@@ -95,10 +95,22 @@ struct KMutex
 /// Recursive acquire. Same task may acquire repeatedly; each call
 /// must be paired with a matching `KMutexRelease`. Blocks (via
 /// `sched::MutexLock` on the inner mutex) when another task
-/// holds the lock. Always succeeds eventually (no timeout in v0;
-/// timed-wait variant lands when the SYS_MUTEX_WAIT migration
-/// needs it).
+/// holds the lock.
 void KMutexAcquire(KMutex* m);
+
+/// Timed recursive acquire. Identical to `KMutexAcquire` for the
+/// re-entrant fast path (recursion bumps regardless of the
+/// timeout — re-entry never blocks). Otherwise blocks at most
+/// `ticks` timer ticks via `sched::MutexLockTimed`. Returns true
+/// if the lock is held on return; false on timeout. `ticks == 0`
+/// is the non-blocking variant — yields then returns false on
+/// contention.
+///
+/// Backs the timed-wait variant of Win32-style WaitForSingleObject
+/// on a mutex handle; the SYS_MUTEX_WAIT migration ahead in the
+/// roadmap routes through here once the surface is moved onto
+/// `Process::kobj_handles`.
+bool KMutexAcquireTimed(KMutex* m, u64 ticks);
 
 /// Drop one recursion level. The outermost release transfers
 /// ownership to the next FIFO waiter (or unlocks if the queue is

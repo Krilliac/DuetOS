@@ -547,6 +547,15 @@ void MutexLock(Mutex* m);
 void MutexUnlock(Mutex* m);
 /// Non-blocking acquire. Returns true on success, false if already held.
 bool MutexTryLock(Mutex* m);
+/// Timed acquire. Identical to MutexLock on the uncontended fast
+/// path; on contention, blocks at most `ticks` timer ticks via
+/// `WaitQueueBlockTimeout`. Returns true if the lock is held on
+/// return (either via the fast path or via MutexUnlock's hand-off
+/// wake), false on timeout. `ticks == 0` is "test then drop" — same
+/// observable as MutexTryLock plus a yield. Lockdep edges are
+/// recorded eagerly (matching MutexLock), but the held-stack push
+/// fires only on success — a timed-out acquire never held the lock.
+bool MutexLockTimed(Mutex* m, u64 ticks);
 
 /*
  * Condition variable — drop-mutex-and-block with safe re-acquire.

@@ -84,6 +84,27 @@ void KMutexAcquire(KMutex* m)
     m->recursion = 1;
 }
 
+bool KMutexAcquireTimed(KMutex* m, u64 ticks)
+{
+    sched::Task* me = sched::CurrentTask();
+    // Re-entrant acquire bypasses the timeout: a task that already
+    // owns the lock cannot block on itself, so the timeout never
+    // applies. Same safety argument as the untimed variant — only
+    // we can mutate `owner` while we own it.
+    if (m->owner == me)
+    {
+        ++m->recursion;
+        return true;
+    }
+    if (!sched::MutexLockTimed(&m->inner, ticks))
+    {
+        return false;
+    }
+    m->owner = me;
+    m->recursion = 1;
+    return true;
+}
+
 void KMutexRelease(KMutex* m)
 {
     sched::Task* me = sched::CurrentTask();
@@ -196,6 +217,36 @@ void KMutexSelfTest()
     if (km->recursion != 0 || km->owner != nullptr)
     {
         core::Panic("ipc/kmutex", "self-test: final release did not reset state");
+    }
+
+    // Timed-acquire fast paths. Re-entrant timed acquire must
+    // succeed regardless of the timeout (no self-block). A
+    // timed-acquire on an unowned mutex with a non-zero budget
+    // must succeed via the fast path. Real contention (waiter
+    // taking the timeout vs. an unlock-handoff) is verified by
+    // a future SMP/contention test once AP bringup lands; v0
+    // exercises the un-contended branches here.
+    if (!KMutexAcquireTimed(km, 1))
+    {
+        core::Panic("ipc/kmutex", "self-test: AcquireTimed(1) on free mutex failed");
+    }
+    if (km->recursion != 1 || km->owner == nullptr)
+    {
+        core::Panic("ipc/kmutex", "self-test: AcquireTimed did not stamp owner+recursion");
+    }
+    if (!KMutexAcquireTimed(km, 0))
+    {
+        core::Panic("ipc/kmutex", "self-test: re-entrant AcquireTimed(0) failed");
+    }
+    if (km->recursion != 2)
+    {
+        core::Panic("ipc/kmutex", "self-test: re-entrant timed acquire did not bump recursion");
+    }
+    KMutexRelease(km);
+    KMutexRelease(km);
+    if (km->recursion != 0 || km->owner != nullptr)
+    {
+        core::Panic("ipc/kmutex", "self-test: timed-acquire release pairs did not reset state");
     }
 
     // Remove from table — refcount falls to zero, destroy fires,

@@ -66,10 +66,17 @@ the same commit** that delivers the code.
   `O_*` flag bitmask + numeric fd allocation. Both surfaces
   need careful preservation across the migration.
 - **When to land:** when handle-table audit pressure exceeds the
-  cost of moving each subsystem. The unified
-  `Process::kobj_handles` table is in place; concrete subclasses
-  (KMutex / KEvent / KSemaphore / KMailbox / KWaitable / KFile)
-  are landed. Next slice is the SYS_* surface migration itself.
+  cost of moving each subsystem. Foundations now in place:
+  unified `Process::kobj_handles` table; concrete subclasses
+  (KMutex / KEvent / KSemaphore / KMailbox / KWaitable / KFile);
+  timed-wait primitives `sched::MutexLockTimed`,
+  `KMutexAcquireTimed`, `KEventWaitTimed`,
+  `KSemaphoreAcquireTimed` (the timeout dimension SYS_MUTEX_WAIT
+  / SYS_EVENT_WAIT / SYS_SEM_WAIT need to preserve). Next slice
+  is the SYS_* surface migration itself — replace per-type
+  `Process::win32_*` arrays with HandleTableInsert/Lookup calls,
+  preserving the existing handle-numeric ranges and
+  kWaitObject0 / kWaitTimeout return shape.
 
 ### Intel CET enable
 

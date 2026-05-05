@@ -4259,6 +4259,58 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 100 — Timed-wait primitives across sched + IPC layer
+
+- **Scope:** `kernel/sched/sched.h` + `sched.cpp` (`MutexLockTimed`),
+  `kernel/ipc/kmutex.{h,cpp}` (`KMutexAcquireTimed`),
+  `kernel/ipc/kevent.{h,cpp}` (`KEventWaitTimed`),
+  `kernel/ipc/ksemaphore.{h,cpp}` (`KSemaphoreAcquireTimed`).
+  Self-tests in each KObject TU exercise the un-contended fast
+  paths.
+- **Decision:** Add a timed-wait variant to every IPC primitive
+  that previously documented "no timeout in v0; lands when the
+  SYS_*_WAIT migration needs it." `sched::MutexLockTimed` mirrors
+  `MutexLock` but uses `WaitQueueBlockTimeout`; the hand-off
+  contract from `MutexUnlock` is unchanged (owner stamped before
+  wake), so a `true` return means the lock is held even if the
+  task came in via the slow path. Lockdep: `BeforeAcquire`
+  fires eagerly (matches `MutexLock`); the held-stack push
+  (`AfterAcquire`) fires only on success. `KEvent` /
+  `KSemaphore` build on `sched::CondvarWaitTimeout` with a
+  deadline computed once at entry — spurious wakeups and
+  "another waiter raced first" cases don't re-arm the budget.
+- **Why:** This is the missing infrastructure piece on the
+  critical path of the SYS_MUTEX / SYS_EVENT / SYS_SEM migration
+  to `Process::kobj_handles`. The Win32 ABI returns
+  `kWaitObject0` / `kWaitTimeout` from `WaitForSingleObject` —
+  neither value is meaningful without a timed-wait primitive
+  underneath each KObject. Landing the primitives first lets the
+  migration commit be a flat substitution (replace per-type
+  `Process::win32_*` with `HandleTableInsert / Lookup` calls)
+  rather than co-evolving the primitive contract and the syscall
+  surface.
+- **Rules out / defers:** Real waiter-contention testing — the
+  v0 self-tests cover the un-contended branches (timeout=0
+  test-and-drop, fast-path success on signaled events / non-zero
+  count / unowned mutex). Spawned-waiter tests that prove a
+  timer beats an unlock-handoff (or vice versa) are gated on
+  SMP AP bringup unblocking real concurrent acquires. The
+  v0 implementation is correct under the existing
+  `WaitQueueBlockTimeout` / `CondvarWaitTimeout` race-handling
+  contract; the defer is testing-only.
+- **Revisit when:** The `SYS_MUTEX_*` / `SYS_EVENT_*` /
+  `SYS_SEM_*` syscall handlers migrate to `kobj_handles`. They
+  call `KMutexAcquireTimed` / `KEventWaitTimed` /
+  `KSemaphoreAcquireTimed` directly, returning
+  `kWaitObject0` on `true` and `kWaitTimeout` on `false` —
+  preserving the existing Win32 ABI without re-implementing
+  the timed-wait machinery per-syscall.
+- **Related tracks:** Track 1 (Kernel — sched + IPC primitives),
+  Track 5 (Win32 subsystem — SYS_*_WAIT migration is the next
+  consumer of this infrastructure).
+
+---
+
 After landing a non-trivial commit, append a new section here with
 the **next sequential number**. Keep entries small. Link the commit
 hash. Always write the "Revisit when" marker — that's the point of

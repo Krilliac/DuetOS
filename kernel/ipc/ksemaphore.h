@@ -66,10 +66,22 @@ struct KSemaphore
 /// `Err{ErrorCode::OutOfMemory}` on heap exhaustion.
 ::duetos::core::Result<KSemaphore*> KSemaphoreCreate(u32 initial_count, u32 max_count);
 
-/// Block until count > 0, then decrement by 1. Always succeeds
-/// eventually (no timeout in v0; timed-wait variant lands when
-/// the SYS_SEM_WAIT migration needs it).
+/// Block until count > 0, then decrement by 1.
 void KSemaphoreAcquire(KSemaphore* s);
+
+/// Timed acquire. Identical to `KSemaphoreAcquire` on the fast
+/// path (count > 0 — decrement and return true immediately).
+/// Otherwise blocks at most `ticks` timer ticks for a permit;
+/// returns true if a permit was consumed, false on timeout. The
+/// deadline is computed once at entry; spurious wakeups and
+/// races against other acquirers don't re-arm the budget.
+/// `ticks == 0` is "test only" — returns true iff a permit was
+/// available at call time.
+///
+/// Backs the timed-wait variant of WaitForSingleObject on a
+/// semaphore handle; the SYS_SEM_WAIT migration in the roadmap
+/// routes through here.
+bool KSemaphoreAcquireTimed(KSemaphore* s, u64 ticks);
 
 /// Release `n` permits. Increments count by n and wakes up to n
 /// waiters (each will resume their `Acquire` and consume one
