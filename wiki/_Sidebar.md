@@ -10,6 +10,7 @@
 
 ### Kernel
 - [Boot Path](kernel/Boot.md)
+- [UEFI Loader](kernel/UEFI-Loader.md)
 - [Memory Management](kernel/Memory-Management.md)
 - [Scheduler](kernel/Scheduler.md)
 - [Syscalls](kernel/Syscalls.md)

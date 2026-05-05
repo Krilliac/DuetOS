@@ -263,6 +263,16 @@ message(STATUS "  LTO                  : ${DUETOS_LTO}")
 
 add_subdirectory(kernel)
 
+# UEFI loader (boot/uefi/) — Phase A toolchain proof. Builds a
+# PE32+ EFI Application ("BOOTX64.EFI") that prints a banner and
+# halts. Wired separately from the kernel because UEFI requires a
+# different target triple (x86_64-unknown-windows) and a Windows-
+# flavor linker (lld-link); the directory's CMakeLists drives
+# clang/lld-link directly via add_custom_command rather than fight
+# the kernel's freestanding-ELF toolchain file. Phase B replaces
+# efi_main with a real ELF loader + multiboot2-shim handoff.
+add_subdirectory(boot/uefi)
+
 # ----------------------------------------------------------------------------
 # Test harness — boots the built kernel in QEMU and greps the serial log for
 # the set of expected boot signatures emitted by the ring3 smoke probes.
