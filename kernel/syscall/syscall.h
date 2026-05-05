@@ -1680,6 +1680,35 @@ enum SyscallNumber : u64
     // Single-instance: a second concurrent call blocks on the
     // first dismissing.
     SYS_WIN_TRACK_POPUP = 173,
+
+    // SYS_GDI_SET_CURSOR — request a cursor-shape change for the
+    // duration of the calling process's mouse interactions. The
+    // kernel honours the request only while the cursor is over a
+    // window owned by the calling pid; outside that window the
+    // mouse loop's hit-test takes over (Hand over buttons,
+    // IBeam over text, etc.). Backs Win32 USER32!SetCursor.
+    //   rdi = u32 shape    // GdiCursorShape enum (below)
+    //   rax = previous shape (so callers can restore on
+    //         WM_SETCURSOR completion).
+    // Out-of-range `shape` is clamped to Arrow.
+    SYS_GDI_SET_CURSOR = 174,
+};
+
+/// Cursor-shape values the PE side hands the kernel via
+/// SYS_GDI_SET_CURSOR. Mirrors the kernel's internal
+/// `duetos::drivers::video::CursorShape` enum but kept as a
+/// freestanding type so the syscall ABI doesn't depend on a
+/// kernel header. Stable from this commit forward.
+enum GdiCursorShape : u32
+{
+    kGdiCursorArrow = 0,
+    kGdiCursorIBeam = 1,
+    kGdiCursorHand = 2,
+    kGdiCursorWait = 3,
+    kGdiCursorResizeNS = 4,
+    kGdiCursorResizeEW = 5,
+    kGdiCursorResizeNESW = 6,
+    kGdiCursorResizeNWSE = 7,
 };
 
 // Cross-language record returned by SYS_DIR_NEXT. 96 bytes, exact

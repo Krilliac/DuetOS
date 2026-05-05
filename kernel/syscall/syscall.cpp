@@ -46,6 +46,8 @@
 #include "syscall/cap_gate.h"
 #include "syscall/syscall.h"
 
+#include "drivers/video/cursor.h"
+
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/hpet.h"
 #include "arch/x86_64/idt.h"
@@ -3188,6 +3190,56 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_WIN_TRACK_POPUP:
         subsystems::win32::DoWinTrackPopup(frame);
         return;
+    case SYS_GDI_SET_CURSOR:
+    {
+        // PE cursor request. Map the GdiCursorShape ABI value
+        // to the kernel's CursorShape enum and return the
+        // previous shape so user32 can implement the standard
+        // SetCursor "previous handle" return.
+        const u32 req = static_cast<u32>(frame->rdi);
+        using duetos::drivers::video::CursorGetShape;
+        using duetos::drivers::video::CursorSetShape;
+        using duetos::drivers::video::CursorShape;
+        const CursorShape prev = CursorGetShape();
+        CursorShape want = CursorShape::Arrow;
+        switch (req)
+        {
+        case kGdiCursorIBeam:
+            want = CursorShape::IBeam;
+            break;
+        case kGdiCursorHand:
+            want = CursorShape::Hand;
+            break;
+        case kGdiCursorWait:
+            want = CursorShape::Wait;
+            break;
+        case kGdiCursorResizeNS:
+            want = CursorShape::ResizeNS;
+            break;
+        case kGdiCursorResizeEW:
+            want = CursorShape::ResizeEW;
+            break;
+        case kGdiCursorResizeNESW:
+            want = CursorShape::ResizeNESW;
+            break;
+        case kGdiCursorResizeNWSE:
+            want = CursorShape::ResizeNWSE;
+            break;
+        case kGdiCursorArrow:
+        default:
+            want = CursorShape::Arrow;
+            break;
+        }
+        // Skip the change if Wait is currently active — long-op
+        // holders own the shape; the PE's request is parked
+        // until the wait pops.
+        if (prev != CursorShape::Wait)
+        {
+            CursorSetShape(want);
+        }
+        frame->rax = static_cast<u64>(prev);
+        return;
+    }
     case SYS_WIN_SET_CURSOR:
         subsystems::win32::DoWinSetCursor(frame);
         return;
