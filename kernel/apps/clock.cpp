@@ -6,6 +6,7 @@
 #include "drivers/video/dialog.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/notify.h"
+#include "drivers/video/sound_cue.h"
 
 namespace duetos::apps::clock
 {
@@ -206,6 +207,7 @@ void CheckAlarmTrigger()
         msg[o++] = static_cast<char>('0' + (g_alarm_minute % 10));
         msg[o] = '\0';
         duetos::drivers::video::NotifyShow(msg);
+        duetos::drivers::video::SoundCueAlarm();
     }
     if (!match)
     {
@@ -225,6 +227,7 @@ void CheckTimerTrigger()
         // restart from this point doesn't misread.
         g_timer_remaining_ticks = 0;
         duetos::drivers::video::NotifyShow("TIMER ZERO");
+        duetos::drivers::video::SoundCueAlarm();
     }
 }
 

@@ -4,6 +4,7 @@
 #include "drivers/video/cursor.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/notify.h"
+#include "drivers/video/sound_cue.h"
 #include "fs/fat32.h"
 #include "mm/kheap.h"
 #include "util/bmp.h"
@@ -238,6 +239,7 @@ bool ScreenshotCapture()
     }
     toast[to] = '\0';
     NotifyShow(toast);
+    duetos::drivers::video::SoundCueChime();
     return true;
 }
 
@@ -332,6 +334,7 @@ bool ScreenshotCaptureTga()
     }
     toast[to] = '\0';
     NotifyShow(toast);
+    duetos::drivers::video::SoundCueChime();
     return true;
 }
 

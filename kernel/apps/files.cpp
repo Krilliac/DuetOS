@@ -9,6 +9,7 @@
 #include "drivers/video/menu.h"
 #include "drivers/video/notify.h"
 #include "drivers/video/scrollbar.h"
+#include "drivers/video/sound_cue.h"
 #include "drivers/video/theme.h"
 #include "fs/fat32.h"
 #include "fs/ramfs.h"
@@ -1146,6 +1147,7 @@ void FilesDispatchContextAction(duetos::u32 action, duetos::u32 ctx)
                 else
                 {
                     duetos::drivers::video::NotifyShow("rename failed");
+                    duetos::drivers::video::SoundCueError();
                     duetos::arch::SerialWrite("[files] rename FAILED: ");
                     duetos::arch::SerialWrite(src);
                     duetos::arch::SerialWrite(" -> ");
