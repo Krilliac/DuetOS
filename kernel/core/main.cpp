@@ -152,6 +152,7 @@
 #include "drivers/video/calendar.h"
 #include "drivers/video/magnifier.h"
 #include "drivers/video/dialog.h"
+#include "drivers/video/dnd.h"
 #include "drivers/video/menu.h"
 #include "drivers/video/modal_input.h"
 #include "drivers/video/start_menu_apps.h"
@@ -2966,6 +2967,23 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 continue;
             }
 
+            // DnD active: Esc cancels the drag, every other
+            // key is consumed silently so a stray keypress
+            // doesn't bleed through.
+            if (duetos::drivers::video::DndIsActive())
+            {
+                duetos::drivers::video::CompositorLock();
+                if (ev.code == kKeyEsc)
+                {
+                    duetos::drivers::video::DndCancel();
+                }
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+                duetos::drivers::video::CompositorUnlock();
+                continue;
+            }
+
             // Modal-input session (window Move / Size). Esc
             // cancels and restores the anchor; everything else
             // is consumed silently so a stray key doesn't bleed
@@ -3241,6 +3259,27 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 duetos::drivers::video::CompositorUnlock();
                 SerialWrite("[ui] ^+N notify history dump\n");
                 continue;
+            }
+
+            // Ctrl+D — begin a DnD drag of the Files-app's
+            // currently-selected row. Active-window-gated. Esc
+            // cancels the drag via the modal-input / dialog
+            // Esc paths.
+            if (ctrl && !alt && !shift && (ev.code == 'd' || ev.code == 'D'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                if (active != duetos::drivers::video::kWindowInvalid && active == duetos::apps::files::FilesWindow())
+                {
+                    duetos::apps::files::FilesBeginDragSelection();
+                    duetos::drivers::video::CursorHide();
+                    duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                    duetos::drivers::video::CursorShow();
+                    duetos::drivers::video::CompositorUnlock();
+                    SerialWrite("[ui] ^D begin files drag\n");
+                    continue;
+                }
+                duetos::drivers::video::CompositorUnlock();
             }
 
             // Ctrl+L — focus the Browser URL bar, web-browser
@@ -4263,6 +4302,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             {
                 duetos::drivers::video::ModalInputOnMotion(cx, cy);
             }
+            // DnD ghost follows the cursor every motion frame
+            // while a drag is live.
+            if (duetos::drivers::video::DndIsActive())
+            {
+                duetos::drivers::video::DndUpdateCursor(cx, cy);
+            }
 
             // Cursor-shape hit-test. Skipped while Wait is active
             // (the long-op holder owns the shape). Otherwise:
@@ -4431,6 +4476,17 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             //   4.  Title bar → raise + begin drag.
             //   5.  Any other part of a window → raise only.
             bool menu_handled = false;
+            // DnD gate: a press edge during a drag resolves the
+            // drop at the cursor position. Consume the click so
+            // it doesn't fall through.
+            if (press_edge && duetos::drivers::video::DndIsActive())
+            {
+                duetos::drivers::video::DndResolveAt(cx, cy);
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+                menu_handled = true;
+            }
             // Modal-input gate: a press edge during a Move /
             // Size session commits and exits. Consume the click
             // so it doesn't fall through to chrome handling.

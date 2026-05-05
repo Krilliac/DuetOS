@@ -5,7 +5,9 @@
 #include "apps/trash.h"
 #include "arch/x86_64/serial.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/cursor.h"
 #include "drivers/video/dialog.h"
+#include "drivers/video/dnd.h"
 #include "drivers/video/menu.h"
 #include "drivers/video/notify.h"
 #include "drivers/video/scrollbar.h"
@@ -1029,6 +1031,28 @@ duetos::i32 FilesRowAt(duetos::u32 sx, duetos::u32 sy)
     if (idx >= n)
         return -1;
     return static_cast<duetos::i32>(idx);
+}
+
+bool FilesBeginDragSelection()
+{
+    if (g_state.mode != Mode::Fat32 || g_state.fat_selection >= g_state.fat_count)
+        return false;
+    const auto& e = g_state.fat_entries[g_state.fat_selection];
+    duetos::drivers::video::DndPayload p{};
+    p.kind = duetos::drivers::video::DndKind::FileEntry;
+    u32 i = 0;
+    while (i < duetos::drivers::video::kDndPayloadMax && e.name[i] != '\0')
+    {
+        p.text[i] = e.name[i];
+        ++i;
+    }
+    p.text[i] = '\0';
+    duetos::u32 cx = 0, cy = 0;
+    duetos::drivers::video::CursorPosition(&cx, &cy);
+    if (!duetos::drivers::video::DndBegin(g_state.handle, p, cx, cy))
+        return false;
+    duetos::drivers::video::NotifyShow("dragging - click target window to drop, Esc to cancel");
+    return true;
 }
 
 bool FilesOnDoubleClick(duetos::u32 sx, duetos::u32 sy)

@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/dnd.h"
 #include "drivers/video/notify.h"
 #include "fs/fat32.h"
 #include "mm/kheap.h"
@@ -875,6 +876,24 @@ void ImageViewInit(WindowHandle handle)
     RescanRoot();
     WindowSetContentDraw(handle, DrawFn, nullptr);
     duetos::drivers::video::WindowSetWheelHandler(handle, ImageViewOnWheel);
+    // Drop target — accept FileEntry payloads. Loads BMP / PNG /
+    // TGA via the same path the Files-app double-click uses.
+    duetos::drivers::video::DndRegisterDropTarget(
+        handle,
+        [](const duetos::drivers::video::DndPayload& p, u32 /*cx*/, u32 /*cy*/) -> bool
+        {
+            if (p.kind != duetos::drivers::video::DndKind::FileEntry)
+                return false;
+            if (ImageViewSelectByName(p.text))
+            {
+                duetos::drivers::video::WindowRaise(g_state.handle);
+                duetos::drivers::video::NotifyShow("loaded in image viewer");
+                return true;
+            }
+            duetos::drivers::video::NotifyShow("imageview: load failed");
+            return false;
+        },
+        1u << static_cast<u32>(duetos::drivers::video::DndKind::FileEntry));
 }
 
 void ImageViewOnWheel(duetos::i32 dz)

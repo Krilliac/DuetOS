@@ -4,7 +4,9 @@
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/timer.h"
 #include "drivers/input/ps2kbd.h"
+#include "drivers/video/dnd.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/notify.h"
 #include "drivers/video/theme.h"
 
 namespace duetos::apps::notes
@@ -744,11 +746,58 @@ bool NotesOnDoubleClick(duetos::u32 /*cx*/, duetos::u32 /*cy*/)
     return false;
 }
 
+// Drop-target callback. Loads a `.TXT` payload into the live
+// buffer; non-`.TXT` files notify and reject. Wired in
+// NotesInit via DndRegisterDropTarget.
+bool NotesOnDrop(const duetos::drivers::video::DndPayload& payload, u32 /*cx*/, u32 /*cy*/)
+{
+    if (payload.kind != duetos::drivers::video::DndKind::FileEntry)
+        return false;
+    const char* name = payload.text;
+    u32 nlen = 0;
+    while (name[nlen] != '\0')
+        ++nlen;
+    auto ends_with_ci = [&](const char* ext) -> bool
+    {
+        u32 elen = 0;
+        while (ext[elen] != '\0')
+            ++elen;
+        if (nlen < elen)
+            return false;
+        for (u32 i = 0; i < elen; ++i)
+        {
+            char a = name[nlen - elen + i];
+            char b = ext[i];
+            if (a >= 'a' && a <= 'z')
+                a -= 32;
+            if (b >= 'a' && b <= 'z')
+                b -= 32;
+            if (a != b)
+                return false;
+        }
+        return true;
+    };
+    if (!ends_with_ci(".TXT"))
+    {
+        duetos::drivers::video::NotifyShow("notes: not a .TXT");
+        return false;
+    }
+    if (NotesLoadFile(name))
+    {
+        duetos::drivers::video::NotifyShow("loaded into notes");
+        return true;
+    }
+    duetos::drivers::video::NotifyShow("notes: load failed");
+    return false;
+}
+
 void NotesInit(duetos::drivers::video::WindowHandle handle)
 {
     g_handle = handle;
     duetos::drivers::video::WindowSetContentDraw(handle, DrawFn, nullptr);
     duetos::drivers::video::WindowSetWheelHandler(handle, NotesOnWheel);
+    duetos::drivers::video::DndRegisterDropTarget(handle, NotesOnDrop,
+                                                  1u << static_cast<u32>(duetos::drivers::video::DndKind::FileEntry));
 
     // Seed with a short greeting so the window isn't blank at
     // boot — also gives the smoke harness a deterministic
