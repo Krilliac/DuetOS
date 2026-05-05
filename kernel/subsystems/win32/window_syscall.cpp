@@ -45,6 +45,7 @@
 #include "drivers/audio/pcspk.h"
 #include "drivers/input/ps2mouse.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/menu.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
 #include "mm/kheap.h"
@@ -2224,6 +2225,250 @@ void DoWinSetText(arch::TrapFrame* frame)
     }
     CompositorUnlock();
     frame->rax = ok ? 1 : 0;
+}
+
+// =====================================================================
+// SYS_WIN_TRACK_POPUP — modal popup-menu syscall (USER32 TrackPopupMenu).
+// =====================================================================
+
+namespace
+{
+
+constexpr u32 kTpMaxItems = duetos::drivers::video::kMenuMaxStack > 0 ? 12u : 12u;
+constexpr u32 kTpLabelMax = 32;
+constexpr u32 kTpFlagReturnCmd = 0x0100; // matches Win32 TPM_RETURNCMD
+
+// Wire format the userland TrackPopupMenu thunk packs onto the
+// caller's stack and passes via rdi. Fixed-size to keep the
+// kernel-side copy a single CopyFromUser. Layout is part of the
+// SYS_WIN_TRACK_POPUP ABI.
+struct TpItemWire
+{
+    u32 action_id;
+    u32 flags; // mirrors kMenuItemFlag* (low 4 bits)
+    char label[kTpLabelMax];
+};
+
+struct TpReqWire
+{
+    u32 count;
+    u32 flags;
+    i32 screen_x;
+    i32 screen_y;
+    u64 hwnd_biased;
+    TpItemWire items[kTpMaxItems];
+};
+
+// Single-instance state. The kernel menu primitive itself is a
+// single global, so a popup syscall owns it for the open lifetime.
+// A second concurrent caller is rejected (returns 0) — documented
+// limitation.
+constinit duetos::sched::Mutex g_tp_lock{};
+constinit duetos::sched::Condvar g_tp_done{};
+constinit bool g_tp_in_flight = false;
+constinit bool g_tp_completed = false;
+constinit u64 g_tp_owner_pid = 0;
+constinit u32 g_tp_result = 0;
+constinit u32 g_tp_caller_flags = 0;
+constinit u64 g_tp_hwnd_biased = 0;
+
+// Persistent label storage so the kernel menu primitive's
+// borrowed string pointers remain valid for the menu's open
+// lifetime. Sized to the worst case (one label per slot), which
+// is small enough to keep static.
+constinit char g_tp_labels[kTpMaxItems][kTpLabelMax + 1] = {};
+// MenuItem array the menu primitive sees. Same lifetime as the
+// label storage. We rebuild this on every open.
+constinit duetos::drivers::video::MenuItem g_tp_items[kTpMaxItems] = {};
+
+} // namespace
+
+void DoWinTrackPopup(arch::TrapFrame* frame)
+{
+    using namespace duetos::drivers::video;
+    using duetos::arch::SerialWrite;
+    using duetos::arch::SerialWriteHex;
+    KDBG_V(Win32Wm, "win32/menu", "DoWinTrackPopup req", frame->rdi);
+
+    duetos::core::Process* proc = duetos::core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+
+    const u32 max_count = static_cast<u32>(frame->rsi);
+    if (max_count == 0 || max_count > kTpMaxItems)
+    {
+        // Caller's own sanity cap. A 0 or oversized value is a
+        // bug on the userland side; refuse rather than guess.
+        frame->rax = 0;
+        return;
+    }
+
+    TpReqWire req{};
+    if (frame->rdi == 0 ||
+        !duetos::mm::CopyFromUser(&req, reinterpret_cast<const void*>(frame->rdi), sizeof(TpReqWire)))
+    {
+        frame->rax = 0;
+        return;
+    }
+    if (req.count == 0 || req.count > max_count || req.count > kTpMaxItems)
+    {
+        frame->rax = 0;
+        return;
+    }
+
+    // Acquire the popup lock. Single-instance: a second caller
+    // collides here and gets 0. We could block, but blocking on
+    // a UI primitive while the user is interacting with the
+    // first popup risks indefinite latency on the second app —
+    // the documented v0 limit is "second caller cancels."
+    duetos::sched::MutexLock(&g_tp_lock);
+    if (g_tp_in_flight)
+    {
+        duetos::sched::MutexUnlock(&g_tp_lock);
+        SerialWrite("[win32/menu] track_popup busy; second caller cancelled\n");
+        frame->rax = 0;
+        return;
+    }
+    g_tp_in_flight = true;
+    g_tp_completed = false;
+    g_tp_owner_pid = proc->pid;
+    g_tp_result = 0;
+    g_tp_caller_flags = req.flags;
+    g_tp_hwnd_biased = req.hwnd_biased;
+
+    // Build the label arena + MenuItem table while holding the
+    // popup lock — the mouse-reader's MenuFeedKey path won't fire
+    // until MenuOpen runs below, so g_tp_items can't be observed
+    // mid-write.
+    for (u32 i = 0; i < req.count; ++i)
+    {
+        const TpItemWire& w = req.items[i];
+        for (u32 c = 0; c < kTpLabelMax; ++c)
+        {
+            char ch = w.label[c];
+            // Sanitise: replace non-printable / non-ASCII with
+            // '?' so the menu renderer doesn't trip on stray
+            // bytes. Spaces and printable ASCII pass through.
+            if (ch == '\0')
+            {
+                g_tp_labels[i][c] = '\0';
+                break;
+            }
+            if (ch < 0x20 || static_cast<unsigned char>(ch) > 0x7E)
+                ch = '?';
+            g_tp_labels[i][c] = ch;
+        }
+        g_tp_labels[i][kTpLabelMax] = '\0';
+        g_tp_items[i].label = g_tp_labels[i];
+        g_tp_items[i].action_id = w.action_id;
+        // Translate caller flags. Submenu marshaling is a v0 GAP
+        // — strip the bit so the kernel never tries to follow
+        // a null submenu pointer.
+        g_tp_items[i].flags = w.flags & (kMenuItemFlagDisabled | kMenuItemFlagChecked | kMenuItemFlagSeparator);
+        g_tp_items[i].submenu = nullptr;
+        g_tp_items[i].submenu_count = 0;
+    }
+    duetos::sched::MutexUnlock(&g_tp_lock);
+
+    // Open the menu under the compositor lock so the mouse-reader
+    // sees a consistent state.
+    CompositorLock();
+    // Clamp the anchor into the framebuffer to keep the panel on
+    // screen even when the caller passes a negative or off-screen
+    // origin.
+    i32 ax = req.screen_x;
+    i32 ay = req.screen_y;
+    if (ax < 0)
+        ax = 0;
+    if (ay < 0)
+        ay = 0;
+    MenuOpen(g_tp_items, req.count, static_cast<u32>(ax), static_cast<u32>(ay), kTrackPopupSentinelCtx);
+    DesktopCompose(ThemeCurrent().desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+    CompositorUnlock();
+
+    SerialWrite("[win32/menu] track_popup hwnd=");
+    SerialWriteHex(req.hwnd_biased);
+    SerialWrite(" count=");
+    SerialWriteHex(req.count);
+    SerialWrite(" flags=");
+    SerialWriteHex(req.flags);
+    SerialWrite("\n");
+
+    // Wait for the dispatcher (mouse-reader / kbd-reader) to
+    // signal completion. A spurious wake re-checks g_tp_completed.
+    duetos::sched::MutexLock(&g_tp_lock);
+    while (!g_tp_completed)
+        duetos::sched::CondvarWait(&g_tp_done, &g_tp_lock);
+    const u32 action = g_tp_result;
+    const u32 caller_flags = g_tp_caller_flags;
+    const u64 hwnd_biased = g_tp_hwnd_biased;
+    g_tp_in_flight = false;
+    g_tp_owner_pid = 0;
+    duetos::sched::MutexUnlock(&g_tp_lock);
+
+    SerialWrite("[win32/menu] track_popup result action=");
+    SerialWriteHex(action);
+    SerialWrite("\n");
+
+    // If TPM_RETURNCMD is NOT set, also post WM_COMMAND to the
+    // owner so a Win32 app that wires its menu through WndProc
+    // sees the click without inspecting the syscall return.
+    if (action != 0 && (caller_flags & kTpFlagReturnCmd) == 0)
+    {
+        constexpr u32 kWmCommand = 0x0111;
+        CompositorLock();
+        const u32 h_comp = HwndToCompositorHandle(hwnd_biased);
+        if (h_comp != kWindowInvalid && WindowIsAlive(h_comp))
+        {
+            WindowPostMessage(h_comp, kWmCommand, action, 0);
+        }
+        CompositorUnlock();
+        WindowMsgWakeAll();
+    }
+
+    frame->rax = action;
+}
+
+void TrackPopupCompleteFromKernel(u32 action_id)
+{
+    duetos::sched::MutexLock(&g_tp_lock);
+    if (g_tp_in_flight && !g_tp_completed)
+    {
+        g_tp_result = action_id;
+        g_tp_completed = true;
+        duetos::sched::CondvarSignal(&g_tp_done);
+    }
+    duetos::sched::MutexUnlock(&g_tp_lock);
+}
+
+void TrackPopupCancelByOwner(u64 pid)
+{
+    using namespace duetos::drivers::video;
+    bool need_close_menu = false;
+    duetos::sched::MutexLock(&g_tp_lock);
+    if (g_tp_in_flight && g_tp_owner_pid == pid && !g_tp_completed)
+    {
+        g_tp_result = 0;
+        g_tp_completed = true;
+        need_close_menu = true;
+        duetos::sched::CondvarSignal(&g_tp_done);
+    }
+    duetos::sched::MutexUnlock(&g_tp_lock);
+    if (need_close_menu)
+    {
+        // Close the kernel menu since its owner is gone. Done
+        // outside g_tp_lock to keep lock ordering simple
+        // (compositor lock vs. tp_lock — never both at once).
+        CompositorLock();
+        if (MenuIsOpen() && MenuContext() == kTrackPopupSentinelCtx)
+        {
+            MenuClose();
+        }
+        CompositorUnlock();
+    }
 }
 
 } // namespace duetos::subsystems::win32

@@ -454,6 +454,269 @@ void PrintShortcutHelp()
     ConsoleWriteln("");
 }
 
+// Dispatch a menu action_id to the side-effect that backs it.
+// Shared between mouse_reader (left-click on item) and kbd_reader
+// (Enter on hovered item). The caller is responsible for the
+// surrounding flow — closing the menu, hiding/showing the cursor,
+// and recomposing. This function does no compositing of its own.
+//
+// `action` is the action_id from the menu's MenuItem table; 0 is
+// reserved for "no item" and never reaches here. `ctx` is the
+// ambient MenuContext() at fire time — for window menus it's the
+// target WindowHandle (the system menu uses ctx for the same).
+//
+// New action-id bands grow this switch; the master allocation
+// table lives in the comment above `kernel_main`'s ui closures.
+void DispatchMenuAction(duetos::u32 action, duetos::u32 ctx)
+{
+    using duetos::arch::SerialWrite;
+    using duetos::arch::SerialWriteHex;
+    switch (action)
+    {
+    case 1: // ABOUT DUETOS
+    {
+        const duetos::drivers::video::WindowHandle ah =
+            duetos::drivers::video::ThemeRoleWindow(duetos::drivers::video::ThemeRole::About);
+        if (ah != duetos::drivers::video::kWindowInvalid)
+        {
+            duetos::drivers::video::WindowRaise(ah);
+            duetos::drivers::video::ConsoleWriteln("-> ABOUT WINDOW RAISED");
+        }
+        else
+        {
+            duetos::drivers::video::ConsoleWriteln("-> DUETOS v0 — WINDOWED DESKTOP SHELL");
+        }
+        break;
+    }
+    case 2: // CYCLE WINDOWS
+        duetos::drivers::video::WindowCycleActive();
+        duetos::drivers::video::ConsoleWriteln("-> CYCLED ACTIVE WINDOW");
+        break;
+    case 3: // LIST WINDOWS
+        duetos::drivers::video::ConsoleWriteln("-> REGISTERED WINDOWS:");
+        for (duetos::u32 h = 0; h < duetos::drivers::video::WindowRegistryCount(); ++h)
+        {
+            if (duetos::drivers::video::WindowIsAlive(h))
+            {
+                const char* title = duetos::drivers::video::WindowTitle(h);
+                duetos::drivers::video::ConsoleWrite("   ");
+                duetos::drivers::video::ConsoleWriteln((title != nullptr) ? title : "(UNNAMED)");
+            }
+        }
+        break;
+    case 4: // PING CONSOLE
+        duetos::drivers::video::ConsoleWriteln("-> PONG");
+        break;
+    case 5: // SWITCH TO TTY
+        duetos::drivers::video::SetDisplayMode(duetos::drivers::video::DisplayMode::Tty);
+        duetos::drivers::video::ConsoleSetOrigin(16, 16);
+        duetos::drivers::video::ConsoleSetColours(duetos::drivers::video::ThemeCurrent().console_fg, 0x00000000);
+        break;
+    case 6: // HELP / SHORTCUTS
+    {
+        const duetos::drivers::video::WindowHandle hh =
+            duetos::drivers::video::ThemeRoleWindow(duetos::drivers::video::ThemeRole::Help);
+        if (hh != duetos::drivers::video::kWindowInvalid)
+        {
+            duetos::drivers::video::WindowRaise(hh);
+        }
+        PrintShortcutHelp();
+        break;
+    }
+    case 10: // RAISE <ctx>
+        duetos::drivers::video::WindowRaise(ctx);
+        SerialWrite("[ui] ctx raise window=");
+        SerialWriteHex(ctx);
+        SerialWrite("\n");
+        break;
+    case 11: // CLOSE <ctx>
+        duetos::drivers::video::WindowClose(ctx);
+        SerialWrite("[ui] ctx close window=");
+        SerialWriteHex(ctx);
+        SerialWrite("\n");
+        break;
+    // Window system menu (action ids 20..25). ctx = target HWND.
+    // 21 (MOVE) and 22 (SIZE) are GAPs in v0 — see CLAUDE.md
+    // "Subsystem-Isolation" doc; needs a modal-input mode that
+    // doesn't yet exist. 22 SIZE is shipped disabled; 21 MOVE
+    // does a one-shot recenter under the cursor as a degraded
+    // stand-in. Re-enable both when modal-input lands.
+    case 20: // RESTORE
+        duetos::drivers::video::WindowRestore(ctx);
+        SerialWrite("[ui] ctx restore window=");
+        SerialWriteHex(ctx);
+        SerialWrite("\n");
+        break;
+    case 21: // MOVE — GAP: snap title-center under cursor
+    {
+        // STUB: real Win32 Move enters a modal-input state that
+        // tracks cursor until next click. We recenter the window
+        // so its title-bar's middle sits under the current cursor
+        // position, then exit. Acceptable degraded behaviour for
+        // v0; a future modal-input pass replaces this body.
+        duetos::u32 cx = 0, cy = 0;
+        duetos::drivers::video::CursorPosition(&cx, &cy);
+        duetos::u32 ww = 0;
+        duetos::drivers::video::WindowGetBounds(ctx, nullptr, nullptr, &ww, nullptr);
+        const duetos::u32 nx = (cx > ww / 2) ? cx - ww / 2 : 0;
+        const duetos::u32 ny = (cy > 11) ? cy - 11 : 0; // ~half a 22-px title bar
+        duetos::drivers::video::WindowMoveTo(ctx, nx, ny);
+        SerialWrite("[ui] ctx move (recenter) window=");
+        SerialWriteHex(ctx);
+        SerialWrite("\n");
+        break;
+    }
+    case 22: // SIZE — GAP: disabled in v0
+        SerialWrite("[ui] ctx size (gap; modal-input mode missing) window=");
+        SerialWriteHex(ctx);
+        SerialWrite("\n");
+        break;
+    case 23: // MINIMIZE
+        duetos::drivers::video::WindowMinimize(ctx);
+        SerialWrite("[ui] ctx minimize window=");
+        SerialWriteHex(ctx);
+        SerialWrite("\n");
+        break;
+    case 24: // MAXIMIZE
+        duetos::drivers::video::WindowMaximize(ctx);
+        SerialWrite("[ui] ctx maximize window=");
+        SerialWriteHex(ctx);
+        SerialWrite("\n");
+        break;
+    case 25: // CLOSE (system menu) — alias for case 11 with a different label
+        duetos::drivers::video::WindowClose(ctx);
+        SerialWrite("[ui] ctx sys-close window=");
+        SerialWriteHex(ctx);
+        SerialWrite("\n");
+        break;
+    // Files-app row context menu (action ids 30..33). ctx = the
+    // row index in the FAT32 listing, captured at MenuOpen time.
+    // The Files app's own dispatcher knows what to do with each
+    // row id; we route there. RENAME (31) is a known v0 GAP —
+    // there's no text-input modal yet; it just notifies the user.
+    case 30: // FILES — OPEN
+    case 31: // FILES — RENAME (GAP)
+    case 32: // FILES — DELETE
+    case 33: // FILES — PROPERTIES
+        duetos::apps::files::FilesDispatchContextAction(action, ctx);
+        break;
+    default:
+        // App launcher bands: 100..199 == "raise the window
+        // registered for ThemeRole(action - 100)". /APPS shortcut
+        // band is 200+slot — resolve through StartMenuAppsResolve
+        // to recover the ThemeRole or a path before raising.
+        bool have_role = false;
+        duetos::drivers::video::ThemeRole role{};
+        if (action >= 100 && action < 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::kCount))
+        {
+            role = static_cast<duetos::drivers::video::ThemeRole>(action - 100);
+            have_role = true;
+        }
+        else
+        {
+            duetos::drivers::video::ShortcutKind sk{};
+            const char* spawn_path = nullptr;
+            if (duetos::drivers::video::StartMenuAppsResolveLaunch(action, &sk, &role, &spawn_path))
+            {
+                if (sk == duetos::drivers::video::ShortcutKind::Role)
+                {
+                    have_role = true;
+                }
+                else if ((sk == duetos::drivers::video::ShortcutKind::Pe ||
+                          sk == duetos::drivers::video::ShortcutKind::Elf) &&
+                         spawn_path != nullptr && spawn_path[0] != '\0')
+                {
+                    char path_buf[128];
+                    duetos::u64 pi = 0;
+                    if (spawn_path[0] != '/')
+                        path_buf[pi++] = '/';
+                    while (spawn_path[pi - (spawn_path[0] != '/' ? 1 : 0)] != '\0' && pi + 1 < sizeof(path_buf))
+                    {
+                        path_buf[pi] = spawn_path[pi - (spawn_path[0] != '/' ? 1 : 0)];
+                        ++pi;
+                    }
+                    path_buf[pi] = '\0';
+                    const auto* vol = duetos::fs::fat32::Fat32Volume(0);
+                    duetos::fs::fat32::DirEntry ent;
+                    if (vol != nullptr && duetos::fs::fat32::Fat32LookupPath(vol, path_buf, &ent) &&
+                        ent.size_bytes > 0 && ent.size_bytes <= 8 * 1024 * 1024)
+                    {
+                        auto* staging = reinterpret_cast<duetos::u8*>(duetos::mm::KMalloc(ent.size_bytes));
+                        if (staging != nullptr)
+                        {
+                            const auto got = duetos::fs::fat32::Fat32ReadFile(vol, &ent, staging, ent.size_bytes);
+                            if (got == static_cast<duetos::i64>(ent.size_bytes))
+                            {
+                                const duetos::u64 pid =
+                                    (sk == duetos::drivers::video::ShortcutKind::Pe)
+                                        ? duetos::core::SpawnPeFile(
+                                              "/apps/launch", staging, static_cast<duetos::u64>(got),
+                                              duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(),
+                                              duetos::mm::kFrameBudgetTrusted, duetos::core::kTickBudgetTrusted)
+                                        : duetos::core::SpawnElfFile(
+                                              "/apps/launch", staging, static_cast<duetos::u64>(got),
+                                              duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(),
+                                              duetos::mm::kFrameBudgetTrusted, duetos::core::kTickBudgetTrusted);
+                                duetos::drivers::video::ConsoleWrite(pid != 0 ? "-> /APPS LAUNCH OK pid="
+                                                                              : "-> /APPS LAUNCH FAIL");
+                                if (pid != 0)
+                                {
+                                    char pidbuf[24];
+                                    duetos::u32 pi2 = 0;
+                                    duetos::u64 v = pid;
+                                    char tmp[24];
+                                    duetos::u32 ti = 0;
+                                    if (v == 0)
+                                        tmp[ti++] = '0';
+                                    while (v != 0)
+                                    {
+                                        tmp[ti++] = static_cast<char>('0' + v % 10);
+                                        v /= 10;
+                                    }
+                                    while (ti > 0)
+                                        pidbuf[pi2++] = tmp[--ti];
+                                    pidbuf[pi2] = '\0';
+                                    duetos::drivers::video::ConsoleWriteln(pidbuf);
+                                }
+                                else
+                                {
+                                    duetos::drivers::video::ConsoleWriteln(path_buf);
+                                }
+                            }
+                            duetos::mm::KFree(staging);
+                        }
+                    }
+                    else
+                    {
+                        duetos::drivers::video::ConsoleWrite("-> /APPS NOT FOUND ");
+                        duetos::drivers::video::ConsoleWriteln(path_buf);
+                    }
+                }
+            }
+        }
+        if (have_role)
+        {
+            const auto h = duetos::drivers::video::ThemeRoleWindow(role);
+            if (h != duetos::drivers::video::kWindowInvalid)
+            {
+                duetos::drivers::video::WindowSetVisible(h, true);
+                duetos::drivers::video::WindowRaise(h);
+                duetos::drivers::video::ConsoleWrite("-> RAISED ");
+                const char* tt = duetos::drivers::video::WindowTitle(h);
+                duetos::drivers::video::ConsoleWriteln((tt != nullptr) ? tt : "(UNNAMED)");
+            }
+            else
+            {
+                duetos::drivers::video::ConsoleWriteln("-> APP NOT REGISTERED");
+            }
+        }
+        break;
+    }
+    SerialWrite("[ui] menu fire action=");
+    SerialWriteHex(action);
+    SerialWrite("\n");
+}
+
 } // namespace
 
 extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
@@ -2498,6 +2761,49 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 continue;
             }
 
+            // Menu navigation: when a context / start menu is
+            // open, arrow keys move the highlight, Enter activates
+            // the hovered item, Esc closes, Right opens a submenu,
+            // Left closes a submenu (or the whole menu at root).
+            // Done before app shortcuts so the menu's modal UX
+            // wins over per-app focus. Skipped on modifier-held
+            // chords so Ctrl+C / Alt+Tab still reach the global
+            // shortcuts below.
+            if (!ctrl && !alt && duetos::drivers::video::MenuIsOpen())
+            {
+                duetos::drivers::video::CompositorLock();
+                // Capture context BEFORE feeding the key — Esc /
+                // Left at the root close the menu and reset
+                // MenuContext to 0, but we need the original ctx
+                // to know whether to wake a TrackPopupMenu syscall.
+                const duetos::u32 ctx_before = duetos::drivers::video::MenuContext();
+                const duetos::u32 fired = duetos::drivers::video::MenuFeedKey(static_cast<duetos::u16>(ev.code));
+                const bool still_open = duetos::drivers::video::MenuIsOpen();
+                if (fired != 0)
+                {
+                    if (ctx_before == duetos::subsystems::win32::kTrackPopupSentinelCtx)
+                    {
+                        duetos::subsystems::win32::TrackPopupCompleteFromKernel(fired);
+                    }
+                    else
+                    {
+                        DispatchMenuAction(fired, ctx_before);
+                    }
+                    duetos::drivers::video::MenuClose();
+                }
+                else if (!still_open && ctx_before == duetos::subsystems::win32::kTrackPopupSentinelCtx)
+                {
+                    // Esc / Left-at-root closed the popup without
+                    // firing — wake the syscall with cancel.
+                    duetos::subsystems::win32::TrackPopupCompleteFromKernel(0);
+                }
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+                duetos::drivers::video::CompositorUnlock();
+                continue;
+            }
+
             // Ctrl+C latches the shell interrupt flag. No
             // DesktopCompose here — the long-running command
             // holding the shell will notice next time it polls.
@@ -3417,9 +3723,26 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             {"HELP / SHORTCUTS", 6}, {"ABOUT DUETOS", 1},  {"CYCLE WINDOWS", 2},
             {"LIST WINDOWS", 3},     {"SWITCH TO TTY", 5},
         };
+        // Window body menu (right-click on a native window's
+        // client area). Enriches the original Raise/Close pair
+        // with the same Min/Max/Restore the system menu offers,
+        // so a user who right-clicks the body gets full controls
+        // without aiming at the title bar.
         static const duetos::drivers::video::MenuItem kWindowMenuItems[] = {
-            {"RAISE", 10},
-            {"CLOSE", 11},
+            {"RAISE", 10, 0, nullptr, 0},   {"MINIMIZE", 23, 0, nullptr, 0}, {"MAXIMIZE", 24, 0, nullptr, 0},
+            {"RESTORE", 20, 0, nullptr, 0}, {"CLOSE", 11, 0, nullptr, 0},
+        };
+        // Title-bar (NC) right-click — the classic Win32 system
+        // menu. RESTORE/MINIMIZE/MAXIMIZE/CLOSE are wired; MOVE
+        // does a one-shot recenter (GAP) and SIZE is shown
+        // disabled — both wait on a modal-input mode.
+        static const duetos::drivers::video::MenuItem kSystemMenuItems[] = {
+            {"RESTORE", 20, 0, nullptr, 0},
+            {"MOVE", 21, 0, nullptr, 0},
+            {"SIZE", 22, duetos::drivers::video::kMenuItemFlagDisabled, nullptr, 0},
+            {"MINIMIZE", 23, 0, nullptr, 0},
+            {"MAXIMIZE", 24, 0, nullptr, 0},
+            {"CLOSE", 25, 0, nullptr, 0},
         };
 
         for (;;)
@@ -3462,6 +3785,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             duetos::u32 cx = 0, cy = 0;
             duetos::drivers::video::CursorPosition(&cx, &cy);
 
+            // Track menu hover. Cheap when no menu is open. When
+            // open, this updates the highlighted row so the next
+            // compose paints it. The recompose itself is forced
+            // below if the cursor moved while a menu was open.
+            duetos::drivers::video::MenuTrackHoverAt(cx, cy);
+
             const bool left_down = (p.buttons & duetos::drivers::input::kMouseButtonLeft) != 0;
             const bool press_edge = left_down && !prev_left;
             const bool release_edge = !left_down && prev_left;
@@ -3475,17 +3804,32 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             // Right-click opens a context menu. Different item set
             // depending on what's under the cursor:
             //   - Taskbar: skip (no right-click menu there yet).
-            //   - Window body or title: window menu with Raise/
-            //     Close, context = that window's handle.
+            //   - Title bar (any window): system menu (Restore /
+            //     Move / Size / Min / Max / Close), ctx = HWND.
+            //   - Native (kernel-app) window body: enriched
+            //     window menu (Raise + Min/Max/Restore/Close),
+            //     ctx = HWND. Also lets the Files app intercept
+            //     to show its per-row menu.
+            //   - PE (user-process) window body: NO kernel menu
+            //     opens. Instead a WM_CONTEXTMENU is posted (see
+            //     the PE mouse-routing block below) so the app
+            //     can call TrackPopupMenu itself.
             //   - Desktop: desktop menu (ABOUT / CYCLE / LIST /
-            //     TTY), context = 0.
+            //     TTY), ctx = 0.
             // If a menu is already open, a right-click simply
-            // closes it — matches Windows behaviour (right-click
-            // on whitespace dismisses the popup).
+            // closes it — matches Windows behaviour.
+            bool pe_right_skip = false;
             if (right_press)
             {
                 if (duetos::drivers::video::MenuIsOpen())
                 {
+                    // If the open menu belongs to a PE
+                    // TrackPopupMenu syscall, signal cancel so the
+                    // syscall returns 0. Then close.
+                    if (duetos::drivers::video::MenuContext() == duetos::subsystems::win32::kTrackPopupSentinelCtx)
+                    {
+                        duetos::subsystems::win32::TrackPopupCompleteFromKernel(0);
+                    }
                     duetos::drivers::video::MenuClose();
                 }
                 else if (!duetos::drivers::video::TaskbarContains(cx, cy))
@@ -3493,21 +3837,69 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     const auto hit = duetos::drivers::video::WindowTopmostAt(cx, cy);
                     if (hit != duetos::drivers::video::kWindowInvalid)
                     {
-                        duetos::drivers::video::MenuOpen(
-                            kWindowMenuItems, sizeof(kWindowMenuItems) / sizeof(kWindowMenuItems[0]), cx, cy, hit);
+                        const bool in_title = duetos::drivers::video::WindowPointInTitle(hit, cx, cy);
+                        if (in_title)
+                        {
+                            duetos::drivers::video::MenuOpen(
+                                kSystemMenuItems, sizeof(kSystemMenuItems) / sizeof(kSystemMenuItems[0]), cx, cy, hit);
+                            SerialWrite("[ui] right-click target=title window=");
+                            SerialWriteHex(hit);
+                            SerialWrite("\n");
+                        }
+                        else
+                        {
+                            const duetos::u64 owner_pid = duetos::drivers::video::WindowOwnerPid(hit);
+                            if (owner_pid > 0)
+                            {
+                                // PE window body: defer to the
+                                // app via WM_CONTEXTMENU.
+                                pe_right_skip = true;
+                                SerialWrite("[ui] right-click target=client (pe) window=");
+                                SerialWriteHex(hit);
+                                SerialWrite("\n");
+                            }
+                            else if (hit == duetos::apps::files::FilesWindow() &&
+                                     duetos::apps::files::FilesOnRightClick(cx, cy))
+                            {
+                                // Files app claimed it (per-row
+                                // context menu opened). No-op
+                                // here; the menu is up.
+                                SerialWrite("[ui] right-click target=client (files) window=");
+                                SerialWriteHex(hit);
+                                SerialWrite("\n");
+                            }
+                            else
+                            {
+                                duetos::drivers::video::MenuOpen(kWindowMenuItems,
+                                                                 sizeof(kWindowMenuItems) / sizeof(kWindowMenuItems[0]),
+                                                                 cx, cy, hit);
+                                SerialWrite("[ui] right-click target=client (native) window=");
+                                SerialWriteHex(hit);
+                                SerialWrite("\n");
+                            }
+                        }
                     }
                     else
                     {
                         duetos::drivers::video::MenuOpen(
                             kDesktopMenuItems, sizeof(kDesktopMenuItems) / sizeof(kDesktopMenuItems[0]), cx, cy, 0);
+                        SerialWrite("[ui] right-click target=desktop\n");
                     }
                 }
                 duetos::drivers::video::CursorHide();
                 duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
                 duetos::drivers::video::CursorShow();
-                duetos::drivers::video::CompositorUnlock();
-                SerialWrite("[ui] right-click\n");
-                continue;
+                if (!pe_right_skip)
+                {
+                    duetos::drivers::video::CompositorUnlock();
+                    continue;
+                }
+                // PE-bound right-click: fall through so the PE
+                // mouse-routing block below can post WM_RBUTTONDOWN
+                // / WM_RBUTTONUP / WM_CONTEXTMENU. drag.active stays
+                // false, so the ordinary press_edge cases that
+                // follow are bypassed naturally (right_press is
+                // handled here, left state unchanged).
             }
 
             // Priority for press edges (highest first):
@@ -3521,239 +3913,48 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             bool menu_handled = false;
             if (press_edge && duetos::drivers::video::MenuIsOpen())
             {
+                // Track stack depth around MenuItemAt so we can
+                // detect "click on a submenu row opened a child
+                // panel" — in that case the menu stays up and no
+                // dispatch happens.
+                const duetos::u32 ctx = duetos::drivers::video::MenuContext();
+                const duetos::u32 prev_depth = duetos::drivers::video::MenuStackDepth();
                 const duetos::u32 action = duetos::drivers::video::MenuItemAt(cx, cy);
-                if (action != 0)
+                const duetos::u32 new_depth = duetos::drivers::video::MenuStackDepth();
+                bool keep_open = false;
+                if (new_depth > prev_depth)
                 {
-                    const duetos::u32 ctx = duetos::drivers::video::MenuContext();
-                    // Dispatch action. Context (ctx) is a caller-
-                    // supplied u32 — for window menus it's the
-                    // target WindowHandle.
-                    switch (action)
-                    {
-                    case 1: // ABOUT DUETOS
-                    {
-                        const duetos::drivers::video::WindowHandle ah =
-                            duetos::drivers::video::ThemeRoleWindow(duetos::drivers::video::ThemeRole::About);
-                        if (ah != duetos::drivers::video::kWindowInvalid)
-                        {
-                            duetos::drivers::video::WindowRaise(ah);
-                            duetos::drivers::video::ConsoleWriteln("-> ABOUT WINDOW RAISED");
-                        }
-                        else
-                        {
-                            // Fallback for the unlikely registration-fail
-                            // path — keeps the action observable even if
-                            // the window slot is somehow gone.
-                            duetos::drivers::video::ConsoleWriteln("-> DUETOS v0 — WINDOWED DESKTOP SHELL");
-                        }
-                        break;
-                    }
-                    case 2: // CYCLE WINDOWS
-                        duetos::drivers::video::WindowCycleActive();
-                        duetos::drivers::video::ConsoleWriteln("-> CYCLED ACTIVE WINDOW");
-                        break;
-                    case 3: // LIST WINDOWS
-                        duetos::drivers::video::ConsoleWriteln("-> REGISTERED WINDOWS:");
-                        for (duetos::u32 h = 0; h < duetos::drivers::video::WindowRegistryCount(); ++h)
-                        {
-                            if (duetos::drivers::video::WindowIsAlive(h))
-                            {
-                                const char* title = duetos::drivers::video::WindowTitle(h);
-                                duetos::drivers::video::ConsoleWrite("   ");
-                                duetos::drivers::video::ConsoleWriteln((title != nullptr) ? title : "(UNNAMED)");
-                            }
-                        }
-                        break;
-                    case 4: // PING CONSOLE
-                        duetos::drivers::video::ConsoleWriteln("-> PONG");
-                        break;
-                    case 5: // SWITCH TO TTY (from desktop context menu)
-                        duetos::drivers::video::SetDisplayMode(duetos::drivers::video::DisplayMode::Tty);
-                        duetos::drivers::video::ConsoleSetOrigin(16, 16);
-                        duetos::drivers::video::ConsoleSetColours(duetos::drivers::video::ThemeCurrent().console_fg,
-                                                                  0x00000000);
-                        break;
-                    case 6: // HELP / SHORTCUTS
-                        // Raise the windowed Help reference and ALSO
-                        // print to the console — the window is the
-                        // discovery surface, the console is the
-                        // scrollback / search surface.
-                        {
-                            const duetos::drivers::video::WindowHandle hh =
-                                duetos::drivers::video::ThemeRoleWindow(duetos::drivers::video::ThemeRole::Help);
-                            if (hh != duetos::drivers::video::kWindowInvalid)
-                            {
-                                duetos::drivers::video::WindowRaise(hh);
-                            }
-                        }
-                        PrintShortcutHelp();
-                        break;
-                    case 10: // RAISE <ctx>
-                        duetos::drivers::video::WindowRaise(ctx);
-                        SerialWrite("[ui] ctx raise window=");
-                        SerialWriteHex(ctx);
-                        SerialWrite("\n");
-                        break;
-                    case 11: // CLOSE <ctx>
-                        duetos::drivers::video::WindowClose(ctx);
-                        SerialWrite("[ui] ctx close window=");
-                        SerialWriteHex(ctx);
-                        SerialWrite("\n");
-                        break;
-                    default:
-                        // App launcher bands: 100..199 == "raise the
-                        // window registered for ThemeRole(action - 100),
-                        // un-hiding it if Show Desktop or a min/hide
-                        // dropped its visible bit." Out-of-band ids
-                        // fall through to the unrecognised log.
-                        // Builtin start-menu items use action 100+role.
-                        // /APPS shortcuts use action 200+slot — resolve
-                        // through StartMenuAppsResolve to recover the
-                        // ThemeRole before raising. Both paths share
-                        // the visibility / raise / log block below.
-                        bool have_role = false;
-                        duetos::drivers::video::ThemeRole role{};
-                        if (action >= 100 &&
-                            action < 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::kCount))
-                        {
-                            role = static_cast<duetos::drivers::video::ThemeRole>(action - 100);
-                            have_role = true;
-                        }
-                        else
-                        {
-                            // /APPS shortcut: ask the full launch
-                            // resolver. PE / ELF kinds spawn the
-                            // binary directly from FAT32; Role kinds
-                            // fall through to the existing ThemeRole
-                            // raise path.
-                            duetos::drivers::video::ShortcutKind sk{};
-                            const char* spawn_path = nullptr;
-                            if (duetos::drivers::video::StartMenuAppsResolveLaunch(action, &sk, &role, &spawn_path))
-                            {
-                                if (sk == duetos::drivers::video::ShortcutKind::Role)
-                                {
-                                    have_role = true;
-                                }
-                                else if ((sk == duetos::drivers::video::ShortcutKind::Pe ||
-                                          sk == duetos::drivers::video::ShortcutKind::Elf) &&
-                                         spawn_path != nullptr && spawn_path[0] != '\0')
-                                {
-                                    // FAT32 paths are walked from the
-                                    // volume root. The manifest writes
-                                    // them as "APPS/FOO.EXE" (no
-                                    // leading slash); Fat32LookupPath
-                                    // accepts both forms but the
-                                    // diagnostic log reads cleaner
-                                    // with the slash, so prepend it
-                                    // when missing.
-                                    char path_buf[128];
-                                    duetos::u64 pi = 0;
-                                    if (spawn_path[0] != '/')
-                                        path_buf[pi++] = '/';
-                                    while (spawn_path[pi - (spawn_path[0] != '/' ? 1 : 0)] != '\0' &&
-                                           pi + 1 < sizeof(path_buf))
-                                    {
-                                        path_buf[pi] = spawn_path[pi - (spawn_path[0] != '/' ? 1 : 0)];
-                                        ++pi;
-                                    }
-                                    path_buf[pi] = '\0';
-                                    const auto* vol = duetos::fs::fat32::Fat32Volume(0);
-                                    duetos::fs::fat32::DirEntry ent;
-                                    if (vol != nullptr && duetos::fs::fat32::Fat32LookupPath(vol, path_buf, &ent) &&
-                                        ent.size_bytes > 0 && ent.size_bytes <= 8 * 1024 * 1024)
-                                    {
-                                        // Stage into a heap buffer.
-                                        // 8 MiB cap mirrors the
-                                        // largest embedded PE we ship
-                                        // today; bigger images need
-                                        // mmap-backed staging.
-                                        auto* staging =
-                                            reinterpret_cast<duetos::u8*>(duetos::mm::KMalloc(ent.size_bytes));
-                                        if (staging != nullptr)
-                                        {
-                                            const auto got =
-                                                duetos::fs::fat32::Fat32ReadFile(vol, &ent, staging, ent.size_bytes);
-                                            if (got == static_cast<duetos::i64>(ent.size_bytes))
-                                            {
-                                                const duetos::u64 pid =
-                                                    (sk == duetos::drivers::video::ShortcutKind::Pe)
-                                                        ? duetos::core::SpawnPeFile("/apps/launch", staging,
-                                                                                    static_cast<duetos::u64>(got),
-                                                                                    duetos::core::CapSetTrusted(),
-                                                                                    duetos::fs::RamfsTrustedRoot(),
-                                                                                    duetos::mm::kFrameBudgetTrusted,
-                                                                                    duetos::core::kTickBudgetTrusted)
-                                                        : duetos::core::SpawnElfFile("/apps/launch", staging,
-                                                                                     static_cast<duetos::u64>(got),
-                                                                                     duetos::core::CapSetTrusted(),
-                                                                                     duetos::fs::RamfsTrustedRoot(),
-                                                                                     duetos::mm::kFrameBudgetTrusted,
-                                                                                     duetos::core::kTickBudgetTrusted);
-                                                duetos::drivers::video::ConsoleWrite(
-                                                    pid != 0 ? "-> /APPS LAUNCH OK pid=" : "-> /APPS LAUNCH FAIL");
-                                                if (pid != 0)
-                                                {
-                                                    char pidbuf[24];
-                                                    duetos::u32 pi2 = 0;
-                                                    duetos::u64 v = pid;
-                                                    char tmp[24];
-                                                    duetos::u32 ti = 0;
-                                                    if (v == 0)
-                                                        tmp[ti++] = '0';
-                                                    while (v != 0)
-                                                    {
-                                                        tmp[ti++] = static_cast<char>('0' + v % 10);
-                                                        v /= 10;
-                                                    }
-                                                    while (ti > 0)
-                                                        pidbuf[pi2++] = tmp[--ti];
-                                                    pidbuf[pi2] = '\0';
-                                                    duetos::drivers::video::ConsoleWriteln(pidbuf);
-                                                }
-                                                else
-                                                {
-                                                    duetos::drivers::video::ConsoleWriteln(path_buf);
-                                                }
-                                            }
-                                            duetos::mm::KFree(staging);
-                                        }
-                                    }
-                                    else
-                                    {
-                                        duetos::drivers::video::ConsoleWrite("-> /APPS NOT FOUND ");
-                                        duetos::drivers::video::ConsoleWriteln(path_buf);
-                                    }
-                                }
-                            }
-                        }
-                        if (have_role)
-                        {
-                            const auto h = duetos::drivers::video::ThemeRoleWindow(role);
-                            if (h != duetos::drivers::video::kWindowInvalid)
-                            {
-                                duetos::drivers::video::WindowSetVisible(h, true);
-                                duetos::drivers::video::WindowRaise(h);
-                                duetos::drivers::video::ConsoleWrite("-> RAISED ");
-                                const char* tt = duetos::drivers::video::WindowTitle(h);
-                                duetos::drivers::video::ConsoleWriteln((tt != nullptr) ? tt : "(UNNAMED)");
-                            }
-                            else
-                            {
-                                duetos::drivers::video::ConsoleWriteln("-> APP NOT REGISTERED");
-                            }
-                        }
-                        break;
-                    }
-                    SerialWrite("[ui] menu fire action=");
-                    SerialWriteHex(action);
-                    SerialWrite("\n");
+                    // Submenu opened — keep menu up, dispatch nothing.
+                    keep_open = true;
                 }
-                duetos::drivers::video::MenuClose();
+                else if (action != 0)
+                {
+                    if (ctx == duetos::subsystems::win32::kTrackPopupSentinelCtx)
+                    {
+                        duetos::subsystems::win32::TrackPopupCompleteFromKernel(action);
+                    }
+                    else
+                    {
+                        DispatchMenuAction(action, ctx);
+                    }
+                }
+                else
+                {
+                    // Click missed item / outside menu — cancel.
+                    if (ctx == duetos::subsystems::win32::kTrackPopupSentinelCtx)
+                    {
+                        duetos::subsystems::win32::TrackPopupCompleteFromKernel(0);
+                    }
+                }
+                if (!keep_open)
+                {
+                    duetos::drivers::video::MenuClose();
+                }
                 // Force an immediate recompose so any console
                 // output the action wrote (HELP / ABOUT / -> RAISED
                 // ...) appears now rather than waiting up to a
-                // second for the ui-ticker. Also clears the menu
-                // panel from the framebuffer.
+                // second for the ui-ticker. Also clears (or refreshes)
+                // the menu panel from the framebuffer.
                 duetos::drivers::video::CursorHide();
                 duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
                 duetos::drivers::video::CursorShow();
@@ -4131,6 +4332,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     constexpr duetos::u32 kWmLButtonUp = 0x0202;
                     constexpr duetos::u32 kWmRButtonDown = 0x0204;
                     constexpr duetos::u32 kWmRButtonUp = 0x0205;
+                    constexpr duetos::u32 kWmContextMenu = 0x007B;
                     constexpr duetos::u64 kMkLButton = 0x0001;
                     constexpr duetos::u64 kMkRButton = 0x0002;
                     duetos::u32 wx = 0, wy = 0;
@@ -4197,6 +4399,19 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     if (right_release)
                     {
                         duetos::drivers::video::WindowPostMessage(pe_hit, kWmRButtonUp, wparam, lparam);
+                        // Win32 WM_CONTEXTMENU contract: posted on
+                        // RBUTTONUP, wparam = HWND, lparam = SCREEN
+                        // coords (not client-local). PE apps decode
+                        // with GET_X/Y_LPARAM.
+                        const duetos::u64 ctx_lparam =
+                            (static_cast<duetos::u64>(cx) & 0xFFFF) | ((static_cast<duetos::u64>(cy) & 0xFFFF) << 16);
+                        duetos::drivers::video::WindowPostMessage(pe_hit, kWmContextMenu,
+                                                                  static_cast<duetos::u64>(pe_hit) + 1, ctx_lparam);
+                        SerialWrite("[win32/wm] wm_contextmenu posted hwnd=");
+                        SerialWriteHex(pe_hit);
+                        SerialWrite(" pid=");
+                        SerialWriteHex(pe_pid);
+                        SerialWrite("\n");
                     }
                     duetos::drivers::video::WindowMsgWakeAll();
                 }
@@ -4234,6 +4449,19 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     duetos::apps::calculator::CalculatorOnWidgetEvent(hit);
                     duetos::apps::settings::SettingsOnWidgetEvent(hit);
                 }
+            }
+
+            // Hover responsiveness: when a menu is open and the
+            // cursor moved this frame, force an immediate recompose
+            // so the highlighted row tracks the mouse without
+            // waiting for the 1 Hz ui-ticker. Skipped during drag
+            // (drag has its own compose) and when the menu was
+            // already handled (the dispatch path composes too).
+            if (!drag.active && !menu_handled && duetos::drivers::video::MenuIsOpen() && (p.dx != 0 || p.dy != 0))
+            {
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
             }
 
             duetos::drivers::video::CompositorUnlock();

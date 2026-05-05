@@ -387,8 +387,25 @@ WinDbg client API, `SymLoadModuleEx`.
 - Accelerators: `LoadAcceleratorsW`, `TranslateAccelerator`
   — GAP: tables load but TranslateAccelerator only handles
   ASCII keys
-- Menus: `LoadMenuW`, `GetSystemMenu` — STUB (return canned
-  empty handle)
+- Menus: `CreateMenu`, `CreatePopupMenu`, `DestroyMenu`,
+  `AppendMenuA/W`, `InsertMenuA/W`, `RemoveMenu`, `DeleteMenu`,
+  `EnableMenuItem`, `CheckMenuItem`, `ModifyMenuA/W`, `GetSubMenu`,
+  `GetMenuItemCount`, `GetMenuItemID`, `GetMenuState`,
+  `TrackPopupMenu`, `TrackPopupMenuEx` — REAL. HMENU is a
+  userland-allocated struct in user32.c; TrackPopupMenu marshals
+  into `SYS_WIN_TRACK_POPUP` (173) which drives the kernel menu
+  primitive and blocks until the user picks (or cancels). PE
+  apps receive `WM_CONTEXTMENU` (0x007B) on right-click-up in
+  the client area.
+- Menus — GAPs: nested submenus aren't marshaled across the
+  syscall (apps call `TrackPopupMenu` recursively from their
+  `WM_COMMAND` handler instead); `TPM_RIGHTBUTTON` /
+  `TPM_HORIZONTAL` / `TPMPARAMS` exclude-rect ignored;
+  concurrent TrackPopupMenu from two PE processes serialise
+  on the single-instance kernel menu (second caller cancels).
+- Menus: `LoadMenuW`, `GetSystemMenu`, `GetMenu`, `SetMenu`,
+  `DrawMenuBar` — STUB (menubars and resource-loaded menus
+  out of scope for v0)
 - Modal dialogs: `DialogBoxA/W`, `DialogBoxParamA/W`,
   `DialogBoxIndirectParamA/W`, `CreateDialogA/W`,
   `CreateDialogParamA/W`, `EndDialog`, `IsDialogMessageA/W`,
@@ -1221,8 +1238,14 @@ did. PE imports of these names fail at PeLoad today.
   `SetDlgItem*` — STUB facades. EATs exist; bodies do not run
   the user-supplied DLGPROC (no modal pump in v0). PEs that
   import the family link and follow the affirmative branch.
-- **Menus** — `LoadMenu`, `TrackPopupMenu`, the menu API —
-  STUB shells.
+- **Menus** — `CreatePopupMenu` / `AppendMenu` /
+  `TrackPopupMenu` / `DestroyMenu` and the surrounding
+  property/state queries are REAL. `LoadMenu`, `GetMenu`,
+  `SetMenu`, `DrawMenuBar`, `GetSystemMenu` remain stubs
+  (menubars + resource-loaded menus are out of scope).
+  Submenu marshaling, exclude-rect, and concurrent popups
+  across PEs are documented v0 GAPs — see the Menus row in
+  the per-method inventory above.
 - **MDI** (multiple-document interface) — STUB.
 - **Hooks** (CBT, mouse, keyboard, journal) — STUB.
 - **Drag and drop** (`DoDragDrop`, IDropTarget) — STUB.

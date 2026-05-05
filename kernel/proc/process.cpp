@@ -11,6 +11,7 @@
 #include "mm/kheap.h"
 #include "util/string.h"
 #include "subsystems/win32/custom.h"
+#include "subsystems/win32/window_syscall.h"
 #include "sched/sched.h"
 #include "log/klog.h"
 #include "core/panic.h"
@@ -345,6 +346,11 @@ void ProcessRelease(Process* p)
         }
         duetos::drivers::video::CompositorUnlock();
     }
+    // Cancel any in-flight TrackPopupMenu owned by this pid so the
+    // syscall waiter doesn't block forever on a vanished caller.
+    // Done OUTSIDE the compositor lock — TrackPopupCancelByOwner
+    // takes both locks itself (in lock order tp_lock → compositor).
+    duetos::subsystems::win32::TrackPopupCancelByOwner(p->pid);
 
     arch::SerialWrite("[proc] destroy pid=");
     arch::SerialWriteHex(p->pid);

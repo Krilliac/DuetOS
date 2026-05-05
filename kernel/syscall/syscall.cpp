@@ -3302,6 +3302,9 @@ void SyscallDispatch(arch::TrapFrame* frame)
         frame->rax = ProcessFindDllBaseByName(proc, kname);
         return;
     }
+    case SYS_WIN_TRACK_POPUP:
+        subsystems::win32::DoWinTrackPopup(frame);
+        return;
     case SYS_WIN_SET_CURSOR:
         subsystems::win32::DoWinSetCursor(frame);
         return;
