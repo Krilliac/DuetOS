@@ -923,6 +923,137 @@ i64 Fat32WriteInPlace(const Volume* v, const DirEntry* e, u64 offset, const void
     return static_cast<i64>(written);
 }
 
+// Write `len` bytes of `buf` at `offset` into the named entry in
+// `dir_cluster`, growing the cluster chain (and the on-disk size
+// field) when the write extends past the current EOF. Mirrors
+// `AppendInDir` for the chain-extension + dir-entry update, and
+// mirrors `Fat32WriteInPlace` for the in-bounds write loop.
+//
+// Sparse writes (offset > current size) are rejected — FAT32 has
+// no sparse file mode and silently zero-filling the gap would let
+// callers create gigabyte-sized files by writing one byte at a
+// huge offset. A caller that wants to grow a file with zeros can
+// do that explicitly via `Fat32TruncateAtPath`.
+i64 WriteInDir(const Volume* v, u32 dir_cluster, const char* name, u64 offset, const void* buf, u64 len)
+{
+    if (v == nullptr || name == nullptr || buf == nullptr)
+        return -1;
+    if (len == 0)
+        return 0;
+    DirEntry e_val;
+    if (!FindInDirByName(*v, dir_cluster, name, &e_val))
+        return -1;
+    const DirEntry* e = &e_val;
+    if (e->attributes & kAttrDirectory)
+        return -1;
+    if (e->first_cluster < 2)
+        return -1; // zero-byte files not supported in v0
+
+    const u64 cluster_bytes = u64(v->sectors_per_cluster) * u64(v->bytes_per_sector);
+    if (v->sectors_per_cluster > sizeof(g_scratch) / 512)
+        return -1;
+    const u32 old_size = e->size_bytes;
+    if (offset > old_size)
+        return -1;
+
+    const u64 new_size_u64 = (offset + len > old_size) ? (offset + len) : old_size;
+    if (new_size_u64 > 0xFFFFFFFFull)
+        return -1;
+    const u32 new_size = static_cast<u32>(new_size_u64);
+
+    // Walk the chain to the cluster containing `offset`. Track the
+    // previous cluster so we can patch its FAT entry when we run
+    // off the end and have to allocate.
+    u32 cluster = e->first_cluster;
+    u32 prev = 0;
+    const u64 cluster_idx = offset / cluster_bytes;
+    for (u64 i = 0; i < cluster_idx; ++i)
+    {
+        prev = cluster;
+        const u32 next = ReadFatEntry(*v, cluster);
+        if (next < 2 || next >= 0x0FFFFFF8u)
+            return -1; // chain ended early — corrupt
+        cluster = next;
+    }
+
+    const auto* src = static_cast<const u8*>(buf);
+    u64 written = 0;
+    u64 in_cluster_off = offset - cluster_idx * cluster_bytes;
+
+    while (written < len)
+    {
+        const u64 lba = u64(v->data_start_sector) + u64(cluster - 2) * u64(v->sectors_per_cluster);
+        const u64 remain = len - written;
+        const u64 avail = cluster_bytes - in_cluster_off;
+        const u64 chunk = (remain < avail) ? remain : avail;
+
+        if (in_cluster_off == 0 && chunk == cluster_bytes)
+        {
+            // Full-cluster overwrite — no read-modify-write.
+            for (u64 i = 0; i < chunk; ++i)
+                g_scratch[i] = src[written + i];
+            if (drivers::storage::BlockDeviceWrite(v->block_handle, lba, v->sectors_per_cluster, g_scratch) != 0)
+                return -1;
+        }
+        else
+        {
+            // Partial cluster: read-modify-write.
+            if (drivers::storage::BlockDeviceRead(v->block_handle, lba, v->sectors_per_cluster, g_scratch) != 0)
+                return -1;
+            for (u64 i = 0; i < chunk; ++i)
+                g_scratch[in_cluster_off + i] = src[written + i];
+            if (drivers::storage::BlockDeviceWrite(v->block_handle, lba, v->sectors_per_cluster, g_scratch) != 0)
+                return -1;
+        }
+
+        written += chunk;
+        in_cluster_off += chunk;
+        if (written == len)
+            break;
+
+        // Advance to the next cluster. If we're past the end of the
+        // existing chain (ReadFatEntry returns the EOC marker),
+        // allocate + chain a fresh one. Mirrors the AllocateFreeCluster
+        // + ZeroCluster + WriteFatEntry sequence in AppendInDir.
+        prev = cluster;
+        const u32 next = ReadFatEntry(*v, cluster);
+        if (next >= 2 && next < 0x0FFFFFF8u)
+        {
+            cluster = next;
+        }
+        else
+        {
+            const u32 fresh = AllocateFreeCluster(*v);
+            if (fresh == 0)
+                return -1;
+            if (!ZeroCluster(*v, fresh))
+                return -1;
+            if (!WriteFatEntry(*v, prev, fresh))
+                return -1;
+            cluster = fresh;
+        }
+        in_cluster_off = 0;
+    }
+
+    // Patch the on-disk dir entry's size if we grew the file.
+    if (new_size != old_size)
+    {
+        if (!UpdateEntrySizeInDir(*v, dir_cluster, name, new_size))
+        {
+            core::Log(core::LogLevel::Error, "fs/fat32",
+                      "write: cluster chain extended but dir entry size update failed");
+            return -1;
+        }
+        if (dir_cluster == v->root_cluster)
+        {
+            Volume* vm = const_cast<Volume*>(v);
+            WalkRootIntoSnapshot(*vm, vm->root_cluster);
+        }
+    }
+
+    return static_cast<i64>(written);
+}
+
 i64 Fat32AppendInRoot(const Volume* v, const char* name, const void* buf, u64 len)
 {
     Fat32Guard guard;
@@ -941,6 +1072,22 @@ i64 Fat32AppendAtPath(const Volume* v, const char* path, const void* buf, u64 le
     if (!ResolveParentDir(*v, path, &parent_cluster, basename, sizeof(basename)))
         return -1;
     return AppendInDir(v, parent_cluster, basename, buf, len);
+}
+
+// Public path-resolved write that grows the cluster chain when the
+// write extends past EOF. Distinct from Fat32WriteInPlace, which
+// strictly bounds writes to the existing size — this one is the
+// API a shell `echo > foo` flow eventually wires through.
+i64 Fat32WriteAtPath(const Volume* v, const char* path, u64 offset, const void* buf, u64 len)
+{
+    Fat32Guard guard;
+    if (v == nullptr || path == nullptr)
+        return -1;
+    u32 parent_cluster = 0;
+    char basename[64];
+    if (!ResolveParentDir(*v, path, &parent_cluster, basename, sizeof(basename)))
+        return -1;
+    return WriteInDir(v, parent_cluster, basename, offset, buf, len);
 }
 
 i64 Fat32TruncateInRoot(const Volume* v, const char* name, u64 new_size)
