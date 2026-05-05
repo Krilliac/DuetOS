@@ -44,6 +44,7 @@
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
 #include "drivers/video/dialog.h"
+#include "drivers/video/dnd.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/magnifier.h"
 #include "drivers/video/menu.h"
@@ -1968,6 +1969,11 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
     TrayFlyoutRedraw();
     NotifyRedraw();
     MagnifierRedraw();
+    // DnD ghost — paints just below the cursor during an
+    // active drag. Sits under the tooltip + dialogs so a
+    // hovered tooltip / open dialog doesn't get visually
+    // occluded by a stale ghost.
+    DndCompose();
     // Tooltip — over chrome, under modal dialogs.
     WidgetTooltipRender();
     // Modal dialog (MessageBox / InputBox) — drawn AFTER every
