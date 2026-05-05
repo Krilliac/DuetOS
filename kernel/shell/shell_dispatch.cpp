@@ -647,7 +647,7 @@ const char* const kCommandSet[] = {
     "theme",    "addr2sym",  "cap-audit", "monitor",  "secevents", "events",    "policy",     "purple",    "purpleteam",
     "mkdir",    "rmdir",     "truncate",  "realpath", "id",        "groups",    "nproc",      "arch",      "tty",
     "type",     "printenv",  "df",        "du",       "loadavg",   "clearhist", "pause",      "yes",       "sync",
-    "port",     "assert",    "watch",     "script",   "exit",     "mkfs",
+    "port",     "assert",    "watch",     "script",   "exit",      "mkfs",
 };
 const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
