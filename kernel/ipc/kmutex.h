@@ -22,32 +22,41 @@
  *   the kernel-internal lock state lives here, not duplicated per-
  *   ABI.
  *
- * WHY THIS, NOT THE EXISTING `Process::win32_mutexes`?
- *   The existing Win32 mutex array on `Process` is Win32-shaped:
- *   it returns `kWaitObject0` / `kWaitTimeout`, supports infinite
- *   waits via Win32 semantics, and is reachable only from the
- *   Win32 mutex syscalls. A native (non-Win32) workload that
- *   wants a kernel-mediated mutex has nowhere to go. `KMutex` is
- *   that home — every ABI front-end converges on the same
- *   refcounted, handle-tabled, type-tagged primitive.
- *
- * WHAT THIS COMMIT IS NOT
- *   v0 lands the type + create/acquire/release primitives + a
- *   self-test that exercises HandleTable round-trip. The
- *   `SYS_MUTEX_*` syscalls keep using the legacy Win32 array
- *   unchanged — migrating them is a separate slice (different
- *   ABI surface to preserve, different test fleet to validate).
+ * RELATION TO Win32 SYS_MUTEX_*
+ *   Every `SYS_MUTEX_CREATE` / `SYS_MUTEX_WAIT` / `SYS_MUTEX_RELEASE`
+ *   syscall routes through this type — the per-process
+ *   `Process::kobj_handles` table holds the `KMutex*`. A native
+ *   (non-Win32) workload that wants a kernel-mediated mutex
+ *   reaches the same primitive through the same handle table; the
+ *   Win32 surface only adds the `kWaitObject0` / `kWaitTimeout`
+ *   return-value translation at the syscall boundary.
  *
  * REFCOUNT SEMANTICS
  *   `KMutexCreate` allocates one through the kheap, calls
  *   `KObjectInit` (refcount = 1), and returns the new KMutex.
  *   The caller is expected to hand it off to a `HandleTable` —
  *   that table takes the initial reference (no extra acquire).
+ *
+ *   The first successful acquire on an unowned mutex takes an
+ *   additional reference (the "holder ref"); the outermost
+ *   release drops it. While a task is blocked in `KMutexAcquire`
+ *   / `KMutexAcquireTimed`, an extra "wait ref" is held — that
+ *   ref upgrades to the holder ref on hand-off success, or is
+ *   dropped on timeout. The wait/holder refs together guarantee
+ *   that closing every handle while the mutex is still held or
+ *   contended cannot free the storage out from under a current
+ *   holder or a still-blocked waiter — the standard Win32
+ *   "abandoned mutex" / "mutex outlives its handle" scenarios
+ *   stay safe even though the kernel never owns its own implicit
+ *   reference.
+ *
  *   The destructor `KMutexDestroy` is registered as the type's
  *   `destroy` callback; it runs on last release, frees the
  *   storage, and panics if the lock is still held (a leak that
- *   reaches refcount=0 with the lock held is a bug in the caller's
- *   release ordering).
+ *   reaches refcount=0 with the lock held is a bug in the
+ *   refcount accounting itself, not in the caller's release
+ *   ordering — caller mistakes are absorbed by the holder/wait
+ *   refs above).
  *
  * THREADING
  *   `KMutexAcquire` / `KMutexRelease` go through the embedded
@@ -95,10 +104,22 @@ struct KMutex
 /// Recursive acquire. Same task may acquire repeatedly; each call
 /// must be paired with a matching `KMutexRelease`. Blocks (via
 /// `sched::MutexLock` on the inner mutex) when another task
-/// holds the lock. Always succeeds eventually (no timeout in v0;
-/// timed-wait variant lands when the SYS_MUTEX_WAIT migration
-/// needs it).
+/// holds the lock.
 void KMutexAcquire(KMutex* m);
+
+/// Timed recursive acquire. Identical to `KMutexAcquire` for the
+/// re-entrant fast path (recursion bumps regardless of the
+/// timeout — re-entry never blocks). Otherwise blocks at most
+/// `ticks` timer ticks via `sched::MutexLockTimed`. Returns true
+/// if the lock is held on return; false on timeout. `ticks == 0`
+/// is the non-blocking variant — yields then returns false on
+/// contention.
+///
+/// Backs the timed-wait variant of Win32-style WaitForSingleObject
+/// on a mutex handle; the SYS_MUTEX_WAIT migration ahead in the
+/// roadmap routes through here once the surface is moved onto
+/// `Process::kobj_handles`.
+bool KMutexAcquireTimed(KMutex* m, u64 ticks);
 
 /// Drop one recursion level. The outermost release transfers
 /// ownership to the next FIFO waiter (or unlocks if the queue is

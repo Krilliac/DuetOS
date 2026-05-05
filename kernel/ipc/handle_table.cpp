@@ -79,6 +79,34 @@ KObject* HandleTableLookup(HandleTable& table, Handle h, KObjectType expected_ty
     return obj;
 }
 
+KObject* HandleTableLookupRef(HandleTable& table, Handle h, KObjectType expected_type)
+{
+    if (!HandleInRange(h))
+    {
+        return nullptr;
+    }
+    KObject* obj = nullptr;
+    {
+        sync::SpinLockGuard guard(table.lock);
+        obj = table.slots[h].obj;
+        if (obj == nullptr)
+        {
+            return nullptr;
+        }
+        if (expected_type != KObjectType::Invalid && obj->type != expected_type)
+        {
+            return nullptr;
+        }
+        // Take the reference under the table's lock so a racing
+        // HandleTableRemove can't drop the slot's reference between
+        // our peek and our acquire. Once the ref is taken, releasing
+        // the table lock is safe — the object cannot be freed before
+        // the caller's matching `KObjectRelease`.
+        KObjectAcquire(obj);
+    }
+    return obj;
+}
+
 ::duetos::core::Result<void> HandleTableRemove(HandleTable& table, Handle h)
 {
     if (!HandleInRange(h))
@@ -227,6 +255,35 @@ void HandleTableSelfTest()
     if (HandleTableLookup(table_a, h_a, KObjectType::Test) != &obj.base)
     {
         PanicHt("Lookup with right type failed");
+    }
+    // (2a) LookupRef: also bumps the refcount so the caller can
+    // safely use the pointer across a blocking primitive without
+    // racing a concurrent Remove. Drop the extra ref before
+    // continuing so subsequent assertions stay accurate.
+    {
+        const u32 ref_before = KObjectRefcount(&obj.base);
+        KObject* pinned = HandleTableLookupRef(table_a, h_a, KObjectType::Test);
+        if (pinned != &obj.base)
+        {
+            PanicHt("LookupRef returned wrong KObject");
+        }
+        if (KObjectRefcount(&obj.base) != ref_before + 1)
+        {
+            PanicHt("LookupRef did not bump refcount by 1");
+        }
+        if (HandleTableLookupRef(table_a, h_a, KObjectType::Mutex) != nullptr)
+        {
+            PanicHt("LookupRef with wrong type-tag returned non-null");
+        }
+        if (KObjectRefcount(&obj.base) != ref_before + 1)
+        {
+            PanicHt("LookupRef type-mismatch leaked a ref");
+        }
+        KObjectRelease(pinned);
+        if (KObjectRefcount(&obj.base) != ref_before)
+        {
+            PanicHt("LookupRef Release did not restore refcount");
+        }
     }
     // Type-tag mismatch returns nullptr.
     if (HandleTableLookup(table_a, h_a, KObjectType::Mutex) != nullptr)

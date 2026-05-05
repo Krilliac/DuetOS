@@ -61,6 +61,10 @@ void KSemaphoreDestroy(KObject* obj)
 
 void KSemaphoreAcquire(KSemaphore* s)
 {
+    // Pin during the operation. Even the fast path needs the
+    // storage alive; closing every handle from another task
+    // can't race a destroy in past us.
+    KObjectAcquire(&s->base);
     sched::MutexLock(&s->inner);
     while (s->count == 0)
     {
@@ -68,6 +72,42 @@ void KSemaphoreAcquire(KSemaphore* s)
     }
     --s->count;
     sched::MutexUnlock(&s->inner);
+    KObjectRelease(&s->base);
+}
+
+bool KSemaphoreAcquireTimed(KSemaphore* s, u64 ticks)
+{
+    KObjectAcquire(&s->base);
+    sched::MutexLock(&s->inner);
+    if (s->count > 0)
+    {
+        --s->count;
+        sched::MutexUnlock(&s->inner);
+        KObjectRelease(&s->base);
+        return true;
+    }
+    if (ticks == 0)
+    {
+        sched::MutexUnlock(&s->inner);
+        KObjectRelease(&s->base);
+        return false;
+    }
+    const u64 deadline = sched::SchedNowTicks() + ticks;
+    while (s->count == 0)
+    {
+        const u64 now = sched::SchedNowTicks();
+        if (now >= deadline)
+        {
+            sched::MutexUnlock(&s->inner);
+            KObjectRelease(&s->base);
+            return false;
+        }
+        sched::CondvarWaitTimeout(&s->cv, &s->inner, deadline - now);
+    }
+    --s->count;
+    sched::MutexUnlock(&s->inner);
+    KObjectRelease(&s->base);
+    return true;
 }
 
 void KSemaphoreRelease(KSemaphore* s, u32 n)
@@ -164,6 +204,37 @@ void KSemaphoreSelfTest()
     {
         core::Panic("ipc/ksemaphore", "self-test: release(0) changed count");
     }
+
+    // Timed-acquire fast paths: count > 0 consumes a permit
+    // immediately; count == 0 with a zero budget returns false
+    // without blocking. Real waiter contention is out of scope
+    // until SMP AP bringup unlocks spawned-waiter tests.
+    if (!KSemaphoreAcquireTimed(s, 5))
+    {
+        core::Panic("ipc/ksemaphore", "self-test: AcquireTimed(5) on count=2 failed");
+    }
+    if (KSemaphoreCount(s) != 1)
+    {
+        core::Panic("ipc/ksemaphore", "self-test: AcquireTimed did not decrement count");
+    }
+    if (!KSemaphoreAcquireTimed(s, 0))
+    {
+        core::Panic("ipc/ksemaphore", "self-test: AcquireTimed(0) on count=1 failed");
+    }
+    if (KSemaphoreCount(s) != 0)
+    {
+        core::Panic("ipc/ksemaphore", "self-test: AcquireTimed(0) did not decrement count");
+    }
+    if (KSemaphoreAcquireTimed(s, 0))
+    {
+        core::Panic("ipc/ksemaphore", "self-test: AcquireTimed(0) on count=0 returned true");
+    }
+    if (KSemaphoreCount(s) != 0)
+    {
+        core::Panic("ipc/ksemaphore", "self-test: failing AcquireTimed touched count");
+    }
+    // Refill so the rest of the test runs against count=2.
+    KSemaphoreRelease(s, 2);
 
     // Round-trip through HandleTable.
     static HandleTable table{};

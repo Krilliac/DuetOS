@@ -389,7 +389,16 @@ WinDbg client API, `SymLoadModuleEx`.
   ASCII keys
 - Menus: `LoadMenuW`, `GetSystemMenu` — STUB (return canned
   empty handle)
-- Modal dialogs: `DialogBoxParamA/W`, `EndDialog` — MISSING
+- Modal dialogs: `DialogBoxA/W`, `DialogBoxParamA/W`,
+  `DialogBoxIndirectParamA/W`, `CreateDialogA/W`,
+  `CreateDialogParamA/W`, `EndDialog`, `IsDialogMessageA/W`,
+  `GetDlgItem`, `GetDlgItemTextA/W`, `SetDlgItemTextA/W`,
+  `GetDlgItemInt`, `SetDlgItemInt` — STUB facades. The EAT
+  entries exist so PEs that import them link; the bodies
+  return IDOK / NULL / FALSE without invoking the user-supplied
+  DLGPROC (no modal pump in v0). Apps that branch on the
+  return value follow the affirmative path; apps that need a
+  real dialog see no controls.
 - Hooks: `SetWindowsHookExA/W`, `UnhookWindowsHookEx`,
   `CallNextHookEx` — STUB
 - Subclassing: `SetWindowSubclass` lives in comctl32 — STUB
@@ -1207,7 +1216,11 @@ did. PE imports of these names fail at PeLoad today.
 
 ### Window manager / desktop
 
-- **Modal dialogs** — `DialogBoxParam`, `EndDialog` — MISSING.
+- **Modal dialogs** — `DialogBoxParam`, `EndDialog`,
+  `CreateDialog`, `IsDialogMessage`, `GetDlgItem*`,
+  `SetDlgItem*` — STUB facades. EATs exist; bodies do not run
+  the user-supplied DLGPROC (no modal pump in v0). PEs that
+  import the family link and follow the affirmative branch.
 - **Menus** — `LoadMenu`, `TrackPopupMenu`, the menu API —
   STUB shells.
 - **MDI** (multiple-document interface) — STUB.

@@ -95,6 +95,12 @@ void KEventReset(KEvent* e)
 
 void KEventWait(KEvent* e)
 {
+    // Pin during the wait so closing every handle while a waiter
+    // is blocked cannot free the storage. The fast path takes the
+    // ref defensively too — even checking `e->signaled` requires
+    // the storage to be alive, and we do not assume the caller
+    // already holds an external ref.
+    KObjectAcquire(&e->base);
     sched::MutexLock(&e->inner);
     while (!e->signaled)
     {
@@ -107,6 +113,57 @@ void KEventWait(KEvent* e)
         e->signaled = false;
     }
     sched::MutexUnlock(&e->inner);
+    KObjectRelease(&e->base);
+}
+
+bool KEventWaitTimed(KEvent* e, u64 ticks)
+{
+    KObjectAcquire(&e->base);
+    sched::MutexLock(&e->inner);
+    if (e->signaled)
+    {
+        if (!e->manual_reset)
+        {
+            e->signaled = false;
+        }
+        sched::MutexUnlock(&e->inner);
+        KObjectRelease(&e->base);
+        return true;
+    }
+    if (ticks == 0)
+    {
+        sched::MutexUnlock(&e->inner);
+        KObjectRelease(&e->base);
+        return false;
+    }
+    // Compute the deadline once so spurious wakeups and "another
+    // waiter consumed the auto-reset signal first" races don't
+    // re-arm the full budget on every iteration.
+    const u64 deadline = sched::SchedNowTicks() + ticks;
+    bool got = false;
+    while (!e->signaled)
+    {
+        const u64 now = sched::SchedNowTicks();
+        if (now >= deadline)
+        {
+            sched::MutexUnlock(&e->inner);
+            KObjectRelease(&e->base);
+            return false;
+        }
+        // CondvarWaitTimeout drops + re-acquires e->inner. Return
+        // value is "woken by signal vs by timer"; we don't act on
+        // it directly — the loop re-tests `signaled` to handle
+        // both spurious wakes and waiters racing for an auto-reset.
+        sched::CondvarWaitTimeout(&e->cv, &e->inner, deadline - now);
+    }
+    got = true;
+    if (!e->manual_reset)
+    {
+        e->signaled = false;
+    }
+    sched::MutexUnlock(&e->inner);
+    KObjectRelease(&e->base);
+    return got;
 }
 
 void KEventSelfTest()
@@ -161,6 +218,34 @@ void KEventSelfTest()
     if (!auto_ev->signaled)
     {
         core::Panic("ipc/kevent", "self-test: auto event set did not signal");
+    }
+
+    // Timed-wait fast paths. Already-signaled event consumes the
+    // signal regardless of the budget. Cleared event with a zero
+    // budget returns false without blocking. Real "Set during
+    // wait wins the race" + "timer fires before Set" verification
+    // needs spawned waiter tasks (deferred to an SMP/contention
+    // test); v0 covers the un-contended branches.
+    if (!KEventWaitTimed(auto_ev, 5))
+    {
+        core::Panic("ipc/kevent", "self-test: WaitTimed on signaled auto event returned false");
+    }
+    if (auto_ev->signaled)
+    {
+        core::Panic("ipc/kevent", "self-test: WaitTimed did not consume auto-reset signal");
+    }
+    if (KEventWaitTimed(auto_ev, 0))
+    {
+        core::Panic("ipc/kevent", "self-test: WaitTimed(0) on cleared event returned true");
+    }
+    KEventSet(manual);
+    if (!KEventWaitTimed(manual, 0))
+    {
+        core::Panic("ipc/kevent", "self-test: WaitTimed(0) on signaled manual event returned false");
+    }
+    if (!manual->signaled)
+    {
+        core::Panic("ipc/kevent", "self-test: manual event cleared after WaitTimed");
     }
 
     // Round-trip through a HandleTable on the manual-reset event

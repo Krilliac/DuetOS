@@ -56,20 +56,25 @@ the same commit** that delivers the code.
 
 ### ABI handle-table migration
 
-- **Scope:** route `SYS_MUTEX_*` / `SYS_EVENT_*` / `SYS_SEM_*`
-  through the KMutex / KEvent / KSemaphore types + per-process
-  `kobj_handles` table; migrate Win32 file handles and Linux
-  fd-table entries onto KFile.
-- **Blocks on:** ABI-preservation work — Win32 syscalls return
-  `kWaitObject0` / `kWaitTimeout` from infinite waits and
-  deadlock-detect callbacks; Linux fd table is exposed through
-  `O_*` flag bitmask + numeric fd allocation. Both surfaces
-  need careful preservation across the migration.
-- **When to land:** when handle-table audit pressure exceeds the
-  cost of moving each subsystem. The unified
-  `Process::kobj_handles` table is in place; concrete subclasses
-  (KMutex / KEvent / KSemaphore / KMailbox / KWaitable / KFile)
-  are landed. Next slice is the SYS_* surface migration itself.
+- **Status:** SYS_MUTEX_* landed (commit migrating
+  CreateMutexW / WaitForSingleObject / ReleaseMutex through
+  `KMutex` + `Process::kobj_handles`). The legacy
+  `Win32MutexHandle win32_mutexes[]` array on `Process` was
+  removed; KMutex / KEvent / KSemaphore now carry the
+  wait-time + holder refcounting that makes the
+  "close every handle while a mutex is held / contended"
+  scenario safe (`HandleTableLookupRef` for the syscall side,
+  `KObjectAcquire` on wait-entry / hold transition for the
+  internal side).
+- **Remaining:** SYS_EVENT_* / SYS_SEM_* migrations follow the
+  same pattern — `KEventCreate` / `KEventSet` / `KEventReset`
+  / `KEventWait{,Timed}` and `KSemaphoreCreate` /
+  `KSemaphoreAcquire{,Timed}` / `KSemaphoreRelease` are all in
+  place, the migration is the `event_syscall.cpp` /
+  `semaphore_syscall.cpp` rewrite + the matching CloseHandle
+  dispatch arms. Linux fd-table → KFile is its own track.
+- **When to land:** opportunistic. Each one is a focused
+  per-syscall slice now that the foundations are paid for.
 
 ### Intel CET enable
 

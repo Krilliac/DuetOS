@@ -2562,6 +2562,44 @@ bool MutexTryLock(Mutex* m)
     return ok;
 }
 
+bool MutexLockTimed(Mutex* m, u64 ticks)
+{
+    KASSERT(m != nullptr, "sched", "MutexLockTimed null mutex");
+
+    // Lockdep edge-walk before the wait/acquire — even on the timed
+    // path, the "held → this" edge is real once we decide to wait.
+    // Matches MutexLock; the held-stack push (LockdepAfterAcquire)
+    // fires only on the success arm so a timed-out attempt never
+    // appears to be held.
+    ::duetos::sync::LockdepBeforeAcquire(m->class_id);
+
+    arch::Cli();
+    if (m->owner == nullptr)
+    {
+        // Fast path: uncontended acquire.
+        m->owner = Current();
+        arch::Sti();
+        ::duetos::sync::LockdepAfterAcquire(m->class_id);
+        ::duetos::diag::EventTrace(::duetos::diag::kEventMutexAcquire, reinterpret_cast<u64>(m), CurrentTaskId());
+        return true;
+    }
+
+    // Slow path with timeout. MutexUnlock's hand-off sets m->owner
+    // = us BEFORE WaitQueueWakeOne wakes us, so a `true` return
+    // means the lock is already ours. A `false` return means the
+    // timer fired first and unlinked us from m->waiters before any
+    // unlock could pick us — m->owner is unchanged.
+    const bool got = WaitQueueBlockTimeout(&m->waiters, ticks);
+    arch::Sti();
+
+    if (got)
+    {
+        ::duetos::sync::LockdepAfterAcquire(m->class_id);
+        ::duetos::diag::EventTrace(::duetos::diag::kEventMutexAcquire, reinterpret_cast<u64>(m), CurrentTaskId());
+    }
+    return got;
+}
+
 void MutexUnlock(Mutex* m)
 {
     KASSERT(m != nullptr, "sched", "MutexUnlock null mutex");

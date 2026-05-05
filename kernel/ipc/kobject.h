@@ -15,14 +15,16 @@
  *   `KObjectType` check.
  *
  * WHY
- *   The current kernel has ~10 separate per-type fixed-size handle
- *   arrays on `Process` (Win32MutexHandle, Win32EventHandle,
+ *   The kernel originally had ~10 separate per-type fixed-size
+ *   handle arrays on `Process` (Win32EventHandle,
  *   Win32SemaphoreHandle, Win32ProcessHandle, …) plus the Linux
- *   `LinuxFd` table. Every new ABI front-end either bolts on its
- *   own table or pretends one of the existing ones fits. The
+ *   `LinuxFd` table. Every new ABI front-end either bolted on its
+ *   own table or pretended one of the existing ones fit. The
  *   plan's hard rule — "one TCP stack, one VFS, one registry, one
  *   window manager" — implicitly demands the same shape for IPC
- *   objects. KObject is that shape.
+ *   objects. KObject is that shape; SYS_MUTEX_* migrated through
+ *   it (see `kmutex.h`), and SYS_EVENT_* / SYS_SEM_* follow the
+ *   same pattern in subsequent slices.
  *
  * WHAT THIS COMMIT IS NOT
  *   v0 lands ONLY the base type + the per-process handle table

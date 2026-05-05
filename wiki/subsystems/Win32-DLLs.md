@@ -20,7 +20,7 @@ Win32 calls into syscalls and trust the kernel's return.
 |-----|-------|
 | `kernel32` | 155 exports — base API |
 | `ntdll`    | 114 exports — NT API |
-| `user32`   | 73 exports — windowing + messages |
+| `user32`   | windowing + messages + modal-dialog STUB facades |
 | `gdi32`    | 44 exports — drawing |
 | `kernelbase` | 44 forwarders to kernel32 |
 | `ucrtbase` | 72 exports — modern UCRT (`fopen`, `printf`, …) |

@@ -526,31 +526,18 @@ struct Process
     static constexpr u64 kWin32HandleBase = 0x100;
     Win32FileHandle win32_handles[kWin32HandleCap];
 
-    // Win32 mutex table — backs CreateMutexW / WaitForSingleObject /
-    // ReleaseMutex. Per-mutex owner pointer + recursion
-    // counter + waitqueue. Real blocking semantics; uses the
-    // existing sched::WaitQueue + WaitQueueBlockTimeout path.
-    //
-    // Handles run kWin32MutexBase + idx (= 0x200..0x207); the range
-    // is disjoint from kWin32HandleBase + idx (0x100..0x10F) so
-    // CloseHandle can dispatch by range without a tag bit.
-    //
-    // Win32 mutexes are RECURSIVE — the same owner can acquire
-    // multiple times, and must release the same number. The
-    // recursion counter tracks this; only on final release does
-    // the mutex become unowned + a waiter (if any) gets the
-    // hand-off.
-    struct Win32MutexHandle
-    {
-        bool in_use; // false = slot free
-        u8 _pad[3];
-        u32 recursion;            // # nested acquires by current owner
-        sched::Task* owner;       // nullptr = unowned
-        sched::WaitQueue waiters; // tasks blocked in WaitForSingleObject
-    };
-    static constexpr u64 kWin32MutexCap = 8;
+    // Win32 mutex handle range — backs CreateMutexW /
+    // WaitForSingleObject / ReleaseMutex / CloseHandle. The
+    // legacy fixed-size `Win32MutexHandle win32_mutexes[]` array
+    // was removed when `SYS_MUTEX_*` migrated to `KMutex` +
+    // `kobj_handles` (kernel/ipc/). The Win32 handle is now
+    // `kWin32MutexBase + ipc_handle`, where `ipc_handle` is a
+    // slot in the unified handle table (1..kHandleTableCapacity-1).
+    // The cap below stays disjoint from kWin32EventBase (0x300)
+    // and kWin32HandleBase (0x100..0x10F) so CloseHandle can
+    // continue to dispatch by range without a tag bit.
     static constexpr u64 kWin32MutexBase = 0x200;
-    Win32MutexHandle win32_mutexes[kWin32MutexCap];
+    static constexpr u64 kWin32MutexCap = ::duetos::ipc::kHandleTableCapacity;
 
     // Win32 event table — backs CreateEventW / SetEvent /
     // ResetEvent / WaitForSingleObject. Simpler than
