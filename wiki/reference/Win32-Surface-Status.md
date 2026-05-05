@@ -586,10 +586,11 @@ canned values for username / domain / station). The rest STUB.
 `NotifyAddrChange`, `NotifyRouteChange`,
 `SetIpInterfaceEntry` — STUB.
 
-### wininet.dll  (~900 LOC, ~50 exports)
+### wininet.dll  (~1100 LOC, ~50 exports)
 
 > **Status:** HTTP/1.0 GET works end-to-end (mini_browser PE
-> uses it). Cookies / FTP / cache / async — STUB.
+> uses it). Cookies REAL via in-process LRU table. RFC 1123
+> time format / parse REAL. FTP / cache / async — STUB.
 
 `InternetOpenA/W`, `InternetOpenUrlA/W`, `InternetReadFile`,
 `InternetCloseHandle`, `HttpQueryInfoA`, `InternetQueryDataAvailable`
