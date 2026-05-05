@@ -2880,11 +2880,28 @@ __declspec(dllexport) BOOL ReadFile(HANDLE h, void* buf, DWORD count, DWORD* lpR
             *lpRead = got;
         return 1;
     }
+
+    const unsigned long long h_raw = (unsigned long long)(UINT_PTR)h;
+
+    /* Std handles: STDIN reports immediate EOF (no kbd-read syscall
+     * yet); STDOUT / STDERR are write-only — Win32 convention is to
+     * return TRUE with *lpRead = 0 ("end of file") rather than
+     * fall through to a failing SYS_FILE_READ. */
+    if (h_raw == 0xFFFFFFF6ULL || h_raw == 0xFFFFFFF5ULL || h_raw == 0xFFFFFFF4ULL)
+    {
+        if (lpRead != (DWORD*)0)
+            *lpRead = 0;
+        return 1;
+    }
+
+    /* Kernel file handle range — same numeric band as WriteFile.
+     * Anything else falls through to SYS_FILE_READ which will
+     * reject it with -1; we mirror that as FALSE. */
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
                      : "a"((long long)21), /* SYS_FILE_READ */
-                       "D"((long long)h), "S"((long long)buf), "d"((long long)count)
+                       "D"((long long)h_raw), "S"((long long)buf), "d"((long long)count)
                      : "memory");
     if (lpRead != (DWORD*)0)
         *lpRead = rv >= 0 ? (DWORD)rv : 0;

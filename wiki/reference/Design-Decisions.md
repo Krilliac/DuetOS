@@ -612,6 +612,40 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 118 — ReadFile dispatches by handle range (mirrors WriteFile)
+
+- **Scope:** `userland/libs/kernel32/kernel32.c` (`ReadFile`).
+- **Decision:** Mirror the WriteFile handle-range dispatch
+  landed in #114:
+  - Pipe sentinel (`DUETOS_PIPE_RD`) — drain the in-process
+    pipe ring (existing path).
+  - Std-handle range (0xFFFFFFF4..0xFFFFFFF6) — return
+    `TRUE` + `*lpRead = 0` (Win32 EOF convention). STDIN has
+    no kbd-read syscall yet; STDOUT / STDERR are write-only.
+    The legacy fall-through called `SYS_FILE_READ` with the
+    std-handle in `rdi`, which returned `-1` and surfaced as
+    `FALSE` — semantically a read error. Returning EOF
+    matches what real Win32 does on a closed STDIN pipe.
+  - Anything else — `SYS_FILE_READ` (handles 0x100..0x10F
+    work; the kernel rejects out-of-band handles with `-1`,
+    surfaced as `FALSE`).
+- **Why:** Symmetric with #114's WriteFile dispatch. Win32
+  CRT startup commonly probes STDIN to size an input buffer;
+  a `FALSE` return there used to confuse callers expecting
+  the standard "no data" path. The 0-byte EOF return makes
+  PE binaries' "read input until EOF" loops terminate
+  instead of reporting an error and aborting.
+- **Rules out / defers:** Real keyboard-backed STDIN reads
+  (would need a SYS_STDIN_READ that drains the kernel's
+  input-event queue). Async / overlapped reads. Read-side
+  share-mode enforcement.
+- **Revisit when:** A workload genuinely needs a STDIN that
+  reads keystrokes (a userland REPL); add SYS_STDIN_READ +
+  switch the std-handle branch over.
+- **Related tracks:** Track 9 (Win32 — file syscall surface).
+
+---
+
 ## 117 — Shell `mkfs` command on a writable block device
 
 - **Scope:** `kernel/shell/shell_storage.cpp` (`CmdMkfs`),
