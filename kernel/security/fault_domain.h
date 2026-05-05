@@ -65,34 +65,62 @@ enum class ModuleState : u8
     Crashed = 2, // a fault tripped MarkRestart but the watchdog has not yet drained
 };
 
+/// Rolling-window rate throttle. Each domain keeps the last
+/// `kRestartHistoryDepth` restart timestamps; when that many
+/// restarts land within `kRestartThrottleWindowTicks`, the
+/// supervisor refuses the next restart and parks the domain in
+/// `Stopped` so an operator can intervene before another flap.
+/// Tick rate is 100 Hz (`kTickHz`); 6000 ticks ≈ 60 seconds.
+inline constexpr u32 kRestartHistoryDepth = 5;
+inline constexpr u64 kRestartThrottleWindowTicks = 6000;
+
+/// Capacity of the cross-domain dependency table. Each slot is a
+/// (parent, dependent) pair: when `parent` restarts, `dependent`
+/// is also marked for restart on the next watchdog tick. Sized
+/// for ~PCI fan-out (one parent feeding several leaves) without
+/// reaching a heap.
+inline constexpr u32 kMaxFaultDomainDeps = 64;
+
 struct FaultDomain
 {
-    const char* name;           // short label: "drivers/usb/xhci"
-    Result<void> (*init)();     // idempotent init; return Err on failure
-    Result<void> (*teardown)(); // free resources; must leave the
-                                // subsystem ready for a fresh init
-    u32 restart_count;          // lifetime restart events
-    u64 last_restart_ticks;     // scheduler-tick of the most recent restart
-    bool alive;                 // false iff teardown ran and init hasn't yet.
-                                // Trap-safe single-bit projection of `state`
-                                // for the watchdog's lossless backbone — the
-                                // trap handler can flip this from NMI/#PF
-                                // context where a multi-byte enum write
-                                // would not be atomic.
-    bool restart_pending;       // set from trap-handler context via
-                                // `FaultDomainMarkRestart`; drained by
-                                // `FaultDomainTick` from kheartbeat,
-                                // which is allowed to take locks +
-                                // allocate memory (the trap handler
-                                // is not).
-    ModuleState state;          // operator-visible projection of the
-                                // bool pair. Written only from heartbeat
-                                // / shell context (multi-byte stores) by
-                                // `FaultDomainRestart`, `FaultDomainTick`,
-                                // `ModuleStart`, `ModuleStop`. Trap path
-                                // never touches this — it flips the
-                                // single-bit `restart_pending` and
-                                // `alive` instead.
+    const char* name;                          // short label: "drivers/usb/xhci"
+    Result<void> (*init)();                    // idempotent init; return Err on failure
+    Result<void> (*teardown)();                // free resources; must leave the
+                                               // subsystem ready for a fresh init
+    u32 restart_count;                         // lifetime restart events
+    u64 last_restart_ticks;                    // scheduler-tick of the most recent restart
+    bool alive;                                // false iff teardown ran and init hasn't yet.
+                                               // Trap-safe single-bit projection of `state`
+                                               // for the watchdog's lossless backbone — the
+                                               // trap handler can flip this from NMI/#PF
+                                               // context where a multi-byte enum write
+                                               // would not be atomic.
+    bool restart_pending;                      // set from trap-handler context via
+                                               // `FaultDomainMarkRestart`; drained by
+                                               // `FaultDomainTick` from kheartbeat,
+                                               // which is allowed to take locks +
+                                               // allocate memory (the trap handler
+                                               // is not).
+    ModuleState state;                         // operator-visible projection of the
+                                               // bool pair. Written only from heartbeat
+                                               // / shell context (multi-byte stores) by
+                                               // `FaultDomainRestart`, `FaultDomainTick`,
+                                               // `ModuleStart`, `ModuleStop`. Trap path
+                                               // never touches this — it flips the
+                                               // single-bit `restart_pending` and
+                                               // `alive` instead.
+    u64 restart_history[kRestartHistoryDepth]; // ring of recent restart
+                                               // timestamps (in scheduler
+                                               // ticks). Populated on every
+                                               // successful restart;
+                                               // consulted by the rate
+                                               // throttle before draining
+                                               // a pending restart.
+    u32 restart_history_next;                  // FIFO write cursor into restart_history.
+    u32 restart_throttle_count;                // lifetime count of throttle-aborted
+                                               // restarts. Diagnostic surface; nonzero
+                                               // means an operator should investigate
+                                               // why this domain keeps flapping.
 };
 
 /// Register a domain. Returns the assigned id, or
@@ -144,5 +172,36 @@ void FaultDomainTick();
 /// MarkRestart + Tick path, verifies the bookkeeping. Panics on
 /// mismatch.
 void FaultDomainSelfTest();
+
+/// Declare that `dependent` must be restarted whenever `parent`
+/// restarts. Used to model topology like "PCI feeds NVMe feeds
+/// VFS" — restarting PCI cascades through the leaves so the
+/// operator doesn't have to drive each restart manually.
+///
+/// Order: a successful `FaultDomainRestart(parent)` walks the
+/// dependency table and calls `FaultDomainMarkRestart(dependent)`
+/// for every matching row. The watchdog drains the marks on the
+/// next heartbeat — same path as a trap-recorded fault. This
+/// keeps the cascade off the synchronous restart path so a slow
+/// dependent's teardown can't stall the parent's recovery.
+///
+/// Returns false if the dependency table is full (cap
+/// `kMaxFaultDomainDeps`) or either id is out of range. Self-
+/// dependencies (parent == dependent) are refused; cycles are
+/// not detected (the cascade is one level deep — a dependent's
+/// own dependents fire on its restart, propagating the cascade
+/// through the graph). Idempotent: registering the same edge
+/// twice succeeds without duplication, but a clean implementation
+/// stores the edge twice (cheap; the cascade tolerates duplicates
+/// since `MarkRestart` is itself idempotent).
+bool FaultDomainAddDependency(FaultDomainId parent, FaultDomainId dependent);
+
+/// Number of registered dependency edges. Diagnostic surface for
+/// audits and self-tests.
+u32 FaultDomainDependencyCount();
+
+/// Number of times the rate throttle has refused a restart, total
+/// across every domain. `0` is the steady-state expectation.
+u64 FaultDomainThrottleCount();
 
 } // namespace duetos::core

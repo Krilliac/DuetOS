@@ -14,6 +14,16 @@ namespace
 constinit FaultDomain g_domains[kMaxFaultDomains] = {};
 constinit u32 g_domain_count = 0;
 
+struct DependencyEdge
+{
+    FaultDomainId parent;
+    FaultDomainId dependent;
+    bool used;
+};
+constinit DependencyEdge g_deps[kMaxFaultDomainDeps] = {};
+constinit u32 g_dep_count = 0;
+constinit u64 g_throttle_count = 0;
+
 bool StrEq(const char* a, const char* b)
 {
     if (a == nullptr || b == nullptr)
@@ -24,6 +34,50 @@ bool StrEq(const char* a, const char* b)
         ++b;
     }
     return *a == *b;
+}
+
+// Rate-throttle decision. A domain that has restarted
+// `kRestartHistoryDepth` times within `kRestartThrottleWindowTicks`
+// is flapping; the supervisor refuses the next restart and parks
+// the domain in `Stopped` so an operator can intervene.
+//
+// "Fullness" is keyed on the lifetime restart counter so a fresh
+// domain that hasn't restarted enough times to fill the ring
+// can't accidentally trip the throttle on a zero-valued slot
+// (relevant during early boot before SchedNowTicks() advances).
+bool RestartTooFast(const FaultDomain& d, u64 now_ticks)
+{
+    if (d.restart_count < kRestartHistoryDepth)
+        return false;
+    u64 oldest = d.restart_history[0];
+    for (u32 i = 1; i < kRestartHistoryDepth; ++i)
+    {
+        if (d.restart_history[i] < oldest)
+            oldest = d.restart_history[i];
+    }
+    return (now_ticks - oldest) < kRestartThrottleWindowTicks;
+}
+
+void RecordRestartTimestamp(FaultDomain& d, u64 now_ticks)
+{
+    d.restart_history[d.restart_history_next % kRestartHistoryDepth] = now_ticks;
+    d.restart_history_next = (d.restart_history_next + 1) % kRestartHistoryDepth;
+}
+
+void CascadeDependents(FaultDomainId parent)
+{
+    // O(n) over a bounded table (kMaxFaultDomainDeps = 64). One
+    // level deep — `MarkRestart` is idempotent, so a dependent
+    // that is itself a parent will, when its own restart runs,
+    // cascade to its children on the same heartbeat tick.
+    for (u32 i = 0; i < kMaxFaultDomainDeps; ++i)
+    {
+        if (!g_deps[i].used)
+            continue;
+        if (g_deps[i].parent != parent)
+            continue;
+        FaultDomainMarkRestart(g_deps[i].dependent);
+    }
 }
 
 } // namespace
@@ -139,11 +193,18 @@ Result<void> FaultDomainRestart(FaultDomainId id)
     d.state = ModuleState::Running;
     ++d.restart_count;
     d.last_restart_ticks = sched::SchedNowTicks();
+    RecordRestartTimestamp(d, d.last_restart_ticks);
     arch::SerialWrite("[fault-domain] restart ok name=");
     arch::SerialWrite(d.name);
     arch::SerialWrite(" count=");
     arch::SerialWriteHex(d.restart_count);
     arch::SerialWrite("\n");
+
+    // Cascade — propagate the restart to every registered
+    // dependent. Off the synchronous path: we mark, the watchdog
+    // drains on the next beat. A dependent that is itself a
+    // parent will cascade further when its own restart fires.
+    CascadeDependents(id);
     return {};
 }
 
@@ -158,12 +219,48 @@ void FaultDomainMarkRestart(FaultDomainId id)
     g_domains[id].restart_pending = true;
 }
 
+bool FaultDomainAddDependency(FaultDomainId parent, FaultDomainId dependent)
+{
+    if (parent >= g_domain_count || dependent >= g_domain_count)
+        return false;
+    if (parent == dependent)
+        return false;
+    if (g_dep_count >= kMaxFaultDomainDeps)
+    {
+        arch::SerialWrite("[fault-domain] dep table full — refused parent=");
+        arch::SerialWrite(g_domains[parent].name);
+        arch::SerialWrite(" dependent=");
+        arch::SerialWrite(g_domains[dependent].name);
+        arch::SerialWrite("\n");
+        return false;
+    }
+    g_deps[g_dep_count] = {parent, dependent, true};
+    ++g_dep_count;
+    arch::SerialWrite("[fault-domain] dep parent=");
+    arch::SerialWrite(g_domains[parent].name);
+    arch::SerialWrite(" -> dependent=");
+    arch::SerialWrite(g_domains[dependent].name);
+    arch::SerialWrite("\n");
+    return true;
+}
+
+u32 FaultDomainDependencyCount()
+{
+    return g_dep_count;
+}
+
+u64 FaultDomainThrottleCount()
+{
+    return g_throttle_count;
+}
+
 void FaultDomainTick()
 {
     // Linear scan; the registry is bounded at kMaxFaultDomains
     // (16). The common-case cost is one branch per domain, so the
     // beat-rate cost is negligible. We only emit a log line when
     // something actually fires.
+    const u64 now = sched::SchedNowTicks();
     for (u32 i = 0; i < g_domain_count; ++i)
     {
         if (!g_domains[i].restart_pending)
@@ -174,6 +271,24 @@ void FaultDomainTick()
         // (after the restart succeeds) sees `Running`. This
         // is also the GDB hook point for `kModuleStateChange`.
         g_domains[i].state = ModuleState::Crashed;
+        // Rate-throttle gate: if this domain has restarted too
+        // often inside the rolling window, refuse the restart
+        // and park the domain in `Stopped`. An operator must
+        // explicitly `module start` it once they've decided the
+        // underlying fault is fixed. This is the supervisor
+        // escalation rule a buggy driver can never demote.
+        if (RestartTooFast(g_domains[i], now))
+        {
+            g_domains[i].restart_pending = false;
+            g_domains[i].alive = false;
+            g_domains[i].state = ModuleState::Stopped;
+            ++g_domains[i].restart_throttle_count;
+            ++g_throttle_count;
+            arch::SerialWrite("[fault-domain-tick] THROTTLED name=");
+            arch::SerialWrite(g_domains[i].name);
+            arch::SerialWrite(" — too many restarts; parked in Stopped\n");
+            continue;
+        }
         // Clear FIRST so a second trap landing during the
         // restart's own teardown/init can re-arm us instead of
         // being lost to a "already pending, ignore" race. The
@@ -205,6 +320,12 @@ namespace
 
 constinit u32 g_selftest_init_calls = 0;
 constinit u32 g_selftest_teardown_calls = 0;
+constinit u32 g_selftest_throttle_init_calls = 0;
+constinit u32 g_selftest_throttle_teardown_calls = 0;
+constinit u32 g_selftest_cascade_a_init_calls = 0;
+constinit u32 g_selftest_cascade_a_teardown_calls = 0;
+constinit u32 g_selftest_cascade_b_init_calls = 0;
+constinit u32 g_selftest_cascade_b_teardown_calls = 0;
 
 Result<void> SelfTestInit()
 {
@@ -215,6 +336,37 @@ Result<void> SelfTestInit()
 Result<void> SelfTestTeardown()
 {
     ++g_selftest_teardown_calls;
+    return {};
+}
+
+Result<void> SelfTestThrottleInit()
+{
+    ++g_selftest_throttle_init_calls;
+    return {};
+}
+Result<void> SelfTestThrottleTeardown()
+{
+    ++g_selftest_throttle_teardown_calls;
+    return {};
+}
+Result<void> SelfTestCascadeAInit()
+{
+    ++g_selftest_cascade_a_init_calls;
+    return {};
+}
+Result<void> SelfTestCascadeATeardown()
+{
+    ++g_selftest_cascade_a_teardown_calls;
+    return {};
+}
+Result<void> SelfTestCascadeBInit()
+{
+    ++g_selftest_cascade_b_init_calls;
+    return {};
+}
+Result<void> SelfTestCascadeBTeardown()
+{
+    ++g_selftest_cascade_b_teardown_calls;
     return {};
 }
 
@@ -274,9 +426,51 @@ void FaultDomainSelfTest()
     // contract: never panic from inside the handler).
     FaultDomainMarkRestart(kFaultDomainInvalid);
 
+    // ---- Cross-domain dependency cascade ---------------------
+    // Register A and B; A->B; restart A; verify B was cascaded.
+    g_selftest_cascade_a_init_calls = 0;
+    g_selftest_cascade_a_teardown_calls = 0;
+    g_selftest_cascade_b_init_calls = 0;
+    g_selftest_cascade_b_teardown_calls = 0;
+    const FaultDomainId idA = FaultDomainRegister("selftest.cascade.A", SelfTestCascadeAInit, SelfTestCascadeATeardown);
+    const FaultDomainId idB = FaultDomainRegister("selftest.cascade.B", SelfTestCascadeBInit, SelfTestCascadeBTeardown);
+    Expect(idA != kFaultDomainInvalid && idB != kFaultDomainInvalid, "cascade domains registered");
+    Expect(FaultDomainAddDependency(idA, idB), "add dep A->B");
+    Expect(!FaultDomainAddDependency(idA, idA), "self-dep refused");
+    Expect(FaultDomainDependencyCount() == 1, "one dependency edge");
+    const auto rA = FaultDomainRestart(idA);
+    Expect(bool(rA), "restart A");
+    // Restart A cascaded MarkRestart(B); the next Tick drains.
+    Expect(FaultDomainGet(idB)->restart_pending, "B marked by cascade");
+    FaultDomainTick();
+    Expect(g_selftest_cascade_b_init_calls >= 1, "B cascaded restart ran init");
+    Expect(g_selftest_cascade_b_teardown_calls >= 1, "B cascaded restart ran teardown");
+
+    // ---- Restart-rate throttle -------------------------------
+    // Push N successful restarts in a tight loop (all in the
+    // same scheduler tick); the (N+1)th MarkRestart+Tick should
+    // hit the throttle and park the domain in Stopped.
+    g_selftest_throttle_init_calls = 0;
+    g_selftest_throttle_teardown_calls = 0;
+    const FaultDomainId idT = FaultDomainRegister("selftest.throttle", SelfTestThrottleInit, SelfTestThrottleTeardown);
+    Expect(idT != kFaultDomainInvalid, "throttle domain registered");
+    for (u32 i = 0; i < kRestartHistoryDepth; ++i)
+    {
+        const auto r = FaultDomainRestart(idT);
+        Expect(bool(r), "throttle test pre-fill restart");
+    }
+    const u32 throttle_before = FaultDomainGet(idT)->restart_throttle_count;
+    const u64 global_before = FaultDomainThrottleCount();
+    FaultDomainMarkRestart(idT);
+    FaultDomainTick();
+    Expect(FaultDomainGet(idT)->restart_throttle_count == throttle_before + 1, "throttle counted on domain");
+    Expect(FaultDomainThrottleCount() == global_before + 1, "throttle counted globally");
+    Expect(FaultDomainGet(idT)->state == ModuleState::Stopped, "throttled domain parked Stopped");
+    Expect(!FaultDomainGet(idT)->alive, "throttled domain marked not-alive");
+
     arch::SerialWrite("[fault-domain-selftest] PASS (");
     arch::SerialWriteHex(g_domain_count);
-    arch::SerialWrite(" domains; toy restarted 3x; tick path verified)\n");
+    arch::SerialWrite(" domains; restart + tick + cascade + throttle verified)\n");
 }
 
 } // namespace duetos::core

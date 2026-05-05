@@ -81,6 +81,19 @@ void DumpRecentDumps(::duetos::core::FaultDomainId id);
 /// (0..kRecentDumpRingCapacity). Used by shell status output.
 u32 RecentDumpCount(::duetos::core::FaultDomainId id);
 
+/// Serialise every dump record currently in the ring into a
+/// caller-provided byte buffer (oldest-first across all
+/// domains). Records that don't fit are truncated; the caller
+/// gets the byte count that was actually written. Used by
+/// `fs/ramfs.cpp` to populate `/proc/dumps` so the same dump
+/// content is reachable from userland tools without going
+/// through the shell.
+///
+/// `buf` may be nullptr only if `cap == 0`. Returns the number
+/// of bytes written (or that would have been written had the
+/// buffer been larger — the cap is enforced strictly).
+u64 FormatAllDumps(u8* buf, u64 cap);
+
 /// Boot-time self-test. Synthesises a domain, opens + closes
 /// a dump, asserts the ring captured it, replays it. Panics
 /// on mismatch.

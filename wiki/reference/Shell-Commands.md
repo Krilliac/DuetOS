@@ -252,7 +252,7 @@ All write-side FAT operations are admin-gated.
 | `module stop <name>` | Run teardown() on a Running module (admin) | Refuses if Stopped. |
 | `module restart <name>` | Drive teardown + init (admin) | |
 | `module dump <name>` | Emit a per-domain crash record on serial without halting (admin) | Also stored in the recent-dumps ring. |
-| `module dumps <name>` | Replay every retained dump record for the named module (admin) | Last 8 records per domain. |
+| `module dumps <name>` | Replay every retained dump record for the named module (admin) | Last 8 records per domain. Also visible via `cat /proc/dumps`. |
 | `flushtlb`, `flush-tlb` | Reload CR3 (admin) | |
 | `perf <args>` | Perf-counter shell front-end | |
 

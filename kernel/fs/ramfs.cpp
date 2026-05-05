@@ -1,9 +1,12 @@
 #include "fs/ramfs.h"
 
 #include "arch/x86_64/serial.h"
+#include "core/init.h"
 #include "loader/pe_loader.h"
 #include "log/klog.h"
 #include "sched/sched.h"
+#include "security/domain_dump.h"
+#include "security/driver_domain.h"
 #include "subsystems/win32/thunks.h"
 #include "syscall/syscall_names.h"
 
@@ -720,11 +723,31 @@ constinit RamfsNode k_proc_boottrace = {
     .file_size = 0,
 };
 
+// ------- /proc/dumps -------
+//
+// Serialised view of the in-kernel recent-dumps ring owned by
+// `kernel/security/domain_dump.cpp`. Refreshed by the heartbeat
+// thread (after FaultDomainTick) so the file's contents are at
+// most one heartbeat stale. Userland tools that don't have a
+// shell session can read this directly.
+//
+// 32 KiB caps the snapshot at roughly 4x the in-kernel ring's
+// per-record budget (8 records × ~2 KiB each = ~16 KiB) with
+// headroom for trailing whitespace + headers between records.
+constexpr u32 kDumpsBufferBytes = 32 * 1024;
+u8 g_dumps_buffer[kDumpsBufferBytes] = {};
+u64 g_dumps_cursor = 0;
+
+constinit RamfsNode k_proc_dumps = {
+    .name = "dumps",
+    .type = RamfsNodeType::kFile,
+    .children = nullptr,
+    .file_bytes = g_dumps_buffer,
+    .file_size = 0,
+};
+
 constinit const RamfsNode* const k_proc_children[] = {
-    &k_proc_boottrace,
-    &k_proc_abi_dir,
-    &k_proc_cpuhist,
-    nullptr,
+    &k_proc_boottrace, &k_proc_dumps, &k_proc_abi_dir, &k_proc_cpuhist, nullptr,
 };
 
 constinit RamfsNode k_proc_dir = {
@@ -802,6 +825,8 @@ void RamfsTeardown()
     // Snapshot anyway, but file_size is the visible contract).
     g_boottrace_cursor = 0;
     k_proc_boottrace.file_size = 0;
+    g_dumps_cursor = 0;
+    k_proc_dumps.file_size = 0;
     g_syscalls_cursor = 0;
     k_sys_syscalls.file_size = 0;
     g_abi_native_cursor = 0;
@@ -868,6 +893,16 @@ void RamfsBoottraceSnapshot()
     core::DumpLogRingTo(&BoottraceAppend);
     k_proc_boottrace.file_size = g_boottrace_cursor;
     core::LogWithValue(core::LogLevel::Info, "fs/ramfs", "boottrace snapshot bytes", g_boottrace_cursor);
+}
+
+void RamfsDumpsSnapshot()
+{
+    // Drain the recent-dumps ring into our local buffer. The
+    // formatter is bounded by `kDumpsBufferBytes`; oversize
+    // records truncate. Refreshed every heartbeat so /proc/dumps
+    // is at most ~10 ms stale (one heartbeat at kTickHz=100).
+    g_dumps_cursor = ::duetos::security::FormatAllDumps(g_dumps_buffer, kDumpsBufferBytes);
+    k_proc_dumps.file_size = g_dumps_cursor;
 }
 
 namespace
@@ -1099,5 +1134,36 @@ void RamfsCpuhistSnapshot()
     }
     k_proc_cpuhist.file_size = g_cpuhist_cursor;
 }
+
+namespace
+{
+
+// Self-register ramfs as a fault domain via KERNEL_INITCALL
+// (Phase::Drivers). Migrated from the inline registration in
+// `kernel/core/main.cpp` so the registration lives next to the
+// subsystem it owns. The constructor emitted by
+// KERNEL_INITCALL puts the callback in the global init registry
+// at C++ static-ctor time; `RunPhase(Phase::Drivers)` later in
+// kernel_main fires it.
+::duetos::core::Result<void> RegisterRamfsModule()
+{
+    ::duetos::security::RegisterDriverDomain(
+        "ramfs",
+        []() -> ::duetos::core::Result<void>
+        {
+            ::duetos::fs::RamfsInit();
+            return {};
+        },
+        []() -> ::duetos::core::Result<void>
+        {
+            ::duetos::fs::RamfsTeardown();
+            return {};
+        });
+    return {};
+}
+
+} // namespace
+
+KERNEL_INITCALL(Drivers, "ramfs.module", RegisterRamfsModule)
 
 } // namespace duetos::fs

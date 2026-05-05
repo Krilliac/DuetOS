@@ -295,6 +295,32 @@ u32 RecentDumpCount(::duetos::core::FaultDomainId id)
     return n;
 }
 
+u64 FormatAllDumps(u8* buf, u64 cap)
+{
+    if (buf == nullptr && cap != 0)
+        return 0;
+    auto flags = ::duetos::sync::SpinLockAcquire(g_dump_lock);
+    u64 written = 0;
+    const u32 base = g_recent_next;
+    for (u32 i = 0; i < kRecentDumpRingCapacity; ++i)
+    {
+        const u32 slot_idx = (base + i) % kRecentDumpRingCapacity;
+        const DumpRecord& rec = g_recent[slot_idx];
+        if (!rec.used || rec.length == 0)
+            continue;
+        const u64 take = (rec.length < (cap - written)) ? rec.length : (cap - written);
+        for (u64 b = 0; b < take; ++b)
+        {
+            buf[written + b] = static_cast<u8>(rec.body[b]);
+        }
+        written += take;
+        if (written >= cap)
+            break;
+    }
+    ::duetos::sync::SpinLockRelease(g_dump_lock, flags);
+    return written;
+}
+
 namespace
 {
 

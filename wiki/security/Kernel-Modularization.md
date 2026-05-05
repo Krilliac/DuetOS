@@ -226,27 +226,121 @@ Not enabled in default builds. Once the smoke harness has a
 shell-driven hook (`fault-inject` is the proposed verb), CI
 can opt in to verify the chain on every PR.
 
-## Out of scope (today — tracked for follow-up)
+## Supervisor — restart-rate throttle
 
-- **Per-domain memory arenas / heap partitions.** A driver that
-  scribbles past its own slab still corrupts kernel-shared
-  heap. Real isolation needs a per-domain frame ledger + slab
-  routing.
-- **First-wave KERNEL_INITCALL migration.** The plan called for
-  6 wave-1 modules to self-register from their own TUs via
-  `KERNEL_INITCALL(Drivers, ...)`. Deferred — the existing
-  registration in `kernel_main` works, and wiring up
-  `RunPhase(Drivers)` is a structural change worth landing
-  separately.
-- **Supervisor / restart-rate escalation.** "After N restarts
-  in T seconds, refuse and degrade." Today the floor in
-  `FaultReactPolicyFloor` covers the worst cases (memory
-  corruption → halt). Counter-based escalation is follow-up.
-- **Cross-domain dependency graph.** PCI feeds NVMe feeds VFS;
-  cascading restart is not modelled.
-- **On-disk persistence of dump records.** Today they go to
-  serial + an in-kernel ring (last 8 records). Disk persistence
-  needs a writable FS that is itself a managed module — bootstrap
-  problem.
-- **Hot upgrade / live patch.** Different problem class; module
-  restart loads the same code.
+A buggy driver that crashes every few milliseconds shouldn't
+loop forever in the watchdog → restart → crash cycle. Each
+domain keeps a rolling history of its last
+`kRestartHistoryDepth` (= 5) restart timestamps; when that many
+restarts land inside `kRestartThrottleWindowTicks` (≈ 60 s at
+the 100 Hz tick rate), the watchdog **refuses** the next
+restart and parks the domain in `Stopped`. An operator must
+explicitly `module start <name>` once they've decided the
+underlying issue is fixed.
+
+Throttle hits are counted on each domain (`restart_throttle_count`)
+and globally (`FaultDomainThrottleCount()`) so an audit can
+spot misbehaving subsystems across boots. The throttle is the
+kernel-owned escalation rule a buggy driver can never demote.
+
+## Cross-domain dependency cascade
+
+Drivers can declare dependencies via
+`FaultDomainAddDependency(parent, dependent)`. After a
+successful restart of `parent`, every registered dependent is
+`MarkRestart`-ed and drained on the same heartbeat tick. The
+cascade is one level deep — a dependent that is itself a
+parent fires its own dependents on its own restart, propagating
+the cascade through the graph without explicit recursion.
+
+Edge capacity is fixed (`kMaxFaultDomainDeps = 64`); self-deps
+are refused; cycles are not detected (the cascade is naturally
+fixed-depth: a domain can be in `Crashed` once per beat).
+
+## /proc/dumps — userland-visible dump records
+
+The in-kernel recent-dumps ring is mirrored to `/proc/dumps`
+in ramfs, refreshed every heartbeat tick. Userland tools can
+`cat /proc/dumps` (or read it through the VFS) to see the same
+serialised records the shell emits via `module dumps`. Updates
+are bounded: at most ~10 ms stale (one heartbeat at the 100 Hz
+default tick rate). Buffer is 32 KiB — enough for ~16 records
+of average size; the formatter truncates oversized records.
+
+Disk persistence (writing dumps to a partition that survives
+reboot) remains out of scope: the FS module needed to host the
+file is itself a managed module, and the bootstrap ordering
+problem isn't worth solving until a real disk-installer story
+lands.
+
+## Wave-1 KERNEL_INITCALL migration — pattern + status
+
+The fault-domain registry started life as inline
+`RegisterDriverDomain(...)` calls in `kernel/core/main.cpp`.
+The `KERNEL_INITCALL(Drivers, "<name>.module", fn)` macro lets
+each driver self-register from its own TU; `RunPhase(Drivers)`
+in kernel_main fires every registered callback.
+
+**Migrated so far:**
+- `fs/ramfs` (kernel/fs/ramfs.cpp:RegisterRamfsModule)
+
+**Pattern for follow-up migrations** (each driver TU):
+
+```cpp
+namespace
+{
+::duetos::core::Result<void> RegisterFooModule()
+{
+    ::duetos::security::RegisterDriverDomain(
+        "drivers/foo",
+        []() -> ::duetos::core::Result<void> { FooInit(); return {}; },
+        []() -> ::duetos::core::Result<void> { return FooShutdown(); });
+    return {};
+}
+} // namespace
+
+KERNEL_INITCALL(Drivers, "drivers/foo.module", RegisterFooModule)
+```
+
+Then delete the matching inline block in
+`kernel/core/main.cpp:1100..1300` for early drivers, or after
+`RunPhase(Drivers)` in the late driver block (≈ line 2600+).
+
+**Pending wave-1 migrations:** drivers/net, drivers/gpu,
+drivers/storage/nvme, drivers/audio, fs/fat32. Each is a small
+edit (move ~10 lines of registration code into the driver TU)
+but has subtle ordering implications because their inline
+registrations run AFTER `RunPhase(Drivers)`. A clean migration
+adds a second `RunPhase(Drivers)` invocation after the late-
+driver Init block, or moves the late drivers' Init into their
+KERNEL_INITCALL constructors. Slice-by-slice work; the
+infrastructure is ready.
+
+## Out of scope (deferred — large enough to be their own slices)
+
+- **Per-domain memory arenas / heap partitions.** Real
+  isolation needs a per-domain frame ledger + slab allocator
+  routing through it. A driver that scribbles past its own
+  slab still corrupts kernel-shared heap today. Phase-C work;
+  blocked on the broader memory-management slab redesign.
+- **Hot upgrade / live patch.** Loading new code under a
+  running kernel is a different problem class — module
+  restart only re-runs the same code. Needs symbol versioning,
+  text patching, and a careful kABI definition. Not on the
+  near-term roadmap.
+- **Rust subsystem port.** The toolchain and FFI shape are
+  documented in `wiki/reference/Roadmap.md`. Modularization
+  works for C++ today; Rust is orthogonal and waits for the
+  rust-toolchain.toml + ABI-translation slice.
+- **Userland-driven module supervisor (PID 1).** A long-term
+  goal is for `init` to own module lifecycle policy (start
+  order, dependencies, restart strategies) the way systemd /
+  launchd does. Today the kernel registry is the only
+  surface. Blocked on userland bringup.
+- **Per-CPU domain isolation.** Restarts serialise on the BSP
+  today via the heartbeat thread. SMP runqueues + per-CPU
+  restart paths would let a domain's teardown run on the CPU
+  that tripped its fault. Blocked on SMP runqueue work.
+- **Disk persistence of dump records.** Covered by the
+  /proc/dumps section above — needs a writable FS module
+  before it's solvable.
