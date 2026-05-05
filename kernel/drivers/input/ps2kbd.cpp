@@ -1127,6 +1127,16 @@ bool Ps2KeyboardSetLayout(KeyboardLayout layout)
     }
 }
 
+const char* Ps2KeyboardActiveLowerMap()
+{
+    return g_keymap_lower;
+}
+
+const char* Ps2KeyboardActiveUpperMap()
+{
+    return g_keymap_upper;
+}
+
 KeyboardLayout Ps2KeyboardLayout()
 {
     switch (g_layout_id)

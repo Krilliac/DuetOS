@@ -190,6 +190,14 @@ bool Ps2KeyboardSetLayout(KeyboardLayout layout);
 /// Read the current layout id.
 KeyboardLayout Ps2KeyboardLayout();
 
+/// Active scancode → ASCII keymap pointers. Returned arrays
+/// are 128 entries; index by PS/2 scancode (0..127). Used by
+/// the xHCI HID translator to honour the same layout PS/2 is
+/// using. Both pointers stay valid for the rest of boot — the
+/// underlying tables are static rodata.
+const char* Ps2KeyboardActiveLowerMap();
+const char* Ps2KeyboardActiveUpperMap();
+
 /// Program the PS/2 keyboard typematic rate + delay via the 0xF3
 /// "Set Typematic Rate/Delay" command.
 ///

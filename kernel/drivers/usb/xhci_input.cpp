@@ -22,28 +22,92 @@ namespace duetos::drivers::usb::xhci::internal
 
 using namespace duetos::drivers::input;
 
+// HID usage → PS/2 set-1 scancode mapping for the printable
+// keys. The mapping is physical-key based (the same physical
+// position on every layout); we then run the scancode through
+// the active PS/2 keymap (g_keymap_lower / upper) to honour
+// the layout chosen via Settings → Keyboard. 0 = no mapping;
+// caller falls back to the per-usage switch below.
+constexpr u8 kHidUsageToScancode[256] = {
+    /* 0x00 */ 0,
+    0,
+    0,
+    0,
+    /* 0x04 a */ 0x1E,
+    /* 0x05 b */ 0x30,
+    /* 0x06 c */ 0x2E,
+    /* 0x07 d */ 0x20,
+    /* 0x08 e */ 0x12,
+    /* 0x09 f */ 0x21,
+    /* 0x0A g */ 0x22,
+    /* 0x0B h */ 0x23,
+    /* 0x0C i */ 0x17,
+    /* 0x0D j */ 0x24,
+    /* 0x0E k */ 0x25,
+    /* 0x0F l */ 0x26,
+    /* 0x10 m */ 0x32,
+    /* 0x11 n */ 0x31,
+    /* 0x12 o */ 0x18,
+    /* 0x13 p */ 0x19,
+    /* 0x14 q */ 0x10,
+    /* 0x15 r */ 0x13,
+    /* 0x16 s */ 0x1F,
+    /* 0x17 t */ 0x14,
+    /* 0x18 u */ 0x16,
+    /* 0x19 v */ 0x2F,
+    /* 0x1A w */ 0x11,
+    /* 0x1B x */ 0x2D,
+    /* 0x1C y */ 0x15,
+    /* 0x1D z */ 0x2C,
+    /* 0x1E 1 */ 0x02,
+    /* 0x1F 2 */ 0x03,
+    /* 0x20 3 */ 0x04,
+    /* 0x21 4 */ 0x05,
+    /* 0x22 5 */ 0x06,
+    /* 0x23 6 */ 0x07,
+    /* 0x24 7 */ 0x08,
+    /* 0x25 8 */ 0x09,
+    /* 0x26 9 */ 0x0A,
+    /* 0x27 0 */ 0x0B,
+    /* 0x28 Enter — fall through to switch */
+    /* ... */
+    /* 0x2D - */[0x2D] = 0x0C,
+    /* 0x2E = */[0x2E] = 0x0D,
+    /* 0x2F [ */[0x2F] = 0x1A,
+    /* 0x30 ] */[0x30] = 0x1B,
+    /* 0x31 \ */[0x31] = 0x2B,
+    /* 0x33 ; */[0x33] = 0x27,
+    /* 0x34 ' */[0x34] = 0x28,
+    /* 0x35 ` */[0x35] = 0x29,
+    /* 0x36 , */[0x36] = 0x33,
+    /* 0x37 . */[0x37] = 0x34,
+    /* 0x38 / */[0x38] = 0x35,
+};
+
+// Active layout keymaps via the ps2kbd accessor. Both
+// arrays are 128 entries; the pointer is whichever layout
+// the user picked via Settings.
+
 // Translate a USB HID Keyboard/Keypad page usage ID (§10 of HUT
-// 1.4) to the KeyEvent `code` field the shell expects. Returns
-// ASCII when there's a direct printable mapping (letters, digits,
-// common punctuation) pre-shifted by the HID modifier byte; the
-// KeyCode enum for non-printable keys (arrows, F-keys, Esc /
-// Tab / Backspace / Enter). Unmapped usage → kKeyNone.
+// 1.4) to the KeyEvent `code` field the shell expects. Routes
+// printable keys through kHidUsageToScancode + the active PS/2
+// keymap so a runtime layout change (US/UK/Dvorak/DE/FR/Colemak)
+// applies to USB HID keyboards too. Falls back to the original
+// per-usage US punctuation table when there's no scancode map.
 u16 TranslateHidUsage(u8 usage, bool shift)
 {
-    if (usage >= 0x04 && usage <= 0x1D)
-    {
-        // A..Z
-        return shift ? u16('A' + (usage - 0x04)) : u16('a' + (usage - 0x04));
-    }
-    if (usage >= 0x1E && usage <= 0x27)
-    {
-        // 1..0 (0x27 is zero, not after nine)
-        static constexpr char kDigitsLower[] = "1234567890";
-        static constexpr char kDigitsUpper[] = "!@#$%^&*()";
-        const u32 i = (usage - 0x1E);
-        return shift ? u16(kDigitsUpper[i]) : u16(kDigitsLower[i]);
-    }
     using namespace duetos::drivers::input;
+    const u8 scan = kHidUsageToScancode[usage];
+    if (scan != 0)
+    {
+        const char* table = shift ? Ps2KeyboardActiveUpperMap() : Ps2KeyboardActiveLowerMap();
+        const char ch = table[scan];
+        if (ch != 0)
+            return u16(static_cast<u8>(ch));
+        // Active layout has no glyph for this scancode (e.g. DE
+        // layout's umlaut positions). Keep US fallback so the
+        // user still sees something printable.
+    }
     switch (usage)
     {
     case 0x28:
