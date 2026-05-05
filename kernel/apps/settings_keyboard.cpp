@@ -113,7 +113,25 @@ void Draw(u32 x, u32 y, u32 w, u32 h)
 
     FramebufferDrawString(x, y + 134, "F : faster repeat   S : slower repeat", dim, bg);
     FramebufferDrawString(x, y + 146, "D : longer delay    Q : shorter delay", dim, bg);
-    FramebufferDrawString(x, y + 158, "(layout: US (hardcoded) — layout switcher: future slice)", dim, bg);
+
+    o = 0;
+    AppendStr(line, sizeof(line), &o, "ACTIVE LAYOUT: ");
+    switch (duetos::drivers::input::Ps2KeyboardLayout())
+    {
+    case duetos::drivers::input::KeyboardLayout::US:
+        AppendStr(line, sizeof(line), &o, "US QWERTY");
+        break;
+    case duetos::drivers::input::KeyboardLayout::UK:
+        AppendStr(line, sizeof(line), &o, "UK QWERTY");
+        break;
+    case duetos::drivers::input::KeyboardLayout::Dvorak:
+        AppendStr(line, sizeof(line), &o, "DVORAK SIMPLIFIED");
+        break;
+    }
+    line[o] = '\0';
+    FramebufferDrawString(x, y + 162, line, fg, bg);
+    FramebufferDrawString(x, y + 174, "1 : US   2 : UK   3 : DVORAK", dim, bg);
+    FramebufferDrawString(x, y + 186, "(xHCI HID keyboards bypass this layout)", dim, bg);
 }
 
 bool Key(char c)
@@ -155,6 +173,26 @@ bool Key(char c)
         if (g_delay_idx > 0)
             --g_delay_idx;
         apply();
+        return true;
+    }
+    using duetos::drivers::input::KeyboardLayout;
+    using duetos::drivers::input::Ps2KeyboardSetLayout;
+    if (c == '1')
+    {
+        Ps2KeyboardSetLayout(KeyboardLayout::US);
+        duetos::drivers::video::NotifyShow("layout: US QWERTY");
+        return true;
+    }
+    if (c == '2')
+    {
+        Ps2KeyboardSetLayout(KeyboardLayout::UK);
+        duetos::drivers::video::NotifyShow("layout: UK QWERTY");
+        return true;
+    }
+    if (c == '3')
+    {
+        Ps2KeyboardSetLayout(KeyboardLayout::Dvorak);
+        duetos::drivers::video::NotifyShow("layout: Dvorak");
         return true;
     }
     return false;

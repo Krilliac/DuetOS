@@ -169,6 +169,24 @@ Ps2Stats Ps2KeyboardStats();
 /// injected event.
 void KeyboardInjectEvent(const KeyEvent& ev);
 
+/// Selectable scancode → ASCII keymap. Affects the PS/2
+/// translator only — xHCI HID keyboards already deliver
+/// decoded events via KeyboardInjectEvent and bypass this
+/// layout. Default is US.
+enum class KeyboardLayout : u8
+{
+    US = 0,
+    UK = 1,
+    Dvorak = 2,
+};
+
+/// Switch the active layout. Returns true if the id was
+/// known. Idempotent — repeated calls with the same id no-op.
+bool Ps2KeyboardSetLayout(KeyboardLayout layout);
+
+/// Read the current layout id.
+KeyboardLayout Ps2KeyboardLayout();
+
 /// Program the PS/2 keyboard typematic rate + delay via the 0xF3
 /// "Set Typematic Rate/Delay" command.
 ///
