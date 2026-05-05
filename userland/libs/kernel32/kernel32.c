@@ -976,6 +976,32 @@ __declspec(dllexport) BOOL SetEnvironmentVariableW(const WCHAR_t* name, const wc
     return 0;
 }
 
+/* GetCommandLineA / GetCommandLineW — return a stable pointer to
+ * the calling process's command-line string. v0 doesn't actually
+ * pass args to PE binaries (SpawnPeFile takes no argv); the
+ * canonical Win32 contract still requires the function to return
+ * a non-null, non-freeable pointer that's at least the program
+ * name. We hand back an empty string ("") so:
+ *   - CRT startup that does `for (p = GetCommandLineA(); *p && *p
+ *     != ' '; ++p);` terminates immediately on the NUL.
+ *   - argv parsers see a 0-length command line + zero arg count.
+ *   - Pointer compare against null doesn't trip the "no command
+ *     line" branch some binaries take to ExitProcess.
+ * The buffer is process-static so the pointer stays valid for
+ * the calling process's lifetime — same shape as real Windows. */
+static char g_cmdline_a[1] = {0};
+static wchar_t16 g_cmdline_w[1] = {0};
+
+__declspec(dllexport) const char* GetCommandLineA(void)
+{
+    return g_cmdline_a;
+}
+
+__declspec(dllexport) const wchar_t16* GetCommandLineW(void)
+{
+    return g_cmdline_w;
+}
+
 __declspec(dllexport) DWORD GetEnvironmentVariableA(const char* name, char* buf, DWORD size)
 {
     if (name == (const char*)0)

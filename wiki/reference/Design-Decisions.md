@@ -612,6 +612,44 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 121 — kernel32 GetCommandLineA / W exports + tighten Lock* export list
+
+- **Scope:** `userland/libs/kernel32/kernel32.c`
+  (`GetCommandLineA`, `GetCommandLineW` exports backed by
+  process-static empty-string buffers),
+  `tools/build/build-kernel32-dll.sh` (export list grew the
+  Lock*, GetCommandLine*, and *Ex names so the DLL's
+  link-time export table actually contains them).
+- **Decision:** GetCommandLine* return process-static empty
+  strings (`""`, NUL only). v0 doesn't pass argv to PE
+  binaries (`SpawnPeFile` takes no argument list); the Win32
+  contract still mandates a non-null pointer to a
+  caller-readable string for the program lifetime, so an
+  empty terminator buffer is the smallest answer that lets
+  CRT startup proceed without crashing on a null deref. The
+  pointer is stable across the process's lifetime — same
+  shape real Windows guarantees.
+- **Why:** Fixes a follow-up bug from #120: I'd added
+  LockFile / UnlockFile / *Ex bodies to `kernel32.c` but
+  forgot to extend the explicit `/export:` list in the build
+  script, so the DLL contained the code but not the entry-
+  table. `objdump -p` now shows entries 230 (LockFile), 231
+  (LockFileEx), 64 (GetCommandLineA), 65 (GetCommandLineW)
+  in the canonical alphabetical order. File size stayed the
+  same (512-byte alignment swallowed the growth).
+- **Rules out / defers:** Real argv plumbing — when
+  `SpawnPeFile` grows an argv parameter, this code reads
+  from a per-process `Process::win32_cmdline_*` slot
+  populated at spawn time (the `proc_env.h` layout already
+  reserves the bytes; just no producer yet).
+- **Revisit when:** First PE workload that wants real argv —
+  most likely the `/APPS` PE-launch path (#115) when a
+  manifest grows an `args=` field.
+- **Related tracks:** Track 9 (Win32 — kernel32 surface),
+  Track 7 (Userland — argv plumbing).
+
+---
+
 ## 120 — kernel32 LockFile / UnlockFile / *Ex — stub-success exports
 
 - **Scope:** `userland/libs/kernel32/kernel32.c` (new
