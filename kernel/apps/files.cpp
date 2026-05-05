@@ -710,6 +710,43 @@ void FilesInit(duetos::drivers::video::WindowHandle handle)
                                                            first = g_state.fat_count > 0 ? g_state.fat_count - 1 : 0;
                                                        g_state.fat_selection = first;
                                                    });
+    // Drop target: a FileEntry dropped onto Files moves the
+    // file into the FAT32 trash. Useful for "drag a row out
+    // of FAT32 mode and drop it back" without arming the
+    // X-then-Y prompt.
+    duetos::drivers::video::DndRegisterDropTarget(
+        handle,
+        [](const duetos::drivers::video::DndPayload& p, duetos::u32 /*cx*/, duetos::u32 /*cy*/) -> bool
+        {
+            if (p.kind != duetos::drivers::video::DndKind::FileEntry)
+                return false;
+            namespace fat = duetos::fs::fat32;
+            const fat::Volume* v = fat::Fat32Volume(0);
+            if (v == nullptr)
+            {
+                duetos::drivers::video::NotifyShow("trash: no FAT32 volume");
+                duetos::drivers::video::SoundCueError();
+                return false;
+            }
+            const auto rc = duetos::apps::trash::TrashMove(v, p.text);
+            if (rc == duetos::apps::trash::MoveResult::Ok)
+            {
+                RescanFat32();
+                RescanTrash();
+                duetos::drivers::video::NotifyShow("moved to trash");
+                return true;
+            }
+            if (rc == duetos::apps::trash::MoveResult::Collision)
+            {
+                duetos::drivers::video::NotifyShow("trash: name collision");
+                duetos::drivers::video::SoundCueError();
+                return false;
+            }
+            duetos::drivers::video::NotifyShow("trash: failed");
+            duetos::drivers::video::SoundCueError();
+            return false;
+        },
+        1u << static_cast<duetos::u32>(duetos::drivers::video::DndKind::FileEntry));
 }
 
 void FilesOnWheel(duetos::i32 dz, duetos::u8 modifiers)
