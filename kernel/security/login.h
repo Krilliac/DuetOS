@@ -82,4 +82,12 @@ void LoginRepaint();
 /// called before the first activation), re-paints.
 void LoginReopen();
 
+/// Lock the screen: re-engage the gate WITHOUT clearing the
+/// auth session. The user (or any valid user — v0 doesn't
+/// enforce same-user-only unlock) re-types credentials to
+/// dismiss. Differs from LoginReopen by skipping AuthLogout.
+/// GAP: per-user lock policy (lock-to-same-user, idle timeout
+/// auto-lock) deferred to a follow-up slice.
+void LoginLock();
+
 } // namespace duetos::core

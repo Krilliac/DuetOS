@@ -25,4 +25,11 @@ namespace duetos::core
 
 [[noreturn]] void KernelReboot();
 
+// GAP: ACPI S5 / soft-off not yet implemented — no AML interpreter,
+// no _PTS / _GTS evaluation. KernelHalt logs a sentinel and parks
+// the boot CPU in `arch::Halt()`. The chipset stays powered; the
+// VM operator (or the user) is expected to cut power. Replace
+// when AML support lands.
+[[noreturn]] void KernelHalt();
+
 } // namespace duetos::core

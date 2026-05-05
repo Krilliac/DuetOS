@@ -591,4 +591,18 @@ void LoginReopen()
     LoginStart(mode);
 }
 
+void LoginLock()
+{
+    // Same as LoginReopen minus the AuthLogout — the session
+    // stays valid under the hood, the gate just intercepts kbd
+    // until credentials are re-entered.
+    const LoginMode mode = g_login.mode;
+    ClearField(g_login.username, &g_login.username_len);
+    ClearField(g_login.password, &g_login.password_len);
+    g_login.status = nullptr;
+    g_login.focus = Field::Username;
+    LoginStart(mode);
+    KLOG_INFO("login", "screen locked (session preserved)");
+}
+
 } // namespace duetos::core
