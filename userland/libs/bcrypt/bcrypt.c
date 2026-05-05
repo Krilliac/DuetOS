@@ -383,6 +383,462 @@ static void Md5Final(Md5* s, unsigned char* out16)
     }
 }
 
+/* SHA-512 reference (FIPS 180-4 §6.4). Same shape as SHA-256 but
+ * 64-bit words, 80 rounds, 1024-bit blocks, 128-bit length pad.
+ * SHA-384 reuses the entire core — only the eight initial-hash
+ * values and the truncated output (48 bytes vs 64) differ. The
+ * 128-bit length field is encoded as { 8 zero bytes, 8 bytes of
+ * bitlen big-endian } since `bitlen` is a u64 (callers are bounded
+ * by 2^61 input bytes, well below the 2^125-byte limit). */
+typedef struct
+{
+    unsigned long long h[8];
+    unsigned char buf[128];
+    unsigned long long bitlen;
+    unsigned int buflen;
+} Sha512;
+
+static const unsigned long long kSha512K[80] = {
+    0x428a2f98d728ae22ULL, 0x7137449123ef65cdULL, 0xb5c0fbcfec4d3b2fULL, 0xe9b5dba58189dbbcULL, 0x3956c25bf348b538ULL,
+    0x59f111f1b605d019ULL, 0x923f82a4af194f9bULL, 0xab1c5ed5da6d8118ULL, 0xd807aa98a3030242ULL, 0x12835b0145706fbeULL,
+    0x243185be4ee4b28cULL, 0x550c7dc3d5ffb4e2ULL, 0x72be5d74f27b896fULL, 0x80deb1fe3b1696b1ULL, 0x9bdc06a725c71235ULL,
+    0xc19bf174cf692694ULL, 0xe49b69c19ef14ad2ULL, 0xefbe4786384f25e3ULL, 0x0fc19dc68b8cd5b5ULL, 0x240ca1cc77ac9c65ULL,
+    0x2de92c6f592b0275ULL, 0x4a7484aa6ea6e483ULL, 0x5cb0a9dcbd41fbd4ULL, 0x76f988da831153b5ULL, 0x983e5152ee66dfabULL,
+    0xa831c66d2db43210ULL, 0xb00327c898fb213fULL, 0xbf597fc7beef0ee4ULL, 0xc6e00bf33da88fc2ULL, 0xd5a79147930aa725ULL,
+    0x06ca6351e003826fULL, 0x142929670a0e6e70ULL, 0x27b70a8546d22ffcULL, 0x2e1b21385c26c926ULL, 0x4d2c6dfc5ac42aedULL,
+    0x53380d139d95b3dfULL, 0x650a73548baf63deULL, 0x766a0abb3c77b2a8ULL, 0x81c2c92e47edaee6ULL, 0x92722c851482353bULL,
+    0xa2bfe8a14cf10364ULL, 0xa81a664bbc423001ULL, 0xc24b8b70d0f89791ULL, 0xc76c51a30654be30ULL, 0xd192e819d6ef5218ULL,
+    0xd69906245565a910ULL, 0xf40e35855771202aULL, 0x106aa07032bbd1b8ULL, 0x19a4c116b8d2d0c8ULL, 0x1e376c085141ab53ULL,
+    0x2748774cdf8eeb99ULL, 0x34b0bcb5e19b48a8ULL, 0x391c0cb3c5c95a63ULL, 0x4ed8aa4ae3418acbULL, 0x5b9cca4f7763e373ULL,
+    0x682e6ff3d6b2b8a3ULL, 0x748f82ee5defb2fcULL, 0x78a5636f43172f60ULL, 0x84c87814a1f0ab72ULL, 0x8cc702081a6439ecULL,
+    0x90befffa23631e28ULL, 0xa4506cebde82bde9ULL, 0xbef9a3f7b2c67915ULL, 0xc67178f2e372532bULL, 0xca273eceea26619cULL,
+    0xd186b8c721c0c207ULL, 0xeada7dd6cde0eb1eULL, 0xf57d4f7fee6ed178ULL, 0x06f067aa72176fbaULL, 0x0a637dc5a2c898a6ULL,
+    0x113f9804bef90daeULL, 0x1b710b35131c471bULL, 0x28db77f523047d84ULL, 0x32caab7b40c72493ULL, 0x3c9ebe0a15c9bebcULL,
+    0x431d67c49c100d4cULL, 0x4cc5d4becb3e42b6ULL, 0x597f299cfc657e2aULL, 0x5fcb6fab3ad6faecULL, 0x6c44198c4a475817ULL};
+
+static unsigned long long rotr64(unsigned long long x, unsigned int n)
+{
+    return (x >> n) | (x << (64 - n));
+}
+
+static void Sha512Init(Sha512* s)
+{
+    s->h[0] = 0x6a09e667f3bcc908ULL;
+    s->h[1] = 0xbb67ae8584caa73bULL;
+    s->h[2] = 0x3c6ef372fe94f82bULL;
+    s->h[3] = 0xa54ff53a5f1d36f1ULL;
+    s->h[4] = 0x510e527fade682d1ULL;
+    s->h[5] = 0x9b05688c2b3e6c1fULL;
+    s->h[6] = 0x1f83d9abfb41bd6bULL;
+    s->h[7] = 0x5be0cd19137e2179ULL;
+    s->bitlen = 0;
+    s->buflen = 0;
+}
+
+static void Sha384Init(Sha512* s)
+{
+    s->h[0] = 0xcbbb9d5dc1059ed8ULL;
+    s->h[1] = 0x629a292a367cd507ULL;
+    s->h[2] = 0x9159015a3070dd17ULL;
+    s->h[3] = 0x152fecd8f70e5939ULL;
+    s->h[4] = 0x67332667ffc00b31ULL;
+    s->h[5] = 0x8eb44a8768581511ULL;
+    s->h[6] = 0xdb0c2e0d64f98fa7ULL;
+    s->h[7] = 0x47b5481dbefa4fa4ULL;
+    s->bitlen = 0;
+    s->buflen = 0;
+}
+
+static void Sha512Block(Sha512* s, const unsigned char* p)
+{
+    unsigned long long w[80];
+    for (int i = 0; i < 16; ++i)
+        w[i] = ((unsigned long long)p[i * 8] << 56) | ((unsigned long long)p[i * 8 + 1] << 48) |
+               ((unsigned long long)p[i * 8 + 2] << 40) | ((unsigned long long)p[i * 8 + 3] << 32) |
+               ((unsigned long long)p[i * 8 + 4] << 24) | ((unsigned long long)p[i * 8 + 5] << 16) |
+               ((unsigned long long)p[i * 8 + 6] << 8) | (unsigned long long)p[i * 8 + 7];
+    for (int i = 16; i < 80; ++i)
+    {
+        unsigned long long s0 = rotr64(w[i - 15], 1) ^ rotr64(w[i - 15], 8) ^ (w[i - 15] >> 7);
+        unsigned long long s1 = rotr64(w[i - 2], 19) ^ rotr64(w[i - 2], 61) ^ (w[i - 2] >> 6);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    unsigned long long a = s->h[0], b = s->h[1], c = s->h[2], d = s->h[3];
+    unsigned long long e = s->h[4], f = s->h[5], g = s->h[6], hh = s->h[7];
+    for (int i = 0; i < 80; ++i)
+    {
+        unsigned long long S1 = rotr64(e, 14) ^ rotr64(e, 18) ^ rotr64(e, 41);
+        unsigned long long ch = (e & f) ^ (~e & g);
+        unsigned long long t1 = hh + S1 + ch + kSha512K[i] + w[i];
+        unsigned long long S0 = rotr64(a, 28) ^ rotr64(a, 34) ^ rotr64(a, 39);
+        unsigned long long mj = (a & b) ^ (a & c) ^ (b & c);
+        unsigned long long t2 = S0 + mj;
+        hh = g;
+        g = f;
+        f = e;
+        e = d + t1;
+        d = c;
+        c = b;
+        b = a;
+        a = t1 + t2;
+    }
+    s->h[0] += a;
+    s->h[1] += b;
+    s->h[2] += c;
+    s->h[3] += d;
+    s->h[4] += e;
+    s->h[5] += f;
+    s->h[6] += g;
+    s->h[7] += hh;
+}
+
+static void Sha512Update(Sha512* s, const unsigned char* p, unsigned int n)
+{
+    s->bitlen += (unsigned long long)n * 8;
+    while (n > 0)
+    {
+        unsigned int take = 128 - s->buflen;
+        if (take > n)
+            take = n;
+        for (unsigned int i = 0; i < take; ++i)
+            s->buf[s->buflen + i] = p[i];
+        s->buflen += take;
+        p += take;
+        n -= take;
+        if (s->buflen == 128)
+        {
+            Sha512Block(s, s->buf);
+            s->buflen = 0;
+        }
+    }
+}
+
+/* Common finaliser. out_len must be 48 (SHA-384) or 64 (SHA-512). */
+static void Sha512Final(Sha512* s, unsigned char* out, unsigned int out_len)
+{
+    s->buf[s->buflen++] = 0x80;
+    if (s->buflen > 112)
+    {
+        while (s->buflen < 128)
+            s->buf[s->buflen++] = 0;
+        Sha512Block(s, s->buf);
+        s->buflen = 0;
+    }
+    while (s->buflen < 112)
+        s->buf[s->buflen++] = 0;
+    /* High 64 bits of the 128-bit length always zero (capped at 2^61
+     * input bytes by bitlen's u64 width). Low 64 bits are bitlen big-endian. */
+    for (int i = 0; i < 8; ++i)
+        s->buf[112 + i] = 0;
+    unsigned long long bl = s->bitlen;
+    for (int i = 7; i >= 0; --i)
+        s->buf[120 + i] = (unsigned char)(bl >> ((7 - i) * 8));
+    Sha512Block(s, s->buf);
+    const unsigned int words = out_len / 8;
+    for (unsigned int i = 0; i < words; ++i)
+    {
+        out[i * 8 + 0] = (unsigned char)(s->h[i] >> 56);
+        out[i * 8 + 1] = (unsigned char)(s->h[i] >> 48);
+        out[i * 8 + 2] = (unsigned char)(s->h[i] >> 40);
+        out[i * 8 + 3] = (unsigned char)(s->h[i] >> 32);
+        out[i * 8 + 4] = (unsigned char)(s->h[i] >> 24);
+        out[i * 8 + 5] = (unsigned char)(s->h[i] >> 16);
+        out[i * 8 + 6] = (unsigned char)(s->h[i] >> 8);
+        out[i * 8 + 7] = (unsigned char)(s->h[i] >> 0);
+    }
+}
+
+/* AES-128 / AES-256 reference (FIPS 197). Encrypts / decrypts one
+ * 16-byte block at a time. Key expansion produces 11 round-keys
+ * for AES-128 (176 bytes) or 15 for AES-256 (240 bytes). The same
+ * Sbox / inverse-Sbox / Rcon tables drive both key sizes. CBC mode
+ * is the higher-level chaining wrapper layered on top. No bitslice
+ * / no AES-NI — straight reference code, ~250 LOC, runs in ~12 µs
+ * per block on a typical 2026 CPU. Sufficient for a v0 BCryptEncrypt
+ * / BCryptDecrypt that matches the API shape every Win32 caller
+ * expects. */
+
+static const unsigned char kAesSbox[256] = {
+    0x63, 0x7C, 0x77, 0x7B, 0xF2, 0x6B, 0x6F, 0xC5, 0x30, 0x01, 0x67, 0x2B, 0xFE, 0xD7, 0xAB, 0x76, 0xCA, 0x82, 0xC9,
+    0x7D, 0xFA, 0x59, 0x47, 0xF0, 0xAD, 0xD4, 0xA2, 0xAF, 0x9C, 0xA4, 0x72, 0xC0, 0xB7, 0xFD, 0x93, 0x26, 0x36, 0x3F,
+    0xF7, 0xCC, 0x34, 0xA5, 0xE5, 0xF1, 0x71, 0xD8, 0x31, 0x15, 0x04, 0xC7, 0x23, 0xC3, 0x18, 0x96, 0x05, 0x9A, 0x07,
+    0x12, 0x80, 0xE2, 0xEB, 0x27, 0xB2, 0x75, 0x09, 0x83, 0x2C, 0x1A, 0x1B, 0x6E, 0x5A, 0xA0, 0x52, 0x3B, 0xD6, 0xB3,
+    0x29, 0xE3, 0x2F, 0x84, 0x53, 0xD1, 0x00, 0xED, 0x20, 0xFC, 0xB1, 0x5B, 0x6A, 0xCB, 0xBE, 0x39, 0x4A, 0x4C, 0x58,
+    0xCF, 0xD0, 0xEF, 0xAA, 0xFB, 0x43, 0x4D, 0x33, 0x85, 0x45, 0xF9, 0x02, 0x7F, 0x50, 0x3C, 0x9F, 0xA8, 0x51, 0xA3,
+    0x40, 0x8F, 0x92, 0x9D, 0x38, 0xF5, 0xBC, 0xB6, 0xDA, 0x21, 0x10, 0xFF, 0xF3, 0xD2, 0xCD, 0x0C, 0x13, 0xEC, 0x5F,
+    0x97, 0x44, 0x17, 0xC4, 0xA7, 0x7E, 0x3D, 0x64, 0x5D, 0x19, 0x73, 0x60, 0x81, 0x4F, 0xDC, 0x22, 0x2A, 0x90, 0x88,
+    0x46, 0xEE, 0xB8, 0x14, 0xDE, 0x5E, 0x0B, 0xDB, 0xE0, 0x32, 0x3A, 0x0A, 0x49, 0x06, 0x24, 0x5C, 0xC2, 0xD3, 0xAC,
+    0x62, 0x91, 0x95, 0xE4, 0x79, 0xE7, 0xC8, 0x37, 0x6D, 0x8D, 0xD5, 0x4E, 0xA9, 0x6C, 0x56, 0xF4, 0xEA, 0x65, 0x7A,
+    0xAE, 0x08, 0xBA, 0x78, 0x25, 0x2E, 0x1C, 0xA6, 0xB4, 0xC6, 0xE8, 0xDD, 0x74, 0x1F, 0x4B, 0xBD, 0x8B, 0x8A, 0x70,
+    0x3E, 0xB5, 0x66, 0x48, 0x03, 0xF6, 0x0E, 0x61, 0x35, 0x57, 0xB9, 0x86, 0xC1, 0x1D, 0x9E, 0xE1, 0xF8, 0x98, 0x11,
+    0x69, 0xD9, 0x8E, 0x94, 0x9B, 0x1E, 0x87, 0xE9, 0xCE, 0x55, 0x28, 0xDF, 0x8C, 0xA1, 0x89, 0x0D, 0xBF, 0xE6, 0x42,
+    0x68, 0x41, 0x99, 0x2D, 0x0F, 0xB0, 0x54, 0xBB, 0x16};
+
+static const unsigned char kAesInvSbox[256] = {
+    0x52, 0x09, 0x6A, 0xD5, 0x30, 0x36, 0xA5, 0x38, 0xBF, 0x40, 0xA3, 0x9E, 0x81, 0xF3, 0xD7, 0xFB, 0x7C, 0xE3, 0x39,
+    0x82, 0x9B, 0x2F, 0xFF, 0x87, 0x34, 0x8E, 0x43, 0x44, 0xC4, 0xDE, 0xE9, 0xCB, 0x54, 0x7B, 0x94, 0x32, 0xA6, 0xC2,
+    0x23, 0x3D, 0xEE, 0x4C, 0x95, 0x0B, 0x42, 0xFA, 0xC3, 0x4E, 0x08, 0x2E, 0xA1, 0x66, 0x28, 0xD9, 0x24, 0xB2, 0x76,
+    0x5B, 0xA2, 0x49, 0x6D, 0x8B, 0xD1, 0x25, 0x72, 0xF8, 0xF6, 0x64, 0x86, 0x68, 0x98, 0x16, 0xD4, 0xA4, 0x5C, 0xCC,
+    0x5D, 0x65, 0xB6, 0x92, 0x6C, 0x70, 0x48, 0x50, 0xFD, 0xED, 0xB9, 0xDA, 0x5E, 0x15, 0x46, 0x57, 0xA7, 0x8D, 0x9D,
+    0x84, 0x90, 0xD8, 0xAB, 0x00, 0x8C, 0xBC, 0xD3, 0x0A, 0xF7, 0xE4, 0x58, 0x05, 0xB8, 0xB3, 0x45, 0x06, 0xD0, 0x2C,
+    0x1E, 0x8F, 0xCA, 0x3F, 0x0F, 0x02, 0xC1, 0xAF, 0xBD, 0x03, 0x01, 0x13, 0x8A, 0x6B, 0x3A, 0x91, 0x11, 0x41, 0x4F,
+    0x67, 0xDC, 0xEA, 0x97, 0xF2, 0xCF, 0xCE, 0xF0, 0xB4, 0xE6, 0x73, 0x96, 0xAC, 0x74, 0x22, 0xE7, 0xAD, 0x35, 0x85,
+    0xE2, 0xF9, 0x37, 0xE8, 0x1C, 0x75, 0xDF, 0x6E, 0x47, 0xF1, 0x1A, 0x71, 0x1D, 0x29, 0xC5, 0x89, 0x6F, 0xB7, 0x62,
+    0x0E, 0xAA, 0x18, 0xBE, 0x1B, 0xFC, 0x56, 0x3E, 0x4B, 0xC6, 0xD2, 0x79, 0x20, 0x9A, 0xDB, 0xC0, 0xFE, 0x78, 0xCD,
+    0x5A, 0xF4, 0x1F, 0xDD, 0xA8, 0x33, 0x88, 0x07, 0xC7, 0x31, 0xB1, 0x12, 0x10, 0x59, 0x27, 0x80, 0xEC, 0x5F, 0x60,
+    0x51, 0x7F, 0xA9, 0x19, 0xB5, 0x4A, 0x0D, 0x2D, 0xE5, 0x7A, 0x9F, 0x93, 0xC9, 0x9C, 0xEF, 0xA0, 0xE0, 0x3B, 0x4D,
+    0xAE, 0x2A, 0xF5, 0xB0, 0xC8, 0xEB, 0xBB, 0x3C, 0x83, 0x53, 0x99, 0x61, 0x17, 0x2B, 0x04, 0x7E, 0xBA, 0x77, 0xD6,
+    0x26, 0xE1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0C, 0x7D};
+
+static const unsigned char kAesRcon[11] = {0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1B, 0x36};
+
+/* GF(2^8) multiplication used by MixColumns / InvMixColumns. */
+static unsigned char aes_xtime(unsigned char x)
+{
+    return (unsigned char)((x << 1) ^ ((x & 0x80) ? 0x1B : 0));
+}
+
+/* AES key expansion. key_bytes ∈ {16, 32}. round_keys must hold
+ * 11 × 16 = 176 bytes for AES-128 or 15 × 16 = 240 bytes for
+ * AES-256. Returns the number of rounds. */
+static int aes_key_expansion(const unsigned char* key, unsigned int key_bytes, unsigned char* round_keys)
+{
+    const int Nk = (key_bytes == 32) ? 8 : 4;
+    const int Nr = Nk + 6; /* 10 for AES-128, 14 for AES-256 */
+    const int total_words = (Nr + 1) * 4;
+    /* First Nk words of round_keys are the key bytes verbatim. */
+    for (int i = 0; i < Nk * 4; ++i)
+        round_keys[i] = key[i];
+    unsigned char tmp[4];
+    for (int i = Nk; i < total_words; ++i)
+    {
+        tmp[0] = round_keys[(i - 1) * 4 + 0];
+        tmp[1] = round_keys[(i - 1) * 4 + 1];
+        tmp[2] = round_keys[(i - 1) * 4 + 2];
+        tmp[3] = round_keys[(i - 1) * 4 + 3];
+        if (i % Nk == 0)
+        {
+            /* RotWord + SubWord + XOR Rcon. */
+            const unsigned char t = tmp[0];
+            tmp[0] = (unsigned char)(kAesSbox[tmp[1]] ^ kAesRcon[i / Nk]);
+            tmp[1] = kAesSbox[tmp[2]];
+            tmp[2] = kAesSbox[tmp[3]];
+            tmp[3] = kAesSbox[t];
+        }
+        else if (Nk > 6 && i % Nk == 4)
+        {
+            /* AES-256 only: extra SubWord every 4 words inside the cycle. */
+            tmp[0] = kAesSbox[tmp[0]];
+            tmp[1] = kAesSbox[tmp[1]];
+            tmp[2] = kAesSbox[tmp[2]];
+            tmp[3] = kAesSbox[tmp[3]];
+        }
+        for (int j = 0; j < 4; ++j)
+            round_keys[i * 4 + j] = (unsigned char)(round_keys[(i - Nk) * 4 + j] ^ tmp[j]);
+    }
+    return Nr;
+}
+
+static void aes_add_round_key(unsigned char state[16], const unsigned char* rk)
+{
+    for (int i = 0; i < 16; ++i)
+        state[i] ^= rk[i];
+}
+
+static void aes_sub_bytes(unsigned char state[16])
+{
+    for (int i = 0; i < 16; ++i)
+        state[i] = kAesSbox[state[i]];
+}
+
+static void aes_inv_sub_bytes(unsigned char state[16])
+{
+    for (int i = 0; i < 16; ++i)
+        state[i] = kAesInvSbox[state[i]];
+}
+
+static void aes_shift_rows(unsigned char s[16])
+{
+    /* Row 1: shift left by 1.  Row 2: by 2.  Row 3: by 3.
+     * AES state is stored column-major: index = col*4 + row. */
+    unsigned char t;
+    t = s[1];
+    s[1] = s[5];
+    s[5] = s[9];
+    s[9] = s[13];
+    s[13] = t;
+    t = s[2];
+    unsigned char u = s[6];
+    s[2] = s[10];
+    s[6] = s[14];
+    s[10] = t;
+    s[14] = u;
+    t = s[3];
+    s[3] = s[15];
+    s[15] = s[11];
+    s[11] = s[7];
+    s[7] = t;
+}
+
+static void aes_inv_shift_rows(unsigned char s[16])
+{
+    unsigned char t;
+    t = s[13];
+    s[13] = s[9];
+    s[9] = s[5];
+    s[5] = s[1];
+    s[1] = t;
+    t = s[2];
+    unsigned char u = s[6];
+    s[2] = s[10];
+    s[6] = s[14];
+    s[10] = t;
+    s[14] = u;
+    t = s[7];
+    s[7] = s[11];
+    s[11] = s[15];
+    s[15] = s[3];
+    s[3] = t;
+}
+
+static void aes_mix_columns(unsigned char s[16])
+{
+    for (int c = 0; c < 4; ++c)
+    {
+        unsigned char* col = s + c * 4;
+        const unsigned char a0 = col[0], a1 = col[1], a2 = col[2], a3 = col[3];
+        const unsigned char t = (unsigned char)(a0 ^ a1 ^ a2 ^ a3);
+        col[0] ^= (unsigned char)(t ^ aes_xtime((unsigned char)(a0 ^ a1)));
+        col[1] ^= (unsigned char)(t ^ aes_xtime((unsigned char)(a1 ^ a2)));
+        col[2] ^= (unsigned char)(t ^ aes_xtime((unsigned char)(a2 ^ a3)));
+        col[3] ^= (unsigned char)(t ^ aes_xtime((unsigned char)(a3 ^ a0)));
+    }
+}
+
+/* Helpers: multiply by 9, 11, 13, 14 in GF(2^8). Each is a sum of
+ * xtime applications: 9 = 8+1, 11 = 8+2+1, 13 = 8+4+1, 14 = 8+4+2. */
+static unsigned char aes_mul9(unsigned char x)
+{
+    const unsigned char x2 = aes_xtime(x);
+    const unsigned char x4 = aes_xtime(x2);
+    const unsigned char x8 = aes_xtime(x4);
+    return (unsigned char)(x8 ^ x);
+}
+static unsigned char aes_mul11(unsigned char x)
+{
+    const unsigned char x2 = aes_xtime(x);
+    const unsigned char x4 = aes_xtime(x2);
+    const unsigned char x8 = aes_xtime(x4);
+    return (unsigned char)(x8 ^ x2 ^ x);
+}
+static unsigned char aes_mul13(unsigned char x)
+{
+    const unsigned char x2 = aes_xtime(x);
+    const unsigned char x4 = aes_xtime(x2);
+    const unsigned char x8 = aes_xtime(x4);
+    return (unsigned char)(x8 ^ x4 ^ x);
+}
+static unsigned char aes_mul14(unsigned char x)
+{
+    const unsigned char x2 = aes_xtime(x);
+    const unsigned char x4 = aes_xtime(x2);
+    const unsigned char x8 = aes_xtime(x4);
+    return (unsigned char)(x8 ^ x4 ^ x2);
+}
+
+static void aes_inv_mix_columns(unsigned char s[16])
+{
+    /* InvMixColumns matrix per FIPS 197 §5.3.3:
+     *   [14 11 13  9]
+     *   [ 9 14 11 13]
+     *   [13  9 14 11]
+     *   [11 13  9 14] */
+    for (int c = 0; c < 4; ++c)
+    {
+        unsigned char* col = s + c * 4;
+        const unsigned char a0 = col[0], a1 = col[1], a2 = col[2], a3 = col[3];
+        col[0] = (unsigned char)(aes_mul14(a0) ^ aes_mul11(a1) ^ aes_mul13(a2) ^ aes_mul9(a3));
+        col[1] = (unsigned char)(aes_mul9(a0) ^ aes_mul14(a1) ^ aes_mul11(a2) ^ aes_mul13(a3));
+        col[2] = (unsigned char)(aes_mul13(a0) ^ aes_mul9(a1) ^ aes_mul14(a2) ^ aes_mul11(a3));
+        col[3] = (unsigned char)(aes_mul11(a0) ^ aes_mul13(a1) ^ aes_mul9(a2) ^ aes_mul14(a3));
+    }
+}
+
+/* Encrypt one 16-byte block in place. round_keys must hold the
+ * key schedule from `aes_key_expansion`. Nr ∈ {10, 14}. */
+static void aes_encrypt_block(unsigned char state[16], const unsigned char* round_keys, int Nr)
+{
+    aes_add_round_key(state, round_keys);
+    for (int r = 1; r < Nr; ++r)
+    {
+        aes_sub_bytes(state);
+        aes_shift_rows(state);
+        aes_mix_columns(state);
+        aes_add_round_key(state, round_keys + r * 16);
+    }
+    aes_sub_bytes(state);
+    aes_shift_rows(state);
+    aes_add_round_key(state, round_keys + Nr * 16);
+}
+
+static void aes_decrypt_block(unsigned char state[16], const unsigned char* round_keys, int Nr)
+{
+    aes_add_round_key(state, round_keys + Nr * 16);
+    for (int r = Nr - 1; r >= 1; --r)
+    {
+        aes_inv_shift_rows(state);
+        aes_inv_sub_bytes(state);
+        aes_add_round_key(state, round_keys + r * 16);
+        aes_inv_mix_columns(state);
+    }
+    aes_inv_shift_rows(state);
+    aes_inv_sub_bytes(state);
+    aes_add_round_key(state, round_keys);
+}
+
+/* CBC mode. `len` must be a multiple of 16 (the bcrypt API surface
+ * accepts a NoPadding flag — we never insert PKCS#7 padding here,
+ * so the caller is responsible for padding to a 16-byte boundary).
+ * `iv` is the initial 16-byte vector; modified in place to the
+ * final ciphertext block so chained calls continue cleanly. */
+static void aes_cbc_encrypt(const unsigned char* in, unsigned int len, const unsigned char* round_keys, int Nr,
+                            unsigned char* iv, unsigned char* out)
+{
+    unsigned char block[16];
+    for (unsigned int off = 0; off < len; off += 16)
+    {
+        for (int i = 0; i < 16; ++i)
+            block[i] = (unsigned char)(in[off + i] ^ iv[i]);
+        aes_encrypt_block(block, round_keys, Nr);
+        for (int i = 0; i < 16; ++i)
+        {
+            out[off + i] = block[i];
+            iv[i] = block[i];
+        }
+    }
+}
+
+static void aes_cbc_decrypt(const unsigned char* in, unsigned int len, const unsigned char* round_keys, int Nr,
+                            unsigned char* iv, unsigned char* out)
+{
+    unsigned char block[16];
+    unsigned char next_iv[16];
+    for (unsigned int off = 0; off < len; off += 16)
+    {
+        for (int i = 0; i < 16; ++i)
+        {
+            block[i] = in[off + i];
+            next_iv[i] = in[off + i];
+        }
+        aes_decrypt_block(block, round_keys, Nr);
+        for (int i = 0; i < 16; ++i)
+        {
+            out[off + i] = (unsigned char)(block[i] ^ iv[i]);
+            iv[i] = next_iv[i];
+        }
+    }
+}
+
 /* Algorithm-id matching: BCryptOpenAlgorithmProvider passes a UTF-16
  * algorithm name (e.g. L"SHA256", L"SHA1", L"MD5"). Each match
  * function checks for exact equality. */
@@ -403,6 +859,14 @@ static int IsSha256(const wchar_t16* algid)
 {
     return wstr_eq(algid, "SHA256");
 }
+static int IsSha384(const wchar_t16* algid)
+{
+    return wstr_eq(algid, "SHA384");
+}
+static int IsSha512(const wchar_t16* algid)
+{
+    return wstr_eq(algid, "SHA512");
+}
 static int IsSha1(const wchar_t16* algid)
 {
     return wstr_eq(algid, "SHA1");
@@ -410,6 +874,10 @@ static int IsSha1(const wchar_t16* algid)
 static int IsMd5(const wchar_t16* algid)
 {
     return wstr_eq(algid, "MD5");
+}
+static int IsAes(const wchar_t16* algid)
+{
+    return wstr_eq(algid, "AES");
 }
 
 /* Per-algorithm hash slot. Single-threaded callers only. The slot
@@ -421,24 +889,40 @@ typedef enum
     HK_SHA256 = 1,
     HK_SHA1 = 2,
     HK_MD5 = 3,
+    HK_SHA384 = 4,
+    HK_SHA512 = 5,
 } HashKind;
 
 #define BCRYPT_ALG_SHA256 ((HANDLE)0x2001)
 #define BCRYPT_ALG_SHA1 ((HANDLE)0x2002)
 #define BCRYPT_ALG_MD5 ((HANDLE)0x2003)
+#define BCRYPT_ALG_SHA384 ((HANDLE)0x2004)
+#define BCRYPT_ALG_SHA512 ((HANDLE)0x2005)
+#define BCRYPT_ALG_AES ((HANDLE)0x2006)
 #define BCRYPT_ALG_GENERIC ((HANDLE)0x2000)
 
 #define BCRYPT_HASH_SHA256 ((HANDLE)0x3001)
 #define BCRYPT_HASH_SHA1 ((HANDLE)0x3002)
 #define BCRYPT_HASH_MD5 ((HANDLE)0x3003)
+#define BCRYPT_HASH_SHA384 ((HANDLE)0x3004)
+#define BCRYPT_HASH_SHA512 ((HANDLE)0x3005)
 #define BCRYPT_HASH_GENERIC ((HANDLE)0x3000)
+
+/* Symmetric-key handle bases. AES key handles are 0x4001..0x4FFF;
+ * a key carries its expanded round-key schedule (240 bytes for
+ * AES-256, fits AES-128's 176 too) plus the active chaining mode. */
+#define BCRYPT_KEY_AES ((HANDLE)0x4001)
 
 static Sha256 g_sha256_slot;
 static Sha1 g_sha1_slot;
 static Md5 g_md5_slot;
+static Sha512 g_sha384_slot;
+static Sha512 g_sha512_slot;
 static int g_sha256_in_use;
 static int g_sha1_in_use;
 static int g_md5_in_use;
+static int g_sha384_in_use;
+static int g_sha512_in_use;
 
 static unsigned int hash_size_for_alg(HANDLE alg)
 {
@@ -448,6 +932,10 @@ static unsigned int hash_size_for_alg(HANDLE alg)
         return 20;
     if (alg == BCRYPT_ALG_MD5)
         return 16;
+    if (alg == BCRYPT_ALG_SHA384)
+        return 48;
+    if (alg == BCRYPT_ALG_SHA512)
+        return 64;
     return 0;
 }
 
@@ -460,10 +948,16 @@ __declspec(dllexport) NTSTATUS BCryptOpenAlgorithmProvider(HANDLE* h, const wcha
         return STATUS_INVALID_PARAMETER;
     if (IsSha256(algid))
         *h = BCRYPT_ALG_SHA256;
+    else if (IsSha384(algid))
+        *h = BCRYPT_ALG_SHA384;
+    else if (IsSha512(algid))
+        *h = BCRYPT_ALG_SHA512;
     else if (IsSha1(algid))
         *h = BCRYPT_ALG_SHA1;
     else if (IsMd5(algid))
         *h = BCRYPT_ALG_MD5;
+    else if (IsAes(algid))
+        *h = BCRYPT_ALG_AES;
     else
         *h = BCRYPT_ALG_GENERIC;
     return STATUS_SUCCESS;
@@ -492,6 +986,18 @@ __declspec(dllexport) NTSTATUS BCryptCreateHash(HANDLE alg, HANDLE* hash, unsign
         g_sha256_in_use = 1;
         *hash = BCRYPT_HASH_SHA256;
     }
+    else if (alg == BCRYPT_ALG_SHA384)
+    {
+        Sha384Init(&g_sha384_slot);
+        g_sha384_in_use = 1;
+        *hash = BCRYPT_HASH_SHA384;
+    }
+    else if (alg == BCRYPT_ALG_SHA512)
+    {
+        Sha512Init(&g_sha512_slot);
+        g_sha512_in_use = 1;
+        *hash = BCRYPT_HASH_SHA512;
+    }
     else if (alg == BCRYPT_ALG_SHA1)
     {
         Sha1Init(&g_sha1_slot);
@@ -516,6 +1022,10 @@ __declspec(dllexport) NTSTATUS BCryptHashData(HANDLE h, unsigned char* in, ULONG
     (void)flags;
     if (h == BCRYPT_HASH_SHA256 && g_sha256_in_use)
         Sha256Update(&g_sha256_slot, in, len);
+    else if (h == BCRYPT_HASH_SHA384 && g_sha384_in_use)
+        Sha512Update(&g_sha384_slot, in, len);
+    else if (h == BCRYPT_HASH_SHA512 && g_sha512_in_use)
+        Sha512Update(&g_sha512_slot, in, len);
     else if (h == BCRYPT_HASH_SHA1 && g_sha1_in_use)
         Sha1Update(&g_sha1_slot, in, len);
     else if (h == BCRYPT_HASH_MD5 && g_md5_in_use)
@@ -534,6 +1044,26 @@ __declspec(dllexport) NTSTATUS BCryptFinishHash(HANDLE h, unsigned char* out, UL
         Sha256Final(&g_sha256_slot, tmp);
         g_sha256_in_use = 0;
         ULONG cap = (len < 32) ? len : 32;
+        for (ULONG i = 0; i < cap; ++i)
+            out[i] = tmp[i];
+        return STATUS_SUCCESS;
+    }
+    if (h == BCRYPT_HASH_SHA384 && g_sha384_in_use)
+    {
+        unsigned char tmp[48];
+        Sha512Final(&g_sha384_slot, tmp, 48);
+        g_sha384_in_use = 0;
+        ULONG cap = (len < 48) ? len : 48;
+        for (ULONG i = 0; i < cap; ++i)
+            out[i] = tmp[i];
+        return STATUS_SUCCESS;
+    }
+    if (h == BCRYPT_HASH_SHA512 && g_sha512_in_use)
+    {
+        unsigned char tmp[64];
+        Sha512Final(&g_sha512_slot, tmp, 64);
+        g_sha512_in_use = 0;
+        ULONG cap = (len < 64) ? len : 64;
         for (ULONG i = 0; i < cap; ++i)
             out[i] = tmp[i];
         return STATUS_SUCCESS;
@@ -567,10 +1097,167 @@ __declspec(dllexport) NTSTATUS BCryptDestroyHash(HANDLE h)
 {
     if (h == BCRYPT_HASH_SHA256)
         g_sha256_in_use = 0;
+    else if (h == BCRYPT_HASH_SHA384)
+        g_sha384_in_use = 0;
+    else if (h == BCRYPT_HASH_SHA512)
+        g_sha512_in_use = 0;
     else if (h == BCRYPT_HASH_SHA1)
         g_sha1_in_use = 0;
     else if (h == BCRYPT_HASH_MD5)
         g_md5_in_use = 0;
+    return STATUS_SUCCESS;
+}
+
+/* ----- Symmetric AES surface --------------------------------------- */
+
+/* Chaining mode tags. Default is CBC; SetProperty(BCRYPT_CHAINING_MODE,
+ * L"ChainingModeECB" / "ChainingModeCBC") flips it. */
+#define BCRYPT_CHAIN_CBC 0u
+#define BCRYPT_CHAIN_ECB 1u
+
+static unsigned char g_aes_round_keys[240]; // fits AES-256
+static int g_aes_rounds;                    // 10 (AES-128) or 14 (AES-256)
+static int g_aes_in_use;
+static unsigned int g_aes_chain_mode = BCRYPT_CHAIN_CBC;
+
+__declspec(dllexport) NTSTATUS BCryptGenerateSymmetricKey(HANDLE alg, HANDLE* out_key, unsigned char* key_obj,
+                                                          ULONG key_obj_len, unsigned char* secret, ULONG secret_len,
+                                                          ULONG flags)
+{
+    (void)key_obj;
+    (void)key_obj_len;
+    (void)flags;
+    if (out_key == 0 || secret == 0)
+        return STATUS_INVALID_PARAMETER;
+    if (alg != BCRYPT_ALG_AES)
+        return STATUS_INVALID_PARAMETER;
+    if (secret_len != 16 && secret_len != 32)
+        return STATUS_INVALID_PARAMETER;
+    g_aes_rounds = aes_key_expansion(secret, (unsigned int)secret_len, g_aes_round_keys);
+    g_aes_in_use = 1;
+    *out_key = BCRYPT_KEY_AES;
+    return STATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS BCryptDestroyKey(HANDLE k)
+{
+    if (k == BCRYPT_KEY_AES)
+        g_aes_in_use = 0;
+    return STATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS BCryptSetProperty(HANDLE h, const wchar_t16* prop, unsigned char* value, ULONG value_len,
+                                                 ULONG flags)
+{
+    (void)flags;
+    if (prop == 0)
+        return STATUS_INVALID_PARAMETER;
+    /* The only property we honour is the AES chaining mode. The
+     * value is a UTF-16 string ("ChainingModeCBC" / "ECB"). */
+    if (h == BCRYPT_KEY_AES && wstr_eq(prop, "ChainingMode"))
+    {
+        if (value == 0 || value_len < 2)
+            return STATUS_INVALID_PARAMETER;
+        const wchar_t16* w = (const wchar_t16*)value;
+        if (wstr_eq(w, "ChainingModeECB"))
+            g_aes_chain_mode = BCRYPT_CHAIN_ECB;
+        else
+            g_aes_chain_mode = BCRYPT_CHAIN_CBC; // default + explicit "ChainingModeCBC"
+        return STATUS_SUCCESS;
+    }
+    return STATUS_NOT_FOUND;
+}
+
+__declspec(dllexport) NTSTATUS BCryptEncrypt(HANDLE k, unsigned char* in, ULONG in_len, void* padding_info,
+                                             unsigned char* iv, ULONG iv_len, unsigned char* out, ULONG out_len,
+                                             ULONG* used, ULONG flags)
+{
+    (void)padding_info;
+    (void)flags;
+    if (used)
+        *used = 0;
+    if (k != BCRYPT_KEY_AES || !g_aes_in_use)
+        return STATUS_INVALID_PARAMETER;
+    if (in == 0)
+        return STATUS_INVALID_PARAMETER;
+    if (in_len == 0 || (in_len & 15u))
+        return STATUS_INVALID_PARAMETER;
+    /* Sizing pass: caller passes out == NULL to learn how big the
+     * ciphertext will be. AES is length-preserving, so we report
+     * in_len. */
+    if (out == 0)
+    {
+        if (used)
+            *used = in_len;
+        return STATUS_SUCCESS;
+    }
+    if (out_len < in_len)
+        return STATUS_INVALID_PARAMETER;
+    if (g_aes_chain_mode == BCRYPT_CHAIN_CBC)
+    {
+        if (iv == 0 || iv_len != 16)
+            return STATUS_INVALID_PARAMETER;
+        aes_cbc_encrypt(in, in_len, g_aes_round_keys, g_aes_rounds, iv, out);
+    }
+    else
+    {
+        for (ULONG off = 0; off < in_len; off += 16)
+        {
+            unsigned char block[16];
+            for (int i = 0; i < 16; ++i)
+                block[i] = in[off + i];
+            aes_encrypt_block(block, g_aes_round_keys, g_aes_rounds);
+            for (int i = 0; i < 16; ++i)
+                out[off + i] = block[i];
+        }
+    }
+    if (used)
+        *used = in_len;
+    return STATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS BCryptDecrypt(HANDLE k, unsigned char* in, ULONG in_len, void* padding_info,
+                                             unsigned char* iv, ULONG iv_len, unsigned char* out, ULONG out_len,
+                                             ULONG* used, ULONG flags)
+{
+    (void)padding_info;
+    (void)flags;
+    if (used)
+        *used = 0;
+    if (k != BCRYPT_KEY_AES || !g_aes_in_use)
+        return STATUS_INVALID_PARAMETER;
+    if (in == 0)
+        return STATUS_INVALID_PARAMETER;
+    if (in_len == 0 || (in_len & 15u))
+        return STATUS_INVALID_PARAMETER;
+    if (out == 0)
+    {
+        if (used)
+            *used = in_len;
+        return STATUS_SUCCESS;
+    }
+    if (out_len < in_len)
+        return STATUS_INVALID_PARAMETER;
+    if (g_aes_chain_mode == BCRYPT_CHAIN_CBC)
+    {
+        if (iv == 0 || iv_len != 16)
+            return STATUS_INVALID_PARAMETER;
+        aes_cbc_decrypt(in, in_len, g_aes_round_keys, g_aes_rounds, iv, out);
+    }
+    else
+    {
+        for (ULONG off = 0; off < in_len; off += 16)
+        {
+            unsigned char block[16];
+            for (int i = 0; i < 16; ++i)
+                block[i] = in[off + i];
+            aes_decrypt_block(block, g_aes_round_keys, g_aes_rounds);
+            for (int i = 0; i < 16; ++i)
+                out[off + i] = block[i];
+        }
+    }
+    if (used)
+        *used = in_len;
     return STATUS_SUCCESS;
 }
 
@@ -584,10 +1271,24 @@ __declspec(dllexport) NTSTATUS BCryptGetProperty(HANDLE h, const wchar_t16* prop
     if (!prop)
         return STATUS_INVALID_PARAMETER;
     unsigned int sz = hash_size_for_alg(h);
-    if (sz == 0 && (h == BCRYPT_HASH_SHA256 || h == BCRYPT_HASH_SHA1 || h == BCRYPT_HASH_MD5))
+    if (sz == 0)
     {
-        sz = (h == BCRYPT_HASH_SHA256) ? 32 : (h == BCRYPT_HASH_SHA1) ? 20 : 16;
+        if (h == BCRYPT_HASH_SHA256)
+            sz = 32;
+        else if (h == BCRYPT_HASH_SHA384)
+            sz = 48;
+        else if (h == BCRYPT_HASH_SHA512)
+            sz = 64;
+        else if (h == BCRYPT_HASH_SHA1)
+            sz = 20;
+        else if (h == BCRYPT_HASH_MD5)
+            sz = 16;
     }
+    /* SHA-384 / SHA-512 use a 1024-bit (128 B) block; everything else
+     * we ship is 512-bit (64 B). Object-length is sized for the worst
+     * case our slots actually hold. */
+    const int is_sha512_family =
+        (h == BCRYPT_ALG_SHA384 || h == BCRYPT_ALG_SHA512 || h == BCRYPT_HASH_SHA384 || h == BCRYPT_HASH_SHA512);
     if (wstr_eq(prop, "HashDigestLength"))
     {
         if (result_len)
@@ -604,7 +1305,11 @@ __declspec(dllexport) NTSTATUS BCryptGetProperty(HANDLE h, const wchar_t16* prop
     }
     if (wstr_eq(prop, "ObjectLength") || wstr_eq(prop, "BlockLength"))
     {
-        unsigned int v = wstr_eq(prop, "BlockLength") ? 64 : (unsigned int)sizeof(Sha256);
+        unsigned int v;
+        if (wstr_eq(prop, "BlockLength"))
+            v = is_sha512_family ? 128 : 64;
+        else
+            v = is_sha512_family ? (unsigned int)sizeof(Sha512) : (unsigned int)sizeof(Sha256);
         if (result_len)
             *result_len = 4;
         if (!out)

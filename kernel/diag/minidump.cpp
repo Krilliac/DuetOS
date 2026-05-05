@@ -722,10 +722,21 @@ u64 BuildMinidumpInto(const ContextRegs& regs, u32 exception_code)
 }
 } // namespace
 
+// Last successfully-built minidump's byte count. Reset to 0 by
+// `BuildMinidumpInto` on entry; set to the final cursor on exit.
+// Read-back via `AccessLastMinidump` so a panic-time disk
+// persistence layer can grab the same bytes the debugcon path
+// already pushed without re-running the build.
+namespace
+{
+constinit u64 g_last_dump_bytes = 0;
+} // namespace
+
 void EmitMinidump(u64 rip, u64 rsp, u64 rbp, u32 exception_code)
 {
     const ContextRegs regs = RegsFromSoftPanic(rip, rsp, rbp);
     const u64 bytes = BuildMinidumpInto(regs, exception_code);
+    g_last_dump_bytes = bytes;
     arch::SerialWrite("[minidump] emitting ");
     arch::SerialWriteHex(bytes);
     arch::SerialWrite(" bytes via debugcon (port 0xE9) [soft panic]\n");
@@ -746,11 +757,29 @@ void EmitMinidumpFromTrapFrame(const arch::TrapFrame* frame, u32 exception_code)
     }
     const ContextRegs regs = RegsFromTrapFrame(frame);
     const u64 bytes = BuildMinidumpInto(regs, exception_code);
+    g_last_dump_bytes = bytes;
     arch::SerialWrite("[minidump] emitting ");
     arch::SerialWriteHex(bytes);
     arch::SerialWrite(" bytes via debugcon (port 0xE9) [trap frame]\n");
     debugcon::Write(g_buf, bytes);
     arch::SerialWrite("[minidump] done\n");
+}
+
+bool AccessLastMinidump(const u8** out_bytes, u64* out_len)
+{
+    if (out_bytes == nullptr || out_len == nullptr)
+    {
+        return false;
+    }
+    if (g_last_dump_bytes == 0)
+    {
+        *out_bytes = nullptr;
+        *out_len = 0;
+        return false;
+    }
+    *out_bytes = g_buf;
+    *out_len = g_last_dump_bytes;
+    return true;
 }
 
 void MinidumpSelfTest()

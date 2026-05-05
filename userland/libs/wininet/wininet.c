@@ -383,43 +383,368 @@ __declspec(dllexport) BOOL InternetReadFileExW(HANDLE h, void* buffers, DWORD fl
     return InternetReadFileExA(h, buffers, flags, ctx);
 }
 
-/* InternetGetCookieA / W — cookie cache. v0 reports "no cookie". */
+/* InternetGetCookieA / W + InternetSetCookieA / W — in-memory
+ * cookie store backing the four classic cookie APIs. v0 keeps a
+ * fixed-size table (16 entries × 256 chars) shared across the
+ * whole process — sufficient for the sites the boot HTTP smoke
+ * exercises and a small browser flow. Real browsers persist
+ * cookies to disk across runs and partition them per profile;
+ * this is in-memory only and clears at process exit.
+ *
+ * Lookup matches on host + name (case-insensitive on host as
+ * RFC 6265 requires); LRU eviction when full. Path / domain /
+ * Secure / HttpOnly / SameSite attributes are dropped — Set
+ * just stashes the (host, name, value) triple. Real cookie
+ * scoping needs a follow-up. */
+
+#define COOKIE_TABLE_ENTRIES 16
+#define COOKIE_HOST_BYTES 64
+#define COOKIE_NAME_BYTES 32
+#define COOKIE_VALUE_BYTES 192
+
+typedef struct
+{
+    char host[COOKIE_HOST_BYTES];
+    char name[COOKIE_NAME_BYTES];
+    char value[COOKIE_VALUE_BYTES];
+    DWORD lru_seq; // higher = more recent
+    BOOL in_use;
+} CookieEntry;
+
+static CookieEntry g_cookie_table[COOKIE_TABLE_ENTRIES] = {0};
+static DWORD g_cookie_lru_counter = 0;
+
+/* ASCII-lowercase a single byte. */
+static char wininet_tolower_byte(char c)
+{
+    if (c >= 'A' && c <= 'Z')
+        return (char)(c - 'A' + 'a');
+    return c;
+}
+
+/* Case-insensitive compare on hostnames. Returns 0 if equal. */
+static int wininet_host_eq(const char* a, const char* b)
+{
+    while (*a || *b)
+    {
+        if (wininet_tolower_byte(*a) != wininet_tolower_byte(*b))
+            return 0;
+        ++a;
+        ++b;
+    }
+    return 1;
+}
+
+/* Extract the host component from a URL like
+ *   "http://host.com:80/path?q"
+ *   "https://user@host.com/path"
+ * into `out` (NUL-terminated, max `out_max - 1` chars). Returns
+ * 1 on success, 0 if the URL is malformed (no scheme separator). */
+static int wininet_extract_host(const char* url, char* out, DWORD out_max)
+{
+    if (!url || !out || out_max == 0)
+        return 0;
+    /* Skip the scheme: search for "://". */
+    const char* p = url;
+    const char* sep = (const char*)0;
+    for (; *p; ++p)
+    {
+        if (p[0] == ':' && p[1] == '/' && p[2] == '/')
+        {
+            sep = p + 3;
+            break;
+        }
+    }
+    if (!sep)
+        return 0;
+    /* Skip optional userinfo "user@" prefix. */
+    const char* host_start = sep;
+    for (const char* q = sep; *q && *q != '/' && *q != '?' && *q != '#'; ++q)
+    {
+        if (*q == '@')
+        {
+            host_start = q + 1;
+            break;
+        }
+    }
+    /* Copy until '/', '?', '#', ':' (port), or NUL. */
+    DWORD i = 0;
+    for (; host_start[i] && i + 1 < out_max; ++i)
+    {
+        const char c = host_start[i];
+        if (c == '/' || c == '?' || c == '#' || c == ':')
+            break;
+        out[i] = c;
+    }
+    out[i] = 0;
+    return i > 0;
+}
+
+/* Find a matching slot. Returns slot index or -1. */
+static int wininet_cookie_find(const char* host, const char* name)
+{
+    for (int i = 0; i < COOKIE_TABLE_ENTRIES; ++i)
+    {
+        if (!g_cookie_table[i].in_use)
+            continue;
+        if (!wininet_host_eq(g_cookie_table[i].host, host))
+            continue;
+        /* Cookie names are case-sensitive per RFC 6265. */
+        const char* a = g_cookie_table[i].name;
+        const char* b = name;
+        BOOL eq = 1;
+        while (*a || *b)
+        {
+            if (*a != *b)
+            {
+                eq = 0;
+                break;
+            }
+            ++a;
+            ++b;
+        }
+        if (eq)
+            return i;
+    }
+    return -1;
+}
+
+/* Find the least-recently-used (or unused) slot. */
+static int wininet_cookie_evict_target(void)
+{
+    int oldest = 0;
+    for (int i = 0; i < COOKIE_TABLE_ENTRIES; ++i)
+    {
+        if (!g_cookie_table[i].in_use)
+            return i;
+        if (g_cookie_table[i].lru_seq < g_cookie_table[oldest].lru_seq)
+            oldest = i;
+    }
+    return oldest;
+}
+
+/* Strict copy + truncate. Returns bytes written excluding NUL. */
+static DWORD wininet_str_copy_capped(char* dst, DWORD dst_max, const char* src)
+{
+    if (dst_max == 0)
+        return 0;
+    DWORD i = 0;
+    for (; src[i] && i + 1 < dst_max; ++i)
+        dst[i] = src[i];
+    dst[i] = 0;
+    return i;
+}
+
+/* Parse "name=value" out of `data`. The caller pre-extracts name
+ * via the explicit `name` arg; otherwise we split at the first
+ * '=' in `data`. Returns 1 on success. */
+static int wininet_parse_namevalue(const char* data, char* name_buf, DWORD name_max, char* value_buf, DWORD value_max)
+{
+    if (!data)
+        return 0;
+    const char* eq = (const char*)0;
+    for (const char* p = data; *p; ++p)
+    {
+        if (*p == '=')
+        {
+            eq = p;
+            break;
+        }
+    }
+    if (!eq)
+    {
+        /* No '=': treat the whole `data` as the value. */
+        if (name_max > 0)
+            name_buf[0] = 0;
+        wininet_str_copy_capped(value_buf, value_max, data);
+        return 1;
+    }
+    DWORD n = 0;
+    for (const char* p = data; p < eq && n + 1 < name_max; ++p, ++n)
+        name_buf[n] = *p;
+    name_buf[n] = 0;
+    wininet_str_copy_capped(value_buf, value_max, eq + 1);
+    return 1;
+}
+
 __declspec(dllexport) BOOL InternetGetCookieA(const char* url, const char* name, char* data, DWORD* size)
 {
-    (void)url;
-    (void)name;
-    if (data && size && *size > 0)
-        data[0] = 0;
-    if (size)
-        *size = 0;
-    return 0;
+    char host[COOKIE_HOST_BYTES];
+    if (!wininet_extract_host(url, host, sizeof(host)))
+        return 0;
+    if (!size)
+        return 0;
+    if (name && *name)
+    {
+        /* Single-cookie lookup. */
+        const int slot = wininet_cookie_find(host, name);
+        if (slot < 0)
+        {
+            if (data && *size > 0)
+                data[0] = 0;
+            *size = 0;
+            return 0;
+        }
+        g_cookie_table[slot].lru_seq = ++g_cookie_lru_counter;
+        const DWORD wrote = wininet_str_copy_capped(data, *size, g_cookie_table[slot].value);
+        *size = wrote;
+        return data != (char*)0;
+    }
+    /* No name → concatenate every matching host cookie as
+     *   "name1=value1; name2=value2; ..."
+     * which is the format an HTTP Cookie: header takes. The
+     * insertion order is the cookie table's slot order — not
+     * RFC 6265's specified path-then-creation-time ordering,
+     * but stable enough that tests can rely on it. Each touch
+     * bumps the slot's LRU sequence so the eviction policy
+     * still tracks "most recently fetched". */
+    DWORD have = 0;
+    BOOL any = 0;
+    for (int i = 0; i < COOKIE_TABLE_ENTRIES; ++i)
+    {
+        if (!g_cookie_table[i].in_use)
+            continue;
+        if (!wininet_host_eq(g_cookie_table[i].host, host))
+            continue;
+        any = 1;
+        g_cookie_table[i].lru_seq = ++g_cookie_lru_counter;
+        if (data == 0 || *size == 0)
+        {
+            /* Caller is sizing the buffer — tally the chars
+             * we'd write but don't dereference data. */
+            DWORD k = 0;
+            while (g_cookie_table[i].name[k])
+                ++k;
+            have += k + 1; /* '=' */
+            k = 0;
+            while (g_cookie_table[i].value[k])
+                ++k;
+            have += k;
+            if (have > 0)
+                have += 2; /* "; " separator (or trailing slack) */
+            continue;
+        }
+        if (have > 0 && have + 2 < *size)
+        {
+            data[have++] = ';';
+            data[have++] = ' ';
+        }
+        DWORD k = 0;
+        while (g_cookie_table[i].name[k] && have + 1 < *size)
+            data[have++] = g_cookie_table[i].name[k++];
+        if (have + 1 < *size)
+            data[have++] = '=';
+        k = 0;
+        while (g_cookie_table[i].value[k] && have + 1 < *size)
+            data[have++] = g_cookie_table[i].value[k++];
+    }
+    if (data && *size > 0)
+        data[have < *size ? have : (*size - 1)] = 0;
+    *size = have;
+    return any;
 }
 
 __declspec(dllexport) BOOL InternetGetCookieW(const wchar_t16* url, const wchar_t16* name, wchar_t16* data, DWORD* size)
 {
-    (void)url;
-    (void)name;
-    if (data && size && *size > 0)
-        data[0] = 0;
+    /* Flatten the wide URL + name to ASCII (cookies in v0 are
+     * ASCII-only — international domain names go through Punycode
+     * before reaching here in real browsers). */
+    char url_a[256] = {0};
+    char name_a[COOKIE_NAME_BYTES] = {0};
+    if (url)
+    {
+        DWORD i = 0;
+        for (; url[i] && i + 1 < sizeof(url_a); ++i)
+            url_a[i] = (char)(url[i] & 0xFF);
+    }
+    if (name)
+    {
+        DWORD i = 0;
+        for (; name[i] && i + 1 < sizeof(name_a); ++i)
+            name_a[i] = (char)(name[i] & 0xFF);
+    }
+    /* Sized to fit the realistic multi-cookie concat. Static
+     * (not stack) because (a) we'd otherwise trip __chkstk on a
+     * frame ≥ 4 KiB and the freestanding DLL doesn't link it, and
+     * (b) the cookie store itself is single-threaded so a static
+     * scratch is correct under the same constraint. */
+    static char value_a[3072];
+    value_a[0] = 0;
+    DWORD asize = sizeof(value_a);
+    const BOOL ok = InternetGetCookieA(url_a, name_a[0] ? name_a : (const char*)0, value_a, &asize);
     if (size)
-        *size = 0;
-    return 0;
+    {
+        if (data && *size > 0)
+        {
+            DWORD i = 0;
+            for (; i < asize && i + 1 < *size; ++i)
+                data[i] = (wchar_t16)(unsigned char)value_a[i];
+            data[i] = 0;
+            *size = i;
+        }
+        else
+        {
+            *size = asize;
+        }
+    }
+    return ok;
 }
 
 __declspec(dllexport) BOOL InternetSetCookieA(const char* url, const char* name, const char* data)
 {
-    (void)url;
-    (void)name;
-    (void)data;
+    char host[COOKIE_HOST_BYTES];
+    if (!wininet_extract_host(url, host, sizeof(host)))
+        return 0;
+    if (!data)
+        return 0;
+    char name_buf[COOKIE_NAME_BYTES] = {0};
+    char value_buf[COOKIE_VALUE_BYTES] = {0};
+    if (name && *name)
+    {
+        wininet_str_copy_capped(name_buf, sizeof(name_buf), name);
+        wininet_str_copy_capped(value_buf, sizeof(value_buf), data);
+    }
+    else
+    {
+        wininet_parse_namevalue(data, name_buf, sizeof(name_buf), value_buf, sizeof(value_buf));
+    }
+    /* If a cookie with the same (host, name) exists, overwrite
+     * its value; otherwise pick the LRU slot. */
+    int slot = wininet_cookie_find(host, name_buf);
+    if (slot < 0)
+        slot = wininet_cookie_evict_target();
+    wininet_str_copy_capped(g_cookie_table[slot].host, sizeof(g_cookie_table[slot].host), host);
+    wininet_str_copy_capped(g_cookie_table[slot].name, sizeof(g_cookie_table[slot].name), name_buf);
+    wininet_str_copy_capped(g_cookie_table[slot].value, sizeof(g_cookie_table[slot].value), value_buf);
+    g_cookie_table[slot].in_use = 1;
+    g_cookie_table[slot].lru_seq = ++g_cookie_lru_counter;
     return 1;
 }
 
 __declspec(dllexport) BOOL InternetSetCookieW(const wchar_t16* url, const wchar_t16* name, const wchar_t16* data)
 {
-    (void)url;
-    (void)name;
-    (void)data;
-    return 1;
+    char url_a[256] = {0};
+    char name_a[COOKIE_NAME_BYTES] = {0};
+    char data_a[COOKIE_VALUE_BYTES + COOKIE_NAME_BYTES + 4] = {0};
+    if (url)
+    {
+        DWORD i = 0;
+        for (; url[i] && i + 1 < sizeof(url_a); ++i)
+            url_a[i] = (char)(url[i] & 0xFF);
+    }
+    if (name)
+    {
+        DWORD i = 0;
+        for (; name[i] && i + 1 < sizeof(name_a); ++i)
+            name_a[i] = (char)(name[i] & 0xFF);
+    }
+    if (data)
+    {
+        DWORD i = 0;
+        for (; data[i] && i + 1 < sizeof(data_a); ++i)
+            data_a[i] = (char)(data[i] & 0xFF);
+    }
+    return InternetSetCookieA(url_a, name_a[0] ? name_a : (const char*)0, data_a);
 }
 
 __declspec(dllexport) BOOL InternetGetCookieExA(const char* url, const char* name, char* data, DWORD* size, DWORD flags,
@@ -832,43 +1157,230 @@ __declspec(dllexport) BOOL DeleteUrlCacheEntryW(const wchar_t16* url)
 }
 
 /* InternetTimeFromSystemTime / InternetTimeToSystemTime —
- * RFC 1123 conversion. v0 returns failure. */
+ * RFC 1123 ("Sun, 06 Nov 1994 08:49:37 GMT") conversion. The
+ * input/output is a SYSTEMTIME struct (16 B):
+ *   WORD wYear, wMonth, wDayOfWeek, wDay, wHour, wMinute,
+ *        wSecond, wMilliseconds.
+ *
+ * `format` accepts INTERNET_RFC1123_FORMAT == 0 (the only
+ * format MSDN documents). Buffer size constant is
+ * INTERNET_RFC1123_BUFSIZE == 30 (29 chars + NUL).
+ */
+
+#define WININET_RFC1123_BUFSIZE 30u
+
+static const char* wininet_dow_short[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+static const char* wininet_mon_short[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+
+static void wininet_two_digits(char* dst, unsigned v)
+{
+    dst[0] = (char)('0' + ((v / 10) % 10));
+    dst[1] = (char)('0' + (v % 10));
+}
+
+static void wininet_four_digits(char* dst, unsigned v)
+{
+    dst[0] = (char)('0' + ((v / 1000) % 10));
+    dst[1] = (char)('0' + ((v / 100) % 10));
+    dst[2] = (char)('0' + ((v / 10) % 10));
+    dst[3] = (char)('0' + (v % 10));
+}
+
+static BOOL wininet_format_rfc1123_a(const void* time_st, char* buf, DWORD buf_len)
+{
+    if (time_st == 0 || buf == 0 || buf_len < WININET_RFC1123_BUFSIZE)
+        return 0;
+    const unsigned short* st = (const unsigned short*)time_st;
+    const unsigned year = st[0];
+    const unsigned month = st[1];
+    const unsigned dow = st[2];
+    const unsigned day = st[3];
+    const unsigned hour = st[4];
+    const unsigned minute = st[5];
+    const unsigned second = st[6];
+    if (month < 1 || month > 12 || dow > 6 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59)
+        return 0;
+    /* "DDD, dd MMM yyyy HH:MM:SS GMT" — exactly 29 chars + NUL. */
+    const char* dn = wininet_dow_short[dow];
+    const char* mn = wininet_mon_short[month - 1];
+    buf[0] = dn[0];
+    buf[1] = dn[1];
+    buf[2] = dn[2];
+    buf[3] = ',';
+    buf[4] = ' ';
+    wininet_two_digits(buf + 5, day);
+    buf[7] = ' ';
+    buf[8] = mn[0];
+    buf[9] = mn[1];
+    buf[10] = mn[2];
+    buf[11] = ' ';
+    wininet_four_digits(buf + 12, year);
+    buf[16] = ' ';
+    wininet_two_digits(buf + 17, hour);
+    buf[19] = ':';
+    wininet_two_digits(buf + 20, minute);
+    buf[22] = ':';
+    wininet_two_digits(buf + 23, second);
+    buf[25] = ' ';
+    buf[26] = 'G';
+    buf[27] = 'M';
+    buf[28] = 'T';
+    buf[29] = 0;
+    return 1;
+}
+
 __declspec(dllexport) BOOL InternetTimeFromSystemTimeA(const void* time_st, DWORD format, char* buf, DWORD buf_len)
 {
-    (void)time_st;
-    (void)format;
-    (void)buf_len;
-    if (buf)
-        buf[0] = 0;
-    return 0;
+    if (format != 0)
+        return 0;
+    return wininet_format_rfc1123_a(time_st, buf, buf_len);
 }
 
 __declspec(dllexport) BOOL InternetTimeFromSystemTimeW(const void* time_st, DWORD format, wchar_t16* buf, DWORD buf_len)
 {
-    (void)time_st;
-    (void)format;
-    (void)buf_len;
-    if (buf)
-        buf[0] = 0;
-    return 0;
+    if (format != 0)
+        return 0;
+    char ascii[WININET_RFC1123_BUFSIZE];
+    if (!wininet_format_rfc1123_a(time_st, ascii, sizeof(ascii)))
+        return 0;
+    if (buf == 0 || buf_len < WININET_RFC1123_BUFSIZE)
+        return 0;
+    for (DWORD i = 0; i < WININET_RFC1123_BUFSIZE; ++i)
+        buf[i] = (wchar_t16)(unsigned char)ascii[i];
+    return 1;
+}
+
+/* Skip leading whitespace. */
+static const char* wininet_skip_ws(const char* p)
+{
+    while (*p == ' ' || *p == '\t')
+        ++p;
+    return p;
+}
+
+/* Parse a base-10 unsigned int, advancing `*pp`. Returns 0 if no
+ * digits were seen at the start. */
+static unsigned wininet_parse_uint(const char** pp)
+{
+    const char* p = *pp;
+    unsigned v = 0;
+    int n = 0;
+    while (*p >= '0' && *p <= '9')
+    {
+        v = v * 10u + (unsigned)(*p - '0');
+        ++p;
+        ++n;
+    }
+    *pp = p;
+    return n > 0 ? v : 0u;
+}
+
+/* Match a 3-letter prefix (case-insensitive). */
+static int wininet_match_prefix3_ci(const char* p, const char* needle)
+{
+    for (int i = 0; i < 3; ++i)
+    {
+        char c = p[i];
+        char n = needle[i];
+        if (c >= 'a' && c <= 'z')
+            c = (char)(c - 32);
+        if (n >= 'a' && n <= 'z')
+            n = (char)(n - 32);
+        if (c != n)
+            return 0;
+    }
+    return 1;
+}
+
+/* Parse RFC 1123 ("Sun, 06 Nov 1994 08:49:37 GMT") into the 16-byte
+ * SYSTEMTIME. Returns 1 on success. Day-of-week is recomputed (not
+ * read from the input) so a malformed dow doesn't reject otherwise-
+ * valid timestamps; we follow Internet Explorer's behaviour here. */
+static BOOL wininet_parse_rfc1123_a(const char* str, void* time_st)
+{
+    if (str == 0 || time_st == 0)
+        return 0;
+    const char* p = wininet_skip_ws(str);
+    /* Skip optional "DDD," prefix. */
+    if (p[0] && p[1] && p[2] && p[3] == ',')
+        p += 4;
+    p = wininet_skip_ws(p);
+    const unsigned day = wininet_parse_uint(&p);
+    if (day < 1 || day > 31)
+        return 0;
+    p = wininet_skip_ws(p);
+    /* Three-letter month. */
+    int month = 0;
+    for (int i = 0; i < 12; ++i)
+    {
+        if (wininet_match_prefix3_ci(p, wininet_mon_short[i]))
+        {
+            month = i + 1;
+            break;
+        }
+    }
+    if (month == 0)
+        return 0;
+    p += 3;
+    p = wininet_skip_ws(p);
+    const unsigned year = wininet_parse_uint(&p);
+    if (year < 1601 || year > 9999)
+        return 0;
+    p = wininet_skip_ws(p);
+    const unsigned hour = wininet_parse_uint(&p);
+    if (hour > 23 || *p != ':')
+        return 0;
+    ++p;
+    const unsigned minute = wininet_parse_uint(&p);
+    if (minute > 59 || *p != ':')
+        return 0;
+    ++p;
+    const unsigned second = wininet_parse_uint(&p);
+    if (second > 59)
+        return 0;
+    /* Trailing zone (GMT/UTC) is permitted but not validated. */
+    /* Compute day-of-week via Zeller's congruence (Gregorian). */
+    unsigned y = year;
+    unsigned m = (unsigned)month;
+    if (m < 3)
+    {
+        m += 12;
+        --y;
+    }
+    const unsigned K = y % 100;
+    const unsigned J = y / 100;
+    const unsigned h = (day + (13 * (m + 1)) / 5 + K + K / 4 + J / 4 + 5 * J) % 7;
+    /* Zeller: 0 = Saturday … 6 = Friday. SYSTEMTIME wants
+     * 0 = Sunday … 6 = Saturday. */
+    const unsigned dow = (h + 6) % 7;
+    unsigned short* st = (unsigned short*)time_st;
+    st[0] = (unsigned short)year;
+    st[1] = (unsigned short)month;
+    st[2] = (unsigned short)dow;
+    st[3] = (unsigned short)day;
+    st[4] = (unsigned short)hour;
+    st[5] = (unsigned short)minute;
+    st[6] = (unsigned short)second;
+    st[7] = 0;
+    return 1;
 }
 
 __declspec(dllexport) BOOL InternetTimeToSystemTimeA(const char* str, void* time_st, DWORD reserved)
 {
-    (void)str;
     (void)reserved;
     if (time_st)
     {
+        /* Pre-zero so a parse failure leaves predictable bytes. */
         unsigned char* p = (unsigned char*)time_st;
         for (int i = 0; i < 16; ++i)
             p[i] = 0;
     }
-    return 0;
+    return wininet_parse_rfc1123_a(str, time_st);
 }
 
 __declspec(dllexport) BOOL InternetTimeToSystemTimeW(const wchar_t16* str, void* time_st, DWORD reserved)
 {
-    (void)str;
     (void)reserved;
     if (time_st)
     {
@@ -876,7 +1388,16 @@ __declspec(dllexport) BOOL InternetTimeToSystemTimeW(const wchar_t16* str, void*
         for (int i = 0; i < 16; ++i)
             p[i] = 0;
     }
-    return 0;
+    if (str == 0)
+        return 0;
+    /* Flatten to ASCII (RFC 1123 dates are ASCII-only). 64 bytes
+     * covers any well-formed date string (29 + slack). */
+    char ascii[64];
+    DWORD i = 0;
+    for (; str[i] && i + 1 < sizeof(ascii); ++i)
+        ascii[i] = (char)(str[i] & 0xFF);
+    ascii[i] = 0;
+    return wininet_parse_rfc1123_a(ascii, time_st);
 }
 
 __declspec(dllexport) BOOL InternetGetLastResponseInfoA(DWORD* err, char* buf, DWORD* len)

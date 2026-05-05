@@ -83,6 +83,10 @@ constinit u64 g_ecam_mmio_phys = 0;
 constinit volatile u8* g_ecam_mmio_virt = nullptr;
 constinit u8 g_ecam_start_bus = 0;
 constinit u8 g_ecam_end_bus = 0;
+// Init-once gate, hoisted out of PciEnumerate so PciTeardown can
+// reset it. Init returns early if already enumerated; teardown
+// clears it so a subsequent enumerate runs the bus walk again.
+constinit bool g_pci_enumerated = false;
 
 inline u32 MakeAddress(DeviceAddress addr, u8 offset)
 {
@@ -764,9 +768,16 @@ void EnumerateBus(u8 bus, u8& highest_bus_seen)
 void PciEnumerate()
 {
     KLOG_TRACE_SCOPE("drivers/pci", "PciEnumerate");
-    static constinit bool s_done = false;
-    KASSERT(!s_done, "drivers/pci", "PciEnumerate called twice");
-    s_done = true;
+    if (g_pci_enumerated)
+    {
+        // The driver-fault-domain restart path runs Teardown +
+        // Enumerate; Teardown clears the gate so this fast-return
+        // doesn't fire on the legitimate second call. Direct
+        // PciEnumerate() callers without an intervening teardown
+        // legitimately want a no-op.
+        return;
+    }
+    g_pci_enumerated = true;
 
     // If ACPI parsed an MCFG table, map the ECAM aperture into the
     // kernel MMIO arena. ECAM covers (end_bus - start_bus + 1) MiB
@@ -902,6 +913,31 @@ void PciEnumerate()
         }
         arch::SerialWrite("\n");
     }
+}
+
+void PciTeardown()
+{
+    if (!g_pci_enumerated)
+    {
+        return;
+    }
+    // Drop every cached device-table row. The Device struct is
+    // POD so a memset-style loop is fine; no destructors run.
+    for (u64 i = 0; i < kMaxDevices; ++i)
+    {
+        g_devices[i] = Device{};
+    }
+    g_device_count = 0;
+    // Forget the ECAM aperture. The MMIO mapping leaks because
+    // the kernel arena is a bump allocator (same caveat the
+    // framebuffer teardown documents). A future slice that
+    // adds a real MMIO unmap path can wire it in here.
+    g_ecam_mmio_phys = 0;
+    g_ecam_mmio_virt = nullptr;
+    g_ecam_start_bus = 0;
+    g_ecam_end_bus = 0;
+    g_pci_enumerated = false;
+    KLOG_INFO("drivers/pci", "teardown — bus enumeration cleared");
 }
 
 } // namespace duetos::drivers::pci

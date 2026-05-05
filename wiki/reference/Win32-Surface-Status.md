@@ -58,7 +58,7 @@ When a slice ADDS a new DLL or new method:
 - **Shipping DLLs:** 38 (Win32 user-mode + DirectX peripheral)
 - **Approximate exports:** ~1100 across all shipping DLLs
 - **Source LOC across `userland/libs/`:** ~38 000
-- **Live STUB / GAP markers** (`git grep -nE "// (STUB|GAP):"`): 7
+- **Live STUB / GAP markers** (`git grep -nE "// (STUB|GAP):"`): 4
 - **Win32 PE smoke coverage:** 127 PE smoke apps boot-tested per run
 
 The marker count is a lower bound on known-stub paths — most stubs
@@ -309,7 +309,11 @@ math (sqrt, pow, exp, log, sin, cos, tan via Taylor series).
 **STUB / GAP:**
 - Multi-byte conversion: `mbtowc`, `wctomb` — STUB ASCII passthrough
 - Locale-aware printf (`_l` family) — STUB returns same as non-_l
-- Threading: `_beginthreadex` works, `_beginthread` GAP
+- Threading: `_beginthread`, `_beginthreadex`, `_endthread`,
+  `_endthreadex` — REAL via SYS_THREAD_CREATE / SYS_EXIT
+  (both flavours route to the same kernel surface; the
+  signature difference is purely C-level — kernel doesn't
+  care about the start function's return type)
 - Atomic helpers — real (forward to compiler intrinsics)
 
 ### dbghelp.dll  (~490 LOC, ~30 exports)
@@ -414,7 +418,10 @@ WinDbg client API, `SymLoadModuleEx`.
   `Ellipse`, `LineTo`, `MoveToEx`,
   `Polygon`, `Polyline`, `BitBlt`, `StretchBlt`,
   `SetPixel`, `SetPixelV`, `GetPixel`,
-  `TextOutA/W`, `ExtTextOutA/W`, `DrawTextA/W`
+  `TextOutA/W`, `ExtTextOutA/W` (honours `ETO_CLIPPED` + the
+  `lprc` clip-rect by trimming the (text, x) pair to the
+  visible columns at the kernel font's 8 px cell width;
+  `ETO_OPAQUE` still STUB), `DrawTextA/W`
 - State: `SetBkColor`, `SetBkMode`, `SetMapMode`,
   `SetTextColor`, `SetTextAlign`
 
@@ -475,12 +482,25 @@ every other call accepts. `IsThemeActive` returns TRUE.
 inventory above. `PathCanonicalizeW` is GAP for `..` walks
 above the drive root.
 
-### shell32.dll  (~290 LOC, ~13 exports)
+### shell32.dll  (~410 LOC, ~13 exports)
 
-`CommandLineToArgvW` — REAL (the only export the boot smoke
-exercises end-to-end). `SHGetFolderPathW`, `SHGetKnownFolderPath`
-— GAP: return canned `C:\Users\admin` / `C:\Windows`.
-`ShellExecuteW`, `ShellExecuteExW`, `SHFileOperationW` — STUB.
+`CommandLineToArgvW` — REAL. `SHGetFolderPathW` /
+`SHGetFolderPathA` / `SHGetSpecialFolderPathW` /
+`SHGetSpecialFolderPathA` — REAL: dispatch the masked
+CSIDL value (`CSIDL_FLAG_MASK = 0xFF00`) against a per-CSIDL
+path table covering APPDATA / LOCAL\_APPDATA / PROGRAM\_FILES /
+PROGRAM\_FILES\_COMMON / WINDOWS / SYSTEM / FONTS / DESKTOP /
+PERSONAL / MYMUSIC / MYVIDEO / MYPICTURES / FAVORITES /
+PROFILE / COMMON\_APPDATA (= ProgramData) and the Start-Menu /
+Recent / SendTo / Templates / Cookies / History / INetCache
+sub-trees, all rooted at `X:\Users\duetos` to match the
+USERPROFILE convention in `userenv.c`. Unrecognised CSIDLs
+fall through to the profile root. `SHGetKnownFolderPath` is
+still STUB — it returns `E_FAIL` because the API allocates
+the path through `CoTaskMemAlloc`, which shell32 doesn't
+import; modern callers should fall back to
+`SHGetFolderPathW`. `ShellExecuteW`, `ShellExecuteExW`,
+`SHFileOperationW` — STUB.
 
 ### version.dll  (~290 LOC, ~16 exports)
 
@@ -566,17 +586,34 @@ canned values for username / domain / station). The rest STUB.
 `NotifyAddrChange`, `NotifyRouteChange`,
 `SetIpInterfaceEntry` — STUB.
 
-### wininet.dll  (~900 LOC, ~50 exports)
+### wininet.dll  (~1100 LOC, ~50 exports)
 
 > **Status:** HTTP/1.0 GET works end-to-end (mini_browser PE
-> uses it). Cookies / FTP / cache / async — STUB.
+> uses it). Cookies REAL via in-process LRU table. RFC 1123
+> time format / parse REAL. FTP / cache / async — STUB.
 
 `InternetOpenA/W`, `InternetOpenUrlA/W`, `InternetReadFile`,
 `InternetCloseHandle`, `HttpQueryInfoA`, `InternetQueryDataAvailable`
 — REAL for HTTP/1.0 + simple Content-Length flow.
+`InternetTimeFromSystemTimeA/W`, `InternetTimeToSystemTimeA/W`
+— REAL: RFC 1123 format / parse round-trip ("Sun, 06 Nov 1994
+08:49:37 GMT"). Day-of-week is recomputed via Zeller on parse
+so a wrong dow input still parses; format always emits the
+Zeller-correct dow.
 
 `InternetWriteFile` — GAP (no chunked POST). FTP family — STUB.
-Cookie family (`InternetGetCookieA/W`) — STUB.
+Cookie family (`InternetGetCookieA/W` /
+`InternetSetCookieA/W` / their `Ex*` variants) — REAL via a
+small in-process cookie store: a 16-entry LRU table of
+`(host, name, value)` triples, host extracted from the URL by
+parsing `scheme://[userinfo@]host[:port]/...`, host compare
+case-insensitive per RFC 6265. `InternetGetCookieA/W` with
+NULL `name` walks every matching host entry and concatenates
+them as `name1=value1; name2=value2; ...` — the canonical
+HTTP `Cookie:` header form. Path / domain / Secure /
+HttpOnly / SameSite attributes are dropped — Set just stashes
+the triple. Cleared at process exit (no on-disk
+persistence).
 
 ### winhttp.dll  (~690 LOC, ~35 exports)
 
@@ -622,21 +659,37 @@ SSPI facade. `AcquireCredentialsHandleA/W`,
 
 ## 5. Crypto / RNG
 
-### bcrypt.dll  (~700 LOC, ~10 exports)
+### bcrypt.dll  (~870 LOC, ~10 exports)
 
 > **Status:** REAL for the algorithm set most callers want.
-> Backed by the kernel's `SYS_RANDOM_BYTES` and an in-tree
-> SHA-256 / AES.
+> Backed by the kernel's `SYS_RANDOM_BYTES` and the in-tree
+> SHA-256 / SHA-384 / SHA-512 / SHA-1 / MD5 / AES hash + cipher
+> cores.
 
 `BCryptOpenAlgorithmProvider`, `BCryptCloseAlgorithmProvider`,
 `BCryptCreateHash`, `BCryptHashData`, `BCryptFinishHash`,
 `BCryptDestroyHash`, `BCryptGetProperty`, `BCryptGenRandom`
-— REAL for SHA-256, SHA-1, MD5, AES-CBC, AES-GCM, RNG.
+— REAL for SHA-256, SHA-384, SHA-512, SHA-1, MD5, RNG.
+SHA-384 and SHA-512 share one FIPS 180-4 §6.4 core; SHA-384
+differs only in the eight initial-hash values and the
+truncated 48-byte output.
 
-GAP: SHA-384 / SHA-512 not in the algorithm table.
-`BCryptHashData` slots are single-threaded (one global per
-algorithm), so concurrent hashing breaks. RSA / ECC key
-import / sign / verify — STUB.
+`BCryptGenerateSymmetricKey`, `BCryptDestroyKey`,
+`BCryptSetProperty`, `BCryptEncrypt`, `BCryptDecrypt` — REAL
+for AES-128 + AES-256 in CBC and ECB modes via a FIPS 197
+reference core. `SetProperty(BCRYPT_CHAINING_MODE, "...CBC"
+| "...ECB")` flips the chaining; `Encrypt` / `Decrypt`
+require a 16-byte IV in CBC mode. Verified against FIPS 197
+Appendix B (AES-128 KAT) and NIST AES-256 KAT — both match
+on first-block + round-trip.
+
+GAP: `BCryptHashData` slots and the AES key slot are
+single-threaded (one global of each), so concurrent hashing
+or encryption breaks.
+
+MISSING: AES-GCM (no AEAD wrapper), PKCS#7 padding (caller
+must pre-pad to 16-byte boundary), RSA / ECC key import /
+sign / verify, key derivation (`BCryptDeriveKeyPBKDF2` etc.).
 
 ---
 
@@ -705,7 +758,13 @@ CreateCounter, 27 CreateDeferredContext, 28 OpenSharedResource.
 
 **ID3D11DeviceContext** (canonical d3d11.h order) — REAL: 0..2
 IUnknown, 9 PSSetShader, 11 VSSetShader, 12 DrawIndexed, 13
-Draw, 14 Map, 15 Unmap, 17 IASetInputLayout, 18
+Draw, 14 Map (validates `map_type` ∈ {READ, WRITE, READ\_WRITE,
+WRITE\_DISCARD, WRITE\_NO\_OVERWRITE}; routes WRITE\_NO\_OVERWRITE
+on buffers to the same backing storage; rejects
+WRITE\_NO\_OVERWRITE on textures with `E_INVALIDARG`; records
+the last map\_type per buffer for read-back via
+`DuetOS_D3D11_PeekBufferMapType`), 15 Unmap, 17
+IASetInputLayout, 18
 IASetVertexBuffers, 19 IASetIndexBuffer, 20
 DrawIndexedInstanced, 21 DrawInstanced, 24
 IASetPrimitiveTopology, 33 OMSetRenderTargets, 35
@@ -749,10 +808,18 @@ DrawInstanced, 13 DrawIndexedInstanced, 20
 IASetPrimitiveTopology, 21 RSSetViewports, 22
 RSSetScissorRects (no-op), 25 SetPipelineState, 26
 ResourceBarrier (records `current_state` per resource —
-TRANSITION barriers update it; ALIASING / UAV are no-op
+TRANSITION barriers update it AND validate StateBefore
+matches the recorded state, bumping a per-list mismatch
+counter (`DuetOS_D3D12_PeekBarrierMismatchCount`) and
+emitting one `[d3d12] ResourceBarrier StateBefore mismatch:
+recorded=… declared=… after=…` line via SYS_DEBUG_PRINT for
+the first three mismatches; ALIASING / UAV are no-op
 success), 29 SetComputeRootSignature (no-op),
 30 SetGraphicsRootSignature, 43 IASetIndexBuffer, 44
-IASetVertexBuffers, 46 OMSetRenderTargets, 47
+IASetVertexBuffers (walks `n` views from `start_slot`,
+populating each of the 32 IA slots independently so the
+PSO's per-element InputSlot can pick the right VB per
+attribute), 46 OMSetRenderTargets, 47
 ClearDepthStencilView (no-op), 48 ClearRenderTargetView.
 
 STUB: every other slot (all root-table / root-32-bit /
@@ -826,10 +893,14 @@ shape. Brush colour mutate / opacity / transform are STUB
 CreateFontFileReference, CreateFontFace,
 CreateTextAnalyzer, the rendering-parameter family.
 
-**IDWriteTextLayout** — REAL: GetMaxWidth, GetMaxHeight,
-GetMetrics (monospace approximation, fixed cell sizes from the
-kernel font). STUB: GetClusterMetrics, HitTestPoint, every
-range-property setter.
+**IDWriteTextLayout** — REAL: GetMaxWidth (slot 42),
+GetMaxHeight (slot 43), GetMetrics (slot 60 — monospace
+approximation, fixed cell sizes derived from the requested
+font size), HitTestPoint (slot 64 — single-line monospace,
+returns column = floor(pointX / cell\_w), trailing-half flag,
+inside-bounds flag, and a populated DWRITE\_HIT\_TEST\_METRICS).
+STUB: GetClusterMetrics, HitTestTextPosition,
+HitTestTextRange, every range-property setter.
 
 ### dinput8.dll  (~545 LOC) — `DirectInput8Create`
 
@@ -1073,10 +1144,13 @@ did. PE imports of these names fail at PeLoad today.
   not honoured by the rasterizer.
 - **Compute** — `Dispatch`, UAVs, structured buffers — STUB.
 - **Indirect draws** — `DrawInstancedIndirect` etc. — STUB.
-- **Multi-stream input layouts** — D3D11 honours all 32 slots
-  (per-element `InputSlot` picks the right VB). D3D12 still
-  reads VB slot 0 only — same approach can land there but
-  hasn't yet.
+- **Multi-stream input layouts** — both D3D11 and D3D12 honour
+  all 32 slots: the PSO / input-layout records each element's
+  `InputSlot`, the command list / context keeps a 32-entry
+  `current_vb_address / size / stride` array, and `Draw*` /
+  `DrawIndexed*` route each attribute to the right VB. The
+  dx\_demo's `test_d3d12_multistream` covers POSITION on slot 0
+  + COLOR on slot 3 end-to-end.
 - **Tessellation** — hull / domain / GS shaders not run.
 
 ### Process / threading
@@ -1199,32 +1273,11 @@ short list:
 
 1. **`SymGetLineFromAddr64`** in dbghelp — would let
    `process_smoke` print real source-line crash dumps.
-2. **`SHGetFolderPathW(CSIDL_APPDATA)`** — return a real
-   per-user path under `C:\Users\admin\AppData\Roaming`
-   (we already have ramfs entries for those names).
-3. **D3D11 `Map(D3D11_MAP_WRITE_DISCARD)` on a buffer** —
-   currently REAL; extend to `D3D11_MAP_WRITE_NO_OVERWRITE`
-   (lock semantics).
-4. **`gdi32!ExtTextOutA` clip-rectangle parameter** —
-   currently ignored; the rect is right there in the
-   primitive.
-5. **`dwrite!IDWriteTextLayout::HitTestPoint`** — use the
-   monospace metrics we already compute.
-6. **D3D12 multi-stream input** — same per-element InputSlot
-   refactor that landed in D3D11; the PSO already extracts
-   the field. Use the same 32-slot array shape.
-7. **D3D12 `ResourceBarrier` validation** — the new
-   `current_state` field is untouched after the barrier
-   updates; check that `StateBefore` matches the recorded
-   state and surface a debug print on mismatch.
-8. **`ws2_32!WSAEventSelect`** — back into our message-
+2. **`ws2_32!WSAEventSelect`** — back into our message-
    queue + waitable-event primitives.
-9. **`bcrypt`** — add SHA-384 / SHA-512 to the algorithm
-   table (SHA-256 reference is right there; the FIPS 180-4
-   delta is the constant table + bigger word size).
-10. **`d2d1!DrawText`** — wire DWrite's monospace metrics
-    into the existing FillRect path so single-line text
-    renders.
+3. **`d2d1!DrawText`** — wire DWrite's monospace metrics
+   into the existing FillRect path so single-line text
+   renders.
 
 Each row is a small slice that flips one STUB / GAP to REAL
 and adds a smoke / dx_demo coverage probe.

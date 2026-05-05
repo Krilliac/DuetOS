@@ -67,8 +67,25 @@ struct FramebufferInfo
 /// linear framebuffer, and MapMmio the pixel buffer. Idempotent:
 /// second call is a no-op. If GRUB didn't provide a tag or the tag
 /// describes an unsupported mode, logs the reason to the serial
-/// console and leaves the driver `Available() == false`.
+/// console and leaves the driver `Available() == false`. The
+/// multiboot info phys passed here is stashed so a later
+/// `FramebufferReinit` can re-locate the tag.
 void FramebufferInit(uptr multiboot_info_phys);
+
+/// Re-init using the multiboot info phys captured during the
+/// first FramebufferInit call. Used by the driver fault-domain
+/// registry to drive the surface through a teardown + re-init
+/// without needing the boot-time multiboot pointer threaded
+/// through every call site.
+void FramebufferReinit();
+
+/// Drop the active framebuffer surface so a subsequent
+/// `FramebufferReinit` runs cleanly: clears Available(), zeroes
+/// the cached info, drops the present-hook + compose state, and
+/// resets the init-once guard. The MMIO mapping leaks (the arena
+/// is a bump allocator); see FramebufferRebind for the same
+/// caveat. Idempotent.
+void FramebufferTeardown();
 
 /// True if init found a usable framebuffer and drawing is permitted.
 bool FramebufferAvailable();

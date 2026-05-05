@@ -77,7 +77,17 @@ namespace duetos::drivers::storage
 /// bus. Registers the controller's namespace 1 as a block device
 /// on success. Logs one banner line per phase so boot-log grep
 /// can follow progress. No-op when no NVMe controller exists.
+/// Idempotent: returns early when the controller is already
+/// online (the fault-domain restart path runs Teardown first).
 void NvmeInit();
+
+/// Free the controller's DMA-backed queues, staging buffer, and
+/// PRP list, then reset every cached field so a subsequent
+/// `NvmeInit` re-walks PCI cleanly. The MMIO mapping for BAR0
+/// and the block-layer handle leak (same caveat ahci / pci /
+/// framebuffer document for their MMIO mappings + block
+/// handles). Idempotent.
+void NvmeTeardown();
 
 /// Boot-time self-test: if an NVMe block device exists, reads
 /// LBA 0 and asserts the first 8 bytes match the marker

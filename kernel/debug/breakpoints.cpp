@@ -328,6 +328,53 @@ void BpInit()
     KLOG_INFO("debug/bp", "breakpoint subsystem online");
 }
 
+void BpTeardown()
+{
+    sync::SpinLockGuard g(g_lock);
+    if (!g_inited)
+        return;
+    // Disarm all hardware breakpoint slots — DR7 to MBS-only with
+    // every L0..L3 / G0..G3 enable bit cleared, then zero each
+    // address register so a stale virtual address can't survive an
+    // accidental DR7 re-enable. Mirrors the BpInit baseline.
+    dr::WriteDr7(dr::kDr7Mbs);
+    dr::WriteDr0(0);
+    dr::WriteDr1(0);
+    dr::WriteDr2(0);
+    dr::WriteDr3(0);
+    // Drop every software / hardware table entry. Software
+    // breakpoints leave behind int3 patches in the .text bytes
+    // they targeted; the table loses the original-byte record
+    // here, so a later BpInit + new install at the same VA would
+    // observe an int3 in place of the original instruction. v0
+    // accepts that — restartable breakpoints are a debugger-only
+    // surface and the operator is expected to manually
+    // unregister the old IDs first via BpRemove. Real Linux's
+    // perf_event subsystem has the same caveat.
+    for (auto& e : g_sw_table)
+    {
+        e.id = 0;
+        e.wq = sched::WaitQueue{};
+        e.stopped_task_id = 0;
+        e.stopped_frame = nullptr;
+        e.stopped_as = nullptr;
+    }
+    for (auto& e : g_hw_table)
+    {
+        e.id = 0;
+        e.wq = sched::WaitQueue{};
+        e.stopped_task_id = 0;
+        e.stopped_frame = nullptr;
+        e.stopped_as = nullptr;
+    }
+    g_next_id = 1;
+    g_reinsert.pending = false;
+    g_stepping.task_id = 0;
+    g_stepping.bp_id = 0;
+    g_inited = false;
+    KLOG_INFO("debug/bp", "breakpoint subsystem offline");
+}
+
 BreakpointId BpInstallSoftware(u64 kernel_va, bool suspend_on_hit, BpError* err, BpHitCallback on_hit)
 {
     auto set_err = [&](BpError e)

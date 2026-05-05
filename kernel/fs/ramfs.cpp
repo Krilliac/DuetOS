@@ -789,6 +789,35 @@ void RamfsInit()
     core::Log(core::LogLevel::Info, "fs/ramfs", "ramfs trees seeded");
 }
 
+void RamfsTeardown()
+{
+    // Trusted + sandbox trees are constinit — nothing to undo
+    // there. What teardown does flush is every mutable snapshot
+    // buffer reachable through /proc and /sys: cursor goes to 0
+    // so a subsequent Snapshot call starts writing from the head
+    // of its buffer, and the corresponding RamfsNode.file_size
+    // goes to 0 so a `cat` of the path between Teardown and the
+    // next Snapshot reads as empty (rather than the stale bytes
+    // the buffer still holds — those get overwritten on the next
+    // Snapshot anyway, but file_size is the visible contract).
+    g_boottrace_cursor = 0;
+    k_proc_boottrace.file_size = 0;
+    g_syscalls_cursor = 0;
+    k_sys_syscalls.file_size = 0;
+    g_abi_native_cursor = 0;
+    k_proc_abi_native.file_size = 0;
+    g_abi_win32_cursor = 0;
+    k_proc_abi_win32.file_size = 0;
+    g_cpuhist_cursor = 0;
+    k_proc_cpuhist.file_size = 0;
+    for (u32 i = 0; i < kInspectSlotCount; ++i)
+    {
+        g_inspect_slots[i].cursor = 0;
+        g_inspect_slots[i].node.file_size = 0;
+    }
+    core::Log(core::LogLevel::Info, "fs/ramfs", "snapshot buffers cleared");
+}
+
 const RamfsNode* RamfsTrustedRoot()
 {
     return &k_trusted_root;

@@ -930,6 +930,12 @@ void HandlePacket()
         ResumeAction picked = ResumeAction::Continue;
         bool found_match = false;
         bool any_action = false;
+        // Bitmap of peers (by cpu_id) that have already had an
+        // action applied during this packet's walk. GDB's vCont
+        // contract is "first matching action per thread wins", so
+        // once a peer is in this set we ignore subsequent actions
+        // that target it. kMaxCpuThreadsFs is 32, fits in a u32.
+        u32 peers_handled = 0;
         while (i < g_packet_len)
         {
             const u8 act = g_packet[i++];
@@ -964,7 +970,50 @@ void HandlePacket()
             // applies iff it matches g_running_thread_id.
             const bool applies = !has_tid || tid <= 0 || static_cast<u32>(tid) == g_running_thread_id;
             if (!applies)
+            {
+                // Peer-thread action. Step (s/S) translates into
+                // setting RFLAGS.TF on the peer's snapshot; the
+                // EnterAndWait release path commits dirty snapshots
+                // back to each peer's TrapFrame before lifting the
+                // NMI freeze, so the peer iretq's with TF set and
+                // traps after one instruction. Continue (c/C) on a
+                // peer ALSO routes here so that an explicit
+                // `vCont;c:<peer>` clears any TF a previous step
+                // request left in place — mirrors how the running-
+                // CPU branch below clears or sets TF based on
+                // `picked`. Out-of-range / non-frozen peers are
+                // silently dropped (matches the `Hg` handler's
+                // tolerance for stale tids).
+                const u32 peer_cpu = ThreadIdToCpuId(tid, kMaxCpuThreadsFs);
+                if (peer_cpu < kMaxCpuThreadsFs && (peer_cpu + 1) != g_running_thread_id)
+                {
+                    const u32 peer_bit = 1u << peer_cpu;
+                    if ((peers_handled & peer_bit) == 0)
+                    {
+                        cpu::PerCpu* peer = arch::SmpGetPercpu(peer_cpu);
+                        if (peer != nullptr && peer->gdb_frozen_frame != nullptr)
+                        {
+                            // Refresh the snapshot only if no `G`
+                            // write already mutated it during this
+                            // stop session — without the dirty guard
+                            // we'd discard operator edits from an
+                            // earlier `Hg` / `G` pair targeting this
+                            // same peer.
+                            if (!g_peer_dirty[peer_cpu])
+                            {
+                                PeerFrameToSnapshot(peer->gdb_frozen_frame, g_peer_snapshots[peer_cpu]);
+                            }
+                            if (act == 's' || act == 'S')
+                                g_peer_snapshots[peer_cpu].rflags |= kRflagsTf;
+                            else
+                                g_peer_snapshots[peer_cpu].rflags &= ~kRflagsTf;
+                            g_peer_dirty[peer_cpu] = true;
+                            peers_handled |= peer_bit;
+                        }
+                    }
+                }
                 continue;
+            }
 
             picked = (act == 's' || act == 'S') ? ResumeAction::Step : ResumeAction::Continue;
             found_match = true;

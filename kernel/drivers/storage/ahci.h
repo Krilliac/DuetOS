@@ -46,9 +46,17 @@ namespace duetos::drivers::storage
 /// drive. For each drive, register it as a block device (name
 /// "sata0", "sata1", ...) so higher layers (GPT parser, FAT32)
 /// consume it through the same interface as NVMe / the RAM
-/// backend. Safe to call exactly once; double-init is a kernel
-/// bug (trapped via an internal flag).
+/// backend. Idempotent: a second call without an intervening
+/// `AhciTeardown` returns early without re-walking PCI.
 void AhciInit();
+
+/// Free every per-port DMA scratch buffer, drop the cached port
+/// table, and clear the init-once flag so a subsequent
+/// `AhciInit` runs the discovery walk again. The block-device
+/// handle BlockDeviceRegister handed out for each port is
+/// leaked because the block layer has no Unregister yet —
+/// future slice. Idempotent.
+void AhciTeardown();
 
 /// Boot-time self-test: if any SATA drive is registered, read
 /// LBA 0 and assert the 0x55AA boot signature at offset 510/511.

@@ -241,6 +241,14 @@ bool Fat32DeleteAtPath(const Volume* v, const char* path);
 i64 Fat32TruncateAtPath(const Volume* v, const char* path, u64 new_size);
 i64 Fat32AppendAtPath(const Volume* v, const char* path, const void* buf, u64 len);
 
+/// Path-resolved write that grows the cluster chain when `offset
+/// + len` exceeds the file's current size. Returns bytes written
+/// or -1. Distinct from `Fat32WriteInPlace` (which bounds the
+/// write to the existing size and never touches the FAT). Sparse
+/// writes (offset > current size) are rejected — caller can grow
+/// the file with zeros explicitly via `Fat32TruncateAtPath`.
+i64 Fat32WriteAtPath(const Volume* v, const char* path, u64 offset, const void* buf, u64 len);
+
 /// Create a new directory at `path`. The parent directory must
 /// exist; the basename must not collide with an existing entry.
 /// Seeds the new directory with the required "." and ".." self

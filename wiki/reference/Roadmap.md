@@ -71,22 +71,14 @@ the same commit** that delivers the code.
   (KMutex / KEvent / KSemaphore / KMailbox / KWaitable / KFile)
   are landed. Next slice is the SYS_* surface migration itself.
 
-### GDB stub completion (peer-thread step)
-
-- **Scope:** `vCont;s` step on a peer thread (no clear use
-  case today, but the only remaining gap in the stub).
-- **Blocks on:** nothing structural; needs a use case to drive
-  the design (current step path is BSP-only).
-- **When to land:** when a multi-thread workload genuinely
-  benefits from per-thread step control.
-
 ### Driver fault-domain registration
 
-- **Scope:** write teardown functions for `framebuffer`, `pci`,
-  `nvme`, `ahci`, `xhci`, `e1000`, `ramfs`, `fat32`,
-  `runtime_checker`, `breakpoints`. Currently 6 driver fault
-  domains are registered (soft-lockup / lockdep / event-trace
-  / perf / nmi-watchdog / cleanroom-trace).
+- **Scope:** write teardown functions for `e1000`, `fat32`.
+  Currently 18 driver fault domains are registered (soft-lockup
+  / lockdep / event-trace / perf / nmi-watchdog / cleanroom-trace
+  / runtime-checker / breakpoints / framebuffer / pci / ahci /
+  nvme / ramfs / acpi/aml / drivers/gpu / drivers/net /
+  drivers/usb/xhci / drivers/audio).
 - **Blocks on:** each driver's teardown story — most drivers
   were written assuming run-once-at-boot semantics. Adding a
   clean teardown for each is the actual work.
@@ -127,10 +119,19 @@ the same commit** that delivers the code.
 
 ### Stage 6 — VFS mount path
 
-- **Scope:** `fs::VfsMount(BlockDeviceHandle, FsType,
-  mount_point) -> MountId`. First consumer: the shell gains a
-  `mount` command that takes `/dev/nvme0p1` and attaches it at
-  `/mnt/...`.
+- **First slice landed:** `fs::VfsMount(mount_point, FsType,
+  block_handle) -> MountId` registry — fixed-size table of 16
+  mounts, dup-mount-point rejection, ramfs-needs-zero-handle
+  validation, plus `VfsUmount` / `VfsMountFind` /
+  `VfsMountEnumerate` and a boot self-test. The registry is
+  bookkeeping only today: lookups still go through the
+  constinit ramfs trees.
+- **Remaining work:** teach `VfsLookup` to consult the mount
+  table when path resolution crosses a mount-point — switch
+  to the mount entry's per-FS-type lookup vtable. That's the
+  Stage 6 second slice. Until then, `VfsMount` is a registry
+  + telemetry surface (the kernel shell's eventual `mount`
+  command will list registered mounts).
 - **Per-process namespace roots** continue to work — `Process::root`
   stays a `const RamfsNode*` today, but grows into a generic
   `VfsDir*` handle once on-disk FS is mountable.
@@ -139,30 +140,33 @@ the same commit** that delivers the code.
 
 In rough priority:
 
-1. **Writable FAT32** — so the shell can create files. Most of
-   the kernel-side write path is in tree (`Fat32WriteInPlace`,
-   `Fat32AppendAtPath`, `SYS_FILE_WRITE`, `SYS_FILE_CREATE`,
-   cap-gated by `kCapFsWrite`). Remaining work is mid-file
-   writes that grow a cluster chain.
+1. **Writable FAT32** — kernel-side write path is in tree:
+   `Fat32WriteInPlace` (bounded), `Fat32WriteAtPath` (mid-file
+   write that grows the cluster chain), `Fat32AppendAtPath`,
+   `Fat32TruncateAtPath`, `SYS_FILE_WRITE`, `SYS_FILE_CREATE`
+   — all cap-gated by `kCapFsWrite`. Remaining work is exposing
+   the path-resolved growing write to userland (`SYS_FILE_WRITE`
+   currently routes through `Fat32WriteInPlace` only).
 2. **Native DuetOS FS** — our own design, journalled, ext-like.
    Done in Rust from scratch (see Rust bring-up below).
 3. **NTFS read-only** — required by the Windows-PE pillar once
    we want to load a `.exe` from a real NTFS partition.
-
-### ext4 leaf-extent depth > 0
-
-- **Today:** ext4 root-dir walk iterates every leaf-extent
-  block; depth>0 extent-tree walk still deferred.
-- **Owner:** `kernel/fs/ext4/`.
 
 ### Crash-dump persistence to disk
 
 - **Today:** Windows-format `.dmp` files are emitted byte-by-byte
   over QEMU's debugcon (port 0xE9 → `${BUILD_DIR}/duetos.dmp`
   host file). Loadable in WinDbg / VSCode / Python `minidump`.
+  The built dump bytes are exposed via
+  `diag::minidump::AccessLastMinidump(*out_bytes, *out_len)` so
+  any panic-time consumer (disk writer, network pusher, etc.)
+  can ship the same bytes the debugcon path already wrote.
 - **Deferred:** real-hardware persistence (raw-block write to a
-  reserved LBA range). Needs a panic-time block writer that
-  runs without the slab allocator or scheduler.
+  reserved LBA range). The bytes-access foundation is in place;
+  remaining work is the panic-time block writer that runs
+  without the slab allocator or scheduler — likely an
+  NVMe / AHCI polled-completion path that bypasses the regular
+  block layer.
 
 ---
 
@@ -193,14 +197,27 @@ In rough priority:
 - **Owner:** `kernel/drivers/net/wireless/` (per-vendor upload +
   ring setup), `kernel/net/wireless/` (MLME state machine).
 
-### USB mouse (xHCI HID class)
+### USB mouse — beyond boot protocol
 
-- **Today:** xHCI keyboard works; mouse class is probe-only.
-  Keyboard path is the template.
-- **Blocks on:** report-descriptor parsing for mouse-class
-  endpoints. No QEMU emulation — has to be tested on physical HW.
-- **Effort:** ~200–300 LOC.
-- **Owner:** `kernel/drivers/usb/class/hid*`.
+- **Today:** boot-protocol mouse is fully wired end-to-end —
+  `xhci_descparse.cpp` recognises `kIfaceProtocolMouse`,
+  `xhci_enum.cpp` flags the device, `xhci_init.cpp`'s polling
+  loop routes 3-byte reports to `HidMouseInject` in
+  `xhci_input.cpp`, which packs them into the same
+  `MousePacket` queue PS/2 mice use. Boot protocol gives 3
+  axes + 3 buttons; that's enough for the desktop-prototype
+  WM and most older USB mice.
+- **Deferred:** report-descriptor-driven mouse decoding —
+  scroll wheel (Z axis), 4th / 5th buttons, high-dpi
+  pointers, tilt wheels. The descriptor parser exists
+  (`HidParseDescriptor` in `hid_descriptor.cpp`); the
+  remaining work is wiring it into `xhci_init.cpp`'s
+  polling-report decode so non-boot reports get parsed by
+  field rather than by fixed 3-byte layout.
+- **Blocks on:** a workload that legitimately needs scroll
+  or extra-button support — boot protocol is the right
+  default until then.
+- **Owner:** `kernel/drivers/usb/`.
 
 ### Multi-monitor / runtime resolution change
 
@@ -238,14 +255,10 @@ In rough priority:
 The following `// GAP:` markers in source code track edge
 cases that the v0 happy path skips:
 
-- `kernel/drivers/audio/audio.cpp` — per-widget amplifier
-  capabilities (Linux HDA codec depth).
 - `kernel/drivers/net/iwlwifi_rings.cpp` — legacy <7000-series
   RBD format; TX completion polling.
 - `kernel/mm/dma.cpp` — ARM64 port (`dsb ishst` + per-line
   `dc cvac`).
-- `kernel/shell/shell_extra.cpp` — rolling 1/5/15-minute load
-  decay.
 - `kernel/subsystems/translation/translate.cpp` — `rseq`
   (restartable sequences).
 

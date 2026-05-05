@@ -152,6 +152,100 @@ __declspec(dllexport) int _configthreadlocale(int per_thread)
 }
 
 /* ------------------------------------------------------------------
+ * Thread creation — _beginthread + _beginthreadex.
+ *
+ * Both wrap SYS_THREAD_CREATE (syscall 45) which spawns a new Task
+ * sharing the caller's Process / AddressSpace / cap set. The kernel
+ * returns a Win32 pseudo-handle (kWin32ThreadBase + slot, i.e.
+ * 0x400..0x407) on success or u64(-1) on failure (cap denied,
+ * slot-table full, etc.). _beginthread's "auto-close" semantic is
+ * a no-op here because the kernel reclaims slots on thread exit
+ * regardless of CloseHandle calls.
+ *
+ * The MSVC CRT signature differences:
+ *   _beginthread(start, stack, arg) — start returns void
+ *   _beginthreadex(security, stack, start, arg, initflag, *thrdid)
+ *                                 — start returns unsigned int
+ * The kernel doesn't care about the start function's return type
+ * (a thread that returns from its entry function lands in the
+ * kernel-side teardown either way), so both signatures route to
+ * the same syscall. stack_size is ignored — the kernel uses a
+ * fixed kV0ThreadStackPages allocation per thread.
+ *
+ * SYS_THREAD_CREATE = 45 takes:
+ *   rdi = user-mode start VA
+ *   rsi = user-mode arg
+ * and returns the handle in rax.
+ * ------------------------------------------------------------------ */
+
+typedef unsigned long long uintptr_t;
+
+static inline uintptr_t ucrt_thread_create(void* start, void* arg)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)45), "D"((long long)(unsigned long long)start),
+                       "S"((long long)(unsigned long long)arg)
+                     : "memory");
+    return (uintptr_t)rv;
+}
+
+__declspec(dllexport) uintptr_t _beginthread(void (*start)(void*), unsigned stack_size, void* arg)
+{
+    (void)stack_size;
+    if (start == 0)
+    {
+        return (uintptr_t)-1L;
+    }
+    return ucrt_thread_create((void*)start, arg);
+}
+
+__declspec(dllexport) uintptr_t _beginthreadex(void* security, unsigned stack_size, unsigned (*start)(void*), void* arg,
+                                               unsigned initflag, unsigned* thrdaddr)
+{
+    (void)security;
+    (void)stack_size;
+    (void)initflag;
+    if (start == 0)
+    {
+        return 0;
+    }
+    const uintptr_t handle = ucrt_thread_create((void*)start, arg);
+    if (handle == (uintptr_t)-1L)
+    {
+        return 0;
+    }
+    if (thrdaddr != 0)
+    {
+        // Use the low bits of the handle as the thread-id surrogate.
+        // Win32 thread IDs are u32; the handle base 0x400 fits.
+        *thrdaddr = (unsigned)(handle & 0xFFFFFFFFu);
+    }
+    return handle;
+}
+
+__declspec(dllexport) void _endthread(void)
+{
+    // Thread exit is reached either by returning from the start
+    // function (kernel-side teardown handles that) or by an
+    // explicit ExitThread / SYS_EXIT. _endthread is the legacy
+    // "I'm done" marker; route to SYS_EXIT(0) so the calling
+    // thread cleanly leaves.
+    long long discard;
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)0), "D"((long long)0) : "memory");
+    (void)discard;
+}
+
+__declspec(dllexport) void _endthreadex(unsigned retval)
+{
+    (void)retval;
+    long long discard;
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)0), "D"((long long)retval) : "memory");
+    (void)discard;
+}
+
+/* ------------------------------------------------------------------
  * String intrinsics — duplicated from msvcrt so PEs that import
  * `ucrtbase.dll!strlen` resolve via this DLL instead of the
  * flat stubs. Real Windows exports these from both msvcrt and

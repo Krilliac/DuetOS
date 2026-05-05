@@ -25,12 +25,21 @@ static const DxGuid kIID_IDWriteTextLayout = {
     0x53737037, 0x6d14, 0x410b, {0x9b, 0xfe, 0x0b, 0x18, 0x2b, 0xb7, 0x09, 0x61}};
 
 /* ---------------------------------------------------------------- *
- * IDWriteTextLayout — ~50-method vtable. v0:                        *
- *   slot 4  GetMaxWidth, 5 GetMaxHeight                             *
- *   slot 28 GetMetrics                                              *
+ * IDWriteTextLayout — vtable mirrors Windows SDK dwrite.h order.   *
+ * Inherits IUnknown(0..2) + IDWriteTextFormat(3..27); the layout-  *
+ * specific tail is:                                                 *
+ *   28..41 SetXxx (range setters and SetMaxWidth/Height)            *
+ *   42 GetMaxWidth, 43 GetMaxHeight                                 *
+ *   44..57 GetXxx with range output                                 *
+ *   58 Draw, 59 GetLineMetrics, 60 GetMetrics,                      *
+ *   61 GetOverhangMetrics, 62 GetClusterMetrics,                    *
+ *   63 DetermineMinWidth                                            *
+ *   64 HitTestPoint, 65 HitTestTextPosition, 66 HitTestTextRange    *
+ * v0 wires GetMaxWidth/Height (slot 42, 43), GetMetrics (60), and   *
+ * HitTestPoint (64); everything else is the cold dx_stub_hresult.   *
  * ---------------------------------------------------------------- */
 
-#define DW_LAYOUT_VTBL_SLOTS 60
+#define DW_LAYOUT_VTBL_SLOTS 70
 
 typedef struct DwLayoutImpl
 {
@@ -75,6 +84,22 @@ static float layout_GetMaxHeight(DwLayoutImpl* self)
 {
     return self->max_h;
 }
+/* Monospace cell sizing. Both GetMetrics and HitTestPoint derive
+ * widths/heights from the same approximation so a UI that lays out
+ * by GetMetrics and hit-tests by HitTestPoint sees a consistent
+ * grid. fs * 0.6 width / fs * 1.2 line-height matches the kernel's
+ * 8x8 bitmap font scaled to the requested font size. */
+static float layout_cell_w(const DwLayoutImpl* self)
+{
+    const float fs = self->font_size > 0 ? self->font_size : 12.0f;
+    return fs * 0.6f;
+}
+static float layout_cell_h(const DwLayoutImpl* self)
+{
+    const float fs = self->font_size > 0 ? self->font_size : 12.0f;
+    return fs * 1.2f;
+}
+
 static HRESULT layout_GetMetrics(DwLayoutImpl* self, void* metrics)
 {
     if (!metrics)
@@ -84,9 +109,8 @@ static HRESULT layout_GetMetrics(DwLayoutImpl* self, void* metrics)
      * that gate on width > 0 / lineCount >= 1 proceed. Real glyph
      * metrics arrive when DirectWrite gains a font backend. */
     dx_memzero(metrics, 36);
-    float fs = self->font_size > 0 ? self->font_size : 12.0f;
-    float approx_w = (float)self->text_len * fs * 0.6f;
-    float approx_h = fs * 1.2f;
+    float approx_w = (float)self->text_len * layout_cell_w(self);
+    float approx_h = layout_cell_h(self);
     if (self->max_w > 0 && approx_w > self->max_w)
         approx_w = self->max_w;
     /* width / widthIncludingTrailingWhitespace */
@@ -96,6 +120,61 @@ static HRESULT layout_GetMetrics(DwLayoutImpl* self, void* metrics)
     *(float*)((BYTE*)metrics + 20) = self->max_w; /* layoutWidth */
     *(float*)((BYTE*)metrics + 24) = self->max_h; /* layoutHeight */
     *(UINT*)((BYTE*)metrics + 32) = 1;            /* lineCount */
+    return DX_S_OK;
+}
+
+/* HitTestPoint(pointX, pointY, *isTrailingHit, *isInside, *hitTestMetrics)
+ * — slot 64. v0 single-line monospace: column = floor(pointX / cell_w),
+ * clamped to [0, text_len]. Returns the trailing half-flag, the
+ * inside-bounds flag, and a populated DWRITE_HIT_TEST_METRICS
+ * (textPosition, length=1, left, top=0, width=cell_w, height=cell_h,
+ * bidiLevel=0, isText=1, isTrimmed=0). Real DirectWrite would
+ * consult the laid-out glyph runs and bidi runs — we approximate
+ * with the same monospace grid the metrics report. */
+static HRESULT layout_HitTestPoint(DwLayoutImpl* self, float point_x, float point_y, int* is_trailing, int* is_inside,
+                                   void* metrics)
+{
+    if (!is_trailing || !is_inside || !metrics)
+        return DX_E_POINTER;
+    const float cw = layout_cell_w(self);
+    const float ch = layout_cell_h(self);
+    int col = 0;
+    if (cw > 0 && point_x > 0)
+        col = (int)(point_x / cw);
+    if (col < 0)
+        col = 0;
+    if ((UINT)col > self->text_len)
+        col = (int)self->text_len;
+    /* The trailing half: > col*cw + cw/2 means the click landed on
+     * the right side of the cell, so callers placing a caret should
+     * advance one position. */
+    const float cell_left = (float)col * cw;
+    *is_trailing = (point_x > cell_left + cw * 0.5f) ? 1 : 0;
+    /* Inside the laid-out bounds when the click falls within the
+     * single line of text and within the column range. */
+    const int has_text = (self->text_len > 0);
+    *is_inside = (has_text && point_x >= 0.0f && point_y >= 0.0f && point_y < ch && (UINT)col < self->text_len) ? 1 : 0;
+
+    /* DWRITE_HIT_TEST_METRICS layout (36 bytes):
+     *   +0  UINT32 textPosition
+     *   +4  UINT32 length
+     *   +8  FLOAT  left
+     *   +12 FLOAT  top
+     *   +16 FLOAT  width
+     *   +20 FLOAT  height
+     *   +24 UINT32 bidiLevel
+     *   +28 BOOL   isText
+     *   +32 BOOL   isTrimmed                                       */
+    dx_memzero(metrics, 36);
+    *(UINT*)((BYTE*)metrics + 0) = (UINT)col;
+    *(UINT*)((BYTE*)metrics + 4) = ((UINT)col < self->text_len) ? 1u : 0u;
+    *(float*)((BYTE*)metrics + 8) = cell_left;
+    *(float*)((BYTE*)metrics + 12) = 0.0f;
+    *(float*)((BYTE*)metrics + 16) = cw;
+    *(float*)((BYTE*)metrics + 20) = ch;
+    *(UINT*)((BYTE*)metrics + 24) = 0;
+    *(int*)((BYTE*)metrics + 28) = has_text ? 1 : 0;
+    *(int*)((BYTE*)metrics + 32) = 0;
     return DX_S_OK;
 }
 
@@ -113,8 +192,8 @@ static void layout_init_vtbl_once(void)
     g_layout_vtbl[2] = (void*)layout_Release;
     g_layout_vtbl[42] = (void*)layout_GetMaxWidth;
     g_layout_vtbl[43] = (void*)layout_GetMaxHeight;
-    g_layout_vtbl[60 - 1] = DX_HSTUB; /* keep size legitimate */
-    g_layout_vtbl[28] = (void*)layout_GetMetrics;
+    g_layout_vtbl[60] = (void*)layout_GetMetrics;
+    g_layout_vtbl[64] = (void*)layout_HitTestPoint;
 }
 
 static DwLayoutImpl* layout_alloc(float w, float h, float font_size, UINT text_len)

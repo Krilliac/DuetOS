@@ -136,11 +136,31 @@ constexpr u64 kHdaScratchBytes = mm::kPageSize; // CORB + RIRB + 1 KiB pad
 // HDA verb encoding: (codec_addr[31:28] << 28) | (node_id[27:20] << 20)
 // | (verb[19:8] << 8) | data[7:0].
 constexpr u32 kHdaVerbGetParameter = 0xF00;
+// GetConnectionListEntry — returns up to 4 ShortForm (1 byte each)
+// or 2 LongForm (2 bytes each) entries starting at the data byte's
+// offset. The response is a 32-bit packed payload; a single verb
+// call covers offsets 0..3 (short) or 0..1 (long).
+constexpr u32 kHdaVerbGetConnListEntry = 0xF02;
 constexpr u32 kHdaParamVendorId = 0x00;
 constexpr u32 kHdaParamRevisionId = 0x02;
 constexpr u32 kHdaParamSubordinateNodeCount = 0x04;
 constexpr u32 kHdaParamFunctionGroupType = 0x05;
 constexpr u32 kHdaParamAudioWidgetCaps = 0x09;
+// Per-widget AmplifierCapabilities + ConnectionListLength
+// parameters (HDA spec §7.3.4.10/.11/.12). Widgets without an
+// amplifier (PinComplex with no input/output amp) return 0; the
+// presence bit in AudioWidgetCaps tells us up-front whether to
+// even bother querying.
+constexpr u32 kHdaParamAmpCapsInput = 0x0D;
+constexpr u32 kHdaParamConnListLength = 0x0E;
+constexpr u32 kHdaParamAmpCapsOutput = 0x12;
+// AudioWidgetCaps bits relevant to amp / conn-list probing.
+//   bit 1  = InAmpPresent  (read AMPCAP_INPUT  parameter)
+//   bit 2  = OutAmpPresent (read AMPCAP_OUTPUT parameter)
+//   bit 8  = ConnListPresent (read CONN_LIST_LENGTH parameter)
+constexpr u32 kHdaWidgetCapInAmp = 1u << 1;
+constexpr u32 kHdaWidgetCapOutAmp = 1u << 2;
+constexpr u32 kHdaWidgetCapConnList = 1u << 8;
 
 // Widget type codes packed into bits [23:20] of AudioWidgetCaps.
 constexpr u32 kHdaWidgetAudioOutput = 0x0;
@@ -175,6 +195,21 @@ struct HdaState
     u32 codec_dac_count[15];
     u32 codec_adc_count[15];
     u32 codec_pin_count[15];
+    // Per-codec totals across the function-group walk: number of
+    // widgets whose AmplifierCapabilities param reported any amp
+    // present, and the sum of connection-list lengths over every
+    // widget that exposed a ConnectionList. Both are diagnostic
+    // counters today; future stream-routing slices will consume
+    // the underlying caps when programming a DAC → pin path.
+    u32 codec_amp_widget_count[15];
+    u32 codec_conn_total[15];
+    // Number of widgets whose first conn-list entry walk
+    // (verb 0xF02) returned at least one non-zero entry. With
+    // the LENGTH probe + the ENTRY walk both landed, the
+    // routing slice has the data it needs; this counter is
+    // the boot-log signal that the walker actually pulled
+    // entry payloads back rather than just the length count.
+    u32 codec_conn_widgets_read[15];
     bool brought_up;
 };
 constinit HdaState g_hda = {};
@@ -240,6 +275,9 @@ u32 HdaWalkCodec(const AudioControllerInfo& a, u8 slot)
     u32 dac = 0;
     u32 adc = 0;
     u32 pin = 0;
+    u32 amp_widgets = 0;       // count of widgets reporting any input or output amp
+    u32 conn_total = 0;        // sum of CONN_LIST_LENGTH lengths across the codec
+    u32 conn_widgets_read = 0; // count of widgets whose first ENTRY walk returned a non-zero entry
     // Bound the walk: even pathological codecs have ≤ 4 function
     // groups. The whole-tree limit (kept loose at 64) protects
     // against malformed responses.
@@ -295,12 +333,64 @@ u32 HdaWalkCodec(const AudioControllerInfo& a, u8 slot)
             // log readable. The summary below is enough to
             // diagnose "codec found a DAC vs not".
             (void)HdaWidgetTypeName(wtype);
+            // Probe per-widget amplifier + connection-list
+            // params. The presence bits in `caps` gate the
+            // probes so widgets that explicitly say "no amp"
+            // / "no conn list" don't burn CORB/RIRB cycles.
+            // The diagnostic counters below are what stream-
+            // routing slices will consume; this slice just
+            // surfaces the totals so an operator can see "yes,
+            // this codec exposes amps + connection lists" as
+            // a precondition for the routing work.
+            if ((caps & (kHdaWidgetCapInAmp | kHdaWidgetCapOutAmp)) != 0)
+            {
+                if ((caps & kHdaWidgetCapInAmp) != 0)
+                {
+                    (void)HdaIssueVerbAndPoll(a, slot, widget_node, kHdaVerbGetParameter, kHdaParamAmpCapsInput);
+                }
+                if ((caps & kHdaWidgetCapOutAmp) != 0)
+                {
+                    (void)HdaIssueVerbAndPoll(a, slot, widget_node, kHdaVerbGetParameter, kHdaParamAmpCapsOutput);
+                }
+                ++amp_widgets;
+            }
+            if ((caps & kHdaWidgetCapConnList) != 0)
+            {
+                const u32 conn =
+                    HdaIssueVerbAndPoll(a, slot, widget_node, kHdaVerbGetParameter, kHdaParamConnListLength);
+                // CONN_LIST_LENGTH layout: bit 7 = LongForm
+                // (entries are 2 bytes), bits [6:0] = count.
+                const u32 conn_count = conn & 0x7Fu;
+                conn_total += conn_count;
+                // Pull the first batch of connection entries for any
+                // widget that reports a non-zero list. v0 issues
+                // exactly one GET_CONNECTION_LIST_ENTRY verb at offset
+                // 0; the response packs the first 4 short-form (1 byte
+                // each) or 2 long-form (2 bytes each) entries into a
+                // 32-bit payload. A non-zero response increments the
+                // diagnostic counter so a clean boot prints
+                // "conn_widgets_read=N" alongside conn_entries=N — N
+                // > 0 confirms the ENTRY walker is working end-to-end
+                // through CORB / RIRB and not just reading stale RIRB
+                // bytes.
+                if (conn_count > 0)
+                {
+                    const u32 entries = HdaIssueVerbAndPoll(a, slot, widget_node, kHdaVerbGetConnListEntry, 0);
+                    if (entries != 0)
+                    {
+                        ++conn_widgets_read;
+                    }
+                }
+            }
         }
     }
 
     g_hda.codec_dac_count[slot] = dac;
     g_hda.codec_adc_count[slot] = adc;
     g_hda.codec_pin_count[slot] = pin;
+    g_hda.codec_amp_widget_count[slot] = amp_widgets;
+    g_hda.codec_conn_total[slot] = conn_total;
+    g_hda.codec_conn_widgets_read[slot] = conn_widgets_read;
     arch::SerialWrite("[hda]     slot=");
     arch::SerialWriteHex(slot);
     arch::SerialWrite(" widgets: dac=");
@@ -309,6 +399,12 @@ u32 HdaWalkCodec(const AudioControllerInfo& a, u8 slot)
     arch::SerialWriteHex(adc);
     arch::SerialWrite(" pin=");
     arch::SerialWriteHex(pin);
+    arch::SerialWrite(" amp=");
+    arch::SerialWriteHex(amp_widgets);
+    arch::SerialWrite(" conn_entries=");
+    arch::SerialWriteHex(conn_total);
+    arch::SerialWrite(" conn_widgets_read=");
+    arch::SerialWriteHex(conn_widgets_read);
     arch::SerialWrite("\n");
     return audio_fg_count;
 }
@@ -486,15 +582,22 @@ u32 HdaIssueVerbAndPoll(const AudioControllerInfo& a, u8 codec, u8 node, u32 ver
     // 8) For every codec slot the controller saw at boot, issue
     // GET_PARAMETER(VENDOR_ID) on root node 0, then walk the
     // function-group + widget tree to discover DAC/ADC/Pin
-    // counts. Stream / amp / connection programming lands as
-    // a follow-up slice; this much already lets boot diagnostics
-    // distinguish "codec is wired up but mute" from "codec
-    // never responded".
-    // GAP: per-widget amplifier capabilities (GET_PARAMETER
-    // 0x0D / 0x12) and connection lists (GET_PARAMETER 0x0E +
-    // GET_CONNECTION_LIST_ENTRY 0xF02) — needed to actually
-    // route a stream to a speaker pin. Revisit when stream
-    // playback lands.
+    // counts plus the per-widget amp + connection-list params
+    // (gated on the corresponding presence bits in the widget's
+    // AudioWidgetCaps so we don't probe widgets that report no
+    // amp / no conn-list). Stream programming lands as a follow-
+    // up slice; this much already lets boot diagnostics
+    // distinguish "codec is wired up but mute" from "codec never
+    // responded" AND "this codec exposes the amp + conn-list
+    // surface stream routing will need".
+    //
+    // The walker also issues one GET_CONNECTION_LIST_ENTRY (verb
+    // 0xF02) at offset 0 per widget that reports a non-zero
+    // CONN_LIST_LENGTH, which proves the ENTRY path works through
+    // CORB / RIRB end-to-end. The result is logged via
+    // codec_conn_widgets_read; storing the actual entry payloads
+    // for routing is a follow-up that needs per-widget storage
+    // (the current per-codec aggregates only summarise counts).
     u32 found = 0;
     for (u32 slot = 0; slot < 15; ++slot)
     {

@@ -158,6 +158,7 @@
 #include "drivers/video/widget.h"
 #include "fs/ramfs.h"
 #include "fs/tmpfs.h"
+#include "fs/mount.h"
 #include "fs/vfs.h"
 #include "mm/address_space.h"
 #include "mm/dma.h"
@@ -767,6 +768,135 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         []() -> ::duetos::core::Result<void>
         {
             duetos::core::CleanroomTraceClear();
+            return {};
+        });
+    // Runtime checker — boot-baseline + per-scan integrity checks.
+    // Restart re-captures the baseline (control regs, IDT/GDT
+    // hashes, .text spot hashes, etc.) — useful after an operator
+    // legitimately mutated something the checker would otherwise
+    // flag, e.g. swapping a stale IDT entry during a triage
+    // session. Teardown clears the baseline-captured gate so the
+    // next init's KASSERT passes.
+    duetos::security::RegisterDriverDomain(
+        "runtime-checker",
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::core::RuntimeCheckerInit();
+            return {};
+        },
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::core::RuntimeCheckerTeardown();
+            return {};
+        });
+    // Breakpoint subsystem — software int3 + hardware DR-slot
+    // tables backing the kernel debugger and GDB stub. Restart
+    // disarms every DR slot, drops every table row, and clears
+    // the inited flag so a fresh BpInit runs cleanly. Useful
+    // after a flaky GDB session left orphaned int3 traps the
+    // operator wants to clear without rebooting.
+    duetos::security::RegisterDriverDomain(
+        "breakpoints",
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::debug::BpInit();
+            return {};
+        },
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::debug::BpTeardown();
+            return {};
+        });
+    // Linear framebuffer — the firmware-handoff direct-pixel
+    // surface every console / splash / compositor path lowers
+    // onto. Restart is useful after a virtio-gpu mode-set
+    // attempt left the surface in a half-configured state, or
+    // when an operator wants to re-snapshot the boot-time
+    // baseline without a reboot.
+    duetos::security::RegisterDriverDomain(
+        "framebuffer",
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::drivers::video::FramebufferReinit();
+            return {};
+        },
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::drivers::video::FramebufferTeardown();
+            return {};
+        });
+    // PCI bus enumeration — the parent of every PCIe device
+    // driver in the tree. Restart is useful after the operator
+    // hot-plugs a device through QEMU's monitor (or a real
+    // PCIe slot) and wants the device table re-walked without
+    // rebooting; downstream drivers (nvme / ahci / xhci /
+    // e1000 / gpu) need their own restarts to pick up the new
+    // BAR / MSI-X assignments.
+    duetos::security::RegisterDriverDomain(
+        "pci",
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::drivers::pci::PciEnumerate();
+            return {};
+        },
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::drivers::pci::PciTeardown();
+            return {};
+        });
+    // AHCI / SATA — the storage controller for every
+    // pre-NVMe drive in the supported HW matrix. Restart
+    // frees per-port DMA scratch buffers + re-walks PCI for
+    // newly-attached SATA drives. Block-device handles leak
+    // until the block layer grows an Unregister (documented
+    // in AhciTeardown).
+    duetos::security::RegisterDriverDomain(
+        "ahci",
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::drivers::storage::AhciInit();
+            return {};
+        },
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::drivers::storage::AhciTeardown();
+            return {};
+        });
+    // NVMe — modern PCIe storage controller. Teardown frees
+    // the admin + I/O queue pages, the staging buffer (16
+    // contiguous frames), and the PRP list. MMIO + block
+    // handle leak with the same caveat as the other storage
+    // drivers.
+    duetos::security::RegisterDriverDomain(
+        "nvme",
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::drivers::storage::NvmeInit();
+            return {};
+        },
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::drivers::storage::NvmeTeardown();
+            return {};
+        });
+    // RAM filesystem — the immutable trusted + sandbox trees
+    // are constinit, so init has no work; restart's interesting
+    // surface is the mutable snapshot buffers reachable through
+    // /proc and /sys (boottrace, syscalls, abi/native, abi/win32,
+    // cpuhist, inspect slots). Teardown wipes their file_size
+    // markers + cursors so the next Snapshot* call starts fresh
+    // — useful when an operator wants to re-baseline what /proc
+    // exposes after a triage session.
+    duetos::security::RegisterDriverDomain(
+        "ramfs",
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::fs::RamfsInit();
+            return {};
+        },
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::fs::RamfsTeardown();
             return {};
         });
 
@@ -1665,6 +1795,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                            duetos::fs::VfsSelfTest();
                                            return duetos::core::Result<void>{};
                                        });
+        duetos::core::InitcallRegister(duetos::core::Phase::Vfs, "vfs-mount-selftest",
+                                       []()
+                                       {
+                                           duetos::fs::VfsMountSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
     }
     (void)duetos::core::RunPhase(duetos::core::Phase::Vfs);
 
@@ -1679,7 +1815,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             return {};
         };
         auto aml_teardown = []() -> duetos::core::Result<void> { return duetos::acpi::AmlNamespaceShutdown(); };
-        duetos::core::FaultDomainRegister("acpi/aml", aml_init, aml_teardown);
+        duetos::security::RegisterDriverDomain("acpi/aml", aml_init, aml_teardown);
     }
 
     SerialWrite("[boot] Disabling 8259 PIC.\n");
@@ -2011,7 +2147,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             return {};
         };
         auto gpu_teardown = []() -> duetos::core::Result<void> { return duetos::drivers::gpu::GpuShutdown(); };
-        duetos::core::FaultDomainRegister("drivers/gpu", gpu_init, gpu_teardown);
+        duetos::security::RegisterDriverDomain("drivers/gpu", gpu_init, gpu_teardown);
     }
 
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::EdidSelfTest());
@@ -2065,7 +2201,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             return {};
         };
         auto net_teardown = []() -> duetos::core::Result<void> { return duetos::drivers::net::NetShutdown(); };
-        duetos::core::FaultDomainRegister("drivers/net", net_init, net_teardown);
+        duetos::security::RegisterDriverDomain("drivers/net", net_init, net_teardown);
     }
 
     SerialWrite("[boot] Detecting USB host controllers.\n");
@@ -2081,7 +2217,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             return {};
         };
         auto xhci_teardown = []() -> duetos::core::Result<void> { return duetos::drivers::usb::xhci::XhciShutdown(); };
-        duetos::core::FaultDomainRegister("drivers/usb/xhci", xhci_init, xhci_teardown);
+        duetos::security::RegisterDriverDomain("drivers/usb/xhci", xhci_init, xhci_teardown);
     }
     // Probe USB-Ethernet adapters now that xHCI enumeration is
     // complete. CDC-ECM is the USB standard — works with QEMU's
@@ -2113,7 +2249,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             return {};
         };
         auto audio_teardown = []() -> duetos::core::Result<void> { return duetos::drivers::audio::AudioShutdown(); };
-        duetos::core::FaultDomainRegister("drivers/audio", audio_init, audio_teardown);
+        duetos::security::RegisterDriverDomain("drivers/audio", audio_init, audio_teardown);
     }
 
     SerialWrite("[boot] Bringing up power / thermal shell.\n");

@@ -1626,6 +1626,19 @@ void RuntimeCheckerInit()
     arch::SerialWrite("\n");
 }
 
+void RuntimeCheckerTeardown()
+{
+    // Clear the gate flag so a subsequent RuntimeCheckerInit's
+    // KASSERT(baseline_captured == 0) passes; init will recapture
+    // every g_baseline_* value, so we leave them as-is. The scan
+    // path also gates the integrity checks on baseline_captured so
+    // a Scan call between Teardown and Init runs only the heap /
+    // frame / scheduler checks (which don't need a baseline) — the
+    // CR / IDT / GDT / text / vtable / PTE checks become no-ops.
+    g_report.baseline_captured = 0;
+    arch::SerialWrite("[health] teardown — baseline cleared\n");
+}
+
 u64 RuntimeCheckerScan()
 {
     const u64 before = g_report.issues_found_total;

@@ -44,6 +44,7 @@
 #include "diag/event_trace.h"
 #include "diag/kdbg.h"
 #include "diag/soft_lockup.h"
+#include "sched/loadavg.h"
 #include "sync/rcu.h"
 #include "log/klog.h"
 #include "core/panic.h"
@@ -1364,6 +1365,35 @@ void OnTimerTick(u64 now_ticks)
     if (woke_any)
     {
         NeedResched() = true;
+    }
+
+    // Loadavg sample: once every 5 seconds, walk g_run_head_normal
+    // counting nodes (plus the running task if it's not idle), then
+    // feed the count into the EWMA. The gate keeps the per-tick
+    // cost at one compare + one branch in the common case. The
+    // sched lock covers list-traversal vs. concurrent enqueue —
+    // already taken briefly above for the sleep-queue work, so the
+    // contention cost is a second short critical section.
+    {
+        static volatile u64 s_last_sample = 0;
+        const u64 kSamplePeriod = 5ULL * ::duetos::time::TickHz();
+        if (now_ticks - s_last_sample >= kSamplePeriod)
+        {
+            s_last_sample = now_ticks;
+            u32 runnable = 0;
+            {
+                sync::SpinLockGuard guard(g_sched_lock);
+                for (Task* t = g_run_head_normal; t != nullptr; t = t->next)
+                {
+                    ++runnable;
+                }
+                if (cur != nullptr && cur->state == TaskState::Running && cur->priority != TaskPriority::Idle)
+                {
+                    ++runnable;
+                }
+            }
+            ::duetos::sched::LoadavgUpdate(runnable);
+        }
     }
 }
 

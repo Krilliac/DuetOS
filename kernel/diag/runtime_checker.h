@@ -315,6 +315,12 @@ struct HealthReport
 /// Safe single-init.
 void RuntimeCheckerInit();
 
+/// Clear the baseline-captured gate so a subsequent
+/// `RuntimeCheckerInit` runs cleanly. Used by the driver
+/// fault-domain registry to drive the subsystem through a
+/// teardown + re-init cycle without rebooting. Idempotent.
+void RuntimeCheckerTeardown();
+
 /// Run the full battery of checks. Logs each failure via klog at
 /// Warn level (subsystem = "health"). Returns the number of
 /// failures observed in THIS scan.

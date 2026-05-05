@@ -618,7 +618,9 @@ typedef struct D12PsoImpl
     void* const* lpVtbl;
     ULONG refcount;
     UINT position_offset; /* 0xFFFF if no POSITION element */
+    UINT position_slot;   /* InputSlot of the POSITION element (default 0) */
     UINT color_offset;    /* 0xFFFF if no COLOR element */
+    UINT color_slot;      /* InputSlot of the COLOR element (default 0) */
     UINT color_kind;      /* 0=R32G32B32A32_FLOAT, 1=B8G8R8A8_UNORM, 2=R8G8B8A8_UNORM */
     UINT topology_type;   /* D3D12_PRIMITIVE_TOPOLOGY_TYPE: 0 undef, 1 point, 2 line, 3 tri */
 } D12PsoImpl;
@@ -700,7 +702,9 @@ static D12PsoImpl* pso_alloc_from_desc(const void* il_descs, UINT il_count, UINT
     p->lpVtbl = g_pso_vtbl;
     p->refcount = 1;
     p->position_offset = 0xFFFF;
+    p->position_slot = 0;
     p->color_offset = 0xFFFF;
+    p->color_slot = 0;
     p->color_kind = 0;
     p->topology_type = topology_type;
     if (il_descs)
@@ -711,12 +715,17 @@ static D12PsoImpl* pso_alloc_from_desc(const void* il_descs, UINT il_count, UINT
             const BYTE* e = q + (SIZE_T)i * 32;
             const char* name = *(const char* const*)(e + 0);
             UINT format = *(const UINT*)(e + 12);
+            UINT input_slot = *(const UINT*)(e + 16);
             UINT offset = *(const UINT*)(e + 20);
             if (pso_name_eq(name, "POSITION") || pso_name_eq(name, "SV_POSITION"))
+            {
                 p->position_offset = offset;
+                p->position_slot = input_slot;
+            }
             else if (pso_name_eq(name, "COLOR") || pso_name_eq(name, "COLOUR"))
             {
                 p->color_offset = offset;
+                p->color_slot = input_slot;
                 if (format == 2)
                     p->color_kind = 0;
                 else if (format == 87)
@@ -775,15 +784,28 @@ struct D12ListImpl
      * pointers are AddRef'd — the caller keeps the resources alive
      * for the duration of the recording. */
     D12PsoImpl* current_pso;
-    UINT current_topology;     /* D3D_PRIMITIVE_TOPOLOGY: 4 = TRIANGLELIST, 5 = STRIP */
-    UINT64 current_vb_address; /* GPU VA from the bound vertex-buffer view */
-    UINT current_vb_size;
-    UINT current_vb_stride;
+    UINT current_topology; /* D3D_PRIMITIVE_TOPOLOGY: 4 = TRIANGLELIST, 5 = STRIP */
+    /* Per-slot vertex-buffer view bindings. D3D12 hard-caps the IA
+     * stage at 32 slots
+     * (D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT); we keep the same
+     * cap so an app that binds the spec maximum doesn't silently
+     * truncate. The PSO's position_slot / color_slot pick which
+     * slot a given attribute reads from. Slots not bound stay 0. */
+    UINT64 current_vb_address[32]; /* GPU VAs from the bound vertex-buffer views */
+    UINT current_vb_size[32];
+    UINT current_vb_stride[32];
     UINT64 current_ib_address;
     UINT current_ib_size;
     UINT current_ib_format; /* DXGI_FORMAT_R16_UINT = 57, R32_UINT = 42 */
     int viewport_x, viewport_y, viewport_w, viewport_h;
     D12ResImpl* current_rt;
+
+    /* Bumped by ResourceBarrier when a TRANSITION barrier's StateBefore
+     * doesn't match the resource's recorded current_state. Read back via
+     * DuetOS_D3D12_PeekBarrierMismatchCount so the dx_demo can verify
+     * the validation fires on a deliberate mismatch and stays at zero
+     * on a clean transition. */
+    UINT barrier_mismatch_count;
 };
 
 static HRESULT list_QueryInterface(D12ListImpl* self, REFIID riid, void** out)
@@ -830,6 +852,37 @@ static HRESULT list_Reset(D12ListImpl* self, void* alloc, void* pso)
     self->current_pso = (pso && ((D12PsoImpl*)pso)->lpVtbl == g_pso_vtbl) ? (D12PsoImpl*)pso : NULL;
     return DX_S_OK;
 }
+/* Emit a single mismatch diagnostic via SYS_DEBUG_PRINT. The DX DLLs
+ * don't link a printf, so the formatting is done by hand into a
+ * stack buffer. Format:
+ *   "[d3d12] ResourceBarrier StateBefore mismatch: recorded=0xXXXXXXXX
+ *    declared=0xXXXXXXXX after=0xXXXXXXXX"
+ * Throttled by the caller (first three mismatches per list) so a
+ * pathological caller can't flood the serial log. */
+static void list_emit_barrier_mismatch(UINT recorded, UINT declared, UINT after)
+{
+    static const char kHex[] = "0123456789abcdef";
+    char buf[112];
+    UINT i = 0;
+    const char* prefix = "[d3d12] ResourceBarrier StateBefore mismatch: recorded=0x";
+    for (UINT k = 0; prefix[k]; ++k)
+        buf[i++] = prefix[k];
+    for (int k = 0; k < 8; ++k)
+        buf[i++] = kHex[(recorded >> ((7 - k) * 4)) & 0xF];
+    const char* mid1 = " declared=0x";
+    for (UINT k = 0; mid1[k]; ++k)
+        buf[i++] = mid1[k];
+    for (int k = 0; k < 8; ++k)
+        buf[i++] = kHex[(declared >> ((7 - k) * 4)) & 0xF];
+    const char* mid2 = " after=0x";
+    for (UINT k = 0; mid2[k]; ++k)
+        buf[i++] = mid2[k];
+    for (int k = 0; k < 8; ++k)
+        buf[i++] = kHex[(after >> ((7 - k) * 4)) & 0xF];
+    buf[i] = 0;
+    dx_dbg(buf);
+}
+
 /* ResourceBarrier(numBarriers, *barriers) — slot 26.
  *
  * D3D12_RESOURCE_BARRIER (40 B):
@@ -848,14 +901,16 @@ static HRESULT list_Reset(D12ListImpl* self, void* alloc, void* pso)
  *       +8  ID3D12Resource* pResource  (8 B)
  *
  * v0 only honours TRANSITION (Type == 0); ALIASING / UAV are
- * no-op success. Real D3D12 would also enforce the StateBefore
- * matches the resource's current state and surface the validation
- * error — we record the new state and trust the caller's
- * sequencing for now. */
+ * no-op success. For TRANSITION barriers we now also validate
+ * that StateBefore matches the resource's recorded current_state;
+ * mismatches bump self->barrier_mismatch_count and surface a
+ * one-line diagnostic on the first three (throttled to keep the
+ * log bounded). The state update lands either way so a caller that
+ * gets the sequencing wrong stays consistent on the next barrier
+ * — the counter is the regression signal, not a hard error. */
 static void list_ResourceBarrier(D12ListImpl* self, UINT n, const void* barriers)
 {
-    (void)self;
-    if (n == 0 || !barriers)
+    if (!self || n == 0 || !barriers)
         return;
     const BYTE* p = (const BYTE*)barriers;
     for (UINT i = 0; i < n; ++i)
@@ -865,9 +920,18 @@ static void list_ResourceBarrier(D12ListImpl* self, UINT n, const void* barriers
         if (type != 0) /* TRANSITION = 0 */
             continue;
         D12ResImpl* res = *(D12ResImpl* const*)(b + 8);
+        UINT state_before = *(const UINT*)(b + 20);
         UINT state_after = *(const UINT*)(b + 24);
         if (res && res->lpVtbl == g_res_vtbl)
+        {
+            if (res->current_state != state_before)
+            {
+                self->barrier_mismatch_count++;
+                if (self->barrier_mismatch_count <= 3)
+                    list_emit_barrier_mismatch(res->current_state, state_before, state_after);
+            }
             res->current_state = state_after;
+        }
     }
 }
 
@@ -936,23 +1000,42 @@ static void list_IASetIndexBuffer(D12ListImpl* self, const void* view)
  *   UINT SizeInBytes (8)
  *   UINT StrideInBytes (12).
  * v0 only honours the first view (slot 0). */
+/* IASetVertexBuffers(startSlot, num, views) — slot 44.
+ * D3D12_VERTEX_BUFFER_VIEW (16 B):
+ *   UINT64 BufferLocation (0)
+ *   UINT SizeInBytes (8)
+ *   UINT StrideInBytes (12).
+ * Walks `n` views starting at `start_slot`, populating each slot
+ * independently so the PSO's per-element InputSlot can pick the
+ * right buffer per attribute. Slots beyond the 32-slot cap are
+ * silently ignored (matches D3D12's spec'd hard limit). A NULL
+ * views array (or n == 0) clears every slot from start_slot up to
+ * the cap so an app can fully reset its IA bindings. */
 static void list_IASetVertexBuffers(D12ListImpl* self, UINT start_slot, UINT n, const void* views)
 {
-    (void)start_slot;
-    if (!self || n == 0 || !views)
+    if (!self)
+        return;
+    if (n == 0 || !views)
     {
-        if (self)
+        for (UINT s = start_slot; s < 32; ++s)
         {
-            self->current_vb_address = 0;
-            self->current_vb_size = 0;
-            self->current_vb_stride = 0;
+            self->current_vb_address[s] = 0;
+            self->current_vb_size[s] = 0;
+            self->current_vb_stride[s] = 0;
         }
         return;
     }
-    const BYTE* v = (const BYTE*)views;
-    self->current_vb_address = *(const UINT64*)(v + 0);
-    self->current_vb_size = *(const UINT*)(v + 8);
-    self->current_vb_stride = *(const UINT*)(v + 12);
+    const BYTE* base = (const BYTE*)views;
+    for (UINT i = 0; i < n; ++i)
+    {
+        UINT s = start_slot + i;
+        if (s >= 32)
+            break;
+        const BYTE* v = base + (SIZE_T)i * 16;
+        self->current_vb_address[s] = *(const UINT64*)(v + 0);
+        self->current_vb_size[s] = *(const UINT*)(v + 8);
+        self->current_vb_stride[s] = *(const UINT*)(v + 12);
+    }
 }
 
 /* OMSetRenderTargets(numRTV, ppCpuHandles, singleRange, dsvHandle) — slot 46.
@@ -995,21 +1078,32 @@ static void list_ClearDepthStencilView(D12ListImpl* self, SIZE_T cpu_handle, UIN
 }
 
 /* Pull (x, y) screen-space from a vertex via the bound PSO's input
- * layout + the bound VB. Returns 0 on out-of-range. */
+ * layout + the bound VB. Returns 0 on out-of-range. POSITION and
+ * COLOR each consult the PSO's per-element InputSlot so a multi-
+ * stream layout (one VB for positions, another for colors) reads
+ * each attribute from the right buffer. */
 static int list_read_vertex(D12ListImpl* self, UINT idx, int* out_x, int* out_y, DWORD* out_color)
 {
-    if (!self || !self->current_pso || self->current_vb_address == 0 || self->current_vb_stride == 0)
+    if (!self || !self->current_pso)
         return 0;
     if (self->current_pso->position_offset == 0xFFFF)
         return 0;
-    const BYTE* base = (const BYTE*)(unsigned long long)self->current_vb_address;
-    if (!base)
+    const UINT pos_slot = self->current_pso->position_slot;
+    if (pos_slot >= 32)
         return 0;
-    SIZE_T pos_off = (SIZE_T)idx * self->current_vb_stride + self->current_pso->position_offset;
-    if (pos_off + 12 > self->current_vb_size)
+    const UINT64 pos_addr = self->current_vb_address[pos_slot];
+    const UINT pos_size = self->current_vb_size[pos_slot];
+    const UINT pos_stride = self->current_vb_stride[pos_slot];
+    if (pos_addr == 0 || pos_stride == 0)
+        return 0;
+    const BYTE* pos_base = (const BYTE*)(unsigned long long)pos_addr;
+    if (!pos_base)
+        return 0;
+    SIZE_T pos_off = (SIZE_T)idx * pos_stride + self->current_pso->position_offset;
+    if (pos_off + 12 > pos_size)
         return 0;
     float xyz[3];
-    dx_memcpy(xyz, base + pos_off, 12);
+    dx_memcpy(xyz, pos_base + pos_off, 12);
     DxVec4 clip;
     clip.x = xyz[0];
     clip.y = xyz[1];
@@ -1037,17 +1131,27 @@ static int list_read_vertex(D12ListImpl* self, UINT idx, int* out_x, int* out_y,
     {
         if (self->current_pso->color_offset != 0xFFFF)
         {
-            SIZE_T col_off = (SIZE_T)idx * self->current_vb_stride + self->current_pso->color_offset;
-            if (self->current_pso->color_kind == 0 && col_off + 16 <= self->current_vb_size)
+            const UINT col_slot = self->current_pso->color_slot;
+            const UINT64 col_addr = (col_slot < 32) ? self->current_vb_address[col_slot] : 0;
+            const UINT col_size = (col_slot < 32) ? self->current_vb_size[col_slot] : 0;
+            const UINT col_stride = (col_slot < 32) ? self->current_vb_stride[col_slot] : 0;
+            const BYTE* col_base = (const BYTE*)(unsigned long long)col_addr;
+            const SIZE_T col_off =
+                (col_addr && col_stride) ? (SIZE_T)idx * col_stride + self->current_pso->color_offset : 0;
+            if (!col_base || col_stride == 0)
+            {
+                *out_color = 0xFFFFFFFFu;
+            }
+            else if (self->current_pso->color_kind == 0 && col_off + 16 <= col_size)
             {
                 float c[4];
-                dx_memcpy(c, base + col_off, 16);
+                dx_memcpy(c, col_base + col_off, 16);
                 *out_color = dxr_pack_rgba(c[0], c[1], c[2], c[3]);
             }
-            else if (col_off + 4 <= self->current_vb_size)
+            else if (col_off + 4 <= col_size)
             {
                 DWORD c;
-                dx_memcpy(&c, base + col_off, 4);
+                dx_memcpy(&c, col_base + col_off, 4);
                 if (self->current_pso->color_kind == 1)
                     *out_color = c;
                 else
@@ -1952,4 +2056,20 @@ __declspec(dllexport) UINT DuetOS_D3D12_PeekResourceState(void* resource)
     if (r->lpVtbl != g_res_vtbl)
         return 0xFFFFFFFFu;
     return r->current_state;
+}
+
+/* Non-Win32 introspection helper: read back the count of TRANSITION
+ * barriers a command list has seen whose StateBefore did not match
+ * the resource's recorded current_state. Used by the dx_demo to
+ * verify the validation fires on a deliberate mismatch and stays at
+ * zero on a clean transition. Returns 0xFFFFFFFF if the pointer
+ * doesn't look like one of our command lists. */
+__declspec(dllexport) UINT DuetOS_D3D12_PeekBarrierMismatchCount(void* list)
+{
+    if (!list)
+        return 0xFFFFFFFFu;
+    D12ListImpl* l = (D12ListImpl*)list;
+    if (l->lpVtbl != g_list_vtbl)
+        return 0xFFFFFFFFu;
+    return l->barrier_mismatch_count;
 }

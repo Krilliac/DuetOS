@@ -63,9 +63,18 @@ struct Device
 };
 
 /// Walk every (bus, device, function) on bus 0..3; cache and log each
-/// present device. Safe to call exactly once at boot. Double-init
-/// panics via KASSERT.
+/// present device. Idempotent: a second call without an intervening
+/// `PciTeardown` returns immediately so the cached device list and
+/// ECAM mapping survive. Used as the driver fault-domain init hook
+/// for the "pci" domain.
 void PciEnumerate();
+
+/// Drop the cached device list + ECAM aperture so a subsequent
+/// `PciEnumerate` runs the bus walk again. The MMIO mapping for
+/// the previous ECAM aperture leaks (the arena is a bump
+/// allocator); same caveat the framebuffer teardown documents.
+/// Idempotent.
+void PciTeardown();
 
 /// Number of devices discovered by the most recent `PciEnumerate`.
 u64 PciDeviceCount();

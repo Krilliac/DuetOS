@@ -23,6 +23,31 @@ static void Out(const char* s)
     WriteConsoleA(h, s, len, &n, 0);
 }
 
+/* Print a UTF-16 path as ASCII-fast (every char fits because all our
+ * canonical paths are ASCII). Truncates at MAX_PATH. */
+static void OutW(const WCHAR* w)
+{
+    char buf[MAX_PATH + 1];
+    int i = 0;
+    for (; i < MAX_PATH && w[i]; ++i)
+        buf[i] = (char)w[i];
+    buf[i] = 0;
+    Out(buf);
+}
+
+/* Compare a wide-string path against an ASCII reference. */
+static int wstreq_a(const WCHAR* w, const char* a)
+{
+    int i = 0;
+    for (;; ++i)
+    {
+        if ((char)w[i] != a[i])
+            return 0;
+        if (a[i] == 0)
+            return 1;
+    }
+}
+
 void __cdecl mainCRTStartup(void)
 {
     Out("[shell_smoke] starting\r\n");
@@ -32,15 +57,68 @@ void __cdecl mainCRTStartup(void)
         WCHAR path[MAX_PATH] = {0};
         HRESULT r = SHGetFolderPathW(NULL, CSIDL_WINDOWS, NULL, 0, path);
         Out("[shell_smoke] SHGetFolderPathW(WIN) = ");
-        Out(SUCCEEDED(r) ? "PASS\r\n" : "FAIL/STUB\r\n");
+        if (SUCCEEDED(r))
+        {
+            Out(wstreq_a(path, "X:\\Windows") ? "PASS " : "FAIL ");
+            OutW(path);
+            Out("\r\n");
+        }
+        else
+        {
+            Out("FAIL/STUB\r\n");
+        }
+    }
+
+    /* SHGetFolderPathW(CSIDL_APPDATA) — the slice that the
+     * surface-status doc explicitly calls out. */
+    {
+        WCHAR path[MAX_PATH] = {0};
+        HRESULT r = SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, path);
+        Out("[shell_smoke] SHGetFolderPathW(APPDATA) = ");
+        if (SUCCEEDED(r))
+        {
+            Out(wstreq_a(path, "X:\\Users\\duetos\\AppData\\Roaming") ? "PASS " : "FAIL ");
+            OutW(path);
+            Out("\r\n");
+        }
+        else
+        {
+            Out("FAIL/STUB\r\n");
+        }
+    }
+
+    /* CSIDL_LOCAL_APPDATA must produce a distinct path. */
+    {
+        WCHAR path[MAX_PATH] = {0};
+        HRESULT r = SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, path);
+        Out("[shell_smoke] SHGetFolderPathW(LOCAL_APPDATA) = ");
+        if (SUCCEEDED(r))
+        {
+            Out(wstreq_a(path, "X:\\Users\\duetos\\AppData\\Local") ? "PASS " : "FAIL ");
+            OutW(path);
+            Out("\r\n");
+        }
+        else
+        {
+            Out("FAIL/STUB\r\n");
+        }
     }
 
     /* SHGetSpecialFolderPathW(CSIDL_PROGRAM_FILES). */
     {
         WCHAR path[MAX_PATH] = {0};
         BOOL r = SHGetSpecialFolderPathW(NULL, path, CSIDL_PROGRAM_FILES, FALSE);
-        Out("[shell_smoke] SHGetSpecialFolderPathW = ");
-        Out(r ? "PASS\r\n" : "FAIL/STUB\r\n");
+        Out("[shell_smoke] SHGetSpecialFolderPathW(PROGRAM_FILES) = ");
+        if (r)
+        {
+            Out(wstreq_a(path, "X:\\Program Files") ? "PASS " : "FAIL ");
+            OutW(path);
+            Out("\r\n");
+        }
+        else
+        {
+            Out("FAIL/STUB\r\n");
+        }
     }
 
     /* CommandLineToArgvW with a simple line. */

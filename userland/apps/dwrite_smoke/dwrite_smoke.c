@@ -60,6 +60,46 @@ void __cdecl mainCRTStartup(void)
     Out("[dwrite_smoke] CreateTextLayout     = ");
     Out((hr == 0 && layout) ? "PASS\r\n" : "FAIL\r\n");
 
+    if (layout)
+    {
+        void** layout_vt = *(void***)layout;
+        /* slot 60 = GetMetrics (canonical Win SDK position). */
+        unsigned char tm[36] = {0};
+        typedef long (*PFN_GM)(void*, void*);
+        ((PFN_GM)layout_vt[60])(layout, tm);
+        const float layout_w = *(const float*)(tm + 8);
+        Out("[dwrite_smoke] Layout::GetMetrics  = ");
+        Out((layout_w > 0.0f) ? "PASS (width>0)\r\n" : "FAIL\r\n");
+
+        /* slot 64 = HitTestPoint. Probe four points across the text:
+         *   (0, 0)        → first column, leading
+         *   (cell_w*1.5)  → column 1, trailing half
+         *   (large x)     → past the end, isInside=FALSE
+         *   (negative y)  → above text, isInside=FALSE                */
+        typedef long (*PFN_HTP)(void*, float, float, int*, int*, void*);
+        const float fs = 14.0f;
+        const float cell_w = fs * 0.6f;
+        unsigned char htm[36] = {0};
+        int trailing = 99, inside = 99;
+        long hr2 = ((PFN_HTP)layout_vt[64])(layout, 0.0f, 0.0f, &trailing, &inside, htm);
+        const UINT pos0 = *(const UINT*)(htm + 0);
+        Out("[dwrite_smoke] Layout::HitTestPoint(0,0) = ");
+        Out((hr2 == 0 && pos0 == 0u && trailing == 0 && inside == 1) ? "PASS\r\n" : "FAIL\r\n");
+
+        trailing = 99;
+        inside = 99;
+        hr2 = ((PFN_HTP)layout_vt[64])(layout, cell_w * 1.5f, 5.0f, &trailing, &inside, htm);
+        const UINT pos1 = *(const UINT*)(htm + 0);
+        Out("[dwrite_smoke] Layout::HitTestPoint(1.5*cw,5) = ");
+        Out((hr2 == 0 && pos1 == 1u && trailing == 1 && inside == 1) ? "PASS\r\n" : "FAIL\r\n");
+
+        trailing = 99;
+        inside = 99;
+        hr2 = ((PFN_HTP)layout_vt[64])(layout, cell_w * 100.0f, 5.0f, &trailing, &inside, htm);
+        Out("[dwrite_smoke] Layout::HitTestPoint(past-end) = ");
+        Out((hr2 == 0 && inside == 0) ? "PASS\r\n" : "FAIL\r\n");
+    }
+
     typedef unsigned long (*PFN_Rel)(void*);
     if (layout)
         ((PFN_Rel)((void**)(*(void***)layout))[2])(layout);

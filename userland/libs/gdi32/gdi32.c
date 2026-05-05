@@ -374,22 +374,81 @@ __declspec(dllexport) INT DrawTextW(HDC dc, const wchar_t16* text, INT len, void
     return (INT)(rv > 0 ? rv : 0);
 }
 
+/* ExtTextOut clip-rect helper. The caller passes a RECT* (4 LONG:
+ * left/top/right/bottom) and a flag bitmask. v0 honours ETO_CLIPPED
+ * by trimming the (text, x) pair to the visible columns of the rect
+ * — kernel-side text drawing has no clip path, so the dispatch in
+ * user mode is the actual clip.
+ *
+ * Returns 1 if there's still text to draw after clipping, 0 if the
+ * rect rejected the entire bbox (caller treats that as a successful
+ * no-op). On entry *out_x / *out_text / *out_len are the unclipped
+ * starting position; on success they're rewritten in place. v0 uses
+ * the kernel font's 8x8 cell — see GetTextExtentPoint32A/W which
+ * also assumes 8px cells. */
+#define ETO_OPAQUE 0x0002u
+#define ETO_CLIPPED 0x0004u
+#define GDI_FONT_CELL_PX 8
+
+static int gdi32_eto_clip(UINT opts, const void* rect, INT* out_x, INT* y_in, const char** out_text, UINT* out_len)
+{
+    if (!(opts & ETO_CLIPPED) || !rect)
+        return 1;
+    const long* r = (const long*)rect;
+    const long left = r[0], top = r[1], right = r[2], bottom = r[3];
+    /* Bail entirely if the rect is empty / inverted. */
+    if (right <= left || bottom <= top)
+        return 0;
+    /* Vertical reject: text line is one cell tall starting at y. */
+    if (*y_in >= bottom || *y_in + GDI_FONT_CELL_PX <= top)
+        return 0;
+    /* Horizontal: clip leading chars whose right edge falls left of
+     * the rect, then trailing chars whose left edge falls past the
+     * rect. Both translate to (x, text_offset, len) updates. */
+    INT x = *out_x;
+    UINT len = *out_len;
+    const char* text = *out_text;
+    if (x < left)
+    {
+        const long skip_px = left - x;
+        const UINT skip = (UINT)((skip_px + GDI_FONT_CELL_PX - 1) / GDI_FONT_CELL_PX);
+        if (skip >= len)
+            return 0;
+        text += skip;
+        len -= skip;
+        x += (INT)skip * GDI_FONT_CELL_PX;
+    }
+    if (x >= right)
+        return 0;
+    const long room_px = right - x;
+    const UINT room_chars = (UINT)(room_px / GDI_FONT_CELL_PX);
+    if (room_chars == 0)
+        return 0;
+    if (len > room_chars)
+        len = room_chars;
+    *out_x = x;
+    *out_text = text;
+    *out_len = len;
+    return 1;
+}
+
 __declspec(dllexport) BOOL ExtTextOutA(HDC dc, INT x, INT y, UINT opts, const void* r, const char* text, UINT len,
                                        const INT* dx)
 {
-    (void)opts;
-    (void)r;
     (void)dx;
     HANDLE hwnd = gdi32_hwnd_from_hdc(dc);
     if (!hwnd)
         return 0;
+    /* If the clip rejects the entire string the call still returns
+     * TRUE — the contract is "succeeded at drawing nothing", not
+     * "failed". */
+    if (!gdi32_eto_clip(opts, r, &x, &y, &text, &len))
+        return 1;
     return gdi32_text_core(hwnd, x, y, text, len, 0);
 }
 __declspec(dllexport) BOOL ExtTextOutW(HDC dc, INT x, INT y, UINT opts, const void* r, const wchar_t16* text, UINT len,
                                        const INT* dx)
 {
-    (void)opts;
-    (void)r;
     (void)dx;
     HANDLE hwnd = gdi32_hwnd_from_hdc(dc);
     if (!hwnd || !text)
@@ -406,7 +465,11 @@ __declspec(dllexport) BOOL ExtTextOutW(HDC dc, INT x, INT y, UINT opts, const vo
         buf[n] = (c > 0 && c < 0x7F) ? (char)c : '?';
     }
     buf[n] = 0;
-    return gdi32_text_core(hwnd, x, y, buf, n, 0);
+    const char* clipped_text = buf;
+    UINT clipped_len = n;
+    if (!gdi32_eto_clip(opts, r, &x, &y, &clipped_text, &clipped_len))
+        return 1;
+    return gdi32_text_core(hwnd, x, y, clipped_text, clipped_len, 0);
 }
 __declspec(dllexport) BOOL TextOutA(HDC dc, INT x, INT y, const char* text, INT len)
 {

@@ -105,6 +105,14 @@ struct BpInfo
 /// are no-ops).
 void BpInit();
 
+/// Drive the subsystem to a clean, freshly-bootable state — disarms
+/// every DR slot, drops every software / hardware breakpoint table
+/// row, and resets the inited flag so the next `BpInit` runs the
+/// table-init path. Idempotent. Used by the driver fault-domain
+/// registry to restart the breakpoint subsystem without a reboot
+/// (e.g. after a flaky GDB session left orphaned int3 traps).
+void BpTeardown();
+
 /// Trap-context callback fired AFTER the reinsert dance (for SW
 /// BPs: original byte restored, RIP rolled back, RFLAGS.TF set;
 /// for HW BPs: just the hit accounting). Runs on the CPU that
