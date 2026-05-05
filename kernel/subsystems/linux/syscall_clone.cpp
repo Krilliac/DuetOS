@@ -203,21 +203,13 @@ i64 DoFork()
             continue;
         // Migrated kinds — KFile sidecar already duplicated by
         // LinuxFdInheritFromParent; skip the legacy explicit
-        // retain. (state 3/4/5 carry kf_handle today; the sub-
-        // sequent slice migrates 6..15 the same way.)
+        // retain. State 3..10 + 13..15 are migrated; only state
+        // 11 (dirfd, special — Win32 dir-pool adapter not yet
+        // wired) and state 12 (pidfd, special — Process* not u32)
+        // still need explicit handling below.
         if (child->linux_fds[i].kf_handle != ::duetos::ipc::kHandleInvalid)
             continue;
-        if (src.state == 6)
-            SocketFdRetain(src.first_cluster);
-        else if (src.state == 7)
-            TimerfdRetain(src.first_cluster);
-        else if (src.state == 8)
-            SignalfdRetain(src.first_cluster);
-        else if (src.state == 9)
-            EpollRetain(src.first_cluster);
-        else if (src.state == 10)
-            InotifyRetain(src.first_cluster);
-        else if (src.state == 11)
+        if (src.state == 11)
         {
             // Directory snapshot lives on the PARENT's
             // win32_dirs[] table. The child's table is fresh
@@ -242,12 +234,6 @@ i64 DoFork()
             if (tgt != nullptr)
                 core::ProcessRetain(tgt);
         }
-        else if (src.state == 13)
-            PosixMqRetain(src.first_cluster);
-        else if (src.state == 14)
-            MemfdRetain(src.first_cluster);
-        else if (src.state == 15)
-            FanotifyRetain(src.first_cluster);
     }
     // Hand a LinuxCloneDesc to the existing LinuxCloneEntry —
     // it iretq's into ring-3 with rax = 0 (EnterUserModeThread's

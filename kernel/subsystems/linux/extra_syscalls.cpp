@@ -173,7 +173,7 @@ void MemfdRelease(u32 idx)
 
 i64 DoMemfdCreate(u64 user_name, u64 flags)
 {
-    (void)flags; // MFD_CLOEXEC / MFD_ALLOW_SEALING / MFD_HUGETLB ignored
+    constexpr u64 kMFD_CLOEXEC = 0x1;
     char name[32];
     for (u32 i = 0; i < sizeof(name); ++i)
         name[i] = 0;
@@ -184,27 +184,33 @@ i64 DoMemfdCreate(u64 user_name, u64 flags)
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
-    u32 fd = 16;
-    for (u32 i = 3; i < LinuxFdEffectiveMax(p); ++i)
-        if (p->linux_fds[i].state == 0)
-        {
-            fd = i;
-            break;
-        }
-    if (fd == 16)
+    const i32 fd = core::LinuxFdAllocLowest(p, 3);
+    if (fd < 0)
         return kEMFILE;
+    p->linux_fds[fd].state = 14; // reserve
     // Create a 0-byte memfd; ftruncate is what makes it usable.
     // To keep v0 simple, we skip the 0-byte case and allocate one
     // page up front. Callers can ftruncate to grow (bounded by
     // kMemfdMaxPages).
     const i32 idx = MemfdAlloc(name, 1);
     if (idx < 0)
+    {
+        p->linux_fds[fd].state = 0;
         return kENOMEM;
-    p->linux_fds[fd].state = 14;
+    }
+    p->linux_fds[fd].flags = 0;
     p->linux_fds[fd].first_cluster = static_cast<u32>(idx);
     p->linux_fds[fd].size = static_cast<u32>(g_memfd_pool[idx].size_bytes);
     p->linux_fds[fd].offset = 0;
     p->linux_fds[fd].path[0] = '\0';
+    if (!core::LinuxFdAttachKFile(p, static_cast<u32>(fd), /*kind=*/14, static_cast<u32>(idx), &MemfdRelease))
+    {
+        p->linux_fds[fd].state = 0;
+        MemfdRelease(static_cast<u32>(idx));
+        return kENOMEM;
+    }
+    if ((flags & kMFD_CLOEXEC) != 0)
+        core::LinuxFdSetCloexec(p, static_cast<u32>(fd), true);
     arch::SerialWrite("[linux/memfd] create fd=");
     arch::SerialWriteHex(fd);
     arch::SerialWrite(" idx=");

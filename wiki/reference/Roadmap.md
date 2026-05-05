@@ -86,27 +86,36 @@ the same commit** that delivers the code.
   eventfd2's EFD_CLOEXEC, dup3's O_CLOEXEC, fcntl(F_SETFD,
   FD_CLOEXEC)) and read by `LinuxFdCloseOnExec` (wired for the
   future execve handler; today exists for the boot-time self-test).
-  Pipe (states 3 / 4) and eventfd (state 5) creators are migrated
-  end-to-end: `LinuxFdAttachKFile` parks a `KFile` carrying
-  `&PipeReleaseRead`/`&PipeReleaseWrite`/`&EventfdRelease` in
+  Pipe (states 3 / 4), eventfd (5), socket (6), timerfd (7),
+  signalfd (8), epoll (9), inotify (10), POSIX MQ (13), memfd
+  (14), and fanotify (15) creators are now all migrated end-to-
+  end: `LinuxFdAttachKFile` parks a `KFile` carrying the per-kind
+  release callback (e.g. `&PipeReleaseRead`, `&SocketFdRelease`,
+  `&TimerfdRelease`, `&EpollRelease`, `&PosixMqRelease`, ...) in
   `kobj_handles`, the `LinuxFd` slot stores the resulting handle,
   and the per-pool release fires once via the `KFile` destroy
-  callback when the last reference drops. The previous v0
-  sub-GAP — dup() of a pipe fd silently leaked the pool ref —
-  is closed; both fds now hold an independent KFile reference and
-  the wakeup-on-disconnect pool semantics are preserved verbatim.
-- **Remaining state-kinds:** socket (6), timerfd (7), signalfd
-  (8), epoll (9), inotify (10), dirfd (11), pidfd (12), POSIX
-  MQ (13), memfd (14), fanotify (15) still wire pool refs by
-  hand at the syscall site (`*Retain` on creation / fork,
-  `*Release` on close). The dual-track logic in `DoClose` and
-  the fork inheritance loop checks `kf_handle != kHandleInvalid`
-  and skips the legacy explicit release / retain when a KFile
-  sidecar is present, so each remaining kind can be migrated
-  one slice at a time without breaking the others. Dirfd (11)
-  needs an adapter callback (snapshot lives on `win32_dirs[]`
-  not a per-state pool); pidfd (12) needs a `Process*` adapter
-  (release decrements a Process refcount, not a pool index).
+  callback when the last reference drops. Every migrated creator
+  now also honours its CLOEXEC flag bit (O_CLOEXEC, EFD_CLOEXEC,
+  TFD_CLOEXEC, SFD_CLOEXEC, EPOLL_CLOEXEC, IN_CLOEXEC,
+  SOCK_CLOEXEC, MQ O_CLOEXEC, MFD_CLOEXEC, FAN_CLOEXEC) — was a
+  documented sub-GAP, now real. The previous v0 sub-GAP — dup of
+  a pipe / eventfd / socket / etc. silently leaking the pool ref
+  — is closed across every migrated kind: both fds now hold an
+  independent KFile reference and the per-pool wakeup-on-
+  disconnect semantics are preserved verbatim. The fork-time
+  legacy `*Retain` block in `syscall_clone.cpp` shrank from
+  ten kinds to two (state 11 + 12).
+- **Remaining state-kinds:** dirfd (state 11) and pidfd (state
+  12) still ride the legacy explicit release at close /
+  retain at fork. Both need adapter callbacks beyond the
+  uniform `void(u32)` shape: dirfd's "release" frees the
+  parent process's `win32_dirs[idx]` snapshot (needs
+  `Process*` + the Win32 base offset), and pidfd's "release"
+  drops a `ProcessRetain` on the target Process found by pid
+  (needs a `SchedFindProcessByPid` lookup adapter). The
+  dual-track logic in `DoClose` and fork inheritance keeps
+  these kinds working unchanged until a follow-up slice wires
+  the adapters.
 - **When to land:** opportunistic, gated on a Linux-ABI workload
   that benefits from the unified surface; the dual-track shape
   means each remaining kind is a self-contained slice.

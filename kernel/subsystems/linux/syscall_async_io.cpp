@@ -284,29 +284,35 @@ i64 TimerfdRead(u32 idx, u64 user_dst, u64 len)
 
 i64 DoTimerfdCreate(u64 clockid, u64 flags)
 {
-    (void)flags; // TFD_NONBLOCK / TFD_CLOEXEC accepted but not enforced
+    constexpr u64 kTFD_CLOEXEC = 0x80000;
+    constexpr u64 kTFD_NONBLOCK = 0x800;
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
-    u32 fd = 16;
-    for (u32 i = 3; i < LinuxFdEffectiveMax(p); ++i)
-    {
-        if (p->linux_fds[i].state == 0)
-        {
-            fd = i;
-            break;
-        }
-    }
-    if (fd == 16)
+    const i32 fd = core::LinuxFdAllocLowest(p, 3);
+    if (fd < 0)
         return kEMFILE;
+    p->linux_fds[fd].state = 7; // reserve so AttachKFile can't trip the slot
     const i32 idx = TimerfdAlloc(static_cast<u32>(clockid));
     if (idx < 0)
+    {
+        p->linux_fds[fd].state = 0;
         return kENFILE;
-    p->linux_fds[fd].state = 7;
+    }
+    p->linux_fds[fd].flags = 0;
     p->linux_fds[fd].first_cluster = static_cast<u32>(idx);
     p->linux_fds[fd].size = 0;
     p->linux_fds[fd].offset = 0;
     p->linux_fds[fd].path[0] = '\0';
+    if (!core::LinuxFdAttachKFile(p, static_cast<u32>(fd), /*kind=*/7, static_cast<u32>(idx), &TimerfdRelease))
+    {
+        p->linux_fds[fd].state = 0;
+        TimerfdRelease(static_cast<u32>(idx));
+        return kENOMEM;
+    }
+    if ((flags & kTFD_CLOEXEC) != 0)
+        core::LinuxFdSetCloexec(p, static_cast<u32>(fd), true);
+    (void)kTFD_NONBLOCK; // accepted but blocking-only in v0
     arch::SerialWrite("[linux/timerfd] fd=");
     arch::SerialWriteHex(fd);
     arch::SerialWrite(" pool_idx=");
@@ -522,7 +528,9 @@ i64 SignalfdRead(u32 idx, u64 user_dst, u64 len)
 
 i64 DoSignalfd(u64 fd, u64 user_mask, u64 sigsetsize, u64 flags)
 {
-    (void)flags;
+    constexpr u64 kSFD_CLOEXEC = 0x80000;
+    constexpr u64 kSFD_NONBLOCK = 0x800;
+    (void)kSFD_NONBLOCK; // accepted but blocking-only in v0
     if (sigsetsize > sizeof(u64))
         return kEINVAL;
     u64 mask = 0;
@@ -548,27 +556,31 @@ i64 DoSignalfd(u64 fd, u64 user_mask, u64 sigsetsize, u64 flags)
         arch::Sti();
         return static_cast<i64>(fd);
     }
-    u32 new_fd = 16;
-    for (u32 i = 3; i < LinuxFdEffectiveMax(p); ++i)
-    {
-        if (p->linux_fds[i].state == 0)
-        {
-            new_fd = i;
-            break;
-        }
-    }
-    if (new_fd == 16)
+    const i32 new_fd = core::LinuxFdAllocLowest(p, 3);
+    if (new_fd < 0)
         return kEMFILE;
+    p->linux_fds[new_fd].state = 8; // reserve
     const i32 idx = SignalfdAlloc(mask);
     if (idx < 0)
+    {
+        p->linux_fds[new_fd].state = 0;
         return kENFILE;
-    p->linux_fds[new_fd].state = 8;
+    }
+    p->linux_fds[new_fd].flags = 0;
     p->linux_fds[new_fd].first_cluster = static_cast<u32>(idx);
     p->linux_fds[new_fd].size = 0;
     p->linux_fds[new_fd].offset = 0;
     p->linux_fds[new_fd].path[0] = '\0';
+    if (!core::LinuxFdAttachKFile(p, static_cast<u32>(new_fd), /*kind=*/8, static_cast<u32>(idx), &SignalfdRelease))
+    {
+        p->linux_fds[new_fd].state = 0;
+        SignalfdRelease(static_cast<u32>(idx));
+        return kENOMEM;
+    }
+    if ((flags & kSFD_CLOEXEC) != 0)
+        core::LinuxFdSetCloexec(p, static_cast<u32>(new_fd), true);
     arch::SerialWrite("[linux/signalfd] fd=");
-    arch::SerialWriteHex(new_fd);
+    arch::SerialWriteHex(static_cast<u64>(new_fd));
     arch::SerialWrite(" mask=");
     arch::SerialWriteHex(mask);
     arch::SerialWrite("\n");
@@ -706,29 +718,33 @@ i64 DoEpollCreate(u64 size)
 
 i64 DoEpollCreate1(u64 flags)
 {
-    (void)flags;
+    constexpr u64 kEPOLL_CLOEXEC = 0x80000;
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
-    u32 fd = 16;
-    for (u32 i = 3; i < LinuxFdEffectiveMax(p); ++i)
-    {
-        if (p->linux_fds[i].state == 0)
-        {
-            fd = i;
-            break;
-        }
-    }
-    if (fd == 16)
+    const i32 fd = core::LinuxFdAllocLowest(p, 3);
+    if (fd < 0)
         return kEMFILE;
+    p->linux_fds[fd].state = 9; // reserve
     const i32 idx = EpollAlloc();
     if (idx < 0)
+    {
+        p->linux_fds[fd].state = 0;
         return kENFILE;
-    p->linux_fds[fd].state = 9;
+    }
+    p->linux_fds[fd].flags = 0;
     p->linux_fds[fd].first_cluster = static_cast<u32>(idx);
     p->linux_fds[fd].size = 0;
     p->linux_fds[fd].offset = 0;
     p->linux_fds[fd].path[0] = '\0';
+    if (!core::LinuxFdAttachKFile(p, static_cast<u32>(fd), /*kind=*/9, static_cast<u32>(idx), &EpollRelease))
+    {
+        p->linux_fds[fd].state = 0;
+        EpollRelease(static_cast<u32>(idx));
+        return kENOMEM;
+    }
+    if ((flags & kEPOLL_CLOEXEC) != 0)
+        core::LinuxFdSetCloexec(p, static_cast<u32>(fd), true);
     arch::SerialWrite("[linux/epoll] fd=");
     arch::SerialWriteHex(fd);
     arch::SerialWrite(" pool_idx=");

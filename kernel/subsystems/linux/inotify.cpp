@@ -322,40 +322,46 @@ i64 InotifyRead(u32 idx, u64 user_dst, u64 len)
 
 i64 InotifyInit()
 {
-    core::Process* p = core::CurrentProcess();
-    if (p == nullptr)
-        return kEPERM;
-    u32 fd = 16;
-    for (u32 i = 3; i < LinuxFdEffectiveMax(p); ++i)
-    {
-        if (p->linux_fds[i].state == 0)
-        {
-            fd = i;
-            break;
-        }
-    }
-    if (fd == 16)
-        return kEMFILE;
-    const i32 idx = InotifyAlloc();
-    if (idx < 0)
-        return kENFILE;
-    p->linux_fds[fd].state = 10;
-    p->linux_fds[fd].first_cluster = static_cast<u32>(idx);
-    p->linux_fds[fd].size = 0;
-    p->linux_fds[fd].offset = 0;
-    p->linux_fds[fd].path[0] = '\0';
-    arch::SerialWrite("[linux/inotify] init fd=");
-    arch::SerialWriteHex(fd);
-    arch::SerialWrite(" pool_idx=");
-    arch::SerialWriteHex(static_cast<u64>(idx));
-    arch::SerialWrite("\n");
-    return static_cast<i64>(fd);
+    return InotifyInit1(/*flags=*/0);
 }
 
 i64 InotifyInit1(u64 flags)
 {
-    (void)flags; // IN_NONBLOCK / IN_CLOEXEC accepted but ignored
-    return InotifyInit();
+    constexpr u64 kIN_CLOEXEC = 0x80000;
+    constexpr u64 kIN_NONBLOCK = 0x800;
+    (void)kIN_NONBLOCK; // accepted but blocking-only in v0
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr)
+        return kEPERM;
+    const i32 fd = core::LinuxFdAllocLowest(p, 3);
+    if (fd < 0)
+        return kEMFILE;
+    p->linux_fds[fd].state = 10; // reserve
+    const i32 idx = InotifyAlloc();
+    if (idx < 0)
+    {
+        p->linux_fds[fd].state = 0;
+        return kENFILE;
+    }
+    p->linux_fds[fd].flags = 0;
+    p->linux_fds[fd].first_cluster = static_cast<u32>(idx);
+    p->linux_fds[fd].size = 0;
+    p->linux_fds[fd].offset = 0;
+    p->linux_fds[fd].path[0] = '\0';
+    if (!core::LinuxFdAttachKFile(p, static_cast<u32>(fd), /*kind=*/10, static_cast<u32>(idx), &InotifyRelease))
+    {
+        p->linux_fds[fd].state = 0;
+        InotifyRelease(static_cast<u32>(idx));
+        return kENOMEM;
+    }
+    if ((flags & kIN_CLOEXEC) != 0)
+        core::LinuxFdSetCloexec(p, static_cast<u32>(fd), true);
+    arch::SerialWrite("[linux/inotify] init fd=");
+    arch::SerialWriteHex(static_cast<u64>(fd));
+    arch::SerialWrite(" pool_idx=");
+    arch::SerialWriteHex(static_cast<u64>(idx));
+    arch::SerialWrite("\n");
+    return static_cast<i64>(fd);
 }
 
 i64 DoInotifyAddWatch(u64 fd, u64 user_path, u64 mask)

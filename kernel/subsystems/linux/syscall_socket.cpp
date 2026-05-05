@@ -95,21 +95,32 @@ bool WriteSockaddrIn(u64 user_addr, u64 user_addrlen_ptr, ::duetos::net::Ipv4Add
 
 i32 AllocFd(::duetos::core::Process* p)
 {
-    for (u32 i = 3; i < LinuxFdEffectiveMax(p); ++i)
-    {
-        if (p->linux_fds[i].state == 0)
-            return static_cast<i32>(i);
-    }
-    return -1;
+    return ::duetos::core::LinuxFdAllocLowest(p, 3);
 }
 
-void FdAssignSocket(::duetos::core::Process* p, u32 fd, u32 sock_idx)
+// Stamp the slot + attach a KFile sidecar carrying
+// `&SocketFdRelease`. Returns false on KFile / handle-table
+// exhaustion — caller is then on the hook for SocketFdRelease
+// (the slot is left at state=0 so a subsequent allocator can
+// reuse it). The legacy direct-mutation path is preserved as a
+// fallback (no KFile means DoClose's dual-track falls through to
+// the explicit `SocketFdRelease` arm).
+bool FdAssignSocket(::duetos::core::Process* p, u32 fd, u32 sock_idx)
 {
     p->linux_fds[fd].state = 6;
+    p->linux_fds[fd].flags = 0;
     p->linux_fds[fd].first_cluster = sock_idx;
     p->linux_fds[fd].size = 0;
     p->linux_fds[fd].offset = 0;
     p->linux_fds[fd].path[0] = '\0';
+    if (!::duetos::core::LinuxFdAttachKFile(p, fd, /*kind=*/6, sock_idx, &SocketFdRelease))
+    {
+        // Attach failed — KFile sidecar absent, legacy DoClose
+        // path will release. Mark not-attached by leaving
+        // kf_handle = invalid; caller decides whether to fail.
+        return false;
+    }
+    return true;
 }
 
 bool FdIsSocket(::duetos::core::Process* p, u64 fd, u32& out_idx)
@@ -141,7 +152,15 @@ i64 DoSocket(u64 domain, u64 type, u64 protocol)
     const i32 sock = ::duetos::net::SocketAlloc(static_cast<u16>(domain), static_cast<u16>(base_type));
     if (sock < 0)
         return kENFILE;
-    FdAssignSocket(p, static_cast<u32>(fd), static_cast<u32>(sock));
+    if (!FdAssignSocket(p, static_cast<u32>(fd), static_cast<u32>(sock)))
+    {
+        // KFile sidecar attach failed — slot is left at state=6 with
+        // no kf_handle, so DoClose's legacy-arm release path will
+        // still fire. We could have rolled back here, but the legacy
+        // path covers cleanup symmetrically.
+    }
+    if ((type & kSockCloExec) != 0)
+        ::duetos::core::LinuxFdSetCloexec(p, static_cast<u32>(fd), true);
     arch::SerialWrite("[linux/socket] fd=");
     arch::SerialWriteHex(static_cast<u64>(fd));
     arch::SerialWrite(" pool=");

@@ -527,6 +527,7 @@ i64 DoMqOpen(u64 user_name, u64 oflag, u64 mode, u64 user_attr)
     (void)user_attr;
     constexpr u64 kOCreat = 0x40;
     constexpr u64 kOExcl = 0x80;
+    constexpr u64 kOCloexec = 0x80000;
     char name[kPosixMqNameCap];
     for (u32 i = 0; i < sizeof(name); ++i)
         name[i] = 0;
@@ -539,14 +540,8 @@ i64 DoMqOpen(u64 user_name, u64 oflag, u64 mode, u64 user_attr)
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
         return -1;
-    u32 fd = 16;
-    for (u32 i = 3; i < LinuxFdEffectiveMax(p); ++i)
-        if (p->linux_fds[i].state == 0)
-        {
-            fd = i;
-            break;
-        }
-    if (fd == 16)
+    const i32 fd = core::LinuxFdAllocLowest(p, 3);
+    if (fd < 0)
         return -24; // -EMFILE
 
     const i32 existing = PosixMqFindByName(name);
@@ -578,10 +573,19 @@ i64 DoMqOpen(u64 user_name, u64 oflag, u64 mode, u64 user_attr)
             return -28;
     }
     p->linux_fds[fd].state = 13;
+    p->linux_fds[fd].flags = 0;
     p->linux_fds[fd].first_cluster = static_cast<u32>(idx);
     p->linux_fds[fd].size = 0;
     p->linux_fds[fd].offset = 0;
     p->linux_fds[fd].path[0] = '\0';
+    if (!core::LinuxFdAttachKFile(p, static_cast<u32>(fd), /*kind=*/13, static_cast<u32>(idx), &PosixMqRelease))
+    {
+        p->linux_fds[fd].state = 0;
+        PosixMqRelease(static_cast<u32>(idx));
+        return -12; // -ENOMEM
+    }
+    if ((oflag & kOCloexec) != 0)
+        core::LinuxFdSetCloexec(p, static_cast<u32>(fd), true);
     arch::SerialWrite("[linux/posixmq] open fd=");
     arch::SerialWriteHex(fd);
     arch::SerialWrite(" idx=");
