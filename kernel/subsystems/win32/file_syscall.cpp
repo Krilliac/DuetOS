@@ -10,8 +10,10 @@
 #include "arch/x86_64/traps.h"
 #include "diag/kdbg.h"
 #include "ipc/handle_table.h"
+#include "ipc/kevent.h"
 #include "ipc/kmutex.h"
 #include "ipc/kobject.h"
+#include "ipc/ksemaphore.h"
 #include "proc/process.h"
 #include "syscall/syscall.h"
 #include "fs/file_route.h"
@@ -186,13 +188,40 @@ void DoFileClose(arch::TrapFrame* frame)
     else if (handle >= core::Process::kWin32EventBase &&
              handle < core::Process::kWin32EventBase + core::Process::kWin32EventCap)
     {
-        const u64 slot = handle - core::Process::kWin32EventBase;
-        arch::Cli();
-        core::Process::Win32EventHandle& e = proc->win32_events[slot];
-        (void)sched::WaitQueueWakeAll(&e.waiters);
-        e.in_use = false;
-        e.signaled = false;
-        arch::Sti();
+        // Migrated to KEvent + kobj_handles. Map the Win32 handle
+        // back to its ipc::Handle slot, type-check via lookup-with-
+        // ref so the storage stays alive across the table remove
+        // below, then drop the table reference. Any waiters still
+        // blocked on the KEvent's condvar carry their own implicit
+        // reference (see KEventDestroy comment in kevent.cpp);
+        // closing the last handle while a waiter is queued is the
+        // future-audit edge documented there, not a regression
+        // introduced by this slice.
+        const ipc::Handle ipc_h = static_cast<ipc::Handle>(handle - core::Process::kWin32EventBase);
+        ipc::KObject* obj = ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Event);
+        if (obj != nullptr)
+        {
+            (void)ipc::HandleTableRemove(proc->kobj_handles, ipc_h);
+            ipc::KObjectRelease(obj); // drop the lookup ref
+        }
+    }
+    else if (handle >= core::Process::kWin32SemaphoreBase &&
+             handle < core::Process::kWin32SemaphoreBase + core::Process::kWin32SemaphoreCap)
+    {
+        // Migrated to KSemaphore + kobj_handles. Same shape as the
+        // event arm above — type-check, drop the table reference,
+        // KSemaphoreDestroy fires when the last reference clears.
+        // (Pre-migration: this arm did not exist; CloseHandle
+        // silently leaked the legacy Win32SemaphoreHandle slot.
+        // Fixed incidentally by routing through the unified
+        // handle table.)
+        const ipc::Handle ipc_h = static_cast<ipc::Handle>(handle - core::Process::kWin32SemaphoreBase);
+        ipc::KObject* obj = ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Semaphore);
+        if (obj != nullptr)
+        {
+            (void)ipc::HandleTableRemove(proc->kobj_handles, ipc_h);
+            ipc::KObjectRelease(obj); // drop the lookup ref
+        }
     }
     else if (handle >= core::Process::kWin32RegistryBase &&
              handle < core::Process::kWin32RegistryBase + core::Process::kWin32RegistryCap)

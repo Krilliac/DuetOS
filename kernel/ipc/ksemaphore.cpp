@@ -143,6 +143,39 @@ void KSemaphoreRelease(KSemaphore* s, u32 n)
     sched::MutexUnlock(&s->inner);
 }
 
+bool KSemaphoreTryRelease(KSemaphore* s, u32 n, u32* prev_out)
+{
+    if (n == 0)
+    {
+        if (prev_out != nullptr)
+        {
+            sched::MutexLock(&s->inner);
+            *prev_out = s->count;
+            sched::MutexUnlock(&s->inner);
+        }
+        return true;
+    }
+    sched::MutexLock(&s->inner);
+    const u64 new_count = static_cast<u64>(s->count) + static_cast<u64>(n);
+    if (new_count > static_cast<u64>(s->max_count))
+    {
+        sched::MutexUnlock(&s->inner);
+        return false;
+    }
+    const u32 prev = s->count;
+    s->count = static_cast<u32>(new_count);
+    for (u32 i = 0; i < n; ++i)
+    {
+        sched::CondvarSignal(&s->cv);
+    }
+    sched::MutexUnlock(&s->inner);
+    if (prev_out != nullptr)
+    {
+        *prev_out = prev;
+    }
+    return true;
+}
+
 u32 KSemaphoreCount(const KSemaphore* s)
 {
     return s->count;

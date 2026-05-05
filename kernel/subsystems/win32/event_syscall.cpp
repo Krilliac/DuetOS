@@ -1,13 +1,28 @@
+/*
+ * SYS_EVENT_* dispatch — backs Win32 CreateEventW / SetEvent /
+ * ResetEvent / WaitForSingleObject(event_handle).
+ *
+ * Routes through the unified `Process::kobj_handles` table + the
+ * concrete `KEvent` infrastructure in `kernel/ipc/`. Win32 ABI is
+ * preserved at the syscall boundary (kWaitObject0 / kWaitTimeout
+ * return values; manual-reset latch; auto-reset consume-on-wake);
+ * the per-process `Win32EventHandle` fixed-size array that this
+ * surface used to inhabit was removed alongside this slice — the
+ * KEvent layer's condvar-backed wait + refcounted handle-table
+ * lookup carry the equivalent storage-lifetime guarantees safely.
+ */
+
 #include "subsystems/win32/event_syscall.h"
 
-#include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
-#include "log/klog.h"
 #include "arch/x86_64/traps.h"
+#include "ipc/handle_table.h"
+#include "ipc/kevent.h"
+#include "ipc/kobject.h"
+#include "log/klog.h"
 #include "proc/process.h"
-#include "syscall/syscall.h"
-#include "sched/sched.h"
 #include "subsystems/win32/custom.h"
+#include "syscall/syscall.h"
 
 namespace duetos::subsystems::win32
 {
@@ -17,7 +32,22 @@ namespace
 constexpr u64 kInfiniteMs = 0xFFFFFFFFu;
 constexpr u64 kWaitObject0 = 0;
 constexpr u64 kWaitTimeout = 0x102;
-constexpr u64 kMsPerTick = 10;
+constexpr u64 kMsPerTick = 10; // scheduler runs at 100 Hz
+
+// Map a Win32 event handle to a kobj_handles slot id, or
+// `ipc::kHandleInvalid` if the value is out of range. The
+// translation is a flat subtraction of the per-type base so a
+// PE that DuplicateHandle'd from another DuetOS process sees the
+// same opaque value.
+ipc::Handle Win32HandleToIpc(u64 handle)
+{
+    if (handle < core::Process::kWin32EventBase ||
+        handle >= core::Process::kWin32EventBase + core::Process::kWin32EventCap)
+    {
+        return ipc::kHandleInvalid;
+    }
+    return static_cast<ipc::Handle>(handle - core::Process::kWin32EventBase);
+}
 } // namespace
 
 void DoEventCreate(arch::TrapFrame* frame)
@@ -32,32 +62,29 @@ void DoEventCreate(arch::TrapFrame* frame)
         frame->rax = static_cast<u64>(-1);
         return;
     }
-    u64 slot = core::Process::kWin32EventCap;
-    arch::Cli();
-    for (u64 i = 0; i < core::Process::kWin32EventCap; ++i)
+
+    const bool manual_reset = (frame->rdi != 0);
+    const bool initial_state = (frame->rsi != 0);
+    auto create_r = ipc::KEventCreate(manual_reset, initial_state);
+    if (!create_r.has_value())
     {
-        if (!proc->win32_events[i].in_use)
-        {
-            slot = i;
-            break;
-        }
-    }
-    if (slot == core::Process::kWin32EventCap)
-    {
-        arch::Sti();
-        ::duetos::core::LogAWithValue(::duetos::core::LogLevel::Warn, ::duetos::core::LogArea::Win32, "win32/event",
-                                      "event_create: out of slots in pid", proc->pid);
+        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event", "create OOM in pid", proc->pid);
         frame->rax = static_cast<u64>(-1);
         return;
     }
-    core::Process::Win32EventHandle& e = proc->win32_events[slot];
-    e.in_use = true;
-    e.manual_reset = (frame->rdi != 0);
-    e.signaled = (frame->rsi != 0);
-    e.waiters.head = nullptr;
-    e.waiters.tail = nullptr;
-    arch::Sti();
-    const u64 handle = core::Process::kWin32EventBase + slot;
+    ipc::KEvent* e = create_r.value();
+
+    auto insert_r = ipc::HandleTableInsert(proc->kobj_handles, &e->base);
+    if (!insert_r.has_value())
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event", "create: kobj_handles full in pid", proc->pid);
+        // Drop the create-time reference; KEventDestroy fires.
+        ipc::KObjectRelease(&e->base);
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
+    const ipc::Handle ipc_h = insert_r.value();
+    const u64 handle = core::Process::kWin32EventBase + ipc_h;
     KLOG_INFO_AV(::duetos::core::LogArea::Win32, "win32/event", "NtCreateEvent OK; handle", handle);
     custom::OnHandleAlloc(proc, handle, static_cast<u32>(core::SYS_EVENT_CREATE), frame->rip);
     frame->rax = handle;
@@ -73,38 +100,25 @@ void DoEventSet(arch::TrapFrame* frame)
         return;
     }
     const u64 handle = frame->rdi;
-    if (handle < core::Process::kWin32EventBase ||
-        handle >= core::Process::kWin32EventBase + core::Process::kWin32EventCap)
+    const ipc::Handle ipc_h = Win32HandleToIpc(handle);
+    if (ipc_h == ipc::kHandleInvalid)
     {
         KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event",
                      "NtSetEvent: bad handle (out of valid event range); handle", handle);
         frame->rax = static_cast<u64>(-1);
         return;
     }
-    core::Process::Win32EventHandle& e = proc->win32_events[handle - core::Process::kWin32EventBase];
-    arch::Cli();
-    if (!e.in_use)
+    ipc::KObject* obj = ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Event);
+    if (obj == nullptr)
     {
-        arch::Sti();
-        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event",
-                     "NtSetEvent: closed handle (use-after-NtClose); handle", handle);
+        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event", "NtSetEvent: bad/closed event handle; handle",
+                     handle);
         frame->rax = static_cast<u64>(-1);
         return;
     }
-    e.signaled = true;
-    if (e.manual_reset)
-    {
-        // Manual: wake ALL waiters; signal stays set.
-        (void)sched::WaitQueueWakeAll(&e.waiters);
-    }
-    else
-    {
-        // Auto: wake ONE; if woken, auto-clear signal.
-        sched::Task* next = sched::WaitQueueWakeOne(&e.waiters);
-        if (next != nullptr)
-            e.signaled = false;
-    }
-    arch::Sti();
+    auto* e = reinterpret_cast<ipc::KEvent*>(obj);
+    ipc::KEventSet(e);
+    ipc::KObjectRelease(obj);
     frame->rax = 0;
 }
 
@@ -118,24 +132,25 @@ void DoEventReset(arch::TrapFrame* frame)
         return;
     }
     const u64 handle = frame->rdi;
-    if (handle < core::Process::kWin32EventBase ||
-        handle >= core::Process::kWin32EventBase + core::Process::kWin32EventCap)
+    const ipc::Handle ipc_h = Win32HandleToIpc(handle);
+    if (ipc_h == ipc::kHandleInvalid)
     {
         KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event", "NtResetEvent: bad handle; handle", handle);
         frame->rax = static_cast<u64>(-1);
         return;
     }
-    core::Process::Win32EventHandle& e = proc->win32_events[handle - core::Process::kWin32EventBase];
-    arch::Cli();
-    const bool was_in_use = e.in_use;
-    if (was_in_use)
-        e.signaled = false;
-    arch::Sti();
-    if (!was_in_use)
+    ipc::KObject* obj = ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Event);
+    if (obj == nullptr)
     {
-        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event", "NtResetEvent: closed handle; handle", handle);
+        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event", "NtResetEvent: bad/closed event handle; handle",
+                     handle);
+        frame->rax = static_cast<u64>(-1);
+        return;
     }
-    frame->rax = was_in_use ? 0 : static_cast<u64>(-1);
+    auto* e = reinterpret_cast<ipc::KEvent*>(obj);
+    ipc::KEventReset(e);
+    ipc::KObjectRelease(obj);
+    frame->rax = 0;
 }
 
 void DoEventWait(arch::TrapFrame* frame)
@@ -150,45 +165,35 @@ void DoEventWait(arch::TrapFrame* frame)
         return;
     }
     const u64 handle = frame->rdi;
-    if (handle < core::Process::kWin32EventBase ||
-        handle >= core::Process::kWin32EventBase + core::Process::kWin32EventCap)
+    const ipc::Handle ipc_h = Win32HandleToIpc(handle);
+    if (ipc_h == ipc::kHandleInvalid)
     {
         KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event", "NtWaitForSingleObject: bad event handle; handle",
                      handle);
         frame->rax = static_cast<u64>(-1);
         return;
     }
-    core::Process::Win32EventHandle& e = proc->win32_events[handle - core::Process::kWin32EventBase];
-    arch::Cli();
-    if (!e.in_use)
+    ipc::KObject* obj = ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Event);
+    if (obj == nullptr)
     {
-        arch::Sti();
         KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event",
-                     "NtWaitForSingleObject: closed event handle; handle", handle);
+                     "NtWaitForSingleObject: bad/closed event handle; handle", handle);
         frame->rax = static_cast<u64>(-1);
         return;
     }
-    if (e.signaled)
-    {
-        // Already signaled. Auto-reset events clear the signal
-        // for us; manual-reset events keep it.
-        if (!e.manual_reset)
-            e.signaled = false;
-        arch::Sti();
-        frame->rax = kWaitObject0;
-        return;
-    }
+    auto* e = reinterpret_cast<ipc::KEvent*>(obj);
+
     const u64 timeout_ms = frame->rsi & 0xFFFFFFFFu;
     if (timeout_ms == kInfiniteMs)
     {
-        sched::WaitQueueBlock(&e.waiters);
-        arch::Sti();
+        ipc::KEventWait(e);
+        ipc::KObjectRelease(obj);
         frame->rax = kWaitObject0;
         return;
     }
     const u64 ticks = (timeout_ms + (kMsPerTick - 1)) / kMsPerTick;
-    const bool got = sched::WaitQueueBlockTimeout(&e.waiters, ticks);
-    arch::Sti();
+    const bool got = ipc::KEventWaitTimed(e, ticks);
+    ipc::KObjectRelease(obj);
     frame->rax = got ? kWaitObject0 : kWaitTimeout;
 }
 

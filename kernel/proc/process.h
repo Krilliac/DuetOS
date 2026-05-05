@@ -539,27 +539,17 @@ struct Process
     static constexpr u64 kWin32MutexBase = 0x200;
     static constexpr u64 kWin32MutexCap = ::duetos::ipc::kHandleTableCapacity;
 
-    // Win32 event table — backs CreateEventW / SetEvent /
-    // ResetEvent / WaitForSingleObject. Simpler than
-    // mutexes: no owner, no recursion, just a signaled flag
-    // with a waitqueue. Manual-reset events stay signaled until
-    // ResetEvent; auto-reset events wake one waiter then clear
-    // themselves automatically.
-    //
-    // Handles run kWin32EventBase + idx (= 0x300..0x307),
-    // disjoint from the mutex and file handle ranges so
-    // CloseHandle / WaitForSingleObject dispatch by range.
-    struct Win32EventHandle
-    {
-        bool in_use;
-        bool manual_reset; // true = stays signaled until reset; false = auto-clears on wake
-        bool signaled;
-        u8 _pad[5];
-        sched::WaitQueue waiters; // tasks blocked in SYS_EVENT_WAIT
-    };
-    static constexpr u64 kWin32EventCap = 8;
+    // Win32 event handle range — backs CreateEventW / SetEvent /
+    // ResetEvent / WaitForSingleObject. Migrated to KEvent +
+    // `kobj_handles` (kernel/ipc/) alongside mutexes; the legacy
+    // `Win32EventHandle win32_events[]` array was removed at the
+    // same time. The Win32 handle is now `kWin32EventBase +
+    // ipc_handle`, with `ipc_handle` a slot in the unified handle
+    // table. The cap stays disjoint from kWin32MutexBase (0x200)
+    // and kWin32ThreadBase (0x400) so CloseHandle / WFMO can
+    // continue to dispatch by range.
     static constexpr u64 kWin32EventBase = 0x300;
-    Win32EventHandle win32_events[kWin32EventCap];
+    static constexpr u64 kWin32EventCap = ::duetos::ipc::kHandleTableCapacity;
 
     // Win32 thread table — backs CreateThread. Each
     // slot carries a pointer to the scheduler Task that was
@@ -602,33 +592,16 @@ struct Process
     static constexpr u64 kWin32ThreadBase = 0x400;
     Win32ThreadHandle win32_threads[kWin32ThreadCap];
 
-    // Win32 counting-semaphore table — backs CreateSemaphoreW /
-    // ReleaseSemaphore / WaitForSingleObject on a semaphore handle.
-    // Handles run kWin32SemaphoreBase + idx
-    // (= 0x500..0x507), disjoint from every other Win32 range.
-    //
-    // Semantics:
-    //   - `count` is the current semaphore value. A wait that sees
-    //     count > 0 decrements it and returns WAIT_OBJECT_0
-    //     immediately. A wait that sees count == 0 blocks on
-    //     `waiters` until a release bumps count back above zero.
-    //   - `max_count` caps the count. Release-past-max is an
-    //     error (returns FALSE, Win32 semantics — count stays at
-    //     max_count, no-one wakes).
-    //   - ReleaseSemaphore(handle, N) bumps count by N and wakes
-    //     up to N waiters (one per unit of count increase).
-    struct Win32SemaphoreHandle
-    {
-        bool in_use;
-        u8 _pad[3];
-        i32 count;     // current count; 0 = no resources
-        i32 max_count; // upper limit
-        u8 _pad2[4];
-        sched::WaitQueue waiters;
-    };
-    static constexpr u64 kWin32SemaphoreCap = 8;
+    // Win32 counting-semaphore handle range — backs
+    // CreateSemaphoreW / ReleaseSemaphore / WaitForSingleObject.
+    // Migrated to KSemaphore + `kobj_handles` (kernel/ipc/)
+    // alongside mutexes and events; the legacy
+    // `Win32SemaphoreHandle win32_semaphores[]` array was removed
+    // at the same time. Migration also fixed an incidental leak:
+    // pre-migration CloseHandle had no semaphore arm at all, so
+    // closed semaphore slots were never reclaimed.
     static constexpr u64 kWin32SemaphoreBase = 0x500;
-    Win32SemaphoreHandle win32_semaphores[kWin32SemaphoreCap];
+    static constexpr u64 kWin32SemaphoreCap = ::duetos::ipc::kHandleTableCapacity;
 
     // Win32 registry handle table — backs the in-kernel read-only
     // registry exposed via SYS_REGISTRY (NtOpenKey /

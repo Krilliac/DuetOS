@@ -130,20 +130,10 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     // Process::kWin32VmapBase with 0 pages consumed.
     p->vmap_base = Process::kWin32VmapBase;
     p->vmap_pages_used = 0;
-    // Win32 mutex storage now lives in `p->kobj_handles` —
-    // SYS_MUTEX_* allocates KMutex objects through that path.
-    // Nothing to init here for the mutex surface.
-    // Win32 event table — every slot starts free + unsignaled.
-    for (u32 i = 0; i < Process::kWin32EventCap; ++i)
-    {
-        p->win32_events[i].in_use = false;
-        p->win32_events[i].manual_reset = false;
-        p->win32_events[i].signaled = false;
-        for (u32 j = 0; j < sizeof(p->win32_events[i]._pad); ++j)
-            p->win32_events[i]._pad[j] = 0;
-        p->win32_events[i].waiters.head = nullptr;
-        p->win32_events[i].waiters.tail = nullptr;
-    }
+    // Win32 mutex / event / semaphore storage now lives in
+    // `p->kobj_handles` — SYS_MUTEX_* / SYS_EVENT_* / SYS_SEM_*
+    // allocate KMutex / KEvent / KSemaphore objects through that
+    // path. Nothing to init here for those surfaces.
     // Win32 thread table — every slot starts free with exit_code
     // = STILL_ACTIVE (matches Win32 GetExitCodeThread semantics on
     // a running thread).
@@ -176,19 +166,6 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
         for (u32 j = 0; j < sizeof(p->win32_section_handles[i]._pad); ++j)
             p->win32_section_handles[i]._pad[j] = 0;
         p->win32_section_handles[i].pool_index = 0;
-    }
-    // Win32 semaphore table — every slot starts free.
-    for (u32 i = 0; i < Process::kWin32SemaphoreCap; ++i)
-    {
-        p->win32_semaphores[i].in_use = false;
-        for (u32 j = 0; j < sizeof(p->win32_semaphores[i]._pad); ++j)
-            p->win32_semaphores[i]._pad[j] = 0;
-        p->win32_semaphores[i].count = 0;
-        p->win32_semaphores[i].max_count = 0;
-        for (u32 j = 0; j < sizeof(p->win32_semaphores[i]._pad2); ++j)
-            p->win32_semaphores[i]._pad2[j] = 0;
-        p->win32_semaphores[i].waiters.head = nullptr;
-        p->win32_semaphores[i].waiters.tail = nullptr;
     }
     // Win32 directory handles — every slot empty; entries pointer
     // null until SYS_DIR_OPEN allocates a snapshot.

@@ -89,6 +89,15 @@ bool KSemaphoreAcquireTimed(KSemaphore* s, u64 ticks);
 /// is a kernel bug.
 void KSemaphoreRelease(KSemaphore* s, u32 n);
 
+/// Best-effort release: increments count by n only if count+n
+/// would not exceed max_count. On success, writes the pre-release
+/// count to `*prev_out` (caller may pass nullptr) and wakes up to
+/// n waiters. On overflow, leaves count unchanged and returns
+/// false — `*prev_out` is not written. Used by ABI surfaces that
+/// must surface ERROR_TOO_MANY_POSTS to userland rather than
+/// panic the kernel.
+bool KSemaphoreTryRelease(KSemaphore* s, u32 n, u32* prev_out);
+
 /// Read-only accessor for diagnostics. Racy under SMP; the
 /// returned value reflects a single sample.
 u32 KSemaphoreCount(const KSemaphore* s);
