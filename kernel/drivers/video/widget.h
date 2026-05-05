@@ -331,6 +331,42 @@ void WindowSetContentDraw(WindowHandle handle, WindowContentFn fn, void* cookie)
 using WindowWheelFn = void (*)(i32 dz);
 void WindowSetWheelHandler(WindowHandle h, WindowWheelFn fn);
 
+/// Per-window scrollbar geometry + state, populated by the app's
+/// DrawFn each compose. The kernel's mouse loop hit-tests against
+/// this to enable click-on-track + drag-the-thumb without each
+/// app re-implementing the geometry. `present == false` disables
+/// scrollbar input routing for the window (the visual bar is
+/// also skipped).
+struct WindowScrollbarSurface
+{
+    bool present;
+    u8 _pad[3];
+    // Bar bounds in framebuffer coords. App computes from its
+    // DrawFn's (cx, cy, cw, ch) — just before painting the bar.
+    u32 x, y, w, h;
+    u32 total;   // total rows of content
+    u32 visible; // visible rows in the viewport
+    u32 first;   // current top-row offset
+};
+
+/// Apps invoke this every compose with their current scrollbar
+/// geometry. Setting present=false stashes nothing.
+void WindowSetScrollbar(WindowHandle h, const WindowScrollbarSurface& s);
+
+/// Read back the most recent scrollbar surface for `h`. Returns
+/// false if none has been registered or `present == false`.
+bool WindowGetScrollbar(WindowHandle h, WindowScrollbarSurface* out);
+
+/// Notify the owning app that the user just changed the
+/// scrollbar's `first` (via track click or thumb drag). Apps
+/// register a callback to apply the new value to their state.
+using WindowScrollSetFn = void (*)(u32 first);
+void WindowSetScrollHandler(WindowHandle h, WindowScrollSetFn fn);
+
+/// Fire the registered scroll handler. Called by the mouse-loop
+/// after a hit-test resolves a new `first`.
+void WindowDispatchScroll(WindowHandle h, u32 first);
+
 /// Deliver a wheel event to `h`. Native owner → calls the
 /// registered `WindowWheelFn` (no-op if none). PE owner
 /// (`owner_pid > 0`) → posts `WM_MOUSEWHEEL` (0x020A) with

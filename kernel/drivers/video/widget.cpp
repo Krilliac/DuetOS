@@ -358,8 +358,10 @@ struct RegisteredWindow
     char mut_subtitle[kWindowSubtitleStorage];
     WindowContentFn content_fn; // nullable per-window content drawer
     void* content_cookie;
-    WindowWheelFn wheel_fn; // nullable per-window wheel handler
-    u64 owner_pid;          // 0 = kernel-owned boot window, >0 = ring-3 pid
+    WindowWheelFn wheel_fn;           // nullable per-window wheel handler
+    WindowScrollbarSurface scrollbar; // most-recent scrollbar geometry
+    WindowScrollSetFn scroll_fn;      // nullable scrollbar-input callback
+    u64 owner_pid;                    // 0 = kernel-owned boot window, >0 = ring-3 pid
     WindowMsgRing msgs;
     WinGdiPrim prims[kWinDisplayListDepth];
     u32 prim_count;
@@ -760,6 +762,8 @@ WindowHandle WindowRegister(const WindowChrome& chrome, const char* title)
     g_windows[h].content_fn = nullptr;
     g_windows[h].content_cookie = nullptr;
     g_windows[h].wheel_fn = nullptr;
+    g_windows[h].scrollbar = {};
+    g_windows[h].scroll_fn = nullptr;
     for (u32 i = 0; i < kWinLongSlots; ++i)
     {
         g_windows[h].longs[i] = 0;
@@ -1368,6 +1372,40 @@ void WindowSetWheelHandler(WindowHandle h, WindowWheelFn fn)
         return;
     }
     g_windows[h].wheel_fn = fn;
+}
+
+void WindowSetScrollbar(WindowHandle h, const WindowScrollbarSurface& s)
+{
+    if (!WindowValid(h))
+        return;
+    g_windows[h].scrollbar = s;
+}
+
+bool WindowGetScrollbar(WindowHandle h, WindowScrollbarSurface* out)
+{
+    if (!WindowValid(h) || out == nullptr)
+        return false;
+    if (!g_windows[h].scrollbar.present)
+        return false;
+    *out = g_windows[h].scrollbar;
+    return true;
+}
+
+void WindowSetScrollHandler(WindowHandle h, WindowScrollSetFn fn)
+{
+    if (!WindowValid(h))
+        return;
+    g_windows[h].scroll_fn = fn;
+}
+
+void WindowDispatchScroll(WindowHandle h, u32 first)
+{
+    if (!WindowValid(h))
+        return;
+    if (g_windows[h].scroll_fn != nullptr)
+    {
+        g_windows[h].scroll_fn(first);
+    }
 }
 
 void WindowDispatchWheel(WindowHandle h, i32 /*client_x*/, i32 /*client_y*/, i32 dz, u32 screen_x, u32 screen_y,
