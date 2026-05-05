@@ -82,6 +82,16 @@ void EmitMinidumpFromTrapFrame(const arch::TrapFrame* frame, u32 exception_code)
 /// Panics on any structural mismatch.
 void MinidumpSelfTest();
 
+/// Disk-persist exercise — writes a synthetic dump through the
+/// real NVMe panic path so a regression in
+/// `NvmePanicWriteDump` surfaces in the boot log instead of
+/// only at real-panic time. Idempotent; clears the
+/// `g_last_dump_bytes` accessor so `lastdump` from the shell
+/// still reports "no minidump emitted this boot" on a clean
+/// run. Called AFTER NvmeInit. Skips silently if no NVMe
+/// namespace is online.
+void DiskPersistSelfTest();
+
 /// Read-back accessor for the last successfully-built minidump's
 /// byte range inside the static buffer. Used by future panic-time
 /// persistence consumers (a reserved-LBA disk writer, a

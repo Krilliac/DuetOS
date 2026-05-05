@@ -860,6 +860,14 @@ i32 NvmeBlockWrite(void* /*cookie*/, u64 lba, u32 count, const void* buf)
     return NvmeDoIo(/*write=*/true, lba, count, const_cast<void*>(buf));
 }
 
+// Panic-time write surface — see header for the full rationale.
+// All state lives in `g_ctrl` (already-allocated DMA queues +
+// staging buffer); no allocations along the way; busy-waits on
+// the CQ phase tag inside SubmitAndWait. Callable from panic /
+// trap context.
+constinit bool g_panic_last_ok = false;
+constinit u64 g_panic_last_bytes = 0;
+
 constinit const BlockOps kNvmeBlockOps = {
     /*.read = */ &NvmeBlockRead,
     /*.write = */ &NvmeBlockWrite,
@@ -910,7 +918,158 @@ bool RegisterAsBlockDevice()
     return true;
 }
 
+// Walk a byte buffer through NvmeDoIo in per-command chunks
+// bounded by the staging buffer + MDTS. Each chunk goes through
+// the same polled completion path the regular block-layer write
+// uses, with no logging on the hot path so a panic-time caller
+// doesn't pay for klog re-entry. Returns the number of bytes
+// successfully landed; sets the global ok flag.
+u64 PanicWriteChunked(u64 base_lba, const u8* bytes, u64 len)
+{
+    g_panic_last_ok = false;
+    g_panic_last_bytes = 0;
+    if (!g_ctrl.online || bytes == nullptr || len == 0)
+    {
+        return 0;
+    }
+    const u32 ss = g_ctrl.ns_sector_size;
+    if (ss == 0)
+    {
+        return 0;
+    }
+    u32 per_cmd_bytes = kIoBufBytes;
+    if (g_ctrl.mdts_max_bytes != 0 && g_ctrl.mdts_max_bytes < per_cmd_bytes)
+    {
+        per_cmd_bytes = g_ctrl.mdts_max_bytes;
+    }
+    const u32 per_cmd_max_sectors = per_cmd_bytes / ss;
+    if (per_cmd_max_sectors == 0)
+    {
+        return 0;
+    }
+
+    u64 written = 0;
+    u64 cur_lba = base_lba;
+    // The reserved region's last LBA, beyond which a write would
+    // wrap into a different namespace area. Bail out early
+    // rather than corrupting the controller's normal addressable
+    // range.
+    const u64 reserved_first = NvmeNamespaceSectorCount() - kNvmeDumpReservedSectors;
+    const u64 reserved_last = NvmeNamespaceSectorCount();
+    if (cur_lba < reserved_first || cur_lba >= reserved_last)
+    {
+        return 0;
+    }
+
+    while (written < len)
+    {
+        const u64 chunk_bytes_raw = len - written;
+        const u32 chunk_bytes = chunk_bytes_raw > per_cmd_bytes ? per_cmd_bytes : static_cast<u32>(chunk_bytes_raw);
+        // Round the chunk up to a sector boundary so the controller
+        // accepts the count. The trailing bytes of the staging
+        // buffer past the real payload stay zero (the static buffer
+        // is BSS-initialised) — fine for a crash dump tail since
+        // the file's stream directory bounds the meaningful range.
+        const u32 sectors = (chunk_bytes + ss - 1) / ss;
+        if (sectors == 0)
+        {
+            break;
+        }
+        const u32 padded_bytes = sectors * ss;
+        if (cur_lba + sectors > reserved_last)
+        {
+            break;
+        }
+        // Zero the staging buffer so any padding past the real
+        // payload doesn't leak whatever the previous chunk left
+        // behind.
+        for (u32 i = 0; i < padded_bytes; ++i)
+        {
+            g_ctrl.io_buf_virt[i] = 0;
+        }
+        // NvmeDoIo memcpys from the user buffer into the staging
+        // buffer; pass it the source range we want.
+        const i32 rc = NvmeDoIo(/*write=*/true, cur_lba, sectors, const_cast<u8*>(bytes + written));
+        if (rc != 0)
+        {
+            // Partial-write bookkeeping — record what landed,
+            // even if the caller treats it as failure overall.
+            g_panic_last_bytes = written;
+            return written;
+        }
+        written += chunk_bytes;
+        cur_lba += sectors;
+    }
+
+    g_panic_last_ok = (written == len);
+    g_panic_last_bytes = written;
+    return written;
+}
+
 } // namespace
+
+bool NvmeAvailable()
+{
+    return g_ctrl.online && g_ctrl.ns_sector_size != 0 && g_ctrl.ns_sector_count != 0;
+}
+
+u32 NvmeNamespaceSectorSize()
+{
+    return g_ctrl.online ? g_ctrl.ns_sector_size : 0;
+}
+
+u64 NvmeNamespaceSectorCount()
+{
+    return g_ctrl.online ? g_ctrl.ns_sector_count : 0;
+}
+
+u64 NvmeDumpReservedLba()
+{
+    if (!NvmeAvailable())
+    {
+        return 0;
+    }
+    if (g_ctrl.ns_sector_count <= kNvmeDumpReservedSectors)
+    {
+        return 0;
+    }
+    return g_ctrl.ns_sector_count - kNvmeDumpReservedSectors;
+}
+
+bool NvmePanicWriteDump(const u8* bytes, u64 len)
+{
+    if (!NvmeAvailable())
+    {
+        g_panic_last_ok = false;
+        g_panic_last_bytes = 0;
+        return false;
+    }
+    const u64 lba = NvmeDumpReservedLba();
+    if (lba == 0)
+    {
+        g_panic_last_ok = false;
+        g_panic_last_bytes = 0;
+        return false;
+    }
+    // Cap the write at the reserved region size so a runaway
+    // length argument doesn't escape the reservation. Anything
+    // longer is a caller bug; ship what fits and surface the
+    // truncation.
+    const u64 reserved_bytes = u64(kNvmeDumpReservedSectors) * g_ctrl.ns_sector_size;
+    const u64 capped_len = (len > reserved_bytes) ? reserved_bytes : len;
+    const u64 written = PanicWriteChunked(lba, bytes, capped_len);
+    return written == len;
+}
+
+bool NvmePanicWriteSucceededLast()
+{
+    return g_panic_last_ok;
+}
+
+u64 NvmePanicLastWriteBytes()
+{
+    return g_panic_last_bytes;
+}
 
 void NvmeInit()
 {

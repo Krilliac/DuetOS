@@ -4915,3 +4915,59 @@ doc helps future readers audit the trail.
   the enum first, then revisit per-state TTLs.
 - **Related tracks:** Track 6 (Networking), Track 13
   (UX — apps).
+
+---
+
+## 111 — Crash-dump persistence to NVMe reserved LBA region
+
+- **Scope:** `kernel/drivers/storage/nvme.{h,cpp}`,
+  `kernel/diag/minidump.{h,cpp}`,
+  `kernel/shell/shell_storage.cpp`,
+  `kernel/core/main.cpp`.
+- **Decision:** Reserve the LAST
+  `kNvmeDumpReservedSectors` (8192 sectors = 4 MiB at
+  512B / 32 MiB at 4K) of NVMe namespace 1 for crash
+  dumps. The minidump emit path
+  (`EmitMinidump` / `EmitMinidumpFromTrapFrame`) calls a
+  new `NvmePanicWriteDump` after the existing debugcon
+  egress; the writer chunks the buffer through
+  `NvmeDoIo` per command (bounded by the staging
+  buffer + MDTS), busy-waits on the CQ phase tag (the
+  regular polled path), and reports both
+  fully-succeeded and partial-write outcomes via
+  `NvmePanicWriteSucceededLast` /
+  `NvmePanicLastWriteBytes`. A new
+  `DiskPersistSelfTest` runs after `NvmeInit` so the
+  full path is exercised at every boot — the synthetic
+  dump it writes gets overwritten cleanly by the next
+  real panic. The `lastdump` shell command surfaces the
+  on-disk LBA + byte count + success status. NVMe
+  staging buffer + CQ + DMA pages are all allocated at
+  driver init, so the panic path adds zero allocations.
+- **Why:** Decision-deferred in earlier roadmap text:
+  the bytes-access foundation
+  (`AccessLastMinidump`) was in place but no consumer
+  shipped. The polled NVMe path that the regular
+  block layer already used was already
+  scheduler/slab-free; the only gap was wrapping it in
+  a chunker that took an arbitrary byte buffer and
+  routing it to a stable LBA range. AHCI gets the same
+  treatment when a workload demands it; v0 picks NVMe
+  because QEMU's `-device nvme` makes the verification
+  path real.
+- **What it rules out:** AHCI panic-write parity (same
+  shape applies but the AHCI driver doesn't have the
+  helper yet), and a partition-table reservation for
+  the dump region (the last 4 MiB of namespace 1 is
+  trusted to be unused — true for the shipped scratch
+  image, not guaranteed on real hardware until the
+  disk installer lands). Multi-controller dumps also
+  out of scope: only namespace 1 of the FIRST NVMe
+  controller is reserved.
+- **Revisit when:** A real-hardware panic shows the
+  dump region collided with workload data (partition
+  table reservation needed), or AHCI/SATA becomes the
+  primary storage path on a target machine and needs
+  the same write.
+- **Related tracks:** Track 7 (Storage / FS), Track 11
+  (Diagnostics — minidump / panic surface).

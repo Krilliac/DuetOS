@@ -184,21 +184,29 @@ In rough priority:
 2. **NTFS read-only** — required by the Windows-PE pillar once
    we want to load a `.exe` from a real NTFS partition.
 
-### Crash-dump persistence to disk
+### Crash-dump persistence — AHCI / GPT reservation
 
 - **Today:** Windows-format `.dmp` files are emitted byte-by-byte
   over QEMU's debugcon (port 0xE9 → `${BUILD_DIR}/duetos.dmp`
-  host file). Loadable in WinDbg / VSCode / Python `minidump`.
-  The built dump bytes are exposed via
-  `diag::minidump::AccessLastMinidump(*out_bytes, *out_len)` so
-  any panic-time consumer (disk writer, network pusher, etc.)
-  can ship the same bytes the debugcon path already wrote.
-- **Deferred:** real-hardware persistence (raw-block write to a
-  reserved LBA range). The bytes-access foundation is in place;
-  remaining work is the panic-time block writer that runs
-  without the slab allocator or scheduler — likely an
-  NVMe / AHCI polled-completion path that bypasses the regular
-  block layer.
+  host file). On systems with an NVMe namespace, the same
+  bytes are also persisted to the LAST
+  `kNvmeDumpReservedSectors` (4 MiB at 512B sectors) of
+  namespace 1 via `NvmePanicWriteDump` — a polled-completion
+  path that reuses the driver's existing staging buffer +
+  CQ phase-tag wait, with no scheduler / slab dependencies.
+  The path is exercised at every boot via
+  `DiskPersistSelfTest` so a regression surfaces in the
+  boot log instead of waiting for a real panic. The
+  `lastdump` shell command surfaces the on-disk LBA + byte
+  count alongside the in-RAM minidump status.
+- **Deferred:** the same persistence story for AHCI/SATA
+  namespaces (the AHCI driver doesn't have a panic-write
+  helper yet), and a real partition-table reservation so
+  the disk installer can allocate the dump region
+  explicitly instead of trusting the last 4 MiB to be
+  unused. Both items wait for a workload that legitimately
+  exercises a real-hardware AHCI disk; QEMU's NVMe path
+  covers the v0 verification.
 
 ---
 

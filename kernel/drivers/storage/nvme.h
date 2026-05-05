@@ -113,4 +113,70 @@ const char* NvmeStatusName(u8 sct, u8 sc);
 /// codes outside the small subset this driver issues.
 const char* NvmeOpcodeName(u8 set, u8 opcode);
 
+// -------------------------------------------------------------
+// Panic-time surface.
+//
+// The polled-completion path in the regular I/O loop already
+// works without scheduler / IRQ / slab dependencies — it
+// busy-waits on the CQ phase tag, no allocations along the way.
+// The only thing missing for crash-dump persistence is a
+// stable LBA range to write into and a thin wrapper that
+// chunks an arbitrary byte buffer through the per-command
+// staging cap. Both live here so the diag/minidump module can
+// reach them without pulling in the block layer.
+//
+// Reservation policy: the LAST `kNvmeDumpReservedSectors`
+// sectors of namespace 1 are reserved for crash dumps — well
+// past anything a v0 filesystem would ever touch. The shipped
+// scratch image is small enough that nothing collides in
+// practice; once a real disk installer lands, the reservation
+// is recorded in the partition table.
+// -------------------------------------------------------------
+
+inline constexpr u64 kNvmeDumpReservedSectors = 8192; // 4 MiB at 512B sectors
+
+/// True iff an NVMe namespace was discovered + brought up. Read
+/// as a precondition by the panic path before calling
+/// NvmePanicWriteDump.
+bool NvmeAvailable();
+
+/// Sector size of namespace 1 (512 or 4096 in v0). 0 if no
+/// namespace.
+u32 NvmeNamespaceSectorSize();
+
+/// Sector count of namespace 1. 0 if no namespace.
+u64 NvmeNamespaceSectorCount();
+
+/// First LBA of the reserved crash-dump region (last
+/// `kNvmeDumpReservedSectors` sectors). Returns 0 if no
+/// namespace; callers MUST check NvmeAvailable() first.
+u64 NvmeDumpReservedLba();
+
+/// Write `len` bytes of `bytes` to the reserved crash-dump
+/// region starting at `NvmeDumpReservedLba()`. Splits the
+/// buffer into per-command chunks bounded by the staging
+/// buffer + MDTS, copies each chunk into the staging buffer,
+/// issues a polled NVM Write, and walks to the next chunk.
+/// Returns true iff EVERY command completed without error.
+///
+/// Safe to call from panic / trap context: no allocations,
+/// no locks, no scheduler dependencies. The driver's existing
+/// SubmitAndWait already polls on the CQ phase tag with an
+/// HPET-bounded deadline. Worst case at panic time is the
+/// HPET deadline fires and we report a partial write — the
+/// debugcon copy of the same bytes is still on the host.
+bool NvmePanicWriteDump(const u8* bytes, u64 len);
+
+/// True iff the most recent `NvmePanicWriteDump` call
+/// succeeded. Reset to false on every call. Used by the
+/// `lastdump` shell command to confirm whether a dump
+/// landed on the reserved region this boot.
+bool NvmePanicWriteSucceededLast();
+
+/// Number of bytes the most recent `NvmePanicWriteDump`
+/// successfully wrote. Even on a partial write this counts
+/// the bytes that DID land — useful for triage when a real
+/// disk hits a write error part-way through.
+u64 NvmePanicLastWriteBytes();
+
 } // namespace duetos::drivers::storage

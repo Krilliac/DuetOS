@@ -5,6 +5,7 @@
 #include "arch/x86_64/traps.h"
 #include "core/panic.h"
 #include "diag/debugcon.h"
+#include "drivers/storage/nvme.h"
 #include "loader/dll_loader.h"
 #include "loader/pe_exports.h"
 #include "mm/address_space.h"
@@ -732,6 +733,39 @@ namespace
 constinit u64 g_last_dump_bytes = 0;
 } // namespace
 
+// Persist the freshly-built minidump bytes to the reserved
+// crash-dump LBA region on the first NVMe namespace, when one
+// is online. Best-effort — failure is logged on serial but
+// doesn't block the panic flow. Called inline after the
+// debugcon emit so an operator who only has access to the
+// disk image still recovers the same .dmp file.
+void PersistToDisk(u64 bytes)
+{
+    namespace stor = duetos::drivers::storage;
+    if (!stor::NvmeAvailable())
+    {
+        arch::SerialWrite("[minidump] no NVMe namespace; disk persist skipped\n");
+        return;
+    }
+    const u64 lba = stor::NvmeDumpReservedLba();
+    arch::SerialWrite("[minidump] persisting to NVMe reserved LBA=");
+    arch::SerialWriteHex(lba);
+    arch::SerialWrite(" sectors=");
+    arch::SerialWriteHex(stor::kNvmeDumpReservedSectors);
+    arch::SerialWrite("\n");
+    const bool ok = stor::NvmePanicWriteDump(g_buf, bytes);
+    if (ok)
+    {
+        arch::SerialWrite("[minidump] disk persist OK\n");
+    }
+    else
+    {
+        arch::SerialWrite("[minidump] disk persist PARTIAL/FAILED bytes_written=");
+        arch::SerialWriteHex(stor::NvmePanicLastWriteBytes());
+        arch::SerialWrite("\n");
+    }
+}
+
 void EmitMinidump(u64 rip, u64 rsp, u64 rbp, u32 exception_code)
 {
     const ContextRegs regs = RegsFromSoftPanic(rip, rsp, rbp);
@@ -741,6 +775,7 @@ void EmitMinidump(u64 rip, u64 rsp, u64 rbp, u32 exception_code)
     arch::SerialWriteHex(bytes);
     arch::SerialWrite(" bytes via debugcon (port 0xE9) [soft panic]\n");
     debugcon::Write(g_buf, bytes);
+    PersistToDisk(bytes);
     arch::SerialWrite("[minidump] done\n");
 }
 
@@ -762,6 +797,7 @@ void EmitMinidumpFromTrapFrame(const arch::TrapFrame* frame, u32 exception_code)
     arch::SerialWriteHex(bytes);
     arch::SerialWrite(" bytes via debugcon (port 0xE9) [trap frame]\n");
     debugcon::Write(g_buf, bytes);
+    PersistToDisk(bytes);
     arch::SerialWrite("[minidump] done\n");
 }
 
@@ -825,6 +861,52 @@ void MinidumpSelfTest()
     // Reset so a subsequent real panic starts from an empty
     // buffer. The buffer is global; only one CPU panics at a
     // time so resetting here is safe.
+    Cursor c;
+    c.Reset();
+}
+
+void DiskPersistSelfTest()
+{
+    // Run AFTER NvmeInit (MinidumpSelfTest fires too early in boot
+    // — the NVMe driver hasn't enumerated yet at that point).
+    // Builds a synthetic dump, writes it to the reserved LBA
+    // region, and reports the result. Surfaces a clean PASS/FAIL
+    // line so a regression in the panic-write path doesn't slip
+    // through silently.
+    namespace stor = duetos::drivers::storage;
+    if (!stor::NvmeAvailable())
+    {
+        arch::SerialWrite("[minidump] disk-persist self-test SKIP (no NVMe namespace)\n");
+        return;
+    }
+    ContextRegs synth{};
+    synth.rip = 0xFFFFFFFF80100000ULL;
+    synth.rsp = 0xFFFFFFFFE0001000ULL;
+    synth.rbp = 0xFFFFFFFFE0001008ULL;
+    synth.cs = 0x08;
+    synth.ds = 0x10;
+    synth.ss = 0x10;
+    synth.rflags = 0x202;
+    const u64 disk_bytes = BuildMinidumpInto(synth, /*exception_code=*/0xC0000005);
+    const bool persisted = stor::NvmePanicWriteDump(g_buf, disk_bytes);
+    if (!persisted)
+    {
+        arch::SerialWrite("[minidump] disk-persist self-test FAIL bytes_written=");
+        arch::SerialWriteHex(stor::NvmePanicLastWriteBytes());
+        arch::SerialWrite("\n");
+    }
+    else
+    {
+        arch::SerialWrite("[minidump] disk-persist self-test OK; reserved LBA=");
+        arch::SerialWriteHex(stor::NvmeDumpReservedLba());
+        arch::SerialWrite(" bytes=");
+        arch::SerialWriteHex(stor::NvmePanicLastWriteBytes());
+        arch::SerialWrite("\n");
+    }
+    // Clear the success flag + bytes so `lastdump` from the
+    // shell doesn't claim a real panic landed when only the
+    // self-test wrote.
+    g_last_dump_bytes = 0;
     Cursor c;
     c.Reset();
 }
