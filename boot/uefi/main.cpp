@@ -62,6 +62,54 @@ const CHAR16 kBanner[] = u"DuetOS UEFI loader v0 (Phase A: toolchain proof)\r\n"
     }
 }
 
+// ---------------------------------------------------------------
+// Direct COM1 banner. UEFI's `ConOut` routes to whatever the
+// firmware considers the "console" — graphical on most boards,
+// captured by OVMF's text mode in QEMU. CI / `tools/test/uefi-
+// smoke.sh` greps the QEMU serial log, which is wired to COM1
+// (port 0x3F8). Writing the banner directly to COM1 in addition
+// to ConOut makes the smoke test robust on any firmware: the
+// banner appears in the serial log even when the firmware drops
+// ConOut, and on real hardware the COM1 write is a harmless no-
+// op if the port isn't connected.
+//
+// We do not configure the UART — UEFI firmware leaves COM1
+// initialised at 115200 8N1 in OVMF, and we accept whatever the
+// firmware set up. `outb 0x3F8` blocks until the THR is empty
+// (we busy-poll LSR.5) so a slow consumer doesn't drop bytes.
+// ---------------------------------------------------------------
+
+inline void OutB(UINT16 port, UINT8 value)
+{
+    __asm__ volatile("outb %0, %1" : : "a"(value), "Nd"(port));
+}
+
+inline UINT8 InB(UINT16 port)
+{
+    UINT8 v;
+    __asm__ volatile("inb %1, %0" : "=a"(v) : "Nd"(port));
+    return v;
+}
+
+void Com1Write(const char* ascii)
+{
+    constexpr UINT16 kCom1Base = 0x3F8;
+    constexpr UINT16 kCom1Lsr = kCom1Base + 5;
+    constexpr UINT8 kLsrThrEmpty = 1u << 5;
+    while (*ascii != '\0')
+    {
+        // Busy-poll until the transmit holding register is
+        // empty. Bounded by hardware tx rate; in QEMU it's
+        // effectively zero-wait.
+        while ((InB(kCom1Lsr) & kLsrThrEmpty) == 0)
+        {
+            __asm__ volatile("pause");
+        }
+        OutB(kCom1Base, static_cast<UINT8>(*ascii));
+        ++ascii;
+    }
+}
+
 } // namespace duetos::boot::uefi
 
 // ---------------------------------------------------------------
@@ -96,6 +144,14 @@ extern "C" duetos::boot::uefi::EFI_STATUS efi_main(duetos::boot::uefi::EFI_HANDL
     // OutputString does not modify the buffer — the spec just
     // omits the const qualifier.
     (void)system_table->ConOut->OutputString(system_table->ConOut, const_cast<CHAR16*>(kBanner));
+
+    // Mirror the banner to COM1 so `tools/test/uefi-smoke.sh`'s
+    // serial-log grep finds the marker. ConOut goes to the
+    // graphical console under OVMF and is invisible to the test
+    // harness; COM1 is what QEMU's `-serial` flag captures.
+    Com1Write("DuetOS UEFI loader v0 (Phase A: toolchain proof)\r\n");
+    Com1Write("  Loader does not yet load the kernel — see\r\n");
+    Com1Write("  wiki/kernel/UEFI-Loader.md for the Phase B plan.\r\n");
 
     // Pace for a moment so the banner is observable on hardware
     // that auto-advances past loaders. 2 seconds is invisible to
