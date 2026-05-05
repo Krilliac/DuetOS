@@ -1277,30 +1277,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             duetos::drivers::storage::AhciTeardown();
             return {};
         });
-    // NVMe — modern PCIe storage controller. Teardown frees
-    // the admin + I/O queue pages, the staging buffer (16
-    // contiguous frames), and the PRP list. MMIO + block
-    // handle leak with the same caveat as the other storage
-    // drivers.
-    duetos::security::RegisterDriverDomain(
-        "nvme",
-        []() -> ::duetos::core::Result<void>
-        {
-            duetos::drivers::storage::NvmeInit();
-            return {};
-        },
-        []() -> ::duetos::core::Result<void>
-        {
-            duetos::drivers::storage::NvmeTeardown();
-            return {};
-        });
-    // RAM filesystem registration is now self-registered via
-    // KERNEL_INITCALL(Drivers, "ramfs.module", ...) in
-    // `kernel/fs/ramfs.cpp` — picked up by the
-    // `RunPhase(Phase::Drivers)` call later in this function.
-    // Pattern documented in `wiki/security/Kernel-Modularization.md`
-    // for the remaining wave-1 drivers (gpu, net, nvme, audio,
-    // fat32) to follow.
+    // Wave-1 fault-domain registrations are now self-registered
+    // via KERNEL_INITCALL(Drivers, "<name>.module", ...) at each
+    // driver's TU — picked up by the `RunPhase(Phase::Drivers)`
+    // call later in this function. Migrated subsystems:
+    // ramfs, nvme, drivers/gpu, drivers/net, drivers/audio,
+    // fs/fat32. Pattern documented in
+    // `wiki/security/Kernel-Modularization.md`.
 
     // Init-call registry self-test (plan A1). Exercises register +
     // RunPhase + bad-argument + failing-callback paths against the
@@ -2613,15 +2596,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Detecting GPUs.\n");
     duetos::drivers::gpu::GpuInit();
-    {
-        auto gpu_init = []() -> duetos::core::Result<void>
-        {
-            duetos::drivers::gpu::GpuInit();
-            return {};
-        };
-        auto gpu_teardown = []() -> duetos::core::Result<void> { return duetos::drivers::gpu::GpuShutdown(); };
-        duetos::security::RegisterDriverDomain("drivers/gpu", gpu_init, gpu_teardown);
-    }
+    // drivers/gpu fault domain self-registers via
+    // KERNEL_INITCALL(Drivers, "drivers/gpu.module", ...) in
+    // `kernel/drivers/gpu/gpu.cpp`.
 
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::EdidSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::CvtSelfTest());
@@ -2667,15 +2644,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Detecting NICs.\n");
     duetos::drivers::net::NetInit();
-    {
-        auto net_init = []() -> duetos::core::Result<void>
-        {
-            duetos::drivers::net::NetInit();
-            return {};
-        };
-        auto net_teardown = []() -> duetos::core::Result<void> { return duetos::drivers::net::NetShutdown(); };
-        duetos::security::RegisterDriverDomain("drivers/net", net_init, net_teardown);
-    }
+    // drivers/net fault domain self-registers via
+    // KERNEL_INITCALL(Drivers, "drivers/net.module", ...) in
+    // `kernel/drivers/net/net.cpp`.
 
     SerialWrite("[boot] Detecting USB host controllers.\n");
     duetos::drivers::usb::UsbInit();
@@ -2715,15 +2686,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Detecting audio controllers.\n");
     duetos::drivers::audio::AudioInit();
-    {
-        auto audio_init = []() -> duetos::core::Result<void>
-        {
-            duetos::drivers::audio::AudioInit();
-            return {};
-        };
-        auto audio_teardown = []() -> duetos::core::Result<void> { return duetos::drivers::audio::AudioShutdown(); };
-        duetos::security::RegisterDriverDomain("drivers/audio", audio_init, audio_teardown);
-    }
+    // drivers/audio fault domain self-registers via
+    // KERNEL_INITCALL(Drivers, "drivers/audio.module", ...) in
+    // `kernel/drivers/audio/audio.cpp`.
 
     SerialWrite("[boot] Bringing up power / thermal shell.\n");
     duetos::drivers::power::PowerInit();
@@ -2798,22 +2763,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Probing FAT32 on block devices.\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::fat32::Fat32SelfTest());
-    {
-        // Init re-probes every block handle, matching the boot
-        // path's probe step but without the SelfTest's CRUD
-        // payload. Teardown drops the in-memory volume registry
-        // so the re-probe lands cleanly. Lambda is `static`
-        // because the FaultDomain hooks store a function pointer.
-        auto fat32_init = []() -> duetos::core::Result<void>
-        {
-            const duetos::u32 handles = duetos::drivers::storage::BlockDeviceCount();
-            for (duetos::u32 h = 0; h < handles; ++h)
-                (void)duetos::fs::fat32::Fat32Probe(h, nullptr);
-            return {};
-        };
-        auto fat32_teardown = []() -> duetos::core::Result<void> { return duetos::fs::fat32::Fat32Shutdown(); };
-        duetos::security::RegisterDriverDomain("fs/fat32", fat32_init, fat32_teardown);
-    }
+    // fs/fat32 fault domain self-registers via
+    // KERNEL_INITCALL(Drivers, "fs/fat32.module", ...) in
+    // `kernel/fs/fat32.cpp`.
 
     // Auto-register every probed FAT32 volume in the mount registry
     // so `VfsMountResolve` (and therefore the file-routing layer)

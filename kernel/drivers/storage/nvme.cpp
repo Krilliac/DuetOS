@@ -28,15 +28,17 @@
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/hpet.h"
 #include "arch/x86_64/serial.h"
-#include "diag/kdbg.h"
-#include "log/klog.h"
+#include "core/init.h"
 #include "core/panic.h"
+#include "diag/kdbg.h"
+#include "drivers/pci/pci.h"
+#include "drivers/storage/block.h"
+#include "log/klog.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
 #include "mm/paging.h"
 #include "sched/sched.h"
-#include "drivers/pci/pci.h"
-#include "drivers/storage/block.h"
+#include "security/driver_domain.h"
 
 namespace duetos::drivers::storage
 {
@@ -1448,5 +1450,34 @@ const char* NvmeOpcodeName(u8 set, u8 opcode)
         return "I/O (unknown)";
     }
 }
+
+namespace
+{
+
+// Self-register NVMe as a fault domain via KERNEL_INITCALL
+// (Phase::Drivers). Migrated from the inline registration in
+// `kernel/core/main.cpp` so the registration lives next to the
+// subsystem it owns. Pattern documented in
+// `wiki/security/Kernel-Modularization.md`.
+::duetos::core::Result<void> RegisterNvmeModule()
+{
+    ::duetos::security::RegisterDriverDomain(
+        "nvme",
+        []() -> ::duetos::core::Result<void>
+        {
+            ::duetos::drivers::storage::NvmeInit();
+            return {};
+        },
+        []() -> ::duetos::core::Result<void>
+        {
+            ::duetos::drivers::storage::NvmeTeardown();
+            return {};
+        });
+    return {};
+}
+
+} // namespace
+
+KERNEL_INITCALL(Drivers, "nvme.module", RegisterNvmeModule)
 
 } // namespace duetos::drivers::storage

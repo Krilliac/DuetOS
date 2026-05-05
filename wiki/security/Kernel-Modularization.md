@@ -281,10 +281,15 @@ The `KERNEL_INITCALL(Drivers, "<name>.module", fn)` macro lets
 each driver self-register from its own TU; `RunPhase(Drivers)`
 in kernel_main fires every registered callback.
 
-**Migrated so far:**
+**Migrated so far** (all wave-1 modules):
 - `fs/ramfs` (kernel/fs/ramfs.cpp:RegisterRamfsModule)
+- `nvme` (kernel/drivers/storage/nvme.cpp:RegisterNvmeModule)
+- `drivers/gpu` (kernel/drivers/gpu/gpu.cpp:RegisterGpuModule)
+- `drivers/net` (kernel/drivers/net/net.cpp:RegisterNetModule)
+- `drivers/audio` (kernel/drivers/audio/audio.cpp:RegisterAudioModule)
+- `fs/fat32` (kernel/fs/fat32.cpp:RegisterFat32Module)
 
-**Pattern for follow-up migrations** (each driver TU):
+**Pattern for further migrations** (each driver TU):
 
 ```cpp
 namespace
@@ -306,15 +311,23 @@ Then delete the matching inline block in
 `kernel/core/main.cpp:1100..1300` for early drivers, or after
 `RunPhase(Drivers)` in the late driver block (≈ line 2600+).
 
-**Pending wave-1 migrations:** drivers/net, drivers/gpu,
-drivers/storage/nvme, drivers/audio, fs/fat32. Each is a small
-edit (move ~10 lines of registration code into the driver TU)
-but has subtle ordering implications because their inline
-registrations run AFTER `RunPhase(Drivers)`. A clean migration
-adds a second `RunPhase(Drivers)` invocation after the late-
-driver Init block, or moves the late drivers' Init into their
-KERNEL_INITCALL constructors. Slice-by-slice work; the
-infrastructure is ready.
+**Wave-1 migration is complete.** All six wave-1 modules now
+self-register from their own TUs. The previous concern about
+ordering — that late drivers' inline registrations ran AFTER
+`RunPhase(Drivers)` — turned out not to apply: the
+KERNEL_INITCALL constructor just queues the callback in a
+global registry, and the Drivers RunPhase fires every queued
+callback regardless of when the corresponding driver's Init
+runs. Registration only stores function pointers; the lambdas
+fire on RESTART, not at registration time, so the timing
+mismatch is benign.
+
+**Future migrations** can follow the same template: add a
+`RegisterFooModule()` constructor in the driver's TU and
+declare it via `KERNEL_INITCALL(Drivers, ...)`. Candidates
+include drivers/usb/xhci, drivers/storage/ahci,
+drivers/pci, and any future driver class. The shrinking inline
+block in `kernel_main` is a useful proxy for "what's left."
 
 ## Out of scope (deferred — large enough to be their own slices)
 

@@ -36,12 +36,14 @@
 #include "fs/fat32.h"
 
 #include "arch/x86_64/serial.h"
+#include "core/init.h"
 #include "diag/kdbg.h"
-#include "log/klog.h"
 #include "diag/log_names.h"
 #include "drivers/storage/block.h"
-#include "sched/sched.h"
 #include "fs/fat32_internal.h"
+#include "log/klog.h"
+#include "sched/sched.h"
+#include "security/driver_domain.h"
 
 namespace duetos::fs::fat32
 {
@@ -317,5 +319,32 @@ const Volume* Fat32Volume(u32 index)
     arch::SerialWrite(" volume snapshot(s)\n");
     return {};
 }
+
+namespace
+{
+
+// Self-register fs/fat32 as a fault domain via KERNEL_INITCALL
+// (Phase::Drivers). Init re-probes every block handle (matching
+// the boot path's probe step but without a CRUD payload);
+// teardown drops the in-memory volume registry so the re-probe
+// lands cleanly.
+::duetos::core::Result<void> RegisterFat32Module()
+{
+    ::duetos::security::RegisterDriverDomain(
+        "fs/fat32",
+        []() -> ::duetos::core::Result<void>
+        {
+            const ::duetos::u32 handles = ::duetos::drivers::storage::BlockDeviceCount();
+            for (::duetos::u32 h = 0; h < handles; ++h)
+                (void)::duetos::fs::fat32::Fat32Probe(h, nullptr);
+            return {};
+        },
+        []() -> ::duetos::core::Result<void> { return ::duetos::fs::fat32::Fat32Shutdown(); });
+    return {};
+}
+
+} // namespace
+
+KERNEL_INITCALL(Drivers, "fs/fat32.module", RegisterFat32Module)
 
 } // namespace duetos::fs::fat32
