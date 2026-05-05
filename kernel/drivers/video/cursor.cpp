@@ -230,12 +230,23 @@ constinit const u8 (*g_active_mask)[kCursorWidth] = kArrowMask;
 constinit CursorShape g_active_shape = CursorShape::Arrow;
 
 // Custom cursor cache. Each slot holds a 12×20 mask buffer
-// plus an "in use" flag. Slot ids are 256+slot_idx so the
-// public API can't collide with the CursorShape enum values
-// (0..7).
+// plus an "in use" flag and per-slot hotspot coords. Slot
+// ids are 256+slot_idx so the public API can't collide with
+// the CursorShape enum values (0..7).
 constinit u8 g_custom_masks[kCustomCursorMax][kCursorHeight][kCursorWidth] = {};
+constinit u8 g_custom_x_hot[kCustomCursorMax] = {};
+constinit u8 g_custom_y_hot[kCustomCursorMax] = {};
 constinit bool g_custom_in_use[kCustomCursorMax] = {};
 constinit u32 g_active_custom_id = 0; // 0 = none; ≥ kCustomCursorIdBase = active
+
+// Active hotspot — the (x_hot, y_hot) the sprite is currently
+// translated by. The cursor's reported position
+// (CursorPosition) is the click point; the sprite is painted
+// at (g_x - hot_x, g_y - hot_y). Built-in shapes default to
+// (0, 0); custom sprites set theirs from the registered
+// values.
+constinit u8 g_active_x_hot = 0;
+constinit u8 g_active_y_hot = 0;
 // Wait stack — refcounted. CursorPushWait increments + sets
 // shape to Wait; CursorPopWait decrements and restores the
 // pre-push shape on the last balance.
@@ -404,13 +415,17 @@ void CursorMove(i32 dx, i32 dy)
 
 void CursorPosition(u32* x_out, u32* y_out)
 {
+    // Click point = sprite-top-left + active hotspot. Built-in
+    // shapes have a (0, 0) hotspot so this collapses to
+    // (g_x, g_y); custom sprites with non-zero hotspots
+    // expose the visually meaningful position.
     if (x_out != nullptr)
     {
-        *x_out = g_x;
+        *x_out = g_x + g_active_x_hot;
     }
     if (y_out != nullptr)
     {
-        *y_out = g_y;
+        *y_out = g_y + g_active_y_hot;
     }
 }
 
@@ -505,6 +520,14 @@ void CursorSetShape(CursorShape s)
     g_active_shape = s;
     g_active_mask = MaskFor(s);
     g_active_custom_id = 0;
+    // Built-in shapes default to a (0, 0) hotspot — sprite
+    // top-left = click point. The Arrow's tip is at (0, 0)
+    // so this matches reality; IBeam / Hand are visually
+    // off-centre but pre-hotspot v0 already accepted that
+    // — landing precision wins is a follow-up that picks
+    // a hotspot per built-in shape.
+    g_active_x_hot = 0;
+    g_active_y_hot = 0;
     if (g_ready)
     {
         SaveAt(g_x, g_y);
@@ -540,9 +563,11 @@ void CursorPopWait()
     }
 }
 
-u32 CursorRegisterCustom(const u8* mask_240)
+u32 CursorRegisterCustom(const u8* mask_240, u8 x_hot, u8 y_hot)
 {
     if (mask_240 == nullptr)
+        return 0;
+    if (x_hot >= kCursorWidth || y_hot >= kCursorHeight)
         return 0;
     for (u32 i = 0; i < kCustomCursorMax; ++i)
     {
@@ -558,6 +583,8 @@ u32 CursorRegisterCustom(const u8* mask_240)
                 g_custom_masks[i][y][x] = (v <= 2) ? v : 0;
             }
         }
+        g_custom_x_hot[i] = x_hot;
+        g_custom_y_hot[i] = y_hot;
         g_custom_in_use[i] = true;
         return kCustomCursorIdBase + i;
     }
@@ -587,6 +614,8 @@ void CursorSetShapeCustom(u32 custom_id)
     g_active_mask = g_custom_masks[idx];
     g_active_shape = CursorShape::Arrow; // sentinel — MaskFor isn't consulted
     g_active_custom_id = custom_id;
+    g_active_x_hot = g_custom_x_hot[idx];
+    g_active_y_hot = g_custom_y_hot[idx];
     if (g_ready)
     {
         SaveAt(g_x, g_y);

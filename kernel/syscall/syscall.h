@@ -1701,8 +1701,12 @@ enum SyscallNumber : u64
     //                               // byte: 0=transparent,
     //                               // 1=outline, 2=fill.
     //   rsi = u32 size             // sanity-check; must == 240
+    //   rdx = (y_hot << 8) | x_hot // hotspot inside sprite,
+    //                               //   x_hot < 12, y_hot < 20.
+    //                               //   0 = sprite top-left.
     //   rax = HCURSOR sentinel (≥ 256), or 0 on failure
-    //         (table full / size mismatch / bad pointer).
+    //         (table full / size mismatch / hotspot OOR / bad
+    //         pointer).
     SYS_GDI_CREATE_CURSOR = 175,
 };
 

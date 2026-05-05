@@ -129,12 +129,18 @@ void CursorPopWait();
 ///   0 = transparent
 ///   1 = outline (drawn in the active outline colour)
 ///   2 = fill (drawn in the active fill colour)
+/// `x_hot` / `y_hot` are the hotspot coordinates inside the
+/// sprite — the kernel translates the cursor's reported
+/// position so the click point sits at (0,0) of the sprite by
+/// default; a non-zero hotspot shifts the sprite so the
+/// hotspot pixel sits under the cursor's logical position.
 /// Returns a slot id (≥ 256) that callers pass to
 /// CursorSetShapeCustom; or 0 on failure (table full / nullptr
-/// mask). Slot ids stay valid for the rest of the boot.
+/// mask / hotspot out of range). Slot ids stay valid for the
+/// rest of the boot.
 constexpr u32 kCustomCursorIdBase = 256;
 constexpr u32 kCustomCursorMax = 16;
-u32 CursorRegisterCustom(const u8* mask_240);
+u32 CursorRegisterCustom(const u8* mask_240, u8 x_hot, u8 y_hot);
 
 /// Switch to a custom sprite previously registered via
 /// CursorRegisterCustom. Out-of-range / unregistered ids fall

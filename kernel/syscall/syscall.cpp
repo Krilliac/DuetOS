@@ -3256,9 +3256,10 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_GDI_CREATE_CURSOR:
     {
         // PE registers a custom 12×20 cursor. rdi = mask_ptr,
-        // rsi = size (must == 240).
+        // rsi = size (must == 240), rdx packs (y_hot<<8)|x_hot.
         const u64 mask_va = frame->rdi;
         const u32 size = static_cast<u32>(frame->rsi);
+        const u64 hot_packed = frame->rdx;
         constexpr u32 kExpected = 12 * 20;
         if (size != kExpected || mask_va == 0)
         {
@@ -3275,7 +3276,9 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = 0;
             return;
         }
-        const u32 id = duetos::drivers::video::CursorRegisterCustom(mask_buf);
+        const u8 x_hot = static_cast<u8>(hot_packed & 0xFFU);
+        const u8 y_hot = static_cast<u8>((hot_packed >> 8) & 0xFFU);
+        const u32 id = duetos::drivers::video::CursorRegisterCustom(mask_buf, x_hot, y_hot);
         frame->rax = id;
         return;
     }

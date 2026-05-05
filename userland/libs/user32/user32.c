@@ -1536,13 +1536,15 @@ __declspec(dllexport) int ShowCursor(BOOL show)
  * Hotspot coordinates aren't honoured today; the kernel's
  * cursor anchors at (0, 0) of the sprite. Real Win32 hotspot
  * support waits on a follow-up. */
-__declspec(dllexport) HANDLE DuetOsCreateCursor(const unsigned char* mask_240)
+__declspec(dllexport) HANDLE DuetOsCreateCursor(const unsigned char* mask_240, unsigned char x_hot, unsigned char y_hot)
 {
     long long h = 0;
+    /* rdx packs (y_hot << 8) | x_hot — both fit in a byte. */
+    const unsigned long long hotspot = ((unsigned long long)y_hot << 8) | (unsigned long long)x_hot;
     asm volatile("syscall"
                  : "=a"(h)
                  : "a"((long long)SYS_GDI_CREATE_CURSOR), "D"((long long)(unsigned long long)mask_240),
-                   "S"((long long)(12 * 20))
+                   "S"((long long)(12 * 20)), "d"(hotspot)
                  : "memory", "rcx", "r11");
     return (HANDLE)(unsigned long long)h;
 }
@@ -1588,7 +1590,10 @@ __declspec(dllexport) HANDLE CreateCursor(HANDLE hInstance, int xHot, int yHot, 
             m[row * 12 + col] = v;
         }
     }
-    return DuetOsCreateCursor(m);
+    /* Clamp the Win32 hotspot into the kernel's 12×20 grid. */
+    unsigned char hx = (unsigned char)((xHot < 0) ? 0 : (xHot > 11 ? 11 : xHot));
+    unsigned char hy = (unsigned char)((yHot < 0) ? 0 : (yHot > 19 ? 19 : yHot));
+    return DuetOsCreateCursor(m, hx, hy);
 }
 
 /* --- Clipboard --- */
