@@ -88,7 +88,7 @@ bool FilesOnRightClick(duetos::u32 cx, duetos::u32 cy);
 /// listing tail. Equivalent to repeated FilesFeedArrow calls.
 /// Registered as the Files window's WindowWheelFn at
 /// FilesInit time.
-void FilesOnWheel(duetos::i32 dz);
+void FilesOnWheel(duetos::i32 dz, duetos::u8 modifiers);
 
 /// Mouse double-click handler. If `cx`/`cy` resolves to a row,
 /// opens that row: directories descend (when supported),

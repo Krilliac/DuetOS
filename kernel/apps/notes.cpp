@@ -709,7 +709,7 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 
 } // namespace
 
-void NotesOnWheel(duetos::i32 dz)
+void NotesOnWheel(duetos::i32 dz, duetos::u8 modifiers)
 {
     // Real viewport scroll: dz > 0 (wheel up) moves the view
     // toward row 0; dz < 0 moves it toward end-of-buffer.

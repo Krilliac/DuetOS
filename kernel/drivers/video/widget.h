@@ -324,11 +324,13 @@ void WindowSetContentDraw(WindowHandle handle, WindowContentFn fn, void* cookie)
 
 /// Per-window mouse-wheel callback. `dz` is the signed wheel-tick
 /// delta (positive = scroll up / away from user) clamped to ±8 by
-/// the dispatcher. Native windows register a handler to consume
-/// wheel motion when the cursor is over their client area;
-/// PE-owned windows ignore this and receive `WM_MOUSEWHEEL` via
-/// the message queue instead.
-using WindowWheelFn = void (*)(i32 dz);
+/// the dispatcher. `modifiers` is a bitmask of `kKeyMod*` values
+/// captured at dispatch time so handlers can branch on Ctrl+wheel
+/// (typically zoom) vs. plain wheel (scroll). Native windows
+/// register a handler to consume wheel motion when the cursor is
+/// over their client area; PE-owned windows ignore this and
+/// receive `WM_MOUSEWHEEL` via the message queue instead.
+using WindowWheelFn = void (*)(i32 dz, u8 modifiers);
 void WindowSetWheelHandler(WindowHandle h, WindowWheelFn fn);
 
 /// Per-window scrollbar geometry + state, populated by the app's
@@ -375,8 +377,8 @@ void WindowDispatchScroll(WindowHandle h, u32 first);
 /// `client_x` / `client_y` are unused today but reserved so a
 /// future scroll-zone-aware widget layer can hit-test inside the
 /// client area without recomputing screen coords.
-void WindowDispatchWheel(WindowHandle h, i32 client_x, i32 client_y, i32 dz, u32 screen_x, u32 screen_y,
-                         u64 mk_buttons);
+void WindowDispatchWheel(WindowHandle h, i32 client_x, i32 client_y, i32 dz, u32 screen_x, u32 screen_y, u64 mk_buttons,
+                         u8 modifiers);
 
 // ---------------------------------------------------------------
 // Per-window ownership + message queue + GDI display list.
@@ -643,6 +645,13 @@ void WindowInputTrackKey(u16 code, bool down);
 /// True iff `code` is currently down. Always false for codes
 /// outside the tracked range.
 bool WindowKeyIsDown(u16 code);
+
+/// Cache of the last KeyEvent modifier bitmask. The kbd reader
+/// publishes after every event so peripheral consumers (mouse-
+/// wheel handlers, drag handlers, etc.) can branch on Ctrl /
+/// Shift / Alt without scanning a key-state map.
+void WindowSetModifierState(u8 modifiers);
+u8 WindowModifierState();
 
 /// Current cursor position in framebuffer coordinates. Pointers
 /// may be null to skip writing that axis.

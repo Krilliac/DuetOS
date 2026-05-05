@@ -712,7 +712,7 @@ void FilesInit(duetos::drivers::video::WindowHandle handle)
                                                    });
 }
 
-void FilesOnWheel(duetos::i32 dz)
+void FilesOnWheel(duetos::i32 dz, duetos::u8 modifiers)
 {
     if (dz == 0)
         return;

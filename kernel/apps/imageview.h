@@ -81,7 +81,7 @@ bool ImageViewFeedArrow(bool left);
 /// v0 has no zoom state, so wheel does not zoom; a future
 /// slice can add a Ctrl+wheel branch. Registered as the
 /// ImageView window's WindowWheelFn at ImageViewInit time.
-void ImageViewOnWheel(duetos::i32 dz);
+void ImageViewOnWheel(duetos::i32 dz, duetos::u8 modifiers);
 
 /// Re-scan the FAT32 root, find an image whose 8.3 name matches
 /// `name` (case-insensitive, supports `.BMP` and `.TGA`), and

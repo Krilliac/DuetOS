@@ -30,6 +30,6 @@ duetos::drivers::video::WindowHandle NotifyCenterWindow();
 
 bool NotifyCenterFeedChar(char c);
 bool NotifyCenterFeedArrow(duetos::u16 keycode);
-void NotifyCenterOnWheel(duetos::i32 dz);
+void NotifyCenterOnWheel(duetos::i32 dz, duetos::u8 modifiers);
 
 } // namespace duetos::apps::notify_center

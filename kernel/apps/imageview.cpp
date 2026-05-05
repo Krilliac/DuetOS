@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/input/ps2kbd.h"
 #include "drivers/video/dnd.h"
 #include "drivers/video/notify.h"
 #include "fs/fat32.h"
@@ -896,14 +897,32 @@ void ImageViewInit(WindowHandle handle)
         1u << static_cast<u32>(duetos::drivers::video::DndKind::FileEntry));
 }
 
-void ImageViewOnWheel(duetos::i32 dz)
+void ImageViewOnWheel(duetos::i32 dz, duetos::u8 modifiers)
 {
     if (dz == 0)
         return;
-    // Wheel down (dz < 0) steps forward through the list;
-    // wheel up steps back. One tick per image is right at the
-    // typical wheel resolution — large dz values are rare and
-    // the dispatcher already clamps to ±8.
+    using duetos::drivers::input::kKeyModCtrl;
+    if ((modifiers & kKeyModCtrl) != 0)
+    {
+        // Ctrl+wheel — zoom by resizing the window. The image
+        // auto-fits to the client area via FitThumbnail, so
+        // resizing the window naturally rescales the image.
+        // 32 px per tick reads as a comfortable zoom step.
+        constexpr duetos::u32 kZoomStep = 32;
+        duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
+        if (!duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh))
+            return;
+        const duetos::i32 steps = (dz > 0) ? dz : -dz;
+        const duetos::i32 delta = static_cast<duetos::i32>(kZoomStep) * steps;
+        const duetos::i32 sign = (dz > 0) ? 1 : -1;
+        duetos::drivers::video::WindowResizeFromEdge(g_state.handle,
+                                                     duetos::drivers::video::WindowResizeEdge::BottomRight,
+                                                     /*ax*/ 0, /*ay*/ 0, ww, wh, sign * delta, sign * delta);
+        g_state.needs_decode = true;
+        return;
+    }
+    // Plain wheel — step image. Wheel down advances; wheel up
+    // steps back.
     const bool forward = (dz < 0);
     const duetos::i32 steps = (dz > 0) ? dz : -dz;
     for (duetos::i32 i = 0; i < steps; ++i)

@@ -2914,6 +2914,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             const bool alt = (ev.modifiers & kKeyModAlt) != 0;
             const bool ctrl = (ev.modifiers & kKeyModCtrl) != 0;
             const bool shift = (ev.modifiers & kKeyModShift) != 0;
+            // Publish for non-kbd consumers (wheel handlers etc.)
+            // so a Ctrl+wheel gesture can be detected without a
+            // race against the kbd ring's own state.
+            duetos::drivers::video::WindowSetModifierState(ev.modifiers);
             bool dirty = false;
 
             // Login gate takes absolute priority — while a
@@ -5224,7 +5228,11 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                         mk |= 0x0001U;
                     if (right_down)
                         mk |= 0x0002U;
-                    duetos::drivers::video::WindowDispatchWheel(pe_hit, client_x, client_y, dz, cx, cy, mk);
+                    // Modifiers come from the kbd-reader's last
+                    // published state. Wheel handlers branch on
+                    // Ctrl (zoom in ImageView) etc.
+                    const duetos::u8 mods = duetos::drivers::video::WindowModifierState();
+                    duetos::drivers::video::WindowDispatchWheel(pe_hit, client_x, client_y, dz, cx, cy, mk, mods);
                     duetos::drivers::video::CursorHide();
                     duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
                     duetos::drivers::video::CursorShow();

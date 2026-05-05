@@ -1223,7 +1223,7 @@ void BrowserInit(WindowHandle handle)
                                                    });
 }
 
-void BrowserOnWheel(duetos::i32 dz)
+void BrowserOnWheel(duetos::i32 dz, duetos::u8 modifiers)
 {
     if (dz == 0)
         return;

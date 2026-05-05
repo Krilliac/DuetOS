@@ -97,7 +97,7 @@ bool BrowserFeedArrow(u16 keycode);
 /// by `dz` rows; in History/Bookmarks mode, steps the list
 /// selection. Registered as the Browser window's WindowWheelFn
 /// at BrowserInit time.
-void BrowserOnWheel(duetos::i32 dz);
+void BrowserOnWheel(duetos::i32 dz, duetos::u8 modifiers);
 
 /// Mouse double-click handler. In Bookmarks mode, follows the
 /// hit row's URL via `StartFetch`. Other modes — no-op (returns

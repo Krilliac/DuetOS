@@ -431,6 +431,11 @@ constinit duetos::sched::WaitQueue g_msg_wq{};
 // compat shim.
 constinit u8 g_vk_state[kWindowVkStateSize / 8] = {};
 
+// Last KeyEvent modifier bitmask. Updated by the kbd-reader
+// thread after every event so peripheral consumers (wheel
+// handlers, etc.) can branch on Ctrl / Shift / Alt.
+constinit u8 g_modifier_state = 0;
+
 // Mouse capture — one system-wide HWND that gets all mouse
 // events regardless of cursor position, or kWindowInvalid when
 // no capture is active.
@@ -1409,7 +1414,7 @@ void WindowDispatchScroll(WindowHandle h, u32 first)
 }
 
 void WindowDispatchWheel(WindowHandle h, i32 /*client_x*/, i32 /*client_y*/, i32 dz, u32 screen_x, u32 screen_y,
-                         u64 mk_buttons)
+                         u64 mk_buttons, u8 modifiers)
 {
     if (!WindowValid(h) || dz == 0)
     {
@@ -1421,6 +1426,8 @@ void WindowDispatchWheel(WindowHandle h, i32 /*client_x*/, i32 /*client_y*/, i32
         // multiples of WHEEL_DELTA (120); low word is button mask
         // (MK_LBUTTON / MK_RBUTTON / MK_SHIFT / ...). lParam packs
         // the screen-coord click point: low word = x, high word = y.
+        // Modifiers don't go into wparam — Win32 PE apps test
+        // GetKeyState themselves.
         constexpr u32 kWmMouseWheel = 0x020A;
         const i32 wheel_delta = dz * 120;
         const u64 wparam = ((static_cast<u64>(static_cast<u16>(static_cast<i16>(wheel_delta))) << 16) & 0xFFFF0000U) |
@@ -1432,7 +1439,7 @@ void WindowDispatchWheel(WindowHandle h, i32 /*client_x*/, i32 /*client_y*/, i32
     }
     if (g_windows[h].wheel_fn != nullptr)
     {
-        g_windows[h].wheel_fn(dz);
+        g_windows[h].wheel_fn(dz, modifiers);
     }
 }
 
@@ -2544,6 +2551,16 @@ bool WindowKeyIsDown(u16 code)
     const u32 byte = idx / 8;
     const u32 bit = idx % 8;
     return (g_vk_state[byte] & (1u << bit)) != 0;
+}
+
+void WindowSetModifierState(u8 modifiers)
+{
+    g_modifier_state = modifiers;
+}
+
+u8 WindowModifierState()
+{
+    return g_modifier_state;
 }
 
 // --- Cursor accessors ---------------------------------------------

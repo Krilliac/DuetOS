@@ -98,7 +98,7 @@ bool NotesIsDirty();
 /// small enough for v0 (`kBufCap = 4096`) to render the cursor
 /// in view without separate viewport state. Registered as the
 /// Notes window's WindowWheelFn at NotesInit time.
-void NotesOnWheel(duetos::i32 dz);
+void NotesOnWheel(duetos::i32 dz, duetos::u8 modifiers);
 
 /// Mouse double-click on the Notes window — currently a no-op
 /// (Notes has no list / icon model that benefits from double-
