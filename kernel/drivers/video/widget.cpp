@@ -931,10 +931,6 @@ WindowResizeEdge WindowPointInResizeEdge(WindowHandle h, u32 cx, u32 cy)
     if (!WindowValid(h))
         return WindowResizeEdge::None;
     const auto& w = g_windows[h].chrome;
-    // Title-bar drag-to-move takes priority over top-edge
-    // resize: a press inside the title bar starts a move, not
-    // a resize. So the top-edge hit zone is gated to the band
-    // BEFORE the title bar.
     if (cx + kWindowResizeBorderPx < w.x || cx >= w.x + w.w + kWindowResizeBorderPx)
         return WindowResizeEdge::None;
     if (cy + kWindowResizeBorderPx < w.y || cy >= w.y + w.h + kWindowResizeBorderPx)
@@ -943,7 +939,17 @@ WindowResizeEdge WindowPointInResizeEdge(WindowHandle h, u32 cx, u32 cy)
     const bool near_bottom = (cy + kWindowResizeBorderPx >= w.y + w.h) && (cy < w.y + w.h + kWindowResizeBorderPx);
     const bool near_left = (cx >= w.x) && (cx < w.x + kWindowResizeBorderPx);
     const bool near_right = (cx + kWindowResizeBorderPx >= w.x + w.w) && (cx < w.x + w.w + kWindowResizeBorderPx);
-    // Vertical-edge preference avoids a corner ambiguity.
+    // Corner zones win over edges (a corner is the intersection
+    // of two edge bands; the diagonal cursor is more useful than
+    // the vertical fallback).
+    if (near_top && near_left)
+        return WindowResizeEdge::TopLeft;
+    if (near_top && near_right)
+        return WindowResizeEdge::TopRight;
+    if (near_bottom && near_left)
+        return WindowResizeEdge::BottomLeft;
+    if (near_bottom && near_right)
+        return WindowResizeEdge::BottomRight;
     if (near_top)
         return WindowResizeEdge::Top;
     if (near_bottom)
@@ -966,9 +972,8 @@ void WindowResizeFromEdge(WindowHandle h, WindowResizeEdge edge, u32 anchor_x, u
     i64 ny = anchor_y;
     i64 nw = anchor_w;
     i64 nh = anchor_h;
-    switch (edge)
+    auto apply_left = [&]()
     {
-    case WindowResizeEdge::Left:
         nx = static_cast<i64>(anchor_x) + dx;
         nw = static_cast<i64>(anchor_w) - dx;
         if (nw < kMinW)
@@ -981,13 +986,15 @@ void WindowResizeFromEdge(WindowHandle h, WindowResizeEdge edge, u32 anchor_x, u
             nw += nx;
             nx = 0;
         }
-        break;
-    case WindowResizeEdge::Right:
+    };
+    auto apply_right = [&]()
+    {
         nw = static_cast<i64>(anchor_w) + dx;
         if (nw < kMinW)
             nw = kMinW;
-        break;
-    case WindowResizeEdge::Top:
+    };
+    auto apply_top = [&]()
+    {
         ny = static_cast<i64>(anchor_y) + dy;
         nh = static_cast<i64>(anchor_h) - dy;
         if (nh < kMinH)
@@ -1000,11 +1007,42 @@ void WindowResizeFromEdge(WindowHandle h, WindowResizeEdge edge, u32 anchor_x, u
             nh += ny;
             ny = 0;
         }
-        break;
-    case WindowResizeEdge::Bottom:
+    };
+    auto apply_bottom = [&]()
+    {
         nh = static_cast<i64>(anchor_h) + dy;
         if (nh < kMinH)
             nh = kMinH;
+    };
+    switch (edge)
+    {
+    case WindowResizeEdge::Left:
+        apply_left();
+        break;
+    case WindowResizeEdge::Right:
+        apply_right();
+        break;
+    case WindowResizeEdge::Top:
+        apply_top();
+        break;
+    case WindowResizeEdge::Bottom:
+        apply_bottom();
+        break;
+    case WindowResizeEdge::TopLeft:
+        apply_top();
+        apply_left();
+        break;
+    case WindowResizeEdge::TopRight:
+        apply_top();
+        apply_right();
+        break;
+    case WindowResizeEdge::BottomLeft:
+        apply_bottom();
+        apply_left();
+        break;
+    case WindowResizeEdge::BottomRight:
+        apply_bottom();
+        apply_right();
         break;
     default:
         return;

@@ -108,13 +108,16 @@ same pixel on the same HWND. Three independent detectors:
 
 ## Cursor Shapes
 
-`cursor.{h,cpp}` carries six 12×20 sprite tables — `Arrow`,
-`IBeam`, `Hand`, `Wait`, `ResizeNS`, `ResizeEW` — selectable
-via `CursorSetShape(s)`. The mouse loop runs a hit-test on
-every packet:
+`cursor.{h,cpp}` carries eight 12×20 sprite tables — `Arrow`,
+`IBeam`, `Hand`, `Wait`, `ResizeNS`, `ResizeEW`, `ResizeNESW`,
+`ResizeNWSE` — selectable via `CursorSetShape(s)`. The mouse
+loop runs a hit-test on every packet:
 
-- Within `kWindowResizeBorderPx` (4 px) of a window edge →
-  `ResizeNS` (top/bottom) or `ResizeEW` (left/right)
+- Within `kWindowResizeBorderPx` (4 px) of a window corner →
+  `ResizeNWSE` (top-left / bottom-right) or `ResizeNESW`
+  (top-right / bottom-left)
+- Within 4 px of a window edge → `ResizeNS` (top/bottom) or
+  `ResizeEW` (left/right)
 - Over a button widget → `Hand`
 - Over Notes / Browser client area → `IBeam`
 - Otherwise → `Arrow`
@@ -172,16 +175,40 @@ calls `WidgetTooltipTrack(cx, cy, now_tick)` every packet,
 and `DesktopCompose` calls `WidgetTooltipRender()` after
 chrome but before modal dialogs.
 
-## Window Edge Resize
+## Window Edge + Corner Resize
 
-A 4-px hit band along each window border (left / right /
-top / bottom) flips the cursor to `ResizeEW` / `ResizeNS`
-on hover and starts a resize-drag on press. The drag
-preserves the press-time anchor bounds and feeds cursor
-deltas through `WindowResizeFromEdge`, which clamps to a
-minimum 80 × 60 size and the framebuffer extents. The title
-bar takes priority over the top edge — clicks in the title
-still drag-to-move, not drag-to-resize.
+A 4-px hit band along each window border flips the cursor to
+the matching shape (`ResizeEW` / `ResizeNS` for edges,
+`ResizeNESW` / `ResizeNWSE` for corners) on hover and starts a
+resize-drag on press. Corner zones win over single-edge zones
+in the hit-test. The drag preserves the press-time anchor
+bounds and feeds cursor deltas through `WindowResizeFromEdge`
+(which composes `apply_top` / `apply_bottom` /
+`apply_left` / `apply_right` so corner edges resize on both
+axes simultaneously). Clamps to a minimum 80 × 60 size and the
+framebuffer extents. The title bar takes priority over the
+top edge — clicks in the title still drag-to-move, not
+drag-to-resize.
+
+## Notification History
+
+`notify.{h,cpp}` retains the last 16 distinct toasts displayed
+via `NotifyShowFor`. Duplicate-text pushes coalesce so a
+service that fires the same toast every second doesn't burn
+through the ring. The history is exposed via
+`NotifyHistoryCount()` + `NotifyHistoryGet(idx, out, cap)`;
+v1's only consumer is the `Ctrl+Shift+N` hotkey in
+`kernel/core/main.cpp`, which dumps the ring to the
+framebuffer console between two banner lines. A dedicated
+Notification Center app is a future slice.
+
+## First-Run Welcome
+
+After login completes (post-greeter, post-banner-Console
+write), main.cpp fires a one-shot `NotifyShowFor("Welcome to
+DuetOS - press F1 for shortcuts", 8)` with extended TTL. The
+static gate (`s_welcome_shown`) makes it strictly per-boot;
+TTY mode skips the toast since toasts don't paint there.
 
 ## Chrome Polish
 
@@ -284,30 +311,34 @@ Action-id allocation:
   shape via `CursorSetShape`, but PE apps have no
   `SYS_GDI_SETCURSOR` to request a shape change. Cursor shape
   is owned entirely by the kernel hit-test today.
-- **Notes wheel = cursor step, not viewport scroll**: a viewport
-  scroll requires tracking visible-row offset state in the draw
-  loop; v1 maps wheel ticks to `MoveUp`/`MoveDown` calls. Works
-  for a typical 4 KiB Notes buffer; a longer document would
-  need real viewport tracking.
 - **ImageView wheel = next/prev only**: zoom is deferred until
   ImageView grows zoom state.
-- **Scrollbar drag-the-thumb interactivity**: deferred. The
-  visual indicator paints correctly; click-on-track jump-to
-  and drag-the-thumb need per-app hit-test wiring + a drag
-  state machine. Wheel dispatch covers the common case.
-- **Calendar click-to-select-date**: deferred. The grid hit-
-  test would have to mirror the multi-section draw geometry
-  (header / weekdays / cells with margins); a drift between
-  paint and hit-test would land on the wrong day.
-- **Clock alarm + timer modes**: deferred. Tab toggles
-  Clock ↔ Stopwatch in v1; alarm needs a "set HH:MM" input
-  flow and a tick-rate notify trigger; timer needs duration
-  input + countdown + zero-trigger notify.
-- **Resize cursor diagonal variants (NESW / NWSE)**: corner
-  resize is deferred. The hit-test resolves corners with a
-  vertical preference (top/bottom over left/right); a true
-  corner cursor would also need corner hit zones distinct
-  from the edge bands.
+- **Scrollbar per-app drag-the-thumb wiring**: the
+  `ScrollbarHitTest` + `ScrollbarDragTo` API exists, but apps
+  (Files, Browser) don't yet route press / drag events into
+  it. Each consumer needs a press-edge handler that hit-tests
+  its scrollbar rect + a drag-state slot for the grab offset.
+  Wheel dispatch covers the common case in the meantime.
+- **Notification Center app**: deferred. The retention ring is
+  in place (`NotifyHistoryCount` + `NotifyHistoryGet`); the
+  v1 consumer is the `Ctrl+Shift+N` console dump. A windowed
+  reader would be a small app on top of the same API.
+- **Drag-and-drop between windows**: not in scope. Needs a
+  per-window drop-target registry, a `kDraggingItem` global,
+  and ghost-image rendering during drag — more invasive than
+  any single-app feature.
+- **Desktop right-click "Move / Size" modal-input mode**:
+  Move enters interactive-cursor-follow until a click; not
+  yet implemented (system menu Move re-centres the window
+  under the cursor as a degraded stand-in).
+- **Audio feedback / system sounds**: gated on HDA codec
+  programming (Roadmap.md). PC speaker exists but is not
+  wired to any UI event.
+- **PE `SetCursor` ABI**: gated on a new `SYS_GDI_*` syscall.
+  Native windows can change cursor shape via `CursorSetShape`,
+  but PE apps have no equivalent.
+- **Settings GUIs (Display / Sound / Keyboard / Mouse /
+  Date-Time)**: each is its own slice per CLAUDE.md.
 - **Trash / ramfs mode in Files**: only FAT32 mode has a v0
   context menu; other modes fall through to the kernel-window menu.
 - **Modal dialogs, common controls, scroll bars, outline fonts,

@@ -2883,6 +2883,18 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                         duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
                         duetos::drivers::video::CursorShow();
                     }
+                    // First-run welcome toast. One-shot per boot
+                    // (the static gate fires only on the first
+                    // post-login transition); a longer TTL than
+                    // the default so a new user reads it before
+                    // it decays. Skipped in TTY mode where there
+                    // are no toasts.
+                    static bool s_welcome_shown = false;
+                    if (!is_tty && !s_welcome_shown)
+                    {
+                        s_welcome_shown = true;
+                        duetos::drivers::video::NotifyShowFor("Welcome to DuetOS - press F1 for shortcuts", 8);
+                    }
                 }
                 duetos::drivers::video::CompositorUnlock();
                 continue;
@@ -3101,6 +3113,50 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     continue;
                 }
                 duetos::drivers::video::CompositorUnlock();
+            }
+
+            // Ctrl+Shift+N — dump the notification history ring
+            // to the framebuffer console. The toast retention
+            // ring (notify.cpp) keeps the last 16 distinct
+            // toasts; without a viewer they stay invisible to a
+            // user who blinked while one popped. Console dump
+            // is the low-friction v1 surface; a dedicated
+            // Notification Center app is a future slice.
+            if (ctrl && shift && !alt && (ev.code == 'n' || ev.code == 'N'))
+            {
+                duetos::drivers::video::CompositorLock();
+                duetos::drivers::video::ConsoleWriteln("");
+                duetos::drivers::video::ConsoleWriteln("--- NOTIFICATION HISTORY (newest first) ---");
+                const duetos::u32 n = duetos::drivers::video::NotifyHistoryCount();
+                if (n == 0)
+                {
+                    duetos::drivers::video::ConsoleWriteln("(empty)");
+                }
+                else
+                {
+                    char line[duetos::drivers::video::kNotifyMaxText + 8];
+                    for (duetos::u32 i = 0; i < n; ++i)
+                    {
+                        duetos::u32 o = 0;
+                        line[o++] = '[';
+                        if (i >= 10)
+                            line[o++] = static_cast<char>('0' + (i / 10));
+                        line[o++] = static_cast<char>('0' + (i % 10));
+                        line[o++] = ']';
+                        line[o++] = ' ';
+                        const duetos::u32 cap_left = sizeof(line) - o;
+                        const duetos::u32 wrote = duetos::drivers::video::NotifyHistoryGet(i, line + o, cap_left);
+                        line[o + wrote] = '\0';
+                        duetos::drivers::video::ConsoleWriteln(line);
+                    }
+                }
+                duetos::drivers::video::ConsoleWriteln("--- end of history ---");
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+                duetos::drivers::video::CompositorUnlock();
+                SerialWrite("[ui] ^+N notify history dump\n");
+                continue;
             }
 
             // Ctrl+L — focus the Browser URL bar, web-browser
@@ -4145,6 +4201,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 {
                     want = CursorShape::ResizeNS;
                 }
+                else if (edge == WindowResizeEdge::TopLeft || edge == WindowResizeEdge::BottomRight)
+                {
+                    want = CursorShape::ResizeNWSE;
+                }
+                else if (edge == WindowResizeEdge::TopRight || edge == WindowResizeEdge::BottomLeft)
+                {
+                    want = CursorShape::ResizeNESW;
+                }
                 else if (duetos::drivers::video::WidgetCursorOverButton(cx, cy))
                 {
                     want = CursorShape::Hand;
@@ -4732,6 +4796,17 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                             SerialWrite("[ui] raise window=");
                             SerialWriteHex(hit);
                             SerialWrite("\n");
+                            // Native-app press dispatch on
+                            // client-area clicks. Calendar's
+                            // click-to-select-date is the only
+                            // current consumer; other apps fan
+                            // their press events through the
+                            // routing block further down (PE
+                            // path) or get them via WidgetRouteMouse.
+                            if (hit == duetos::apps::calendar::CalendarWindow())
+                            {
+                                duetos::apps::calendar::CalendarOnClick(cx, cy);
+                            }
                         }
                     }
                     duetos::drivers::video::CursorHide();

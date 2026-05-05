@@ -215,6 +215,10 @@ enum class WindowResizeEdge : u8
     Right = 2,
     Top = 3,
     Bottom = 4,
+    TopLeft = 5,
+    TopRight = 6,
+    BottomLeft = 7,
+    BottomRight = 8,
 };
 
 /// Pixel width of the resize-detection band along each edge.

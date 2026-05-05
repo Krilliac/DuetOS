@@ -53,4 +53,20 @@ void NotifyRedraw();
 /// COM1.
 void NotifySelfTest();
 
+/// History ring — last `kNotifyHistoryCap` displayed toasts,
+/// newest first. The Notification Center / "what was that
+/// toast that flashed by?" UI reads from this. Empty slots
+/// are NUL-only.
+inline constexpr u32 kNotifyHistoryCap = 16;
+
+/// Number of populated entries in the history ring (≤
+/// `kNotifyHistoryCap`).
+u32 NotifyHistoryCount();
+
+/// Read entry `idx` (0 = most-recent). Copies up to
+/// `cap - 1` bytes + NUL terminator into `out`. Returns the
+/// number of bytes written (excluding NUL); 0 if `idx` is out
+/// of range or `out` is null.
+u32 NotifyHistoryGet(u32 idx, char* out, u32 cap);
+
 } // namespace duetos::drivers::video

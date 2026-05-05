@@ -96,8 +96,10 @@ enum class CursorShape : u8
     IBeam = 1,
     Hand = 2,
     Wait = 3,
-    ResizeNS = 4, // ↕ over top / bottom borders
-    ResizeEW = 5, // ↔ over left / right borders
+    ResizeNS = 4,   // ↕ over top / bottom borders
+    ResizeEW = 5,   // ↔ over left / right borders
+    ResizeNESW = 6, // ⤢ over top-right / bottom-left corners
+    ResizeNWSE = 7, // ⤡ over top-left / bottom-right corners
 };
 
 /// Pick the active sprite. Repaints in place so the new shape

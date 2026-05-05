@@ -155,6 +155,22 @@ constexpr u32 kPaperColour = 0x00E0E0D8;
 
 constinit duetos::drivers::video::WindowHandle g_handle = duetos::drivers::video::kWindowInvalid;
 
+// Viewport scroll offset, in visual rows. Wheel adjusts this
+// directly; the draw loop skips painting until the row counter
+// reaches g_view_top, then paints up to max_row rows. When the
+// cursor moves outside the visible band, the input path calls
+// AutoScrollIntoView to nudge g_view_top so the caret stays
+// visible.
+constinit u32 g_view_top = 0;
+
+// Last (max_col, max_row) the draw loop used. Captured each
+// frame so the wheel + nav handlers can clamp scroll bounds
+// without re-deriving the geometry. Defaults to a sane non-
+// zero so a wheel event before the first compose doesn't
+// divide by zero.
+constinit u32 g_last_max_col = 80;
+constinit u32 g_last_max_row = 24;
+
 // Delete the char to the right of the cursor (forward delete).
 // Returns true iff anything was deleted.
 bool DeleteAtCursor()
@@ -391,6 +407,56 @@ VisualPos ComputeVisualPos(u32 target, u32 max_col)
     return p;
 }
 
+// Total visual-row count assuming `max_col` wrap. Walks the
+// buffer once. Used by AutoScrollIntoView + the wheel clamp
+// to bound g_view_top against "no scroll past last line".
+u32 TotalVisualRows(u32 max_col)
+{
+    if (max_col == 0)
+        return 0;
+    u32 row = 0;
+    u32 col = 0;
+    for (u32 i = 0; i < g_len; ++i)
+    {
+        const char c = g_buf[i];
+        if (c == '\n')
+        {
+            ++row;
+            col = 0;
+            continue;
+        }
+        if (col >= max_col)
+        {
+            ++row;
+            col = 0;
+        }
+        ++col;
+    }
+    return row + 1;
+}
+
+// Bring the caret into the visible band by adjusting
+// g_view_top. Does nothing if the caret is already visible.
+void AutoScrollIntoView()
+{
+    const u32 max_col = (g_last_max_col > 0) ? g_last_max_col : 80;
+    const u32 max_row = (g_last_max_row > 0) ? g_last_max_row : 24;
+    VisualPos cp = ComputeVisualPos(g_cursor, max_col);
+    if (cp.col >= max_col)
+    {
+        ++cp.row;
+        cp.col = 0;
+    }
+    if (cp.row < g_view_top)
+    {
+        g_view_top = cp.row;
+    }
+    else if (cp.row >= g_view_top + max_row)
+    {
+        g_view_top = cp.row - max_row + 1;
+    }
+}
+
 // Append `s` (NUL-terminated) onto `dst` at offset `*o`, capped
 // at `cap - 1` bytes. Stops early if either runs out. Helper for
 // the status-footer formatter.
@@ -511,6 +577,24 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     const u32 max_row = (ch - 2 * kPad - kStatusH) / kGlyphH;
     if (max_col == 0 || max_row == 0)
         return;
+    // Cache geometry so the wheel + nav handlers can compute
+    // scroll bounds without re-deriving from cw / ch.
+    g_last_max_col = max_col;
+    g_last_max_row = max_row;
+    // Clamp g_view_top against the current buffer size — a
+    // delete that shrinks past the visible band shouldn't
+    // strand the viewport pointing at empty rows.
+    const u32 total_rows = TotalVisualRows(max_col);
+    if (total_rows > max_row)
+    {
+        const u32 max_top = total_rows - max_row;
+        if (g_view_top > max_top)
+            g_view_top = max_top;
+    }
+    else
+    {
+        g_view_top = 0;
+    }
 
     // Selection range — half-open [sel_lo, sel_hi). When no
     // selection is live both bounds collapse to g_cursor and
@@ -527,11 +611,16 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     }
     const u32 sel_paper = duetos::drivers::video::ThemeCurrent().taskbar_accent;
 
+    // Walk the buffer tracking the absolute visual row + col;
+    // skip painting while row < g_view_top, paint into the
+    // visible band [g_view_top, g_view_top + max_row), stop
+    // once we're past the band. This keeps the existing wrap
+    // discipline intact while gaining a real viewport.
     u32 col = 0;
     u32 row = 0;
     for (u32 i = 0; i < g_len; ++i)
     {
-        if (row >= max_row)
+        if (row >= g_view_top + max_row)
             break;
         const char c = g_buf[i];
         const bool in_sel = (i >= sel_lo && i < sel_hi);
@@ -545,27 +634,31 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
         {
             ++row;
             col = 0;
-            if (row >= max_row)
+            if (row >= g_view_top + max_row)
                 break;
         }
-        const u32 paper = in_sel ? sel_paper : kPaperColour;
-        FramebufferDrawChar(x0 + col * kGlyphW, y0 + row * kGlyphH, c, kInkColour, paper);
+        if (row >= g_view_top)
+        {
+            const u32 paper = in_sel ? sel_paper : kPaperColour;
+            const u32 vis_row = row - g_view_top;
+            FramebufferDrawChar(x0 + col * kGlyphW, y0 + vis_row * kGlyphH, c, kInkColour, paper);
+        }
         ++col;
     }
 
-    // Paint the caret. Compute its visual position independently
-    // of the draw loop because the cursor may sit mid-buffer, not
-    // just at the tail. A trailing-column cursor wraps to the
-    // start of the next row so it's visible in the client area.
+    // Paint the caret in the visible band. ComputeVisualPos
+    // returns absolute (row, col); subtract g_view_top to land
+    // in viewport coords.
     VisualPos cp = ComputeVisualPos(g_cursor, max_col);
     if (cp.col >= max_col)
     {
         ++cp.row;
         cp.col = 0;
     }
-    if (cp.row < max_row && cp.col < max_col)
+    if (cp.row >= g_view_top && cp.row < g_view_top + max_row && cp.col < max_col)
     {
-        FramebufferDrawChar(x0 + cp.col * kGlyphW, y0 + cp.row * kGlyphH, '_', kInkColour, kPaperColour);
+        const u32 vis_row = cp.row - g_view_top;
+        FramebufferDrawChar(x0 + cp.col * kGlyphW, y0 + vis_row * kGlyphH, '_', kInkColour, kPaperColour);
     }
 
     // Status footer: paint a thin band along the bottom of the
@@ -616,25 +709,30 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 
 void NotesOnWheel(duetos::i32 dz)
 {
-    using namespace duetos::drivers::input;
-    // Step the cursor by |dz| rows — wheel up moves toward
-    // line 0, wheel down toward end-of-buffer. Keeps the v1
-    // implementation viewport-free; the cursor stays visible
-    // because the buffer (kBufCap = 4096) fits comfortably
-    // in the rendered region for any realistic note.
+    // Real viewport scroll: dz > 0 (wheel up) moves the view
+    // toward row 0; dz < 0 moves it toward end-of-buffer.
+    // Clamps against [0, total_rows - max_row]. The cursor
+    // stays where it is — only the visible band shifts.
+    if (dz == 0)
+        return;
+    const u32 max_col = (g_last_max_col > 0) ? g_last_max_col : 80;
+    const u32 max_row = (g_last_max_row > 0) ? g_last_max_row : 24;
+    const u32 total_rows = TotalVisualRows(max_col);
+    if (total_rows <= max_row)
+    {
+        g_view_top = 0;
+        return;
+    }
+    const u32 max_top = total_rows - max_row;
     if (dz > 0)
     {
-        for (duetos::i32 i = 0; i < dz; ++i)
-        {
-            MoveUp();
-        }
+        const u32 step = static_cast<u32>(dz);
+        g_view_top = (g_view_top > step) ? (g_view_top - step) : 0;
     }
-    else if (dz < 0)
+    else
     {
-        for (duetos::i32 i = 0; i < -dz; ++i)
-        {
-            MoveDown();
-        }
+        const u32 step = static_cast<u32>(-dz);
+        g_view_top = (g_view_top + step > max_top) ? max_top : (g_view_top + step);
     }
 }
 
@@ -674,30 +772,37 @@ duetos::drivers::video::WindowHandle NotesWindow()
 
 bool NotesFeedChar(char c)
 {
+    bool consumed = false;
     if (static_cast<u8>(c) == 0x08)
     {
         PushUndo();
-        if (DeleteSelectionIfAny())
-            return true;
-        BackspaceAtCursor();
-        return true;
+        if (!DeleteSelectionIfAny())
+            BackspaceAtCursor();
+        consumed = true;
     }
-    if (c == 0x0A)
+    else if (c == 0x0A)
     {
         PushUndo();
         DeleteSelectionIfAny();
         InsertAtCursor('\n');
-        return true;
+        consumed = true;
     }
-    const u8 uc = static_cast<u8>(c);
-    if (uc >= 0x20 && uc <= 0x7E)
+    else
     {
-        PushUndo();
-        DeleteSelectionIfAny();
-        InsertAtCursor(c);
-        return true;
+        const u8 uc = static_cast<u8>(c);
+        if (uc >= 0x20 && uc <= 0x7E)
+        {
+            PushUndo();
+            DeleteSelectionIfAny();
+            InsertAtCursor(c);
+            consumed = true;
+        }
     }
-    return false;
+    if (consumed)
+    {
+        AutoScrollIntoView();
+    }
+    return consumed;
 }
 
 bool NotesFeedKey(u16 keycode, u8 modifiers)
@@ -706,10 +811,6 @@ bool NotesFeedKey(u16 keycode, u8 modifiers)
     const bool shift = (modifiers & kKeyModShift) != 0;
     const bool ctrl = (modifiers & kKeyModCtrl) != 0;
 
-    // Pre-motion bookkeeping: shift extends a selection from
-    // a remembered anchor; non-shift movement clears it. Set
-    // anchor BEFORE moving so the anchor reflects the caret's
-    // pre-move position.
     auto pre_motion = [&]()
     {
         if (shift)
@@ -723,6 +824,7 @@ bool NotesFeedKey(u16 keycode, u8 modifiers)
         }
     };
 
+    bool consumed = true;
     switch (keycode)
     {
     case kKeyArrowLeft:
@@ -731,52 +833,58 @@ bool NotesFeedKey(u16 keycode, u8 modifiers)
             MoveWordLeft();
         else
             MoveLeft();
-        return true;
+        break;
     case kKeyArrowRight:
         pre_motion();
         if (ctrl)
             MoveWordRight();
         else
             MoveRight();
-        return true;
+        break;
     case kKeyArrowUp:
         pre_motion();
         MoveUp();
-        return true;
+        break;
     case kKeyArrowDown:
         pre_motion();
         MoveDown();
-        return true;
+        break;
     case kKeyPageUp:
         pre_motion();
         MovePage(true);
-        return true;
+        break;
     case kKeyPageDown:
         pre_motion();
         MovePage(false);
-        return true;
+        break;
     case kKeyHome:
         pre_motion();
         if (ctrl)
             MoveDocStart();
         else
             MoveHome();
-        return true;
+        break;
     case kKeyEnd:
         pre_motion();
         if (ctrl)
             MoveDocEnd();
         else
             MoveEnd();
-        return true;
+        break;
     case kKeyDelete:
         PushUndo();
         if (!DeleteSelectionIfAny())
             DeleteAtCursor();
-        return true;
+        break;
     default:
-        return false;
+        consumed = false;
+        break;
     }
+    if (consumed)
+    {
+        AutoScrollIntoView();
+    }
+    return consumed;
 }
 
 bool NotesUndo()
@@ -792,6 +900,7 @@ bool NotesUndo()
     }
     g_cursor = (f.cursor <= g_len) ? f.cursor : g_len;
     g_sel_anchor = f.sel_anchor;
+    AutoScrollIntoView();
     // Undo doesn't clear the dirty flag — the buffer still
     // differs from disk after popping. A subsequent Save
     // clears it normally.

@@ -151,6 +151,54 @@ constinit const u8 kResizeEWMask[kCursorHeight][kCursorWidth] = {
     {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
 };
 
+// Diagonal NESW resize: ⤢, top-right ↔ bottom-left arrow.
+constinit const u8 kResizeNESWMask[kCursorHeight][kCursorWidth] = {
+    {0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0}, // top-right arrowhead
+    {0, 0, 0, 0, 0, 0, 0, 1, 2, 2, 1, 0},
+    {0, 0, 0, 0, 0, 0, 0, 1, 2, 2, 1, 0},
+    {0, 0, 0, 0, 0, 0, 1, 2, 2, 1, 1, 0},
+    {0, 0, 0, 0, 0, 1, 2, 2, 1, 0, 1, 0},
+    {0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0},
+    {0, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0, 0},
+    {0, 0, 1, 2, 2, 1, 0, 0, 0, 0, 0, 0},
+    {0, 1, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0},
+    {0, 1, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0},
+    {0, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0},
+    {1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0}, // bottom-left arrowhead
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+};
+
+// Diagonal NWSE resize: ⤡, top-left ↔ bottom-right arrow.
+constinit const u8 kResizeNWSEMask[kCursorHeight][kCursorWidth] = {
+    {1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0}, // top-left arrowhead
+    {1, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0},
+    {1, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0},
+    {1, 1, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0},
+    {1, 0, 1, 2, 2, 1, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 1, 2, 2, 1, 0, 0},
+    {0, 0, 0, 0, 0, 0, 1, 1, 2, 1, 0, 0},
+    {0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0}, // bottom-right arrowhead
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+};
+
 // Hourglass / "wait" shape. Two stacked triangles.
 constinit const u8 kWaitMask[kCursorHeight][kCursorWidth] = {
     {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0}, // row 0 — top bar
@@ -420,6 +468,10 @@ const u8 (*MaskFor(CursorShape s))[kCursorWidth]
         return kResizeNSMask;
     case CursorShape::ResizeEW:
         return kResizeEWMask;
+    case CursorShape::ResizeNESW:
+        return kResizeNESWMask;
+    case CursorShape::ResizeNWSE:
+        return kResizeNWSEMask;
     case CursorShape::Arrow:
     default:
         return kArrowMask;

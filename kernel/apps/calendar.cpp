@@ -146,9 +146,15 @@ struct State
     u32 view_year;
     u32 view_month;
     bool initialised;
+    // User-selected day. `sel_year` == 0 means "no selection".
+    // The selection survives view changes — paging months still
+    // remembers what day the user clicked.
+    u32 sel_year;
+    u32 sel_month;
+    u32 sel_day;
 };
 
-constinit State g_state = {kWindowInvalid, 2026, 1, false};
+constinit State g_state = {kWindowInvalid, 2026, 1, false, 0, 0, 0};
 
 // Pull current RTC date into view_year / view_month if the user
 // hasn't navigated yet. Called on every paint so the live month is
@@ -309,15 +315,22 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
             }
 
             const bool is_today = (cell_year == today_year && cell_month == today_month && day == today_day);
+            const bool is_selected = (g_state.sel_year != 0) && (cell_year == g_state.sel_year) &&
+                                     (cell_month == g_state.sel_month) && (day == g_state.sel_day);
 
-            if (is_today)
+            if (is_selected)
+            {
+                // Selection: outlined fill in the theme accent so
+                // it reads distinctly from the today-highlight.
+                FramebufferFillRect(cell_x + 2, cell_y + 2, kCellW - 4, kCellH - 4, today_accent);
+                FramebufferDrawRect(cell_x + 1, cell_y + 1, kCellW - 2, kCellH - 2, fg, 1);
+            }
+            else if (is_today)
             {
                 FramebufferFillRect(cell_x + 2, cell_y + 2, kCellW - 4, kCellH - 4, today_accent);
             }
             else if (current_month && (c == 0 || c == 6))
             {
-                // Faint weekend highlight on the current month so
-                // weekends stand out from weekdays.
                 FramebufferFillRect(cell_x + 2, cell_y + 2, kCellW - 4, kCellH - 4, select_dim);
             }
 
@@ -326,7 +339,8 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
             FormatDayDec(dbuf, day, dw);
             const u32 dx = cell_x + (kCellW - dw) / 2;
             const u32 dy = cell_y + (kCellH - 8) / 2;
-            const u32 inkbg = is_today ? today_accent : (current_month && (c == 0 || c == 6) ? select_dim : bg);
+            const u32 inkbg =
+                (is_selected || is_today) ? today_accent : (current_month && (c == 0 || c == 6) ? select_dim : bg);
             const u32 inkfg = current_month ? fg : dim;
             FramebufferDrawString(dx, dy, dbuf, inkfg, inkbg);
         }
@@ -343,6 +357,82 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 }
 
 } // namespace
+
+bool CalendarOnClick(duetos::u32 cx, duetos::u32 cy)
+{
+    using duetos::drivers::video::WindowGetBounds;
+    if (g_state.handle == kWindowInvalid)
+        return false;
+    duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
+    if (!WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh))
+        return false;
+    // Mirror DrawFn's geometry. Window chrome eats 22 px title +
+    // 2 px borders (the same constants the chrome path uses).
+    constexpr duetos::u32 kTitle = 22;
+    constexpr duetos::u32 kBorder = 2;
+    if (wh < kTitle + 2 * kBorder)
+        return false;
+    const duetos::u32 client_x = wx + kBorder;
+    const duetos::u32 client_y = wy + kTitle + kBorder;
+    const duetos::u32 client_w = (ww > 2 * kBorder) ? ww - 2 * kBorder : 0;
+    const duetos::u32 client_h = (wh > kTitle + 2 * kBorder) ? wh - kTitle - 2 * kBorder : 0;
+    const duetos::u32 grid_w = kCols * kCellW;
+    const duetos::u32 grid_h = kGridRows * kCellH;
+    const duetos::u32 panel_w = grid_w + 2 * kMargin;
+    const duetos::u32 panel_h = kHeaderH + kWeekdayH + grid_h + kFooterH + 2 * kMargin;
+    if (client_w < panel_w + 4 || client_h < panel_h + 4)
+        return false;
+    const duetos::u32 ox = client_x + (client_w - panel_w) / 2;
+    const duetos::u32 oy = client_y + (client_h - panel_h) / 2;
+    const duetos::u32 grid_origin_x = ox + kMargin;
+    const duetos::u32 grid_origin_y = oy + kHeaderH + kWeekdayH;
+    if (cx < grid_origin_x || cx >= grid_origin_x + grid_w)
+        return false;
+    if (cy < grid_origin_y || cy >= grid_origin_y + grid_h)
+        return false;
+    const duetos::u32 r = (cy - grid_origin_y) / kCellH;
+    const duetos::u32 c = (cx - grid_origin_x) / kCellW;
+    // Re-derive the cell's (year, month, day) using the same
+    // ord arithmetic DrawFn uses.
+    const duetos::u32 first_dow = DayOfWeek(g_state.view_year, g_state.view_month, 1);
+    const duetos::u32 month_days = DaysInMonth(g_state.view_year, g_state.view_month);
+    duetos::u32 prev_year = g_state.view_year;
+    duetos::u32 prev_month = g_state.view_month;
+    Step(prev_year, prev_month, -1);
+    const duetos::u32 prev_days = DaysInMonth(prev_year, prev_month);
+    const duetos::i32 ord = duetos::i32(r * kCols + c) - duetos::i32(first_dow);
+    duetos::u32 day = 0;
+    duetos::u32 cell_year = g_state.view_year;
+    duetos::u32 cell_month = g_state.view_month;
+    if (ord < 0)
+    {
+        day = duetos::u32(duetos::i32(prev_days) + ord + 1);
+        cell_year = prev_year;
+        cell_month = prev_month;
+    }
+    else if (ord >= duetos::i32(month_days))
+    {
+        day = duetos::u32(ord - duetos::i32(month_days) + 1);
+        cell_year = g_state.view_year;
+        cell_month = g_state.view_month;
+        Step(cell_year, cell_month, +1);
+    }
+    else
+    {
+        day = duetos::u32(ord) + 1;
+    }
+    g_state.sel_year = cell_year;
+    g_state.sel_month = cell_month;
+    g_state.sel_day = day;
+    duetos::arch::SerialWrite("[calendar] click select day=");
+    duetos::arch::SerialWriteHex(day);
+    duetos::arch::SerialWrite(" month=");
+    duetos::arch::SerialWriteHex(cell_month);
+    duetos::arch::SerialWrite(" year=");
+    duetos::arch::SerialWriteHex(cell_year);
+    duetos::arch::SerialWrite("\n");
+    return true;
+}
 
 void CalendarInit(WindowHandle handle)
 {

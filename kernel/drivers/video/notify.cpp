@@ -20,6 +20,57 @@ struct ToastState
 
 constinit ToastState g_toast = {};
 
+// History ring. Front-loaded: index 0 is the most recent
+// displayed toast, index `count - 1` is the oldest. Pushed on
+// every NotifyShowFor that has non-empty text. Duplicate-text
+// pushes coalesce — a service that fires the same toast every
+// second won't fill the ring with the same string.
+struct HistorySlot
+{
+    char text[kNotifyMaxText + 1];
+    u32 len;
+};
+
+constinit HistorySlot g_history[kNotifyHistoryCap] = {};
+constinit u32 g_history_count = 0;
+
+bool HistoryFrontMatches(const char* text, u32 len)
+{
+    if (g_history_count == 0)
+        return false;
+    const HistorySlot& f = g_history[0];
+    if (f.len != len)
+        return false;
+    for (u32 i = 0; i < len; ++i)
+    {
+        if (f.text[i] != text[i])
+            return false;
+    }
+    return true;
+}
+
+void HistoryPush(const char* text, u32 len)
+{
+    if (HistoryFrontMatches(text, len))
+        return;
+    // Shift down by one to make room at the front. Drop the
+    // oldest entry if the ring is full.
+    const u32 keep = (g_history_count < kNotifyHistoryCap) ? g_history_count : (kNotifyHistoryCap - 1);
+    for (u32 i = keep; i > 0; --i)
+    {
+        g_history[i] = g_history[i - 1];
+    }
+    HistorySlot& dst = g_history[0];
+    for (u32 i = 0; i < len; ++i)
+    {
+        dst.text[i] = text[i];
+    }
+    dst.text[len] = '\0';
+    dst.len = len;
+    if (g_history_count < kNotifyHistoryCap)
+        ++g_history_count;
+}
+
 u32 StrLenCapped(const char* s, u32 cap)
 {
     if (s == nullptr)
@@ -57,6 +108,26 @@ void NotifyShowFor(const char* text, u32 ttl_ticks)
     g_toast.text[n] = '\0';
     g_toast.len = n;
     g_toast.ttl = ttl_ticks;
+    HistoryPush(g_toast.text, n);
+}
+
+u32 NotifyHistoryCount()
+{
+    return g_history_count;
+}
+
+u32 NotifyHistoryGet(u32 idx, char* out, u32 cap)
+{
+    if (out == nullptr || cap == 0 || idx >= g_history_count)
+        return 0;
+    const HistorySlot& s = g_history[idx];
+    const u32 take = (s.len + 1 < cap) ? s.len : cap - 1;
+    for (u32 i = 0; i < take; ++i)
+    {
+        out[i] = s.text[i];
+    }
+    out[take] = '\0';
+    return take;
 }
 
 bool NotifyIsActive()
