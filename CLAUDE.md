@@ -147,8 +147,8 @@ kernel/
   sync/                   — Spinlocks, mutexes, RW locks, RCU-lite
   syscall/                — Native syscall dispatch + time syscalls
   util/                   — Result<T,E>, string helpers, types, symbols, random
-  time/                   — (planned) HPET/TSC/APIC timer, clocksource, scheduler tick
-  ipc/                    — (planned) Capability-based IPC, ports, shared memory
+  time/                   — HPET clocksource, scheduler tick, timezone
+  ipc/                    — Handle table, KMutex/KEvent/KSemaphore/KMailbox/KFile kernel objects
 drivers/
   pci/                    — PCIe enumeration
   storage/nvme/           — NVMe
