@@ -1,9 +1,11 @@
 /*
- * userland/libs/user32/user32.c — 73 window-manager stubs, with
+ * userland/libs/user32/user32.c — window-manager surface, with
  * create/destroy/show/message-box + the full message pump (GetMessage
  * / PeekMessage / PostMessage / DispatchMessage / PostQuitMessage)
  * bridged to the kernel compositor via SYS_WIN_* (58..64) as of the
- * windowing v1 slice.
+ * windowing v1 slice. Modal-dialog family (DialogBoxParam / EndDialog
+ * + GetDlgItem*) ships as STUB facades — EATs exist so PEs link, but
+ * no modal pump runs in v0 (see comment block before DialogBoxParamA).
  *
  * Critical quirks:
  *   - GetMessage BLOCKS in the kernel until a message arrives; the
@@ -1098,6 +1100,186 @@ __declspec(dllexport) int MessageBoxExW(HANDLE h, const wchar_t16* text, const w
 {
     (void)lang;
     return MessageBoxW(h, text, caption, type);
+}
+
+/* --- Modal dialogs (STUB) ---
+ *
+ * Real Win32 DialogBoxParam blocks until EndDialog is called from
+ * the caller-supplied DLGPROC. v0 has no modal event loop and no
+ * real dialog window; we deliberately do NOT invoke the DLGPROC
+ * (calling it with a NULL hwnd would crash any procedure that
+ * touches GetDlgItem). Returning IDOK matches MessageBox's "user
+ * pressed OK" default so PEs that branch on the result follow the
+ * affirmative path. EndDialog is a no-op that returns TRUE — the
+ * stored result is never observed because DialogBoxParam itself
+ * never enters a modal loop. Real modal dialogs need a window-
+ * system upgrade (modal pump + dialog template loader); see wiki
+ * Roadmap. The presence of these EAT entries means PEs that import
+ * the family LOAD; the fact they don't run a real dialog is on the
+ * caller to discover via the surface-status doc. */
+
+typedef long long INT_PTR;
+
+__declspec(dllexport) INT_PTR DialogBoxParamA(HANDLE hInst, const char* lpTemplate, HANDLE hWndParent,
+                                              void* lpDialogFunc, LPARAM dwInitParam)
+{
+    (void)hInst;
+    (void)lpTemplate;
+    (void)hWndParent;
+    (void)lpDialogFunc;
+    (void)dwInitParam;
+    return IDOK;
+}
+__declspec(dllexport) INT_PTR DialogBoxParamW(HANDLE hInst, const wchar_t16* lpTemplate, HANDLE hWndParent,
+                                              void* lpDialogFunc, LPARAM dwInitParam)
+{
+    (void)hInst;
+    (void)lpTemplate;
+    (void)hWndParent;
+    (void)lpDialogFunc;
+    (void)dwInitParam;
+    return IDOK;
+}
+__declspec(dllexport) INT_PTR DialogBoxA(HANDLE hInst, const char* lpTemplate, HANDLE hWndParent, void* lpDialogFunc)
+{
+    return DialogBoxParamA(hInst, lpTemplate, hWndParent, lpDialogFunc, 0);
+}
+__declspec(dllexport) INT_PTR DialogBoxW(HANDLE hInst, const wchar_t16* lpTemplate, HANDLE hWndParent,
+                                         void* lpDialogFunc)
+{
+    return DialogBoxParamW(hInst, lpTemplate, hWndParent, lpDialogFunc, 0);
+}
+__declspec(dllexport) INT_PTR DialogBoxIndirectParamA(HANDLE hInst, const void* lpTemplate, HANDLE hWndParent,
+                                                      void* lpDialogFunc, LPARAM dwInitParam)
+{
+    (void)hInst;
+    (void)lpTemplate;
+    (void)hWndParent;
+    (void)lpDialogFunc;
+    (void)dwInitParam;
+    return IDOK;
+}
+__declspec(dllexport) INT_PTR DialogBoxIndirectParamW(HANDLE hInst, const void* lpTemplate, HANDLE hWndParent,
+                                                      void* lpDialogFunc, LPARAM dwInitParam)
+{
+    (void)hInst;
+    (void)lpTemplate;
+    (void)hWndParent;
+    (void)lpDialogFunc;
+    (void)dwInitParam;
+    return IDOK;
+}
+__declspec(dllexport) BOOL EndDialog(HANDLE hDlg, INT_PTR nResult)
+{
+    (void)hDlg;
+    (void)nResult;
+    return 1;
+}
+/* CreateDialogParamA/W is the modeless cousin of DialogBoxParam —
+ * Windows returns immediately with a HWND for the dialog instead of
+ * blocking. v0 returns NULL (caller treats this as "dialog could not
+ * be created"; a properly-written modeless caller falls back to its
+ * non-dialog code path). Pair with EndDialog above. */
+__declspec(dllexport) HANDLE CreateDialogParamA(HANDLE hInst, const char* lpTemplate, HANDLE hWndParent,
+                                                void* lpDialogFunc, LPARAM dwInitParam)
+{
+    (void)hInst;
+    (void)lpTemplate;
+    (void)hWndParent;
+    (void)lpDialogFunc;
+    (void)dwInitParam;
+    return (HANDLE)0;
+}
+__declspec(dllexport) HANDLE CreateDialogParamW(HANDLE hInst, const wchar_t16* lpTemplate, HANDLE hWndParent,
+                                                void* lpDialogFunc, LPARAM dwInitParam)
+{
+    (void)hInst;
+    (void)lpTemplate;
+    (void)hWndParent;
+    (void)lpDialogFunc;
+    (void)dwInitParam;
+    return (HANDLE)0;
+}
+__declspec(dllexport) HANDLE CreateDialogA(HANDLE hInst, const char* lpTemplate, HANDLE hWndParent, void* lpDialogFunc)
+{
+    return CreateDialogParamA(hInst, lpTemplate, hWndParent, lpDialogFunc, 0);
+}
+__declspec(dllexport) HANDLE CreateDialogW(HANDLE hInst, const wchar_t16* lpTemplate, HANDLE hWndParent,
+                                           void* lpDialogFunc)
+{
+    return CreateDialogParamW(hInst, lpTemplate, hWndParent, lpDialogFunc, 0);
+}
+/* IsDialogMessageA/W returns FALSE in real Win32 when a message
+ * isn't dialog-related. Without modal dialogs the answer is always
+ * "not a dialog message" — the caller's GetMessage/DispatchMessage
+ * pump runs unchanged. */
+__declspec(dllexport) BOOL IsDialogMessageA(HANDLE hDlg, void* lpMsg)
+{
+    (void)hDlg;
+    (void)lpMsg;
+    return 0;
+}
+__declspec(dllexport) BOOL IsDialogMessageW(HANDLE hDlg, void* lpMsg)
+{
+    (void)hDlg;
+    (void)lpMsg;
+    return 0;
+}
+/* GetDlgItem — without real dialogs there are no child controls.
+ * Returns NULL so any DLGPROC that does happen to run sees "control
+ * not found" and bails on the affected branch. */
+__declspec(dllexport) HANDLE GetDlgItem(HANDLE hDlg, int nIDDlgItem)
+{
+    (void)hDlg;
+    (void)nIDDlgItem;
+    return (HANDLE)0;
+}
+__declspec(dllexport) BOOL SetDlgItemTextA(HANDLE hDlg, int nIDDlgItem, const char* text)
+{
+    (void)hDlg;
+    (void)nIDDlgItem;
+    (void)text;
+    return 0;
+}
+__declspec(dllexport) BOOL SetDlgItemTextW(HANDLE hDlg, int nIDDlgItem, const wchar_t16* text)
+{
+    (void)hDlg;
+    (void)nIDDlgItem;
+    (void)text;
+    return 0;
+}
+__declspec(dllexport) UINT GetDlgItemTextA(HANDLE hDlg, int nIDDlgItem, char* buf, int cap)
+{
+    (void)hDlg;
+    (void)nIDDlgItem;
+    if (buf && cap > 0)
+        buf[0] = 0;
+    return 0;
+}
+__declspec(dllexport) UINT GetDlgItemTextW(HANDLE hDlg, int nIDDlgItem, wchar_t16* buf, int cap)
+{
+    (void)hDlg;
+    (void)nIDDlgItem;
+    if (buf && cap > 0)
+        buf[0] = 0;
+    return 0;
+}
+__declspec(dllexport) BOOL SetDlgItemInt(HANDLE hDlg, int nIDDlgItem, UINT value, BOOL signed_)
+{
+    (void)hDlg;
+    (void)nIDDlgItem;
+    (void)value;
+    (void)signed_;
+    return 0;
+}
+__declspec(dllexport) UINT GetDlgItemInt(HANDLE hDlg, int nIDDlgItem, BOOL* translated, BOOL signed_)
+{
+    (void)hDlg;
+    (void)nIDDlgItem;
+    (void)signed_;
+    if (translated)
+        *translated = 0;
+    return 0;
 }
 
 /* --- Load* family --- */
