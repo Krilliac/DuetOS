@@ -662,20 +662,26 @@ SSPI facade. `AcquireCredentialsHandleA/W`,
 ### bcrypt.dll  (~870 LOC, ~10 exports)
 
 > **Status:** REAL for the algorithm set most callers want.
-> Backed by the kernel's `SYS_RANDOM_BYTES` and an in-tree
-> SHA-256 / SHA-384 / SHA-512 / AES.
+> Backed by the kernel's `SYS_RANDOM_BYTES` and the in-tree
+> SHA-256 / SHA-384 / SHA-512 / SHA-1 / MD5 hash cores.
 
 `BCryptOpenAlgorithmProvider`, `BCryptCloseAlgorithmProvider`,
 `BCryptCreateHash`, `BCryptHashData`, `BCryptFinishHash`,
 `BCryptDestroyHash`, `BCryptGetProperty`, `BCryptGenRandom`
-— REAL for SHA-256, SHA-384, SHA-512, SHA-1, MD5, AES-CBC,
-AES-GCM, RNG. SHA-384 and SHA-512 share one FIPS 180-4 §6.4
-core; SHA-384 differs only in the eight initial-hash values
-and the truncated 48-byte output.
+— REAL for SHA-256, SHA-384, SHA-512, SHA-1, MD5, RNG.
+SHA-384 and SHA-512 share one FIPS 180-4 §6.4 core; SHA-384
+differs only in the eight initial-hash values and the
+truncated 48-byte output.
 
 GAP: `BCryptHashData` slots are single-threaded (one global
-per algorithm), so concurrent hashing breaks. RSA / ECC key
-import / sign / verify — STUB.
+per algorithm), so concurrent hashing breaks.
+
+MISSING (not exported): `BCryptGenerateSymmetricKey`,
+`BCryptEncrypt`, `BCryptDecrypt` — symmetric AES-CBC /
+AES-GCM aren't wired in yet despite the prior status line
+claiming they were. Adding them needs an AES core (~500 LOC)
+and the CBC / GCM mode glue. RSA / ECC key import / sign /
+verify — also MISSING.
 
 ---
 
