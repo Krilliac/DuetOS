@@ -153,6 +153,7 @@
 #include "drivers/video/magnifier.h"
 #include "drivers/video/dialog.h"
 #include "drivers/video/menu.h"
+#include "drivers/video/modal_input.h"
 #include "drivers/video/start_menu_apps.h"
 #include "drivers/video/netpanel.h"
 #include "drivers/video/notify.h"
@@ -553,30 +554,95 @@ void DispatchMenuAction(duetos::u32 action, duetos::u32 ctx)
         SerialWriteHex(ctx);
         SerialWrite("\n");
         break;
-    case 21: // MOVE — GAP: snap title-center under cursor
+    case 21: // MOVE — modal cursor-follow
     {
-        // STUB: real Win32 Move enters a modal-input state that
-        // tracks cursor until next click. We recenter the window
-        // so its title-bar's middle sits under the current cursor
-        // position, then exit. Acceptable degraded behaviour for
-        // v0; a future modal-input pass replaces this body.
-        duetos::u32 cx = 0, cy = 0;
-        duetos::drivers::video::CursorPosition(&cx, &cy);
-        duetos::u32 ww = 0;
-        duetos::drivers::video::WindowGetBounds(ctx, nullptr, nullptr, &ww, nullptr);
-        const duetos::u32 nx = (cx > ww / 2) ? cx - ww / 2 : 0;
-        const duetos::u32 ny = (cy > 11) ? cy - 11 : 0; // ~half a 22-px title bar
-        duetos::drivers::video::WindowMoveTo(ctx, nx, ny);
-        SerialWrite("[ui] ctx move (recenter) window=");
+        // Capture the window's anchor + initial cursor and
+        // enter a modal session. Motion frames update the
+        // window position so it follows the cursor; press
+        // commits (cursor stays where it was, window stays
+        // under it); Esc cancels and restores the anchor.
+        struct MoveCtx
+        {
+            duetos::drivers::video::WindowHandle hwnd;
+            duetos::u32 anchor_cx, anchor_cy;
+            duetos::u32 anchor_x, anchor_y;
+        };
+        static MoveCtx s_move{};
+        s_move.hwnd = ctx;
+        duetos::drivers::video::CursorPosition(&s_move.anchor_cx, &s_move.anchor_cy);
+        duetos::drivers::video::WindowGetBounds(ctx, &s_move.anchor_x, &s_move.anchor_y, nullptr, nullptr);
+        duetos::drivers::video::ModalInputCallbacks cb{};
+        cb.cursor = duetos::drivers::video::CursorShape::Hand;
+        cb.user = &s_move;
+        cb.motion = [](duetos::u32 cx, duetos::u32 cy, void* user)
+        {
+            const auto* m = static_cast<const MoveCtx*>(user);
+            const duetos::i32 dx = static_cast<duetos::i32>(cx) - static_cast<duetos::i32>(m->anchor_cx);
+            const duetos::i32 dy = static_cast<duetos::i32>(cy) - static_cast<duetos::i32>(m->anchor_cy);
+            const duetos::u32 nx =
+                (dx >= 0)
+                    ? m->anchor_x + static_cast<duetos::u32>(dx)
+                    : (m->anchor_x > static_cast<duetos::u32>(-dx) ? m->anchor_x - static_cast<duetos::u32>(-dx) : 0);
+            const duetos::u32 ny =
+                (dy >= 0)
+                    ? m->anchor_y + static_cast<duetos::u32>(dy)
+                    : (m->anchor_y > static_cast<duetos::u32>(-dy) ? m->anchor_y - static_cast<duetos::u32>(-dy) : 0);
+            duetos::drivers::video::WindowMoveTo(m->hwnd, nx, ny);
+        };
+        cb.commit = [](duetos::u32 /*cx*/, duetos::u32 /*cy*/, void* /*user*/) {};
+        cb.cancel = [](void* user)
+        {
+            const auto* m = static_cast<const MoveCtx*>(user);
+            duetos::drivers::video::WindowMoveTo(m->hwnd, m->anchor_x, m->anchor_y);
+        };
+        duetos::drivers::video::ModalInputBegin(cb);
+        SerialWrite("[ui] ctx move modal-begin window=");
         SerialWriteHex(ctx);
         SerialWrite("\n");
         break;
     }
-    case 22: // SIZE — GAP: disabled in v0
-        SerialWrite("[ui] ctx size (gap; modal-input mode missing) window=");
+    case 22: // SIZE — modal cursor-follow resize from bottom-right
+    {
+        // Cursor delta from the press point becomes the new
+        // (w, h). Anchored on the BR corner — moving the cursor
+        // right/down grows the window; left/up shrinks it.
+        // Press commits the size; Esc restores anchor.
+        struct SizeCtx
+        {
+            duetos::drivers::video::WindowHandle hwnd;
+            duetos::u32 anchor_cx, anchor_cy;
+            duetos::u32 anchor_w, anchor_h;
+        };
+        static SizeCtx s_size{};
+        s_size.hwnd = ctx;
+        duetos::drivers::video::CursorPosition(&s_size.anchor_cx, &s_size.anchor_cy);
+        duetos::drivers::video::WindowGetBounds(ctx, nullptr, nullptr, &s_size.anchor_w, &s_size.anchor_h);
+        duetos::drivers::video::ModalInputCallbacks cb{};
+        cb.cursor = duetos::drivers::video::CursorShape::ResizeNWSE;
+        cb.user = &s_size;
+        cb.motion = [](duetos::u32 cx, duetos::u32 cy, void* user)
+        {
+            const auto* sz = static_cast<const SizeCtx*>(user);
+            const duetos::i32 dx = static_cast<duetos::i32>(cx) - static_cast<duetos::i32>(sz->anchor_cx);
+            const duetos::i32 dy = static_cast<duetos::i32>(cy) - static_cast<duetos::i32>(sz->anchor_cy);
+            duetos::drivers::video::WindowResizeFromEdge(sz->hwnd,
+                                                         duetos::drivers::video::WindowResizeEdge::BottomRight,
+                                                         /*ax*/ 0, /*ay*/ 0, sz->anchor_w, sz->anchor_h, dx, dy);
+        };
+        cb.commit = [](duetos::u32 /*cx*/, duetos::u32 /*cy*/, void* /*user*/) {};
+        cb.cancel = [](void* user)
+        {
+            const auto* sz = static_cast<const SizeCtx*>(user);
+            duetos::drivers::video::WindowResizeFromEdge(sz->hwnd,
+                                                         duetos::drivers::video::WindowResizeEdge::BottomRight, 0, 0,
+                                                         sz->anchor_w, sz->anchor_h, 0, 0);
+        };
+        duetos::drivers::video::ModalInputBegin(cb);
+        SerialWrite("[ui] ctx size modal-begin window=");
         SerialWriteHex(ctx);
         SerialWrite("\n");
         break;
+    }
     case 23: // MINIMIZE
         duetos::drivers::video::WindowMinimize(ctx);
         SerialWrite("[ui] ctx minimize window=");
@@ -2900,6 +2966,24 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 continue;
             }
 
+            // Modal-input session (window Move / Size). Esc
+            // cancels and restores the anchor; everything else
+            // is consumed silently so a stray key doesn't bleed
+            // through to apps.
+            if (duetos::drivers::video::ModalInputIsActive())
+            {
+                duetos::drivers::video::CompositorLock();
+                if (ev.code == kKeyEsc)
+                {
+                    duetos::drivers::video::ModalInputOnCancel();
+                }
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+                duetos::drivers::video::CompositorUnlock();
+                continue;
+            }
+
             // Modal-dialog gate: when a MessageBox / InputBox is
             // up, route every keystroke into the dialog and skip
             // every downstream branch (menus, shortcuts, app
@@ -4117,12 +4201,8 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         // does a one-shot recenter (GAP) and SIZE is shown
         // disabled — both wait on a modal-input mode.
         static const duetos::drivers::video::MenuItem kSystemMenuItems[] = {
-            {"RESTORE", 20, 0, nullptr, 0},
-            {"MOVE", 21, 0, nullptr, 0},
-            {"SIZE", 22, duetos::drivers::video::kMenuItemFlagDisabled, nullptr, 0},
-            {"MINIMIZE", 23, 0, nullptr, 0},
-            {"MAXIMIZE", 24, 0, nullptr, 0},
-            {"CLOSE", 25, 0, nullptr, 0},
+            {"RESTORE", 20, 0, nullptr, 0},  {"MOVE", 21, 0, nullptr, 0},     {"SIZE", 22, 0, nullptr, 0},
+            {"MINIMIZE", 23, 0, nullptr, 0}, {"MAXIMIZE", 24, 0, nullptr, 0}, {"CLOSE", 25, 0, nullptr, 0},
         };
 
         for (;;)
@@ -4175,6 +4255,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             // + first-hover tick so a 1-second linger can promote
             // to a tooltip on the next compose.
             duetos::drivers::video::WidgetTooltipTrack(cx, cy, duetos::arch::TimerTicks());
+
+            // Modal-input session (Move / Size from system menu)
+            // — feed every motion frame to the registered handler
+            // so the window follows the cursor live.
+            if (duetos::drivers::video::ModalInputIsActive())
+            {
+                duetos::drivers::video::ModalInputOnMotion(cx, cy);
+            }
 
             // Cursor-shape hit-test. Skipped while Wait is active
             // (the long-op holder owns the shape). Otherwise:
@@ -4343,6 +4431,17 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             //   4.  Title bar → raise + begin drag.
             //   5.  Any other part of a window → raise only.
             bool menu_handled = false;
+            // Modal-input gate: a press edge during a Move /
+            // Size session commits and exits. Consume the click
+            // so it doesn't fall through to chrome handling.
+            if (press_edge && duetos::drivers::video::ModalInputIsActive())
+            {
+                duetos::drivers::video::ModalInputOnPress(cx, cy);
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+                menu_handled = true;
+            }
             // Modal-dialog gate: if a MessageBox / InputBox is up,
             // route press edges into it and consume the click.
             // The dialog runs OK / Cancel hit-tests + dismiss
