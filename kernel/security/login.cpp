@@ -29,8 +29,10 @@
 #include "drivers/video/console.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/widget.h"
-#include "security/auth.h"
 #include "log/klog.h"
+#include "sched/sched.h"
+#include "security/auth.h"
+#include "time/tick.h"
 
 namespace duetos::core
 {
@@ -700,6 +702,154 @@ void LoginLock()
     {
         KLOG_WARN("login", "LoginLock with no active session — no same-user constraint");
     }
+}
+
+// ---------------------------------------------------------------
+// Idle-timeout auto-lock.
+// ---------------------------------------------------------------
+
+namespace
+{
+
+// Default threshold: 600 seconds == 10 minutes. Matches the
+// Windows / GNOME default. 0 disables auto-lock entirely.
+constexpr u32 kDefaultIdleSeconds = 600;
+constexpr u32 kSchedulerHz = 100;
+constexpr u64 kIdleCheckIntervalTicks = kSchedulerHz; // 1 s
+
+constinit u64 g_input_last_activity_ticks = 0;
+constinit u32 g_idle_threshold_secs = kDefaultIdleSeconds;
+constinit bool g_idle_task_started = false;
+
+bool IdleLockCheckAt(u64 now_ticks)
+{
+    const u32 threshold = g_idle_threshold_secs;
+    if (threshold == 0)
+    {
+        return false; // auto-lock disabled
+    }
+    if (LoginIsActive())
+    {
+        return false; // gate already up
+    }
+    if (!AuthIsAuthenticated())
+    {
+        return false; // nobody logged in to lock against
+    }
+    const u64 last = g_input_last_activity_ticks;
+    if (now_ticks <= last)
+    {
+        return false;
+    }
+    const u64 elapsed_ticks = now_ticks - last;
+    const u64 threshold_ticks = u64(threshold) * kSchedulerHz;
+    if (elapsed_ticks < threshold_ticks)
+    {
+        return false;
+    }
+    KLOG_INFO_V("login", "idle-lock threshold crossed; locking", elapsed_ticks);
+    duetos::drivers::video::CompositorLock();
+    LoginLock();
+    duetos::drivers::video::CompositorUnlock();
+    return true;
+}
+
+void IdleLockTask(void* /*arg*/)
+{
+    for (;;)
+    {
+        ::duetos::sched::SchedSleepTicks(kIdleCheckIntervalTicks);
+        IdleLockCheckAt(::duetos::time::TickCount());
+    }
+}
+
+} // namespace
+
+void InputActivityStamp()
+{
+    g_input_last_activity_ticks = ::duetos::time::TickCount();
+}
+
+u64 InputLastActivityTicks()
+{
+    return g_input_last_activity_ticks;
+}
+
+void IdleLockSetThresholdSeconds(u32 seconds)
+{
+    g_idle_threshold_secs = seconds;
+    KLOG_INFO_V("login", "idle-lock threshold set (seconds)", seconds);
+}
+
+u32 IdleLockThresholdSeconds()
+{
+    return g_idle_threshold_secs;
+}
+
+void IdleLockTaskStart()
+{
+    if (g_idle_task_started)
+    {
+        return;
+    }
+    g_idle_task_started = true;
+    // Stamp once so the first idle window starts now rather than
+    // counting from 0. The task itself wakes once a second; the
+    // watch is cheap enough to coexist with other 1Hz consumers.
+    InputActivityStamp();
+    ::duetos::sched::SchedCreate(IdleLockTask, nullptr, "idle-lock");
+}
+
+bool IdleLockCheckOnce()
+{
+    return IdleLockCheckAt(::duetos::time::TickCount());
+}
+
+namespace
+{
+
+void IdleExpect(bool cond, const char* what)
+{
+    if (!cond)
+    {
+        KLOG_WARN("login", what);
+    }
+}
+
+} // namespace
+
+void IdleLockSelfTest()
+{
+    KLOG_TRACE_SCOPE("login", "IdleLockSelfTest");
+
+    // Threshold accessor round-trips.
+    const u32 saved = IdleLockThresholdSeconds();
+    IdleLockSetThresholdSeconds(60);
+    IdleExpect(IdleLockThresholdSeconds() == 60, "threshold round-trip");
+    IdleLockSetThresholdSeconds(0);
+    IdleExpect(IdleLockThresholdSeconds() == 0, "threshold zero round-trip");
+    IdleLockSetThresholdSeconds(saved);
+
+    // Activity stamp is monotonic.
+    const u64 t0 = InputLastActivityTicks();
+    InputActivityStamp();
+    const u64 t1 = InputLastActivityTicks();
+    IdleExpect(t1 >= t0, "stamp monotonic");
+
+    // Synthetic "way past threshold" timestamp without an active
+    // session — should NOT fire (no session to lock against).
+    // This run is at boot before any login, so the path
+    // short-circuits cleanly.
+    g_input_last_activity_ticks = 1; // ancient
+    const u32 t = IdleLockThresholdSeconds();
+    const u64 huge_now = u64(t + 1000) * kSchedulerHz + 100;
+    const bool fired = IdleLockCheckAt(huge_now);
+    IdleExpect(!fired, "no auto-lock without active session");
+
+    // Re-stamp so the watcher's first real check has a fresh
+    // window.
+    InputActivityStamp();
+    KLOG_INFO("login", "idle-lock self-test ok");
 }
 
 } // namespace duetos::core

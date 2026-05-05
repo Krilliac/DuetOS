@@ -168,6 +168,109 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
         FramebufferDrawString(cx + kMargin, y, line, bound ? kBound : kUnbound, kBg);
         y += kRowH;
     }
+
+    // Routing / DNS — pulled from the most recent DHCP lease. v0
+    // is single-lease (the stack tracks one transaction at a time)
+    // so a single GATEWAY / DNS line is enough; once multiple
+    // leases coexist the app grows a per-iface section.
+    y += kRowH;
+    if (y + kRowH >= cy + ch)
+    {
+        return;
+    }
+    const auto lease = duetos::net::DhcpLeaseRead();
+    FramebufferDrawString(cx + kMargin, y, "ROUTING / DNS", kHeaderFg, kBg);
+    y += kRowH + 4;
+
+    char line[80];
+    u32 o = 0;
+    auto append_str = [&line, &o](const char* s)
+    {
+        while (*s != '\0' && o + 1 < sizeof(line))
+        {
+            line[o++] = *s++;
+        }
+    };
+    auto append_ip = [&line, &o](duetos::net::Ipv4Address ip)
+    {
+        char buf[20];
+        u32 b = 0;
+        for (u32 i = 0; i < 4; ++i)
+        {
+            const u8 v = ip.octets[i];
+            if (v >= 100)
+            {
+                buf[b++] = static_cast<char>('0' + (v / 100));
+            }
+            if (v >= 10)
+            {
+                buf[b++] = static_cast<char>('0' + ((v / 10) % 10));
+            }
+            buf[b++] = static_cast<char>('0' + (v % 10));
+            if (i < 3)
+            {
+                buf[b++] = '.';
+            }
+        }
+        for (u32 i = 0; i < b && o + 1 < sizeof(line); ++i)
+        {
+            line[o++] = buf[i];
+        }
+    };
+
+    if (!lease.valid)
+    {
+        FramebufferDrawString(cx + kMargin, y, "  (no DHCP lease — gateway / DNS unknown)", kFgDim, kBg);
+        return;
+    }
+
+    o = 0;
+    append_str("GATEWAY  : ");
+    append_ip(lease.router);
+    line[o] = '\0';
+    FramebufferDrawString(cx + kMargin, y, line, kBound, kBg);
+    y += kRowH;
+    if (y + kRowH >= cy + ch)
+    {
+        return;
+    }
+
+    o = 0;
+    append_str("DNS      : ");
+    append_ip(lease.dns);
+    line[o] = '\0';
+    FramebufferDrawString(cx + kMargin, y, line, kBound, kBg);
+    y += kRowH;
+    if (y + kRowH >= cy + ch)
+    {
+        return;
+    }
+
+    o = 0;
+    append_str("DHCP SVR : ");
+    append_ip(lease.server);
+    append_str("   LEASE: ");
+    {
+        u64 v = lease.lease_secs;
+        char buf[16];
+        u32 b = 0;
+        if (v == 0)
+        {
+            buf[b++] = '0';
+        }
+        while (v != 0 && b < sizeof(buf))
+        {
+            buf[b++] = static_cast<char>('0' + (v % 10));
+            v /= 10;
+        }
+        while (b != 0 && o + 1 < sizeof(line))
+        {
+            line[o++] = buf[--b];
+        }
+    }
+    append_str("s");
+    line[o] = '\0';
+    FramebufferDrawString(cx + kMargin, y, line, kFgDim, kBg);
 }
 
 } // namespace

@@ -365,22 +365,21 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
   `\_S5_`. Without that we can't drive the chipset's soft-off
   state. Same blocker the per-CPU sleep state work has.
 
-### Lock screen — idle-timeout auto-lock + switch-user affordance
+### Lock screen — switch-user affordance
 
-- **Today:** Same-user-only unlock landed in `LoginLock` —
-  the active username is captured at lock time, and unlock
-  attempts that submit any other username are rejected with
-  a "LOCKED — USE THE SAME USER OR LOG OUT TO SWITCH" status
-  before AuthLogin runs. The lock policy is cleared on
-  successful unlock, on `LoginReopen` (the path the existing
-  `logout` shell command takes), and on a subsequent
-  `LoginLock` from a different active session.
-- **Remaining:** idle-timeout auto-lock (no kernel idle
-  source today; needs a per-input-event timestamp +
-  scheduler-tick comparator), and an on-screen "switch user"
-  affordance distinct from `logout` so a different user
-  can reach the login gate without the locker first
-  approving.
+- **Today:** Same-user-only unlock and idle-timeout
+  auto-lock both landed in `LoginLock` /
+  `kernel/security/login.cpp`. The active username is
+  captured at lock time and unlock attempts with any
+  other username are rejected. Every kbd / mouse ingest
+  path stamps `core::InputActivityStamp`; a dedicated
+  `idle-lock` task wakes once a second, computes the
+  gap, and calls `LoginLock` once the gap exceeds the
+  configured threshold (default 600 s, override via
+  `idlelock=<seconds>` boot cmdline; 0 disables).
+- **Remaining:** an on-screen "switch user" affordance
+  distinct from `logout` so a different user can reach
+  the login gate without the locker first approving.
 
 ### Device Manager — virtio + eject + hot-unplug
 
@@ -394,19 +393,18 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
   gating, and a hot-unplug driver path that the AHCI /
   xHCI controllers don't yet support.
 
-### Network Status — Wi-Fi scan + routing/DNS surface
+### Network Status — Wi-Fi scan
 
-- **Today:** read-only iface table (index, MAC, IPv4, bound
-  state) plus rx/tx packet + byte counters and the
-  firewall's per-iface `tx_dropped_firewall` column
-  backing the Start menu's NETWORK STATUS entry
-  (`kernel/apps/netstatus.cpp`). Counters are bumped at the
-  L2 RX path (`NetStackInjectRx`) and the L3 TX helper
-  (`IfaceTx`) and read via `InterfaceCountersRead`. The
-  `tx_dropped_unbound` counter ships in the same struct
-  for diagnostic use; not yet shown in the app.
+- **Today:** Iface table (index, MAC, IPv4, bound state),
+  rx/tx packet + byte counters, the firewall's per-iface
+  `tx_dropped_firewall` column, and a routing/DNS section
+  (gateway + DNS resolver + DHCP server + lease seconds)
+  pulled from `DhcpLeaseRead()` back the Start menu's
+  NETWORK STATUS entry (`kernel/apps/netstatus.cpp`).
 - **Blocks on:** Wi-Fi scan results from `kernel/net/wifi.cpp`
-  and a routing/DNS surface for the display layer.
+  for an SSID picker. Routing surface is single-lease
+  today — multi-iface lease tracking happens when more than
+  one DHCP transaction can be live at once.
 
 ### Terminal emulator (windowed userland shell)
 

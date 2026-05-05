@@ -77,6 +77,13 @@ See [Shell Commands](../reference/Shell-Commands.md) for the full list.
   `FwRemove`, `FwToggle`, `FwSetDefaultPolicy`). Read access
   to the rule table and per-iface counters is unprivileged.
 
+## Operator Surface
+
+The kernel shell exposes the firewall via a `firewall`
+command (`firewall list / stats / add / del / toggle /
+default / reset`) — see the Firewall page for syntax and
+examples.
+
 ## Firewall (v0)
 
 A static rule table in `kernel/net/firewall.{h,cpp}` runs at

@@ -4710,3 +4710,100 @@ doc helps future readers audit the trail.
   `Eject` button (gated on a new `kCapDeviceAdmin`).
 - **Related tracks:** Track 9 (Drivers — buses), Track 13
   (UX — apps).
+
+---
+
+## 107 — Firewall shell command + Network Status routing/DNS surface
+
+- **Scope:** `kernel/shell/shell_network.cpp`,
+  `kernel/shell/shell_dispatch.cpp`,
+  `kernel/shell/shell_internal.h`,
+  `kernel/apps/netstatus.cpp`.
+- **Decision:** A new `firewall` shell command exposes
+  every `FwAdd` / `FwRemove` / `FwToggle` /
+  `FwSetDefaultPolicy` / `FwSnapshot` / `FwStatsRead` /
+  `FwInit` operation through a uniform argv parser. Names
+  are deliberately distinct from the existing `fwpolicy`
+  / `fwtrace` commands (which target firmware loading,
+  not the packet filter). Network Status grows a routing
+  / DNS section pulled from `DhcpLeaseRead()` showing
+  GATEWAY, DNS resolver, DHCP server, and lease seconds.
+  Both surfaces are unprivileged reads (configuration is
+  not secret); edit operations through the shell run in
+  the trusted profile so `kCapNetAdmin` is satisfied
+  automatically.
+- **Why:** The firewall API landed in #104 with no
+  text-mode operator surface — only the read-only
+  desktop app. A real audit ("did the rule I added
+  actually take effect? what's been denied so far?")
+  needs a kernel-shell equivalent. Network Status
+  similarly had counters but no routing context — a
+  user looking at "why doesn't ping reach the gateway"
+  needed an external command to see what gateway the
+  stack thought it had.
+- **What it rules out:** Per-iface DHCP lease (only one
+  global lease today — the stack tracks one transaction
+  at a time) and a desktop firewall editor. The shell
+  driver is the v0 edit path; promoting to a desktop
+  widget waits for an interactive widget framework
+  bound to caps.
+- **Revisit when:** Multiple concurrent DHCP transactions
+  ship and per-iface lease tracking lands, or a workload
+  needs an interactive desktop firewall editor that
+  doesn't reach through the kernel shell.
+- **Related tracks:** Track 6 (Networking), Track 13
+  (UX — apps).
+
+---
+
+## 108 — Lock-screen idle-timeout auto-lock
+
+- **Scope:** `kernel/security/login.{h,cpp}`,
+  `kernel/drivers/input/ps2kbd.cpp`,
+  `kernel/drivers/input/ps2mouse.cpp`,
+  `kernel/core/main.cpp`.
+- **Decision:** Every kbd / mouse ingest path stamps a
+  global `g_input_last_activity_ticks` via
+  `core::InputActivityStamp`. A dedicated `idle-lock`
+  task (`SchedSleepTicks(100)` per iteration — 1 Hz at
+  the scheduler's 100 Hz tick) computes
+  `now - last_activity` and calls `LoginLock()` once the
+  gap exceeds the configured threshold AND a session is
+  active AND the gate isn't already up. Threshold
+  defaults to 600 seconds (10 minutes) and is
+  configurable per-boot via the `idlelock=<seconds>`
+  kernel cmdline token; 0 disables auto-lock entirely.
+  The activity stamp is a single 64-bit aligned
+  variable; reads use a single load, writes happen
+  inside the existing Cli/Sti bracket of each input
+  driver — no new lock. The watcher takes
+  `CompositorLock` itself when it transitions to
+  locked, matching the discipline the kbd-reader thread
+  uses for `LoginFeedKey`.
+- **Why:** The same-user-only unlock policy from #105
+  closed the "any user can unlock a locked desktop"
+  hole, but the gap that comes BEFORE that — "operator
+  walks away, screen never locks" — was still open.
+  The roadmap entry called out the dependency on a
+  per-input-event timestamp and a tick comparator;
+  both are cheap and well-defined. Sticking the watcher
+  in its own task avoids inflating the keyboard-reader
+  thread's responsibilities and keeps the periodic
+  check off the IRQ path.
+- **What it rules out:** An on-screen "switch user"
+  affordance distinct from `logout` — that's still
+  pending. The auto-lock fires only on full operator
+  idleness; no per-feature exemptions (e.g. "don't
+  lock during a long-running build" requires the
+  application to call `InputActivityStamp` itself
+  periodically, which we explicitly chose NOT to ship
+  as a syscall in v0 — granting a process the ability
+  to defer lock would require a cap and a UX
+  affordance).
+- **Revisit when:** A workload needs per-feature lock
+  exemption (a media player suppressing screensaver
+  during playback, etc.), or the on-screen switch-user
+  affordance lands and needs to interact with the
+  auto-lock timing.
+- **Related tracks:** Track 12 (Security — auth gate),
+  Track 4 (Input — kbd / mouse pipelines).

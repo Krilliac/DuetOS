@@ -9,6 +9,7 @@
 #include "arch/x86_64/traps.h"
 #include "log/klog.h"
 #include "core/panic.h"
+#include "security/login.h"
 #include "sched/sched.h"
 
 // Vector 0x2C = IRQ 12. Stub lives in exceptions.S alongside
@@ -455,6 +456,7 @@ void MouseInjectPacket(const MousePacket& p)
     arch::Cli();
     PushPacket(p);
     arch::Sti();
+    duetos::core::InputActivityStamp();
 }
 
 } // namespace duetos::drivers::input

@@ -48,13 +48,46 @@ action, and per-rule hit counters.
   Runs at the same point as the other net subsystem
   self-tests.
 
+## Shell command (landed)
+
+The kernel shell exposes the firewall via a `firewall`
+command:
+
+```
+firewall list                                   — show rules + per-rule hit counts
+firewall stats                                  — aggregate ingress/egress counters
+firewall add <in|out> <any|tcp|udp|icmp>
+             <src/mask> <dst/mask>
+             <sport|sport-range|any>
+             <dport|dport-range|any>
+             <allow|deny>                       — add a rule (returns its index)
+firewall del <idx>                              — clear a rule slot
+firewall toggle <idx>                           — flip the active flag
+firewall default <in|out> <allow|deny>          — set per-direction default
+firewall reset                                  — wipe rule table; defaults=allow/allow
+```
+
+Examples:
+
+```
+firewall add in tcp 0.0.0.0/0 0.0.0.0/0 any 22-22 deny
+firewall default in deny
+firewall add in tcp 10.0.2.0/24 0.0.0.0/0 any 80 allow
+firewall list
+```
+
+The kernel shell runs trusted, so its calls satisfy
+`kCapNetAdmin` automatically; a future userland editor
+issuing the same calls through a syscall surface will
+gate on the cap.
+
 ## Planned (not committed yet)
 
-1. **Editor surface in `kernel/apps/firewall.cpp`.** Today
-   the app is read-only. Adding / removing / toggling rules
-   from the desktop needs an interactive widget bound to
-   `kCapNetAdmin` (the kernel shell can already drive the
-   API directly).
+1. **Desktop editor surface in `kernel/apps/firewall.cpp`.**
+   Today the app is read-only. Adding / removing / toggling
+   rules from the desktop needs an interactive widget
+   bound to `kCapNetAdmin` (the kernel shell + the new
+   `firewall` command can already drive the API directly).
 2. **Connection tracking** for "established + related"
    semantics so the Windows-style default-deny inbound
    policy can be flipped on without breaking outbound TCP
