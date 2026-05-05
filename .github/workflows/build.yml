@@ -254,7 +254,21 @@ jobs:
             sleep $((attempt * 5))
           done
           sudo apt-get install -y qemu-system-x86 grub-common grub-pc-bin \
-                                  grub-efi-amd64-bin xorriso mtools ovmf
+                                  grub-efi-amd64-bin xorriso mtools ovmf \
+                                  clang-18 lld-18 llvm-18 cmake ninja-build python3
+          # cmake --preset x86_64-debug below pulls in
+          # boot/uefi/CMakeLists.txt's `find_program(... lld-link
+          # REQUIRED)`, so even on a smoke job that only re-runs
+          # configure (the kernel artifact is already downloaded)
+          # the PE/COFF linker has to be on PATH. ubuntu-24.04's
+          # preinstalled clang/lld doesn't include lld-link;
+          # symlink the versioned binaries the same way the
+          # build-debug job does.
+          sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
+          sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
+          sudo ln -sf /usr/bin/lld-link-18 /usr/local/bin/lld-link
+          sudo ln -sf /usr/bin/llvm-dlltool-18 /usr/local/bin/llvm-dlltool
+          sudo ln -sf /usr/bin/ld.lld-18 /usr/local/bin/ld.lld
       - name: Enable KVM access (~50× speedup vs TCG)
         run: |
           # GitHub-hosted ubuntu-24.04 runners ship with /dev/kvm
