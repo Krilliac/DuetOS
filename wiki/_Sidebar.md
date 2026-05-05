@@ -17,6 +17,7 @@
 - [Process Model](kernel/Process-Model.md)
 - [Subsystem Isolation](kernel/Subsystem-Isolation.md)
 - [Logging and Tracing](kernel/Logging-And-Tracing.md)
+- [Start Menu](kernel/Start-Menu.md)
 
 ### Drivers
 - [Driver Overview](drivers/Driver-Overview.md)
@@ -46,6 +47,7 @@
 ### Networking
 - [Network Stack](networking/Network-Stack.md)
 - [Live Internet Verification](networking/Live-Internet.md)
+- [Firewall Roadmap](networking/Firewall-Roadmap.md)
 
 ### Security
 - [Sandboxing](security/Sandboxing.md)

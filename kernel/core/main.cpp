@@ -130,10 +130,13 @@
 #include "apps/browser.h"
 #include "apps/calendar.h"
 #include "apps/clock.h"
+#include "apps/devicemgr.h"
 #include "apps/files.h"
+#include "apps/firewall.h"
 #include "apps/gfxdemo.h"
 #include "apps/help.h"
 #include "apps/imageview.h"
+#include "apps/netstatus.h"
 #include "apps/notes.h"
 #include "apps/screenshot.h"
 #include "apps/settings.h"
@@ -195,6 +198,7 @@
 #include "diag/heartbeat.h"
 #include "log/klog.h"
 #include "log/klog_persist.h"
+#include "power/reboot.h"
 #include "security/login.h"
 #include "core/init.h"
 #include "core/panic.h"
@@ -600,6 +604,69 @@ void DispatchMenuAction(duetos::u32 action, duetos::u32 ctx)
     case 33: // FILES — PROPERTIES
         duetos::apps::files::FilesDispatchContextAction(action, ctx);
         break;
+    // Power / session band (40..49). 40/41 don't return.
+    case 40: // REBOOT
+        SerialWrite("[ui] menu fire reboot\n");
+        duetos::core::SessionRestoreSave();
+        duetos::core::KernelReboot();
+        // unreachable
+        break;
+    case 41: // SHUT DOWN
+        SerialWrite("[ui] menu fire shutdown\n");
+        duetos::core::SessionRestoreSave();
+        duetos::core::KernelHalt();
+        // unreachable
+        break;
+    case 42: // LOCK
+        SerialWrite("[ui] menu fire lock\n");
+        duetos::core::SessionRestoreSave();
+        duetos::core::LoginLock();
+        break;
+    case 43: // LOG OUT
+        SerialWrite("[ui] menu fire logout\n");
+        duetos::core::SessionRestoreSave();
+        duetos::core::LoginReopen();
+        break;
+    // System shortcuts (50..59).
+    case 50: // SCREENSHOT
+        SerialWrite("[ui] menu fire screenshot\n");
+        // ScreenshotCapture takes its own CompositorLock per its
+        // header contract; the menu close path that runs before
+        // we get here has already released the lock.
+        duetos::apps::screenshot::ScreenshotCapture();
+        break;
+    // Bespoke viewer windows (60..69) — no ThemeRole, raised
+    // directly via their stored handle.
+    case 60: // NETWORK STATUS
+    {
+        const auto h = duetos::apps::netstatus::NetStatusWindow();
+        if (h != duetos::drivers::video::kWindowInvalid)
+        {
+            duetos::drivers::video::WindowSetVisible(h, true);
+            duetos::drivers::video::WindowRaise(h);
+        }
+        break;
+    }
+    case 61: // DEVICE MANAGER
+    {
+        const auto h = duetos::apps::devicemgr::DeviceMgrWindow();
+        if (h != duetos::drivers::video::kWindowInvalid)
+        {
+            duetos::drivers::video::WindowSetVisible(h, true);
+            duetos::drivers::video::WindowRaise(h);
+        }
+        break;
+    }
+    case 62: // FIREWALL
+    {
+        const auto h = duetos::apps::firewall::FirewallWindow();
+        if (h != duetos::drivers::video::kWindowInvalid)
+        {
+            duetos::drivers::video::WindowSetVisible(h, true);
+            duetos::drivers::video::WindowRaise(h);
+        }
+        break;
+    }
     default:
         // App launcher bands: 100..199 == "raise the window
         // registered for ThemeRole(action - 100)". /APPS shortcut
@@ -1807,6 +1874,47 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::drivers::video::ThemeRegisterWindow(Role::Calendar, calendar_handle);
     duetos::apps::calendar::CalendarInit(calendar_handle);
     DUETOS_BOOT_SELFTEST(duetos::apps::calendar::CalendarSelfTest());
+
+    // NETWORK STATUS — read-only viewer over net::stack accessors.
+    // No ThemeRole today; the chrome is seeded from Settings'
+    // palette so it sits in the same slate-grey "tools" family.
+    {
+        duetos::drivers::video::WindowChrome chrome = theme_chrome(Role::Settings);
+        chrome.x = 220;
+        chrome.y = 110;
+        chrome.w = 480;
+        chrome.h = 260;
+        const duetos::drivers::video::WindowHandle h = duetos::drivers::video::WindowRegister(chrome, "NETWORK STATUS");
+        duetos::drivers::video::WindowSetVisible(h, false);
+        duetos::apps::netstatus::NetStatusInit(h);
+        DUETOS_BOOT_SELFTEST(duetos::apps::netstatus::NetStatusSelfTest());
+    }
+
+    // DEVICE MANAGER — read-only PCI device list.
+    {
+        duetos::drivers::video::WindowChrome chrome = theme_chrome(Role::TaskManager);
+        chrome.x = 260;
+        chrome.y = 130;
+        chrome.w = 460;
+        chrome.h = 320;
+        const duetos::drivers::video::WindowHandle h = duetos::drivers::video::WindowRegister(chrome, "DEVICE MANAGER");
+        duetos::drivers::video::WindowSetVisible(h, false);
+        duetos::apps::devicemgr::DeviceMgrInit(h);
+        DUETOS_BOOT_SELFTEST(duetos::apps::devicemgr::DeviceMgrSelfTest());
+    }
+
+    // FIREWALL — empty-state placeholder; honest about the absent
+    // filter subsystem. See apps/firewall.h for the GAP marker.
+    {
+        duetos::drivers::video::WindowChrome chrome = theme_chrome(Role::Settings);
+        chrome.x = 300;
+        chrome.y = 150;
+        chrome.w = 440;
+        chrome.h = 240;
+        const duetos::drivers::video::WindowHandle h = duetos::drivers::video::WindowRegister(chrome, "FIREWALL");
+        duetos::drivers::video::WindowSetVisible(h, false);
+        duetos::apps::firewall::FirewallInit(h);
+    }
 
     // Framebuffer text console. 80x40 chars of boot log at the
     // bottom of the desktop, under the windows in z-order. Dragging
@@ -3675,50 +3783,86 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         // Menu item sets — static so their label pointers outlive
         // the menu's open state. action_id scheme is documented in
         // kernel_main's comment above; keep these tables in sync.
-        // action_id 100..199 are reserved for "open app by ThemeRole"
-        // — id = 100 + role index — so the dispatch handler can fan
-        // back out to a single ThemeRoleWindow lookup. New roles
-        // pick the next 100 + idx and need a label here only.
-        static const duetos::drivers::video::MenuItem kStartItemsBuiltins[] = {
-            {"CALCULATOR", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Calculator)},
-            {"NOTEPAD", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Notes)},
-            {"FILES", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Files)},
-            {"CLOCK", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Clock)},
-            {"TASK MANAGER", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::TaskManager)},
-            {"KERNEL LOG", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::LogView)},
-            {"GFX DEMO", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::GfxDemo)},
-            {"SETTINGS", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Settings)},
-            {"IMAGE VIEWER", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::ImageView)},
-            {"ABOUT", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::About)},
-            {"HELP", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Help)},
-            {"BROWSER", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Browser)},
-            {"CALENDAR", 100 + static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::Calendar)},
+        //
+        // Action-id allocation:
+        //   1..39   — misc commands (1=ABOUT, 2=CYCLE, 5=TTY, 6=HELP,
+        //             10/11=RAISE/CLOSE, 20-25=system menu,
+        //             30-33=Files context).
+        //   40..49  — power / session
+        //               40=REBOOT, 41=SHUT DOWN, 42=LOCK, 43=LOG OUT.
+        //   50..59  — system shortcuts
+        //               50=SCREENSHOT.
+        //   60..69  — bespoke viewer windows that don't have a
+        //             ThemeRole today
+        //               60=NETWORK STATUS, 61=DEVICE MANAGER,
+        //               62=FIREWALL.
+        //   100..199 — open app by ThemeRole (id = 100 + role).
+        //   200..255 — /APPS shortcut slots (StartMenuAppsResolveLaunch).
+        //
+        // Layout: a six-row root that fans out to four submenus
+        // (APPS, SYSTEM, USER APPS, POWER) plus a leaf SCREENSHOT
+        // and a separator. Each leaf panel stays under the menu
+        // renderer's 12-item-per-panel cap (kMaxItems in menu.cpp).
+        using duetos::drivers::video::kMenuItemFlagDisabled;
+        using duetos::drivers::video::kMenuItemFlagSeparator;
+        using duetos::drivers::video::kMenuItemFlagSubmenu;
+        using Role = duetos::drivers::video::ThemeRole;
+
+        static const duetos::drivers::video::MenuItem kAppsItems[] = {
+            {"CALCULATOR", 100 + static_cast<duetos::u32>(Role::Calculator), 0, nullptr, 0},
+            {"NOTEPAD", 100 + static_cast<duetos::u32>(Role::Notes), 0, nullptr, 0},
+            {"FILES", 100 + static_cast<duetos::u32>(Role::Files), 0, nullptr, 0},
+            {"CLOCK", 100 + static_cast<duetos::u32>(Role::Clock), 0, nullptr, 0},
+            {"CALENDAR", 100 + static_cast<duetos::u32>(Role::Calendar), 0, nullptr, 0},
+            {"BROWSER", 100 + static_cast<duetos::u32>(Role::Browser), 0, nullptr, 0},
+            {"IMAGE VIEWER", 100 + static_cast<duetos::u32>(Role::ImageView), 0, nullptr, 0},
+            {"GFX DEMO", 100 + static_cast<duetos::u32>(Role::GfxDemo), 0, nullptr, 0},
+            {"ABOUT", 100 + static_cast<duetos::u32>(Role::About), 0, nullptr, 0},
+            {"HELP", 100 + static_cast<duetos::u32>(Role::Help), 0, nullptr, 0},
         };
-        static const duetos::drivers::video::MenuItem kStartItemsTrailing[] = {
-            {"HELP / SHORTCUTS", 6},
-            {"CYCLE WINDOWS", 2},
-            {"ABOUT DUETOS", 1},
+        static const duetos::drivers::video::MenuItem kSystemItems[] = {
+            {"SETTINGS", 100 + static_cast<duetos::u32>(Role::Settings), 0, nullptr, 0},
+            {"TASK MANAGER", 100 + static_cast<duetos::u32>(Role::TaskManager), 0, nullptr, 0},
+            {"KERNEL LOG", 100 + static_cast<duetos::u32>(Role::LogView), 0, nullptr, 0},
+            {"NETWORK STATUS", 60, 0, nullptr, 0},
+            {"DEVICE MANAGER", 61, 0, nullptr, 0},
+            {"FIREWALL", 62, 0, nullptr, 0},
+            {nullptr, 0, kMenuItemFlagSeparator, nullptr, 0},
+            {"CYCLE WINDOWS", 2, 0, nullptr, 0},
+            {"SWITCH TO TTY", 5, 0, nullptr, 0},
         };
-        // Combined array: builtins, then /APPS shortcuts, then
-        // help/cycle/about. The ui-thread is the only writer
-        // (so a function-static is fine), but it's recomputed
-        // each open so a freshly-dropped /APPS/*.MNF picks up
-        // without a reboot — StartMenuAppsScan runs at boot,
-        // but a per-open re-scan would be cheap to add later.
-        constexpr duetos::u32 kBuiltinsN = sizeof(kStartItemsBuiltins) / sizeof(kStartItemsBuiltins[0]);
-        constexpr duetos::u32 kTrailingN = sizeof(kStartItemsTrailing) / sizeof(kStartItemsTrailing[0]);
-        constexpr duetos::u32 kStartItemsCap = kBuiltinsN + duetos::drivers::video::kStartMenuAppsMax + kTrailingN;
-        static duetos::drivers::video::MenuItem kStartItems[kStartItemsCap] = {};
-        duetos::u32 start_items_count = 0;
-        for (duetos::u32 i = 0; i < kBuiltinsN; ++i)
-        {
-            kStartItems[start_items_count++] = kStartItemsBuiltins[i];
-        }
-        duetos::drivers::video::StartMenuAppsAppendTo(kStartItems, &start_items_count, kStartItemsCap - kTrailingN);
-        for (duetos::u32 i = 0; i < kTrailingN; ++i)
-        {
-            kStartItems[start_items_count++] = kStartItemsTrailing[i];
-        }
+        static const duetos::drivers::video::MenuItem kPowerItems[] = {
+            {"LOCK", 42, 0, nullptr, 0},
+            {"LOG OUT", 43, 0, nullptr, 0},
+            {nullptr, 0, kMenuItemFlagSeparator, nullptr, 0},
+            {"REBOOT", 40, 0, nullptr, 0},
+            {"SHUT DOWN", 41, 0, nullptr, 0},
+        };
+
+        // /APPS shortcuts — populated each open from the FAT32
+        // scan so a freshly-dropped /APPS/*.MNF picks up without
+        // a reboot. Capped at 12 to fit the menu renderer's per-
+        // panel limit (StartMenuAppsAppendTo logs an overflow line
+        // if more were discovered).
+        constexpr duetos::u32 kUserAppsCap = 12;
+        static duetos::drivers::video::MenuItem kUserAppsItems[kUserAppsCap] = {};
+        duetos::u32 user_apps_count = 0;
+        duetos::drivers::video::StartMenuAppsAppendTo(kUserAppsItems, &user_apps_count, kUserAppsCap);
+
+        // Six-row root. USER APPS is disabled when empty so the
+        // user sees the bucket (and learns about the /APPS slot)
+        // without firing a launcher path that resolves to nothing.
+        static duetos::drivers::video::MenuItem kStartItems[6] = {};
+        kStartItems[0] = {"APPS", 0, kMenuItemFlagSubmenu, kAppsItems, sizeof(kAppsItems) / sizeof(kAppsItems[0])};
+        kStartItems[1] = {"SYSTEM", 0, kMenuItemFlagSubmenu, kSystemItems,
+                          sizeof(kSystemItems) / sizeof(kSystemItems[0])};
+        kStartItems[2] = {(user_apps_count == 0) ? "USER APPS (EMPTY)" : "USER APPS", 0,
+                          kMenuItemFlagSubmenu | (user_apps_count == 0 ? kMenuItemFlagDisabled : 0u), kUserAppsItems,
+                          user_apps_count};
+        kStartItems[3] = {nullptr, 0, kMenuItemFlagSeparator, nullptr, 0};
+        kStartItems[4] = {"SCREENSHOT", 50, 0, nullptr, 0};
+        kStartItems[5] = {"POWER", 0, kMenuItemFlagSubmenu, kPowerItems, sizeof(kPowerItems) / sizeof(kPowerItems[0])};
+        constexpr duetos::u32 start_items_count = sizeof(kStartItems) / sizeof(kStartItems[0]);
         static const duetos::drivers::video::MenuItem kDesktopMenuItems[] = {
             {"HELP / SHORTCUTS", 6}, {"ABOUT DUETOS", 1},  {"CYCLE WINDOWS", 2},
             {"LIST WINDOWS", 3},     {"SWITCH TO TTY", 5},

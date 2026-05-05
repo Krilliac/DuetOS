@@ -86,4 +86,17 @@ void SpinShortDelay()
     arch::Halt();
 }
 
+[[noreturn]] void KernelHalt()
+{
+    // GAP: no ACPI S5 path — see header. Without AML we can't
+    // evaluate _PTS / _S5_ to drive the chipset to soft-off, so
+    // we log the request, mask interrupts, and park the CPU.
+    Log(LogLevel::Warn, "core/halt", "shutdown requested (no ACPI S5; CPU halted)");
+    asm volatile("cli");
+    for (;;)
+    {
+        arch::Halt();
+    }
+}
+
 } // namespace duetos::core
