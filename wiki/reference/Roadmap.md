@@ -56,25 +56,27 @@ the same commit** that delivers the code.
 
 ### ABI handle-table migration
 
-- **Status:** SYS_MUTEX_* landed (commit migrating
-  CreateMutexW / WaitForSingleObject / ReleaseMutex through
-  `KMutex` + `Process::kobj_handles`). The legacy
-  `Win32MutexHandle win32_mutexes[]` array on `Process` was
-  removed; KMutex / KEvent / KSemaphore now carry the
-  wait-time + holder refcounting that makes the
-  "close every handle while a mutex is held / contended"
-  scenario safe (`HandleTableLookupRef` for the syscall side,
-  `KObjectAcquire` on wait-entry / hold transition for the
-  internal side).
-- **Remaining:** SYS_EVENT_* / SYS_SEM_* migrations follow the
-  same pattern — `KEventCreate` / `KEventSet` / `KEventReset`
-  / `KEventWait{,Timed}` and `KSemaphoreCreate` /
-  `KSemaphoreAcquire{,Timed}` / `KSemaphoreRelease` are all in
-  place, the migration is the `event_syscall.cpp` /
-  `semaphore_syscall.cpp` rewrite + the matching CloseHandle
-  dispatch arms. Linux fd-table → KFile is its own track.
-- **When to land:** opportunistic. Each one is a focused
-  per-syscall slice now that the foundations are paid for.
+- **Status:** Win32 side complete. SYS_MUTEX_* migrated first;
+  SYS_EVENT_* and SYS_SEM_* followed via `event_syscall.cpp` +
+  the new `semaphore_syscall.{h,cpp}`, with the WaitForMultiple-
+  Objects probe + auto-reset-consume passes refactored onto
+  `HandleTableLookup` + `KEventIsSignaled` /
+  `KEventClearAutoReset` / `KSemaphoreCount`. The legacy
+  `Win32MutexHandle`, `Win32EventHandle`, `Win32SemaphoreHandle`
+  arrays on `Process` are all removed; KMutex / KEvent /
+  KSemaphore carry the wait-time + holder refcounting that
+  makes the "close every handle while a primitive is held /
+  contended" scenario safe (`HandleTableLookupRef` for the
+  syscall side, `KObjectAcquire` on wait-entry / hold transition
+  for the internal side). CloseHandle's semaphore arm — which
+  did not exist pre-migration — was added incidentally, fixing
+  a slot leak that pre-dated this work.
+- **Remaining:** Linux fd-table → KFile is its own track. The
+  KFile primitive is in place (`kernel/ipc/kfile.{h,cpp}`); the
+  migration is rerouting the Linux ABI's `LinuxFd` entry points
+  through `kobj_handles`.
+- **When to land:** opportunistic, gated on a Linux-ABI workload
+  that benefits from the unified surface.
 
 ### Intel CET enable
 

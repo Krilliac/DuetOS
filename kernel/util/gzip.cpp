@@ -15,7 +15,6 @@ constexpr u8 kGzipId1 = 0x1F;
 constexpr u8 kGzipId2 = 0x8B;
 constexpr u8 kGzipCmDeflate = 0x08;
 
-constexpr u8 kGzipFlagFText = 0x01;
 constexpr u8 kGzipFlagFHcrc = 0x02;
 constexpr u8 kGzipFlagFExtra = 0x04;
 constexpr u8 kGzipFlagFName = 0x08;

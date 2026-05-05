@@ -4369,6 +4369,90 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 102 — SYS_EVENT_* / SYS_SEM_* migrated to KEvent / KSemaphore + kobj_handles
+
+- **Scope:** `kernel/subsystems/win32/event_syscall.cpp` (full
+  rewrite mirroring `mutex_syscall.cpp`), new
+  `kernel/subsystems/win32/semaphore_syscall.{h,cpp}`,
+  `kernel/syscall/syscall.cpp` (SYS_SEM_CREATE / SYS_SEM_WAIT /
+  SYS_SEM_RELEASE inline blocks replaced with single dispatch
+  calls; WaitForMultipleObjects probe + auto-reset-consume passes
+  refactored onto `HandleTableLookup` + `KEventIsSignaled` /
+  `KEventClearAutoReset` / `KSemaphoreCount`),
+  `kernel/subsystems/win32/file_syscall.cpp` (CloseHandle event
+  arm rewritten through the handle table; new semaphore arm —
+  none existed pre-migration), `kernel/proc/process.{h,cpp}`
+  (legacy `Win32EventHandle` / `Win32SemaphoreHandle` structs +
+  arrays removed; `kWin32EventCap` / `kWin32SemaphoreCap`
+  redefined to `kHandleTableCapacity`),
+  `kernel/ipc/kevent.{h,cpp}` (new `KEventIsSignaled` +
+  `KEventClearAutoReset` non-blocking primitives for WFMO),
+  `kernel/ipc/ksemaphore.{h,cpp}` (new `KSemaphoreTryRelease` —
+  non-panicking release that surfaces `ERROR_TOO_MANY_POSTS` to
+  the ABI rather than panicking the kernel on overflow).
+- **Decision:** Win32 events and semaphores allocate `KEvent` /
+  `KSemaphore` on the kheap and route through
+  `Process::kobj_handles`. Win32 handles stay
+  `kWin32EventBase + ipc_handle` and `kWin32SemaphoreBase +
+  ipc_handle` so CloseHandle's range-dispatch is unchanged.
+  Two non-blocking primitives close the WFMO design gap from
+  the legacy code: `KEventIsSignaled` for the probe phase,
+  `KEventClearAutoReset` for the satisfied-consume phase.
+  Semaphore probe reuses the existing `KSemaphoreCount`
+  accessor (no consume — wait-all without consuming the count
+  was the v0 design and remains so). `KSemaphoreTryRelease`
+  was added because `KSemaphoreRelease` panics in debug on
+  overflow, which is correct for kernel callers but wrong for
+  an ABI surface that has to surface `ERROR_TOO_MANY_POSTS` to
+  potentially malicious userland.
+- **Why:** Completes the Win32 side of the
+  "one source of truth per resource" handle-table migration
+  started in entry #101. Same wait-time + holder refcounting
+  guarantees as KMutex now apply to events and semaphores —
+  closing every handle to a contended event or semaphore
+  cannot free the storage out from under a waiter, and a
+  CloseHandle race against WaitForMultipleObjects can no
+  longer dereference a stale slot (the WFMO probe goes through
+  `HandleTableLookup` with a type tag).
+- **Incidental fixes:**
+  - **CloseHandle had no semaphore arm pre-migration.** Closed
+    semaphore slots leaked their `Win32SemaphoreHandle` slot
+    forever. The legacy code only added arms for the handle
+    families that had matching close paths; semaphores never
+    got one. Routing through the unified handle table fixes
+    this without an extra patch.
+  - **WFMO event/sem branches now type-check.** The legacy
+    code reached straight into `proc->win32_events[slot]` /
+    `proc->win32_semaphores[slot]` without a tag check; an
+    out-of-range handle that happened to fall in the same
+    slot of a different table would have read the wrong
+    storage. Post-migration, `HandleTableLookup` rejects
+    type-mismatched handles by returning nullptr.
+- **Capacity tradeoff:** Legacy was 64 mutex + 8 event + 8 sem
+  = 80 total Win32 IPC handles per process. Post-migration,
+  all three share the unified 64-slot `kobj_handles` table
+  (a strict reduction). Same constant as the mutex migration's
+  already-shipped tradeoff; one-line bump in
+  `kernel/ipc/handle_table.h` if a workload demands it.
+- **Rules out / defers:** Race-free WFMO across semaphores
+  (consume-on-satisfaction without lost wakeups) — still a
+  poll loop, count is read but not consumed, matching the v0
+  design noted in the legacy code. KSemaphoreRelease's
+  debug-build panic-on-overflow stays — it's the right
+  behaviour for kernel-internal callers; the ABI surface uses
+  `KSemaphoreTryRelease` to opt out.
+- **Revisit when:** A workload exceeds 64 simultaneous IPC
+  handles (bump `kHandleTableCapacity`). A workload needs
+  race-free wait-multiple semantics over semaphores
+  (consume-on-satisfaction across the whole set, not poll +
+  read). The Linux fd-table → KFile track lands (the third
+  ABI front-end converging on `kobj_handles`).
+- **Commit:** `fe07e28`.
+- **Related tracks:** Track 1 (Kernel — IPC + handle table),
+  Track 5 (Win32 subsystem — SYS_EVENT_* / SYS_SEM_* end-to-end).
+
+---
+
 After landing a non-trivial commit, append a new section here with
 the **next sequential number**. Keep entries small. Link the commit
 hash. Always write the "Revisit when" marker — that's the point of
