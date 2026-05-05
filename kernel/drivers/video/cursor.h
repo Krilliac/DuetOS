@@ -87,14 +87,17 @@ void CursorSetColours(u32 outline_rgb, u32 fill_rgb);
 /// `CursorPopWait()` after. Arrow / IBeam / Hand are picked by
 /// the mouse-loop's hit-test based on what's under the cursor:
 /// buttons → Hand, text-input regions → IBeam, everywhere else
-/// → Arrow. All four sprites are 12×20 so the backing-store
-/// allocation never moves.
+/// → Arrow. ResizeNS / ResizeEW appear over window borders to
+/// indicate edge-drag-to-resize. All sprites are 12×20 so the
+/// backing-store allocation never moves.
 enum class CursorShape : u8
 {
     Arrow = 0,
     IBeam = 1,
     Hand = 2,
     Wait = 3,
+    ResizeNS = 4, // ↕ over top / bottom borders
+    ResizeEW = 5, // ↔ over left / right borders
 };
 
 /// Pick the active sprite. Repaints in place so the new shape

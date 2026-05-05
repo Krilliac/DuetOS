@@ -84,6 +84,18 @@ u32 WidgetRouteMouse(u32 cursor_x, u32 cursor_y, u8 button_mask);
 /// the cursor sprite to `Hand` when hovering a clickable.
 bool WidgetCursorOverButton(u32 cx, u32 cy);
 
+/// Track cursor hover for tooltips. Called from the mouse loop
+/// every packet; the implementation timestamps the first
+/// hover-on-a-widget so a 1-second linger triggers a tooltip
+/// in the next compose.
+void WidgetTooltipTrack(u32 cx, u32 cy, u64 now_tick);
+
+/// Render a tooltip if one is currently armed. Called from
+/// `DesktopCompose` after every other surface paints (just
+/// before the dialog overlay) so the tooltip lands above
+/// chrome but below modal dialogs.
+void WidgetTooltipRender();
+
 // ---------------------------------------------------------------
 // Window chrome + registry.
 //
@@ -190,6 +202,37 @@ WindowHandle WindowTopmostAt(u32 x, u32 y);
 /// True iff (x, y) is inside `h`'s title bar (the strip from the
 /// window's top down to `title_height` pixels).
 bool WindowPointInTitle(WindowHandle h, u32 x, u32 y);
+
+/// Resize-edge hit zones. `None` = not on a border; the others
+/// pick which edge to drag. The hit zone is `kWindowResizeBorderPx`
+/// pixels wide; corner overlaps are resolved with a vertical
+/// preference (top/bottom win over left/right) — adequate for a
+/// 4-edge resize without true diagonal cursors.
+enum class WindowResizeEdge : u8
+{
+    None = 0,
+    Left = 1,
+    Right = 2,
+    Top = 3,
+    Bottom = 4,
+};
+
+/// Pixel width of the resize-detection band along each edge.
+constexpr u32 kWindowResizeBorderPx = 4;
+
+/// Hit-test (cx, cy) against `h`'s outer-border resize zones.
+/// Returns the matching edge or `None`. The title bar takes
+/// priority over the top edge — clicks in the title still
+/// drag-to-move, not drag-to-resize.
+WindowResizeEdge WindowPointInResizeEdge(WindowHandle h, u32 cx, u32 cy);
+
+/// Read the bounds + apply a resize delta on `h`. `edge` picks
+/// which side moves; `cur_x` / `cur_y` is the live cursor; the
+/// caller passes the window's bounds at drag-start so the
+/// resize is anchored. Clamps to a minimum 80×60 size and to
+/// the framebuffer. No-op for `None`.
+void WindowResizeFromEdge(WindowHandle h, WindowResizeEdge edge, u32 anchor_x, u32 anchor_y, u32 anchor_w, u32 anchor_h,
+                          i32 dx, i32 dy);
 
 /// True iff (x, y) is inside the close-button square in the
 /// top-right corner of `h`'s title bar — same geometry the

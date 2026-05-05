@@ -36,12 +36,14 @@
 #include "drivers/video/widget.h"
 
 #include "arch/x86_64/cpu.h"
+#include "arch/x86_64/timer.h"
 #include "drivers/input/ps2mouse.h"
 #include "sched/sched.h"
 #include "sync/lockdep.h"
 #include "drivers/video/calendar.h"
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
+#include "drivers/video/dialog.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/magnifier.h"
 #include "drivers/video/menu.h"
@@ -241,6 +243,91 @@ bool WidgetCursorOverButton(u32 cx, u32 cy)
         }
     }
     return false;
+}
+
+namespace
+{
+
+// Tooltip hover state. `g_tooltip_widget` is the index of the
+// widget currently under the cursor (or kWidgetInvalid). The
+// timer arms when the cursor settles on a widget; if it stays
+// for kTooltipArmTicks (~1s @ 100Hz), the next compose paints
+// the widget's label in a small panel near the cursor.
+constinit u32 g_tooltip_widget = kWidgetInvalid;
+constinit u64 g_tooltip_arm_tick = 0;
+constinit u32 g_tooltip_cursor_x = 0;
+constinit u32 g_tooltip_cursor_y = 0;
+constexpr u64 kTooltipArmTicks = 100; // ~1 second at 100Hz
+
+u32 FindWidgetAt(u32 cx, u32 cy)
+{
+    for (u32 i = 0; i < g_widget_count; ++i)
+    {
+        const ButtonWidget& b = g_widgets[i];
+        u32 bx = 0, by = 0;
+        if (!EffectiveButtonPos(b, &bx, &by))
+            continue;
+        if (cx >= bx && cx < bx + b.w && cy >= by && cy < by + b.h)
+            return i;
+    }
+    return kWidgetInvalid;
+}
+
+} // namespace
+
+void WidgetTooltipTrack(u32 cx, u32 cy, u64 now_tick)
+{
+    const u32 hit = FindWidgetAt(cx, cy);
+    if (hit != g_tooltip_widget)
+    {
+        g_tooltip_widget = hit;
+        g_tooltip_arm_tick = now_tick;
+        g_tooltip_cursor_x = cx;
+        g_tooltip_cursor_y = cy;
+        return;
+    }
+    // Same widget — refresh cursor position so the tooltip
+    // anchors near where the user actually paused, not where
+    // they first crossed the widget edge.
+    g_tooltip_cursor_x = cx;
+    g_tooltip_cursor_y = cy;
+}
+
+void WidgetTooltipRender()
+{
+    if (g_tooltip_widget == kWidgetInvalid || g_tooltip_widget >= g_widget_count)
+        return;
+    const ButtonWidget& b = g_widgets[g_tooltip_widget];
+    if (b.label == nullptr)
+        return;
+    // Hover-time check: only render if the widget has been
+    // hovered for ≥ kTooltipArmTicks. The mouse loop tracks
+    // this; we read TimerTicks here to compare so a paused
+    // ticker doesn't trip a tooltip.
+    const u64 now = duetos::arch::TimerTicks();
+    if (now - g_tooltip_arm_tick < kTooltipArmTicks)
+        return;
+    const u32 lw = StringPixelWidth(b.label);
+    if (lw == 0)
+        return;
+    const u32 pad = 4;
+    const u32 panel_w = lw + 2 * pad;
+    const u32 panel_h = 8 + 2 * pad;
+    // Anchor below the cursor by 16 px so the panel doesn't
+    // sit under the pointer sprite. Clamp to the framebuffer.
+    const auto fb = FramebufferGet();
+    u32 px = g_tooltip_cursor_x + 12;
+    u32 py = g_tooltip_cursor_y + 16;
+    if (px + panel_w > fb.width)
+        px = (fb.width > panel_w) ? fb.width - panel_w : 0;
+    if (py + panel_h > fb.height)
+        py = (fb.height > panel_h) ? fb.height - panel_h : 0;
+    constexpr u32 kTipBg = 0x00FFFFD0; // pale-yellow (Win9x convention)
+    constexpr u32 kTipFg = 0x00101020;
+    constexpr u32 kTipBorder = 0x00606078;
+    FramebufferFillRect(px, py, panel_w, panel_h, kTipBg);
+    FramebufferDrawRect(px, py, panel_w, panel_h, kTipBorder, 1);
+    FramebufferDrawString(px + pad, py + pad, b.label, kTipFg, kTipBg);
 }
 
 namespace
@@ -837,6 +924,105 @@ WindowHandle WindowTopmostAt(u32 x, u32 y)
         }
     }
     return kWindowInvalid;
+}
+
+WindowResizeEdge WindowPointInResizeEdge(WindowHandle h, u32 cx, u32 cy)
+{
+    if (!WindowValid(h))
+        return WindowResizeEdge::None;
+    const auto& w = g_windows[h].chrome;
+    // Title-bar drag-to-move takes priority over top-edge
+    // resize: a press inside the title bar starts a move, not
+    // a resize. So the top-edge hit zone is gated to the band
+    // BEFORE the title bar.
+    if (cx + kWindowResizeBorderPx < w.x || cx >= w.x + w.w + kWindowResizeBorderPx)
+        return WindowResizeEdge::None;
+    if (cy + kWindowResizeBorderPx < w.y || cy >= w.y + w.h + kWindowResizeBorderPx)
+        return WindowResizeEdge::None;
+    const bool near_top = (cy >= w.y) && (cy < w.y + kWindowResizeBorderPx);
+    const bool near_bottom = (cy + kWindowResizeBorderPx >= w.y + w.h) && (cy < w.y + w.h + kWindowResizeBorderPx);
+    const bool near_left = (cx >= w.x) && (cx < w.x + kWindowResizeBorderPx);
+    const bool near_right = (cx + kWindowResizeBorderPx >= w.x + w.w) && (cx < w.x + w.w + kWindowResizeBorderPx);
+    // Vertical-edge preference avoids a corner ambiguity.
+    if (near_top)
+        return WindowResizeEdge::Top;
+    if (near_bottom)
+        return WindowResizeEdge::Bottom;
+    if (near_left)
+        return WindowResizeEdge::Left;
+    if (near_right)
+        return WindowResizeEdge::Right;
+    return WindowResizeEdge::None;
+}
+
+void WindowResizeFromEdge(WindowHandle h, WindowResizeEdge edge, u32 anchor_x, u32 anchor_y, u32 anchor_w, u32 anchor_h,
+                          i32 dx, i32 dy)
+{
+    if (!WindowValid(h) || edge == WindowResizeEdge::None)
+        return;
+    constexpr u32 kMinW = 80;
+    constexpr u32 kMinH = 60;
+    i64 nx = anchor_x;
+    i64 ny = anchor_y;
+    i64 nw = anchor_w;
+    i64 nh = anchor_h;
+    switch (edge)
+    {
+    case WindowResizeEdge::Left:
+        nx = static_cast<i64>(anchor_x) + dx;
+        nw = static_cast<i64>(anchor_w) - dx;
+        if (nw < kMinW)
+        {
+            nx -= (kMinW - nw);
+            nw = kMinW;
+        }
+        if (nx < 0)
+        {
+            nw += nx;
+            nx = 0;
+        }
+        break;
+    case WindowResizeEdge::Right:
+        nw = static_cast<i64>(anchor_w) + dx;
+        if (nw < kMinW)
+            nw = kMinW;
+        break;
+    case WindowResizeEdge::Top:
+        ny = static_cast<i64>(anchor_y) + dy;
+        nh = static_cast<i64>(anchor_h) - dy;
+        if (nh < kMinH)
+        {
+            ny -= (kMinH - nh);
+            nh = kMinH;
+        }
+        if (ny < 0)
+        {
+            nh += ny;
+            ny = 0;
+        }
+        break;
+    case WindowResizeEdge::Bottom:
+        nh = static_cast<i64>(anchor_h) + dy;
+        if (nh < kMinH)
+            nh = kMinH;
+        break;
+    default:
+        return;
+    }
+    const auto fb_info = FramebufferGet();
+    if (nx + nw > fb_info.width)
+        nw = fb_info.width - nx;
+    if (ny + nh > fb_info.height)
+        nh = fb_info.height - ny;
+    if (nw < kMinW)
+        nw = kMinW;
+    if (nh < kMinH)
+        nh = kMinH;
+    g_windows[h].chrome.x = static_cast<u32>(nx);
+    g_windows[h].chrome.y = static_cast<u32>(ny);
+    g_windows[h].chrome.w = static_cast<u32>(nw);
+    g_windows[h].chrome.h = static_cast<u32>(nh);
+    g_windows[h].maximized = false;
 }
 
 bool WindowPointInTitle(WindowHandle h, u32 x, u32 y)
@@ -1744,6 +1930,13 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
     TrayFlyoutRedraw();
     NotifyRedraw();
     MagnifierRedraw();
+    // Tooltip — over chrome, under modal dialogs.
+    WidgetTooltipRender();
+    // Modal dialog (MessageBox / InputBox) — drawn AFTER every
+    // other surface so the panel + dim overlay land on top of
+    // windows, taskbar, menus, notifications. The cursor is
+    // still painted by the mouse reader after this returns.
+    DialogCompose();
     // Caret — painted last so it overlays everything, including
     // the taskbar. Blink phase toggles per compose; the ui-
     // ticker's 1 Hz compose produces the blink cadence.

@@ -108,10 +108,13 @@ same pixel on the same HWND. Three independent detectors:
 
 ## Cursor Shapes
 
-`cursor.{h,cpp}` carries four 12×20 sprite tables — `Arrow`,
-`IBeam`, `Hand`, `Wait` — selectable via `CursorSetShape(s)`.
-The mouse loop runs a hit-test on every packet:
+`cursor.{h,cpp}` carries six 12×20 sprite tables — `Arrow`,
+`IBeam`, `Hand`, `Wait`, `ResizeNS`, `ResizeEW` — selectable
+via `CursorSetShape(s)`. The mouse loop runs a hit-test on
+every packet:
 
+- Within `kWindowResizeBorderPx` (4 px) of a window edge →
+  `ResizeNS` (top/bottom) or `ResizeEW` (left/right)
 - Over a button widget → `Hand`
 - Over Notes / Browser client area → `IBeam`
 - Otherwise → `Arrow`
@@ -121,6 +124,64 @@ test cheap when the shape doesn't change. `CursorPushWait()` /
 `CursorPopWait()` are refcounted hooks for long-running
 operations (used by `screenshot.cpp` around the FAT32 streaming
 write); the pre-Wait shape is restored on the last balance.
+
+## Modal Dialogs
+
+`dialog.{h,cpp}` carries a single-instance `MessageBox` /
+`InputBox` primitive. The API is fire-and-forget: callers pass
+a `DialogResultFn` callback that fires from the kbd-reader
+thread once the user resolves the dialog. Synchronous spin
+would deadlock the readers themselves, so the design avoids
+blocking entirely.
+
+- `MessageBoxOpen(title, body, cb, user)` — OK/Cancel.
+- `InputBoxOpen(title, prompt, default_text, cb, user)` —
+  single-line edit field, `kDialogInputMax = 64` bytes.
+- `DialogIsActive()` — lets the kbd / mouse routers redirect
+  input. While a dialog is up: every keystroke goes to
+  `DialogFeedKey` / `DialogFeedChar`; every press_edge goes
+  to `DialogOnPress`. Menus, app shortcuts, app routing all
+  skipped.
+- `DialogCompose()` — paints a 50% theme-coloured dim over the
+  desktop + a centred 400×140 panel + OK/Cancel buttons. Drawn
+  from `DesktopCompose` after every other surface so it lands
+  above chrome and tooltips.
+
+Consumers in v1: Files rename (`InputBox` → `Fat32RenameAtPath`);
+Notes dirty-close (`MessageBox` "Discard unsaved changes?"
+replaces the prior two-step Alt+F4 prompt).
+
+## Scrollbar
+
+`scrollbar.{h,cpp}` is a pure visual indicator. Apps call
+`ScrollbarPaint(x, y, w, h, {total, visible, first})` from
+their `DrawFn`; the painter draws a track + proportional
+thumb. v1 doesn't implement drag-the-thumb interactivity —
+wheel dispatch covers the common scroll case; click-on-track
+jump-to is deferred. Files (FAT32 list) and Browser (body
+view) integrate today; Notes / Help skipped because their
+content fits the typical render area.
+
+## Tooltips
+
+Hover a button widget for ≥ 1 second (100 ticks at 100 Hz)
+and the next compose paints the widget's label in a small
+pale-yellow panel near the cursor. State lives in `widget.cpp`
+(`g_tooltip_widget`, `g_tooltip_arm_tick`); the mouse loop
+calls `WidgetTooltipTrack(cx, cy, now_tick)` every packet,
+and `DesktopCompose` calls `WidgetTooltipRender()` after
+chrome but before modal dialogs.
+
+## Window Edge Resize
+
+A 4-px hit band along each window border (left / right /
+top / bottom) flips the cursor to `ResizeEW` / `ResizeNS`
+on hover and starts a resize-drag on press. The drag
+preserves the press-time anchor bounds and feeds cursor
+deltas through `WindowResizeFromEdge`, which clamps to a
+minimum 80 × 60 size and the framebuffer extents. The title
+bar takes priority over the top edge — clicks in the title
+still drag-to-move, not drag-to-resize.
 
 ## Chrome Polish
 
@@ -219,24 +280,10 @@ Action-id allocation:
 - **Concurrent `TrackPopupMenu` from two PE processes**: serialise
   on the single-instance kernel menu — the second caller cancels
   with action_id = 0 and returns immediately.
-- **Files-app rename**: GAP. No text-input modal exists yet; the
-  RENAME row notifies "rename: not in v0 UI". A modal-text-input
-  primitive replaces the notify when it lands.
-  `Fat32RenameAtPath` is already in tree (`kernel/fs/fat32.h`);
-  only the dialog half is missing.
-- **Common dialogs (MessageBox / InputBox)**: GAP. The "discard
-  unsaved changes?" prompt for Notes is a two-step Alt+F4
-  pattern (notify on first press, close on second within 3 s).
-  A real synchronous modal dialog primitive would replace this
-  in a follow-up slice.
 - **PE `SetCursor`**: GAP. Native windows can change cursor
   shape via `CursorSetShape`, but PE apps have no
   `SYS_GDI_SETCURSOR` to request a shape change. Cursor shape
   is owned entirely by the kernel hit-test today.
-- **Resize cursors + edge-drag-to-resize**: not in scope for
-  v1. The cursor enum has slots for `IBeam` / `Hand` / `Wait`
-  but no resize variants because no consumer would set them
-  (windows still rely on `Ctrl+Alt+Shift+Arrow` for resize).
 - **Notes wheel = cursor step, not viewport scroll**: a viewport
   scroll requires tracking visible-row offset state in the draw
   loop; v1 maps wheel ticks to `MoveUp`/`MoveDown` calls. Works
@@ -244,6 +291,23 @@ Action-id allocation:
   need real viewport tracking.
 - **ImageView wheel = next/prev only**: zoom is deferred until
   ImageView grows zoom state.
+- **Scrollbar drag-the-thumb interactivity**: deferred. The
+  visual indicator paints correctly; click-on-track jump-to
+  and drag-the-thumb need per-app hit-test wiring + a drag
+  state machine. Wheel dispatch covers the common case.
+- **Calendar click-to-select-date**: deferred. The grid hit-
+  test would have to mirror the multi-section draw geometry
+  (header / weekdays / cells with margins); a drift between
+  paint and hit-test would land on the wrong day.
+- **Clock alarm + timer modes**: deferred. Tab toggles
+  Clock ↔ Stopwatch in v1; alarm needs a "set HH:MM" input
+  flow and a tick-rate notify trigger; timer needs duration
+  input + countdown + zero-trigger notify.
+- **Resize cursor diagonal variants (NESW / NWSE)**: corner
+  resize is deferred. The hit-test resolves corners with a
+  vertical preference (top/bottom over left/right); a true
+  corner cursor would also need corner hit zones distinct
+  from the edge bands.
 - **Trash / ramfs mode in Files**: only FAT32 mode has a v0
   context menu; other modes fall through to the kernel-window menu.
 - **Modal dialogs, common controls, scroll bars, outline fonts,

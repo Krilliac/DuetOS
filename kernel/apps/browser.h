@@ -112,6 +112,13 @@ bool BrowserOnDoubleClick(duetos::u32 cx, duetos::u32 cy);
 /// memory.
 void BrowserFocusUrl();
 
+/// Back / forward navigation through the in-memory history
+/// stack. Bound by main.cpp's keyboard reader to Alt+Left /
+/// Alt+Right when Browser is the active window. No-op at the
+/// ends of the history.
+void BrowserNavBack();
+void BrowserNavForward();
+
 /// Boot self-test — pure compute. Validates URL parsing
 /// (scheme/host/port/path extraction), HTML tag stripper +
 /// entity decoder. No network I/O so it runs unconditionally.

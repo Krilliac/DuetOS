@@ -102,6 +102,55 @@ constinit const u8 kHandMask[kCursorHeight][kCursorWidth] = {
     {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
 };
 
+// Vertical resize: ↕ arrow with arrowheads top + bottom and a
+// thin shaft. Used over top / bottom window borders.
+constinit const u8 kResizeNSMask[kCursorHeight][kCursorWidth] = {
+    {0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0}, // row 0    ##
+    {0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0}, //         #..#
+    {0, 0, 0, 1, 2, 2, 2, 2, 1, 0, 0, 0}, //        #....#
+    {0, 0, 1, 2, 2, 2, 2, 2, 2, 1, 0, 0}, //       #......#
+    {0, 1, 1, 1, 1, 2, 2, 1, 1, 1, 1, 0},
+    {0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0},
+    {0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0},
+    {0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0},
+    {0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0},
+    {0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0},
+    {0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0},
+    {0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0},
+    {0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0},
+    {0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0},
+    {0, 1, 1, 1, 1, 2, 2, 1, 1, 1, 1, 0},
+    {0, 0, 1, 2, 2, 2, 2, 2, 2, 1, 0, 0},
+    {0, 0, 0, 1, 2, 2, 2, 2, 1, 0, 0, 0},
+    {0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+};
+
+// Horizontal resize: ↔ arrow. Used over left / right borders.
+constinit const u8 kResizeEWMask[kCursorHeight][kCursorWidth] = {
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0},
+    {0, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0},
+    {1, 2, 1, 1, 1, 1, 1, 1, 1, 1, 2, 1},
+    {1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1},
+    {1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1},
+    {1, 2, 1, 1, 1, 1, 1, 1, 1, 1, 2, 1},
+    {0, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0},
+    {0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+};
+
 // Hourglass / "wait" shape. Two stacked triangles.
 constinit const u8 kWaitMask[kCursorHeight][kCursorWidth] = {
     {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0}, // row 0 — top bar
@@ -367,6 +416,10 @@ const u8 (*MaskFor(CursorShape s))[kCursorWidth]
         return kHandMask;
     case CursorShape::Wait:
         return kWaitMask;
+    case CursorShape::ResizeNS:
+        return kResizeNSMask;
+    case CursorShape::ResizeEW:
+        return kResizeEWMask;
     case CursorShape::Arrow:
     default:
         return kArrowMask;

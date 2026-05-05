@@ -4,6 +4,7 @@
 #include "drivers/input/ps2kbd.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/notify.h"
+#include "drivers/video/scrollbar.h"
 #include "drivers/video/theme.h"
 #include "fs/fat32.h"
 #include "mm/kheap.h"
@@ -964,11 +965,22 @@ void DrawBody(u32 cx, u32 cy, u32 cw, u32 ch, u32 fg, u32 bg)
             line[line_n++] = c;
         }
         ++col;
-        if (row >= g_state.scroll_row + rows_visible)
-            break;
+        // Don't break early — keep counting rows past the
+        // visible range so the scrollbar's "total" reflects the
+        // full body. The flush_line bounds-check above already
+        // prevents writes outside the visible window.
     }
     if (line_n > 0)
         flush_line();
+    // Scrollbar at the right edge of the body view. `total` is
+    // the final row count; `visible` is rows_visible; `first`
+    // is scroll_row.
+    if (rows_visible > 0 && cw > duetos::drivers::video::kScrollbarWidth)
+    {
+        duetos::drivers::video::ScrollbarPaint(cx + cw - duetos::drivers::video::kScrollbarWidth, cy + top_reserved,
+                                               duetos::drivers::video::kScrollbarWidth, rows_visible * kRowH,
+                                               {row, rows_visible, g_state.scroll_row});
+    }
 }
 
 void DrawList(u32 cx, u32 cy, u32 cw, u32 ch, const char* title, char list[][kUrlCap], u32 count, u32 fg, u32 dim,
@@ -1203,6 +1215,16 @@ void BrowserOnWheel(duetos::i32 dz)
 void BrowserFocusUrl()
 {
     EnterUrlEdit();
+}
+
+void BrowserNavBack()
+{
+    NavigateBackForward(false);
+}
+
+void BrowserNavForward()
+{
+    NavigateBackForward(true);
 }
 
 bool BrowserOnDoubleClick(duetos::u32 sx, duetos::u32 sy)

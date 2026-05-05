@@ -393,6 +393,8 @@ bool CalendarFeedArrow(u16 keycode)
     using duetos::drivers::input::kKeyArrowLeft;
     using duetos::drivers::input::kKeyArrowRight;
     using duetos::drivers::input::kKeyArrowUp;
+    using duetos::drivers::input::kKeyPageDown;
+    using duetos::drivers::input::kKeyPageUp;
     if (keycode == kKeyArrowLeft)
     {
         Step(g_state.view_year, g_state.view_month, -1);
@@ -405,13 +407,16 @@ bool CalendarFeedArrow(u16 keycode)
         g_state.initialised = true;
         return true;
     }
-    if (keycode == kKeyArrowUp)
+    // Up/Down and PageUp/PageDown both step a year. PageUp/Dn
+    // matches calendar-app muscle memory; Up/Dn matches v0's
+    // existing binding so neither breaks for current users.
+    if (keycode == kKeyArrowUp || keycode == kKeyPageUp)
     {
         Step(g_state.view_year, g_state.view_month, -12);
         g_state.initialised = true;
         return true;
     }
-    if (keycode == kKeyArrowDown)
+    if (keycode == kKeyArrowDown || keycode == kKeyPageDown)
     {
         Step(g_state.view_year, g_state.view_month, +12);
         g_state.initialised = true;

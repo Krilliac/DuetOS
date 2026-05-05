@@ -151,6 +151,7 @@
 #include "generated_chrome_font.h"
 #include "drivers/video/calendar.h"
 #include "drivers/video/magnifier.h"
+#include "drivers/video/dialog.h"
 #include "drivers/video/menu.h"
 #include "drivers/video/start_menu_apps.h"
 #include "drivers/video/netpanel.h"
@@ -2887,6 +2888,37 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 continue;
             }
 
+            // Modal-dialog gate: when a MessageBox / InputBox is
+            // up, route every keystroke into the dialog and skip
+            // every downstream branch (menus, shortcuts, app
+            // routing). The dialog consumes Enter / Esc, edits an
+            // InputBox buffer on printable chars, and resolves
+            // its callback when the user picks a button. Keeps
+            // the modal contract simple: while a dialog is open,
+            // nothing else hears keys.
+            if (duetos::drivers::video::DialogIsActive())
+            {
+                duetos::drivers::video::CompositorLock();
+                duetos::drivers::video::DialogFeedKey(static_cast<duetos::u16>(ev.code), ev.is_release, ev.modifiers);
+                if (ev.code == kKeyEnter)
+                {
+                    duetos::drivers::video::DialogFeedChar('\n');
+                }
+                else if (ev.code == kKeyBackspace)
+                {
+                    duetos::drivers::video::DialogFeedChar(0x08);
+                }
+                else if (ev.code >= 0x20 && ev.code <= 0x7E)
+                {
+                    duetos::drivers::video::DialogFeedChar(static_cast<char>(ev.code));
+                }
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+                duetos::drivers::video::CompositorUnlock();
+                continue;
+            }
+
             // Menu navigation: when a context / start menu is
             // open, arrow keys move the highlight, Enter activates
             // the hovered item, Esc closes, Right opens a submenu,
@@ -3037,6 +3069,35 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     duetos::drivers::video::CompositorUnlock();
                     duetos::drivers::video::NotifyShow(ok ? "saved to NOTES.TXT" : "save failed");
                     SerialWrite(ok ? "[ui] ^S notes saved\n" : "[ui] ^S notes save FAILED\n");
+                    continue;
+                }
+                duetos::drivers::video::CompositorUnlock();
+            }
+
+            // Alt+Left / Alt+Right — Browser back / forward. Web
+            // convention. Active-window-gated so it doesn't shadow
+            // any future window-manager bindings.
+            if (alt && !ctrl && !shift && (ev.code == kKeyArrowLeft || ev.code == kKeyArrowRight))
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                if (active != duetos::drivers::video::kWindowInvalid &&
+                    active == duetos::apps::browser::BrowserWindow())
+                {
+                    if (ev.code == kKeyArrowLeft)
+                    {
+                        duetos::apps::browser::BrowserNavBack();
+                        SerialWrite("[ui] alt+left browser back\n");
+                    }
+                    else
+                    {
+                        duetos::apps::browser::BrowserNavForward();
+                        SerialWrite("[ui] alt+right browser forward\n");
+                    }
+                    duetos::drivers::video::CursorHide();
+                    duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                    duetos::drivers::video::CursorShow();
+                    duetos::drivers::video::CompositorUnlock();
                     continue;
                 }
                 duetos::drivers::video::CompositorUnlock();
@@ -3510,38 +3571,43 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 const auto active = duetos::drivers::video::WindowActive();
                 if (active != duetos::drivers::video::kWindowInvalid)
                 {
-                    // Notes dirty-close two-step. If the active
-                    // window is Notes AND the buffer has unsaved
-                    // edits, the first Alt+F4 just notifies +
-                    // arms a "press again to discard" gate; a
-                    // second Alt+F4 within ~3 seconds (30 ticks
-                    // @ 100 Hz) actually closes. The gate also
-                    // releases on any other key event, so a user
-                    // who intended to keep editing can just resume
-                    // typing. This is the "dialog-free" close
-                    // confirmation pattern — a richer MessageBox
-                    // primitive replaces it in a future slice.
-                    constexpr duetos::u64 kDirtyCloseArmTicks = 300; // ~3 s
-                    static duetos::u64 s_dirty_close_armed_tick = 0;
-                    static duetos::drivers::video::WindowHandle s_dirty_close_armed_hwnd =
-                        duetos::drivers::video::kWindowInvalid;
+                    // Notes dirty-close — open MessageBox for
+                    // "Discard unsaved changes?". Callback closes
+                    // the window on OK; Cancel keeps it open.
                     const bool is_notes = (active == duetos::apps::notes::NotesWindow());
                     const bool dirty = is_notes && duetos::apps::notes::NotesIsDirty();
-                    const duetos::u64 now_tick = duetos::arch::TimerTicks();
-                    const bool armed = (s_dirty_close_armed_hwnd == active) &&
-                                       (now_tick - s_dirty_close_armed_tick <= kDirtyCloseArmTicks);
-                    if (dirty && !armed)
+                    if (dirty)
                     {
-                        s_dirty_close_armed_tick = now_tick;
-                        s_dirty_close_armed_hwnd = active;
+                        static duetos::drivers::video::WindowHandle s_close_target =
+                            duetos::drivers::video::kWindowInvalid;
+                        s_close_target = active;
+                        duetos::drivers::video::MessageBoxOpen(
+                            "UNSAVED CHANGES",
+                            "The Notes buffer has unsaved edits.\n"
+                            "OK = discard and close. Cancel = keep editing.",
+                            [](duetos::drivers::video::DialogResult r, const char* /*text*/, void* /*user*/)
+                            {
+                                if (r == duetos::drivers::video::DialogResult::Ok &&
+                                    s_close_target != duetos::drivers::video::kWindowInvalid)
+                                {
+                                    duetos::drivers::video::WindowClose(s_close_target);
+                                    SerialWrite("[ui] dirty-close confirmed window=");
+                                    SerialWriteHex(s_close_target);
+                                    SerialWrite("\n");
+                                }
+                                else
+                                {
+                                    SerialWrite("[ui] dirty-close cancelled\n");
+                                }
+                                s_close_target = duetos::drivers::video::kWindowInvalid;
+                            },
+                            nullptr);
+                        duetos::drivers::video::CursorHide();
+                        duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                        duetos::drivers::video::CursorShow();
                         duetos::drivers::video::CompositorUnlock();
-                        duetos::drivers::video::NotifyShow("Unsaved changes. Press Alt+F4 again to discard.");
-                        SerialWrite("[ui] alt-f4 dirty-close armed window=");
-                        SerialWriteHex(active);
-                        SerialWrite("\n");
                         continue;
                     }
-                    s_dirty_close_armed_hwnd = duetos::drivers::video::kWindowInvalid;
                     duetos::drivers::video::WindowClose(active);
                     SerialWrite("[ui] alt-f4 close window=");
                     SerialWriteHex(active);
@@ -3644,7 +3710,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     }
                     else if (active == duetos::apps::calendar::CalendarWindow() &&
                              (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyArrowLeft ||
-                              ev.code == kKeyArrowRight))
+                              ev.code == kKeyArrowRight || ev.code == kKeyPageUp || ev.code == kKeyPageDown))
                     {
                         app_consumed = duetos::apps::calendar::CalendarFeedArrow(static_cast<duetos::u16>(ev.code));
                     }
@@ -3662,6 +3728,8 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                             c = '\n';
                         else if (ev.code == kKeyBackspace)
                             c = 0x08;
+                        else if (ev.code == kKeyTab && !alt)
+                            c = '\t';
                         else if (ev.code >= 0x20 && ev.code <= 0x7E)
                             c = static_cast<char>(ev.code);
                         if (c != 0)
@@ -3698,6 +3766,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                             else if (active == duetos::apps::calendar::CalendarWindow())
                             {
                                 app_consumed = duetos::apps::calendar::CalendarFeedChar(c);
+                            }
+                            else if (active == duetos::apps::clock::ClockWindow())
+                            {
+                                app_consumed = duetos::apps::clock::ClockFeedChar(c);
                             }
                         }
                     }
@@ -3863,6 +3935,27 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             duetos::u32 grab_offset_y;
         };
         static DragState drag{false, duetos::drivers::video::kWindowInvalid, 0, 0};
+        // Edge-resize state. Activated when the user presses on
+        // a window's resize border. Tracks the window + edge +
+        // anchor bounds so the resize is computed off the
+        // press-time geometry, not the prior frame's.
+        struct ResizeState
+        {
+            bool active;
+            duetos::drivers::video::WindowHandle window;
+            duetos::drivers::video::WindowResizeEdge edge;
+            duetos::u32 anchor_cx, anchor_cy;
+            duetos::u32 anchor_x, anchor_y, anchor_w, anchor_h;
+        };
+        static ResizeState resize{false,
+                                  duetos::drivers::video::kWindowInvalid,
+                                  duetos::drivers::video::WindowResizeEdge::None,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0};
         static bool prev_left = false;
         static bool prev_right = false;
         auto desktop_bg = []() { return duetos::drivers::video::ThemeCurrent().desktop_bg; };
@@ -4022,6 +4115,11 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             // below if the cursor moved while a menu was open.
             duetos::drivers::video::MenuTrackHoverAt(cx, cy);
 
+            // Tooltip hover tracker. Records widget-under-cursor
+            // + first-hover tick so a 1-second linger can promote
+            // to a tooltip on the next compose.
+            duetos::drivers::video::WidgetTooltipTrack(cx, cy, duetos::arch::TimerTicks());
+
             // Cursor-shape hit-test. Skipped while Wait is active
             // (the long-op holder owns the shape). Otherwise:
             // hovering a button widget → Hand; hovering Notes /
@@ -4031,20 +4129,32 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             if (duetos::drivers::video::CursorGetShape() != duetos::drivers::video::CursorShape::Wait)
             {
                 using duetos::drivers::video::CursorShape;
+                using duetos::drivers::video::WindowResizeEdge;
                 CursorShape want = CursorShape::Arrow;
-                if (duetos::drivers::video::WidgetCursorOverButton(cx, cy))
+                const auto over_resize = duetos::drivers::video::WindowTopmostAt(cx, cy);
+                WindowResizeEdge edge = WindowResizeEdge::None;
+                if (over_resize != duetos::drivers::video::kWindowInvalid)
+                {
+                    edge = duetos::drivers::video::WindowPointInResizeEdge(over_resize, cx, cy);
+                }
+                if (edge == WindowResizeEdge::Left || edge == WindowResizeEdge::Right)
+                {
+                    want = CursorShape::ResizeEW;
+                }
+                else if (edge == WindowResizeEdge::Top || edge == WindowResizeEdge::Bottom)
+                {
+                    want = CursorShape::ResizeNS;
+                }
+                else if (duetos::drivers::video::WidgetCursorOverButton(cx, cy))
                 {
                     want = CursorShape::Hand;
                 }
-                else
+                else if (over_resize != duetos::drivers::video::kWindowInvalid &&
+                         !duetos::drivers::video::WindowPointInTitle(over_resize, cx, cy) &&
+                         (over_resize == duetos::apps::notes::NotesWindow() ||
+                          over_resize == duetos::apps::browser::BrowserWindow()))
                 {
-                    const auto over = duetos::drivers::video::WindowTopmostAt(cx, cy);
-                    if (over != duetos::drivers::video::kWindowInvalid &&
-                        !duetos::drivers::video::WindowPointInTitle(over, cx, cy) &&
-                        (over == duetos::apps::notes::NotesWindow() || over == duetos::apps::browser::BrowserWindow()))
-                    {
-                        want = CursorShape::IBeam;
-                    }
+                    want = CursorShape::IBeam;
                 }
                 duetos::drivers::video::CursorSetShape(want);
             }
@@ -4169,6 +4279,18 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             //   4.  Title bar → raise + begin drag.
             //   5.  Any other part of a window → raise only.
             bool menu_handled = false;
+            // Modal-dialog gate: if a MessageBox / InputBox is up,
+            // route press edges into it and consume the click.
+            // The dialog runs OK / Cancel hit-tests + dismiss
+            // logic itself.
+            if (press_edge && duetos::drivers::video::DialogIsActive())
+            {
+                duetos::drivers::video::DialogOnPress(cx, cy);
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+                menu_handled = true; // suppress every downstream press path
+            }
             if (press_edge && duetos::drivers::video::MenuIsOpen())
             {
                 // Track stack depth around MenuItemAt so we can
@@ -4433,6 +4555,41 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 }
             }
 
+            // Edge-resize detection. Runs before the chrome-press
+            // block so a click on the 4-px border doesn't fall
+            // through to title-bar drag-start. Handles the press
+            // edge only — the motion + release branches further
+            // down do the actual resize.
+            if (press_edge && !menu_handled && !drag.active && !resize.active)
+            {
+                const auto rh = duetos::drivers::video::WindowTopmostAt(cx, cy);
+                if (rh != duetos::drivers::video::kWindowInvalid)
+                {
+                    const auto rede = duetos::drivers::video::WindowPointInResizeEdge(rh, cx, cy);
+                    if (rede != duetos::drivers::video::WindowResizeEdge::None)
+                    {
+                        duetos::u32 ax = 0, ay = 0, aw = 0, ah = 0;
+                        duetos::drivers::video::WindowGetBounds(rh, &ax, &ay, &aw, &ah);
+                        resize.active = true;
+                        resize.window = rh;
+                        resize.edge = rede;
+                        resize.anchor_cx = cx;
+                        resize.anchor_cy = cy;
+                        resize.anchor_x = ax;
+                        resize.anchor_y = ay;
+                        resize.anchor_w = aw;
+                        resize.anchor_h = ah;
+                        duetos::drivers::video::WindowRaise(rh);
+                        menu_handled = true; // chrome path skips
+                        SerialWrite("[ui] resize begin window=");
+                        SerialWriteHex(rh);
+                        SerialWrite(" edge=");
+                        SerialWriteHex(static_cast<duetos::u64>(rede));
+                        SerialWrite("\n");
+                    }
+                }
+            }
+
             if (press_edge && !menu_handled && !drag.active && duetos::drivers::video::TaskbarContains(cx, cy))
             {
                 const duetos::u32 tab_hit = duetos::drivers::video::TaskbarTabAt(cx, cy);
@@ -4588,6 +4745,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 SerialWriteHex(drag.window);
                 SerialWrite("\n");
                 drag.active = false;
+            }
+            if (release_edge && resize.active)
+            {
+                SerialWrite("[ui] resize end window=");
+                SerialWriteHex(resize.window);
+                SerialWrite("\n");
+                resize.active = false;
+                resize.edge = duetos::drivers::video::WindowResizeEdge::None;
             }
             if (release_edge && duetos::drivers::video::TaskbarIsDragging())
             {
@@ -4795,6 +4960,19 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 const duetos::u32 nx = (cx > drag.grab_offset_x) ? cx - drag.grab_offset_x : 0;
                 const duetos::u32 ny = (cy > drag.grab_offset_y) ? cy - drag.grab_offset_y : 0;
                 duetos::drivers::video::WindowMoveTo(drag.window, nx, ny);
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+            }
+            else if (resize.active)
+            {
+                // Resize-drag: feed the cumulative cursor delta
+                // since the press into the resize calc, anchored
+                // on the press-time bounds.
+                const duetos::i32 dx = static_cast<duetos::i32>(cx) - static_cast<duetos::i32>(resize.anchor_cx);
+                const duetos::i32 dy = static_cast<duetos::i32>(cy) - static_cast<duetos::i32>(resize.anchor_cy);
+                duetos::drivers::video::WindowResizeFromEdge(resize.window, resize.edge, resize.anchor_x,
+                                                             resize.anchor_y, resize.anchor_w, resize.anchor_h, dx, dy);
                 duetos::drivers::video::CursorHide();
                 duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
                 duetos::drivers::video::CursorShow();
