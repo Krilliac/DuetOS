@@ -15,6 +15,7 @@
 
 #include "drivers/storage/block.h"
 #include "drivers/video/console.h"
+#include "fs/fat32.h"
 #include "fs/gpt.h"
 #include "fs/mount.h"
 
@@ -162,6 +163,91 @@ void CmdLsgpt()
             ConsoleWrite("       TYPE ");
             ConsoleWriteln(guid_str);
         }
+    }
+}
+
+// `mkfs <handle> ERASE` — destructive. Lays down a fresh FAT32
+// volume on the named block-device handle. Refuses unless the
+// caller passes the literal "ERASE" confirmation token (matches
+// the disk-installer plan's user-typed-confirmation contract for
+// every DESTRUCTIVE primitive). Admin-gated. Validates writability
+// + minimum size + already-FAT32-mounted state before touching
+// anything on disk.
+void CmdMkfs(u32 argc, char** argv)
+{
+    namespace storage = duetos::drivers::storage;
+    namespace fat = duetos::fs::fat32;
+    if (!RequireAdmin("MKFS"))
+        return;
+    if (argc < 3 || argv == nullptr)
+    {
+        ConsoleWriteln("usage: mkfs <handle-hex> ERASE");
+        ConsoleWriteln("  handle  block-device handle from `lsblk` (hex)");
+        ConsoleWriteln("  ERASE   literal token — destructive, lays a fresh FAT32 BPB");
+        return;
+    }
+    duetos::u64 handle_u64 = 0;
+    if (!ParseU64Str(argv[1], &handle_u64) || handle_u64 >= 0xFFFFu)
+    {
+        ConsoleWrite("mkfs: bad handle '");
+        ConsoleWrite(argv[1]);
+        ConsoleWriteln("'");
+        return;
+    }
+    const duetos::u32 handle = static_cast<duetos::u32>(handle_u64);
+    bool ok = false;
+    for (duetos::u32 i = 0; i < storage::BlockDeviceCount(); ++i)
+    {
+        if (i == handle)
+        {
+            ok = true;
+            break;
+        }
+    }
+    if (!ok)
+    {
+        ConsoleWriteln("mkfs: handle out of range — see `lsblk`");
+        return;
+    }
+    bool confirm = argv[2][0] == 'E' && argv[2][1] == 'R' && argv[2][2] == 'A' && argv[2][3] == 'S' &&
+                   argv[2][4] == 'E' && argv[2][5] == '\0';
+    if (!confirm)
+    {
+        ConsoleWriteln("mkfs: confirmation token missing — pass literal ERASE");
+        return;
+    }
+    if (!storage::BlockDeviceIsWritable(handle))
+    {
+        ConsoleWrite("mkfs: handle not writable: ");
+        ConsoleWriteln(storage::BlockDeviceName(handle));
+        return;
+    }
+    const duetos::u64 sectors = storage::BlockDeviceSectorCount(handle);
+    if (sectors < 65600)
+    {
+        ConsoleWriteln("mkfs: device under 32 MiB — FAT32 spec floor");
+        return;
+    }
+    ConsoleWrite("mkfs: formatting ");
+    ConsoleWrite(storage::BlockDeviceName(handle));
+    ConsoleWrite(" (");
+    WriteHexCol(sectors, 0);
+    ConsoleWriteln(" sectors) as FAT32...");
+    if (!fat::Fat32Format(handle, sectors))
+    {
+        ConsoleWriteln("mkfs: Fat32Format failed (see klog)");
+        return;
+    }
+    duetos::u32 vol_idx = 0;
+    if (fat::Fat32Probe(handle, &vol_idx))
+    {
+        ConsoleWrite("mkfs OK: re-probe handed back volume index ");
+        WriteHexCol(vol_idx, 2);
+        ConsoleWriteln("");
+    }
+    else
+    {
+        ConsoleWriteln("mkfs: laid down BPB but re-probe rejected — please file a bug");
     }
 }
 

@@ -498,6 +498,7 @@ void CmdMount();
 void CmdLsblk();
 void CmdLsgpt();
 void CmdLsmod();
+void CmdMkfs(u32 argc, char** argv);
 
 // ---------------------------------------------------------------
 // Extended get/set/manipulate commands (shell_extra.cpp).

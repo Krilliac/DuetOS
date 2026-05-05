@@ -612,6 +612,45 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 117 — Shell `mkfs` command on a writable block device
+
+- **Scope:** `kernel/shell/shell_storage.cpp` (`CmdMkfs`),
+  `kernel/shell/shell_internal.h` (prototype),
+  `kernel/shell/shell_dispatch.cpp` (dispatch case + name in
+  `kCommandSet[]`).
+- **Decision:** Add a shell `mkfs` command with the
+  signature `mkfs <handle-hex> ERASE`. Validates argv length,
+  parses the block-device handle, asserts admin privilege,
+  refuses unless the second arg is the literal `ERASE`
+  confirmation token (the disk-installer plan's typed-
+  confirmation contract for every DESTRUCTIVE primitive),
+  checks `BlockDeviceIsWritable` + minimum 32 MiB sector
+  count, calls `Fat32Format`, and confirms via a fresh
+  `Fat32Probe` that the BPB came back. Failures log a one-line
+  reason without further explanation — the operator typed
+  ERASE; they can read a klog message.
+- **Why:** Surfaces the existing `Fat32Format` primitive at
+  the operator level. Before this slice the only way to
+  exercise the FS format path was the boot self-test on a
+  ramdisk; a real installer flow needs an interactive entry
+  point. Admin-gated + `ERASE`-token-gated matches the
+  pre-existing pattern for destructive operations (`READ`'s
+  admin check, the in-flight installer plan).
+- **Rules out / defers:** A full `mkfs.fat` flag set
+  (`-F 32`, `-n LABEL`, `-c bad-block scan`, etc.) — single-
+  flavour FAT32 today. GPT layout (`mkfs` writes a raw FAT32
+  BPB to LBA 0 of the device, ignoring any partition table —
+  matches what `Fat32Format` does). Per-partition formatting
+  (operates on whole devices; carving partitions first goes
+  through `GptInitDisk` + a future `mkpart` command).
+- **Revisit when:** A real installer wizard lands and needs
+  per-partition `mkfs`. Other FS flavours (ext4, NTFS) gain
+  format support and the verb wants a `-t fstype` selector.
+- **Related tracks:** Track 3 (Filesystem — installer
+  primitives), Track 11 (Shell — admin commands).
+
+---
+
 ## 116 — gpt::FormatGuid + corrected disk-installer Roadmap
 
 - **Scope:** `kernel/fs/gpt.{h,cpp}` (new `kGuidStringLen`,
