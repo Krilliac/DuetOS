@@ -180,64 +180,30 @@ i64 DoFork()
     child->linux_parent_pid = parent->pid;
 
     // fd inheritance — every parent fd survives into the child.
-    // Linux semantics: dup() shares the file description; we
-    // approximate by copying the slot verbatim and bumping
-    // refcounts on pool-backed states (pipe / eventfd / socket)
-    // so the kernel object outlives the parent's close().
-    // FAT32 file handles share first_cluster + path but track
-    // their own per-fd offset — copying the slot achieves that.
-    // CLOEXEC is a sub-GAP; every fd survives unconditionally.
+    // For migrated kinds (3..10 + 12..15) the per-pool ref is
+    // shared via `LinuxFdInheritFromParent`'s HandleTable-
+    // Duplicate path: each side gets a fresh ipc handle pointing
+    // at the same KFile, and the KObject refcount drives the
+    // per-pool release callback (which fires once when the last
+    // handle closes). For pidfd specifically, the target
+    // Process's refcount is held by the single shared KFile —
+    // both fork-parent and fork-child contribute one KObject
+    // ref each; the underlying ProcessRetain is taken once at
+    // open and dropped once at last-close.
+    //
+    // Dirfd (state 11) is the only kind still on the legacy
+    // path: the snapshot lives on the parent's win32_dirs[]
+    // table, which the child doesn't share, so the child's
+    // dirfd slot is cleared (POSIX permits closing dirfds on
+    // fork). `LinuxFdClose` drops any KFile sidecar the inherit
+    // helper might have duplicated; today dirfd has no sidecar,
+    // but the call shape is correct for the future migration.
+    core::LinuxFdInheritFromParent(parent, child);
     for (u32 i = 0; i < 16; ++i)
     {
-        const auto& src = parent->linux_fds[i];
-        child->linux_fds[i] = src;
-        if (src.state == 3)
-            PipeRetainRead(src.first_cluster);
-        else if (src.state == 4)
-            PipeRetainWrite(src.first_cluster);
-        else if (src.state == 5)
-            EventfdRetain(src.first_cluster);
-        else if (src.state == 6)
-            SocketFdRetain(src.first_cluster);
-        else if (src.state == 7)
-            TimerfdRetain(src.first_cluster);
-        else if (src.state == 8)
-            SignalfdRetain(src.first_cluster);
-        else if (src.state == 9)
-            EpollRetain(src.first_cluster);
-        else if (src.state == 10)
-            InotifyRetain(src.first_cluster);
-        else if (src.state == 11)
-        {
-            // Directory snapshot lives on the PARENT's
-            // win32_dirs[] table. The child's table is fresh
-            // and empty; sharing the parent's slot index would
-            // leave the child's fd dangling. Skip inheritance —
-            // the child's dirfd slot is cleared so getdents64
-            // sees an honest -EBADF rather than reading the
-            // wrong slot. (POSIX permits closing dirfds on
-            // fork — same as what some libcs do under
-            // FD_CLOEXEC; our v0 just makes it unconditional.)
-            child->linux_fds[i].state = 0;
-            child->linux_fds[i].first_cluster = 0;
-            child->linux_fds[i].size = 0;
-            child->linux_fds[i].offset = 0;
-        }
-        else if (src.state == 12)
-        {
-            // pidfd: bump the target Process refcount so the
-            // child holds an independent reference. The child's
-            // close path will release.
-            core::Process* tgt = sched::SchedFindProcessByPid(src.first_cluster);
-            if (tgt != nullptr)
-                core::ProcessRetain(tgt);
-        }
-        else if (src.state == 13)
-            PosixMqRetain(src.first_cluster);
-        else if (src.state == 14)
-            MemfdRetain(src.first_cluster);
-        else if (src.state == 15)
-            FanotifyRetain(src.first_cluster);
+        if (parent->linux_fds[i].state != 11)
+            continue;
+        core::LinuxFdClose(child, i);
     }
     // Hand a LinuxCloneDesc to the existing LinuxCloneEntry —
     // it iretq's into ring-3 with rax = 0 (EnterUserModeThread's

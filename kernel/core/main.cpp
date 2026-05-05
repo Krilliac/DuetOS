@@ -2491,6 +2491,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::ipc::KMailboxSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::ipc::KWaitableSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::ipc::KFileSelfTest());
+    // Linux fd-table helper self-test (Linux fd → KFile
+    // migration). Exercises LinuxFdAllocLowest / AttachKFile /
+    // Dup / SetCloexec / CloseOnExec / Close on a stand-in
+    // Process so the helper plumbing — including the per-pool
+    // release-callback dispatch through KFileDestroy — is
+    // verified before any real Linux ABI workload reaches the
+    // syscall surface.
+    DUETOS_BOOT_SELFTEST(duetos::core::LinuxFdSelfTest());
     // Soft-lockup detector (plan D4). The detector itself is
     // already wired into the timer-IRQ tail (`OnTimerTick`), so
     // a real lockup would already be surfaced; the self-test

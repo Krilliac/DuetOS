@@ -344,6 +344,17 @@ struct Process
     // the typical static-musl binary. Real programs (shells,
     // dynamic linkers) need more; grow to a KMalloc'd array when
     // a workload actually exceeds 16 open handles.
+    //
+    // KFile sidecar (kf_handle): for pool-backed kinds (states
+    // 3..15), each open allocates a `KFile` carrying the kind tag
+    // + pool index + per-pool release callback, parks it in
+    // `kobj_handles`, and stores the resulting handle here. Close
+    // / dup / fork all route through HandleTable* — the KFile's
+    // refcount drives per-pool retain/release instead of every
+    // syscall site open-coding the explicit *Retain / *Release
+    // pair. Mirrors the Win32 mutex migration's shape. State 0/1
+    // (unused / TTY) and state 2 (FAT32 file — no pool ref to
+    // count) leave kf_handle = 0.
     struct LinuxFd
     {
         // state 0 = unused
@@ -367,7 +378,14 @@ struct Process
         u8 _pad[2];
         u32 first_cluster;
         u32 size;
-        u32 _pad2;
+        // Sidecar handle into `kobj_handles`. 0 (kHandleInvalid) =
+        // no KFile attached. Populated by `LinuxFdAttachKFile` at
+        // creation time for pool-backed kinds; cleared by
+        // `LinuxFdClose` after `HandleTableRemove` fires the per-
+        // pool release callback. Stored as u32 so the LinuxFd
+        // struct stays 8-byte aligned and process.h doesn't have
+        // to pull in ipc/handle_table.h transitively.
+        u32 kf_handle;
         u64 offset; // read cursor; only meaningful for state=file
         // Volume-relative path as passed to sys_open, NUL-
         // terminated. Needed so sys_write's extend path can call
@@ -384,6 +402,17 @@ struct Process
     // wall even though the syscall doesn't re-evaluate the
     // path. Mirrors `Win32FileHandle::is_canary`.
     static constexpr u8 kLinuxFdFlagCanary = 0x02;
+    // FD_CLOEXEC bit. Closes-on-exec (when `LinuxFdCloseOnExec`
+    // runs at exec). Set at open via O_CLOEXEC, at pipe2 via
+    // O_CLOEXEC, at dup3 via O_CLOEXEC, at *_create flag-args
+    // (TFD_CLOEXEC, SFD_CLOEXEC, IN_CLOEXEC, MFD_CLOEXEC,
+    // FAN_CLOEXEC, EFD_CLOEXEC, SOCK_CLOEXEC, EPOLL_CLOEXEC),
+    // and via fcntl(F_SETFD, FD_CLOEXEC). Cleared by fcntl
+    // F_SETFD with arg=0 and by dup() (which always produces a
+    // non-cloexec fd). Independent of O_CLOEXEC at the open-file-
+    // description layer (that's a sub-GAP — v0 has no shared open
+    // file descriptions yet). Per-fd, not per-file.
+    static constexpr u8 kLinuxFdFlagCloexec = 0x04;
     LinuxFd linux_fds[16];
 
     // Linux-ABI brk heap. Meaningful only when abi_flavor ==
@@ -1255,5 +1284,88 @@ void StdinFocusClearIf(Process* proc);
 /// single-CPU system. No-op when no focus is registered. The
 /// canonical kbd-reader entry point.
 void ProcessFeedStdinFocusChar(char c);
+
+// =========================================================================
+// Linux fd-table helpers (Linux fd → KFile migration).
+//
+// Centralises the "find lowest free fd >= N", per-fd CLOEXEC
+// flag, fork-time inheritance, and exec-time teardown that
+// were previously open-coded across ~13 syscall handlers
+// (open, pipe, eventfd, socket, timerfd, signalfd, epoll,
+// inotify, fanotify, pidfd, mq_open, memfd, dup/dup2/dup3,
+// fcntl(F_DUPFD/F_DUPFD_CLOEXEC), close, clone(CLONE_FILES)).
+//
+// For pool-backed kinds (states 3..15) the helpers also wire
+// a `KFile` sidecar into `Process::kobj_handles` so per-pool
+// retain/release rides KObject refcounting instead of the
+// scatter of explicit `*Retain` / `*Release` calls in the
+// syscall layer. State 0/1/2 use the helpers but skip the
+// KFile sidecar (no pool ref to count).
+// =========================================================================
+
+/// Lowest free fd ≥ `lo`, capped at `LinuxFdEffectiveMax(p)`
+/// (which honours RLIMIT_NOFILE). Returns -1 = no slot. Does
+/// NOT mark the slot in_use — caller stamps the slot's `state`
+/// + per-kind data immediately after.
+i32 LinuxFdAllocLowest(Process* p, u32 lo);
+
+/// Stamp the KFile sidecar onto an already-allocated slot.
+/// `kind` is the per-state pool tag; `pool_index` is whatever
+/// the per-state pool returned (e.g. PipeAlloc's slot index);
+/// `release` is the per-pool release function fired when the
+/// KFile's refcount drops to zero. Returns false on heap or
+/// HandleTable exhaustion (caller should roll back: free pool
+/// slot + zero fd state). On success, stores the resulting
+/// `ipc::Handle` in `p->linux_fds[fd].kf_handle` so close /
+/// dup / fork can route through the unified table.
+bool LinuxFdAttachKFile(Process* p, u32 fd, u8 kind, u32 pool_index, void (*release)(u32));
+
+/// Tear down a Linux fd slot. If a KFile sidecar is attached,
+/// drops its handle-table reference (which fires the per-pool
+/// release callback when refcount hits zero). Zeroes
+/// state/first_cluster/size/offset/path so the slot is reusable.
+/// No-op for slots already in state 0. Does NOT honour the
+/// reserved-tty rule (state 1) — the legacy `DoClose` keeps that
+/// guard at the syscall boundary.
+void LinuxFdClose(Process* p, u32 fd);
+
+/// Duplicate slot `oldfd` into slot `newfd`. Copies state +
+/// first_cluster + size + offset + path; if a KFile sidecar
+/// exists, calls `HandleTableDuplicate` so both fds share the
+/// underlying KFile + its pool ref (each fd holds one ref —
+/// closing one drops one ref, closing both fires the per-pool
+/// release callback). Closes any existing slot at `newfd`
+/// first. Caller is responsible for setting cloexec on the
+/// new slot if dup3 honoured O_CLOEXEC. Returns false on
+/// HandleTable exhaustion.
+bool LinuxFdDup(Process* p, u32 oldfd, u32 newfd);
+
+/// Set / clear FD_CLOEXEC on a slot. No-op for unused slots.
+void LinuxFdSetCloexec(Process* p, u32 fd, bool on);
+bool LinuxFdGetCloexec(const Process* p, u32 fd);
+
+/// Copy parent's fd table into `child` at fork time. Each
+/// occupied slot in `parent` is mirrored into `child`; KFile
+/// sidecars are duplicated via `HandleTableDuplicate` so the
+/// child shares the parent's per-pool ref counts (each side
+/// drops one ref on close). FD_CLOEXEC is preserved on the
+/// inherited slot — Linux semantics: fork copies cloexec
+/// fds; only execve drops them. Caller (DoFork / DoClone)
+/// must have already initialised `child`'s fd table to all-
+/// unused via `ProcessCreate`.
+void LinuxFdInheritFromParent(Process* parent, Process* child);
+
+/// Walk the fd table and close every slot with FD_CLOEXEC set.
+/// Called from the future execve handler before the new image
+/// is mapped in. v0 has no execve, so this is currently
+/// invoked only by the boot-time self-test that exercises the
+/// CLOEXEC bit's plumbing.
+void LinuxFdCloseOnExec(Process* p);
+
+/// Self-test for the Linux fd-table helpers. Boot-time only;
+/// exercises a synthetic Process's fd table through alloc /
+/// dup / cloexec-set / inherit / close-on-exec. Panics on any
+/// invariant violation.
+void LinuxFdSelfTest();
 
 } // namespace duetos::core

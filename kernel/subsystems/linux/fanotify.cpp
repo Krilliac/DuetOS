@@ -335,30 +335,36 @@ i64 FanotifyRead(u32 idx, u64 user_dst, u64 len)
 
 i64 DoFanotifyInit(u64 flags, u64 event_f_flags)
 {
-    (void)flags;
+    constexpr u64 kFAN_CLOEXEC = 0x1;
     (void)event_f_flags;
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
-    u32 fd = 16;
-    for (u32 i = 3; i < LinuxFdEffectiveMax(p); ++i)
-        if (p->linux_fds[i].state == 0)
-        {
-            fd = i;
-            break;
-        }
-    if (fd == 16)
+    const i32 fd = core::LinuxFdAllocLowest(p, 3);
+    if (fd < 0)
         return kEMFILE;
+    p->linux_fds[fd].state = 15; // reserve
     const i32 idx = FanAlloc();
     if (idx < 0)
+    {
+        p->linux_fds[fd].state = 0;
         return kENFILE;
-    p->linux_fds[fd].state = 15;
+    }
+    p->linux_fds[fd].flags = 0;
     p->linux_fds[fd].first_cluster = static_cast<u32>(idx);
     p->linux_fds[fd].size = 0;
     p->linux_fds[fd].offset = 0;
     p->linux_fds[fd].path[0] = '\0';
+    if (!core::LinuxFdAttachKFile(p, static_cast<u32>(fd), /*kind=*/15, static_cast<u32>(idx), &FanotifyRelease))
+    {
+        p->linux_fds[fd].state = 0;
+        FanotifyRelease(static_cast<u32>(idx));
+        return kENOMEM;
+    }
+    if ((flags & kFAN_CLOEXEC) != 0)
+        core::LinuxFdSetCloexec(p, static_cast<u32>(fd), true);
     arch::SerialWrite("[linux/fanotify] init fd=");
-    arch::SerialWriteHex(fd);
+    arch::SerialWriteHex(static_cast<u64>(fd));
     arch::SerialWrite(" idx=");
     arch::SerialWriteHex(static_cast<u64>(idx));
     arch::SerialWrite("\n");

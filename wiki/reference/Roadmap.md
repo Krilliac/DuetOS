@@ -71,12 +71,59 @@ the same commit** that delivers the code.
   for the internal side). CloseHandle's semaphore arm — which
   did not exist pre-migration — was added incidentally, fixing
   a slot leak that pre-dated this work.
-- **Remaining:** Linux fd-table → KFile is its own track. The
-  KFile primitive is in place (`kernel/ipc/kfile.{h,cpp}`); the
-  migration is rerouting the Linux ABI's `LinuxFd` entry points
-  through `kobj_handles`.
+- **Linux side — first slice landed:** `KFile` extended with a
+  `KFileKind` enum + per-state `pool_index` slot + per-kind
+  release callback fired by `KFileDestroy` (kfile.{h,cpp}). New
+  per-process helpers in `proc/process.{h,cpp}` consolidate the
+  thirteen open-coded "scan for lowest free fd ≥ N" loops behind
+  `LinuxFdAllocLowest`, add a `Handle kf_handle` sidecar to every
+  `LinuxFd` slot, and route close / dup / fork through
+  `LinuxFdClose` / `LinuxFdDup` / `LinuxFdInheritFromParent` —
+  which themselves drive `HandleTableRemove` / `HandleTableDuplicate`
+  on `Process::kobj_handles`. FD_CLOEXEC is a real per-fd bit now
+  (was a sub-GAP); honoured at every creation site that takes a
+  CLOEXEC-style flag (open's O_CLOEXEC, pipe2's O_CLOEXEC,
+  eventfd2's EFD_CLOEXEC, dup3's O_CLOEXEC, fcntl(F_SETFD,
+  FD_CLOEXEC)) and read by `LinuxFdCloseOnExec` (wired for the
+  future execve handler; today exists for the boot-time self-test).
+  Eleven of the twelve pool-backed kinds — pipe (states 3 / 4),
+  eventfd (5), socket (6), timerfd (7), signalfd (8), epoll (9),
+  inotify (10), pidfd (12), POSIX MQ (13), memfd (14), and
+  fanotify (15) — are migrated end-to-end. `LinuxFdAttachKFile`
+  parks a `KFile` carrying the per-kind release callback in
+  `kobj_handles`, the `LinuxFd` slot stores the resulting handle,
+  and the per-pool release fires once via the `KFile` destroy
+  callback when the last reference drops. Every migrated creator
+  honours its CLOEXEC flag bit (O_CLOEXEC, EFD_CLOEXEC,
+  TFD_CLOEXEC, SFD_CLOEXEC, EPOLL_CLOEXEC, IN_CLOEXEC,
+  SOCK_CLOEXEC, PIDFD_NONBLOCK, MQ O_CLOEXEC, MFD_CLOEXEC,
+  FAN_CLOEXEC) — was a documented sub-GAP, now real. The
+  previous v0 sub-GAP — dup of a pipe / eventfd / socket / etc.
+  silently leaking the pool ref — is closed across every
+  migrated kind: both fds now hold an independent KFile
+  reference and the per-pool wakeup-on-disconnect semantics
+  are preserved verbatim. Pidfd's adapter (`PidfdRelease`)
+  takes the target pid as `pool_index`, looks the target up
+  via `SchedFindProcessByPid`, and drops the `ProcessRetain`
+  taken at open — same shape as the legacy DoClose arm but
+  routed through the unified KObject refcount. The fork-time
+  legacy `*Retain` block in `syscall_clone.cpp` collapsed from
+  ten arms to one — only state 11 (dirfd) remains.
+- **Remaining state-kind:** dirfd (state 11) is the lone
+  hold-out. Its release frees a `win32_dirs[]` snapshot owned
+  by the calling Process — the uniform `void(u32)` KFile
+  callback can't reach the owning `Process*` without a richer
+  callback shape. The legacy DoClose arm continues to handle
+  it explicitly (one `SysDirClose(p, dh)` call gated on
+  state == 11 && kf_handle == invalid). Migrating dirfd needs
+  either a `void(Process*, u32)` callback variant in KFile or
+  promoting the directory snapshot itself onto KFile (vnode +
+  entries pointer) so the destroy callback no longer needs
+  the parent process at all — both are bigger changes than
+  the uniform-shape migration.
 - **When to land:** opportunistic, gated on a Linux-ABI workload
-  that benefits from the unified surface.
+  that benefits from the unified surface; the dual-track shape
+  means each remaining kind is a self-contained slice.
 
 ### Intel CET enable
 

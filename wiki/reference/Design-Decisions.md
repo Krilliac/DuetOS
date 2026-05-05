@@ -4453,6 +4453,117 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 103 — Linux fd-table → KFile sidecar (pipe + eventfd migrated)
+
+- **Scope:** `kernel/ipc/kfile.{h,cpp}` (KFile extended with
+  `KFileKind` enum + `pool_index` slot + per-kind release
+  callback fired from `KFileDestroy`),
+  `kernel/proc/process.{h,cpp}` (new `LinuxFd::kf_handle`
+  sidecar field reusing the previous `_pad2` slot — same struct
+  size; new helper API: `LinuxFdAllocLowest`,
+  `LinuxFdAttachKFile`, `LinuxFdClose`, `LinuxFdDup`,
+  `LinuxFdSetCloexec` / `LinuxFdGetCloexec`,
+  `LinuxFdInheritFromParent`, `LinuxFdCloseOnExec`,
+  `LinuxFdSelfTest`; new `kLinuxFdFlagCloexec` bit),
+  `kernel/subsystems/linux/syscall_fd.cpp` (full rewrite of
+  dup / dup2 / dup3 / fcntl on the helpers — dup3 honours
+  `O_CLOEXEC`, fcntl(F_GETFD/F_SETFD) reads/writes the per-fd
+  bit, F_DUPFD_CLOEXEC stamps it on the new fd),
+  `kernel/subsystems/linux/syscall_file.cpp` (DoOpen routes
+  through `LinuxFdAllocLowest` for both regular files and
+  directory snapshots, honours `O_CLOEXEC`; DoClose dual-
+  tracks: drops the KFile ref via `LinuxFdClose` for migrated
+  kinds, falls through to legacy `*Release` calls for un-
+  migrated ones gated on `kf_handle == kHandleInvalid`),
+  `kernel/subsystems/linux/syscall_pipe.cpp` (DoPipe2 +
+  DoEventfd2 attach KFile sidecars carrying `&PipeReleaseRead`
+  / `&PipeReleaseWrite` / `&EventfdRelease`; `O_CLOEXEC` /
+  `EFD_CLOEXEC` honoured),
+  `kernel/subsystems/linux/syscall_clone.cpp` (fork inherits
+  through `LinuxFdInheritFromParent` which calls
+  `HandleTableDuplicate` per occupied slot; the existing per-
+  state `*Retain` block stays for un-migrated kinds, gated on
+  the same `kf_handle == kHandleInvalid` predicate),
+  `kernel/core/main.cpp` (boot-self-test list).
+- **Decision:** Each Linux fd is a `LinuxFd` slot (legacy 16-
+  entry array on `Process`) plus a `KFile` sidecar living in
+  `Process::kobj_handles`. The legacy slot keeps the hot-path
+  fields (state, first_cluster, size, offset, path, flags) so
+  read / write / lseek / etc. don't pay an indirection cost.
+  The `KFile` sidecar carries the per-state pool tag + the per-
+  pool release callback; close / dup / fork all drive
+  `HandleTableRemove` / `HandleTableDuplicate` so per-pool
+  retain/release rides KObject refcounting. The dual-track —
+  presence of a `kf_handle` selects KFile semantics, absence
+  selects the legacy explicit `*Retain` / `*Release` path —
+  lets each remaining kind migrate as its own slice without
+  one big atomic landing.
+- **Why:** Linux fds are a single per-process namespace with
+  fifteen distinct backings; migrating any one in isolation
+  forced a dual-track close path anyway. Storing the KFile
+  alongside (sidecar) instead of replacing the slot wholesale
+  preserves the hot-path zero-indirection access pattern that
+  the syscall layer relies on (every read / write / lseek /
+  poll handler reaches for `linux_fds[fd].first_cluster` or
+  `.offset` directly), while still placing every fd's lifecycle
+  on the unified handle table for `HandleTableDrain` at
+  process-exit and `HandleTableDuplicate` at fork.
+- **Incidental fixes:**
+  - **dup() of a pipe / eventfd fd no longer leaks the pool
+    ref.** Pre-migration, `CopyFdSlot` copied the pool index
+    verbatim without bumping `pool.read_refs` / `write_refs` —
+    closing one of the two fds dropped the count to zero and
+    woke disconnect under the still-live other fd. Post-
+    migration, `LinuxFdDup` calls `HandleTableDuplicate` so
+    each fd holds an independent `KFile` reference; the per-
+    pool release fires once at the last close.
+  - **FD_CLOEXEC is a real per-fd bit now.** Pre-migration was
+    a documented sub-GAP (every fd survived exec
+    unconditionally). Post-migration, `LinuxFdCloseOnExec`
+    walks the table and drops every cloexec-stamped slot;
+    creators honour `O_CLOEXEC` / `EFD_CLOEXEC` flag bits.
+    `LinuxFdCloseOnExec` is wired for the future execve
+    handler and exists today for the boot-time self-test.
+- **Capacity tradeoff:** Each Linux fd in the pool-backed
+  kinds (3..15) consumes one slot in `Process::kobj_handles`
+  on top of its `LinuxFd` slot. Linux fds cap at 16; the table
+  has 64 slots; Linux processes don't share `kobj_handles`
+  with Win32 mutex/event/sem (different abi_flavor), so the
+  worst case is 16 fds + a handful of native KObjects, well
+  within budget.
+- **Rules out / defers:** Wholesale replacement of the
+  `LinuxFd` struct with `KFile*` (the design considered first):
+  rejected because read / write / lseek hot paths would pay
+  an extra indirection per access. Per-fd open-file-description
+  sharing à la real Linux dup() (single offset, single flag
+  set across dup'd fds): still a v0 sub-GAP — KFile carries
+  per-fd state, not per-open-file-description state. Per-fd
+  cwd for `*at` syscalls: still keyed on AT_FDCWD only.
+  Migrating the remaining ten state-kinds (socket, timerfd,
+  signalfd, epoll, inotify, dirfd, pidfd, POSIX MQ, memfd,
+  fanotify): each is a self-contained slice that only needs
+  to flip its creator + remove its explicit `*Retain` /
+  `*Release` calls; the dual-track logic handles the rest.
+- **Revisit when:** A Linux workload demonstrates a corner the
+  legacy `LinuxFd` slot data layout can't represent (real
+  pidfd polling that needs target-process events, real
+  io_uring rings that need `KFile` ↔ pool back-pointers,
+  per-FD-CWD `*at` syscalls). At that point the slot fields
+  collapse into a single `KFile*` and the hot-path indirection
+  cost is justified by the new feature.
+- **Related tracks:** Track 1 (Kernel — IPC + handle table),
+  Track 4 (Linux subsystem — fd table + creators).
+- **Commit:** `da31973`. QEMU smoke (debug profile, OVMF) ran
+  every IPC self-test in order — `kobject` → `handle_table` →
+  `kmutex` → `kevent` → `ksemaphore` → `kmailbox` → `kwaitable`
+  → `kfile` — and the new `[proc] linux-fd-table self-test OK`
+  fires immediately after, exercising AllocLowest / AttachKFile /
+  Dup / SetCloexec / CloseOnExec / final-Close end-to-end
+  including the per-pool release-callback dispatch through
+  `KFileDestroy`.
+
+---
+
 After landing a non-trivial commit, append a new section here with
 the **next sequential number**. Keep entries small. Link the commit
 hash. Always write the "Revisit when" marker — that's the point of

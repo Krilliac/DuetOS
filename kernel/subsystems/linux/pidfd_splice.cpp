@@ -46,16 +46,6 @@ namespace
 // just hold a process handle. The "zero-copy" comment lives on
 // splice/tee/vmsplice below.
 
-i32 FindFreeLinuxFd(core::Process* p)
-{
-    if (p == nullptr)
-        return -1;
-    for (u32 i = 3; i < LinuxFdEffectiveMax(p); ++i)
-        if (p->linux_fds[i].state == 0)
-            return static_cast<i32>(i);
-    return -1;
-}
-
 } // namespace
 
 // Global pidfd-exit waitqueue (§ syscall_internal.h LinuxPidfdExitWake).
@@ -87,13 +77,35 @@ sched::WaitQueue* LinuxPidfdExitWq()
     return &g_pidfd_exit_wq;
 }
 
+// Pidfd KFile release adapter — invoked by `KFileDestroy` when
+// the last reference on a pidfd's KFile drops. `pool_index`
+// carries the target pid (matches `LinuxFd::first_cluster` for
+// state-12 slots). Looks the target up in the global PID
+// registry and drops the `ProcessRetain` that `DoPidfdOpen`
+// took. Tolerates the "target already reaped" case — the
+// lookup returns null and we simply do nothing (no ref to drop;
+// the missed Release is benign because the target's last
+// reference has already been dropped by another path).
+//
+// Symmetry with the legacy DoClose arm preserved: same lookup
+// + same Release call, just routed through the unified KObject
+// refcount path instead of the per-state-tag dispatch in DoClose.
+void PidfdRelease(u32 pid)
+{
+    core::Process* target = sched::SchedFindProcessByPid(pid);
+    if (target != nullptr)
+        core::ProcessRelease(target);
+}
+
 // =========================================================
 // pidfd_open / pidfd_send_signal
 // =========================================================
 
 i64 DoPidfdOpen(u64 pid, u64 flags)
 {
-    (void)flags; // PIDFD_NONBLOCK accepted but ignored
+    constexpr u64 kPIDFD_NONBLOCK = 0x800;
+    (void)kPIDFD_NONBLOCK; // accepted but blocking-only in v0
+    (void)flags;
     // pid==0 is invalid in pidfd_open (real Linux returns
     // -EINVAL since "self" is not addressable that way; the
     // documented "no pid" sentinel for pidfd_open is just
@@ -106,15 +118,27 @@ i64 DoPidfdOpen(u64 pid, u64 flags)
     core::Process* target = sched::SchedFindProcessByPid(pid);
     if (target == nullptr)
         return kESRCH;
-    const i32 fd = FindFreeLinuxFd(caller);
+    const i32 fd = core::LinuxFdAllocLowest(caller, 3);
     if (fd < 0)
         return kEMFILE;
     core::ProcessRetain(target);
     caller->linux_fds[fd].state = 12;
+    caller->linux_fds[fd].flags = 0;
     caller->linux_fds[fd].first_cluster = static_cast<u32>(pid);
     caller->linux_fds[fd].size = 0;
     caller->linux_fds[fd].offset = 0;
     caller->linux_fds[fd].path[0] = '\0';
+    if (!core::LinuxFdAttachKFile(caller, static_cast<u32>(fd), /*kind=*/12, static_cast<u32>(pid), &PidfdRelease))
+    {
+        // KFile attach failed — drop the ProcessRetain we just
+        // took (the legacy DoClose arm won't fire because it
+        // checks `kf_handle == invalid` for legacy release; here
+        // kf_handle is also invalid but the slot is being torn
+        // down immediately so explicit release is required).
+        caller->linux_fds[fd].state = 0;
+        core::ProcessRelease(target);
+        return kENOMEM;
+    }
     arch::SerialWrite("[linux/pidfd] open fd=");
     arch::SerialWriteHex(static_cast<u64>(fd));
     arch::SerialWrite(" target_pid=");
