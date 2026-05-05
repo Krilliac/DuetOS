@@ -1,6 +1,7 @@
 #include "net/firewall.h"
 
 #include "log/klog.h"
+#include "time/tick.h"
 
 namespace duetos::net::firewall
 {
@@ -12,6 +13,22 @@ constinit Rule g_rules[kFwMaxRules] = {};
 constinit Action g_default_in = Action::Allow;
 constinit Action g_default_out = Action::Allow;
 constinit Stats g_stats = {};
+
+// Recent-denial ring. `g_log_total` is the next sequence
+// number AND the count of denials ever recorded. Slot index
+// for sequence N is N % kFwLogCap. When `g_log_total >
+// kFwLogCap`, the oldest live entry sits at sequence
+// `g_log_total - kFwLogCap`.
+constinit DenialRecord g_log[kFwLogCap] = {};
+constinit u64 g_log_total = 0;
+
+// Conntrack table. Linear-scan lookup is fine for v0 — 64
+// entries × 5-tuple compare is fast enough that a hash adds
+// more code than it saves. Eviction picks the entry with the
+// oldest `last_use_ticks`.
+constinit ConntrackEntry g_conntrack[kConntrackCap] = {};
+
+constexpr u32 kSchedulerHz = 100;
 
 constexpr u32 Ipv4ToHost(Ipv4Address a)
 {
@@ -45,6 +62,125 @@ bool PortInRange(const PortRange& r, u16 port)
 bool ProtoMatch(Proto rule_proto, Proto pkt_proto)
 {
     return rule_proto == Proto::Any || rule_proto == pkt_proto;
+}
+
+bool IpEq(Ipv4Address a, Ipv4Address b)
+{
+    return a.octets[0] == b.octets[0] && a.octets[1] == b.octets[1] && a.octets[2] == b.octets[2] &&
+           a.octets[3] == b.octets[3];
+}
+
+bool ConntrackTupleMatch(const ConntrackEntry& e, Proto proto, Ipv4Address local_ip, u16 local_port,
+                         Ipv4Address peer_ip, u16 peer_port)
+{
+    return e.active && e.proto == proto && IpEq(e.local_ip, local_ip) && e.local_port == local_port &&
+           IpEq(e.peer_ip, peer_ip) && e.peer_port == peer_port;
+}
+
+void ConntrackInsertOrRefresh(Proto proto, Ipv4Address local_ip, u16 local_port, Ipv4Address peer_ip, u16 peer_port)
+{
+    if (proto != Proto::Tcp && proto != Proto::Udp)
+    {
+        return;
+    }
+    const u64 now = ::duetos::time::TickCount();
+    const u32 ttl_secs = (proto == Proto::Tcp) ? kConntrackTtlTcpSecs : kConntrackTtlUdpSecs;
+    const u64 expiry = now + u64(ttl_secs) * kSchedulerHz;
+
+    // Refresh-or-evict pass: walk once, look for a tuple match;
+    // along the way track the oldest `last_use_ticks` slot for a
+    // possible eviction. Inactive slots win over both — fill
+    // them first.
+    u32 free_idx = kConntrackCap;
+    u32 lru_idx = 0;
+    u64 lru_ticks = ~u64(0);
+    for (u32 i = 0; i < kConntrackCap; ++i)
+    {
+        if (g_conntrack[i].active &&
+            ConntrackTupleMatch(g_conntrack[i], proto, local_ip, local_port, peer_ip, peer_port))
+        {
+            g_conntrack[i].expiry_ticks = expiry;
+            g_conntrack[i].last_use_ticks = now;
+            return;
+        }
+        if (!g_conntrack[i].active && free_idx == kConntrackCap)
+        {
+            free_idx = i;
+        }
+        if (g_conntrack[i].active && g_conntrack[i].last_use_ticks < lru_ticks)
+        {
+            lru_ticks = g_conntrack[i].last_use_ticks;
+            lru_idx = i;
+        }
+    }
+
+    u32 slot;
+    if (free_idx != kConntrackCap)
+    {
+        slot = free_idx;
+    }
+    else
+    {
+        slot = lru_idx;
+        ++g_stats.conntrack_evictions;
+    }
+    g_conntrack[slot].active = true;
+    g_conntrack[slot].proto = proto;
+    g_conntrack[slot].local_ip = local_ip;
+    g_conntrack[slot].local_port = local_port;
+    g_conntrack[slot].peer_ip = peer_ip;
+    g_conntrack[slot].peer_port = peer_port;
+    g_conntrack[slot].expiry_ticks = expiry;
+    g_conntrack[slot].last_use_ticks = now;
+    ++g_stats.conntrack_inserts;
+}
+
+bool ConntrackLookupReverse(Proto proto, Ipv4Address ingress_src_ip, u16 ingress_src_port, Ipv4Address ingress_dst_ip,
+                            u16 ingress_dst_port)
+{
+    if (proto != Proto::Tcp && proto != Proto::Udp)
+    {
+        return false;
+    }
+    const u64 now = ::duetos::time::TickCount();
+    // Ingress packet (src=peer, dst=local) matches an egress
+    // entry whose (local, peer) is the reverse tuple.
+    for (u32 i = 0; i < kConntrackCap; ++i)
+    {
+        ConntrackEntry& e = g_conntrack[i];
+        if (!e.active)
+        {
+            continue;
+        }
+        if (now >= e.expiry_ticks)
+        {
+            e.active = false;
+            continue;
+        }
+        if (ConntrackTupleMatch(e, proto, ingress_dst_ip, ingress_dst_port, ingress_src_ip, ingress_src_port))
+        {
+            e.last_use_ticks = now;
+            ++g_stats.conntrack_hits;
+            return true;
+        }
+    }
+    return false;
+}
+
+void LogDenial(Direction dir, Proto proto, Ipv4Address src_ip, Ipv4Address dst_ip, u16 src_port, u16 dst_port,
+               u32 matched_rule)
+{
+    const u64 seq = g_log_total++;
+    DenialRecord& r = g_log[seq % kFwLogCap];
+    r.sequence = seq + 1; // 1-based externally so 0 stays the "slot empty" sentinel
+    r.ticks = ::duetos::time::TickCount();
+    r.dir = dir;
+    r.proto = proto;
+    r.src_ip = src_ip;
+    r.dst_ip = dst_ip;
+    r.src_port = src_port;
+    r.dst_port = dst_port;
+    r.matched_rule = matched_rule;
 }
 
 bool RuleMatches(const Rule& r, Direction dir, Proto proto, Ipv4Address src_ip, Ipv4Address dst_ip, u16 src_port,
@@ -99,7 +235,64 @@ void FwInit()
     g_default_in = Action::Allow;
     g_default_out = Action::Allow;
     g_stats = Stats{};
+    for (u32 i = 0; i < kFwLogCap; ++i)
+    {
+        g_log[i] = DenialRecord{};
+    }
+    g_log_total = 0;
+    ConntrackReset();
     KLOG_INFO("net/firewall", "rule-table reset; defaults=allow/allow");
+}
+
+void ConntrackReset()
+{
+    for (u32 i = 0; i < kConntrackCap; ++i)
+    {
+        g_conntrack[i] = ConntrackEntry{};
+    }
+}
+
+u32 ConntrackSnapshot(ConntrackEntry* out, u32 cap)
+{
+    if (out == nullptr || cap == 0)
+    {
+        return 0;
+    }
+    u32 written = 0;
+    for (u32 i = 0; i < kConntrackCap && written < cap; ++i)
+    {
+        if (g_conntrack[i].active)
+        {
+            out[written++] = g_conntrack[i];
+        }
+    }
+    return written;
+}
+
+u32 FwLogSnapshot(DenialRecord* out, u32 cap)
+{
+    if (out == nullptr || cap == 0)
+    {
+        return 0;
+    }
+    const u64 total = g_log_total;
+    if (total == 0)
+    {
+        return 0;
+    }
+    const u64 want = (total < kFwLogCap) ? total : kFwLogCap;
+    const u64 first_seq = total - want;
+    u32 written = 0;
+    for (u64 s = first_seq; s < total && written < cap; ++s)
+    {
+        out[written++] = g_log[s % kFwLogCap];
+    }
+    return written;
+}
+
+u64 FwLogTotalCount()
+{
+    return g_log_total;
 }
 
 Action FwDefaultPolicy(Direction dir)
@@ -183,6 +376,7 @@ Action FwEvaluate(Direction dir, Proto proto, Ipv4Address src_ip, Ipv4Address ds
                 {
                     ++g_stats.egress_denied;
                 }
+                LogDenial(dir, proto, src_ip, dst_ip, src_port, dst_port, i);
             }
             return g_rules[i].action;
         }
@@ -191,7 +385,24 @@ Action FwEvaluate(Direction dir, Proto proto, Ipv4Address src_ip, Ipv4Address ds
     {
         *matched_index = kFwMaxRules;
     }
-    const Action def = FwDefaultPolicy(dir);
+    // Egress that no explicit rule matched: register a
+    // conntrack entry so the corresponding inbound reply
+    // is recognised even under a default-deny inbound policy.
+    if (dir == Direction::Egress)
+    {
+        ConntrackInsertOrRefresh(proto, src_ip, src_port, dst_ip, dst_port);
+    }
+    // Ingress that no explicit rule matched and the default
+    // would deny: consult conntrack for a matching outbound
+    // before logging.
+    Action def = FwDefaultPolicy(dir);
+    if (dir == Direction::Ingress && def == Action::Deny)
+    {
+        if (ConntrackLookupReverse(proto, src_ip, src_port, dst_ip, dst_port))
+        {
+            return Action::Allow;
+        }
+    }
     if (def == Action::Deny)
     {
         if (dir == Direction::Ingress)
@@ -202,6 +413,7 @@ Action FwEvaluate(Direction dir, Proto proto, Ipv4Address src_ip, Ipv4Address ds
         {
             ++g_stats.egress_denied;
         }
+        LogDenial(dir, proto, src_ip, dst_ip, src_port, dst_port, kFwMaxRules);
     }
     return def;
 }
@@ -342,6 +554,34 @@ void FwSelfTest()
         Rule snap[kFwMaxRules];
         FwSnapshot(snap, kFwMaxRules);
         Expect(!snap[idx].active, "FwRemove clears active flag");
+    }
+
+    // ---------- Conntrack: outbound establishes ingress-allow ----------
+    FwInit();
+    FwSetDefaultPolicy(Direction::Ingress, Action::Deny);
+    {
+        constexpr Ipv4Address local = {{10, 0, 0, 5}};
+        constexpr Ipv4Address peer = {{93, 184, 216, 34}};
+        constexpr u16 local_port = 50000;
+        constexpr u16 peer_port = 80;
+        // Egress packet registers conntrack.
+        const Action a_out = FwEvaluate(Direction::Egress, Proto::Tcp, local, peer, local_port, peer_port, nullptr);
+        Expect(a_out == Action::Allow, "egress allowed by default");
+        // Ingress reply matches conntrack -> Allow even under default-deny.
+        const Action a_in = FwEvaluate(Direction::Ingress, Proto::Tcp, peer, local, peer_port, local_port, nullptr);
+        Expect(a_in == Action::Allow, "ingress reply allowed via conntrack");
+        // Ingress from a different peer port -> denied (no conntrack).
+        const Action a_in2 = FwEvaluate(Direction::Ingress, Proto::Tcp, peer, local, 81, local_port, nullptr);
+        Expect(a_in2 == Action::Deny, "ingress without conntrack hits default-deny");
+    }
+    FwSetDefaultPolicy(Direction::Ingress, Action::Allow);
+
+    // ---------- Denial log captured the deny above ----------
+    {
+        DenialRecord rec[kFwLogCap];
+        const u32 n = FwLogSnapshot(rec, kFwLogCap);
+        Expect(n >= 1, "denial log captured at least one entry");
+        Expect(FwLogTotalCount() >= 1, "denial total monotone");
     }
 
     // Reset back to clean v0 state.

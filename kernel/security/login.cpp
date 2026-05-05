@@ -442,7 +442,36 @@ void GuiRepaint()
     FramebufferDrawString(l.panel_x + 24, l.hint_y, "TAB TO SWITCH FIELD   ENTER TO LOG IN", kHint, kPanel);
 
     const u32 y_hint = l.fb_h - 22;
-    FramebufferDrawString(16, y_hint, "DEFAULT ACCOUNTS: ADMIN/ADMIN  GUEST/(EMPTY)", 0x00C0D0E0, kBgBottom);
+    if (g_login.locked)
+    {
+        char locked_msg[96];
+        u32 o = 0;
+        const char* prefix = "LOCKED FOR ";
+        for (u32 i = 0; prefix[i] != '\0' && o + 1 < sizeof(locked_msg); ++i)
+        {
+            locked_msg[o++] = prefix[i];
+        }
+        for (u32 i = 0; g_login.locked_user[i] != '\0' && o + 1 < sizeof(locked_msg); ++i)
+        {
+            char c = g_login.locked_user[i];
+            if (c >= 'a' && c <= 'z')
+            {
+                c = static_cast<char>(c - 'a' + 'A');
+            }
+            locked_msg[o++] = c;
+        }
+        const char* suffix = "  -  CTRL+ALT+S TO SWITCH USER (LOGS OUT)";
+        for (u32 i = 0; suffix[i] != '\0' && o + 1 < sizeof(locked_msg); ++i)
+        {
+            locked_msg[o++] = suffix[i];
+        }
+        locked_msg[o] = '\0';
+        FramebufferDrawString(16, y_hint, locked_msg, 0x00FFC080, kBgBottom);
+    }
+    else
+    {
+        FramebufferDrawString(16, y_hint, "DEFAULT ACCOUNTS: ADMIN/ADMIN  GUEST/(EMPTY)", 0x00C0D0E0, kBgBottom);
+    }
 
     // Push the freshly-painted login surface to the active backend
     // (virtio-gpu TRANSFER_TO_HOST_2D + RESOURCE_FLUSH; no-op for
@@ -664,6 +693,24 @@ void LoginReopen()
     g_login.locked = false;
     g_login.locked_user[0] = '\0';
     LoginStart(mode);
+}
+
+bool LoginIsLocked()
+{
+    return g_login.locked;
+}
+
+void LoginSwitchUser()
+{
+    if (!g_login.locked)
+    {
+        // Caller assumed the gate is locked; if it isn't,
+        // LoginReopen still does the right thing (logs out +
+        // re-opens), but log the surprise so a misuse surfaces.
+        KLOG_WARN("login", "LoginSwitchUser called outside of locked state");
+    }
+    KLOG_INFO_S("login", "switch-user requested from locked gate", "previous", g_login.locked_user);
+    LoginReopen();
 }
 
 void LoginLock()

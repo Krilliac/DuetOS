@@ -86,13 +86,24 @@ void LoginReopen();
 /// auth session. Captures the active user at lock time and
 /// rejects unlock attempts with any other username — Windows-
 /// style "only the same user can unlock". A different user
-/// must explicitly log out (the existing `logout` shell
-/// command, or LoginReopen) to clear the lock policy and
-/// reach a fresh login. Differs from LoginReopen by skipping
-/// AuthLogout.
-/// GAP: on-screen "switch user" affordance distinct from
-/// logout deferred to a follow-up slice.
+/// must use the "switch user" affordance (Ctrl+Alt+S on the
+/// locked GUI, or `LoginSwitchUser()`) to log the locker out
+/// and reach a fresh login. Differs from LoginReopen by
+/// skipping AuthLogout.
 void LoginLock();
+
+/// True iff the gate is up specifically because of LoginLock
+/// (vs. LoginReopen / LoginStart on a fresh boot). Used by
+/// the kbd reader to recognise the locked state and intercept
+/// Ctrl+Alt+S before LoginFeedKey routes the keystroke into
+/// the form fields.
+bool LoginIsLocked();
+
+/// Switch user from a locked screen: clear the lock policy,
+/// log the captured user out, and re-open the login gate so
+/// any account can authenticate. Caller MUST hold the
+/// compositor lock — this calls LoginReopen which paints.
+void LoginSwitchUser();
 
 // ---------------------------------------------------------------
 // Idle-timeout auto-lock.

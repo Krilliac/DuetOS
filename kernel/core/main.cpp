@@ -2947,6 +2947,20 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             // ticker nor the mouse reader.
             if (duetos::core::LoginIsActive())
             {
+                // Ctrl+Alt+S on a LOCKED gate is the "switch user"
+                // affordance: clears the lock, logs the locker out,
+                // re-opens the gate so any account can sign in.
+                // Available only while locked — on a fresh boot
+                // (LoginIsActive but !LoginIsLocked) the chord
+                // routes into LoginFeedKey along with everything
+                // else.
+                if (ctrl && alt && duetos::core::LoginIsLocked() && (ev.code == 's' || ev.code == 'S'))
+                {
+                    duetos::drivers::video::CompositorLock();
+                    duetos::core::LoginSwitchUser();
+                    duetos::drivers::video::CompositorUnlock();
+                    continue;
+                }
                 duetos::drivers::video::CompositorLock();
                 const bool still_active = duetos::core::LoginFeedKey(ev.code);
                 if (!still_active)

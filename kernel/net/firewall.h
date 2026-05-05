@@ -115,6 +115,9 @@ struct Stats
     u64 ingress_denied;
     u64 egress_checked;
     u64 egress_denied;
+    u64 conntrack_inserts;
+    u64 conntrack_hits;
+    u64 conntrack_evictions;
 };
 
 Stats FwStatsRead();
@@ -122,6 +125,79 @@ Stats FwStatsRead();
 /// Snapshot up to `cap` rules into `out`. Returns the number
 /// written. Read-only — safe from any context.
 u32 FwSnapshot(Rule* out, u32 cap);
+
+// -------------------------------------------------------------
+// Recent-denial ring. Bounded (32 slots); circular write,
+// monotone read sequence so a consumer can detect wraparound.
+// Surface for the kernel shell's `firewall log` command and
+// for any future GUI pane that wants to render "why is this
+// connection failing".
+// -------------------------------------------------------------
+
+inline constexpr u32 kFwLogCap = 32;
+
+struct DenialRecord
+{
+    u64 sequence; // monotone; 0 means "slot empty" only when no record ever landed
+    u64 ticks;    // scheduler-tick timestamp at the deny moment
+    Direction dir;
+    Proto proto;
+    Ipv4Address src_ip;
+    Ipv4Address dst_ip;
+    u16 src_port;
+    u16 dst_port;
+    u32 matched_rule; // kFwMaxRules == default policy fired
+};
+
+/// Snapshot up to `cap` recent denials into `out` ordered
+/// oldest-first. Returns the number written. Read-only.
+u32 FwLogSnapshot(DenialRecord* out, u32 cap);
+
+/// Total number of denials ever recorded (also the next
+/// sequence number that would be assigned). Useful for tests
+/// that need to detect "did any new denial land?".
+u64 FwLogTotalCount();
+
+// -------------------------------------------------------------
+// Connection tracking (v0 — TCP / UDP only).
+//
+// On egress, when a TCP / UDP packet leaves through a bound
+// interface, the firewall registers a conntrack entry keyed on
+// (proto, local_ip, local_port, peer_ip, peer_port). On ingress,
+// if no explicit rule matches, the firewall consults conntrack
+// for the reverse-direction tuple before falling through to the
+// default policy: a hit allows the packet, modeling "established
+// connections are accepted" — the v0 minimum needed to flip the
+// default-deny inbound default safely without breaking outbound-
+// initiated TCP connect / UDP request-reply.
+//
+// Capacity is fixed; eviction is LRU on full ring. TTLs:
+// kConntrackTtlTcp ≈ 5 minutes, kConntrackTtlUdp ≈ 60 seconds.
+// Both refresh on each matching packet.
+// -------------------------------------------------------------
+
+inline constexpr u32 kConntrackCap = 64;
+inline constexpr u32 kConntrackTtlTcpSecs = 300;
+inline constexpr u32 kConntrackTtlUdpSecs = 60;
+
+struct ConntrackEntry
+{
+    bool active;
+    Proto proto;
+    Ipv4Address local_ip;
+    u16 local_port;
+    Ipv4Address peer_ip;
+    u16 peer_port;
+    u64 expiry_ticks;
+    u64 last_use_ticks;
+};
+
+/// Snapshot up to `cap` active conntrack entries into `out`.
+u32 ConntrackSnapshot(ConntrackEntry* out, u32 cap);
+
+/// Reset the conntrack table. Idempotent — used by `FwInit`
+/// and the `firewall reset` shell command.
+void ConntrackReset();
 
 /// Boot-time self-test. Exercises add / match / miss / default
 /// / hit-counter / mask matching. Logs PASS/FAIL through

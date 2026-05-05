@@ -365,22 +365,6 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
   `\_S5_`. Without that we can't drive the chipset's soft-off
   state. Same blocker the per-CPU sleep state work has.
 
-### Lock screen — switch-user affordance
-
-- **Today:** Same-user-only unlock and idle-timeout
-  auto-lock both landed in `LoginLock` /
-  `kernel/security/login.cpp`. The active username is
-  captured at lock time and unlock attempts with any
-  other username are rejected. Every kbd / mouse ingest
-  path stamps `core::InputActivityStamp`; a dedicated
-  `idle-lock` task wakes once a second, computes the
-  gap, and calls `LoginLock` once the gap exceeds the
-  configured threshold (default 600 s, override via
-  `idlelock=<seconds>` boot cmdline; 0 disables).
-- **Remaining:** an on-screen "switch user" affordance
-  distinct from `logout` so a different user can reach
-  the login gate without the locker first approving.
-
 ### Device Manager — virtio + eject + hot-unplug
 
 - **Today:** Device Manager renders two sections: a PCI

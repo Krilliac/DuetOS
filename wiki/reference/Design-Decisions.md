@@ -4807,3 +4807,64 @@ doc helps future readers audit the trail.
   auto-lock timing.
 - **Related tracks:** Track 12 (Security — auth gate),
   Track 4 (Input — kbd / mouse pipelines).
+
+---
+
+## 109 — Firewall conntrack-lite + denial-log ring + Ctrl+Alt+S switch-user
+
+- **Scope:** `kernel/net/firewall.{h,cpp}`,
+  `kernel/shell/shell_network.cpp`,
+  `kernel/security/login.{h,cpp}`,
+  `kernel/core/main.cpp`.
+- **Decision:** Three layered additions to the firewall
+  + auth gate:
+  1. **Conntrack v0** — every egress packet whose proto
+     is TCP / UDP and that no rule explicitly matched
+     registers a `(proto, local_ip, local_port, peer_ip,
+     peer_port)` entry. Capacity 64; LRU eviction; TTLs
+     300 s (TCP) / 60 s (UDP); refresh on each match.
+     On ingress, when no rule matches AND the default
+     policy would be Deny, the firewall consults
+     conntrack for the reverse-direction tuple before
+     logging — a hit yields Allow. Models "established
+     connections accepted" without doing real TCP-state
+     tracking.
+  2. **Denial log** — bounded ring (32 slots) capturing
+     every Deny verdict with its 5-tuple, direction,
+     timestamp, and matched rule index (or `kFwMaxRules`
+     when the default policy fired). Surfaced via
+     `FwLogSnapshot` / `FwLogTotalCount` and the new
+     `firewall log` shell subcommand. `firewall stats`
+     gains conntrack counters
+     (`inserts`/`hits`/`evictions`).
+  3. **Switch-user affordance** — `Ctrl+Alt+S` on a
+     locked GUI (active session, gate up because
+     `LoginLock` fired) clears the lock policy, calls
+     `AuthLogout`, and re-opens the gate. The locked
+     GUI grows a footer hint identifying the locker
+     and the chord. On a non-locked gate (fresh boot,
+     no active session) the chord routes to
+     `LoginFeedKey` like every other keystroke.
+- **Why:** With conntrack in place an operator can
+  finally `firewall default in deny` without breaking
+  outbound TCP / UDP replies. The denial log closes the
+  observability hole the rule table created — without
+  it, a "why is this connection failing" question
+  needs an external sniffer. The switch-user chord
+  fills the last gap from #105 / #108: the locker
+  could trap a different user under their lock policy
+  with no escape short of `logout` (which they
+  couldn't reach without unlocking).
+- **What it rules out:** Real TCP-state-aware conntrack
+  (SYN / FIN / RST observation, half-open timeouts).
+  Per-process socket policy keyed on `Process::caps`.
+  An interactive desktop firewall editor. All three are
+  follow-up slices.
+- **Revisit when:** A real workload exercises the
+  default-deny inbound policy long enough that the
+  TTL-only conntrack lets stuck half-opens leak;
+  per-process firewall comes when a sandboxed PE
+  needs network egress restricted but not denied
+  outright.
+- **Related tracks:** Track 6 (Networking), Track 12
+  (Security — auth gate).

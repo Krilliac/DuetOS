@@ -8,6 +8,21 @@ action, and per-rule hit counters.
 
 ## Today (v0 — landed)
 
+- **Connection tracking** for TCP / UDP. Every egress
+  packet that no rule explicitly matches registers a
+  conntrack entry keyed on `(proto, local_ip, local_port,
+  peer_ip, peer_port)`. On ingress, if no rule matches
+  AND the default policy is Deny, the firewall consults
+  conntrack for the reverse-direction tuple before
+  denying — a hit yields Allow. TTLs: 300 s for TCP,
+  60 s for UDP; entries refresh on each matching packet.
+  Capacity 64; LRU eviction.
+- **Recent-denial ring** (`kFwLogCap = 32`) captures
+  every Deny verdict (timestamp ticks, direction,
+  protocol, src/dst IP+port, matched rule index — or
+  `kFwMaxRules` for default-policy denies). Surface via
+  `FwLogSnapshot` / `FwLogTotalCount` and the
+  `firewall log` shell command.
 - **Static rule table** at `kernel/net/firewall.{h,cpp}`,
   capacity 32, evaluated first-match-wins.
 - **Tuple:** direction (Ingress / Egress), protocol
@@ -55,7 +70,9 @@ command:
 
 ```
 firewall list                                   — show rules + per-rule hit counts
-firewall stats                                  — aggregate ingress/egress counters
+firewall stats                                  — aggregate ingress/egress + conntrack counters
+firewall log                                    — recent denials (oldest first)
+firewall conntrack                              — active conntrack entries
 firewall add <in|out> <any|tcp|udp|icmp>
              <src/mask> <dst/mask>
              <sport|sport-range|any>
@@ -64,7 +81,7 @@ firewall add <in|out> <any|tcp|udp|icmp>
 firewall del <idx>                              — clear a rule slot
 firewall toggle <idx>                           — flip the active flag
 firewall default <in|out> <allow|deny>          — set per-direction default
-firewall reset                                  — wipe rule table; defaults=allow/allow
+firewall reset                                  — wipe rule table + conntrack + log; defaults=allow/allow
 ```
 
 Examples:
@@ -88,20 +105,16 @@ gate on the cap.
    rules from the desktop needs an interactive widget
    bound to `kCapNetAdmin` (the kernel shell + the new
    `firewall` command can already drive the API directly).
-2. **Connection tracking** for "established + related"
-   semantics so the Windows-style default-deny inbound
-   policy can be flipped on without breaking outbound TCP
-   replies. v0 keeps default Allow inbound for that
-   reason — a TCP connect we initiated would be
-   unanswerable otherwise.
+2. **TCP-state-aware conntrack.** Today's conntrack just
+   tracks 5-tuples + TTL refresh; it doesn't follow the
+   TCP state machine, so a stuck half-open connection
+   keeps the entry alive until the TTL expires. A real
+   conntrack would observe SYN / FIN / RST and adjust
+   the entry lifetime accordingly.
 3. **Per-process socket policy.** Filter keyed off the
    owning `Process::caps` so a sandboxed Win32 PE can be
    denied network egress entirely regardless of the
    global rule table.
-4. **Logging hooks.** A bounded ring of recent denials
-   (timestamp, direction, 5-tuple) for the kernel shell
-   to surface — useful when an operator is debugging a
-   "why is this connection failing?" question.
 
 The placeholder text on the Firewall app stays accurate as
 each item lands: today the app shows real rules, real

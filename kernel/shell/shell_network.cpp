@@ -1442,6 +1442,92 @@ void FirewallStats()
     ConsoleWrite(" denied=");
     WriteU64Dec(s.egress_denied);
     ConsoleWriteln("");
+    ConsoleWrite("CONNTRACK: inserts=");
+    WriteU64Dec(s.conntrack_inserts);
+    ConsoleWrite(" hits=");
+    WriteU64Dec(s.conntrack_hits);
+    ConsoleWrite(" evictions=");
+    WriteU64Dec(s.conntrack_evictions);
+    ConsoleWriteln("");
+}
+
+void FirewallLog()
+{
+    duetos::net::firewall::DenialRecord rec[duetos::net::firewall::kFwLogCap];
+    const u32 n = duetos::net::firewall::FwLogSnapshot(rec, duetos::net::firewall::kFwLogCap);
+    if (n == 0)
+    {
+        ConsoleWrite("FIREWALL: no denials recorded (total=");
+        WriteU64Dec(duetos::net::firewall::FwLogTotalCount());
+        ConsoleWriteln(")");
+        return;
+    }
+    ConsoleWrite("FIREWALL: ");
+    WriteU64Dec(n);
+    ConsoleWrite(" of ");
+    WriteU64Dec(duetos::net::firewall::FwLogTotalCount());
+    ConsoleWriteln(" recent denials (oldest first):");
+    ConsoleWriteln("SEQ      TICK       DIR PROTO SRC                    DST                    RULE");
+    for (u32 i = 0; i < n; ++i)
+    {
+        const auto& r = rec[i];
+        WriteU64Dec(r.sequence);
+        ConsoleWrite("  ");
+        WriteU64Dec(r.ticks);
+        ConsoleWrite("  ");
+        ConsoleWrite(DirectionLabel(r.dir));
+        ConsoleWriteChar(' ');
+        ConsoleWrite(ProtoLabel(r.proto));
+        ConsoleWriteChar(' ');
+        WriteIpv4(r.src_ip);
+        ConsoleWriteChar(':');
+        WriteU64Dec(r.src_port);
+        ConsoleWrite("    ");
+        WriteIpv4(r.dst_ip);
+        ConsoleWriteChar(':');
+        WriteU64Dec(r.dst_port);
+        ConsoleWrite("    ");
+        if (r.matched_rule == duetos::net::firewall::kFwMaxRules)
+        {
+            ConsoleWrite("default");
+        }
+        else
+        {
+            WriteU64Dec(r.matched_rule);
+        }
+        ConsoleWriteln("");
+    }
+}
+
+void FirewallConntrack()
+{
+    duetos::net::firewall::ConntrackEntry entries[duetos::net::firewall::kConntrackCap];
+    const u32 n = duetos::net::firewall::ConntrackSnapshot(entries, duetos::net::firewall::kConntrackCap);
+    if (n == 0)
+    {
+        ConsoleWriteln("FIREWALL: no active conntrack entries");
+        return;
+    }
+    ConsoleWrite("FIREWALL: ");
+    WriteU64Dec(n);
+    ConsoleWriteln(" active conntrack entries:");
+    ConsoleWriteln("PROTO LOCAL                  PEER                   EXPIRY-TICK");
+    for (u32 i = 0; i < n; ++i)
+    {
+        const auto& e = entries[i];
+        ConsoleWrite(ProtoLabel(e.proto));
+        ConsoleWriteChar(' ');
+        WriteIpv4(e.local_ip);
+        ConsoleWriteChar(':');
+        WriteU64Dec(e.local_port);
+        ConsoleWrite("    ");
+        WriteIpv4(e.peer_ip);
+        ConsoleWriteChar(':');
+        WriteU64Dec(e.peer_port);
+        ConsoleWrite("    ");
+        WriteU64Dec(e.expiry_ticks);
+        ConsoleWriteln("");
+    }
 }
 
 void FirewallUsage()
@@ -1449,6 +1535,8 @@ void FirewallUsage()
     ConsoleWriteln("FIREWALL: usage:");
     ConsoleWriteln("  firewall list");
     ConsoleWriteln("  firewall stats");
+    ConsoleWriteln("  firewall log");
+    ConsoleWriteln("  firewall conntrack");
     ConsoleWriteln("  firewall add <in|out> <any|tcp|udp|icmp> <src/mask> <dst/mask> "
                    "<sport|sport-range|any> <dport|dport-range|any> <allow|deny>");
     ConsoleWriteln("  firewall del <idx>");
@@ -1469,6 +1557,16 @@ void CmdFirewall(u32 argc, char** argv)
     if (StrEq(argv[1], "stats"))
     {
         FirewallStats();
+        return;
+    }
+    if (StrEq(argv[1], "log"))
+    {
+        FirewallLog();
+        return;
+    }
+    if (StrEq(argv[1], "conntrack") || StrEq(argv[1], "ct"))
+    {
+        FirewallConntrack();
         return;
     }
     if (StrEq(argv[1], "reset"))
