@@ -149,14 +149,21 @@ bool IfaceTx(u32 iface_index, const void* frame, u64 frame_len)
         const u8 ihl = ip[0] & 0x0F;
         u16 src_port = 0;
         u16 dst_port = 0;
+        u8 tcp_flags = 0;
         if ((proto == firewall::Proto::Tcp || proto == firewall::Proto::Udp) && frame_len >= 14 + u64(ihl) * 4 + 4)
         {
             const u8* l4 = ip + u64(ihl) * 4;
             src_port = (u16(l4[0]) << 8) | u16(l4[1]);
             dst_port = (u16(l4[2]) << 8) | u16(l4[3]);
+            // TCP flags byte sits at offset 13 of the TCP
+            // header. UDP has no flags so leave tcp_flags=0.
+            if (proto == firewall::Proto::Tcp && frame_len >= 14 + u64(ihl) * 4 + 14)
+            {
+                tcp_flags = l4[13];
+            }
         }
-        const firewall::Action verdict =
-            firewall::FwEvaluate(firewall::Direction::Egress, proto, src_ip, dst_ip, src_port, dst_port, nullptr);
+        const firewall::Action verdict = firewall::FwEvaluate(firewall::Direction::Egress, proto, src_ip, dst_ip,
+                                                              src_port, dst_port, tcp_flags, nullptr);
         if (verdict == firewall::Action::Deny)
         {
             ++ifc.counters.tx_dropped_firewall;
@@ -937,14 +944,19 @@ bool Ipv4HandleIncoming(u32 iface_index, const void* frame, u64 len)
         const firewall::Proto fw_proto = ToFwProto(ip[9]);
         u16 src_port = 0;
         u16 dst_port = 0;
+        u8 tcp_flags = 0;
         if ((fw_proto == firewall::Proto::Tcp || fw_proto == firewall::Proto::Udp) && total_len >= u16(ihl) * 4 + 4)
         {
             const u8* l4 = ip + u64(ihl) * 4;
             src_port = (u16(l4[0]) << 8) | u16(l4[1]);
             dst_port = (u16(l4[2]) << 8) | u16(l4[3]);
+            if (fw_proto == firewall::Proto::Tcp && total_len >= u16(ihl) * 4 + 14)
+            {
+                tcp_flags = l4[13];
+            }
         }
-        const firewall::Action verdict =
-            firewall::FwEvaluate(firewall::Direction::Ingress, fw_proto, src_ip, dst_ip, src_port, dst_port, nullptr);
+        const firewall::Action verdict = firewall::FwEvaluate(firewall::Direction::Ingress, fw_proto, src_ip, dst_ip,
+                                                              src_port, dst_port, tcp_flags, nullptr);
         if (verdict == firewall::Action::Deny)
         {
             return false;

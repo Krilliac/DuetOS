@@ -4868,3 +4868,50 @@ doc helps future readers audit the trail.
   outright.
 - **Related tracks:** Track 6 (Networking), Track 12
   (Security — auth gate).
+
+---
+
+## 110 — TCP-state-aware conntrack + firewall app log/conntrack panels
+
+- **Scope:** `kernel/net/firewall.{h,cpp}`,
+  `kernel/net/stack.cpp`, `kernel/apps/firewall.cpp`.
+- **Decision:** `FwEvaluate` grew a `tcp_flags` u8
+  argument that the IPv4 ingress / egress hooks fill
+  from the TCP header (offset 13). Conntrack entries
+  carry a `TcpState` enum (NEW / Established / FinWait
+  / Closed); transitions are driven by SYN / SYN+ACK /
+  FIN / RST observation per direction. Per-state TTLs
+  replace fixed proto TTLs: NEW=30 s (catches
+  abandoned half-opens), Established=300 s, FinWait=
+  60 s, Closed=10 s (drains the slot quickly after
+  clean teardown). UDP / Any keep a single fixed TTL
+  in Established. The desktop firewall app now renders
+  the active conntrack entries (proto + state + local
+  + peer, top 4) and the recent-denials list (top 4)
+  underneath the rule table.
+- **Why:** Decision 109's conntrack-lite was a
+  TTL-only timer; a stuck half-open kept its slot for
+  the full Established TTL, and there was no signal to
+  the operator that the connection had progressed past
+  setup. Folding state observation into the same
+  refresh path costs one byte of struct + a
+  six-line state machine and makes the LRU eviction
+  pressure proportional to how connections are
+  actually used. The firewall-app panels close the
+  observability loop the kernel-shell `firewall log`
+  / `firewall conntrack` opened in #109 — an operator
+  with a desktop session no longer has to drop to the
+  kernel shell to see why a connection failed.
+- **What it rules out:** Window scaling / sequence-
+  number tracking, real conntrack helpers (FTP control
+  channel triggering data channels, etc.), and SYN
+  cookies. Those land if a workload demands them; the
+  v0 state machine intentionally stays a
+  short-and-correct subset.
+- **Revisit when:** A workload exposes timing edges
+  the four-state machine misses — e.g. simultaneous
+  open, half-close-then-data, or RST-after-FIN
+  pathologies. Standard recommendation is to grow
+  the enum first, then revisit per-state TTLs.
+- **Related tracks:** Track 6 (Networking), Track 13
+  (UX — apps).

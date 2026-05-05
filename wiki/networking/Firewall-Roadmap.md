@@ -8,15 +8,20 @@ action, and per-rule hit counters.
 
 ## Today (v0 — landed)
 
-- **Connection tracking** for TCP / UDP. Every egress
-  packet that no rule explicitly matches registers a
-  conntrack entry keyed on `(proto, local_ip, local_port,
-  peer_ip, peer_port)`. On ingress, if no rule matches
-  AND the default policy is Deny, the firewall consults
-  conntrack for the reverse-direction tuple before
-  denying — a hit yields Allow. TTLs: 300 s for TCP,
-  60 s for UDP; entries refresh on each matching packet.
-  Capacity 64; LRU eviction.
+- **Connection tracking** for TCP / UDP with a real TCP
+  state machine. Every egress packet that no rule
+  explicitly matches registers a conntrack entry keyed on
+  `(proto, local_ip, local_port, peer_ip, peer_port)`. On
+  ingress, if no rule matches AND the default policy is
+  Deny, the firewall consults conntrack for the reverse-
+  direction tuple before denying — a hit yields Allow.
+  Each TCP entry rides a four-state machine
+  (NEW / Established / FinWait / Closed): SYN egress
+  inserts NEW; SYN+ACK ingress graduates to Established;
+  FIN moves to FinWait; RST collapses to Closed. UDP
+  entries stay in Established. Per-state expiry replaces
+  fixed proto TTLs — NEW=30s, Established=300s, FinWait=
+  60s, Closed=10s. Capacity 64; LRU eviction.
 - **Recent-denial ring** (`kFwLogCap = 32`) captures
   every Deny verdict (timestamp ticks, direction,
   protocol, src/dst IP+port, matched rule index — or
@@ -101,17 +106,12 @@ gate on the cap.
 ## Planned (not committed yet)
 
 1. **Desktop editor surface in `kernel/apps/firewall.cpp`.**
-   Today the app is read-only. Adding / removing / toggling
-   rules from the desktop needs an interactive widget
-   bound to `kCapNetAdmin` (the kernel shell + the new
-   `firewall` command can already drive the API directly).
-2. **TCP-state-aware conntrack.** Today's conntrack just
-   tracks 5-tuples + TTL refresh; it doesn't follow the
-   TCP state machine, so a stuck half-open connection
-   keeps the entry alive until the TTL expires. A real
-   conntrack would observe SYN / FIN / RST and adjust
-   the entry lifetime accordingly.
-3. **Per-process socket policy.** Filter keyed off the
+   The app now renders rules + recent denials + active
+   conntrack entries (read-only). Editing from the desktop
+   needs an interactive widget bound to `kCapNetAdmin` —
+   the kernel shell's `firewall` command is the v0 edit
+   path.
+2. **Per-process socket policy.** Filter keyed off the
    owning `Process::caps` so a sandboxed Win32 PE can be
    denied network egress entirely regardless of the
    global rule table.

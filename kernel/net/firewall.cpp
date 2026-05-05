@@ -77,15 +77,80 @@ bool ConntrackTupleMatch(const ConntrackEntry& e, Proto proto, Ipv4Address local
            IpEq(e.peer_ip, peer_ip) && e.peer_port == peer_port;
 }
 
-void ConntrackInsertOrRefresh(Proto proto, Ipv4Address local_ip, u16 local_port, Ipv4Address peer_ip, u16 peer_port)
+u32 TtlSecsForState(Proto proto, TcpState state)
+{
+    if (proto != Proto::Tcp)
+    {
+        // UDP / Any keeps a single fixed TTL — no flag-driven
+        // state to ride.
+        return kConntrackTtlEstSecs;
+    }
+    switch (state)
+    {
+    case TcpState::New:
+        return kConntrackTtlNewSecs;
+    case TcpState::FinWait:
+        return kConntrackTtlFinSecs;
+    case TcpState::Closed:
+        return kConntrackTtlClosedSecs;
+    case TcpState::Established:
+    default:
+        return kConntrackTtlEstSecs;
+    }
+}
+
+// State machine driven by an egress-direction TCP packet. Local
+// is sending to peer.
+TcpState TcpStateAfterEgress(TcpState s, u8 flags)
+{
+    if ((flags & kTcpRst) != 0)
+    {
+        return TcpState::Closed;
+    }
+    if ((flags & kTcpFin) != 0)
+    {
+        return TcpState::FinWait;
+    }
+    // Pure ACK from local with no SYN promotes a half-open
+    // connection (peer's SYN+ACK already moved us to Established
+    // via the ingress side; this catches a connect we initiated
+    // where the local ACK is what we're observing).
+    if (s == TcpState::New && (flags & kTcpAck) != 0 && (flags & kTcpSyn) == 0)
+    {
+        return TcpState::Established;
+    }
+    return s;
+}
+
+// State machine driven by an ingress-direction TCP packet. Peer
+// is sending to local.
+TcpState TcpStateAfterIngress(TcpState s, u8 flags)
+{
+    if ((flags & kTcpRst) != 0)
+    {
+        return TcpState::Closed;
+    }
+    if ((flags & kTcpFin) != 0)
+    {
+        return TcpState::FinWait;
+    }
+    // Classic SYN+ACK reply from peer to our outbound SYN
+    // graduates the entry to Established.
+    if (s == TcpState::New && (flags & kTcpSyn) != 0 && (flags & kTcpAck) != 0)
+    {
+        return TcpState::Established;
+    }
+    return s;
+}
+
+void ConntrackInsertOrRefresh(Proto proto, Ipv4Address local_ip, u16 local_port, Ipv4Address peer_ip, u16 peer_port,
+                              u8 tcp_flags)
 {
     if (proto != Proto::Tcp && proto != Proto::Udp)
     {
         return;
     }
     const u64 now = ::duetos::time::TickCount();
-    const u32 ttl_secs = (proto == Proto::Tcp) ? kConntrackTtlTcpSecs : kConntrackTtlUdpSecs;
-    const u64 expiry = now + u64(ttl_secs) * kSchedulerHz;
 
     // Refresh-or-evict pass: walk once, look for a tuple match;
     // along the way track the oldest `last_use_ticks` slot for a
@@ -99,7 +164,9 @@ void ConntrackInsertOrRefresh(Proto proto, Ipv4Address local_ip, u16 local_port,
         if (g_conntrack[i].active &&
             ConntrackTupleMatch(g_conntrack[i], proto, local_ip, local_port, peer_ip, peer_port))
         {
-            g_conntrack[i].expiry_ticks = expiry;
+            g_conntrack[i].tcp_state = TcpStateAfterEgress(g_conntrack[i].tcp_state, tcp_flags);
+            const u32 ttl_secs = TtlSecsForState(proto, g_conntrack[i].tcp_state);
+            g_conntrack[i].expiry_ticks = now + u64(ttl_secs) * kSchedulerHz;
             g_conntrack[i].last_use_ticks = now;
             return;
         }
@@ -124,19 +191,26 @@ void ConntrackInsertOrRefresh(Proto proto, Ipv4Address local_ip, u16 local_port,
         slot = lru_idx;
         ++g_stats.conntrack_evictions;
     }
+    // First-observation state: TCP starts in NEW (refined when
+    // SYN/ACK or FIN/RST arrives); UDP / Any treated as
+    // Established for TTL purposes.
+    TcpState initial_state = (proto == Proto::Tcp) ? TcpState::New : TcpState::Established;
+    initial_state = TcpStateAfterEgress(initial_state, tcp_flags);
+    const u32 ttl_secs = TtlSecsForState(proto, initial_state);
     g_conntrack[slot].active = true;
     g_conntrack[slot].proto = proto;
     g_conntrack[slot].local_ip = local_ip;
     g_conntrack[slot].local_port = local_port;
     g_conntrack[slot].peer_ip = peer_ip;
     g_conntrack[slot].peer_port = peer_port;
-    g_conntrack[slot].expiry_ticks = expiry;
+    g_conntrack[slot].expiry_ticks = now + u64(ttl_secs) * kSchedulerHz;
     g_conntrack[slot].last_use_ticks = now;
+    g_conntrack[slot].tcp_state = initial_state;
     ++g_stats.conntrack_inserts;
 }
 
 bool ConntrackLookupReverse(Proto proto, Ipv4Address ingress_src_ip, u16 ingress_src_port, Ipv4Address ingress_dst_ip,
-                            u16 ingress_dst_port)
+                            u16 ingress_dst_port, u8 tcp_flags)
 {
     if (proto != Proto::Tcp && proto != Proto::Udp)
     {
@@ -159,6 +233,11 @@ bool ConntrackLookupReverse(Proto proto, Ipv4Address ingress_src_ip, u16 ingress
         }
         if (ConntrackTupleMatch(e, proto, ingress_dst_ip, ingress_dst_port, ingress_src_ip, ingress_src_port))
         {
+            // Drive the state machine on the ingress side and
+            // refresh the expiry to the new state's TTL.
+            e.tcp_state = TcpStateAfterIngress(e.tcp_state, tcp_flags);
+            const u32 ttl_secs = TtlSecsForState(proto, e.tcp_state);
+            e.expiry_ticks = now + u64(ttl_secs) * kSchedulerHz;
             e.last_use_ticks = now;
             ++g_stats.conntrack_hits;
             return true;
@@ -295,6 +374,23 @@ u64 FwLogTotalCount()
     return g_log_total;
 }
 
+const char* TcpStateName(TcpState s)
+{
+    switch (s)
+    {
+    case TcpState::New:
+        return "NEW";
+    case TcpState::Established:
+        return "EST";
+    case TcpState::FinWait:
+        return "FIN";
+    case TcpState::Closed:
+        return "CLO";
+    default:
+        return "?";
+    }
+}
+
 Action FwDefaultPolicy(Direction dir)
 {
     return dir == Direction::Ingress ? g_default_in : g_default_out;
@@ -347,7 +443,7 @@ void FwToggle(u32 index)
 }
 
 Action FwEvaluate(Direction dir, Proto proto, Ipv4Address src_ip, Ipv4Address dst_ip, u16 src_port, u16 dst_port,
-                  u32* matched_index)
+                  u8 tcp_flags, u32* matched_index)
 {
     if (dir == Direction::Ingress)
     {
@@ -390,7 +486,7 @@ Action FwEvaluate(Direction dir, Proto proto, Ipv4Address src_ip, Ipv4Address ds
     // is recognised even under a default-deny inbound policy.
     if (dir == Direction::Egress)
     {
-        ConntrackInsertOrRefresh(proto, src_ip, src_port, dst_ip, dst_port);
+        ConntrackInsertOrRefresh(proto, src_ip, src_port, dst_ip, dst_port, tcp_flags);
     }
     // Ingress that no explicit rule matched and the default
     // would deny: consult conntrack for a matching outbound
@@ -398,7 +494,7 @@ Action FwEvaluate(Direction dir, Proto proto, Ipv4Address src_ip, Ipv4Address ds
     Action def = FwDefaultPolicy(dir);
     if (dir == Direction::Ingress && def == Action::Deny)
     {
-        if (ConntrackLookupReverse(proto, src_ip, src_port, dst_ip, dst_port))
+        if (ConntrackLookupReverse(proto, src_ip, src_port, dst_ip, dst_port, tcp_flags))
         {
             return Action::Allow;
         }
@@ -468,7 +564,7 @@ void FwSelfTest()
     // Default policy fires on empty table.
     {
         u32 matched = 0;
-        const Action a = FwEvaluate(Direction::Ingress, Proto::Tcp, kHostA, kHostB, 1234, 80, &matched);
+        const Action a = FwEvaluate(Direction::Ingress, Proto::Tcp, kHostA, kHostB, 1234, 80, 0, &matched);
         Expect(a == Action::Allow, "empty-table ingress defaults allow");
         Expect(matched == kFwMaxRules, "empty-table reports default-policy match");
     }
@@ -476,7 +572,7 @@ void FwSelfTest()
     // Switching the default to deny must take effect.
     FwSetDefaultPolicy(Direction::Ingress, Action::Deny);
     {
-        const Action a = FwEvaluate(Direction::Ingress, Proto::Tcp, kHostA, kHostB, 1234, 80, nullptr);
+        const Action a = FwEvaluate(Direction::Ingress, Proto::Tcp, kHostA, kHostB, 1234, 80, 0, nullptr);
         Expect(a == Action::Deny, "ingress default flipped to deny");
     }
     FwSetDefaultPolicy(Direction::Ingress, Action::Allow);
@@ -494,18 +590,18 @@ void FwSelfTest()
     Expect(idx < kFwMaxRules, "FwAdd allocates a slot");
     {
         u32 matched = 0;
-        const Action a = FwEvaluate(Direction::Ingress, Proto::Tcp, kHostA, kHostB, 1234, 22, &matched);
+        const Action a = FwEvaluate(Direction::Ingress, Proto::Tcp, kHostA, kHostB, 1234, 22, 0, &matched);
         Expect(a == Action::Deny, "explicit deny overrides allow default");
         Expect(matched == idx, "matched the rule we just added");
     }
     // Rule that doesn't match the dst port falls through.
     {
-        const Action a = FwEvaluate(Direction::Ingress, Proto::Tcp, kHostA, kHostB, 1234, 80, nullptr);
+        const Action a = FwEvaluate(Direction::Ingress, Proto::Tcp, kHostA, kHostB, 1234, 80, 0, nullptr);
         Expect(a == Action::Allow, "dst_port=80 falls through to default allow");
     }
     // Wrong direction does not match.
     {
-        const Action a = FwEvaluate(Direction::Egress, Proto::Tcp, kHostA, kHostB, 1234, 22, nullptr);
+        const Action a = FwEvaluate(Direction::Egress, Proto::Tcp, kHostA, kHostB, 1234, 22, 0, nullptr);
         Expect(a == Action::Allow, "egress packet ignores ingress rule");
     }
     // Hit counter incremented exactly twice (one match above).
@@ -528,11 +624,11 @@ void FwSelfTest()
     const u32 sidx = FwAdd(subnet);
     Expect(sidx < kFwMaxRules, "subnet rule allocates");
     {
-        const Action a = FwEvaluate(Direction::Egress, Proto::Tcp, kHostA, kSubnetCHost, 1024, 80, nullptr);
+        const Action a = FwEvaluate(Direction::Egress, Proto::Tcp, kHostA, kSubnetCHost, 1024, 80, 0, nullptr);
         Expect(a == Action::Deny, "/24 subnet rule denies in-range dst");
     }
     {
-        const Action a = FwEvaluate(Direction::Egress, Proto::Tcp, kHostA, kOtherSubnet, 1024, 80, nullptr);
+        const Action a = FwEvaluate(Direction::Egress, Proto::Tcp, kHostA, kOtherSubnet, 1024, 80, 0, nullptr);
         Expect(a == Action::Allow, "/24 subnet rule does not match other subnet");
     }
 
@@ -544,7 +640,7 @@ void FwSelfTest()
         Expect(!snap[idx].active, "FwToggle clears active flag");
     }
     {
-        const Action a = FwEvaluate(Direction::Ingress, Proto::Tcp, kHostA, kHostB, 1234, 22, nullptr);
+        const Action a = FwEvaluate(Direction::Ingress, Proto::Tcp, kHostA, kHostB, 1234, 22, 0, nullptr);
         Expect(a == Action::Allow, "toggled-off rule no longer matches");
     }
 
@@ -557,6 +653,8 @@ void FwSelfTest()
     }
 
     // ---------- Conntrack: outbound establishes ingress-allow ----------
+    // Drives the TCP state machine through SYN -> SYN+ACK -> RST
+    // and verifies the per-state TTL is applied.
     FwInit();
     FwSetDefaultPolicy(Direction::Ingress, Action::Deny);
     {
@@ -564,15 +662,59 @@ void FwSelfTest()
         constexpr Ipv4Address peer = {{93, 184, 216, 34}};
         constexpr u16 local_port = 50000;
         constexpr u16 peer_port = 80;
-        // Egress packet registers conntrack.
-        const Action a_out = FwEvaluate(Direction::Egress, Proto::Tcp, local, peer, local_port, peer_port, nullptr);
-        Expect(a_out == Action::Allow, "egress allowed by default");
-        // Ingress reply matches conntrack -> Allow even under default-deny.
-        const Action a_in = FwEvaluate(Direction::Ingress, Proto::Tcp, peer, local, peer_port, local_port, nullptr);
-        Expect(a_in == Action::Allow, "ingress reply allowed via conntrack");
+        // Egress SYN registers conntrack in NEW.
+        const Action a_out =
+            FwEvaluate(Direction::Egress, Proto::Tcp, local, peer, local_port, peer_port, kTcpSyn, nullptr);
+        Expect(a_out == Action::Allow, "egress SYN allowed by default");
+        {
+            ConntrackEntry snap[kConntrackCap];
+            const u32 n = ConntrackSnapshot(snap, kConntrackCap);
+            Expect(n >= 1, "conntrack entry recorded after egress SYN");
+            bool found_new = false;
+            for (u32 i = 0; i < n; ++i)
+            {
+                if (snap[i].local_port == local_port && snap[i].peer_port == peer_port)
+                {
+                    found_new = (snap[i].tcp_state == TcpState::New);
+                    break;
+                }
+            }
+            Expect(found_new, "tcp_state is NEW after first SYN");
+        }
+        // Ingress SYN+ACK matches conntrack -> Allow + graduate to Established.
+        const Action a_in =
+            FwEvaluate(Direction::Ingress, Proto::Tcp, peer, local, peer_port, local_port, kTcpSyn | kTcpAck, nullptr);
+        Expect(a_in == Action::Allow, "ingress SYN+ACK allowed via conntrack");
+        {
+            ConntrackEntry snap[kConntrackCap];
+            const u32 n = ConntrackSnapshot(snap, kConntrackCap);
+            bool found_est = false;
+            for (u32 i = 0; i < n; ++i)
+            {
+                if (snap[i].local_port == local_port && snap[i].peer_port == peer_port)
+                {
+                    found_est = (snap[i].tcp_state == TcpState::Established);
+                    break;
+                }
+            }
+            Expect(found_est, "tcp_state graduates to EST after SYN+ACK");
+        }
         // Ingress from a different peer port -> denied (no conntrack).
-        const Action a_in2 = FwEvaluate(Direction::Ingress, Proto::Tcp, peer, local, 81, local_port, nullptr);
+        const Action a_in2 = FwEvaluate(Direction::Ingress, Proto::Tcp, peer, local, 81, local_port, kTcpAck, nullptr);
         Expect(a_in2 == Action::Deny, "ingress without conntrack hits default-deny");
+        // RST collapses the entry to Closed.
+        FwEvaluate(Direction::Egress, Proto::Tcp, local, peer, local_port, peer_port, kTcpRst, nullptr);
+        {
+            ConntrackEntry snap[kConntrackCap];
+            const u32 n = ConntrackSnapshot(snap, kConntrackCap);
+            for (u32 i = 0; i < n; ++i)
+            {
+                if (snap[i].local_port == local_port && snap[i].peer_port == peer_port)
+                {
+                    Expect(snap[i].tcp_state == TcpState::Closed, "tcp_state CLO after RST");
+                }
+            }
+        }
     }
     FwSetDefaultPolicy(Direction::Ingress, Action::Allow);
 

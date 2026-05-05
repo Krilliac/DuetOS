@@ -102,12 +102,37 @@ void FwRemove(u32 index);
 /// Toggle a rule's `active` flag. Useful for the editor surface.
 void FwToggle(u32 index);
 
+/// TCP flag bits as observed in the TCP header (offset 13).
+/// Used by the conntrack state machine — see Firewall-Roadmap.md.
+inline constexpr u8 kTcpFin = 0x01;
+inline constexpr u8 kTcpSyn = 0x02;
+inline constexpr u8 kTcpRst = 0x04;
+inline constexpr u8 kTcpAck = 0x10;
+
+/// Conntrack TCP state. Egress observation drives transitions:
+/// NEW on first SYN, Established once a SYN+ACK or pure ACK has
+/// flowed, FinWait after a FIN, Closed after RST. Per-state
+/// expiry replaces the proto-based fixed TTL. UDP entries stay
+/// in `Established` for their lifetime.
+enum class TcpState : u8
+{
+    New = 0,
+    Established = 1,
+    FinWait = 2,
+    Closed = 3,
+};
+
+const char* TcpStateName(TcpState s);
+
 /// Evaluate one packet against the rule table. Returns the
 /// resulting action and (optionally) the matching rule index.
 /// `*matched_index` is `kFwMaxRules` when the default policy
-/// fired. Increments the matched rule's hit counter.
+/// fired. Increments the matched rule's hit counter. `tcp_flags`
+/// is the TCP header's flag byte (offset 13) when proto==Tcp; it
+/// drives the conntrack state transitions and is ignored for
+/// other protocols.
 Action FwEvaluate(Direction dir, Proto proto, Ipv4Address src_ip, Ipv4Address dst_ip, u16 src_port, u16 dst_port,
-                  u32* matched_index);
+                  u8 tcp_flags, u32* matched_index);
 
 struct Stats
 {
@@ -180,6 +205,14 @@ inline constexpr u32 kConntrackCap = 64;
 inline constexpr u32 kConntrackTtlTcpSecs = 300;
 inline constexpr u32 kConntrackTtlUdpSecs = 60;
 
+/// Conntrack TTL per state (seconds). Entries refresh to the
+/// new state's TTL on every transition. Closed gets a short
+/// drain so the slot recycles quickly after a clean teardown.
+inline constexpr u32 kConntrackTtlNewSecs = 30;
+inline constexpr u32 kConntrackTtlEstSecs = 300;
+inline constexpr u32 kConntrackTtlFinSecs = 60;
+inline constexpr u32 kConntrackTtlClosedSecs = 10;
+
 struct ConntrackEntry
 {
     bool active;
@@ -190,6 +223,7 @@ struct ConntrackEntry
     u16 peer_port;
     u64 expiry_ticks;
     u64 last_use_ticks;
+    TcpState tcp_state; // ignored when proto != Tcp
 };
 
 /// Snapshot up to `cap` active conntrack entries into `out`.

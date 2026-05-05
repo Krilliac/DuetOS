@@ -185,8 +185,108 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
         y += kRowH;
     }
 
-    y += kRowH;
-    FramebufferDrawString(cx + kMargin, y, "EDIT requires NetAdmin capability (kernel shell: fw add/del)", kFgDim, kBg);
+    // ---------- Active conntrack ----------
+    y += kRowH / 2;
+    if (y + kRowH < cy + ch)
+    {
+        FramebufferDrawString(cx + kMargin, y, "CONNTRACK (recent / active)", kHeaderFg, kBg);
+        y += kRowH;
+    }
+    if (y + kRowH < cy + ch)
+    {
+        FramebufferDrawString(cx + kMargin, y, "PROTO STATE LOCAL                   PEER", kFgDim, kBg);
+        y += kRowH;
+    }
+    duetos::net::firewall::ConntrackEntry ct[duetos::net::firewall::kConntrackCap];
+    const u32 ct_n = duetos::net::firewall::ConntrackSnapshot(ct, duetos::net::firewall::kConntrackCap);
+    if (ct_n == 0 && y + kRowH < cy + ch)
+    {
+        FramebufferDrawString(cx + kMargin, y, "  (no active conntrack entries)", kFgDim, kBg);
+        y += kRowH;
+    }
+    // Show up to 4 most-recent entries; the kernel shell's
+    // `firewall conntrack` is the full surface.
+    const u32 ct_show = (ct_n < 4) ? ct_n : 4;
+    for (u32 i = 0; i < ct_show && y + kRowH < cy + ch; ++i)
+    {
+        const auto& e = ct[i];
+        pos = 0;
+        Append(line, pos, sizeof(line), ProtoName(e.proto));
+        line[pos++] = ' ';
+        Append(line, pos, sizeof(line), duetos::net::firewall::TcpStateName(e.tcp_state));
+        Append(line, pos, sizeof(line), "    ");
+        const u32 lstart = pos;
+        AppendIp(line, pos, sizeof(line), e.local_ip, 32);
+        if (pos < sizeof(line) - 1)
+        {
+            line[pos++] = ':';
+        }
+        AppendU(line, pos, sizeof(line), e.local_port);
+        while (pos - lstart < 21 && pos + 1 < sizeof(line))
+        {
+            line[pos++] = ' ';
+        }
+        line[pos++] = ' ';
+        AppendIp(line, pos, sizeof(line), e.peer_ip, 32);
+        if (pos < sizeof(line) - 1)
+        {
+            line[pos++] = ':';
+        }
+        AppendU(line, pos, sizeof(line), e.peer_port);
+        line[pos] = '\0';
+        FramebufferDrawString(cx + kMargin, y, line, kFg, kBg);
+        y += kRowH;
+    }
+
+    // ---------- Recent denials ----------
+    y += kRowH / 2;
+    if (y + kRowH < cy + ch)
+    {
+        FramebufferDrawString(cx + kMargin, y, "RECENT DENIALS", kHeaderFg, kBg);
+        y += kRowH;
+    }
+    duetos::net::firewall::DenialRecord dl[duetos::net::firewall::kFwLogCap];
+    const u32 dl_n = duetos::net::firewall::FwLogSnapshot(dl, duetos::net::firewall::kFwLogCap);
+    if (dl_n == 0 && y + kRowH < cy + ch)
+    {
+        FramebufferDrawString(cx + kMargin, y, "  (no denials recorded)", kFgDim, kBg);
+        y += kRowH;
+    }
+    // Show the four most-recent denials (newest at the bottom).
+    const u32 dl_show = (dl_n < 4) ? dl_n : 4;
+    const u32 dl_start = dl_n - dl_show;
+    for (u32 i = dl_start; i < dl_n && y + kRowH < cy + ch; ++i)
+    {
+        const auto& r = dl[i];
+        pos = 0;
+        Append(line, pos, sizeof(line), DirName(r.dir));
+        line[pos++] = ' ';
+        Append(line, pos, sizeof(line), ProtoName(r.proto));
+        line[pos++] = ' ';
+        AppendIp(line, pos, sizeof(line), r.src_ip, 32);
+        if (pos < sizeof(line) - 1)
+        {
+            line[pos++] = ':';
+        }
+        AppendU(line, pos, sizeof(line), r.src_port);
+        Append(line, pos, sizeof(line), " -> ");
+        AppendIp(line, pos, sizeof(line), r.dst_ip, 32);
+        if (pos < sizeof(line) - 1)
+        {
+            line[pos++] = ':';
+        }
+        AppendU(line, pos, sizeof(line), r.dst_port);
+        line[pos] = '\0';
+        FramebufferDrawString(cx + kMargin, y, line, kDenyFg, kBg);
+        y += kRowH;
+    }
+
+    y += kRowH / 2;
+    if (y + kRowH < cy + ch)
+    {
+        FramebufferDrawString(cx + kMargin, y, "EDIT via kernel shell: firewall add/del/toggle/default/log/conntrack",
+                              kFgDim, kBg);
+    }
 }
 
 } // namespace
