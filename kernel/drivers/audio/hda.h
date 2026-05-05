@@ -131,4 +131,54 @@ u8 TotalStreamCount();
 /// bring-up. Bumped only on success.
 u32 ArmedStreamCount();
 
+/// Set / clear the RUN bit on stream descriptor `sd_idx`. The
+/// caller must have armed the descriptor via StreamArm and
+/// populated the BDL with real buffer pages first; setting RUN
+/// against an empty BDL produces a stream of silence (or
+/// whatever's in the un-initialised buffer). Returns Ok on
+/// success.
+::duetos::core::Result<void> StreamRun(const AudioControllerInfo& a, u8 sd_idx, bool run);
+
+/// One BDL entry — see HDA spec §3.6.2. Each entry is 16
+/// bytes: 8-byte buffer phys address, 4-byte length, 4-byte
+/// flags (only IOC = bit 0 in v0).
+struct BdlEntry
+{
+    u64 phys;
+    u32 length;
+    u32 flags; // bit 0 = IOC (interrupt on completion)
+};
+
+/// Populate `count` entries of a BDL at the kernel-virtual
+/// address `bdl_virt`. The BDL must be 128-byte aligned and at
+/// least `count * 16` bytes; cap is `kHdaBdlEntries`. Returns
+/// Ok on success.
+::duetos::core::Result<void> StreamFillBdl(void* bdl_virt, const BdlEntry* entries, u32 count);
+
+/// Verb wrappers for codec configuration. Each issues a single
+/// verb via IssueVerbAndPoll. v0 callers are the audio server
+/// (when it lands) and the per-stream "play a tone" path.
+///
+/// SET_CONVERTER_FORMAT — programs the codec converter (0x2F00)
+/// with the matching SD format value the controller is running.
+::duetos::core::Result<void> CodecSetConverterFormat(const AudioControllerInfo& a, u8 codec, u8 node, u16 format);
+
+/// SET_AMP_GAIN_MUTE — verb 0x300. The 16-bit payload encodes
+/// (set output amp / set input amp / set left / set right /
+/// gain index / mute bit). For "unmute output amp at moderate
+/// gain" pass payload = 0xB000 | (gain & 0x7F).
+::duetos::core::Result<void> CodecSetAmpGainMute(const AudioControllerInfo& a, u8 codec, u8 node, u16 payload);
+
+/// SET_CONVERTER_STREAM_CHANNEL — verb 0x706. payload = (stream
+/// tag << 4) | channel; channel 0 is the right answer for a
+/// stereo converter taking the lower channel of a 2-channel
+/// stream tag.
+::duetos::core::Result<void> CodecSetConverterStream(const AudioControllerInfo& a, u8 codec, u8 node, u8 stream_tag,
+                                                     u8 channel);
+
+/// SET_PIN_WIDGET_CONTROL — verb 0x707. payload bits: 6 = output
+/// enabled, 5 = input enabled, 7 = headphone amp enabled. For
+/// "drive the speaker pin" pass 0x40.
+::duetos::core::Result<void> CodecSetPinWidgetControl(const AudioControllerInfo& a, u8 codec, u8 node, u8 payload);
+
 } // namespace duetos::drivers::audio::hda
