@@ -144,6 +144,10 @@ void CmdLsgpt()
         ConsoleWrite("  PARTS ");
         WriteHexCol(d->partition_count, 2);
         ConsoleWriteln("");
+        char guid_str[gpt::kGuidStringLen + 1];
+        gpt::FormatGuid(d->disk_guid, guid_str, sizeof(guid_str));
+        ConsoleWrite("  DISK_GUID ");
+        ConsoleWriteln(guid_str);
         for (duetos::u32 pi = 0; pi < d->partition_count; ++pi)
         {
             const gpt::Partition& p = d->partitions[pi];
@@ -154,26 +158,9 @@ void CmdLsgpt()
             ConsoleWrite(" LAST_LBA ");
             WriteHexCol(p.last_lba, 0);
             ConsoleWriteln("");
+            gpt::FormatGuid(p.type_guid, guid_str, sizeof(guid_str));
             ConsoleWrite("       TYPE ");
-            // Canonical mixed-endian GUID rendering.
-            static constexpr int kOrder[] = {3, 2, 1, 0, -1, 5, 4, -1, 7, 6, -1, 8, 9, -1, 10, 11, 12, 13, 14, 15};
-            for (int k = 0; k < 20; ++k)
-            {
-                const int idx = kOrder[k];
-                if (idx < 0)
-                {
-                    ConsoleWriteChar('-');
-                }
-                else
-                {
-                    const duetos::u8 b = p.type_guid[idx];
-                    const char hi = (b >> 4) < 10 ? char('0' + (b >> 4)) : char('A' + (b >> 4) - 10);
-                    const char lo = (b & 0xF) < 10 ? char('0' + (b & 0xF)) : char('A' + (b & 0xF) - 10);
-                    ConsoleWriteChar(hi);
-                    ConsoleWriteChar(lo);
-                }
-            }
-            ConsoleWriteln("");
+            ConsoleWriteln(guid_str);
         }
     }
 }

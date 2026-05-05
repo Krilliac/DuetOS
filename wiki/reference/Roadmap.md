@@ -315,9 +315,18 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
 
 ### Disk installer
 
-- **Today:** boots from ISO only. Live system; no install.
-- **Blocks on:** GPT write (probe-only today), FAT32 mkfs (no
-  in-kernel BPB-laydown), bootloader copy.
+- **Today:** boots from ISO only. Live system; no install. The
+  building blocks exist — `fs::gpt::GptInitDisk` writes a fresh
+  GPT (PMBR + primary header + entries + backup header),
+  `fs::fat32::Fat32Format` lays down a FAT32 BPB on a partition,
+  and `fs::gpt::FormatGuid` renders 16-byte GUIDs for diagnostics
+  / installer-step UI.
+- **Blocks on:** the orchestration layer (a userland or shell
+  installer that walks "pick disk → confirm erase → GPT-init →
+  FAT32-format → copy kernel + initrd → install bootloader") and
+  bootloader copy (a writer that puts a UEFI-loadable image into
+  the ESP). The DESTRUCTIVE primitives intentionally don't ship
+  user-facing surfaces yet — that's the shell-command slice.
 
 ### System updater
 

@@ -612,6 +612,41 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 116 — gpt::FormatGuid + corrected disk-installer Roadmap
+
+- **Scope:** `kernel/fs/gpt.{h,cpp}` (new `kGuidStringLen`,
+  `FormatGuid(guid, *out, cap)`), `kernel/shell/shell_storage.cpp`
+  (`CmdLsgpt` switches to `FormatGuid`; also prints `DISK_GUID`,
+  which it never did before), `wiki/reference/Roadmap.md`
+  (corrected the "Disk installer" entry).
+- **Decision:** Extract the canonical mixed-endian (8-4-4-4-12)
+  GUID renderer the shell had open-coded into a public
+  `gpt::FormatGuid` so other callers (a future installer wizard,
+  GPT diagnostics, `gpt-info` shell command) don't recopy the
+  byte-order table. The shell `lsgpt` output gains the disk's
+  top-level GUID line — it's been in `Disk::disk_guid` since
+  GptProbe parsed the header but no command surfaced it.
+- **Why:** The Roadmap's "Disk installer" entry claimed GPT
+  write and FAT32 mkfs were "blocks on" the installer; both
+  primitives have actually been in tree since GptInitDisk and
+  Fat32Format landed. The corrected entry makes the real gap
+  ("orchestration layer + bootloader copy") legible to the next
+  contributor instead of pointing them at code that already
+  works. Extracting `FormatGuid` is the smallest sub-step that
+  also eliminates a duplicated byte-order table.
+- **Rules out / defers:** `ParseGuidString` (the inverse —
+  installer wizard will need it once a user can type a GUID).
+  Lowercase rendering (Microsoft + UEFI canon is uppercase; we
+  match). Locale-aware separators (none needed).
+- **Revisit when:** A user-typed GUID lands in a shell command
+  (mkpart / installer); add `ParseGuid`. A non-canonical render
+  (lower / no-hyphen) becomes load-bearing for diff readability
+  in a future test fixture.
+- **Related tracks:** Track 3 (Filesystem — disk installer
+  building blocks).
+
+---
+
 ## 115 — /APPS manifests can launch PE/ELF binaries from FAT32
 
 - **Scope:** `kernel/drivers/video/start_menu_apps.{h,cpp}`
