@@ -130,6 +130,7 @@
 #include "apps/browser.h"
 #include "apps/calendar.h"
 #include "apps/clock.h"
+#include "apps/notify_center.h"
 #include "apps/devicemgr.h"
 #include "apps/files.h"
 #include "apps/firewall.h"
@@ -1952,6 +1953,19 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::drivers::video::ThemeRegisterWindow(Role::Calendar, calendar_handle);
     duetos::apps::calendar::CalendarInit(calendar_handle);
     DUETOS_BOOT_SELFTEST(duetos::apps::calendar::CalendarSelfTest());
+
+    // NOTIFICATION CENTER — windowed reader over the toast
+    // history ring kept in drivers/video/notify.cpp. Same
+    // info-panel chrome family as Calendar / Browser / About.
+    duetos::drivers::video::WindowChrome notify_chrome = theme_chrome(Role::NotifyCenter);
+    notify_chrome.x = 280;
+    notify_chrome.y = 120;
+    notify_chrome.w = 380;
+    notify_chrome.h = 240;
+    const duetos::drivers::video::WindowHandle notify_handle =
+        duetos::drivers::video::WindowRegister(notify_chrome, "NOTIFICATIONS");
+    duetos::drivers::video::ThemeRegisterWindow(Role::NotifyCenter, notify_handle);
+    duetos::apps::notify_center::NotifyCenterInit(notify_handle);
 
     // NETWORK STATUS — read-only viewer over net::stack accessors.
     // No ThemeRole today; the chrome is seeded from Settings'
@@ -3898,6 +3912,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     {
                         app_consumed = duetos::apps::calendar::CalendarFeedArrow(static_cast<duetos::u16>(ev.code));
                     }
+                    else if (active == duetos::apps::notify_center::NotifyCenterWindow() &&
+                             (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyPageUp ||
+                              ev.code == kKeyPageDown))
+                    {
+                        app_consumed =
+                            duetos::apps::notify_center::NotifyCenterFeedArrow(static_cast<duetos::u16>(ev.code));
+                    }
                     else if (active == duetos::apps::notes::NotesWindow() &&
                              (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyArrowLeft ||
                               ev.code == kKeyArrowRight || ev.code == kKeyHome || ev.code == kKeyEnd ||
@@ -3954,6 +3975,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                             else if (active == duetos::apps::clock::ClockWindow())
                             {
                                 app_consumed = duetos::apps::clock::ClockFeedChar(c);
+                            }
+                            else if (active == duetos::apps::notify_center::NotifyCenterWindow())
+                            {
+                                app_consumed = duetos::apps::notify_center::NotifyCenterFeedChar(c);
                             }
                         }
                     }
