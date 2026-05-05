@@ -228,6 +228,14 @@ constinit const u8 kWaitMask[kCursorHeight][kCursorWidth] = {
 // the four sprites declared above.
 constinit const u8 (*g_active_mask)[kCursorWidth] = kArrowMask;
 constinit CursorShape g_active_shape = CursorShape::Arrow;
+
+// Custom cursor cache. Each slot holds a 12×20 mask buffer
+// plus an "in use" flag. Slot ids are 256+slot_idx so the
+// public API can't collide with the CursorShape enum values
+// (0..7).
+constinit u8 g_custom_masks[kCustomCursorMax][kCursorHeight][kCursorWidth] = {};
+constinit bool g_custom_in_use[kCustomCursorMax] = {};
+constinit u32 g_active_custom_id = 0; // 0 = none; ≥ kCustomCursorIdBase = active
 // Wait stack — refcounted. CursorPushWait increments + sets
 // shape to Wait; CursorPopWait decrements and restores the
 // pre-push shape on the last balance.
@@ -482,20 +490,21 @@ const u8 (*MaskFor(CursorShape s))[kCursorWidth]
 
 void CursorSetShape(CursorShape s)
 {
-    if (s == g_active_shape)
+    // The change-gate is special-cased: when a custom cursor
+    // is active, the comparison against g_active_shape is
+    // meaningless (we always set Arrow as a sentinel). So
+    // skip the gate when transitioning OUT of a custom id.
+    if (s == g_active_shape && g_active_custom_id == 0)
     {
         return;
     }
-    // Restore the backing under the OLD sprite before swapping
-    // masks — the masks differ pixel-for-pixel, so a Save under
-    // the new mask without restoring the old leaks ghost pixels
-    // around the cursor edges.
     if (g_ready)
     {
         RestoreAt(g_x, g_y);
     }
     g_active_shape = s;
     g_active_mask = MaskFor(s);
+    g_active_custom_id = 0;
     if (g_ready)
     {
         SaveAt(g_x, g_y);
@@ -528,6 +537,60 @@ void CursorPopWait()
     if (g_wait_depth == 0)
     {
         CursorSetShape(g_pre_wait_shape);
+    }
+}
+
+u32 CursorRegisterCustom(const u8* mask_240)
+{
+    if (mask_240 == nullptr)
+        return 0;
+    for (u32 i = 0; i < kCustomCursorMax; ++i)
+    {
+        if (g_custom_in_use[i])
+            continue;
+        for (u32 y = 0; y < kCursorHeight; ++y)
+        {
+            for (u32 x = 0; x < kCursorWidth; ++x)
+            {
+                const u8 v = mask_240[y * kCursorWidth + x];
+                // Clamp out-of-range values to transparent so a
+                // malformed PE upload can't paint garbage.
+                g_custom_masks[i][y][x] = (v <= 2) ? v : 0;
+            }
+        }
+        g_custom_in_use[i] = true;
+        return kCustomCursorIdBase + i;
+    }
+    return 0; // table full
+}
+
+void CursorSetShapeCustom(u32 custom_id)
+{
+    if (custom_id < kCustomCursorIdBase || custom_id >= kCustomCursorIdBase + kCustomCursorMax)
+    {
+        // Not a custom id — fall back to Arrow.
+        CursorSetShape(CursorShape::Arrow);
+        return;
+    }
+    const u32 idx = custom_id - kCustomCursorIdBase;
+    if (!g_custom_in_use[idx])
+    {
+        CursorSetShape(CursorShape::Arrow);
+        return;
+    }
+    if (g_active_custom_id == custom_id)
+        return; // change-gate
+    if (g_ready)
+    {
+        RestoreAt(g_x, g_y);
+    }
+    g_active_mask = g_custom_masks[idx];
+    g_active_shape = CursorShape::Arrow; // sentinel — MaskFor isn't consulted
+    g_active_custom_id = custom_id;
+    if (g_ready)
+    {
+        SaveAt(g_x, g_y);
+        DrawAt(g_x, g_y);
     }
 }
 

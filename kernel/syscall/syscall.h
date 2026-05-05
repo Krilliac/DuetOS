@@ -1692,6 +1692,18 @@ enum SyscallNumber : u64
     //         WM_SETCURSOR completion).
     // Out-of-range `shape` is clamped to Arrow.
     SYS_GDI_SET_CURSOR = 174,
+
+    // SYS_GDI_CREATE_CURSOR — register a custom cursor sprite
+    // from PE-side memory. Returns a u32 HCURSOR sentinel
+    // (≥ 256) the PE then hands to SetCursor via the existing
+    // SYS_GDI_SET_CURSOR path.
+    //   rdi = const u8* mask_ptr   // 240 bytes (12*20). Each
+    //                               // byte: 0=transparent,
+    //                               // 1=outline, 2=fill.
+    //   rsi = u32 size             // sanity-check; must == 240
+    //   rax = HCURSOR sentinel (≥ 256), or 0 on failure
+    //         (table full / size mismatch / bad pointer).
+    SYS_GDI_CREATE_CURSOR = 175,
 };
 
 /// Cursor-shape values the PE side hands the kernel via

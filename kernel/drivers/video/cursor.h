@@ -124,4 +124,21 @@ void CursorPushWait();
 /// if other pushes are still outstanding.
 void CursorPopWait();
 
+/// Register a custom 12×20 sprite from a caller-provided
+/// mask buffer. The buffer is 240 bytes; each byte is one of:
+///   0 = transparent
+///   1 = outline (drawn in the active outline colour)
+///   2 = fill (drawn in the active fill colour)
+/// Returns a slot id (≥ 256) that callers pass to
+/// CursorSetShapeCustom; or 0 on failure (table full / nullptr
+/// mask). Slot ids stay valid for the rest of the boot.
+constexpr u32 kCustomCursorIdBase = 256;
+constexpr u32 kCustomCursorMax = 16;
+u32 CursorRegisterCustom(const u8* mask_240);
+
+/// Switch to a custom sprite previously registered via
+/// CursorRegisterCustom. Out-of-range / unregistered ids fall
+/// back to Arrow. Same change-gate semantics as CursorSetShape.
+void CursorSetShapeCustom(u32 custom_id);
+
 } // namespace duetos::drivers::video

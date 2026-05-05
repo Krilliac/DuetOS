@@ -3199,8 +3199,21 @@ void SyscallDispatch(arch::TrapFrame* frame)
         const u32 req = static_cast<u32>(frame->rdi);
         using duetos::drivers::video::CursorGetShape;
         using duetos::drivers::video::CursorSetShape;
+        using duetos::drivers::video::CursorSetShapeCustom;
         using duetos::drivers::video::CursorShape;
+        using duetos::drivers::video::kCustomCursorIdBase;
+        using duetos::drivers::video::kCustomCursorMax;
         const CursorShape prev = CursorGetShape();
+        // Custom HCURSOR (slot id ≥ 256) routes through the
+        // CursorSetShapeCustom path; the previous-shape return
+        // collapses to Arrow because the kernel doesn't track
+        // which custom id was active before.
+        if (req >= kCustomCursorIdBase && req < kCustomCursorIdBase + kCustomCursorMax)
+        {
+            CursorSetShapeCustom(req);
+            frame->rax = static_cast<u64>(prev);
+            return;
+        }
         CursorShape want = CursorShape::Arrow;
         switch (req)
         {
@@ -3238,6 +3251,32 @@ void SyscallDispatch(arch::TrapFrame* frame)
             CursorSetShape(want);
         }
         frame->rax = static_cast<u64>(prev);
+        return;
+    }
+    case SYS_GDI_CREATE_CURSOR:
+    {
+        // PE registers a custom 12×20 cursor. rdi = mask_ptr,
+        // rsi = size (must == 240).
+        const u64 mask_va = frame->rdi;
+        const u32 size = static_cast<u32>(frame->rsi);
+        constexpr u32 kExpected = 12 * 20;
+        if (size != kExpected || mask_va == 0)
+        {
+            frame->rax = 0;
+            return;
+        }
+        u8 mask_buf[kExpected];
+        // mm::CopyFromUser validates the source range against
+        // the calling Process's address space ledger + gates
+        // SMAP — same pattern every other byte-buffer syscall
+        // uses.
+        if (!mm::CopyFromUser(mask_buf, reinterpret_cast<const void*>(mask_va), kExpected))
+        {
+            frame->rax = 0;
+            return;
+        }
+        const u32 id = duetos::drivers::video::CursorRegisterCustom(mask_buf);
+        frame->rax = id;
         return;
     }
     case SYS_WIN_SET_CURSOR:

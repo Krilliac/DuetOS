@@ -50,6 +50,7 @@ typedef void* HANDLE;
 #define SYS_WIN_GET_CURSOR 78
 #define SYS_WIN_SET_CURSOR 79
 #define SYS_GDI_SET_CURSOR 174
+#define SYS_GDI_CREATE_CURSOR 175
 
 /* GdiCursorShape — keep in sync with kernel/syscall/syscall.h. */
 #define DUETOS_CURSOR_ARROW 0
@@ -1519,6 +1520,75 @@ __declspec(dllexport) int ShowCursor(BOOL show)
 {
     (void)show;
     return 0;
+}
+
+/* CreateCursor — register a custom 12x20 sprite. Win32's
+ * signature takes hInstance + xHotSpot + yHotSpot + ANDmask +
+ * XORmask; v1 simplifies to a single 240-byte mask buffer in
+ * the kernel's tri-state encoding (0=transparent, 1=outline,
+ * 2=fill). Callers that hand a Win32-shaped AND/XOR pair can
+ * convert by walking each (and_bit, xor_bit) pair:
+ *   AND=0 XOR=0  -> 1 (outline / black)
+ *   AND=0 XOR=1  -> 2 (fill / white)
+ *   AND=1 XOR=0  -> 0 (transparent)
+ *   AND=1 XOR=1  -> 0 (inverter — degraded to transparent)
+ *
+ * Hotspot coordinates aren't honoured today; the kernel's
+ * cursor anchors at (0, 0) of the sprite. Real Win32 hotspot
+ * support waits on a follow-up. */
+__declspec(dllexport) HANDLE DuetOsCreateCursor(const unsigned char* mask_240)
+{
+    long long h = 0;
+    asm volatile("syscall"
+                 : "=a"(h)
+                 : "a"((long long)SYS_GDI_CREATE_CURSOR), "D"((long long)(unsigned long long)mask_240),
+                   "S"((long long)(12 * 20))
+                 : "memory", "rcx", "r11");
+    return (HANDLE)(unsigned long long)h;
+}
+
+/* Win32-shaped CreateCursor. Sprites bigger than 12x20 are
+ * downsampled to fit; smaller sprites are letterboxed. The
+ * AND/XOR mask pair is walked into the kernel's tri-state
+ * encoding per the helper above. Hot-spot coords are noted
+ * but not honoured by the kernel. */
+__declspec(dllexport) HANDLE CreateCursor(HANDLE hInstance, int xHot, int yHot, int width, int height,
+                                          const void* and_mask, const void* xor_mask)
+{
+    (void)hInstance;
+    (void)xHot;
+    (void)yHot;
+    /* v1: only the 12x20 case is supported — anything else
+     * returns IDC_ARROW so the caller still has a usable
+     * cursor. AND / XOR are 1 bit per pixel, packed MSB-first
+     * into rows aligned up to a multiple of 16 bits per
+     * Win32. */
+    if (width != 12 || height != 20 || and_mask == 0 || xor_mask == 0)
+        return (HANDLE)(unsigned long long)IDC_ARROW;
+    const unsigned char* a = (const unsigned char*)and_mask;
+    const unsigned char* x = (const unsigned char*)xor_mask;
+    unsigned char m[12 * 20];
+    /* Stride for a 12-px row, MSB-first, padded to 16 bits = 2 bytes. */
+    const int stride = 2;
+    for (int row = 0; row < 20; ++row)
+    {
+        for (int col = 0; col < 12; ++col)
+        {
+            const int byte = row * stride + (col / 8);
+            const int bit = 7 - (col % 8);
+            const unsigned char ab = (a[byte] >> bit) & 1;
+            const unsigned char xb = (x[byte] >> bit) & 1;
+            unsigned char v = 0;
+            if (ab == 0 && xb == 0)
+                v = 1; /* outline */
+            else if (ab == 0 && xb == 1)
+                v = 2; /* fill */
+            /* AND=1 XOR={0,1} → transparent (XOR=1 is the
+             * Win32 inverter colour we degrade to clear). */
+            m[row * 12 + col] = v;
+        }
+    }
+    return DuetOsCreateCursor(m);
 }
 
 /* --- Clipboard --- */
