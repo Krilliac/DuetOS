@@ -2723,10 +2723,8 @@ __declspec(dllexport) BOOL WriteFile(HANDLE hFile, const void* buf, DWORD n, DWO
         long long rv;
         __asm__ volatile("int $0x80"
                          : "=a"(rv)
-                         : "a"((long long)43),  /* SYS_FILE_WRITE */
-                           "D"((long long)h_raw),
-                           "S"((long long)buf),
-                           "d"((long long)n)
+                         : "a"((long long)43), /* SYS_FILE_WRITE */
+                           "D"((long long)h_raw), "S"((long long)buf), "d"((long long)n)
                          : "memory");
         const int ok = (rv >= 0 && (unsigned long long)rv != ~0ULL);
         if (lpWritten != (DWORD*)0)
