@@ -107,4 +107,24 @@ u64 FreeFramesCount();
 /// looks wrong.
 void FrameAllocatorSelfTest();
 
+/// Test-only OOM injection. After `n_remaining` successful AllocateFrame /
+/// AllocateContiguousFrames calls, the next call returns `kNullFrame` as if
+/// the pool were exhausted. Decrements per call. Use 0 to disable.
+///
+/// Used exclusively by the loader-unwind self-tests in
+/// `kernel/diag/robustness_selftest.cpp` to drive PE/ELF loaders into
+/// every leg of their allocation ladder. Not for production code paths.
+void FrameAllocatorSetFailAfter(u64 n_remaining);
+
+/// Read the current value of the fail-after counter. 0 means injection is
+/// disabled. Used by the self-tests to assert the injection actually fired.
+u64 FrameAllocatorGetFailAfter();
+
+/// Boot-time self-test for FrameAllocatorSetFailAfter / GetFailAfter.
+/// Allocates N frames, injects OOM after one more, asserts the next
+/// AllocateFrame returns kNullFrame, then verifies normal allocation
+/// resumes after the counter is consumed. Frees everything it allocates.
+/// Panics on regression.
+void FrameAllocatorOomInjectionSelfTest();
+
 } // namespace duetos::mm

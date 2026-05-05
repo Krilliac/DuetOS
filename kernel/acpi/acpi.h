@@ -198,4 +198,12 @@ u32 SsdtLength(u64 index);
 /// the battery's current state this way, just its declaration.
 bool AmlContainsName(const char* name4);
 
+/// Boot-time self-test for the parser-underflow guards added when a
+/// hostile / malformed firmware ships an ACPI table whose
+/// `header.length` is smaller than its struct size. Invoked from
+/// `kernel_main` after AcpiInit so the test runs on an already-online
+/// table cache; saves and restores the live state so re-running it is
+/// idempotent. Panics on guard regression.
+void AcpiUnderflowSelfTest();
+
 } // namespace duetos::acpi

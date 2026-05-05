@@ -28,6 +28,7 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
+#include "debug/probes.h"
 #include "log/klog.h"
 #include "core/panic.h"
 #include "mm/multiboot2.h"
@@ -564,7 +565,9 @@ void CollectSsdts(const Rsdp& rsdp)
     if (rsdp.revision >= 2 && rsdp.xsdt_address != 0)
     {
         const auto* xsdt = PhysToHeader(rsdp.xsdt_address);
-        const u64 count = (xsdt->length - sizeof(SdtHeader)) / sizeof(u64);
+        // Underflow guard: malformed firmware could ship `length <
+        // sizeof(SdtHeader)`. Treat as zero entries.
+        const u64 count = (xsdt->length >= sizeof(SdtHeader)) ? (xsdt->length - sizeof(SdtHeader)) / sizeof(u64) : 0;
         const auto* entries = reinterpret_cast<const u64*>(reinterpret_cast<uptr>(xsdt) + sizeof(SdtHeader));
         for (u64 i = 0; i < count; ++i)
         {
@@ -577,7 +580,8 @@ void CollectSsdts(const Rsdp& rsdp)
         return;
     }
     const auto* rsdt = PhysToHeader(rsdp.rsdt_address);
-    const u64 count = (rsdt->length - sizeof(SdtHeader)) / sizeof(u32);
+    // Same underflow guard for the RSDT path.
+    const u64 count = (rsdt->length >= sizeof(SdtHeader)) ? (rsdt->length - sizeof(SdtHeader)) / sizeof(u32) : 0;
     const auto* entries = reinterpret_cast<const u32*>(reinterpret_cast<uptr>(rsdt) + sizeof(SdtHeader));
     for (u64 i = 0; i < count; ++i)
     {
@@ -607,11 +611,17 @@ void ParseHpet(const HpetTable& hpet)
 
 void ParseMcfg(const McfgTable& mcfg)
 {
-    const u64 entries_bytes = mcfg.header.length - sizeof(McfgTable);
-    if (entries_bytes < sizeof(McfgEntry))
+    // Subtractive bound: a malformed firmware can ship a table whose
+    // header.length is smaller than sizeof(McfgTable). The subtraction
+    // below would then wrap to a huge u64 and the loop reads OOB. Pin
+    // the underflow before it can wrap.
+    if (mcfg.header.length < sizeof(McfgTable) + sizeof(McfgEntry))
     {
-        return; // MCFG table with zero entries — treat as absent
+        KLOG_WARN_V("acpi", "MCFG truncated; header.length", mcfg.header.length);
+        KBP_PROBE_V(::duetos::debug::ProbeId::kAcpiMcfgTruncated, mcfg.header.length);
+        return;
     }
+    const u64 entries_bytes = mcfg.header.length - sizeof(McfgTable);
 
     const auto* first = reinterpret_cast<const McfgEntry*>(reinterpret_cast<uptr>(&mcfg) + sizeof(McfgTable));
 
@@ -1090,6 +1100,49 @@ bool AcpiShutdown()
     for (u32 i = 0; i < 1'000'000; ++i)
         asm volatile("pause" ::: "memory");
     return false;
+}
+
+void AcpiUnderflowSelfTest()
+{
+    // Save live MCFG state so the test is idempotent — running this
+    // can't perturb a real PCIe ECAM cache primed by AcpiInit.
+    const u64 saved_addr = g_mcfg_address;
+    const u8 saved_start = g_mcfg_start_bus;
+    const u8 saved_end = g_mcfg_end_bus;
+
+    // Force a deliberately-not-zero sentinel into g_mcfg_address so we
+    // can prove ParseMcfg's early-return preserved it. (If the guard
+    // regressed, the corrupt count loop would either trip a fault or
+    // overwrite this value with whatever bytes lie past the synthetic
+    // table.)
+    g_mcfg_address = 0xDEADBEEFCAFEBABEULL;
+
+    // Synthesize a malformed MCFG: header.length = sizeof(SdtHeader),
+    // which is smaller than sizeof(McfgTable). The pre-fix code did
+    // `entries_bytes = length - sizeof(McfgTable)` which underflows to
+    // ~UINT64_MAX, then divides by sizeof(McfgEntry) and walks every
+    // resulting "entry" — reading megabytes off the end of our buffer.
+    McfgTable bogus = {};
+    bogus.header.signature[0] = 'M';
+    bogus.header.signature[1] = 'C';
+    bogus.header.signature[2] = 'F';
+    bogus.header.signature[3] = 'G';
+    bogus.header.length = sizeof(SdtHeader); // < sizeof(McfgTable)
+    bogus.header.revision = 1;
+
+    ParseMcfg(bogus);
+
+    if (g_mcfg_address != 0xDEADBEEFCAFEBABEULL)
+    {
+        core::Panic("acpi", "AcpiUnderflowSelfTest: ParseMcfg wrote past truncated header");
+    }
+
+    // Restore live state.
+    g_mcfg_address = saved_addr;
+    g_mcfg_start_bus = saved_start;
+    g_mcfg_end_bus = saved_end;
+
+    arch::SerialWrite("[acpi-test] underflow guards PASS\n");
 }
 
 } // namespace duetos::acpi

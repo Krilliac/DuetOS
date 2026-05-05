@@ -224,6 +224,7 @@
 #include "subsystems/win32/registry.h"
 #include "subsystems/win32/window_syscall.h"
 #include "loader/dll_loader.h"
+#include "loader/elf_loader.h"
 #include "shell/shell.h"
 #include "syscall/syscall.h"
 #include "mm/kheap.h"
@@ -1285,6 +1286,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                            FrameAllocatorSelfTest();
                                            return duetos::core::Result<void>{};
                                        });
+        // Robustness — frame allocator OOM injection hook used by
+        // the loader unwind self-tests below.
+        duetos::core::InitcallRegister(duetos::core::Phase::PhysMem, "frame-oom-injection-selftest",
+                                       []()
+                                       {
+                                           duetos::mm::FrameAllocatorOomInjectionSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
         // mm/zone scaffold (plan C1) — additive layer over the
         // global frame allocator; v0 forwards every zone request
         // to the same pool.
@@ -2177,6 +2186,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Parsing ACPI tables.\n");
     duetos::acpi::AcpiInit(multiboot_info);
+    DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiUnderflowSelfTest());
     SerialWrite("[boot] Building AML namespace from DSDT/SSDT.\n");
     duetos::acpi::AmlNamespaceBuild();
     {
@@ -4875,6 +4885,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // heartbeat thread, etc.).
     if constexpr (duetos::core::kBootSelfTests)
     {
+        duetos::core::InitcallRegister(duetos::core::Phase::Userland, "elf-loader-unwind-selftest",
+                                       []()
+                                       {
+                                           duetos::core::ElfLoaderUnwindSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
         duetos::core::InitcallRegister(duetos::core::Phase::Userland, "dll-loader-selftest",
                                        []()
                                        {

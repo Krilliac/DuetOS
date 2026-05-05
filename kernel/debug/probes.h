@@ -43,18 +43,25 @@ enum class ProbeId : u8
 {
     // Rare, high-signal events — armed-log by default. A clean
     // boot log will show most of these at least once.
-    kPanicEnter,       // core::Panic called — about to halt
-    kSandboxDenialCap, // a capability-gated syscall was denied
-    kWin32StubMiss,    // an unresolved Win32 import got hit
-    kKernelPageFault,  // #PF from ring 0 — always a bug, always logged
-    kKernelGpf,        // #GP from ring 0 — always a bug, always logged
-    kKernelUd,         // #UD from ring 0 — invalid opcode, always a bug
-    kHeapAllocFail,    // KMalloc returned nullptr (kheap pool exhausted)
-    kPhysAllocFail,    // AllocateFrame returned kNullFrame (physical OOM)
-    kSmpApOnline,      // a secondary CPU finished bring-up; boot diagnostic
-    kBootSelftestFail, // a boot-time self-test reported FAIL; armed-log so
-                       // GDB can `b duetos::debug::ProbeFire` and break
-                       // immediately when a smoke regression first appears
+    kPanicEnter,        // core::Panic called — about to halt
+    kSandboxDenialCap,  // a capability-gated syscall was denied
+    kWin32StubMiss,     // an unresolved Win32 import got hit
+    kKernelPageFault,   // #PF from ring 0 — always a bug, always logged
+    kKernelGpf,         // #GP from ring 0 — always a bug, always logged
+    kKernelUd,          // #UD from ring 0 — invalid opcode, always a bug
+    kHeapAllocFail,     // KMalloc returned nullptr (kheap pool exhausted)
+    kPhysAllocFail,     // AllocateFrame returned kNullFrame (physical OOM)
+    kSmpApOnline,       // a secondary CPU finished bring-up; boot diagnostic
+    kBootSelftestFail,  // a boot-time self-test reported FAIL; armed-log so
+                        // GDB can `b duetos::debug::ProbeFire` and break
+                        // immediately when a smoke regression first appears
+    kAcpiMcfgTruncated, // ACPI MCFG header.length too small for any entry —
+                        // firmware bug or hostile table; fire and skip
+    kPeLoaderOom,       // PeLoad ran out of frames partway through the
+                        // alloc ladder; the unwind guard freed everything
+    kElfLoaderOom,      // ElfLoad ran out of frames mid-segment; same
+    kProbeFail,         // a driver vendor probe returned false; device
+                        // skipped and any pre-probe MMIO mapping unwound
 
     // Medium-frequency events — disarmed by default, the
     // operator arms these when hunting a specific issue.

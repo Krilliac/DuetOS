@@ -152,6 +152,55 @@ struct PeHeaders
     u64 entry_rva;
 };
 
+// Allocation-ladder unwind for PeLoad. PE startup maps headers,
+// every section, a stack, a TEB, a proc-env page, and the Win32
+// stubs region — five+ allocation phases that each can fail
+// independently. Without an unwind, a partial-failure leaks every
+// frame mapped before the failing leg (~20+ frames + VA mappings).
+//
+// Contract: every successful AddressSpaceMapUserPage inside PeLoad
+// (and the helpers it delegates to) is followed by a Track(va)
+// call. The destructor walks the tracked VAs in reverse order and
+// calls AddressSpaceUnmapUserPage, which both clears the PTE and
+// frees the underlying frame (see kernel/mm/address_space.cpp:446).
+// PeLoad disarms the guard on success — the destructor then no-ops.
+//
+// Cap sized for the v0 worst case: kV0StackPages (16) + 1 TEB + 1
+// env + 2 stubs + sections (~16 pages typical, ~256 worst case for
+// large images) + headers (1-2 pages). 1024 leaves comfortable
+// headroom; if a future PE legitimately exceeds it, the KASSERT in
+// Track fires at the boundary so the leak doesn't go silent.
+struct LoaderUnwindGuard
+{
+    static constexpr u64 kMaxTrackedVas = 1024;
+    duetos::mm::AddressSpace* as = nullptr;
+    u64 vas[kMaxTrackedVas] = {};
+    u32 count = 0;
+    bool armed = true;
+
+    void Track(u64 va)
+    {
+        if (count >= kMaxTrackedVas)
+        {
+            arch::SerialWrite("[pe-load] LoaderUnwindGuard cap exceeded — leak hazard\n");
+            return;
+        }
+        vas[count++] = va;
+    }
+
+    void Disarm() { armed = false; }
+
+    ~LoaderUnwindGuard()
+    {
+        if (!armed || as == nullptr)
+            return;
+        // Walk in reverse so paging table levels are torn down in
+        // the same order they were built up.
+        for (u32 i = count; i > 0; --i)
+            duetos::mm::AddressSpaceUnmapUserPage(as, vas[i - 1]);
+    }
+};
+
 // Read a NUL-terminated ASCII string at `file[off..]` with
 // bounds checks. Returns nullptr if we can't prove there's a
 // NUL before the buffer ends — callers treat that as "skip,
@@ -358,7 +407,7 @@ PeStatus ParseHeaders(const u8* file, u64 file_len, PeHeaders& out)
 //     file[PointerToRawData..] into memory at
 //     ImageBase + VirtualAddress.
 //   - Characteristics bits pick the mapping flags.
-bool MapSection(const u8* file, const u8* sec, u64 image_base, duetos::mm::AddressSpace* as)
+bool MapSection(const u8* file, const u8* sec, u64 image_base, duetos::mm::AddressSpace* as, LoaderUnwindGuard& guard)
 {
     using namespace duetos::mm;
     const u32 virt_addr = LeU32(sec + kSectionHeaderVirtualAddress);
@@ -413,6 +462,7 @@ bool MapSection(const u8* file, const u8* sec, u64 image_base, duetos::mm::Addre
                 frame_direct[page_off + i] = file[file_off + i];
         }
         AddressSpaceMapUserPage(as, page_va, frame, flags);
+        guard.Track(page_va);
     }
     return true;
 }
@@ -424,7 +474,8 @@ bool MapSection(const u8* file, const u8* sec, u64 image_base, duetos::mm::Addre
 // keeps the image layout at runtime isomorphic to the on-disk
 // layout — important for a future slice that runs a DLL
 // resolver.
-bool MapHeaders(const u8* file, u64 sizeof_headers, u64 image_base, duetos::mm::AddressSpace* as)
+bool MapHeaders(const u8* file, u64 sizeof_headers, u64 image_base, duetos::mm::AddressSpace* as,
+                LoaderUnwindGuard& guard)
 {
     using namespace duetos::mm;
     const u64 start = image_base & ~kPageMask;
@@ -444,6 +495,7 @@ bool MapHeaders(const u8* file, u64 sizeof_headers, u64 image_base, duetos::mm::
         for (u64 i = 0; i < n; ++i)
             direct[i] = file[file_off + i];
         AddressSpaceMapUserPage(as, page_va, frame, kPagePresent | kPageUser | kPageNoExecute);
+        guard.Track(page_va);
     }
     return true;
 }
@@ -1052,7 +1104,10 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
     }
 
     const u64 tbl_off = RvaToFile(file, h, imp.rva);
-    if (tbl_off == ~u64(0) || tbl_off + imp.size > file_len)
+    // Subtractive bound: `tbl_off + imp.size > file_len` wraps on
+    // hostile inputs where tbl_off is near UINT64_MAX. Compare via
+    // subtraction so wraparound can't bracket the buffer end.
+    if (tbl_off == ~u64(0) || tbl_off > file_len || imp.size > file_len - tbl_off)
     {
         SerialWrite("[pe-resolve] import table rva out of bounds\n");
         return false;
@@ -1217,7 +1272,7 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
                 // pattern reads a real argv pointer instead of zero.
                 const bool data_named = is_data && win32::Win32ThunksLookupDataNamed(fn_name, &stub_va);
                 const bool ok = data_named ? true
-                              : is_data    ? win32::Win32ThunksLookupDataCatchAll(&stub_va)
+                                : is_data  ? win32::Win32ThunksLookupDataCatchAll(&stub_va)
                                            : win32::Win32ThunksLookupCatchAll(&stub_va);
                 if (!ok)
                 {
@@ -1230,7 +1285,7 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
                 }
                 is_noop_stub = true;
                 const char* msg = data_named ? "data import -> proc-env named slot"
-                                : is_data    ? "unknown import -> data-miss zero pad"
+                                  : is_data  ? "unknown import -> data-miss zero pad"
                                              : "unknown import -> catch-all NO-OP";
                 core::LogWithString(core::LogLevel::Warn, "pe-resolve", msg, "fn", fn_name);
                 core::LogWithString(core::LogLevel::Warn, "pe-resolve", "  from", "dll", dll_name);
@@ -1386,12 +1441,20 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     SerialWriteHex(h.section_count);
     SerialWrite("\n");
 
+    // Allocation-ladder unwind. Every successful frame map is
+    // tracked in `guard`; if PeLoad early-returns from any of the
+    // failure legs below, the destructor walks the tracked VAs and
+    // unmaps + frees each one. Disarmed at the bottom on success.
+    LoaderUnwindGuard guard;
+    guard.as = as;
+
     // 1. Map PE headers (RO, NX) at ImageBase. Loader
     //    convention — makes __ImageBase usable from ring 3.
     const u64 sizeof_headers = LeU32(file + h.opt_base + kOptHeaderSizeOfHeaders);
-    if (!MapHeaders(file, sizeof_headers, h.image_base, as))
+    if (!MapHeaders(file, sizeof_headers, h.image_base, as, guard))
     {
         SerialWrite("[pe-load] FAIL MapHeaders\n");
+        KBP_PROBE(::duetos::debug::ProbeId::kPeLoaderOom);
         return r;
     }
     SerialWrite("[pe-load] step1 headers mapped\n");
@@ -1400,11 +1463,12 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     for (u16 i = 0; i < h.section_count; ++i)
     {
         const u8* sec = file + h.section_base + u64(i) * kSectionHeaderSize;
-        if (!MapSection(file, sec, h.image_base, as))
+        if (!MapSection(file, sec, h.image_base, as, guard))
         {
             SerialWrite("[pe-load] FAIL MapSection idx=");
             SerialWriteHex(i);
             SerialWrite("\n");
+            KBP_PROBE(::duetos::debug::ProbeId::kPeLoaderOom);
             return r;
         }
     }
@@ -1470,10 +1534,12 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
             SerialWrite("[pe-load] FAIL stack frame alloc idx=");
             SerialWriteHex(p);
             SerialWrite("\n");
+            KBP_PROBE_V(::duetos::debug::ProbeId::kPeLoaderOom, p);
             return r;
         }
         const u64 page_va = kV0StackVa + p * kPageSize;
         AddressSpaceMapUserPage(as, page_va, stack_frame, kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
+        guard.Track(page_va);
     }
     SerialWrite("[pe-load] step4 stack mapped pages=");
     SerialWriteHex(kV0StackPages);
@@ -1491,6 +1557,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
         if (teb_frame == kNullFrame)
         {
             SerialWrite("[pe-load] FAIL teb frame alloc\n");
+            KBP_PROBE(::duetos::debug::ProbeId::kPeLoaderOom);
             return r;
         }
         auto* teb_direct = static_cast<u8*>(PhysToVirt(teb_frame));
@@ -1500,6 +1567,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
         for (u64 b = 0; b < 8; ++b)
             teb_direct[kTebOffSelf + b] = static_cast<u8>((kV0TebVa >> (b * 8)) & 0xFF);
         AddressSpaceMapUserPage(as, kV0TebVa, teb_frame, kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
+        guard.Track(kV0TebVa);
         teb_va = kV0TebVa;
         SerialWrite("[pe-load] step4b teb mapped va=");
         SerialWriteHex(teb_va);
@@ -1519,6 +1587,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
         if (env_frame == kNullFrame)
         {
             SerialWrite("[pe-load] FAIL proc-env frame alloc\n");
+            KBP_PROBE(::duetos::debug::ProbeId::kPeLoaderOom);
             return r;
         }
         auto* env_direct = static_cast<u8*>(PhysToVirt(env_frame));
@@ -1527,6 +1596,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
         win32::Win32ProcEnvPopulate(env_direct, program_name, h.image_base);
         AddressSpaceMapUserPage(as, win32::kProcEnvVa, env_frame,
                                 kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
+        guard.Track(win32::kProcEnvVa);
         SerialWrite("[pe-load] step4c proc-env mapped va=");
         SerialWriteHex(win32::kProcEnvVa);
         SerialWrite("\n");
@@ -1547,6 +1617,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
         if (stubs_frame == kNullFrame)
         {
             SerialWrite("[pe-load] FAIL stubs frames alloc (need 2)\n");
+            KBP_PROBE(::duetos::debug::ProbeId::kPeLoaderOom);
             return r;
         }
         auto* stubs_direct = static_cast<u8*>(PhysToVirt(stubs_frame));
@@ -1554,9 +1625,14 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
             stubs_direct[i] = 0;
         win32::Win32ThunksPopulate(stubs_direct);
         // R-X on both pages: no kPageWritable (W^X), no kPageNoExecute.
+        // Tracked individually — AddressSpaceUnmapUserPage frees one
+        // frame at a time, matching the bitmap-per-frame shape of the
+        // contiguous run (see kernel/mm/dma.h:99).
         AddressSpaceMapUserPage(as, win32::kWin32ThunksVa, stubs_frame, kPagePresent | kPageUser);
+        guard.Track(win32::kWin32ThunksVa);
         AddressSpaceMapUserPage(as, win32::kWin32ThunksVa + kPageSize, stubs_frame + kPageSize,
                                 kPagePresent | kPageUser);
+        guard.Track(win32::kWin32ThunksVa + kPageSize);
 
         if (!ResolveImports(file, file_len, h, as, preloaded_dlls, preloaded_dll_count))
         {
@@ -1575,6 +1651,9 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     r.image_base = h.image_base;
     r.image_size = h.image_size;
     r.teb_va = teb_va;
+    // Image now owned by the AddressSpace; the unwind guard's
+    // destructor must NOT roll back what's now legitimately mapped.
+    guard.Disarm();
     KBP_PROBE_V(::duetos::debug::ProbeId::kPeLoadOk, h.image_base);
     return r;
 }
