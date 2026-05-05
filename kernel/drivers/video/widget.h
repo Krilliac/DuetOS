@@ -653,6 +653,22 @@ bool WindowKeyIsDown(u16 code);
 void WindowSetModifierState(u8 modifiers);
 u8 WindowModifierState();
 
+/// Double-click threshold in scheduler ticks (10 ms each).
+/// Default 50 ticks (~500 ms). The kernel mouse loop's DC
+/// detector reads this on every press_edge so a runtime
+/// change (Settings Mouse panel) takes effect immediately.
+void WindowSetDoubleClickTicks(u32 ticks);
+u32 WindowDoubleClickTicks();
+
+/// Mouse sensitivity scale, 0..255. 128 = identity (no scale).
+/// The mouse reader multiplies dx / dy by `scale / 128` before
+/// feeding the cursor + apps. Below 128 dampens motion; above
+/// boosts. Bypassed entirely while a modal-input or DnD
+/// session is live (the user wants 1:1 cursor tracking during
+/// gestures).
+void WindowSetMouseSensitivity(u8 scale);
+u8 WindowMouseSensitivity();
+
 /// Current cursor position in framebuffer coordinates. Pointers
 /// may be null to skip writing that axis.
 void WindowGetCursor(u32* x_out, u32* y_out);

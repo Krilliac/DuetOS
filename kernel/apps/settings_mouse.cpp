@@ -5,6 +5,7 @@
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/notify.h"
 #include "drivers/video/theme.h"
+#include "drivers/video/widget.h"
 
 namespace duetos::apps::settings
 {
@@ -98,7 +99,23 @@ void Draw(u32 x, u32 y, u32 w, u32 h)
     FramebufferDrawString(x, y + 84, "4: RESIZE-NS  5: RESIZE-EW", dim, bg);
     FramebufferDrawString(x, y + 96, "6: RESIZE-NESW  7: RESIZE-NWSE  9: ARROW", dim, bg);
 
-    FramebufferDrawString(x, y + 116, "(double-click ms / sensitivity: future slice)", dim, bg);
+    o = 0;
+    AppendStr(line, sizeof(line), &o, "DBL-CLICK THRESHOLD: ");
+    AppendDec(line, sizeof(line), &o, duetos::drivers::video::WindowDoubleClickTicks() * 10u);
+    AppendStr(line, sizeof(line), &o, " ms");
+    line[o] = '\0';
+    FramebufferDrawString(x, y + 116, line, fg, bg);
+
+    o = 0;
+    AppendStr(line, sizeof(line), &o, "SENSITIVITY: ");
+    AppendDec(line, sizeof(line), &o, duetos::drivers::video::WindowMouseSensitivity());
+    AppendStr(line, sizeof(line), &o, " / 128 (identity = 128)");
+    line[o] = '\0';
+    FramebufferDrawString(x, y + 128, line, fg, bg);
+
+    FramebufferDrawString(x, y + 144, "[ : DC -50ms     ] : DC +50ms", dim, bg);
+    FramebufferDrawString(x, y + 156, "- : SENS -16     = : SENS +16", dim, bg);
+    FramebufferDrawString(x, y + 168, "0 : RESET (DC=500ms, SENS=128)", dim, bg);
 }
 
 bool Key(char c)
@@ -138,6 +155,41 @@ bool Key(char c)
     case '9':
         CursorSetShape(CursorShape::Arrow);
         duetos::drivers::video::NotifyShow("cursor: Arrow");
+        return true;
+    case '[':
+    {
+        const u32 cur = duetos::drivers::video::WindowDoubleClickTicks();
+        duetos::drivers::video::WindowSetDoubleClickTicks((cur >= 5) ? cur - 5 : 5);
+        duetos::drivers::video::NotifyShow("dbl-click threshold -50ms");
+        return true;
+    }
+    case ']':
+    {
+        duetos::drivers::video::WindowSetDoubleClickTicks(duetos::drivers::video::WindowDoubleClickTicks() + 5);
+        duetos::drivers::video::NotifyShow("dbl-click threshold +50ms");
+        return true;
+    }
+    case '-':
+    {
+        const u8 cur = duetos::drivers::video::WindowMouseSensitivity();
+        const u8 nxt = (cur > 16) ? static_cast<u8>(cur - 16) : 16;
+        duetos::drivers::video::WindowSetMouseSensitivity(nxt);
+        duetos::drivers::video::NotifyShow("sensitivity -");
+        return true;
+    }
+    case '=':
+    case '+':
+    {
+        const u32 cur = duetos::drivers::video::WindowMouseSensitivity();
+        const u32 nxt = (cur + 16 > 255) ? 255 : cur + 16;
+        duetos::drivers::video::WindowSetMouseSensitivity(static_cast<u8>(nxt));
+        duetos::drivers::video::NotifyShow("sensitivity +");
+        return true;
+    }
+    case '0':
+        duetos::drivers::video::WindowSetDoubleClickTicks(50);
+        duetos::drivers::video::WindowSetMouseSensitivity(128);
+        duetos::drivers::video::NotifyShow("mouse: defaults restored");
         return true;
     default:
         return false;

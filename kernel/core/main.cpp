@@ -4317,7 +4317,21 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             // the compositor mutex — the kbd reader can be mid-
             // ConsoleWrite / DesktopCompose at the same time.
             duetos::drivers::video::CompositorLock();
-            duetos::drivers::video::CursorMove(p.dx, p.dy);
+            // Apply per-user mouse sensitivity scale (Settings
+            // Mouse panel). 128 = identity. Bypass while a
+            // modal-input or DnD session is live so the user
+            // gets 1:1 cursor tracking during gestures.
+            const duetos::u8 sens = duetos::drivers::video::WindowMouseSensitivity();
+            const bool gesture_active =
+                duetos::drivers::video::ModalInputIsActive() || duetos::drivers::video::DndIsActive();
+            duetos::i32 mdx = p.dx;
+            duetos::i32 mdy = p.dy;
+            if (sens != 128 && !gesture_active)
+            {
+                mdx = static_cast<duetos::i32>((static_cast<duetos::i64>(mdx) * sens) / 128);
+                mdy = static_cast<duetos::i32>((static_cast<duetos::i64>(mdy) * sens) / 128);
+            }
+            duetos::drivers::video::CursorMove(mdx, mdy);
 
             duetos::u32 cx = 0, cy = 0;
             duetos::drivers::video::CursorPosition(&cx, &cy);
@@ -4979,7 +4993,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                             // press edges before the routing block
                             // sees them; without this the second
                             // click would just re-arm the drag.
-                            constexpr duetos::u64 kTitleDblClickTicks = 50; // ~500ms
+                            const duetos::u64 kTitleDblClickTicks = duetos::drivers::video::WindowDoubleClickTicks();
                             static duetos::u64 s_title_dc_tick = 0;
                             static duetos::drivers::video::WindowHandle s_title_dc_hwnd =
                                 duetos::drivers::video::kWindowInvalid;
@@ -5134,7 +5148,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                         // WM_LBUTTONDBLCLK (0x0203) instead of a
                         // second WM_LBUTTONDOWN.
                         constexpr duetos::u32 kWmLButtonDblClk = 0x0203;
-                        constexpr duetos::u64 kDblClickTicks = 50; // 500ms
+                        const duetos::u64 kDblClickTicks = duetos::drivers::video::WindowDoubleClickTicks();
                         static duetos::u64 s_last_click_tick = 0;
                         static duetos::drivers::video::WindowHandle s_last_click_hwnd =
                             duetos::drivers::video::kWindowInvalid;
@@ -5194,7 +5208,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     // path above. Title-bar DC is handled in the
                     // chrome branch (maximize/restore toggle), so
                     // a hit here is always client-area.
-                    constexpr duetos::u64 kNativeDblClickTicks = 50;
+                    const duetos::u64 kNativeDblClickTicks = duetos::drivers::video::WindowDoubleClickTicks();
                     static duetos::u64 s_native_dc_tick = 0;
                     static duetos::drivers::video::WindowHandle s_native_dc_hwnd =
                         duetos::drivers::video::kWindowInvalid;

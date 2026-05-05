@@ -436,6 +436,17 @@ constinit u8 g_vk_state[kWindowVkStateSize / 8] = {};
 // handlers, etc.) can branch on Ctrl / Shift / Alt.
 constinit u8 g_modifier_state = 0;
 
+// Double-click threshold in scheduler ticks (10 ms each).
+// Default 50 ticks (~500 ms) — Windows / GTK convention.
+// Read by the kernel mouse-loop DC detector on every
+// press_edge so a runtime change takes effect immediately.
+constinit u32 g_dbl_click_ticks = 50;
+
+// Mouse sensitivity scale (0..255). 128 = identity. The
+// mouse reader multiplies dx/dy by (scale/128) before
+// feeding the cursor + apps.
+constinit u8 g_mouse_sensitivity = 128;
+
 // Mouse capture — one system-wide HWND that gets all mouse
 // events regardless of cursor position, or kWindowInvalid when
 // no capture is active.
@@ -2561,6 +2572,33 @@ void WindowSetModifierState(u8 modifiers)
 u8 WindowModifierState()
 {
     return g_modifier_state;
+}
+
+void WindowSetDoubleClickTicks(u32 ticks)
+{
+    // Floor + cap so a misconfigured Settings input can't make
+    // DC undetectable (0 ticks) or wedge the user (a 30-second
+    // threshold). 5..200 ticks ≈ 50 ms..2 s.
+    if (ticks < 5)
+        ticks = 5;
+    if (ticks > 200)
+        ticks = 200;
+    g_dbl_click_ticks = ticks;
+}
+
+u32 WindowDoubleClickTicks()
+{
+    return g_dbl_click_ticks;
+}
+
+void WindowSetMouseSensitivity(u8 scale)
+{
+    g_mouse_sensitivity = scale;
+}
+
+u8 WindowMouseSensitivity()
+{
+    return g_mouse_sensitivity;
 }
 
 // --- Cursor accessors ---------------------------------------------
