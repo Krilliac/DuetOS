@@ -127,11 +127,20 @@ void Draw(u32 x, u32 y, u32 w, u32 h)
     case duetos::drivers::input::KeyboardLayout::Dvorak:
         AppendStr(line, sizeof(line), &o, "DVORAK SIMPLIFIED");
         break;
+    case duetos::drivers::input::KeyboardLayout::DE:
+        AppendStr(line, sizeof(line), &o, "DE QWERTZ (ASCII subset)");
+        break;
+    case duetos::drivers::input::KeyboardLayout::FR:
+        AppendStr(line, sizeof(line), &o, "FR AZERTY (ASCII subset)");
+        break;
+    case duetos::drivers::input::KeyboardLayout::Colemak:
+        AppendStr(line, sizeof(line), &o, "COLEMAK");
+        break;
     }
     line[o] = '\0';
     FramebufferDrawString(x, y + 162, line, fg, bg);
-    FramebufferDrawString(x, y + 174, "1 : US   2 : UK   3 : DVORAK", dim, bg);
-    FramebufferDrawString(x, y + 186, "(xHCI HID keyboards bypass this layout)", dim, bg);
+    FramebufferDrawString(x, y + 174, "1:US  2:UK  3:DVORAK  4:DE  5:FR  6:COLEMAK", dim, bg);
+    FramebufferDrawString(x, y + 186, "(DE/FR diacritics: ASCII fallback for now)", dim, bg);
 }
 
 bool Key(char c)
@@ -193,6 +202,24 @@ bool Key(char c)
     {
         Ps2KeyboardSetLayout(KeyboardLayout::Dvorak);
         duetos::drivers::video::NotifyShow("layout: Dvorak");
+        return true;
+    }
+    if (c == '4')
+    {
+        Ps2KeyboardSetLayout(KeyboardLayout::DE);
+        duetos::drivers::video::NotifyShow("layout: DE QWERTZ");
+        return true;
+    }
+    if (c == '5')
+    {
+        Ps2KeyboardSetLayout(KeyboardLayout::FR);
+        duetos::drivers::video::NotifyShow("layout: FR AZERTY");
+        return true;
+    }
+    if (c == '6')
+    {
+        Ps2KeyboardSetLayout(KeyboardLayout::Colemak);
+        duetos::drivers::video::NotifyShow("layout: Colemak");
         return true;
     }
     return false;

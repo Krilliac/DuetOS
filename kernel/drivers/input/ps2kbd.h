@@ -178,6 +178,9 @@ enum class KeyboardLayout : u8
     US = 0,
     UK = 1,
     Dvorak = 2,
+    DE = 3, // German QWERTZ — ASCII subset (umlauts collapse to base letter)
+    FR = 4, // French AZERTY — ASCII subset (accented letters collapse)
+    Colemak = 5,
 };
 
 /// Switch the active layout. Returns true if the id was

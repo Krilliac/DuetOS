@@ -243,6 +243,84 @@ constinit const char kKeymapUpperDvorak[kKeymapSize] = {
     /* 0x70 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,    0,   0,    0,
 };
 
+// German QWERTZ — Y/Z swapped vs US, umlauts collapse to base
+// ASCII (no Unicode dead-key support yet). Punctuation cluster
+// reshuffled per the published Microsoft DE layout; ß / ä / ö /
+// ü return 0 (caller re-polls — sees no insert).
+constinit const char kKeymapLowerDE[kKeymapSize] = {
+    /* 0x00 */ 0,   0,   '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', 0,    '\'', '\b', '\t',
+    /* 0x10 */ 'q', 'w', 'e', 'r', 't', 'z', 'u', 'i', 'o', 'p', 0,   '+', '\n', 0,    'a',  's',
+    /* 0x20 */ 'd', 'f', 'g', 'h', 'j', 'k', 'l', 0,   0,   '^', 0,   '#', 'y',  'x',  'c',  'v',
+    /* 0x30 */ 'b', 'n', 'm', ',', '.', '-', 0,   '*', 0,   ' ', 0,   0,   0,    0,    0,    0,
+    /* 0x40 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,    0,    0,    0,
+    /* 0x50 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,    0,    0,    0,
+    /* 0x60 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,    0,    0,    0,
+    /* 0x70 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,    0,    0,    0,
+};
+
+constinit const char kKeymapUpperDE[kKeymapSize] = {
+    /* 0x00 */ 0,   0,   '!', '"', 0,   '$', '%', '&', '/', '(', ')', '=',  '?',  '`', '\b', '\t',
+    /* 0x10 */ 'Q', 'W', 'E', 'R', 'T', 'Z', 'U', 'I', 'O', 'P', 0,   '*',  '\n', 0,   'A',  'S',
+    /* 0x20 */ 'D', 'F', 'G', 'H', 'J', 'K', 'L', 0,   0,   0,   0,   '\'', 'Y',  'X', 'C',  'V',
+    /* 0x30 */ 'B', 'N', 'M', ';', ':', '_', 0,   '*', 0,   ' ', 0,   0,    0,    0,   0,    0,
+    /* 0x40 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,    0,    0,   0,    0,
+    /* 0x50 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,    0,    0,   0,    0,
+    /* 0x60 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,    0,    0,   0,    0,
+    /* 0x70 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,    0,    0,   0,    0,
+};
+
+// French AZERTY — top row swaps Q/A and W/Z; number row is
+// shifted-letters-by-default. Diacritics return 0; the
+// punctuation cluster matches Microsoft FR layout where
+// ASCII has a counterpart, else 0.
+constinit const char kKeymapLowerFR[kKeymapSize] = {
+    /* 0x00 */ 0,   0,   '&', 0,   '"', '\'', '(', '-', 0,   '_', 0,   0,   ')',  '=', '\b', '\t',
+    /* 0x10 */ 'a', 'z', 'e', 'r', 't', 'y',  'u', 'i', 'o', 'p', '^', '$', '\n', 0,   'q',  's',
+    /* 0x20 */ 'd', 'f', 'g', 'h', 'j', 'k',  'l', 'm', 0,   0,   0,   '*', 'w',  'x', 'c',  'v',
+    /* 0x30 */ 'b', 'n', ',', ';', ':', '!',  0,   '*', 0,   ' ', 0,   0,   0,    0,   0,    0,
+    /* 0x40 */ 0,   0,   0,   0,   0,   0,    0,   0,   0,   0,   0,   0,   0,    0,   0,    0,
+    /* 0x50 */ 0,   0,   0,   0,   0,   0,    0,   0,   0,   0,   0,   0,   0,    0,   0,    0,
+    /* 0x60 */ 0,   0,   0,   0,   0,   0,    0,   0,   0,   0,   0,   0,   0,    0,   0,    0,
+    /* 0x70 */ 0,   0,   0,   0,   0,   0,    0,   0,   0,   0,   0,   0,   0,    0,   0,    0,
+};
+
+constinit const char kKeymapUpperFR[kKeymapSize] = {
+    /* 0x00 */ 0,   0,   '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', 0,    '+', '\b', '\t',
+    /* 0x10 */ 'A', 'Z', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', 0,   0,   '\n', 0,   'Q',  'S',
+    /* 0x20 */ 'D', 'F', 'G', 'H', 'J', 'K', 'L', 'M', '%', 0,   0,   '|', 'W',  'X', 'C',  'V',
+    /* 0x30 */ 'B', 'N', '?', '.', '/', 0,   0,   '*', 0,   ' ', 0,   0,   0,    0,   0,    0,
+    /* 0x40 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,    0,   0,    0,
+    /* 0x50 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,    0,   0,    0,
+    /* 0x60 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,    0,   0,    0,
+    /* 0x70 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,    0,   0,    0,
+};
+
+// Colemak — modern ergonomic ASCII-only layout. Reorders
+// letters; punctuation matches QWERTY. Same physical-key
+// scancodes as QWERTY (DK / SE / NO Colemak diverge on
+// non-letters).
+constinit const char kKeymapLowerColemak[kKeymapSize] = {
+    /* 0x00 */ 0,   0,   '1', '2', '3', '4', '5', '6', '7',  '8', '9', '0',  '-',  '=', '\b', '\t',
+    /* 0x10 */ 'q', 'w', 'f', 'p', 'g', 'j', 'l', 'u', 'y',  ';', '[', ']',  '\n', 0,   'a',  'r',
+    /* 0x20 */ 's', 't', 'd', 'h', 'n', 'e', 'i', 'o', '\'', '`', 0,   '\\', 'z',  'x', 'c',  'v',
+    /* 0x30 */ 'b', 'k', 'm', ',', '.', '/', 0,   '*', 0,    ' ', 0,   0,    0,    0,   0,    0,
+    /* 0x40 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,    0,   0,   0,    0,    0,   0,    0,
+    /* 0x50 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,    0,   0,   0,    0,    0,   0,    0,
+    /* 0x60 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,    0,   0,   0,    0,    0,   0,    0,
+    /* 0x70 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,    0,   0,   0,    0,    0,   0,    0,
+};
+
+constinit const char kKeymapUpperColemak[kKeymapSize] = {
+    /* 0x00 */ 0,   0,   '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_',  '+', '\b', '\t',
+    /* 0x10 */ 'Q', 'W', 'F', 'P', 'G', 'J', 'L', 'U', 'Y', ':', '{', '}', '\n', 0,   'A',  'R',
+    /* 0x20 */ 'S', 'T', 'D', 'H', 'N', 'E', 'I', 'O', '"', '~', 0,   '|', 'Z',  'X', 'C',  'V',
+    /* 0x30 */ 'B', 'K', 'M', '<', '>', '?', 0,   '*', 0,   ' ', 0,   0,   0,    0,   0,    0,
+    /* 0x40 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,    0,   0,    0,
+    /* 0x50 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,    0,   0,    0,
+    /* 0x60 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,    0,   0,    0,
+    /* 0x70 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,    0,   0,    0,
+};
+
 // Active layout pointers — swappable at runtime via
 // Ps2KeyboardSetLayout. Default to US.
 constinit const char* g_keymap_lower = kKeymapLowerUS;
@@ -1029,6 +1107,21 @@ bool Ps2KeyboardSetLayout(KeyboardLayout layout)
         g_keymap_upper = kKeymapUpperDvorak;
         g_layout_id = 2;
         return true;
+    case KeyboardLayout::DE:
+        g_keymap_lower = kKeymapLowerDE;
+        g_keymap_upper = kKeymapUpperDE;
+        g_layout_id = 3;
+        return true;
+    case KeyboardLayout::FR:
+        g_keymap_lower = kKeymapLowerFR;
+        g_keymap_upper = kKeymapUpperFR;
+        g_layout_id = 4;
+        return true;
+    case KeyboardLayout::Colemak:
+        g_keymap_lower = kKeymapLowerColemak;
+        g_keymap_upper = kKeymapUpperColemak;
+        g_layout_id = 5;
+        return true;
     default:
         return false;
     }
@@ -1042,6 +1135,12 @@ KeyboardLayout Ps2KeyboardLayout()
         return KeyboardLayout::UK;
     case 2:
         return KeyboardLayout::Dvorak;
+    case 3:
+        return KeyboardLayout::DE;
+    case 4:
+        return KeyboardLayout::FR;
+    case 5:
+        return KeyboardLayout::Colemak;
     case 0:
     default:
         return KeyboardLayout::US;
