@@ -165,6 +165,23 @@ Ipv4Address InterfaceIp(u32 iface_index);
 /// Bound MAC for `iface_index`. Returns all-zero MAC if unbound.
 MacAddress InterfaceMac(u32 iface_index);
 
+/// Per-interface byte/packet counters. Bumped by the L2 RX
+/// path (`NetStackInjectRx`) and the L3 TX helper (`IfaceTx`).
+/// Read access is unprivileged — the Network Status app polls
+/// these to render per-iface throughput and the firewall app
+/// uses them to contextualise per-rule hit counters.
+struct IfaceCounters
+{
+    u64 rx_packets;
+    u64 rx_bytes;
+    u64 tx_packets;
+    u64 tx_bytes;
+    u64 tx_dropped_firewall;
+    u64 tx_dropped_unbound;
+};
+
+IfaceCounters InterfaceCountersRead(u32 iface_index);
+
 /// Number of currently-cached, non-expired ARP entries. Useful for
 /// shell `ifconfig` / `route` to indicate L2 reachability without
 /// dumping the whole table.

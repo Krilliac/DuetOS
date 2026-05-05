@@ -83,11 +83,16 @@ void LoginRepaint();
 void LoginReopen();
 
 /// Lock the screen: re-engage the gate WITHOUT clearing the
-/// auth session. The user (or any valid user — v0 doesn't
-/// enforce same-user-only unlock) re-types credentials to
-/// dismiss. Differs from LoginReopen by skipping AuthLogout.
-/// GAP: per-user lock policy (lock-to-same-user, idle timeout
-/// auto-lock) deferred to a follow-up slice.
+/// auth session. Captures the active user at lock time and
+/// rejects unlock attempts with any other username — Windows-
+/// style "only the same user can unlock". A different user
+/// must explicitly log out (the existing `logout` shell
+/// command, or LoginReopen) to clear the lock policy and
+/// reach a fresh login. Differs from LoginReopen by skipping
+/// AuthLogout.
+/// GAP: idle-timeout auto-lock and an on-screen "switch user"
+/// affordance distinct from logout deferred to a follow-up
+/// slice.
 void LoginLock();
 
 } // namespace duetos::core

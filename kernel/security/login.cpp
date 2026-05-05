@@ -67,6 +67,15 @@ struct State
     u32 password_len;
     const char* status; // non-null string shown beneath the form
     u32 attempts;
+
+    // Lock-screen same-user-only policy. When `locked` is true the
+    // gate is up because LoginLock fired (vs. LoginStart on a fresh
+    // boot or LoginReopen after a logout). `locked_user` holds the
+    // username that was active at lock time so the unlock path can
+    // refuse credentials for any other account. Cleared on
+    // successful unlock and on LoginReopen.
+    bool locked;
+    char locked_user[kFieldMax];
 };
 
 constinit State g_login = {};
@@ -92,6 +101,37 @@ void ClearField(char* buf, u32* len)
 {
     buf[0] = '\0';
     *len = 0;
+}
+
+bool LockedSameUser(const char* submitted)
+{
+    if (!g_login.locked)
+    {
+        return true;
+    }
+    const char* a = g_login.locked_user;
+    const char* b = submitted;
+    while (*a != '\0' && *b != '\0' && *a == *b)
+    {
+        ++a;
+        ++b;
+    }
+    return *a == *b;
+}
+
+void CopyName(char* dst, const char* src, u32 cap)
+{
+    if (cap == 0)
+    {
+        return;
+    }
+    u32 i = 0;
+    while (i + 1 < cap && src[i] != '\0')
+    {
+        dst[i] = src[i];
+        ++i;
+    }
+    dst[i] = '\0';
 }
 
 void FieldAppend(char* buf, u32* len, char c)
@@ -190,6 +230,20 @@ bool TtySubmit()
     }
     // password field — try to authenticate
     ConsoleWriteln("");
+    if (!LockedSameUser(g_login.username))
+    {
+        ++g_login.attempts;
+        ConsoleWrite("LOCKED FOR USER: ");
+        ConsoleWriteln(g_login.locked_user);
+        ConsoleWriteln("UNLOCK REQUIRES THE SAME USER. LOG OUT TO SWITCH USERS.");
+        ConsoleWriteln("");
+        ClearField(g_login.username, &g_login.username_len);
+        ClearField(g_login.password, &g_login.password_len);
+        g_login.focus = Field::Username;
+        ConsoleWrite("USERNAME: ");
+        KLOG_WARN("login", "tty unlock attempted for different user");
+        return true;
+    }
     if (AuthLogin(g_login.username, g_login.password))
     {
         ConsoleWrite("WELCOME, ");
@@ -199,6 +253,8 @@ bool TtySubmit()
         ClearField(g_login.password, &g_login.password_len);
         g_login.active = false;
         g_login.focus = Field::Username;
+        g_login.locked = false;
+        g_login.locked_user[0] = '\0';
         KLOG_INFO("login", "tty session opened");
         return false;
     }
@@ -403,6 +459,16 @@ bool GuiTrySubmit()
         GuiRepaint();
         return true;
     }
+    if (!LockedSameUser(g_login.username))
+    {
+        ++g_login.attempts;
+        g_login.status = "LOCKED — USE THE SAME USER OR LOG OUT TO SWITCH";
+        duetos::arch::SerialWrite("[login] gui unlock attempted for different user; locked_user=\"");
+        duetos::arch::SerialWrite(g_login.locked_user);
+        duetos::arch::SerialWrite("\"\n");
+        GuiRepaint();
+        return true;
+    }
     if (AuthLogin(g_login.username, g_login.password))
     {
         ClearField(g_login.username, &g_login.username_len);
@@ -410,6 +476,8 @@ bool GuiTrySubmit()
         g_login.active = false;
         g_login.focus = Field::Username;
         g_login.status = nullptr;
+        g_login.locked = false;
+        g_login.locked_user[0] = '\0';
         KLOG_INFO("login", "gui session opened");
         return false;
     }
@@ -588,6 +656,11 @@ void LoginReopen()
     ClearField(g_login.password, &g_login.password_len);
     g_login.status = nullptr;
     g_login.focus = Field::Username;
+    // A full logout drops the lock policy — the next user is
+    // free to log in. Lock policy only fires after an explicit
+    // LoginLock call.
+    g_login.locked = false;
+    g_login.locked_user[0] = '\0';
     LoginStart(mode);
 }
 
@@ -595,14 +668,38 @@ void LoginLock()
 {
     // Same as LoginReopen minus the AuthLogout — the session
     // stays valid under the hood, the gate just intercepts kbd
-    // until credentials are re-entered.
+    // until credentials are re-entered. Capture the active user
+    // so the unlock submit path can refuse credentials for any
+    // other account (Windows-style same-user lock policy). If
+    // no session is active when LoginLock fires (programmer
+    // error — locking an empty desktop), fall back to a regular
+    // login gate without the same-user constraint so the box
+    // doesn't become unreachable.
     const LoginMode mode = g_login.mode;
+    const char* active = AuthCurrentUserName();
+    if (active != nullptr && active[0] != '\0')
+    {
+        g_login.locked = true;
+        CopyName(g_login.locked_user, active, kFieldMax);
+    }
+    else
+    {
+        g_login.locked = false;
+        g_login.locked_user[0] = '\0';
+    }
     ClearField(g_login.username, &g_login.username_len);
     ClearField(g_login.password, &g_login.password_len);
     g_login.status = nullptr;
     g_login.focus = Field::Username;
     LoginStart(mode);
-    KLOG_INFO("login", "screen locked (session preserved)");
+    if (g_login.locked)
+    {
+        KLOG_INFO_S("login", "screen locked (same-user-only)", "user", g_login.locked_user);
+    }
+    else
+    {
+        KLOG_WARN("login", "LoginLock with no active session — no same-user constraint");
+    }
 }
 
 } // namespace duetos::core

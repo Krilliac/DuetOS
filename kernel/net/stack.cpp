@@ -33,6 +33,7 @@
  */
 
 #include "net/stack.h"
+#include "net/firewall.h"
 #include "net/socket.h"
 #include "net/wifi.h"
 
@@ -83,8 +84,94 @@ struct Interface
     MacAddress mac;
     Ipv4Address ip;
     NetTxFn tx;
+    IfaceCounters counters;
 };
 Interface g_interfaces[kMaxInterfaces] = {};
+
+// Map an IP protocol number to the firewall's enum. Anything we
+// don't recognise is treated as Any so a rule that targets only
+// TCP / UDP / ICMP doesn't accidentally match an unknown proto.
+firewall::Proto ToFwProto(u8 ip_proto)
+{
+    switch (ip_proto)
+    {
+    case 1:
+        return firewall::Proto::Icmp;
+    case 6:
+        return firewall::Proto::Tcp;
+    case 17:
+        return firewall::Proto::Udp;
+    default:
+        return firewall::Proto::Any;
+    }
+}
+
+// Egress helper: parse the ethernet+IPv4 header out of a frame
+// already laid down by the per-protocol senders, run the firewall
+// check, bump per-iface counters on accept, and forward to the
+// driver's bound TX trampoline. Mirrors the rx side for symmetry —
+// every TX site that previously called `ifc.tx` directly now goes
+// through here so the firewall and counters can't be bypassed.
+bool IfaceTx(u32 iface_index, const void* frame, u64 frame_len)
+{
+    if (iface_index >= kMaxInterfaces)
+    {
+        return false;
+    }
+    Interface& ifc = g_interfaces[iface_index];
+    if (!ifc.bound || ifc.tx == nullptr)
+    {
+        ++ifc.counters.tx_dropped_unbound;
+        return false;
+    }
+    if (frame == nullptr || frame_len < 14)
+    {
+        return false;
+    }
+
+    const auto* eth = static_cast<const u8*>(frame);
+    const u16 ether_type = (u16(eth[12]) << 8) | u16(eth[13]);
+    // Only IPv4 traffic flows through the firewall in v0. ARP /
+    // other ethertypes pass straight through; ARP is the L2
+    // discovery mechanism the firewall depends on, denying it
+    // would break every IPv4 path.
+    if (ether_type == kEtherTypeIpv4 && frame_len >= 14 + 20)
+    {
+        const u8* ip = eth + 14;
+        Ipv4Address src_ip = {};
+        Ipv4Address dst_ip = {};
+        for (u64 i = 0; i < 4; ++i)
+        {
+            src_ip.octets[i] = ip[12 + i];
+            dst_ip.octets[i] = ip[16 + i];
+        }
+        const firewall::Proto proto = ToFwProto(ip[9]);
+        const u8 ihl = ip[0] & 0x0F;
+        u16 src_port = 0;
+        u16 dst_port = 0;
+        if ((proto == firewall::Proto::Tcp || proto == firewall::Proto::Udp) && frame_len >= 14 + u64(ihl) * 4 + 4)
+        {
+            const u8* l4 = ip + u64(ihl) * 4;
+            src_port = (u16(l4[0]) << 8) | u16(l4[1]);
+            dst_port = (u16(l4[2]) << 8) | u16(l4[3]);
+        }
+        const firewall::Action verdict =
+            firewall::FwEvaluate(firewall::Direction::Egress, proto, src_ip, dst_ip, src_port, dst_port, nullptr);
+        if (verdict == firewall::Action::Deny)
+        {
+            ++ifc.counters.tx_dropped_firewall;
+            return false;
+        }
+    }
+
+    if (!ifc.tx(iface_index, frame, frame_len))
+    {
+        return false;
+    }
+    ++ifc.counters.tx_packets;
+    ifc.counters.tx_bytes += frame_len;
+    return true;
+}
 
 // UDP bindings. Fixed-cap table; v0 has a small number of ports
 // (DHCP=68, DNS resolver later, custom apps); linear scan is
@@ -172,7 +259,7 @@ bool SendArpRequest(u32 iface_index, Ipv4Address target_ip)
         req[38 + i] = target_ip.octets[i];
 
     ++g_arp_stats.tx_requests;
-    const bool ok = ifc.tx(iface_index, req, sizeof(req));
+    const bool ok = IfaceTx(iface_index, req, sizeof(req));
     if (!ok)
         ++g_arp_stats.tx_failures;
     return ok;
@@ -235,6 +322,7 @@ void NetStackInit()
     KASSERT(!s_done, "net/stack", "NetStackInit called twice");
     s_done = true;
     WifiInit();
+    firewall::FwInit();
 
     // Walk the driver-layer NIC table. Today we just log a
     // one-line-per-interface "would bind" record — there's no
@@ -737,7 +825,7 @@ bool ArpHandleIncoming(u32 iface_index, const void* frame, u64 len)
     for (u64 i = 0; i < 4; ++i)
         reply[38 + i] = spa.octets[i];
 
-    (void)ifc.tx(iface_index, reply, sizeof(reply));
+    (void)IfaceTx(iface_index, reply, sizeof(reply));
     return true;
 }
 
@@ -832,6 +920,35 @@ bool Ipv4HandleIncoming(u32 iface_index, const void* frame, u64 len)
     {
         ++g_ipv4_stats.rx_bad_checksum;
         return false;
+    }
+    // Firewall ingress check. Parse the 5-tuple needed by the
+    // rule table: proto, src/dst IP, and (for TCP/UDP) src/dst
+    // ports. Drop on Deny — the rest of the L3 path never sees
+    // the packet, and per-rule hit counters / iface counters
+    // accurately reflect what was filtered.
+    {
+        Ipv4Address src_ip = {};
+        Ipv4Address dst_ip = {};
+        for (u64 i = 0; i < 4; ++i)
+        {
+            src_ip.octets[i] = ip[12 + i];
+            dst_ip.octets[i] = ip[16 + i];
+        }
+        const firewall::Proto fw_proto = ToFwProto(ip[9]);
+        u16 src_port = 0;
+        u16 dst_port = 0;
+        if ((fw_proto == firewall::Proto::Tcp || fw_proto == firewall::Proto::Udp) && total_len >= u16(ihl) * 4 + 4)
+        {
+            const u8* l4 = ip + u64(ihl) * 4;
+            src_port = (u16(l4[0]) << 8) | u16(l4[1]);
+            dst_port = (u16(l4[2]) << 8) | u16(l4[3]);
+        }
+        const firewall::Action verdict =
+            firewall::FwEvaluate(firewall::Direction::Ingress, fw_proto, src_ip, dst_ip, src_port, dst_port, nullptr);
+        if (verdict == firewall::Action::Deny)
+        {
+            return false;
+        }
     }
     // Auto-learn the ARP cache from every valid IPv4 frame: the
     // ethernet src MAC + IPv4 src IP are always consistent with
@@ -987,7 +1104,7 @@ bool Ipv4HandleIncoming(u32 iface_index, const void* frame, u64 len)
         r_icmp[2] = u8(icmp_ck >> 8);
         r_icmp[3] = u8(icmp_ck & 0xFF);
 
-        if (ifc.tx(iface_index, reply, reply_len))
+        if (IfaceTx(iface_index, reply, reply_len))
         {
             ++g_icmp_stats.echo_replies_tx;
         }
@@ -1191,7 +1308,7 @@ bool NetUdpSend(u32 iface_index, const MacAddress& dst_mac, Ipv4Address dst_ip, 
     udp[6] = u8(udp_ck >> 8);
     udp[7] = u8(udp_ck & 0xFF);
 
-    if (!ifc.tx(iface_index, frame, frame_len))
+    if (!IfaceTx(iface_index, frame, frame_len))
     {
         ++g_udp_stats.tx_failures;
         return false;
@@ -1659,7 +1776,7 @@ void TcpSend(u32 iface_index, const MacAddress& dst_mac, Ipv4Address dst_ip, u16
     tcp[16] = u8(tcp_ck >> 8);
     tcp[17] = u8(tcp_ck & 0xFF);
 
-    ifc.tx(iface_index, frame, frame_len);
+    (void)IfaceTx(iface_index, frame, frame_len);
 }
 
 void TcpSendRst(u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_ip, u16 peer_port, u16 local_port,
@@ -2033,7 +2150,7 @@ bool NetIcmpSendEcho(u32 iface_index, Ipv4Address dst_ip, u16 id, u16 seq)
     icmp[2] = u8(icmp_ck >> 8);
     icmp[3] = u8(icmp_ck & 0xFF);
 
-    if (!ifc.tx(iface_index, frame, sizeof(frame)))
+    if (!IfaceTx(iface_index, frame, sizeof(frame)))
     {
         ++g_icmp_stats.tx_failures;
         return false;
@@ -2354,6 +2471,7 @@ bool NetStackBindInterface(u32 iface_index, MacAddress mac, Ipv4Address ip, NetT
     g_interfaces[iface_index].ip = ip;
     g_interfaces[iface_index].tx = tx;
     g_interfaces[iface_index].bound = true;
+    g_interfaces[iface_index].counters = IfaceCounters{};
     arch::SerialWrite("[net-stack] iface ");
     arch::SerialWriteHex(iface_index);
     arch::SerialWrite(" bound ip=");
@@ -2368,6 +2486,15 @@ bool NetStackBindInterface(u32 iface_index, MacAddress mac, Ipv4Address ip, NetT
     return true;
 }
 
+IfaceCounters InterfaceCountersRead(u32 iface_index)
+{
+    if (iface_index >= kMaxInterfaces)
+    {
+        return IfaceCounters{};
+    }
+    return g_interfaces[iface_index].counters;
+}
+
 void NetStackInjectRx(u32 iface_index, const void* frame, u64 len)
 {
     if (frame == nullptr || len < 14)
@@ -2379,6 +2506,8 @@ void NetStackInjectRx(u32 iface_index, const void* frame, u64 len)
     // makes the invariant uniform.
     if (iface_index >= kMaxInterfaces)
         return;
+    ++g_interfaces[iface_index].counters.rx_packets;
+    g_interfaces[iface_index].counters.rx_bytes += len;
     const auto* eth = static_cast<const u8*>(frame);
     const u16 ether_type = (u16(eth[12]) << 8) | u16(eth[13]);
     switch (ether_type)

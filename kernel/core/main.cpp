@@ -114,6 +114,7 @@
 #include "drivers/usb/usb.h"
 #include "drivers/usb/xhci.h"
 #include "net/net_smoke.h"
+#include "net/firewall.h"
 #include "net/stack.h"
 #include "subsystems/graphics/graphics.h"
 #include "drivers/storage/ahci.h"
@@ -2729,6 +2730,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Bringing up network stack skeleton.\n");
     duetos::net::NetStackInit();
+    DUETOS_BOOT_SELFTEST(duetos::net::firewall::FwSelfTest());
     // Smoke test runs in its own task. It owns the (single) TCP
     // slot during its run and installs the boot HTTP listener
     // afterwards via NetSmokeInstallBootListener — so an active

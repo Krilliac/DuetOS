@@ -35,6 +35,37 @@ void Dec3(char* out, u8 v)
     out[2] = static_cast<char>('0' + (v % 10));
 }
 
+// Right-align a u64 into a fixed-width column. Truncates the
+// leading digits if the value exceeds `width` — UI-only, the
+// raw counters remain accurate via InterfaceCountersRead.
+void U64Col(char* out, u32 width, u64 v)
+{
+    char tmp[32];
+    u32 t = 0;
+    if (v == 0)
+    {
+        tmp[t++] = '0';
+    }
+    while (v != 0 && t < sizeof(tmp))
+    {
+        tmp[t++] = static_cast<char>('0' + (v % 10));
+        v /= 10;
+    }
+    if (t > width)
+    {
+        t = width;
+    }
+    const u32 pad = width - t;
+    for (u32 i = 0; i < pad; ++i)
+    {
+        out[i] = ' ';
+    }
+    for (u32 i = 0; i < t; ++i)
+    {
+        out[pad + i] = tmp[t - 1 - i];
+    }
+}
+
 void FormatMac(const duetos::net::MacAddress& mac, char* out)
 {
     for (u32 i = 0; i < 6; ++i)
@@ -68,7 +99,9 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     u32 y = cy + kMargin;
     FramebufferDrawString(cx + kMargin, y, "NETWORK INTERFACES", kHeaderFg, kBg);
     y += kRowH + 4;
-    FramebufferDrawString(cx + kMargin, y, "IDX  MAC                IPV4             STATE", kFgDim, kBg);
+    FramebufferDrawString(cx + kMargin, y,
+                          "IDX  MAC                IPV4             STATE  RX-PKT     RX-BYTE    TX-PKT     TX-BYTE",
+                          kFgDim, kBg);
     y += kRowH;
 
     const u64 n = duetos::net::InterfaceCount();
@@ -80,7 +113,7 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 
     for (u32 i = 0; i < n && y + kRowH < cy + ch; ++i)
     {
-        char line[80];
+        char line[160];
         u32 o = 0;
         line[o++] = ' ';
         line[o++] = static_cast<char>('0' + (i / 10));
@@ -108,10 +141,25 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
         }
 
         const bool bound = duetos::net::InterfaceIsBound(i);
-        const char* state_str = bound ? "BOUND" : "DOWN";
+        const char* state_str = bound ? "BOUND" : "DOWN ";
         u32 s = 0;
         while (state_str[s] != '\0')
             line[o++] = state_str[s++];
+        line[o++] = ' ';
+        line[o++] = ' ';
+
+        const auto cnt = duetos::net::InterfaceCountersRead(i);
+        U64Col(line + o, 10, cnt.rx_packets);
+        o += 10;
+        line[o++] = ' ';
+        U64Col(line + o, 10, cnt.rx_bytes);
+        o += 10;
+        line[o++] = ' ';
+        U64Col(line + o, 10, cnt.tx_packets);
+        o += 10;
+        line[o++] = ' ';
+        U64Col(line + o, 10, cnt.tx_bytes);
+        o += 10;
         line[o] = '\0';
 
         FramebufferDrawString(cx + kMargin, y, line, bound ? kBound : kUnbound, kBg);

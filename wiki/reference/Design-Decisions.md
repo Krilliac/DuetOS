@@ -4575,3 +4575,102 @@ Don't delete superseded entries. If a decision is replaced, add a
 `**Superseded by #M (commit hash)**` note at the top of entry #N.
 Both stay in git history regardless; keeping them in the rendered
 doc helps future readers audit the trail.
+
+---
+
+## 104 — Firewall v0 (rule table + IPv4 in/out hooks + kCapNetAdmin)
+
+- **Scope:** `kernel/net/firewall.{h,cpp}`,
+  `kernel/net/stack.{h,cpp}` (per-iface counters +
+  `IfaceTx` egress helper + ingress hook in
+  `Ipv4HandleIncoming`), `kernel/proc/process.{h,cpp}`
+  (`kCapNetAdmin`), `kernel/apps/firewall.cpp` (read-only
+  rule list + per-rule hits), `kernel/apps/netstatus.cpp`
+  (rx/tx packet + byte columns).
+- **Decision:** Static fixed-capacity rule table (32
+  entries) evaluated first-match-wins. Each rule carries
+  direction, protocol (Any / ICMP / TCP / UDP), src + dst
+  prefix, src + dst port range, action (Allow / Deny),
+  active flag, hit counter. Default policies are per
+  direction and configurable; default to Allow / Allow at
+  boot so the existing DHCP / DNS / TCP smoke paths keep
+  working. Read access is unprivileged; edit operations
+  (FwAdd / FwRemove / FwToggle / FwSetDefaultPolicy) are
+  gated on a brand-new `kCapNetAdmin` capability —
+  distinct from `kCapNet` so a process can be allowed to
+  USE the network without being allowed to RECONFIGURE
+  it. Hooks live at IPv4 ingress (after header
+  validation) and IPv4 egress (inside `IfaceTx`, the new
+  helper every TX site routes through). Per-iface
+  counters (`rx_packets`, `rx_bytes`, `tx_packets`,
+  `tx_bytes`, `tx_dropped_firewall`, `tx_dropped_unbound`)
+  share the same plumbing.
+- **Why:** Adding a packet filter without a chokepoint
+  invites bypasses — three of the existing TX call
+  sites already had subtle differences. Funnelling them
+  through `IfaceTx` makes the firewall + counter
+  invariants uniform: there is no way to send a frame
+  out a bound interface without consulting them. Keeping
+  the rule capacity static avoids a kernel allocation
+  on every rule edit and matches the v0 expectation
+  that a workstation has a small handful of explicit
+  rules; promoting to dynamic is reserved for a real
+  workload that actually exhausts 32 slots.
+- **What it rules out:** Connection tracking ("established
+  + related" semantics) is not v0 — flipping the
+  default-deny inbound policy on without it would break
+  every TCP connect we initiated, since the peer's reply
+  would arrive unsolicited. We default Allow inbound
+  until conntrack lands. Logging hooks (a bounded ring of
+  recent denials for the kernel shell to surface) and an
+  editor surface in the desktop firewall app are also
+  deferred — the kernel-shell command driver is the v0
+  edit path.
+- **Revisit when:** A workload demands per-process socket
+  policy keyed on `Process::caps` (deny network egress
+  for sandboxed PEs entirely) — that's the next major
+  slice and unlocks "default-deny inbound + sandbox
+  egress lockdown". Conntrack lands when an operator
+  legitimately wants Windows-style default-deny inbound
+  and a TCP active-open path no longer breaks.
+- **Related tracks:** Track 6 (Networking — protocols
+  + interfaces), Track 12 (Security — capability gating).
+
+---
+
+## 105 — Lock screen: same-user-only unlock policy
+
+- **Scope:** `kernel/security/login.{h,cpp}`.
+- **Decision:** `LoginLock` captures the active username
+  (via `AuthCurrentUserName`) into a new `locked_user`
+  field on the login state and sets a `locked` flag. Both
+  the TTY and GUI submit paths short-circuit before
+  `AuthLogin` if `locked` is true and the submitted
+  username doesn't match `locked_user`, displaying a
+  "LOCKED — USE THE SAME USER OR LOG OUT TO SWITCH" status
+  and emitting a serial diagnostic. Successful unlock
+  clears both fields; `LoginReopen` (the path the existing
+  `logout` shell command takes) also clears them so a
+  fresh login is unconstrained. If `LoginLock` fires with
+  no active session (programmer error — locking an empty
+  desktop), the lock policy is not engaged so the box
+  doesn't become unreachable.
+- **Why:** Win9x-style "any valid user can unlock" was a
+  documented gap on the LOCK action — useful for v0 boot
+  bring-up but a clear regression once multi-user accounts
+  landed in the auth database. The fix is small (one
+  policy field plus one short-circuit on the submit path)
+  but couldn't be retrofitted without committing to
+  capturing the active user at lock time, which means a
+  defined behaviour for locking an empty desktop.
+- **What it rules out:** Idle-timeout auto-lock (no kernel
+  idle source today; needs a per-input-event timestamp +
+  a scheduler-tick comparator) and an on-screen "switch
+  user" affordance distinct from `logout` (a different
+  user must currently log out the locker first to reach
+  the gate, mirroring an early-Windows-NT discipline).
+- **Revisit when:** A workload demands automatic lock
+  after N minutes of input idle, or an on-screen
+  affordance that does what `LoginReopen` does without
+  the locker having to type the `logout` command first.
+- **Related tracks:** Track 12 (Security — auth gate).

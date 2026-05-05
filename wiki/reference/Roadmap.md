@@ -355,19 +355,6 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
 
 ## End-user features
 
-### Firewall subsystem
-
-- **Today:** no kernel firewall — every packet a bound NIC
-  accepts reaches the stack. The Start menu's FIREWALL entry
-  opens an empty-state placeholder window
-  (`kernel/apps/firewall.cpp`) that documents the gap.
-- **Blocks on:** filter hook points at L2 ingress / L3 egress,
-  a rule table data structure, and a `kCapNetAdmin` capability
-  for editing.
-- **Owner:** `kernel/net/` plus a real `kernel/apps/firewall.cpp`
-  body. Roadmap detail in
-  [Firewall Roadmap](../networking/Firewall-Roadmap.md).
-
 ### ACPI S5 / soft-off shutdown
 
 - **Today:** Start menu's SHUT DOWN action calls `KernelHalt`
@@ -378,13 +365,22 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
   `\_S5_`. Without that we can't drive the chipset's soft-off
   state. Same blocker the per-CPU sleep state work has.
 
-### Lock screen — same-user-only unlock
+### Lock screen — idle-timeout auto-lock + switch-user affordance
 
-- **Today:** Start menu's LOCK action calls `LoginLock` which
-  brings the gate up without clearing the auth session. Any
-  valid user can unlock (Win9x-style).
-- **Blocks on:** per-user lock policy + idle-timeout auto-lock
-  + on-screen "switch user" affordance distinct from logout.
+- **Today:** Same-user-only unlock landed in `LoginLock` —
+  the active username is captured at lock time, and unlock
+  attempts that submit any other username are rejected with
+  a "LOCKED — USE THE SAME USER OR LOG OUT TO SWITCH" status
+  before AuthLogin runs. The lock policy is cleared on
+  successful unlock, on `LoginReopen` (the path the existing
+  `logout` shell command takes), and on a subsequent
+  `LoginLock` from a different active session.
+- **Remaining:** idle-timeout auto-lock (no kernel idle
+  source today; needs a per-input-event timestamp +
+  scheduler-tick comparator), and an on-screen "switch user"
+  affordance distinct from `logout` so a different user
+  can reach the login gate without the locker first
+  approving.
 
 ### Device Manager — class tree + eject
 
@@ -395,15 +391,20 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
   driver path that the AHCI / xHCI controllers don't yet
   support.
 
-### Network Status — per-iface counters and Wi-Fi scan
+### Network Status — Wi-Fi scan + routing/DNS surface
 
 - **Today:** read-only iface table (index, MAC, IPv4, bound
-  state) backing the Start menu's NETWORK STATUS entry
-  (`kernel/apps/netstatus.cpp`).
-- **Blocks on:** rx/tx counters in the L2 driver layer (NICs
-  don't aggregate them yet), Wi-Fi scan results from
-  `kernel/net/wifi.cpp`, and a routing/DNS surface for the
-  display layer.
+  state) plus rx/tx packet + byte counters backing the Start
+  menu's NETWORK STATUS entry (`kernel/apps/netstatus.cpp`).
+  Counters are bumped at the L2 RX path
+  (`NetStackInjectRx`) and the L3 TX helper (`IfaceTx`) and
+  read via `InterfaceCountersRead`. The firewall's
+  `tx_dropped_firewall` and `tx_dropped_unbound` counters
+  share the same struct.
+- **Blocks on:** Wi-Fi scan results from `kernel/net/wifi.cpp`,
+  a routing/DNS surface for the display layer, and per-iface
+  drop visibility (the counters are present; the app does
+  not yet render the dropped-by-firewall column).
 
 ### Terminal emulator (windowed userland shell)
 
