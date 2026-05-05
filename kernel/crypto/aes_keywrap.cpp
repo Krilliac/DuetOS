@@ -247,10 +247,8 @@ void AesKeyWrapSelfTest()
         const u8 dummy[16] = {0};
         KASSERT(!AesKeyWrap(ctx, dummy, 0, buf), "crypto/aes_keywrap", "wrap accepted len=0");
         KASSERT(!AesKeyWrap(ctx, dummy, 7, buf), "crypto/aes_keywrap", "wrap accepted len=7 (not %8)");
-        KASSERT(!AesKeyWrap(ctx, dummy, 8, buf), "crypto/aes_keywrap",
-                "wrap accepted single-semi-block input (n=1)");
-        KASSERT(!AesKeyUnwrap(ctx, buf, 16, buf), "crypto/aes_keywrap",
-                "unwrap accepted len=16 (need ≥ 24)");
+        KASSERT(!AesKeyWrap(ctx, dummy, 8, buf), "crypto/aes_keywrap", "wrap accepted single-semi-block input (n=1)");
+        KASSERT(!AesKeyUnwrap(ctx, buf, 16, buf), "crypto/aes_keywrap", "unwrap accepted len=16 (need ≥ 24)");
     }
 }
 
