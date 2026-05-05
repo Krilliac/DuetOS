@@ -405,8 +405,12 @@ jobs:
             if sudo apt-get update; then break; fi
             sleep $((attempt * 5))
           done
-          sudo apt-get install -y clang-tidy-18 clang-18 cmake ninja-build
+          sudo apt-get install -y clang-tidy-18 clang-18 lld-18 cmake ninja-build
           sudo ln -sf /usr/bin/clang-tidy-18 /usr/local/bin/clang-tidy
+          sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
+          sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
+          sudo ln -sf /usr/bin/lld-link-18 /usr/local/bin/lld-link
+          sudo ln -sf /usr/bin/ld.lld-18 /usr/local/bin/ld.lld
       - name: Configure (for compile_commands.json)
         run: cmake --preset x86_64-debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
       - name: Run clang-tidy
