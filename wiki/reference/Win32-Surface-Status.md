@@ -594,6 +594,11 @@ canned values for username / domain / station). The rest STUB.
 `InternetOpenA/W`, `InternetOpenUrlA/W`, `InternetReadFile`,
 `InternetCloseHandle`, `HttpQueryInfoA`, `InternetQueryDataAvailable`
 — REAL for HTTP/1.0 + simple Content-Length flow.
+`InternetTimeFromSystemTimeA/W`, `InternetTimeToSystemTimeA/W`
+— REAL: RFC 1123 format / parse round-trip ("Sun, 06 Nov 1994
+08:49:37 GMT"). Day-of-week is recomputed via Zeller on parse
+so a wrong dow input still parses; format always emits the
+Zeller-correct dow.
 
 `InternetWriteFile` — GAP (no chunked POST). FTP family — STUB.
 Cookie family (`InternetGetCookieA/W` /

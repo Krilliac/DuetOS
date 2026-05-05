@@ -1100,43 +1100,230 @@ __declspec(dllexport) BOOL DeleteUrlCacheEntryW(const wchar_t16* url)
 }
 
 /* InternetTimeFromSystemTime / InternetTimeToSystemTime —
- * RFC 1123 conversion. v0 returns failure. */
+ * RFC 1123 ("Sun, 06 Nov 1994 08:49:37 GMT") conversion. The
+ * input/output is a SYSTEMTIME struct (16 B):
+ *   WORD wYear, wMonth, wDayOfWeek, wDay, wHour, wMinute,
+ *        wSecond, wMilliseconds.
+ *
+ * `format` accepts INTERNET_RFC1123_FORMAT == 0 (the only
+ * format MSDN documents). Buffer size constant is
+ * INTERNET_RFC1123_BUFSIZE == 30 (29 chars + NUL).
+ */
+
+#define WININET_RFC1123_BUFSIZE 30u
+
+static const char* wininet_dow_short[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+static const char* wininet_mon_short[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+
+static void wininet_two_digits(char* dst, unsigned v)
+{
+    dst[0] = (char)('0' + ((v / 10) % 10));
+    dst[1] = (char)('0' + (v % 10));
+}
+
+static void wininet_four_digits(char* dst, unsigned v)
+{
+    dst[0] = (char)('0' + ((v / 1000) % 10));
+    dst[1] = (char)('0' + ((v / 100) % 10));
+    dst[2] = (char)('0' + ((v / 10) % 10));
+    dst[3] = (char)('0' + (v % 10));
+}
+
+static BOOL wininet_format_rfc1123_a(const void* time_st, char* buf, DWORD buf_len)
+{
+    if (time_st == 0 || buf == 0 || buf_len < WININET_RFC1123_BUFSIZE)
+        return 0;
+    const unsigned short* st = (const unsigned short*)time_st;
+    const unsigned year = st[0];
+    const unsigned month = st[1];
+    const unsigned dow = st[2];
+    const unsigned day = st[3];
+    const unsigned hour = st[4];
+    const unsigned minute = st[5];
+    const unsigned second = st[6];
+    if (month < 1 || month > 12 || dow > 6 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59)
+        return 0;
+    /* "DDD, dd MMM yyyy HH:MM:SS GMT" — exactly 29 chars + NUL. */
+    const char* dn = wininet_dow_short[dow];
+    const char* mn = wininet_mon_short[month - 1];
+    buf[0] = dn[0];
+    buf[1] = dn[1];
+    buf[2] = dn[2];
+    buf[3] = ',';
+    buf[4] = ' ';
+    wininet_two_digits(buf + 5, day);
+    buf[7] = ' ';
+    buf[8] = mn[0];
+    buf[9] = mn[1];
+    buf[10] = mn[2];
+    buf[11] = ' ';
+    wininet_four_digits(buf + 12, year);
+    buf[16] = ' ';
+    wininet_two_digits(buf + 17, hour);
+    buf[19] = ':';
+    wininet_two_digits(buf + 20, minute);
+    buf[22] = ':';
+    wininet_two_digits(buf + 23, second);
+    buf[25] = ' ';
+    buf[26] = 'G';
+    buf[27] = 'M';
+    buf[28] = 'T';
+    buf[29] = 0;
+    return 1;
+}
+
 __declspec(dllexport) BOOL InternetTimeFromSystemTimeA(const void* time_st, DWORD format, char* buf, DWORD buf_len)
 {
-    (void)time_st;
-    (void)format;
-    (void)buf_len;
-    if (buf)
-        buf[0] = 0;
-    return 0;
+    if (format != 0)
+        return 0;
+    return wininet_format_rfc1123_a(time_st, buf, buf_len);
 }
 
 __declspec(dllexport) BOOL InternetTimeFromSystemTimeW(const void* time_st, DWORD format, wchar_t16* buf, DWORD buf_len)
 {
-    (void)time_st;
-    (void)format;
-    (void)buf_len;
-    if (buf)
-        buf[0] = 0;
-    return 0;
+    if (format != 0)
+        return 0;
+    char ascii[WININET_RFC1123_BUFSIZE];
+    if (!wininet_format_rfc1123_a(time_st, ascii, sizeof(ascii)))
+        return 0;
+    if (buf == 0 || buf_len < WININET_RFC1123_BUFSIZE)
+        return 0;
+    for (DWORD i = 0; i < WININET_RFC1123_BUFSIZE; ++i)
+        buf[i] = (wchar_t16)(unsigned char)ascii[i];
+    return 1;
+}
+
+/* Skip leading whitespace. */
+static const char* wininet_skip_ws(const char* p)
+{
+    while (*p == ' ' || *p == '\t')
+        ++p;
+    return p;
+}
+
+/* Parse a base-10 unsigned int, advancing `*pp`. Returns 0 if no
+ * digits were seen at the start. */
+static unsigned wininet_parse_uint(const char** pp)
+{
+    const char* p = *pp;
+    unsigned v = 0;
+    int n = 0;
+    while (*p >= '0' && *p <= '9')
+    {
+        v = v * 10u + (unsigned)(*p - '0');
+        ++p;
+        ++n;
+    }
+    *pp = p;
+    return n > 0 ? v : 0u;
+}
+
+/* Match a 3-letter prefix (case-insensitive). */
+static int wininet_match_prefix3_ci(const char* p, const char* needle)
+{
+    for (int i = 0; i < 3; ++i)
+    {
+        char c = p[i];
+        char n = needle[i];
+        if (c >= 'a' && c <= 'z')
+            c = (char)(c - 32);
+        if (n >= 'a' && n <= 'z')
+            n = (char)(n - 32);
+        if (c != n)
+            return 0;
+    }
+    return 1;
+}
+
+/* Parse RFC 1123 ("Sun, 06 Nov 1994 08:49:37 GMT") into the 16-byte
+ * SYSTEMTIME. Returns 1 on success. Day-of-week is recomputed (not
+ * read from the input) so a malformed dow doesn't reject otherwise-
+ * valid timestamps; we follow Internet Explorer's behaviour here. */
+static BOOL wininet_parse_rfc1123_a(const char* str, void* time_st)
+{
+    if (str == 0 || time_st == 0)
+        return 0;
+    const char* p = wininet_skip_ws(str);
+    /* Skip optional "DDD," prefix. */
+    if (p[0] && p[1] && p[2] && p[3] == ',')
+        p += 4;
+    p = wininet_skip_ws(p);
+    const unsigned day = wininet_parse_uint(&p);
+    if (day < 1 || day > 31)
+        return 0;
+    p = wininet_skip_ws(p);
+    /* Three-letter month. */
+    int month = 0;
+    for (int i = 0; i < 12; ++i)
+    {
+        if (wininet_match_prefix3_ci(p, wininet_mon_short[i]))
+        {
+            month = i + 1;
+            break;
+        }
+    }
+    if (month == 0)
+        return 0;
+    p += 3;
+    p = wininet_skip_ws(p);
+    const unsigned year = wininet_parse_uint(&p);
+    if (year < 1601 || year > 9999)
+        return 0;
+    p = wininet_skip_ws(p);
+    const unsigned hour = wininet_parse_uint(&p);
+    if (hour > 23 || *p != ':')
+        return 0;
+    ++p;
+    const unsigned minute = wininet_parse_uint(&p);
+    if (minute > 59 || *p != ':')
+        return 0;
+    ++p;
+    const unsigned second = wininet_parse_uint(&p);
+    if (second > 59)
+        return 0;
+    /* Trailing zone (GMT/UTC) is permitted but not validated. */
+    /* Compute day-of-week via Zeller's congruence (Gregorian). */
+    unsigned y = year;
+    unsigned m = (unsigned)month;
+    if (m < 3)
+    {
+        m += 12;
+        --y;
+    }
+    const unsigned K = y % 100;
+    const unsigned J = y / 100;
+    const unsigned h = (day + (13 * (m + 1)) / 5 + K + K / 4 + J / 4 + 5 * J) % 7;
+    /* Zeller: 0 = Saturday … 6 = Friday. SYSTEMTIME wants
+     * 0 = Sunday … 6 = Saturday. */
+    const unsigned dow = (h + 6) % 7;
+    unsigned short* st = (unsigned short*)time_st;
+    st[0] = (unsigned short)year;
+    st[1] = (unsigned short)month;
+    st[2] = (unsigned short)dow;
+    st[3] = (unsigned short)day;
+    st[4] = (unsigned short)hour;
+    st[5] = (unsigned short)minute;
+    st[6] = (unsigned short)second;
+    st[7] = 0;
+    return 1;
 }
 
 __declspec(dllexport) BOOL InternetTimeToSystemTimeA(const char* str, void* time_st, DWORD reserved)
 {
-    (void)str;
     (void)reserved;
     if (time_st)
     {
+        /* Pre-zero so a parse failure leaves predictable bytes. */
         unsigned char* p = (unsigned char*)time_st;
         for (int i = 0; i < 16; ++i)
             p[i] = 0;
     }
-    return 0;
+    return wininet_parse_rfc1123_a(str, time_st);
 }
 
 __declspec(dllexport) BOOL InternetTimeToSystemTimeW(const wchar_t16* str, void* time_st, DWORD reserved)
 {
-    (void)str;
     (void)reserved;
     if (time_st)
     {
@@ -1144,7 +1331,16 @@ __declspec(dllexport) BOOL InternetTimeToSystemTimeW(const wchar_t16* str, void*
         for (int i = 0; i < 16; ++i)
             p[i] = 0;
     }
-    return 0;
+    if (str == 0)
+        return 0;
+    /* Flatten to ASCII (RFC 1123 dates are ASCII-only). 64 bytes
+     * covers any well-formed date string (29 + slack). */
+    char ascii[64];
+    DWORD i = 0;
+    for (; str[i] && i + 1 < sizeof(ascii); ++i)
+        ascii[i] = (char)(str[i] & 0xFF);
+    ascii[i] = 0;
+    return wininet_parse_rfc1123_a(ascii, time_st);
 }
 
 __declspec(dllexport) BOOL InternetGetLastResponseInfoA(DWORD* err, char* buf, DWORD* len)
