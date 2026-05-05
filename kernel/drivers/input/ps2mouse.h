@@ -65,11 +65,19 @@ namespace duetos::drivers::input
 constexpr u8 kMouseButtonLeft = 1U << 0;
 constexpr u8 kMouseButtonRight = 1U << 1;
 constexpr u8 kMouseButtonMiddle = 1U << 2;
+// Side buttons. Set by USB-HID mice that report 4+ buttons in
+// non-boot reports; PS/2 mice never set these (the IBM 3-button
+// PS/2 wire format has no slot for them). Consumers that don't
+// care about side buttons can ignore the bits.
+constexpr u8 kMouseButton4 = 1U << 3;
+constexpr u8 kMouseButton5 = 1U << 4;
 
 struct MousePacket
 {
     i32 dx;     // pixels, positive = right
     i32 dy;     // pixels, positive = down (screen-space convention)
+    i32 dz;     // wheel ticks, positive = scroll up. Always 0 for
+                // PS/2 packets and for USB-HID boot-protocol reports.
     u8 buttons; // bitmask of kMouseButton*
     u8 _pad[3];
 };

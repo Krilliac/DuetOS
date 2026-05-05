@@ -140,22 +140,37 @@ bool UsageInReport(u8 usage, const u8 report[8])
     return false;
 }
 
-// Diff previous vs current HID boot keyboard report. Emit a
-// release KeyEvent for every usage in prev-not-in-curr, a press
-// Parse a 3-byte HID Boot Mouse report. Layout:
-//   byte 0 = buttons (bit 0 = left, 1 = right, 2 = middle, rest
-//            reserved)
-//   byte 1 = signed dx in mickeys (device-defined units; QEMU
-//            treats them as pixels on the host display)
-//   byte 2 = signed dy (positive = down; matches our
-//            Ps2KeyboardReadPacket convention)
-// Inject one MousePacket per report. Boot mouse reports come
-// in every tick even when nothing moves; we do NOT filter
-// zero-motion reports so a driver looking for button edges
-// still sees the right stream.
-void HidMouseInject(const u8 report[3])
+// Decode a HID mouse report and inject one MousePacket. Reports
+// come in every poll even when nothing moves; we do NOT filter
+// zero-motion reports so a driver looking for button edges still
+// sees the right stream.
+//
+// Layouts handled (the common forms a USB-HID mouse uses without
+// negotiating SetProtocol — the host gets whichever the device
+// powers up in):
+//   - 3 bytes (boot protocol):
+//       byte 0 = buttons (bit 0 = left, 1 = right, 2 = middle)
+//       byte 1 = signed dx
+//       byte 2 = signed dy
+//   - 4 bytes (extended boot, the most common wheel-mouse layout):
+//       same as 3-byte + byte 3 = signed wheel ticks
+//   - 5+ bytes (extended boot + side buttons / tilt):
+//       byte 0 also exposes bits 3 = button4, 4 = button5
+//       byte 3 = wheel, byte 4 ignored (horizontal tilt — no
+//       MousePacket field for it yet)
+//
+// Reports of zero length or smaller than 3 bytes are dropped.
+// Reports longer than 8 bytes are clamped to 8 (typical interrupt
+// IN endpoint max for a HID mouse — anything bigger is a
+// non-standard layout we won't decode without the report descriptor
+// parser landing field-level offsets).
+void HidMouseInjectN(const u8* report, u32 len)
 {
     using namespace duetos::drivers::input;
+    if (report == nullptr || len < 3)
+        return;
+    if (len > 8)
+        len = 8;
     MousePacket p{};
     p.buttons = 0;
     if (report[0] & 0x01)
@@ -164,10 +179,23 @@ void HidMouseInject(const u8 report[3])
         p.buttons |= kMouseButtonRight;
     if (report[0] & 0x04)
         p.buttons |= kMouseButtonMiddle;
-    // Sign-extend the int8 deltas into our int32 fields.
+    if (len >= 5)
+    {
+        if (report[0] & 0x08)
+            p.buttons |= kMouseButton4;
+        if (report[0] & 0x10)
+            p.buttons |= kMouseButton5;
+    }
     p.dx = static_cast<i32>(static_cast<i8>(report[1]));
     p.dy = static_cast<i32>(static_cast<i8>(report[2]));
+    if (len >= 4)
+        p.dz = static_cast<i32>(static_cast<i8>(report[3]));
     MouseInjectPacket(p);
+}
+
+void HidMouseInject(const u8 report[3])
+{
+    HidMouseInjectN(report, 3);
 }
 
 // for every usage in curr-not-in-prev. Modifier edges emit

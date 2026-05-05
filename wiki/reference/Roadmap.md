@@ -175,26 +175,28 @@ In rough priority:
 - **Owner:** `kernel/drivers/net/wireless/` (per-vendor upload +
   ring setup), `kernel/net/wireless/` (MLME state machine).
 
-### USB mouse — beyond boot protocol
+### USB mouse — high-DPI 16-bit XY
 
-- **Today:** boot-protocol mouse is fully wired end-to-end —
-  `xhci_descparse.cpp` recognises `kIfaceProtocolMouse`,
-  `xhci_enum.cpp` flags the device, `xhci_init.cpp`'s polling
-  loop routes 3-byte reports to `HidMouseInject` in
-  `xhci_input.cpp`, which packs them into the same
-  `MousePacket` queue PS/2 mice use. Boot protocol gives 3
-  axes + 3 buttons; that's enough for the desktop-prototype
-  WM and most older USB mice.
-- **Deferred:** report-descriptor-driven mouse decoding —
-  scroll wheel (Z axis), 4th / 5th buttons, high-dpi
-  pointers, tilt wheels. The descriptor parser exists
-  (`HidParseDescriptor` in `hid_descriptor.cpp`); the
-  remaining work is wiring it into `xhci_init.cpp`'s
-  polling-report decode so non-boot reports get parsed by
-  field rather than by fixed 3-byte layout.
-- **Blocks on:** a workload that legitimately needs scroll
-  or extra-button support — boot protocol is the right
-  default until then.
+- **Today:** boot-protocol + extended boot-protocol decoding
+  is wired end-to-end. `xhci_init.cpp`'s polling loop computes
+  the actual transfer length from the TRB residual and calls
+  `HidMouseInjectN(buf, len)` in `xhci_input.cpp`, which
+  decodes 3 / 4 / 5+ byte reports — wheel (Z axis), buttons
+  4 / 5, and standard left/right/middle. `MousePacket` carries
+  `dz` and the `kMouseButton4 / kMouseButton5` bits; the
+  Win32 mouse-input accumulator already accepts the wheel
+  delta.
+- **Deferred:** descriptor-driven decoding for layouts with
+  16-bit X / Y (high-DPI gaming mice), digitizer / absolute
+  pointers, and horizontal tilt. Needs `HidParseDescriptor`
+  to expose per-field offsets — today it sums Report Size ×
+  Report Count without recording where each field lands. The
+  next slice extends the parser, fetches the report
+  descriptor at enumeration time, and passes the layout
+  table into `HidMouseInjectN`.
+- **Blocks on:** a workload that legitimately needs high-DPI
+  precision or digitizer events — extended boot covers wheel
+  + 5 buttons.
 - **Owner:** `kernel/drivers/usb/`.
 
 ### Multi-monitor / runtime resolution change

@@ -612,6 +612,50 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 112 — Extended-boot USB mouse: wheel + buttons 4/5
+
+- **Scope:** `kernel/drivers/input/ps2mouse.h` (added `dz`,
+  `kMouseButton4`, `kMouseButton5` to `MousePacket`),
+  `kernel/drivers/usb/xhci_input.cpp` (`HidMouseInjectN(buf, len)`
+  decoder; `HidMouseInject` now thunks through it),
+  `kernel/drivers/usb/xhci_internal.h` (prototype),
+  `kernel/drivers/usb/xhci_init.cpp` (residual-aware actual-length
+  computation, replaced fixed 3-byte read), `kernel/core/main.cpp`
+  (PS/2 reader path passes `p.dz` instead of hard-coded zero).
+- **Decision:** Decode by report length rather than by fixed
+  3-byte boot layout. The xHCI poller computes
+  `actual = max_packet - residual` from the TRB completion and
+  hands `[0..actual)` to `HidMouseInjectN`. Length-3 reports
+  decode as boot protocol; length-4 adds the signed wheel byte;
+  length-5+ adds buttons 4/5 from byte 0 bits 3/4. Reports
+  shorter than 3 bytes are dropped; longer than 8 are clamped.
+  The wheel field flows through the existing
+  `MouseInputAccumulate` Win32 accumulator (which already
+  accepted a `dz` argument).
+- **Why:** Closes the "USB mouse beyond boot protocol" Roadmap
+  item to the extent the existing parser supports. Most wheel
+  mice without explicit `SetProtocol(boot)` ship 4-byte reports
+  in the extended-boot layout (button + dx + dy + wheel) — the
+  industry de-facto fallback for vendors that don't ship a
+  full report descriptor. Decoding it gets us scroll + 5
+  buttons without needing the parser to expose per-field
+  offsets, which is a much bigger lift.
+- **Rules out / defers:** 16-bit X / Y axes (high-DPI gaming
+  mice), digitizer / absolute pointers, horizontal tilt as a
+  first-class field. Those need `HidParseDescriptor` to track
+  field offsets — today it sums Report Size × Report Count
+  without recording position. The Roadmap entry now reads
+  "high-DPI 16-bit XY" reflecting the smaller scope still
+  open.
+- **Revisit when:** A workload needs digitizer / absolute
+  pointers, or a high-DPI mouse arrives in the test fleet
+  whose 16-bit XY layout the extended-boot heuristic
+  misreads.
+- **Related tracks:** Track 6 (Drivers — USB HID), Track 9
+  (Win32 — mouse-input accumulator).
+
+---
+
 ## 111 — SYS_FILE_WRITE grows FAT32 files past EOF via Fat32WriteAtPath
 
 - **Scope:** `kernel/proc/process.h` (new `fat32_path[64]` field

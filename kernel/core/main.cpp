@@ -3432,9 +3432,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             // the warp-corrected cursor diff would lie about user
             // motion when programmatic SetCursor moves the cursor
             // (e.g. confined-to-window capture).
-            // PS/2 has no wheel byte; xHCI HID will inject wheel
-            // ticks once that path is wired.
-            duetos::subsystems::win32::MouseInputAccumulate(p.dx, p.dy, /*dz=*/0, p.buttons);
+            // PS/2 packets carry dz=0 in the MousePacket (the IBM
+            // 3-byte wire format has no wheel slot); USB-HID mice
+            // populate it from a 4+ byte report.
+            duetos::subsystems::win32::MouseInputAccumulate(p.dx, p.dy, p.dz, p.buttons);
 
             // Every UI mutation inside this packet lives under
             // the compositor mutex — the kbd reader can be mid-
