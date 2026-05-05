@@ -495,6 +495,17 @@ void SettingsInit(WindowHandle handle)
         b.label = kActions[i].label;
         duetos::drivers::video::WidgetRegisterButton(b);
     }
+
+    // Sub-panel installers — each settings_<panel>.cpp registers
+    // its draw + key callbacks with the framework. A panel that
+    // hasn't shipped yet is a missing-symbol link error rather
+    // than a silent placeholder; that's the right tradeoff —
+    // catching the missing wiring at link time.
+    SettingsDisplayInit();
+    SettingsSoundInit();
+    SettingsKeyboardInit();
+    SettingsMouseInit();
+    SettingsDateTimeInit();
 }
 
 WindowHandle SettingsWindow()

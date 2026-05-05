@@ -120,4 +120,12 @@ using PanelKeyFn = bool (*)(char c);
 /// panel's internals. Passing nullptr clears the slot.
 void SettingsRegisterPanel(Panel p, PanelDrawFn draw, PanelKeyFn key);
 
+/// Per-panel install hooks. Each settings_<panel>.cpp exposes
+/// one of these and SettingsInit calls them all to register.
+void SettingsDisplayInit();
+void SettingsSoundInit();
+void SettingsKeyboardInit();
+void SettingsMouseInit();
+void SettingsDateTimeInit();
+
 } // namespace duetos::apps::settings
