@@ -574,23 +574,74 @@ __declspec(dllexport) BOOL InternetGetCookieA(const char* url, const char* name,
         return 0;
     if (!size)
         return 0;
-    /* Look up the named cookie for this host. */
-    const int slot = (name && *name) ? wininet_cookie_find(host, name) : -1;
-    if (slot < 0)
+    if (name && *name)
     {
-        /* No name → concatenate all cookies for the host. v0
-         * scope skips the concat path and returns "no cookie";
-         * a real browser would build "name1=value1; name2=value2"
-         * here. */
-        if (data && *size > 0)
-            data[0] = 0;
-        *size = 0;
-        return 0;
+        /* Single-cookie lookup. */
+        const int slot = wininet_cookie_find(host, name);
+        if (slot < 0)
+        {
+            if (data && *size > 0)
+                data[0] = 0;
+            *size = 0;
+            return 0;
+        }
+        g_cookie_table[slot].lru_seq = ++g_cookie_lru_counter;
+        const DWORD wrote = wininet_str_copy_capped(data, *size, g_cookie_table[slot].value);
+        *size = wrote;
+        return data != (char*)0;
     }
-    g_cookie_table[slot].lru_seq = ++g_cookie_lru_counter;
-    const DWORD wrote = wininet_str_copy_capped(data, *size, g_cookie_table[slot].value);
-    *size = wrote;
-    return data != (char*)0;
+    /* No name → concatenate every matching host cookie as
+     *   "name1=value1; name2=value2; ..."
+     * which is the format an HTTP Cookie: header takes. The
+     * insertion order is the cookie table's slot order — not
+     * RFC 6265's specified path-then-creation-time ordering,
+     * but stable enough that tests can rely on it. Each touch
+     * bumps the slot's LRU sequence so the eviction policy
+     * still tracks "most recently fetched". */
+    DWORD have = 0;
+    BOOL any = 0;
+    for (int i = 0; i < COOKIE_TABLE_ENTRIES; ++i)
+    {
+        if (!g_cookie_table[i].in_use)
+            continue;
+        if (!wininet_host_eq(g_cookie_table[i].host, host))
+            continue;
+        any = 1;
+        g_cookie_table[i].lru_seq = ++g_cookie_lru_counter;
+        if (data == 0 || *size == 0)
+        {
+            /* Caller is sizing the buffer — tally the chars
+             * we'd write but don't dereference data. */
+            DWORD k = 0;
+            while (g_cookie_table[i].name[k])
+                ++k;
+            have += k + 1; /* '=' */
+            k = 0;
+            while (g_cookie_table[i].value[k])
+                ++k;
+            have += k;
+            if (have > 0)
+                have += 2; /* "; " separator (or trailing slack) */
+            continue;
+        }
+        if (have > 0 && have + 2 < *size)
+        {
+            data[have++] = ';';
+            data[have++] = ' ';
+        }
+        DWORD k = 0;
+        while (g_cookie_table[i].name[k] && have + 1 < *size)
+            data[have++] = g_cookie_table[i].name[k++];
+        if (have + 1 < *size)
+            data[have++] = '=';
+        k = 0;
+        while (g_cookie_table[i].value[k] && have + 1 < *size)
+            data[have++] = g_cookie_table[i].value[k++];
+    }
+    if (data && *size > 0)
+        data[have < *size ? have : (*size - 1)] = 0;
+    *size = have;
+    return any;
 }
 
 __declspec(dllexport) BOOL InternetGetCookieW(const wchar_t16* url, const wchar_t16* name, wchar_t16* data, DWORD* size)
@@ -612,7 +663,13 @@ __declspec(dllexport) BOOL InternetGetCookieW(const wchar_t16* url, const wchar_
         for (; name[i] && i + 1 < sizeof(name_a); ++i)
             name_a[i] = (char)(name[i] & 0xFF);
     }
-    char value_a[COOKIE_VALUE_BYTES] = {0};
+    /* Sized to fit the realistic multi-cookie concat. Static
+     * (not stack) because (a) we'd otherwise trip __chkstk on a
+     * frame ≥ 4 KiB and the freestanding DLL doesn't link it, and
+     * (b) the cookie store itself is single-threaded so a static
+     * scratch is correct under the same constraint. */
+    static char value_a[3072];
+    value_a[0] = 0;
     DWORD asize = sizeof(value_a);
     const BOOL ok = InternetGetCookieA(url_a, name_a[0] ? name_a : (const char*)0, value_a, &asize);
     if (size)

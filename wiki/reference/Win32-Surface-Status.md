@@ -607,7 +607,10 @@ Cookie family (`InternetGetCookieA/W` /
 small in-process cookie store: a 16-entry LRU table of
 `(host, name, value)` triples, host extracted from the URL by
 parsing `scheme://[userinfo@]host[:port]/...`, host compare
-case-insensitive per RFC 6265. Path / domain / Secure /
+case-insensitive per RFC 6265. `InternetGetCookieA/W` with
+NULL `name` walks every matching host entry and concatenates
+them as `name1=value1; name2=value2; ...` — the canonical
+HTTP `Cookie:` header form. Path / domain / Secure /
 HttpOnly / SameSite attributes are dropped — Set just stashes
 the triple. Cleared at process exit (no on-disk
 persistence).
