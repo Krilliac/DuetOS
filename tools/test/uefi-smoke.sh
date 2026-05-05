@@ -31,6 +31,7 @@ readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PRESET="${DUETOS_PRESET:-x86_64-release}"
 BUILD_DIR="${REPO_ROOT}/build/${PRESET}"
 EFI_IMAGE="${BUILD_DIR}/boot/uefi/BOOTX64.EFI"
+KERNEL_ELF="${BUILD_DIR}/kernel/duetos-kernel.elf"
 TIMEOUT_SECS="${DUETOS_TIMEOUT:-15}"
 
 # OVMF firmware path. The naming has shifted across Ubuntu/Debian
@@ -48,9 +49,15 @@ for cand in \
     fi
 done
 
-# The banner string the loader's main.cpp prints. Keep this in
-# sync with boot/uefi/main.cpp's `kBanner`.
+# Markers to grep for in the captured serial log. Keep both in
+# sync with boot/uefi/main.cpp.
+#   BANNER  — Phase A toolchain-proof banner.
+#   KERNEL  — Phase B.1 marker emitted after a successful
+#             open + read + validate of duetos-kernel.elf on the
+#             boot ESP. Absence indicates the loader couldn't
+#             find / open / read / validate the kernel image.
 readonly BANNER_NEEDLE="DuetOS UEFI loader v0"
+readonly KERNEL_NEEDLE="kernel ELF: valid x86_64 image"
 
 # --------------------------------------------------------------
 # Prerequisite checks. Fail with code 2 + a useful "what to do"
@@ -73,6 +80,15 @@ if [ ! -f "${EFI_IMAGE}" ]; then
     echo "  build:   cmake --build build/${PRESET} --target duetos-uefi" >&2
     exit 2
 fi
+# Phase B.1 also requires the kernel ELF to be staged on the
+# virtual ESP so the loader's ProbeKernelElf can find + validate
+# it. Skip cleanly if the kernel hasn't been built — the
+# CMakeLists' add_subdirectory(kernel) target builds this.
+if [ ! -f "${KERNEL_ELF}" ]; then
+    echo "[uefi-smoke] kernel ELF not built at ${KERNEL_ELF}" >&2
+    echo "  build:   cmake --build build/${PRESET}" >&2
+    exit 2
+fi
 
 # --------------------------------------------------------------
 # Stage a virtual FAT32 ESP. QEMU's `-drive file=fat:rw:DIR`
@@ -87,6 +103,10 @@ trap 'rm -rf "${ESP_DIR}" "${LOG_FILE}"' EXIT
 
 mkdir -p "${ESP_DIR}/EFI/BOOT"
 cp "${EFI_IMAGE}" "${ESP_DIR}/EFI/BOOT/BOOTX64.EFI"
+# Phase B.1: stage the kernel ELF at the volume root so the
+# loader's ProbeKernelElf can open it via SimpleFileSystem.
+# Path matches the CHAR16 literal in main.cpp's kKernelPath.
+cp "${KERNEL_ELF}" "${ESP_DIR}/duetos-kernel.elf"
 
 # --------------------------------------------------------------
 # Run QEMU. `-serial file:LOG_FILE` captures COM1 — the loader
@@ -123,12 +143,17 @@ set -e
 # a fault during firmware load and a Phase A regression.
 # --------------------------------------------------------------
 
-if grep -q "${BANNER_NEEDLE}" "${LOG_FILE}"; then
-    echo "[uefi-smoke] PASS (banner observed on COM1, qemu exit=${QEMU_EXIT})"
-    exit 0
+if ! grep -q "${BANNER_NEEDLE}" "${LOG_FILE}"; then
+    echo "[uefi-smoke] FAIL (Phase A banner NOT found; qemu exit=${QEMU_EXIT})"
+    echo "--- last 40 lines of serial log ---"
+    tail -40 "${LOG_FILE}" || true
+    exit 1
 fi
-
-echo "[uefi-smoke] FAIL (banner NOT found in serial log; qemu exit=${QEMU_EXIT})"
-echo "--- last 40 lines of serial log ---"
-tail -40 "${LOG_FILE}" || true
-exit 1
+if ! grep -q "${KERNEL_NEEDLE}" "${LOG_FILE}"; then
+    echo "[uefi-smoke] FAIL (Phase B.1 kernel-validation marker NOT found; qemu exit=${QEMU_EXIT})"
+    echo "--- last 40 lines of serial log ---"
+    tail -40 "${LOG_FILE}" || true
+    exit 1
+fi
+echo "[uefi-smoke] PASS (Phase A banner + Phase B.1 kernel ELF validated; qemu exit=${QEMU_EXIT})"
+exit 0

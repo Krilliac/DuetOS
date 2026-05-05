@@ -16,12 +16,14 @@ on a FAT32 ESP. It is **not yet** the canonical boot path —
 today the kernel still boots via GRUB + Multiboot2 — but it is a
 real binary that the firmware accepts and runs.
 
-The loader has two phases:
+The loader has two phases (Phase B is itself sliced):
 
 | Phase | Scope | Status |
 | ----- | ----- | ------ |
-| **A** | Toolchain + ABI proof. `efi_main` prints a banner via `ConOut->OutputString`, calls `BootServices->Stall`, halts. No kernel handoff. | ✅ Shipped |
-| **B** | Real loader. ELF parsing of `boot/duetos-kernel.elf` from the boot partition, allocate pages, populate boot info (memory map + framebuffer), `ExitBootServices`, jump to kernel. | ⏳ Pending |
+| **A**     | Toolchain + ABI proof. `efi_main` prints a banner via `ConOut->OutputString` + COM1, calls `BootServices->Stall`, halts. No kernel handoff. | ✅ Shipped |
+| **B.1**   | File-system probe + ELF header validation. Walks `image_handle → LoadedImage → DeviceHandle → SimpleFileSystem → root → \duetos-kernel.elf`, reads the 64-byte `Elf64_Ehdr`, validates magic / class / endianness / `EM_X86_64` / `e_phnum`, logs `e_entry`. Halts. No segment load yet. | ✅ Shipped |
+| **B.2**   | Allocate pages, load each `PT_LOAD` segment, set up the kernel page tables (or hand the kernel its own setup), build a DuetOS-shaped boot info struct (memory map + framebuffer + cmdline). | ⏳ Pending |
+| **B.3**   | `ExitBootServices`, jump to a new `entry_uefi` symbol in `boot.S` that takes the boot info struct in 64-bit long mode. | ⏳ Pending |
 
 ## Why two phases
 
