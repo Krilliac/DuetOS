@@ -313,13 +313,6 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
 - **Blocks on:** string-table layer with id → text indirection.
 - **Effort:** refactor across all apps.
 
-### PE/ELF launching from /APPS manifests
-
-- **Today:** /APPS *.MNF enumeration works; manifests with
-  `target=<role>` raise the matching kernel-app window.
-- **Blocks on:** loader runtime that lands a manifest with
-  `kind=pe path=APPS/foo.exe` as a real launch.
-
 ### Disk installer
 
 - **Today:** boots from ISO only. Live system; no install.

@@ -3619,9 +3619,112 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                             role = static_cast<duetos::drivers::video::ThemeRole>(action - 100);
                             have_role = true;
                         }
-                        else if (duetos::drivers::video::StartMenuAppsResolve(action, &role))
+                        else
                         {
-                            have_role = true;
+                            // /APPS shortcut: ask the full launch
+                            // resolver. PE / ELF kinds spawn the
+                            // binary directly from FAT32; Role kinds
+                            // fall through to the existing ThemeRole
+                            // raise path.
+                            duetos::drivers::video::ShortcutKind sk{};
+                            const char* spawn_path = nullptr;
+                            if (duetos::drivers::video::StartMenuAppsResolveLaunch(action, &sk, &role, &spawn_path))
+                            {
+                                if (sk == duetos::drivers::video::ShortcutKind::Role)
+                                {
+                                    have_role = true;
+                                }
+                                else if ((sk == duetos::drivers::video::ShortcutKind::Pe ||
+                                          sk == duetos::drivers::video::ShortcutKind::Elf) &&
+                                         spawn_path != nullptr && spawn_path[0] != '\0')
+                                {
+                                    // FAT32 paths are walked from the
+                                    // volume root. The manifest writes
+                                    // them as "APPS/FOO.EXE" (no
+                                    // leading slash); Fat32LookupPath
+                                    // accepts both forms but the
+                                    // diagnostic log reads cleaner
+                                    // with the slash, so prepend it
+                                    // when missing.
+                                    char path_buf[128];
+                                    duetos::u64 pi = 0;
+                                    if (spawn_path[0] != '/')
+                                        path_buf[pi++] = '/';
+                                    while (spawn_path[pi - (spawn_path[0] != '/' ? 1 : 0)] != '\0' &&
+                                           pi + 1 < sizeof(path_buf))
+                                    {
+                                        path_buf[pi] = spawn_path[pi - (spawn_path[0] != '/' ? 1 : 0)];
+                                        ++pi;
+                                    }
+                                    path_buf[pi] = '\0';
+                                    const auto* vol = duetos::fs::fat32::Fat32Volume(0);
+                                    duetos::fs::fat32::DirEntry ent;
+                                    if (vol != nullptr && duetos::fs::fat32::Fat32LookupPath(vol, path_buf, &ent) &&
+                                        ent.size_bytes > 0 && ent.size_bytes <= 8 * 1024 * 1024)
+                                    {
+                                        // Stage into a heap buffer.
+                                        // 8 MiB cap mirrors the
+                                        // largest embedded PE we ship
+                                        // today; bigger images need
+                                        // mmap-backed staging.
+                                        auto* staging =
+                                            reinterpret_cast<duetos::u8*>(duetos::mm::KMalloc(ent.size_bytes));
+                                        if (staging != nullptr)
+                                        {
+                                            const auto got =
+                                                duetos::fs::fat32::Fat32ReadFile(vol, &ent, staging, ent.size_bytes);
+                                            if (got == static_cast<duetos::i64>(ent.size_bytes))
+                                            {
+                                                const duetos::u64 pid =
+                                                    (sk == duetos::drivers::video::ShortcutKind::Pe)
+                                                        ? duetos::core::SpawnPeFile("/apps/launch", staging,
+                                                                                    static_cast<duetos::u64>(got),
+                                                                                    duetos::core::CapSetTrusted(),
+                                                                                    duetos::fs::RamfsTrustedRoot(),
+                                                                                    duetos::mm::kFrameBudgetTrusted,
+                                                                                    duetos::core::kTickBudgetTrusted)
+                                                        : duetos::core::SpawnElfFile("/apps/launch", staging,
+                                                                                     static_cast<duetos::u64>(got),
+                                                                                     duetos::core::CapSetTrusted(),
+                                                                                     duetos::fs::RamfsTrustedRoot(),
+                                                                                     duetos::mm::kFrameBudgetTrusted,
+                                                                                     duetos::core::kTickBudgetTrusted);
+                                                duetos::drivers::video::ConsoleWrite(
+                                                    pid != 0 ? "-> /APPS LAUNCH OK pid=" : "-> /APPS LAUNCH FAIL");
+                                                if (pid != 0)
+                                                {
+                                                    char pidbuf[24];
+                                                    duetos::u32 pi2 = 0;
+                                                    duetos::u64 v = pid;
+                                                    char tmp[24];
+                                                    duetos::u32 ti = 0;
+                                                    if (v == 0)
+                                                        tmp[ti++] = '0';
+                                                    while (v != 0)
+                                                    {
+                                                        tmp[ti++] = static_cast<char>('0' + v % 10);
+                                                        v /= 10;
+                                                    }
+                                                    while (ti > 0)
+                                                        pidbuf[pi2++] = tmp[--ti];
+                                                    pidbuf[pi2] = '\0';
+                                                    duetos::drivers::video::ConsoleWriteln(pidbuf);
+                                                }
+                                                else
+                                                {
+                                                    duetos::drivers::video::ConsoleWriteln(path_buf);
+                                                }
+                                            }
+                                            duetos::mm::KFree(staging);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        duetos::drivers::video::ConsoleWrite("-> /APPS NOT FOUND ");
+                                        duetos::drivers::video::ConsoleWriteln(path_buf);
+                                    }
+                                }
+                            }
                         }
                         if (have_role)
                         {

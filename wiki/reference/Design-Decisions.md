@@ -612,6 +612,54 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 115 — /APPS manifests can launch PE/ELF binaries from FAT32
+
+- **Scope:** `kernel/drivers/video/start_menu_apps.{h,cpp}`
+  (new `ShortcutKind` enum, `Slot::path`, `kPathCap`,
+  `ParsedManifest`, `StartMenuAppsResolveLaunch`, extended
+  parser + self-test), `kernel/core/main.cpp` (menu-action
+  dispatch reads the file off FAT32 and calls `SpawnPeFile` /
+  `SpawnElfFile`).
+- **Decision:** Manifests can pick exactly one of two launch
+  forms:
+  - `target=<role>` — raise an existing app window (current
+    behaviour, unchanged).
+  - `kind=pe|elf` + `path=<fat32-path>` — read the binary
+    bytes from FAT32 (8 MiB cap), KMalloc-stage them, and
+    spawn via `SpawnPeFile` / `SpawnElfFile` with trusted caps
+    + budget.
+  Manifests that have neither directive are rejected (the
+  legacy parser silently dropped them too; the new self-test
+  asserts the rejection path). The action dispatcher in
+  `main.cpp` resolves through `StartMenuAppsResolveLaunch`,
+  which yields the kind + path; PE/ELF kinds skip the
+  ThemeRole-raise block.
+- **Why:** Closes the "PE/ELF launching from /APPS manifests"
+  Roadmap item. Before this, manifests could only alias an
+  already-built-into-the-kernel app — useless for users who
+  drop a `.exe` onto disk. The kernel has had `SpawnPeFile`
+  for embedded ramfs PEs since the loader landed; this slice
+  just puts the FAT32-staging + dispatch glue in front of it.
+  Trusted caps for v0 because the manifest writer is a local
+  user; per-manifest cap fields are a follow-up.
+- **Rules out / defers:** Per-manifest `caps=` /
+  `frame-budget=` / `tick-budget=` fields (sandboxed
+  manifests). Argv / env passthrough (manifests carry no
+  `args=` field; would require `SpawnPeFile`'s argv shim from
+  Roadmap entry #109's "First ring-3 program wants argv"
+  trigger). Auto-detect ELF-Linux vs ELF-DuetOS-native
+  (manifests pick explicitly via `kind=elf`; `kind=elf-linux`
+  follow-up when needed). > 8 MiB binaries (KMalloc staging
+  cap; mmap-backed staging is the next-bigger lift).
+- **Revisit when:** A workload needs sandboxed launches from
+  a manifest (drop the cap from Trusted to Sandbox + a
+  per-manifest field). A real argv user shows up. ELF-Linux
+  becomes a separate kind.
+- **Related tracks:** Track 7 (Userland — launcher), Track 4
+  (Process — spawn surface).
+
+---
+
 ## 114 — WriteFile dispatches by handle range, not "always stdout"
 
 - **Scope:** `userland/libs/kernel32/kernel32.c` (`WriteFile`).
