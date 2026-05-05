@@ -52,6 +52,18 @@ struct Action
 constexpr u8 kOpacityStep = 32;
 constexpr u8 kOpacityMin = 64;
 
+// Sub-panel registry. Indexed by Panel enum value. Each slot
+// is populated by SettingsRegisterPanel from the panel's own
+// .cpp; the General panel is handled inline in DrawFn /
+// SettingsFeedChar so it doesn't register here.
+struct PanelSlot
+{
+    PanelDrawFn draw;
+    PanelKeyFn key;
+};
+constinit PanelSlot g_panels[static_cast<u32>(Panel::kCount)] = {};
+constinit Panel g_active_panel = Panel::General;
+
 void DoThemePrev()
 {
     // ThemeCycle only advances forward, so step kCount-1 times.
@@ -248,6 +260,35 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     const auto& th = ThemeCurrent();
     const u32 ink_fg = th.console_fg;
     const u32 ink_bg = th.role_client[static_cast<u32>(duetos::drivers::video::ThemeRole::Settings)];
+    // Panel-switcher hint at the very top: lists the number-key
+    // shortcuts so a fresh user can find sub-panels without
+    // reading the wiki.
+    FramebufferDrawString(cx + kReadoutX, cy + 2, "0:GEN 1:DSP 2:SND 3:KBD 4:MSE 5:DT", th.banner_fg, ink_bg);
+    // Sub-panel dispatch. When a non-General panel is active
+    // and registered, render its content into the readout area
+    // (everything to the right of the button column) and skip
+    // the General-panel body below.
+    if (g_active_panel != Panel::General)
+    {
+        const PanelSlot& s = g_panels[static_cast<u32>(g_active_panel)];
+        if (s.draw != nullptr)
+        {
+            // Readout area = right of buttons, below the
+            // panel-switcher hint, above the bottom edge.
+            constexpr u32 kSubTop = 14;
+            const u32 sx = cx + kReadoutX;
+            const u32 sy = cy + kSubTop;
+            const u32 sw = (cw > kReadoutX) ? cw - kReadoutX - 4 : 0;
+            const u32 sh = (ch > kSubTop + 4) ? ch - kSubTop - 4 : 0;
+            s.draw(sx, sy, sw, sh);
+            return;
+        }
+        // Fallthrough — placeholder text when a panel slot is
+        // empty. The real panel populates via SettingsRegisterPanel
+        // from its own .cpp.
+        FramebufferDrawString(cx + kReadoutX, cy + 24, "(panel not registered yet)", th.banner_fg, ink_bg);
+        return;
+    }
 
     // Section header.
     const u32 hdr_y = cy + 6;
@@ -454,6 +495,17 @@ void SettingsInit(WindowHandle handle)
         b.label = kActions[i].label;
         duetos::drivers::video::WidgetRegisterButton(b);
     }
+
+    // Sub-panel installers — each settings_<panel>.cpp registers
+    // its draw + key callbacks with the framework. A panel that
+    // hasn't shipped yet is a missing-symbol link error rather
+    // than a silent placeholder; that's the right tradeoff —
+    // catching the missing wiring at link time.
+    SettingsDisplayInit();
+    SettingsSoundInit();
+    SettingsKeyboardInit();
+    SettingsMouseInit();
+    SettingsDateTimeInit();
 }
 
 WindowHandle SettingsWindow()
@@ -468,7 +520,55 @@ bool SettingsOnWidgetEvent(u32 id)
 
 bool SettingsFeedChar(char c)
 {
+    // Panel-switcher number keys take priority. '0' switches
+    // back to the General panel; '1'..'5' route to Display /
+    // Sound / Keyboard / Mouse / Date-Time. The General
+    // panel's existing chars ('t' / 'h' / '-' / '+' / '0')
+    // overlap on '0' — but '0' has the same semantics in
+    // both contexts ("reset to default") so the alias is
+    // intentional.
+    if (c >= '0' && c <= '5')
+    {
+        const u32 idx = static_cast<u32>(c - '0');
+        if (idx < static_cast<u32>(Panel::kCount))
+        {
+            g_active_panel = static_cast<Panel>(idx);
+        }
+        // Don't return here — '0' should still reach the
+        // General-panel reset action. Other digits are
+        // panel-only keystrokes.
+        if (c != '0')
+            return true;
+    }
+    if (g_active_panel != Panel::General)
+    {
+        const PanelKeyFn fn = g_panels[static_cast<u32>(g_active_panel)].key;
+        if (fn != nullptr && fn(c))
+            return true;
+        // Fall through to General handling for unhandled keys
+        // — keeps Theme cycle / opacity always reachable.
+    }
     return DispatchByChar(c);
+}
+
+Panel SettingsActivePanel()
+{
+    return g_active_panel;
+}
+
+void SettingsSetActivePanel(Panel p)
+{
+    if (static_cast<u32>(p) < static_cast<u32>(Panel::kCount))
+        g_active_panel = p;
+}
+
+void SettingsRegisterPanel(Panel p, PanelDrawFn draw, PanelKeyFn key)
+{
+    const u32 idx = static_cast<u32>(p);
+    if (idx >= static_cast<u32>(Panel::kCount))
+        return;
+    g_panels[idx].draw = draw;
+    g_panels[idx].key = key;
 }
 
 void SettingsSelfTest()

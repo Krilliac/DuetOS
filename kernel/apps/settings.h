@@ -82,4 +82,50 @@ bool SettingsFeedChar(char c);
 /// path. Prints one PASS/FAIL line to COM1.
 void SettingsSelfTest();
 
+/// Sub-panel identifier. The Settings window's main DrawFn
+/// dispatches to a sub-panel renderer; each sub-panel owns
+/// its own draw + key handler. Number-key shortcuts (0..5)
+/// switch panels.
+enum class Panel : u8
+{
+    General = 0,  // existing theme / opacity / clock content
+    Display = 1,  // resolution + brightness (DPMS) + theme
+    Sound = 2,    // PC speaker test + future HDA volume
+    Keyboard = 3, // repeat rate + layout (placeholder)
+    Mouse = 4,    // double-click + sensitivity (placeholder)
+    DateTime = 5, // RTC + timezone
+    kCount,
+};
+
+/// Read the active sub-panel.
+Panel SettingsActivePanel();
+
+/// Switch sub-panel. The next compose paints the new content;
+/// no immediate redraw — the ui-ticker's recompose handles it.
+void SettingsSetActivePanel(Panel p);
+
+/// Per-panel draw callback. Receives the sub-panel content
+/// rectangle (excluding the side rail of buttons + the panel
+/// switcher header). Each panel may freely use the rect.
+using PanelDrawFn = void (*)(duetos::u32 x, duetos::u32 y, duetos::u32 w, duetos::u32 h);
+
+/// Per-panel keyboard handler. `c` is the printable char
+/// (already stripped of the panel-switching number keys).
+/// Returns true iff the panel consumed the key.
+using PanelKeyFn = bool (*)(char c);
+
+/// Register a sub-panel's draw + key handlers. Late binding so
+/// each panel's source file can install itself in a static
+/// initialiser without making this header depend on every
+/// panel's internals. Passing nullptr clears the slot.
+void SettingsRegisterPanel(Panel p, PanelDrawFn draw, PanelKeyFn key);
+
+/// Per-panel install hooks. Each settings_<panel>.cpp exposes
+/// one of these and SettingsInit calls them all to register.
+void SettingsDisplayInit();
+void SettingsSoundInit();
+void SettingsKeyboardInit();
+void SettingsMouseInit();
+void SettingsDateTimeInit();
+
 } // namespace duetos::apps::settings

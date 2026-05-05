@@ -71,6 +71,145 @@ and [Duet Theme Spec](../specifications/Duet-Theme-Spec.md).
 `Ctrl+Alt+Y` (or `theme=<name>` on the kernel cmdline / `theme <name>`
 in the kernel shell) hot-swaps every chrome colour.
 
+## Mouse Wheel
+
+`MousePacket::dz` is captured by the PS/2 driver
+(`ps2mouse.cpp`) and the xHCI HID decode
+(`xhci_input.cpp`) and surfaced to consumers via
+`WindowDispatchWheel(hwnd, client_x, client_y, dz, screen_x, screen_y, mk_buttons)`
+in `widget.{h,cpp}`. The dispatcher fans out:
+
+- **PE owners** — posts `WM_MOUSEWHEEL` (`0x020A`) with the
+  Win32-canonical `wparam = (i16(dz * 120) << 16) | mk_buttons`,
+  `lparam = (screen_y << 16) | screen_x`. Standard Win32
+  message-pump handling applies.
+- **Native owners** — calls the per-window `WindowWheelFn`
+  registered via `WindowSetWheelHandler`. v1 consumers: Files
+  (selection step), Notes (cursor step), Browser (body /
+  selection scroll), ImageView (next/prev image).
+
+The kernel's mouse loop clamps `|dz| <= 8` per packet to defang
+fast-wheel runaway and recomposes after each dispatch.
+
+## Double-Click
+
+Press-edge double-click detection lives in
+`kernel/core/main.cpp` mouse loop. Fires on two press edges
+within `kDblClickTicks` (50 ticks @ 100 Hz ≈ 500 ms) at the
+same pixel on the same HWND. Three independent detectors:
+
+- **PE client area** — posts `WM_LBUTTONDBLCLK` (`0x0203`).
+- **Native client area** — calls per-app `OnDoubleClick(cx, cy)`
+  (`FilesOnDoubleClick` opens row by extension;
+  `BrowserOnDoubleClick` follows a bookmark; others are no-ops).
+- **Title bar (any window)** — toggles
+  `WindowMaximize` / `WindowRestore`. The detector lives in the
+  chrome branch so it short-circuits the drag-start.
+
+## Cursor Shapes
+
+`cursor.{h,cpp}` carries eight 12×20 sprite tables — `Arrow`,
+`IBeam`, `Hand`, `Wait`, `ResizeNS`, `ResizeEW`, `ResizeNESW`,
+`ResizeNWSE` — selectable via `CursorSetShape(s)`. The mouse
+loop runs a hit-test on every packet:
+
+- Within `kWindowResizeBorderPx` (4 px) of a window corner →
+  `ResizeNWSE` (top-left / bottom-right) or `ResizeNESW`
+  (top-right / bottom-left)
+- Within 4 px of a window edge → `ResizeNS` (top/bottom) or
+  `ResizeEW` (left/right)
+- Over a button widget → `Hand`
+- Over Notes / Browser client area → `IBeam`
+- Otherwise → `Arrow`
+
+The change-gate (`if (new != current)`) keeps the per-packet
+test cheap when the shape doesn't change. `CursorPushWait()` /
+`CursorPopWait()` are refcounted hooks for long-running
+operations (used by `screenshot.cpp` around the FAT32 streaming
+write); the pre-Wait shape is restored on the last balance.
+
+## Modal Dialogs
+
+`dialog.{h,cpp}` carries a single-instance `MessageBox` /
+`InputBox` primitive. The API is fire-and-forget: callers pass
+a `DialogResultFn` callback that fires from the kbd-reader
+thread once the user resolves the dialog. Synchronous spin
+would deadlock the readers themselves, so the design avoids
+blocking entirely.
+
+- `MessageBoxOpen(title, body, cb, user)` — OK/Cancel.
+- `InputBoxOpen(title, prompt, default_text, cb, user)` —
+  single-line edit field, `kDialogInputMax = 64` bytes.
+- `DialogIsActive()` — lets the kbd / mouse routers redirect
+  input. While a dialog is up: every keystroke goes to
+  `DialogFeedKey` / `DialogFeedChar`; every press_edge goes
+  to `DialogOnPress`. Menus, app shortcuts, app routing all
+  skipped.
+- `DialogCompose()` — paints a 50% theme-coloured dim over the
+  desktop + a centred 400×140 panel + OK/Cancel buttons. Drawn
+  from `DesktopCompose` after every other surface so it lands
+  above chrome and tooltips.
+
+Consumers in v1: Files rename (`InputBox` → `Fat32RenameAtPath`);
+Notes dirty-close (`MessageBox` "Discard unsaved changes?"
+replaces the prior two-step Alt+F4 prompt).
+
+## Scrollbar
+
+`scrollbar.{h,cpp}` is a pure visual indicator. Apps call
+`ScrollbarPaint(x, y, w, h, {total, visible, first})` from
+their `DrawFn`; the painter draws a track + proportional
+thumb. v1 doesn't implement drag-the-thumb interactivity —
+wheel dispatch covers the common scroll case; click-on-track
+jump-to is deferred. Files (FAT32 list) and Browser (body
+view) integrate today; Notes / Help skipped because their
+content fits the typical render area.
+
+## Tooltips
+
+Hover a button widget for ≥ 1 second (100 ticks at 100 Hz)
+and the next compose paints the widget's label in a small
+pale-yellow panel near the cursor. State lives in `widget.cpp`
+(`g_tooltip_widget`, `g_tooltip_arm_tick`); the mouse loop
+calls `WidgetTooltipTrack(cx, cy, now_tick)` every packet,
+and `DesktopCompose` calls `WidgetTooltipRender()` after
+chrome but before modal dialogs.
+
+## Window Edge + Corner Resize
+
+A 4-px hit band along each window border flips the cursor to
+the matching shape (`ResizeEW` / `ResizeNS` for edges,
+`ResizeNESW` / `ResizeNWSE` for corners) on hover and starts a
+resize-drag on press. Corner zones win over single-edge zones
+in the hit-test. The drag preserves the press-time anchor
+bounds and feeds cursor deltas through `WindowResizeFromEdge`
+(which composes `apply_top` / `apply_bottom` /
+`apply_left` / `apply_right` so corner edges resize on both
+axes simultaneously). Clamps to a minimum 80 × 60 size and the
+framebuffer extents. The title bar takes priority over the
+top edge — clicks in the title still drag-to-move, not
+drag-to-resize.
+
+## Notification History
+
+`notify.{h,cpp}` retains the last 16 distinct toasts displayed
+via `NotifyShowFor`. Duplicate-text pushes coalesce so a
+service that fires the same toast every second doesn't burn
+through the ring. The history is exposed via
+`NotifyHistoryCount()` + `NotifyHistoryGet(idx, out, cap)`;
+v1's only consumer is the `Ctrl+Shift+N` hotkey in
+`kernel/core/main.cpp`, which dumps the ring to the
+framebuffer console between two banner lines. A dedicated
+Notification Center app is a future slice.
+
+## First-Run Welcome
+
+After login completes (post-greeter, post-banner-Console
+write), main.cpp fires a one-shot `NotifyShowFor("Welcome to
+DuetOS - press F1 for shortcuts", 8)` with extended TTL. The
+static gate (`s_welcome_shown`) makes it strictly per-boot;
+TTY mode skips the toast since toasts don't paint there.
+
 ## Chrome Polish
 
 Recent compositor work:
@@ -168,9 +307,38 @@ Action-id allocation:
 - **Concurrent `TrackPopupMenu` from two PE processes**: serialise
   on the single-instance kernel menu — the second caller cancels
   with action_id = 0 and returns immediately.
-- **Files-app rename**: GAP. No text-input modal exists yet; the
-  RENAME row notifies "rename: not in v0 UI". A modal-text-input
-  primitive replaces the notify when it lands.
+- **PE `SetCursor`**: GAP. Native windows can change cursor
+  shape via `CursorSetShape`, but PE apps have no
+  `SYS_GDI_SETCURSOR` to request a shape change. Cursor shape
+  is owned entirely by the kernel hit-test today.
+- **ImageView wheel = next/prev only**: zoom is deferred until
+  ImageView grows zoom state.
+- **Scrollbar per-app drag-the-thumb wiring**: the
+  `ScrollbarHitTest` + `ScrollbarDragTo` API exists, but apps
+  (Files, Browser) don't yet route press / drag events into
+  it. Each consumer needs a press-edge handler that hit-tests
+  its scrollbar rect + a drag-state slot for the grab offset.
+  Wheel dispatch covers the common case in the meantime.
+- **Notification Center app**: deferred. The retention ring is
+  in place (`NotifyHistoryCount` + `NotifyHistoryGet`); the
+  v1 consumer is the `Ctrl+Shift+N` console dump. A windowed
+  reader would be a small app on top of the same API.
+- **Drag-and-drop between windows**: not in scope. Needs a
+  per-window drop-target registry, a `kDraggingItem` global,
+  and ghost-image rendering during drag — more invasive than
+  any single-app feature.
+- **Desktop right-click "Move / Size" modal-input mode**:
+  Move enters interactive-cursor-follow until a click; not
+  yet implemented (system menu Move re-centres the window
+  under the cursor as a degraded stand-in).
+- **Audio feedback / system sounds**: gated on HDA codec
+  programming (Roadmap.md). PC speaker exists but is not
+  wired to any UI event.
+- **PE `SetCursor` ABI**: gated on a new `SYS_GDI_*` syscall.
+  Native windows can change cursor shape via `CursorSetShape`,
+  but PE apps have no equivalent.
+- **Settings GUIs (Display / Sound / Keyboard / Mouse /
+  Date-Time)**: each is its own slice per CLAUDE.md.
 - **Trash / ramfs mode in Files**: only FAT32 mode has a v0
   context menu; other modes fall through to the kernel-window menu.
 - **Modal dialogs, common controls, scroll bars, outline fonts,

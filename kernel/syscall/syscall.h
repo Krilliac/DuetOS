@@ -1680,6 +1680,51 @@ enum SyscallNumber : u64
     // Single-instance: a second concurrent call blocks on the
     // first dismissing.
     SYS_WIN_TRACK_POPUP = 173,
+
+    // SYS_GDI_SET_CURSOR — request a cursor-shape change for the
+    // duration of the calling process's mouse interactions. The
+    // kernel honours the request only while the cursor is over a
+    // window owned by the calling pid; outside that window the
+    // mouse loop's hit-test takes over (Hand over buttons,
+    // IBeam over text, etc.). Backs Win32 USER32!SetCursor.
+    //   rdi = u32 shape    // GdiCursorShape enum (below)
+    //   rax = previous shape (so callers can restore on
+    //         WM_SETCURSOR completion).
+    // Out-of-range `shape` is clamped to Arrow.
+    SYS_GDI_SET_CURSOR = 174,
+
+    // SYS_GDI_CREATE_CURSOR — register a custom cursor sprite
+    // from PE-side memory. Returns a u32 HCURSOR sentinel
+    // (≥ 256) the PE then hands to SetCursor via the existing
+    // SYS_GDI_SET_CURSOR path.
+    //   rdi = const u8* mask_ptr   // 240 bytes (12*20). Each
+    //                               // byte: 0=transparent,
+    //                               // 1=outline, 2=fill.
+    //   rsi = u32 size             // sanity-check; must == 240
+    //   rdx = (y_hot << 8) | x_hot // hotspot inside sprite,
+    //                               //   x_hot < 12, y_hot < 20.
+    //                               //   0 = sprite top-left.
+    //   rax = HCURSOR sentinel (≥ 256), or 0 on failure
+    //         (table full / size mismatch / hotspot OOR / bad
+    //         pointer).
+    SYS_GDI_CREATE_CURSOR = 175,
+};
+
+/// Cursor-shape values the PE side hands the kernel via
+/// SYS_GDI_SET_CURSOR. Mirrors the kernel's internal
+/// `duetos::drivers::video::CursorShape` enum but kept as a
+/// freestanding type so the syscall ABI doesn't depend on a
+/// kernel header. Stable from this commit forward.
+enum GdiCursorShape : u32
+{
+    kGdiCursorArrow = 0,
+    kGdiCursorIBeam = 1,
+    kGdiCursorHand = 2,
+    kGdiCursorWait = 3,
+    kGdiCursorResizeNS = 4,
+    kGdiCursorResizeEW = 5,
+    kGdiCursorResizeNESW = 6,
+    kGdiCursorResizeNWSE = 7,
 };
 
 // Cross-language record returned by SYS_DIR_NEXT. 96 bytes, exact

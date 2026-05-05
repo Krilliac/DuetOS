@@ -82,4 +82,69 @@ void CursorSetDesktopBackground(u32 rgb);
 /// without waiting for motion.
 void CursorSetColours(u32 outline_rgb, u32 fill_rgb);
 
+/// Pointer-shape variants. `Wait` is a programmatic toggle —
+/// callers `CursorPushWait()` before a long operation and
+/// `CursorPopWait()` after. Arrow / IBeam / Hand are picked by
+/// the mouse-loop's hit-test based on what's under the cursor:
+/// buttons → Hand, text-input regions → IBeam, everywhere else
+/// → Arrow. ResizeNS / ResizeEW appear over window borders to
+/// indicate edge-drag-to-resize. All sprites are 12×20 so the
+/// backing-store allocation never moves.
+enum class CursorShape : u8
+{
+    Arrow = 0,
+    IBeam = 1,
+    Hand = 2,
+    Wait = 3,
+    ResizeNS = 4,   // ↕ over top / bottom borders
+    ResizeEW = 5,   // ↔ over left / right borders
+    ResizeNESW = 6, // ⤢ over top-right / bottom-left corners
+    ResizeNWSE = 7, // ⤡ over top-left / bottom-right corners
+};
+
+/// Pick the active sprite. Repaints in place so the new shape
+/// shows immediately without waiting for motion. No-op if `s`
+/// is already the active shape.
+void CursorSetShape(CursorShape s);
+
+/// Read the current shape. Returns `Arrow` before the cursor
+/// is initialised.
+CursorShape CursorGetShape();
+
+/// Push a `Wait` overlay onto the active shape. Refcounted —
+/// nested CursorPushWait / CursorPopWait calls compose: the
+/// shape stays Wait until the last Pop balances. The shape
+/// underneath is restored on the final Pop. Used by long-
+/// running code paths (screenshot save, FAT32 write) so the
+/// hourglass appears for the whole operation.
+void CursorPushWait();
+
+/// Pop one Wait overlay. The cursor reverts to whatever shape
+/// the hit-test was setting before the push, OR remains Wait
+/// if other pushes are still outstanding.
+void CursorPopWait();
+
+/// Register a custom 12×20 sprite from a caller-provided
+/// mask buffer. The buffer is 240 bytes; each byte is one of:
+///   0 = transparent
+///   1 = outline (drawn in the active outline colour)
+///   2 = fill (drawn in the active fill colour)
+/// `x_hot` / `y_hot` are the hotspot coordinates inside the
+/// sprite — the kernel translates the cursor's reported
+/// position so the click point sits at (0,0) of the sprite by
+/// default; a non-zero hotspot shifts the sprite so the
+/// hotspot pixel sits under the cursor's logical position.
+/// Returns a slot id (≥ 256) that callers pass to
+/// CursorSetShapeCustom; or 0 on failure (table full / nullptr
+/// mask / hotspot out of range). Slot ids stay valid for the
+/// rest of the boot.
+constexpr u32 kCustomCursorIdBase = 256;
+constexpr u32 kCustomCursorMax = 16;
+u32 CursorRegisterCustom(const u8* mask_240, u8 x_hot, u8 y_hot);
+
+/// Switch to a custom sprite previously registered via
+/// CursorRegisterCustom. Out-of-range / unregistered ids fall
+/// back to Arrow. Same change-gate semantics as CursorSetShape.
+void CursorSetShapeCustom(u32 custom_id);
+
 } // namespace duetos::drivers::video

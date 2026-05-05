@@ -49,6 +49,30 @@ typedef void* HANDLE;
 #define SYS_WIN_GET_KEYSTATE 77
 #define SYS_WIN_GET_CURSOR 78
 #define SYS_WIN_SET_CURSOR 79
+#define SYS_GDI_SET_CURSOR 174
+#define SYS_GDI_CREATE_CURSOR 175
+
+/* GdiCursorShape — keep in sync with kernel/syscall/syscall.h. */
+#define DUETOS_CURSOR_ARROW 0
+#define DUETOS_CURSOR_IBEAM 1
+#define DUETOS_CURSOR_HAND 2
+#define DUETOS_CURSOR_WAIT 3
+#define DUETOS_CURSOR_RESIZE_NS 4
+#define DUETOS_CURSOR_RESIZE_EW 5
+#define DUETOS_CURSOR_RESIZE_NESW 6
+#define DUETOS_CURSOR_RESIZE_NWSE 7
+
+/* Standard Win32 IDC_* constants. LoadCursor returns these
+ * sentinel values; SetCursor maps them to the kernel's
+ * GdiCursorShape via SYS_GDI_SET_CURSOR. */
+#define IDC_ARROW 32512
+#define IDC_IBEAM 32513
+#define IDC_WAIT 32514
+#define IDC_HAND 32649
+#define IDC_SIZENS 32645
+#define IDC_SIZEWE 32644
+#define IDC_SIZENESW 32643
+#define IDC_SIZENWSE 32642
 #define SYS_WIN_SET_CAPTURE 80
 #define SYS_WIN_RELEASE_CAPTURE 81
 #define SYS_WIN_GET_CAPTURE 82
@@ -1308,17 +1332,29 @@ __declspec(dllexport) HANDLE LoadBitmapW(HANDLE h, const wchar_t16* name)
     (void)name;
     return (HANDLE)0;
 }
+/* LoadCursor — return the IDC_* sentinel as the HCURSOR so a
+ * subsequent SetCursor can decode which shape was requested.
+ * The kernel doesn't track HCURSOR identity; the value is just
+ * the round-trip key.
+ *
+ * `name` here is the MAKEINTRESOURCE-style integer cast to a
+ * char*; values < 0x10000 are the well-known IDC_* IDs. v1
+ * recognises only those; named cursors return IDC_ARROW. */
 __declspec(dllexport) HANDLE LoadCursorA(HANDLE h, const char* name)
 {
     (void)h;
-    (void)name;
-    return (HANDLE)1;
+    unsigned long id = (unsigned long)(unsigned long long)name;
+    if (id == 0 || id > 0xFFFF)
+        return (HANDLE)(unsigned long long)IDC_ARROW;
+    return (HANDLE)(unsigned long long)id;
 }
 __declspec(dllexport) HANDLE LoadCursorW(HANDLE h, const wchar_t16* name)
 {
     (void)h;
-    (void)name;
-    return (HANDLE)1;
+    unsigned long id = (unsigned long)(unsigned long long)name;
+    if (id == 0 || id > 0xFFFF)
+        return (HANDLE)(unsigned long long)IDC_ARROW;
+    return (HANDLE)(unsigned long long)id;
 }
 __declspec(dllexport) HANDLE LoadIconA(HANDLE h, const char* name)
 {
@@ -1407,15 +1443,157 @@ __declspec(dllexport) BOOL SetCursorPos(int x, int y)
                      : "memory");
     return rv ? 1 : 0;
 }
+/* SetCursor — translate the HCURSOR (IDC_* sentinel) into a
+ * GdiCursorShape and issue SYS_GDI_SET_CURSOR. Return value is
+ * the previous shape mapped back to its IDC_* sentinel so
+ * callers can restore on WM_SETCURSOR. */
 __declspec(dllexport) HANDLE SetCursor(HANDLE h)
 {
-    (void)h;
-    return (HANDLE)0;
+    unsigned long id = (unsigned long)(unsigned long long)h;
+    unsigned long shape = DUETOS_CURSOR_ARROW;
+    switch (id)
+    {
+    case IDC_IBEAM:
+        shape = DUETOS_CURSOR_IBEAM;
+        break;
+    case IDC_HAND:
+        shape = DUETOS_CURSOR_HAND;
+        break;
+    case IDC_WAIT:
+        shape = DUETOS_CURSOR_WAIT;
+        break;
+    case IDC_SIZENS:
+        shape = DUETOS_CURSOR_RESIZE_NS;
+        break;
+    case IDC_SIZEWE:
+        shape = DUETOS_CURSOR_RESIZE_EW;
+        break;
+    case IDC_SIZENESW:
+        shape = DUETOS_CURSOR_RESIZE_NESW;
+        break;
+    case IDC_SIZENWSE:
+        shape = DUETOS_CURSOR_RESIZE_NWSE;
+        break;
+    case IDC_ARROW:
+    default:
+        shape = DUETOS_CURSOR_ARROW;
+        break;
+    }
+    long long prev = 0;
+    asm volatile("syscall"
+                 : "=a"(prev)
+                 : "a"((long long)SYS_GDI_SET_CURSOR), "D"((long long)shape)
+                 : "memory", "rcx", "r11");
+    /* Map the kernel's previous shape back to an IDC_* HCURSOR
+     * the caller can hand to a future SetCursor. */
+    unsigned long prev_id = IDC_ARROW;
+    switch (prev)
+    {
+    case DUETOS_CURSOR_IBEAM:
+        prev_id = IDC_IBEAM;
+        break;
+    case DUETOS_CURSOR_HAND:
+        prev_id = IDC_HAND;
+        break;
+    case DUETOS_CURSOR_WAIT:
+        prev_id = IDC_WAIT;
+        break;
+    case DUETOS_CURSOR_RESIZE_NS:
+        prev_id = IDC_SIZENS;
+        break;
+    case DUETOS_CURSOR_RESIZE_EW:
+        prev_id = IDC_SIZEWE;
+        break;
+    case DUETOS_CURSOR_RESIZE_NESW:
+        prev_id = IDC_SIZENESW;
+        break;
+    case DUETOS_CURSOR_RESIZE_NWSE:
+        prev_id = IDC_SIZENWSE;
+        break;
+    default:
+        prev_id = IDC_ARROW;
+        break;
+    }
+    return (HANDLE)(unsigned long long)prev_id;
 }
 __declspec(dllexport) int ShowCursor(BOOL show)
 {
     (void)show;
     return 0;
+}
+
+/* CreateCursor — register a custom 12x20 sprite. Win32's
+ * signature takes hInstance + xHotSpot + yHotSpot + ANDmask +
+ * XORmask; v1 simplifies to a single 240-byte mask buffer in
+ * the kernel's tri-state encoding (0=transparent, 1=outline,
+ * 2=fill). Callers that hand a Win32-shaped AND/XOR pair can
+ * convert by walking each (and_bit, xor_bit) pair:
+ *   AND=0 XOR=0  -> 1 (outline / black)
+ *   AND=0 XOR=1  -> 2 (fill / white)
+ *   AND=1 XOR=0  -> 0 (transparent)
+ *   AND=1 XOR=1  -> 0 (inverter — degraded to transparent)
+ *
+ * Hotspot coordinates aren't honoured today; the kernel's
+ * cursor anchors at (0, 0) of the sprite. Real Win32 hotspot
+ * support waits on a follow-up. */
+__declspec(dllexport) HANDLE DuetOsCreateCursor(const unsigned char* mask_240, unsigned char x_hot, unsigned char y_hot)
+{
+    long long h = 0;
+    /* rdx packs (y_hot << 8) | x_hot — both fit in a byte. */
+    const unsigned long long hotspot = ((unsigned long long)y_hot << 8) | (unsigned long long)x_hot;
+    asm volatile("syscall"
+                 : "=a"(h)
+                 : "a"((long long)SYS_GDI_CREATE_CURSOR), "D"((long long)(unsigned long long)mask_240),
+                   "S"((long long)(12 * 20)), "d"(hotspot)
+                 : "memory", "rcx", "r11");
+    return (HANDLE)(unsigned long long)h;
+}
+
+/* Win32-shaped CreateCursor. Sprites bigger than 12x20 are
+ * downsampled to fit; smaller sprites are letterboxed. The
+ * AND/XOR mask pair is walked into the kernel's tri-state
+ * encoding per the helper above. Hot-spot coords are noted
+ * but not honoured by the kernel. */
+__declspec(dllexport) HANDLE CreateCursor(HANDLE hInstance, int xHot, int yHot, int width, int height,
+                                          const void* and_mask, const void* xor_mask)
+{
+    (void)hInstance;
+    (void)xHot;
+    (void)yHot;
+    /* v1: only the 12x20 case is supported — anything else
+     * returns IDC_ARROW so the caller still has a usable
+     * cursor. AND / XOR are 1 bit per pixel, packed MSB-first
+     * into rows aligned up to a multiple of 16 bits per
+     * Win32. */
+    if (width != 12 || height != 20 || and_mask == 0 || xor_mask == 0)
+        return (HANDLE)(unsigned long long)IDC_ARROW;
+    const unsigned char* a = (const unsigned char*)and_mask;
+    const unsigned char* x = (const unsigned char*)xor_mask;
+    unsigned char m[12 * 20];
+    /* Stride for a 12-px row, MSB-first, padded to 16 bits = 2 bytes. */
+    const int stride = 2;
+    for (int row = 0; row < 20; ++row)
+    {
+        for (int col = 0; col < 12; ++col)
+        {
+            const int byte = row * stride + (col / 8);
+            const int bit = 7 - (col % 8);
+            const unsigned char ab = (a[byte] >> bit) & 1;
+            const unsigned char xb = (x[byte] >> bit) & 1;
+            unsigned char v = 0;
+            if (ab == 0 && xb == 0)
+                v = 1; /* outline */
+            else if (ab == 0 && xb == 1)
+                v = 2; /* fill */
+            /* AND=1 XOR={0,1} → transparent (XOR=1 is the
+             * Win32 inverter colour we degrade to clear). */
+            m[row * 12 + col] = v;
+        }
+    }
+    /* Clamp the Win32 hotspot into the kernel's 12×20 grid. */
+    unsigned char hx = (unsigned char)((xHot < 0) ? 0 : (xHot > 11 ? 11 : xHot));
+    unsigned char hy = (unsigned char)((yHot < 0) ? 0 : (yHot > 19 ? 19 : yHot));
+    return DuetOsCreateCursor(m, hx, hy);
 }
 
 /* --- Clipboard --- */

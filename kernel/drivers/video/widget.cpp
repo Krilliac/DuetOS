@@ -36,12 +36,15 @@
 #include "drivers/video/widget.h"
 
 #include "arch/x86_64/cpu.h"
+#include "arch/x86_64/timer.h"
 #include "drivers/input/ps2mouse.h"
 #include "sched/sched.h"
 #include "sync/lockdep.h"
 #include "drivers/video/calendar.h"
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
+#include "drivers/video/dialog.h"
+#include "drivers/video/dnd.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/magnifier.h"
 #include "drivers/video/menu.h"
@@ -225,6 +228,109 @@ void WidgetDrawAll()
     }
 }
 
+bool WidgetCursorOverButton(u32 cx, u32 cy)
+{
+    for (u32 i = 0; i < g_widget_count; ++i)
+    {
+        const ButtonWidget& b = g_widgets[i];
+        u32 bx = 0, by = 0;
+        if (!EffectiveButtonPos(b, &bx, &by))
+        {
+            continue;
+        }
+        if (cx >= bx && cx < bx + b.w && cy >= by && cy < by + b.h)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+namespace
+{
+
+// Tooltip hover state. `g_tooltip_widget` is the index of the
+// widget currently under the cursor (or kWidgetInvalid). The
+// timer arms when the cursor settles on a widget; if it stays
+// for kTooltipArmTicks (~1s @ 100Hz), the next compose paints
+// the widget's label in a small panel near the cursor.
+constinit u32 g_tooltip_widget = kWidgetInvalid;
+constinit u64 g_tooltip_arm_tick = 0;
+constinit u32 g_tooltip_cursor_x = 0;
+constinit u32 g_tooltip_cursor_y = 0;
+constexpr u64 kTooltipArmTicks = 100; // ~1 second at 100Hz
+
+u32 FindWidgetAt(u32 cx, u32 cy)
+{
+    for (u32 i = 0; i < g_widget_count; ++i)
+    {
+        const ButtonWidget& b = g_widgets[i];
+        u32 bx = 0, by = 0;
+        if (!EffectiveButtonPos(b, &bx, &by))
+            continue;
+        if (cx >= bx && cx < bx + b.w && cy >= by && cy < by + b.h)
+            return i;
+    }
+    return kWidgetInvalid;
+}
+
+} // namespace
+
+void WidgetTooltipTrack(u32 cx, u32 cy, u64 now_tick)
+{
+    const u32 hit = FindWidgetAt(cx, cy);
+    if (hit != g_tooltip_widget)
+    {
+        g_tooltip_widget = hit;
+        g_tooltip_arm_tick = now_tick;
+        g_tooltip_cursor_x = cx;
+        g_tooltip_cursor_y = cy;
+        return;
+    }
+    // Same widget — refresh cursor position so the tooltip
+    // anchors near where the user actually paused, not where
+    // they first crossed the widget edge.
+    g_tooltip_cursor_x = cx;
+    g_tooltip_cursor_y = cy;
+}
+
+void WidgetTooltipRender()
+{
+    if (g_tooltip_widget == kWidgetInvalid || g_tooltip_widget >= g_widget_count)
+        return;
+    const ButtonWidget& b = g_widgets[g_tooltip_widget];
+    if (b.label == nullptr)
+        return;
+    // Hover-time check: only render if the widget has been
+    // hovered for ≥ kTooltipArmTicks. The mouse loop tracks
+    // this; we read TimerTicks here to compare so a paused
+    // ticker doesn't trip a tooltip.
+    const u64 now = duetos::arch::TimerTicks();
+    if (now - g_tooltip_arm_tick < kTooltipArmTicks)
+        return;
+    const u32 lw = StringPixelWidth(b.label);
+    if (lw == 0)
+        return;
+    const u32 pad = 4;
+    const u32 panel_w = lw + 2 * pad;
+    const u32 panel_h = 8 + 2 * pad;
+    // Anchor below the cursor by 16 px so the panel doesn't
+    // sit under the pointer sprite. Clamp to the framebuffer.
+    const auto fb = FramebufferGet();
+    u32 px = g_tooltip_cursor_x + 12;
+    u32 py = g_tooltip_cursor_y + 16;
+    if (px + panel_w > fb.width)
+        px = (fb.width > panel_w) ? fb.width - panel_w : 0;
+    if (py + panel_h > fb.height)
+        py = (fb.height > panel_h) ? fb.height - panel_h : 0;
+    constexpr u32 kTipBg = 0x00FFFFD0; // pale-yellow (Win9x convention)
+    constexpr u32 kTipFg = 0x00101020;
+    constexpr u32 kTipBorder = 0x00606078;
+    FramebufferFillRect(px, py, panel_w, panel_h, kTipBg);
+    FramebufferDrawRect(px, py, panel_w, panel_h, kTipBorder, 1);
+    FramebufferDrawString(px + pad, py + pad, b.label, kTipFg, kTipBg);
+}
+
 namespace
 {
 
@@ -252,7 +358,10 @@ struct RegisteredWindow
     char mut_subtitle[kWindowSubtitleStorage];
     WindowContentFn content_fn; // nullable per-window content drawer
     void* content_cookie;
-    u64 owner_pid; // 0 = kernel-owned boot window, >0 = ring-3 pid
+    WindowWheelFn wheel_fn;           // nullable per-window wheel handler
+    WindowScrollbarSurface scrollbar; // most-recent scrollbar geometry
+    WindowScrollSetFn scroll_fn;      // nullable scrollbar-input callback
+    u64 owner_pid;                    // 0 = kernel-owned boot window, >0 = ring-3 pid
     WindowMsgRing msgs;
     WinGdiPrim prims[kWinDisplayListDepth];
     u32 prim_count;
@@ -321,6 +430,22 @@ constinit duetos::sched::WaitQueue g_msg_wq{};
 // from the ring directly — so this table is effectively a Win32
 // compat shim.
 constinit u8 g_vk_state[kWindowVkStateSize / 8] = {};
+
+// Last KeyEvent modifier bitmask. Updated by the kbd-reader
+// thread after every event so peripheral consumers (wheel
+// handlers, etc.) can branch on Ctrl / Shift / Alt.
+constinit u8 g_modifier_state = 0;
+
+// Double-click threshold in scheduler ticks (10 ms each).
+// Default 50 ticks (~500 ms) — Windows / GTK convention.
+// Read by the kernel mouse-loop DC detector on every
+// press_edge so a runtime change takes effect immediately.
+constinit u32 g_dbl_click_ticks = 50;
+
+// Mouse sensitivity scale (0..255). 128 = identity. The
+// mouse reader multiplies dx/dy by (scale/128) before
+// feeding the cursor + apps.
+constinit u8 g_mouse_sensitivity = 128;
 
 // Mouse capture — one system-wide HWND that gets all mouse
 // events regardless of cursor position, or kWindowInvalid when
@@ -652,6 +777,9 @@ WindowHandle WindowRegister(const WindowChrome& chrome, const char* title)
     g_windows[h].blit_pool_used = 0;
     g_windows[h].content_fn = nullptr;
     g_windows[h].content_cookie = nullptr;
+    g_windows[h].wheel_fn = nullptr;
+    g_windows[h].scrollbar = {};
+    g_windows[h].scroll_fn = nullptr;
     for (u32 i = 0; i < kWinLongSlots; ++i)
     {
         g_windows[h].longs[i] = 0;
@@ -817,6 +945,143 @@ WindowHandle WindowTopmostAt(u32 x, u32 y)
         }
     }
     return kWindowInvalid;
+}
+
+WindowResizeEdge WindowPointInResizeEdge(WindowHandle h, u32 cx, u32 cy)
+{
+    if (!WindowValid(h))
+        return WindowResizeEdge::None;
+    const auto& w = g_windows[h].chrome;
+    if (cx + kWindowResizeBorderPx < w.x || cx >= w.x + w.w + kWindowResizeBorderPx)
+        return WindowResizeEdge::None;
+    if (cy + kWindowResizeBorderPx < w.y || cy >= w.y + w.h + kWindowResizeBorderPx)
+        return WindowResizeEdge::None;
+    const bool near_top = (cy >= w.y) && (cy < w.y + kWindowResizeBorderPx);
+    const bool near_bottom = (cy + kWindowResizeBorderPx >= w.y + w.h) && (cy < w.y + w.h + kWindowResizeBorderPx);
+    const bool near_left = (cx >= w.x) && (cx < w.x + kWindowResizeBorderPx);
+    const bool near_right = (cx + kWindowResizeBorderPx >= w.x + w.w) && (cx < w.x + w.w + kWindowResizeBorderPx);
+    // Corner zones win over edges (a corner is the intersection
+    // of two edge bands; the diagonal cursor is more useful than
+    // the vertical fallback).
+    if (near_top && near_left)
+        return WindowResizeEdge::TopLeft;
+    if (near_top && near_right)
+        return WindowResizeEdge::TopRight;
+    if (near_bottom && near_left)
+        return WindowResizeEdge::BottomLeft;
+    if (near_bottom && near_right)
+        return WindowResizeEdge::BottomRight;
+    if (near_top)
+        return WindowResizeEdge::Top;
+    if (near_bottom)
+        return WindowResizeEdge::Bottom;
+    if (near_left)
+        return WindowResizeEdge::Left;
+    if (near_right)
+        return WindowResizeEdge::Right;
+    return WindowResizeEdge::None;
+}
+
+void WindowResizeFromEdge(WindowHandle h, WindowResizeEdge edge, u32 anchor_x, u32 anchor_y, u32 anchor_w, u32 anchor_h,
+                          i32 dx, i32 dy)
+{
+    if (!WindowValid(h) || edge == WindowResizeEdge::None)
+        return;
+    constexpr u32 kMinW = 80;
+    constexpr u32 kMinH = 60;
+    i64 nx = anchor_x;
+    i64 ny = anchor_y;
+    i64 nw = anchor_w;
+    i64 nh = anchor_h;
+    auto apply_left = [&]()
+    {
+        nx = static_cast<i64>(anchor_x) + dx;
+        nw = static_cast<i64>(anchor_w) - dx;
+        if (nw < kMinW)
+        {
+            nx -= (kMinW - nw);
+            nw = kMinW;
+        }
+        if (nx < 0)
+        {
+            nw += nx;
+            nx = 0;
+        }
+    };
+    auto apply_right = [&]()
+    {
+        nw = static_cast<i64>(anchor_w) + dx;
+        if (nw < kMinW)
+            nw = kMinW;
+    };
+    auto apply_top = [&]()
+    {
+        ny = static_cast<i64>(anchor_y) + dy;
+        nh = static_cast<i64>(anchor_h) - dy;
+        if (nh < kMinH)
+        {
+            ny -= (kMinH - nh);
+            nh = kMinH;
+        }
+        if (ny < 0)
+        {
+            nh += ny;
+            ny = 0;
+        }
+    };
+    auto apply_bottom = [&]()
+    {
+        nh = static_cast<i64>(anchor_h) + dy;
+        if (nh < kMinH)
+            nh = kMinH;
+    };
+    switch (edge)
+    {
+    case WindowResizeEdge::Left:
+        apply_left();
+        break;
+    case WindowResizeEdge::Right:
+        apply_right();
+        break;
+    case WindowResizeEdge::Top:
+        apply_top();
+        break;
+    case WindowResizeEdge::Bottom:
+        apply_bottom();
+        break;
+    case WindowResizeEdge::TopLeft:
+        apply_top();
+        apply_left();
+        break;
+    case WindowResizeEdge::TopRight:
+        apply_top();
+        apply_right();
+        break;
+    case WindowResizeEdge::BottomLeft:
+        apply_bottom();
+        apply_left();
+        break;
+    case WindowResizeEdge::BottomRight:
+        apply_bottom();
+        apply_right();
+        break;
+    default:
+        return;
+    }
+    const auto fb_info = FramebufferGet();
+    if (nx + nw > fb_info.width)
+        nw = fb_info.width - nx;
+    if (ny + nh > fb_info.height)
+        nh = fb_info.height - ny;
+    if (nw < kMinW)
+        nw = kMinW;
+    if (nh < kMinH)
+        nh = kMinH;
+    g_windows[h].chrome.x = static_cast<u32>(nx);
+    g_windows[h].chrome.y = static_cast<u32>(ny);
+    g_windows[h].chrome.w = static_cast<u32>(nw);
+    g_windows[h].chrome.h = static_cast<u32>(nh);
+    g_windows[h].maximized = false;
 }
 
 bool WindowPointInTitle(WindowHandle h, u32 x, u32 y)
@@ -1114,6 +1379,79 @@ void WindowSetContentDraw(WindowHandle h, WindowContentFn fn, void* cookie)
     }
     g_windows[h].content_fn = fn;
     g_windows[h].content_cookie = cookie;
+}
+
+void WindowSetWheelHandler(WindowHandle h, WindowWheelFn fn)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    g_windows[h].wheel_fn = fn;
+}
+
+void WindowSetScrollbar(WindowHandle h, const WindowScrollbarSurface& s)
+{
+    if (!WindowValid(h))
+        return;
+    g_windows[h].scrollbar = s;
+}
+
+bool WindowGetScrollbar(WindowHandle h, WindowScrollbarSurface* out)
+{
+    if (!WindowValid(h) || out == nullptr)
+        return false;
+    if (!g_windows[h].scrollbar.present)
+        return false;
+    *out = g_windows[h].scrollbar;
+    return true;
+}
+
+void WindowSetScrollHandler(WindowHandle h, WindowScrollSetFn fn)
+{
+    if (!WindowValid(h))
+        return;
+    g_windows[h].scroll_fn = fn;
+}
+
+void WindowDispatchScroll(WindowHandle h, u32 first)
+{
+    if (!WindowValid(h))
+        return;
+    if (g_windows[h].scroll_fn != nullptr)
+    {
+        g_windows[h].scroll_fn(first);
+    }
+}
+
+void WindowDispatchWheel(WindowHandle h, i32 /*client_x*/, i32 /*client_y*/, i32 dz, u32 screen_x, u32 screen_y,
+                         u64 mk_buttons, u8 modifiers)
+{
+    if (!WindowValid(h) || dz == 0)
+    {
+        return;
+    }
+    if (g_windows[h].owner_pid > 0)
+    {
+        // Win32 contract: high word of wparam is signed delta in
+        // multiples of WHEEL_DELTA (120); low word is button mask
+        // (MK_LBUTTON / MK_RBUTTON / MK_SHIFT / ...). lParam packs
+        // the screen-coord click point: low word = x, high word = y.
+        // Modifiers don't go into wparam — Win32 PE apps test
+        // GetKeyState themselves.
+        constexpr u32 kWmMouseWheel = 0x020A;
+        const i32 wheel_delta = dz * 120;
+        const u64 wparam = ((static_cast<u64>(static_cast<u16>(static_cast<i16>(wheel_delta))) << 16) & 0xFFFF0000U) |
+                           (mk_buttons & 0xFFFFU);
+        const u64 lparam = (static_cast<u64>(screen_x & 0xFFFFU)) | ((static_cast<u64>(screen_y & 0xFFFFU)) << 16);
+        WindowPostMessage(h, kWmMouseWheel, wparam, lparam);
+        WindowMsgWakeAll();
+        return;
+    }
+    if (g_windows[h].wheel_fn != nullptr)
+    {
+        g_windows[h].wheel_fn(dz, modifiers);
+    }
 }
 
 void WindowDrawAllOrdered()
@@ -1687,6 +2025,18 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
     TrayFlyoutRedraw();
     NotifyRedraw();
     MagnifierRedraw();
+    // DnD ghost — paints just below the cursor during an
+    // active drag. Sits under the tooltip + dialogs so a
+    // hovered tooltip / open dialog doesn't get visually
+    // occluded by a stale ghost.
+    DndCompose();
+    // Tooltip — over chrome, under modal dialogs.
+    WidgetTooltipRender();
+    // Modal dialog (MessageBox / InputBox) — drawn AFTER every
+    // other surface so the panel + dim overlay land on top of
+    // windows, taskbar, menus, notifications. The cursor is
+    // still painted by the mouse reader after this returns.
+    DialogCompose();
     // Caret — painted last so it overlays everything, including
     // the taskbar. Blink phase toggles per compose; the ui-
     // ticker's 1 Hz compose produces the blink cadence.
@@ -2212,6 +2562,43 @@ bool WindowKeyIsDown(u16 code)
     const u32 byte = idx / 8;
     const u32 bit = idx % 8;
     return (g_vk_state[byte] & (1u << bit)) != 0;
+}
+
+void WindowSetModifierState(u8 modifiers)
+{
+    g_modifier_state = modifiers;
+}
+
+u8 WindowModifierState()
+{
+    return g_modifier_state;
+}
+
+void WindowSetDoubleClickTicks(u32 ticks)
+{
+    // Floor + cap so a misconfigured Settings input can't make
+    // DC undetectable (0 ticks) or wedge the user (a 30-second
+    // threshold). 5..200 ticks ≈ 50 ms..2 s.
+    if (ticks < 5)
+        ticks = 5;
+    if (ticks > 200)
+        ticks = 200;
+    g_dbl_click_ticks = ticks;
+}
+
+u32 WindowDoubleClickTicks()
+{
+    return g_dbl_click_ticks;
+}
+
+void WindowSetMouseSensitivity(u8 scale)
+{
+    g_mouse_sensitivity = scale;
+}
+
+u8 WindowMouseSensitivity()
+{
+    return g_mouse_sensitivity;
 }
 
 // --- Cursor accessors ---------------------------------------------

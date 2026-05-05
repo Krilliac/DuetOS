@@ -114,7 +114,8 @@ enum class ThemeRole : u8
     Help = 10,
     Browser = 11,
     Calendar = 12,
-    kCount = 13,
+    NotifyCenter = 13,
+    kCount = 14,
 };
 
 struct Theme

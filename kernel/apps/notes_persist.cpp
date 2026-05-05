@@ -131,6 +131,9 @@ bool LoadFromPath(const char* path)
     }
     detail::g_cursor = detail::g_len;
     detail::g_dirty = false;
+    // Loading a fresh document drops any in-flight selection —
+    // the indices wouldn't refer to the same content anyway.
+    detail::g_sel_anchor = detail::kNoSelection;
     SerialWrite("[notes] load OK\n");
     return true;
 }

@@ -169,4 +169,48 @@ Ps2Stats Ps2KeyboardStats();
 /// injected event.
 void KeyboardInjectEvent(const KeyEvent& ev);
 
+/// Selectable scancode → ASCII keymap. Affects the PS/2
+/// translator only — xHCI HID keyboards already deliver
+/// decoded events via KeyboardInjectEvent and bypass this
+/// layout. Default is US.
+enum class KeyboardLayout : u8
+{
+    US = 0,
+    UK = 1,
+    Dvorak = 2,
+    DE = 3, // German QWERTZ — ASCII subset (umlauts collapse to base letter)
+    FR = 4, // French AZERTY — ASCII subset (accented letters collapse)
+    Colemak = 5,
+};
+
+/// Switch the active layout. Returns true if the id was
+/// known. Idempotent — repeated calls with the same id no-op.
+bool Ps2KeyboardSetLayout(KeyboardLayout layout);
+
+/// Read the current layout id.
+KeyboardLayout Ps2KeyboardLayout();
+
+/// Active scancode → ASCII keymap pointers. Returned arrays
+/// are 128 entries; index by PS/2 scancode (0..127). Used by
+/// the xHCI HID translator to honour the same layout PS/2 is
+/// using. Both pointers stay valid for the rest of boot — the
+/// underlying tables are static rodata.
+const char* Ps2KeyboardActiveLowerMap();
+const char* Ps2KeyboardActiveUpperMap();
+
+/// Program the PS/2 keyboard typematic rate + delay via the 0xF3
+/// "Set Typematic Rate/Delay" command.
+///
+/// `rate_idx` ∈ [0..31] → repeat rate from ~30 Hz (0) down to
+/// ~2 Hz (31). The hardware encoding is intentionally
+/// non-linear; rate_idx is the index, not the Hz.
+/// `delay_idx` ∈ [0..3] → initial delay before repeat starts:
+///   0 → 250 ms, 1 → 500 ms, 2 → 750 ms, 3 → 1000 ms.
+///
+/// Returns true if the controller ACK'd both bytes. On a USB-
+/// only system (no PS/2 controller) returns false silently —
+/// QEMU's i8042 always exists, real systems with a Legacy USB
+/// hand-off do too.
+bool Ps2KeyboardSetTypematic(u8 rate_idx, u8 delay_idx);
+
 } // namespace duetos::drivers::input

@@ -2,6 +2,8 @@
 
 #include "arch/x86_64/serial.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/input/ps2kbd.h"
+#include "drivers/video/dnd.h"
 #include "drivers/video/notify.h"
 #include "fs/fat32.h"
 #include "mm/kheap.h"
@@ -874,6 +876,59 @@ void ImageViewInit(WindowHandle handle)
     g_state.needs_decode = true;
     RescanRoot();
     WindowSetContentDraw(handle, DrawFn, nullptr);
+    duetos::drivers::video::WindowSetWheelHandler(handle, ImageViewOnWheel);
+    // Drop target — accept FileEntry payloads. Loads BMP / PNG /
+    // TGA via the same path the Files-app double-click uses.
+    duetos::drivers::video::DndRegisterDropTarget(
+        handle,
+        [](const duetos::drivers::video::DndPayload& p, u32 /*cx*/, u32 /*cy*/) -> bool
+        {
+            if (p.kind != duetos::drivers::video::DndKind::FileEntry)
+                return false;
+            if (ImageViewSelectByName(p.text))
+            {
+                duetos::drivers::video::WindowRaise(g_state.handle);
+                duetos::drivers::video::NotifyShow("loaded in image viewer");
+                return true;
+            }
+            duetos::drivers::video::NotifyShow("imageview: load failed");
+            return false;
+        },
+        1u << static_cast<u32>(duetos::drivers::video::DndKind::FileEntry));
+}
+
+void ImageViewOnWheel(duetos::i32 dz, duetos::u8 modifiers)
+{
+    if (dz == 0)
+        return;
+    using duetos::drivers::input::kKeyModCtrl;
+    if ((modifiers & kKeyModCtrl) != 0)
+    {
+        // Ctrl+wheel — zoom by resizing the window. The image
+        // auto-fits to the client area via FitThumbnail, so
+        // resizing the window naturally rescales the image.
+        // 32 px per tick reads as a comfortable zoom step.
+        constexpr duetos::u32 kZoomStep = 32;
+        duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
+        if (!duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh))
+            return;
+        const duetos::i32 steps = (dz > 0) ? dz : -dz;
+        const duetos::i32 delta = static_cast<duetos::i32>(kZoomStep) * steps;
+        const duetos::i32 sign = (dz > 0) ? 1 : -1;
+        duetos::drivers::video::WindowResizeFromEdge(g_state.handle,
+                                                     duetos::drivers::video::WindowResizeEdge::BottomRight,
+                                                     /*ax*/ 0, /*ay*/ 0, ww, wh, sign * delta, sign * delta);
+        g_state.needs_decode = true;
+        return;
+    }
+    // Plain wheel — step image. Wheel down advances; wheel up
+    // steps back.
+    const bool forward = (dz < 0);
+    const duetos::i32 steps = (dz > 0) ? dz : -dz;
+    for (duetos::i32 i = 0; i < steps; ++i)
+    {
+        StepIndex(forward);
+    }
 }
 
 WindowHandle ImageViewWindow()

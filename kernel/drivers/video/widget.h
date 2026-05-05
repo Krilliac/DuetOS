@@ -78,6 +78,24 @@ void WidgetDrawAll();
 /// a single button bit).
 u32 WidgetRouteMouse(u32 cursor_x, u32 cursor_y, u8 button_mask);
 
+/// Cursor-shape hit-test. True iff (cx, cy) lands inside any
+/// alive button widget's bounds AND the button's owner window
+/// (if any) is alive + visible. Used by the mouse loop to flip
+/// the cursor sprite to `Hand` when hovering a clickable.
+bool WidgetCursorOverButton(u32 cx, u32 cy);
+
+/// Track cursor hover for tooltips. Called from the mouse loop
+/// every packet; the implementation timestamps the first
+/// hover-on-a-widget so a 1-second linger triggers a tooltip
+/// in the next compose.
+void WidgetTooltipTrack(u32 cx, u32 cy, u64 now_tick);
+
+/// Render a tooltip if one is currently armed. Called from
+/// `DesktopCompose` after every other surface paints (just
+/// before the dialog overlay) so the tooltip lands above
+/// chrome but below modal dialogs.
+void WidgetTooltipRender();
+
 // ---------------------------------------------------------------
 // Window chrome + registry.
 //
@@ -185,6 +203,41 @@ WindowHandle WindowTopmostAt(u32 x, u32 y);
 /// window's top down to `title_height` pixels).
 bool WindowPointInTitle(WindowHandle h, u32 x, u32 y);
 
+/// Resize-edge hit zones. `None` = not on a border; the others
+/// pick which edge to drag. The hit zone is `kWindowResizeBorderPx`
+/// pixels wide; corner overlaps are resolved with a vertical
+/// preference (top/bottom win over left/right) — adequate for a
+/// 4-edge resize without true diagonal cursors.
+enum class WindowResizeEdge : u8
+{
+    None = 0,
+    Left = 1,
+    Right = 2,
+    Top = 3,
+    Bottom = 4,
+    TopLeft = 5,
+    TopRight = 6,
+    BottomLeft = 7,
+    BottomRight = 8,
+};
+
+/// Pixel width of the resize-detection band along each edge.
+constexpr u32 kWindowResizeBorderPx = 4;
+
+/// Hit-test (cx, cy) against `h`'s outer-border resize zones.
+/// Returns the matching edge or `None`. The title bar takes
+/// priority over the top edge — clicks in the title still
+/// drag-to-move, not drag-to-resize.
+WindowResizeEdge WindowPointInResizeEdge(WindowHandle h, u32 cx, u32 cy);
+
+/// Read the bounds + apply a resize delta on `h`. `edge` picks
+/// which side moves; `cur_x` / `cur_y` is the live cursor; the
+/// caller passes the window's bounds at drag-start so the
+/// resize is anchored. Clamps to a minimum 80×60 size and to
+/// the framebuffer. No-op for `None`.
+void WindowResizeFromEdge(WindowHandle h, WindowResizeEdge edge, u32 anchor_x, u32 anchor_y, u32 anchor_w, u32 anchor_h,
+                          i32 dx, i32 dy);
+
 /// True iff (x, y) is inside the close-button square in the
 /// top-right corner of `h`'s title bar — same geometry the
 /// WindowDraw chrome paints.
@@ -268,6 +321,64 @@ const char* WindowTitle(WindowHandle h);
 /// cookie is passed back unchanged.
 using WindowContentFn = void (*)(u32 x, u32 y, u32 w, u32 h, void* cookie);
 void WindowSetContentDraw(WindowHandle handle, WindowContentFn fn, void* cookie);
+
+/// Per-window mouse-wheel callback. `dz` is the signed wheel-tick
+/// delta (positive = scroll up / away from user) clamped to ±8 by
+/// the dispatcher. `modifiers` is a bitmask of `kKeyMod*` values
+/// captured at dispatch time so handlers can branch on Ctrl+wheel
+/// (typically zoom) vs. plain wheel (scroll). Native windows
+/// register a handler to consume wheel motion when the cursor is
+/// over their client area; PE-owned windows ignore this and
+/// receive `WM_MOUSEWHEEL` via the message queue instead.
+using WindowWheelFn = void (*)(i32 dz, u8 modifiers);
+void WindowSetWheelHandler(WindowHandle h, WindowWheelFn fn);
+
+/// Per-window scrollbar geometry + state, populated by the app's
+/// DrawFn each compose. The kernel's mouse loop hit-tests against
+/// this to enable click-on-track + drag-the-thumb without each
+/// app re-implementing the geometry. `present == false` disables
+/// scrollbar input routing for the window (the visual bar is
+/// also skipped).
+struct WindowScrollbarSurface
+{
+    bool present;
+    u8 _pad[3];
+    // Bar bounds in framebuffer coords. App computes from its
+    // DrawFn's (cx, cy, cw, ch) — just before painting the bar.
+    u32 x, y, w, h;
+    u32 total;   // total rows of content
+    u32 visible; // visible rows in the viewport
+    u32 first;   // current top-row offset
+};
+
+/// Apps invoke this every compose with their current scrollbar
+/// geometry. Setting present=false stashes nothing.
+void WindowSetScrollbar(WindowHandle h, const WindowScrollbarSurface& s);
+
+/// Read back the most recent scrollbar surface for `h`. Returns
+/// false if none has been registered or `present == false`.
+bool WindowGetScrollbar(WindowHandle h, WindowScrollbarSurface* out);
+
+/// Notify the owning app that the user just changed the
+/// scrollbar's `first` (via track click or thumb drag). Apps
+/// register a callback to apply the new value to their state.
+using WindowScrollSetFn = void (*)(u32 first);
+void WindowSetScrollHandler(WindowHandle h, WindowScrollSetFn fn);
+
+/// Fire the registered scroll handler. Called by the mouse-loop
+/// after a hit-test resolves a new `first`.
+void WindowDispatchScroll(WindowHandle h, u32 first);
+
+/// Deliver a wheel event to `h`. Native owner → calls the
+/// registered `WindowWheelFn` (no-op if none). PE owner
+/// (`owner_pid > 0`) → posts `WM_MOUSEWHEEL` (0x020A) with
+/// `wparam = (i16(dz * 120) << 16) | mk_buttons`,
+/// `lparam = (screen_y << 16) | screen_x` per Win32 contract.
+/// `client_x` / `client_y` are unused today but reserved so a
+/// future scroll-zone-aware widget layer can hit-test inside the
+/// client area without recomputing screen coords.
+void WindowDispatchWheel(WindowHandle h, i32 client_x, i32 client_y, i32 dz, u32 screen_x, u32 screen_y, u64 mk_buttons,
+                         u8 modifiers);
 
 // ---------------------------------------------------------------
 // Per-window ownership + message queue + GDI display list.
@@ -534,6 +645,29 @@ void WindowInputTrackKey(u16 code, bool down);
 /// True iff `code` is currently down. Always false for codes
 /// outside the tracked range.
 bool WindowKeyIsDown(u16 code);
+
+/// Cache of the last KeyEvent modifier bitmask. The kbd reader
+/// publishes after every event so peripheral consumers (mouse-
+/// wheel handlers, drag handlers, etc.) can branch on Ctrl /
+/// Shift / Alt without scanning a key-state map.
+void WindowSetModifierState(u8 modifiers);
+u8 WindowModifierState();
+
+/// Double-click threshold in scheduler ticks (10 ms each).
+/// Default 50 ticks (~500 ms). The kernel mouse loop's DC
+/// detector reads this on every press_edge so a runtime
+/// change (Settings Mouse panel) takes effect immediately.
+void WindowSetDoubleClickTicks(u32 ticks);
+u32 WindowDoubleClickTicks();
+
+/// Mouse sensitivity scale, 0..255. 128 = identity (no scale).
+/// The mouse reader multiplies dx / dy by `scale / 128` before
+/// feeding the cursor + apps. Below 128 dampens motion; above
+/// boosts. Bypassed entirely while a modal-input or DnD
+/// session is live (the user wants 1:1 cursor tracking during
+/// gestures).
+void WindowSetMouseSensitivity(u8 scale);
+u8 WindowMouseSensitivity();
 
 /// Current cursor position in framebuffer coordinates. Pointers
 /// may be null to skip writing that axis.

@@ -33,6 +33,11 @@ void ClockInit(duetos::drivers::video::WindowHandle handle);
 /// other apps; not used by input routers (clock takes no input).
 duetos::drivers::video::WindowHandle ClockWindow();
 
+/// Keyboard handler. Tab cycles between Clock and Stopwatch
+/// modes. In Stopwatch mode, Space toggles run/stop and `R`
+/// resets accumulated time to zero. Returns true iff consumed.
+bool ClockFeedChar(char c);
+
 /// Boot-time self-test: verifies the digit-segment table is
 /// consistent (every digit 0-9 resolves to a non-zero mask,
 /// every colon position renders within bounds). Prints one

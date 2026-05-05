@@ -5,8 +5,13 @@
 #include "apps/trash.h"
 #include "arch/x86_64/serial.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/cursor.h"
+#include "drivers/video/dialog.h"
+#include "drivers/video/dnd.h"
 #include "drivers/video/menu.h"
 #include "drivers/video/notify.h"
+#include "drivers/video/scrollbar.h"
+#include "drivers/video/sound_cue.h"
 #include "drivers/video/theme.h"
 #include "fs/fat32.h"
 #include "fs/ramfs.h"
@@ -331,12 +336,42 @@ void DrawFat32(u32 cx, u32 cy, u32 cw, u32 ch)
     u32 first = 0;
     if (n > max_rows && g_state.fat_selection >= max_rows)
         first = g_state.fat_selection - (max_rows - 1);
+    const u32 list_w =
+        (cw > duetos::drivers::video::kScrollbarWidth + 2) ? cw - duetos::drivers::video::kScrollbarWidth - 2 : cw;
     for (u32 i = 0; i < max_rows && first + i < n; ++i)
     {
         const u32 idx = first + i;
         const auto& e = g_state.fat_entries[idx];
         const bool is_dir = (e.attributes & 0x10) != 0;
-        DrawRowGeneric(cx, list_top + i * kRowH, cw, is_dir, e.name, e.size_bytes, idx == g_state.fat_selection);
+        DrawRowGeneric(cx, list_top + i * kRowH, list_w, is_dir, e.name, e.size_bytes, idx == g_state.fat_selection);
+    }
+    // Scrollbar at the right edge of the row area.
+    if (max_rows > 0 && cw > duetos::drivers::video::kScrollbarWidth)
+    {
+        const duetos::u32 sb_x = cx + cw - duetos::drivers::video::kScrollbarWidth;
+        const duetos::u32 sb_y = list_top;
+        const duetos::u32 sb_w = duetos::drivers::video::kScrollbarWidth;
+        const duetos::u32 sb_h = max_rows * kRowH;
+        duetos::drivers::video::ScrollbarPaint(sb_x, sb_y, sb_w, sb_h, {n, max_rows, first});
+        // Register the bar with the kernel so the mouse loop
+        // can hit-test against it for click-on-track and
+        // drag-the-thumb without re-deriving the geometry.
+        duetos::drivers::video::WindowScrollbarSurface s{};
+        s.present = true;
+        s.x = sb_x;
+        s.y = sb_y;
+        s.w = sb_w;
+        s.h = sb_h;
+        s.total = n;
+        s.visible = max_rows;
+        s.first = first;
+        duetos::drivers::video::WindowSetScrollbar(g_state.handle, s);
+    }
+    else
+    {
+        duetos::drivers::video::WindowScrollbarSurface s{};
+        s.present = false;
+        duetos::drivers::video::WindowSetScrollbar(g_state.handle, s);
     }
     // Delete-to-trash prompt overlays the footer row when armed.
     // Painted in red ink so a confirmation step is visually
@@ -661,6 +696,69 @@ void FilesInit(duetos::drivers::video::WindowHandle handle)
         g_state.mode = Mode::Ramfs;
     }
     duetos::drivers::video::WindowSetContentDraw(handle, DrawFn, nullptr);
+    duetos::drivers::video::WindowSetWheelHandler(handle, FilesOnWheel);
+    duetos::drivers::video::WindowSetScrollHandler(handle,
+                                                   [](duetos::u32 first)
+                                                   {
+                                                       // The list selection drives `first` in DrawFn —
+                                                       // setting `first` directly via the bar means
+                                                       // moving the selection so it lands at the new
+                                                       // top. Clamp to the listing.
+                                                       if (g_state.mode != Mode::Fat32)
+                                                           return;
+                                                       if (first >= g_state.fat_count)
+                                                           first = g_state.fat_count > 0 ? g_state.fat_count - 1 : 0;
+                                                       g_state.fat_selection = first;
+                                                   });
+    // Drop target: a FileEntry dropped onto Files moves the
+    // file into the FAT32 trash. Useful for "drag a row out
+    // of FAT32 mode and drop it back" without arming the
+    // X-then-Y prompt.
+    duetos::drivers::video::DndRegisterDropTarget(
+        handle,
+        [](const duetos::drivers::video::DndPayload& p, duetos::u32 /*cx*/, duetos::u32 /*cy*/) -> bool
+        {
+            if (p.kind != duetos::drivers::video::DndKind::FileEntry)
+                return false;
+            namespace fat = duetos::fs::fat32;
+            const fat::Volume* v = fat::Fat32Volume(0);
+            if (v == nullptr)
+            {
+                duetos::drivers::video::NotifyShow("trash: no FAT32 volume");
+                duetos::drivers::video::SoundCueError();
+                return false;
+            }
+            const auto rc = duetos::apps::trash::TrashMove(v, p.text);
+            if (rc == duetos::apps::trash::MoveResult::Ok)
+            {
+                RescanFat32();
+                RescanTrash();
+                duetos::drivers::video::NotifyShow("moved to trash");
+                return true;
+            }
+            if (rc == duetos::apps::trash::MoveResult::Collision)
+            {
+                duetos::drivers::video::NotifyShow("trash: name collision");
+                duetos::drivers::video::SoundCueError();
+                return false;
+            }
+            duetos::drivers::video::NotifyShow("trash: failed");
+            duetos::drivers::video::SoundCueError();
+            return false;
+        },
+        1u << static_cast<duetos::u32>(duetos::drivers::video::DndKind::FileEntry));
+}
+
+void FilesOnWheel(duetos::i32 dz, duetos::u8 modifiers)
+{
+    if (dz == 0)
+        return;
+    const bool up = (dz > 0);
+    const duetos::i32 steps = (dz > 0) ? dz : -dz;
+    for (duetos::i32 i = 0; i < steps; ++i)
+    {
+        FilesFeedArrow(up);
+    }
 }
 
 duetos::drivers::video::WindowHandle FilesWindow()
@@ -959,13 +1057,10 @@ namespace
 {
 
 // Per-row context menu items. Static so the menu primitive can
-// hold a borrowed pointer for the open lifetime. RENAME (31) is
-// shipped disabled — there is no text-input modal in v0.
+// hold a borrowed pointer for the open lifetime.
 constinit duetos::drivers::video::MenuItem kFilesContextMenuItems[] = {
-    {"OPEN", 30, 0, nullptr, 0},
-    {"RENAME (GAP)", 31, duetos::drivers::video::kMenuItemFlagDisabled, nullptr, 0},
-    {"DELETE", 32, 0, nullptr, 0},
-    {"PROPERTIES", 33, 0, nullptr, 0},
+    {"OPEN", 30, 0, nullptr, 0},       {"RENAME", 31, 0, nullptr, 0},  {"DELETE", 32, 0, nullptr, 0},
+    {"PROPERTIES", 33, 0, nullptr, 0}, {"REFRESH", 34, 0, nullptr, 0},
 };
 constexpr duetos::u32 kFilesContextMenuItemsN = sizeof(kFilesContextMenuItems) / sizeof(kFilesContextMenuItems[0]);
 
@@ -1009,6 +1104,48 @@ duetos::i32 FilesRowAt(duetos::u32 sx, duetos::u32 sy)
     return static_cast<duetos::i32>(idx);
 }
 
+bool FilesBeginDragSelection()
+{
+    if (g_state.mode != Mode::Fat32 || g_state.fat_selection >= g_state.fat_count)
+        return false;
+    const auto& e = g_state.fat_entries[g_state.fat_selection];
+    duetos::drivers::video::DndPayload p{};
+    p.kind = duetos::drivers::video::DndKind::FileEntry;
+    u32 i = 0;
+    while (i < duetos::drivers::video::kDndPayloadMax && e.name[i] != '\0')
+    {
+        p.text[i] = e.name[i];
+        ++i;
+    }
+    p.text[i] = '\0';
+    duetos::u32 cx = 0, cy = 0;
+    duetos::drivers::video::CursorPosition(&cx, &cy);
+    if (!duetos::drivers::video::DndBegin(g_state.handle, p, cx, cy))
+        return false;
+    duetos::drivers::video::NotifyShow("dragging - click target window to drop, Esc to cancel");
+    return true;
+}
+
+bool FilesOnDoubleClick(duetos::u32 sx, duetos::u32 sy)
+{
+    // FAT32 mode is the only mode with a click-to-row hit-test
+    // today. Trash / ramfs DC could be wired the same way — keep
+    // them GAP'd until those modes get a real RowAt helper, so a
+    // double-click in those modes simply doesn't open anything
+    // (it doesn't misfire).
+    if (g_state.mode != Mode::Fat32)
+        return false;
+    const duetos::i32 row = FilesRowAt(sx, sy);
+    if (row < 0)
+        return false;
+    g_state.fat_selection = static_cast<duetos::u32>(row);
+    OpenFat32Selected();
+    duetos::arch::SerialWrite("[files] double-click open row=");
+    duetos::arch::SerialWriteHex(static_cast<duetos::u64>(row));
+    duetos::arch::SerialWrite("\n");
+    return true;
+}
+
 bool FilesOnRightClick(duetos::u32 sx, duetos::u32 sy)
 {
     // Only FAT32 mode has a v0 context menu. Trash and ramfs fall
@@ -1049,10 +1186,73 @@ void FilesDispatchContextAction(duetos::u32 action, duetos::u32 ctx)
         OpenFat32Selected();
         break;
     }
-    case 31: // RENAME — GAP
-        duetos::drivers::video::NotifyShow("rename: not in v0 UI");
-        duetos::arch::SerialWrite("[files] rename (gap) row=\n");
+    case 31: // RENAME — InputBox prompt -> Fat32RenameAtPath
+    {
+        // Stash the row in a static so the callback knows which
+        // entry the user was renaming. The dialog primitive is
+        // single-instance + the callback fires synchronously
+        // from the kbd-reader once OK is chosen, so a single
+        // slot is enough; a future multi-dialog primitive would
+        // make this state per-callback.
+        static u32 s_rename_row = 0;
+        s_rename_row = ctx;
+        const auto& e = g_state.fat_entries[ctx];
+        duetos::drivers::video::InputBoxOpen(
+            "RENAME", "Enter new name (8.3 form):", e.name,
+            [](duetos::drivers::video::DialogResult r, const char* text, void* /*user*/)
+            {
+                if (r != duetos::drivers::video::DialogResult::Ok || text == nullptr || text[0] == '\0')
+                {
+                    duetos::drivers::video::NotifyShow("rename cancelled");
+                    return;
+                }
+                if (s_rename_row >= g_state.fat_count)
+                    return;
+                namespace fat = duetos::fs::fat32;
+                const fat::Volume* v = fat::Fat32Volume(0);
+                if (v == nullptr)
+                {
+                    duetos::drivers::video::NotifyShow("rename: no FAT32 volume");
+                    return;
+                }
+                char src[20];
+                src[0] = '/';
+                u32 si = 1;
+                const auto& cur = g_state.fat_entries[s_rename_row];
+                for (u32 i = 0; cur.name[i] != '\0' && si + 1 < sizeof(src); ++i)
+                    src[si++] = cur.name[i];
+                src[si] = '\0';
+                char dst[20];
+                dst[0] = '/';
+                u32 di = 1;
+                for (u32 i = 0; text[i] != '\0' && di + 1 < sizeof(dst); ++i)
+                    dst[di++] = text[i];
+                dst[di] = '\0';
+                const bool ok = fat::Fat32RenameAtPath(v, src, dst);
+                if (ok)
+                {
+                    RescanFat32();
+                    duetos::drivers::video::NotifyShow("renamed");
+                    duetos::arch::SerialWrite("[files] rename ok: ");
+                    duetos::arch::SerialWrite(src);
+                    duetos::arch::SerialWrite(" -> ");
+                    duetos::arch::SerialWrite(dst);
+                    duetos::arch::SerialWrite("\n");
+                }
+                else
+                {
+                    duetos::drivers::video::NotifyShow("rename failed");
+                    duetos::drivers::video::SoundCueError();
+                    duetos::arch::SerialWrite("[files] rename FAILED: ");
+                    duetos::arch::SerialWrite(src);
+                    duetos::arch::SerialWrite(" -> ");
+                    duetos::arch::SerialWrite(dst);
+                    duetos::arch::SerialWrite("\n");
+                }
+            },
+            nullptr);
         break;
+    }
     case 32: // DELETE — re-arm the existing X-then-Y prompt.
     {
         g_state.fat_selection = ctx;
@@ -1088,6 +1288,17 @@ void FilesDispatchContextAction(duetos::u32 action, duetos::u32 ctx)
         duetos::arch::SerialWriteHex(e.attributes);
         duetos::arch::SerialWrite("\n");
         duetos::drivers::video::NotifyShow(e.name);
+        break;
+    }
+    case 34: // REFRESH — re-scan FAT32 root, clamp selection.
+    {
+        RescanFat32();
+        if (g_state.fat_selection >= g_state.fat_count && g_state.fat_count > 0)
+            g_state.fat_selection = g_state.fat_count - 1;
+        duetos::drivers::video::NotifyShow("refreshed");
+        duetos::arch::SerialWrite("[files] refresh via context menu, count=");
+        duetos::arch::SerialWriteHex(g_state.fat_count);
+        duetos::arch::SerialWrite("\n");
         break;
     }
     default:

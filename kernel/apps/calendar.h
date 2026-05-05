@@ -47,6 +47,15 @@ bool CalendarFeedChar(char c);
 /// Caller passes the kernel keycode (`kKeyArrowLeft` etc).
 bool CalendarFeedArrow(u16 keycode);
 
+/// Mouse press at framebuffer coords (cx, cy). If the click
+/// lands on a day cell, the cell's date is recorded in the
+/// selection state (visible as an outlined accent fill on the
+/// next compose). Cells from the previous / next month also
+/// land — clicking a leading / trailing greyed cell selects
+/// that day in the adjacent month. Returns true iff the
+/// click landed on the calendar grid.
+bool CalendarOnClick(duetos::u32 cx, duetos::u32 cy);
+
 /// Boot self-test: Zeller's-congruence weekday round-trip,
 /// month-length table including Feb leap years, prev/next
 /// navigation across year boundaries. Pure compute.

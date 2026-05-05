@@ -4,6 +4,7 @@
 #include "drivers/input/ps2kbd.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/notify.h"
+#include "drivers/video/scrollbar.h"
 #include "drivers/video/theme.h"
 #include "fs/fat32.h"
 #include "mm/kheap.h"
@@ -964,11 +965,40 @@ void DrawBody(u32 cx, u32 cy, u32 cw, u32 ch, u32 fg, u32 bg)
             line[line_n++] = c;
         }
         ++col;
-        if (row >= g_state.scroll_row + rows_visible)
-            break;
+        // Don't break early — keep counting rows past the
+        // visible range so the scrollbar's "total" reflects the
+        // full body. The flush_line bounds-check above already
+        // prevents writes outside the visible window.
     }
     if (line_n > 0)
         flush_line();
+    // Scrollbar at the right edge of the body view. `total` is
+    // the final row count; `visible` is rows_visible; `first`
+    // is scroll_row.
+    if (rows_visible > 0 && cw > duetos::drivers::video::kScrollbarWidth)
+    {
+        const u32 sb_x = cx + cw - duetos::drivers::video::kScrollbarWidth;
+        const u32 sb_y = cy + top_reserved;
+        const u32 sb_w = duetos::drivers::video::kScrollbarWidth;
+        const u32 sb_h = rows_visible * kRowH;
+        duetos::drivers::video::ScrollbarPaint(sb_x, sb_y, sb_w, sb_h, {row, rows_visible, g_state.scroll_row});
+        duetos::drivers::video::WindowScrollbarSurface s{};
+        s.present = true;
+        s.x = sb_x;
+        s.y = sb_y;
+        s.w = sb_w;
+        s.h = sb_h;
+        s.total = row;
+        s.visible = rows_visible;
+        s.first = g_state.scroll_row;
+        duetos::drivers::video::WindowSetScrollbar(g_state.handle, s);
+    }
+    else
+    {
+        duetos::drivers::video::WindowScrollbarSurface s{};
+        s.present = false;
+        duetos::drivers::video::WindowSetScrollbar(g_state.handle, s);
+    }
 }
 
 void DrawList(u32 cx, u32 cy, u32 cw, u32 ch, const char* title, char list[][kUrlCap], u32 count, u32 fg, u32 dim,
@@ -1183,6 +1213,83 @@ void BrowserInit(WindowHandle handle)
     g_state.fetch_in_flight = false;
     StatusSet("Press U for URL bar.  HTTP only (no HTTPS).");
     WindowSetContentDraw(handle, DrawFn, nullptr);
+    duetos::drivers::video::WindowSetWheelHandler(handle, BrowserOnWheel);
+    duetos::drivers::video::WindowSetScrollHandler(handle,
+                                                   [](duetos::u32 first)
+                                                   {
+                                                       // Body view binds directly; modal lists clamp.
+                                                       if (g_state.mode == Mode::View)
+                                                           g_state.scroll_row = first;
+                                                   });
+}
+
+void BrowserOnWheel(duetos::i32 dz, duetos::u8 modifiers)
+{
+    if (dz == 0)
+        return;
+    // Wheel-up (dz > 0) maps to "scroll content up" which means
+    // ARROW UP in our viewport (smaller scroll_row).
+    const u16 key = (dz > 0) ? kKeyArrowUp : kKeyArrowDown;
+    const duetos::i32 steps = (dz > 0) ? dz : -dz;
+    for (duetos::i32 i = 0; i < steps; ++i)
+    {
+        BrowserFeedArrow(key);
+    }
+}
+
+void BrowserFocusUrl()
+{
+    EnterUrlEdit();
+}
+
+void BrowserNavBack()
+{
+    NavigateBackForward(false);
+}
+
+void BrowserNavForward()
+{
+    NavigateBackForward(true);
+}
+
+bool BrowserOnDoubleClick(duetos::u32 sx, duetos::u32 sy)
+{
+    // Only meaningful in Bookmarks mode — DC follows the hit row.
+    // History mode could mirror this but isn't on the v1 critical
+    // path (less common navigation pattern).
+    if (g_state.mode != Mode::Bookmarks || g_state.bookmark_count == 0)
+        return false;
+    duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
+    if (!duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh))
+        return false;
+    // Mirror the geometry from DrawFn → DrawList. Client area
+    // starts 22 px below the window origin (title bar) + 2 px
+    // border. DrawList is invoked at (cy + kRowH * 2 + 4); inside
+    // it the list rows start at top = cy_inner + 4 + kRowH * 2.
+    constexpr u32 kTitle = 22;
+    constexpr u32 kBorder = 2;
+    const u32 client_y = wy + kTitle + kBorder;
+    const u32 list_y0 = client_y + kRowH * 2 + 4 + 4 + kRowH * 2;
+    if (sy < list_y0)
+        return false;
+    const u32 row = (sy - list_y0) / kRowH;
+    // Re-derive `first` the same way DrawList does so the hit row
+    // matches what's painted.
+    const u32 max_rows_h = (wh > kTitle + kBorder * 2 + kRowH) ? (wh - kTitle - kBorder * 2) / kRowH : 0;
+    u32 first = 0;
+    if (g_state.bookmark_count > max_rows_h && g_state.list_selection >= max_rows_h)
+        first = g_state.list_selection - (max_rows_h - 1);
+    const u32 idx = first + row;
+    if (idx >= g_state.bookmark_count)
+        return false;
+    char tmp[kUrlCap];
+    StrCopyCap(tmp, kUrlCap, g_state.bookmarks[idx]);
+    g_state.mode = Mode::View;
+    StartFetch(tmp);
+    duetos::arch::SerialWrite("[browser] double-click bookmark idx=");
+    duetos::arch::SerialWriteHex(idx);
+    duetos::arch::SerialWrite("\n");
+    return true;
 }
 
 WindowHandle BrowserWindow()
