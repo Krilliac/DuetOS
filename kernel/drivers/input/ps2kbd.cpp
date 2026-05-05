@@ -950,4 +950,20 @@ void KeyboardInjectEvent(const KeyEvent& ev)
     duetos::sched::WaitQueueWakeOne(&g_readers);
 }
 
+bool Ps2KeyboardSetTypematic(u8 rate_idx, u8 delay_idx)
+{
+    // Encoding (Intel 8042 spec):
+    //   bit 7    : reserved (0)
+    //   bits 6-5 : delay (00=250ms, 01=500ms, 10=750ms, 11=1000ms)
+    //   bits 4-0 : rate index (0..31)
+    if (rate_idx > 31 || delay_idx > 3)
+        return false;
+    const u8 encoded = static_cast<u8>(((delay_idx & 0x3) << 5) | (rate_idx & 0x1F));
+    if (!KbdSendAndAck(0xF3))
+        return false;
+    if (!KbdSendAndAck(encoded))
+        return false;
+    return true;
+}
+
 } // namespace duetos::drivers::input

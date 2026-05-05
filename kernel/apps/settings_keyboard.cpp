@@ -2,6 +2,7 @@
 
 #include "drivers/input/ps2kbd.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/notify.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
 
@@ -10,6 +11,13 @@ namespace duetos::apps::settings
 
 namespace
 {
+
+// Cached typematic indices so the panel can render the
+// current values + so successive +/- key presses step from a
+// known anchor. Defaults match the BIOS-set typematic the
+// PS/2 controller comes up with on most hardware.
+constinit u8 g_rate_idx = 0xB; // ~10.9 Hz — comfortable
+constinit u8 g_delay_idx = 1;  // 500 ms
 
 void AppendDec(char* out, u32 cap, u32* o, u64 v)
 {
@@ -86,11 +94,69 @@ void Draw(u32 x, u32 y, u32 w, u32 h)
     line[o] = '\0';
     FramebufferDrawString(x, y + 90, line, fg, bg);
 
-    FramebufferDrawString(x, y + 110, "(layout / repeat config: future slice)", dim, bg);
+    o = 0;
+    AppendStr(line, sizeof(line), &o, "REPEAT RATE IDX: ");
+    AppendDec(line, sizeof(line), &o, g_rate_idx);
+    AppendStr(line, sizeof(line), &o, " (lower = faster, 0..31)");
+    line[o] = '\0';
+    FramebufferDrawString(x, y + 106, line, fg, bg);
+
+    o = 0;
+    AppendStr(line, sizeof(line), &o, "REPEAT DELAY IDX: ");
+    AppendDec(line, sizeof(line), &o, g_delay_idx);
+    static const char* kDelayMs[4] = {"250 ms", "500 ms", "750 ms", "1000 ms"};
+    AppendStr(line, sizeof(line), &o, " (");
+    AppendStr(line, sizeof(line), &o, kDelayMs[g_delay_idx & 0x3]);
+    AppendStr(line, sizeof(line), &o, ")");
+    line[o] = '\0';
+    FramebufferDrawString(x, y + 118, line, fg, bg);
+
+    FramebufferDrawString(x, y + 134, "F : faster repeat   S : slower repeat", dim, bg);
+    FramebufferDrawString(x, y + 146, "D : longer delay    Q : shorter delay", dim, bg);
+    FramebufferDrawString(x, y + 158, "(layout: US (hardcoded) — layout switcher: future slice)", dim, bg);
 }
 
-bool Key(char /*c*/)
+bool Key(char c)
 {
+    auto apply = []()
+    {
+        if (duetos::drivers::input::Ps2KeyboardSetTypematic(g_rate_idx, g_delay_idx))
+        {
+            duetos::drivers::video::NotifyShow("typematic updated");
+        }
+        else
+        {
+            duetos::drivers::video::NotifyShow("typematic write rejected");
+        }
+    };
+    if (c == 'f' || c == 'F')
+    {
+        if (g_rate_idx > 0)
+            --g_rate_idx;
+        apply();
+        return true;
+    }
+    if (c == 's' || c == 'S')
+    {
+        if (g_rate_idx < 31)
+            ++g_rate_idx;
+        apply();
+        return true;
+    }
+    if (c == 'd' || c == 'D')
+    {
+        if (g_delay_idx < 3)
+            ++g_delay_idx;
+        apply();
+        return true;
+    }
+    if (c == 'q' || c == 'Q')
+    {
+        if (g_delay_idx > 0)
+            --g_delay_idx;
+        apply();
+        return true;
+    }
     return false;
 }
 
