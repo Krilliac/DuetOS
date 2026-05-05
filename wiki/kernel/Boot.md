@@ -30,6 +30,12 @@ on real hardware) from a single image: `tools/build/iso/grub.cfg`
 declares both `multiboot2` and `chainloader` paths, and `grub-mkrescue`
 embeds the El-Torito boot record alongside the EFI System Partition.
 
+The native `boot/uefi/BOOTX64.EFI` exists today as a Phase A toolchain
+proof — it builds, the firmware accepts it, and `efi_main` prints a
+banner via `ConOut`. It does not yet load the kernel; the GRUB path
+remains canonical until Phase B replaces `efi_main` with a real ELF
+loader + kernel handoff. See [`UEFI-Loader.md`](UEFI-Loader.md).
+
 ## Kernel execution order at boot
 
 ```

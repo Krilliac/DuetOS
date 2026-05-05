@@ -166,6 +166,24 @@ bool KEventWaitTimed(KEvent* e, u64 ticks)
     return got;
 }
 
+bool KEventIsSignaled(KEvent* e)
+{
+    sched::MutexLock(&e->inner);
+    const bool s = e->signaled;
+    sched::MutexUnlock(&e->inner);
+    return s;
+}
+
+void KEventClearAutoReset(KEvent* e)
+{
+    sched::MutexLock(&e->inner);
+    if (!e->manual_reset)
+    {
+        e->signaled = false;
+    }
+    sched::MutexUnlock(&e->inner);
+}
+
 void KEventSelfTest()
 {
     KLOG_TRACE_SCOPE("ipc/kevent", "KEventSelfTest");

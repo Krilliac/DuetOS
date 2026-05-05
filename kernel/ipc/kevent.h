@@ -98,6 +98,20 @@ void KEventWait(KEvent* e);
 /// routes through here.
 bool KEventWaitTimed(KEvent* e, u64 ticks);
 
+/// Non-blocking peek at the signaled state. Locks the inner
+/// mutex briefly. Returns the current value of `signaled` —
+/// race-prone by design (caller is expected to be a poll loop
+/// such as WaitForMultipleObjects that re-tests). Does not
+/// consume the signal even on auto-reset events.
+bool KEventIsSignaled(KEvent* e);
+
+/// If `e` is auto-reset, atomically clear `signaled`; if
+/// manual-reset, no-op. Locks the inner mutex briefly. Used by
+/// WaitForMultipleObjects after the wait set is satisfied to
+/// claim the wakeup on auto-reset slots while leaving manual-
+/// reset slots latched (Win32 contract).
+void KEventClearAutoReset(KEvent* e);
+
 /// Boot-time self-test. Allocates one auto-reset and one
 /// manual-reset KEvent on the heap, inserts both into a synthetic
 /// HandleTable, exercises the Set / Reset / consume semantics
