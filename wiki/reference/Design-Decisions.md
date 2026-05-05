@@ -4553,6 +4553,14 @@ get an inline "superseded by <commit>" note and stay.
   cost is justified by the new feature.
 - **Related tracks:** Track 1 (Kernel — IPC + handle table),
   Track 4 (Linux subsystem — fd table + creators).
+- **Commit:** `da31973`. QEMU smoke (debug profile, OVMF) ran
+  every IPC self-test in order — `kobject` → `handle_table` →
+  `kmutex` → `kevent` → `ksemaphore` → `kmailbox` → `kwaitable`
+  → `kfile` — and the new `[proc] linux-fd-table self-test OK`
+  fires immediately after, exercising AllocLowest / AttachKFile /
+  Dup / SetCloexec / CloseOnExec / final-Close end-to-end
+  including the per-pool release-callback dispatch through
+  `KFileDestroy`.
 
 ---
 
