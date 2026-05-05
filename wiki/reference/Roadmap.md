@@ -273,13 +273,23 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
 - **Blocks on:** per-vendor GPU drivers landing real command-
   ring submission; Vulkan-first ICD then D3D translation layer.
 
-### Windowing — modal dialogs, menus, common controls
+### Windowing — modal dialogs, common controls
 
-- Modal dialogs, menus, common controls, scroll bars, outline
-  fonts, multi-threaded message queues are all unimplemented.
+- Modal dialogs, common controls, scroll bars, outline fonts,
+  multi-threaded message queues remain unimplemented.
   Per the [`Win32-DLLs`](../subsystems/Win32-DLLs.md) doc:
   the DLL surface ships real EATs; behind each export the
   implementation can be a doc-error sentinel today.
+- **Menus shipped (v0):** popup menus + WM_CONTEXTMENU
+  dispatch + the Win32 menu API surface land on
+  `claude/right-click-context-menu-mPDDD`. Residual GAPs:
+  interactive Move / Size (need modal-input mode), submenu
+  marshaling across `SYS_WIN_TRACK_POPUP`, `TPM_*` flags
+  beyond `TPM_RETURNCMD`, Files-app rename UI (needs a
+  text-input modal), Trash / ramfs Files context menus,
+  menubars + `LoadMenu` resource loading. See
+  [`Compositor`](../subsystems/Compositor.md) §"Popup Menus"
+  for the live state.
 
 ### Winsock async surface
 

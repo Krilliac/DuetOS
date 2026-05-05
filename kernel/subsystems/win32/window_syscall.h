@@ -114,4 +114,28 @@ void DoWinGetFocus(arch::TrapFrame* frame);
 void DoWinCaret(arch::TrapFrame* frame);
 void DoWinBeep(arch::TrapFrame* frame);
 
+/// Display a modal popup menu (USER32 TrackPopupMenu). Blocks the
+/// calling task until the user picks an item or dismisses, then
+/// returns the chosen action_id in rax (0 = cancelled). See
+/// SYS_WIN_TRACK_POPUP in syscall.h for the full ABI.
+void DoWinTrackPopup(arch::TrapFrame* frame);
+
+/// Called by the mouse-reader / kbd-reader when a menu fires
+/// while a TrackPopupMenu is in flight (menu was opened with
+/// context = kTrackPopupSentinelCtx). Records the result and
+/// wakes the blocked syscall caller. `action_id == 0` is the
+/// cancel path. No-op if there is no in-flight popup.
+void TrackPopupCompleteFromKernel(u32 action_id);
+
+/// Sentinel context value the mouse reader compares against to
+/// recognise that the open menu is owned by a PE TrackPopupMenu
+/// syscall (rather than the native desktop / window menus).
+inline constexpr u32 kTrackPopupSentinelCtx = 0xFFFFFFFFu;
+
+/// Wake any in-flight TrackPopupMenu owned by `pid` with a
+/// cancel result (action_id = 0). Called from WindowReapByOwner
+/// so a process that exits while its menu is open doesn't leave
+/// the popup waiter blocked forever.
+void TrackPopupCancelByOwner(u64 pid);
+
 } // namespace duetos::subsystems::win32

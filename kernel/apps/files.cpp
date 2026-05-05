@@ -5,6 +5,7 @@
 #include "apps/trash.h"
 #include "arch/x86_64/serial.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/menu.h"
 #include "drivers/video/notify.h"
 #include "drivers/video/theme.h"
 #include "fs/fat32.h"
@@ -952,6 +953,146 @@ void FilesSelfTest()
     g_state.mode = saved_mode;
     SerialWrite(pass ? "[files] self-test OK (ramfs descend+back, mode toggle, ext match, delete-disarm)\n"
                      : "[files] self-test FAILED\n");
+}
+
+namespace
+{
+
+// Per-row context menu items. Static so the menu primitive can
+// hold a borrowed pointer for the open lifetime. RENAME (31) is
+// shipped disabled — there is no text-input modal in v0.
+constinit duetos::drivers::video::MenuItem kFilesContextMenuItems[] = {
+    {"OPEN", 30, 0, nullptr, 0},
+    {"RENAME (GAP)", 31, duetos::drivers::video::kMenuItemFlagDisabled, nullptr, 0},
+    {"DELETE", 32, 0, nullptr, 0},
+    {"PROPERTIES", 33, 0, nullptr, 0},
+};
+constexpr duetos::u32 kFilesContextMenuItemsN = sizeof(kFilesContextMenuItems) / sizeof(kFilesContextMenuItems[0]);
+
+} // namespace
+
+duetos::i32 FilesRowAt(duetos::u32 sx, duetos::u32 sy)
+{
+    if (g_state.mode != Mode::Fat32 || g_state.fat_count == 0)
+        return -1;
+    duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
+    if (!duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh))
+        return -1;
+    if (ww < 4 || wh < 26)
+        return -1;
+    // Content area starts at (wx+2, wy+22+2) — title bar 22 px +
+    // 2-px borders. Mirror the geometry in DrawFat32: list_top is
+    // 2 + kRowH + 2 below the content origin.
+    const duetos::u32 content_x = wx + 2;
+    const duetos::u32 content_y = wy + 22 + 2;
+    const duetos::u32 content_w = ww - 4;
+    const duetos::u32 content_h = wh - 22 - 4;
+    if (sx < content_x || sx >= content_x + content_w)
+        return -1;
+    const duetos::u32 list_top = content_y + 2 + kRowH + 2;
+    if (sy < list_top)
+        return -1;
+    const duetos::u32 n = g_state.fat_count;
+    const duetos::u32 max_rows =
+        (content_h > (list_top - content_y) + kRowH) ? (content_h - (list_top - content_y)) / kRowH : 0;
+    if (max_rows == 0)
+        return -1;
+    duetos::u32 first = 0;
+    if (n > max_rows && g_state.fat_selection >= max_rows)
+        first = g_state.fat_selection - (max_rows - 1);
+    const duetos::u32 row_in_view = (sy - list_top) / kRowH;
+    if (row_in_view >= max_rows)
+        return -1;
+    const duetos::u32 idx = first + row_in_view;
+    if (idx >= n)
+        return -1;
+    return static_cast<duetos::i32>(idx);
+}
+
+bool FilesOnRightClick(duetos::u32 sx, duetos::u32 sy)
+{
+    // Only FAT32 mode has a v0 context menu. Trash and ramfs fall
+    // through; caller will use the default kernel-window menu.
+    if (g_state.mode != Mode::Fat32)
+        return false;
+    const duetos::i32 row = FilesRowAt(sx, sy);
+    if (row < 0)
+        return false;
+    duetos::drivers::video::MenuOpen(kFilesContextMenuItems, kFilesContextMenuItemsN, sx, sy,
+                                     static_cast<duetos::u32>(row));
+    duetos::arch::SerialWrite("[files] context menu opened row=");
+    duetos::arch::SerialWriteHex(static_cast<duetos::u64>(row));
+    duetos::arch::SerialWrite(" name=");
+    if (static_cast<duetos::u32>(row) < g_state.fat_count)
+        duetos::arch::SerialWrite(g_state.fat_entries[row].name);
+    duetos::arch::SerialWrite("\n");
+    return true;
+}
+
+void FilesDispatchContextAction(duetos::u32 action, duetos::u32 ctx)
+{
+    // ctx is the row index captured at MenuOpen time. Validate
+    // against the current fat_count — the listing could have
+    // re-scanned between right-click and click-on-item.
+    if (g_state.mode != Mode::Fat32)
+        return;
+    if (ctx >= g_state.fat_count)
+        return;
+    switch (action)
+    {
+    case 30: // OPEN
+    {
+        // Restore selection to the right-clicked row so the
+        // existing OpenFat32Selected helper opens the correct
+        // file. Save + restore would be over-engineered for v0.
+        g_state.fat_selection = ctx;
+        OpenFat32Selected();
+        break;
+    }
+    case 31: // RENAME — GAP
+        duetos::drivers::video::NotifyShow("rename: not in v0 UI");
+        duetos::arch::SerialWrite("[files] rename (gap) row=\n");
+        break;
+    case 32: // DELETE — re-arm the existing X-then-Y prompt.
+    {
+        g_state.fat_selection = ctx;
+        g_state.pending = Pending::DeleteToTrash;
+        g_state.pending_idx = ctx;
+        duetos::drivers::video::NotifyShow("press Y to confirm delete");
+        duetos::arch::SerialWrite("[files] delete-to-trash armed via context menu\n");
+        break;
+    }
+    case 33: // PROPERTIES — log + notify
+    {
+        const auto& e = g_state.fat_entries[ctx];
+        duetos::arch::SerialWrite("[files] properties: name=");
+        duetos::arch::SerialWrite(e.name);
+        duetos::arch::SerialWrite(" size=");
+        char sb[24];
+        duetos::u32 si = 0;
+        duetos::u64 v = e.size_bytes;
+        char tmp[24];
+        duetos::u32 ti = 0;
+        if (v == 0)
+            tmp[ti++] = '0';
+        while (v != 0)
+        {
+            tmp[ti++] = static_cast<char>('0' + v % 10);
+            v /= 10;
+        }
+        while (ti > 0)
+            sb[si++] = tmp[--ti];
+        sb[si] = '\0';
+        duetos::arch::SerialWrite(sb);
+        duetos::arch::SerialWrite(" attr=");
+        duetos::arch::SerialWriteHex(e.attributes);
+        duetos::arch::SerialWrite("\n");
+        duetos::drivers::video::NotifyShow(e.name);
+        break;
+    }
+    default:
+        break;
+    }
 }
 
 } // namespace duetos::apps::files

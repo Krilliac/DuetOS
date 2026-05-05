@@ -1658,6 +1658,28 @@ enum SyscallNumber : u64
     //         capped at 63.
     //   rax = base VA on hit, 0 on miss / bad pointer / oversize.
     SYS_DLL_BASE_BY_NAME = 172,
+
+    // SYS_WIN_TRACK_POPUP — display a modal popup menu and block
+    // until the user picks an item (or dismisses). Backs USER32's
+    // TrackPopupMenu / TrackPopupMenuEx for PE apps.
+    //   rdi = user pointer to a TrackPopupReq struct (see below):
+    //         u32 count;            // <= kMenuMaxItems (12)
+    //         u32 flags;            // TPM_RETURNCMD = 0x0100;
+    //                               //  cleared = also post WM_COMMAND
+    //         i32 screen_x, screen_y;
+    //         u64 hwnd_biased;      // owner; receives WM_COMMAND
+    //         struct {
+    //             u32 action_id;    // nonzero
+    //             u32 flags;        // disabled/checked/separator
+    //                               //  (submenu = GAP v0)
+    //             char label[32];   // ASCII, NUL-terminated;
+    //                               //  non-ASCII -> '?'
+    //         } items[count];
+    //   rsi = u32 max_count          // sanity cap; reject larger
+    //   rax = chosen action_id (0 = cancelled / nothing selected).
+    // Single-instance: a second concurrent call blocks on the
+    // first dismissing.
+    SYS_WIN_TRACK_POPUP = 173,
 };
 
 // Cross-language record returned by SYS_DIR_NEXT. 96 bytes, exact

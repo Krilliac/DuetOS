@@ -70,6 +70,7 @@ typedef void* HANDLE;
 #define SYS_WIN_GET_FOCUS 98
 #define SYS_WIN_CARET 99
 #define SYS_WIN_BEEP 100
+#define SYS_WIN_TRACK_POPUP 173
 
 /* WNDCLASS storage indices for SYS_WIN_SET/GET_LONG. */
 #define GWLP_WNDPROC 0
@@ -1962,26 +1963,124 @@ __declspec(dllexport) BOOL Beep(DWORD freq, DWORD dur)
  * user32_slot_from_index (shared with GetWindowLongPtrA); no
  * separate wrappers needed here. */
 
-/* --- Menu API stubs ---
- * v0 has no menu engine; every entry returns a sentinel non-null
- * handle so caller-side null checks pass, and the mutators all
- * report success. Real menus need a separate kernel-side menu
- * table — out of scope for v0. */
+/* --- Menu API ---
+ * HMENU is a userland-allocated struct held in the per-process
+ * bump pool below. Submenu marshaling across the SYS_WIN_TRACK_POPUP
+ * syscall is a v0 GAP — submenu rows fall through as no-op clicks.
+ * GetMenu/SetMenu/DrawMenuBar/LoadMenu/GetSystemMenu remain stubs
+ * because menubars and resource-loaded menus are out of scope. */
+
+#define USER32_MENU_CAP 32
+#define USER32_MENU_ITEM_CAP 16
+#define USER32_MENU_LABEL_CAP 32
+#define USER32_MENU_MAGIC 0x756E4D48u /* 'HMnu' */
+
+#define USER32_MF_GRAYED 0x0001u
+#define USER32_MF_DISABLED 0x0002u
+#define USER32_MF_CHECKED 0x0008u
+#define USER32_MF_POPUP 0x0010u
+#define USER32_MF_SEPARATOR 0x0800u
+
+#define USER32_TPM_RETURNCMD 0x0100u
+
+/* Kernel mirror — must agree with kMenuItemFlag* in
+ * kernel/drivers/video/menu.h. */
+#define USER32_KMENU_FLAG_DISABLED 0x1u
+#define USER32_KMENU_FLAG_CHECKED 0x2u
+#define USER32_KMENU_FLAG_SUBMENU 0x4u
+#define USER32_KMENU_FLAG_SEPARATOR 0x8u
+
+struct user32_menu_item
+{
+    unsigned action_id;
+    unsigned flags;                    /* kernel kMenuItemFlag* form */
+    char label[USER32_MENU_LABEL_CAP]; /* NUL-terminated */
+    HANDLE submenu;                    /* nullable */
+};
+
+struct user32_menu
+{
+    unsigned magic;    /* USER32_MENU_MAGIC when in use */
+    unsigned is_popup; /* 1 if CreatePopupMenu, 0 if CreateMenu */
+    unsigned count;
+    struct user32_menu_item items[USER32_MENU_ITEM_CAP];
+};
+
+static struct user32_menu s_menus[USER32_MENU_CAP];
+
+static struct user32_menu* user32_menu_resolve(HANDLE h)
+{
+    if (!h)
+        return 0;
+    long long idx_signed = (long long)(unsigned long long)h - 1; /* match HWND-style +1 bias */
+    if (idx_signed < 0 || idx_signed >= USER32_MENU_CAP)
+        return 0;
+    struct user32_menu* m = &s_menus[(unsigned)idx_signed];
+    if (m->magic != USER32_MENU_MAGIC)
+        return 0;
+    return m;
+}
+
+static HANDLE user32_menu_alloc(unsigned is_popup)
+{
+    for (unsigned i = 0; i < USER32_MENU_CAP; ++i)
+    {
+        if (s_menus[i].magic == 0)
+        {
+            s_menus[i].magic = USER32_MENU_MAGIC;
+            s_menus[i].is_popup = is_popup;
+            s_menus[i].count = 0;
+            for (unsigned j = 0; j < USER32_MENU_ITEM_CAP; ++j)
+            {
+                s_menus[i].items[j].action_id = 0;
+                s_menus[i].items[j].flags = 0;
+                s_menus[i].items[j].label[0] = '\0';
+                s_menus[i].items[j].submenu = (HANDLE)0;
+            }
+            return (HANDLE)(unsigned long long)(i + 1);
+        }
+    }
+    return (HANDLE)0;
+}
+
+static unsigned user32_menu_translate_flags(UINT mf)
+{
+    unsigned k = 0;
+    if (mf & (USER32_MF_GRAYED | USER32_MF_DISABLED))
+        k |= USER32_KMENU_FLAG_DISABLED;
+    if (mf & USER32_MF_CHECKED)
+        k |= USER32_KMENU_FLAG_CHECKED;
+    if (mf & USER32_MF_SEPARATOR)
+        k |= USER32_KMENU_FLAG_SEPARATOR;
+    if (mf & USER32_MF_POPUP)
+        k |= USER32_KMENU_FLAG_SUBMENU;
+    return k;
+}
+
 __declspec(dllexport) HANDLE CreateMenu(void)
 {
-    /* Distinct sentinel so identity checks don't collide with
-     * other handle ranges. */
-    return (HANDLE)(long long)0xCEEEFFFF;
+    return user32_menu_alloc(0);
 }
 __declspec(dllexport) HANDLE CreatePopupMenu(void)
 {
-    return (HANDLE)(long long)0xCEEFFFFE;
+    return user32_menu_alloc(1);
 }
 __declspec(dllexport) BOOL DestroyMenu(HANDLE menu)
 {
-    (void)menu;
+    struct user32_menu* m = user32_menu_resolve(menu);
+    if (!m)
+        return 0;
+    /* Recursively destroy submenus referenced via MF_POPUP. */
+    for (unsigned i = 0; i < m->count; ++i)
+    {
+        if (m->items[i].submenu)
+            DestroyMenu(m->items[i].submenu);
+    }
+    m->magic = 0;
+    m->count = 0;
     return 1;
 }
+/* Menubar slots — STUB: menubar drawing is out of scope for v0. */
 __declspec(dllexport) HANDLE GetMenu(HANDLE hwnd)
 {
     (void)hwnd;
@@ -1995,124 +2094,332 @@ __declspec(dllexport) BOOL SetMenu(HANDLE hwnd, HANDLE menu)
 }
 __declspec(dllexport) HANDLE GetSubMenu(HANDLE menu, int pos)
 {
-    (void)menu;
-    (void)pos;
-    return (HANDLE)0;
+    struct user32_menu* m = user32_menu_resolve(menu);
+    if (!m || pos < 0 || (unsigned)pos >= m->count)
+        return (HANDLE)0;
+    return m->items[(unsigned)pos].submenu;
 }
 __declspec(dllexport) int GetMenuItemCount(HANDLE menu)
 {
-    (void)menu;
-    return 0;
+    struct user32_menu* m = user32_menu_resolve(menu);
+    return m ? (int)m->count : -1;
 }
 __declspec(dllexport) UINT GetMenuItemID(HANDLE menu, int pos)
 {
-    (void)menu;
-    (void)pos;
-    return 0xFFFFFFFFu; /* -1 */
+    struct user32_menu* m = user32_menu_resolve(menu);
+    if (!m || pos < 0 || (unsigned)pos >= m->count)
+        return 0xFFFFFFFFu;
+    return m->items[(unsigned)pos].action_id;
 }
 __declspec(dllexport) UINT GetMenuState(HANDLE menu, UINT id, UINT flags)
 {
-    (void)menu;
-    (void)id;
-    (void)flags;
+    struct user32_menu* m = user32_menu_resolve(menu);
+    if (!m)
+        return 0xFFFFFFFFu;
+    /* MF_BYPOSITION (0x400) flips lookup mode. */
+    const unsigned by_pos = (flags & 0x400) != 0;
+    for (unsigned i = 0; i < m->count; ++i)
+    {
+        const unsigned key = by_pos ? i : m->items[i].action_id;
+        if (key == id)
+        {
+            unsigned r = 0;
+            if (m->items[i].flags & USER32_KMENU_FLAG_DISABLED)
+                r |= USER32_MF_DISABLED;
+            if (m->items[i].flags & USER32_KMENU_FLAG_CHECKED)
+                r |= USER32_MF_CHECKED;
+            if (m->items[i].flags & USER32_KMENU_FLAG_SEPARATOR)
+                r |= USER32_MF_SEPARATOR;
+            if (m->items[i].submenu)
+                r |= USER32_MF_POPUP;
+            return r;
+        }
+    }
     return 0xFFFFFFFFu;
 }
 __declspec(dllexport) BOOL AppendMenuA(HANDLE menu, UINT flags, unsigned long long item_id, const char* text)
 {
-    (void)menu;
-    (void)flags;
-    (void)item_id;
-    (void)text;
+    struct user32_menu* m = user32_menu_resolve(menu);
+    if (!m || m->count >= USER32_MENU_ITEM_CAP)
+        return 0;
+    struct user32_menu_item* it = &m->items[m->count];
+    it->action_id = (unsigned)(item_id & 0xFFFFFFFFu);
+    it->flags = user32_menu_translate_flags(flags);
+    if (flags & USER32_MF_POPUP)
+    {
+        /* When MF_POPUP is set, `text` is actually an HMENU. */
+        it->submenu = (HANDLE)(unsigned long long)item_id; /* MSDN quirk */
+        /* Action_id of a popup row is the submenu HMENU's value;
+         * the kernel side treats it as an opaque pass-through. */
+        it->label[0] = '\0';
+        if (text)
+            user32_strcpy_ascii(it->label, USER32_MENU_LABEL_CAP, text);
+    }
+    else
+    {
+        it->submenu = (HANDLE)0;
+        it->label[0] = '\0';
+        if (text && (flags & USER32_MF_SEPARATOR) == 0)
+            user32_strcpy_ascii(it->label, USER32_MENU_LABEL_CAP, text);
+    }
+    ++m->count;
     return 1;
 }
 __declspec(dllexport) BOOL AppendMenuW(HANDLE menu, UINT flags, unsigned long long item_id, const wchar_t16* text)
 {
-    (void)menu;
-    (void)flags;
-    (void)item_id;
-    (void)text;
-    return 1;
+    char buf[USER32_MENU_LABEL_CAP];
+    buf[0] = '\0';
+    if (text && (flags & USER32_MF_SEPARATOR) == 0)
+    {
+        unsigned i = 0;
+        for (; i + 1 < USER32_MENU_LABEL_CAP && text[i]; ++i)
+        {
+            wchar_t16 wc = text[i];
+            buf[i] = (wc < 0x80) ? (char)wc : '?';
+        }
+        buf[i] = '\0';
+    }
+    return AppendMenuA(menu, flags, item_id, buf);
 }
 __declspec(dllexport) BOOL InsertMenuA(HANDLE menu, UINT pos, UINT flags, unsigned long long item_id, const char* text)
 {
-    (void)menu;
-    (void)pos;
-    (void)flags;
-    (void)item_id;
-    (void)text;
+    struct user32_menu* m = user32_menu_resolve(menu);
+    if (!m || m->count >= USER32_MENU_ITEM_CAP)
+        return 0;
+    /* MF_BYPOSITION (0x400) — `pos` is an index. v0 ignores
+     * MF_BYCOMMAND lookup and always treats pos as an index,
+     * clamped. */
+    unsigned at = pos;
+    if (at > m->count)
+        at = m->count;
+    /* Shift items to make room at `at`. */
+    for (unsigned i = m->count; i > at; --i)
+        m->items[i] = m->items[i - 1];
+    ++m->count;
+    /* Reuse Append's translation by rewriting in place. */
+    --m->count;
+    BOOL ok = AppendMenuA(menu, flags, item_id, text); /* appends at old end */
+    if (!ok)
+        return 0;
+    /* Move the just-appended item to `at` if needed. */
+    if (at != m->count - 1)
+    {
+        struct user32_menu_item tmp = m->items[m->count - 1];
+        for (unsigned i = m->count - 1; i > at; --i)
+            m->items[i] = m->items[i - 1];
+        m->items[at] = tmp;
+    }
     return 1;
 }
 __declspec(dllexport) BOOL InsertMenuW(HANDLE menu, UINT pos, UINT flags, unsigned long long item_id,
                                        const wchar_t16* text)
 {
-    (void)menu;
-    (void)pos;
-    (void)flags;
-    (void)item_id;
-    (void)text;
-    return 1;
+    char buf[USER32_MENU_LABEL_CAP];
+    buf[0] = '\0';
+    if (text && (flags & USER32_MF_SEPARATOR) == 0)
+    {
+        unsigned i = 0;
+        for (; i + 1 < USER32_MENU_LABEL_CAP && text[i]; ++i)
+        {
+            wchar_t16 wc = text[i];
+            buf[i] = (wc < 0x80) ? (char)wc : '?';
+        }
+        buf[i] = '\0';
+    }
+    return InsertMenuA(menu, pos, flags, item_id, buf);
 }
 __declspec(dllexport) BOOL RemoveMenu(HANDLE menu, UINT pos, UINT flags)
 {
-    (void)menu;
-    (void)pos;
-    (void)flags;
+    struct user32_menu* m = user32_menu_resolve(menu);
+    if (!m)
+        return 0;
+    const unsigned by_pos = (flags & 0x400) != 0;
+    unsigned at = USER32_MENU_ITEM_CAP;
+    for (unsigned i = 0; i < m->count; ++i)
+    {
+        const unsigned key = by_pos ? i : m->items[i].action_id;
+        if (key == pos)
+        {
+            at = i;
+            break;
+        }
+    }
+    if (at == USER32_MENU_ITEM_CAP)
+        return 0;
+    for (unsigned i = at; i + 1 < m->count; ++i)
+        m->items[i] = m->items[i + 1];
+    --m->count;
     return 1;
 }
 __declspec(dllexport) BOOL DeleteMenu(HANDLE menu, UINT pos, UINT flags)
 {
-    (void)menu;
-    (void)pos;
-    (void)flags;
-    return 1;
+    /* DeleteMenu also frees the submenu it points at. */
+    struct user32_menu* m = user32_menu_resolve(menu);
+    if (!m)
+        return 0;
+    const unsigned by_pos = (flags & 0x400) != 0;
+    for (unsigned i = 0; i < m->count; ++i)
+    {
+        const unsigned key = by_pos ? i : m->items[i].action_id;
+        if (key == pos && m->items[i].submenu)
+        {
+            DestroyMenu(m->items[i].submenu);
+            m->items[i].submenu = (HANDLE)0;
+            break;
+        }
+    }
+    return RemoveMenu(menu, pos, flags);
 }
 __declspec(dllexport) BOOL EnableMenuItem(HANDLE menu, UINT id, UINT flags)
 {
-    (void)menu;
-    (void)id;
-    (void)flags;
-    return 1;
+    struct user32_menu* m = user32_menu_resolve(menu);
+    if (!m)
+        return 0xFFFFFFFFu;
+    const unsigned by_pos = (flags & 0x400) != 0;
+    const unsigned want_disabled = (flags & (USER32_MF_GRAYED | USER32_MF_DISABLED)) != 0;
+    for (unsigned i = 0; i < m->count; ++i)
+    {
+        const unsigned key = by_pos ? i : m->items[i].action_id;
+        if (key == id)
+        {
+            const unsigned prev = (m->items[i].flags & USER32_KMENU_FLAG_DISABLED) ? 1u : 0u;
+            if (want_disabled)
+                m->items[i].flags |= USER32_KMENU_FLAG_DISABLED;
+            else
+                m->items[i].flags &= ~USER32_KMENU_FLAG_DISABLED;
+            return prev;
+        }
+    }
+    return 0xFFFFFFFFu;
 }
 __declspec(dllexport) DWORD CheckMenuItem(HANDLE menu, UINT id, UINT flags)
 {
-    (void)menu;
-    (void)id;
-    (void)flags;
-    return 0;
+    struct user32_menu* m = user32_menu_resolve(menu);
+    if (!m)
+        return 0xFFFFFFFFu;
+    const unsigned by_pos = (flags & 0x400) != 0;
+    const unsigned want_checked = (flags & USER32_MF_CHECKED) != 0;
+    for (unsigned i = 0; i < m->count; ++i)
+    {
+        const unsigned key = by_pos ? i : m->items[i].action_id;
+        if (key == id)
+        {
+            const unsigned prev = (m->items[i].flags & USER32_KMENU_FLAG_CHECKED) ? USER32_MF_CHECKED : 0u;
+            if (want_checked)
+                m->items[i].flags |= USER32_KMENU_FLAG_CHECKED;
+            else
+                m->items[i].flags &= ~USER32_KMENU_FLAG_CHECKED;
+            return prev;
+        }
+    }
+    return 0xFFFFFFFFu;
 }
 __declspec(dllexport) BOOL ModifyMenuA(HANDLE menu, UINT pos, UINT flags, unsigned long long item_id, const char* text)
 {
-    return InsertMenuA(menu, pos, flags, item_id, text);
+    /* Replace the item at `pos`/id with new text/flags. */
+    struct user32_menu* m = user32_menu_resolve(menu);
+    if (!m)
+        return 0;
+    const unsigned by_pos = (flags & 0x400) != 0;
+    for (unsigned i = 0; i < m->count; ++i)
+    {
+        const unsigned key = by_pos ? i : m->items[i].action_id;
+        if (key == pos)
+        {
+            m->items[i].flags = user32_menu_translate_flags(flags);
+            m->items[i].action_id = (unsigned)(item_id & 0xFFFFFFFFu);
+            m->items[i].label[0] = '\0';
+            if (text && (flags & USER32_MF_SEPARATOR) == 0)
+                user32_strcpy_ascii(m->items[i].label, USER32_MENU_LABEL_CAP, text);
+            return 1;
+        }
+    }
+    return 0;
 }
 __declspec(dllexport) BOOL ModifyMenuW(HANDLE menu, UINT pos, UINT flags, unsigned long long item_id,
                                        const wchar_t16* text)
 {
-    return InsertMenuW(menu, pos, flags, item_id, text);
+    char buf[USER32_MENU_LABEL_CAP];
+    buf[0] = '\0';
+    if (text && (flags & USER32_MF_SEPARATOR) == 0)
+    {
+        unsigned i = 0;
+        for (; i + 1 < USER32_MENU_LABEL_CAP && text[i]; ++i)
+        {
+            wchar_t16 wc = text[i];
+            buf[i] = (wc < 0x80) ? (char)wc : '?';
+        }
+        buf[i] = '\0';
+    }
+    return ModifyMenuA(menu, pos, flags, item_id, buf);
 }
+
+/* Wire format the kernel expects (mirror of TpReqWire / TpItemWire
+ * in kernel/subsystems/win32/window_syscall.cpp). MUST match. */
+#define USER32_TP_LABEL_CAP 32
+#define USER32_TP_MAX_ITEMS 12
+
+struct user32_tp_item
+{
+    unsigned action_id;
+    unsigned flags;
+    char label[USER32_TP_LABEL_CAP];
+};
+
+struct user32_tp_req
+{
+    unsigned count;
+    unsigned flags;
+    int screen_x, screen_y;
+    unsigned long long hwnd_biased;
+    struct user32_tp_item items[USER32_TP_MAX_ITEMS];
+};
+
 __declspec(dllexport) BOOL TrackPopupMenu(HANDLE menu, UINT flags, int x, int y, int reserved, HANDLE hwnd, void* rect)
 {
-    (void)menu;
-    (void)flags;
-    (void)x;
-    (void)y;
     (void)reserved;
-    (void)hwnd;
     (void)rect;
-    /* No popup menu shown — return 0 (= "no item selected"). */
-    return 0;
+    struct user32_menu* m = user32_menu_resolve(menu);
+    if (!m || !m->is_popup || m->count == 0)
+        return 0;
+    if (m->count > USER32_TP_MAX_ITEMS)
+        return 0;
+    struct user32_tp_req req;
+    /* Zero unused tail items so non-debug kernels can't fault on
+     * stale stack bytes. */
+    for (unsigned i = 0; i < sizeof(req); ++i)
+        ((unsigned char*)&req)[i] = 0;
+    req.count = m->count;
+    req.flags = flags;
+    req.screen_x = x;
+    req.screen_y = y;
+    req.hwnd_biased = (unsigned long long)hwnd;
+    for (unsigned i = 0; i < m->count; ++i)
+    {
+        req.items[i].action_id = m->items[i].action_id;
+        req.items[i].flags = m->items[i].flags;
+        unsigned j = 0;
+        for (; j + 1 < USER32_TP_LABEL_CAP && m->items[i].label[j]; ++j)
+            req.items[i].label[j] = m->items[i].label[j];
+        req.items[i].label[j] = '\0';
+    }
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_TRACK_POPUP), "D"((long long)(unsigned long long)&req),
+                       "S"((long long)USER32_TP_MAX_ITEMS)
+                     : "memory");
+    return (BOOL)(unsigned long)rv;
 }
 __declspec(dllexport) BOOL TrackPopupMenuEx(HANDLE menu, UINT flags, int x, int y, HANDLE hwnd, void* params)
 {
-    (void)menu;
-    (void)flags;
-    (void)x;
-    (void)y;
-    (void)hwnd;
+    /* TPMPARAMS exclude-rect is ignored in v0. */
     (void)params;
-    return 0;
+    return TrackPopupMenu(menu, flags, x, y, 0, hwnd, (void*)0);
 }
 __declspec(dllexport) BOOL DrawMenuBar(HANDLE hwnd)
 {
+    /* STUB: menubar drawing not implemented in v0. */
     (void)hwnd;
     return 1;
 }

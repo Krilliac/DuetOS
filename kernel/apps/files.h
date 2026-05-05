@@ -67,4 +67,26 @@ bool FilesFeedArrow(bool up);
 /// to that directory's children. Prints PASS/FAIL to COM1.
 void FilesSelfTest();
 
+/// Map cursor (cx, cy) in screen coordinates to a row index in
+/// the current FAT32 listing. Returns -1 if the cursor is not
+/// over a row (over the title bar, header, scrollbar, or outside
+/// the window). Mirrors the row geometry in DrawFat32 — keep them
+/// in sync if the layout changes.
+duetos::i32 FilesRowAt(duetos::u32 cx, duetos::u32 cy);
+
+/// Right-click handler. If the cursor is over a row in FAT32
+/// mode, opens the per-row context menu (Open / Rename / Delete /
+/// Properties) and returns true. In Trash or ramfs modes,
+/// returns false so the caller can fall through to the default
+/// window menu. Caller must not be holding the compositor lock
+/// when invoking — the menu itself doesn't touch it, but the
+/// caller's surrounding flow does.
+bool FilesOnRightClick(duetos::u32 cx, duetos::u32 cy);
+
+/// Dispatch a Files-app context-menu action. Called from the
+/// shared menu dispatcher in main.cpp once the menu fires. The
+/// action ids are 30..33; ctx is the row index captured at
+/// MenuOpen time.
+void FilesDispatchContextAction(duetos::u32 action, duetos::u32 ctx);
+
 } // namespace duetos::apps::files

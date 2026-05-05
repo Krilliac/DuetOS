@@ -4,7 +4,7 @@
 >
 > **Execution context:** Kernel — compositor runs in the focused-window's draw pass
 >
-> **Maturity:** v0 painting + windowing; modal dialogs / menus deferred
+> **Maturity:** v0 painting + windowing; popup menus shipped, modal dialogs deferred
 
 ## Overview
 
@@ -92,6 +92,61 @@ list and per-NIC TX/RX byte counters; a single tick polls each path
 state and refreshes the per-row tooltip without blocking the main
 compose pass.
 
+## Popup Menus
+
+The compositor owns a single global popup menu primitive
+(`kernel/drivers/video/menu.{h,cpp}`) used by:
+
+- **Native menus**: Start menu, desktop right-click,
+  per-window right-click, title-bar (NC) right-click system
+  menu, and the Files-app per-row context menu.
+- **PE TrackPopupMenu**: USER32's `TrackPopupMenu` /
+  `TrackPopupMenuEx` marshal the userland HMENU into a fixed
+  request struct and issue `SYS_WIN_TRACK_POPUP` (173). The
+  syscall opens the same kernel menu primitive with a sentinel
+  context value, blocks the calling task on a Mutex+Condvar,
+  and returns the chosen `action_id` (or 0 = cancel) to userland.
+
+Capabilities of the primitive:
+
+- Up to `kMenuMaxStack = 4` nested panels (root + 3 submenus).
+- Hover highlight tracked via `MenuTrackHoverAt(cx, cy)` from
+  the mouse-reader on every packet; a recompose is forced when
+  the cursor moves while a menu is open.
+- Keyboard navigation via `MenuFeedKey(vk)` from the
+  kbd-reader: Up / Down move the highlight, Enter activates
+  the hovered item, Esc closes the whole menu, Right opens a
+  submenu, Left pops one panel (or closes at root).
+- Per-item flags: `kMenuItemFlagDisabled`, `kMenuItemFlagChecked`,
+  `kMenuItemFlagSubmenu`, `kMenuItemFlagSeparator`.
+
+Right-click dispatch in the mouse-reader (`kernel/core/main.cpp`):
+
+| Cursor target | Menu opened |
+|---|---|
+| Title bar of any window | System menu (Restore / Move / Size / Min / Max / Close) |
+| Body of a kernel-app window | Enriched window menu (Raise + Min/Max/Restore/Close) |
+| Body of a PE window | No kernel menu — `WM_CONTEXTMENU` (0x007B) is posted to the PE |
+| Body of the Files app | Per-row context menu (Open / Rename(GAP) / Delete / Properties) |
+| Desktop background | Desktop menu (Help / About / Cycle / List / TTY) |
+
+PE apps process `WM_CONTEXTMENU` in their `WndProc` — `wparam` is
+the receiving HWND, `lparam` packs screen X/Y. They typically
+reply by calling `TrackPopupMenu(TPM_RETURNCMD, x, y, 0, hwnd, NULL)`
+and acting on the returned id.
+
+Action-id allocation:
+
+| Range | Owner |
+|---|---|
+| 1–6 | Desktop menu |
+| 10–11 | Window menu (Raise / Close legacy) |
+| 20–25 | System menu (NC) — Restore / Move / Size / Min / Max / Close |
+| 30–33 | Files app row menu |
+| 100–199 | ThemeRole launchers (Calculator, Notes, …) |
+| 200+ | `/APPS/*.MNF` shortcuts |
+| ≥ 0x10000 | PE-app dynamic ids (opaque to kernel) |
+
 ## Known Limits / GAPs
 
 - **No GDI paint inside the client area for unfiled Win32 PEs** —
@@ -102,8 +157,24 @@ compose pass.
   pump immediately.
 - **Keyboard / mouse routing to the focused window**: input still
   goes to the native console even when a Win32 PE is focused.
-- **Modal dialogs, menus, common controls, scroll bars, outline
-  fonts, multi-threaded message queues**: all on the windowing track's
+- **Interactive Move / Size from the system menu**: GAP. Win32's
+  Move / Size enter a modal-input state that follows the cursor
+  until the next click; we don't have modal input. Move
+  one-shot-recenters the window under the cursor as a degraded
+  stand-in; Size is shown disabled.
+- **Submenu marshaling across `SYS_WIN_TRACK_POPUP`**: GAP. PE
+  apps that need nested menus call `TrackPopupMenu` recursively
+  from their `WM_COMMAND` handler.
+- **Concurrent `TrackPopupMenu` from two PE processes**: serialise
+  on the single-instance kernel menu — the second caller cancels
+  with action_id = 0 and returns immediately.
+- **Files-app rename**: GAP. No text-input modal exists yet; the
+  RENAME row notifies "rename: not in v0 UI". A modal-text-input
+  primitive replaces the notify when it lands.
+- **Trash / ramfs mode in Files**: only FAT32 mode has a v0
+  context menu; other modes fall through to the kernel-window menu.
+- **Modal dialogs, common controls, scroll bars, outline fonts,
+  multi-threaded message queues**: all on the windowing track's
   deferred list.
 
 ## Related Pages
