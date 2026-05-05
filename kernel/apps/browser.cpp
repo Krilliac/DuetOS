@@ -977,9 +977,27 @@ void DrawBody(u32 cx, u32 cy, u32 cw, u32 ch, u32 fg, u32 bg)
     // is scroll_row.
     if (rows_visible > 0 && cw > duetos::drivers::video::kScrollbarWidth)
     {
-        duetos::drivers::video::ScrollbarPaint(cx + cw - duetos::drivers::video::kScrollbarWidth, cy + top_reserved,
-                                               duetos::drivers::video::kScrollbarWidth, rows_visible * kRowH,
-                                               {row, rows_visible, g_state.scroll_row});
+        const u32 sb_x = cx + cw - duetos::drivers::video::kScrollbarWidth;
+        const u32 sb_y = cy + top_reserved;
+        const u32 sb_w = duetos::drivers::video::kScrollbarWidth;
+        const u32 sb_h = rows_visible * kRowH;
+        duetos::drivers::video::ScrollbarPaint(sb_x, sb_y, sb_w, sb_h, {row, rows_visible, g_state.scroll_row});
+        duetos::drivers::video::WindowScrollbarSurface s{};
+        s.present = true;
+        s.x = sb_x;
+        s.y = sb_y;
+        s.w = sb_w;
+        s.h = sb_h;
+        s.total = row;
+        s.visible = rows_visible;
+        s.first = g_state.scroll_row;
+        duetos::drivers::video::WindowSetScrollbar(g_state.handle, s);
+    }
+    else
+    {
+        duetos::drivers::video::WindowScrollbarSurface s{};
+        s.present = false;
+        duetos::drivers::video::WindowSetScrollbar(g_state.handle, s);
     }
 }
 
@@ -1196,6 +1214,13 @@ void BrowserInit(WindowHandle handle)
     StatusSet("Press U for URL bar.  HTTP only (no HTTPS).");
     WindowSetContentDraw(handle, DrawFn, nullptr);
     duetos::drivers::video::WindowSetWheelHandler(handle, BrowserOnWheel);
+    duetos::drivers::video::WindowSetScrollHandler(handle,
+                                                   [](duetos::u32 first)
+                                                   {
+                                                       // Body view binds directly; modal lists clamp.
+                                                       if (g_state.mode == Mode::View)
+                                                           g_state.scroll_row = first;
+                                                   });
 }
 
 void BrowserOnWheel(duetos::i32 dz)

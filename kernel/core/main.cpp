@@ -155,6 +155,7 @@
 #include "drivers/video/dnd.h"
 #include "drivers/video/menu.h"
 #include "drivers/video/modal_input.h"
+#include "drivers/video/scrollbar.h"
 #include "drivers/video/start_menu_apps.h"
 #include "drivers/video/netpanel.h"
 #include "drivers/video/notify.h"
@@ -4135,6 +4136,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                   0,
                                   0,
                                   0};
+        // Scrollbar drag-the-thumb state.
+        struct ScrollbarDrag
+        {
+            bool active;
+            duetos::drivers::video::WindowHandle hwnd;
+            duetos::u32 grab_offset_in_thumb;
+        };
+        static ScrollbarDrag sb_drag{false, duetos::drivers::video::kWindowInvalid, 0};
         static bool prev_left = false;
         static bool prev_right = false;
         auto desktop_bg = []() { return duetos::drivers::video::ThemeCurrent().desktop_bg; };
@@ -4774,6 +4783,40 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 }
             }
 
+            // Scrollbar press hit-test. Runs before edge-resize
+            // and chrome handling because a scrollbar bar lives
+            // inside the client area + is a higher-priority
+            // gesture than "raise window". Track click sets a
+            // new `first` (page-back / page-forward / on-thumb).
+            // On-thumb captures into sb_drag for follow-up motion.
+            if (press_edge && !menu_handled && !drag.active && !resize.active)
+            {
+                const auto sh = duetos::drivers::video::WindowTopmostAt(cx, cy);
+                duetos::drivers::video::WindowScrollbarSurface s{};
+                if (sh != duetos::drivers::video::kWindowInvalid && duetos::drivers::video::WindowGetScrollbar(sh, &s))
+                {
+                    const duetos::drivers::video::ScrollbarState state{s.total, s.visible, s.first};
+                    const duetos::u32 hit = duetos::drivers::video::ScrollbarHitTest(cx, cy, s.x, s.y, s.w, s.h, state);
+                    if (hit != duetos::drivers::video::kScrollbarNoHit)
+                    {
+                        const duetos::u32 thumb_y = duetos::drivers::video::ScrollbarThumbY(s.h, state);
+                        const duetos::u32 thumb_h = duetos::drivers::video::ScrollbarThumbH(s.h, state);
+                        const duetos::u32 click_y = cy - s.y;
+                        if (click_y >= thumb_y && click_y < thumb_y + thumb_h)
+                        {
+                            sb_drag.active = true;
+                            sb_drag.hwnd = sh;
+                            sb_drag.grab_offset_in_thumb = click_y - thumb_y;
+                        }
+                        else
+                        {
+                            duetos::drivers::video::WindowDispatchScroll(sh, hit);
+                        }
+                        menu_handled = true;
+                    }
+                }
+            }
+
             // Edge-resize detection. Runs before the chrome-press
             // block so a click on the 4-px border doesn't fall
             // through to title-bar drag-start. Handles the press
@@ -4975,6 +5018,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 SerialWriteHex(drag.window);
                 SerialWrite("\n");
                 drag.active = false;
+            }
+            if (release_edge && sb_drag.active)
+            {
+                sb_drag.active = false;
+                sb_drag.hwnd = duetos::drivers::video::kWindowInvalid;
+                SerialWrite("[ui] scrollbar drag end\n");
             }
             if (release_edge && resize.active)
             {
@@ -5190,6 +5239,22 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 const duetos::u32 nx = (cx > drag.grab_offset_x) ? cx - drag.grab_offset_x : 0;
                 const duetos::u32 ny = (cy > drag.grab_offset_y) ? cy - drag.grab_offset_y : 0;
                 duetos::drivers::video::WindowMoveTo(drag.window, nx, ny);
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+            }
+            else if (sb_drag.active)
+            {
+                // Scrollbar drag — follow the cursor's vertical
+                // position, translate via ScrollbarDragTo, dispatch.
+                duetos::drivers::video::WindowScrollbarSurface s{};
+                if (duetos::drivers::video::WindowGetScrollbar(sb_drag.hwnd, &s))
+                {
+                    const duetos::drivers::video::ScrollbarState state{s.total, s.visible, s.first};
+                    const duetos::u32 nf =
+                        duetos::drivers::video::ScrollbarDragTo(cy, s.y, s.h, sb_drag.grab_offset_in_thumb, state);
+                    duetos::drivers::video::WindowDispatchScroll(sb_drag.hwnd, nf);
+                }
                 duetos::drivers::video::CursorHide();
                 duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
                 duetos::drivers::video::CursorShow();

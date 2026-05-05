@@ -348,9 +348,30 @@ void DrawFat32(u32 cx, u32 cy, u32 cw, u32 ch)
     // Scrollbar at the right edge of the row area.
     if (max_rows > 0 && cw > duetos::drivers::video::kScrollbarWidth)
     {
-        duetos::drivers::video::ScrollbarPaint(cx + cw - duetos::drivers::video::kScrollbarWidth, list_top,
-                                               duetos::drivers::video::kScrollbarWidth, max_rows * kRowH,
-                                               {n, max_rows, first});
+        const duetos::u32 sb_x = cx + cw - duetos::drivers::video::kScrollbarWidth;
+        const duetos::u32 sb_y = list_top;
+        const duetos::u32 sb_w = duetos::drivers::video::kScrollbarWidth;
+        const duetos::u32 sb_h = max_rows * kRowH;
+        duetos::drivers::video::ScrollbarPaint(sb_x, sb_y, sb_w, sb_h, {n, max_rows, first});
+        // Register the bar with the kernel so the mouse loop
+        // can hit-test against it for click-on-track and
+        // drag-the-thumb without re-deriving the geometry.
+        duetos::drivers::video::WindowScrollbarSurface s{};
+        s.present = true;
+        s.x = sb_x;
+        s.y = sb_y;
+        s.w = sb_w;
+        s.h = sb_h;
+        s.total = n;
+        s.visible = max_rows;
+        s.first = first;
+        duetos::drivers::video::WindowSetScrollbar(g_state.handle, s);
+    }
+    else
+    {
+        duetos::drivers::video::WindowScrollbarSurface s{};
+        s.present = false;
+        duetos::drivers::video::WindowSetScrollbar(g_state.handle, s);
     }
     // Delete-to-trash prompt overlays the footer row when armed.
     // Painted in red ink so a confirmation step is visually
@@ -676,6 +697,19 @@ void FilesInit(duetos::drivers::video::WindowHandle handle)
     }
     duetos::drivers::video::WindowSetContentDraw(handle, DrawFn, nullptr);
     duetos::drivers::video::WindowSetWheelHandler(handle, FilesOnWheel);
+    duetos::drivers::video::WindowSetScrollHandler(handle,
+                                                   [](duetos::u32 first)
+                                                   {
+                                                       // The list selection drives `first` in DrawFn —
+                                                       // setting `first` directly via the bar means
+                                                       // moving the selection so it lands at the new
+                                                       // top. Clamp to the listing.
+                                                       if (g_state.mode != Mode::Fat32)
+                                                           return;
+                                                       if (first >= g_state.fat_count)
+                                                           first = g_state.fat_count > 0 ? g_state.fat_count - 1 : 0;
+                                                       g_state.fat_selection = first;
+                                                   });
 }
 
 void FilesOnWheel(duetos::i32 dz)
