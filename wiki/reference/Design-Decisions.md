@@ -612,6 +612,47 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 110 — Driver fault-domain teardown for e1000 + fat32
+
+- **Scope:** `kernel/drivers/net/net.cpp` (`E1000Quiesce` helper
+  used by `NetShutdown`), `kernel/fs/fat32.{h,cpp}`
+  (`Fat32Shutdown`), `kernel/core/main.cpp` (new `fs/fat32`
+  fault-domain registration + lighter init lambda).
+- **Decision:** `NetShutdown` now actually quiesces a brought-up
+  e1000 — masks IRQs, clears IVAR routing, disables RX/TX,
+  software-resets the chip, frees the descriptor rings + buffer
+  pools, wakes any sleeper on the RX wait queue, then zeroes the
+  context. `Fat32Shutdown` wipes the in-memory volume snapshot
+  array under the driver-wide mutex. Both are wired into the
+  fault-domain machinery via `RegisterDriverDomain`; the fat32
+  init lambda re-walks `BlockDeviceCount()` calling `Fat32Probe`
+  per handle (lighter than `Fat32SelfTest`, which has CRUD side
+  effects). Brings the driver fault-domain count from 18 to 19.
+- **Why:** Closes the only Roadmap item under "Driver
+  fault-domain registration." Both subsystems were registered
+  with no-op or registry-only teardowns; a real restart left
+  hardware programmed with stale ring pointers (e1000) or the
+  volume registry in a half-populated state (fat32). Without a
+  proper quiesce, `RestartDriverDomain("drivers/net")` silently
+  corrupted any subsequent `NetInit` because PCI re-walk found
+  the same NIC but the e1000 context was already populated and
+  `E1000BringUp` early-returned.
+- **Rules out / defers:** MSI-X vector unbind + `IrqAllocVector`
+  return — no `PciMsixUnbind` API exists yet, and leaving the
+  handler installed is harmless because the device-side IMC
+  mask + reset stops events. Per-NIC MMIO unmap (mapping arena
+  is non-reclaiming today). Stopping the `e1000-rx-poll` task —
+  task termination doesn't exist; the task observes
+  `online == false` via `E1000DrainRx` and idles cheaply.
+- **Revisit when:** First USB hot-swap path needs to restart
+  xHCI + drag fat32 along (mount-point handling cascades from
+  there). MSI-X unbind lands. Task termination lands and the
+  RX-poll task can be torn down properly.
+- **Related tracks:** Track 6 (Drivers — restart story), Track
+  3 (Filesystem — mount lifecycle).
+
+---
+
 ## 109 — SYS_SPAWN = 7 — ring-3 can spawn ring-3 from an ELF path
 
 - **Scope:** `kernel/core/syscall.{h,cpp}` — new `SYS_SPAWN`

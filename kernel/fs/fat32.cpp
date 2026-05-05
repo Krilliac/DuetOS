@@ -302,4 +302,20 @@ const Volume* Fat32Volume(u32 index)
     return &g_volumes[index];
 }
 
+::duetos::core::Result<void> Fat32Shutdown()
+{
+    KLOG_TRACE_SCOPE("fs/fat32", "Fat32Shutdown");
+    Fat32Guard guard;
+    const u32 dropped = g_volume_count;
+    for (u32 i = 0; i < g_volume_count; ++i)
+    {
+        VZero(&g_volumes[i], sizeof(g_volumes[i]));
+    }
+    g_volume_count = 0;
+    arch::SerialWrite("[fs/fat32] shutdown: dropped ");
+    arch::SerialWriteHex(static_cast<u64>(dropped));
+    arch::SerialWrite(" volume snapshot(s)\n");
+    return {};
+}
+
 } // namespace duetos::fs::fat32

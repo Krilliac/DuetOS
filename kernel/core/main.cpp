@@ -2322,6 +2322,22 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Probing FAT32 on block devices.\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::fat32::Fat32SelfTest());
+    {
+        // Init re-probes every block handle, matching the boot
+        // path's probe step but without the SelfTest's CRUD
+        // payload. Teardown drops the in-memory volume registry
+        // so the re-probe lands cleanly. Lambda is `static`
+        // because the FaultDomain hooks store a function pointer.
+        auto fat32_init = []() -> duetos::core::Result<void>
+        {
+            const duetos::u32 handles = duetos::drivers::storage::BlockDeviceCount();
+            for (duetos::u32 h = 0; h < handles; ++h)
+                (void)duetos::fs::fat32::Fat32Probe(h, nullptr);
+            return {};
+        };
+        auto fat32_teardown = []() -> duetos::core::Result<void> { return duetos::fs::fat32::Fat32Shutdown(); };
+        duetos::security::RegisterDriverDomain("fs/fat32", fat32_init, fat32_teardown);
+    }
 
     SerialWrite("[boot] Routing Win32 file syscalls through FAT32.\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::routing::SelfTest());

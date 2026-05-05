@@ -71,21 +71,6 @@ the same commit** that delivers the code.
   (KMutex / KEvent / KSemaphore / KMailbox / KWaitable / KFile)
   are landed. Next slice is the SYS_* surface migration itself.
 
-### Driver fault-domain registration
-
-- **Scope:** write teardown functions for `e1000`, `fat32`.
-  Currently 18 driver fault domains are registered (soft-lockup
-  / lockdep / event-trace / perf / nmi-watchdog / cleanroom-trace
-  / runtime-checker / breakpoints / framebuffer / pci / ahci /
-  nvme / ramfs / acpi/aml / drivers/gpu / drivers/net /
-  drivers/usb/xhci / drivers/audio).
-- **Blocks on:** each driver's teardown story — most drivers
-  were written assuming run-once-at-boot semantics. Adding a
-  clean teardown for each is the actual work.
-- **When to land:** organically. Each driver gets a teardown
-  when a developer needs to restart it without rebooting (e.g.
-  hot-swap a USB device + re-probe xhci).
-
 ### Intel CET enable
 
 - **Scope:** write `IA32_S_CET` / `IA32_PL0_SSP`, allocate

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "util/result.h"
 #include "util/types.h"
 
 /*
@@ -295,6 +296,15 @@ bool Fat32RmdirAtPath(const Volume* v, const char* path);
 /// the seed file HELLO.TXT reads back exactly as the image-
 /// builder wrote it.
 void Fat32SelfTest();
+
+/// Drop the in-memory volume registry. Used by the
+/// `fs/fat32` fault-domain teardown so a subsequent `Fat32Probe`
+/// re-walks the block layer cleanly. The on-disk content is left
+/// alone; only the registry-level snapshots
+/// (`g_volumes` / `Fat32VolumeCount`) are cleared. Any lock state
+/// is unaffected — callers must not be inside a `Fat32Guard` when
+/// they invoke this. Always succeeds.
+::duetos::core::Result<void> Fat32Shutdown();
 
 /// Lay down a fresh FAT32 file system on `block_handle` starting
 /// at the partition's LBA 0. Pre-conditions:
