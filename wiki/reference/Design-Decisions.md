@@ -612,6 +612,54 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 111 — SYS_FILE_WRITE grows FAT32 files past EOF via Fat32WriteAtPath
+
+- **Scope:** `kernel/proc/process.h` (new `fat32_path[64]` field
+  on `Win32FileHandle`), `kernel/fs/file_route.cpp`
+  (`CopyPathInto` helper, path stamping in `OpenForProcess` /
+  `CreateForProcess`, `WriteForProcess` rewrite, updated
+  self-test), `kernel/syscall/syscall.h` (doc comment).
+- **Decision:** `WriteForProcess` now picks one of three paths
+  based on the (cursor + len) range:
+  1. `cursor + len <= file_size` → `Fat32WriteInPlace` (fast
+     path, no parent-dir walk).
+  2. Past-EOF AND the open-time path fit in the 64-byte cap →
+     `Fat32WriteAtPath` grows the cluster chain and patches
+     the dir-entry size.
+  3. Past-EOF AND the path overflowed the cap → bounded
+     in-place write up to current EOF, returns the short count
+     (matches POSIX `ssize_t` semantics).
+  After a growing write the cached `DirEntry` snapshot in the
+  handle is refreshed from `Fat32LookupPath` so a follow-up
+  `SeekForProcess(SEEK_END)` / `FstatForProcess` returns the
+  new size. Self-test was inverted: the past-EOF case used to
+  panic if the write succeeded; it now panics if the file
+  doesn't grow.
+- **Why:** Closes the only remaining sub-item under "Writable
+  FAT32" on the Roadmap. Win32 `WriteFile` callers + shell
+  redirect-append flows that wrote past EOF were silently short-
+  written or rejected; with the cluster chain + dir-entry size
+  patching reachable from the syscall surface, a real PE workload
+  doing `fopen("a") + fwrite + fclose` actually appends. The path
+  cap is set to 64 chars because the `Win32FileHandle` table is
+  16 entries × per-process — 1 KiB total per process for the path
+  cache, which fits cleanly in the existing process structure.
+- **Rules out / defers:** Unbounded path length (paths over 63
+  chars fall back to in-place + short-write — kernel-side
+  `kSyscallPathMax` is 256, but most paths that hit this surface
+  today are well under 64 chars). Storing the parent-cluster +
+  basename instead of the path (would skip `ResolveParentDir` per
+  call but bloats the handle and complicates rename semantics).
+  Atomic overwrite-then-grow batching (every chunked write does
+  a separate FAT-walk; batching lands when a profiler shows it).
+- **Revisit when:** A workload regularly hits the >63-char path
+  fallback; bump the cap or move to a per-process path arena.
+  Rename-while-open lands and the cached path goes stale.
+- **Related tracks:** Track 3 (Filesystem — write surface), Track
+  9 (Win32 — `WriteFile` semantics).
+
+---
+
 ## 110 — Driver fault-domain teardown for e1000 + fat32
 
 - **Scope:** `kernel/drivers/net/net.cpp` (`E1000Quiesce` helper

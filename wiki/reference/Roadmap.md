@@ -125,16 +125,9 @@ the same commit** that delivers the code.
 
 In rough priority:
 
-1. **Writable FAT32** — kernel-side write path is in tree:
-   `Fat32WriteInPlace` (bounded), `Fat32WriteAtPath` (mid-file
-   write that grows the cluster chain), `Fat32AppendAtPath`,
-   `Fat32TruncateAtPath`, `SYS_FILE_WRITE`, `SYS_FILE_CREATE`
-   — all cap-gated by `kCapFsWrite`. Remaining work is exposing
-   the path-resolved growing write to userland (`SYS_FILE_WRITE`
-   currently routes through `Fat32WriteInPlace` only).
-2. **Native DuetOS FS** — our own design, journalled, ext-like.
+1. **Native DuetOS FS** — our own design, journalled, ext-like.
    Done in Rust from scratch (see Rust bring-up below).
-3. **NTFS read-only** — required by the Windows-PE pillar once
+2. **NTFS read-only** — required by the Windows-PE pillar once
    we want to load a `.exe` from a real NTFS partition.
 
 ### Crash-dump persistence to disk

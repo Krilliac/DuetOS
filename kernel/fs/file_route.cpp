@@ -68,6 +68,41 @@ void ZeroDirEntry(fat32::DirEntry& e)
     e.size_bytes = 0;
 }
 
+// Copy a NUL-terminated path into the handle's bounded path buffer.
+// Returns true if the source fit; false (with the destination zeroed)
+// if it didn't — caller treats that as "no growing-write path,
+// fall back to in-place writes." The cap is set in process.h to
+// match the longest path we expect from current shell + Win32 CWD
+// flows; longer paths still open + read just fine, they just lose
+// the past-EOF growth privilege.
+bool CopyPathInto(char (&dst)[::duetos::core::Process::Win32FileHandle::kFat32PathCap], const char* src)
+{
+    using ::duetos::core::Process;
+    constexpr u64 kCap = Process::Win32FileHandle::kFat32PathCap;
+    if (src == nullptr)
+    {
+        for (u64 i = 0; i < kCap; ++i)
+            dst[i] = '\0';
+        return false;
+    }
+    u64 n = 0;
+    while (src[n] != '\0' && n < kCap)
+        ++n;
+    if (n == kCap)
+    {
+        // Source longer than buffer (no NUL within cap). Drop it
+        // — partial path would mis-route writes.
+        for (u64 i = 0; i < kCap; ++i)
+            dst[i] = '\0';
+        return false;
+    }
+    for (u64 i = 0; i < n; ++i)
+        dst[i] = src[i];
+    for (u64 i = n; i < kCap; ++i)
+        dst[i] = '\0';
+    return true;
+}
+
 // Parse "/disk/<idx>/<rest>" → (idx, pointer-into-path-at-rest).
 // Returns false on any malformed prefix (no digits, no separator
 // after the index). On a non-disk prefix returns false silently —
@@ -199,6 +234,12 @@ u64 OpenForProcess(::duetos::core::Process* proc, const char* path)
         h.fat32_volume_idx = disk_idx;
         CopyDirEntry(h.fat32_entry, entry);
         h.cursor = 0;
+        // Stamp the in-volume path for past-EOF growing writes.
+        // `disk_rest` already starts with '/' and addresses the
+        // path inside the volume — exactly what Fat32WriteAtPath
+        // wants. Long paths return false; the handle still works
+        // for read + bounded write.
+        (void)CopyPathInto(h.fat32_path, disk_rest);
         // Stamp the canary flag at open time. We only consult
         // the path-match side (CanaryMatchesPath) — suspicious-
         // extension matching at open is a false-positive
@@ -236,6 +277,7 @@ u64 OpenForProcess(::duetos::core::Process* proc, const char* path)
     h.fat32_volume_idx = 0;
     h.cursor = 0;
     h.is_canary = ::duetos::security::CanaryMatchesPath(path);
+    (void)CopyPathInto(h.fat32_path, nullptr); // ramfs handles never need it
     const u64 handle = Process::kWin32HandleBase + slot;
     SerialWrite("[fs/route] open ok pid=");
     SerialWriteHex(proc->pid);
@@ -319,28 +361,58 @@ u64 WriteForProcess(::duetos::core::Process* proc, u64 handle, const void* src, 
     if (h.kind == Process::FsBackingKind::Ramfs)
         return u64(-1); // ramfs is .rodata
 
-    // Fat32 backing. v0 is in-place only — past-EOF writes need
-    // append + dir-entry-size update which Fat32WriteInPlace
-    // refuses. Cap `len` at remaining bytes; signal short-write
-    // by returning the actual count (matches POSIX ssize_t).
-    const u64 size = h.fat32_entry.size_bytes;
-    if (h.cursor >= size)
-        return u64(-1); // EOF — no growth in this slice
-    const u64 remaining = size - h.cursor;
-    const u64 take = (len < remaining) ? len : remaining;
-
     const fat32::Volume* vol = fat32::Fat32Volume(h.fat32_volume_idx);
     if (vol == nullptr)
         return u64(-1);
-    const i64 wrote = fat32::Fat32WriteInPlace(vol, &h.fat32_entry, h.cursor, src, take);
+
+    const u64 size = h.fat32_entry.size_bytes;
+    const u64 end = h.cursor + len;
+
+    // In-place fast path: write entirely within the existing file.
+    // Avoids the per-call ResolveParentDir walk Fat32WriteAtPath
+    // does. Writes that grow the file fall through to the
+    // path-resolved growing write below.
+    if (end <= size)
+    {
+        const i64 wrote = fat32::Fat32WriteInPlace(vol, &h.fat32_entry, h.cursor, src, len);
+        if (wrote < 0)
+            return u64(-1);
+        h.cursor += u64(wrote);
+        ::duetos::core::RecordFsWrite(proc, u64(wrote));
+        return u64(wrote);
+    }
+
+    // Growing write — extends past EOF. Needs a path so the
+    // FAT32 layer can patch the parent dir entry's size after
+    // chaining a new cluster. The path was stamped at open /
+    // create time; if it's empty we don't have one (path was
+    // longer than the bounded buffer), so we cap the write at
+    // the in-place region and return the short count.
+    if (h.fat32_path[0] == '\0')
+    {
+        if (h.cursor >= size)
+            return u64(-1);
+        const u64 take = size - h.cursor;
+        const i64 wrote = fat32::Fat32WriteInPlace(vol, &h.fat32_entry, h.cursor, src, take);
+        if (wrote < 0)
+            return u64(-1);
+        h.cursor += u64(wrote);
+        ::duetos::core::RecordFsWrite(proc, u64(wrote));
+        return u64(wrote);
+    }
+
+    const i64 wrote = fat32::Fat32WriteAtPath(vol, h.fat32_path, h.cursor, src, len);
     if (wrote < 0)
         return u64(-1);
     h.cursor += u64(wrote);
-    // Ransomware-rate guard. Bumps per-process counters; if this
-    // call pushes the calling process past `kFsWriteWindowByteCap`
-    // bytes within the rolling window, it flags the current task
-    // for kill via FlagCurrentForKill. See `RecordFsWrite` in
-    // kernel/proc/process.cpp for the threshold + window math.
+    // Refresh the cached DirEntry size — the on-disk dir entry
+    // got patched inside Fat32WriteAtPath, but our snapshot
+    // still reads the pre-grow value. Without this, a follow-up
+    // SeekForProcess(SEEK_END) on the same handle returns the
+    // stale size and subsequent reads stop early.
+    fat32::DirEntry refreshed;
+    if (fat32::Fat32LookupPath(vol, h.fat32_path, &refreshed))
+        CopyDirEntry(h.fat32_entry, refreshed);
     ::duetos::core::RecordFsWrite(proc, u64(wrote));
     return u64(wrote);
 }
@@ -437,6 +509,7 @@ u64 CreateForProcess(::duetos::core::Process* proc, const char* path, const void
     // handle's is_canary is false. Stash it explicitly so the
     // write path doesn't read uninitialized state.
     h.is_canary = false;
+    (void)CopyPathInto(h.fat32_path, disk_rest);
     // Ransomware-rate guard. Counts the create's init_bytes
     // payload toward the calling process's window — a typical
     // encrypt-loop is "create new file with encrypted contents"
@@ -524,6 +597,7 @@ u64 CloseForProcess(::duetos::core::Process* proc, u64 handle)
     h.ramfs_node = nullptr;
     h.fat32_volume_idx = 0;
     h.cursor = 0;
+    (void)CopyPathInto(h.fat32_path, nullptr);
     return 0;
 }
 
@@ -830,8 +904,9 @@ void SelfTest()
         ::duetos::core::Panic("fs/route", "SelfTest restore write failed");
     CloseForProcess(&s_test_proc, wh);
 
-    // Past-EOF write must fail without growing the file. Open
-    // HELLO.TXT, seek past end, attempt write — expect u64(-1).
+    // Past-EOF write GROWS the file via Fat32WriteAtPath. Open
+    // HELLO.TXT, seek to its end, append one byte, verify the
+    // file grew + the new byte reads back.
     const u64 eh = OpenForProcess(&s_test_proc, "/disk/0/HELLO.TXT");
     if (eh == u64(-1))
         ::duetos::core::Panic("fs/route", "SelfTest open-for-eof-write failed");
@@ -840,10 +915,30 @@ void SelfTest()
         ::duetos::core::Panic("fs/route", "SelfTest fstat-for-eof failed");
     if (SeekForProcess(&s_test_proc, eh, 0, /*END=*/2) != esize)
         ::duetos::core::Panic("fs/route", "SelfTest seek-end before eof-write failed");
-    if (WriteForProcess(&s_test_proc, eh, "x", 1) != u64(-1))
+    if (WriteForProcess(&s_test_proc, eh, "x", 1) != 1)
     {
-        SerialWrite("[fs/route-selftest] FAIL: past-EOF write should fail\n");
-        ::duetos::core::Panic("fs/route", "SelfTest past-EOF write should fail");
+        SerialWrite("[fs/route-selftest] FAIL: past-EOF growing write returned wrong count\n");
+        ::duetos::core::Panic("fs/route", "SelfTest past-EOF growing write count");
+    }
+    u64 grown = 0;
+    if (FstatForProcess(&s_test_proc, eh, &grown) != 0 || grown != esize + 1)
+    {
+        SerialWrite("[fs/route-selftest] FAIL: file did not grow after past-EOF write\n");
+        ::duetos::core::Panic("fs/route", "SelfTest grown size mismatch");
+    }
+    if (SeekForProcess(&s_test_proc, eh, static_cast<i64>(esize), /*SET=*/0) != esize)
+        ::duetos::core::Panic("fs/route", "SelfTest seek before grow-readback failed");
+    char gbuf[2] = {0, 0};
+    if (ReadForProcess(&s_test_proc, eh, gbuf, 1) != 1 || gbuf[0] != 'x')
+    {
+        SerialWrite("[fs/route-selftest] FAIL: grown byte didn't read back\n");
+        ::duetos::core::Panic("fs/route", "SelfTest grown byte readback");
+    }
+    // Restore HELLO.TXT to its seed length so subsequent
+    // self-tests on the same volume aren't perturbed.
+    if (fat32::Fat32TruncateAtPath(fat32::Fat32Volume(0), "/HELLO.TXT", esize) != static_cast<i64>(esize))
+    {
+        SerialWrite("[fs/route-selftest] WARN: cleanup truncate of HELLO.TXT failed\n");
     }
     CloseForProcess(&s_test_proc, eh);
 

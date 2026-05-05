@@ -418,10 +418,13 @@ enum SyscallNumber : u64
     //
     // Cap-gated on kCapFsWrite. Backing dispatch:
     //   Ramfs  → -1 (ramfs is .rodata, refuses writes).
-    //   Fat32  → Fat32WriteInPlace within [cursor..min(cursor+rdx,
-    //            file_size)]. Past EOF the call fails — file
-    //            growth requires SYS_FILE_CREATE / append paths
-    //            that the routing layer hasn't exposed yet.
+    //   Fat32  → in-place when cursor+rdx <= file_size; otherwise
+    //            Fat32WriteAtPath grows the cluster chain and
+    //            patches the dir entry's size. Routing keeps the
+    //            in-volume path captured at open / create time.
+    //            Handles whose original path didn't fit in the
+    //            64-byte cap fall back to in-place + short-write
+    //            at EOF.
     //
     // Backs Win32 WriteFile / WriteFileEx for handle-based I/O.
     SYS_FILE_WRITE = 43,
