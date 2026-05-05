@@ -382,29 +382,31 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
   can reach the login gate without the locker first
   approving.
 
-### Device Manager — class tree + eject
+### Device Manager — virtio + eject + hot-unplug
 
-- **Today:** read-only flat PCI list backing the Start menu's
-  DEVICE MANAGER entry (`kernel/apps/devicemgr.cpp`).
-- **Blocks on:** USB / virtio child enumeration to merge into
-  a single tree, `Eject` capability gating, and a hot-unplug
-  driver path that the AHCI / xHCI controllers don't yet
-  support.
+- **Today:** Device Manager renders two sections: a PCI
+  device table (vendor:device, class label) and a USB
+  device table that walks every xHCI controller's port
+  records (vendor:product, speed, class label,
+  HID kbd/mouse hint). Read-only.
+- **Blocks on:** virtio child enumeration to merge in (no
+  virtio bus walker exists today), `Eject` capability
+  gating, and a hot-unplug driver path that the AHCI /
+  xHCI controllers don't yet support.
 
 ### Network Status — Wi-Fi scan + routing/DNS surface
 
 - **Today:** read-only iface table (index, MAC, IPv4, bound
-  state) plus rx/tx packet + byte counters backing the Start
-  menu's NETWORK STATUS entry (`kernel/apps/netstatus.cpp`).
-  Counters are bumped at the L2 RX path
-  (`NetStackInjectRx`) and the L3 TX helper (`IfaceTx`) and
-  read via `InterfaceCountersRead`. The firewall's
-  `tx_dropped_firewall` and `tx_dropped_unbound` counters
-  share the same struct.
-- **Blocks on:** Wi-Fi scan results from `kernel/net/wifi.cpp`,
-  a routing/DNS surface for the display layer, and per-iface
-  drop visibility (the counters are present; the app does
-  not yet render the dropped-by-firewall column).
+  state) plus rx/tx packet + byte counters and the
+  firewall's per-iface `tx_dropped_firewall` column
+  backing the Start menu's NETWORK STATUS entry
+  (`kernel/apps/netstatus.cpp`). Counters are bumped at the
+  L2 RX path (`NetStackInjectRx`) and the L3 TX helper
+  (`IfaceTx`) and read via `InterfaceCountersRead`. The
+  `tx_dropped_unbound` counter ships in the same struct
+  for diagnostic use; not yet shown in the app.
+- **Blocks on:** Wi-Fi scan results from `kernel/net/wifi.cpp`
+  and a routing/DNS surface for the display layer.
 
 ### Terminal emulator (windowed userland shell)
 

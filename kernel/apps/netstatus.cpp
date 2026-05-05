@@ -12,7 +12,6 @@ namespace
 
 constexpr u32 kRowH = 14;
 constexpr u32 kMargin = 12;
-constexpr u32 kFg = 0x00C8D0DA;
 constexpr u32 kFgDim = 0x00808890;
 constexpr u32 kHeaderFg = 0x00FFFFFF;
 constexpr u32 kBg = 0x00101820;
@@ -99,9 +98,10 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     u32 y = cy + kMargin;
     FramebufferDrawString(cx + kMargin, y, "NETWORK INTERFACES", kHeaderFg, kBg);
     y += kRowH + 4;
-    FramebufferDrawString(cx + kMargin, y,
-                          "IDX  MAC                IPV4             STATE  RX-PKT     RX-BYTE    TX-PKT     TX-BYTE",
-                          kFgDim, kBg);
+    FramebufferDrawString(
+        cx + kMargin, y,
+        "IDX  MAC                IPV4             STATE  RX-PKT     RX-BYTE    TX-PKT     TX-BYTE    FW-DROP", kFgDim,
+        kBg);
     y += kRowH;
 
     const u64 n = duetos::net::InterfaceCount();
@@ -159,6 +159,9 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
         o += 10;
         line[o++] = ' ';
         U64Col(line + o, 10, cnt.tx_bytes);
+        o += 10;
+        line[o++] = ' ';
+        U64Col(line + o, 10, cnt.tx_dropped_firewall);
         o += 10;
         line[o] = '\0';
 

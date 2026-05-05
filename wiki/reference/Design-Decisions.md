@@ -4674,3 +4674,39 @@ doc helps future readers audit the trail.
   affordance that does what `LoginReopen` does without
   the locker having to type the `logout` command first.
 - **Related tracks:** Track 12 (Security — auth gate).
+
+---
+
+## 106 — Device Manager: USB section + Network Status FW-DROP column
+
+- **Scope:** `kernel/apps/devicemgr.cpp`,
+  `kernel/apps/netstatus.cpp`.
+- **Decision:** Device Manager renders two sections — PCI
+  devices (existing) and USB devices (new) — by walking
+  `XhciControllerAt(i)->ports[]` per xHCI controller and
+  printing `controller_idx port_num VID:PID speed
+  class_label hid_hint` for every connected port. Network
+  Status grows a `FW-DROP` column reading
+  `InterfaceCountersRead(i).tx_dropped_firewall`. Both
+  reads are unprivileged — these surfaces are diagnostic.
+- **Why:** Decision 104 added per-iface counters and the
+  firewall verdict path but stopped short of surfacing
+  `tx_dropped_firewall` in the app — it stayed a
+  diagnostic on the kernel side. Closing that loop costs
+  one column. Device Manager's PCI-only view was a known
+  gap; xHCI already populates `PortRecord` with
+  vendor/product/class/HID-classifier on every successful
+  enumeration, so adding the second section is a render
+  change, not a discovery change.
+- **What it rules out:** The new sections do not merge
+  hot-unplug events (no driver path supports it) and do
+  not yet render virtio child enumeration (no virtio bus
+  walker today). `Eject` is also not gated yet — the
+  whole surface is read-only by design until the
+  unplug-capable path lands.
+- **Revisit when:** A virtio bus walker lands and it makes
+  sense to merge its devices into the same tree, or
+  hot-unplug becomes possible and the surface needs an
+  `Eject` button (gated on a new `kCapDeviceAdmin`).
+- **Related tracks:** Track 9 (Drivers — buses), Track 13
+  (UX — apps).
