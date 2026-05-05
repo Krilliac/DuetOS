@@ -866,15 +866,86 @@ void NetInit()
     }
 }
 
+namespace
+{
+
+// Quiesce a brought-up e1000 controller and release its DMA rings
+// + buffer frames. Safe to call when `g_e1000.online` is false (the
+// register touches are skipped). The MSI-X handler stays installed
+// — the device-side IMC mask + reset stops further events; a
+// subsequent `E1000BringUp` rebinds via `PciMsixBindSimple`. The
+// RX-poll task spawned by bring-up keeps running but observes
+// `online == false` (E1000Send / E1000DrainRx both early-return)
+// so it idles cheaply until the next bring-up replaces the rings.
+void E1000Quiesce()
+{
+    if (!g_e1000.online)
+        return;
+
+    // 1. Mask all interrupt sources, drain any pending cause bits,
+    //    clear the IVAR routing so a stray IRQ during reset doesn't
+    //    target a stale vector.
+    E1000Write(kE1000RegImc, 0xFFFFFFFFu);
+    (void)E1000Read(kE1000RegIcr);
+    E1000Write(kE1000RegIvar, 0);
+    E1000Write(kE1000RegIvargp, 0);
+
+    // 2. Disable receive + transmit so the controller stops touching
+    //    descriptor memory before we free the backing frames.
+    E1000Write(kE1000RegRctl, 0);
+    E1000Write(kE1000RegTctl, 0);
+
+    // 3. Software reset returns ring-pointer registers (RDBAL/RDBAH/
+    //    TDBAL/TDBAH/RDLEN/TDLEN/RDH/RDT/TDH/TDT) to their power-on
+    //    defaults. Failure here just means the controller didn't
+    //    acknowledge — the ring-pointer registers we care about are
+    //    no longer being read because RCTL/TCTL are already cleared.
+    (void)E1000Reset();
+
+    // 4. Free the descriptor rings and buffer pools. AllocateFrame
+    //    handed out one page each for the rings, AllocateContiguousFrames
+    //    a multi-page run for the buffers.
+    if (g_e1000.rx_ring_phys != mm::kNullFrame)
+        mm::FreeFrame(g_e1000.rx_ring_phys);
+    if (g_e1000.tx_ring_phys != mm::kNullFrame)
+        mm::FreeFrame(g_e1000.tx_ring_phys);
+    constexpr u32 kRxBufPages = (kE1000RxRingSlots * kE1000RxBufBytes) / mm::kPageSize;
+    constexpr u32 kTxBufPages = (kE1000TxRingSlots * kE1000RxBufBytes) / mm::kPageSize;
+    if (g_e1000.rx_buf_base_phys != mm::kNullFrame)
+        mm::FreeContiguousFrames(g_e1000.rx_buf_base_phys, kRxBufPages);
+    if (g_e1000.tx_buf_base_phys != mm::kNullFrame)
+        mm::FreeContiguousFrames(g_e1000.tx_buf_base_phys, kTxBufPages);
+
+    // 5. Wake any sleeper on the RX wait queue so the polling task
+    //    re-checks `online` and stops dereferencing freed ring
+    //    pointers. The wake happens BEFORE the context zero so the
+    //    WaitQueue node list is still intact when WakeAll walks it.
+    (void)duetos::sched::WaitQueueWakeAll(&g_e1000.rx_wait);
+
+    // 6. Clear the context. `online = false` is the wake-up gate the
+    //    RX-poll task and E1000Send check on every entry; clearing
+    //    it before the rest of the state means a racing TX submission
+    //    bails before reading a freed pointer.
+    NicInfo* nic = g_e1000.nic;
+    g_e1000 = {};
+    if (nic != nullptr)
+        nic->driver_online = false;
+
+    arch::SerialWrite("[e1000] quiesced — IRQs masked, RX/TX disabled, rings freed\n");
+}
+
+} // namespace
+
 ::duetos::core::Result<void> NetShutdown()
 {
     KLOG_TRACE_SCOPE("drivers/net", "NetShutdown");
+    E1000Quiesce();
     const u64 dropped = g_nic_count;
     g_nic_count = 0;
     g_init_done = false;
     arch::SerialWrite("[drivers/net] shutdown: dropped ");
     arch::SerialWriteHex(dropped);
-    arch::SerialWrite(" NIC records (MMIO mappings retained)\n");
+    arch::SerialWrite(" NIC records\n");
     return {};
 }
 

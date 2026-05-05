@@ -30,16 +30,22 @@ namespace
 {
 
 constexpr u32 kLabelCap = 32;
+constexpr u32 kPathCap = 96;
 constexpr const char kAppsDir[] = "APPS";
 constexpr const char kSamplePath[] = "APPS/SAMPLE.MNF";
 constexpr const char kSampleBody[] = "; sample shortcut — copy as APPS/<NAME>.MNF\n"
                                      "name=DuetOS Notes\n"
-                                     "target=notes\n";
+                                     "target=notes\n"
+                                     "; alternative form for a PE binary on disk:\n"
+                                     ";   name=My PE App\n"
+                                     ";   kind=pe path=APPS/MYAPP.EXE\n";
 
 struct Slot
 {
     char label[kLabelCap];
-    ThemeRole role;
+    ShortcutKind kind;
+    ThemeRole role;      // valid iff kind == Role
+    char path[kPathCap]; // valid iff kind == Pe / Elf — FAT32 path, NUL-terminated
     bool used;
 };
 
@@ -161,16 +167,44 @@ void CopyLabel(char* dst, const char* src)
     dst[i] = 0;
 }
 
-// Parse one manifest payload. Returns true if both name and
-// target resolved. `label_out` and `role_out` are populated on
-// success; on failure they're untouched.
-bool ParseManifest(const char* buf, u64 len, char* label_out, ThemeRole* role_out)
+struct ParsedManifest
+{
+    char label[kLabelCap];
+    ShortcutKind kind;
+    ThemeRole role;      // valid iff kind == Role
+    char path[kPathCap]; // valid iff kind == Pe / Elf
+};
+
+// Copy a value into a destination buffer, truncating at cap-1 chars
+// and NUL-terminating. Caller-owned bounded write.
+void CopyTo(char* dst, u32 dst_cap, const char* src)
+{
+    u32 j = 0;
+    while (src[j] != 0 && j < dst_cap - 1)
+    {
+        dst[j] = src[j];
+        ++j;
+    }
+    dst[j] = 0;
+}
+
+// Parse one manifest payload. Recognises:
+//   name=<label>
+//   target=<role>          (Role kind)
+//   kind=pe|elf
+//   path=<fat32 path>      (Pe / Elf kinds)
+// Returns true if name + (target | (kind + path)) all resolved.
+bool ParseManifest(const char* buf, u64 len, ParsedManifest* out)
 {
     char name[kLabelCap] = {};
     char target[kLabelCap] = {};
+    char kind_str[kLabelCap] = {};
+    char path[kPathCap] = {};
     bool have_name = false;
     bool have_target = false;
-    char line[96];
+    bool have_kind = false;
+    bool have_path = false;
+    char line[160];
     u64 lpos = 0;
     for (u64 i = 0; i <= len; ++i)
     {
@@ -195,25 +229,23 @@ bool ParseManifest(const char* buf, u64 len, char* label_out, ThemeRole* role_ou
                 const char* val = line + eq + 1;
                 if (StrEqI(k, "name"))
                 {
-                    u32 j = 0;
-                    while (val[j] != 0 && j < kLabelCap - 1)
-                    {
-                        name[j] = val[j];
-                        ++j;
-                    }
-                    name[j] = 0;
+                    CopyTo(name, kLabelCap, val);
                     have_name = true;
                 }
                 else if (StrEqI(k, "target"))
                 {
-                    u32 j = 0;
-                    while (val[j] != 0 && j < kLabelCap - 1)
-                    {
-                        target[j] = val[j];
-                        ++j;
-                    }
-                    target[j] = 0;
+                    CopyTo(target, kLabelCap, val);
                     have_target = true;
+                }
+                else if (StrEqI(k, "kind"))
+                {
+                    CopyTo(kind_str, kLabelCap, val);
+                    have_kind = true;
+                }
+                else if (StrEqI(k, "path"))
+                {
+                    CopyTo(path, kPathCap, val);
+                    have_path = true;
                 }
             }
             lpos = 0;
@@ -224,15 +256,35 @@ bool ParseManifest(const char* buf, u64 len, char* label_out, ThemeRole* role_ou
             line[lpos++] = c;
         }
     }
-    if (!have_name || !have_target)
+    if (!have_name)
     {
         return false;
     }
-    if (!ResolveTargetName(target, role_out))
+    if (have_kind && have_path)
     {
+        if (StrEqI(kind_str, "pe"))
+            out->kind = ShortcutKind::Pe;
+        else if (StrEqI(kind_str, "elf"))
+            out->kind = ShortcutKind::Elf;
+        else
+            return false;
+        out->role = ThemeRole::Notes; // unused for PE/ELF; sentinel
+        CopyTo(out->path, kPathCap, path);
+    }
+    else if (have_target)
+    {
+        if (!ResolveTargetName(target, &out->role))
+            return false;
+        out->kind = ShortcutKind::Role;
+        out->path[0] = 0;
+    }
+    else
+    {
+        // Neither target= nor (kind=+path=) — manifest is missing
+        // its launch directive.
         return false;
     }
-    CopyLabel(label_out, name);
+    CopyLabel(out->label, name);
     return true;
 }
 
@@ -257,6 +309,8 @@ void ResetSlots()
     {
         g_slots[i].used = false;
         g_slots[i].label[0] = 0;
+        g_slots[i].path[0] = 0;
+        g_slots[i].kind = ShortcutKind::Role;
     }
     g_slot_count = 0;
 }
@@ -319,14 +373,21 @@ void StartMenuAppsScan()
         {
             continue;
         }
-        Slot& s = g_slots[g_slot_count];
-        if (!ParseManifest(buf, static_cast<u64>(n), s.label, &s.role))
+        ParsedManifest pm{};
+        if (!ParseManifest(buf, static_cast<u64>(n), &pm))
         {
             arch::SerialWrite("[startapps] skipping malformed ");
             arch::SerialWrite(e.name);
             arch::SerialWrite("\n");
             continue;
         }
+        Slot& s = g_slots[g_slot_count];
+        for (u32 j = 0; j < kLabelCap; ++j)
+            s.label[j] = pm.label[j];
+        s.kind = pm.kind;
+        s.role = pm.role;
+        for (u32 j = 0; j < kPathCap; ++j)
+            s.path[j] = pm.path[j];
         s.used = true;
         ++g_slot_count;
     }
@@ -372,7 +433,7 @@ bool StartMenuAppsResolve(u32 action_id, ThemeRole* out)
         return false;
     }
     const u32 slot = action_id - kStartMenuAppsActionBase;
-    if (!g_slots[slot].used)
+    if (!g_slots[slot].used || g_slots[slot].kind != ShortcutKind::Role)
     {
         return false;
     }
@@ -380,6 +441,26 @@ bool StartMenuAppsResolve(u32 action_id, ThemeRole* out)
     {
         *out = g_slots[slot].role;
     }
+    return true;
+}
+
+bool StartMenuAppsResolveLaunch(u32 action_id, ShortcutKind* out_kind, ThemeRole* out_role, const char** out_path)
+{
+    if (action_id < kStartMenuAppsActionBase || action_id >= kStartMenuAppsActionBase + kStartMenuAppsMax)
+    {
+        return false;
+    }
+    const u32 slot = action_id - kStartMenuAppsActionBase;
+    if (!g_slots[slot].used)
+    {
+        return false;
+    }
+    if (out_kind != nullptr)
+        *out_kind = g_slots[slot].kind;
+    if (out_role != nullptr)
+        *out_role = g_slots[slot].role;
+    if (out_path != nullptr)
+        *out_path = g_slots[slot].path;
     return true;
 }
 
@@ -394,11 +475,27 @@ void StartMenuAppsSelfTest()
         return;
     }
     constexpr const char kSynth[] = "name=TestApp\ntarget=Calculator\n";
-    char label[kLabelCap] = {};
-    ThemeRole role = ThemeRole::Notes;
-    const bool ok = ParseManifest(kSynth, sizeof(kSynth) - 1, label, &role) && role == ThemeRole::Calculator &&
-                    label[0] == 'T' && label[1] == 'E' && label[2] == 'S' && label[3] == 'T';
-    SerialWrite(ok ? "[startapps] self-test OK (manifest parser round-trip)\n" : "[startapps] self-test FAILED\n");
+    ParsedManifest pm{};
+    const bool role_ok = ParseManifest(kSynth, sizeof(kSynth) - 1, &pm) && pm.kind == ShortcutKind::Role &&
+                         pm.role == ThemeRole::Calculator && pm.label[0] == 'T' && pm.label[1] == 'E' &&
+                         pm.label[2] == 'S' && pm.label[3] == 'T';
+    constexpr const char kPeSynth[] = "name=PeApp\nkind=pe\npath=APPS/FOO.EXE\n";
+    ParsedManifest pmpe{};
+    const bool pe_ok = ParseManifest(kPeSynth, sizeof(kPeSynth) - 1, &pmpe) && pmpe.kind == ShortcutKind::Pe &&
+                       pmpe.path[0] == 'A' && pmpe.path[1] == 'P' && pmpe.path[2] == 'P' && pmpe.path[3] == 'S' &&
+                       pmpe.path[4] == '/';
+    constexpr const char kBadSynth[] = "name=NoLaunch\n"; // missing both target= and kind=
+    ParsedManifest pmbad{};
+    const bool reject_ok = !ParseManifest(kBadSynth, sizeof(kBadSynth) - 1, &pmbad);
+    if (role_ok && pe_ok && reject_ok)
+    {
+        SerialWrite("[startapps] self-test OK (role + PE + reject-no-launch round-trip)\n");
+    }
+    else
+    {
+        SerialWrite(role_ok ? "[startapps] self-test FAIL (PE or reject branch)\n"
+                            : "[startapps] self-test FAIL (role branch)\n");
+    }
 }
 
 } // namespace duetos::drivers::video

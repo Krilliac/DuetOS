@@ -318,6 +318,9 @@ set +e
     /export:GetSystemDirectoryA /export:GetSystemDirectoryW \
     /export:GetSystemWindowsDirectoryW \
     /export:GetTempFileNameA /export:GetTempFileNameW \
+    /export:LockFile /export:UnlockFile \
+    /export:LockFileEx /export:UnlockFileEx \
+    /export:GetCommandLineA /export:GetCommandLineW \
     /export:GetCurrentDirectoryA \
     /export:SetCurrentDirectoryA /export:SetCurrentDirectoryW \
     /export:CreateToolhelp32Snapshot \

@@ -150,6 +150,10 @@ const char* CompletionCodeName(u32 code);
 // doesn't care that the device is USB. HidPollEntry in xhci.cpp
 // is the only caller.
 void HidMouseInject(const u8 report[3]);
+// Variant that takes the actual transfer length so non-boot reports
+// (4-byte wheel, 5-byte wheel + side-buttons, etc.) decode their
+// extended fields. Reports < 3 bytes are dropped; > 8 are clamped.
+void HidMouseInjectN(const u8* report, u32 len);
 void HidDiffAndInject(const u8 prev[8], const u8 curr[8]);
 
 // MMIO accessors. xHCI registers are word- or qword-sized and

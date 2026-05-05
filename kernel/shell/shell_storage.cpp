@@ -13,8 +13,10 @@
 
 #include "shell/shell_internal.h"
 
+#include "diag/minidump.h"
 #include "drivers/storage/block.h"
 #include "drivers/video/console.h"
+#include "fs/fat32.h"
 #include "fs/gpt.h"
 #include "fs/mount.h"
 
@@ -144,6 +146,10 @@ void CmdLsgpt()
         ConsoleWrite("  PARTS ");
         WriteHexCol(d->partition_count, 2);
         ConsoleWriteln("");
+        char guid_str[gpt::kGuidStringLen + 1];
+        gpt::FormatGuid(d->disk_guid, guid_str, sizeof(guid_str));
+        ConsoleWrite("  DISK_GUID ");
+        ConsoleWriteln(guid_str);
         for (duetos::u32 pi = 0; pi < d->partition_count; ++pi)
         {
             const gpt::Partition& p = d->partitions[pi];
@@ -154,27 +160,137 @@ void CmdLsgpt()
             ConsoleWrite(" LAST_LBA ");
             WriteHexCol(p.last_lba, 0);
             ConsoleWriteln("");
+            gpt::FormatGuid(p.type_guid, guid_str, sizeof(guid_str));
             ConsoleWrite("       TYPE ");
-            // Canonical mixed-endian GUID rendering.
-            static constexpr int kOrder[] = {3, 2, 1, 0, -1, 5, 4, -1, 7, 6, -1, 8, 9, -1, 10, 11, 12, 13, 14, 15};
-            for (int k = 0; k < 20; ++k)
-            {
-                const int idx = kOrder[k];
-                if (idx < 0)
-                {
-                    ConsoleWriteChar('-');
-                }
-                else
-                {
-                    const duetos::u8 b = p.type_guid[idx];
-                    const char hi = (b >> 4) < 10 ? char('0' + (b >> 4)) : char('A' + (b >> 4) - 10);
-                    const char lo = (b & 0xF) < 10 ? char('0' + (b & 0xF)) : char('A' + (b & 0xF) - 10);
-                    ConsoleWriteChar(hi);
-                    ConsoleWriteChar(lo);
-                }
-            }
-            ConsoleWriteln("");
+            ConsoleWriteln(guid_str);
         }
+    }
+}
+
+// `mkfs <handle> ERASE` — destructive. Lays down a fresh FAT32
+// volume on the named block-device handle. Refuses unless the
+// caller passes the literal "ERASE" confirmation token (matches
+// the disk-installer plan's user-typed-confirmation contract for
+// every DESTRUCTIVE primitive). Admin-gated. Validates writability
+// + minimum size + already-FAT32-mounted state before touching
+// anything on disk.
+void CmdMkfs(u32 argc, char** argv)
+{
+    namespace storage = duetos::drivers::storage;
+    namespace fat = duetos::fs::fat32;
+    if (!RequireAdmin("MKFS"))
+        return;
+    if (argc < 3 || argv == nullptr)
+    {
+        ConsoleWriteln("usage: mkfs <handle-hex> ERASE");
+        ConsoleWriteln("  handle  block-device handle from `lsblk` (hex)");
+        ConsoleWriteln("  ERASE   literal token — destructive, lays a fresh FAT32 BPB");
+        return;
+    }
+    duetos::u64 handle_u64 = 0;
+    if (!ParseU64Str(argv[1], &handle_u64) || handle_u64 >= 0xFFFFu)
+    {
+        ConsoleWrite("mkfs: bad handle '");
+        ConsoleWrite(argv[1]);
+        ConsoleWriteln("'");
+        return;
+    }
+    const duetos::u32 handle = static_cast<duetos::u32>(handle_u64);
+    bool ok = false;
+    for (duetos::u32 i = 0; i < storage::BlockDeviceCount(); ++i)
+    {
+        if (i == handle)
+        {
+            ok = true;
+            break;
+        }
+    }
+    if (!ok)
+    {
+        ConsoleWriteln("mkfs: handle out of range — see `lsblk`");
+        return;
+    }
+    bool confirm = argv[2][0] == 'E' && argv[2][1] == 'R' && argv[2][2] == 'A' && argv[2][3] == 'S' &&
+                   argv[2][4] == 'E' && argv[2][5] == '\0';
+    if (!confirm)
+    {
+        ConsoleWriteln("mkfs: confirmation token missing — pass literal ERASE");
+        return;
+    }
+    if (!storage::BlockDeviceIsWritable(handle))
+    {
+        ConsoleWrite("mkfs: handle not writable: ");
+        ConsoleWriteln(storage::BlockDeviceName(handle));
+        return;
+    }
+    const duetos::u64 sectors = storage::BlockDeviceSectorCount(handle);
+    if (sectors < 65600)
+    {
+        ConsoleWriteln("mkfs: device under 32 MiB — FAT32 spec floor");
+        return;
+    }
+    ConsoleWrite("mkfs: formatting ");
+    ConsoleWrite(storage::BlockDeviceName(handle));
+    ConsoleWrite(" (");
+    WriteHexCol(sectors, 0);
+    ConsoleWriteln(" sectors) as FAT32...");
+    if (!fat::Fat32Format(handle, sectors))
+    {
+        ConsoleWriteln("mkfs: Fat32Format failed (see klog)");
+        return;
+    }
+    duetos::u32 vol_idx = 0;
+    if (fat::Fat32Probe(handle, &vol_idx))
+    {
+        ConsoleWrite("mkfs OK: re-probe handed back volume index ");
+        WriteHexCol(vol_idx, 2);
+        ConsoleWriteln("");
+    }
+    else
+    {
+        ConsoleWriteln("mkfs: laid down BPB but re-probe rejected — please file a bug");
+    }
+}
+
+// `lastdump` — operator readout for the last-built minidump.
+// On QEMU the dump bytes egress via debugcon (port 0xE9) on every
+// emit; on real hardware those writes go nowhere, so an
+// in-system command that confirms a dump WAS emitted (and how
+// big it was) is the only surface that survives. Prints
+// "no dump this boot" when AccessLastMinidump returns false.
+void CmdLastdump()
+{
+    namespace md = duetos::diag::minidump;
+    const duetos::u8* bytes = nullptr;
+    duetos::u64 len = 0;
+    if (!md::AccessLastMinidump(&bytes, &len) || bytes == nullptr || len == 0)
+    {
+        ConsoleWriteln("lastdump: no minidump emitted this boot");
+        return;
+    }
+    ConsoleWrite("lastdump: ");
+    WriteHexCol(len, 0);
+    ConsoleWriteln(" bytes resident in the kernel buffer");
+    // First 4 bytes of a minidump are "MDMP" (0x504D444D LE) per
+    // the Microsoft format. Surface them so an operator can sanity-
+    // check the header without a debugger attached.
+    ConsoleWrite("  signature: ");
+    if (len >= 4)
+    {
+        for (duetos::u32 i = 0; i < 4; ++i)
+        {
+            const char c = static_cast<char>(bytes[i]);
+            ConsoleWriteChar((c >= 0x20 && c < 0x7F) ? c : '?');
+        }
+    }
+    ConsoleWriteln("");
+    if (len >= 8)
+    {
+        // Bytes 4..7 are version (low 16) + revision (high 16).
+        ConsoleWrite("  version: ");
+        const duetos::u16 ver = static_cast<duetos::u16>(bytes[4] | (bytes[5] << 8));
+        WriteHexCol(static_cast<duetos::u64>(ver), 4);
+        ConsoleWriteln("");
     }
 }
 

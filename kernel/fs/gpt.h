@@ -37,9 +37,22 @@ namespace duetos::fs::gpt
 /// Size of a GPT GUID in bytes. Binary form — byte order is little-
 /// endian for the first three fields (u32, u16, u16) and big-endian
 /// for the last two (u8[2], u8[6]) per UEFI spec §5.3.1. We store
-/// them raw and compare byte-wise; string rendering is deferred to
-/// a future `GptFormatGuid`.
+/// them raw and compare byte-wise; string rendering goes through
+/// `FormatGuid` below.
 inline constexpr u32 kGuidBytes = 16;
+
+/// Length of a canonical mixed-endian GUID string (8-4-4-4-12 hex
+/// + 4 hyphens), without the trailing NUL.
+inline constexpr u32 kGuidStringLen = 36;
+
+/// Render a 16-byte GUID as a mixed-endian hex string into
+/// `out_buf` (≥ kGuidStringLen + 1 bytes — the helper writes a
+/// trailing '\0'). Layout matches what mkfs / parted print:
+/// the first three fields are little-endian-decoded, the last
+/// two are big-endian. Output is uppercase hex with hyphens at
+/// the canonical positions (8-4-4-4-12). No-op (writes "" if
+/// buf_cap > 0) on null pointers or undersized buffers.
+void FormatGuid(const u8 guid[kGuidBytes], char* out_buf, u32 buf_cap);
 
 /// Partition name length in UTF-16 code units. Stored as raw bytes
 /// (144 bytes total) in the entry; this field reports the code-

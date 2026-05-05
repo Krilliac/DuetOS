@@ -2322,6 +2322,38 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Probing FAT32 on block devices.\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::fat32::Fat32SelfTest());
+    {
+        // Init re-probes every block handle, matching the boot
+        // path's probe step but without the SelfTest's CRUD
+        // payload. Teardown drops the in-memory volume registry
+        // so the re-probe lands cleanly. Lambda is `static`
+        // because the FaultDomain hooks store a function pointer.
+        auto fat32_init = []() -> duetos::core::Result<void>
+        {
+            const duetos::u32 handles = duetos::drivers::storage::BlockDeviceCount();
+            for (duetos::u32 h = 0; h < handles; ++h)
+                (void)duetos::fs::fat32::Fat32Probe(h, nullptr);
+            return {};
+        };
+        auto fat32_teardown = []() -> duetos::core::Result<void> { return duetos::fs::fat32::Fat32Shutdown(); };
+        duetos::security::RegisterDriverDomain("fs/fat32", fat32_init, fat32_teardown);
+    }
+
+    // Auto-register every probed FAT32 volume in the mount registry
+    // so `VfsMountResolve` (and therefore the file-routing layer)
+    // sees them. The mount point matches the existing hardcoded
+    // "/disk/<idx>" routing prefix — the longest-prefix resolver
+    // produces the same routing decision the legacy parser made,
+    // but now gated on actual mount-table entries.
+    {
+        char mp[16] = "/disk/0";
+        for (duetos::u32 i = 0; i < duetos::fs::fat32::Fat32VolumeCount() && i < 10; ++i)
+        {
+            mp[6] = static_cast<char>('0' + i);
+            mp[7] = '\0';
+            (void)duetos::fs::VfsMount(mp, duetos::fs::FsType::Fat32, i);
+        }
+    }
 
     SerialWrite("[boot] Routing Win32 file syscalls through FAT32.\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::routing::SelfTest());
@@ -3416,9 +3448,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             // the warp-corrected cursor diff would lie about user
             // motion when programmatic SetCursor moves the cursor
             // (e.g. confined-to-window capture).
-            // PS/2 has no wheel byte; xHCI HID will inject wheel
-            // ticks once that path is wired.
-            duetos::subsystems::win32::MouseInputAccumulate(p.dx, p.dy, /*dz=*/0, p.buttons);
+            // PS/2 packets carry dz=0 in the MousePacket (the IBM
+            // 3-byte wire format has no wheel slot); USB-HID mice
+            // populate it from a 4+ byte report.
+            duetos::subsystems::win32::MouseInputAccumulate(p.dx, p.dy, p.dz, p.buttons);
 
             // Every UI mutation inside this packet lives under
             // the compositor mutex — the kbd reader can be mid-
@@ -3586,9 +3619,112 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                             role = static_cast<duetos::drivers::video::ThemeRole>(action - 100);
                             have_role = true;
                         }
-                        else if (duetos::drivers::video::StartMenuAppsResolve(action, &role))
+                        else
                         {
-                            have_role = true;
+                            // /APPS shortcut: ask the full launch
+                            // resolver. PE / ELF kinds spawn the
+                            // binary directly from FAT32; Role kinds
+                            // fall through to the existing ThemeRole
+                            // raise path.
+                            duetos::drivers::video::ShortcutKind sk{};
+                            const char* spawn_path = nullptr;
+                            if (duetos::drivers::video::StartMenuAppsResolveLaunch(action, &sk, &role, &spawn_path))
+                            {
+                                if (sk == duetos::drivers::video::ShortcutKind::Role)
+                                {
+                                    have_role = true;
+                                }
+                                else if ((sk == duetos::drivers::video::ShortcutKind::Pe ||
+                                          sk == duetos::drivers::video::ShortcutKind::Elf) &&
+                                         spawn_path != nullptr && spawn_path[0] != '\0')
+                                {
+                                    // FAT32 paths are walked from the
+                                    // volume root. The manifest writes
+                                    // them as "APPS/FOO.EXE" (no
+                                    // leading slash); Fat32LookupPath
+                                    // accepts both forms but the
+                                    // diagnostic log reads cleaner
+                                    // with the slash, so prepend it
+                                    // when missing.
+                                    char path_buf[128];
+                                    duetos::u64 pi = 0;
+                                    if (spawn_path[0] != '/')
+                                        path_buf[pi++] = '/';
+                                    while (spawn_path[pi - (spawn_path[0] != '/' ? 1 : 0)] != '\0' &&
+                                           pi + 1 < sizeof(path_buf))
+                                    {
+                                        path_buf[pi] = spawn_path[pi - (spawn_path[0] != '/' ? 1 : 0)];
+                                        ++pi;
+                                    }
+                                    path_buf[pi] = '\0';
+                                    const auto* vol = duetos::fs::fat32::Fat32Volume(0);
+                                    duetos::fs::fat32::DirEntry ent;
+                                    if (vol != nullptr && duetos::fs::fat32::Fat32LookupPath(vol, path_buf, &ent) &&
+                                        ent.size_bytes > 0 && ent.size_bytes <= 8 * 1024 * 1024)
+                                    {
+                                        // Stage into a heap buffer.
+                                        // 8 MiB cap mirrors the
+                                        // largest embedded PE we ship
+                                        // today; bigger images need
+                                        // mmap-backed staging.
+                                        auto* staging =
+                                            reinterpret_cast<duetos::u8*>(duetos::mm::KMalloc(ent.size_bytes));
+                                        if (staging != nullptr)
+                                        {
+                                            const auto got =
+                                                duetos::fs::fat32::Fat32ReadFile(vol, &ent, staging, ent.size_bytes);
+                                            if (got == static_cast<duetos::i64>(ent.size_bytes))
+                                            {
+                                                const duetos::u64 pid =
+                                                    (sk == duetos::drivers::video::ShortcutKind::Pe)
+                                                        ? duetos::core::SpawnPeFile("/apps/launch", staging,
+                                                                                    static_cast<duetos::u64>(got),
+                                                                                    duetos::core::CapSetTrusted(),
+                                                                                    duetos::fs::RamfsTrustedRoot(),
+                                                                                    duetos::mm::kFrameBudgetTrusted,
+                                                                                    duetos::core::kTickBudgetTrusted)
+                                                        : duetos::core::SpawnElfFile("/apps/launch", staging,
+                                                                                     static_cast<duetos::u64>(got),
+                                                                                     duetos::core::CapSetTrusted(),
+                                                                                     duetos::fs::RamfsTrustedRoot(),
+                                                                                     duetos::mm::kFrameBudgetTrusted,
+                                                                                     duetos::core::kTickBudgetTrusted);
+                                                duetos::drivers::video::ConsoleWrite(
+                                                    pid != 0 ? "-> /APPS LAUNCH OK pid=" : "-> /APPS LAUNCH FAIL");
+                                                if (pid != 0)
+                                                {
+                                                    char pidbuf[24];
+                                                    duetos::u32 pi2 = 0;
+                                                    duetos::u64 v = pid;
+                                                    char tmp[24];
+                                                    duetos::u32 ti = 0;
+                                                    if (v == 0)
+                                                        tmp[ti++] = '0';
+                                                    while (v != 0)
+                                                    {
+                                                        tmp[ti++] = static_cast<char>('0' + v % 10);
+                                                        v /= 10;
+                                                    }
+                                                    while (ti > 0)
+                                                        pidbuf[pi2++] = tmp[--ti];
+                                                    pidbuf[pi2] = '\0';
+                                                    duetos::drivers::video::ConsoleWriteln(pidbuf);
+                                                }
+                                                else
+                                                {
+                                                    duetos::drivers::video::ConsoleWriteln(path_buf);
+                                                }
+                                            }
+                                            duetos::mm::KFree(staging);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        duetos::drivers::video::ConsoleWrite("-> /APPS NOT FOUND ");
+                                        duetos::drivers::video::ConsoleWriteln(path_buf);
+                                    }
+                                }
+                            }
                         }
                         if (have_role)
                         {

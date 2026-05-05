@@ -71,21 +71,6 @@ the same commit** that delivers the code.
   (KMutex / KEvent / KSemaphore / KMailbox / KWaitable / KFile)
   are landed. Next slice is the SYS_* surface migration itself.
 
-### Driver fault-domain registration
-
-- **Scope:** write teardown functions for `e1000`, `fat32`.
-  Currently 18 driver fault domains are registered (soft-lockup
-  / lockdep / event-trace / perf / nmi-watchdog / cleanroom-trace
-  / runtime-checker / breakpoints / framebuffer / pci / ahci /
-  nvme / ramfs / acpi/aml / drivers/gpu / drivers/net /
-  drivers/usb/xhci / drivers/audio).
-- **Blocks on:** each driver's teardown story — most drivers
-  were written assuming run-once-at-boot semantics. Adding a
-  clean teardown for each is the actual work.
-- **When to land:** organically. Each driver gets a teardown
-  when a developer needs to restart it without rebooting (e.g.
-  hot-swap a USB device + re-probe xhci).
-
 ### Intel CET enable
 
 - **Scope:** write `IA32_S_CET` / `IA32_PL0_SSP`, allocate
@@ -119,19 +104,19 @@ the same commit** that delivers the code.
 
 ### Stage 6 — VFS mount path
 
-- **First slice landed:** `fs::VfsMount(mount_point, FsType,
-  block_handle) -> MountId` registry — fixed-size table of 16
-  mounts, dup-mount-point rejection, ramfs-needs-zero-handle
-  validation, plus `VfsUmount` / `VfsMountFind` /
-  `VfsMountEnumerate` and a boot self-test. The registry is
-  bookkeeping only today: lookups still go through the
-  constinit ramfs trees.
-- **Remaining work:** teach `VfsLookup` to consult the mount
-  table when path resolution crosses a mount-point — switch
-  to the mount entry's per-FS-type lookup vtable. That's the
-  Stage 6 second slice. Until then, `VfsMount` is a registry
-  + telemetry surface (the kernel shell's eventual `mount`
-  command will list registered mounts).
+- **First two slices landed:** `fs::VfsMount(mount_point,
+  FsType, block_handle) -> MountId` registry; longest-prefix
+  `VfsMountResolve(path)` resolver; FAT32 volumes auto-mount
+  at `/disk/<idx>` during boot; `fs::routing::ParseDiskPath`
+  consults the mount registry first before falling back to
+  the hard-coded prefix. Today every Win32 file syscall that
+  resolves to FAT32 gets there via the mount table.
+- **Remaining work:** teach the ramfs-side `VfsLookup` itself
+  to walk across mount points (return a generic `VfsNode`
+  handle instead of `const RamfsNode*`), so `cd /disk/0/SUB`
+  in the kernel shell goes through one VFS API rather than
+  the routing-layer detour. That's the per-FS-type lookup
+  vtable mentioned in the original Stage 6 plan.
 - **Per-process namespace roots** continue to work — `Process::root`
   stays a `const RamfsNode*` today, but grows into a generic
   `VfsDir*` handle once on-disk FS is mountable.
@@ -140,16 +125,9 @@ the same commit** that delivers the code.
 
 In rough priority:
 
-1. **Writable FAT32** — kernel-side write path is in tree:
-   `Fat32WriteInPlace` (bounded), `Fat32WriteAtPath` (mid-file
-   write that grows the cluster chain), `Fat32AppendAtPath`,
-   `Fat32TruncateAtPath`, `SYS_FILE_WRITE`, `SYS_FILE_CREATE`
-   — all cap-gated by `kCapFsWrite`. Remaining work is exposing
-   the path-resolved growing write to userland (`SYS_FILE_WRITE`
-   currently routes through `Fat32WriteInPlace` only).
-2. **Native DuetOS FS** — our own design, journalled, ext-like.
+1. **Native DuetOS FS** — our own design, journalled, ext-like.
    Done in Rust from scratch (see Rust bring-up below).
-3. **NTFS read-only** — required by the Windows-PE pillar once
+2. **NTFS read-only** — required by the Windows-PE pillar once
    we want to load a `.exe` from a real NTFS partition.
 
 ### Crash-dump persistence to disk
@@ -197,26 +175,28 @@ In rough priority:
 - **Owner:** `kernel/drivers/net/wireless/` (per-vendor upload +
   ring setup), `kernel/net/wireless/` (MLME state machine).
 
-### USB mouse — beyond boot protocol
+### USB mouse — high-DPI 16-bit XY
 
-- **Today:** boot-protocol mouse is fully wired end-to-end —
-  `xhci_descparse.cpp` recognises `kIfaceProtocolMouse`,
-  `xhci_enum.cpp` flags the device, `xhci_init.cpp`'s polling
-  loop routes 3-byte reports to `HidMouseInject` in
-  `xhci_input.cpp`, which packs them into the same
-  `MousePacket` queue PS/2 mice use. Boot protocol gives 3
-  axes + 3 buttons; that's enough for the desktop-prototype
-  WM and most older USB mice.
-- **Deferred:** report-descriptor-driven mouse decoding —
-  scroll wheel (Z axis), 4th / 5th buttons, high-dpi
-  pointers, tilt wheels. The descriptor parser exists
-  (`HidParseDescriptor` in `hid_descriptor.cpp`); the
-  remaining work is wiring it into `xhci_init.cpp`'s
-  polling-report decode so non-boot reports get parsed by
-  field rather than by fixed 3-byte layout.
-- **Blocks on:** a workload that legitimately needs scroll
-  or extra-button support — boot protocol is the right
-  default until then.
+- **Today:** boot-protocol + extended boot-protocol decoding
+  is wired end-to-end. `xhci_init.cpp`'s polling loop computes
+  the actual transfer length from the TRB residual and calls
+  `HidMouseInjectN(buf, len)` in `xhci_input.cpp`, which
+  decodes 3 / 4 / 5+ byte reports — wheel (Z axis), buttons
+  4 / 5, and standard left/right/middle. `MousePacket` carries
+  `dz` and the `kMouseButton4 / kMouseButton5` bits; the
+  Win32 mouse-input accumulator already accepts the wheel
+  delta.
+- **Deferred:** descriptor-driven decoding for layouts with
+  16-bit X / Y (high-DPI gaming mice), digitizer / absolute
+  pointers, and horizontal tilt. Needs `HidParseDescriptor`
+  to expose per-field offsets — today it sums Report Size ×
+  Report Count without recording where each field lands. The
+  next slice extends the parser, fetches the report
+  descriptor at enumeration time, and passes the layout
+  table into `HidMouseInjectN`.
+- **Blocks on:** a workload that legitimately needs high-DPI
+  precision or digitizer events — extended boot covers wheel
+  + 5 buttons.
 - **Owner:** `kernel/drivers/usb/`.
 
 ### Multi-monitor / runtime resolution change
@@ -302,14 +282,6 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
 - **Deferred:** WSAEventSelect + overlapped I/O + completion
   ports.
 
-### Arbitrary file writes through PE workloads
-
-- **Today:** `SYS_FILE_WRITE` / `SYS_FILE_CREATE` cap-gated by
-  `kCapFsWrite`; FS-write rate guard + canary wall enforce
-  multi-window ransomware caps. App layer hasn't migrated yet.
-- **Owner:** `userland/libs/kernel32/` for `WriteFile`,
-  `CreateFileW`.
-
 ---
 
 ## End-user features
@@ -341,18 +313,20 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
 - **Blocks on:** string-table layer with id → text indirection.
 - **Effort:** refactor across all apps.
 
-### PE/ELF launching from /APPS manifests
-
-- **Today:** /APPS *.MNF enumeration works; manifests with
-  `target=<role>` raise the matching kernel-app window.
-- **Blocks on:** loader runtime that lands a manifest with
-  `kind=pe path=APPS/foo.exe` as a real launch.
-
 ### Disk installer
 
-- **Today:** boots from ISO only. Live system; no install.
-- **Blocks on:** GPT write (probe-only today), FAT32 mkfs (no
-  in-kernel BPB-laydown), bootloader copy.
+- **Today:** boots from ISO only. Live system; no install. The
+  building blocks exist — `fs::gpt::GptInitDisk` writes a fresh
+  GPT (PMBR + primary header + entries + backup header),
+  `fs::fat32::Fat32Format` lays down a FAT32 BPB on a partition,
+  and `fs::gpt::FormatGuid` renders 16-byte GUIDs for diagnostics
+  / installer-step UI.
+- **Blocks on:** the orchestration layer (a userland or shell
+  installer that walks "pick disk → confirm erase → GPT-init →
+  FAT32-format → copy kernel + initrd → install bootloader") and
+  bootloader copy (a writer that puts a UEFI-loadable image into
+  the ESP). The DESTRUCTIVE primitives intentionally don't ship
+  user-facing surfaces yet — that's the shell-command slice.
 
 ### System updater
 

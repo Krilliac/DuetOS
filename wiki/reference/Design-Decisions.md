@@ -612,6 +612,490 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 121 — kernel32 GetCommandLineA / W exports + tighten Lock* export list
+
+- **Scope:** `userland/libs/kernel32/kernel32.c`
+  (`GetCommandLineA`, `GetCommandLineW` exports backed by
+  process-static empty-string buffers),
+  `tools/build/build-kernel32-dll.sh` (export list grew the
+  Lock*, GetCommandLine*, and *Ex names so the DLL's
+  link-time export table actually contains them).
+- **Decision:** GetCommandLine* return process-static empty
+  strings (`""`, NUL only). v0 doesn't pass argv to PE
+  binaries (`SpawnPeFile` takes no argument list); the Win32
+  contract still mandates a non-null pointer to a
+  caller-readable string for the program lifetime, so an
+  empty terminator buffer is the smallest answer that lets
+  CRT startup proceed without crashing on a null deref. The
+  pointer is stable across the process's lifetime — same
+  shape real Windows guarantees.
+- **Why:** Fixes a follow-up bug from #120: I'd added
+  LockFile / UnlockFile / *Ex bodies to `kernel32.c` but
+  forgot to extend the explicit `/export:` list in the build
+  script, so the DLL contained the code but not the entry-
+  table. `objdump -p` now shows entries 230 (LockFile), 231
+  (LockFileEx), 64 (GetCommandLineA), 65 (GetCommandLineW)
+  in the canonical alphabetical order. File size stayed the
+  same (512-byte alignment swallowed the growth).
+- **Rules out / defers:** Real argv plumbing — when
+  `SpawnPeFile` grows an argv parameter, this code reads
+  from a per-process `Process::win32_cmdline_*` slot
+  populated at spawn time (the `proc_env.h` layout already
+  reserves the bytes; just no producer yet).
+- **Revisit when:** First PE workload that wants real argv —
+  most likely the `/APPS` PE-launch path (#115) when a
+  manifest grows an `args=` field.
+- **Related tracks:** Track 9 (Win32 — kernel32 surface),
+  Track 7 (Userland — argv plumbing).
+
+---
+
+## 120 — kernel32 LockFile / UnlockFile / *Ex — stub-success exports
+
+- **Scope:** `userland/libs/kernel32/kernel32.c` (new
+  `LockFile`, `UnlockFile`, `LockFileEx`, `UnlockFileEx`
+  exports).
+- **Decision:** Add the four byte-range locking entry points
+  with v0 stub-success bodies — they take no real lock but
+  return TRUE so the caller proceeds. v0 has a single-process
+  workload model and a single-writer FAT32 layer, so no two
+  callers can race the same byte range; advisory locking has
+  nothing to enforce yet. The Win32 surface wiki claimed
+  these "return success without locking" but they were
+  actually missing exports — a real PE that imported them
+  would fail to load. This makes the wiki claim accurate and
+  ensures future PE workloads that use LockFile see the
+  contract the doc promises.
+- **Why:** Bumps the kernel32 DLL from 46080 to 46592 bytes
+  (~512 bytes of new export-table + body). Cost is negligible;
+  unblocks a category of Win32 binaries that the loader
+  previously rejected.
+- **Rules out / defers:** Real per-file byte-range tracking
+  (per-handle range table, contention-aware acquire). Real
+  multi-user concurrency. SQLite-style mandatory locking.
+  Returns success even on overlapping ranges from the same
+  process — caller responsibility today.
+- **Revisit when:** A second writer to the same FAT32 file
+  becomes possible (multi-process write contention). A
+  workload genuinely depends on advisory locking semantics.
+- **Related tracks:** Track 9 (Win32 — kernel32 surface).
+
+---
+
+## 119 — Shell `lastdump` operator readout for the last minidump
+
+- **Scope:** `kernel/shell/shell_storage.cpp` (`CmdLastdump`),
+  `kernel/shell/shell_internal.h` (prototype),
+  `kernel/shell/shell_dispatch.cpp` (dispatch + name).
+- **Decision:** Add a `lastdump` shell command that reads the
+  byte-buffer `AccessLastMinidump` exposes and prints
+  size + the "MDMP" signature + version word. On QEMU the
+  dump bytes egress via debugcon (port 0xE9) on every emit;
+  on real hardware those writes go nowhere, so an in-system
+  command that confirms a dump was emitted (and how big it
+  was) is the only operator-facing surface that survives.
+  Prints "no minidump emitted this boot" when
+  `AccessLastMinidump` returns false.
+- **Why:** Real-hardware crash diagnostics. Today the only
+  way to see whether a minidump fired was to grep the serial
+  log for `[minidump] emitting`; on a board without serial
+  capture that log is invisible. `lastdump` reads the same
+  static buffer the debugcon path emits so the operator
+  always has a "did the dump happen" answer reachable from
+  the shell.
+- **Rules out / defers:** Writing the bytes to disk (the
+  Roadmap's "Crash-dump persistence to disk" entry is still
+  open — that's the FAT32 / reserved-LBA writer slice).
+  Pretty-printing the ExceptionStream / ThreadList /
+  ModuleList contents (each is a separate parser; deferred
+  until an in-system debugger needs them).
+- **Revisit when:** A reserved-LBA panic-time writer lands
+  and `lastdump` grows a `--save` flag to copy the bytes
+  to that LBA range from the post-boot operator session.
+- **Related tracks:** Track 1 (Diagnostics), Track 11
+  (Shell — operator commands).
+
+---
+
+## 118 — ReadFile dispatches by handle range (mirrors WriteFile)
+
+- **Scope:** `userland/libs/kernel32/kernel32.c` (`ReadFile`).
+- **Decision:** Mirror the WriteFile handle-range dispatch
+  landed in #114:
+  - Pipe sentinel (`DUETOS_PIPE_RD`) — drain the in-process
+    pipe ring (existing path).
+  - Std-handle range (0xFFFFFFF4..0xFFFFFFF6) — return
+    `TRUE` + `*lpRead = 0` (Win32 EOF convention). STDIN has
+    no kbd-read syscall yet; STDOUT / STDERR are write-only.
+    The legacy fall-through called `SYS_FILE_READ` with the
+    std-handle in `rdi`, which returned `-1` and surfaced as
+    `FALSE` — semantically a read error. Returning EOF
+    matches what real Win32 does on a closed STDIN pipe.
+  - Anything else — `SYS_FILE_READ` (handles 0x100..0x10F
+    work; the kernel rejects out-of-band handles with `-1`,
+    surfaced as `FALSE`).
+- **Why:** Symmetric with #114's WriteFile dispatch. Win32
+  CRT startup commonly probes STDIN to size an input buffer;
+  a `FALSE` return there used to confuse callers expecting
+  the standard "no data" path. The 0-byte EOF return makes
+  PE binaries' "read input until EOF" loops terminate
+  instead of reporting an error and aborting.
+- **Rules out / defers:** Real keyboard-backed STDIN reads
+  (would need a SYS_STDIN_READ that drains the kernel's
+  input-event queue). Async / overlapped reads. Read-side
+  share-mode enforcement.
+- **Revisit when:** A workload genuinely needs a STDIN that
+  reads keystrokes (a userland REPL); add SYS_STDIN_READ +
+  switch the std-handle branch over.
+- **Related tracks:** Track 9 (Win32 — file syscall surface).
+
+---
+
+## 117 — Shell `mkfs` command on a writable block device
+
+- **Scope:** `kernel/shell/shell_storage.cpp` (`CmdMkfs`),
+  `kernel/shell/shell_internal.h` (prototype),
+  `kernel/shell/shell_dispatch.cpp` (dispatch case + name in
+  `kCommandSet[]`).
+- **Decision:** Add a shell `mkfs` command with the
+  signature `mkfs <handle-hex> ERASE`. Validates argv length,
+  parses the block-device handle, asserts admin privilege,
+  refuses unless the second arg is the literal `ERASE`
+  confirmation token (the disk-installer plan's typed-
+  confirmation contract for every DESTRUCTIVE primitive),
+  checks `BlockDeviceIsWritable` + minimum 32 MiB sector
+  count, calls `Fat32Format`, and confirms via a fresh
+  `Fat32Probe` that the BPB came back. Failures log a one-line
+  reason without further explanation — the operator typed
+  ERASE; they can read a klog message.
+- **Why:** Surfaces the existing `Fat32Format` primitive at
+  the operator level. Before this slice the only way to
+  exercise the FS format path was the boot self-test on a
+  ramdisk; a real installer flow needs an interactive entry
+  point. Admin-gated + `ERASE`-token-gated matches the
+  pre-existing pattern for destructive operations (`READ`'s
+  admin check, the in-flight installer plan).
+- **Rules out / defers:** A full `mkfs.fat` flag set
+  (`-F 32`, `-n LABEL`, `-c bad-block scan`, etc.) — single-
+  flavour FAT32 today. GPT layout (`mkfs` writes a raw FAT32
+  BPB to LBA 0 of the device, ignoring any partition table —
+  matches what `Fat32Format` does). Per-partition formatting
+  (operates on whole devices; carving partitions first goes
+  through `GptInitDisk` + a future `mkpart` command).
+- **Revisit when:** A real installer wizard lands and needs
+  per-partition `mkfs`. Other FS flavours (ext4, NTFS) gain
+  format support and the verb wants a `-t fstype` selector.
+- **Related tracks:** Track 3 (Filesystem — installer
+  primitives), Track 11 (Shell — admin commands).
+
+---
+
+## 116 — gpt::FormatGuid + corrected disk-installer Roadmap
+
+- **Scope:** `kernel/fs/gpt.{h,cpp}` (new `kGuidStringLen`,
+  `FormatGuid(guid, *out, cap)`), `kernel/shell/shell_storage.cpp`
+  (`CmdLsgpt` switches to `FormatGuid`; also prints `DISK_GUID`,
+  which it never did before), `wiki/reference/Roadmap.md`
+  (corrected the "Disk installer" entry).
+- **Decision:** Extract the canonical mixed-endian (8-4-4-4-12)
+  GUID renderer the shell had open-coded into a public
+  `gpt::FormatGuid` so other callers (a future installer wizard,
+  GPT diagnostics, `gpt-info` shell command) don't recopy the
+  byte-order table. The shell `lsgpt` output gains the disk's
+  top-level GUID line — it's been in `Disk::disk_guid` since
+  GptProbe parsed the header but no command surfaced it.
+- **Why:** The Roadmap's "Disk installer" entry claimed GPT
+  write and FAT32 mkfs were "blocks on" the installer; both
+  primitives have actually been in tree since GptInitDisk and
+  Fat32Format landed. The corrected entry makes the real gap
+  ("orchestration layer + bootloader copy") legible to the next
+  contributor instead of pointing them at code that already
+  works. Extracting `FormatGuid` is the smallest sub-step that
+  also eliminates a duplicated byte-order table.
+- **Rules out / defers:** `ParseGuidString` (the inverse —
+  installer wizard will need it once a user can type a GUID).
+  Lowercase rendering (Microsoft + UEFI canon is uppercase; we
+  match). Locale-aware separators (none needed).
+- **Revisit when:** A user-typed GUID lands in a shell command
+  (mkpart / installer); add `ParseGuid`. A non-canonical render
+  (lower / no-hyphen) becomes load-bearing for diff readability
+  in a future test fixture.
+- **Related tracks:** Track 3 (Filesystem — disk installer
+  building blocks).
+
+---
+
+## 115 — /APPS manifests can launch PE/ELF binaries from FAT32
+
+- **Scope:** `kernel/drivers/video/start_menu_apps.{h,cpp}`
+  (new `ShortcutKind` enum, `Slot::path`, `kPathCap`,
+  `ParsedManifest`, `StartMenuAppsResolveLaunch`, extended
+  parser + self-test), `kernel/core/main.cpp` (menu-action
+  dispatch reads the file off FAT32 and calls `SpawnPeFile` /
+  `SpawnElfFile`).
+- **Decision:** Manifests can pick exactly one of two launch
+  forms:
+  - `target=<role>` — raise an existing app window (current
+    behaviour, unchanged).
+  - `kind=pe|elf` + `path=<fat32-path>` — read the binary
+    bytes from FAT32 (8 MiB cap), KMalloc-stage them, and
+    spawn via `SpawnPeFile` / `SpawnElfFile` with trusted caps
+    + budget.
+  Manifests that have neither directive are rejected (the
+  legacy parser silently dropped them too; the new self-test
+  asserts the rejection path). The action dispatcher in
+  `main.cpp` resolves through `StartMenuAppsResolveLaunch`,
+  which yields the kind + path; PE/ELF kinds skip the
+  ThemeRole-raise block.
+- **Why:** Closes the "PE/ELF launching from /APPS manifests"
+  Roadmap item. Before this, manifests could only alias an
+  already-built-into-the-kernel app — useless for users who
+  drop a `.exe` onto disk. The kernel has had `SpawnPeFile`
+  for embedded ramfs PEs since the loader landed; this slice
+  just puts the FAT32-staging + dispatch glue in front of it.
+  Trusted caps for v0 because the manifest writer is a local
+  user; per-manifest cap fields are a follow-up.
+- **Rules out / defers:** Per-manifest `caps=` /
+  `frame-budget=` / `tick-budget=` fields (sandboxed
+  manifests). Argv / env passthrough (manifests carry no
+  `args=` field; would require `SpawnPeFile`'s argv shim from
+  Roadmap entry #109's "First ring-3 program wants argv"
+  trigger). Auto-detect ELF-Linux vs ELF-DuetOS-native
+  (manifests pick explicitly via `kind=elf`; `kind=elf-linux`
+  follow-up when needed). > 8 MiB binaries (KMalloc staging
+  cap; mmap-backed staging is the next-bigger lift).
+- **Revisit when:** A workload needs sandboxed launches from
+  a manifest (drop the cap from Trusted to Sandbox + a
+  per-manifest field). A real argv user shows up. ELF-Linux
+  becomes a separate kind.
+- **Related tracks:** Track 7 (Userland — launcher), Track 4
+  (Process — spawn surface).
+
+---
+
+## 114 — WriteFile dispatches by handle range, not "always stdout"
+
+- **Scope:** `userland/libs/kernel32/kernel32.c` (`WriteFile`).
+- **Decision:** `WriteFile` now dispatches by the handle's
+  numeric range:
+  - Pipe sentinel (`DUETOS_PIPE_WR`, 0xA0010002) — push into
+    the in-process anonymous-pipe ring (existing path).
+  - Kernel file handle (0x100..0x10F, planted by `CreateFileW`
+    via `SYS_FILE_OPEN` / `SYS_FILE_CREATE`) — `SYS_FILE_WRITE`
+    (syscall 43). Cap-gated on `kCapFsWrite`; routes through
+    the per-handle cursor + canary wall + FAT32 in-place-or-
+    grow write landed in #111.
+  - Std-handle range (0xFFFFFFF4..0xFFFFFFF6 — what
+    `GetStdHandle(STD_OUTPUT/STD_INPUT/STD_ERROR_HANDLE)`
+    zero-extends DWORD `(DWORD)-12..(DWORD)-10` into) —
+    `SYS_WRITE(fd=1)` (existing console-write path).
+  - Anything else — return `FALSE` with `*lpWritten = 0`. The
+    legacy "all writes to stdout" fallback used to swallow
+    bugs where a Win32 caller wrote to a stale handle.
+- **Why:** Closes the only Roadmap item under "Arbitrary file
+  writes through PE workloads." A Win32 PE that calls
+  `CreateFileW("/disk/0/foo.txt") + WriteFile(...)` previously
+  saw its bytes appear on the serial console rather than in
+  the file. The kernel-side write path (canary wall, rate
+  guard, in-place + grow write) was complete; this change
+  routes the userland API to it.
+- **Rules out / defers:** `OVERLAPPED` (async I/O completion
+  ports — the current path is synchronous). Console-mode bit
+  vs file-mode bit dispatch on handle attributes (we route by
+  numeric range; Win32 normally tags handles internally but
+  our pseudo-handles don't carry a flag word). Per-handle
+  share-mode + access-mode enforcement (kernel layer doesn't
+  read the `dwDesiredAccess` flag yet — `kCapFsWrite` is the
+  whole story).
+- **Revisit when:** A workload needs `OVERLAPPED` async writes;
+  Winsock async surface lands and shares the completion-port
+  scaffold. A second std-handle producer (e.g. forwarded child
+  stdout) reuses the dispatch.
+- **Related tracks:** Track 9 (Win32 — file syscall surface),
+  Track 3 (Filesystem — write path).
+
+---
+
+## 113 — VFS mount registry routes Win32 file syscalls
+
+- **Scope:** `kernel/fs/mount.{h,cpp}` (new
+  `VfsMountResolve(path, *out_subpath)` longest-prefix resolver +
+  4 self-test cases), `kernel/fs/file_route.cpp`
+  (`ParseDiskPath` consults the resolver before falling back to
+  the hard-coded `/disk/<idx>/...` prefix; new `fs/mount.h`
+  include), `kernel/core/main.cpp` (auto-`VfsMount` every probed
+  FAT32 volume at `/disk/<idx>` after the FAT32 self-test).
+- **Decision:** The mount registry becomes the source of truth
+  for the kernel's on-disk path namespace. `VfsMountResolve`
+  walks the table for the longest-prefix match (component-aware
+  — `/disk/0` won't match `/disk/01/foo`) and hands back the
+  `MountEntry*` plus the in-mount sub-path. `ParseDiskPath` runs
+  the resolver first; only a non-FAT32 hit OR a complete miss
+  triggers the legacy prefix parse. FAT32 volumes are
+  auto-mounted at boot so the registry is populated before the
+  first `OpenForProcess` call. The hard-coded prefix path stays
+  as a fallback for the (currently-unreachable) "boot before
+  auto-mount" window — once Stage 6's third slice lands the
+  ramfs-side `VfsLookup` rewrite, the fallback retires.
+- **Why:** Closes the second of three sub-items under "Stage 6
+  — VFS mount path" on the Roadmap. Without this, the mount
+  registry was bookkeeping-only — every Win32 file syscall
+  routed through a hard-coded `"/disk/"` prefix in
+  `file_route.cpp`. Wiring the registry into `ParseDiskPath`
+  means a future on-disk FS (NTFS read, ext4 read) only has to
+  call `VfsMount` to be reachable from `OpenForProcess` /
+  `WriteForProcess`; the routing layer doesn't grow per-FS
+  branches. Component-aware longest-prefix match also unlocks
+  nested mounts (e.g. binding a filesystem image at
+  `/disk/0/IMAGES/foo.img` over the parent `/disk/0` FAT32).
+- **Rules out / defers:** Returning a generic `VfsNode` from
+  `VfsLookup` (still `const RamfsNode*`; that's the third
+  Stage 6 slice). Stripping the legacy `"/disk/<idx>"` parse
+  (kept as a safety net while only one FS type is mountable).
+  Per-process mount namespaces (the registry is global; per-
+  process roots remain `Process::root` ramfs handles).
+- **Revisit when:** A second on-disk FS type ships and routes
+  through the resolver. Per-process mount namespaces become a
+  requirement (sandboxing). The ramfs-side VfsLookup grows a
+  cross-FS handle so the legacy prefix parser can be deleted.
+- **Related tracks:** Track 3 (Filesystem — VFS layer), Track 9
+  (Win32 — file syscall routing).
+
+---
+
+## 112 — Extended-boot USB mouse: wheel + buttons 4/5
+
+- **Scope:** `kernel/drivers/input/ps2mouse.h` (added `dz`,
+  `kMouseButton4`, `kMouseButton5` to `MousePacket`),
+  `kernel/drivers/usb/xhci_input.cpp` (`HidMouseInjectN(buf, len)`
+  decoder; `HidMouseInject` now thunks through it),
+  `kernel/drivers/usb/xhci_internal.h` (prototype),
+  `kernel/drivers/usb/xhci_init.cpp` (residual-aware actual-length
+  computation, replaced fixed 3-byte read), `kernel/core/main.cpp`
+  (PS/2 reader path passes `p.dz` instead of hard-coded zero).
+- **Decision:** Decode by report length rather than by fixed
+  3-byte boot layout. The xHCI poller computes
+  `actual = max_packet - residual` from the TRB completion and
+  hands `[0..actual)` to `HidMouseInjectN`. Length-3 reports
+  decode as boot protocol; length-4 adds the signed wheel byte;
+  length-5+ adds buttons 4/5 from byte 0 bits 3/4. Reports
+  shorter than 3 bytes are dropped; longer than 8 are clamped.
+  The wheel field flows through the existing
+  `MouseInputAccumulate` Win32 accumulator (which already
+  accepted a `dz` argument).
+- **Why:** Closes the "USB mouse beyond boot protocol" Roadmap
+  item to the extent the existing parser supports. Most wheel
+  mice without explicit `SetProtocol(boot)` ship 4-byte reports
+  in the extended-boot layout (button + dx + dy + wheel) — the
+  industry de-facto fallback for vendors that don't ship a
+  full report descriptor. Decoding it gets us scroll + 5
+  buttons without needing the parser to expose per-field
+  offsets, which is a much bigger lift.
+- **Rules out / defers:** 16-bit X / Y axes (high-DPI gaming
+  mice), digitizer / absolute pointers, horizontal tilt as a
+  first-class field. Those need `HidParseDescriptor` to track
+  field offsets — today it sums Report Size × Report Count
+  without recording position. The Roadmap entry now reads
+  "high-DPI 16-bit XY" reflecting the smaller scope still
+  open.
+- **Revisit when:** A workload needs digitizer / absolute
+  pointers, or a high-DPI mouse arrives in the test fleet
+  whose 16-bit XY layout the extended-boot heuristic
+  misreads.
+- **Related tracks:** Track 6 (Drivers — USB HID), Track 9
+  (Win32 — mouse-input accumulator).
+
+---
+
+## 111 — SYS_FILE_WRITE grows FAT32 files past EOF via Fat32WriteAtPath
+
+- **Scope:** `kernel/proc/process.h` (new `fat32_path[64]` field
+  on `Win32FileHandle`), `kernel/fs/file_route.cpp`
+  (`CopyPathInto` helper, path stamping in `OpenForProcess` /
+  `CreateForProcess`, `WriteForProcess` rewrite, updated
+  self-test), `kernel/syscall/syscall.h` (doc comment).
+- **Decision:** `WriteForProcess` now picks one of three paths
+  based on the (cursor + len) range:
+  1. `cursor + len <= file_size` → `Fat32WriteInPlace` (fast
+     path, no parent-dir walk).
+  2. Past-EOF AND the open-time path fit in the 64-byte cap →
+     `Fat32WriteAtPath` grows the cluster chain and patches
+     the dir-entry size.
+  3. Past-EOF AND the path overflowed the cap → bounded
+     in-place write up to current EOF, returns the short count
+     (matches POSIX `ssize_t` semantics).
+  After a growing write the cached `DirEntry` snapshot in the
+  handle is refreshed from `Fat32LookupPath` so a follow-up
+  `SeekForProcess(SEEK_END)` / `FstatForProcess` returns the
+  new size. Self-test was inverted: the past-EOF case used to
+  panic if the write succeeded; it now panics if the file
+  doesn't grow.
+- **Why:** Closes the only remaining sub-item under "Writable
+  FAT32" on the Roadmap. Win32 `WriteFile` callers + shell
+  redirect-append flows that wrote past EOF were silently short-
+  written or rejected; with the cluster chain + dir-entry size
+  patching reachable from the syscall surface, a real PE workload
+  doing `fopen("a") + fwrite + fclose` actually appends. The path
+  cap is set to 64 chars because the `Win32FileHandle` table is
+  16 entries × per-process — 1 KiB total per process for the path
+  cache, which fits cleanly in the existing process structure.
+- **Rules out / defers:** Unbounded path length (paths over 63
+  chars fall back to in-place + short-write — kernel-side
+  `kSyscallPathMax` is 256, but most paths that hit this surface
+  today are well under 64 chars). Storing the parent-cluster +
+  basename instead of the path (would skip `ResolveParentDir` per
+  call but bloats the handle and complicates rename semantics).
+  Atomic overwrite-then-grow batching (every chunked write does
+  a separate FAT-walk; batching lands when a profiler shows it).
+- **Revisit when:** A workload regularly hits the >63-char path
+  fallback; bump the cap or move to a per-process path arena.
+  Rename-while-open lands and the cached path goes stale.
+- **Related tracks:** Track 3 (Filesystem — write surface), Track
+  9 (Win32 — `WriteFile` semantics).
+
+---
+
+## 110 — Driver fault-domain teardown for e1000 + fat32
+
+- **Scope:** `kernel/drivers/net/net.cpp` (`E1000Quiesce` helper
+  used by `NetShutdown`), `kernel/fs/fat32.{h,cpp}`
+  (`Fat32Shutdown`), `kernel/core/main.cpp` (new `fs/fat32`
+  fault-domain registration + lighter init lambda).
+- **Decision:** `NetShutdown` now actually quiesces a brought-up
+  e1000 — masks IRQs, clears IVAR routing, disables RX/TX,
+  software-resets the chip, frees the descriptor rings + buffer
+  pools, wakes any sleeper on the RX wait queue, then zeroes the
+  context. `Fat32Shutdown` wipes the in-memory volume snapshot
+  array under the driver-wide mutex. Both are wired into the
+  fault-domain machinery via `RegisterDriverDomain`; the fat32
+  init lambda re-walks `BlockDeviceCount()` calling `Fat32Probe`
+  per handle (lighter than `Fat32SelfTest`, which has CRUD side
+  effects). Brings the driver fault-domain count from 18 to 19.
+- **Why:** Closes the only Roadmap item under "Driver
+  fault-domain registration." Both subsystems were registered
+  with no-op or registry-only teardowns; a real restart left
+  hardware programmed with stale ring pointers (e1000) or the
+  volume registry in a half-populated state (fat32). Without a
+  proper quiesce, `RestartDriverDomain("drivers/net")` silently
+  corrupted any subsequent `NetInit` because PCI re-walk found
+  the same NIC but the e1000 context was already populated and
+  `E1000BringUp` early-returned.
+- **Rules out / defers:** MSI-X vector unbind + `IrqAllocVector`
+  return — no `PciMsixUnbind` API exists yet, and leaving the
+  handler installed is harmless because the device-side IMC
+  mask + reset stops events. Per-NIC MMIO unmap (mapping arena
+  is non-reclaiming today). Stopping the `e1000-rx-poll` task —
+  task termination doesn't exist; the task observes
+  `online == false` via `E1000DrainRx` and idles cheaply.
+- **Revisit when:** First USB hot-swap path needs to restart
+  xHCI + drag fat32 along (mount-point handling cascades from
+  there). MSI-X unbind lands. Task termination lands and the
+  RX-poll task can be torn down properly.
+- **Related tracks:** Track 6 (Drivers — restart story), Track
+  3 (Filesystem — mount lifecycle).
+
+---
+
 ## 109 — SYS_SPAWN = 7 — ring-3 can spawn ring-3 from an ELF path
 
 - **Scope:** `kernel/core/syscall.{h,cpp}` — new `SYS_SPAWN`

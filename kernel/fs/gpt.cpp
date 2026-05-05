@@ -731,4 +731,36 @@ void GptSelfTest()
     arch::SerialWrite("[fs/gpt]   -> GptInitDisk + reparse PASS (1 partition, LBA 64..200)\n");
 }
 
+void FormatGuid(const u8 guid[kGuidBytes], char* out_buf, u32 buf_cap)
+{
+    if (out_buf == nullptr || buf_cap == 0)
+        return;
+    if (guid == nullptr || buf_cap <= kGuidStringLen)
+    {
+        out_buf[0] = '\0';
+        return;
+    }
+    // Mixed-endian: bytes 0..3 reversed, 4..5 reversed, 6..7
+    // reversed, 8..9 as-is, 10..15 as-is, with hyphens at the
+    // 8/4/4/4/12 boundaries.
+    static constexpr int kOrder[20] = {3, 2, 1, 0, -1, 5, 4, -1, 7, 6, -1, 8, 9, -1, 10, 11, 12, 13, 14, 15};
+    auto hex_nibble = [](u8 n) -> char { return n < 10 ? char('0' + n) : char('A' + n - 10); };
+    u32 w = 0;
+    for (int k = 0; k < 20 && w + 2 < buf_cap; ++k)
+    {
+        const int idx = kOrder[k];
+        if (idx < 0)
+        {
+            out_buf[w++] = '-';
+        }
+        else
+        {
+            const u8 b = guid[idx];
+            out_buf[w++] = hex_nibble(b >> 4);
+            out_buf[w++] = hex_nibble(b & 0xF);
+        }
+    }
+    out_buf[w] = '\0';
+}
+
 } // namespace duetos::fs::gpt

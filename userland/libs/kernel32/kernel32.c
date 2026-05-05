@@ -976,6 +976,32 @@ __declspec(dllexport) BOOL SetEnvironmentVariableW(const WCHAR_t* name, const wc
     return 0;
 }
 
+/* GetCommandLineA / GetCommandLineW — return a stable pointer to
+ * the calling process's command-line string. v0 doesn't actually
+ * pass args to PE binaries (SpawnPeFile takes no argv); the
+ * canonical Win32 contract still requires the function to return
+ * a non-null, non-freeable pointer that's at least the program
+ * name. We hand back an empty string ("") so:
+ *   - CRT startup that does `for (p = GetCommandLineA(); *p && *p
+ *     != ' '; ++p);` terminates immediately on the NUL.
+ *   - argv parsers see a 0-length command line + zero arg count.
+ *   - Pointer compare against null doesn't trip the "no command
+ *     line" branch some binaries take to ExitProcess.
+ * The buffer is process-static so the pointer stays valid for
+ * the calling process's lifetime — same shape as real Windows. */
+static char g_cmdline_a[1] = {0};
+static wchar_t16 g_cmdline_w[1] = {0};
+
+__declspec(dllexport) const char* GetCommandLineA(void)
+{
+    return g_cmdline_a;
+}
+
+__declspec(dllexport) const wchar_t16* GetCommandLineW(void)
+{
+    return g_cmdline_w;
+}
+
 __declspec(dllexport) DWORD GetEnvironmentVariableA(const char* name, char* buf, DWORD size)
 {
     if (name == (const char*)0)
@@ -2670,10 +2696,22 @@ __declspec(dllexport) wchar_t16* lstrcatW(wchar_t16* dst, const wchar_t16* src)
  * rdi, rsi, rdx, r10, r8, r9 — so the trampolines mostly just
  * shuffle the calling convention.
  *
- * WriteFile / WriteConsole* ignore the handle and route to
- * SYS_WRITE(fd=1) — same simplification as the existing flat
- * stubs. Real handle-aware writes need a richer dispatch
- * (file vs console vs pipe); deferred.
+ * WriteFile dispatches by handle range:
+ *   - Pipe sentinel handles (DUETOS_PIPE_WR/_RD) → in-process
+ *     anonymous-pipe ring.
+ *   - Kernel file handles (0x100..0x10F, planted by CreateFileW
+ *     via SYS_FILE_OPEN / SYS_FILE_CREATE) → SYS_FILE_WRITE
+ *     (syscall 43); cap-gated on kCapFsWrite. Routes through the
+ *     per-handle cursor + fat32 in-place-or-grow write.
+ *   - Std-output / std-error handles (the negative-int values
+ *     GetStdHandle hands back: STD_OUTPUT_HANDLE = (HANDLE)-11,
+ *     STD_ERROR_HANDLE = (HANDLE)-12) → SYS_WRITE(fd=1).
+ *   - Anything else → fail (return FALSE, *lpWritten = 0). The
+ *     legacy "dump everything to stdout" fallback used to mask
+ *     bugs where a Win32 caller passed a stale handle.
+ *
+ * WriteConsole* always route to stdout regardless of handle —
+ * they're console-bound by Win32 contract.
  * ------------------------------------------------------------------ */
 
 typedef void* LPDWORD_t; /* DWORD* via opaque pointer to avoid C-warning chains */
@@ -2700,17 +2738,52 @@ __declspec(dllexport) BOOL WriteFile(HANDLE hFile, const void* buf, DWORD n, DWO
             *lpWritten = wrote;
         return 1;
     }
-    long long rv;
-    __asm__ volatile("int $0x80"
-                     : "=a"(rv)
-                     : "a"((long long)2),   /* SYS_WRITE */
-                       "D"((long long)1),   /* fd=1 (stdout) */
-                       "S"((long long)buf), /* buf */
-                       "d"((long long)n)    /* count */
-                     : "memory");
+
+    const unsigned long long h_raw = (unsigned long long)(UINT_PTR)hFile;
+
+    /* Kernel file handle (Win32-shaped pseudo-handle): 0x100..0x10F.
+     * Route through SYS_FILE_WRITE so the per-handle cursor +
+     * canary wall + cap gate fire. */
+    if (h_raw >= 0x100ULL && h_raw < 0x110ULL)
+    {
+        long long rv;
+        __asm__ volatile("int $0x80"
+                         : "=a"(rv)
+                         : "a"((long long)43), /* SYS_FILE_WRITE */
+                           "D"((long long)h_raw), "S"((long long)buf), "d"((long long)n)
+                         : "memory");
+        const int ok = (rv >= 0 && (unsigned long long)rv != ~0ULL);
+        if (lpWritten != (DWORD*)0)
+            *lpWritten = ok ? (DWORD)rv : 0;
+        return ok ? 1 : 0;
+    }
+
+    /* Std handles. GetStdHandle zero-extends DWORD into HANDLE,
+     * so STD_OUTPUT_HANDLE = (DWORD)-11 = 0xFFFFFFF5 surfaces as
+     * 0x00000000FFFFFFF5 here. STD_INPUT (-10) is invalid for a
+     * write but we silently route it the same way the flat-stub
+     * impl did. */
+    if (h_raw == 0xFFFFFFF5ULL || h_raw == 0xFFFFFFF4ULL || h_raw == 0xFFFFFFF6ULL)
+    {
+        long long rv;
+        __asm__ volatile("int $0x80"
+                         : "=a"(rv)
+                         : "a"((long long)2),   /* SYS_WRITE */
+                           "D"((long long)1),   /* fd=1 (stdout) */
+                           "S"((long long)buf), /* buf */
+                           "d"((long long)n)    /* count */
+                         : "memory");
+        if (lpWritten != (DWORD*)0)
+            *lpWritten = rv >= 0 ? (DWORD)rv : 0;
+        return rv >= 0 ? 1 : 0;
+    }
+
+    /* Unknown handle — fail rather than silently routing to
+     * stdout. Caller almost certainly passed a stale or never-
+     * opened handle. */
     if (lpWritten != (DWORD*)0)
-        *lpWritten = rv >= 0 ? (DWORD)rv : 0;
-    return rv >= 0 ? 1 : 0;
+        *lpWritten = 0;
+    return 0;
 }
 
 __declspec(dllexport) BOOL WriteConsoleA(HANDLE hConsole, const void* buf, DWORD n, DWORD* lpWritten, void* lpReserved)
@@ -2831,11 +2904,28 @@ __declspec(dllexport) BOOL ReadFile(HANDLE h, void* buf, DWORD count, DWORD* lpR
             *lpRead = got;
         return 1;
     }
+
+    const unsigned long long h_raw = (unsigned long long)(UINT_PTR)h;
+
+    /* Std handles: STDIN reports immediate EOF (no kbd-read syscall
+     * yet); STDOUT / STDERR are write-only — Win32 convention is to
+     * return TRUE with *lpRead = 0 ("end of file") rather than
+     * fall through to a failing SYS_FILE_READ. */
+    if (h_raw == 0xFFFFFFF6ULL || h_raw == 0xFFFFFFF5ULL || h_raw == 0xFFFFFFF4ULL)
+    {
+        if (lpRead != (DWORD*)0)
+            *lpRead = 0;
+        return 1;
+    }
+
+    /* Kernel file handle range — same numeric band as WriteFile.
+     * Anything else falls through to SYS_FILE_READ which will
+     * reject it with -1; we mirror that as FALSE. */
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
                      : "a"((long long)21), /* SYS_FILE_READ */
-                       "D"((long long)h), "S"((long long)buf), "d"((long long)count)
+                       "D"((long long)h_raw), "S"((long long)buf), "d"((long long)count)
                      : "memory");
     if (lpRead != (DWORD*)0)
         *lpRead = rv >= 0 ? (DWORD)rv : 0;
@@ -4281,6 +4371,63 @@ __declspec(dllexport) BOOL SetFileAttributesW(const wchar_t16* path, DWORD attrs
 {
     (void)path;
     (void)attrs;
+    return 1;
+}
+
+/* LockFile / UnlockFile / *Ex — return TRUE without taking a real
+ * lock. v0 has a single-process workload model and a single-writer
+ * fat32 layer; no two callers are racing for the same range, so a
+ * stub success is the correct answer (and matches what NTFS+
+ * Windows used to do for advisory locks back when it was a single-
+ * user OS). When a real concurrency story arrives — multi-user
+ * sandboxing, a sqlite-like workload that genuinely needs byte-
+ * range locks — this grows a per-file range table. Until then a
+ * Win32 caller that does
+ *   LockFile(h, 0, 0, sz_lo, sz_hi);
+ *   ... write ...
+ *   UnlockFile(h, 0, 0, sz_lo, sz_hi);
+ * proceeds cleanly instead of stalling on a STATUS_NOT_IMPLEMENTED
+ * upstream of every write call.
+ */
+__declspec(dllexport) BOOL LockFile(HANDLE h, DWORD off_lo, DWORD off_hi, DWORD len_lo, DWORD len_hi)
+{
+    (void)h;
+    (void)off_lo;
+    (void)off_hi;
+    (void)len_lo;
+    (void)len_hi;
+    return 1;
+}
+
+__declspec(dllexport) BOOL UnlockFile(HANDLE h, DWORD off_lo, DWORD off_hi, DWORD len_lo, DWORD len_hi)
+{
+    (void)h;
+    (void)off_lo;
+    (void)off_hi;
+    (void)len_lo;
+    (void)len_hi;
+    return 1;
+}
+
+__declspec(dllexport) BOOL LockFileEx(HANDLE h, DWORD flags, DWORD reserved, DWORD len_lo, DWORD len_hi,
+                                      void* lpOverlapped)
+{
+    (void)h;
+    (void)flags;
+    (void)reserved;
+    (void)len_lo;
+    (void)len_hi;
+    (void)lpOverlapped;
+    return 1;
+}
+
+__declspec(dllexport) BOOL UnlockFileEx(HANDLE h, DWORD reserved, DWORD len_lo, DWORD len_hi, void* lpOverlapped)
+{
+    (void)h;
+    (void)reserved;
+    (void)len_lo;
+    (void)len_hi;
+    (void)lpOverlapped;
     return 1;
 }
 

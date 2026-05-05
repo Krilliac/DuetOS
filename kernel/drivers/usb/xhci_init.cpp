@@ -122,15 +122,18 @@ void HidPollEntry(void* raw)
                 consumed_by_hid = true;
                 // Parse + inject. Mice skip the diff state — each
                 // report is a standalone delta + button snapshot,
-                // so we push the packet as-is.
+                // so we push the packet as-is. Actual report length
+                // is `requested - residual` per xHCI completion-code
+                // semantics (kCompletionCodeShortPacket / Success).
+                // Cap at 8 bytes to match the HID buffer page slice.
                 if (dev.hid_is_mouse)
                 {
-                    u8 mouse_rep[3] = {
-                        dev.hid_buf_virt[0],
-                        dev.hid_buf_virt[1],
-                        dev.hid_buf_virt[2],
-                    };
-                    HidMouseInject(mouse_rep);
+                    u32 actual = dev.hid_ep_max_packet;
+                    if (residual <= actual)
+                        actual -= residual;
+                    if (actual > 8)
+                        actual = 8;
+                    HidMouseInjectN(dev.hid_buf_virt, actual);
                 }
                 else
                 {

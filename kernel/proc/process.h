@@ -509,6 +509,18 @@ struct Process
         // the write call) still trips the wall. Stamped once at
         // open; never cleared (handles are short-lived).
         bool is_canary;
+        // FAT32 path inside the volume (e.g. "/SUB/FOO.TXT"),
+        // captured at open / create time when kind == Fat32. Past-
+        // EOF writes route through `Fat32WriteAtPath` which needs
+        // the path so it can resolve the parent directory and
+        // patch the dir-entry size after a chain extension. The
+        // DirEntry snapshot doesn't carry parent-cluster info,
+        // so the path is the cheapest way to reconstruct it.
+        // 64 bytes covers every shell + Win32-CWD path that hits
+        // the syscall surface today; longer paths fall back to the
+        // bounded in-place write.
+        static constexpr u64 kFat32PathCap = 64;
+        char fat32_path[kFat32PathCap];
     };
     static constexpr u64 kWin32HandleCap = 16;
     static constexpr u64 kWin32HandleBase = 0x100;
