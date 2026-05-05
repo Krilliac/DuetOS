@@ -612,6 +612,38 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 120 — kernel32 LockFile / UnlockFile / *Ex — stub-success exports
+
+- **Scope:** `userland/libs/kernel32/kernel32.c` (new
+  `LockFile`, `UnlockFile`, `LockFileEx`, `UnlockFileEx`
+  exports).
+- **Decision:** Add the four byte-range locking entry points
+  with v0 stub-success bodies — they take no real lock but
+  return TRUE so the caller proceeds. v0 has a single-process
+  workload model and a single-writer FAT32 layer, so no two
+  callers can race the same byte range; advisory locking has
+  nothing to enforce yet. The Win32 surface wiki claimed
+  these "return success without locking" but they were
+  actually missing exports — a real PE that imported them
+  would fail to load. This makes the wiki claim accurate and
+  ensures future PE workloads that use LockFile see the
+  contract the doc promises.
+- **Why:** Bumps the kernel32 DLL from 46080 to 46592 bytes
+  (~512 bytes of new export-table + body). Cost is negligible;
+  unblocks a category of Win32 binaries that the loader
+  previously rejected.
+- **Rules out / defers:** Real per-file byte-range tracking
+  (per-handle range table, contention-aware acquire). Real
+  multi-user concurrency. SQLite-style mandatory locking.
+  Returns success even on overlapping ranges from the same
+  process — caller responsibility today.
+- **Revisit when:** A second writer to the same FAT32 file
+  becomes possible (multi-process write contention). A
+  workload genuinely depends on advisory locking semantics.
+- **Related tracks:** Track 9 (Win32 — kernel32 surface).
+
+---
+
 ## 119 — Shell `lastdump` operator readout for the last minidump
 
 - **Scope:** `kernel/shell/shell_storage.cpp` (`CmdLastdump`),

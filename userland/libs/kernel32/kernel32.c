@@ -4350,6 +4350,63 @@ __declspec(dllexport) BOOL SetFileAttributesW(const wchar_t16* path, DWORD attrs
     return 1;
 }
 
+/* LockFile / UnlockFile / *Ex — return TRUE without taking a real
+ * lock. v0 has a single-process workload model and a single-writer
+ * fat32 layer; no two callers are racing for the same range, so a
+ * stub success is the correct answer (and matches what NTFS+
+ * Windows used to do for advisory locks back when it was a single-
+ * user OS). When a real concurrency story arrives — multi-user
+ * sandboxing, a sqlite-like workload that genuinely needs byte-
+ * range locks — this grows a per-file range table. Until then a
+ * Win32 caller that does
+ *   LockFile(h, 0, 0, sz_lo, sz_hi);
+ *   ... write ...
+ *   UnlockFile(h, 0, 0, sz_lo, sz_hi);
+ * proceeds cleanly instead of stalling on a STATUS_NOT_IMPLEMENTED
+ * upstream of every write call.
+ */
+__declspec(dllexport) BOOL LockFile(HANDLE h, DWORD off_lo, DWORD off_hi, DWORD len_lo, DWORD len_hi)
+{
+    (void)h;
+    (void)off_lo;
+    (void)off_hi;
+    (void)len_lo;
+    (void)len_hi;
+    return 1;
+}
+
+__declspec(dllexport) BOOL UnlockFile(HANDLE h, DWORD off_lo, DWORD off_hi, DWORD len_lo, DWORD len_hi)
+{
+    (void)h;
+    (void)off_lo;
+    (void)off_hi;
+    (void)len_lo;
+    (void)len_hi;
+    return 1;
+}
+
+__declspec(dllexport) BOOL LockFileEx(HANDLE h, DWORD flags, DWORD reserved, DWORD len_lo, DWORD len_hi,
+                                      void* lpOverlapped)
+{
+    (void)h;
+    (void)flags;
+    (void)reserved;
+    (void)len_lo;
+    (void)len_hi;
+    (void)lpOverlapped;
+    return 1;
+}
+
+__declspec(dllexport) BOOL UnlockFileEx(HANDLE h, DWORD reserved, DWORD len_lo, DWORD len_hi, void* lpOverlapped)
+{
+    (void)h;
+    (void)reserved;
+    (void)len_lo;
+    (void)len_hi;
+    (void)lpOverlapped;
+    return 1;
+}
+
 __declspec(dllexport) BOOL CreateDirectoryA(const char* path, void* sec)
 {
     (void)path;
