@@ -4311,6 +4311,64 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 101 — SYS_MUTEX_* migrated to KMutex + kobj_handles
+
+- **Scope:** `kernel/subsystems/win32/mutex_syscall.cpp` (full
+  rewrite), `kernel/subsystems/win32/file_syscall.cpp`
+  (CloseHandle dispatch arm for the mutex range), `kernel/proc/
+  process.{h,cpp}` (legacy `Win32MutexHandle` struct + array
+  removed; `kWin32MutexCap` redefined to `kHandleTableCapacity`),
+  `kernel/ipc/handle_table.{h,cpp}` (new `HandleTableLookupRef`
+  for refcount-safe pin-during-use), `kernel/ipc/kmutex.cpp`
+  (wait-time + holder refcounting), `kernel/ipc/kevent.cpp`,
+  `kernel/ipc/ksemaphore.cpp` (wait-time refcounting on the
+  paths that block).
+- **Decision:** The Win32 mutex syscalls now allocate `KMutex`
+  objects on the kheap and route handles through
+  `Process::kobj_handles`. The Win32 handle is `kWin32MutexBase
+  + ipc_handle` so the per-type handle range stays disjoint
+  from event/file/thread/semaphore for `CloseHandle` to keep
+  dispatching by range. The legacy fixed-size 8-slot array on
+  every `Process` is gone — handle capacity is now whatever
+  `kHandleTableCapacity` is (64 today). Wait-time refcounting
+  guarantees that closing every handle to a contended or held
+  mutex cannot free the storage out from under a current
+  holder or a still-blocked waiter; `HandleTableLookupRef`
+  pins the object across the syscall handler's blocking work
+  to close the lookup→use race.
+- **Why:** This is the slice the project pillar
+  ("one source of truth per resource") demands for IPC
+  objects. Win32 ABI is preserved at the syscall boundary —
+  PEs that imported `CreateMutexW` / `WaitForSingleObject` /
+  `ReleaseMutex` previously continue to work unchanged; the
+  pe-winapi smoke profile validates the recursion-OK +
+  multi-create cases under TCG. The wait-time refcounting
+  pattern also closes a class of bugs the legacy fixed-array
+  scheme was structurally immune to (because the array
+  storage outlived the process), but that any future
+  cross-process DuplicateHandle would have re-introduced
+  without it.
+- **Rules out / defers:** Per-handle contention metric beyond
+  the first 8 ipc_handles — `kContentionSlotCap` stays at 8
+  because the array sits per-process and the metric is
+  best-effort observability. Real abandoned-mutex semantics
+  (Win32's `WAIT_ABANDONED_0`) — v0 force-releases the closer's
+  ownership and hands off to the next waiter cleanly; the
+  abandoned-status signal-back to waking waiters is not
+  delivered. Cross-process `DuplicateHandle` + per-process
+  ref accounting interactions — single-process for now.
+- **Revisit when:** A workload needs >8-handle contention
+  tracking (bump `kContentionSlotCap` to `kHandleTableCapacity`
+  — one-line change). A workload depends on `WAIT_ABANDONED_0`
+  signaling (add a per-mutex abandoned flag set by force-release
+  and propagated by `KMutexAcquire{,Timed}` to its returning
+  waiter). SYS_EVENT_* / SYS_SEM_* migrate (same pattern —
+  the infrastructure now in place).
+- **Related tracks:** Track 1 (Kernel — IPC + handle table),
+  Track 5 (Win32 subsystem — SYS_MUTEX_* end-to-end).
+
+---
+
 After landing a non-trivial commit, append a new section here with
 the **next sequential number**. Keep entries small. Link the commit
 hash. Always write the "Revisit when" marker — that's the point of

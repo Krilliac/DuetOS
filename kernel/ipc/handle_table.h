@@ -77,6 +77,15 @@ struct HandleTable
 ///     empty slot, type mismatch.
 KObject* HandleTableLookup(HandleTable& table, Handle h, KObjectType expected_type);
 
+/// Lookup with an additional reference taken. The ref is acquired
+/// under the table's lock so it cannot race with a concurrent
+/// `HandleTableRemove`. Caller MUST pair the returned non-null
+/// pointer with a `KObjectRelease` once done. Used by syscall
+/// handlers that need the kernel object to stay alive across a
+/// blocking primitive (Wait / Acquire) where the issuing process
+/// could close the handle in parallel.
+KObject* HandleTableLookupRef(HandleTable& table, Handle h, KObjectType expected_type);
+
 /// Remove `h` from the table. Calls `KObjectRelease` on the slot's
 /// object (the table held a reference; it is dropping it). Returns
 /// Ok on success, `Err{ErrorCode::InvalidArgument}` for bad

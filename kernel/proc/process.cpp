@@ -129,17 +129,9 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     // Process::kWin32VmapBase with 0 pages consumed.
     p->vmap_base = Process::kWin32VmapBase;
     p->vmap_pages_used = 0;
-    // Win32 mutex table — every slot starts free + unowned.
-    for (u32 i = 0; i < Process::kWin32MutexCap; ++i)
-    {
-        p->win32_mutexes[i].in_use = false;
-        for (u32 j = 0; j < sizeof(p->win32_mutexes[i]._pad); ++j)
-            p->win32_mutexes[i]._pad[j] = 0;
-        p->win32_mutexes[i].recursion = 0;
-        p->win32_mutexes[i].owner = nullptr;
-        p->win32_mutexes[i].waiters.head = nullptr;
-        p->win32_mutexes[i].waiters.tail = nullptr;
-    }
+    // Win32 mutex storage now lives in `p->kobj_handles` —
+    // SYS_MUTEX_* allocates KMutex objects through that path.
+    // Nothing to init here for the mutex surface.
     // Win32 event table — every slot starts free + unsignaled.
     for (u32 i = 0; i < Process::kWin32EventCap; ++i)
     {

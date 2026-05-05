@@ -95,6 +95,12 @@ void KEventReset(KEvent* e)
 
 void KEventWait(KEvent* e)
 {
+    // Pin during the wait so closing every handle while a waiter
+    // is blocked cannot free the storage. The fast path takes the
+    // ref defensively too — even checking `e->signaled` requires
+    // the storage to be alive, and we do not assume the caller
+    // already holds an external ref.
+    KObjectAcquire(&e->base);
     sched::MutexLock(&e->inner);
     while (!e->signaled)
     {
@@ -107,10 +113,12 @@ void KEventWait(KEvent* e)
         e->signaled = false;
     }
     sched::MutexUnlock(&e->inner);
+    KObjectRelease(&e->base);
 }
 
 bool KEventWaitTimed(KEvent* e, u64 ticks)
 {
+    KObjectAcquire(&e->base);
     sched::MutexLock(&e->inner);
     if (e->signaled)
     {
@@ -119,23 +127,27 @@ bool KEventWaitTimed(KEvent* e, u64 ticks)
             e->signaled = false;
         }
         sched::MutexUnlock(&e->inner);
+        KObjectRelease(&e->base);
         return true;
     }
     if (ticks == 0)
     {
         sched::MutexUnlock(&e->inner);
+        KObjectRelease(&e->base);
         return false;
     }
     // Compute the deadline once so spurious wakeups and "another
     // waiter consumed the auto-reset signal first" races don't
     // re-arm the full budget on every iteration.
     const u64 deadline = sched::SchedNowTicks() + ticks;
+    bool got = false;
     while (!e->signaled)
     {
         const u64 now = sched::SchedNowTicks();
         if (now >= deadline)
         {
             sched::MutexUnlock(&e->inner);
+            KObjectRelease(&e->base);
             return false;
         }
         // CondvarWaitTimeout drops + re-acquires e->inner. Return
@@ -144,12 +156,14 @@ bool KEventWaitTimed(KEvent* e, u64 ticks)
         // both spurious wakes and waiters racing for an auto-reset.
         sched::CondvarWaitTimeout(&e->cv, &e->inner, deadline - now);
     }
+    got = true;
     if (!e->manual_reset)
     {
         e->signaled = false;
     }
     sched::MutexUnlock(&e->inner);
-    return true;
+    KObjectRelease(&e->base);
+    return got;
 }
 
 void KEventSelfTest()

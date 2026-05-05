@@ -212,7 +212,12 @@ struct ContentionRecord
     u64 wait_count;    // # times a wait actually blocked (count > 0)
     u64 total_wait_ms; // sum of wait durations in ms
 };
-// One record per Win32 mutex slot in the process (matches Process::kWin32MutexCap).
+// Per-mutex contention slot. After SYS_MUTEX_* migrated to
+// `kobj_handles`, the "slot" is now the kobj_handles handle id;
+// only the first kContentionSlotCap handles get tracked, the
+// rest silently degrade (the metric is best-effort observability,
+// not load-bearing). Bumping this to match `kHandleTableCapacity`
+// is a one-line change if a real workload demonstrates value.
 inline constexpr u32 kContentionSlotCap = 8;
 
 // ---------- Global (kernel-wide) tables ----------

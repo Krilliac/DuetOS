@@ -9,6 +9,9 @@
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/traps.h"
 #include "diag/kdbg.h"
+#include "ipc/handle_table.h"
+#include "ipc/kmutex.h"
+#include "ipc/kobject.h"
 #include "proc/process.h"
 #include "syscall/syscall.h"
 #include "fs/file_route.h"
@@ -157,15 +160,28 @@ void DoFileClose(arch::TrapFrame* frame)
     else if (handle >= core::Process::kWin32MutexBase &&
              handle < core::Process::kWin32MutexBase + core::Process::kWin32MutexCap)
     {
-        const u64 slot = handle - core::Process::kWin32MutexBase;
-        arch::Cli();
-        core::Process::Win32MutexHandle& m = proc->win32_mutexes[slot];
-        // Abandoned-mutex: hand off to the next waiter if any.
-        sched::Task* next = sched::WaitQueueWakeOne(&m.waiters);
-        m.owner = next;
-        m.recursion = (next != nullptr) ? 1 : 0;
-        m.in_use = false;
-        arch::Sti();
+        // Migrated to KMutex + kobj_handles. The Win32 handle is
+        // `kWin32MutexBase + ipc_handle`; map it back, type-check
+        // (via lookup-with-ref so the storage stays alive across
+        // the force-release below), and drop the table reference.
+        // Closer-as-holder is force-released through KMutexRelease
+        // first — that drains the recursion counter and hands the
+        // lock off to the longest-waiting blocker if any (KMutex's
+        // wait-time refs keep the storage alive for those waiters
+        // until they wake).
+        const ipc::Handle ipc_h = static_cast<ipc::Handle>(handle - core::Process::kWin32MutexBase);
+        ipc::KObject* obj = ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Mutex);
+        if (obj != nullptr)
+        {
+            auto* m = reinterpret_cast<ipc::KMutex*>(obj);
+            sched::Task* me = sched::CurrentTask();
+            while (ipc::KMutexOwner(m) == me)
+            {
+                ipc::KMutexRelease(m);
+            }
+            (void)ipc::HandleTableRemove(proc->kobj_handles, ipc_h);
+            ipc::KObjectRelease(obj); // drop the lookup ref
+        }
     }
     else if (handle >= core::Process::kWin32EventBase &&
              handle < core::Process::kWin32EventBase + core::Process::kWin32EventCap)

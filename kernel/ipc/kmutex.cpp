@@ -73,35 +73,47 @@ void KMutexAcquire(KMutex* m)
     // Fast path for re-entrant acquire — same owner, just bump
     // recursion. Read of `owner` is safe outside the inner lock
     // ONLY when `me == owner`, because no other task can mutate
-    // the owner field while we hold it.
+    // the owner field while we hold it. Recursion does NOT take
+    // a fresh ref — the holder-ref already counts.
     if (m->owner == me)
     {
         ++m->recursion;
         return;
     }
+    // Pin the storage during the wait. If every handle closes
+    // while we're blocked, the wait-ref keeps the KMutex alive
+    // until we wake; on success the same ref upgrades to the
+    // holder-ref so the storage stays alive while we own it.
+    KObjectAcquire(&m->base);
     sched::MutexLock(&m->inner);
     m->owner = me;
     m->recursion = 1;
+    // Wait-ref retained as holder-ref; no count change.
 }
 
 bool KMutexAcquireTimed(KMutex* m, u64 ticks)
 {
     sched::Task* me = sched::CurrentTask();
-    // Re-entrant acquire bypasses the timeout: a task that already
-    // owns the lock cannot block on itself, so the timeout never
-    // applies. Same safety argument as the untimed variant — only
-    // we can mutate `owner` while we own it.
+    // Re-entrant acquire bypasses the timeout — a task that
+    // already owns the lock cannot block on itself, so the
+    // timeout never applies and no fresh ref is taken.
     if (m->owner == me)
     {
         ++m->recursion;
         return true;
     }
+    KObjectAcquire(&m->base);
     if (!sched::MutexLockTimed(&m->inner, ticks))
     {
+        // Timed out — drop the wait-ref. May trigger destroy if
+        // every handle closed while we were blocked AND we were
+        // the last waiter; that's the correct outcome.
+        KObjectRelease(&m->base);
         return false;
     }
     m->owner = me;
     m->recursion = 1;
+    // Wait-ref retained as holder-ref.
     return true;
 }
 
@@ -133,6 +145,15 @@ void KMutexRelease(KMutex* m)
     // next acquirer sees a fresh state.
     m->owner = nullptr;
     sched::MutexUnlock(&m->inner);
+    // Drop the holder-ref unconditionally. In the no-hand-off
+    // case, this may push refcount to zero and fire `KMutexDestroy`
+    // (correct: nobody holds and no waiters held a wait-ref).
+    // In the hand-off case, the new holder's wait-ref upgraded
+    // to their holder-ref inside their `KMutexAcquire` /
+    // `KMutexAcquireTimed` success continuation — net refcount
+    // unchanged across the transition (we dropped one, they
+    // implicitly retained one).
+    KObjectRelease(&m->base);
 }
 
 sched::Task* KMutexOwner(const KMutex* m)

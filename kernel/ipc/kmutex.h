@@ -22,32 +22,41 @@
  *   the kernel-internal lock state lives here, not duplicated per-
  *   ABI.
  *
- * WHY THIS, NOT THE EXISTING `Process::win32_mutexes`?
- *   The existing Win32 mutex array on `Process` is Win32-shaped:
- *   it returns `kWaitObject0` / `kWaitTimeout`, supports infinite
- *   waits via Win32 semantics, and is reachable only from the
- *   Win32 mutex syscalls. A native (non-Win32) workload that
- *   wants a kernel-mediated mutex has nowhere to go. `KMutex` is
- *   that home — every ABI front-end converges on the same
- *   refcounted, handle-tabled, type-tagged primitive.
- *
- * WHAT THIS COMMIT IS NOT
- *   v0 lands the type + create/acquire/release primitives + a
- *   self-test that exercises HandleTable round-trip. The
- *   `SYS_MUTEX_*` syscalls keep using the legacy Win32 array
- *   unchanged — migrating them is a separate slice (different
- *   ABI surface to preserve, different test fleet to validate).
+ * RELATION TO Win32 SYS_MUTEX_*
+ *   Every `SYS_MUTEX_CREATE` / `SYS_MUTEX_WAIT` / `SYS_MUTEX_RELEASE`
+ *   syscall routes through this type — the per-process
+ *   `Process::kobj_handles` table holds the `KMutex*`. A native
+ *   (non-Win32) workload that wants a kernel-mediated mutex
+ *   reaches the same primitive through the same handle table; the
+ *   Win32 surface only adds the `kWaitObject0` / `kWaitTimeout`
+ *   return-value translation at the syscall boundary.
  *
  * REFCOUNT SEMANTICS
  *   `KMutexCreate` allocates one through the kheap, calls
  *   `KObjectInit` (refcount = 1), and returns the new KMutex.
  *   The caller is expected to hand it off to a `HandleTable` —
  *   that table takes the initial reference (no extra acquire).
+ *
+ *   The first successful acquire on an unowned mutex takes an
+ *   additional reference (the "holder ref"); the outermost
+ *   release drops it. While a task is blocked in `KMutexAcquire`
+ *   / `KMutexAcquireTimed`, an extra "wait ref" is held — that
+ *   ref upgrades to the holder ref on hand-off success, or is
+ *   dropped on timeout. The wait/holder refs together guarantee
+ *   that closing every handle while the mutex is still held or
+ *   contended cannot free the storage out from under a current
+ *   holder or a still-blocked waiter — the standard Win32
+ *   "abandoned mutex" / "mutex outlives its handle" scenarios
+ *   stay safe even though the kernel never owns its own implicit
+ *   reference.
+ *
  *   The destructor `KMutexDestroy` is registered as the type's
  *   `destroy` callback; it runs on last release, frees the
  *   storage, and panics if the lock is still held (a leak that
- *   reaches refcount=0 with the lock held is a bug in the caller's
- *   release ordering).
+ *   reaches refcount=0 with the lock held is a bug in the
+ *   refcount accounting itself, not in the caller's release
+ *   ordering — caller mistakes are absorbed by the holder/wait
+ *   refs above).
  *
  * THREADING
  *   `KMutexAcquire` / `KMutexRelease` go through the embedded

@@ -61,6 +61,10 @@ void KSemaphoreDestroy(KObject* obj)
 
 void KSemaphoreAcquire(KSemaphore* s)
 {
+    // Pin during the operation. Even the fast path needs the
+    // storage alive; closing every handle from another task
+    // can't race a destroy in past us.
+    KObjectAcquire(&s->base);
     sched::MutexLock(&s->inner);
     while (s->count == 0)
     {
@@ -68,20 +72,24 @@ void KSemaphoreAcquire(KSemaphore* s)
     }
     --s->count;
     sched::MutexUnlock(&s->inner);
+    KObjectRelease(&s->base);
 }
 
 bool KSemaphoreAcquireTimed(KSemaphore* s, u64 ticks)
 {
+    KObjectAcquire(&s->base);
     sched::MutexLock(&s->inner);
     if (s->count > 0)
     {
         --s->count;
         sched::MutexUnlock(&s->inner);
+        KObjectRelease(&s->base);
         return true;
     }
     if (ticks == 0)
     {
         sched::MutexUnlock(&s->inner);
+        KObjectRelease(&s->base);
         return false;
     }
     const u64 deadline = sched::SchedNowTicks() + ticks;
@@ -91,12 +99,14 @@ bool KSemaphoreAcquireTimed(KSemaphore* s, u64 ticks)
         if (now >= deadline)
         {
             sched::MutexUnlock(&s->inner);
+            KObjectRelease(&s->base);
             return false;
         }
         sched::CondvarWaitTimeout(&s->cv, &s->inner, deadline - now);
     }
     --s->count;
     sched::MutexUnlock(&s->inner);
+    KObjectRelease(&s->base);
     return true;
 }
 
