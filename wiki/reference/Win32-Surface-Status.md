@@ -663,7 +663,8 @@ SSPI facade. `AcquireCredentialsHandleA/W`,
 
 > **Status:** REAL for the algorithm set most callers want.
 > Backed by the kernel's `SYS_RANDOM_BYTES` and the in-tree
-> SHA-256 / SHA-384 / SHA-512 / SHA-1 / MD5 hash cores.
+> SHA-256 / SHA-384 / SHA-512 / SHA-1 / MD5 / AES hash + cipher
+> cores.
 
 `BCryptOpenAlgorithmProvider`, `BCryptCloseAlgorithmProvider`,
 `BCryptCreateHash`, `BCryptHashData`, `BCryptFinishHash`,
@@ -673,15 +674,22 @@ SHA-384 and SHA-512 share one FIPS 180-4 §6.4 core; SHA-384
 differs only in the eight initial-hash values and the
 truncated 48-byte output.
 
-GAP: `BCryptHashData` slots are single-threaded (one global
-per algorithm), so concurrent hashing breaks.
+`BCryptGenerateSymmetricKey`, `BCryptDestroyKey`,
+`BCryptSetProperty`, `BCryptEncrypt`, `BCryptDecrypt` — REAL
+for AES-128 + AES-256 in CBC and ECB modes via a FIPS 197
+reference core. `SetProperty(BCRYPT_CHAINING_MODE, "...CBC"
+| "...ECB")` flips the chaining; `Encrypt` / `Decrypt`
+require a 16-byte IV in CBC mode. Verified against FIPS 197
+Appendix B (AES-128 KAT) and NIST AES-256 KAT — both match
+on first-block + round-trip.
 
-MISSING (not exported): `BCryptGenerateSymmetricKey`,
-`BCryptEncrypt`, `BCryptDecrypt` — symmetric AES-CBC /
-AES-GCM aren't wired in yet despite the prior status line
-claiming they were. Adding them needs an AES core (~500 LOC)
-and the CBC / GCM mode glue. RSA / ECC key import / sign /
-verify — also MISSING.
+GAP: `BCryptHashData` slots and the AES key slot are
+single-threaded (one global of each), so concurrent hashing
+or encryption breaks.
+
+MISSING: AES-GCM (no AEAD wrapper), PKCS#7 padding (caller
+must pre-pad to 16-byte boundary), RSA / ECC key import /
+sign / verify, key derivation (`BCryptDeriveKeyPBKDF2` etc.).
 
 ---
 

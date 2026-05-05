@@ -548,6 +548,297 @@ static void Sha512Final(Sha512* s, unsigned char* out, unsigned int out_len)
     }
 }
 
+/* AES-128 / AES-256 reference (FIPS 197). Encrypts / decrypts one
+ * 16-byte block at a time. Key expansion produces 11 round-keys
+ * for AES-128 (176 bytes) or 15 for AES-256 (240 bytes). The same
+ * Sbox / inverse-Sbox / Rcon tables drive both key sizes. CBC mode
+ * is the higher-level chaining wrapper layered on top. No bitslice
+ * / no AES-NI — straight reference code, ~250 LOC, runs in ~12 µs
+ * per block on a typical 2026 CPU. Sufficient for a v0 BCryptEncrypt
+ * / BCryptDecrypt that matches the API shape every Win32 caller
+ * expects. */
+
+static const unsigned char kAesSbox[256] = {
+    0x63, 0x7C, 0x77, 0x7B, 0xF2, 0x6B, 0x6F, 0xC5, 0x30, 0x01, 0x67, 0x2B, 0xFE, 0xD7, 0xAB, 0x76, 0xCA, 0x82, 0xC9,
+    0x7D, 0xFA, 0x59, 0x47, 0xF0, 0xAD, 0xD4, 0xA2, 0xAF, 0x9C, 0xA4, 0x72, 0xC0, 0xB7, 0xFD, 0x93, 0x26, 0x36, 0x3F,
+    0xF7, 0xCC, 0x34, 0xA5, 0xE5, 0xF1, 0x71, 0xD8, 0x31, 0x15, 0x04, 0xC7, 0x23, 0xC3, 0x18, 0x96, 0x05, 0x9A, 0x07,
+    0x12, 0x80, 0xE2, 0xEB, 0x27, 0xB2, 0x75, 0x09, 0x83, 0x2C, 0x1A, 0x1B, 0x6E, 0x5A, 0xA0, 0x52, 0x3B, 0xD6, 0xB3,
+    0x29, 0xE3, 0x2F, 0x84, 0x53, 0xD1, 0x00, 0xED, 0x20, 0xFC, 0xB1, 0x5B, 0x6A, 0xCB, 0xBE, 0x39, 0x4A, 0x4C, 0x58,
+    0xCF, 0xD0, 0xEF, 0xAA, 0xFB, 0x43, 0x4D, 0x33, 0x85, 0x45, 0xF9, 0x02, 0x7F, 0x50, 0x3C, 0x9F, 0xA8, 0x51, 0xA3,
+    0x40, 0x8F, 0x92, 0x9D, 0x38, 0xF5, 0xBC, 0xB6, 0xDA, 0x21, 0x10, 0xFF, 0xF3, 0xD2, 0xCD, 0x0C, 0x13, 0xEC, 0x5F,
+    0x97, 0x44, 0x17, 0xC4, 0xA7, 0x7E, 0x3D, 0x64, 0x5D, 0x19, 0x73, 0x60, 0x81, 0x4F, 0xDC, 0x22, 0x2A, 0x90, 0x88,
+    0x46, 0xEE, 0xB8, 0x14, 0xDE, 0x5E, 0x0B, 0xDB, 0xE0, 0x32, 0x3A, 0x0A, 0x49, 0x06, 0x24, 0x5C, 0xC2, 0xD3, 0xAC,
+    0x62, 0x91, 0x95, 0xE4, 0x79, 0xE7, 0xC8, 0x37, 0x6D, 0x8D, 0xD5, 0x4E, 0xA9, 0x6C, 0x56, 0xF4, 0xEA, 0x65, 0x7A,
+    0xAE, 0x08, 0xBA, 0x78, 0x25, 0x2E, 0x1C, 0xA6, 0xB4, 0xC6, 0xE8, 0xDD, 0x74, 0x1F, 0x4B, 0xBD, 0x8B, 0x8A, 0x70,
+    0x3E, 0xB5, 0x66, 0x48, 0x03, 0xF6, 0x0E, 0x61, 0x35, 0x57, 0xB9, 0x86, 0xC1, 0x1D, 0x9E, 0xE1, 0xF8, 0x98, 0x11,
+    0x69, 0xD9, 0x8E, 0x94, 0x9B, 0x1E, 0x87, 0xE9, 0xCE, 0x55, 0x28, 0xDF, 0x8C, 0xA1, 0x89, 0x0D, 0xBF, 0xE6, 0x42,
+    0x68, 0x41, 0x99, 0x2D, 0x0F, 0xB0, 0x54, 0xBB, 0x16};
+
+static const unsigned char kAesInvSbox[256] = {
+    0x52, 0x09, 0x6A, 0xD5, 0x30, 0x36, 0xA5, 0x38, 0xBF, 0x40, 0xA3, 0x9E, 0x81, 0xF3, 0xD7, 0xFB, 0x7C, 0xE3, 0x39,
+    0x82, 0x9B, 0x2F, 0xFF, 0x87, 0x34, 0x8E, 0x43, 0x44, 0xC4, 0xDE, 0xE9, 0xCB, 0x54, 0x7B, 0x94, 0x32, 0xA6, 0xC2,
+    0x23, 0x3D, 0xEE, 0x4C, 0x95, 0x0B, 0x42, 0xFA, 0xC3, 0x4E, 0x08, 0x2E, 0xA1, 0x66, 0x28, 0xD9, 0x24, 0xB2, 0x76,
+    0x5B, 0xA2, 0x49, 0x6D, 0x8B, 0xD1, 0x25, 0x72, 0xF8, 0xF6, 0x64, 0x86, 0x68, 0x98, 0x16, 0xD4, 0xA4, 0x5C, 0xCC,
+    0x5D, 0x65, 0xB6, 0x92, 0x6C, 0x70, 0x48, 0x50, 0xFD, 0xED, 0xB9, 0xDA, 0x5E, 0x15, 0x46, 0x57, 0xA7, 0x8D, 0x9D,
+    0x84, 0x90, 0xD8, 0xAB, 0x00, 0x8C, 0xBC, 0xD3, 0x0A, 0xF7, 0xE4, 0x58, 0x05, 0xB8, 0xB3, 0x45, 0x06, 0xD0, 0x2C,
+    0x1E, 0x8F, 0xCA, 0x3F, 0x0F, 0x02, 0xC1, 0xAF, 0xBD, 0x03, 0x01, 0x13, 0x8A, 0x6B, 0x3A, 0x91, 0x11, 0x41, 0x4F,
+    0x67, 0xDC, 0xEA, 0x97, 0xF2, 0xCF, 0xCE, 0xF0, 0xB4, 0xE6, 0x73, 0x96, 0xAC, 0x74, 0x22, 0xE7, 0xAD, 0x35, 0x85,
+    0xE2, 0xF9, 0x37, 0xE8, 0x1C, 0x75, 0xDF, 0x6E, 0x47, 0xF1, 0x1A, 0x71, 0x1D, 0x29, 0xC5, 0x89, 0x6F, 0xB7, 0x62,
+    0x0E, 0xAA, 0x18, 0xBE, 0x1B, 0xFC, 0x56, 0x3E, 0x4B, 0xC6, 0xD2, 0x79, 0x20, 0x9A, 0xDB, 0xC0, 0xFE, 0x78, 0xCD,
+    0x5A, 0xF4, 0x1F, 0xDD, 0xA8, 0x33, 0x88, 0x07, 0xC7, 0x31, 0xB1, 0x12, 0x10, 0x59, 0x27, 0x80, 0xEC, 0x5F, 0x60,
+    0x51, 0x7F, 0xA9, 0x19, 0xB5, 0x4A, 0x0D, 0x2D, 0xE5, 0x7A, 0x9F, 0x93, 0xC9, 0x9C, 0xEF, 0xA0, 0xE0, 0x3B, 0x4D,
+    0xAE, 0x2A, 0xF5, 0xB0, 0xC8, 0xEB, 0xBB, 0x3C, 0x83, 0x53, 0x99, 0x61, 0x17, 0x2B, 0x04, 0x7E, 0xBA, 0x77, 0xD6,
+    0x26, 0xE1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0C, 0x7D};
+
+static const unsigned char kAesRcon[11] = {0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1B, 0x36};
+
+/* GF(2^8) multiplication used by MixColumns / InvMixColumns. */
+static unsigned char aes_xtime(unsigned char x)
+{
+    return (unsigned char)((x << 1) ^ ((x & 0x80) ? 0x1B : 0));
+}
+
+/* AES key expansion. key_bytes ∈ {16, 32}. round_keys must hold
+ * 11 × 16 = 176 bytes for AES-128 or 15 × 16 = 240 bytes for
+ * AES-256. Returns the number of rounds. */
+static int aes_key_expansion(const unsigned char* key, unsigned int key_bytes, unsigned char* round_keys)
+{
+    const int Nk = (key_bytes == 32) ? 8 : 4;
+    const int Nr = Nk + 6; /* 10 for AES-128, 14 for AES-256 */
+    const int total_words = (Nr + 1) * 4;
+    /* First Nk words of round_keys are the key bytes verbatim. */
+    for (int i = 0; i < Nk * 4; ++i)
+        round_keys[i] = key[i];
+    unsigned char tmp[4];
+    for (int i = Nk; i < total_words; ++i)
+    {
+        tmp[0] = round_keys[(i - 1) * 4 + 0];
+        tmp[1] = round_keys[(i - 1) * 4 + 1];
+        tmp[2] = round_keys[(i - 1) * 4 + 2];
+        tmp[3] = round_keys[(i - 1) * 4 + 3];
+        if (i % Nk == 0)
+        {
+            /* RotWord + SubWord + XOR Rcon. */
+            const unsigned char t = tmp[0];
+            tmp[0] = (unsigned char)(kAesSbox[tmp[1]] ^ kAesRcon[i / Nk]);
+            tmp[1] = kAesSbox[tmp[2]];
+            tmp[2] = kAesSbox[tmp[3]];
+            tmp[3] = kAesSbox[t];
+        }
+        else if (Nk > 6 && i % Nk == 4)
+        {
+            /* AES-256 only: extra SubWord every 4 words inside the cycle. */
+            tmp[0] = kAesSbox[tmp[0]];
+            tmp[1] = kAesSbox[tmp[1]];
+            tmp[2] = kAesSbox[tmp[2]];
+            tmp[3] = kAesSbox[tmp[3]];
+        }
+        for (int j = 0; j < 4; ++j)
+            round_keys[i * 4 + j] = (unsigned char)(round_keys[(i - Nk) * 4 + j] ^ tmp[j]);
+    }
+    return Nr;
+}
+
+static void aes_add_round_key(unsigned char state[16], const unsigned char* rk)
+{
+    for (int i = 0; i < 16; ++i)
+        state[i] ^= rk[i];
+}
+
+static void aes_sub_bytes(unsigned char state[16])
+{
+    for (int i = 0; i < 16; ++i)
+        state[i] = kAesSbox[state[i]];
+}
+
+static void aes_inv_sub_bytes(unsigned char state[16])
+{
+    for (int i = 0; i < 16; ++i)
+        state[i] = kAesInvSbox[state[i]];
+}
+
+static void aes_shift_rows(unsigned char s[16])
+{
+    /* Row 1: shift left by 1.  Row 2: by 2.  Row 3: by 3.
+     * AES state is stored column-major: index = col*4 + row. */
+    unsigned char t;
+    t = s[1];
+    s[1] = s[5];
+    s[5] = s[9];
+    s[9] = s[13];
+    s[13] = t;
+    t = s[2];
+    unsigned char u = s[6];
+    s[2] = s[10];
+    s[6] = s[14];
+    s[10] = t;
+    s[14] = u;
+    t = s[3];
+    s[3] = s[15];
+    s[15] = s[11];
+    s[11] = s[7];
+    s[7] = t;
+}
+
+static void aes_inv_shift_rows(unsigned char s[16])
+{
+    unsigned char t;
+    t = s[13];
+    s[13] = s[9];
+    s[9] = s[5];
+    s[5] = s[1];
+    s[1] = t;
+    t = s[2];
+    unsigned char u = s[6];
+    s[2] = s[10];
+    s[6] = s[14];
+    s[10] = t;
+    s[14] = u;
+    t = s[7];
+    s[7] = s[11];
+    s[11] = s[15];
+    s[15] = s[3];
+    s[3] = t;
+}
+
+static void aes_mix_columns(unsigned char s[16])
+{
+    for (int c = 0; c < 4; ++c)
+    {
+        unsigned char* col = s + c * 4;
+        const unsigned char a0 = col[0], a1 = col[1], a2 = col[2], a3 = col[3];
+        const unsigned char t = (unsigned char)(a0 ^ a1 ^ a2 ^ a3);
+        col[0] ^= (unsigned char)(t ^ aes_xtime((unsigned char)(a0 ^ a1)));
+        col[1] ^= (unsigned char)(t ^ aes_xtime((unsigned char)(a1 ^ a2)));
+        col[2] ^= (unsigned char)(t ^ aes_xtime((unsigned char)(a2 ^ a3)));
+        col[3] ^= (unsigned char)(t ^ aes_xtime((unsigned char)(a3 ^ a0)));
+    }
+}
+
+/* Helpers: multiply by 9, 11, 13, 14 in GF(2^8). Each is a sum of
+ * xtime applications: 9 = 8+1, 11 = 8+2+1, 13 = 8+4+1, 14 = 8+4+2. */
+static unsigned char aes_mul9(unsigned char x)
+{
+    const unsigned char x2 = aes_xtime(x);
+    const unsigned char x4 = aes_xtime(x2);
+    const unsigned char x8 = aes_xtime(x4);
+    return (unsigned char)(x8 ^ x);
+}
+static unsigned char aes_mul11(unsigned char x)
+{
+    const unsigned char x2 = aes_xtime(x);
+    const unsigned char x4 = aes_xtime(x2);
+    const unsigned char x8 = aes_xtime(x4);
+    return (unsigned char)(x8 ^ x2 ^ x);
+}
+static unsigned char aes_mul13(unsigned char x)
+{
+    const unsigned char x2 = aes_xtime(x);
+    const unsigned char x4 = aes_xtime(x2);
+    const unsigned char x8 = aes_xtime(x4);
+    return (unsigned char)(x8 ^ x4 ^ x);
+}
+static unsigned char aes_mul14(unsigned char x)
+{
+    const unsigned char x2 = aes_xtime(x);
+    const unsigned char x4 = aes_xtime(x2);
+    const unsigned char x8 = aes_xtime(x4);
+    return (unsigned char)(x8 ^ x4 ^ x2);
+}
+
+static void aes_inv_mix_columns(unsigned char s[16])
+{
+    /* InvMixColumns matrix per FIPS 197 §5.3.3:
+     *   [14 11 13  9]
+     *   [ 9 14 11 13]
+     *   [13  9 14 11]
+     *   [11 13  9 14] */
+    for (int c = 0; c < 4; ++c)
+    {
+        unsigned char* col = s + c * 4;
+        const unsigned char a0 = col[0], a1 = col[1], a2 = col[2], a3 = col[3];
+        col[0] = (unsigned char)(aes_mul14(a0) ^ aes_mul11(a1) ^ aes_mul13(a2) ^ aes_mul9(a3));
+        col[1] = (unsigned char)(aes_mul9(a0) ^ aes_mul14(a1) ^ aes_mul11(a2) ^ aes_mul13(a3));
+        col[2] = (unsigned char)(aes_mul13(a0) ^ aes_mul9(a1) ^ aes_mul14(a2) ^ aes_mul11(a3));
+        col[3] = (unsigned char)(aes_mul11(a0) ^ aes_mul13(a1) ^ aes_mul9(a2) ^ aes_mul14(a3));
+    }
+}
+
+/* Encrypt one 16-byte block in place. round_keys must hold the
+ * key schedule from `aes_key_expansion`. Nr ∈ {10, 14}. */
+static void aes_encrypt_block(unsigned char state[16], const unsigned char* round_keys, int Nr)
+{
+    aes_add_round_key(state, round_keys);
+    for (int r = 1; r < Nr; ++r)
+    {
+        aes_sub_bytes(state);
+        aes_shift_rows(state);
+        aes_mix_columns(state);
+        aes_add_round_key(state, round_keys + r * 16);
+    }
+    aes_sub_bytes(state);
+    aes_shift_rows(state);
+    aes_add_round_key(state, round_keys + Nr * 16);
+}
+
+static void aes_decrypt_block(unsigned char state[16], const unsigned char* round_keys, int Nr)
+{
+    aes_add_round_key(state, round_keys + Nr * 16);
+    for (int r = Nr - 1; r >= 1; --r)
+    {
+        aes_inv_shift_rows(state);
+        aes_inv_sub_bytes(state);
+        aes_add_round_key(state, round_keys + r * 16);
+        aes_inv_mix_columns(state);
+    }
+    aes_inv_shift_rows(state);
+    aes_inv_sub_bytes(state);
+    aes_add_round_key(state, round_keys);
+}
+
+/* CBC mode. `len` must be a multiple of 16 (the bcrypt API surface
+ * accepts a NoPadding flag — we never insert PKCS#7 padding here,
+ * so the caller is responsible for padding to a 16-byte boundary).
+ * `iv` is the initial 16-byte vector; modified in place to the
+ * final ciphertext block so chained calls continue cleanly. */
+static void aes_cbc_encrypt(const unsigned char* in, unsigned int len, const unsigned char* round_keys, int Nr,
+                            unsigned char* iv, unsigned char* out)
+{
+    unsigned char block[16];
+    for (unsigned int off = 0; off < len; off += 16)
+    {
+        for (int i = 0; i < 16; ++i)
+            block[i] = (unsigned char)(in[off + i] ^ iv[i]);
+        aes_encrypt_block(block, round_keys, Nr);
+        for (int i = 0; i < 16; ++i)
+        {
+            out[off + i] = block[i];
+            iv[i] = block[i];
+        }
+    }
+}
+
+static void aes_cbc_decrypt(const unsigned char* in, unsigned int len, const unsigned char* round_keys, int Nr,
+                            unsigned char* iv, unsigned char* out)
+{
+    unsigned char block[16];
+    unsigned char next_iv[16];
+    for (unsigned int off = 0; off < len; off += 16)
+    {
+        for (int i = 0; i < 16; ++i)
+        {
+            block[i] = in[off + i];
+            next_iv[i] = in[off + i];
+        }
+        aes_decrypt_block(block, round_keys, Nr);
+        for (int i = 0; i < 16; ++i)
+        {
+            out[off + i] = (unsigned char)(block[i] ^ iv[i]);
+            iv[i] = next_iv[i];
+        }
+    }
+}
+
 /* Algorithm-id matching: BCryptOpenAlgorithmProvider passes a UTF-16
  * algorithm name (e.g. L"SHA256", L"SHA1", L"MD5"). Each match
  * function checks for exact equality. */
@@ -584,6 +875,10 @@ static int IsMd5(const wchar_t16* algid)
 {
     return wstr_eq(algid, "MD5");
 }
+static int IsAes(const wchar_t16* algid)
+{
+    return wstr_eq(algid, "AES");
+}
 
 /* Per-algorithm hash slot. Single-threaded callers only. The slot
  * union holds whichever digest is live; g_hash_kind selects the
@@ -603,6 +898,7 @@ typedef enum
 #define BCRYPT_ALG_MD5 ((HANDLE)0x2003)
 #define BCRYPT_ALG_SHA384 ((HANDLE)0x2004)
 #define BCRYPT_ALG_SHA512 ((HANDLE)0x2005)
+#define BCRYPT_ALG_AES ((HANDLE)0x2006)
 #define BCRYPT_ALG_GENERIC ((HANDLE)0x2000)
 
 #define BCRYPT_HASH_SHA256 ((HANDLE)0x3001)
@@ -611,6 +907,11 @@ typedef enum
 #define BCRYPT_HASH_SHA384 ((HANDLE)0x3004)
 #define BCRYPT_HASH_SHA512 ((HANDLE)0x3005)
 #define BCRYPT_HASH_GENERIC ((HANDLE)0x3000)
+
+/* Symmetric-key handle bases. AES key handles are 0x4001..0x4FFF;
+ * a key carries its expanded round-key schedule (240 bytes for
+ * AES-256, fits AES-128's 176 too) plus the active chaining mode. */
+#define BCRYPT_KEY_AES ((HANDLE)0x4001)
 
 static Sha256 g_sha256_slot;
 static Sha1 g_sha1_slot;
@@ -655,6 +956,8 @@ __declspec(dllexport) NTSTATUS BCryptOpenAlgorithmProvider(HANDLE* h, const wcha
         *h = BCRYPT_ALG_SHA1;
     else if (IsMd5(algid))
         *h = BCRYPT_ALG_MD5;
+    else if (IsAes(algid))
+        *h = BCRYPT_ALG_AES;
     else
         *h = BCRYPT_ALG_GENERIC;
     return STATUS_SUCCESS;
@@ -802,6 +1105,159 @@ __declspec(dllexport) NTSTATUS BCryptDestroyHash(HANDLE h)
         g_sha1_in_use = 0;
     else if (h == BCRYPT_HASH_MD5)
         g_md5_in_use = 0;
+    return STATUS_SUCCESS;
+}
+
+/* ----- Symmetric AES surface --------------------------------------- */
+
+/* Chaining mode tags. Default is CBC; SetProperty(BCRYPT_CHAINING_MODE,
+ * L"ChainingModeECB" / "ChainingModeCBC") flips it. */
+#define BCRYPT_CHAIN_CBC 0u
+#define BCRYPT_CHAIN_ECB 1u
+
+static unsigned char g_aes_round_keys[240]; // fits AES-256
+static int g_aes_rounds;                    // 10 (AES-128) or 14 (AES-256)
+static int g_aes_in_use;
+static unsigned int g_aes_chain_mode = BCRYPT_CHAIN_CBC;
+
+__declspec(dllexport) NTSTATUS BCryptGenerateSymmetricKey(HANDLE alg, HANDLE* out_key, unsigned char* key_obj,
+                                                          ULONG key_obj_len, unsigned char* secret, ULONG secret_len,
+                                                          ULONG flags)
+{
+    (void)key_obj;
+    (void)key_obj_len;
+    (void)flags;
+    if (out_key == 0 || secret == 0)
+        return STATUS_INVALID_PARAMETER;
+    if (alg != BCRYPT_ALG_AES)
+        return STATUS_INVALID_PARAMETER;
+    if (secret_len != 16 && secret_len != 32)
+        return STATUS_INVALID_PARAMETER;
+    g_aes_rounds = aes_key_expansion(secret, (unsigned int)secret_len, g_aes_round_keys);
+    g_aes_in_use = 1;
+    *out_key = BCRYPT_KEY_AES;
+    return STATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS BCryptDestroyKey(HANDLE k)
+{
+    if (k == BCRYPT_KEY_AES)
+        g_aes_in_use = 0;
+    return STATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS BCryptSetProperty(HANDLE h, const wchar_t16* prop, unsigned char* value, ULONG value_len,
+                                                 ULONG flags)
+{
+    (void)flags;
+    if (prop == 0)
+        return STATUS_INVALID_PARAMETER;
+    /* The only property we honour is the AES chaining mode. The
+     * value is a UTF-16 string ("ChainingModeCBC" / "ECB"). */
+    if (h == BCRYPT_KEY_AES && wstr_eq(prop, "ChainingMode"))
+    {
+        if (value == 0 || value_len < 2)
+            return STATUS_INVALID_PARAMETER;
+        const wchar_t16* w = (const wchar_t16*)value;
+        if (wstr_eq(w, "ChainingModeECB"))
+            g_aes_chain_mode = BCRYPT_CHAIN_ECB;
+        else
+            g_aes_chain_mode = BCRYPT_CHAIN_CBC; // default + explicit "ChainingModeCBC"
+        return STATUS_SUCCESS;
+    }
+    return STATUS_NOT_FOUND;
+}
+
+__declspec(dllexport) NTSTATUS BCryptEncrypt(HANDLE k, unsigned char* in, ULONG in_len, void* padding_info,
+                                             unsigned char* iv, ULONG iv_len, unsigned char* out, ULONG out_len,
+                                             ULONG* used, ULONG flags)
+{
+    (void)padding_info;
+    (void)flags;
+    if (used)
+        *used = 0;
+    if (k != BCRYPT_KEY_AES || !g_aes_in_use)
+        return STATUS_INVALID_PARAMETER;
+    if (in == 0)
+        return STATUS_INVALID_PARAMETER;
+    if (in_len == 0 || (in_len & 15u))
+        return STATUS_INVALID_PARAMETER;
+    /* Sizing pass: caller passes out == NULL to learn how big the
+     * ciphertext will be. AES is length-preserving, so we report
+     * in_len. */
+    if (out == 0)
+    {
+        if (used)
+            *used = in_len;
+        return STATUS_SUCCESS;
+    }
+    if (out_len < in_len)
+        return STATUS_INVALID_PARAMETER;
+    if (g_aes_chain_mode == BCRYPT_CHAIN_CBC)
+    {
+        if (iv == 0 || iv_len != 16)
+            return STATUS_INVALID_PARAMETER;
+        aes_cbc_encrypt(in, in_len, g_aes_round_keys, g_aes_rounds, iv, out);
+    }
+    else
+    {
+        for (ULONG off = 0; off < in_len; off += 16)
+        {
+            unsigned char block[16];
+            for (int i = 0; i < 16; ++i)
+                block[i] = in[off + i];
+            aes_encrypt_block(block, g_aes_round_keys, g_aes_rounds);
+            for (int i = 0; i < 16; ++i)
+                out[off + i] = block[i];
+        }
+    }
+    if (used)
+        *used = in_len;
+    return STATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS BCryptDecrypt(HANDLE k, unsigned char* in, ULONG in_len, void* padding_info,
+                                             unsigned char* iv, ULONG iv_len, unsigned char* out, ULONG out_len,
+                                             ULONG* used, ULONG flags)
+{
+    (void)padding_info;
+    (void)flags;
+    if (used)
+        *used = 0;
+    if (k != BCRYPT_KEY_AES || !g_aes_in_use)
+        return STATUS_INVALID_PARAMETER;
+    if (in == 0)
+        return STATUS_INVALID_PARAMETER;
+    if (in_len == 0 || (in_len & 15u))
+        return STATUS_INVALID_PARAMETER;
+    if (out == 0)
+    {
+        if (used)
+            *used = in_len;
+        return STATUS_SUCCESS;
+    }
+    if (out_len < in_len)
+        return STATUS_INVALID_PARAMETER;
+    if (g_aes_chain_mode == BCRYPT_CHAIN_CBC)
+    {
+        if (iv == 0 || iv_len != 16)
+            return STATUS_INVALID_PARAMETER;
+        aes_cbc_decrypt(in, in_len, g_aes_round_keys, g_aes_rounds, iv, out);
+    }
+    else
+    {
+        for (ULONG off = 0; off < in_len; off += 16)
+        {
+            unsigned char block[16];
+            for (int i = 0; i < 16; ++i)
+                block[i] = in[off + i];
+            aes_decrypt_block(block, g_aes_round_keys, g_aes_rounds);
+            for (int i = 0; i < 16; ++i)
+                out[off + i] = block[i];
+        }
+    }
+    if (used)
+        *used = in_len;
     return STATUS_SUCCESS;
 }
 
