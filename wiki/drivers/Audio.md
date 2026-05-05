@@ -13,14 +13,34 @@ primarily Intel HDA (High Definition Audio) shell with stubs for the
 core mixer + audio-server surface that the Win32 `winmm` /
 `xaudio2` DLLs will eventually marshal through.
 
-## Intel HDA Shell
+## Intel HDA driver
 
-`kernel/drivers/audio/hda/`.
+PCI discovery + classification lives in `kernel/drivers/audio/audio.{h,cpp}`;
+HDA-specific bring-up + codec walking + stream programming lives in
+`kernel/drivers/audio/hda.{h,cpp}` (split out of `audio.cpp` once the
+HDA code grew past the bloat threshold). The shell calls
+`hda::BringUp(controller)` for the first HDA controller it finds.
 
-- PCI probe + MMIO register map.
-- CORB / RIRB ring setup is in progress.
-- No live audio output yet — `winmm!waveOutWrite` returns success
-  with `// STUB:` markers in the userland DLL.
+The HDA driver:
+
+- Programs CORB / RIRB rings against a single 4 KiB DMA-coherent
+  page (CORB at offset 0, RIRB at offset 1 KiB).
+- Walks every codec slot reported by `STATESTS` and records
+  per-codec DAC / ADC / pin counts, amp-widget counts, and
+  connection-list totals.
+- Reads ISS / OSS from `GCAP` so the stream-arming helper knows
+  the SD index range.
+- Provides `hda::IssueVerbAndPoll(...)` so future codec
+  configuration code (`SET_PIN_WIDGET_CONTROL`,
+  `SET_AMP_GAIN_MUTE`) doesn't re-marshal CORB writes.
+- Provides `hda::StreamArm(controller, dir, fmt, bdl_phys,
+  buffer_bytes, lvi)` to program a free SD slot's BDL pointer,
+  CBL, LVI, FORMAT, and stream tag. `RUN` is **not** set —
+  flipping it requires real BDL entries pointing at audio buffer
+  pages, which lands in the audio-server slice.
+
+`winmm!waveOutWrite` still returns success with a `// STUB:`
+marker because no audio server consumes the armed stream.
 
 ## Audio Routing (planned)
 

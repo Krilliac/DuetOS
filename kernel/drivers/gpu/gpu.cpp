@@ -26,7 +26,10 @@
 #include "drivers/video/framebuffer.h"
 #include "mm/paging.h"
 #include "drivers/pci/pci.h"
+#include "drivers/gpu/amd_gpu.h"
 #include "drivers/gpu/bochs_vbe.h"
+#include "drivers/gpu/intel_gpu.h"
+#include "drivers/gpu/nvidia_gpu.h"
 #include "drivers/gpu/virtio_gpu.h"
 
 namespace duetos::drivers::gpu
@@ -83,25 +86,10 @@ u16 Mmio16(const GpuInfo& g, u64 offset)
     return *p;
 }
 
-u32 Mmio32(const GpuInfo& g, u64 offset)
-{
-    if (g.mmio_virt == nullptr || offset + 4 > g.mmio_size)
-        return 0xFFFFFFFFu;
-    auto* p = reinterpret_cast<volatile u32*>(static_cast<u8*>(g.mmio_virt) + offset);
-    return *p;
-}
-
-// NVIDIA PMC_BOOT_0 is at BAR0 + 0x000000, 4 bytes, on every
-// NVIDIA GPU since NV4 (1998). Format (from open-gpu-kernel-modules
-// and nouveau's nvkm/engine/device/base.c):
-//   bits 27:20 = chipset / architecture id
-//   bits 19:16 = implementation
-//   bits 15:8  = reserved
-//   bits  7:0  = revision (major:minor nibbles)
-//
-// We map the architecture nibble to a short name for boot-log
-// readability; unknown values land on nullptr so the log shows the
-// raw value instead.
+// NVIDIA PMC_BOOT_0 architecture-nibble -> short codename. Used by
+// the cross-vendor diagnostic line in `LogGpu`. The nvidia driver
+// scaffold (drivers/gpu/nvidia_gpu.cpp) re-derives the same value
+// independently.
 const char* NvidiaArchName(u8 arch)
 {
     switch (arch)
@@ -135,64 +123,6 @@ const char* NvidiaArchName(u8 arch)
     default:
         return nullptr;
     }
-}
-
-void ProbeNvidiaRegisters(GpuInfo& g)
-{
-    constexpr u64 kPmcBoot0 = 0x000000;
-    const u32 boot0 = Mmio32(g, kPmcBoot0);
-    g.probe_reg = boot0;
-    g.mmio_live = (boot0 != 0xFFFFFFFFu);
-    if (!g.mmio_live)
-    {
-        arch::SerialWrite("[gpu-probe] nvidia: BAR0 read returned 0xFFFFFFFF (MMIO decode failed)\n");
-        return;
-    }
-    const u8 arch_nib = static_cast<u8>((boot0 >> 20) & 0xFF);
-    const u8 impl = static_cast<u8>((boot0 >> 16) & 0xF);
-    const u8 rev = static_cast<u8>(boot0 & 0xFF);
-    g.arch = NvidiaArchName(arch_nib);
-    arch::SerialWrite("[gpu-probe] nvidia: PMC_BOOT_0=");
-    arch::SerialWriteHex(boot0);
-    arch::SerialWrite(" arch=");
-    arch::SerialWriteHex(arch_nib);
-    if (g.arch != nullptr)
-    {
-        arch::SerialWrite(" (");
-        arch::SerialWrite(g.arch);
-        arch::SerialWrite(")");
-    }
-    arch::SerialWrite(" impl=");
-    arch::SerialWriteHex(impl);
-    arch::SerialWrite(" rev=");
-    arch::SerialWriteHex(rev);
-    arch::SerialWrite("\n");
-}
-
-// Intel iGPU: BAR0 is the MMIO register aperture on every Gen we
-// target (Gen9+). There isn't a single "chip id" register that
-// works across every Gen — the canonical GT revision register moves
-// between 0x0 (GEN_INFO) and 0x9130 (GT_CAPABILITY) depending on
-// generation. For v0, we only perform a liveness read and log the
-// first dword. A full-driver slice will decode per-Gen registers.
-void ProbeIntelRegisters(GpuInfo& g)
-{
-    const u32 dword0 = Mmio32(g, 0);
-    g.probe_reg = dword0;
-    g.mmio_live = (dword0 != 0xFFFFFFFFu);
-    arch::SerialWrite("[gpu-probe] intel: BAR0[0]=");
-    arch::SerialWriteHex(dword0);
-    arch::SerialWrite(g.mmio_live ? " (MMIO live)\n" : " (MMIO decode failed)\n");
-}
-
-// AMD Radeon GFX9+: BAR0 is VRAM framebuffer, BAR2 is doorbell, and
-// BAR5 is the MMIO register aperture. We only map BAR0 in GpuInit
-// today, so we cannot reach AMD register ids. A full AMD slice will
-// probe and map BAR5, then read e.g. mmGRBM_STATUS (0x8010).
-void ProbeAmdRegisters(GpuInfo& g)
-{
-    (void)g;
-    arch::SerialWrite("[gpu-probe] amd: no register read — registers at BAR5, not mapped in v0\n");
 }
 
 void DecodeBochsVbe(const GpuInfo& g)
@@ -276,22 +206,31 @@ void RunVendorProbe(GpuInfo& g)
     // GpuInfo. These are the first reads that actually talk to
     // the hardware past PCI config-space — a failing read here
     // means the BAR map is broken or the controller is dead.
-    if (g.mmio_virt != nullptr)
+    //
+    // The probes themselves live in per-vendor TUs (intel_gpu,
+    // amd_gpu, nvidia_gpu) so each vendor's register layout is
+    // localised. Discovery here just dispatches.
+    switch (g.vendor_id)
     {
-        switch (g.vendor_id)
+    case kVendorNvidia:
+        nvidia::Probe(g);
+        if (g.mmio_live)
         {
-        case kVendorNvidia:
-            ProbeNvidiaRegisters(g);
-            break;
-        case kVendorIntel:
-            ProbeIntelRegisters(g);
-            break;
-        case kVendorAmd:
-            ProbeAmdRegisters(g);
-            break;
-        default:
-            break;
+            // Decode the architecture nibble for the cross-vendor
+            // diagnostic line. The nvidia driver scaffold logs the
+            // raw fields itself; we just want a tag here.
+            const u8 arch_nib = static_cast<u8>((g.probe_reg >> 20) & 0xFF);
+            g.arch = NvidiaArchName(arch_nib);
         }
+        break;
+    case kVendorIntel:
+        intel::Probe(g);
+        break;
+    case kVendorAmd:
+        amd::Probe(g);
+        break;
+    default:
+        break;
     }
 
     // Bochs VBE aperture is a QEMU-only detail — probing it on bare

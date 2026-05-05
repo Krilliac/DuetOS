@@ -569,6 +569,11 @@ duetos_stub_dll(ddraw 0x102B0000 "DirectDrawCreate,DirectDrawCreateEx,DirectDraw
 duetos_stub_dll(d2d1 0x102C0000 "D2D1CreateFactory")
 duetos_stub_dll(dwrite 0x102D0000 "DWriteCreateFactory")
 
+# HLSL compiler — userland d3dcompiler.dll. Real lex + parse + emit
+# of a tiny HLSL subset; produces a deterministic DXBC-shaped blob.
+# See userland/libs/d3dcompiler/d3dcompiler.c.
+duetos_stub_dll(d3dcompiler 0x102E0000 "D3DCompile,D3DCompile2,D3DCreateBlob,D3DReflect,D3DDisassemble,DuetOS_D3DCompiler_PeekBlobMagic")
+
 
 set(DUETOS_KERNEL_LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/arch/x86_64/linker.ld")
 

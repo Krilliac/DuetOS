@@ -67,11 +67,51 @@ swap->Present(0, 0);
 This rasterizes a coloured triangle into the back buffer and
 BitBlts it to the owning HWND via `SYS_GDI_BITBLT`.
 
+## HLSL compilation — `d3dcompiler.dll`
+
+The userland `d3dcompiler.dll` (source:
+`userland/libs/d3dcompiler/d3dcompiler.c`) implements
+`D3DCompile` / `D3DCompile2` / `D3DCreateBlob` /
+`D3DReflect` / `D3DDisassemble`. The compiler is real but the
+HLSL subset is small:
+
+- Lexer recognises the `float`/`floatN`/`int`/`uint`/`half`/
+  `Texture2D`/`SamplerState` keyword set, identifiers, decimal
+  numbers (with optional `f` / `h` suffix), line + block
+  comments, and the punctuation needed for the supported
+  grammar.
+- Parser is recursive-descent over a top-level grammar of
+  struct declarations, `cbuffer` blocks, and function
+  definitions; statements are `return`, local-decl with
+  optional initialiser, and expression-statements; expressions
+  are arithmetic with `+ - * /`, unary `-`, parenthesisation,
+  field access (`.xyzw`), function calls, and type
+  constructors (`float4(x, y, z, w)`).
+- Bytecode emitter produces a deterministic DXBC-shaped blob:
+  `DXBC` magic + 16-byte FNV-1a-derived hash + reserved + total
+  size + chunk directory pointing at SHEX (executable opcode
+  stream), ISGN (input signature), OSGN (output signature),
+  and STAT (node + token totals).
+
+The blob is wrapped in an `ID3DBlob` with the canonical COM
+shape (IUnknown + GetBufferPointer + GetBufferSize). v0
+downstream code in `d3d11.dll` still ignores the bytecode at
+draw time — the rasterizer remains pass-through —  but the
+compiler is real enough that:
+
+- A second compile of identical source produces a byte-exact
+  blob (deterministic hash).
+- `D3DReflect` round-trips the blob (echoes the source bytes
+  in a refcounted blob the caller can poke directly).
+- `DuetOS_D3DCompiler_PeekBlobMagic(blob)` returns the `DXBC`
+  magic for smoke tests.
+
 ## What Returns E_NOTIMPL
 
-- HLSL compilation (vertex / pixel shaders are tracked but their
-  bytecode is ignored — the rasterizer always uses pass-through
-  position + per-vertex colour).
+- HLSL bytecode is **compiled** by `d3dcompiler.dll` but
+  **not executed** by the d3d11 / d3d12 draw path — the
+  rasterizer always uses pass-through position + per-vertex
+  colour.
 - Texture sampling (SRVs, samplers).
 - Geometry / hull / domain / compute shaders.
 - Multi-stream input (only slot 0 of `IASetVertexBuffers` honoured).
