@@ -6,6 +6,7 @@
 #include "mm/kheap.h"
 #include "sched/sched.h"
 #include "subsystems/translation/translate.h"
+#include "fs/ramfs.h"
 #include "security/fault_domain.h"
 #include "log/klog.h"
 #include "core/panic.h"
@@ -135,6 +136,12 @@ u64 DeltaClampMonotonic(const char* counter_name, u64 now, u64 prev)
         // registry.
         FaultDomainTick();
         LogWithValue(LogLevel::Info, "kheartbeat", "fault_domains_count", FaultDomainCount());
+
+        // Refresh /proc/dumps with the current recent-dumps ring
+        // so userland tools see the latest crash records without
+        // a shell session. Cheap when the ring is empty (one
+        // bounded scan + zero copy).
+        ::duetos::fs::RamfsDumpsSnapshot();
 
         prev_tick_sample = sched_stats.total_ticks;
         prev_sched_stats = sched_stats;

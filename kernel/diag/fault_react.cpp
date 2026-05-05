@@ -4,6 +4,7 @@
 #include "log/klog.h"
 #include "proc/process.h"
 #include "sched/sched.h"
+#include "security/domain_dump.h"
 #include "security/fault_domain.h"
 
 namespace duetos::diag
@@ -18,7 +19,7 @@ namespace
 // The size mirrors core::kMaxFaultDomains; we don't pull the
 // constant transitively here to avoid a header-cycle and instead
 // assert at the call site that the id fits.
-constexpr u32 kPolicySlotCount = 16; // == core::kMaxFaultDomains
+constexpr u32 kPolicySlotCount = 48; // == core::kMaxFaultDomains
 constinit FaultReactionFn g_policies[kPolicySlotCount] = {};
 
 // Per-domain pending fault, written by trap handlers via
@@ -351,6 +352,24 @@ void FaultReactDrainPending()
         ev.attempt_count = 0;
         ev.faulting_rip = rip;
         ev.aux = 0;
+
+        // Per-domain crash dump — non-fatal, emitted on serial
+        // and into the in-kernel recent-dumps ring before the
+        // dispatcher decides on a reaction. We dump unconditionally
+        // for trap-recorded faults: by the time we're here the
+        // domain's code has tripped a kernel-mode #PF/#GP that the
+        // extable caught, and the dump is the operator's only
+        // window into "what was the subsystem doing the moment
+        // before it tripped." If the dispatcher subsequently
+        // halts (Halt floor), the dump is already on serial; if
+        // it restarts the domain, the dump is the receipt.
+        ::duetos::security::DomainDumpEvidence dde = {};
+        dde.kind = kind;
+        dde.faulting_rip = rip;
+        dde.aux = 0;
+        dde.frame = nullptr;
+        ::duetos::security::BeginDomainDump(i, dde);
+        ::duetos::security::EndDomainDump();
 
         // Dispatch may panic; if it does, that's the right
         // outcome (the floor decided the kind warrants Halt).

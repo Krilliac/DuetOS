@@ -4971,3 +4971,86 @@ doc helps future readers audit the trail.
   the same write.
 - **Related tracks:** Track 7 (Storage / FS), Track 11
   (Diagnostics — minidump / panic surface).
+
+
+## ModuleState enum is 3-valued, not 6 (2026-05-05)
+
+- **Decision:** The operator-visible `core::ModuleState` enum
+  has three values — `Stopped`, `Running`, `Crashed` — not the
+  six (`Stopped`, `Starting`, `Running`, `Stopping`, `Crashed`,
+  `Restarting`) a textbook lifecycle would suggest.
+- **Why:** `init` and `teardown` are non-yielding under the
+  single-writer fault-domain registry. Transient
+  `Starting` / `Stopping` / `Restarting` would never be observable
+  to a reader: the same call that flips `Stopped → Starting`
+  flips `Starting → Running` synchronously. The intermediate
+  values would surface only if a reader happened to interrupt
+  a writer mid-call, which can't happen on the single-CPU
+  heartbeat path that owns the registry. `Crashed` is the only
+  new state worth distinguishing from `Stopped` because they
+  answer different operational questions ("operator stopped me"
+  vs "trap landed in my code, watchdog hasn't drained yet").
+- **Why not (alternatives considered):**
+  - **Six-valued**: dead complexity. Every state name a reader
+    can see has to be documented + tested; making three of
+    them unreachable is anti-bloat by definition.
+  - **Two-valued (`Stopped` / `Running`)**: loses the "fault
+    just tripped" signal an operator wants to see. `Crashed`
+    is the difference between "I asked to stop this" and "this
+    crashed and is about to come back."
+- **Revisit when:** SMP runqueues land and the registry grows
+  to support per-CPU restart paths. If two CPUs can drive a
+  domain's lifecycle simultaneously, the transient states
+  become observable and we'd need to expand the enum.
+- **Related tracks:** [Kernel Modularization](../security/Kernel-Modularization.md),
+  [Runtime Recovery](../security/Runtime-Recovery.md).
+
+## Fault-domain registry capacity is 48 (2026-05-05)
+
+- **Decision:** `core::kMaxFaultDomains` is 48 — not 16 (the
+  initial v0 cap) and not unbounded.
+- **Why:** Roughly 30 subsystems are restartable per the
+  foundation-vs-restartable classification in
+  [Kernel Modularization](../security/Kernel-Modularization.md).
+  20 are already registered today; 48 gives 50% headroom for
+  follow-up migrations without forcing a registry rebuild.
+  Linear scans (`FaultDomainTick`, `FaultDomainFind`) stay
+  trivial at this size — one cache line per few rows.
+- **Why not (alternatives considered):**
+  - **Unbounded (heap-allocated):** the registry is consulted
+    from the trap handler's heartbeat tick where every alloc
+    is a risk. Fixed-size keeps that path lock-free /
+    alloc-free.
+  - **128 or 256:** YAGNI — even with full migration of every
+    restartable subsystem we don't reach 48. The bigger array
+    is dead memory the kernel image carries forever.
+- **Revisit when:** Migration of the wave-1 + wave-2 modules
+  pushes the actual count past 36 (75% of capacity); raise to
+  64 then.
+- **Related tracks:** [Kernel Modularization](../security/Kernel-Modularization.md).
+
+## Per-domain crash dump is non-fatal and lives in its own TU (2026-05-05)
+
+- **Decision:** `BeginDomainDump` / `EndDomainDump` are
+  separate APIs from `core::BeginCrashDump` / `EndCrashDump`,
+  emitted from `kernel/security/domain_dump.cpp`, never call
+  `SerialEnterPanicMode`, never broadcast NMI, never halt.
+  The dump goes to serial **and** an in-kernel ring of the
+  last 8 records per domain (replayable via `module dumps`).
+- **Why:** Re-using the panic crash-dump path for non-fatal
+  domain crashes would dilute the panic semantics — that
+  path's reader assumes the kernel is dead. A separate emitter
+  keeps panic.cpp focused on its one job and lets the heartbeat-
+  side fault-react drain emit dumps without touching panic
+  state.
+- **Why not (alternatives considered):**
+  - **Halt-on-dump:** defeats the entire modularization point.
+  - **Disk persistence:** depends on a writable FS that is
+    itself a managed module — bootstrap problem. Serial +
+    in-kernel ring is enough for v0; QEMU serial capture
+    plays the role of "disk."
+- **Revisit when:** A non-foundational FS module (ramfs is the
+  obvious candidate) is willing to host `/var/crash/` and
+  accept the bootstrap-ordering complexity of being writable
+  before the dump path needs it.
+- **Related tracks:** [Kernel Modularization](../security/Kernel-Modularization.md).

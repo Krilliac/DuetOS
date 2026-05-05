@@ -31,19 +31,21 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
+#include "core/init.h"
+#include "core/panic.h"
 #include "debug/probes.h"
 #include "diag/cleanroom_trace.h"
+#include "drivers/net/bcm43xx.h"
+#include "drivers/net/iwlwifi.h"
+#include "drivers/net/rtl88xx.h"
+#include "drivers/pci/pci.h"
 #include "log/klog.h"
-#include "core/panic.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
 #include "mm/paging.h"
 #include "net/stack.h"
 #include "sched/sched.h"
-#include "drivers/pci/pci.h"
-#include "drivers/net/bcm43xx.h"
-#include "drivers/net/iwlwifi.h"
-#include "drivers/net/rtl88xx.h"
+#include "security/driver_domain.h"
 
 namespace duetos::drivers::net
 {
@@ -1197,5 +1199,25 @@ const char* VirtioNetTag(u16 device_id)
         return "virtio-net";
     return "virtio-unknown-class";
 }
+
+namespace
+{
+
+::duetos::core::Result<void> RegisterNetModule()
+{
+    ::duetos::security::RegisterDriverDomain(
+        "drivers/net",
+        []() -> ::duetos::core::Result<void>
+        {
+            ::duetos::drivers::net::NetInit();
+            return {};
+        },
+        []() -> ::duetos::core::Result<void> { return ::duetos::drivers::net::NetShutdown(); });
+    return {};
+}
+
+} // namespace
+
+KERNEL_INITCALL(Drivers, "drivers/net.module", RegisterNetModule)
 
 } // namespace duetos::drivers::net

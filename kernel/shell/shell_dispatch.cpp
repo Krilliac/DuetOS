@@ -1397,7 +1397,21 @@ void Dispatch(char* line)
         // resources held by another task; gate to admin.
         if (!RequireAdmin("DOMAIN"))
             return;
+        // Once-per-boot deprecation warning. The aliasing
+        // remains until a future slice removes the verb.
+        ::duetos::arch::SerialWrite(
+            "[shell] `domain` is deprecated — use `module` (status/start/stop/restart/dump/dumps)\n");
         CmdDomain(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "module"))
+    {
+        // Lifecycle (start/stop/restart) can free resources held
+        // by other tasks and dumps go to COM1; gate to admin to
+        // match `domain`.
+        if (!RequireAdmin("MODULE"))
+            return;
+        CmdModule(argc, argv);
         return;
     }
     if (StrEq(cmd, "lockdep"))

@@ -96,6 +96,16 @@ bool RamfsIsDir(const RamfsNode* n);
 /// "system ready".
 void RamfsBoottraceSnapshot();
 
+/// Refresh `/proc/dumps` with the current contents of the in-
+/// kernel recent-dumps ring owned by
+/// `kernel/security/domain_dump.cpp`. Called from the heartbeat
+/// thread after `FaultDomainTick` so the userland-visible file
+/// is at most one heartbeat stale. Cheap when the ring is empty
+/// — one bounded scan + zero copy. Safe from heartbeat / shell
+/// context; not safe from a trap handler (the formatter takes
+/// a spinlock internally).
+void RamfsDumpsSnapshot();
+
 /// Format the native syscall number → name table into the static
 /// `/sys/syscalls` buffer. Each line is "<dec_nr>  SYS_FOO\n",
 /// in `kSyscallNames[]` order. Idempotent. Buffer is 8 KiB,

@@ -16,11 +16,13 @@
 #include "drivers/audio/audio.h"
 
 #include "arch/x86_64/serial.h"
+#include "core/init.h"
 #include "core/panic.h"
 #include "drivers/audio/hda.h"
 #include "drivers/pci/pci.h"
 #include "log/klog.h"
 #include "mm/paging.h"
+#include "security/driver_domain.h"
 
 namespace duetos::drivers::audio
 {
@@ -180,5 +182,25 @@ const AudioControllerInfo& AudioController(u64 index)
     KASSERT_WITH_VALUE(index < g_ac_count, "drivers/audio", "AudioController index out of range", index);
     return g_acs[index];
 }
+
+namespace
+{
+
+::duetos::core::Result<void> RegisterAudioModule()
+{
+    ::duetos::security::RegisterDriverDomain(
+        "drivers/audio",
+        []() -> ::duetos::core::Result<void>
+        {
+            ::duetos::drivers::audio::AudioInit();
+            return {};
+        },
+        []() -> ::duetos::core::Result<void> { return ::duetos::drivers::audio::AudioShutdown(); });
+    return {};
+}
+
+} // namespace
+
+KERNEL_INITCALL(Drivers, "drivers/audio.module", RegisterAudioModule)
 
 } // namespace duetos::drivers::audio

@@ -39,8 +39,10 @@
 #include "diag/ubsan.h"
 #include "mm/zone.h"
 #include "security/cap_audit.h"
+#include "security/domain_dump.h"
 #include "security/driver_domain.h"
 #include "security/fault_domain.h"
+#include "security/module.h"
 #include "sync/lockdep.h"
 #include "sync/rcu.h"
 #include "time/tick.h"
@@ -926,6 +928,125 @@ void CmdDomain(u32 argc, char** argv)
         return;
     }
     ConsoleWriteln("DOMAIN: USAGE: DOMAIN LIST | DOMAIN RESTART <NAME>");
+}
+
+// `module list / status <name> / start <name> / stop <name> /
+// restart <name> / dump <name> / dumps <name>` — operator
+// surface over the FaultDomain registry. Sibling of `domain`,
+// which is kept as an alias for one release. The richer surface
+// surfaces the ModuleState enum + recent-dumps ring + lifecycle
+// verbs that didn't exist on the original `domain` command.
+void CmdModule(u32 argc, char** argv)
+{
+    using ::duetos::core::FaultDomainCount;
+    using ::duetos::core::FaultDomainFind;
+    using ::duetos::core::FaultDomainGet;
+    using ::duetos::core::FaultDomainId;
+    using ::duetos::core::kFaultDomainInvalid;
+    using ::duetos::core::ModuleState;
+    using ::duetos::security::DumpRecentDumps;
+    using ::duetos::security::ModuleDump;
+    using ::duetos::security::ModuleRestart;
+    using ::duetos::security::ModuleStart;
+    using ::duetos::security::ModuleStateName;
+    using ::duetos::security::ModuleStateOf;
+    using ::duetos::security::ModuleStop;
+    using ::duetos::security::RecentDumpCount;
+
+    if (argc < 2)
+    {
+        ConsoleWriteln(
+            "MODULE: USAGE: MODULE LIST | MODULE STATUS <NAME> | MODULE START|STOP|RESTART|DUMP|DUMPS <NAME>");
+        return;
+    }
+
+    const char* sub = argv[1];
+
+    if (StrEq(sub, "list"))
+    {
+        CmdInspectDomains();
+        return;
+    }
+
+    if (argc < 3)
+    {
+        ConsoleWrite("MODULE ");
+        ConsoleWrite(sub);
+        ConsoleWriteln(": USAGE: PROVIDE A MODULE NAME");
+        return;
+    }
+    const char* name = argv[2];
+    const FaultDomainId id = FaultDomainFind(name);
+    if (id == kFaultDomainInvalid)
+    {
+        ConsoleWrite("MODULE ");
+        ConsoleWrite(sub);
+        ConsoleWrite(": NOT FOUND \"");
+        ConsoleWrite(name);
+        ConsoleWriteln("\"");
+        return;
+    }
+
+    if (StrEq(sub, "status"))
+    {
+        const auto* d = FaultDomainGet(id);
+        const auto state = ModuleStateOf(id);
+        ConsoleWrite("MODULE ");
+        ConsoleWrite(name);
+        ConsoleWrite(": state=");
+        ConsoleWrite(ModuleStateName(state));
+        ConsoleWrite(" restarts=");
+        WriteU64Dec(d->restart_count);
+        ConsoleWrite(" alive=");
+        ConsoleWrite(d->alive ? "true" : "false");
+        ConsoleWrite(" dumps=");
+        WriteU64Dec(RecentDumpCount(id));
+        ConsoleWriteln("");
+        return;
+    }
+    if (StrEq(sub, "start"))
+    {
+        const auto r = ModuleStart(id);
+        ConsoleWrite("MODULE START \"");
+        ConsoleWrite(name);
+        ConsoleWriteln(r ? "\": OK" : "\": REFUSED (see klog)");
+        return;
+    }
+    if (StrEq(sub, "stop"))
+    {
+        const auto r = ModuleStop(id);
+        ConsoleWrite("MODULE STOP \"");
+        ConsoleWrite(name);
+        ConsoleWriteln(r ? "\": OK" : "\": REFUSED (see klog)");
+        return;
+    }
+    if (StrEq(sub, "restart"))
+    {
+        const auto r = ModuleRestart(id);
+        ConsoleWrite("MODULE RESTART \"");
+        ConsoleWrite(name);
+        ConsoleWriteln(r ? "\": OK" : "\": FAILED (see klog)");
+        return;
+    }
+    if (StrEq(sub, "dump"))
+    {
+        const auto r = ModuleDump(id);
+        ConsoleWrite("MODULE DUMP \"");
+        ConsoleWrite(name);
+        ConsoleWriteln(r ? "\": EMITTED ON COM1" : "\": FAILED");
+        return;
+    }
+    if (StrEq(sub, "dumps"))
+    {
+        DumpRecentDumps(id);
+        ConsoleWrite("MODULE DUMPS \"");
+        ConsoleWrite(name);
+        ConsoleWriteln("\": HISTORICAL DUMPS ON COM1");
+        return;
+    }
+    ConsoleWrite("MODULE: UNKNOWN SUBCOMMAND \"");
+    ConsoleWrite(sub);
+    ConsoleWriteln("\"");
 }
 
 // `lockdep panic on|off` — flip the inversion-promote-to-panic

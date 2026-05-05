@@ -21,16 +21,18 @@
 
 #include "arch/x86_64/hypervisor.h"
 #include "arch/x86_64/serial.h"
-#include "log/klog.h"
+#include "core/init.h"
 #include "core/panic.h"
-#include "drivers/video/framebuffer.h"
-#include "mm/paging.h"
-#include "drivers/pci/pci.h"
 #include "drivers/gpu/amd_gpu.h"
 #include "drivers/gpu/bochs_vbe.h"
 #include "drivers/gpu/intel_gpu.h"
 #include "drivers/gpu/nvidia_gpu.h"
 #include "drivers/gpu/virtio_gpu.h"
+#include "drivers/pci/pci.h"
+#include "drivers/video/framebuffer.h"
+#include "log/klog.h"
+#include "mm/paging.h"
+#include "security/driver_domain.h"
 
 namespace duetos::drivers::gpu
 {
@@ -588,5 +590,25 @@ const char* NvidiaGenTag(u16 device_id)
         return "ada-rtx-4000";
     return "nvidia-pre-turing-or-unknown";
 }
+
+namespace
+{
+
+::duetos::core::Result<void> RegisterGpuModule()
+{
+    ::duetos::security::RegisterDriverDomain(
+        "drivers/gpu",
+        []() -> ::duetos::core::Result<void>
+        {
+            ::duetos::drivers::gpu::GpuInit();
+            return {};
+        },
+        []() -> ::duetos::core::Result<void> { return ::duetos::drivers::gpu::GpuShutdown(); });
+    return {};
+}
+
+} // namespace
+
+KERNEL_INITCALL(Drivers, "drivers/gpu.module", RegisterGpuModule)
 
 } // namespace duetos::drivers::gpu
