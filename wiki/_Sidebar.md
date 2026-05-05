@@ -56,6 +56,7 @@
 - [W^X / NX Enforcement](security/WX-Enforcement.md)
 - [Attack Simulation](security/Attack-Simulation.md)
 - [Runtime Recovery Strategy](security/Runtime-Recovery.md)
+- [Kernel Modularization](security/Kernel-Modularization.md)
 - [Malware Hard-Stop Plan](security/Malware-Hard-Stop-Plan.md)
 
 ### Tooling

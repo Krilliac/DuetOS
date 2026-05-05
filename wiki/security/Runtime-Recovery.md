@@ -1,6 +1,10 @@
 # Runtime Recovery Strategy — Halt vs. Restart vs. Retry vs. Reject
 
-_Last updated: 2026-04-20_
+_Last updated: 2026-05-05_
+
+> **See also:** [Kernel Modularization](Kernel-Modularization.md) —
+> the operator-visible side of the recovery story (lifecycle states,
+> per-domain crash dumps, the `module` shell verb).
 
 ## Purpose
 

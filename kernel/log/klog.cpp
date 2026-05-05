@@ -933,6 +933,44 @@ void DumpLogRingToFiltered(LogTee writer, LogLevel min_level)
     }
 }
 
+void DumpLogRingFilteredAreaTo(LogTee writer, u32 area_mask, u32 max_entries)
+{
+    if (writer == nullptr || area_mask == 0)
+    {
+        return;
+    }
+    // Oldest-first walk; same pattern as DumpLogRingToFiltered.
+    // The subsystem-prefix → area mapping is recomputed per entry
+    // because the LogEntry struct doesn't store the area (kept
+    // narrow on purpose so the ring stays cache-friendly).
+    const u64 start = g_log_ring_next - g_log_ring_count;
+    u32 emitted = 0;
+    for (u64 i = 0; i < g_log_ring_count; ++i)
+    {
+        const u64 slot = (start + i) % kLogRingCapacity;
+        const LogEntry& e = g_log_ring[slot];
+        if (e.subsystem == nullptr || e.message == nullptr)
+        {
+            continue;
+        }
+        const u32 entry_area = static_cast<u32>(AreaFromSubsystemImpl(e.subsystem));
+        if ((entry_area & area_mask) == 0)
+        {
+            continue;
+        }
+        writer(LevelTag(e.level));
+        writer(e.subsystem);
+        writer(" : ");
+        writer(e.message);
+        writer("\n");
+        ++emitted;
+        if (max_entries != 0 && emitted >= max_entries)
+        {
+            break;
+        }
+    }
+}
+
 // ---------------------------------------------------------------
 // Trace scope tracking
 // ---------------------------------------------------------------

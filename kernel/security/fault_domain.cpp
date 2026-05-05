@@ -48,6 +48,7 @@ FaultDomainId FaultDomainRegister(const char* name, Result<void> (*init)(), Resu
     d.last_restart_ticks = 0;
     d.alive = true; // assume the subsystem's own Init ran already
     d.restart_pending = false;
+    d.state = ModuleState::Running;
     arch::SerialWrite("[fault-domain] register id=");
     arch::SerialWriteHex(id);
     arch::SerialWrite(" name=");
@@ -62,6 +63,13 @@ u32 FaultDomainCount()
 }
 
 const FaultDomain* FaultDomainGet(FaultDomainId id)
+{
+    if (id >= g_domain_count)
+        return nullptr;
+    return &g_domains[id];
+}
+
+FaultDomain* FaultDomainGetMutable(FaultDomainId id)
 {
     if (id >= g_domain_count)
         return nullptr;
@@ -97,6 +105,11 @@ Result<void> FaultDomainRestart(FaultDomainId id)
     const auto td = d.teardown();
     if (!td)
     {
+        // Teardown failure leaves the domain in `Stopped`: the
+        // subsystem will not be live again until a successful
+        // restart pairs a teardown + init. The shell's
+        // `module status` will reflect this.
+        d.state = ModuleState::Stopped;
         arch::SerialWrite("[fault-domain] teardown failed name=");
         arch::SerialWrite(d.name);
         arch::SerialWrite(" err=");
@@ -109,6 +122,10 @@ Result<void> FaultDomainRestart(FaultDomainId id)
     const auto in = d.init();
     if (!in)
     {
+        // Init failure also lands in `Stopped`. An operator can
+        // retry via `module start` once the underlying issue
+        // (typically resource exhaustion) is resolved.
+        d.state = ModuleState::Stopped;
         arch::SerialWrite("[fault-domain] init failed name=");
         arch::SerialWrite(d.name);
         arch::SerialWrite(" err=");
@@ -119,6 +136,7 @@ Result<void> FaultDomainRestart(FaultDomainId id)
 
     d.alive = true;
     d.restart_pending = false;
+    d.state = ModuleState::Running;
     ++d.restart_count;
     d.last_restart_ticks = sched::SchedNowTicks();
     arch::SerialWrite("[fault-domain] restart ok name=");
@@ -150,6 +168,12 @@ void FaultDomainTick()
     {
         if (!g_domains[i].restart_pending)
             continue;
+        // Project the trap-set bool onto the operator-visible
+        // state field BEFORE clearing it. A `module status`
+        // running on this beat sees `Crashed`; the next beat
+        // (after the restart succeeds) sees `Running`. This
+        // is also the GDB hook point for `kModuleStateChange`.
+        g_domains[i].state = ModuleState::Crashed;
         // Clear FIRST so a second trap landing during the
         // restart's own teardown/init can re-arm us instead of
         // being lost to a "already pending, ignore" race. The

@@ -77,6 +77,17 @@ enum class ProbeId : u8
     // useful with a targeted filter in mind.
     kSchedContextSwitch, // every Schedule() that actually swaps
 
+    // Module lifecycle — fires on every operator-visible state
+    // flip (Running ↔ Crashed ↔ Stopped) routed through
+    // `security::Module*` or the watchdog drain. ArmedLog by
+    // default so a clean boot stays quiet (no transitions
+    // happen at steady state) but a triage session can break
+    // on every flip with `b duetos::debug::ProbeFire`. The
+    // packed value carries the FaultDomainId in the high 32
+    // bits, the previous state in bits 8..15, and the new
+    // state in bits 0..7.
+    kModuleStateChange,
+
     kCount, // sentinel
 };
 

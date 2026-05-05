@@ -419,6 +419,23 @@ void DumpLogRingTo(LogTee writer);
 /// form. Shell `dmesg w` uses this to emit only Warn+ entries.
 void DumpLogRingToFiltered(LogTee writer, LogLevel min_level);
 
+/// As DumpLogRingTo, but drops entries whose subsystem-derived
+/// `LogArea` is not set in `area_mask`, and writes at most
+/// `max_entries` of those that pass the filter (oldest-first).
+/// Used by the per-domain crash-dump emitter to splice the tail
+/// of klog history relevant to a single subsystem into the dump
+/// record without touching unrelated areas.
+///
+/// `area_mask` is a bitwise OR of `LogArea` values. The match
+/// reuses `AreaFromSubsystem(entry.subsystem)` so callers don't
+/// need to track the area separately — passing the prefix the
+/// subsystem already logs under is enough.
+///
+/// `max_entries == 0` means no cap (write every match in the
+/// ring). Safe from any context that can take the same locks
+/// as `DumpLogRingTo` (i.e. not from inside the trap handler).
+void DumpLogRingFilteredAreaTo(LogTee writer, u32 area_mask, u32 max_entries);
+
 } // namespace duetos::core
 
 // Convenience macros. The `do { } while (0)` lets call sites still

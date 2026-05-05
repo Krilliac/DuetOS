@@ -41,10 +41,29 @@
 namespace duetos::core
 {
 
-inline constexpr u32 kMaxFaultDomains = 16;
+// Registry capacity. Sized to accommodate every restartable
+// subsystem in the foundational-vs-restartable classification
+// (~30 today) plus 50% headroom for follow-up migrations. The
+// linear scans (`FaultDomainTick`, `FaultDomainFind`) stay
+// trivially cheap at this size — one cache line per few rows.
+inline constexpr u32 kMaxFaultDomains = 48;
 
 using FaultDomainId = u32;
 inline constexpr FaultDomainId kFaultDomainInvalid = 0xFFFFFFFFu;
+
+/// Operator-visible lifecycle state of a registered domain.
+/// Three states, not six: `init`/`teardown` are non-yielding and
+/// serialised by the registry, so transient `Starting`/`Stopping`
+/// are never observable to a reader. `Crashed` is distinct from
+/// `Stopped` because they answer different questions — "operator
+/// stopped me" vs "I tripped a trap and the watchdog hasn't
+/// drained me yet."
+enum class ModuleState : u8
+{
+    Stopped = 0, // teardown ran cleanly; init has not yet been called
+    Running = 1, // init succeeded; subsystem is live
+    Crashed = 2, // a fault tripped MarkRestart but the watchdog has not yet drained
+};
 
 struct FaultDomain
 {
@@ -54,13 +73,26 @@ struct FaultDomain
                                 // subsystem ready for a fresh init
     u32 restart_count;          // lifetime restart events
     u64 last_restart_ticks;     // scheduler-tick of the most recent restart
-    bool alive;                 // false iff teardown ran and init hasn't yet
+    bool alive;                 // false iff teardown ran and init hasn't yet.
+                                // Trap-safe single-bit projection of `state`
+                                // for the watchdog's lossless backbone — the
+                                // trap handler can flip this from NMI/#PF
+                                // context where a multi-byte enum write
+                                // would not be atomic.
     bool restart_pending;       // set from trap-handler context via
                                 // `FaultDomainMarkRestart`; drained by
                                 // `FaultDomainTick` from kheartbeat,
                                 // which is allowed to take locks +
                                 // allocate memory (the trap handler
                                 // is not).
+    ModuleState state;          // operator-visible projection of the
+                                // bool pair. Written only from heartbeat
+                                // / shell context (multi-byte stores) by
+                                // `FaultDomainRestart`, `FaultDomainTick`,
+                                // `ModuleStart`, `ModuleStop`. Trap path
+                                // never touches this — it flips the
+                                // single-bit `restart_pending` and
+                                // `alive` instead.
 };
 
 /// Register a domain. Returns the assigned id, or
@@ -73,6 +105,14 @@ u32 FaultDomainCount();
 
 /// Accessor; nullptr for out-of-range.
 const FaultDomain* FaultDomainGet(FaultDomainId id);
+
+/// Mutating accessor used by `security/module.cpp` (ModuleStart /
+/// ModuleStop / ModuleDump) to project state changes onto the
+/// operator-visible `ModuleState` field. The trap path must NOT
+/// use this — it flips `restart_pending` instead. Returns nullptr
+/// for out-of-range. Callers run in heartbeat / shell context
+/// (multi-byte stores are safe).
+FaultDomain* FaultDomainGetMutable(FaultDomainId id);
 
 /// Lookup by name. Linear scan. Returns `kFaultDomainInvalid` if
 /// not found.

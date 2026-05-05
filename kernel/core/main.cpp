@@ -213,8 +213,10 @@
 #include "syscall/cap_gate.h"
 #include "proc/process.h"
 #include "util/random.h"
+#include "security/domain_dump.h"
 #include "security/driver_domain.h"
 #include "security/fault_domain.h"
+#include "security/module.h"
 #include "diag/diag_decode.h"
 #include "diag/hexdump.h"
 #include "util/result.h"
@@ -1093,6 +1095,17 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // Wraps the core fault-domain registry with a driver-tag
     // convention; demo register/restart cycle.
     DUETOS_BOOT_SELFTEST(duetos::security::DriverDomainSelfTest());
+
+    // Module lifecycle layer over FaultDomain. Verifies the
+    // ModuleState transitions (Stopped/Running/Crashed), the
+    // refusal paths (start-when-Running, stop-when-Stopped),
+    // and the init-failure recovery edge.
+    DUETOS_BOOT_SELFTEST(duetos::security::ModuleSelfTest());
+
+    // Per-domain non-fatal crash dump emitter. Verifies the
+    // Begin/End pair, the recent-dumps ring, and the replay
+    // path. Output to COM1 is a witness of the dump format.
+    DUETOS_BOOT_SELFTEST(duetos::security::DomainDumpSelfTest());
 
     // Register one real driver as a driver fault domain
     // (plan E3-followup, 2026-04-28). The soft-lockup detector

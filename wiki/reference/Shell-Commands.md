@@ -245,7 +245,14 @@ All write-side FAT operations are admin-gated.
 | `probe <args>` | Runtime probe arming (admin) | |
 | `lockdep panic on\|off` | Toggle lock-inversion-promotes-panic (admin) | |
 | `cap-audit mode <off\|sample\|full>` | Cap-gate audit verbosity (admin) | |
-| `domain <args>` | Restart a fault domain (admin) | |
+| `domain <args>` | DEPRECATED — alias for `module` (admin) | Removed in a future slice. |
+| `module list` | List every registered module + state + restart count (admin) | |
+| `module status <name>` | State + restart count + alive flag + recent-dump count (admin) | |
+| `module start <name>` | Run init() on a Stopped module (admin) | Refuses if Running. |
+| `module stop <name>` | Run teardown() on a Running module (admin) | Refuses if Stopped. |
+| `module restart <name>` | Drive teardown + init (admin) | |
+| `module dump <name>` | Emit a per-domain crash record on serial without halting (admin) | Also stored in the recent-dumps ring. |
+| `module dumps <name>` | Replay every retained dump record for the named module (admin) | Last 8 records per domain. |
 | `flushtlb`, `flush-tlb` | Reload CR3 (admin) | |
 | `perf <args>` | Perf-counter shell front-end | |
 
