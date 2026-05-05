@@ -97,8 +97,12 @@ inline constexpr u8 kElfPfR = 0x4;
 // per-process stack base, growable stacks.
 //
 // On any failure (invalid ELF, AllocateFrame OOM) returns
-// {ok=false}; partial mappings are NOT rolled back — caller must
-// AddressSpaceRelease the AS to free anything that got installed.
+// {ok=false}; an internal `LoaderUnwindGuard` walks every page
+// successfully mapped by this call and rolls back via
+// AddressSpaceUnmapUserPage so the address space is left in the
+// same shape it had at entry. The caller still owns the AS and
+// can AddressSpaceRelease it; the guard just means a partial-load
+// failure doesn't leak frames.
 // ---------------------------------------------------------------
 
 struct ElfLoadResult
@@ -110,8 +114,16 @@ struct ElfLoadResult
 };
 
 /// Load a validated ELF image into `as`. Returns {ok=true, ...} on
-/// success. On failure, the AddressSpace may contain partial state
-/// — caller should AddressSpaceRelease it.
+/// success. On failure, the loader unwinds anything it mapped via
+/// the internal `LoaderUnwindGuard` — no leaked frames.
 ElfLoadResult ElfLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as);
+
+/// Boot-time self-test for the ElfLoad allocation-ladder unwind
+/// guard. Drives a synthetic load against a fresh AddressSpace with
+/// the test-only OOM injection (FrameAllocatorSetFailAfter) primed
+/// so the guard fires on a partial-load failure. Asserts that
+/// FreeFramesCount returns to its pre-test value — i.e. the guard
+/// freed every frame it mapped before the OOM. Panics on regression.
+void ElfLoaderUnwindSelfTest();
 
 } // namespace duetos::core

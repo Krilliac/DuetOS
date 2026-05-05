@@ -1,5 +1,7 @@
 #include "loader/elf_loader.h"
 
+#include "arch/x86_64/serial.h"
+#include "core/panic.h"
 #include "debug/probes.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
@@ -225,12 +227,51 @@ namespace
 
 constexpr u64 kV0StackVa = 0x7FFFE000ULL;
 
+// Allocation-ladder unwind for ElfLoad. PT_LOAD segments and the
+// stack page each AllocateFrame + map; a partial failure leaves the
+// pages mapped before the failing leg leaked. Track every successful
+// map and unmap+free on early-return. Disarmed on full success.
+//
+// Cap: typical small ELFs map a handful of pages; large statically-
+// linked binaries can run into the hundreds. 1024 covers the v0
+// workloads with headroom; if a future binary blows past it the log
+// line in Track flags the leak hazard at the boundary.
+struct LoaderUnwindGuard
+{
+    static constexpr u64 kMaxTrackedVas = 1024;
+    duetos::mm::AddressSpace* as = nullptr;
+    u64 vas[kMaxTrackedVas] = {};
+    u32 count = 0;
+    bool armed = true;
+
+    void Track(u64 va)
+    {
+        if (count >= kMaxTrackedVas)
+        {
+            KLOG_WARN("elf-loader", "LoaderUnwindGuard cap exceeded — leak hazard");
+            return;
+        }
+        vas[count++] = va;
+    }
+
+    void Disarm() { armed = false; }
+
+    ~LoaderUnwindGuard()
+    {
+        if (!armed || as == nullptr)
+            return;
+        for (u32 i = count; i > 0; --i)
+            duetos::mm::AddressSpaceUnmapUserPage(as, vas[i - 1]);
+    }
+};
+
 // Context struct passed through ElfForEachPtLoad via the void*
 // cookie so we can plumb state into the lambda.
 struct LoadCtx
 {
     const u8* file;
     duetos::mm::AddressSpace* as;
+    LoaderUnwindGuard* guard;
     bool ok;
 };
 
@@ -268,6 +309,7 @@ void LoadSegment(LoadCtx& ctx, const ElfSegment& seg)
         const PhysAddr frame = AllocateFrame();
         if (frame == kNullFrame)
         {
+            KBP_PROBE_V(::duetos::debug::ProbeId::kElfLoaderOom, page_va);
             ctx.ok = false;
             return;
         }
@@ -296,6 +338,8 @@ void LoadSegment(LoadCtx& ctx, const ElfSegment& seg)
         }
 
         AddressSpaceMapUserPage(ctx.as, page_va, frame, flags);
+        if (ctx.guard != nullptr)
+            ctx.guard->Track(page_va);
     }
 }
 
@@ -331,7 +375,9 @@ ElfLoadResult ElfLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as
         return r;
     }
 
-    LoadCtx ctx{file, as, true};
+    LoaderUnwindGuard guard;
+    guard.as = as;
+    LoadCtx ctx{file, as, &guard, true};
     ElfForEachPtLoad(
         file, file_len, [](const ElfSegment& seg, void* cookie) { LoadSegment(*static_cast<LoadCtx*>(cookie), seg); },
         &ctx);
@@ -348,16 +394,158 @@ ElfLoadResult ElfLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as
     if (stack_frame == kNullFrame)
     {
         KLOG_ERROR("elf-loader", "stack frame allocation failed (OOM)");
+        KBP_PROBE(::duetos::debug::ProbeId::kElfLoaderOom);
         return r;
     }
     AddressSpaceMapUserPage(as, kV0StackVa, stack_frame, kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
+    guard.Track(kV0StackVa);
 
     r.ok = true;
     r.entry_va = ElfEntry(file);
     r.stack_va = kV0StackVa;
     r.stack_top = kV0StackVa + kPageSize;
+    // Image now owned by the AddressSpace; suppress the unwind so
+    // the destructor doesn't roll back what's now legitimately mapped.
+    guard.Disarm();
     KBP_PROBE_V(::duetos::debug::ProbeId::kElfLoadOk, r.entry_va);
     return r;
+}
+
+// ---------------------------------------------------------------
+// LoaderUnwindGuard self-test
+//
+// Builds a minimal in-memory ELF64 image with one PT_LOAD segment
+// covering a few pages, primes FrameAllocatorSetFailAfter to fail
+// partway through the segment loop, and asserts that ElfLoad's
+// LoaderUnwindGuard rolled back every prior page so the global
+// free-frame count matches the pre-test baseline.
+// ---------------------------------------------------------------
+
+void ElfLoaderUnwindSelfTest()
+{
+    using arch::SerialWrite;
+    using namespace duetos::mm;
+
+    // Build a minimal valid ELF64 buffer on the heap (well, the
+    // bss-resident static): one PT_LOAD covering 4 pages of memsz so
+    // the OOM injection has multiple successful Track() calls to
+    // unwind. ElfValidate is strict; getting through it requires:
+    // - "\x7FELF" magic, ELFCLASS64, ELFDATA2LSB, EV_CURRENT
+    // - e_machine = EM_X86_64
+    // - e_phoff in bounds, e_phentsize >= 56, e_phnum > 0
+    // - PT_LOAD p_offset + p_filesz in bounds; p_memsz >= p_filesz
+    // - p_vaddr in canonical low half
+    // - p_offset % p_align == p_vaddr % p_align (we use align=0x1000
+    //   and place the segment at offset 0x1000 → page-aligned)
+    constexpr u64 kFileLen = 0x2000; // 8 KiB: 1 page header + 4 pages payload
+    static u8 file[kFileLen];
+    for (u64 i = 0; i < kFileLen; ++i)
+        file[i] = 0;
+
+    // ELF identification.
+    file[0] = 0x7F;
+    file[1] = 'E';
+    file[2] = 'L';
+    file[3] = 'F';
+    file[4] = 2; // ELFCLASS64
+    file[5] = 1; // ELFDATA2LSB
+    file[6] = 1; // EV_CURRENT
+
+    auto write_u16 = [](u8* p, u16 v)
+    {
+        p[0] = static_cast<u8>(v);
+        p[1] = static_cast<u8>(v >> 8);
+    };
+    auto write_u32 = [](u8* p, u32 v)
+    {
+        p[0] = static_cast<u8>(v);
+        p[1] = static_cast<u8>(v >> 8);
+        p[2] = static_cast<u8>(v >> 16);
+        p[3] = static_cast<u8>(v >> 24);
+    };
+    auto write_u64 = [](u8* p, u64 v)
+    {
+        for (int i = 0; i < 8; ++i)
+            p[i] = static_cast<u8>(v >> (i * 8));
+    };
+
+    write_u16(file + 16, 2);        // e_type = ET_EXEC
+    write_u16(file + 18, 0x3E);     // e_machine = EM_X86_64
+    write_u32(file + 20, 1);        // e_version
+    write_u64(file + 24, 0x400000); // e_entry
+    write_u64(file + 32, 64);       // e_phoff (right after Ehdr)
+    write_u16(file + 54, 56);       // e_phentsize
+    write_u16(file + 56, 1);        // e_phnum
+
+    // Program header at offset 64.
+    u8* ph = file + 64;
+    write_u32(ph, 1);           // p_type = PT_LOAD
+    write_u32(ph + 4, 0x4);     // p_flags = PF_R
+    write_u64(ph + 8, 0x1000);  // p_offset (page-aligned)
+    write_u64(ph + 16, 0x1000); // p_vaddr (also page-aligned → same residue)
+    // p_paddr at +24 (zero ok)
+    write_u64(ph + 32, 0x1000); // p_filesz: 4 KiB
+    write_u64(ph + 40, 0x4000); // p_memsz: 16 KiB → 4 mapped pages
+    write_u64(ph + 48, 0x1000); // p_align
+
+    AddressSpace* as = AddressSpaceCreate(/*frame_budget=*/64);
+    if (as == nullptr)
+    {
+        SerialWrite("[elf-test] FAIL AddressSpaceCreate\n");
+        core::Panic("elf-loader", "ElfLoaderUnwindSelfTest: AddressSpaceCreate returned null");
+    }
+
+    const u64 free_before = FreeFramesCount();
+
+    // Inject failure on the third successful AllocateFrame inside
+    // LoadSegment. With memsz=0x4000 the loop maps four pages; the
+    // first two succeed, the third returns kNullFrame, the guard
+    // unwinds those two on early-return.
+    FrameAllocatorSetFailAfter(2);
+
+    ElfLoadResult r = ElfLoad(file, kFileLen, as);
+
+    // Make sure injection actually fired and is now disabled.
+    if (FrameAllocatorGetFailAfter() != 0)
+    {
+        SerialWrite("[elf-test] FAIL injection counter not consumed\n");
+        core::Panic("elf-loader", "ElfLoaderUnwindSelfTest: FrameAllocatorSetFailAfter didn't fire");
+    }
+    if (r.ok)
+    {
+        SerialWrite("[elf-test] FAIL ElfLoad returned ok despite OOM injection\n");
+        core::Panic("elf-loader", "ElfLoaderUnwindSelfTest: ElfLoad ignored OOM");
+    }
+
+    // The guard should have unwound the two pages it tracked. The
+    // address space itself still owns its PML4/PDPT/PD frames; tear
+    // it down before sampling FreeFramesCount.
+    AddressSpaceRelease(as);
+
+    const u64 free_after = FreeFramesCount();
+    if (free_after != free_before)
+    {
+        SerialWrite("[elf-test] FAIL frame count drifted: before=");
+        for (int i = 60; i >= 0; i -= 4)
+        {
+            const u64 nibble = (free_before >> i) & 0xF;
+            char c = static_cast<char>(nibble < 10 ? '0' + nibble : 'a' + nibble - 10);
+            char buf[2] = {c, 0};
+            SerialWrite(buf);
+        }
+        SerialWrite(" after=");
+        for (int i = 60; i >= 0; i -= 4)
+        {
+            const u64 nibble = (free_after >> i) & 0xF;
+            char c = static_cast<char>(nibble < 10 ? '0' + nibble : 'a' + nibble - 10);
+            char buf[2] = {c, 0};
+            SerialWrite(buf);
+        }
+        SerialWrite("\n");
+        core::Panic("elf-loader", "ElfLoaderUnwindSelfTest: frame leak detected");
+    }
+
+    SerialWrite("[elf-test] unwind-guard PASS\n");
 }
 
 } // namespace duetos::core

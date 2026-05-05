@@ -31,6 +31,7 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
+#include "debug/probes.h"
 #include "diag/cleanroom_trace.h"
 #include "log/klog.h"
 #include "core/panic.h"
@@ -686,7 +687,13 @@ bool E1000BringUp(NicInfo& n)
     return true;
 }
 
-void RunVendorProbe(NicInfo& n)
+// Returns true iff the vendor ID matched one of the families we know
+// how to probe. False means no driver code touched the device — the
+// caller is then responsible for unwinding any pre-probe MMIO mapping
+// it set up rather than registering a half-initialised NIC entry. A
+// matched-but-not-brought-up device still returns true; it stays in
+// the registry so device manager can list it as `(probe only)`.
+bool RunVendorProbe(NicInfo& n)
 {
     const char* family = nullptr;
     switch (n.vendor_id)
@@ -704,7 +711,7 @@ void RunVendorProbe(NicInfo& n)
         family = VirtioNetTag(n.device_id);
         break;
     default:
-        return;
+        return false;
     }
     n.family = family;
     bool brought_up = false;
@@ -780,6 +787,7 @@ void RunVendorProbe(NicInfo& n)
         }
         arch::SerialWrite(n.link_up ? "  link=up\n" : "  link=down\n");
     }
+    return true;
 }
 
 void LogNic(const NicInfo& n)
@@ -838,6 +846,7 @@ void NetInit()
         nic.subclass = d.subclass;
         nic.vendor = VendorShort(d.vendor_id);
 
+        u64 map_bytes = 0;
         const pci::Bar bar0 = pci::PciReadBar(d.addr, 0);
         if (bar0.size != 0 && !bar0.is_io)
         {
@@ -847,11 +856,24 @@ void NetInit()
             // bigger BARs on HPC NICs are for RDMA doorbells which
             // no v0 driver touches.
             constexpr u64 kMmioCap = 2ULL * 1024 * 1024;
-            const u64 map_bytes = (bar0.size > kMmioCap) ? kMmioCap : bar0.size;
+            map_bytes = (bar0.size > kMmioCap) ? kMmioCap : bar0.size;
             nic.mmio_virt = mm::MapMmio(bar0.address, map_bytes);
         }
 
-        RunVendorProbe(nic);
+        // Probe contract: false means no vendor matched. Unmap the
+        // MMIO and skip the registry add — keeping the entry would
+        // leak a 2 MiB MMIO mapping per unrecognised PCI network
+        // controller for the lifetime of the boot.
+        if (!RunVendorProbe(nic))
+        {
+            if (nic.mmio_virt != nullptr && map_bytes != 0)
+            {
+                mm::UnmapMmio(nic.mmio_virt, map_bytes);
+            }
+            KLOG_WARN_V("drivers/net", "no vendor match; device skipped did", nic.device_id);
+            KBP_PROBE_V(::duetos::debug::ProbeId::kProbeFail, nic.device_id);
+            continue;
+        }
         g_nics[g_nic_count++] = nic;
     }
 

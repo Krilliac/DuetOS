@@ -70,6 +70,12 @@ constinit u64 g_next_hint = 0; // search hint for AllocateFrame
 constinit u64 g_free_count = 0;
 constinit u64 g_total_frames = 0;
 
+// Test-only OOM injection. Set via FrameAllocatorSetFailAfter; each
+// successful Allocate* path decrements. When zero is reached the
+// next Allocate* returns kNullFrame and the counter stays at 0
+// (further injection requires another SetFailAfter call). 0 disables.
+constinit u64 g_fail_after = 0;
+
 // Local alias keeps call sites tidy; delegates to the central core::Panic
 // so the output format matches every other subsystem.
 [[noreturn]] void PanicFrame(const char* message)
@@ -436,6 +442,19 @@ PhysAddr AllocateFrameInRange(PhysAddr max_phys)
 
 PhysAddr AllocateFrame()
 {
+    // Test-only OOM injection. When the counter reaches zero we return
+    // null; otherwise we decrement and proceed. The branch is one load
+    // + compare on the hot path — measured impact below noise on the
+    // boot-time alloc cadence.
+    if (g_fail_after != 0)
+    {
+        if (g_fail_after == 1)
+        {
+            g_fail_after = 0;
+            return kNullFrame;
+        }
+        --g_fail_after;
+    }
     for (u64 i = 0; i < g_bitmap_frames; ++i)
     {
         const u64 frame = g_next_hint + i;
@@ -564,6 +583,17 @@ PhysAddr AllocateContiguousFrames(u64 count)
     {
         return AllocateFrame();
     }
+    // Test-only OOM injection mirrors the AllocateFrame path so multi-
+    // frame allocations also exercise the failing leg.
+    if (g_fail_after != 0)
+    {
+        if (g_fail_after == 1)
+        {
+            g_fail_after = 0;
+            return kNullFrame;
+        }
+        --g_fail_after;
+    }
 
     // Linear scan for a run of `count` consecutive free frames. v0: O(n).
     // Replace with a freelist of contiguous runs when allocation patterns
@@ -680,6 +710,51 @@ u64 TotalFrames()
 u64 FreeFramesCount()
 {
     return g_free_count;
+}
+
+void FrameAllocatorSetFailAfter(u64 n_remaining)
+{
+    g_fail_after = n_remaining;
+}
+
+u64 FrameAllocatorGetFailAfter()
+{
+    return g_fail_after;
+}
+
+void FrameAllocatorOomInjectionSelfTest()
+{
+    // Sanity: injection must be disabled at entry.
+    if (g_fail_after != 0)
+    {
+        PanicFrame("FrameAllocatorOomInjectionSelfTest: injection counter non-zero at entry");
+    }
+    // Inject OOM after exactly two successful allocations. The first
+    // two AllocateFrame calls below succeed; the third returns
+    // kNullFrame and the counter resets to 0.
+    FrameAllocatorSetFailAfter(3);
+    const PhysAddr a = AllocateFrame();
+    if (a == kNullFrame)
+        PanicFrame("FrameAllocatorOomInjectionSelfTest: first AllocateFrame returned null");
+    const PhysAddr b = AllocateFrame();
+    if (b == kNullFrame)
+        PanicFrame("FrameAllocatorOomInjectionSelfTest: second AllocateFrame returned null");
+    const PhysAddr c = AllocateFrame();
+    if (c != kNullFrame)
+        PanicFrame("FrameAllocatorOomInjectionSelfTest: third AllocateFrame should have failed");
+    if (g_fail_after != 0)
+        PanicFrame("FrameAllocatorOomInjectionSelfTest: counter not consumed");
+
+    // Subsequent allocations succeed (injection is disabled again).
+    const PhysAddr d = AllocateFrame();
+    if (d == kNullFrame)
+        PanicFrame("FrameAllocatorOomInjectionSelfTest: post-injection alloc failed");
+
+    FreeFrame(a);
+    FreeFrame(b);
+    FreeFrame(d);
+
+    arch::SerialWrite("[frame-test] OOM injection PASS\n");
 }
 
 void FrameAllocatorSelfTest()
