@@ -33,8 +33,20 @@ BUILD_DIR="${REPO_ROOT}/build/${PRESET}"
 EFI_IMAGE="${BUILD_DIR}/boot/uefi/BOOTX64.EFI"
 TIMEOUT_SECS="${DUETOS_TIMEOUT:-15}"
 
-# OVMF firmware path. Ubuntu/Debian ships OVMF_CODE.fd here.
-OVMF_CODE="/usr/share/OVMF/OVMF_CODE.fd"
+# OVMF firmware path. The naming has shifted across Ubuntu/Debian
+# revisions; check the canonical locations in order. The combined
+# `OVMF.fd` (CODE + VARS in one image) is what `-bios` wants.
+OVMF_CODE=""
+for cand in \
+    /usr/share/ovmf/OVMF.fd \
+    /usr/share/OVMF/OVMF_CODE_4M.fd \
+    /usr/share/OVMF/OVMF_CODE.fd \
+    /usr/share/qemu/OVMF.fd ; do
+    if [ -f "${cand}" ]; then
+        OVMF_CODE="${cand}"
+        break
+    fi
+done
 
 # The banner string the loader's main.cpp prints. Keep this in
 # sync with boot/uefi/main.cpp's `kBanner`.
@@ -51,8 +63,8 @@ if ! command -v qemu-system-x86_64 > /dev/null; then
     echo "  install: sudo apt-get install -y qemu-system-x86" >&2
     exit 2
 fi
-if [ ! -f "${OVMF_CODE}" ]; then
-    echo "[uefi-smoke] OVMF firmware not found at ${OVMF_CODE}" >&2
+if [ -z "${OVMF_CODE}" ]; then
+    echo "[uefi-smoke] OVMF firmware not found in any canonical location" >&2
     echo "  install: sudo apt-get install -y ovmf" >&2
     exit 2
 fi

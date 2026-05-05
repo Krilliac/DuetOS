@@ -44,7 +44,7 @@ namespace duetos::boot::uefi
 
 const CHAR16 kBanner[] = u"DuetOS UEFI loader v0 (Phase A: toolchain proof)\r\n"
                          u"  This loader does not yet load the kernel.\r\n"
-                         u"  See wiki/boot/UEFI-Loader.md for the Phase B plan.\r\n";
+                         u"  See wiki/kernel/UEFI-Loader.md for the Phase B plan.\r\n";
 
 // ---------------------------------------------------------------
 // Halt the CPU forever. UEFI applications can return from
