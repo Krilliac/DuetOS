@@ -458,6 +458,15 @@ sched::WaitQueue* LinuxPidfdExitWq();
 // to decide whether to sleep on the pidfd-exit waitqueue.
 bool LinuxProcessHasPidfd(const core::Process* p);
 
+// Pidfd KFile release adapter. Pool index = target pid; looks
+// up the target Process and drops the `ProcessRetain` that
+// `DoPidfdOpen` took. Used as the per-kind release callback
+// when `LinuxFdAttachKFile` parks a pidfd's KFile in
+// `kobj_handles`. Public so the migration site can take its
+// address; the actual Process refcount accounting is identical
+// to the pre-migration legacy path in DoClose.
+void PidfdRelease(u32 pid);
+
 // Kernel-level zero-copy fd-to-fd I/O. v0 implementations bounce
 // through a 1 KiB on-stack buffer (no actual zero-copy yet, but
 // the syscall surface works so callers don't need to roll their

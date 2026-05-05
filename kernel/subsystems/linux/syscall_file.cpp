@@ -250,15 +250,25 @@ i64 DoOpen(u64 user_path, u64 flags, u64 mode)
 
 // Linux: close(fd). Marks the slot unused. No destructor work
 // for FAT32-backed regular files (snapshotted at open). For
-// pool-backed kinds (states 3..15) the per-pool release is
-// driven by the slot's KFile sidecar (`kf_handle`) when one is
-// attached: `LinuxFdClose` calls `HandleTableRemove`, the
-// resulting `KObjectRelease` fires `KFileDestroy`, and that
-// dispatches to the per-pool release callback (e.g.
-// `PipeReleaseRead`) registered when the slot was created.
-// Un-migrated kinds (no KFile sidecar) fall through to the
-// legacy explicit `*Release` calls below — kept for the
-// states whose creators haven't been migrated yet.
+// pool-backed kinds the per-pool release is driven by the
+// slot's KFile sidecar (`kf_handle`) when one is attached:
+// `LinuxFdClose` calls `HandleTableRemove`, the resulting
+// `KObjectRelease` fires `KFileDestroy`, and that dispatches
+// to the per-pool release callback (e.g. `PipeReleaseRead`)
+// registered when the slot was created.
+//
+// State 11 (dirfd / directory snapshot) is the only kind still
+// on the legacy explicit `*Release` path — its release frees
+// a `win32_dirs[]` slot belonging to the owning process, which
+// the uniform `void(u32 pool_index)` KFile callback can't
+// reach without a `Process*` adapter. Until that adapter
+// lands, we explicitly call `SysDirClose(p, ...)` here while
+// `p` (the current process) is still in scope.
+//
+// The other legacy arms (states 3..10, 12..15) have been
+// removed — every creator for those kinds now attaches a
+// KFile, and a regression that fails to do so would still be
+// safe (the slot just leaks its pool ref, no double-free).
 i64 DoClose(u64 fd)
 {
     core::Process* p = core::CurrentProcess();
@@ -271,63 +281,18 @@ i64 DoClose(u64 fd)
     {
         return kEBADF;
     }
-    const u8 state = p->linux_fds[fd].state;
-    const u32 idx = p->linux_fds[fd].first_cluster;
-    const bool has_kfile = p->linux_fds[fd].kf_handle != ::duetos::ipc::kHandleInvalid;
 
-    // Legacy explicit *Release for kinds whose creators still
-    // wire pool refs by hand. Skipped for migrated kinds — the
-    // KFile sidecar's destroy callback drops the ref instead.
-    if (!has_kfile)
+    // Dirfd legacy arm — only kind not yet on the KFile path.
+    // Fires before the unified slot teardown so `p` still
+    // resolves the win32_dirs[] entry.
+    if (p->linux_fds[fd].state == 11 && p->linux_fds[fd].kf_handle == ::duetos::ipc::kHandleInvalid)
     {
-        if (state == 3)
-            PipeReleaseRead(idx);
-        else if (state == 4)
-            PipeReleaseWrite(idx);
-        else if (state == 5)
-            EventfdRelease(idx);
-        else if (state == 6)
-            SocketFdRelease(idx);
-        else if (state == 7)
-            TimerfdRelease(idx);
-        else if (state == 8)
-            SignalfdRelease(idx);
-        else if (state == 9)
-            EpollRelease(idx);
-        else if (state == 10)
-            InotifyRelease(idx);
-        else if (state == 11)
-            ::duetos::subsystems::win32::SysDirClose(p, idx + core::Process::kWin32DirBase);
-        else if (state == 12)
-        {
-            // pidfd: drop the ProcessRetain that pidfd_open took.
-            // The target may already be reaped — Release tolerates a
-            // null target lookup (no ref to drop).
-            core::Process* target = sched::SchedFindProcessByPid(idx);
-            if (target != nullptr)
-                core::ProcessRelease(target);
-        }
-        else if (state == 13)
-        {
-            // POSIX MQ: drop the per-handle refcount. Frees the ring
-            // when refs == 0 AND mq_unlink already happened.
-            PosixMqRelease(idx);
-        }
-        else if (state == 14)
-        {
-            // memfd: drop the per-handle refcount. Frees the frame
-            // array when refs == 0 (no one holds the fd anymore).
-            MemfdRelease(idx);
-        }
-        else if (state == 15)
-        {
-            // fanotify instance: drop refcount; frees on last release.
-            FanotifyRelease(idx);
-        }
+        const u64 dh = p->linux_fds[fd].first_cluster + core::Process::kWin32DirBase;
+        ::duetos::subsystems::win32::SysDirClose(p, dh);
     }
 
-    // Centralised slot teardown — also drops the KFile ref when
-    // a sidecar is attached (firing the per-pool release callback
+    // Centralised slot teardown — drops the KFile ref when a
+    // sidecar is attached (firing the per-pool release callback
     // for migrated kinds).
     core::LinuxFdClose(p, static_cast<u32>(fd));
     return 0;

@@ -180,60 +180,30 @@ i64 DoFork()
     child->linux_parent_pid = parent->pid;
 
     // fd inheritance — every parent fd survives into the child.
-    // For migrated kinds (pipe / eventfd) the per-pool ref is
+    // For migrated kinds (3..10 + 12..15) the per-pool ref is
     // shared via `LinuxFdInheritFromParent`'s HandleTable-
     // Duplicate path: each side gets a fresh ipc handle pointing
-    // at the same KFile, bumping the KObject refcount by one.
-    // The legacy explicit `*Retain` calls below cover un-
-    // migrated kinds (socket / timerfd / signalfd / epoll /
-    // inotify / pidfd / mq / memfd / fanotify); they're skipped
-    // when a KFile sidecar is present (kf_handle != invalid)
-    // because the duplicated KFile already holds the ref.
+    // at the same KFile, and the KObject refcount drives the
+    // per-pool release callback (which fires once when the last
+    // handle closes). For pidfd specifically, the target
+    // Process's refcount is held by the single shared KFile —
+    // both fork-parent and fork-child contribute one KObject
+    // ref each; the underlying ProcessRetain is taken once at
+    // open and dropped once at last-close.
     //
-    // Dirfd (state 11) is special: the snapshot lives on the
-    // parent's win32_dirs[] table, which the child doesn't
-    // share, so the child's dirfd slot is cleared (POSIX
-    // permits closing dirfds on fork). We do this AFTER the
-    // helper runs so the slot is overwritten.
+    // Dirfd (state 11) is the only kind still on the legacy
+    // path: the snapshot lives on the parent's win32_dirs[]
+    // table, which the child doesn't share, so the child's
+    // dirfd slot is cleared (POSIX permits closing dirfds on
+    // fork). `LinuxFdClose` drops any KFile sidecar the inherit
+    // helper might have duplicated; today dirfd has no sidecar,
+    // but the call shape is correct for the future migration.
     core::LinuxFdInheritFromParent(parent, child);
     for (u32 i = 0; i < 16; ++i)
     {
-        const auto& src = parent->linux_fds[i];
-        if (src.state == 0)
+        if (parent->linux_fds[i].state != 11)
             continue;
-        // Migrated kinds — KFile sidecar already duplicated by
-        // LinuxFdInheritFromParent; skip the legacy explicit
-        // retain. State 3..10 + 13..15 are migrated; only state
-        // 11 (dirfd, special — Win32 dir-pool adapter not yet
-        // wired) and state 12 (pidfd, special — Process* not u32)
-        // still need explicit handling below.
-        if (child->linux_fds[i].kf_handle != ::duetos::ipc::kHandleInvalid)
-            continue;
-        if (src.state == 11)
-        {
-            // Directory snapshot lives on the PARENT's
-            // win32_dirs[] table. The child's table is fresh
-            // and empty; sharing the parent's slot index would
-            // leave the child's fd dangling. Clear the child's
-            // dirfd slot so getdents64 sees an honest -EBADF
-            // rather than reading the wrong slot.
-            //
-            // `LinuxFdClose` drops any KFile sidecar the inherit
-            // helper might have duplicated for this slot — today
-            // dirfd has no sidecar (legacy `SysDirClose`-only
-            // path), so this is just a slot zero-out, but the
-            // call shape is correct for the future migration.
-            core::LinuxFdClose(child, i);
-        }
-        else if (src.state == 12)
-        {
-            // pidfd: bump the target Process refcount so the
-            // child holds an independent reference. The child's
-            // close path will release.
-            core::Process* tgt = sched::SchedFindProcessByPid(src.first_cluster);
-            if (tgt != nullptr)
-                core::ProcessRetain(tgt);
-        }
+        core::LinuxFdClose(child, i);
     }
     // Hand a LinuxCloneDesc to the existing LinuxCloneEntry —
     // it iretq's into ring-3 with rax = 0 (EnterUserModeThread's
