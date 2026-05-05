@@ -489,6 +489,7 @@ void CmdPasswd(u32 argc, char** argv);
 void CmdLogout();
 void CmdSu(u32 argc, char** argv);
 void CmdLoginCmd(u32 argc, char** argv);
+void CmdIdleLock(u32 argc, char** argv);
 
 // ---------------------------------------------------------------
 // Storage / mount / device-list commands (shell_storage.cpp).

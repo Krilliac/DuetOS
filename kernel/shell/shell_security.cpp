@@ -282,6 +282,55 @@ void CmdLoginCmd(u32 argc, char** argv)
     ConsoleWriteln(argv[1]);
 }
 
+void CmdIdleLock(u32 argc, char** argv)
+{
+    using duetos::core::IdleLockSetThresholdSeconds;
+    using duetos::core::IdleLockThresholdSeconds;
+    using duetos::core::InputLastActivityTicks;
+
+    if (argc < 2 || StrEq(argv[1], "show") || StrEq(argv[1], "status"))
+    {
+        const u32 secs = IdleLockThresholdSeconds();
+        ConsoleWrite("IDLELOCK: threshold=");
+        WriteU64Dec(secs);
+        ConsoleWrite(" sec");
+        if (secs == 0)
+        {
+            ConsoleWrite(" (DISABLED)");
+        }
+        ConsoleWriteln("");
+        ConsoleWrite("IDLELOCK: last_activity_tick=");
+        WriteU64Dec(InputLastActivityTicks());
+        ConsoleWriteln("");
+        return;
+    }
+    if (StrEq(argv[1], "off") || StrEq(argv[1], "disable"))
+    {
+        if (!RequireAdmin("IDLELOCK SET"))
+            return;
+        IdleLockSetThresholdSeconds(0);
+        ConsoleWriteln("IDLELOCK: disabled");
+        return;
+    }
+    if (StrEq(argv[1], "set") && argc >= 3)
+    {
+        if (!RequireAdmin("IDLELOCK SET"))
+            return;
+        const i64 secs = ParseInt(argv[2]);
+        if (secs < 0 || secs > 86400)
+        {
+            ConsoleWriteln("IDLELOCK: seconds out of range (0..86400; 0 disables)");
+            return;
+        }
+        IdleLockSetThresholdSeconds(static_cast<u32>(secs));
+        ConsoleWrite("IDLELOCK: threshold set to ");
+        WriteU64Dec(secs);
+        ConsoleWriteln(" sec");
+        return;
+    }
+    ConsoleWriteln("IDLELOCK: usage: idlelock <show|set <seconds>|off>");
+}
+
 void CmdGuard(u32 argc, char** argv)
 {
     // Show / control the security guard.
