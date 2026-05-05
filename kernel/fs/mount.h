@@ -81,6 +81,18 @@ void VfsMountEnumerate(VfsMountEnumCb cb, void* cookie);
 /// no entry. Pointer is stable until the matching VfsUmount call.
 const MountEntry* VfsMountFind(const char* mount_point);
 
+/// Resolve `path` to the longest mount-point that's a prefix of
+/// it. Sets `*out_subpath` to the path component _inside_ the
+/// matched mount (always starts with '/' — the matched prefix is
+/// stripped, leaving the remainder rooted at the mount). Returns
+/// nullptr if no mount matches. Useful to teach the file-routing
+/// layer to dispatch by mount registry rather than by hard-coded
+/// prefix string. A mount of "/disk/0" matches "/disk/0",
+/// "/disk/0/", and "/disk/0/SUB/FILE.TXT"; it does NOT match
+/// "/disk/01" (component-aware comparison — the mount point's
+/// trailing path component must end at a boundary in `path`).
+const MountEntry* VfsMountResolve(const char* path, const char** out_subpath);
+
 /// Boot-time self-test: register, enumerate, find, unmount and
 /// assert each step. Panics on mismatch. Cheap and runs once.
 void VfsMountSelfTest();

@@ -2339,6 +2339,22 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         duetos::security::RegisterDriverDomain("fs/fat32", fat32_init, fat32_teardown);
     }
 
+    // Auto-register every probed FAT32 volume in the mount registry
+    // so `VfsMountResolve` (and therefore the file-routing layer)
+    // sees them. The mount point matches the existing hardcoded
+    // "/disk/<idx>" routing prefix — the longest-prefix resolver
+    // produces the same routing decision the legacy parser made,
+    // but now gated on actual mount-table entries.
+    {
+        char mp[16] = "/disk/0";
+        for (duetos::u32 i = 0; i < duetos::fs::fat32::Fat32VolumeCount() && i < 10; ++i)
+        {
+            mp[6] = static_cast<char>('0' + i);
+            mp[7] = '\0';
+            (void)duetos::fs::VfsMount(mp, duetos::fs::FsType::Fat32, i);
+        }
+    }
+
     SerialWrite("[boot] Routing Win32 file syscalls through FAT32.\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::routing::SelfTest());
 

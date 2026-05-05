@@ -28,6 +28,7 @@
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
 #include "fs/fat32.h"
+#include "fs/mount.h"
 #include "fs/ramfs.h"
 #include "fs/vfs.h"
 #include "log/klog.h"
@@ -107,10 +108,36 @@ bool CopyPathInto(char (&dst)[::duetos::core::Process::Win32FileHandle::kFat32Pa
 // Returns false on any malformed prefix (no digits, no separator
 // after the index). On a non-disk prefix returns false silently —
 // the caller treats that as "use ramfs."
+//
+// Resolution order:
+//   1. Mount registry — longest-prefix match against `VfsMountResolve`.
+//      Hits when fat32 volumes have been auto-mounted at boot
+//      (kernel/core/main.cpp wires that next to the FAT32 self-test).
+//      `MountEntry::block_handle` carries the FAT32 volume index.
+//   2. Hardcoded "/disk/<idx>/<rest>" parse — fallback for callers
+//      that hit before auto-mount has run, or when mounts are
+//      cleared between fault-domain restarts.
 bool ParseDiskPath(const char* path, u32* out_idx, const char** out_rest)
 {
     if (path == nullptr)
         return false;
+
+    // (1) Mount registry — longest-prefix match. Only routes here
+    // when the resolved entry is a FAT32 mount (other FS types end
+    // up here once they ship; for now a non-fat32 mount silently
+    // falls through to the hardcoded path).
+    const char* mount_sub = nullptr;
+    if (const auto* me = duetos::fs::VfsMountResolve(path, &mount_sub))
+    {
+        if (me->fs_type == duetos::fs::FsType::Fat32 && mount_sub != nullptr && mount_sub[0] == '/')
+        {
+            *out_idx = me->block_handle;
+            *out_rest = mount_sub;
+            return true;
+        }
+    }
+
+    // (2) Hardcoded "/disk/<idx>/<rest>" fallback.
     for (u64 i = 0; i < kDiskPrefixLen; ++i)
     {
         if (path[i] == '\0')

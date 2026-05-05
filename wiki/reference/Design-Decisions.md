@@ -612,6 +612,53 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 113 — VFS mount registry routes Win32 file syscalls
+
+- **Scope:** `kernel/fs/mount.{h,cpp}` (new
+  `VfsMountResolve(path, *out_subpath)` longest-prefix resolver +
+  4 self-test cases), `kernel/fs/file_route.cpp`
+  (`ParseDiskPath` consults the resolver before falling back to
+  the hard-coded `/disk/<idx>/...` prefix; new `fs/mount.h`
+  include), `kernel/core/main.cpp` (auto-`VfsMount` every probed
+  FAT32 volume at `/disk/<idx>` after the FAT32 self-test).
+- **Decision:** The mount registry becomes the source of truth
+  for the kernel's on-disk path namespace. `VfsMountResolve`
+  walks the table for the longest-prefix match (component-aware
+  — `/disk/0` won't match `/disk/01/foo`) and hands back the
+  `MountEntry*` plus the in-mount sub-path. `ParseDiskPath` runs
+  the resolver first; only a non-FAT32 hit OR a complete miss
+  triggers the legacy prefix parse. FAT32 volumes are
+  auto-mounted at boot so the registry is populated before the
+  first `OpenForProcess` call. The hard-coded prefix path stays
+  as a fallback for the (currently-unreachable) "boot before
+  auto-mount" window — once Stage 6's third slice lands the
+  ramfs-side `VfsLookup` rewrite, the fallback retires.
+- **Why:** Closes the second of three sub-items under "Stage 6
+  — VFS mount path" on the Roadmap. Without this, the mount
+  registry was bookkeeping-only — every Win32 file syscall
+  routed through a hard-coded `"/disk/"` prefix in
+  `file_route.cpp`. Wiring the registry into `ParseDiskPath`
+  means a future on-disk FS (NTFS read, ext4 read) only has to
+  call `VfsMount` to be reachable from `OpenForProcess` /
+  `WriteForProcess`; the routing layer doesn't grow per-FS
+  branches. Component-aware longest-prefix match also unlocks
+  nested mounts (e.g. binding a filesystem image at
+  `/disk/0/IMAGES/foo.img` over the parent `/disk/0` FAT32).
+- **Rules out / defers:** Returning a generic `VfsNode` from
+  `VfsLookup` (still `const RamfsNode*`; that's the third
+  Stage 6 slice). Stripping the legacy `"/disk/<idx>"` parse
+  (kept as a safety net while only one FS type is mountable).
+  Per-process mount namespaces (the registry is global; per-
+  process roots remain `Process::root` ramfs handles).
+- **Revisit when:** A second on-disk FS type ships and routes
+  through the resolver. Per-process mount namespaces become a
+  requirement (sandboxing). The ramfs-side VfsLookup grows a
+  cross-FS handle so the legacy prefix parser can be deleted.
+- **Related tracks:** Track 3 (Filesystem — VFS layer), Track 9
+  (Win32 — file syscall routing).
+
+---
+
 ## 112 — Extended-boot USB mouse: wheel + buttons 4/5
 
 - **Scope:** `kernel/drivers/input/ps2mouse.h` (added `dz`,

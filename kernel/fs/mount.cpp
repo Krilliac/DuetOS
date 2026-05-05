@@ -202,6 +202,77 @@ const MountEntry* VfsMountFind(const char* mount_point)
     return nullptr;
 }
 
+const MountEntry* VfsMountResolve(const char* path, const char** out_subpath)
+{
+    if (path == nullptr || path[0] != '/')
+    {
+        if (out_subpath != nullptr)
+        {
+            *out_subpath = nullptr;
+        }
+        return nullptr;
+    }
+    const u32 path_len = StrLen(path);
+    const MountEntry* best = nullptr;
+    u32 best_len = 0;
+    for (u32 i = 0; i < kMaxMounts; ++i)
+    {
+        if (!g_mounts[i].in_use)
+        {
+            continue;
+        }
+        const char* mp = g_mounts[i].mount_point;
+        const u32 mp_len = StrLen(mp);
+        if (mp_len == 0 || mp_len > path_len)
+        {
+            continue;
+        }
+        // Byte-for-byte prefix match on [0..mp_len).
+        bool prefix_ok = true;
+        for (u32 k = 0; k < mp_len; ++k)
+        {
+            if (path[k] != mp[k])
+            {
+                prefix_ok = false;
+                break;
+            }
+        }
+        if (!prefix_ok)
+        {
+            continue;
+        }
+        // Component boundary: either path ends here, or the next
+        // byte is '/'. Otherwise "/disk/0" would falsely match
+        // "/disk/01/foo".
+        if (path[mp_len] != '\0' && path[mp_len] != '/')
+        {
+            continue;
+        }
+        if (mp_len > best_len)
+        {
+            best = &g_mounts[i];
+            best_len = mp_len;
+        }
+    }
+    if (best == nullptr)
+    {
+        if (out_subpath != nullptr)
+        {
+            *out_subpath = nullptr;
+        }
+        return nullptr;
+    }
+    if (out_subpath != nullptr)
+    {
+        // The remainder begins where the mount point ended. If the
+        // path equals the mount point exactly we hand back "/" so
+        // the caller doesn't have to distinguish "" from "/".
+        const char* tail = path + best_len;
+        *out_subpath = (tail[0] == '\0') ? "/" : tail;
+    }
+    return best;
+}
+
 void VfsMountSelfTest()
 {
     const u32 baseline = g_mount_count;
@@ -244,6 +315,41 @@ void VfsMountSelfTest()
     {
         core::Panic("fs/mount", "self-test: root single-slash mount point accepted");
     }
+    // Longest-prefix resolution. Mount "/disk/0" + "/disk/0/SUB"
+    // and verify a path under each routes to the correct one.
+    const MountId rd0 = VfsMount("/disk/0", FsType::Fat32, 11);
+    const MountId rd1 = VfsMount("/disk/0/SUB", FsType::Fat32, 12);
+    if (rd0 == kInvalidMountId || rd1 == kInvalidMountId)
+    {
+        core::Panic("fs/mount", "self-test: resolver mounts failed");
+    }
+    const char* sub = nullptr;
+    const MountEntry* r1 = VfsMountResolve("/disk/0/HELLO.TXT", &sub);
+    if (r1 == nullptr || r1->block_handle != 11 || sub == nullptr || sub[0] != '/' || sub[1] != 'H')
+    {
+        core::Panic("fs/mount", "self-test: resolve /disk/0/HELLO.TXT");
+    }
+    const MountEntry* r2 = VfsMountResolve("/disk/0/SUB/INNER.TXT", &sub);
+    if (r2 == nullptr || r2->block_handle != 12 || sub == nullptr || sub[0] != '/' || sub[1] != 'I')
+    {
+        core::Panic("fs/mount", "self-test: resolve longer-prefix /disk/0/SUB/...");
+    }
+    // Component boundary: "/disk/01" must NOT match "/disk/0".
+    if (VfsMountResolve("/disk/01/foo", &sub) != nullptr)
+    {
+        core::Panic("fs/mount", "self-test: resolver crossed component boundary");
+    }
+    // Exact-match: "/disk/0" should resolve, sub == "/".
+    const MountEntry* r3 = VfsMountResolve("/disk/0", &sub);
+    if (r3 == nullptr || sub == nullptr || sub[0] != '/' || sub[1] != '\0')
+    {
+        core::Panic("fs/mount", "self-test: exact-match resolve");
+    }
+    if (!VfsUmount(rd0) || !VfsUmount(rd1))
+    {
+        core::Panic("fs/mount", "self-test: resolver unmounts failed");
+    }
+
     // Unmount + verify.
     if (!VfsUmount(a))
     {
