@@ -1,5 +1,7 @@
 #include "proc/process.h"
 
+#include "ipc/kfile.h"
+#include "ipc/kobject.h"
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
 #include "diag/hexdump.h"
@@ -101,12 +103,13 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     for (u32 i = 0; i < 16; ++i)
     {
         p->linux_fds[i].state = (i < 3) ? 1 /* reserved-tty */ : 0;
+        p->linux_fds[i].flags = 0;
         p->linux_fds[i].first_cluster = 0;
         p->linux_fds[i].size = 0;
+        p->linux_fds[i].kf_handle = ::duetos::ipc::kHandleInvalid;
         p->linux_fds[i].offset = 0;
         for (u32 j = 0; j < sizeof(p->linux_fds[i]._pad); ++j)
             p->linux_fds[i]._pad[j] = 0;
-        p->linux_fds[i]._pad2 = 0;
         for (u32 j = 0; j < sizeof(p->linux_fds[i].path); ++j)
             p->linux_fds[i].path[j] = 0;
     }
@@ -1049,6 +1052,342 @@ void ProcessFeedStdinFocusChar(char c)
         sched::WaitQueueWakeOne(&r.waiters);
     }
     arch::Sti();
+}
+
+// =========================================================================
+// Linux fd-table helpers — see process.h for contract details.
+// =========================================================================
+
+namespace
+{
+
+// Mirrors duetos::subsystems::linux::internal::LinuxFdEffectiveMax,
+// inlined here so the helper layer doesn't have to pull in the
+// Linux subsystem's private header. Both definitions read the
+// same `linux_rlimit_nofile_cur` field; keeping them in sync is
+// a one-line change if the cap ever moves.
+constexpr u32 kLinuxFdHardCap = 16;
+
+u32 LinuxFdEffectiveMaxLocal(const Process* p)
+{
+    if (p == nullptr)
+        return kLinuxFdHardCap;
+    const u64 cap = p->linux_rlimit_nofile_cur;
+    if (cap == 0xFFFFFFFFFFFFFFFFull || cap > kLinuxFdHardCap)
+        return kLinuxFdHardCap;
+    return static_cast<u32>(cap);
+}
+
+// KFileKind ↔ legacy LinuxFd::state mapping. Tags are wire-
+// compatible (numeric values match) — see kfile.h's enum class
+// KFileKind. Cast keeps process.cpp from having to reach into
+// the ipc:: namespace at every helper site.
+inline ::duetos::ipc::KFileKind KindOf(u8 state)
+{
+    return static_cast<::duetos::ipc::KFileKind>(state);
+}
+
+} // namespace
+
+i32 LinuxFdAllocLowest(Process* p, u32 lo)
+{
+    if (p == nullptr)
+        return -1;
+    const u32 fd_max = LinuxFdEffectiveMaxLocal(p);
+    if (lo >= fd_max)
+        return -1;
+    for (u32 i = lo; i < fd_max; ++i)
+    {
+        if (p->linux_fds[i].state == 0)
+            return static_cast<i32>(i);
+    }
+    return -1;
+}
+
+bool LinuxFdAttachKFile(Process* p, u32 fd, u8 kind, u32 pool_index, void (*release)(u32))
+{
+    if (p == nullptr || fd >= 16)
+        return false;
+    auto kf_r = ::duetos::ipc::KFileCreate(KindOf(kind), pool_index, release, /*vnode=*/nullptr,
+                                           /*flags=*/0);
+    if (!kf_r.has_value())
+        return false;
+    auto h_r = ::duetos::ipc::HandleTableInsert(p->kobj_handles, &kf_r.value()->base);
+    if (!h_r.has_value())
+    {
+        // Insert failed (table full). Drop the fresh KFile ref so
+        // its destroy callback runs and releases the pool slot —
+        // the caller had already allocated `pool_index` and is
+        // counting on cleanup if attach fails.
+        ::duetos::ipc::KObjectRelease(&kf_r.value()->base);
+        return false;
+    }
+    p->linux_fds[fd].kf_handle = h_r.value();
+    return true;
+}
+
+void LinuxFdClose(Process* p, u32 fd)
+{
+    if (p == nullptr || fd >= 16)
+        return;
+    Process::LinuxFd& lf = p->linux_fds[fd];
+    if (lf.state == 0)
+        return;
+    if (lf.kf_handle != ::duetos::ipc::kHandleInvalid)
+    {
+        // Drops the table's KObject ref. KFileDestroy fires on
+        // refcount=0, dispatching to the per-pool release callback
+        // (PipeReleaseRead/Write, EventfdRelease, etc.) — no
+        // explicit `*Release` call needed at the syscall layer
+        // for KFile-backed fds.
+        (void)::duetos::ipc::HandleTableRemove(p->kobj_handles, lf.kf_handle);
+        lf.kf_handle = ::duetos::ipc::kHandleInvalid;
+    }
+    lf.state = 0;
+    lf.flags = 0;
+    lf.first_cluster = 0;
+    lf.size = 0;
+    lf.offset = 0;
+    for (u32 j = 0; j < sizeof(lf.path); ++j)
+        lf.path[j] = 0;
+}
+
+bool LinuxFdDup(Process* p, u32 oldfd, u32 newfd)
+{
+    if (p == nullptr || oldfd >= 16 || newfd >= 16)
+        return false;
+    if (oldfd == newfd)
+        return true;
+    Process::LinuxFd& src = p->linux_fds[oldfd];
+    if (src.state == 0)
+        return false;
+    // Close any existing slot at newfd FIRST. Drops the dst's
+    // KFile ref via the unified path.
+    LinuxFdClose(p, newfd);
+
+    Process::LinuxFd& dst = p->linux_fds[newfd];
+    // Mirror the v0 sub-GAP: per-fd offsets/path/etc. are an
+    // independent copy. Real Linux dup() shares the open-file
+    // description (single offset, single flag set); v0 doesn't
+    // model that yet — the per-fd state is per-slot.
+    dst.state = src.state;
+    dst.flags = src.flags;
+    // Drop FD_CLOEXEC on the new fd by default. Linux semantics:
+    // dup() always produces a non-cloexec fd; dup3() with
+    // O_CLOEXEC re-sets it via LinuxFdSetCloexec at the call site.
+    dst.flags = static_cast<u8>(dst.flags & ~Process::kLinuxFdFlagCloexec);
+    dst.first_cluster = src.first_cluster;
+    dst.size = src.size;
+    dst.offset = src.offset;
+    for (u32 j = 0; j < sizeof(dst.path); ++j)
+        dst.path[j] = src.path[j];
+
+    // Duplicate the KFile sidecar so both fds share the underlying
+    // pool ref. Each fd holds one ref — closing one drops one ref;
+    // closing both fires the per-pool release callback.
+    if (src.kf_handle != ::duetos::ipc::kHandleInvalid)
+    {
+        auto h_r = ::duetos::ipc::HandleTableDuplicate(p->kobj_handles, p->kobj_handles, src.kf_handle);
+        if (!h_r.has_value())
+        {
+            // Roll back the slot copy — we promised "either both
+            // fds reference the same KFile, or neither does".
+            dst.state = 0;
+            dst.flags = 0;
+            dst.first_cluster = 0;
+            dst.size = 0;
+            dst.offset = 0;
+            for (u32 j = 0; j < sizeof(dst.path); ++j)
+                dst.path[j] = 0;
+            return false;
+        }
+        dst.kf_handle = h_r.value();
+    }
+    else
+    {
+        dst.kf_handle = ::duetos::ipc::kHandleInvalid;
+    }
+    return true;
+}
+
+void LinuxFdSetCloexec(Process* p, u32 fd, bool on)
+{
+    if (p == nullptr || fd >= 16)
+        return;
+    Process::LinuxFd& lf = p->linux_fds[fd];
+    if (lf.state == 0)
+        return;
+    if (on)
+        lf.flags = static_cast<u8>(lf.flags | Process::kLinuxFdFlagCloexec);
+    else
+        lf.flags = static_cast<u8>(lf.flags & ~Process::kLinuxFdFlagCloexec);
+}
+
+bool LinuxFdGetCloexec(const Process* p, u32 fd)
+{
+    if (p == nullptr || fd >= 16)
+        return false;
+    const Process::LinuxFd& lf = p->linux_fds[fd];
+    if (lf.state == 0)
+        return false;
+    return (lf.flags & Process::kLinuxFdFlagCloexec) != 0;
+}
+
+void LinuxFdInheritFromParent(Process* parent, Process* child)
+{
+    if (parent == nullptr || child == nullptr)
+        return;
+    for (u32 fd = 0; fd < 16; ++fd)
+    {
+        const Process::LinuxFd& src = parent->linux_fds[fd];
+        if (src.state == 0)
+            continue;
+        Process::LinuxFd& dst = child->linux_fds[fd];
+        // Reserved-tty slots (fd 0/1/2 in a freshly-created child)
+        // start at state=1; just leave them alone if the parent
+        // also has state=1 there. For a truly inherited fd, mirror
+        // the parent's state including FD_CLOEXEC.
+        dst.state = src.state;
+        dst.flags = src.flags; // keeps cloexec; execve drops it later
+        dst.first_cluster = src.first_cluster;
+        dst.size = src.size;
+        dst.offset = src.offset;
+        for (u32 j = 0; j < sizeof(dst.path); ++j)
+            dst.path[j] = src.path[j];
+
+        // KFile sidecar inheritance — duplicate the parent's
+        // handle into the child's table. Each side now holds one
+        // KFile ref; the per-pool release callback fires only when
+        // both have closed the fd.
+        if (src.kf_handle != ::duetos::ipc::kHandleInvalid)
+        {
+            auto h_r = ::duetos::ipc::HandleTableDuplicate(parent->kobj_handles, child->kobj_handles, src.kf_handle);
+            if (h_r.has_value())
+            {
+                dst.kf_handle = h_r.value();
+            }
+            else
+            {
+                // Child's table is full or duplication otherwise
+                // failed. Best-effort: leave the slot's data
+                // populated but with no KFile ref — close-side
+                // will skip the HandleTableRemove. Pool will leak
+                // (sub-GAP — fork failure under handle-table
+                // pressure is exotic, and v0 forks are rare).
+                dst.kf_handle = ::duetos::ipc::kHandleInvalid;
+            }
+        }
+        else
+        {
+            dst.kf_handle = ::duetos::ipc::kHandleInvalid;
+        }
+    }
+}
+
+void LinuxFdCloseOnExec(Process* p)
+{
+    if (p == nullptr)
+        return;
+    for (u32 fd = 0; fd < 16; ++fd)
+    {
+        if (p->linux_fds[fd].state == 0)
+            continue;
+        if ((p->linux_fds[fd].flags & Process::kLinuxFdFlagCloexec) == 0)
+            continue;
+        LinuxFdClose(p, fd);
+    }
+}
+
+// Side-channel for the self-test's synthetic per-pool release
+// callback. File-scope so the lambda's `+` decay can use it
+// without capturing.
+namespace
+{
+u32 g_lfd_selftest_release_calls = 0;
+u32 g_lfd_selftest_release_idx = 0;
+
+void LinuxFdSelfTestRelease(u32 idx)
+{
+    ++g_lfd_selftest_release_calls;
+    g_lfd_selftest_release_idx = idx;
+}
+} // namespace
+
+void LinuxFdSelfTest()
+{
+    arch::SerialWrite("[proc] linux-fd-table self-test\n");
+
+    // The helpers only touch `linux_fds[]`, `kobj_handles`, and
+    // `linux_rlimit_nofile_cur`. Allocate a stand-in Process on
+    // the heap, zero-init the whole thing, and exercise just
+    // those fields — avoids the full ProcessCreate dependency
+    // chain (AS / scheduler / serial banner) which isn't needed
+    // for a unit test of the helper plumbing.
+    auto* p = static_cast<Process*>(mm::KMalloc(sizeof(Process)));
+    if (p == nullptr)
+    {
+        arch::SerialWrite("[proc] linux-fd-table self-test: skipped (no kheap)\n");
+        return;
+    }
+    memset(p, 0, sizeof(Process));
+    p->linux_rlimit_nofile_cur = 0xFFFFFFFFFFFFFFFFull; // unlimited
+    for (u32 i = 0; i < 16; ++i)
+    {
+        p->linux_fds[i].state = (i < 3) ? 1 : 0;
+        p->linux_fds[i].kf_handle = ::duetos::ipc::kHandleInvalid;
+    }
+
+    // 1) AllocLowest: should hand out fd 3 first (0/1/2 reserved).
+    const i32 fd3 = LinuxFdAllocLowest(p, 3);
+    if (fd3 != 3)
+        core::Panic("proc/linux-fd", "self-test: AllocLowest(3) != 3");
+    // Helper does NOT mark slot in_use — caller stamps state.
+    p->linux_fds[3].state = 5; // synthetic eventfd-like
+    p->linux_fds[3].first_cluster = 0xAAAA;
+
+    // 2) AttachKFile: synthetic release callback that records.
+    g_lfd_selftest_release_calls = 0;
+    g_lfd_selftest_release_idx = 0;
+    if (!LinuxFdAttachKFile(p, 3, /*kind=*/5, /*pool_index=*/0xAAAA, &LinuxFdSelfTestRelease))
+        core::Panic("proc/linux-fd", "self-test: AttachKFile failed");
+    if (p->linux_fds[3].kf_handle == ::duetos::ipc::kHandleInvalid)
+        core::Panic("proc/linux-fd", "self-test: kf_handle invalid post-attach");
+
+    // 3) Dup: fd 4 should share the KFile ref with fd 3.
+    if (!LinuxFdDup(p, 3, 4))
+        core::Panic("proc/linux-fd", "self-test: Dup(3, 4) failed");
+    if (p->linux_fds[4].state != 5)
+        core::Panic("proc/linux-fd", "self-test: Dup did not copy state");
+    if (p->linux_fds[4].kf_handle == ::duetos::ipc::kHandleInvalid)
+        core::Panic("proc/linux-fd", "self-test: Dup did not set kf_handle on dst");
+    if (p->linux_fds[4].kf_handle == p->linux_fds[3].kf_handle)
+        core::Panic("proc/linux-fd", "self-test: Dup gave dst the SAME handle");
+
+    // 4) CLOEXEC: stamp on fd 3, leave fd 4 clear.
+    LinuxFdSetCloexec(p, 3, true);
+    if (!LinuxFdGetCloexec(p, 3))
+        core::Panic("proc/linux-fd", "self-test: SetCloexec(3,true) didn't take");
+    if (LinuxFdGetCloexec(p, 4))
+        core::Panic("proc/linux-fd", "self-test: cloexec leaked across dup");
+
+    // 5) CloseOnExec: fd 3 (cloexec) should close, fd 4 should survive.
+    LinuxFdCloseOnExec(p);
+    if (p->linux_fds[3].state != 0)
+        core::Panic("proc/linux-fd", "self-test: CloseOnExec didn't close cloexec slot");
+    if (p->linux_fds[4].state != 5)
+        core::Panic("proc/linux-fd", "self-test: CloseOnExec dropped non-cloexec slot");
+    if (g_lfd_selftest_release_calls != 0)
+        core::Panic("proc/linux-fd", "self-test: pool release fired prematurely");
+
+    // 6) Final close on fd 4 — fires the per-pool release callback.
+    LinuxFdClose(p, 4);
+    if (g_lfd_selftest_release_calls != 1)
+        core::Panic("proc/linux-fd", "self-test: pool release didn't fire on last close");
+    if (g_lfd_selftest_release_idx != 0xAAAA)
+        core::Panic("proc/linux-fd", "self-test: pool release got wrong index");
+
+    mm::KFree(p);
+    arch::SerialWrite("[proc] linux-fd-table self-test OK\n");
 }
 
 } // namespace duetos::core

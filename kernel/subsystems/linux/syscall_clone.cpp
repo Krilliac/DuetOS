@@ -180,24 +180,34 @@ i64 DoFork()
     child->linux_parent_pid = parent->pid;
 
     // fd inheritance — every parent fd survives into the child.
-    // Linux semantics: dup() shares the file description; we
-    // approximate by copying the slot verbatim and bumping
-    // refcounts on pool-backed states (pipe / eventfd / socket)
-    // so the kernel object outlives the parent's close().
-    // FAT32 file handles share first_cluster + path but track
-    // their own per-fd offset — copying the slot achieves that.
-    // CLOEXEC is a sub-GAP; every fd survives unconditionally.
+    // For migrated kinds (pipe / eventfd) the per-pool ref is
+    // shared via `LinuxFdInheritFromParent`'s HandleTable-
+    // Duplicate path: each side gets a fresh ipc handle pointing
+    // at the same KFile, bumping the KObject refcount by one.
+    // The legacy explicit `*Retain` calls below cover un-
+    // migrated kinds (socket / timerfd / signalfd / epoll /
+    // inotify / pidfd / mq / memfd / fanotify); they're skipped
+    // when a KFile sidecar is present (kf_handle != invalid)
+    // because the duplicated KFile already holds the ref.
+    //
+    // Dirfd (state 11) is special: the snapshot lives on the
+    // parent's win32_dirs[] table, which the child doesn't
+    // share, so the child's dirfd slot is cleared (POSIX
+    // permits closing dirfds on fork). We do this AFTER the
+    // helper runs so the slot is overwritten.
+    core::LinuxFdInheritFromParent(parent, child);
     for (u32 i = 0; i < 16; ++i)
     {
         const auto& src = parent->linux_fds[i];
-        child->linux_fds[i] = src;
-        if (src.state == 3)
-            PipeRetainRead(src.first_cluster);
-        else if (src.state == 4)
-            PipeRetainWrite(src.first_cluster);
-        else if (src.state == 5)
-            EventfdRetain(src.first_cluster);
-        else if (src.state == 6)
+        if (src.state == 0)
+            continue;
+        // Migrated kinds — KFile sidecar already duplicated by
+        // LinuxFdInheritFromParent; skip the legacy explicit
+        // retain. (state 3/4/5 carry kf_handle today; the sub-
+        // sequent slice migrates 6..15 the same way.)
+        if (child->linux_fds[i].kf_handle != ::duetos::ipc::kHandleInvalid)
+            continue;
+        if (src.state == 6)
             SocketFdRetain(src.first_cluster);
         else if (src.state == 7)
             TimerfdRetain(src.first_cluster);
@@ -212,16 +222,16 @@ i64 DoFork()
             // Directory snapshot lives on the PARENT's
             // win32_dirs[] table. The child's table is fresh
             // and empty; sharing the parent's slot index would
-            // leave the child's fd dangling. Skip inheritance —
-            // the child's dirfd slot is cleared so getdents64
-            // sees an honest -EBADF rather than reading the
-            // wrong slot. (POSIX permits closing dirfds on
-            // fork — same as what some libcs do under
-            // FD_CLOEXEC; our v0 just makes it unconditional.)
-            child->linux_fds[i].state = 0;
-            child->linux_fds[i].first_cluster = 0;
-            child->linux_fds[i].size = 0;
-            child->linux_fds[i].offset = 0;
+            // leave the child's fd dangling. Clear the child's
+            // dirfd slot so getdents64 sees an honest -EBADF
+            // rather than reading the wrong slot.
+            //
+            // `LinuxFdClose` drops any KFile sidecar the inherit
+            // helper might have duplicated for this slot — today
+            // dirfd has no sidecar (legacy `SysDirClose`-only
+            // path), so this is just a slot zero-out, but the
+            // call shape is correct for the future migration.
+            core::LinuxFdClose(child, i);
         }
         else if (src.state == 12)
         {

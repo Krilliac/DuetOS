@@ -90,6 +90,7 @@ i64 DoOpen(u64 user_path, u64 flags, u64 mode)
     constexpr u64 kO_CREAT = 0x40;
     constexpr u64 kO_EXCL = 0x80;
     constexpr u64 kO_TRUNC = 0x200;
+    constexpr u64 kO_CLOEXEC = 0x80000;
     char path[64];
     for (u32 i = 0; i < sizeof(path); ++i)
         path[i] = 0;
@@ -200,20 +201,20 @@ i64 DoOpen(u64 user_path, u64 flags, u64 mode)
         if (dh < 0)
             return kENOMEM;
         const u32 dslot = static_cast<u32>(dh) - static_cast<u32>(core::Process::kWin32DirBase);
-        for (u32 i = 3; i < LinuxFdEffectiveMax(p); ++i)
+        const i32 fd = core::LinuxFdAllocLowest(p, 3);
+        if (fd < 0)
         {
-            if (p->linux_fds[i].state == 0)
-            {
-                p->linux_fds[i].state = 11;
-                p->linux_fds[i].first_cluster = dslot;
-                p->linux_fds[i].size = 0;
-                p->linux_fds[i].offset = 0;
-                p->linux_fds[i].path[0] = '\0';
-                return static_cast<i64>(i);
-            }
+            ::duetos::subsystems::win32::SysDirClose(p, static_cast<u64>(dh));
+            return kEMFILE;
         }
-        ::duetos::subsystems::win32::SysDirClose(p, static_cast<u64>(dh));
-        return kEMFILE;
+        p->linux_fds[fd].state = 11;
+        p->linux_fds[fd].first_cluster = dslot;
+        p->linux_fds[fd].size = 0;
+        p->linux_fds[fd].offset = 0;
+        p->linux_fds[fd].path[0] = '\0';
+        if ((flags & kO_CLOEXEC) != 0)
+            core::LinuxFdSetCloexec(p, static_cast<u32>(fd), true);
+        return static_cast<i64>(fd);
     }
     // Stamp the canary flag at open time — same wall the Win32
     // SYS_FILE_OPEN path uses (see file_route.cpp). Pending-
@@ -222,36 +223,42 @@ i64 DoOpen(u64 user_path, u64 flags, u64 mode)
     // those handles are by-construction not canaries; existing
     // files we just check.
     const bool open_canary = !pending_create && ::duetos::security::CanaryMatchesPath(leaf);
-    for (u32 i = 3; i < LinuxFdEffectiveMax(p); ++i)
+    const i32 fd = core::LinuxFdAllocLowest(p, 3);
+    if (fd < 0)
+        return kEMFILE;
+    p->linux_fds[fd].state = 2;
+    u8 fd_flags = pending_create ? core::Process::kLinuxFdFlagPendingCreate : 0;
+    if (open_canary)
+        fd_flags |= core::Process::kLinuxFdFlagCanary;
+    p->linux_fds[fd].flags = fd_flags;
+    p->linux_fds[fd].first_cluster = entry.first_cluster;
+    p->linux_fds[fd].size = entry.size_bytes;
+    p->linux_fds[fd].offset = 0;
+    // Remember the (stripped) volume-relative path so
+    // sys_write can call Fat32AppendAtPath on extend.
+    u32 pi = 0;
+    while (leaf[pi] != 0 && pi + 1 < sizeof(p->linux_fds[fd].path))
     {
-        if (p->linux_fds[i].state == 0)
-        {
-            p->linux_fds[i].state = 2;
-            u8 fd_flags = pending_create ? core::Process::kLinuxFdFlagPendingCreate : 0;
-            if (open_canary)
-                fd_flags |= core::Process::kLinuxFdFlagCanary;
-            p->linux_fds[i].flags = fd_flags;
-            p->linux_fds[i].first_cluster = entry.first_cluster;
-            p->linux_fds[i].size = entry.size_bytes;
-            p->linux_fds[i].offset = 0;
-            // Remember the (stripped) volume-relative path so
-            // sys_write can call Fat32AppendAtPath on extend.
-            u32 pi = 0;
-            while (leaf[pi] != 0 && pi + 1 < sizeof(p->linux_fds[i].path))
-            {
-                p->linux_fds[i].path[pi] = leaf[pi];
-                ++pi;
-            }
-            p->linux_fds[i].path[pi] = 0;
-            return static_cast<i64>(i);
-        }
+        p->linux_fds[fd].path[pi] = leaf[pi];
+        ++pi;
     }
-    return kEMFILE;
+    p->linux_fds[fd].path[pi] = 0;
+    if ((flags & kO_CLOEXEC) != 0)
+        core::LinuxFdSetCloexec(p, static_cast<u32>(fd), true);
+    return static_cast<i64>(fd);
 }
 
-// Linux: close(fd). Marks the slot unused. No destructor work —
-// FAT32 entries are snapshotted into the fd at open() time; a
-// close doesn't touch disk.
+// Linux: close(fd). Marks the slot unused. No destructor work
+// for FAT32-backed regular files (snapshotted at open). For
+// pool-backed kinds (states 3..15) the per-pool release is
+// driven by the slot's KFile sidecar (`kf_handle`) when one is
+// attached: `LinuxFdClose` calls `HandleTableRemove`, the
+// resulting `KObjectRelease` fires `KFileDestroy`, and that
+// dispatches to the per-pool release callback (e.g.
+// `PipeReleaseRead`) registered when the slot was created.
+// Un-migrated kinds (no KFile sidecar) fall through to the
+// legacy explicit `*Release` calls below — kept for the
+// states whose creators haven't been migrated yet.
 i64 DoClose(u64 fd)
 {
     core::Process* p = core::CurrentProcess();
@@ -264,59 +271,65 @@ i64 DoClose(u64 fd)
     {
         return kEBADF;
     }
-    // Drop the per-pool ref before zeroing the LinuxFd. Pipe
-    // ends only release one half — the other end's LinuxFd
-    // slot keeps its own ref. Eventfd has a single end.
     const u8 state = p->linux_fds[fd].state;
     const u32 idx = p->linux_fds[fd].first_cluster;
-    if (state == 3)
-        PipeReleaseRead(idx);
-    else if (state == 4)
-        PipeReleaseWrite(idx);
-    else if (state == 5)
-        EventfdRelease(idx);
-    else if (state == 6)
-        SocketFdRelease(idx);
-    else if (state == 7)
-        TimerfdRelease(idx);
-    else if (state == 8)
-        SignalfdRelease(idx);
-    else if (state == 9)
-        EpollRelease(idx);
-    else if (state == 10)
-        InotifyRelease(idx);
-    else if (state == 11)
-        ::duetos::subsystems::win32::SysDirClose(p, idx + core::Process::kWin32DirBase);
-    else if (state == 12)
+    const bool has_kfile = p->linux_fds[fd].kf_handle != ::duetos::ipc::kHandleInvalid;
+
+    // Legacy explicit *Release for kinds whose creators still
+    // wire pool refs by hand. Skipped for migrated kinds — the
+    // KFile sidecar's destroy callback drops the ref instead.
+    if (!has_kfile)
     {
-        // pidfd: drop the ProcessRetain that pidfd_open took.
-        // The target may already be reaped — Release tolerates a
-        // null target lookup (no ref to drop).
-        core::Process* target = sched::SchedFindProcessByPid(idx);
-        if (target != nullptr)
-            core::ProcessRelease(target);
+        if (state == 3)
+            PipeReleaseRead(idx);
+        else if (state == 4)
+            PipeReleaseWrite(idx);
+        else if (state == 5)
+            EventfdRelease(idx);
+        else if (state == 6)
+            SocketFdRelease(idx);
+        else if (state == 7)
+            TimerfdRelease(idx);
+        else if (state == 8)
+            SignalfdRelease(idx);
+        else if (state == 9)
+            EpollRelease(idx);
+        else if (state == 10)
+            InotifyRelease(idx);
+        else if (state == 11)
+            ::duetos::subsystems::win32::SysDirClose(p, idx + core::Process::kWin32DirBase);
+        else if (state == 12)
+        {
+            // pidfd: drop the ProcessRetain that pidfd_open took.
+            // The target may already be reaped — Release tolerates a
+            // null target lookup (no ref to drop).
+            core::Process* target = sched::SchedFindProcessByPid(idx);
+            if (target != nullptr)
+                core::ProcessRelease(target);
+        }
+        else if (state == 13)
+        {
+            // POSIX MQ: drop the per-handle refcount. Frees the ring
+            // when refs == 0 AND mq_unlink already happened.
+            PosixMqRelease(idx);
+        }
+        else if (state == 14)
+        {
+            // memfd: drop the per-handle refcount. Frees the frame
+            // array when refs == 0 (no one holds the fd anymore).
+            MemfdRelease(idx);
+        }
+        else if (state == 15)
+        {
+            // fanotify instance: drop refcount; frees on last release.
+            FanotifyRelease(idx);
+        }
     }
-    else if (state == 13)
-    {
-        // POSIX MQ: drop the per-handle refcount. Frees the ring
-        // when refs == 0 AND mq_unlink already happened.
-        PosixMqRelease(idx);
-    }
-    else if (state == 14)
-    {
-        // memfd: drop the per-handle refcount. Frees the frame
-        // array when refs == 0 (no one holds the fd anymore).
-        MemfdRelease(idx);
-    }
-    else if (state == 15)
-    {
-        // fanotify instance: drop refcount; frees on last release.
-        FanotifyRelease(idx);
-    }
-    p->linux_fds[fd].state = 0;
-    p->linux_fds[fd].first_cluster = 0;
-    p->linux_fds[fd].size = 0;
-    p->linux_fds[fd].offset = 0;
+
+    // Centralised slot teardown — also drops the KFile ref when
+    // a sidecar is attached (firing the per-pool release callback
+    // for migrated kinds).
+    core::LinuxFdClose(p, static_cast<u32>(fd));
     return 0;
 }
 

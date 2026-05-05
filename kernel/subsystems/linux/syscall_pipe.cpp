@@ -587,56 +587,91 @@ i64 DoPipe(u64 user_fds)
 
 i64 DoPipe2(u64 user_fds, u64 flags)
 {
-    (void)flags; // O_NONBLOCK / O_CLOEXEC ignored in v0 (sub-GAP)
+    // Linux open-flag bits we honour: O_CLOEXEC (0x80000) — stamps
+    // the cloexec bit on both ends; O_NONBLOCK (0x800) — accepted
+    // as a no-op (v0 pipes are blocking, sub-GAP).
+    constexpr u64 kO_CLOEXEC = 0x80000;
+    constexpr u64 kO_NONBLOCK = 0x800;
+    if ((flags & ~(kO_CLOEXEC | kO_NONBLOCK)) != 0)
+        return kEINVAL;
+
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
-    // Find two free LinuxFd slots starting at fd 3 (0/1/2 are
-    // tty-reserved). Linux semantics: lowest two free fds.
-    u32 r_fd = 16;
-    u32 w_fd = 16;
-    const u32 fd_max = LinuxFdEffectiveMax(p);
-    for (u32 i = 3; i < fd_max; ++i)
-    {
-        if (p->linux_fds[i].state != 0)
-            continue;
-        if (r_fd == 16)
-            r_fd = i;
-        else if (w_fd == 16)
-        {
-            w_fd = i;
-            break;
-        }
-    }
-    if (r_fd == 16 || w_fd == 16)
+    // Allocate the read end first; reserve the slot by stamping
+    // its state immediately so the second AllocLowest doesn't
+    // hand us back the same fd.
+    const i32 r_fd = core::LinuxFdAllocLowest(p, 3);
+    if (r_fd < 0)
         return kEMFILE;
+    p->linux_fds[r_fd].state = 3;
+    const i32 w_fd = core::LinuxFdAllocLowest(p, 3);
+    if (w_fd < 0)
+    {
+        p->linux_fds[r_fd].state = 0;
+        return kEMFILE;
+    }
+    p->linux_fds[w_fd].state = 4;
 
     const i32 idx = PipeAlloc();
     if (idx < 0)
+    {
+        p->linux_fds[r_fd].state = 0;
+        p->linux_fds[w_fd].state = 0;
         return kENFILE;
+    }
 
-    p->linux_fds[r_fd].state = 3;
+    p->linux_fds[r_fd].flags = 0;
     p->linux_fds[r_fd].first_cluster = static_cast<u32>(idx);
     p->linux_fds[r_fd].size = 0;
     p->linux_fds[r_fd].offset = 0;
     p->linux_fds[r_fd].path[0] = '\0';
-
-    p->linux_fds[w_fd].state = 4;
+    p->linux_fds[w_fd].flags = 0;
     p->linux_fds[w_fd].first_cluster = static_cast<u32>(idx);
     p->linux_fds[w_fd].size = 0;
     p->linux_fds[w_fd].offset = 0;
     p->linux_fds[w_fd].path[0] = '\0';
 
-    u32 fds[2];
-    fds[0] = r_fd;
-    fds[1] = w_fd;
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_fds), fds, sizeof(fds)))
+    // Attach KFile sidecars so close / dup / fork all route the
+    // per-pool release through KObject refcounting. The initial
+    // pool refs (read_refs=1, write_refs=1 from PipeAlloc) are
+    // handed off to the two KFile destroy callbacks; no explicit
+    // Retain at the syscall site.
+    if (!core::LinuxFdAttachKFile(p, static_cast<u32>(r_fd), /*kind=*/3, static_cast<u32>(idx), &PipeReleaseRead))
     {
-        // User pointer bad — roll back the fds + the pool entry.
         p->linux_fds[r_fd].state = 0;
         p->linux_fds[w_fd].state = 0;
         PipeReleaseRead(static_cast<u32>(idx));
         PipeReleaseWrite(static_cast<u32>(idx));
+        return kENOMEM;
+    }
+    if (!core::LinuxFdAttachKFile(p, static_cast<u32>(w_fd), /*kind=*/4, static_cast<u32>(idx), &PipeReleaseWrite))
+    {
+        // r_fd's KFile sidecar will release its read ref via
+        // LinuxFdClose. The write end's pool ref needs an explicit
+        // release here (no KFile attached on w_fd).
+        core::LinuxFdClose(p, static_cast<u32>(r_fd));
+        p->linux_fds[w_fd].state = 0;
+        PipeReleaseWrite(static_cast<u32>(idx));
+        return kENOMEM;
+    }
+
+    if ((flags & kO_CLOEXEC) != 0)
+    {
+        core::LinuxFdSetCloexec(p, static_cast<u32>(r_fd), true);
+        core::LinuxFdSetCloexec(p, static_cast<u32>(w_fd), true);
+    }
+
+    u32 fds[2];
+    fds[0] = static_cast<u32>(r_fd);
+    fds[1] = static_cast<u32>(w_fd);
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_fds), fds, sizeof(fds)))
+    {
+        // User pointer bad — both KFile sidecars get their refs
+        // dropped via LinuxFdClose, which in turn fires the per-
+        // pool release callback (drops read_refs / write_refs).
+        core::LinuxFdClose(p, static_cast<u32>(r_fd));
+        core::LinuxFdClose(p, static_cast<u32>(w_fd));
         return kEFAULT;
     }
 
@@ -657,28 +692,37 @@ i64 DoEventfd(u64 initval)
 
 i64 DoEventfd2(u64 initval, u64 flags)
 {
+    constexpr u64 kEFD_CLOEXEC = 0x80000;
+    constexpr u64 kEFD_NONBLOCK = 0x800;
+    constexpr u64 kEFD_SEMAPHORE = 0x1;
+    if ((flags & ~(kEFD_CLOEXEC | kEFD_NONBLOCK | kEFD_SEMAPHORE)) != 0)
+        return kEINVAL;
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
-    u32 fd = 16;
-    for (u32 i = 3; i < LinuxFdEffectiveMax(p); ++i)
-    {
-        if (p->linux_fds[i].state == 0)
-        {
-            fd = i;
-            break;
-        }
-    }
-    if (fd == 16)
+    const i32 fd = core::LinuxFdAllocLowest(p, 3);
+    if (fd < 0)
         return kEMFILE;
+    p->linux_fds[fd].state = 5; // reserve so AttachKFile can't trip the slot
     const i32 idx = EventfdAlloc(initval, static_cast<u32>(flags));
     if (idx < 0)
+    {
+        p->linux_fds[fd].state = 0;
         return kENFILE;
-    p->linux_fds[fd].state = 5;
+    }
+    p->linux_fds[fd].flags = 0;
     p->linux_fds[fd].first_cluster = static_cast<u32>(idx);
     p->linux_fds[fd].size = 0;
     p->linux_fds[fd].offset = 0;
     p->linux_fds[fd].path[0] = '\0';
+    if (!core::LinuxFdAttachKFile(p, static_cast<u32>(fd), /*kind=*/5, static_cast<u32>(idx), &EventfdRelease))
+    {
+        p->linux_fds[fd].state = 0;
+        EventfdRelease(static_cast<u32>(idx));
+        return kENOMEM;
+    }
+    if ((flags & kEFD_CLOEXEC) != 0)
+        core::LinuxFdSetCloexec(p, static_cast<u32>(fd), true);
     arch::SerialWrite("[linux/eventfd] fd=");
     arch::SerialWriteHex(fd);
     arch::SerialWrite(" pool_idx=");

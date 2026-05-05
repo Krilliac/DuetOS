@@ -71,12 +71,45 @@ the same commit** that delivers the code.
   for the internal side). CloseHandle's semaphore arm — which
   did not exist pre-migration — was added incidentally, fixing
   a slot leak that pre-dated this work.
-- **Remaining:** Linux fd-table → KFile is its own track. The
-  KFile primitive is in place (`kernel/ipc/kfile.{h,cpp}`); the
-  migration is rerouting the Linux ABI's `LinuxFd` entry points
-  through `kobj_handles`.
+- **Linux side — first slice landed:** `KFile` extended with a
+  `KFileKind` enum + per-state `pool_index` slot + per-kind
+  release callback fired by `KFileDestroy` (kfile.{h,cpp}). New
+  per-process helpers in `proc/process.{h,cpp}` consolidate the
+  thirteen open-coded "scan for lowest free fd ≥ N" loops behind
+  `LinuxFdAllocLowest`, add a `Handle kf_handle` sidecar to every
+  `LinuxFd` slot, and route close / dup / fork through
+  `LinuxFdClose` / `LinuxFdDup` / `LinuxFdInheritFromParent` —
+  which themselves drive `HandleTableRemove` / `HandleTableDuplicate`
+  on `Process::kobj_handles`. FD_CLOEXEC is a real per-fd bit now
+  (was a sub-GAP); honoured at every creation site that takes a
+  CLOEXEC-style flag (open's O_CLOEXEC, pipe2's O_CLOEXEC,
+  eventfd2's EFD_CLOEXEC, dup3's O_CLOEXEC, fcntl(F_SETFD,
+  FD_CLOEXEC)) and read by `LinuxFdCloseOnExec` (wired for the
+  future execve handler; today exists for the boot-time self-test).
+  Pipe (states 3 / 4) and eventfd (state 5) creators are migrated
+  end-to-end: `LinuxFdAttachKFile` parks a `KFile` carrying
+  `&PipeReleaseRead`/`&PipeReleaseWrite`/`&EventfdRelease` in
+  `kobj_handles`, the `LinuxFd` slot stores the resulting handle,
+  and the per-pool release fires once via the `KFile` destroy
+  callback when the last reference drops. The previous v0
+  sub-GAP — dup() of a pipe fd silently leaked the pool ref —
+  is closed; both fds now hold an independent KFile reference and
+  the wakeup-on-disconnect pool semantics are preserved verbatim.
+- **Remaining state-kinds:** socket (6), timerfd (7), signalfd
+  (8), epoll (9), inotify (10), dirfd (11), pidfd (12), POSIX
+  MQ (13), memfd (14), fanotify (15) still wire pool refs by
+  hand at the syscall site (`*Retain` on creation / fork,
+  `*Release` on close). The dual-track logic in `DoClose` and
+  the fork inheritance loop checks `kf_handle != kHandleInvalid`
+  and skips the legacy explicit release / retain when a KFile
+  sidecar is present, so each remaining kind can be migrated
+  one slice at a time without breaking the others. Dirfd (11)
+  needs an adapter callback (snapshot lives on `win32_dirs[]`
+  not a per-state pool); pidfd (12) needs a `Process*` adapter
+  (release decrements a Process refcount, not a pool index).
 - **When to land:** opportunistic, gated on a Linux-ABI workload
-  that benefits from the unified surface.
+  that benefits from the unified surface; the dual-track shape
+  means each remaining kind is a self-contained slice.
 
 ### Intel CET enable
 

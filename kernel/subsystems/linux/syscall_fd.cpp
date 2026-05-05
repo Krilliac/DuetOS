@@ -2,10 +2,19 @@
  * DuetOS — Linux ABI: file-descriptor handlers.
  *
  * Sibling TU of syscall.cpp. Houses dup / dup2 / dup3 / fcntl.
- * v0 stores per-fd state in core::Process::linux_fds[16] and
- * treats each slot as an INDEPENDENT copy on dup — real Linux
- * dup() would share the file description (one shared offset +
- * flag set), but our workloads don't hit the difference yet.
+ * dup / dup2 / dup3 / F_DUPFD / F_DUPFD_CLOEXEC route through
+ * `LinuxFdDup` so a per-fd KFile sidecar (when present) is
+ * shared via `HandleTableDuplicate` — both fds hold one ref to
+ * the underlying pool, and the per-pool release callback fires
+ * only when both close. Pre-migration v0 dup() leaked the
+ * shared pool ref; the helper closes that gap.
+ *
+ * F_SETFD / FD_CLOEXEC honour `LinuxFdSetCloexec`; F_GETFD
+ * reads it via `LinuxFdGetCloexec`. F_DUPFD_CLOEXEC stamps the
+ * cloexec bit on the fresh fd. The `LinuxFdCloseOnExec` helper
+ * walks the fd table at exec-time and drops every cloexec slot
+ * — wired in execve when that handler lands; today exists for
+ * the boot-time self-test.
  */
 
 #include "subsystems/linux/syscall_internal.h"
@@ -19,24 +28,23 @@ namespace duetos::subsystems::linux::internal
 namespace
 {
 
-// Copy one fd slot into another (same process). Used by dup /
-// dup2 / F_DUPFD. v0 semantics: the new fd is an INDEPENDENT
-// copy — state + first_cluster + size + offset + path all
-// mirrored.
-void CopyFdSlot(const core::Process::LinuxFd& src, core::Process::LinuxFd& dst)
-{
-    dst.state = src.state;
-    dst.first_cluster = src.first_cluster;
-    dst.size = src.size;
-    dst.offset = src.offset;
-    for (u32 i = 0; i < sizeof(dst.path); ++i)
-        dst.path[i] = src.path[i];
-}
+// O_CLOEXEC bit value matching musl + glibc. Same constant as
+// the open() / pipe2() / dup3() flag bit and the per-create
+// CLOEXEC flag for eventfd / timerfd / signalfd / inotify /
+// memfd / socket. Centralised here so the dup3 / F_DUPFD_CLOEXEC
+// arms agree on the encoding.
+constexpr u64 kOCloexec = 0x80000;
+
+// FD_CLOEXEC argument bit for fcntl(F_SETFD, ...). Linux defines
+// FD_CLOEXEC = 1 (a separate value space from O_CLOEXEC).
+constexpr u64 kFdCloexec = 1;
 
 } // namespace
 
-// Linux: dup(fd). Allocate the lowest unused slot ≥ 3 and copy
-// the source fd into it. Returns the new fd or -EMFILE if full.
+// Linux: dup(fd). Allocate the lowest unused slot ≥ 3, share
+// the source fd's KFile via HandleTableDuplicate, and copy the
+// per-slot snapshot fields. Returns the new fd or -EMFILE if
+// full / -EBADF if oldfd isn't open.
 i64 DoDup(u64 fd)
 {
     KLOG_TRACE_V("linux/fd", "DoDup: fd", fd);
@@ -51,22 +59,26 @@ i64 DoDup(u64 fd)
         KLOG_WARN_V("linux/fd", "DoDup: EBADF (fd not open)", fd);
         return kEBADF;
     }
-    const u32 fd_max = LinuxFdEffectiveMax(p);
-    for (u32 i = 3; i < fd_max; ++i)
+    const i32 newfd = core::LinuxFdAllocLowest(p, 3);
+    if (newfd < 0)
     {
-        if (p->linux_fds[i].state == 0)
-        {
-            CopyFdSlot(p->linux_fds[fd], p->linux_fds[i]);
-            KLOG_DEBUG_V("linux/fd", "DoDup: granted new fd", i);
-            return static_cast<i64>(i);
-        }
+        KLOG_WARN("linux/fd", "DoDup: EMFILE (no free slot >= 3)");
+        return kEMFILE;
     }
-    KLOG_WARN("linux/fd", "DoDup: EMFILE (no free slot >= 3)");
-    return kEMFILE;
+    if (!core::LinuxFdDup(p, static_cast<u32>(fd), static_cast<u32>(newfd)))
+    {
+        KLOG_WARN_V("linux/fd", "DoDup: HandleTable full -> EMFILE", static_cast<u64>(newfd));
+        return kEMFILE;
+    }
+    // Linux semantics: dup() always produces a non-cloexec fd.
+    // LinuxFdDup already strips the bit on the destination.
+    KLOG_DEBUG_V("linux/fd", "DoDup: granted new fd", static_cast<u64>(newfd));
+    return static_cast<i64>(newfd);
 }
 
 // Linux: dup2(oldfd, newfd). If newfd == oldfd, returns newfd.
-// Else closes newfd if in use, then copies. Returns newfd.
+// Else closes newfd if in use, then duplicates the fd (KFile
+// shared via HandleTableDuplicate when present). Returns newfd.
 i64 DoDup2(u64 oldfd, u64 newfd)
 {
     KLOG_TRACE_V("linux/fd", "DoDup2: oldfd", oldfd);
@@ -87,34 +99,46 @@ i64 DoDup2(u64 oldfd, u64 newfd)
         return static_cast<i64>(newfd);
     }
     // newfd < 3 (stdin/stdout/stderr) — dup2 onto a tty slot is
-    // legal in Linux (shell redirection pattern). Since we track
-    // tty slots as state=1 (not a file), just overwrite.
-    CopyFdSlot(p->linux_fds[oldfd], p->linux_fds[newfd]);
+    // legal in Linux (shell redirection pattern). LinuxFdDup
+    // closes any existing slot at newfd first via LinuxFdClose,
+    // which also strips the reserved-tty state cleanly.
+    if (!core::LinuxFdDup(p, static_cast<u32>(oldfd), static_cast<u32>(newfd)))
+    {
+        KLOG_WARN_2V("linux/fd", "DoDup2: HandleTable full -> EMFILE", "oldfd", oldfd, "newfd", newfd);
+        return kEMFILE;
+    }
     KLOG_INFO_2V("linux/fd", "DoDup2: ok", "oldfd", oldfd, "newfd", newfd);
     return static_cast<i64>(newfd);
 }
 
 // Linux: dup3(oldfd, newfd, flags). Same as dup2 but requires
-// oldfd != newfd (else -EINVAL) and optionally takes O_CLOEXEC
-// (0x80000). We don't track CLOEXEC so the flag is accepted but
-// a no-op. Everything else is DoDup2.
+// oldfd != newfd (else -EINVAL) and accepts O_CLOEXEC. We honour
+// O_CLOEXEC by stamping `kLinuxFdFlagCloexec` on the destination
+// after the dup completes — closes the pre-migration sub-GAP.
 i64 DoDup3(u64 oldfd, u64 newfd, u64 flags)
 {
     if (oldfd == newfd)
         return kEINVAL;
-    constexpr u64 kOCloexec = 0x80000;
     if ((flags & ~kOCloexec) != 0)
         return kEINVAL;
-    return DoDup2(oldfd, newfd);
+    const i64 r = DoDup2(oldfd, newfd);
+    if (r < 0)
+        return r;
+    if ((flags & kOCloexec) != 0)
+    {
+        core::LinuxFdSetCloexec(core::CurrentProcess(), static_cast<u32>(newfd), true);
+    }
+    return r;
 }
 
 // Linux: fcntl(fd, cmd, arg). v0 supports:
-//   F_DUPFD (0)      — dup the fd, returning a slot >= arg.
-//   F_GETFD (1)      — returns 0 (no per-fd flags stored).
-//   F_SETFD (2)      — accepts + returns 0.
-//   F_GETFL (3)      — returns O_RDWR (2) for any live fd.
-//   F_SETFL (4)      — accepts + returns 0.
-// Everything else returns -EINVAL.
+//   F_DUPFD (0)             — dup the fd, returning a slot >= arg.
+//   F_GETFD (1)             — returns FD_CLOEXEC bit if set, else 0.
+//   F_SETFD (2)             — write FD_CLOEXEC bit; other bits ignored.
+//   F_GETFL (3)             — returns O_RDWR (2) for any live fd.
+//   F_SETFL (4)             — accepts + returns 0.
+//   F_DUPFD_CLOEXEC (1030)  — F_DUPFD + stamp FD_CLOEXEC on dst.
+// Other cmds either accept-as-no-op or return -EINVAL per Linux.
 i64 DoFcntl(u64 fd, u64 cmd, u64 arg)
 {
     KLOG_TRACE_V("linux/fd", "DoFcntl: fd", fd);
@@ -134,43 +158,33 @@ i64 DoFcntl(u64 fd, u64 cmd, u64 arg)
     {
     case 0: // F_DUPFD
     {
-        const u32 fd_max = LinuxFdEffectiveMax(p);
-        const u32 start = (arg < 3) ? 3 : (arg >= fd_max ? fd_max : static_cast<u32>(arg));
-        for (u32 i = start; i < fd_max; ++i)
-        {
-            if (p->linux_fds[i].state == 0)
-            {
-                CopyFdSlot(p->linux_fds[fd], p->linux_fds[i]);
-                return static_cast<i64>(i);
-            }
-        }
-        return kEMFILE;
+        const u32 lo = (arg < 3) ? 3u : static_cast<u32>(arg);
+        const i32 newfd = core::LinuxFdAllocLowest(p, lo);
+        if (newfd < 0)
+            return kEMFILE;
+        if (!core::LinuxFdDup(p, static_cast<u32>(fd), static_cast<u32>(newfd)))
+            return kEMFILE;
+        return static_cast<i64>(newfd);
     }
     case 1: // F_GETFD
-        return 0;
+        return core::LinuxFdGetCloexec(p, static_cast<u32>(fd)) ? kFdCloexec : 0;
     case 2: // F_SETFD
+        core::LinuxFdSetCloexec(p, static_cast<u32>(fd), (arg & kFdCloexec) != 0);
         return 0;
     case 3:       // F_GETFL
         return 2; // O_RDWR
     case 4:       // F_SETFL
         return 0;
-    case 1030: // F_DUPFD_CLOEXEC — same as F_DUPFD in v0 (we
-               // don't track per-fd CLOEXEC; the fd table
-               // wholesale survives exec). The dup behaviour
-               // is identical to F_DUPFD; the CLOEXEC bit is
-               // a documented sub-GAP.
+    case 1030: // F_DUPFD_CLOEXEC — F_DUPFD + stamp cloexec on dst.
     {
-        const u32 fd_max = LinuxFdEffectiveMax(p);
-        const u32 start = (arg < 3) ? 3 : (arg >= fd_max ? fd_max : static_cast<u32>(arg));
-        for (u32 i = start; i < fd_max; ++i)
-        {
-            if (p->linux_fds[i].state == 0)
-            {
-                CopyFdSlot(p->linux_fds[fd], p->linux_fds[i]);
-                return static_cast<i64>(i);
-            }
-        }
-        return kEMFILE;
+        const u32 lo = (arg < 3) ? 3u : static_cast<u32>(arg);
+        const i32 newfd = core::LinuxFdAllocLowest(p, lo);
+        if (newfd < 0)
+            return kEMFILE;
+        if (!core::LinuxFdDup(p, static_cast<u32>(fd), static_cast<u32>(newfd)))
+            return kEMFILE;
+        core::LinuxFdSetCloexec(p, static_cast<u32>(newfd), true);
+        return static_cast<i64>(newfd);
     }
     case 5: // F_GETLK — record-locking query. v0 has no
         // record locks; report "no conflict" (l_type
