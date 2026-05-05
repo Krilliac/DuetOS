@@ -612,6 +612,49 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 114 — WriteFile dispatches by handle range, not "always stdout"
+
+- **Scope:** `userland/libs/kernel32/kernel32.c` (`WriteFile`).
+- **Decision:** `WriteFile` now dispatches by the handle's
+  numeric range:
+  - Pipe sentinel (`DUETOS_PIPE_WR`, 0xA0010002) — push into
+    the in-process anonymous-pipe ring (existing path).
+  - Kernel file handle (0x100..0x10F, planted by `CreateFileW`
+    via `SYS_FILE_OPEN` / `SYS_FILE_CREATE`) — `SYS_FILE_WRITE`
+    (syscall 43). Cap-gated on `kCapFsWrite`; routes through
+    the per-handle cursor + canary wall + FAT32 in-place-or-
+    grow write landed in #111.
+  - Std-handle range (0xFFFFFFF4..0xFFFFFFF6 — what
+    `GetStdHandle(STD_OUTPUT/STD_INPUT/STD_ERROR_HANDLE)`
+    zero-extends DWORD `(DWORD)-12..(DWORD)-10` into) —
+    `SYS_WRITE(fd=1)` (existing console-write path).
+  - Anything else — return `FALSE` with `*lpWritten = 0`. The
+    legacy "all writes to stdout" fallback used to swallow
+    bugs where a Win32 caller wrote to a stale handle.
+- **Why:** Closes the only Roadmap item under "Arbitrary file
+  writes through PE workloads." A Win32 PE that calls
+  `CreateFileW("/disk/0/foo.txt") + WriteFile(...)` previously
+  saw its bytes appear on the serial console rather than in
+  the file. The kernel-side write path (canary wall, rate
+  guard, in-place + grow write) was complete; this change
+  routes the userland API to it.
+- **Rules out / defers:** `OVERLAPPED` (async I/O completion
+  ports — the current path is synchronous). Console-mode bit
+  vs file-mode bit dispatch on handle attributes (we route by
+  numeric range; Win32 normally tags handles internally but
+  our pseudo-handles don't carry a flag word). Per-handle
+  share-mode + access-mode enforcement (kernel layer doesn't
+  read the `dwDesiredAccess` flag yet — `kCapFsWrite` is the
+  whole story).
+- **Revisit when:** A workload needs `OVERLAPPED` async writes;
+  Winsock async surface lands and shares the completion-port
+  scaffold. A second std-handle producer (e.g. forwarded child
+  stdout) reuses the dispatch.
+- **Related tracks:** Track 9 (Win32 — file syscall surface),
+  Track 3 (Filesystem — write path).
+
+---
+
 ## 113 — VFS mount registry routes Win32 file syscalls
 
 - **Scope:** `kernel/fs/mount.{h,cpp}` (new

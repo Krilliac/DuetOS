@@ -282,14 +282,6 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
 - **Deferred:** WSAEventSelect + overlapped I/O + completion
   ports.
 
-### Arbitrary file writes through PE workloads
-
-- **Today:** `SYS_FILE_WRITE` / `SYS_FILE_CREATE` cap-gated by
-  `kCapFsWrite`; FS-write rate guard + canary wall enforce
-  multi-window ransomware caps. App layer hasn't migrated yet.
-- **Owner:** `userland/libs/kernel32/` for `WriteFile`,
-  `CreateFileW`.
-
 ---
 
 ## End-user features

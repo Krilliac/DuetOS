@@ -2670,10 +2670,22 @@ __declspec(dllexport) wchar_t16* lstrcatW(wchar_t16* dst, const wchar_t16* src)
  * rdi, rsi, rdx, r10, r8, r9 — so the trampolines mostly just
  * shuffle the calling convention.
  *
- * WriteFile / WriteConsole* ignore the handle and route to
- * SYS_WRITE(fd=1) — same simplification as the existing flat
- * stubs. Real handle-aware writes need a richer dispatch
- * (file vs console vs pipe); deferred.
+ * WriteFile dispatches by handle range:
+ *   - Pipe sentinel handles (DUETOS_PIPE_WR/_RD) → in-process
+ *     anonymous-pipe ring.
+ *   - Kernel file handles (0x100..0x10F, planted by CreateFileW
+ *     via SYS_FILE_OPEN / SYS_FILE_CREATE) → SYS_FILE_WRITE
+ *     (syscall 43); cap-gated on kCapFsWrite. Routes through the
+ *     per-handle cursor + fat32 in-place-or-grow write.
+ *   - Std-output / std-error handles (the negative-int values
+ *     GetStdHandle hands back: STD_OUTPUT_HANDLE = (HANDLE)-11,
+ *     STD_ERROR_HANDLE = (HANDLE)-12) → SYS_WRITE(fd=1).
+ *   - Anything else → fail (return FALSE, *lpWritten = 0). The
+ *     legacy "dump everything to stdout" fallback used to mask
+ *     bugs where a Win32 caller passed a stale handle.
+ *
+ * WriteConsole* always route to stdout regardless of handle —
+ * they're console-bound by Win32 contract.
  * ------------------------------------------------------------------ */
 
 typedef void* LPDWORD_t; /* DWORD* via opaque pointer to avoid C-warning chains */
@@ -2700,17 +2712,54 @@ __declspec(dllexport) BOOL WriteFile(HANDLE hFile, const void* buf, DWORD n, DWO
             *lpWritten = wrote;
         return 1;
     }
-    long long rv;
-    __asm__ volatile("int $0x80"
-                     : "=a"(rv)
-                     : "a"((long long)2),   /* SYS_WRITE */
-                       "D"((long long)1),   /* fd=1 (stdout) */
-                       "S"((long long)buf), /* buf */
-                       "d"((long long)n)    /* count */
-                     : "memory");
+
+    const unsigned long long h_raw = (unsigned long long)(UINT_PTR)hFile;
+
+    /* Kernel file handle (Win32-shaped pseudo-handle): 0x100..0x10F.
+     * Route through SYS_FILE_WRITE so the per-handle cursor +
+     * canary wall + cap gate fire. */
+    if (h_raw >= 0x100ULL && h_raw < 0x110ULL)
+    {
+        long long rv;
+        __asm__ volatile("int $0x80"
+                         : "=a"(rv)
+                         : "a"((long long)43),  /* SYS_FILE_WRITE */
+                           "D"((long long)h_raw),
+                           "S"((long long)buf),
+                           "d"((long long)n)
+                         : "memory");
+        const int ok = (rv >= 0 && (unsigned long long)rv != ~0ULL);
+        if (lpWritten != (DWORD*)0)
+            *lpWritten = ok ? (DWORD)rv : 0;
+        return ok ? 1 : 0;
+    }
+
+    /* Std handles. GetStdHandle zero-extends DWORD into HANDLE,
+     * so STD_OUTPUT_HANDLE = (DWORD)-11 = 0xFFFFFFF5 surfaces as
+     * 0x00000000FFFFFFF5 here. STD_INPUT (-10) is invalid for a
+     * write but we silently route it the same way the flat-stub
+     * impl did. */
+    if (h_raw == 0xFFFFFFF5ULL || h_raw == 0xFFFFFFF4ULL || h_raw == 0xFFFFFFF6ULL)
+    {
+        long long rv;
+        __asm__ volatile("int $0x80"
+                         : "=a"(rv)
+                         : "a"((long long)2),   /* SYS_WRITE */
+                           "D"((long long)1),   /* fd=1 (stdout) */
+                           "S"((long long)buf), /* buf */
+                           "d"((long long)n)    /* count */
+                         : "memory");
+        if (lpWritten != (DWORD*)0)
+            *lpWritten = rv >= 0 ? (DWORD)rv : 0;
+        return rv >= 0 ? 1 : 0;
+    }
+
+    /* Unknown handle — fail rather than silently routing to
+     * stdout. Caller almost certainly passed a stale or never-
+     * opened handle. */
     if (lpWritten != (DWORD*)0)
-        *lpWritten = rv >= 0 ? (DWORD)rv : 0;
-    return rv >= 0 ? 1 : 0;
+        *lpWritten = 0;
+    return 0;
 }
 
 __declspec(dllexport) BOOL WriteConsoleA(HANDLE hConsole, const void* buf, DWORD n, DWORD* lpWritten, void* lpReserved)
