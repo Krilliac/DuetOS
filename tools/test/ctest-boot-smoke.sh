@@ -48,6 +48,25 @@ if ! command -v qemu-system-x86_64 > /dev/null 2>&1; then
     echo "      sudo apt-get install -y qemu-system-x86 grub-common grub-pc-bin xorriso mtools ovmf"
     exit 2
 fi
+# duetos.iso is built only when grub-mkrescue + xorriso are present
+# at configure time. Without them, the iso target is disabled and
+# a kernel-boot test would have nothing to feed QEMU. Report SKIP
+# rather than FAIL — same shape as the qemu-not-installed branch
+# above. The cmake configure line that emits "duetos-iso target
+# disabled" is the matching message on the build side.
+if [[ ! -f "${BIN_DIR}/duetos.iso" ]]; then
+    echo "SKIP: ${BIN_DIR}/duetos.iso not built"
+    echo "      The iso target is disabled when grub-mkrescue / xorriso are"
+    echo "      missing at configure time. Install via CLAUDE.md's live-test"
+    echo "      runtime tooling line:"
+    echo "      sudo apt-get install -y grub-common grub-pc-bin xorriso mtools"
+    exit 2
+fi
+# run.sh defaults DUETOS_PRESET=x86_64-debug. ctest may have invoked
+# us with a different preset's binary dir (the cmake --preset value
+# is the basename of BIN_DIR). Pin DUETOS_PRESET so run.sh's
+# BUILD_DIR matches the directory the iso lives in.
+export DUETOS_PRESET="$(basename "${BIN_DIR}")"
 
 SERIAL_LOG="${BIN_DIR}/ctest-smoke-serial.log"
 rm -f "${SERIAL_LOG}"
