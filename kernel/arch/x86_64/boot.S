@@ -96,7 +96,25 @@ boot_pd:
 
 .align 16
 stack_bottom:
-    .skip 16384                 /* 16 KiB boot stack */
+    /* Boot stack used by kernel_main forever (the BSP "main" thread
+     * keeps using this stack via its higher-half alias — see "Switch
+     * onto the boot stack via its HIGH-VMA alias" below). Sized to
+     * match the per-task kstack (kKernelStackPages = 16 = 64 KiB) so
+     * the PE loader / FAT32 sink / klog flush call chains, which all
+     * run synchronously in kernel_main's context during smoke
+     * profiles, don't overflow.
+     *
+     * History: was 16 KiB. pe-winapi / pe-winkill consume ~20 KiB
+     * (Fat32LookupPath alone allocates a 0x1f0-byte frame on top of
+     * a deep PE-resolve / FAT32-sink chain). The overflow grew DOWN
+     * past stack_bottom into adjacent .bss.boot (boot_pd at 0x105000,
+     * boot_pdpt_high at 0x104000), zeroing page-table entries and
+     * triple-faulting on the next kernel-half access. 3423df7's
+     * emulator gate hid the symptom by skipping the FAT32 sink
+     * (= no klog flush during PE-resolve = no Fat32 call depth = no
+     * overflow); this fix removes the underlying cause so the gate
+     * can come out. */
+    .skip 65536                 /* 64 KiB boot stack */
 stack_top:
 
 
