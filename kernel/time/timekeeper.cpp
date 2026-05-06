@@ -81,13 +81,6 @@ constinit u64 g_tsc_boot = 0;    ///< TSC value at calibration time.
 constinit u64 g_tsc_freq_hz = 0; ///< Calibrated frequency; 0 = "TSC not registered".
 constinit u64 g_tsc_resolution_ns = 0;
 
-inline u64 ReadTsc()
-{
-    u32 lo, hi;
-    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return (static_cast<u64>(hi) << 32) | lo;
-}
-
 u64 TscClocksourceReadNs()
 {
     if (g_tsc_freq_hz == 0)
@@ -172,6 +165,33 @@ u64 CalibrateTscFreqHz()
 }
 
 } // namespace
+
+u64 ReadTsc()
+{
+    u32 lo, hi;
+    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return (static_cast<u64>(hi) << 32) | lo;
+}
+
+u64 TscToNanos(u64 cycles)
+{
+    if (g_tsc_freq_hz == 0)
+    {
+        return 0;
+    }
+    // Same divmod trick as TscClocksourceReadNs above — the naive
+    // `cycles * 1e9` overflows u64 around ~4.6 s of accumulated
+    // TSC ticks at 4 GHz, which a long-running benchmark can hit.
+    constexpr u64 kNsPerSec = 1'000'000'000ULL;
+    const u64 quot = cycles / g_tsc_freq_hz;
+    const u64 rem = cycles % g_tsc_freq_hz;
+    return quot * kNsPerSec + (rem * kNsPerSec) / g_tsc_freq_hz;
+}
+
+bool TscCalibrated()
+{
+    return g_tsc_freq_hz != 0;
+}
 
 void TimekeeperInit()
 {

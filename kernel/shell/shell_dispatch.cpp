@@ -649,7 +649,7 @@ const char* const kCommandSet[] = {
     "purple",     "purpleteam", "mkdir",    "rmdir",    "truncate",  "realpath", "id",         "groups",    "nproc",
     "arch",       "tty",        "type",     "printenv", "df",        "du",       "loadavg",    "clearhist", "pause",
     "yes",        "sync",       "port",     "assert",   "watch",     "script",   "exit",       "mkfs",      "lastdump",
-    "loadtest",   "stress",
+    "loadtest",   "stress",     "bench",
 };
 const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1969,6 +1969,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "loadtest") || StrEq(cmd, "stress"))
     {
         CmdLoadTest(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "bench"))
+    {
+        CmdBench(argc, argv);
         return;
     }
     ShellSetExit(127);

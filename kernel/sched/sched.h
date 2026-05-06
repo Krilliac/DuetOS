@@ -246,6 +246,25 @@ u64 TaskId(const Task* t);
 /// the crash-dump path to label the current task on a panic.
 const char* TaskName(const Task* t);
 
+/// Hint the scheduler to route the task's NEXT wake-side enqueue
+/// onto `cpu_id`. Stores `cpu_id` into the task's `last_cpu`
+/// field — the same routing primitive the existing wake path
+/// reads. Returns false if `t` is null or `cpu_id` is outside
+/// `[0, arch::SmpCpusOnline())`; otherwise returns true.
+///
+/// This is a HINT, not a hard pin: once the task starts running,
+/// the context-switch hot path updates `last_cpu` to the CPU that
+/// actually scheduled it (preserving cache affinity on subsequent
+/// wakes). Use it to direct the FIRST wake of a freshly-spawned
+/// worker — typically a benchmark or a per-CPU service thread —
+/// onto a specific peer. For a hard pin (no migration ever), the
+/// per-task affinity-mask design lives behind Roadmap B3.
+///
+/// Threading: takes the scheduler's main spinlock for the single
+/// store, identical to how `Schedule()` / wake-side code mutates
+/// the same field. Safe from any kernel context.
+bool SchedSetAffinity(Task* t, u32 cpu_id);
+
 // ---------------------------------------------------------------------------
 // Per-task syscall trail
 // ---------------------------------------------------------------------------

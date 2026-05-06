@@ -91,6 +91,28 @@ struct BrokenDownTime
 /// timestamps. `out` MUST be non-null.
 void RealtimeBrokenDown(BrokenDownTime* out);
 
+/// Read the CPU's time-stamp counter — single `rdtsc` instruction.
+/// Returns the unmodified 64-bit TSC value at call time. Cheap (~20
+/// cycles) and meaningful as a relative cycle counter even on CPUs
+/// without invariant TSC; absolute conversions to ns require the
+/// boot-time HPET calibration to have completed (see `TscToNanos`).
+/// Used by the bench harness to bracket microbenchmark loops.
+u64 ReadTsc();
+
+/// Convert a TSC cycle delta to nanoseconds using the boot-time
+/// calibration. Returns 0 if the TSC was never registered as a
+/// clocksource (e.g. invariant-TSC bit absent, or HPET unavailable
+/// at boot so calibration never ran). Uses divmod to keep the
+/// `cycles * 1e9` intermediate from overflowing u64 — safe across
+/// any cycle delta a microbenchmark could plausibly accumulate.
+u64 TscToNanos(u64 cycles);
+
+/// True iff the calibration window picked a non-zero TSC frequency.
+/// Used by the bench harness to print a one-line warning header
+/// when ns conversion is impossible (it falls back to cycles-only
+/// reporting). Cheap (one global load).
+bool TscCalibrated();
+
 /// Boot-time self-test. Verifies that after `TimekeeperInit`:
 ///   - `MonotonicNs()` returns a non-zero, strictly-increasing
 ///     value across two reads (with a tiny busy-wait in between).
