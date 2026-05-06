@@ -70,6 +70,12 @@ struct FramebufferInfo
 /// `valid == false` means "no pixels written this frame" — the
 /// hook short-circuits. Otherwise the rect is already clipped to
 /// the framebuffer bounds.
+///
+/// The union math lives in `Extend` so the framebuffer driver and
+/// the host unit test (`tests/host/test_damage_rect.cpp`) share
+/// one canonical implementation. `Extend` is `constexpr` + has no
+/// kernel dependencies — the only thing it touches is its own
+/// fields.
 struct DamageRect
 {
     u32 x;
@@ -77,6 +83,54 @@ struct DamageRect
     u32 w;
     u32 h;
     bool valid;
+
+    /// Extend this rect to cover `(rx, ry, rw, rh)`. The added
+    /// rect is treated as exclusive (right edge is `rx + rw`,
+    /// bottom edge is `ry + rh`). No-op on zero `rw` or `rh`. The
+    /// first non-empty `Extend` after a `Reset` (or on a default-
+    /// constructed `DamageRect`) populates the union; subsequent
+    /// calls grow it monotonically.
+    ///
+    /// Caller is responsible for keeping `rx + rw` and `ry + rh`
+    /// within `u32` range — the framebuffer driver clips to the
+    /// surface bounds before calling this so the addition can't
+    /// overflow.
+    constexpr void Extend(u32 rx, u32 ry, u32 rw, u32 rh)
+    {
+        if (rw == 0 || rh == 0)
+            return;
+        const u32 rx1 = rx + rw;
+        const u32 ry1 = ry + rh;
+        if (!valid)
+        {
+            x = rx;
+            y = ry;
+            w = rw;
+            h = rh;
+            valid = true;
+            return;
+        }
+        const u32 x1 = x + w;
+        const u32 y1 = y + h;
+        const u32 nx0 = (rx < x) ? rx : x;
+        const u32 ny0 = (ry < y) ? ry : y;
+        const u32 nx1 = (rx1 > x1) ? rx1 : x1;
+        const u32 ny1 = (ry1 > y1) ? ry1 : y1;
+        x = nx0;
+        y = ny0;
+        w = nx1 - nx0;
+        h = ny1 - ny0;
+    }
+
+    /// Drop the union. After this, `Extend` rebuilds from scratch.
+    constexpr void Reset()
+    {
+        x = 0;
+        y = 0;
+        w = 0;
+        h = 0;
+        valid = false;
+    }
 };
 
 /// Parse the Multiboot2 framebuffer tag from the info struct at

@@ -1184,7 +1184,7 @@ void Dispatch(char* line)
     }
     if (StrEq(cmd, "gfx"))
     {
-        CmdGfx();
+        CmdGfx(argc, argv);
         return;
     }
     if (StrEq(cmd, "vbe"))

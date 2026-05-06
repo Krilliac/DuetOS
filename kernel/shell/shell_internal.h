@@ -356,7 +356,7 @@ void CmdPower();
 void CmdThermal();
 void CmdHwmon();
 void CmdGpu();
-void CmdGfx();
+void CmdGfx(u32 argc, char** argv);
 void CmdVbe(u32 argc, char** argv);
 void CmdMonitor(u32 argc, char** argv);
 

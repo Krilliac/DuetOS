@@ -1057,8 +1057,27 @@ void CmdGpu()
     }
 }
 
-void CmdGfx()
+void CmdGfx(u32 argc, char** argv)
 {
+    // Subcommands: `gfx reset` clears the render-stats counters
+    // so the operator can measure a specific scenario (open the
+    // Files app, drag a window, etc.) without prior history. The
+    // ICD handle-table counters and the GPU discovery cache are
+    // boot-stable and not part of the reset.
+    if (argc >= 2 && argv != nullptr && argv[1] != nullptr)
+    {
+        if (StrEq(argv[1], "reset"))
+        {
+            duetos::drivers::video::RenderStatsReset();
+            ConsoleWriteln("gfx: render stats reset");
+            return;
+        }
+        ConsoleWrite("gfx: unknown subcommand '");
+        ConsoleWrite(argv[1]);
+        ConsoleWriteln("' (try: gfx, gfx reset)");
+        return;
+    }
+
     // Surfaces the graphics ICD handle-table counters. The ICD is
     // a trace-only skeleton today (see subsystems/graphics/graphics.h),
     // so in the steady state all counts are zero unless something

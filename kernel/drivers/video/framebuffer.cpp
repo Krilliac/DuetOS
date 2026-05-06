@@ -45,44 +45,22 @@ constinit bool g_compose_active = false;
 
 // Damage union. Every pixel-write primitive routes its post-clip
 // rect through `MarkDamage` so the compose-end blit and the present
-// hook can flush only the dirty region. The four fields are an
-// inclusive bbox; `g_damage_valid == false` means "no writes yet
-// this frame" so the End-of-compose path can skip the row copy
-// entirely. The union is reset by `FramebufferResetDamage`, which
-// `FramebufferPresent` calls after the hook has consumed it.
-constinit u32 g_damage_x0 = 0;
-constinit u32 g_damage_y0 = 0;
-constinit u32 g_damage_x1 = 0; // exclusive
-constinit u32 g_damage_y1 = 0; // exclusive
-constinit bool g_damage_valid = false;
+// hook can flush only the dirty region. The math lives on
+// `DamageRect::Extend` — see framebuffer.h. `valid == false` means
+// "no writes yet this frame" so the End-of-compose path can skip
+// the row copy entirely. The union is reset by
+// `FramebufferResetDamage`, which `FramebufferPresent` calls after
+// the hook has consumed it.
+constinit DamageRect g_damage = {};
 
 // Mark `(x, y, w, h)` as dirty. Caller is responsible for already
 // having clipped the rect to the surface; passing zero width or
-// height is a silent no-op so primitives that early-out on empty
-// clip rects don't have to add a second branch.
+// height is a silent no-op (Extend short-circuits on either) so
+// primitives that early-out on empty clip rects don't have to add
+// a second branch.
 inline void MarkDamage(u32 x, u32 y, u32 w, u32 h)
 {
-    if (w == 0 || h == 0)
-        return;
-    const u32 x1 = x + w;
-    const u32 y1 = y + h;
-    if (!g_damage_valid)
-    {
-        g_damage_x0 = x;
-        g_damage_y0 = y;
-        g_damage_x1 = x1;
-        g_damage_y1 = y1;
-        g_damage_valid = true;
-        return;
-    }
-    if (x < g_damage_x0)
-        g_damage_x0 = x;
-    if (y < g_damage_y0)
-        g_damage_y0 = y;
-    if (x1 > g_damage_x1)
-        g_damage_x1 = x1;
-    if (y1 > g_damage_y1)
-        g_damage_y1 = y1;
+    g_damage.Extend(x, y, w, h);
 }
 
 // Single source of truth for "where do pixel writes go". Called by
@@ -247,11 +225,7 @@ void FramebufferTeardown()
     g_compose_active = false;
     // Damage union — reset so a Reinit at different geometry
     // doesn't carry forward a rect that's now off-surface.
-    g_damage_valid = false;
-    g_damage_x0 = 0;
-    g_damage_y0 = 0;
-    g_damage_x1 = 0;
-    g_damage_y1 = 0;
+    g_damage.Reset();
     // Present hook + the init guard. Re-init re-arms the hook
     // through whatever backend (virtio-gpu, etc.) registers
     // again on its own restart path.
@@ -390,18 +364,12 @@ void FramebufferAddDamage(u32 x, u32 y, u32 w, u32 h)
 
 DamageRect FramebufferReadDamage()
 {
-    if (!g_damage_valid)
-        return DamageRect{0, 0, 0, 0, false};
-    return DamageRect{g_damage_x0, g_damage_y0, g_damage_x1 - g_damage_x0, g_damage_y1 - g_damage_y0, true};
+    return g_damage;
 }
 
 void FramebufferResetDamage()
 {
-    g_damage_valid = false;
-    g_damage_x0 = 0;
-    g_damage_y0 = 0;
-    g_damage_x1 = 0;
-    g_damage_y1 = 0;
+    g_damage.Reset();
 }
 
 void FramebufferBeginCompose()
@@ -448,19 +416,19 @@ void FramebufferEndCompose()
     // those rows + columns. The compose buffer holds last frame's
     // pixels outside the damage rect, so a partial copy preserves
     // unchanged regions on screen (which is exactly what we want
-    // — they were already correct). When `g_damage_valid` is false
+    // — they were already correct). When `g_damage.valid` is false
     // the frame painted nothing, and the copy below short-circuits
     // before touching the live framebuffer at all.
-    if (!g_damage_valid)
+    if (!g_damage.valid)
     {
         g_compose_active = false;
         RenderStatsOnComposeEnd();
         return;
     }
-    const u32 cx = g_damage_x0;
-    const u32 cy = g_damage_y0;
-    const u32 cx_end = g_damage_x1;
-    const u32 cy_end = g_damage_y1;
+    const u32 cx = g_damage.x;
+    const u32 cy = g_damage.y;
+    const u32 cx_end = g_damage.x + g_damage.w;
+    const u32 cy_end = g_damage.y + g_damage.h;
     auto* src_bytes = reinterpret_cast<const u8*>(g_shadow_base);
     auto* dst_bytes = reinterpret_cast<u8*>(g_info.virt);
     for (u32 yi = cy; yi < cy_end; ++yi)

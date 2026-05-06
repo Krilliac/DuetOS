@@ -192,7 +192,8 @@ All write-side FAT operations are admin-gated.
 | `thermal`, `temp` | Re-read MSR thermal sensors |
 | `hwmon` | Unified sensor view |
 | `gpu`, `lsgpu` | List discovered GPUs |
-| `gfx` | Graphics-stack overview |
+| `gfx` | Graphics-stack overview (ICD counters + display info + render stats) |
+| `gfx reset` | Reset render-stats counters (frames composed/presented, dirty pixels) |
 | `vbe [W H [B]]` | Query / set Bochs VBE display mode |
 | `monitor [args...]` | Per-display monitor info |
 | `port r <port>` | Read one byte from x86 I/O port (admin) |
