@@ -6,6 +6,7 @@
 #include "mm/page.h"
 #include "mm/paging.h"
 #include "drivers/video/font8x8.h"
+#include "drivers/video/render_stats.h"
 
 namespace duetos::drivers::video
 {
@@ -41,6 +42,26 @@ extern FramebufferPresentFn g_present_hook;
 constinit void* g_shadow_base = nullptr;
 constinit u32 g_shadow_pitch = 0;
 constinit bool g_compose_active = false;
+
+// Damage union. Every pixel-write primitive routes its post-clip
+// rect through `MarkDamage` so the compose-end blit and the present
+// hook can flush only the dirty region. The math lives on
+// `DamageRect::Extend` — see framebuffer.h. `valid == false` means
+// "no writes yet this frame" so the End-of-compose path can skip
+// the row copy entirely. The union is reset by
+// `FramebufferResetDamage`, which `FramebufferPresent` calls after
+// the hook has consumed it.
+constinit DamageRect g_damage = {};
+
+// Mark `(x, y, w, h)` as dirty. Caller is responsible for already
+// having clipped the rect to the surface; passing zero width or
+// height is a silent no-op (Extend short-circuits on either) so
+// primitives that early-out on empty clip rects don't have to add
+// a second branch.
+inline void MarkDamage(u32 x, u32 y, u32 w, u32 h)
+{
+    g_damage.Extend(x, y, w, h);
+}
 
 // Single source of truth for "where do pixel writes go". Called by
 // every primitive's inner loop; the cost is one dependent load +
@@ -202,6 +223,9 @@ void FramebufferTeardown()
     g_shadow_base = nullptr;
     g_shadow_pitch = 0;
     g_compose_active = false;
+    // Damage union — reset so a Reinit at different geometry
+    // doesn't carry forward a rect that's now off-surface.
+    g_damage.Reset();
     // Present hook + the init guard. Re-init re-arms the hook
     // through whatever backend (virtio-gpu, etc.) registers
     // again on its own restart path.
@@ -308,8 +332,44 @@ void FramebufferSetPresentHook(FramebufferPresentFn fn)
 
 void FramebufferPresent()
 {
+    const DamageRect d = FramebufferReadDamage();
     if (g_present_hook != nullptr)
-        g_present_hook();
+    {
+        g_present_hook(d);
+    }
+    // Stats track every present pass — including the no-hook case
+    // (firmware framebuffer, Bochs VBE) — so the partial vs. full
+    // ratio reflects the compositor's behaviour rather than the
+    // backend's. Recorded BEFORE damage reset so the snapshot is
+    // accurate.
+    RenderStatsOnPresent(d, g_info.width, g_info.height);
+    // Either way, the damage union belongs to the just-presented
+    // frame — the next compose pass starts clean. Hooks that need
+    // the rect take a snapshot above; running this unconditionally
+    // means callers without a hook (firmware framebuffer, Bochs
+    // VBE) also start each frame from a clean union.
+    FramebufferResetDamage();
+}
+
+void FramebufferAddDamage(u32 x, u32 y, u32 w, u32 h)
+{
+    if (!g_available || w == 0 || h == 0)
+        return;
+    if (x >= g_info.width || y >= g_info.height)
+        return;
+    const u32 x_end = (x + w > g_info.width) ? g_info.width : x + w;
+    const u32 y_end = (y + h > g_info.height) ? g_info.height : y + h;
+    MarkDamage(x, y, x_end - x, y_end - y);
+}
+
+DamageRect FramebufferReadDamage()
+{
+    return g_damage;
+}
+
+void FramebufferResetDamage()
+{
+    g_damage.Reset();
 }
 
 void FramebufferBeginCompose()
@@ -351,18 +411,37 @@ void FramebufferEndCompose()
     // Flush the shadow surface to the live framebuffer. Pitches
     // differ in general (live may have padding), so the copy is
     // row-by-row rather than a single memcpy.
+    //
+    // If the compose pass accumulated a damage union, copy only
+    // those rows + columns. The compose buffer holds last frame's
+    // pixels outside the damage rect, so a partial copy preserves
+    // unchanged regions on screen (which is exactly what we want
+    // — they were already correct). When `g_damage.valid` is false
+    // the frame painted nothing, and the copy below short-circuits
+    // before touching the live framebuffer at all.
+    if (!g_damage.valid)
+    {
+        g_compose_active = false;
+        RenderStatsOnComposeEnd();
+        return;
+    }
+    const u32 cx = g_damage.x;
+    const u32 cy = g_damage.y;
+    const u32 cx_end = g_damage.x + g_damage.w;
+    const u32 cy_end = g_damage.y + g_damage.h;
     auto* src_bytes = reinterpret_cast<const u8*>(g_shadow_base);
     auto* dst_bytes = reinterpret_cast<u8*>(g_info.virt);
-    for (u32 yi = 0; yi < g_info.height; ++yi)
+    for (u32 yi = cy; yi < cy_end; ++yi)
     {
         const auto* src_row = reinterpret_cast<const u32*>(src_bytes + static_cast<u64>(yi) * g_shadow_pitch);
         auto* dst_row = reinterpret_cast<volatile u32*>(dst_bytes + static_cast<u64>(yi) * g_info.pitch);
-        for (u32 xi = 0; xi < g_info.width; ++xi)
+        for (u32 xi = cx; xi < cx_end; ++xi)
         {
             dst_row[xi] = src_row[xi];
         }
     }
     g_compose_active = false;
+    RenderStatsOnComposeEnd();
 }
 
 bool FramebufferComposeActive()
@@ -388,6 +467,7 @@ void FramebufferPutPixel(u32 x, u32 y, u32 rgb)
     const WriteTarget wt = GetWriteTarget();
     auto* row = reinterpret_cast<volatile u32*>(wt.base + static_cast<u64>(y) * wt.pitch);
     row[x] = rgb;
+    MarkDamage(x, y, 1, 1);
 }
 
 void FramebufferFillRect(u32 x, u32 y, u32 w, u32 h, u32 rgb)
@@ -414,6 +494,7 @@ void FramebufferFillRect(u32 x, u32 y, u32 w, u32 h, u32 rgb)
             row[xi] = rgb;
         }
     }
+    MarkDamage(x, y, x_end - x, y_end - y);
 }
 
 void FramebufferBlit(u32 dst_x, u32 dst_y, const u32* src, u32 src_w, u32 src_h, u32 src_pitch_px)
@@ -439,6 +520,7 @@ void FramebufferBlit(u32 dst_x, u32 dst_y, const u32* src, u32 src_w, u32 src_h,
             row[xi] = src_row[xi - dst_x];
         }
     }
+    MarkDamage(dst_x, dst_y, x_end - dst_x, y_end - dst_y);
 }
 
 void FramebufferClear(u32 rgb)
@@ -621,6 +703,7 @@ void FramebufferFillRectAlpha(u32 x, u32 y, u32 w, u32 h, u32 argb)
             row[xi] = (r << 16) | (g << 8) | b;
         }
     }
+    MarkDamage(x, y, x_end - x, y_end - y);
 }
 
 void FramebufferFillRectGradient(u32 x, u32 y, u32 w, u32 h, u32 top_rgb, u32 bot_rgb)
@@ -668,6 +751,7 @@ void FramebufferFillRectGradient(u32 x, u32 y, u32 w, u32 h, u32 top_rgb, u32 bo
             row[xi] = c;
         }
     }
+    MarkDamage(x, y, x_end - x, y_end - y);
 }
 
 void FramebufferFillRoundRect(u32 x, u32 y, u32 w, u32 h, u32 radius, u32 rgb)

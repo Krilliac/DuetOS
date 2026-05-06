@@ -301,10 +301,22 @@ void RunVendorProbe(GpuInfo& g)
                     // turns the virtio-gpu into our primary display.
                     ::duetos::drivers::video::FramebufferRebindExternal(sc.backing_va, sc.backing_phys, sc.width,
                                                                         sc.height, sc.pitch, 32);
+                    // Damage-aware flush: TRANSFER_TO_HOST_2D +
+                    // RESOURCE_FLUSH only the rectangle the
+                    // compositor wrote this frame. A clean frame
+                    // (`damage.valid == false`) skips the round-
+                    // trip entirely — virtio-gpu replays the prior
+                    // scanout from host-side cache. Empirically
+                    // this turns chrome-only frames (cursor blink,
+                    // taskbar clock tick) into ~thousands of
+                    // pixels rather than the full 1024×768=786 432
+                    // every present cycle.
                     ::duetos::drivers::video::FramebufferSetPresentHook(
-                        []() {
-                            (void)VirtioGpuFlushScanout(0, 0, VirtioGpuScanoutInfo().width,
-                                                        VirtioGpuScanoutInfo().height);
+                        [](const ::duetos::drivers::video::DamageRect& damage)
+                        {
+                            if (!damage.valid)
+                                return;
+                            (void)VirtioGpuFlushScanout(damage.x, damage.y, damage.w, damage.h);
                         });
                     // Paint a boot-proof test pattern straight into
                     // the backing (now also the kernel framebuffer)

@@ -1,6 +1,6 @@
 # DuetOS — Design Decisions Log
 
-_Last updated: 2026-05-06_
+_Last updated: 2026-05-06 (damage tracking + render stats + display info aggregator)_
 
 The most recent formal entries below run through 042 (HPET self-test);
 slices that landed during 2026-04-25 → 2026-05-04 (windowing / GDI /
@@ -5211,4 +5211,72 @@ doc helps future readers audit the trail.
 - **Related tracks:** [Shell Commands](Shell-Commands.md),
   [Scheduler](../kernel/Scheduler.md), Roadmap entry "Bench
   follow-ups".
+
+## Single-bbox damage tracking, not a rect list, for the v0 framebuffer present pipeline (2026-05-06)
+
+- **Decision:** the framebuffer driver
+  (`kernel/drivers/video/framebuffer.{h,cpp}`) accumulates one
+  axis-aligned bounding box of dirty pixels per compose pass.
+  Every primitive that writes pixels (`PutPixel`, `FillRect`,
+  `Blit`, `FillRectAlpha`, `FillRectGradient`) routes its post-
+  clip rect through an internal `MarkDamage` helper that unions
+  with the running bbox. `FramebufferEndCompose` copies only that
+  bbox from the shadow buffer to the live framebuffer;
+  `FramebufferPresent` hands the same rect to the registered
+  present hook, which on virtio-gpu becomes
+  `VirtioGpuFlushScanout(x, y, w, h)`. A clean compose pass
+  (`damage.valid == false`) skips the flush entirely.
+- **Why:** the chrome-only frames the compositor produces
+  thousands of times per session (cursor blink, taskbar clock
+  tick, focus pulse) only touch a handful of small rects. Before
+  this slice every present uploaded the full surface
+  (`width * height * 4` bytes) over the virtio-gpu transfer ring
+  AND ran a full-surface shadow→live blit; both were dominated
+  by chrome that had already been drawn. The bbox tracker turns
+  a 1024×768 cursor-blink frame from 786 432 pixels of work
+  into ~256, with no per-pixel cost in the inner loops (only
+  one update per primitive call, hoisted out of the tight
+  store loop). The present hook also picks up a "skip the
+  whole thing" fast path for frames where the compositor wrote
+  nothing.
+- **Why not (alternatives considered):**
+  - **No tracker (status quo):** burns full-surface bandwidth
+    every present even when nothing changed. virtio-gpu's
+    transfer cost is the bottleneck; making it proportional to
+    work done is the obvious win.
+  - **Per-window damage list (`DirtyRegion[]`):** the right
+    answer for a desktop with many small disjoint changes
+    (cursor blink in one corner + clock tick in another), but
+    overkill for v0. The compositor today still walks every
+    window and re-draws chrome the same way it always has, so
+    the disjoint-rect case is rare relative to "this whole
+    window repainted." Adding a list now would require either a
+    fixed cap (artificial limit) or an allocator on the present
+    path (kheap pressure on a hot path) to handle pathological
+    counts. Single-bbox keeps the per-frame cost constant.
+  - **Hardware scissor / region clip:** GPUs can do this cheaply
+    on the host side, but we don't yet have a real hardware
+    GPU driver — virtio-gpu's API takes a flush rect, full
+    stop. Hardware scissors land when we have a real GPU
+    command queue, not before.
+  - **Per-tile dirty bitmap:** very efficient for sparse damage
+    on large surfaces (think 4K) but memory and bookkeeping cost
+    is fixed per-tile and dwarfs the v0 surface sizes. Revisit
+    when the active framebuffer crosses ~8 megapixels.
+- **What it rules out / defers:** disjoint damage rects (a
+  cursor in one corner + a clock in another currently flushes
+  the bbox spanning both); per-window damage tracking the
+  compositor could use to skip whole windows; hardware-side
+  scissor / region. None of those are required for the
+  bandwidth win the v0 chrome-only frames produce.
+- **Revisit when:** the compositor grows a "this window is
+  unchanged, skip its draw call entirely" pass (then per-
+  window rects feed naturally into a list-of-rects damage
+  surface); a real GPU driver lands with a scissor primitive;
+  the active framebuffer routinely crosses ~8 megapixels (4K
+  desktop, multi-monitor) and the chrome-only frame's bbox
+  starts pulling in too many pixels.
+- **Related tracks:** [Graphics Drivers](../drivers/Graphics-Drivers.md),
+  [Compositor and Window Manager](../subsystems/Compositor.md),
+  Roadmap entry "Multi-monitor / runtime resolution change".
 

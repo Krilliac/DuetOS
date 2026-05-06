@@ -45,7 +45,9 @@
 #include "drivers/pci/pci.h"
 #include "drivers/power/power.h"
 #include "drivers/video/console.h"
+#include "drivers/video/display_info.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/render_stats.h"
 #include "mm/kheap.h"
 #include "mm/paging.h"
 #include "sched/sched.h"
@@ -1055,8 +1057,27 @@ void CmdGpu()
     }
 }
 
-void CmdGfx()
+void CmdGfx(u32 argc, char** argv)
 {
+    // Subcommands: `gfx reset` clears the render-stats counters
+    // so the operator can measure a specific scenario (open the
+    // Files app, drag a window, etc.) without prior history. The
+    // ICD handle-table counters and the GPU discovery cache are
+    // boot-stable and not part of the reset.
+    if (argc >= 2 && argv != nullptr && argv[1] != nullptr)
+    {
+        if (StrEq(argv[1], "reset"))
+        {
+            duetos::drivers::video::RenderStatsReset();
+            ConsoleWriteln("gfx: render stats reset");
+            return;
+        }
+        ConsoleWrite("gfx: unknown subcommand '");
+        ConsoleWrite(argv[1]);
+        ConsoleWriteln("' (try: gfx, gfx reset)");
+        return;
+    }
+
     // Surfaces the graphics ICD handle-table counters. The ICD is
     // a trace-only skeleton today (see subsystems/graphics/graphics.h),
     // so in the steady state all counts are zero unless something
@@ -1112,6 +1133,114 @@ void CmdGfx()
     ConsoleWrite("  Physical devices visible to ICD: ");
     WriteU64Dec(ngpu);
     ConsoleWriteChar('\n');
+
+    // Display info — bundles framebuffer + GPU + present backend.
+    // Comes after the ICD section so the operator sees the
+    // "skeleton ICD" first and the "but here's what's actually
+    // driving the screen" reality second.
+    const auto di = duetos::drivers::video::Query();
+    ConsoleWriteln("Display");
+    if (!di.available)
+    {
+        ConsoleWriteln("  framebuffer: <not available> — boot stayed on serial");
+    }
+    else
+    {
+        ConsoleWrite("  framebuffer: ");
+        WriteU64Dec(di.width);
+        ConsoleWrite("x");
+        WriteU64Dec(di.height);
+        ConsoleWrite(" pitch=");
+        WriteU64Dec(di.pitch);
+        ConsoleWrite(" bpp=");
+        WriteU64Dec(di.bpp);
+        ConsoleWriteChar('\n');
+        ConsoleWrite("  fb_phys=");
+        WriteU64Hex(di.fb_phys);
+        ConsoleWrite(" fb_virt=");
+        WriteU64Hex(di.fb_virt);
+        ConsoleWriteChar('\n');
+    }
+    ConsoleWrite("  backend: ");
+    ConsoleWrite(duetos::drivers::video::PresentBackendName(di.backend));
+    if (di.compose_active)
+        ConsoleWrite(" (compose-active)");
+    ConsoleWriteChar('\n');
+    if (di.gpu_present)
+    {
+        ConsoleWrite("  primary GPU: vendor=");
+        ConsoleWrite(di.gpu_vendor != nullptr ? di.gpu_vendor : "<unknown>");
+        ConsoleWrite(" tier=");
+        ConsoleWrite(di.gpu_tier != nullptr ? di.gpu_tier : "<unknown>");
+        if (di.gpu_family != nullptr)
+        {
+            ConsoleWrite(" family=");
+            ConsoleWrite(di.gpu_family);
+        }
+        if (di.gpu_arch != nullptr)
+        {
+            ConsoleWrite(" arch=");
+            ConsoleWrite(di.gpu_arch);
+        }
+        ConsoleWriteChar('\n');
+        if (di.gpu_mmio_size != 0)
+        {
+            ConsoleWrite("  bar0=");
+            WriteU64Hex(di.gpu_mmio_phys);
+            ConsoleWrite("/");
+            WriteU64Hex(di.gpu_mmio_size, 0);
+            ConsoleWriteChar('\n');
+        }
+    }
+    else
+    {
+        ConsoleWriteln("  primary GPU: <none discovered>");
+    }
+
+    // Render stats — accumulated since boot (or since the last
+    // RenderStatsReset). Reads as a one-shot snapshot, no
+    // side effects.
+    const auto rs = duetos::drivers::video::RenderStatsRead();
+    ConsoleWriteln("Render stats (since boot)");
+    ConsoleWrite("  frames composed:   ");
+    WriteU64Dec(rs.frames_composed);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  frames presented:  ");
+    WriteU64Dec(rs.frames_presented);
+    ConsoleWrite("  (clean=");
+    WriteU64Dec(rs.frames_clean);
+    ConsoleWrite(" partial=");
+    WriteU64Dec(rs.frames_partial);
+    ConsoleWrite(" full=");
+    WriteU64Dec(rs.frames_full);
+    ConsoleWrite(")\n");
+    if (rs.surface_pixels_total != 0)
+    {
+        // Per-mille rather than percent so a 5% partial frame
+        // doesn't round to "0%". The compositor's chrome-heavy
+        // frames usually land in the 1-20% range when only the
+        // taskbar / clock / cursor blink.
+        const u64 permille = (rs.dirty_pixels_total * 1000ULL) / rs.surface_pixels_total;
+        ConsoleWrite("  avg dirty fraction: ");
+        WriteU64Dec(permille);
+        ConsoleWrite("‰ (");
+        WriteU64Dec(rs.dirty_pixels_total);
+        ConsoleWrite(" / ");
+        WriteU64Dec(rs.surface_pixels_total);
+        ConsoleWrite(" px)\n");
+    }
+    if (rs.last_damage_valid)
+    {
+        ConsoleWrite("  last damage rect: ");
+        WriteU64Dec(rs.last_damage_w);
+        ConsoleWrite("x");
+        WriteU64Dec(rs.last_damage_h);
+        ConsoleWrite(" @ (");
+        WriteU64Dec(rs.last_damage_x);
+        ConsoleWrite(",");
+        WriteU64Dec(rs.last_damage_y);
+        ConsoleWrite(")\n");
+    }
 }
 
 void CmdVbe(u32 argc, char** argv)

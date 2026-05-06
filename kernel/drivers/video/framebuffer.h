@@ -62,6 +62,77 @@ struct FramebufferInfo
     u8 _pad[3];
 };
 
+/// Axis-aligned dirty-rect that pixel-write primitives accumulate
+/// during a compose pass. The compose-end blit and the virtio-gpu
+/// present hook consult this so they only touch the changed pixels
+/// instead of the whole surface.
+///
+/// `valid == false` means "no pixels written this frame" — the
+/// hook short-circuits. Otherwise the rect is already clipped to
+/// the framebuffer bounds.
+///
+/// The union math lives in `Extend` so the framebuffer driver and
+/// the host unit test (`tests/host/test_damage_rect.cpp`) share
+/// one canonical implementation. `Extend` is `constexpr` + has no
+/// kernel dependencies — the only thing it touches is its own
+/// fields.
+struct DamageRect
+{
+    u32 x;
+    u32 y;
+    u32 w;
+    u32 h;
+    bool valid;
+
+    /// Extend this rect to cover `(rx, ry, rw, rh)`. The added
+    /// rect is treated as exclusive (right edge is `rx + rw`,
+    /// bottom edge is `ry + rh`). No-op on zero `rw` or `rh`. The
+    /// first non-empty `Extend` after a `Reset` (or on a default-
+    /// constructed `DamageRect`) populates the union; subsequent
+    /// calls grow it monotonically.
+    ///
+    /// Caller is responsible for keeping `rx + rw` and `ry + rh`
+    /// within `u32` range — the framebuffer driver clips to the
+    /// surface bounds before calling this so the addition can't
+    /// overflow.
+    constexpr void Extend(u32 rx, u32 ry, u32 rw, u32 rh)
+    {
+        if (rw == 0 || rh == 0)
+            return;
+        const u32 rx1 = rx + rw;
+        const u32 ry1 = ry + rh;
+        if (!valid)
+        {
+            x = rx;
+            y = ry;
+            w = rw;
+            h = rh;
+            valid = true;
+            return;
+        }
+        const u32 x1 = x + w;
+        const u32 y1 = y + h;
+        const u32 nx0 = (rx < x) ? rx : x;
+        const u32 ny0 = (ry < y) ? ry : y;
+        const u32 nx1 = (rx1 > x1) ? rx1 : x1;
+        const u32 ny1 = (ry1 > y1) ? ry1 : y1;
+        x = nx0;
+        y = ny0;
+        w = nx1 - nx0;
+        h = ny1 - ny0;
+    }
+
+    /// Drop the union. After this, `Extend` rebuilds from scratch.
+    constexpr void Reset()
+    {
+        x = 0;
+        y = 0;
+        w = 0;
+        h = 0;
+        valid = false;
+    }
+};
+
 /// Parse the Multiboot2 framebuffer tag from the info struct at
 /// `multiboot_info_phys`, validate that it's a direct-RGB 32-bpp
 /// linear framebuffer, and MapMmio the pixel buffer. Idempotent:
@@ -374,9 +445,35 @@ bool FramebufferRebindExternal(void* virt, u64 phys, u32 width, u32 height, u32 
 // and `FramebufferPresent()` is a no-op. For virtio-gpu the hook
 // runs TRANSFER_TO_HOST_2D + RESOURCE_FLUSH so the host sees the
 // new guest pixels.
-using FramebufferPresentFn = void (*)();
+//
+// The hook receives the current frame's accumulated damage rect.
+// If `damage.valid == false` the hook should skip the flush — the
+// compositor wrote nothing this pass, so re-uploading the whole
+// scanout would just burn PCIe bandwidth. The damage rect is
+// already clipped to the framebuffer surface.
+using FramebufferPresentFn = void (*)(const DamageRect& damage);
 void FramebufferSetPresentHook(FramebufferPresentFn fn);
 void FramebufferPresent();
+
+/// Manually extend the damage union by `(x, y, w, h)`. Called
+/// internally by every pixel-write primitive after it clips its
+/// rect to the surface; advanced callers (a backend that paints
+/// straight into the live framebuffer behind the primitive API)
+/// can call this themselves so the next `FramebufferPresent`
+/// flushes their pixels too. Out-of-range / empty rects are a
+/// silent no-op.
+void FramebufferAddDamage(u32 x, u32 y, u32 w, u32 h);
+
+/// Snapshot the current damage union. Returns `valid == false`
+/// when nothing was written since the last reset. The compositor
+/// uses this to size partial-region flushes.
+DamageRect FramebufferReadDamage();
+
+/// Drop the current damage rect — call after a full present has
+/// pushed every dirty pixel to the screen. `FramebufferEndCompose`
+/// + `FramebufferPresent` invoke this themselves; explicit callers
+/// only need it if they bypass the standard compose-end flow.
+void FramebufferResetDamage();
 
 /// Begin an offscreen compose pass. While compose is active every
 /// pixel-write primitive in this header (`FramebufferPutPixel`,
