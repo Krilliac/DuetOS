@@ -5099,3 +5099,57 @@ doc helps future readers audit the trail.
   [SMP-AP-Bringup-Scope](../advanced/SMP-AP-Bringup-Scope.md),
   Roadmap B2-followup.
 
+## CPU topology + locality-aware work-stealing — cluster collapse rule (2026-05-06)
+
+- **Decision:** the scheduler treats each CPU as belonging to one
+  cluster, identified by `cpu::PerCpu.cluster_id` (a `u16`
+  appended to `PerCpu` past the syscall-stub-relevant offsets).
+  Cluster IDs are assigned once at boot using the **innermost
+  meaningful grouping** rule:
+  1. ≥2 distinct NUMA nodes (from ACPI SRAT) → cluster = numa_node.
+  2. Else ≥2 distinct packages (from CPUID 0x1F / 0x0B / leaf-4
+     fallback) → cluster = package_id.
+  3. Else single cluster — every CPU gets `cluster_id = 0`.
+  `StealNormalFromPeer` does a two-pass round-robin scan: pass 0
+  visits same-cluster peers only, pass 1 visits cross-cluster.
+  On a single-cluster machine pass 0 covers every peer (no
+  regression vs. the pre-clustering scheduler).
+- **Why:** matches the cache topology a steal would actually
+  benefit from. NUMA nodes are the natural cluster on multi-
+  socket workstations; package IDs are the natural cluster on
+  single-socket multi-die desktops (Threadripper, Sapphire
+  Rapids); UMA single-package boxes collapse to one cluster
+  with zero scheduler-side overhead. The collapse keeps the
+  cluster vocabulary the same across SKUs.
+- **Why not (alternatives considered):**
+  - **Always cluster by package:** wrong on multi-socket NUMA
+    boxes — two packages can live on the same node, and you
+    want the stealer to prefer in-node first.
+  - **Always cluster by NUMA node:** wrong on multi-die single-
+    socket boxes — without an SRAT entry the kernel would
+    treat them as one cluster and lose the L3 locality signal.
+  - **Always expose hierarchy (node ⊇ package ⊇ core):** the
+    extra level helps placement and migration cost models, but
+    the steal path only needs one bit of "near vs far". Defer
+    until placement affinity / migration cost lands.
+- **Trampoline rendezvous:** `cpu::TopologyInitAp(cpu_id)` runs
+  inside `ApEntryFromTrampoline` immediately **before** the
+  `online_flag = 1` write. The BSP's existing `WaitForApOnline`
+  poll therefore doubles as the rendezvous on AP topology
+  decode, so `TopologyAssignClusters()` after `SmpStartAps()`
+  returns is race-free without a separate done flag. Putting
+  the call inside `SchedEnterOnAp` instead would race the BSP,
+  which already considers the AP "online" by then.
+- **Failure handling:** any decode or SRAT failure is non-fatal.
+  `kTopologyParseFailed` probe fires, the affected CPU stays at
+  `cluster_id = 0`, and locality stealing degrades to round-
+  robin for that CPU. No panic.
+- **Revisit when:** the NUMA-aware page allocator lands (will
+  consume the same `numa_node` field), or per-cluster runqueue
+  splits go in (Roadmap B2-followup), or x2APIC IDs above 255
+  appear on hardware we care about (current SRAT parser caps at
+  `kMaxApicId = 256`).
+- **Related tracks:** [CPU Topology](../kernel/CPU-Topology.md),
+  [Scheduler](../kernel/Scheduler.md), Roadmap entry
+  "Topology-driven follow-ons".
+

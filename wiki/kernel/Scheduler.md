@@ -114,6 +114,14 @@ runqueue empty, `StealNormalFromPeer` walks peer CPUs round-robin
 peer Normal-band queue. Stolen tasks have their `last_cpu` updated
 so the next wake routes to the stealer.
 
+The walk is **two-pass cluster-aware**: pass 0 visits only peers
+that share `self`'s `cluster_id` (NUMA node, or package on UMA
+boxes); pass 1 covers cross-cluster peers. On a single-cluster
+machine pass 0 finds every peer (every `cluster_id == 0`) so the
+behaviour is identical to the pre-clustering scheduler — no
+regression. See [CPU Topology](CPU-Topology.md) for how cluster
+IDs are assigned at boot.
+
 ## Blocking Primitives (sister doc)
 
 `SchedSleepTicks`, `WaitQueue`, and `Mutex` were added on top of the

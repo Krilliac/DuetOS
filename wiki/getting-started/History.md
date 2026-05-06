@@ -300,9 +300,18 @@ runqueue is still serialised through one global `g_sched_lock`. The
 data structures are per-CPU; the lock is not. Splitting per-CPU is a
 tractable follow-up when profiles show contention.
 
+Locality awareness landed immediately afterward: each CPU is now
+decoded into a `cpu::Topology` row at boot (CPUID 0x1F / 0x0B /
+leaf-4 fallback + ACPI SRAT) and assigned a `cluster_id`. The
+work-stealing path scans same-cluster peers first and falls back
+to cross-cluster only when the local cluster has no work. UMA
+single-package boxes collapse to one cluster and behave identically
+to the pre-clustering scheduler.
+
 See [`Scheduler`](../kernel/Scheduler.md),
+[`CPU Topology`](../kernel/CPU-Topology.md),
 [`SMP-AP-Bringup-Scope`](../advanced/SMP-AP-Bringup-Scope.md), and
-the 2026-05-06 entry in
+the 2026-05-06 entries in
 [`Design-Decisions`](../reference/Design-Decisions.md) for the
 rationale.
 

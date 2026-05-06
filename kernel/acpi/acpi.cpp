@@ -34,6 +34,7 @@
 #include "mm/multiboot2.h"
 #include "mm/page.h"
 #include "acpi/aml.h"
+#include "acpi/srat.h"
 
 namespace duetos::acpi
 {
@@ -749,6 +750,26 @@ void AcpiInit(uptr multiboot_info_phys)
         }
         ParseMcfg(*reinterpret_cast<const McfgTable*>(mcfg_hdr));
     }
+
+    // SRAT — optional. UMA-only firmware may omit it entirely; the
+    // parser treats null + bad-checksum tables as "absent" without
+    // panicking. Consumed by `cpu/topology.cpp` to assign cluster
+    // IDs in the scheduler. ParseSrat doesn't reach into our file-
+    // local types — it's a flat byte-walk in `acpi/srat.cpp`.
+    const SdtHeader* srat_hdr = FindTable(*rsdp, "SRAT");
+    srat::SratInit(srat_hdr);
+
+    SerialWrite("[acpi] srat=");
+    if (srat::SratPresent())
+    {
+        SerialWrite("present nodes=");
+        SerialWriteHex(srat::SratNodeCount());
+    }
+    else
+    {
+        SerialWrite("absent");
+    }
+    SerialWrite("\n");
 
     SerialWrite("[acpi] rsdp rev=");
     SerialWriteHex(rsdp->revision);

@@ -47,6 +47,30 @@ the same commit** that delivers the code.
 - **When to land:** when a workload exposes lock contention. For
   most workloads the global lock is acceptable.
 
+### Topology-driven follow-ons (post-clustering v0)
+
+- **Status:** v0 clustering landed — `cpu::Topology` + SRAT parser
+  + cluster-aware two-pass `StealNormalFromPeer`. See
+  [CPU Topology](../kernel/CPU-Topology.md).
+- **Remaining scope:** the topology + cluster machinery is in tree
+  but the only consumer is the steal path. Three natural follow-on
+  slices reuse the same data:
+  - **NUMA-aware page allocator** — frame allocator queries SRAT
+    memory-affinity records (subtype 1, currently ignored) and
+    prefers the requesting CPU's `numa_node`. Today every frame
+    comes from one global pool.
+  - **Cluster-broadcast IPIs** — extend `arch::SmpSendIpi` with
+    cluster-scoped destination bits when x2APIC cluster mode is
+    in use; lets a wake or shootdown fan out within a cluster
+    in one ICR write.
+  - **Placement affinity at spawn / wake** — at task creation
+    (and on `WaitQueueWakeOne`), route to the parent's cluster's
+    least-loaded CPU rather than just `last_cpu`. Adds a per-
+    cluster load counter.
+- **Blocks on:** none technically. NUMA allocator is the highest-
+  ROI on multi-socket workstations; the other two are profile-
+  driven.
+
 ### Slab allocator + freed-object poison + real KASAN
 
 - **Scope:** implement a slab allocator (currently kheap is the

@@ -12,6 +12,7 @@
 #include "log/klog.h"
 #include "core/panic.h"
 #include "cpu/percpu.h"
+#include "cpu/topology.h"
 #include "mm/kheap.h"
 #include "mm/page.h"
 #include "sched/sched.h"
@@ -342,6 +343,13 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
     }
     LapicWrite(kLapicRegTpr, 0);
     LapicWrite(kLapicRegSvr, (1U << 8) | 0xFF);
+
+    // Decode this AP's CPUID/SRAT topology BEFORE flipping the
+    // online_flag, so the BSP's WaitForApOnline poll inside
+    // SmpStartAps doubles as the rendezvous on AP topology init.
+    // After SmpStartAps returns, the BSP runs TopologyAssignClusters
+    // and every AP's row is already populated — no separate done flag.
+    cpu::TopologyInitAp(cpu_id);
 
     // Signal BSP BEFORE logging — log path races with BSP's serial
     // writes and can delay arbitrarily on contention.
