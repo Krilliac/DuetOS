@@ -1,67 +1,77 @@
 # SMP AP Bring-up — Scope & Staged Plan
 
-_Last updated: 2026-04-20_
+_Last updated: 2026-05-06_
 
-## Why this doc exists
+## Status: SMP online
 
-The current kernel is single-CPU. Making it multi-CPU involves a
-real→long-mode trampoline, precise INIT-SIPI-SIPI timing, per-AP
-state (stack, PerCpu, GDT/TSS later), and a scheduler-side refactor
-(runqueue spinlock, migrate `g_current` + `g_need_resched` into
-PerCpu).
+All five staged commits (A–E) plus the per-CPU runqueue refactor and
+work-stealing have landed. APs run kernel tasks; cross-CPU wakes fire
+reschedule-IPIs; idle CPUs steal from busy peers. The single
+remaining limitation is lock granularity — every per-CPU runqueue is
+still covered by one global `g_sched_lock`. Splitting the lock
+per-CPU is the next slice when contention shows up in profiles.
 
-This doc captures the staged plan so a future session can pick up
-where today's left off. We've landed the **foundations** already —
-the remaining work is the trampoline itself and the scheduler's
-SMP-safe refactor.
+## Why this doc exists (historical)
+
+The original 2026-04-20 plan staged the SMP bring-up across five
+small commits to keep each diff reviewable. Below preserves that
+plan as a reference for how the work was decomposed; the "What's
+landed" section reflects current reality.
 
 ## What's landed
 
 - `kernel/sync/spinlock.{h,cpp}` — xchg-based spinlock with IF
   save/restore (entry 017 in decision log).
 - `kernel/cpu/percpu.{h,cpp}` — `PerCpu` struct addressable via
-  `IA32_GS_BASE`; BSP's struct installed in `kernel_main`.
-- `kernel/sched/sched.cpp` — `g_current` + `g_need_resched` migrated
-  to `cpu::CurrentCpu()->{current_task, need_resched}`. On single
-  CPU this is a no-op; on SMP the accessors automatically resolve
-  to the executing CPU's PerCpu.
+  `IA32_GS_BASE`; BSP's struct installed in `kernel_main`. Holds
+  per-CPU `current_task`, `need_resched`, runqueue head/tail,
+  `tss` pointer, and the lock-pass slot.
 - `kernel/acpi/acpi.{h,cpp}` — MADT parses type-0 LAPIC entries;
   `acpi::CpuCount()` + `acpi::Lapic(i)` enumerate the APs.
 - `kernel/arch/x86_64/smp.{h,cpp}` — IPI-send helper (`SmpSendIpi`
-  wraps the LAPIC ICR dance) + discovery scaffolding
-  (`SmpStartAps` logs each AP candidate).
+  wraps the LAPIC ICR dance), discovery, AP trampoline copy,
+  per-AP allocation (PerCpu + GDT bundle + stack), full
+  INIT-SIPI-SIPI sequence with online-flag polling, reschedule-IPI
+  helper (`SmpSendReschedIpi`).
+- `kernel/arch/x86_64/ap_trampoline.S` — real-mode → long-mode
+  trampoline at physical 0x8000.
+- `kernel/sched/sched.cpp` — lock-passing across `ContextSwitch`,
+  per-CPU runqueue data layout, `Task::last_cpu` cache-affinity
+  routing, `SchedEnterOnAp` for AP scheduler join, work-stealing in
+  `RunqueuePopRunnable` via `StealNormalFromPeer`.
+- `kernel/arch/x86_64/gdt.{h,cpp}` — per-AP GDT clone + TSS body +
+  three IST stacks (#DF / #MC / #NMI) allocated by `AllocateApGdt`,
+  loaded on the AP via `LoadGdtForCurrent`. `TssSetRsp0` routes
+  via `cpu::CurrentCpu()->tss` so each CPU's RSP0 update lands on
+  the right TSS.
+- `kernel/arch/x86_64/timer.{h,cpp}` — `LapicTimerStartOnCurrent`
+  arms the local LAPIC timer on the calling CPU using the cached
+  calibration from BSP's `TimerInit`.
 
-## What's NOT landed yet
+## Known limitations / GAPs
 
-1. **Real-mode → long-mode trampoline.** ~150 lines of GNU-as
-   Intel-syntax assembly with careful two-symbol arithmetic
-   workarounds. Needs iterative QEMU testing — not safe to write
-   "blind" and commit.
-2. **Trampoline parameter block + relocation.** BSP writes
-   pml4_phys / stack_top / entry_fn / cpu_id / online_flag into
-   the fixed offsets within the 4 KiB page at physical 0x8000
-   before each SIPI.
-3. **INIT-SIPI-SIPI sequence per AP** using `SmpSendIpi`. INIT
-   assert + 10 ms wait + SIPI + 200 µs wait + second SIPI. Intel
-   SDM Vol. 3A §8.4.4 gives the canonical sequence.
-4. **AP-side C++ entry** (`ApEntryFromTrampoline(cpu_id)`): write
-   GSBASE from `g_ap_percpus[cpu_id]`, enable LAPIC, increment
-   `g_cpus_online`, halt. Scheduler-join comes in step 6.
-5. **Scheduler SMP-safe refactor.** Wrap `g_run_head` / `g_run_tail`
-   / `g_sleep_head` / `g_zombies` / `g_tasks_*` accesses in a
-   `sync::SpinLock`. Handle the lock-passing-across-context-switch
-   subtlety (the lock is released by the task we context-switch
-   **into**, not the task we switch **from** — see Linux's
-   `finish_task_switch` for prior art).
-6. **AP joins scheduler.** AP entry calls a new `SchedEnterOnAp()`
-   that installs an idle task for this CPU, arms the LAPIC timer,
-   and enters the scheduler loop. Each AP's timer fires
-   independently; the shared runqueue feeds tasks to whichever CPU
-   asks for one first.
-7. **Per-AP TSS + IST** — needed when ring 3 lands (the TSS carries
-   the kernel-mode stack pointer used on user→kernel trap entry).
-   Not strictly needed for ring-0-only SMP but we'll land it
-   alongside ring 3 rather than doing it twice.
+1. **`g_sched_lock` is still global.** Every per-CPU runqueue is
+   covered by the same lock; every `Schedule()` call on every CPU
+   serialises through it. Per-CPU lock split is a follow-up when
+   profiles show contention. The lock-passing protocol generalises
+   directly — the slot in `PerCpu` already references a pointer.
+2. **`g_ticks` multi-writer race** — every CPU's
+   `LapicTimerStartOnCurrent`-fed handler increments the same
+   global. Bounded misbehaviour (lost / duplicated tick observation
+   in load average); scheduling is driven by per-CPU `need_resched`
+   not the absolute tick. Atomic-`g_ticks` upgrade roadmapped
+   separately.
+3. **AP boot sentinel stack leak.** Each AP keeps the trampoline
+   allocated 16 KiB stack referenced by its boot sentinel forever
+   (the sentinel never re-enqueues, so `Schedule()` never resumes
+   it). Bounded at 16 KiB × kMaxAps = 512 KiB worst case.
+4. **Per-package LAPIC frequency variance.** `LapicTimerStartOnCurrent`
+   reuses BSP's calibration assuming a homogeneous package — true
+   on every commodity x86 today, but a future heterogeneous
+   platform will need per-CPU recalibration.
+5. **Single ring-3 path on APs not yet exercised.** Per-AP TSS +
+   IST landed, but no ring-3 task has run on an AP. Ring-3-on-AP
+   is a separate validation slice when a workload lands.
 
 ## Staged plan (when we come back)
 

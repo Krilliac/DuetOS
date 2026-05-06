@@ -4,16 +4,30 @@
 >
 > **Execution context:** Kernel — `Schedule()` runs after IRQ EOI or in `cli` cooperative paths
 >
-> **Maturity:** v0 (round-robin, single CPU + idle); SMP-aware bringup pending
+> **Maturity:** SMP-online — per-CPU runqueues, work-stealing, reschedule-IPI; single global `g_sched_lock` (per-CPU lock split deferred)
 
 ## Overview
 
-The DuetOS scheduler is preemptive, kernel-thread first. `SchedInit`
-wraps `kernel_main` as task 0 (the boot task). `SchedStartIdle` spawns
-a dedicated `idle-bsp` task that loops on `sti; hlt` so the runqueue is
-never empty. `SchedCreate(entry, arg, name)` spawns a regular kernel
-thread with its own 16 KiB stack. Sleep / wait queues / mutexes layer
-on top.
+The DuetOS scheduler is preemptive, kernel-thread first, and SMP. Each
+CPU has its own runqueue (Normal + Idle bands) stored in `cpu::PerCpu`.
+`SchedInit` wraps `kernel_main` as task 0 (the boot task) on the BSP;
+`SchedStartIdle` spawns a per-CPU idle task (`idle-bsp` on the BSP,
+`idle-apN` on each AP) that loops on `sti; hlt` so each CPU's runqueue
+is never empty. `SchedCreate(entry, arg, name)` spawns a regular kernel
+thread with its own 64 KiB stack on the spawning CPU's runqueue. Sleep
+/ wait queues / mutexes layer on top.
+
+Cross-CPU work routing: every Task carries a `last_cpu` field updated
+on every `Schedule()` switch-in. `RunqueuePush(t)` enqueues on
+`t->last_cpu`'s runqueue (cache affinity) and fires a reschedule-IPI
+(vector `0xF8`, see `arch::SmpSendReschedIpi`) at the target CPU when
+it's not the current one — wake-to-run latency drops from ~10 ms (next
+tick) to microseconds.
+
+Idle CPUs steal: when `RunqueuePopRunnable` finds the local runqueue
+empty, `StealNormalFromPeer` walks peer CPUs round-robin and lifts one
+Normal-band task. Stolen tasks have their `last_cpu` updated to the
+stealer so the next wake routes here.
 
 ## Task Struct
 
@@ -65,15 +79,40 @@ with interrupts disabled forever.
 
 ## Runqueue
 
-Singly-linked FIFO, head + tail. The running task is **not** on the
-queue. `Schedule()` re-enqueues the previous task (if still `Ready`)
-before popping the head. Dead tasks are reaped — `SchedExit` pushes
-the dying task onto a zombie list and wakes a reaper thread
-(`g_reaper_wq`) that frees the stack + Task struct.
+Per-CPU singly-linked FIFO, head + tail, in two priority bands
+(Normal + Idle). The four head/tail pointers live in `cpu::PerCpu`
+(`runq_head_normal`, `runq_tail_normal`, `runq_head_idle`,
+`runq_tail_idle`). The running task is **not** on the queue.
+`Schedule()` re-enqueues the previous task (if still `Ready`) on its
+`last_cpu` runqueue before popping the local head. Dead tasks are
+reaped — `SchedExit` pushes the dying task onto the global zombie
+list and wakes a reaper thread (`g_reaper_wq`) that frees the stack
++ Task struct.
 
-Preemption (timer IRQ -> `need_resched`) and cooperative yield
-(`SchedYield()` -> `cli + Schedule + sti`) coexist; both push the
-current task to the tail and pop the head.
+Preemption (timer IRQ -> `need_resched`, per-CPU) and cooperative
+yield (`SchedYield()` -> `cli + Schedule + sti`) coexist; both push
+the current task to the tail and pop the head.
+
+**Lock granularity**: today every per-CPU runqueue is still
+covered by the single global `g_sched_lock`. The data structures
+are per-CPU; the lock is not. Splitting the lock per-CPU is a
+follow-up — every Schedule() call on every CPU still serialises
+on `g_sched_lock`.
+
+**Lock-passing across `ContextSwitch`**: `Schedule()` holds
+`g_sched_lock` across the stack swap. The source CPU writes the
+lock pointer + saved IRQ flags into its `cpu::PerCpu`'s
+`ctxsw_lock_to_release` slot; the resumed code (`SchedFinishTaskSwitch`
+in `Schedule()` post-switch, or `SchedTaskTrampoline` for fresh tasks)
+drains the slot and releases. Mirrors Linux's `prepare_task_switch`
+/ `finish_task_switch`. Closes the SMP race where a peer CPU could
+wake `prev` between an early lock release and the actual stack swap.
+
+**Work-stealing**: when `RunqueuePopRunnable` finds the local
+runqueue empty, `StealNormalFromPeer` walks peer CPUs round-robin
+(starting from `cpu_id+1`) and lifts the head of the first non-empty
+peer Normal-band queue. Stolen tasks have their `last_cpu` updated
+so the next wake routes to the stealer.
 
 ## Blocking Primitives (sister doc)
 

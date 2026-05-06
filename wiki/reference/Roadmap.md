@@ -17,30 +17,35 @@ the same commit** that delivers the code.
 
 ## Kernel / runtime
 
-### B2 — SMP: per-CPU runqueues + work stealing
+### B2-followup — split `g_sched_lock` per-CPU
 
-- **Scope:** bring the scheduler from BSP-only to genuine SMP.
-  Per-CPU runqueues, AP bringup synchronisation, work-stealing
-  across CPUs, IPI-based reschedule.
-- **Blocks on:** nothing. The per-CPU shape is in place across
-  lockdep / soft-lockup / event-trace / perf, all keyed on
-  `g_per_cpu[0]` aliases that just need to index by current CPU
-  ID. SMP AP bringup itself (`SmpStartAps`) already exists; see
-  [`SMP-AP-Bringup-Scope`](../advanced/SMP-AP-Bringup-Scope.md).
+- **Status:** SMP per-CPU runqueues + work-stealing + reschedule-IPI
+  + per-AP TSS/IST landed (see
+  [`SMP-AP-Bringup-Scope`](../advanced/SMP-AP-Bringup-Scope.md)).
+  APs run kernel tasks; cross-CPU wakes route via `last_cpu` and
+  fire `kReschedIpiVector` (0xF8); idle CPUs steal Normal-band
+  tasks from peers via `StealNormalFromPeer`.
+- **Remaining scope:** the per-CPU runqueue head/tail pointers
+  live in `cpu::PerCpu`, but every mutation still serialises on
+  one global `g_sched_lock`. Splitting the lock per-CPU drops the
+  steady-state contention to local-only Schedule() calls. Wake
+  paths take target CPU's lock briefly; work-stealing uses
+  try-lock to avoid AB/BA deadlock.
+- **Blocks on:** nothing technical; defer until profiles show
+  contention on `g_sched_lock`.
 - **Cascading items unlocked when this lands:**
-  - Index `g_per_cpu` lockdep array by current-CPU ID.
+  - Index `g_per_cpu` lockdep array by current-CPU ID (currently
+    keyed on `g_per_cpu[0]` aliases).
   - Index event-trace `g_per_cpu` by current-CPU ID.
   - Index soft-lockup `g_per_cpu` by current-CPU ID.
   - SMP-stress versions of the RwLock + SeqLock + KMailbox
     contention self-tests (current cooperative-single-CPU
-    forms cover the wakeup paths; AP bringup unlocks real
-    concurrent-acquire stress).
+    forms cover the wakeup paths).
   - Move LAPIC-divider + tick-frequency programming out of
     `arch::TimerInit` into `time::TimerConfigure(hz)` once an
     ARM64 / generic-timer backend justifies the abstraction.
-- **When to land:** when a workload genuinely benefits from
-  parallelism — typical native userland workloads or any
-  non-trivial PE binary.
+- **When to land:** when a workload exposes lock contention. For
+  most workloads the global lock is acceptable.
 
 ### Slab allocator + freed-object poison + real KASAN
 

@@ -261,6 +261,53 @@ subsystem at a time.
 
 ---
 
+## Phase 6.5 — SMP scheduler online (2026-05-06)
+
+Until this slice, the kernel ran every task on the BSP — APs came up
+through `INIT-SIPI-SIPI`, enabled their LAPICs, and halted on
+`cli; hlt`. Six small commits closed the loop:
+
+1. **Lock-passing across `ContextSwitch`.** `Schedule()` now holds
+   `g_sched_lock` across the stack swap, with the source CPU writing
+   the lock pointer + saved IRQ flags into its `cpu::PerCpu`'s
+   `ctxsw_lock_to_release` slot; the resumed code drains the slot and
+   releases on the new stack. Mirrors Linux's
+   `prepare_task_switch` / `finish_task_switch`.
+2. **Per-CPU runqueue data layout.** The four runqueue head/tail
+   pointers (Normal+Idle bands) moved into `cpu::PerCpu`; every Task
+   carries `last_cpu` for cache-affinity wake routing.
+3. **Per-AP GDT + TSS + IST stacks.** Each AP allocates its own GDT
+   clone, TSS body, and three 4 KiB IST stacks (#DF / #MC / #NMI) so
+   critical traps on an AP don't race the BSP's static slots.
+4. **Reschedule-IPI vector.** `arch::SmpSendReschedIpi(cpu_id)`
+   delivers vector `0xF8` to a peer CPU; the handler sets
+   `need_resched` and the dispatcher's post-EOI check fires
+   `Schedule()` before iretq. Wake-to-run latency drops from ~10 ms
+   (next tick) to microseconds.
+5. **AP scheduler join.** `ApEntryFromTrampoline` hands off to
+   `sched::SchedEnterOnAp`, which spawns the AP's `idle-apN`, mints
+   a non-runnable boot sentinel, arms the AP's LAPIC timer, and drops
+   into a sti+hlt idle loop. The first timer IRQ on the AP fires
+   `Schedule()`; from then on the AP runs whatever tasks land on its
+   runqueue via `last_cpu` routing.
+6. **Work-stealing.** When a CPU's local runqueue is empty,
+   `StealNormalFromPeer` walks peer CPUs round-robin and lifts one
+   Normal-band task. Stolen tasks have their `last_cpu` updated to
+   the stealer.
+
+The remaining limitation is lock granularity — every per-CPU
+runqueue is still serialised through one global `g_sched_lock`. The
+data structures are per-CPU; the lock is not. Splitting per-CPU is a
+tractable follow-up when profiles show contention.
+
+See [`Scheduler`](../kernel/Scheduler.md),
+[`SMP-AP-Bringup-Scope`](../advanced/SMP-AP-Bringup-Scope.md), and
+the 2026-05-06 entry in
+[`Design-Decisions`](../reference/Design-Decisions.md) for the
+rationale.
+
+---
+
 ## How to read the rest of the tree
 
 - `CLAUDE.md` — the authoritative project context, coding standards,

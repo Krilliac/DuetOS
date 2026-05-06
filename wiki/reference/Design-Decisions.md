@@ -1,6 +1,6 @@
 # DuetOS — Design Decisions Log
 
-_Last updated: 2026-05-04_
+_Last updated: 2026-05-06_
 
 The most recent formal entries below run through 042 (HPET self-test);
 slices that landed during 2026-04-25 → 2026-05-04 (windowing / GDI /
@@ -5054,3 +5054,48 @@ doc helps future readers audit the trail.
   accept the bootstrap-ordering complexity of being writable
   before the dump path needs it.
 - **Related tracks:** [Kernel Modularization](../security/Kernel-Modularization.md).
+
+## SMP scheduler join: per-CPU runqueues, lock-passing, work-stealing, reschedule-IPI (2026-05-06)
+
+- **Decision:** Land the full SMP scheduler arc in six small
+  commits — lock-passing across `ContextSwitch`, per-CPU
+  runqueue data layout with `Task::last_cpu` cache affinity,
+  per-AP GDT/TSS/IST stacks, reschedule-IPI on vector 0xF8,
+  AP scheduler join via `SchedEnterOnAp`, and work-stealing
+  in `RunqueuePopRunnable`. All under a single global
+  `g_sched_lock` for now — data structures are per-CPU; lock
+  granularity is not.
+- **Why:** APs were halting at `cli; hlt` after LAPIC enable;
+  every kernel task ran on the BSP. Six small commits keep the
+  bisect window tight (each commit is UP-equivalent until
+  commit 5 lights up multi-core). The lock-passing slot lives
+  in `cpu::PerCpu` (not `Task`) because the slot identifies the
+  lock THIS CPU just acquired; the resumed task is irrelevant.
+  Cache-affinity routing via `last_cpu` keeps hot tasks on the
+  CPU running them; work-stealing balances when a CPU is idle.
+- **Why not (alternatives considered):**
+  - **Per-CPU lock split now:** the lock-order graph for
+    Schedule's kill-path (zombies + reaper wake) versus
+    OnTimerTick (sleep queue + wake-from-WQ) versus
+    WaitQueueWakeOne is non-trivial. Single global lock is
+    correct and meets v0 contention budget; per-CPU split is a
+    tractable follow-up when profiles justify it.
+  - **Lock-pass slot on Task:** wrong — Tasks migrate between
+    CPUs, but the slot tracks "the lock THIS CPU just
+    acquired." Per-CPU is correct.
+  - **Steal half / proportional steal:** steal-one keeps the
+    lock-held window short and is sufficient for v0 balance.
+  - **CPU affinity masks / priorities / RT class:** out of
+    scope; deferred to Roadmap B3.
+  - **Per-CPU sleep queue:** the sleep queue is touched once
+    per OnTimerTick + each Sleep call, much less contended
+    than the runqueue. Stays global.
+- **Revisit when:** Profiles show `g_sched_lock` contention
+  (split per-CPU), or a workload exposes IST exhaustion on an
+  AP (extend per-AP IST stacks beyond 4 KiB), or
+  heterogeneous-package hardware exposes per-CPU LAPIC
+  frequency variance (per-CPU LAPIC calibration).
+- **Related tracks:** [Scheduler](../kernel/Scheduler.md),
+  [SMP-AP-Bringup-Scope](../advanced/SMP-AP-Bringup-Scope.md),
+  Roadmap B2-followup.
+
