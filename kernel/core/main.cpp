@@ -76,6 +76,7 @@
 #include "debug/breakpoints.h"
 #include "debug/extable.h"
 #include "debug/probes.h"
+#include "debug/watch.h"
 #include "drivers/audio/audio.h"
 #include "drivers/gpu/cea861.h"
 #include "drivers/gpu/cvt.h"
@@ -1430,6 +1431,18 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     if (!duetos::debug::BpSelfTest())
     {
         SerialWrite("[boot] WARN: breakpoint self-test failed — see serial log\n");
+    }
+    // Named hardware-watchpoint wrapper — exercises the on-hit
+    // dispatch + counter + remove path on a stack-local. Uses one
+    // DR slot transiently and releases it before returning. See
+    // kernel/debug/watch.h for the public API and `bp watch …`
+    // for the operator-facing surface.
+    if constexpr (duetos::core::kBootSelfTests)
+    {
+        if (!duetos::debug::WatchSelfTest())
+        {
+            SerialWrite("[boot] WARN: watchpoint self-test failed — see serial log\n");
+        }
     }
 
 #ifdef DUETOS_GDB_DEMO

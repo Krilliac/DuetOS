@@ -240,6 +240,13 @@ u64* AllocateTable()
         table[i] = 0;
     }
     ++g_tables_allocated;
+    // Register the frame as a live kernel page table so a stray
+    // FreeFrame on this physical address panics instead of silently
+    // poisoning the PT and un-mapping every 4 KiB it covers. v0
+    // never frees kernel PTs once installed; if a future tear-down
+    // path adds a legitimate FreeFrame on one of these, it must
+    // unregister first via a paired primitive (not present today).
+    FrameAllocatorRegisterKernelPt(frame);
     return table;
 }
 
