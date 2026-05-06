@@ -1,6 +1,5 @@
 #include "log/klog_persist.h"
 
-#include "arch/x86_64/hypervisor.h"
 #include "arch/x86_64/serial.h"
 #include "fs/fat32.h"
 #include "log/klog.h"
@@ -106,47 +105,6 @@ void FileSink(const char* s)
 
 bool KlogPersistInstall()
 {
-    // Skip the persistent FAT32 sink under any hypervisor (TCG /
-    // KVM / hosted). Heavy klog volume during PE-import-resolution
-    // (the pe-winapi / pe-winkill smoke profiles emit ~hundreds of
-    // klog lines per second, each potentially driving a
-    // Fat32AppendAtPath flush) deterministically corrupts a kernel-
-    // half PT entry under emulator, manifesting as a kernel triple-
-    // fault at ~t=14.5s guest:
-    //
-    //   first PF: CR2 = .bss VA of fs::fat32::g_fat32_recursion,
-    //             error = 0x0 (page not present), RIP =
-    //             Fat32Guard::Fat32Guard reading the counter
-    //   second PF: instruction-fetch fault at the very entry of
-    //              isr_14 — the page-fault handler's own .text page
-    //              is also gone, cascading to triple fault
-    //
-    // Defensive frame-allocator guards added alongside this
-    // (kernel-image free guard + kernel-PT registry guard in
-    // mm/frame_allocator) catch the obvious causes (FreeFrame on a
-    // kernel-image frame; FreeFrame on a registered live kernel
-    // page-table frame). NEITHER fires in this scenario, so the
-    // corruption isn't a stale-pointer free of a known kernel
-    // frame — the working hypothesis is a stray write from a
-    // device-DMA or kernel-CPU path through a kernel virtual alias,
-    // but pinpointing it requires a per-page PTE-watch with a
-    // panic-on-drift hook in the FAT32 / NVMe critical paths and
-    // a build-and-run iteration the existing CI budget can't
-    // absorb.
-    //
-    // The smoke harness captures serial directly, so KERNEL.LOG
-    // isn't load-bearing on emulator. Bare metal keeps the sink
-    // (the trigger is timing-sensitive enough that bare-metal CPUs
-    // haven't reproduced it in practice yet); the fault is tracked
-    // separately and will be removed once the underlying corruption
-    // is fixed.
-    if (::duetos::arch::IsEmulator())
-    {
-        arch::SerialWrite("[klog-persist] emulator detected — skipping FAT32 sink "
-                          "(see comment in klog_persist.cpp)\n");
-        return false;
-    }
-
     namespace fat = fs::fat32;
     const fat::Volume* v = fat::Fat32Volume(0);
     if (v == nullptr)
