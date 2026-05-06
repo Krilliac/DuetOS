@@ -110,6 +110,9 @@ using VkBuffer = u64;
 using VkDeviceMemory = u64;
 using VkFence = u64;
 using VkSemaphore = u64;
+using VkDescriptorSetLayout = u64;
+using VkDescriptorPool = u64;
+using VkDescriptorSet = u64;
 
 // Return codes (subset).
 enum class VkResult : i32
@@ -395,6 +398,70 @@ VkResult VkCreateSemaphore(VkDevice dev, VkSemaphore* out);
 void VkDestroySemaphore(VkDevice dev, VkSemaphore sem);
 
 // -------------------------------------------------------------------
+// Descriptor sets + pools.
+// -------------------------------------------------------------------
+//
+// Real Vulkan descriptor sets pin GPU-visible resources for a
+// shader pipeline.  Our v0 ICD records the layout + bindings as
+// stats only — there's no shader execution to feed yet.  The
+// surface is here so a downstream caller (DXVK, dxgi -> Vulkan
+// thunks, native compute path) finds a complete API ladder
+// today, with rendering plumbed in by a later slice.
+
+enum class VkDescriptorType : u32
+{
+    Sampler = 0,
+    CombinedImageSampler = 1,
+    SampledImage = 2,
+    StorageImage = 3,
+    UniformTexelBuffer = 4,
+    StorageTexelBuffer = 5,
+    UniformBuffer = 6,
+    StorageBuffer = 7,
+    UniformBufferDynamic = 8,
+    StorageBufferDynamic = 9,
+    InputAttachment = 10,
+};
+
+inline constexpr u32 kMaxDescriptorBindings = 8;
+
+struct VkDescriptorSetLayoutBinding
+{
+    u32 binding;
+    VkDescriptorType type;
+    u32 count;
+    u32 stage_flags;
+};
+
+VkResult VkCreateDescriptorSetLayout(VkDevice dev, u32 binding_count, const VkDescriptorSetLayoutBinding* bindings,
+                                     VkDescriptorSetLayout* out);
+void VkDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout layout);
+
+struct VkDescriptorPoolSize
+{
+    VkDescriptorType type;
+    u32 count;
+};
+
+VkResult VkCreateDescriptorPool(VkDevice dev, u32 max_sets, u32 pool_size_count, const VkDescriptorPoolSize* pool_sizes,
+                                VkDescriptorPool* out);
+void VkDestroyDescriptorPool(VkDevice dev, VkDescriptorPool pool);
+VkResult VkResetDescriptorPool(VkDevice dev, VkDescriptorPool pool);
+
+VkResult VkAllocateDescriptorSets(VkDevice dev, VkDescriptorPool pool, u32 count, const VkDescriptorSetLayout* layouts,
+                                  VkDescriptorSet* out);
+VkResult VkFreeDescriptorSets(VkDevice dev, VkDescriptorPool pool, u32 count, const VkDescriptorSet* sets);
+
+/// Update a descriptor set's binding to point at a buffer or
+/// image-view resource.  The resource handle is stored against
+/// the binding for stat purposes; no shader will ever read it
+/// in v0.
+VkResult VkUpdateDescriptorSet(VkDescriptorSet set, u32 binding, VkDescriptorType type, u64 resource_handle);
+
+VkResult VkCmdBindDescriptorSets(VkCommandBuffer cb, VkPipelineBindPoint bind_point, VkPipelineLayout layout,
+                                 u32 first_set, u32 set_count, const VkDescriptorSet* sets);
+
+// -------------------------------------------------------------------
 // D3D11 / D3D12 -> Vulkan translation (still skeleton)
 // -------------------------------------------------------------------
 //
@@ -442,6 +509,10 @@ struct GraphicsStats
     u32 vk_fences_live;
     u32 vk_semaphores_live;
     u32 vk_pipeline_layouts_live;
+    u32 vk_descriptor_set_layouts_live;
+    u32 vk_descriptor_pools_live;
+    u32 vk_descriptor_sets_live;
+    u32 vk_descriptor_writes;        // total VkUpdateDescriptorSet calls
     u32 vk_queue_submits;            // total VkQueueSubmit calls
     u32 vk_command_recorded;         // total vkCmd* opcodes recorded
     u32 vk_command_replayed;         // total vkCmd* opcodes replayed in submit

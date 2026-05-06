@@ -106,6 +106,9 @@ constexpr u64 kBufferBase = 0xE'0000;
 constexpr u64 kMemoryBase = 0xF'0000;
 constexpr u64 kFenceBase = 0x10'0000;
 constexpr u64 kSemaphoreBase = 0x11'0000;
+constexpr u64 kDescSetLayoutBase = 0x12'0000;
+constexpr u64 kDescPoolBase = 0x13'0000;
+constexpr u64 kDescSetBase = 0x14'0000;
 
 bool HandleInRange(u64 h, u64 base)
 {
@@ -195,6 +198,34 @@ struct CmdBufferRecord
 };
 CmdBufferRecord g_cmdbuf_data[kPoolCapacity];
 
+// Descriptor-set layouts: just the bindings list.
+struct DescriptorSetLayoutRecord
+{
+    u32 binding_count;
+    VkDescriptorSetLayoutBinding bindings[kMaxDescriptorBindings];
+};
+DescriptorSetLayoutRecord g_desc_set_layout_data[kPoolCapacity];
+
+// Descriptor pools: track max-sets budget + current allocation
+// count so an exhausted pool returns ErrorOutOfPoolMemory rather
+// than oversubscribing.
+struct DescriptorPoolRecord
+{
+    u32 max_sets;
+    u32 sets_allocated;
+};
+DescriptorPoolRecord g_desc_pool_data[kPoolCapacity];
+
+// Descriptor sets: which pool owns them + which layout shaped
+// them + last-known binding writes (for stats only).
+struct DescriptorSetRecord
+{
+    VkDescriptorPool pool;
+    VkDescriptorSetLayout layout;
+    u32 writes;
+};
+DescriptorSetRecord g_desc_set_data[kPoolCapacity];
+
 // -------------------------------------------------------------------
 // Pools.
 // -------------------------------------------------------------------
@@ -216,6 +247,9 @@ Pool g_buffer_pool;
 Pool g_memory_pool;
 Pool g_fence_pool;
 Pool g_semaphore_pool;
+Pool g_desc_set_layout_pool;
+Pool g_desc_pool_pool;
+Pool g_desc_set_pool;
 
 // -------------------------------------------------------------------
 // Aggregate counters.
@@ -226,6 +260,7 @@ u32 g_command_recorded = 0;
 u32 g_command_replayed = 0;
 u32 g_clear_pixels_painted = 0;
 u32 g_invalid_spirv_rejections = 0;
+u32 g_descriptor_writes = 0;
 
 // One-shot logging keyed by entry point.
 enum EpId
@@ -1152,6 +1187,188 @@ void VkDestroySemaphore(VkDevice dev, VkSemaphore sem)
 }
 
 // -------------------------------------------------------------------
+// Descriptor sets + pools.
+// -------------------------------------------------------------------
+
+VkResult VkCreateDescriptorSetLayout(VkDevice dev, u32 binding_count, const VkDescriptorSetLayoutBinding* bindings,
+                                     VkDescriptorSetLayout* out)
+{
+    if (!HandleInRange(dev, kDeviceBase) || !PoolIsLive(g_device_pool, SlotOf(dev, kDeviceBase)))
+        return VkResult::ErrorInitializationFailed;
+    if (binding_count > kMaxDescriptorBindings)
+        return VkResult::ErrorTooManyObjects;
+    if (binding_count > 0 && bindings == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    u32 slot = 0;
+    if (!PoolAlloc(g_desc_set_layout_pool, &slot))
+        return VkResult::ErrorOutOfHostMemory;
+    auto& rec = g_desc_set_layout_data[slot];
+    rec.binding_count = binding_count;
+    for (u32 i = 0; i < binding_count; ++i)
+        rec.bindings[i] = bindings[i];
+    if (out != nullptr)
+        *out = HandleFor(kDescSetLayoutBase, slot);
+    return VkResult::Success;
+}
+
+void VkDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout layout)
+{
+    (void)dev;
+    if (layout == 0 || !HandleInRange(layout, kDescSetLayoutBase))
+        return;
+    (void)PoolFree(g_desc_set_layout_pool, SlotOf(layout, kDescSetLayoutBase));
+}
+
+VkResult VkCreateDescriptorPool(VkDevice dev, u32 max_sets, u32 pool_size_count, const VkDescriptorPoolSize* pool_sizes,
+                                VkDescriptorPool* out)
+{
+    (void)pool_sizes;
+    if (!HandleInRange(dev, kDeviceBase) || !PoolIsLive(g_device_pool, SlotOf(dev, kDeviceBase)))
+        return VkResult::ErrorInitializationFailed;
+    if (max_sets == 0)
+        return VkResult::ErrorInitializationFailed;
+    if (pool_size_count > 0 && pool_sizes == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    u32 slot = 0;
+    if (!PoolAlloc(g_desc_pool_pool, &slot))
+        return VkResult::ErrorOutOfHostMemory;
+    g_desc_pool_data[slot].max_sets = max_sets;
+    g_desc_pool_data[slot].sets_allocated = 0;
+    if (out != nullptr)
+        *out = HandleFor(kDescPoolBase, slot);
+    return VkResult::Success;
+}
+
+void VkDestroyDescriptorPool(VkDevice dev, VkDescriptorPool pool)
+{
+    (void)dev;
+    if (pool == 0 || !HandleInRange(pool, kDescPoolBase))
+        return;
+    // Free any sets that still claim this pool — protects against
+    // a caller that destroys the pool without first freeing the
+    // sets (matches the spec's implicit free behaviour).
+    for (u32 i = 0; i < kPoolCapacity; ++i)
+    {
+        if (PoolIsLive(g_desc_set_pool, i) && g_desc_set_data[i].pool == pool)
+            (void)PoolFree(g_desc_set_pool, i);
+    }
+    (void)PoolFree(g_desc_pool_pool, SlotOf(pool, kDescPoolBase));
+}
+
+VkResult VkResetDescriptorPool(VkDevice dev, VkDescriptorPool pool)
+{
+    (void)dev;
+    if (!HandleInRange(pool, kDescPoolBase) || !PoolIsLive(g_desc_pool_pool, SlotOf(pool, kDescPoolBase)))
+        return VkResult::ErrorInitializationFailed;
+    for (u32 i = 0; i < kPoolCapacity; ++i)
+    {
+        if (PoolIsLive(g_desc_set_pool, i) && g_desc_set_data[i].pool == pool)
+            (void)PoolFree(g_desc_set_pool, i);
+    }
+    g_desc_pool_data[SlotOf(pool, kDescPoolBase)].sets_allocated = 0;
+    return VkResult::Success;
+}
+
+VkResult VkAllocateDescriptorSets(VkDevice dev, VkDescriptorPool pool, u32 count, const VkDescriptorSetLayout* layouts,
+                                  VkDescriptorSet* out)
+{
+    if (!HandleInRange(dev, kDeviceBase) || !PoolIsLive(g_device_pool, SlotOf(dev, kDeviceBase)))
+        return VkResult::ErrorInitializationFailed;
+    if (!HandleInRange(pool, kDescPoolBase) || !PoolIsLive(g_desc_pool_pool, SlotOf(pool, kDescPoolBase)))
+        return VkResult::ErrorInitializationFailed;
+    if (out == nullptr || layouts == nullptr || count == 0)
+        return VkResult::ErrorInitializationFailed;
+
+    auto& pool_rec = g_desc_pool_data[SlotOf(pool, kDescPoolBase)];
+    if (pool_rec.sets_allocated + count > pool_rec.max_sets)
+        return VkResult::ErrorFragmentedPool;
+
+    for (u32 i = 0; i < count; ++i)
+    {
+        if (!HandleInRange(layouts[i], kDescSetLayoutBase) ||
+            !PoolIsLive(g_desc_set_layout_pool, SlotOf(layouts[i], kDescSetLayoutBase)))
+        {
+            // Roll back partials so the caller's `out` array stays
+            // consistent with what's been allocated.
+            for (u32 j = 0; j < i; ++j)
+                (void)PoolFree(g_desc_set_pool, SlotOf(out[j], kDescSetBase));
+            return VkResult::ErrorInitializationFailed;
+        }
+        u32 slot = 0;
+        if (!PoolAlloc(g_desc_set_pool, &slot))
+        {
+            for (u32 j = 0; j < i; ++j)
+                (void)PoolFree(g_desc_set_pool, SlotOf(out[j], kDescSetBase));
+            return VkResult::ErrorOutOfHostMemory;
+        }
+        g_desc_set_data[slot].pool = pool;
+        g_desc_set_data[slot].layout = layouts[i];
+        g_desc_set_data[slot].writes = 0;
+        out[i] = HandleFor(kDescSetBase, slot);
+        ++pool_rec.sets_allocated;
+    }
+    return VkResult::Success;
+}
+
+VkResult VkFreeDescriptorSets(VkDevice dev, VkDescriptorPool pool, u32 count, const VkDescriptorSet* sets)
+{
+    (void)dev;
+    if (!HandleInRange(pool, kDescPoolBase) || !PoolIsLive(g_desc_pool_pool, SlotOf(pool, kDescPoolBase)))
+        return VkResult::ErrorInitializationFailed;
+    if (sets == nullptr && count != 0)
+        return VkResult::ErrorInitializationFailed;
+    auto& pool_rec = g_desc_pool_data[SlotOf(pool, kDescPoolBase)];
+    for (u32 i = 0; i < count; ++i)
+    {
+        if (!HandleInRange(sets[i], kDescSetBase))
+            continue;
+        const u32 slot = SlotOf(sets[i], kDescSetBase);
+        if (!PoolIsLive(g_desc_set_pool, slot))
+            continue;
+        if (g_desc_set_data[slot].pool != pool)
+            continue; // not from this pool — spec forbids
+        (void)PoolFree(g_desc_set_pool, slot);
+        if (pool_rec.sets_allocated > 0)
+            --pool_rec.sets_allocated;
+    }
+    return VkResult::Success;
+}
+
+VkResult VkUpdateDescriptorSet(VkDescriptorSet set, u32 binding, VkDescriptorType type, u64 resource_handle)
+{
+    (void)binding;
+    (void)type;
+    (void)resource_handle;
+    if (!HandleInRange(set, kDescSetBase) || !PoolIsLive(g_desc_set_pool, SlotOf(set, kDescSetBase)))
+        return VkResult::ErrorInitializationFailed;
+    ++g_desc_set_data[SlotOf(set, kDescSetBase)].writes;
+    ++g_descriptor_writes;
+    return VkResult::Success;
+}
+
+VkResult VkCmdBindDescriptorSets(VkCommandBuffer cb, VkPipelineBindPoint bind_point, VkPipelineLayout layout,
+                                 u32 first_set, u32 set_count, const VkDescriptorSet* sets)
+{
+    (void)bind_point;
+    (void)layout;
+    (void)first_set;
+    if (!HandleInRange(cb, kCmdBufBase) || !PoolIsLive(g_cmdbuf_pool, SlotOf(cb, kCmdBufBase)))
+        return VkResult::ErrorInitializationFailed;
+    auto& rec = g_cmdbuf_data[SlotOf(cb, kCmdBufBase)];
+    if (rec.state != CbState::Recording)
+        return VkResult::ErrorInitializationFailed;
+    // Validate all sets up front; no opcode is recorded for the
+    // bind today (no shader to consume it) but we still want to
+    // catch a stale-handle bug at record time, not submit time.
+    for (u32 i = 0; i < set_count; ++i)
+    {
+        if (!HandleInRange(sets[i], kDescSetBase) || !PoolIsLive(g_desc_set_pool, SlotOf(sets[i], kDescSetBase)))
+            return VkResult::ErrorInitializationFailed;
+    }
+    return VkResult::Success;
+}
+
+// -------------------------------------------------------------------
 // Stats accessor — graphics.cpp's GraphicsStatsRead reads this and
 // then overlays the D3D-side counters.
 // -------------------------------------------------------------------
@@ -1178,6 +1395,10 @@ GraphicsStats VkStatsSnapshot()
     s.vk_fences_live = g_fence_pool.live;
     s.vk_semaphores_live = g_semaphore_pool.live;
     s.vk_pipeline_layouts_live = g_pipelinelayout_pool.live;
+    s.vk_descriptor_set_layouts_live = g_desc_set_layout_pool.live;
+    s.vk_descriptor_pools_live = g_desc_pool_pool.live;
+    s.vk_descriptor_sets_live = g_desc_set_pool.live;
+    s.vk_descriptor_writes = g_descriptor_writes;
     s.vk_queue_submits = g_queue_submits;
     s.vk_command_recorded = g_command_recorded;
     s.vk_command_replayed = g_command_replayed;
@@ -1286,6 +1507,37 @@ bool RunCanonicalLifecycle()
     if (VkCreateGraphicsPipeline(dev, pl_layout, vs, fs, &pipe) != VkResult::Success)
         return SelftestFail("[selftest:graphics] vkCreateGraphicsPipeline failed", 0);
 
+    // Descriptor leg: layout(2 bindings) -> pool(1 set) -> set ->
+    // update each binding -> bind during recording -> destroy.
+    const VkDescriptorSetLayoutBinding bindings[] = {
+        VkDescriptorSetLayoutBinding{0, VkDescriptorType::UniformBuffer, 1, 0xFFu},
+        VkDescriptorSetLayoutBinding{1, VkDescriptorType::CombinedImageSampler, 1, 0xFFu},
+    };
+    VkDescriptorSetLayout dsl = 0;
+    if (VkCreateDescriptorSetLayout(dev, 2, bindings, &dsl) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] vkCreateDescriptorSetLayout failed", 0);
+
+    const VkDescriptorPoolSize pool_sizes[] = {
+        VkDescriptorPoolSize{VkDescriptorType::UniformBuffer, 1},
+        VkDescriptorPoolSize{VkDescriptorType::CombinedImageSampler, 1},
+    };
+    VkDescriptorPool dpool = 0;
+    if (VkCreateDescriptorPool(dev, 1, 2, pool_sizes, &dpool) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] vkCreateDescriptorPool failed", 0);
+
+    VkDescriptorSet dset = 0;
+    if (VkAllocateDescriptorSets(dev, dpool, 1, &dsl, &dset) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] vkAllocateDescriptorSets failed", 0);
+
+    // Pool budget enforcement: a second alloc against a max=1 pool
+    // must fail with ErrorFragmentedPool.  Proves the budget gate
+    // is wired and not hard-coded to Success.
+    VkDescriptorSet dset_overflow = 0;
+    if (VkAllocateDescriptorSets(dev, dpool, 1, &dsl, &dset_overflow) != VkResult::ErrorFragmentedPool)
+        return SelftestFail("[selftest:graphics] descriptor pool budget did not enforce max_sets", 0);
+    if (dset_overflow != 0)
+        return SelftestFail("[selftest:graphics] over-budget allocate emitted a handle", dset_overflow);
+
     // Resource leg: memory + buffer bind + non-scanout image.
     VkDeviceMemory mem_handle = 0;
     if (VkAllocateMemory(dev, 4096, 0, &mem_handle) != VkResult::Success)
@@ -1325,6 +1577,15 @@ bool RunCanonicalLifecycle()
     if (VkBeginCommandBuffer(cb) != VkResult::Success)
         return SelftestFail("[selftest:graphics] vkBeginCommandBuffer failed", 0);
 
+    // Wire descriptor writes + bind into the recording leg so the
+    // happy path covers the full set surface.
+    if (VkUpdateDescriptorSet(dset, 0, VkDescriptorType::UniformBuffer, buf) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] VkUpdateDescriptorSet(uniform) failed", 0);
+    if (VkUpdateDescriptorSet(dset, 1, VkDescriptorType::CombinedImageSampler, view) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] VkUpdateDescriptorSet(image) failed", 0);
+    if (VkCmdBindDescriptorSets(cb, VkPipelineBindPoint::Graphics, pl_layout, 0, 1, &dset) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] VkCmdBindDescriptorSets failed", 0);
+
     // Use the integer (UNORM 8) alias so the test path doesn't
     // pull in the soft-float runtime — see VkClearColorValue.
     VkClearColorValue color{};
@@ -1357,6 +1618,10 @@ bool RunCanonicalLifecycle()
     if (VkFreeCommandBuffers(dev, pool, 1, &cb) != VkResult::Success)
         return SelftestFail("[selftest:graphics] vkFreeCommandBuffers failed", 0);
     VkDestroyCommandPool(dev, pool);
+    if (VkFreeDescriptorSets(dev, dpool, 1, &dset) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] vkFreeDescriptorSets failed", 0);
+    VkDestroyDescriptorPool(dev, dpool);
+    VkDestroyDescriptorSetLayout(dev, dsl);
     VkDestroyFramebuffer(dev, fb);
     VkDestroyRenderPass(dev, rp);
     VkDestroyImageView(dev, view);
@@ -1374,15 +1639,16 @@ bool RunCanonicalLifecycle()
 
 bool AssertAllPoolsClean()
 {
-    const Pool* pools[] = {&g_instance_pool,  &g_phys_pool,       &g_device_pool,      &g_queue_pool,
-                           &g_cmdpool_pool,   &g_cmdbuf_pool,     &g_shader_pool,      &g_pipelinelayout_pool,
-                           &g_pipeline_pool,  &g_renderpass_pool, &g_framebuffer_pool, &g_image_pool,
-                           &g_imageview_pool, &g_buffer_pool,     &g_memory_pool,      &g_fence_pool,
-                           &g_semaphore_pool};
-    const char* names[] = {"instance",       "physical-device", "device",          "queue",    "command-pool",
-                           "command-buffer", "shader-module",   "pipeline-layout", "pipeline", "render-pass",
-                           "framebuffer",    "image",           "image-view",      "buffer",   "device-memory",
-                           "fence",          "semaphore"};
+    const Pool* pools[] = {
+        &g_instance_pool,    &g_phys_pool,      &g_device_pool,          &g_queue_pool,     &g_cmdpool_pool,
+        &g_cmdbuf_pool,      &g_shader_pool,    &g_pipelinelayout_pool,  &g_pipeline_pool,  &g_renderpass_pool,
+        &g_framebuffer_pool, &g_image_pool,     &g_imageview_pool,       &g_buffer_pool,    &g_memory_pool,
+        &g_fence_pool,       &g_semaphore_pool, &g_desc_set_layout_pool, &g_desc_pool_pool, &g_desc_set_pool};
+    const char* names[] = {
+        "instance",        "physical-device", "device",        "queue",       "command-pool", "command-buffer",
+        "shader-module",   "pipeline-layout", "pipeline",      "render-pass", "framebuffer",  "image",
+        "image-view",      "buffer",          "device-memory", "fence",       "semaphore",    "descriptor-set-layout",
+        "descriptor-pool", "descriptor-set"};
     constexpr u32 n = sizeof(pools) / sizeof(pools[0]);
     for (u32 i = 0; i < n; ++i)
     {
