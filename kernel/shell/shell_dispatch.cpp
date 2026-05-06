@@ -649,7 +649,7 @@ const char* const kCommandSet[] = {
     "purple",     "purpleteam", "mkdir",    "rmdir",    "truncate",  "realpath", "id",         "groups",    "nproc",
     "arch",       "tty",        "type",     "printenv", "df",        "du",       "loadavg",    "clearhist", "pause",
     "yes",        "sync",       "port",     "assert",   "watch",     "script",   "exit",       "mkfs",      "lastdump",
-    "loadtest",   "stress",     "bench",
+    "loadtest",   "stress",     "bench",      "dbg",
 };
 const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1323,6 +1323,13 @@ void Dispatch(char* line)
         if (!RequireAdmin("BP"))
             return;
         CmdBp(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "dbg"))
+    {
+        if (!RequireAdmin("DBG"))
+            return;
+        CmdDbg(argc, argv);
         return;
     }
     if (StrEq(cmd, "probe"))

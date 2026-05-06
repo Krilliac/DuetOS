@@ -1873,9 +1873,11 @@ void EmitTask(const Task* t, SchedEnumCb cb, void* cookie, bool is_running)
     info.wake_tick = t->wake_tick;
     info.stack_size = t->stack_size;
     info.ticks_run = t->ticks_run;
+    info.owner_pid = (t->process != nullptr) ? t->process->pid : 0;
     info.state = static_cast<u8>(t->state);
     info.priority = static_cast<u8>(t->priority);
     info.is_running = is_running;
+    info.has_process = (t->process != nullptr);
     for (u32 i = 0; i < sizeof(info._pad); ++i)
         info._pad[i] = 0;
     cb(info, cookie);

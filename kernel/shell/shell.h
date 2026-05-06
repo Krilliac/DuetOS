@@ -90,4 +90,13 @@ bool ShellInterruptRequested();
 u32 ShellHistoryCount();
 const char* ShellHistoryGet(u32 n);
 
+/// klog post-emit hook — register at boot via
+/// `core::SetPostEmitHook(&ShellRedrawAfterLogLine)` so that a log
+/// line interrupting the operator's typing redraws the prompt +
+/// current input buffer on a fresh line. Without this, fast log
+/// chatter scrolls partially-typed commands off the visible
+/// surface and the operator can't tell what they have entered.
+/// No-op when the input buffer is empty (idle).
+void ShellRedrawAfterLogLine();
+
 } // namespace duetos::core

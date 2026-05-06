@@ -82,6 +82,23 @@ enum class BpError : u8
     BadKind,        // HwExecute with len != 1, HwWrite with len 0, etc.
     NotInstalled,   // BpRemove(bogus id)
     SmpUnsupported, // phase 1 refuses multi-CPU installs
+    UnsafeZone,     // target lies inside the trap dispatcher / klog / heap /
+                    // scheduler / panic / spinlock primitives — refused
+                    // unless the operator passed BpInstallFlags::AllowUnsafe.
+                    // See BpInit for the full unsafe-symbol list.
+};
+
+/// Operator-side install policy. Most callers pass `None`. The
+/// `AllowUnsafe` bit overrides the safety blocklist that would
+/// otherwise reject a BP whose target lies inside a kernel path
+/// that the BP handler itself reaches (logging, scheduler,
+/// allocator, trap dispatcher). Setting a BP in those zones
+/// risks infinite recursion / SMP-wide hang / triple-fault — only
+/// pass this when you know exactly what you're doing.
+enum class BpInstallFlags : u8
+{
+    None = 0,
+    AllowUnsafe = 1,
 };
 
 // Snapshot of one installed breakpoint, returned by BpList.
@@ -143,7 +160,8 @@ using BpHitCallback = void (*)(BreakpointId id, arch::TrapFrame* frame);
 ///
 /// `on_hit` — optional trap-context callback (see BpHitCallback
 /// above). nullptr = no callback (default behaviour).
-BreakpointId BpInstallSoftware(u64 kernel_va, bool suspend_on_hit, BpError* err, BpHitCallback on_hit = nullptr);
+BreakpointId BpInstallSoftware(u64 kernel_va, bool suspend_on_hit, BpError* err, BpHitCallback on_hit = nullptr,
+                               BpInstallFlags flags = BpInstallFlags::None);
 
 /// Install a hardware breakpoint via the next free DR slot.
 /// `va` may be any canonical VA — data breakpoints work on any
@@ -158,7 +176,7 @@ BreakpointId BpInstallSoftware(u64 kernel_va, bool suspend_on_hit, BpError* err,
 /// `on_hit` — optional trap-context callback (see BpHitCallback
 /// above). nullptr = no callback (default behaviour).
 BreakpointId BpInstallHardware(u64 va, BpKind kind, BpLen len, u64 owner_pid, bool suspend_on_hit, BpError* err,
-                               BpHitCallback on_hit = nullptr);
+                               BpHitCallback on_hit = nullptr, BpInstallFlags flags = BpInstallFlags::None);
 
 /// Remove a previously-installed breakpoint. `requester_pid` must
 /// match the BP's owner_pid (or be 0 for kernel-privileged
@@ -181,6 +199,26 @@ usize BpList(BpInfo* out, usize cap);
 bool BpHandleBreakpoint(arch::TrapFrame* frame); // #BP, vector 3
 bool BpHandleDebug(arch::TrapFrame* frame);      // #DB, vector 1
 
+/// True iff `va` lies inside one of the unsafe ranges populated
+/// by BpInit. Exposed so a shell-side diagnostic can explain
+/// WHY an install was rejected, and so an operator GUI can grey
+/// out the "Add" button when the cursor is on a hot path.
+bool BpAddressInUnsafeZone(u64 va);
+
+/// Snapshot of one unsafe range (for `dbg bp unsafe-zones` and
+/// equivalent diagnostics). `name` is borrowed from the embedded
+/// `.symtab` and is stable for the kernel's lifetime.
+struct BpUnsafeRange
+{
+    u64 lo;
+    u64 hi;
+    const char* name;
+};
+
+/// Snapshot up to `cap` unsafe-range entries into `out`. Returns
+/// the count actually written. No allocation.
+usize BpUnsafeRangesList(BpUnsafeRange* out, usize cap);
+
 /// Diagnostic: used by the `bp test` shell command. Installs a
 /// software BP at an internal sentinel, invokes it, checks the
 /// hit counter, removes the BP, then does the same dance with a
@@ -194,6 +232,17 @@ bool BpSelfTest();
 /// false otherwise. `out` must be non-null. The frame is a COPY —
 /// mutating it has no effect; use BpStep to change control flow.
 bool BpReadRegs(BreakpointId id, arch::TrapFrame* out);
+
+/// Mutate the saved trap frame of the task currently stopped on
+/// `id`. The kernel sanitises CS/SS/RFLAGS the same way
+/// SYS_THREAD_SET_CONTEXT does — caller cannot promote the target
+/// to ring 0, force IOPL > 0, suppress IF, or set the trap flag.
+/// All GPRs (rax..r15), RIP, RSP, and the operator-safe RFLAGS
+/// bits transfer verbatim. Returns BpError::None on success,
+/// BpError::NotInstalled if no task is parked on this BP. The
+/// edits land on the iretq stack image, taking effect when the
+/// task is resumed via BpResume / BpStep.
+BpError BpWriteRegs(BreakpointId id, const arch::TrapFrame* in);
 
 /// Read `len` bytes of the stopped task's user memory starting at
 /// `user_va` into `out`. Walks the target task's AddressSpace to

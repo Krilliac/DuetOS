@@ -183,6 +183,18 @@ void SetLogThreshold(LogLevel level);
 /// Current runtime threshold. Defaults to the compile-time floor.
 LogLevel GetLogThreshold();
 
+/// Post-emit hook — called once after every klog line is fully
+/// written to serial + tee. Used by the kernel shell to redraw
+/// its prompt + current input buffer on a fresh line so an
+/// operator typing through a flood of klog lines sees what they
+/// have typed instead of having it scrolled away. Pass nullptr
+/// to clear. The hook MUST NOT itself call Log* (it would
+/// recurse — the hook fires while the trailing newline is the
+/// last write, not while a line is in flight, but a klog line
+/// FROM the hook would invoke the hook again on its own emit).
+using PostEmitHook = void (*)();
+void SetPostEmitHook(PostEmitHook hook);
+
 // -----------------------------------------------------------------
 // Area filtering — runtime bitmask + per-area level overrides.
 //

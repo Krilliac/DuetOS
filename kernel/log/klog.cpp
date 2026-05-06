@@ -608,6 +608,33 @@ LogLevel GetLogThreshold()
     return g_log_threshold;
 }
 
+namespace
+{
+// Atomic-enough single-pointer post-emit hook. Set/cleared rarely
+// (boot-time + shutdown), called many times per second. A plain
+// load is fine on x86_64 for an aligned pointer; the 1-cycle
+// branch on null when no hook is registered keeps the hot path
+// effectively free.
+PostEmitHook g_post_emit_hook = nullptr;
+bool g_post_emit_in_flight = false; // recursion guard
+
+inline void PostEmit()
+{
+    if (g_post_emit_hook == nullptr)
+        return;
+    if (g_post_emit_in_flight)
+        return; // hook itself called Log* — refuse to recurse
+    g_post_emit_in_flight = true;
+    g_post_emit_hook();
+    g_post_emit_in_flight = false;
+}
+} // namespace
+
+void SetPostEmitHook(PostEmitHook hook)
+{
+    g_post_emit_hook = hook;
+}
+
 void Log(LogLevel level, const char* subsystem, const char* message)
 {
     if (!LevelAndAreaEnabled(level, AreaFromSubsystemImpl(subsystem)))
@@ -646,6 +673,7 @@ void Log(LogLevel level, const char* subsystem, const char* message)
     Tee("\n");
 
     PushEntry(level, subsystem, message, 0, false);
+    PostEmit();
 }
 
 void LogWithValue(LogLevel level, const char* subsystem, const char* message, u64 value)
@@ -683,6 +711,7 @@ void LogWithValue(LogLevel level, const char* subsystem, const char* message, u6
     Tee("\n");
 
     PushEntry(level, subsystem, message, value, true);
+    PostEmit();
 }
 
 void LogWithString(LogLevel level, const char* subsystem, const char* message, const char* label, const char* value_str)
@@ -735,6 +764,7 @@ void LogWithString(LogLevel level, const char* subsystem, const char* message, c
     // Ring-buffer entry records the message only; the string pointer
     // would need per-entry deep-copy storage we don't have yet.
     PushEntry(level, subsystem, message, 0, false);
+    PostEmit();
 }
 
 void LogWith2Values(LogLevel level, const char* subsystem, const char* message, const char* a_label, u64 a_value,
@@ -790,6 +820,7 @@ void LogWith2Values(LogLevel level, const char* subsystem, const char* message, 
     // Record only the first value — a second u64 would bloat every
     // entry just to service the rarer 2-value path.
     PushEntry(level, subsystem, message, a_value, true);
+    PostEmit();
 }
 
 void SetLogColor(bool enabled)
@@ -1074,6 +1105,7 @@ TraceScope::~TraceScope()
     Tee("\n");
 
     PushEntry(LogLevel::Trace, m_subsystem, m_name, elapsed, true);
+    PostEmit();
 }
 
 void DumpInflightScopes()
@@ -1157,6 +1189,7 @@ void LogMetrics(LogLevel level, const char* subsystem, const char* label)
     // Ring entry: record heap used as the one preserved value so
     // post-mortem shows "at metrics checkpoint X, heap was at Y".
     PushEntry(level, subsystem, label ? label : "metrics", heap.used_bytes, true);
+    PostEmit();
 }
 
 void KLogSelfTest()
@@ -1219,6 +1252,7 @@ void LogA(LogLevel level, LogArea area, const char* subsystem, const char* messa
     Tee(message);
     Tee("\n");
     PushEntry(level, subsystem, message, 0, false);
+    PostEmit();
 }
 
 void LogAWithValue(LogLevel level, LogArea area, const char* subsystem, const char* message, u64 value)
@@ -1248,6 +1282,7 @@ void LogAWithValue(LogLevel level, LogArea area, const char* subsystem, const ch
     Tee(message);
     Tee("\n");
     PushEntry(level, subsystem, message, value, true);
+    PostEmit();
 }
 
 void LogAWithString(LogLevel level, LogArea area, const char* subsystem, const char* message, const char* label,
@@ -1283,6 +1318,7 @@ void LogAWithString(LogLevel level, LogArea area, const char* subsystem, const c
     Tee(message);
     Tee("\n");
     PushEntry(level, subsystem, message, 0, false);
+    PostEmit();
 }
 
 void LogAWith2Values(LogLevel level, LogArea area, const char* subsystem, const char* message, const char* a_label,
@@ -1324,6 +1360,7 @@ void LogAWith2Values(LogLevel level, LogArea area, const char* subsystem, const 
     Tee(message);
     Tee("\n");
     PushEntry(level, subsystem, message, a_value, true);
+    PostEmit();
 }
 
 // -----------------------------------------------------------------

@@ -37,6 +37,20 @@
 #include "sched/sched.h"
 #include "sync/spinlock.h"
 #include "debug/dr.h"
+#include "util/symbols.h"
+
+// Embedded kernel symbol table — see util/symbols.cpp for the
+// public ResolveAddress path. We reach the externs directly only
+// for the bulk walk that seeds g_unsafe at boot. Declared here
+// at file scope (above the `namespace duetos::debug` opening) so
+// the qualified `duetos::core::g_duetos_symtab_*` names resolve
+// against the global root, not against the enclosing debug
+// namespace.
+namespace duetos::core
+{
+extern "C" const SymbolEntry g_duetos_symtab_entries[];
+extern "C" const u64 g_duetos_symtab_count;
+} // namespace duetos::core
 
 namespace duetos::debug
 {
@@ -118,6 +132,18 @@ struct SteppingSlot
     u32 bp_id;
 };
 SteppingSlot g_stepping{};
+
+// Re-entrancy depth for the trap-handler entry points. A non-zero
+// value means a BP fired while we were already inside one of the
+// handlers on this CPU — the cause is almost always a BP attached
+// to a function the handler itself reaches (klog, the symbol
+// resolver, the allocator). The unsafe-zone install gate
+// catches this at install time for the common cases; the
+// counter is the backstop for paths the gate doesn't know
+// about (HW write watches, AllowUnsafe overrides). Phase 1 is
+// single-CPU, so a plain int suffices; v0 SMP grows this to a
+// per-CPU array.
+u32 g_handler_depth = 0;
 
 bool IsInKernelText(u64 va)
 {
@@ -287,6 +313,157 @@ u64 LenToDr7(BpLen l)
     }
 }
 
+// ------------------ Safety: unsafe-zone blocklist ------------
+//
+// A BP fired inside the trap dispatcher / klog / heap / scheduler
+// / panic / spinlock primitives recurses into its own handler
+// (logging, suspension, stack-frame inspection — all of those
+// reach the very paths the BP is attached to). The result is
+// triple-fault on UP, SMP-wide deadlock on multi-CPU, or a klog
+// flood drowning the serial console. To cut that off at install
+// time we resolve a curated list of demangled symbol-name
+// substrings against the embedded `.symtab` at BpInit and cache
+// each match's [addr, addr+size) range. Operators who knowingly
+// want to BP a critical path pass `BpInstallFlags::AllowUnsafe`.
+//
+// The list is a compromise:
+//   * Aggressive enough to catch the common footguns (the
+//     dispatcher, the panic path, the symbol resolver, the
+//     allocator, the scheduler core, the serial writer).
+//   * Conservative on substring matches — exact `BpHandle...`
+//     and unique tokens like `Schedule(` / `Panic(` only.
+//     Vague tokens (`Init`, `Read`) would over-block.
+//
+// Phase-2 work: graduate to a build-script-emitted list (cheap to
+// extend, no name fragility), add operator-extensible runtime
+// `dbg bp unsafe-add <addr> <name>` for site-specific lockouts.
+
+constexpr usize kMaxUnsafeRanges = 128;
+
+struct UnsafeRangeSlot
+{
+    u64 lo;
+    u64 hi;
+    const char* name;
+};
+
+UnsafeRangeSlot g_unsafe[kMaxUnsafeRanges]{};
+usize g_unsafe_count = 0;
+
+bool SubstringMatch(const char* hay, const char* needle)
+{
+    if (hay == nullptr || needle == nullptr)
+        return false;
+    for (u32 i = 0; hay[i] != 0; ++i)
+    {
+        u32 j = 0;
+        while (needle[j] != 0 && hay[i + j] == needle[j])
+            ++j;
+        if (needle[j] == 0)
+            return true;
+    }
+    return false;
+}
+
+// Curated list of demangled-name substrings that mark a function
+// the BP handler itself reaches. Order matters only for the log
+// readability — we record every match. Substrings must be
+// distinctive enough not to over-match common helpers.
+const char* const kUnsafeSubstrings[] = {
+    // The breakpoint subsystem itself — fires on every BP.
+    "BpHandleBreakpoint",
+    "BpHandleDebug",
+    "BpReadRegs",
+    "BpReadMem",
+    "BpResume",
+    "BpStep",
+
+    // Symbol resolution — used by the BP-hit log line and the
+    // panic dump.
+    "ResolveAddress",
+    "WriteResolvedAddress",
+    "WriteAddressWithSymbol",
+
+    // Logging primitives — every diagnostic the BP handler emits
+    // routes through these.
+    "SerialWrite",
+    "SerialWriteByte",
+    "KlogEmit",
+    "KlogWrite",
+
+    // Panic + trap dispatch — recursion here means we can't
+    // even report the recursion.
+    "TrapDispatch",
+    "Panic",
+    "isr_common",
+    "PageFaultHandler",
+
+    // Scheduler / context switch / lock primitives — suspend-on-
+    // hit while holding sched/lock state deadlocks the box.
+    "Schedule(",
+    "ContextSwitch",
+    "SpinLockAcquire",
+    "SpinLockRelease",
+
+    // Memory allocators — BP handler may log + allocate.
+    "KMalloc",
+    "KFree",
+    "AllocateFrame",
+};
+
+// Walk the embedded symbol table, populate `g_unsafe` with every
+// row whose demangled name contains any of the curated tokens.
+// Called from BpInit (after the lock is held). Idempotent —
+// safe to call multiple times; subsequent calls reset the table.
+void PopulateUnsafeRanges()
+{
+    g_unsafe_count = 0;
+    const u64 total = core::SymbolTableSize();
+    if (total == 0)
+        return; // stage-1 build with no embedded symbols
+    constexpr u32 kSubstringCount = sizeof(kUnsafeSubstrings) / sizeof(kUnsafeSubstrings[0]);
+
+    const auto* entries = core::g_duetos_symtab_entries;
+    const u64 count = core::g_duetos_symtab_count;
+    for (u64 i = 0; i < count && g_unsafe_count < kMaxUnsafeRanges; ++i)
+    {
+        const auto& e = entries[i];
+        if (e.size == 0)
+            continue;
+        for (u32 k = 0; k < kSubstringCount; ++k)
+        {
+            if (SubstringMatch(e.name, kUnsafeSubstrings[k]))
+            {
+                g_unsafe[g_unsafe_count].lo = e.addr;
+                g_unsafe[g_unsafe_count].hi = e.addr + e.size;
+                g_unsafe[g_unsafe_count].name = e.name;
+                ++g_unsafe_count;
+                break;
+            }
+        }
+    }
+    KLOG_INFO_V("debug/bp", "unsafe-zone ranges populated: count=", g_unsafe_count);
+    if (g_unsafe_count == kMaxUnsafeRanges)
+    {
+        // Hitting the cap means the curated substring list matched
+        // more symbols than the table can hold; some critical paths
+        // are unprotected at install time. The re-entrancy guard
+        // still backstops them, but operators should bump the cap
+        // in a follow-up slice.
+        KLOG_WARN("debug/bp", "unsafe-zone table FULL — some critical paths unprotected at install time");
+    }
+}
+
+bool InUnsafeRange(u64 va) /* MUST hold g_lock */
+{
+    for (usize i = 0; i < g_unsafe_count; ++i)
+    {
+        if (va >= g_unsafe[i].lo && va < g_unsafe[i].hi)
+            return true;
+    }
+    return false;
+}
+
 } // namespace
 
 void BpInit()
@@ -324,8 +501,30 @@ void BpInit()
     dr::WriteDr2(0);
     dr::WriteDr3(0);
     dr::WriteDr6(dr::kDr6InitValue);
+    PopulateUnsafeRanges();
     g_inited = true;
     KLOG_INFO("debug/bp", "breakpoint subsystem online");
+}
+
+bool BpAddressInUnsafeZone(u64 va)
+{
+    sync::SpinLockGuard g(g_lock);
+    return InUnsafeRange(va);
+}
+
+usize BpUnsafeRangesList(BpUnsafeRange* out, usize cap)
+{
+    if (out == nullptr || cap == 0)
+        return 0;
+    sync::SpinLockGuard g(g_lock);
+    const usize n = (g_unsafe_count < cap) ? g_unsafe_count : cap;
+    for (usize i = 0; i < n; ++i)
+    {
+        out[i].lo = g_unsafe[i].lo;
+        out[i].hi = g_unsafe[i].hi;
+        out[i].name = g_unsafe[i].name;
+    }
+    return n;
 }
 
 void BpTeardown()
@@ -375,7 +574,8 @@ void BpTeardown()
     KLOG_INFO("debug/bp", "breakpoint subsystem offline");
 }
 
-BreakpointId BpInstallSoftware(u64 kernel_va, bool suspend_on_hit, BpError* err, BpHitCallback on_hit)
+BreakpointId BpInstallSoftware(u64 kernel_va, bool suspend_on_hit, BpError* err, BpHitCallback on_hit,
+                               BpInstallFlags flags)
 {
     auto set_err = [&](BpError e)
     {
@@ -393,6 +593,13 @@ BreakpointId BpInstallSoftware(u64 kernel_va, bool suspend_on_hit, BpError* err,
         return kBpIdNone;
     }
     sync::SpinLockGuard g(g_lock);
+    const bool allow_unsafe = (static_cast<u8>(flags) & static_cast<u8>(BpInstallFlags::AllowUnsafe)) != 0;
+    if (!allow_unsafe && InUnsafeRange(kernel_va))
+    {
+        KLOG_WARN_V("debug/bp", "SW BP refused (unsafe zone) addr=", kernel_va);
+        set_err(BpError::UnsafeZone);
+        return kBpIdNone;
+    }
     if (FindSwByAddr(kernel_va) != nullptr)
     {
         set_err(BpError::InvalidAddress); // already installed
@@ -425,7 +632,7 @@ BreakpointId BpInstallSoftware(u64 kernel_va, bool suspend_on_hit, BpError* err,
 }
 
 BreakpointId BpInstallHardware(u64 va, BpKind kind, BpLen len, u64 owner_pid, bool suspend_on_hit, BpError* err,
-                               BpHitCallback on_hit)
+                               BpHitCallback on_hit, BpInstallFlags flags)
 {
     auto set_err = [&](BpError e)
     {
@@ -446,6 +653,18 @@ BreakpointId BpInstallHardware(u64 va, BpKind kind, BpLen len, u64 owner_pid, bo
     // context switches, so SMP is safe without an IPI shootdown —
     // each CPU re-loads the running task's DRs on every switch-in.
     sync::SpinLockGuard g(g_lock);
+    // The unsafe-zone gate applies to HwExecute targets only:
+    // a Hw-write or Hw-read-write watch on a kernel data region
+    // doesn't fire instruction-fetch recursion. (Suspend-on-hit
+    // for a hot data slot is still a footgun, but a different
+    // class — operator can disarm or remove the BP.)
+    const bool allow_unsafe = (static_cast<u8>(flags) & static_cast<u8>(BpInstallFlags::AllowUnsafe)) != 0;
+    if (!allow_unsafe && kind == BpKind::HwExecute && InUnsafeRange(va))
+    {
+        KLOG_WARN_V("debug/bp", "HW exec BP refused (unsafe zone) addr=", va);
+        set_err(BpError::UnsafeZone);
+        return kBpIdNone;
+    }
     int s = AllocHwSlot();
     if (s < 0)
     {
@@ -563,6 +782,60 @@ bool BpReadRegs(BreakpointId id, arch::TrapFrame* out)
     for (usize i = 0; i < sizeof(arch::TrapFrame); ++i)
         dst[i] = src[i];
     return true;
+}
+
+BpError BpWriteRegs(BreakpointId id, const arch::TrapFrame* in)
+{
+    if (id.value == 0 || in == nullptr)
+        return BpError::NotInstalled;
+    sync::SpinLockGuard g(g_lock);
+    BpEntry* e = FindById(id.value);
+    if (e == nullptr || e->stopped_frame == nullptr || e->stopped_task_id == 0)
+        return BpError::NotInstalled;
+    arch::TrapFrame* tf = e->stopped_frame;
+
+    // GPRs transfer verbatim.
+    tf->rax = in->rax;
+    tf->rbx = in->rbx;
+    tf->rcx = in->rcx;
+    tf->rdx = in->rdx;
+    tf->rsi = in->rsi;
+    tf->rdi = in->rdi;
+    tf->rbp = in->rbp;
+    tf->r8 = in->r8;
+    tf->r9 = in->r9;
+    tf->r10 = in->r10;
+    tf->r11 = in->r11;
+    tf->r12 = in->r12;
+    tf->r13 = in->r13;
+    tf->r14 = in->r14;
+    tf->r15 = in->r15;
+    tf->rip = in->rip;
+    tf->rsp = in->rsp;
+
+    // RFLAGS sanitisation — same shape as SYS_THREAD_SET_CONTEXT
+    // (kernel/syscall/syscall.cpp around the SetContext handler).
+    // Force IF=1 (otherwise the target wakes with interrupts off
+    // and the next timer tick deadlocks), force IOPL=0 (no port-
+    // IO privilege gift), clear NT (no nested-task chains) and TF
+    // (no surprise single-step). Operator-chosen arithmetic /
+    // comparison flags pass through.
+    constexpr u64 kRflagsIf = 1ULL << 9;
+    constexpr u64 kRflagsTf = 1ULL << 8;
+    constexpr u64 kRflagsNt = 1ULL << 14;
+    constexpr u64 kRflagsIoplMask = 0x3ULL << 12;
+    u64 new_flags = in->rflags;
+    new_flags |= kRflagsIf;
+    new_flags &= ~(kRflagsTf | kRflagsNt | kRflagsIoplMask);
+    tf->rflags = new_flags;
+
+    // Force ring-3 selectors. A malicious operator (or a buggy
+    // GUI binding edit-fields to wide ints) passing kernel
+    // selectors would otherwise iretq into ring 0 on resume.
+    tf->cs = 0x2B; // kUserCodeSelector — matches syscall.cpp
+    tf->ss = 0x33; // kUserDataSelector
+
+    return BpError::None;
 }
 
 // Walk the stopped task's captured AddressSpace to find the
@@ -744,18 +1017,37 @@ bool BpHandleBreakpoint(arch::TrapFrame* frame)
     // int3 (0xCC) pushes rip pointing to the byte AFTER the 0xCC,
     // so the patched address is rip - 1.
     const u64 bp_addr = frame->rip - 1;
+
+    // Cross-handler re-entrancy: a BP firing while we are already
+    // executing a BP handler means the BP is attached to a path
+    // the handler itself reaches. Don't recurse — claim the trap,
+    // log once, and let the iretq run. If the BP is software
+    // (int3 still patched), the very next execution of this VA
+    // will re-fire — that's deliberate, the operator gets a
+    // klog flood until they remove the BP.
+    if (g_handler_depth > 0)
+    {
+        KLOG_WARN_V("debug/bp", "RECURSION: nested handler entry at addr=", bp_addr);
+        return true;
+    }
+    ++g_handler_depth;
+
     u32 hit_id = 0;
     BpHitCallback hit_callback = nullptr;
     {
         sync::SpinLockGuard g(g_lock);
         BpEntry* e = FindSwByAddr(bp_addr);
         if (e == nullptr)
+        {
+            --g_handler_depth;
             return false; // spurious int3 — not one of ours
+        }
         // Reentrancy guard: a second SW BP while reinsert is
         // pending means we'd lose the first one's re-patch.
         if (g_reinsert.pending)
         {
             KLOG_WARN_V("debug/bp", "nested SW BP hit while reinsert pending at", g_reinsert.addr);
+            --g_handler_depth;
             return true;
         }
         ++e->hit_count;
@@ -772,7 +1064,12 @@ bool BpHandleBreakpoint(arch::TrapFrame* frame)
     // Drop g_lock before invoking the on-hit callback OR the
     // potential block — both can re-enter through APIs that
     // need the lock (the inspector for MaybeSuspend; the GDB
-    // stop loop for the callback).
+    // stop loop for the callback). Drop the recursion-depth
+    // guard here too: the synchronous danger window (klog +
+    // PokeByte under g_lock) is over; a peer task that fires
+    // a BP while we're parked in MaybeSuspend should be
+    // handled normally, not skipped.
+    --g_handler_depth;
     if (hit_callback != nullptr)
     {
         hit_callback({hit_id}, frame);
@@ -783,6 +1080,18 @@ bool BpHandleBreakpoint(arch::TrapFrame* frame)
 
 bool BpHandleDebug(arch::TrapFrame* frame)
 {
+    // Cross-handler re-entrancy: see BpHandleBreakpoint above.
+    // For #DB the recursive case is a HW write/read-write watch
+    // installed on a kernel data slot the handler itself touches
+    // (g_reinsert, g_stepping, the slot tables). Skip + log so
+    // the trap iretqs without stacking into the same handler.
+    if (g_handler_depth > 0)
+    {
+        KLOG_WARN("debug/bp", "RECURSION: nested #DB handler entry");
+        return true;
+    }
+    ++g_handler_depth;
+
     const u64 dr6 = dr::ReadDr6();
     bool claimed = false;
     u32 suspend_id = 0; // BP to park the caller on after DR6 clear
@@ -859,6 +1168,12 @@ bool BpHandleDebug(arch::TrapFrame* frame)
     // CPU set survive iretq and would surface as a phantom hit
     // on the next unrelated #DB.
     dr::WriteDr6(dr::kDr6InitValue);
+
+    // Drop the recursion-depth guard: synchronous danger window
+    // (DR access + log emission) is over. Callback / suspend run
+    // outside the guard so a peer task firing a BP isn't skipped
+    // while we're parked in MaybeSuspend.
+    --g_handler_depth;
 
     // GDB-style on-hit callback runs AFTER DR6 clear (so a
     // GDB session can read DR6 and see the cleared state if it
