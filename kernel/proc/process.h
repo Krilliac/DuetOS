@@ -1329,6 +1329,16 @@ i32 LinuxFdAllocLowest(Process* p, u32 lo);
 /// dup / fork can route through the unified table.
 bool LinuxFdAttachKFile(Process* p, u32 fd, u8 kind, u32 pool_index, void (*release)(u32));
 
+/// Owner-aware variant of `LinuxFdAttachKFile`. Used by dirfd
+/// (kind=11), whose backing storage is a `Process::win32_dirs[]`
+/// slot — the release callback needs the owning Process to free
+/// the slot. The owner is captured at attach time and pinned via
+/// the no-cross-process rule (pidfd_splice refuses state 11; fork
+/// closes the child's dirfd slots immediately). Rolls back the
+/// pool slot via the release callback if HandleTable insertion
+/// fails (mirroring `LinuxFdAttachKFile`'s rollback shape).
+bool LinuxFdAttachKFileOwned(Process* p, u32 fd, u8 kind, u32 pool_index, void (*release)(Process*, u32));
+
 /// Tear down a Linux fd slot. If a KFile sidecar is attached,
 /// drops its handle-table reference (which fires the per-pool
 /// release callback when refcount hits zero). Zeroes

@@ -141,6 +141,18 @@ u32 EncodeVerb(u8 codec, u8 node, u32 verb12, u8 data8)
     return (static_cast<u32>(codec) << 28) | (static_cast<u32>(node) << 20) | ((verb12 & 0xFFFu) << 8) | data8;
 }
 
+// 4-bit-verb / 16-bit-payload encoder. HDA spec §7.3.1: the verb
+// id occupies bits 19:16 and the payload occupies bits 15:0.
+// Used for SET_CONVERTER_FORMAT (verb 0x2), SET_AMP_GAIN_MUTE
+// (verb 0x3), and any other verb whose payload exceeds 8 bits.
+// Callers pass verb12 in the same 0x2NN / 0x3NN form they use
+// for the 12-bit shape; we extract the high nibble.
+u32 EncodeVerb16(u8 codec, u8 node, u32 verb12, u16 payload16)
+{
+    return (static_cast<u32>(codec) << 28) | (static_cast<u32>(node) << 20) |
+           ((static_cast<u32>(verb12) & 0xF00u) << 8) | static_cast<u32>(payload16);
+}
+
 // HDA stream FORMAT register layout (HDA spec §3.7.1 / §7.2.5):
 //   bits 14    = Sample-base rate (1 = 44.1 kHz, 0 = 48 kHz)
 //   bits 13:11 = Base-rate multiplier (×1, ×2, ×3, ×4)
@@ -262,6 +274,40 @@ const char* WidgetTypeName(u32 type_code)
 }
 
 void WalkCodec(const AudioControllerInfo& a, u8 slot);
+
+} // namespace
+
+namespace
+{
+
+// Shared raw-verb dispatch shared by IssueVerbAndPoll +
+// IssueVerbAndPoll16. Pre-encoded `verb` is the 32-bit value
+// CORB will see; this helper just marshals through the rings.
+u32 IssueVerbRawAndPoll(const AudioControllerInfo& a, u32 verb)
+{
+    if (!g.live)
+        return 0;
+    auto* corb = static_cast<volatile u32*>(g.dma.virt) + (kHdaCorbOffset / sizeof(u32));
+    auto* rirb = reinterpret_cast<volatile u64*>(static_cast<u8*>(g.dma.virt) + kHdaRirbOffset);
+
+    const u16 rirb_wp_before = Mmio16(a, kHdaRegRirbwp) & 0xFFu;
+    g.corb_wp = static_cast<u16>((g.corb_wp + 1) % kHdaCorbEntries);
+    corb[g.corb_wp] = verb;
+    mm::DmaSyncForDevice(g.dma, kHdaCorbOffset, kHdaCorbBytes);
+    Mmio16Write(a, kHdaRegCorbwp, g.corb_wp);
+
+    for (u32 spin = 0; spin < 1024; ++spin)
+    {
+        const u16 rirb_wp_now = Mmio16(a, kHdaRegRirbwp) & 0xFFu;
+        if (rirb_wp_now != rirb_wp_before)
+        {
+            mm::DmaSyncForCpu(g.dma, kHdaRirbOffset, kHdaRirbBytes);
+            return static_cast<u32>(rirb[rirb_wp_now] & 0xFFFFFFFFu);
+        }
+        asm volatile("pause" ::: "memory");
+    }
+    return 0;
+}
 
 } // namespace
 
@@ -710,32 +756,39 @@ u32 ArmedStreamCount()
     return {};
 }
 
+u32 IssueVerbAndPoll16(const AudioControllerInfo& a, u8 codec, u8 node, u32 verb12, u16 payload16)
+{
+    if (!g.live)
+        return 0;
+    return IssueVerbRawAndPoll(a, EncodeVerb16(codec, node, verb12, payload16));
+}
+
 ::duetos::core::Result<void> CodecSetConverterFormat(const AudioControllerInfo& a, u8 codec, u8 node, u16 format)
 {
-    // Verb 0x2 — Set Converter Format. The 16-bit payload is
-    // the same format-value the SD_FORMAT register takes; the
-    // codec needs to know what it's pulling.
-    const u32 verb = 0x200; // verb id 0x2 in bits 19:8
-    const u8 data8 = static_cast<u8>(format & 0xFF);
-    const u8 data_high = static_cast<u8>((format >> 8) & 0xFF);
-    // The HDA verb for 4-byte verbs (Set Converter Format) is
-    // a 16-bit form — verb id 0x200 and a 16-bit payload spread
-    // across data + the next byte. Our 12+8 helper shape only
-    // covers the 12+8 pattern, so we issue two verbs: hi byte
-    // first, then lo. Many codecs accept the lo as the meaningful
-    // write; this is the v0 simplification.
-    (void)data_high;
-    IssueVerbAndPoll(a, codec, node, verb, data8);
+    // Verb 0x2 — Set Converter Format. 4-bit-verb / 16-bit-payload
+    // form: verb id 0x2 lives in bits 19:16, full 16-bit format
+    // value occupies bits 15:0 (matches the SD_FORMAT register the
+    // controller is running). EncodeVerb16 picks the high nibble
+    // out of the 12-bit `0x200` constant for back-compat with the
+    // existing verb numbering convention.
+    (void)IssueVerbAndPoll16(a, codec, node, /*verb12=*/0x200, format);
     return {};
 }
 
 ::duetos::core::Result<void> CodecSetAmpGainMute(const AudioControllerInfo& a, u8 codec, u8 node, u16 payload)
 {
-    // Verb 0x3 — Set Amp Gain/Mute. 16-bit payload; same caveat
-    // as CodecSetConverterFormat about the 12+8 verb shape.
-    const u32 verb = 0x300;
-    const u8 data8 = static_cast<u8>(payload & 0xFF);
-    IssueVerbAndPoll(a, codec, node, verb, data8);
+    // Verb 0x3 — Set Amp Gain/Mute. 4-bit-verb / 16-bit-payload
+    // form. Payload bit layout:
+    //   bit 15 = set output amp
+    //   bit 14 = set input amp
+    //   bit 13 = set left
+    //   bit 12 = set right
+    //   bits 11:8 = index (for input amps; 0 for output)
+    //   bit 7 = mute
+    //   bits 6:0 = gain
+    // For "unmute output amp at moderate gain" pass payload =
+    // (1<<15) | (1<<13) | (1<<12) | gain ≈ 0xB000 | gain.
+    (void)IssueVerbAndPoll16(a, codec, node, /*verb12=*/0x300, payload);
     return {};
 }
 
@@ -756,6 +809,107 @@ u32 ArmedStreamCount()
     const u32 verb = 0x707;
     IssueVerbAndPoll(a, codec, node, verb, payload);
     return {};
+}
+
+::duetos::core::Result<void> ConfigureOutputPath(const AudioControllerInfo& a, u8 codec, u8 dac_node, u8 pin_node,
+                                                 u8 stream_tag, u16 format)
+{
+    if (a.mmio_virt == nullptr || !g.live)
+        return ::duetos::core::Err{::duetos::core::ErrorCode::NotReady};
+    // Reject obviously-bogus inputs early — codec must be in the
+    // 4-bit STATESTS slot range, nodes must be non-zero (node 0 is
+    // the root node, never a DAC / pin), stream tag must fit in
+    // the 4-bit field SET_CONVERTER_STREAM_CHANNEL takes.
+    if (codec >= 15 || dac_node == 0 || pin_node == 0 || stream_tag == 0 || stream_tag >= 16)
+        return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+
+    // Step 1: DAC converter format. Has to match the SD format
+    // the controller is running so the codec pulls samples at the
+    // same rate / depth / channel count.
+    auto r1 = CodecSetConverterFormat(a, codec, dac_node, format);
+    if (!r1.has_value())
+        return r1;
+
+    // Step 2: un-mute the DAC's output amp at moderate gain.
+    auto r2 = CodecSetAmpGainMute(a, codec, dac_node, kAmpPayloadSetOutBothMid);
+    if (!r2.has_value())
+        return r2;
+
+    // Step 3: un-mute the pin's output amp (no-op for pins without
+    // an output amp — the codec acks the verb regardless).
+    auto r3 = CodecSetAmpGainMute(a, codec, pin_node, kAmpPayloadSetOutBothMid);
+    if (!r3.has_value())
+        return r3;
+
+    // Step 4: drive the pin. Without this the speaker stays muted
+    // even if the DAC is producing samples — pin widgets gate the
+    // physical output independently of amp state.
+    auto r4 = CodecSetPinWidgetControl(a, codec, pin_node, kPinPayloadOutputEnable);
+    if (!r4.has_value())
+        return r4;
+
+    // Step 5: bind the DAC to a stream descriptor's tag. The
+    // controller picks the tag at StreamArm time; the codec
+    // converter has to match or it sees no samples.
+    auto r5 = CodecSetConverterStream(a, codec, dac_node, stream_tag, /*channel=*/0);
+    if (!r5.has_value())
+        return r5;
+
+    KLOG_DEBUG_V("drivers/audio/hda", "ConfigureOutputPath: dac=", dac_node);
+    KLOG_DEBUG_V("drivers/audio/hda", "ConfigureOutputPath: pin=", pin_node);
+    KLOG_DEBUG_V("drivers/audio/hda", "ConfigureOutputPath: stream_tag=", stream_tag);
+    return {};
+}
+
+void VerbEncodingSelfTest()
+{
+    arch::SerialWrite("[hda] verb-encoding self-test\n");
+
+    // 12-bit-verb / 8-bit-data: GET_PARAMETER on codec 0, node 0,
+    // parameter 0x04 (Audio Widget Caps).
+    //   bits 31:28 = 0x0 (codec)
+    //   bits 27:20 = 0x00 (node)
+    //   bits 19:8  = 0xF00 (verb)
+    //   bits 7:0   = 0x04 (parameter)
+    // = 0x000F0004
+    const u32 v_12 = EncodeVerb(/*codec=*/0, /*node=*/0, /*verb12=*/0xF00, /*data8=*/0x04);
+    if (v_12 != 0x000F0004u)
+    {
+        core::PanicWithValue("drivers/audio/hda", "verb encoding 12+8 mismatch", v_12);
+    }
+
+    // 4-bit-verb / 16-bit-data: SET_CONVERTER_FORMAT on codec 1,
+    // node 5, format 0x4011 (16-bit / 48 kHz / stereo).
+    //   bits 31:28 = 0x1 (codec)
+    //   bits 27:20 = 0x05 (node)
+    //   bits 19:16 = 0x2 (verb id)
+    //   bits 15:0  = 0x4011 (payload)
+    // = 0x10524011
+    const u32 v_16 = EncodeVerb16(/*codec=*/1, /*node=*/5, /*verb12=*/0x200, /*payload16=*/0x4011);
+    if (v_16 != 0x10524011u)
+    {
+        core::PanicWithValue("drivers/audio/hda", "verb encoding 4+16 mismatch", v_16);
+    }
+
+    // SET_AMP_GAIN_MUTE on codec 0, node 0x10, payload 0xB040
+    // (set out, both channels, mid gain).
+    const u32 v_amp = EncodeVerb16(0, 0x10, 0x300, 0xB040);
+    if (v_amp != 0x0103B040u)
+    {
+        core::PanicWithValue("drivers/audio/hda", "verb encoding amp-gain mismatch", v_amp);
+    }
+
+    // Boundary: 12-bit form's `data8` upper bits cleared. If a
+    // caller accidentally passes data8=0x100 it overflows — the
+    // helper's `data8` parameter is u8 so the compiler clamps,
+    // but we sanity-check at the encode level.
+    const u32 v_clamp = EncodeVerb(0xF, 0xFF, 0xFFF, 0xFF);
+    if (v_clamp != 0xFFFFFFFFu)
+    {
+        core::PanicWithValue("drivers/audio/hda", "verb encoding all-ones mismatch", v_clamp);
+    }
+
+    arch::SerialWrite("[hda] verb-encoding self-test OK\n");
 }
 
 } // namespace duetos::drivers::audio::hda

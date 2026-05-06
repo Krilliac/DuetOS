@@ -50,15 +50,15 @@ the same commit** that delivers the code.
 ### Topology-driven follow-ons (post-clustering v0)
 
 - **Status:** v0 clustering landed — `cpu::Topology` + SRAT parser
-  + cluster-aware two-pass `StealNormalFromPeer`. See
-  [CPU Topology](../kernel/CPU-Topology.md).
-- **Remaining scope:** the topology + cluster machinery is in tree
-  but the only consumer is the steal path. Three natural follow-on
-  slices reuse the same data:
-  - **NUMA-aware page allocator** — frame allocator queries SRAT
-    memory-affinity records (subtype 1, currently ignored) and
-    prefers the requesting CPU's `numa_node`. Today every frame
-    comes from one global pool.
+  + cluster-aware two-pass `StealNormalFromPeer`. NUMA-aware
+  frame allocator landed in this slice (`acpi::srat` now records
+  Memory-Affinity records; `FrameAllocatorBuildNumaRanges`
+  consumes them; `AllocateFrame` biases toward the calling CPU's
+  local node before falling back to the global pool). UMA boots
+  (no SRAT) keep the historical global linear-scan path
+  byte-for-byte. See [CPU Topology](../kernel/CPU-Topology.md).
+- **Remaining scope:** the topology + cluster machinery has two
+  more profile-driven follow-ons:
   - **Cluster-broadcast IPIs** — extend `arch::SmpSendIpi` with
     cluster-scoped destination bits when x2APIC cluster mode is
     in use; lets a wake or shootdown fan out within a cluster
@@ -67,9 +67,8 @@ the same commit** that delivers the code.
     (and on `WaitQueueWakeOne`), route to the parent's cluster's
     least-loaded CPU rather than just `last_cpu`. Adds a per-
     cluster load counter.
-- **Blocks on:** none technically. NUMA allocator is the highest-
-  ROI on multi-socket workstations; the other two are profile-
-  driven.
+- **Blocks on:** profile evidence — both items are workload-
+  triggered, not pre-emptive.
 
 ### Slab allocator + freed-object poison + real KASAN
 
@@ -82,77 +81,6 @@ the same commit** that delivers the code.
   + frame poison + UBSAN cover most needs.
 - **When to land:** when a hot-path consumer demands sub-page
   allocations and a slab cache is justified.
-
-### ABI handle-table migration
-
-- **Status:** Win32 side complete. SYS_MUTEX_* migrated first;
-  SYS_EVENT_* and SYS_SEM_* followed via `event_syscall.cpp` +
-  the new `semaphore_syscall.{h,cpp}`, with the WaitForMultiple-
-  Objects probe + auto-reset-consume passes refactored onto
-  `HandleTableLookup` + `KEventIsSignaled` /
-  `KEventClearAutoReset` / `KSemaphoreCount`. The legacy
-  `Win32MutexHandle`, `Win32EventHandle`, `Win32SemaphoreHandle`
-  arrays on `Process` are all removed; KMutex / KEvent /
-  KSemaphore carry the wait-time + holder refcounting that
-  makes the "close every handle while a primitive is held /
-  contended" scenario safe (`HandleTableLookupRef` for the
-  syscall side, `KObjectAcquire` on wait-entry / hold transition
-  for the internal side). CloseHandle's semaphore arm — which
-  did not exist pre-migration — was added incidentally, fixing
-  a slot leak that pre-dated this work.
-- **Linux side — first slice landed:** `KFile` extended with a
-  `KFileKind` enum + per-state `pool_index` slot + per-kind
-  release callback fired by `KFileDestroy` (kfile.{h,cpp}). New
-  per-process helpers in `proc/process.{h,cpp}` consolidate the
-  thirteen open-coded "scan for lowest free fd ≥ N" loops behind
-  `LinuxFdAllocLowest`, add a `Handle kf_handle` sidecar to every
-  `LinuxFd` slot, and route close / dup / fork through
-  `LinuxFdClose` / `LinuxFdDup` / `LinuxFdInheritFromParent` —
-  which themselves drive `HandleTableRemove` / `HandleTableDuplicate`
-  on `Process::kobj_handles`. FD_CLOEXEC is a real per-fd bit now
-  (was a sub-GAP); honoured at every creation site that takes a
-  CLOEXEC-style flag (open's O_CLOEXEC, pipe2's O_CLOEXEC,
-  eventfd2's EFD_CLOEXEC, dup3's O_CLOEXEC, fcntl(F_SETFD,
-  FD_CLOEXEC)) and read by `LinuxFdCloseOnExec` (wired for the
-  future execve handler; today exists for the boot-time self-test).
-  Eleven of the twelve pool-backed kinds — pipe (states 3 / 4),
-  eventfd (5), socket (6), timerfd (7), signalfd (8), epoll (9),
-  inotify (10), pidfd (12), POSIX MQ (13), memfd (14), and
-  fanotify (15) — are migrated end-to-end. `LinuxFdAttachKFile`
-  parks a `KFile` carrying the per-kind release callback in
-  `kobj_handles`, the `LinuxFd` slot stores the resulting handle,
-  and the per-pool release fires once via the `KFile` destroy
-  callback when the last reference drops. Every migrated creator
-  honours its CLOEXEC flag bit (O_CLOEXEC, EFD_CLOEXEC,
-  TFD_CLOEXEC, SFD_CLOEXEC, EPOLL_CLOEXEC, IN_CLOEXEC,
-  SOCK_CLOEXEC, PIDFD_NONBLOCK, MQ O_CLOEXEC, MFD_CLOEXEC,
-  FAN_CLOEXEC) — was a documented sub-GAP, now real. The
-  previous v0 sub-GAP — dup of a pipe / eventfd / socket / etc.
-  silently leaking the pool ref — is closed across every
-  migrated kind: both fds now hold an independent KFile
-  reference and the per-pool wakeup-on-disconnect semantics
-  are preserved verbatim. Pidfd's adapter (`PidfdRelease`)
-  takes the target pid as `pool_index`, looks the target up
-  via `SchedFindProcessByPid`, and drops the `ProcessRetain`
-  taken at open — same shape as the legacy DoClose arm but
-  routed through the unified KObject refcount. The fork-time
-  legacy `*Retain` block in `syscall_clone.cpp` collapsed from
-  ten arms to one — only state 11 (dirfd) remains.
-- **Remaining state-kind:** dirfd (state 11) is the lone
-  hold-out. Its release frees a `win32_dirs[]` snapshot owned
-  by the calling Process — the uniform `void(u32)` KFile
-  callback can't reach the owning `Process*` without a richer
-  callback shape. The legacy DoClose arm continues to handle
-  it explicitly (one `SysDirClose(p, dh)` call gated on
-  state == 11 && kf_handle == invalid). Migrating dirfd needs
-  either a `void(Process*, u32)` callback variant in KFile or
-  promoting the directory snapshot itself onto KFile (vnode +
-  entries pointer) so the destroy callback no longer needs
-  the parent process at all — both are bigger changes than
-  the uniform-shape migration.
-- **When to land:** opportunistic, gated on a Linux-ABI workload
-  that benefits from the unified surface; the dual-track shape
-  means each remaining kind is a self-contained slice.
 
 ### Intel CET enable
 
@@ -185,24 +113,24 @@ the same commit** that delivers the code.
 
 ## Storage and filesystem
 
-### Stage 6 — VFS mount path
+### Stage 6 — per-process namespace roots
 
-- **First two slices landed:** `fs::VfsMount(mount_point,
-  FsType, block_handle) -> MountId` registry; longest-prefix
-  `VfsMountResolve(path)` resolver; FAT32 volumes auto-mount
-  at `/disk/<idx>` during boot; `fs::routing::ParseDiskPath`
-  consults the mount registry first before falling back to
-  the hard-coded prefix. Today every Win32 file syscall that
-  resolves to FAT32 gets there via the mount table.
-- **Remaining work:** teach the ramfs-side `VfsLookup` itself
-  to walk across mount points (return a generic `VfsNode`
-  handle instead of `const RamfsNode*`), so `cd /disk/0/SUB`
-  in the kernel shell goes through one VFS API rather than
-  the routing-layer detour. That's the per-FS-type lookup
-  vtable mentioned in the original Stage 6 plan.
-- **Per-process namespace roots** continue to work — `Process::root`
-  stays a `const RamfsNode*` today, but grows into a generic
-  `VfsDir*` handle once on-disk FS is mountable.
+- **Status (Stage 6 complete for the global namespace):**
+  `fs::VfsMount` registry + longest-prefix `VfsMountResolve`
+  + FAT32 auto-mount at `/disk/<idx>` landed first; the
+  cross-mount resolver (`fs::VfsResolve(root, path) -> VfsNode`)
+  + per-FsType `VfsBackendOps` vtable + boot-time cross-mount
+  self-test landed alongside this entry. `cd /disk/0/SUB` and
+  every other "give me the resolved node" caller now goes
+  through one VFS API; backend dispatch is a vtable hop.
+- **Remaining scope:** teach `Process::root` to carry a
+  `VfsNode` (or a `VfsDir*` thin handle) so a sandboxed
+  process can be rooted at a non-ramfs subtree (e.g. `/disk/0/SANDBOX`).
+  Today every process root is a `const RamfsNode*` and the
+  cross-mount path always falls through to ramfs at the leaf.
+  The wider syscall surface (open / stat / readdir) still
+  lands in `RamfsNode*` — migrating those is a per-syscall
+  follow-on once a workload demands a non-ramfs sandbox root.
 
 ### Stage 7+ — Writable FS / native FS / NTFS read
 
@@ -243,11 +171,28 @@ In rough priority:
 
 ### Audio — HDA codec / stream programming
 
-- **Today:** Intel HDA register probe only (`kernel/drivers/audio/audio.cpp`).
-  PC speaker still works through `pcspk.cpp`. Codec walker exists
-  but stream / amplifier wiring is `// GAP:`-marked.
-- **Blocks:** Settings volume slider, system beep on
-  notifications, WAV / OGG playback app.
+- **Today:** Intel HDA register probe + codec walker
+  (`kernel/drivers/audio/audio.cpp` + `hda.cpp`). Stream
+  descriptor `StreamArm` programs BDLPL/BDLPU/CBL/LVI/FORMAT;
+  RUN bit toggled via `StreamRun`. Codec configuration verbs
+  `CodecSetConverterFormat` / `CodecSetAmpGainMute` use the
+  4-bit-verb / 16-bit-payload encoding (verb 0x2 / 0x3) — the
+  full 16-bit format value reaches the codec instead of the
+  truncated 8-bit form. `ConfigureOutputPath` stitches the
+  five-verb sequence (DAC format → DAC amp → pin amp → pin
+  widget control → converter stream tag) so a future "play
+  system beep" path doesn't have to know the order. Boot self-
+  test exercises the verb-encoding helpers against canonical
+  inputs.
+- **Blocks (still pending):** allocating real audio buffer
+  pages + populating a BDL with sample data + flipping RUN +
+  observing samples land at the codec — needs a DMA-coherent
+  buffer allocator path that's wired through the audio shell
+  (or a system-beep driver), plus QEMU's `-device hda-output`
+  to verify the byte-level path. Also: a "find first speaker
+  pin" heuristic that picks the dac_node / pin_node pair to
+  hand `ConfigureOutputPath`. Today the helper is called by
+  no one — it's plumbing waiting for a consumer.
 - **Owner:** `kernel/drivers/audio/`.
 
 ### Wireless — real-hardware verification
@@ -266,28 +211,32 @@ In rough priority:
 - **Owner:** `kernel/drivers/net/wireless/` (per-vendor upload +
   ring setup), `kernel/net/wireless/` (MLME state machine).
 
-### USB mouse — high-DPI 16-bit XY
+### USB mouse — high-DPI 16-bit XY (parser + injector landed)
 
-- **Today:** boot-protocol + extended boot-protocol decoding
-  is wired end-to-end. `xhci_init.cpp`'s polling loop computes
-  the actual transfer length from the TRB residual and calls
-  `HidMouseInjectN(buf, len)` in `xhci_input.cpp`, which
-  decodes 3 / 4 / 5+ byte reports — wheel (Z axis), buttons
-  4 / 5, and standard left/right/middle. `MousePacket` carries
-  `dz` and the `kMouseButton4 / kMouseButton5` bits; the
-  Win32 mouse-input accumulator already accepts the wheel
-  delta.
-- **Deferred:** descriptor-driven decoding for layouts with
-  16-bit X / Y (high-DPI gaming mice), digitizer / absolute
-  pointers, and horizontal tilt. Needs `HidParseDescriptor`
-  to expose per-field offsets — today it sums Report Size ×
-  Report Count without recording where each field lands. The
-  next slice extends the parser, fetches the report
-  descriptor at enumeration time, and passes the layout
-  table into `HidMouseInjectN`.
-- **Blocks on:** a workload that legitimately needs high-DPI
-  precision or digitizer events — extended boot covers wheel
-  + 5 buttons.
+- **Today:** descriptor-driven decoding is in tree.
+  `HidExtractMouseLayout` walks a HID report descriptor and
+  records per-field bit offsets / sizes / sign for X / Y /
+  Wheel / AC Pan / Button-mask + the optional Report ID byte.
+  `HidMouseInjectWithLayout` extracts each named field at the
+  recorded bit offset (8 / 12 / 16 bits — sign-extended for
+  signed axes) and injects a `MousePacket`. The xHCI polling
+  loop calls the layout-aware path when
+  `dev.hid_mouse_layout_valid`, otherwise falls back to the
+  existing boot-protocol `HidMouseInjectN`.
+- **Self-tested:** boot-keyboard / boot-mouse / a synthetic
+  high-DPI 5-button + 16-bit-XY + wheel + AC-Pan descriptor
+  all round-trip through `HidExtractMouseLayout` with the
+  expected bit offsets at boot.
+- **Remaining (gated on real hardware):** wire
+  `GET_DESCRIPTOR(Report)` (kDescTypeReport = 0x22) into
+  the HID enumeration step in `xhci_enum.cpp` so
+  `dev.hid_mouse_layout` is populated for real mice — today
+  the layout slot stays invalid and the polling loop uses
+  the boot-protocol fallback. The HID class descriptor
+  inside the Configuration tree carries the report-descriptor
+  length; the fetch is one extra `DoControlIn` call. Defer
+  until the test fleet includes a high-DPI mouse to verify
+  the byte-level decode.
 - **Owner:** `kernel/drivers/usb/`.
 
 ### Multi-monitor / runtime resolution change

@@ -32,8 +32,11 @@
 #include "mm/page.h"
 #include "mm/poison.h"
 
+#include "acpi/srat.h"
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
+#include "cpu/percpu.h"
+#include "cpu/topology.h"
 #include "debug/probes.h"
 #include "diag/kdbg.h"
 #include "log/klog.h"
@@ -69,6 +72,24 @@ constinit u64 g_bitmap_bytes = 0;
 constinit u64 g_next_hint = 0; // search hint for AllocateFrame
 constinit u64 g_free_count = 0;
 constinit u64 g_total_frames = 0;
+
+// NUMA bias state. Built from SRAT memory-affinity records during
+// FrameAllocatorInit (or, if SRAT was parsed AFTER init, lazily on
+// first NUMA-aware allocate). Each node carries the union span of
+// its memory-affinity records as [start_frame, end_frame_exclusive)
+// — the bitmap stays a single global array; only the search start
+// position is biased toward locality. Per-node hints round-robin
+// inside the span so concurrent CPUs on the same node don't all
+// hammer the same bit.
+//
+// `g_numa_node_count` mirrors `acpi::srat::SratNodeCount()` once
+// `FrameAllocatorBuildNumaRanges` has run; zero means "no SRAT
+// records, every alloc takes the global linear-scan path"
+// (UMA-equivalent behaviour, byte-for-byte the pre-NUMA path).
+constinit u64 g_node_start_frame[acpi::srat::kMaxNumaNodes] = {};
+constinit u64 g_node_end_frame[acpi::srat::kMaxNumaNodes] = {};
+constinit u64 g_node_hint[acpi::srat::kMaxNumaNodes] = {};
+constinit u8 g_numa_node_count = 0;
 
 // Test-only OOM injection. Set via FrameAllocatorSetFailAfter; each
 // successful Allocate* path decrements. When zero is reached the
@@ -404,6 +425,67 @@ u64 BitmapFindFreeBelow(u64 max_frames)
     return g_bitmap_frames;
 }
 
+// Search a [lo, hi) bitmap subrange starting at `hint` and wrapping
+// inside the subrange. Returns g_bitmap_frames on miss. Used by the
+// NUMA-biased path so the calling CPU's local node gets first dibs.
+u64 BitmapFindFreeInRange(u64 lo, u64 hi, u64 hint)
+{
+    if (lo >= g_bitmap_frames)
+        return g_bitmap_frames;
+    if (hi > g_bitmap_frames)
+        hi = g_bitmap_frames;
+    if (hi <= lo)
+        return g_bitmap_frames;
+    if (hint < lo || hint >= hi)
+        hint = lo;
+    const u64 span = hi - lo;
+    for (u64 i = 0; i < span; ++i)
+    {
+        u64 frame = hint + i;
+        if (frame >= hi)
+            frame -= span;
+        if (!BitmapIsUsed(frame))
+            return frame;
+    }
+    return g_bitmap_frames;
+}
+
+// Map an APIC-derived NUMA node index to the [start, end) bitmap
+// span recorded for it. Returns false when the node has no recorded
+// memory-affinity range (degrades to the global path).
+bool NumaNodeRange(u8 node, u64* lo, u64* hi, u64* hint)
+{
+    if (g_numa_node_count == 0 || node >= acpi::srat::kMaxNumaNodes)
+        return false;
+    const u64 start = g_node_start_frame[node];
+    const u64 end = g_node_end_frame[node];
+    if (end <= start)
+        return false;
+    if (lo)
+        *lo = start;
+    if (hi)
+        *hi = end;
+    if (hint)
+        *hint = g_node_hint[node];
+    return true;
+}
+
+// Look up the calling CPU's NUMA node. Returns kTopologyUnknownNode
+// when the topology table isn't ready, the SRAT didn't register a
+// node for this APIC, or the BSP path predates `TopologyInitBsp`.
+// Cheap: one PerCpu fetch + one indexed read.
+u8 CurrentCpuNumaNode()
+{
+    using ::duetos::cpu::CurrentCpuIdOrBsp;
+    using ::duetos::cpu::kTopologyUnknownNode;
+    using ::duetos::cpu::TopologyForCpu;
+    const u32 cpu_id = CurrentCpuIdOrBsp();
+    const auto* row = TopologyForCpu(cpu_id);
+    if (row == nullptr)
+        return kTopologyUnknownNode;
+    return row->numa_node;
+}
+
 PhysAddr AllocateFrameAtIndex(u64 frame)
 {
     BitmapMarkUsed(frame);
@@ -421,6 +503,162 @@ PhysAddr AllocateFrameAtIndex(u64 frame)
 }
 
 } // namespace
+
+void FrameAllocatorNumaSelfTest()
+{
+    arch::SerialWrite("[mm/frame] numa self-test\n");
+
+    // Path 1 — UMA fallback. AllocateFrameNode with a sentinel node
+    // (or with the node table empty) routes through the global
+    // linear-scan path. Always covered: even on a NUMA boot, a node
+    // index past the recorded count is treated as "no range" and
+    // falls through.
+    const PhysAddr fallback = AllocateFrameNode(acpi::srat::kNoNode);
+    if (fallback == kNullFrame)
+    {
+        core::Panic("mm/frame", "numa self-test: UMA fallback alloc failed");
+    }
+    FreeFrame(fallback);
+
+    // Path 2 — node-biased. Only meaningful when SRAT registered
+    // a memory-affinity record; otherwise the test degrades to the
+    // same global-path coverage above. SKIP cleanly so QEMU boots
+    // without an SRAT see [SKIP] not panic.
+    if (g_numa_node_count == 0)
+    {
+        arch::SerialWrite("[mm/frame] numa self-test SKIP (no SRAT memory records — UMA boot)\n");
+        return;
+    }
+
+    // Find the first node with a non-empty range.
+    u8 test_node = acpi::srat::kNoNode;
+    for (u8 i = 0; i < g_numa_node_count; ++i)
+    {
+        if (g_node_end_frame[i] > g_node_start_frame[i])
+        {
+            test_node = i;
+            break;
+        }
+    }
+    if (test_node == acpi::srat::kNoNode)
+    {
+        arch::SerialWrite("[mm/frame] numa self-test SKIP (every node range collapsed to empty)\n");
+        return;
+    }
+    const PhysAddr local = AllocateFrameNode(test_node);
+    if (local == kNullFrame)
+    {
+        core::Panic("mm/frame", "numa self-test: AllocateFrameNode(local) failed");
+    }
+    const u64 local_frame = local >> kPageSizeLog2;
+    if (local_frame < g_node_start_frame[test_node] || local_frame >= g_node_end_frame[test_node])
+    {
+        // Allowed: the local node was full at boot and the path
+        // fell through to the global pool. Log the surprise but
+        // don't panic — it's correct behaviour.
+        arch::SerialWrite("[mm/frame] numa self-test: node-local exhausted, fell back to global (frame ");
+        arch::SerialWriteHex(local_frame);
+        arch::SerialWrite(")\n");
+    }
+    else
+    {
+        arch::SerialWrite("[mm/frame] numa self-test OK (node-local frame=");
+        arch::SerialWriteHex(local_frame);
+        arch::SerialWrite(")\n");
+    }
+    FreeFrame(local);
+}
+
+void FrameAllocatorBuildNumaRanges()
+{
+    KLOG_TRACE_SCOPE("mm/frame", "FrameAllocatorBuildNumaRanges");
+    // Reset the per-node table. Idempotent across re-init paths
+    // (the slab self-test re-runs SRAT parsing).
+    for (u8 i = 0; i < acpi::srat::kMaxNumaNodes; ++i)
+    {
+        g_node_start_frame[i] = 0;
+        g_node_end_frame[i] = 0;
+        g_node_hint[i] = 0;
+    }
+    g_numa_node_count = 0;
+
+    const u8 mem_count = acpi::srat::SratMemoryRangeCount();
+    if (mem_count == 0)
+    {
+        // UMA boot — no SRAT memory-affinity records. AllocateFrame
+        // takes the global linear-scan path verbatim.
+        KLOG_INFO("mm/frame", "NUMA: no SRAT memory ranges, UMA path active");
+        return;
+    }
+
+    // Walk every memory-affinity record and update the per-node
+    // span union. Multi-range nodes (rare — usually a single 0..N
+    // range per node) get the union span.
+    for (u8 i = 0; i < mem_count; ++i)
+    {
+        acpi::srat::MemoryRange r{};
+        if (!acpi::srat::SratMemoryRange(i, &r))
+            continue;
+        if (!r.enabled || r.length == 0)
+            continue;
+        if (r.node >= acpi::srat::kMaxNumaNodes)
+            continue;
+        const u64 lo = r.base >> kPageSizeLog2;
+        const u64 hi = (r.base + r.length + kPageSize - 1) >> kPageSizeLog2;
+        u64& cur_lo = g_node_start_frame[r.node];
+        u64& cur_hi = g_node_end_frame[r.node];
+        if (cur_hi == 0)
+        {
+            cur_lo = lo;
+            cur_hi = hi;
+            g_node_hint[r.node] = lo;
+        }
+        else
+        {
+            if (lo < cur_lo)
+                cur_lo = lo;
+            if (hi > cur_hi)
+                cur_hi = hi;
+        }
+        if (r.node + 1 > g_numa_node_count)
+            g_numa_node_count = static_cast<u8>(r.node + 1);
+    }
+
+    // Clip every node's span to the bitmap. Some firmware reports
+    // memory-affinity records covering MMIO holes or memory above
+    // the physical pool we're tracking; clipping keeps the bitmap
+    // index in-bounds.
+    for (u8 i = 0; i < g_numa_node_count; ++i)
+    {
+        if (g_node_end_frame[i] > g_bitmap_frames)
+            g_node_end_frame[i] = g_bitmap_frames;
+        if (g_node_start_frame[i] >= g_bitmap_frames)
+        {
+            g_node_start_frame[i] = 0;
+            g_node_end_frame[i] = 0;
+        }
+        if (g_node_hint[i] < g_node_start_frame[i] || g_node_hint[i] >= g_node_end_frame[i])
+            g_node_hint[i] = g_node_start_frame[i];
+    }
+
+    arch::SerialWrite("[mm/frame] NUMA ranges: nodes=");
+    arch::SerialWriteHex(g_numa_node_count);
+    arch::SerialWrite("\n");
+    for (u8 i = 0; i < g_numa_node_count; ++i)
+    {
+        if (g_node_end_frame[i] == 0)
+            continue;
+        arch::SerialWrite("[mm/frame]   node ");
+        arch::SerialWriteHex(i);
+        arch::SerialWrite(": frames [");
+        arch::SerialWriteHex(g_node_start_frame[i]);
+        arch::SerialWrite(", ");
+        arch::SerialWriteHex(g_node_end_frame[i]);
+        arch::SerialWrite(") = ");
+        arch::SerialWriteHex(g_node_end_frame[i] - g_node_start_frame[i]);
+        arch::SerialWrite(" frames\n");
+    }
+}
 
 PhysAddr AllocateFrameInRange(PhysAddr max_phys)
 {
@@ -440,12 +678,105 @@ PhysAddr AllocateFrameInRange(PhysAddr max_phys)
     return AllocateFrameAtIndex(frame);
 }
 
+namespace
+{
+
+// Finalise a successful frame pick — common tail shared by the
+// global linear scan and the NUMA-biased path. Performs the kernel-
+// PT registry guard, marks the bitmap, advances hints, zeros the
+// page, and returns its physical address. `node` is the dense
+// NUMA index when the frame came out of a NUMA-biased path
+// (so g_node_hint[node] gets its round-robin update), or
+// `acpi::srat::kNoNode` for the global path (only g_next_hint
+// advances).
+PhysAddr ProcessAndReturnFrame(u64 frame, u8 node)
+{
+    const PhysAddr phys = frame << kPageSizeLog2;
+    if (FrameAllocatorIsRegisteredKernelPt(phys))
+    {
+        core::PanicWithValue("mm/frame_allocator",
+                             "AllocateFrame returning a registered kernel-PT frame (stale free upstream)", phys);
+    }
+    BitmapMarkUsed(frame);
+    g_next_hint = frame + 1;
+    if (node != acpi::srat::kNoNode && node < acpi::srat::kMaxNumaNodes)
+    {
+        g_node_hint[node] = frame + 1;
+    }
+    if (phys >= kDirectMapBytes)
+    {
+        PanicFrame("AllocateFrame: frame past direct map, cannot zero");
+    }
+    auto* virt = static_cast<u8*>(PhysToVirt(phys));
+    for (u64 b = 0; b < kPageSize; ++b)
+    {
+        virt[b] = 0;
+    }
+    return phys;
+}
+
+} // namespace
+
+PhysAddr AllocateFrameNode(u8 node)
+{
+    if (g_fail_after != 0)
+    {
+        if (g_fail_after == 1)
+        {
+            g_fail_after = 0;
+            return kNullFrame;
+        }
+        --g_fail_after;
+    }
+    u64 lo = 0;
+    u64 hi = 0;
+    u64 hint = 0;
+    if (NumaNodeRange(node, &lo, &hi, &hint))
+    {
+        const u64 frame = BitmapFindFreeInRange(lo, hi, hint);
+        if (frame < g_bitmap_frames)
+        {
+            return ProcessAndReturnFrame(frame, node);
+        }
+        // Local node exhausted — fall through to the global path.
+        // Same-node OOM is rare on a healthy NUMA box; when it
+        // happens we'd rather have a remote frame than fail the
+        // allocation.
+    }
+    // Global linear scan (UMA fallback). Identical semantics to the
+    // pre-NUMA AllocateFrame loop.
+    for (u64 i = 0; i < g_bitmap_frames; ++i)
+    {
+        u64 frame = g_next_hint + i;
+        if (frame >= g_bitmap_frames)
+            frame -= g_bitmap_frames;
+        if (!BitmapIsUsed(frame))
+        {
+            return ProcessAndReturnFrame(frame, /*node=*/acpi::srat::kNoNode);
+        }
+    }
+    KLOG_ONCE_WARN("mm/frame", "out of physical frames (AllocateFrameNode)");
+    KLOG_CRITICAL_A(::duetos::core::LogArea::Memory, "mm/frame", "AllocateFrameNode: physical OOM");
+    KDBG(Mm, "mm/frame", "AllocateFrameNode OOM");
+    KBP_PROBE(::duetos::debug::ProbeId::kPhysAllocFail);
+    return kNullFrame;
+}
+
 PhysAddr AllocateFrame()
 {
-    // Test-only OOM injection. When the counter reaches zero we return
-    // null; otherwise we decrement and proceed. The branch is one load
-    // + compare on the hot path — measured impact below noise on the
-    // boot-time alloc cadence.
+    // Hot path with NUMA bias. When SRAT memory-affinity records
+    // were registered, route through `AllocateFrameNode` with the
+    // current CPU's local node (for free on UMA — kNoNode falls
+    // straight through to the global scan). The OOM-injection
+    // counter is consumed inside `AllocateFrameNode` so the
+    // per-test scaffolding still drives the same OOM ladder.
+    if (g_numa_node_count > 0)
+    {
+        return AllocateFrameNode(CurrentCpuNumaNode());
+    }
+
+    // UMA / pre-NUMA path — identical behaviour to the original
+    // hot loop. Kept verbatim so SRAT-less boots see no regression.
     if (g_fail_after != 0)
     {
         if (g_fail_after == 1)

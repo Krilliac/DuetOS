@@ -99,6 +99,67 @@ struct HidReportSummary
 /// Returns `out->parse_ok`.
 bool HidParseDescriptor(const u8* buf, u32 len, HidReportSummary* out);
 
+// =====================================================================
+// Mouse-layout extraction (high-DPI / 16-bit XY support).
+//
+// `HidParseDescriptor` returns aggregates only — sum-of-bits and a
+// `primary_kind`. A real driver dealing with anything beyond the
+// boot protocol needs to know **where** each named field (X / Y
+// / wheel / button mask / report ID) lives in the report stream.
+// `HidExtractMouseLayout` walks the descriptor with that lens and
+// fills a `HidMouseLayout` so the input dispatcher can pull a
+// 16-bit signed X out of an 8-byte report at the right bit offset.
+//
+// The layout is bit-addressed (not byte-addressed) because HID
+// allows non-byte-aligned fields. Callers that mask + shift bits
+// out of the report byte stream don't have to assume any
+// particular packing.
+// =====================================================================
+
+/// Per-named-field record. `present == false` means this descriptor
+/// did not declare the field in its primary mouse collection;
+/// `bit_offset` / `bit_size` are then meaningless. `bit_size` is
+/// always recorded in [1..32]; well-known mouse fields are 8, 12,
+/// or 16 bits in shipping hardware. `is_signed` is true for
+/// relative axes (X / Y / wheel / horizontal tilt — Logical
+/// Minimum < 0); false for absolute fields (button bits, report
+/// IDs, digitizer pressure).
+struct HidMouseField
+{
+    bool present;
+    bool is_signed;
+    u8 bit_size;
+    u32 bit_offset; ///< from the start of the report bit stream
+};
+
+/// Resolved mouse-report layout. `report_size_bits` is the total
+/// width of the report (the sum of every Input item under the
+/// primary mouse Application collection); a 4-byte report has
+/// `report_size_bits == 32`. `report_id` is non-zero when the
+/// device prefixes its reports with a Report ID byte; consumers
+/// must skip the first byte of the report and add 8 to every
+/// `bit_offset` when extracting.
+struct HidMouseLayout
+{
+    bool valid;            ///< true iff the descriptor parsed AND a Mouse usage was found
+    u8 report_id;          ///< 0 = no report ID prefix
+    u32 report_size_bits;  ///< total payload bits (excluding the optional report-ID byte)
+    HidMouseField buttons; ///< Button-page Input field (bit 0 = button 1, etc.)
+    HidMouseField x;       ///< Generic Desktop Usage 0x30 (X)
+    HidMouseField y;       ///< Generic Desktop Usage 0x31 (Y)
+    HidMouseField wheel;   ///< Generic Desktop Usage 0x38 (Wheel)
+    HidMouseField h_tilt;  ///< Consumer page Usage 0x238 (AC Pan / horizontal wheel)
+};
+
+/// Extract a `HidMouseLayout` from a report descriptor. Returns
+/// `out->valid` on completion. Walks the descriptor twice
+/// internally — once via `HidParseDescriptor` to confirm primary
+/// kind == Mouse, then a focused walk to record per-field bit
+/// offsets. Layouts with multiple top-level Mouse Application
+/// collections only have the first one captured (matches what
+/// the v0 input dispatcher consumes).
+bool HidExtractMouseLayout(const u8* buf, u32 len, HidMouseLayout* out);
+
 /// Boot-time sanity test — feeds the canonical USB boot-keyboard
 /// and boot-mouse descriptors through the parser and KASSERTs
 /// the expected classification + bit counts. Prints PASS/FAIL on

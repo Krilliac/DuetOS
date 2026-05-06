@@ -181,4 +181,47 @@ struct BdlEntry
 /// "drive the speaker pin" pass 0x40.
 ::duetos::core::Result<void> CodecSetPinWidgetControl(const AudioControllerInfo& a, u8 codec, u8 node, u8 payload);
 
+/// Stitched output-path bring-up — issues the four verbs the codec
+/// needs to make a DAC drive a speaker pin in tandem with an HDA
+/// stream descriptor:
+///
+///   1. SET_CONVERTER_FORMAT(dac_node, format)  — DAC pulls in the
+///      same format the SD is configured for.
+///   2. SET_AMP_GAIN_MUTE(dac_node, kAmpUnmuteOutMid) — un-mute the
+///      DAC's output amp at moderate gain.
+///   3. SET_AMP_GAIN_MUTE(pin_node, kAmpUnmuteOutMid) — un-mute the
+///      pin complex's output amp (no-op on pins without one — the
+///      codec acks but the verb has no effect; cheaper than walking
+///      caps to skip).
+///   4. SET_PIN_WIDGET_CONTROL(pin_node, kPinOutputEnable) — drive
+///      the physical jack / speaker.
+///   5. SET_CONVERTER_STREAM_CHANNEL(dac_node, stream_tag, 0) —
+///      bind the DAC to the controller's stream descriptor.
+///
+/// The codec walker `WalkCodec` records DAC / pin counts but does
+/// not pick a path — caller supplies the `dac_node` and `pin_node`
+/// from operator policy or future "find first speaker pin"
+/// heuristics. v0 leaves path-selection to the audio shell; this
+/// helper is the verb-sequence facade so a future "play system
+/// beep" driver doesn't have to know the order.
+///
+/// Returns Ok on success, NotReady when the HDA controller hasn't
+/// been brought up, InvalidArgument on bad codec / node indices.
+::duetos::core::Result<void> ConfigureOutputPath(const AudioControllerInfo& a, u8 codec, u8 dac_node, u8 pin_node,
+                                                 u8 stream_tag, u16 format);
+
+/// Common amplifier payload — set output amp, both channels,
+/// un-muted, gain index 0x40 (≈ -32 dB on most codecs, audible
+/// without being loud). `kAmpUnmuteOutMid` is 0xB040.
+inline constexpr u16 kAmpPayloadSetOutBothMid = 0xB040;
+
+/// Pin-widget control payload — output enable bit only.
+inline constexpr u8 kPinPayloadOutputEnable = 0x40;
+
+/// Verb-encoder self-test — exercises EncodeVerb (12+8 form) and
+/// EncodeVerb16 (4+16 form) against canonical inputs and asserts
+/// the bit layout matches HDA spec §7.3. Cheap and runs once at
+/// boot. Catches future regressions in the verb-shape helpers.
+void VerbEncodingSelfTest();
+
 } // namespace duetos::drivers::audio::hda

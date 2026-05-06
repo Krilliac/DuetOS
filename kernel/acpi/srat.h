@@ -7,15 +7,13 @@
  *
  * Walks the SRAT's processor-affinity records and builds a flat
  * APIC-ID -> NUMA-domain table. Memory-affinity records (subtype 1)
- * and other entry types are intentionally ignored — v0 consumes
- * NUMA topology only for scheduler clustering, not for page-
- * allocation routing. When the NUMA-aware allocator lands the
- * memory-affinity walk slots in alongside this one.
+ * land in a sibling table consumed by the NUMA-aware page allocator;
+ * other entry types (GICC / ITS / Generic Initiator) are ignored.
  *
  * Coverage in v0:
  *   - Subtype 0  Processor Local APIC/SAPIC Affinity (16 bytes)
+ *   - Subtype 1  Memory Affinity                     (40 bytes)
  *   - Subtype 2  Processor Local x2APIC Affinity     (24 bytes)
- *   - Subtype 1  Memory Affinity                     — ignored
  *   - Subtype 3  Processor Local GICC Affinity       — ignored (ARM)
  *   - Subtype 4  GIC ITS Affinity                    — ignored (ARM)
  *   - Subtype 5  Generic Initiator Affinity          — ignored
@@ -65,5 +63,36 @@ bool SratNodeForApic(u32 apic_id, u8* out_node);
 
 /// Number of distinct NUMA nodes seen in the SRAT (0 if absent).
 u8 SratNodeCount();
+
+// ===================================================================
+// Memory affinity records (Subtype 1). Each record names a physical
+// memory range and the proximity domain (NUMA node) that owns it.
+// The NUMA-aware page allocator consumes these to bias allocations
+// toward the requesting CPU's local node.
+// ===================================================================
+
+/// Maximum memory-affinity records we keep. A typical UMA / dual-
+/// socket workstation has 1..4 records; larger NUMA topologies
+/// (e.g. four-socket EPYC) commonly stay under 16. A workload that
+/// overflows this slots into a roadmap follow-up.
+inline constexpr u8 kMaxMemoryRanges = 16;
+
+struct MemoryRange
+{
+    u64 base;   ///< physical base address (byte-granular)
+    u64 length; ///< length in bytes
+    u8 node;    ///< dense node index, same namespace as `SratNodeForApic`
+    bool enabled;
+    u8 _pad[6];
+};
+
+/// Number of memory-affinity records we collected. 0 when SRAT is
+/// absent or had no enabled subtype-1 records.
+u8 SratMemoryRangeCount();
+
+/// Read the `idx`th memory-affinity record. Returns false on
+/// out-of-range. Pointer is stable for the kernel's lifetime
+/// (records sit in `.bss`).
+bool SratMemoryRange(u8 idx, MemoryRange* out);
 
 } // namespace duetos::acpi::srat

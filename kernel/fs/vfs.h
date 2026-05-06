@@ -1,6 +1,7 @@
 #pragma once
 
 #include "util/types.h"
+#include "fs/fat32.h"
 #include "fs/ramfs.h"
 
 /*
@@ -81,5 +82,94 @@ const RamfsNode* VfsLookup(const RamfsNode* root, const char* path, u64 path_max
 /// brings up ring 3 — a VFS regression here is fatal because every
 /// later subsystem (sandboxing, file syscalls) layers on these rules.
 void VfsSelfTest();
+
+// =====================================================================
+// Generic VFS node + cross-mount resolver (Stage 6 second slice).
+//
+// `VfsLookup` above is ramfs-only by signature: it returns a
+// `RamfsNode*` and walks a ramfs tree from a given root. That's
+// enough for sandbox enforcement and the constinit trees, but it
+// cannot answer "what does `/disk/0/SUB/INNER.TXT` resolve to?"
+// because that path crosses a FAT32 mount point — the file lives
+// in a different backend.
+//
+// `VfsResolve` is the cross-mount sibling. It returns a tagged
+// `VfsNode` so callers can hold "the resolved thing" without
+// caring which backend produced it. Two backends ship today —
+// Ramfs (constinit trees + the per-process root) and Fat32
+// (registered via `VfsMount` at boot for every probed volume).
+// New backends register a `VfsBackendOps` table in `mount.cpp`
+// and `VfsResolve` dispatches through `VfsBackendForFsType`.
+//
+// The `VfsLookup` API is preserved verbatim for ramfs-only
+// callers — sandbox enforcement, syscall path resolution against
+// `Process::root` — so the two coexist while the fleet of
+// callers migrates.
+// =====================================================================
+
+enum class VfsBackend : u32
+{
+    Invalid = 0, ///< default-constructed / "miss" sentinel
+    Ramfs = 1,
+    Fat32 = 2,
+};
+
+/// Resolved node — backend-tagged. Storage is by-value so the
+/// caller doesn't have to track lifetime against a backend's
+/// internal table; the FAT32 entry is a snapshot copy (mirrors
+/// `Fat32LookupPath`'s caller-owned-out shape).
+struct VfsNode
+{
+    VfsBackend backend;
+    /// Ramfs-backed nodes — pointer into the constinit ramfs tree.
+    /// Stable for the kernel's lifetime.
+    const RamfsNode* ramfs;
+    /// FAT32-backed nodes — volume index + a snapshotted DirEntry.
+    /// `fat32_volume_idx` indexes into `fs::fat32::Fat32Volume(...)`;
+    /// `fat32_entry` carries the resolved entry by value.
+    u32 fat32_volume_idx;
+    fat32::DirEntry fat32_entry;
+};
+
+/// True when `n` is a real resolved node (backend != Invalid).
+bool VfsNodeIsValid(const VfsNode& n);
+
+/// True when `n` represents a directory in its backend.
+bool VfsNodeIsDir(const VfsNode& n);
+
+/// True when `n` represents a regular file in its backend.
+bool VfsNodeIsFile(const VfsNode& n);
+
+/// Size of a file-backed node, 0 for directories / invalid nodes.
+u64 VfsNodeSize(const VfsNode& n);
+
+/// Cross-mount path resolver. Walks `path` starting from `root`
+/// (a ramfs root, typically `Process::root`). When the path's
+/// longest mount-prefix matches a non-ramfs mount, dispatches to
+/// that backend's lookup with the in-mount subpath; otherwise
+/// resolves through the ramfs walker. Returns a `VfsNode` with
+/// `backend = Invalid` on miss / malformed path.
+///
+/// Same path-resolution rules as `VfsLookup` — leading-slash
+/// optional, `..` rejected, `.` skipped, empty components
+/// tolerated. The mount-prefix check considers the path verbatim
+/// (it does NOT chase ramfs symlinks first) — a mount of
+/// `/disk/0` exists in the global namespace, not as a member of
+/// the calling process's ramfs root.
+///
+/// Ramfs mounts in the registry are ignored by the dispatcher —
+/// the explicit `root` argument is authoritative for the ramfs
+/// view (so sandbox roots stay sandbox roots even when a ramfs
+/// mount is registered globally).
+VfsNode VfsResolve(const RamfsNode* root, const char* path, u64 path_max);
+
+/// Cross-mount resolver self-test. Runs AFTER FAT32 auto-mount
+/// has registered each probed volume (`/disk/<idx>` mount points
+/// with `FsType::Fat32`). Asserts a `/disk/0/HELLO.TXT` resolve
+/// hits the FAT32 backend, surfaces the right size, and that
+/// missing paths under the same mount return Invalid. SKIPs
+/// gracefully on systems with no FAT32 volume so the test stays
+/// no-op on QEMU runs without an attached disk image.
+void VfsResolveCrossMountSelfTest();
 
 } // namespace duetos::fs

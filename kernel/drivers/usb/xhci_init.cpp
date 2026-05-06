@@ -131,9 +131,23 @@ void HidPollEntry(void* raw)
                     u32 actual = dev.hid_ep_max_packet;
                     if (residual <= actual)
                         actual -= residual;
-                    if (actual > 8)
-                        actual = 8;
-                    HidMouseInjectN(dev.hid_buf_virt, actual);
+                    // Layout-aware path supports 16-bit XY for high-
+                    // DPI mice; clamp at 16 bytes (typical max-packet
+                    // for an interrupt-IN HID endpoint) so reports up
+                    // to that length flow through without truncation.
+                    // Boot-protocol fallback still caps at 8 bytes.
+                    if (dev.hid_mouse_layout_valid)
+                    {
+                        if (actual > 16)
+                            actual = 16;
+                        HidMouseInjectWithLayout(dev.hid_buf_virt, actual, &dev.hid_mouse_layout);
+                    }
+                    else
+                    {
+                        if (actual > 8)
+                            actual = 8;
+                        HidMouseInjectN(dev.hid_buf_virt, actual);
+                    }
                 }
                 else
                 {

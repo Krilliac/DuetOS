@@ -97,4 +97,41 @@ const MountEntry* VfsMountResolve(const char* path, const char** out_subpath);
 /// assert each step. Panics on mismatch. Cheap and runs once.
 void VfsMountSelfTest();
 
+// =====================================================================
+// Per-FsType lookup vtable (Stage 6 second slice).
+//
+// `VfsResolve` (in `vfs.h`) dispatches across mount points by
+// asking the mount registry for the longest-prefix match, then
+// calling the resolved entry's `FsType` lookup function with the
+// in-mount subpath. Each backend that wants to be reachable
+// through `VfsResolve` registers a `VfsBackendOps` struct via the
+// `VfsBackendForFsType` query.
+//
+// Ramfs is intentionally NOT in this vtable — `VfsResolve` is
+// always called with an explicit ramfs `root` argument, and a
+// ramfs entry in the mount registry would otherwise let any
+// process see another root through the global mount table.
+// =====================================================================
+
+/// Resolve `subpath` (volume-relative, leading-slash tolerated)
+/// in the backend identified by `block_handle`. Fills `*out_node`
+/// (which the caller treats as opaque — see `VfsNode` in `vfs.h`)
+/// and returns true on success, false on miss / I/O error / bad
+/// arguments. `out_node` storage is provided as a `void*` so this
+/// header doesn't have to pull `vfs.h`; `mount.cpp` casts it back
+/// to `VfsNode*` internally. The vtable shape stays narrow on
+/// purpose — adding more methods (read / readdir / stat) lands
+/// in follow-up slices when callers actually need them.
+using VfsBackendLookupFn = bool (*)(u32 block_handle, const char* subpath, void* out_node);
+
+struct VfsBackendOps
+{
+    VfsBackendLookupFn lookup;
+};
+
+/// Returns the ops table for `t`, or nullptr if no backend is
+/// registered. Today: FAT32 is wired; Ext4 / NTFS return nullptr
+/// (they have a registry slot but no read path yet).
+const VfsBackendOps* VfsBackendForFsType(FsType t);
+
 } // namespace duetos::fs

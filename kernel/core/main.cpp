@@ -80,6 +80,7 @@
 #include "debug/tripwire.h"
 #include "debug/watch.h"
 #include "drivers/audio/audio.h"
+#include "drivers/audio/hda.h"
 #include "drivers/gpu/cea861.h"
 #include "drivers/gpu/cvt.h"
 #include "drivers/gpu/dpms.h"
@@ -2286,6 +2287,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWrite("[boot] Parsing ACPI tables.\n");
     duetos::acpi::AcpiInit(multiboot_info);
     DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiUnderflowSelfTest());
+
+    // SRAT memory-affinity records are now parsed (AcpiInit ->
+    // SratInit). Hand them to the frame allocator so subsequent
+    // AllocateFrame calls bias toward the calling CPU's local
+    // node. UMA boots (no SRAT) leave the per-node table empty
+    // and the global linear-scan path stays the only path.
+    duetos::mm::FrameAllocatorBuildNumaRanges();
+    DUETOS_BOOT_SELFTEST(duetos::mm::FrameAllocatorNumaSelfTest());
     SerialWrite("[boot] Building AML namespace from DSDT/SSDT.\n");
     duetos::acpi::AmlNamespaceBuild();
     {
@@ -2728,6 +2737,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // drivers/audio fault domain self-registers via
     // KERNEL_INITCALL(Drivers, "drivers/audio.module", ...) in
     // `kernel/drivers/audio/audio.cpp`.
+    DUETOS_BOOT_SELFTEST(duetos::drivers::audio::hda::VerbEncodingSelfTest());
 
     SerialWrite("[boot] Bringing up power / thermal shell.\n");
     duetos::drivers::power::PowerInit();
@@ -2821,6 +2831,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             (void)duetos::fs::VfsMount(mp, duetos::fs::FsType::Fat32, i);
         }
     }
+
+    SerialWrite("[boot] Cross-mount VfsResolve self-test.\n");
+    DUETOS_BOOT_SELFTEST(duetos::fs::VfsResolveCrossMountSelfTest());
 
     SerialWrite("[boot] Routing Win32 file syscalls through FAT32.\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::routing::SelfTest());

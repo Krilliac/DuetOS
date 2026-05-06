@@ -612,6 +612,365 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 126 — HDA verb-encoding fix + ConfigureOutputPath stitched bring-up
+
+- **Scope:** `kernel/drivers/audio/hda.{h,cpp}` (new
+  `EncodeVerb16` for the 4-bit-verb / 16-bit-payload form;
+  `IssueVerbAndPoll16` wraps it through CORB / RIRB;
+  `IssueVerbRawAndPoll` factored out for reuse;
+  `CodecSetConverterFormat` and `CodecSetAmpGainMute` switched
+  from the truncated 12+8 form to the proper 4+16 form;
+  new `ConfigureOutputPath` stitches the five-verb DAC →
+  amp → pin → stream-tag sequence; new
+  `kAmpPayloadSetOutBothMid` / `kPinPayloadOutputEnable`
+  defaults; `VerbEncodingSelfTest` exercises both encoders).
+  `kernel/core/main.cpp` (added the boot self-test invocation
+  + `drivers/audio/hda.h` include).
+- **Decision (encoding):** keep `EncodeVerb` (12-bit-verb /
+  8-bit-data) verbatim — it covers GET_PARAMETER and every
+  other 12+8 verb the codec walker uses today. Add
+  `EncodeVerb16` (4-bit-verb / 16-bit-payload) as a sibling
+  rather than overloading the existing helper. Callers continue
+  to pass verb12 in the `0x2NN` / `0x3NN` form (matches the
+  numbering convention used throughout the file); the new
+  encoder extracts the high nibble.
+- **Why the encoding bug mattered:** SET_CONVERTER_FORMAT (verb
+  0x2) and SET_AMP_GAIN_MUTE (verb 0x3) take 16-bit payloads.
+  Pre-fix, only the low 8 bits reached the codec — meaning
+  `CodecSetConverterFormat(format=0xABCD)` actually transmitted
+  `format=0x00CD`. The format register is what tells the
+  codec the sample rate / depth / channel count. Wrong format
+  = the codec pulls the wrong number of bytes per frame =
+  silence (or noise). Same story for amp gain.
+- **Decision (ConfigureOutputPath):** ship the stitched
+  sequence as one entry point so a "play system beep" caller
+  doesn't have to know the verb order. Path selection
+  (`dac_node`, `pin_node`) stays the caller's responsibility —
+  picking the right DAC / pin pair needs codec-specific
+  knowledge (Intel HDA codecs use widely different node
+  numbering). Today the helper has no production consumer;
+  the audio shell is the obvious first one.
+- **Self-test:** verb-encoding self-test runs at boot and
+  asserts canonical inputs round-trip correctly. Catches a
+  future regression in either encoder before any real codec
+  sees a malformed verb. Cheap (no MMIO, no DMA, no codec
+  required).
+- **Rules out / defers:** Real DMA buffer allocation +
+  populating a BDL with sample data + flipping RUN + observing
+  samples land at a codec — needs `mm::AllocDmaCoherent` calls
+  threaded through the audio shell (or a system-beep
+  driver) and QEMU's `-device hda-output` for byte-level
+  verification. Path selection ("find a working speaker pin")
+  defers to a workload that wants automatic configuration; the
+  audio shell can drive `ConfigureOutputPath` with manually
+  chosen nodes in the meantime.
+- **Revisit when:** A workload calls `ConfigureOutputPath`
+  (system beep, Settings volume slider preview, audio shell
+  test-tone) — at that point the BDL allocation + RUN bit
+  toggle + signal generator slot in alongside.
+- **Related tracks:** Track 5 (Drivers — audio).
+
+---
+
+## 125 — NUMA-aware page allocator
+
+- **Scope:** `kernel/acpi/srat.{h,cpp}` (subtype-1 Memory Affinity
+  record decode + `MemoryRange` struct + `SratMemoryRangeCount`
+  / `SratMemoryRange` accessors; remap path shared with the
+  existing CPU-affinity walk so dense-node indices stay
+  consistent across both tables). `kernel/mm/frame_allocator.{h,cpp}`
+  (per-node frame ranges built from SRAT in
+  `FrameAllocatorBuildNumaRanges`; `BitmapFindFreeInRange` +
+  `NumaNodeRange` + `CurrentCpuNumaNode` helpers; new
+  `AllocateFrameNode(node)` API; `AllocateFrame` routes through
+  `AllocateFrameNode(CurrentCpuNumaNode())` on NUMA boots,
+  preserves the verbatim global linear-scan path on UMA;
+  shared `ProcessAndReturnFrame` tail covers the kernel-PT
+  guard + zeroing + per-node hint round-robin;
+  `FrameAllocatorNumaSelfTest` smoke test). `kernel/core/main.cpp`
+  (calls `FrameAllocatorBuildNumaRanges` immediately after
+  `AcpiInit` returns + the new self-test).
+- **Decision:** Keep the bitmap a single global structure. The
+  NUMA bias is a *search-start position*, not a separate per-
+  node allocator. The calling CPU's local node has first dibs
+  on its memory-affinity range; on local-node OOM the search
+  falls through to the global linear scan. UMA boots (no SRAT)
+  see the historical path byte-for-byte: `g_numa_node_count == 0`
+  short-circuits the NUMA path entirely.
+- **Why hint-only over per-node bitmaps:** per-node bitmaps
+  would force the firmware-reported memory ranges to be the
+  ground truth for every allocator-visible frame. They aren't —
+  some firmware reports overlapping ranges, some leaves MMIO
+  holes inside an "available" range, and our reservation pass
+  (kernel image, Multiboot info, bitmap-self) crosses node
+  boundaries on multi-socket systems. A unified bitmap lets
+  the existing reservation logic stay verbatim; the per-node
+  hint only changes WHERE the search starts.
+- **Multi-range nodes:** stored as the union span (min-base,
+  max-end) per node. Allocations near the node's "edge" can
+  pick frames that aren't strictly inside one of the affinity
+  ranges, but they're inside the union — close enough for
+  locality bias. Strict per-range scanning is a follow-on if
+  a workload exposes the inefficiency.
+- **Lifetime:** `FrameAllocatorBuildNumaRanges` runs once after
+  `AcpiInit` (which calls `SratInit` internally). Re-callable —
+  resets the per-node table at the head. Idempotent on the
+  same SRAT.
+- **Owner-pointer / cycle concern:** none. The frame allocator
+  reaches into `cpu::TopologyForCpu(CurrentCpuIdOrBsp())` per-
+  call to find the local node. `TopologyForCpu` is a plain
+  array read after `TopologyInitBsp` returns; safe from any
+  context. The cost is one extra indexed read per
+  `AllocateFrame`, well below the bitmap-scan cost on a
+  populated pool.
+- **OOM-injection harness:** `g_fail_after` consumed inside
+  `AllocateFrameNode` so existing tests (loader-unwind in
+  `diag/robustness_selftest.cpp`) drive the same OOM ladder
+  as before — the NUMA bias is invisible to the test scaffold.
+- **Rules out / defers:** Per-node free counters / explicit
+  "interleave" / "remote-only" allocation policies — they're
+  larger surface changes that need a workload calling for
+  them. Strict per-range scanning (vs union span) — same
+  reasoning. Migrating long-lived allocations across nodes —
+  v0 frames don't move once handed out.
+- **Revisit when:** a multi-socket workload demonstrates
+  remote-allocation cost in a profile, or the firmware
+  surfaces multi-range nodes whose union spans cross another
+  node's range. At that point per-range scanning + per-node
+  hint round-robin earn their complexity.
+- **Related tracks:** Track 1 (Kernel — memory management),
+  Track 2 (Kernel — SMP / NUMA topology).
+
+---
+
+## 124 — HID descriptor-driven mouse decoding (high-DPI 16-bit XY)
+
+- **Scope:** `kernel/drivers/usb/hid_descriptor.{h,cpp}` (new
+  `HidMouseField` + `HidMouseLayout` structs;
+  `HidExtractMouseLayout` walker tracking Local Usage list +
+  Logical Min sign + Report ID + bit cursor across Mouse
+  Application collections; new self-test descriptor
+  `kHighDpiMouseDescriptor` + four new `ExpectEq` blocks).
+  `kernel/drivers/usb/xhci_input.cpp` (new
+  `HidMouseInjectWithLayout` extracting fields at bit
+  offsets + sign-extending signed axes; `ExtractBitsLE` /
+  `SignExtend` helpers). `kernel/drivers/usb/xhci_internal.h`
+  (`HidMouseInjectWithLayout` decl; `DeviceState` grew
+  `hid_mouse_layout_valid` + `hid_mouse_layout` fields).
+  `kernel/drivers/usb/xhci_init.cpp` (polling loop dispatches
+  layout-aware path when valid; 16-byte buffer cap when
+  layout is in use, 8-byte fallback for boot protocol).
+- **Decision:** Parser produces a flat `HidMouseLayout` rather
+  than a `Field[]` table. The well-known mouse fields (X / Y
+  / wheel / horizontal tilt / buttons / report ID) are a
+  fixed, finite set; an array shape would force every
+  consumer to scan it. Direct-named slots stay O(1) for the
+  inject hot path.
+- **Why now:** the parser side was the heavy lift — bit-level
+  walking with Logical Min sign tracking and Local Usage list
+  reset semantics matches HID spec §6.2.2 verbatim. Hardware-
+  fetch wiring (GET_DESCRIPTOR(Report)) is a few-line follow-on
+  best validated against a real high-DPI mouse, which the test
+  fleet doesn't have today. Landing the parser + injector with
+  a synthetic 5-button / 16-bit-XY / wheel / AC-Pan self-test
+  proves the byte-level decode and unblocks the wiring slice
+  whenever a real device shows up.
+- **Layout-aware vs boot-protocol:** the polling loop branches on
+  `dev.hid_mouse_layout_valid`. Today the layout slot is
+  always invalid (no fetch); the boot-protocol path stays
+  the runtime default and every existing mouse path is
+  byte-for-byte unchanged. The first commit that wires the
+  fetch flips the boolean per-device, with no global behaviour
+  change for boot-protocol-only devices.
+- **MousePacket coverage:** vertical wheel (`dz`), buttons 1..5
+  (`kMouseButtonLeft / Right / Middle / Button4 / Button5`),
+  and signed X / Y deltas all flow through. Horizontal tilt /
+  AC Pan is parsed but discarded — `MousePacket` has no
+  horizontal-scroll field today; the layout's
+  `h_tilt.present` flag is preserved so a future MousePacket
+  expansion can pick it up.
+- **Rules out / defers:** Digitizer / absolute-pointer
+  decoding (the layout extractor refuses non-Mouse primary
+  kinds; touch panels live in a separate Application
+  collection). Multi-collection mice (some gaming mice expose
+  multiple Application collections — keyboard mode + mouse
+  mode); we capture the first Mouse collection only.
+  GET_DESCRIPTOR(Report) fetch wiring stays a follow-on,
+  gated on a real high-DPI mouse in the test fleet.
+- **Revisit when:** a workload (or test-fleet hardware) needs
+  digitizer events; or a mouse legitimately switches modes
+  via a non-first Application collection; or
+  `MousePacket` grows a horizontal-scroll field.
+- **Related tracks:** Track 5 (Drivers — USB).
+
+---
+
+## 123 — VFS Stage 6 finish: cross-mount `VfsResolve` + `VfsNode`
+
+- **Scope:** `kernel/fs/vfs.{h,cpp}` (new `VfsBackend` enum,
+  `VfsNode` tagged-storage struct + accessors `VfsNodeIsValid`,
+  `VfsNodeIsDir`, `VfsNodeIsFile`, `VfsNodeSize`; new
+  `VfsResolve(root, path, path_max) -> VfsNode` walker;
+  `VfsResolveCrossMountSelfTest()` exercising a real `/disk/0/HELLO.TXT`
+  resolution post-FAT32-auto-mount). `kernel/fs/mount.{h,cpp}`
+  (new `VfsBackendLookupFn` + `VfsBackendOps` vtable +
+  `VfsBackendForFsType`; `Fat32Lookup` adapter wraps
+  `Fat32LookupPath` into a vtable entry). `kernel/core/main.cpp`
+  (new `DUETOS_BOOT_SELFTEST(VfsResolveCrossMountSelfTest())`
+  immediately after FAT32 auto-mount, before the routing self-test).
+- **Decision:** Add a sibling `VfsResolve` API that returns a
+  generic backend-tagged `VfsNode` rather than changing
+  `VfsLookup`'s `RamfsNode*` signature. The existing `VfsLookup`
+  callers (sandbox enforcement against `Process::root`,
+  syscall path resolution) keep their narrow ramfs-only contract
+  — none of them are equipped to handle a FAT32 entry today.
+  New callers that legitimately want to cross a mount point
+  (the kernel shell's `cd /disk/0/SUB`, future generic
+  `stat`/`open`/`readdir` syscalls that go through one
+  resolver) opt into the broader API. Backend dispatch lives
+  on a per-FsType vtable in `mount.cpp`; FAT32 is wired today,
+  Ext4 / NTFS slots return nullptr until a backend ships.
+- **Why:** Dual signatures avoid a fleet-wide refactor of every
+  existing `VfsLookup` caller. The constinit ramfs trees,
+  sandbox roots, and "is this path inside the jail" checks all
+  rely on the `RamfsNode*` shape; rewriting them to handle a
+  tagged union when none of them cross mount points would be
+  pure churn. Adding `VfsResolve` separately gives the cross-
+  mount story a real home and matches the original Stage 6
+  plan's "per-FS-type lookup vtable" sketch.
+- **Mount-registry semantics:** Ramfs mounts in the registry are
+  IGNORED by `VfsResolve` (the dispatcher only fires on non-
+  ramfs `FsType`s). The explicit `root` argument stays
+  authoritative for the ramfs view, so a sandbox root keeps
+  its jail invariant even when the global namespace has a
+  ramfs entry registered. Relative paths (no leading slash)
+  always go through the ramfs walker — the mount registry is
+  a global-namespace facility and relative paths are anchored
+  to the caller, not to `/`.
+- **VfsNode storage:** `VfsNode` carries the FAT32 entry by
+  value (snapshot copy mirroring `Fat32LookupPath`'s caller-
+  owned-out shape), so callers don't have to track lifetime
+  against any backend's internal table. Ramfs nodes stay as
+  pointers into `.rodata` — the constinit trees outlive every
+  caller. The struct is fixed-size; future backends can add a
+  union arm without breaking ABI inside the kernel.
+- **Self-test wiring:** Two layers cover the resolver. The
+  in-place `VfsSelfTest` (Phase::Vfs, before FAT32 probe) runs
+  the ramfs-fall-through, sandbox-jail-survives-VfsResolve,
+  and `..` rejection cases. `VfsResolveCrossMountSelfTest`
+  runs after FAT32 auto-mount (when `/disk/0` is in the mount
+  registry pointing at a real volume) and asserts the FAT32-
+  backend dispatch end-to-end against the seeded HELLO.TXT.
+  SKIPs gracefully on volumes-less boots so QEMU runs without
+  a disk image stay no-op.
+- **Rules out / defers:** Migrating `Process::root` to a
+  `VfsNode` (so a sandboxed process can be rooted in a non-
+  ramfs subtree) — `Process::root` stays a `const RamfsNode*`
+  for v0; today every process root is ramfs by construction.
+  A unified `open`/`stat`/`readdir` syscall surface that takes
+  a `VfsNode` instead of routing-layer-specific `Win32FileHandle`
+  / `LinuxFd` slots — that's a much bigger refactor, gated on
+  a workload that wants per-process jails on FAT32 subtrees.
+  Removing the legacy "/disk/<idx>" parser fallback in
+  `routing::ParseDiskPath` — kept for boots where auto-mount
+  hasn't run yet (fault-domain restart cleared the registry,
+  early callers).
+- **Revisit when:** A workload wants to sandbox a process under
+  a FAT32 subtree (e.g. running a PE image with its rootfs
+  pinned to `/disk/0/SANDBOX/`). At that point the syscall
+  layer's `VfsLookup`-against-`Process::root` calls migrate
+  to `VfsResolve`, and `Process::root` grows from a
+  `RamfsNode*` to a `VfsNode` carrying the appropriate
+  backend.
+- **Related tracks:** Track 3 (Storage / FS), Track 1 (Kernel —
+  VFS abstraction).
+
+---
+
+## 122 — Dirfd (Linux state 11) on owner-aware KFile release
+
+- **Scope:** `kernel/ipc/kfile.{h,cpp}` (new
+  `KFileProcessRelease` typedef + `KFile::owner` +
+  `KFile::release_pool_with_owner` fields + `KFileCreateWithOwner`
+  ctor; `KFileDestroy` fires both the legacy and owner-aware
+  releases; self-test grew a third round exercising the owner-
+  aware shape with a sentinel `Process*`),
+  `kernel/proc/process.{h,cpp}` (new helper
+  `LinuxFdAttachKFileOwned` mirroring `LinuxFdAttachKFile` but
+  taking `void(Process*, u32)`; `ProcessRelease` reorders
+  HandleTableDrain to run **before** the `win32_dirs[]` sweep so
+  dirfd KFile destroys can call `SysDirClose(p, ...)` on the
+  still-live per-process table),
+  `kernel/subsystems/linux/syscall_file.cpp` (DoOpen's directory
+  branch attaches a KFile via `LinuxFdAttachKFileOwned` whose
+  release adapter `DirfdReleaseOwnerAware(p, slot)` calls
+  `SysDirClose(p, kWin32DirBase+slot)`; DoClose's legacy
+  state==11 explicit-release arm is removed entirely — every
+  fd kind that owns a per-pool ref is now on the unified
+  KFile path),
+  `kernel/subsystems/linux/syscall_clone.cpp` (comment refresh —
+  dirfd is no longer "the lone hold-out").
+- **Decision:** Add an owner-aware release-callback variant
+  alongside the existing pool-only callback rather than
+  promoting the entire `Win32DirHandle` snapshot onto KFile.
+  KFile carries an optional `Process* owner` pointer set at
+  attach time and pinned for the KFile's lifetime; the
+  destroy callback fires `release_pool_with_owner(owner,
+  pool_index)` which calls `SysDirClose(owner, slot)`. The
+  win32_dirs[] table on Process stays the slot pool — Win32
+  callers (FindFirstFile/FindNextFile/NtQueryDirectoryFile)
+  keep using raw `kWin32DirBase + idx` handles unchanged, and
+  Linux fds get a KFile sidecar that drives the same per-slot
+  cleanup through KObject refcounting.
+- **Why:** The roadmap offered two options ("a `void(Process*,
+  u32)` callback variant in KFile, or promoting the directory
+  snapshot itself onto KFile"). The variant is a 4-line struct
+  delta + one new ctor + one rebuilt destroy branch; the
+  promotion would touch `Win32DirHandle`, every `win32_dirs[]`
+  consumer (SysDirOpenKernel/SysDirNext/SysDirRewind/SysDirClose,
+  DoGetdents / DoGetdents64), and force the Win32 dir handle ABI
+  through the KFile shape too. The variant is the smaller
+  change and gets every Linux fd kind onto the unified handle
+  table — the migration's actual goal — without dragging the
+  Win32 ABI surface along for the ride.
+- **Lifetime / cross-process safety:** dirfd never crosses
+  processes — `pidfd_splice.cpp:207` refuses state 11 in
+  `pidfd_getfd`, and `syscall_clone.cpp` (DoFork) closes every
+  inherited dirfd slot in the child immediately after
+  `LinuxFdInheritFromParent`. The owner pointer is therefore
+  pinned to the same Process for every reference of every
+  KFile. No `ProcessRetain` / refcount bump on the owner is
+  needed; keeping the pointer non-owning avoids the cycle the
+  full retain shape would introduce.
+- **Process-exit ordering:** moved `HandleTableDrain` BEFORE
+  the `win32_dirs[]` sweep in `ProcessRelease`. Drain fires
+  every live KFile destroy (including dirfd's owner-aware
+  release) while the per-process dir-slot table is still
+  intact; the subsequent sweep only reaches slots that had no
+  KFile sidecar (Win32-only FindFirstFile callers that exited
+  without CloseHandle) and is idempotent — `entries == nullptr`
+  short-circuits already-cleaned slots.
+- **Rules out / defers:** Promoting the directory snapshot
+  itself onto KFile (vnode + entries pointer with the
+  `Win32DirHandle` slot pool eliminated) — still possible, but
+  would need to either route Win32 raw handles through KFile
+  too, or carry two parallel storage paths. Either is a bigger
+  shape change than the migration needed. Cross-process dirfd
+  sharing — still refused by `pidfd_splice` for the same
+  semantic reason as before; the new KFile shape doesn't change
+  that policy.
+- **Revisit when:** A workload demonstrates a corner the slot-
+  pool can't represent (per-fd dirent cursor needing >256
+  entries / handle, dirfd that survives a fork on the child
+  side, openat using a real dirfd as the base). At that point
+  promoting the snapshot onto KFile + retiring `win32_dirs[]`
+  becomes worthwhile because the slot-pool ceiling is the
+  blocker, not the callback shape.
+- **Related tracks:** Track 1 (Kernel — IPC + handle table),
+  Track 4 (Linux subsystem — fd table + creators).
+
+---
+
 ## 121 — kernel32 GetCommandLineA / W exports + tighten Lock* export list
 
 - **Scope:** `userland/libs/kernel32/kernel32.c`

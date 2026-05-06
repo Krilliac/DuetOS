@@ -36,6 +36,21 @@ namespace duetos::subsystems::linux::internal
 namespace
 {
 
+// Owner-aware release callback for dirfd KFiles. Fires from
+// `KFileDestroy` when the last reference (close / process exit /
+// inherited-then-closed) drops; resolves `pool_index` to a
+// `win32_dirs[]` slot on the owning process and frees it via
+// `SysDirClose` (which KFrees the entries snapshot and marks the
+// slot unused). Owner is pinned at attach time and dirfd never
+// crosses processes (pidfd_splice refuses state 11; fork closes
+// the child's dirfd slots immediately) so the owner pointer is
+// always valid.
+void DirfdReleaseOwnerAware(::duetos::core::Process* owner, u32 pool_index)
+{
+    const u64 dh = static_cast<u64>(pool_index) + ::duetos::core::Process::kWin32DirBase;
+    ::duetos::subsystems::win32::SysDirClose(owner, dh);
+}
+
 // Fill a Linux struct stat from the given FAT32 directory entry.
 // Layout matches uapi/asm-generic/stat.h for x86_64 (144 bytes).
 // Times are zeroed — no RTC integration yet.
@@ -212,6 +227,19 @@ i64 DoOpen(u64 user_path, u64 flags, u64 mode)
         p->linux_fds[fd].size = 0;
         p->linux_fds[fd].offset = 0;
         p->linux_fds[fd].path[0] = '\0';
+        // Attach a KFile sidecar so close / fork-then-close /
+        // process-exit all route through the unified handle table.
+        // The owner-aware release fires `SysDirClose(p, ...)` once
+        // per dirfd lifetime — same shape as the legacy DoClose
+        // arm, but driven by KObject refcounting instead of an
+        // open-coded per-state branch.
+        if (!core::LinuxFdAttachKFileOwned(p, static_cast<u32>(fd), /*kind=*/11, dslot, &DirfdReleaseOwnerAware))
+        {
+            ::duetos::subsystems::win32::SysDirClose(p, static_cast<u64>(dh));
+            p->linux_fds[fd].state = 0;
+            p->linux_fds[fd].first_cluster = 0;
+            return kENOMEM;
+        }
         if ((flags & kO_CLOEXEC) != 0)
             core::LinuxFdSetCloexec(p, static_cast<u32>(fd), true);
         return static_cast<i64>(fd);
@@ -251,24 +279,15 @@ i64 DoOpen(u64 user_path, u64 flags, u64 mode)
 // Linux: close(fd). Marks the slot unused. No destructor work
 // for FAT32-backed regular files (snapshotted at open). For
 // pool-backed kinds the per-pool release is driven by the
-// slot's KFile sidecar (`kf_handle`) when one is attached:
-// `LinuxFdClose` calls `HandleTableRemove`, the resulting
-// `KObjectRelease` fires `KFileDestroy`, and that dispatches
-// to the per-pool release callback (e.g. `PipeReleaseRead`)
-// registered when the slot was created.
+// slot's KFile sidecar (`kf_handle`): `LinuxFdClose` calls
+// `HandleTableRemove`, the resulting `KObjectRelease` fires
+// `KFileDestroy`, and that dispatches to the per-pool release
+// callback (e.g. `PipeReleaseRead`, or `DirfdReleaseOwnerAware`
+// for state 11) registered when the slot was created.
 //
-// State 11 (dirfd / directory snapshot) is the only kind still
-// on the legacy explicit `*Release` path — its release frees
-// a `win32_dirs[]` slot belonging to the owning process, which
-// the uniform `void(u32 pool_index)` KFile callback can't
-// reach without a `Process*` adapter. Until that adapter
-// lands, we explicitly call `SysDirClose(p, ...)` here while
-// `p` (the current process) is still in scope.
-//
-// The other legacy arms (states 3..10, 12..15) have been
-// removed — every creator for those kinds now attaches a
-// KFile, and a regression that fails to do so would still be
-// safe (the slot just leaks its pool ref, no double-free).
+// Every state-kind that owns a per-pool ref (3..10, 11, 12..15)
+// is now on the KFile path — there are no legacy explicit
+// `*Release` arms left in this handler.
 i64 DoClose(u64 fd)
 {
     core::Process* p = core::CurrentProcess();
@@ -282,18 +301,9 @@ i64 DoClose(u64 fd)
         return kEBADF;
     }
 
-    // Dirfd legacy arm — only kind not yet on the KFile path.
-    // Fires before the unified slot teardown so `p` still
-    // resolves the win32_dirs[] entry.
-    if (p->linux_fds[fd].state == 11 && p->linux_fds[fd].kf_handle == ::duetos::ipc::kHandleInvalid)
-    {
-        const u64 dh = p->linux_fds[fd].first_cluster + core::Process::kWin32DirBase;
-        ::duetos::subsystems::win32::SysDirClose(p, dh);
-    }
-
     // Centralised slot teardown — drops the KFile ref when a
     // sidecar is attached (firing the per-pool release callback
-    // for migrated kinds).
+    // for migrated kinds, including dirfd's owner-aware variant).
     core::LinuxFdClose(p, static_cast<u32>(fd));
     return 0;
 }
