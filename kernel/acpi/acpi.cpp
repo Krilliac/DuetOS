@@ -575,6 +575,15 @@ void CollectSsdts(const Rsdp& rsdp)
             const auto* h = PhysToHeader(entries[i]);
             if (BytesEqual(h->signature, "SSDT", 4))
             {
+                if (!ChecksumOk(h, h->length))
+                {
+                    // Every other ACPI table the kernel consumes is
+                    // checksum-validated before use. SSDTs were
+                    // skipping the check, so a corrupt SSDT would
+                    // be cached and later read by AmlContainsName.
+                    core::Log(core::LogLevel::Warn, "acpi", "SSDT checksum failed; skipping table");
+                    continue;
+                }
                 CacheSsdt(entries[i], h->length);
             }
         }
@@ -589,6 +598,11 @@ void CollectSsdts(const Rsdp& rsdp)
         const auto* h = PhysToHeader(entries[i]);
         if (BytesEqual(h->signature, "SSDT", 4))
         {
+            if (!ChecksumOk(h, h->length))
+            {
+                core::Log(core::LogLevel::Warn, "acpi", "SSDT checksum failed; skipping table");
+                continue;
+            }
             CacheSsdt(entries[i], h->length);
         }
     }
