@@ -171,11 +171,28 @@ In rough priority:
 
 ### Audio — HDA codec / stream programming
 
-- **Today:** Intel HDA register probe only (`kernel/drivers/audio/audio.cpp`).
-  PC speaker still works through `pcspk.cpp`. Codec walker exists
-  but stream / amplifier wiring is `// GAP:`-marked.
-- **Blocks:** Settings volume slider, system beep on
-  notifications, WAV / OGG playback app.
+- **Today:** Intel HDA register probe + codec walker
+  (`kernel/drivers/audio/audio.cpp` + `hda.cpp`). Stream
+  descriptor `StreamArm` programs BDLPL/BDLPU/CBL/LVI/FORMAT;
+  RUN bit toggled via `StreamRun`. Codec configuration verbs
+  `CodecSetConverterFormat` / `CodecSetAmpGainMute` use the
+  4-bit-verb / 16-bit-payload encoding (verb 0x2 / 0x3) — the
+  full 16-bit format value reaches the codec instead of the
+  truncated 8-bit form. `ConfigureOutputPath` stitches the
+  five-verb sequence (DAC format → DAC amp → pin amp → pin
+  widget control → converter stream tag) so a future "play
+  system beep" path doesn't have to know the order. Boot self-
+  test exercises the verb-encoding helpers against canonical
+  inputs.
+- **Blocks (still pending):** allocating real audio buffer
+  pages + populating a BDL with sample data + flipping RUN +
+  observing samples land at the codec — needs a DMA-coherent
+  buffer allocator path that's wired through the audio shell
+  (or a system-beep driver), plus QEMU's `-device hda-output`
+  to verify the byte-level path. Also: a "find first speaker
+  pin" heuristic that picks the dac_node / pin_node pair to
+  hand `ConfigureOutputPath`. Today the helper is called by
+  no one — it's plumbing waiting for a consumer.
 - **Owner:** `kernel/drivers/audio/`.
 
 ### Wireless — real-hardware verification

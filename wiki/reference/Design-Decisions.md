@@ -612,6 +612,66 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 126 — HDA verb-encoding fix + ConfigureOutputPath stitched bring-up
+
+- **Scope:** `kernel/drivers/audio/hda.{h,cpp}` (new
+  `EncodeVerb16` for the 4-bit-verb / 16-bit-payload form;
+  `IssueVerbAndPoll16` wraps it through CORB / RIRB;
+  `IssueVerbRawAndPoll` factored out for reuse;
+  `CodecSetConverterFormat` and `CodecSetAmpGainMute` switched
+  from the truncated 12+8 form to the proper 4+16 form;
+  new `ConfigureOutputPath` stitches the five-verb DAC →
+  amp → pin → stream-tag sequence; new
+  `kAmpPayloadSetOutBothMid` / `kPinPayloadOutputEnable`
+  defaults; `VerbEncodingSelfTest` exercises both encoders).
+  `kernel/core/main.cpp` (added the boot self-test invocation
+  + `drivers/audio/hda.h` include).
+- **Decision (encoding):** keep `EncodeVerb` (12-bit-verb /
+  8-bit-data) verbatim — it covers GET_PARAMETER and every
+  other 12+8 verb the codec walker uses today. Add
+  `EncodeVerb16` (4-bit-verb / 16-bit-payload) as a sibling
+  rather than overloading the existing helper. Callers continue
+  to pass verb12 in the `0x2NN` / `0x3NN` form (matches the
+  numbering convention used throughout the file); the new
+  encoder extracts the high nibble.
+- **Why the encoding bug mattered:** SET_CONVERTER_FORMAT (verb
+  0x2) and SET_AMP_GAIN_MUTE (verb 0x3) take 16-bit payloads.
+  Pre-fix, only the low 8 bits reached the codec — meaning
+  `CodecSetConverterFormat(format=0xABCD)` actually transmitted
+  `format=0x00CD`. The format register is what tells the
+  codec the sample rate / depth / channel count. Wrong format
+  = the codec pulls the wrong number of bytes per frame =
+  silence (or noise). Same story for amp gain.
+- **Decision (ConfigureOutputPath):** ship the stitched
+  sequence as one entry point so a "play system beep" caller
+  doesn't have to know the verb order. Path selection
+  (`dac_node`, `pin_node`) stays the caller's responsibility —
+  picking the right DAC / pin pair needs codec-specific
+  knowledge (Intel HDA codecs use widely different node
+  numbering). Today the helper has no production consumer;
+  the audio shell is the obvious first one.
+- **Self-test:** verb-encoding self-test runs at boot and
+  asserts canonical inputs round-trip correctly. Catches a
+  future regression in either encoder before any real codec
+  sees a malformed verb. Cheap (no MMIO, no DMA, no codec
+  required).
+- **Rules out / defers:** Real DMA buffer allocation +
+  populating a BDL with sample data + flipping RUN + observing
+  samples land at a codec — needs `mm::AllocDmaCoherent` calls
+  threaded through the audio shell (or a system-beep
+  driver) and QEMU's `-device hda-output` for byte-level
+  verification. Path selection ("find a working speaker pin")
+  defers to a workload that wants automatic configuration; the
+  audio shell can drive `ConfigureOutputPath` with manually
+  chosen nodes in the meantime.
+- **Revisit when:** A workload calls `ConfigureOutputPath`
+  (system beep, Settings volume slider preview, audio shell
+  test-tone) — at that point the BDL allocation + RUN bit
+  toggle + signal generator slot in alongside.
+- **Related tracks:** Track 5 (Drivers — audio).
+
+---
+
 ## 125 — NUMA-aware page allocator
 
 - **Scope:** `kernel/acpi/srat.{h,cpp}` (subtype-1 Memory Affinity
