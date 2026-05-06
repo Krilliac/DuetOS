@@ -38,6 +38,10 @@ void KFileDestroy(KObject* obj)
     {
         f->release_pool(f->pool_index);
     }
+    if (f->release_pool_with_owner != nullptr && f->owner != nullptr)
+    {
+        f->release_pool_with_owner(f->owner, f->pool_index);
+    }
     duetos::mm::KFree(f);
 }
 
@@ -57,6 +61,29 @@ void KFileDestroy(KObject* obj)
     f->cloexec = false;
     f->pool_index = pool_index;
     f->release_pool = release;
+    f->release_pool_with_owner = nullptr;
+    f->owner = nullptr;
+    f->vnode = vnode;
+    f->flags = flags;
+    return f;
+}
+
+::duetos::core::Result<KFile*> KFileCreateWithOwner(KFileKind kind, u32 pool_index, KFileProcessRelease release,
+                                                    ::duetos::core::Process* owner, void* vnode, u32 flags)
+{
+    auto* f = static_cast<KFile*>(duetos::mm::KMalloc(sizeof(KFile)));
+    if (f == nullptr)
+    {
+        return ::duetos::core::Err{::duetos::core::ErrorCode::OutOfMemory};
+    }
+    *f = KFile{};
+    KObjectInit(&f->base, KObjectType::File, &KFileDestroy);
+    f->kind = kind;
+    f->cloexec = false;
+    f->pool_index = pool_index;
+    f->release_pool = nullptr;
+    f->release_pool_with_owner = release;
+    f->owner = owner;
     f->vnode = vnode;
     f->flags = flags;
     return f;
@@ -95,6 +122,17 @@ void SelfTestPoolRelease(u32 pool_index)
 {
     ++g_selftest_release_calls;
     g_selftest_release_index = pool_index;
+}
+
+u32 g_selftest_owner_release_calls = 0;
+u32 g_selftest_owner_release_index = 0;
+::duetos::core::Process* g_selftest_owner_release_owner = nullptr;
+
+void SelfTestOwnerRelease(::duetos::core::Process* owner, u32 pool_index)
+{
+    ++g_selftest_owner_release_calls;
+    g_selftest_owner_release_index = pool_index;
+    g_selftest_owner_release_owner = owner;
 }
 
 } // namespace
@@ -189,8 +227,57 @@ void KFileSelfTest()
         core::Panic("ipc/kfile", "self-test: release callback got wrong pool_index");
     }
 
+    // Round 3 — owner-aware release shape (dirfd path).
+    // Build a synthetic owner sentinel (cast of an integer — the
+    // self-test never dereferences it, only round-trips it through
+    // the callback) and assert it lands intact.
+    g_selftest_owner_release_calls = 0;
+    g_selftest_owner_release_index = 0;
+    g_selftest_owner_release_owner = nullptr;
+    auto* owner_sentinel = reinterpret_cast<::duetos::core::Process*>(0xFEEDFACEULL);
+    auto r3 = KFileCreateWithOwner(KFileKind::DirSnapshot, 0xBEEF, &SelfTestOwnerRelease, owner_sentinel,
+                                   /*vnode=*/nullptr, /*flags=*/0);
+    if (!r3.has_value())
+    {
+        core::Panic("ipc/kfile", "self-test: KFileCreateWithOwner failed");
+    }
+    KFile* f3 = r3.value();
+    if (f3->owner != owner_sentinel)
+    {
+        core::Panic("ipc/kfile", "self-test: owner round-trip lost");
+    }
+    if (f3->release_pool != nullptr)
+    {
+        core::Panic("ipc/kfile", "self-test: owner-aware Create left pool callback non-null");
+    }
+    auto insert3_r = HandleTableInsert(table, &f3->base);
+    if (!insert3_r.has_value())
+    {
+        core::Panic("ipc/kfile", "self-test: HandleTableInsert(3) failed");
+    }
+    if (g_selftest_owner_release_calls != 0)
+    {
+        core::Panic("ipc/kfile", "self-test: owner release fired before refcount=0");
+    }
+    if (!HandleTableRemove(table, insert3_r.value()).has_value())
+    {
+        core::Panic("ipc/kfile", "self-test: HandleTableRemove(3) failed");
+    }
+    if (g_selftest_owner_release_calls != 1)
+    {
+        core::Panic("ipc/kfile", "self-test: owner release did not fire exactly once");
+    }
+    if (g_selftest_owner_release_index != 0xBEEF)
+    {
+        core::Panic("ipc/kfile", "self-test: owner release got wrong pool_index");
+    }
+    if (g_selftest_owner_release_owner != owner_sentinel)
+    {
+        core::Panic("ipc/kfile", "self-test: owner release got wrong owner pointer");
+    }
+
     arch::SerialWrite("[ipc] kfile self-test OK (Create + kind/pool round-trip + HandleTable cycle + "
-                      "per-kind release callback).\n");
+                      "per-kind release callback + owner-aware release callback).\n");
 }
 
 } // namespace duetos::ipc

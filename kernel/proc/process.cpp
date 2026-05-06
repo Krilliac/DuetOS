@@ -390,8 +390,25 @@ void ProcessRelease(Process* p)
     subsystems::win32::custom::CleanupProcess(p);
     arch::SerialWrite("[proc] release: post-CleanupProcess\n");
 
+    // Drain the unified KObject handle table (plan A3). Calls
+    // KObjectRelease on every live slot so any object whose final
+    // reference was held by this process gets destroyed cleanly,
+    // even on abnormal exit. No-op when the process never inserted
+    // anything (the common case while the existing per-type Win32
+    // tables remain authoritative).
+    //
+    // Runs BEFORE the `win32_dirs[]` sweep below so dirfd KFiles
+    // (state 11, owner-aware release) can call `SysDirClose(p, ...)`
+    // through the live `p->win32_dirs[]` table — the sweep below
+    // handles only Win32-only dir slots that had no KFile sidecar
+    // (raw FindFirstFile callers without an attached Linux fd).
+    ::duetos::ipc::HandleTableDrain(p->kobj_handles);
+    arch::SerialWrite("[proc] release: post-HandleTableDrain\n");
+
     // Free any directory-iteration snapshots the process leaked
     // by exiting without CloseHandle on its FindFirstFile pairs.
+    // Idempotent — slots already freed by a dirfd KFile destroy
+    // (above) are skipped via the entries-null guard.
     for (u64 i = 0; i < Process::kWin32DirCap; ++i)
     {
         if (p->win32_dirs[i].entries != nullptr)
@@ -402,15 +419,6 @@ void ProcessRelease(Process* p)
     }
 
     arch::SerialWrite("[proc] release: post-win32_dirs\n");
-
-    // Drain the unified KObject handle table (plan A3). Calls
-    // KObjectRelease on every live slot so any object whose final
-    // reference was held by this process gets destroyed cleanly,
-    // even on abnormal exit. No-op when the process never inserted
-    // anything (the common case while the existing per-type Win32
-    // tables remain authoritative).
-    ::duetos::ipc::HandleTableDrain(p->kobj_handles);
-    arch::SerialWrite("[proc] release: post-HandleTableDrain\n");
 
     // Drop the stdin focus if this process held it. Without this,
     // kbd-reader would keep pushing into the freed ring's head
@@ -1124,6 +1132,27 @@ bool LinuxFdAttachKFile(Process* p, u32 fd, u8 kind, u32 pool_index, void (*rele
         // its destroy callback runs and releases the pool slot —
         // the caller had already allocated `pool_index` and is
         // counting on cleanup if attach fails.
+        ::duetos::ipc::KObjectRelease(&kf_r.value()->base);
+        return false;
+    }
+    p->linux_fds[fd].kf_handle = h_r.value();
+    return true;
+}
+
+bool LinuxFdAttachKFileOwned(Process* p, u32 fd, u8 kind, u32 pool_index, void (*release)(Process*, u32))
+{
+    if (p == nullptr || fd >= 16)
+        return false;
+    auto kf_r = ::duetos::ipc::KFileCreateWithOwner(KindOf(kind), pool_index, release, p,
+                                                    /*vnode=*/nullptr, /*flags=*/0);
+    if (!kf_r.has_value())
+        return false;
+    auto h_r = ::duetos::ipc::HandleTableInsert(p->kobj_handles, &kf_r.value()->base);
+    if (!h_r.has_value())
+    {
+        // Same rollback shape as `LinuxFdAttachKFile` — KObjectRelease
+        // fires the owner-aware destroy callback, which frees the
+        // pool slot the caller had already allocated.
         ::duetos::ipc::KObjectRelease(&kf_r.value()->base);
         return false;
     }

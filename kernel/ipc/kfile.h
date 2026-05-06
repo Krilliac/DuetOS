@@ -4,6 +4,11 @@
 #include "util/result.h"
 #include "util/types.h"
 
+namespace duetos::core
+{
+struct Process;
+}
+
 /*
  * DuetOS — concrete `KFile` kernel object.
  *
@@ -91,6 +96,17 @@ enum class KFileKind : u8
 /// when it builds the KFile.
 using KFilePoolRelease = void (*)(u32 pool_index);
 
+/// Owner-aware release callback. Same role as `KFilePoolRelease`
+/// but receives the owning `Process*` alongside the pool index, so
+/// kinds whose backing storage lives on a per-process table
+/// (currently: dirfd's `Process::win32_dirs[]` snapshot) can free
+/// the right slot. The owner pointer is captured at attach time
+/// and pinned for the lifetime of the KFile via the documented
+/// no-cross-process rule (see `pidfd_splice.cpp` — state 11 is
+/// refused; `syscall_clone.cpp` — child closes its dirfds at
+/// fork). nullptr when no per-process release is needed.
+using KFileProcessRelease = void (*)(::duetos::core::Process* owner, u32 pool_index);
+
 struct KFile
 {
     /// MUST be first — `KObject*` ↔ `KFile*` cast shape.
@@ -119,6 +135,19 @@ struct KFile
     /// Per-kind release callback, fired in `KFileDestroy` at
     /// the moment the refcount hits zero. nullptr = no-op.
     KFilePoolRelease release_pool;
+
+    /// Owner-aware release callback. Fires after `release_pool`
+    /// (typically only one of the two is set per kind). nullptr
+    /// when not used. See `KFileProcessRelease`.
+    KFileProcessRelease release_pool_with_owner;
+
+    /// Owning process for `release_pool_with_owner`. nullptr when
+    /// the kind has no per-process storage. Not refcounted —
+    /// dirfd is the only consumer today and dirfd never crosses
+    /// processes (pidfd_splice refuses state 11; fork drops the
+    /// child's dirfd slots), so the owner outlives every KFile
+    /// reference.
+    ::duetos::core::Process* owner;
 
     /// Opaque vnode handle — backend-specific (ramfs / fat32 /
     /// future-vfs). Used by `kFileKindFat32File` to point at the
@@ -155,6 +184,14 @@ struct KFile
 /// on heap exhaustion.
 ::duetos::core::Result<KFile*> KFileCreate(KFileKind kind, u32 pool_index, KFilePoolRelease release, void* vnode,
                                            u32 flags);
+
+/// Same as `KFileCreate` but registers the owner-aware release
+/// callback variant — used by `kFileKindDirSnapshot`, whose
+/// backing storage (a `Process::win32_dirs[]` slot) needs the
+/// owning process to free. `owner` MUST outlive every reference
+/// to the returned KFile (see `KFile::owner` notes).
+::duetos::core::Result<KFile*> KFileCreateWithOwner(KFileKind kind, u32 pool_index, KFileProcessRelease release,
+                                                    ::duetos::core::Process* owner, void* vnode, u32 flags);
 
 /// Read accessors — diagnostic only.
 u64 KFilePosition(const KFile* f);

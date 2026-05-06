@@ -180,24 +180,25 @@ i64 DoFork()
     child->linux_parent_pid = parent->pid;
 
     // fd inheritance — every parent fd survives into the child.
-    // For migrated kinds (3..10 + 12..15) the per-pool ref is
-    // shared via `LinuxFdInheritFromParent`'s HandleTable-
-    // Duplicate path: each side gets a fresh ipc handle pointing
-    // at the same KFile, and the KObject refcount drives the
-    // per-pool release callback (which fires once when the last
-    // handle closes). For pidfd specifically, the target
-    // Process's refcount is held by the single shared KFile —
-    // both fork-parent and fork-child contribute one KObject
-    // ref each; the underlying ProcessRetain is taken once at
-    // open and dropped once at last-close.
+    // For pool-backed kinds (3..15) the per-pool ref is shared
+    // via `LinuxFdInheritFromParent`'s HandleTable-Duplicate
+    // path: each side gets a fresh ipc handle pointing at the
+    // same KFile, and the KObject refcount drives the per-pool
+    // release callback (which fires once when the last handle
+    // closes). For pidfd specifically, the target Process's
+    // refcount is held by the single shared KFile — both fork-
+    // parent and fork-child contribute one KObject ref each;
+    // the underlying ProcessRetain is taken once at open and
+    // dropped once at last-close.
     //
-    // Dirfd (state 11) is the only kind still on the legacy
-    // path: the snapshot lives on the parent's win32_dirs[]
-    // table, which the child doesn't share, so the child's
-    // dirfd slot is cleared (POSIX permits closing dirfds on
-    // fork). `LinuxFdClose` drops any KFile sidecar the inherit
-    // helper might have duplicated; today dirfd has no sidecar,
-    // but the call shape is correct for the future migration.
+    // Dirfd (state 11) is on the owner-aware KFile path. The
+    // snapshot lives on the *parent's* `win32_dirs[]` table and
+    // the child doesn't share that storage; cross-process dirfd
+    // sharing is also refused by `pidfd_splice` for the same
+    // reason. So immediately after the unified inherit, walk the
+    // child's dirfd slots and close them — `LinuxFdClose` drops
+    // the duplicated KFile ref, the parent's ref keeps the
+    // snapshot alive until the parent itself closes the dirfd.
     core::LinuxFdInheritFromParent(parent, child);
     for (u32 i = 0; i < 16; ++i)
     {

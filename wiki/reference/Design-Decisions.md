@@ -612,6 +612,90 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 122 — Dirfd (Linux state 11) on owner-aware KFile release
+
+- **Scope:** `kernel/ipc/kfile.{h,cpp}` (new
+  `KFileProcessRelease` typedef + `KFile::owner` +
+  `KFile::release_pool_with_owner` fields + `KFileCreateWithOwner`
+  ctor; `KFileDestroy` fires both the legacy and owner-aware
+  releases; self-test grew a third round exercising the owner-
+  aware shape with a sentinel `Process*`),
+  `kernel/proc/process.{h,cpp}` (new helper
+  `LinuxFdAttachKFileOwned` mirroring `LinuxFdAttachKFile` but
+  taking `void(Process*, u32)`; `ProcessRelease` reorders
+  HandleTableDrain to run **before** the `win32_dirs[]` sweep so
+  dirfd KFile destroys can call `SysDirClose(p, ...)` on the
+  still-live per-process table),
+  `kernel/subsystems/linux/syscall_file.cpp` (DoOpen's directory
+  branch attaches a KFile via `LinuxFdAttachKFileOwned` whose
+  release adapter `DirfdReleaseOwnerAware(p, slot)` calls
+  `SysDirClose(p, kWin32DirBase+slot)`; DoClose's legacy
+  state==11 explicit-release arm is removed entirely — every
+  fd kind that owns a per-pool ref is now on the unified
+  KFile path),
+  `kernel/subsystems/linux/syscall_clone.cpp` (comment refresh —
+  dirfd is no longer "the lone hold-out").
+- **Decision:** Add an owner-aware release-callback variant
+  alongside the existing pool-only callback rather than
+  promoting the entire `Win32DirHandle` snapshot onto KFile.
+  KFile carries an optional `Process* owner` pointer set at
+  attach time and pinned for the KFile's lifetime; the
+  destroy callback fires `release_pool_with_owner(owner,
+  pool_index)` which calls `SysDirClose(owner, slot)`. The
+  win32_dirs[] table on Process stays the slot pool — Win32
+  callers (FindFirstFile/FindNextFile/NtQueryDirectoryFile)
+  keep using raw `kWin32DirBase + idx` handles unchanged, and
+  Linux fds get a KFile sidecar that drives the same per-slot
+  cleanup through KObject refcounting.
+- **Why:** The roadmap offered two options ("a `void(Process*,
+  u32)` callback variant in KFile, or promoting the directory
+  snapshot itself onto KFile"). The variant is a 4-line struct
+  delta + one new ctor + one rebuilt destroy branch; the
+  promotion would touch `Win32DirHandle`, every `win32_dirs[]`
+  consumer (SysDirOpenKernel/SysDirNext/SysDirRewind/SysDirClose,
+  DoGetdents / DoGetdents64), and force the Win32 dir handle ABI
+  through the KFile shape too. The variant is the smaller
+  change and gets every Linux fd kind onto the unified handle
+  table — the migration's actual goal — without dragging the
+  Win32 ABI surface along for the ride.
+- **Lifetime / cross-process safety:** dirfd never crosses
+  processes — `pidfd_splice.cpp:207` refuses state 11 in
+  `pidfd_getfd`, and `syscall_clone.cpp` (DoFork) closes every
+  inherited dirfd slot in the child immediately after
+  `LinuxFdInheritFromParent`. The owner pointer is therefore
+  pinned to the same Process for every reference of every
+  KFile. No `ProcessRetain` / refcount bump on the owner is
+  needed; keeping the pointer non-owning avoids the cycle the
+  full retain shape would introduce.
+- **Process-exit ordering:** moved `HandleTableDrain` BEFORE
+  the `win32_dirs[]` sweep in `ProcessRelease`. Drain fires
+  every live KFile destroy (including dirfd's owner-aware
+  release) while the per-process dir-slot table is still
+  intact; the subsequent sweep only reaches slots that had no
+  KFile sidecar (Win32-only FindFirstFile callers that exited
+  without CloseHandle) and is idempotent — `entries == nullptr`
+  short-circuits already-cleaned slots.
+- **Rules out / defers:** Promoting the directory snapshot
+  itself onto KFile (vnode + entries pointer with the
+  `Win32DirHandle` slot pool eliminated) — still possible, but
+  would need to either route Win32 raw handles through KFile
+  too, or carry two parallel storage paths. Either is a bigger
+  shape change than the migration needed. Cross-process dirfd
+  sharing — still refused by `pidfd_splice` for the same
+  semantic reason as before; the new KFile shape doesn't change
+  that policy.
+- **Revisit when:** A workload demonstrates a corner the slot-
+  pool can't represent (per-fd dirent cursor needing >256
+  entries / handle, dirfd that survives a fork on the child
+  side, openat using a real dirfd as the base). At that point
+  promoting the snapshot onto KFile + retiring `win32_dirs[]`
+  becomes worthwhile because the slot-pool ceiling is the
+  blocker, not the callback shape.
+- **Related tracks:** Track 1 (Kernel — IPC + handle table),
+  Track 4 (Linux subsystem — fd table + creators).
+
+---
+
 ## 121 — kernel32 GetCommandLineA / W exports + tighten Lock* export list
 
 - **Scope:** `userland/libs/kernel32/kernel32.c`
