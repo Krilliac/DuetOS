@@ -528,7 +528,18 @@ AddressSpace* AddressSpaceFork(const AddressSpace* parent)
         const PhysAddr parent_frame = parent->regions[i].frame;
         const u64 parent_pte = AddressSpaceProbePteRaw(parent, va);
         if (parent_pte == 0)
-            continue; // region table out of sync with PTEs; skip
+        {
+            // Region table thinks `va` is mapped but the PTE
+            // walk found nothing present. That means an unmap
+            // path mutated the page tables without removing
+            // the matching region entry — a kernel-internal
+            // invariant break. Surface it loudly so the next
+            // such bug is found at fork time, not days later
+            // when the child segfaults on a missing page.
+            KLOG_WARN_2V("mm/address_space", "AddressSpaceFork: region table out of sync with PTEs", "va", va,
+                         "region_idx", static_cast<u64>(i));
+            continue;
+        }
         // Extract flags: mask out the address bits, keep the
         // protection / present / user / NX flags.
         const u64 flags = parent_pte & ~kAddrMask;

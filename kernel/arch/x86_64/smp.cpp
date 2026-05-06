@@ -322,10 +322,14 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
     // would triple-fault picking up RSP0 / IST stack from a stale or
     // missing slot. The bundle was prepared by SmpStartAps.
     ApGdtBundle* bundle = g_ap_gdt_bundles[cpu_id];
-    if (bundle != nullptr)
-    {
-        LoadGdtForCurrent(bundle);
-    }
+    // SmpStartAps only fires SIPI for an AP whose bundle was
+    // allocated, so by construction we should never enter here
+    // with a null bundle. If a future refactor violates the
+    // invariant, continuing without a loaded GDT would crash
+    // the AP at the first NMI/#DF on a stale or missing IST
+    // stack — far worse than halting cleanly.
+    KASSERT(bundle != nullptr, "arch/smp", "AP entered ApEntryFromTrampoline without an allocated GDT bundle");
+    LoadGdtForCurrent(bundle);
 
     // Enable the AP's LAPIC. IA32_APIC_BASE MSR bit 11 is the global
     // enable; the LAPIC MMIO window is already mapped in the shared
