@@ -22,6 +22,7 @@
 #include "debug/inspect.h"
 #include "debug/probes.h"
 #include "debug/syscall_scan.h"
+#include "debug/watch.h"
 #include "drivers/video/console.h"
 #include "mm/kheap.h"
 #include "mm/paging.h"
@@ -1521,6 +1522,7 @@ void CmdBp(u32 argc, char** argv)
         ConsoleWriteln("    BP HW     [--SUSPEND] <HEX-ADDR> [X|W|RW] [LEN] (HARDWARE)");
         ConsoleWriteln("    BP CLEAR  <ID>                                  (REMOVE)");
         ConsoleWriteln("    BP TEST                                         (SELF-TEST)");
+        ConsoleWriteln("    BP WATCH                                        (NAMED HW-WRITE WATCHPOINTS)");
         ConsoleWriteln("    BP STOPPED                                      (LIST SUSPENDED)");
         ConsoleWriteln("    BP REGS   <ID>                                  (DUMP REGS)");
         ConsoleWriteln("    BP MEM    <ID> <HEX-ADDR> [LEN]                 (DUMP USER MEM)");
@@ -1696,6 +1698,123 @@ void CmdBp(u32 argc, char** argv)
     {
         const bool ok = duetos::debug::BpSelfTest();
         ConsoleWriteln(ok ? "BP TEST: OK" : "BP TEST: FAILED (SEE SERIAL LOG)");
+        return;
+    }
+
+    if (StrEq(sub, "watch"))
+    {
+        // Friendly named-watchpoint front-end for `bp hw … w`. See
+        // kernel/debug/watch.h for the full rationale.
+        if (argc < 3)
+        {
+            ConsoleWriteln("BP WATCH: USAGE:");
+            ConsoleWriteln("    BP WATCH LIST                                       (SHOW INSTALLED)");
+            ConsoleWriteln("    BP WATCH ADD <NAME> <HEX-ADDR> [LEN] [ACTION]       (INSTALL)");
+            ConsoleWriteln("        LEN     = 1 | 2 | 4 | 8 (default 8)");
+            ConsoleWriteln("        ACTION  = panic | once | each (default panic)");
+            ConsoleWriteln("    BP WATCH RM <NAME>                                  (REMOVE)");
+            ConsoleWriteln("    BP WATCH TEST                                       (SELF-TEST)");
+            return;
+        }
+        const char* wsub = argv[2];
+        if (StrEq(wsub, "list"))
+        {
+            duetos::debug::WatchInfo info[8];
+            const usize n = duetos::debug::WatchList(info, 8);
+            if (n == 0)
+            {
+                ConsoleWriteln("BP WATCH: NONE INSTALLED");
+                return;
+            }
+            ConsoleWriteln("BP WATCH: NAME                  ADDR              LEN  ACTION    HITS");
+            for (usize i = 0; i < n; ++i)
+            {
+                ConsoleWrite("  ");
+                ConsoleWrite(info[i].name != nullptr ? info[i].name : "?");
+                ConsoleWrite("  ");
+                WriteU64Hex(info[i].addr, 16);
+                ConsoleWrite("  ");
+                WriteU64Dec(info[i].len_bytes);
+                ConsoleWrite("    ");
+                switch (info[i].action)
+                {
+                case duetos::debug::WatchAction::Panic:
+                    ConsoleWrite("panic     ");
+                    break;
+                case duetos::debug::WatchAction::LogOnce:
+                    ConsoleWrite("once      ");
+                    break;
+                case duetos::debug::WatchAction::LogEachHit:
+                    ConsoleWrite("each      ");
+                    break;
+                }
+                WriteU64Dec(info[i].hit_count);
+                ConsoleWriteChar('\n');
+            }
+            return;
+        }
+        if (StrEq(wsub, "test"))
+        {
+            const bool ok = duetos::debug::WatchSelfTest();
+            ConsoleWriteln(ok ? "BP WATCH TEST: OK" : "BP WATCH TEST: FAILED (SEE SERIAL LOG)");
+            return;
+        }
+        if (StrEq(wsub, "rm"))
+        {
+            if (argc < 4)
+            {
+                ConsoleWriteln("BP WATCH RM: NEED <NAME>");
+                return;
+            }
+            const bool ok = duetos::debug::WatchRemove(argv[3]);
+            ConsoleWriteln(ok ? "BP WATCH RM: OK" : "BP WATCH RM: NOT FOUND");
+            return;
+        }
+        if (StrEq(wsub, "add"))
+        {
+            if (argc < 5)
+            {
+                ConsoleWriteln("BP WATCH ADD: NEED <NAME> <HEX-ADDR> [LEN] [ACTION]");
+                return;
+            }
+            const char* name = argv[3];
+            u64 addr = 0;
+            if (!ParseU64Str(argv[4], &addr))
+            {
+                ConsoleWriteln("BP WATCH ADD: BAD ADDRESS");
+                return;
+            }
+            u64 len = 8;
+            if (argc >= 6)
+            {
+                if (!ParseU64Str(argv[5], &len) || (len != 1 && len != 2 && len != 4 && len != 8))
+                {
+                    ConsoleWriteln("BP WATCH ADD: LEN MUST BE 1/2/4/8");
+                    return;
+                }
+            }
+            duetos::debug::WatchAction action = duetos::debug::WatchAction::Panic;
+            if (argc >= 7)
+            {
+                if (StrEq(argv[6], "panic"))
+                    action = duetos::debug::WatchAction::Panic;
+                else if (StrEq(argv[6], "once"))
+                    action = duetos::debug::WatchAction::LogOnce;
+                else if (StrEq(argv[6], "each"))
+                    action = duetos::debug::WatchAction::LogEachHit;
+                else
+                {
+                    ConsoleWriteln("BP WATCH ADD: ACTION MUST BE panic|once|each");
+                    return;
+                }
+            }
+            const bool ok =
+                duetos::debug::Watch(name, reinterpret_cast<const void*>(addr), static_cast<u8>(len), action);
+            ConsoleWriteln(ok ? "BP WATCH ADD: OK" : "BP WATCH ADD: FAILED (SEE SERIAL LOG)");
+            return;
+        }
+        ConsoleWrite("BP WATCH: UNKNOWN SUB-VERB ");
+        ConsoleWriteln(wsub);
         return;
     }
 
