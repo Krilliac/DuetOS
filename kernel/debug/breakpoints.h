@@ -195,6 +195,17 @@ bool BpSelfTest();
 /// mutating it has no effect; use BpStep to change control flow.
 bool BpReadRegs(BreakpointId id, arch::TrapFrame* out);
 
+/// Mutate the saved trap frame of the task currently stopped on
+/// `id`. The kernel sanitises CS/SS/RFLAGS the same way
+/// SYS_THREAD_SET_CONTEXT does — caller cannot promote the target
+/// to ring 0, force IOPL > 0, suppress IF, or set the trap flag.
+/// All GPRs (rax..r15), RIP, RSP, and the operator-safe RFLAGS
+/// bits transfer verbatim. Returns BpError::None on success,
+/// BpError::NotInstalled if no task is parked on this BP. The
+/// edits land on the iretq stack image, taking effect when the
+/// task is resumed via BpResume / BpStep.
+BpError BpWriteRegs(BreakpointId id, const arch::TrapFrame* in);
+
 /// Read `len` bytes of the stopped task's user memory starting at
 /// `user_va` into `out`. Walks the target task's AddressSpace to
 /// find the backing frame(s); returns the number of bytes

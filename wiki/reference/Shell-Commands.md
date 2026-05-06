@@ -243,6 +243,7 @@ All write-side FAT operations are admin-gated.
 | `addr2sym <addr>` | Resolve address to symbol | |
 | `memdump <addr> [N]` | Hex+ASCII dump of kernel memory (admin) | |
 | `bp`, `breakpoint` | Kernel breakpoints (sw + hw) (admin) | |
+| `dbg <subcmd>` | Native interactive debugger (admin) | Subcommands: `ps`, `mem <pid> <addr> [len]`, `dis <pid> <addr> [rows]`, `bp {list\|add\|rm\|resume\|step}`, `regs <bp_id>`, `watch {add\|list\|rm}`, `scan <pid> <hexbytes>`. Mirrors the GUI debugger app — see [Debugger](../tooling/Debugger.md). |
 | `probe <args>` | Runtime probe arming (admin) | |
 | `lockdep panic on\|off` | Toggle lock-inversion-promotes-panic (admin) | |
 | `cap-audit mode <off\|sample\|full>` | Cap-gate audit verbosity (admin) | |

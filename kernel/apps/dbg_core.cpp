@@ -1,0 +1,476 @@
+#include "apps/dbg_core.h"
+
+#include "arch/x86_64/traps.h"
+#include "mm/address_space.h"
+#include "mm/frame_allocator.h"
+#include "mm/page.h"
+#include "proc/process.h"
+#include "sched/sched.h"
+#include "sync/spinlock.h"
+#include "util/types.h"
+
+namespace duetos::apps::dbg::core
+{
+
+namespace
+{
+
+// File-scope watchlist. Single-app, single-table — protected by
+// a small spinlock so the timer-driven Refresh and the operator-
+// driven Add/Remove can't tear each other up.
+sync::SpinLock g_watch_lock{.locked = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
+WatchEntry g_watch[kWatchMax]{};
+
+void StrCopyTrunc(char* dst, u32 cap, const char* src)
+{
+    u32 i = 0;
+    while (src[i] != 0 && i + 1 < cap)
+    {
+        dst[i] = src[i];
+        ++i;
+    }
+    dst[i] = 0;
+}
+
+// Format `value` as "0xN" hex into dst (NUL-terminated).
+void FormatHex(char* dst, u32 cap, u64 value)
+{
+    static const char kHex[] = "0123456789abcdef";
+    if (cap < 4)
+    {
+        if (cap > 0)
+            dst[0] = 0;
+        return;
+    }
+    dst[0] = '0';
+    dst[1] = 'x';
+    if (value == 0)
+    {
+        dst[2] = '0';
+        dst[3] = 0;
+        return;
+    }
+    char tmp[18];
+    u32 n = 0;
+    while (value != 0 && n < 16)
+    {
+        tmp[n++] = kHex[value & 0xF];
+        value >>= 4;
+    }
+    u32 w = 2;
+    while (n > 0 && w + 1 < cap)
+        dst[w++] = tmp[--n];
+    dst[w] = 0;
+}
+
+void FormatBytesHex(char* dst, u32 cap, const u8* bytes, u8 n)
+{
+    static const char kHex[] = "0123456789abcdef";
+    u32 w = 0;
+    for (u8 i = 0; i < n && w + 3 < cap; ++i)
+    {
+        if (i != 0 && w + 1 < cap)
+            dst[w++] = ' ';
+        dst[w++] = kHex[(bytes[i] >> 4) & 0xF];
+        dst[w++] = kHex[bytes[i] & 0xF];
+    }
+    if (w < cap)
+        dst[w] = 0;
+    else if (cap > 0)
+        dst[cap - 1] = 0;
+}
+
+} // namespace
+
+usize EnumerateProcesses(ProcInfo* out, usize cap)
+{
+    if (out == nullptr || cap == 0)
+        return 0;
+    usize count = 0;
+    // Walk PID space 1..1023 — bounded, predictable, and avoids
+    // building a separate enumerator. SchedFindProcessByPid is
+    // O(tasks) per call; the GUI calls this at most once per
+    // tab-open, so the cost is tolerable.
+    for (u64 pid = 0; pid < 1024 && count < cap; ++pid)
+    {
+        ::duetos::core::Process* p = sched::SchedFindProcessByPid(pid);
+        if (p == nullptr)
+            continue;
+        ProcInfo& row = out[count];
+        row.pid = p->pid;
+        StrCopyTrunc(row.name, sizeof(row.name), p->name != nullptr ? p->name : "?");
+        row.state = sched::SchedIsPidZombie(pid) ? 3 : 0;
+        row.ticks_used = p->ticks_used;
+        row.region_count = p->as != nullptr ? p->as->region_count : 0;
+        ++count;
+    }
+    return count;
+}
+
+bool LookupProcess(u64 pid, ProcInfo* out)
+{
+    if (out == nullptr)
+        return false;
+    ::duetos::core::Process* p = sched::SchedFindProcessByPid(pid);
+    if (p == nullptr)
+        return false;
+    out->pid = p->pid;
+    StrCopyTrunc(out->name, sizeof(out->name), p->name != nullptr ? p->name : "?");
+    out->state = sched::SchedIsPidZombie(pid) ? 3 : 0;
+    out->ticks_used = p->ticks_used;
+    out->region_count = p->as != nullptr ? p->as->region_count : 0;
+    return true;
+}
+
+// ---- ReadMem / WriteMem -------------------------------------
+
+namespace
+{
+
+// Cross-AS user memory access via the kernel direct-map alias of
+// the backing frame. Returns nullptr if the page isn't mapped in
+// `as`. Identical strategy to BpReadMem's helper, but parameterised
+// on AddressSpace* so non-suspended targets work too.
+const u8* ResolveUserByteRO(mm::AddressSpace* as, u64 user_va)
+{
+    if (as == nullptr)
+        return nullptr;
+    const u64 page_va = user_va & ~0xFFFULL;
+    mm::PhysAddr frame = mm::AddressSpaceLookupUserFrame(as, page_va);
+    if (frame == mm::kNullFrame)
+        return nullptr;
+    const u8* page = static_cast<const u8*>(mm::PhysToVirt(frame));
+    return page + (user_va & 0xFFF);
+}
+
+u8* ResolveUserByteRW(mm::AddressSpace* as, u64 user_va)
+{
+    return const_cast<u8*>(ResolveUserByteRO(as, user_va));
+}
+
+} // namespace
+
+u64 ReadMem(u64 pid, u64 va, u8* out, u64 len)
+{
+    if (out == nullptr || len == 0)
+        return 0;
+    ::duetos::core::Process* p = sched::SchedFindProcessByPid(pid);
+    if (p == nullptr || p->as == nullptr)
+        return 0;
+    u64 copied = 0;
+    while (copied < len)
+    {
+        const u8* src = ResolveUserByteRO(p->as, va + copied);
+        if (src == nullptr)
+            break;
+        const u64 page_off = (va + copied) & 0xFFFULL;
+        const u64 page_room = 0x1000 - page_off;
+        u64 chunk = len - copied;
+        if (chunk > page_room)
+            chunk = page_room;
+        for (u64 i = 0; i < chunk; ++i)
+            out[copied + i] = src[i];
+        copied += chunk;
+    }
+    return copied;
+}
+
+u64 WriteMem(u64 pid, u64 va, const u8* in, u64 len)
+{
+    if (in == nullptr || len == 0)
+        return 0;
+    ::duetos::core::Process* p = sched::SchedFindProcessByPid(pid);
+    if (p == nullptr || p->as == nullptr)
+        return 0;
+    u64 copied = 0;
+    while (copied < len)
+    {
+        u8* dst = ResolveUserByteRW(p->as, va + copied);
+        if (dst == nullptr)
+            break;
+        const u64 page_off = (va + copied) & 0xFFFULL;
+        const u64 page_room = 0x1000 - page_off;
+        u64 chunk = len - copied;
+        if (chunk > page_room)
+            chunk = page_room;
+        for (u64 i = 0; i < chunk; ++i)
+            dst[i] = in[copied + i];
+        copied += chunk;
+    }
+    return copied;
+}
+
+// ---- Scan ---------------------------------------------------
+
+usize ScanBytes(u64 pid, const u8* needle, usize nlen, u64* hits, usize cap)
+{
+    if (needle == nullptr || nlen == 0 || hits == nullptr || cap == 0)
+        return 0;
+    ::duetos::core::Process* p = sched::SchedFindProcessByPid(pid);
+    if (p == nullptr || p->as == nullptr)
+        return 0;
+    if (cap > kScanResultCap)
+        cap = kScanResultCap;
+    usize hit_count = 0;
+    mm::AddressSpace* as = p->as;
+    // Walk the regions ledger. Each region is a 4 KiB page; we
+    // scan within each page and across page boundaries within a
+    // region by re-resolving every 4 KiB.
+    for (u16 r = 0; r < as->region_count && hit_count < cap; ++r)
+    {
+        const u64 base = as->regions[r].vaddr;
+        const u8* page = ResolveUserByteRO(as, base);
+        if (page == nullptr)
+            continue;
+        // Scan the 4 KiB page; tail-spill match must fit before
+        // the page end (we deliberately don't span pages here —
+        // a needle straddling a page boundary won't match. That's
+        // a known v0 GAP; documented in the Disasm wiki page.
+        for (u64 off = 0; off + nlen <= 0x1000 && hit_count < cap; ++off)
+        {
+            bool match = true;
+            for (usize k = 0; k < nlen; ++k)
+            {
+                if (page[off + k] != needle[k])
+                {
+                    match = false;
+                    break;
+                }
+            }
+            if (match)
+                hits[hit_count++] = base + off;
+        }
+    }
+    return hit_count;
+}
+
+usize ScanNext(u64 pid, const u8* needle, usize nlen, const u64* prev_hits, usize prev_count, u64* out_hits, usize cap)
+{
+    if (needle == nullptr || nlen == 0 || prev_hits == nullptr || out_hits == nullptr || cap == 0)
+        return 0;
+    if (cap > kScanResultCap)
+        cap = kScanResultCap;
+    usize kept = 0;
+    u8 buf[16];
+    if (nlen > sizeof(buf))
+        return 0;
+    for (usize i = 0; i < prev_count && kept < cap; ++i)
+    {
+        const u64 got = ReadMem(pid, prev_hits[i], buf, nlen);
+        if (got != nlen)
+            continue;
+        bool match = true;
+        for (usize k = 0; k < nlen; ++k)
+        {
+            if (buf[k] != needle[k])
+            {
+                match = false;
+                break;
+            }
+        }
+        if (match)
+            out_hits[kept++] = prev_hits[i];
+    }
+    return kept;
+}
+
+// ---- Disasm -------------------------------------------------
+
+u64 DisasmRows(u64 pid, u64 va, debug::disasm::DecodedInsn* out, u64 row_cap)
+{
+    if (out == nullptr || row_cap == 0)
+        return 0;
+    // Pull a 256-byte window — enough for ~32 average-length
+    // x86_64 instructions, well above the typical Disasm-tab
+    // viewport. Capping the buffer keeps the decoder allocation-
+    // free and bounded.
+    static constexpr u64 kWindow = 256;
+    u8 buf[kWindow];
+    const u64 got = ReadMem(pid, va, buf, kWindow);
+    if (got == 0)
+        return 0;
+    return debug::disasm::DecodeStream(buf, got, va, out, row_cap);
+}
+
+// ---- Breakpoints --------------------------------------------
+
+debug::BreakpointId InstallBp(u64 va, debug::BpKind kind, debug::BpLen len, u64 owner_pid, bool suspend,
+                              debug::BpError* err)
+{
+    if (kind == debug::BpKind::Software)
+    {
+        return debug::BpInstallSoftware(va, suspend, err);
+    }
+    return debug::BpInstallHardware(va, kind, len, owner_pid, suspend, err);
+}
+
+debug::BpError RemoveBp(debug::BreakpointId id, u64 requester_pid)
+{
+    return debug::BpRemove(id, requester_pid);
+}
+
+debug::BpError ResumeBp(debug::BreakpointId id)
+{
+    return debug::BpResume(id);
+}
+
+debug::BpError StepBp(debug::BreakpointId id)
+{
+    return debug::BpStep(id);
+}
+
+usize ListBp(debug::BpInfo* out, usize cap)
+{
+    return debug::BpList(out, cap);
+}
+
+// ---- Regs ---------------------------------------------------
+
+bool RegsRead(debug::BreakpointId id, arch::TrapFrame* out)
+{
+    return debug::BpReadRegs(id, out);
+}
+
+debug::BpError RegsWrite(debug::BreakpointId id, const arch::TrapFrame* in)
+{
+    return debug::BpWriteRegs(id, in);
+}
+
+// ---- Watch --------------------------------------------------
+
+u32 WatchAdd(u64 pid, u64 va, u8 len, WatchType type, const char* name)
+{
+    if (name == nullptr || name[0] == 0)
+        return 0xFFFFFFFFu;
+    if (len == 0 || len > 16)
+        len = 4;
+    sync::SpinLockGuard g(g_watch_lock);
+    for (u32 i = 0; i < kWatchMax; ++i)
+    {
+        if (!g_watch[i].used)
+        {
+            g_watch[i].used = true;
+            g_watch[i].pid = pid;
+            g_watch[i].va = va;
+            g_watch[i].len = len;
+            g_watch[i].type = type;
+            StrCopyTrunc(g_watch[i].name, sizeof(g_watch[i].name), name);
+            StrCopyTrunc(g_watch[i].value, sizeof(g_watch[i].value), "n/a");
+            return i;
+        }
+    }
+    return 0xFFFFFFFFu;
+}
+
+bool WatchRemove(u32 slot)
+{
+    if (slot >= kWatchMax)
+        return false;
+    sync::SpinLockGuard g(g_watch_lock);
+    if (!g_watch[slot].used)
+        return false;
+    g_watch[slot].used = false;
+    return true;
+}
+
+void WatchRefresh()
+{
+    sync::SpinLockGuard g(g_watch_lock);
+    for (u32 i = 0; i < kWatchMax; ++i)
+    {
+        if (!g_watch[i].used)
+            continue;
+        WatchEntry& e = g_watch[i];
+        u8 raw[16];
+        u8 want = e.len;
+        switch (e.type)
+        {
+        case WatchType::U8:
+            want = 1;
+            break;
+        case WatchType::U16:
+            want = 2;
+            break;
+        case WatchType::U32:
+        case WatchType::I32:
+            want = 4;
+            break;
+        case WatchType::U64:
+        case WatchType::I64:
+            want = 8;
+            break;
+        case WatchType::Bytes:
+            // already set
+            break;
+        }
+        if (want > sizeof(raw))
+            want = sizeof(raw);
+        const u64 got = ReadMem(e.pid, e.va, raw, want);
+        if (got != want)
+        {
+            StrCopyTrunc(e.value, sizeof(e.value), "n/a");
+            continue;
+        }
+        u64 vu = 0;
+        for (u8 b = 0; b < want; ++b)
+            vu |= ((u64)raw[b]) << (b * 8);
+        switch (e.type)
+        {
+        case WatchType::U8:
+        case WatchType::U16:
+        case WatchType::U32:
+        case WatchType::U64:
+            FormatHex(e.value, sizeof(e.value), vu);
+            break;
+        case WatchType::I32:
+        case WatchType::I64:
+        {
+            // Reformat as signed if MSB set.
+            i64 sv = (e.type == WatchType::I32) ? (i64)(i32)(u32)vu : (i64)vu;
+            char tmp[32];
+            // Tiny signed decimal formatter.
+            u32 w = 0;
+            if (sv < 0)
+            {
+                tmp[w++] = '-';
+                sv = -sv;
+            }
+            char rev[24];
+            u32 n = 0;
+            if (sv == 0)
+                rev[n++] = '0';
+            while (sv != 0 && n < sizeof(rev))
+            {
+                rev[n++] = (char)('0' + (sv % 10));
+                sv /= 10;
+            }
+            while (n > 0 && w + 1 < sizeof(tmp))
+                tmp[w++] = rev[--n];
+            tmp[w] = 0;
+            StrCopyTrunc(e.value, sizeof(e.value), tmp);
+            break;
+        }
+        case WatchType::Bytes:
+            FormatBytesHex(e.value, sizeof(e.value), raw, want);
+            break;
+        }
+    }
+}
+
+const WatchEntry* WatchSlot(u32 slot)
+{
+    if (slot >= kWatchMax)
+        return nullptr;
+    return &g_watch[slot];
+}
+
+usize WatchCount()
+{
+    usize n = 0;
+    for (u32 i = 0; i < kWatchMax; ++i)
+        if (g_watch[i].used)
+            ++n;
+    return n;
+}
+
+} // namespace duetos::apps::dbg::core

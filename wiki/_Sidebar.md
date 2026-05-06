@@ -66,6 +66,7 @@
 - [Anti-Bloat Guidelines](tooling/Anti-Bloat-Guidelines.md)
 - [Git Workflow](tooling/Git-Workflow.md)
 - [Debugging](tooling/Debugging.md)
+- [Debugger](tooling/Debugger.md)
 - [QEMU Smoke Tests](tooling/QEMU-Smoke.md)
 
 ### Specifications

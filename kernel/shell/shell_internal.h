@@ -394,6 +394,7 @@ void CmdUsbNet(u32 argc, char** argv);
 // ---------------------------------------------------------------
 void CmdMemDump(u32 argc, char** argv);
 void CmdBp(u32 argc, char** argv);
+void CmdDbg(u32 argc, char** argv);
 void CmdProbe(u32 argc, char** argv);
 void CmdInstr(u32 argc, char** argv);
 void CmdAddr2Sym(u32 argc, char** argv);

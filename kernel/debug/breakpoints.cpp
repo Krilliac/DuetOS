@@ -565,6 +565,60 @@ bool BpReadRegs(BreakpointId id, arch::TrapFrame* out)
     return true;
 }
 
+BpError BpWriteRegs(BreakpointId id, const arch::TrapFrame* in)
+{
+    if (id.value == 0 || in == nullptr)
+        return BpError::NotInstalled;
+    sync::SpinLockGuard g(g_lock);
+    BpEntry* e = FindById(id.value);
+    if (e == nullptr || e->stopped_frame == nullptr || e->stopped_task_id == 0)
+        return BpError::NotInstalled;
+    arch::TrapFrame* tf = e->stopped_frame;
+
+    // GPRs transfer verbatim.
+    tf->rax = in->rax;
+    tf->rbx = in->rbx;
+    tf->rcx = in->rcx;
+    tf->rdx = in->rdx;
+    tf->rsi = in->rsi;
+    tf->rdi = in->rdi;
+    tf->rbp = in->rbp;
+    tf->r8 = in->r8;
+    tf->r9 = in->r9;
+    tf->r10 = in->r10;
+    tf->r11 = in->r11;
+    tf->r12 = in->r12;
+    tf->r13 = in->r13;
+    tf->r14 = in->r14;
+    tf->r15 = in->r15;
+    tf->rip = in->rip;
+    tf->rsp = in->rsp;
+
+    // RFLAGS sanitisation — same shape as SYS_THREAD_SET_CONTEXT
+    // (kernel/syscall/syscall.cpp around the SetContext handler).
+    // Force IF=1 (otherwise the target wakes with interrupts off
+    // and the next timer tick deadlocks), force IOPL=0 (no port-
+    // IO privilege gift), clear NT (no nested-task chains) and TF
+    // (no surprise single-step). Operator-chosen arithmetic /
+    // comparison flags pass through.
+    constexpr u64 kRflagsIf = 1ULL << 9;
+    constexpr u64 kRflagsTf = 1ULL << 8;
+    constexpr u64 kRflagsNt = 1ULL << 14;
+    constexpr u64 kRflagsIoplMask = 0x3ULL << 12;
+    u64 new_flags = in->rflags;
+    new_flags |= kRflagsIf;
+    new_flags &= ~(kRflagsTf | kRflagsNt | kRflagsIoplMask);
+    tf->rflags = new_flags;
+
+    // Force ring-3 selectors. A malicious operator (or a buggy
+    // GUI binding edit-fields to wide ints) passing kernel
+    // selectors would otherwise iretq into ring 0 on resume.
+    tf->cs = 0x2B; // kUserCodeSelector — matches syscall.cpp
+    tf->ss = 0x33; // kUserDataSelector
+
+    return BpError::None;
+}
+
 // Walk the stopped task's captured AddressSpace to find the
 // physical frame backing a given user VA, returning a kernel
 // direct-map pointer into that frame. Returns nullptr if the

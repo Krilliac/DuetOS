@@ -138,6 +138,7 @@
 #include "apps/devicemgr.h"
 #include "apps/files.h"
 #include "apps/firewall.h"
+#include "apps/dbg.h"
 #include "apps/gfxdemo.h"
 #include "apps/help.h"
 #include "apps/imageview.h"
@@ -1867,6 +1868,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::drivers::video::ThemeRegisterWindow(Role::GfxDemo, gfx_handle);
     duetos::apps::gfxdemo::GfxDemoInit(gfx_handle);
     DUETOS_BOOT_SELFTEST(duetos::apps::gfxdemo::GfxDemoSelfTest());
+
+    // DEBUGGER — native interactive debugger app (memory view +
+    // edit, regs, breakpoints, watchlist, byte-pattern scan,
+    // disassembly). DbgInit registers its own window via
+    // WindowRegister using a Slate-10-friendly chrome, so we
+    // don't pre-register one here.
+    duetos::apps::dbg::DbgInit();
+    DUETOS_BOOT_SELFTEST(duetos::apps::dbg::DbgSelfTest());
 
     // SETTINGS — unified panel that wraps the Ctrl+Alt chord
     // surfaces (theme cycle / direct picker, opacity step, high-
@@ -3979,6 +3988,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                             else if (active == duetos::apps::notify_center::NotifyCenterWindow())
                             {
                                 app_consumed = duetos::apps::notify_center::NotifyCenterFeedChar(c);
+                            }
+                            else if (active == duetos::apps::dbg::DbgWindow())
+                            {
+                                app_consumed = duetos::apps::dbg::DbgFeedChar(c);
                             }
                         }
                     }
