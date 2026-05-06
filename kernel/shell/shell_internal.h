@@ -547,6 +547,14 @@ void CmdExit(u32 argc, char** argv);
 void CmdLoadTest(u32 argc, char** argv);
 
 // ---------------------------------------------------------------
+// Microbenchmark harness (shell_bench.cpp). Measures cycles/ns
+// per op on specific kernel hot paths (KMalloc, sched::Mutex,
+// SyscallDispatch, KEvent wakeup). Complement to loadtest —
+// stress vs measure. Admin-gated inside the handler.
+// ---------------------------------------------------------------
+void CmdBench(u32 argc, char** argv);
+
+// ---------------------------------------------------------------
 // Scripting language v0 (shell_script.cpp).
 //
 // A small line-indexed interpreter that adds POSIX-shell-flavoured

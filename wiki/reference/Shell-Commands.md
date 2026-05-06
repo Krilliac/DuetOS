@@ -256,6 +256,7 @@ All write-side FAT operations are admin-gated.
 | `flushtlb`, `flush-tlb` | Reload CR3 (admin) | |
 | `perf <args>` | Perf-counter shell front-end | |
 | `loadtest`, `stress` | Stress CPU and/or kernel heap to test stability under load (admin) | Subcommands: `spin [SECS]`, `cpu [SECS] [N]`, `mem [MIB] [SECS]`, `mix [SECS] [N] [MIB]`, `status`. Defaults SECS=5 (cap 60), N=2 (cap 8), MIB=4 (cap 64). ^C aborts. |
+| `bench` | Microbenchmark kernel hot paths — cycles/op, ns/op, ops/sec (admin) | Subcommands: `kmalloc [ITERS]` (KMalloc(64) round-trip), `mutex [ITERS]` (uncontended `sched::Mutex`), `syscall [ITERS]` (`SyscallDispatch(SYS_GETPID)` — measures dispatcher path minus trap entry/exit), `wakeup [ITERS]` (`KEvent` set/wait, worker pinned to peer CPU on SMP; same-CPU on UP). `bench all [ITERS]` runs every benchmark. ns/op reads 0 if TSC calibration didn't run at boot — header line warns. Complement to `loadtest`: stress vs measure. |
 
 ## Security & accounts
 

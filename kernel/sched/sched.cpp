@@ -1686,6 +1686,22 @@ const char* TaskName(const Task* t)
     return (t->name != nullptr) ? t->name : "<noname>";
 }
 
+bool SchedSetAffinity(Task* t, u32 cpu_id)
+{
+    if (t == nullptr)
+    {
+        return false;
+    }
+    const u32 online = static_cast<u32>(arch::SmpCpusOnline());
+    if (cpu_id >= online)
+    {
+        return false;
+    }
+    sync::SpinLockGuard guard(g_sched_lock);
+    t->last_cpu = cpu_id;
+    return true;
+}
+
 namespace
 {
 

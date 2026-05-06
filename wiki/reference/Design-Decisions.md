@@ -5153,3 +5153,62 @@ doc helps future readers audit the trail.
   [Scheduler](../kernel/Scheduler.md), Roadmap entry
   "Topology-driven follow-ons".
 
+## Microbenchmark harness as a sibling of loadtest, not a fork of perf (2026-05-06)
+
+- **Decision:** the kernel ships a `bench` shell command in
+  `kernel/shell/shell_bench.cpp` (sibling of `shell_loadtest.cpp`)
+  that produces fixed-workload cycles/op + ns/op + ops/sec
+  numbers for four hot paths (KMalloc round-trip, uncontended
+  `sched::Mutex`, `SyscallDispatch(SYS_GETPID)`, `KEvent`
+  wakeup). The harness reuses the boot-time HPET-derived TSC
+  calibration via two new public helpers in `kernel/time/`:
+  `time::ReadTsc()` (hoisted out of an anonymous namespace) and
+  `time::TscToNanos(u64 cycles)` for cycle→ns conversion. Wakeup
+  bench routes the worker's first wake to a peer CPU using a new
+  `sched::SchedSetAffinity(Task*, u32 cpu_id)` hint that writes
+  `Task::last_cpu` under the existing scheduler spinlock.
+- **Why:** `loadtest` (stress) and `perf` (statistical sample
+  ring) cover orthogonal axes — fairness/OOM behaviour and
+  "where did we spend cycles?" — but neither answers "how fast
+  is hot path X under a fixed workload?" The recent SMP
+  scheduler work (per-CPU runqueues, work-stealing, reschedule-
+  IPI) makes scheduler-wakeup-latency benchmarks meaningful for
+  the first time, and a regression sentinel for the dispatcher
+  path is cheap to maintain once the harness exists.
+- **Why not (alternatives considered):**
+  - **Extend `perf` with a microbench mode:** wrong shape —
+    `perf`'s sample ring measures emergent cost across whatever
+    workload happens to be running; bench measures specific
+    paths under deliberate workloads. Mixing the two would
+    blur both.
+  - **Extend `loadtest` with a `measure` subcommand:**
+    loadtest's contract is "stress until something breaks";
+    bench's contract is "complete in well under one second
+    and report a number." Two contracts, two TUs.
+  - **Bench from a userland helper (PE or native) instead of
+    a kernel shell command:** would require the userland to
+    issue every primitive it wants to measure (no way to bench
+    the dispatcher itself from outside it), and would conflate
+    the bench timer with userland scheduling jitter.
+  - **Hard CPU pin via affinity mask:** the wakeup bench only
+    needs the FIRST wake routed to the peer; the existing
+    `last_cpu = CurrentCpu()` write at the context-switch site
+    keeps subsequent wakes pinned. A full per-task affinity
+    mask is deferred to Roadmap B3.
+- **What it rules out / defers:** no PMU / IA32_PERFEVTSEL
+  programming (perf's NMI sampling owns hardware-event
+  sampling); no persistent results storage (output to console
+  + boot log only — `/sys/bench/` is a follow-up once `/sys`
+  exists); no comparison-vs-baseline or statistical-confidence
+  reporting in v0 (mean over ITERS is the only summary).
+- **Revisit when:** a regression detector is needed (then add
+  baseline storage + delta reporting); a real userland needs
+  to measure the same paths (then port the harness primitives
+  to a userland tool that issues int 0x80 directly to
+  measure the full ring-3 round-trip); hardware-event sampling
+  becomes useful enough to integrate (then a `bench --pmu`
+  surface delegates to `perf`'s ring rather than reimplementing).
+- **Related tracks:** [Shell Commands](Shell-Commands.md),
+  [Scheduler](../kernel/Scheduler.md), Roadmap entry "Bench
+  follow-ups".
+
