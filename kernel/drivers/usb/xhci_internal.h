@@ -15,6 +15,7 @@
 #include "util/types.h"
 #include "mm/page.h"
 #include "sched/sched.h"
+#include "drivers/usb/hid_descriptor.h"
 #include "drivers/usb/xhci.h"
 
 namespace duetos::drivers::usb::xhci::internal
@@ -154,6 +155,15 @@ void HidMouseInject(const u8 report[3]);
 // (4-byte wheel, 5-byte wheel + side-buttons, etc.) decode their
 // extended fields. Reports < 3 bytes are dropped; > 8 are clamped.
 void HidMouseInjectN(const u8* report, u32 len);
+// Layout-driven variant. `layout` must be a non-null
+// `hid::HidMouseLayout*` produced by `HidExtractMouseLayout` from
+// the device's report descriptor. Pulls each named field at its
+// recorded bit offset, supporting 16-bit X / Y for high-DPI
+// gaming mice. Reports shorter than the layout's `report_size_bits`
+// are zero-padded on the high side; longer reports are truncated.
+// `layout` is declared as `void*` so this header doesn't have to
+// pull `hid_descriptor.h` for every xhci TU.
+void HidMouseInjectWithLayout(const u8* report, u32 len, const void* layout);
 void HidDiffAndInject(const u8 prev[8], const u8 curr[8]);
 
 // MMIO accessors. xHCI registers are word- or qword-sized and
@@ -273,6 +283,19 @@ struct DeviceState
     u8* hid_buf_virt;         // report buffer (8 bytes keyboard, 3 bytes mouse)
     u8 hid_prev[8];           // keyboard: previous report (mouse is stateless on keys)
     u64 hid_outstanding_phys; // TRB phys addr we're waiting on, or 0
+
+    // Mouse-layout cache. Populated when GET_DESCRIPTOR(Report)
+    // succeeds + HidExtractMouseLayout returns valid; consumed by
+    // HidMouseInjectWithLayout in the polling loop. When
+    // `hid_mouse_layout_valid == false` the polling loop falls back
+    // to `HidMouseInjectN` (boot-protocol assumptions). GAP:
+    // GET_DESCRIPTOR(Report) fetch is not yet wired
+    // (kDescTypeReport = 0x22); revisit when a real high-DPI mouse
+    // exists in the test fleet — the parser side (this slice)
+    // already produces the right layout from a synthetic
+    // 16-bit-XY descriptor, so the wiring is a small follow-on.
+    bool hid_mouse_layout_valid;
+    hid::HidMouseLayout hid_mouse_layout;
 
     // Bulk endpoint state. One pair (IN + OUT) per device is enough
     // for every v0 USB-net class (CDC-ECM, RTL8150, AX88xxx).

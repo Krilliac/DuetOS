@@ -612,6 +612,68 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 124 — HID descriptor-driven mouse decoding (high-DPI 16-bit XY)
+
+- **Scope:** `kernel/drivers/usb/hid_descriptor.{h,cpp}` (new
+  `HidMouseField` + `HidMouseLayout` structs;
+  `HidExtractMouseLayout` walker tracking Local Usage list +
+  Logical Min sign + Report ID + bit cursor across Mouse
+  Application collections; new self-test descriptor
+  `kHighDpiMouseDescriptor` + four new `ExpectEq` blocks).
+  `kernel/drivers/usb/xhci_input.cpp` (new
+  `HidMouseInjectWithLayout` extracting fields at bit
+  offsets + sign-extending signed axes; `ExtractBitsLE` /
+  `SignExtend` helpers). `kernel/drivers/usb/xhci_internal.h`
+  (`HidMouseInjectWithLayout` decl; `DeviceState` grew
+  `hid_mouse_layout_valid` + `hid_mouse_layout` fields).
+  `kernel/drivers/usb/xhci_init.cpp` (polling loop dispatches
+  layout-aware path when valid; 16-byte buffer cap when
+  layout is in use, 8-byte fallback for boot protocol).
+- **Decision:** Parser produces a flat `HidMouseLayout` rather
+  than a `Field[]` table. The well-known mouse fields (X / Y
+  / wheel / horizontal tilt / buttons / report ID) are a
+  fixed, finite set; an array shape would force every
+  consumer to scan it. Direct-named slots stay O(1) for the
+  inject hot path.
+- **Why now:** the parser side was the heavy lift — bit-level
+  walking with Logical Min sign tracking and Local Usage list
+  reset semantics matches HID spec §6.2.2 verbatim. Hardware-
+  fetch wiring (GET_DESCRIPTOR(Report)) is a few-line follow-on
+  best validated against a real high-DPI mouse, which the test
+  fleet doesn't have today. Landing the parser + injector with
+  a synthetic 5-button / 16-bit-XY / wheel / AC-Pan self-test
+  proves the byte-level decode and unblocks the wiring slice
+  whenever a real device shows up.
+- **Layout-aware vs boot-protocol:** the polling loop branches on
+  `dev.hid_mouse_layout_valid`. Today the layout slot is
+  always invalid (no fetch); the boot-protocol path stays
+  the runtime default and every existing mouse path is
+  byte-for-byte unchanged. The first commit that wires the
+  fetch flips the boolean per-device, with no global behaviour
+  change for boot-protocol-only devices.
+- **MousePacket coverage:** vertical wheel (`dz`), buttons 1..5
+  (`kMouseButtonLeft / Right / Middle / Button4 / Button5`),
+  and signed X / Y deltas all flow through. Horizontal tilt /
+  AC Pan is parsed but discarded — `MousePacket` has no
+  horizontal-scroll field today; the layout's
+  `h_tilt.present` flag is preserved so a future MousePacket
+  expansion can pick it up.
+- **Rules out / defers:** Digitizer / absolute-pointer
+  decoding (the layout extractor refuses non-Mouse primary
+  kinds; touch panels live in a separate Application
+  collection). Multi-collection mice (some gaming mice expose
+  multiple Application collections — keyboard mode + mouse
+  mode); we capture the first Mouse collection only.
+  GET_DESCRIPTOR(Report) fetch wiring stays a follow-on,
+  gated on a real high-DPI mouse in the test fleet.
+- **Revisit when:** a workload (or test-fleet hardware) needs
+  digitizer events; or a mouse legitimately switches modes
+  via a non-first Application collection; or
+  `MousePacket` grows a horizontal-scroll field.
+- **Related tracks:** Track 5 (Drivers — USB).
+
+---
+
 ## 123 — VFS Stage 6 finish: cross-mount `VfsResolve` + `VfsNode`
 
 - **Scope:** `kernel/fs/vfs.{h,cpp}` (new `VfsBackend` enum,

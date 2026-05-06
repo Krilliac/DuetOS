@@ -195,28 +195,32 @@ In rough priority:
 - **Owner:** `kernel/drivers/net/wireless/` (per-vendor upload +
   ring setup), `kernel/net/wireless/` (MLME state machine).
 
-### USB mouse — high-DPI 16-bit XY
+### USB mouse — high-DPI 16-bit XY (parser + injector landed)
 
-- **Today:** boot-protocol + extended boot-protocol decoding
-  is wired end-to-end. `xhci_init.cpp`'s polling loop computes
-  the actual transfer length from the TRB residual and calls
-  `HidMouseInjectN(buf, len)` in `xhci_input.cpp`, which
-  decodes 3 / 4 / 5+ byte reports — wheel (Z axis), buttons
-  4 / 5, and standard left/right/middle. `MousePacket` carries
-  `dz` and the `kMouseButton4 / kMouseButton5` bits; the
-  Win32 mouse-input accumulator already accepts the wheel
-  delta.
-- **Deferred:** descriptor-driven decoding for layouts with
-  16-bit X / Y (high-DPI gaming mice), digitizer / absolute
-  pointers, and horizontal tilt. Needs `HidParseDescriptor`
-  to expose per-field offsets — today it sums Report Size ×
-  Report Count without recording where each field lands. The
-  next slice extends the parser, fetches the report
-  descriptor at enumeration time, and passes the layout
-  table into `HidMouseInjectN`.
-- **Blocks on:** a workload that legitimately needs high-DPI
-  precision or digitizer events — extended boot covers wheel
-  + 5 buttons.
+- **Today:** descriptor-driven decoding is in tree.
+  `HidExtractMouseLayout` walks a HID report descriptor and
+  records per-field bit offsets / sizes / sign for X / Y /
+  Wheel / AC Pan / Button-mask + the optional Report ID byte.
+  `HidMouseInjectWithLayout` extracts each named field at the
+  recorded bit offset (8 / 12 / 16 bits — sign-extended for
+  signed axes) and injects a `MousePacket`. The xHCI polling
+  loop calls the layout-aware path when
+  `dev.hid_mouse_layout_valid`, otherwise falls back to the
+  existing boot-protocol `HidMouseInjectN`.
+- **Self-tested:** boot-keyboard / boot-mouse / a synthetic
+  high-DPI 5-button + 16-bit-XY + wheel + AC-Pan descriptor
+  all round-trip through `HidExtractMouseLayout` with the
+  expected bit offsets at boot.
+- **Remaining (gated on real hardware):** wire
+  `GET_DESCRIPTOR(Report)` (kDescTypeReport = 0x22) into
+  the HID enumeration step in `xhci_enum.cpp` so
+  `dev.hid_mouse_layout` is populated for real mice — today
+  the layout slot stays invalid and the polling loop uses
+  the boot-protocol fallback. The HID class descriptor
+  inside the Configuration tree carries the report-descriptor
+  length; the fetch is one extra `DoControlIn` call. Defer
+  until the test fleet includes a high-DPI mouse to verify
+  the byte-level decode.
 - **Owner:** `kernel/drivers/usb/`.
 
 ### Multi-monitor / runtime resolution change
