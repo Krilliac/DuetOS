@@ -37,6 +37,8 @@ constinit PerCpu g_bsp_percpu = {
     .gdb_snapshot_rsp = 0,
     .gdb_snapshot_rflags = 0,
     .gdb_frozen_frame = nullptr,
+    .ctxsw_lock_to_release = nullptr,
+    .ctxsw_lock_flags = 0,
 };
 
 // One-shot flag so CurrentCpuIdOrBsp can return a sane value before

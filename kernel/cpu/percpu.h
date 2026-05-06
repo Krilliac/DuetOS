@@ -116,6 +116,24 @@ struct PerCpu
     u64 gdb_snapshot_rflags;
     arch::TrapFrame* gdb_frozen_frame;
 
+    // Lock to release after the next ContextSwitch on this CPU. The
+    // scheduler holds g_sched_lock (or, post-commit-2, this CPU's
+    // runq_lock) across ContextSwitch and stashes the lock pointer +
+    // saved IRQ flags here while still on prev's stack. Once
+    // ContextSwitch returns — on whatever task we just resumed —
+    // SchedFinishTaskSwitch reads this slot, clears it, and calls
+    // SpinLockRelease. The slot is per-CPU (not per-task) because
+    // it identifies "the lock THIS CPU just acquired"; the resumed
+    // task is irrelevant to which lock needs releasing.
+    //
+    // ctxsw_lock_to_release is void* to keep cpu/percpu.h free of a
+    // sync/spinlock.h include; sched.cpp casts it back to SpinLock*.
+    // nullptr = no pending release (e.g., not currently inside
+    // Schedule). ctxsw_lock_flags is the IrqFlags::rflags value
+    // captured at acquire — required by SpinLockRelease's signature.
+    void* ctxsw_lock_to_release;
+    u64 ctxsw_lock_flags;
+
     // Everything below this line will grow as SMP matures:
     //   - per-CPU runqueue head/tail + spinlock
     //   - per-CPU heap magazine (when the heap grows per-CPU caching)

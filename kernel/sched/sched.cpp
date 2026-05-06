@@ -300,22 +300,18 @@ constinit u64 g_tasks_exited = 0;
 //   - any WaitQueue head/tail
 //   - g_tasks_* counters
 //
-// On single CPU today this is a no-op: callers that matter are
-// already CLI'd, so there's no concurrency to guard against. The
-// value is enforcing a single locking discipline across every
-// mutation point so SMP bring-up (Commit D in the SMP plan — see
-// wiki/advanced/SMP-AP-Bringup-Scope.md) has uniform ground truth
-// — "this lock protects the runqueue" — rather than a per-site
-// bolt-on.
+// SMP correctness: Schedule() HOLDS this lock across the
+// ContextSwitch call via the lock-passing handshake — the source
+// CPU writes the lock pointer + saved IRQ flags into its PerCpu
+// `ctxsw_lock_to_release` slot before ContextSwitch, and the
+// resumed code (SchedFinishTaskSwitch, called either from
+// Schedule()'s post-switch path or from SchedTaskTrampoline on a
+// fresh-task first-run) drains the slot and releases. Closes the
+// race where a peer CPU could wake `prev` between an early lock
+// release and the actual stack swap, then dispatch prev while
+// we're still on its stack. Mirrors Linux's prepare_task_switch /
+// finish_task_switch pattern.
 //
-// IMPORTANT gap: Schedule() does NOT hold this lock across the
-// ContextSwitch call. The lock covers RunqueuePop/Push and the
-// state transitions; it's released before ContextSwitch. On single
-// CPU that's fine (CLI prevents concurrent IRQs on this core). On
-// SMP, another CPU could wake `prev` between the release and the
-// context switch, then try to schedule INTO prev while we're still
-// on prev's stack. Commit D fixes via lock-passing-across-switch,
-// mirroring Linux's finish_task_switch pattern.
 // Tagged with `kLockClassSched` so the lockdep-lite locking-order
 // graph (sync/lockdep.h) records every "lock-X-was-held when sched
 // was acquired" pairing. Untagged locks pay nothing; the scheduler
@@ -611,6 +607,33 @@ extern "C" void SchedTaskTrampoline();
 extern "C" [[noreturn]] void SchedExitC();
 
 } // namespace
+
+// Lock-pass drain. Called from two places:
+//   1. Schedule(), immediately after ContextSwitch returns (we're on
+//      the resumed task's stack).
+//   2. SchedTaskTrampoline (context_switch.S), as the first instruction
+//      a fresh task ever runs — before the entry function fires.
+//
+// Reads this CPU's PerCpu slot — written by the source side of the
+// switch under g_sched_lock — and releases the lock with the saved
+// IRQ flags. The slot is per-CPU because it identifies "the lock THIS
+// CPU just acquired in Schedule()"; the resumed task is irrelevant to
+// the release decision. nullptr slot = nothing to release (a fresh AP
+// joining the scheduler hits this path with the slot still cleared
+// from PerCpuInitBsp / SmpStartAps initialisation).
+extern "C" void SchedFinishTaskSwitch()
+{
+    cpu::PerCpu* pcpu = cpu::CurrentCpu();
+    void* lock_ptr = pcpu->ctxsw_lock_to_release;
+    if (lock_ptr == nullptr)
+    {
+        return;
+    }
+    sync::IrqFlags flags{.rflags = pcpu->ctxsw_lock_flags};
+    pcpu->ctxsw_lock_to_release = nullptr;
+    pcpu->ctxsw_lock_flags = 0;
+    sync::SpinLockRelease(*static_cast<sync::SpinLock*>(lock_ptr), flags);
+}
 
 void SchedInit()
 {
@@ -962,76 +985,91 @@ void Schedule()
 
     Task* prev = nullptr;
     Task* next = nullptr;
+    // Acquire the scheduler lock manually (rather than via SpinLockGuard)
+    // so we can hand it off across ContextSwitch — see the lock-passing
+    // dance below. The lock covers the pick + state transitions; all
+    // per-CPU register handoffs (TSS.RSP0, AS activate, FS_BASE, IRQ
+    // depth, DR*) can correctly run while it's held.
+    sync::IrqFlags lock_flags = sync::SpinLockAcquire(g_sched_lock);
+
+    next = RunqueuePopRunnable();
+    if (next == nullptr)
     {
-        // Acquire the scheduler lock ONLY for the pick + state-transition
-        // phase. We release BEFORE ContextSwitch — see the SMP gap note
-        // on g_sched_lock: on single CPU this is safe (CLI serialises),
-        // on SMP Commit D adds the lock-passing-across-switch dance.
-        sync::SpinLockGuard guard(g_sched_lock);
-
-        next = RunqueuePopRunnable();
-        if (next == nullptr)
+        if (Current()->state != TaskState::Running)
         {
-            if (Current()->state != TaskState::Running)
-            {
-                PanicSched("no runnable task available");
-            }
-            return;
+            // Release the lock before panic so any post-mortem walker
+            // sees a consistent state. PanicSched is [[noreturn]].
+            sync::SpinLockRelease(g_sched_lock, lock_flags);
+            PanicSched("no runnable task available");
         }
-        // Documentation-of-invariant: a task pulled off the runqueue
-        // must have been Ready (the only state RunqueuePush accepts).
-        // A non-Ready next means the runqueue's contract was violated
-        // upstream — likely a missing state transition before push.
-        DEBUG_ASSERT(next->state == TaskState::Ready, "sched", "popped task was not Ready");
+        sync::SpinLockRelease(g_sched_lock, lock_flags);
+        return;
+    }
+    // Documentation-of-invariant: a task pulled off the runqueue
+    // must have been Ready (the only state RunqueuePush accepts).
+    // A non-Ready next means the runqueue's contract was violated
+    // upstream — likely a missing state transition before push.
+    DEBUG_ASSERT(next->state == TaskState::Ready, "sched", "popped task was not Ready");
 
-        prev = Current();
-        if (prev->state == TaskState::Running)
+    prev = Current();
+    if (prev->state == TaskState::Running)
+    {
+        if (prev->kill_requested)
         {
-            if (prev->kill_requested)
-            {
-                SerialWrite("[sched] killing task id=");
-                SerialWriteHex(prev->id);
-                SerialWrite(" name=\"");
-                SerialWrite(prev->name);
-                SerialWrite("\" reason=");
-                SerialWrite(KillReasonName(prev->kill_reason));
-                SerialWrite("\n");
-                // CPU-tick budget ran out (flagged by OnTimerTick). Treat
-                // identically to SchedExit but inline — we're already
-                // inside Schedule()'s locked section, calling SchedExit
-                // here would re-enter the lock and fight the state
-                // machine. Transition Running → Dead, push to zombies,
-                // wake the reaper.
-                prev->state = TaskState::Dead;
-                ++g_tasks_exited;
-                --g_tasks_live;
-                prev->next = g_zombies;
-                g_zombies = prev;
-                // Wake the reaper; it's blocked on g_reaper_wq and
-                // noticing a new zombie needs a wake. WaitQueueWakeOne
-                // itself acquires g_sched_lock — but we already hold
-                // it. Use the _Locked variant to avoid recursive lock.
-                WaitQueueWakeOneLocked(&g_reaper_wq);
-            }
-            else
-            {
-                // RunqueueOrSuspendPush sets state appropriately:
-                // Ready when suspend_count == 0 (the typical path)
-                // or Blocked + onto g_suspended when the task was
-                // suspended while it was the running task. Self-
-                // suspend is the only way the latter happens on
-                // single-CPU — a different task suspending us
-                // can't preempt us, so we always reach this point
-                // after our own SchedSuspendTask call.
-                RunqueueOrSuspendPush(prev);
-            }
+            SerialWrite("[sched] killing task id=");
+            SerialWriteHex(prev->id);
+            SerialWrite(" name=\"");
+            SerialWrite(prev->name);
+            SerialWrite("\" reason=");
+            SerialWrite(KillReasonName(prev->kill_reason));
+            SerialWrite("\n");
+            // CPU-tick budget ran out (flagged by OnTimerTick). Treat
+            // identically to SchedExit but inline — we're already
+            // inside Schedule()'s locked section, calling SchedExit
+            // here would re-enter the lock and fight the state
+            // machine. Transition Running → Dead, push to zombies,
+            // wake the reaper.
+            prev->state = TaskState::Dead;
+            ++g_tasks_exited;
+            --g_tasks_live;
+            prev->next = g_zombies;
+            g_zombies = prev;
+            // Wake the reaper; it's blocked on g_reaper_wq and
+            // noticing a new zombie needs a wake. WaitQueueWakeOne
+            // itself acquires g_sched_lock — but we already hold
+            // it. Use the _Locked variant to avoid recursive lock.
+            WaitQueueWakeOneLocked(&g_reaper_wq);
         }
-        // Dead tasks are NOT re-enqueued; their Task struct + stack live on
-        // until the reaper reclaims them.
+        else
+        {
+            // RunqueueOrSuspendPush sets state appropriately:
+            // Ready when suspend_count == 0 (the typical path)
+            // or Blocked + onto g_suspended when the task was
+            // suspended while it was the running task. Self-
+            // suspend is the only way the latter happens on
+            // single-CPU — a different task suspending us
+            // can't preempt us, so we always reach this point
+            // after our own SchedSuspendTask call.
+            RunqueueOrSuspendPush(prev);
+        }
+    }
+    // Dead tasks are NOT re-enqueued; their Task struct + stack live on
+    // until the reaper reclaims them.
 
-        next->state = TaskState::Running;
-        Current() = next;
-        ++g_context_switches;
+    next->state = TaskState::Running;
+    Current() = next;
+    ++g_context_switches;
+
+    // Lock-passing handoff. The lock STAYS HELD across ContextSwitch;
+    // SchedFinishTaskSwitch (called below on the resumed task's stack,
+    // or from SchedTaskTrampoline on a fresh-task first-run) reads this
+    // CPU's slot and releases. Closes the SMP race where a peer CPU
+    // could wake `prev` between an early lock release and the actual
+    // stack swap, then dispatch prev while we're still on its stack.
+    {
+        cpu::PerCpu* pcpu = cpu::CurrentCpu();
+        pcpu->ctxsw_lock_to_release = &g_sched_lock;
+        pcpu->ctxsw_lock_flags = lock_flags.rflags;
     }
 
     // Publish `next`'s kernel-stack top to the BSP's TSS.RSP0 slot.
@@ -1130,6 +1168,15 @@ void Schedule()
     // swapped to us." Use Current() instead — the scheduler wrote
     // it to the incoming task BEFORE the stack flip, so Current()
     // here is the task that just resumed.
+    //
+    // First thing on the new stack: drain the lock-pass slot. The
+    // SOURCE-CPU side of THIS Schedule() call (which may have been a
+    // different physical Schedule() invocation, on this same CPU,
+    // some time in the past — whenever this task was switched out)
+    // wrote the slot before its ContextSwitch. We release it here
+    // BEFORE touching any other shared state so the scheduler is
+    // unlocked promptly after the resumption.
+    SchedFinishTaskSwitch();
     {
         const u64 v = Current()->fs_base;
         const u32 lo = static_cast<u32>(v);
