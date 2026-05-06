@@ -374,13 +374,13 @@ u64 DisasmRows(u64 pid, u64 va, debug::disasm::DecodedInsn* out, u64 row_cap)
 // ---- Breakpoints --------------------------------------------
 
 debug::BreakpointId InstallBp(u64 va, debug::BpKind kind, debug::BpLen len, u64 owner_pid, bool suspend,
-                              debug::BpError* err)
+                              debug::BpError* err, debug::BpInstallFlags flags)
 {
     if (kind == debug::BpKind::Software)
     {
-        return debug::BpInstallSoftware(va, suspend, err);
+        return debug::BpInstallSoftware(va, suspend, err, /*on_hit=*/nullptr, flags);
     }
-    return debug::BpInstallHardware(va, kind, len, owner_pid, suspend, err);
+    return debug::BpInstallHardware(va, kind, len, owner_pid, suspend, err, /*on_hit=*/nullptr, flags);
 }
 
 debug::BpError RemoveBp(debug::BreakpointId id, u64 requester_pid)

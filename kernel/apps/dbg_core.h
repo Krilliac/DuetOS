@@ -196,7 +196,7 @@ u64 DisasmRows(u64 pid, u64 va, debug::disasm::DecodedInsn* out, u64 row_cap);
 // ---- Breakpoints --------------------------------------------
 
 debug::BreakpointId InstallBp(u64 va, debug::BpKind kind, debug::BpLen len, u64 owner_pid, bool suspend,
-                              debug::BpError* err);
+                              debug::BpError* err, debug::BpInstallFlags flags = debug::BpInstallFlags::None);
 debug::BpError RemoveBp(debug::BreakpointId id, u64 requester_pid);
 debug::BpError ResumeBp(debug::BreakpointId id);
 debug::BpError StepBp(debug::BreakpointId id);

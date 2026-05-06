@@ -251,7 +251,7 @@ void DoBp(u32 argc, char** argv)
     {
         if (argc < 6)
         {
-            ConsoleWriteln("DBG BP ADD: <ADDR> <KIND=SW|HWX|HWW|HWRW> <LEN=1|2|4|8> [SUSPEND]");
+            ConsoleWriteln("DBG BP ADD: <ADDR> <KIND=SW|HWX|HWW|HWRW> <LEN=1|2|4|8> [SUSPEND] [UNSAFE]");
             return;
         }
         u64 addr = 0, len = 1;
@@ -265,17 +265,52 @@ void DoBp(u32 argc, char** argv)
                           : (len == 4) ? duetos::debug::BpLen::Four
                           : (len == 2) ? duetos::debug::BpLen::Two
                                        : duetos::debug::BpLen::One;
-        const bool suspend = (argc >= 7) && StrEq(argv[6], "suspend");
+        bool suspend = false;
+        bool unsafe = false;
+        for (u32 i = 6; i < argc; ++i)
+        {
+            if (StrEq(argv[i], "suspend"))
+                suspend = true;
+            else if (StrEq(argv[i], "unsafe"))
+                unsafe = true;
+        }
+        const auto flags = unsafe ? duetos::debug::BpInstallFlags::AllowUnsafe : duetos::debug::BpInstallFlags::None;
         duetos::debug::BpError err = duetos::debug::BpError::None;
-        const auto id = dc::InstallBp(addr, kind, blen, /*owner_pid=*/0, suspend, &err);
+        const auto id = dc::InstallBp(addr, kind, blen, /*owner_pid=*/0, suspend, &err, flags);
         if (id.value == 0)
         {
-            ConsoleWriteln("DBG BP ADD: FAIL");
+            if (err == duetos::debug::BpError::UnsafeZone)
+                ConsoleWriteln("DBG BP ADD: REFUSED — addr is in an unsafe kernel zone "
+                               "(klog/heap/sched/trap/panic). Append 'unsafe' to override.");
+            else
+                ConsoleWriteln("DBG BP ADD: FAIL");
             return;
         }
         ConsoleWrite("DBG BP ADD: ID=");
         WriteU64Dec(id.value);
         ConsoleWriteln("");
+        return;
+    }
+    if (StrEq(sub, "zones"))
+    {
+        duetos::debug::BpUnsafeRange ranges[32];
+        const usize n = duetos::debug::BpUnsafeRangesList(ranges, 32);
+        if (n == 0)
+        {
+            ConsoleWriteln("DBG BP ZONES: <empty> — stage-1 build, or PopulateUnsafeRanges hasn't run yet.");
+            return;
+        }
+        ConsoleWrite("DBG BP ZONES: COUNT=");
+        WriteU64Dec(n);
+        ConsoleWriteln("");
+        for (usize i = 0; i < n; ++i)
+        {
+            WriteU64Hex(ranges[i].lo, 16);
+            ConsoleWrite("..");
+            WriteU64Hex(ranges[i].hi, 16);
+            ConsoleWrite("  ");
+            ConsoleWriteln(ranges[i].name);
+        }
         return;
     }
     if (StrEq(sub, "rm"))

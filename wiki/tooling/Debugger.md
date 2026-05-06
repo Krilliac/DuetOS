@@ -155,6 +155,44 @@ CI greps for both lines once it's wired up. Failure paths emit `[smoke] disasm=F
    - `dbg bp list` — should show the BP just installed.
 4. Open the GUI: bring the `Debugger` window to focus, press `1` … `7` to walk every tab.
 
+## Safety: unsafe-zone blocklist + re-entrancy guard
+
+A breakpoint set inside a kernel path that the BP handler itself reaches will recurse — `int3` inside the trap dispatcher / klog / panic / scheduler / heap allocator / spinlock primitives means the BP-hit handler tries to log → re-enters the patched code → triple-faults on UP, deadlocks on SMP. To prevent that, the breakpoint subsystem ships two safety nets.
+
+### Install-time blocklist
+
+At `BpInit`, the kernel walks the embedded `.symtab` and caches `[addr, addr+size)` ranges for every function whose demangled name contains any of the curated unsafe-substrings (the BP handlers themselves, the symbol resolver, `SerialWrite`, klog emitters, panic / trap dispatchers, scheduler core, spinlock primitives, `KMalloc` / `KFree`, frame allocator). `BpInstallSoftware` and `BpInstallHardware` (HW-execute only) reject installs that target one of those ranges with `BpError::UnsafeZone`.
+
+To override — for research, deep kernel debugging, or paths the curated list misses — pass `BpInstallFlags::AllowUnsafe` to the C++ API, or append the literal `unsafe` to the shell command:
+
+```
+dbg bp add 0xffffffff80123456 hwx 1 suspend unsafe
+```
+
+`dbg bp zones` lists every currently-blocklisted range. The list is populated once at boot and is stable until reboot.
+
+The list is conservative — substrings are picked to match unique tokens (e.g. `Schedule(`, `BpHandleBreakpoint`) so a vague match doesn't over-block a legitimate target.
+
+### Trap-handler re-entrancy guard
+
+A single `g_handler_depth` counter (per-CPU on SMP, when SMP-mode lands) wraps the synchronous portion of `BpHandleBreakpoint` and `BpHandleDebug`. If the counter is > 0 on entry, the handler:
+
+- emits one `RECURSION: nested handler entry at addr=…` warning;
+- claims the trap and returns;
+- does NOT log a normal hit, run the on-hit callback, or attempt suspend.
+
+The counter is decremented before `MaybeSuspend` runs — once the synchronous danger window (klog + `PokeByte` under `g_lock`) has closed, peer tasks firing BPs while the parked task is on its wait queue are handled normally. The guard's job is exclusively to break the same-CPU synchronous recursion that would otherwise stack-overflow into a triple-fault.
+
+### What's still possible
+
+These safety nets reduce the blast radius but don't make BP-on-anything safe:
+
+- A HW write/read-write watch on a hot kernel data slot (e.g. `g_total_ticks`) is **not** blocked — it's an arms-length data tap that doesn't recurse the handler. But with `suspend_on_hit` it can park the box if it fires faster than the operator can resume.
+- A BP installed via `unsafe` override on the trap dispatcher or the panic path will still triple-fault if it actually fires.
+- Kernel-data writes via `dbg watch` are read-only by design; writes happen only through `BpWriteRegs` (sanitised) or, if you reach for it, the breakpoint subsystem's `PokeByte` (kernel-`.text` only, under spinlock).
+
+If you want a hot path BP'd anyway, the safest workflow is: install with `unsafe`, observe one fire under serial-only logging, remove. Don't `suspend_on_hit` an unsafe target.
+
 ## Out of scope (deliberate)
 
 - DWARF / source-level stepping. Use the GDB stub for that.
