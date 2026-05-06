@@ -566,6 +566,60 @@ bool SuspendedListRemove(Task* t)
     return false;
 }
 
+// Lift one Normal-band Ready task off a peer CPU's runqueue.
+// Called from RunqueuePopRunnable's empty-local-queue fallback.
+// Walks peers round-robin starting from cpu_id+1; returns the
+// first non-suspended task found, or nullptr if every peer is
+// also empty. Idle tasks are pinned per-CPU and never stolen —
+// the band-segregation also prevents an idle from drifting
+// onto a different CPU's Normal queue.
+//
+// Caller must hold g_sched_lock — every per-CPU runqueue is
+// covered by the same global lock today, so cross-CPU access
+// is safe without try-lock dancing. When the lock granularity
+// splits per-CPU later, this function will need try-lock + a
+// fallback iteration order to avoid AB/BA deadlock.
+Task* StealNormalFromPeer()
+{
+    cpu::PerCpu* self = cpu::CurrentCpu();
+    if (self == nullptr)
+    {
+        return nullptr;
+    }
+    const u32 limit = arch::SmpCpuIdLimit();
+    if (limit <= 1)
+    {
+        return nullptr; // UP — no peers to steal from
+    }
+    const u32 self_id = self->cpu_id;
+    for (u32 step = 1; step < limit; ++step)
+    {
+        const u32 peer_id = (self_id + step) % limit;
+        cpu::PerCpu* peer = arch::SmpGetPercpu(peer_id);
+        if (peer == nullptr)
+        {
+            continue;
+        }
+        Task* head = RunqHeadNormal(peer);
+        if (head == nullptr)
+        {
+            continue;
+        }
+        // Pop the head off the peer's Normal queue.
+        RunqHeadNormal(peer) = head->next;
+        if (RunqHeadNormal(peer) == nullptr)
+        {
+            RunqTailNormal(peer) = nullptr;
+        }
+        head->next = nullptr;
+        // Update affinity so the next wake routes to us — keeps
+        // hot tasks on whichever CPU is actually running them.
+        head->last_cpu = self_id;
+        return head;
+    }
+    return nullptr;
+}
+
 // Drain runqueue until a non-suspended task is found OR the
 // runqueue is empty. Suspended tasks popped along the way are
 // re-parked on g_suspended_head with state = Blocked. The wake
@@ -573,6 +627,11 @@ bool SuspendedListRemove(Task* t)
 // entirely for known-suspended tasks; this loop is the safety
 // net for tasks suspended WHILE on the runqueue (Ready state),
 // which the suspender doesn't relocate eagerly.
+//
+// On an empty local runqueue, attempts to steal one Normal-band
+// task from a peer CPU (commit-6 work-stealing). Idle tasks are
+// per-CPU and not eligible to steal — falling through to the
+// caller's nullptr handling lets Schedule() pick our own idle.
 Task* RunqueuePopRunnable()
 {
     while (true)
@@ -580,7 +639,16 @@ Task* RunqueuePopRunnable()
         Task* t = RunqueuePop();
         if (t == nullptr)
         {
-            return nullptr;
+            // Try to steal a Normal-band task from a peer before
+            // giving up. If no peer has work, the caller falls
+            // back to this CPU's idle.
+            t = StealNormalFromPeer();
+            if (t == nullptr)
+            {
+                return nullptr;
+            }
+            // Stolen task is Ready — same state contract as a
+            // local pop. Fall through to the suspend check.
         }
         if (t->suspend_count == 0)
         {
