@@ -185,8 +185,12 @@ Implemented:
   `vkCreateImageView`.
 - `vkCreateRenderPass` / `vkCreateFramebuffer`.
 - `vkCreateShaderModule` validates the SPIR-V magic word
-  `0x07230203` (LE) and rejects with `ErrorInvalidShaderNV`;
-  blob bytes are stored, not executed.
+  `0x07230203` (LE) and rejects with `ErrorInvalidShaderNV`.
+  A v1 header walker then runs across every accepted blob and
+  aggregates entry-point / capability / execution-mode /
+  decoration counts; the result hangs off `VkGetShaderModuleInfoDuet`
+  (DuetOS-only diagnostic accessor — non-spec).  The bytecode
+  itself is still not executed.
 - `vkCreatePipelineLayout`, `vkCreateGraphicsPipeline`,
   `vkCreateComputePipeline`.
 - `vkCreateCommandPool`, `vkAllocateCommandBuffers`,
@@ -205,6 +209,25 @@ Implemented:
 - `vkCreateFence` / `vkWaitForFences` (always immediately
   signalled — submits are synchronous in this ICD),
   `vkCreateSemaphore`.
+- Descriptor sets: `vkCreateDescriptorSetLayout`,
+  `vkCreateDescriptorPool` (with `max_sets` budget enforcement),
+  `vkAllocateDescriptorSets`, `vkUpdateDescriptorSet` (DuetOS
+  one-binding-at-a-time variant of `vkUpdateDescriptorSets`),
+  `vkCmdBindDescriptorSets`, `vkFreeDescriptorSets`,
+  `vkResetDescriptorPool`.  Sets carry no resource state for
+  shaders to consume; the surface exists so a downstream
+  caller (DXVK, native compute) finds the full ladder today.
+- WSI: `VkCreateDuetSurfaceKHR` (single platform-agnostic
+  surface bound to the kernel framebuffer),
+  `VkGetPhysicalDeviceSurfaceCapabilitiesKHR` /
+  `SurfaceFormatsKHR` / `SurfacePresentModesKHR`,
+  `vkCreateSwapchainKHR` (allocates 2-4 scanout-backed
+  images), `vkGetSwapchainImagesKHR`,
+  `vkAcquireNextImageKHR` (rotates the cursor),
+  `vkQueuePresentKHR` (validates the index and calls
+  `FramebufferPresent` so the compositor flushes the damage
+  rect).  Only `Fifo` present mode + `B8G8R8A8_UNORM`
+  format are advertised.
 
 Out of scope — deferred:
 
@@ -245,12 +268,10 @@ recompose. Four themes ship:
   virtio-gpu's tiny command set; a real GPU driver will need a
   proper queue.
 - **Vulkan ICD does not execute shaders.** SPIR-V blobs are
-  validated (magic-word check) and stored, not run. `vkCmdDraw`
-  is recorded for stats but produces no pixels.
-- **No swapchain.** WSI (`vkAcquireNextImageKHR`,
-  `vkQueuePresentKHR`) is unimplemented; callers paint the
-  framebuffer via `vkCmdClearColorImage` against a scanout-
-  backed image as a v0 shortcut.
+  validated (magic-word check) + parsed (entry-point /
+  capability / decoration counts), but the bytecode is not
+  executed. `vkCmdDraw` is recorded for stats but produces
+  no pixels.
 - **Damage tracking is single-bbox.** A frame that touches the
   top-left and bottom-right corners flushes the whole surface. A
   list-of-rects damage tracker would help for chrome-heavy frames

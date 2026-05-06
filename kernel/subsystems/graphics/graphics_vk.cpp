@@ -147,6 +147,7 @@ ImageRecord g_image_data[kPoolCapacity];
 struct ShaderRecord
 {
     u64 byte_size;
+    ShaderModuleInfo info;
 };
 ShaderRecord g_shader_data[kPoolCapacity];
 
@@ -283,6 +284,11 @@ u32 g_invalid_spirv_rejections = 0;
 u32 g_descriptor_writes = 0;
 u32 g_swapchain_acquires = 0;
 u32 g_swapchain_presents = 0;
+u32 g_spirv_modules_parsed = 0;
+u32 g_spirv_entry_points_seen = 0;
+u32 g_spirv_capabilities_seen = 0;
+u32 g_spirv_decorations_seen = 0;
+u32 g_spirv_execution_modes_seen = 0;
 
 // One-shot logging keyed by entry point.
 enum EpId
@@ -788,6 +794,89 @@ void VkDestroyFramebuffer(VkDevice dev, VkFramebuffer fb)
 // Shader module + pipeline.
 // -------------------------------------------------------------------
 
+namespace
+{
+
+// SPIR-V opcodes we recognise.  Full opcode table is huge — only
+// the instructions whose presence is interesting for v1
+// diagnostics are listed.  Reference: SPIR-V 1.6 spec § 3.37.
+constexpr u16 kOpSource = 3;
+constexpr u16 kOpName = 5;
+constexpr u16 kOpMemoryModel = 14;
+constexpr u16 kOpEntryPoint = 15;
+constexpr u16 kOpExecutionMode = 16;
+constexpr u16 kOpCapability = 17;
+constexpr u16 kOpDecorate = 71;
+constexpr u16 kOpMemberDecorate = 72;
+
+ShaderModuleInfo ParseSpirv(const u32* code, u64 byte_size)
+{
+    ShaderModuleInfo info{};
+    if (code == nullptr || byte_size < 5u * 4u || (byte_size & 3u) != 0u)
+        return info;
+    if (code[0] != 0x07230203u)
+        return info;
+
+    info.word_count = static_cast<u32>(byte_size / 4u);
+    info.generator = code[2];
+    info.bound = code[3];
+
+    u32 i = 5; // skip 5-word header
+    while (i < info.word_count)
+    {
+        const u32 instr = code[i];
+        const u32 wc = instr >> 16;
+        const u16 op = static_cast<u16>(instr & 0xFFFFu);
+        if (wc == 0 || i + wc > info.word_count)
+            return info; // malformed — leave info.valid == false
+        switch (op)
+        {
+        case kOpEntryPoint:
+            ++info.entry_point_count;
+            // First entry point's execution model + name fed back
+            // for diagnostics.  Layout: [instr][model][id][name...].
+            if (info.entry_point_count == 1 && wc >= 4)
+            {
+                info.first_execution_model = code[i + 1];
+                const u32 name_words = wc - 3;
+                const u32 name_max_bytes = name_words * 4u;
+                const auto* name_bytes = reinterpret_cast<const char*>(&code[i + 3]);
+                u32 j = 0;
+                const u32 cap = kMaxEntryPointName - 1;
+                while (j < name_max_bytes && j < cap && name_bytes[j] != '\0')
+                {
+                    info.first_entry_name[j] = name_bytes[j];
+                    ++j;
+                }
+                info.first_entry_name[j] = '\0';
+            }
+            break;
+        case kOpExecutionMode:
+            ++info.execution_mode_count;
+            break;
+        case kOpCapability:
+            ++info.capability_count;
+            break;
+        case kOpDecorate:
+        case kOpMemberDecorate:
+            ++info.decoration_count;
+            break;
+        case kOpSource:
+        case kOpName:
+        case kOpMemoryModel:
+        default:
+            // Recognised but uncounted — instruction stream still
+            // advances by `wc` words.
+            break;
+        }
+        i += wc;
+    }
+    info.valid = true;
+    return info;
+}
+
+} // namespace
+
 VkResult VkCreateShaderModule(VkDevice dev, const u32* code, u64 code_size_bytes, VkShaderModule* out)
 {
     LogOnce(EpCreateShaderModule, "vkCreateShaderModule");
@@ -809,8 +898,27 @@ VkResult VkCreateShaderModule(VkDevice dev, const u32* code, u64 code_size_bytes
     if (!PoolAlloc(g_shader_pool, &slot))
         return VkResult::ErrorOutOfHostMemory;
     g_shader_data[slot].byte_size = code_size_bytes;
+    g_shader_data[slot].info = ParseSpirv(code, code_size_bytes);
+    if (g_shader_data[slot].info.valid)
+    {
+        ++g_spirv_modules_parsed;
+        g_spirv_entry_points_seen += g_shader_data[slot].info.entry_point_count;
+        g_spirv_capabilities_seen += g_shader_data[slot].info.capability_count;
+        g_spirv_decorations_seen += g_shader_data[slot].info.decoration_count;
+        g_spirv_execution_modes_seen += g_shader_data[slot].info.execution_mode_count;
+    }
     if (out != nullptr)
         *out = HandleFor(kShaderBase, slot);
+    return VkResult::Success;
+}
+
+VkResult VkGetShaderModuleInfoDuet(VkShaderModule module, ShaderModuleInfo* out)
+{
+    if (out == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    if (!HandleInRange(module, kShaderBase) || !PoolIsLive(g_shader_pool, SlotOf(module, kShaderBase)))
+        return VkResult::ErrorInitializationFailed;
+    *out = g_shader_data[SlotOf(module, kShaderBase)].info;
     return VkResult::Success;
 }
 
@@ -1647,6 +1755,11 @@ GraphicsStats VkStatsSnapshot()
     s.vk_command_replayed = g_command_replayed;
     s.vk_clear_pixels_painted = g_clear_pixels_painted;
     s.vk_invalid_spirv_rejections = g_invalid_spirv_rejections;
+    s.vk_spirv_modules_parsed = g_spirv_modules_parsed;
+    s.vk_spirv_entry_points_seen = g_spirv_entry_points_seen;
+    s.vk_spirv_capabilities_seen = g_spirv_capabilities_seen;
+    s.vk_spirv_decorations_seen = g_spirv_decorations_seen;
+    s.vk_spirv_execution_modes_seen = g_spirv_execution_modes_seen;
     return s;
 }
 
@@ -1665,11 +1778,9 @@ namespace
 {
 
 // Minimal valid SPIR-V header: magic + version + generator +
-// bound + schema + a single OpReturn (0xFD0001).  Real shaders
-// have orders of magnitude more, but our v0 ICD only checks the
-// magic word; the trailing words satisfy the "must be 4-byte
-// aligned and at least 5 words" test the spec mandates so a
-// downstream consumer can size-check the blob.
+// bound + schema + a single OpReturn (0xFD0001).  The v1 parser
+// walks this and reports all counts as zero — proves the
+// "well-formed but feature-light" path.
 constexpr u32 kFakeSpirvBlob[] = {
     0x07230203u, // magic
     0x00010300u, // version 1.3
@@ -1677,6 +1788,47 @@ constexpr u32 kFakeSpirvBlob[] = {
     0x00000001u, // bound
     0x00000000u, // schema
     0x000100FDu, // OpReturn
+};
+
+// Real-shape SPIR-V fragment shader module.  Used by the
+// self-test to prove the v1 parser reaches every interesting
+// instruction class: OpCapability, OpMemoryModel, OpEntryPoint
+// (with a name), OpExecutionMode, OpDecorate.  Layout:
+//   header (5 words) + OpCapability Shader (2)
+//   + OpMemoryModel Logical GLSL450 (3)
+//   + OpEntryPoint Fragment %4 "main" (5)
+//   + OpExecutionMode %4 OriginUpperLeft (3)
+//   + OpDecorate %5 Location 0 (4)
+// = 22 words.  Bound = 6 (highest id 5 + 1).
+constexpr u32 kRichSpirvBlob[] = {
+    // Header.
+    0x07230203u,
+    0x00010300u,
+    0xDE020104u,
+    0x00000006u,
+    0x00000000u,
+    // OpCapability Shader (1).
+    0x00020011u,
+    0x00000001u,
+    // OpMemoryModel Logical(0) GLSL450(1).
+    0x0003000Eu,
+    0x00000000u,
+    0x00000001u,
+    // OpEntryPoint Fragment(4) %4 "main".
+    0x0005000Fu,
+    0x00000004u,
+    0x00000004u,
+    0x6E69616Du,
+    0x00000000u,
+    // OpExecutionMode %4 OriginUpperLeft(7).
+    0x00030010u,
+    0x00000004u,
+    0x00000007u,
+    // OpDecorate %5 Location(30) 0.
+    0x00040047u,
+    0x00000005u,
+    0x0000001Eu,
+    0x00000000u,
 };
 
 bool SelftestFail(const char* what, u64 detail)
@@ -1745,6 +1897,32 @@ bool RunCanonicalLifecycle()
         return SelftestFail("[selftest:graphics] SPIR-V magic-word validator did not reject bad blob", 0);
     if (bogus != 0)
         return SelftestFail("[selftest:graphics] SPIR-V validator emitted a handle on rejection", bogus);
+
+    // Parser leg: a real-shape SPIR-V module reaches the v1
+    // walker.  The walker is run inside VkCreateShaderModule;
+    // VkGetShaderModuleInfoDuet exposes the parse result for
+    // the test to assert against.
+    VkShaderModule rich = 0;
+    if (VkCreateShaderModule(dev, kRichSpirvBlob, sizeof(kRichSpirvBlob), &rich) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] vkCreateShaderModule(rich) failed", 0);
+
+    ShaderModuleInfo rich_info{};
+    if (VkGetShaderModuleInfoDuet(rich, &rich_info) != VkResult::Success || !rich_info.valid)
+        return SelftestFail("[selftest:graphics] SPIR-V parser failed on rich module", 0);
+    if (rich_info.entry_point_count != 1)
+        return SelftestFail("[selftest:graphics] entry_point_count mismatch", rich_info.entry_point_count);
+    if (rich_info.capability_count != 1)
+        return SelftestFail("[selftest:graphics] capability_count mismatch", rich_info.capability_count);
+    if (rich_info.execution_mode_count != 1)
+        return SelftestFail("[selftest:graphics] execution_mode_count mismatch", rich_info.execution_mode_count);
+    if (rich_info.decoration_count != 1)
+        return SelftestFail("[selftest:graphics] decoration_count mismatch", rich_info.decoration_count);
+    if (rich_info.first_execution_model != 4) // Fragment
+        return SelftestFail("[selftest:graphics] first_execution_model not Fragment", rich_info.first_execution_model);
+    if (rich_info.first_entry_name[0] != 'm' || rich_info.first_entry_name[1] != 'a' ||
+        rich_info.first_entry_name[2] != 'i' || rich_info.first_entry_name[3] != 'n')
+        return SelftestFail("[selftest:graphics] first_entry_name did not decode to 'main'", 0);
+    VkDestroyShaderModule(dev, rich);
 
     VkPipeline pipe = 0;
     if (VkCreateGraphicsPipeline(dev, pl_layout, vs, fs, &pipe) != VkResult::Success)
@@ -1996,6 +2174,18 @@ VkResult GraphicsIcdSelfTest()
     {
         KLOG_WARN_V("subsystems/graphics", "[selftest:graphics] command replay covered fewer ops than expected",
                     g_command_replayed);
+        return VkResult::ErrorInitializationFailed;
+    }
+    if (g_spirv_modules_parsed < 3)
+    {
+        KLOG_WARN_V("subsystems/graphics", "[selftest:graphics] SPIR-V parser covered fewer modules than expected",
+                    g_spirv_modules_parsed);
+        return VkResult::ErrorInitializationFailed;
+    }
+    if (g_spirv_entry_points_seen == 0 || g_spirv_capabilities_seen == 0)
+    {
+        KLOG_WARN("subsystems/graphics",
+                  "[selftest:graphics] SPIR-V parser did not aggregate entry-points or capabilities");
         return VkResult::ErrorInitializationFailed;
     }
     KLOG_INFO_V("subsystems/graphics", "Vulkan ICD self-test passed; ops replayed", g_command_replayed);

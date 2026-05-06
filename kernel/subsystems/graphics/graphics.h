@@ -343,10 +343,38 @@ void VkDestroyFramebuffer(VkDevice dev, VkFramebuffer fb);
 // Shader + pipeline
 // -------------------------------------------------------------------
 
-/// Validates the SPIR-V magic word (0x07230203 LE) and stores the
-/// blob length.  The bytecode itself is not executed.
+/// Validates the SPIR-V magic word (0x07230203 LE) and stores
+/// the blob length.  The bytecode is not executed; a small
+/// header walker (see `VkGetShaderModuleInfoDuet`) runs at
+/// create time to extract entry points, capabilities, and
+/// decorations for diagnostics.
 VkResult VkCreateShaderModule(VkDevice dev, const u32* code, u64 code_size_bytes, VkShaderModule* out);
 void VkDestroyShaderModule(VkDevice dev, VkShaderModule module);
+
+inline constexpr u32 kMaxEntryPointName = 32;
+
+/// SPIR-V parse result attached to every shader module that
+/// passed the magic-word check.  Populated by the v1 parser at
+/// `VkCreateShaderModule` time — walks the instruction stream
+/// once and aggregates counts; does not execute the bytecode.
+///
+/// Non-spec entry point — DuetOS diagnostic surface only.
+struct ShaderModuleInfo
+{
+    bool valid;                                // false = parse failed (malformed)
+    u32 word_count;                            // module size in 32-bit words
+    u32 generator;                             // header word 2 (generator magic)
+    u32 bound;                                 // header word 3 (ID upper bound)
+    u32 entry_point_count;                     // OpEntryPoint instructions
+    u32 execution_mode_count;                  // OpExecutionMode instructions
+    u32 capability_count;                      // OpCapability instructions
+    u32 decoration_count;                      // OpDecorate + OpMemberDecorate
+    u32 first_execution_model;                 // first OpEntryPoint's model
+                                               // (0=Vertex, 4=Fragment, 5=GLCompute)
+    char first_entry_name[kMaxEntryPointName]; // null-terminated UTF-8
+};
+
+VkResult VkGetShaderModuleInfoDuet(VkShaderModule module, ShaderModuleInfo* out);
 
 VkResult VkCreatePipelineLayout(VkDevice dev, VkPipelineLayout* out);
 void VkDestroyPipelineLayout(VkDevice dev, VkPipelineLayout layout);
@@ -591,13 +619,18 @@ struct GraphicsStats
     u32 vk_descriptor_writes; // total VkUpdateDescriptorSet calls
     u32 vk_surfaces_live;
     u32 vk_swapchains_live;
-    u32 vk_swapchain_acquires;       // total vkAcquireNextImageKHR calls
-    u32 vk_swapchain_presents;       // total vkQueuePresentKHR calls
-    u32 vk_queue_submits;            // total VkQueueSubmit calls
-    u32 vk_command_recorded;         // total vkCmd* opcodes recorded
-    u32 vk_command_replayed;         // total vkCmd* opcodes replayed in submit
-    u32 vk_clear_pixels_painted;     // sum of pixels actually painted by scanout-backed clears
-    u32 vk_invalid_spirv_rejections; // VkCreateShaderModule rejections (bad magic or 0 size)
+    u32 vk_swapchain_acquires;         // total vkAcquireNextImageKHR calls
+    u32 vk_swapchain_presents;         // total vkQueuePresentKHR calls
+    u32 vk_queue_submits;              // total VkQueueSubmit calls
+    u32 vk_command_recorded;           // total vkCmd* opcodes recorded
+    u32 vk_command_replayed;           // total vkCmd* opcodes replayed in submit
+    u32 vk_clear_pixels_painted;       // sum of pixels actually painted by scanout-backed clears
+    u32 vk_invalid_spirv_rejections;   // VkCreateShaderModule rejections (bad magic / 0 size)
+    u32 vk_spirv_modules_parsed;       // shaders successfully parsed by the v1 walker
+    u32 vk_spirv_entry_points_seen;    // sum across all parsed modules
+    u32 vk_spirv_capabilities_seen;    // sum
+    u32 vk_spirv_decorations_seen;     // sum
+    u32 vk_spirv_execution_modes_seen; // sum
     u32 d3d_create_calls;
     u32 dxgi_create_calls;
     u32 d3d9_create_calls;
