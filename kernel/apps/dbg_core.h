@@ -76,10 +76,87 @@ struct WatchEntry
 /// can't park the compositor for >50 ms.
 inline constexpr u64 kScanResultCap = 256;
 
+/// Sentinel "PID" that means "kernel mode" — Memory / Disasm /
+/// Scan paths read directly from `va` (bounded by
+/// `PlausibleKernelAddress`) instead of walking a Process's
+/// AddressSpace. PID 0 is the boot task in DuetOS and a
+/// legitimate ring-3 target, so we use the all-bits-set value
+/// for the kernel pseudo-target.
+inline constexpr u64 kKernelPid = static_cast<u64>(-1);
+
+/// Snapshot row produced by EnumerateThreads. Distinct from a
+/// process row — DuetOS schedules at task granularity, so a
+/// multi-threaded process appears as multiple rows here while
+/// EnumerateProcesses sees it once.
+struct ThreadInfo
+{
+    u64 tid;
+    char name[24];
+    u64 ticks_run;
+    u8 state;    // 0 ready, 1 running, 2 sleeping, 3 blocked, 4 dead
+    u8 priority; // sched::TaskPriority cast to u8
+    bool is_running;
+};
+
+/// Snapshot row produced by EnumerateSymbols. The pointers are
+/// borrowed from the embedded .rodata symbol table — never freed,
+/// safe to dereference until reboot.
+struct SymbolRow
+{
+    u64 addr;
+    u32 size;
+    u32 line;
+    const char* name;
+    const char* file;
+};
+
+/// One-line readout of system-wide kernel state. Refreshed every
+/// time the System tab is repainted or the `dbg sysinfo` shell
+/// subcommand runs.
+struct KernelOverview
+{
+    u64 heap_pool_bytes;
+    u64 heap_used_bytes;
+    u64 heap_free_bytes;
+    u64 heap_alloc_count;
+    u64 heap_free_count;
+    u64 heap_largest_free_run;
+    u64 sched_context_switches;
+    u64 sched_tasks_live;
+    u64 sched_tasks_sleeping;
+    u64 sched_tasks_blocked;
+    u64 sched_tasks_created;
+    u64 sched_tasks_exited;
+    u64 sched_tasks_reaped;
+    u64 sched_total_ticks;
+    u64 sched_idle_ticks;
+    u64 symbol_count;
+    u64 text_start;
+    u64 text_end;
+};
+
 // ---- Process / memory ---------------------------------------
 
 usize EnumerateProcesses(ProcInfo* out, usize cap);
 bool LookupProcess(u64 pid, ProcInfo* out);
+
+/// Per-task enumeration. Walks the scheduler's runqueues, sleep
+/// queue, and zombies in a single CLI-bracketed pass. Emits one
+/// row per Task, regardless of which Process it belongs to.
+usize EnumerateThreads(ThreadInfo* out, usize cap);
+
+/// Iterate the embedded kernel symbol table. `start` is the
+/// first index to emit; `filter` is a substring matcher (case-
+/// sensitive, NUL-terminated; pass nullptr or "" to disable).
+/// Returns the number of rows actually written. Use
+/// `KernelSymbolCount` to size your scroll cursor.
+usize EnumerateSymbols(SymbolRow* out, usize cap, u64 start, const char* filter);
+
+/// Total entries in the embedded kernel symbol table.
+u64 KernelSymbolCount();
+
+/// One-shot snapshot of system state for the System tab.
+void GetKernelOverview(KernelOverview* out);
 
 /// Read up to `len` bytes from `pid`'s user memory at `va`. If
 /// the target task is currently parked on a breakpoint, this

@@ -48,6 +48,9 @@ enum class Tab : u8
     Watch,
     Scan,
     Disasm,
+    System,  // kernel heap + scheduler + symbol-table overview
+    Symbols, // browse + filter the embedded kernel .symtab
+    Threads, // per-thread enumeration (not just per-process)
     Count,
 };
 

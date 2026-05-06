@@ -76,15 +76,22 @@ void TabAdvance(int dir)
     g_state.current_tab = static_cast<Tab>(t);
 }
 
-// Promote the currently-highlighted process row to current_pid.
-// Driven by the Enter key in the Processes tab.
+// Promote the currently-highlighted Procs-tab row to current_pid.
+// Row 0 is the <kernel> pseudo-target; rows 1..N+1 are the live
+// processes returned by EnumerateProcesses.
 void PickCurrentProcess()
 {
+    if (g_state.proc_scroll_rows == 0)
+    {
+        g_state.current_pid = core::kKernelPid;
+        KLOG_INFO("dbg", "selected target=<kernel>");
+        return;
+    }
     core::ProcInfo rows[64];
     const usize n = core::EnumerateProcesses(rows, 64);
     if (n == 0)
         return;
-    u32 idx = g_state.proc_scroll_rows;
+    u32 idx = g_state.proc_scroll_rows - 1; // skip the <kernel> row
     if (idx >= n)
         idx = static_cast<u32>(n - 1);
     g_state.current_pid = rows[idx].pid;
@@ -110,10 +117,18 @@ bool DbgFeedChar(char c)
         duetos::drivers::video::WindowCycleActive();
         return true;
     }
-    if (c >= '1' && c <= '7')
+    if (c >= '1' && c <= '9')
     {
-        // Quick-jump to tab 1..7.
+        // Quick-jump to tab 1..9.
         const u8 idx = static_cast<u8>(c - '1');
+        if (idx < static_cast<u8>(Tab::Count))
+            g_state.current_tab = static_cast<Tab>(idx);
+        return true;
+    }
+    if (c == '0')
+    {
+        // '0' jumps to the 10th tab (Threads).
+        const u8 idx = 9;
         if (idx < static_cast<u8>(Tab::Count))
             g_state.current_tab = static_cast<Tab>(idx);
         return true;

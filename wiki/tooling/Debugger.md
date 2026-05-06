@@ -23,18 +23,19 @@ Read-only operations (`dbg ps`, `dbg mem`, `dbg dis`, `dbg bp list`, `dbg watch 
 
 | Key            | Action                                              |
 | -------------- | --------------------------------------------------- |
-| `1` … `7`      | Quick-jump to tab 1..7 (Procs / Mem / Regs / BP / Watch / Scan / Disasm) |
+| `1` … `9`      | Quick-jump to tab 1..9 (Procs / Mem / Regs / BP / Watch / Scan / Disasm / System / Symbols) |
+| `0`            | Quick-jump to tab 10 (Threads)                      |
 | `Tab`          | Cycle to the next tab                               |
 | `Esc`          | Release focus (cycles to the next compositor window)|
 | `j` / `J`      | Scroll the active tab down                          |
 | `k` / `K`      | Scroll the active tab up                            |
-| `Enter`        | In Procs tab: pick the highlighted row as the current target |
+| `Enter`        | In Procs tab: pick the highlighted row as the current target (row 0 is `<kernel>`) |
 
 ## Tabs
 
 ### Processes
 
-Lists every live process with PID, state (`run` / `zomb`), cumulative ticks, and name. Press `Enter` to set the highlighted row as the current target — the Memory and Disasm tabs operate against this PID.
+Lists every live process with PID, state (`run` / `zomb`), cumulative ticks, and name. Row 0 is always the `<kernel>` pseudo-target — selecting it routes Memory / Disasm / Scan reads to kernel addresses (bounded by `PlausibleKernelAddress`, no AS walks). Press `Enter` to set the highlighted row as the current target.
 
 ### Memory
 
@@ -79,23 +80,40 @@ GAPs (not yet covered, marked in `disasm.cpp`):
 
 If those bytes show up frequently in real workloads, vendoring Capstone or Zydis is the planned escape hatch.
 
+### System
+
+Read-only one-page snapshot of system-wide kernel state: heap pool / used / free / alloc-count / free-count / largest-free-run, scheduler context-switch count / live / sleeping / blocked / created / exited / reaped task counts, total + idle ticks, embedded symbol-table count, and the kernel `.text` start/end VAs. Refreshed on every recompose.
+
+### Symbols
+
+Browse the embedded kernel `.symtab`. Each row shows `addr  size  name`. Use `j` / `k` to scroll. The tab itself lists the first window with no filter; use `dbg syms <substring>` from the kernel shell for case-sensitive filtering.
+
+### Threads
+
+Per-task enumeration. DuetOS schedules at task granularity, so a multi-threaded process appears as multiple rows here while the Processes tab sees it once. Each row shows TID, state (`ready` / `RUN` / `sleep` / `block` / `DEAD`), priority, ticks-run, an asterisk for the currently-running task, and the task name.
+
 ## Shell command reference
 
 ```
-dbg ps                                        list every live process
-dbg mem    <pid> <addr> [len]                 hex+ASCII dump (default 64 B, max 256 B)
-dbg dis    <pid> <addr> [rows]                disassembly (default 16 rows, max 32)
-dbg bp     list                               enumerate every BP
-dbg bp     add <addr> <kind> <len> [suspend]  install BP (kind=sw|hwx|hww|hwrw)
-dbg bp     rm <id>                            remove BP
-dbg bp     resume <id>                        resume a parked task
-dbg bp     step <id>                          single-step a parked task
-dbg regs   <bp_id>                            print the saved trap frame
-dbg watch  add <pid> <addr> <type> <name>     add a watch row
-dbg watch  list                               enumerate the watchlist
-dbg watch  rm <slot>                          remove a watch row
-dbg scan   <pid> <hexbytes>                   first-pass byte-pattern scan
+dbg ps                                                list every live process
+dbg threads                                           list every task
+dbg sysinfo                                           heap + scheduler + text-range overview
+dbg syms      [filter]                                browse the kernel symbol table (filter is a substring)
+dbg mem       <pid|kernel> <addr> [len]               hex+ASCII dump (default 64 B, max 256 B)
+dbg dis       <pid|kernel> <addr> [rows]              disassembly (default 16 rows, max 32)
+dbg bp        list                                    enumerate every BP
+dbg bp        add <addr> <kind> <len> [suspend]       install BP (kind=sw|hwx|hww|hwrw)
+dbg bp        rm <id>                                 remove BP
+dbg bp        resume <id>                             resume a parked task
+dbg bp        step <id>                               single-step a parked task
+dbg regs      <bp_id>                                 print the saved trap frame
+dbg watch     add <pid|kernel> <addr> <type> <name>   add a watch row
+dbg watch     list                                    enumerate the watchlist
+dbg watch     rm <slot>                               remove a watch row
+dbg scan      <pid|kernel> <hexbytes>                 byte-pattern scan
 ```
+
+`<pid|kernel>` accepts a numeric PID or the literal `kernel` (or `k`) — the latter routes the operation to kernel-address space. For `mem` / `dis` / `scan`, kernel-mode reads are gated by `PlausibleKernelAddress` (higher-half direct map + MMIO arena only); for `scan kernel`, the sweep is bounded by the kernel `.text` range. Kernel-mode `dbg mem`/`dis` cannot WRITE — patching `.text` is the breakpoint subsystem's job (it owns the W-window dance under spinlock); arbitrary kernel-`.data` writes are a footgun even with `kCapDebug`.
 
 `<addr>` is parsed by `ParseU64Str` — accepts decimal, `0x`-prefixed hex, and (sub)slot indexes. `<hexbytes>` is a contiguous lowercase / uppercase hex string with optional spaces (`deadbeef` and `de ad be ef` are equivalent). `<type>` for `dbg watch add`: `u8` / `u16` / `u32` / `u64` / `i32` / `i64` / `bytes`.
 

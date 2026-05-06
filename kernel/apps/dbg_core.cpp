@@ -1,13 +1,29 @@
 #include "apps/dbg_core.h"
 
 #include "arch/x86_64/traps.h"
+#include "diag/hexdump.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
+#include "mm/kheap.h"
 #include "mm/page.h"
 #include "proc/process.h"
 #include "sched/sched.h"
 #include "sync/spinlock.h"
+#include "util/symbols.h"
 #include "util/types.h"
+
+// Kernel .text bounds, populated by the linker script. Used by
+// the kernel-mode scan path (kKernelPid → ScanBytes walks
+// [_text_start, _text_end) instead of an AddressSpace).
+extern "C" duetos::u8 _text_start[];
+extern "C" duetos::u8 _text_end[];
+
+// Embedded symbol table — declared in util/symbols.cpp.
+namespace duetos::core
+{
+extern "C" const SymbolEntry g_duetos_symtab_entries[];
+extern "C" const u64 g_duetos_symtab_count;
+} // namespace duetos::core
 
 namespace duetos::apps::dbg::core
 {
@@ -154,6 +170,33 @@ u64 ReadMem(u64 pid, u64 va, u8* out, u64 len)
 {
     if (out == nullptr || len == 0)
         return 0;
+
+    // Kernel-mode read: walk the page directly via the higher-half
+    // mapping, gated by PlausibleKernelAddress so a wild VA can't
+    // nest a #PF inside the read. The plausibility check covers
+    // the higher-half direct map + MMIO arena; anything else is
+    // refused.
+    if (pid == kKernelPid)
+    {
+        u64 copied = 0;
+        while (copied < len)
+        {
+            const u64 page_va = (va + copied) & ~0xFFFULL;
+            if (!::duetos::core::PlausibleKernelAddress(page_va))
+                break;
+            const u8* src = reinterpret_cast<const u8*>(va + copied);
+            const u64 page_off = (va + copied) & 0xFFFULL;
+            const u64 page_room = 0x1000 - page_off;
+            u64 chunk = len - copied;
+            if (chunk > page_room)
+                chunk = page_room;
+            for (u64 i = 0; i < chunk; ++i)
+                out[copied + i] = src[i];
+            copied += chunk;
+        }
+        return copied;
+    }
+
     ::duetos::core::Process* p = sched::SchedFindProcessByPid(pid);
     if (p == nullptr || p->as == nullptr)
         return 0;
@@ -178,6 +221,14 @@ u64 ReadMem(u64 pid, u64 va, u8* out, u64 len)
 u64 WriteMem(u64 pid, u64 va, const u8* in, u64 len)
 {
     if (in == nullptr || len == 0)
+        return 0;
+    // Kernel-mode write is intentionally NOT supported through this
+    // path — patching .text is the breakpoint subsystem's job (it
+    // owns the W-window dance under spinlock); patching .data /
+    // .bss arbitrarily is a footgun even with kCapDebug. If a
+    // future operator workflow legitimately needs it, route it
+    // through the breakpoint subsystem's PokeByte path.
+    if (pid == kKernelPid)
         return 0;
     ::duetos::core::Process* p = sched::SchedFindProcessByPid(pid);
     if (p == nullptr || p->as == nullptr)
@@ -206,12 +257,40 @@ usize ScanBytes(u64 pid, const u8* needle, usize nlen, u64* hits, usize cap)
 {
     if (needle == nullptr || nlen == 0 || hits == nullptr || cap == 0)
         return 0;
-    ::duetos::core::Process* p = sched::SchedFindProcessByPid(pid);
-    if (p == nullptr || p->as == nullptr)
-        return 0;
     if (cap > kScanResultCap)
         cap = kScanResultCap;
     usize hit_count = 0;
+
+    // Kernel-mode scan: sweep .text. The same bounds the breakpoint
+    // subsystem uses for software-BP installs. Reads are linear
+    // and direct — no AS walks.
+    if (pid == kKernelPid)
+    {
+        const u8* lo = _text_start;
+        const u8* hi = _text_end;
+        if (hi <= lo)
+            return 0;
+        const u64 size = (u64)(hi - lo);
+        for (u64 off = 0; off + nlen <= size && hit_count < cap; ++off)
+        {
+            bool match = true;
+            for (usize k = 0; k < nlen; ++k)
+            {
+                if (lo[off + k] != needle[k])
+                {
+                    match = false;
+                    break;
+                }
+            }
+            if (match)
+                hits[hit_count++] = reinterpret_cast<u64>(lo + off);
+        }
+        return hit_count;
+    }
+
+    ::duetos::core::Process* p = sched::SchedFindProcessByPid(pid);
+    if (p == nullptr || p->as == nullptr)
+        return 0;
     mm::AddressSpace* as = p->as;
     // Walk the regions ledger. Each region is a 4 KiB page; we
     // scan within each page and across page boundaries within a
@@ -471,6 +550,122 @@ usize WatchCount()
         if (g_watch[i].used)
             ++n;
     return n;
+}
+
+// ---- Threads / symbols / system overview --------------------
+
+namespace
+{
+
+// Cookie passed to the SchedEnumerate callback while
+// EnumerateThreads is running. We collect into a caller-supplied
+// buffer; the cap+count protect against overflow when the system
+// has more tasks than the GUI viewport can show.
+struct ThreadsCollector
+{
+    ThreadInfo* out;
+    usize cap;
+    usize count;
+};
+
+void OnSchedEnumThread(const sched::SchedTaskInfo& info, void* cookie)
+{
+    auto* c = static_cast<ThreadsCollector*>(cookie);
+    if (c == nullptr || c->count >= c->cap)
+        return;
+    ThreadInfo& row = c->out[c->count];
+    row.tid = info.id;
+    row.ticks_run = info.ticks_run;
+    row.state = info.state;
+    row.priority = info.priority;
+    row.is_running = info.is_running;
+    StrCopyTrunc(row.name, sizeof(row.name), info.name != nullptr ? info.name : "?");
+    ++c->count;
+}
+
+// Case-sensitive substring match. Returns true iff `needle` is
+// empty or appears anywhere in `hay`. Both must be NUL-terminated.
+bool Contains(const char* hay, const char* needle)
+{
+    if (needle == nullptr || needle[0] == 0)
+        return true;
+    if (hay == nullptr)
+        return false;
+    for (u32 i = 0; hay[i] != 0; ++i)
+    {
+        u32 j = 0;
+        while (needle[j] != 0 && hay[i + j] == needle[j])
+            ++j;
+        if (needle[j] == 0)
+            return true;
+    }
+    return false;
+}
+
+} // namespace
+
+usize EnumerateThreads(ThreadInfo* out, usize cap)
+{
+    if (out == nullptr || cap == 0)
+        return 0;
+    ThreadsCollector c{out, cap, 0};
+    sched::SchedEnumerate(&OnSchedEnumThread, &c);
+    return c.count;
+}
+
+usize EnumerateSymbols(SymbolRow* out, usize cap, u64 start, const char* filter)
+{
+    if (out == nullptr || cap == 0)
+        return 0;
+    const u64 total = ::duetos::core::g_duetos_symtab_count;
+    usize written = 0;
+    u64 visited = 0;
+    for (u64 i = 0; i < total && written < cap; ++i)
+    {
+        const auto& e = ::duetos::core::g_duetos_symtab_entries[i];
+        if (filter != nullptr && filter[0] != 0 && !Contains(e.name, filter))
+            continue;
+        if (visited++ < start)
+            continue;
+        out[written].addr = e.addr;
+        out[written].size = e.size;
+        out[written].line = e.line;
+        out[written].name = e.name;
+        out[written].file = e.file;
+        ++written;
+    }
+    return written;
+}
+
+u64 KernelSymbolCount()
+{
+    return ::duetos::core::g_duetos_symtab_count;
+}
+
+void GetKernelOverview(KernelOverview* out)
+{
+    if (out == nullptr)
+        return;
+    const auto h = mm::KernelHeapStatsRead();
+    const auto s = sched::SchedStatsRead();
+    out->heap_pool_bytes = h.pool_bytes;
+    out->heap_used_bytes = h.used_bytes;
+    out->heap_free_bytes = h.free_bytes;
+    out->heap_alloc_count = h.alloc_count;
+    out->heap_free_count = h.free_count;
+    out->heap_largest_free_run = h.largest_free_run;
+    out->sched_context_switches = s.context_switches;
+    out->sched_tasks_live = s.tasks_live;
+    out->sched_tasks_sleeping = s.tasks_sleeping;
+    out->sched_tasks_blocked = s.tasks_blocked;
+    out->sched_tasks_created = s.tasks_created;
+    out->sched_tasks_exited = s.tasks_exited;
+    out->sched_tasks_reaped = s.tasks_reaped;
+    out->sched_total_ticks = s.total_ticks;
+    out->sched_idle_ticks = s.idle_ticks;
+    out->symbol_count = ::duetos::core::g_duetos_symtab_count;
+    out->text_start = reinterpret_cast<u64>(_text_start);
+    out->text_end = reinterpret_cast<u64>(_text_end);
 }
 
 } // namespace duetos::apps::dbg::core

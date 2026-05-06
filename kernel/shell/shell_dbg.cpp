@@ -45,11 +45,26 @@ namespace dc = duetos::apps::dbg::core;
 void Usage()
 {
     ConsoleWriteln("DBG: SUBCOMMANDS");
-    ConsoleWriteln("  PS | MEM <PID> <ADDR> [LEN] | DIS <PID> <ADDR> [ROWS]");
+    ConsoleWriteln("  PS | THREADS | SYSINFO | SYMS [FILTER]");
+    ConsoleWriteln("  MEM <PID|KERNEL> <ADDR> [LEN] | DIS <PID|KERNEL> <ADDR> [ROWS]");
     ConsoleWriteln("  BP {LIST | ADD <ADDR> <KIND> <LEN> [SUSPEND] | RM <ID> | RESUME <ID> | STEP <ID>}");
     ConsoleWriteln("  REGS <BP_ID>");
-    ConsoleWriteln("  WATCH {ADD <PID> <ADDR> <TYPE> <NAME> | LIST | RM <SLOT>}");
-    ConsoleWriteln("  SCAN <PID> <HEXBYTES>");
+    ConsoleWriteln("  WATCH {ADD <PID|KERNEL> <ADDR> <TYPE> <NAME> | LIST | RM <SLOT>}");
+    ConsoleWriteln("  SCAN <PID|KERNEL> <HEXBYTES>");
+}
+
+// `pid` arg accepts a numeric value or the literal `kernel` (case-
+// insensitive `k`/`K` prefix). Returns true on success.
+bool ParsePidArg(const char* s, u64* out)
+{
+    if (s == nullptr || out == nullptr)
+        return false;
+    if (StrEq(s, "kernel") || StrEq(s, "KERNEL") || StrEq(s, "k") || StrEq(s, "K"))
+    {
+        *out = dc::kKernelPid;
+        return true;
+    }
+    return ParseU64Str(s, out);
 }
 
 // Parse a hex-byte literal like "deadbeef" or "de ad be ef" into
@@ -111,7 +126,7 @@ void DoMem(u32 argc, char** argv)
         return;
     }
     u64 pid = 0, addr = 0, len = 64;
-    if (!ParseU64Str(argv[2], &pid) || !ParseU64Str(argv[3], &addr))
+    if (!ParsePidArg(argv[2], &pid) || !ParseU64Str(argv[3], &addr))
     {
         ConsoleWriteln("DBG MEM: BAD ARGS");
         return;
@@ -153,7 +168,7 @@ void DoDis(u32 argc, char** argv)
         return;
     }
     u64 pid = 0, addr = 0, rows = 16;
-    if (!ParseU64Str(argv[2], &pid) || !ParseU64Str(argv[3], &addr))
+    if (!ParsePidArg(argv[2], &pid) || !ParseU64Str(argv[3], &addr))
     {
         ConsoleWriteln("DBG DIS: BAD ARGS");
         return;
@@ -414,7 +429,7 @@ void DoWatch(u32 argc, char** argv)
             return;
         }
         u64 pid = 0, addr = 0;
-        if (!ParseU64Str(argv[3], &pid) || !ParseU64Str(argv[4], &addr))
+        if (!ParsePidArg(argv[3], &pid) || !ParseU64Str(argv[4], &addr))
         {
             ConsoleWriteln("DBG WATCH ADD: BAD ARGS");
             return;
@@ -443,6 +458,123 @@ void DoWatch(u32 argc, char** argv)
     }
 }
 
+void DoSysinfo()
+{
+    dc::KernelOverview kov{};
+    dc::GetKernelOverview(&kov);
+    ConsoleWriteln("DBG SYSINFO:");
+
+    ConsoleWrite("  HEAP   POOL=");
+    WriteU64Dec(kov.heap_pool_bytes);
+    ConsoleWrite("  USED=");
+    WriteU64Dec(kov.heap_used_bytes);
+    ConsoleWrite("  FREE=");
+    WriteU64Dec(kov.heap_free_bytes);
+    ConsoleWrite("  ALLOCS=");
+    WriteU64Dec(kov.heap_alloc_count);
+    ConsoleWrite("  FREES=");
+    WriteU64Dec(kov.heap_free_count);
+    ConsoleWriteln("");
+
+    ConsoleWrite("  SCHED  CSWCH=");
+    WriteU64Dec(kov.sched_context_switches);
+    ConsoleWrite("  LIVE=");
+    WriteU64Dec(kov.sched_tasks_live);
+    ConsoleWrite("  SLEEP=");
+    WriteU64Dec(kov.sched_tasks_sleeping);
+    ConsoleWrite("  BLOCK=");
+    WriteU64Dec(kov.sched_tasks_blocked);
+    ConsoleWriteln("");
+
+    ConsoleWrite("  TICKS  TOTAL=");
+    WriteU64Dec(kov.sched_total_ticks);
+    ConsoleWrite("  IDLE=");
+    WriteU64Dec(kov.sched_idle_ticks);
+    ConsoleWriteln("");
+
+    ConsoleWrite("  TEXT   ");
+    WriteU64Hex(kov.text_start, 16);
+    ConsoleWrite("..");
+    WriteU64Hex(kov.text_end, 16);
+    ConsoleWrite("  SYMS=");
+    WriteU64Dec(kov.symbol_count);
+    ConsoleWriteln("");
+}
+
+void DoSyms(u32 argc, char** argv)
+{
+    const char* filter = (argc >= 3) ? argv[2] : nullptr;
+    dc::SymbolRow rows[32];
+    const u64 total = dc::KernelSymbolCount();
+    if (total == 0)
+    {
+        ConsoleWriteln("DBG SYMS: <empty> — kernel built without embedded symbols");
+        return;
+    }
+    ConsoleWrite("DBG SYMS:  TOTAL=");
+    WriteU64Dec(total);
+    ConsoleWriteln("");
+    const u64 n = dc::EnumerateSymbols(rows, 32, 0, filter);
+    if (n == 0)
+    {
+        ConsoleWriteln("  (no matches)");
+        return;
+    }
+    for (u64 i = 0; i < n; ++i)
+    {
+        WriteU64Hex(rows[i].addr, 16);
+        ConsoleWrite("  ");
+        ConsoleWriteln(rows[i].name);
+    }
+    if (n == 32)
+    {
+        ConsoleWriteln("  (showing first 32; refine the filter to see more)");
+    }
+}
+
+void DoThreads()
+{
+    dc::ThreadInfo rows[64];
+    const u64 n = dc::EnumerateThreads(rows, 64);
+    if (n == 0)
+    {
+        ConsoleWriteln("DBG THREADS: <empty>");
+        return;
+    }
+    ConsoleWriteln("TID    STATE   PRI  TICKS         NAME");
+    for (u64 i = 0; i < n; ++i)
+    {
+        WriteU64Dec(rows[i].tid);
+        ConsoleWrite("    ");
+        const char* st = "?";
+        switch (rows[i].state)
+        {
+        case 0:
+            st = "READY ";
+            break;
+        case 1:
+            st = "RUN   ";
+            break;
+        case 2:
+            st = "SLEEP ";
+            break;
+        case 3:
+            st = "BLOCK ";
+            break;
+        case 4:
+            st = "DEAD  ";
+            break;
+        }
+        ConsoleWrite(st);
+        ConsoleWrite("  ");
+        WriteU64Dec(rows[i].priority);
+        ConsoleWrite("    ");
+        WriteU64Dec(rows[i].ticks_run);
+        ConsoleWrite("    ");
+        ConsoleWriteln(rows[i].name);
+    }
+}
+
 void DoScan(u32 argc, char** argv)
 {
     if (argc < 4)
@@ -451,7 +583,7 @@ void DoScan(u32 argc, char** argv)
         return;
     }
     u64 pid = 0;
-    if (!ParseU64Str(argv[2], &pid))
+    if (!ParsePidArg(argv[2], &pid))
     {
         ConsoleWriteln("DBG SCAN: BAD PID");
         return;
@@ -499,6 +631,12 @@ void CmdDbg(u32 argc, char** argv)
         DoWatch(argc, argv);
     else if (StrEq(sub, "scan"))
         DoScan(argc, argv);
+    else if (StrEq(sub, "sysinfo"))
+        DoSysinfo();
+    else if (StrEq(sub, "syms"))
+        DoSyms(argc, argv);
+    else if (StrEq(sub, "threads"))
+        DoThreads();
     else
         Usage();
 }
