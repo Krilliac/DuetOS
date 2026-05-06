@@ -1,6 +1,7 @@
 #include "arch/x86_64/smp.h"
 
 #include "arch/x86_64/cpu.h"
+#include "arch/x86_64/gdt.h"
 #include "arch/x86_64/lapic.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/timer.h"
@@ -44,6 +45,11 @@ constexpr u32 kMaxAps = acpi::kMaxCpus - 1;
 // heap-allocated PerCpu whose pointer is cached here so the AP's C++
 // entry can find its own struct by cpu_id.
 constinit cpu::PerCpu* g_ap_percpus[acpi::kMaxCpus] = {};
+
+// Per-AP GDT bundle (GDT clone + Tss + 3 IST stacks). Allocated by
+// AllocateApGdt during SmpStartAps; consumed by ApEntryFromTrampoline
+// via LoadGdtForCurrent. Indexed by cpu_id like g_ap_percpus.
+constinit ApGdtBundle* g_ap_gdt_bundles[acpi::kMaxCpus] = {};
 constinit u64 g_cpus_online = 1;  // BSP always counted
 constinit u32 g_cpu_id_limit = 1; // 1 + max cpu_id ever bound (so iteration covers BSP + every AP slot used)
 
@@ -268,6 +274,19 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
     cpu::PerCpu* pcpu = g_ap_percpus[cpu_id];
     WriteMsrGsBase(reinterpret_cast<u64>(pcpu));
 
+    // Install this AP's own GDT + TSS so NMI / #DF / #MC trap entries
+    // resolve to the AP's IST stacks (not the BSP's, which would race
+    // any concurrent BSP fault and corrupt either CPU's frame). Must
+    // happen BEFORE LAPIC enable — once LAPIC is on, an NMI could
+    // arrive at any moment, and without an installed TSS the CPU
+    // would triple-fault picking up RSP0 / IST stack from a stale or
+    // missing slot. The bundle was prepared by SmpStartAps.
+    ApGdtBundle* bundle = g_ap_gdt_bundles[cpu_id];
+    if (bundle != nullptr)
+    {
+        LoadGdtForCurrent(bundle);
+    }
+
     // Enable the AP's LAPIC. IA32_APIC_BASE MSR bit 11 is the global
     // enable; the LAPIC MMIO window is already mapped in the shared
     // PML4 (BSP's MapMmio for 0xFEE00000), so LapicRead/Write just
@@ -402,6 +421,21 @@ u64 SmpStartAps()
         ap_pcpu->runq_tail_normal = nullptr;
         ap_pcpu->runq_head_idle = nullptr;
         ap_pcpu->runq_tail_idle = nullptr;
+        // TSS slot wired by AllocateApGdt below, before the AP runs.
+        ap_pcpu->tss = nullptr;
+
+        // Allocate this AP's GDT clone + TSS body + 3 IST stacks.
+        // ApEntryFromTrampoline picks them up via g_ap_gdt_bundles
+        // and loads them via LoadGdtForCurrent before enabling LAPIC.
+        ApGdtBundle* bundle = AllocateApGdt(ap_pcpu);
+        if (bundle == nullptr)
+        {
+            core::DebugPanicOrWarn("arch/smp", "AllocateApGdt failed");
+            mm::KFree(ap_pcpu);
+            g_ap_percpus[cpu_id] = nullptr;
+            continue;
+        }
+        g_ap_gdt_bundles[cpu_id] = bundle;
         g_ap_percpus[cpu_id] = ap_pcpu;
         if (cpu_id + 1 > g_cpu_id_limit)
         {

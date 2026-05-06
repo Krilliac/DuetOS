@@ -1,5 +1,6 @@
 #include "cpu/percpu.h"
 
+#include "arch/x86_64/gdt.h"
 #include "arch/x86_64/lapic.h"
 #include "arch/x86_64/serial.h"
 #include "log/klog.h"
@@ -43,6 +44,7 @@ constinit PerCpu g_bsp_percpu = {
     .runq_tail_normal = nullptr,
     .runq_head_idle = nullptr,
     .runq_tail_idle = nullptr,
+    .tss = nullptr,
 };
 
 // One-shot flag so CurrentCpuIdOrBsp can return a sane value before
@@ -68,6 +70,11 @@ void PerCpuInitBsp()
     g_bsp_percpu.lapic_id = static_cast<u32>(arch::LapicRead(arch::kLapicRegId) >> 24);
 
     WriteMsr(kIa32GsBaseMsr, reinterpret_cast<u64>(&g_bsp_percpu));
+    // BSP TSS pointer wired here (TssInit ran before PerCpuInitBsp,
+    // so the TSS body is fully populated). All TssSetRsp0 calls from
+    // here on go through cpu::CurrentCpu()->tss; the static BSP TSS
+    // remains the same object — just routed via PerCpu now.
+    g_bsp_percpu.tss = arch::BspTssPtr();
     g_bsp_installed = true;
 
     arch::SerialWrite("[cpu] BSP PerCpu installed: cpu_id=0 lapic_id=");

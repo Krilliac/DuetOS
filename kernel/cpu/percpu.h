@@ -148,10 +148,19 @@ struct PerCpu
     void* runq_head_idle;
     void* runq_tail_idle;
 
+    // Pointer to this CPU's TSS struct (arch::Tss*). BSP's slot
+    // points at the static g_bsp_tss; each AP's slot points at a
+    // heap-allocated AP TSS (allocated by arch::AllocateApGdt
+    // alongside the per-AP GDT clone + IST stacks). TssSetRsp0
+    // dereferences this on every user→kernel transition prep so
+    // the right CPU's TSS RSP0 slot gets updated. void* to avoid
+    // pulling arch/x86_64/gdt.h into every includer of percpu.h;
+    // gdt.cpp casts back to arch::Tss*.
+    void* tss;
+
     // Everything below this line will grow as SMP matures:
     //   - per-CPU runqueue spinlock (today: shared g_sched_lock)
     //   - per-CPU heap magazine (when the heap grows per-CPU caching)
-    //   - TSS pointer
     //   - idle stack pointer
     //   - stats (ticks, context switches, irqs served)
 };
