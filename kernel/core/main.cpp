@@ -76,6 +76,7 @@
 #include "debug/breakpoints.h"
 #include "debug/extable.h"
 #include "debug/probes.h"
+#include "debug/tripwire.h"
 #include "debug/watch.h"
 #include "drivers/audio/audio.h"
 #include "drivers/gpu/cea861.h"
@@ -1442,6 +1443,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         if (!duetos::debug::WatchSelfTest())
         {
             SerialWrite("[boot] WARN: watchpoint self-test failed — see serial log\n");
+        }
+        // Software-tripwire counterpart to Watch — exercises CRC32
+        // baseline / scribble-detect / refresh / remove on a stack-
+        // local buffer. No hardware DR slots involved; the table is
+        // pure .bss. See kernel/debug/tripwire.h.
+        if (!duetos::debug::TripwireSelfTest())
+        {
+            SerialWrite("[boot] WARN: tripwire self-test failed — see serial log\n");
         }
     }
 

@@ -22,6 +22,7 @@
 #include "debug/inspect.h"
 #include "debug/probes.h"
 #include "debug/syscall_scan.h"
+#include "debug/tripwire.h"
 #include "debug/watch.h"
 #include "drivers/video/console.h"
 #include "mm/kheap.h"
@@ -1523,6 +1524,7 @@ void CmdBp(u32 argc, char** argv)
         ConsoleWriteln("    BP CLEAR  <ID>                                  (REMOVE)");
         ConsoleWriteln("    BP TEST                                         (SELF-TEST)");
         ConsoleWriteln("    BP WATCH                                        (NAMED HW-WRITE WATCHPOINTS)");
+        ConsoleWriteln("    BP TRIPWIRE                                     (NAMED CRC-SNAPSHOT TRIPWIRES)");
         ConsoleWriteln("    BP STOPPED                                      (LIST SUSPENDED)");
         ConsoleWriteln("    BP REGS   <ID>                                  (DUMP REGS)");
         ConsoleWriteln("    BP MEM    <ID> <HEX-ADDR> [LEN]                 (DUMP USER MEM)");
@@ -1815,6 +1817,153 @@ void CmdBp(u32 argc, char** argv)
         }
         ConsoleWrite("BP WATCH: UNKNOWN SUB-VERB ");
         ConsoleWriteln(wsub);
+        return;
+    }
+
+    if (StrEq(sub, "tripwire"))
+    {
+        // Software CRC-snapshot tripwires. Companion to `bp watch`.
+        // No hardware DR slots; arbitrary region length; only fires
+        // at `verify` time. See kernel/debug/tripwire.h.
+        if (argc < 3)
+        {
+            ConsoleWriteln("BP TRIPWIRE: USAGE:");
+            ConsoleWriteln("    BP TRIPWIRE LIST                                    (SHOW INSTALLED)");
+            ConsoleWriteln("    BP TRIPWIRE ADD <NAME> <HEX-ADDR> <LEN> [ACTION]    (INSTALL)");
+            ConsoleWriteln("        ACTION  = log | each | panic (default log)");
+            ConsoleWriteln("    BP TRIPWIRE RM <NAME>                               (REMOVE)");
+            ConsoleWriteln("    BP TRIPWIRE REFRESH <NAME>                          (RE-BASELINE)");
+            ConsoleWriteln("    BP TRIPWIRE VERIFY                                  (SCAN ALL)");
+            ConsoleWriteln("    BP TRIPWIRE TEST                                    (SELF-TEST)");
+            return;
+        }
+        const char* tsub = argv[2];
+        if (StrEq(tsub, "list"))
+        {
+            duetos::debug::TripwireInfo info[16];
+            const usize n = duetos::debug::TripwireList(info, 16);
+            if (n == 0)
+            {
+                ConsoleWriteln("BP TRIPWIRE: NONE INSTALLED");
+                return;
+            }
+            ConsoleWriteln("BP TRIPWIRE: NAME                  ADDR              LEN     ACTION    "
+                           "EXPECT     ACTUAL     V/M    ARMED");
+            for (usize i = 0; i < n; ++i)
+            {
+                ConsoleWrite("  ");
+                ConsoleWrite(info[i].name != nullptr ? info[i].name : "?");
+                ConsoleWrite("  ");
+                WriteU64Hex(info[i].addr, 16);
+                ConsoleWrite("  ");
+                WriteU64Dec(info[i].len_bytes);
+                ConsoleWrite("    ");
+                switch (info[i].action)
+                {
+                case duetos::debug::TripwireAction::Log:
+                    ConsoleWrite("log       ");
+                    break;
+                case duetos::debug::TripwireAction::LogEach:
+                    ConsoleWrite("each      ");
+                    break;
+                case duetos::debug::TripwireAction::Panic:
+                    ConsoleWrite("panic     ");
+                    break;
+                }
+                WriteU64Hex(info[i].expected_crc, 8);
+                ConsoleWrite("  ");
+                WriteU64Hex(info[i].last_actual_crc, 8);
+                ConsoleWrite("  ");
+                WriteU64Dec(info[i].verify_count);
+                ConsoleWriteChar('/');
+                WriteU64Dec(info[i].mismatch_count);
+                ConsoleWrite("  ");
+                ConsoleWriteln(info[i].armed ? "yes" : "no");
+            }
+            return;
+        }
+        if (StrEq(tsub, "test"))
+        {
+            const bool ok = duetos::debug::TripwireSelfTest();
+            ConsoleWriteln(ok ? "BP TRIPWIRE TEST: OK" : "BP TRIPWIRE TEST: FAILED (SEE SERIAL LOG)");
+            return;
+        }
+        if (StrEq(tsub, "verify"))
+        {
+            const usize n = duetos::debug::TripwireVerify();
+            if (n == 0)
+                ConsoleWriteln("BP TRIPWIRE VERIFY: ALL GREEN");
+            else
+            {
+                ConsoleWrite("BP TRIPWIRE VERIFY: ");
+                WriteU64Dec(n);
+                ConsoleWriteln(" MISMATCH(ES) — SEE SERIAL LOG");
+            }
+            return;
+        }
+        if (StrEq(tsub, "rm"))
+        {
+            if (argc < 4)
+            {
+                ConsoleWriteln("BP TRIPWIRE RM: NEED <NAME>");
+                return;
+            }
+            const bool ok = duetos::debug::TripwireRemove(argv[3]);
+            ConsoleWriteln(ok ? "BP TRIPWIRE RM: OK" : "BP TRIPWIRE RM: NOT FOUND");
+            return;
+        }
+        if (StrEq(tsub, "refresh"))
+        {
+            if (argc < 4)
+            {
+                ConsoleWriteln("BP TRIPWIRE REFRESH: NEED <NAME>");
+                return;
+            }
+            const bool ok = duetos::debug::TripwireRefresh(argv[3]);
+            ConsoleWriteln(ok ? "BP TRIPWIRE REFRESH: OK" : "BP TRIPWIRE REFRESH: NOT FOUND");
+            return;
+        }
+        if (StrEq(tsub, "add"))
+        {
+            if (argc < 6)
+            {
+                ConsoleWriteln("BP TRIPWIRE ADD: NEED <NAME> <HEX-ADDR> <LEN> [ACTION]");
+                return;
+            }
+            const char* name = argv[3];
+            u64 addr = 0;
+            if (!ParseU64Str(argv[4], &addr))
+            {
+                ConsoleWriteln("BP TRIPWIRE ADD: BAD ADDRESS");
+                return;
+            }
+            u64 len = 0;
+            if (!ParseU64Str(argv[5], &len) || len == 0)
+            {
+                ConsoleWriteln("BP TRIPWIRE ADD: BAD LENGTH");
+                return;
+            }
+            duetos::debug::TripwireAction action = duetos::debug::TripwireAction::Log;
+            if (argc >= 7)
+            {
+                if (StrEq(argv[6], "log"))
+                    action = duetos::debug::TripwireAction::Log;
+                else if (StrEq(argv[6], "each"))
+                    action = duetos::debug::TripwireAction::LogEach;
+                else if (StrEq(argv[6], "panic"))
+                    action = duetos::debug::TripwireAction::Panic;
+                else
+                {
+                    ConsoleWriteln("BP TRIPWIRE ADD: ACTION MUST BE log|each|panic");
+                    return;
+                }
+            }
+            const bool ok = duetos::debug::Tripwire(name, reinterpret_cast<const void*>(addr), len, action);
+            ConsoleWriteln(ok ? "BP TRIPWIRE ADD: OK" : "BP TRIPWIRE ADD: FAILED (SEE SERIAL LOG)");
+            return;
+        }
+        ConsoleWrite("BP TRIPWIRE: UNKNOWN SUB-VERB ");
+        ConsoleWriteln(tsub);
         return;
     }
 
