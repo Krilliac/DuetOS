@@ -98,6 +98,65 @@ These are the same primitives the DirectX v0 DLLs (`d3d9` / `d3d11` /
 
 See [DirectX v0 Path](../subsystems/DirectX.md).
 
+## Damage tracking + present pipeline
+
+`kernel/drivers/video/framebuffer.{h,cpp}` accumulates a
+single-bbox **damage rect** as primitives write pixels. The
+compose-end blit copies only the damage union from the shadow
+surface to the live framebuffer; `FramebufferPresent` hands the
+same rect to the registered present hook so a backend can flush
+only the changed region.
+
+- **Direct backends** (firmware passthrough, Bochs VBE) — present
+  hook is null; pixels are already on screen as soon as the shadow
+  blit copies them. The damage rect still bounds the blit, so a
+  cursor-blink frame on a 1920×1080 surface costs ~256 px instead
+  of 2 megapixels.
+- **virtio-gpu** — present hook calls `VirtioGpuFlushScanout(x, y,
+  w, h)` with the damage rect, which runs `TRANSFER_TO_HOST_2D` +
+  `RESOURCE_FLUSH` on just that subrect. A frame with no draws
+  (`damage.valid == false`) skips the round-trip entirely; the
+  host repaints from its prior scanout cache.
+
+After every `FramebufferPresent` call the damage union is reset.
+Callers that paint straight into the framebuffer behind the
+primitive API (rare: virtio-gpu's boot test pattern is the only
+one today) can call `FramebufferAddDamage(x, y, w, h)` to cover
+their writes for the next present.
+
+`FramebufferReadDamage()` snapshots the current union without
+clearing it — used by tests + diagnostics.
+
+## Render statistics
+
+`kernel/drivers/video/render_stats.{h,cpp}` accumulates per-frame
+counters that the `gfx` shell command surfaces:
+
+- `frames_composed` / `frames_presented` — totals.
+- `frames_clean` — present passes that skipped the flush because
+  the compositor wrote nothing.
+- `frames_full` / `frames_partial` — split by ≥95% surface
+  coverage. Heavy chrome frames (full window redraw) land in
+  "full"; cursor / clock / hover frames in "partial".
+- `dirty_pixels_total` / `surface_pixels_total` — per-mille
+  ratio is the average dirty fraction.
+- `last_damage_*` — the most recently presented damage rect,
+  for diagnosis.
+
+Only the compose-end and present-end paths bump counters, never
+the per-pixel inner loops, so the per-frame cost is constant.
+
+## Display info aggregator
+
+`kernel/drivers/video/display_info.{h,cpp}` exposes a single
+`Query()` that bundles framebuffer geometry, owning GPU
+identification (vendor / family / tier / arch / BAR0), and
+present-backend classification (`direct` / `virtio-gpu` /
+`none`) into one struct. Used by the `gfx` shell command and
+intended as the source of truth for the future Vulkan ICD's
+`vkGetPhysicalDeviceProperties` query and runtime mode-change
+paths.
+
 ## Themes
 
 `kernel/drivers/video/theme.cpp` is a flat token table the window
@@ -122,6 +181,11 @@ recompose. Four themes ship:
   proper queue.
 - **No Vulkan ICD yet.** Skeleton lives in
   `kernel/subsystems/graphics/`.
+- **Damage tracking is single-bbox.** A frame that touches the
+  top-left and bottom-right corners flushes the whole surface. A
+  list-of-rects damage tracker would help for chrome-heavy frames
+  with non-contiguous writes (e.g. caret blink + clock tick on
+  opposite ends of the taskbar).
 
 ## Related Pages
 

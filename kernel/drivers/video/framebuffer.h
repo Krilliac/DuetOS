@@ -62,6 +62,23 @@ struct FramebufferInfo
     u8 _pad[3];
 };
 
+/// Axis-aligned dirty-rect that pixel-write primitives accumulate
+/// during a compose pass. The compose-end blit and the virtio-gpu
+/// present hook consult this so they only touch the changed pixels
+/// instead of the whole surface.
+///
+/// `valid == false` means "no pixels written this frame" — the
+/// hook short-circuits. Otherwise the rect is already clipped to
+/// the framebuffer bounds.
+struct DamageRect
+{
+    u32 x;
+    u32 y;
+    u32 w;
+    u32 h;
+    bool valid;
+};
+
 /// Parse the Multiboot2 framebuffer tag from the info struct at
 /// `multiboot_info_phys`, validate that it's a direct-RGB 32-bpp
 /// linear framebuffer, and MapMmio the pixel buffer. Idempotent:
@@ -374,9 +391,35 @@ bool FramebufferRebindExternal(void* virt, u64 phys, u32 width, u32 height, u32 
 // and `FramebufferPresent()` is a no-op. For virtio-gpu the hook
 // runs TRANSFER_TO_HOST_2D + RESOURCE_FLUSH so the host sees the
 // new guest pixels.
-using FramebufferPresentFn = void (*)();
+//
+// The hook receives the current frame's accumulated damage rect.
+// If `damage.valid == false` the hook should skip the flush — the
+// compositor wrote nothing this pass, so re-uploading the whole
+// scanout would just burn PCIe bandwidth. The damage rect is
+// already clipped to the framebuffer surface.
+using FramebufferPresentFn = void (*)(const DamageRect& damage);
 void FramebufferSetPresentHook(FramebufferPresentFn fn);
 void FramebufferPresent();
+
+/// Manually extend the damage union by `(x, y, w, h)`. Called
+/// internally by every pixel-write primitive after it clips its
+/// rect to the surface; advanced callers (a backend that paints
+/// straight into the live framebuffer behind the primitive API)
+/// can call this themselves so the next `FramebufferPresent`
+/// flushes their pixels too. Out-of-range / empty rects are a
+/// silent no-op.
+void FramebufferAddDamage(u32 x, u32 y, u32 w, u32 h);
+
+/// Snapshot the current damage union. Returns `valid == false`
+/// when nothing was written since the last reset. The compositor
+/// uses this to size partial-region flushes.
+DamageRect FramebufferReadDamage();
+
+/// Drop the current damage rect — call after a full present has
+/// pushed every dirty pixel to the screen. `FramebufferEndCompose`
+/// + `FramebufferPresent` invoke this themselves; explicit callers
+/// only need it if they bypass the standard compose-end flow.
+void FramebufferResetDamage();
 
 /// Begin an offscreen compose pass. While compose is active every
 /// pixel-write primitive in this header (`FramebufferPutPixel`,
