@@ -4,6 +4,7 @@
 #include "arch/x86_64/serial.h"
 #include "fs/fat32.h"
 #include "log/klog.h"
+#include "mm/kernel_half_watch.h"
 
 /*
  * klog persistence layer — FAT32-backed file sink.
@@ -64,10 +65,18 @@ void FlushToFat32()
         g_used = 0;
         return;
     }
+    // Kernel-half trip-wire on the entry edge. The corruption tracked
+    // in 3423df7 first surfaced as a fault inside the FAT32 path that
+    // this flush invokes; checking BEFORE the call narrows the trigger
+    // to "either the corruption is already present" (caller-side) or
+    // "happens during this flush" (FAT32 / NVMe-side). Pair with the
+    // post-flush check below for the bracketing diagnostic.
+    ::duetos::mm::KernelHalfWatchCheck("klog-flush-enter");
     g_in_flush = true;
     fat::Fat32AppendAtPath(v, kLogPath, g_buf, g_used);
     g_used = 0;
     g_in_flush = false;
+    ::duetos::mm::KernelHalfWatchCheck("klog-flush-exit");
 }
 
 void FileSink(const char* s)
