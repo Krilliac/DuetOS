@@ -222,7 +222,20 @@ void RunCpuLoad(u32 secs, u32 workers, bool also_mem, u32 mib)
     u32 chunks_held = 0;
     if (also_mem && mib > 0)
     {
-        const u64 want_bytes = static_cast<u64>(mib) * 1024ULL * 1024ULL;
+        u64 want_bytes = static_cast<u64>(mib) * 1024ULL * 1024ULL;
+        // Apply the same 50%-of-free-heap soft-cap as the dedicated
+        // mem mode — mix on the v0 2 MiB heap would otherwise hit
+        // KMalloc OOM (which the kernel logs at CRIT) before the
+        // CPU stress had a chance to land.
+        const auto pre_heap = duetos::mm::KernelHeapStatsRead();
+        const u64 soft_cap_bytes = pre_heap.free_bytes / 2;
+        if (want_bytes > soft_cap_bytes)
+        {
+            want_bytes = soft_cap_bytes;
+            ConsoleWrite("LOADTEST: mix mem soft-cap to 50% of free heap (");
+            WriteU64Dec(soft_cap_bytes / 1024);
+            ConsoleWriteln(" KiB)");
+        }
         const u64 want_chunks = want_bytes / kMemChunkBytes;
         for (u64 c = 0; c < want_chunks; ++c)
         {
@@ -372,7 +385,7 @@ void RunMemLoad(u32 mib, u32 secs)
     if (want_bytes > soft_cap_bytes)
     {
         want_bytes = soft_cap_bytes;
-        ConsoleWrite("LOADTEST: soft-capping at 50%% of free heap (");
+        ConsoleWrite("LOADTEST: soft-capping at 50% of free heap (");
         WriteU64Dec(soft_cap_bytes / 1024);
         ConsoleWriteln(" KiB)");
     }
