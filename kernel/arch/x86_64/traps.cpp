@@ -206,6 +206,12 @@ inline bool IsDispatchedVector(u64 vector)
         return false;
     if (vector >= kIrqVectorBase && vector <= kMsixVectorMax)
         return true;
+    // Reschedule-IPI (0xF8): in the 240..254 reserved range. Goes
+    // through the same dispatch + EOI path as a hardware IRQ so
+    // the post-handler need_resched check fires Schedule() before
+    // iretq, matching the timer-tick preemption shape.
+    if (vector == 0xF8)
+        return true;
     return false;
 }
 

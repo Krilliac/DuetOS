@@ -1,9 +1,11 @@
 #include "arch/x86_64/smp.h"
 
 #include "arch/x86_64/cpu.h"
+#include "arch/x86_64/gdt.h"
 #include "arch/x86_64/lapic.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/timer.h"
+#include "arch/x86_64/traps.h"
 
 #include "acpi/acpi.h"
 #include "debug/probes.h"
@@ -44,6 +46,11 @@ constexpr u32 kMaxAps = acpi::kMaxCpus - 1;
 // heap-allocated PerCpu whose pointer is cached here so the AP's C++
 // entry can find its own struct by cpu_id.
 constinit cpu::PerCpu* g_ap_percpus[acpi::kMaxCpus] = {};
+
+// Per-AP GDT bundle (GDT clone + Tss + 3 IST stacks). Allocated by
+// AllocateApGdt during SmpStartAps; consumed by ApEntryFromTrampoline
+// via LoadGdtForCurrent. Indexed by cpu_id like g_ap_percpus.
+constinit ApGdtBundle* g_ap_gdt_bundles[acpi::kMaxCpus] = {};
 constinit u64 g_cpus_online = 1;  // BSP always counted
 constinit u32 g_cpu_id_limit = 1; // 1 + max cpu_id ever bound (so iteration covers BSP + every AP slot used)
 
@@ -248,6 +255,44 @@ u32 SmpCpuIdLimit()
     return g_cpu_id_limit;
 }
 
+namespace
+{
+// Reschedule-IPI handler. Runs in the IRQ dispatcher context with
+// IF=0; sets the per-CPU need_resched flag and returns. The
+// dispatcher post-handler check (TakeNeedResched + Schedule) then
+// runs the scheduler before iretq, exactly mirroring the timer-IRQ
+// preemption path.
+void ReschedIpiHandler()
+{
+    sched::SetNeedResched();
+}
+} // namespace
+
+void SmpInstallReschedIpiHandler()
+{
+    IrqInstall(kReschedIpiVector, ReschedIpiHandler);
+}
+
+void SmpSendReschedIpi(u32 cpu_id)
+{
+    cpu::PerCpu* self = cpu::CurrentCpu();
+    if (self != nullptr && self->cpu_id == cpu_id)
+    {
+        return; // self-IPI is pointless — caller already SetNeedResched
+    }
+    cpu::PerCpu* target = SmpGetPercpu(cpu_id);
+    if (target == nullptr)
+    {
+        return;
+    }
+    // Fixed delivery, edge-triggered (level=assert), vector encoded
+    // in the low 8 bits. No destination-shorthand — we want exactly
+    // this CPU's LAPIC ID.
+    constexpr u32 kIcrDeliveryFixed = 0U << 8;
+    constexpr u32 icr_low_base = kIcrDeliveryFixed | kIcrLevelAssert;
+    SmpSendIpi(static_cast<u8>(target->lapic_id), icr_low_base | kReschedIpiVector);
+}
+
 // ---------------------------------------------------------------------------
 // AP kernel entry — called from ap_trampoline.S once long mode is live.
 // Signature: void ApEntryFromTrampoline(u32 cpu_id)
@@ -267,6 +312,19 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
 {
     cpu::PerCpu* pcpu = g_ap_percpus[cpu_id];
     WriteMsrGsBase(reinterpret_cast<u64>(pcpu));
+
+    // Install this AP's own GDT + TSS so NMI / #DF / #MC trap entries
+    // resolve to the AP's IST stacks (not the BSP's, which would race
+    // any concurrent BSP fault and corrupt either CPU's frame). Must
+    // happen BEFORE LAPIC enable — once LAPIC is on, an NMI could
+    // arrive at any moment, and without an installed TSS the CPU
+    // would triple-fault picking up RSP0 / IST stack from a stale or
+    // missing slot. The bundle was prepared by SmpStartAps.
+    ApGdtBundle* bundle = g_ap_gdt_bundles[cpu_id];
+    if (bundle != nullptr)
+    {
+        LoadGdtForCurrent(bundle);
+    }
 
     // Enable the AP's LAPIC. IA32_APIC_BASE MSR bit 11 is the global
     // enable; the LAPIC MMIO window is already mapped in the shared
@@ -292,15 +350,13 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
     core::LogWithValue(core::LogLevel::Info, "arch/smp", "AP online cpu_id", static_cast<u64>(cpu_id));
     KBP_PROBE_V(::duetos::debug::ProbeId::kSmpApOnline, cpu_id);
 
-    // Halt forever with IRQs enabled — timer IRQs that land here are
-    // harmless noise (no IDT entry for the AP's perspective? actually
-    // IDT is shared; any timer IRQ on this core would enter the
-    // dispatcher and try to Schedule on a CPU that isn't in the
-    // scheduler yet). Keep IF=0 until AP scheduler-join lands.
-    for (;;)
-    {
-        asm volatile("cli; hlt");
-    }
+    // Hand off to the scheduler. SchedEnterOnAp spawns this CPU's
+    // idle task, mints a boot sentinel as current_task, arms this
+    // CPU's LAPIC timer, and never returns. The first timer IRQ on
+    // this CPU dispatches Schedule(); from then on the AP runs
+    // tasks routed to it via t->last_cpu (commit-2 affinity) plus
+    // any work stolen by the idle path (commit-6 work-stealing).
+    sched::SchedEnterOnAp(cpu_id);
 }
 
 u64 SmpStartAps()
@@ -393,6 +449,30 @@ u64 SmpStartAps()
         ap_pcpu->gdb_snapshot_rsp = 0;
         ap_pcpu->gdb_snapshot_rflags = 0;
         ap_pcpu->gdb_frozen_frame = nullptr;
+        // Lock-pass slot — empty until this AP enters Schedule().
+        ap_pcpu->ctxsw_lock_to_release = nullptr;
+        ap_pcpu->ctxsw_lock_flags = 0;
+        // Per-CPU runqueue heads — empty until SchedEnterOnAp spawns
+        // this AP's idle task and tasks migrate here via wake routing.
+        ap_pcpu->runq_head_normal = nullptr;
+        ap_pcpu->runq_tail_normal = nullptr;
+        ap_pcpu->runq_head_idle = nullptr;
+        ap_pcpu->runq_tail_idle = nullptr;
+        // TSS slot wired by AllocateApGdt below, before the AP runs.
+        ap_pcpu->tss = nullptr;
+
+        // Allocate this AP's GDT clone + TSS body + 3 IST stacks.
+        // ApEntryFromTrampoline picks them up via g_ap_gdt_bundles
+        // and loads them via LoadGdtForCurrent before enabling LAPIC.
+        ApGdtBundle* bundle = AllocateApGdt(ap_pcpu);
+        if (bundle == nullptr)
+        {
+            core::DebugPanicOrWarn("arch/smp", "AllocateApGdt failed");
+            mm::KFree(ap_pcpu);
+            g_ap_percpus[cpu_id] = nullptr;
+            continue;
+        }
+        g_ap_gdt_bundles[cpu_id] = bundle;
         g_ap_percpus[cpu_id] = ap_pcpu;
         if (cpu_id + 1 > g_cpu_id_limit)
         {

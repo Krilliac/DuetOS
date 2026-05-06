@@ -40,6 +40,8 @@
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/smp.h"
+#include "arch/x86_64/timer.h"
 #include "arch/x86_64/traps.h"
 #include "diag/event_trace.h"
 #include "diag/kdbg.h"
@@ -214,6 +216,16 @@ struct Task
     // (a snapshot for diagnostics is fine).
     u32 suspend_count;
 
+    // CPU this task most recently ran on (or, for never-yet-run
+    // tasks, the CPU that spawned them). Used by the wake path to
+    // route the task back onto the same CPU's runqueue — preserves
+    // cache affinity across sleep/wake cycles. Updated by Schedule()
+    // each time the task is switched IN. Initialised to the spawning
+    // CPU in SchedCreateInternal. Work-stealing in commit 6 may
+    // override the routing decision when a peer CPU is idle.
+    u32 last_cpu;
+    u32 _pad_last_cpu;
+
     // Per-task syscall trail. Ring of the most recent
     // kSyscallTrailSize syscalls (newest at trail_head - 1, mod
     // size). Pushed by SyscallTrailRecord from each dispatcher,
@@ -266,10 +278,34 @@ constexpr u64 kStackCanary = 0xC0DEB0B0CAFED00DULL;
 // queue is FIFO round-robin within its priority band. Promoting
 // beyond two levels (real-time class, per-priority timeslicing)
 // is deferred until a workload needs it (see decision log #010).
-constinit Task* g_run_head_normal = nullptr;
-constinit Task* g_run_tail_normal = nullptr;
-constinit Task* g_run_head_idle = nullptr;
-constinit Task* g_run_tail_idle = nullptr;
+//
+// As of commit 2 of the SMP refactor, the runqueue head/tail
+// pointers live in cpu::PerCpu (one set per CPU). This file's
+// RunqueuePushOn / RunqueuePop helpers below take a target PerCpu
+// argument so wake paths can enqueue on the task's `last_cpu` for
+// cache affinity. The lock granularity is unchanged for now —
+// every enqueue / pop still happens under g_sched_lock; per-CPU
+// runqueue spinlocks are a follow-up optimisation.
+//
+// Helper: typed accessor wrappers around the void* slots in PerCpu
+// so call sites don't need to cast on every reference.
+inline Task*& RunqHeadNormal(cpu::PerCpu* p)
+{
+    return reinterpret_cast<Task*&>(p->runq_head_normal);
+}
+inline Task*& RunqTailNormal(cpu::PerCpu* p)
+{
+    return reinterpret_cast<Task*&>(p->runq_tail_normal);
+}
+inline Task*& RunqHeadIdle(cpu::PerCpu* p)
+{
+    return reinterpret_cast<Task*&>(p->runq_head_idle);
+}
+inline Task*& RunqTailIdle(cpu::PerCpu* p)
+{
+    return reinterpret_cast<Task*&>(p->runq_tail_idle);
+}
+
 constinit Task* g_sleep_head = nullptr; // sorted by wake_tick (ascending)
 constinit u64 g_tick_now = 0;
 constinit u64 g_next_task_id = 0;
@@ -300,22 +336,18 @@ constinit u64 g_tasks_exited = 0;
 //   - any WaitQueue head/tail
 //   - g_tasks_* counters
 //
-// On single CPU today this is a no-op: callers that matter are
-// already CLI'd, so there's no concurrency to guard against. The
-// value is enforcing a single locking discipline across every
-// mutation point so SMP bring-up (Commit D in the SMP plan — see
-// wiki/advanced/SMP-AP-Bringup-Scope.md) has uniform ground truth
-// — "this lock protects the runqueue" — rather than a per-site
-// bolt-on.
+// SMP correctness: Schedule() HOLDS this lock across the
+// ContextSwitch call via the lock-passing handshake — the source
+// CPU writes the lock pointer + saved IRQ flags into its PerCpu
+// `ctxsw_lock_to_release` slot before ContextSwitch, and the
+// resumed code (SchedFinishTaskSwitch, called either from
+// Schedule()'s post-switch path or from SchedTaskTrampoline on a
+// fresh-task first-run) drains the slot and releases. Closes the
+// race where a peer CPU could wake `prev` between an early lock
+// release and the actual stack swap, then dispatch prev while
+// we're still on its stack. Mirrors Linux's prepare_task_switch /
+// finish_task_switch pattern.
 //
-// IMPORTANT gap: Schedule() does NOT hold this lock across the
-// ContextSwitch call. The lock covers RunqueuePop/Push and the
-// state transitions; it's released before ContextSwitch. On single
-// CPU that's fine (CLI prevents concurrent IRQs on this core). On
-// SMP, another CPU could wake `prev` between the release and the
-// context switch, then try to schedule INTO prev while we're still
-// on prev's stack. Commit D fixes via lock-passing-across-switch,
-// mirroring Linux's finish_task_switch pattern.
 // Tagged with `kLockClassSched` so the lockdep-lite locking-order
 // graph (sync/lockdep.h) records every "lock-X-was-held when sched
 // was acquired" pairing. Untagged locks pay nothing; the scheduler
@@ -345,18 +377,35 @@ inline bool& NeedResched()
 // "_Locked" suffix would be Linux-style but in our file-local scope
 // the expectation is encoded by staying inside the anonymous namespace
 // and calling only from functions that acquire the lock themselves.
-void RunqueuePush(Task* t)
+// Resolve a task's target CPU for enqueue. Falls back to the
+// current CPU when last_cpu is out of range (boot tasks created
+// before any switch sets last_cpu, plus any future hot-unplug
+// scenario where the task's previous CPU is gone). Both BSP and
+// any AP that has joined the scheduler have a live PerCpu
+// pointer registered in arch::SmpGetPercpu.
+cpu::PerCpu* TargetPerCpuFor(Task* t)
+{
+    cpu::PerCpu* p = arch::SmpGetPercpu(t->last_cpu);
+    if (p == nullptr)
+    {
+        p = cpu::CurrentCpu();
+    }
+    return p;
+}
+
+void RunqueuePushOn(cpu::PerCpu* target, Task* t)
 {
     // A null task on the runqueue would panic Schedule() later with
     // a less informative call site. Catch the bad caller here.
     KASSERT(t != nullptr, "sched", "RunqueuePush(nullptr)");
+    KASSERT(target != nullptr, "sched", "RunqueuePushOn(nullptr target)");
     // A Dead task must never re-enter the runqueue — it has no stack,
     // its AS is gone, and the reaper holds the only legitimate
     // reference. Silently accepting it would crash the next Schedule().
     KASSERT(t->state != TaskState::Dead, "sched", "RunqueuePush of Dead task");
     t->next = nullptr;
-    Task*& head = (t->priority == TaskPriority::Idle) ? g_run_head_idle : g_run_head_normal;
-    Task*& tail = (t->priority == TaskPriority::Idle) ? g_run_tail_idle : g_run_tail_normal;
+    Task*& head = (t->priority == TaskPriority::Idle) ? RunqHeadIdle(target) : RunqHeadNormal(target);
+    Task*& tail = (t->priority == TaskPriority::Idle) ? RunqTailIdle(target) : RunqTailNormal(target);
     if (tail == nullptr)
     {
         head = tail = t;
@@ -368,28 +417,83 @@ void RunqueuePush(Task* t)
     }
 }
 
-// Pops the highest-priority-available Ready task. Normal drains
-// before Idle — an Idle task only runs when Normal is empty.
+// Convenience wrapper: route to the task's last_cpu (cache
+// affinity). Used by every wake-side enqueue. When the target CPU
+// is different from the current CPU, fire a reschedule-IPI so the
+// peer notices the wake within microseconds rather than waiting
+// up to one timer tick (10 ms) for its own preemption point.
+void RunqueuePush(Task* t)
+{
+    cpu::PerCpu* target = TargetPerCpuFor(t);
+    RunqueuePushOn(target, t);
+    cpu::PerCpu* self = cpu::CurrentCpu();
+    if (self != nullptr && target != self)
+    {
+        arch::SmpSendReschedIpi(target->cpu_id);
+    }
+}
+
+// Walk every Task on every CPU's runqueue (Normal then Idle band,
+// per CPU). Caller holds g_sched_lock for the duration. The visitor
+// returns true to stop early (used by find-by-pid / find-by-tid),
+// false to continue. Helper return value mirrors that — true if any
+// visit asked to stop. Centralises the per-CPU iteration so the
+// rest of the file doesn't open-code `for (cpu_id = 0; ...) { for
+// (Task* ...) }` everywhere.
+template <typename F> bool ForEachRunqueueTask(F&& fn)
+{
+    const u32 limit = arch::SmpCpuIdLimit();
+    for (u32 i = 0; i < limit; ++i)
+    {
+        cpu::PerCpu* p = arch::SmpGetPercpu(i);
+        if (p == nullptr)
+        {
+            continue;
+        }
+        for (Task* t = RunqHeadNormal(p); t != nullptr; t = t->next)
+        {
+            if (fn(t))
+            {
+                return true;
+            }
+        }
+        for (Task* t = RunqHeadIdle(p); t != nullptr; t = t->next)
+        {
+            if (fn(t))
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Pops the highest-priority-available Ready task from THIS CPU's
+// runqueue. Normal drains before Idle — an Idle task only runs
+// when Normal is empty. Work-stealing across peer CPUs is a
+// commit-6 follow-up; today an empty local runqueue means this
+// CPU has no work and falls through to its idle task.
 Task* RunqueuePop()
 {
-    Task* t = g_run_head_normal;
+    cpu::PerCpu* p = cpu::CurrentCpu();
+    Task* t = RunqHeadNormal(p);
     if (t != nullptr)
     {
-        g_run_head_normal = t->next;
-        if (g_run_head_normal == nullptr)
+        RunqHeadNormal(p) = t->next;
+        if (RunqHeadNormal(p) == nullptr)
         {
-            g_run_tail_normal = nullptr;
+            RunqTailNormal(p) = nullptr;
         }
         t->next = nullptr;
         return t;
     }
-    t = g_run_head_idle;
+    t = RunqHeadIdle(p);
     if (t != nullptr)
     {
-        g_run_head_idle = t->next;
-        if (g_run_head_idle == nullptr)
+        RunqHeadIdle(p) = t->next;
+        if (RunqHeadIdle(p) == nullptr)
         {
-            g_run_tail_idle = nullptr;
+            RunqTailIdle(p) = nullptr;
         }
         t->next = nullptr;
         return t;
@@ -462,6 +566,60 @@ bool SuspendedListRemove(Task* t)
     return false;
 }
 
+// Lift one Normal-band Ready task off a peer CPU's runqueue.
+// Called from RunqueuePopRunnable's empty-local-queue fallback.
+// Walks peers round-robin starting from cpu_id+1; returns the
+// first non-suspended task found, or nullptr if every peer is
+// also empty. Idle tasks are pinned per-CPU and never stolen —
+// the band-segregation also prevents an idle from drifting
+// onto a different CPU's Normal queue.
+//
+// Caller must hold g_sched_lock — every per-CPU runqueue is
+// covered by the same global lock today, so cross-CPU access
+// is safe without try-lock dancing. When the lock granularity
+// splits per-CPU later, this function will need try-lock + a
+// fallback iteration order to avoid AB/BA deadlock.
+Task* StealNormalFromPeer()
+{
+    cpu::PerCpu* self = cpu::CurrentCpu();
+    if (self == nullptr)
+    {
+        return nullptr;
+    }
+    const u32 limit = arch::SmpCpuIdLimit();
+    if (limit <= 1)
+    {
+        return nullptr; // UP — no peers to steal from
+    }
+    const u32 self_id = self->cpu_id;
+    for (u32 step = 1; step < limit; ++step)
+    {
+        const u32 peer_id = (self_id + step) % limit;
+        cpu::PerCpu* peer = arch::SmpGetPercpu(peer_id);
+        if (peer == nullptr)
+        {
+            continue;
+        }
+        Task* head = RunqHeadNormal(peer);
+        if (head == nullptr)
+        {
+            continue;
+        }
+        // Pop the head off the peer's Normal queue.
+        RunqHeadNormal(peer) = head->next;
+        if (RunqHeadNormal(peer) == nullptr)
+        {
+            RunqTailNormal(peer) = nullptr;
+        }
+        head->next = nullptr;
+        // Update affinity so the next wake routes to us — keeps
+        // hot tasks on whichever CPU is actually running them.
+        head->last_cpu = self_id;
+        return head;
+    }
+    return nullptr;
+}
+
 // Drain runqueue until a non-suspended task is found OR the
 // runqueue is empty. Suspended tasks popped along the way are
 // re-parked on g_suspended_head with state = Blocked. The wake
@@ -469,6 +627,11 @@ bool SuspendedListRemove(Task* t)
 // entirely for known-suspended tasks; this loop is the safety
 // net for tasks suspended WHILE on the runqueue (Ready state),
 // which the suspender doesn't relocate eagerly.
+//
+// On an empty local runqueue, attempts to steal one Normal-band
+// task from a peer CPU (commit-6 work-stealing). Idle tasks are
+// per-CPU and not eligible to steal — falling through to the
+// caller's nullptr handling lets Schedule() pick our own idle.
 Task* RunqueuePopRunnable()
 {
     while (true)
@@ -476,7 +639,16 @@ Task* RunqueuePopRunnable()
         Task* t = RunqueuePop();
         if (t == nullptr)
         {
-            return nullptr;
+            // Try to steal a Normal-band task from a peer before
+            // giving up. If no peer has work, the caller falls
+            // back to this CPU's idle.
+            t = StealNormalFromPeer();
+            if (t == nullptr)
+            {
+                return nullptr;
+            }
+            // Stolen task is Ready — same state contract as a
+            // local pop. Fall through to the suspend check.
         }
         if (t->suspend_count == 0)
         {
@@ -612,6 +784,33 @@ extern "C" [[noreturn]] void SchedExitC();
 
 } // namespace
 
+// Lock-pass drain. Called from two places:
+//   1. Schedule(), immediately after ContextSwitch returns (we're on
+//      the resumed task's stack).
+//   2. SchedTaskTrampoline (context_switch.S), as the first instruction
+//      a fresh task ever runs — before the entry function fires.
+//
+// Reads this CPU's PerCpu slot — written by the source side of the
+// switch under g_sched_lock — and releases the lock with the saved
+// IRQ flags. The slot is per-CPU because it identifies "the lock THIS
+// CPU just acquired in Schedule()"; the resumed task is irrelevant to
+// the release decision. nullptr slot = nothing to release (a fresh AP
+// joining the scheduler hits this path with the slot still cleared
+// from PerCpuInitBsp / SmpStartAps initialisation).
+extern "C" void SchedFinishTaskSwitch()
+{
+    cpu::PerCpu* pcpu = cpu::CurrentCpu();
+    void* lock_ptr = pcpu->ctxsw_lock_to_release;
+    if (lock_ptr == nullptr)
+    {
+        return;
+    }
+    sync::IrqFlags flags{.rflags = pcpu->ctxsw_lock_flags};
+    pcpu->ctxsw_lock_to_release = nullptr;
+    pcpu->ctxsw_lock_flags = 0;
+    sync::SpinLockRelease(*static_cast<sync::SpinLock*>(lock_ptr), flags);
+}
+
 void SchedInit()
 {
     KLOG_TRACE_SCOPE("sched", "SchedInit");
@@ -646,6 +845,7 @@ void SchedInit()
     boot_task->kill_requested = false;               // kernel tasks never hit a budget
     boot_task->kill_reason = KillReason::TickBudget; // unused when kill_requested=false
     boot_task->suspend_count = 0;                    // boot/kernel tasks never get suspended
+    boot_task->last_cpu = cpu::CurrentCpu()->cpu_id; // BSP pin — boot task only ever runs here
 
     Current() = boot_task;
     g_tasks_created = 1;
@@ -743,6 +943,12 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     t->dr3 = 0;
     t->dr7 = 0;
     t->suspend_count = 0;
+    // Default affinity: spawn on the spawning CPU. The wake path
+    // routes via this field; first ContextSwitch into the task
+    // updates it to whichever CPU actually picks the task off the
+    // runqueue (in v0 same as spawn CPU since tasks don't migrate
+    // until commit-6 work-stealing).
+    t->last_cpu = cpu::CurrentCpu()->cpu_id;
 
     // Build the initial stack. ContextSwitch pops r15, r14, r13, r12,
     // rbp, rbx and then rets. So from bottom to top of the pre-planted
@@ -962,76 +1168,92 @@ void Schedule()
 
     Task* prev = nullptr;
     Task* next = nullptr;
+    // Acquire the scheduler lock manually (rather than via SpinLockGuard)
+    // so we can hand it off across ContextSwitch — see the lock-passing
+    // dance below. The lock covers the pick + state transitions; all
+    // per-CPU register handoffs (TSS.RSP0, AS activate, FS_BASE, IRQ
+    // depth, DR*) can correctly run while it's held.
+    sync::IrqFlags lock_flags = sync::SpinLockAcquire(g_sched_lock);
+
+    next = RunqueuePopRunnable();
+    if (next == nullptr)
     {
-        // Acquire the scheduler lock ONLY for the pick + state-transition
-        // phase. We release BEFORE ContextSwitch — see the SMP gap note
-        // on g_sched_lock: on single CPU this is safe (CLI serialises),
-        // on SMP Commit D adds the lock-passing-across-switch dance.
-        sync::SpinLockGuard guard(g_sched_lock);
-
-        next = RunqueuePopRunnable();
-        if (next == nullptr)
+        if (Current()->state != TaskState::Running)
         {
-            if (Current()->state != TaskState::Running)
-            {
-                PanicSched("no runnable task available");
-            }
-            return;
+            // Release the lock before panic so any post-mortem walker
+            // sees a consistent state. PanicSched is [[noreturn]].
+            sync::SpinLockRelease(g_sched_lock, lock_flags);
+            PanicSched("no runnable task available");
         }
-        // Documentation-of-invariant: a task pulled off the runqueue
-        // must have been Ready (the only state RunqueuePush accepts).
-        // A non-Ready next means the runqueue's contract was violated
-        // upstream — likely a missing state transition before push.
-        DEBUG_ASSERT(next->state == TaskState::Ready, "sched", "popped task was not Ready");
+        sync::SpinLockRelease(g_sched_lock, lock_flags);
+        return;
+    }
+    // Documentation-of-invariant: a task pulled off the runqueue
+    // must have been Ready (the only state RunqueuePush accepts).
+    // A non-Ready next means the runqueue's contract was violated
+    // upstream — likely a missing state transition before push.
+    DEBUG_ASSERT(next->state == TaskState::Ready, "sched", "popped task was not Ready");
 
-        prev = Current();
-        if (prev->state == TaskState::Running)
+    prev = Current();
+    if (prev->state == TaskState::Running)
+    {
+        if (prev->kill_requested)
         {
-            if (prev->kill_requested)
-            {
-                SerialWrite("[sched] killing task id=");
-                SerialWriteHex(prev->id);
-                SerialWrite(" name=\"");
-                SerialWrite(prev->name);
-                SerialWrite("\" reason=");
-                SerialWrite(KillReasonName(prev->kill_reason));
-                SerialWrite("\n");
-                // CPU-tick budget ran out (flagged by OnTimerTick). Treat
-                // identically to SchedExit but inline — we're already
-                // inside Schedule()'s locked section, calling SchedExit
-                // here would re-enter the lock and fight the state
-                // machine. Transition Running → Dead, push to zombies,
-                // wake the reaper.
-                prev->state = TaskState::Dead;
-                ++g_tasks_exited;
-                --g_tasks_live;
-                prev->next = g_zombies;
-                g_zombies = prev;
-                // Wake the reaper; it's blocked on g_reaper_wq and
-                // noticing a new zombie needs a wake. WaitQueueWakeOne
-                // itself acquires g_sched_lock — but we already hold
-                // it. Use the _Locked variant to avoid recursive lock.
-                WaitQueueWakeOneLocked(&g_reaper_wq);
-            }
-            else
-            {
-                // RunqueueOrSuspendPush sets state appropriately:
-                // Ready when suspend_count == 0 (the typical path)
-                // or Blocked + onto g_suspended when the task was
-                // suspended while it was the running task. Self-
-                // suspend is the only way the latter happens on
-                // single-CPU — a different task suspending us
-                // can't preempt us, so we always reach this point
-                // after our own SchedSuspendTask call.
-                RunqueueOrSuspendPush(prev);
-            }
+            SerialWrite("[sched] killing task id=");
+            SerialWriteHex(prev->id);
+            SerialWrite(" name=\"");
+            SerialWrite(prev->name);
+            SerialWrite("\" reason=");
+            SerialWrite(KillReasonName(prev->kill_reason));
+            SerialWrite("\n");
+            // CPU-tick budget ran out (flagged by OnTimerTick). Treat
+            // identically to SchedExit but inline — we're already
+            // inside Schedule()'s locked section, calling SchedExit
+            // here would re-enter the lock and fight the state
+            // machine. Transition Running → Dead, push to zombies,
+            // wake the reaper.
+            prev->state = TaskState::Dead;
+            ++g_tasks_exited;
+            --g_tasks_live;
+            prev->next = g_zombies;
+            g_zombies = prev;
+            // Wake the reaper; it's blocked on g_reaper_wq and
+            // noticing a new zombie needs a wake. WaitQueueWakeOne
+            // itself acquires g_sched_lock — but we already hold
+            // it. Use the _Locked variant to avoid recursive lock.
+            WaitQueueWakeOneLocked(&g_reaper_wq);
         }
-        // Dead tasks are NOT re-enqueued; their Task struct + stack live on
-        // until the reaper reclaims them.
+        else
+        {
+            // RunqueueOrSuspendPush sets state appropriately:
+            // Ready when suspend_count == 0 (the typical path)
+            // or Blocked + onto g_suspended when the task was
+            // suspended while it was the running task. Self-
+            // suspend is the only way the latter happens on
+            // single-CPU — a different task suspending us
+            // can't preempt us, so we always reach this point
+            // after our own SchedSuspendTask call.
+            RunqueueOrSuspendPush(prev);
+        }
+    }
+    // Dead tasks are NOT re-enqueued; their Task struct + stack live on
+    // until the reaper reclaims them.
 
-        next->state = TaskState::Running;
-        Current() = next;
-        ++g_context_switches;
+    next->state = TaskState::Running;
+    next->last_cpu = cpu::CurrentCpu()->cpu_id; // pin affinity to this CPU for next wake
+    Current() = next;
+    ++g_context_switches;
+
+    // Lock-passing handoff. The lock STAYS HELD across ContextSwitch;
+    // SchedFinishTaskSwitch (called below on the resumed task's stack,
+    // or from SchedTaskTrampoline on a fresh-task first-run) reads this
+    // CPU's slot and releases. Closes the SMP race where a peer CPU
+    // could wake `prev` between an early lock release and the actual
+    // stack swap, then dispatch prev while we're still on its stack.
+    {
+        cpu::PerCpu* pcpu = cpu::CurrentCpu();
+        pcpu->ctxsw_lock_to_release = &g_sched_lock;
+        pcpu->ctxsw_lock_flags = lock_flags.rflags;
     }
 
     // Publish `next`'s kernel-stack top to the BSP's TSS.RSP0 slot.
@@ -1130,6 +1352,15 @@ void Schedule()
     // swapped to us." Use Current() instead — the scheduler wrote
     // it to the incoming task BEFORE the stack flip, so Current()
     // here is the task that just resumed.
+    //
+    // First thing on the new stack: drain the lock-pass slot. The
+    // SOURCE-CPU side of THIS Schedule() call (which may have been a
+    // different physical Schedule() invocation, on this same CPU,
+    // some time in the past — whenever this task was switched out)
+    // wrote the slot before its ContextSwitch. We release it here
+    // BEFORE touching any other shared state so the scheduler is
+    // unlocked promptly after the resumption.
+    SchedFinishTaskSwitch();
     {
         const u64 v = Current()->fs_base;
         const u32 lo = static_cast<u32>(v);
@@ -1367,8 +1598,9 @@ void OnTimerTick(u64 now_ticks)
         NeedResched() = true;
     }
 
-    // Loadavg sample: once every 5 seconds, walk g_run_head_normal
-    // counting nodes (plus the running task if it's not idle), then
+    // Loadavg sample: once every 5 seconds, walk every CPU's
+    // Normal runqueue counting nodes (plus the running task if
+    // it's not idle), then
     // feed the count into the EWMA. The gate keeps the per-tick
     // cost at one compare + one branch in the common case. The
     // sched lock covers list-traversal vs. concurrent enqueue —
@@ -1383,9 +1615,21 @@ void OnTimerTick(u64 now_ticks)
             u32 runnable = 0;
             {
                 sync::SpinLockGuard guard(g_sched_lock);
-                for (Task* t = g_run_head_normal; t != nullptr; t = t->next)
+                // Walk every CPU's Normal runqueue. Loadavg counts
+                // Normal-band runnables only — Idle tasks always
+                // qualify as a system-idle indicator, not as "load."
+                const u32 cpu_limit = arch::SmpCpuIdLimit();
+                for (u32 i = 0; i < cpu_limit; ++i)
                 {
-                    ++runnable;
+                    cpu::PerCpu* p = arch::SmpGetPercpu(i);
+                    if (p == nullptr)
+                    {
+                        continue;
+                    }
+                    for (Task* t = RunqHeadNormal(p); t != nullptr; t = t->next)
+                    {
+                        ++runnable;
+                    }
                 }
                 if (cur != nullptr && cur->state == TaskState::Running && cur->priority != TaskPriority::Idle)
                 {
@@ -1721,25 +1965,16 @@ KillResult SchedKillByPid(u64 pid)
     }
     if (target == nullptr)
     {
-        for (Task* t = g_run_head_normal; t != nullptr; t = t->next)
-        {
-            if (t->id == pid)
+        ForEachRunqueueTask(
+            [&](Task* t)
             {
-                target = t;
-                break;
-            }
-        }
-    }
-    if (target == nullptr)
-    {
-        for (Task* t = g_run_head_idle; t != nullptr; t = t->next)
-        {
-            if (t->id == pid)
-            {
-                target = t;
-                break;
-            }
-        }
+                if (t->id == pid)
+                {
+                    target = t;
+                    return true;
+                }
+                return false;
+            });
     }
     if (target == nullptr)
     {
@@ -1829,10 +2064,12 @@ u64 SchedKillByProcess(core::Process* target)
     };
     Task* cur = Current();
     collect(cur);
-    for (Task* t = g_run_head_normal; t != nullptr; t = t->next)
-        collect(t);
-    for (Task* t = g_run_head_idle; t != nullptr; t = t->next)
-        collect(t);
+    ForEachRunqueueTask(
+        [&](Task* t)
+        {
+            collect(t);
+            return false;
+        });
     for (Task* t = g_sleep_head; t != nullptr; t = t->sleep_next)
         collect(t);
     arch::Sti();
@@ -1995,10 +2232,12 @@ StackHealth SchedCheckTaskStacks()
     };
     arch::Cli();
     check(Current());
-    for (Task* t = g_run_head_normal; t != nullptr; t = t->next)
-        check(t);
-    for (Task* t = g_run_head_idle; t != nullptr; t = t->next)
-        check(t);
+    ForEachRunqueueTask(
+        [&](Task* t)
+        {
+            check(t);
+            return false;
+        });
     for (Task* t = g_sleep_head; t != nullptr; t = t->sleep_next)
         check(t);
     for (Task* t = g_zombies; t != nullptr; t = t->next)
@@ -2022,8 +2261,23 @@ void SchedEnumerate(SchedEnumCb cb, void* cookie)
     {
         EmitTask(running, cb, cookie, true);
     }
-    EmitList(g_run_head_normal, cb, cookie, running);
-    EmitList(g_run_head_idle, cb, cookie, running);
+    // Walk every CPU's Normal then Idle runqueue. EmitList already
+    // skips the running task by pointer comparison, so iterating
+    // every per-CPU queue is safe even though `running` is on this
+    // CPU's currently-active slot, not on a runqueue at all.
+    {
+        const u32 cpu_limit = arch::SmpCpuIdLimit();
+        for (u32 i = 0; i < cpu_limit; ++i)
+        {
+            cpu::PerCpu* p = arch::SmpGetPercpu(i);
+            if (p == nullptr)
+            {
+                continue;
+            }
+            EmitList(RunqHeadNormal(p), cb, cookie, running);
+            EmitList(RunqHeadIdle(p), cb, cookie, running);
+        }
+    }
     // Sleep queue is threaded by sleep_next, not next — walk
     // that separately.
     for (Task* t = g_sleep_head; t != nullptr; t = t->sleep_next)
@@ -2070,8 +2324,15 @@ u64 SchedCountChildrenOfPid(u64 parent_pid)
     Task* running = Current();
     if (running != nullptr && running->process != nullptr && running->process->linux_parent_pid == parent_pid)
         ++total;
-    total += count_in(g_run_head_normal, false);
-    total += count_in(g_run_head_idle, false);
+    ForEachRunqueueTask(
+        [&](Task* t)
+        {
+            if (t->process != nullptr && t->process->linux_parent_pid == parent_pid)
+            {
+                ++total;
+            }
+            return false;
+        });
     total += count_in(g_sleep_head, true);
     arch::Sti();
     return total;
@@ -2105,21 +2366,25 @@ core::Process* SchedFindProcessByPid(u64 target_pid)
         arch::Sti();
         return hit;
     }
-    for (Task* t = g_run_head_normal; t != nullptr && hit == nullptr; t = t->next)
+    ForEachRunqueueTask(
+        [&](Task* t)
+        {
+            hit = match(t);
+            return hit != nullptr;
+        });
+    if (hit == nullptr)
     {
-        hit = match(t);
+        for (Task* t = g_sleep_head; t != nullptr && hit == nullptr; t = t->sleep_next)
+        {
+            hit = match(t);
+        }
     }
-    for (Task* t = g_run_head_idle; t != nullptr && hit == nullptr; t = t->next)
+    if (hit == nullptr)
     {
-        hit = match(t);
-    }
-    for (Task* t = g_sleep_head; t != nullptr && hit == nullptr; t = t->sleep_next)
-    {
-        hit = match(t);
-    }
-    for (Task* t = g_zombies; t != nullptr && hit == nullptr; t = t->next)
-    {
-        hit = match(t);
+        for (Task* t = g_zombies; t != nullptr && hit == nullptr; t = t->next)
+        {
+            hit = match(t);
+        }
     }
     arch::Sti();
     return hit;
@@ -2144,17 +2409,18 @@ Task* SchedFindTaskByTid(u64 target_tid)
         arch::Sti();
         return hit;
     }
-    for (Task* t = g_run_head_normal; t != nullptr && hit == nullptr; t = t->next)
+    ForEachRunqueueTask(
+        [&](Task* t)
+        {
+            hit = match(t);
+            return hit != nullptr;
+        });
+    if (hit == nullptr)
     {
-        hit = match(t);
-    }
-    for (Task* t = g_run_head_idle; t != nullptr && hit == nullptr; t = t->next)
-    {
-        hit = match(t);
-    }
-    for (Task* t = g_sleep_head; t != nullptr && hit == nullptr; t = t->sleep_next)
-    {
-        hit = match(t);
+        for (Task* t = g_sleep_head; t != nullptr && hit == nullptr; t = t->sleep_next)
+        {
+            hit = match(t);
+        }
     }
     // Skip zombies — opening a handle on a dead task is a v0
     // GAP we don't service. The kernel zeroes a Process* once
@@ -2321,6 +2587,108 @@ void SchedStartIdle(const char* name)
     KASSERT(name != nullptr, "sched", "SchedStartIdle null name");
     SchedCreate(&IdleMain, nullptr, name, TaskPriority::Idle);
     core::Log(core::LogLevel::Info, "sched/idle", "idle task online");
+}
+
+namespace
+{
+
+// Mint a non-runnable boot sentinel for an AP about to enter the
+// scheduler. Schedule()'s null-current check (sched.cpp top) panics
+// without a current task; we need a placeholder so the AP's first
+// Schedule() call has somewhere to record `prev->rsp`. The sentinel
+// is never re-resumed (state never flips back to Ready), so its
+// trampoline-stack frame is leaked-by-design; bounded at 16 KiB ×
+// kMaxAps. Documented at the SmpStartAps allocation site.
+Task* CreateApBootSentinel(u32 cpu_id)
+{
+    auto* t = static_cast<Task*>(mm::KMalloc(sizeof(Task)));
+    if (t == nullptr)
+    {
+        PanicSched("KMalloc failed for AP boot sentinel");
+    }
+    memset(t, 0, sizeof(Task));
+    t->id = g_next_task_id++;
+    t->state = TaskState::Running;
+    t->rsp = 0;              // populated by ContextSwitch's first store
+    t->stack_base = nullptr; // sentinel is on the trampoline stack — never inspected
+    t->stack_size = 0;
+    t->name = "ap-boot";
+    t->priority = TaskPriority::Normal;
+    t->last_cpu = cpu_id;
+    return t;
+}
+
+// Build a per-AP idle name "idle-apN" without pulling in stdio.
+// Caller's buffer must be ≥16 bytes; result is null-terminated.
+void FormatIdleApName(char (&out)[16], u32 cpu_id)
+{
+    out[0] = 'i';
+    out[1] = 'd';
+    out[2] = 'l';
+    out[3] = 'e';
+    out[4] = '-';
+    out[5] = 'a';
+    out[6] = 'p';
+    // Decimal cpu_id (kMaxCpus = 32, so max 2 digits).
+    char buf[8];
+    u32 n = 0;
+    u32 v = cpu_id;
+    if (v == 0)
+    {
+        buf[n++] = '0';
+    }
+    while (v != 0)
+    {
+        buf[n++] = static_cast<char>('0' + (v % 10));
+        v /= 10;
+    }
+    u32 w = 7;
+    while (n > 0 && w < 16)
+    {
+        out[w++] = buf[--n];
+    }
+    if (w >= 16)
+    {
+        w = 15;
+    }
+    out[w] = '\0';
+}
+
+} // namespace
+
+[[noreturn]] void SchedEnterOnAp(u32 cpu_id)
+{
+    // 1. Spawn this CPU's idle task. The Ready→runqueue push routes
+    //    via t->last_cpu; SchedCreate sets last_cpu to the spawning
+    //    CPU (which is THIS AP), so the idle lands on the AP's own
+    //    runqueue.
+    char name[16];
+    FormatIdleApName(name, cpu_id);
+    SchedStartIdle(name);
+
+    // 2. Mint a boot sentinel so Schedule() has a non-null `prev`
+    //    on its first call. Install as current_task BEFORE arming
+    //    the LAPIC timer — once the timer fires, the IRQ handler
+    //    enters Schedule() and dereferences Current().
+    Task* sentinel = CreateApBootSentinel(cpu_id);
+    cpu::CurrentCpu()->current_task = sentinel;
+
+    // 3. Arm THIS CPU's LAPIC timer at 100 Hz. Vector 0x20 is
+    //    already wired in the shared IDT; this just programs the
+    //    AP's own LAPIC MMIO registers.
+    arch::LapicTimerStartOnCurrent();
+
+    KLOG_WARN_S("sched/smp", "AP scheduler-join complete; entering idle loop", "cpu", name);
+
+    // 4. Drop into idle. The first timer IRQ on this CPU enters
+    //    Schedule(), pulls a runnable task off this CPU's runqueue
+    //    (or our just-spawned idle if no work is waiting), and
+    //    never returns to this stack frame.
+    for (;;)
+    {
+        arch::Sti();
+        asm volatile("hlt");
+    }
 }
 
 // ---------------------------------------------------------------------------

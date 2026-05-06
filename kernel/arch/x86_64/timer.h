@@ -39,4 +39,16 @@ void TimerInit();
 /// not a synchronised clock.
 u64 TimerTicks();
 
+/// Arm the LAPIC timer on the calling CPU using the cached calibration
+/// from TimerInit. Used by APs in SchedEnterOnAp — TimerInit ran on
+/// the BSP and computed g_lapic_ticks_per_period; the AP's LAPIC bus
+/// clock is assumed identical (defensible v0 assumption for a
+/// homogeneous package). Idempotent — programs the AP's LAPIC timer
+/// MMIO registers; doesn't touch the global tick counter or install
+/// the IDT handler (already installed BSP-side).
+///
+/// `// GAP: per-package LAPIC frequency variance — recalibrate per CPU
+/// when the workload exposes drift.`
+void LapicTimerStartOnCurrent();
+
 } // namespace duetos::arch

@@ -472,6 +472,17 @@ void SchedStartReaper();
 /// bring-up will call this again with a distinct `name` per CPU.
 void SchedStartIdle(const char* name);
 
+/// Bring an Application Processor into the scheduler. Called from
+/// `arch::ApEntryFromTrampoline` after the AP has installed GSBASE,
+/// loaded its per-AP GDT/TSS/IST, and enabled its LAPIC. Spawns a
+/// per-CPU idle task ("idle-apN"), mints a non-runnable boot
+/// sentinel as `current_task`, arms this CPU's LAPIC timer, then
+/// drops into a sti+hlt idle loop. The first timer IRQ on this CPU
+/// triggers Schedule(), which picks a runnable task off this CPU's
+/// runqueue (or the idle if no work is queued) and never returns
+/// to the caller.
+[[noreturn]] void SchedEnterOnAp(u32 cpu_id);
+
 /*
  * Wait queues — event-driven blocking.
  *

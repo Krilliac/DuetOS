@@ -86,6 +86,13 @@ SchedTaskTrampoline:
      * scheduler switch INTO a fresh task would raise #CP instead of
      * running the trampoline. */
     endbr64
+    /* Drain this CPU's lock-pass slot. The Schedule() call that
+     * switched INTO this fresh task left g_sched_lock held; we own
+     * the release. SchedFinishTaskSwitch is callee-saved-clean
+     * (extern "C", no args), so rbx (entry) and rbp (arg) survive
+     * the call and the existing first-run primer wiring still
+     * works. */
+    call    SchedFinishTaskSwitch
     /* The first time we run a fresh task we arrive here via ret from
      * ContextSwitch, not via iretq — so RFLAGS.IF is whatever the prior
      * caller had. Typical path: Schedule() was invoked from the timer

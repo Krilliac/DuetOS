@@ -6,6 +6,7 @@
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/traps.h"
 
+#include "core/panic.h"
 #include "log/klog.h"
 #include "sched/sched.h"
 
@@ -174,6 +175,15 @@ void TimerInit()
 u64 TimerTicks()
 {
     return g_ticks;
+}
+
+void LapicTimerStartOnCurrent()
+{
+    KASSERT(g_lapic_ticks_per_period != 0, "arch/timer", "LapicTimerStartOnCurrent before TimerInit");
+    const u64 ticks_per_kernel_tick = (g_lapic_ticks_per_period * 1000) / (kCalibrationMs * kTickFrequencyHz);
+    LapicWrite(kLapicRegTimerDivide, kLapicTimerDivBy16);
+    LapicWrite(kLapicRegLvtTimer, kLvtTimerPeriodicBit | kTimerVector);
+    LapicWrite(kLapicRegTimerInit, static_cast<u32>(ticks_per_kernel_tick));
 }
 
 } // namespace duetos::arch

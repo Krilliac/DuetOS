@@ -1,6 +1,8 @@
 #include "arch/x86_64/gdt.h"
 
+#include "cpu/percpu.h"
 #include "log/klog.h"
+#include "mm/kheap.h"
 
 namespace duetos::arch
 {
@@ -51,36 +53,12 @@ struct [[gnu::packed]] GdtPointer
 // Filled in at runtime inside GdtInit().
 GdtPointer g_gdt_pointer;
 
-// ---------------------------------------------------------------------------
-// TSS (long-mode, 104 bytes). Intel SDM Vol. 3A §7.7.
-//
-// Only RSP0 and IST1..IST3 are meaningful today. RSP0 is the stack
-// the CPU switches to on a user→kernel transition (irrelevant until
-// ring 3 lands); IST1..IST3 are the dedicated stacks for the three
-// critical exception vectors. The I/O-permission-bitmap offset is
-// set past the TSS body, which disables the bitmap entirely —
+// BSP TSS (Tss layout lives in gdt.h so per-AP code can reference
+// it). Only RSP0 (kernel stack on user→kernel transition) and IST1
+// ..IST3 (dedicated stacks for the three critical exception vectors)
+// carry meaningful values. The I/O-permission-bitmap offset is set
+// past the TSS body in TssInit, disabling the bitmap entirely so
 // every port access from user mode will #GP.
-// ---------------------------------------------------------------------------
-struct [[gnu::packed]] Tss
-{
-    u32 reserved0;
-    u64 rsp0;
-    u64 rsp1;
-    u64 rsp2;
-    u64 reserved1;
-    u64 ist1;
-    u64 ist2;
-    u64 ist3;
-    u64 ist4;
-    u64 ist5;
-    u64 ist6;
-    u64 ist7;
-    u64 reserved2;
-    u16 reserved3;
-    u16 iopb_offset;
-};
-static_assert(sizeof(Tss) == 104, "long-mode TSS is 104 bytes");
-
 alignas(16) constinit Tss g_bsp_tss = {};
 
 // Dedicated exception stacks. 4 KiB each is comfortable — the trap
@@ -191,7 +169,144 @@ bool IstStackCanariesIntact()
 
 void TssSetRsp0(u64 rsp0)
 {
+    // Per-CPU TSS routing: write to whichever TSS this CPU has
+    // ltr'd. BSP's PerCpu.tss is wired to &g_bsp_tss by
+    // PerCpuInitBsp; each AP's PerCpu.tss is wired to its
+    // heap-allocated AP TSS by SmpStartAps. Falls back to
+    // g_bsp_tss if PerCpu hasn't been installed yet (only
+    // possible on the very early boot path before PerCpuInitBsp
+    // — and the only caller that can race that window is the
+    // boot path's own ring-3 smoke, which runs much later).
+    if (cpu::BspInstalled())
+    {
+        cpu::PerCpu* p = cpu::CurrentCpu();
+        Tss* t = static_cast<Tss*>(p->tss);
+        if (t != nullptr)
+        {
+            t->rsp0 = rsp0;
+            return;
+        }
+    }
     g_bsp_tss.rsp0 = rsp0;
+}
+
+Tss* BspTssPtr()
+{
+    return &g_bsp_tss;
+}
+
+ApGdtBundle* AllocateApGdt(cpu::PerCpu* pcpu)
+{
+    auto* bundle = static_cast<ApGdtBundle*>(mm::KMalloc(sizeof(ApGdtBundle)));
+    if (bundle == nullptr)
+    {
+        return nullptr;
+    }
+    *bundle = {};
+
+    // 7-entry GDT clone — same layout as BSP's g_gdt. Slots 3-4
+    // are the TSS descriptor; we fill them after allocating the
+    // AP's TSS so the descriptor's base field can point at it.
+    constexpr u64 kGdtSlots = 7;
+    auto* ap_gdt = static_cast<u64*>(mm::KMalloc(kGdtSlots * sizeof(u64)));
+    if (ap_gdt == nullptr)
+    {
+        mm::KFree(bundle);
+        return nullptr;
+    }
+    ap_gdt[0] = kGdtNull;
+    ap_gdt[1] = kGdtKernelCode;
+    ap_gdt[2] = kGdtKernelData;
+    ap_gdt[3] = 0; // filled below
+    ap_gdt[4] = 0; // filled below
+    ap_gdt[5] = kGdtUserCode;
+    ap_gdt[6] = kGdtUserData;
+
+    auto* ap_tss = static_cast<Tss*>(mm::KMalloc(sizeof(Tss)));
+    if (ap_tss == nullptr)
+    {
+        mm::KFree(ap_gdt);
+        mm::KFree(bundle);
+        return nullptr;
+    }
+    *ap_tss = {};
+    ap_tss->iopb_offset = sizeof(Tss); // disable I/O bitmap
+
+    auto* ist_df = static_cast<u8*>(mm::KMalloc(kIstStackBytes));
+    auto* ist_mc = static_cast<u8*>(mm::KMalloc(kIstStackBytes));
+    auto* ist_nmi = static_cast<u8*>(mm::KMalloc(kIstStackBytes));
+    if (ist_df == nullptr || ist_mc == nullptr || ist_nmi == nullptr)
+    {
+        if (ist_df != nullptr)
+            mm::KFree(ist_df);
+        if (ist_mc != nullptr)
+            mm::KFree(ist_mc);
+        if (ist_nmi != nullptr)
+            mm::KFree(ist_nmi);
+        mm::KFree(ap_tss);
+        mm::KFree(ap_gdt);
+        mm::KFree(bundle);
+        return nullptr;
+    }
+    // Plant canaries at the low edge of each IST stack — same
+    // pattern as BSP's static IST stacks.
+    *reinterpret_cast<u64*>(ist_df) = kIstStackCanary;
+    *reinterpret_cast<u64*>(ist_mc) = kIstStackCanary;
+    *reinterpret_cast<u64*>(ist_nmi) = kIstStackCanary;
+    ap_tss->ist1 = reinterpret_cast<u64>(ist_df) + kIstStackBytes;
+    ap_tss->ist2 = reinterpret_cast<u64>(ist_mc) + kIstStackBytes;
+    ap_tss->ist3 = reinterpret_cast<u64>(ist_nmi) + kIstStackBytes;
+
+    // Build the 16-byte TSS system descriptor in slots 3-4 of the
+    // AP's own GDT. Same construction as TssInit's BSP path.
+    const u64 base = reinterpret_cast<u64>(ap_tss);
+    const u64 limit = sizeof(Tss) - 1;
+    const u64 low = (limit & 0xFFFFULL) | ((base & 0xFFFFFFULL) << 16) | (0x89ULL << 40) |
+                    (((limit >> 16) & 0xFULL) << 48) | (((base >> 24) & 0xFFULL) << 56);
+    const u64 high = (base >> 32) & 0xFFFFFFFFULL;
+    ap_gdt[3] = low;
+    ap_gdt[4] = high;
+
+    bundle->gdt = ap_gdt;
+    bundle->gdt_limit = static_cast<u16>(kGdtSlots * sizeof(u64) - 1);
+    bundle->tss = ap_tss;
+    bundle->ist_stack_df = ist_df;
+    bundle->ist_stack_mc = ist_mc;
+    bundle->ist_stack_nmi = ist_nmi;
+
+    pcpu->tss = ap_tss;
+    return bundle;
+}
+
+void LoadGdtForCurrent(ApGdtBundle* bundle)
+{
+    // Build the lgdt operand on the stack — the CPU reads a
+    // [u16 limit, u64 base] tuple. No need for a per-CPU static
+    // GdtPointer slot; once lgdt has executed, the CPU has the
+    // descriptor cached.
+    GdtPointer ptr;
+    ptr.limit = bundle->gdt_limit;
+    ptr.base = reinterpret_cast<u64>(bundle->gdt);
+
+    asm volatile("lgdt %[gdtp]                 \n\t"
+                 // Far-return trick to reload CS — same idiom as GdtInit.
+                 "pushq %[kcode]               \n\t"
+                 "leaq  1f(%%rip), %%rax       \n\t"
+                 "pushq %%rax                  \n\t"
+                 "lretq                        \n\t"
+                 "1:                           \n\t"
+                 "movw %[kdata], %%ax          \n\t"
+                 "movw %%ax,     %%ds          \n\t"
+                 "movw %%ax,     %%es          \n\t"
+                 "movw %%ax,     %%fs          \n\t"
+                 "movw %%ax,     %%gs          \n\t"
+                 "movw %%ax,     %%ss          \n\t"
+                 :
+                 : [gdtp] "m"(ptr), [kcode] "i"(kKernelCodeSelector), [kdata] "i"(kKernelDataSelector)
+                 : "rax", "memory");
+
+    // ltr loads the TSS selector from the new GDT (slot 3-4).
+    asm volatile("ltr %w0" : : "r"(kTssSelector));
 }
 
 u64* GdtRawBase()

@@ -2,6 +2,11 @@
 
 #include "util/types.h"
 
+namespace duetos::cpu
+{
+struct PerCpu;
+}
+
 /*
  * DuetOS x86_64 Global Descriptor Table + TSS.
  *
@@ -45,6 +50,31 @@ inline constexpr u16 kUserDataSelector = 0x30 | 0x3;
 inline constexpr u8 kIstDoubleFault = 1;
 inline constexpr u8 kIstMachineCheck = 2;
 inline constexpr u8 kIstNmi = 3;
+
+// Long-mode TSS (Intel SDM Vol. 3A §7.7). Exposed in this header so
+// per-CPU TssSetRsp0 can dereference the current CPU's TSS pointer
+// (cached in cpu::PerCpu::tss). Only RSP0 (kernel stack on user→
+// kernel transition) and IST1..IST3 (dedicated stacks for #DF / #MC
+// / #NMI) carry meaningful values today.
+struct [[gnu::packed]] Tss
+{
+    u32 reserved0;
+    u64 rsp0;
+    u64 rsp1;
+    u64 rsp2;
+    u64 reserved1;
+    u64 ist1;
+    u64 ist2;
+    u64 ist3;
+    u64 ist4;
+    u64 ist5;
+    u64 ist6;
+    u64 ist7;
+    u64 reserved2;
+    u16 reserved3;
+    u16 iopb_offset;
+};
+static_assert(sizeof(Tss) == 104, "long-mode TSS is 104 bytes");
 
 /// Install the kernel GDT and reload all segment registers. Must be called
 /// before IdtInit(), because the IDT entries reference kKernelCodeSelector.
@@ -92,5 +122,43 @@ void TssSetRsp0(u64 rsp0);
 /// the crash-dump path so IST overflow is a named diagnostic
 /// instead of mystery heap / data corruption.
 bool IstStackCanariesIntact();
+
+/// Pointer to the BSP TSS struct. Wired into BSP's PerCpu by
+/// PerCpuInitBsp so TssSetRsp0 can find it via current CPU.
+Tss* BspTssPtr();
+
+/// Per-AP GDT bundle. Each AP needs:
+///   - a 7-entry GDT clone (so ltr can resolve TSS slot 3-4 to
+///     the AP's own TSS rather than the BSP's),
+///   - a Tss body (RSP0 + IST1..3 slots),
+///   - three 4 KiB IST stacks (#DF, #MC, #NMI).
+/// All four allocations are heap-backed and pointed into by this
+/// bundle; the bundle itself is heap-allocated and pointed at from
+/// `g_ap_gdt_bundles[cpu_id]` in smp.cpp. AP entry calls
+/// `LoadGdtForCurrent` with its bundle pointer to install on
+/// the executing core.
+struct ApGdtBundle
+{
+    u64* gdt;          // 7 qwords, kKernel{Code,Data}/Tss/User{Code,Data}
+    u16 gdt_limit;     // sizeof(g_gdt) - 1
+    Tss* tss;          // body — referenced by gdt slots 3-4 (TSS desc)
+    u8* ist_stack_df;  // 4 KiB
+    u8* ist_stack_mc;  // 4 KiB
+    u8* ist_stack_nmi; // 4 KiB
+};
+
+/// Heap-allocate a GDT bundle for an AP and wire its TSS pointer
+/// into pcpu->tss. Returns nullptr if any allocation fails (caller
+/// should treat the AP as failed to start). Does NOT issue lgdt /
+/// ltr — that happens on the AP itself via LoadGdtForCurrent once
+/// it's executing kernel code.
+ApGdtBundle* AllocateApGdt(cpu::PerCpu* pcpu);
+
+/// Issue lgdt + segment reload + ltr on the calling CPU using the
+/// pre-built AP bundle. Called from ApEntryFromTrampoline as soon
+/// as the AP has installed its GSBASE (so cpu::CurrentCpu() works,
+/// even though we don't read PerCpu inside this helper — the
+/// bundle pointer is passed explicitly to keep the boundary tight).
+void LoadGdtForCurrent(ApGdtBundle* bundle);
 
 } // namespace duetos::arch

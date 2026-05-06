@@ -66,6 +66,27 @@ u64 SmpCpusOnline();
 /// wake-up) share the same ICR dance rather than reimplementing it.
 void SmpSendIpi(u8 target_apic_id, u32 icr_low);
 
+/// Reschedule-IPI vector. Set by the wake path on a remote CPU's
+/// runqueue to prompt that CPU to call Schedule() promptly rather
+/// than wait up to one timer tick (10 ms) for its own preemption.
+inline constexpr u8 kReschedIpiVector = 0xF8;
+
+/// Fire the reschedule-IPI at `cpu_id`. No-op if `cpu_id` is the
+/// current CPU (we'd just be poking ourselves; the wake path's
+/// own SetNeedResched is enough). Looks up the target's LAPIC ID
+/// via SmpGetPercpu and wraps SmpSendIpi with the fixed-delivery
+/// vector encoding. Safe to call with the scheduler lock held —
+/// SmpSendIpi blocks only on the LAPIC delivery-status bit, which
+/// clears within microseconds on healthy hardware.
+void SmpSendReschedIpi(u32 cpu_id);
+
+/// Install the IDT handler for kReschedIpiVector. Called once after
+/// IdtInit but before any peer CPU could fire the IPI (i.e. before
+/// SmpStartAps). The handler body just sets the current CPU's
+/// need_resched flag — the IRQ dispatcher's existing post-EOI
+/// check then calls Schedule() before iretq.
+void SmpInstallReschedIpiHandler();
+
 /// Broadcast an NMI to every CPU except the calling one. Used by
 /// the panic path to halt peer CPUs before dumping diagnostics so
 /// they can't keep executing against potentially-corrupt shared
