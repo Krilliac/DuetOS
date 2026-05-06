@@ -1,6 +1,7 @@
 #include "fs/vfs.h"
 
 #include "arch/x86_64/serial.h"
+#include "fs/mount.h"
 #include "log/klog.h"
 #include "core/panic.h"
 
@@ -119,6 +120,101 @@ const RamfsNode* VfsLookup(const RamfsNode* root, const char* path, u64 path_max
     return cur;
 }
 
+// =====================================================
+// Generic VfsNode helpers + cross-mount resolver.
+// =====================================================
+
+bool VfsNodeIsValid(const VfsNode& n)
+{
+    return n.backend != VfsBackend::Invalid;
+}
+
+bool VfsNodeIsDir(const VfsNode& n)
+{
+    if (n.backend == VfsBackend::Ramfs)
+    {
+        return RamfsIsDir(n.ramfs);
+    }
+    if (n.backend == VfsBackend::Fat32)
+    {
+        return (n.fat32_entry.attributes & 0x10) != 0;
+    }
+    return false;
+}
+
+bool VfsNodeIsFile(const VfsNode& n)
+{
+    if (n.backend == VfsBackend::Ramfs)
+    {
+        return n.ramfs != nullptr && n.ramfs->type == RamfsNodeType::kFile;
+    }
+    if (n.backend == VfsBackend::Fat32)
+    {
+        return (n.fat32_entry.attributes & 0x10) == 0;
+    }
+    return false;
+}
+
+u64 VfsNodeSize(const VfsNode& n)
+{
+    if (n.backend == VfsBackend::Ramfs)
+    {
+        return n.ramfs != nullptr ? n.ramfs->file_size : 0;
+    }
+    if (n.backend == VfsBackend::Fat32)
+    {
+        return n.fat32_entry.size_bytes;
+    }
+    return 0;
+}
+
+VfsNode VfsResolve(const RamfsNode* root, const char* path, u64 path_max)
+{
+    VfsNode out{};
+    out.backend = VfsBackend::Invalid;
+    if (path == nullptr || path_max == 0)
+    {
+        return out;
+    }
+
+    // Mount-registry dispatch only fires when the path is absolute
+    // (a leading '/'). Relative paths are always ramfs-from-root —
+    // sandbox roots stay sandbox roots. The mount registry is a
+    // global namespace; relative paths are anchored to the caller
+    // and must not climb out of it.
+    if (path[0] == '/')
+    {
+        const char* sub = nullptr;
+        const MountEntry* me = VfsMountResolve(path, &sub);
+        if (me != nullptr && me->fs_type != FsType::Ramfs && sub != nullptr)
+        {
+            const VfsBackendOps* ops = VfsBackendForFsType(me->fs_type);
+            if (ops != nullptr && ops->lookup != nullptr)
+            {
+                if (ops->lookup(me->block_handle, sub, &out))
+                {
+                    return out;
+                }
+            }
+            // Mount matched but lookup missed / no backend wired —
+            // fall through to ramfs is wrong because we're past the
+            // mount-point boundary. Return Invalid.
+            out.backend = VfsBackend::Invalid;
+            return out;
+        }
+    }
+
+    // Ramfs fall-through: the explicit `root` arg is authoritative.
+    const RamfsNode* n = VfsLookup(root, path, path_max);
+    if (n == nullptr)
+    {
+        return out;
+    }
+    out.backend = VfsBackend::Ramfs;
+    out.ramfs = n;
+    return out;
+}
+
 namespace
 {
 
@@ -229,7 +325,90 @@ void VfsSelfTest()
     Expect(VfsLookup(sandbox, "..", 64) == nullptr, "JAIL: sandbox .. rejected");
     Expect(VfsLookup(sandbox, "/welcome.txt/..", 64) == nullptr, "JAIL: sandbox file/.. rejected");
 
-    arch::SerialWrite("[fs/vfs] self-test OK (32 cases: lookup + jail + .. + path_max)\n");
+    // ----- Cross-mount resolver (Stage 6 second slice) -----
+    //
+    // VfsResolve falls back to ramfs when no non-ramfs mount is in
+    // the registry; the Fat32-mount path is exercised by the
+    // routing self-test that runs after FAT32 auto-mount lands.
+    // Here we just verify the ramfs-fall-through and Invalid-miss
+    // shapes so a regression in the resolver shows up at this
+    // level rather than only at the routing layer above.
+    {
+        VfsNode r = VfsResolve(trusted, "/etc/version", 64);
+        Expect(VfsNodeIsValid(r), "VfsResolve /etc/version valid");
+        Expect(r.backend == VfsBackend::Ramfs, "VfsResolve /etc/version is ramfs");
+        Expect(r.ramfs == version, "VfsResolve /etc/version matches VfsLookup");
+        Expect(VfsNodeIsFile(r), "VfsResolve /etc/version is file");
+        Expect(VfsNodeSize(r) == version->file_size, "VfsResolve /etc/version size matches");
+
+        VfsNode d = VfsResolve(trusted, "/etc", 64);
+        Expect(VfsNodeIsValid(d), "VfsResolve /etc valid");
+        Expect(VfsNodeIsDir(d), "VfsResolve /etc is dir");
+
+        VfsNode m = VfsResolve(trusted, "/nope", 64);
+        Expect(!VfsNodeIsValid(m), "VfsResolve /nope misses");
+        Expect(m.backend == VfsBackend::Invalid, "VfsResolve /nope backend=Invalid");
+
+        // Sandbox jail still applies to ramfs fall-through.
+        VfsNode s = VfsResolve(sandbox, "/etc/version", 64);
+        Expect(!VfsNodeIsValid(s), "VfsResolve sandbox-jail still rejects /etc/version");
+
+        // ".." rejection survives the resolver wrapping.
+        VfsNode dd = VfsResolve(trusted, "/etc/..", 64);
+        Expect(!VfsNodeIsValid(dd), "VfsResolve /etc/.. rejected");
+
+        // Default-constructed node behaves correctly.
+        VfsNode z{};
+        Expect(!VfsNodeIsValid(z), "default VfsNode invalid");
+        Expect(!VfsNodeIsDir(z), "default VfsNode not dir");
+        Expect(!VfsNodeIsFile(z), "default VfsNode not file");
+        Expect(VfsNodeSize(z) == 0, "default VfsNode size=0");
+    }
+
+    arch::SerialWrite("[fs/vfs] self-test OK (lookup + jail + .. + path_max + VfsResolve)\n");
+}
+
+void VfsResolveCrossMountSelfTest()
+{
+    arch::SerialWrite("[fs/vfs] cross-mount self-test\n");
+
+    if (fat32::Fat32VolumeCount() == 0)
+    {
+        arch::SerialWrite("[fs/vfs] cross-mount self-test SKIP (no fat32 volume)\n");
+        return;
+    }
+
+    const RamfsNode* root = RamfsTrustedRoot();
+
+    // /disk/0/HELLO.TXT is seeded by tools/qemu/make-gpt-image.py;
+    // FAT32 auto-mount has run before us so the mount registry has
+    // a /disk/0 → FsType::Fat32 entry pointing at volume 0.
+    VfsNode hello = VfsResolve(root, "/disk/0/HELLO.TXT", 64);
+    Expect(VfsNodeIsValid(hello), "cross-mount: /disk/0/HELLO.TXT resolves");
+    Expect(hello.backend == VfsBackend::Fat32, "cross-mount: /disk/0/HELLO.TXT lands on fat32 backend");
+    Expect(VfsNodeIsFile(hello), "cross-mount: /disk/0/HELLO.TXT is file");
+    // FAT32 self-test runs before us and may have appended bytes
+    // ("hello from fat32\n" + 5000-byte tail). All we assert is the
+    // size includes the seeded prefix — anything ≥ the original 17
+    // bytes is acceptable. Full byte-level coverage stays in
+    // routing::SelfTest, which has the read path wired.
+    Expect(VfsNodeSize(hello) >= 17, "cross-mount: /disk/0/HELLO.TXT size >= seed");
+
+    // Negative case under the same mount: a non-existent file
+    // returns Invalid (not a stale ramfs hit, since /disk/0/NOPE
+    // doesn't exist in either backend).
+    VfsNode miss = VfsResolve(root, "/disk/0/NOPE.NOT", 64);
+    Expect(!VfsNodeIsValid(miss), "cross-mount: missing fat32 file returns Invalid");
+    Expect(miss.backend == VfsBackend::Invalid, "cross-mount: miss has Invalid backend");
+
+    // Resolving /disk/0 itself should land on a directory (root of
+    // the FAT32 volume — DirEntry's attributes carry 0x10).
+    VfsNode rootdir = VfsResolve(root, "/disk/0", 64);
+    Expect(VfsNodeIsValid(rootdir), "cross-mount: /disk/0 resolves");
+    Expect(rootdir.backend == VfsBackend::Fat32, "cross-mount: /disk/0 is fat32");
+    Expect(VfsNodeIsDir(rootdir), "cross-mount: /disk/0 is dir");
+
+    arch::SerialWrite("[fs/vfs] cross-mount self-test OK\n");
 }
 
 } // namespace duetos::fs

@@ -2822,6 +2822,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         }
     }
 
+    SerialWrite("[boot] Cross-mount VfsResolve self-test.\n");
+    DUETOS_BOOT_SELFTEST(duetos::fs::VfsResolveCrossMountSelfTest());
+
     SerialWrite("[boot] Routing Win32 file syscalls through FAT32.\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::routing::SelfTest());
 

@@ -612,6 +612,88 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 123 — VFS Stage 6 finish: cross-mount `VfsResolve` + `VfsNode`
+
+- **Scope:** `kernel/fs/vfs.{h,cpp}` (new `VfsBackend` enum,
+  `VfsNode` tagged-storage struct + accessors `VfsNodeIsValid`,
+  `VfsNodeIsDir`, `VfsNodeIsFile`, `VfsNodeSize`; new
+  `VfsResolve(root, path, path_max) -> VfsNode` walker;
+  `VfsResolveCrossMountSelfTest()` exercising a real `/disk/0/HELLO.TXT`
+  resolution post-FAT32-auto-mount). `kernel/fs/mount.{h,cpp}`
+  (new `VfsBackendLookupFn` + `VfsBackendOps` vtable +
+  `VfsBackendForFsType`; `Fat32Lookup` adapter wraps
+  `Fat32LookupPath` into a vtable entry). `kernel/core/main.cpp`
+  (new `DUETOS_BOOT_SELFTEST(VfsResolveCrossMountSelfTest())`
+  immediately after FAT32 auto-mount, before the routing self-test).
+- **Decision:** Add a sibling `VfsResolve` API that returns a
+  generic backend-tagged `VfsNode` rather than changing
+  `VfsLookup`'s `RamfsNode*` signature. The existing `VfsLookup`
+  callers (sandbox enforcement against `Process::root`,
+  syscall path resolution) keep their narrow ramfs-only contract
+  — none of them are equipped to handle a FAT32 entry today.
+  New callers that legitimately want to cross a mount point
+  (the kernel shell's `cd /disk/0/SUB`, future generic
+  `stat`/`open`/`readdir` syscalls that go through one
+  resolver) opt into the broader API. Backend dispatch lives
+  on a per-FsType vtable in `mount.cpp`; FAT32 is wired today,
+  Ext4 / NTFS slots return nullptr until a backend ships.
+- **Why:** Dual signatures avoid a fleet-wide refactor of every
+  existing `VfsLookup` caller. The constinit ramfs trees,
+  sandbox roots, and "is this path inside the jail" checks all
+  rely on the `RamfsNode*` shape; rewriting them to handle a
+  tagged union when none of them cross mount points would be
+  pure churn. Adding `VfsResolve` separately gives the cross-
+  mount story a real home and matches the original Stage 6
+  plan's "per-FS-type lookup vtable" sketch.
+- **Mount-registry semantics:** Ramfs mounts in the registry are
+  IGNORED by `VfsResolve` (the dispatcher only fires on non-
+  ramfs `FsType`s). The explicit `root` argument stays
+  authoritative for the ramfs view, so a sandbox root keeps
+  its jail invariant even when the global namespace has a
+  ramfs entry registered. Relative paths (no leading slash)
+  always go through the ramfs walker — the mount registry is
+  a global-namespace facility and relative paths are anchored
+  to the caller, not to `/`.
+- **VfsNode storage:** `VfsNode` carries the FAT32 entry by
+  value (snapshot copy mirroring `Fat32LookupPath`'s caller-
+  owned-out shape), so callers don't have to track lifetime
+  against any backend's internal table. Ramfs nodes stay as
+  pointers into `.rodata` — the constinit trees outlive every
+  caller. The struct is fixed-size; future backends can add a
+  union arm without breaking ABI inside the kernel.
+- **Self-test wiring:** Two layers cover the resolver. The
+  in-place `VfsSelfTest` (Phase::Vfs, before FAT32 probe) runs
+  the ramfs-fall-through, sandbox-jail-survives-VfsResolve,
+  and `..` rejection cases. `VfsResolveCrossMountSelfTest`
+  runs after FAT32 auto-mount (when `/disk/0` is in the mount
+  registry pointing at a real volume) and asserts the FAT32-
+  backend dispatch end-to-end against the seeded HELLO.TXT.
+  SKIPs gracefully on volumes-less boots so QEMU runs without
+  a disk image stay no-op.
+- **Rules out / defers:** Migrating `Process::root` to a
+  `VfsNode` (so a sandboxed process can be rooted in a non-
+  ramfs subtree) — `Process::root` stays a `const RamfsNode*`
+  for v0; today every process root is ramfs by construction.
+  A unified `open`/`stat`/`readdir` syscall surface that takes
+  a `VfsNode` instead of routing-layer-specific `Win32FileHandle`
+  / `LinuxFd` slots — that's a much bigger refactor, gated on
+  a workload that wants per-process jails on FAT32 subtrees.
+  Removing the legacy "/disk/<idx>" parser fallback in
+  `routing::ParseDiskPath` — kept for boots where auto-mount
+  hasn't run yet (fault-domain restart cleared the registry,
+  early callers).
+- **Revisit when:** A workload wants to sandbox a process under
+  a FAT32 subtree (e.g. running a PE image with its rootfs
+  pinned to `/disk/0/SANDBOX/`). At that point the syscall
+  layer's `VfsLookup`-against-`Process::root` calls migrate
+  to `VfsResolve`, and `Process::root` grows from a
+  `RamfsNode*` to a `VfsNode` carrying the appropriate
+  backend.
+- **Related tracks:** Track 3 (Storage / FS), Track 1 (Kernel —
+  VFS abstraction).
+
+---
+
 ## 122 — Dirfd (Linux state 11) on owner-aware KFile release
 
 - **Scope:** `kernel/ipc/kfile.{h,cpp}` (new

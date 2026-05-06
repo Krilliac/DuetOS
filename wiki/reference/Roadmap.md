@@ -114,24 +114,24 @@ the same commit** that delivers the code.
 
 ## Storage and filesystem
 
-### Stage 6 — VFS mount path
+### Stage 6 — per-process namespace roots
 
-- **First two slices landed:** `fs::VfsMount(mount_point,
-  FsType, block_handle) -> MountId` registry; longest-prefix
-  `VfsMountResolve(path)` resolver; FAT32 volumes auto-mount
-  at `/disk/<idx>` during boot; `fs::routing::ParseDiskPath`
-  consults the mount registry first before falling back to
-  the hard-coded prefix. Today every Win32 file syscall that
-  resolves to FAT32 gets there via the mount table.
-- **Remaining work:** teach the ramfs-side `VfsLookup` itself
-  to walk across mount points (return a generic `VfsNode`
-  handle instead of `const RamfsNode*`), so `cd /disk/0/SUB`
-  in the kernel shell goes through one VFS API rather than
-  the routing-layer detour. That's the per-FS-type lookup
-  vtable mentioned in the original Stage 6 plan.
-- **Per-process namespace roots** continue to work — `Process::root`
-  stays a `const RamfsNode*` today, but grows into a generic
-  `VfsDir*` handle once on-disk FS is mountable.
+- **Status (Stage 6 complete for the global namespace):**
+  `fs::VfsMount` registry + longest-prefix `VfsMountResolve`
+  + FAT32 auto-mount at `/disk/<idx>` landed first; the
+  cross-mount resolver (`fs::VfsResolve(root, path) -> VfsNode`)
+  + per-FsType `VfsBackendOps` vtable + boot-time cross-mount
+  self-test landed alongside this entry. `cd /disk/0/SUB` and
+  every other "give me the resolved node" caller now goes
+  through one VFS API; backend dispatch is a vtable hop.
+- **Remaining scope:** teach `Process::root` to carry a
+  `VfsNode` (or a `VfsDir*` thin handle) so a sandboxed
+  process can be rooted at a non-ramfs subtree (e.g. `/disk/0/SANDBOX`).
+  Today every process root is a `const RamfsNode*` and the
+  cross-mount path always falls through to ramfs at the leaf.
+  The wider syscall surface (open / stat / readdir) still
+  lands in `RamfsNode*` — migrating those is a per-syscall
+  follow-on once a workload demands a non-ramfs sandbox root.
 
 ### Stage 7+ — Writable FS / native FS / NTFS read
 

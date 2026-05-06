@@ -1,6 +1,8 @@
 #include "fs/mount.h"
 
 #include "core/panic.h"
+#include "fs/fat32.h"
+#include "fs/vfs.h"
 #include "log/klog.h"
 
 namespace duetos::fs
@@ -271,6 +273,55 @@ const MountEntry* VfsMountResolve(const char* path, const char** out_subpath)
         *out_subpath = (tail[0] == '\0') ? "/" : tail;
     }
     return best;
+}
+
+// =====================================================
+// Per-FsType lookup vtable (Stage 6 second slice).
+// =====================================================
+
+namespace
+{
+
+bool Fat32Lookup(u32 block_handle, const char* subpath, void* out_node)
+{
+    if (subpath == nullptr || out_node == nullptr)
+    {
+        return false;
+    }
+    const auto* v = fat32::Fat32Volume(block_handle);
+    if (v == nullptr)
+    {
+        return false;
+    }
+    fat32::DirEntry entry{};
+    if (!fat32::Fat32LookupPath(v, subpath, &entry))
+    {
+        return false;
+    }
+    auto* out = static_cast<VfsNode*>(out_node);
+    out->backend = VfsBackend::Fat32;
+    out->ramfs = nullptr;
+    out->fat32_volume_idx = block_handle;
+    out->fat32_entry = entry;
+    return true;
+}
+
+constinit VfsBackendOps g_fat32_ops = {&Fat32Lookup};
+
+} // namespace
+
+const VfsBackendOps* VfsBackendForFsType(FsType t)
+{
+    switch (t)
+    {
+    case FsType::Fat32:
+        return &g_fat32_ops;
+    case FsType::Ramfs:
+    case FsType::Ext4:
+    case FsType::Ntfs:
+    default:
+        return nullptr;
+    }
 }
 
 void VfsMountSelfTest()
