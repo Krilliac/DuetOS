@@ -235,7 +235,6 @@
 #include "loader/elf_loader.h"
 #include "shell/shell.h"
 #include "syscall/syscall.h"
-#include "mm/kernel_half_watch.h"
 #include "mm/kheap.h"
 #include "mm/kstack.h"
 #include "mm/multiboot2.h"
@@ -1421,17 +1420,6 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // of them does, the fault will fire here at boot rather than
     // corrupt code silently later.
     ProtectKernelImage();
-
-    // Kernel-half PML4 trip-wire. Snapshots PML4[256..511] so any
-    // post-boot mutation panics with the offending index instead of
-    // silently un-mapping a 512 GiB swath of kernel VA. Armed HERE
-    // because the kernel half is now stable: PagingInit installed
-    // the boot PML4, ProtectKernelImage finished its PD-level splits
-    // (which never extend the PML4 — every kernel-half mapping in
-    // v0 fits under PML4[511]), and downstream MapMmio calls extend
-    // PDPT/PD/PT under that one entry without touching the PML4
-    // tier. See kernel/mm/kernel_half_watch.h for the rationale.
-    duetos::mm::KernelHalfWatchArm();
 
     // Breakpoint subsystem (int3 + DR0..DR3). Must run AFTER
     // ProtectKernelImage so we know .text is at its final 4 KiB-

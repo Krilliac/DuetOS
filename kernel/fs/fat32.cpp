@@ -42,7 +42,6 @@
 #include "drivers/storage/block.h"
 #include "fs/fat32_internal.h"
 #include "log/klog.h"
-#include "mm/kernel_half_watch.h"
 #include "sched/sched.h"
 #include "security/driver_domain.h"
 
@@ -76,14 +75,6 @@ alignas(16) constinit u8 g_scratch[4096] = {};
 
 Fat32Guard::Fat32Guard()
 {
-    // Kernel-half integrity trip-wire. The previous slice (3423df7)
-    // observed Fat32Guard's `++g_fat32_recursion` page-faulting on a
-    // .bss VA that had been silently unmapped. Check the kernel-half
-    // PML4 here — if any entry has drifted, the panic banner names
-    // the index BEFORE we deref a possibly-unmapped page, turning a
-    // triple fault into a structured diagnostic. No-op until the
-    // wire is armed in main.cpp post-ProtectKernelImage.
-    ::duetos::mm::KernelHalfWatchCheck("fat32-guard-enter");
     sched::Task* me = sched::CurrentTask();
     if (me != nullptr && g_fat32_mutex.owner == me)
     {
