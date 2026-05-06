@@ -5607,6 +5607,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::test::SmokeProfileSleepAndExit();
     SerialWrite("[boot] <<< SmokeProfileSleepAndExit (returned, profile=None path)\n");
 
+    // Reschedule-IPI handler must be installed BEFORE any AP can
+    // wake, since the moment an AP joins the scheduler a peer-CPU
+    // wake (e.g. WaitQueueWakeOne firing on the BSP and routing to
+    // the AP's runqueue) will pull the IPI trigger.
+    duetos::arch::SmpInstallReschedIpiHandler();
+
     // Bring up APs. SmpStartAps calls SchedSleepTicks(1) between
     // INIT and SIPI; the dedicated idle task installed at the top
     // of SchedInit guarantees the runqueue is non-empty, so the

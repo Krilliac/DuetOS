@@ -5,6 +5,7 @@
 #include "arch/x86_64/lapic.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/timer.h"
+#include "arch/x86_64/traps.h"
 
 #include "acpi/acpi.h"
 #include "debug/probes.h"
@@ -252,6 +253,44 @@ cpu::PerCpu* SmpGetPercpu(u32 cpu_id)
 u32 SmpCpuIdLimit()
 {
     return g_cpu_id_limit;
+}
+
+namespace
+{
+// Reschedule-IPI handler. Runs in the IRQ dispatcher context with
+// IF=0; sets the per-CPU need_resched flag and returns. The
+// dispatcher post-handler check (TakeNeedResched + Schedule) then
+// runs the scheduler before iretq, exactly mirroring the timer-IRQ
+// preemption path.
+void ReschedIpiHandler()
+{
+    sched::SetNeedResched();
+}
+} // namespace
+
+void SmpInstallReschedIpiHandler()
+{
+    IrqInstall(kReschedIpiVector, ReschedIpiHandler);
+}
+
+void SmpSendReschedIpi(u32 cpu_id)
+{
+    cpu::PerCpu* self = cpu::CurrentCpu();
+    if (self != nullptr && self->cpu_id == cpu_id)
+    {
+        return; // self-IPI is pointless — caller already SetNeedResched
+    }
+    cpu::PerCpu* target = SmpGetPercpu(cpu_id);
+    if (target == nullptr)
+    {
+        return;
+    }
+    // Fixed delivery, edge-triggered (level=assert), vector encoded
+    // in the low 8 bits. No destination-shorthand — we want exactly
+    // this CPU's LAPIC ID.
+    constexpr u32 kIcrDeliveryFixed = 0U << 8;
+    constexpr u32 icr_low_base = kIcrDeliveryFixed | kIcrLevelAssert;
+    SmpSendIpi(static_cast<u8>(target->lapic_id), icr_low_base | kReschedIpiVector);
 }
 
 // ---------------------------------------------------------------------------

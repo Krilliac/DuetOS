@@ -417,10 +417,19 @@ void RunqueuePushOn(cpu::PerCpu* target, Task* t)
 }
 
 // Convenience wrapper: route to the task's last_cpu (cache
-// affinity). Used by every wake-side enqueue.
+// affinity). Used by every wake-side enqueue. When the target CPU
+// is different from the current CPU, fire a reschedule-IPI so the
+// peer notices the wake within microseconds rather than waiting
+// up to one timer tick (10 ms) for its own preemption point.
 void RunqueuePush(Task* t)
 {
-    RunqueuePushOn(TargetPerCpuFor(t), t);
+    cpu::PerCpu* target = TargetPerCpuFor(t);
+    RunqueuePushOn(target, t);
+    cpu::PerCpu* self = cpu::CurrentCpu();
+    if (self != nullptr && target != self)
+    {
+        arch::SmpSendReschedIpi(target->cpu_id);
+    }
 }
 
 // Walk every Task on every CPU's runqueue (Normal then Idle band,
