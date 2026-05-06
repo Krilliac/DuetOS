@@ -612,6 +612,77 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 125 — NUMA-aware page allocator
+
+- **Scope:** `kernel/acpi/srat.{h,cpp}` (subtype-1 Memory Affinity
+  record decode + `MemoryRange` struct + `SratMemoryRangeCount`
+  / `SratMemoryRange` accessors; remap path shared with the
+  existing CPU-affinity walk so dense-node indices stay
+  consistent across both tables). `kernel/mm/frame_allocator.{h,cpp}`
+  (per-node frame ranges built from SRAT in
+  `FrameAllocatorBuildNumaRanges`; `BitmapFindFreeInRange` +
+  `NumaNodeRange` + `CurrentCpuNumaNode` helpers; new
+  `AllocateFrameNode(node)` API; `AllocateFrame` routes through
+  `AllocateFrameNode(CurrentCpuNumaNode())` on NUMA boots,
+  preserves the verbatim global linear-scan path on UMA;
+  shared `ProcessAndReturnFrame` tail covers the kernel-PT
+  guard + zeroing + per-node hint round-robin;
+  `FrameAllocatorNumaSelfTest` smoke test). `kernel/core/main.cpp`
+  (calls `FrameAllocatorBuildNumaRanges` immediately after
+  `AcpiInit` returns + the new self-test).
+- **Decision:** Keep the bitmap a single global structure. The
+  NUMA bias is a *search-start position*, not a separate per-
+  node allocator. The calling CPU's local node has first dibs
+  on its memory-affinity range; on local-node OOM the search
+  falls through to the global linear scan. UMA boots (no SRAT)
+  see the historical path byte-for-byte: `g_numa_node_count == 0`
+  short-circuits the NUMA path entirely.
+- **Why hint-only over per-node bitmaps:** per-node bitmaps
+  would force the firmware-reported memory ranges to be the
+  ground truth for every allocator-visible frame. They aren't —
+  some firmware reports overlapping ranges, some leaves MMIO
+  holes inside an "available" range, and our reservation pass
+  (kernel image, Multiboot info, bitmap-self) crosses node
+  boundaries on multi-socket systems. A unified bitmap lets
+  the existing reservation logic stay verbatim; the per-node
+  hint only changes WHERE the search starts.
+- **Multi-range nodes:** stored as the union span (min-base,
+  max-end) per node. Allocations near the node's "edge" can
+  pick frames that aren't strictly inside one of the affinity
+  ranges, but they're inside the union — close enough for
+  locality bias. Strict per-range scanning is a follow-on if
+  a workload exposes the inefficiency.
+- **Lifetime:** `FrameAllocatorBuildNumaRanges` runs once after
+  `AcpiInit` (which calls `SratInit` internally). Re-callable —
+  resets the per-node table at the head. Idempotent on the
+  same SRAT.
+- **Owner-pointer / cycle concern:** none. The frame allocator
+  reaches into `cpu::TopologyForCpu(CurrentCpuIdOrBsp())` per-
+  call to find the local node. `TopologyForCpu` is a plain
+  array read after `TopologyInitBsp` returns; safe from any
+  context. The cost is one extra indexed read per
+  `AllocateFrame`, well below the bitmap-scan cost on a
+  populated pool.
+- **OOM-injection harness:** `g_fail_after` consumed inside
+  `AllocateFrameNode` so existing tests (loader-unwind in
+  `diag/robustness_selftest.cpp`) drive the same OOM ladder
+  as before — the NUMA bias is invisible to the test scaffold.
+- **Rules out / defers:** Per-node free counters / explicit
+  "interleave" / "remote-only" allocation policies — they're
+  larger surface changes that need a workload calling for
+  them. Strict per-range scanning (vs union span) — same
+  reasoning. Migrating long-lived allocations across nodes —
+  v0 frames don't move once handed out.
+- **Revisit when:** a multi-socket workload demonstrates
+  remote-allocation cost in a profile, or the firmware
+  surfaces multi-range nodes whose union spans cross another
+  node's range. At that point per-range scanning + per-node
+  hint round-robin earn their complexity.
+- **Related tracks:** Track 1 (Kernel — memory management),
+  Track 2 (Kernel — SMP / NUMA topology).
+
+---
+
 ## 124 — HID descriptor-driven mouse decoding (high-DPI 16-bit XY)
 
 - **Scope:** `kernel/drivers/usb/hid_descriptor.{h,cpp}` (new

@@ -36,8 +36,28 @@ inline constexpr PhysAddr kNullFrame = 0; // The zero frame is always reserved.
 /// (kernel image, bitmap itself, Multiboot2 info page, everything below 1 MiB).
 void FrameAllocatorInit(uptr multiboot_info_phys);
 
+/// Build the per-NUMA-node frame ranges from `acpi::srat`'s memory-
+/// affinity records (subtype 1). Must run after `acpi::srat::SratInit`
+/// has parsed the SRAT. Idempotent — re-callable when the SRAT
+/// re-reads. On UMA boots (no SRAT records) leaves the per-node
+/// table empty and `AllocateFrame` keeps the historical global
+/// linear-scan path. Logs one summary line per node to klog.
+void FrameAllocatorBuildNumaRanges();
+
 /// Allocate one 4 KiB frame. Returns kNullFrame on out-of-memory.
+/// On a NUMA-aware boot (SRAT memory-affinity records present),
+/// biases the search toward the calling CPU's local node before
+/// falling back to the global pool. UMA boots get the historical
+/// global linear-scan path verbatim.
 PhysAddr AllocateFrame();
+
+/// Allocate a 4 KiB frame from a specific NUMA node, falling back
+/// to the global pool when the node is exhausted or unknown.
+/// `node` is a dense node index in the same namespace as
+/// `acpi::srat::SratNodeForApic`. Mostly an internal seam exposed
+/// for the boot self-test; production callers go through
+/// `AllocateFrame()` and let the per-CPU NUMA hint drive locality.
+PhysAddr AllocateFrameNode(u8 node);
 
 /// Allocate a 4 KiB frame whose physical address is strictly less
 /// than `max_phys`. Used by per-zone allocation paths to honour
@@ -106,6 +126,14 @@ u64 FreeFramesCount();
 /// boot only — prints to COM1 and halts with a [panic] message if anything
 /// looks wrong.
 void FrameAllocatorSelfTest();
+
+/// NUMA-aware allocator smoke test. On UMA boots (no SRAT memory
+/// records) verifies AllocateFrameNode falls back to the global
+/// path; on NUMA boots verifies a frame allocated via
+/// AllocateFrameNode(<local-node>) lands inside that node's
+/// recorded range. Cheap and runs once after
+/// FrameAllocatorBuildNumaRanges. Panics on regression.
+void FrameAllocatorNumaSelfTest();
 
 /// Test-only OOM injection. After `n_remaining` successful AllocateFrame /
 /// AllocateContiguousFrames calls, the next call returns `kNullFrame` as if

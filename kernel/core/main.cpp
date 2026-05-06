@@ -2286,6 +2286,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWrite("[boot] Parsing ACPI tables.\n");
     duetos::acpi::AcpiInit(multiboot_info);
     DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiUnderflowSelfTest());
+
+    // SRAT memory-affinity records are now parsed (AcpiInit ->
+    // SratInit). Hand them to the frame allocator so subsequent
+    // AllocateFrame calls bias toward the calling CPU's local
+    // node. UMA boots (no SRAT) leave the per-node table empty
+    // and the global linear-scan path stays the only path.
+    duetos::mm::FrameAllocatorBuildNumaRanges();
+    DUETOS_BOOT_SELFTEST(duetos::mm::FrameAllocatorNumaSelfTest());
     SerialWrite("[boot] Building AML namespace from DSDT/SSDT.\n");
     duetos::acpi::AmlNamespaceBuild();
     {

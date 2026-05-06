@@ -50,15 +50,15 @@ the same commit** that delivers the code.
 ### Topology-driven follow-ons (post-clustering v0)
 
 - **Status:** v0 clustering landed — `cpu::Topology` + SRAT parser
-  + cluster-aware two-pass `StealNormalFromPeer`. See
-  [CPU Topology](../kernel/CPU-Topology.md).
-- **Remaining scope:** the topology + cluster machinery is in tree
-  but the only consumer is the steal path. Three natural follow-on
-  slices reuse the same data:
-  - **NUMA-aware page allocator** — frame allocator queries SRAT
-    memory-affinity records (subtype 1, currently ignored) and
-    prefers the requesting CPU's `numa_node`. Today every frame
-    comes from one global pool.
+  + cluster-aware two-pass `StealNormalFromPeer`. NUMA-aware
+  frame allocator landed in this slice (`acpi::srat` now records
+  Memory-Affinity records; `FrameAllocatorBuildNumaRanges`
+  consumes them; `AllocateFrame` biases toward the calling CPU's
+  local node before falling back to the global pool). UMA boots
+  (no SRAT) keep the historical global linear-scan path
+  byte-for-byte. See [CPU Topology](../kernel/CPU-Topology.md).
+- **Remaining scope:** the topology + cluster machinery has two
+  more profile-driven follow-ons:
   - **Cluster-broadcast IPIs** — extend `arch::SmpSendIpi` with
     cluster-scoped destination bits when x2APIC cluster mode is
     in use; lets a wake or shootdown fan out within a cluster
@@ -67,9 +67,8 @@ the same commit** that delivers the code.
     (and on `WaitQueueWakeOne`), route to the parent's cluster's
     least-loaded CPU rather than just `last_cpu`. Adds a per-
     cluster load counter.
-- **Blocks on:** none technically. NUMA allocator is the highest-
-  ROI on multi-socket workstations; the other two are profile-
-  driven.
+- **Blocks on:** profile evidence — both items are workload-
+  triggered, not pre-emptive.
 
 ### Slab allocator + freed-object poison + real KASAN
 

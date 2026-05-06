@@ -39,6 +39,7 @@ constexpr u64 kSratBodyOffset = sizeof(SdtPrefix) + sizeof(SratBody);
 
 // Affinity record subtypes we care about.
 constexpr u8 kSubtypeLapicAffinity = 0;
+constexpr u8 kSubtypeMemoryAffinity = 1;
 constexpr u8 kSubtypeX2ApicAffinity = 2;
 
 // Subtype-0 record — Processor Local APIC/SAPIC Affinity, 16 bytes.
@@ -54,6 +55,21 @@ struct [[gnu::packed]] LapicAffinity
     u32 clock_domain;
 };
 static_assert(sizeof(LapicAffinity) == 16, "LapicAffinity record must be 16 bytes");
+
+// Subtype-1 record — Memory Affinity, 40 bytes.
+struct [[gnu::packed]] MemoryAffinity
+{
+    u8 type;   // == 1
+    u8 length; // == 40
+    u32 proximity_domain;
+    u16 reserved;
+    u64 base_addr;
+    u64 length_bytes;
+    u32 reserved2;
+    u32 flags; // bit 0 = enabled, bit 1 = hot-pluggable, bit 2 = non-volatile
+    u64 reserved3;
+};
+static_assert(sizeof(MemoryAffinity) == 40, "MemoryAffinity record must be 40 bytes");
 
 // Subtype-2 record — Processor Local x2APIC Affinity, 24 bytes.
 struct [[gnu::packed]] X2ApicAffinity
@@ -81,6 +97,12 @@ constinit u8 g_apic_to_node[kMaxApicId] = {};
 constinit u32 g_domain_remap[kMaxNumaNodes] = {};
 constinit u8 g_node_count = 0;
 
+// Memory-affinity records. Filled by WalkRecords for each enabled
+// subtype-1 entry. Indexed by `node` in dense form (same namespace
+// as g_apic_to_node).
+constinit MemoryRange g_memory_ranges[kMaxMemoryRanges] = {};
+constinit u8 g_memory_range_count = 0;
+
 constinit bool g_present = false;
 constinit bool g_inited = false;
 
@@ -96,7 +118,12 @@ void ResetState()
     {
         g_domain_remap[i] = 0xFFFFFFFFu;
     }
+    for (u8 i = 0; i < kMaxMemoryRanges; ++i)
+    {
+        g_memory_ranges[i] = MemoryRange{};
+    }
     g_node_count = 0;
+    g_memory_range_count = 0;
     g_present = false;
 }
 
@@ -194,8 +221,25 @@ void WalkRecords(const u8* base, u32 total_length)
                 RegisterApic(rec->x2apic_id, rec->proximity_domain);
             }
         }
-        // Other subtypes (memory, GICC, ITS, generic initiator)
-        // intentionally ignored in v0.
+        else if (type == kSubtypeMemoryAffinity && len == sizeof(MemoryAffinity))
+        {
+            const auto* rec = reinterpret_cast<const MemoryAffinity*>(cursor);
+            if ((rec->flags & kAffinityFlagEnabled) != 0 && rec->length_bytes != 0 &&
+                g_memory_range_count < kMaxMemoryRanges)
+            {
+                const u8 node = RemapDomain(rec->proximity_domain);
+                if (node != kNoNode)
+                {
+                    auto& slot = g_memory_ranges[g_memory_range_count];
+                    slot.base = rec->base_addr;
+                    slot.length = rec->length_bytes;
+                    slot.node = node;
+                    slot.enabled = true;
+                    ++g_memory_range_count;
+                }
+            }
+        }
+        // GICC / ITS / generic-initiator subtypes intentionally ignored.
         cursor += len;
     }
 }
@@ -264,6 +308,21 @@ bool SratNodeForApic(u32 apic_id, u8* out_node)
 u8 SratNodeCount()
 {
     return g_node_count;
+}
+
+u8 SratMemoryRangeCount()
+{
+    return g_memory_range_count;
+}
+
+bool SratMemoryRange(u8 idx, MemoryRange* out)
+{
+    if (idx >= g_memory_range_count || out == nullptr)
+    {
+        return false;
+    }
+    *out = g_memory_ranges[idx];
+    return true;
 }
 
 } // namespace duetos::acpi::srat
