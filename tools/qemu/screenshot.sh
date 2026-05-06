@@ -112,7 +112,7 @@ fi
 # Poll the serial log for a marker that means "desktop is composed
 # and the scheduler is running". kheartbeat fires periodically; once
 # we see one line, the compositor has painted at least once.
-for _ in $(seq 1 60); do
+for _ in $(seq 1 "${DUETOS_BOOT_WAIT_SECS:-60}"); do
     if [[ -f "${SERIAL_LOG}" ]] && grep -q "kheartbeat" "${SERIAL_LOG}"; then
         break
     fi
