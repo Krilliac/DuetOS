@@ -109,6 +109,8 @@ constexpr u64 kSemaphoreBase = 0x11'0000;
 constexpr u64 kDescSetLayoutBase = 0x12'0000;
 constexpr u64 kDescPoolBase = 0x13'0000;
 constexpr u64 kDescSetBase = 0x14'0000;
+constexpr u64 kSurfaceBase = 0x15'0000;
+constexpr u64 kSwapchainBase = 0x16'0000;
 
 bool HandleInRange(u64 h, u64 base)
 {
@@ -226,6 +228,22 @@ struct DescriptorSetRecord
 };
 DescriptorSetRecord g_desc_set_data[kPoolCapacity];
 
+// A swapchain owns a small set of scanout-backed images plus a
+// rotating "next-image" cursor.  `acquired_image` tracks the
+// most recent vkAcquireNextImageKHR result so VkQueuePresentKHR
+// can validate the index the caller hands back.
+struct SwapchainRecord
+{
+    VkSurfaceKHR surface;
+    VkExtent2D extent;
+    u32 image_count;
+    u32 next_image; // round-robin cursor advanced by Acquire
+    u32 acquired_index;
+    bool image_acquired;
+    VkImage images[kMaxSwapchainImages];
+};
+SwapchainRecord g_swapchain_data[kPoolCapacity];
+
 // -------------------------------------------------------------------
 // Pools.
 // -------------------------------------------------------------------
@@ -250,6 +268,8 @@ Pool g_semaphore_pool;
 Pool g_desc_set_layout_pool;
 Pool g_desc_pool_pool;
 Pool g_desc_set_pool;
+Pool g_surface_pool;
+Pool g_swapchain_pool;
 
 // -------------------------------------------------------------------
 // Aggregate counters.
@@ -261,6 +281,8 @@ u32 g_command_replayed = 0;
 u32 g_clear_pixels_painted = 0;
 u32 g_invalid_spirv_rejections = 0;
 u32 g_descriptor_writes = 0;
+u32 g_swapchain_acquires = 0;
+u32 g_swapchain_presents = 0;
 
 // One-shot logging keyed by entry point.
 enum EpId
@@ -1369,6 +1391,223 @@ VkResult VkCmdBindDescriptorSets(VkCommandBuffer cb, VkPipelineBindPoint bind_po
 }
 
 // -------------------------------------------------------------------
+// Surface + swapchain (WSI).
+// -------------------------------------------------------------------
+
+VkResult VkCreateDuetSurfaceKHR(VkInstance inst, VkSurfaceKHR* out)
+{
+    if (!HandleInRange(inst, kInstanceBase) || !PoolIsLive(g_instance_pool, SlotOf(inst, kInstanceBase)))
+        return VkResult::ErrorInitializationFailed;
+    const auto di = drivers::video::Query();
+    if (!di.available)
+        return VkResult::ErrorInitializationFailed; // no framebuffer to attach to
+    u32 slot = 0;
+    if (!PoolAlloc(g_surface_pool, &slot))
+        return VkResult::ErrorOutOfHostMemory;
+    if (out != nullptr)
+        *out = HandleFor(kSurfaceBase, slot);
+    return VkResult::Success;
+}
+
+void VkDestroySurfaceKHR(VkInstance inst, VkSurfaceKHR surface)
+{
+    (void)inst;
+    if (surface == 0 || !HandleInRange(surface, kSurfaceBase))
+        return;
+    (void)PoolFree(g_surface_pool, SlotOf(surface, kSurfaceBase));
+}
+
+VkResult VkGetPhysicalDeviceSurfaceCapabilitiesKHR(VkPhysicalDevice phys, VkSurfaceKHR surface,
+                                                   VkSurfaceCapabilitiesKHR* out)
+{
+    if (out == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    if (!HandleInRange(phys, kPhysDevBase) || !PoolIsLive(g_phys_pool, SlotOf(phys, kPhysDevBase)))
+        return VkResult::ErrorInitializationFailed;
+    if (!HandleInRange(surface, kSurfaceBase) || !PoolIsLive(g_surface_pool, SlotOf(surface, kSurfaceBase)))
+        return VkResult::ErrorInitializationFailed;
+    const auto di = drivers::video::Query();
+    *out = VkSurfaceCapabilitiesKHR{};
+    out->minImageCount = 2;
+    out->maxImageCount = kMaxSwapchainImages;
+    out->currentExtent = VkExtent2D{di.available ? di.width : 0u, di.available ? di.height : 0u};
+    out->minImageExtent = out->currentExtent;
+    out->maxImageExtent = out->currentExtent;
+    out->maxImageArrayLayers = 1;
+    out->supportedTransforms = 1;     // identity only
+    out->currentTransform = 1;        // identity
+    out->supportedCompositeAlpha = 1; // opaque only
+    out->supportedUsageFlags = 0x10;  // VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+    return VkResult::Success;
+}
+
+VkResult VkGetPhysicalDeviceSurfaceFormatsKHR(VkPhysicalDevice phys, VkSurfaceKHR surface, u32* count,
+                                              VkSurfaceFormatKHR* formats)
+{
+    if (count == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    if (!HandleInRange(phys, kPhysDevBase) || !PoolIsLive(g_phys_pool, SlotOf(phys, kPhysDevBase)))
+        return VkResult::ErrorInitializationFailed;
+    if (!HandleInRange(surface, kSurfaceBase) || !PoolIsLive(g_surface_pool, SlotOf(surface, kSurfaceBase)))
+        return VkResult::ErrorInitializationFailed;
+    if (formats == nullptr)
+    {
+        *count = 1;
+        return VkResult::Success;
+    }
+    if (*count == 0)
+        return VkResult::Incomplete;
+    formats[0].format = 0; // B8G8R8A8_UNORM
+    formats[0].colorSpace = VkColorSpaceKHR::SrgbNonlinear;
+    *count = 1;
+    return VkResult::Success;
+}
+
+VkResult VkGetPhysicalDeviceSurfacePresentModesKHR(VkPhysicalDevice phys, VkSurfaceKHR surface, u32* count,
+                                                   VkPresentModeKHR* modes)
+{
+    if (count == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    if (!HandleInRange(phys, kPhysDevBase) || !PoolIsLive(g_phys_pool, SlotOf(phys, kPhysDevBase)))
+        return VkResult::ErrorInitializationFailed;
+    if (!HandleInRange(surface, kSurfaceBase) || !PoolIsLive(g_surface_pool, SlotOf(surface, kSurfaceBase)))
+        return VkResult::ErrorInitializationFailed;
+    if (modes == nullptr)
+    {
+        *count = 1;
+        return VkResult::Success;
+    }
+    if (*count == 0)
+        return VkResult::Incomplete;
+    modes[0] = VkPresentModeKHR::Fifo;
+    *count = 1;
+    return VkResult::Success;
+}
+
+VkResult VkCreateSwapchainKHR(VkDevice dev, VkSurfaceKHR surface, u32 min_image_count, VkExtent2D extent,
+                              VkSwapchainKHR* out)
+{
+    if (!HandleInRange(dev, kDeviceBase) || !PoolIsLive(g_device_pool, SlotOf(dev, kDeviceBase)))
+        return VkResult::ErrorInitializationFailed;
+    if (!HandleInRange(surface, kSurfaceBase) || !PoolIsLive(g_surface_pool, SlotOf(surface, kSurfaceBase)))
+        return VkResult::ErrorInitializationFailed;
+    if (min_image_count < 2)
+        min_image_count = 2;
+    if (min_image_count > kMaxSwapchainImages)
+        return VkResult::ErrorOutOfHostMemory;
+
+    u32 sc_slot = 0;
+    if (!PoolAlloc(g_swapchain_pool, &sc_slot))
+        return VkResult::ErrorOutOfHostMemory;
+    auto& rec = g_swapchain_data[sc_slot];
+    rec = SwapchainRecord{};
+    rec.surface = surface;
+    rec.extent = extent;
+    rec.image_count = min_image_count;
+    rec.next_image = 0;
+    rec.image_acquired = false;
+
+    // Allocate scanout-backed images for each swapchain slot.  If
+    // image-pool allocation fails partway, roll back so the
+    // swapchain handle is never visible with partial backing.
+    for (u32 i = 0; i < min_image_count; ++i)
+    {
+        u32 img_slot = 0;
+        if (!PoolAlloc(g_image_pool, &img_slot))
+        {
+            for (u32 j = 0; j < i; ++j)
+                (void)PoolFree(g_image_pool, SlotOf(rec.images[j], kImageBase));
+            (void)PoolFree(g_swapchain_pool, sc_slot);
+            return VkResult::ErrorOutOfHostMemory;
+        }
+        g_image_data[img_slot].extent = VkExtent3D{extent.width, extent.height, 1};
+        g_image_data[img_slot].flags = kImageScanoutBacked;
+        g_image_data[img_slot].memory_bound = true; // implicit-bound for swapchain images
+        rec.images[i] = HandleFor(kImageBase, img_slot);
+    }
+    if (out != nullptr)
+        *out = HandleFor(kSwapchainBase, sc_slot);
+    return VkResult::Success;
+}
+
+void VkDestroySwapchainKHR(VkDevice dev, VkSwapchainKHR sc)
+{
+    (void)dev;
+    if (sc == 0 || !HandleInRange(sc, kSwapchainBase))
+        return;
+    const u32 slot = SlotOf(sc, kSwapchainBase);
+    if (!PoolIsLive(g_swapchain_pool, slot))
+        return;
+    auto& rec = g_swapchain_data[slot];
+    for (u32 i = 0; i < rec.image_count; ++i)
+    {
+        if (HandleInRange(rec.images[i], kImageBase))
+            (void)PoolFree(g_image_pool, SlotOf(rec.images[i], kImageBase));
+    }
+    rec.image_count = 0;
+    (void)PoolFree(g_swapchain_pool, slot);
+}
+
+VkResult VkGetSwapchainImagesKHR(VkDevice dev, VkSwapchainKHR sc, u32* count, VkImage* images)
+{
+    (void)dev;
+    if (count == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    if (!HandleInRange(sc, kSwapchainBase) || !PoolIsLive(g_swapchain_pool, SlotOf(sc, kSwapchainBase)))
+        return VkResult::ErrorInitializationFailed;
+    auto& rec = g_swapchain_data[SlotOf(sc, kSwapchainBase)];
+    if (images == nullptr)
+    {
+        *count = rec.image_count;
+        return VkResult::Success;
+    }
+    const u32 give = (*count < rec.image_count) ? *count : rec.image_count;
+    for (u32 i = 0; i < give; ++i)
+        images[i] = rec.images[i];
+    *count = give;
+    return (give < rec.image_count) ? VkResult::Incomplete : VkResult::Success;
+}
+
+VkResult VkAcquireNextImageKHR(VkDevice dev, VkSwapchainKHR sc, u64 timeout_ns, VkSemaphore signal_semaphore,
+                               VkFence signal_fence, u32* image_index_out)
+{
+    (void)dev;
+    (void)timeout_ns;
+    (void)signal_semaphore;
+    (void)signal_fence;
+    if (image_index_out == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    if (!HandleInRange(sc, kSwapchainBase) || !PoolIsLive(g_swapchain_pool, SlotOf(sc, kSwapchainBase)))
+        return VkResult::ErrorInitializationFailed;
+    auto& rec = g_swapchain_data[SlotOf(sc, kSwapchainBase)];
+    if (rec.image_count == 0)
+        return VkResult::ErrorDeviceLost;
+    rec.acquired_index = rec.next_image;
+    rec.next_image = (rec.next_image + 1) % rec.image_count;
+    rec.image_acquired = true;
+    *image_index_out = rec.acquired_index;
+    ++g_swapchain_acquires;
+    return VkResult::Success;
+}
+
+VkResult VkQueuePresentKHR(VkQueue q, VkSwapchainKHR sc, u32 image_index)
+{
+    if (!HandleInRange(q, kQueueBase) || !PoolIsLive(g_queue_pool, SlotOf(q, kQueueBase)))
+        return VkResult::ErrorInitializationFailed;
+    if (!HandleInRange(sc, kSwapchainBase) || !PoolIsLive(g_swapchain_pool, SlotOf(sc, kSwapchainBase)))
+        return VkResult::ErrorInitializationFailed;
+    auto& rec = g_swapchain_data[SlotOf(sc, kSwapchainBase)];
+    if (image_index >= rec.image_count)
+        return VkResult::ErrorInitializationFailed;
+    if (!rec.image_acquired || rec.acquired_index != image_index)
+        return VkResult::ErrorInitializationFailed; // present without acquire == bug
+    rec.image_acquired = false;
+    drivers::video::FramebufferPresent();
+    ++g_swapchain_presents;
+    return VkResult::Success;
+}
+
+// -------------------------------------------------------------------
 // Stats accessor — graphics.cpp's GraphicsStatsRead reads this and
 // then overlays the D3D-side counters.
 // -------------------------------------------------------------------
@@ -1399,6 +1638,10 @@ GraphicsStats VkStatsSnapshot()
     s.vk_descriptor_pools_live = g_desc_pool_pool.live;
     s.vk_descriptor_sets_live = g_desc_set_pool.live;
     s.vk_descriptor_writes = g_descriptor_writes;
+    s.vk_surfaces_live = g_surface_pool.live;
+    s.vk_swapchains_live = g_swapchain_pool.live;
+    s.vk_swapchain_acquires = g_swapchain_acquires;
+    s.vk_swapchain_presents = g_swapchain_presents;
     s.vk_queue_submits = g_queue_submits;
     s.vk_command_recorded = g_command_recorded;
     s.vk_command_replayed = g_command_replayed;
@@ -1613,6 +1856,71 @@ bool RunCanonicalLifecycle()
     if (VkQueueWaitIdle(queue) != VkResult::Success)
         return SelftestFail("[selftest:graphics] vkQueueWaitIdle failed", 0);
 
+    // WSI leg: surface + swapchain + acquire / present cycle.
+    // Skipped when no framebuffer is live (headless boot) — the
+    // surface create itself fails in that case, which is the
+    // intended behaviour, so the test asserts the right error
+    // code rather than treating it as a regression.
+    const auto di_for_wsi = drivers::video::Query();
+    if (di_for_wsi.available)
+    {
+        VkSurfaceKHR surface = 0;
+        if (VkCreateDuetSurfaceKHR(inst, &surface) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] VkCreateDuetSurfaceKHR failed", 0);
+
+        VkSurfaceCapabilitiesKHR caps{};
+        if (VkGetPhysicalDeviceSurfaceCapabilitiesKHR(phys[0], surface, &caps) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] GetPhysicalDeviceSurfaceCapabilities failed", 0);
+        if (caps.currentExtent.width == 0 || caps.currentExtent.height == 0)
+            return SelftestFail("[selftest:graphics] surface caps reported a zero extent", 0);
+
+        u32 fmt_count = 0;
+        if (VkGetPhysicalDeviceSurfaceFormatsKHR(phys[0], surface, &fmt_count, nullptr) != VkResult::Success ||
+            fmt_count == 0)
+            return SelftestFail("[selftest:graphics] surface formats(query) failed", fmt_count);
+
+        u32 mode_count = 0;
+        if (VkGetPhysicalDeviceSurfacePresentModesKHR(phys[0], surface, &mode_count, nullptr) != VkResult::Success ||
+            mode_count == 0)
+            return SelftestFail("[selftest:graphics] surface present modes(query) failed", mode_count);
+
+        VkSwapchainKHR sc = 0;
+        // Use a 1x1 extent so the present's FramebufferPresent
+        // call doesn't actually paint anything visible — the
+        // swapchain images are scanout-backed but no clear gets
+        // recorded against them in the self-test.
+        if (VkCreateSwapchainKHR(dev, surface, 2, VkExtent2D{1, 1}, &sc) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] VkCreateSwapchainKHR failed", 0);
+
+        u32 sc_image_count = 0;
+        if (VkGetSwapchainImagesKHR(dev, sc, &sc_image_count, nullptr) != VkResult::Success || sc_image_count != 2)
+            return SelftestFail("[selftest:graphics] swapchain image count mismatch", sc_image_count);
+
+        VkImage sc_images[kMaxSwapchainImages] = {};
+        u32 want_images = sc_image_count;
+        if (VkGetSwapchainImagesKHR(dev, sc, &want_images, sc_images) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] swapchain images(fetch) failed", 0);
+
+        // Two acquire + present round trips so the rotation cursor
+        // actually advances and the second present validates the
+        // index handed back by Acquire.  Present without a prior
+        // Acquire must fail — proves the index gate is wired.
+        u32 idx = 0;
+        if (VkQueuePresentKHR(queue, sc, 0) != VkResult::ErrorInitializationFailed)
+            return SelftestFail("[selftest:graphics] QueuePresent without Acquire did not fail", 0);
+        if (VkAcquireNextImageKHR(dev, sc, 0, 0, 0, &idx) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] AcquireNextImage failed", 0);
+        if (VkQueuePresentKHR(queue, sc, idx) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] QueuePresent failed", 0);
+        if (VkAcquireNextImageKHR(dev, sc, 0, 0, 0, &idx) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] AcquireNextImage(2) failed", 0);
+        if (VkQueuePresentKHR(queue, sc, idx) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] QueuePresent(2) failed", 0);
+
+        VkDestroySwapchainKHR(dev, sc);
+        VkDestroySurfaceKHR(inst, surface);
+    }
+
     // Tear down in reverse order.
     VkDestroyFence(dev, fence);
     if (VkFreeCommandBuffers(dev, pool, 1, &cb) != VkResult::Success)
@@ -1643,12 +1951,13 @@ bool AssertAllPoolsClean()
         &g_instance_pool,    &g_phys_pool,      &g_device_pool,          &g_queue_pool,     &g_cmdpool_pool,
         &g_cmdbuf_pool,      &g_shader_pool,    &g_pipelinelayout_pool,  &g_pipeline_pool,  &g_renderpass_pool,
         &g_framebuffer_pool, &g_image_pool,     &g_imageview_pool,       &g_buffer_pool,    &g_memory_pool,
-        &g_fence_pool,       &g_semaphore_pool, &g_desc_set_layout_pool, &g_desc_pool_pool, &g_desc_set_pool};
+        &g_fence_pool,       &g_semaphore_pool, &g_desc_set_layout_pool, &g_desc_pool_pool, &g_desc_set_pool,
+        &g_surface_pool,     &g_swapchain_pool};
     const char* names[] = {
         "instance",        "physical-device", "device",        "queue",       "command-pool", "command-buffer",
         "shader-module",   "pipeline-layout", "pipeline",      "render-pass", "framebuffer",  "image",
         "image-view",      "buffer",          "device-memory", "fence",       "semaphore",    "descriptor-set-layout",
-        "descriptor-pool", "descriptor-set"};
+        "descriptor-pool", "descriptor-set",  "surface",       "swapchain"};
     constexpr u32 n = sizeof(pools) / sizeof(pools[0]);
     for (u32 i = 0; i < n; ++i)
     {

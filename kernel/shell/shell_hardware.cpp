@@ -1136,6 +1136,15 @@ void CmdGfx(u32 argc, char** argv)
     ConsoleWrite(" dwrites=");
     WriteU64Dec(s.vk_descriptor_writes);
     ConsoleWriteChar('\n');
+    ConsoleWrite("                         surfaces=");
+    WriteU64Dec(s.vk_surfaces_live);
+    ConsoleWrite(" swapchains=");
+    WriteU64Dec(s.vk_swapchains_live);
+    ConsoleWrite(" acquires=");
+    WriteU64Dec(s.vk_swapchain_acquires);
+    ConsoleWrite(" presents=");
+    WriteU64Dec(s.vk_swapchain_presents);
+    ConsoleWriteChar('\n');
     ConsoleWrite("  Vulkan submit traffic: submits=");
     WriteU64Dec(s.vk_queue_submits);
     ConsoleWrite(" recorded=");

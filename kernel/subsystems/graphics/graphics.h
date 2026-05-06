@@ -113,6 +113,8 @@ using VkSemaphore = u64;
 using VkDescriptorSetLayout = u64;
 using VkDescriptorPool = u64;
 using VkDescriptorSet = u64;
+using VkSurfaceKHR = u64;
+using VkSwapchainKHR = u64;
 
 // Return codes (subset).
 enum class VkResult : i32
@@ -462,6 +464,80 @@ VkResult VkCmdBindDescriptorSets(VkCommandBuffer cb, VkPipelineBindPoint bind_po
                                  u32 first_set, u32 set_count, const VkDescriptorSet* sets);
 
 // -------------------------------------------------------------------
+// Surface + swapchain (WSI subset).
+// -------------------------------------------------------------------
+//
+// Real Vulkan WSI is a per-platform extension surface (KHR_surface
+// + KHR_win32_surface / KHR_xcb_surface / etc.) that hands the
+// presentation engine a window-system handle.  On DuetOS the
+// "window system" is the kernel framebuffer, so a single
+// `VkCreateDuetSurfaceKHR` covers the bring-up — no per-platform
+// branching.  The swapchain rotates through N scanout-backed
+// images; `vkQueuePresentKHR` calls `FramebufferPresent` so the
+// damage rect from the last clear is flushed to the live display.
+//
+// Out of scope:
+//   - VK_KHR_swapchain_maintenance1 (resize / dynamic format).
+//   - VK_PRESENT_MODE_MAILBOX_KHR (we expose Fifo only).
+//   - Multi-monitor presentation (one display per ICD instance).
+
+inline constexpr u32 kMaxSwapchainImages = 4;
+
+enum class VkPresentModeKHR : u32
+{
+    Immediate = 0,
+    Mailbox = 1,
+    Fifo = 2, // the only mode this ICD advertises
+    FifoRelaxed = 3,
+};
+
+enum class VkColorSpaceKHR : u32
+{
+    SrgbNonlinear = 0, // VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
+};
+
+struct VkSurfaceFormatKHR
+{
+    u32 format; // 0 = VK_FORMAT_B8G8R8A8_UNORM (only one we expose)
+    VkColorSpaceKHR colorSpace;
+};
+
+struct VkSurfaceCapabilitiesKHR
+{
+    u32 minImageCount;
+    u32 maxImageCount;
+    VkExtent2D currentExtent;
+    VkExtent2D minImageExtent;
+    VkExtent2D maxImageExtent;
+    u32 maxImageArrayLayers;
+    u32 supportedTransforms;
+    u32 currentTransform;
+    u32 supportedCompositeAlpha;
+    u32 supportedUsageFlags;
+};
+
+VkResult VkCreateDuetSurfaceKHR(VkInstance inst, VkSurfaceKHR* out);
+void VkDestroySurfaceKHR(VkInstance inst, VkSurfaceKHR surface);
+
+VkResult VkGetPhysicalDeviceSurfaceCapabilitiesKHR(VkPhysicalDevice phys, VkSurfaceKHR surface,
+                                                   VkSurfaceCapabilitiesKHR* out);
+VkResult VkGetPhysicalDeviceSurfaceFormatsKHR(VkPhysicalDevice phys, VkSurfaceKHR surface, u32* count,
+                                              VkSurfaceFormatKHR* formats);
+VkResult VkGetPhysicalDeviceSurfacePresentModesKHR(VkPhysicalDevice phys, VkSurfaceKHR surface, u32* count,
+                                                   VkPresentModeKHR* modes);
+
+VkResult VkCreateSwapchainKHR(VkDevice dev, VkSurfaceKHR surface, u32 min_image_count, VkExtent2D extent,
+                              VkSwapchainKHR* out);
+void VkDestroySwapchainKHR(VkDevice dev, VkSwapchainKHR sc);
+
+VkResult VkGetSwapchainImagesKHR(VkDevice dev, VkSwapchainKHR sc, u32* count, VkImage* images);
+
+VkResult VkAcquireNextImageKHR(VkDevice dev, VkSwapchainKHR sc, u64 timeout_ns, VkSemaphore signal_semaphore,
+                               VkFence signal_fence, u32* image_index_out);
+
+VkResult VkQueuePresentKHR(VkQueue q, VkSwapchainKHR sc, u32 image_index);
+
+// -------------------------------------------------------------------
 // D3D11 / D3D12 -> Vulkan translation (still skeleton)
 // -------------------------------------------------------------------
 //
@@ -512,7 +588,11 @@ struct GraphicsStats
     u32 vk_descriptor_set_layouts_live;
     u32 vk_descriptor_pools_live;
     u32 vk_descriptor_sets_live;
-    u32 vk_descriptor_writes;        // total VkUpdateDescriptorSet calls
+    u32 vk_descriptor_writes; // total VkUpdateDescriptorSet calls
+    u32 vk_surfaces_live;
+    u32 vk_swapchains_live;
+    u32 vk_swapchain_acquires;       // total vkAcquireNextImageKHR calls
+    u32 vk_swapchain_presents;       // total vkQueuePresentKHR calls
     u32 vk_queue_submits;            // total VkQueueSubmit calls
     u32 vk_command_recorded;         // total vkCmd* opcodes recorded
     u32 vk_command_replayed;         // total vkCmd* opcodes replayed in submit
