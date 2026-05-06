@@ -105,6 +105,12 @@ constinit u8 g_memory_range_count = 0;
 
 constinit bool g_present = false;
 constinit bool g_inited = false;
+// Distinct from `!g_present`: set when SratInit was called with
+// a non-null table that failed validation (wrong signature,
+// length-too-small, or checksum mismatch). Lets callers tell
+// "machine has no SRAT" (silent UMA) from "machine has a
+// corrupt SRAT" (firmware problem worth surfacing).
+constinit bool g_corrupt = false;
 
 // Reset all state. Called at the head of SratInit so re-running
 // the parser (defensive idempotency) starts from a known floor.
@@ -125,6 +131,7 @@ void ResetState()
     g_node_count = 0;
     g_memory_range_count = 0;
     g_present = false;
+    g_corrupt = false;
 }
 
 // Map a raw proximity-domain value to a dense 0..N-1 index. Adds
@@ -261,21 +268,27 @@ void SratInit(const void* srat_table)
     {
         KLOG_WARN("acpi/srat", "table at SRAT slot has wrong signature");
         KBP_PROBE_V(::duetos::debug::ProbeId::kTopologyParseFailed, 0);
+        g_corrupt = true;
         return;
     }
     if (hdr->length < kSratBodyOffset)
     {
         KLOG_WARN_V("acpi/srat", "SRAT length below minimum body offset", hdr->length);
         KBP_PROBE_V(::duetos::debug::ProbeId::kTopologyParseFailed, hdr->length);
+        g_corrupt = true;
         return;
     }
     if (!ChecksumOk(static_cast<const u8*>(srat_table), hdr->length))
     {
         // SRAT is optional and a bad checksum is firmware-level
-        // corruption. Treat as absent rather than panicking — the
-        // package-fallback path keeps the system running.
+        // corruption. Treat as absent for the topology code (so
+        // the package-fallback path keeps the system running) but
+        // record the corruption flag so SratCorrupt() callers can
+        // tell "no SRAT" (UMA) from "broken SRAT" (firmware
+        // problem worth surfacing).
         KLOG_WARN("acpi/srat", "SRAT checksum failed, treating as absent");
         KBP_PROBE_V(::duetos::debug::ProbeId::kTopologyParseFailed, 0);
+        g_corrupt = true;
         return;
     }
     WalkRecords(static_cast<const u8*>(srat_table), hdr->length);
@@ -285,6 +298,11 @@ void SratInit(const void* srat_table)
 bool SratPresent()
 {
     return g_present;
+}
+
+bool SratCorrupt()
+{
+    return g_corrupt;
 }
 
 bool SratNodeForApic(u32 apic_id, u8* out_node)

@@ -246,11 +246,12 @@ struct LoaderUnwindGuard
 
     void Track(u64 va)
     {
-        if (count >= kMaxTrackedVas)
-        {
-            KLOG_WARN("elf-loader", "LoaderUnwindGuard cap exceeded — leak hazard");
-            return;
-        }
+        // Same shape as the PE loader — a silent return here used
+        // to leak frames mapped after the cap if a later step then
+        // failed. 1024 entries is 4 MiB of mappings; an ELF that
+        // legitimately exceeds it is structurally beyond v0 scope
+        // and should crash loudly, not leak.
+        KASSERT(count < kMaxTrackedVas, "loader/elf", "LoaderUnwindGuard cap exceeded");
         vas[count++] = va;
     }
 

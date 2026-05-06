@@ -93,6 +93,12 @@ struct BeaconParsed
     u32 ie_count;
     u32 unknown_ies;
     u32 walked_bytes;
+    // Number of RSN IEs we started to parse but had to abandon
+    // mid-walk because of a truncated length. When non-zero, the
+    // beacon's RSN view is intentionally absent — callers should
+    // treat the network as having WPA1/Privacy-only fallback
+    // rather than incomplete WPA2.
+    u8 rsn_truncated_ies;
 };
 
 ::duetos::core::Result<void> BeaconParse(const u8* frame, u32 frame_size, BeaconParsed* parsed);

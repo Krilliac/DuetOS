@@ -28,6 +28,7 @@
 #include "fs/fat32.h"
 
 #include "fs/fat32_internal.h"
+#include "log/klog.h"
 
 namespace duetos::fs::fat32
 {
@@ -187,7 +188,9 @@ bool WalkDirChain(const Volume& v, u32 first_cluster, DirVisitor visit, void* ct
     VZero(pending_long, sizeof(pending_long));
 
     u32 cluster = first_cluster;
-    for (u32 step = 0; step < 64; ++step)
+    constexpr u32 kMaxDirChainSteps = 64;
+    u32 step = 0;
+    for (; step < kMaxDirChainSteps; ++step)
     {
         if (cluster < 2 || cluster >= 0x0FFFFFF8u)
             break;
@@ -289,6 +292,17 @@ bool WalkDirChain(const Volume& v, u32 first_cluster, DirVisitor visit, void* ct
                 return true;
         }
         cluster = ReadFatEntry(v, cluster);
+    }
+    if (step == kMaxDirChainSteps)
+    {
+        // Bound exhausted without reaching a natural EOC. This is
+        // either a directory bigger than v0 supports (~64 clusters
+        // × cluster bytes) or a circular cluster chain — both are
+        // corruption signals worth surfacing. The caller still
+        // sees the entries we DID walk; it just won't know the
+        // tail is missing without this WARN.
+        KLOG_WARN_V("fs/fat32", "WalkDirChain hit step bound; possible cluster-chain corruption",
+                    static_cast<u64>(first_cluster));
     }
     return true;
 }

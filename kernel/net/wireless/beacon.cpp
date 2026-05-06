@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "log/klog.h"
 
 namespace duetos::net::wireless
 {
@@ -98,46 +99,84 @@ void ParseRsnIe(const u8* ie_payload, u8 ie_len, BeaconParsed* p)
     // RSN IE (id=48) v2.4-2020 §9.4.2.24:
     //   2 ver + 4 group + 2 pcount + 4*pcount pairs + 2 acount +
     //   4*acount akm + 2 caps + (optional PMKID + group-mgmt-cipher)
+    //
+    // A truncated RSN IE used to set `rsn_present=true` early then
+    // bail mid-walk, which left the parsed beacon with an empty
+    // cipher / AKM list but the security state derived as WPA2.
+    // A crafted beacon could exploit that to coerce association.
+    // Now we only commit `rsn_present=true` after the AKM walk
+    // completes — if the IE is truncated mid-parse we leave the
+    // beacon as if no RSN IE were present and let WPA1 vendor-IE
+    // / Privacy-bit fallback decide.
     if (ie_len < 2)
         return;
-    p->rsn_present = true;
     u32 off = 0;
-    p->rsn_version = ReadLe16(ie_payload, off);
+    const u16 version = ReadLe16(ie_payload, off);
     off += 2;
     if (off + 4 > ie_len)
+    {
+        ++p->rsn_truncated_ies;
         return;
-    p->rsn_group_cipher = PackSuite(ie_payload + off, ie_payload[off + 3]);
+    }
+    const u32 group_cipher = PackSuite(ie_payload + off, ie_payload[off + 3]);
     off += 4;
     if (off + 2 > ie_len)
+    {
+        ++p->rsn_truncated_ies;
         return;
+    }
     const u16 pair_count = ReadLe16(ie_payload, off);
     off += 2;
+    u8 pair_recorded = 0;
+    u32 pair_buf[kBeaconMaxCipherSuites] = {};
     for (u16 i = 0; i < pair_count; ++i)
     {
         if (off + 4 > ie_len)
-            return;
-        if (p->rsn_pairwise_count < kBeaconMaxCipherSuites)
         {
-            p->rsn_pairwise_ciphers[p->rsn_pairwise_count] = PackSuite(ie_payload + off, ie_payload[off + 3]);
-            ++p->rsn_pairwise_count;
+            ++p->rsn_truncated_ies;
+            return;
+        }
+        if (pair_recorded < kBeaconMaxCipherSuites)
+        {
+            pair_buf[pair_recorded] = PackSuite(ie_payload + off, ie_payload[off + 3]);
+            ++pair_recorded;
         }
         off += 4;
     }
     if (off + 2 > ie_len)
+    {
+        ++p->rsn_truncated_ies;
         return;
+    }
     const u16 akm_count = ReadLe16(ie_payload, off);
     off += 2;
+    u8 akm_recorded = 0;
+    u32 akm_buf[kBeaconMaxAkmSuites] = {};
     for (u16 i = 0; i < akm_count; ++i)
     {
         if (off + 4 > ie_len)
-            return;
-        if (p->rsn_akm_count < kBeaconMaxAkmSuites)
         {
-            p->rsn_akm_suites[p->rsn_akm_count] = PackSuite(ie_payload + off, ie_payload[off + 3]);
-            ++p->rsn_akm_count;
+            ++p->rsn_truncated_ies;
+            return;
+        }
+        if (akm_recorded < kBeaconMaxAkmSuites)
+        {
+            akm_buf[akm_recorded] = PackSuite(ie_payload + off, ie_payload[off + 3]);
+            ++akm_recorded;
         }
         off += 4;
     }
+
+    // Full walk done — commit to the parsed beacon.
+    p->rsn_present = true;
+    p->rsn_version = version;
+    p->rsn_group_cipher = group_cipher;
+    p->rsn_pairwise_count = pair_recorded;
+    for (u8 i = 0; i < pair_recorded; ++i)
+        p->rsn_pairwise_ciphers[i] = pair_buf[i];
+    p->rsn_akm_count = akm_recorded;
+    for (u8 i = 0; i < akm_recorded; ++i)
+        p->rsn_akm_suites[i] = akm_buf[i];
     if (off + 2 <= ie_len)
         p->rsn_capabilities = ReadLe16(ie_payload, off);
 }
@@ -275,6 +314,9 @@ const char* WirelessSecurityName(WirelessSecurity s)
     parsed->walked_bytes = off;
     DeriveSecurity(parsed);
     parsed->valid = true;
+    if (parsed->rsn_truncated_ies != 0)
+        KLOG_WARN_V("net/wireless/beacon", "beacon RSN IE truncated mid-parse — RSN view discarded",
+                    static_cast<u64>(parsed->rsn_truncated_ies));
     return ::duetos::core::Result<void>{};
 }
 

@@ -43,6 +43,7 @@
 #include "loader/pe_loader.h"
 
 #include "arch/x86_64/serial.h"
+#include "core/panic.h"
 #include "debug/probes.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
@@ -180,11 +181,14 @@ struct LoaderUnwindGuard
 
     void Track(u64 va)
     {
-        if (count >= kMaxTrackedVas)
-        {
-            arch::SerialWrite("[pe-load] LoaderUnwindGuard cap exceeded — leak hazard\n");
-            return;
-        }
+        // Cap exhaustion used to silently no-op, leaving frames
+        // mapped after a failing later step with no record for
+        // the destructor to unmap — a guaranteed leak. The cap is
+        // 4 MiB of mappings; hitting it on a normal PE means the
+        // image is structurally beyond what v0 supports, and
+        // continuing with a half-tracked unwind is worse than a
+        // panic.
+        KASSERT(count < kMaxTrackedVas, "loader/pe", "LoaderUnwindGuard cap exceeded");
         vas[count++] = va;
     }
 
@@ -591,15 +595,24 @@ struct StagedMiss
 constexpr u64 kStagedMissCap = 128;
 StagedMiss g_staged_misses[kStagedMissCap];
 u64 g_staged_miss_count = 0;
+// Dropped imports past the cap. Surfaced as one WARN per
+// PeLoad in PeLoadDrainIatMisses so an operator can see the
+// PE legitimately exceeded the staging buffer rather than
+// just guess from the IAT-miss count being suspiciously round.
+u64 g_staged_miss_dropped = 0;
 
 void StagedMissReset()
 {
     g_staged_miss_count = 0;
+    g_staged_miss_dropped = 0;
 }
 void StagedMissAppend(u64 slot_va, const char* name)
 {
     if (g_staged_miss_count >= kStagedMissCap)
-        return; // silently drop — log line already warned
+    {
+        ++g_staged_miss_dropped;
+        return;
+    }
     g_staged_misses[g_staged_miss_count].slot_va = slot_va;
     g_staged_misses[g_staged_miss_count].name = name;
     ++g_staged_miss_count;
@@ -1669,7 +1682,11 @@ void PeLoadDrainIatMisses(Process* proc)
         proc->win32_iat_misses[i].name = g_staged_misses[i].name;
     }
     proc->win32_iat_miss_count = n;
+    if (g_staged_miss_dropped != 0)
+        KLOG_WARN_V("loader/pe", "IAT miss staging buffer overflowed; entries dropped",
+                    static_cast<u64>(g_staged_miss_dropped));
     g_staged_miss_count = 0;
+    g_staged_miss_dropped = 0;
 }
 
 // ---------------------------------------------------------------

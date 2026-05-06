@@ -56,6 +56,14 @@ void SratInit(const void* srat_table);
 /// affinity record was registered.
 bool SratPresent();
 
+/// True iff SratInit was given a non-null table that failed to
+/// validate (wrong signature, length-too-small, checksum
+/// mismatch). Distinct from `!SratPresent()`: a clean machine
+/// with no SRAT returns false from both. A machine whose
+/// firmware shipped a broken SRAT returns true here even though
+/// SratPresent() is false.
+bool SratCorrupt();
+
 /// Look up the NUMA node for a given APIC ID. Returns true and
 /// writes the dense node index to *out_node when known; returns
 /// false and leaves *out_node unchanged when no entry exists.

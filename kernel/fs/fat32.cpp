@@ -159,9 +159,11 @@ bool ReadCluster(const Volume& v, u32 cluster)
 }
 
 // Read the FAT entry for `cluster`. Returns 0x0FFFFFFF on I/O error
-// (caller treats it as EOC, same semantics as a real EOC — the walk
-// terminates cleanly). FAT32 uses 4 bytes per entry, top 4 bits
-// reserved.
+// — caller treats it as EOC and the walk terminates cleanly. The
+// I/O failure is surfaced via a WARN log so an operator can tell
+// transient disk failures from a normal end-of-chain (the latter
+// is silent and frequent). FAT32 uses 4 bytes per entry, top 4
+// bits reserved.
 u32 ReadFatEntry(const Volume& v, u32 cluster)
 {
     const u32 byte_off = cluster * 4;
@@ -169,7 +171,10 @@ u32 ReadFatEntry(const Volume& v, u32 cluster)
     const u32 byte_in_sec = byte_off % v.bytes_per_sector;
     const u64 lba = v.reserved_sectors + sec_off;
     if (!ReadSector(v.block_handle, lba))
+    {
+        KLOG_WARN_V("fs/fat32", "ReadFatEntry sector read failed; treating chain as EOC", static_cast<u64>(lba));
         return 0x0FFFFFFFu;
+    }
     return LeU32(g_scratch + byte_in_sec) & 0x0FFFFFFFu;
 }
 } // namespace internal
