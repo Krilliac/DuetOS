@@ -4,7 +4,8 @@
 >
 > **Execution context:** Kernel — IRQ + process; pixel ops in compositor pass
 >
-> **Maturity:** virtio-gpu v0 scanout; Intel/AMD/NVIDIA discovery only
+> **Maturity:** virtio-gpu v0 scanout; Intel/AMD/NVIDIA discovery only;
+> Vulkan ICD v0 (CPU-side lifecycle, command tape replay, scanout-backed clears)
 
 ## Overview
 
@@ -153,9 +154,73 @@ the per-pixel inner loops, so the per-frame cost is constant.
 identification (vendor / family / tier / arch / BAR0), and
 present-backend classification (`direct` / `virtio-gpu` /
 `none`) into one struct. Used by the `gfx` shell command and
-intended as the source of truth for the future Vulkan ICD's
-`vkGetPhysicalDeviceProperties` query and runtime mode-change
-paths.
+by the Vulkan ICD's `vkGetPhysicalDeviceProperties` /
+`vkGetPhysicalDeviceMemoryProperties` queries (it's the
+source of truth for vendorID, deviceName, framebuffer-sized
+DEVICE_LOCAL heap, and `maxFramebuffer*` limits).
+
+## Vulkan ICD (v0)
+
+`kernel/subsystems/graphics/{graphics.h, graphics.cpp,
+graphics_vk.cpp}` implements a CPU-side Vulkan 1.3 ICD subset.
+Lifecycle calls succeed (no more `ErrorIncompatibleDriver`
+sentinels); per-kind handle pools track live counts; the boot
+self-test (`GraphicsIcdSelfTest`) drives the canonical
+Instance → Device → Pipeline → CommandBuffer → Submit → Destroy
+flow and asserts every pool returns to zero.
+
+Implemented:
+
+- Instance / PhysicalDevice / Device / Queue lifecycle.
+- `vkGetPhysicalDeviceProperties` / `Features` /
+  `MemoryProperties` / `QueueFamilyProperties` — properties
+  sourced from `display_info::Query()` (vendor ID from PCI
+  vendor name, device name composed as
+  `DuetOS-vk-<vendor>-<family>`, framebuffer-sized
+  DEVICE_LOCAL heap, 16 MiB HOST_VISIBLE+COHERENT heap).
+- Instance / Device extension + layer enumeration (zero count
+  — no extensions yet).
+- `vkAllocateMemory` / `vkFreeMemory`, `vkCreateBuffer` /
+  `vkBindBufferMemory`, `vkCreateImage` / `vkBindImageMemory`,
+  `vkCreateImageView`.
+- `vkCreateRenderPass` / `vkCreateFramebuffer`.
+- `vkCreateShaderModule` validates the SPIR-V magic word
+  `0x07230203` (LE) and rejects with `ErrorInvalidShaderNV`;
+  blob bytes are stored, not executed.
+- `vkCreatePipelineLayout`, `vkCreateGraphicsPipeline`,
+  `vkCreateComputePipeline`.
+- `vkCreateCommandPool`, `vkAllocateCommandBuffers`,
+  `vkBeginCommandBuffer` / `vkEndCommandBuffer` /
+  `vkResetCommandBuffer`.
+- Recording: `vkCmdBeginRenderPass`, `vkCmdEndRenderPass`,
+  `vkCmdBindPipeline`, `vkCmdClearColorImage`, `vkCmdDraw`.
+  Each opcode is appended to the command buffer's tape (32
+  ops max).
+- `vkQueueSubmit` walks the tape; `vkCmdClearColorImage`
+  against an image created with the `kImageScanoutBacked`
+  flag forwards the clear to `FramebufferFillRect` plus
+  `FramebufferAddDamage` so the next compositor pass picks
+  up the rect. Other opcodes are recorded for stats but
+  produce no visible output (no SPIR-V execution yet).
+- `vkCreateFence` / `vkWaitForFences` (always immediately
+  signalled — submits are synchronous in this ICD),
+  `vkCreateSemaphore`.
+
+Out of scope — deferred:
+
+- Real GPU command-ring submission (blocks on per-vendor
+  driver bring-up: Intel GuC/HuC, AMD MEC/RLC, NVIDIA GSP).
+- SPIR-V execution / shader translation.
+- Descriptor sets, descriptor pools.
+- Swapchain, surface, WSI (`vkAcquireNextImageKHR`,
+  `vkQueuePresentKHR`).
+- Multi-queue, cross-queue sync that actually blocks.
+- `vkCmdBeginRenderPass` clear-attachment painting (needs
+  framebuffer → image-view back-mapping).
+
+The `gfx` shell command surfaces every per-kind `*_live`
+counter plus submit / record / replay totals plus the SPIR-V
+validator's rejection count.
 
 ## Themes
 
@@ -179,8 +244,13 @@ recompose. Four themes ship:
 - **No GPU command queue.** Submission is direct register writes for
   virtio-gpu's tiny command set; a real GPU driver will need a
   proper queue.
-- **No Vulkan ICD yet.** Skeleton lives in
-  `kernel/subsystems/graphics/`.
+- **Vulkan ICD does not execute shaders.** SPIR-V blobs are
+  validated (magic-word check) and stored, not run. `vkCmdDraw`
+  is recorded for stats but produces no pixels.
+- **No swapchain.** WSI (`vkAcquireNextImageKHR`,
+  `vkQueuePresentKHR`) is unimplemented; callers paint the
+  framebuffer via `vkCmdClearColorImage` against a scanout-
+  backed image as a v0 shortcut.
 - **Damage tracking is single-bbox.** A frame that touches the
   top-left and bottom-right corners flushes the whole surface. A
   list-of-rects damage tracker would help for chrome-heavy frames

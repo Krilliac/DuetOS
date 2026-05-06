@@ -3,7 +3,19 @@
 #include "util/types.h"
 
 /*
- * DuetOS — Graphics subsystem skeleton, v0.
+ * DuetOS — Graphics subsystem, v0.
+ *
+ * The native Vulkan ICD was a trace-only skeleton on every entry
+ * point until this slice; it now implements a CPU-side lifecycle:
+ * Instance/Device creation succeeds, physical-device queries return
+ * properties sourced from `drivers/video/display_info::Query()`,
+ * command buffers record a small tape of opcodes, and `VkQueueSubmit`
+ * replays the tape.  vkCmdClearColorImage is the one tape opcode
+ * that produces visible output today — when the image was created
+ * with the kImageScanoutBacked flag, the submit forwards the clear
+ * to `FramebufferFillRect` on the active backbuffer; otherwise the
+ * op is recorded for stats and discarded.  No GPU command-ring
+ * submission, no SPIR-V execution, no swapchain/WSI yet.
  *
  * Where the pieces live in the final system:
  *
@@ -11,10 +23,7 @@
  *              |
  *              |  vulkan / d3d11 / d3d12 / opengl entry points
  *              v
- *     subsystems/graphics/ (user-mode)      <-- this file is the
- *     Vulkan ICD skeleton + D3D translation layer;  kernel-mode
- *     is a stand-in today because we don't yet have a user-mode
- *     graphics target.
+ *     subsystems/graphics/ (kernel today, user-mode later)
  *              |
  *              |  command submission via kernel gate
  *              v
@@ -24,50 +33,65 @@
  *              v
  *            GPU
  *
- * Right now this is a trace-only surface: each "API entry point"
- * logs "called" and returns an appropriate zero/null. It proves
- * the plumbing exists so a real Vulkan ICD slice can land
- * without restructuring the tree.
+ * Scope (v0):
+ *   - Vulkan instance/device/queue lifecycle (Success-returning).
+ *   - Physical-device properties / features / memory / queue-family
+ *     queries; properties are sourced from display_info::Query().
+ *   - Shader module create with SPIR-V magic validation
+ *     (0x07230203 little-endian); blob is stored, not executed.
+ *   - Graphics + compute pipeline create (state recorded only).
+ *   - Render pass + framebuffer + image + image-view + buffer +
+ *     device-memory create; all are tracked handles, no real
+ *     storage layout.
+ *   - Command pool + command buffer allocation.
+ *   - Command tape: vkCmdClearColorImage, vkCmdBeginRenderPass,
+ *     vkCmdEndRenderPass, vkCmdBindPipeline, vkCmdDraw recorded.
+ *   - vkQueueSubmit replays the tape.  Clears against an image
+ *     that was tagged with kImageScanoutBacked land on the
+ *     framebuffer via FramebufferFillRect.
+ *   - Fence + semaphore create/destroy (signalling is a no-op,
+ *     vkWaitForFences returns Success immediately).
+ *   - Self-test (`GraphicsIcdSelfTest`) runs the canonical
+ *     CreateInstance -> CreateDevice -> CreateCommandPool ->
+ *     AllocateCommandBuffers -> Begin -> CmdClearColorImage ->
+ *     End -> Submit -> WaitIdle -> Free -> Destroy* pipeline and
+ *     asserts every live handle counter returns to zero.
  *
- * Scope:
- *   - Vulkan ICD entry points: vkCreateInstance, vkEnumerate*,
- *     vkCreateDevice, vkGetDeviceQueue, vkQueueSubmit, vkDestroy*.
- *     Trace-only. Returns VK_ERROR_INCOMPATIBLE_DRIVER for
- *     any non-trivial call, so a caller's fallback path kicks in.
- *   - D3D11 → Vulkan translation entry points (stub).
- *   - D3D12 → Vulkan translation entry points (stub).
+ * Out of scope — deferred:
+ *   - Real GPU command-ring submission (blocked on per-vendor
+ *     driver work).
+ *   - SPIR-V execution / shader translation.
+ *   - Descriptor sets / descriptor pools.
+ *   - Swapchain / WSI / vkAcquireNextImageKHR.
+ *   - Multi-queue, multi-device, multi-pipeline.
+ *   - Synchronization primitives that actually block.
  *
- * Not in scope (real-work slices later):
- *   - Actually forwarding calls to a GPU driver.
- *   - Shader compilation / SPIR-V translation.
- *   - Descriptor table handling.
- *   - Swapchain / present.
+ * D3D translation surface stays as it was (counters + E_FAIL
+ * sentinels).  Wiring D3D11/D3D12 thunks into this Vulkan ICD is
+ * a follow-on slice.
  *
  * References to study when this becomes real work:
  *   ValveSoftware/wine (github)
  *     - dlls/wined3d/    — D3D9/10 support
- *     - dxvk/            — D3D9/10/11 → Vulkan
- *     - vkd3d-proton/    — D3D12 → Vulkan (used in Steam Play)
- *   These are the reference implementations for every translation
- *   layer we need. We won't fork them, but their IR lowering,
- *   descriptor-table handling, and swapchain logic are prior art
- *   worth studying.
+ *     - dxvk/            — D3D9/10/11 -> Vulkan
+ *     - vkd3d-proton/    — D3D12 -> Vulkan (used in Steam Play)
  *
- * Context: kernel (temporary home). Moves to subsystems/graphics/
- * under a user-mode target when one exists.
+ * Context: kernel.  No locking — boot-time ICD init plus a tiny
+ * fixed-size handle table; concurrent vkQueueSubmit from multiple
+ * tasks is a future slice's concern.
  */
 
 namespace duetos::subsystems::graphics
 {
 
 // -------------------------------------------------------------------
-// Vulkan ICD surface (skeleton)
+// Vulkan ICD surface
 // -------------------------------------------------------------------
 //
-// Mirrors a small subset of the Vulkan 1.3 spec. Types are opaque
-// u64 handles rather than structs — Vulkan itself defines them as
-// dispatchable pointers, but for a skeleton u64 is enough to see
-// "did vkCreateInstance get called, what followed".
+// Mirrors a subset of the Vulkan 1.3 spec.  Handles are u64 rather
+// than the spec's dispatchable pointers — every handle this ICD
+// hands out lives in a fixed-size per-kind slot table indexed by
+// the low 8 bits of the handle so Destroy can validate cheaply.
 
 using VkInstance = u64;
 using VkPhysicalDevice = u64;
@@ -75,6 +99,17 @@ using VkDevice = u64;
 using VkQueue = u64;
 using VkCommandPool = u64;
 using VkCommandBuffer = u64;
+using VkShaderModule = u64;
+using VkPipelineLayout = u64;
+using VkPipeline = u64;
+using VkRenderPass = u64;
+using VkFramebuffer = u64;
+using VkImage = u64;
+using VkImageView = u64;
+using VkBuffer = u64;
+using VkDeviceMemory = u64;
+using VkFence = u64;
+using VkSemaphore = u64;
 
 // Return codes (subset).
 enum class VkResult : i32
@@ -82,60 +117,294 @@ enum class VkResult : i32
     Success = 0,
     NotReady = 1,
     Timeout = 2,
+    EventSet = 3,
+    EventReset = 4,
+    Incomplete = 5,
     ErrorOutOfHostMemory = -1,
+    ErrorOutOfDeviceMemory = -2,
     ErrorInitializationFailed = -3,
     ErrorDeviceLost = -4,
+    ErrorMemoryMapFailed = -5,
+    ErrorLayerNotPresent = -6,
+    ErrorExtensionNotPresent = -7,
+    ErrorFeatureNotPresent = -8,
     ErrorIncompatibleDriver = -9,
+    ErrorTooManyObjects = -10,
+    ErrorFormatNotSupported = -11,
+    ErrorFragmentedPool = -12,
+    ErrorInvalidShaderNV = -1000012000,
 };
 
-/// Bring up the graphics ICD skeleton. Currently logs "graphics
-/// ICD present (v0 skeleton)" and registers the vendor enumerators
-/// against `drivers::gpu`. Does not actually load a driver.
+// Image flags.  We only track scanout-backing today; a real ICD
+// would carry usage / tiling / aspect masks.
+inline constexpr u32 kImageScanoutBacked = 1u << 0;
+
+// Pipeline stage shape, recorded but not actioned.
+enum class VkPipelineBindPoint : u32
+{
+    Graphics = 0,
+    Compute = 1,
+};
+
+// Memory property flags (subset; matches the spec's bit layout).
+inline constexpr u32 kMemoryPropertyDeviceLocal = 0x00000001;
+inline constexpr u32 kMemoryPropertyHostVisible = 0x00000002;
+inline constexpr u32 kMemoryPropertyHostCoherent = 0x00000004;
+
+// Queue capability flags.
+inline constexpr u32 kQueueGraphicsBit = 0x00000001;
+inline constexpr u32 kQueueComputeBit = 0x00000002;
+inline constexpr u32 kQueueTransferBit = 0x00000004;
+
+struct VkOffset2D
+{
+    i32 x;
+    i32 y;
+};
+struct VkExtent2D
+{
+    u32 width;
+    u32 height;
+};
+struct VkExtent3D
+{
+    u32 width;
+    u32 height;
+    u32 depth;
+};
+struct VkRect2D
+{
+    VkOffset2D offset;
+    VkExtent2D extent;
+};
+
+// Spec-shaped union — a real ICD picks the field that matches
+// the image format.  The kernel ICD has no float runtime
+// (`-mno-sse -mgeneral-regs-only`) and reads only `uint32[]`,
+// where the low byte of each lane is the 0-255 colour
+// component.  `float32[]` is kept for ABI compatibility so a
+// caller using the spec's float-init pattern still compiles.
+union VkClearColorValue
+{
+    float float32[4];
+    u32 uint32[4]; // RRGGBBAA in lane low-bytes (UNORM 8-bit)
+    i32 int32[4];
+};
+
+struct VkPhysicalDeviceLimits
+{
+    u32 maxImageDimension2D;
+    u32 maxFramebufferWidth;
+    u32 maxFramebufferHeight;
+    u32 maxBoundDescriptorSets;
+    u32 maxPushConstantsSize;
+    u32 maxComputeWorkGroupCount[3];
+};
+
+// API version macro shape.  Encoded the same way as
+// VK_MAKE_API_VERSION(variant, major, minor, patch).
+inline constexpr u32 MakeApiVersion(u32 variant, u32 major, u32 minor, u32 patch)
+{
+    return (variant << 29) | (major << 22) | (minor << 12) | patch;
+}
+inline constexpr u32 kApiVersion1_3 = MakeApiVersion(0, 1, 3, 0);
+
+inline constexpr u32 kMaxDeviceName = 64;
+
+struct VkPhysicalDeviceProperties
+{
+    u32 apiVersion;    // VK_API_VERSION_1_3 today
+    u32 driverVersion; // DuetOS ICD epoch
+    u32 vendorID;      // PCI vendor ID from display_info
+    u32 deviceID;      // 0 for our skeleton
+    u32 deviceType;    // 0=Other, 1=IntegratedGPU, 2=DiscreteGPU, 3=VirtualGpu, 4=CPU
+    char deviceName[kMaxDeviceName];
+    VkPhysicalDeviceLimits limits;
+};
+
+struct VkPhysicalDeviceFeatures
+{
+    u32 robustBufferAccess; // Vulkan booleans are 32-bit ints.
+    u32 fullDrawIndexUint32;
+    u32 imageCubeArray;
+    u32 geometryShader;
+    u32 tessellationShader;
+};
+
+struct VkMemoryHeap
+{
+    u64 size;
+    u32 flags;
+};
+struct VkMemoryType
+{
+    u32 propertyFlags;
+    u32 heapIndex;
+};
+inline constexpr u32 kMaxMemoryHeaps = 4;
+inline constexpr u32 kMaxMemoryTypes = 8;
+struct VkPhysicalDeviceMemoryProperties
+{
+    u32 memoryHeapCount;
+    VkMemoryHeap memoryHeaps[kMaxMemoryHeaps];
+    u32 memoryTypeCount;
+    VkMemoryType memoryTypes[kMaxMemoryTypes];
+};
+
+struct VkQueueFamilyProperties
+{
+    u32 queueFlags;
+    u32 queueCount;
+    u32 timestampValidBits;
+    VkExtent3D minImageTransferGranularity;
+};
+
+// -------------------------------------------------------------------
+// Init + diagnostics
+// -------------------------------------------------------------------
+
+/// Bring up the graphics ICD.  Logs "graphics ICD present (v0)"
+/// and reports physical devices + the active display.  No driver
+/// is loaded — this is a CPU-side ICD whose deepest visible op
+/// is a framebuffer-backed clear.
 void GraphicsIcdInit();
 
-// --- Vulkan entry points (skeleton) ---
-//
-// Each one logs a single `[vk] <name>` line the first time it's
-// called (rate-limited). Returns either a trivial handle (a
-// counter-generated u64) or VkResult::ErrorIncompatibleDriver to
-// signal "no real driver available".
+/// Boot-time self-test: drives the canonical Create -> Submit ->
+/// Destroy pipeline and asserts every live counter returns to
+/// zero.  Returns Success on a clean run; the boot harness
+/// converts failures into the standard `[selftest:graphics]`
+/// boot-log line.  Safe to call once after `GraphicsIcdInit`.
+VkResult GraphicsIcdSelfTest();
+
+// -------------------------------------------------------------------
+// Vulkan instance / physical-device / device
+// -------------------------------------------------------------------
 
 VkResult VkCreateInstance(VkInstance* out);
-VkResult VkEnumeratePhysicalDevices(VkInstance inst, u32* count, VkPhysicalDevice* devs);
-VkResult VkCreateDevice(VkPhysicalDevice phys, VkDevice* out);
-VkResult VkGetDeviceQueue(VkDevice dev, VkQueue* out);
-VkResult VkQueueSubmit(VkQueue q);
 void VkDestroyInstance(VkInstance inst);
+
+VkResult VkEnumeratePhysicalDevices(VkInstance inst, u32* count, VkPhysicalDevice* devs);
+
+VkResult VkGetPhysicalDeviceProperties(VkPhysicalDevice phys, VkPhysicalDeviceProperties* out);
+VkResult VkGetPhysicalDeviceFeatures(VkPhysicalDevice phys, VkPhysicalDeviceFeatures* out);
+VkResult VkGetPhysicalDeviceMemoryProperties(VkPhysicalDevice phys, VkPhysicalDeviceMemoryProperties* out);
+VkResult VkGetPhysicalDeviceQueueFamilyProperties(VkPhysicalDevice phys, u32* count, VkQueueFamilyProperties* out);
+
+VkResult VkEnumerateInstanceExtensionProperties(u32* count);
+VkResult VkEnumerateInstanceLayerProperties(u32* count);
+VkResult VkEnumerateDeviceExtensionProperties(VkPhysicalDevice phys, u32* count);
+
+VkResult VkCreateDevice(VkPhysicalDevice phys, VkDevice* out);
 void VkDestroyDevice(VkDevice dev);
 
+VkResult VkGetDeviceQueue(VkDevice dev, VkQueue* out);
+VkResult VkQueueWaitIdle(VkQueue q);
+VkResult VkDeviceWaitIdle(VkDevice dev);
+
 // -------------------------------------------------------------------
-// D3D11 / D3D12 → Vulkan translation (skeleton)
+// Memory + buffers + images + views
+// -------------------------------------------------------------------
+
+VkResult VkAllocateMemory(VkDevice dev, u64 size, u32 memory_type_index, VkDeviceMemory* out);
+void VkFreeMemory(VkDevice dev, VkDeviceMemory mem);
+
+VkResult VkCreateBuffer(VkDevice dev, u64 size, VkBuffer* out);
+void VkDestroyBuffer(VkDevice dev, VkBuffer buf);
+VkResult VkBindBufferMemory(VkDevice dev, VkBuffer buf, VkDeviceMemory mem, u64 offset);
+
+/// Create an image.  When `flags & kImageScanoutBacked` is set, a
+/// later `vkCmdClearColorImage` against this image will paint the
+/// active framebuffer via `FramebufferFillRect` — our v0 swapchain
+/// shortcut.  `extent.depth` is recorded but unused.
+VkResult VkCreateImage(VkDevice dev, VkExtent3D extent, u32 flags, VkImage* out);
+void VkDestroyImage(VkDevice dev, VkImage img);
+VkResult VkBindImageMemory(VkDevice dev, VkImage img, VkDeviceMemory mem, u64 offset);
+
+VkResult VkCreateImageView(VkDevice dev, VkImage img, VkImageView* out);
+void VkDestroyImageView(VkDevice dev, VkImageView view);
+
+// -------------------------------------------------------------------
+// Render pass + framebuffer
+// -------------------------------------------------------------------
+
+VkResult VkCreateRenderPass(VkDevice dev, VkRenderPass* out);
+void VkDestroyRenderPass(VkDevice dev, VkRenderPass rp);
+
+VkResult VkCreateFramebuffer(VkDevice dev, VkRenderPass rp, VkImageView attachment, VkExtent2D extent,
+                             VkFramebuffer* out);
+void VkDestroyFramebuffer(VkDevice dev, VkFramebuffer fb);
+
+// -------------------------------------------------------------------
+// Shader + pipeline
+// -------------------------------------------------------------------
+
+/// Validates the SPIR-V magic word (0x07230203 LE) and stores the
+/// blob length.  The bytecode itself is not executed.
+VkResult VkCreateShaderModule(VkDevice dev, const u32* code, u64 code_size_bytes, VkShaderModule* out);
+void VkDestroyShaderModule(VkDevice dev, VkShaderModule module);
+
+VkResult VkCreatePipelineLayout(VkDevice dev, VkPipelineLayout* out);
+void VkDestroyPipelineLayout(VkDevice dev, VkPipelineLayout layout);
+
+/// Records pipeline state.  The shader modules and layout are
+/// not introspected; the handle is just a "draw will succeed"
+/// token until the SPIR-V execution slice lands.
+VkResult VkCreateGraphicsPipeline(VkDevice dev, VkPipelineLayout layout, VkShaderModule vs, VkShaderModule fs,
+                                  VkPipeline* out);
+VkResult VkCreateComputePipeline(VkDevice dev, VkPipelineLayout layout, VkShaderModule cs, VkPipeline* out);
+void VkDestroyPipeline(VkDevice dev, VkPipeline pipe);
+
+// -------------------------------------------------------------------
+// Command pool + command buffer + recording
+// -------------------------------------------------------------------
+
+VkResult VkCreateCommandPool(VkDevice dev, VkCommandPool* out);
+void VkDestroyCommandPool(VkDevice dev, VkCommandPool pool);
+
+VkResult VkAllocateCommandBuffers(VkDevice dev, VkCommandPool pool, u32 count, VkCommandBuffer* out);
+VkResult VkFreeCommandBuffers(VkDevice dev, VkCommandPool pool, u32 count, const VkCommandBuffer* cbs);
+
+VkResult VkBeginCommandBuffer(VkCommandBuffer cb);
+VkResult VkEndCommandBuffer(VkCommandBuffer cb);
+VkResult VkResetCommandBuffer(VkCommandBuffer cb);
+
+VkResult VkCmdBeginRenderPass(VkCommandBuffer cb, VkRenderPass rp, VkFramebuffer fb, VkRect2D area,
+                              VkClearColorValue clear);
+VkResult VkCmdEndRenderPass(VkCommandBuffer cb);
+VkResult VkCmdBindPipeline(VkCommandBuffer cb, VkPipelineBindPoint bind_point, VkPipeline pipe);
+VkResult VkCmdClearColorImage(VkCommandBuffer cb, VkImage image, VkClearColorValue clear);
+VkResult VkCmdDraw(VkCommandBuffer cb, u32 vertex_count, u32 instance_count, u32 first_vertex, u32 first_instance);
+
+// -------------------------------------------------------------------
+// Submission + sync
+// -------------------------------------------------------------------
+
+/// Replay every command tape associated with the supplied
+/// command buffers, in order.  The only opcode that produces
+/// visible output today is vkCmdClearColorImage against an image
+/// tagged with kImageScanoutBacked; everything else updates
+/// stat counters and is dropped.
+VkResult VkQueueSubmit(VkQueue q, u32 cb_count, const VkCommandBuffer* cbs, VkFence signal_fence);
+
+VkResult VkCreateFence(VkDevice dev, bool signalled, VkFence* out);
+void VkDestroyFence(VkDevice dev, VkFence fence);
+VkResult VkResetFences(VkDevice dev, u32 count, const VkFence* fences);
+VkResult VkWaitForFences(VkDevice dev, u32 count, const VkFence* fences, u64 timeout_ns);
+
+VkResult VkCreateSemaphore(VkDevice dev, VkSemaphore* out);
+void VkDestroySemaphore(VkDevice dev, VkSemaphore sem);
+
+// -------------------------------------------------------------------
+// D3D11 / D3D12 -> Vulkan translation (still skeleton)
 // -------------------------------------------------------------------
 //
-// The Win32 subsystem (kernel/subsystems/win32/) patches PE IAT
-// slots for d3d11/d3d12/dxgi imports. Those stubs currently all
-// land on the miss-logger; a future slice will redirect them here.
-// The entry points below are the shape those redirects will take.
+// Wiring D3D thunks into the new Vulkan path is a follow-on slice.
+// Today they continue to return E_FAIL + bump call counters.
 
-/// D3D11: `HRESULT D3D11CreateDevice(IDXGIAdapter*, D3D_DRIVER_TYPE,
-/// HMODULE, UINT flags, ...)`. Today: logs + returns E_FAIL.
 u32 D3D11CreateDeviceStub();
-
-/// D3D12: `HRESULT D3D12CreateDevice(IUnknown* adapter, D3D_FEATURE_LEVEL,
-/// REFIID riid, void** ppDevice)`. Today: logs + returns E_FAIL.
 u32 D3D12CreateDeviceStub();
-
-/// DXGI: `HRESULT CreateDXGIFactory(REFIID, void**)`.
 u32 DxgiCreateFactoryStub();
-
-/// D3D9: `IDirect3D9* Direct3DCreate9(UINT)`. Today: bumps counter.
 u32 D3d9CreateStub();
-
-/// DirectInput8 / XInput / XAudio2 / DirectSound / DirectDraw /
-/// Direct2D / DirectWrite create-call counters. Each just bumps
-/// the corresponding counter so the `gfx` shell command can see
-/// activity. The DLLs themselves return their own real handles;
-/// these stubs are for stats only.
 u32 Dinput8CreateStub();
 u32 XinputCreateStub();
 u32 Xaudio2CreateStub();
@@ -144,10 +413,14 @@ u32 DdrawCreateStub();
 u32 D2d1CreateStub();
 u32 DwriteCreateStub();
 
+// -------------------------------------------------------------------
+// Diagnostics
+// -------------------------------------------------------------------
+
 /// Diagnostic snapshot — handle-table counters for every kind of
-/// object the ICD hands out. Covers a gap left by the logger-only
-/// pattern: a future unit test of the vkCreate/vkDestroy round
-/// trip can now assert that live counts return to zero.
+/// object the ICD hands out.  The boot self-test asserts every
+/// `*_live` counter returns to 0 after a Create -> Destroy round
+/// trip.  The `gfx` shell command formats this for an operator.
 struct GraphicsStats
 {
     u32 vk_instances_live;
@@ -156,6 +429,24 @@ struct GraphicsStats
     u32 vk_devices_live;
     u32 vk_devices_created;
     u32 vk_devices_destroyed;
+    u32 vk_command_pools_live;
+    u32 vk_command_buffers_live;
+    u32 vk_shader_modules_live;
+    u32 vk_pipelines_live;
+    u32 vk_render_passes_live;
+    u32 vk_framebuffers_live;
+    u32 vk_images_live;
+    u32 vk_image_views_live;
+    u32 vk_buffers_live;
+    u32 vk_device_memory_live;
+    u32 vk_fences_live;
+    u32 vk_semaphores_live;
+    u32 vk_pipeline_layouts_live;
+    u32 vk_queue_submits;            // total VkQueueSubmit calls
+    u32 vk_command_recorded;         // total vkCmd* opcodes recorded
+    u32 vk_command_replayed;         // total vkCmd* opcodes replayed in submit
+    u32 vk_clear_pixels_painted;     // sum of pixels actually painted by scanout-backed clears
+    u32 vk_invalid_spirv_rejections; // VkCreateShaderModule rejections (bad magic or 0 size)
     u32 d3d_create_calls;
     u32 dxgi_create_calls;
     u32 d3d9_create_calls;
