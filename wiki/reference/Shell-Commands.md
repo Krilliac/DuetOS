@@ -255,6 +255,7 @@ All write-side FAT operations are admin-gated.
 | `module dumps <name>` | Replay every retained dump record for the named module (admin) | Last 8 records per domain. Also visible via `cat /proc/dumps`. |
 | `flushtlb`, `flush-tlb` | Reload CR3 (admin) | |
 | `perf <args>` | Perf-counter shell front-end | |
+| `loadtest`, `stress` | Stress CPU and/or kernel heap to test stability under load (admin) | Subcommands: `spin [SECS]`, `cpu [SECS] [N]`, `mem [MIB] [SECS]`, `mix [SECS] [N] [MIB]`, `status`. Defaults SECS=5 (cap 60), N=2 (cap 8), MIB=4 (cap 64). ^C aborts. |
 
 ## Security & accounts
 

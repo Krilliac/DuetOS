@@ -539,6 +539,14 @@ void CmdScript(u32 argc, char** argv);
 void CmdExit(u32 argc, char** argv);
 
 // ---------------------------------------------------------------
+// Load / stress testing (shell_loadtest.cpp). Exercises the
+// scheduler + kernel heap under sustained pressure so an operator
+// can verify stability and ^C responsiveness on a hot path.
+// Admin-gated inside the handler.
+// ---------------------------------------------------------------
+void CmdLoadTest(u32 argc, char** argv);
+
+// ---------------------------------------------------------------
 // Scripting language v0 (shell_script.cpp).
 //
 // A small line-indexed interpreter that adds POSIX-shell-flavoured

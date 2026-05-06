@@ -139,6 +139,7 @@ void CmdHelp()
     ConsoleWriteln("  HEALTH       RUN RUNTIME INVARIANT SCAN (HEAP/FRAMES/SCHED/CRX)");
     ConsoleWriteln("  UUID [N]     GENERATE N V4 UUIDS FROM THE ENTROPY POOL");
     ConsoleWriteln("  ATTACKSIM    RUN RED-TEAM ATTACK SUITE (IDT/GDT/LSTAR/CANARY/LBA0)");
+    ConsoleWriteln("  LOADTEST ... STRESS CPU/HEAP TO TEST STABILITY UNDER LOAD");
     ConsoleWriteln("  MEMDUMP A [N]  HEX+ASCII DUMP OF KERNEL MEMORY -> SERIAL");
     ConsoleWriteln("  INSTR A [N]  INSTRUCTION-BYTE DUMP AT ADDRESS -> SERIAL");
     ConsoleWriteln("  INSPECT ...  RE / TRIAGE UMBRELLA (SYSCALLS|OPCODES|ARM) -> SERIAL");
@@ -648,6 +649,7 @@ const char* const kCommandSet[] = {
     "purple",     "purpleteam", "mkdir",    "rmdir",    "truncate",  "realpath", "id",         "groups",    "nproc",
     "arch",       "tty",        "type",     "printenv", "df",        "du",       "loadavg",    "clearhist", "pause",
     "yes",        "sync",       "port",     "assert",   "watch",     "script",   "exit",       "mkfs",      "lastdump",
+    "loadtest",   "stress",
 };
 const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1962,6 +1964,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "exit"))
     {
         CmdExit(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "loadtest") || StrEq(cmd, "stress"))
+    {
+        CmdLoadTest(argc, argv);
         return;
     }
     ShellSetExit(127);
