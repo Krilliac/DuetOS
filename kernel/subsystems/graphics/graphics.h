@@ -5,17 +5,22 @@
 /*
  * DuetOS — Graphics subsystem, v0.
  *
- * The native Vulkan ICD was a trace-only skeleton on every entry
- * point until this slice; it now implements a CPU-side lifecycle:
- * Instance/Device creation succeeds, physical-device queries return
- * properties sourced from `drivers/video/display_info::Query()`,
- * command buffers record a small tape of opcodes, and `VkQueueSubmit`
- * replays the tape.  vkCmdClearColorImage is the one tape opcode
- * that produces visible output today — when the image was created
- * with the kImageScanoutBacked flag, the submit forwards the clear
- * to `FramebufferFillRect` on the active backbuffer; otherwise the
- * op is recorded for stats and discarded.  No GPU command-ring
- * submission, no SPIR-V execution, no swapchain/WSI yet.
+ * The native Vulkan ICD implements a CPU-side lifecycle for the
+ * full Vulkan 1.3 happy path: Instance/Device creation succeeds,
+ * physical-device queries return properties sourced from
+ * `drivers/video/display_info::Query()`, command buffers record a
+ * tape of opcodes that `VkQueueSubmit` replays, descriptor sets
+ * pin resources for shaders that don't yet exist, and
+ * `vkQueuePresentKHR` flushes the framebuffer through the
+ * compositor's damage rect.  vkCmdClearColorImage is the one
+ * tape opcode that produces visible output today — when the
+ * image was created with the kImageScanoutBacked flag (which is
+ * automatic for swapchain images), the submit forwards the
+ * clear to `FramebufferFillRect`; otherwise the op is recorded
+ * for stats and discarded.  No GPU command-ring submission, no
+ * SPIR-V execution.  SPIR-V modules are validated (magic word)
+ * + parsed (entry-point / capability / decoration counts via
+ * `VkGetShaderModuleInfoDuet`).
  *
  * Where the pieces live in the final system:
  *
@@ -59,12 +64,14 @@
  *
  * Out of scope — deferred:
  *   - Real GPU command-ring submission (blocked on per-vendor
- *     driver work).
+ *     firmware bring-up: Intel GuC/HuC, AMD MEC/RLC, NVIDIA GSP).
  *   - SPIR-V execution / shader translation.
- *   - Descriptor sets / descriptor pools.
- *   - Swapchain / WSI / vkAcquireNextImageKHR.
  *   - Multi-queue, multi-device, multi-pipeline.
  *   - Synchronization primitives that actually block.
+ *   - WSI present modes other than Fifo, surface formats other
+ *     than B8G8R8A8_UNORM, multi-monitor swapchains.
+ *   - VkUpdateDescriptorSets variants beyond the single-binding
+ *     `VkUpdateDescriptorSet` we expose.
  *
  * D3D translation surface stays as it was (counters + E_FAIL
  * sentinels).  Wiring D3D11/D3D12 thunks into this Vulkan ICD is
