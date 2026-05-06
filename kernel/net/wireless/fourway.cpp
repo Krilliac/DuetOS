@@ -102,8 +102,26 @@ bool IsAllZero(const u8* buf, u32 len)
 // Walk an EAPOL key-data field looking for a GTK KDE.
 // KDE format: u8 type=0xDD, u8 len, u8 oui[3]={00:0F:AC},
 // u8 data_type=1 (GTK), u8 KeyId+TX, u8 reserved, u8 gtk[N].
-// Returns true if a GTK KDE was found and copied.
-bool ExtractGtkKde(const u8* key_data, u32 key_data_len, u8* gtk, u32 gtk_capacity, u32* gtk_len_out, u8* gtk_index_out)
+//
+// Three outcomes:
+//   Found       — GTK KDE present and copied into `gtk`.
+//   None        — KeyData walked cleanly to the end with no GTK
+//                 KDE. Legitimate for early-WPA setups that ship
+//                 the GTK in a separate Group Key Handshake.
+//   Corrupt     — A KDE length advanced past `key_data_len`, or
+//                 the GTK payload exceeded `gtk_capacity`. Caller
+//                 must fail the handshake — silently treating
+//                 this as None used to leave the link "connected"
+//                 with no broadcast key, dropping all multicast.
+enum class GtkKdeResult : u8
+{
+    None = 0,
+    Found = 1,
+    Corrupt = 2,
+};
+
+GtkKdeResult ExtractGtkKde(const u8* key_data, u32 key_data_len, u8* gtk, u32 gtk_capacity, u32* gtk_len_out,
+                           u8* gtk_index_out)
 {
     u32 off = 0;
     while (off + 2 <= key_data_len)
@@ -111,7 +129,7 @@ bool ExtractGtkKde(const u8* key_data, u32 key_data_len, u8* gtk, u32 gtk_capaci
         const u8 type = key_data[off];
         const u8 len = key_data[off + 1];
         if (off + 2u + len > key_data_len)
-            return false;
+            return GtkKdeResult::Corrupt;
         if (type == 0xDD && len >= 6 && key_data[off + 2] == 0x00 && key_data[off + 3] == 0x0F &&
             key_data[off + 4] == 0xAC && key_data[off + 5] == 0x01)
         {
@@ -120,16 +138,16 @@ bool ExtractGtkKde(const u8* key_data, u32 key_data_len, u8* gtk, u32 gtk_capaci
             // off+7 reserved
             const u32 gtk_bytes = static_cast<u32>(len) - 6u;
             if (gtk_bytes > gtk_capacity)
-                return false;
+                return GtkKdeResult::Corrupt;
             for (u32 i = 0; i < gtk_bytes; ++i)
                 gtk[i] = key_data[off + 8 + i];
             *gtk_len_out = gtk_bytes;
             *gtk_index_out = key_id_tx & 0x03u;
-            return true;
+            return GtkKdeResult::Found;
         }
         off += 2u + len;
     }
-    return false;
+    return GtkKdeResult::None;
 }
 
 } // namespace
@@ -317,7 +335,18 @@ void FourWayInit(FourWayContext& ctx, const u8 pmk[32], const u8 sta_mac[6], con
             u8 gtk[kGtkMaxBytes];
             u32 gtk_len = 0;
             u8 gtk_idx = 0;
-            if (ExtractGtkKde(keydata, keydata_len, gtk, sizeof(gtk), &gtk_len, &gtk_idx))
+            const GtkKdeResult gr = ExtractGtkKde(keydata, keydata_len, gtk, sizeof(gtk), &gtk_len, &gtk_idx);
+            if (gr == GtkKdeResult::Corrupt)
+            {
+                ++ctx.mic_failures;
+                ctx.state = FourWayState::Failed;
+                KLOG_ERROR_A(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
+                             "M3 KeyData GTK KDE corrupt — handshake aborted");
+                diag::RecordErr(diag::Layer::Eapol, "4way-m3-gtk-corrupt",
+                                static_cast<u32>(::duetos::core::ErrorCode::Corrupt), keydata_len, 0, 0);
+                return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
+            }
+            if (gr == GtkKdeResult::Found)
             {
                 CopyBytes(ctx.gtk, gtk, gtk_len);
                 ctx.gtk_len = gtk_len;
