@@ -396,6 +396,12 @@ u64 SmpStartAps()
         // Lock-pass slot — empty until this AP enters Schedule().
         ap_pcpu->ctxsw_lock_to_release = nullptr;
         ap_pcpu->ctxsw_lock_flags = 0;
+        // Per-CPU runqueue heads — empty until SchedEnterOnAp spawns
+        // this AP's idle task and tasks migrate here via wake routing.
+        ap_pcpu->runq_head_normal = nullptr;
+        ap_pcpu->runq_tail_normal = nullptr;
+        ap_pcpu->runq_head_idle = nullptr;
+        ap_pcpu->runq_tail_idle = nullptr;
         g_ap_percpus[cpu_id] = ap_pcpu;
         if (cpu_id + 1 > g_cpu_id_limit)
         {

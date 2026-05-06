@@ -39,6 +39,10 @@ constinit PerCpu g_bsp_percpu = {
     .gdb_frozen_frame = nullptr,
     .ctxsw_lock_to_release = nullptr,
     .ctxsw_lock_flags = 0,
+    .runq_head_normal = nullptr,
+    .runq_tail_normal = nullptr,
+    .runq_head_idle = nullptr,
+    .runq_tail_idle = nullptr,
 };
 
 // One-shot flag so CurrentCpuIdOrBsp can return a sane value before

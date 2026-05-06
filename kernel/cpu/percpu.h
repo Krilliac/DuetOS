@@ -117,14 +117,13 @@ struct PerCpu
     arch::TrapFrame* gdb_frozen_frame;
 
     // Lock to release after the next ContextSwitch on this CPU. The
-    // scheduler holds g_sched_lock (or, post-commit-2, this CPU's
-    // runq_lock) across ContextSwitch and stashes the lock pointer +
-    // saved IRQ flags here while still on prev's stack. Once
-    // ContextSwitch returns — on whatever task we just resumed —
-    // SchedFinishTaskSwitch reads this slot, clears it, and calls
-    // SpinLockRelease. The slot is per-CPU (not per-task) because
-    // it identifies "the lock THIS CPU just acquired"; the resumed
-    // task is irrelevant to which lock needs releasing.
+    // scheduler holds g_sched_lock across ContextSwitch and stashes
+    // the lock pointer + saved IRQ flags here while still on prev's
+    // stack. Once ContextSwitch returns — on whatever task we just
+    // resumed — SchedFinishTaskSwitch reads this slot, clears it,
+    // and calls SpinLockRelease. The slot is per-CPU (not per-task)
+    // because it identifies "the lock THIS CPU just acquired"; the
+    // resumed task is irrelevant to which lock needs releasing.
     //
     // ctxsw_lock_to_release is void* to keep cpu/percpu.h free of a
     // sync/spinlock.h include; sched.cpp casts it back to SpinLock*.
@@ -134,8 +133,23 @@ struct PerCpu
     void* ctxsw_lock_to_release;
     u64 ctxsw_lock_flags;
 
+    // Per-CPU runqueues. Two priority bands (Normal + Idle), each a
+    // FIFO with head + tail pointers. A task enqueued on this CPU's
+    // runqueue is owned by THIS CPU until popped — no migration in
+    // v0 (work-stealing in commit 6 changes that). All four slots
+    // are still protected by the global g_sched_lock; the per-CPU
+    // structure here is the data-layout half of the per-CPU runqueue
+    // refactor — lock-granularity decomposition is deferred until
+    // contention shows up in profiles. Pointers are typed as void*
+    // to avoid pulling sched/sched.h's Task forward decl into every
+    // includer of percpu.h; sched.cpp casts back to Task*.
+    void* runq_head_normal;
+    void* runq_tail_normal;
+    void* runq_head_idle;
+    void* runq_tail_idle;
+
     // Everything below this line will grow as SMP matures:
-    //   - per-CPU runqueue head/tail + spinlock
+    //   - per-CPU runqueue spinlock (today: shared g_sched_lock)
     //   - per-CPU heap magazine (when the heap grows per-CPU caching)
     //   - TSS pointer
     //   - idle stack pointer
