@@ -632,20 +632,17 @@ u8 DecodeOne(const u8* bytes, u64 available, u64 va, DecodedInsn* out)
     };
 
     // ---- ALU base opcode dispatch (0x00..0x3D regular grid) ----
-    if (op <= 0x3D)
+    // Only the six valid ALU forms (op & 0x7 < 6) — forms 6/7 are
+    // segment-prefix / push-seg encodings (0x06/0x07/0x0E/0x16/...
+    // /0x3F). 0x0F in particular is the two-byte-opcode escape and
+    // must reach the dedicated handler below; falling into the
+    // ALU branch would `fail_db` it and lose syscall/jcc-rel32/etc.
+    if (op <= 0x3D && (op & 0x7) < 6)
     {
         static const char* const kAluMnem[8] = {"add", "or", "adc", "sbb", "and", "sub", "xor", "cmp"};
         const u8 group = (op >> 3) & 0x7;
         const u8 form = op & 0x7;
-        // Skip 0x06/0x07/0x0E/0x16/0x17/0x1E/0x1F/0x26/0x27/0x2E/0x2F/0x36/0x37/0x3E/0x3F.
-        // These are either invalid in long mode (push seg) or
-        // segment prefixes already eaten in the prefix loop.
-        if (form < 6)
-        {
-            return handle_alu_base(kAluMnem[group], form);
-        }
-        // Fall through — invalid in 64-bit mode.
-        return fail_db(op);
+        return handle_alu_base(kAluMnem[group], form);
     }
 
     // ---- 0x50..0x5F: PUSH/POP reg short forms ----
