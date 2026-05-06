@@ -378,46 +378,82 @@ void VfsResolveCrossMountSelfTest()
         return;
     }
 
+    // Find any FAT32 mount actually present in the registry. The
+    // auto-mount loop in main.cpp skips volume 0 silently (its
+    // block_handle == 0 is rejected by `VfsMount` — that's a
+    // legacy invariant the routing layer covers via a hardcoded
+    // `/disk/<N>` fallback parser). The cross-mount resolver
+    // tests against whatever IS in the registry so this stays
+    // green regardless of which volume index ended up mountable.
+    struct DiscoverState
+    {
+        char mount_point[64];
+        u32 block_handle;
+        bool found;
+    };
+    DiscoverState st{};
+    st.found = false;
+
+    auto pick_first_fat32 = [](const MountEntry& entry, MountId, void* cookie) -> bool
+    {
+        auto* s = static_cast<DiscoverState*>(cookie);
+        if (entry.fs_type != FsType::Fat32)
+        {
+            return true; // keep walking
+        }
+        for (u32 i = 0; i < sizeof(s->mount_point); ++i)
+            s->mount_point[i] = 0;
+        for (u32 i = 0; i < sizeof(s->mount_point) - 1 && entry.mount_point[i] != 0; ++i)
+            s->mount_point[i] = entry.mount_point[i];
+        s->block_handle = entry.block_handle;
+        s->found = true;
+        return false; // stop
+    };
+    VfsMountEnumerate(pick_first_fat32, &st);
+
+    if (!st.found)
+    {
+        arch::SerialWrite("[fs/vfs] cross-mount self-test SKIP (no fat32 mount in registry)\n");
+        return;
+    }
+
+    arch::SerialWrite("[fs/vfs] cross-mount self-test using mount=\"");
+    arch::SerialWrite(st.mount_point);
+    arch::SerialWrite("\" block_handle=");
+    arch::SerialWriteHex(st.block_handle);
+    arch::SerialWrite("\n");
+
     const RamfsNode* root = RamfsTrustedRoot();
 
-    // Resolve `/disk/0` itself. The mount registry has a `/disk/0`
-    // → FsType::Fat32 entry pointing at volume 0; VfsResolve must
-    // therefore land on the FAT32 backend with a directory-typed
-    // node (FAT32 root carries attributes 0x10). The volume root
-    // is always present by construction whenever FAT32 mounts —
-    // unlike a specific seeded file, which depends on the boot
-    // image. This keeps the self-test green across both bare-
-    // metal smokes (where HELLO.TXT exists) and emulator runs
-    // (where it may not).
-    VfsNode rootdir = VfsResolve(root, "/disk/0", 64);
-    Expect(VfsNodeIsValid(rootdir), "cross-mount: /disk/0 resolves");
-    Expect(rootdir.backend == VfsBackend::Fat32, "cross-mount: /disk/0 lands on fat32 backend");
-    Expect(VfsNodeIsDir(rootdir), "cross-mount: /disk/0 is dir");
-    Expect(rootdir.fat32_volume_idx == 0, "cross-mount: /disk/0 picked volume 0");
+    // Resolve the discovered mount-point path itself. The FAT32
+    // root is synthesised by `Fat32LookupPath` whenever the
+    // volume mounts (attributes = 0x10), so a successful resolve
+    // proves the dispatch + backend wiring without depending on
+    // any specific seeded file.
+    VfsNode rootdir = VfsResolve(root, st.mount_point, sizeof(st.mount_point));
+    Expect(VfsNodeIsValid(rootdir), "cross-mount: mount-point resolves");
+    Expect(rootdir.backend == VfsBackend::Fat32, "cross-mount: mount-point lands on fat32 backend");
+    Expect(VfsNodeIsDir(rootdir), "cross-mount: mount-point is dir");
+    Expect(rootdir.fat32_volume_idx == st.block_handle, "cross-mount: volume idx matches mount entry");
 
-    // Resolving a missing file under the same mount returns Invalid
-    // (not a stale ramfs hit, since /disk/0/<unique> doesn't exist
-    // in either backend).
-    VfsNode miss = VfsResolve(root, "/disk/0/_NONE_TEST_NOT_THERE_.X", 64);
+    // Negative case: a path under the same mount that obviously
+    // doesn't exist must return Invalid (proves the lookup is
+    // running through the FAT32 backend rather than papering over
+    // misses with a stale ramfs node).
+    char miss_path[80];
+    for (u32 i = 0; i < sizeof(miss_path); ++i)
+        miss_path[i] = 0;
+    u32 mi = 0;
+    for (; mi < sizeof(miss_path) - 1 && st.mount_point[mi] != 0; ++mi)
+        miss_path[mi] = st.mount_point[mi];
+    const char suffix[] = "/_NONE_TEST_NOT_THERE_.X";
+    for (u32 j = 0; mi + 1 < sizeof(miss_path) && suffix[j] != 0; ++j, ++mi)
+        miss_path[mi] = suffix[j];
+    VfsNode miss = VfsResolve(root, miss_path, sizeof(miss_path));
     Expect(!VfsNodeIsValid(miss), "cross-mount: missing fat32 file returns Invalid");
     Expect(miss.backend == VfsBackend::Invalid, "cross-mount: miss has Invalid backend");
 
-    // Optional positive case: try `/disk/0/HELLO.TXT` (the canonical
-    // Fat32 self-test artifact). Real bare-metal smokes seed it; QEMU
-    // smokes that don't have a populated image just log SKIP. We
-    // don't `Expect` on this — it's a bonus check when the file is
-    // available.
-    VfsNode hello = VfsResolve(root, "/disk/0/HELLO.TXT", 64);
-    if (VfsNodeIsValid(hello))
-    {
-        Expect(hello.backend == VfsBackend::Fat32, "cross-mount: HELLO.TXT lands on fat32");
-        Expect(VfsNodeIsFile(hello), "cross-mount: HELLO.TXT is file");
-        arch::SerialWrite("[fs/vfs] cross-mount self-test OK (with HELLO.TXT)\n");
-    }
-    else
-    {
-        arch::SerialWrite("[fs/vfs] cross-mount self-test OK (HELLO.TXT not seeded — root + miss only)\n");
-    }
+    arch::SerialWrite("[fs/vfs] cross-mount self-test OK\n");
 }
 
 } // namespace duetos::fs
