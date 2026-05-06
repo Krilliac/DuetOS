@@ -41,6 +41,7 @@
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/smp.h"
+#include "arch/x86_64/timer.h"
 #include "arch/x86_64/traps.h"
 #include "diag/event_trace.h"
 #include "diag/kdbg.h"
@@ -2518,6 +2519,108 @@ void SchedStartIdle(const char* name)
     KASSERT(name != nullptr, "sched", "SchedStartIdle null name");
     SchedCreate(&IdleMain, nullptr, name, TaskPriority::Idle);
     core::Log(core::LogLevel::Info, "sched/idle", "idle task online");
+}
+
+namespace
+{
+
+// Mint a non-runnable boot sentinel for an AP about to enter the
+// scheduler. Schedule()'s null-current check (sched.cpp top) panics
+// without a current task; we need a placeholder so the AP's first
+// Schedule() call has somewhere to record `prev->rsp`. The sentinel
+// is never re-resumed (state never flips back to Ready), so its
+// trampoline-stack frame is leaked-by-design; bounded at 16 KiB ×
+// kMaxAps. Documented at the SmpStartAps allocation site.
+Task* CreateApBootSentinel(u32 cpu_id)
+{
+    auto* t = static_cast<Task*>(mm::KMalloc(sizeof(Task)));
+    if (t == nullptr)
+    {
+        PanicSched("KMalloc failed for AP boot sentinel");
+    }
+    memset(t, 0, sizeof(Task));
+    t->id = g_next_task_id++;
+    t->state = TaskState::Running;
+    t->rsp = 0;              // populated by ContextSwitch's first store
+    t->stack_base = nullptr; // sentinel is on the trampoline stack — never inspected
+    t->stack_size = 0;
+    t->name = "ap-boot";
+    t->priority = TaskPriority::Normal;
+    t->last_cpu = cpu_id;
+    return t;
+}
+
+// Build a per-AP idle name "idle-apN" without pulling in stdio.
+// Caller's buffer must be ≥16 bytes; result is null-terminated.
+void FormatIdleApName(char (&out)[16], u32 cpu_id)
+{
+    out[0] = 'i';
+    out[1] = 'd';
+    out[2] = 'l';
+    out[3] = 'e';
+    out[4] = '-';
+    out[5] = 'a';
+    out[6] = 'p';
+    // Decimal cpu_id (kMaxCpus = 32, so max 2 digits).
+    char buf[8];
+    u32 n = 0;
+    u32 v = cpu_id;
+    if (v == 0)
+    {
+        buf[n++] = '0';
+    }
+    while (v != 0)
+    {
+        buf[n++] = static_cast<char>('0' + (v % 10));
+        v /= 10;
+    }
+    u32 w = 7;
+    while (n > 0 && w < 16)
+    {
+        out[w++] = buf[--n];
+    }
+    if (w >= 16)
+    {
+        w = 15;
+    }
+    out[w] = '\0';
+}
+
+} // namespace
+
+[[noreturn]] void SchedEnterOnAp(u32 cpu_id)
+{
+    // 1. Spawn this CPU's idle task. The Ready→runqueue push routes
+    //    via t->last_cpu; SchedCreate sets last_cpu to the spawning
+    //    CPU (which is THIS AP), so the idle lands on the AP's own
+    //    runqueue.
+    char name[16];
+    FormatIdleApName(name, cpu_id);
+    SchedStartIdle(name);
+
+    // 2. Mint a boot sentinel so Schedule() has a non-null `prev`
+    //    on its first call. Install as current_task BEFORE arming
+    //    the LAPIC timer — once the timer fires, the IRQ handler
+    //    enters Schedule() and dereferences Current().
+    Task* sentinel = CreateApBootSentinel(cpu_id);
+    cpu::CurrentCpu()->current_task = sentinel;
+
+    // 3. Arm THIS CPU's LAPIC timer at 100 Hz. Vector 0x20 is
+    //    already wired in the shared IDT; this just programs the
+    //    AP's own LAPIC MMIO registers.
+    arch::LapicTimerStartOnCurrent();
+
+    KLOG_WARN_S("sched/smp", "AP scheduler-join complete; entering idle loop", "cpu", name);
+
+    // 4. Drop into idle. The first timer IRQ on this CPU enters
+    //    Schedule(), pulls a runnable task off this CPU's runqueue
+    //    (or our just-spawned idle if no work is waiting), and
+    //    never returns to this stack frame.
+    for (;;)
+    {
+        arch::Sti();
+        asm volatile("hlt");
+    }
 }
 
 // ---------------------------------------------------------------------------

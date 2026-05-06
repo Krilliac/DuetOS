@@ -350,15 +350,13 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
     core::LogWithValue(core::LogLevel::Info, "arch/smp", "AP online cpu_id", static_cast<u64>(cpu_id));
     KBP_PROBE_V(::duetos::debug::ProbeId::kSmpApOnline, cpu_id);
 
-    // Halt forever with IRQs enabled — timer IRQs that land here are
-    // harmless noise (no IDT entry for the AP's perspective? actually
-    // IDT is shared; any timer IRQ on this core would enter the
-    // dispatcher and try to Schedule on a CPU that isn't in the
-    // scheduler yet). Keep IF=0 until AP scheduler-join lands.
-    for (;;)
-    {
-        asm volatile("cli; hlt");
-    }
+    // Hand off to the scheduler. SchedEnterOnAp spawns this CPU's
+    // idle task, mints a boot sentinel as current_task, arms this
+    // CPU's LAPIC timer, and never returns. The first timer IRQ on
+    // this CPU dispatches Schedule(); from then on the AP runs
+    // tasks routed to it via t->last_cpu (commit-2 affinity) plus
+    // any work stolen by the idle path (commit-6 work-stealing).
+    sched::SchedEnterOnAp(cpu_id);
 }
 
 u64 SmpStartAps()
