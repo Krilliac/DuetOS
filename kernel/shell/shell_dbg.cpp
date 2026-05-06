@@ -107,6 +107,11 @@ void DoPs()
     dc::ProcInfo rows[64];
     const usize n = dc::EnumerateProcesses(rows, 64);
     ConsoleWriteln("PID    STATE   TICKS         NAME");
+    // Always emit the <kernel> pseudo-target as the first row so
+    // the operator sees a usable target even when no ring-3
+    // processes are alive at the moment (common right after boot
+    // when PE smokes have all exited). Matches the GUI Procs tab.
+    ConsoleWriteln("<k>    KRNL    <static>      <kernel>");
     for (usize i = 0; i < n; ++i)
     {
         WriteU64Dec(rows[i].pid);
@@ -115,6 +120,10 @@ void DoPs()
         WriteU64Dec(rows[i].ticks_used);
         ConsoleWrite("    ");
         ConsoleWriteln(rows[i].name);
+    }
+    if (n == 0)
+    {
+        ConsoleWriteln("(no live ring-3 processes — use 'dbg threads' for kernel-only tasks)");
     }
 }
 

@@ -4143,6 +4143,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // every output-side serial caller.
     duetos::core::SerialInputStart();
 
+    // Register the shell's post-emit hook so a klog line that
+    // interrupts the operator's typing redraws the prompt +
+    // current input buffer on a fresh line. Without this, fast
+    // log chatter scrolls partially-typed commands off-screen.
+    duetos::core::SetPostEmitHook(&duetos::core::ShellRedrawAfterLogLine);
+
     // UI ticker: once per second, re-composite so the taskbar's
     // uptime / wall-clock counter advances even when the user
     // hasn't touched keyboard or mouse. Uses the compositor

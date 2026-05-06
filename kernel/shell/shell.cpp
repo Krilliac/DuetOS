@@ -230,6 +230,24 @@ void ShellSubmit()
     Prompt();
 }
 
+void ShellRedrawAfterLogLine()
+{
+    // klog has just finished writing a line and a newline. If the
+    // operator is mid-input (g_len > 0), redraw the prompt + their
+    // current buffer on the fresh line so they can see what they
+    // typed instead of having it scrolled off-screen by the log
+    // chatter. The recursion guard in klog ensures we never call
+    // back into Log* from here (Prompt + ConsoleWrite go straight
+    // to console + serial, not through klog).
+    if (g_len == 0)
+        return;
+    Prompt();
+    for (u32 i = 0; i < g_len; ++i)
+    {
+        ConsoleWriteChar(g_input[i]);
+    }
+}
+
 u32 ShellHistoryCount()
 {
     return g_history_count;

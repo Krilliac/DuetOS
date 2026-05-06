@@ -98,24 +98,61 @@ void FormatBytesHex(char* dst, u32 cap, const u8* bytes, u8 n)
 
 } // namespace
 
+namespace
+{
+
+// Cookie for the SchedEnumerate-driven process walk. We collect
+// distinct owner_pids (from process-backed tasks) into a small
+// dedupe set, then materialise each as a ProcInfo row in a second
+// pass. Avoids the wasteful PID 0..1023 iteration and finds
+// processes whose pids fall outside any pre-baked range.
+struct ProcCollector
+{
+    u64 seen_pids[64];
+    usize seen_count;
+};
+
+void OnSchedEnumProc(const sched::SchedTaskInfo& info, void* cookie)
+{
+    auto* c = static_cast<ProcCollector*>(cookie);
+    if (c == nullptr || !info.has_process || info.owner_pid == 0)
+        return;
+    if (c->seen_count >= sizeof(c->seen_pids) / sizeof(c->seen_pids[0]))
+        return;
+    for (usize i = 0; i < c->seen_count; ++i)
+    {
+        if (c->seen_pids[i] == info.owner_pid)
+            return; // already seen via another thread of the same proc
+    }
+    c->seen_pids[c->seen_count++] = info.owner_pid;
+}
+
+} // namespace
+
 usize EnumerateProcesses(ProcInfo* out, usize cap)
 {
     if (out == nullptr || cap == 0)
         return 0;
+
+    // Pass 1 — walk every task once, collect distinct owning pids.
+    ProcCollector coll{};
+    sched::SchedEnumerate(&OnSchedEnumProc, &coll);
+
+    // Pass 2 — materialise each pid as a ProcInfo row. Dropping
+    // the per-pid SchedFindProcessByPid call on the hot path
+    // would let us populate from a single Task* during pass 1,
+    // but exposing that requires a Task accessor — overkill for
+    // a debug surface.
     usize count = 0;
-    // Walk PID space 1..1023 — bounded, predictable, and avoids
-    // building a separate enumerator. SchedFindProcessByPid is
-    // O(tasks) per call; the GUI calls this at most once per
-    // tab-open, so the cost is tolerable.
-    for (u64 pid = 0; pid < 1024 && count < cap; ++pid)
+    for (usize i = 0; i < coll.seen_count && count < cap; ++i)
     {
-        ::duetos::core::Process* p = sched::SchedFindProcessByPid(pid);
+        ::duetos::core::Process* p = sched::SchedFindProcessByPid(coll.seen_pids[i]);
         if (p == nullptr)
             continue;
         ProcInfo& row = out[count];
         row.pid = p->pid;
         StrCopyTrunc(row.name, sizeof(row.name), p->name != nullptr ? p->name : "?");
-        row.state = sched::SchedIsPidZombie(pid) ? 3 : 0;
+        row.state = sched::SchedIsPidZombie(p->pid) ? 3 : 0;
         row.ticks_used = p->ticks_used;
         row.region_count = p->as != nullptr ? p->as->region_count : 0;
         ++count;

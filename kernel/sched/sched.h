@@ -367,10 +367,17 @@ struct SchedTaskInfo
     // creation. Divide by `SchedTotalTicks()` for a since-boot
     // CPU-%; a `top`-style periodic delta is built by the shell.
     u64 ticks_run;
-    u8 state;        // TaskState cast to u8 (Ready/Running/Sleeping/Blocked/Dead)
-    u8 priority;     // TaskPriority cast to u8
-    bool is_running; // true if this is the currently-scheduled task
-    u8 _pad[5];
+    // Owning process's pid, or 0 if this is a kernel-only task
+    // (the boot task, idle, workers, the keyboard reader, etc.).
+    // Lets `dbg ps` walk SchedEnumerate + dedupe by pid instead of
+    // sweeping PID space — much cheaper, and finds processes whose
+    // pids fall outside any pre-baked iteration bound.
+    u64 owner_pid;
+    u8 state;         // TaskState cast to u8 (Ready/Running/Sleeping/Blocked/Dead)
+    u8 priority;      // TaskPriority cast to u8
+    bool is_running;  // true if this is the currently-scheduled task
+    bool has_process; // true if owner_pid is meaningful (vs. kernel-only)
+    u8 _pad[4];
 };
 
 /// Enumerate every known task — runqueues (Normal + Idle),
