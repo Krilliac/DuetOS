@@ -127,4 +127,21 @@ u64 FrameAllocatorGetFailAfter();
 /// Panics on regression.
 void FrameAllocatorOomInjectionSelfTest();
 
+/// Register `frame` as currently in use as a kernel page table.
+/// FreeFrame consults this list and panics on any attempt to free a
+/// registered PT frame — guarding against stale-pointer bugs that
+/// would otherwise corrupt kernel-half page tables and triple-fault
+/// the box.
+///
+/// SplitPsPage and similar paging-internals call this immediately
+/// after AllocateFrame returns the frame they install at PD level.
+/// The list is fixed-size; once full, registration becomes a no-op
+/// (the guard simply doesn't catch frees of late-registered tables).
+void FrameAllocatorRegisterKernelPt(PhysAddr frame);
+
+/// True if `frame` was registered via FrameAllocatorRegisterKernelPt
+/// and not subsequently unregistered. Used by FreeFrame to spot
+/// stale-pointer frees of kernel page-table frames.
+bool FrameAllocatorIsRegisteredKernelPt(PhysAddr frame);
+
 } // namespace duetos::mm

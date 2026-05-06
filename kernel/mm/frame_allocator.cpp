@@ -467,9 +467,23 @@ PhysAddr AllocateFrame()
 
         if (!BitmapIsUsed(frame))
         {
+            const PhysAddr phys = frame << kPageSizeLog2;
+            // Symmetric check to FreeFrame's PT-registry guard:
+            // if AllocateFrame is about to return a frame that's
+            // currently registered as a live kernel page table,
+            // SOMEONE freed it earlier without unregistering. Panic
+            // with the offending physical address so the bad caller
+            // surfaces in the boot log instead of the kernel
+            // silently triple-faulting later when the new owner
+            // overwrites the PT.
+            if (FrameAllocatorIsRegisteredKernelPt(phys))
+            {
+                core::PanicWithValue("mm/frame_allocator",
+                                     "AllocateFrame returning a registered kernel-PT frame (stale free upstream)",
+                                     phys);
+            }
             BitmapMarkUsed(frame);
             g_next_hint = frame + 1;
-            const PhysAddr phys = frame << kPageSizeLog2;
             // Zero the frame before handing it out. Prevents any
             // stale content (a reaper'd task struct, freed kheap
             // chunk, previous user process's page) from leaking
@@ -533,6 +547,27 @@ void FreeFrame(PhysAddr frame)
     if ((frame & (kPageSize - 1)) != 0)
     {
         core::PanicWithValue("mm/frame_allocator", "FreeFrame called with non-page-aligned address", frame);
+    }
+    // Guard against any caller freeing a frame that backs the kernel
+    // image (.text / .rodata / .data / .bss / boot tables). Those
+    // frames are reserved at FrameAllocatorInit and never legitimately
+    // handed out, so a FreeFrame call inside that range is always a
+    // caller bug.
+    const u64 kimg_start = reinterpret_cast<u64>(_kernel_start_phys);
+    const u64 kimg_end = reinterpret_cast<u64>(_kernel_end_phys);
+    if (frame >= kimg_start && frame < kimg_end)
+    {
+        core::PanicWithValue("mm/frame_allocator", "FreeFrame attempts to free a kernel-image frame (bug in caller)",
+                             frame);
+    }
+    // Guard against freeing a frame that's currently in use as a
+    // kernel page table. SplitPsPage allocates new PT frames during
+    // ProtectKernelImage; any FreeFrame on one of those is a bug
+    // that would corrupt kernel-half page tables and triple-fault.
+    if (FrameAllocatorIsRegisteredKernelPt(frame))
+    {
+        core::PanicWithValue("mm/frame_allocator",
+                             "FreeFrame attempts to free a kernel page-table frame (bug in caller)", frame);
     }
     const u64 index = frame >> kPageSizeLog2;
     // Documentation-of-invariant: by this point we've already checked
@@ -868,6 +903,54 @@ void FrameAllocatorSelfTest()
     SerialWrite("  page poison: verified 0xDE across 4 KiB freed page\n");
 
     SerialWrite("[mm] frame allocator self-test OK\n");
+}
+
+// ----------------------------------------------------------------------
+// Kernel page-table frame registry
+// ----------------------------------------------------------------------
+// SplitPsPage allocates new 4 KiB PT frames during ProtectKernelImage
+// and never frees them — they're live for the kernel's lifetime. A
+// stale-pointer FreeFrame on one of those frames would zero / poison
+// the PT, un-mapping every 4 KiB page it covers. The kernel-image
+// guard above catches frees inside [_kernel_start_phys,
+// _kernel_end_phys), but kernel PT frames live OUTSIDE that range
+// (allocated by AllocateFrame post-init). Track them explicitly so
+// FreeFrame can panic on any attempt to free one.
+//
+// 256 slots × 8 bytes = 2 KiB. A typical x86_64 kernel image with
+// W^X protection split across .text/.rodata/.data/.bss takes ~10-20
+// PTs (one per 2 MiB region the protection flags need to subdivide).
+// 256 leaves headroom for future kernel-half mappings (per-CPU areas,
+// MMIO arenas) without forcing a dynamic-grow path.
+constexpr u32 kMaxKernelPtFrames = 256;
+constinit PhysAddr g_kernel_pt_frames[kMaxKernelPtFrames] = {};
+constinit u32 g_kernel_pt_count = 0;
+
+void FrameAllocatorRegisterKernelPt(PhysAddr frame)
+{
+    if (frame == kNullFrame)
+        return;
+    if (g_kernel_pt_count >= kMaxKernelPtFrames)
+    {
+        // Best-effort: log once and continue. Late-registered tables
+        // aren't covered by the FreeFrame guard, but the kernel still
+        // runs — the guard is a defensive net, not a correctness gate.
+        KLOG_ONCE_WARN("mm/frame_allocator", "kernel PT registry full — late tables unguarded");
+        return;
+    }
+    g_kernel_pt_frames[g_kernel_pt_count++] = frame;
+}
+
+bool FrameAllocatorIsRegisteredKernelPt(PhysAddr frame)
+{
+    if (frame == kNullFrame)
+        return false;
+    for (u32 i = 0; i < g_kernel_pt_count; ++i)
+    {
+        if (g_kernel_pt_frames[i] == frame)
+            return true;
+    }
+    return false;
 }
 
 } // namespace duetos::mm
