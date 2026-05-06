@@ -73,6 +73,7 @@
 #include "arch/x86_64/smp.h"
 #include "arch/x86_64/timer.h"
 #include "cpu/percpu.h"
+#include "cpu/topology.h"
 #include "debug/breakpoints.h"
 #include "debug/extable.h"
 #include "debug/probes.h"
@@ -2385,6 +2386,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Installing BSP per-CPU struct.\n");
     duetos::cpu::PerCpuInitBsp();
+
+    // Decode BSP CPUID 0x1F/0x0B + SRAT row into the per-CPU
+    // topology table. AP rows are filled later by each AP from
+    // inside ApEntryFromTrampoline before signaling online_flag,
+    // so the BSP's WaitForApOnline poll inside SmpStartAps is the
+    // rendezvous; cluster assignment runs after SmpStartAps returns.
+    duetos::cpu::TopologyInitBsp();
 
     // Architectural LBR — start the per-CPU branch trace ring as
     // early as practical so a panic during late init still has
@@ -5620,6 +5628,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // independent of worker-creation order.
     SerialWrite("[boot] Bringing up APs.\n");
     SmpStartAps();
+
+    // Every AP populated its own k_topo[i] before flipping the
+    // trampoline's online_flag, so by the time SmpStartAps returns
+    // the per-CPU topology table is complete. Pick a cluster-id
+    // rule (NUMA-node, package, or single) and propagate to PerCpu.
+    duetos::cpu::TopologyAssignClusters();
+    duetos::cpu::TopologyDump();
 
     // Runtime invariant checker baseline. Capture NOW, after
     // every init that touches IDT / GDT / TSS / CR4 / EFER has

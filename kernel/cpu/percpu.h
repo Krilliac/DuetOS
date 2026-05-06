@@ -158,6 +158,22 @@ struct PerCpu
     // gdt.cpp casts back to arch::Tss*.
     void* tss;
 
+    // Scheduler-locality cluster index. Read by the work-stealing
+    // hot path (`StealNormalFromPeer`) to bias steals to peers in
+    // the same cluster as `self`. Populated once at boot by
+    // `cpu::TopologyAssignClusters` after every AP has decoded its
+    // own CPUID/SRAT topology — until then, every CPU's slot is 0
+    // (the steal path's two-pass scan still works: pass 0 visits
+    // every peer with cluster_id==0, pass 1 finds nothing). 0 is
+    // also the canonical single-cluster value, so a UMA single-
+    // package box never needs to write this field after init.
+    //
+    // Placed AFTER `tss` to keep the syscall-stub offsets at +32
+    // and +40 stable; appending past line 159 doesn't disturb
+    // kPerCpuKernelRsp / kPerCpuUserRspScratch.
+    u16 cluster_id;
+    u8 _pad_topo[6];
+
     // Everything below this line will grow as SMP matures:
     //   - per-CPU runqueue spinlock (today: shared g_sched_lock)
     //   - per-CPU heap magazine (when the heap grows per-CPU caching)
@@ -173,6 +189,14 @@ struct PerCpu
 // + need_resched(1) + _pad(7) = 32 → kernel_rsp at +32.
 inline constexpr u32 kPerCpuKernelRsp = 32;
 inline constexpr u32 kPerCpuUserRspScratch = 40;
+
+// Belt-and-braces for the syscall-entry stub: trip the build the
+// instant a future PerCpu reshuffle drifts these offsets, rather
+// than corrupting kernel_rsp at runtime.
+static_assert(__builtin_offsetof(PerCpu, kernel_rsp) == kPerCpuKernelRsp,
+              "PerCpu.kernel_rsp offset must match kPerCpuKernelRsp (subsystems/linux/syscall_entry.S)");
+static_assert(__builtin_offsetof(PerCpu, user_rsp_scratch) == kPerCpuUserRspScratch,
+              "PerCpu.user_rsp_scratch offset must match kPerCpuUserRspScratch (subsystems/linux/syscall_entry.S)");
 
 /// Install the BSP's PerCpu struct and write its address to GSBASE.
 /// Called once from kernel_main before SchedInit so that CurrentCpu()

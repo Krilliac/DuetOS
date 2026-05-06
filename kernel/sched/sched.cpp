@@ -568,11 +568,13 @@ bool SuspendedListRemove(Task* t)
 
 // Lift one Normal-band Ready task off a peer CPU's runqueue.
 // Called from RunqueuePopRunnable's empty-local-queue fallback.
-// Walks peers round-robin starting from cpu_id+1; returns the
-// first non-suspended task found, or nullptr if every peer is
-// also empty. Idle tasks are pinned per-CPU and never stolen —
-// the band-segregation also prevents an idle from drifting
-// onto a different CPU's Normal queue.
+// Walks peers in two passes: pass 0 visits only peers that share
+// `self`'s cluster_id (NUMA node, or package on UMA boxes); pass 1
+// covers cross-cluster peers. Within each pass, the same round-
+// robin step starting from cpu_id+1 is preserved, so on a single-
+// cluster system the behaviour is identical to the pre-clustering
+// scheduler — pass 0 finds every peer, pass 1 finds none.
+// Idle tasks are pinned per-CPU and never stolen.
 //
 // Caller must hold g_sched_lock — every per-CPU runqueue is
 // covered by the same global lock today, so cross-CPU access
@@ -592,30 +594,44 @@ Task* StealNormalFromPeer()
         return nullptr; // UP — no peers to steal from
     }
     const u32 self_id = self->cpu_id;
-    for (u32 step = 1; step < limit; ++step)
+    const u16 self_cluster = self->cluster_id;
+    for (int pass = 0; pass < 2; ++pass)
     {
-        const u32 peer_id = (self_id + step) % limit;
-        cpu::PerCpu* peer = arch::SmpGetPercpu(peer_id);
-        if (peer == nullptr)
+        const bool same_cluster_only = (pass == 0);
+        for (u32 step = 1; step < limit; ++step)
         {
-            continue;
+            const u32 peer_id = (self_id + step) % limit;
+            cpu::PerCpu* peer = arch::SmpGetPercpu(peer_id);
+            if (peer == nullptr)
+            {
+                continue;
+            }
+            const bool same_cluster = (peer->cluster_id == self_cluster);
+            if (same_cluster_only && !same_cluster)
+            {
+                continue;
+            }
+            if (!same_cluster_only && same_cluster)
+            {
+                continue; // already visited in pass 0
+            }
+            Task* head = RunqHeadNormal(peer);
+            if (head == nullptr)
+            {
+                continue;
+            }
+            // Pop the head off the peer's Normal queue.
+            RunqHeadNormal(peer) = head->next;
+            if (RunqHeadNormal(peer) == nullptr)
+            {
+                RunqTailNormal(peer) = nullptr;
+            }
+            head->next = nullptr;
+            // Update affinity so the next wake routes to us — keeps
+            // hot tasks on whichever CPU is actually running them.
+            head->last_cpu = self_id;
+            return head;
         }
-        Task* head = RunqHeadNormal(peer);
-        if (head == nullptr)
-        {
-            continue;
-        }
-        // Pop the head off the peer's Normal queue.
-        RunqHeadNormal(peer) = head->next;
-        if (RunqHeadNormal(peer) == nullptr)
-        {
-            RunqTailNormal(peer) = nullptr;
-        }
-        head->next = nullptr;
-        // Update affinity so the next wake routes to us — keeps
-        // hot tasks on whichever CPU is actually running them.
-        head->last_cpu = self_id;
-        return head;
     }
     return nullptr;
 }

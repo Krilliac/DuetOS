@@ -13,6 +13,7 @@
 - [UEFI Loader](kernel/UEFI-Loader.md)
 - [Memory Management](kernel/Memory-Management.md)
 - [Scheduler](kernel/Scheduler.md)
+- [CPU Topology](kernel/CPU-Topology.md)
 - [Syscalls](kernel/Syscalls.md)
 - [IPC](kernel/IPC.md)
 - [Process Model](kernel/Process-Model.md)
