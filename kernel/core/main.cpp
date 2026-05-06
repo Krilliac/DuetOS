@@ -2717,15 +2717,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWrite("[boot] Bringing up NVMe controller.\n");
     duetos::drivers::storage::NvmeInit();
     DUETOS_BOOT_SELFTEST(duetos::drivers::storage::NvmeSelfTest());
-    // Boot-time disk-persist self-test removed: it wrote 22 KiB at
-    // LBA 24576 of every NVMe namespace on every boot, which on the
-    // CI test image (32768-sector / 16 MiB) lands inside the FAT32
-    // data partition (LBA 2048..32733) — corrupting cluster ~2798
-    // onwards. The panic-time NvmePanicWriteDump path itself stays;
-    // it only runs from the trap dispatcher and target hardware
-    // ships with a partition table that reserves the dump region.
-    // Restore once `NvmeDumpReservedLba()` honours a partition-table
-    // reservation rather than a flat last-N-sectors policy.
+    DUETOS_BOOT_SELFTEST(duetos::diag::minidump::DiskPersistSelfTest());
 
     SerialWrite("[boot] Bringing up AHCI controller(s).\n");
     duetos::drivers::storage::AhciInit();
