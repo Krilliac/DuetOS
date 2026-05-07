@@ -20,17 +20,25 @@
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+extern crate alloc;
+
+mod kheap_alloc;
 mod alloc_bitmap;
 mod block_dev;
+mod compress;
 mod crc32;
 mod crc_table;
+mod crypto;
 mod format;
 mod fs;
 mod fsck;
+mod journal;
 mod mkfs;
 mod ops;
 mod ops_dir;
 mod panic;
 mod path;
+mod snapshot;
+mod xattr;
 
 pub mod ffi;

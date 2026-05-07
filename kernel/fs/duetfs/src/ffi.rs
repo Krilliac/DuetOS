@@ -12,11 +12,18 @@
 
 use core::ffi::{c_uchar, c_uint, c_void};
 
-use crate::block_dev::{ExternBlockDevice, ExternBlockDeviceOps};
-use crate::format::{NODE_KIND_DIR, NODE_KIND_FILE, NODE_KIND_UNUSED, ROOT_NODE_ID};
+use crate::block_dev::{BlockDevice, ExternBlockDevice, ExternBlockDeviceOps};
+use crate::compress;
+use crate::crypto;
+use crate::format::{
+    BLOCK_SIZE, JOURNAL_LBA, NODE_KIND_DIR, NODE_KIND_FILE, NODE_KIND_UNUSED, ROOT_NODE_ID,
+    SALT_BYTES, SUPERBLOCK_LBA,
+};
 use crate::fs::{Fs, FsError};
+use crate::journal;
 use crate::mkfs;
 use crate::path::split_parent_and_name;
+use crate::snapshot;
 
 // Status codes returned by FFI fns. 0 = success, anything else = an
 // FsError variant. Kept in lockstep with kKindMiss / kStatus* in
@@ -444,3 +451,551 @@ pub static DUETFS_KIND_FILE: u32 = NODE_KIND_FILE;
 pub static DUETFS_KIND_DIR: u32 = NODE_KIND_DIR;
 #[no_mangle]
 pub static DUETFS_ROOT_NODE_ID: u32 = ROOT_NODE_ID;
+
+// ----------------------------------------------------------------
+// Journal FFI — diagnostic + self-test helpers.
+// ----------------------------------------------------------------
+
+/// Read a raw block at `lba` into `dst`. Bypasses the FS — useful
+/// for the journal self-test which inspects on-disk state directly.
+/// Returns kStatusOk on success.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_block_read(
+    desc: *const DuetFsDevice, lba: u32, dst: *mut u8,
+) -> c_uint
+{
+    if dst.is_null()
+    {
+        return STATUS_INVALID;
+    }
+    let Some(dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    if lba >= dev.block_count()
+    {
+        return STATUS_INVALID;
+    }
+    let buf = unsafe { core::slice::from_raw_parts_mut(dst, BLOCK_SIZE) };
+    match dev.read_block(lba, buf)
+    {
+        Ok(()) => STATUS_OK,
+        Err(_) => STATUS_IO,
+    }
+}
+
+/// Apply a single (target_lba, payload) write through the journal.
+/// Atomic against torn writes — either the new payload reaches the
+/// target or the FS is left exactly as it was. `payload` MUST point
+/// at a kernel-space buffer of at least kBlockSize bytes.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_journal_apply(
+    desc: *const DuetFsDevice, target_lba: u32, payload: *const u8,
+) -> c_uint
+{
+    if payload.is_null()
+    {
+        return STATUS_INVALID;
+    }
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    let buf = unsafe { core::slice::from_raw_parts(payload, BLOCK_SIZE) };
+    // txn_id of 1 is fine for the standalone helper — Fs::open's
+    // replay path doesn't depend on monotonicity (it only reads the
+    // descriptor's `state`).
+    match journal::apply(&mut dev, JOURNAL_LBA, 1, &[(target_lba, buf)])
+    {
+        Ok(()) => STATUS_OK,
+        Err(e) => err_to_status(e),
+    }
+}
+
+/// Test-only: stage a single (target_lba, payload) write through
+/// the journal AND mark it COMMITTED, but skip the apply step.
+/// Simulates a torn write between "journal fsync'd" and "apply
+/// finished" — the next call to a function that opens the FS
+/// (probe / lookup / mkfs aren't probe-only — only FFIs that go
+/// through Fs::open) will replay it. Used exclusively by the boot
+/// self-test in kernel/fs/duetfs.cpp.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_journal_inject_for_test(
+    desc: *const DuetFsDevice, target_lba: u32, payload: *const u8,
+) -> c_uint
+{
+    if payload.is_null()
+    {
+        return STATUS_INVALID;
+    }
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    let buf = unsafe { core::slice::from_raw_parts(payload, BLOCK_SIZE) };
+    match journal::inject_committed_for_test(&mut dev, JOURNAL_LBA, 1, &[(target_lba, buf)])
+    {
+        Ok(()) => STATUS_OK,
+        Err(e) => err_to_status(e),
+    }
+}
+
+/// Read the journal descriptor's `state` field. 0 = empty, 1 =
+/// committed (replay pending). Other values reflect a corrupt
+/// descriptor and are reported verbatim. Diagnostic — never fails
+/// the FS-open path (Fs::open replays first), so a clean mount
+/// always reports state == 0.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_journal_state(desc: *const DuetFsDevice) -> c_uint
+{
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return c_uint::MAX };
+    match journal::peek_descriptor(&mut dev, JOURNAL_LBA)
+    {
+        Ok(d) => d.state,
+        Err(_) => c_uint::MAX,
+    }
+}
+
+// ----------------------------------------------------------------
+// Crypto FFI — v6. AES-256-XTS block primitives + Argon2id KDF.
+// Designed so the kernel C++ side composes them into an
+// "encrypted Device" wrapper: it holds the derived 64-byte key in
+// kernel memory, intercepts every read/write callback, and calls
+// duetfs_xts_encrypt_block / duetfs_xts_decrypt_block on the
+// payload before forwarding to the underlying storage.
+// ----------------------------------------------------------------
+
+/// Argon2id KDF. Derives a 64-byte XTS key from a password + salt
+/// and (m_cost_kib, t_cost, p_cost). Returns kStatusOk on success
+/// or kStatusInvalid for parameter / null-pointer / output-size
+/// problems.
+///
+/// `out_key` MUST point at a 64-byte buffer. The first 32 bytes
+/// become the AES-256-XTS data-cipher key; the remaining 32 bytes
+/// the tweak-cipher key. Both are randomly distinguishable from
+/// each other by the KDF — Argon2id's output stream is uniform.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_kdf_argon2id(
+    password: *const u8, password_len: usize, salt: *const u8, salt_len: usize, m_cost_kib: u32,
+    t_cost: u32, p_cost: u32, out_key: *mut u8,
+) -> c_uint
+{
+    if password.is_null() || salt.is_null() || out_key.is_null() || password_len == 0 || salt_len == 0
+    {
+        return STATUS_INVALID;
+    }
+    let pw = unsafe { core::slice::from_raw_parts(password, password_len) };
+    let s = unsafe { core::slice::from_raw_parts(salt, salt_len) };
+    let mut key = [0u8; crypto::XTS_KEY_BYTES];
+    if !crypto::argon2id_kdf(pw, s, m_cost_kib, t_cost, p_cost, &mut key)
+    {
+        return STATUS_INVALID;
+    }
+    let dst = unsafe { core::slice::from_raw_parts_mut(out_key, crypto::XTS_KEY_BYTES) };
+    dst.copy_from_slice(&key);
+    STATUS_OK
+}
+
+/// Encrypt a 4096-byte block in place using AES-256-XTS. `key`
+/// points at a 64-byte key (data || tweak). `sector` is the LBA —
+/// the XTS tweak is derived from it so the same plaintext at
+/// different LBAs produces different ciphertext.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_xts_encrypt_block(
+    key: *const u8, sector: u64, buf: *mut u8,
+) -> c_uint
+{
+    if key.is_null() || buf.is_null()
+    {
+        return STATUS_INVALID;
+    }
+    let mut k = [0u8; crypto::XTS_KEY_BYTES];
+    let raw_key = unsafe { core::slice::from_raw_parts(key, crypto::XTS_KEY_BYTES) };
+    k.copy_from_slice(raw_key);
+    let payload = unsafe { core::slice::from_raw_parts_mut(buf, crypto::SECTOR_BYTES) };
+    crypto::xts_encrypt_in_place(&k, sector, payload);
+    STATUS_OK
+}
+
+/// Decrypt a 4096-byte block in place. Inverse of
+/// `duetfs_xts_encrypt_block`.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_xts_decrypt_block(
+    key: *const u8, sector: u64, buf: *mut u8,
+) -> c_uint
+{
+    if key.is_null() || buf.is_null()
+    {
+        return STATUS_INVALID;
+    }
+    let mut k = [0u8; crypto::XTS_KEY_BYTES];
+    let raw_key = unsafe { core::slice::from_raw_parts(key, crypto::XTS_KEY_BYTES) };
+    k.copy_from_slice(raw_key);
+    let payload = unsafe { core::slice::from_raw_parts_mut(buf, crypto::SECTOR_BYTES) };
+    crypto::xts_decrypt_in_place(&k, sector, payload);
+    STATUS_OK
+}
+
+/// Format an encrypted volume. `dev` MUST already wrap the underlying
+/// storage in the C++ AES-XTS encrypt/decrypt callbacks (the kernel
+/// builds that wrapper after deriving the key with
+/// duetfs_kdf_argon2id). `salt` (16 bytes) and the (m_cost_kib,
+/// t_cost, p_cost) triple get persisted in the SB so a future
+/// mounter can re-derive the key from the same password.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_mkfs_encrypted(
+    desc: *const DuetFsDevice, salt: *const u8, salt_len: usize, m_cost_kib: u32, t_cost: u32,
+    p_cost: u32,
+) -> c_uint
+{
+    if salt.is_null() || salt_len != SALT_BYTES
+    {
+        return STATUS_INVALID;
+    }
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    let mut salt_arr = [0u8; SALT_BYTES];
+    let raw = unsafe { core::slice::from_raw_parts(salt, SALT_BYTES) };
+    salt_arr.copy_from_slice(raw);
+    match mkfs::format_encrypted(&mut dev, &salt_arr, m_cost_kib, t_cost, p_cost)
+    {
+        Ok(()) => STATUS_OK,
+        Err(e) => err_to_status(e),
+    }
+}
+
+// ----------------------------------------------------------------
+// LZ4 compression FFI — v7. Block-format primitives that operate on
+// kernel-staged buffers. The on-disk shape is the standard
+// "size-prefixed LZ4 frame" — a u32-le uncompressed-length header
+// followed by the LZ4 bytes — so external tooling decompresses the
+// raw payload as-is.
+// ----------------------------------------------------------------
+
+/// Compress `src_len` bytes from `src` into `dst`. The output is a
+/// size-prefixed LZ4 frame (u32-le uncompressed length header +
+/// LZ4 bytes). On success writes the byte count to `*out_len` and
+/// returns kStatusOk; on dst-too-small returns kStatusInvalid (caller
+/// queried the worst-case bound from `duetfs_lz4_compress_bound`).
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_lz4_compress(
+    src: *const u8, src_len: usize, dst: *mut u8, dst_max: usize, out_len: *mut usize,
+) -> c_uint
+{
+    if !out_len.is_null()
+    {
+        unsafe { *out_len = 0 };
+    }
+    if src.is_null() || dst.is_null()
+    {
+        return STATUS_INVALID;
+    }
+    let s = unsafe { core::slice::from_raw_parts(src, src_len) };
+    let d = unsafe { core::slice::from_raw_parts_mut(dst, dst_max) };
+    let n = compress::compress_prepend_size(s, d);
+    if n == 0 && src_len != 0
+    {
+        return STATUS_INVALID;
+    }
+    if !out_len.is_null()
+    {
+        unsafe { *out_len = n };
+    }
+    STATUS_OK
+}
+
+/// Decompress a size-prefixed LZ4 frame from `src` into `dst`. On
+/// success writes the byte count to `*out_len` and returns
+/// kStatusOk; on any error (truncated input, bad header, dst short)
+/// returns kStatusInvalid.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_lz4_decompress(
+    src: *const u8, src_len: usize, dst: *mut u8, dst_max: usize, out_len: *mut usize,
+) -> c_uint
+{
+    if !out_len.is_null()
+    {
+        unsafe { *out_len = 0 };
+    }
+    if src.is_null() || dst.is_null() || src_len == 0
+    {
+        return STATUS_INVALID;
+    }
+    let s = unsafe { core::slice::from_raw_parts(src, src_len) };
+    let d = unsafe { core::slice::from_raw_parts_mut(dst, dst_max) };
+    let n = compress::decompress_size_prepended(s, d);
+    if n == 0
+    {
+        return STATUS_INVALID;
+    }
+    if !out_len.is_null()
+    {
+        unsafe { *out_len = n };
+    }
+    STATUS_OK
+}
+
+/// Worst-case output size for `duetfs_lz4_compress` on an input of
+/// `n` bytes — caller sizes the dst buffer to this. Includes the
+/// 4-byte size header. Cheap (no I/O).
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_lz4_compress_bound(n: usize) -> usize
+{
+    compress::compress_bound(n)
+}
+
+// ----------------------------------------------------------------
+// Snapshot FFI — v7. Single-slot save / restore + CoW pinning. The
+// pinning is applied transparently inside Fs::alloc_run; FFI only
+// surfaces create / restore / status to the C++ side.
+// ----------------------------------------------------------------
+
+/// Take a snapshot of the live FS metadata. Persists SB + bitmap +
+/// CRC table + node table into the snapshot slot. After this call
+/// every block the live allocator considers in-use is pinned —
+/// alloc_run treats it as unavailable until snapshot_restore.
+///
+/// `ts_ns` is opaque to the FS — typically the kernel monotonic
+/// clock at snapshot time. Stored verbatim in the SB so the C++
+/// side can render "snapshot taken N seconds ago".
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_snapshot_create(
+    desc: *const DuetFsDevice, ts_ns: u64,
+) -> c_uint
+{
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    match snapshot::create(&mut dev, ts_ns)
+    {
+        Ok(()) => STATUS_OK,
+        Err(e) => err_to_status(e),
+    }
+}
+
+/// Restore the snapshot slot back to the live metadata. The FS
+/// returns to exactly the state captured by the most recent
+/// `duetfs_snapshot_create`. Idempotent — restoring an already-
+/// restored snapshot is a no-op re-apply.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_snapshot_restore(desc: *const DuetFsDevice) -> c_uint
+{
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    match snapshot::restore(&mut dev)
+    {
+        Ok(()) => STATUS_OK,
+        Err(e) => err_to_status(e),
+    }
+}
+
+// ----------------------------------------------------------------
+// xattr FFI — v8. Per-node extended attributes. Path-addressed; the
+// kernel C++ side sees the same FFI shape as setxattr(2) / getxattr
+// / listxattr / removexattr.
+// ----------------------------------------------------------------
+
+/// Set / replace `name`'s value on the node at `path`. Allocates
+/// the per-node xattr block on first set; rewrites in place after.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_xattr_set(
+    desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize, name: *const c_uchar,
+    name_len: usize, value: *const u8, value_len: usize,
+) -> c_uint
+{
+    if name.is_null() || name_len == 0
+    {
+        return STATUS_INVALID;
+    }
+    if value.is_null() && value_len != 0
+    {
+        return STATUS_INVALID;
+    }
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else { return STATUS_INVALID };
+    let mut fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
+    let target = match fs.lookup_path(path_bytes) { Ok(r) => r, Err(e) => return err_to_status(e) };
+    let name_bytes = unsafe { core::slice::from_raw_parts(name, name_len) };
+    let value_bytes = if value_len == 0
+    {
+        &[] as &[u8]
+    }
+    else
+    {
+        unsafe { core::slice::from_raw_parts(value, value_len) }
+    };
+    match fs.xattr_set(target.node_id, name_bytes, value_bytes)
+    {
+        Ok(()) => STATUS_OK,
+        Err(e) => err_to_status(e),
+    }
+}
+
+/// Read `name`'s value on the node at `path` into `dst`. Writes the
+/// full value length (which may exceed `dst_max`) to `*out_len`.
+/// Caller treats `*out_len > dst_max` as "buffer too small".
+/// Returns kStatusOk on hit, kStatusNotFound on no such xattr.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_xattr_get(
+    desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize, name: *const c_uchar,
+    name_len: usize, dst: *mut u8, dst_max: usize, out_len: *mut usize,
+) -> c_uint
+{
+    if !out_len.is_null()
+    {
+        unsafe { *out_len = 0 };
+    }
+    if name.is_null() || name_len == 0
+    {
+        return STATUS_INVALID;
+    }
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else { return STATUS_INVALID };
+    let fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
+    let target = match fs.lookup_path(path_bytes) { Ok(r) => r, Err(e) => return err_to_status(e) };
+    let name_bytes = unsafe { core::slice::from_raw_parts(name, name_len) };
+    // dst can be empty for a probe call ("how big is the buffer I need?").
+    let dst_slice = if dst.is_null() || dst_max == 0
+    {
+        &mut [] as &mut [u8]
+    }
+    else
+    {
+        unsafe { core::slice::from_raw_parts_mut(dst, dst_max) }
+    };
+    match fs.xattr_get(target.node_id, name_bytes, dst_slice)
+    {
+        Ok(n) => {
+            if !out_len.is_null()
+            {
+                unsafe { *out_len = n };
+            }
+            STATUS_OK
+        }
+        Err(e) => err_to_status(e),
+    }
+}
+
+/// List xattr names on the node at `path` as a NUL-separated stream
+/// in `dst`. Writes the total bytes-needed to `*out_len`. Caller
+/// treats `*out_len > dst_max` as "buffer too small".
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_xattr_list(
+    desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize, dst: *mut u8,
+    dst_max: usize, out_len: *mut usize,
+) -> c_uint
+{
+    if !out_len.is_null()
+    {
+        unsafe { *out_len = 0 };
+    }
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else { return STATUS_INVALID };
+    let fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
+    let target = match fs.lookup_path(path_bytes) { Ok(r) => r, Err(e) => return err_to_status(e) };
+    let dst_slice = if dst.is_null() || dst_max == 0
+    {
+        &mut [] as &mut [u8]
+    }
+    else
+    {
+        unsafe { core::slice::from_raw_parts_mut(dst, dst_max) }
+    };
+    match fs.xattr_list(target.node_id, dst_slice)
+    {
+        Ok(n) => {
+            if !out_len.is_null()
+            {
+                unsafe { *out_len = n };
+            }
+            STATUS_OK
+        }
+        Err(e) => err_to_status(e),
+    }
+}
+
+/// Remove `name`'s entry on the node at `path`. Frees the xattr
+/// block if the last entry is removed. Returns kStatusNotFound when
+/// no such xattr exists.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_xattr_remove(
+    desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize, name: *const c_uchar,
+    name_len: usize,
+) -> c_uint
+{
+    if name.is_null() || name_len == 0
+    {
+        return STATUS_INVALID;
+    }
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else { return STATUS_INVALID };
+    let mut fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
+    let target = match fs.lookup_path(path_bytes) { Ok(r) => r, Err(e) => return err_to_status(e) };
+    let name_bytes = unsafe { core::slice::from_raw_parts(name, name_len) };
+    match fs.xattr_remove(target.node_id, name_bytes)
+    {
+        Ok(()) => STATUS_OK,
+        Err(e) => err_to_status(e),
+    }
+}
+
+/// Snapshot presence. 0 = absent, 1 = present, 0xFFFFFFFFu = read
+/// error / corrupt SB.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_snapshot_present(desc: *const DuetFsDevice) -> c_uint
+{
+    let Some(dev) = (unsafe { make_dev(desc) }) else { return c_uint::MAX };
+    let mut block = [0u8; BLOCK_SIZE];
+    if dev.read_block(SUPERBLOCK_LBA, &mut block).is_err()
+    {
+        return c_uint::MAX;
+    }
+    let sb = unsafe {
+        core::ptr::read_unaligned(block.as_ptr() as *const crate::format::Superblock)
+    };
+    if sb.magic != crate::format::MAGIC || sb.version != crate::format::VERSION
+    {
+        return c_uint::MAX;
+    }
+    sb.snapshot_present
+}
+
+/// Read the SB's encryption metadata without mounting the FS.
+/// Lets the C++ side discover salt + cost params for a previously-
+/// formatted encrypted volume so it can prompt for a password,
+/// derive the key, and build the encrypted-Device wrapper before
+/// any other duetfs FFI call. `dev` here is the RAW device, NOT a
+/// crypto wrapper — the SB lives at LBA 0 plaintext.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_read_encryption_meta(
+    desc: *const DuetFsDevice, out_encrypted: *mut u32, out_m_cost: *mut u32, out_t_cost: *mut u32,
+    out_p_cost: *mut u32, out_salt: *mut u8, salt_buf_len: usize,
+) -> c_uint
+{
+    let Some(dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    if salt_buf_len < SALT_BYTES
+    {
+        return STATUS_INVALID;
+    }
+    let mut block = [0u8; BLOCK_SIZE];
+    if dev.read_block(0, &mut block).is_err()
+    {
+        return STATUS_IO;
+    }
+    let sb = unsafe {
+        core::ptr::read_unaligned(block.as_ptr() as *const crate::format::Superblock)
+    };
+    if sb.magic != crate::format::MAGIC || sb.version != crate::format::VERSION
+    {
+        return STATUS_INVALID;
+    }
+    if !out_encrypted.is_null()
+    {
+        unsafe { *out_encrypted = sb.encrypted };
+    }
+    if !out_m_cost.is_null()
+    {
+        unsafe { *out_m_cost = sb.kdf_m_cost_kib };
+    }
+    if !out_t_cost.is_null()
+    {
+        unsafe { *out_t_cost = sb.kdf_t_cost };
+    }
+    if !out_p_cost.is_null()
+    {
+        unsafe { *out_p_cost = sb.kdf_p_cost };
+    }
+    if !out_salt.is_null()
+    {
+        let dst = unsafe { core::slice::from_raw_parts_mut(out_salt, SALT_BYTES) };
+        dst.copy_from_slice(&sb.kdf_salt);
+    }
+    STATUS_OK
+}

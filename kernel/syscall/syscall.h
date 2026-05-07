@@ -1708,6 +1708,38 @@ enum SyscallNumber : u64
     //         (table full / size mismatch / hotspot OOR / bad
     //         pointer).
     SYS_GDI_CREATE_CURSOR = 175,
+
+    // POSIX-shaped filesystem mutation surface for DuetFS-mounted
+    // paths. The kernel routes paths whose longest mount-prefix is
+    // a DuetFS mount through the duetfs FFI (kernel/fs/duetfs/);
+    // non-DuetFS paths return -1 (other backends will hook in as
+    // they grow these primitives). Every entry is gated on
+    // kCapFsWrite at the syscall layer.
+    //
+    //   SYS_FILE_MKDIR    — rdi = const char* user_path,
+    //                       rsi = path_len (excluding NUL).
+    //                       rax = 0 on success, NTSTATUS on failure.
+    //   SYS_FILE_SYMLINK  — rdi = const char* user_path (the symlink),
+    //                       rsi = path_len,
+    //                       rdx = const char* user_target,
+    //                       r10 = target_len.
+    //                       rax = 0 on success.
+    //   SYS_FILE_LINK     — rdi = const char* user_existing,
+    //                       rsi = existing_len,
+    //                       rdx = const char* user_new,
+    //                       r10 = new_len.
+    //                       rax = 0 on success.
+    //   SYS_FILE_READLINK — rdi = const char* user_path,
+    //                       rsi = path_len,
+    //                       rdx = user u8* dst (kernel writes the
+    //                             link target verbatim, NUL-terminated),
+    //                       r10 = dst_max.
+    //                       rax = bytes copied (excluding NUL) on success,
+    //                             0xFFFFFFFFFFFFFFFFu on failure.
+    SYS_FILE_MKDIR = 180,
+    SYS_FILE_SYMLINK = 181,
+    SYS_FILE_LINK = 182,
+    SYS_FILE_READLINK = 183,
 };
 
 /// Cursor-shape values the PE side hands the kernel via

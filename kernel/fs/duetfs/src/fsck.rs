@@ -13,8 +13,9 @@ use crate::alloc_bitmap::BitmapAllocator;
 use crate::block_dev::BlockDevice;
 use crate::crc32::crc32;
 use crate::format::{
-    BITMAP_LBA, BLOCK_SIZE, CRC_TABLE_LBA, MAX_INLINE_EXTENTS, NODE_KIND_DIR, NODE_KIND_FILE,
-    NODE_KIND_SYMLINK, NODE_TABLE_BLOCKS, NODE_TABLE_LBA, SUPERBLOCK_LBA,
+    BITMAP_LBA, BLOCK_SIZE, CRC_TABLE_LBA, JOURNAL_BLOCKS, JOURNAL_LBA, MAX_INLINE_EXTENTS,
+    NODE_KIND_DIR, NODE_KIND_FILE, NODE_KIND_SYMLINK, NODE_TABLE_BLOCKS, NODE_TABLE_LBA,
+    SNAPSHOT_BLOCKS, SNAPSHOT_LBA, SUPERBLOCK_LBA,
 };
 use crate::fs::{compute_sb_crc, Fs, FsError, FsResult};
 use crate::mkfs;
@@ -47,6 +48,14 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         for i in 0..NODE_TABLE_BLOCKS
         {
             want.mark_used(NODE_TABLE_LBA + i);
+        }
+        for i in 0..JOURNAL_BLOCKS
+        {
+            want.mark_used(JOURNAL_LBA + i);
+        }
+        for i in 0..SNAPSHOT_BLOCKS
+        {
+            want.mark_used(SNAPSHOT_LBA + i);
         }
 
         // Per-node refcount derived from dir entries (so we can
@@ -154,12 +163,27 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
             }
         }
 
-        // Per-block CRC verification.
+        // Per-block CRC verification. Journal blocks are mutated by
+        // every metadata commit (and the descriptor itself by every
+        // open via replay's clear) — their CRC entries can't track
+        // those updates without doubling the I/O on every write. The
+        // journal's own descriptor CRC + payload CRCs cover its
+        // integrity instead, so skip the journal range here.
         let mut buf = [0u8; BLOCK_SIZE];
         for b in 0..self.sb.total_blocks
         {
-            // Skip the CRC table block itself (sentinel = 0).
             if b == CRC_TABLE_LBA
+            {
+                continue;
+            }
+            if b >= JOURNAL_LBA && b < JOURNAL_LBA + JOURNAL_BLOCKS
+            {
+                continue;
+            }
+            // Snapshot blocks change on snapshot_create / restore;
+            // their CRC is implicit in the snapshot SB copy at
+            // SNAPSHOT_LBA, not the live crc_table entry.
+            if b >= SNAPSHOT_LBA && b < SNAPSHOT_LBA + SNAPSHOT_BLOCKS
             {
                 continue;
             }
@@ -176,7 +200,11 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         {
             self.bitmap = want;
             self.bitmap.flush(self.dev).map_err(|_| FsError::Io)?;
-            // Rebuild every CRC entry by reading + hashing.
+            // Rebuild every CRC entry by reading + hashing. The
+            // journal range tracks its own CRC inside the descriptor
+            // — leave its crc_table entries pointing at whatever the
+            // current bytes hash to, but the verifier above skips
+            // them so the entry's value doesn't matter.
             for b in 0..self.sb.total_blocks
             {
                 if b == CRC_TABLE_LBA

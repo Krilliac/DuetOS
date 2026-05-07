@@ -79,4 +79,14 @@ impl CrcTable
         }
         Ok(())
     }
+
+    /// Snapshot the in-memory bytes without touching the device.
+    /// Used by journal-protected callers that want to feed the
+    /// CRC-table block as one of the staged ops in a single txn,
+    /// and clear the dirty flag once the journal commits.
+    pub fn materialise(&mut self) -> [u8; BLOCK_SIZE]
+    {
+        self.dirty = false;
+        self.bytes
+    }
 }

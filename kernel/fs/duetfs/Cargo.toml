@@ -43,7 +43,18 @@ opt-level       = 1
 overflow-checks = true
 debug           = true
 
-# Intentionally no [dependencies]. The v0 read path needs core + alloc
-# only — anything beyond that is a follow-up slice. RedoxFS pulls in
-# aes / xts-mode / argon2 / lz4_flex / seahash; the equivalents land
-# behind their own Roadmap items, not this one.
+# Crypto deps — added in the v6 encryption slice.
+#   aes        — pure-Rust AES-128/256 block cipher (no_std).
+#   xts-mode   — XTS-mode wrapper for AES (no_std).
+#   argon2     — Argon2id password-based KDF (no_std + alloc).
+# All three ride on the cipher / digest / blake2 stack and stay
+# no_std + alloc, matching the crate's existing freestanding shape.
+
+[dependencies]
+aes        = { version = "0.8", default-features = false }
+xts-mode   = { version = "0.5", default-features = false }
+argon2     = { version = "0.5", default-features = false, features = ["alloc"] }
+# LZ4 — pure-Rust block-format compress / decompress (no_std). Used
+# for the v7 file-payload compression path; the in-memory layout is
+# the standard LZ4 frame so external tools can decompress as-is.
+lz4_flex   = { version = "0.11", default-features = false }

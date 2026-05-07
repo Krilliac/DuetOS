@@ -11,9 +11,9 @@ use crate::crc32::crc32;
 use crate::crc_table::CrcTable;
 use crate::format::{
     Extent, Node, Superblock, BITMAP_LBA, BLOCK_SIZE, CRC_TABLE_BLOCKS, CRC_TABLE_LBA,
-    DATA_LBA, MAGIC, MIN_TOTAL_BLOCKS, NODE_COUNT, NODE_KIND_DIR, NODE_SIZE,
-    NODE_TABLE_BLOCKS, NODE_TABLE_LBA, NODES_PER_BLOCK, ROOT_NODE_ID, SUPERBLOCK_LBA,
-    VERSION,
+    DATA_LBA, JOURNAL_BLOCKS, JOURNAL_LBA, MAGIC, MIN_TOTAL_BLOCKS, NODE_COUNT,
+    NODE_KIND_DIR, NODE_SIZE, NODE_TABLE_BLOCKS, NODE_TABLE_LBA, NODES_PER_BLOCK,
+    ROOT_NODE_ID, SNAPSHOT_BLOCKS, SNAPSHOT_LBA, SUPERBLOCK_LBA, VERSION,
 };
 use crate::fs::{compute_sb_crc, FsError, FsResult};
 
@@ -41,14 +41,34 @@ pub fn format<D: BlockDevice + ?Sized>(dev: &mut D) -> FsResult<()>
     {
         bitmap.mark_used(NODE_TABLE_LBA + i);
     }
+    for i in 0..JOURNAL_BLOCKS
+    {
+        bitmap.mark_used(JOURNAL_LBA + i);
+    }
+    for i in 0..SNAPSHOT_BLOCKS
+    {
+        bitmap.mark_used(SNAPSHOT_LBA + i);
+    }
     let root_extent = DATA_LBA;
     bitmap.mark_used(root_extent);
 
-    // 2. Zero the node table + root dir's child-id block.
+    // 2. Zero the node table + journal + root dir's child-id block.
+    //    Journal block 0 starts as an EMPTY descriptor (all zeros —
+    //    the EMPTY state is value 0 and the magic check happens
+    //    before state, so a fully-zeroed descriptor is treated as a
+    //    no-op by replay).
     let zero = [0u8; BLOCK_SIZE];
     for i in 0..NODE_TABLE_BLOCKS
     {
         dev.write_block(NODE_TABLE_LBA + i, &zero).map_err(|_| FsError::Io)?;
+    }
+    for i in 0..JOURNAL_BLOCKS
+    {
+        dev.write_block(JOURNAL_LBA + i, &zero).map_err(|_| FsError::Io)?;
+    }
+    for i in 0..SNAPSHOT_BLOCKS
+    {
+        dev.write_block(SNAPSHOT_LBA + i, &zero).map_err(|_| FsError::Io)?;
     }
     dev.write_block(root_extent, &zero).map_err(|_| FsError::Io)?;
 
@@ -79,6 +99,15 @@ pub fn format<D: BlockDevice + ?Sized>(dev: &mut D) -> FsResult<()>
         dev.read_block(NODE_TABLE_LBA + i, &mut buf).map_err(|_| FsError::Io)?;
         crc_table.set(NODE_TABLE_LBA + i, crc32(&buf));
     }
+    let zero_crc = crc32(&zero);
+    for i in 0..JOURNAL_BLOCKS
+    {
+        crc_table.set(JOURNAL_LBA + i, zero_crc);
+    }
+    for i in 0..SNAPSHOT_BLOCKS
+    {
+        crc_table.set(SNAPSHOT_LBA + i, zero_crc);
+    }
     crc_table.set(root_extent, crc32(&zero));
 
     // 6. Build superblock with CRC.
@@ -97,7 +126,21 @@ pub fn format<D: BlockDevice + ?Sized>(dev: &mut D) -> FsResult<()>
         data_lba: DATA_LBA,
         free_blocks: bitmap.free_count(),
         sb_crc32: 0,
-        reserved: [0; 2],
+        journal_lba: JOURNAL_LBA,
+        journal_blocks: JOURNAL_BLOCKS,
+        // v6 — unencrypted by default. mkfs_encrypted populates
+        // these via a wrapper around `format` that re-CRCs the SB.
+        encrypted: 0,
+        kdf_m_cost_kib: 0,
+        kdf_t_cost: 0,
+        kdf_p_cost: 0,
+        kdf_salt: [0; crate::format::SALT_BYTES],
+        // v7 — snapshot slot present at SNAPSHOT_LBA but empty.
+        snapshot_lba: SNAPSHOT_LBA,
+        snapshot_blocks: SNAPSHOT_BLOCKS,
+        snapshot_present: 0,
+        snapshot_reserved: 0,
+        snapshot_timestamp_ns: 0,
     };
     sb.sb_crc32 = compute_sb_crc(&sb);
 
@@ -150,4 +193,35 @@ pub(crate) fn rewrite_superblock<D: BlockDevice + ?Sized>(
     };
     block[..raw.len()].copy_from_slice(raw);
     dev.write_block(SUPERBLOCK_LBA, &block).map_err(|_| FsError::Io)
+}
+
+/// Format an encrypted volume. Runs the standard `format`, then
+/// rewrites the SB with the v6 encryption metadata. The caller
+/// (typically the C++ kernel side) MUST already have a key derived
+/// from `salt + (m, t, p)` and a Device whose read/write callbacks
+/// AES-XTS-encrypt every LBA except SUPERBLOCK_LBA. mkfs writes
+/// metadata blocks via that Device, so they land on the underlying
+/// medium ciphertext-side; the SB stays plaintext (unencrypted) so
+/// a future mounter can read the salt + cost params before it has
+/// the key.
+pub fn format_encrypted<D: BlockDevice + ?Sized>(
+    dev: &mut D, salt: &[u8; crate::format::SALT_BYTES], m_cost_kib: u32, t_cost: u32, p_cost: u32,
+) -> FsResult<()>
+{
+    format(dev)?;
+    // Read the SB back to inherit the just-written values, swap in
+    // the encryption metadata, re-CRC, and write again. The SB write
+    // path stays unencrypted in the C++ wrapper, so this round-trip
+    // doesn't garble itself.
+    let mut block = [0u8; BLOCK_SIZE];
+    dev.read_block(SUPERBLOCK_LBA, &mut block).map_err(|_| FsError::Io)?;
+    let mut sb = unsafe { core::ptr::read_unaligned(block.as_ptr() as *const Superblock) };
+    sb.encrypted = crate::format::ENCRYPTED_AES_XTS_256;
+    sb.kdf_m_cost_kib = m_cost_kib;
+    sb.kdf_t_cost = t_cost;
+    sb.kdf_p_cost = p_cost;
+    sb.kdf_salt = *salt;
+    sb.sb_crc32 = 0;
+    sb.sb_crc32 = compute_sb_crc(&sb);
+    rewrite_superblock(dev, &sb)
 }

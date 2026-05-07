@@ -27,6 +27,8 @@
 #include "arch/x86_64/hypervisor.h"
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "fs/duetfs.h"
+#include "fs/duetfs/include/duetfs.h"
 #include "fs/fat32.h"
 #include "fs/mount.h"
 #include "fs/ramfs.h"
@@ -167,6 +169,44 @@ bool ParseDiskPath(const char* path, u32* out_idx, const char** out_rest)
     return true;
 }
 
+// Resolve `path` against the VFS mount registry and, if the matched
+// mount is a DuetFS mount, write `*out_block_handle` and
+// `*out_subpath` (always starts with '/' — the in-mount tail). The
+// kernel's boot DuetFS volume is mounted at "/duetfs", so paths like
+// "/duetfs/etc/version" land here with subpath = "/etc/version".
+bool ParseDuetFsPath(const char* path, u32* out_block_handle, const char** out_subpath)
+{
+    if (path == nullptr)
+        return false;
+    const char* sub = nullptr;
+    const auto* me = duetos::fs::VfsMountResolve(path, &sub);
+    if (me == nullptr || me->fs_type != duetos::fs::FsType::DuetFs)
+        return false;
+    if (sub == nullptr || sub[0] != '/')
+        return false;
+    *out_block_handle = me->block_handle;
+    *out_subpath = sub;
+    return true;
+}
+
+// Build a duetfs::Device descriptor from a mount block-handle.
+duetos::fs::duetfs::Device DuetFsDeviceFor(u32 block_handle)
+{
+    return duetos::fs::duetfs::DeviceForMountHandle(block_handle);
+}
+
+// Path length (NUL-terminated) bounded at kPathMax — used to size
+// the path_max argument to duetfs FFI calls. Ramfs paths can
+// theoretically be longer; the duetfs FFI walks until NUL or
+// path_max so we hand it a generous bound.
+u64 PathLen(const char* p)
+{
+    u64 n = 0;
+    while (p[n] != '\0' && n < kPathMax)
+        ++n;
+    return n;
+}
+
 // Find a free Win32 handle slot on `proc`. Returns kWin32HandleCap
 // when none are free.
 u64 FindFreeSlot(::duetos::core::Process* proc)
@@ -189,7 +229,7 @@ u64 HandleToSlot(u64 handle)
     return handle - Process::kWin32HandleBase;
 }
 
-// Per-handle byte size accessor — both backings know it.
+// Per-handle byte size accessor — every backing knows it.
 u64 HandleSize(const ::duetos::core::Process::Win32FileHandle& h)
 {
     using ::duetos::core::Process;
@@ -197,6 +237,8 @@ u64 HandleSize(const ::duetos::core::Process::Win32FileHandle& h)
         return h.ramfs_node->file_size;
     if (h.kind == Process::FsBackingKind::Fat32)
         return h.fat32_entry.size_bytes;
+    if (h.kind == Process::FsBackingKind::DuetFs)
+        return h.duetfs_size_bytes;
     return 0;
 }
 
@@ -213,6 +255,9 @@ u64 OpenForProcess(::duetos::core::Process* proc, const char* path)
     u32 disk_idx = 0;
     const char* disk_rest = nullptr;
     const bool routed = ParseDiskPath(path, &disk_idx, &disk_rest);
+    u32 duet_handle = 0;
+    const char* duet_sub = nullptr;
+    const bool duet_routed = ParseDuetFsPath(path, &duet_handle, &duet_sub);
 
     const u64 slot = FindFreeSlot(proc);
     if (slot == Process::kWin32HandleCap)
@@ -223,6 +268,47 @@ u64 OpenForProcess(::duetos::core::Process* proc, const char* path)
         return u64(-1);
     }
     Process::Win32FileHandle& h = proc->win32_handles[slot];
+
+    if (duet_routed)
+    {
+        const auto dev = DuetFsDeviceFor(duet_handle);
+        duetos::fs::duetfs::LookupResult res{};
+        const u64 sub_len = PathLen(duet_sub);
+        const u32 st = duetfs_lookup(&dev, reinterpret_cast<const u8*>(duet_sub), sub_len + 1, &res);
+        if (st != duetos::fs::duetfs::kStatusOk)
+        {
+            SerialWrite("[fs/route] open: duetfs miss path=\"");
+            SerialWrite(path);
+            SerialWrite("\"\n");
+            return u64(-1);
+        }
+        // Refuse open of a directory — Win32 file handles are file-only.
+        if (res.kind != duetos::fs::duetfs::kKindFile && res.kind != duetos::fs::duetfs::kKindSymlink)
+        {
+            SerialWrite("[fs/route] open: refusing duetfs non-file kind\n");
+            return u64(-1);
+        }
+        h.kind = Process::FsBackingKind::DuetFs;
+        h.ramfs_node = nullptr;
+        h.fat32_volume_idx = 0;
+        h.duetfs_block_handle = duet_handle;
+        h.duetfs_node_id = res.node_id;
+        h.duetfs_size_bytes = static_cast<u64>(res.size_bytes);
+        h.cursor = 0;
+        h.is_canary = false;
+        (void)CopyPathInto(h.fat32_path, nullptr);
+        const u64 handle = Process::kWin32HandleBase + slot;
+        SerialWrite("[fs/route] open ok pid=");
+        SerialWriteHex(proc->pid);
+        SerialWrite(" path=\"");
+        SerialWrite(path);
+        SerialWrite("\" backing=duetfs node=");
+        SerialWriteHex(res.node_id);
+        SerialWrite(" size=");
+        SerialWriteHex(res.size_bytes);
+        SerialWrite("\n");
+        return handle;
+    }
 
     if (routed)
     {
@@ -347,6 +433,19 @@ u64 ReadForProcess(::duetos::core::Process* proc, u64 handle, void* dst, u64 len
         return take;
     }
 
+    if (h.kind == Process::FsBackingKind::DuetFs)
+    {
+        const auto dev = DuetFsDeviceFor(h.duetfs_block_handle);
+        const u64 remaining = size - h.cursor;
+        const u64 take = (len < remaining) ? len : remaining;
+        usize got = 0;
+        const u32 st = duetfs_read_file(&dev, h.duetfs_node_id, static_cast<u32>(h.cursor), dst, take, &got);
+        if (st != duetos::fs::duetfs::kStatusOk)
+            return u64(-1);
+        h.cursor += static_cast<u64>(got);
+        return static_cast<u64>(got);
+    }
+
     // Fat32 backing — stream through the offset-aware reader so
     // we can resume from any cursor without staging the whole file.
     const fat32::Volume* vol = fat32::Fat32Volume(h.fat32_volume_idx);
@@ -387,6 +486,22 @@ u64 WriteForProcess(::duetos::core::Process* proc, u64 handle, const void* src, 
 
     if (h.kind == Process::FsBackingKind::Ramfs)
         return u64(-1); // ramfs is .rodata
+
+    if (h.kind == Process::FsBackingKind::DuetFs)
+    {
+        const auto dev = DuetFsDeviceFor(h.duetfs_block_handle);
+        usize wrote = 0;
+        const u32 st = duetfs_write_at(&dev, h.duetfs_node_id, static_cast<u32>(h.cursor), src, len, &wrote);
+        if (st != duetos::fs::duetfs::kStatusOk)
+            return u64(-1);
+        h.cursor += static_cast<u64>(wrote);
+        // Refresh the cached size — write_at auto-grew the file if the
+        // write extended past EOF, and SeekForProcess / FstatForProcess
+        // need the new size to clamp to a valid range.
+        if (h.cursor > h.duetfs_size_bytes)
+            h.duetfs_size_bytes = h.cursor;
+        return static_cast<u64>(wrote);
+    }
 
     const fat32::Volume* vol = fat32::Fat32Volume(h.fat32_volume_idx);
     if (vol == nullptr)
@@ -456,6 +571,50 @@ u64 CreateForProcess(::duetos::core::Process* proc, const char* path, const void
 
     u32 disk_idx = 0;
     const char* disk_rest = nullptr;
+    u32 duet_handle = 0;
+    const char* duet_sub = nullptr;
+    if (ParseDuetFsPath(path, &duet_handle, &duet_sub))
+    {
+        const auto dev = DuetFsDeviceFor(duet_handle);
+        u32 new_id = 0;
+        const u64 sub_len = PathLen(duet_sub);
+        const u32 st = duetfs_create_path(&dev, reinterpret_cast<const u8*>(duet_sub), sub_len + 1,
+                                          duetos::fs::duetfs::kKindFile, &new_id);
+        if (st != duetos::fs::duetfs::kStatusOk)
+        {
+            SerialWrite("[fs/route] create: duetfs_create_path failed st=");
+            SerialWriteHex(st);
+            SerialWrite("\n");
+            return u64(-1);
+        }
+        if (init_len > 0 && init_bytes != nullptr)
+        {
+            usize wrote = 0;
+            const u32 wst = duetfs_write_at(&dev, new_id, 0, init_bytes, init_len, &wrote);
+            if (wst != duetos::fs::duetfs::kStatusOk || wrote != init_len)
+            {
+                // Roll back the create — leaves the FS in its pre-call state.
+                (void)duetfs_unlink_path(&dev, reinterpret_cast<const u8*>(duet_sub), sub_len + 1);
+                return u64(-1);
+            }
+        }
+        const u64 slot = FindFreeSlot(proc);
+        if (slot == Process::kWin32HandleCap)
+            return u64(-1);
+        Process::Win32FileHandle& dh = proc->win32_handles[slot];
+        dh.kind = Process::FsBackingKind::DuetFs;
+        dh.ramfs_node = nullptr;
+        dh.fat32_volume_idx = 0;
+        dh.duetfs_block_handle = duet_handle;
+        dh.duetfs_node_id = new_id;
+        dh.duetfs_size_bytes = init_len;
+        dh.cursor = 0;
+        dh.is_canary = false;
+        (void)CopyPathInto(dh.fat32_path, nullptr);
+        if (init_len > 0)
+            ::duetos::core::RecordFsWrite(proc, init_len);
+        return Process::kWin32HandleBase + slot;
+    }
     if (!ParseDiskPath(path, &disk_idx, &disk_rest))
     {
         SerialWrite("[fs/route] create: ramfs path rejected (read-only) \"");
@@ -646,6 +805,25 @@ bool UnlinkForProcess(::duetos::core::Process* proc, const char* path)
     (void)proc;
     if (path == nullptr || path[0] == '\0')
         return false;
+    u32 duet_handle = 0;
+    const char* duet_sub = nullptr;
+    if (ParseDuetFsPath(path, &duet_handle, &duet_sub))
+    {
+        if (::duetos::security::CanaryCheck(duet_sub, "unlink"))
+            return false;
+        if (::duetos::security::PersistenceCheck(duet_sub, "unlink"))
+            return false;
+        const auto dev = DuetFsDeviceFor(duet_handle);
+        const u64 sub_len = PathLen(duet_sub);
+        if (duetfs_unlink_path(&dev, reinterpret_cast<const u8*>(duet_sub), sub_len + 1) !=
+            duetos::fs::duetfs::kStatusOk)
+        {
+            return false;
+        }
+        ::duetos::subsystems::linux::internal::InotifyPublish(duet_sub,
+                                                              ::duetos::subsystems::linux::internal::kInDelete);
+        return true;
+    }
     u32 idx = 0;
     const char* rest = nullptr;
     if (!ParseDiskPath(path, &idx, &rest))
@@ -673,6 +851,22 @@ bool StatPathForProcess(::duetos::core::Process* proc, const char* path, u64* ou
 {
     if (proc == nullptr || path == nullptr || path[0] == '\0')
         return false;
+    u32 duet_handle = 0;
+    const char* duet_sub = nullptr;
+    if (ParseDuetFsPath(path, &duet_handle, &duet_sub))
+    {
+        const auto dev = DuetFsDeviceFor(duet_handle);
+        duetos::fs::duetfs::LookupResult res{};
+        const u64 sub_len = PathLen(duet_sub);
+        const u32 st = duetfs_lookup(&dev, reinterpret_cast<const u8*>(duet_sub), sub_len + 1, &res);
+        if (st != duetos::fs::duetfs::kStatusOk)
+            return false;
+        if (out_size != nullptr)
+            *out_size = static_cast<u64>(res.size_bytes);
+        if (out_is_dir != nullptr)
+            *out_is_dir = (res.kind == duetos::fs::duetfs::kKindDir);
+        return true;
+    }
     u32 idx = 0;
     const char* rest = nullptr;
     if (ParseDiskPath(path, &idx, &rest))
@@ -741,6 +935,103 @@ bool RenameForProcess(::duetos::core::Process* proc, const char* src, const char
                                                           ::duetos::subsystems::linux::internal::kInMovedFrom);
     ::duetos::subsystems::linux::internal::InotifyPublish(dst_rest, ::duetos::subsystems::linux::internal::kInMovedTo);
     return true;
+}
+
+// ---------------------------------------------------------------
+// DuetFS-backed metadata operations. These call into the Rust
+// crate via the FFI; non-DuetFS paths return false (kept simple
+// — extending into FAT32 / ramfs is its own slice).
+// ---------------------------------------------------------------
+
+bool MkdirForProcess(::duetos::core::Process* proc, const char* path)
+{
+    (void)proc;
+    if (path == nullptr || path[0] == '\0')
+        return false;
+    u32 duet_handle = 0;
+    const char* duet_sub = nullptr;
+    if (!ParseDuetFsPath(path, &duet_handle, &duet_sub))
+        return false;
+    const auto dev = DuetFsDeviceFor(duet_handle);
+    u32 new_id = 0;
+    const u64 sub_len = PathLen(duet_sub);
+    const u32 st = duetfs_create_path(&dev, reinterpret_cast<const u8*>(duet_sub), sub_len + 1,
+                                      duetos::fs::duetfs::kKindDir, &new_id);
+    if (st != duetos::fs::duetfs::kStatusOk)
+        return false;
+    ::duetos::subsystems::linux::internal::InotifyPublish(duet_sub, ::duetos::subsystems::linux::internal::kInCreate);
+    return true;
+}
+
+bool SymlinkForProcess(::duetos::core::Process* proc, const char* path, const char* target)
+{
+    (void)proc;
+    if (path == nullptr || target == nullptr || path[0] == '\0' || target[0] == '\0')
+        return false;
+    u32 duet_handle = 0;
+    const char* duet_sub = nullptr;
+    if (!ParseDuetFsPath(path, &duet_handle, &duet_sub))
+        return false;
+    const auto dev = DuetFsDeviceFor(duet_handle);
+    u32 new_id = 0;
+    const u64 sub_len = PathLen(duet_sub);
+    const u64 tgt_len = PathLen(target);
+    const u32 st = duetfs_create_symlink(&dev, reinterpret_cast<const u8*>(duet_sub), sub_len + 1,
+                                         reinterpret_cast<const u8*>(target), tgt_len + 1, &new_id);
+    if (st != duetos::fs::duetfs::kStatusOk)
+        return false;
+    ::duetos::subsystems::linux::internal::InotifyPublish(duet_sub, ::duetos::subsystems::linux::internal::kInCreate);
+    return true;
+}
+
+bool LinkForProcess(::duetos::core::Process* proc, const char* existing_path, const char* new_path)
+{
+    (void)proc;
+    if (existing_path == nullptr || new_path == nullptr || existing_path[0] == '\0' || new_path[0] == '\0')
+        return false;
+    u32 e_handle = 0;
+    u32 n_handle = 0;
+    const char* e_sub = nullptr;
+    const char* n_sub = nullptr;
+    if (!ParseDuetFsPath(existing_path, &e_handle, &e_sub) || !ParseDuetFsPath(new_path, &n_handle, &n_sub))
+        return false;
+    if (e_handle != n_handle)
+        return false; // cross-volume link unsupported
+    const auto dev = DuetFsDeviceFor(e_handle);
+    const u64 e_len = PathLen(e_sub);
+    const u64 n_len = PathLen(n_sub);
+    const u32 st =
+        duetfs_link(&dev, reinterpret_cast<const u8*>(e_sub), e_len + 1, reinterpret_cast<const u8*>(n_sub), n_len + 1);
+    return st == duetos::fs::duetfs::kStatusOk;
+}
+
+u64 ReadlinkForProcess(::duetos::core::Process* proc, const char* path, char* dst, u64 dst_max)
+{
+    (void)proc;
+    if (path == nullptr || dst == nullptr || dst_max == 0 || path[0] == '\0')
+        return u64(-1);
+    u32 duet_handle = 0;
+    const char* duet_sub = nullptr;
+    if (!ParseDuetFsPath(path, &duet_handle, &duet_sub))
+        return u64(-1);
+    const auto dev = DuetFsDeviceFor(duet_handle);
+    duetos::fs::duetfs::LookupResult res{};
+    const u64 sub_len = PathLen(duet_sub);
+    if (duetfs_lookup(&dev, reinterpret_cast<const u8*>(duet_sub), sub_len + 1, &res) != duetos::fs::duetfs::kStatusOk)
+    {
+        return u64(-1);
+    }
+    if (res.kind != duetos::fs::duetfs::kKindSymlink)
+        return u64(-1);
+    // Reserve one byte for NUL — duetfs_readlink writes raw bytes,
+    // so we cap the read to dst_max - 1.
+    usize copied = 0;
+    if (duetfs_readlink(&dev, res.node_id, dst, dst_max - 1, &copied) != duetos::fs::duetfs::kStatusOk)
+        return u64(-1);
+    if (copied >= dst_max)
+        copied = dst_max - 1;
+    dst[copied] = '\0';
+    return static_cast<u64>(copied);
 }
 
 // ---------------------------------------------------------------

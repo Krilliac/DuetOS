@@ -1,26 +1,29 @@
-// DuetFS v3 on-disk format.
+// DuetFS v5 on-disk format.
 //
 //   block 0          Superblock (struct Superblock, padded to BLOCK_SIZE)
 //   block 1          Free-block bitmap (1 bit per block; bit set = in use)
 //   block 2          CRC table (1024 × u32, one per FS block; v3 caps
 //                    images at 1024 blocks = 4 MiB)
 //   block 3..=6      Node table (NODES_PER_BLOCK × Node per block, 4 blocks = 64 nodes)
-//   block 7..        Data blocks (file extents, dir-children blocks)
+//   block 7..=14     Journal (1 descriptor + 7 payload slots, v5)
+//   block 15..       Data blocks (file extents, dir-children blocks)
 //
 // All multi-byte integers are little-endian.
 //
+// v5 changes vs v3 (v3 → v4 was a fix-only bump that didn't ship a
+// public format; v5 is the first format-extending bump):
+//   - Journal at JOURNAL_LBA covers atomic metadata writes (every
+//     write_node + bitmap-flush + crc-table-flush path). On mount
+//     Fs::open replays any committed-but-unfinished txn, so a
+//     torn write of a multi-block metadata mutation either fully
+//     persists or fully reverts. See src/journal.rs.
+//   - Superblock gains journal_lba + journal_blocks (consume the
+//     two pre-existing reserved u32 fields).
+//   - DATA_LBA shifts from 7 to 15.
+//
 // v3 changes vs v2:
-//   - Per-block CRCs stored in a CRC table at LBA 2. Every write
-//     through the Fs::write_block_checked path updates the entry;
-//     fsck verifies. Reads are still uncorrected — the CRC catches
-//     bit rot at fsck time, not at every read. Image cap drops
-//     from 128 MiB to 4 MiB (single CRC block); a future slice
-//     extends to a multi-block CRC table.
-//   - Node carries `link_count` (hard-link refcount) and
-//     NODE_KIND_SYMLINK is a new kind. unlink decrements; only
-//     drops the data + recycles the node when link_count reaches
-//     0.
-//   - Magic stays "DuetFS01"; version bumps 3 -> 4.
+//   - Per-block CRCs stored in a CRC table at LBA 2.
+//   - Node carries `link_count`; NODE_KIND_SYMLINK is a new kind.
 
 pub const BLOCK_SIZE: usize = 4096;
 pub const NODE_SIZE: usize = 256;
@@ -36,8 +39,43 @@ pub const CRC_TABLE_BLOCKS: u32 = 1;
 pub const NODE_TABLE_LBA: u32 = CRC_TABLE_LBA + CRC_TABLE_BLOCKS; // 3
 pub const NODE_TABLE_BLOCKS: u32 = 4;
 pub const NODE_COUNT: u32 = NODE_TABLE_BLOCKS * (NODES_PER_BLOCK as u32); // 64
-pub const DATA_LBA: u32 = NODE_TABLE_LBA + NODE_TABLE_BLOCKS; // 7
-pub const MIN_TOTAL_BLOCKS: u32 = DATA_LBA + 1;               // 8
+
+// Journal — v5. 1 descriptor block + 7 payload slots. Sized so an
+// internal mutation that touches at most one metadata block (the
+// dominant case: write_node updates a single node-table block) plus
+// up to six co-affected blocks (bitmap, crc-table, dir-child block,
+// truncate's freed-extent zeros, …) commits in a single txn. Larger
+// batches must split into multiple txns and accept loss of cross-txn
+// atomicity — a follow-up grows the journal once a real workload
+// shows the contention.
+pub const JOURNAL_LBA: u32 = NODE_TABLE_LBA + NODE_TABLE_BLOCKS; // 7
+pub const JOURNAL_BLOCKS: u32 = 8;
+pub const MAX_JOURNAL_OPS: usize = (JOURNAL_BLOCKS - 1) as usize; // 7
+
+pub const JOURNAL_DESCRIPTOR_MAGIC: u32 = u32::from_le_bytes(*b"DJRN");
+pub const JOURNAL_STATE_EMPTY: u32 = 0;
+pub const JOURNAL_STATE_COMMITTED: u32 = 1;
+
+// Snapshot region — v7. One slot stores a frozen copy of the FS's
+// metadata blocks: SB, bitmap, CRC table, node table. While a
+// snapshot is present (`SB.snapshot_present == 1`), every block that
+// the snapshot's bitmap records as in-use is pinned — the live
+// allocator refuses to reuse it. Restoration copies the slot back on
+// top of the live metadata, recovering the FS to its snapshotted
+// state. v7 ships ONE snapshot slot; multi-snapshot timeline lands
+// in a follow-up once the single-slot path is proven.
+pub const SNAPSHOT_LBA: u32 = JOURNAL_LBA + JOURNAL_BLOCKS; // 15
+pub const SNAPSHOT_SB_OFFSET: u32 = 0;
+pub const SNAPSHOT_BITMAP_OFFSET: u32 = 1;
+pub const SNAPSHOT_CRC_OFFSET: u32 = 2;
+pub const SNAPSHOT_NODE_TABLE_OFFSET: u32 = 3;
+pub const SNAPSHOT_BLOCKS: u32 = 3 + NODE_TABLE_BLOCKS; // 7
+
+pub const SNAPSHOT_PRESENT_NO: u32 = 0;
+pub const SNAPSHOT_PRESENT_YES: u32 = 1;
+
+pub const DATA_LBA: u32 = SNAPSHOT_LBA + SNAPSHOT_BLOCKS; // 22
+pub const MIN_TOTAL_BLOCKS: u32 = DATA_LBA + 1; // 23
 
 // CRC table: one block = 1024 × u32 entries. v3 cap = 1024 blocks.
 pub const CRC_TABLE_ENTRIES: u32 = (BLOCK_SIZE / 4) as u32;
@@ -47,7 +85,24 @@ pub const MAX_TOTAL_BLOCKS: u32 = CRC_TABLE_ENTRIES;
 pub const BITMAP_BITS: u32 = (BLOCK_SIZE as u32) * 8;
 
 pub const MAGIC: u64 = u64::from_le_bytes(*b"DuetFS01");
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 8;
+
+// xattr — v8. Each node gets at most one xattr block (4 KiB) of
+// total xattr storage. The block holds a stream of
+// (name_len: u16, value_len: u16, name_bytes, value_bytes) records,
+// terminated by a name_len of 0. Empty names are forbidden by
+// the FFI so the terminator never collides with a real entry.
+pub const XATTR_NAME_MAX: usize = 255;
+pub const XATTR_VALUE_MAX: usize = 1024;
+
+// Encryption — v6. The volume is either fully encrypted or fully
+// unencrypted; per-file encryption isn't on the roadmap. Block 0
+// (SB) stays plaintext so a mounter can read these fields before
+// it has the key. Every other block is AES-256-XTS-encrypted with
+// sector index = LBA.
+pub const ENCRYPTED_NO: u32 = 0;
+pub const ENCRYPTED_AES_XTS_256: u32 = 1;
+pub const SALT_BYTES: usize = 16;
 
 pub const NODE_KIND_UNUSED: u32 = 0;
 pub const NODE_KIND_FILE: u32 = 1;
@@ -90,7 +145,30 @@ pub struct Superblock
     pub data_lba: u32,
     pub free_blocks: u32,
     pub sb_crc32: u32, // CRC32 of SB with this field zeroed
-    pub reserved: [u32; 2],
+    // v5 — journal pinning. Cross-validated against the compile-time
+    // JOURNAL_LBA / JOURNAL_BLOCKS constants by Fs::open.
+    pub journal_lba: u32,
+    pub journal_blocks: u32,
+    // v6 — encryption metadata. `encrypted` is one of the
+    // ENCRYPTED_* constants above; ENCRYPTED_NO leaves every block
+    // plaintext and the rest of these fields are zero. For an
+    // ENCRYPTED_AES_XTS_256 volume the salt + KDF costs let a
+    // mounter reconstruct the key from a password without storing
+    // anything secret in plain on disk.
+    pub encrypted: u32,
+    pub kdf_m_cost_kib: u32,
+    pub kdf_t_cost: u32,
+    pub kdf_p_cost: u32,
+    pub kdf_salt: [u8; SALT_BYTES],
+    // v7 — snapshot slot. `snapshot_present` is SNAPSHOT_PRESENT_*;
+    // when YES, the slot at SNAPSHOT_LBA holds a frozen metadata
+    // copy and the live allocator pins every block referenced by
+    // the slot's bitmap (no reuse → restoration is consistent).
+    pub snapshot_lba: u32,
+    pub snapshot_blocks: u32,
+    pub snapshot_present: u32,
+    pub snapshot_reserved: u32, // alignment + future timestamp
+    pub snapshot_timestamp_ns: u64,
 }
 
 #[repr(C)]
@@ -107,7 +185,12 @@ pub struct Node
     pub reserved: u32,
     pub name: [u8; NAME_MAX],
     pub extents: [Extent; MAX_INLINE_EXTENTS],
-    pub pad: [u8; NODE_SIZE - 32 - NAME_MAX - 8 * MAX_INLINE_EXTENTS],
+    /// v8 — single xattr block for this node. `xattr_extent.blocks ==
+    /// 0` means no xattrs. The block holds a stream of
+    /// (name_len: u16, value_len: u16, name_bytes, value_bytes)
+    /// records terminated by name_len == 0.
+    pub xattr_extent: Extent,
+    pub pad: [u8; NODE_SIZE - 32 - NAME_MAX - 8 * MAX_INLINE_EXTENTS - 8],
 }
 
 const _: () = assert!(core::mem::size_of::<Node>() == NODE_SIZE);
@@ -128,7 +211,8 @@ impl Node
             reserved: 0,
             name: [0u8; NAME_MAX],
             extents: [Extent { block: 0, blocks: 0 }; MAX_INLINE_EXTENTS],
-            pad: [0u8; NODE_SIZE - 32 - NAME_MAX - 8 * MAX_INLINE_EXTENTS],
+            xattr_extent: Extent { block: 0, blocks: 0 },
+            pad: [0u8; NODE_SIZE - 32 - NAME_MAX - 8 * MAX_INLINE_EXTENTS - 8],
         }
     }
 

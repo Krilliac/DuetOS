@@ -14,7 +14,18 @@
 // pointer.
 
 #include "core/panic.h"
+#include "mm/kheap.h"
 #include "util/types.h"
+
+extern "C" void* duetos_rust_alloc(duetos::usize bytes)
+{
+    return duetos::mm::KMalloc(bytes);
+}
+
+extern "C" void duetos_rust_free(void* ptr)
+{
+    duetos::mm::KFree(ptr);
+}
 
 extern "C" [[noreturn]] void duetos_rust_panic(const duetos::u8* msg, duetos::usize msg_len)
 {

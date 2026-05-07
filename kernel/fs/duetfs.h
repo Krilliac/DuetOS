@@ -72,9 +72,10 @@ inline constexpr u32 kBootImageBytes = kBootImageBlocks * kBlockSize;
 
 /// Minimum block count for an existing kernel block device to be
 /// considered as a candidate DuetFS volume during the boot probe.
-/// 7 blocks is the minimum a v2 image can occupy (1 SB + 1 bitmap
-/// + 4 node table + 1 data block).
-inline constexpr u32 kMinDiskBlocks = 7;
+/// 23 blocks is the minimum a v7 image can occupy (1 SB + 1 bitmap
+/// + 1 CRC table + 4 node table + 8 journal + 7 snapshot slot + 1
+/// data block).
+inline constexpr u32 kMinDiskBlocks = 23;
 
 /// Sentinel block_handle stored in the mount table for the
 /// memory-backed boot volume (the real kernel block-device

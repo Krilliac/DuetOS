@@ -37,4 +37,12 @@ void DoFileCreate(arch::TrapFrame* frame);
 void DoFileUnlink(arch::TrapFrame* frame);
 void DoFileRename(arch::TrapFrame* frame);
 
+// POSIX-shaped extras — DuetFS-routed today; non-DuetFS paths
+// return a generic NTSTATUS error. See syscall.h for the per-
+// register ABI documentation.
+void DoFileMkdir(arch::TrapFrame* frame);
+void DoFileSymlink(arch::TrapFrame* frame);
+void DoFileLink(arch::TrapFrame* frame);
+void DoFileReadlink(arch::TrapFrame* frame);
+
 } // namespace duetos::subsystems::win32

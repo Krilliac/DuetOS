@@ -110,6 +110,32 @@ bool UnlinkForProcess(::duetos::core::Process* proc, const char* path);
 /// success.
 bool RenameForProcess(::duetos::core::Process* proc, const char* src, const char* dst);
 
+/// Create a directory at `path`. v0 routes DuetFS paths (via the
+/// VFS mount registry) through `duetfs_create_path` with kind = dir;
+/// non-DuetFS paths fail (ramfs is read-only, FAT32 directory
+/// creation hasn't landed). Returns true on success.
+bool MkdirForProcess(::duetos::core::Process* proc, const char* path);
+
+/// Create a symbolic link at `path` pointing at `target`. DuetFS-
+/// only in v0 — other backends return false. The target is stored
+/// verbatim; readlink hands the same bytes back. Path resolution
+/// THROUGH the symlink is the caller's job.
+bool SymlinkForProcess(::duetos::core::Process* proc, const char* path, const char* target);
+
+/// Create a hard link at `new_path` to the inode at
+/// `existing_path`. Both paths must live on the same DuetFS
+/// volume; cross-volume / non-DuetFS calls return false. v3
+/// caveat: the new dirent shares the target's existing name —
+/// `new_path`'s last component must equal the target's name.
+bool LinkForProcess(::duetos::core::Process* proc, const char* existing_path, const char* new_path);
+
+/// Read a symlink's target into `dst` (NUL-terminated; truncated
+/// to `dst_max - 1` if longer). Returns the byte count copied
+/// (excluding NUL) on success, u64(-1) on bad path / not-a-symlink
+/// / non-DuetFS. The DuetFS implementation caps targets at
+/// kSymlinkTargetMax (1024).
+u64 ReadlinkForProcess(::duetos::core::Process* proc, const char* path, char* dst, u64 dst_max);
+
 /// Boot self-test. Routes /disk/0/HELLO.TXT (the FAT32 image
 /// builder seeds this file with known content) through
 /// OpenForProcess + ReadForProcess + CloseForProcess, verifies

@@ -29,9 +29,20 @@ inline constexpr u32 kRootNodeId = 0;
 
 /// Magic identifying a DuetFS superblock — bytes "DuetFS01"
 /// little-endian (byte 0 = 'D' = 0x44, byte 7 = '1' = 0x31).
-/// Magic stayed across v1→v3; only the version field bumps.
+/// Magic stayed across v1→v8; only the version field bumps.
 inline constexpr u64 kMagic = 0x3130534674657544ull;
-inline constexpr u32 kVersion = 4; // v3 (per-block CRCs + symlinks + hardlinks)
+inline constexpr u32 kVersion = 8; // v8 (xattrs / ACLs)
+inline constexpr u32 kXattrNameMax = 255;
+inline constexpr u32 kXattrValueMax = 1024;
+inline constexpr u32 kJournalLba = 7;
+inline constexpr u32 kJournalBlocks = 8;
+inline constexpr u32 kSnapshotLba = 15;
+inline constexpr u32 kSnapshotBlocks = 7;
+inline constexpr u32 kDataLba = 22;
+inline constexpr u32 kSaltBytes = 16;
+inline constexpr u32 kXtsKeyBytes = 64;
+inline constexpr u32 kEncryptedNo = 0;
+inline constexpr u32 kEncryptedAesXts256 = 1;
 inline constexpr u32 kMaxInlineExtents = 8;
 inline constexpr u32 kSymlinkTargetMax = 1024;
 
@@ -170,6 +181,118 @@ extern "C"
     /// target's existing name (its last component MUST equal
     /// the target's name); a separate dirent table lands later.
     u32 duetfs_link(const Device* dev, const u8* existing_path, usize existing_max, const u8* new_path, usize new_max);
+
+    /// Read a raw 4096-byte block at `lba` from the device. Bypasses
+    /// the FS layer — used by the journal self-test to verify
+    /// post-replay block contents. `dst` must point at a buffer of
+    /// at least kBlockSize bytes.
+    u32 duetfs_block_read(const Device* dev, u32 lba, u8* dst);
+
+    /// Apply a single (target_lba, payload) write atomically through
+    /// the journal. `payload` is a kernel-space pointer to a
+    /// kBlockSize-byte buffer. On success the target LBA holds the
+    /// new bytes and the journal is empty; on failure the FS is left
+    /// in its pre-call state (or, after the next mount's replay,
+    /// brought there).
+    u32 duetfs_journal_apply(const Device* dev, u32 target_lba, const u8* payload);
+
+    /// Test-only: stage + commit a single (target_lba, payload)
+    /// through the journal AND skip the apply step. Used by the
+    /// self-test to simulate a torn write between the commit fsync
+    /// and the apply-to-target step. The next call that re-opens
+    /// the FS (any Fs::open path) replays the txn.
+    u32 duetfs_journal_inject_for_test(const Device* dev, u32 target_lba, const u8* payload);
+
+    /// Read the journal descriptor's `state` field. 0 = empty
+    /// (clean), 1 = committed (replay pending), 0xFFFFFFFFu = read
+    /// error. Diagnostic — Fs::open replays before returning, so a
+    /// well-formed mount always reports 0.
+    u32 duetfs_journal_state(const Device* dev);
+
+    /// Argon2id KDF. Derives a 64-byte key (kXtsKeyBytes) into
+    /// `out_key` from `password` + `salt` and the (m, t, p) costs.
+    /// kStatusInvalid for null pointers / empty inputs / out-of-
+    /// range params. Default v6 params: m=4096 KiB, t=3, p=1.
+    u32 duetfs_kdf_argon2id(const u8* password, usize password_len, const u8* salt, usize salt_len, u32 m_cost_kib,
+                            u32 t_cost, u32 p_cost, u8* out_key);
+
+    /// Encrypt `buf` (kBlockSize bytes) in place using AES-256-XTS.
+    /// `key` is 64 bytes (data || tweak). `sector` is the FS LBA
+    /// — the XTS tweak is derived from it.
+    u32 duetfs_xts_encrypt_block(const u8* key, u64 sector, u8* buf);
+
+    /// Decrypt `buf` (kBlockSize bytes) in place. Inverse of
+    /// duetfs_xts_encrypt_block.
+    u32 duetfs_xts_decrypt_block(const u8* key, u64 sector, u8* buf);
+
+    /// Format `dev` as an encrypted DuetFS volume. The caller MUST
+    /// already wrap the underlying storage with AES-XTS in/out
+    /// callbacks — mkfs writes every metadata block via the wrapper.
+    /// `salt` (kSaltBytes) and the (m, t, p) cost params get
+    /// persisted in the SB; the SB itself stays plaintext so a
+    /// future mounter can read these fields before having the key.
+    u32 duetfs_mkfs_encrypted(const Device* dev, const u8* salt, usize salt_len, u32 m_cost_kib, u32 t_cost,
+                              u32 p_cost);
+
+    /// Read the SB's encryption metadata without mounting. `dev` is
+    /// the RAW (unwrapped) device. Returns kStatusOk + fills the
+    /// outs on a recognised v6 SB; kStatusInvalid otherwise. Used
+    /// by the C++ side to learn salt + cost params before deriving
+    /// the key. `salt_buf_len` MUST be >= kSaltBytes.
+    u32 duetfs_read_encryption_meta(const Device* dev, u32* out_encrypted, u32* out_m_cost, u32* out_t_cost,
+                                    u32* out_p_cost, u8* out_salt, usize salt_buf_len);
+
+    /// LZ4 compress `src_len` bytes from `src` into `dst`. Output is
+    /// a size-prefixed LZ4 frame (u32-le uncompressed length header +
+    /// LZ4 bytes). Caller sizes `dst_max` via `duetfs_lz4_compress_bound`.
+    u32 duetfs_lz4_compress(const u8* src, usize src_len, u8* dst, usize dst_max, usize* out_len);
+
+    /// LZ4 decompress a size-prefixed frame from `src` into `dst`.
+    /// `dst_max` MUST be >= the original uncompressed length.
+    u32 duetfs_lz4_decompress(const u8* src, usize src_len, u8* dst, usize dst_max, usize* out_len);
+
+    /// Worst-case output size for duetfs_lz4_compress on an input of
+    /// `n` bytes (includes the 4-byte size prefix). Cheap (no I/O).
+    usize duetfs_lz4_compress_bound(usize n);
+
+    /// Take a snapshot of the live FS metadata. Pins every block
+    /// the live allocator currently considers in-use; allocations
+    /// after this call skip pinned blocks. `ts_ns` is opaque —
+    /// stored in the SB for diagnostic display ("snapshot taken
+    /// N seconds ago"). Returns kStatusOk or an error code.
+    u32 duetfs_snapshot_create(const Device* dev, u64 ts_ns);
+
+    /// Restore the snapshot slot on top of the live metadata. The
+    /// FS returns to exactly the state captured by the most recent
+    /// duetfs_snapshot_create. Idempotent.
+    u32 duetfs_snapshot_restore(const Device* dev);
+
+    /// Snapshot presence. 0 = absent, 1 = present, 0xFFFFFFFFu =
+    /// read error / corrupt SB.
+    u32 duetfs_snapshot_present(const Device* dev);
+
+    /// Set / replace `name`'s value on the node at `path`. Allocates
+    /// the per-node xattr block on first set; rewrites in place on
+    /// subsequent calls. `name_len` <= kXattrNameMax (255);
+    /// `value_len` <= kXattrValueMax (1024). Use a name like
+    /// "system.posix_acl_access" for an ACL.
+    u32 duetfs_xattr_set(const Device* dev, const u8* path, usize path_max, const u8* name, usize name_len,
+                         const u8* value, usize value_len);
+
+    /// Read `name`'s value on the node at `path` into `dst`. Writes
+    /// the full value length to `*out_len` (may exceed `dst_max` —
+    /// caller probes for size by passing a 0-byte dst).
+    u32 duetfs_xattr_get(const Device* dev, const u8* path, usize path_max, const u8* name, usize name_len, u8* dst,
+                         usize dst_max, usize* out_len);
+
+    /// List xattr names on the node at `path` as a NUL-separated
+    /// stream in `dst`. Writes the bytes-needed to `*out_len`.
+    u32 duetfs_xattr_list(const Device* dev, const u8* path, usize path_max, u8* dst, usize dst_max, usize* out_len);
+
+    /// Remove `name`'s entry on the node at `path`. Returns
+    /// kStatusNotFound if no such xattr exists; frees the xattr
+    /// block if the last entry is removed.
+    u32 duetfs_xattr_remove(const Device* dev, const u8* path, usize path_max, const u8* name, usize name_len);
 }
 
 } // namespace duetos::fs::duetfs
