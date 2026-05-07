@@ -386,6 +386,135 @@ void HandleMemSub()
     g_state.memory_set = true;
 }
 
+// ---------------------------------------------------------------
+// Scientific (unary) operations — apply directly to the display
+// value, write the result back via SetDisplayI64. All set
+// fresh_entry so the next digit starts a new number, mirroring
+// the convention used by '=' / op chains.
+// ---------------------------------------------------------------
+
+// Integer square root via Newton's method. Returns floor(sqrt(v)).
+// Negative input flips the error flag — sqrt of a negative number
+// has no integer answer in this calculator's domain.
+i64 IntSqrt(i64 v)
+{
+    if (v < 0)
+        return -1;
+    if (v < 2)
+        return v;
+    // Initial guess: a power of two at least as large as the
+    // answer. (1 << (bits/2 + 1)) is a safe over-estimate that
+    // converges in <=6 iterations for any 63-bit positive input.
+    i64 x = 1;
+    while (x * x <= v && x < (1ll << 31))
+        x <<= 1;
+    // Newton: x = (x + v/x) / 2 until fixed-point or oscillation.
+    for (u32 i = 0; i < 64; ++i)
+    {
+        const i64 nx = (x + v / x) / 2;
+        if (nx >= x)
+            break;
+        x = nx;
+    }
+    while (x * x > v)
+        --x;
+    return x;
+}
+
+void HandleSqrt()
+{
+    if (g_state.error)
+        return;
+    const i64 cur = ReadDisplayAsI64();
+    const i64 r = IntSqrt(cur);
+    if (r < 0)
+    {
+        g_state.error = true;
+        const char* err = "ERR";
+        for (u32 i = 0; i < 4; ++i)
+            g_state.display[i] = err[i];
+        g_state.display_len = 3;
+        return;
+    }
+    SetDisplayI64(r);
+    g_state.fresh_entry = true;
+}
+
+void HandleSquare()
+{
+    if (g_state.error)
+        return;
+    const i64 cur = ReadDisplayAsI64();
+    // Overflow guard: i64 square overflows past sqrt(I64_MAX) ~= 3e9.
+    // Anything past that flips the sticky error flag.
+    if (cur > 3037000499ll || cur < -3037000499ll)
+    {
+        g_state.error = true;
+        const char* err = "ERR";
+        for (u32 i = 0; i < 4; ++i)
+            g_state.display[i] = err[i];
+        g_state.display_len = 3;
+        return;
+    }
+    SetDisplayI64(cur * cur);
+    g_state.fresh_entry = true;
+}
+
+void HandleAbs()
+{
+    if (g_state.error)
+        return;
+    i64 cur = ReadDisplayAsI64();
+    if (cur < 0)
+        cur = -cur;
+    SetDisplayI64(cur);
+    g_state.fresh_entry = true;
+}
+
+// Factorial. Caps at 20! = 2432902008176640000 (largest 20-digit
+// factorial that fits in i64); anything past 20 flips ERR.
+// Negative inputs also flip ERR (factorial undefined on negatives).
+void HandleFactorial()
+{
+    if (g_state.error)
+        return;
+    const i64 cur = ReadDisplayAsI64();
+    if (cur < 0 || cur > 20)
+    {
+        g_state.error = true;
+        const char* err = "ERR";
+        for (u32 i = 0; i < 4; ++i)
+            g_state.display[i] = err[i];
+        g_state.display_len = 3;
+        return;
+    }
+    i64 r = 1;
+    for (i64 i = 2; i <= cur; ++i)
+        r *= i;
+    SetDisplayI64(r);
+    g_state.fresh_entry = true;
+}
+
+// Reciprocal: 1 / cur, integer-truncated. Division by zero flips
+// ERR — same policy as the binary `/` operator.
+void HandleReciprocal()
+{
+    if (g_state.error)
+        return;
+    const i64 cur = ReadDisplayAsI64();
+    if (cur == 0)
+    {
+        g_state.error = true;
+        const char* err = "ERR";
+        for (u32 i = 0; i < 4; ++i)
+            g_state.display[i] = err[i];
+        g_state.display_len = 3;
+        return;
+    }
+    SetDisplayI64(1 / cur);
+    g_state.fresh_entry = true;
+}
+
 void DispatchKey(char k)
 {
     if (k >= '0' && k <= '9')
@@ -412,6 +541,16 @@ void DispatchKey(char k)
         HandleMemAdd();
     else if (k == 'b' || k == 'B')
         HandleMemSub();
+    else if (k == 'q' || k == 'Q')
+        HandleSqrt();
+    else if (k == 'x' || k == 'X')
+        HandleSquare();
+    else if (k == 'y' || k == 'Y')
+        HandleAbs();
+    else if (k == '!')
+        HandleFactorial();
+    else if (k == 'r' || k == 'R')
+        HandleReciprocal();
 }
 
 // Content-draw callback: paints the display strip across the
@@ -583,7 +722,8 @@ bool CalculatorFeedChar(char c)
     const u8 uc = static_cast<u8>(c);
     if ((c >= '0' && c <= '9') || c == '+' || c == '-' || c == '*' || c == '/' || c == '=' || c == 'c' || c == 'C' ||
         c == '%' || c == 'n' || c == 'N' || c == '_' || uc == 0x08 || c == 'm' || c == 'M' || c == 's' || c == 'S' ||
-        c == 'l' || c == 'L' || c == 'a' || c == 'A' || c == 'b' || c == 'B')
+        c == 'l' || c == 'L' || c == 'a' || c == 'A' || c == 'b' || c == 'B' || c == 'q' || c == 'Q' || c == 'x' ||
+        c == 'X' || c == 'y' || c == 'Y' || c == '!' || c == 'r' || c == 'R')
     {
         DispatchKey(c);
         return true;
@@ -687,7 +827,55 @@ void CalculatorSelfTest()
 
     HandleClear();
     HandleMemClear();
-    SerialWrite(all_pass ? "[calc] self-test OK (arith + percent + sign + backspace + memory)\n"
+
+    // Scientific operations: sqrt(144)=12, square(7)=49, abs(-9)=9,
+    // factorial(6)=720, reciprocal(2)=0 (integer trunc). Each runs
+    // on a clean state so the unary-op-on-display path is exercised.
+    HandleClear();
+    DispatchKey('1');
+    DispatchKey('4');
+    DispatchKey('4');
+    DispatchKey('q');
+    if (ReadDisplayAsI64() != 12 || g_state.error)
+        all_pass = false;
+
+    HandleClear();
+    DispatchKey('7');
+    DispatchKey('x');
+    if (ReadDisplayAsI64() != 49 || g_state.error)
+        all_pass = false;
+
+    HandleClear();
+    DispatchKey('9');
+    DispatchKey('n'); // -9
+    DispatchKey('y'); // abs -> 9
+    if (ReadDisplayAsI64() != 9 || g_state.error)
+        all_pass = false;
+
+    HandleClear();
+    DispatchKey('6');
+    DispatchKey('!'); // 6! = 720
+    if (ReadDisplayAsI64() != 720 || g_state.error)
+        all_pass = false;
+
+    // factorial(21) overflows i64 -> ERR sticks until clear.
+    HandleClear();
+    DispatchKey('2');
+    DispatchKey('1');
+    DispatchKey('!');
+    if (!g_state.error)
+        all_pass = false;
+    HandleClear();
+
+    // sqrt(-4) -> ERR.
+    DispatchKey('4');
+    DispatchKey('n');
+    DispatchKey('q');
+    if (!g_state.error)
+        all_pass = false;
+    HandleClear();
+
+    SerialWrite(all_pass ? "[calc] self-test OK (arith + percent + sign + backspace + memory + scientific)\n"
                          : "[calc] self-test FAILED\n");
 }
 
