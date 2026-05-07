@@ -27,7 +27,25 @@
  *   - Keyboard — `CalculatorFeedChar(c)` is called by the
  *     kbd-reader thread when the active window is the
  *     calculator window. Accepts '0'-'9', '+', '-', '*', '/',
- *     '=' (or Enter), 'c'/'C'/Backspace.
+ *     '=' (or Enter), 'c'/'C'/Backspace, plus extended
+ *     bindings:
+ *
+ *       %        percent
+ *       n / _    sign toggle
+ *       m / s    memory recall / store
+ *       l        memory clear
+ *       a / b    memory add / sub
+ *       q        sqrt (integer; negative input flips ERR)
+ *       x        square (n*n; overflow flips ERR)
+ *       y        abs
+ *       !        factorial (capped at 20! -> i64 ceiling)
+ *       r        reciprocal (1/n; zero flips ERR)
+ *       &        bitwise AND (binary)
+ *       |        bitwise OR  (binary)
+ *       ^        bitwise XOR (binary)
+ *       <        shift left  (binary; rhs in [0, 64))
+ *       >        shift right (binary, arithmetic; keeps sign bit)
+ *       ~        bitwise NOT (unary, one's complement)
  *
  * Context: kernel. Both entry points assume the caller holds
  * the compositor lock — same discipline as NotesFeedChar.

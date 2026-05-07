@@ -5639,3 +5639,204 @@ doc helps future readers audit the trail.
   [Compositor and Window Manager](../subsystems/Compositor.md),
   Roadmap entry "Multi-monitor / runtime resolution change".
 
+## Task Manager v1 — per-task list with sort + kill (2026-05-07)
+
+- **Decision:** the Task Manager window flips from a 7-row
+  aggregate-stats panel (uptime / ctx-switches / TASKS LIVE /
+  MEM FREE counters) to a Windows Task Manager / `htop` style
+  per-task list. The implementation lives in
+  `kernel/apps/taskman.{h,cpp}`, registered via `TaskmanInit`
+  on the existing window handle. Each row shows PID, name,
+  state, since-boot CPU%, on-CPU tick count. Header line
+  carries CPU% / IDLE% / MEM MiB / live task count. Keyboard:
+  `↑`/`↓` move selection, PgUp/PgDn page-step, Home/End jump,
+  `S` cycles sort (CPU% → PID → NAME → STATE), `K` / Del opens
+  a kill-confirm `MessageBoxOpen` for the selected PID.
+- **Why:** an OS that exists for users needs an answer to "what
+  is running and why is it slow?" The old panel showed seven
+  global counters and could not name a single task — useless
+  for triage. `SchedEnumerate` already exposed every field a
+  proper list needs (id, name, ticks_run, owner_pid, state,
+  is_running) and `SchedKillByPid` already wired the
+  termination path; no new kernel primitive was needed.
+- **What was considered + rejected:**
+  - **Per-task instantaneous CPU%:** would require keeping a
+    shadow table of `prev_ticks_run` per task id between
+    redraws. Since-boot CPU% (`ticks_run / total_ticks`) is a
+    cheaper denominator that matches what `top --cumulative`
+    shows, and `is_running` already highlights the on-CPU
+    task in green so an operator can see "who's running right
+    now" at a glance. Re-derive instantaneous on demand once
+    a workload exposes a real user-visible miss.
+  - **A kheap-allocated row buffer:** `kMaxRows = 128` snapshot
+    on `.bss` keeps the snapshot rebuild allocator-free and
+    avoids any "task manager itself triggers OOM" tail risk.
+    Tasks past 128 are silently dropped from the listing
+    (header's TASKS count still reflects the live total).
+  - **Direct callback drawing under SchedEnumerate's CLI:**
+    rejected because the framebuffer path is heavy; build the
+    snapshot first, then sort + draw with interrupts back on.
+- **What it rules out / defers:** no per-process memory column
+  (would need to walk Process->as->regions table — defer until
+  Process exposes a `MemUsage()` accessor; today it tracks
+  `heap_pages` only and that's a partial number). No
+  multi-column click-to-sort by mouse — `S` cycles via
+  keyboard and that's enough for v1. No process-tree grouping
+  by parent PID. No "End Process Tree" recursive kill.
+- **Revisit when:** Process gains a `MemUsage()` (then add a
+  MEM column); a workload routinely produces > 128 tasks
+  (then bump `kMaxRows` or grow to a kheap-backed scrollable
+  table); the compositor grows mouse-routed column-header
+  clicks (then bind sort cycling to a header click).
+- **Related tracks:** [`Start Menu`](../kernel/Start-Menu.md),
+  scheduler enumeration (`SchedEnumerate`, `SchedKillByPid`),
+  end-user features (the Task Manager bullet on the Roadmap
+  used to read "deeper teal panel"; this slice cashes that
+  in).
+
+## End-user app feature slate (2026-05-07)
+
+- **Decision:** ship a batch of everyday-OS feature parity items
+  on top of the desktop apps that already exist, pulled from
+  Windows / macOS / common-Linux conventions:
+
+  1. **Task Manager PERFORMANCE tab** — Tab key cycles
+     PROCESSES <-> PERFORMANCE. PERFORMANCE renders two
+     stacked 60-sample sparklines for CPU% busy + MEM%
+     used, sampled at 1 Hz via the existing UI ticker.
+     Bottom row shows 1/5/15-min load averages from
+     `LoadavgSnapshot`. (`kernel/apps/taskman.cpp`.)
+
+  2. **Notes find / find-next / find-and-replace** —
+     Ctrl+F opens an InputBox seeded with the last query;
+     F3 steps to the next match; Ctrl+H runs a two-stage
+     "Find:" + "Replace with:" dialog flow. Match
+     highlighting reuses the existing selection band.
+     (`kernel/apps/notes.cpp` + main.cpp keybinding.)
+
+  3. **Calculator scientific + bitwise + multi-radix preview** —
+     keyboard adds `q` sqrt, `x` square, `y` abs, `!`
+     factorial, `r` reciprocal, `~` bitwise NOT, plus
+     binary `& | ^ < >`. The display strip grew a second
+     band that renders the live decimal value as `0xFF` /
+     `0b1011...` / `0o377` simultaneously; the calculator
+     window grew 220 → 260 px to host the band. Input
+     remains decimal — multi-radix is purely visual.
+     (`kernel/apps/calculator.cpp`, main.cpp window dim.)
+
+  4. **Files sort modes** — `s` cycles NAME (case-insensitive
+     ascending) → SIZE → TYPE (dirs first, alphabetical
+     within). Insertion sort over the cached entries arrays
+     (kFatMax = 64); selection re-anchors to the prior
+     selection's name across re-sort so the cursor doesn't
+     snap. (`kernel/apps/files.cpp`.)
+
+  5. **Help reference + main.cpp PrintShortcutHelp synced** to
+     advertise every new chord. The two surfaces explicitly
+     stay lock-stepped per the kRows comment.
+
+- **Why:** the wiki Roadmap's "End-user features" track listed
+  these as known gaps in the everyday-usability story; the
+  underlying infrastructure (`SchedEnumerate`,
+  `LoadavgSnapshot`, `MessageBoxOpen` / `InputBoxOpen`,
+  `FramebufferDrawLine`, the existing per-app draw / feed
+  hooks) was already in tree, so each item was a
+  straightforward delta on top of what existed. Holistically
+  the slate moves DuetOS from "demo desktop" closer to
+  "actually usable for everyday text-editing, arithmetic,
+  process-monitoring, file-browsing without a mouse."
+
+- **What was considered + rejected per slice:**
+  - Per-task instantaneous CPU% (vs. since-last-sample) —
+    deferred until a workload exposes the user-visible miss.
+  - HLSL bytecode-driven Calculator — way out of scope.
+  - Hex / bin / oct INPUT in Calculator — input radix toggle
+    is a substantial UX rework (digit-set conflicts with
+    memory keys); the multi-radix preview gets the user
+    most of the value with no input ambiguity.
+  - Files sort by date — DirEntry doesn't expose mtime in
+    the v0 FAT32 walker; revisit when it does.
+
+- **What it rules out / defers:** none of these slices changes
+  the Win32 / Linux subsystem isolation contract; they all
+  live in `kernel/apps/*` content drawers and `core::Cap*` is
+  not relaxed. The PROCESSES tab's kill action goes through
+  the existing `SchedKillByPid` cap-checked path.
+
+- **Revisit when:** Process gains a per-process MemUsage()
+  accessor (Task Manager grows a MEM column); the dialog
+  system grows multi-line input (Notes Replace can become a
+  single dialog); FAT32 DirEntry exposes mtime (Files sort
+  gains DATE).
+
+- **Related tracks:** End-user features (Roadmap),
+  [`Compositor`](../subsystems/Compositor.md),
+  [`Win32-Surface-Status`](Win32-Surface-Status.md) is
+  unaffected.
+
+## End-user app slate, batch 2 (2026-05-07)
+
+- **Decision:** ship a follow-up batch of usability features on
+  top of the apps that landed in the first slate:
+
+  1. **Calendar Shift+arrow day navigation** — plain arrows
+     keep their month / year semantics; Shift+arrows now step
+     the date selection ±1 day (left/right) or ±7 days (up/down).
+     `CalendarFeedArrow` grew a `modifiers` parameter (default
+     0). View follows the selection so the cell is always
+     visible. (`kernel/apps/calendar.cpp`.)
+
+  2. **Calendar event persistence** — `CalendarSave` /
+     `CalendarLoad` round-trip the event table to
+     `CALENDAR.TXT` on the FAT32 root. One line per event in
+     `YYYY-MM-DD\tEVENT\n` form; atomic save mirrors
+     `NotesSave`'s tmp + rename. Auto-loads at boot once
+     FAT32 is online. Bound to Ctrl+S / Ctrl+O when Calendar
+     is the active window. Persist self-test snapshots /
+     restores around a round-trip.
+
+  3. **Notes Ctrl+A + Ctrl+G** — select-all + goto-line.
+     `NotesSelectAll` anchors the selection at byte 0 with
+     the caret at end; `NotesGotoLine(N)` walks the buffer
+     counting newlines and parks the caret at line N's first
+     column (clamps for out-of-range targets). Ctrl+G opens
+     an InputBox; the callback parses + jumps.
+
+  4. **Help live filter** — Help-active-window consumes
+     printable ASCII into a 31-char case-insensitive
+     substring filter. Section headers survive when at
+     least one of their following rows matches, so the
+     filtered output stays grouped. Backspace pops; the
+     title line shows "TYPE TO FILTER" in dim until the
+     first key, then "FIND: <q>" in fg. No-match state
+     prints an explicit fallback line.
+
+  5. **ImageView '+' / '-' zoom** — keyboard equivalents of
+     the existing Ctrl+wheel zoom. Both grow / shrink the
+     window via `WindowResizeFromEdge`; FitThumbnail re-fits
+     on the next draw. '+' and '=' both bound (US layout
+     unshifted is '='); '-' and '_' both bound, matching the
+     same convention every browser uses for its zoom keys.
+
+- **Why:** all five close concrete usability gaps a user
+  doing real everyday work hits within minutes — the calendar
+  was useless without persistence, Notes had find-and-replace
+  but no select-all, the Help table was too long to scan at
+  ~70 rows, and ImageView's zoom required the mouse.
+
+- **What was rejected per slice:**
+  - Calendar event recurrence (weekly / monthly) — would
+    require a richer schema than `YYYY-MM-DD\tTEXT`. Defer
+    until a workload exposes the gap.
+  - Notes "save selection only" — selection model is single-
+    range; multi-cursor is the bigger lift if users need it.
+  - Help: section-header click to toggle collapse — needs a
+    per-section open/closed state. Defer.
+  - ImageView pan when zoomed past the window — current
+    FitThumbnail caps at source size; a real zoomed-pan model
+    is its own slice.
+
+- **Revisit when:** Process gains MemUsage(); FAT32 grows
+  mtime in DirEntry; multi-line InputBox lands; recurring
+  events become a real workload.
+

@@ -162,4 +162,71 @@ void NotesSelfTest();
 /// trampled). Prints one PASS / FAIL / SKIP line to COM1.
 void NotesPersistSelfTest();
 
+/// Set the Find query and step to the first case-insensitive
+/// match at or after the cursor. The query is stored across
+/// calls so `NotesFindNext()` can step through subsequent
+/// matches. On a successful find, the caret jumps to the
+/// match's tail and the selection anchors at the match's head
+/// so the band is visually highlighted by the existing
+/// selection painter. Empty / nullptr query clears the stored
+/// query and selection. Returns true iff a match was found.
+///
+/// MUST be called with the compositor lock held.
+bool NotesFindSet(const char* query);
+
+/// Step to the next case-insensitive match of the stored query,
+/// starting one byte past the current cursor. Wraps to the
+/// document head once the tail runs out (mirrors most editors'
+/// "Find / find next" wrap-around behaviour). Returns true iff
+/// a match was found; returns false and clears the selection
+/// if no match exists or no query has been set.
+///
+/// MUST be called with the compositor lock held.
+bool NotesFindNext();
+
+/// Total matches of the stored query in the live buffer + the
+/// 1-based ordinal of the currently-highlighted match. Either
+/// pointer may be null. Returns false when no query is set or
+/// no matches exist; the out-params are zeroed in that case so
+/// the status footer can render a stable "—" placeholder.
+///
+/// MUST be called with the compositor lock held.
+bool NotesFindStats(duetos::u32* total_out, duetos::u32* current_out);
+
+/// Pointer to the stored query string (NUL-terminated, never
+/// longer than `kDialogInputMax`). Returns "" when no query is
+/// set so the status footer can concat unconditionally. Caller
+/// must NOT mutate the returned pointer.
+const char* NotesFindQuery();
+
+/// Replace every case-insensitive occurrence of `query` in the
+/// live buffer with `replacement`. Updates the cursor to the
+/// position of the first replacement (or end-of-buffer if no
+/// matches existed). Sets the dirty flag if any replacement
+/// was made. Returns the count of substitutions performed.
+///
+/// `query` empty / nullptr is a no-op (returns 0). `replacement`
+/// nullptr is treated as the empty string (delete-all-matches).
+/// If the post-replace buffer would exceed kBufCap, replacement
+/// stops at the first overflow point and the returned count
+/// reflects what was actually applied.
+///
+/// MUST be called with the compositor lock held.
+duetos::u32 NotesReplaceAll(const char* query, const char* replacement);
+
+/// Select the entire buffer (anchor at byte 0, caret at end).
+/// Subsequent Backspace / Delete / typing collapses the
+/// selection per the existing edit semantics — Ctrl+A then
+/// type replaces the whole document. Bound to Ctrl+A by the
+/// kernel kbd-reader. MUST be called with the compositor lock.
+void NotesSelectAll();
+
+/// Move the caret to the start of logical line `line_1based`.
+/// Lines are counted from 1 (matches what every editor's
+/// status-bar shows). Out-of-range targets clamp: line 0 lands
+/// at byte 0; targets past the last line land on the last
+/// line's first column. Selection is cleared. MUST be called
+/// with the compositor lock.
+void NotesGotoLine(duetos::u32 line_1based);
+
 } // namespace duetos::apps::notes

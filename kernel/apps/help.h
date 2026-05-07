@@ -42,4 +42,13 @@ duetos::drivers::video::WindowHandle HelpWindow();
 /// Pure compute; runs unconditionally.
 void HelpSelfTest();
 
+/// Printable-key feed. Letters / digits / space / punctuation
+/// append to the live filter; Backspace removes the last char.
+/// Returns true iff the char was consumed. The filter substring
+/// matches case-insensitively against any row text; section
+/// headers are pulled in when at least one of their following
+/// rows matches, so the filtered result still reads as
+/// grouped sections.
+bool HelpFeedChar(char c);
+
 } // namespace duetos::apps::help

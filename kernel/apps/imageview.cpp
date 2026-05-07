@@ -955,6 +955,24 @@ bool ImageViewFeedChar(char c)
         drivers::video::NotifyShow("image: root rescan");
         return true;
     }
+    if (c == '+' || c == '=' || c == '-' || c == '_')
+    {
+        // Keyboard zoom: '+' / '=' grows the window; '-' / '_'
+        // shrinks. Mirrors the Ctrl+wheel path which already
+        // resizes via WindowResizeFromEdge — FitThumbnail
+        // refreshes the image to match the new client area.
+        constexpr duetos::u32 kZoomStep = 32;
+        duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
+        if (!duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh))
+            return true;
+        const duetos::i32 sign = (c == '+' || c == '=') ? 1 : -1;
+        const duetos::i32 delta = static_cast<duetos::i32>(kZoomStep);
+        duetos::drivers::video::WindowResizeFromEdge(g_state.handle,
+                                                     duetos::drivers::video::WindowResizeEdge::BottomRight,
+                                                     /*ax*/ 0, /*ay*/ 0, ww, wh, sign * delta, sign * delta);
+        g_state.needs_decode = true;
+        return true;
+    }
     return false;
 }
 

@@ -147,6 +147,7 @@
 #include "apps/notes.h"
 #include "apps/screenshot.h"
 #include "apps/settings.h"
+#include "apps/taskman.h"
 #include "apps/trash.h"
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
@@ -429,6 +430,11 @@ void PrintShortcutHelp()
     ConsoleWriteln("    CTRL+C / CTRL+V   COPY / PASTE CLIPBOARD");
     ConsoleWriteln("    CTRL+S            SAVE TO NOTES.TXT (FAT32)");
     ConsoleWriteln("    CTRL+O            LOAD FROM NOTES.TXT (FAT32)");
+    ConsoleWriteln("    CTRL+F            FIND (case-insensitive)");
+    ConsoleWriteln("    F3                FIND NEXT (wraps to start)");
+    ConsoleWriteln("    CTRL+H            FIND-AND-REPLACE (two prompts)");
+    ConsoleWriteln("    CTRL+A            SELECT ALL");
+    ConsoleWriteln("    CTRL+G            GO TO LINE");
     ConsoleWriteln("    STATUS FOOTER     L:line C:col  CHARS  WORDS  *MOD");
     ConsoleWriteln("");
     ConsoleWriteln("  CALCULATOR (WHEN ACTIVE)");
@@ -437,6 +443,18 @@ void PrintShortcutHelp()
     ConsoleWriteln("    M / S             MEMORY RECALL / STORE");
     ConsoleWriteln("    A / B             MEMORY ADD / SUBTRACT");
     ConsoleWriteln("    L                 MEMORY CLEAR");
+    ConsoleWriteln("    Q / X / Y / R / ! SQRT / SQUARE / ABS / 1OVERN / FACTORIAL");
+    ConsoleWriteln("    & | ^ < > ~       BITWISE AND/OR/XOR/SHL/SHR/NOT");
+    ConsoleWriteln("    HEX BIN OCT       SHOWN LIVE BELOW DECIMAL DISPLAY");
+    ConsoleWriteln("");
+    ConsoleWriteln("  TASK MANAGER (WHEN ACTIVE)");
+    ConsoleWriteln("    TAB               CYCLE PROCESSES / PERFORMANCE");
+    ConsoleWriteln("    UP / DN           MOVE SELECTION (PROCESSES TAB)");
+    ConsoleWriteln("    PGUP / PGDN       PAGE-STEP SELECTION");
+    ConsoleWriteln("    HOME / END        FIRST / LAST ROW");
+    ConsoleWriteln("    S                 CYCLE SORT (CPU / PID / NAME / STATE)");
+    ConsoleWriteln("    K / DEL           KILL SELECTED PROCESS (CONFIRM)");
+    ConsoleWriteln("    R                 FORCE SNAPSHOT REBUILD");
     ConsoleWriteln("");
     ConsoleWriteln("  FILES (WHEN ACTIVE)");
     ConsoleWriteln("    UP / DN           MOVE SELECTION");
@@ -444,12 +462,15 @@ void PrintShortcutHelp()
     ConsoleWriteln("    B / BACKSPACE     UP ONE LEVEL (RAM MODE)");
     ConsoleWriteln("    D / M / T         SWITCH DISK / RAM / TRASH VIEW");
     ConsoleWriteln("    R                 RESCAN (DISK) / RESTORE (TRASH)");
+    ConsoleWriteln("    S                 CYCLE SORT (NAME -> SIZE -> TYPE)");
     ConsoleWriteln("    X THEN Y          DISK: TO TRASH; TRASH: PERM-DEL");
     ConsoleWriteln("    E THEN Y          EMPTY TRASH (TRASH VIEW ONLY)");
     ConsoleWriteln("");
     ConsoleWriteln("  IMAGE VIEWER (WHEN ACTIVE)");
-    ConsoleWriteln("    N / P / LEFT/RT   NEXT / PREV BMP");
-    ConsoleWriteln("    R                 RESCAN DISK FOR BMPS");
+    ConsoleWriteln("    N / P / LEFT/RT   NEXT / PREV IMAGE");
+    ConsoleWriteln("    R                 RESCAN DISK FOR IMAGES");
+    ConsoleWriteln("    + / -             ZOOM IN / OUT (resize)");
+    ConsoleWriteln("    CTRL+WHEEL        ZOOM IN / OUT (mouse)");
     ConsoleWriteln("");
     ConsoleWriteln("  BROWSER (WHEN ACTIVE)");
     ConsoleWriteln("    U / TAB           ENTER URL EDIT");
@@ -465,6 +486,11 @@ void PrintShortcutHelp()
     ConsoleWriteln("    [ / ]  / LEFT/RT   PREV / NEXT MONTH");
     ConsoleWriteln("    { / }  / UP / DN   PREV / NEXT YEAR");
     ConsoleWriteln("    T                  JUMP TO TODAY");
+    ConsoleWriteln("    SHIFT+LEFT/RIGHT   STEP SELECTION 1 DAY");
+    ConsoleWriteln("    SHIFT+UP/DOWN      STEP SELECTION 7 DAYS");
+    ConsoleWriteln("    ENTER              ADD EVENT (selected date)");
+    ConsoleWriteln("    DEL                REMOVE EVENT (selected date)");
+    ConsoleWriteln("    CTRL+S / CTRL+O    SAVE / LOAD CALENDAR.TXT");
     ConsoleWriteln("");
     ConsoleWriteln("  SETTINGS BUTTONS");
     ConsoleWriteln("    THEME / OPACITY / TZ / LOG OUT / REBOOT / SHUTDOWN");
@@ -1604,7 +1630,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     win_a_chrome.x = 60;
     win_a_chrome.y = 60;
     win_a_chrome.w = 300;
-    win_a_chrome.h = 220;
+    // Bumped from 220 to fit the multi-radix preview band that
+    // sits between the main display strip and the 4x4 button grid.
+    win_a_chrome.h = 260;
     const duetos::drivers::video::WindowHandle calc_handle =
         duetos::drivers::video::WindowRegister(win_a_chrome, "CALCULATOR");
     duetos::drivers::video::ThemeRegisterWindow(Role::Calculator, calc_handle);
@@ -1632,8 +1660,11 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::drivers::video::WindowChrome taskman_chrome = theme_chrome(Role::TaskManager);
     taskman_chrome.x = 180;
     taskman_chrome.y = 310;
-    taskman_chrome.w = 340;
-    taskman_chrome.h = 170;
+    // Bigger default size for the 5-column per-task list — the
+    // original 340x170 aggregate-stats panel is too narrow to
+    // host PID + NAME + STATE + CPU% + TICKS without truncation.
+    taskman_chrome.w = 520;
+    taskman_chrome.h = 260;
     const duetos::drivers::video::WindowHandle taskman_handle =
         duetos::drivers::video::WindowRegister(taskman_chrome, "TASK MANAGER");
     duetos::drivers::video::ThemeRegisterWindow(Role::TaskManager, taskman_handle);
@@ -1751,78 +1782,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         },
         nullptr);
 
-    duetos::drivers::video::WindowSetContentDraw(
-        taskman_handle,
-        [](duetos::u32 cx, duetos::u32 cy, duetos::u32 /*cw*/, duetos::u32 /*ch*/, void*)
-        {
-            using duetos::drivers::video::FramebufferDrawString;
-            constexpr duetos::u32 kFg = 0x0080F088;
-            // Match the window's current client fill so the text
-            // rows sit on the same colour as the chrome client.
-            const duetos::u32 kBg =
-                duetos::drivers::video::ThemeCurrent()
-                    .role_client[static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::TaskManager)];
-            // Manual decimal formatter for u64 — kernel has no
-            // printf. Fixed-width (10 digits) so the numeric
-            // column doesn't jitter when values roll over.
-            auto fmt_u64 = [](duetos::u64 v, char* out)
-            {
-                char tmp[24];
-                duetos::u32 n = 0;
-                if (v == 0)
-                {
-                    tmp[n++] = '0';
-                }
-                else
-                {
-                    while (v > 0 && n < sizeof(tmp))
-                    {
-                        tmp[n++] = static_cast<char>('0' + (v % 10));
-                        v /= 10;
-                    }
-                }
-                duetos::u32 pad = (n < 10) ? 10 - n : 0;
-                duetos::u32 o = 0;
-                for (duetos::u32 i = 0; i < pad; ++i)
-                    out[o++] = ' ';
-                for (duetos::u32 i = 0; i < n; ++i)
-                    out[o++] = tmp[n - 1 - i];
-                out[o] = '\0';
-            };
-
-            const auto s = duetos::sched::SchedStatsRead();
-            const duetos::u64 total = duetos::mm::TotalFrames();
-            const duetos::u64 free_frames = duetos::mm::FreeFramesCount();
-            const duetos::u64 uptime_s = duetos::sched::SchedNowTicks() / 100;
-
-            char num[24];
-            char line[64];
-            struct Row
-            {
-                const char* label;
-                duetos::u64 value;
-            };
-            const Row rows[] = {
-                {"UPTIME (S)     ", uptime_s},        {"CTX SWITCHES   ", s.context_switches},
-                {"TASKS LIVE     ", s.tasks_live},    {"TASKS SLEEPING ", s.tasks_sleeping},
-                {"TASKS BLOCKED  ", s.tasks_blocked}, {"MEM FREE (4K)  ", free_frames},
-                {"MEM TOTAL (4K) ", total},
-            };
-            duetos::u32 y_off = cy + 4;
-            for (duetos::u32 i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i)
-            {
-                fmt_u64(rows[i].value, num);
-                duetos::u32 o = 0;
-                for (duetos::u32 j = 0; rows[i].label[j] != '\0' && o + 1 < sizeof(line); ++j)
-                    line[o++] = rows[i].label[j];
-                for (duetos::u32 j = 0; num[j] != '\0' && o + 1 < sizeof(line); ++j)
-                    line[o++] = num[j];
-                line[o] = '\0';
-                FramebufferDrawString(cx + 6, y_off, line, kFg, kBg);
-                y_off += 10;
-            }
-        },
-        nullptr);
+    // Per-task list with sort + kill — see kernel/apps/taskman.cpp.
+    // Replaces the original 7-row aggregate-stats panel; the
+    // header still shows CPU% / IDLE% / MEM totals, then a row
+    // per task with PID, name, state, since-boot CPU%, and ticks.
+    duetos::apps::taskman::TaskmanInit(taskman_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::taskman::TaskmanSelfTest());
 
     // FILES — native DuetOS file browser. Lists the ramfs
     // trusted root; Up/Down to move, Enter to descend, Backspace
@@ -1970,6 +1935,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::drivers::video::ThemeRegisterWindow(Role::Calendar, calendar_handle);
     duetos::apps::calendar::CalendarInit(calendar_handle);
     DUETOS_BOOT_SELFTEST(duetos::apps::calendar::CalendarSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::apps::calendar::CalendarPersistSelfTest());
 
     // NOTIFICATION CENTER — windowed reader over the toast
     // history ring kept in drivers/video/notify.cpp. Same
@@ -2854,6 +2820,11 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // still toggle back with M (memory).
     duetos::apps::files::FilesPromoteToDisk();
 
+    // Restore the saved Calendar event table from CALENDAR.TXT if
+    // one exists. Silent no-op if the file isn't there — first-
+    // boot Calendar simply starts with an empty event store.
+    duetos::apps::calendar::CalendarLoad();
+
     // Install the FAT32 file sink — replaces the early tmpfs
     // sink (single-slot API). The tmpfs `/tmp/boot.log`
     // captured the early-boot lines; from here on, every
@@ -3211,10 +3182,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 duetos::drivers::video::CompositorUnlock();
             }
 
-            // Ctrl+S — persist the Notes buffer to the FAT32 root
-            // as NOTES.TXT. Active-window-gated: anywhere else this
-            // chord is unbound. NotesSave logs success/failure to
-            // COM1; the toast surfaces the same outcome to the user.
+            // Ctrl+S — persist Notes / Calendar to the FAT32 root.
+            // Active-window-gated: Notes -> NOTES.TXT, Calendar ->
+            // CALENDAR.TXT. Anywhere else this chord is unbound.
             if (ctrl && !alt && (ev.code == 's' || ev.code == 'S'))
             {
                 duetos::drivers::video::CompositorLock();
@@ -3225,6 +3195,186 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     duetos::drivers::video::CompositorUnlock();
                     duetos::drivers::video::NotifyShow(ok ? "saved to NOTES.TXT" : "save failed");
                     SerialWrite(ok ? "[ui] ^S notes saved\n" : "[ui] ^S notes save FAILED\n");
+                    continue;
+                }
+                if (active != duetos::drivers::video::kWindowInvalid &&
+                    active == duetos::apps::calendar::CalendarWindow())
+                {
+                    const bool ok = duetos::apps::calendar::CalendarSave();
+                    duetos::drivers::video::CompositorUnlock();
+                    duetos::drivers::video::NotifyShow(ok ? "saved to CALENDAR.TXT" : "calendar save failed");
+                    SerialWrite(ok ? "[ui] ^S calendar saved\n" : "[ui] ^S calendar save FAILED\n");
+                    continue;
+                }
+                duetos::drivers::video::CompositorUnlock();
+            }
+
+            // Ctrl+A — Notes select-all. Active-window-gated.
+            if (ctrl && !alt && (ev.code == 'a' || ev.code == 'A'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                if (active != duetos::drivers::video::kWindowInvalid && active == duetos::apps::notes::NotesWindow())
+                {
+                    duetos::apps::notes::NotesSelectAll();
+                    duetos::drivers::video::CompositorUnlock();
+                    duetos::drivers::video::NotifyShow("notes: selected all");
+                    continue;
+                }
+                duetos::drivers::video::CompositorUnlock();
+            }
+
+            // Ctrl+G — Notes goto-line. Opens an InputBox that
+            // takes a 1-based line number; the callback parses
+            // and calls NotesGotoLine. Active-window-gated.
+            if (ctrl && !alt && (ev.code == 'g' || ev.code == 'G'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                const bool is_notes =
+                    active != duetos::drivers::video::kWindowInvalid && active == duetos::apps::notes::NotesWindow();
+                duetos::drivers::video::CompositorUnlock();
+                if (is_notes)
+                {
+                    duetos::drivers::video::InputBoxOpen(
+                        "GO TO LINE", "Line:", "1",
+                        [](duetos::drivers::video::DialogResult r, const char* text, void*)
+                        {
+                            if (r != duetos::drivers::video::DialogResult::Ok || text == nullptr)
+                                return;
+                            duetos::u32 v = 0;
+                            for (duetos::u32 i = 0; text[i] != '\0'; ++i)
+                            {
+                                if (text[i] < '0' || text[i] > '9')
+                                    return;
+                                v = v * 10 + static_cast<duetos::u32>(text[i] - '0');
+                            }
+                            duetos::drivers::video::CompositorLock();
+                            duetos::apps::notes::NotesGotoLine(v);
+                            duetos::drivers::video::CompositorUnlock();
+                        },
+                        nullptr);
+                    continue;
+                }
+            }
+
+            // Ctrl+F — open the Notes find dialog. Active-window
+            // gated; opens an InputBox pre-populated with the last
+            // query (if any). InputBox callback runs NotesFindSet
+            // which jumps to the first match at/after the cursor
+            // and stores the query for F3 follow-ups.
+            if (ctrl && !alt && (ev.code == 'f' || ev.code == 'F'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                const bool is_notes =
+                    active != duetos::drivers::video::kWindowInvalid && active == duetos::apps::notes::NotesWindow();
+                duetos::drivers::video::CompositorUnlock();
+                if (is_notes)
+                {
+                    duetos::drivers::video::InputBoxOpen(
+                        "FIND", "Search:", duetos::apps::notes::NotesFindQuery(),
+                        [](duetos::drivers::video::DialogResult r, const char* text, void*)
+                        {
+                            if (r != duetos::drivers::video::DialogResult::Ok)
+                                return;
+                            duetos::drivers::video::CompositorLock();
+                            const bool ok = duetos::apps::notes::NotesFindSet(text);
+                            duetos::drivers::video::CompositorUnlock();
+                            duetos::drivers::video::NotifyShow(ok ? "find: match" : "find: no match");
+                        },
+                        nullptr);
+                    continue;
+                }
+            }
+
+            // Ctrl+H — open the Notes Find-and-Replace flow. Two
+            // chained InputBoxes: first asks for the search query,
+            // second for the replacement. The intermediate query
+            // is stashed in a static buffer because the dialog
+            // callback fires after the keyboard event loop has
+            // moved on. Active-window gated, like Ctrl+F.
+            if (ctrl && !alt && (ev.code == 'h' || ev.code == 'H'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                const bool is_notes =
+                    active != duetos::drivers::video::kWindowInvalid && active == duetos::apps::notes::NotesWindow();
+                duetos::drivers::video::CompositorUnlock();
+                if (is_notes)
+                {
+                    static char pending_query[64];
+                    pending_query[0] = '\0';
+                    duetos::drivers::video::InputBoxOpen(
+                        "REPLACE: FIND", "Find:", duetos::apps::notes::NotesFindQuery(),
+                        [](duetos::drivers::video::DialogResult r, const char* text, void*)
+                        {
+                            if (r != duetos::drivers::video::DialogResult::Ok || text == nullptr || text[0] == '\0')
+                                return;
+                            duetos::u32 i = 0;
+                            for (; i + 1 < sizeof(pending_query) && text[i] != '\0'; ++i)
+                                pending_query[i] = text[i];
+                            pending_query[i] = '\0';
+                            duetos::drivers::video::InputBoxOpen(
+                                "REPLACE: WITH", "Replace with:", "",
+                                [](duetos::drivers::video::DialogResult r2, const char* repl, void*)
+                                {
+                                    if (r2 != duetos::drivers::video::DialogResult::Ok)
+                                        return;
+                                    duetos::drivers::video::CompositorLock();
+                                    const duetos::u32 n = duetos::apps::notes::NotesReplaceAll(pending_query, repl);
+                                    duetos::drivers::video::CompositorUnlock();
+                                    if (n == 0)
+                                    {
+                                        duetos::drivers::video::NotifyShow("replace: no matches");
+                                    }
+                                    else
+                                    {
+                                        char msg[40];
+                                        duetos::u32 o = 0;
+                                        const char* lead = "replace: ";
+                                        for (duetos::u32 k = 0; lead[k] != '\0' && o + 1 < sizeof(msg); ++k)
+                                            msg[o++] = lead[k];
+                                        // Render n in decimal.
+                                        char tmp[12];
+                                        duetos::u32 nn = 0;
+                                        duetos::u32 v = n;
+                                        if (v == 0)
+                                            tmp[nn++] = '0';
+                                        else
+                                            while (v > 0 && nn < sizeof(tmp))
+                                            {
+                                                tmp[nn++] = static_cast<char>('0' + (v % 10));
+                                                v /= 10;
+                                            }
+                                        while (nn > 0 && o + 1 < sizeof(msg))
+                                            msg[o++] = tmp[--nn];
+                                        const char* tail = " match(es)";
+                                        for (duetos::u32 k = 0; tail[k] != '\0' && o + 1 < sizeof(msg); ++k)
+                                            msg[o++] = tail[k];
+                                        msg[o] = '\0';
+                                        duetos::drivers::video::NotifyShow(msg);
+                                    }
+                                },
+                                nullptr);
+                        },
+                        nullptr);
+                    continue;
+                }
+            }
+
+            // F3 — step to the next Notes find match. Same
+            // active-window gate as Ctrl+F so the chord is
+            // unbound elsewhere.
+            if (!ctrl && !alt && ev.code == kKeyF3)
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                if (active != duetos::drivers::video::kWindowInvalid && active == duetos::apps::notes::NotesWindow())
+                {
+                    const bool ok = duetos::apps::notes::NotesFindNext();
+                    duetos::drivers::video::CompositorUnlock();
+                    duetos::drivers::video::NotifyShow(ok ? "find: next match" : "find: no match");
                     continue;
                 }
                 duetos::drivers::video::CompositorUnlock();
@@ -3377,6 +3527,15 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     duetos::drivers::video::CompositorUnlock();
                     duetos::drivers::video::NotifyShow(ok ? "loaded NOTES.TXT" : "load failed (no NOTES.TXT?)");
                     SerialWrite(ok ? "[ui] ^O notes loaded\n" : "[ui] ^O notes load FAILED\n");
+                    continue;
+                }
+                if (active != duetos::drivers::video::kWindowInvalid &&
+                    active == duetos::apps::calendar::CalendarWindow())
+                {
+                    const bool ok = duetos::apps::calendar::CalendarLoad();
+                    duetos::drivers::video::CompositorUnlock();
+                    duetos::drivers::video::NotifyShow(ok ? "loaded CALENDAR.TXT" : "calendar load failed");
+                    SerialWrite(ok ? "[ui] ^O calendar loaded\n" : "[ui] ^O calendar load FAILED\n");
                     continue;
                 }
                 duetos::drivers::video::CompositorUnlock();
@@ -3931,9 +4090,11 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     }
                     else if (active == duetos::apps::calendar::CalendarWindow() &&
                              (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyArrowLeft ||
-                              ev.code == kKeyArrowRight || ev.code == kKeyPageUp || ev.code == kKeyPageDown))
+                              ev.code == kKeyArrowRight || ev.code == kKeyPageUp || ev.code == kKeyPageDown ||
+                              ev.code == kKeyDelete))
                     {
-                        app_consumed = duetos::apps::calendar::CalendarFeedArrow(static_cast<duetos::u16>(ev.code));
+                        app_consumed =
+                            duetos::apps::calendar::CalendarFeedArrow(static_cast<duetos::u16>(ev.code), ev.modifiers);
                     }
                     else if (active == duetos::apps::notify_center::NotifyCenterWindow() &&
                              (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyPageUp ||
@@ -3948,6 +4109,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                               ev.code == kKeyDelete || ev.code == kKeyPageUp || ev.code == kKeyPageDown))
                     {
                         app_consumed = duetos::apps::notes::NotesFeedKey(ev.code, ev.modifiers);
+                    }
+                    else if (active == duetos::apps::taskman::TaskmanWindow() &&
+                             (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyHome ||
+                              ev.code == kKeyEnd || ev.code == kKeyPageUp || ev.code == kKeyPageDown ||
+                              ev.code == kKeyDelete))
+                    {
+                        app_consumed = duetos::apps::taskman::TaskmanFeedKey(static_cast<duetos::u16>(ev.code));
                     }
                     else
                     {
@@ -4006,6 +4174,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                             else if (active == duetos::apps::dbg::DbgWindow())
                             {
                                 app_consumed = duetos::apps::dbg::DbgFeedChar(c);
+                            }
+                            else if (active == duetos::apps::taskman::TaskmanWindow())
+                            {
+                                app_consumed = duetos::apps::taskman::TaskmanFeedChar(c);
+                            }
+                            else if (active == duetos::apps::help::HelpWindow())
+                            {
+                                app_consumed = duetos::apps::help::HelpFeedChar(c);
                             }
                         }
                     }
