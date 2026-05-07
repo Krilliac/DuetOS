@@ -112,4 +112,38 @@ bool CalendarAddEventForSelected(const char* text);
 /// selection). Returns the count removed.
 duetos::u32 CalendarRemoveEventsForSelected();
 
+/// Live event count. Used by the persist-layer self-test to
+/// snapshot before / restore after.
+duetos::u32 CalendarEventCount();
+
+/// Read one event by index (0..CalendarEventCount() - 1) into
+/// the caller-provided slots. Returns false for out-of-range
+/// indices. `text_out` MUST have room for kEventTextCap + 1.
+/// Used by the persist layer when serialising the table to
+/// disk; not part of the everyday user surface.
+bool CalendarEventAt(duetos::u32 index, duetos::u32* year, duetos::u8* month, duetos::u8* day, char* text_out,
+                     duetos::u32 text_cap);
+
+/// Persist the in-RAM event table to `CALENDAR.TXT` on the
+/// FAT32 root volume. Atomic via CALENDAR.TMP + rename. One
+/// line per event in `YYYY-MM-DD\tEVENT TEXT\n` form. Returns
+/// true on success; false if no FAT32 volume is mounted or
+/// the I/O failed. Caller MUST hold the compositor lock.
+bool CalendarSave();
+
+/// Replace the in-RAM event table with the contents of
+/// `CALENDAR.TXT` on the FAT32 root volume. Bytes that fail
+/// to parse are skipped; the live table is untouched on
+/// total I/O failure. Returns true on success. Caller MUST
+/// hold the compositor lock.
+bool CalendarLoad();
+
+/// Round-trip self-test for CalendarSave / CalendarLoad. Plants
+/// a known event marker, saves, drops the in-RAM table, loads,
+/// asserts the marker round-tripped. Cleans up afterwards.
+/// Skipped silently when no FAT32 volume is mounted or
+/// CALENDAR.TXT already exists. Prints one PASS / FAIL / SKIP
+/// line to COM1.
+void CalendarPersistSelfTest();
+
 } // namespace duetos::apps::calendar

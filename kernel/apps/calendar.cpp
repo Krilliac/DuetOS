@@ -7,6 +7,7 @@
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/notify.h"
 #include "drivers/video/theme.h"
+#include "fs/fat32.h"
 #include "util/datetime.h"
 
 namespace duetos::apps::calendar
@@ -958,6 +959,245 @@ u32 CalendarRemoveEventsForSelected()
     u8 m, d;
     ActiveDate(&y, &m, &d);
     return CalendarRemoveEvents(y, m, d);
+}
+
+u32 CalendarEventCount()
+{
+    return g_event_count;
+}
+
+bool CalendarEventAt(u32 index, u32* year, u8* month, u8* day, char* text_out, u32 text_cap)
+{
+    if (index >= g_event_count)
+        return false;
+    const StoredEvent& e = g_events[index];
+    if (year)
+        *year = e.year;
+    if (month)
+        *month = e.month;
+    if (day)
+        *day = e.day;
+    if (text_out != nullptr && text_cap > 0)
+    {
+        u32 i = 0;
+        for (; i + 1 < text_cap && i < kEventTextCap && e.text[i] != '\0'; ++i)
+            text_out[i] = e.text[i];
+        text_out[i] = '\0';
+    }
+    return true;
+}
+
+namespace
+{
+
+// Persistence path on the FAT32 root volume. 8.3 form to keep
+// the LFN-emission path off this slice's surface; mirrors the
+// convention NOTES.TXT uses.
+constexpr const char kSaveFile[] = "CALENDAR.TXT";
+constexpr const char kTmpFile[] = "CALENDAR.TMP";
+// One-line buffer size: "YYYY-MM-DD\t" + kEventTextCap + "\n" + "\0".
+constexpr u32 kLineMax = 4 + 1 + 2 + 1 + 2 + 1 + kEventTextCap + 2;
+// Whole-file buffer: kMaxEvents * kLineMax with a small safety pad.
+constexpr u32 kFileBufCap = kMaxEvents * (kLineMax + 1) + 16;
+
+void EmitU32(char* out, u32& o, u32 cap, u32 v, u32 width)
+{
+    char tmp[12];
+    u32 n = 0;
+    if (v == 0)
+        tmp[n++] = '0';
+    else
+        while (v > 0 && n < sizeof(tmp))
+        {
+            tmp[n++] = static_cast<char>('0' + (v % 10));
+            v /= 10;
+        }
+    while (n < width && n < sizeof(tmp))
+        tmp[n++] = '0';
+    while (n > 0 && o + 1 < cap)
+        out[o++] = tmp[--n];
+}
+
+bool ParseU32(const char* s, u32 len, u32& out)
+{
+    if (len == 0)
+        return false;
+    u32 v = 0;
+    for (u32 i = 0; i < len; ++i)
+    {
+        if (s[i] < '0' || s[i] > '9')
+            return false;
+        v = v * 10 + static_cast<u32>(s[i] - '0');
+    }
+    out = v;
+    return true;
+}
+
+} // namespace
+
+bool CalendarSave()
+{
+    namespace fat = duetos::fs::fat32;
+    using duetos::arch::SerialWrite;
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        SerialWrite("[calendar] save: no FAT32 volume mounted\n");
+        return false;
+    }
+    // Serialise to a single byte-buffer first, then ship via the
+    // atomic create-tmp + rename path that NotesSave uses.
+    char buf[kFileBufCap];
+    u32 o = 0;
+    for (u32 i = 0; i < g_event_count; ++i)
+    {
+        const StoredEvent& e = g_events[i];
+        if (o + kLineMax >= sizeof(buf))
+            break; // hard cap — leave the rest for next save
+        EmitU32(buf, o, sizeof(buf), e.year, 4);
+        if (o + 1 < sizeof(buf))
+            buf[o++] = '-';
+        EmitU32(buf, o, sizeof(buf), e.month, 2);
+        if (o + 1 < sizeof(buf))
+            buf[o++] = '-';
+        EmitU32(buf, o, sizeof(buf), e.day, 2);
+        if (o + 1 < sizeof(buf))
+            buf[o++] = '\t';
+        for (u32 k = 0; k < kEventTextCap && e.text[k] != '\0' && o + 1 < sizeof(buf); ++k)
+            buf[o++] = e.text[k];
+        if (o + 1 < sizeof(buf))
+            buf[o++] = '\n';
+    }
+    // Drop a stale CALENDAR.TMP so the create succeeds.
+    fat::DirEntry tmp_existing;
+    if (fat::Fat32LookupPath(v, kTmpFile, &tmp_existing))
+        fat::Fat32DeleteAtPath(v, kTmpFile);
+    if (fat::Fat32CreateAtPath(v, kTmpFile, buf, o) < 0)
+    {
+        SerialWrite("[calendar] save: create CALENDAR.TMP failed\n");
+        return false;
+    }
+    fat::DirEntry existing;
+    if (fat::Fat32LookupPath(v, kSaveFile, &existing))
+    {
+        if (!fat::Fat32DeleteAtPath(v, kSaveFile))
+        {
+            SerialWrite("[calendar] save: delete-existing failed; CALENDAR.TMP retained\n");
+            return false;
+        }
+    }
+    if (!fat::Fat32RenameAtPath(v, kTmpFile, kSaveFile))
+    {
+        SerialWrite("[calendar] save: rename failed\n");
+        return false;
+    }
+    SerialWrite("[calendar] save: CALENDAR.TXT written (atomic via CALENDAR.TMP)\n");
+    return true;
+}
+
+bool CalendarLoad()
+{
+    namespace fat = duetos::fs::fat32;
+    using duetos::arch::SerialWrite;
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        SerialWrite("[calendar] load: no FAT32 volume mounted\n");
+        return false;
+    }
+    fat::DirEntry e;
+    if (!fat::Fat32LookupPath(v, kSaveFile, &e))
+    {
+        SerialWrite("[calendar] load: CALENDAR.TXT not found\n");
+        return false;
+    }
+    if (e.attributes & 0x10)
+        return false;
+    char buf[kFileBufCap];
+    const u64 cap = (e.size_bytes < sizeof(buf)) ? e.size_bytes : sizeof(buf);
+    const i64 n = fat::Fat32ReadFile(v, &e, buf, cap);
+    if (n < 0)
+    {
+        SerialWrite("[calendar] load: read failed\n");
+        return false;
+    }
+    g_event_count = 0;
+    u32 i = 0;
+    while (i < static_cast<u32>(n))
+    {
+        // Find end-of-line.
+        u32 lend = i;
+        while (lend < static_cast<u32>(n) && buf[lend] != '\n')
+            ++lend;
+        // Parse "YYYY-MM-DD\tTEXT".
+        if (lend - i >= 11 && buf[i + 4] == '-' && buf[i + 7] == '-' && buf[i + 10] == '\t')
+        {
+            u32 yy = 0, mm = 0, dd = 0;
+            const bool ok = ParseU32(buf + i, 4, yy) && ParseU32(buf + i + 5, 2, mm) && ParseU32(buf + i + 8, 2, dd);
+            if (ok && ValidDate(yy, static_cast<u8>(mm), static_cast<u8>(dd)))
+            {
+                char text[kEventTextCap + 1];
+                u32 t = 0;
+                u32 src = i + 11;
+                while (src < lend && t < kEventTextCap)
+                    text[t++] = buf[src++];
+                text[t] = '\0';
+                CalendarAddEvent(yy, static_cast<u8>(mm), static_cast<u8>(dd), text);
+            }
+        }
+        // Advance past the newline (or end-of-buffer).
+        i = (lend < static_cast<u32>(n)) ? lend + 1 : lend;
+    }
+    SerialWrite("[calendar] load: CALENDAR.TXT applied\n");
+    return true;
+}
+
+void CalendarPersistSelfTest()
+{
+    namespace fat = duetos::fs::fat32;
+    using duetos::arch::SerialWrite;
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        SerialWrite("[calendar] persist self-test SKIP (no FAT32)\n");
+        return;
+    }
+    fat::DirEntry existing;
+    if (fat::Fat32LookupPath(v, kSaveFile, &existing))
+    {
+        SerialWrite("[calendar] persist self-test SKIP (CALENDAR.TXT exists)\n");
+        return;
+    }
+    // Snapshot live state so the test never destroys it.
+    StoredEvent saved[kMaxEvents];
+    const u32 saved_count = g_event_count;
+    for (u32 i = 0; i < saved_count; ++i)
+        saved[i] = g_events[i];
+
+    g_event_count = 0;
+    bool pass = true;
+    if (!CalendarAddEvent(2026, 5, 7, "PERSIST_TEST"))
+        pass = false;
+    if (!CalendarSave())
+        pass = false;
+    g_event_count = 0;
+    if (pass && !CalendarLoad())
+        pass = false;
+    if (pass && (g_event_count != 1 || !CalendarHasEvent(2026, 5, 7)))
+        pass = false;
+    char tbuf[kEventTextCap + 1] = {};
+    if (pass && !CalendarFirstEventText(2026, 5, 7, tbuf, sizeof(tbuf)))
+        pass = false;
+    if (pass && (tbuf[0] != 'P' || tbuf[1] != 'E' || tbuf[2] != 'R'))
+        pass = false;
+
+    // Cleanup: drop the test file + restore the live table.
+    fat::Fat32DeleteAtPath(v, kSaveFile);
+    g_event_count = saved_count;
+    for (u32 i = 0; i < saved_count; ++i)
+        g_events[i] = saved[i];
+
+    SerialWrite(pass ? "[calendar] persist self-test OK (round-trip)\n" : "[calendar] persist self-test FAILED\n");
 }
 
 } // namespace duetos::apps::calendar

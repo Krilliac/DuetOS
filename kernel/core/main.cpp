@@ -486,6 +486,7 @@ void PrintShortcutHelp()
     ConsoleWriteln("    SHIFT+UP/DOWN      STEP SELECTION 7 DAYS");
     ConsoleWriteln("    ENTER              ADD EVENT (selected date)");
     ConsoleWriteln("    DEL                REMOVE EVENT (selected date)");
+    ConsoleWriteln("    CTRL+S / CTRL+O    SAVE / LOAD CALENDAR.TXT");
     ConsoleWriteln("");
     ConsoleWriteln("  SETTINGS BUTTONS");
     ConsoleWriteln("    THEME / OPACITY / TZ / LOG OUT / REBOOT / SHUTDOWN");
@@ -1930,6 +1931,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::drivers::video::ThemeRegisterWindow(Role::Calendar, calendar_handle);
     duetos::apps::calendar::CalendarInit(calendar_handle);
     DUETOS_BOOT_SELFTEST(duetos::apps::calendar::CalendarSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::apps::calendar::CalendarPersistSelfTest());
 
     // NOTIFICATION CENTER — windowed reader over the toast
     // history ring kept in drivers/video/notify.cpp. Same
@@ -2814,6 +2816,11 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // still toggle back with M (memory).
     duetos::apps::files::FilesPromoteToDisk();
 
+    // Restore the saved Calendar event table from CALENDAR.TXT if
+    // one exists. Silent no-op if the file isn't there — first-
+    // boot Calendar simply starts with an empty event store.
+    duetos::apps::calendar::CalendarLoad();
+
     // Install the FAT32 file sink — replaces the early tmpfs
     // sink (single-slot API). The tmpfs `/tmp/boot.log`
     // captured the early-boot lines; from here on, every
@@ -3171,10 +3178,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 duetos::drivers::video::CompositorUnlock();
             }
 
-            // Ctrl+S — persist the Notes buffer to the FAT32 root
-            // as NOTES.TXT. Active-window-gated: anywhere else this
-            // chord is unbound. NotesSave logs success/failure to
-            // COM1; the toast surfaces the same outcome to the user.
+            // Ctrl+S — persist Notes / Calendar to the FAT32 root.
+            // Active-window-gated: Notes -> NOTES.TXT, Calendar ->
+            // CALENDAR.TXT. Anywhere else this chord is unbound.
             if (ctrl && !alt && (ev.code == 's' || ev.code == 'S'))
             {
                 duetos::drivers::video::CompositorLock();
@@ -3185,6 +3191,15 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     duetos::drivers::video::CompositorUnlock();
                     duetos::drivers::video::NotifyShow(ok ? "saved to NOTES.TXT" : "save failed");
                     SerialWrite(ok ? "[ui] ^S notes saved\n" : "[ui] ^S notes save FAILED\n");
+                    continue;
+                }
+                if (active != duetos::drivers::video::kWindowInvalid &&
+                    active == duetos::apps::calendar::CalendarWindow())
+                {
+                    const bool ok = duetos::apps::calendar::CalendarSave();
+                    duetos::drivers::video::CompositorUnlock();
+                    duetos::drivers::video::NotifyShow(ok ? "saved to CALENDAR.TXT" : "calendar save failed");
+                    SerialWrite(ok ? "[ui] ^S calendar saved\n" : "[ui] ^S calendar save FAILED\n");
                     continue;
                 }
                 duetos::drivers::video::CompositorUnlock();
@@ -3459,6 +3474,15 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     duetos::drivers::video::CompositorUnlock();
                     duetos::drivers::video::NotifyShow(ok ? "loaded NOTES.TXT" : "load failed (no NOTES.TXT?)");
                     SerialWrite(ok ? "[ui] ^O notes loaded\n" : "[ui] ^O notes load FAILED\n");
+                    continue;
+                }
+                if (active != duetos::drivers::video::kWindowInvalid &&
+                    active == duetos::apps::calendar::CalendarWindow())
+                {
+                    const bool ok = duetos::apps::calendar::CalendarLoad();
+                    duetos::drivers::video::CompositorUnlock();
+                    duetos::drivers::video::NotifyShow(ok ? "loaded CALENDAR.TXT" : "calendar load failed");
+                    SerialWrite(ok ? "[ui] ^O calendar loaded\n" : "[ui] ^O calendar load FAILED\n");
                     continue;
                 }
                 duetos::drivers::video::CompositorUnlock();

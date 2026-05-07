@@ -114,6 +114,7 @@ constexpr Row kRows[] = {
     {"  SHIFT+UP/DN       STEP SELECTION 7 DAYS", false},
     {"  ENTER             ADD EVENT (selected date)", false},
     {"  DEL               REMOVE EVENT (selected date)", false},
+    {"  CTRL+S / CTRL+O   SAVE / LOAD CALENDAR.TXT", false},
     {"  *DOT*             cell carries an event", false},
     {"SETTINGS", true},
     {"  THEME / OPACITY / TZ / LOG OUT", false},
