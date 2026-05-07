@@ -7,25 +7,26 @@
  *
  * The leak detector (`kernel/diag/leak_detector.cpp`) consumes the
  * four `GpuLeakSnapshot*` accessors below to fold GPU resources into
- * its unified per-class report. Today each accessor returns a zeroed
- * snapshot — v0 GPU is discovery-only (`kernel/drivers/gpu/gpu.h`)
- * and there are no contexts, surfaces, command buffers, or VRAM
- * allocations to count. As the imminent GPU slice lands real tables,
- * each accessor's implementation flips from "returns zero" to
- * "returns real count" without any change to the leak detector.
+ * its unified per-class report. Each accessor is a thin passthrough
+ * over `gpu_resources.h`'s per-class snapshot tables — drivers
+ * register resources via `GpuContextRegister` / `GpuSurfaceRegister`
+ * / `GpuCmdBufferRegister` / `GpuVramRegister`, and the snapshots
+ * here see the live count + peak + byte_cost.
  *
  * The detector links against these symbols unconditionally — it
- * never reaches into GPU internals. The driver owns the source of
- * truth (its per-resource tables); this header is the read-side
+ * never reaches into GPU internals. The drivers own the write side
+ * (registering / releasing resources); this header is the read-side
  * contract.
  *
  * Adding a new GPU resource class:
  *   1. Extend `ResourceClass` in `kernel/diag/leak_detector.h`.
  *   2. Add a sibling `GpuLeakSnapshot<NewClass>()` here.
- *   3. Adapt in `kernel/diag/leak_detector.cpp`.
+ *   3. Add the matching class to `gpu_resources.h` (table + APIs).
+ *   4. Adapt in `kernel/diag/leak_detector.cpp`.
  *
- * Context: kernel. Snapshot accessors are read-only and safe from
- * any context — no locks, no allocation, no blocking.
+ * Context: kernel. Snapshot accessors are read-only — they take
+ * the resource subsystem's spinlock briefly. Safe from any
+ * context that doesn't already hold that lock.
  */
 
 namespace duetos::drivers::gpu
@@ -62,16 +63,16 @@ GpuClassSnapshot GpuLeakSnapshotCmdBuffers();
 GpuClassSnapshot GpuLeakSnapshotVram();
 
 /// Per-process exit hook. Called from the leak detector's
-/// `LeakDetectorReportProcessExit()` so the GPU driver can attribute
-/// any residue (orphaned contexts, surfaces, command buffers, VRAM)
-/// to the exiting PID. `per_class` is filled in by the detector's
-/// caller with the four GPU classes' snapshots in the order
-/// (contexts, surfaces, cmd_buffers, vram); the GPU driver may use
-/// it to cross-check against its own tables.
-///
-/// v0 implementation is a no-op — there are no GPU resources to
-/// orphan yet. The contract is in place so the GPU slice's exit
-/// path drops in here once it has tables to walk.
+/// `LeakDetectorReportProcessExit()` so the GPU resource tables
+/// can evict any residue (orphaned contexts, surfaces, command
+/// buffers, VRAM) attributed to the exiting PID. `per_class` is
+/// filled in by the detector's caller with the four GPU classes'
+/// snapshots in the order (contexts, surfaces, cmd_buffers, vram);
+/// the hook logs them alongside the eviction count so an operator
+/// can correlate a leak warning with the system-wide outstanding
+/// state at the moment of exit. Resources tagged with `kPidKernel`
+/// are skipped — they outlive the user process and are released
+/// through driver-shutdown paths.
 void GpuLeakReportProcessExit(u64 pid, const GpuClassSnapshot per_class[4]);
 
 } // namespace duetos::drivers::gpu

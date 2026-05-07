@@ -88,6 +88,7 @@
 #include "drivers/gpu/dpms.h"
 #include "drivers/gpu/edid.h"
 #include "drivers/gpu/gpu.h"
+#include "drivers/gpu/gpu_resources.h"
 #include "drivers/gpu/intel_gsc_fw.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/input/ps2mouse.h"
@@ -2629,6 +2630,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::DpmsSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::Cea861SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::intel::IntelGscFwSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::GpuResourcesSelfTest());
 
     SerialWrite("[boot] Bringing up firmware loader (scaffold).\n");
     duetos::core::FwLoaderInit();
