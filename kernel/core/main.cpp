@@ -81,6 +81,7 @@
 #include "debug/watch.h"
 #include "drivers/audio/audio.h"
 #include "drivers/audio/hda.h"
+#include "drivers/audio/hda_jack.h"
 #include "drivers/gpu/cea861.h"
 #include "drivers/gpu/cvt.h"
 #include "drivers/gpu/dpms.h"
@@ -2706,6 +2707,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // KERNEL_INITCALL(Drivers, "drivers/audio.module", ...) in
     // `kernel/drivers/audio/audio.cpp`.
     DUETOS_BOOT_SELFTEST(duetos::drivers::audio::hda::VerbEncodingSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::audio::hda::HdaJackSelfTest());
 
     SerialWrite("[boot] Bringing up power / thermal shell.\n");
     duetos::drivers::power::PowerInit();
