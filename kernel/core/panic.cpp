@@ -7,6 +7,7 @@
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/smp.h"
 #include "arch/x86_64/timer.h"
+#include "arch/x86_64/traps.h"
 #include "time/tick.h"
 #include "cpu/percpu.h"
 #include "debug/probes.h"
@@ -730,6 +731,26 @@ void Panic(const char* subsystem, const char* message)
     // itself also CLI+HLT loops, but getting the clean banner out
     // first matters for diagnosis.
     arch::Cli();
+
+    // Recursive-panic short-circuit. If a previous halt-bound path
+    // already started its diagnostic (this routine, PanicWithValue,
+    // or the trap dispatcher's kernel-mode Panic outcome), running
+    // the full DumpDiagnostics + minidump emit again would re-walk
+    // the same potentially-corrupt frames that triggered the
+    // recursion in the first place. Engage panic-mode serial (so
+    // the line below bypasses the spinlock the first dump may have
+    // grabbed), emit a one-line marker, halt.
+    if (arch::PanicInProgress())
+    {
+        arch::SerialEnterPanicMode();
+        arch::SerialWrite("\n[recursive-panic] ");
+        arch::SerialWrite(subsystem);
+        arch::SerialWrite(": ");
+        arch::SerialWrite(message);
+        arch::SerialWrite(" — short-circuiting\n");
+        arch::Halt();
+    }
+    arch::PanicInProgressMark();
     // Silence the NMI watchdog. The crash-dump path can take
     // longer than one watchdog interval (serial write is slow,
     // symbol resolution walks the embedded table) and we don't
@@ -798,6 +819,22 @@ void Panic(const char* subsystem, const char* message)
 void PanicWithValue(const char* subsystem, const char* message, u64 value)
 {
     arch::Cli();
+
+    // Recursive-panic short-circuit — see Panic() for rationale.
+    if (arch::PanicInProgress())
+    {
+        arch::SerialEnterPanicMode();
+        arch::SerialWrite("\n[recursive-panic] ");
+        arch::SerialWrite(subsystem);
+        arch::SerialWrite(": ");
+        arch::SerialWrite(message);
+        arch::SerialWrite("\n  value    : ");
+        arch::SerialWriteHex(value);
+        arch::SerialWrite("\n  — short-circuiting\n");
+        arch::Halt();
+    }
+    arch::PanicInProgressMark();
+
     arch::NmiWatchdogDisable();
     duetos::diag::SoftLockupDisable();
     // Freeze the per-CPU LBR ring NOW so the dump-emission code

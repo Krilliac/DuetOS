@@ -171,4 +171,34 @@ struct FaultCounts
 };
 FaultCounts FaultCountsSnapshot();
 
+/// True once any halt-bound path (kernel-mode trap Panic outcome,
+/// core::Panic, core::PanicWithValue) has crossed the "no recovery"
+/// threshold and started emitting its dump. Read by the trap
+/// dispatcher and the panic helpers to detect a recursive fault
+/// raised while the dump itself is being printed — without this
+/// guard, a wild pointer walked by DumpDiagnostics re-enters the
+/// dispatcher from #PF, runs the full dump again, and either
+/// triple-faults or produces interleaved garbage.
+///
+/// Once true, stays true for the lifetime of the boot — there is
+/// no recovery from a kernel panic, and the flag's only consumer
+/// is the short-circuit that distinguishes "first fault" from
+/// "fault while we were trying to dump the first fault".
+bool PanicInProgress();
+
+/// Mark the panic-in-progress flag set. Idempotent. Visible to all
+/// CPUs once set (volatile store; no atomic needed because the
+/// only race is "two CPUs panic simultaneously" and any ordering
+/// is acceptable — both will short-circuit each other).
+void PanicInProgressMark();
+
+/// Recursive-fault halt path. Emits one raw-serial line naming the
+/// offending vector + RIP and halts. Used by the trap dispatcher's
+/// kernel-mode Panic outcome when PanicInProgress() is already
+/// true on entry — the dump that produced THIS fault is still
+/// running on another stack frame, so any heavy diagnostic here
+/// would compound the recursion. Better to lose the second dump
+/// than to triple-fault.
+[[noreturn]] void HaltOnRecursiveFault(u64 vector, u64 rip);
+
 } // namespace duetos::arch
