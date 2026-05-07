@@ -112,11 +112,20 @@ void FixJournalInit();
 /// Record a gap. Safe from process and IRQ context. Not safe from
 /// trap / NMI / soft-IRQ context — use `FixJournalRecordFromTrap`
 /// there. `source_pin` and `hint` are copied into the record (up
-/// to 39 chars + NUL); pass nullptr for `hint` if none. Returns
-/// `Ok` on success, `Err{OutOfMemory}` if the ring is full and the
-/// record is a brand-new (detector, source_pin) — in that case the
-/// drop is recorded in stats. Existing records always succeed
-/// (dedup just bumps the counter).
+/// to 39 chars + NUL); pass nullptr for `hint` if none.
+///
+/// `source_pin` may be nullptr or empty — in that case the record
+/// auto-derives a pin of the form `func+0xOFF` from the caller's
+/// rip via the embedded symbol table. Function-relative offsets
+/// are KASLR-stable so dedup remains stable across boots. Auto-
+/// derivation fails (returns `Err{InvalidArgument}`) only if the
+/// caller's rip lies outside any known symbol — typically a sign
+/// the recorder is in a generated stub or a JIT region.
+///
+/// Returns `Ok` on success, `Err{OutOfMemory}` if the ring is full
+/// and the record is a brand-new (detector, source_pin) — in that
+/// case the drop is recorded in stats. Existing records always
+/// succeed (dedup just bumps the counter).
 ::duetos::core::Result<void> FixJournalRecord(FixDetector detector, const char* source_pin, const char* hint, u64 ctx_a,
                                               u64 ctx_b);
 

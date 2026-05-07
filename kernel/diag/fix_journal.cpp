@@ -5,6 +5,7 @@
 #include "sync/spinlock.h"
 #include "time/timekeeper.h"
 #include "util/result.h"
+#include "util/symbols.h"
 #include "util/types.h"
 
 /*
@@ -68,6 +69,65 @@ struct TrapPending
     u64 caller_rip; // for the eventual record
 };
 TrapPending g_trap_pending = {};
+
+// Format an unsigned hex value into `dst` starting at `cursor`,
+// without leading zeros, capped at `cap`. Returns the new cursor.
+// Used to render `+0xOFF` suffixes in auto-derived source_pins.
+u64 AppendHex(char* dst, u64 cursor, u64 cap, u64 value)
+{
+    if (cursor >= cap)
+        return cursor;
+    if (value == 0)
+    {
+        dst[cursor++] = '0';
+        return cursor;
+    }
+    char tmp[16];
+    int n = 0;
+    while (value != 0 && n < 16)
+    {
+        const u8 nib = static_cast<u8>(value & 0xF);
+        tmp[n++] = static_cast<char>(nib < 10 ? ('0' + nib) : ('a' + nib - 10));
+        value >>= 4;
+    }
+    for (int i = n - 1; i >= 0 && cursor < cap; --i)
+    {
+        dst[cursor++] = tmp[i];
+    }
+    return cursor;
+}
+
+// Build a pin of the form `func+0xOFF` from a caller rip. Returns
+// true if the rip resolved to a known symbol. Output is NUL-
+// terminated within `cap`. Used as a fallback when the recorder
+// site supplies no source_pin.
+bool BuildAutoPin(char* dst, u64 cap, u64 caller_rip)
+{
+    if (dst == nullptr || cap == 0)
+        return false;
+    dst[0] = '\0';
+    ::duetos::core::SymbolResolution res{};
+    if (!::duetos::core::ResolveAddress(caller_rip, &res) || res.entry == nullptr)
+        return false;
+    const char* name = res.entry->name != nullptr ? res.entry->name : "?";
+    u64 c = 0;
+    while (c + 1 < cap && name[c] != '\0')
+    {
+        dst[c] = name[c];
+        ++c;
+    }
+    if (c + 4 < cap)
+    {
+        dst[c++] = '+';
+        dst[c++] = '0';
+        dst[c++] = 'x';
+        c = AppendHex(dst, c, cap - 1, res.offset);
+    }
+    if (c >= cap)
+        c = cap - 1;
+    dst[c] = '\0';
+    return true;
+}
 
 // Bounded string copy with NUL termination. Always NUL-terminates
 // the dest even when src is too long — the reviewer prefers a
@@ -172,8 +232,17 @@ u64 InternLocked(FixDetector detector, const char* source_pin, const char* hint,
 ::duetos::core::Result<void> RecordCommon(FixDetector detector, const char* source_pin, const char* hint, u64 ctx_a,
                                           u64 ctx_b, u16 severity, u64 caller_rip)
 {
+    // Auto-symbolize when the recorder supplies no pin: derive
+    // `func+0xOFF` from caller_rip via the embedded symbol table.
+    // Function-relative offsets are KASLR-stable (the whole image
+    // shifts together), so the same call site dedups across boots.
+    char auto_pin[40];
     if (source_pin == nullptr || source_pin[0] == '\0')
-        return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+    {
+        if (!BuildAutoPin(auto_pin, sizeof(auto_pin), caller_rip))
+            return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+        source_pin = auto_pin;
+    }
 
     const u64 ts = ::duetos::time::MonotonicNs();
 
@@ -446,7 +515,34 @@ void FixJournalSelfTest()
         return;
     }
 
-    KLOG_INFO_V("smoke", "fix_journal=ok records", after_dup.records_unique);
+    // Auto-symbolize check: pass nullptr source_pin and verify the
+    // record lands with a non-empty pin matching `<func>+0xOFF`
+    // (or just `<func>` if offset is zero). Skips if the symbol
+    // table couldn't resolve the caller (unlikely in this
+    // function — it lives in well-known kernel .text).
+    const u64 unique_before_auto = FixJournalGetStats().records_unique;
+    const auto auto_result = FixJournalRecord(FixDetector::StubMarker, nullptr, "auto-pin selftest", 0, 0);
+    const u64 unique_after_auto = FixJournalGetStats().records_unique;
+    if (auto_result.has_value() && unique_after_auto == unique_before_auto + 1)
+    {
+        // Confirm the most-recent record carries a non-empty pin
+        // — if the symbol resolver was active, BuildAutoPin filled
+        // it; otherwise the record would have been rejected with
+        // InvalidArgument (handled by the !has_value() branch).
+        FixRecord newest[1] = {};
+        if (FixJournalSnapshot(newest, 1) == 1 && newest[0].source_pin[0] == '\0')
+        {
+            KLOG_ERROR("diag/fix_journal", "selftest: auto-pin landed an empty source_pin");
+            ::duetos::debug::ProbeFire(::duetos::debug::ProbeId::kBootSelftestFail,
+                                       reinterpret_cast<u64>(__builtin_return_address(0)), 6);
+            return;
+        }
+    }
+    // If auto_result.has_value() is false, BuildAutoPin couldn't
+    // resolve — that's a SKIP, not a FAIL (e.g. the symbol table
+    // is the stage-1 stub that maps no addresses).
+
+    KLOG_INFO_V("smoke", "fix_journal=ok records", FixJournalGetStats().records_unique);
 }
 
 } // namespace duetos::diag

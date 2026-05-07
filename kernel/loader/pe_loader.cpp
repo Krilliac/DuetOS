@@ -1380,6 +1380,42 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
             const core::LogLevel lvl = is_noop_stub ? core::LogLevel::Warn : core::LogLevel::Info;
             const char* msg = is_noop_stub ? "import resolved to NO-OP stub" : "import resolved";
             core::LogWithString(lvl, "pe-resolve", msg, "fn", fn_name);
+
+            // Journal the resolved-to-NO-OP path too: the catch-all
+            // earlier in this function only caught imports with no
+            // table entry at all. A function that DOES have a thunk
+            // entry but resolves to `kOffReturnZero` / `kOffReturnOne`
+            // / `kOffMissLogger` / `kOffCritSecNop` is still a gap —
+            // the call returns a constant rather than doing the real
+            // work. Dedup by (UnmappedThunk, "<dll>!<fn>") collapses
+            // repeats, so a PE that calls the same noop 1000 times
+            // shows up once with repeat_count=1000.
+            if (is_noop_stub)
+            {
+                char pin[40];
+                u64 p = 0;
+                if (dll_name != nullptr)
+                {
+                    while (p < 30 && dll_name[p] != '\0')
+                    {
+                        pin[p] = dll_name[p];
+                        ++p;
+                    }
+                }
+                if (p < 39)
+                    pin[p++] = '!';
+                if (fn_name != nullptr)
+                {
+                    u64 f = 0;
+                    while (p < 39 && fn_name[f] != '\0')
+                    {
+                        pin[p++] = fn_name[f++];
+                    }
+                }
+                pin[p] = '\0';
+                (void)::duetos::diag::FixJournalRecord(::duetos::diag::FixDetector::UnmappedThunk, pin,
+                                                       "implement Win32 thunk (currently noop-stub)", h.image_base, 1);
+            }
         }
     }
 

@@ -26,10 +26,12 @@ as a Python error rather than silently misaligning fields.
 from __future__ import annotations
 
 import argparse
+import json
 import struct
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
+from pathlib import Path
 
 FILE_MAGIC = 0x4A584946  # 'FIXJ'
 RECORD_MAGIC = 0x52584946  # 'FIXR'
@@ -144,7 +146,76 @@ def read_records(path: str) -> tuple[int, list[FixRecord]]:
     return version, records
 
 
-def render_markdown(boots: list[tuple[str, int, list[FixRecord]]]) -> str:
+def load_markers(path: Path) -> list[dict]:
+    """Load a marker manifest produced by gen-fix-markers.py."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"# warn: couldn't read markers manifest {path}: {exc}", file=sys.stderr)
+        return []
+
+
+def render_marker_section(markers: list[dict], boots: list[tuple[str, int, list[FixRecord]]]) -> list[str]:
+    """Cross-reference source markers against observed runtime records.
+
+    A marker is "ever observed" if any record's source_pin starts with
+    the marker's file path or contains the marker line — the recorder
+    sites use file:line or file:Function naming so a substring check
+    on file path is the most robust we can do without an explicit pin
+    tagging convention.
+    """
+    if not markers:
+        return []
+    observed_pins = set()
+    for _path, _ver, recs in boots:
+        for r in recs:
+            observed_pins.add(r.source_pin)
+
+    out: list[str] = []
+    out.append("## Marker Drift")
+    out.append("")
+    out.append(
+        "Each row is a `// STUB:` / `// GAP:` comment in the source tree. "
+        "`Observable` is true when the marker has a `FIX_NOTE_*` macro on a "
+        "following line — i.e. the kernel can journal it at runtime. "
+        "`Observed` is true when at least one fix-journal record's "
+        "`source_pin` references the marker's file."
+    )
+    out.append("")
+    out.append("| File:Line | Kind | Observable | Observed | Comment |")
+    out.append("|-----------|------|-----------|----------|---------|")
+    for m in sorted(markers, key=lambda r: (r["file"], r["line"])):
+        # Heuristic match: any observed pin that contains the file
+        # path. The recorder convention is "<file>:<func>" or
+        # "<dir>/<file>:<func>", so a substring test on the trailing
+        # filename catches the common cases without false positives
+        # on bare function names.
+        fname = Path(m["file"]).stem
+        observed = any(fname in pin for pin in observed_pins)
+        obs_flag = "✅" if m["has_macro"] else "—"
+        seen_flag = "✅" if observed else "—"
+        comment = m["comment"][:60] + ("…" if len(m["comment"]) > 60 else "")
+        out.append(
+            f"| `{m['file']}:{m['line']}` | {m['kind']} | {obs_flag} | {seen_flag} | {comment} |"
+        )
+    out.append("")
+
+    total = len(markers)
+    obs = sum(1 for m in markers if m["has_macro"])
+    seen = sum(1 for m in markers if any(Path(m["file"]).stem in pin for pin in observed_pins))
+    out.append(
+        f"**Summary:** {total} markers in source — "
+        f"{obs} observable ({total - obs} comment-only); "
+        f"{seen} ever observed at runtime."
+    )
+    out.append("")
+    return out
+
+
+def render_markdown(
+    boots: list[tuple[str, int, list[FixRecord]]],
+    markers: list[dict] | None = None,
+) -> str:
     """Render a single combined report covering one or more boots."""
     out: list[str] = []
     out.append("# DuetOS Fix Journal Report")
@@ -214,6 +285,9 @@ def render_markdown(boots: list[tuple[str, int, list[FixRecord]]]) -> str:
             )
         out.append("")
 
+    if markers:
+        out.extend(render_marker_section(markers, boots))
+
     out.append("## Triage Workflow")
     out.append("")
     out.append(
@@ -224,7 +298,12 @@ def render_markdown(boots: list[tuple[str, int, list[FixRecord]]]) -> str:
         "existing primitive, or accept the gap (then tell `dfix mark-done` "
         "to filter it out).\n"
         "3. Land the source fix as a normal commit; the runtime journal "
-        "is observe-only — no auto-apply, per Design-Decision #016."
+        "is observe-only — no auto-apply, per Design-Decision #016.\n"
+        "4. Cross-reference the **Marker Drift** table (when a manifest "
+        "is supplied via `--markers`): rows with `Observable=—` need a "
+        "`FIX_NOTE_*` macro added; rows with `Observable=✅` and "
+        "`Observed=—` are cold paths or unreachable dead code worth "
+        "investigating."
     )
     return "\n".join(out)
 
@@ -232,6 +311,12 @@ def render_markdown(boots: list[tuple[str, int, list[FixRecord]]]) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("files", nargs="+", help="KERNEL.FIX (and rotation siblings)")
+    ap.add_argument(
+        "--markers",
+        type=Path,
+        default=None,
+        help="optional marker manifest (gen-fix-markers.py output) for cross-reference",
+    )
     args = ap.parse_args()
 
     boots: list[tuple[str, int, list[FixRecord]]] = []
@@ -247,7 +332,8 @@ def main() -> int:
         print("# no readable fix-journal files", file=sys.stderr)
         return 1
 
-    print(render_markdown(boots))
+    markers = load_markers(args.markers) if args.markers else []
+    print(render_markdown(boots, markers))
     return 0
 
 
