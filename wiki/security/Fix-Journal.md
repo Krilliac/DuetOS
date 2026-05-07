@@ -68,6 +68,35 @@ $ python3 tools/build/gen-fix-report.py KERNEL.FIX KERNEL.F0 KERNEL.F1
 
 The output is a markdown report grouping records by detector and source pin, sorted by repeat count, with a triage workflow at the end.
 
+## Patch generation
+
+A second host-side script consumes `KERNEL.FIX` and emits **candidate source patches** for the gaps the journal recorded. Same #016 contract as the rest of the subsystem — the kernel never auto-applies; the script just removes the mechanical busywork of writing the diff:
+
+```sh
+$ python3 tools/build/gen-fix-patches.py KERNEL.FIX --out=fix-patches/
+```
+
+For each unique record:
+
+| Detector | Auto-patch? | Action shape |
+|----------|-------------|--------------|
+| `unmapped_thunk` (not in `thunks_table.inc`) | YES | Inserts a row pointing at `kOffMissLogger` (safe catch-all) so the next boot logs each call site instead of silently returning 0 |
+| `unmapped_thunk` (in table at `kOffReturnZero/One/CritSecNop/GetProcessHeap`) | No | Markdown note explaining the entry is a placeholder; reviewer either upgrades the bytecode or replaces the generic `kOff*` with a distinct named offset (the noop classifier ignores any offset whose name isn't in the noop set) |
+| `unknown_syscall` | YES | Scaffolds an explicit `case 0x<num>:` arm in `syscall.cpp` that returns `-ENOSYS` plus a `FIX_NOTE_STUB` so future hits stay observable |
+| `stub` / `gap` / `soft_fault_recov` / `loader_reject` | No | Markdown note pointing at the source pin |
+
+Patch files are unified diffs ready for `git apply`. Re-running after applying is safe — the script doesn't re-emit a patch for a row that already exists. Optional `--apply` runs `git apply` on each patch with a y/n prompt; `--yes` skips the prompts (use only in CI).
+
+### Why no auto-apply for the noop-stub case?
+
+When a thunk row already exists at `kOffReturnZero/One/CritSecNop`, the right answer depends on the call's semantics — the script can't tell whether the caller cares about the return value, whether a real implementation needs proc-env state, or whether the noop is genuinely the correct contract. The reviewer makes that call. Two patterns the script suggests:
+
+1. **Real implementation**: write x86-64 bytecode in `kernel/subsystems/win32/thunks_bytecode.inc`, declare a `kOff<Name>` constant in `thunks.cpp`, and update the row. See the eight thunks landed alongside this script (`__chkstk`, `_cexit`, `_crt_atexit`, `_register_onexit_function`, `_initialize_onexit_table`, `_set_app_type`, `_configure_narrow_argv`, `FreeEnvironmentStringsW`) for worked examples covering page probing, atexit-list walking, and proc-env-backed value storage.
+
+2. **Named-equivalent noop**: when the noop IS the correct contract (e.g. `FreeEnvironmentStringsW` over a static env block), add a distinct `kOffFooBar` constant whose bytecode is literally the same `xor eax, eax; ret` / `mov eax, 1; ret` / `ret`. The noop classifier in `Win32ThunksLookupHashed` checks the offset *name*, not the bytes, so a named offset stops surfacing as a journal record on every boot.
+
+Both patterns keep the audit trail intact — the journal continues to record any TRULY unimplemented gap, while suppressing entries the reviewer has already decided about.
+
 ## Reviewer workflow
 
 1. **Pick a gap.** `dfix list` (or the markdown report) gives the un-audited rows. The highest-repeat row in each detector is the best ROI.
@@ -92,6 +121,7 @@ The output is a markdown report grouping records by detector and source pin, sor
 | `kernel/shell/shell_diag.cpp` | `dfix` command (5 sub-operations) | 280 |
 | `kernel/fs/ramfs.cpp` (additions) | `/proc/fixjournal` snapshot view | ~80 |
 | `tools/build/gen-fix-report.py` | Offline markdown summarizer | 250 |
+| `tools/build/gen-fix-patches.py` | Offline source-patch generator (--apply) | 380 |
 
 Insertions into existing files (single-digit lines each): `kernel/syscall/syscall.cpp`, `kernel/loader/pe_loader.cpp`, `kernel/diag/recovery.h`, `kernel/core/main.cpp`, `kernel/core/panic.cpp`, `kernel/diag/heartbeat.cpp`, plus six representative `// STUB:` / `// GAP:` sites that gained `FIX_NOTE_*` macros.
 

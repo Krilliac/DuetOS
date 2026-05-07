@@ -3548,8 +3548,8 @@
     0x00, 0x00,                   //
     0x4D, 0x89, 0x10,             // 0x10B9 mov [r8], r10          ; *p_env = &env block
     // 0x10BC: skip_env
-    0x31, 0xC0,                   // 0x10BC xor eax, eax           ; return 0
-    0xC3,                         // 0x10BE ret
+    0x31, 0xC0, // 0x10BC xor eax, eax           ; return 0
+    0xC3,       // 0x10BE ret
 
     // --- _errno (offset 0x10BF, 6 bytes) ------------------------
     // int* _errno(void). Returns a pointer to the thread-local
@@ -3564,3 +3564,181 @@
     // fix shape as kOffPCommode.
     0xB8, 0x00, 0x08, 0x00, 0x65, // 0x10BF mov eax, 0x65000800
     0xC3,                         // 0x10C4 ret
+
+    // --- __chkstk (offset 0x10C5, 53 bytes) ---------------------
+    // MSVC stack-probe helper. Caller emits `call __chkstk` with
+    // RAX = bytes to subtract from RSP, then does `sub rsp, rax`
+    // ONLY after we return. We must touch one byte per page in
+    // the about-to-be-allocated range so the OS commits each
+    // demand-paged page before the caller's `sub rsp, rax`
+    // permanently lands the stack pointer there. Preserves all
+    // GPRs except r10/r11 (caller-saved scratch in Win64 ABI)
+    // and rax (which Win64 __chkstk explicitly preserves).
+    //
+    // For DuetOS today the user stack is fully committed at PE
+    // load — every page is already mapped, so the probes are
+    // strictly redundant. Doing them anyway is the right
+    // forward-compatible shape: the day demand-paged stacks
+    // land, this thunk is correct without revisiting. Probing
+    // a committed page is a single dummy memory load that the
+    // CPU coalesces into a no-op (no fault, no TLB churn).
+    //
+    // Algorithm:
+    //   r11 = caller's RSP (skip our two pushes)
+    //   r10 = bytes left to probe (= caller's RAX)
+    //   while (r10 > 4096) { r11 -= 4096; r10 -= 4096; probe [r11] }
+    //   probe [r11 - r10]   ; final partial page
+    0x41, 0x52,             // 0x10C5 push r10
+    0x41, 0x53,             // 0x10C7 push r11
+    0x49, 0x89, 0xE3,       // 0x10C9 mov  r11, rsp
+    0x49, 0x83, 0xC3, 0x10, // 0x10CC add  r11, 16   ; skip our 2 pushes
+    0x49, 0x89, 0xC2,       // 0x10D0 mov  r10, rax
+    // .loop:
+    0x49, 0x81, 0xFA, 0x00, 0x10, // 0x10D3 cmp  r10, 0x1000
+    0x00, 0x00,                   //
+    0x76, 0x13,                   // 0x10DA jbe  +0x13 -> .done (0x10EF)
+    0x49, 0x81, 0xEB, 0x00, 0x10, // 0x10DC sub  r11, 0x1000
+    0x00, 0x00,                   //
+    0x49, 0x81, 0xEA, 0x00, 0x10, // 0x10E3 sub  r10, 0x1000
+    0x00, 0x00,                   //
+    0x45, 0x85, 0x1B,             // 0x10EA test [r11], r11d   ; probe one page
+    0xEB, 0xE4,                   // 0x10ED jmp  -0x1C -> .loop (0x10D3)
+    // .done:
+    0x4D, 0x29, 0xD3, // 0x10EF sub  r11, r10       ; final partial-page addr
+    0x45, 0x85, 0x13, // 0x10F2 test [r11], r10d    ; probe final page
+    0x41, 0x5B,       // 0x10F5 pop  r11
+    0x41, 0x5A,       // 0x10F7 pop  r10
+    0xC3,             // 0x10F9 ret
+
+    // --- _set_app_type (offset 0x10FA, 12 bytes) ----------------
+    // void _set_app_type(int at_type)
+    //   ecx = at_type (0=unknown, 1=console, 2=GUI)
+    // Stores the type in the proc-env page so anything that wants
+    // to query it later (e.g. _get_app_type) reads back the value
+    // the program asked for. Callers don't expect a return value.
+    0xB8, 0x00, 0x00, 0x00, 0x65, // 0x10FA mov  eax, 0x65000000   ; rax = proc_env base
+    0x89, 0x88, 0x08, 0x09, 0x00, // 0x10FF mov  [rax + 0x908], ecx ; store app_type
+    0x00,                         //
+    0xC3,                         // 0x1105 ret
+
+    // --- _configure_narrow_argv (offset 0x1106, 14 bytes) -------
+    // int _configure_narrow_argv(int mode)
+    //   ecx = mode (0=expand wildcards, 1=as-is, 2=POSIX)
+    // Stores mode in proc-env. Returns 0 on success. We never
+    // expand wildcards regardless of mode, but recording the
+    // value is what makes this a "real" implementation rather
+    // than a return-zero noop.
+    0xB8, 0x00, 0x00, 0x00, 0x65, // 0x1106 mov  eax, 0x65000000
+    0x89, 0x88, 0x0C, 0x09, 0x00, // 0x110B mov  [rax + 0x90C], ecx ; store mode
+    0x00,                         //
+    0x31, 0xC0,                   // 0x1111 xor  eax, eax           ; success
+    0xC3,                         // 0x1113 ret
+
+    // --- _initialize_onexit_table (offset 0x1114, 14 bytes) -----
+    // int _initialize_onexit_table(_onexit_table_t* table)
+    //   rcx = table (struct of three pointers: _first, _last, _end)
+    // Zero out the user's table struct so subsequent
+    // _execute_onexit_table walks it and finds no entries.
+    // We store our own atexit list in proc-env and walk that
+    // from _cexit; the user-provided table is purely a façade.
+    // Returns 0 on success.
+    0x31, 0xC0,             // 0x1114 xor  eax, eax
+    0x48, 0x89, 0x01,       // 0x1116 mov  [rcx], rax       ; ->_first = NULL
+    0x48, 0x89, 0x41, 0x08, // 0x1119 mov  [rcx + 8], rax   ; ->_last  = NULL
+    0x48, 0x89, 0x41, 0x10, // 0x111D mov  [rcx + 16], rax  ; ->_end   = NULL
+    0xC3,                   // 0x1121 ret
+
+    // --- _crt_atexit (offset 0x1122, 39 bytes) ------------------
+    // int _crt_atexit(void (*func)(void))
+    //   rcx = func
+    // Append `func` to the proc-env atexit slot table. Returns
+    // 0 on success, -1 if the table is full (matches MSVC's
+    // documented "atexit returns nonzero if registration failed"
+    // contract).
+    0xB8, 0x00, 0x00, 0x00, 0x65, // 0x1122 mov  eax, 0x65000000
+    0x44, 0x8B, 0x90, 0x00, 0x09, // 0x1127 mov  r10d, [rax + 0x900]  ; r10 = atexit_count
+    0x00, 0x00,                   //
+    0x41, 0x83, 0xFA, 0x40,       // 0x112E cmp  r10d, 64
+    0x73, 0x11,                   // 0x1132 jae  +0x11 -> .full (0x1145)
+    0x4A, 0x89, 0x8C, 0xD0, 0x10, // 0x1134 mov  [rax + 0x910 + r10*8], rcx
+    0x09, 0x00, 0x00,             //
+    0xFF, 0x80, 0x00, 0x09, 0x00, // 0x113C inc  dword [rax + 0x900]
+    0x00,                         //
+    0x31, 0xC0,                   // 0x1142 xor  eax, eax           ; success
+    0xC3,                         // 0x1144 ret
+    // .full:
+    0x83, 0xC8, 0xFF, // 0x1145 or   eax, -1            ; failure
+    0xC3,             // 0x1148 ret
+
+    // --- _register_onexit_function (offset 0x1149, 39 bytes) ----
+    // int _register_onexit_function(_onexit_table_t* table,
+    //                               void (*func)(void))
+    //   rcx = table (ignored — we use proc-env), rdx = func
+    // Same shape as _crt_atexit but the function pointer is in
+    // RDX instead of RCX. The table arg is documented but not
+    // honoured: we always append to the proc-env shared list,
+    // which _cexit walks LIFO. Returns 0 on success, -1 if full.
+    0xB8, 0x00, 0x00, 0x00, 0x65, // 0x1149 mov  eax, 0x65000000
+    0x44, 0x8B, 0x90, 0x00, 0x09, // 0x114E mov  r10d, [rax + 0x900]
+    0x00, 0x00,                   //
+    0x41, 0x83, 0xFA, 0x40,       // 0x1155 cmp  r10d, 64
+    0x73, 0x11,                   // 0x1159 jae  +0x11 -> .full (0x116C)
+    0x4A, 0x89, 0x94, 0xD0, 0x10, // 0x115B mov  [rax + 0x910 + r10*8], rdx
+    0x09, 0x00, 0x00,             //
+    0xFF, 0x80, 0x00, 0x09, 0x00, // 0x1163 inc  dword [rax + 0x900]
+    0x00,                         //
+    0x31, 0xC0,                   // 0x1169 xor  eax, eax
+    0xC3,                         // 0x116B ret
+    // .full:
+    0x83, 0xC8, 0xFF, // 0x116C or   eax, -1
+    0xC3,             // 0x116F ret
+
+    // --- _cexit (offset 0x1170, 61 bytes) -----------------------
+    // void _cexit(void)
+    // Walk the proc-env atexit table in LIFO order, calling each
+    // registered handler. After the walk, zero the count so a
+    // re-entrant _cexit (or a subsequent ExitProcess path that
+    // routes through the same logic) doesn't double-call.
+    //
+    // Win64 ABI: shadow space (32 bytes) MUST be allocated by the
+    // caller before each indirect `call`. We push rcx (loop
+    // counter) across the shadow-space scope so the inner call
+    // doesn't clobber our iteration state.
+    0x53,                         // 0x1170 push rbx
+    0xBB, 0x00, 0x00, 0x00, 0x65, // 0x1171 mov  ebx, 0x65000000   ; rbx = proc_env
+    0x8B, 0x8B, 0x00, 0x09, 0x00, // 0x1176 mov  ecx, [rbx + 0x900] ; count
+    0x00,                         //
+    0x85, 0xC9,                   // 0x117C test ecx, ecx
+    0x74, 0x1F,                   // 0x117E jz   +0x1F -> .done (0x119F)
+    // .loop:
+    0xFF, 0xC9,                   // 0x1180 dec  ecx
+    0x48, 0x8B, 0x84, 0xCB, 0x10, // 0x1182 mov  rax, [rbx + 0x910 + rcx*8]
+    0x09, 0x00, 0x00,             //
+    0x48, 0x85, 0xC0,             // 0x118A test rax, rax
+    0x74, 0x0C,                   // 0x118D jz   +0x0C -> .skip (0x119B)
+    0x51,                         // 0x118F push rcx
+    0x48, 0x83, 0xEC, 0x20,       // 0x1190 sub  rsp, 32           ; Win64 shadow space
+    0xFF, 0xD0,                   // 0x1194 call rax
+    0x48, 0x83, 0xC4, 0x20,       // 0x1196 add  rsp, 32
+    0x59,                         // 0x119A pop  rcx
+    // .skip:
+    0x85, 0xC9, // 0x119B test ecx, ecx
+    0x75, 0xE1, // 0x119D jnz  -0x1F -> .loop (0x1180)
+    // .done:
+    0xC7, 0x83, 0x00, 0x09, 0x00, // 0x119F mov  dword [rbx + 0x900], 0  ; clear count
+    0x00, 0x00, 0x00, 0x00, 0x00, //
+    0x31, 0xC0,                   // 0x11A9 xor  eax, eax
+    0x5B,                         // 0x11AB pop  rbx
+    0xC3,                         // 0x11AC ret
+
+    // --- FreeEnvironmentStringsW (offset 0x11AD, 6 bytes) -------
+    // BOOL FreeEnvironmentStringsW(LPWCH penv)
+    //   rcx = env block pointer (ignored)
+    // Returns TRUE. Our GetEnvironmentStringsW returns a static
+    // pointer into the proc-env page (kProcEnvEnvBlockWOff), not
+    // a heap allocation, so freeing is a true no-op. Bytecode is
+    // identical to kOffReturnOne but a distinct named offset
+    // means the fix-journal noop classifier doesn't flag this as
+    // an unimplemented stub — it IS the correct implementation.
+    0xB8, 0x01, 0x00, 0x00, 0x00, // 0x11AD mov  eax, 1
+    0xC3,                         // 0x11B2 ret

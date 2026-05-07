@@ -420,6 +420,47 @@ FixJournalStats FixJournalGetStats()
     return g_stats;
 }
 
+void FixJournalEmitBootSummary()
+{
+    // Walk the ring under the lock and tally per-detector unique
+    // counts + audited count. Counters are bounded by the ring
+    // capacity so the loop is O(kFixJournalCapacity) — fine to call
+    // at smoke completion.
+    u64 per_detector[7] = {0, 0, 0, 0, 0, 0, 0};
+    u64 audited = 0;
+    {
+        ::duetos::sync::SpinLockGuard guard(g_lock);
+        for (u64 i = 0; i < g_used; ++i)
+        {
+            const u8 d = static_cast<u8>(g_ring[i].detector);
+            if (d < 7)
+                ++per_detector[d];
+            if ((g_ring[i].flags & 0x01) != 0)
+                ++audited;
+        }
+    }
+    const FixJournalStats s = FixJournalGetStats();
+
+    // Emit one structured line that grep tools (CI / dfix-monitor /
+    // run-fix-cycle.sh) can pick up directly. Format:
+    //   [smoke] fix_journal_summary unique=<u> recorded=<r> dropped=<d>
+    //                               audited=<a>
+    //                               stub=<n> gap=<n> ...
+    KLOG_INFO_2V("smoke", "fix_journal_summary unique/recorded", "unique", s.records_unique, "recorded",
+                 s.records_recorded);
+    KLOG_INFO_2V("smoke", "fix_journal_summary dropped/audited", "dropped", s.records_dropped, "audited", audited);
+    // Per-detector breakdown — six lines is verbose but trivially
+    // greppable. The detector names match `FixDetectorName()` and
+    // the python report's keys, so a CI script can join them.
+    for (u8 d = 1; d < 7; ++d)
+    {
+        KLOG_INFO_V("smoke", FixDetectorName(static_cast<FixDetector>(d)), per_detector[d]);
+    }
+    // Single-line sentinel for grep convenience. Numeric-only so
+    // the format is stable for parsing.
+    KLOG_INFO_2V("smoke", "fix_journal_summary done", "unique", s.records_unique, "audited", audited);
+}
+
 void FixJournalSelfTest()
 {
     if (!g_inited)

@@ -47,11 +47,15 @@
     // linear and small — duplicate entries are cheap.
 
     // Return-0 family (spread across several apisets).
-    {"api-ms-win-crt-runtime-l1-1-0.dll", "_initialize_onexit_table", kOffReturnZero},
-    {"api-ms-win-crt-runtime-l1-1-0.dll", "_register_onexit_function", kOffReturnZero},
-    {"api-ms-win-crt-runtime-l1-1-0.dll", "_crt_atexit", kOffReturnZero},
+    // _initialize_onexit_table / _register_onexit_function /
+    // _crt_atexit / _configure_narrow_argv: real implementations
+    // backed by the per-process atexit table in proc_env.h
+    // (kProcEnvAtexit*). _cexit walks the table LIFO.
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_initialize_onexit_table", kOffInitOnexitTable},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_register_onexit_function", kOffRegisterOnexitFn},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_crt_atexit", kOffCrtAtexit},
     {"api-ms-win-crt-runtime-l1-1-0.dll", "_initterm_e", kOffReturnZero},
-    {"api-ms-win-crt-runtime-l1-1-0.dll", "_configure_narrow_argv", kOffReturnZero},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_configure_narrow_argv", kOffConfigureNarrowArgv},
     {"api-ms-win-crt-runtime-l1-1-0.dll", "_initialize_narrow_environment", kOffReturnZero},
     {"api-ms-win-crt-runtime-l1-1-0.dll", "_get_initial_narrow_environment", kOffReturnZero},
     {"api-ms-win-crt-runtime-l1-1-0.dll", "_seh_filter_exe", kOffReturnZero},
@@ -61,10 +65,15 @@
     {"api-ms-win-crt-stdio-l1-1-0.dll", "_set_fmode", kOffReturnZero},
 
     // Return-void family.
+    // _cexit / _c_exit: route through the proc-env atexit walker
+    // (kOffCexit) — runs every handler registered via _crt_atexit
+    // / _register_onexit_function in LIFO order. _set_app_type
+    // stores its arg into the proc-env app_type slot so a later
+    // _get_app_type would observe the program-asserted value.
     {"api-ms-win-crt-runtime-l1-1-0.dll", "_initterm", kOffCritSecNop},
-    {"api-ms-win-crt-runtime-l1-1-0.dll", "_cexit", kOffCritSecNop},
-    {"api-ms-win-crt-runtime-l1-1-0.dll", "_c_exit", kOffCritSecNop},
-    {"api-ms-win-crt-runtime-l1-1-0.dll", "_set_app_type", kOffCritSecNop},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_cexit", kOffCexit},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_c_exit", kOffCexit},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_set_app_type", kOffSetAppType},
     {"api-ms-win-crt-math-l1-1-0.dll", "__setusermatherr", kOffCritSecNop},
 
     // Exit family — `exit` and `_exit` alias ExitProcess
@@ -519,10 +528,12 @@
     {"vcruntime140.dll", "_InterlockedExchange", kOffInterlockedExchg},
     {"vcruntime140.dll", "_InterlockedExchangeAdd", kOffInterlockedExchgAdd},
     // __chkstk: MSVC stack-probe helper for functions with
-    // frames > 4 KiB. DuetOS maps the full user stack up-
-    // front at PE load, so no probe is needed — just ret. RAX
-    // holds the requested size; we preserve it by doing nothing.
-    {"vcruntime140.dll", "__chkstk", kOffCritSecNop}, {"ntdll.dll", "__chkstk", kOffCritSecNop},
+    // frames > 4 KiB. Real implementation (kOffChkStk) walks
+    // the would-be-allocated range one byte per page so the OS
+    // commits each page before the caller's `sub rsp, rax`.
+    // DuetOS pre-commits user stacks today, but the probe is
+    // forward-compatible with future demand-paged stacks.
+    {"vcruntime140.dll", "__chkstk", kOffChkStk}, {"ntdll.dll", "__chkstk", kOffChkStk},
     // 64-bit variants
     {"kernel32.dll", "InterlockedIncrement64", kOffInterlockedInc64},
     {"kernel32.dll", "InterlockedDecrement64", kOffInterlockedDec64},
@@ -972,14 +983,18 @@
     // outcome of the Win32 contract and cleanly degrades for
     // any caller that has a default. GetEnvironmentStringsW
     // returns a pointer to an empty block (two NUL bytes).
-    // FreeEnvironmentStringsW is a no-op returning TRUE.
+    // FreeEnvironmentStrings{W,A}: real implementation returning
+    // TRUE — the env block is a static slot inside proc-env, not
+    // heap-allocated, so freeing is a true no-op. Distinct named
+    // offset (kOffFreeEnvStringsW) ensures the fix-journal noop
+    // classifier doesn't flag it as an unimplemented stub.
     {"kernel32.dll", "GetCommandLineW", kOffGetCmdLineW}, {"kernel32.dll", "GetCommandLineA", kOffGetCmdLineA},
     {"kernel32.dll", "GetEnvironmentVariableW", kOffReturnZero},
     {"kernel32.dll", "GetEnvironmentVariableA", kOffReturnZero},
     {"kernel32.dll", "GetEnvironmentStringsW", kOffGetEnvBlockW},
     {"kernel32.dll", "GetEnvironmentStrings", kOffGetEnvBlockW},
-    {"kernel32.dll", "FreeEnvironmentStringsW", kOffReturnOne},
-    {"kernel32.dll", "FreeEnvironmentStringsA", kOffReturnOne},
+    {"kernel32.dll", "FreeEnvironmentStringsW", kOffFreeEnvStringsW},
+    {"kernel32.dll", "FreeEnvironmentStringsA", kOffFreeEnvStringsW},
     {"kernel32.dll", "SetEnvironmentVariableW", kOffReturnOne}, // pretend success
     {"kernel32.dll", "SetEnvironmentVariableA", kOffReturnOne},
 

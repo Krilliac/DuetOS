@@ -3,6 +3,7 @@
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/hypervisor.h"
 #include "arch/x86_64/serial.h"
+#include "diag/fix_journal.h"
 #include "sched/sched.h"
 
 namespace duetos::test
@@ -319,6 +320,14 @@ void SmokeProfileSleepAndExit()
         arch::SerialWriteHex(stats.context_switches);
         arch::SerialWrite("\n");
     }
+
+    // Fix-journal boot summary — emits per-detector tallies + total
+    // record count so a CI grep can spot drift between runs without
+    // pulling KERNEL.FIX off the disk image. Cheap (single ring
+    // walk under the journal lock) and the lines are structured so
+    // tools/qemu/run-fix-cycle.sh can pick them up alongside the
+    // standard sentinel.
+    ::duetos::diag::FixJournalEmitBootSummary();
 
     // Sentinel that the CI script greps for. The "complete" suffix
     // is the only thing the assertion list checks under a smoke
