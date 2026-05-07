@@ -155,4 +155,31 @@ bool GptInitDisk(u32 block_handle, u64 disk_sector_count, const u8 disk_guid[kGu
 inline constexpr u32 kCanonicalPartitionCount = 128;
 inline constexpr u32 kCanonicalEntryBytes = 128;
 
+/// DuetOS-private partition type GUID for crash-dump regions.
+/// Picked so the printable bytes spell "DUETOSCRAS H_DUMP" — a
+/// disk-installer that lays down GPT can mark a 4 MiB tail
+/// partition with this type, and the panic-time dump path will
+/// discover it via GptFindCrashDumpRegion instead of trusting
+/// the last 4 MiB of the namespace to be unused.
+///
+/// Bytes are stored as an UEFI-canonical mixed-endian GUID:
+///   44554554-4F53-4352-4153-485F44554D50
+/// Field 1 (u32) and field 2/3 (u16) appear little-endian on
+/// disk; fields 4/5 are byte-arrays that appear big-endian.
+inline constexpr u8 kDuetCrashDumpTypeGuid[kGuidBytes] = {
+    0x54, 0x45, 0x55, 0x44,             // u32 LE: 0x44554554
+    0x53, 0x4F,                         // u16 LE: 0x4F53
+    0x52, 0x43,                         // u16 LE: 0x4352
+    0x41, 0x53,                         // u8[2] BE: 0x41 0x53
+    0x48, 0x5F, 0x44, 0x55, 0x4D, 0x50, // u8[6] BE: 0x48 0x5F 0x44 0x55 0x4D 0x50
+};
+
+/// Search every probed Disk for a partition whose type_guid
+/// matches kDuetCrashDumpTypeGuid AND whose block_handle equals
+/// `block_handle`. On hit, fills *first_lba_out and *sector_count_out
+/// with the partition's inclusive LBA range expressed as base + count
+/// and returns true. On miss returns false; callers fall back to a
+/// driver-private "tail of namespace" reservation.
+bool GptFindCrashDumpRegion(u32 block_handle, u64* first_lba_out, u64* sector_count_out);
+
 } // namespace duetos::fs::gpt

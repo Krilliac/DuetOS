@@ -456,6 +456,50 @@ const Disk* GptDisk(u32 index)
     return &g_disks[index];
 }
 
+bool GptFindCrashDumpRegion(u32 block_handle, u64* first_lba_out, u64* sector_count_out)
+{
+    if (first_lba_out == nullptr || sector_count_out == nullptr)
+    {
+        return false;
+    }
+    for (u32 di = 0; di < g_disk_count; ++di)
+    {
+        const Disk& d = g_disks[di];
+        if (d.block_handle != block_handle)
+        {
+            continue;
+        }
+        for (u32 pi = 0; pi < d.partition_count; ++pi)
+        {
+            const Partition& p = d.partitions[pi];
+            // Byte-wise compare against our private dump-type GUID.
+            // Both buffers are 16 bytes; no early-out micro-opt
+            // because the hit count is tiny.
+            bool match = true;
+            for (u32 i = 0; i < kGuidBytes; ++i)
+            {
+                if (p.type_guid[i] != kDuetCrashDumpTypeGuid[i])
+                {
+                    match = false;
+                    break;
+                }
+            }
+            if (!match)
+            {
+                continue;
+            }
+            if (p.last_lba < p.first_lba)
+            {
+                continue; // malformed entry — skip
+            }
+            *first_lba_out = p.first_lba;
+            *sector_count_out = (p.last_lba - p.first_lba) + 1;
+            return true;
+        }
+    }
+    return false;
+}
+
 namespace
 {
 

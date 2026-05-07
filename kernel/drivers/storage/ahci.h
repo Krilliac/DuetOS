@@ -65,4 +65,47 @@ void AhciTeardown();
 /// No-op + log "skipped" if no SATA drive is registered.
 void AhciSelfTest();
 
+// -------------------------------------------------------------
+// Panic-time surface — mirrors NVMe's contract.
+//
+// The panic path falls back to AHCI when NVMe isn't available
+// (no NVMe controller, or the namespace failed to come up).
+// Reserved LBA range is sourced from GPT first
+// (GptFindCrashDumpRegion); otherwise the last
+// kAhciDumpReservedSectors of the first online port's drive.
+// -------------------------------------------------------------
+
+inline constexpr u64 kAhciDumpReservedSectors = 8192; // 4 MiB at 512B sectors
+
+/// True iff at least one SATA port is online and registered.
+bool AhciAvailable();
+
+/// Sector size of the first online port's drive (always 512 in
+/// v1; the driver doesn't yet support 4 KiB-sector ATA). 0 if no
+/// drive online.
+u32 AhciNamespaceSectorSize();
+
+/// Sector count of the first online port's drive. 0 if no drive
+/// online.
+u64 AhciNamespaceSectorCount();
+
+/// First LBA of the reserved crash-dump region on the first
+/// online port's drive. Consults GPT for a recorded reservation
+/// first (kDuetCrashDumpTypeGuid partition); falls back to the
+/// tail-of-drive reservation otherwise. 0 if no drive online.
+u64 AhciDumpReservedLba();
+
+/// Write `len` bytes to the reserved crash-dump region on the
+/// first online port. Same contract as NvmePanicWriteDump:
+/// polled, no allocations, no scheduler dependencies — safe to
+/// call from panic / trap context. Returns true iff every chunk
+/// completed without error.
+bool AhciPanicWriteDump(const u8* bytes, u64 len);
+
+/// True iff the most recent AhciPanicWriteDump call succeeded.
+bool AhciPanicWriteSucceededLast();
+
+/// Number of bytes the most recent AhciPanicWriteDump landed.
+u64 AhciPanicLastWriteBytes();
+
 } // namespace duetos::drivers::storage

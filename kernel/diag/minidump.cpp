@@ -5,6 +5,7 @@
 #include "arch/x86_64/traps.h"
 #include "core/panic.h"
 #include "diag/debugcon.h"
+#include "drivers/storage/ahci.h"
 #include "drivers/storage/nvme.h"
 #include "loader/dll_loader.h"
 #include "loader/pe_exports.h"
@@ -734,36 +735,59 @@ constinit u64 g_last_dump_bytes = 0;
 } // namespace
 
 // Persist the freshly-built minidump bytes to the reserved
-// crash-dump LBA region on the first NVMe namespace, when one
-// is online. Best-effort — failure is logged on serial but
-// doesn't block the panic flow. Called inline after the
-// debugcon emit so an operator who only has access to the
-// disk image still recovers the same .dmp file.
+// crash-dump LBA region. NVMe is the preferred backend; AHCI is
+// the fallback when no NVMe namespace is online (real-hardware
+// SATA-only boxes, QEMU configs without -device nvme). Best-
+// effort — failure is logged on serial but doesn't block the
+// panic flow. Called inline after the debugcon emit so an
+// operator who only has access to the disk image still recovers
+// the same .dmp file.
 void PersistToDisk(u64 bytes)
 {
     namespace stor = duetos::drivers::storage;
-    if (!stor::NvmeAvailable())
+    if (stor::NvmeAvailable())
     {
-        arch::SerialWrite("[minidump] no NVMe namespace; disk persist skipped\n");
+        const u64 lba = stor::NvmeDumpReservedLba();
+        arch::SerialWrite("[minidump] persisting to NVMe reserved LBA=");
+        arch::SerialWriteHex(lba);
+        arch::SerialWrite(" sectors=");
+        arch::SerialWriteHex(stor::kNvmeDumpReservedSectors);
+        arch::SerialWrite("\n");
+        const bool ok = stor::NvmePanicWriteDump(g_buf, bytes);
+        if (ok)
+        {
+            arch::SerialWrite("[minidump] disk persist OK (NVMe)\n");
+        }
+        else
+        {
+            arch::SerialWrite("[minidump] disk persist PARTIAL/FAILED bytes_written=");
+            arch::SerialWriteHex(stor::NvmePanicLastWriteBytes());
+            arch::SerialWrite("\n");
+        }
         return;
     }
-    const u64 lba = stor::NvmeDumpReservedLba();
-    arch::SerialWrite("[minidump] persisting to NVMe reserved LBA=");
-    arch::SerialWriteHex(lba);
-    arch::SerialWrite(" sectors=");
-    arch::SerialWriteHex(stor::kNvmeDumpReservedSectors);
-    arch::SerialWrite("\n");
-    const bool ok = stor::NvmePanicWriteDump(g_buf, bytes);
-    if (ok)
+    if (stor::AhciAvailable())
     {
-        arch::SerialWrite("[minidump] disk persist OK\n");
-    }
-    else
-    {
-        arch::SerialWrite("[minidump] disk persist PARTIAL/FAILED bytes_written=");
-        arch::SerialWriteHex(stor::NvmePanicLastWriteBytes());
+        const u64 lba = stor::AhciDumpReservedLba();
+        arch::SerialWrite("[minidump] persisting to AHCI reserved LBA=");
+        arch::SerialWriteHex(lba);
+        arch::SerialWrite(" sectors=");
+        arch::SerialWriteHex(stor::kAhciDumpReservedSectors);
         arch::SerialWrite("\n");
+        const bool ok = stor::AhciPanicWriteDump(g_buf, bytes);
+        if (ok)
+        {
+            arch::SerialWrite("[minidump] disk persist OK (AHCI)\n");
+        }
+        else
+        {
+            arch::SerialWrite("[minidump] disk persist PARTIAL/FAILED bytes_written=");
+            arch::SerialWriteHex(stor::AhciPanicLastWriteBytes());
+            arch::SerialWrite("\n");
+        }
+        return;
     }
+    arch::SerialWrite("[minidump] no NVMe / AHCI backend; disk persist skipped\n");
 }
 
 void EmitMinidump(u64 rip, u64 rsp, u64 rbp, u32 exception_code)
@@ -874,9 +898,11 @@ void DiskPersistSelfTest()
     // line so a regression in the panic-write path doesn't slip
     // through silently.
     namespace stor = duetos::drivers::storage;
-    if (!stor::NvmeAvailable())
+    const bool have_nvme = stor::NvmeAvailable();
+    const bool have_ahci = stor::AhciAvailable();
+    if (!have_nvme && !have_ahci)
     {
-        arch::SerialWrite("[minidump] disk-persist self-test SKIP (no NVMe namespace)\n");
+        arch::SerialWrite("[minidump] disk-persist self-test SKIP (no NVMe / AHCI backend)\n");
         return;
     }
     ContextRegs synth{};
@@ -888,20 +914,41 @@ void DiskPersistSelfTest()
     synth.ss = 0x10;
     synth.rflags = 0x202;
     const u64 disk_bytes = BuildMinidumpInto(synth, /*exception_code=*/0xC0000005);
-    const bool persisted = stor::NvmePanicWriteDump(g_buf, disk_bytes);
-    if (!persisted)
+    if (have_nvme)
     {
-        arch::SerialWrite("[minidump] disk-persist self-test FAIL bytes_written=");
-        arch::SerialWriteHex(stor::NvmePanicLastWriteBytes());
-        arch::SerialWrite("\n");
+        const bool persisted = stor::NvmePanicWriteDump(g_buf, disk_bytes);
+        if (!persisted)
+        {
+            arch::SerialWrite("[minidump] disk-persist self-test FAIL (NVMe) bytes_written=");
+            arch::SerialWriteHex(stor::NvmePanicLastWriteBytes());
+            arch::SerialWrite("\n");
+        }
+        else
+        {
+            arch::SerialWrite("[minidump] disk-persist self-test OK (NVMe); reserved LBA=");
+            arch::SerialWriteHex(stor::NvmeDumpReservedLba());
+            arch::SerialWrite(" bytes=");
+            arch::SerialWriteHex(stor::NvmePanicLastWriteBytes());
+            arch::SerialWrite("\n");
+        }
     }
-    else
+    if (have_ahci)
     {
-        arch::SerialWrite("[minidump] disk-persist self-test OK; reserved LBA=");
-        arch::SerialWriteHex(stor::NvmeDumpReservedLba());
-        arch::SerialWrite(" bytes=");
-        arch::SerialWriteHex(stor::NvmePanicLastWriteBytes());
-        arch::SerialWrite("\n");
+        const bool persisted = stor::AhciPanicWriteDump(g_buf, disk_bytes);
+        if (!persisted)
+        {
+            arch::SerialWrite("[minidump] disk-persist self-test FAIL (AHCI) bytes_written=");
+            arch::SerialWriteHex(stor::AhciPanicLastWriteBytes());
+            arch::SerialWrite("\n");
+        }
+        else
+        {
+            arch::SerialWrite("[minidump] disk-persist self-test OK (AHCI); reserved LBA=");
+            arch::SerialWriteHex(stor::AhciDumpReservedLba());
+            arch::SerialWrite(" bytes=");
+            arch::SerialWriteHex(stor::AhciPanicLastWriteBytes());
+            arch::SerialWrite("\n");
+        }
     }
     // Clear the success flag + bytes so `lastdump` from the
     // shell doesn't claim a real panic landed when only the
