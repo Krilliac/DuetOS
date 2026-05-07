@@ -3634,7 +3634,7 @@
     0x31, 0xC0,                   // 0x1111 xor  eax, eax           ; success
     0xC3,                         // 0x1113 ret
 
-    // --- _initialize_onexit_table (offset 0x1114, 14 bytes) -----
+    // --- _initialize_onexit_table (offset 0x1114, 19 bytes) -----
     // int _initialize_onexit_table(_onexit_table_t* table)
     //   rcx = table (struct of three pointers: _first, _last, _end)
     // Zero out the user's table struct so subsequent
@@ -3642,35 +3642,46 @@
     // We store our own atexit list in proc-env and walk that
     // from _cexit; the user-provided table is purely a façade.
     // Returns 0 on success.
+    //
+    // NULL-table guard: PEs commonly call this with rcx=NULL
+    // (the MSVC CRT does it in its startup glue when the
+    // process-wide table hasn't been allocated yet). Without
+    // the guard `mov [rcx], rax` faults at user-space VA 0
+    // and the PE dies before its first real CRT call. The
+    // `test rcx,rcx / je .ret` early-out short-circuits the
+    // three writes; the function still returns 0 because
+    // `xor eax,eax` happens before the test.
     0x31, 0xC0,             // 0x1114 xor  eax, eax
-    0x48, 0x89, 0x01,       // 0x1116 mov  [rcx], rax       ; ->_first = NULL
-    0x48, 0x89, 0x41, 0x08, // 0x1119 mov  [rcx + 8], rax   ; ->_last  = NULL
-    0x48, 0x89, 0x41, 0x10, // 0x111D mov  [rcx + 16], rax  ; ->_end   = NULL
-    0xC3,                   // 0x1121 ret
+    0x48, 0x85, 0xC9,       // 0x1116 test rcx, rcx
+    0x74, 0x0B,             // 0x1119 je   .ret  (skip 11 bytes)
+    0x48, 0x89, 0x01,       // 0x111B mov  [rcx], rax       ; ->_first = NULL
+    0x48, 0x89, 0x41, 0x08, // 0x111E mov  [rcx + 8], rax   ; ->_last  = NULL
+    0x48, 0x89, 0x41, 0x10, // 0x1122 mov  [rcx + 16], rax  ; ->_end   = NULL
+    0xC3,                   // 0x1126 ret  ; .ret
 
-    // --- _crt_atexit (offset 0x1122, 39 bytes) ------------------
+    // --- _crt_atexit (offset 0x1127, 39 bytes) ------------------
     // int _crt_atexit(void (*func)(void))
     //   rcx = func
     // Append `func` to the proc-env atexit slot table. Returns
     // 0 on success, -1 if the table is full (matches MSVC's
     // documented "atexit returns nonzero if registration failed"
     // contract).
-    0xB8, 0x00, 0x00, 0x00, 0x65, // 0x1122 mov  eax, 0x65000000
-    0x44, 0x8B, 0x90, 0x00, 0x09, // 0x1127 mov  r10d, [rax + 0x900]  ; r10 = atexit_count
+    0xB8, 0x00, 0x00, 0x00, 0x65, // 0x1127 mov  eax, 0x65000000
+    0x44, 0x8B, 0x90, 0x00, 0x09, // 0x112C mov  r10d, [rax + 0x900]  ; r10 = atexit_count
     0x00, 0x00,                   //
-    0x41, 0x83, 0xFA, 0x40,       // 0x112E cmp  r10d, 64
-    0x73, 0x11,                   // 0x1132 jae  +0x11 -> .full (0x1145)
-    0x4A, 0x89, 0x8C, 0xD0, 0x10, // 0x1134 mov  [rax + 0x910 + r10*8], rcx
+    0x41, 0x83, 0xFA, 0x40,       // 0x1133 cmp  r10d, 64
+    0x73, 0x11,                   // 0x1137 jae  +0x11 -> .full (0x114A)
+    0x4A, 0x89, 0x8C, 0xD0, 0x10, // 0x1139 mov  [rax + 0x910 + r10*8], rcx
     0x09, 0x00, 0x00,             //
-    0xFF, 0x80, 0x00, 0x09, 0x00, // 0x113C inc  dword [rax + 0x900]
+    0xFF, 0x80, 0x00, 0x09, 0x00, // 0x1141 inc  dword [rax + 0x900]
     0x00,                         //
-    0x31, 0xC0,                   // 0x1142 xor  eax, eax           ; success
-    0xC3,                         // 0x1144 ret
+    0x31, 0xC0,                   // 0x1147 xor  eax, eax           ; success
+    0xC3,                         // 0x1149 ret
     // .full:
-    0x83, 0xC8, 0xFF, // 0x1145 or   eax, -1            ; failure
-    0xC3,             // 0x1148 ret
+    0x83, 0xC8, 0xFF, // 0x114A or   eax, -1            ; failure
+    0xC3,             // 0x114D ret
 
-    // --- _register_onexit_function (offset 0x1149, 39 bytes) ----
+    // --- _register_onexit_function (offset 0x114E, 39 bytes) ----
     // int _register_onexit_function(_onexit_table_t* table,
     //                               void (*func)(void))
     //   rcx = table (ignored — we use proc-env), rdx = func
@@ -3678,22 +3689,22 @@
     // RDX instead of RCX. The table arg is documented but not
     // honoured: we always append to the proc-env shared list,
     // which _cexit walks LIFO. Returns 0 on success, -1 if full.
-    0xB8, 0x00, 0x00, 0x00, 0x65, // 0x1149 mov  eax, 0x65000000
-    0x44, 0x8B, 0x90, 0x00, 0x09, // 0x114E mov  r10d, [rax + 0x900]
+    0xB8, 0x00, 0x00, 0x00, 0x65, // 0x114E mov  eax, 0x65000000
+    0x44, 0x8B, 0x90, 0x00, 0x09, // 0x1153 mov  r10d, [rax + 0x900]
     0x00, 0x00,                   //
-    0x41, 0x83, 0xFA, 0x40,       // 0x1155 cmp  r10d, 64
-    0x73, 0x11,                   // 0x1159 jae  +0x11 -> .full (0x116C)
-    0x4A, 0x89, 0x94, 0xD0, 0x10, // 0x115B mov  [rax + 0x910 + r10*8], rdx
+    0x41, 0x83, 0xFA, 0x40,       // 0x115A cmp  r10d, 64
+    0x73, 0x11,                   // 0x115E jae  +0x11 -> .full (0x1171)
+    0x4A, 0x89, 0x94, 0xD0, 0x10, // 0x1160 mov  [rax + 0x910 + r10*8], rdx
     0x09, 0x00, 0x00,             //
-    0xFF, 0x80, 0x00, 0x09, 0x00, // 0x1163 inc  dword [rax + 0x900]
+    0xFF, 0x80, 0x00, 0x09, 0x00, // 0x1168 inc  dword [rax + 0x900]
     0x00,                         //
-    0x31, 0xC0,                   // 0x1169 xor  eax, eax
-    0xC3,                         // 0x116B ret
+    0x31, 0xC0,                   // 0x116E xor  eax, eax
+    0xC3,                         // 0x1170 ret
     // .full:
-    0x83, 0xC8, 0xFF, // 0x116C or   eax, -1
-    0xC3,             // 0x116F ret
+    0x83, 0xC8, 0xFF, // 0x1171 or   eax, -1
+    0xC3,             // 0x1174 ret
 
-    // --- _cexit (offset 0x1170, 61 bytes) -----------------------
+    // --- _cexit (offset 0x1175, 61 bytes) -----------------------
     // void _cexit(void)
     // Walk the proc-env atexit table in LIFO order, calling each
     // registered handler. After the walk, zero the count so a
@@ -3704,34 +3715,34 @@
     // caller before each indirect `call`. We push rcx (loop
     // counter) across the shadow-space scope so the inner call
     // doesn't clobber our iteration state.
-    0x53,                         // 0x1170 push rbx
-    0xBB, 0x00, 0x00, 0x00, 0x65, // 0x1171 mov  ebx, 0x65000000   ; rbx = proc_env
-    0x8B, 0x8B, 0x00, 0x09, 0x00, // 0x1176 mov  ecx, [rbx + 0x900] ; count
+    0x53,                         // 0x1175 push rbx
+    0xBB, 0x00, 0x00, 0x00, 0x65, // 0x1176 mov  ebx, 0x65000000   ; rbx = proc_env
+    0x8B, 0x8B, 0x00, 0x09, 0x00, // 0x117B mov  ecx, [rbx + 0x900] ; count
     0x00,                         //
-    0x85, 0xC9,                   // 0x117C test ecx, ecx
-    0x74, 0x1F,                   // 0x117E jz   +0x1F -> .done (0x119F)
+    0x85, 0xC9,                   // 0x1181 test ecx, ecx
+    0x74, 0x1F,                   // 0x1183 jz   +0x1F -> .done (0x11A4)
     // .loop:
-    0xFF, 0xC9,                   // 0x1180 dec  ecx
-    0x48, 0x8B, 0x84, 0xCB, 0x10, // 0x1182 mov  rax, [rbx + 0x910 + rcx*8]
+    0xFF, 0xC9,                   // 0x1185 dec  ecx
+    0x48, 0x8B, 0x84, 0xCB, 0x10, // 0x1187 mov  rax, [rbx + 0x910 + rcx*8]
     0x09, 0x00, 0x00,             //
-    0x48, 0x85, 0xC0,             // 0x118A test rax, rax
-    0x74, 0x0C,                   // 0x118D jz   +0x0C -> .skip (0x119B)
-    0x51,                         // 0x118F push rcx
-    0x48, 0x83, 0xEC, 0x20,       // 0x1190 sub  rsp, 32           ; Win64 shadow space
-    0xFF, 0xD0,                   // 0x1194 call rax
-    0x48, 0x83, 0xC4, 0x20,       // 0x1196 add  rsp, 32
-    0x59,                         // 0x119A pop  rcx
+    0x48, 0x85, 0xC0,             // 0x118F test rax, rax
+    0x74, 0x0C,                   // 0x1192 jz   +0x0C -> .skip (0x11A0)
+    0x51,                         // 0x1194 push rcx
+    0x48, 0x83, 0xEC, 0x20,       // 0x1195 sub  rsp, 32           ; Win64 shadow space
+    0xFF, 0xD0,                   // 0x1199 call rax
+    0x48, 0x83, 0xC4, 0x20,       // 0x119B add  rsp, 32
+    0x59,                         // 0x119F pop  rcx
     // .skip:
-    0x85, 0xC9, // 0x119B test ecx, ecx
-    0x75, 0xE1, // 0x119D jnz  -0x1F -> .loop (0x1180)
+    0x85, 0xC9, // 0x11A0 test ecx, ecx
+    0x75, 0xE1, // 0x11A2 jnz  -0x1F -> .loop (0x1185)
     // .done:
-    0xC7, 0x83, 0x00, 0x09, 0x00, // 0x119F mov  dword [rbx + 0x900], 0  ; clear count
+    0xC7, 0x83, 0x00, 0x09, 0x00, // 0x11A4 mov  dword [rbx + 0x900], 0  ; clear count
     0x00, 0x00, 0x00, 0x00, 0x00, //
-    0x31, 0xC0,                   // 0x11A9 xor  eax, eax
-    0x5B,                         // 0x11AB pop  rbx
-    0xC3,                         // 0x11AC ret
+    0x31, 0xC0,                   // 0x11AE xor  eax, eax
+    0x5B,                         // 0x11B0 pop  rbx
+    0xC3,                         // 0x11B1 ret
 
-    // --- FreeEnvironmentStringsW (offset 0x11AD, 6 bytes) -------
+    // --- FreeEnvironmentStringsW (offset 0x11B2, 6 bytes) -------
     // BOOL FreeEnvironmentStringsW(LPWCH penv)
     //   rcx = env block pointer (ignored)
     // Returns TRUE. Our GetEnvironmentStringsW returns a static
@@ -3740,5 +3751,5 @@
     // identical to kOffReturnOne but a distinct named offset
     // means the fix-journal noop classifier doesn't flag this as
     // an unimplemented stub — it IS the correct implementation.
-    0xB8, 0x01, 0x00, 0x00, 0x00, // 0x11AD mov  eax, 1
-    0xC3,                         // 0x11B2 ret
+    0xB8, 0x01, 0x00, 0x00, 0x00, // 0x11B2 mov  eax, 1
+    0xC3,                         // 0x11B7 ret
