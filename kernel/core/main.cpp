@@ -81,11 +81,14 @@
 #include "debug/watch.h"
 #include "drivers/audio/audio.h"
 #include "drivers/audio/hda.h"
+#include "drivers/audio/hda_jack.h"
+#include "drivers/audio/hda_jack_inventory.h"
 #include "drivers/gpu/cea861.h"
 #include "drivers/gpu/cvt.h"
 #include "drivers/gpu/dpms.h"
 #include "drivers/gpu/edid.h"
 #include "drivers/gpu/gpu.h"
+#include "drivers/gpu/intel_gsc_fw.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/input/ps2mouse.h"
 #include "drivers/net/bcm43xx_fw.h"
@@ -96,6 +99,8 @@
 #include "drivers/net/net.h"
 #include "drivers/net/rtl88xx_fw.h"
 #include "drivers/net/rtl88xx_upload.h"
+#include "net/bluetooth/diag.h"
+#include "net/bluetooth/hci.h"
 #include "net/wireless/beacon.h"
 #include "crypto/aes.h"
 #include "crypto/aes_keywrap.h"
@@ -110,6 +115,7 @@
 #include "net/wireless/test/wireless_e2e_test.h"
 #include "net/wireless/wdev.h"
 #include "net/wireless/wifi_diag.h"
+#include "drivers/mei/mei.h"
 #include "drivers/pci/pci.h"
 #include "drivers/power/power.h"
 #include "drivers/usb/cdc_ecm.h"
@@ -2608,6 +2614,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWrite("[boot] Enumerating PCI bus.\n");
     duetos::drivers::pci::PciEnumerate();
 
+    SerialWrite("[boot] Detecting Intel MEI/HECI devices.\n");
+    duetos::drivers::mei::MeiInit();
+    DUETOS_BOOT_SELFTEST(duetos::drivers::mei::MeiSelfTest());
+
     SerialWrite("[boot] Detecting GPUs.\n");
     duetos::drivers::gpu::GpuInit();
     // drivers/gpu fault domain self-registers via
@@ -2618,6 +2628,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::CvtSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::DpmsSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::Cea861SelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::intel::IntelGscFwSelfTest());
 
     SerialWrite("[boot] Bringing up firmware loader (scaffold).\n");
     duetos::core::FwLoaderInit();
@@ -2626,6 +2637,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::RtlFirmwareSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::BcmFirmwareSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::BeaconSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::bluetooth::HciSelfTest());
+    duetos::net::bluetooth::BluetoothDiagInit();
+    DUETOS_BOOT_SELFTEST(duetos::net::bluetooth::BluetoothDiagSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::UnicodeSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::BmpSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::TgaSelfTest());
@@ -2704,6 +2718,8 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // KERNEL_INITCALL(Drivers, "drivers/audio.module", ...) in
     // `kernel/drivers/audio/audio.cpp`.
     DUETOS_BOOT_SELFTEST(duetos::drivers::audio::hda::VerbEncodingSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::audio::hda::HdaJackSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::audio::hda::HdaJackInventorySelfTest());
 
     SerialWrite("[boot] Bringing up power / thermal shell.\n");
     duetos::drivers::power::PowerInit();

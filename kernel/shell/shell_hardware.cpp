@@ -34,6 +34,9 @@
 #include "arch/x86_64/thermal.h"
 #include "arch/x86_64/timer.h"
 #include "time/tick.h"
+#include "drivers/audio/hda_jack.h"
+#include "drivers/audio/hda_jack_inventory.h"
+#include "drivers/mei/mei.h"
 #include "drivers/gpu/bochs_vbe.h"
 #include "drivers/gpu/cea861.h"
 #include "drivers/gpu/cvt.h"
@@ -1719,6 +1722,125 @@ void CmdMonitor(u32 argc, char** argv)
         return;
     }
     ConsoleWriteln("monitor: unrecognised arguments — try `monitor` for usage.");
+}
+
+void CmdHdaJacks()
+{
+    namespace hda = duetos::drivers::audio::hda;
+    const u32 count = hda::HdaJackInventoryCount();
+    if (count == 0)
+    {
+        ConsoleWriteln("HDA-JACKS: no records — codec walker hasn't run, or controller absent");
+        return;
+    }
+    ConsoleWrite("HDA-JACKS: ");
+    WriteU64Dec(count);
+    ConsoleWriteln(" pin record(s)");
+    for (u32 i = 0; i < count; ++i)
+    {
+        hda::HdaJackRecord r{};
+        if (!hda::HdaJackInventoryRead(i, &r))
+            continue;
+        ConsoleWrite("  [");
+        WriteU64Dec(i);
+        ConsoleWrite("] codec=");
+        WriteU64Hex(r.codec_slot, 2);
+        ConsoleWrite(" pin=");
+        WriteU64Hex(r.pin_node, 2);
+        ConsoleWrite(" raw=");
+        WriteU64Hex(r.config.raw, 8);
+        ConsoleWrite(" port=");
+        ConsoleWrite(hda::HdaPortConnectivityTag(r.config.port_connectivity));
+        ConsoleWrite(" device=");
+        ConsoleWrite(hda::HdaDefaultDeviceTag(r.config.default_device));
+        ConsoleWrite(" conn=");
+        ConsoleWrite(hda::HdaConnectionTypeTag(r.config.connection_type));
+        ConsoleWrite(" color=");
+        ConsoleWrite(hda::HdaJackColorTag(r.config.color));
+        ConsoleWrite(" assoc=");
+        WriteU64Hex(r.config.default_association, 1);
+        ConsoleWrite("/seq=");
+        WriteU64Hex(r.config.sequence, 1);
+        if (r.jack_present_known)
+        {
+            ConsoleWrite(" present=");
+            ConsoleWrite(r.jack_present ? "yes" : "no");
+        }
+        else
+        {
+            ConsoleWrite(" present=?");
+        }
+        ConsoleWriteln("");
+    }
+
+    // Helpful summary: which pin would the audio server pick for
+    // common output / input requests?
+    u8 codec = 0xFF;
+    u8 pin = 0xFF;
+    ConsoleWriteln("  ---");
+    if (hda::HdaJackInventoryFindByDevice(hda::HdaDefaultDevice::Speaker, &codec, &pin))
+    {
+        ConsoleWrite("  speaker pick: codec=");
+        WriteU64Hex(codec, 2);
+        ConsoleWrite(" pin=");
+        WriteU64Hex(pin, 2);
+        ConsoleWriteln("");
+    }
+    if (hda::HdaJackInventoryFindByDevice(hda::HdaDefaultDevice::HpOut, &codec, &pin))
+    {
+        ConsoleWrite("  headphone pick: codec=");
+        WriteU64Hex(codec, 2);
+        ConsoleWrite(" pin=");
+        WriteU64Hex(pin, 2);
+        ConsoleWriteln("");
+    }
+    if (hda::HdaJackInventoryFindByDevice(hda::HdaDefaultDevice::MicIn, &codec, &pin))
+    {
+        ConsoleWrite("  mic-in pick: codec=");
+        WriteU64Hex(codec, 2);
+        ConsoleWrite(" pin=");
+        WriteU64Hex(pin, 2);
+        ConsoleWriteln("");
+    }
+}
+
+void CmdMei()
+{
+    namespace mei = duetos::drivers::mei;
+    const u32 count = mei::MeiDeviceCount();
+    if (count == 0)
+    {
+        ConsoleWriteln("MEI: no Intel MEI/HECI device found");
+        ConsoleWriteln("    (looking for vendor=0x8086 class=0x07 subclass=0x80)");
+        return;
+    }
+    ConsoleWrite("MEI: ");
+    WriteU64Dec(count);
+    ConsoleWriteln(" device(s)");
+    for (u32 i = 0; i < count; ++i)
+    {
+        const auto& d = mei::MeiDevice(i);
+        ConsoleWrite("  [");
+        WriteU64Dec(i);
+        ConsoleWrite("] vendor=");
+        WriteU64Hex(d.vendor_id, 4);
+        ConsoleWrite(" device=");
+        WriteU64Hex(d.device_id, 4);
+        ConsoleWrite(" role=");
+        ConsoleWrite(d.role_tag);
+        ConsoleWrite(" bus=");
+        WriteU64Hex(d.bus, 2);
+        ConsoleWrite(":");
+        WriteU64Hex(d.device, 2);
+        ConsoleWrite(".");
+        WriteU64Hex(d.function, 1);
+        ConsoleWrite(" mmio_phys=");
+        WriteU64Hex(d.mmio_phys, 8);
+        ConsoleWrite(" size=");
+        WriteU64Hex(d.mmio_size, 4);
+        ConsoleWriteln("");
+    }
+    ConsoleWriteln("  (HECI bus protocol not yet implemented — driver is probe-only)");
 }
 
 } // namespace duetos::core::shell::internal

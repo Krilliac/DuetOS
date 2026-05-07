@@ -33,6 +33,7 @@
 #include "drivers/usb/cdc_ecm.h"
 #include "drivers/usb/rndis.h"
 #include "drivers/video/console.h"
+#include "net/bluetooth/diag.h"
 #include "net/firewall.h"
 #include "net/stack.h"
 #include "net/wifi.h"
@@ -1685,6 +1686,131 @@ void CmdFirewall(u32 argc, char** argv)
         return;
     }
     FirewallUsage();
+}
+
+namespace
+{
+
+void WriteHexU8(u8 v)
+{
+    auto nibble = [](u8 n) -> char { return static_cast<char>(n < 10 ? '0' + n : 'a' + (n - 10)); };
+    char buf[3] = {nibble(u8((v >> 4) & 0xF)), nibble(u8(v & 0xF)), '\0'};
+    ConsoleWrite(buf);
+}
+
+void WriteBdAddr(const u8 bd[6])
+{
+    // BD_ADDR is little-endian on the wire; render the canonical
+    // human form (high-byte-first colon-separated).
+    for (i32 i = 5; i >= 0; --i)
+    {
+        WriteHexU8(bd[i]);
+        if (i > 0)
+            ConsoleWriteChar(':');
+    }
+}
+
+void WriteHexU16(u16 v)
+{
+    WriteHexU8(u8((v >> 8) & 0xFF));
+    WriteHexU8(u8(v & 0xFF));
+}
+
+} // namespace
+
+void CmdBt(u32 argc, char** argv)
+{
+    const u32 count = duetos::net::bluetooth::BluetoothDiagAdapterCount();
+    const bool show_events = (argc >= 2 && StrEq(argv[1], "events"));
+
+    if (count == 0)
+    {
+        ConsoleWriteln("BT: no Bluetooth adapter registered");
+        ConsoleWriteln("    (USB Bluetooth: declare class=0xE0/sub=0x01/prog=0x01)");
+        ConsoleWriteln("    (transport drivers: btusb / btuart not yet wired — diag layer is live)");
+        return;
+    }
+
+    ConsoleWrite("BT: ");
+    WriteU64Dec(count);
+    ConsoleWriteln(" adapter(s)");
+
+    for (u32 i = 0; i < duetos::net::bluetooth::kBluetoothMaxAdapters; ++i)
+    {
+        const auto& a = duetos::net::bluetooth::BluetoothDiagAdapter(i);
+        if (!a.live)
+            continue;
+        ConsoleWrite("  [");
+        WriteU64Dec(i);
+        ConsoleWrite("] transport=");
+        ConsoleWrite(duetos::net::bluetooth::BluetoothTransportName(a.transport));
+        ConsoleWrite(" name=\"");
+        ConsoleWrite(a.name);
+        ConsoleWrite("\" mfr=");
+        WriteHexU16(a.manufacturer_id);
+        ConsoleWrite(" hci=");
+        WriteHexU8(a.hci_version);
+        ConsoleWrite(" lmp=");
+        WriteHexU8(a.lmp_version);
+        ConsoleWrite(" bdaddr=");
+        if (a.bd_addr_valid)
+            WriteBdAddr(a.bd_addr);
+        else
+            ConsoleWrite("?");
+        ConsoleWriteln("");
+        ConsoleWrite("       events=");
+        WriteU64Dec(a.events_seen);
+        ConsoleWrite(" cc=");
+        WriteU64Dec(a.cmd_complete_seen);
+        ConsoleWrite(" cs=");
+        WriteU64Dec(a.cmd_status_seen);
+        ConsoleWrite(" disc=");
+        WriteU64Dec(a.disconnection_seen);
+        ConsoleWrite(" le=");
+        WriteU64Dec(a.le_meta_seen);
+        ConsoleWrite(" unknown=");
+        WriteU64Dec(a.unknown_seen);
+        ConsoleWrite(" overflow=");
+        WriteU64Dec(a.ring_overflows);
+        ConsoleWriteln("");
+
+        if (show_events)
+        {
+            const u32 fill = duetos::net::bluetooth::BluetoothDiagEventRingFill(i);
+            ConsoleWrite("       events ring (");
+            WriteU64Dec(fill);
+            ConsoleWriteln("):");
+            for (u32 e = 0; e < fill; ++e)
+            {
+                const auto& r = duetos::net::bluetooth::BluetoothDiagEventRingAt(i, e);
+                ConsoleWrite("         seq=");
+                WriteU64Dec(r.sequence);
+                ConsoleWrite(" code=");
+                WriteHexU8(r.event_code);
+                ConsoleWrite(" plen=");
+                WriteU64Dec(r.parameter_total_length);
+                if (r.command_opcode != 0)
+                {
+                    ConsoleWrite(" opcode=");
+                    WriteHexU16(r.command_opcode);
+                }
+                if (r.le_subevent != 0)
+                {
+                    ConsoleWrite(" le_sub=");
+                    WriteHexU8(r.le_subevent);
+                }
+                if (r.event_code == duetos::net::bluetooth::kEvtCommandStatus)
+                {
+                    ConsoleWrite(" status=");
+                    WriteHexU8(r.status);
+                }
+                ConsoleWriteln("");
+            }
+        }
+    }
+
+    if (!show_events)
+        ConsoleWriteln("  (try `bt events` to dump per-adapter event ring)");
 }
 
 } // namespace duetos::core::shell::internal

@@ -7,6 +7,7 @@
 #include "mm/paging.h"
 #include "drivers/pci/pci.h"
 #include "drivers/usb/hid_descriptor.h"
+#include "net/bluetooth/diag.h"
 
 namespace duetos::drivers::usb
 {
@@ -96,11 +97,46 @@ bool VideoProbe(u8 subclass, u8 prog_if)
     return false;
 }
 
+// Wireless / Bluetooth class driver. Standards-compliant
+// Bluetooth USB devices declare (class=0xE0, subclass=0x01,
+// prog_if=0x01) on their primary interface (Bluetooth Core Spec
+// Vol 4 Part B §1.2). Other wireless-class devices (UWB radios,
+// Wireless USB hubs) are extremely rare — we log them but do not
+// claim. v0 registers an adapter slot in the diag layer so the
+// `bt` shell command shows the controller exists; real I/O
+// (control + bulk + interrupt URB plumbing) lands in the btusb
+// transport-driver follow-on slice.
+bool WirelessProbe(u8 subclass, u8 prog_if)
+{
+    arch::SerialWrite("[btusb] probe subclass=");
+    arch::SerialWriteHex(subclass);
+    arch::SerialWrite(" prog_if=");
+    arch::SerialWriteHex(prog_if);
+    if (subclass == kUsbWirelessSubclassRf && prog_if == kUsbWirelessProgIfBluetooth)
+    {
+        auto reg =
+            duetos::net::bluetooth::BluetoothDiagRegisterAdapter(duetos::net::bluetooth::BluetoothTransport::Usb);
+        if (reg.has_value())
+        {
+            duetos::net::bluetooth::BluetoothDiagSetName(reg.value(), "btusb");
+            arch::SerialWrite(" adapter=");
+            arch::SerialWriteHex(reg.value());
+            arch::SerialWrite("  (registered — transport stub, no I/O yet)\n");
+            return false; // do not claim until transport URBs land
+        }
+        arch::SerialWrite("  (registration failed — adapter table full)\n");
+        return false;
+    }
+    arch::SerialWrite("  (non-Bluetooth wireless — not claimed)\n");
+    return false;
+}
+
 constexpr UsbClassDriver kClassDrivers[] = {
     {kUsbClassHid, "hid", HidProbe},
     {kUsbClassMsc, "msc", MscProbe},
     {kUsbClassHub, "hub", HubProbe},
     {kUsbClassVideo, "video", VideoProbe},
+    {kUsbClassWireless, "wireless", WirelessProbe},
 };
 
 // xHCI capability registers (offsets at the base of the

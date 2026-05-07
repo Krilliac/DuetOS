@@ -10,6 +10,8 @@
 
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "drivers/audio/hda_jack.h"
+#include "drivers/audio/hda_jack_inventory.h"
 #include "log/klog.h"
 #include "mm/dma.h"
 #include "mm/paging.h"
@@ -401,6 +403,27 @@ void WalkCodec(const AudioControllerInfo& a, u8 slot)
                 break;
             case kHdaWidgetPinComplex:
                 ++pin;
+                {
+                    // Pull the 32-bit Pin Configuration Default
+                    // (verb 0xF1C, see hda_jack.h) and stamp the
+                    // inventory. The decoder is pure; the
+                    // inventory is the kernel-wide table the
+                    // `hdajacks` shell command + the audio
+                    // server's path-selection consume.
+                    const u32 cfg_raw = IssueVerbAndPoll(a, slot, widget_node, kHdaVerbGetConfigDefault, 0);
+                    HdaJackInventoryRecord(slot, widget_node, cfg_raw);
+
+                    // Initial presence read. Some pins have no
+                    // sense capability — the verb returns 0 in
+                    // that case and the cached presence stays
+                    // "unknown" until a real response arrives.
+                    const u32 sense = IssueVerbAndPoll(a, slot, widget_node, kHdaVerbGetPinSense, 0);
+                    if (sense != 0)
+                        HdaJackInventoryStampPresence(slot, widget_node, sense);
+
+                    HdaPinConfigDefault decoded = HdaDecodePinConfigDefault(cfg_raw);
+                    HdaPinConfigDefaultLog(slot, widget_node, decoded);
+                }
                 break;
             default:
                 break;

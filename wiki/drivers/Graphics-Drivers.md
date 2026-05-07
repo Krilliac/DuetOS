@@ -83,6 +83,62 @@ Each driver exposes:
 dispatches into the per-vendor TUs and only retains
 `NvidiaArchName` (used by the cross-vendor diagnostic line).
 
+### Intel GSC firmware-image parser
+
+`intel_gsc_fw.{h,cpp}` is a freestanding, clean-room parser for
+the Intel Graphics System Controller (GSC) firmware-image
+format used by Intel discrete GPUs (DG2 / Arc / Alchemist /
+Battlemage) and recent integrated parts (Meteor Lake / Lunar
+Lake). The format is the publicly-documented Flash Partition
+Table (FPT) layout — a 32-byte `$FPT` header followed by an
+array of 32-byte partition entries — that
+[`intel/igsc`](https://github.com/intel/igsc) consumes when
+pushing firmware updates to the GSC over MEI.
+
+DuetOS does not yet ship an MEI driver, so we cannot push an
+update. The parser is wired into `intel::Probe()` purely as a
+diagnostic: if the operator drops a firmware image at
+`/lib/firmware/duetos/open/intel-gsc/gsc.bin` (preferred) or
+`/lib/firmware/intel-gsc/gsc.bin` (vendor namespace), the boot
+log records:
+
+- which partitions the image declares (`FTPR` / `OPRO` /
+  `OPRC` / `IAFW` / `MDMV` / `GLUT` / `MFTP` / `DLMP` /
+  `FPFS` / `PMCP`)
+- the FITC version dwords
+- whether a 16-byte ROM-bypass prelude precedes the marker
+  (older Intel ME images) or not (modern GSC)
+- a manufacturing-flag bitset that warns if `MFTP` / `DLMP`
+  is present (test-only partitions; should not deploy)
+
+The parser is fully covered by `IntelGscFwSelfTest`, which
+runs at boot alongside the iwlwifi / Realtek / Broadcom
+firmware-format self-tests. Bad-marker, oversized
+`num_entries`, entry-array-overflow, single-bogus-span, and
+manufacturing-flag-detection cases are all asserted.
+
+When the MEI subsystem lands, this parser becomes the
+front-end of the GSC update path: per-partition manifest
+validation (CPD/SHA-256 hash chain) plugs in at the same call
+site, then the updater walks each partition payload over the
+MEI HECI channel.
+
+The PCI-side scaffold has landed in
+`kernel/drivers/mei/mei.{h,cpp}`. It probes every Intel device
+matching `(class=0x07 / subclass=0x80)` at boot, classifies the
+device-ID into CSME / GSC / TXE / SPS roles, and maps BAR0 as
+MMIO so a future driver can reach H_CSR / ME_CSR without
+re-running the size probe. The `mei` shell command surfaces the
+inventory. What's still needed to flip the GSC update path on:
+the HECI bus protocol (H2M/M2H handshake, version negotiation,
+per-client multiplexing).
+
+`intel::Probe()` also looks up `guc.bin` and `huc.bin` under the
+firmware loader's open-firmware path policy — every Gen9+ GPU
+needs both blobs to bring up the command rings. The lookups are
+advisory today (no ring submission) and feed the existing
+`fwtrace show` ring.
+
 ## Compositor Primitives
 
 The compositor exposes:
