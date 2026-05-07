@@ -40,6 +40,12 @@
  *       y        abs
  *       !        factorial (capped at 20! -> i64 ceiling)
  *       r        reciprocal (1/n; zero flips ERR)
+ *       &        bitwise AND (binary)
+ *       |        bitwise OR  (binary)
+ *       ^        bitwise XOR (binary)
+ *       <        shift left  (binary; rhs in [0, 64))
+ *       >        shift right (binary, arithmetic; keeps sign bit)
+ *       ~        bitwise NOT (unary, one's complement)
  *
  * Context: kernel. Both entry points assume the caller holds
  * the compositor lock — same discipline as NotesFeedChar.

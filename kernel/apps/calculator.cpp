@@ -197,6 +197,30 @@ void ApplyPending(i64 rhs)
         }
         result = lhs / rhs;
         break;
+    case '&':
+        result = lhs & rhs;
+        break;
+    case '|':
+        result = lhs | rhs;
+        break;
+    case '^':
+        result = lhs ^ rhs;
+        break;
+    case '<': // shift left
+        // Out-of-range shifts (negative or >= 64) are
+        // undefined behavior in C++; clamp to a sane range
+        // and let the user see 0 or saturated bits.
+        if (rhs < 0 || rhs >= 64)
+            result = 0;
+        else
+            result = lhs << rhs;
+        break;
+    case '>': // shift right (arithmetic — keeps sign bit)
+        if (rhs < 0 || rhs >= 64)
+            result = (lhs < 0) ? -1 : 0;
+        else
+            result = lhs >> rhs;
+        break;
     default:
         result = rhs;
         break;
@@ -495,6 +519,17 @@ void HandleFactorial()
     g_state.fresh_entry = true;
 }
 
+// Bitwise NOT (one's complement). Unary; flips fresh_entry so a
+// subsequent digit starts a new number.
+void HandleBitwiseNot()
+{
+    if (g_state.error)
+        return;
+    const i64 cur = ReadDisplayAsI64();
+    SetDisplayI64(~cur);
+    g_state.fresh_entry = true;
+}
+
 // Reciprocal: 1 / cur, integer-truncated. Division by zero flips
 // ERR — same policy as the binary `/` operator.
 void HandleReciprocal()
@@ -519,8 +554,10 @@ void DispatchKey(char k)
 {
     if (k >= '0' && k <= '9')
         HandleDigit(k);
-    else if (k == '+' || k == '-' || k == '*' || k == '/')
+    else if (k == '+' || k == '-' || k == '*' || k == '/' || k == '&' || k == '|' || k == '^' || k == '<' || k == '>')
         HandleOp(k);
+    else if (k == '~')
+        HandleBitwiseNot();
     else if (k == '=')
         HandleEquals();
     else if (k == 'C' || k == 'c')
@@ -723,7 +760,8 @@ bool CalculatorFeedChar(char c)
     if ((c >= '0' && c <= '9') || c == '+' || c == '-' || c == '*' || c == '/' || c == '=' || c == 'c' || c == 'C' ||
         c == '%' || c == 'n' || c == 'N' || c == '_' || uc == 0x08 || c == 'm' || c == 'M' || c == 's' || c == 'S' ||
         c == 'l' || c == 'L' || c == 'a' || c == 'A' || c == 'b' || c == 'B' || c == 'q' || c == 'Q' || c == 'x' ||
-        c == 'X' || c == 'y' || c == 'Y' || c == '!' || c == 'r' || c == 'R')
+        c == 'X' || c == 'y' || c == 'Y' || c == '!' || c == 'r' || c == 'R' || c == '&' || c == '|' || c == '^' ||
+        c == '<' || c == '>' || c == '~')
     {
         DispatchKey(c);
         return true;
@@ -875,7 +913,66 @@ void CalculatorSelfTest()
         all_pass = false;
     HandleClear();
 
-    SerialWrite(all_pass ? "[calc] self-test OK (arith + percent + sign + backspace + memory + scientific)\n"
+    // Bitwise: 12 & 10 = 8.
+    DispatchKey('1');
+    DispatchKey('2');
+    DispatchKey('&');
+    DispatchKey('1');
+    DispatchKey('0');
+    DispatchKey('=');
+    if (ReadDisplayAsI64() != 8 || g_state.error)
+        all_pass = false;
+    HandleClear();
+
+    // Bitwise: 12 | 10 = 14.
+    DispatchKey('1');
+    DispatchKey('2');
+    DispatchKey('|');
+    DispatchKey('1');
+    DispatchKey('0');
+    DispatchKey('=');
+    if (ReadDisplayAsI64() != 14 || g_state.error)
+        all_pass = false;
+    HandleClear();
+
+    // Bitwise: 12 ^ 10 = 6.
+    DispatchKey('1');
+    DispatchKey('2');
+    DispatchKey('^');
+    DispatchKey('1');
+    DispatchKey('0');
+    DispatchKey('=');
+    if (ReadDisplayAsI64() != 6 || g_state.error)
+        all_pass = false;
+    HandleClear();
+
+    // Shift: 1 << 4 = 16.
+    DispatchKey('1');
+    DispatchKey('<');
+    DispatchKey('4');
+    DispatchKey('=');
+    if (ReadDisplayAsI64() != 16 || g_state.error)
+        all_pass = false;
+    HandleClear();
+
+    // Shift: 64 >> 2 = 16.
+    DispatchKey('6');
+    DispatchKey('4');
+    DispatchKey('>');
+    DispatchKey('2');
+    DispatchKey('=');
+    if (ReadDisplayAsI64() != 16 || g_state.error)
+        all_pass = false;
+    HandleClear();
+
+    // Bitwise NOT: ~5 = -6 (two's complement).
+    DispatchKey('5');
+    DispatchKey('~');
+    if (ReadDisplayAsI64() != -6 || g_state.error)
+        all_pass = false;
+    HandleClear();
+
+    SerialWrite(all_pass ? "[calc] self-test OK (arith + percent + sign + backspace + memory + scientific + bitwise)\n"
                          : "[calc] self-test FAILED\n");
 }
 
