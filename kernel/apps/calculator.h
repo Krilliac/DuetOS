@@ -88,4 +88,18 @@ bool CalculatorFeedChar(char c);
 /// so the window renders with a blank "0" on first paint.
 void CalculatorSelfTest();
 
+/// Memory register read-back. Exposed so SessionRestoreSave can
+/// snapshot the user's stash through SESSION.CFG. The display
+/// itself is intentionally not persisted (a calculator wakes
+/// "fresh"); only the M slot mirrors a physical calculator's
+/// sticky-memory expectation.
+i64 CalculatorMemoryValue();
+bool CalculatorMemorySet();
+
+/// Restore the memory register from a saved snapshot. Used by
+/// SessionRestoreApply on the next boot. Idempotent. Setting
+/// `set` to false also zeroes the value to keep the two flags
+/// coherent — the `M` indicator is driven off `set`.
+void CalculatorMemoryRestore(i64 value, bool set);
+
 } // namespace duetos::apps::calculator

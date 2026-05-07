@@ -24,12 +24,21 @@
  *   win.0.y=120
  *   win.1.x=300       ; ThemeRole::Notes
  *   win.1.y=80
- *   ...
+ *   mouse.dblclick=50 ; WindowDoubleClickTicks
+ *   mouse.sens=128    ; WindowMouseSensitivity (0..255, identity=128)
+ *   kbd.rate=11       ; PS/2 typematic rate idx (0..31)
+ *   kbd.delay=1       ; PS/2 typematic delay idx (0..3)
+ *   kbd.layout=us     ; us / uk / dvorak / de / fr / colemak
+ *   sound.cues=1      ; SoundCueIsEnabled (0|1)
+ *   tz.minutes=-330   ; signed UTC offset in minutes
+ *   calc.mem=42       ; calculator M register (only emitted when set)
+ *   calc.memset=1     ; matching memset flag
+ *   imageview.last=PHOTO.BMP  ; 8.3 filename of last-loaded image
  *
  * Unknown / malformed lines are skipped silently — the file
  * format is meant to absorb future fields without breaking old
- * boots. Roles not present in the file keep whatever default
- * position main.cpp assigned them.
+ * boots. Roles / knobs not present in the file keep whatever
+ * default state init has assigned them.
  */
 
 namespace duetos::core

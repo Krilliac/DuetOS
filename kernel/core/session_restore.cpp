@@ -1,11 +1,17 @@
 #include "core/session_restore.h"
 
+#include "apps/calculator.h"
+#include "apps/imageview.h"
+#include "apps/settings.h"
 #include "arch/x86_64/serial.h"
 #include "debug/probes.h"
+#include "drivers/input/ps2kbd.h"
+#include "drivers/video/sound_cue.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
 #include "fs/fat32.h"
 #include "log/klog.h"
+#include "time/timezone.h"
 
 /*
  * SESSION.CFG round-trip.
@@ -44,7 +50,12 @@ namespace
 {
 
 constexpr const char kCfgPath[] = "SESSION.CFG";
-constexpr u64 kPayloadCap = 1024;
+// Sized for: theme + every role window (two lines each) + the
+// system-knob keys (mouse / kbd / sound / tz / calc / imageview).
+// The 12-role window block alone is ~600 bytes; the knob block
+// adds ~250. 2 KiB leaves headroom for new keys without forcing
+// a per-add bump.
+constexpr u64 kPayloadCap = 2048;
 
 constinit char g_last_payload[kPayloadCap] = {};
 constinit u64 g_last_len = 0;
@@ -127,6 +138,217 @@ bool ParseU32(const char* s, u32 len, u32* out)
     return true;
 }
 
+void AppendI32(char* dst, u64* pos, u64 cap, i32 v)
+{
+    if (v < 0)
+    {
+        if (*pos + 1 < cap)
+        {
+            dst[(*pos)++] = '-';
+        }
+        // -INT32_MIN can't be represented; promote to u32 abs.
+        const u32 abs_v = (v == static_cast<i32>(0x80000000)) ? 0x80000000u : static_cast<u32>(-v);
+        AppendU32(dst, pos, cap, abs_v);
+        return;
+    }
+    AppendU32(dst, pos, cap, static_cast<u32>(v));
+}
+
+bool ParseI32(const char* s, u32 len, i32* out)
+{
+    if (len == 0)
+    {
+        return false;
+    }
+    bool neg = false;
+    u32 i = 0;
+    if (s[0] == '-')
+    {
+        neg = true;
+        i = 1;
+    }
+    else if (s[0] == '+')
+    {
+        i = 1;
+    }
+    if (i >= len)
+    {
+        return false;
+    }
+    u32 mag = 0;
+    if (!ParseU32(s + i, len - i, &mag))
+    {
+        return false;
+    }
+    if (neg)
+    {
+        // Allow magnitude up to 2^31 (so INT32_MIN parses).
+        if (mag > 0x80000000u)
+        {
+            return false;
+        }
+        *out = (mag == 0x80000000u) ? static_cast<i32>(0x80000000) : -static_cast<i32>(mag);
+    }
+    else
+    {
+        if (mag > 0x7FFFFFFFu)
+        {
+            return false;
+        }
+        *out = static_cast<i32>(mag);
+    }
+    return true;
+}
+
+void AppendI64(char* dst, u64* pos, u64 cap, i64 v)
+{
+    bool neg = false;
+    u64 mag;
+    if (v < 0)
+    {
+        neg = true;
+        // i64 min has no representable positive — handle it as
+        // the unsigned 0x80000000'00000000 magnitude, identical to
+        // -static_cast<u64>(v) under two's-complement semantics.
+        mag = static_cast<u64>(-(v + 1)) + 1;
+    }
+    else
+    {
+        mag = static_cast<u64>(v);
+    }
+    char tmp[24];
+    u32 n = 0;
+    if (mag == 0)
+    {
+        tmp[n++] = '0';
+    }
+    while (mag != 0)
+    {
+        tmp[n++] = static_cast<char>('0' + (mag % 10));
+        mag /= 10;
+    }
+    if (neg && *pos + 1 < cap)
+    {
+        dst[(*pos)++] = '-';
+    }
+    while (n > 0 && *pos + 1 < cap)
+    {
+        dst[(*pos)++] = tmp[--n];
+    }
+}
+
+bool ParseI64(const char* s, u32 len, i64* out)
+{
+    if (len == 0)
+    {
+        return false;
+    }
+    bool neg = false;
+    u32 i = 0;
+    if (s[0] == '-')
+    {
+        neg = true;
+        i = 1;
+    }
+    else if (s[0] == '+')
+    {
+        i = 1;
+    }
+    if (i >= len)
+    {
+        return false;
+    }
+    u64 v = 0;
+    for (u32 j = i; j < len; ++j)
+    {
+        const char c = s[j];
+        if (c < '0' || c > '9')
+        {
+            return false;
+        }
+        const u64 next = v * 10 + static_cast<u64>(c - '0');
+        if (next < v)
+        {
+            return false; // overflow
+        }
+        v = next;
+    }
+    if (neg)
+    {
+        if (v > 0x8000000000000000ULL)
+        {
+            return false;
+        }
+        *out = (v == 0x8000000000000000ULL) ? static_cast<i64>(0x8000000000000000LL) : -static_cast<i64>(v);
+    }
+    else
+    {
+        if (v > 0x7FFFFFFFFFFFFFFFULL)
+        {
+            return false;
+        }
+        *out = static_cast<i64>(v);
+    }
+    return true;
+}
+
+const char* KeyboardLayoutName(drivers::input::KeyboardLayout l)
+{
+    using drivers::input::KeyboardLayout;
+    switch (l)
+    {
+    case KeyboardLayout::US:
+        return "us";
+    case KeyboardLayout::UK:
+        return "uk";
+    case KeyboardLayout::Dvorak:
+        return "dvorak";
+    case KeyboardLayout::DE:
+        return "de";
+    case KeyboardLayout::FR:
+        return "fr";
+    case KeyboardLayout::Colemak:
+        return "colemak";
+    }
+    return "us";
+}
+
+bool KeyboardLayoutFromName(const char* name, drivers::input::KeyboardLayout* out)
+{
+    using drivers::input::KeyboardLayout;
+    if (StrEq(name, "us"))
+    {
+        *out = KeyboardLayout::US;
+        return true;
+    }
+    if (StrEq(name, "uk"))
+    {
+        *out = KeyboardLayout::UK;
+        return true;
+    }
+    if (StrEq(name, "dvorak"))
+    {
+        *out = KeyboardLayout::Dvorak;
+        return true;
+    }
+    if (StrEq(name, "de"))
+    {
+        *out = KeyboardLayout::DE;
+        return true;
+    }
+    if (StrEq(name, "fr"))
+    {
+        *out = KeyboardLayout::FR;
+        return true;
+    }
+    if (StrEq(name, "colemak"))
+    {
+        *out = KeyboardLayout::Colemak;
+        return true;
+    }
+    return false;
+}
+
 void FormatPayload(char* dst, u64 cap, u64* len_out)
 {
     namespace v = drivers::video;
@@ -160,6 +382,60 @@ void FormatPayload(char* dst, u64 cap, u64* len_out)
         AppendU32(dst, &pos, cap, y);
         Append(dst, &pos, cap, "\n");
     }
+
+    // Mouse — double-click threshold (in compositor ticks) and
+    // sensitivity (0..255, identity = 128).
+    Append(dst, &pos, cap, "mouse.dblclick=");
+    AppendU32(dst, &pos, cap, v::WindowDoubleClickTicks());
+    Append(dst, &pos, cap, "\n");
+    Append(dst, &pos, cap, "mouse.sens=");
+    AppendU32(dst, &pos, cap, v::WindowMouseSensitivity());
+    Append(dst, &pos, cap, "\n");
+
+    // Keyboard — typematic indices + active layout.
+    Append(dst, &pos, cap, "kbd.rate=");
+    AppendU32(dst, &pos, cap, apps::settings::KeyboardTypematicRateIdx());
+    Append(dst, &pos, cap, "\n");
+    Append(dst, &pos, cap, "kbd.delay=");
+    AppendU32(dst, &pos, cap, apps::settings::KeyboardTypematicDelayIdx());
+    Append(dst, &pos, cap, "\n");
+    Append(dst, &pos, cap, "kbd.layout=");
+    Append(dst, &pos, cap, KeyboardLayoutName(drivers::input::Ps2KeyboardLayout()));
+    Append(dst, &pos, cap, "\n");
+
+    // Sound cues enable flag — drives the M-key toggle on the
+    // Sound sub-panel.
+    Append(dst, &pos, cap, "sound.cues=");
+    AppendU32(dst, &pos, cap, v::SoundCueIsEnabled() ? 1u : 0u);
+    Append(dst, &pos, cap, "\n");
+
+    // Timezone offset in minutes (signed; range -720..+840).
+    Append(dst, &pos, cap, "tz.minutes=");
+    AppendI32(dst, &pos, cap, time::TimezoneOffsetMinutes());
+    Append(dst, &pos, cap, "\n");
+
+    // Calculator memory register — only emit when the user has
+    // an active stash. The `memset` flag is what drives the M
+    // indicator; on a fresh boot with no stash we don't bother
+    // round-tripping a zero pair.
+    if (apps::calculator::CalculatorMemorySet())
+    {
+        Append(dst, &pos, cap, "calc.mem=");
+        AppendI64(dst, &pos, cap, apps::calculator::CalculatorMemoryValue());
+        Append(dst, &pos, cap, "\ncalc.memset=1\n");
+    }
+
+    // ImageView last-loaded filename — empty string means "no
+    // selection on the most recent boot", which the Apply path
+    // ignores (no point selecting "" through SelectByName).
+    const char* iv_name = apps::imageview::ImageViewCurrentName();
+    if (iv_name != nullptr && iv_name[0] != '\0')
+    {
+        Append(dst, &pos, cap, "imageview.last=");
+        Append(dst, &pos, cap, iv_name);
+        Append(dst, &pos, cap, "\n");
+    }
+
     *len_out = pos;
 }
 
@@ -174,6 +450,111 @@ bool ApplyOne(const char* key, const char* val)
         if (v::ThemeIdFromName(val, &id))
         {
             v::ThemeSet(id);
+        }
+        return true;
+    }
+    if (StrEq(key, "mouse.dblclick"))
+    {
+        u32 num = 0;
+        if (ParseU32(val, static_cast<u32>(StrLen(val)), &num))
+        {
+            v::WindowSetDoubleClickTicks(num);
+        }
+        return true;
+    }
+    if (StrEq(key, "mouse.sens"))
+    {
+        u32 num = 0;
+        if (ParseU32(val, static_cast<u32>(StrLen(val)), &num) && num <= 0xFF)
+        {
+            v::WindowSetMouseSensitivity(static_cast<u8>(num));
+        }
+        return true;
+    }
+    if (StrEq(key, "kbd.rate") || StrEq(key, "kbd.delay"))
+    {
+        u32 num = 0;
+        if (!ParseU32(val, static_cast<u32>(StrLen(val)), &num))
+        {
+            return true; // known key, malformed value — ignore
+        }
+        // Read the current pair, replace just the field this key
+        // names, then push both. Avoids depending on which of the
+        // two keys the parser sees first.
+        u8 rate = apps::settings::KeyboardTypematicRateIdx();
+        u8 delay = apps::settings::KeyboardTypematicDelayIdx();
+        if (StrEq(key, "kbd.rate") && num <= 31)
+        {
+            rate = static_cast<u8>(num);
+        }
+        else if (StrEq(key, "kbd.delay") && num <= 3)
+        {
+            delay = static_cast<u8>(num);
+        }
+        apps::settings::KeyboardSetTypematicIdx(rate, delay);
+        return true;
+    }
+    if (StrEq(key, "kbd.layout"))
+    {
+        drivers::input::KeyboardLayout l;
+        if (KeyboardLayoutFromName(val, &l))
+        {
+            drivers::input::Ps2KeyboardSetLayout(l);
+        }
+        return true;
+    }
+    if (StrEq(key, "sound.cues"))
+    {
+        u32 num = 0;
+        if (ParseU32(val, static_cast<u32>(StrLen(val)), &num))
+        {
+            v::SoundCueSetEnabled(num != 0);
+        }
+        return true;
+    }
+    if (StrEq(key, "tz.minutes"))
+    {
+        i32 num = 0;
+        if (ParseI32(val, static_cast<u32>(StrLen(val)), &num))
+        {
+            time::SetTimezoneOffsetMinutes(num);
+        }
+        return true;
+    }
+    if (StrEq(key, "calc.mem"))
+    {
+        i64 num = 0;
+        if (ParseI64(val, static_cast<u32>(StrLen(val)), &num))
+        {
+            // Tentatively stash the value. The matching memset=1
+            // line that follows will lock in the M indicator. If
+            // calc.memset never arrives (stripped file), the
+            // value sits as a zeroed register from boot defaults
+            // — exactly the no-stash state.
+            apps::calculator::CalculatorMemoryRestore(num, true);
+        }
+        return true;
+    }
+    if (StrEq(key, "calc.memset"))
+    {
+        u32 num = 0;
+        if (ParseU32(val, static_cast<u32>(StrLen(val)), &num))
+        {
+            // Honor the explicit clear: memset=0 wipes whatever
+            // calc.mem put in place (defensive; keeps the M flag
+            // and the value coherent on a partially-written file).
+            if (num == 0)
+            {
+                apps::calculator::CalculatorMemoryRestore(0, false);
+            }
+        }
+        return true;
+    }
+    if (StrEq(key, "imageview.last"))
+    {
+        if (val[0] != '\0')
+        {
+            apps::imageview::ImageViewSelectByName(val);
         }
         return true;
     }
@@ -375,16 +756,37 @@ void SessionRestoreSelfTest()
     // current default (Classic), so we pick "amber" — known
     // registered, distinct from Classic.
     constexpr const char* kSynthTheme = "amber";
-    char synth[64];
+    char synth[256];
     u64 spos = 0;
     Append(synth, &spos, sizeof(synth), "theme=");
     Append(synth, &spos, sizeof(synth), kSynthTheme);
     Append(synth, &spos, sizeof(synth), "\nwin.0.x=42\nwin.0.y=84\n");
+    // Synthetic system-knob block. Each of these values is
+    // distinguishable from the boot defaults so a sub-check that
+    // fails to apply leaves an observable gap.
+    Append(synth, &spos, sizeof(synth),
+           "mouse.dblclick=77\nmouse.sens=200\n"
+           "kbd.rate=7\nkbd.delay=2\n"
+           "sound.cues=0\n"
+           "tz.minutes=-330\n"
+           "calc.mem=-12345\ncalc.memset=1\n");
     const v::ThemeId orig_theme = v::ThemeCurrentId();
     u32 ox = 0;
     u32 oy = 0;
     const v::WindowHandle calc = v::ThemeRoleWindow(v::ThemeRole::Calculator);
     const bool have_calc = (calc != v::kWindowInvalid) && v::WindowGetBounds(calc, &ox, &oy, nullptr, nullptr);
+
+    // Snapshot the live system-knob state so we can restore it
+    // after the round-trip — this self-test must not perturb
+    // what the user / boot defaults left behind.
+    const u32 orig_dblclick = v::WindowDoubleClickTicks();
+    const u8 orig_sens = v::WindowMouseSensitivity();
+    const u8 orig_kbd_rate = apps::settings::KeyboardTypematicRateIdx();
+    const u8 orig_kbd_delay = apps::settings::KeyboardTypematicDelayIdx();
+    const bool orig_sound = v::SoundCueIsEnabled();
+    const i32 orig_tz = time::TimezoneOffsetMinutes();
+    const i64 orig_mem = apps::calculator::CalculatorMemoryValue();
+    const bool orig_memset = apps::calculator::CalculatorMemorySet();
 
     ApplyPayload(synth, spos);
 
@@ -426,21 +828,79 @@ void SessionRestoreSelfTest()
         KLOG_DEBUG_V("session", "  observed nx", nx_dbg);
         KLOG_DEBUG_V("session", "  observed ny", ny_dbg);
     }
+
+    // System-knob round-trip checks. Each compares the live value
+    // against the synthetic line above. A failure points to a
+    // missing handler in ApplyOne or a parser regression.
+    bool knob_ok = true;
+    const u32 got_dblclick = v::WindowDoubleClickTicks();
+    if (got_dblclick != 77)
+    {
+        knob_ok = false;
+        KLOG_DEBUG_V("session", "  dblclick mismatch", got_dblclick);
+    }
+    const u32 got_sens = v::WindowMouseSensitivity();
+    if (got_sens != 200)
+    {
+        knob_ok = false;
+        KLOG_DEBUG_V("session", "  mouse sens mismatch", got_sens);
+    }
+    const u8 got_kbd_rate = apps::settings::KeyboardTypematicRateIdx();
+    const u8 got_kbd_delay = apps::settings::KeyboardTypematicDelayIdx();
+    if (got_kbd_rate != 7 || got_kbd_delay != 2)
+    {
+        knob_ok = false;
+        KLOG_DEBUG_V("session", "  kbd rate idx mismatch", got_kbd_rate);
+        KLOG_DEBUG_V("session", "  kbd delay idx mismatch", got_kbd_delay);
+    }
+    if (v::SoundCueIsEnabled())
+    {
+        knob_ok = false;
+        KLOG_WARN("session", "  sound.cues=0 line did not disable cues");
+    }
+    const i32 got_tz = time::TimezoneOffsetMinutes();
+    if (got_tz != -330)
+    {
+        knob_ok = false;
+        KLOG_DEBUG_V("session", "  tz.minutes mismatch (expected -330)", static_cast<u32>(got_tz));
+    }
+    const i64 got_mem = apps::calculator::CalculatorMemoryValue();
+    const bool got_memset = apps::calculator::CalculatorMemorySet();
+    if (got_mem != -12345 || !got_memset)
+    {
+        knob_ok = false;
+        KLOG_WARN("session", "  calc.mem / calc.memset round-trip mismatch");
+    }
+    if (!knob_ok)
+    {
+        ok = false;
+        KLOG_WARN("session", "self-test: system-knob sub-check FAILED");
+    }
+
+    // Restore the original system-knob state so this test leaves
+    // no observable side effects.
+    v::WindowSetDoubleClickTicks(orig_dblclick);
+    v::WindowSetMouseSensitivity(orig_sens);
+    apps::settings::KeyboardSetTypematicIdx(orig_kbd_rate, orig_kbd_delay);
+    v::SoundCueSetEnabled(orig_sound);
+    time::SetTimezoneOffsetMinutes(orig_tz);
+    apps::calculator::CalculatorMemoryRestore(orig_mem, orig_memset);
+
     // Restore original theme.
     v::ThemeSet(orig_theme);
 
     if (ok)
     {
-        SerialWrite("[session] self-test OK (theme + window position round-trip)\n");
+        SerialWrite("[session] self-test OK (theme + window + knob round-trip)\n");
     }
     else
     {
         SerialWrite("[session] self-test FAILED (see preceding sub-check log)\n");
         // Fire the GDB-attachable probe so a debugger session catches
         // the exact frame where the regression first surfaces. Encoded
-        // value packs the two sub-check flags so the probe row tells
+        // value packs the three sub-check flags so the probe row tells
         // an at-a-glance reader which leg failed without re-greping.
-        const u64 fail_value = (theme_applied ? 0u : 0x01u) | (win_ok ? 0u : 0x02u);
+        const u64 fail_value = (theme_applied ? 0u : 0x01u) | (win_ok ? 0u : 0x02u) | (knob_ok ? 0u : 0x04u);
         KBP_PROBE_V(::duetos::debug::ProbeId::kBootSelftestFail, fail_value);
     }
 }

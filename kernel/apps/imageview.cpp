@@ -1098,4 +1098,13 @@ void ImageViewSelfTest()
                      : "[image] self-test FAILED\n");
 }
 
+const char* ImageViewCurrentName()
+{
+    if (g_state.count == 0 || g_state.index >= g_state.count)
+    {
+        return "";
+    }
+    return g_state.names[g_state.index];
+}
+
 } // namespace duetos::apps::imageview

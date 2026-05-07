@@ -101,4 +101,12 @@ bool ImageViewSelectByName(const char* name);
 /// uses.
 void ImageViewSelfTest();
 
+/// Currently-selected image filename, or `""` when no image is
+/// loaded. The pointer references in-app storage and stays valid
+/// until the next RescanRoot — callers that need to retain the
+/// name must copy it. Used by the session-restore subsystem to
+/// snapshot which image the user was viewing across reboot;
+/// ImageViewSelectByName is the matching restore entry.
+const char* ImageViewCurrentName();
+
 } // namespace duetos::apps::imageview

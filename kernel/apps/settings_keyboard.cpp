@@ -9,15 +9,19 @@
 namespace duetos::apps::settings
 {
 
-namespace
-{
-
 // Cached typematic indices so the panel can render the
 // current values + so successive +/- key presses step from a
 // known anchor. Defaults match the BIOS-set typematic the
-// PS/2 controller comes up with on most hardware.
+// PS/2 controller comes up with on most hardware. Lifted out
+// of the anonymous namespace so KeyboardTypematic{Rate,Delay}Idx
+// + KeyboardSetTypematicIdx can read/write them — those are the
+// hooks SessionRestoreApply / SessionRestoreSave use to round-
+// trip these values through SESSION.CFG.
 constinit u8 g_rate_idx = 0xB; // ~10.9 Hz — comfortable
 constinit u8 g_delay_idx = 1;  // 500 ms
+
+namespace
+{
 
 void AppendDec(char* out, u32 cap, u32* o, u64 v)
 {
@@ -230,6 +234,27 @@ bool Key(char c)
 void SettingsKeyboardInit()
 {
     SettingsRegisterPanel(Panel::Keyboard, Draw, Key);
+}
+
+u8 KeyboardTypematicRateIdx()
+{
+    return g_rate_idx;
+}
+
+u8 KeyboardTypematicDelayIdx()
+{
+    return g_delay_idx;
+}
+
+void KeyboardSetTypematicIdx(u8 rate, u8 delay)
+{
+    if (rate > 31)
+        rate = 31;
+    if (delay > 3)
+        delay = 3;
+    g_rate_idx = rate;
+    g_delay_idx = delay;
+    duetos::drivers::input::Ps2KeyboardSetTypematic(g_rate_idx, g_delay_idx);
 }
 
 } // namespace duetos::apps::settings
