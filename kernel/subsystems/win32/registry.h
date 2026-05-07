@@ -96,4 +96,68 @@ bool ReleaseHandleForCurrentProcess(u64 handle);
 /// gauntlet alongside ProcessSelfTest.
 void RegistrySelfTest();
 
+/// Read REGISTRY.HIV from the FAT32 root volume and rebuild the
+/// sidecar mutable-value pool from it. No-op when FAT32 isn't
+/// mounted or the file doesn't exist (first boot path). Run once
+/// after the FAT32 probe and after RegistrySelfTest, so the
+/// reload doesn't trample the boot consistency probes.
+void RegistryHiveLoad();
+
+/// Serialize the current sidecar state to REGISTRY.HIV. Called
+/// from the success leg of DoSetValue / DoDeleteValue so each
+/// successful mutation lands on disk before the syscall returns.
+/// Throttled internally — a payload identical to the last
+/// successful write is skipped.
+void RegistryHiveSave();
+
+/// Boot self-test: round-trips a synthetic value through
+/// snapshot/restore (no FAT32 write) so the encode + decode
+/// path is exercised without touching the operator's hive.
+/// Prints PASS / FAIL / SKIP to COM1.
+void RegistryHiveSelfTest();
+
+namespace detail
+{
+
+/// Public POD for the boundary between registry.cpp (which owns
+/// the sidecar internals) and registry_hive.cpp (which owns the
+/// FAT32 file format). Sized so a Snapshot[] array can be a
+/// stack-resident scratch on save.
+struct HiveSnapshot
+{
+    bool active;    // false ⇒ empty slot
+    bool tombstone; // true ⇒ explicit deletion shadowing a static value
+    u8 _pad[2];
+    u64 root;       // kHkey* sentinel
+    u32 type;       // REG_*
+    u32 size;       // bytes valid in `data`
+    char path[128]; // matches a kRegKeys[] entry; NUL-terminated
+    char name[64];  // sidecar value name; NUL-terminated
+    u8 data[256];   // value payload
+};
+
+/// Sidecar pool capacity (== kSidecarValueCap inside registry.cpp).
+/// Exposed so registry_hive.cpp can size buffers without including
+/// the .cpp's private constants.
+inline constexpr u32 kSidecarPoolSize = 32;
+
+/// Read slot `idx`. `out->active` reports occupancy. Pure read —
+/// no mutation, safe to call without holding any registry lock.
+bool SidecarSnapshotAt(u32 idx, HiveSnapshot* out);
+
+/// Apply one snapshot back into the sidecar. The (root, path)
+/// pair is looked up in the static tree; mismatches return false
+/// (a hive that references a key the current build doesn't ship
+/// is silently skipped — forward-compat for adding/removing
+/// well-known keys). Caller is expected to SidecarReset() first
+/// when doing a full Load.
+bool SidecarRestoreOne(const HiveSnapshot* in);
+
+/// Wipe the entire sidecar pool. Used by RegistryHiveLoad before
+/// re-applying snapshots so a stale entry not in the file gets
+/// dropped.
+void SidecarReset();
+
+} // namespace detail
+
 } // namespace duetos::subsystems::win32::registry

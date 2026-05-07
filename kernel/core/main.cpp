@@ -2842,6 +2842,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::core::SessionRestoreSelfTest());
     duetos::core::SessionRestoreApply();
 
+    // Win32 registry hive: replay any sidecar values the previous
+    // boot wrote (NtSetValueKey / NtDeleteValueKey targets land in
+    // REGISTRY.HIV and are restored here). Self-test runs first so
+    // a regression surfaces before the live load mutates the pool.
+    DUETOS_BOOT_SELFTEST(duetos::subsystems::win32::registry::RegistryHiveSelfTest());
+    duetos::subsystems::win32::registry::RegistryHiveLoad();
+
     // /APPS shortcut enumeration. Creates the directory + a
     // SAMPLE.MNF seed on first boot so the user has a working
     // template to copy. Each *.MNF file becomes an extra entry
