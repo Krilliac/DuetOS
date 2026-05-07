@@ -1605,7 +1605,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     win_a_chrome.x = 60;
     win_a_chrome.y = 60;
     win_a_chrome.w = 300;
-    win_a_chrome.h = 220;
+    // Bumped from 220 to fit the multi-radix preview band that
+    // sits between the main display strip and the 4x4 button grid.
+    win_a_chrome.h = 260;
     const duetos::drivers::video::WindowHandle calc_handle =
         duetos::drivers::video::WindowRegister(win_a_chrome, "CALCULATOR");
     duetos::drivers::video::ThemeRegisterWindow(Role::Calculator, calc_handle);

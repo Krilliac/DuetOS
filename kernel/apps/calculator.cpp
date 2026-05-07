@@ -17,10 +17,12 @@ constexpr char kButtonKeys[kIdCount] = {
 };
 
 // Grid layout inside the calculator window. Numbers are
-// offsets from the window origin; the chrome's title bar
-// takes up the first ~28 pixels and the display takes up the
-// next ~32, so the button grid starts at y = kGridTopOffset.
-constexpr u32 kGridTopOffset = 60;
+// offsets from the window origin; the chrome's title bar takes
+// the first 22 pixels, the display + multi-radix preview
+// occupies ~64 pixels of client area below it, so the button
+// grid sits at window-y kGridTopOffset = 100 (= 22 + 4 + 28 +
+// 4 + 28 + 14 px gap).
+constexpr u32 kGridTopOffset = 100;
 constexpr u32 kGridLeftOffset = 8;
 constexpr u32 kBtnW = 68;
 constexpr u32 kBtnH = 36;
@@ -595,6 +597,132 @@ void DispatchKey(char k)
 // painted by WidgetDrawAll — the compositor calls that after
 // each window's content-draw, so they appear on top of the
 // client fill naturally.
+// Format `v` as unsigned hex into `out`. `width` must be >= 18
+// (covers "0x" + 16 hex digits + NUL). Negative values are
+// rendered via two's-complement bit pattern, mirroring how every
+// programmer calculator surfaces signed -1 as 0xFFFF...FFFF.
+void FmtHex(i64 v, char* out, u32 width)
+{
+    if (width < 19)
+    {
+        if (width > 0)
+            out[0] = '\0';
+        return;
+    }
+    out[0] = '0';
+    out[1] = 'x';
+    u64 u = static_cast<u64>(v);
+    bool nonzero = false;
+    u32 o = 2;
+    for (i32 i = 60; i >= 0; i -= 4)
+    {
+        const u32 nib = static_cast<u32>((u >> static_cast<u32>(i)) & 0xFu);
+        if (nib != 0 || nonzero || i == 0)
+        {
+            nonzero = true;
+            out[o++] = (nib < 10) ? static_cast<char>('0' + nib) : static_cast<char>('A' + nib - 10);
+        }
+    }
+    out[o] = '\0';
+}
+
+// Format `v` as unsigned binary into `out`. Drops leading zeros
+// down to the minimum, then caps the prefix at 16 bits — values
+// past 0xFFFF render as e.g. "0b1...1010101" so the strip
+// doesn't overflow.
+void FmtBin(i64 v, char* out, u32 width)
+{
+    if (width < 4)
+    {
+        if (width > 0)
+            out[0] = '\0';
+        return;
+    }
+    u64 u = static_cast<u64>(v);
+    out[0] = '0';
+    out[1] = 'b';
+    u32 o = 2;
+    // Determine the highest set bit (also handles v == 0 -> "0").
+    i32 hi = -1;
+    for (i32 i = 63; i >= 0; --i)
+    {
+        if ((u >> static_cast<u32>(i)) & 1ull)
+        {
+            hi = i;
+            break;
+        }
+    }
+    if (hi < 0)
+    {
+        out[o++] = '0';
+        out[o] = '\0';
+        return;
+    }
+    // If the value fits in 16 bits, render it in full. Otherwise
+    // emit a "1...XXXXXXXXXXXXXXXX" elision so the high portion
+    // is implied without exceeding ~22 chars.
+    if (hi < 16)
+    {
+        for (i32 i = hi; i >= 0; --i)
+        {
+            const u64 b = (u >> static_cast<u32>(i)) & 1ull;
+            if (o + 1 < width)
+                out[o++] = b ? '1' : '0';
+        }
+    }
+    else
+    {
+        // High bit + ellipsis + low 16 bits.
+        if (o + 5 < width)
+        {
+            out[o++] = '1';
+            out[o++] = '.';
+            out[o++] = '.';
+            out[o++] = '.';
+        }
+        for (i32 i = 15; i >= 0; --i)
+        {
+            const u64 b = (u >> static_cast<u32>(i)) & 1ull;
+            if (o + 1 < width)
+                out[o++] = b ? '1' : '0';
+        }
+    }
+    out[o] = '\0';
+}
+
+// Format `v` as unsigned octal into `out`. Width >= 24 covers
+// "0o" + 22 octal digits + NUL (i64 fits in 22 octal digits
+// when interpreted unsigned).
+void FmtOct(i64 v, char* out, u32 width)
+{
+    if (width < 25)
+    {
+        if (width > 0)
+            out[0] = '\0';
+        return;
+    }
+    out[0] = '0';
+    out[1] = 'o';
+    u64 u = static_cast<u64>(v);
+    if (u == 0)
+    {
+        out[2] = '0';
+        out[3] = '\0';
+        return;
+    }
+    char tmp[24];
+    u32 n = 0;
+    while (u > 0 && n < sizeof(tmp))
+    {
+        tmp[n++] = static_cast<char>('0' + (u & 0x7));
+        u >>= 3;
+    }
+    u32 o = 2;
+    while (n > 0 && o + 1 < width)
+        out[o++] = tmp[--n];
+    out[o] = '\0';
+}
+
 void DrawFn(u32 cx, u32 cy, u32 cw, u32 /*ch*/, void* /*cookie*/)
 {
     using duetos::drivers::video::FramebufferDrawRect;
@@ -610,8 +738,14 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 /*ch*/, void* /*cookie*/)
     constexpr u32 kDisplayBg = 0x00202830;
     constexpr u32 kDisplayFg = 0x0080F088;
     constexpr u32 kDisplayBorder = 0x00081018;
-    FramebufferFillRect(x, y, w, kDisplayH, kDisplayBg);
-    FramebufferDrawRect(x, y, w, kDisplayH, kDisplayBorder, 1);
+    constexpr u32 kAuxFg = 0x0060B0E0; // muted blue for the multi-radix line
+    // Two-row display strip: top is the main right-aligned number,
+    // bottom row holds the multi-radix preview (hex / bin / oct).
+    // Filling both bands with kDisplayBg keeps the aux line's per-
+    // character background tone-matched to the strip.
+    constexpr u32 kAuxBandH = 28; // 2 lines of 12 px + a 4 px top gap
+    FramebufferFillRect(x, y, w, kDisplayH + kAuxBandH, kDisplayBg);
+    FramebufferDrawRect(x, y, w, kDisplayH + kAuxBandH, kDisplayBorder, 1);
     // Memory indicator: small "M" in the top-left of the display
     // strip when the register has a non-zero value. Painted before
     // the right-aligned number so it doesn't get pushed off-screen
@@ -631,6 +765,44 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 /*ch*/, void* /*cookie*/)
     const u32 text_x = (text_w + 12 < w) ? x + w - text_w - 6 : x + 4;
     const u32 text_y = y + (kDisplayH > 8 ? (kDisplayH - 8) / 2 : 0);
     FramebufferDrawString(text_x, text_y, s, kDisplayFg, kDisplayBg);
+
+    // Multi-radix preview line — sits in the gap between the
+    // display strip and the button grid (kGridTopOffset = 60,
+    // display strip extends to y = kDisplayPadY + kDisplayH = 32,
+    // leaving ~28 vertical px of gap). Skips paint when the
+    // value would be pure noise (error state).
+    if (!g_state.error)
+    {
+        const i64 v = ReadDisplayAsI64();
+        char hex_buf[24];
+        char bin_buf[28];
+        char oct_buf[28];
+        FmtHex(v, hex_buf, sizeof(hex_buf));
+        FmtBin(v, bin_buf, sizeof(bin_buf));
+        FmtOct(v, oct_buf, sizeof(oct_buf));
+        const u32 aux_y = y + kDisplayH + 4;
+        // Two rows: hex on top right-aligned with the main
+        // display, bin + oct on the lower row. Keeps total
+        // height within the 28 px gap.
+        u32 hlen = 0;
+        while (hex_buf[hlen] != '\0')
+            ++hlen;
+        const u32 hx = (hlen * 8 + 12 < w) ? x + w - hlen * 8 - 6 : x + 4;
+        FramebufferDrawString(hx, aux_y, hex_buf, kAuxFg, kDisplayBg);
+        // Bin + oct sit below hex on the same row, separated
+        // by spaces. Both pushed to the right edge.
+        char low[60];
+        u32 lo = 0;
+        for (u32 i = 0; bin_buf[i] != '\0' && lo + 1 < sizeof(low); ++i)
+            low[lo++] = bin_buf[i];
+        low[lo++] = ' ';
+        low[lo++] = ' ';
+        for (u32 i = 0; oct_buf[i] != '\0' && lo + 1 < sizeof(low); ++i)
+            low[lo++] = oct_buf[i];
+        low[lo] = '\0';
+        const u32 lx = (lo * 8 + 12 < w) ? x + w - lo * 8 - 6 : x + 4;
+        FramebufferDrawString(lx, aux_y + 12, low, kAuxFg, kDisplayBg);
+    }
 }
 
 } // namespace
