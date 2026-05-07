@@ -45,6 +45,8 @@ constinit PerCpu g_bsp_percpu = {
     .runq_head_idle = nullptr,
     .runq_tail_idle = nullptr,
     .tss = nullptr,
+    .cluster_id = 0,
+    ._pad_topo = {},
 };
 
 // One-shot flag so CurrentCpuIdOrBsp can return a sane value before

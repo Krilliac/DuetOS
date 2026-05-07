@@ -68,6 +68,12 @@ u32 AllocateFreeCluster(const Volume& v)
     const u32 hard_cap = max_fat_entries < 1000000u ? max_fat_entries : 1000000u;
     for (u32 cluster = 2; cluster < hard_cap; ++cluster)
     {
+        // Some tiny fixture images leave the root directory cluster's
+        // FAT entry clear even though the BPB names it as live. Never
+        // hand it out as file data; doing so aliases file writes over
+        // the root directory and corrupts later directory walks.
+        if (cluster == v.root_cluster)
+            continue;
         const u32 byte_off = cluster * 4;
         const u32 sec_off = byte_off / v.bytes_per_sector;
         const u32 byte_in_sec = byte_off % v.bytes_per_sector;
@@ -107,6 +113,7 @@ bool ZeroCluster(const Volume& v, u32 cluster)
 // Separate from WalkDirChain because it exposes the on-disk
 // address, which WalkDirChain intentionally hides.
 using OnDiskSfnVisitor = bool (*)(u64 sector_lba, u32 off_in_sec, const u8* raw, const DirEntry& e, void* ctx);
+
 
 bool WalkDirOnDisk(const Volume& v, u32 first_cluster, OnDiskSfnVisitor visit, void* ctx)
 {
@@ -480,6 +487,8 @@ using namespace internal_write;
 namespace
 {
 
+bool FindEntryLbaInDir(const Volume& v, u32 first_cluster, const char* want, u64* out_lba, u32* out_off);
+
 // Find a root-directory entry by name and patch its 32-bit size
 // field (bytes 28..31) with the new value, then write the
 // containing sector back. Returns true on success, false on miss
@@ -489,69 +498,24 @@ bool UpdateEntrySizeInDir(const Volume& v, u32 first_cluster, const char* want, 
 {
     KDBG_3V(Fat32Walker, "fs/fat32", "UpdateEntrySizeInDir enter", "first_cluster", first_cluster, "want_first_byte",
             want != nullptr ? static_cast<u64>(static_cast<u8>(want[0])) : 0u, "new_size", new_size);
-    u32 cluster = first_cluster;
-    // Bounded like the other walkers — 64 clusters covers any
-    // realistic directory.
-    for (u32 step = 0; step < 64; ++step)
+
+    u64 lba = 0;
+    u32 off = 0;
+    if (!FindEntryLbaInDir(v, first_cluster, want, &lba, &off))
     {
-        if (cluster < 2 || cluster >= 0x0FFFFFF8u)
-        {
-            KDBG_2V(Fat32Walker, "fs/fat32", "walk halt", "step", step, "cluster", cluster);
-            return false;
-        }
-        const u32 bytes = v.sectors_per_cluster * v.bytes_per_sector;
-        // Read the cluster one sector at a time so we can find the
-        // entry, patch it in the scratch copy, and write JUST that
-        // sector back. Whole-cluster write would be wasteful and
-        // risk clobbering a concurrent writer's scratch staging
-        // (though v0 is single-threaded on the shell path).
-        for (u32 sec = 0; sec < v.sectors_per_cluster; ++sec)
-        {
-            const u64 lba = u64(v.data_start_sector) + u64(cluster - 2) * u64(v.sectors_per_cluster) + sec;
-            const i32 rd_rc = drivers::storage::BlockDeviceRead(v.block_handle, lba, 1, g_scratch);
-            KDBG_4V(Fat32Walker, "fs/fat32", "post-read", "lba", lba, "rd_rc", static_cast<u64>(rd_rc), "g0",
-                    static_cast<u64>(g_scratch[0]), "g32", static_cast<u64>(g_scratch[32]));
-            if (rd_rc != 0)
-                return false;
-            const u32 bytes_in_sec = v.bytes_per_sector;
-            for (u32 off = 0; off + 32 <= bytes_in_sec; off += 32)
-            {
-                const u8* e = g_scratch + off;
-                KDBG_3V(Fat32Walker, "fs/fat32", "visit", "off", off, "e0", static_cast<u64>(e[0]), "e11",
-                        static_cast<u64>(e[11]));
-                if (e[0] == 0x00)
-                    return false; // end of dir — not found
-                if (e[0] == 0xE5)
-                    continue;
-                const u8 attr = e[11];
-                if ((attr & kAttrLongName) == kAttrLongName)
-                    continue;
-                if (attr & kAttrVolumeId)
-                    continue;
-                DirEntry decoded;
-                DecodeEntry(e, decoded);
-                if (IsDotEntry(decoded.name))
-                    continue;
-                KDBG_S(Fat32Walker, "fs/fat32", "entry", "name", decoded.name);
-                // Match on the SFN only — LFN matching would need
-                // us to accumulate fragments here too, which v0
-                // append doesn't need (HELLO.TXT in the self-test
-                // has no LFN). Upgrade when a long-named callee
-                // needs resize.
-                if (NameIEqual(decoded.name, want))
-                {
-                    g_scratch[off + 28] = static_cast<u8>(new_size & 0xFF);
-                    g_scratch[off + 29] = static_cast<u8>((new_size >> 8) & 0xFF);
-                    g_scratch[off + 30] = static_cast<u8>((new_size >> 16) & 0xFF);
-                    g_scratch[off + 31] = static_cast<u8>((new_size >> 24) & 0xFF);
-                    return drivers::storage::BlockDeviceWrite(v.block_handle, lba, 1, g_scratch) == 0;
-                }
-            }
-            (void)bytes;
-        }
-        cluster = ReadFatEntry(v, cluster);
+        return false;
     }
-    return false;
+
+    if (drivers::storage::BlockDeviceRead(v.block_handle, lba, 1, g_scratch) != 0)
+    {
+        return false;
+    }
+
+    g_scratch[off + 28] = static_cast<u8>(new_size & 0xFF);
+    g_scratch[off + 29] = static_cast<u8>((new_size >> 8) & 0xFF);
+    g_scratch[off + 30] = static_cast<u8>((new_size >> 16) & 0xFF);
+    g_scratch[off + 31] = static_cast<u8>((new_size >> 24) & 0xFF);
+    return drivers::storage::BlockDeviceWrite(v.block_handle, lba, 1, g_scratch) == 0;
 }
 
 // Find the sector LBA + offset of the root-dir SFN entry whose
@@ -583,8 +547,11 @@ bool FindEntryLbaInDir(const Volume& v, u32 first_cluster, const char* want, u64
             return true;
         },
         &ctx);
-    if (!walk_ok || !ctx.found)
+    if (!ctx.found)
+    {
+        (void)walk_ok;
         return false;
+    }
     *out_lba = ctx.lba;
     *out_off = ctx.off;
     return true;

@@ -49,11 +49,6 @@ namespace duetos::subsystems::translation
 namespace
 {
 
-// Subset of errno we hand back. Match Linux's values so callers
-// see consistent numbers regardless of which path they came in
-// through.
-constexpr i64 kEFAULT = -14;
-
 // NTSTATUS values we produce for the NT→Linux translator. Only
 // the handful we actually need; Windows defines many more.
 //   STATUS_SUCCESS              (0)          — fall-through success
@@ -314,6 +309,8 @@ void LogMiss(const char* origin, arch::TrapFrame* f, const char* name)
 // has dense spec coverage). Wrap in #if 0 so the unused-function
 // warning stays quiet; keep as reference until next refactor.
 #if 0
+constexpr i64 kEFAULT = -14;
+
 // umask(mask) — returns the OLD umask. Linux-standard default is
 // 022. We have no permission model so nothing actually enforces
 // it; the value is purely for compat with programs that track +

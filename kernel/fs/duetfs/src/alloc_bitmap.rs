@@ -142,7 +142,12 @@ impl BitmapAllocator
     /// mark_used range. Returns the first LBA on success.
     pub fn alloc_run(&mut self, n: u32) -> Option<u32>
     {
-        self.alloc_run_with_pinned(n, None)
+        let start = self.find_run(n)?;
+        for i in 0..n
+        {
+            self.mark_used(start + i);
+        }
+        Some(start)
     }
 
     /// Snapshot-aware variant — skips blocks set in `pinned`.

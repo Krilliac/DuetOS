@@ -337,14 +337,6 @@ u32 WriteContextX64(Cursor& c, const ContextRegs& r)
     return rva;
 }
 
-// Write a MINIDUMP_DIRECTORY entry.
-void WriteDirEntry(Cursor& c, u32 type, u32 size, u32 rva)
-{
-    c.WriteU32(type);
-    c.WriteU32(size);
-    c.WriteU32(rva);
-}
-
 // Write SystemInfoStream body (56 bytes total).
 u32 WriteSystemInfoStream(Cursor& c)
 {
@@ -686,7 +678,6 @@ u64 BuildMinidumpInto(const ContextRegs& regs, u32 exception_code)
 
     // ---------- Phase 5: back-patch the directory ----------
     {
-        Cursor d;
         // Treat the directory as if we were rewriting from offset
         // `directory_rva`. The simplest approach: directly
         // mutate the static buffer at the pre-known offset.

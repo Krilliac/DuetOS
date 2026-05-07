@@ -1238,6 +1238,7 @@ void HandlePacket()
                 //         addresses outside .text)
                 //   E15 — bad kind/len combo
                 //   E16 — multi-CPU install rejected
+                //   E17 — target lies in a debugger-unsafe kernel zone
                 const char* err_code = "E11";
                 switch (berr)
                 {
@@ -1255,6 +1256,9 @@ void HandlePacket()
                     break;
                 case debug::BpError::SmpUnsupported:
                     err_code = "E16";
+                    break;
+                case debug::BpError::UnsafeZone:
+                    err_code = "E17";
                     break;
                 case debug::BpError::None:
                 case debug::BpError::NotInstalled:

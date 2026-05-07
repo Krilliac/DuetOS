@@ -164,6 +164,7 @@ bool NotifyCenterFeedArrow(duetos::u16 keycode)
 
 void NotifyCenterOnWheel(duetos::i32 dz, duetos::u8 modifiers)
 {
+    (void)modifiers;
     const u16 key = (dz > 0) ? duetos::drivers::input::kKeyArrowUp : duetos::drivers::input::kKeyArrowDown;
     const i32 steps = (dz > 0) ? dz : -dz;
     for (i32 i = 0; i < steps; ++i)

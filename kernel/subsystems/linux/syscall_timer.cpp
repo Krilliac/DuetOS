@@ -77,7 +77,6 @@ void NsToTimevalParts(u64 ns, i64& sec, i64& usec)
 }
 
 constexpr u64 kItimerReal = 0;
-constexpr u64 kItimerVirtual = 1;
 constexpr u64 kItimerProf = 2;
 
 } // namespace

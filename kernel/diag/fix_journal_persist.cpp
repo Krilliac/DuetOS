@@ -45,6 +45,8 @@ struct FixFileHeader
 };
 static_assert(sizeof(FixFileHeader) == 16, "FixFileHeader is part of the on-disk format");
 
+u8 g_file_scratch[sizeof(FixFileHeader) + kFixJournalCapacity * sizeof(FixRecord)] = {};
+
 // Build "KERNEL.F<digit>" into `out`. Caller-supplied buffer must
 // hold at least 11 bytes ("KERNEL.F" + 1 digit + NUL).
 void FormatRotPath(char* out, u32 idx)
@@ -113,15 +115,8 @@ bool WriteRingSnapshot(const fs::fat32::Volume* v)
 {
     namespace fat = fs::fat32;
 
-    // Snapshot the ring into a stack buffer. kFixJournalCapacity *
-    // sizeof(FixRecord) = 128 KiB which is larger than a typical
-    // kernel stack — so we walk in chunks. Each chunk fits within
-    // 4 KiB.
-    constexpr u64 kChunkRecords = 32; // 32 * 128 = 4 KiB
-    FixRecord chunk[kChunkRecords];
-
-    // First a header-only create. If a prior flush left the file
-    // around (mid-boot rewrite), delete it first so size is exact.
+    // If a prior flush left the file around (mid-boot rewrite),
+    // delete it first so size is exact.
     fat::DirEntry pre;
     if (fat::Fat32LookupPath(v, kFixJournalPath, &pre))
     {
@@ -140,39 +135,34 @@ bool WriteRingSnapshot(const fs::fat32::Volume* v)
     hdr.record_count = static_cast<u32>(n);
     hdr.reserved = 0;
 
-    // Create with header bytes; if this fails the file isn't on
-    // disk and the next flush will retry.
-    if (fat::Fat32CreateAtPath(v, kFixJournalPath, &hdr, sizeof(hdr)) < 0)
+    // Build one contiguous payload and create the file in a single
+    // FAT operation. This keeps the periodic heartbeat flush from
+    // repeatedly extending the cluster chain and then patching the
+    // directory size field, which is both slower and easier to leave
+    // inconsistent if a later append fails. g_snapshot_scratch[] is
+    // most-recent-first; the on-disk file is oldest-first so a
+    // streaming reader sees monotonically increasing sequence order.
+    auto* file = g_file_scratch;
+    for (u64 i = 0; i < sizeof(hdr); ++i)
     {
-        KLOG_WARN("diag/fix-journal-persist", "create KERNEL.FIX failed");
+        file[i] = reinterpret_cast<const u8*>(&hdr)[i];
+    }
+    for (u64 i = 0; i < n; ++i)
+    {
+        const FixRecord& rec = g_snapshot_scratch[n - 1 - i];
+        const auto* src = reinterpret_cast<const u8*>(&rec);
+        u8* dst = file + sizeof(hdr) + i * sizeof(FixRecord);
+        for (u64 j = 0; j < sizeof(FixRecord); ++j)
+        {
+            dst[j] = src[j];
+        }
+    }
+
+    const u64 file_len = sizeof(hdr) + n * sizeof(FixRecord);
+    if (fat::Fat32CreateAtPath(v, kFixJournalPath, file, file_len) < 0)
+    {
+        KLOG_WARN("diag/fix-journal-persist", "create KERNEL.FIX payload failed");
         return false;
-    }
-
-    if (n == 0)
-    {
-        // Header-only is a valid, empty snapshot.
-        return true;
-    }
-
-    // Append records oldest-first. all[0] is the most recent;
-    // walk it in reverse to land oldest first.
-    u64 written = 0;
-    while (written < n)
-    {
-        const u64 remaining = n - written;
-        const u64 this_chunk = (remaining > kChunkRecords) ? kChunkRecords : remaining;
-        for (u64 i = 0; i < this_chunk; ++i)
-        {
-            // g_snapshot_scratch[] is most-recent-first. Index
-            // `n - 1 - (written + i)` gives oldest-first.
-            chunk[i] = g_snapshot_scratch[n - 1 - (written + i)];
-        }
-        if (fat::Fat32AppendAtPath(v, kFixJournalPath, chunk, this_chunk * sizeof(FixRecord)) < 0)
-        {
-            KLOG_WARN_V("diag/fix-journal-persist", "append failed at record", written);
-            return false;
-        }
-        written += this_chunk;
     }
     return true;
 }

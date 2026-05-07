@@ -28,7 +28,6 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use xts_mode::Xts128;
 
 pub const XTS_KEY_BYTES: usize = 64; // 32 data + 32 tweak
-pub const SALT_BYTES: usize = 16;
 pub const SECTOR_BYTES: usize = 4096; // matches BLOCK_SIZE
 
 /// Build an XTS context from a 64-byte key. The first 32 bytes are
@@ -95,11 +94,3 @@ pub fn argon2id_kdf(
     out_key.copy_from_slice(&buf);
     true
 }
-
-/// Default Argon2id cost parameters used by `mkfs_encrypted` when
-/// the caller doesn't override. Tuned for "fits the kernel heap +
-/// completes within ~100 ms on a 2 GHz core". A future slice
-/// surfaces an interactive cost-tuner.
-pub const DEFAULT_KDF_M_COST_KIB: u32 = 4096; // 4 MiB
-pub const DEFAULT_KDF_T_COST: u32 = 3;
-pub const DEFAULT_KDF_P_COST: u32 = 1;

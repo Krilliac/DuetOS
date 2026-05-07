@@ -388,7 +388,6 @@ bool HidExtractMouseLayout(const u8* buf, u32 len, HidMouseLayout* out)
     LocalUsageList locals{};
     LocalUsageReset(locals);
     u32 usage_min_page = 0;
-    u32 usage_min_id = 0;
     bool have_usage_min = false;
 
     // Logical-min is signed if it's negative — HID encodes it as a
@@ -487,7 +486,6 @@ bool HidExtractMouseLayout(const u8* buf, u32 len, HidMouseLayout* out)
             }
             case kLocalUsageMin:
                 usage_min_page = gs.usage_page;
-                usage_min_id = data_u;
                 have_usage_min = true;
                 break;
             case kLocalUsageMax_Tag:
