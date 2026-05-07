@@ -48,6 +48,7 @@
 #include "log/klog.h"
 #include "core/panic.h"
 #include "security/fault_domain.h"
+#include "util/symbols.h"
 
 // __stack_chk_guard symbol is C-linkage.
 extern "C" duetos::u64 __stack_chk_guard;
@@ -1002,7 +1003,11 @@ bool CheckAttackSimVtable()
             arch::SerialWrite("[health] saved RIP outside .text: frame=");
             arch::SerialWriteHex(i);
             arch::SerialWrite(" rip=");
-            arch::SerialWriteHex(saved_rip);
+            // The whole point of this check is "this looks corrupt";
+            // resolve + classify so the operator sees what KIND of
+            // corruption (sentinel cast, all-ones, NULL, or just
+            // "in some other kernel region") on the same line.
+            ::duetos::core::WriteAddressWithSymbol(saved_rip);
             arch::SerialWrite("\n");
             Report(HealthIssue::TaskStackRipCorrupt);
             return false;

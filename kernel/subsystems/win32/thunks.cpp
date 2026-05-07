@@ -382,18 +382,18 @@ constexpr u32 kOffPErrno = 0x10BF;      // 6 bytes — returns ptr to errno scra
 constexpr u32 kOffChkStk = 0x10C5;              // 53 bytes — page probe loop
 constexpr u32 kOffSetAppType = 0x10FA;          // 12 bytes — proc-env app_type slot
 constexpr u32 kOffConfigureNarrowArgv = 0x1106; // 14 bytes — proc-env narrow_argv_mode slot
-constexpr u32 kOffInitOnexitTable = 0x1114;     // 14 bytes — zero user table; proc-env atexit list authoritative
-constexpr u32 kOffCrtAtexit = 0x1122;           // 39 bytes — append rcx to proc-env atexit slots
-constexpr u32 kOffRegisterOnexitFn = 0x1149;    // 39 bytes — append rdx to proc-env atexit slots
-constexpr u32 kOffCexit = 0x1170;               // 61 bytes — walk + call atexit handlers LIFO
-constexpr u32 kOffFreeEnvStringsW = 0x11AD;     // 6 bytes — return TRUE (env block is static)
+constexpr u32 kOffInitOnexitTable = 0x1114;  // 19 bytes — NULL-guarded table zero; proc-env atexit list authoritative
+constexpr u32 kOffCrtAtexit = 0x1127;        // 39 bytes — append rcx to proc-env atexit slots
+constexpr u32 kOffRegisterOnexitFn = 0x114E; // 39 bytes — append rdx to proc-env atexit slots
+constexpr u32 kOffCexit = 0x1175;            // 61 bytes — walk + call atexit handlers LIFO
+constexpr u32 kOffFreeEnvStringsW = 0x11B2;  // 6 bytes — return TRUE (env block is static)
 
 constexpr u8 kThunksBytes[] = {
 #include "subsystems/win32/thunks_bytecode.inc"
 };
 
 static_assert(sizeof(kThunksBytes) <= 8192, "Win32 thunks page fits in two 4 KiB pages");
-static_assert(sizeof(kThunksBytes) == 0x11B3, "thunk layout drifted; update kOff* constants");
+static_assert(sizeof(kThunksBytes) == 0x11B8, "thunk layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The thunk
 // bytes encode 0x65000000 and 0x65000008 directly; if proc_env.h

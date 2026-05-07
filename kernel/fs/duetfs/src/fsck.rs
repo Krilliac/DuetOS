@@ -163,12 +163,16 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
             }
         }
 
-        // Per-block CRC verification. Journal blocks are mutated by
-        // every metadata commit (and the descriptor itself by every
-        // open via replay's clear) — their CRC entries can't track
-        // those updates without doubling the I/O on every write. The
-        // journal's own descriptor CRC + payload CRCs cover its
-        // integrity instead, so skip the journal range here.
+        // Per-block CRC verification. Only checks blocks the
+        // metadata thinks are in use — unallocated blocks have no
+        // CRC entry (table defaults to 0) but their on-disk bytes
+        // are arbitrary, so verifying them produces false mismatches.
+        // Journal blocks are mutated by every metadata commit (and
+        // the descriptor itself by every open via replay's clear) —
+        // their CRC entries can't track those updates without
+        // doubling the I/O on every write. The journal's own
+        // descriptor CRC + payload CRCs cover its integrity instead,
+        // so skip the journal range here.
         let mut buf = [0u8; BLOCK_SIZE];
         for b in 0..self.sb.total_blocks
         {
@@ -187,6 +191,10 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
             {
                 continue;
             }
+            if !want.is_set(b)
+            {
+                continue;
+            }
             self.dev.read_block(b, &mut buf).map_err(|_| FsError::Io)?;
             let want_crc = self.crc_table.get(b).unwrap_or(0);
             let got_crc = crc32(&buf);
@@ -200,6 +208,12 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         {
             self.bitmap = want;
             self.bitmap.flush(self.dev).map_err(|_| FsError::Io)?;
+            self.sb.free_blocks = self.bitmap.free_count();
+            self.sb.sb_crc32 = compute_sb_crc(&self.sb);
+            // Rewrite the SB BEFORE we hash it for the CRC table —
+            // otherwise the entry captures the pre-repair contents
+            // and the next clean pass reports a CRC mismatch.
+            mkfs::rewrite_superblock(self.dev, &self.sb)?;
             // Rebuild every CRC entry by reading + hashing. The
             // journal range tracks its own CRC inside the descriptor
             // — leave its crc_table entries pointing at whatever the
@@ -216,9 +230,6 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
                 self.crc_table.set(b, crc32(&buf));
             }
             self.crc_table.flush(self.dev).map_err(|_| FsError::Io)?;
-            self.sb.free_blocks = self.bitmap.free_count();
-            self.sb.sb_crc32 = compute_sb_crc(&self.sb);
-            mkfs::rewrite_superblock(self.dev, &self.sb)?;
             report.repaired = 1;
         }
 

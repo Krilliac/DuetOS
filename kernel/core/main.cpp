@@ -310,11 +310,41 @@ namespace
 // because TtfChromeFontSet stores a borrowed pointer.
 constinit duetos::drivers::video::TtfFont g_chrome_font_storage{};
 
+// Cached copy of the boot cmdline. Populated on the first
+// FindBootCmdline call that resolves a non-null string while the
+// Multiboot2 info struct is still reachable through the low
+// identity map (early boot, before MmFinalizePaging tears that
+// map down). Later callers — KbdReader / ui-ticker setup at
+// kernel_main+~4300, the `idlelock=<seconds>` parser, anything
+// running after the heavy boot phases — read from this cache
+// instead of re-walking the original info buffer at the now-
+// unmapped low VA.
+//
+// 4 KiB is well over Multiboot2's per-tag size for cmdline (the
+// loader caps it at 1 KiB on every implementation we've
+// surveyed); a longer string truncates with a trailing NUL
+// rather than corrupting adjacent data.
+constinit char g_boot_cmdline_cache[4096] = {};
+constinit bool g_boot_cmdline_cached = false;
+
 // Walk the Multiboot2 tag list for type-1 (boot cmdline) and
-// return its NUL-terminated string, or nullptr if absent. The
-// pointer is into the live info struct; do not free.
+// return its NUL-terminated string, or nullptr if absent.
+//
+// Caches the result on first success: subsequent calls hand back
+// the cached copy without dereferencing `info_phys`. This is
+// required because `info_phys` is the LOW identity-mapped address
+// the boot loader handed us, and that mapping disappears once
+// MmFinalizePaging tears the early page tables down. A late-boot
+// caller passing the same `info_phys` would page-fault inside
+// this function (observed in CI as `arch/traps msg="#PF Page
+// fault" cr2=0x92000` at FindBootCmdline+0x40, with the bringup
+// smoke crashing right after `[bringup-tail] kbd-reader spawned`).
 const char* FindBootCmdline(duetos::uptr info_phys)
 {
+    if (g_boot_cmdline_cached)
+    {
+        return g_boot_cmdline_cache[0] != '\0' ? g_boot_cmdline_cache : nullptr;
+    }
     if (info_phys == 0)
     {
         return nullptr;
@@ -332,10 +362,26 @@ const char* FindBootCmdline(duetos::uptr info_phys)
         if (tag->type == duetos::mm::kMultibootTagCmdline)
         {
             // String starts right after the 8-byte {type, size} header.
-            return reinterpret_cast<const char*>(cursor + sizeof(duetos::mm::MultibootTagHeader));
+            const char* src = reinterpret_cast<const char*>(cursor + sizeof(duetos::mm::MultibootTagHeader));
+            // Copy into the cache so callers after MmFinalizePaging
+            // still have a valid pointer. Truncate at the buffer
+            // size minus 1 to keep the trailing NUL.
+            duetos::usize i = 0;
+            while (i + 1 < sizeof(g_boot_cmdline_cache) && src[i] != '\0')
+            {
+                g_boot_cmdline_cache[i] = src[i];
+                ++i;
+            }
+            g_boot_cmdline_cache[i] = '\0';
+            g_boot_cmdline_cached = true;
+            return g_boot_cmdline_cache;
         }
         cursor += (tag->size + 7u) & ~duetos::uptr{7};
     }
+    // No cmdline tag — record the absence so a re-call short-
+    // circuits without re-walking the (potentially-unmapped) info.
+    g_boot_cmdline_cache[0] = '\0';
+    g_boot_cmdline_cached = true;
     return nullptr;
 }
 
@@ -2914,6 +2960,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // Metrics checkpoint: everything above is bringup overhead; what
     // the system consumes from here on is steady-state.
     KLOG_METRICS("boot", "bringup-complete");
+    SerialWrite("[bringup-tail] post-metrics\n");
 
     // Sanity-check the tmpfs log sink — by now enough Info+ lines
     // have fired that /tmp/boot.log should be at its 512-byte cap.
@@ -4328,6 +4375,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         }
     };
     duetos::sched::SchedCreate(kbd_reader, nullptr, "kbd-reader");
+    SerialWrite("[bringup-tail] kbd-reader spawned\n");
 
     // Idle-timeout auto-lock watcher. Wakes once a second and
     // calls LoginLock when the active session has been idle past
@@ -4450,6 +4498,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         }
     };
     duetos::sched::SchedCreate(ui_ticker, nullptr, "ui-ticker");
+    SerialWrite("[bringup-tail] ui-ticker spawned\n");
 
     // Mouse reader thread: blocks on Ps2MouseReadPacket, prints one
     // line per decoded packet. Same end-to-end closure the keyboard
@@ -5693,6 +5742,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         }
     };
     duetos::sched::SchedCreate(mouse_reader, nullptr, "mouse-reader");
+    SerialWrite("[bringup-tail] mouse-reader spawned\n");
 
     // Win32 timer ticker: walks the per-window timer table every
     // scheduler tick (10 ms) and posts WM_TIMER when a timer

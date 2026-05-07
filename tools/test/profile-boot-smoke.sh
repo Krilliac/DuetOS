@@ -214,8 +214,21 @@ if [[ $fail -ne 0 ]]; then
     done
     echo "=== last 200 lines of serial log (${SERIAL_LOG}) ==="
     tail -200 "${SERIAL_LOG}" || true
-    echo "=== smoke marker grep: any [smoke] / [boot] >>>/<<< / [panic] lines ==="
-    grep -aE '^\[smoke\]|^\[boot\] >>>|^\[boot\] <<<|^\[panic\]|DUETOS CRASH' "${SERIAL_LOG}" || true
+    echo "=== smoke marker grep: any [smoke] / [boot] >>>/<<< / [bringup-tail] / [panic] / [panic-summary] lines ==="
+    grep -aE '^\[smoke\]|^\[boot\] >>>|^\[boot\] <<<|^\[bringup-tail\]|^\[panic\]|^\[panic-summary\]|DUETOS CRASH' "${SERIAL_LOG}" || true
+    # Crash-dump header fields (subsystem / message / value / vector
+    # / rip / cr2 / reason). These lines are 2-space-indented inside
+    # the `=== DUETOS CRASH DUMP ===` bracket, so the marker grep
+    # above misses them. When a verbose post-panic dump (wifi-diag
+    # ring, log ring, peer-CPU snapshots, etc.) crowds out the
+    # `tail -200` window, these extracted fields stay readable in
+    # CI even when the rest of the dump has scrolled off-screen.
+    echo "=== crash dump header fields ==="
+    grep -aE '^  (subsystem|message  |value    |vector    |vector_name|rip       |cs        |rsp       |cr2       |reason    |rip      |rsp      |rbp      |task     |pid       )[ ]*: ' "${SERIAL_LOG}" | head -25 || true
+    # Crash-analysis banner the kernel emits when the faulting RIP
+    # is recognisably wild — the banner spells out the likely root
+    # cause + next-step checklist (see kernel/util/symbols.cpp).
+    grep -aE '^  \[!\] crash analysis|^      hint   :|^      cause\? :|^      next   :' "${SERIAL_LOG}" || true
     echo "=== expected signature presence map ==="
     for sig in "${expected[@]}"; do
         if grep -aF "$sig" "${SERIAL_LOG}" > /dev/null; then

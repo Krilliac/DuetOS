@@ -86,9 +86,41 @@ u64 SymbolTableSize();
 void WriteResolvedAddress(const SymbolResolution& resolution);
 
 /// Resolve + emit the decorated form `<hex>  [name+0xOFF (file:line)]`.
-/// Fallback: if the address cannot be resolved, emits only `<hex>`.
+/// Fallback: if the address cannot be resolved, emits only `<hex>` —
+/// plus a `[wild: …]` hint when the value matches a known sentinel
+/// pattern (all-ones / u32-sentinel / null / classic uninit fill).
 /// Used by the panic path so every address in the dump is annotated
 /// where possible.
 void WriteAddressWithSymbol(u64 addr);
+
+/// Classify a value that doesn't symbolize as a known sentinel /
+/// uninitialized pattern. Returns a stable short string when the
+/// pattern is recognised (e.g. "all-ones — likely corrupted RIP")
+/// or nullptr when no useful classification applies. Allocation-free,
+/// safe from any context.
+///
+/// The intended consumer is the trap / panic dump path: when an
+/// address fails symbol resolution and falls outside any plausible
+/// kernel region, knowing it's e.g. `0x00000000FFFFFFFF` (a u32 -1
+/// sentinel cast to a pointer) instantly explains the crash without
+/// the operator having to memorise the project's sentinel values.
+const char* ClassifyWildAddress(u64 value);
+
+/// Convenience: emit `  [wild: <hint>]` to serial iff
+/// `ClassifyWildAddress` returns a non-null hint. Caller does NOT
+/// pre-emit a separator. No trailing newline.
+void WriteWildAddressHint(u64 value);
+
+/// Multi-line crash-analysis banner emitted at the top of a trap /
+/// panic dump when the faulting RIP itself is recognisably wild.
+/// Distinct from the single-line `[wild: …]` hint: this writes a
+/// prominent `[!] crash analysis:` block with concrete next steps
+/// the operator should take (walk the backtrace, look for the
+/// stack-overflow guard line, etc.). No-op when RIP looks valid
+/// — the regular RIP line already carries the symbol or wild hint.
+///
+/// Safe in trap context: allocation-free, no locks, single-pass
+/// serial writes only.
+void WriteCrashAnalysisBanner(u64 rip);
 
 } // namespace duetos::core

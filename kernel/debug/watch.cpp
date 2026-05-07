@@ -133,7 +133,7 @@ void OnHit(BreakpointId id, ::duetos::arch::TrapFrame* frame)
         arch::SerialWrite("[watch] HIT (unknown id=");
         arch::SerialWriteHex(static_cast<u64>(id.value));
         arch::SerialWrite(") rip=");
-        arch::SerialWriteHex(frame != nullptr ? frame->rip : 0);
+        ::duetos::core::WriteAddressWithSymbol(frame != nullptr ? frame->rip : 0);
         arch::SerialWrite("\n");
         return;
     }

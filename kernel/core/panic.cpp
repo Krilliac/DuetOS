@@ -136,6 +136,10 @@ void WriteLabelledVa(const char* label, u64 value)
     arch::SerialWrite(" : ");
     arch::SerialWriteHex(value);
     WriteVaRegion(value);
+    // Sentinel/uninit hint so e.g. `cr2 : 0xFFFFFFFFFFFFFFFF
+    // [region=k.directmap] [wild: all-ones — wild branch / …]`
+    // explains the value in plain text on the dump line itself.
+    WriteWildAddressHint(value);
     arch::SerialWrite("\n");
 }
 
@@ -583,6 +587,22 @@ void DumpHeldLocksLocal()
 void BeginCrashDump(const char* subsystem, const char* message, const u64* optional_value)
 {
     arch::SerialWrite("\n");
+    // Single-line summary BEFORE the verbose dump so CI's
+    // tail-200-lines truncation can't bury the actual reason.
+    // Grep-friendly fixed shape — a parser can read everything
+    // after `subsystem=` up to the first space, and everything
+    // between the surrounding double-quotes for the message.
+    arch::SerialWrite("[panic-summary] subsystem=");
+    arch::SerialWrite(subsystem != nullptr ? subsystem : "<null>");
+    arch::SerialWrite(" msg=\"");
+    arch::SerialWrite(message != nullptr ? message : "<null>");
+    arch::SerialWrite("\"");
+    if (optional_value != nullptr)
+    {
+        arch::SerialWrite(" value=");
+        arch::SerialWriteHex(*optional_value);
+    }
+    arch::SerialWrite("\n");
     arch::SerialWrite(kDumpBeginMarker);
     WriteLabelled("version  ", kDumpSchemaVersion);
     arch::SerialWrite("  subsystem: ");
@@ -614,6 +634,12 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
     WriteUptimeReadable();
     arch::SerialWrite(" since boot\n");
     DumpTask();
+    // Crash-analysis banner first when the panicking RIP is
+    // recognisably wild (-1, NULL, u32 sentinel) — the trap path
+    // does the same so the operator gets the diagnosis before the
+    // raw register dump regardless of which entry point caught the
+    // failure. No-op for a valid RIP.
+    WriteCrashAnalysisBanner(rip);
     WriteLabelledCode("rip      ", rip);
     WriteLabelledVa("rsp      ", rsp);
     WriteLabelledVa("rbp      ", rbp);

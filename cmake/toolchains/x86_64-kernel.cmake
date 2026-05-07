@@ -56,7 +56,21 @@ set(DUETOS_KERNEL_C_FLAGS
     # endbr64 is a NOP on pre-CET CPUs, so this is safe to emit
     # unconditionally; the protection activates only when the MSR
     # is enabled at boot.
-    -fcf-protection=branch
+    #
+    # GAP: temporarily disabled — KVM's instruction emulator on the
+    # CI host kernel can't decode `f3 0f 1e fa` (endbr64) and
+    # vmexits with KVM_INTERNAL_ERROR_EMULATION whenever an
+    # interrupt-window or MMIO emulation fallback lands at the
+    # entry of an indirectly-called function (observed at
+    # MemRead, the C++ block-device callback Rust calls through
+    # the Device struct). CET wiring (CetInit, CR4.CET set,
+    # #CP handling) hasn't landed yet either, so this flag was
+    # only contributing dead NOPs anyway. Re-enable in lockstep
+    # with the CetInit slice + a runtime probe that checks
+    # whether the host KVM decoder handles endbr64 (`-cpu max`
+    # exposes the feature flag but the emulator support is
+    # kernel-version-gated).
+    -fcf-protection=none
     # Spectre-v2 / branch-target-injection mitigation. Replaces
     # every `jmp/call *%reg` with a `call __x86_indirect_thunk_<reg>`
     # that traps speculation at a lfence before the indirect
