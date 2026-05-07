@@ -1406,6 +1406,57 @@ const char* NotesFindQuery()
     return g_find_query;
 }
 
+void NotesSelectAll()
+{
+    using detail::g_buf;
+    using detail::g_cursor;
+    using detail::g_len;
+    using detail::g_sel_anchor;
+    if (g_len == 0)
+        return;
+    g_sel_anchor = 0;
+    g_cursor = g_len;
+    (void)g_buf;
+}
+
+void NotesGotoLine(u32 line_1based)
+{
+    using detail::g_buf;
+    using detail::g_cursor;
+    using detail::g_len;
+    using detail::g_sel_anchor;
+    using detail::kNoSelection;
+    g_sel_anchor = kNoSelection;
+    if (line_1based <= 1)
+    {
+        g_cursor = 0;
+        return;
+    }
+    // Walk g_buf counting newlines; the start of line N is the
+    // byte right after the (N-1)th newline. If the buffer has
+    // fewer logical lines than `line_1based`, land on the start
+    // of the last line (post the final newline, or the final
+    // line head when no trailing newline).
+    u32 line = 1;
+    u32 i = 0;
+    u32 last_line_head = 0;
+    while (i < g_len)
+    {
+        if (g_buf[i] == '\n')
+        {
+            ++line;
+            last_line_head = i + 1;
+            if (line == line_1based)
+            {
+                g_cursor = i + 1;
+                return;
+            }
+        }
+        ++i;
+    }
+    g_cursor = last_line_head;
+}
+
 u32 NotesReplaceAll(const char* query, const char* replacement)
 {
     using detail::g_buf;

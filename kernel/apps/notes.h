@@ -214,4 +214,19 @@ const char* NotesFindQuery();
 /// MUST be called with the compositor lock held.
 duetos::u32 NotesReplaceAll(const char* query, const char* replacement);
 
+/// Select the entire buffer (anchor at byte 0, caret at end).
+/// Subsequent Backspace / Delete / typing collapses the
+/// selection per the existing edit semantics — Ctrl+A then
+/// type replaces the whole document. Bound to Ctrl+A by the
+/// kernel kbd-reader. MUST be called with the compositor lock.
+void NotesSelectAll();
+
+/// Move the caret to the start of logical line `line_1based`.
+/// Lines are counted from 1 (matches what every editor's
+/// status-bar shows). Out-of-range targets clamp: line 0 lands
+/// at byte 0; targets past the last line land on the last
+/// line's first column. Selection is cleared. MUST be called
+/// with the compositor lock.
+void NotesGotoLine(duetos::u32 line_1based);
+
 } // namespace duetos::apps::notes

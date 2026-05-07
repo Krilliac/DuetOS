@@ -433,6 +433,8 @@ void PrintShortcutHelp()
     ConsoleWriteln("    CTRL+F            FIND (case-insensitive)");
     ConsoleWriteln("    F3                FIND NEXT (wraps to start)");
     ConsoleWriteln("    CTRL+H            FIND-AND-REPLACE (two prompts)");
+    ConsoleWriteln("    CTRL+A            SELECT ALL");
+    ConsoleWriteln("    CTRL+G            GO TO LINE");
     ConsoleWriteln("    STATUS FOOTER     L:line C:col  CHARS  WORDS  *MOD");
     ConsoleWriteln("");
     ConsoleWriteln("  CALCULATOR (WHEN ACTIVE)");
@@ -3203,6 +3205,55 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     continue;
                 }
                 duetos::drivers::video::CompositorUnlock();
+            }
+
+            // Ctrl+A — Notes select-all. Active-window-gated.
+            if (ctrl && !alt && (ev.code == 'a' || ev.code == 'A'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                if (active != duetos::drivers::video::kWindowInvalid && active == duetos::apps::notes::NotesWindow())
+                {
+                    duetos::apps::notes::NotesSelectAll();
+                    duetos::drivers::video::CompositorUnlock();
+                    duetos::drivers::video::NotifyShow("notes: selected all");
+                    continue;
+                }
+                duetos::drivers::video::CompositorUnlock();
+            }
+
+            // Ctrl+G — Notes goto-line. Opens an InputBox that
+            // takes a 1-based line number; the callback parses
+            // and calls NotesGotoLine. Active-window-gated.
+            if (ctrl && !alt && (ev.code == 'g' || ev.code == 'G'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                const bool is_notes =
+                    active != duetos::drivers::video::kWindowInvalid && active == duetos::apps::notes::NotesWindow();
+                duetos::drivers::video::CompositorUnlock();
+                if (is_notes)
+                {
+                    duetos::drivers::video::InputBoxOpen(
+                        "GO TO LINE", "Line:", "1",
+                        [](duetos::drivers::video::DialogResult r, const char* text, void*)
+                        {
+                            if (r != duetos::drivers::video::DialogResult::Ok || text == nullptr)
+                                return;
+                            duetos::u32 v = 0;
+                            for (duetos::u32 i = 0; text[i] != '\0'; ++i)
+                            {
+                                if (text[i] < '0' || text[i] > '9')
+                                    return;
+                                v = v * 10 + static_cast<duetos::u32>(text[i] - '0');
+                            }
+                            duetos::drivers::video::CompositorLock();
+                            duetos::apps::notes::NotesGotoLine(v);
+                            duetos::drivers::video::CompositorUnlock();
+                        },
+                        nullptr);
+                    continue;
+                }
             }
 
             // Ctrl+F — open the Notes find dialog. Active-window
