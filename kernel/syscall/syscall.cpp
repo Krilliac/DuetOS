@@ -1328,6 +1328,19 @@ void SyscallDispatch(arch::TrapFrame* frame)
             }
             leaf = &kpath[i + 1];
         }
+        if (disk_idx >= fs::fat32::kMaxVolumes)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        char mount_point[16] = {};
+        if (!fs::VfsFormatDiskMountPoint(disk_idx, mount_point, sizeof(mount_point)) ||
+            !fs::VfsMountVisibleFromRoot(caller->root, mount_point))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+
         const fs::fat32::Volume* v = fs::fat32::Fat32Volume(disk_idx);
         if (v == nullptr)
         {
@@ -2521,8 +2534,8 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // with the same truncating/page-boundary semantics as
         // SYS_DEBUG_PRINT.
         u16 wbuf[kSyscallDebugPrintMax + 1];
-        const auto copy = mm::CopyUserString16Truncating(wbuf, kSyscallDebugPrintMax + 1,
-                                                        reinterpret_cast<const void*>(frame->rdi));
+        const auto copy =
+            mm::CopyUserString16Truncating(wbuf, kSyscallDebugPrintMax + 1, reinterpret_cast<const void*>(frame->rdi));
         if (copy.status == mm::UserStringCopyStatus::BadArgument || copy.status == mm::UserStringCopyStatus::Fault)
         {
             frame->rax = static_cast<u64>(-1);
@@ -3514,7 +3527,8 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // we've seen in MSVCP140 (~180 chars).
         constexpr u64 kDllFuncNameMax = 256;
         char name_buf[kDllFuncNameMax + 1];
-        if (frame->rsi == 0 || !mm::CopyUserCString(name_buf, sizeof(name_buf), reinterpret_cast<const void*>(frame->rsi)).ok())
+        if (frame->rsi == 0 ||
+            !mm::CopyUserCString(name_buf, sizeof(name_buf), reinterpret_cast<const void*>(frame->rsi)).ok())
         {
             frame->rax = 0;
             return;

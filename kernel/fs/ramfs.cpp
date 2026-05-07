@@ -784,6 +784,7 @@ constinit RamfsNode k_proc_dir = {
     .file_size = 0,
 };
 
+
 constinit const RamfsNode* const k_trusted_root_children[] = {
     &k_trusted_etc_dir, &k_trusted_bin_dir, &k_proc_dir, &k_sys_dir, nullptr,
 };

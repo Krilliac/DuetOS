@@ -36,6 +36,59 @@ bool StrEqN(const char* a, u64 alen, const char* b)
     return b[alen] == '\0';
 }
 
+
+u32 CStrLen(const char* s)
+{
+    u32 n = 0;
+    if (s != nullptr)
+    {
+        while (s[n] != '\0')
+        {
+            ++n;
+        }
+    }
+    return n;
+}
+
+bool CStrLenBounded(const char* s, u64 max, u32* out_len)
+{
+    if (s == nullptr || out_len == nullptr || max == 0)
+    {
+        return false;
+    }
+    u64 n = 0;
+    while (n < max && s[n] != '\0')
+    {
+        ++n;
+    }
+    if (n > 0xFFFFFFFFULL)
+    {
+        return false;
+    }
+    *out_len = static_cast<u32>(n);
+    return true;
+}
+
+bool MountPrefixMatch(const char* path, u32 path_len, const char* mount_point, u32 mount_len)
+{
+    if (path == nullptr || mount_point == nullptr || mount_len == 0 || mount_len > path_len)
+    {
+        return false;
+    }
+    for (u32 i = 0; i < mount_len; ++i)
+    {
+        if (path[i] != mount_point[i])
+        {
+            return false;
+        }
+    }
+    if (mount_len == path_len)
+    {
+        return true;
+    }
+    return path[mount_len] == '\0' || path[mount_len] == '/';
+}
+
 // Locate a child named [name, name+name_len) inside `dir`. O(children)
 // linear scan. Returns nullptr if dir is null, not a directory, has
 // no children, or no match.
@@ -120,6 +173,143 @@ const RamfsNode* VfsLookup(const RamfsNode* root, const char* path, u64 path_max
     return cur;
 }
 
+bool VfsFormatDiskMountPoint(u32 idx, char* dst, u64 dst_cap)
+{
+    if (dst == nullptr || dst_cap == 0)
+    {
+        return false;
+    }
+    dst[0] = '\0';
+
+    constexpr const char prefix[] = "/disk/";
+    u64 pos = 0;
+    for (; pos < sizeof(prefix) - 1; ++pos)
+    {
+        if (pos + 1 >= dst_cap)
+        {
+            dst[0] = '\0';
+            return false;
+        }
+        dst[pos] = prefix[pos];
+    }
+
+    char digits[10] = {};
+    u32 n = idx;
+    u32 count = 0;
+    do
+    {
+        digits[count++] = static_cast<char>('0' + (n % 10));
+        n /= 10;
+    } while (n != 0 && count < sizeof(digits));
+
+    if (pos + count >= dst_cap)
+    {
+        dst[0] = '\0';
+        return false;
+    }
+    while (count > 0)
+    {
+        dst[pos++] = digits[--count];
+    }
+    dst[pos] = '\0';
+    return true;
+}
+
+bool VfsMountVisibleFromRoot(const RamfsNode* root, const char* mount_point)
+{
+    if (root == nullptr || mount_point == nullptr || mount_point[0] != '/')
+    {
+        return false;
+    }
+
+    // v0 policy: the trusted boot namespace owns the global mount
+    // table. Sandboxed / custom roots must opt in by materialising
+    // the mount point as a ramfs directory in their own tree. This
+    // keeps today's immutable ramfs small while preserving the shape
+    // needed for future non-ramfs process roots.
+    if (root == RamfsTrustedRoot())
+    {
+        return true;
+    }
+
+    const RamfsNode* graft = VfsLookup(root, mount_point, 64);
+    return RamfsIsDir(graft);
+}
+
+namespace
+{
+
+struct VisibleMountResolveState
+{
+    const RamfsNode* root;
+    const char* path;
+    u32 path_len;
+    const MountEntry* best;
+    u32 best_len;
+};
+
+bool ConsiderVisibleMount(const MountEntry& entry, MountId, void* cookie)
+{
+    auto* st = static_cast<VisibleMountResolveState*>(cookie);
+    const u32 mount_len = CStrLen(entry.mount_point);
+    if (entry.fs_type == FsType::Ramfs || mount_len <= st->best_len)
+    {
+        return true;
+    }
+    if (!MountPrefixMatch(st->path, st->path_len, entry.mount_point, mount_len))
+    {
+        return true;
+    }
+    if (!VfsMountVisibleFromRoot(st->root, entry.mount_point))
+    {
+        return true;
+    }
+    st->best = &entry;
+    st->best_len = mount_len;
+    return true;
+}
+
+} // namespace
+
+const MountEntry* VfsMountResolveVisible(const RamfsNode* root, const char* path, u64 path_max,
+                                         const char** out_subpath)
+{
+    if (out_subpath != nullptr)
+    {
+        *out_subpath = nullptr;
+    }
+    if (root == nullptr || path == nullptr || path[0] != '/' || path_max == 0)
+    {
+        return nullptr;
+    }
+
+    VisibleMountResolveState st{};
+    st.root = root;
+    st.path = path;
+    if (!CStrLenBounded(path, path_max, &st.path_len))
+    {
+        return nullptr;
+    }
+    VfsMountEnumerate(ConsiderVisibleMount, &st);
+    if (st.best == nullptr)
+    {
+        return nullptr;
+    }
+    if (out_subpath != nullptr)
+    {
+        if (st.best_len == st.path_len)
+        {
+            *out_subpath = "/";
+        }
+        else
+        {
+            const char* tail = path + st.best_len;
+            *out_subpath = (tail[0] == '\0') ? "/" : tail;
+        }
+    }
+    return st.best;
+}
+
 // =====================================================
 // Generic VfsNode helpers + cross-mount resolver.
 // =====================================================
@@ -197,8 +387,8 @@ VfsNode VfsResolve(const RamfsNode* root, const char* path, u64 path_max)
     if (path[0] == '/')
     {
         const char* sub = nullptr;
-        const MountEntry* me = VfsMountResolve(path, &sub);
-        if (me != nullptr && me->fs_type != FsType::Ramfs && sub != nullptr)
+        const MountEntry* me = VfsMountResolveVisible(root, path, path_max, &sub);
+        if (me != nullptr && sub != nullptr)
         {
             const VfsBackendOps* ops = VfsBackendForFsType(me->fs_type);
             if (ops != nullptr && ops->lookup != nullptr)
@@ -208,9 +398,9 @@ VfsNode VfsResolve(const RamfsNode* root, const char* path, u64 path_max)
                     return out;
                 }
             }
-            // Mount matched but lookup missed / no backend wired —
-            // fall through to ramfs is wrong because we're past the
-            // mount-point boundary. Return Invalid.
+            // A visible mount matched, but lookup missed / no backend
+            // is wired. Falling through to ramfs here would let a
+            // ramfs node pierce a mounted subtree.
             out.backend = VfsBackend::Invalid;
             return out;
         }
@@ -285,6 +475,9 @@ void VfsSelfTest()
     Expect(VfsLookup(trusted, "/etc/profile", 64) != nullptr, "/etc/profile resolves");
     Expect(VfsLookup(trusted, "/etc/man/ls", 64) != nullptr, "/etc/man/ls resolves (3-deep)");
     Expect(VfsLookup(trusted, "/etc/man/cat", 64) != nullptr, "/etc/man/cat resolves");
+    Expect(VfsMountVisibleFromRoot(trusted, "/disk/0"), "trusted root sees /disk/0 mount");
+    Expect(VfsMountVisibleFromRoot(trusted, "/duetfs"), "trusted root sees /duetfs mount");
+    Expect(VfsMountVisibleFromRoot(trusted, "/disks/duetfs0"), "trusted root sees /disks/duetfs0 mount");
 
     // ----- Relative lookups (no leading slash) start from root -----
     Expect(VfsLookup(trusted, "etc/version", 64) == version, "relative path matches absolute");
@@ -334,6 +527,8 @@ void VfsSelfTest()
     Expect(VfsLookup(sandbox, "/bin/hello", 64) == nullptr, "JAIL: sandbox cannot see /bin/hello");
     Expect(VfsLookup(sandbox, "/bin", 64) == nullptr, "JAIL: sandbox cannot see /bin");
     Expect(VfsLookup(sandbox, "/etc", 64) == nullptr, "JAIL: sandbox cannot see /etc");
+    Expect(!VfsMountVisibleFromRoot(sandbox, "/disk/0"), "JAIL: sandbox cannot see /disk/0 mount");
+    Expect(!VfsMountVisibleFromRoot(sandbox, "/duetfs"), "JAIL: sandbox cannot see /duetfs mount");
     Expect(VfsLookup(sandbox, "..", 64) == nullptr, "JAIL: sandbox .. rejected");
     Expect(VfsLookup(sandbox, "/welcome.txt/..", 64) == nullptr, "JAIL: sandbox file/.. rejected");
 
@@ -364,6 +559,8 @@ void VfsSelfTest()
         // Sandbox jail still applies to ramfs fall-through.
         VfsNode s = VfsResolve(sandbox, "/etc/version", 64);
         Expect(!VfsNodeIsValid(s), "VfsResolve sandbox-jail still rejects /etc/version");
+        VfsNode sd = VfsResolve(sandbox, "/disk/0/HELLO.TXT", 64);
+        Expect(!VfsNodeIsValid(sd), "VfsResolve sandbox-jail rejects hidden disk mount");
 
         // ".." rejection survives the resolver wrapping.
         VfsNode dd = VfsResolve(trusted, "/etc/..", 64);

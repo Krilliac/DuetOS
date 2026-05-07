@@ -57,6 +57,8 @@
 namespace duetos::fs
 {
 
+struct MountEntry;
+
 /// Resolve `path` starting from `root`. `path` may begin with '/'
 /// (absolute against root) or not (relative to root, same effect).
 /// Returns the resolved node, or nullptr on any failure.
@@ -155,24 +157,49 @@ bool VfsNodeIsFile(const VfsNode& n);
 /// Size of a file-backed node, 0 for directories / invalid nodes.
 u64 VfsNodeSize(const VfsNode& n);
 
+/// True when `mount_point` may be crossed from `root`. The trusted
+/// boot root owns the global mount namespace; sandbox/custom roots
+/// only see mounts whose mount point is explicitly materialised as a
+/// ramfs directory inside that root. This keeps mount visibility as a
+/// namespace policy instead of baking synthetic mount directories into
+/// the immutable ramfs tree.
+bool VfsMountVisibleFromRoot(const RamfsNode* root, const char* mount_point);
+
+/// Format the canonical FAT-style auto-mount point for a volume index
+/// (`/disk/<idx>`). Returns false when the destination is null, too
+/// small, or the decimal index cannot fit. Kept beside mount visibility
+/// so direct FAT32 paths and routing-layer paths use the same spelling.
+bool VfsFormatDiskMountPoint(u32 idx, char* dst, u64 dst_cap);
+
+/// Resolve `path` to the longest visible non-ramfs mount for `root`.
+/// Hidden mount points are skipped instead of shadowing shorter
+/// visible mounts or root-local ramfs paths. `path_max` bounds the
+/// scan exactly like `VfsLookup`; the resolver never walks past it
+/// looking for a NUL. `out_subpath` receives the in-mount absolute
+/// tail (`/` when `path == mount_point`).
+const MountEntry* VfsMountResolveVisible(const RamfsNode* root, const char* path, u64 path_max,
+                                         const char** out_subpath);
+
 /// Cross-mount path resolver. Walks `path` starting from `root`
 /// (a ramfs root, typically `Process::root`). When the path's
-/// longest mount-prefix matches a non-ramfs mount, dispatches to
-/// that backend's lookup with the in-mount subpath; otherwise
-/// resolves through the ramfs walker. Returns a `VfsNode` with
-/// `backend = Invalid` on miss / malformed path.
+/// longest visible mount-prefix matches a non-ramfs mount, the
+/// resolver dispatches to that backend's lookup with the in-mount
+/// subpath. Hidden global mounts are ignored for this root, so they
+/// do not shadow shorter visible mounts or root-local ramfs files.
+/// Returns a `VfsNode` with `backend = Invalid` on miss / malformed
+/// path.
 ///
 /// Same path-resolution rules as `VfsLookup` — leading-slash
 /// optional, `..` rejected, `.` skipped, empty components
 /// tolerated. The mount-prefix check considers the path verbatim
-/// (it does NOT chase ramfs symlinks first) — a mount of
-/// `/disk/0` exists in the global namespace, not as a member of
-/// the calling process's ramfs root.
+/// (it does NOT chase ramfs symlinks first), but the per-process
+/// namespace gate still decides whether that global mount is visible
+/// to this root.
 ///
 /// Ramfs mounts in the registry are ignored by the dispatcher —
 /// the explicit `root` argument is authoritative for the ramfs
-/// view (so sandbox roots stay sandbox roots even when a ramfs
-/// mount is registered globally).
+/// view (so sandbox roots stay sandbox roots even when any global
+/// mount is registered).
 VfsNode VfsResolve(const RamfsNode* root, const char* path, u64 path_max);
 
 /// Cross-mount resolver self-test. Runs AFTER FAT32 auto-mount
