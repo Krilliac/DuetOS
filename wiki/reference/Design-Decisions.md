@@ -5694,3 +5694,83 @@ doc helps future readers audit the trail.
   used to read "deeper teal panel"; this slice cashes that
   in).
 
+## End-user app feature slate (2026-05-07)
+
+- **Decision:** ship a batch of everyday-OS feature parity items
+  on top of the desktop apps that already exist, pulled from
+  Windows / macOS / common-Linux conventions:
+
+  1. **Task Manager PERFORMANCE tab** — Tab key cycles
+     PROCESSES <-> PERFORMANCE. PERFORMANCE renders two
+     stacked 60-sample sparklines for CPU% busy + MEM%
+     used, sampled at 1 Hz via the existing UI ticker.
+     Bottom row shows 1/5/15-min load averages from
+     `LoadavgSnapshot`. (`kernel/apps/taskman.cpp`.)
+
+  2. **Notes find / find-next / find-and-replace** —
+     Ctrl+F opens an InputBox seeded with the last query;
+     F3 steps to the next match; Ctrl+H runs a two-stage
+     "Find:" + "Replace with:" dialog flow. Match
+     highlighting reuses the existing selection band.
+     (`kernel/apps/notes.cpp` + main.cpp keybinding.)
+
+  3. **Calculator scientific + bitwise + multi-radix preview** —
+     keyboard adds `q` sqrt, `x` square, `y` abs, `!`
+     factorial, `r` reciprocal, `~` bitwise NOT, plus
+     binary `& | ^ < >`. The display strip grew a second
+     band that renders the live decimal value as `0xFF` /
+     `0b1011...` / `0o377` simultaneously; the calculator
+     window grew 220 → 260 px to host the band. Input
+     remains decimal — multi-radix is purely visual.
+     (`kernel/apps/calculator.cpp`, main.cpp window dim.)
+
+  4. **Files sort modes** — `s` cycles NAME (case-insensitive
+     ascending) → SIZE → TYPE (dirs first, alphabetical
+     within). Insertion sort over the cached entries arrays
+     (kFatMax = 64); selection re-anchors to the prior
+     selection's name across re-sort so the cursor doesn't
+     snap. (`kernel/apps/files.cpp`.)
+
+  5. **Help reference + main.cpp PrintShortcutHelp synced** to
+     advertise every new chord. The two surfaces explicitly
+     stay lock-stepped per the kRows comment.
+
+- **Why:** the wiki Roadmap's "End-user features" track listed
+  these as known gaps in the everyday-usability story; the
+  underlying infrastructure (`SchedEnumerate`,
+  `LoadavgSnapshot`, `MessageBoxOpen` / `InputBoxOpen`,
+  `FramebufferDrawLine`, the existing per-app draw / feed
+  hooks) was already in tree, so each item was a
+  straightforward delta on top of what existed. Holistically
+  the slate moves DuetOS from "demo desktop" closer to
+  "actually usable for everyday text-editing, arithmetic,
+  process-monitoring, file-browsing without a mouse."
+
+- **What was considered + rejected per slice:**
+  - Per-task instantaneous CPU% (vs. since-last-sample) —
+    deferred until a workload exposes the user-visible miss.
+  - HLSL bytecode-driven Calculator — way out of scope.
+  - Hex / bin / oct INPUT in Calculator — input radix toggle
+    is a substantial UX rework (digit-set conflicts with
+    memory keys); the multi-radix preview gets the user
+    most of the value with no input ambiguity.
+  - Files sort by date — DirEntry doesn't expose mtime in
+    the v0 FAT32 walker; revisit when it does.
+
+- **What it rules out / defers:** none of these slices changes
+  the Win32 / Linux subsystem isolation contract; they all
+  live in `kernel/apps/*` content drawers and `core::Cap*` is
+  not relaxed. The PROCESSES tab's kill action goes through
+  the existing `SchedKillByPid` cap-checked path.
+
+- **Revisit when:** Process gains a per-process MemUsage()
+  accessor (Task Manager grows a MEM column); the dialog
+  system grows multi-line input (Notes Replace can become a
+  single dialog); FAT32 DirEntry exposes mtime (Files sort
+  gains DATE).
+
+- **Related tracks:** End-user features (Roadmap),
+  [`Compositor`](../subsystems/Compositor.md),
+  [`Win32-Surface-Status`](Win32-Surface-Status.md) is
+  unaffected.
+
