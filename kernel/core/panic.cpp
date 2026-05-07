@@ -587,6 +587,22 @@ void DumpHeldLocksLocal()
 void BeginCrashDump(const char* subsystem, const char* message, const u64* optional_value)
 {
     arch::SerialWrite("\n");
+    // Single-line summary BEFORE the verbose dump so CI's
+    // tail-200-lines truncation can't bury the actual reason.
+    // Grep-friendly fixed shape — a parser can read everything
+    // after `subsystem=` up to the first space, and everything
+    // between the surrounding double-quotes for the message.
+    arch::SerialWrite("[panic-summary] subsystem=");
+    arch::SerialWrite(subsystem != nullptr ? subsystem : "<null>");
+    arch::SerialWrite(" msg=\"");
+    arch::SerialWrite(message != nullptr ? message : "<null>");
+    arch::SerialWrite("\"");
+    if (optional_value != nullptr)
+    {
+        arch::SerialWrite(" value=");
+        arch::SerialWriteHex(*optional_value);
+    }
+    arch::SerialWrite("\n");
     arch::SerialWrite(kDumpBeginMarker);
     WriteLabelled("version  ", kDumpSchemaVersion);
     arch::SerialWrite("  subsystem: ");

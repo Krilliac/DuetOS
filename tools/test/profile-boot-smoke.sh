@@ -214,8 +214,8 @@ if [[ $fail -ne 0 ]]; then
     done
     echo "=== last 200 lines of serial log (${SERIAL_LOG}) ==="
     tail -200 "${SERIAL_LOG}" || true
-    echo "=== smoke marker grep: any [smoke] / [boot] >>>/<<< / [panic] lines ==="
-    grep -aE '^\[smoke\]|^\[boot\] >>>|^\[boot\] <<<|^\[panic\]|DUETOS CRASH' "${SERIAL_LOG}" || true
+    echo "=== smoke marker grep: any [smoke] / [boot] >>>/<<< / [panic] / [panic-summary] lines ==="
+    grep -aE '^\[smoke\]|^\[boot\] >>>|^\[boot\] <<<|^\[panic\]|^\[panic-summary\]|DUETOS CRASH' "${SERIAL_LOG}" || true
     echo "=== expected signature presence map ==="
     for sig in "${expected[@]}"; do
         if grep -aF "$sig" "${SERIAL_LOG}" > /dev/null; then
