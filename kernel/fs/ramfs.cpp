@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "core/init.h"
+#include "diag/fix_journal.h"
 #include "loader/pe_loader.h"
 #include "log/klog.h"
 #include "sched/sched.h"
@@ -746,8 +747,33 @@ constinit RamfsNode k_proc_dumps = {
     .file_size = 0,
 };
 
+// ------- /proc/fixjournal -------
+//
+// Tab-separated dump of the in-RAM fix journal. One record per
+// line: seq <TAB> detector <TAB> repeat <TAB> audited <TAB>
+// source_pin <TAB> hint. Refreshed by the heartbeat thread so
+// the file's contents are at most one tick stale. Used by the
+// reviewer (typically a Claude session attached to the live
+// kernel) to triage gaps without needing a shell prompt.
+//
+// 64 KiB caps the snapshot at roughly 4x the in-kernel ring's
+// human-format payload (1024 records × ~80 bytes per line ~=
+// 80 KiB at the worst case; truncates rather than allocating
+// more .bss).
+constexpr u32 kFixJournalBufferBytes = 64 * 1024;
+u8 g_fixjournal_buffer[kFixJournalBufferBytes] = {};
+u64 g_fixjournal_cursor = 0;
+
+constinit RamfsNode k_proc_fixjournal = {
+    .name = "fixjournal",
+    .type = RamfsNodeType::kFile,
+    .children = nullptr,
+    .file_bytes = g_fixjournal_buffer,
+    .file_size = 0,
+};
+
 constinit const RamfsNode* const k_proc_children[] = {
-    &k_proc_boottrace, &k_proc_dumps, &k_proc_abi_dir, &k_proc_cpuhist, nullptr,
+    &k_proc_boottrace, &k_proc_dumps, &k_proc_fixjournal, &k_proc_abi_dir, &k_proc_cpuhist, nullptr,
 };
 
 constinit RamfsNode k_proc_dir = {
@@ -903,6 +929,81 @@ void RamfsDumpsSnapshot()
     // is at most ~10 ms stale (one heartbeat at kTickHz=100).
     g_dumps_cursor = ::duetos::security::FormatAllDumps(g_dumps_buffer, kDumpsBufferBytes);
     k_proc_dumps.file_size = g_dumps_cursor;
+}
+
+namespace
+{
+
+// Append a NUL-terminated string into the fixjournal buffer with
+// truncate-at-end semantics. Returns the new cursor.
+u64 FjAppendStr(u64 cursor, const char* s)
+{
+    if (s == nullptr)
+        return cursor;
+    while (*s != '\0' && cursor < kFixJournalBufferBytes)
+    {
+        g_fixjournal_buffer[cursor++] = static_cast<u8>(*s++);
+    }
+    return cursor;
+}
+
+// Append a u64 in decimal form. Caps at the buffer end.
+u64 FjAppendU64(u64 cursor, u64 v)
+{
+    if (cursor >= kFixJournalBufferBytes)
+        return cursor;
+    if (v == 0)
+    {
+        g_fixjournal_buffer[cursor++] = '0';
+        return cursor;
+    }
+    char tmp[20];
+    int n = 0;
+    while (v != 0 && n < 20)
+    {
+        tmp[n++] = static_cast<char>('0' + (v % 10));
+        v /= 10;
+    }
+    for (int i = n - 1; i >= 0 && cursor < kFixJournalBufferBytes; --i)
+    {
+        g_fixjournal_buffer[cursor++] = static_cast<u8>(tmp[i]);
+    }
+    return cursor;
+}
+
+} // namespace
+
+void RamfsFixJournalSnapshot()
+{
+    // Snapshot the live ring into a stack buffer (bounded by
+    // FixJournal capacity = 1024 records, but we cap at 256 here
+    // to keep the stack footprint reasonable — older entries
+    // beyond that fall off).
+    constexpr u64 kSnapCap = 256;
+    duetos::diag::FixRecord scratch[kSnapCap] = {};
+    const u64 got = duetos::diag::FixJournalSnapshot(scratch, kSnapCap);
+
+    u64 c = 0;
+    c = FjAppendStr(c, "# /proc/fixjournal — observe-only gap journal.\n");
+    c = FjAppendStr(c, "# Format: seq\\tdetector\\trepeat\\taudited\\tsource_pin\\thint\n");
+    for (u64 i = 0; i < got && c < kFixJournalBufferBytes; ++i)
+    {
+        const auto& r = scratch[i];
+        c = FjAppendU64(c, r.seq);
+        c = FjAppendStr(c, "\t");
+        c = FjAppendStr(c, duetos::diag::FixDetectorName(static_cast<duetos::diag::FixDetector>(r.detector)));
+        c = FjAppendStr(c, "\t");
+        c = FjAppendU64(c, r.repeat_count);
+        c = FjAppendStr(c, "\t");
+        c = FjAppendStr(c, (r.flags & duetos::diag::kFixFlagAudited) ? "yes" : "no");
+        c = FjAppendStr(c, "\t");
+        c = FjAppendStr(c, r.source_pin);
+        c = FjAppendStr(c, "\t");
+        c = FjAppendStr(c, r.hint);
+        c = FjAppendStr(c, "\n");
+    }
+    g_fixjournal_cursor = c;
+    k_proc_fixjournal.file_size = c;
 }
 
 namespace
