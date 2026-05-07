@@ -115,6 +115,7 @@
 #include "net/wireless/test/wireless_e2e_test.h"
 #include "net/wireless/wdev.h"
 #include "net/wireless/wifi_diag.h"
+#include "drivers/mei/mei.h"
 #include "drivers/pci/pci.h"
 #include "drivers/power/power.h"
 #include "drivers/usb/cdc_ecm.h"
@@ -2612,6 +2613,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Enumerating PCI bus.\n");
     duetos::drivers::pci::PciEnumerate();
+
+    SerialWrite("[boot] Detecting Intel MEI/HECI devices.\n");
+    duetos::drivers::mei::MeiInit();
+    DUETOS_BOOT_SELFTEST(duetos::drivers::mei::MeiSelfTest());
 
     SerialWrite("[boot] Detecting GPUs.\n");
     duetos::drivers::gpu::GpuInit();

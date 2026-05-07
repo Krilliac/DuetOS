@@ -123,6 +123,22 @@ validation (CPD/SHA-256 hash chain) plugs in at the same call
 site, then the updater walks each partition payload over the
 MEI HECI channel.
 
+The PCI-side scaffold has landed in
+`kernel/drivers/mei/mei.{h,cpp}`. It probes every Intel device
+matching `(class=0x07 / subclass=0x80)` at boot, classifies the
+device-ID into CSME / GSC / TXE / SPS roles, and maps BAR0 as
+MMIO so a future driver can reach H_CSR / ME_CSR without
+re-running the size probe. The `mei` shell command surfaces the
+inventory. What's still needed to flip the GSC update path on:
+the HECI bus protocol (H2M/M2H handshake, version negotiation,
+per-client multiplexing).
+
+`intel::Probe()` also looks up `guc.bin` and `huc.bin` under the
+firmware loader's open-firmware path policy — every Gen9+ GPU
+needs both blobs to bring up the command rings. The lookups are
+advisory today (no ring submission) and feed the existing
+`fwtrace show` ring.
+
 ## Compositor Primitives
 
 The compositor exposes:

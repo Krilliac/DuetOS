@@ -1305,6 +1305,11 @@ void Dispatch(char* line)
         CmdHdaJacks();
         return;
     }
+    if (StrEq(cmd, "mei") || StrEq(cmd, "heci"))
+    {
+        CmdMei();
+        return;
+    }
     if (StrEq(cmd, "usbnet"))
     {
         CmdUsbNet(argc, argv);

@@ -36,6 +36,7 @@
 #include "time/tick.h"
 #include "drivers/audio/hda_jack.h"
 #include "drivers/audio/hda_jack_inventory.h"
+#include "drivers/mei/mei.h"
 #include "drivers/gpu/bochs_vbe.h"
 #include "drivers/gpu/cea861.h"
 #include "drivers/gpu/cvt.h"
@@ -1801,6 +1802,45 @@ void CmdHdaJacks()
         WriteU64Hex(pin, 2);
         ConsoleWriteln("");
     }
+}
+
+void CmdMei()
+{
+    namespace mei = duetos::drivers::mei;
+    const u32 count = mei::MeiDeviceCount();
+    if (count == 0)
+    {
+        ConsoleWriteln("MEI: no Intel MEI/HECI device found");
+        ConsoleWriteln("    (looking for vendor=0x8086 class=0x07 subclass=0x80)");
+        return;
+    }
+    ConsoleWrite("MEI: ");
+    WriteU64Dec(count);
+    ConsoleWriteln(" device(s)");
+    for (u32 i = 0; i < count; ++i)
+    {
+        const auto& d = mei::MeiDevice(i);
+        ConsoleWrite("  [");
+        WriteU64Dec(i);
+        ConsoleWrite("] vendor=");
+        WriteU64Hex(d.vendor_id, 4);
+        ConsoleWrite(" device=");
+        WriteU64Hex(d.device_id, 4);
+        ConsoleWrite(" role=");
+        ConsoleWrite(d.role_tag);
+        ConsoleWrite(" bus=");
+        WriteU64Hex(d.bus, 2);
+        ConsoleWrite(":");
+        WriteU64Hex(d.device, 2);
+        ConsoleWrite(".");
+        WriteU64Hex(d.function, 1);
+        ConsoleWrite(" mmio_phys=");
+        WriteU64Hex(d.mmio_phys, 8);
+        ConsoleWrite(" size=");
+        WriteU64Hex(d.mmio_size, 4);
+        ConsoleWriteln("");
+    }
+    ConsoleWriteln("  (HECI bus protocol not yet implemented — driver is probe-only)");
 }
 
 } // namespace duetos::core::shell::internal

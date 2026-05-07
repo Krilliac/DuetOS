@@ -96,22 +96,61 @@ void Probe(GpuInfo& g)
     // they're carrying around is structurally valid and which
     // partitions it claims. A future MEI-driver slice will turn
     // this into the actual update path.
-    ::duetos::core::FwLoadRequest req{};
-    req.vendor = "intel-gsc";
-    req.basename = "gsc.bin";
-    req.min_bytes = kIntelGscFptHeaderBytes + kIntelGscFptEntryBytes;
-    req.max_bytes = 0; // accept any size up to u32 max
-    auto fw = ::duetos::core::FwLoad(req);
-    if (fw.has_value())
     {
-        IntelGscFwParsed parsed{};
-        auto pr = IntelGscFwParse(fw.value().data, fw.value().size, &parsed);
-        if (pr.has_value())
-            IntelGscFwLog(parsed);
-        else
-            KLOG_WARN("drivers/gpu/intel", "GSC firmware image present but parse failed");
-        ::duetos::core::FwRelease(fw.value());
+        ::duetos::core::FwLoadRequest req{};
+        req.vendor = "intel-gsc";
+        req.basename = "gsc.bin";
+        req.min_bytes = kIntelGscFptHeaderBytes + kIntelGscFptEntryBytes;
+        req.max_bytes = 0; // accept any size up to u32 max
+        auto fw = ::duetos::core::FwLoad(req);
+        if (fw.has_value())
+        {
+            IntelGscFwParsed parsed{};
+            auto pr = IntelGscFwParse(fw.value().data, fw.value().size, &parsed);
+            if (pr.has_value())
+                IntelGscFwLog(parsed);
+            else
+                KLOG_WARN("drivers/gpu/intel", "GSC firmware image present but parse failed");
+            ::duetos::core::FwRelease(fw.value());
+        }
     }
+
+    // Probe for the GuC (Graphics microController) and HuC (HEVC
+    // microController) firmware blobs. Intel ships these for every
+    // Gen9+ GPU; the GuC owns command-submission scheduling and
+    // power management, the HuC accelerates HEVC encode. The Linux
+    // i915 / Xe drivers lazy-load both during ring bring-up.
+    //
+    // We don't have a GPU command-ring online yet, so the loads
+    // are advisory — the lookup names which firmware files an
+    // operator has dropped under
+    // /lib/firmware/duetos/open/intel-gpu/ (or
+    // /lib/firmware/intel-gpu/), and the boot log records each
+    // hit/miss so a follow-up bring-up slice knows what's
+    // available.
+    auto probe_one = [](const char* basename)
+    {
+        ::duetos::core::FwLoadRequest req{};
+        req.vendor = "intel-gpu";
+        req.basename = basename;
+        req.min_bytes = 64;
+        req.max_bytes = 0;
+        auto fw = ::duetos::core::FwLoad(req);
+        if (fw.has_value())
+        {
+            arch::SerialWrite("[gpu/intel] firmware probe ");
+            arch::SerialWrite(basename);
+            arch::SerialWrite(" present, size=");
+            arch::SerialWriteHex(fw.value().size);
+            arch::SerialWrite("\n");
+            ::duetos::core::FwRelease(fw.value());
+        }
+        // Misses are silent here — the firmware loader's own trace
+        // ring records every attempt, so `fwtrace show` is the
+        // right tool when an operator wants to know what failed.
+    };
+    probe_one("guc.bin");
+    probe_one("huc.bin");
 }
 
 ::duetos::core::Result<void> Bringup(GpuInfo& g)

@@ -347,6 +347,7 @@ void CmdLapic();
 void CmdSmp();
 void CmdLspci();
 void CmdHdaJacks();
+void CmdMei();
 void CmdHeap(u32 argc, char** argv);
 void CmdPaging();
 void CmdFb();
