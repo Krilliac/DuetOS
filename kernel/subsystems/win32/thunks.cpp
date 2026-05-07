@@ -382,11 +382,11 @@ constexpr u32 kOffPErrno = 0x10BF;      // 6 bytes — returns ptr to errno scra
 constexpr u32 kOffChkStk = 0x10C5;              // 53 bytes — page probe loop
 constexpr u32 kOffSetAppType = 0x10FA;          // 12 bytes — proc-env app_type slot
 constexpr u32 kOffConfigureNarrowArgv = 0x1106; // 14 bytes — proc-env narrow_argv_mode slot
-constexpr u32 kOffInitOnexitTable = 0x1114;     // 19 bytes — NULL-guarded table zero; proc-env atexit list authoritative
-constexpr u32 kOffCrtAtexit = 0x1127;           // 39 bytes — append rcx to proc-env atexit slots
-constexpr u32 kOffRegisterOnexitFn = 0x114E;    // 39 bytes — append rdx to proc-env atexit slots
-constexpr u32 kOffCexit = 0x1175;               // 61 bytes — walk + call atexit handlers LIFO
-constexpr u32 kOffFreeEnvStringsW = 0x11B2;     // 6 bytes — return TRUE (env block is static)
+constexpr u32 kOffInitOnexitTable = 0x1114;  // 19 bytes — NULL-guarded table zero; proc-env atexit list authoritative
+constexpr u32 kOffCrtAtexit = 0x1127;        // 39 bytes — append rcx to proc-env atexit slots
+constexpr u32 kOffRegisterOnexitFn = 0x114E; // 39 bytes — append rdx to proc-env atexit slots
+constexpr u32 kOffCexit = 0x1175;            // 61 bytes — walk + call atexit handlers LIFO
+constexpr u32 kOffFreeEnvStringsW = 0x11B2;  // 6 bytes — return TRUE (env block is static)
 
 constexpr u8 kThunksBytes[] = {
 #include "subsystems/win32/thunks_bytecode.inc"
