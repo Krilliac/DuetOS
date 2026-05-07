@@ -18,6 +18,7 @@
 #include "arch/x86_64/serial.h"
 #include "log/klog.h"
 #include "mm/address_space.h"
+#include "mm/paging.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -34,24 +35,13 @@ const char* StripFatPrefix(const char* p)
 bool CopyAndStripFatPath(u64 user_path, char (&kbuf)[64], const char*& out_leaf)
 {
     KLOG_TRACE_V("linux/pathutil", "CopyAndStripFatPath: user_path", user_path);
-    for (u32 i = 0; i < sizeof(kbuf); ++i)
-        kbuf[i] = 0;
-    if (!mm::CopyFromUser(kbuf, reinterpret_cast<const void*>(user_path), sizeof(kbuf) - 1))
+    const auto copy = mm::CopyUserCString(kbuf, sizeof(kbuf), reinterpret_cast<const void*>(user_path));
+    if (copy.status == mm::UserStringCopyStatus::Fault || copy.status == mm::UserStringCopyStatus::BadArgument)
     {
-        KLOG_WARN_V("linux/pathutil", "CopyAndStripFatPath: CopyFromUser failed", user_path);
+        KLOG_WARN_V("linux/pathutil", "CopyAndStripFatPath: user string copy failed", user_path);
         return false;
     }
-    kbuf[sizeof(kbuf) - 1] = 0;
-    bool has_nul = false;
-    for (u32 i = 0; i < sizeof(kbuf); ++i)
-    {
-        if (kbuf[i] == 0)
-        {
-            has_nul = true;
-            break;
-        }
-    }
-    if (!has_nul)
+    if (copy.status == mm::UserStringCopyStatus::NoTerminator)
     {
         KLOG_WARN("linux/pathutil", "CopyAndStripFatPath: path missing NUL terminator within buffer");
         return false;

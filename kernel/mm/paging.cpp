@@ -377,13 +377,11 @@ void PagingInit()
 //      inside this helper. A bug that tries to dereference user memory
 //      anywhere else still #PFs.
 //
-// v0 intentionally does NOT catch #PF during the copy. If the user
-// pointer is mapped but the target page is gone mid-copy, the trap
-// dispatcher halts — exactly as it does today for any other kernel #PF.
-// The proper fix is a __copy_user_fault_fixup table (one entry pointing
-// at a "return false" label per copy loop); landing that alongside the
-// first syscall that can legitimately trigger a page fault is the next
-// natural slice.
+// The assembly copy loops live in recoverable fault ranges. If a page
+// disappears after the pre-walk or the caller races a mapping change,
+// trap dispatch redirects the faulting RIP to the copy fixup path and
+// the C++ helper returns false. Callers must still treat a failed copy
+// as partial: bytes before the fault may already have moved.
 // ---------------------------------------------------------------------------
 
 bool IsUserAddressRange(u64 addr, u64 len)
@@ -525,6 +523,213 @@ bool CopyFromUser(void* kernel_dst, const void* user_src, u64 len)
     }
     return _copy_user_from(kernel_dst, user_src, len) != 0;
 }
+
+namespace
+{
+
+template <typename CharT>
+UserStringCopyResult CopyUserStringImpl(CharT* kernel_dst, u64 dst_cap, const void* user_src, bool truncate)
+{
+    if (dst_cap == 0 || kernel_dst == nullptr)
+    {
+        return {UserStringCopyStatus::BadArgument, 0};
+    }
+
+    // Keep the destination printable/inspectable for every failure
+    // path where a destination exists, including null user pointers.
+    for (u64 i = 0; i < dst_cap; ++i)
+    {
+        kernel_dst[i] = 0;
+    }
+
+    if (user_src == nullptr)
+    {
+        return {UserStringCopyStatus::BadArgument, 0};
+    }
+
+    const u64 base = reinterpret_cast<u64>(user_src);
+    const u64 probe_count = truncate ? (dst_cap - 1) : dst_cap;
+    for (u64 i = 0; i < probe_count; ++i)
+    {
+        const u64 offset = i * sizeof(CharT);
+        if (sizeof(CharT) != 0 && offset / sizeof(CharT) != i)
+        {
+            return {UserStringCopyStatus::Fault, i};
+        }
+        if (base > (~0ULL - offset))
+        {
+            return {UserStringCopyStatus::Fault, i};
+        }
+
+        CharT c = 0;
+        if (!CopyFromUser(&c, reinterpret_cast<const void*>(base + offset), sizeof(CharT)))
+        {
+            if (i < dst_cap)
+            {
+                kernel_dst[i] = 0;
+            }
+            return {UserStringCopyStatus::Fault, i};
+        }
+
+        kernel_dst[i] = c;
+        if (c == 0)
+        {
+            return {UserStringCopyStatus::Ok, i};
+        }
+    }
+
+    kernel_dst[dst_cap - 1] = 0;
+    return {UserStringCopyStatus::NoTerminator, probe_count};
+}
+
+} // namespace
+
+UserStringCopyResult CopyUserCString(char* kernel_dst, u64 dst_cap, const void* user_src)
+{
+    return CopyUserStringImpl(kernel_dst, dst_cap, user_src, /*truncate=*/false);
+}
+
+UserStringCopyResult CopyUserCStringTruncating(char* kernel_dst, u64 dst_cap, const void* user_src)
+{
+    return CopyUserStringImpl(kernel_dst, dst_cap, user_src, /*truncate=*/true);
+}
+
+UserStringCopyResult CopyUserString16(u16* kernel_dst, u64 dst_cap, const void* user_src)
+{
+    return CopyUserStringImpl(kernel_dst, dst_cap, user_src, /*truncate=*/false);
+}
+
+UserStringCopyResult CopyUserString16Truncating(u16* kernel_dst, u64 dst_cap, const void* user_src)
+{
+    return CopyUserStringImpl(kernel_dst, dst_cap, user_src, /*truncate=*/true);
+}
+
+namespace
+{
+
+void CheckUserStringResult(const char* label, UserStringCopyResult got, UserStringCopyStatus status, u64 length)
+{
+    if (got.status != status)
+    {
+        PanicPaging(label, static_cast<u64>(got.status));
+    }
+    if (got.length != length)
+    {
+        PanicPaging(label, got.length);
+    }
+}
+
+void CheckChar(const char* label, char got, char want)
+{
+    if (got != want)
+    {
+        PanicPaging(label, static_cast<u64>(static_cast<u8>(got)));
+    }
+}
+
+void CheckU16(const char* label, u16 got, u16 want)
+{
+    if (got != want)
+    {
+        PanicPaging(label, static_cast<u64>(got));
+    }
+}
+
+void UserStringCopySelfTest()
+{
+    // Map one synthetic user page in the active boot address space and
+    // fill it through a kernel MMIO alias. The second page is left
+    // deliberately unmapped so the page-tail cases prove the string
+    // helpers stop at NUL instead of bulk-copying the full cap.
+    constexpr u64 kUserTestVa = 0x0000004000000000ULL;
+    const PhysAddr frame = AllocateFrame();
+    if (frame == kNullFrame)
+    {
+        PanicPaging("user-string self-test: AllocateFrame returned null", 0);
+    }
+
+    auto* alias = static_cast<volatile u8*>(MapMmio(frame, kPageSize));
+    if (alias == nullptr)
+    {
+        PanicPaging("user-string self-test: MapMmio returned null", 0);
+    }
+    for (u64 i = 0; i < kPageSize; ++i)
+    {
+        alias[i] = 0;
+    }
+
+    alias[0] = 0;
+    alias[16] = 'a';
+    alias[17] = 'b';
+    alias[18] = 'c';
+    alias[19] = 0;
+    alias[32] = 'x';
+    alias[33] = 'y';
+    alias[34] = 'z';
+    alias[35] = 'w';
+    alias[kPageSize - 2] = 'Z';
+    alias[kPageSize - 1] = 0;
+
+    MapPage(kUserTestVa, frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
+
+    char buf[8];
+    for (u64 i = 0; i < sizeof(buf); ++i)
+    {
+        buf[i] = static_cast<char>(0x7F);
+    }
+    CheckUserStringResult("user-string self-test: null source", CopyUserCString(buf, sizeof(buf), nullptr),
+                          UserStringCopyStatus::BadArgument, 0);
+    CheckChar("user-string self-test: null source clears", buf[0], 0);
+
+    CheckUserStringResult("user-string self-test: empty", CopyUserCString(buf, sizeof(buf), reinterpret_cast<const void*>(kUserTestVa)),
+                          UserStringCopyStatus::Ok, 0);
+    CheckChar("user-string self-test: empty terminator", buf[0], 0);
+
+    CheckUserStringResult("user-string self-test: cap-minus-one",
+                          CopyUserCString(buf, 4, reinterpret_cast<const void*>(kUserTestVa + 16)),
+                          UserStringCopyStatus::Ok, 3);
+    CheckChar("user-string self-test: cap-minus-one byte", buf[2], 'c');
+    CheckChar("user-string self-test: cap-minus-one nul", buf[3], 0);
+
+    CheckUserStringResult("user-string self-test: no terminator",
+                          CopyUserCString(buf, 3, reinterpret_cast<const void*>(kUserTestVa + 16)),
+                          UserStringCopyStatus::NoTerminator, 3);
+    CheckChar("user-string self-test: no terminator clamps", buf[2], 0);
+
+    CheckUserStringResult("user-string self-test: truncating",
+                          CopyUserCStringTruncating(buf, 4, reinterpret_cast<const void*>(kUserTestVa + 32)),
+                          UserStringCopyStatus::NoTerminator, 3);
+    CheckChar("user-string self-test: truncating byte", buf[2], 'z');
+    CheckChar("user-string self-test: truncating nul", buf[3], 0);
+
+    CheckUserStringResult("user-string self-test: page tail",
+                          CopyUserCString(buf, 4, reinterpret_cast<const void*>(kUserTestVa + kPageSize - 2)),
+                          UserStringCopyStatus::Ok, 1);
+    CheckChar("user-string self-test: page tail byte", buf[0], 'Z');
+    CheckChar("user-string self-test: page tail nul", buf[1], 0);
+
+    alias[kPageSize - 1] = 'Q';
+    CheckUserStringResult("user-string self-test: fault before nul",
+                          CopyUserCString(buf, 4, reinterpret_cast<const void*>(kUserTestVa + kPageSize - 1)),
+                          UserStringCopyStatus::Fault, 1);
+
+    alias[64] = 'A';
+    alias[65] = 0;
+    alias[66] = 'B';
+    alias[67] = 0;
+    u16 wbuf[4];
+    CheckUserStringResult("user-string self-test: utf16",
+                          CopyUserString16(wbuf, 4, reinterpret_cast<const void*>(kUserTestVa + 64)),
+                          UserStringCopyStatus::Ok, 1);
+    CheckU16("user-string self-test: utf16 byte", wbuf[0], 'A');
+    CheckU16("user-string self-test: utf16 nul", wbuf[1], 0);
+
+    UnmapPage(kUserTestVa);
+    UnmapMmio(const_cast<u8*>(alias), kPageSize);
+    FreeFrame(frame);
+}
+
+} // namespace
 
 bool CopyToUser(void* user_dst, const void* kernel_src, u64 len)
 {
@@ -1011,6 +1216,8 @@ void PagingSelfTest()
     UnmapMmio(const_cast<u64*>(alias_a), kPageSize);
     UnmapMmio(const_cast<u64*>(alias_b), kPageSize);
     FreeFrame(frame);
+
+    UserStringCopySelfTest();
 
     const PagingStats s = PagingStatsRead();
     SerialWrite("  tables     : ");

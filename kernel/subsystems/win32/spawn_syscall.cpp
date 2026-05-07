@@ -139,11 +139,8 @@ i64 SysProcessSpawn(u64 user_path, u64 flags)
         return -1;
     }
     char path[128];
-    for (u32 i = 0; i < sizeof(path); ++i)
-        path[i] = 0;
-    if (!mm::CopyFromUser(path, reinterpret_cast<const void*>(user_path), sizeof(path) - 1))
+    if (!mm::CopyUserCString(path, sizeof(path), reinterpret_cast<const void*>(user_path)).ok())
         return -1;
-    path[sizeof(path) - 1] = 0;
 
     u64 file_len = 0;
     u8* bytes = ReadFileToHeap(path, file_len);

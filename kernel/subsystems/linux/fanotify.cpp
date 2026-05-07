@@ -383,14 +383,14 @@ i64 DoFanotifyMark(u64 fd, u64 flags, u64 mask, u64 dirfd, u64 user_path)
     const u32 idx = p->linux_fds[fd].first_cluster;
     if (idx >= kFanotifyPoolCap)
         return kEINVAL;
-    char path[kFanotifyPathCap];
-    for (u32 i = 0; i < sizeof(path); ++i)
-        path[i] = 0;
+    char path[kFanotifyPathCap] = {};
     if (user_path != 0)
     {
-        if (!mm::CopyFromUser(path, reinterpret_cast<const void*>(user_path), sizeof(path) - 1))
+        const auto copy = mm::CopyUserCString(path, sizeof(path), reinterpret_cast<const void*>(user_path));
+        if (copy.status == mm::UserStringCopyStatus::Fault || copy.status == mm::UserStringCopyStatus::BadArgument)
             return kEFAULT;
-        path[sizeof(path) - 1] = 0;
+        if (copy.status == mm::UserStringCopyStatus::NoTerminator)
+            return kENAMETOOLONG;
     }
     arch::Cli();
     FanInstance& inst = g_fan_pool[idx];

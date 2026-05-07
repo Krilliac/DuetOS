@@ -187,11 +187,8 @@ i64 SysDirOpen(u64 user_path)
     if (proc == nullptr)
         return -1;
     char path[64];
-    for (u32 i = 0; i < sizeof(path); ++i)
-        path[i] = 0;
-    if (!mm::CopyFromUser(path, reinterpret_cast<const void*>(user_path), sizeof(path) - 1))
+    if (!mm::CopyUserCString(path, sizeof(path), reinterpret_cast<const void*>(user_path)).ok())
         return -1;
-    path[sizeof(path) - 1] = 0;
     return SysDirOpenKernel(path);
 }
 

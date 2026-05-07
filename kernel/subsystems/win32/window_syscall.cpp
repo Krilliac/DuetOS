@@ -121,31 +121,13 @@ void SerialWriteDec(u64 v)
 }
 
 // Bounded copy from user space into the caller-supplied kernel
-// buffer. Returns true on success, false on fault / NUL-in-bounds
-// verification failure. `kdst` is always NUL-terminated at `cap`
-// on return (even on fault, it's zero-initialised). Max `cap-1`
-// user bytes are copied plus a guaranteed trailing NUL.
+// buffer. Returns true only when a NUL terminator is present within
+// `cap` bytes. `kdst` is always NUL-terminated on return; short
+// strings at the end of a user page do not require the next page to
+// be mapped because mm::CopyUserCString probes byte-by-byte.
 bool CopyUserString(char* kdst, u64 cap, u64 user_ptr)
 {
-    if (cap == 0)
-    {
-        return false;
-    }
-    for (u64 i = 0; i < cap; ++i)
-    {
-        kdst[i] = '\0';
-    }
-    if (user_ptr == 0)
-    {
-        return false;
-    }
-    if (!duetos::mm::CopyFromUser(kdst, reinterpret_cast<const void*>(user_ptr), cap - 1))
-    {
-        kdst[0] = '\0';
-        return false;
-    }
-    kdst[cap - 1] = '\0';
-    return true;
+    return duetos::mm::CopyUserCString(kdst, cap, reinterpret_cast<const void*>(user_ptr)).ok();
 }
 
 } // namespace
