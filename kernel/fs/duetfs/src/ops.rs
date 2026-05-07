@@ -43,6 +43,19 @@ fn locate(node: &Node, offset: u32) -> Option<(usize, u32)>
     None
 }
 
+fn last_extent_count(node: &Node) -> u32
+{
+    let mut n: u32 = 0;
+    for i in 0..MAX_INLINE_EXTENTS
+    {
+        if node.extents[i].blocks != 0
+        {
+            n = (i as u32) + 1;
+        }
+    }
+    n
+}
+
 impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
 {
     pub fn lookup_path(&self, path: &[u8]) -> FsResult<Resolved>
@@ -83,7 +96,7 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
             let (ext_idx, in_ext) = locate(&node, cur).ok_or(FsError::Corrupt)?;
             let lba = node.extents[ext_idx].block + in_ext / (BLOCK_SIZE as u32);
             let in_block = (in_ext as usize) % BLOCK_SIZE;
-            self.dev.read_block(lba, &mut block_buf).map_err(|_| FsError::Io)?;
+            self.read_data_block(lba, &mut block_buf)?;
             let chunk = ((BLOCK_SIZE - in_block) as u32).min(want - copied);
             let dst_off = copied as usize;
             dst[dst_off..dst_off + chunk as usize]
@@ -121,7 +134,7 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
             let chunk = ((BLOCK_SIZE - in_block) as u32).min(src.len() as u32 - written);
             if in_block != 0 || chunk != BLOCK_SIZE as u32
             {
-                self.dev.read_block(lba, &mut block_buf).map_err(|_| FsError::Io)?;
+                self.read_data_block(lba, &mut block_buf)?;
             }
             let s = written as usize;
             block_buf[in_block..in_block + chunk as usize]
@@ -279,13 +292,86 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         {
             return Err(FsError::NotAFile);
         }
+
+        let old_size = node.size_bytes;
         let need_blocks = blocks_for_bytes(new_size);
         if need_blocks > node.total_blocks()
         {
             self.grow_file(&mut node, need_blocks)?;
         }
+
+        // POSIX-style truncate semantics: bytes exposed by a later
+        // grow must read as zero, not as stale contents from before
+        // a shrink. Zero the affected retained blocks before freeing
+        // any whole-block tail extents. Newly allocated grow blocks
+        // are already zeroed by alloc_run / try_extend_extent, but
+        // this also fixes growth inside previously retained capacity.
+        if new_size < old_size
+        {
+            let zero_end = old_size.min(need_blocks.saturating_mul(BLOCK_SIZE as u32));
+            self.zero_file_range(&node, new_size, zero_end)?;
+            self.shrink_file_extents(&mut node, need_blocks)?;
+        }
+        else if new_size > old_size
+        {
+            self.zero_file_range(&node, old_size, new_size)?;
+        }
+
         node.size_bytes = new_size;
         self.write_node(node_id, &node)?;
+        Ok(())
+    }
+
+    fn zero_file_range(&mut self, node: &Node, start: u32, end: u32) -> FsResult<()>
+    {
+        if start >= end
+        {
+            return Ok(());
+        }
+        let mut cur = start;
+        let mut block_buf = [0u8; BLOCK_SIZE];
+        while cur < end
+        {
+            let (ext_idx, in_ext) = locate(node, cur).ok_or(FsError::Corrupt)?;
+            let lba = node.extents[ext_idx].block + in_ext / (BLOCK_SIZE as u32);
+            let in_block = (in_ext as usize) % BLOCK_SIZE;
+            let chunk = ((BLOCK_SIZE - in_block) as u32).min(end - cur);
+            self.read_data_block(lba, &mut block_buf)?;
+            block_buf[in_block..in_block + chunk as usize].fill(0);
+            self.write_data_block(lba, &block_buf)?;
+            cur += chunk;
+        }
+        Ok(())
+    }
+
+    fn shrink_file_extents(&mut self, node: &mut Node, keep_blocks: u32) -> FsResult<()>
+    {
+        let mut walked: u32 = 0;
+        let n = (node.extent_count as usize).min(MAX_INLINE_EXTENTS);
+        for i in 0..n
+        {
+            let ext = node.extents[i];
+            if ext.blocks == 0
+            {
+                continue;
+            }
+
+            if walked >= keep_blocks
+            {
+                self.free_run(ext.block, ext.blocks)?;
+                node.extents[i].block = 0;
+                node.extents[i].blocks = 0;
+            }
+            else if walked + ext.blocks > keep_blocks
+            {
+                let keep_in_extent = keep_blocks - walked;
+                let free_blocks = ext.blocks - keep_in_extent;
+                self.free_run(ext.block + keep_in_extent, free_blocks)?;
+                node.extents[i].blocks = keep_in_extent;
+            }
+            walked = walked.saturating_add(ext.blocks);
+        }
+        node.extent_count = last_extent_count(node);
         Ok(())
     }
 }

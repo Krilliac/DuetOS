@@ -5,9 +5,10 @@
 // mirrors the SB's own sb_crc32 (the SB has a self-contained CRC,
 // duplicated here so a uniform fsck pass works).
 //
-// Updates: every write through Fs::write_block_checked recomputes
-// the entry for the written LBA. Reads do NOT verify CRCs in v3 —
-// fsck does. That keeps the read hot-path free.
+// Updates: every write through Fs::write_data_block recomputes
+// the entry for the written LBA. Reads through Fs::read_data_block
+// verify data-region blocks before returning bytes to callers; fsck
+// still uses raw block reads so it can report and repair mismatches.
 //
 // The CRC table itself isn't covered by its own CRC entry (would
 // be circular); fsck flags a CRC table whose stored CRC for its

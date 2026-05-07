@@ -14,18 +14,19 @@ first Rust subsystem in the kernel. v3 ships:
 - mkfs (format an empty image)
 - create / unlink (files + directories)
 - read / write (with auto-grow that appends inline extents — up to 8 per node)
-- truncate (grow + shrink)
+- truncate (grow + shrink; shrink frees full tail blocks and zeroes retained stale ranges)
 - **symbolic links** (`create_symlink` / `readlink`, target stored inline up to 1 KiB)
 - **hard links** (`link`, with `link_count` refcount on every node; unlink decrements, only frees on 0)
 - **fsck** with per-block CRC verification, link_count drift detection, repair
-- **per-block CRC table** at LBA 2 (one CRC32 per FS block; mismatch counted by fsck)
+- **read-time CRC verification** for file, symlink-target, directory, and xattr data blocks
+- **per-block CRC table** at LBA 2 (one CRC32 per FS block; mismatch counted by fsck and checked on data reads)
 - **superblock CRC32** (corruption detection; mismatch fails open with `kStatusCorrupt`)
 - mounted at `/duetfs` from boot via `DuetFsBoot`
 - **on-disk auto-mount**: every kernel block-device handle holding a v3 superblock is mounted at `/disks/duetfs<N>`
 - routed through the standard VFS (`VfsResolve("/duetfs/...")` returns a `VfsNode` with `backend == VfsBackend::DuetFs`)
 
-CoW / journal / checksums / encryption / compression / B-tree
-directory index land in later slices.
+CoW / journal, multi-block CRC tables, encryption, compression, and
+B-tree directory indexes land in later slices.
 
 The lineage is **clean-room from RedoxFS** ([redox-os/redoxfs](https://github.com/redox-os/redoxfs),
 MIT). RedoxFS uses a B-tree and AES-XTS encryption; DuetFS v1 keeps
@@ -118,31 +119,38 @@ fsck-with-repair both write a fresh CRC; `Fs::open` rejects with
 `kStatusCorrupt` on mismatch. CRC matches `kernel/util/crc32.h` so a
 host-side image dumper can verify cross-language.
 
-Per-block CRCs are NOT stored in v2 — only the SB. Per-block checksums
-+ a trailer journal land in a follow-up slice.
+Per-block CRCs live in the single-block CRC table at LBA 2. File,
+symlink-target, directory child-list, and xattr reads recompute the block CRC and
+return `kStatusCorrupt` on mismatch before exposing bytes to callers. fsck
+still uses raw block reads so it can report and repair corruption rather than
+being blocked by the first mismatch.
 
 ### fsck
 
-`duetfs_fsck(dev, repair, &report)` walks the entire reachable tree
-from the root, recomputes the should-be bitmap from scratch, and
-diffs against the on-disk bitmap. Returns counts:
+`duetfs_fsck(dev, repair, &report)` walks the tree reachable from
+the root for orphan detection, scans every live node to keep repair
+conservative, recomputes the should-be bitmap, and diffs against
+the on-disk bitmap. Returns counts:
 
 ```
 struct FsckReport {
     u32 leaked_blocks;     // marked-used in bitmap, not reachable
     u32 missing_blocks;    // reachable, not marked-used
-    u32 orphan_nodes;      // node whose parent_id is unreachable
+    u32 orphan_nodes;      // unreachable node or parent_id chain cycle / invalid parent
     u32 bad_extents;       // extent with block out of valid range
     u32 repaired;          // 1 if bitmap was rewritten
     u32 sb_crc_mismatch;   // 1 if on-disk SB CRC differed
+    u32 block_crc_mismatch;// stored per-block CRC != recomputed CRC
+    u32 link_count_mismatch;// link_count != count derived from dir entries
 };
 ```
 
 With `repair = 1`, fsck rewrites the bitmap to match the recomputed
 should-be bitmap and rewrites the SB with a fresh `free_blocks` count
-and CRC. Today's fsck handles bitmap drift; orphan-node sweep,
-cycle-detection in `parent_id` chains, and per-block CRC validation
-land in follow-up slices.
+and CRC. Orphan nodes and `parent_id` cycles are reported but not
+automatically recycled yet; until node clearing is journaled, repair
+keeps their extents pinned instead of risking reuse behind a live
+node-table entry.
 
 **Known limits (v3):**
 
@@ -150,11 +158,10 @@ land in follow-up slices.
 - Directories cap at 1024 children (one block of child IDs).
 - Maximum image size: **4 MiB** (single-block CRC table — was 128 MiB before per-block CRCs).
 - Maximum node count: 64 per filesystem (4 blocks of node table).
-- Per-block CRCs are verified by **fsck only** — the read hot path doesn't pay the verification cost. (A future slice can flip the switch.)
+- Per-block CRCs are verified on file, symlink-target, directory child-list, and xattr reads; node-table / bitmap metadata verification remains fsck-led so repair can still inspect damaged metadata.
 - Hard link `new_path`'s last component must equal the target's existing name (v3 stores names on the inode; a separate dirent table lifts this in a future slice).
 - Symlink resolution stops at the symlink — caller re-resolves with the target. Auto-traversal in `lookup_path` lands later (cycle detection makes it non-trivial).
 - No CoW, no journal, no encryption, no compression.
-- `truncate` shrink does NOT free extent blocks (free-on-shrink lands later).
 
 ## Boot integration
 
@@ -164,7 +171,7 @@ land in follow-up slices.
 2. Calls `duetfs_mkfs` to format it (kStatusOk required).
 3. Seeds `/etc/version` with `"DuetFS v1 (kernel boot)\n"` so any boot-log checker can confirm DuetFS is alive.
 4. Registers the volume in the VFS mount table at `/duetfs` with `FsType::DuetFs` and `block_handle = 0xFFFFFFFFu` (the boot-handle sentinel).
-5. **Walks every kernel block-device handle** (ignoring partition-view handles and devices smaller than `kMinDiskBlocks = 7`). For each handle that holds a valid v2 superblock, mounts it at `/disks/duetfs<N>`. Devices that don't probe as DuetFS are left alone — auto-mkfs of a real disk is too destructive to do silently.
+5. **Walks every kernel block-device handle** (ignoring partition-view handles and devices smaller than `kMinDiskBlocks = 7`). For each handle that holds a valid DuetFS superblock, mounts it at `/disks/duetfs<N>`. Devices that don't probe as DuetFS are left alone — auto-mkfs of a real disk is too destructive to do silently.
 
 After boot, every `VfsResolve("/duetfs/<path>")` call dispatches
 through `mount.cpp`'s `DuetFsLookup`, which builds a fresh `Device`
@@ -187,7 +194,7 @@ side reads `src/ffi.rs`.
 | `duetfs_write_at(dev, node_id, off, src, src_max, out_written)` | Write bytes; auto-grow file if needed. |
 | `duetfs_create_path(dev, path, path_max, kind, out_node_id)` | Create a file or directory. Parent must exist. |
 | `duetfs_unlink_path(dev, path, path_max)` | Remove a file or empty directory. |
-| `duetfs_truncate(dev, node_id, new_size)` | Set a file's logical size, growing the extent if needed. |
+| `duetfs_truncate(dev, node_id, new_size)` | Set a file's logical size, growing extents as needed, freeing full tail blocks on shrink, and zeroing bytes exposed by later growth. |
 | `duetfs_fsck(dev, repair, out)` | Walk metadata, verify per-block CRCs, recompute bitmap, optionally repair. |
 | `duetfs_create_symlink(dev, path, path_max, target, target_max, out_node_id)` | Create a symlink; target stored inline. |
 | `duetfs_readlink(dev, node_id, dst, dst_max, out_copied)` | Read a symlink's target. |
@@ -278,13 +285,11 @@ and the format stays trivially walkable from a Rust-only `no_std` crate.
 
 Tracked in [`Roadmap.md`](../reference/Roadmap.md):
 
-- Read-time per-block CRC verification (today fsck-only).
 - Multi-block CRC table (lifts the 4 MiB cap to 32 MiB / 128 MiB).
 - Multi-block directories (raise the 1024-child cap).
 - Indirect extents (for files needing > 8 extents).
 - Separate dirent table (decouples hard-link names from the inode's `name`; supports `new_path` ≠ target's name).
 - Auto-symlink resolution in `lookup_path` with cycle detection.
-- Free-on-shrink `truncate`.
 - B-tree directory index (when first directory grows past ~1000 entries).
 - CoW + journal (durability — currently no crash safety beyond SB + per-block CRC).
 - AES-XTS encryption + Argon2 KDF.

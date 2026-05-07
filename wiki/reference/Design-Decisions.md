@@ -6070,8 +6070,8 @@ doc helps future readers audit the trail.
   3. **fsck walks the reachable tree, recomputes the should-be
      bitmap, diffs against on-disk.** Optional repair rewrites
      the bitmap and the superblock with a fresh CRC + `free_blocks`.
-     Today's fsck handles bitmap drift; orphan sweep + cycle
-     detection + per-block CRCs land later.
+     Later DuetFS slices added per-block CRCs, orphan detection,
+     and parent-chain cycle detection.
   4. **Boot probe + on-disk auto-mount.** Every kernel block-device
      handle that's not a partition view and holds a v2 superblock
      gets mounted at `/disks/duetfs<N>`. Blank devices are NEVER
@@ -6120,12 +6120,10 @@ doc helps future readers audit the trail.
     field), so the file size cap depends on free-list contiguity,
     not extent count alone.
   - **Multi-block dirs.** Still 1024-child cap.
-  - **Free-on-shrink.** Same as v1 — truncate-shrink leaves blocks
-    allocated until the file is unlinked or grown again.
   - **Auto-mkfs of a blank disk.** Boot probe never formats; that's
     a user shell command.
-  - **fsck's deeper checks** (orphan sweep, parent_id cycle
-    detection, per-block CRC scan).
+  - **fsck orphan repair.** Detection lands in a later slice;
+    automatic node recycling waits for journaled node-table repair.
 
 - **Revisit when:**
   - First file needs > 8 extents → indirect blocks, new Node field.
@@ -6138,6 +6136,107 @@ doc helps future readers audit the trail.
   - Filesystem track — DuetFS reaches "primary FS with crash-
     resistant SB". Persistent on-disk volumes mount at boot;
     the next persistence cliff is the journal.
+
+---
+
+### DD-FS-DUETFS-FSCK-DEEP-CHECKS — DuetFS fsck orphan and parent-cycle detection
+
+- **Scope & commit:** `kernel/fs/duetfs/src/fsck.rs` adds a
+  bounded root reachability walk plus a per-node `parent_id` chain
+  walk. `kernel/fs/duetfs.cpp` extends the self-test by corrupting
+  `/hello.txt`'s `parent_id` into a self-cycle and requiring
+  `orphan_nodes` to become non-zero before restoring the field.
+
+- **Decision:** fsck now reports live nodes that are unreachable
+  from the root directory, have invalid / non-directory parents, or
+  whose `parent_id` chain cycles before reaching root. Directory
+  child-list walks are bounded by `DIR_MAX_CHILDREN` and invalid
+  child IDs / directory storage extents are counted as bad extents
+  rather than indexing past the one-block directory format.
+
+- **Why:** link-count drift alone does not catch a reachable node
+  with a broken parent chain, nor does it catch an unreferenced node
+  whose extents still pin allocator space. The extra fsck pass makes
+  those structural failures visible without changing the on-disk
+  format.
+
+- **What it rules out / defers:** repair does not recycle orphan
+  nodes yet. Until node-table clearing and extent release are
+  journaled as one operation, fsck keeps orphan extents pinned in
+  the rebuilt bitmap and reports the problem for a future repair
+  policy.
+
+- **Revisit when:** node-table mutation repair is journaled; then
+  `repair=1` can clear unreachable nodes, free their extents, and
+  rewrite the CRC table in the same recovery pass.
+
+
+---
+
+### DD-FS-DUETFS-TRUNCATE-SHRINK-FREE — DuetFS truncate frees tail extents
+
+- **Scope & commit:** `kernel/fs/duetfs/src/ops.rs` teaches
+  `Fs::truncate` to zero bytes that could be exposed by a future
+  grow and to free whole tail blocks / extents when shrinking.
+  `kernel/fs/duetfs.cpp` extends the self-test to assert that a
+  shrink from 8 KiB to 4 bytes keeps exactly one block, then
+  re-grows and verifies the exposed range is zero-filled.
+
+- **Decision:** shrinking a file now returns full tail blocks to the
+  allocator immediately. The retained partial block is zeroed from
+  the new logical EOF to the block boundary covered by the old size,
+  and growth zeroes the newly exposed logical byte range.
+
+- **Why:** keeping tail blocks allocated after shrink makes the
+  allocator pessimistic and leaves stale bytes available after a
+  later grow. Freeing whole-block tails matches normal filesystem
+  expectations, and zeroing retained/grown ranges preserves the
+  caller-visible truncate contract.
+
+- **What it rules out / defers:** shrinking still works at block
+  granularity. DuetFS does not punch sub-block holes or compact
+  middle extents; sparse files remain a future format feature.
+
+- **Revisit when:** indirect extents or sparse-file support lands;
+  those features should share this zero-before-expose policy while
+  avoiding unnecessary full-block rewrites for holes.
+
+
+---
+
+### DD-FS-DUETFS-READ-CRC — DuetFS read-time data-block CRC verification
+
+- **Scope & commit:** `kernel/fs/duetfs/src/fs.rs` adds
+  `Fs::read_data_block`; `ops.rs` routes file and symlink-target
+  reads plus partial-block write preserve reads through it;
+  `ops_dir.rs` routes directory child-list reads through it;
+  `xattr.rs` routes xattr get / list / set / remove block reads
+  through it; `kernel/fs/duetfs.cpp` extends the boot self-test to require
+  `kStatusCorrupt` on a deliberately flipped data block before
+  fsck repair.
+
+- **Decision:** verify per-block CRCs on the DuetFS data-region
+  read path. The helper reads the block, recomputes CRC32, compares
+  against the cached CRC-table entry, and returns `FsError::Corrupt`
+  before any file bytes, symlink target bytes, directory child IDs,
+  or xattr records are consumed.
+
+- **Why:** the CRC table already existed and every data write updates
+  it in lockstep. Checking it at read time turns the integrity tier
+  from an operator-invoked fsck signal into a normal caller-visible
+  failure, preventing corrupted directory entries, xattr records, or file
+  contents from being used silently.
+
+- **What it rules out / defers:** node-table and bitmap reads remain
+  raw in the normal `Fs::open` / `read_node` paths for now. fsck must
+  be able to open and inspect a damaged volume to produce a report and
+  repair bookkeeping, so metadata hard-fail-on-read is a separate
+  policy decision.
+
+- **Revisit when:** the VFS/userland syscall surface needs a richer
+  error distinction than `kStatusCorrupt`, or when mount-time policy
+  grows a read-only degraded mode for metadata CRC mismatches.
+
 
 ---
 
@@ -6209,8 +6308,9 @@ doc helps future readers audit the trail.
     cleanly.
 
 - **What it rules out / defers:**
-  - **Read-time CRC verification.** Kept fsck-only to preserve
-    read perf; flip later behind a feature flag.
+  - **Metadata read-time CRC verification.** The initial read-time
+    switch covers data-region file / symlink / directory / xattr blocks;
+    node table and bitmap policy remains fsck-led.
   - **CRC table > 1 block.** 4 MiB image cap until then.
   - **Symlink auto-resolution in `lookup_path`.** Caller-side
     re-resolve until cycle detection lands.
@@ -6222,8 +6322,9 @@ doc helps future readers audit the trail.
   - **Encryption / compression.** Both untouched in v3.
 
 - **Revisit when:**
-  - First production read benchmark says CRC verification is
-    free → flip read-time verification on.
+  - First production metadata-corruption incident needs mount-time
+    hard-fail semantics → extend read-time verification to node
+    table / bitmap reads.
   - First image > 4 MiB needs a CRC table → multi-block CRC
     table.
   - First user wants `link("/a", "/dir/b")` to do POSIX-style
