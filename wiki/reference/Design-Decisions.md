@@ -5840,3 +5840,402 @@ doc helps future readers audit the trail.
   mtime in DirEntry; multi-line InputBox lands; recurring
   events become a real workload.
 
+---
+
+### DD-RUST-001 — Rust toolchain bootstrap via DuetFS v0
+
+- **Scope & commit:** `kernel/fs/duetfs/` (Rust crate) +
+  `kernel/fs/duetfs.{h,cpp}` + `kernel/fs/duetfs_image.cpp` +
+  `kernel/fs/duetfs_rust_panic.cpp` + `rust-toolchain.toml`. First
+  Rust subsystem in the kernel.
+
+- **Decision:**
+  1. **Trigger #1 (on-disk filesystem) of the Rust bring-up
+     plan is hereby fired.** The toolchain is wired in at
+     nightly-2026-01-15 with `rust-src` + `x86_64-unknown-none`
+     pinned in `/rust-toolchain.toml`.
+  2. **DuetFS is clean-room from RedoxFS** — file lineage is
+     called out in source comments and `wiki/filesystem/DuetFS.md`,
+     but the on-disk format, build system, and source code are
+     written from scratch. RedoxFS's MIT license and B-tree /
+     AES-XTS / Argon2 / LZ4 stack are studied as prior art only;
+     none of their crates are vendored in v0.
+  3. **v0 ships a deliberately tiny on-disk format** — fixed 256 B
+     nodes, one contiguous extent per file, flat node table, no
+     CoW, no journal, no encryption, no compression. The first
+     slice's job is to prove the FFI / build / link / boot self-
+     test path works, not to ship a feature-complete FS.
+  4. **The image is in-memory only in v0** — synthesized at boot
+     into a 16 KiB `.bss` buffer by `BuildSelfTestImage`. Block-
+     device backing is a separate slice.
+  5. **CMake side is a leaf custom_command** — `kernel/fs/duetfs/
+     CMakeLists.txt` runs `cargo build --release --target
+     x86_64-unknown-none -Z build-std=core,alloc -Z
+     build-std-features=compiler-builtins-mem` and exposes the
+     produced `libduetfs.a` to both kernel stages via
+     `target_link_libraries`. No new build system; cargo is a
+     leaf, not a peer.
+  6. **C ↔ Rust contract is hand-mirrored** — `include/duetfs.h`
+     (C++) and `src/ffi.rs` (Rust) define the same four-call
+     surface (probe / lookup / read_file / panic shim). Bindgen /
+     cbindgen are forbidden — short enough that code review
+     catches drift.
+
+- **Why:**
+  - Trigger #1 fired naturally: the slice parses on-disk metadata
+    (a superblock + node table) from a buffer the kernel will
+    eventually receive from a block device. That's the exact
+    "attacker-controllable byte stream" the bring-up plan named.
+  - Clean-room rather than vendor-and-rename keeps the on-disk
+    format ours, so future divergence from RedoxFS doesn't fight
+    upstream conventions. The cost (writing format.rs / image.rs /
+    lookup.rs from scratch) is about 250 lines for v0 — much
+    smaller than untangling the RedoxFS adapter layer.
+  - Tiny v0 format means the slice ships a working end-to-end
+    FFI in one PR without dragging in `aes-xts` / `argon2` /
+    `lz4_flex`. Each of those is its own future PR with its own
+    blast-radius review.
+  - In-memory image keeps the read-path entirely deterministic
+    for the boot self-test — no disk dependency, no FAT32-style
+    "skip if no volume" branch.
+
+- **What it rules out / defers:**
+  - **Vendoring upstream redoxfs.** Re-adopting upstream sources
+    would now require rewriting every file we authored.
+  - **B-tree / hash-tree directory index.** Flat node table caps
+    directories at ~16 entries until that lands.
+  - **Multiple extents per file.** Single contiguous extent only.
+  - **A second Rust subsystem before the toolchain has been
+    proven on this one.** The CMake leaf-target pattern is in
+    place; the next crate's CMakeLists is a copy-paste with the
+    crate name swapped.
+  - **Vendoring redoxfs's encryption/compression stack.** Each
+    of `aes-xts`, `argon2`, `lz4_flex`, `seahash` is its own slice
+    when the workload that wants it appears.
+  - **VFS routing integration.** No `FsType::DuetFs` enum value
+    yet — the self-test exercises the FFI directly. Routing lands
+    after the block-device backing.
+
+- **Revisit when:**
+  - A second Rust crate lands → factor any duplicate CMake bits
+    into a `duetos_rust_subsystem(name)` helper function.
+  - Block-device backing is wired → DuetFS becomes mountable;
+    `FsType::DuetFs` lands; the synthesized self-test image
+    moves out of `.bss` and onto a ramdisk image baked into the
+    kernel via `embed-blob.py`.
+  - First directory grows past ~1000 entries → swap the flat
+    child-id list for a B-tree.
+  - First file needs to span > one extent → swap to multi-extent.
+  - First panic from the Rust side fires in production → tighten
+    the `duetos_rust_panic` shim to capture the file:line site
+    via `core::panic::Location` (today only the message is
+    forwarded).
+
+- **Related roadmap track(s):**
+  - Rust bring-up — section in [`Roadmap.md`](Roadmap.md) updated
+    from "first crate lands when" → "bootstrapped; remaining
+    triggers apply for future crates".
+  - Filesystem track — DuetFS becomes the project's native FS
+    once the block-device backing slice ships.
+
+---
+
+### DD-FS-DUETFS-V1 — DuetFS v1: write path + free-block bitmap + VFS routing
+
+- **Scope & commit:** `kernel/fs/duetfs/` (Rust crate, near-total
+  rewrite of v0) + `kernel/fs/duetfs.{h,cpp}` (kernel adapter) +
+  `kernel/fs/duetfs_block_dev.cpp` (Device builders) +
+  `kernel/fs/mount.{h,cpp}` (FsType::DuetFs, DuetFsLookup) +
+  `kernel/fs/vfs.{h,cpp}` (VfsBackend::DuetFs + VfsNode fields) +
+  `kernel/core/main.cpp` (DuetFsBoot + DuetFsSelfTest at boot).
+
+- **Decision:**
+  1. **DuetFS jumps from v0 (read-only synthesized image) to v1
+     (write path, mounted at boot)** in a single slice. The v0
+     surface was a stepping-stone to prove FFI plumbing; production
+     workloads need a real read+write FS.
+  2. **On-disk format v1 layout** = superblock(1) + free-bitmap(1) +
+     node-table(4) + data(rest). 64 nodes max, 128 MiB max image,
+     1024 children per directory. Single contiguous extent per
+     file with `ext_blocks` headroom (auto-grow via realloc-and-
+     copy, double-and-grow strategy).
+  3. **Magic bumped from "DuetFS00" to "DuetFS01"; version 1 → 2.**
+     v0 images are NOT compatible with v1 readers — there is no
+     migration path because v0 was never persistent.
+  4. **One Device descriptor for both backends.** `kernel/fs/duetfs/
+     include/duetfs.h` declares a single `Device` struct with
+     read/write callbacks; the C++ adapter
+     (`duetfs_block_dev.cpp`) provides two builders —
+     `MakeMemoryDevice` (cookie = a small struct holding buf+len)
+     and `MakeBlockHandleDevice` (cookie = the block handle, cast
+     through `uptr`). The Rust crate doesn't know which is which.
+     This avoids a polymorphic Rust trait at the FFI boundary and
+     keeps the crate truly stateless across calls.
+  5. **Stateless FFI.** Each `duetfs_*` call constructs a fresh
+     `Fs` from the descriptor, performs the op, drops the `Fs`.
+     The bitmap auto-flushes on every mutation, so a successful
+     return leaves the device consistent. No retained state, no
+     handle table.
+  6. **VfsNode extended with five duetfs fields**
+     (`block_handle / node_id / kind / size / child_count`). Same
+     by-value snapshot pattern as the FAT32 backend so callers
+     don't have to track FS-internal lifetimes.
+  7. **Boot mount lives in `.bss`, not a kernel block-device.**
+     `RamBlockDeviceCreate` allocates its own buffer at runtime;
+     for the boot mount we want a known address before init runs,
+     so the boot image is a static array and the kernel-block-
+     handle adapter is exercised by self-test code on a separately-
+     created RAM disk in a later slice. The block-handle backend
+     IS implemented — it just doesn't drive the boot mount today.
+
+- **Why:**
+  - Becoming the project's primary FS requires write capability.
+    v0 was a scaffold, not a usable filesystem.
+  - Free-bitmap allocator is a real allocator (not bump-only) so
+    unlink + truncate-shrink can actually reclaim blocks, not
+    leak them. Required for any long-lived workload.
+  - Auto-grow on write keeps the per-call API simple — callers
+    don't have to call truncate-then-write — at the cost of some
+    realloc churn. v0 had no growth semantics at all.
+  - VFS routing integration means every kernel caller that already
+    speaks the VFS (sandbox enforcement, syscall path resolution)
+    transparently sees DuetFS the same way it sees FAT32 and
+    ramfs. No special-case code.
+  - One descriptor / two backends keeps the build matrix flat —
+    a future kernel-block-handle-backed boot mount adds zero new
+    FFI surface.
+
+- **What it rules out / defers:**
+  - **v0 disk-image compatibility.** No upgrade path; the magic
+    bump is a hard wall.
+  - **Multi-extent files.** Single contiguous extent forces
+    realloc-and-copy on every grow past ext_blocks. Acceptable
+    for v1 workloads (small config files, kernel logs); painful
+    for large files. Multi-extent is the next FS slice.
+  - **Multi-block dirs.** 1024 children/dir is plenty for typical
+    `/etc`, `/bin`, `/home/$user` — but not for a sprawling
+    `/usr/share`. Bumping the cap requires multi-block dir
+    children + a B-tree, both later slices.
+  - **Persistent backing.** The boot image lives in `.bss` and is
+    lost on reboot. A real on-disk DuetFS partition (probe the
+    boot disk, mkfs if blank) is its own slice.
+  - **Crash safety.** No journal, no CoW. A crash mid-mutation
+    leaves a node and a bitmap entry that disagree. `fsck` lands
+    when there's a real workload that crashes.
+  - **Free-on-shrink truncate.** Shrinking a file via truncate
+    keeps the extent allocated — the wasted blocks become
+    unreachable until the file is unlinked or grown again.
+
+- **Revisit when:**
+  - First file needs to be > ~256 KiB (the boot image size, and
+    where realloc cost first hurts) → multi-extent.
+  - First directory grows past 1024 children → multi-block dirs +
+    B-tree.
+  - First crash-resilience requirement appears → CoW or journal.
+  - First reboot test that needs the FS to survive → persistent
+    on-disk backing.
+  - First time the 64-node cap matters → bump `NODE_TABLE_BLOCKS`
+    or move to dynamically-sized node tables.
+  - First time a kernel block-device handle gets used to back a
+    DuetFS volume → the block-handle adapter (already in the
+    tree) becomes the primary path.
+
+- **Related roadmap track(s):**
+  - Filesystem track — DuetFS surface flips from "read-only
+    proof of concept" to "primary FS with write path".
+
+---
+
+### DD-FS-DUETFS-V2 — DuetFS v2: multi-extent + CRC + fsck + on-disk auto-mount
+
+- **Scope & commit:** `kernel/fs/duetfs/src/format.rs` + new
+  `crc32.rs` + new `fsck.rs` + extent-aware `ops.rs` + extent-aware
+  `ops_dir.rs::grow_file` + `mkfs.rs` (writes CRC) + `ffi.rs`
+  (`duetfs_fsck` + new status codes) + `kernel/fs/duetfs.cpp`
+  (boot-time disk probe).
+
+- **Decision:**
+  1. **Multi-extent files**: Node carries up to 8 inline extents
+     instead of a single contiguous extent. `grow_file` first tries
+     to extend the last extent in place (cheap), then allocates a
+     new extent if a slot is free, then returns
+     `kStatusNoSpaceExtents` (no realloc-and-copy). This drops the
+     v1 single-extent constraint without dragging in indirect
+     blocks.
+  2. **Superblock CRC32 (zlib polynomial 0xEDB88320)** —
+     foundation for corruption detection. mkfs writes it; mutation
+     paths (today: only fsck-with-repair) rewrite it. `Fs::open`
+     verifies on every mount and returns `kStatusCorrupt` on
+     mismatch.
+  3. **fsck walks the reachable tree, recomputes the should-be
+     bitmap, diffs against on-disk.** Optional repair rewrites
+     the bitmap and the superblock with a fresh CRC + `free_blocks`.
+     Today's fsck handles bitmap drift; orphan sweep + cycle
+     detection + per-block CRCs land later.
+  4. **Boot probe + on-disk auto-mount.** Every kernel block-device
+     handle that's not a partition view and holds a v2 superblock
+     gets mounted at `/disks/duetfs<N>`. Blank devices are NEVER
+     auto-mkfs'd — that's a destructive operation that requires an
+     explicit user command (in a future userland-shell slice).
+  5. **Format-version bump from 2 to 3.** Magic stays
+     `"DuetFS01"` to keep the dump tool's grep stable; the version
+     field signals the layout difference. v1 images are rejected
+     with `kStatusInvalid` (version mismatch) by v2 readers — there
+     was no persistent v1 storage in the wild, so the break is
+     real but harmless.
+  6. **Per-block CRCs deliberately deferred to a follow-up.**
+     Storing CRCs alongside data blocks needs either a separate CRC
+     region (file-system-wide table) or per-block trailers (cuts
+     usable block size). Both are real design decisions — neither
+     fits in this slice.
+
+- **Why:**
+  - Multi-extent: v1's "realloc-and-copy on grow past extent"
+    was correct but quadratic for streaming writes. With 8 inline
+    extents, a streaming write that starts at 0 and ends at 32 KiB
+    finishes with ≤ 8 allocations and zero copies. The next
+    cliff (file > 8 extents worth of capacity) lands when first
+    workload hits it.
+  - SB CRC: cheap (one CRC per mount + on every mutation today,
+    none of those are hot-path), catches torn writes from a power
+    loss during the SB write. Per-block CRCs would catch the
+    much wider class of "block X is corrupt" — but they're a
+    bigger design decision.
+  - fsck: necessary the moment there's any persistence story. v2's
+    `.bss`-backed boot image doesn't survive a reboot, but the
+    on-disk auto-mount path means real disks DO survive — and a
+    crash mid-mutation needs a recovery story.
+  - Auto-mount on probe (not on mkfs): we never want the boot path
+    to silently format a stranger's disk. A blank disk gets ignored
+    until a user explicitly says "format this".
+
+- **What it rules out / defers:**
+  - **Per-block CRCs.** Only the SB has a CRC in v2; a corrupted
+    data block reads stale bytes silently.
+  - **CoW / journal.** A crash mid-write to a file's data extent
+    can leave the file with garbage at the unflushed offset; v2
+    has no protection against torn writes outside the SB.
+  - **Indirect extents.** Files needing > 8 extents are out of
+    luck. Each extent can be many blocks (single 4-byte u32 length
+    field), so the file size cap depends on free-list contiguity,
+    not extent count alone.
+  - **Multi-block dirs.** Still 1024-child cap.
+  - **Free-on-shrink.** Same as v1 — truncate-shrink leaves blocks
+    allocated until the file is unlinked or grown again.
+  - **Auto-mkfs of a blank disk.** Boot probe never formats; that's
+    a user shell command.
+  - **fsck's deeper checks** (orphan sweep, parent_id cycle
+    detection, per-block CRC scan).
+
+- **Revisit when:**
+  - First file needs > 8 extents → indirect blocks, new Node field.
+  - First crash mid-mutation corrupts user data → CoW or journal.
+  - First disk fail surfaces a single bad sector → per-block CRCs.
+  - First directory grows past 1024 children → multi-block dirs.
+  - First boot of a real disk needs to be auto-formatted → user shell `mkfs.duetfs /dev/...`.
+
+- **Related roadmap track(s):**
+  - Filesystem track — DuetFS reaches "primary FS with crash-
+    resistant SB". Persistent on-disk volumes mount at boot;
+    the next persistence cliff is the journal.
+
+---
+
+### DD-FS-DUETFS-V3 — DuetFS v3: per-block CRCs + symlinks + hard links
+
+- **Scope & commit:** `kernel/fs/duetfs/src/format.rs` (CRC table
+  fields, NODE_KIND_SYMLINK, link_count) + new `crc_table.rs` +
+  `fs.rs` (caches CRC table, `write_data_block` helper) +
+  `mkfs.rs` (initializes CRC table) + `ops.rs` (symlinks +
+  hardlinks + write_data_block routing) + `ops_dir.rs` (link_count
+  on create) + `fsck.rs` (per-block CRC + link_count verification)
+  + `ffi.rs` (3 new fns + 2 new status codes + extended FsckReport)
+  + `kernel/fs/duetfs/include/duetfs.h` (mirrored).
+
+- **Decision:**
+  1. **Per-block CRC table at LBA 2.** One block, 1024 × u32
+     entries, indexed by FS block LBA. Updated in lockstep with
+     every data-block write via `Fs::write_data_block`.
+     **Verified by fsck only**, not on the read hot path — keeps
+     reads cheap until a workload demands stronger guarantees.
+  2. **Image cap drops from 128 MiB to 4 MiB.** Single CRC block
+     covers 1024 FS blocks. Multi-block CRC tables (lifting the
+     cap to 32 MiB / 128 MiB) is a separate slice.
+  3. **NODE_KIND_SYMLINK = 3.** Target string stored inline in
+     the symlink node's first extent (one block, capped at
+     `SYMLINK_TARGET_MAX = 1024` bytes). `lookup_path` does NOT
+     auto-resolve through symlinks in v3 — it returns the symlink
+     kind and lets the caller re-resolve. Cycle detection makes
+     auto-resolution non-trivial; ship the inert form first.
+  4. **Hard links via `link_count` refcount on every node.**
+     `unlink` decrements; only frees extents and recycles the
+     node when `link_count` reaches 0. fsck cross-checks node
+     `link_count` against the count derived from dir entries
+     and reports drift in `link_count_mismatch`.
+  5. **v3 hard-link caveat: `new_path`'s last component must
+     equal the target's existing name.** v3 stores the name on
+     the inode itself; until a separate dirent table lands, two
+     dirents pointing at the same inode share a single name.
+     POSIX `link("/a", "/dir/b")` would semantically rename;
+     v3 returns `kStatusInvalid` rather than allow that.
+  6. **Symlink targets are byte-for-byte preserved**, NOT
+     resolved at creation. `readlink` returns the bytes
+     verbatim. Same shape as POSIX `readlink(2)`.
+  7. **Format-version bump 3 → 4.** Magic stays `"DuetFS01"`.
+     v2 images fail open() with `kStatusInvalid` (version
+     mismatch). On-disk v2 volumes from the previous slice need
+     to be reformatted; the boot self-test was the only known
+     consumer and it formats every time.
+  8. **fsck rebuilds the CRC table on repair**, not just the
+     bitmap. After `fsck(repair=1)` a clean second pass reports
+     zero CRC mismatches. Repair semantics: trust the
+     metadata + data blocks, rewrite the bookkeeping.
+
+- **Why:**
+  - Per-block CRCs give us bit-rot detection (the foundation
+    of a real durability story). Coupled with a future journal,
+    this becomes "data integrity end-to-end" for free —
+    journal commit can verify CRCs as it replays.
+  - SB-only CRC (v2) catches torn writes to the SB itself but
+    nothing else. v3 catches "block X is corrupt" — though only
+    on demand at fsck time, which is when an operator runs it
+    explicitly or at mount-time recovery.
+  - Symlinks and hard links are POSIX bedrock. Every Unix
+    binary that calls `symlink(2)` / `link(2)` works the day
+    the userland syscall surface lands.
+  - link_count on every node, not just files, means dirs are
+    refcounted too (root has self-loop link_count=1). Sets up
+    the "rmdir an empty dir frees the inode" semantics
+    cleanly.
+
+- **What it rules out / defers:**
+  - **Read-time CRC verification.** Kept fsck-only to preserve
+    read perf; flip later behind a feature flag.
+  - **CRC table > 1 block.** 4 MiB image cap until then.
+  - **Symlink auto-resolution in `lookup_path`.** Caller-side
+    re-resolve until cycle detection lands.
+  - **Hard-link names different from target's name.** Needs a
+    dirent table.
+  - **Journal.** Mid-write crash on a file's data extent still
+    leaves garbage at the unflushed offset. CRC catches it
+    after the fact; no atomic-commit guarantee.
+  - **Encryption / compression.** Both untouched in v3.
+
+- **Revisit when:**
+  - First production read benchmark says CRC verification is
+    free → flip read-time verification on.
+  - First image > 4 MiB needs a CRC table → multi-block CRC
+    table.
+  - First user wants `link("/a", "/dir/b")` to do POSIX-style
+    rename → dirent table.
+  - First package install with symlinks works on a real disk →
+    auto-symlink resolution.
+
+- **Related roadmap track(s):**
+  - Filesystem track — DuetFS reaches "primary FS with data
+    integrity tier". Next cliffs: journal, encryption.
+
+
+
+
+

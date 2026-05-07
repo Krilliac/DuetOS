@@ -1,6 +1,7 @@
 #include "fs/mount.h"
 
 #include "core/panic.h"
+#include "fs/duetfs.h"
 #include "fs/fat32.h"
 #include "fs/vfs.h"
 #include "log/klog.h"
@@ -95,6 +96,8 @@ const char* FsTypeName(FsType t)
         return "ext4";
     case FsType::Ntfs:
         return "ntfs";
+    case FsType::DuetFs:
+        return "duetfs";
     }
     return "unknown";
 }
@@ -308,6 +311,45 @@ bool Fat32Lookup(u32 block_handle, const char* subpath, void* out_node)
 
 constinit VfsBackendOps g_fat32_ops = {&Fat32Lookup};
 
+bool DuetFsLookup(u32 block_handle, const char* subpath, void* out_node)
+{
+    if (subpath == nullptr || out_node == nullptr)
+    {
+        return false;
+    }
+    const auto dev = duetos::fs::duetfs::DeviceForMountHandle(block_handle);
+    if (dev.read == nullptr)
+    {
+        return false;
+    }
+    duetos::fs::duetfs::LookupResult res{};
+    // strlen-bounded path buffer is OK here: subpath comes from
+    // mount.cpp's resolver which already trims to a kernel-owned
+    // string; the FFI walks until NUL or path_max, whichever first.
+    usize n = 0;
+    while (subpath[n] != '\0')
+    {
+        ++n;
+    }
+    const u32 status = duetfs_lookup(&dev, reinterpret_cast<const u8*>(subpath), n + 1, &res);
+    if (status != duetos::fs::duetfs::kStatusOk)
+    {
+        return false;
+    }
+    auto* out = static_cast<VfsNode*>(out_node);
+    out->backend = VfsBackend::DuetFs;
+    out->ramfs = nullptr;
+    out->fat32_volume_idx = 0;
+    out->duetfs_block_handle = block_handle;
+    out->duetfs_node_id = res.node_id;
+    out->duetfs_kind = res.kind;
+    out->duetfs_size_bytes = res.size_bytes;
+    out->duetfs_child_count = res.child_count;
+    return true;
+}
+
+constinit VfsBackendOps g_duetfs_ops = {&DuetFsLookup};
+
 } // namespace
 
 const VfsBackendOps* VfsBackendForFsType(FsType t)
@@ -316,6 +358,8 @@ const VfsBackendOps* VfsBackendForFsType(FsType t)
     {
     case FsType::Fat32:
         return &g_fat32_ops;
+    case FsType::DuetFs:
+        return &g_duetfs_ops;
     case FsType::Ramfs:
     case FsType::Ext4:
     case FsType::Ntfs:

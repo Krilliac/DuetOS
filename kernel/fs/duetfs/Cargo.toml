@@ -1,0 +1,49 @@
+# DuetFS — DuetOS native filesystem (v0).
+#
+# Clean-room rewrite inspired by RedoxFS (https://github.com/redox-os/redoxfs,
+# MIT). The v0 on-disk layout is intentionally a small subset — fixed
+# 256 B nodes, linear extents, no CoW, no encryption — chosen so the
+# first Rust subsystem to land in DuetOS proves the FFI / build / VFS
+# plumbing end-to-end without dragging in aes-xts / argon2 / lz4 on
+# day one. The format will diverge further from RedoxFS as DuetFS
+# evolves; the lineage stays in this comment so future readers can
+# follow the prior art without digging.
+#
+# Rules (see wiki/reference/Roadmap.md "Rust bring-up"):
+#   - no_std  — kernel can't bring in libstd.
+#   - panic = abort — kernel can't unwind.
+#   - core + alloc only — every other dep is a future slice's PR.
+#   - exposes a narrow C FFI (include/duetfs.h, hand-written) that
+#     the C++ kernel side calls; no Rust appears in the middle of a
+#     C++ call chain.
+
+[package]
+name    = "duetfs"
+version = "0.0.1"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "DuetOS native filesystem (v0). Clean-room rewrite inspired by RedoxFS."
+
+[lib]
+name       = "duetfs"
+crate-type = ["staticlib"]
+
+[profile.release]
+panic       = "abort"
+lto         = "thin"
+opt-level   = "z"
+codegen-units = 1
+strip       = true
+overflow-checks = true
+
+[profile.dev]
+panic           = "abort"
+opt-level       = 1
+overflow-checks = true
+debug           = true
+
+# Intentionally no [dependencies]. The v0 read path needs core + alloc
+# only — anything beyond that is a follow-up slice. RedoxFS pulls in
+# aes / xts-mode / argon2 / lz4_flex / seahash; the equivalents land
+# behind their own Roadmap items, not this one.
