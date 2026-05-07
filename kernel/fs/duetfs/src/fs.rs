@@ -13,10 +13,11 @@ use crate::crc32::crc32;
 use crate::crc_table::CrcTable;
 use crate::format::{
     Node, Superblock, BITMAP_LBA, BLOCK_SIZE, CRC_TABLE_BLOCKS, CRC_TABLE_LBA, DATA_LBA,
-    MAGIC, MAX_INLINE_EXTENTS, NAME_MAX, NODE_COUNT, NODE_KIND_UNUSED, NODE_SIZE,
-    NODE_TABLE_BLOCKS, NODE_TABLE_LBA, NODES_PER_BLOCK, ROOT_NODE_ID, SUPERBLOCK_LBA,
-    VERSION,
+    JOURNAL_BLOCKS, JOURNAL_LBA, MAGIC, MAX_INLINE_EXTENTS, NAME_MAX, NODE_COUNT,
+    NODE_KIND_UNUSED, NODE_SIZE, NODE_TABLE_BLOCKS, NODE_TABLE_LBA, NODES_PER_BLOCK,
+    ROOT_NODE_ID, SUPERBLOCK_LBA, VERSION,
 };
+use crate::journal;
 
 #[derive(Clone, Copy)]
 pub enum FsError
@@ -47,6 +48,14 @@ pub struct Fs<'d, D: BlockDevice + ?Sized + 'd>
     pub(crate) sb: Superblock,
     pub(crate) bitmap: BitmapAllocator,
     pub(crate) crc_table: CrcTable,
+    /// Next txn id to issue when wrapping a metadata write through
+    /// `journal::apply`. Persisted only implicitly — on mount the
+    /// replay path picks `last_committed_txn + 1` from the on-disk
+    /// descriptor; an empty journal seeds it to 1. Wraparound is
+    /// not a correctness concern (txn ids are advisory; the state
+    /// machine runs off the descriptor's `state` field), so a
+    /// saturating increment is fine.
+    pub(crate) next_txn_id: u32,
 }
 
 impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
@@ -65,6 +74,8 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
             || sb.node_table_lba != NODE_TABLE_LBA
             || sb.node_table_blocks != NODE_TABLE_BLOCKS
             || sb.node_count != NODE_COUNT
+            || sb.journal_lba != JOURNAL_LBA
+            || sb.journal_blocks != JOURNAL_BLOCKS
             || sb.data_lba != DATA_LBA
             || sb.total_blocks > dev.block_count()
         {
@@ -76,9 +87,23 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         {
             return Err(FsError::Corrupt);
         }
+        // Replay any committed-but-unfinished journal txn. Must run
+        // BEFORE we load the bitmap / crc_table so a torn write to
+        // either of those structures gets rolled forward first. On a
+        // read-only mount the journal can still hold a committed txn;
+        // skip replay (the dev refuses writes anyway) and accept that
+        // structural integrity matches whatever's on disk.
+        let next_txn_id = if dev.is_read_only()
+        {
+            1
+        }
+        else
+        {
+            journal::replay(dev, JOURNAL_LBA)?
+        };
         let bitmap = BitmapAllocator::load(dev, sb.total_blocks).map_err(|_| FsError::Io)?;
         let crc_table = CrcTable::load(dev).map_err(|_| FsError::Io)?;
-        Ok(Self { dev, sb, bitmap, crc_table })
+        Ok(Self { dev, sb, bitmap, crc_table, next_txn_id })
     }
 
     #[allow(dead_code)]
@@ -134,11 +159,20 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         block[off..off + NODE_SIZE].copy_from_slice(unsafe {
             core::slice::from_raw_parts((node as *const Node) as *const u8, NODE_SIZE)
         });
-        // Node table is metadata; CRC entries cover it for fsck.
-        self.dev.write_block(lba, &block).map_err(|_| FsError::Io)?;
+        // Atomic via the journal: the node-table block + the matching
+        // CRC-table block move together. Without this, a torn write
+        // between the two leaves the on-disk node valid but its CRC
+        // entry stale (or vice versa) — fsck would flag it as
+        // corruption when the FS is actually self-consistent.
         let crc = crc32(&block);
         self.crc_table.set(lba, crc);
-        self.crc_table.flush(self.dev).map_err(|_| FsError::Io)?;
+        let crc_block = self.crc_table.materialise();
+        let txn_id = self.next_txn_id;
+        self.next_txn_id = txn_id.saturating_add(1).max(1);
+        journal::apply(
+            self.dev, JOURNAL_LBA, txn_id,
+            &[(lba, &block), (CRC_TABLE_LBA, &crc_block)],
+        )?;
         Ok(())
     }
 
@@ -251,7 +285,8 @@ fn read_superblock(block: &[u8]) -> Superblock
         data_lba: 0,
         free_blocks: 0,
         sb_crc32: 0,
-        reserved: [0; 2],
+        journal_lba: 0,
+        journal_blocks: 0,
     };
     let raw = unsafe {
         core::slice::from_raw_parts_mut(

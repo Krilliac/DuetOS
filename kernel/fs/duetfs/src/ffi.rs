@@ -12,9 +12,12 @@
 
 use core::ffi::{c_uchar, c_uint, c_void};
 
-use crate::block_dev::{ExternBlockDevice, ExternBlockDeviceOps};
-use crate::format::{NODE_KIND_DIR, NODE_KIND_FILE, NODE_KIND_UNUSED, ROOT_NODE_ID};
+use crate::block_dev::{BlockDevice, ExternBlockDevice, ExternBlockDeviceOps};
+use crate::format::{
+    BLOCK_SIZE, JOURNAL_LBA, NODE_KIND_DIR, NODE_KIND_FILE, NODE_KIND_UNUSED, ROOT_NODE_ID,
+};
 use crate::fs::{Fs, FsError};
+use crate::journal;
 use crate::mkfs;
 use crate::path::split_parent_and_name;
 
@@ -444,3 +447,98 @@ pub static DUETFS_KIND_FILE: u32 = NODE_KIND_FILE;
 pub static DUETFS_KIND_DIR: u32 = NODE_KIND_DIR;
 #[no_mangle]
 pub static DUETFS_ROOT_NODE_ID: u32 = ROOT_NODE_ID;
+
+// ----------------------------------------------------------------
+// Journal FFI — diagnostic + self-test helpers.
+// ----------------------------------------------------------------
+
+/// Read a raw block at `lba` into `dst`. Bypasses the FS — useful
+/// for the journal self-test which inspects on-disk state directly.
+/// Returns kStatusOk on success.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_block_read(
+    desc: *const DuetFsDevice, lba: u32, dst: *mut u8,
+) -> c_uint
+{
+    if dst.is_null()
+    {
+        return STATUS_INVALID;
+    }
+    let Some(dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    if lba >= dev.block_count()
+    {
+        return STATUS_INVALID;
+    }
+    let buf = unsafe { core::slice::from_raw_parts_mut(dst, BLOCK_SIZE) };
+    match dev.read_block(lba, buf)
+    {
+        Ok(()) => STATUS_OK,
+        Err(_) => STATUS_IO,
+    }
+}
+
+/// Apply a single (target_lba, payload) write through the journal.
+/// Atomic against torn writes — either the new payload reaches the
+/// target or the FS is left exactly as it was. `payload` MUST point
+/// at a kernel-space buffer of at least kBlockSize bytes.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_journal_apply(
+    desc: *const DuetFsDevice, target_lba: u32, payload: *const u8,
+) -> c_uint
+{
+    if payload.is_null()
+    {
+        return STATUS_INVALID;
+    }
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    let buf = unsafe { core::slice::from_raw_parts(payload, BLOCK_SIZE) };
+    // txn_id of 1 is fine for the standalone helper — Fs::open's
+    // replay path doesn't depend on monotonicity (it only reads the
+    // descriptor's `state`).
+    match journal::apply(&mut dev, JOURNAL_LBA, 1, &[(target_lba, buf)])
+    {
+        Ok(()) => STATUS_OK,
+        Err(e) => err_to_status(e),
+    }
+}
+
+/// Test-only: stage a single (target_lba, payload) write through
+/// the journal AND mark it COMMITTED, but skip the apply step.
+/// Simulates a torn write between "journal fsync'd" and "apply
+/// finished" — the next call to a function that opens the FS
+/// (probe / lookup / mkfs aren't probe-only — only FFIs that go
+/// through Fs::open) will replay it. Used exclusively by the boot
+/// self-test in kernel/fs/duetfs.cpp.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_journal_inject_for_test(
+    desc: *const DuetFsDevice, target_lba: u32, payload: *const u8,
+) -> c_uint
+{
+    if payload.is_null()
+    {
+        return STATUS_INVALID;
+    }
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    let buf = unsafe { core::slice::from_raw_parts(payload, BLOCK_SIZE) };
+    match journal::inject_committed_for_test(&mut dev, JOURNAL_LBA, 1, &[(target_lba, buf)])
+    {
+        Ok(()) => STATUS_OK,
+        Err(e) => err_to_status(e),
+    }
+}
+
+/// Read the journal descriptor's `state` field. 0 = empty, 1 =
+/// committed (replay pending). Other values reflect a corrupt
+/// descriptor and are reported verbatim. Diagnostic — never fails
+/// the FS-open path (Fs::open replays first), so a clean mount
+/// always reports state == 0.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_journal_state(desc: *const DuetFsDevice) -> c_uint
+{
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return c_uint::MAX };
+    match journal::peek_descriptor(&mut dev, JOURNAL_LBA)
+    {
+        Ok(d) => d.state,
+        Err(_) => c_uint::MAX,
+    }
+}

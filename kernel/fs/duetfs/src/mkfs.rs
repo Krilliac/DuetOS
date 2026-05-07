@@ -11,9 +11,9 @@ use crate::crc32::crc32;
 use crate::crc_table::CrcTable;
 use crate::format::{
     Extent, Node, Superblock, BITMAP_LBA, BLOCK_SIZE, CRC_TABLE_BLOCKS, CRC_TABLE_LBA,
-    DATA_LBA, MAGIC, MIN_TOTAL_BLOCKS, NODE_COUNT, NODE_KIND_DIR, NODE_SIZE,
-    NODE_TABLE_BLOCKS, NODE_TABLE_LBA, NODES_PER_BLOCK, ROOT_NODE_ID, SUPERBLOCK_LBA,
-    VERSION,
+    DATA_LBA, JOURNAL_BLOCKS, JOURNAL_LBA, MAGIC, MIN_TOTAL_BLOCKS, NODE_COUNT,
+    NODE_KIND_DIR, NODE_SIZE, NODE_TABLE_BLOCKS, NODE_TABLE_LBA, NODES_PER_BLOCK,
+    ROOT_NODE_ID, SUPERBLOCK_LBA, VERSION,
 };
 use crate::fs::{compute_sb_crc, FsError, FsResult};
 
@@ -41,14 +41,26 @@ pub fn format<D: BlockDevice + ?Sized>(dev: &mut D) -> FsResult<()>
     {
         bitmap.mark_used(NODE_TABLE_LBA + i);
     }
+    for i in 0..JOURNAL_BLOCKS
+    {
+        bitmap.mark_used(JOURNAL_LBA + i);
+    }
     let root_extent = DATA_LBA;
     bitmap.mark_used(root_extent);
 
-    // 2. Zero the node table + root dir's child-id block.
+    // 2. Zero the node table + journal + root dir's child-id block.
+    //    Journal block 0 starts as an EMPTY descriptor (all zeros —
+    //    the EMPTY state is value 0 and the magic check happens
+    //    before state, so a fully-zeroed descriptor is treated as a
+    //    no-op by replay).
     let zero = [0u8; BLOCK_SIZE];
     for i in 0..NODE_TABLE_BLOCKS
     {
         dev.write_block(NODE_TABLE_LBA + i, &zero).map_err(|_| FsError::Io)?;
+    }
+    for i in 0..JOURNAL_BLOCKS
+    {
+        dev.write_block(JOURNAL_LBA + i, &zero).map_err(|_| FsError::Io)?;
     }
     dev.write_block(root_extent, &zero).map_err(|_| FsError::Io)?;
 
@@ -79,6 +91,11 @@ pub fn format<D: BlockDevice + ?Sized>(dev: &mut D) -> FsResult<()>
         dev.read_block(NODE_TABLE_LBA + i, &mut buf).map_err(|_| FsError::Io)?;
         crc_table.set(NODE_TABLE_LBA + i, crc32(&buf));
     }
+    let zero_crc = crc32(&zero);
+    for i in 0..JOURNAL_BLOCKS
+    {
+        crc_table.set(JOURNAL_LBA + i, zero_crc);
+    }
     crc_table.set(root_extent, crc32(&zero));
 
     // 6. Build superblock with CRC.
@@ -97,7 +114,8 @@ pub fn format<D: BlockDevice + ?Sized>(dev: &mut D) -> FsResult<()>
         data_lba: DATA_LBA,
         free_blocks: bitmap.free_count(),
         sb_crc32: 0,
-        reserved: [0; 2],
+        journal_lba: JOURNAL_LBA,
+        journal_blocks: JOURNAL_BLOCKS,
     };
     sb.sb_crc32 = compute_sb_crc(&sb);
 

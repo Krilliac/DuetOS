@@ -29,9 +29,12 @@ inline constexpr u32 kRootNodeId = 0;
 
 /// Magic identifying a DuetFS superblock — bytes "DuetFS01"
 /// little-endian (byte 0 = 'D' = 0x44, byte 7 = '1' = 0x31).
-/// Magic stayed across v1→v3; only the version field bumps.
+/// Magic stayed across v1→v5; only the version field bumps.
 inline constexpr u64 kMagic = 0x3130534674657544ull;
-inline constexpr u32 kVersion = 4; // v3 (per-block CRCs + symlinks + hardlinks)
+inline constexpr u32 kVersion = 5; // v5 (journal — atomic-commit log)
+inline constexpr u32 kJournalLba = 7;
+inline constexpr u32 kJournalBlocks = 8;
+inline constexpr u32 kDataLba = 15;
 inline constexpr u32 kMaxInlineExtents = 8;
 inline constexpr u32 kSymlinkTargetMax = 1024;
 
@@ -170,6 +173,33 @@ extern "C"
     /// target's existing name (its last component MUST equal
     /// the target's name); a separate dirent table lands later.
     u32 duetfs_link(const Device* dev, const u8* existing_path, usize existing_max, const u8* new_path, usize new_max);
+
+    /// Read a raw 4096-byte block at `lba` from the device. Bypasses
+    /// the FS layer — used by the journal self-test to verify
+    /// post-replay block contents. `dst` must point at a buffer of
+    /// at least kBlockSize bytes.
+    u32 duetfs_block_read(const Device* dev, u32 lba, u8* dst);
+
+    /// Apply a single (target_lba, payload) write atomically through
+    /// the journal. `payload` is a kernel-space pointer to a
+    /// kBlockSize-byte buffer. On success the target LBA holds the
+    /// new bytes and the journal is empty; on failure the FS is left
+    /// in its pre-call state (or, after the next mount's replay,
+    /// brought there).
+    u32 duetfs_journal_apply(const Device* dev, u32 target_lba, const u8* payload);
+
+    /// Test-only: stage + commit a single (target_lba, payload)
+    /// through the journal AND skip the apply step. Used by the
+    /// self-test to simulate a torn write between the commit fsync
+    /// and the apply-to-target step. The next call that re-opens
+    /// the FS (any Fs::open path) replays the txn.
+    u32 duetfs_journal_inject_for_test(const Device* dev, u32 target_lba, const u8* payload);
+
+    /// Read the journal descriptor's `state` field. 0 = empty
+    /// (clean), 1 = committed (replay pending), 0xFFFFFFFFu = read
+    /// error. Diagnostic — Fs::open replays before returning, so a
+    /// well-formed mount always reports 0.
+    u32 duetfs_journal_state(const Device* dev);
 }
 
 } // namespace duetos::fs::duetfs

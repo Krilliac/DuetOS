@@ -27,6 +27,7 @@ mod crc_table;
 mod format;
 mod fs;
 mod fsck;
+mod journal;
 mod mkfs;
 mod ops;
 mod ops_dir;

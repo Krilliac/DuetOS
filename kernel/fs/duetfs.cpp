@@ -347,11 +347,11 @@ void DuetFsSelfTest()
     // 13. Per-block CRC corruption detection. Flip a byte in a known
     //     data block (the root dir's child-id block at LBA = data_lba)
     //     and run fsck — should report exactly one block_crc_mismatch.
-    g_scratch_image[7 * kBlockSize] ^= 0x01u; // data_lba = 7 in v3
+    g_scratch_image[kDataLba * kBlockSize] ^= 0x01u; // data_lba = 15 in v5
     rep = FsckReport{};
     ExpectStatus(duetfs_fsck(&scratch, /*repair=*/0u, &rep), kStatusOk, "fsck post-corrupt failed");
     Expect(rep.block_crc_mismatch >= 1, "fsck missed per-block CRC corruption");
-    g_scratch_image[7 * kBlockSize] ^= 0x01u; // restore
+    g_scratch_image[kDataLba * kBlockSize] ^= 0x01u; // restore (data_lba = 15 in v5)
 
     // 14. fsck repair: run with repair=1, then a second clean pass
     //     should report zero again.
@@ -362,7 +362,86 @@ void DuetFsSelfTest()
     ExpectStatus(duetfs_fsck(&scratch, /*repair=*/0u, &rep), kStatusOk, "post-repair fsck failed");
     Expect(rep.block_crc_mismatch == 0, "post-repair still has CRC mismatch");
 
-    KLOG_INFO("duetfs/selftest", "OK — v3 per-block CRC + symlinks + hardlinks + v2 surface passed");
+    // 15. Journal happy-path: write a known block via duetfs_journal_apply,
+    //     read it back through duetfs_block_read, then check that the
+    //     descriptor state is back to 0 (apply finished).
+    {
+        u8 jpayload[kBlockSize] = {};
+        for (u32 i = 0; i < kBlockSize; ++i)
+        {
+            jpayload[i] = static_cast<u8>((i * 31 + 5) & 0xFF);
+        }
+        // Pick an unused tail block — the boot image's last block is
+        // always free post-mkfs (we only allocate the root extent +
+        // hello.txt's headroom + big.bin's 3 blocks + linkme + hl + etc).
+        const u32 tail_lba = kBootImageBlocks - 1;
+        ExpectStatus(duetfs_journal_apply(&scratch, tail_lba, jpayload), kStatusOk, "journal_apply happy-path failed");
+        u8 jread[kBlockSize] = {};
+        ExpectStatus(duetfs_block_read(&scratch, tail_lba, jread), kStatusOk, "block_read post-journal_apply failed");
+        for (u32 i = 0; i < kBlockSize; ++i)
+        {
+            if (jread[i] != jpayload[i])
+            {
+                duetos::core::PanicWithValue("duetfs/selftest", "journal_apply readback mismatch", i);
+            }
+        }
+        // Descriptor cleared.
+        Expect(duetfs_journal_state(&scratch) == 0, "journal state non-zero post-apply");
+    }
+
+    // 16. Journal torn-write recovery: inject a COMMITTED descriptor
+    //     pointing at a target block but DON'T finish the apply. The
+    //     descriptor state should be 1 (committed). A subsequent
+    //     duetfs_probe / duetfs_lookup re-opens the FS — Fs::open
+    //     replays the journal and the target block reflects the
+    //     staged payload.
+    {
+        u8 torn_payload[kBlockSize] = {};
+        for (u32 i = 0; i < kBlockSize; ++i)
+        {
+            torn_payload[i] = static_cast<u8>(0xA0u ^ (i & 0xFFu));
+        }
+        const u32 tail_lba = kBootImageBlocks - 2;
+        // Read the tail block's pre-injection contents.
+        u8 pre[kBlockSize] = {};
+        ExpectStatus(duetfs_block_read(&scratch, tail_lba, pre), kStatusOk, "pre-injection block_read failed");
+
+        // Inject — descriptor goes COMMITTED; tail_lba unchanged on disk.
+        ExpectStatus(duetfs_journal_inject_for_test(&scratch, tail_lba, torn_payload), kStatusOk,
+                     "journal inject failed");
+        Expect(duetfs_journal_state(&scratch) == 1, "journal state not COMMITTED after inject");
+
+        // Tail block STILL holds pre-injection contents — apply hasn't run yet.
+        u8 mid[kBlockSize] = {};
+        ExpectStatus(duetfs_block_read(&scratch, tail_lba, mid), kStatusOk, "mid block_read failed");
+        bool unchanged_pre_replay = true;
+        for (u32 i = 0; i < kBlockSize; ++i)
+        {
+            if (mid[i] != pre[i])
+            {
+                unchanged_pre_replay = false;
+                break;
+            }
+        }
+        Expect(unchanged_pre_replay, "tail block changed before replay");
+
+        // Trigger Fs::open via duetfs_probe — replays the journal.
+        Expect(duetfs_probe(&scratch) == 1, "probe failed pre-replay");
+        Expect(duetfs_journal_state(&scratch) == 0, "journal state non-zero post-replay");
+
+        // Tail block now reflects the injected payload.
+        u8 post[kBlockSize] = {};
+        ExpectStatus(duetfs_block_read(&scratch, tail_lba, post), kStatusOk, "post block_read failed");
+        for (u32 i = 0; i < kBlockSize; ++i)
+        {
+            if (post[i] != torn_payload[i])
+            {
+                duetos::core::PanicWithValue("duetfs/selftest", "torn-write replay mismatch", i);
+            }
+        }
+    }
+
+    KLOG_INFO("duetfs/selftest", "OK — v5 journal + per-block CRC + symlinks + hardlinks + v2 surface passed");
 }
 
 } // namespace duetos::fs::duetfs
