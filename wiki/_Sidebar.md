@@ -41,6 +41,7 @@
 
 ### Filesystem
 - [VFS](filesystem/VFS.md)
+- [DuetFS (Rust, native)](filesystem/DuetFS.md)
 - [FAT32](filesystem/FAT32.md)
 - [ext4](filesystem/ext4.md)
 - [NTFS](filesystem/NTFS.md)

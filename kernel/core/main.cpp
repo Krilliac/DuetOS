@@ -131,6 +131,7 @@
 #include "drivers/storage/ahci.h"
 #include "drivers/storage/block.h"
 #include "drivers/storage/nvme.h"
+#include "fs/duetfs.h"
 #include "fs/exfat.h"
 #include "fs/ext4.h"
 #include "fs/fat32.h"
@@ -2832,6 +2833,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Cross-mount VfsResolve self-test.\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::VfsResolveCrossMountSelfTest());
+
+    // First Rust subsystem in the kernel — proves the C++ → Rust FFI
+    // round-trip for the duetfs crate (kernel/fs/duetfs/). Synthesizes
+    // a 16 KiB DuetFS v0 image in .bss, probes / resolves / reads /
+    // negative-tests through the Rust crate's exported symbols.
+    SerialWrite("[boot] DuetFS Rust crate self-test.\n");
+    DUETOS_BOOT_SELFTEST(duetos::fs::duetfs::DuetFsSelfTest());
 
     SerialWrite("[boot] Routing Win32 file syscalls through FAT32.\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::routing::SelfTest());

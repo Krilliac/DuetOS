@@ -5840,3 +5840,102 @@ doc helps future readers audit the trail.
   mtime in DirEntry; multi-line InputBox lands; recurring
   events become a real workload.
 
+---
+
+### DD-RUST-001 — Rust toolchain bootstrap via DuetFS v0
+
+- **Scope & commit:** `kernel/fs/duetfs/` (Rust crate) +
+  `kernel/fs/duetfs.{h,cpp}` + `kernel/fs/duetfs_image.cpp` +
+  `kernel/fs/duetfs_rust_panic.cpp` + `rust-toolchain.toml`. First
+  Rust subsystem in the kernel.
+
+- **Decision:**
+  1. **Trigger #1 (on-disk filesystem) of the Rust bring-up
+     plan is hereby fired.** The toolchain is wired in at
+     nightly-2026-01-15 with `rust-src` + `x86_64-unknown-none`
+     pinned in `/rust-toolchain.toml`.
+  2. **DuetFS is clean-room from RedoxFS** — file lineage is
+     called out in source comments and `wiki/filesystem/DuetFS.md`,
+     but the on-disk format, build system, and source code are
+     written from scratch. RedoxFS's MIT license and B-tree /
+     AES-XTS / Argon2 / LZ4 stack are studied as prior art only;
+     none of their crates are vendored in v0.
+  3. **v0 ships a deliberately tiny on-disk format** — fixed 256 B
+     nodes, one contiguous extent per file, flat node table, no
+     CoW, no journal, no encryption, no compression. The first
+     slice's job is to prove the FFI / build / link / boot self-
+     test path works, not to ship a feature-complete FS.
+  4. **The image is in-memory only in v0** — synthesized at boot
+     into a 16 KiB `.bss` buffer by `BuildSelfTestImage`. Block-
+     device backing is a separate slice.
+  5. **CMake side is a leaf custom_command** — `kernel/fs/duetfs/
+     CMakeLists.txt` runs `cargo build --release --target
+     x86_64-unknown-none -Z build-std=core,alloc -Z
+     build-std-features=compiler-builtins-mem` and exposes the
+     produced `libduetfs.a` to both kernel stages via
+     `target_link_libraries`. No new build system; cargo is a
+     leaf, not a peer.
+  6. **C ↔ Rust contract is hand-mirrored** — `include/duetfs.h`
+     (C++) and `src/ffi.rs` (Rust) define the same four-call
+     surface (probe / lookup / read_file / panic shim). Bindgen /
+     cbindgen are forbidden — short enough that code review
+     catches drift.
+
+- **Why:**
+  - Trigger #1 fired naturally: the slice parses on-disk metadata
+    (a superblock + node table) from a buffer the kernel will
+    eventually receive from a block device. That's the exact
+    "attacker-controllable byte stream" the bring-up plan named.
+  - Clean-room rather than vendor-and-rename keeps the on-disk
+    format ours, so future divergence from RedoxFS doesn't fight
+    upstream conventions. The cost (writing format.rs / image.rs /
+    lookup.rs from scratch) is about 250 lines for v0 — much
+    smaller than untangling the RedoxFS adapter layer.
+  - Tiny v0 format means the slice ships a working end-to-end
+    FFI in one PR without dragging in `aes-xts` / `argon2` /
+    `lz4_flex`. Each of those is its own future PR with its own
+    blast-radius review.
+  - In-memory image keeps the read-path entirely deterministic
+    for the boot self-test — no disk dependency, no FAT32-style
+    "skip if no volume" branch.
+
+- **What it rules out / defers:**
+  - **Vendoring upstream redoxfs.** Re-adopting upstream sources
+    would now require rewriting every file we authored.
+  - **B-tree / hash-tree directory index.** Flat node table caps
+    directories at ~16 entries until that lands.
+  - **Multiple extents per file.** Single contiguous extent only.
+  - **A second Rust subsystem before the toolchain has been
+    proven on this one.** The CMake leaf-target pattern is in
+    place; the next crate's CMakeLists is a copy-paste with the
+    crate name swapped.
+  - **Vendoring redoxfs's encryption/compression stack.** Each
+    of `aes-xts`, `argon2`, `lz4_flex`, `seahash` is its own slice
+    when the workload that wants it appears.
+  - **VFS routing integration.** No `FsType::DuetFs` enum value
+    yet — the self-test exercises the FFI directly. Routing lands
+    after the block-device backing.
+
+- **Revisit when:**
+  - A second Rust crate lands → factor any duplicate CMake bits
+    into a `duetos_rust_subsystem(name)` helper function.
+  - Block-device backing is wired → DuetFS becomes mountable;
+    `FsType::DuetFs` lands; the synthesized self-test image
+    moves out of `.bss` and onto a ramdisk image baked into the
+    kernel via `embed-blob.py`.
+  - First directory grows past ~1000 entries → swap the flat
+    child-id list for a B-tree.
+  - First file needs to span > one extent → swap to multi-extent.
+  - First panic from the Rust side fires in production → tighten
+    the `duetos_rust_panic` shim to capture the file:line site
+    via `core::panic::Location` (today only the message is
+    forwarded).
+
+- **Related roadmap track(s):**
+  - Rust bring-up — section in [`Roadmap.md`](Roadmap.md) updated
+    from "first crate lands when" → "bootstrapped; remaining
+    triggers apply for future crates".
+  - Filesystem track — DuetFS becomes the project's native FS
+    once the block-device backing slice ships.
+
+

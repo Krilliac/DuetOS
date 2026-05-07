@@ -442,82 +442,69 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
 
 ---
 
-## Rust bring-up
+## Rust bring-up — bootstrapped
 
-DuetOS is C++23 / ASM today. The first Rust subsystem lands
-when **any** of these is true:
+The Rust toolchain is **now wired into the kernel build** via the
+DuetFS slice (trigger #1 — on-disk filesystem parsing). See
+[`filesystem/DuetFS.md`](../filesystem/DuetFS.md). The toolchain is
+pinned in `/rust-toolchain.toml`; CMake builds drive cargo through
+each crate's leaf `CMakeLists.txt`.
 
-1. **Real on-disk filesystem** — our native FS, NTFS read
-   path, ext4 read path. Trigger when a slice actually starts
-   parsing on-disk metadata from an attacker-controllable byte
-   stream.
-2. **USB class drivers with descriptor parsing** — xHCI host
-   controller is fine in C++; the USB *class* drivers (HID,
-   MSC, hub) parse device-supplied descriptor chains.
-3. **TCP/IP stack** — packet headers from untrusted peers.
-   Skip Rust for the link-layer drivers but start at the
-   protocol stack boundary.
-4. **Anything else with non-trivial parsing of attacker-supplied
+The remaining triggers still apply for **future** Rust subsystems
+(adding a second crate is a no-op on the toolchain side):
+
+1. **USB class drivers with descriptor parsing** — HID, MSC, hub.
+2. **TCP/IP stack** — packet headers from untrusted peers; start at
+   the protocol stack boundary, not the link layer.
+3. **Anything else with non-trivial parsing of attacker-supplied
    structured bytes** — image formats, compression, font files,
    crypto framings.
 
-**Not** triggers:
+**Not** triggers (unchanged):
 
-- "Memory safety is cool" — the slice has to have a real
-  lifetime problem, not an aesthetic one.
+- "Memory safety is cool" — needs a real lifetime problem.
 - "A library exists in Rust" — porting one subsystem so we can
   use a single crate is a rewrite tax for a dependency.
 
-### Tree layout when the trigger fires
+### Rules for new Rust crates
 
-```
-fs/customfs/                  (NEW — Rust crate)
-├── Cargo.toml                (no_std, panic-abort)
-├── build.rs                  (emit static lib, link to kernel)
-├── src/
-│   ├── lib.rs                (entry: pub extern "C" fn customfs_*)
-│   └── ...
-└── include/
-    └── customfs.h            (C header, hand-written — DO NOT bindgen)
+- **One crate per subsystem.** No shared "rust-utils" until a
+  second subsystem actually needs the shared bits.
+- **No Rust in the middle of a C++ call chain.** Kernel C++ side
+  calls Rust through a narrow C FFI; never C++ → Rust → C++ → Rust.
+- **No `unsafe` outside the FFI wall.** Internal `unsafe` needs a
+  1-line comment explaining which kernel invariant justifies it.
+- **Header is hand-written.** Bindgen / cbindgen are forbidden —
+  the FFI contract should be readable from the header alone.
+- **Toolchain pin lives in `/rust-toolchain.toml`.** Bumping it is
+  its own PR.
+- **CMake side is a leaf custom_command** that calls `cargo build
+  --release --target x86_64-unknown-none -Z build-std=core,alloc -Z
+  build-std-features=compiler-builtins-mem` (mirror
+  `kernel/fs/duetfs/CMakeLists.txt`).
+- **`panic = "abort"`** — kernel can't unwind. Each crate provides
+  its own `#[panic_handler]` calling `duetos_rust_panic` (defined
+  per-crate in a sibling `*_rust_panic.cpp` shim).
+- **`lto = "thin"`** — fat LTO interacts badly with CMake.
+- **Forbidden:** Bazel / Nix / Meson; cbindgen; speculative deps.
 
-rust-toolchain.toml           (NEW — pin nightly date)
-```
+### DuetFS follow-ups
 
-### Rules
+v0 ships a read-only in-memory image. The next slices in priority
+order:
 
-- **One crate per subsystem.** Never a shared "rust-utils"
-  crate until a second subsystem actually needs the shared
-  bits.
-- **No Rust in the middle of a C++ call chain.** The kernel C++
-  side calls Rust through a narrow C FFI; never C++ → Rust →
-  C++ → Rust.
-- **No `unsafe` outside the FFI wall.** Internal subsystem code
-  that uses `unsafe` needs a 1-line comment explaining which
-  kernel invariant justifies it.
-- **Header is hand-written.** Bindgen pulls in cbindgen-style
-  automation noise and makes the contract implicit.
-- **Pin nightly by date.** `-Zbuild-std` is needed for `no_std`
-  against `x86_64-unknown-none`. Bump the pin in a dedicated
-  PR, never in a subsystem PR.
-- **Adopt CMake side as a leaf custom command** that calls
-  `cargo build --release --target x86_64-unknown-none -Z
-  build-std=core,alloc` and wraps the resulting `.a` as an
-  IMPORTED static library.
-- **`panic = "abort"`** — kernel can't unwind. Same policy
-  Linux uses for Rust-for-Linux.
-- **`lto = "thin"`** — fat LTO interacts badly with CMake +
-  multiple object files.
-
-### Do not
-
-- Install a Rust toolchain on the dev host speculatively. Add
-  it the same way QEMU is added: when a task legitimately
-  requires it.
-- Adopt a Rust-native build system (Bazel, Nix, Meson). CMake
-  is the project's build system; the Rust subsystem is a leaf
-  CMake target that happens to call `cargo` internally.
-- Use Rust for a kernel driver that's mostly MMIO bit-bashing
-  with no parsing surface.
+1. **Block-device backing** — adapter that reads on demand from
+   a block-handle (mirrors the FAT32 backend's shape).
+2. **VFS routing integration** — add `FsType::DuetFs` to
+   `kernel/fs/mount.cpp` and register a `VfsBackendOps`.
+3. **Write path** — runtime mkdir / create / write; in-Rust mkfs
+   for hosted tooling.
+4. **B-tree directory index** — replace the flat `child_count`-bounded
+   list once any slice puts more than ~1000 entries in a directory.
+5. **Multi-extent files** — drop the contiguous-extent constraint.
+6. **CoW + journal + checksums** — durability / crash safety.
+7. **AES-XTS encryption + Argon2 KDF** — full-disk encryption tier.
+8. **LZ4 compression** — optional per-file compression.
 
 ---
 

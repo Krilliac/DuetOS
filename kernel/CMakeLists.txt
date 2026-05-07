@@ -48,6 +48,12 @@ list(REMOVE_ITEM DUETOS_KERNEL_SHARED_SOURCES util/symbols_stub.cpp)
 # Future-proofing: keep tests/ out of the kernel image if/when it appears.
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^tests/")
 
+# fs/duetfs/ is a Rust crate — handled by its own CMakeLists below.
+# Filter out anything that may have leaked into the C++ glob from
+# the crate's build dir (CMake's binary dir can sit under it on
+# some setups).
+list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^fs/duetfs/(target|cargo-target)/")
+
 # security/stack_canary.cpp provides __stack_chk_fail and the
 # RandomizeStackCanary helper. The latter updates the cookie at
 # runtime; if ANY function in this file gets compiled with stack
@@ -601,10 +607,30 @@ endfunction()
 # in the same trailing slot; rodata grows tail-ward and every other
 # symbol's VA is preserved.
 # ----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# Rust leaf targets.
+#
+# Each Rust subsystem lives in its own subdirectory with its own
+# CMakeLists.txt. We pull them in BEFORE the kernel executables so
+# the per-crate variables (`<CRATE>_STATIC_LIB`, `<CRATE>_INCLUDE_DIR`)
+# are visible at the link site below. The crate CMakeLists drives
+# `cargo build` via add_custom_command and exposes the produced
+# .a path in PARENT_SCOPE.
+#
+# Adding a new Rust crate: drop a CMakeLists.txt in the subsystem
+# directory, add an `add_subdirectory(...)` line here, link the
+# `.a` and `add_dependencies(... <crate>-rust)` against both
+# kernel stages.
+# ----------------------------------------------------------------------------
+add_subdirectory(fs/duetfs)
+
 add_executable(duetos-kernel-stage1
     ${DUETOS_KERNEL_SHARED_SOURCES}
     util/symbols_stub.cpp
 )
+target_link_libraries(duetos-kernel-stage1 PRIVATE "${DUETFS_STATIC_LIB}")
+target_include_directories(duetos-kernel-stage1 PRIVATE "${DUETFS_INCLUDE_DIR}")
+add_dependencies(duetos-kernel-stage1 duetfs-rust)
 set_target_properties(duetos-kernel-stage1 PROPERTIES
     OUTPUT_NAME "duetos-kernel-stage1.elf"
     C_STANDARD 17
@@ -651,6 +677,9 @@ add_executable(duetos-kernel
     ${DUETOS_KERNEL_SHARED_SOURCES}
     "${DUETOS_SYMBOLS_GENERATED}"
 )
+target_link_libraries(duetos-kernel PRIVATE "${DUETFS_STATIC_LIB}")
+target_include_directories(duetos-kernel PRIVATE "${DUETFS_INCLUDE_DIR}")
+add_dependencies(duetos-kernel duetfs-rust)
 
 # Deliberate-panic build flag, consumed by kernel_main and triggered
 # by tools/debug/test-panic.sh. OFF for normal builds — the demo panic

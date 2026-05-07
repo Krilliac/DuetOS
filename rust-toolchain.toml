@@ -1,0 +1,21 @@
+# DuetOS — Rust toolchain pin.
+#
+# Bumping this is its own PR, never bundled with a subsystem PR. The
+# current pin is the date the first Rust subsystem (kernel/fs/duetfs/)
+# landed; bumping it later requires a clean rebuild of every Rust
+# leaf target the kernel links.
+#
+# Rules (see wiki/reference/Roadmap.md "Rust bring-up"):
+#   - nightly is required for `-Zbuild-std` against `x86_64-unknown-none`.
+#   - rust-src is required by `-Zbuild-std=core,alloc`.
+#   - profile = minimal — we don't need clippy/rustfmt/docs in the
+#     pinned toolchain; developers add those locally.
+#
+# Targets list lives here too so `cargo build` from the repo root
+# auto-installs them on first use.
+
+[toolchain]
+channel = "nightly-2026-01-15"
+components = ["rust-src"]
+targets = ["x86_64-unknown-none"]
+profile = "minimal"
