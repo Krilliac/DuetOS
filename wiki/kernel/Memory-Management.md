@@ -130,6 +130,41 @@ clobbering the next allocation. The boot stack additionally uses a
 high-VMA alias so the early CR3 swap to a per-process PML4 doesn't
 unmap the active stack mid-call.
 
+## Leak Detection
+
+A unified leak detector lives at
+[`kernel/diag/leak_detector.h`](../../kernel/diag/leak_detector.h). It
+folds the existing per-subsystem accounting (heap caller-RIP tracker,
+frame allocator counters, kstack high-water, address-space refcount,
+IPC handle table, Win32 fixed-size handle tables, GDI alive flags,
+socket pool, scheduler `ticks_run`, GPU resource tables) into one
+operator-facing surface with two trigger points:
+
+- **Shell command — `leakcheck`** (also `leakcheck class <name>` and
+  `leakcheck pid <n>`). Cheap; no allocation, no blocking. See the
+  [Shell Commands](../reference/Shell-Commands.md) reference for the
+  full subcommand grid.
+- **Process-exit attribution.** `LeakDetectorReportProcessExit()` is
+  invoked from `ProcessRelease()` after `HandleTableDrain()`. If any
+  per-process resource (kobject handles, Win32 handle slots, ticks
+  over budget, future GPU residue) is still live when the process's
+  refcount hits zero, the detector emits one `KLOG_WARN` line and
+  fires the `kLeakAttributable` probe (`diag.leak_attributable`,
+  `ProbeArm::ArmedLog` by default) so an attached GDB can break at
+  the moment the leak is first observed. Clean exits stay silent.
+
+The detector is purely read-only — every counter comes from an
+existing accessor. No new tracking is added inside hot allocator
+paths.
+
+GPU classes (`kGpuContext`, `kGpuSurface`, `kGpuCmdBuffer`,
+`kGpuMemory`) read through
+[`kernel/drivers/gpu/gpu_leak.h`](../../kernel/drivers/gpu/gpu_leak.h),
+a stable contract the GPU driver fills in as each resource type
+lands. Today every GPU accessor returns a zeroed snapshot (carrying a
+`// GAP:` marker); the leak detector itself does not need to change
+when GPU work begins populating those tables.
+
 ## Known Limits / GAPs
 
 - **No SMP locking yet** in the heap, frame allocator, or page-table

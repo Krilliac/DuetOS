@@ -114,6 +114,7 @@ void CmdHelp()
     ConsoleWriteln("  SMP          CPUS ONLINE");
     ConsoleWriteln("  LSPCI        LIST PCI DEVICES");
     ConsoleWriteln("  HEAP         KERNEL HEAP USAGE");
+    ConsoleWriteln("  LEAKCHECK [CLASS NAME | PID N | HEAP] UNIFIED RESOURCE LEAK SCAN");
     ConsoleWriteln("  PAGING       PAGE TABLE + MAPPING STATS");
     ConsoleWriteln("  FB           FRAMEBUFFER GEOMETRY");
     ConsoleWriteln("  KBDSTATS     PS/2 KEYBOARD IRQ COUNTERS");
@@ -627,29 +628,29 @@ u32 Tokenize(char* buf, char** argv)
 // New commands added here + dispatched in Dispatch — keeping
 // the two in sync is the price of not having reflection.
 const char* const kCommandSet[] = {
-    "help",       "about",      "version",  "clear",    "uptime",    "date",     "windows",    "mode",      "ls",
-    "cat",        "touch",      "rm",       "echo",     "cp",        "mv",       "wc",         "head",      "tail",
-    "dmesg",      "stats",      "mem",      "history",  "set",       "unset",    "env",        "alias",     "unalias",
-    "sysinfo",    "source",     "man",      "grep",     "find",      "time",     "which",      "seq",       "sort",
-    "uniq",       "cpuid",      "cr",       "rflags",   "tsc",       "hpet",     "ticks",      "msr",       "lapic",
-    "smp",        "lspci",      "heap",     "paging",   "fb",        "kbdstats", "mousestats", "loglevel",  "logcolor",
-    "logarea",    "kdbg",       "getenv",   "yield",    "reboot",    "halt",     "uname",      "whoami",    "hostname",
-    "pwd",        "true",       "false",    "mount",    "lsmod",     "lsblk",    "lsgpt",      "free",      "ps",
-    "spawn",      "readelf",    "hexdump",  "stat",     "basename",  "dirname",  "cal",        "sleep",     "reset",
-    "tac",        "nl",         "rev",      "expr",     "color",     "rand",     "flushtlb",   "checksum",  "repeat",
-    "kill",       "exec",       "metrics",  "trace",    "read",      "guard",    "top",        "fatcat",    "fatls",
-    "fatwrite",   "fatappend",  "fatnew",   "fatrm",    "fattrunc",  "fatmkdir", "fatrmdir",   "linuxexec", "translate",
-    "smbios",     "power",      "battery",  "thermal",  "temp",      "gpu",      "lsgpu",      "gfx",       "nic",
-    "lsnic",      "ip",         "arp",      "ipv4",     "uuid",      "uuidgen",  "health",     "checkup",   "attacksim",
-    "redteam",    "memdump",    "ifconfig", "netinfo",  "dhcp",      "route",    "netscan",    "wifi",      "firewall",
-    "fwpolicy",   "fwtrace",    "crtrace",  "crprobe",  "net",       "usbnet",   "instr",      "dumpstate", "bp",
-    "breakpoint", "login",      "logout",   "passwd",   "useradd",   "userdel",  "users",      "who",       "su",
-    "idlelock",   "hwmon",      "vbe",      "ping",     "nslookup",  "ntp",      "http",       "shutdown",  "poweroff",
-    "beep",       "inspect",    "theme",    "addr2sym", "cap-audit", "monitor",  "secevents",  "events",    "policy",
-    "purple",     "purpleteam", "mkdir",    "rmdir",    "truncate",  "realpath", "id",         "groups",    "nproc",
-    "arch",       "tty",        "type",     "printenv", "df",        "du",       "loadavg",    "clearhist", "pause",
-    "yes",        "sync",       "port",     "assert",   "watch",     "script",   "exit",       "mkfs",      "lastdump",
-    "loadtest",   "stress",     "bench",      "dbg",
+    "help",     "about",      "version",    "clear",    "uptime",   "date",      "windows",    "mode",      "ls",
+    "cat",      "touch",      "rm",         "echo",     "cp",       "mv",        "wc",         "head",      "tail",
+    "dmesg",    "stats",      "mem",        "history",  "set",      "unset",     "env",        "alias",     "unalias",
+    "sysinfo",  "source",     "man",        "grep",     "find",     "time",      "which",      "seq",       "sort",
+    "uniq",     "cpuid",      "cr",         "rflags",   "tsc",      "hpet",      "ticks",      "msr",       "lapic",
+    "smp",      "lspci",      "heap",       "paging",   "fb",       "kbdstats",  "mousestats", "loglevel",  "logcolor",
+    "logarea",  "kdbg",       "getenv",     "yield",    "reboot",   "halt",      "uname",      "whoami",    "hostname",
+    "pwd",      "true",       "false",      "mount",    "lsmod",    "lsblk",     "lsgpt",      "free",      "ps",
+    "spawn",    "readelf",    "hexdump",    "stat",     "basename", "dirname",   "cal",        "sleep",     "reset",
+    "tac",      "nl",         "rev",        "expr",     "color",    "rand",      "flushtlb",   "checksum",  "repeat",
+    "kill",     "exec",       "metrics",    "trace",    "read",     "guard",     "top",        "fatcat",    "fatls",
+    "fatwrite", "fatappend",  "fatnew",     "fatrm",    "fattrunc", "fatmkdir",  "fatrmdir",   "linuxexec", "translate",
+    "smbios",   "power",      "battery",    "thermal",  "temp",     "gpu",       "lsgpu",      "gfx",       "nic",
+    "lsnic",    "ip",         "arp",        "ipv4",     "uuid",     "uuidgen",   "health",     "checkup",   "attacksim",
+    "redteam",  "memdump",    "leakcheck",  "ifconfig", "netinfo",  "dhcp",      "route",      "netscan",   "wifi",
+    "firewall", "fwpolicy",   "fwtrace",    "crtrace",  "crprobe",  "net",       "usbnet",     "instr",     "dumpstate",
+    "bp",       "breakpoint", "login",      "logout",   "passwd",   "useradd",   "userdel",    "users",     "who",
+    "su",       "idlelock",   "hwmon",      "vbe",      "ping",     "nslookup",  "ntp",        "http",      "shutdown",
+    "poweroff", "beep",       "inspect",    "theme",    "addr2sym", "cap-audit", "monitor",    "secevents", "events",
+    "policy",   "purple",     "purpleteam", "mkdir",    "rmdir",    "truncate",  "realpath",   "id",        "groups",
+    "nproc",    "arch",       "tty",        "type",     "printenv", "df",        "du",         "loadavg",   "clearhist",
+    "pause",    "yes",        "sync",       "port",     "assert",   "watch",     "script",     "exit",      "mkfs",
+    "lastdump", "loadtest",   "stress",     "bench",    "dbg",
 };
 const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1135,6 +1136,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "heap"))
     {
         CmdHeap(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "leakcheck"))
+    {
+        CmdLeakCheck(argc, argv);
         return;
     }
     if (StrEq(cmd, "paging"))
