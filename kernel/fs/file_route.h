@@ -8,13 +8,13 @@
  * One layer between the Win32 file syscalls and the concrete FS
  * backends (ramfs + fat32). Owns:
  *
- *   - Path-prefix routing. "/disk/<idx>/<rest>" lands on the
- *     fat32 volume registered at <idx>; everything else lands
- *     on the per-process ramfs root. This is the smallest
- *     credible mount-table stand-in — no real mount table, no
- *     drive-letter resolver, just a prefix the loader and tests
- *     can rely on. Replace with named mounts the day a real
- *     mount table exists.
+ *   - Mount-aware routing. Paths first consult the VFS mount
+ *     registry through the caller's Process::root visibility policy;
+ *     visible FAT32 / DuetFS mounts dispatch to their backend, and
+ *     everything else lands on the per-process ramfs root. The legacy
+ *     "/disk/<idx>/<rest>" parser remains as a compatibility fallback
+ *     for early boot / fault-domain recovery before auto-mount records
+ *     are restored.
  *
  *   - Handle allocation against `Process::win32_handles`. Both
  *     ramfs- and fat32-backed slots reuse the same 0x100..0x10F
@@ -89,23 +89,24 @@ u64 CloseForProcess(::duetos::core::Process* proc, u64 handle);
 /// Look up a path's metadata without opening a handle. Used by
 /// NtQueryAttributesFile / NtQueryFullAttributesFile and the
 /// Linux stat() family. Fills `out_size` (file size in bytes)
-/// and `out_is_dir` (true when the entry is a directory). v0
-/// honours fat32 paths only ("/disk/<idx>/<rest>"); other paths
-/// return false. Returns false if the path doesn't exist or
-/// the volume isn't mounted.
+/// and `out_is_dir` (true when the entry is a directory). Mounted
+/// backends are gated by the caller's namespace root before backend
+/// dispatch. Returns false if the path doesn't exist or the volume
+/// isn't mounted / visible.
 bool StatPathForProcess(::duetos::core::Process* proc, const char* path, u64* out_size, bool* out_is_dir);
 
-/// Remove a file at `path`. v0 honours fat32 paths only
-/// ("/disk/<idx>/<rest>"); everything else returns false
-/// (ramfs is read-only, tmpfs has its own shell-only surface).
-/// `proc` is accepted for API symmetry but unused — fat32 has
-/// no per-process credentials. Returns true on success.
+/// Remove a file at `path`. v0 honours visible FAT32 and DuetFS
+/// mounts; everything else returns false (ramfs is read-only,
+/// tmpfs has its own shell-only surface). `proc->root` gates mount
+/// visibility before a backend mutates storage. Returns true on
+/// success.
 bool UnlinkForProcess(::duetos::core::Process* proc, const char* path);
 
-/// Rename a file from `src` to `dst`. Both paths must live on
-/// the same fat32 volume (cross-volume rename returns false in
-/// v0 — needs a streaming copy). Implementation is copy-then-
-/// delete: non-atomic with respect to power loss. `dst` must
+/// Rename a file from `src` to `dst`. Both paths must be visible
+/// from `proc->root` and live on the same fat32 volume (cross-volume
+/// rename returns false in v0 — needs a streaming copy).
+/// Implementation is copy-then-delete: non-atomic with respect to
+/// power loss. `dst` must
 /// not already exist (no implicit overwrite). Returns true on
 /// success.
 bool RenameForProcess(::duetos::core::Process* proc, const char* src, const char* dst);

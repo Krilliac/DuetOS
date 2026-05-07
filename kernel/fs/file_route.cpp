@@ -108,28 +108,29 @@ bool CopyPathInto(char (&dst)[::duetos::core::Process::Win32FileHandle::kFat32Pa
 
 // Parse "/disk/<idx>/<rest>" → (idx, pointer-into-path-at-rest).
 // Returns false on any malformed prefix (no digits, no separator
-// after the index). On a non-disk prefix returns false silently —
-// the caller treats that as "use ramfs."
+// after the index) or when the caller's namespace root cannot see
+// the matching /disk/<idx> mount point. On a non-disk prefix returns
+// false silently — the caller treats that as "use ramfs."
 //
 // Resolution order:
-//   1. Mount registry — longest-prefix match against `VfsMountResolve`.
-//      Hits when fat32 volumes have been auto-mounted at boot
-//      (kernel/core/main.cpp wires that next to the FAT32 self-test).
-//      `MountEntry::block_handle` carries the FAT32 volume index.
+//   1. Mount registry — longest-visible-prefix match against
+//      `VfsMountResolveVisible`. Hits when fat32 volumes have been
+//      auto-mounted at boot (kernel/core/main.cpp wires that next to
+//      the FAT32 self-test). `MountEntry::block_handle` carries the
+//      FAT32 volume index.
 //   2. Hardcoded "/disk/<idx>/<rest>" parse — fallback for callers
 //      that hit before auto-mount has run, or when mounts are
 //      cleared between fault-domain restarts.
-bool ParseDiskPath(const char* path, u32* out_idx, const char** out_rest)
+bool ParseDiskPath(const RamfsNode* root, const char* path, u32* out_idx, const char** out_rest)
 {
-    if (path == nullptr)
+    if (root == nullptr || path == nullptr)
         return false;
 
-    // (1) Mount registry — longest-prefix match. Only routes here
-    // when the resolved entry is a FAT32 mount (other FS types end
-    // up here once they ship; for now a non-fat32 mount silently
-    // falls through to the hardcoded path).
+    // (1) Mount registry — longest visible-prefix match. Only routes
+    // here when the resolved entry is a FAT32 mount (other FS types
+    // fall through to the hardcoded compatibility parser below).
     const char* mount_sub = nullptr;
-    if (const auto* me = duetos::fs::VfsMountResolve(path, &mount_sub))
+    if (const auto* me = duetos::fs::VfsMountResolveVisible(root, path, kPathMax, &mount_sub))
     {
         if (me->fs_type == duetos::fs::FsType::Fat32 && mount_sub != nullptr && mount_sub[0] == '/')
         {
@@ -164,22 +165,27 @@ bool ParseDiskPath(const char* path, u32* out_idx, const char** out_rest)
     // empty meaning "the volume root") starts at cursor + 1.
     if (path[cursor] != '/')
         return false;
+    if (idx >= fat32::kMaxVolumes)
+        return false;
+    char mount_point[16] = {};
+    if (!VfsFormatDiskMountPoint(idx, mount_point, sizeof(mount_point)) || !VfsMountVisibleFromRoot(root, mount_point))
+        return false;
     *out_idx = idx;
     *out_rest = path + cursor; // include the leading '/' so Fat32LookupPath sees an absolute path
     return true;
 }
 
 // Resolve `path` against the VFS mount registry and, if the matched
-// mount is a DuetFS mount, write `*out_block_handle` and
-// `*out_subpath` (always starts with '/' — the in-mount tail). The
+// mount is a DuetFS mount visible from `root`, write the block handle
+// and in-mount subpath (`*out_subpath` always starts with '/'). The
 // kernel's boot DuetFS volume is mounted at "/duetfs", so paths like
 // "/duetfs/etc/version" land here with subpath = "/etc/version".
-bool ParseDuetFsPath(const char* path, u32* out_block_handle, const char** out_subpath)
+bool ParseDuetFsPath(const RamfsNode* root, const char* path, u32* out_block_handle, const char** out_subpath)
 {
-    if (path == nullptr)
+    if (root == nullptr || path == nullptr)
         return false;
     const char* sub = nullptr;
-    const auto* me = duetos::fs::VfsMountResolve(path, &sub);
+    const auto* me = duetos::fs::VfsMountResolveVisible(root, path, kPathMax, &sub);
     if (me == nullptr || me->fs_type != duetos::fs::FsType::DuetFs)
         return false;
     if (sub == nullptr || sub[0] != '/')
@@ -254,10 +260,10 @@ u64 OpenForProcess(::duetos::core::Process* proc, const char* path)
 
     u32 disk_idx = 0;
     const char* disk_rest = nullptr;
-    const bool routed = ParseDiskPath(path, &disk_idx, &disk_rest);
+    const bool routed = ParseDiskPath(proc->root, path, &disk_idx, &disk_rest);
     u32 duet_handle = 0;
     const char* duet_sub = nullptr;
-    const bool duet_routed = ParseDuetFsPath(path, &duet_handle, &duet_sub);
+    const bool duet_routed = ParseDuetFsPath(proc->root, path, &duet_handle, &duet_sub);
 
     const u64 slot = FindFreeSlot(proc);
     if (slot == Process::kWin32HandleCap)
@@ -573,7 +579,7 @@ u64 CreateForProcess(::duetos::core::Process* proc, const char* path, const void
     const char* disk_rest = nullptr;
     u32 duet_handle = 0;
     const char* duet_sub = nullptr;
-    if (ParseDuetFsPath(path, &duet_handle, &duet_sub))
+    if (ParseDuetFsPath(proc->root, path, &duet_handle, &duet_sub))
     {
         const auto dev = DuetFsDeviceFor(duet_handle);
         u32 new_id = 0;
@@ -615,7 +621,7 @@ u64 CreateForProcess(::duetos::core::Process* proc, const char* path, const void
             ::duetos::core::RecordFsWrite(proc, init_len);
         return Process::kWin32HandleBase + slot;
     }
-    if (!ParseDiskPath(path, &disk_idx, &disk_rest))
+    if (!ParseDiskPath(proc->root, path, &disk_idx, &disk_rest))
     {
         SerialWrite("[fs/route] create: ramfs path rejected (read-only) \"");
         SerialWrite(path);
@@ -802,12 +808,11 @@ u64 CloseForProcess(::duetos::core::Process* proc, u64 handle)
 
 bool UnlinkForProcess(::duetos::core::Process* proc, const char* path)
 {
-    (void)proc;
-    if (path == nullptr || path[0] == '\0')
+    if (proc == nullptr || path == nullptr || path[0] == '\0')
         return false;
     u32 duet_handle = 0;
     const char* duet_sub = nullptr;
-    if (ParseDuetFsPath(path, &duet_handle, &duet_sub))
+    if (ParseDuetFsPath(proc->root, path, &duet_handle, &duet_sub))
     {
         if (::duetos::security::CanaryCheck(duet_sub, "unlink"))
             return false;
@@ -826,7 +831,7 @@ bool UnlinkForProcess(::duetos::core::Process* proc, const char* path)
     }
     u32 idx = 0;
     const char* rest = nullptr;
-    if (!ParseDiskPath(path, &idx, &rest))
+    if (!ParseDiskPath(proc->root, path, &idx, &rest))
         return false;
     // Canary wall: refuse unlink of a canary path. Ransomware
     // typically deletes the original after writing the encrypted
@@ -853,7 +858,7 @@ bool StatPathForProcess(::duetos::core::Process* proc, const char* path, u64* ou
         return false;
     u32 duet_handle = 0;
     const char* duet_sub = nullptr;
-    if (ParseDuetFsPath(path, &duet_handle, &duet_sub))
+    if (ParseDuetFsPath(proc->root, path, &duet_handle, &duet_sub))
     {
         const auto dev = DuetFsDeviceFor(duet_handle);
         duetos::fs::duetfs::LookupResult res{};
@@ -869,7 +874,7 @@ bool StatPathForProcess(::duetos::core::Process* proc, const char* path, u64* ou
     }
     u32 idx = 0;
     const char* rest = nullptr;
-    if (ParseDiskPath(path, &idx, &rest))
+    if (ParseDiskPath(proc->root, path, &idx, &rest))
     {
         const fat32::Volume* v = fat32::Fat32Volume(idx);
         if (v == nullptr)
@@ -900,16 +905,15 @@ bool StatPathForProcess(::duetos::core::Process* proc, const char* path, u64* ou
 
 bool RenameForProcess(::duetos::core::Process* proc, const char* src, const char* dst)
 {
-    (void)proc;
-    if (src == nullptr || dst == nullptr || src[0] == '\0' || dst[0] == '\0')
+    if (proc == nullptr || src == nullptr || dst == nullptr || src[0] == '\0' || dst[0] == '\0')
         return false;
     u32 src_idx = 0;
     u32 dst_idx = 0;
     const char* src_rest = nullptr;
     const char* dst_rest = nullptr;
-    if (!ParseDiskPath(src, &src_idx, &src_rest))
+    if (!ParseDiskPath(proc->root, src, &src_idx, &src_rest))
         return false;
-    if (!ParseDiskPath(dst, &dst_idx, &dst_rest))
+    if (!ParseDiskPath(proc->root, dst, &dst_idx, &dst_rest))
         return false;
     // Canary wall: refuse rename if EITHER endpoint is a canary
     // / suspicious-extension target. Ransomware that does
@@ -945,12 +949,11 @@ bool RenameForProcess(::duetos::core::Process* proc, const char* src, const char
 
 bool MkdirForProcess(::duetos::core::Process* proc, const char* path)
 {
-    (void)proc;
-    if (path == nullptr || path[0] == '\0')
+    if (proc == nullptr || path == nullptr || path[0] == '\0')
         return false;
     u32 duet_handle = 0;
     const char* duet_sub = nullptr;
-    if (!ParseDuetFsPath(path, &duet_handle, &duet_sub))
+    if (!ParseDuetFsPath(proc->root, path, &duet_handle, &duet_sub))
         return false;
     const auto dev = DuetFsDeviceFor(duet_handle);
     u32 new_id = 0;
@@ -965,12 +968,11 @@ bool MkdirForProcess(::duetos::core::Process* proc, const char* path)
 
 bool SymlinkForProcess(::duetos::core::Process* proc, const char* path, const char* target)
 {
-    (void)proc;
-    if (path == nullptr || target == nullptr || path[0] == '\0' || target[0] == '\0')
+    if (proc == nullptr || path == nullptr || target == nullptr || path[0] == '\0' || target[0] == '\0')
         return false;
     u32 duet_handle = 0;
     const char* duet_sub = nullptr;
-    if (!ParseDuetFsPath(path, &duet_handle, &duet_sub))
+    if (!ParseDuetFsPath(proc->root, path, &duet_handle, &duet_sub))
         return false;
     const auto dev = DuetFsDeviceFor(duet_handle);
     u32 new_id = 0;
@@ -986,14 +988,15 @@ bool SymlinkForProcess(::duetos::core::Process* proc, const char* path, const ch
 
 bool LinkForProcess(::duetos::core::Process* proc, const char* existing_path, const char* new_path)
 {
-    (void)proc;
-    if (existing_path == nullptr || new_path == nullptr || existing_path[0] == '\0' || new_path[0] == '\0')
+    if (proc == nullptr || existing_path == nullptr || new_path == nullptr || existing_path[0] == '\0' ||
+        new_path[0] == '\0')
         return false;
     u32 e_handle = 0;
     u32 n_handle = 0;
     const char* e_sub = nullptr;
     const char* n_sub = nullptr;
-    if (!ParseDuetFsPath(existing_path, &e_handle, &e_sub) || !ParseDuetFsPath(new_path, &n_handle, &n_sub))
+    if (!ParseDuetFsPath(proc->root, existing_path, &e_handle, &e_sub) ||
+        !ParseDuetFsPath(proc->root, new_path, &n_handle, &n_sub))
         return false;
     if (e_handle != n_handle)
         return false; // cross-volume link unsupported
@@ -1007,12 +1010,11 @@ bool LinkForProcess(::duetos::core::Process* proc, const char* existing_path, co
 
 u64 ReadlinkForProcess(::duetos::core::Process* proc, const char* path, char* dst, u64 dst_max)
 {
-    (void)proc;
-    if (path == nullptr || dst == nullptr || dst_max == 0 || path[0] == '\0')
+    if (proc == nullptr || path == nullptr || dst == nullptr || dst_max == 0 || path[0] == '\0')
         return u64(-1);
     u32 duet_handle = 0;
     const char* duet_sub = nullptr;
-    if (!ParseDuetFsPath(path, &duet_handle, &duet_sub))
+    if (!ParseDuetFsPath(proc->root, path, &duet_handle, &duet_sub))
         return u64(-1);
     const auto dev = DuetFsDeviceFor(duet_handle);
     duetos::fs::duetfs::LookupResult res{};

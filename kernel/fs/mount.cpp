@@ -429,6 +429,15 @@ void VfsMountSelfTest()
     {
         core::Panic("fs/mount", "self-test: resolve longer-prefix /disk/0/SUB/...");
     }
+    const MountEntry* vr = VfsMountResolveVisible(RamfsTrustedRoot(), "/disk/0/SUB/INNER.TXT", 64, &sub);
+    if (vr == nullptr || vr->block_handle != 12 || sub == nullptr || sub[0] != '/' || sub[1] != 'I')
+    {
+        core::Panic("fs/mount", "self-test: visible resolver trusted longer-prefix");
+    }
+    if (VfsMountResolveVisible(RamfsSandboxRoot(), "/disk/0/SUB/INNER.TXT", 64, &sub) != nullptr || sub != nullptr)
+    {
+        core::Panic("fs/mount", "self-test: visible resolver exposed hidden mount");
+    }
     // Component boundary: "/disk/01" must NOT match "/disk/0".
     if (VfsMountResolve("/disk/01/foo", &sub) != nullptr)
     {

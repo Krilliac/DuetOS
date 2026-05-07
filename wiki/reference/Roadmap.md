@@ -120,17 +120,28 @@ the same commit** that delivers the code.
   + FAT32 auto-mount at `/disk/<idx>` landed first; the
   cross-mount resolver (`fs::VfsResolve(root, path) -> VfsNode`)
   + per-FsType `VfsBackendOps` vtable + boot-time cross-mount
-  self-test landed alongside this entry. `cd /disk/0/SUB` and
-  every other "give me the resolved node" caller now goes
-  through one VFS API; backend dispatch is a vtable hop.
+  self-test landed alongside this entry. Mount crossings now run
+  through `VfsMountVisibleFromRoot`: the trusted boot namespace can
+  see the global mount table, while sandbox/custom roots only see
+  mounts they explicitly materialise as ramfs graft directories.
+  Resolution picks the longest visible mount rather than the longest
+  global mount: hidden mounts are ignored instead of shadowing shorter
+  visible mounts or root-local ramfs paths. This keeps sandbox roots
+  from reaching global mounts merely by
+  spelling an absolute path without bloating the immutable ramfs tree
+  with synthetic mount directories. `cd /disk/0/SUB` and every other
+  "give me the resolved node" caller now goes through one VFS API;
+  backend dispatch is a vtable hop.
 - **Remaining scope:** teach `Process::root` to carry a
   `VfsNode` (or a `VfsDir*` thin handle) so a sandboxed
   process can be rooted at a non-ramfs subtree (e.g. `/disk/0/SANDBOX`).
-  Today every process root is a `const RamfsNode*` and the
-  cross-mount path always falls through to ramfs at the leaf.
-  The wider syscall surface (open / stat / readdir) still
-  lands in `RamfsNode*` — migrating those is a per-syscall
-  follow-on once a workload demands a non-ramfs sandbox root.
+  Today every process root is a `const RamfsNode*`; trusted roots
+  see the global mount namespace by policy and custom roots can
+  expose individual graft points, but the root still cannot itself be
+  a non-ramfs backend node. The wider syscall surface (open / stat /
+  readdir) still lands in `RamfsNode*` for ramfs fall-through —
+  migrating those is a per-syscall follow-on once a workload demands
+  a non-ramfs sandbox root.
 
 ### Stage 7+ — Writable FS / native FS / NTFS read
 
