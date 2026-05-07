@@ -5639,3 +5639,58 @@ doc helps future readers audit the trail.
   [Compositor and Window Manager](../subsystems/Compositor.md),
   Roadmap entry "Multi-monitor / runtime resolution change".
 
+## Task Manager v1 — per-task list with sort + kill (2026-05-07)
+
+- **Decision:** the Task Manager window flips from a 7-row
+  aggregate-stats panel (uptime / ctx-switches / TASKS LIVE /
+  MEM FREE counters) to a Windows Task Manager / `htop` style
+  per-task list. The implementation lives in
+  `kernel/apps/taskman.{h,cpp}`, registered via `TaskmanInit`
+  on the existing window handle. Each row shows PID, name,
+  state, since-boot CPU%, on-CPU tick count. Header line
+  carries CPU% / IDLE% / MEM MiB / live task count. Keyboard:
+  `↑`/`↓` move selection, PgUp/PgDn page-step, Home/End jump,
+  `S` cycles sort (CPU% → PID → NAME → STATE), `K` / Del opens
+  a kill-confirm `MessageBoxOpen` for the selected PID.
+- **Why:** an OS that exists for users needs an answer to "what
+  is running and why is it slow?" The old panel showed seven
+  global counters and could not name a single task — useless
+  for triage. `SchedEnumerate` already exposed every field a
+  proper list needs (id, name, ticks_run, owner_pid, state,
+  is_running) and `SchedKillByPid` already wired the
+  termination path; no new kernel primitive was needed.
+- **What was considered + rejected:**
+  - **Per-task instantaneous CPU%:** would require keeping a
+    shadow table of `prev_ticks_run` per task id between
+    redraws. Since-boot CPU% (`ticks_run / total_ticks`) is a
+    cheaper denominator that matches what `top --cumulative`
+    shows, and `is_running` already highlights the on-CPU
+    task in green so an operator can see "who's running right
+    now" at a glance. Re-derive instantaneous on demand once
+    a workload exposes a real user-visible miss.
+  - **A kheap-allocated row buffer:** `kMaxRows = 128` snapshot
+    on `.bss` keeps the snapshot rebuild allocator-free and
+    avoids any "task manager itself triggers OOM" tail risk.
+    Tasks past 128 are silently dropped from the listing
+    (header's TASKS count still reflects the live total).
+  - **Direct callback drawing under SchedEnumerate's CLI:**
+    rejected because the framebuffer path is heavy; build the
+    snapshot first, then sort + draw with interrupts back on.
+- **What it rules out / defers:** no per-process memory column
+  (would need to walk Process->as->regions table — defer until
+  Process exposes a `MemUsage()` accessor; today it tracks
+  `heap_pages` only and that's a partial number). No
+  multi-column click-to-sort by mouse — `S` cycles via
+  keyboard and that's enough for v1. No process-tree grouping
+  by parent PID. No "End Process Tree" recursive kill.
+- **Revisit when:** Process gains a `MemUsage()` (then add a
+  MEM column); a workload routinely produces > 128 tasks
+  (then bump `kMaxRows` or grow to a kheap-backed scrollable
+  table); the compositor grows mouse-routed column-header
+  clicks (then bind sort cycling to a header click).
+- **Related tracks:** [`Start Menu`](../kernel/Start-Menu.md),
+  scheduler enumeration (`SchedEnumerate`, `SchedKillByPid`),
+  end-user features (the Task Manager bullet on the Roadmap
+  used to read "deeper teal panel"; this slice cashes that
+  in).
+

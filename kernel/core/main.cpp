@@ -147,6 +147,7 @@
 #include "apps/notes.h"
 #include "apps/screenshot.h"
 #include "apps/settings.h"
+#include "apps/taskman.h"
 #include "apps/trash.h"
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
@@ -1632,8 +1633,11 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::drivers::video::WindowChrome taskman_chrome = theme_chrome(Role::TaskManager);
     taskman_chrome.x = 180;
     taskman_chrome.y = 310;
-    taskman_chrome.w = 340;
-    taskman_chrome.h = 170;
+    // Bigger default size for the 5-column per-task list — the
+    // original 340x170 aggregate-stats panel is too narrow to
+    // host PID + NAME + STATE + CPU% + TICKS without truncation.
+    taskman_chrome.w = 520;
+    taskman_chrome.h = 260;
     const duetos::drivers::video::WindowHandle taskman_handle =
         duetos::drivers::video::WindowRegister(taskman_chrome, "TASK MANAGER");
     duetos::drivers::video::ThemeRegisterWindow(Role::TaskManager, taskman_handle);
@@ -1751,78 +1755,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         },
         nullptr);
 
-    duetos::drivers::video::WindowSetContentDraw(
-        taskman_handle,
-        [](duetos::u32 cx, duetos::u32 cy, duetos::u32 /*cw*/, duetos::u32 /*ch*/, void*)
-        {
-            using duetos::drivers::video::FramebufferDrawString;
-            constexpr duetos::u32 kFg = 0x0080F088;
-            // Match the window's current client fill so the text
-            // rows sit on the same colour as the chrome client.
-            const duetos::u32 kBg =
-                duetos::drivers::video::ThemeCurrent()
-                    .role_client[static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::TaskManager)];
-            // Manual decimal formatter for u64 — kernel has no
-            // printf. Fixed-width (10 digits) so the numeric
-            // column doesn't jitter when values roll over.
-            auto fmt_u64 = [](duetos::u64 v, char* out)
-            {
-                char tmp[24];
-                duetos::u32 n = 0;
-                if (v == 0)
-                {
-                    tmp[n++] = '0';
-                }
-                else
-                {
-                    while (v > 0 && n < sizeof(tmp))
-                    {
-                        tmp[n++] = static_cast<char>('0' + (v % 10));
-                        v /= 10;
-                    }
-                }
-                duetos::u32 pad = (n < 10) ? 10 - n : 0;
-                duetos::u32 o = 0;
-                for (duetos::u32 i = 0; i < pad; ++i)
-                    out[o++] = ' ';
-                for (duetos::u32 i = 0; i < n; ++i)
-                    out[o++] = tmp[n - 1 - i];
-                out[o] = '\0';
-            };
-
-            const auto s = duetos::sched::SchedStatsRead();
-            const duetos::u64 total = duetos::mm::TotalFrames();
-            const duetos::u64 free_frames = duetos::mm::FreeFramesCount();
-            const duetos::u64 uptime_s = duetos::sched::SchedNowTicks() / 100;
-
-            char num[24];
-            char line[64];
-            struct Row
-            {
-                const char* label;
-                duetos::u64 value;
-            };
-            const Row rows[] = {
-                {"UPTIME (S)     ", uptime_s},        {"CTX SWITCHES   ", s.context_switches},
-                {"TASKS LIVE     ", s.tasks_live},    {"TASKS SLEEPING ", s.tasks_sleeping},
-                {"TASKS BLOCKED  ", s.tasks_blocked}, {"MEM FREE (4K)  ", free_frames},
-                {"MEM TOTAL (4K) ", total},
-            };
-            duetos::u32 y_off = cy + 4;
-            for (duetos::u32 i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i)
-            {
-                fmt_u64(rows[i].value, num);
-                duetos::u32 o = 0;
-                for (duetos::u32 j = 0; rows[i].label[j] != '\0' && o + 1 < sizeof(line); ++j)
-                    line[o++] = rows[i].label[j];
-                for (duetos::u32 j = 0; num[j] != '\0' && o + 1 < sizeof(line); ++j)
-                    line[o++] = num[j];
-                line[o] = '\0';
-                FramebufferDrawString(cx + 6, y_off, line, kFg, kBg);
-                y_off += 10;
-            }
-        },
-        nullptr);
+    // Per-task list with sort + kill — see kernel/apps/taskman.cpp.
+    // Replaces the original 7-row aggregate-stats panel; the
+    // header still shows CPU% / IDLE% / MEM totals, then a row
+    // per task with PID, name, state, since-boot CPU%, and ticks.
+    duetos::apps::taskman::TaskmanInit(taskman_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::taskman::TaskmanSelfTest());
 
     // FILES — native DuetOS file browser. Lists the ramfs
     // trusted root; Up/Down to move, Enter to descend, Backspace
@@ -3949,6 +3887,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     {
                         app_consumed = duetos::apps::notes::NotesFeedKey(ev.code, ev.modifiers);
                     }
+                    else if (active == duetos::apps::taskman::TaskmanWindow() &&
+                             (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyHome ||
+                              ev.code == kKeyEnd || ev.code == kKeyPageUp || ev.code == kKeyPageDown ||
+                              ev.code == kKeyDelete))
+                    {
+                        app_consumed = duetos::apps::taskman::TaskmanFeedKey(static_cast<duetos::u16>(ev.code));
+                    }
                     else
                     {
                         char c = 0;
@@ -4006,6 +3951,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                             else if (active == duetos::apps::dbg::DbgWindow())
                             {
                                 app_consumed = duetos::apps::dbg::DbgFeedChar(c);
+                            }
+                            else if (active == duetos::apps::taskman::TaskmanWindow())
+                            {
+                                app_consumed = duetos::apps::taskman::TaskmanFeedChar(c);
                             }
                         }
                     }
