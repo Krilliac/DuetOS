@@ -308,6 +308,64 @@ def render_markdown(
     return "\n".join(out)
 
 
+def load_baseline(path: Path) -> set[tuple[str, str]]:
+    """Load a baseline file as a set of (detector, source_pin) tuples.
+
+    Format is one record per line: `<detector>\\t<source_pin>`. Lines
+    starting with `#` are comments. Missing baseline file is treated
+    as empty (first run on a fresh tree).
+    """
+    if not path.exists():
+        return set()
+    out: set[tuple[str, str]] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t", 1)
+        if len(parts) == 2:
+            out.add((parts[0], parts[1]))
+    return out
+
+
+def save_baseline(path: Path, boots: list[tuple[str, int, list[FixRecord]]]) -> int:
+    """Write a baseline file covering every (detector, source_pin)
+    pair in any of the supplied boots. Returns the number of unique
+    pairs written."""
+    pairs: set[tuple[str, str]] = set()
+    for _path, _ver, recs in boots:
+        for r in recs:
+            pairs.add((r.detector_name, r.source_pin))
+    lines = [
+        "# DuetOS fix-journal baseline — pairs already triaged at this commit.",
+        "# Re-run gen-fix-report.py with --baseline=<this file> to see only NEW gaps.",
+        "# Format: <detector>\\t<source_pin> per line.",
+        "",
+    ]
+    for det, pin in sorted(pairs):
+        lines.append(f"{det}\t{pin}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return len(pairs)
+
+
+def filter_against_baseline(
+    boots: list[tuple[str, int, list[FixRecord]]],
+    baseline: set[tuple[str, str]],
+) -> list[tuple[str, int, list[FixRecord]]]:
+    """Drop records whose (detector, source_pin) is in baseline.
+
+    Keeps the boot tuple shape so downstream rendering stays
+    unchanged. A boot whose every record was filtered ends up with
+    an empty record list — the rendered report still shows the boot
+    in the header table so the reviewer sees it ran clean.
+    """
+    out: list[tuple[str, int, list[FixRecord]]] = []
+    for path, ver, recs in boots:
+        kept = [r for r in recs if (r.detector_name, r.source_pin) not in baseline]
+        out.append((path, ver, kept))
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("files", nargs="+", help="KERNEL.FIX (and rotation siblings)")
@@ -316,6 +374,25 @@ def main() -> int:
         type=Path,
         default=None,
         help="optional marker manifest (gen-fix-markers.py output) for cross-reference",
+    )
+    ap.add_argument(
+        "--baseline",
+        type=Path,
+        default=None,
+        help=(
+            "baseline file of (detector, source_pin) pairs to filter out — only "
+            "records NOT in the baseline appear in the report. Use to surface "
+            "drift between runs."
+        ),
+    )
+    ap.add_argument(
+        "--save-baseline",
+        type=Path,
+        default=None,
+        help=(
+            "write a baseline file covering every record across the supplied "
+            "files; suitable as a future --baseline argument."
+        ),
     )
     args = ap.parse_args()
 
@@ -331,6 +408,21 @@ def main() -> int:
     if not boots:
         print("# no readable fix-journal files", file=sys.stderr)
         return 1
+
+    if args.save_baseline:
+        n = save_baseline(args.save_baseline, boots)
+        print(f"# wrote baseline with {n} pairs to {args.save_baseline}", file=sys.stderr)
+
+    if args.baseline:
+        before = sum(len(r) for _p, _v, r in boots)
+        baseline = load_baseline(args.baseline)
+        boots = filter_against_baseline(boots, baseline)
+        after = sum(len(r) for _p, _v, r in boots)
+        print(
+            f"# baseline {args.baseline}: {len(baseline)} pairs, filtered "
+            f"{before - after}/{before} records",
+            file=sys.stderr,
+        )
 
     markers = load_markers(args.markers) if args.markers else []
     print(render_markdown(boots, markers))

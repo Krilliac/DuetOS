@@ -168,6 +168,16 @@ u64 FixJournalSnapshotPanicSafe(FixRecord* out, u64 cap);
 /// Live counter view. Cheap; does not lock.
 FixJournalStats FixJournalGetStats();
 
+/// Emit a single structured `[smoke] fix_journal_summary` log line
+/// summarising the current ring contents: total records, unique
+/// pins, audited count, and a per-detector breakdown. Designed to
+/// be called at smoke-profile completion so a CI grep can detect
+/// regressions ("yesterday's run had 3 unmapped_thunk records,
+/// today's has 5 → investigate") without parsing the FAT32
+/// KERNEL.FIX file. Cheap (single ring walk under g_lock) so the
+/// non-smoke boot path can call it too if useful.
+void FixJournalEmitBootSummary();
+
 /// Boot self-test. Synthesizes one record per detector kind,
 /// asserts the unique count rose by exactly the number injected,
 /// asserts a known dedup-hit increments repeat_count instead of

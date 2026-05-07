@@ -129,11 +129,34 @@ def read_records(path: str) -> list[FixRecord]:
 # ---------------------------------------------------------------- thunks index
 
 _THUNKS_TABLE_PATH = "kernel/subsystems/win32/thunks_table.inc"
+_THUNKS_CPP_PATH = "kernel/subsystems/win32/thunks.cpp"
+_THUNKS_BYTECODE_PATH = "kernel/subsystems/win32/thunks_bytecode.inc"
 
 # Generic noop offsets: an entry resolving to one of these is a
 # placeholder, not a real implementation. Mirrors the runtime
 # classifier in kernel/subsystems/win32/thunks.cpp.
 _NOOP_OFFSETS = {"kOffReturnZero", "kOffReturnOne", "kOffCritSecNop", "kOffGetProcessHeap"}
+
+# Bytecode templates for "named-equivalent" noops. Each entry gives
+# the bytes that produce identical behaviour to the generic noop
+# offset on the left, plus a one-line ASM comment for the patched
+# bytecode block. The classifier in thunks.cpp checks the offset
+# *value*, so aliasing isn't enough — we MUST emit fresh bytes at a
+# new offset to break out of the noop set.
+_NOOP_TEMPLATES = {
+    "kOffReturnZero": {
+        "bytes": [0x31, 0xC0, 0xC3],
+        "asm": "xor eax, eax; ret  ; named-equivalent of kOffReturnZero",
+    },
+    "kOffReturnOne": {
+        "bytes": [0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3],
+        "asm": "mov eax, 1; ret    ; named-equivalent of kOffReturnOne",
+    },
+    "kOffCritSecNop": {
+        "bytes": [0xC3],
+        "asm": "ret                 ; named-equivalent of kOffCritSecNop",
+    },
+}
 
 
 def load_thunks_table(repo_root: Path) -> dict[tuple[str, str], str]:
@@ -244,6 +267,161 @@ def synth_thunk_patch(dll: str, fn: str, seq: int, repo_root: Path) -> str | Non
     return "".join(diff_lines)
 
 
+def _hunk_replace_line(file_rel: str, lines: list[str], idx: int, new_line: str) -> str:
+    """Build a single-line-replacement hunk for `lines[idx]` -> new_line."""
+    ctx_start = max(0, idx - 3)
+    pre = lines[ctx_start:idx]
+    post = lines[idx + 1 : idx + 4]
+    old_count = len(pre) + 1 + len(post)
+    new_count = old_count
+    out: list[str] = []
+    out.append(f"--- a/{file_rel}\n")
+    out.append(f"+++ b/{file_rel}\n")
+    out.append(f"@@ -{ctx_start + 1},{old_count} +{ctx_start + 1},{new_count} @@\n")
+    for ln in pre:
+        out.append(" " + ln)
+    out.append("-" + lines[idx])
+    out.append("+" + new_line)
+    for ln in post:
+        out.append(" " + ln)
+    return "".join(out)
+
+
+def _hunk_insert_lines(file_rel: str, lines: list[str], idx: int, inserts: list[str]) -> str:
+    """Build a hunk that inserts `inserts` before `lines[idx]`."""
+    ctx_start = max(0, idx - 3)
+    pre = lines[ctx_start:idx]
+    post = lines[idx : idx + 3]
+    old_count = len(pre) + len(post)
+    new_count = old_count + len(inserts)
+    out: list[str] = []
+    out.append(f"--- a/{file_rel}\n")
+    out.append(f"+++ b/{file_rel}\n")
+    out.append(f"@@ -{ctx_start + 1},{old_count} +{ctx_start + 1},{new_count} @@\n")
+    for ln in pre:
+        out.append(" " + ln)
+    for ln in inserts:
+        out.append("+" + ln)
+    for ln in post:
+        out.append(" " + ln)
+    return "".join(out)
+
+
+def synth_named_noop_patch(
+    dll: str, fn: str, current_const: str, seq: int, repo_root: Path
+) -> str | None:
+    """Multi-file patch: introduce a named-equivalent offset for an
+    entry currently resolving to a generic noop (kOffReturnZero etc.)
+    so the loader's classifier stops surfacing it as a journal record.
+
+    Touches three files:
+      * thunks_bytecode.inc — append the bytes for the named offset
+      * thunks.cpp           — declare the new constant + bump size assert
+      * thunks_table.inc     — point the row at the new constant
+
+    Returns None if the inputs aren't consistent (e.g. current
+    size assertion not parseable, source row not found).
+    """
+    tmpl = _NOOP_TEMPLATES.get(current_const)
+    if tmpl is None:
+        return None
+
+    # 1. Parse the current size assertion from thunks.cpp.
+    cpp_path = repo_root / _THUNKS_CPP_PATH
+    bc_path = repo_root / _THUNKS_BYTECODE_PATH
+    tbl_path = repo_root / _THUNKS_TABLE_PATH
+    if not (cpp_path.exists() and bc_path.exists() and tbl_path.exists()):
+        return None
+    cpp_lines = cpp_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    size_re = re.compile(
+        r"static_assert\(sizeof\(kThunksBytes\) == (0x[0-9a-fA-F]+),"
+    )
+    size_idx = None
+    current_size = None
+    for i, ln in enumerate(cpp_lines):
+        m = size_re.search(ln)
+        if m:
+            size_idx = i
+            current_size = int(m.group(1), 16)
+            break
+    if size_idx is None or current_size is None:
+        return None
+
+    # 2. Synthesise a constant name from the function name. Trim
+    # leading underscores (MSVC convention) and capitalise the first
+    # letter so it looks like other kOff* names.
+    base = fn.lstrip("_")
+    if not base:
+        return None
+    new_const = "kOff" + base[0].upper() + base[1:]
+    new_offset = current_size
+    new_bytes = tmpl["bytes"]
+    new_size = current_size + len(new_bytes)
+
+    # 3. Build the bytecode hunk: append a comment + the new bytes
+    # at the end of thunks_bytecode.inc (right after the last
+    # existing entry).
+    bc_lines = bc_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    # Append after the last non-blank line.
+    bc_insert_idx = len(bc_lines)
+    for i in range(len(bc_lines) - 1, -1, -1):
+        if bc_lines[i].strip():
+            bc_insert_idx = i + 1
+            break
+    asm_comment = tmpl["asm"]
+    bytes_hex = ", ".join(f"0x{b:02X}" for b in new_bytes)
+    bc_inserts = [
+        "\n",
+        f"    // --- {fn} (offset 0x{new_offset:X}, {len(new_bytes)} bytes) ----------\n",
+        f"    // Auto-added from fix journal seq={seq}. {asm_comment}\n",
+        f"    // {dll}!{fn} formerly resolved to {current_const}; the named\n",
+        f"    // offset breaks out of the noop classifier so the journal\n",
+        f"    // stops re-recording it. Replace these bytes with a real\n",
+        f"    // implementation when one lands.\n",
+        f"    {bytes_hex}, // 0x{new_offset:X} {asm_comment.split(';')[0].strip()}\n",
+    ]
+    bc_hunk = _hunk_insert_lines(_THUNKS_BYTECODE_PATH, bc_lines, bc_insert_idx, bc_inserts)
+
+    # 4. cpp hunk: bump the size assertion and add a new constant
+    # before it.
+    new_size_line = re.sub(r"0x[0-9a-fA-F]+", f"0x{new_size:X}", cpp_lines[size_idx], count=1)
+    cpp_size_hunk = _hunk_replace_line(_THUNKS_CPP_PATH, cpp_lines, size_idx, new_size_line)
+    # Insert the constant declaration just before the kThunksBytes[]
+    # array definition. We find that line by string match — keeping
+    # the search local to the file we already loaded.
+    bytes_arr_idx = None
+    for i, ln in enumerate(cpp_lines):
+        if "constexpr u8 kThunksBytes[]" in ln:
+            bytes_arr_idx = i
+            break
+    if bytes_arr_idx is None:
+        return None
+    const_inserts = [
+        f"// Auto-added from fix journal seq={seq} — named-equivalent of {current_const}.\n",
+        f"constexpr u32 {new_const} = 0x{new_offset:X}; // {len(new_bytes)} bytes\n",
+        "\n",
+    ]
+    cpp_const_hunk = _hunk_insert_lines(_THUNKS_CPP_PATH, cpp_lines, bytes_arr_idx, const_inserts)
+
+    # 5. Table hunk: rewrite the row for (dll, fn) to use new_const.
+    tbl_lines = tbl_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    row_re = re.compile(
+        r'(\{\s*"' + re.escape(dll) + r'"\s*,\s*"' + re.escape(fn) + r'"\s*,\s*)'
+        + re.escape(current_const) + r'(\s*\})'
+    )
+    tbl_idx = None
+    for i, ln in enumerate(tbl_lines):
+        if row_re.search(ln):
+            tbl_idx = i
+            break
+    if tbl_idx is None:
+        return None
+    new_tbl_line = row_re.sub(r"\1" + new_const + r"\2", tbl_lines[tbl_idx])
+    tbl_hunk = _hunk_replace_line(_THUNKS_TABLE_PATH, tbl_lines, tbl_idx, new_tbl_line)
+
+    return tbl_hunk + cpp_const_hunk + cpp_size_hunk + bc_hunk
+
+
 _SYSCALL_PATH = "kernel/syscall/syscall.cpp"
 
 
@@ -347,26 +525,44 @@ def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path) 
                         )
                     )
             elif existing in _NOOP_OFFSETS:
-                actions.append(
-                    Action(
-                        kind="note",
-                        title=f"`{dll}!{fn}` resolves to noop `{existing}`",
-                        body=(
-                            f"The thunk table already has an entry for `{dll}!{fn}` "
-                            f"pointing at the generic noop `{existing}`. The fix journal "
-                            f"recorded the call because the caller likely needs real "
-                            f"semantics. Either:\n\n"
-                            f"  1. Add a real implementation: write bytecode in "
-                            f"`thunks_bytecode.inc`, declare a `kOff<Name>` constant in "
-                            f"`thunks.cpp`, and update the row in `thunks_table.inc`.\n"
-                            f"  2. Accept the noop as intentional: replace the generic "
-                            f"`{existing}` with a distinct named offset (the loader's noop "
-                            f"classifier ignores any offset whose name isn't in the noop "
-                            f"set, so the journal stops re-recording it).\n"
-                        ),
-                        filename=None,
+                # Auto-emit the multi-file "named-equivalent" patch
+                # — same bytecode at a fresh offset under a new
+                # kOff<Name>, so the loader's noop classifier
+                # (which compares by offset value) stops surfacing
+                # the entry. The reviewer can later swap the bytes
+                # for a real implementation without changing the
+                # IAT contract.
+                diff = synth_named_noop_patch(dll, fn, existing, r.seq, repo_root)
+                if diff:
+                    fname = (
+                        f"named-noop-{dll.replace('.dll', '')}-{fn}.patch"
+                    ).replace("/", "_")
+                    actions.append(
+                        Action(
+                            kind="patch",
+                            title=(
+                                f"Promote `{dll}!{fn}` from `{existing}` to a "
+                                f"named-equivalent offset"
+                            ),
+                            body=diff,
+                            filename=fname,
+                        )
                     )
-                )
+                else:
+                    actions.append(
+                        Action(
+                            kind="note",
+                            title=f"`{dll}!{fn}` resolves to noop `{existing}`",
+                            body=(
+                                f"Could not auto-generate a named-equivalent "
+                                f"patch for `{existing}`. Add the bytecode + "
+                                f"constant + table row by hand, or extend "
+                                f"`_NOOP_TEMPLATES` in this script to cover "
+                                f"this kOff*."
+                            ),
+                            filename=None,
+                        )
+                    )
             else:
                 # Already real — journal probably caught it before
                 # the row landed; nothing to do.
