@@ -11,8 +11,14 @@
  * 1 Hz UI tick (compositor scheduler) so a long-uptime log
  * always reflects the current ring within roughly a second.
  *
- * Each boot truncates the on-disk file. There is no cross-boot
- * rotation yet — that's a follow-up.
+ * Cross-boot retention: on install, KERNEL.LOG ages to KERNEL.0,
+ * the existing KERNEL.<i> archive chain shifts down one slot, and
+ * the oldest is dropped. A bounded number of past boots (depth
+ * == 4 currently) are kept on disk for post-mortem inspection.
+ *
+ * Mid-boot rotation: when KERNEL.LOG would grow past 256 KiB on
+ * the next flush, the same chain shift runs in-place — so a
+ * long-running boot doesn't grow the on-disk log unbounded.
  */
 
 namespace duetos::core
