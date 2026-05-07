@@ -122,6 +122,10 @@ using VkDescriptorPool = u64;
 using VkDescriptorSet = u64;
 using VkSurfaceKHR = u64;
 using VkSwapchainKHR = u64;
+using VkSampler = u64;
+using VkEvent = u64;
+using VkPipelineCache = u64;
+using VkQueryPool = u64;
 
 // Return codes (subset).
 enum class VkResult : i32
@@ -156,6 +160,28 @@ enum class VkPipelineBindPoint : u32
 {
     Graphics = 0,
     Compute = 1,
+};
+
+// VkIndexType — for vkCmdBindIndexBuffer.
+enum class VkIndexType : u32
+{
+    Uint16 = 0,
+    Uint32 = 1,
+};
+
+// Push constant payload size cap — covers the spec's
+// minimum-mandated 128 bytes.  Keeps the per-cb tape entry a
+// fixed size.
+inline constexpr u32 kMaxPushConstantBytes = 128;
+
+struct VkViewport
+{
+    float x;
+    float y;
+    float width;
+    float height;
+    float minDepth;
+    float maxDepth;
 };
 
 // Memory property flags (subset; matches the spec's bit layout).
@@ -320,6 +346,20 @@ VkResult VkDeviceWaitIdle(VkDevice dev);
 VkResult VkAllocateMemory(VkDevice dev, u64 size, u32 memory_type_index, VkDeviceMemory* out);
 void VkFreeMemory(VkDevice dev, VkDeviceMemory mem);
 
+/// Map host-visible memory.  The pointer returned is the kernel
+/// heap allocation that backed the memory at allocate time;
+/// only memory_type_index 1 (HOST_VISIBLE+COHERENT) supports
+/// mapping today.  Map calls are reference-counted but the
+/// pointer never moves.
+VkResult VkMapMemory(VkDevice dev, VkDeviceMemory mem, u64 offset, u64 size, void** out_ptr);
+void VkUnmapMemory(VkDevice dev, VkDeviceMemory mem);
+
+/// Flush / invalidate cache lines that span the supplied memory
+/// ranges.  HOST_COHERENT memory makes these no-ops; the entries
+/// exist for spec compatibility.
+VkResult VkFlushMappedMemoryRanges(VkDevice dev, u32 count, const VkDeviceMemory* mems);
+VkResult VkInvalidateMappedMemoryRanges(VkDevice dev, u32 count, const VkDeviceMemory* mems);
+
 VkResult VkCreateBuffer(VkDevice dev, u64 size, VkBuffer* out);
 void VkDestroyBuffer(VkDevice dev, VkBuffer buf);
 VkResult VkBindBufferMemory(VkDevice dev, VkBuffer buf, VkDeviceMemory mem, u64 offset);
@@ -408,12 +448,58 @@ VkResult VkBeginCommandBuffer(VkCommandBuffer cb);
 VkResult VkEndCommandBuffer(VkCommandBuffer cb);
 VkResult VkResetCommandBuffer(VkCommandBuffer cb);
 
+/// Reset every command buffer in the pool to the Initial state.
+/// `flags` is accepted for spec compatibility (RELEASE_RESOURCES
+/// is a no-op in v0 — there's no per-cb storage to release).
+VkResult VkResetCommandPool(VkDevice dev, VkCommandPool pool, u32 flags);
+
 VkResult VkCmdBeginRenderPass(VkCommandBuffer cb, VkRenderPass rp, VkFramebuffer fb, VkRect2D area,
                               VkClearColorValue clear);
 VkResult VkCmdEndRenderPass(VkCommandBuffer cb);
 VkResult VkCmdBindPipeline(VkCommandBuffer cb, VkPipelineBindPoint bind_point, VkPipeline pipe);
 VkResult VkCmdClearColorImage(VkCommandBuffer cb, VkImage image, VkClearColorValue clear);
 VkResult VkCmdDraw(VkCommandBuffer cb, u32 vertex_count, u32 instance_count, u32 first_vertex, u32 first_instance);
+VkResult VkCmdDrawIndexed(VkCommandBuffer cb, u32 index_count, u32 instance_count, u32 first_index, i32 vertex_offset,
+                          u32 first_instance);
+
+// Dynamic state — recorded only.  A real ICD feeds these into
+// the rasterizer at draw time.
+VkResult VkCmdSetViewport(VkCommandBuffer cb, u32 first_viewport, u32 count, const VkViewport* viewports);
+VkResult VkCmdSetScissor(VkCommandBuffer cb, u32 first_scissor, u32 count, const VkRect2D* scissors);
+
+// Vertex / index binding — recorded only (no shader to consume
+// the streams yet).  vkCmdBindVertexBuffers takes parallel
+// arrays of buffers + per-buffer offsets like the spec.
+VkResult VkCmdBindVertexBuffers(VkCommandBuffer cb, u32 first_binding, u32 count, const VkBuffer* buffers,
+                                const u64* offsets);
+VkResult VkCmdBindIndexBuffer(VkCommandBuffer cb, VkBuffer buffer, u64 offset, VkIndexType type);
+
+// Buffer transfer / fill — recorded; replay copies bytes
+// between buffer-bound memory when both buffers are mapped.
+VkResult VkCmdCopyBuffer(VkCommandBuffer cb, VkBuffer src, VkBuffer dst, u64 src_offset, u64 dst_offset, u64 size);
+VkResult VkCmdFillBuffer(VkCommandBuffer cb, VkBuffer dst, u64 dst_offset, u64 size, u32 data);
+
+// Pipeline barrier — recorded only.  Required for spec
+// compliance even when there's no GPU-side hazard tracking.
+VkResult VkCmdPipelineBarrier(VkCommandBuffer cb, u32 src_stage_mask, u32 dst_stage_mask, u32 dependency_flags);
+
+// Push constants — small per-pipeline-layout payload that
+// shaders read.  Recorded into the cb's tape; replay never
+// dispatches anywhere today.
+VkResult VkCmdPushConstants(VkCommandBuffer cb, VkPipelineLayout layout, u32 stage_flags, u32 offset, u32 size,
+                            const void* values);
+
+// Compute dispatch — recorded only.
+VkResult VkCmdDispatch(VkCommandBuffer cb, u32 group_count_x, u32 group_count_y, u32 group_count_z);
+
+/// Copy a contiguous range of host-visible buffer memory into
+/// an image's pixel store.  When the image is scanout-backed
+/// the replay path actually paints those bytes through
+/// `FramebufferBlit` — turning this into a real texture-upload
+/// path.  When the image is non-scanout, the bytes are
+/// recorded but discarded (no real image storage in v0).
+VkResult VkCmdCopyBufferToImage(VkCommandBuffer cb, VkBuffer src_buffer, VkImage dst_image, u64 src_offset, u32 width,
+                                u32 height);
 
 // -------------------------------------------------------------------
 // Submission + sync
@@ -495,6 +581,22 @@ VkResult VkFreeDescriptorSets(VkDevice dev, VkDescriptorPool pool, u32 count, co
 /// in v0.
 VkResult VkUpdateDescriptorSet(VkDescriptorSet set, u32 binding, VkDescriptorType type, u64 resource_handle);
 
+/// Spec-form descriptor write — same shape Vulkan callers
+/// expect: an array of writes, each describing a (set, binding,
+/// type, resource handle) tuple.  Internally this dispatches to
+/// `VkUpdateDescriptorSet` per-element so the per-set write
+/// counter increments correctly.
+struct VkWriteDescriptorSet
+{
+    VkDescriptorSet dstSet;
+    u32 dstBinding;
+    VkDescriptorType type;
+    u64 resourceHandle; // VkBuffer / VkImageView / VkSampler
+};
+
+VkResult VkUpdateDescriptorSets(VkDevice dev, u32 write_count, const VkWriteDescriptorSet* writes, u32 copy_count,
+                                const void* copies);
+
 VkResult VkCmdBindDescriptorSets(VkCommandBuffer cb, VkPipelineBindPoint bind_point, VkPipelineLayout layout,
                                  u32 first_set, u32 set_count, const VkDescriptorSet* sets);
 
@@ -573,6 +675,104 @@ VkResult VkAcquireNextImageKHR(VkDevice dev, VkSwapchainKHR sc, u64 timeout_ns, 
 VkResult VkQueuePresentKHR(VkQueue q, VkSwapchainKHR sc, u32 image_index);
 
 // -------------------------------------------------------------------
+// Sampler.
+// -------------------------------------------------------------------
+//
+// Texture sampler — handle bookkeeping only.  No shader will
+// actually read through the sampler in v0; the surface exists
+// so a downstream caller's descriptor-set wiring lines up.
+
+enum class VkFilter : u32
+{
+    Nearest = 0,
+    Linear = 1,
+};
+
+enum class VkSamplerAddressMode : u32
+{
+    Repeat = 0,
+    MirroredRepeat = 1,
+    ClampToEdge = 2,
+    ClampToBorder = 3,
+};
+
+struct VkSamplerCreateInfo
+{
+    VkFilter magFilter;
+    VkFilter minFilter;
+    VkSamplerAddressMode addressModeU;
+    VkSamplerAddressMode addressModeV;
+    VkSamplerAddressMode addressModeW;
+};
+
+VkResult VkCreateSampler(VkDevice dev, const VkSamplerCreateInfo* info, VkSampler* out);
+void VkDestroySampler(VkDevice dev, VkSampler sampler);
+
+// -------------------------------------------------------------------
+// Event.
+// -------------------------------------------------------------------
+//
+// Host-signallable / device-signallable sync.  vkSet/Reset toggle
+// the device-visible bit; vkGetEventStatus reads it; the cb-side
+// CmdSetEvent / CmdResetEvent / CmdWaitEvents are recorded into
+// the tape (no-op replay — there's no real GPU pipeline to gate).
+
+VkResult VkCreateEvent(VkDevice dev, VkEvent* out);
+void VkDestroyEvent(VkDevice dev, VkEvent event);
+VkResult VkSetEvent(VkDevice dev, VkEvent event);
+VkResult VkResetEvent(VkDevice dev, VkEvent event);
+VkResult VkGetEventStatus(VkDevice dev, VkEvent event); // returns Success when set, NotReady when reset
+VkResult VkCmdSetEvent(VkCommandBuffer cb, VkEvent event, u32 stage_mask);
+VkResult VkCmdResetEvent(VkCommandBuffer cb, VkEvent event, u32 stage_mask);
+VkResult VkCmdWaitEvents(VkCommandBuffer cb, u32 count, const VkEvent* events);
+
+// -------------------------------------------------------------------
+// Pipeline cache.
+// -------------------------------------------------------------------
+//
+// Real Vulkan pipeline caches store compiled shader binaries so
+// repeated vkCreateGraphicsPipelines calls don't recompile from
+// SPIR-V.  Our v0 ICD doesn't compile, so the cache is a tracked
+// handle only — Merge accepts source caches but writes nothing.
+// GetData reports a 16-byte header (matches the spec's
+// VkPipelineCacheHeaderVersionOne shape) so a caller's
+// "round-trip the cache to disk" path doesn't trip.
+
+VkResult VkCreatePipelineCache(VkDevice dev, const void* initial_data, u64 initial_size, VkPipelineCache* out);
+void VkDestroyPipelineCache(VkDevice dev, VkPipelineCache cache);
+VkResult VkMergePipelineCaches(VkDevice dev, VkPipelineCache dst, u32 src_count, const VkPipelineCache* sources);
+VkResult VkGetPipelineCacheData(VkDevice dev, VkPipelineCache cache, u64* size, void* data);
+
+// -------------------------------------------------------------------
+// Query pool.
+// -------------------------------------------------------------------
+//
+// Timestamp / occlusion queries.  Storage is a small array of
+// u64 results per pool; vkCmdBeginQuery / vkCmdEndQuery /
+// vkCmdResetQueryPool are recorded into the tape and replayed
+// to update the result array.  vkGetQueryPoolResults copies
+// out.  No real GPU is sampled — timestamps come from the
+// kernel time source so the values move predictably across
+// queries (good enough for the self-test to assert ordering).
+
+enum class VkQueryType : u32
+{
+    Occlusion = 0,
+    PipelineStatistics = 1,
+    Timestamp = 2,
+};
+
+VkResult VkCreateQueryPool(VkDevice dev, VkQueryType type, u32 query_count, VkQueryPool* out);
+void VkDestroyQueryPool(VkDevice dev, VkQueryPool pool);
+VkResult VkResetQueryPool(VkDevice dev, VkQueryPool pool, u32 first_query, u32 query_count);
+VkResult VkCmdResetQueryPool(VkCommandBuffer cb, VkQueryPool pool, u32 first_query, u32 query_count);
+VkResult VkCmdBeginQuery(VkCommandBuffer cb, VkQueryPool pool, u32 query, u32 flags);
+VkResult VkCmdEndQuery(VkCommandBuffer cb, VkQueryPool pool, u32 query);
+VkResult VkCmdWriteTimestamp(VkCommandBuffer cb, u32 stage, VkQueryPool pool, u32 query);
+VkResult VkGetQueryPoolResults(VkDevice dev, VkQueryPool pool, u32 first_query, u32 query_count, u64* data, u32 stride,
+                               u32 flags);
+
+// -------------------------------------------------------------------
 // D3D11 / D3D12 -> Vulkan translation (still skeleton)
 // -------------------------------------------------------------------
 //
@@ -626,8 +826,20 @@ struct GraphicsStats
     u32 vk_descriptor_writes; // total VkUpdateDescriptorSet calls
     u32 vk_surfaces_live;
     u32 vk_swapchains_live;
-    u32 vk_swapchain_acquires;         // total vkAcquireNextImageKHR calls
-    u32 vk_swapchain_presents;         // total vkQueuePresentKHR calls
+    u32 vk_swapchain_acquires;   // total vkAcquireNextImageKHR calls
+    u32 vk_swapchain_presents;   // total vkQueuePresentKHR calls
+    u32 vk_buffer_copy_bytes;    // bytes moved by vkCmdCopyBuffer replay
+    u32 vk_buffer_fill_bytes;    // bytes written by vkCmdFillBuffer replay
+    u32 vk_push_constant_writes; // count of vkCmdPushConstants ops recorded
+    u32 vk_pipeline_barriers;    // count of vkCmdPipelineBarrier ops recorded
+    u32 vk_dispatches;           // count of vkCmdDispatch ops recorded
+    u32 vk_image_upload_pixels;  // pixels uploaded by vkCmdCopyBufferToImage replay
+    u32 vk_samplers_live;
+    u32 vk_events_live;
+    u32 vk_pipeline_caches_live;
+    u32 vk_query_pools_live;
+    u32 vk_queries_executed;           // total CmdEndQuery / CmdWriteTimestamp replays
+    u32 vk_memory_maps;                // total VkMapMemory calls
     u32 vk_queue_submits;              // total VkQueueSubmit calls
     u32 vk_command_recorded;           // total vkCmd* opcodes recorded
     u32 vk_command_replayed;           // total vkCmd* opcodes replayed in submit

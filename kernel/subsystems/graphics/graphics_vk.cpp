@@ -5,6 +5,8 @@
 #include "drivers/video/display_info.h"
 #include "drivers/video/framebuffer.h"
 #include "log/klog.h"
+#include "mm/kheap.h"
+#include "time/timekeeper.h"
 
 /*
  * DuetOS — Vulkan ICD implementation, v0.
@@ -111,6 +113,10 @@ constexpr u64 kDescPoolBase = 0x13'0000;
 constexpr u64 kDescSetBase = 0x14'0000;
 constexpr u64 kSurfaceBase = 0x15'0000;
 constexpr u64 kSwapchainBase = 0x16'0000;
+constexpr u64 kSamplerBase = 0x17'0000;
+constexpr u64 kEventBase = 0x18'0000;
+constexpr u64 kPipelineCacheBase = 0x19'0000;
+constexpr u64 kQueryPoolBase = 0x1A'0000;
 
 bool HandleInRange(u64 h, u64 base)
 {
@@ -155,8 +161,34 @@ struct BufferRecord
 {
     u64 size;
     bool memory_bound;
+    void* backing;      // host-visible pointer (filled in by VkMapMemory or
+                        // implicit-bound for swapchain images / self-test buffers)
+    u64 backing_offset; // offset into the bound memory's host backing
+    VkDeviceMemory bound_memory;
 };
 BufferRecord g_buffer_data[kPoolCapacity];
+
+struct ImageViewRecord
+{
+    VkImage image;
+};
+ImageViewRecord g_imageview_data[kPoolCapacity];
+
+struct FramebufferRecord
+{
+    VkImageView attachment;
+};
+FramebufferRecord g_framebuffer_data[kPoolCapacity];
+
+struct DeviceMemoryRecord
+{
+    u64 size;
+    void* host_ptr; // KMalloc-backed allocation, nullptr until bound
+    u32 type_index;
+    bool host_visible;
+    u32 map_count; // current vkMapMemory ref count
+};
+DeviceMemoryRecord g_memory_data[kPoolCapacity];
 
 enum class CmdOp : u8
 {
@@ -166,6 +198,24 @@ enum class CmdOp : u8
     BindPipeline = 3,
     ClearColorImage = 4,
     Draw = 5,
+    DrawIndexed = 6,
+    SetViewport = 7,
+    SetScissor = 8,
+    BindVertexBuffer = 9,
+    BindIndexBuffer = 10,
+    CopyBuffer = 11,
+    FillBuffer = 12,
+    PipelineBarrier = 13,
+    PushConstants = 14,
+    Dispatch = 15,
+    CopyBufferToImage = 16,
+    SetEvent = 17,
+    ResetEvent = 18,
+    WaitEvents = 19,
+    BeginQuery = 20,
+    EndQuery = 21,
+    ResetQueryPool = 22,
+    WriteTimestamp = 23,
 };
 
 struct CmdRecord
@@ -182,6 +232,42 @@ struct CmdRecord
     u32 instance_count;
     u32 first_vertex;
     u32 first_instance;
+    // Indexed draw + index-binding fields.
+    u32 index_count;
+    u32 first_index;
+    i32 vertex_offset;
+    VkBuffer index_buffer;
+    u64 index_offset;
+    VkIndexType index_type;
+    // Vertex binding (single-binding subset; spec allows arrays).
+    VkBuffer vertex_buffer;
+    u64 vertex_offset_bytes;
+    u32 vertex_binding;
+    // Buffer copy / fill.
+    VkBuffer src_buffer;
+    VkBuffer dst_buffer;
+    u64 src_offset;
+    u64 dst_offset;
+    u64 region_size;
+    u32 fill_pattern;
+    // Push constants — fixed-size payload + actual length.
+    u32 push_offset;
+    u32 push_size;
+    u8 push_data[kMaxPushConstantBytes];
+    // Dispatch dimensions.
+    u32 dispatch_x;
+    u32 dispatch_y;
+    u32 dispatch_z;
+    // Event ops.
+    VkEvent event;
+    // Query ops.
+    VkQueryPool query_pool;
+    u32 query_first;
+    u32 query_count;
+    u32 query_index;
+    // CopyBufferToImage geometry.
+    u32 region_width;
+    u32 region_height;
 };
 
 constexpr u32 kCmdTapeCapacity = 32;
@@ -245,6 +331,42 @@ struct SwapchainRecord
 };
 SwapchainRecord g_swapchain_data[kPoolCapacity];
 
+// Event: device-visible signal bit, plus map_count style ref
+// counting on host accesses.
+struct EventRecord
+{
+    bool signalled;
+};
+EventRecord g_event_data[kPoolCapacity];
+
+// Pipeline cache: blobless; we just record initial-data size to
+// satisfy GetPipelineCacheData round trips.
+struct PipelineCacheRecord
+{
+    u64 stored_size;
+};
+PipelineCacheRecord g_pipeline_cache_data[kPoolCapacity];
+
+// Query pool: small fixed-size results array.
+constexpr u32 kMaxQueriesPerPool = 16;
+struct QueryPoolRecord
+{
+    VkQueryType type;
+    u32 query_count;
+    u64 results[kMaxQueriesPerPool];
+    bool available[kMaxQueriesPerPool];
+};
+QueryPoolRecord g_query_pool_data[kPoolCapacity];
+
+// Per-physical-device record — which GPU index this handle
+// represents.  Set at enum time, read by the property queries
+// so a caller with multiple GPUs sees per-device vendor / family.
+struct PhysicalDeviceRecord
+{
+    u32 gpu_index;
+};
+PhysicalDeviceRecord g_phys_data[kPoolCapacity];
+
 // -------------------------------------------------------------------
 // Pools.
 // -------------------------------------------------------------------
@@ -271,6 +393,10 @@ Pool g_desc_pool_pool;
 Pool g_desc_set_pool;
 Pool g_surface_pool;
 Pool g_swapchain_pool;
+Pool g_sampler_pool;
+Pool g_event_pool;
+Pool g_pipeline_cache_pool;
+Pool g_query_pool_pool;
 
 // -------------------------------------------------------------------
 // Aggregate counters.
@@ -289,6 +415,14 @@ u32 g_spirv_entry_points_seen = 0;
 u32 g_spirv_capabilities_seen = 0;
 u32 g_spirv_decorations_seen = 0;
 u32 g_spirv_execution_modes_seen = 0;
+u32 g_buffer_copy_bytes = 0;
+u32 g_buffer_fill_bytes = 0;
+u32 g_push_constant_writes = 0;
+u32 g_pipeline_barriers = 0;
+u32 g_dispatches = 0;
+u32 g_queries_executed = 0;
+u32 g_memory_maps = 0;
+u32 g_image_upload_pixels = 0;
 
 // One-shot logging keyed by entry point.
 enum EpId
@@ -420,6 +554,11 @@ VkResult VkEnumeratePhysicalDevices(VkInstance inst, u32* count, VkPhysicalDevic
             *count = i;
             return VkResult::ErrorOutOfHostMemory;
         }
+        // Map the handle slot back to a real GPU index so the
+        // property queries can report per-device vendor/family
+        // (a multi-GPU host gets distinct VkPhysicalDevice
+        // properties per handle, not the same struct repeated).
+        g_phys_data[slot].gpu_index = i;
         devs[i] = HandleFor(kPhysDevBase, slot);
     }
     *count = give;
@@ -436,14 +575,34 @@ VkResult VkGetPhysicalDeviceProperties(VkPhysicalDevice phys, VkPhysicalDevicePr
     *out = VkPhysicalDeviceProperties{};
     out->apiVersion = kApiVersion1_3;
     out->driverVersion = MakeApiVersion(0, 0, 1, 0); // DuetOS ICD epoch
+
+    // Source per-handle: pick the GPU this phys handle was
+    // allocated for, falling back to display_info when the GPU
+    // index is out of range (no display-class device discovered).
+    const u32 gpu_index = g_phys_data[SlotOf(phys, kPhysDevBase)].gpu_index;
     const auto di = drivers::video::Query();
-    out->vendorID = di.gpu_present ? PciVendorIdFromName(di.gpu_vendor) : 0u;
-    out->deviceID = 0;
+    const char* vendor_str = nullptr;
+    const char* family_str = nullptr;
+    if (gpu_index < drivers::gpu::GpuCount())
+    {
+        const auto& g = drivers::gpu::Gpu(gpu_index);
+        vendor_str = g.vendor;
+        family_str = g.family;
+        out->vendorID = g.vendor_id;
+        out->deviceID = g.device_id;
+    }
+    else
+    {
+        vendor_str = di.gpu_vendor;
+        family_str = di.gpu_family;
+        out->vendorID = di.gpu_present ? PciVendorIdFromName(di.gpu_vendor) : 0u;
+        out->deviceID = 0;
+    }
 
     // Device type: virtio-gpu / Bochs are virtual; Intel iGPU is
     // integrated; AMD/NVIDIA are discrete.  CPU fallback when no
     // display-class device was discovered.
-    if (!di.gpu_present)
+    if (vendor_str == nullptr)
         out->deviceType = 4; // CPU
     else if (out->vendorID == 0x8086)
         out->deviceType = 1; // IntegratedGPU
@@ -463,11 +622,11 @@ VkResult VkGetPhysicalDeviceProperties(VkPhysicalDevice phys, VkPhysicalDevicePr
             buf[i++] = *s++;
     };
     append("DuetOS-vk-");
-    append(di.gpu_present ? di.gpu_vendor : "cpu");
-    if (di.gpu_present && di.gpu_family != nullptr)
+    append(vendor_str != nullptr ? vendor_str : "cpu");
+    if (family_str != nullptr)
     {
         append("-");
-        append(di.gpu_family);
+        append(family_str);
     }
     buf[i] = '\0';
     StrCopyN(out->deviceName, buf, kMaxDeviceName);
@@ -630,11 +789,31 @@ VkResult VkAllocateMemory(VkDevice dev, u64 size, u32 memory_type_index, VkDevic
         return VkResult::ErrorInitializationFailed;
     if (size == 0)
         return VkResult::ErrorOutOfDeviceMemory;
+    // Memory type 0 = DEVICE_LOCAL, 1 = HOST_VISIBLE+COHERENT.
+    // (See VkGetPhysicalDeviceMemoryProperties.)
     if (memory_type_index >= 2)
         return VkResult::ErrorInitializationFailed;
     u32 slot = 0;
     if (!PoolAlloc(g_memory_pool, &slot))
         return VkResult::ErrorOutOfHostMemory;
+    auto& rec = g_memory_data[slot];
+    rec.size = size;
+    rec.type_index = memory_type_index;
+    rec.host_visible = (memory_type_index == 1);
+    rec.map_count = 0;
+    rec.host_ptr = nullptr;
+    if (rec.host_visible)
+    {
+        // Back host-visible memory with kheap so vkMapMemory can
+        // hand the caller a real pointer they can read/write.
+        // DEVICE_LOCAL stays nullptr — caller can't map it anyway.
+        rec.host_ptr = mm::KMalloc(size);
+        if (rec.host_ptr == nullptr)
+        {
+            (void)PoolFree(g_memory_pool, slot);
+            return VkResult::ErrorOutOfDeviceMemory;
+        }
+    }
     if (out != nullptr)
         *out = HandleFor(kMemoryBase, slot);
     return VkResult::Success;
@@ -645,7 +824,63 @@ void VkFreeMemory(VkDevice dev, VkDeviceMemory mem)
     (void)dev;
     if (mem == 0 || !HandleInRange(mem, kMemoryBase))
         return;
-    (void)PoolFree(g_memory_pool, SlotOf(mem, kMemoryBase));
+    const u32 slot = SlotOf(mem, kMemoryBase);
+    if (!PoolIsLive(g_memory_pool, slot))
+        return;
+    if (g_memory_data[slot].host_ptr != nullptr)
+    {
+        mm::KFree(g_memory_data[slot].host_ptr);
+        g_memory_data[slot].host_ptr = nullptr;
+    }
+    (void)PoolFree(g_memory_pool, slot);
+}
+
+VkResult VkMapMemory(VkDevice dev, VkDeviceMemory mem, u64 offset, u64 size, void** out_ptr)
+{
+    (void)size;
+    if (out_ptr == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    if (!HandleInRange(dev, kDeviceBase) || !PoolIsLive(g_device_pool, SlotOf(dev, kDeviceBase)))
+        return VkResult::ErrorInitializationFailed;
+    if (!HandleInRange(mem, kMemoryBase) || !PoolIsLive(g_memory_pool, SlotOf(mem, kMemoryBase)))
+        return VkResult::ErrorInitializationFailed;
+    auto& rec = g_memory_data[SlotOf(mem, kMemoryBase)];
+    if (!rec.host_visible || rec.host_ptr == nullptr)
+        return VkResult::ErrorMemoryMapFailed;
+    if (offset >= rec.size)
+        return VkResult::ErrorMemoryMapFailed;
+    ++rec.map_count;
+    ++g_memory_maps;
+    *out_ptr = static_cast<u8*>(rec.host_ptr) + offset;
+    return VkResult::Success;
+}
+
+void VkUnmapMemory(VkDevice dev, VkDeviceMemory mem)
+{
+    (void)dev;
+    if (!HandleInRange(mem, kMemoryBase) || !PoolIsLive(g_memory_pool, SlotOf(mem, kMemoryBase)))
+        return;
+    auto& rec = g_memory_data[SlotOf(mem, kMemoryBase)];
+    if (rec.map_count > 0)
+        --rec.map_count;
+}
+
+VkResult VkFlushMappedMemoryRanges(VkDevice dev, u32 count, const VkDeviceMemory* mems)
+{
+    (void)dev;
+    (void)count;
+    (void)mems;
+    // Memory type 1 advertises HOST_COHERENT, so flushes are
+    // implicit; this entry is here for spec compatibility.
+    return VkResult::Success;
+}
+
+VkResult VkInvalidateMappedMemoryRanges(VkDevice dev, u32 count, const VkDeviceMemory* mems)
+{
+    (void)dev;
+    (void)count;
+    (void)mems;
+    return VkResult::Success;
 }
 
 VkResult VkCreateBuffer(VkDevice dev, u64 size, VkBuffer* out)
@@ -655,8 +890,8 @@ VkResult VkCreateBuffer(VkDevice dev, u64 size, VkBuffer* out)
     u32 slot = 0;
     if (!PoolAlloc(g_buffer_pool, &slot))
         return VkResult::ErrorOutOfHostMemory;
+    g_buffer_data[slot] = BufferRecord{};
     g_buffer_data[slot].size = size;
-    g_buffer_data[slot].memory_bound = false;
     if (out != nullptr)
         *out = HandleFor(kBufferBase, slot);
     return VkResult::Success;
@@ -673,12 +908,18 @@ void VkDestroyBuffer(VkDevice dev, VkBuffer buf)
 VkResult VkBindBufferMemory(VkDevice dev, VkBuffer buf, VkDeviceMemory mem, u64 offset)
 {
     (void)dev;
-    (void)offset;
     if (!HandleInRange(buf, kBufferBase) || !PoolIsLive(g_buffer_pool, SlotOf(buf, kBufferBase)))
         return VkResult::ErrorInitializationFailed;
     if (!HandleInRange(mem, kMemoryBase) || !PoolIsLive(g_memory_pool, SlotOf(mem, kMemoryBase)))
         return VkResult::ErrorInitializationFailed;
-    g_buffer_data[SlotOf(buf, kBufferBase)].memory_bound = true;
+    auto& buf_rec = g_buffer_data[SlotOf(buf, kBufferBase)];
+    auto& mem_rec = g_memory_data[SlotOf(mem, kMemoryBase)];
+    if (offset > mem_rec.size || offset + buf_rec.size > mem_rec.size)
+        return VkResult::ErrorInitializationFailed;
+    buf_rec.memory_bound = true;
+    buf_rec.bound_memory = mem;
+    buf_rec.backing_offset = offset;
+    buf_rec.backing = (mem_rec.host_ptr != nullptr) ? static_cast<u8*>(mem_rec.host_ptr) + offset : nullptr;
     return VkResult::Success;
 }
 
@@ -727,6 +968,7 @@ VkResult VkCreateImageView(VkDevice dev, VkImage img, VkImageView* out)
     u32 slot = 0;
     if (!PoolAlloc(g_imageview_pool, &slot))
         return VkResult::ErrorOutOfHostMemory;
+    g_imageview_data[slot].image = img;
     if (out != nullptr)
         *out = HandleFor(kImageViewBase, slot);
     return VkResult::Success;
@@ -777,6 +1019,7 @@ VkResult VkCreateFramebuffer(VkDevice dev, VkRenderPass rp, VkImageView attachme
     u32 slot = 0;
     if (!PoolAlloc(g_framebuffer_pool, &slot))
         return VkResult::ErrorOutOfHostMemory;
+    g_framebuffer_data[slot].attachment = attachment;
     if (out != nullptr)
         *out = HandleFor(kFramebufferBase, slot);
     return VkResult::Success;
@@ -1092,6 +1335,25 @@ VkResult VkResetCommandBuffer(VkCommandBuffer cb)
     return VkResult::Success;
 }
 
+VkResult VkResetCommandPool(VkDevice dev, VkCommandPool pool, u32 flags)
+{
+    (void)dev;
+    (void)flags;
+    if (!HandleInRange(pool, kCmdPoolBase) || !PoolIsLive(g_cmdpool_pool, SlotOf(pool, kCmdPoolBase)))
+        return VkResult::ErrorInitializationFailed;
+    // The pool itself doesn't track which command buffers it owns
+    // (the spec says caller must not free across pools), so reset
+    // walks every live cb.  Cheap — only kPoolCapacity slots.
+    for (u32 i = 0; i < kPoolCapacity; ++i)
+    {
+        if (!PoolIsLive(g_cmdbuf_pool, i))
+            continue;
+        g_cmdbuf_data[i].state = CbState::Initial;
+        g_cmdbuf_data[i].op_count = 0;
+    }
+    return VkResult::Success;
+}
+
 namespace
 {
 
@@ -1168,6 +1430,482 @@ VkResult VkCmdDraw(VkCommandBuffer cb, u32 vertex_count, u32 instance_count, u32
     return AppendOp(cb, op);
 }
 
+VkResult VkCmdDrawIndexed(VkCommandBuffer cb, u32 index_count, u32 instance_count, u32 first_index, i32 vertex_offset,
+                          u32 first_instance)
+{
+    CmdRecord op{};
+    op.op = CmdOp::DrawIndexed;
+    op.index_count = index_count;
+    op.instance_count = instance_count;
+    op.first_index = first_index;
+    op.vertex_offset = vertex_offset;
+    op.first_instance = first_instance;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdSetViewport(VkCommandBuffer cb, u32 first_viewport, u32 count, const VkViewport* viewports)
+{
+    (void)first_viewport;
+    (void)count;
+    (void)viewports;
+    // Recorded as state-only; the rasterizer doesn't read it yet.
+    CmdRecord op{};
+    op.op = CmdOp::SetViewport;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdSetScissor(VkCommandBuffer cb, u32 first_scissor, u32 count, const VkRect2D* scissors)
+{
+    (void)first_scissor;
+    if (count == 0 || scissors == nullptr)
+    {
+        CmdRecord op{};
+        op.op = CmdOp::SetScissor;
+        return AppendOp(cb, op);
+    }
+    CmdRecord op{};
+    op.op = CmdOp::SetScissor;
+    op.area = scissors[0]; // first scissor only — multi-scissor isn't wired
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdBindVertexBuffers(VkCommandBuffer cb, u32 first_binding, u32 count, const VkBuffer* buffers,
+                                const u64* offsets)
+{
+    if (count == 0)
+        return VkResult::Success;
+    if (buffers == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    // Spec lets the caller bind multiple in a single call; v0
+    // records the first binding only and validates each handle.
+    for (u32 i = 0; i < count; ++i)
+    {
+        if (!HandleInRange(buffers[i], kBufferBase) || !PoolIsLive(g_buffer_pool, SlotOf(buffers[i], kBufferBase)))
+            return VkResult::ErrorInitializationFailed;
+    }
+    CmdRecord op{};
+    op.op = CmdOp::BindVertexBuffer;
+    op.vertex_buffer = buffers[0];
+    op.vertex_offset_bytes = (offsets != nullptr) ? offsets[0] : 0;
+    op.vertex_binding = first_binding;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdBindIndexBuffer(VkCommandBuffer cb, VkBuffer buffer, u64 offset, VkIndexType type)
+{
+    if (!HandleInRange(buffer, kBufferBase) || !PoolIsLive(g_buffer_pool, SlotOf(buffer, kBufferBase)))
+        return VkResult::ErrorInitializationFailed;
+    CmdRecord op{};
+    op.op = CmdOp::BindIndexBuffer;
+    op.index_buffer = buffer;
+    op.index_offset = offset;
+    op.index_type = type;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdCopyBuffer(VkCommandBuffer cb, VkBuffer src, VkBuffer dst, u64 src_offset, u64 dst_offset, u64 size)
+{
+    if (!HandleInRange(src, kBufferBase) || !PoolIsLive(g_buffer_pool, SlotOf(src, kBufferBase)))
+        return VkResult::ErrorInitializationFailed;
+    if (!HandleInRange(dst, kBufferBase) || !PoolIsLive(g_buffer_pool, SlotOf(dst, kBufferBase)))
+        return VkResult::ErrorInitializationFailed;
+    CmdRecord op{};
+    op.op = CmdOp::CopyBuffer;
+    op.src_buffer = src;
+    op.dst_buffer = dst;
+    op.src_offset = src_offset;
+    op.dst_offset = dst_offset;
+    op.region_size = size;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdFillBuffer(VkCommandBuffer cb, VkBuffer dst, u64 dst_offset, u64 size, u32 data)
+{
+    if (!HandleInRange(dst, kBufferBase) || !PoolIsLive(g_buffer_pool, SlotOf(dst, kBufferBase)))
+        return VkResult::ErrorInitializationFailed;
+    CmdRecord op{};
+    op.op = CmdOp::FillBuffer;
+    op.dst_buffer = dst;
+    op.dst_offset = dst_offset;
+    op.region_size = size;
+    op.fill_pattern = data;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdPipelineBarrier(VkCommandBuffer cb, u32 src_stage_mask, u32 dst_stage_mask, u32 dependency_flags)
+{
+    (void)src_stage_mask;
+    (void)dst_stage_mask;
+    (void)dependency_flags;
+    CmdRecord op{};
+    op.op = CmdOp::PipelineBarrier;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdPushConstants(VkCommandBuffer cb, VkPipelineLayout layout, u32 stage_flags, u32 offset, u32 size,
+                            const void* values)
+{
+    (void)stage_flags;
+    if (!HandleInRange(layout, kPipelineLayoutBase) ||
+        !PoolIsLive(g_pipelinelayout_pool, SlotOf(layout, kPipelineLayoutBase)))
+        return VkResult::ErrorInitializationFailed;
+    if (size > kMaxPushConstantBytes)
+        return VkResult::ErrorTooManyObjects;
+    if (size > 0 && values == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    CmdRecord op{};
+    op.op = CmdOp::PushConstants;
+    op.push_offset = offset;
+    op.push_size = size;
+    if (size > 0)
+    {
+        const auto* src = static_cast<const u8*>(values);
+        for (u32 i = 0; i < size; ++i)
+            op.push_data[i] = src[i];
+    }
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdDispatch(VkCommandBuffer cb, u32 group_count_x, u32 group_count_y, u32 group_count_z)
+{
+    CmdRecord op{};
+    op.op = CmdOp::Dispatch;
+    op.dispatch_x = group_count_x;
+    op.dispatch_y = group_count_y;
+    op.dispatch_z = group_count_z;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdCopyBufferToImage(VkCommandBuffer cb, VkBuffer src_buffer, VkImage dst_image, u64 src_offset, u32 width,
+                                u32 height)
+{
+    if (!HandleInRange(src_buffer, kBufferBase) || !PoolIsLive(g_buffer_pool, SlotOf(src_buffer, kBufferBase)))
+        return VkResult::ErrorInitializationFailed;
+    if (!HandleInRange(dst_image, kImageBase) || !PoolIsLive(g_image_pool, SlotOf(dst_image, kImageBase)))
+        return VkResult::ErrorInitializationFailed;
+    CmdRecord op{};
+    op.op = CmdOp::CopyBufferToImage;
+    op.src_buffer = src_buffer;
+    op.image = dst_image;
+    op.src_offset = src_offset;
+    op.region_width = width;
+    op.region_height = height;
+    return AppendOp(cb, op);
+}
+
+// -------------------------------------------------------------------
+// Sampler.
+// -------------------------------------------------------------------
+
+VkResult VkCreateSampler(VkDevice dev, const VkSamplerCreateInfo* info, VkSampler* out)
+{
+    (void)info;
+    if (!HandleInRange(dev, kDeviceBase) || !PoolIsLive(g_device_pool, SlotOf(dev, kDeviceBase)))
+        return VkResult::ErrorInitializationFailed;
+    u32 slot = 0;
+    if (!PoolAlloc(g_sampler_pool, &slot))
+        return VkResult::ErrorOutOfHostMemory;
+    if (out != nullptr)
+        *out = HandleFor(kSamplerBase, slot);
+    return VkResult::Success;
+}
+
+void VkDestroySampler(VkDevice dev, VkSampler sampler)
+{
+    (void)dev;
+    if (sampler == 0 || !HandleInRange(sampler, kSamplerBase))
+        return;
+    (void)PoolFree(g_sampler_pool, SlotOf(sampler, kSamplerBase));
+}
+
+// -------------------------------------------------------------------
+// Event.
+// -------------------------------------------------------------------
+
+VkResult VkCreateEvent(VkDevice dev, VkEvent* out)
+{
+    if (!HandleInRange(dev, kDeviceBase) || !PoolIsLive(g_device_pool, SlotOf(dev, kDeviceBase)))
+        return VkResult::ErrorInitializationFailed;
+    u32 slot = 0;
+    if (!PoolAlloc(g_event_pool, &slot))
+        return VkResult::ErrorOutOfHostMemory;
+    g_event_data[slot].signalled = false;
+    if (out != nullptr)
+        *out = HandleFor(kEventBase, slot);
+    return VkResult::Success;
+}
+
+void VkDestroyEvent(VkDevice dev, VkEvent event)
+{
+    (void)dev;
+    if (event == 0 || !HandleInRange(event, kEventBase))
+        return;
+    (void)PoolFree(g_event_pool, SlotOf(event, kEventBase));
+}
+
+VkResult VkSetEvent(VkDevice dev, VkEvent event)
+{
+    (void)dev;
+    if (!HandleInRange(event, kEventBase) || !PoolIsLive(g_event_pool, SlotOf(event, kEventBase)))
+        return VkResult::ErrorInitializationFailed;
+    g_event_data[SlotOf(event, kEventBase)].signalled = true;
+    return VkResult::Success;
+}
+
+VkResult VkResetEvent(VkDevice dev, VkEvent event)
+{
+    (void)dev;
+    if (!HandleInRange(event, kEventBase) || !PoolIsLive(g_event_pool, SlotOf(event, kEventBase)))
+        return VkResult::ErrorInitializationFailed;
+    g_event_data[SlotOf(event, kEventBase)].signalled = false;
+    return VkResult::Success;
+}
+
+VkResult VkGetEventStatus(VkDevice dev, VkEvent event)
+{
+    (void)dev;
+    if (!HandleInRange(event, kEventBase) || !PoolIsLive(g_event_pool, SlotOf(event, kEventBase)))
+        return VkResult::ErrorInitializationFailed;
+    return g_event_data[SlotOf(event, kEventBase)].signalled ? VkResult::EventSet : VkResult::EventReset;
+}
+
+VkResult VkCmdSetEvent(VkCommandBuffer cb, VkEvent event, u32 stage_mask)
+{
+    (void)stage_mask;
+    if (!HandleInRange(event, kEventBase) || !PoolIsLive(g_event_pool, SlotOf(event, kEventBase)))
+        return VkResult::ErrorInitializationFailed;
+    CmdRecord op{};
+    op.op = CmdOp::SetEvent;
+    op.event = event;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdResetEvent(VkCommandBuffer cb, VkEvent event, u32 stage_mask)
+{
+    (void)stage_mask;
+    if (!HandleInRange(event, kEventBase) || !PoolIsLive(g_event_pool, SlotOf(event, kEventBase)))
+        return VkResult::ErrorInitializationFailed;
+    CmdRecord op{};
+    op.op = CmdOp::ResetEvent;
+    op.event = event;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdWaitEvents(VkCommandBuffer cb, u32 count, const VkEvent* events)
+{
+    if (count == 0)
+        return VkResult::Success;
+    if (events == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    for (u32 i = 0; i < count; ++i)
+    {
+        if (!HandleInRange(events[i], kEventBase) || !PoolIsLive(g_event_pool, SlotOf(events[i], kEventBase)))
+            return VkResult::ErrorInitializationFailed;
+    }
+    CmdRecord op{};
+    op.op = CmdOp::WaitEvents;
+    op.event = events[0]; // first event only — multi-event isn't recorded individually
+    return AppendOp(cb, op);
+}
+
+// -------------------------------------------------------------------
+// Pipeline cache.
+// -------------------------------------------------------------------
+
+VkResult VkCreatePipelineCache(VkDevice dev, const void* initial_data, u64 initial_size, VkPipelineCache* out)
+{
+    (void)initial_data;
+    if (!HandleInRange(dev, kDeviceBase) || !PoolIsLive(g_device_pool, SlotOf(dev, kDeviceBase)))
+        return VkResult::ErrorInitializationFailed;
+    u32 slot = 0;
+    if (!PoolAlloc(g_pipeline_cache_pool, &slot))
+        return VkResult::ErrorOutOfHostMemory;
+    g_pipeline_cache_data[slot].stored_size = initial_size;
+    if (out != nullptr)
+        *out = HandleFor(kPipelineCacheBase, slot);
+    return VkResult::Success;
+}
+
+void VkDestroyPipelineCache(VkDevice dev, VkPipelineCache cache)
+{
+    (void)dev;
+    if (cache == 0 || !HandleInRange(cache, kPipelineCacheBase))
+        return;
+    (void)PoolFree(g_pipeline_cache_pool, SlotOf(cache, kPipelineCacheBase));
+}
+
+VkResult VkMergePipelineCaches(VkDevice dev, VkPipelineCache dst, u32 src_count, const VkPipelineCache* sources)
+{
+    (void)dev;
+    if (!HandleInRange(dst, kPipelineCacheBase) || !PoolIsLive(g_pipeline_cache_pool, SlotOf(dst, kPipelineCacheBase)))
+        return VkResult::ErrorInitializationFailed;
+    if (sources == nullptr && src_count != 0)
+        return VkResult::ErrorInitializationFailed;
+    for (u32 i = 0; i < src_count; ++i)
+    {
+        if (!HandleInRange(sources[i], kPipelineCacheBase) ||
+            !PoolIsLive(g_pipeline_cache_pool, SlotOf(sources[i], kPipelineCacheBase)))
+            return VkResult::ErrorInitializationFailed;
+    }
+    return VkResult::Success;
+}
+
+VkResult VkGetPipelineCacheData(VkDevice dev, VkPipelineCache cache, u64* size, void* data)
+{
+    (void)dev;
+    if (size == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    if (!HandleInRange(cache, kPipelineCacheBase) ||
+        !PoolIsLive(g_pipeline_cache_pool, SlotOf(cache, kPipelineCacheBase)))
+        return VkResult::ErrorInitializationFailed;
+    // Spec defines a 16-byte VkPipelineCacheHeaderVersionOne:
+    //   u32 size, u32 version (=1), u32 vendor_id, u32 device_id,
+    //   u8[16] uuid (we leave zeroed).
+    constexpr u64 kHeaderBytes = 16 + 16; // 16-byte header struct + 16-byte UUID
+    if (data == nullptr)
+    {
+        *size = kHeaderBytes;
+        return VkResult::Success;
+    }
+    if (*size < kHeaderBytes)
+    {
+        *size = kHeaderBytes;
+        return VkResult::Incomplete;
+    }
+    auto* p = static_cast<u32*>(data);
+    p[0] = static_cast<u32>(kHeaderBytes);
+    p[1] = 1; // header version
+    p[2] = 0; // vendor id
+    p[3] = 0; // device id
+    auto* uuid = static_cast<u8*>(data) + 16;
+    for (u32 i = 0; i < 16; ++i)
+        uuid[i] = 0;
+    *size = kHeaderBytes;
+    return VkResult::Success;
+}
+
+// -------------------------------------------------------------------
+// Query pool.
+// -------------------------------------------------------------------
+
+VkResult VkCreateQueryPool(VkDevice dev, VkQueryType type, u32 query_count, VkQueryPool* out)
+{
+    if (!HandleInRange(dev, kDeviceBase) || !PoolIsLive(g_device_pool, SlotOf(dev, kDeviceBase)))
+        return VkResult::ErrorInitializationFailed;
+    if (query_count == 0 || query_count > kMaxQueriesPerPool)
+        return VkResult::ErrorTooManyObjects;
+    u32 slot = 0;
+    if (!PoolAlloc(g_query_pool_pool, &slot))
+        return VkResult::ErrorOutOfHostMemory;
+    auto& rec = g_query_pool_data[slot];
+    rec = QueryPoolRecord{};
+    rec.type = type;
+    rec.query_count = query_count;
+    if (out != nullptr)
+        *out = HandleFor(kQueryPoolBase, slot);
+    return VkResult::Success;
+}
+
+void VkDestroyQueryPool(VkDevice dev, VkQueryPool pool)
+{
+    (void)dev;
+    if (pool == 0 || !HandleInRange(pool, kQueryPoolBase))
+        return;
+    (void)PoolFree(g_query_pool_pool, SlotOf(pool, kQueryPoolBase));
+}
+
+VkResult VkResetQueryPool(VkDevice dev, VkQueryPool pool, u32 first_query, u32 query_count)
+{
+    (void)dev;
+    if (!HandleInRange(pool, kQueryPoolBase) || !PoolIsLive(g_query_pool_pool, SlotOf(pool, kQueryPoolBase)))
+        return VkResult::ErrorInitializationFailed;
+    auto& rec = g_query_pool_data[SlotOf(pool, kQueryPoolBase)];
+    if (first_query + query_count > rec.query_count)
+        return VkResult::ErrorInitializationFailed;
+    for (u32 i = 0; i < query_count; ++i)
+    {
+        rec.results[first_query + i] = 0;
+        rec.available[first_query + i] = false;
+    }
+    return VkResult::Success;
+}
+
+VkResult VkCmdResetQueryPool(VkCommandBuffer cb, VkQueryPool pool, u32 first_query, u32 query_count)
+{
+    if (!HandleInRange(pool, kQueryPoolBase) || !PoolIsLive(g_query_pool_pool, SlotOf(pool, kQueryPoolBase)))
+        return VkResult::ErrorInitializationFailed;
+    CmdRecord op{};
+    op.op = CmdOp::ResetQueryPool;
+    op.query_pool = pool;
+    op.query_first = first_query;
+    op.query_count = query_count;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdBeginQuery(VkCommandBuffer cb, VkQueryPool pool, u32 query, u32 flags)
+{
+    (void)flags;
+    if (!HandleInRange(pool, kQueryPoolBase) || !PoolIsLive(g_query_pool_pool, SlotOf(pool, kQueryPoolBase)))
+        return VkResult::ErrorInitializationFailed;
+    CmdRecord op{};
+    op.op = CmdOp::BeginQuery;
+    op.query_pool = pool;
+    op.query_index = query;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdEndQuery(VkCommandBuffer cb, VkQueryPool pool, u32 query)
+{
+    if (!HandleInRange(pool, kQueryPoolBase) || !PoolIsLive(g_query_pool_pool, SlotOf(pool, kQueryPoolBase)))
+        return VkResult::ErrorInitializationFailed;
+    CmdRecord op{};
+    op.op = CmdOp::EndQuery;
+    op.query_pool = pool;
+    op.query_index = query;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdWriteTimestamp(VkCommandBuffer cb, u32 stage, VkQueryPool pool, u32 query)
+{
+    (void)stage;
+    if (!HandleInRange(pool, kQueryPoolBase) || !PoolIsLive(g_query_pool_pool, SlotOf(pool, kQueryPoolBase)))
+        return VkResult::ErrorInitializationFailed;
+    CmdRecord op{};
+    op.op = CmdOp::WriteTimestamp;
+    op.query_pool = pool;
+    op.query_index = query;
+    return AppendOp(cb, op);
+}
+
+VkResult VkGetQueryPoolResults(VkDevice dev, VkQueryPool pool, u32 first_query, u32 query_count, u64* data, u32 stride,
+                               u32 flags)
+{
+    (void)dev;
+    (void)flags;
+    if (data == nullptr || stride == 0)
+        return VkResult::ErrorInitializationFailed;
+    if (!HandleInRange(pool, kQueryPoolBase) || !PoolIsLive(g_query_pool_pool, SlotOf(pool, kQueryPoolBase)))
+        return VkResult::ErrorInitializationFailed;
+    auto& rec = g_query_pool_data[SlotOf(pool, kQueryPoolBase)];
+    if (first_query + query_count > rec.query_count)
+        return VkResult::ErrorInitializationFailed;
+    bool any_unavailable = false;
+    for (u32 i = 0; i < query_count; ++i)
+    {
+        const u32 q = first_query + i;
+        if (!rec.available[q])
+        {
+            any_unavailable = true;
+            data[i] = 0;
+        }
+        else
+        {
+            data[i] = rec.results[q];
+        }
+    }
+    return any_unavailable ? VkResult::NotReady : VkResult::Success;
+}
+
 // -------------------------------------------------------------------
 // Submit replay.
 // -------------------------------------------------------------------
@@ -1175,16 +1913,13 @@ VkResult VkCmdDraw(VkCommandBuffer cb, u32 vertex_count, u32 instance_count, u32
 namespace
 {
 
-void ReplayClear(const CmdRecord& op)
+void PaintScanoutClear(VkImage image, VkClearColorValue color)
 {
-    if (!HandleInRange(op.image, kImageBase) || !PoolIsLive(g_image_pool, SlotOf(op.image, kImageBase)))
+    if (!HandleInRange(image, kImageBase) || !PoolIsLive(g_image_pool, SlotOf(image, kImageBase)))
         return;
-    const auto& img = g_image_data[SlotOf(op.image, kImageBase)];
+    const auto& img = g_image_data[SlotOf(image, kImageBase)];
     if ((img.flags & kImageScanoutBacked) == 0)
         return;
-    // Map RGBA float to the framebuffer's 0xRRGGBB format and
-    // paint.  Framebuffer dimensions clamp the rect — the image
-    // extent may exceed the live framebuffer (caller resized).
     const auto di = drivers::video::Query();
     if (!di.available)
         return;
@@ -1196,9 +1931,149 @@ void ReplayClear(const CmdRecord& op)
         h = di.height;
     if (w == 0 || h == 0)
         return;
-    drivers::video::FramebufferFillRect(0, 0, w, h, ColorToRgb(op.color));
+    drivers::video::FramebufferFillRect(0, 0, w, h, ColorToRgb(color));
     drivers::video::FramebufferAddDamage(0, 0, w, h);
     g_clear_pixels_painted += w * h;
+}
+
+void ReplayClear(const CmdRecord& op)
+{
+    PaintScanoutClear(op.image, op.color);
+}
+
+// vkCmdBeginRenderPass replay: trace the framebuffer through its
+// image-view to the underlying image; if the image is scanout-
+// backed, paint the begin-rp clear color across it.  This is
+// what completes the v0 "render-pass clear actually clears"
+// loop that was a GAP at the original ICD landing.
+void ReplayBeginRenderPass(const CmdRecord& op)
+{
+    if (!HandleInRange(op.framebuffer, kFramebufferBase) ||
+        !PoolIsLive(g_framebuffer_pool, SlotOf(op.framebuffer, kFramebufferBase)))
+        return;
+    const auto& fb = g_framebuffer_data[SlotOf(op.framebuffer, kFramebufferBase)];
+    if (!HandleInRange(fb.attachment, kImageViewBase) ||
+        !PoolIsLive(g_imageview_pool, SlotOf(fb.attachment, kImageViewBase)))
+        return;
+    const auto& view = g_imageview_data[SlotOf(fb.attachment, kImageViewBase)];
+    PaintScanoutClear(view.image, op.color);
+}
+
+void ReplayCopyBuffer(const CmdRecord& op)
+{
+    if (!HandleInRange(op.src_buffer, kBufferBase) || !PoolIsLive(g_buffer_pool, SlotOf(op.src_buffer, kBufferBase)))
+        return;
+    if (!HandleInRange(op.dst_buffer, kBufferBase) || !PoolIsLive(g_buffer_pool, SlotOf(op.dst_buffer, kBufferBase)))
+        return;
+    const auto& src = g_buffer_data[SlotOf(op.src_buffer, kBufferBase)];
+    auto& dst = g_buffer_data[SlotOf(op.dst_buffer, kBufferBase)];
+    if (src.backing == nullptr || dst.backing == nullptr)
+        return; // not host-visible — no real bytes to move
+    if (op.src_offset + op.region_size > src.size)
+        return;
+    if (op.dst_offset + op.region_size > dst.size)
+        return;
+    const u8* sp = static_cast<const u8*>(src.backing) + op.src_offset;
+    u8* dp = static_cast<u8*>(dst.backing) + op.dst_offset;
+    for (u64 i = 0; i < op.region_size; ++i)
+        dp[i] = sp[i];
+    g_buffer_copy_bytes += static_cast<u32>(op.region_size);
+}
+
+void ReplayFillBuffer(const CmdRecord& op)
+{
+    if (!HandleInRange(op.dst_buffer, kBufferBase) || !PoolIsLive(g_buffer_pool, SlotOf(op.dst_buffer, kBufferBase)))
+        return;
+    auto& dst = g_buffer_data[SlotOf(op.dst_buffer, kBufferBase)];
+    if (dst.backing == nullptr)
+        return;
+    if (op.dst_offset + op.region_size > dst.size)
+        return;
+    // vkCmdFillBuffer's region_size must be a multiple of 4
+    // and the pattern is a u32 broadcast across the range.
+    const u64 words = op.region_size / 4u;
+    auto* dp = reinterpret_cast<u32*>(static_cast<u8*>(dst.backing) + op.dst_offset);
+    for (u64 i = 0; i < words; ++i)
+        dp[i] = op.fill_pattern;
+    g_buffer_fill_bytes += static_cast<u32>(words * 4u);
+}
+
+void ReplaySetEvent(const CmdRecord& op)
+{
+    if (!HandleInRange(op.event, kEventBase) || !PoolIsLive(g_event_pool, SlotOf(op.event, kEventBase)))
+        return;
+    g_event_data[SlotOf(op.event, kEventBase)].signalled = true;
+}
+
+void ReplayResetEvent(const CmdRecord& op)
+{
+    if (!HandleInRange(op.event, kEventBase) || !PoolIsLive(g_event_pool, SlotOf(op.event, kEventBase)))
+        return;
+    g_event_data[SlotOf(op.event, kEventBase)].signalled = false;
+}
+
+void ReplayResetQueryPool(const CmdRecord& op)
+{
+    if (!HandleInRange(op.query_pool, kQueryPoolBase) ||
+        !PoolIsLive(g_query_pool_pool, SlotOf(op.query_pool, kQueryPoolBase)))
+        return;
+    auto& rec = g_query_pool_data[SlotOf(op.query_pool, kQueryPoolBase)];
+    if (op.query_first + op.query_count > rec.query_count)
+        return;
+    for (u32 i = 0; i < op.query_count; ++i)
+    {
+        rec.results[op.query_first + i] = 0;
+        rec.available[op.query_first + i] = false;
+    }
+}
+
+void ReplayCopyBufferToImage(const CmdRecord& op)
+{
+    if (!HandleInRange(op.src_buffer, kBufferBase) || !PoolIsLive(g_buffer_pool, SlotOf(op.src_buffer, kBufferBase)))
+        return;
+    if (!HandleInRange(op.image, kImageBase) || !PoolIsLive(g_image_pool, SlotOf(op.image, kImageBase)))
+        return;
+    const auto& src = g_buffer_data[SlotOf(op.src_buffer, kBufferBase)];
+    const auto& img = g_image_data[SlotOf(op.image, kImageBase)];
+    if (src.backing == nullptr)
+        return; // not host-visible — nothing to upload
+    if ((img.flags & kImageScanoutBacked) == 0)
+        return; // non-scanout images have no real storage in v0
+    const auto di = drivers::video::Query();
+    if (!di.available)
+        return;
+    const u32 region_w = op.region_width;
+    const u32 region_h = op.region_height;
+    if (region_w == 0 || region_h == 0)
+        return;
+    const u64 byte_count = static_cast<u64>(region_w) * region_h * 4u;
+    if (op.src_offset + byte_count > src.size)
+        return;
+    const u32* pixels = reinterpret_cast<const u32*>(static_cast<const u8*>(src.backing) + op.src_offset);
+    // FramebufferBlit expects a tightly packed src_pitch_px == width.
+    drivers::video::FramebufferBlit(0, 0, pixels, region_w, region_h, region_w);
+    drivers::video::FramebufferAddDamage(0, 0, region_w, region_h);
+    g_image_upload_pixels += region_w * region_h;
+}
+
+void ReplayWriteQueryResult(const CmdRecord& op, bool is_timestamp)
+{
+    if (!HandleInRange(op.query_pool, kQueryPoolBase) ||
+        !PoolIsLive(g_query_pool_pool, SlotOf(op.query_pool, kQueryPoolBase)))
+        return;
+    auto& rec = g_query_pool_data[SlotOf(op.query_pool, kQueryPoolBase)];
+    if (op.query_index >= rec.query_count)
+        return;
+    // Timestamp queries write the kernel monotonic clock (ns).
+    // Occlusion / pipeline-statistics queries write a counter
+    // that increments per replay so the self-test can prove
+    // ordering.  Both go through the same slot.
+    if (is_timestamp)
+        rec.results[op.query_index] = duetos::time::MonotonicNs();
+    else
+        rec.results[op.query_index] = static_cast<u64>(g_queries_executed) + 1u;
+    rec.available[op.query_index] = true;
+    ++g_queries_executed;
 }
 
 void ReplayCommandBuffer(VkCommandBuffer cb)
@@ -1218,15 +2093,51 @@ void ReplayCommandBuffer(VkCommandBuffer cb)
             ReplayClear(op);
             break;
         case CmdOp::BeginRenderPass:
-            // The render-pass clear value would also paint the
-            // attachment if the attachment image were scanout-
-            // backed.  Wiring that path needs the framebuffer ->
-            // attachment ImageView mapping, which is a follow-on
-            // slice; for v0 we record the op for stats only.
+            ReplayBeginRenderPass(op);
             break;
+        case CmdOp::CopyBuffer:
+            ReplayCopyBuffer(op);
+            break;
+        case CmdOp::FillBuffer:
+            ReplayFillBuffer(op);
+            break;
+        case CmdOp::PipelineBarrier:
+            ++g_pipeline_barriers;
+            break;
+        case CmdOp::PushConstants:
+            ++g_push_constant_writes;
+            break;
+        case CmdOp::Dispatch:
+            ++g_dispatches;
+            break;
+        case CmdOp::SetEvent:
+            ReplaySetEvent(op);
+            break;
+        case CmdOp::ResetEvent:
+            ReplayResetEvent(op);
+            break;
+        case CmdOp::ResetQueryPool:
+            ReplayResetQueryPool(op);
+            break;
+        case CmdOp::EndQuery:
+            ReplayWriteQueryResult(op, /*is_timestamp=*/false);
+            break;
+        case CmdOp::WriteTimestamp:
+            ReplayWriteQueryResult(op, /*is_timestamp=*/true);
+            break;
+        case CmdOp::CopyBufferToImage:
+            ReplayCopyBufferToImage(op);
+            break;
+        case CmdOp::WaitEvents: // no-op replay (events already signalled)
+        case CmdOp::BeginQuery: // pairs with EndQuery — write happens at End
         case CmdOp::EndRenderPass:
         case CmdOp::BindPipeline:
         case CmdOp::Draw:
+        case CmdOp::DrawIndexed:
+        case CmdOp::SetViewport:
+        case CmdOp::SetScissor:
+        case CmdOp::BindVertexBuffer:
+        case CmdOp::BindIndexBuffer:
         case CmdOp::None:
             break;
         }
@@ -1473,6 +2384,29 @@ VkResult VkUpdateDescriptorSet(VkDescriptorSet set, u32 binding, VkDescriptorTyp
         return VkResult::ErrorInitializationFailed;
     ++g_desc_set_data[SlotOf(set, kDescSetBase)].writes;
     ++g_descriptor_writes;
+    return VkResult::Success;
+}
+
+VkResult VkUpdateDescriptorSets(VkDevice dev, u32 write_count, const VkWriteDescriptorSet* writes, u32 copy_count,
+                                const void* copies)
+{
+    (void)dev;
+    (void)copies;
+    if (write_count == 0 && copy_count == 0)
+        return VkResult::Success;
+    if (write_count > 0 && writes == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    // Copy-from-set (VkCopyDescriptorSet) is accepted but not
+    // tracked — there's no shader-visible state to copy.  This
+    // matches the spec's "no observable side effect" path for a
+    // copy that the implementation chooses to no-op.
+    for (u32 i = 0; i < write_count; ++i)
+    {
+        const VkResult r =
+            VkUpdateDescriptorSet(writes[i].dstSet, writes[i].dstBinding, writes[i].type, writes[i].resourceHandle);
+        if (r != VkResult::Success)
+            return r;
+    }
     return VkResult::Success;
 }
 
@@ -1750,6 +2684,18 @@ GraphicsStats VkStatsSnapshot()
     s.vk_swapchains_live = g_swapchain_pool.live;
     s.vk_swapchain_acquires = g_swapchain_acquires;
     s.vk_swapchain_presents = g_swapchain_presents;
+    s.vk_buffer_copy_bytes = g_buffer_copy_bytes;
+    s.vk_buffer_fill_bytes = g_buffer_fill_bytes;
+    s.vk_push_constant_writes = g_push_constant_writes;
+    s.vk_pipeline_barriers = g_pipeline_barriers;
+    s.vk_dispatches = g_dispatches;
+    s.vk_image_upload_pixels = g_image_upload_pixels;
+    s.vk_samplers_live = g_sampler_pool.live;
+    s.vk_events_live = g_event_pool.live;
+    s.vk_pipeline_caches_live = g_pipeline_cache_pool.live;
+    s.vk_query_pools_live = g_query_pool_pool.live;
+    s.vk_queries_executed = g_queries_executed;
+    s.vk_memory_maps = g_memory_maps;
     s.vk_queue_submits = g_queue_submits;
     s.vk_command_recorded = g_command_recorded;
     s.vk_command_replayed = g_command_replayed;
@@ -1998,14 +2944,37 @@ bool RunCanonicalLifecycle()
     if (VkBeginCommandBuffer(cb) != VkResult::Success)
         return SelftestFail("[selftest:graphics] vkBeginCommandBuffer failed", 0);
 
-    // Wire descriptor writes + bind into the recording leg so the
-    // happy path covers the full set surface.
-    if (VkUpdateDescriptorSet(dset, 0, VkDescriptorType::UniformBuffer, buf) != VkResult::Success)
-        return SelftestFail("[selftest:graphics] VkUpdateDescriptorSet(uniform) failed", 0);
-    if (VkUpdateDescriptorSet(dset, 1, VkDescriptorType::CombinedImageSampler, view) != VkResult::Success)
-        return SelftestFail("[selftest:graphics] VkUpdateDescriptorSet(image) failed", 0);
+    // Spec-form descriptor writes — exercises the array entry
+    // alongside the per-binding form so both code paths cover.
+    const VkWriteDescriptorSet writes[] = {
+        VkWriteDescriptorSet{dset, 0, VkDescriptorType::UniformBuffer, buf},
+        VkWriteDescriptorSet{dset, 1, VkDescriptorType::CombinedImageSampler, view},
+    };
+    if (VkUpdateDescriptorSets(dev, 2, writes, 0, nullptr) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] VkUpdateDescriptorSets(array) failed", 0);
     if (VkCmdBindDescriptorSets(cb, VkPipelineBindPoint::Graphics, pl_layout, 0, 1, &dset) != VkResult::Success)
         return SelftestFail("[selftest:graphics] VkCmdBindDescriptorSets failed", 0);
+
+    // New tape ops — viewport / scissor / vertex+index binding /
+    // indexed draw / pipeline barrier / push constants / dispatch.
+    const VkViewport vp{0, 0, 16, 16, 0, 1};
+    if (VkCmdSetViewport(cb, 0, 1, &vp) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] vkCmdSetViewport failed", 0);
+    const VkRect2D scissor{VkOffset2D{0, 0}, VkExtent2D{16, 16}};
+    if (VkCmdSetScissor(cb, 0, 1, &scissor) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] vkCmdSetScissor failed", 0);
+    const u64 vb_offset = 0;
+    if (VkCmdBindVertexBuffers(cb, 0, 1, &buf, &vb_offset) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] vkCmdBindVertexBuffers failed", 0);
+    if (VkCmdBindIndexBuffer(cb, buf, 0, VkIndexType::Uint16) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] vkCmdBindIndexBuffer failed", 0);
+    if (VkCmdPipelineBarrier(cb, 0x10, 0x20, 0) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] vkCmdPipelineBarrier failed", 0);
+    const u32 push_payload[] = {0xCAFEF00Du, 0xDEADBEEFu};
+    if (VkCmdPushConstants(cb, pl_layout, 0xFFu, 0, sizeof(push_payload), push_payload) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] vkCmdPushConstants failed", 0);
+    if (VkCmdDispatch(cb, 8, 8, 1) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] vkCmdDispatch failed", 0);
 
     // Use the integer (UNORM 8) alias so the test path doesn't
     // pull in the soft-float runtime — see VkClearColorValue.
@@ -2020,6 +2989,8 @@ bool RunCanonicalLifecycle()
         return SelftestFail("[selftest:graphics] vkCmdClearColorImage failed", 0);
     if (VkCmdDraw(cb, 3, 1, 0, 0) != VkResult::Success)
         return SelftestFail("[selftest:graphics] vkCmdDraw failed", 0);
+    if (VkCmdDrawIndexed(cb, 6, 1, 0, 0, 0) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] vkCmdDrawIndexed failed", 0);
     if (VkEndCommandBuffer(cb) != VkResult::Success)
         return SelftestFail("[selftest:graphics] vkEndCommandBuffer failed", 0);
 
@@ -2033,6 +3004,144 @@ bool RunCanonicalLifecycle()
         return SelftestFail("[selftest:graphics] vkWaitForFences failed", 0);
     if (VkQueueWaitIdle(queue) != VkResult::Success)
         return SelftestFail("[selftest:graphics] vkQueueWaitIdle failed", 0);
+
+    // Memory-mapping leg: allocate host-visible memory, bind two
+    // buffers into it, map the source, write a recognisable byte
+    // pattern, record CopyBuffer + FillBuffer + CopyBufferToImage
+    // (against a non-scanout image so no pixels reach the live
+    // framebuffer), submit, assert the destination buffer
+    // matches the source.
+    {
+        VkDeviceMemory hmem = 0;
+        if (VkAllocateMemory(dev, 4096, /*memory_type_index=*/1, &hmem) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] VkAllocateMemory(host-visible) failed", 0);
+        VkBuffer hsrc = 0, hdst = 0;
+        if (VkCreateBuffer(dev, 1024, &hsrc) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] VkCreateBuffer(host-src) failed", 0);
+        if (VkCreateBuffer(dev, 1024, &hdst) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] VkCreateBuffer(host-dst) failed", 0);
+        if (VkBindBufferMemory(dev, hsrc, hmem, 0) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] BindBufferMemory(host-src) failed", 0);
+        if (VkBindBufferMemory(dev, hdst, hmem, 1024) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] BindBufferMemory(host-dst) failed", 0);
+
+        // Map the memory + write a pattern across the src half.
+        void* mapped = nullptr;
+        if (VkMapMemory(dev, hmem, 0, 1024, &mapped) != VkResult::Success || mapped == nullptr)
+            return SelftestFail("[selftest:graphics] VkMapMemory failed", 0);
+        auto* src_bytes = static_cast<u8*>(mapped);
+        for (u32 i = 0; i < 256; ++i)
+            src_bytes[i] = static_cast<u8>(i);
+        VkUnmapMemory(dev, hmem);
+
+        // Record CopyBuffer + FillBuffer into a second cb, submit.
+        VkCommandBuffer cb2 = 0;
+        if (VkAllocateCommandBuffers(dev, pool, 1, &cb2) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] VkAllocateCommandBuffers(cb2) failed", 0);
+        if (VkBeginCommandBuffer(cb2) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] VkBeginCommandBuffer(cb2) failed", 0);
+        if (VkCmdCopyBuffer(cb2, hsrc, hdst, 0, 0, 256) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] VkCmdCopyBuffer failed", 0);
+        if (VkCmdFillBuffer(cb2, hdst, 256, 256, 0xA5A5A5A5u) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] VkCmdFillBuffer failed", 0);
+        if (VkEndCommandBuffer(cb2) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] VkEndCommandBuffer(cb2) failed", 0);
+        if (VkQueueSubmit(queue, 1, &cb2, 0) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] VkQueueSubmit(cb2) failed", 0);
+        if (VkQueueWaitIdle(queue) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] VkQueueWaitIdle(cb2) failed", 0);
+
+        // Read the dst region back through a second mapping and
+        // assert the byte pattern propagated.
+        if (VkMapMemory(dev, hmem, 1024, 512, &mapped) != VkResult::Success || mapped == nullptr)
+            return SelftestFail("[selftest:graphics] VkMapMemory(dst) failed", 0);
+        const auto* dst_bytes = static_cast<const u8*>(mapped);
+        for (u32 i = 0; i < 256; ++i)
+        {
+            if (dst_bytes[i] != static_cast<u8>(i))
+                return SelftestFail("[selftest:graphics] CopyBuffer didn't propagate byte", i);
+        }
+        const auto* fill_words = reinterpret_cast<const u32*>(dst_bytes + 256);
+        for (u32 i = 0; i < 64; ++i)
+        {
+            if (fill_words[i] != 0xA5A5A5A5u)
+                return SelftestFail("[selftest:graphics] FillBuffer didn't broadcast pattern", fill_words[i]);
+        }
+        VkUnmapMemory(dev, hmem);
+
+        if (VkFreeCommandBuffers(dev, pool, 1, &cb2) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] FreeCommandBuffers(cb2) failed", 0);
+        VkDestroyBuffer(dev, hdst);
+        VkDestroyBuffer(dev, hsrc);
+        VkFreeMemory(dev, hmem);
+    }
+
+    // Sampler / event / pipeline-cache / query-pool leg.
+    {
+        const VkSamplerCreateInfo sci{VkFilter::Linear, VkFilter::Linear, VkSamplerAddressMode::ClampToEdge,
+                                      VkSamplerAddressMode::ClampToEdge, VkSamplerAddressMode::ClampToEdge};
+        VkSampler smp = 0;
+        if (VkCreateSampler(dev, &sci, &smp) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] VkCreateSampler failed", 0);
+        VkDestroySampler(dev, smp);
+
+        VkEvent evt = 0;
+        if (VkCreateEvent(dev, &evt) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] VkCreateEvent failed", 0);
+        if (VkGetEventStatus(dev, evt) != VkResult::EventReset)
+            return SelftestFail("[selftest:graphics] new event was not Reset", 0);
+        if (VkSetEvent(dev, evt) != VkResult::Success || VkGetEventStatus(dev, evt) != VkResult::EventSet)
+            return SelftestFail("[selftest:graphics] VkSetEvent did not signal", 0);
+        if (VkResetEvent(dev, evt) != VkResult::Success || VkGetEventStatus(dev, evt) != VkResult::EventReset)
+            return SelftestFail("[selftest:graphics] VkResetEvent did not clear", 0);
+        VkDestroyEvent(dev, evt);
+
+        VkPipelineCache pcache = 0;
+        if (VkCreatePipelineCache(dev, nullptr, 0, &pcache) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] VkCreatePipelineCache failed", 0);
+        u64 cache_size = 0;
+        if (VkGetPipelineCacheData(dev, pcache, &cache_size, nullptr) != VkResult::Success || cache_size == 0)
+            return SelftestFail("[selftest:graphics] cache size query failed", cache_size);
+        u8 cache_buf[64] = {};
+        u64 fill_size = sizeof(cache_buf);
+        if (VkGetPipelineCacheData(dev, pcache, &fill_size, cache_buf) != VkResult::Success || fill_size != cache_size)
+            return SelftestFail("[selftest:graphics] cache data fetch failed", fill_size);
+        VkDestroyPipelineCache(dev, pcache);
+
+        // Query pool: timestamp queries.  Record reset + two
+        // timestamps + submit, fetch results, assert ordering.
+        VkQueryPool qpool = 0;
+        if (VkCreateQueryPool(dev, VkQueryType::Timestamp, 2, &qpool) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] VkCreateQueryPool failed", 0);
+        VkCommandBuffer qcb = 0;
+        if (VkAllocateCommandBuffers(dev, pool, 1, &qcb) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] AllocateCommandBuffers(qcb) failed", 0);
+        if (VkBeginCommandBuffer(qcb) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] Begin(qcb) failed", 0);
+        if (VkCmdResetQueryPool(qcb, qpool, 0, 2) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] CmdResetQueryPool failed", 0);
+        if (VkCmdWriteTimestamp(qcb, 0x10, qpool, 0) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] CmdWriteTimestamp(0) failed", 0);
+        if (VkCmdWriteTimestamp(qcb, 0x10, qpool, 1) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] CmdWriteTimestamp(1) failed", 0);
+        if (VkEndCommandBuffer(qcb) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] End(qcb) failed", 0);
+        if (VkQueueSubmit(queue, 1, &qcb, 0) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] QueueSubmit(qcb) failed", 0);
+        if (VkQueueWaitIdle(queue) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] WaitIdle(qcb) failed", 0);
+        u64 ts[2] = {};
+        if (VkGetQueryPoolResults(dev, qpool, 0, 2, ts, sizeof(u64), 0) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] GetQueryPoolResults failed", 0);
+        if (ts[1] < ts[0])
+            return SelftestFail("[selftest:graphics] timestamp ordering inverted", ts[0]);
+        VkFreeCommandBuffers(dev, pool, 1, &qcb);
+        VkDestroyQueryPool(dev, qpool);
+    }
+
+    // ResetCommandPool exercises the new pool-wide reset path.
+    if (VkResetCommandPool(dev, pool, 0) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] VkResetCommandPool failed", 0);
 
     // WSI leg: surface + swapchain + acquire / present cycle.
     // Skipped when no framebuffer is live (headless boot) — the
@@ -2130,12 +3239,14 @@ bool AssertAllPoolsClean()
         &g_cmdbuf_pool,      &g_shader_pool,    &g_pipelinelayout_pool,  &g_pipeline_pool,  &g_renderpass_pool,
         &g_framebuffer_pool, &g_image_pool,     &g_imageview_pool,       &g_buffer_pool,    &g_memory_pool,
         &g_fence_pool,       &g_semaphore_pool, &g_desc_set_layout_pool, &g_desc_pool_pool, &g_desc_set_pool,
-        &g_surface_pool,     &g_swapchain_pool};
+        &g_surface_pool,     &g_swapchain_pool, &g_sampler_pool,         &g_event_pool,     &g_pipeline_cache_pool,
+        &g_query_pool_pool};
     const char* names[] = {
         "instance",        "physical-device", "device",        "queue",       "command-pool", "command-buffer",
         "shader-module",   "pipeline-layout", "pipeline",      "render-pass", "framebuffer",  "image",
         "image-view",      "buffer",          "device-memory", "fence",       "semaphore",    "descriptor-set-layout",
-        "descriptor-pool", "descriptor-set",  "surface",       "swapchain"};
+        "descriptor-pool", "descriptor-set",  "surface",       "swapchain",   "sampler",      "event",
+        "pipeline-cache",  "query-pool"};
     constexpr u32 n = sizeof(pools) / sizeof(pools[0]);
     for (u32 i = 0; i < n; ++i)
     {

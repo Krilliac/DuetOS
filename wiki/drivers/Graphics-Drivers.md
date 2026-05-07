@@ -182,7 +182,11 @@ Implemented:
   — no extensions yet).
 - `vkAllocateMemory` / `vkFreeMemory`, `vkCreateBuffer` /
   `vkBindBufferMemory`, `vkCreateImage` / `vkBindImageMemory`,
-  `vkCreateImageView`.
+  `vkCreateImageView`. Host-visible memory is backed by
+  kheap so `vkMapMemory` returns a real pointer the caller
+  can read/write; `vkFlushMappedMemoryRanges` and
+  `vkInvalidateMappedMemoryRanges` are no-ops because memory
+  type 1 advertises HOST_COHERENT.
 - `vkCreateRenderPass` / `vkCreateFramebuffer`.
 - `vkCreateShaderModule` validates the SPIR-V magic word
   `0x07230203` (LE) and rejects with `ErrorInvalidShaderNV`.
@@ -197,15 +201,38 @@ Implemented:
   `vkBeginCommandBuffer` / `vkEndCommandBuffer` /
   `vkResetCommandBuffer`.
 - Recording: `vkCmdBeginRenderPass`, `vkCmdEndRenderPass`,
-  `vkCmdBindPipeline`, `vkCmdClearColorImage`, `vkCmdDraw`.
-  Each opcode is appended to the command buffer's tape (32
-  ops max).
-- `vkQueueSubmit` walks the tape; `vkCmdClearColorImage`
-  against an image created with the `kImageScanoutBacked`
-  flag forwards the clear to `FramebufferFillRect` plus
-  `FramebufferAddDamage` so the next compositor pass picks
-  up the rect. Other opcodes are recorded for stats but
-  produce no visible output (no SPIR-V execution yet).
+  `vkCmdBindPipeline`, `vkCmdClearColorImage`, `vkCmdDraw`,
+  `vkCmdDrawIndexed`, `vkCmdSetViewport`, `vkCmdSetScissor`,
+  `vkCmdBindVertexBuffers`, `vkCmdBindIndexBuffer`,
+  `vkCmdCopyBuffer`, `vkCmdFillBuffer`, `vkCmdPipelineBarrier`,
+  `vkCmdPushConstants`, `vkCmdDispatch`,
+  `vkCmdCopyBufferToImage`, `vkCmdSetEvent`,
+  `vkCmdResetEvent`, `vkCmdWaitEvents`, `vkCmdBeginQuery`,
+  `vkCmdEndQuery`, `vkCmdResetQueryPool`,
+  `vkCmdWriteTimestamp`, `vkCmdBindDescriptorSets`. Each
+  opcode is appended to the command buffer's tape (32 ops
+  max). `vkResetCommandPool` resets every cb in the pool back
+  to Initial.
+- `vkQueueSubmit` walks the tape:
+  * `vkCmdClearColorImage` and `vkCmdBeginRenderPass` clears
+    against scanout-backed images forward to
+    `FramebufferFillRect` + `FramebufferAddDamage`.
+  * `vkCmdCopyBuffer` / `vkCmdFillBuffer` move bytes between
+    host-visible buffer-bound memory ranges (real
+    propagation, asserted by the self-test).
+  * `vkCmdCopyBufferToImage` against a scanout-backed image
+    runs through `FramebufferBlit` — a real texture-upload
+    path that turns a host-visible buffer of pixels into
+    framebuffer pixels.
+  * `vkCmdSetEvent` / `vkCmdResetEvent` flip the device-
+    visible event bit.
+  * `vkCmdWriteTimestamp` writes the kernel monotonic clock
+    (ns) into the query pool slot.
+  * `vkCmdEndQuery` writes a monotonic counter into the
+    query pool slot (occlusion queries get ordering, not
+    pixel counts — no rasterizer to sample).
+  Other opcodes are recorded for stats but produce no
+  visible output (no SPIR-V execution yet).
 - `vkCreateFence` / `vkWaitForFences` (always immediately
   signalled — submits are synchronous in this ICD),
   `vkCreateSemaphore`.
@@ -217,6 +244,14 @@ Implemented:
   `vkResetDescriptorPool`.  Sets carry no resource state for
   shaders to consume; the surface exists so a downstream
   caller (DXVK, native compute) finds the full ladder today.
+- Sampler / Event / PipelineCache / QueryPool: full
+  create/destroy + supporting entry points. Pipeline cache
+  hands back a 32-byte VkPipelineCacheHeaderVersionOne-shaped
+  blob via `vkGetPipelineCacheData` so a caller's "round-trip
+  the cache to disk" path works. Query pools support
+  occlusion + timestamp; `vkCmdWriteTimestamp` writes the
+  kernel monotonic clock; `vkGetQueryPoolResults` returns
+  `NotReady` for slots that haven't been written.
 - WSI: `VkCreateDuetSurfaceKHR` (single platform-agnostic
   surface bound to the kernel framebuffer),
   `VkGetPhysicalDeviceSurfaceCapabilitiesKHR` /
