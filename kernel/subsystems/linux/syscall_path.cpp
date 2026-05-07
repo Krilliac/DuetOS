@@ -17,6 +17,7 @@
 #include "log/klog.h"
 #include "proc/process.h"
 #include "mm/address_space.h"
+#include "mm/paging.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -37,30 +38,18 @@ i64 DoChdir(u64 user_path)
         return kEINVAL;
     }
     char kbuf[core::Process::kLinuxCwdCap];
-    for (u32 i = 0; i < sizeof(kbuf); ++i)
-        kbuf[i] = 0;
-    if (!mm::CopyFromUser(kbuf, reinterpret_cast<const void*>(user_path), sizeof(kbuf) - 1))
+    const auto copy = mm::CopyUserCString(kbuf, sizeof(kbuf), reinterpret_cast<const void*>(user_path));
+    if (copy.status == mm::UserStringCopyStatus::Fault || copy.status == mm::UserStringCopyStatus::BadArgument)
     {
-        KLOG_WARN_V("linux/path", "DoChdir: CopyFromUser failed", user_path);
+        KLOG_WARN_V("linux/path", "DoChdir: user string copy failed", user_path);
         return kEFAULT;
     }
-    kbuf[sizeof(kbuf) - 1] = 0;
-    bool has_nul = false;
-    u64 len = 0;
-    for (u32 i = 0; i < sizeof(kbuf); ++i)
-    {
-        if (kbuf[i] == 0)
-        {
-            has_nul = true;
-            break;
-        }
-        ++len;
-    }
-    if (!has_nul)
+    if (copy.status == mm::UserStringCopyStatus::NoTerminator)
     {
         KLOG_WARN("linux/path", "DoChdir: ENAMETOOLONG (no NUL within cwd buffer)");
         return kENAMETOOLONG;
     }
+    const u64 len = copy.length;
     if (len == 0)
     {
         KLOG_WARN("linux/path", "DoChdir: ENOENT (empty path)");

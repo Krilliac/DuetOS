@@ -144,16 +144,16 @@ i64 DoAddKey(u64 user_type, u64 user_desc, u64 user_payload, u64 plen, u64 keyri
     char type[kKeyTypeCap];
     char desc[kKeyDescCap];
     u8 payload[kKeyPayloadCap];
-    for (u32 i = 0; i < sizeof(type); ++i)
-        type[i] = 0;
-    for (u32 i = 0; i < sizeof(desc); ++i)
-        desc[i] = 0;
-    if (!mm::CopyFromUser(type, reinterpret_cast<const void*>(user_type), sizeof(type) - 1))
+    const auto type_copy = mm::CopyUserCString(type, sizeof(type), reinterpret_cast<const void*>(user_type));
+    if (type_copy.status == mm::UserStringCopyStatus::Fault || type_copy.status == mm::UserStringCopyStatus::BadArgument)
         return kEFAULT;
-    type[sizeof(type) - 1] = 0;
-    if (!mm::CopyFromUser(desc, reinterpret_cast<const void*>(user_desc), sizeof(desc) - 1))
+    if (type_copy.status == mm::UserStringCopyStatus::NoTerminator)
+        return kENAMETOOLONG;
+    const auto desc_copy = mm::CopyUserCString(desc, sizeof(desc), reinterpret_cast<const void*>(user_desc));
+    if (desc_copy.status == mm::UserStringCopyStatus::Fault || desc_copy.status == mm::UserStringCopyStatus::BadArgument)
         return kEFAULT;
-    desc[sizeof(desc) - 1] = 0;
+    if (desc_copy.status == mm::UserStringCopyStatus::NoTerminator)
+        return kENAMETOOLONG;
     if (plen > kKeyPayloadCap)
         return -7; // -E2BIG
     if (plen > 0 && user_payload != 0)
@@ -201,16 +201,16 @@ i64 DoRequestKey(u64 user_type, u64 user_desc, u64 user_callout, u64 dest_keyrin
     (void)dest_keyring;
     char type[kKeyTypeCap];
     char desc[kKeyDescCap];
-    for (u32 i = 0; i < sizeof(type); ++i)
-        type[i] = 0;
-    for (u32 i = 0; i < sizeof(desc); ++i)
-        desc[i] = 0;
-    if (!mm::CopyFromUser(type, reinterpret_cast<const void*>(user_type), sizeof(type) - 1))
+    const auto type_copy = mm::CopyUserCString(type, sizeof(type), reinterpret_cast<const void*>(user_type));
+    if (type_copy.status == mm::UserStringCopyStatus::Fault || type_copy.status == mm::UserStringCopyStatus::BadArgument)
         return kEFAULT;
-    if (!mm::CopyFromUser(desc, reinterpret_cast<const void*>(user_desc), sizeof(desc) - 1))
+    if (type_copy.status == mm::UserStringCopyStatus::NoTerminator)
+        return kENAMETOOLONG;
+    const auto desc_copy = mm::CopyUserCString(desc, sizeof(desc), reinterpret_cast<const void*>(user_desc));
+    if (desc_copy.status == mm::UserStringCopyStatus::Fault || desc_copy.status == mm::UserStringCopyStatus::BadArgument)
         return kEFAULT;
-    type[sizeof(type) - 1] = 0;
-    desc[sizeof(desc) - 1] = 0;
+    if (desc_copy.status == mm::UserStringCopyStatus::NoTerminator)
+        return kENAMETOOLONG;
     ProcKeyring* k = FindKeyringForCurrent();
     if (k == nullptr)
         return -126; // -ENOKEY
@@ -364,18 +364,20 @@ i64 DoKeyctl(u64 op, u64 a2, u64 a3, u64 a4, u64 /*a5*/)
     {
         // search a keyring for a key matching (type, desc); v0 only
         // searches the per-process keyring and ignores `keyring` arg.
-        char type[kKeyTypeCap];
-        char desc[kKeyDescCap];
-        for (u32 i = 0; i < sizeof(type); ++i)
-            type[i] = 0;
-        for (u32 i = 0; i < sizeof(desc); ++i)
-            desc[i] = 0;
+        char type[kKeyTypeCap] = {};
+        char desc[kKeyDescCap] = {};
         if (a2 != 0)
-            (void)mm::CopyFromUser(type, reinterpret_cast<const void*>(a2), sizeof(type) - 1);
+        {
+            const auto type_copy = mm::CopyUserCString(type, sizeof(type), reinterpret_cast<const void*>(a2));
+            if (!type_copy.ok())
+                return (type_copy.status == mm::UserStringCopyStatus::NoTerminator) ? kENAMETOOLONG : kEFAULT;
+        }
         if (a3 != 0)
-            (void)mm::CopyFromUser(desc, reinterpret_cast<const void*>(a3), sizeof(desc) - 1);
-        type[sizeof(type) - 1] = 0;
-        desc[sizeof(desc) - 1] = 0;
+        {
+            const auto desc_copy = mm::CopyUserCString(desc, sizeof(desc), reinterpret_cast<const void*>(a3));
+            if (!desc_copy.ok())
+                return (desc_copy.status == mm::UserStringCopyStatus::NoTerminator) ? kENAMETOOLONG : kEFAULT;
+        }
         for (u32 i = 0; i < kKeyringSlots; ++i)
             if (k->slots[i].in_use && TypeEqual(k->slots[i].type, type) && TypeEqual(k->slots[i].desc, desc))
                 return k->slots[i].id;

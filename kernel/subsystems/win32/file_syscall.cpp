@@ -30,7 +30,7 @@ void DoFileOpen(arch::TrapFrame* frame)
     KDBG_2V(Win32Thunk, "win32/file", "DoFileOpen", "user_path", frame->rdi, "path_cap", frame->rsi);
     // Path-based open. Routing (ramfs vs fat32 by /disk/<idx>/
     // prefix) lives in fs::routing — this layer only does the
-    // syscall-context work (cap check, CopyFromUser, rax wiring).
+    // syscall-context work (cap check, user-string copy, rax wiring).
     // Returns a Win32 pseudo-handle (kWin32HandleBase + slot_idx)
     // on success or u64(-1) on any failure.
     core::Process* proc = core::CurrentProcess();
@@ -61,13 +61,11 @@ void DoFileOpen(arch::TrapFrame* frame)
         return;
     }
     char kpath[core::kSyscallPathMax];
-    if (!mm::CopyFromUser(kpath, reinterpret_cast<const void*>(frame->rdi), path_cap))
+    if (!mm::CopyUserCString(kpath, path_cap + 1, reinterpret_cast<const void*>(frame->rdi)).ok())
     {
         frame->rax = static_cast<u64>(-1);
         return;
     }
-    kpath[path_cap] = '\0';
-    kpath[core::kSyscallPathMax - 1] = '\0';
 
     const u64 handle = fs::routing::OpenForProcess(proc, kpath);
     if (handle != static_cast<u64>(-1) && handle != 0)
@@ -407,13 +405,11 @@ void DoFileCreate(arch::TrapFrame* frame)
         return;
     }
     char kpath[core::kSyscallPathMax];
-    if (!mm::CopyFromUser(kpath, reinterpret_cast<const void*>(frame->rdi), path_cap))
+    if (!mm::CopyUserCString(kpath, path_cap + 1, reinterpret_cast<const void*>(frame->rdi)).ok())
     {
         frame->rax = static_cast<u64>(-1);
         return;
     }
-    kpath[path_cap] = '\0';
-    kpath[core::kSyscallPathMax - 1] = '\0';
 
     // Initial-content payload — optional, capped at 4 KiB for
     // the same staging-buffer reasons as DoFileWrite. Larger
@@ -470,13 +466,11 @@ void DoFileUnlink(arch::TrapFrame* frame)
         return;
     }
     char kpath[core::kSyscallPathMax];
-    if (!mm::CopyFromUser(kpath, reinterpret_cast<const void*>(frame->rdi), path_cap))
+    if (!mm::CopyUserCString(kpath, path_cap + 1, reinterpret_cast<const void*>(frame->rdi)).ok())
     {
         frame->rax = kStatusInvalidParameter;
         return;
     }
-    kpath[path_cap] = '\0';
-    kpath[core::kSyscallPathMax - 1] = '\0';
     if (!fs::routing::UnlinkForProcess(proc, kpath))
     {
         frame->rax = kStatusObjectNameNotFound;
@@ -510,20 +504,12 @@ void DoFileRename(arch::TrapFrame* frame)
     }
     char ksrc[core::kSyscallPathMax];
     char kdst[core::kSyscallPathMax];
-    if (!mm::CopyFromUser(ksrc, reinterpret_cast<const void*>(frame->rdi), src_cap))
+    if (!mm::CopyUserCString(ksrc, src_cap + 1, reinterpret_cast<const void*>(frame->rdi)).ok() ||
+        !mm::CopyUserCString(kdst, dst_cap + 1, reinterpret_cast<const void*>(frame->rdx)).ok())
     {
         frame->rax = kStatusInvalidParameter;
         return;
     }
-    if (!mm::CopyFromUser(kdst, reinterpret_cast<const void*>(frame->rdx), dst_cap))
-    {
-        frame->rax = kStatusInvalidParameter;
-        return;
-    }
-    ksrc[src_cap] = '\0';
-    ksrc[core::kSyscallPathMax - 1] = '\0';
-    kdst[dst_cap] = '\0';
-    kdst[core::kSyscallPathMax - 1] = '\0';
     if (!fs::routing::RenameForProcess(proc, ksrc, kdst))
     {
         // Rename failure could be missing src OR existing dst;
@@ -539,7 +525,6 @@ namespace
 {
 constexpr u64 kStatusSuccess = 0;
 constexpr u64 kStatusInvalidParameter = 0xC000000DULL;
-constexpr u64 kStatusObjectNameNotFound = 0xC0000034ULL;
 constexpr u64 kStatusObjectNameCollision = 0xC0000035ULL;
 
 bool CopyPathArg(arch::TrapFrame* frame, u64 user_ptr, u64 path_cap, char* dst)
@@ -547,11 +532,7 @@ bool CopyPathArg(arch::TrapFrame* frame, u64 user_ptr, u64 path_cap, char* dst)
     (void)frame;
     if (path_cap == 0 || path_cap >= core::kSyscallPathMax)
         return false;
-    if (!mm::CopyFromUser(dst, reinterpret_cast<const void*>(user_ptr), path_cap))
-        return false;
-    dst[path_cap] = '\0';
-    dst[core::kSyscallPathMax - 1] = '\0';
-    return true;
+    return mm::CopyUserCString(dst, path_cap + 1, reinterpret_cast<const void*>(user_ptr)).ok();
 }
 } // namespace
 

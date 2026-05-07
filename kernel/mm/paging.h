@@ -252,15 +252,18 @@ PageWalkSnapshot SnapshotPageWalk(u64 virt);
  * stac / clac so the CPU's SMAP check lets through the user access
  * only inside this one helper.
  *
- * Return true on success, false if the pointer is rejected. `len == 0`
- * is a trivial no-op that returns true. Zero-byte buffers aren't an
- * error and neither is a null kernel_dst / kernel_src when len == 0.
+ * Return true on success, false if the pointer is rejected or if a
+ * recoverable page fault is hit during the copy. `len == 0` is a
+ * trivial no-op that returns true. Zero-byte buffers aren't an error
+ * and neither is a null kernel_dst / kernel_src when len == 0.
  *
- * v0 does NOT catch #PF during the copy: a user pointer that's in
- * range but unmapped (or mapped but pages unreachable) faults and the
- * kernel's trap dispatcher halts. Proper #PF recovery via a fault-
- * fixup table lands with the first syscall that can legitimately
- * trigger it.
+ * Fault handling contract: the helpers first validate the canonical
+ * low-half range, pre-walk the caller's user PTEs, then enter the
+ * assembly copy window that gates SMAP with stac/clac. Trap dispatch
+ * recognises faults inside that window and rewrites RIP to the copy
+ * fixup path, so syscall handlers see `false` instead of a kernel
+ * panic. Partial prefixes may have been copied before a fault; callers
+ * must treat the whole destination as untrusted on `false`.
  *
  * Context: kernel. Must NOT be called from interrupt context while the
  * current task isn't the one whose address space the user pointer lives
@@ -269,5 +272,50 @@ PageWalkSnapshot SnapshotPageWalk(u64 virt);
  */
 bool CopyFromUser(void* kernel_dst, const void* user_src, u64 len);
 bool CopyToUser(void* user_dst, const void* kernel_src, u64 len);
+
+/// Result for bounded NUL-terminated user-string copies.
+enum class UserStringCopyStatus : u8
+{
+    Ok,
+    BadArgument,
+    Fault,
+    NoTerminator,
+};
+
+struct UserStringCopyResult
+{
+    UserStringCopyStatus status;
+    // Ok: characters copied before the NUL terminator.
+    // NoTerminator: characters copied/probed before the bounded stop.
+    // Fault: characters copied before the faulting probe.
+    u64 length;
+
+    constexpr bool ok() const { return status == UserStringCopyStatus::Ok; }
+};
+
+/// Copy a NUL-terminated 8-bit user string into `kernel_dst`.
+///
+/// `dst_cap` is the total destination capacity including the terminator.
+/// When `kernel_dst != nullptr` and `dst_cap > 0`, the destination is
+/// NUL-filled up front so it is safe to log/debug-print even on failure.
+/// Unlike fixed-size
+/// CopyFromUser, this probes one character at a time and stops at the
+/// first NUL; a short string at the end of a mapped page therefore does
+/// not require the following page to be mapped.
+UserStringCopyResult CopyUserCString(char* kernel_dst, u64 dst_cap, const void* user_src);
+
+/// Copy up to `dst_cap - 1` user characters and always append a kernel
+/// terminator. NoTerminator means the user string was truncated cleanly,
+/// not that the copy faulted. Intended for diagnostic surfaces whose ABI
+/// is explicitly bounded/truncating.
+UserStringCopyResult CopyUserCStringTruncating(char* kernel_dst, u64 dst_cap, const void* user_src);
+
+/// UTF-16LE sibling of CopyUserCString. `dst_cap` is in u16 code units,
+/// including the terminator. No UTF validation is performed here; callers
+/// decide how to interpret non-ASCII or surrogate code units.
+UserStringCopyResult CopyUserString16(u16* kernel_dst, u64 dst_cap, const void* user_src);
+
+/// UTF-16LE sibling of CopyUserCStringTruncating.
+UserStringCopyResult CopyUserString16Truncating(u16* kernel_dst, u64 dst_cap, const void* user_src);
 
 } // namespace duetos::mm

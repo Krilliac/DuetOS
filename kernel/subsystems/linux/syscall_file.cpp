@@ -27,6 +27,7 @@
 #include "proc/process.h"
 #include "fs/fat32.h"
 #include "mm/address_space.h"
+#include "mm/paging.h"
 #include "security/canary.h"
 #include "subsystems/win32/dir_syscall.h"
 
@@ -104,26 +105,14 @@ i64 DoOpen(u64 user_path, u64 flags, u64 mode)
     // bits mean the same thing.
     constexpr u64 kO_CREAT = 0x40;
     constexpr u64 kO_EXCL = 0x80;
-    constexpr u64 kO_TRUNC = 0x200;
     constexpr u64 kO_CLOEXEC = 0x80000;
     char path[64];
-    for (u32 i = 0; i < sizeof(path); ++i)
-        path[i] = 0;
-    if (!mm::CopyFromUser(path, reinterpret_cast<const void*>(user_path), sizeof(path) - 1))
+    const auto copy = mm::CopyUserCString(path, sizeof(path), reinterpret_cast<const void*>(user_path));
+    if (copy.status == mm::UserStringCopyStatus::Fault || copy.status == mm::UserStringCopyStatus::BadArgument)
     {
         return kEFAULT;
     }
-    path[sizeof(path) - 1] = 0;
-    bool has_nul = false;
-    for (u32 i = 0; i < sizeof(path); ++i)
-    {
-        if (path[i] == 0)
-        {
-            has_nul = true;
-            break;
-        }
-    }
-    if (!has_nul)
+    if (copy.status == mm::UserStringCopyStatus::NoTerminator)
     {
         return kENAMETOOLONG;
     }
@@ -314,11 +303,11 @@ i64 DoClose(u64 fd)
 i64 DoStat(u64 user_path, u64 user_buf)
 {
     char path[64];
-    for (u32 i = 0; i < sizeof(path); ++i)
-        path[i] = 0;
-    if (!mm::CopyFromUser(path, reinterpret_cast<const void*>(user_path), sizeof(path) - 1))
+    const auto copy = mm::CopyUserCString(path, sizeof(path), reinterpret_cast<const void*>(user_path));
+    if (copy.status == mm::UserStringCopyStatus::Fault || copy.status == mm::UserStringCopyStatus::BadArgument)
         return kEFAULT;
-    path[sizeof(path) - 1] = 0;
+    if (copy.status == mm::UserStringCopyStatus::NoTerminator)
+        return kENAMETOOLONG;
 
     const auto* v = fs::fat32::Fat32Volume(0);
     if (v == nullptr)
@@ -387,11 +376,11 @@ i64 DoAccess(u64 user_path, u64 mode)
 {
     (void)mode;
     char path[64];
-    for (u32 i = 0; i < sizeof(path); ++i)
-        path[i] = 0;
-    if (!mm::CopyFromUser(path, reinterpret_cast<const void*>(user_path), sizeof(path) - 1))
+    const auto copy = mm::CopyUserCString(path, sizeof(path), reinterpret_cast<const void*>(user_path));
+    if (copy.status == mm::UserStringCopyStatus::Fault || copy.status == mm::UserStringCopyStatus::BadArgument)
         return kEFAULT;
-    path[sizeof(path) - 1] = 0;
+    if (copy.status == mm::UserStringCopyStatus::NoTerminator)
+        return kENAMETOOLONG;
     const auto* v = fs::fat32::Fat32Volume(0);
     if (v == nullptr)
         return kENOENT;

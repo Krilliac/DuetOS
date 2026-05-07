@@ -1288,12 +1288,11 @@ void SyscallDispatch(arch::TrapFrame* frame)
             return;
         }
         char kpath[256];
-        if (!mm::CopyFromUser(kpath, reinterpret_cast<const void*>(user_path), path_len))
+        if (!mm::CopyUserCString(kpath, path_len + 1, reinterpret_cast<const void*>(user_path)).ok())
         {
             frame->rax = static_cast<u64>(-1);
             return;
         }
-        kpath[path_len] = '\0';
 
         // Path lookup — fat32-only (matches §11.18 stat). Parse
         // /disk/<idx>/<rest> inline (the routing-side helper is
@@ -1634,12 +1633,12 @@ void SyscallDispatch(arch::TrapFrame* frame)
         case kSockOpResolveA:
         {
             char host[257] = {};
-            if (!mm::CopyFromUser(host, reinterpret_cast<const void*>(frame->rsi), sizeof(host) - 1))
+            const auto host_copy = mm::CopyUserCString(host, sizeof(host), reinterpret_cast<const void*>(frame->rsi));
+            if (!host_copy.ok())
             {
-                rv = -14;
+                rv = (host_copy.status == mm::UserStringCopyStatus::NoTerminator) ? -36 : -14;
                 break;
             }
-            host[256] = '\0';
             const auto lease = ::duetos::net::DhcpLeaseRead();
             if (!lease.valid)
             {
@@ -1778,12 +1777,11 @@ void SyscallDispatch(arch::TrapFrame* frame)
             return;
         }
         char kpath[256];
-        if (!mm::CopyFromUser(kpath, reinterpret_cast<const void*>(user_path), path_len))
+        if (!mm::CopyUserCString(kpath, path_len + 1, reinterpret_cast<const void*>(user_path)).ok())
         {
             frame->rax = kStatusAccessViolation;
             return;
         }
-        kpath[path_len] = '\0';
         u64 size = 0;
         bool is_dir = false;
         Process* caller = CurrentProcess();
@@ -2352,19 +2350,18 @@ void SyscallDispatch(arch::TrapFrame* frame)
             return;
         }
 
-        // Bounce buffer on kernel stack, +1 for the hard terminator
-        // so a user string that exactly fills the ceiling still
-        // prints bounded.
+        // Bounce buffer on kernel stack, +1 for the hard terminator.
+        // This diagnostic ABI is intentionally truncating: we copy at
+        // most kSyscallDebugPrintMax bytes and append a kernel NUL, but
+        // we do not require the page after a short user string to be
+        // mapped just because the ceiling is larger than the string.
         char kbuf[kSyscallDebugPrintMax + 1];
-        // Freestanding: no memset, so clear via byte loop.
-        for (u64 i = 0; i < sizeof(kbuf); ++i)
-            kbuf[i] = 0;
-        if (!mm::CopyFromUser(kbuf, reinterpret_cast<const void*>(frame->rdi), kSyscallDebugPrintMax))
+        const auto copy = mm::CopyUserCStringTruncating(kbuf, sizeof(kbuf), reinterpret_cast<const void*>(frame->rdi));
+        if (copy.status == mm::UserStringCopyStatus::BadArgument || copy.status == mm::UserStringCopyStatus::Fault)
         {
             frame->rax = static_cast<u64>(-1);
             return;
         }
-        kbuf[kSyscallDebugPrintMax] = '\0';
 
         arch::SerialWrite("[odbg] ");
         arch::SerialWrite(kbuf);
@@ -2520,16 +2517,17 @@ void SyscallDispatch(arch::TrapFrame* frame)
             return;
         }
 
-        // Read up to kSyscallDebugPrintMax wide-chars (2 bytes each).
+        // Read up to kSyscallDebugPrintMax wide-chars (2 bytes each)
+        // with the same truncating/page-boundary semantics as
+        // SYS_DEBUG_PRINT.
         u16 wbuf[kSyscallDebugPrintMax + 1];
-        for (u64 i = 0; i < kSyscallDebugPrintMax + 1; ++i)
-            wbuf[i] = 0;
-        if (!mm::CopyFromUser(wbuf, reinterpret_cast<const void*>(frame->rdi), kSyscallDebugPrintMax * sizeof(u16)))
+        const auto copy = mm::CopyUserString16Truncating(wbuf, kSyscallDebugPrintMax + 1,
+                                                        reinterpret_cast<const void*>(frame->rdi));
+        if (copy.status == mm::UserStringCopyStatus::BadArgument || copy.status == mm::UserStringCopyStatus::Fault)
         {
             frame->rax = static_cast<u64>(-1);
             return;
         }
-        wbuf[kSyscallDebugPrintMax] = 0;
 
         // Strip to ASCII — non-ASCII → '?'. Single-pass, stops at
         // first NUL wide-char.
@@ -2844,12 +2842,11 @@ void SyscallDispatch(arch::TrapFrame* frame)
         }
 
         char kpath[kSyscallPathMax];
-        if (!mm::CopyFromUser(kpath, reinterpret_cast<const void*>(frame->rdi), kSyscallPathMax))
+        if (!mm::CopyUserCString(kpath, sizeof(kpath), reinterpret_cast<const void*>(frame->rdi)).ok())
         {
             frame->rax = static_cast<u64>(-1);
             return;
         }
-        kpath[kSyscallPathMax - 1] = '\0';
 
         const fs::RamfsNode* n = fs::VfsLookup(proc->root, kpath, kSyscallPathMax);
         if (n == nullptr)
@@ -2918,20 +2915,15 @@ void SyscallDispatch(arch::TrapFrame* frame)
             return;
         }
 
-        // Bounce the user path onto the kernel stack. CopyFromUser
-        // validates pointer range + walks the active AS's PML4
-        // (cap + namespace jail compose on top of that: even after
-        // copy, lookup is bounded by proc->root).
+        // Bounce the user path onto the kernel stack. CopyUserCString
+        // validates/probes via the active AS and requires an in-bounds
+        // NUL terminator; namespace jail checks happen during lookup.
         char kpath[kSyscallPathMax];
-        if (!mm::CopyFromUser(kpath, reinterpret_cast<const void*>(frame->rdi), kSyscallPathMax))
+        if (!mm::CopyUserCString(kpath, sizeof(kpath), reinterpret_cast<const void*>(frame->rdi)).ok())
         {
             frame->rax = static_cast<u64>(-1);
             return;
         }
-        // Ensure terminal NUL within the buffer — a user pointer
-        // to an unterminated buffer would let VfsLookup wander;
-        // force-terminate at kSyscallPathMax - 1.
-        kpath[kSyscallPathMax - 1] = '\0';
 
         const fs::RamfsNode* n = fs::VfsLookup(proc->root, kpath, kSyscallPathMax);
         if (n == nullptr)
@@ -2997,12 +2989,11 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = static_cast<u64>(-1);
             return;
         }
-        if (!mm::CopyFromUser(kpath, reinterpret_cast<const void*>(frame->rdi), plen))
+        if (!mm::CopyUserCString(kpath, plen + 1, reinterpret_cast<const void*>(frame->rdi)).ok())
         {
             frame->rax = static_cast<u64>(-1);
             return;
         }
-        kpath[plen] = '\0';
         const fs::RamfsNode* n = fs::VfsLookup(proc->root, kpath, kSyscallPathMax);
         if (n == nullptr || n->type != fs::RamfsNodeType::kFile)
         {
@@ -3191,12 +3182,11 @@ void SyscallDispatch(arch::TrapFrame* frame)
             return;
         }
         char kname[64];
-        if (!mm::CopyFromUser(kname, reinterpret_cast<const void*>(user_name), name_len))
+        if (!mm::CopyUserCString(kname, name_len + 1, reinterpret_cast<const void*>(user_name)).ok())
         {
             frame->rax = 0;
             return;
         }
-        kname[name_len] = '\0';
         frame->rax = ProcessFindDllBaseByName(proc, kname);
         return;
     }
@@ -3524,14 +3514,11 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // we've seen in MSVCP140 (~180 chars).
         constexpr u64 kDllFuncNameMax = 256;
         char name_buf[kDllFuncNameMax + 1];
-        for (u64 i = 0; i < sizeof(name_buf); ++i)
-            name_buf[i] = 0;
-        if (frame->rsi == 0 || !mm::CopyFromUser(name_buf, reinterpret_cast<const void*>(frame->rsi), kDllFuncNameMax))
+        if (frame->rsi == 0 || !mm::CopyUserCString(name_buf, sizeof(name_buf), reinterpret_cast<const void*>(frame->rsi)).ok())
         {
             frame->rax = 0;
             return;
         }
-        name_buf[kDllFuncNameMax] = '\0';
         const u64 va = ProcessResolveDllExportByBase(proc, frame->rdi, name_buf);
         frame->rax = va;
         return;

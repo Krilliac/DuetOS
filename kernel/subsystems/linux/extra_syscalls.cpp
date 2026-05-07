@@ -174,12 +174,15 @@ void MemfdRelease(u32 idx)
 i64 DoMemfdCreate(u64 user_name, u64 flags)
 {
     constexpr u64 kMFD_CLOEXEC = 0x1;
-    char name[32];
-    for (u32 i = 0; i < sizeof(name); ++i)
-        name[i] = 0;
+    char name[32] = {};
     if (user_name != 0)
-        (void)mm::CopyFromUser(name, reinterpret_cast<const void*>(user_name), sizeof(name) - 1);
-    name[sizeof(name) - 1] = '\0';
+    {
+        const auto copy = mm::CopyUserCString(name, sizeof(name), reinterpret_cast<const void*>(user_name));
+        if (copy.status == mm::UserStringCopyStatus::Fault || copy.status == mm::UserStringCopyStatus::BadArgument)
+            return kEFAULT;
+        if (copy.status == mm::UserStringCopyStatus::NoTerminator)
+            return kENAMETOOLONG;
+    }
 
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
@@ -276,14 +279,14 @@ i64 DoStatx(u64 dirfd, u64 user_path, u64 flags, u64 mask, u64 user_buf)
     if (sdir != kAtFdCwd)
         return kEBADF;
     constexpr u64 kAtEmptyPath = 0x1000;
-    char path[64];
-    for (u32 i = 0; i < sizeof(path); ++i)
-        path[i] = 0;
+    char path[64] = {};
     if (user_path != 0 && (flags & kAtEmptyPath) == 0)
     {
-        if (!mm::CopyFromUser(path, reinterpret_cast<const void*>(user_path), sizeof(path) - 1))
+        const auto copy = mm::CopyUserCString(path, sizeof(path), reinterpret_cast<const void*>(user_path));
+        if (copy.status == mm::UserStringCopyStatus::Fault || copy.status == mm::UserStringCopyStatus::BadArgument)
             return kEFAULT;
-        path[sizeof(path) - 1] = 0;
+        if (copy.status == mm::UserStringCopyStatus::NoTerminator)
+            return kENAMETOOLONG;
     }
     Statx out;
     for (u64 i = 0; i < sizeof(out); ++i)
@@ -745,11 +748,11 @@ i64 DoNameToHandleAt(u64 dirfd, u64 user_path, u64 user_handle, u64 user_mount_i
     if (static_cast<i64>(dirfd) != kAtFdCwd)
         return kEBADF;
     char path[64];
-    for (u32 i = 0; i < sizeof(path); ++i)
-        path[i] = 0;
-    if (!mm::CopyFromUser(path, reinterpret_cast<const void*>(user_path), sizeof(path) - 1))
+    const auto copy = mm::CopyUserCString(path, sizeof(path), reinterpret_cast<const void*>(user_path));
+    if (copy.status == mm::UserStringCopyStatus::Fault || copy.status == mm::UserStringCopyStatus::BadArgument)
         return kEFAULT;
-    path[sizeof(path) - 1] = 0;
+    if (copy.status == mm::UserStringCopyStatus::NoTerminator)
+        return kENAMETOOLONG;
     const auto* v = fs::fat32::Fat32Volume(0);
     if (v == nullptr)
         return kENOENT;

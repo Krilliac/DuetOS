@@ -529,11 +529,11 @@ i64 DoMqOpen(u64 user_name, u64 oflag, u64 mode, u64 user_attr)
     constexpr u64 kOExcl = 0x80;
     constexpr u64 kOCloexec = 0x80000;
     char name[kPosixMqNameCap];
-    for (u32 i = 0; i < sizeof(name); ++i)
-        name[i] = 0;
-    if (!mm::CopyFromUser(name, reinterpret_cast<const void*>(user_name), sizeof(name) - 1))
-        return -14;
-    name[sizeof(name) - 1] = 0;
+    const auto copy = mm::CopyUserCString(name, sizeof(name), reinterpret_cast<const void*>(user_name));
+    if (copy.status == mm::UserStringCopyStatus::Fault || copy.status == mm::UserStringCopyStatus::BadArgument)
+        return kEFAULT;
+    if (copy.status == mm::UserStringCopyStatus::NoTerminator)
+        return kENAMETOOLONG;
     if (name[0] != '/')
         return -22;
 
@@ -599,11 +599,11 @@ i64 DoMqOpen(u64 user_name, u64 oflag, u64 mode, u64 user_attr)
 i64 DoMqUnlink(u64 user_name)
 {
     char name[kPosixMqNameCap];
-    for (u32 i = 0; i < sizeof(name); ++i)
-        name[i] = 0;
-    if (!mm::CopyFromUser(name, reinterpret_cast<const void*>(user_name), sizeof(name) - 1))
-        return -14;
-    name[sizeof(name) - 1] = 0;
+    const auto copy = mm::CopyUserCString(name, sizeof(name), reinterpret_cast<const void*>(user_name));
+    if (copy.status == mm::UserStringCopyStatus::Fault || copy.status == mm::UserStringCopyStatus::BadArgument)
+        return kEFAULT;
+    if (copy.status == mm::UserStringCopyStatus::NoTerminator)
+        return kENAMETOOLONG;
     arch::Cli();
     const i32 idx = PosixMqFindByName(name);
     if (idx < 0)

@@ -22,6 +22,7 @@
 #include "fs/fat32.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
+#include "mm/paging.h"
 #include "sched/sched.h"
 
 namespace duetos::subsystems::linux::internal
@@ -65,11 +66,11 @@ i64 DoSetTidAddress(u64 user_tid_ptr)
 i64 DoReadlink(u64 user_path, u64 user_buf, u64 bufsiz)
 {
     char path[64];
-    for (u32 i = 0; i < sizeof(path); ++i)
-        path[i] = 0;
-    if (!mm::CopyFromUser(path, reinterpret_cast<const void*>(user_path), sizeof(path) - 1))
+    const auto copy = mm::CopyUserCString(path, sizeof(path), reinterpret_cast<const void*>(user_path));
+    if (copy.status == mm::UserStringCopyStatus::Fault || copy.status == mm::UserStringCopyStatus::BadArgument)
         return kEFAULT;
-    path[sizeof(path) - 1] = 0;
+    if (copy.status == mm::UserStringCopyStatus::NoTerminator)
+        return kENAMETOOLONG;
 
     const char kSelf[] = "/proc/self/exe";
     bool matches = true;
@@ -647,9 +648,8 @@ i64 DoPrctl(u64 option, u64 arg2, u64 arg3, u64 arg4, u64 arg5)
         if (p == nullptr)
             return kEINVAL;
         char buf[core::Process::kLinuxTaskNameCap];
-        for (u32 i = 0; i < sizeof(buf); ++i)
-            buf[i] = 0;
-        if (!mm::CopyFromUser(buf, reinterpret_cast<const void*>(arg2), sizeof(buf) - 1))
+        const auto copy = mm::CopyUserCStringTruncating(buf, sizeof(buf), reinterpret_cast<const void*>(arg2));
+        if (copy.status == mm::UserStringCopyStatus::Fault || copy.status == mm::UserStringCopyStatus::BadArgument)
             return kEFAULT;
         for (u32 i = 0; i < sizeof(buf); ++i)
             p->linux_task_name[i] = buf[i];
