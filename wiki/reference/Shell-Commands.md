@@ -237,6 +237,7 @@ All write-side FAT operations are admin-gated.
 | `trace [on\|off]` | Toggle trace threshold + show in-flight scopes | |
 | `metrics` | Log resource snapshot | |
 | `health`, `checkup` | Runtime invariant scan (heap/frames/sched/CRX) | |
+| `leakcheck [class <name>\|pid <n>\|<class>]` | Unified resource-leak summary | Aggregates heap / frames / kstack / AS regions / kobject + Win32 handles / sockets / GDI / CPU runaway / GPU contexts+surfaces+cmdbufs+VRAM. `leakcheck heap` shows top-N caller RIPs (same as `heap leaks`). `leakcheck pid <n>` reports residue attributable to a single PID. GPU rows return zero today — populated by the GPU driver as resource tracking lands. |
 | `dumpstate` | Snapshot every kernel subsystem to serial | |
 | `inspect ...` | RE / triage umbrella (syscalls / opcodes / ARM) | |
 | `instr <addr> [N]` | Instruction-byte dump at address | |

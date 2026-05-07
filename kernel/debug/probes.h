@@ -92,6 +92,16 @@ enum class ProbeId : u8
     // state in bits 0..7.
     kModuleStateChange,
 
+    // Leak detector — fires from `LeakDetectorReportProcessExit`
+    // when a process's teardown leaves residue attributable to it
+    // (kobject handles, win32 handle slots, ticks-over-budget, or
+    // future GPU residue). ArmedLog by default so a clean boot
+    // stays quiet and a leak shows up immediately; an attached
+    // GDB can `b duetos::debug::ProbeFire` and break on the first
+    // attribution. The packed value carries the total
+    // attributable count (handles + slots + over-budget ticks).
+    kLeakAttributable,
+
     kCount, // sentinel
 };
 

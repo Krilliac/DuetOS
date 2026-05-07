@@ -5,6 +5,7 @@
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
 #include "diag/hexdump.h"
+#include "diag/leak_detector.h"
 #include "diag/log_names.h"
 #include "diag/runtime_checker.h"
 #include "debug/probes.h"
@@ -404,6 +405,12 @@ void ProcessRelease(Process* p)
     // (raw FindFirstFile callers without an attached Linux fd).
     ::duetos::ipc::HandleTableDrain(p->kobj_handles);
     arch::SerialWrite("[proc] release: post-HandleTableDrain\n");
+
+    // Surface anything still attributable to this PID after the
+    // earlier drain steps (kobject handles, Win32 handle slots,
+    // ticks-over-budget, future GPU residue). Silent on a clean
+    // exit; logs WARN + fires kLeakAttributable on residue.
+    ::duetos::diag::LeakDetectorReportProcessExit(*p);
 
     // Free any directory-iteration snapshots the process leaked
     // by exiting without CloseHandle on its FindFirstFile pairs.
