@@ -111,4 +111,16 @@ const char* ClassifyWildAddress(u64 value);
 /// pre-emit a separator. No trailing newline.
 void WriteWildAddressHint(u64 value);
 
+/// Multi-line crash-analysis banner emitted at the top of a trap /
+/// panic dump when the faulting RIP itself is recognisably wild.
+/// Distinct from the single-line `[wild: …]` hint: this writes a
+/// prominent `[!] crash analysis:` block with concrete next steps
+/// the operator should take (walk the backtrace, look for the
+/// stack-overflow guard line, etc.). No-op when RIP looks valid
+/// — the regular RIP line already carries the symbol or wild hint.
+///
+/// Safe in trap context: allocation-free, no locks, single-pass
+/// serial writes only.
+void WriteCrashAnalysisBanner(u64 rip);
+
 } // namespace duetos::core

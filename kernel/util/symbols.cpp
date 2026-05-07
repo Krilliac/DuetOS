@@ -276,4 +276,68 @@ void WriteAddressWithSymbol(u64 addr)
     WriteWildAddressHint(addr);
 }
 
+void WriteCrashAnalysisBanner(u64 rip)
+{
+    // The banner only fires when RIP is recognisably broken. A
+    // valid RIP (any in-image kernel address, or even an out-of-
+    // image address that doesn't match a sentinel) gets no banner —
+    // the standard RIP line already carries the symbol resolution
+    // and the wild hint covers any leftover "weird but maybe valid"
+    // values.
+    SymbolResolution res{};
+    if (ResolveAddress(rip, &res))
+    {
+        return;
+    }
+    const char* hint = ClassifyWildAddress(rip);
+    if (hint == nullptr)
+    {
+        return;
+    }
+
+    arch::SerialWrite("  [!] crash analysis: RIP did not symbolize.\n");
+    arch::SerialWrite("      hint   : ");
+    arch::SerialWrite(hint);
+    arch::SerialWrite("\n");
+
+    // The likely root cause + next-step checklist depends on which
+    // wild pattern we matched. Each branch lists ONE concrete next
+    // action so the operator doesn't have to guess.
+    if (rip == 0xFFFFFFFFFFFFFFFFULL)
+    {
+        arch::SerialWrite("      cause? : a `ret` popped 0xFFFFFFFFFFFFFFFF off the stack,\n");
+        arch::SerialWrite("               or an unmapped IDT gate target was sign-extended.\n");
+        arch::SerialWrite("      next   : walk the backtrace below to the last good frame;\n");
+        arch::SerialWrite("               compare RSP to the kstack-arena guard line; check\n");
+        arch::SerialWrite("               the IDT installer if the fault has no preceding\n");
+        arch::SerialWrite("               clean RIP in the log ring.\n");
+    }
+    else if (rip == 0x00000000FFFFFFFFULL)
+    {
+        arch::SerialWrite("      cause? : a u32 sentinel (kKindMiss / kInvalidNodeId /\n");
+        arch::SerialWrite("               kBootHandleSentinel / -1 errno) was zero-extended\n");
+        arch::SerialWrite("               and then called as a function pointer.\n");
+        arch::SerialWrite("      next   : grep the source for `0xFFFFFFFFu` constants used\n");
+        arch::SerialWrite("               as 'no result' returns; the missing check is at\n");
+        arch::SerialWrite("               the call site visible in the topmost stack frame.\n");
+    }
+    else if (rip == 0)
+    {
+        arch::SerialWrite("      cause? : an uninitialised function pointer, vtable slot,\n");
+        arch::SerialWrite("               or a NULL deref through an indirect call.\n");
+        arch::SerialWrite("      next   : the backtrace's top frame holds the call site;\n");
+        arch::SerialWrite("               check whether its target struct was zeroed but\n");
+        arch::SerialWrite("               never populated (constinit + missed Init()).\n");
+    }
+    else
+    {
+        // Catch-all for the remaining sentinel patterns the
+        // classifier matched but which don't have a tailored
+        // next-step paragraph. Generic guidance still beats none.
+        arch::SerialWrite("      next   : compare the topmost backtrace frame against the\n");
+        arch::SerialWrite("               wild-pattern hint above to identify which slot\n");
+        arch::SerialWrite("               was unintentionally treated as a code pointer.\n");
+    }
+}
+
 } // namespace duetos::core

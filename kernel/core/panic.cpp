@@ -618,6 +618,12 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
     WriteUptimeReadable();
     arch::SerialWrite(" since boot\n");
     DumpTask();
+    // Crash-analysis banner first when the panicking RIP is
+    // recognisably wild (-1, NULL, u32 sentinel) — the trap path
+    // does the same so the operator gets the diagnosis before the
+    // raw register dump regardless of which entry point caught the
+    // failure. No-op for a valid RIP.
+    WriteCrashAnalysisBanner(rip);
     WriteLabelledCode("rip      ", rip);
     WriteLabelledVa("rsp      ", rsp);
     WriteLabelledVa("rbp      ", rbp);

@@ -484,7 +484,7 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         SerialWrite("[idt] spurious vector ");
         SerialWriteHex(frame->vector);
         SerialWrite(" rip=");
-        SerialWriteHex(frame->rip);
+        duetos::core::WriteAddressWithSymbol(frame->rip);
         SerialWrite(" cs=");
         SerialWriteHex(frame->cs);
         SerialWrite("\n");
@@ -771,16 +771,27 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         SerialWrite("\n  pid  : ");
         SerialWriteHex(duetos::sched::CurrentTaskId());
         SerialWrite("\n  rip  : ");
-        SerialWriteHex(frame->rip);
+        // User-mode RIPs don't resolve against the kernel symbol
+        // table, but the wild-address hint still applies — a
+        // ring-3 call through a corrupted vtable lands at -1 / NULL
+        // exactly the same shape the kernel's wild classifier
+        // already names.
+        ::duetos::core::WriteAddressWithSymbol(frame->rip);
         SerialWrite("\n  rsp  : ");
         SerialWriteHex(frame->rsp);
+        ::duetos::core::WriteWildAddressHint(frame->rsp);
         SerialWrite("\n  cs   : ");
         SerialWriteHex(frame->cs);
         ::duetos::core::WriteSegmentSelectorBits(frame->cs);
         if (frame->vector == 14)
         {
+            const u64 user_cr2 = ReadCr2();
             SerialWrite("\n  cr2  : ");
-            SerialWriteHex(ReadCr2());
+            SerialWriteHex(user_cr2);
+            // Sentinel hint on cr2 so a `[wild: u32 -1 zero-extended …]`
+            // fires when ring-3 dereferences a sentinel-shaped value
+            // it didn't recognise as "no result".
+            ::duetos::core::WriteWildAddressHint(user_cr2);
             SerialWrite("\n  err  : ");
             SerialWriteHex(frame->error_code);
             ::duetos::core::WritePageFaultErrBits(frame->error_code);
@@ -894,6 +905,12 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     SerialWrite("  vector_name : ");
     SerialWrite(vector_name);
     SerialWrite("\n");
+    // If RIP is recognisably wild (-1, NULL, u32 sentinel, etc.)
+    // emit a multi-line `[!] crash analysis:` banner ABOVE the rip
+    // line so the operator sees the diagnosis up-front instead of
+    // having to spot the magic number further down. No-op for a
+    // valid RIP — the standard line below carries the symbol.
+    core::WriteCrashAnalysisBanner(frame->rip);
     SerialWrite("  rip       : ");
     core::WriteAddressWithSymbol(frame->rip);
     core::WriteVaRegion(frame->rip);
