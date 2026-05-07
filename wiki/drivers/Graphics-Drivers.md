@@ -244,6 +244,30 @@ Implemented:
   `vkResetDescriptorPool`.  Sets carry no resource state for
   shaders to consume; the surface exists so a downstream
   caller (DXVK, native compute) finds the full ladder today.
+- Loader plumbing: `vkEnumerateInstanceVersion`,
+  `vkGetInstanceProcAddr`, `vkGetDeviceProcAddr` (returns
+  opaque token, 0 for unknown / instance-only-from-device).
+- Vulkan 1.1 / 1.2 -shaped `Properties2` / `Features2` /
+  `MemoryProperties2` accept a pNext chain (ignored — no
+  extensions advertised) so a hosted SDK caller's setup runs.
+- `vkGetBufferMemoryRequirements` /
+  `vkGetImageMemoryRequirements` /
+  `vkGetDeviceMemoryCommitment` /
+  `vkGetBufferDeviceAddress` (returns the kheap pointer).
+- VK_KHR_dynamic_rendering: `vkCmdBeginRendering` /
+  `vkCmdEndRendering` — same scanout-clear path as
+  `vkCmdBeginRenderPass` for the attachment image.
+- Dynamic state setters: `vkCmdSetLineWidth`,
+  `vkCmdSetDepthBias`, `vkCmdSetBlendConstants`,
+  `vkCmdSetDepthBounds`, `vkCmdSetStencil{Compare,Write}Mask`,
+  `vkCmdSetStencilReference` — recorded only.
+- VK_EXT_debug_utils: `vkSetDebugUtilsObjectNameEXT` attaches
+  a label to any handle; `VkGetDebugUtilsObjectNameDuet`
+  reads it back.  Small fixed-size table (16 most recent).
+- Image transfer suite: `vkCmdCopyImage`, `vkCmdBlitImage`,
+  `vkCmdCopyImageToBuffer`, `vkCmdResolveImage`,
+  `vkCmdUpdateBuffer` (real bytes when buffer host-visible),
+  `vkCmdClearAttachments`, `vkCmdClearDepthStencilImage`.
 - Sampler / Event / PipelineCache / QueryPool: full
   create/destroy + supporting entry points. Pipeline cache
   hands back a 32-byte VkPipelineCacheHeaderVersionOne-shaped

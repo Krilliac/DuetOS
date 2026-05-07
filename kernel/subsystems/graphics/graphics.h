@@ -169,6 +169,20 @@ enum class VkIndexType : u32
     Uint32 = 1,
 };
 
+enum class VkFilter : u32
+{
+    Nearest = 0,
+    Linear = 1,
+};
+
+enum class VkSamplerAddressMode : u32
+{
+    Repeat = 0,
+    MirroredRepeat = 1,
+    ClampToEdge = 2,
+    ClampToBorder = 3,
+};
+
 // Push constant payload size cap — covers the spec's
 // minimum-mandated 128 bytes.  Keeps the per-cb tape entry a
 // fixed size.
@@ -332,6 +346,35 @@ VkResult VkEnumerateInstanceExtensionProperties(u32* count);
 VkResult VkEnumerateInstanceLayerProperties(u32* count);
 VkResult VkEnumerateDeviceExtensionProperties(VkPhysicalDevice phys, u32* count);
 
+/// Loader-style proc-address resolver.  Returns a stable opaque
+/// token (the entry-point id) that a caller can cross-reference
+/// against the kernel-side dispatch table.  Returns 0 for
+/// unrecognised names.
+VkResult VkEnumerateInstanceVersion(u32* api_version);
+u64 VkGetInstanceProcAddr(VkInstance inst, const char* name);
+u64 VkGetDeviceProcAddr(VkDevice dev, const char* name);
+
+// Vulkan 1.1 / 1.2 -shaped extended queries.  pNext chain is
+// accepted but ignored — no extensions are advertised yet.
+struct VkPhysicalDeviceProperties2
+{
+    void* pNext;
+    VkPhysicalDeviceProperties properties;
+};
+struct VkPhysicalDeviceFeatures2
+{
+    void* pNext;
+    VkPhysicalDeviceFeatures features;
+};
+struct VkPhysicalDeviceMemoryProperties2
+{
+    void* pNext;
+    VkPhysicalDeviceMemoryProperties memoryProperties;
+};
+VkResult VkGetPhysicalDeviceProperties2(VkPhysicalDevice phys, VkPhysicalDeviceProperties2* out);
+VkResult VkGetPhysicalDeviceFeatures2(VkPhysicalDevice phys, VkPhysicalDeviceFeatures2* out);
+VkResult VkGetPhysicalDeviceMemoryProperties2(VkPhysicalDevice phys, VkPhysicalDeviceMemoryProperties2* out);
+
 VkResult VkCreateDevice(VkPhysicalDevice phys, VkDevice* out);
 void VkDestroyDevice(VkDevice dev);
 
@@ -363,6 +406,28 @@ VkResult VkInvalidateMappedMemoryRanges(VkDevice dev, u32 count, const VkDeviceM
 VkResult VkCreateBuffer(VkDevice dev, u64 size, VkBuffer* out);
 void VkDestroyBuffer(VkDevice dev, VkBuffer buf);
 VkResult VkBindBufferMemory(VkDevice dev, VkBuffer buf, VkDeviceMemory mem, u64 offset);
+
+struct VkMemoryRequirements
+{
+    u64 size;
+    u64 alignment;
+    u32 memoryTypeBits; // bitmask of allowed memory type indices
+};
+
+VkResult VkGetBufferMemoryRequirements(VkDevice dev, VkBuffer buffer, VkMemoryRequirements* out);
+VkResult VkGetImageMemoryRequirements(VkDevice dev, VkImage image, VkMemoryRequirements* out);
+
+/// Returns the memory commit (live bound size) for a memory
+/// allocation.  v0 reports the full allocation size for any
+/// memory whose host pointer was successfully allocated.
+VkResult VkGetDeviceMemoryCommitment(VkDevice dev, VkDeviceMemory mem, u64* committed);
+
+/// Vulkan 1.2 buffer device address.  Returns the kernel-side
+/// host pointer cast to u64 — in our v0 the "device" address
+/// space and the host address space are the same since memory
+/// is just kheap-backed.  Returns 0 for unbound or
+/// device-local-only buffers.
+u64 VkGetBufferDeviceAddress(VkDevice dev, VkBuffer buffer);
 
 /// Create an image.  When `flags & kImageScanoutBacked` is set, a
 /// later `vkCmdClearColorImage` against this image will paint the
@@ -500,6 +565,91 @@ VkResult VkCmdDispatch(VkCommandBuffer cb, u32 group_count_x, u32 group_count_y,
 /// recorded but discarded (no real image storage in v0).
 VkResult VkCmdCopyBufferToImage(VkCommandBuffer cb, VkBuffer src_buffer, VkImage dst_image, u64 src_offset, u32 width,
                                 u32 height);
+
+/// Image-to-image copy.  Recorded only.
+VkResult VkCmdCopyImage(VkCommandBuffer cb, VkImage src_image, VkImage dst_image, u32 width, u32 height);
+
+/// Filtered image copy.  Recorded only.
+VkResult VkCmdBlitImage(VkCommandBuffer cb, VkImage src_image, VkImage dst_image, VkRect2D src_rect, VkRect2D dst_rect,
+                        VkFilter filter);
+
+/// Image-to-buffer transfer.  Recorded only.
+VkResult VkCmdCopyImageToBuffer(VkCommandBuffer cb, VkImage src_image, VkBuffer dst_buffer, u64 dst_offset, u32 width,
+                                u32 height);
+
+/// Multi-sample resolve.  Recorded only.
+VkResult VkCmdResolveImage(VkCommandBuffer cb, VkImage src_image, VkImage dst_image, u32 width, u32 height);
+
+/// Inline buffer update — small payload (<=64 KiB per spec).
+/// Real bytes move when the buffer is bound to host-visible
+/// memory; otherwise recorded only.
+VkResult VkCmdUpdateBuffer(VkCommandBuffer cb, VkBuffer dst, u64 dst_offset, u64 size, const void* data);
+
+/// Clear sub-region of bound attachments mid-pass.  Recorded only.
+VkResult VkCmdClearAttachments(VkCommandBuffer cb, u32 attachment_count, u32 rect_count, VkClearColorValue clear);
+
+/// Depth/stencil image clear.  Recorded only — no depth buffer.
+VkResult VkCmdClearDepthStencilImage(VkCommandBuffer cb, VkImage image, float depth, u32 stencil);
+
+// -------------------------------------------------------------------
+// Dynamic state setters (recorded only).
+// -------------------------------------------------------------------
+//
+// Most of these touch a single pipeline state register that the
+// rasterizer would consume; v0 has no rasterizer state, so the
+// calls are recorded for stats and dropped.  The shapes match
+// the spec so a downstream caller's draw setup runs through.
+
+VkResult VkCmdSetLineWidth(VkCommandBuffer cb, float line_width);
+VkResult VkCmdSetDepthBias(VkCommandBuffer cb, float constant_factor, float clamp, float slope_factor);
+VkResult VkCmdSetBlendConstants(VkCommandBuffer cb, const float blend_constants[4]);
+VkResult VkCmdSetDepthBounds(VkCommandBuffer cb, float min_depth_bounds, float max_depth_bounds);
+VkResult VkCmdSetStencilCompareMask(VkCommandBuffer cb, u32 face_mask, u32 compare_mask);
+VkResult VkCmdSetStencilWriteMask(VkCommandBuffer cb, u32 face_mask, u32 write_mask);
+VkResult VkCmdSetStencilReference(VkCommandBuffer cb, u32 face_mask, u32 reference);
+
+// -------------------------------------------------------------------
+// VK_KHR_dynamic_rendering — render passes without VkRenderPass.
+// -------------------------------------------------------------------
+//
+// Dynamic rendering lets a caller submit a draw without going
+// through the heavyweight VkCreateRenderPass / VkCreateFramebuffer
+// dance.  Our v0 records the begin / end pair into the tape and,
+// for the begin call, paints the clear value across the
+// attachment image when the latter is scanout-backed (same
+// machinery as VkCmdBeginRenderPass).
+
+struct VkRenderingAttachmentInfo
+{
+    VkImageView imageView;
+    u32 loadOp; // 0=LoadOp_Load, 1=LoadOp_Clear, 2=LoadOp_DontCare
+    VkClearColorValue clearValue;
+};
+
+VkResult VkCmdBeginRendering(VkCommandBuffer cb, VkRect2D render_area, u32 color_attachment_count,
+                             const VkRenderingAttachmentInfo* color_attachments);
+VkResult VkCmdEndRendering(VkCommandBuffer cb);
+
+// -------------------------------------------------------------------
+// VK_EXT_debug_utils — object naming for tooling.
+// -------------------------------------------------------------------
+//
+// Lets a caller attach a string label to any kernel-side handle.
+// The label is stored in a small fixed-size table indexed by
+// handle; `VkGetDebugUtilsObjectNameDuet` reads it back.  No
+// validator hooks the names today, but the surface lets an
+// external tracer correlate handles to source code.
+
+inline constexpr u32 kMaxDebugLabelLen = 32;
+
+struct VkDebugUtilsObjectNameInfoEXT
+{
+    u64 objectHandle;
+    const char* pObjectName; // null-terminated UTF-8, copied
+};
+
+VkResult VkSetDebugUtilsObjectNameEXT(VkDevice dev, const VkDebugUtilsObjectNameInfoEXT* info);
+VkResult VkGetDebugUtilsObjectNameDuet(u64 object_handle, char* out_buf, u32 buf_len);
 
 // -------------------------------------------------------------------
 // Submission + sync
@@ -682,20 +832,6 @@ VkResult VkQueuePresentKHR(VkQueue q, VkSwapchainKHR sc, u32 image_index);
 // actually read through the sampler in v0; the surface exists
 // so a downstream caller's descriptor-set wiring lines up.
 
-enum class VkFilter : u32
-{
-    Nearest = 0,
-    Linear = 1,
-};
-
-enum class VkSamplerAddressMode : u32
-{
-    Repeat = 0,
-    MirroredRepeat = 1,
-    ClampToEdge = 2,
-    ClampToBorder = 3,
-};
-
 struct VkSamplerCreateInfo
 {
     VkFilter magFilter;
@@ -840,6 +976,8 @@ struct GraphicsStats
     u32 vk_query_pools_live;
     u32 vk_queries_executed;           // total CmdEndQuery / CmdWriteTimestamp replays
     u32 vk_memory_maps;                // total VkMapMemory calls
+    u32 vk_dynamic_renderings;         // total CmdBeginRendering replays
+    u32 vk_debug_labels;               // total VkSetDebugUtilsObjectNameEXT calls
     u32 vk_queue_submits;              // total VkQueueSubmit calls
     u32 vk_command_recorded;           // total vkCmd* opcodes recorded
     u32 vk_command_replayed;           // total vkCmd* opcodes replayed in submit

@@ -216,6 +216,20 @@ enum class CmdOp : u8
     EndQuery = 21,
     ResetQueryPool = 22,
     WriteTimestamp = 23,
+    CopyImage = 24,
+    BlitImage = 25,
+    CopyImageToBuffer = 26,
+    ResolveImage = 27,
+    UpdateBuffer = 28,
+    ClearAttachments = 29,
+    ClearDepthStencilImage = 30,
+    BeginRendering = 31,
+    EndRendering = 32,
+    SetLineWidth = 33,
+    SetDepthBias = 34,
+    SetBlendConstants = 35,
+    SetDepthBounds = 36,
+    SetStencilState = 37,
 };
 
 struct CmdRecord
@@ -265,9 +279,20 @@ struct CmdRecord
     u32 query_first;
     u32 query_count;
     u32 query_index;
-    // CopyBufferToImage geometry.
+    // CopyBufferToImage / CopyImage / Blit geometry.
     u32 region_width;
     u32 region_height;
+    VkImage src_image;
+    VkRect2D src_rect;
+    VkRect2D dst_rect;
+    VkFilter blit_filter;
+    // ClearDepthStencil — depth as integer-cast (no float math
+    // in kernel) + stencil byte.
+    u32 depth_bits;
+    u32 stencil;
+    // ClearAttachments counts.
+    u32 attachment_count;
+    u32 rect_count;
 };
 
 constexpr u32 kCmdTapeCapacity = 32;
@@ -423,6 +448,20 @@ u32 g_dispatches = 0;
 u32 g_queries_executed = 0;
 u32 g_memory_maps = 0;
 u32 g_image_upload_pixels = 0;
+u32 g_dynamic_renderings = 0;
+u32 g_debug_labels = 0;
+
+// Tiny debug-utils name table.  A circular slot table keyed by
+// the (handle, name) tuple — we never need more than a handful
+// of named handles.  Lookup is linear (tiny N).
+constexpr u32 kMaxDebugLabels = 16;
+struct DebugLabelEntry
+{
+    u64 handle;
+    char name[kMaxDebugLabelLen];
+};
+DebugLabelEntry g_debug_label_table[kMaxDebugLabels] = {};
+u32 g_debug_label_head = 0;
 
 // One-shot logging keyed by entry point.
 enum EpId
@@ -727,6 +766,136 @@ VkResult VkEnumerateDeviceExtensionProperties(VkPhysicalDevice phys, u32* count)
         return VkResult::ErrorInitializationFailed;
     *count = 0;
     return VkResult::Success;
+}
+
+VkResult VkEnumerateInstanceVersion(u32* api_version)
+{
+    if (api_version == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    *api_version = kApiVersion1_3;
+    return VkResult::Success;
+}
+
+namespace
+{
+
+// Loader-style name -> token table.  The token value is opaque
+// (a small integer prefix); only `!= 0` is meaningful to a
+// caller.  One table covers both instance + device queries — an
+// entry not appropriate for the device-level call returns 0
+// from VkGetDeviceProcAddr.
+struct NamedEntry
+{
+    const char* name;
+    u64 token;
+    bool device_level;
+};
+
+constexpr u64 kEpFnBase = 0xF000'0000ull;
+constexpr NamedEntry kKnownEntries[] = {
+    {"vkCreateInstance", kEpFnBase + 1, false},
+    {"vkDestroyInstance", kEpFnBase + 2, false},
+    {"vkEnumeratePhysicalDevices", kEpFnBase + 3, false},
+    {"vkGetPhysicalDeviceProperties", kEpFnBase + 4, false},
+    {"vkGetPhysicalDeviceFeatures", kEpFnBase + 5, false},
+    {"vkGetPhysicalDeviceMemoryProperties", kEpFnBase + 6, false},
+    {"vkGetPhysicalDeviceQueueFamilyProperties", kEpFnBase + 7, false},
+    {"vkCreateDevice", kEpFnBase + 8, false},
+    {"vkDestroyDevice", kEpFnBase + 9, true},
+    {"vkGetDeviceQueue", kEpFnBase + 10, true},
+    {"vkQueueSubmit", kEpFnBase + 11, true},
+    {"vkQueueWaitIdle", kEpFnBase + 12, true},
+    {"vkDeviceWaitIdle", kEpFnBase + 13, true},
+    {"vkAllocateMemory", kEpFnBase + 14, true},
+    {"vkFreeMemory", kEpFnBase + 15, true},
+    {"vkMapMemory", kEpFnBase + 16, true},
+    {"vkUnmapMemory", kEpFnBase + 17, true},
+    {"vkCreateBuffer", kEpFnBase + 18, true},
+    {"vkDestroyBuffer", kEpFnBase + 19, true},
+    {"vkBindBufferMemory", kEpFnBase + 20, true},
+    {"vkCreateImage", kEpFnBase + 21, true},
+    {"vkDestroyImage", kEpFnBase + 22, true},
+    {"vkCreateImageView", kEpFnBase + 23, true},
+    {"vkDestroyImageView", kEpFnBase + 24, true},
+    {"vkCreateRenderPass", kEpFnBase + 25, true},
+    {"vkCreateFramebuffer", kEpFnBase + 26, true},
+    {"vkCreateShaderModule", kEpFnBase + 27, true},
+    {"vkCreateGraphicsPipelines", kEpFnBase + 28, true},
+    {"vkCreateCommandPool", kEpFnBase + 29, true},
+    {"vkAllocateCommandBuffers", kEpFnBase + 30, true},
+    {"vkBeginCommandBuffer", kEpFnBase + 31, true},
+    {"vkEndCommandBuffer", kEpFnBase + 32, true},
+    {"vkCmdClearColorImage", kEpFnBase + 33, true},
+    {"vkCmdDraw", kEpFnBase + 34, true},
+    {"vkCreateSwapchainKHR", kEpFnBase + 35, true},
+    {"vkAcquireNextImageKHR", kEpFnBase + 36, true},
+    {"vkQueuePresentKHR", kEpFnBase + 37, true},
+    {"vkGetInstanceProcAddr", kEpFnBase + 38, false},
+    {"vkGetDeviceProcAddr", kEpFnBase + 39, true},
+    {"vkEnumerateInstanceVersion", kEpFnBase + 40, false},
+};
+
+bool StrEqual(const char* a, const char* b)
+{
+    if (a == nullptr || b == nullptr)
+        return false;
+    while (*a != '\0' && *b != '\0' && *a == *b)
+    {
+        ++a;
+        ++b;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+u64 ResolveProc(const char* name, bool device_level_only)
+{
+    if (name == nullptr)
+        return 0;
+    for (const auto& e : kKnownEntries)
+    {
+        if (StrEqual(e.name, name))
+        {
+            if (device_level_only && !e.device_level)
+                return 0;
+            return e.token;
+        }
+    }
+    return 0;
+}
+
+} // namespace
+
+u64 VkGetInstanceProcAddr(VkInstance inst, const char* name)
+{
+    (void)inst;
+    return ResolveProc(name, /*device_level_only=*/false);
+}
+
+u64 VkGetDeviceProcAddr(VkDevice dev, const char* name)
+{
+    (void)dev;
+    return ResolveProc(name, /*device_level_only=*/true);
+}
+
+VkResult VkGetPhysicalDeviceProperties2(VkPhysicalDevice phys, VkPhysicalDeviceProperties2* out)
+{
+    if (out == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    return VkGetPhysicalDeviceProperties(phys, &out->properties);
+}
+
+VkResult VkGetPhysicalDeviceFeatures2(VkPhysicalDevice phys, VkPhysicalDeviceFeatures2* out)
+{
+    if (out == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    return VkGetPhysicalDeviceFeatures(phys, &out->features);
+}
+
+VkResult VkGetPhysicalDeviceMemoryProperties2(VkPhysicalDevice phys, VkPhysicalDeviceMemoryProperties2* out)
+{
+    if (out == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    return VkGetPhysicalDeviceMemoryProperties(phys, &out->memoryProperties);
 }
 
 // -------------------------------------------------------------------
@@ -1593,6 +1762,322 @@ VkResult VkCmdCopyBufferToImage(VkCommandBuffer cb, VkBuffer src_buffer, VkImage
     return AppendOp(cb, op);
 }
 
+VkResult VkCmdCopyImage(VkCommandBuffer cb, VkImage src_image, VkImage dst_image, u32 width, u32 height)
+{
+    if (!HandleInRange(src_image, kImageBase) || !PoolIsLive(g_image_pool, SlotOf(src_image, kImageBase)))
+        return VkResult::ErrorInitializationFailed;
+    if (!HandleInRange(dst_image, kImageBase) || !PoolIsLive(g_image_pool, SlotOf(dst_image, kImageBase)))
+        return VkResult::ErrorInitializationFailed;
+    CmdRecord op{};
+    op.op = CmdOp::CopyImage;
+    op.src_image = src_image;
+    op.image = dst_image;
+    op.region_width = width;
+    op.region_height = height;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdBlitImage(VkCommandBuffer cb, VkImage src_image, VkImage dst_image, VkRect2D src_rect, VkRect2D dst_rect,
+                        VkFilter filter)
+{
+    if (!HandleInRange(src_image, kImageBase) || !PoolIsLive(g_image_pool, SlotOf(src_image, kImageBase)))
+        return VkResult::ErrorInitializationFailed;
+    if (!HandleInRange(dst_image, kImageBase) || !PoolIsLive(g_image_pool, SlotOf(dst_image, kImageBase)))
+        return VkResult::ErrorInitializationFailed;
+    CmdRecord op{};
+    op.op = CmdOp::BlitImage;
+    op.src_image = src_image;
+    op.image = dst_image;
+    op.src_rect = src_rect;
+    op.dst_rect = dst_rect;
+    op.blit_filter = filter;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdCopyImageToBuffer(VkCommandBuffer cb, VkImage src_image, VkBuffer dst_buffer, u64 dst_offset, u32 width,
+                                u32 height)
+{
+    if (!HandleInRange(src_image, kImageBase) || !PoolIsLive(g_image_pool, SlotOf(src_image, kImageBase)))
+        return VkResult::ErrorInitializationFailed;
+    if (!HandleInRange(dst_buffer, kBufferBase) || !PoolIsLive(g_buffer_pool, SlotOf(dst_buffer, kBufferBase)))
+        return VkResult::ErrorInitializationFailed;
+    CmdRecord op{};
+    op.op = CmdOp::CopyImageToBuffer;
+    op.src_image = src_image;
+    op.dst_buffer = dst_buffer;
+    op.dst_offset = dst_offset;
+    op.region_width = width;
+    op.region_height = height;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdResolveImage(VkCommandBuffer cb, VkImage src_image, VkImage dst_image, u32 width, u32 height)
+{
+    if (!HandleInRange(src_image, kImageBase) || !PoolIsLive(g_image_pool, SlotOf(src_image, kImageBase)))
+        return VkResult::ErrorInitializationFailed;
+    if (!HandleInRange(dst_image, kImageBase) || !PoolIsLive(g_image_pool, SlotOf(dst_image, kImageBase)))
+        return VkResult::ErrorInitializationFailed;
+    CmdRecord op{};
+    op.op = CmdOp::ResolveImage;
+    op.src_image = src_image;
+    op.image = dst_image;
+    op.region_width = width;
+    op.region_height = height;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdUpdateBuffer(VkCommandBuffer cb, VkBuffer dst, u64 dst_offset, u64 size, const void* data)
+{
+    if (!HandleInRange(dst, kBufferBase) || !PoolIsLive(g_buffer_pool, SlotOf(dst, kBufferBase)))
+        return VkResult::ErrorInitializationFailed;
+    if (size == 0)
+        return VkResult::Success;
+    if (data == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    if (size > kMaxPushConstantBytes)
+        return VkResult::ErrorTooManyObjects; // v0 inline cap; spec allows 64 KiB
+    CmdRecord op{};
+    op.op = CmdOp::UpdateBuffer;
+    op.dst_buffer = dst;
+    op.dst_offset = dst_offset;
+    op.region_size = size;
+    const auto* src = static_cast<const u8*>(data);
+    for (u64 i = 0; i < size; ++i)
+        op.push_data[i] = src[i];
+    op.push_size = static_cast<u32>(size);
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdClearAttachments(VkCommandBuffer cb, u32 attachment_count, u32 rect_count, VkClearColorValue clear)
+{
+    CmdRecord op{};
+    op.op = CmdOp::ClearAttachments;
+    op.attachment_count = attachment_count;
+    op.rect_count = rect_count;
+    op.color = clear;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdClearDepthStencilImage(VkCommandBuffer cb, VkImage image, float depth, u32 stencil)
+{
+    if (!HandleInRange(image, kImageBase) || !PoolIsLive(g_image_pool, SlotOf(image, kImageBase)))
+        return VkResult::ErrorInitializationFailed;
+    // Kernel can't touch a `float` (no SSE / soft-float runtime),
+    // so capture the bit pattern through the union form to avoid
+    // ever reading the value as a float.
+    CmdRecord op{};
+    op.op = CmdOp::ClearDepthStencilImage;
+    op.image = image;
+    union
+    {
+        float f;
+        u32 u;
+    } cast = {depth};
+    op.depth_bits = cast.u;
+    op.stencil = stencil & 0xFFu;
+    return AppendOp(cb, op);
+}
+
+// -------------------------------------------------------------------
+// Memory requirements + buffer device address.
+// -------------------------------------------------------------------
+
+VkResult VkGetBufferMemoryRequirements(VkDevice dev, VkBuffer buffer, VkMemoryRequirements* out)
+{
+    (void)dev;
+    if (out == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    if (!HandleInRange(buffer, kBufferBase) || !PoolIsLive(g_buffer_pool, SlotOf(buffer, kBufferBase)))
+        return VkResult::ErrorInitializationFailed;
+    *out = VkMemoryRequirements{};
+    out->size = g_buffer_data[SlotOf(buffer, kBufferBase)].size;
+    out->alignment = 256;      // matches the spec's nonCoherentAtomSize floor
+    out->memoryTypeBits = 0x3; // both memory types are usable
+    return VkResult::Success;
+}
+
+VkResult VkGetImageMemoryRequirements(VkDevice dev, VkImage image, VkMemoryRequirements* out)
+{
+    (void)dev;
+    if (out == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    if (!HandleInRange(image, kImageBase) || !PoolIsLive(g_image_pool, SlotOf(image, kImageBase)))
+        return VkResult::ErrorInitializationFailed;
+    const auto& img = g_image_data[SlotOf(image, kImageBase)];
+    *out = VkMemoryRequirements{};
+    out->size = static_cast<u64>(img.extent.width) * img.extent.height * 4u; // assume B8G8R8A8
+    out->alignment = 4096;
+    out->memoryTypeBits = 0x1; // device-local only
+    return VkResult::Success;
+}
+
+VkResult VkGetDeviceMemoryCommitment(VkDevice dev, VkDeviceMemory mem, u64* committed)
+{
+    (void)dev;
+    if (committed == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    if (!HandleInRange(mem, kMemoryBase) || !PoolIsLive(g_memory_pool, SlotOf(mem, kMemoryBase)))
+        return VkResult::ErrorInitializationFailed;
+    const auto& rec = g_memory_data[SlotOf(mem, kMemoryBase)];
+    *committed = (rec.host_ptr != nullptr) ? rec.size : 0;
+    return VkResult::Success;
+}
+
+u64 VkGetBufferDeviceAddress(VkDevice dev, VkBuffer buffer)
+{
+    (void)dev;
+    if (!HandleInRange(buffer, kBufferBase) || !PoolIsLive(g_buffer_pool, SlotOf(buffer, kBufferBase)))
+        return 0;
+    const auto& buf = g_buffer_data[SlotOf(buffer, kBufferBase)];
+    return reinterpret_cast<u64>(buf.backing); // 0 if unbound or device-local-only
+}
+
+// -------------------------------------------------------------------
+// Dynamic rendering.
+// -------------------------------------------------------------------
+
+VkResult VkCmdBeginRendering(VkCommandBuffer cb, VkRect2D render_area, u32 color_attachment_count,
+                             const VkRenderingAttachmentInfo* color_attachments)
+{
+    (void)render_area;
+    if (color_attachment_count > 0 && color_attachments == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    CmdRecord op{};
+    op.op = CmdOp::BeginRendering;
+    if (color_attachment_count > 0)
+    {
+        // Record the first attachment only — single-MRT v0.  Trace
+        // the image-view to its image so the replay can paint a
+        // clear into the framebuffer when scanout-backed.
+        const auto& a = color_attachments[0];
+        if (HandleInRange(a.imageView, kImageViewBase) &&
+            PoolIsLive(g_imageview_pool, SlotOf(a.imageView, kImageViewBase)))
+        {
+            op.image = g_imageview_data[SlotOf(a.imageView, kImageViewBase)].image;
+        }
+        op.color = a.clearValue;
+    }
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdEndRendering(VkCommandBuffer cb)
+{
+    CmdRecord op{};
+    op.op = CmdOp::EndRendering;
+    return AppendOp(cb, op);
+}
+
+// -------------------------------------------------------------------
+// Dynamic state setters.
+// -------------------------------------------------------------------
+
+VkResult VkCmdSetLineWidth(VkCommandBuffer cb, float line_width)
+{
+    (void)line_width;
+    CmdRecord op{};
+    op.op = CmdOp::SetLineWidth;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdSetDepthBias(VkCommandBuffer cb, float constant_factor, float clamp, float slope_factor)
+{
+    (void)constant_factor;
+    (void)clamp;
+    (void)slope_factor;
+    CmdRecord op{};
+    op.op = CmdOp::SetDepthBias;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdSetBlendConstants(VkCommandBuffer cb, const float blend_constants[4])
+{
+    (void)blend_constants;
+    CmdRecord op{};
+    op.op = CmdOp::SetBlendConstants;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdSetDepthBounds(VkCommandBuffer cb, float min_depth_bounds, float max_depth_bounds)
+{
+    (void)min_depth_bounds;
+    (void)max_depth_bounds;
+    CmdRecord op{};
+    op.op = CmdOp::SetDepthBounds;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdSetStencilCompareMask(VkCommandBuffer cb, u32 face_mask, u32 compare_mask)
+{
+    (void)face_mask;
+    (void)compare_mask;
+    CmdRecord op{};
+    op.op = CmdOp::SetStencilState;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdSetStencilWriteMask(VkCommandBuffer cb, u32 face_mask, u32 write_mask)
+{
+    (void)face_mask;
+    (void)write_mask;
+    CmdRecord op{};
+    op.op = CmdOp::SetStencilState;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdSetStencilReference(VkCommandBuffer cb, u32 face_mask, u32 reference)
+{
+    (void)face_mask;
+    (void)reference;
+    CmdRecord op{};
+    op.op = CmdOp::SetStencilState;
+    return AppendOp(cb, op);
+}
+
+// -------------------------------------------------------------------
+// Debug-utils object naming.
+// -------------------------------------------------------------------
+
+VkResult VkSetDebugUtilsObjectNameEXT(VkDevice dev, const VkDebugUtilsObjectNameInfoEXT* info)
+{
+    (void)dev;
+    if (info == nullptr || info->objectHandle == 0 || info->pObjectName == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    auto& slot = g_debug_label_table[g_debug_label_head];
+    slot.handle = info->objectHandle;
+    u32 i = 0;
+    while (i + 1 < kMaxDebugLabelLen && info->pObjectName[i] != '\0')
+    {
+        slot.name[i] = info->pObjectName[i];
+        ++i;
+    }
+    slot.name[i] = '\0';
+    g_debug_label_head = (g_debug_label_head + 1) % kMaxDebugLabels;
+    ++g_debug_labels;
+    return VkResult::Success;
+}
+
+VkResult VkGetDebugUtilsObjectNameDuet(u64 object_handle, char* out_buf, u32 buf_len)
+{
+    if (out_buf == nullptr || buf_len == 0)
+        return VkResult::ErrorInitializationFailed;
+    for (const auto& e : g_debug_label_table)
+    {
+        if (e.handle == object_handle)
+        {
+            u32 i = 0;
+            while (i + 1 < buf_len && e.name[i] != '\0')
+            {
+                out_buf[i] = e.name[i];
+                ++i;
+            }
+            out_buf[i] = '\0';
+            return VkResult::Success;
+        }
+    }
+    out_buf[0] = '\0';
+    return VkResult::Incomplete;
+}
+
 // -------------------------------------------------------------------
 // Sampler.
 // -------------------------------------------------------------------
@@ -2027,6 +2512,21 @@ void ReplayResetQueryPool(const CmdRecord& op)
     }
 }
 
+void ReplayUpdateBuffer(const CmdRecord& op)
+{
+    if (!HandleInRange(op.dst_buffer, kBufferBase) || !PoolIsLive(g_buffer_pool, SlotOf(op.dst_buffer, kBufferBase)))
+        return;
+    auto& dst = g_buffer_data[SlotOf(op.dst_buffer, kBufferBase)];
+    if (dst.backing == nullptr)
+        return;
+    if (op.dst_offset + op.push_size > dst.size)
+        return;
+    auto* dp = static_cast<u8*>(dst.backing) + op.dst_offset;
+    for (u32 i = 0; i < op.push_size; ++i)
+        dp[i] = op.push_data[i];
+    g_buffer_copy_bytes += op.push_size;
+}
+
 void ReplayCopyBufferToImage(const CmdRecord& op)
 {
     if (!HandleInRange(op.src_buffer, kBufferBase) || !PoolIsLive(g_buffer_pool, SlotOf(op.src_buffer, kBufferBase)))
@@ -2127,6 +2627,29 @@ void ReplayCommandBuffer(VkCommandBuffer cb)
             break;
         case CmdOp::CopyBufferToImage:
             ReplayCopyBufferToImage(op);
+            break;
+        case CmdOp::UpdateBuffer:
+            ReplayUpdateBuffer(op);
+            break;
+        case CmdOp::BeginRendering:
+            // Same scanout-clear path as VkCmdBeginRenderPass —
+            // dynamic rendering's clear value paints the
+            // attachment image when scanout-backed.
+            PaintScanoutClear(op.image, op.color);
+            ++g_dynamic_renderings;
+            break;
+        case CmdOp::CopyImage: // no real image storage in v0
+        case CmdOp::BlitImage:
+        case CmdOp::CopyImageToBuffer:
+        case CmdOp::ResolveImage:
+        case CmdOp::ClearAttachments:       // no concept of bound attachments outside RP begin
+        case CmdOp::ClearDepthStencilImage: // no depth buffer
+        case CmdOp::EndRendering:
+        case CmdOp::SetLineWidth:
+        case CmdOp::SetDepthBias:
+        case CmdOp::SetBlendConstants:
+        case CmdOp::SetDepthBounds:
+        case CmdOp::SetStencilState:
             break;
         case CmdOp::WaitEvents: // no-op replay (events already signalled)
         case CmdOp::BeginQuery: // pairs with EndQuery — write happens at End
@@ -2696,6 +3219,8 @@ GraphicsStats VkStatsSnapshot()
     s.vk_query_pools_live = g_query_pool_pool.live;
     s.vk_queries_executed = g_queries_executed;
     s.vk_memory_maps = g_memory_maps;
+    s.vk_dynamic_renderings = g_dynamic_renderings;
+    s.vk_debug_labels = g_debug_labels;
     s.vk_queue_submits = g_queue_submits;
     s.vk_command_recorded = g_command_recorded;
     s.vk_command_replayed = g_command_replayed;
@@ -3142,6 +3667,84 @@ bool RunCanonicalLifecycle()
     // ResetCommandPool exercises the new pool-wide reset path.
     if (VkResetCommandPool(dev, pool, 0) != VkResult::Success)
         return SelftestFail("[selftest:graphics] VkResetCommandPool failed", 0);
+
+    // Loader leg: ProcAddr returns non-zero for known names + 0
+    // for unknown.  Same call against the device variant must
+    // return 0 for instance-only entries (proves the
+    // device_level filter works).
+    if (VkGetInstanceProcAddr(inst, "vkCreateInstance") == 0)
+        return SelftestFail("[selftest:graphics] InstanceProcAddr did not resolve vkCreateInstance", 0);
+    if (VkGetInstanceProcAddr(inst, "vkBogusEntryThatDoesNotExist") != 0)
+        return SelftestFail("[selftest:graphics] InstanceProcAddr resolved a fake name", 0);
+    if (VkGetDeviceProcAddr(dev, "vkCreateInstance") != 0)
+        return SelftestFail("[selftest:graphics] DeviceProcAddr resolved an instance-only name", 0);
+    if (VkGetDeviceProcAddr(dev, "vkQueueSubmit") == 0)
+        return SelftestFail("[selftest:graphics] DeviceProcAddr did not resolve vkQueueSubmit", 0);
+    u32 instance_version = 0;
+    if (VkEnumerateInstanceVersion(&instance_version) != VkResult::Success || instance_version != kApiVersion1_3)
+        return SelftestFail("[selftest:graphics] EnumerateInstanceVersion mismatch", instance_version);
+
+    // Properties2 leg: round-trip through the wrapper.
+    VkPhysicalDeviceProperties2 props2{};
+    if (VkGetPhysicalDeviceProperties2(phys[0], &props2) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] GetPhysicalDeviceProperties2 failed", 0);
+    if (props2.properties.apiVersion != kApiVersion1_3)
+        return SelftestFail("[selftest:graphics] Properties2 apiVersion mismatch", props2.properties.apiVersion);
+
+    // Memory requirements leg: ask the ICD to report the size /
+    // memory-type-bits a buffer / image needs.  Both queries are
+    // pure read; assert the values look right.
+    VkBuffer mr_buf = 0;
+    if (VkCreateBuffer(dev, 4096, &mr_buf) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] mr-buffer create failed", 0);
+    VkMemoryRequirements buf_req{};
+    if (VkGetBufferMemoryRequirements(dev, mr_buf, &buf_req) != VkResult::Success || buf_req.size != 4096)
+        return SelftestFail("[selftest:graphics] GetBufferMemoryRequirements wrong size", buf_req.size);
+    VkDestroyBuffer(dev, mr_buf);
+    VkMemoryRequirements img_req{};
+    if (VkGetImageMemoryRequirements(dev, img, &img_req) != VkResult::Success || img_req.size == 0)
+        return SelftestFail("[selftest:graphics] GetImageMemoryRequirements wrong size", img_req.size);
+
+    // Debug-utils naming leg: attach a label, read it back.
+    const VkDebugUtilsObjectNameInfoEXT name_info{phys[0], "test-physical-device"};
+    if (VkSetDebugUtilsObjectNameEXT(dev, &name_info) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] SetDebugUtilsObjectName failed", 0);
+    char read_back[kMaxDebugLabelLen] = {};
+    if (VkGetDebugUtilsObjectNameDuet(phys[0], read_back, sizeof(read_back)) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] GetDebugUtilsObjectNameDuet failed", 0);
+    if (read_back[0] != 't' || read_back[1] != 'e' || read_back[2] != 's' || read_back[3] != 't')
+        return SelftestFail("[selftest:graphics] debug label round-trip corrupted", 0);
+
+    // Dynamic rendering leg: record begin/end, submit, assert
+    // the dynamic-rendering counter advanced.  Use the
+    // non-scanout image so no pixels reach the framebuffer.
+    VkCommandBuffer dyn_cb = 0;
+    if (VkAllocateCommandBuffers(dev, pool, 1, &dyn_cb) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] dyn cb allocate failed", 0);
+    if (VkBeginCommandBuffer(dyn_cb) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] dyn cb begin failed", 0);
+    VkRenderingAttachmentInfo dyn_attach{};
+    dyn_attach.imageView = view;
+    dyn_attach.loadOp = 1; // clear
+    dyn_attach.clearValue.uint32[0] = 0x12;
+    dyn_attach.clearValue.uint32[1] = 0x34;
+    dyn_attach.clearValue.uint32[2] = 0x56;
+    dyn_attach.clearValue.uint32[3] = 0x78;
+    const VkRect2D dyn_area{VkOffset2D{0, 0}, VkExtent2D{16, 16}};
+    if (VkCmdBeginRendering(dyn_cb, dyn_area, 1, &dyn_attach) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] CmdBeginRendering failed", 0);
+    if (VkCmdEndRendering(dyn_cb) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] CmdEndRendering failed", 0);
+    if (VkEndCommandBuffer(dyn_cb) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] dyn cb end failed", 0);
+    const u32 dyn_before = g_dynamic_renderings;
+    if (VkQueueSubmit(queue, 1, &dyn_cb, 0) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] dyn cb submit failed", 0);
+    if (VkQueueWaitIdle(queue) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] dyn cb wait failed", 0);
+    if (g_dynamic_renderings <= dyn_before)
+        return SelftestFail("[selftest:graphics] dynamic rendering counter did not advance", g_dynamic_renderings);
+    VkFreeCommandBuffers(dev, pool, 1, &dyn_cb);
 
     // WSI leg: surface + swapchain + acquire / present cycle.
     // Skipped when no framebuffer is live (headless boot) — the
