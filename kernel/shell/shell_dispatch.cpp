@@ -1300,6 +1300,11 @@ void Dispatch(char* line)
         CmdBt(argc, argv);
         return;
     }
+    if (StrEq(cmd, "hdajacks"))
+    {
+        CmdHdaJacks();
+        return;
+    }
     if (StrEq(cmd, "usbnet"))
     {
         CmdUsbNet(argc, argv);
