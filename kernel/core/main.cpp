@@ -2914,6 +2914,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // Metrics checkpoint: everything above is bringup overhead; what
     // the system consumes from here on is steady-state.
     KLOG_METRICS("boot", "bringup-complete");
+    SerialWrite("[bringup-tail] post-metrics\n");
 
     // Sanity-check the tmpfs log sink — by now enough Info+ lines
     // have fired that /tmp/boot.log should be at its 512-byte cap.
@@ -4328,6 +4329,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         }
     };
     duetos::sched::SchedCreate(kbd_reader, nullptr, "kbd-reader");
+    SerialWrite("[bringup-tail] kbd-reader spawned\n");
 
     // Idle-timeout auto-lock watcher. Wakes once a second and
     // calls LoginLock when the active session has been idle past
@@ -4450,6 +4452,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         }
     };
     duetos::sched::SchedCreate(ui_ticker, nullptr, "ui-ticker");
+    SerialWrite("[bringup-tail] ui-ticker spawned\n");
 
     // Mouse reader thread: blocks on Ps2MouseReadPacket, prints one
     // line per decoded packet. Same end-to-end closure the keyboard
@@ -5693,6 +5696,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         }
     };
     duetos::sched::SchedCreate(mouse_reader, nullptr, "mouse-reader");
+    SerialWrite("[bringup-tail] mouse-reader spawned\n");
 
     // Win32 timer ticker: walks the per-window timer table every
     // scheduler tick (10 ms) and posts WM_TIMER when a timer
