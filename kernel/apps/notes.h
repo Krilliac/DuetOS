@@ -162,4 +162,41 @@ void NotesSelfTest();
 /// trampled). Prints one PASS / FAIL / SKIP line to COM1.
 void NotesPersistSelfTest();
 
+/// Set the Find query and step to the first case-insensitive
+/// match at or after the cursor. The query is stored across
+/// calls so `NotesFindNext()` can step through subsequent
+/// matches. On a successful find, the caret jumps to the
+/// match's tail and the selection anchors at the match's head
+/// so the band is visually highlighted by the existing
+/// selection painter. Empty / nullptr query clears the stored
+/// query and selection. Returns true iff a match was found.
+///
+/// MUST be called with the compositor lock held.
+bool NotesFindSet(const char* query);
+
+/// Step to the next case-insensitive match of the stored query,
+/// starting one byte past the current cursor. Wraps to the
+/// document head once the tail runs out (mirrors most editors'
+/// "Find / find next" wrap-around behaviour). Returns true iff
+/// a match was found; returns false and clears the selection
+/// if no match exists or no query has been set.
+///
+/// MUST be called with the compositor lock held.
+bool NotesFindNext();
+
+/// Total matches of the stored query in the live buffer + the
+/// 1-based ordinal of the currently-highlighted match. Either
+/// pointer may be null. Returns false when no query is set or
+/// no matches exist; the out-params are zeroed in that case so
+/// the status footer can render a stable "—" placeholder.
+///
+/// MUST be called with the compositor lock held.
+bool NotesFindStats(duetos::u32* total_out, duetos::u32* current_out);
+
+/// Pointer to the stored query string (NUL-terminated, never
+/// longer than `kDialogInputMax`). Returns "" when no query is
+/// set so the status footer can concat unconditionally. Caller
+/// must NOT mutate the returned pointer.
+const char* NotesFindQuery();
+
 } // namespace duetos::apps::notes

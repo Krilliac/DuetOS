@@ -3168,6 +3168,53 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 duetos::drivers::video::CompositorUnlock();
             }
 
+            // Ctrl+F — open the Notes find dialog. Active-window
+            // gated; opens an InputBox pre-populated with the last
+            // query (if any). InputBox callback runs NotesFindSet
+            // which jumps to the first match at/after the cursor
+            // and stores the query for F3 follow-ups.
+            if (ctrl && !alt && (ev.code == 'f' || ev.code == 'F'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                const bool is_notes =
+                    active != duetos::drivers::video::kWindowInvalid && active == duetos::apps::notes::NotesWindow();
+                duetos::drivers::video::CompositorUnlock();
+                if (is_notes)
+                {
+                    duetos::drivers::video::InputBoxOpen(
+                        "FIND", "Search:", duetos::apps::notes::NotesFindQuery(),
+                        [](duetos::drivers::video::DialogResult r, const char* text, void*)
+                        {
+                            if (r != duetos::drivers::video::DialogResult::Ok)
+                                return;
+                            duetos::drivers::video::CompositorLock();
+                            const bool ok = duetos::apps::notes::NotesFindSet(text);
+                            duetos::drivers::video::CompositorUnlock();
+                            duetos::drivers::video::NotifyShow(ok ? "find: match" : "find: no match");
+                        },
+                        nullptr);
+                    continue;
+                }
+            }
+
+            // F3 — step to the next Notes find match. Same
+            // active-window gate as Ctrl+F so the chord is
+            // unbound elsewhere.
+            if (!ctrl && !alt && ev.code == kKeyF3)
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                if (active != duetos::drivers::video::kWindowInvalid && active == duetos::apps::notes::NotesWindow())
+                {
+                    const bool ok = duetos::apps::notes::NotesFindNext();
+                    duetos::drivers::video::CompositorUnlock();
+                    duetos::drivers::video::NotifyShow(ok ? "find: next match" : "find: no match");
+                    continue;
+                }
+                duetos::drivers::video::CompositorUnlock();
+            }
+
             // Alt+Left / Alt+Right — Browser back / forward. Web
             // convention. Active-window-gated so it doesn't shadow
             // any future window-manager bindings.

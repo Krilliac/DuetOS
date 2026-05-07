@@ -705,6 +705,44 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
             FramebufferDrawString(mx, sy, kModTag, kStatusFgDirty, kStatusBg);
         }
     }
+
+    // Find indicator — visible whenever a query is set, even
+    // when it has no matches (so the user knows the search ran).
+    // Layout: above the line/col status row, sharing the same
+    // band on a row reserved for Find. We render it in-band
+    // when there's room (full status band height) by drawing
+    // the find row immediately to the right of the counts.
+    const char* fq = NotesFindQuery();
+    if (fq != nullptr && fq[0] != '\0')
+    {
+        u32 total = 0;
+        u32 current = 0;
+        NotesFindStats(&total, &current);
+        char fbuf[80];
+        u32 fo = 0;
+        AppendStr(fbuf, sizeof(fbuf), &fo, "  FIND:");
+        for (u32 i = 0; fq[i] != '\0' && fo + 1 < sizeof(fbuf); ++i)
+            fbuf[fo++] = fq[i];
+        AppendStr(fbuf, sizeof(fbuf), &fo, "  ");
+        if (total == 0)
+        {
+            AppendStr(fbuf, sizeof(fbuf), &fo, "(NO MATCH)");
+        }
+        else
+        {
+            AppendU32(fbuf, sizeof(fbuf), &fo, current);
+            AppendStr(fbuf, sizeof(fbuf), &fo, "/");
+            AppendU32(fbuf, sizeof(fbuf), &fo, total);
+        }
+        fbuf[fo] = '\0';
+        // Anchor to the existing status row, after the counts:
+        // sx + 8 px per existing glyph * o is the cell after
+        // the line/col/chars/words string.
+        const u32 fx = sx + o * kGlyphW;
+        const u32 max_x = cx + cw - kPad;
+        if (fx + fo * kGlyphW < max_x)
+            FramebufferDrawString(fx, sy, fbuf, kStatusFgDirty, kStatusBg);
+    }
 }
 
 } // namespace
@@ -1189,6 +1227,183 @@ void NotesSelfTest()
         msg[o] = '\0';
         SerialWrite(msg);
     }
+}
+
+// ---------------------------------------------------------------
+// Find / Find-Next — case-insensitive substring search across the
+// live buffer. Stores the query so a follow-up F3 / Ctrl+G can
+// step to the next match; selection painter highlights each match
+// via the existing g_sel_anchor + g_cursor band.
+// ---------------------------------------------------------------
+
+namespace
+{
+
+constinit char g_find_query[64] = {};
+constinit u32 g_find_query_len = 0;
+
+char ToUpperAscii(char c)
+{
+    if (c >= 'a' && c <= 'z')
+        return static_cast<char>(c - 32);
+    return c;
+}
+
+// Case-insensitive forward substring search. Returns the byte
+// offset of the first match at or after `start` in g_buf, or
+// (u32)-1 if none. Empty / 0-length query returns -1.
+u32 FindForwardCi(u32 start)
+{
+    using detail::g_buf;
+    using detail::g_len;
+    if (g_find_query_len == 0 || g_len == 0 || g_find_query_len > g_len)
+        return static_cast<u32>(-1);
+    if (start > g_len - g_find_query_len)
+        return static_cast<u32>(-1);
+    for (u32 i = start; i + g_find_query_len <= g_len; ++i)
+    {
+        bool match = true;
+        for (u32 j = 0; j < g_find_query_len; ++j)
+        {
+            if (ToUpperAscii(g_buf[i + j]) != ToUpperAscii(g_find_query[j]))
+            {
+                match = false;
+                break;
+            }
+        }
+        if (match)
+            return i;
+    }
+    return static_cast<u32>(-1);
+}
+
+// Highlight the match at [pos, pos + qlen): cursor lands at the
+// match's tail, selection anchor at the head. Mirrors the
+// pattern Shift+End / Shift+Home use for selections.
+void SelectMatchAt(u32 pos)
+{
+    detail::g_sel_anchor = static_cast<i32>(pos);
+    detail::g_cursor = pos + g_find_query_len;
+}
+
+} // namespace
+
+bool NotesFindSet(const char* query)
+{
+    using detail::g_buf;
+    using detail::g_cursor;
+    using detail::g_len;
+    using detail::g_sel_anchor;
+    using detail::kNoSelection;
+    g_find_query_len = 0;
+    if (query == nullptr)
+    {
+        g_find_query[0] = '\0';
+        g_sel_anchor = kNoSelection;
+        return false;
+    }
+    for (u32 i = 0; i + 1 < sizeof(g_find_query) && query[i] != '\0'; ++i)
+    {
+        g_find_query[i] = query[i];
+        g_find_query_len = i + 1;
+    }
+    g_find_query[g_find_query_len] = '\0';
+    if (g_find_query_len == 0)
+    {
+        g_sel_anchor = kNoSelection;
+        return false;
+    }
+    // Search forward from the current cursor; if no match,
+    // wrap once from byte 0. Skips an immediate-cursor false
+    // match by starting at min(cursor, g_len - qlen) so the
+    // current selection's tail doesn't trivially re-match.
+    const u32 start = (g_cursor <= g_len) ? g_cursor : 0;
+    u32 pos = FindForwardCi(start);
+    if (pos == static_cast<u32>(-1) && start > 0)
+        pos = FindForwardCi(0);
+    if (pos == static_cast<u32>(-1))
+    {
+        g_sel_anchor = kNoSelection;
+        return false;
+    }
+    SelectMatchAt(pos);
+    return true;
+}
+
+bool NotesFindNext()
+{
+    using detail::g_cursor;
+    using detail::g_len;
+    using detail::g_sel_anchor;
+    using detail::kNoSelection;
+    if (g_find_query_len == 0)
+        return false;
+    // Step past the current cursor so an existing selection's
+    // tail position doesn't trivially re-match.
+    const u32 start = (g_cursor < g_len) ? g_cursor : 0;
+    u32 pos = FindForwardCi(start);
+    if (pos == static_cast<u32>(-1))
+        pos = FindForwardCi(0); // wrap to start
+    if (pos == static_cast<u32>(-1))
+    {
+        g_sel_anchor = kNoSelection;
+        return false;
+    }
+    SelectMatchAt(pos);
+    return true;
+}
+
+bool NotesFindStats(u32* total_out, u32* current_out)
+{
+    using detail::g_buf;
+    using detail::g_cursor;
+    using detail::g_len;
+    if (total_out)
+        *total_out = 0;
+    if (current_out)
+        *current_out = 0;
+    if (g_find_query_len == 0 || g_len == 0)
+        return false;
+    u32 total = 0;
+    u32 current = 0;
+    // Walk every position. Ordinal matches by checking which
+    // position equals (g_cursor - qlen) — that's where the
+    // SelectMatchAt landed.
+    const u32 head_of_current = (g_cursor >= g_find_query_len) ? g_cursor - g_find_query_len : static_cast<u32>(-1);
+    if (g_find_query_len > g_len)
+        return false;
+    for (u32 i = 0; i + g_find_query_len <= g_len; ++i)
+    {
+        bool match = true;
+        for (u32 j = 0; j < g_find_query_len; ++j)
+        {
+            if (ToUpperAscii(g_buf[i + j]) != ToUpperAscii(g_find_query[j]))
+            {
+                match = false;
+                break;
+            }
+        }
+        if (match)
+        {
+            ++total;
+            if (i == head_of_current)
+                current = total;
+            // Skip past the match tail so overlapping matches
+            // don't double-count (mirrors `grep` and most
+            // editors' default behaviour).
+            i += g_find_query_len - 1;
+        }
+    }
+    if (total_out)
+        *total_out = total;
+    if (current_out)
+        *current_out = current;
+    return total > 0;
+}
+
+const char* NotesFindQuery()
+{
+    return g_find_query;
 }
 
 } // namespace duetos::apps::notes
