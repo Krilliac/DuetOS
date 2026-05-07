@@ -1295,6 +1295,11 @@ void Dispatch(char* line)
         CmdNet(argc, argv);
         return;
     }
+    if (StrEq(cmd, "bt") || StrEq(cmd, "bluetooth"))
+    {
+        CmdBt(argc, argv);
+        return;
+    }
     if (StrEq(cmd, "usbnet"))
     {
         CmdUsbNet(argc, argv);

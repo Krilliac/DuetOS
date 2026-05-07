@@ -98,6 +98,7 @@
 #include "drivers/net/net.h"
 #include "drivers/net/rtl88xx_fw.h"
 #include "drivers/net/rtl88xx_upload.h"
+#include "net/bluetooth/diag.h"
 #include "net/bluetooth/hci.h"
 #include "net/wireless/beacon.h"
 #include "crypto/aes.h"
@@ -2631,6 +2632,8 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::BcmFirmwareSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::BeaconSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::bluetooth::HciSelfTest());
+    duetos::net::bluetooth::BluetoothDiagInit();
+    DUETOS_BOOT_SELFTEST(duetos::net::bluetooth::BluetoothDiagSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::UnicodeSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::BmpSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::TgaSelfTest());

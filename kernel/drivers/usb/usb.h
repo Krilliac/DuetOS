@@ -110,6 +110,12 @@ inline constexpr u8 kUsbClassHid = 0x03;
 inline constexpr u8 kUsbClassMsc = 0x08;
 inline constexpr u8 kUsbClassHub = 0x09;
 inline constexpr u8 kUsbClassVideo = 0x0E;
+inline constexpr u8 kUsbClassWireless = 0xE0; // wireless controllers (Bluetooth uses this class)
+// Bluetooth Core Spec Vol 4 Part B §1.2: every standards-compliant
+// Bluetooth USB device declares interface descriptor
+// (class=0xE0, subclass=0x01, prog_if=0x01).
+inline constexpr u8 kUsbWirelessSubclassRf = 0x01;
+inline constexpr u8 kUsbWirelessProgIfBluetooth = 0x01;
 
 /// Class-driver probe called once per attached device by a future
 /// bus-enumeration slice. Today it's a log-only stub surfaced here
