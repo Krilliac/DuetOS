@@ -116,6 +116,13 @@ pub fn format<D: BlockDevice + ?Sized>(dev: &mut D) -> FsResult<()>
         sb_crc32: 0,
         journal_lba: JOURNAL_LBA,
         journal_blocks: JOURNAL_BLOCKS,
+        // v6 — unencrypted by default. mkfs_encrypted populates
+        // these via a wrapper around `format` that re-CRCs the SB.
+        encrypted: 0,
+        kdf_m_cost_kib: 0,
+        kdf_t_cost: 0,
+        kdf_p_cost: 0,
+        kdf_salt: [0; crate::format::SALT_BYTES],
     };
     sb.sb_crc32 = compute_sb_crc(&sb);
 
@@ -168,4 +175,35 @@ pub(crate) fn rewrite_superblock<D: BlockDevice + ?Sized>(
     };
     block[..raw.len()].copy_from_slice(raw);
     dev.write_block(SUPERBLOCK_LBA, &block).map_err(|_| FsError::Io)
+}
+
+/// Format an encrypted volume. Runs the standard `format`, then
+/// rewrites the SB with the v6 encryption metadata. The caller
+/// (typically the C++ kernel side) MUST already have a key derived
+/// from `salt + (m, t, p)` and a Device whose read/write callbacks
+/// AES-XTS-encrypt every LBA except SUPERBLOCK_LBA. mkfs writes
+/// metadata blocks via that Device, so they land on the underlying
+/// medium ciphertext-side; the SB stays plaintext (unencrypted) so
+/// a future mounter can read the salt + cost params before it has
+/// the key.
+pub fn format_encrypted<D: BlockDevice + ?Sized>(
+    dev: &mut D, salt: &[u8; crate::format::SALT_BYTES], m_cost_kib: u32, t_cost: u32, p_cost: u32,
+) -> FsResult<()>
+{
+    format(dev)?;
+    // Read the SB back to inherit the just-written values, swap in
+    // the encryption metadata, re-CRC, and write again. The SB write
+    // path stays unencrypted in the C++ wrapper, so this round-trip
+    // doesn't garble itself.
+    let mut block = [0u8; BLOCK_SIZE];
+    dev.read_block(SUPERBLOCK_LBA, &mut block).map_err(|_| FsError::Io)?;
+    let mut sb = unsafe { core::ptr::read_unaligned(block.as_ptr() as *const Superblock) };
+    sb.encrypted = crate::format::ENCRYPTED_AES_XTS_256;
+    sb.kdf_m_cost_kib = m_cost_kib;
+    sb.kdf_t_cost = t_cost;
+    sb.kdf_p_cost = p_cost;
+    sb.kdf_salt = *salt;
+    sb.sb_crc32 = 0;
+    sb.sb_crc32 = compute_sb_crc(&sb);
+    rewrite_superblock(dev, &sb)
 }

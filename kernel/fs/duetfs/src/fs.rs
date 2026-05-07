@@ -287,6 +287,11 @@ fn read_superblock(block: &[u8]) -> Superblock
         sb_crc32: 0,
         journal_lba: 0,
         journal_blocks: 0,
+        encrypted: 0,
+        kdf_m_cost_kib: 0,
+        kdf_t_cost: 0,
+        kdf_p_cost: 0,
+        kdf_salt: [0; crate::format::SALT_BYTES],
     };
     let raw = unsafe {
         core::slice::from_raw_parts_mut(

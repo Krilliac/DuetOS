@@ -67,7 +67,16 @@ pub const MAX_TOTAL_BLOCKS: u32 = CRC_TABLE_ENTRIES;
 pub const BITMAP_BITS: u32 = (BLOCK_SIZE as u32) * 8;
 
 pub const MAGIC: u64 = u64::from_le_bytes(*b"DuetFS01");
-pub const VERSION: u32 = 5;
+pub const VERSION: u32 = 6;
+
+// Encryption — v6. The volume is either fully encrypted or fully
+// unencrypted; per-file encryption isn't on the roadmap. Block 0
+// (SB) stays plaintext so a mounter can read these fields before
+// it has the key. Every other block is AES-256-XTS-encrypted with
+// sector index = LBA.
+pub const ENCRYPTED_NO: u32 = 0;
+pub const ENCRYPTED_AES_XTS_256: u32 = 1;
+pub const SALT_BYTES: usize = 16;
 
 pub const NODE_KIND_UNUSED: u32 = 0;
 pub const NODE_KIND_FILE: u32 = 1;
@@ -114,6 +123,17 @@ pub struct Superblock
     // JOURNAL_LBA / JOURNAL_BLOCKS constants by Fs::open.
     pub journal_lba: u32,
     pub journal_blocks: u32,
+    // v6 — encryption metadata. `encrypted` is one of the
+    // ENCRYPTED_* constants above; ENCRYPTED_NO leaves every block
+    // plaintext and the rest of these fields are zero. For an
+    // ENCRYPTED_AES_XTS_256 volume the salt + KDF costs let a
+    // mounter reconstruct the key from a password without storing
+    // anything secret in plain on disk.
+    pub encrypted: u32,
+    pub kdf_m_cost_kib: u32,
+    pub kdf_t_cost: u32,
+    pub kdf_p_cost: u32,
+    pub kdf_salt: [u8; SALT_BYTES],
 }
 
 #[repr(C)]

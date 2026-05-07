@@ -13,8 +13,10 @@
 use core::ffi::{c_uchar, c_uint, c_void};
 
 use crate::block_dev::{BlockDevice, ExternBlockDevice, ExternBlockDeviceOps};
+use crate::crypto;
 use crate::format::{
     BLOCK_SIZE, JOURNAL_LBA, NODE_KIND_DIR, NODE_KIND_FILE, NODE_KIND_UNUSED, ROOT_NODE_ID,
+    SALT_BYTES,
 };
 use crate::fs::{Fs, FsError};
 use crate::journal;
@@ -541,4 +543,164 @@ pub unsafe extern "C" fn duetfs_journal_state(desc: *const DuetFsDevice) -> c_ui
         Ok(d) => d.state,
         Err(_) => c_uint::MAX,
     }
+}
+
+// ----------------------------------------------------------------
+// Crypto FFI — v6. AES-256-XTS block primitives + Argon2id KDF.
+// Designed so the kernel C++ side composes them into an
+// "encrypted Device" wrapper: it holds the derived 64-byte key in
+// kernel memory, intercepts every read/write callback, and calls
+// duetfs_xts_encrypt_block / duetfs_xts_decrypt_block on the
+// payload before forwarding to the underlying storage.
+// ----------------------------------------------------------------
+
+/// Argon2id KDF. Derives a 64-byte XTS key from a password + salt
+/// and (m_cost_kib, t_cost, p_cost). Returns kStatusOk on success
+/// or kStatusInvalid for parameter / null-pointer / output-size
+/// problems.
+///
+/// `out_key` MUST point at a 64-byte buffer. The first 32 bytes
+/// become the AES-256-XTS data-cipher key; the remaining 32 bytes
+/// the tweak-cipher key. Both are randomly distinguishable from
+/// each other by the KDF — Argon2id's output stream is uniform.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_kdf_argon2id(
+    password: *const u8, password_len: usize, salt: *const u8, salt_len: usize, m_cost_kib: u32,
+    t_cost: u32, p_cost: u32, out_key: *mut u8,
+) -> c_uint
+{
+    if password.is_null() || salt.is_null() || out_key.is_null() || password_len == 0 || salt_len == 0
+    {
+        return STATUS_INVALID;
+    }
+    let pw = unsafe { core::slice::from_raw_parts(password, password_len) };
+    let s = unsafe { core::slice::from_raw_parts(salt, salt_len) };
+    let mut key = [0u8; crypto::XTS_KEY_BYTES];
+    if !crypto::argon2id_kdf(pw, s, m_cost_kib, t_cost, p_cost, &mut key)
+    {
+        return STATUS_INVALID;
+    }
+    let dst = unsafe { core::slice::from_raw_parts_mut(out_key, crypto::XTS_KEY_BYTES) };
+    dst.copy_from_slice(&key);
+    STATUS_OK
+}
+
+/// Encrypt a 4096-byte block in place using AES-256-XTS. `key`
+/// points at a 64-byte key (data || tweak). `sector` is the LBA —
+/// the XTS tweak is derived from it so the same plaintext at
+/// different LBAs produces different ciphertext.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_xts_encrypt_block(
+    key: *const u8, sector: u64, buf: *mut u8,
+) -> c_uint
+{
+    if key.is_null() || buf.is_null()
+    {
+        return STATUS_INVALID;
+    }
+    let mut k = [0u8; crypto::XTS_KEY_BYTES];
+    let raw_key = unsafe { core::slice::from_raw_parts(key, crypto::XTS_KEY_BYTES) };
+    k.copy_from_slice(raw_key);
+    let payload = unsafe { core::slice::from_raw_parts_mut(buf, crypto::SECTOR_BYTES) };
+    crypto::xts_encrypt_in_place(&k, sector, payload);
+    STATUS_OK
+}
+
+/// Decrypt a 4096-byte block in place. Inverse of
+/// `duetfs_xts_encrypt_block`.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_xts_decrypt_block(
+    key: *const u8, sector: u64, buf: *mut u8,
+) -> c_uint
+{
+    if key.is_null() || buf.is_null()
+    {
+        return STATUS_INVALID;
+    }
+    let mut k = [0u8; crypto::XTS_KEY_BYTES];
+    let raw_key = unsafe { core::slice::from_raw_parts(key, crypto::XTS_KEY_BYTES) };
+    k.copy_from_slice(raw_key);
+    let payload = unsafe { core::slice::from_raw_parts_mut(buf, crypto::SECTOR_BYTES) };
+    crypto::xts_decrypt_in_place(&k, sector, payload);
+    STATUS_OK
+}
+
+/// Format an encrypted volume. `dev` MUST already wrap the underlying
+/// storage in the C++ AES-XTS encrypt/decrypt callbacks (the kernel
+/// builds that wrapper after deriving the key with
+/// duetfs_kdf_argon2id). `salt` (16 bytes) and the (m_cost_kib,
+/// t_cost, p_cost) triple get persisted in the SB so a future
+/// mounter can re-derive the key from the same password.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_mkfs_encrypted(
+    desc: *const DuetFsDevice, salt: *const u8, salt_len: usize, m_cost_kib: u32, t_cost: u32,
+    p_cost: u32,
+) -> c_uint
+{
+    if salt.is_null() || salt_len != SALT_BYTES
+    {
+        return STATUS_INVALID;
+    }
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    let mut salt_arr = [0u8; SALT_BYTES];
+    let raw = unsafe { core::slice::from_raw_parts(salt, SALT_BYTES) };
+    salt_arr.copy_from_slice(raw);
+    match mkfs::format_encrypted(&mut dev, &salt_arr, m_cost_kib, t_cost, p_cost)
+    {
+        Ok(()) => STATUS_OK,
+        Err(e) => err_to_status(e),
+    }
+}
+
+/// Read the SB's encryption metadata without mounting the FS.
+/// Lets the C++ side discover salt + cost params for a previously-
+/// formatted encrypted volume so it can prompt for a password,
+/// derive the key, and build the encrypted-Device wrapper before
+/// any other duetfs FFI call. `dev` here is the RAW device, NOT a
+/// crypto wrapper — the SB lives at LBA 0 plaintext.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_read_encryption_meta(
+    desc: *const DuetFsDevice, out_encrypted: *mut u32, out_m_cost: *mut u32, out_t_cost: *mut u32,
+    out_p_cost: *mut u32, out_salt: *mut u8, salt_buf_len: usize,
+) -> c_uint
+{
+    let Some(dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    if salt_buf_len < SALT_BYTES
+    {
+        return STATUS_INVALID;
+    }
+    let mut block = [0u8; BLOCK_SIZE];
+    if dev.read_block(0, &mut block).is_err()
+    {
+        return STATUS_IO;
+    }
+    let sb = unsafe {
+        core::ptr::read_unaligned(block.as_ptr() as *const crate::format::Superblock)
+    };
+    if sb.magic != crate::format::MAGIC || sb.version != crate::format::VERSION
+    {
+        return STATUS_INVALID;
+    }
+    if !out_encrypted.is_null()
+    {
+        unsafe { *out_encrypted = sb.encrypted };
+    }
+    if !out_m_cost.is_null()
+    {
+        unsafe { *out_m_cost = sb.kdf_m_cost_kib };
+    }
+    if !out_t_cost.is_null()
+    {
+        unsafe { *out_t_cost = sb.kdf_t_cost };
+    }
+    if !out_p_cost.is_null()
+    {
+        unsafe { *out_p_cost = sb.kdf_p_cost };
+    }
+    if !out_salt.is_null()
+    {
+        let dst = unsafe { core::slice::from_raw_parts_mut(out_salt, SALT_BYTES) };
+        dst.copy_from_slice(&sb.kdf_salt);
+    }
+    STATUS_OK
 }

@@ -441,7 +441,88 @@ void DuetFsSelfTest()
         }
     }
 
-    KLOG_INFO("duetfs/selftest", "OK — v5 journal + per-block CRC + symlinks + hardlinks + v2 surface passed");
+    // 17. Crypto primitives: AES-256-XTS round-trip — encrypt then
+    //     decrypt should restore the original bytes.
+    {
+        u8 key[kXtsKeyBytes] = {};
+        for (u32 i = 0; i < kXtsKeyBytes; ++i)
+        {
+            key[i] = static_cast<u8>(0x40u + i);
+        }
+        u8 plain[kBlockSize] = {};
+        for (u32 i = 0; i < kBlockSize; ++i)
+        {
+            plain[i] = static_cast<u8>((i * 11 + 17) & 0xFF);
+        }
+        u8 cipher[kBlockSize] = {};
+        for (u32 i = 0; i < kBlockSize; ++i)
+        {
+            cipher[i] = plain[i];
+        }
+        ExpectStatus(duetfs_xts_encrypt_block(key, /*sector=*/42, cipher), kStatusOk, "xts encrypt failed");
+        // Differs from plaintext.
+        bool any_diff = false;
+        for (u32 i = 0; i < kBlockSize; ++i)
+        {
+            if (cipher[i] != plain[i])
+            {
+                any_diff = true;
+                break;
+            }
+        }
+        Expect(any_diff, "xts encrypt produced identity");
+        // Round-trip back.
+        ExpectStatus(duetfs_xts_decrypt_block(key, /*sector=*/42, cipher), kStatusOk, "xts decrypt failed");
+        for (u32 i = 0; i < kBlockSize; ++i)
+        {
+            if (cipher[i] != plain[i])
+            {
+                duetos::core::PanicWithValue("duetfs/selftest", "xts round-trip mismatch", i);
+            }
+        }
+    }
+
+    // 18. Argon2id KDF determinism: same password+salt+params => same key.
+    //     Use deliberately-tiny params (8 KiB, 1 iter, 1 lane) — proven
+    //     correctness without paying ~100 ms in boot self-test path.
+    {
+        const u8 pw1[] = "correct horse battery staple";
+        const u8 salt[16] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                             0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10};
+        u8 k1[kXtsKeyBytes] = {};
+        u8 k2[kXtsKeyBytes] = {};
+        ExpectStatus(duetfs_kdf_argon2id(pw1, sizeof(pw1) - 1, salt, sizeof(salt),
+                                         /*m=*/8u, /*t=*/1u, /*p=*/1u, k1),
+                     kStatusOk, "argon2id #1 failed");
+        ExpectStatus(duetfs_kdf_argon2id(pw1, sizeof(pw1) - 1, salt, sizeof(salt),
+                                         /*m=*/8u, /*t=*/1u, /*p=*/1u, k2),
+                     kStatusOk, "argon2id #2 failed");
+        for (u32 i = 0; i < kXtsKeyBytes; ++i)
+        {
+            if (k1[i] != k2[i])
+            {
+                duetos::core::PanicWithValue("duetfs/selftest", "argon2id determinism failed", i);
+            }
+        }
+        // Different password → different key.
+        const u8 pw2[] = "incorrect horse battery staple";
+        u8 k3[kXtsKeyBytes] = {};
+        ExpectStatus(duetfs_kdf_argon2id(pw2, sizeof(pw2) - 1, salt, sizeof(salt),
+                                         /*m=*/8u, /*t=*/1u, /*p=*/1u, k3),
+                     kStatusOk, "argon2id #3 failed");
+        bool diff_pw = false;
+        for (u32 i = 0; i < kXtsKeyBytes; ++i)
+        {
+            if (k3[i] != k1[i])
+            {
+                diff_pw = true;
+                break;
+            }
+        }
+        Expect(diff_pw, "argon2id different passwords produced same key");
+    }
+
+    KLOG_INFO("duetfs/selftest", "OK — v6 AES-XTS + Argon2 + journal + per-block CRC + symlinks + hardlinks passed");
 }
 
 } // namespace duetos::fs::duetfs

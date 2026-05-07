@@ -29,12 +29,16 @@ inline constexpr u32 kRootNodeId = 0;
 
 /// Magic identifying a DuetFS superblock — bytes "DuetFS01"
 /// little-endian (byte 0 = 'D' = 0x44, byte 7 = '1' = 0x31).
-/// Magic stayed across v1→v5; only the version field bumps.
+/// Magic stayed across v1→v6; only the version field bumps.
 inline constexpr u64 kMagic = 0x3130534674657544ull;
-inline constexpr u32 kVersion = 5; // v5 (journal — atomic-commit log)
+inline constexpr u32 kVersion = 6; // v6 (AES-XTS encryption + Argon2 KDF)
 inline constexpr u32 kJournalLba = 7;
 inline constexpr u32 kJournalBlocks = 8;
 inline constexpr u32 kDataLba = 15;
+inline constexpr u32 kSaltBytes = 16;
+inline constexpr u32 kXtsKeyBytes = 64;
+inline constexpr u32 kEncryptedNo = 0;
+inline constexpr u32 kEncryptedAesXts256 = 1;
 inline constexpr u32 kMaxInlineExtents = 8;
 inline constexpr u32 kSymlinkTargetMax = 1024;
 
@@ -200,6 +204,39 @@ extern "C"
     /// error. Diagnostic — Fs::open replays before returning, so a
     /// well-formed mount always reports 0.
     u32 duetfs_journal_state(const Device* dev);
+
+    /// Argon2id KDF. Derives a 64-byte key (kXtsKeyBytes) into
+    /// `out_key` from `password` + `salt` and the (m, t, p) costs.
+    /// kStatusInvalid for null pointers / empty inputs / out-of-
+    /// range params. Default v6 params: m=4096 KiB, t=3, p=1.
+    u32 duetfs_kdf_argon2id(const u8* password, usize password_len, const u8* salt, usize salt_len, u32 m_cost_kib,
+                            u32 t_cost, u32 p_cost, u8* out_key);
+
+    /// Encrypt `buf` (kBlockSize bytes) in place using AES-256-XTS.
+    /// `key` is 64 bytes (data || tweak). `sector` is the FS LBA
+    /// — the XTS tweak is derived from it.
+    u32 duetfs_xts_encrypt_block(const u8* key, u64 sector, u8* buf);
+
+    /// Decrypt `buf` (kBlockSize bytes) in place. Inverse of
+    /// duetfs_xts_encrypt_block.
+    u32 duetfs_xts_decrypt_block(const u8* key, u64 sector, u8* buf);
+
+    /// Format `dev` as an encrypted DuetFS volume. The caller MUST
+    /// already wrap the underlying storage with AES-XTS in/out
+    /// callbacks — mkfs writes every metadata block via the wrapper.
+    /// `salt` (kSaltBytes) and the (m, t, p) cost params get
+    /// persisted in the SB; the SB itself stays plaintext so a
+    /// future mounter can read these fields before having the key.
+    u32 duetfs_mkfs_encrypted(const Device* dev, const u8* salt, usize salt_len, u32 m_cost_kib, u32 t_cost,
+                              u32 p_cost);
+
+    /// Read the SB's encryption metadata without mounting. `dev` is
+    /// the RAW (unwrapped) device. Returns kStatusOk + fills the
+    /// outs on a recognised v6 SB; kStatusInvalid otherwise. Used
+    /// by the C++ side to learn salt + cost params before deriving
+    /// the key. `salt_buf_len` MUST be >= kSaltBytes.
+    u32 duetfs_read_encryption_meta(const Device* dev, u32* out_encrypted, u32* out_m_cost, u32* out_t_cost,
+                                    u32* out_p_cost, u8* out_salt, usize salt_buf_len);
 }
 
 } // namespace duetos::fs::duetfs
