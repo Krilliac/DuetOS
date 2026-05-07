@@ -38,6 +38,7 @@ enum class FsType : u32
     Fat32 = 1,
     Ext4 = 2,
     Ntfs = 3,
+    DuetFs = 4,
 };
 
 const char* FsTypeName(FsType t);

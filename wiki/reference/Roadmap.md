@@ -490,21 +490,28 @@ The remaining triggers still apply for **future** Rust subsystems
 
 ### DuetFS follow-ups
 
-v0 ships a read-only in-memory image. The next slices in priority
-order:
+v1 ships the full write path (mkfs, create, write, mkdir, unlink,
+truncate), free-block bitmap, single-contiguous-extent files with
+auto-grow, and VFS routing through `FsType::DuetFs`. The boot image
+is `.bss`-resident (lost on reboot). Next slices in priority order
+to make DuetFS a viable production FS:
 
-1. **Block-device backing** — adapter that reads on demand from
-   a block-handle (mirrors the FAT32 backend's shape).
-2. **VFS routing integration** — add `FsType::DuetFs` to
-   `kernel/fs/mount.cpp` and register a `VfsBackendOps`.
-3. **Write path** — runtime mkdir / create / write; in-Rust mkfs
-   for hosted tooling.
-4. **B-tree directory index** — replace the flat `child_count`-bounded
-   list once any slice puts more than ~1000 entries in a directory.
-5. **Multi-extent files** — drop the contiguous-extent constraint.
-6. **CoW + journal + checksums** — durability / crash safety.
-7. **AES-XTS encryption + Argon2 KDF** — full-disk encryption tier.
-8. **LZ4 compression** — optional per-file compression.
+1. **Multi-extent files** — drop the single-contiguous-extent
+   constraint. Today writes past `ext_blocks` realloc-and-copy.
+2. **Multi-block dirs + B-tree directory index** — bump the
+   1024-child cap.
+3. **Persistent backing** — probe a real block device at boot,
+   mkfs if blank, mount that instead of the `.bss` image. The
+   block-handle adapter (`MakeBlockHandleDevice`) is already in
+   the tree.
+4. **CoW + journal + checksums** — durability / crash safety. A
+   v1 crash mid-mutation leaves a node and a bitmap entry that
+   disagree; `fsck` reconciles.
+5. **Free-on-shrink truncate** — today shrink leaves the extent
+   allocated.
+6. **AES-XTS encryption + Argon2 KDF** — full-disk encryption tier.
+7. **LZ4 compression** — optional per-file compression.
+8. **fsck** — re-derive the bitmap from the node table at mount.
 
 ---
 

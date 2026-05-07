@@ -1,26 +1,12 @@
-// DuetFS C FFI — hand-written.
+// DuetFS C FFI — hand-written. Mirrors kernel/fs/duetfs/src/ffi.rs.
 //
-// This header is the contract between the C++ kernel and the Rust
-// `duetfs` crate. It MUST stay in lockstep with `kernel/fs/duetfs/
-// src/ffi.rs`. Bindgen / cbindgen are not used — the contract is
-// readable here and verified at compile time on the C++ side.
+// Bindgen / cbindgen are forbidden — the contract is readable here
+// and verified at compile time on the C++ side.
 //
-// Lifetime / ownership:
-//   - The kernel owns the image bytes. Every call passes them in;
-//     the crate never retains the pointer across calls.
-//   - All functions are NUL- / NULL-tolerant — passing 0 / NULL
-//     yields a "miss" result (0 / no-bytes-written), never UB.
-//   - Returned data references in `duetfs_lookup` are by-value;
-//     callers never need to free anything from the crate.
-//
-// Build:
-//   - The crate is a `staticlib` linked into the kernel.
-//   - `panic = abort` — a Rust panic calls `duetos_rust_panic`
-//     (kernel-provided) which routes to klog + halts the box.
-//
-// Lineage: clean-room rewrite inspired by RedoxFS
-// (https://github.com/redox-os/redoxfs, MIT). The on-disk format
-// is a small subset designed for this v0 slice.
+// One descriptor (`Device`) covers both memory- and kernel-block-
+// handle backends. Construct a Device, hand it to a duetfs_* call,
+// drop it. The Rust crate never retains the descriptor or the
+// callbacks across calls.
 
 #pragma once
 
@@ -29,52 +15,111 @@
 namespace duetos::fs::duetfs
 {
 
+// ----------------------------------------------------------------
+// Constants — kept in lockstep with kernel/fs/duetfs/src/format.rs
+// ----------------------------------------------------------------
 inline constexpr u32 kKindUnused = 0;
 inline constexpr u32 kKindFile = 1;
 inline constexpr u32 kKindDir = 2;
 
 inline constexpr u32 kBlockSize = 4096;
 inline constexpr u32 kNodeSize = 256;
-inline constexpr u32 kNodesPerBlock = kBlockSize / kNodeSize; // 16
 inline constexpr u32 kRootNodeId = 0;
-inline constexpr u32 kKindMiss = 0xFFFFFFFFu;
 
-/// Magic identifying a DuetFS v0 superblock — bytes "DuetFS00"
-/// little-endian (byte 0 = 'D' = 0x44, byte 7 = '0' = 0x30).
-inline constexpr u64 kMagic = 0x3030534674657544ull;
+/// Magic identifying a DuetFS v1 superblock — bytes "DuetFS01"
+/// little-endian (byte 0 = 'D' = 0x44, byte 7 = '1' = 0x31).
+inline constexpr u64 kMagic = 0x3130534674657544ull;
+inline constexpr u32 kVersion = 2;
 
-/// Result of a successful path resolve. Layout is mirrored in
-/// `kernel/fs/duetfs/src/ffi.rs`'s `DuetFsLookupResult`. The C++
-/// side static_asserts the size + offsets match.
-struct LookupResult
+// ----------------------------------------------------------------
+// Status codes
+// ----------------------------------------------------------------
+inline constexpr u32 kStatusOk = 0;
+inline constexpr u32 kStatusInvalid = 1;
+inline constexpr u32 kStatusNotFound = 2;
+inline constexpr u32 kStatusNotADir = 3;
+inline constexpr u32 kStatusNotAFile = 4;
+inline constexpr u32 kStatusNameTooLong = 5;
+inline constexpr u32 kStatusNameExists = 6;
+inline constexpr u32 kStatusDirNotEmpty = 7;
+inline constexpr u32 kStatusNoSpaceData = 8;
+inline constexpr u32 kStatusNoSpaceNodes = 9;
+inline constexpr u32 kStatusIo = 10;
+inline constexpr u32 kStatusReadOnly = 11;
+
+// ----------------------------------------------------------------
+// Device descriptor
+// ----------------------------------------------------------------
+using BlockReadFn = i32 (*)(void* cookie, u32 lba, u8* dst);
+using BlockWriteFn = i32 (*)(void* cookie, u32 lba, const u8* src);
+
+struct Device
 {
-    u32 kind;        // kKind*
-    u32 node_id;     // node table index
-    u32 size_bytes;  // file size (or dir child_count × 4)
-    u32 child_count; // dirs only; 0 for files
+    void* cookie;
+    u32 block_count;
+    u32 read_only; // 0 = writable, 1 = read-only
+    BlockReadFn read;
+    BlockWriteFn write;
 };
 
+// ----------------------------------------------------------------
+// Lookup result
+// ----------------------------------------------------------------
+struct LookupResult
+{
+    u32 kind; // kKind* or 0xFFFFFFFF on miss
+    u32 node_id;
+    u32 size_bytes;
+    u32 child_count;
+};
+inline constexpr u32 kKindMiss = 0xFFFFFFFFu;
+
+// ----------------------------------------------------------------
+// FFI surface
+// ----------------------------------------------------------------
 extern "C"
 {
-    /// Probe `image[0..len]` for a DuetFS superblock. 1 if valid, 0
-    /// otherwise. Cheap — only inspects the first block.
-    u32 duetfs_probe(const u8* image, usize len);
+    /// Probe a device for a DuetFS v1 superblock. Returns 1 if valid,
+    /// 0 otherwise. Cheap — only inspects block 0.
+    u32 duetfs_probe(const Device* dev);
+
+    /// Format a fresh DuetFS image on the device. Wipes the
+    /// superblock + bitmap + node table, then creates the root dir.
+    /// Returns kStatusOk or an error code.
+    u32 duetfs_mkfs(const Device* dev);
 
     /// Resolve `path` (NUL-terminated, kernel buffer, bounded by
-    /// `path_max`) against the image. On success, fills `*out` and
-    /// returns 1. On miss / corruption / bad args returns 0 and leaves
-    /// `out->kind == kKindMiss`.
-    ///
-    /// Path-shape rules: leading '/' optional, "." skipped, ".."
-    /// rejected, empty components ("//") tolerated. Mirrors the global
-    /// VFS resolver semantics in kernel/fs/vfs.h.
-    u32 duetfs_lookup(const u8* image, usize len, const u8* path, usize path_max, LookupResult* out);
+    /// `path_max`) against the FS. On success fills `*out` and
+    /// returns kStatusOk. On miss / corruption / bad args returns a
+    /// non-zero status code and `out->kind == kKindMiss`.
+    u32 duetfs_lookup(const Device* dev, const u8* path, usize path_max, LookupResult* out);
 
     /// Read up to `dst_max` bytes of `node_id`'s file contents into
-    /// `dst`, starting at `offset`. Returns the number of bytes copied
-    /// — 0 on miss / non-file / out-of-range (a short read at EOF
-    /// returns the truncated count, not 0). Caller-owned `dst`.
-    usize duetfs_read_file(const u8* image, usize len, u32 node_id, u32 offset, void* dst, usize dst_max);
+    /// `dst` starting at `offset`. On success writes the actual byte
+    /// count to `*out_copied` (may be 0 on EOF, < dst_max on partial)
+    /// and returns kStatusOk.
+    u32 duetfs_read_file(const Device* dev, u32 node_id, u32 offset, void* dst, usize dst_max, usize* out_copied);
+
+    /// Write `src_max` bytes from `src` to `node_id` starting at
+    /// `offset`. Auto-grows the file (realloc + copy) if the write
+    /// extends past the current extent. On success writes the byte
+    /// count to `*out_written`.
+    u32 duetfs_write_at(const Device* dev, u32 node_id, u32 offset, const void* src, usize src_max, usize* out_written);
+
+    /// Create a file (kind=kKindFile) or directory (kind=kKindDir)
+    /// at `path`. The parent must already exist. On success writes
+    /// the new node id to `*out_node_id`.
+    u32 duetfs_create_path(const Device* dev, const u8* path, usize path_max, u32 kind, u32* out_node_id);
+
+    /// Remove `path`. Refuses to remove a non-empty directory
+    /// (kStatusDirNotEmpty) or a missing path (kStatusNotFound).
+    u32 duetfs_unlink_path(const Device* dev, const u8* path, usize path_max);
+
+    /// Set a file's logical size to `new_size`, growing or shrinking
+    /// the underlying extent as needed. Grow allocates additional
+    /// blocks; shrink does NOT free extent blocks (free-on-shrink
+    /// lands in a follow-up slice).
+    u32 duetfs_truncate(const Device* dev, u32 node_id, u32 new_size);
 }
 
 } // namespace duetos::fs::duetfs

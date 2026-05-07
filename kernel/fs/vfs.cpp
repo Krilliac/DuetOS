@@ -139,6 +139,10 @@ bool VfsNodeIsDir(const VfsNode& n)
     {
         return (n.fat32_entry.attributes & 0x10) != 0;
     }
+    if (n.backend == VfsBackend::DuetFs)
+    {
+        return n.duetfs_kind == 2; // duetfs::kKindDir
+    }
     return false;
 }
 
@@ -152,6 +156,10 @@ bool VfsNodeIsFile(const VfsNode& n)
     {
         return (n.fat32_entry.attributes & 0x10) == 0;
     }
+    if (n.backend == VfsBackend::DuetFs)
+    {
+        return n.duetfs_kind == 1; // duetfs::kKindFile
+    }
     return false;
 }
 
@@ -164,6 +172,10 @@ u64 VfsNodeSize(const VfsNode& n)
     if (n.backend == VfsBackend::Fat32)
     {
         return n.fat32_entry.size_bytes;
+    }
+    if (n.backend == VfsBackend::DuetFs)
+    {
+        return n.duetfs_size_bytes;
     }
     return 0;
 }

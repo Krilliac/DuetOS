@@ -2834,11 +2834,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWrite("[boot] Cross-mount VfsResolve self-test.\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::VfsResolveCrossMountSelfTest());
 
-    // First Rust subsystem in the kernel — proves the C++ → Rust FFI
-    // round-trip for the duetfs crate (kernel/fs/duetfs/). Synthesizes
-    // a 16 KiB DuetFS v0 image in .bss, probes / resolves / reads /
-    // negative-tests through the Rust crate's exported symbols.
-    SerialWrite("[boot] DuetFS Rust crate self-test.\n");
+    // First Rust subsystem in the kernel — DuetFS v1 brings up the
+    // project's native filesystem. DuetFsBoot creates a 256 KiB RAM-
+    // backed volume, mkfs's it, seeds /etc/version, and registers it
+    // in the VFS mount table at /duetfs. DuetFsSelfTest exercises the
+    // full v1 surface (mkfs, create, write, read, mkdir, unlink,
+    // truncate) on a SCRATCH image so the boot mount stays clean.
+    SerialWrite("[boot] DuetFS bring-up.\n");
+    duetos::fs::duetfs::DuetFsBoot();
     DUETOS_BOOT_SELFTEST(duetos::fs::duetfs::DuetFsSelfTest());
 
     SerialWrite("[boot] Routing Win32 file syscalls through FAT32.\n");

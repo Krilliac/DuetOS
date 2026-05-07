@@ -5938,4 +5938,111 @@ doc helps future readers audit the trail.
   - Filesystem track — DuetFS becomes the project's native FS
     once the block-device backing slice ships.
 
+---
+
+### DD-FS-DUETFS-V1 — DuetFS v1: write path + free-block bitmap + VFS routing
+
+- **Scope & commit:** `kernel/fs/duetfs/` (Rust crate, near-total
+  rewrite of v0) + `kernel/fs/duetfs.{h,cpp}` (kernel adapter) +
+  `kernel/fs/duetfs_block_dev.cpp` (Device builders) +
+  `kernel/fs/mount.{h,cpp}` (FsType::DuetFs, DuetFsLookup) +
+  `kernel/fs/vfs.{h,cpp}` (VfsBackend::DuetFs + VfsNode fields) +
+  `kernel/core/main.cpp` (DuetFsBoot + DuetFsSelfTest at boot).
+
+- **Decision:**
+  1. **DuetFS jumps from v0 (read-only synthesized image) to v1
+     (write path, mounted at boot)** in a single slice. The v0
+     surface was a stepping-stone to prove FFI plumbing; production
+     workloads need a real read+write FS.
+  2. **On-disk format v1 layout** = superblock(1) + free-bitmap(1) +
+     node-table(4) + data(rest). 64 nodes max, 128 MiB max image,
+     1024 children per directory. Single contiguous extent per
+     file with `ext_blocks` headroom (auto-grow via realloc-and-
+     copy, double-and-grow strategy).
+  3. **Magic bumped from "DuetFS00" to "DuetFS01"; version 1 → 2.**
+     v0 images are NOT compatible with v1 readers — there is no
+     migration path because v0 was never persistent.
+  4. **One Device descriptor for both backends.** `kernel/fs/duetfs/
+     include/duetfs.h` declares a single `Device` struct with
+     read/write callbacks; the C++ adapter
+     (`duetfs_block_dev.cpp`) provides two builders —
+     `MakeMemoryDevice` (cookie = a small struct holding buf+len)
+     and `MakeBlockHandleDevice` (cookie = the block handle, cast
+     through `uptr`). The Rust crate doesn't know which is which.
+     This avoids a polymorphic Rust trait at the FFI boundary and
+     keeps the crate truly stateless across calls.
+  5. **Stateless FFI.** Each `duetfs_*` call constructs a fresh
+     `Fs` from the descriptor, performs the op, drops the `Fs`.
+     The bitmap auto-flushes on every mutation, so a successful
+     return leaves the device consistent. No retained state, no
+     handle table.
+  6. **VfsNode extended with five duetfs fields**
+     (`block_handle / node_id / kind / size / child_count`). Same
+     by-value snapshot pattern as the FAT32 backend so callers
+     don't have to track FS-internal lifetimes.
+  7. **Boot mount lives in `.bss`, not a kernel block-device.**
+     `RamBlockDeviceCreate` allocates its own buffer at runtime;
+     for the boot mount we want a known address before init runs,
+     so the boot image is a static array and the kernel-block-
+     handle adapter is exercised by self-test code on a separately-
+     created RAM disk in a later slice. The block-handle backend
+     IS implemented — it just doesn't drive the boot mount today.
+
+- **Why:**
+  - Becoming the project's primary FS requires write capability.
+    v0 was a scaffold, not a usable filesystem.
+  - Free-bitmap allocator is a real allocator (not bump-only) so
+    unlink + truncate-shrink can actually reclaim blocks, not
+    leak them. Required for any long-lived workload.
+  - Auto-grow on write keeps the per-call API simple — callers
+    don't have to call truncate-then-write — at the cost of some
+    realloc churn. v0 had no growth semantics at all.
+  - VFS routing integration means every kernel caller that already
+    speaks the VFS (sandbox enforcement, syscall path resolution)
+    transparently sees DuetFS the same way it sees FAT32 and
+    ramfs. No special-case code.
+  - One descriptor / two backends keeps the build matrix flat —
+    a future kernel-block-handle-backed boot mount adds zero new
+    FFI surface.
+
+- **What it rules out / defers:**
+  - **v0 disk-image compatibility.** No upgrade path; the magic
+    bump is a hard wall.
+  - **Multi-extent files.** Single contiguous extent forces
+    realloc-and-copy on every grow past ext_blocks. Acceptable
+    for v1 workloads (small config files, kernel logs); painful
+    for large files. Multi-extent is the next FS slice.
+  - **Multi-block dirs.** 1024 children/dir is plenty for typical
+    `/etc`, `/bin`, `/home/$user` — but not for a sprawling
+    `/usr/share`. Bumping the cap requires multi-block dir
+    children + a B-tree, both later slices.
+  - **Persistent backing.** The boot image lives in `.bss` and is
+    lost on reboot. A real on-disk DuetFS partition (probe the
+    boot disk, mkfs if blank) is its own slice.
+  - **Crash safety.** No journal, no CoW. A crash mid-mutation
+    leaves a node and a bitmap entry that disagree. `fsck` lands
+    when there's a real workload that crashes.
+  - **Free-on-shrink truncate.** Shrinking a file via truncate
+    keeps the extent allocated — the wasted blocks become
+    unreachable until the file is unlinked or grown again.
+
+- **Revisit when:**
+  - First file needs to be > ~256 KiB (the boot image size, and
+    where realloc cost first hurts) → multi-extent.
+  - First directory grows past 1024 children → multi-block dirs +
+    B-tree.
+  - First crash-resilience requirement appears → CoW or journal.
+  - First reboot test that needs the FS to survive → persistent
+    on-disk backing.
+  - First time the 64-node cap matters → bump `NODE_TABLE_BLOCKS`
+    or move to dynamically-sized node tables.
+  - First time a kernel block-device handle gets used to back a
+    DuetFS volume → the block-handle adapter (already in the
+    tree) becomes the primary path.
+
+- **Related roadmap track(s):**
+  - Filesystem track — DuetFS surface flips from "read-only
+    proof of concept" to "primary FS with write path".
+
+
 

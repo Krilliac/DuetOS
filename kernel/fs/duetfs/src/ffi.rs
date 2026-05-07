@@ -1,25 +1,55 @@
 // DuetFS C FFI — narrow surface, hand-mirrored in include/duetfs.h.
 //
-// Bindgen is forbidden by project policy (the contract should be
-// readable from the header alone). Every change here MUST update
-// the header in lockstep, and the C++ adapter
-// (kernel/fs/duetfs.cpp) re-checks the layout via static_assert at
-// compile time.
+// One descriptor (`DuetFsDevice`) covers both memory- and kernel-
+// block-handle backends; the C++ side fills in the read/write
+// callbacks and DuetFS doesn't have to know which is which.
 //
-// Lifetime discipline: the kernel hands the crate raw image bytes
-// + length on every call. The crate never retains them across
-// calls. No global state, no allocations in the hot path.
+// Every call constructs a fresh `Fs` from the descriptor, performs
+// the op, and lets the `Fs` drop. The bitmap auto-flushes inside
+// each mutation, so a successful return leaves the device
+// consistent. A panic inside the crate routes through
+// `duetos_rust_panic` (panic.rs) — never UB on the C++ side.
 
 use core::ffi::{c_uchar, c_uint, c_void};
 
-use crate::format::{NODE_KIND_DIR, NODE_KIND_FILE, NODE_KIND_UNUSED};
-use crate::image::Image;
-use crate::lookup;
+use crate::block_dev::{ExternBlockDevice, ExternBlockDeviceOps};
+use crate::format::{
+    NODE_KIND_DIR, NODE_KIND_FILE, NODE_KIND_UNUSED, ROOT_NODE_ID,
+};
+use crate::fs::{Fs, FsError};
+use crate::mkfs;
+use crate::path::split_parent_and_name;
+
+// Status codes returned by FFI fns. 0 = success, anything else = an
+// FsError variant. Kept in lockstep with kKindMiss / kStatus* in
+// include/duetfs.h.
+const STATUS_OK: u32 = 0;
+const STATUS_INVALID: u32 = 1;
+const STATUS_NOT_FOUND: u32 = 2;
+const STATUS_NOT_A_DIR: u32 = 3;
+const STATUS_NOT_A_FILE: u32 = 4;
+const STATUS_NAME_TOO_LONG: u32 = 5;
+const STATUS_NAME_EXISTS: u32 = 6;
+const STATUS_DIR_NOT_EMPTY: u32 = 7;
+const STATUS_NO_SPACE_DATA: u32 = 8;
+const STATUS_NO_SPACE_NODES: u32 = 9;
+const STATUS_IO: u32 = 10;
+const STATUS_READ_ONLY: u32 = 11;
+
+#[repr(C)]
+pub struct DuetFsDevice
+{
+    pub cookie: *mut c_void,
+    pub block_count: u32,
+    pub read_only: u32,
+    pub read: Option<unsafe extern "C" fn(cookie: *mut c_void, lba: u32, dst: *mut u8) -> i32>,
+    pub write: Option<unsafe extern "C" fn(cookie: *mut c_void, lba: u32, src: *const u8) -> i32>,
+}
 
 #[repr(C)]
 pub struct DuetFsLookupResult
 {
-    pub kind: u32,        // NODE_KIND_*
+    pub kind: u32,
     pub node_id: u32,
     pub size_bytes: u32,
     pub child_count: u32,
@@ -27,115 +57,40 @@ pub struct DuetFsLookupResult
 
 const KIND_MISS: u32 = u32::MAX;
 
-/// Probe a buffer to confirm it's a DuetFS image. Returns 1 if valid,
-/// 0 otherwise. Cheap — only inspects the superblock.
-///
-/// SAFETY: caller guarantees `image[..len]` is a readable byte range
-/// for the duration of the call, or `image == NULL` / `len == 0`.
-#[no_mangle]
-pub unsafe extern "C" fn duetfs_probe(image: *const c_uchar, len: usize) -> c_uint
+fn err_to_status(e: FsError) -> u32
 {
-    let Some(bytes) = (unsafe { slice_from_raw(image, len) }) else { return 0 };
-    Image::parse(bytes).map_or(0, |_| 1)
+    match e
+    {
+        FsError::Invalid => STATUS_INVALID,
+        FsError::NotFound => STATUS_NOT_FOUND,
+        FsError::NotADir => STATUS_NOT_A_DIR,
+        FsError::NotAFile => STATUS_NOT_A_FILE,
+        FsError::NameTooLong => STATUS_NAME_TOO_LONG,
+        FsError::NameExists => STATUS_NAME_EXISTS,
+        FsError::DirNotEmpty => STATUS_DIR_NOT_EMPTY,
+        FsError::NoSpaceData => STATUS_NO_SPACE_DATA,
+        FsError::NoSpaceNodes => STATUS_NO_SPACE_NODES,
+        FsError::Io => STATUS_IO,
+        FsError::ReadOnly => STATUS_READ_ONLY,
+    }
 }
 
-/// Resolve `path` (NUL-terminated, kernel buffer) against `image`.
-/// On success, fills `*out` and returns 1. On miss / corruption / bad
-/// args returns 0; `*out` is left with `kind = u32::MAX`.
-///
-/// SAFETY: caller guarantees `image[..len]` and `path` (until NUL,
-/// bounded by `path_max`) are readable for the call. `out` is
-/// writable for `sizeof(DuetFsLookupResult)` bytes.
-#[no_mangle]
-pub unsafe extern "C" fn duetfs_lookup(
-    image: *const c_uchar,
-    len: usize,
-    path: *const c_uchar,
-    path_max: usize,
-    out: *mut DuetFsLookupResult,
-) -> c_uint
+// SAFETY: caller guarantees `desc` is valid + readable, and that
+// every callback operates correctly on its cookie for the lifetime
+// of this call. No retention across calls.
+unsafe fn make_dev(desc: *const DuetFsDevice) -> Option<ExternBlockDevice>
 {
-    if out.is_null()
-    {
-        return 0;
-    }
-    unsafe {
-        (*out).kind = KIND_MISS;
-        (*out).node_id = 0;
-        (*out).size_bytes = 0;
-        (*out).child_count = 0;
-    }
-    let Some(bytes) = (unsafe { slice_from_raw(image, len) }) else { return 0 };
-    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else { return 0 };
-    let Some(img) = Image::parse(bytes) else { return 0 };
-    let Some(res) = lookup::resolve(&img, path_bytes) else { return 0 };
-    unsafe {
-        (*out).kind = res.node.kind;
-        (*out).node_id = res.node_id;
-        (*out).size_bytes = res.node.size_bytes;
-        (*out).child_count = res.node.child_count;
-    }
-    1
-}
-
-/// Copy up to `dst_max` bytes of `node_id`'s file contents into `dst`,
-/// starting at `offset`. Returns the number of bytes copied (0 on
-/// miss / non-file / out-of-range — same shape as a short read).
-#[no_mangle]
-pub unsafe extern "C" fn duetfs_read_file(
-    image: *const c_uchar,
-    len: usize,
-    node_id: u32,
-    offset: u32,
-    dst: *mut c_void,
-    dst_max: usize,
-) -> usize
-{
-    if dst.is_null() || dst_max == 0
-    {
-        return 0;
-    }
-    let Some(bytes) = (unsafe { slice_from_raw(image, len) }) else { return 0 };
-    let Some(img) = Image::parse(bytes) else { return 0 };
-    let Some(node) = img.node(node_id) else { return 0 };
-    if node.kind != NODE_KIND_FILE
-    {
-        return 0;
-    }
-    let Some(file_bytes) = img.file_bytes(&node) else { return 0 };
-    let off = offset as usize;
-    if off >= file_bytes.len()
-    {
-        return 0;
-    }
-    let avail = file_bytes.len() - off;
-    let n = avail.min(dst_max);
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            file_bytes.as_ptr().add(off),
-            dst as *mut u8,
-            n,
-        );
-    }
-    n
-}
-
-// Keep the kind constants linked into the staticlib so the header's
-// values stay greppable. Without this they'd be optimized away.
-#[no_mangle]
-pub static DUETFS_KIND_UNUSED: u32 = NODE_KIND_UNUSED;
-#[no_mangle]
-pub static DUETFS_KIND_FILE: u32 = NODE_KIND_FILE;
-#[no_mangle]
-pub static DUETFS_KIND_DIR: u32 = NODE_KIND_DIR;
-
-unsafe fn slice_from_raw<'a>(p: *const c_uchar, len: usize) -> Option<&'a [u8]>
-{
-    if p.is_null() || len == 0
+    if desc.is_null()
     {
         return None;
     }
-    Some(unsafe { core::slice::from_raw_parts(p, len) })
+    let d = unsafe { &*desc };
+    Some(ExternBlockDevice {
+        cookie: d.cookie,
+        block_count: d.block_count,
+        ops: ExternBlockDeviceOps { read: d.read, write: d.write },
+        read_only: d.read_only != 0,
+    })
 }
 
 unsafe fn cstr_to_slice<'a>(p: *const c_uchar, max: usize) -> Option<&'a [u8]>
@@ -148,3 +103,200 @@ unsafe fn cstr_to_slice<'a>(p: *const c_uchar, max: usize) -> Option<&'a [u8]>
     let n = bytes.iter().position(|&b| b == 0).unwrap_or(max);
     Some(&bytes[..n])
 }
+
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_probe(desc: *const DuetFsDevice) -> c_uint
+{
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return 0 };
+    Fs::open(&mut dev).is_ok() as c_uint
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_mkfs(desc: *const DuetFsDevice) -> c_uint
+{
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    match mkfs::format(&mut dev)
+    {
+        Ok(()) => STATUS_OK,
+        Err(e) => err_to_status(e),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_lookup(
+    desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize,
+    out: *mut DuetFsLookupResult,
+) -> c_uint
+{
+    if !out.is_null()
+    {
+        unsafe {
+            (*out).kind = KIND_MISS;
+            (*out).node_id = 0;
+            (*out).size_bytes = 0;
+            (*out).child_count = 0;
+        }
+    }
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else { return STATUS_INVALID };
+    let fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
+    match fs.lookup_path(path_bytes)
+    {
+        Ok(r) => {
+            if !out.is_null()
+            {
+                unsafe {
+                    (*out).kind = r.node.kind;
+                    (*out).node_id = r.node_id;
+                    (*out).size_bytes = r.node.size_bytes;
+                    (*out).child_count = r.node.child_count;
+                }
+            }
+            STATUS_OK
+        }
+        Err(e) => err_to_status(e),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_read_file(
+    desc: *const DuetFsDevice, node_id: u32, offset: u32, dst: *mut c_void, dst_max: usize,
+    out_copied: *mut usize,
+) -> c_uint
+{
+    if !out_copied.is_null()
+    {
+        unsafe { *out_copied = 0 };
+    }
+    if dst.is_null() || dst_max == 0
+    {
+        return STATUS_INVALID;
+    }
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    let fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
+    let buf = unsafe { core::slice::from_raw_parts_mut(dst as *mut u8, dst_max) };
+    match fs.read_at(node_id, offset, buf)
+    {
+        Ok(n) => {
+            if !out_copied.is_null()
+            {
+                unsafe { *out_copied = n as usize };
+            }
+            STATUS_OK
+        }
+        Err(e) => err_to_status(e),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_write_at(
+    desc: *const DuetFsDevice, node_id: u32, offset: u32, src: *const c_void, src_max: usize,
+    out_written: *mut usize,
+) -> c_uint
+{
+    if !out_written.is_null()
+    {
+        unsafe { *out_written = 0 };
+    }
+    if src.is_null() && src_max != 0
+    {
+        return STATUS_INVALID;
+    }
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    let mut fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
+    let buf = if src.is_null() { &[] as &[u8] } else {
+        unsafe { core::slice::from_raw_parts(src as *const u8, src_max) }
+    };
+    match fs.write_at(node_id, offset, buf)
+    {
+        Ok(n) => {
+            if !out_written.is_null()
+            {
+                unsafe { *out_written = n as usize };
+            }
+            STATUS_OK
+        }
+        Err(e) => err_to_status(e),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_create_path(
+    desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize, kind: u32,
+    out_node_id: *mut u32,
+) -> c_uint
+{
+    if !out_node_id.is_null()
+    {
+        unsafe { *out_node_id = 0 };
+    }
+    if kind != NODE_KIND_FILE && kind != NODE_KIND_DIR
+    {
+        return STATUS_INVALID;
+    }
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else { return STATUS_INVALID };
+    let Some((parent_path, name)) = split_parent_and_name(path_bytes) else { return STATUS_INVALID };
+    let mut fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
+    let parent = match fs.lookup_path(parent_path) { Ok(r) => r, Err(e) => return err_to_status(e) };
+    let res = if kind == NODE_KIND_FILE
+    {
+        fs.create_file(parent.node_id, name)
+    }
+    else
+    {
+        fs.create_dir(parent.node_id, name)
+    };
+    match res
+    {
+        Ok(id) => {
+            if !out_node_id.is_null()
+            {
+                unsafe { *out_node_id = id };
+            }
+            STATUS_OK
+        }
+        Err(e) => err_to_status(e),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_unlink_path(
+    desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize,
+) -> c_uint
+{
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else { return STATUS_INVALID };
+    let Some((parent_path, name)) = split_parent_and_name(path_bytes) else { return STATUS_INVALID };
+    let mut fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
+    let parent = match fs.lookup_path(parent_path) { Ok(r) => r, Err(e) => return err_to_status(e) };
+    match fs.unlink(parent.node_id, name)
+    {
+        Ok(()) => STATUS_OK,
+        Err(e) => err_to_status(e),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_truncate(
+    desc: *const DuetFsDevice, node_id: u32, new_size: u32,
+) -> c_uint
+{
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    let mut fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
+    match fs.truncate(node_id, new_size)
+    {
+        Ok(()) => STATUS_OK,
+        Err(e) => err_to_status(e),
+    }
+}
+
+// Constants kept linked so the header's enums stay greppable.
+#[no_mangle]
+pub static DUETFS_KIND_UNUSED: u32 = NODE_KIND_UNUSED;
+#[no_mangle]
+pub static DUETFS_KIND_FILE: u32 = NODE_KIND_FILE;
+#[no_mangle]
+pub static DUETFS_KIND_DIR: u32 = NODE_KIND_DIR;
+#[no_mangle]
+pub static DUETFS_ROOT_NODE_ID: u32 = ROOT_NODE_ID;

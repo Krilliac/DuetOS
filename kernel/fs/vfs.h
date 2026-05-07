@@ -112,6 +112,7 @@ enum class VfsBackend : u32
     Invalid = 0, ///< default-constructed / "miss" sentinel
     Ramfs = 1,
     Fat32 = 2,
+    DuetFs = 3,
 };
 
 /// Resolved node — backend-tagged. Storage is by-value so the
@@ -129,6 +130,17 @@ struct VfsNode
     /// `fat32_entry` carries the resolved entry by value.
     u32 fat32_volume_idx;
     fat32::DirEntry fat32_entry;
+    /// DuetFS-backed nodes — mount block_handle (used to rebuild a
+    /// `duetfs::Device` via `DeviceForMountHandle`) plus a snapshot
+    /// of the node's id / kind / size / child_count from the
+    /// LookupResult. The crate's id is stable across calls within
+    /// the same FS, so the snapshot survives any number of
+    /// subsequent reads / writes from the same caller.
+    u32 duetfs_block_handle;
+    u32 duetfs_node_id;
+    u32 duetfs_kind;
+    u32 duetfs_size_bytes;
+    u32 duetfs_child_count;
 };
 
 /// True when `n` is a real resolved node (backend != Invalid).
