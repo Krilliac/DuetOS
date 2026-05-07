@@ -21,6 +21,7 @@
  *                         selected task (no-op if it's a kernel-
  *                         only task or PID 0 / 1)
  *   - 'r' / 'R'           force a snapshot rebuild on next paint
+ *   - Tab                 cycle PROCESSES <-> PERFORMANCE tab
  *
  * Snapshot layout: SchedEnumerate is invoked from inside DrawFn
  * to fill a fixed-size local array. Sorting + drawing happen
@@ -40,6 +41,12 @@ namespace duetos::apps::taskman
 /// 128 is well above the steady-state count (~30 today) and
 /// keeps the on-stack snapshot bounded at ~6 KiB.
 inline constexpr duetos::u32 kMaxRows = 128;
+
+/// Length of the CPU% / MEM% history rings used by the
+/// Performance tab. 60 samples at the ~1 Hz UI tick gives a
+/// rolling-minute window — same default Windows Resource
+/// Monitor's "60 sec" view shows.
+inline constexpr duetos::u32 kHistorySamples = 60;
 
 /// Install the content-draw callback on `handle`. No other
 /// state — every redraw rebuilds the snapshot from

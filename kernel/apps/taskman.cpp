@@ -1,12 +1,14 @@
 #include "apps/taskman.h"
 
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/timer.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/video/dialog.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/notify.h"
 #include "drivers/video/theme.h"
 #include "mm/frame_allocator.h"
+#include "sched/loadavg.h"
 #include "sched/sched.h"
 
 namespace duetos::apps::taskman
@@ -125,6 +127,63 @@ Row g_rows[kMaxRows];                         // last snapshot
 constinit duetos::u64 g_total_ticks_snap = 1; // for CPU% denominator
 constinit duetos::u64 g_idle_ticks_snap = 0;
 constinit duetos::u64 g_kill_target_pid = 0; // pending kill-confirm
+
+// View tabs. PROCESSES is the per-task list; PERFORMANCE is the
+// system-wide line-graph view (Windows Resource Monitor-style).
+// Cycle with Tab. Index into a tab name table for the title-bar
+// suffix and the footer hint.
+enum class Tab : duetos::u8
+{
+    Processes = 0,
+    Performance = 1,
+    kCount = 2,
+};
+
+constinit Tab g_tab = Tab::Processes;
+
+const char* TabName(Tab t)
+{
+    switch (t)
+    {
+    case Tab::Processes:
+        return "PROCESSES";
+    case Tab::Performance:
+        return "PERFORMANCE";
+    default:
+        return "?";
+    }
+}
+
+// Sampling ring for the PERFORMANCE tab. Each entry is the
+// instantaneous (delta-since-previous-sample) CPU busy percent
+// and MEM used percent, in tenths of a percent (0..1000).
+// `g_hist_head` is the index where the NEXT sample will land;
+// `g_hist_count` saturates at kHistorySamples. The oldest
+// sample is at `(g_hist_head - g_hist_count) mod N`.
+struct HistorySample
+{
+    duetos::u16 cpu_tenths;
+    duetos::u16 mem_tenths;
+};
+
+HistorySample g_history[kHistorySamples];
+constinit duetos::u32 g_hist_head = 0;
+constinit duetos::u32 g_hist_count = 0;
+
+// Last sampled scheduler counters — used to compute the
+// since-last-sample delta. Initialised to zero; first sample
+// sees a delta from boot, which is fine for v0 — the curve
+// settles into a real instantaneous reading after one tick.
+constinit duetos::u64 g_last_total_ticks = 0;
+constinit duetos::u64 g_last_idle_ticks = 0;
+constinit duetos::u64 g_last_sample_tick = 0;
+
+// Sampling cadence — minimum ticks between samples. The UI
+// ticker repaints faster than once per second; rate-limiting
+// here keeps the X-axis at 1 sample / second so the 60-sample
+// ring covers a clean rolling minute. 100 ticks = 1 s at the
+// kernel's 100 Hz scheduler tick.
+constexpr duetos::u64 kSampleIntervalTicks = 100;
 
 // String helpers — the kernel has no printf, so column
 // formatting is done by hand. All formatters write at most
@@ -333,6 +392,49 @@ void RebuildSnapshot()
         g_selected = g_row_count == 0 ? 0 : g_row_count - 1;
 }
 
+// Append one HistorySample to the ring if at least
+// kSampleIntervalTicks have elapsed since the last sample.
+// Cheap (unconditional read of stats + memory). Called from
+// DrawFn before the tab body draws so the most recent sample
+// is the rightmost point on the graph.
+void MaybeSampleHistory()
+{
+    const duetos::u64 now = duetos::arch::TimerTicks();
+    if (g_last_sample_tick != 0 && (now - g_last_sample_tick) < kSampleIntervalTicks)
+        return;
+
+    const auto stats = duetos::sched::SchedStatsRead();
+    duetos::u16 cpu_tenths = 0;
+    if (g_last_total_ticks != 0 && stats.total_ticks > g_last_total_ticks)
+    {
+        const duetos::u64 d_total = stats.total_ticks - g_last_total_ticks;
+        const duetos::u64 d_idle = (stats.idle_ticks > g_last_idle_ticks) ? stats.idle_ticks - g_last_idle_ticks : 0;
+        const duetos::u64 d_busy = d_total > d_idle ? d_total - d_idle : 0;
+        duetos::u64 t = (d_busy * 1000ull) / (d_total == 0 ? 1ull : d_total);
+        if (t > 1000ull)
+            t = 1000ull;
+        cpu_tenths = static_cast<duetos::u16>(t);
+    }
+
+    const duetos::u64 total = duetos::mm::TotalFrames();
+    const duetos::u64 freef = duetos::mm::FreeFramesCount();
+    const duetos::u64 used = (total > freef) ? total - freef : 0;
+    duetos::u64 m = (total == 0) ? 0 : (used * 1000ull) / total;
+    if (m > 1000ull)
+        m = 1000ull;
+    const duetos::u16 mem_tenths = static_cast<duetos::u16>(m);
+
+    g_history[g_hist_head].cpu_tenths = cpu_tenths;
+    g_history[g_hist_head].mem_tenths = mem_tenths;
+    g_hist_head = (g_hist_head + 1) % kHistorySamples;
+    if (g_hist_count < kHistorySamples)
+        ++g_hist_count;
+
+    g_last_total_ticks = stats.total_ticks;
+    g_last_idle_ticks = stats.idle_ticks;
+    g_last_sample_tick = now;
+}
+
 // ---------------------------------------------------------------
 // Draw — header band, sortable column headings, scrollable rows,
 // footer hint. Called from the compositor with the client-area
@@ -369,7 +471,9 @@ void DrawHeader(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 fg, 
         while (*s != '\0' && o + 1 < sizeof(line))
             line[o++] = *s++;
     };
-    append("CPU ");
+    append("[");
+    append(TabName(g_tab));
+    append("]  CPU ");
     append(num_cpu);
     append("%  IDLE ");
     append(num_idle);
@@ -382,7 +486,10 @@ void DrawHeader(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 fg, 
     line[o] = '\0';
     FramebufferDrawString(cx + kColPad, cy + 2, line, fg, bg);
 
-    // Line 2: column headers, with the active sort key highlighted.
+    // Line 2: column headers (PROCESSES tab only — the
+    // PERFORMANCE tab paints labels inside the graph stack).
+    if (g_tab != Tab::Processes)
+        return;
     char col_pid[8];
     char col_name[24];
     char col_state[8];
@@ -484,11 +591,207 @@ void DrawFooter(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, 
         while (*s != '\0' && o + 1 < sizeof(hint))
             hint[o++] = *s++;
     };
-    append("UP/DN PGUP/PGDN  S:SORT-");
+    append("TAB:VIEW  UP/DN PGUP/PGDN  S:SORT-");
     append(SortModeName(g_sort));
     append("  K:KILL  R:REFRESH");
     hint[o] = '\0';
     FramebufferDrawString(cx + kColPad, y + 2, hint, fg, bg);
+}
+
+// Render a single line graph into a rectangle. `samples` is the
+// kHistorySamples-long ring at `g_history`; `field_offset` picks
+// which u16 field per HistorySample to plot. Y values are tenths
+// of a percent (0..1000); X is sample index, oldest on the left.
+// Draws a 1-px frame, a 25%/50%/75% horizontal gridline triplet,
+// then connects each adjacent pair of samples with FramebufferDrawLine.
+void DrawSparkline(duetos::u32 x, duetos::u32 y, duetos::u32 w, duetos::u32 h, duetos::u32 fg, duetos::u32 grid,
+                   duetos::u32 frame, duetos::u32 fill, bool plot_cpu)
+{
+    using duetos::drivers::video::FramebufferDrawLine;
+    using duetos::drivers::video::FramebufferFillRect;
+    if (w < 4 || h < 4)
+        return;
+    FramebufferFillRect(x, y, w, h, fill);
+    // Top + bottom + left + right frame, 1 px thick.
+    FramebufferFillRect(x, y, w, 1, frame);
+    FramebufferFillRect(x, y + h - 1, w, 1, frame);
+    FramebufferFillRect(x, y, 1, h, frame);
+    FramebufferFillRect(x + w - 1, y, 1, h, frame);
+    // Gridlines at 25 / 50 / 75 percent.
+    for (duetos::u32 q = 1; q <= 3; ++q)
+    {
+        const duetos::u32 gy = y + (h * q) / 4;
+        FramebufferFillRect(x + 1, gy, w - 2, 1, grid);
+    }
+    if (g_hist_count < 2)
+        return;
+    // Plot oldest -> newest left-to-right. Step = w / kHistorySamples
+    // gives a stable X spacing that doesn't depend on g_hist_count.
+    const duetos::u32 plot_w = w - 2;
+    const duetos::u32 plot_h = (h > 2) ? h - 2 : 0;
+    const duetos::u32 ox = x + 1;
+    const duetos::u32 oy = y + 1;
+    auto sample_at = [&](duetos::u32 i) -> duetos::u16
+    {
+        // i = 0 -> oldest sample. The ring head points at the
+        // NEXT slot to write, so the oldest is head when count
+        // == N, and the (head - count) slot otherwise.
+        const duetos::u32 first = (g_hist_head + kHistorySamples - g_hist_count) % kHistorySamples;
+        const duetos::u32 idx = (first + i) % kHistorySamples;
+        return plot_cpu ? g_history[idx].cpu_tenths : g_history[idx].mem_tenths;
+    };
+    auto x_of = [&](duetos::u32 i) -> duetos::i32
+    { return static_cast<duetos::i32>(ox + (i * plot_w) / (kHistorySamples - 1)); };
+    auto y_of = [&](duetos::u16 t) -> duetos::i32
+    {
+        // t in [0..1000]. y=oy at 100%, y=oy+plot_h at 0%.
+        const duetos::u32 yy = oy + plot_h - (t * plot_h) / 1000u;
+        return static_cast<duetos::i32>(yy);
+    };
+    for (duetos::u32 i = 1; i < g_hist_count; ++i)
+    {
+        const duetos::i32 x0 = x_of(i - 1 + (kHistorySamples - g_hist_count));
+        const duetos::i32 y0 = y_of(sample_at(i - 1));
+        const duetos::i32 x1 = x_of(i + (kHistorySamples - g_hist_count));
+        const duetos::i32 y1 = y_of(sample_at(i));
+        FramebufferDrawLine(x0, y0, x1, y1, fg);
+    }
+}
+
+void DrawPerformance(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, duetos::u32 fg, duetos::u32 fg_cpu,
+                     duetos::u32 fg_mem, duetos::u32 grid, duetos::u32 frame, duetos::u32 fill, duetos::u32 bg)
+{
+    using duetos::drivers::video::FramebufferDrawString;
+    using duetos::drivers::video::FramebufferFillRect;
+    const duetos::u32 list_y = cy + kHeaderH;
+    const duetos::u32 list_h = (ch > kHeaderH + kFooterH) ? ch - kHeaderH - kFooterH : 0;
+    FramebufferFillRect(cx, list_y, cw, list_h, bg);
+    if (list_h < 60)
+        return;
+
+    // Two equal-height graph stacks with a 12-px label band each.
+    const duetos::u32 stack_h = list_h / 2;
+    const duetos::u32 lbl_h = 12;
+    const duetos::u32 graph_h = (stack_h > lbl_h + 4) ? stack_h - lbl_h : stack_h;
+
+    // CPU graph header — current % + peak % from the ring.
+    duetos::u16 cur_cpu = 0;
+    duetos::u16 peak_cpu = 0;
+    duetos::u16 cur_mem = 0;
+    duetos::u16 peak_mem = 0;
+    if (g_hist_count > 0)
+    {
+        const duetos::u32 newest = (g_hist_head + kHistorySamples - 1) % kHistorySamples;
+        cur_cpu = g_history[newest].cpu_tenths;
+        cur_mem = g_history[newest].mem_tenths;
+        for (duetos::u32 i = 0; i < g_hist_count; ++i)
+        {
+            const duetos::u32 idx = (g_hist_head + kHistorySamples - g_hist_count + i) % kHistorySamples;
+            if (g_history[idx].cpu_tenths > peak_cpu)
+                peak_cpu = g_history[idx].cpu_tenths;
+            if (g_history[idx].mem_tenths > peak_mem)
+                peak_mem = g_history[idx].mem_tenths;
+        }
+    }
+
+    auto fmt_tenths = [](duetos::u16 t, char* out)
+    {
+        const duetos::u16 whole = t / 10;
+        const duetos::u16 frac = t % 10;
+        char tmp[6];
+        duetos::u32 n = 0;
+        if (whole == 0)
+        {
+            tmp[n++] = '0';
+        }
+        else
+        {
+            duetos::u16 v = whole;
+            while (v > 0 && n < sizeof(tmp))
+            {
+                tmp[n++] = static_cast<char>('0' + (v % 10));
+                v = static_cast<duetos::u16>(v / 10);
+            }
+        }
+        duetos::u32 o = 0;
+        while (n > 0)
+            out[o++] = tmp[--n];
+        out[o++] = '.';
+        out[o++] = static_cast<char>('0' + frac);
+        out[o++] = '%';
+        out[o] = '\0';
+    };
+
+    char cur_buf[8];
+    char peak_buf[8];
+    char line[80];
+
+    // CPU header.
+    fmt_tenths(cur_cpu, cur_buf);
+    fmt_tenths(peak_cpu, peak_buf);
+    duetos::u32 o = 0;
+    auto append = [&](const char* s)
+    {
+        while (*s != '\0' && o + 1 < sizeof(line))
+            line[o++] = *s++;
+    };
+    append("CPU  cur ");
+    append(cur_buf);
+    append("  peak ");
+    append(peak_buf);
+    append("  (60 s)");
+    line[o] = '\0';
+    FramebufferDrawString(cx + kColPad, list_y + 2, line, fg_cpu, bg);
+    DrawSparkline(cx + kColPad, list_y + lbl_h, cw - 2 * kColPad, graph_h, fg_cpu, grid, frame, fill, true);
+
+    // MEM header.
+    o = 0;
+    fmt_tenths(cur_mem, cur_buf);
+    fmt_tenths(peak_mem, peak_buf);
+    const duetos::u64 total = duetos::mm::TotalFrames();
+    const duetos::u64 freef = duetos::mm::FreeFramesCount();
+    const duetos::u64 used_kib = (total > freef) ? (total - freef) * 4ull : 0;
+    char num_used[10];
+    char num_total[10];
+    FmtU64Right(used_kib / 1024ull, num_used, 5);
+    FmtU64Right(total * 4ull / 1024ull, num_total, 5);
+    append("MEM  cur ");
+    append(cur_buf);
+    append("  peak ");
+    append(peak_buf);
+    append("  ");
+    append(num_used);
+    append("/");
+    append(num_total);
+    append(" MIB");
+    line[o] = '\0';
+    FramebufferDrawString(cx + kColPad, list_y + stack_h + 2, line, fg_mem, bg);
+    DrawSparkline(cx + kColPad, list_y + stack_h + lbl_h, cw - 2 * kColPad, graph_h, fg_mem, grid, frame, fill, false);
+
+    // Below the graphs (inside the footer band — the actual
+    // footer is `OPENS / GRAPH / TASKS` below this) we draw
+    // load averages on the left of the footer hint. Use the
+    // same row the footer's hint occupies but on the left.
+    duetos::u32 one = 0;
+    duetos::u32 five = 0;
+    duetos::u32 fifteen = 0;
+    duetos::sched::LoadavgSnapshot(&one, &five, &fifteen);
+    char buf1[12];
+    char buf5[12];
+    char buf15[12];
+    duetos::sched::LoadavgFormat(buf1, sizeof(buf1), one);
+    duetos::sched::LoadavgFormat(buf5, sizeof(buf5), five);
+    duetos::sched::LoadavgFormat(buf15, sizeof(buf15), fifteen);
+    o = 0;
+    append("LOAD ");
+    append(buf1);
+    append(" / ");
+    append(buf5);
+    append(" / ");
+    append(buf15);
+    line[o] = '\0';
+    if (ch >= kFooterH + 12)
+        FramebufferDrawString(cx + kColPad, cy + ch - kFooterH - 12, line, fg, bg);
 }
 
 void DrawFn(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, void* /*cookie*/)
@@ -498,13 +801,22 @@ void DrawFn(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, void
     const duetos::u32 bg = theme.role_client[static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::TaskManager)];
     constexpr duetos::u32 kFg = 0x00C8E0FF;    // soft-blue text
     constexpr duetos::u32 kFgRun = 0x0080FF80; // bright green for the on-CPU task
+    constexpr duetos::u32 kFgCpu = 0x0080FF80; // CPU graph line
+    constexpr duetos::u32 kFgMem = 0x00FFD060; // MEM graph line
     constexpr duetos::u32 kHl = 0x00FFD060;    // amber — active sort key
     constexpr duetos::u32 kSelBg = 0x00204060; // selected-row band
+    constexpr duetos::u32 kGrid = 0x00203040;  // graph gridlines
+    constexpr duetos::u32 kFrame = 0x00405070; // graph border
+    constexpr duetos::u32 kFill = 0x00081020;  // graph background
     FramebufferFillRect(cx, cy, cw, ch, bg);
 
+    MaybeSampleHistory();
     RebuildSnapshot();
     DrawHeader(cx, cy, cw, kFg, kHl, bg);
-    DrawRows(cx, cy, cw, ch, kFg, kFgRun, kSelBg, bg);
+    if (g_tab == Tab::Processes)
+        DrawRows(cx, cy, cw, ch, kFg, kFgRun, kSelBg, bg);
+    else
+        DrawPerformance(cx, cy, cw, ch, kFg, kFgCpu, kFgMem, kGrid, kFrame, kFill, bg);
     DrawFooter(cx, cy, cw, ch, kFg, bg);
 }
 
@@ -581,6 +893,13 @@ duetos::drivers::video::WindowHandle TaskmanWindow()
 
 bool TaskmanFeedChar(char c)
 {
+    if (c == '\t')
+    {
+        // Cycle PROCESSES <-> PERFORMANCE.
+        const auto next = static_cast<duetos::u8>(g_tab) + 1;
+        g_tab = (next >= static_cast<duetos::u8>(Tab::kCount)) ? Tab::Processes : static_cast<Tab>(next);
+        return true;
+    }
     if (c == 's' || c == 'S')
     {
         const auto next = static_cast<duetos::u8>(g_sort) + 1;
