@@ -430,6 +430,8 @@ void PrintShortcutHelp()
     ConsoleWriteln("    CTRL+C / CTRL+V   COPY / PASTE CLIPBOARD");
     ConsoleWriteln("    CTRL+S            SAVE TO NOTES.TXT (FAT32)");
     ConsoleWriteln("    CTRL+O            LOAD FROM NOTES.TXT (FAT32)");
+    ConsoleWriteln("    CTRL+F            FIND (case-insensitive)");
+    ConsoleWriteln("    F3                FIND NEXT (wraps to start)");
     ConsoleWriteln("    STATUS FOOTER     L:line C:col  CHARS  WORDS  *MOD");
     ConsoleWriteln("");
     ConsoleWriteln("  CALCULATOR (WHEN ACTIVE)");
@@ -438,6 +440,18 @@ void PrintShortcutHelp()
     ConsoleWriteln("    M / S             MEMORY RECALL / STORE");
     ConsoleWriteln("    A / B             MEMORY ADD / SUBTRACT");
     ConsoleWriteln("    L                 MEMORY CLEAR");
+    ConsoleWriteln("    Q / X / Y / R / ! SQRT / SQUARE / ABS / 1OVERN / FACTORIAL");
+    ConsoleWriteln("    & | ^ < > ~       BITWISE AND/OR/XOR/SHL/SHR/NOT");
+    ConsoleWriteln("    HEX BIN OCT       SHOWN LIVE BELOW DECIMAL DISPLAY");
+    ConsoleWriteln("");
+    ConsoleWriteln("  TASK MANAGER (WHEN ACTIVE)");
+    ConsoleWriteln("    TAB               CYCLE PROCESSES / PERFORMANCE");
+    ConsoleWriteln("    UP / DN           MOVE SELECTION (PROCESSES TAB)");
+    ConsoleWriteln("    PGUP / PGDN       PAGE-STEP SELECTION");
+    ConsoleWriteln("    HOME / END        FIRST / LAST ROW");
+    ConsoleWriteln("    S                 CYCLE SORT (CPU / PID / NAME / STATE)");
+    ConsoleWriteln("    K / DEL           KILL SELECTED PROCESS (CONFIRM)");
+    ConsoleWriteln("    R                 FORCE SNAPSHOT REBUILD");
     ConsoleWriteln("");
     ConsoleWriteln("  FILES (WHEN ACTIVE)");
     ConsoleWriteln("    UP / DN           MOVE SELECTION");
@@ -445,6 +459,7 @@ void PrintShortcutHelp()
     ConsoleWriteln("    B / BACKSPACE     UP ONE LEVEL (RAM MODE)");
     ConsoleWriteln("    D / M / T         SWITCH DISK / RAM / TRASH VIEW");
     ConsoleWriteln("    R                 RESCAN (DISK) / RESTORE (TRASH)");
+    ConsoleWriteln("    S                 CYCLE SORT (NAME -> SIZE -> TYPE)");
     ConsoleWriteln("    X THEN Y          DISK: TO TRASH; TRASH: PERM-DEL");
     ConsoleWriteln("    E THEN Y          EMPTY TRASH (TRASH VIEW ONLY)");
     ConsoleWriteln("");
