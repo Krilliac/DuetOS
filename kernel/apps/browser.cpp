@@ -1225,6 +1225,7 @@ void BrowserInit(WindowHandle handle)
 
 void BrowserOnWheel(duetos::i32 dz, duetos::u8 modifiers)
 {
+    (void)modifiers;
     if (dz == 0)
         return;
     // Wheel-up (dz > 0) maps to "scroll content up" which means
@@ -1254,6 +1255,7 @@ void BrowserNavForward()
 
 bool BrowserOnDoubleClick(duetos::u32 sx, duetos::u32 sy)
 {
+    (void)sx;
     // Only meaningful in Bookmarks mode — DC follows the hit row.
     // History mode could mirror this but isn't on the v1 critical
     // path (less common navigation pattern).

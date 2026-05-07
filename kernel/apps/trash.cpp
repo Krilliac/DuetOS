@@ -12,7 +12,6 @@ namespace
 namespace fat = fs::fat32;
 
 constexpr u32 kPathCap = 64;
-constexpr u32 kNameCap = 16; // 8.3 + NUL with slack
 
 // Build "TRASH/<name>" into `out`. Caller-owned `out` must hold
 // at least `kPathCap` bytes; truncates silently on overflow so

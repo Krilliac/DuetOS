@@ -4059,8 +4059,8 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     // "Discard unsaved changes?". Callback closes
                     // the window on OK; Cancel keeps it open.
                     const bool is_notes = (active == duetos::apps::notes::NotesWindow());
-                    const bool dirty = is_notes && duetos::apps::notes::NotesIsDirty();
-                    if (dirty)
+                    const bool notes_dirty = is_notes && duetos::apps::notes::NotesIsDirty();
+                    if (notes_dirty)
                     {
                         static duetos::drivers::video::WindowHandle s_close_target =
                             duetos::drivers::video::kWindowInvalid;
@@ -4577,24 +4577,24 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         using duetos::drivers::video::kMenuItemFlagDisabled;
         using duetos::drivers::video::kMenuItemFlagSeparator;
         using duetos::drivers::video::kMenuItemFlagSubmenu;
-        using Role = duetos::drivers::video::ThemeRole;
+        using StartMenuRole = duetos::drivers::video::ThemeRole;
 
         static const duetos::drivers::video::MenuItem kAppsItems[] = {
-            {"CALCULATOR", 100 + static_cast<duetos::u32>(Role::Calculator), 0, nullptr, 0},
-            {"NOTEPAD", 100 + static_cast<duetos::u32>(Role::Notes), 0, nullptr, 0},
-            {"FILES", 100 + static_cast<duetos::u32>(Role::Files), 0, nullptr, 0},
-            {"CLOCK", 100 + static_cast<duetos::u32>(Role::Clock), 0, nullptr, 0},
-            {"CALENDAR", 100 + static_cast<duetos::u32>(Role::Calendar), 0, nullptr, 0},
-            {"BROWSER", 100 + static_cast<duetos::u32>(Role::Browser), 0, nullptr, 0},
-            {"IMAGE VIEWER", 100 + static_cast<duetos::u32>(Role::ImageView), 0, nullptr, 0},
-            {"GFX DEMO", 100 + static_cast<duetos::u32>(Role::GfxDemo), 0, nullptr, 0},
-            {"ABOUT", 100 + static_cast<duetos::u32>(Role::About), 0, nullptr, 0},
-            {"HELP", 100 + static_cast<duetos::u32>(Role::Help), 0, nullptr, 0},
+            {"CALCULATOR", 100 + static_cast<duetos::u32>(StartMenuRole::Calculator), 0, nullptr, 0},
+            {"NOTEPAD", 100 + static_cast<duetos::u32>(StartMenuRole::Notes), 0, nullptr, 0},
+            {"FILES", 100 + static_cast<duetos::u32>(StartMenuRole::Files), 0, nullptr, 0},
+            {"CLOCK", 100 + static_cast<duetos::u32>(StartMenuRole::Clock), 0, nullptr, 0},
+            {"CALENDAR", 100 + static_cast<duetos::u32>(StartMenuRole::Calendar), 0, nullptr, 0},
+            {"BROWSER", 100 + static_cast<duetos::u32>(StartMenuRole::Browser), 0, nullptr, 0},
+            {"IMAGE VIEWER", 100 + static_cast<duetos::u32>(StartMenuRole::ImageView), 0, nullptr, 0},
+            {"GFX DEMO", 100 + static_cast<duetos::u32>(StartMenuRole::GfxDemo), 0, nullptr, 0},
+            {"ABOUT", 100 + static_cast<duetos::u32>(StartMenuRole::About), 0, nullptr, 0},
+            {"HELP", 100 + static_cast<duetos::u32>(StartMenuRole::Help), 0, nullptr, 0},
         };
         static const duetos::drivers::video::MenuItem kSystemItems[] = {
-            {"SETTINGS", 100 + static_cast<duetos::u32>(Role::Settings), 0, nullptr, 0},
-            {"TASK MANAGER", 100 + static_cast<duetos::u32>(Role::TaskManager), 0, nullptr, 0},
-            {"KERNEL LOG", 100 + static_cast<duetos::u32>(Role::LogView), 0, nullptr, 0},
+            {"SETTINGS", 100 + static_cast<duetos::u32>(StartMenuRole::Settings), 0, nullptr, 0},
+            {"TASK MANAGER", 100 + static_cast<duetos::u32>(StartMenuRole::TaskManager), 0, nullptr, 0},
+            {"KERNEL LOG", 100 + static_cast<duetos::u32>(StartMenuRole::LogView), 0, nullptr, 0},
             {"NETWORK STATUS", 60, 0, nullptr, 0},
             {"DEVICE MANAGER", 61, 0, nullptr, 0},
             {"FIREWALL", 62, 0, nullptr, 0},
@@ -4635,8 +4635,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         kStartItems[5] = {"POWER", 0, kMenuItemFlagSubmenu, kPowerItems, sizeof(kPowerItems) / sizeof(kPowerItems[0])};
         constexpr duetos::u32 start_items_count = sizeof(kStartItems) / sizeof(kStartItems[0]);
         static const duetos::drivers::video::MenuItem kDesktopMenuItems[] = {
-            {"HELP / SHORTCUTS", 6}, {"ABOUT DUETOS", 1},  {"CYCLE WINDOWS", 2},
-            {"LIST WINDOWS", 3},     {"SWITCH TO TTY", 5},
+            {"HELP / SHORTCUTS", 6, 0, nullptr, 0}, {"ABOUT DUETOS", 1, 0, nullptr, 0},
+            {"CYCLE WINDOWS", 2, 0, nullptr, 0},    {"LIST WINDOWS", 3, 0, nullptr, 0},
+            {"SWITCH TO TTY", 5, 0, nullptr, 0},
         };
         // Window body menu (right-click on a native window's
         // client area). Enriches the original Raise/Close pair

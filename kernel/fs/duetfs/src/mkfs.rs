@@ -130,7 +130,7 @@ pub fn format<D: BlockDevice + ?Sized>(dev: &mut D) -> FsResult<()>
         journal_blocks: JOURNAL_BLOCKS,
         // v6 — unencrypted by default. mkfs_encrypted populates
         // these via a wrapper around `format` that re-CRCs the SB.
-        encrypted: 0,
+        encrypted: crate::format::ENCRYPTED_NO,
         kdf_m_cost_kib: 0,
         kdf_t_cost: 0,
         kdf_p_cost: 0,
@@ -138,7 +138,7 @@ pub fn format<D: BlockDevice + ?Sized>(dev: &mut D) -> FsResult<()>
         // v7 — snapshot slot present at SNAPSHOT_LBA but empty.
         snapshot_lba: SNAPSHOT_LBA,
         snapshot_blocks: SNAPSHOT_BLOCKS,
-        snapshot_present: 0,
+        snapshot_present: crate::format::SNAPSHOT_PRESENT_NO,
         snapshot_reserved: 0,
         snapshot_timestamp_ns: 0,
     };

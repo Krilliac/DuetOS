@@ -209,10 +209,12 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         {
             None
         };
-        let lba = self
-            .bitmap
-            .alloc_run_with_pinned(n, pinned_buf.as_ref())
-            .ok_or(FsError::NoSpaceData)?;
+        let lba = match pinned_buf.as_ref()
+        {
+            Some(pinned) => self.bitmap.alloc_run_with_pinned(n, Some(pinned)),
+            None => self.bitmap.alloc_run(n),
+        }
+        .ok_or(FsError::NoSpaceData)?;
         self.bitmap.flush(self.dev).map_err(|_| FsError::Io)?;
         // Update bitmap's own CRC entry.
         let mut bm = [0u8; BLOCK_SIZE];
@@ -334,14 +336,14 @@ fn read_superblock(block: &[u8]) -> Superblock
         sb_crc32: 0,
         journal_lba: 0,
         journal_blocks: 0,
-        encrypted: 0,
+        encrypted: crate::format::ENCRYPTED_NO,
         kdf_m_cost_kib: 0,
         kdf_t_cost: 0,
         kdf_p_cost: 0,
         kdf_salt: [0; crate::format::SALT_BYTES],
         snapshot_lba: 0,
         snapshot_blocks: 0,
-        snapshot_present: 0,
+        snapshot_present: crate::format::SNAPSHOT_PRESENT_NO,
         snapshot_reserved: 0,
         snapshot_timestamp_ns: 0,
     };

@@ -293,7 +293,7 @@ void WakeupWorkerEntry(void* arg)
         {
             break;
         }
-        --c->remaining;
+        c->remaining = c->remaining - 1;
         ::duetos::ipc::KEventSet(c->done);
     }
     c->worker_exited = true;
