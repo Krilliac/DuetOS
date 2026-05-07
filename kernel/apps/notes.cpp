@@ -776,12 +776,98 @@ void NotesOnWheel(duetos::i32 dz, duetos::u8 modifiers)
     }
 }
 
-bool NotesOnDoubleClick(duetos::u32 /*cx*/, duetos::u32 /*cy*/)
+// Map screen (sx, sy) coordinates to a buffer index. Mirrors the
+// forward (index → visual row/col) walk in `ComputeVisualPos`,
+// re-using the content-area geometry cached by the most recent
+// `DrawFn` (`g_last_max_col` / `g_last_max_row` / `g_view_top`).
+// Lands on the buffer position whose visual cell contains the
+// click; if the click is past end-of-line, lands on the line's
+// terminator (or g_len at end-of-buffer). Returns g_len if the
+// click is below the last visual row.
+u32 ClickToBufferIndex(u32 sx, u32 sy)
 {
-    // GAP: Notes has no double-click semantics (no token /
-    // word selection model in v1). Reserved for a future
-    // word-select-on-DBL slice.
-    return false;
+    constexpr u32 kPad = 4;
+    constexpr u32 kBorder = 2;
+    constexpr u32 kTitleH = 22;
+    duetos::u32 wx = 0, wy = 0;
+    if (!duetos::drivers::video::WindowGetBounds(g_handle, &wx, &wy, nullptr, nullptr))
+        return g_len;
+    const u32 content_x = wx + kBorder;
+    const u32 content_y = wy + kTitleH + kBorder;
+    if (sx < content_x + kPad || sy < content_y + kPad)
+        return 0;
+    const u32 cx_in_content = sx - content_x - kPad;
+    const u32 cy_in_content = sy - content_y - kPad;
+    const u32 max_col = (g_last_max_col > 0) ? g_last_max_col : 80;
+    const u32 max_row = (g_last_max_row > 0) ? g_last_max_row : 24;
+    u32 vrow = cy_in_content / kGlyphH;
+    if (vrow >= max_row)
+        vrow = max_row - 1;
+    u32 vcol = cx_in_content / kGlyphW;
+    if (vcol > max_col)
+        vcol = max_col;
+    const u32 target_row = g_view_top + vrow;
+
+    u32 row = 0;
+    u32 col = 0;
+    for (u32 i = 0; i < g_len; ++i)
+    {
+        if (row == target_row && col == vcol)
+            return i;
+        const char c = g_buf[i];
+        if (c == '\n')
+        {
+            if (row == target_row)
+                return i;
+            ++row;
+            col = 0;
+            continue;
+        }
+        if (col >= max_col)
+        {
+            if (row == target_row)
+                return i;
+            ++row;
+            col = 0;
+        }
+        ++col;
+    }
+    return g_len;
+}
+
+// Word-snap at a buffer index: walk outward through the
+// surrounding run of `IsWordChar` bytes and anchor the selection
+// [lo, hi). Returns true iff a non-empty word was found and the
+// selection was placed; non-word indices (whitespace, punctuation,
+// past-end-of-buffer) leave selection state untouched.
+bool WordSnapAt(u32 idx)
+{
+    if (idx >= g_len || !IsWordChar(g_buf[idx]))
+        return false;
+    u32 lo = idx;
+    while (lo > 0 && IsWordChar(g_buf[lo - 1]))
+        --lo;
+    u32 hi = idx;
+    while (hi < g_len && IsWordChar(g_buf[hi]))
+        ++hi;
+    if (lo == hi)
+        return false;
+    g_sel_anchor = static_cast<duetos::i32>(lo);
+    g_cursor = hi;
+    return true;
+}
+
+bool NotesOnDoubleClick(duetos::u32 sx, duetos::u32 sy)
+{
+    // Map the click to a buffer index and word-snap. Clicks
+    // landing on non-word chars (whitespace, punctuation) still
+    // consume the event so the dispatcher's compose-on-DC path
+    // doesn't fall through to the desktop background, but they
+    // leave the existing selection alone.
+    const u32 idx = ClickToBufferIndex(sx, sy);
+    if (WordSnapAt(idx))
+        AutoScrollIntoView();
+    return true;
 }
 
 // Drop-target callback. Loads a `.TXT` payload into the live
@@ -1186,6 +1272,34 @@ void NotesSelfTest()
     // ...but a non-ws after a ws starts a new word.
     NotesFeedChar('X');
     check(WordCount() == 3); // 21
+
+    // Word-snap: build a known buffer "hello world foo_bar", then
+    // snap-test at indices that land inside / on word boundaries /
+    // on whitespace. WordSnapAt should set [lo, hi) on a hit and
+    // leave state alone on a miss.
+    g_len = 0;
+    g_cursor = 0;
+    g_sel_anchor = kNoSelection;
+    const char kSnap[] = "hello world foo_bar";
+    for (u32 i = 0; kSnap[i] != '\0'; ++i)
+        InsertAtCursor(kSnap[i]);
+    // Click inside "hello" — selection becomes [0, 5).
+    check(WordSnapAt(2));                      // 22
+    check(g_sel_anchor == 0 && g_cursor == 5); // 23
+    // Click on the space at index 5 — non-word, no change.
+    g_sel_anchor = kNoSelection;
+    g_cursor = 0;
+    check(!WordSnapAt(5));                                // 24
+    check(g_sel_anchor == kNoSelection && g_cursor == 0); // 25
+    // Click inside "foo_bar" — selection [12, 19), underscore is a
+    // word char so the whole identifier snaps.
+    check(WordSnapAt(15));                       // 26
+    check(g_sel_anchor == 12 && g_cursor == 19); // 27
+    // Click past end-of-buffer — no-op.
+    g_sel_anchor = kNoSelection;
+    g_cursor = 0;
+    check(!WordSnapAt(g_len));           // 28
+    check(g_sel_anchor == kNoSelection); // 29
 
     // Restore pre-test state.
     g_len = saved_len;

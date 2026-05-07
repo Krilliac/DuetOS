@@ -52,6 +52,16 @@ inline constexpr u32 kFhRscsrChnl0Sbrb = 0x1BCC;
 // to this single MMIO offset to publish a freshly-built TFD.
 inline constexpr u32 kHbusTargWrptr = 0x460;
 
+// SCD (Scheduler) per-queue read-pointer registers. The chip
+// publishes its TX read pointer here once a frame is on the air;
+// the driver advances `tail` to match. Layout per Linux iwlwifi
+// `iwl-prph.h`: SCD_BASE=0xa02c00, queue 0's RDPTR at +0x68,
+// each subsequent queue +4. The pointer is a 9-bit modular index
+// (mod 512); we mask with `(ring_size - 1)` to fit our 256-entry
+// rings.
+inline constexpr u32 kScdQueueRdptr0 = 0xa02c68;
+inline constexpr u32 kScdQueueRdptrStride = 4;
+
 struct IwlTxRing
 {
     u32 queue_id;
@@ -95,6 +105,22 @@ struct IwlRingState
 /// Drain the RX ring. Calls `WirelessDeliverBeacon` etc. for each
 /// retrieved frame. Returns the number of frames processed.
 u32 IwlRingsServiceRx(NicInfo& n, IwlRingState* state);
+
+/// Poll TX completions on `queue_id`: reads the chip's SCD read
+/// pointer for the queue, advances `tail` to match, and reclaims
+/// each completed slot. Increments `completion_count` per slot
+/// reclaimed; if the queue had outstanding TX (`head != tail`)
+/// but the chip reported no progress, bumps `stuck_polls` so a
+/// future watchdog can spot a hung queue. Returns the number of
+/// TFD slots reclaimed on this call. The IRQ handler is the
+/// canonical caller; a periodic kernel poll is the fallback.
+u32 IwlRingsPollTxCompletions(NicInfo& n, IwlRingState* state, u32 queue_id);
+
+/// Test seam for `IwlRingsPollTxCompletions` — same bookkeeping,
+/// but the chip-side read pointer is supplied by the caller
+/// instead of being read from MMIO. Lets the self-test verify
+/// the slot-reclaim walk without a live chip.
+u32 IwlRingsApplyTxCompletions(IwlRingState* state, u32 queue_id, u32 chip_rdptr);
 
 void IwlRingsSelfTest();
 

@@ -5512,11 +5512,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                         {
                             duetos::apps::browser::BrowserOnDoubleClick(cx, cy);
                         }
-                        // Other native apps: NotesOnDoubleClick is
-                        // a documented no-op (no word-select model
-                        // in v0). Calculator / Calendar / Clock /
-                        // ImageView don't have a DC entry point —
-                        // those gestures aren't part of their UX.
+                        else if (pe_hit == duetos::apps::notes::NotesWindow())
+                        {
+                            duetos::apps::notes::NotesOnDoubleClick(cx, cy);
+                        }
+                        // Calculator / Calendar / Clock / ImageView
+                        // don't have a DC entry point — those
+                        // gestures aren't part of their UX.
                         s_native_dc_hwnd = duetos::drivers::video::kWindowInvalid;
                         duetos::drivers::video::CursorHide();
                         duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");

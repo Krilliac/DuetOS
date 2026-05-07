@@ -351,13 +351,67 @@ void PopulateRbdRing(IwlRxRing& rx, mm::PhysAddr data_pool_base)
     ++q.doorbell_count;
     diag::RecordOk(diag::Layer::Tx, "tx-doorbell", queue_id, q.head, frame_len);
 
-    // GAP: TX completion polling. The chip writes a status word
-    //   into a per-queue completion area (BD_RP) once the frame is
-    //   on the air; the driver should reclaim the scratch buffer
-    //   once the chip's read-pointer passes our head. v0 returns
-    //   Ok unconditionally — submission is "fire-and-forget" until
-    //   the IRQ + completion-poll slice lands.
+    // Completion polling lives in `IwlRingsPollTxCompletions` —
+    // the IRQ handler / kernel poll thread calls it to advance
+    // `tail` once the chip's per-queue read-pointer passes our
+    // submitted head. Submit itself stays "fire-and-forget".
     return ::duetos::core::Result<void>{};
+}
+
+u32 IwlRingsApplyTxCompletions(IwlRingState* state, u32 queue_id, u32 chip_rdptr)
+{
+    if (state == nullptr || queue_id >= kIwlNumTxQueues || !state->initialized)
+        return 0;
+    IwlTxRing& q = state->tx_queues[queue_id];
+    // Chip's RDPTR is 9-bit modular per iwl-prph.h; mask down to
+    // our 256-entry ring index. `chip_rdptr == ~0u` is the canary
+    // returned by Mmio32Read on a missing MMIO mapping — treat as
+    // "no info" and bail without bumping any counters.
+    if (chip_rdptr == 0xFFFFFFFFu)
+        return 0;
+    const u32 mask = q.size - 1; // q.size is 256 (power-of-two)
+    const u32 chip = chip_rdptr & mask;
+    // No outstanding TX → nothing to reclaim. Don't bump
+    // stuck_polls either; a quiet ring isn't a stuck ring.
+    if (q.head == q.tail)
+    {
+        diag::RecordOk(diag::Layer::Tx, "tx-poll-quiet", queue_id, q.head, q.tail);
+        return 0;
+    }
+    // Walk tail → chip in ring order. Each step counts as one
+    // reclaimed slot. If chip == tail (no progress since the last
+    // poll), bump stuck_polls and return zero.
+    if (chip == q.tail)
+    {
+        ++q.stuck_polls;
+        diag::RecordOk(diag::Layer::Tx, "tx-poll-stuck", queue_id, q.head, q.stuck_polls);
+        return 0;
+    }
+    u32 reclaimed = 0;
+    while (q.tail != chip)
+    {
+        q.tail = (q.tail + 1) & mask;
+        ++q.completion_count;
+        ++reclaimed;
+        // Safety net: a malformed chip RDPTR could otherwise let
+        // tail run past head (which would later make the ring
+        // think it has a full 256 slots outstanding when in fact
+        // it has 1). Stop at head and warn.
+        if (q.tail == q.head)
+            break;
+    }
+    q.stuck_polls = 0;
+    diag::RecordOk(diag::Layer::Tx, "tx-poll-reclaim", queue_id, reclaimed, q.tail);
+    return reclaimed;
+}
+
+u32 IwlRingsPollTxCompletions(NicInfo& n, IwlRingState* state, u32 queue_id)
+{
+    if (state == nullptr || queue_id >= kIwlNumTxQueues || !state->initialized)
+        return 0;
+    const u32 off = kScdQueueRdptr0 + queue_id * kScdQueueRdptrStride;
+    const u32 chip_rdptr = Mmio32Read(n, off);
+    return IwlRingsApplyTxCompletions(state, queue_id, chip_rdptr);
 }
 
 u32 IwlRingsServiceRx(NicInfo& n, IwlRingState* state)
@@ -400,9 +454,9 @@ void IwlRingsSelfTest()
 
     // SubmitTx now succeeds: copies frame into per-queue scratch,
     // builds TFD at q.head, advances head, "rings" the doorbell
-    // (no-op without mmio_virt). TX completion polling is its own
-    // future slice — for v0 the call returns Ok once the structural
-    // submission has happened.
+    // (no-op without mmio_virt). The IRQ handler / kernel poll
+    // thread later calls IwlRingsPollTxCompletions to advance
+    // `tail` once the chip reports progress.
     {
         const u8 dummy[16] = {0xDE, 0xAD, 0xBE, 0xEF};
         const u32 head_before = s.tx_queues[0].head;
@@ -419,6 +473,38 @@ void IwlRingsSelfTest()
         const u16 packed = ring[head_before].tbs[0].hi_n_len;
         const u16 packed_len = static_cast<u16>((packed >> 4) & 0xFFFu);
         KASSERT(packed_len == sizeof(dummy), "drivers/net/iwlwifi_rings", "packed len in TFD wrong");
+
+        // TX completion bookkeeping: at this point head=1, tail=0,
+        // so the queue has 1 outstanding TFD. With no MMIO mapping
+        // the live PollTxCompletions reads 0xFFFFFFFF and returns
+        // 0 — verify the bookkeeping stays put. Then drive the
+        // test seam directly with a synthesised chip read-pointer.
+        KASSERT(s.tx_queues[0].head == 1, "drivers/net/iwlwifi_rings", "expected head=1 before completion poll");
+        KASSERT(s.tx_queues[0].tail == 0, "drivers/net/iwlwifi_rings", "expected tail=0 before completion poll");
+        KASSERT(IwlRingsPollTxCompletions(n, &s, 0) == 0, "drivers/net/iwlwifi_rings",
+                "poll without MMIO must report zero reclaims");
+        KASSERT(s.tx_queues[0].tail == 0, "drivers/net/iwlwifi_rings",
+                "tail must not advance when chip returns no progress");
+        // Apply with chip_rdptr == tail: stuck-poll path. tail
+        // doesn't move; stuck_polls bumps to 1.
+        KASSERT(IwlRingsApplyTxCompletions(&s, 0, 0) == 0, "drivers/net/iwlwifi_rings",
+                "apply with rdptr==tail must reclaim nothing");
+        KASSERT(s.tx_queues[0].stuck_polls == 1, "drivers/net/iwlwifi_rings", "stuck_polls did not bump");
+        // Apply with chip_rdptr == 1 (chip has moved past our
+        // submitted slot): one slot reclaimed, tail advances to 1,
+        // stuck_polls clears.
+        KASSERT(IwlRingsApplyTxCompletions(&s, 0, 1) == 1, "drivers/net/iwlwifi_rings",
+                "apply with rdptr==1 must reclaim 1 slot");
+        KASSERT(s.tx_queues[0].tail == 1, "drivers/net/iwlwifi_rings", "tail did not advance to 1");
+        KASSERT(s.tx_queues[0].completion_count == 1, "drivers/net/iwlwifi_rings", "completion_count did not bump");
+        KASSERT(s.tx_queues[0].stuck_polls == 0, "drivers/net/iwlwifi_rings", "stuck_polls did not clear");
+        // Quiet ring: head == tail, apply must early-out without
+        // bumping stuck_polls.
+        const u32 stuck_before = s.tx_queues[0].stuck_polls;
+        KASSERT(IwlRingsApplyTxCompletions(&s, 0, 1) == 0, "drivers/net/iwlwifi_rings",
+                "quiet-ring apply must reclaim nothing");
+        KASSERT(s.tx_queues[0].stuck_polls == stuck_before, "drivers/net/iwlwifi_rings",
+                "quiet ring must not bump stuck_polls");
     }
 
     // Bad args: zero length + oversized length.
