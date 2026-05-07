@@ -264,6 +264,22 @@ Implemented:
 - VK_EXT_debug_utils: `vkSetDebugUtilsObjectNameEXT` attaches
   a label to any handle; `VkGetDebugUtilsObjectNameDuet`
   reads it back.  Small fixed-size table (16 most recent).
+- Format introspection: `vkGetPhysicalDeviceFormatProperties` /
+  `vkGetPhysicalDeviceImageFormatProperties` (recognise
+  `VK_FORMAT_B8G8R8A8_UNORM` only; everything else reports
+  zero features / `ErrorFormatNotSupported`).
+- Push descriptors: `vkCmdPushDescriptorSetKHR` records each
+  write as a tape op for stats; no shader to consume.
+- Secondary command buffers: `VkAllocateCommandBuffers2`
+  (level=Secondary), `vkCmdExecuteCommands` recurses into the
+  secondary's tape during replay so its ops actually run.
+  Primary cbs passed to ExecuteCommands are rejected at record
+  time.
+- VK_EXT_debug_utils command-stream labels:
+  `vkCmdBeginDebugUtilsLabelEXT` / `End` / `Insert` (string
+  payload reuses the per-op push-constants slot).
+- Vulkan 1.1 array-form bind: `vkBindBufferMemory2` /
+  `vkBindImageMemory2`.
 - Image transfer suite: `vkCmdCopyImage`, `vkCmdBlitImage`,
   `vkCmdCopyImageToBuffer`, `vkCmdResolveImage`,
   `vkCmdUpdateBuffer` (real bytes when buffer host-visible),

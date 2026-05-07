@@ -230,6 +230,11 @@ enum class CmdOp : u8
     SetBlendConstants = 35,
     SetDepthBounds = 36,
     SetStencilState = 37,
+    BeginDebugLabel = 38,
+    EndDebugLabel = 39,
+    InsertDebugLabel = 40,
+    PushDescriptor = 41,
+    ExecuteCommands = 42,
 };
 
 struct CmdRecord
@@ -293,6 +298,10 @@ struct CmdRecord
     // ClearAttachments counts.
     u32 attachment_count;
     u32 rect_count;
+    // ExecuteCommands secondary cb (single-secondary subset; the
+    // wider entry-point accepts an array but we record only the
+    // first to keep the per-op storage bounded).
+    VkCommandBuffer secondary_cb;
 };
 
 constexpr u32 kCmdTapeCapacity = 32;
@@ -307,6 +316,7 @@ enum class CbState : u8
 struct CmdBufferRecord
 {
     CbState state;
+    bool is_secondary;
     u32 op_count;
     CmdRecord ops[kCmdTapeCapacity];
 };
@@ -450,6 +460,9 @@ u32 g_memory_maps = 0;
 u32 g_image_upload_pixels = 0;
 u32 g_dynamic_renderings = 0;
 u32 g_debug_labels = 0;
+u32 g_secondary_executes = 0;
+u32 g_secondary_ops_replayed = 0;
+u32 g_push_descriptor_writes = 0;
 
 // Tiny debug-utils name table.  A circular slot table keyed by
 // the (handle, name) tuple — we never need more than a handful
@@ -2078,6 +2091,186 @@ VkResult VkGetDebugUtilsObjectNameDuet(u64 object_handle, char* out_buf, u32 buf
     return VkResult::Incomplete;
 }
 
+namespace
+{
+
+VkResult AppendCmdLabel(VkCommandBuffer cb, CmdOp tag, const char* label)
+{
+    CmdRecord op{};
+    op.op = tag;
+    op.push_size = 0;
+    if (label != nullptr)
+    {
+        u32 i = 0;
+        while (i + 1 < kMaxPushConstantBytes && label[i] != '\0')
+        {
+            op.push_data[i] = static_cast<u8>(label[i]);
+            ++i;
+        }
+        op.push_data[i] = 0;
+        op.push_size = i;
+    }
+    return AppendOp(cb, op);
+}
+
+} // namespace
+
+VkResult VkCmdBeginDebugUtilsLabelEXT(VkCommandBuffer cb, const char* label)
+{
+    return AppendCmdLabel(cb, CmdOp::BeginDebugLabel, label);
+}
+
+VkResult VkCmdEndDebugUtilsLabelEXT(VkCommandBuffer cb)
+{
+    return AppendCmdLabel(cb, CmdOp::EndDebugLabel, nullptr);
+}
+
+VkResult VkCmdInsertDebugUtilsLabelEXT(VkCommandBuffer cb, const char* label)
+{
+    return AppendCmdLabel(cb, CmdOp::InsertDebugLabel, label);
+}
+
+VkResult VkCmdPushDescriptorSetKHR(VkCommandBuffer cb, VkPipelineBindPoint bind_point, VkPipelineLayout layout, u32 set,
+                                   u32 write_count, const VkWriteDescriptorSet* writes)
+{
+    (void)bind_point;
+    (void)layout;
+    (void)set;
+    if (write_count == 0)
+        return VkResult::Success;
+    if (writes == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    // Each write is recorded as its own PushDescriptor op so the
+    // counter aggregates correctly.
+    for (u32 i = 0; i < write_count; ++i)
+    {
+        CmdRecord op{};
+        op.op = CmdOp::PushDescriptor;
+        op.dst_buffer = writes[i].resourceHandle; // store handle in any field
+        const VkResult r = AppendOp(cb, op);
+        if (r != VkResult::Success)
+            return r;
+        ++g_push_descriptor_writes;
+    }
+    return VkResult::Success;
+}
+
+VkResult VkAllocateCommandBuffers2(VkDevice dev, VkCommandPool pool, VkCommandBufferLevel level, u32 count,
+                                   VkCommandBuffer* out)
+{
+    const VkResult r = VkAllocateCommandBuffers(dev, pool, count, out);
+    if (r != VkResult::Success)
+        return r;
+    if (level == VkCommandBufferLevel::Secondary)
+    {
+        for (u32 i = 0; i < count; ++i)
+        {
+            if (HandleInRange(out[i], kCmdBufBase))
+                g_cmdbuf_data[SlotOf(out[i], kCmdBufBase)].is_secondary = true;
+        }
+    }
+    return VkResult::Success;
+}
+
+VkResult VkCmdExecuteCommands(VkCommandBuffer cb, u32 count, const VkCommandBuffer* secondaries)
+{
+    if (count == 0)
+        return VkResult::Success;
+    if (secondaries == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    // Validate every secondary up front so a partial record is
+    // never appended.  Spec lets a primary cb call execute on
+    // multiple secondaries; v0 records each as its own op.
+    for (u32 i = 0; i < count; ++i)
+    {
+        if (!HandleInRange(secondaries[i], kCmdBufBase) ||
+            !PoolIsLive(g_cmdbuf_pool, SlotOf(secondaries[i], kCmdBufBase)))
+            return VkResult::ErrorInitializationFailed;
+        if (!g_cmdbuf_data[SlotOf(secondaries[i], kCmdBufBase)].is_secondary)
+            return VkResult::ErrorInitializationFailed; // primary cbs can't be inlined
+    }
+    for (u32 i = 0; i < count; ++i)
+    {
+        CmdRecord op{};
+        op.op = CmdOp::ExecuteCommands;
+        op.secondary_cb = secondaries[i];
+        const VkResult r = AppendOp(cb, op);
+        if (r != VkResult::Success)
+            return r;
+    }
+    return VkResult::Success;
+}
+
+VkResult VkBindBufferMemory2(VkDevice dev, u32 count, const VkBindBufferMemoryInfo* infos)
+{
+    if (count == 0)
+        return VkResult::Success;
+    if (infos == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    for (u32 i = 0; i < count; ++i)
+    {
+        const VkResult r = VkBindBufferMemory(dev, infos[i].buffer, infos[i].memory, infos[i].memoryOffset);
+        if (r != VkResult::Success)
+            return r;
+    }
+    return VkResult::Success;
+}
+
+VkResult VkBindImageMemory2(VkDevice dev, u32 count, const VkBindImageMemoryInfo* infos)
+{
+    if (count == 0)
+        return VkResult::Success;
+    if (infos == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    for (u32 i = 0; i < count; ++i)
+    {
+        const VkResult r = VkBindImageMemory(dev, infos[i].image, infos[i].memory, infos[i].memoryOffset);
+        if (r != VkResult::Success)
+            return r;
+    }
+    return VkResult::Success;
+}
+
+VkResult VkGetPhysicalDeviceFormatProperties(VkPhysicalDevice phys, u32 format, VkFormatProperties* out)
+{
+    if (out == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    if (!HandleInRange(phys, kPhysDevBase) || !PoolIsLive(g_phys_pool, SlotOf(phys, kPhysDevBase)))
+        return VkResult::ErrorInitializationFailed;
+    *out = VkFormatProperties{};
+    if (format == 0) // VK_FORMAT_B8G8R8A8_UNORM
+    {
+        const u32 baseline = kFormatFeatureSampledImage | kFormatFeatureColorAttachment | kFormatFeatureTransferSrc |
+                             kFormatFeatureTransferDst;
+        out->linearTilingFeatures = baseline;
+        out->optimalTilingFeatures = baseline;
+        out->bufferFeatures = kFormatFeatureTransferSrc | kFormatFeatureTransferDst;
+    }
+    return VkResult::Success;
+}
+
+VkResult VkGetPhysicalDeviceImageFormatProperties(VkPhysicalDevice phys, u32 format, u32 type, u32 tiling, u32 usage,
+                                                  u32 flags, VkImageFormatProperties* out)
+{
+    (void)type;
+    (void)tiling;
+    (void)usage;
+    (void)flags;
+    if (out == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    if (!HandleInRange(phys, kPhysDevBase) || !PoolIsLive(g_phys_pool, SlotOf(phys, kPhysDevBase)))
+        return VkResult::ErrorInitializationFailed;
+    if (format != 0)
+        return VkResult::ErrorFormatNotSupported;
+    *out = VkImageFormatProperties{};
+    out->maxExtent = VkExtent3D{16384, 16384, 1};
+    out->maxMipLevels = 14; // log2(16384) + 1
+    out->maxArrayLayers = 1;
+    out->sampleCounts = 1;
+    out->maxResourceSize = 256u * 1024u * 1024u;
+    return VkResult::Success;
+}
+
 // -------------------------------------------------------------------
 // Sampler.
 // -------------------------------------------------------------------
@@ -2512,6 +2705,21 @@ void ReplayResetQueryPool(const CmdRecord& op)
     }
 }
 
+void ReplayCommandBuffer(VkCommandBuffer cb); // forward — recursion through ExecuteCommands
+
+void ReplayExecuteCommands(const CmdRecord& op)
+{
+    if (!HandleInRange(op.secondary_cb, kCmdBufBase) ||
+        !PoolIsLive(g_cmdbuf_pool, SlotOf(op.secondary_cb, kCmdBufBase)))
+        return;
+    const auto& sec = g_cmdbuf_data[SlotOf(op.secondary_cb, kCmdBufBase)];
+    if (!sec.is_secondary || sec.state != CbState::Executable)
+        return;
+    ++g_secondary_executes;
+    g_secondary_ops_replayed += sec.op_count;
+    ReplayCommandBuffer(op.secondary_cb);
+}
+
 void ReplayUpdateBuffer(const CmdRecord& op)
 {
     if (!HandleInRange(op.dst_buffer, kBufferBase) || !PoolIsLive(g_buffer_pool, SlotOf(op.dst_buffer, kBufferBase)))
@@ -2644,12 +2852,19 @@ void ReplayCommandBuffer(VkCommandBuffer cb)
         case CmdOp::ResolveImage:
         case CmdOp::ClearAttachments:       // no concept of bound attachments outside RP begin
         case CmdOp::ClearDepthStencilImage: // no depth buffer
+        case CmdOp::ExecuteCommands:
+            ReplayExecuteCommands(op);
+            break;
         case CmdOp::EndRendering:
         case CmdOp::SetLineWidth:
         case CmdOp::SetDepthBias:
         case CmdOp::SetBlendConstants:
         case CmdOp::SetDepthBounds:
         case CmdOp::SetStencilState:
+        case CmdOp::BeginDebugLabel:
+        case CmdOp::EndDebugLabel:
+        case CmdOp::InsertDebugLabel:
+        case CmdOp::PushDescriptor:
             break;
         case CmdOp::WaitEvents: // no-op replay (events already signalled)
         case CmdOp::BeginQuery: // pairs with EndQuery — write happens at End
@@ -3221,6 +3436,9 @@ GraphicsStats VkStatsSnapshot()
     s.vk_memory_maps = g_memory_maps;
     s.vk_dynamic_renderings = g_dynamic_renderings;
     s.vk_debug_labels = g_debug_labels;
+    s.vk_secondary_executes = g_secondary_executes;
+    s.vk_secondary_ops_replayed = g_secondary_ops_replayed;
+    s.vk_push_descriptor_writes = g_push_descriptor_writes;
     s.vk_queue_submits = g_queue_submits;
     s.vk_command_recorded = g_command_recorded;
     s.vk_command_replayed = g_command_replayed;
@@ -3745,6 +3963,113 @@ bool RunCanonicalLifecycle()
     if (g_dynamic_renderings <= dyn_before)
         return SelftestFail("[selftest:graphics] dynamic rendering counter did not advance", g_dynamic_renderings);
     VkFreeCommandBuffers(dev, pool, 1, &dyn_cb);
+
+    // Format-properties leg: only B8G8R8A8_UNORM (format 0)
+    // is recognised; any other format reports zero features.
+    VkFormatProperties fmt_props{};
+    if (VkGetPhysicalDeviceFormatProperties(phys[0], 0, &fmt_props) != VkResult::Success ||
+        fmt_props.optimalTilingFeatures == 0)
+        return SelftestFail("[selftest:graphics] FormatProperties for B8G8R8A8 reported no features",
+                            fmt_props.optimalTilingFeatures);
+    VkFormatProperties unknown_fmt{};
+    if (VkGetPhysicalDeviceFormatProperties(phys[0], 0xDEAD, &unknown_fmt) != VkResult::Success ||
+        unknown_fmt.optimalTilingFeatures != 0)
+        return SelftestFail("[selftest:graphics] FormatProperties for unknown format leaked features", 0);
+
+    // BindMemory2 leg: bind a buffer through the array form.
+    {
+        VkBuffer arr_buf = 0;
+        VkDeviceMemory arr_mem = 0;
+        if (VkCreateBuffer(dev, 256, &arr_buf) != VkResult::Success ||
+            VkAllocateMemory(dev, 256, 1, &arr_mem) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] bind2 create failed", 0);
+        const VkBindBufferMemoryInfo info{arr_buf, arr_mem, 0};
+        if (VkBindBufferMemory2(dev, 1, &info) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] BindBufferMemory2 failed", 0);
+        if (VkGetBufferDeviceAddress(dev, arr_buf) == 0)
+            return SelftestFail("[selftest:graphics] BufferDeviceAddress reported 0 on bound host-visible buffer", 0);
+        VkDestroyBuffer(dev, arr_buf);
+        VkFreeMemory(dev, arr_mem);
+    }
+
+    // Cmd-debug-label + push-descriptor leg: record a few ops on
+    // a transient cb, submit, assert the push-descriptor
+    // counter advanced.
+    {
+        VkCommandBuffer dbg_cb = 0;
+        if (VkAllocateCommandBuffers(dev, pool, 1, &dbg_cb) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] dbg cb allocate failed", 0);
+        if (VkBeginCommandBuffer(dbg_cb) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] dbg cb begin failed", 0);
+        if (VkCmdBeginDebugUtilsLabelEXT(dbg_cb, "selftest-region") != VkResult::Success)
+            return SelftestFail("[selftest:graphics] BeginDebugUtilsLabel failed", 0);
+        if (VkCmdInsertDebugUtilsLabelEXT(dbg_cb, "midpoint") != VkResult::Success)
+            return SelftestFail("[selftest:graphics] InsertDebugUtilsLabel failed", 0);
+        const VkWriteDescriptorSet pd_write{dset, 0, VkDescriptorType::UniformBuffer, buf};
+        const u32 pd_before = g_push_descriptor_writes;
+        if (VkCmdPushDescriptorSetKHR(dbg_cb, VkPipelineBindPoint::Graphics, pl_layout, 0, 1, &pd_write) !=
+            VkResult::Success)
+            return SelftestFail("[selftest:graphics] PushDescriptorSet failed", 0);
+        if (g_push_descriptor_writes <= pd_before)
+            return SelftestFail("[selftest:graphics] push descriptor counter did not advance", 0);
+        if (VkCmdEndDebugUtilsLabelEXT(dbg_cb) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] EndDebugUtilsLabel failed", 0);
+        if (VkEndCommandBuffer(dbg_cb) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] dbg cb end failed", 0);
+        if (VkQueueSubmit(queue, 1, &dbg_cb, 0) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] dbg cb submit failed", 0);
+        if (VkQueueWaitIdle(queue) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] dbg cb wait failed", 0);
+        VkFreeCommandBuffers(dev, pool, 1, &dbg_cb);
+    }
+
+    // Secondary command buffer leg: record an inner op into a
+    // secondary, then call ExecuteCommands from a primary.
+    {
+        VkCommandBuffer secondary = 0;
+        if (VkAllocateCommandBuffers2(dev, pool, VkCommandBufferLevel::Secondary, 1, &secondary) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] secondary allocate failed", 0);
+        if (VkBeginCommandBuffer(secondary) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] secondary begin failed", 0);
+        // Record three barriers in the secondary so the executes
+        // counter has a non-zero ops_replayed delta to assert.
+        for (u32 i = 0; i < 3; ++i)
+        {
+            if (VkCmdPipelineBarrier(secondary, 0x10, 0x20, 0) != VkResult::Success)
+                return SelftestFail("[selftest:graphics] secondary inner record failed", i);
+        }
+        if (VkEndCommandBuffer(secondary) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] secondary end failed", 0);
+
+        VkCommandBuffer primary = 0;
+        if (VkAllocateCommandBuffers(dev, pool, 1, &primary) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] primary allocate failed", 0);
+        if (VkBeginCommandBuffer(primary) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] primary begin failed", 0);
+        if (VkCmdExecuteCommands(primary, 1, &secondary) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] CmdExecuteCommands failed", 0);
+        // Negative path: a primary cb passed to ExecuteCommands
+        // must be rejected.  Proves the level filter is wired.
+        if (VkCmdExecuteCommands(primary, 1, &primary) != VkResult::ErrorInitializationFailed)
+            return SelftestFail("[selftest:graphics] ExecuteCommands accepted a primary as secondary", 0);
+        if (VkEndCommandBuffer(primary) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] primary end failed", 0);
+
+        const u32 sec_before = g_secondary_executes;
+        const u32 sec_ops_before = g_secondary_ops_replayed;
+        if (VkQueueSubmit(queue, 1, &primary, 0) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] primary submit failed", 0);
+        if (VkQueueWaitIdle(queue) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] primary wait failed", 0);
+        if (g_secondary_executes <= sec_before)
+            return SelftestFail("[selftest:graphics] secondary executes counter did not advance", g_secondary_executes);
+        if (g_secondary_ops_replayed - sec_ops_before < 3)
+            return SelftestFail("[selftest:graphics] secondary ops_replayed did not pick up inner barriers",
+                                g_secondary_ops_replayed - sec_ops_before);
+
+        VkFreeCommandBuffers(dev, pool, 1, &primary);
+        VkFreeCommandBuffers(dev, pool, 1, &secondary);
+    }
 
     // WSI leg: surface + swapchain + acquire / present cycle.
     // Skipped when no framebuffer is live (headless boot) — the

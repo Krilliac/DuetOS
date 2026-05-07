@@ -375,6 +375,41 @@ VkResult VkGetPhysicalDeviceProperties2(VkPhysicalDevice phys, VkPhysicalDeviceP
 VkResult VkGetPhysicalDeviceFeatures2(VkPhysicalDevice phys, VkPhysicalDeviceFeatures2* out);
 VkResult VkGetPhysicalDeviceMemoryProperties2(VkPhysicalDevice phys, VkPhysicalDeviceMemoryProperties2* out);
 
+// -------------------------------------------------------------------
+// Format properties.
+// -------------------------------------------------------------------
+//
+// Reports which features are supported for a given pixel
+// format.  Our v0 ICD recognises only one format
+// (VK_FORMAT_B8G8R8A8_UNORM, encoded as 0) and reports a
+// minimal feature set against it.
+
+inline constexpr u32 kFormatFeatureSampledImage = 0x0001;
+inline constexpr u32 kFormatFeatureColorAttachment = 0x0080;
+inline constexpr u32 kFormatFeatureTransferSrc = 0x4000;
+inline constexpr u32 kFormatFeatureTransferDst = 0x8000;
+
+struct VkFormatProperties
+{
+    u32 linearTilingFeatures;
+    u32 optimalTilingFeatures;
+    u32 bufferFeatures;
+};
+
+VkResult VkGetPhysicalDeviceFormatProperties(VkPhysicalDevice phys, u32 format, VkFormatProperties* out);
+
+struct VkImageFormatProperties
+{
+    VkExtent3D maxExtent;
+    u32 maxMipLevels;
+    u32 maxArrayLayers;
+    u32 sampleCounts; // VK_SAMPLE_COUNT_1_BIT only
+    u64 maxResourceSize;
+};
+
+VkResult VkGetPhysicalDeviceImageFormatProperties(VkPhysicalDevice phys, u32 format, u32 type, u32 tiling, u32 usage,
+                                                  u32 flags, VkImageFormatProperties* out);
+
 VkResult VkCreateDevice(VkPhysicalDevice phys, VkDevice* out);
 void VkDestroyDevice(VkDevice dev);
 
@@ -650,6 +685,71 @@ struct VkDebugUtilsObjectNameInfoEXT
 
 VkResult VkSetDebugUtilsObjectNameEXT(VkDevice dev, const VkDebugUtilsObjectNameInfoEXT* info);
 VkResult VkGetDebugUtilsObjectNameDuet(u64 object_handle, char* out_buf, u32 buf_len);
+
+/// Debug-label brackets in the cmd stream (VK_EXT_debug_utils).
+/// `vkCmdInsertDebugUtilsLabelEXT` records a single labelled
+/// marker; the begin/end pair brackets a region.  The label
+/// strings ride along inside the cb's tape (reuse the
+/// push-constants byte slot).
+VkResult VkCmdBeginDebugUtilsLabelEXT(VkCommandBuffer cb, const char* label);
+VkResult VkCmdEndDebugUtilsLabelEXT(VkCommandBuffer cb);
+VkResult VkCmdInsertDebugUtilsLabelEXT(VkCommandBuffer cb, const char* label);
+
+// -------------------------------------------------------------------
+// Push descriptors (VK_KHR_push_descriptor).
+// -------------------------------------------------------------------
+//
+// Pushes a descriptor write straight onto the command buffer
+// without going through a descriptor pool — handy for "I just
+// want to bind one resource for one draw" cases.  Recorded only;
+// no shader to consume.
+
+struct VkWriteDescriptorSet; // defined further down in the descriptor section
+VkResult VkCmdPushDescriptorSetKHR(VkCommandBuffer cb, VkPipelineBindPoint bind_point, VkPipelineLayout layout, u32 set,
+                                   u32 write_count, const VkWriteDescriptorSet* writes);
+
+// -------------------------------------------------------------------
+// Secondary command buffers + execute.
+// -------------------------------------------------------------------
+//
+// vkAllocateCommandBuffers v0 always returns "primary" cbs; this
+// slice introduces a separate Allocate2 path that takes a
+// "level" hint, plus vkCmdExecuteCommands which records "execute
+// the supplied secondary cbs as if their tape were inlined".
+// Replay simply walks the secondary cb's tape inside the
+// primary's replay so the recorded ops actually run.
+
+enum class VkCommandBufferLevel : u32
+{
+    Primary = 0,
+    Secondary = 1,
+};
+
+VkResult VkAllocateCommandBuffers2(VkDevice dev, VkCommandPool pool, VkCommandBufferLevel level, u32 count,
+                                   VkCommandBuffer* out);
+
+VkResult VkCmdExecuteCommands(VkCommandBuffer cb, u32 count, const VkCommandBuffer* secondaries);
+
+// -------------------------------------------------------------------
+// Bind-memory-2 array forms (Vulkan 1.1).
+// -------------------------------------------------------------------
+
+struct VkBindBufferMemoryInfo
+{
+    VkBuffer buffer;
+    VkDeviceMemory memory;
+    u64 memoryOffset;
+};
+
+struct VkBindImageMemoryInfo
+{
+    VkImage image;
+    VkDeviceMemory memory;
+    u64 memoryOffset;
+};
+
+VkResult VkBindBufferMemory2(VkDevice dev, u32 count, const VkBindBufferMemoryInfo* infos);
+VkResult VkBindImageMemory2(VkDevice dev, u32 count, const VkBindImageMemoryInfo* infos);
 
 // -------------------------------------------------------------------
 // Submission + sync
@@ -978,6 +1078,9 @@ struct GraphicsStats
     u32 vk_memory_maps;                // total VkMapMemory calls
     u32 vk_dynamic_renderings;         // total CmdBeginRendering replays
     u32 vk_debug_labels;               // total VkSetDebugUtilsObjectNameEXT calls
+    u32 vk_secondary_executes;         // total VkCmdExecuteCommands replays
+    u32 vk_secondary_ops_replayed;     // total ops replayed inside a secondary
+    u32 vk_push_descriptor_writes;     // total VkCmdPushDescriptorSetKHR writes
     u32 vk_queue_submits;              // total VkQueueSubmit calls
     u32 vk_command_recorded;           // total vkCmd* opcodes recorded
     u32 vk_command_replayed;           // total vkCmd* opcodes replayed in submit
