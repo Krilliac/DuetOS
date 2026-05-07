@@ -1,40 +1,40 @@
 {
   "asset_count": 6,
   "by_asset": {
-    "413989768": {
-      "count": 0,
-      "name": "SHA256SUMS.txt",
-      "release_tag": "latest-release"
-    },
-    "413989769": {
-      "count": 0,
-      "name": "duetos-release.iso",
-      "release_tag": "latest-release"
-    },
-    "413989770": {
-      "count": 0,
-      "name": "duetos-kernel-release.elf",
-      "release_tag": "latest-release"
-    },
-    "413989805": {
-      "count": 0,
-      "name": "duetos-kernel-debug.elf",
-      "release_tag": "latest-debug"
-    },
-    "413989807": {
+    "413990310": {
       "count": 0,
       "name": "duetos-debug.iso",
       "release_tag": "latest-debug"
     },
-    "413989808": {
+    "413990312": {
+      "count": 0,
+      "name": "duetos-kernel-debug.elf",
+      "release_tag": "latest-debug"
+    },
+    "413990324": {
       "count": 0,
       "name": "SHA256SUMS.txt",
       "release_tag": "latest-debug"
+    },
+    "413990340": {
+      "count": 0,
+      "name": "SHA256SUMS.txt",
+      "release_tag": "latest-release"
+    },
+    "413990341": {
+      "count": 0,
+      "name": "duetos-kernel-release.elf",
+      "release_tag": "latest-release"
+    },
+    "413990342": {
+      "count": 0,
+      "name": "duetos-release.iso",
+      "release_tag": "latest-release"
     }
   },
   "delta_this_run": 0,
   "lifetime_total": 9,
   "live_assets_total": 0,
   "repo": "Krilliac/DuetOS",
-  "snapshot_at": "2026-05-07T01:31:29+00:00"
+  "snapshot_at": "2026-05-07T02:15:28+00:00"
 }
