@@ -10,8 +10,9 @@
 // full (NoSpaceExtents otherwise).
 
 use crate::block_dev::BlockDevice;
+use crate::crc32::crc32;
 use crate::format::{
-    Extent, Node, BLOCK_SIZE, INVALID_NODE_ID, MAX_INLINE_EXTENTS, NODE_KIND_DIR,
+    Extent, Node, BITMAP_LBA, BLOCK_SIZE, INVALID_NODE_ID, MAX_INLINE_EXTENTS, NODE_KIND_DIR,
     NODE_KIND_UNUSED, ROOT_NODE_ID,
 };
 use crate::fs::{Fs, FsError, FsResult};
@@ -215,11 +216,22 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
             self.bitmap.mark_used(start + i);
         }
         self.bitmap.flush(self.dev).map_err(|_| FsError::Io)?;
+        // Update bitmap's CRC entry to match the new on-disk content,
+        // and seed each freshly-allocated block's CRC with the
+        // zero-fill we're about to write. Without this, fsck reports
+        // a CRC mismatch for the bitmap (its bits changed) and for
+        // every extended block (table still says 0).
+        let mut bm = [0u8; BLOCK_SIZE];
+        self.dev.read_block(BITMAP_LBA, &mut bm).map_err(|_| FsError::Io)?;
+        self.crc_table.set(BITMAP_LBA, crc32(&bm));
         let zero = [0u8; BLOCK_SIZE];
+        let zero_crc = crc32(&zero);
         for i in 0..n
         {
             self.dev.write_block(start + i, &zero).map_err(|_| FsError::Io)?;
+            self.crc_table.set(start + i, zero_crc);
         }
+        self.crc_table.flush(self.dev).map_err(|_| FsError::Io)?;
         Ok(true)
     }
 }
