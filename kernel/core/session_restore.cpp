@@ -366,7 +366,9 @@ void FormatPayload(char* dst, u64 cap, u64* len_out)
         }
         u32 x = 0;
         u32 y = 0;
-        if (!v::WindowGetBounds(h, &x, &y, nullptr, nullptr))
+        u32 w = 0;
+        u32 hgt = 0;
+        if (!v::WindowGetBounds(h, &x, &y, &w, &hgt))
         {
             continue;
         }
@@ -380,6 +382,23 @@ void FormatPayload(char* dst, u64 cap, u64* len_out)
         AppendU32(dst, &pos, cap, i);
         Append(dst, &pos, cap, ".y=");
         AppendU32(dst, &pos, cap, y);
+        Append(dst, &pos, cap, "\n");
+
+        // Width/height — captures user-driven resizes (e.g. the
+        // ImageView Ctrl+wheel / +/- zoom path, which mutates
+        // the window dimensions rather than a separate zoom
+        // factor). Only emitted when the bounds query succeeds;
+        // the apply side tolerates either field being absent.
+        Append(dst, &pos, cap, "win.");
+        AppendU32(dst, &pos, cap, i);
+        Append(dst, &pos, cap, ".w=");
+        AppendU32(dst, &pos, cap, w);
+        Append(dst, &pos, cap, "\n");
+
+        Append(dst, &pos, cap, "win.");
+        AppendU32(dst, &pos, cap, i);
+        Append(dst, &pos, cap, ".h=");
+        AppendU32(dst, &pos, cap, hgt);
         Append(dst, &pos, cap, "\n");
     }
 
@@ -558,7 +577,7 @@ bool ApplyOne(const char* key, const char* val)
         }
         return true;
     }
-    // win.<role>.x or win.<role>.y
+    // win.<role>.x | win.<role>.y | win.<role>.w | win.<role>.h
     if (key[0] == 'w' && key[1] == 'i' && key[2] == 'n' && key[3] == '.')
     {
         const char* p = key + 4;
@@ -574,7 +593,7 @@ bool ApplyOne(const char* key, const char* val)
             return false;
         }
         const char axis = p[i + 1];
-        if ((axis != 'x' && axis != 'y') || p[i + 2] != 0)
+        if ((axis != 'x' && axis != 'y' && axis != 'w' && axis != 'h') || p[i + 2] != 0)
         {
             return false;
         }
@@ -598,9 +617,23 @@ bool ApplyOne(const char* key, const char* val)
         {
             v::WindowMoveTo(h, num, cy);
         }
-        else
+        else if (axis == 'y')
         {
             v::WindowMoveTo(h, cx, num);
+        }
+        else if (axis == 'w')
+        {
+            // WindowResizeTo treats 0 as "leave unchanged" — pass
+            // num for the width axis, 0 for height. The matching
+            // .h line (if present) lands the height in a follow-up
+            // call. WindowResizeTo clamps against the framebuffer
+            // so a stale-config height bigger than the screen is
+            // a no-op rather than a corruption.
+            v::WindowResizeTo(h, num, 0);
+        }
+        else
+        {
+            v::WindowResizeTo(h, 0, num);
         }
         return true;
     }
@@ -760,7 +793,7 @@ void SessionRestoreSelfTest()
     u64 spos = 0;
     Append(synth, &spos, sizeof(synth), "theme=");
     Append(synth, &spos, sizeof(synth), kSynthTheme);
-    Append(synth, &spos, sizeof(synth), "\nwin.0.x=42\nwin.0.y=84\n");
+    Append(synth, &spos, sizeof(synth), "\nwin.0.x=42\nwin.0.y=84\nwin.0.w=320\nwin.0.h=240\n");
     // Synthetic system-knob block. Each of these values is
     // distinguishable from the boot defaults so a sub-check that
     // fails to apply leaves an observable gap.
@@ -773,8 +806,10 @@ void SessionRestoreSelfTest()
     const v::ThemeId orig_theme = v::ThemeCurrentId();
     u32 ox = 0;
     u32 oy = 0;
+    u32 ow = 0;
+    u32 oh = 0;
     const v::WindowHandle calc = v::ThemeRoleWindow(v::ThemeRole::Calculator);
-    const bool have_calc = (calc != v::kWindowInvalid) && v::WindowGetBounds(calc, &ox, &oy, nullptr, nullptr);
+    const bool have_calc = (calc != v::kWindowInvalid) && v::WindowGetBounds(calc, &ox, &oy, &ow, &oh);
 
     // Snapshot the live system-knob state so we can restore it
     // after the round-trip — this self-test must not perturb
@@ -808,25 +843,31 @@ void SessionRestoreSelfTest()
     bool win_ok = true;
     u32 nx_dbg = 0;
     u32 ny_dbg = 0;
+    u32 nw_dbg = 0;
+    u32 nh_dbg = 0;
     bool got_bounds = false;
     if (have_calc)
     {
-        got_bounds = v::WindowGetBounds(calc, &nx_dbg, &ny_dbg, nullptr, nullptr);
-        if (!got_bounds || nx_dbg != 42 || ny_dbg != 84)
+        got_bounds = v::WindowGetBounds(calc, &nx_dbg, &ny_dbg, &nw_dbg, &nh_dbg);
+        if (!got_bounds || nx_dbg != 42 || ny_dbg != 84 || nw_dbg != 320 || nh_dbg != 240)
         {
             ok = false;
             win_ok = false;
         }
-        // Restore original calc position.
+        // Restore the original calc geometry — both position
+        // and size, so the test leaves no observable drift.
         v::WindowMoveTo(calc, ox, oy);
+        v::WindowResizeTo(calc, ow, oh);
     }
     if (!win_ok)
     {
-        KLOG_WARN("session", "self-test: window-position sub-check FAILED");
+        KLOG_WARN("session", "self-test: window-geometry sub-check FAILED");
         KLOG_DEBUG_V("session", "  have_calc", have_calc ? 1u : 0u);
         KLOG_DEBUG_V("session", "  got_bounds", got_bounds ? 1u : 0u);
         KLOG_DEBUG_V("session", "  observed nx", nx_dbg);
         KLOG_DEBUG_V("session", "  observed ny", ny_dbg);
+        KLOG_DEBUG_V("session", "  observed nw", nw_dbg);
+        KLOG_DEBUG_V("session", "  observed nh", nh_dbg);
     }
 
     // System-knob round-trip checks. Each compares the live value
@@ -891,7 +932,7 @@ void SessionRestoreSelfTest()
 
     if (ok)
     {
-        SerialWrite("[session] self-test OK (theme + window + knob round-trip)\n");
+        SerialWrite("[session] self-test OK (theme + window xy/wh + knob round-trip)\n");
     }
     else
     {

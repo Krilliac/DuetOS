@@ -22,6 +22,8 @@
  *   theme=DARK
  *   win.0.x=200       ; ThemeRole::Calculator
  *   win.0.y=120
+ *   win.0.w=400       ; user-resized (e.g. ImageView zoom path)
+ *   win.0.h=300
  *   win.1.x=300       ; ThemeRole::Notes
  *   win.1.y=80
  *   mouse.dblclick=50 ; WindowDoubleClickTicks
