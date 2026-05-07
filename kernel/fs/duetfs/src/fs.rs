@@ -3,16 +3,17 @@
 // `Fs<'d, D>` borrows a block device and caches the superblock +
 // free-block bitmap. Path / directory / file ops live in ops.rs;
 // this file holds the foundations: open, sync, node-table I/O,
-// and contiguous-extent (de)allocation.
+// extent allocation/free, superblock CRC verification.
 //
 // Nothing here allocates dynamically — every buffer is on the stack.
 
 use crate::alloc_bitmap::BitmapAllocator;
 use crate::block_dev::BlockDevice;
+use crate::crc32::crc32;
 use crate::format::{
-    blocks_for_bytes, Node, Superblock, BLOCK_SIZE, BITMAP_LBA, DATA_LBA, MAGIC, NAME_MAX,
-    NODE_COUNT, NODE_KIND_DIR, NODE_KIND_UNUSED, NODE_SIZE, NODE_TABLE_BLOCKS,
-    NODE_TABLE_LBA, NODES_PER_BLOCK, ROOT_NODE_ID, SUPERBLOCK_LBA, VERSION,
+    Node, Superblock, BITMAP_LBA, BLOCK_SIZE, DATA_LBA, MAGIC, MAX_INLINE_EXTENTS, NAME_MAX,
+    NODE_COUNT, NODE_KIND_UNUSED, NODE_SIZE, NODE_TABLE_BLOCKS, NODE_TABLE_LBA,
+    NODES_PER_BLOCK, ROOT_NODE_ID, SUPERBLOCK_LBA, VERSION,
 };
 
 #[derive(Clone, Copy)]
@@ -27,8 +28,10 @@ pub enum FsError
     DirNotEmpty,
     NoSpaceData,
     NoSpaceNodes,
+    NoSpaceExtents,
     Invalid,
     ReadOnly,
+    Corrupt,
 }
 
 pub type FsResult<T> = Result<T, FsError>;
@@ -59,23 +62,31 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         {
             return Err(FsError::Invalid);
         }
+        // Verify CRC. We zero out the sb_crc32 field in the
+        // computed image and recompute over the same span.
+        let want = sb.sb_crc32;
+        let got = compute_sb_crc(&sb);
+        if want != got
+        {
+            return Err(FsError::Corrupt);
+        }
         let bitmap = BitmapAllocator::load(dev, sb.total_blocks).map_err(|_| FsError::Io)?;
         Ok(Self { dev, sb, bitmap })
     }
 
-    #[allow(dead_code)] // exposed for future stat / df callers
+    #[allow(dead_code)]
     pub fn superblock(&self) -> &Superblock
     {
         &self.sb
     }
 
-    #[allow(dead_code)] // exposed for future stat / df callers
+    #[allow(dead_code)]
     pub fn free_blocks(&self) -> u32
     {
         self.bitmap.free_count()
     }
 
-    #[allow(dead_code)] // bitmap is auto-flushed on every mutation today
+    #[allow(dead_code)]
     pub fn sync(&mut self) -> FsResult<()>
     {
         self.bitmap.flush(self.dev).map_err(|_| FsError::Io)?;
@@ -137,8 +148,6 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
     {
         let lba = self.bitmap.alloc_run(n).ok_or(FsError::NoSpaceData)?;
         self.bitmap.flush(self.dev).map_err(|_| FsError::Io)?;
-        // Zero-init for safety — a fresh allocation with stale bytes
-        // would leak whatever the previous owner wrote there.
         let zero = [0u8; BLOCK_SIZE];
         for i in 0..n
         {
@@ -154,7 +163,19 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         Ok(())
     }
 
-    // -------- Helpers --------
+    pub(crate) fn free_node_extents(&mut self, node: &Node) -> FsResult<()>
+    {
+        let n = (node.extent_count as usize).min(MAX_INLINE_EXTENTS);
+        for i in 0..n
+        {
+            let e = node.extents[i];
+            if e.blocks > 0 && e.block != 0
+            {
+                self.free_run(e.block, e.blocks)?;
+            }
+        }
+        Ok(())
+    }
 
     pub(crate) fn validate_name(&self, name: &[u8]) -> FsResult<()>
     {
@@ -187,7 +208,8 @@ fn read_superblock(block: &[u8]) -> Superblock
         node_table_blocks: 0,
         data_lba: 0,
         free_blocks: 0,
-        reserved: [0; 5],
+        sb_crc32: 0,
+        reserved: [0; 4],
     };
     let raw = unsafe {
         core::slice::from_raw_parts_mut(
@@ -196,6 +218,21 @@ fn read_superblock(block: &[u8]) -> Superblock
         )
     };
     raw.copy_from_slice(&block[..core::mem::size_of::<Superblock>()]);
-    let _ = (NODE_KIND_DIR, blocks_for_bytes(0)); // suppress unused-import noise
     sb
+}
+
+/// Compute the CRC32 over a superblock as it should be persisted —
+/// i.e. with the `sb_crc32` field zeroed. Both write_superblock
+/// (mkfs.rs) and Fs::open use this so the algorithm is in lockstep.
+pub(crate) fn compute_sb_crc(sb: &Superblock) -> u32
+{
+    let mut copy = *sb;
+    copy.sb_crc32 = 0;
+    let raw = unsafe {
+        core::slice::from_raw_parts(
+            (&copy as *const Superblock) as *const u8,
+            core::mem::size_of::<Superblock>(),
+        )
+    };
+    crc32(raw)
 }

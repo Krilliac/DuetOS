@@ -36,16 +36,6 @@ bool BytesEqual(const u8* a, const char* literal, usize n)
     return true;
 }
 
-usize CStrLen(const char* s)
-{
-    usize n = 0;
-    while (s[n] != '\0')
-    {
-        ++n;
-    }
-    return n;
-}
-
 void Expect(bool cond, const char* what)
 {
     if (!cond)
@@ -147,6 +137,59 @@ u32 DuetFsBoot()
         duetos::core::Panic("duetfs/boot", "VfsMount /duetfs failed");
     }
     KLOG_INFO("duetfs/boot", "OK — /duetfs mounted (256 KiB RAM, /etc/version seeded)");
+
+    // Probe every registered kernel block device. Anything that
+    // already holds a v2 DuetFS superblock gets mounted; blank
+    // devices are left alone (auto-mkfs of a real disk is too
+    // destructive to do silently). Skip partition-view handles —
+    // they show up as their own entries and we'd double-count.
+    const u32 dev_count = drivers::storage::BlockDeviceCount();
+    u32 mounted = 0;
+    for (u32 h = 0; h < dev_count; ++h)
+    {
+        if (drivers::storage::BlockDeviceIsPartition(h))
+        {
+            continue;
+        }
+        if (drivers::storage::BlockDeviceSectorCount(h) < kMinDiskBlocks)
+        {
+            continue;
+        }
+        if (!ProbeBlockHandle(h))
+        {
+            continue;
+        }
+        char mp[24] = {};
+        // Build "/disks/duetfs<N>" — N up to 999 is plenty.
+        const char prefix[] = "/disks/duetfs";
+        for (u32 i = 0; i < sizeof(prefix) - 1; ++i)
+        {
+            mp[i] = prefix[i];
+        }
+        u32 n = mounted;
+        u32 digits[3] = {};
+        u32 nd = 0;
+        do
+        {
+            digits[nd++] = n % 10;
+            n /= 10;
+        } while (n != 0 && nd < 3);
+        for (u32 i = 0; i < nd; ++i)
+        {
+            mp[sizeof(prefix) - 1 + i] = static_cast<char>('0' + digits[nd - 1 - i]);
+        }
+        mp[sizeof(prefix) - 1 + nd] = '\0';
+        const auto pmid = duetos::fs::VfsMount(mp, duetos::fs::FsType::DuetFs, h);
+        if (pmid != duetos::fs::kInvalidMountId)
+        {
+            ++mounted;
+            KLOG_INFO_V("duetfs/boot", "mounted on-disk DuetFS at /disks/duetfsN; handle", h);
+        }
+    }
+    if (mounted > 0)
+    {
+        KLOG_INFO_V("duetfs/boot", "on-disk DuetFS volumes mounted", mounted);
+    }
     return g_boot_handle;
 }
 
@@ -218,7 +261,49 @@ void DuetFsSelfTest()
     Expect(duetfs_lookup(&scratch, reinterpret_cast<const u8*>("/.."), 4, &res) == kStatusInvalid,
            "/.. unexpectedly accepted");
 
-    KLOG_INFO("duetfs/selftest", "OK — v1 mkfs/create/write/read/mkdir/unlink/truncate passed");
+    // 8. Multi-extent grow. Truncate up past one extent's worth of
+    //    blocks — the grow path should append a new extent rather
+    //    than realloc-and-copy. Verify the file still reads back
+    //    correctly across the extent boundary.
+    u32 big_id = 0;
+    ExpectStatus(duetfs_create_path(&scratch, reinterpret_cast<const u8*>("/big.bin"), 9, kKindFile, &big_id),
+                 kStatusOk, "create /big.bin failed");
+    // Write a recognisable 12 KiB pattern that spans 3 blocks. The
+    // initial extent is 1 block; the second 4 KiB triggers grow.
+    u8 pattern[12 * 1024];
+    for (u32 i = 0; i < sizeof(pattern); ++i)
+    {
+        pattern[i] = static_cast<u8>((i * 7 + 13) & 0xFF);
+    }
+    ExpectStatus(duetfs_write_at(&scratch, big_id, 0, pattern, sizeof(pattern), &wrote), kStatusOk,
+                 "write /big.bin failed");
+    Expect(wrote == sizeof(pattern), "big write short");
+    u8 readback[12 * 1024] = {};
+    ExpectStatus(duetfs_read_file(&scratch, big_id, 0, readback, sizeof(readback), &got), kStatusOk,
+                 "read /big.bin failed");
+    Expect(got == sizeof(pattern), "big read short");
+    for (u32 i = 0; i < sizeof(pattern); ++i)
+    {
+        if (readback[i] != pattern[i])
+        {
+            duetos::core::PanicWithValue("duetfs/selftest", "big readback mismatch", i);
+        }
+    }
+
+    // 9. CRC32 corruption detection. Flip a bit in the on-disk
+    //    superblock; the next probe should reject it (kStatusCorrupt
+    //    on Fs::open).
+    g_scratch_image[8] ^= 0x01u; // anywhere outside magic; trips CRC
+    Expect(duetfs_probe(&scratch) == 0, "probe accepted a CRC-corrupted SB");
+    g_scratch_image[8] ^= 0x01u; // restore; subsequent ops resume
+
+    // 10. fsck on a clean post-mkfs FS — should report zero leaks.
+    FsckReport rep{};
+    ExpectStatus(duetfs_fsck(&scratch, /*repair=*/0u, &rep), kStatusOk, "fsck clean failed");
+    Expect(rep.leaked_blocks == 0 && rep.missing_blocks == 0 && rep.bad_extents == 0,
+           "fsck reported issues on clean FS");
+
+    KLOG_INFO("duetfs/selftest", "OK — v2 multi-extent + CRC + fsck + v1 surface passed");
 }
 
 } // namespace duetos::fs::duetfs

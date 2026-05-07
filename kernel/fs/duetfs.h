@@ -40,14 +40,19 @@ Device MakeBlockHandleDevice(u32 block_handle);
 bool ProbeBlockHandle(u32 block_handle);
 
 /// Boot-time DuetFS bring-up:
-///   1. Create a RAM block device (size = kBootImageBytes).
-///   2. mkfs it.
-///   3. Seed /etc/version with the kernel build banner.
-///   4. Mount at /duetfs (FsType::DuetFs).
+///   1. Create the in-memory boot volume (kBootImageBytes in .bss).
+///   2. mkfs it + seed /etc/version + mount at /duetfs.
+///   3. Walk every kernel block-device handle. For each handle
+///      that's not a partition view and is at least kMinDiskBlocks
+///      blocks: probe — if the device already holds a v2 DuetFS
+///      superblock, mount it at /disks/duetfs<N>; if it's blank
+///      (probe fails), do nothing (we never auto-mkfs a real
+///      device, that's a destructive operation that requires an
+///      explicit user command).
 ///
-/// On failure, panics with subsystem `duetfs/boot`. Returns the
-/// block handle of the freshly-mounted RAM disk so callers can
-/// run further setup or self-tests against it.
+/// On failure of step 1/2, panics with subsystem `duetfs/boot`.
+/// Steps 3+ log + skip on failure (never panic — a misbehaving
+/// disk shouldn't take down the boot).
 u32 DuetFsBoot();
 
 /// Boot-time self-test. Runs after DuetFsBoot. Exercises:
@@ -64,6 +69,12 @@ void DuetFsSelfTest();
 /// Size of the boot-time DuetFS image (256 KiB = 64 blocks).
 inline constexpr u32 kBootImageBlocks = 64;
 inline constexpr u32 kBootImageBytes = kBootImageBlocks * kBlockSize;
+
+/// Minimum block count for an existing kernel block device to be
+/// considered as a candidate DuetFS volume during the boot probe.
+/// 7 blocks is the minimum a v2 image can occupy (1 SB + 1 bitmap
+/// + 4 node table + 1 data block).
+inline constexpr u32 kMinDiskBlocks = 7;
 
 /// Sentinel block_handle stored in the mount table for the
 /// memory-backed boot volume (the real kernel block-device

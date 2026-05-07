@@ -35,6 +35,8 @@ const STATUS_NO_SPACE_DATA: u32 = 8;
 const STATUS_NO_SPACE_NODES: u32 = 9;
 const STATUS_IO: u32 = 10;
 const STATUS_READ_ONLY: u32 = 11;
+const STATUS_NO_SPACE_EXTENTS: u32 = 12;
+const STATUS_CORRUPT: u32 = 13;
 
 #[repr(C)]
 pub struct DuetFsDevice
@@ -72,6 +74,8 @@ fn err_to_status(e: FsError) -> u32
         FsError::NoSpaceNodes => STATUS_NO_SPACE_NODES,
         FsError::Io => STATUS_IO,
         FsError::ReadOnly => STATUS_READ_ONLY,
+        FsError::NoSpaceExtents => STATUS_NO_SPACE_EXTENTS,
+        FsError::Corrupt => STATUS_CORRUPT,
     }
 }
 
@@ -287,6 +291,49 @@ pub unsafe extern "C" fn duetfs_truncate(
     match fs.truncate(node_id, new_size)
     {
         Ok(()) => STATUS_OK,
+        Err(e) => err_to_status(e),
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct DuetFsFsckReport
+{
+    pub leaked_blocks: u32,
+    pub missing_blocks: u32,
+    pub orphan_nodes: u32,
+    pub bad_extents: u32,
+    pub repaired: u32,
+    pub sb_crc_mismatch: u32,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_fsck(
+    desc: *const DuetFsDevice, repair: u32, out: *mut DuetFsFsckReport,
+) -> c_uint
+{
+    if !out.is_null()
+    {
+        unsafe { *out = DuetFsFsckReport::default() };
+    }
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    let mut fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
+    match fs.fsck(repair != 0)
+    {
+        Ok(r) => {
+            if !out.is_null()
+            {
+                unsafe {
+                    (*out).leaked_blocks = r.leaked_blocks;
+                    (*out).missing_blocks = r.missing_blocks;
+                    (*out).orphan_nodes = r.orphan_nodes;
+                    (*out).bad_extents = r.bad_extents;
+                    (*out).repaired = r.repaired;
+                    (*out).sb_crc_mismatch = r.sb_crc_mismatch;
+                }
+            }
+            STATUS_OK
+        }
         Err(e) => err_to_status(e),
     }
 }

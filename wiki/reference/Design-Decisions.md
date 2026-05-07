@@ -6044,5 +6044,100 @@ doc helps future readers audit the trail.
   - Filesystem track — DuetFS surface flips from "read-only
     proof of concept" to "primary FS with write path".
 
+---
+
+### DD-FS-DUETFS-V2 — DuetFS v2: multi-extent + CRC + fsck + on-disk auto-mount
+
+- **Scope & commit:** `kernel/fs/duetfs/src/format.rs` + new
+  `crc32.rs` + new `fsck.rs` + extent-aware `ops.rs` + extent-aware
+  `ops_dir.rs::grow_file` + `mkfs.rs` (writes CRC) + `ffi.rs`
+  (`duetfs_fsck` + new status codes) + `kernel/fs/duetfs.cpp`
+  (boot-time disk probe).
+
+- **Decision:**
+  1. **Multi-extent files**: Node carries up to 8 inline extents
+     instead of a single contiguous extent. `grow_file` first tries
+     to extend the last extent in place (cheap), then allocates a
+     new extent if a slot is free, then returns
+     `kStatusNoSpaceExtents` (no realloc-and-copy). This drops the
+     v1 single-extent constraint without dragging in indirect
+     blocks.
+  2. **Superblock CRC32 (zlib polynomial 0xEDB88320)** —
+     foundation for corruption detection. mkfs writes it; mutation
+     paths (today: only fsck-with-repair) rewrite it. `Fs::open`
+     verifies on every mount and returns `kStatusCorrupt` on
+     mismatch.
+  3. **fsck walks the reachable tree, recomputes the should-be
+     bitmap, diffs against on-disk.** Optional repair rewrites
+     the bitmap and the superblock with a fresh CRC + `free_blocks`.
+     Today's fsck handles bitmap drift; orphan sweep + cycle
+     detection + per-block CRCs land later.
+  4. **Boot probe + on-disk auto-mount.** Every kernel block-device
+     handle that's not a partition view and holds a v2 superblock
+     gets mounted at `/disks/duetfs<N>`. Blank devices are NEVER
+     auto-mkfs'd — that's a destructive operation that requires an
+     explicit user command (in a future userland-shell slice).
+  5. **Format-version bump from 2 to 3.** Magic stays
+     `"DuetFS01"` to keep the dump tool's grep stable; the version
+     field signals the layout difference. v1 images are rejected
+     with `kStatusInvalid` (version mismatch) by v2 readers — there
+     was no persistent v1 storage in the wild, so the break is
+     real but harmless.
+  6. **Per-block CRCs deliberately deferred to a follow-up.**
+     Storing CRCs alongside data blocks needs either a separate CRC
+     region (file-system-wide table) or per-block trailers (cuts
+     usable block size). Both are real design decisions — neither
+     fits in this slice.
+
+- **Why:**
+  - Multi-extent: v1's "realloc-and-copy on grow past extent"
+    was correct but quadratic for streaming writes. With 8 inline
+    extents, a streaming write that starts at 0 and ends at 32 KiB
+    finishes with ≤ 8 allocations and zero copies. The next
+    cliff (file > 8 extents worth of capacity) lands when first
+    workload hits it.
+  - SB CRC: cheap (one CRC per mount + on every mutation today,
+    none of those are hot-path), catches torn writes from a power
+    loss during the SB write. Per-block CRCs would catch the
+    much wider class of "block X is corrupt" — but they're a
+    bigger design decision.
+  - fsck: necessary the moment there's any persistence story. v2's
+    `.bss`-backed boot image doesn't survive a reboot, but the
+    on-disk auto-mount path means real disks DO survive — and a
+    crash mid-mutation needs a recovery story.
+  - Auto-mount on probe (not on mkfs): we never want the boot path
+    to silently format a stranger's disk. A blank disk gets ignored
+    until a user explicitly says "format this".
+
+- **What it rules out / defers:**
+  - **Per-block CRCs.** Only the SB has a CRC in v2; a corrupted
+    data block reads stale bytes silently.
+  - **CoW / journal.** A crash mid-write to a file's data extent
+    can leave the file with garbage at the unflushed offset; v2
+    has no protection against torn writes outside the SB.
+  - **Indirect extents.** Files needing > 8 extents are out of
+    luck. Each extent can be many blocks (single 4-byte u32 length
+    field), so the file size cap depends on free-list contiguity,
+    not extent count alone.
+  - **Multi-block dirs.** Still 1024-child cap.
+  - **Free-on-shrink.** Same as v1 — truncate-shrink leaves blocks
+    allocated until the file is unlinked or grown again.
+  - **Auto-mkfs of a blank disk.** Boot probe never formats; that's
+    a user shell command.
+  - **fsck's deeper checks** (orphan sweep, parent_id cycle
+    detection, per-block CRC scan).
+
+- **Revisit when:**
+  - First file needs > 8 extents → indirect blocks, new Node field.
+  - First crash mid-mutation corrupts user data → CoW or journal.
+  - First disk fail surfaces a single bad sector → per-block CRCs.
+  - First directory grows past 1024 children → multi-block dirs.
+  - First boot of a real disk needs to be auto-formatted → user shell `mkfs.duetfs /dev/...`.
+
+- **Related roadmap track(s):**
+  - Filesystem track — DuetFS reaches "primary FS with crash-
+    resistant SB". Persistent on-disk volumes mount at boot;
+    the next persistence cliff is the journal.
+
 
 

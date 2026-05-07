@@ -1,19 +1,16 @@
 // DuetFS path / dir / file operations.
 //
-// Builds on `Fs` from fs.rs. Same path-shape rules as kernel/fs/vfs.h:
-//   - leading '/' tolerated
-//   - "." accepted and skipped
-//   - ".." rejected (no parent climb)
-//   - empty components ("//") tolerated
-//   - trailing slash tolerated
+// Builds on `Fs` from fs.rs. Same path-shape rules as kernel/fs/vfs.h.
 //
-// File extents are single-contiguous in v1. Writes that exceed
-// `ext_blocks * BLOCK_SIZE` trigger a realloc-and-copy grow with a
-// double-and-grow strategy for amortized cost.
+// File data is held in up to MAX_INLINE_EXTENTS extents. Read /
+// write walk the extent list to find which extent contains the
+// byte at a given offset; grow_file (in ops_dir.rs) appends a new
+// extent when the current set is full.
 
 use crate::block_dev::BlockDevice;
 use crate::format::{
-    blocks_for_bytes, Node, BLOCK_SIZE, NODE_KIND_DIR, NODE_KIND_FILE, ROOT_NODE_ID,
+    blocks_for_bytes, Node, BLOCK_SIZE, MAX_INLINE_EXTENTS, NODE_KIND_DIR, NODE_KIND_FILE,
+    ROOT_NODE_ID,
 };
 use crate::fs::{Fs, FsError, FsResult};
 use crate::path::PathIter;
@@ -23,6 +20,24 @@ pub struct Resolved
 {
     pub node_id: u32,
     pub node: Node,
+}
+
+/// Resolve a byte offset to (extent_index, in_extent_byte_offset).
+/// Returns None if the offset is past the end of the last extent.
+fn locate(node: &Node, offset: u32) -> Option<(usize, u32)>
+{
+    let mut walked: u32 = 0;
+    let n = (node.extent_count as usize).min(MAX_INLINE_EXTENTS);
+    for i in 0..n
+    {
+        let ext_size = node.extents[i].blocks.saturating_mul(BLOCK_SIZE as u32);
+        if offset < walked.saturating_add(ext_size)
+        {
+            return Some((i, offset - walked));
+        }
+        walked = walked.saturating_add(ext_size);
+    }
+    None
 }
 
 impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
@@ -56,16 +71,17 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
             return Ok(0);
         }
         let avail = node.size_bytes - offset;
-        let n = (dst.len() as u32).min(avail);
+        let want = (dst.len() as u32).min(avail);
         let mut copied: u32 = 0;
         let mut block_buf = [0u8; BLOCK_SIZE];
-        while copied < n
+        while copied < want
         {
             let cur = offset + copied;
-            let lba = node.first_block + cur / (BLOCK_SIZE as u32);
-            let in_block = (cur as usize) % BLOCK_SIZE;
+            let (ext_idx, in_ext) = locate(&node, cur).ok_or(FsError::Corrupt)?;
+            let lba = node.extents[ext_idx].block + in_ext / (BLOCK_SIZE as u32);
+            let in_block = (in_ext as usize) % BLOCK_SIZE;
             self.dev.read_block(lba, &mut block_buf).map_err(|_| FsError::Io)?;
-            let chunk = ((BLOCK_SIZE - in_block) as u32).min(n - copied);
+            let chunk = ((BLOCK_SIZE - in_block) as u32).min(want - copied);
             let dst_off = copied as usize;
             dst[dst_off..dst_off + chunk as usize]
                 .copy_from_slice(&block_buf[in_block..in_block + chunk as usize]);
@@ -87,18 +103,18 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         }
         let need_size = offset.saturating_add(src.len() as u32);
         let need_blocks = blocks_for_bytes(need_size);
-        if need_blocks > node.ext_blocks
+        if need_blocks > node.total_blocks()
         {
             self.grow_file(&mut node, need_blocks)?;
         }
-        // Block-by-block write, read-modify-write at partial-block edges.
         let mut written: u32 = 0;
         let mut block_buf = [0u8; BLOCK_SIZE];
         while written < src.len() as u32
         {
             let cur = offset + written;
-            let lba = node.first_block + cur / (BLOCK_SIZE as u32);
-            let in_block = (cur as usize) % BLOCK_SIZE;
+            let (ext_idx, in_ext) = locate(&node, cur).ok_or(FsError::Corrupt)?;
+            let lba = node.extents[ext_idx].block + in_ext / (BLOCK_SIZE as u32);
+            let in_block = (in_ext as usize) % BLOCK_SIZE;
             let chunk = ((BLOCK_SIZE - in_block) as u32).min(src.len() as u32 - written);
             if in_block != 0 || chunk != BLOCK_SIZE as u32
             {
@@ -144,14 +160,8 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         {
             return Err(FsError::DirNotEmpty);
         }
-        // Free the node's data extent + dir-children block.
-        if target.node.ext_blocks > 0 && target.node.first_block != 0
-        {
-            self.free_run(target.node.first_block, target.node.ext_blocks)?;
-        }
-        // Remove the child id from the parent's child list and decrement count.
+        self.free_node_extents(&target.node)?;
         self.dir_remove_child(parent_id, target.node_id)?;
-        // Mark the node unused.
         let mut zero = Node::unused();
         zero.parent_id = crate::format::INVALID_NODE_ID;
         self.write_node(target.node_id, &zero)?;
@@ -170,7 +180,7 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
             return Err(FsError::NotAFile);
         }
         let need_blocks = blocks_for_bytes(new_size);
-        if need_blocks > node.ext_blocks
+        if need_blocks > node.total_blocks()
         {
             self.grow_file(&mut node, need_blocks)?;
         }

@@ -26,10 +26,12 @@ inline constexpr u32 kBlockSize = 4096;
 inline constexpr u32 kNodeSize = 256;
 inline constexpr u32 kRootNodeId = 0;
 
-/// Magic identifying a DuetFS v1 superblock — bytes "DuetFS01"
+/// Magic identifying a DuetFS superblock — bytes "DuetFS01"
 /// little-endian (byte 0 = 'D' = 0x44, byte 7 = '1' = 0x31).
+/// Magic stayed across v1→v2; only the version field bumps.
 inline constexpr u64 kMagic = 0x3130534674657544ull;
-inline constexpr u32 kVersion = 2;
+inline constexpr u32 kVersion = 3; // v2 (multi-extent + SB CRC)
+inline constexpr u32 kMaxInlineExtents = 8;
 
 // ----------------------------------------------------------------
 // Status codes
@@ -46,6 +48,8 @@ inline constexpr u32 kStatusNoSpaceData = 8;
 inline constexpr u32 kStatusNoSpaceNodes = 9;
 inline constexpr u32 kStatusIo = 10;
 inline constexpr u32 kStatusReadOnly = 11;
+inline constexpr u32 kStatusNoSpaceExtents = 12;
+inline constexpr u32 kStatusCorrupt = 13;
 
 // ----------------------------------------------------------------
 // Device descriptor
@@ -73,6 +77,21 @@ struct LookupResult
     u32 child_count;
 };
 inline constexpr u32 kKindMiss = 0xFFFFFFFFu;
+
+/// fsck output. `repaired = 1` iff the on-disk bitmap was
+/// rewritten. `sb_crc_mismatch = 1` if the superblock's stored
+/// CRC didn't match the computed one (informational; CRC failure
+/// already causes Fs::open to return kStatusCorrupt before fsck
+/// can even run).
+struct FsckReport
+{
+    u32 leaked_blocks;
+    u32 missing_blocks;
+    u32 orphan_nodes;
+    u32 bad_extents;
+    u32 repaired;
+    u32 sb_crc_mismatch;
+};
 
 // ----------------------------------------------------------------
 // FFI surface
@@ -120,6 +139,11 @@ extern "C"
     /// blocks; shrink does NOT free extent blocks (free-on-shrink
     /// lands in a follow-up slice).
     u32 duetfs_truncate(const Device* dev, u32 node_id, u32 new_size);
+
+    /// Walk the metadata, recompute the should-be bitmap, and
+    /// optionally repair (rewrite the on-disk bitmap + SB).
+    /// Returns kStatusOk on success and fills *out with counts.
+    u32 duetfs_fsck(const Device* dev, u32 repair, FsckReport* out);
 }
 
 } // namespace duetos::fs::duetfs

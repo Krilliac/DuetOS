@@ -22,8 +22,10 @@
 
 mod alloc_bitmap;
 mod block_dev;
+mod crc32;
 mod format;
 mod fs;
+mod fsck;
 mod mkfs;
 mod ops;
 mod ops_dir;

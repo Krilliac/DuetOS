@@ -1,21 +1,18 @@
-// DuetFS mkfs — format a fresh image.
+// DuetFS mkfs — format a fresh image (v2).
 //
-// Writes a v1 superblock + zeroed bitmap + zeroed node table, then
-// creates the root directory (node 0). After mkfs, `Fs::open(dev)`
-// succeeds and `Fs::lookup_path("/")` returns the root.
-//
-// `format` requires the device to expose at least MIN_TOTAL_BLOCKS
-// (= DATA_LBA + 1) blocks. The first data block is allocated to
-// the root dir's child-id list.
+// Writes a v2 superblock (with CRC32) + zeroed bitmap + zeroed
+// node table, then creates the root directory (node 0) with one
+// inline extent. After mkfs, `Fs::open(dev)` succeeds and
+// `Fs::lookup_path("/")` returns the root.
 
 use crate::alloc_bitmap::BitmapAllocator;
 use crate::block_dev::BlockDevice;
 use crate::format::{
-    Node, Superblock, BITMAP_LBA, BLOCK_SIZE, DATA_LBA, MAGIC, MIN_TOTAL_BLOCKS, NODE_COUNT,
-    NODE_KIND_DIR, NODE_KIND_UNUSED, NODE_SIZE, NODE_TABLE_BLOCKS, NODE_TABLE_LBA,
-    NODES_PER_BLOCK, ROOT_NODE_ID, SUPERBLOCK_LBA, VERSION,
+    Extent, Node, Superblock, BITMAP_LBA, BLOCK_SIZE, DATA_LBA, MAGIC, MIN_TOTAL_BLOCKS,
+    NODE_COUNT, NODE_KIND_DIR, NODE_KIND_UNUSED, NODE_SIZE, NODE_TABLE_BLOCKS,
+    NODE_TABLE_LBA, NODES_PER_BLOCK, ROOT_NODE_ID, SUPERBLOCK_LBA, VERSION,
 };
-use crate::fs::{FsError, FsResult};
+use crate::fs::{compute_sb_crc, FsError, FsResult};
 
 pub fn format<D: BlockDevice + ?Sized>(dev: &mut D) -> FsResult<()>
 {
@@ -41,36 +38,30 @@ pub fn format<D: BlockDevice + ?Sized>(dev: &mut D) -> FsResult<()>
     let root_extent = DATA_LBA;
     bitmap.mark_used(root_extent);
 
-    // 2. Zero out the node table.
+    // 2. Zero the node table + root dir's child-id block.
     let zero = [0u8; BLOCK_SIZE];
     for i in 0..NODE_TABLE_BLOCKS
     {
         dev.write_block(NODE_TABLE_LBA + i, &zero).map_err(|_| FsError::Io)?;
     }
-
-    // 3. Zero out the root dir's child-id block.
     dev.write_block(root_extent, &zero).map_err(|_| FsError::Io)?;
 
-    // 4. Write the root node. Root has no name and no parent.
+    // 3. Write the root node — one extent, no children, self-loop parent.
     let mut root = Node::unused();
     root.kind = NODE_KIND_DIR;
-    root.first_block = root_extent;
-    root.ext_blocks = 1;
-    root.parent_id = ROOT_NODE_ID; // self-loop is the convention
+    root.extents[0] = Extent { block: root_extent, blocks: 1 };
+    root.extent_count = 1;
+    root.parent_id = ROOT_NODE_ID;
     write_node_to_table(dev, ROOT_NODE_ID, &root)?;
 
-    // 5. Write remaining nodes as unused (they are already zeroed,
-    //    which is exactly NODE_KIND_UNUSED — but be explicit so any
-    //    future Node-layout drift is caught).
     let _ = NODE_KIND_UNUSED;
 
-    // 6. Flush bitmap to disk.
+    // 4. Flush bitmap.
     bitmap.flush(dev).map_err(|_| FsError::Io)?;
 
-    // 7. Write the superblock last — until step 7 the image is
-    //    invalid, so a half-finished mkfs leaves a clean rejection
-    //    rather than a partly-mutated FS.
-    let sb = Superblock {
+    // 5. Build superblock with CRC, write last so a half-finished
+    //    mkfs leaves a clean rejection rather than a partly-mutated FS.
+    let mut sb = Superblock {
         magic: MAGIC,
         version: VERSION,
         block_size: BLOCK_SIZE as u32,
@@ -82,8 +73,10 @@ pub fn format<D: BlockDevice + ?Sized>(dev: &mut D) -> FsResult<()>
         node_table_blocks: NODE_TABLE_BLOCKS,
         data_lba: DATA_LBA,
         free_blocks: bitmap.free_count(),
-        reserved: [0; 5],
+        sb_crc32: 0,
+        reserved: [0; 4],
     };
+    sb.sb_crc32 = compute_sb_crc(&sb);
     write_superblock(dev, &sb)?;
     Ok(())
 }
@@ -104,6 +97,17 @@ fn write_node_to_table<D: BlockDevice + ?Sized>(
 }
 
 fn write_superblock<D: BlockDevice + ?Sized>(dev: &mut D, sb: &Superblock) -> FsResult<()>
+{
+    rewrite_superblock(dev, sb)
+}
+
+/// Rewrite the on-disk superblock from `sb`. Caller is responsible
+/// for setting `sb.sb_crc32` to the correct CRC before calling
+/// (compute_sb_crc lives in fs.rs). Used by fsck after repair to
+/// commit the recomputed `free_blocks` + fresh CRC.
+pub(crate) fn rewrite_superblock<D: BlockDevice + ?Sized>(
+    dev: &mut D, sb: &Superblock,
+) -> FsResult<()>
 {
     let mut block = [0u8; BLOCK_SIZE];
     let raw = unsafe {
