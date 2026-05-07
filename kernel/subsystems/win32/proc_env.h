@@ -112,6 +112,32 @@ inline constexpr u64 kProcEnvUnhandledFilterOff = 0x600;
  */
 inline constexpr u64 kProcEnvDataMissOff = 0x800;
 
+// CRT atexit registry — per-process LIFO stack of function
+// pointers. _crt_atexit / _register_onexit_function append a
+// pointer here and bump the count; _cexit walks the stack in
+// reverse order (LIFO, matching MSVC behaviour) and tail-calls
+// each handler. Storage lives inside the proc-env page so the
+// thunks are syscall-free (single load+store from a fixed VA).
+//
+// Layout:
+//   [0x900] u32 atexit_count       ; 0 .. kProcEnvAtexitMax
+//   [0x904] u32 reserved
+//   [0x908] u32 app_type           ; _set_app_type stores here
+//   [0x90C] u32 narrow_argv_mode   ; _configure_narrow_argv stores here
+//   [0x910] u64 atexit_slots[64]   ; 64 * 8 = 512 bytes
+//
+// 64 slots is generous for v0 — a typical MSVC CRT registers
+// 6-12 handlers (locale teardown, stdio flush, onexit chain).
+// Hitting the cap returns -1 from the registrar; the surplus
+// handler simply isn't called at exit, which matches the
+// documented MSVC failure mode.
+inline constexpr u64 kProcEnvAtexitCountOff = 0x900;
+inline constexpr u64 kProcEnvAppTypeOff = 0x908;
+inline constexpr u64 kProcEnvNarrowArgvModeOff = 0x90C;
+inline constexpr u64 kProcEnvAtexitSlotsOff = 0x910;
+inline constexpr u64 kProcEnvAtexitMax = 64;
+static_assert(kProcEnvAtexitSlotsOff + kProcEnvAtexitMax * 8 <= 0x1000, "atexit table must fit in proc-env page");
+
 /// Populate a freshly-zeroed proc-env page. `proc_env_page` is
 /// the kernel-visible direct-map pointer to the 4 KiB frame that
 /// will be mapped at `kProcEnvVa`. `program_name` is copied into

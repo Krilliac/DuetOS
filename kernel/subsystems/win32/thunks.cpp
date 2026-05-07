@@ -374,12 +374,26 @@ constexpr u32 kOffFputc = 0x1086;  // 21 bytes (returns c, not 0 — see comment
 constexpr u32 kOffGetMainArgs = 0x109B; // 36 bytes — populates argc/argv/env
 constexpr u32 kOffPErrno = 0x10BF;      // 6 bytes — returns ptr to errno scratch
 
+// Real-implementation thunks that replaced generic noop catch-alls.
+// Distinct named offsets so the fix-journal noop classifier does
+// NOT flag them — these ARE the correct implementations, not
+// placeholders. Source-pin journal evidence drove each: see the
+// commit landing them for the captured KERNEL.FIX records.
+constexpr u32 kOffChkStk = 0x10C5;              // 53 bytes — page probe loop
+constexpr u32 kOffSetAppType = 0x10FA;          // 12 bytes — proc-env app_type slot
+constexpr u32 kOffConfigureNarrowArgv = 0x1106; // 14 bytes — proc-env narrow_argv_mode slot
+constexpr u32 kOffInitOnexitTable = 0x1114;     // 14 bytes — zero user table; proc-env atexit list authoritative
+constexpr u32 kOffCrtAtexit = 0x1122;           // 39 bytes — append rcx to proc-env atexit slots
+constexpr u32 kOffRegisterOnexitFn = 0x1149;    // 39 bytes — append rdx to proc-env atexit slots
+constexpr u32 kOffCexit = 0x1170;               // 61 bytes — walk + call atexit handlers LIFO
+constexpr u32 kOffFreeEnvStringsW = 0x11AD;     // 6 bytes — return TRUE (env block is static)
+
 constexpr u8 kThunksBytes[] = {
 #include "subsystems/win32/thunks_bytecode.inc"
 };
 
 static_assert(sizeof(kThunksBytes) <= 8192, "Win32 thunks page fits in two 4 KiB pages");
-static_assert(sizeof(kThunksBytes) == 0x10C5, "thunk layout drifted; update kOff* constants");
+static_assert(sizeof(kThunksBytes) == 0x11B3, "thunk layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The thunk
 // bytes encode 0x65000000 and 0x65000008 directly; if proc_env.h
@@ -391,6 +405,15 @@ static_assert(kProcEnvArgvPtrOff == 0x08, "argv-ptr offset no longer matches __p
 static_assert(kProcEnvCommodeOff == 0x200, "commode offset no longer matches __p__commode thunk bytes");
 static_assert(kProcEnvUnhandledFilterOff == 0x600,
               "unhandled-filter offset no longer matches SetUnhandledExceptionFilter stub bytes");
+// Atexit registry — these constants are baked into the
+// _crt_atexit / _register_onexit_function / _cexit thunk
+// bytecode as 32-bit displacements off rax/rbx (= proc-env base).
+// Moving them in proc_env.h means re-encoding the bytes too.
+static_assert(kProcEnvAtexitCountOff == 0x900, "atexit-count offset baked into _crt_atexit + _cexit thunks");
+static_assert(kProcEnvAppTypeOff == 0x908, "app_type offset baked into _set_app_type thunk");
+static_assert(kProcEnvNarrowArgvModeOff == 0x90C, "narrow_argv_mode offset baked into _configure_narrow_argv thunk");
+static_assert(kProcEnvAtexitSlotsOff == 0x910, "atexit-slots offset baked into _crt_atexit + _cexit thunks");
+static_assert(kProcEnvAtexitMax == 64, "atexit max slots baked into _crt_atexit cap check");
 
 struct ThunkEntry
 {
