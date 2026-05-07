@@ -43,9 +43,13 @@ duetos::drivers::video::WindowHandle CalendarWindow();
 /// year, 'T' jumps to today. Returns true iff the key was consumed.
 bool CalendarFeedChar(char c);
 
-/// Arrow-key feed. Left/Right step a month, Up/Down step a year.
-/// Caller passes the kernel keycode (`kKeyArrowLeft` etc).
-bool CalendarFeedArrow(u16 keycode);
+/// Arrow-key feed. Plain Left/Right step a month, Up/Down step
+/// a year. Shift+Left/Right step the selected day by one;
+/// Shift+Up/Down step the selected day by a week. Delete on
+/// the selected date removes its events. `modifiers` is a
+/// bitmask of `kKeyMod*` values; 0 (default) preserves the
+/// pre-Shift behaviour.
+bool CalendarFeedArrow(duetos::u16 keycode, duetos::u8 modifiers = 0);
 
 /// Mouse press at framebuffer coords (cx, cy). If the click
 /// lands on a day cell, the cell's date is recorded in the

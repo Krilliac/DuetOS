@@ -110,6 +110,8 @@ constexpr Row kRows[] = {
     {"  [ ] LEFT/RT       PREV / NEXT MONTH", false},
     {"  { } UP / DN       PREV / NEXT YEAR", false},
     {"  T                 JUMP TO TODAY", false},
+    {"  SHIFT+LEFT/RT     STEP SELECTION 1 DAY", false},
+    {"  SHIFT+UP/DN       STEP SELECTION 7 DAYS", false},
     {"  ENTER             ADD EVENT (selected date)", false},
     {"  DEL               REMOVE EVENT (selected date)", false},
     {"  *DOT*             cell carries an event", false},

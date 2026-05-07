@@ -482,6 +482,8 @@ void PrintShortcutHelp()
     ConsoleWriteln("    [ / ]  / LEFT/RT   PREV / NEXT MONTH");
     ConsoleWriteln("    { / }  / UP / DN   PREV / NEXT YEAR");
     ConsoleWriteln("    T                  JUMP TO TODAY");
+    ConsoleWriteln("    SHIFT+LEFT/RIGHT   STEP SELECTION 1 DAY");
+    ConsoleWriteln("    SHIFT+UP/DOWN      STEP SELECTION 7 DAYS");
     ConsoleWriteln("    ENTER              ADD EVENT (selected date)");
     ConsoleWriteln("    DEL                REMOVE EVENT (selected date)");
     ConsoleWriteln("");
@@ -4014,7 +4016,8 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                               ev.code == kKeyArrowRight || ev.code == kKeyPageUp || ev.code == kKeyPageDown ||
                               ev.code == kKeyDelete))
                     {
-                        app_consumed = duetos::apps::calendar::CalendarFeedArrow(static_cast<duetos::u16>(ev.code));
+                        app_consumed =
+                            duetos::apps::calendar::CalendarFeedArrow(static_cast<duetos::u16>(ev.code), ev.modifiers);
                     }
                     else if (active == duetos::apps::notify_center::NotifyCenterWindow() &&
                              (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyPageUp ||

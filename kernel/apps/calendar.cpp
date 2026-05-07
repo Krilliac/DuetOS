@@ -568,14 +568,120 @@ bool CalendarFeedChar(char c)
     return false;
 }
 
-bool CalendarFeedArrow(u16 keycode)
+// Step the active selection by `days` days. If no selection is
+// set, seeds it from today's RTC date. Wraps month / year on
+// boundaries; the displayed view follows so the cell is always
+// visible. Used by the Shift+arrow day-navigation path.
+void StepSelectionByDays(i32 days)
+{
+    u32 y;
+    u8 m;
+    u8 d;
+    if (g_state.sel_year == 0)
+    {
+        duetos::arch::RtcTime rtc{};
+        duetos::arch::RtcRead(&rtc);
+        y = rtc.year;
+        m = rtc.month;
+        d = rtc.day;
+    }
+    else
+    {
+        y = g_state.sel_year;
+        m = static_cast<u8>(g_state.sel_month);
+        d = static_cast<u8>(g_state.sel_day);
+    }
+    // Apply the delta in calendar-correct steps. Forward and
+    // backward use the same loop so the wrap rules are shared.
+    while (days > 0)
+    {
+        const u32 m_days = DaysInMonth(y, m);
+        if (d < m_days)
+        {
+            ++d;
+        }
+        else
+        {
+            d = 1;
+            if (m < 12)
+            {
+                ++m;
+            }
+            else
+            {
+                m = 1;
+                if (y < 9999)
+                    ++y;
+            }
+        }
+        --days;
+    }
+    while (days < 0)
+    {
+        if (d > 1)
+        {
+            --d;
+        }
+        else
+        {
+            if (m > 1)
+            {
+                --m;
+            }
+            else
+            {
+                m = 12;
+                if (y > 1)
+                    --y;
+            }
+            d = static_cast<u8>(DaysInMonth(y, m));
+        }
+        ++days;
+    }
+    g_state.sel_year = y;
+    g_state.sel_month = m;
+    g_state.sel_day = d;
+    g_state.view_year = y;
+    g_state.view_month = m;
+    g_state.initialised = true;
+}
+
+bool CalendarFeedArrow(u16 keycode, u8 modifiers)
 {
     using duetos::drivers::input::kKeyArrowDown;
     using duetos::drivers::input::kKeyArrowLeft;
     using duetos::drivers::input::kKeyArrowRight;
     using duetos::drivers::input::kKeyArrowUp;
+    using duetos::drivers::input::kKeyModShift;
     using duetos::drivers::input::kKeyPageDown;
     using duetos::drivers::input::kKeyPageUp;
+    const bool shift = (modifiers & kKeyModShift) != 0;
+    // Shift+arrows = day-cell navigation (matches macOS
+    // Calendar). Plain arrows keep their original month / year
+    // step semantics so existing muscle memory is preserved.
+    if (shift)
+    {
+        if (keycode == kKeyArrowLeft)
+        {
+            StepSelectionByDays(-1);
+            return true;
+        }
+        if (keycode == kKeyArrowRight)
+        {
+            StepSelectionByDays(+1);
+            return true;
+        }
+        if (keycode == kKeyArrowUp)
+        {
+            StepSelectionByDays(-7);
+            return true;
+        }
+        if (keycode == kKeyArrowDown)
+        {
+            StepSelectionByDays(+7);
+            return true;
+        }
+    }
     if (keycode == kKeyArrowLeft)
     {
         Step(g_state.view_year, g_state.view_month, -1);
