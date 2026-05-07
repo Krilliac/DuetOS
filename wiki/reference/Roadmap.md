@@ -265,7 +265,12 @@ In rough priority:
 ### Bluetooth, Printer, Webcam
 
 - **Bluetooth:** HCI host-controller driver + L2CAP / RFCOMM /
-  GATT stack.
+  GATT stack. (HCI command/event packet parser landed in
+  `kernel/net/bluetooth/hci.{h,cpp}` — covers HCI_Reset / Read
+  Local Version / Read BD_ADDR / LE Set Scan Params + Enable on
+  the encode side, Command_Complete / Command_Status / event
+  header on the decode side. Boot self-test asserts every shape.
+  Real bring-up still needs a btusb / btuart transport driver.)
 - **Printer:** USB printer-class driver + IPP / PostScript /
   raster pipeline.
 - **Webcam:** UVC USB-Video class driver.
