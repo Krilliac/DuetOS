@@ -387,15 +387,20 @@ void WriteCr3Decoded(u64 value)
 
 void WriteSymbolIfCode(u64 value)
 {
-    if (!PlausibleKernelAddress(value))
+    if (PlausibleKernelAddress(value))
     {
-        return;
+        SymbolResolution res{};
+        if (ResolveAddress(value, &res))
+        {
+            WriteResolvedAddress(res);
+            return;
+        }
     }
-    SymbolResolution res{};
-    if (ResolveAddress(value, &res))
-    {
-        WriteResolvedAddress(res);
-    }
+    // Not a kernel-code address (or didn't resolve). If the value
+    // matches a known sentinel / uninit-fill pattern, emit a hint
+    // so e.g. `rbp : 0xFFFFFFFFFFFFFFFF` carries `[wild: all-ones …]`
+    // and the reader doesn't have to decode the magic number by hand.
+    WriteWildAddressHint(value);
 }
 
 void WritePteFlags(u64 flags)

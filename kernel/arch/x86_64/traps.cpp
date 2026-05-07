@@ -272,6 +272,11 @@ void WriteLabelledVa(const char* label, duetos::u64 value)
     SerialWrite(" : ");
     SerialWriteHex(value);
     duetos::core::WriteVaRegion(value);
+    // Sentinel/uninit hint: e.g. cr2/rsp/rbp = 0xFFFFFFFFFFFFFFFF
+    // gets `[wild: all-ones — wild branch / corrupted return …]`
+    // appended so the operator doesn't have to recognise the
+    // magic number themselves.
+    duetos::core::WriteWildAddressHint(value);
     SerialWrite("\n");
 }
 

@@ -136,6 +136,10 @@ void WriteLabelledVa(const char* label, u64 value)
     arch::SerialWrite(" : ");
     arch::SerialWriteHex(value);
     WriteVaRegion(value);
+    // Sentinel/uninit hint so e.g. `cr2 : 0xFFFFFFFFFFFFFFFF
+    // [region=k.directmap] [wild: all-ones — wild branch / …]`
+    // explains the value in plain text on the dump line itself.
+    WriteWildAddressHint(value);
     arch::SerialWrite("\n");
 }
 
