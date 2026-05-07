@@ -1,4 +1,5 @@
 #include "subsystems/graphics/graphics.h"
+#include "subsystems/graphics/graphics_vk_internal.h"
 
 #include "arch/x86_64/serial.h"
 #include "drivers/gpu/gpu.h"
@@ -30,381 +31,44 @@
 namespace duetos::subsystems::graphics
 {
 
-namespace
+// All file-scope helpers + per-kind handle storage live in
+// `internal::` so a sibling TU (graphics_vk_selftest.cpp today,
+// future graphics_vk_commands.cpp / _wsi.cpp / _misc.cpp) can
+// reach them through the bridge declared in
+// `graphics_vk_internal.h`.  The using-directive below means
+// every entry point in the rest of this file finds those names
+// unqualified, so the existing references compile unchanged.
+namespace internal
+{
+}
+using namespace internal;
+
+namespace internal
 {
 
 // -------------------------------------------------------------------
-// Handle pool primitive.
+// Per-kind storage.  Types + extern decls live in
+// graphics_vk_internal.h; this TU is the single point of
+// definition.  A multi-TU split (graphics_vk_commands.cpp,
+// _wsi.cpp, _misc.cpp) reaches the same storage through the
+// header without duplicating any of it.
 // -------------------------------------------------------------------
-//
-// Every Vk* type has its own pool.  A pool is a small fixed-size
-// bitmap of live slots plus a per-kind base; a handle is `base +
-// slot`.  Capacity is sized for the canonical self-test path plus
-// a comfortable headroom; this is a v0 ICD, not a benchmark.
 
-constexpr u32 kPoolCapacity = 32;
-
-struct Pool
-{
-    u32 live = 0;
-    u32 created = 0;
-    u32 destroyed = 0;
-    u32 used_bitmap = 0; // bit N = slot N live
-};
-
-bool PoolAlloc(Pool& p, u32* slot_out)
-{
-    for (u32 i = 0; i < kPoolCapacity; ++i)
-    {
-        const u32 bit = 1u << i;
-        if ((p.used_bitmap & bit) == 0u)
-        {
-            p.used_bitmap |= bit;
-            ++p.live;
-            ++p.created;
-            *slot_out = i;
-            return true;
-        }
-    }
-    return false;
-}
-
-bool PoolFree(Pool& p, u32 slot)
-{
-    if (slot >= kPoolCapacity)
-        return false;
-    const u32 bit = 1u << slot;
-    if ((p.used_bitmap & bit) == 0u)
-        return false;
-    p.used_bitmap &= ~bit;
-    --p.live;
-    ++p.destroyed;
-    return true;
-}
-
-bool PoolIsLive(const Pool& p, u32 slot)
-{
-    if (slot >= kPoolCapacity)
-        return false;
-    return (p.used_bitmap & (1u << slot)) != 0u;
-}
-
-// Disjoint base ranges per handle kind so a stray handle from one
-// kind passed to another's Destroy can be range-rejected cheaply.
-constexpr u64 kInstanceBase = 0x1'0000;
-constexpr u64 kPhysDevBase = 0x2'0000;
-constexpr u64 kDeviceBase = 0x3'0000;
-constexpr u64 kQueueBase = 0x4'0000;
-constexpr u64 kCmdPoolBase = 0x5'0000;
-constexpr u64 kCmdBufBase = 0x6'0000;
-constexpr u64 kShaderBase = 0x7'0000;
-constexpr u64 kPipelineLayoutBase = 0x8'0000;
-constexpr u64 kPipelineBase = 0x9'0000;
-constexpr u64 kRenderPassBase = 0xA'0000;
-constexpr u64 kFramebufferBase = 0xB'0000;
-constexpr u64 kImageBase = 0xC'0000;
-constexpr u64 kImageViewBase = 0xD'0000;
-constexpr u64 kBufferBase = 0xE'0000;
-constexpr u64 kMemoryBase = 0xF'0000;
-constexpr u64 kFenceBase = 0x10'0000;
-constexpr u64 kSemaphoreBase = 0x11'0000;
-constexpr u64 kDescSetLayoutBase = 0x12'0000;
-constexpr u64 kDescPoolBase = 0x13'0000;
-constexpr u64 kDescSetBase = 0x14'0000;
-constexpr u64 kSurfaceBase = 0x15'0000;
-constexpr u64 kSwapchainBase = 0x16'0000;
-constexpr u64 kSamplerBase = 0x17'0000;
-constexpr u64 kEventBase = 0x18'0000;
-constexpr u64 kPipelineCacheBase = 0x19'0000;
-constexpr u64 kQueryPoolBase = 0x1A'0000;
-
-bool HandleInRange(u64 h, u64 base)
-{
-    return h >= base && h < base + kPoolCapacity;
-}
-u32 SlotOf(u64 h, u64 base)
-{
-    return static_cast<u32>(h - base);
-}
-u64 HandleFor(u64 base, u32 slot)
-{
-    return base + slot;
-}
-
-// -------------------------------------------------------------------
-// Per-kind data.
-// -------------------------------------------------------------------
-//
-// Most pools carry no state beyond the bitmap.  Three need it:
-//   - Image: scanout-backed flag + extent (drives clear replay).
-//   - ShaderModule: byte size (so the self-test can reason about
-//     "the bytes I gave you ended up tracked").
-//   - CommandBuffer: a fixed-size tape of recorded ops + record
-//     state.
-
-struct ImageRecord
-{
-    VkExtent3D extent;
-    u32 flags;
-    bool memory_bound;
-};
 ImageRecord g_image_data[kPoolCapacity];
-
-struct ShaderRecord
-{
-    u64 byte_size;
-    ShaderModuleInfo info;
-};
 ShaderRecord g_shader_data[kPoolCapacity];
-
-struct BufferRecord
-{
-    u64 size;
-    bool memory_bound;
-    void* backing;      // host-visible pointer (filled in by VkMapMemory or
-                        // implicit-bound for swapchain images / self-test buffers)
-    u64 backing_offset; // offset into the bound memory's host backing
-    VkDeviceMemory bound_memory;
-};
 BufferRecord g_buffer_data[kPoolCapacity];
-
-struct ImageViewRecord
-{
-    VkImage image;
-};
 ImageViewRecord g_imageview_data[kPoolCapacity];
-
-struct FramebufferRecord
-{
-    VkImageView attachment;
-};
 FramebufferRecord g_framebuffer_data[kPoolCapacity];
-
-struct DeviceMemoryRecord
-{
-    u64 size;
-    void* host_ptr; // KMalloc-backed allocation, nullptr until bound
-    u32 type_index;
-    bool host_visible;
-    u32 map_count; // current vkMapMemory ref count
-};
 DeviceMemoryRecord g_memory_data[kPoolCapacity];
-
-enum class CmdOp : u8
-{
-    None = 0,
-    BeginRenderPass = 1,
-    EndRenderPass = 2,
-    BindPipeline = 3,
-    ClearColorImage = 4,
-    Draw = 5,
-    DrawIndexed = 6,
-    SetViewport = 7,
-    SetScissor = 8,
-    BindVertexBuffer = 9,
-    BindIndexBuffer = 10,
-    CopyBuffer = 11,
-    FillBuffer = 12,
-    PipelineBarrier = 13,
-    PushConstants = 14,
-    Dispatch = 15,
-    CopyBufferToImage = 16,
-    SetEvent = 17,
-    ResetEvent = 18,
-    WaitEvents = 19,
-    BeginQuery = 20,
-    EndQuery = 21,
-    ResetQueryPool = 22,
-    WriteTimestamp = 23,
-    CopyImage = 24,
-    BlitImage = 25,
-    CopyImageToBuffer = 26,
-    ResolveImage = 27,
-    UpdateBuffer = 28,
-    ClearAttachments = 29,
-    ClearDepthStencilImage = 30,
-    BeginRendering = 31,
-    EndRendering = 32,
-    SetLineWidth = 33,
-    SetDepthBias = 34,
-    SetBlendConstants = 35,
-    SetDepthBounds = 36,
-    SetStencilState = 37,
-    BeginDebugLabel = 38,
-    EndDebugLabel = 39,
-    InsertDebugLabel = 40,
-    PushDescriptor = 41,
-    ExecuteCommands = 42,
-};
-
-struct CmdRecord
-{
-    CmdOp op;
-    VkImage image;
-    VkRenderPass render_pass;
-    VkFramebuffer framebuffer;
-    VkRect2D area;
-    VkClearColorValue color;
-    VkPipelineBindPoint bind_point;
-    VkPipeline pipeline;
-    u32 vertex_count;
-    u32 instance_count;
-    u32 first_vertex;
-    u32 first_instance;
-    // Indexed draw + index-binding fields.
-    u32 index_count;
-    u32 first_index;
-    i32 vertex_offset;
-    VkBuffer index_buffer;
-    u64 index_offset;
-    VkIndexType index_type;
-    // Vertex binding (single-binding subset; spec allows arrays).
-    VkBuffer vertex_buffer;
-    u64 vertex_offset_bytes;
-    u32 vertex_binding;
-    // Buffer copy / fill.
-    VkBuffer src_buffer;
-    VkBuffer dst_buffer;
-    u64 src_offset;
-    u64 dst_offset;
-    u64 region_size;
-    u32 fill_pattern;
-    // Push constants — fixed-size payload + actual length.
-    u32 push_offset;
-    u32 push_size;
-    u8 push_data[kMaxPushConstantBytes];
-    // Dispatch dimensions.
-    u32 dispatch_x;
-    u32 dispatch_y;
-    u32 dispatch_z;
-    // Event ops.
-    VkEvent event;
-    // Query ops.
-    VkQueryPool query_pool;
-    u32 query_first;
-    u32 query_count;
-    u32 query_index;
-    // CopyBufferToImage / CopyImage / Blit geometry.
-    u32 region_width;
-    u32 region_height;
-    VkImage src_image;
-    VkRect2D src_rect;
-    VkRect2D dst_rect;
-    VkFilter blit_filter;
-    // ClearDepthStencil — depth as integer-cast (no float math
-    // in kernel) + stencil byte.
-    u32 depth_bits;
-    u32 stencil;
-    // ClearAttachments counts.
-    u32 attachment_count;
-    u32 rect_count;
-    // ExecuteCommands secondary cb (single-secondary subset; the
-    // wider entry-point accepts an array but we record only the
-    // first to keep the per-op storage bounded).
-    VkCommandBuffer secondary_cb;
-};
-
-constexpr u32 kCmdTapeCapacity = 32;
-
-enum class CbState : u8
-{
-    Initial = 0,
-    Recording = 1,
-    Executable = 2,
-};
-
-struct CmdBufferRecord
-{
-    CbState state;
-    bool is_secondary;
-    u32 op_count;
-    CmdRecord ops[kCmdTapeCapacity];
-};
 CmdBufferRecord g_cmdbuf_data[kPoolCapacity];
-
-// Descriptor-set layouts: just the bindings list.
-struct DescriptorSetLayoutRecord
-{
-    u32 binding_count;
-    VkDescriptorSetLayoutBinding bindings[kMaxDescriptorBindings];
-};
 DescriptorSetLayoutRecord g_desc_set_layout_data[kPoolCapacity];
-
-// Descriptor pools: track max-sets budget + current allocation
-// count so an exhausted pool returns ErrorOutOfPoolMemory rather
-// than oversubscribing.
-struct DescriptorPoolRecord
-{
-    u32 max_sets;
-    u32 sets_allocated;
-};
 DescriptorPoolRecord g_desc_pool_data[kPoolCapacity];
-
-// Descriptor sets: which pool owns them + which layout shaped
-// them + last-known binding writes (for stats only).
-struct DescriptorSetRecord
-{
-    VkDescriptorPool pool;
-    VkDescriptorSetLayout layout;
-    u32 writes;
-};
 DescriptorSetRecord g_desc_set_data[kPoolCapacity];
-
-// A swapchain owns a small set of scanout-backed images plus a
-// rotating "next-image" cursor.  `acquired_image` tracks the
-// most recent vkAcquireNextImageKHR result so VkQueuePresentKHR
-// can validate the index the caller hands back.
-struct SwapchainRecord
-{
-    VkSurfaceKHR surface;
-    VkExtent2D extent;
-    u32 image_count;
-    u32 next_image; // round-robin cursor advanced by Acquire
-    u32 acquired_index;
-    bool image_acquired;
-    VkImage images[kMaxSwapchainImages];
-};
 SwapchainRecord g_swapchain_data[kPoolCapacity];
-
-// Event: device-visible signal bit, plus map_count style ref
-// counting on host accesses.
-struct EventRecord
-{
-    bool signalled;
-};
 EventRecord g_event_data[kPoolCapacity];
-
-// Pipeline cache: blobless; we just record initial-data size to
-// satisfy GetPipelineCacheData round trips.
-struct PipelineCacheRecord
-{
-    u64 stored_size;
-};
 PipelineCacheRecord g_pipeline_cache_data[kPoolCapacity];
-
-// Query pool: small fixed-size results array.
-constexpr u32 kMaxQueriesPerPool = 16;
-struct QueryPoolRecord
-{
-    VkQueryType type;
-    u32 query_count;
-    u64 results[kMaxQueriesPerPool];
-    bool available[kMaxQueriesPerPool];
-};
 QueryPoolRecord g_query_pool_data[kPoolCapacity];
-
-// Per-physical-device record — which GPU index this handle
-// represents.  Set at enum time, read by the property queries
-// so a caller with multiple GPUs sees per-device vendor / family.
-struct PhysicalDeviceRecord
-{
-    u32 gpu_index;
-};
 PhysicalDeviceRecord g_phys_data[kPoolCapacity];
-
-// -------------------------------------------------------------------
-// Pools.
-// -------------------------------------------------------------------
 
 Pool g_instance_pool;
 Pool g_phys_pool;
@@ -549,7 +213,7 @@ u32 ColorToRgb(const VkClearColorValue& c)
     return (r << 16) | (g << 8) | b;
 }
 
-} // namespace
+} // namespace internal
 
 // -------------------------------------------------------------------
 // Instance + physical device.
@@ -789,7 +453,7 @@ VkResult VkEnumerateInstanceVersion(u32* api_version)
     return VkResult::Success;
 }
 
-namespace
+namespace internal
 {
 
 // Loader-style name -> token table.  The token value is opaque
@@ -876,7 +540,7 @@ u64 ResolveProc(const char* name, bool device_level_only)
     return 0;
 }
 
-} // namespace
+} // namespace internal
 
 u64 VkGetInstanceProcAddr(VkInstance inst, const char* name)
 {
@@ -1219,7 +883,7 @@ void VkDestroyFramebuffer(VkDevice dev, VkFramebuffer fb)
 // Shader module + pipeline.
 // -------------------------------------------------------------------
 
-namespace
+namespace internal
 {
 
 // SPIR-V opcodes we recognise.  Full opcode table is huge — only
@@ -1300,7 +964,7 @@ ShaderModuleInfo ParseSpirv(const u32* code, u64 byte_size)
     return info;
 }
 
-} // namespace
+} // namespace internal
 
 VkResult VkCreateShaderModule(VkDevice dev, const u32* code, u64 code_size_bytes, VkShaderModule* out)
 {
@@ -1536,7 +1200,7 @@ VkResult VkResetCommandPool(VkDevice dev, VkCommandPool pool, u32 flags)
     return VkResult::Success;
 }
 
-namespace
+namespace internal
 {
 
 VkResult AppendOp(VkCommandBuffer cb, const CmdRecord& op)
@@ -1553,7 +1217,7 @@ VkResult AppendOp(VkCommandBuffer cb, const CmdRecord& op)
     return VkResult::Success;
 }
 
-} // namespace
+} // namespace internal
 
 VkResult VkCmdBeginRenderPass(VkCommandBuffer cb, VkRenderPass rp, VkFramebuffer fb, VkRect2D area,
                               VkClearColorValue clear)
@@ -2091,7 +1755,7 @@ VkResult VkGetDebugUtilsObjectNameDuet(u64 object_handle, char* out_buf, u32 buf
     return VkResult::Incomplete;
 }
 
-namespace
+namespace internal
 {
 
 VkResult AppendCmdLabel(VkCommandBuffer cb, CmdOp tag, const char* label)
@@ -2113,7 +1777,7 @@ VkResult AppendCmdLabel(VkCommandBuffer cb, CmdOp tag, const char* label)
     return AppendOp(cb, op);
 }
 
-} // namespace
+} // namespace internal
 
 VkResult VkCmdBeginDebugUtilsLabelEXT(VkCommandBuffer cb, const char* label)
 {
@@ -2588,7 +2252,7 @@ VkResult VkGetQueryPoolResults(VkDevice dev, VkQueryPool pool, u32 first_query, 
 // Submit replay.
 // -------------------------------------------------------------------
 
-namespace
+namespace internal
 {
 
 void PaintScanoutClear(VkImage image, VkClearColorValue color)
@@ -2882,7 +2546,7 @@ void ReplayCommandBuffer(VkCommandBuffer cb)
     }
 }
 
-} // namespace
+} // namespace internal
 
 VkResult VkQueueSubmit(VkQueue q, u32 cb_count, const VkCommandBuffer* cbs, VkFence signal_fence)
 {
