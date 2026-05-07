@@ -607,6 +607,55 @@ void StagedMissReset()
     g_staged_miss_count = 0;
     g_staged_miss_dropped = 0;
 }
+
+// Build a fix-journal source-pin into pin_out. Format: "<dll>!<fn>\0".
+// Total pin buffer is 40 bytes (one record-field width). Drops the
+// redundant trailing ".dll" suffix so longer DLL names like
+// "api-ms-win-crt-runtime-l1-1-0.dll" fit; prefers preserving the
+// function name (the more diagnostic half) when truncation is forced.
+void BuildFixJournalPin(const char* dll_name, const char* fn_name, char (&pin_out)[40])
+{
+    constexpr u64 kPinCap = 40;
+    constexpr u64 kPinContent = kPinCap - 1; // leave room for '\0'
+
+    auto str_len = [](const char* s) -> u64
+    {
+        if (s == nullptr)
+            return 0;
+        u64 n = 0;
+        while (s[n] != '\0')
+            ++n;
+        return n;
+    };
+
+    u64 dll_len = str_len(dll_name);
+    if (dll_len >= 4)
+    {
+        const char* tail = dll_name + (dll_len - 4);
+        const bool ends_dll = (tail[0] == '.') && ((tail[1] == 'd') || (tail[1] == 'D')) &&
+                              ((tail[2] == 'l') || (tail[2] == 'L')) && ((tail[3] == 'l') || (tail[3] == 'L'));
+        if (ends_dll)
+            dll_len -= 4;
+    }
+    const u64 fn_len = str_len(fn_name);
+
+    // 1 char for '!' separator. Cap the function half first
+    // (it's the more diagnostic part), then give the rest to dll.
+    const u64 fn_avail = (kPinContent >= 1) ? (kPinContent - 1) : 0;
+    const u64 fn_take = fn_len < fn_avail ? fn_len : fn_avail;
+    const u64 dll_avail = fn_avail - fn_take;
+    const u64 dll_take = dll_len < dll_avail ? dll_len : dll_avail;
+
+    u64 p = 0;
+    for (u64 i = 0; i < dll_take; ++i)
+        pin_out[p++] = dll_name[i];
+    if (p < kPinContent)
+        pin_out[p++] = '!';
+    for (u64 i = 0; i < fn_take; ++i)
+        pin_out[p++] = fn_name[i];
+    pin_out[p] = '\0';
+}
+
 void StagedMissAppend(u64 slot_va, const char* name)
 {
     if (g_staged_miss_count >= kStagedMissCap)
@@ -1314,26 +1363,7 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
                 if (!data_named)
                 {
                     char pin[40];
-                    u64 p = 0;
-                    if (dll_name != nullptr)
-                    {
-                        while (p < 30 && dll_name[p] != '\0')
-                        {
-                            pin[p] = dll_name[p];
-                            ++p;
-                        }
-                    }
-                    if (p < 39)
-                        pin[p++] = '!';
-                    if (fn_name != nullptr)
-                    {
-                        u64 f = 0;
-                        while (p < 39 && fn_name[f] != '\0')
-                        {
-                            pin[p++] = fn_name[f++];
-                        }
-                    }
-                    pin[p] = '\0';
+                    BuildFixJournalPin(dll_name, fn_name, pin);
                     (void)::duetos::diag::FixJournalRecord(::duetos::diag::FixDetector::UnmappedThunk, pin,
                                                            is_data ? "implement data import" : "implement Win32 thunk",
                                                            h.image_base, 0);
@@ -1393,26 +1423,7 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
             if (is_noop_stub)
             {
                 char pin[40];
-                u64 p = 0;
-                if (dll_name != nullptr)
-                {
-                    while (p < 30 && dll_name[p] != '\0')
-                    {
-                        pin[p] = dll_name[p];
-                        ++p;
-                    }
-                }
-                if (p < 39)
-                    pin[p++] = '!';
-                if (fn_name != nullptr)
-                {
-                    u64 f = 0;
-                    while (p < 39 && fn_name[f] != '\0')
-                    {
-                        pin[p++] = fn_name[f++];
-                    }
-                }
-                pin[p] = '\0';
+                BuildFixJournalPin(dll_name, fn_name, pin);
                 (void)::duetos::diag::FixJournalRecord(::duetos::diag::FixDetector::UnmappedThunk, pin,
                                                        "implement Win32 thunk (currently noop-stub)", h.image_base, 1);
             }
