@@ -21,6 +21,7 @@ namespace duetos::fs::duetfs
 inline constexpr u32 kKindUnused = 0;
 inline constexpr u32 kKindFile = 1;
 inline constexpr u32 kKindDir = 2;
+inline constexpr u32 kKindSymlink = 3;
 
 inline constexpr u32 kBlockSize = 4096;
 inline constexpr u32 kNodeSize = 256;
@@ -28,10 +29,11 @@ inline constexpr u32 kRootNodeId = 0;
 
 /// Magic identifying a DuetFS superblock — bytes "DuetFS01"
 /// little-endian (byte 0 = 'D' = 0x44, byte 7 = '1' = 0x31).
-/// Magic stayed across v1→v2; only the version field bumps.
+/// Magic stayed across v1→v3; only the version field bumps.
 inline constexpr u64 kMagic = 0x3130534674657544ull;
-inline constexpr u32 kVersion = 3; // v2 (multi-extent + SB CRC)
+inline constexpr u32 kVersion = 4; // v3 (per-block CRCs + symlinks + hardlinks)
 inline constexpr u32 kMaxInlineExtents = 8;
+inline constexpr u32 kSymlinkTargetMax = 1024;
 
 // ----------------------------------------------------------------
 // Status codes
@@ -50,6 +52,8 @@ inline constexpr u32 kStatusIo = 10;
 inline constexpr u32 kStatusReadOnly = 11;
 inline constexpr u32 kStatusNoSpaceExtents = 12;
 inline constexpr u32 kStatusCorrupt = 13;
+inline constexpr u32 kStatusNotASymlink = 14;
+inline constexpr u32 kStatusXdevLink = 15;
 
 // ----------------------------------------------------------------
 // Device descriptor
@@ -91,6 +95,8 @@ struct FsckReport
     u32 bad_extents;
     u32 repaired;
     u32 sb_crc_mismatch;
+    u32 block_crc_mismatch;
+    u32 link_count_mismatch;
 };
 
 // ----------------------------------------------------------------
@@ -140,10 +146,30 @@ extern "C"
     /// lands in a follow-up slice).
     u32 duetfs_truncate(const Device* dev, u32 node_id, u32 new_size);
 
-    /// Walk the metadata, recompute the should-be bitmap, and
-    /// optionally repair (rewrite the on-disk bitmap + SB).
-    /// Returns kStatusOk on success and fills *out with counts.
+    /// Walk the metadata, recompute the should-be bitmap, verify
+    /// per-block CRCs, and optionally repair (rewrite the on-disk
+    /// bitmap + CRC table + SB).
     u32 duetfs_fsck(const Device* dev, u32 repair, FsckReport* out);
+
+    /// Create a symbolic link at `path` pointing at `target`.
+    /// `target` is stored verbatim in the symlink node's first
+    /// extent (capped at kSymlinkTargetMax bytes). Resolution
+    /// through the symlink lives in lookup_path's caller — v3
+    /// stops at the symlink and hands its kind back; the caller
+    /// re-resolves with the target.
+    u32 duetfs_create_symlink(const Device* dev, const u8* path, usize path_max, const u8* target, usize target_max,
+                              u32* out_node_id);
+
+    /// Read a symlink's target into `dst`. Same shape as
+    /// duetfs_read_file but errors with kStatusNotASymlink if the
+    /// node isn't a symlink.
+    u32 duetfs_readlink(const Device* dev, u32 node_id, void* dst, usize dst_max, usize* out_copied);
+
+    /// Create a hard link at `new_path` to the inode at
+    /// `existing_path`. v3 caveat: the new dirent shares the
+    /// target's existing name (its last component MUST equal
+    /// the target's name); a separate dirent table lands later.
+    u32 duetfs_link(const Device* dev, const u8* existing_path, usize existing_max, const u8* new_path, usize new_max);
 }
 
 } // namespace duetos::fs::duetfs

@@ -23,6 +23,7 @@
 mod alloc_bitmap;
 mod block_dev;
 mod crc32;
+mod crc_table;
 mod format;
 mod fs;
 mod fsck;

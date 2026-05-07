@@ -297,13 +297,72 @@ void DuetFsSelfTest()
     Expect(duetfs_probe(&scratch) == 0, "probe accepted a CRC-corrupted SB");
     g_scratch_image[8] ^= 0x01u; // restore; subsequent ops resume
 
-    // 10. fsck on a clean post-mkfs FS — should report zero leaks.
+    // 10. fsck on a clean post-mkfs FS — should report zero leaks
+    //     AND zero per-block CRC mismatches AND zero link-count drift.
     FsckReport rep{};
     ExpectStatus(duetfs_fsck(&scratch, /*repair=*/0u, &rep), kStatusOk, "fsck clean failed");
     Expect(rep.leaked_blocks == 0 && rep.missing_blocks == 0 && rep.bad_extents == 0,
-           "fsck reported issues on clean FS");
+           "fsck bitmap reported issues on clean FS");
+    Expect(rep.block_crc_mismatch == 0, "fsck found per-block CRC mismatch on clean FS");
+    Expect(rep.link_count_mismatch == 0, "fsck found link_count drift on clean FS");
 
-    KLOG_INFO("duetfs/selftest", "OK — v2 multi-extent + CRC + fsck + v1 surface passed");
+    // 11. Symbolic link: create /linkme.txt pointing at /big.bin,
+    //     read it back through readlink + lookup the symlink.
+    u32 sym_id = 0;
+    ExpectStatus(duetfs_create_symlink(&scratch, reinterpret_cast<const u8*>("/linkme.txt"), 12,
+                                       reinterpret_cast<const u8*>("/big.bin"), 9, &sym_id),
+                 kStatusOk, "create_symlink failed");
+    u8 lbuf[16] = {};
+    usize lcopied = 0;
+    ExpectStatus(duetfs_readlink(&scratch, sym_id, lbuf, sizeof(lbuf), &lcopied), kStatusOk, "readlink failed");
+    Expect(lcopied == 8 && BytesEqual(lbuf, "/big.bin", 8), "readlink content wrong");
+    ExpectStatus(duetfs_lookup(&scratch, reinterpret_cast<const u8*>("/linkme.txt"), 12, &res), kStatusOk,
+                 "lookup symlink failed");
+    Expect(res.kind == kKindSymlink, "lookup symlink kind wrong");
+
+    // 12. Hard link: create /hl.bin (same name as the source so v3's
+    //     name-must-match rule holds — first need to create a fresh
+    //     file under that name then link a second dirent to it).
+    u32 hl_id = 0;
+    ExpectStatus(duetfs_create_path(&scratch, reinterpret_cast<const u8*>("/hl.bin"), 8, kKindFile, &hl_id), kStatusOk,
+                 "create /hl.bin failed");
+    // hl.bin's parent is root. Add a hard link in /etc (rebuilding
+    // /etc since we unlinked it earlier).
+    u32 etc2_id = 0;
+    ExpectStatus(duetfs_create_path(&scratch, reinterpret_cast<const u8*>("/etc"), 5, kKindDir, &etc2_id), kStatusOk,
+                 "rebuild /etc failed");
+    // v3's hard-link rule: the target's name must equal the new
+    // path's last component. So link /hl.bin into /etc/hl.bin.
+    ExpectStatus(duetfs_link(&scratch, reinterpret_cast<const u8*>("/hl.bin"), 8,
+                             reinterpret_cast<const u8*>("/etc/hl.bin"), 12),
+                 kStatusOk, "duetfs_link failed");
+    // Lookup both paths — same node id, link_count == 2.
+    ExpectStatus(duetfs_lookup(&scratch, reinterpret_cast<const u8*>("/hl.bin"), 8, &res), kStatusOk,
+                 "lookup /hl.bin post-link failed");
+    Expect(res.node_id == hl_id, "hardlink node_id mismatch");
+    ExpectStatus(duetfs_lookup(&scratch, reinterpret_cast<const u8*>("/etc/hl.bin"), 12, &res), kStatusOk,
+                 "lookup /etc/hl.bin post-link failed");
+    Expect(res.node_id == hl_id, "hardlink dual-path node_id mismatch");
+
+    // 13. Per-block CRC corruption detection. Flip a byte in a known
+    //     data block (the root dir's child-id block at LBA = data_lba)
+    //     and run fsck — should report exactly one block_crc_mismatch.
+    g_scratch_image[7 * kBlockSize] ^= 0x01u; // data_lba = 7 in v3
+    rep = FsckReport{};
+    ExpectStatus(duetfs_fsck(&scratch, /*repair=*/0u, &rep), kStatusOk, "fsck post-corrupt failed");
+    Expect(rep.block_crc_mismatch >= 1, "fsck missed per-block CRC corruption");
+    g_scratch_image[7 * kBlockSize] ^= 0x01u; // restore
+
+    // 14. fsck repair: run with repair=1, then a second clean pass
+    //     should report zero again.
+    rep = FsckReport{};
+    ExpectStatus(duetfs_fsck(&scratch, /*repair=*/1u, &rep), kStatusOk, "fsck repair failed");
+    Expect(rep.repaired == 1, "fsck didn't claim repaired");
+    rep = FsckReport{};
+    ExpectStatus(duetfs_fsck(&scratch, /*repair=*/0u, &rep), kStatusOk, "post-repair fsck failed");
+    Expect(rep.block_crc_mismatch == 0, "post-repair still has CRC mismatch");
+
+    KLOG_INFO("duetfs/selftest", "OK — v3 per-block CRC + symlinks + hardlinks + v2 surface passed");
 }
 
 } // namespace duetos::fs::duetfs

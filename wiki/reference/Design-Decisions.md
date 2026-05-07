@@ -6139,5 +6139,103 @@ doc helps future readers audit the trail.
     resistant SB". Persistent on-disk volumes mount at boot;
     the next persistence cliff is the journal.
 
+---
+
+### DD-FS-DUETFS-V3 — DuetFS v3: per-block CRCs + symlinks + hard links
+
+- **Scope & commit:** `kernel/fs/duetfs/src/format.rs` (CRC table
+  fields, NODE_KIND_SYMLINK, link_count) + new `crc_table.rs` +
+  `fs.rs` (caches CRC table, `write_data_block` helper) +
+  `mkfs.rs` (initializes CRC table) + `ops.rs` (symlinks +
+  hardlinks + write_data_block routing) + `ops_dir.rs` (link_count
+  on create) + `fsck.rs` (per-block CRC + link_count verification)
+  + `ffi.rs` (3 new fns + 2 new status codes + extended FsckReport)
+  + `kernel/fs/duetfs/include/duetfs.h` (mirrored).
+
+- **Decision:**
+  1. **Per-block CRC table at LBA 2.** One block, 1024 × u32
+     entries, indexed by FS block LBA. Updated in lockstep with
+     every data-block write via `Fs::write_data_block`.
+     **Verified by fsck only**, not on the read hot path — keeps
+     reads cheap until a workload demands stronger guarantees.
+  2. **Image cap drops from 128 MiB to 4 MiB.** Single CRC block
+     covers 1024 FS blocks. Multi-block CRC tables (lifting the
+     cap to 32 MiB / 128 MiB) is a separate slice.
+  3. **NODE_KIND_SYMLINK = 3.** Target string stored inline in
+     the symlink node's first extent (one block, capped at
+     `SYMLINK_TARGET_MAX = 1024` bytes). `lookup_path` does NOT
+     auto-resolve through symlinks in v3 — it returns the symlink
+     kind and lets the caller re-resolve. Cycle detection makes
+     auto-resolution non-trivial; ship the inert form first.
+  4. **Hard links via `link_count` refcount on every node.**
+     `unlink` decrements; only frees extents and recycles the
+     node when `link_count` reaches 0. fsck cross-checks node
+     `link_count` against the count derived from dir entries
+     and reports drift in `link_count_mismatch`.
+  5. **v3 hard-link caveat: `new_path`'s last component must
+     equal the target's existing name.** v3 stores the name on
+     the inode itself; until a separate dirent table lands, two
+     dirents pointing at the same inode share a single name.
+     POSIX `link("/a", "/dir/b")` would semantically rename;
+     v3 returns `kStatusInvalid` rather than allow that.
+  6. **Symlink targets are byte-for-byte preserved**, NOT
+     resolved at creation. `readlink` returns the bytes
+     verbatim. Same shape as POSIX `readlink(2)`.
+  7. **Format-version bump 3 → 4.** Magic stays `"DuetFS01"`.
+     v2 images fail open() with `kStatusInvalid` (version
+     mismatch). On-disk v2 volumes from the previous slice need
+     to be reformatted; the boot self-test was the only known
+     consumer and it formats every time.
+  8. **fsck rebuilds the CRC table on repair**, not just the
+     bitmap. After `fsck(repair=1)` a clean second pass reports
+     zero CRC mismatches. Repair semantics: trust the
+     metadata + data blocks, rewrite the bookkeeping.
+
+- **Why:**
+  - Per-block CRCs give us bit-rot detection (the foundation
+    of a real durability story). Coupled with a future journal,
+    this becomes "data integrity end-to-end" for free —
+    journal commit can verify CRCs as it replays.
+  - SB-only CRC (v2) catches torn writes to the SB itself but
+    nothing else. v3 catches "block X is corrupt" — though only
+    on demand at fsck time, which is when an operator runs it
+    explicitly or at mount-time recovery.
+  - Symlinks and hard links are POSIX bedrock. Every Unix
+    binary that calls `symlink(2)` / `link(2)` works the day
+    the userland syscall surface lands.
+  - link_count on every node, not just files, means dirs are
+    refcounted too (root has self-loop link_count=1). Sets up
+    the "rmdir an empty dir frees the inode" semantics
+    cleanly.
+
+- **What it rules out / defers:**
+  - **Read-time CRC verification.** Kept fsck-only to preserve
+    read perf; flip later behind a feature flag.
+  - **CRC table > 1 block.** 4 MiB image cap until then.
+  - **Symlink auto-resolution in `lookup_path`.** Caller-side
+    re-resolve until cycle detection lands.
+  - **Hard-link names different from target's name.** Needs a
+    dirent table.
+  - **Journal.** Mid-write crash on a file's data extent still
+    leaves garbage at the unflushed offset. CRC catches it
+    after the fact; no atomic-commit guarantee.
+  - **Encryption / compression.** Both untouched in v3.
+
+- **Revisit when:**
+  - First production read benchmark says CRC verification is
+    free → flip read-time verification on.
+  - First image > 4 MiB needs a CRC table → multi-block CRC
+    table.
+  - First user wants `link("/a", "/dir/b")` to do POSIX-style
+    rename → dirent table.
+  - First package install with symlinks works on a real disk →
+    auto-symlink resolution.
+
+- **Related roadmap track(s):**
+  - Filesystem track — DuetFS reaches "primary FS with data
+    integrity tier". Next cliffs: journal, encryption.
+
+
+
 
 

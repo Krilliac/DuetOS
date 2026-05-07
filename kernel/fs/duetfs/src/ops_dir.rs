@@ -70,7 +70,7 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         self.dev.read_block(lba, &mut block).map_err(|_| FsError::Io)?;
         let off = (dir.child_count as usize) * 4;
         block[off..off + 4].copy_from_slice(&child_id.to_le_bytes());
-        self.dev.write_block(lba, &block).map_err(|_| FsError::Io)?;
+        self.write_data_block(lba, &block)?;
         dir.child_count += 1;
         dir.size_bytes = dir.child_count * 4;
         self.write_node(dir_id, &dir)?;
@@ -107,7 +107,7 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
             let dst_off = idx * 4;
             block[dst_off..dst_off + 4].copy_from_slice(&last_bytes);
         }
-        self.dev.write_block(lba, &block).map_err(|_| FsError::Io)?;
+        self.write_data_block(lba, &block)?;
         dir.child_count -= 1;
         dir.size_bytes = dir.child_count * 4;
         self.write_node(dir_id, &dir)?;
@@ -136,9 +136,11 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         let mut node = Node::unused();
         node.kind = kind;
         node.parent_id = parent_id;
+        node.link_count = 1;
         node.set_name(name);
-        // Allocate one block of headroom — both files (write_at
-        // grows as needed) and dirs (cap at DIR_MAX_CHILDREN).
+        // Allocate one block of headroom — files (write_at grows
+        // as needed), dirs (cap at DIR_MAX_CHILDREN), symlinks
+        // (target stored in this block).
         let lba = self.alloc_run(1)?;
         node.extents[0] = Extent { block: lba, blocks: 1 };
         node.extent_count = 1;

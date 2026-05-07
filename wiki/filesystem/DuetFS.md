@@ -4,21 +4,24 @@
 >
 > **Execution context:** Kernel — process context.
 >
-> **Maturity:** v2 — multi-extent files, superblock CRC32, fsck, on-disk auto-mount.
+> **Maturity:** v3 — per-block CRCs, symbolic links, hard links (link_count refcount).
 
 ## Overview
 
 DuetFS is the project's **native filesystem**, written in Rust as the
-first Rust subsystem in the kernel. v2 ships:
+first Rust subsystem in the kernel. v3 ships:
 
 - mkfs (format an empty image)
 - create / unlink (files + directories)
 - read / write (with auto-grow that appends inline extents — up to 8 per node)
 - truncate (grow + shrink)
-- **fsck** (re-derive bitmap from metadata, validate, optionally repair)
+- **symbolic links** (`create_symlink` / `readlink`, target stored inline up to 1 KiB)
+- **hard links** (`link`, with `link_count` refcount on every node; unlink decrements, only frees on 0)
+- **fsck** with per-block CRC verification, link_count drift detection, repair
+- **per-block CRC table** at LBA 2 (one CRC32 per FS block; mismatch counted by fsck)
 - **superblock CRC32** (corruption detection; mismatch fails open with `kStatusCorrupt`)
 - mounted at `/duetfs` from boot via `DuetFsBoot`
-- **on-disk auto-mount**: every kernel block-device handle holding a v2 superblock is mounted at `/disks/duetfs<N>`
+- **on-disk auto-mount**: every kernel block-device handle holding a v3 superblock is mounted at `/disks/duetfs<N>`
 - routed through the standard VFS (`VfsResolve("/duetfs/...")` returns a `VfsNode` with `backend == VfsBackend::DuetFs`)
 
 CoW / journal / checksums / encryption / compression / B-tree
@@ -51,53 +54,60 @@ slice-defining workload makes them earn their complexity.
 - `kernel/fs/duetfs_rust_panic.cpp` — Rust → C++ panic bridge.
 - `rust-toolchain.toml` — pinned nightly (rust-src + x86_64-unknown-none target).
 
-## On-disk format (v2)
+## On-disk format (v3)
 
 All multi-byte integers are little-endian. Magic = `"DuetFS01"`,
-version = 3.
+version = 4.
 
 ```
 Block 0          Superblock {
                    magic              u64  = "DuetFS01" (0x3130534674657544)
-                   version            u32  = 3
+                   version            u32  = 4
                    block_size         u32  = 4096
                    total_blocks       u32
                    node_count         u32  = 64
                    root_node          u32  = 0
                    bitmap_lba         u32  = 1
-                   node_table_lba     u32  = 2
+                   crc_table_lba     u32  = 2
+                   crc_table_blocks  u32  = 1
+                   node_table_lba     u32  = 3
                    node_table_blocks  u32  = 4
-                   data_lba           u32  = 6
+                   data_lba           u32  = 7
                    free_blocks        u32  (accounting; rederivable)
                    sb_crc32           u32  (CRC32 over SB with this field zeroed)
-                   reserved[4]
+                   reserved[2]
                  }
 
 Block 1          Free-block bitmap (1 bit per FS block, LSB-first
-                 within each byte; bit set = block in use). Caps the
-                 image at 32 768 blocks (128 MiB) in v2.
+                 within each byte; bit set = block in use).
 
-Block 2..=5      Node table — fixed 256 B entries, 16 nodes/block,
+Block 2          Per-block CRC table. 1024 × u32 little-endian
+                 entries, indexed by FS block LBA. Updated in
+                 lockstep with every block write; verified at
+                 fsck time. Entry [CRC_TABLE_LBA] is 0 (sentinel).
+                 Caps the image at 1024 blocks (4 MiB) in v3.
+
+Block 3..=6      Node table — fixed 256 B entries, 16 nodes/block,
                  64 nodes total.
                  Node {
-                   kind            u32  (0=unused, 1=file, 2=dir)
-                   size_bytes      u32  (file: byte length; dir: child_count*4)
+                   kind            u32  (0=unused, 1=file, 2=dir, 3=symlink)
+                   size_bytes      u32  (file/symlink: byte length; dir: child_count*4)
                    extent_count    u32  (0..=8)
                    child_count     u32  (dirs only)
                    name_len        u32
                    parent_id       u32
-                   reserved[2]
+                   link_count      u32  (hard-link refcount; 1 at create)
+                   reserved        u32
                    name[64]
                    extents[8]      8 × {block u32, blocks u32}  = 64 B
                    pad[96]
                  }
 
-Block 6..        Data blocks. Files: up to 8 inline extents per
-                 file. Each extent is contiguous; multi-extent
-                 means a file may span non-contiguous regions of
-                 the disk. Dirs: child_count × u32 child node IDs
-                 packed at the head of the dir's first extent's
-                 first block (cap: 1024 children).
+Block 7..        Data blocks. Files: up to 8 inline extents per
+                 file. Symlinks: target string in the first
+                 extent's first block (NUL-padded). Dirs:
+                 child_count × u32 child node IDs packed at the
+                 head of the dir's first block (cap: 1024 children).
 ```
 
 ### CRC32
@@ -134,17 +144,17 @@ and CRC. Today's fsck handles bitmap drift; orphan-node sweep,
 cycle-detection in `parent_id` chains, and per-block CRC validation
 land in follow-up slices.
 
-**Known limits (v2):**
+**Known limits (v3):**
 
 - Up to 8 inline extents per file (no indirect blocks). Files that need a 9th extent fail with `kStatusNoSpaceExtents`.
 - Directories cap at 1024 children (one block of child IDs).
-- Maximum image size: 128 MiB (single-block bitmap).
+- Maximum image size: **4 MiB** (single-block CRC table — was 128 MiB before per-block CRCs).
 - Maximum node count: 64 per filesystem (4 blocks of node table).
-- Only the superblock has a CRC; per-block CRCs land later.
+- Per-block CRCs are verified by **fsck only** — the read hot path doesn't pay the verification cost. (A future slice can flip the switch.)
+- Hard link `new_path`'s last component must equal the target's existing name (v3 stores names on the inode; a separate dirent table lifts this in a future slice).
+- Symlink resolution stops at the symlink — caller re-resolves with the target. Auto-traversal in `lookup_path` lands later (cycle detection makes it non-trivial).
 - No CoW, no journal, no encryption, no compression.
-- No symbolic links.
-- `truncate` shrink does NOT free extent blocks (free-on-shrink lands in a follow-up slice).
-- fsck handles bitmap drift only; deeper repair (orphan sweep, cycle detection) lands later.
+- `truncate` shrink does NOT free extent blocks (free-on-shrink lands later).
 
 ## Boot integration
 
@@ -178,7 +188,10 @@ side reads `src/ffi.rs`.
 | `duetfs_create_path(dev, path, path_max, kind, out_node_id)` | Create a file or directory. Parent must exist. |
 | `duetfs_unlink_path(dev, path, path_max)` | Remove a file or empty directory. |
 | `duetfs_truncate(dev, node_id, new_size)` | Set a file's logical size, growing the extent if needed. |
-| `duetfs_fsck(dev, repair, out)` | Walk metadata, recompute should-be bitmap, diff against on-disk; optionally repair. |
+| `duetfs_fsck(dev, repair, out)` | Walk metadata, verify per-block CRCs, recompute bitmap, optionally repair. |
+| `duetfs_create_symlink(dev, path, path_max, target, target_max, out_node_id)` | Create a symlink; target stored inline. |
+| `duetfs_readlink(dev, node_id, dst, dst_max, out_copied)` | Read a symlink's target. |
+| `duetfs_link(dev, existing, existing_max, new, new_max)` | Create a hard link (increments target's link_count). |
 
 All ops take a `Device` descriptor with `cookie` + `read` + `write`
 callbacks. The crate constructs an internal `Fs` from the
@@ -265,13 +278,15 @@ and the format stays trivially walkable from a Rust-only `no_std` crate.
 
 Tracked in [`Roadmap.md`](../reference/Roadmap.md):
 
+- Read-time per-block CRC verification (today fsck-only).
+- Multi-block CRC table (lifts the 4 MiB cap to 32 MiB / 128 MiB).
 - Multi-block directories (raise the 1024-child cap).
 - Indirect extents (for files needing > 8 extents).
+- Separate dirent table (decouples hard-link names from the inode's `name`; supports `new_path` ≠ target's name).
+- Auto-symlink resolution in `lookup_path` with cycle detection.
 - Free-on-shrink `truncate`.
 - B-tree directory index (when first directory grows past ~1000 entries).
-- Per-block CRCs.
-- CoW + journal (durability — currently no crash safety beyond SB CRC).
+- CoW + journal (durability — currently no crash safety beyond SB + per-block CRC).
 - AES-XTS encryption + Argon2 KDF.
 - LZ4 compression.
 - Userland syscall surface (file open/read/write that route through DuetFS via the existing VFS).
-- Hard links / symbolic links.

@@ -13,9 +13,7 @@
 use core::ffi::{c_uchar, c_uint, c_void};
 
 use crate::block_dev::{ExternBlockDevice, ExternBlockDeviceOps};
-use crate::format::{
-    NODE_KIND_DIR, NODE_KIND_FILE, NODE_KIND_UNUSED, ROOT_NODE_ID,
-};
+use crate::format::{NODE_KIND_DIR, NODE_KIND_FILE, NODE_KIND_UNUSED, ROOT_NODE_ID};
 use crate::fs::{Fs, FsError};
 use crate::mkfs;
 use crate::path::split_parent_and_name;
@@ -37,6 +35,8 @@ const STATUS_IO: u32 = 10;
 const STATUS_READ_ONLY: u32 = 11;
 const STATUS_NO_SPACE_EXTENTS: u32 = 12;
 const STATUS_CORRUPT: u32 = 13;
+const STATUS_NOT_A_SYMLINK: u32 = 14;
+const STATUS_XDEV_LINK: u32 = 15;
 
 #[repr(C)]
 pub struct DuetFsDevice
@@ -76,6 +76,8 @@ fn err_to_status(e: FsError) -> u32
         FsError::ReadOnly => STATUS_READ_ONLY,
         FsError::NoSpaceExtents => STATUS_NO_SPACE_EXTENTS,
         FsError::Corrupt => STATUS_CORRUPT,
+        FsError::NotASymlink => STATUS_NOT_A_SYMLINK,
+        FsError::XdevLink => STATUS_XDEV_LINK,
     }
 }
 
@@ -305,6 +307,8 @@ pub struct DuetFsFsckReport
     pub bad_extents: u32,
     pub repaired: u32,
     pub sb_crc_mismatch: u32,
+    pub block_crc_mismatch: u32,
+    pub link_count_mismatch: u32,
 }
 
 #[no_mangle]
@@ -330,10 +334,103 @@ pub unsafe extern "C" fn duetfs_fsck(
                     (*out).bad_extents = r.bad_extents;
                     (*out).repaired = r.repaired;
                     (*out).sb_crc_mismatch = r.sb_crc_mismatch;
+                    (*out).block_crc_mismatch = r.block_crc_mismatch;
+                    (*out).link_count_mismatch = r.link_count_mismatch;
                 }
             }
             STATUS_OK
         }
+        Err(e) => err_to_status(e),
+    }
+}
+
+/// Create a symbolic link at `path` pointing at `target`. Both
+/// strings are NUL-terminated kernel buffers.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_create_symlink(
+    desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize,
+    target: *const c_uchar, target_max: usize, out_node_id: *mut u32,
+) -> c_uint
+{
+    if !out_node_id.is_null()
+    {
+        unsafe { *out_node_id = 0 };
+    }
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else { return STATUS_INVALID };
+    let Some(target_bytes) = (unsafe { cstr_to_slice(target, target_max) }) else { return STATUS_INVALID };
+    let Some((parent_path, name)) = split_parent_and_name(path_bytes) else { return STATUS_INVALID };
+    let mut fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
+    let parent = match fs.lookup_path(parent_path) { Ok(r) => r, Err(e) => return err_to_status(e) };
+    match fs.create_symlink(parent.node_id, name, target_bytes)
+    {
+        Ok(id) => {
+            if !out_node_id.is_null()
+            {
+                unsafe { *out_node_id = id };
+            }
+            STATUS_OK
+        }
+        Err(e) => err_to_status(e),
+    }
+}
+
+/// Read a symlink's target into `dst`. Returns kStatusOk + bytes
+/// copied via `*out_copied`. Same shape as duetfs_read_file but
+/// requires the node to be a symlink.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_readlink(
+    desc: *const DuetFsDevice, node_id: u32, dst: *mut c_void, dst_max: usize,
+    out_copied: *mut usize,
+) -> c_uint
+{
+    if !out_copied.is_null()
+    {
+        unsafe { *out_copied = 0 };
+    }
+    if dst.is_null() || dst_max == 0
+    {
+        return STATUS_INVALID;
+    }
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    let fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
+    let buf = unsafe { core::slice::from_raw_parts_mut(dst as *mut u8, dst_max) };
+    match fs.readlink(node_id, buf)
+    {
+        Ok(n) => {
+            if !out_copied.is_null()
+            {
+                unsafe { *out_copied = n as usize };
+            }
+            STATUS_OK
+        }
+        Err(e) => err_to_status(e),
+    }
+}
+
+/// Create a hard link at `new_path` pointing at the same inode as
+/// `existing_path`. v3 caveat: the new dirent shares the target's
+/// existing name; passing a `new_path` whose last component
+/// differs from the target's name returns STATUS_INVALID until a
+/// future slice introduces a separate dirent table.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_link(
+    desc: *const DuetFsDevice, existing_path: *const c_uchar, existing_max: usize,
+    new_path: *const c_uchar, new_max: usize,
+) -> c_uint
+{
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    let Some(existing_bytes) = (unsafe { cstr_to_slice(existing_path, existing_max) }) else {
+        return STATUS_INVALID;
+    };
+    let Some(new_bytes) = (unsafe { cstr_to_slice(new_path, new_max) }) else { return STATUS_INVALID };
+    let Some((parent_path, name)) = split_parent_and_name(new_bytes) else { return STATUS_INVALID };
+    let mut fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
+    let target = match fs.lookup_path(existing_bytes) { Ok(r) => r, Err(e) => return err_to_status(e) };
+    let parent = match fs.lookup_path(parent_path) { Ok(r) => r, Err(e) => return err_to_status(e) };
+    match fs.link(target.node_id, parent.node_id, name)
+    {
+        Ok(()) => STATUS_OK,
         Err(e) => err_to_status(e),
     }
 }

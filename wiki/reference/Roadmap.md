@@ -490,27 +490,29 @@ The remaining triggers still apply for **future** Rust subsystems
 
 ### DuetFS follow-ups
 
-v2 ships multi-extent files (≤ 8 inline extents), superblock CRC32,
-fsck (bitmap recomputation + repair), and on-disk auto-mount of
-existing v2 volumes via boot-time block-device probe. The
-in-memory `/duetfs` boot image is still `.bss`-resident (lost on
-reboot); real on-disk volumes survive. Next slices:
+v3 ships per-block CRCs (fsck-verified), symbolic links, hard links
+with `link_count` refcount, fsck with link-count drift detection,
+and the same on-disk auto-mount path. Image cap dropped from 128 MiB
+to 4 MiB to make room for the single-block CRC table; future slice
+extends. Next:
 
-1. **Per-block CRCs** — extend corruption detection from SB-only
-   to data + metadata blocks.
-2. **CoW + journal** — durability / crash safety on file data
-   writes (today only the SB is crash-resistant via CRC).
-3. **Userland syscall surface** — make DuetFS reachable from PE/ELF
+1. **Read-time per-block CRC verification** — today fsck-only; flip
+   the read hot-path switch.
+2. **Multi-block CRC table** — restore the 32 MiB / 128 MiB image cap.
+3. **CoW + journal** — durability / crash safety on file data writes.
+4. **Userland syscall surface** — make DuetFS reachable from PE/ELF
    binaries. Routes file open/read/write through the existing VFS,
    which already has `VfsBackend::DuetFs`.
-4. **Indirect extents** — files needing > 8 extents.
-5. **Multi-block dirs + B-tree directory index** — bump the 1024-child cap.
-6. **Auto-mkfs of a blank disk via shell command** — `mkfs.duetfs /disks/<dev>`.
-7. **Free-on-shrink `truncate`** — today shrink keeps extent blocks allocated.
-8. **fsck deeper checks** — orphan-node sweep, `parent_id` cycle detection.
-9. **AES-XTS encryption + Argon2 KDF** — full-disk encryption tier.
-10. **LZ4 compression** — optional per-file compression.
-11. **Hard links / symbolic links**.
+5. **Separate dirent table** — decouples hard-link names from the
+   inode's `name` (today's v3 caveat).
+6. **Auto-symlink resolution in `lookup_path`** with cycle detection.
+7. **Indirect extents** — files needing > 8 extents.
+8. **Multi-block dirs + B-tree directory index** — bump the 1024-child cap.
+9. **Auto-mkfs of a blank disk via shell command** — `mkfs.duetfs /disks/<dev>`.
+10. **Free-on-shrink `truncate`** — today shrink keeps extent blocks allocated.
+11. **fsck deeper checks** — orphan-node sweep, `parent_id` cycle detection.
+12. **AES-XTS encryption + Argon2 KDF** — full-disk encryption tier.
+13. **LZ4 compression** — optional per-file compression.
 
 ---
 
