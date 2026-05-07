@@ -17,12 +17,13 @@ use crate::compress;
 use crate::crypto;
 use crate::format::{
     BLOCK_SIZE, JOURNAL_LBA, NODE_KIND_DIR, NODE_KIND_FILE, NODE_KIND_UNUSED, ROOT_NODE_ID,
-    SALT_BYTES,
+    SALT_BYTES, SUPERBLOCK_LBA,
 };
 use crate::fs::{Fs, FsError};
 use crate::journal;
 use crate::mkfs;
 use crate::path::split_parent_and_name;
+use crate::snapshot;
 
 // Status codes returned by FFI fns. 0 = success, anything else = an
 // FsError variant. Kept in lockstep with kKindMiss / kStatus* in
@@ -731,6 +732,69 @@ pub unsafe extern "C" fn duetfs_lz4_decompress(
 pub unsafe extern "C" fn duetfs_lz4_compress_bound(n: usize) -> usize
 {
     compress::compress_bound(n)
+}
+
+// ----------------------------------------------------------------
+// Snapshot FFI — v7. Single-slot save / restore + CoW pinning. The
+// pinning is applied transparently inside Fs::alloc_run; FFI only
+// surfaces create / restore / status to the C++ side.
+// ----------------------------------------------------------------
+
+/// Take a snapshot of the live FS metadata. Persists SB + bitmap +
+/// CRC table + node table into the snapshot slot. After this call
+/// every block the live allocator considers in-use is pinned —
+/// alloc_run treats it as unavailable until snapshot_restore.
+///
+/// `ts_ns` is opaque to the FS — typically the kernel monotonic
+/// clock at snapshot time. Stored verbatim in the SB so the C++
+/// side can render "snapshot taken N seconds ago".
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_snapshot_create(
+    desc: *const DuetFsDevice, ts_ns: u64,
+) -> c_uint
+{
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    match snapshot::create(&mut dev, ts_ns)
+    {
+        Ok(()) => STATUS_OK,
+        Err(e) => err_to_status(e),
+    }
+}
+
+/// Restore the snapshot slot back to the live metadata. The FS
+/// returns to exactly the state captured by the most recent
+/// `duetfs_snapshot_create`. Idempotent — restoring an already-
+/// restored snapshot is a no-op re-apply.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_snapshot_restore(desc: *const DuetFsDevice) -> c_uint
+{
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    match snapshot::restore(&mut dev)
+    {
+        Ok(()) => STATUS_OK,
+        Err(e) => err_to_status(e),
+    }
+}
+
+/// Snapshot presence. 0 = absent, 1 = present, 0xFFFFFFFFu = read
+/// error / corrupt SB.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_snapshot_present(desc: *const DuetFsDevice) -> c_uint
+{
+    let Some(dev) = (unsafe { make_dev(desc) }) else { return c_uint::MAX };
+    let mut block = [0u8; BLOCK_SIZE];
+    if dev.read_block(SUPERBLOCK_LBA, &mut block).is_err()
+    {
+        return c_uint::MAX;
+    }
+    let sb = unsafe {
+        core::ptr::read_unaligned(block.as_ptr() as *const crate::format::Superblock)
+    };
+    if sb.magic != crate::format::MAGIC || sb.version != crate::format::VERSION
+    {
+        return c_uint::MAX;
+    }
+    sb.snapshot_present
 }
 
 /// Read the SB's encryption metadata without mounting the FS.

@@ -38,5 +38,6 @@ mod ops;
 mod ops_dir;
 mod panic;
 mod path;
+mod snapshot;
 
 pub mod ffi;

@@ -15,7 +15,7 @@ use crate::format::{
     Node, Superblock, BITMAP_LBA, BLOCK_SIZE, CRC_TABLE_BLOCKS, CRC_TABLE_LBA, DATA_LBA,
     JOURNAL_BLOCKS, JOURNAL_LBA, MAGIC, MAX_INLINE_EXTENTS, NAME_MAX, NODE_COUNT,
     NODE_KIND_UNUSED, NODE_SIZE, NODE_TABLE_BLOCKS, NODE_TABLE_LBA, NODES_PER_BLOCK,
-    ROOT_NODE_ID, SUPERBLOCK_LBA, VERSION,
+    ROOT_NODE_ID, SNAPSHOT_BLOCKS, SNAPSHOT_LBA, SUPERBLOCK_LBA, VERSION,
 };
 use crate::journal;
 
@@ -76,6 +76,8 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
             || sb.node_count != NODE_COUNT
             || sb.journal_lba != JOURNAL_LBA
             || sb.journal_blocks != JOURNAL_BLOCKS
+            || sb.snapshot_lba != SNAPSHOT_LBA
+            || sb.snapshot_blocks != SNAPSHOT_BLOCKS
             || sb.data_lba != DATA_LBA
             || sb.total_blocks > dev.block_count()
         {
@@ -192,7 +194,25 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
 
     pub(crate) fn alloc_run(&mut self, n: u32) -> FsResult<u32>
     {
-        let lba = self.bitmap.alloc_run(n).ok_or(FsError::NoSpaceData)?;
+        // When a snapshot is present, its bitmap copy pins every
+        // block the snapshot references. The live allocator skips
+        // those blocks so a future restore retains every byte the
+        // snapshot captured. The read happens once per alloc — the
+        // snapshot bitmap doesn't change during normal FS operation,
+        // only on snapshot_create / restore.
+        let pinned_buf: Option<[u8; BLOCK_SIZE]> = if self.sb.snapshot_present
+            == crate::format::SNAPSHOT_PRESENT_YES
+        {
+            Some(crate::snapshot::read_pinned_bitmap(self.dev)?)
+        }
+        else
+        {
+            None
+        };
+        let lba = self
+            .bitmap
+            .alloc_run_with_pinned(n, pinned_buf.as_ref())
+            .ok_or(FsError::NoSpaceData)?;
         self.bitmap.flush(self.dev).map_err(|_| FsError::Io)?;
         // Update bitmap's own CRC entry.
         let mut bm = [0u8; BLOCK_SIZE];
@@ -292,6 +312,11 @@ fn read_superblock(block: &[u8]) -> Superblock
         kdf_t_cost: 0,
         kdf_p_cost: 0,
         kdf_salt: [0; crate::format::SALT_BYTES],
+        snapshot_lba: 0,
+        snapshot_blocks: 0,
+        snapshot_present: 0,
+        snapshot_reserved: 0,
+        snapshot_timestamp_ns: 0,
     };
     let raw = unsafe {
         core::slice::from_raw_parts_mut(

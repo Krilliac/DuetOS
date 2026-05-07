@@ -15,7 +15,7 @@ use crate::crc32::crc32;
 use crate::format::{
     BITMAP_LBA, BLOCK_SIZE, CRC_TABLE_LBA, JOURNAL_BLOCKS, JOURNAL_LBA, MAX_INLINE_EXTENTS,
     NODE_KIND_DIR, NODE_KIND_FILE, NODE_KIND_SYMLINK, NODE_TABLE_BLOCKS, NODE_TABLE_LBA,
-    SUPERBLOCK_LBA,
+    SNAPSHOT_BLOCKS, SNAPSHOT_LBA, SUPERBLOCK_LBA,
 };
 use crate::fs::{compute_sb_crc, Fs, FsError, FsResult};
 use crate::mkfs;
@@ -52,6 +52,10 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         for i in 0..JOURNAL_BLOCKS
         {
             want.mark_used(JOURNAL_LBA + i);
+        }
+        for i in 0..SNAPSHOT_BLOCKS
+        {
+            want.mark_used(SNAPSHOT_LBA + i);
         }
 
         // Per-node refcount derived from dir entries (so we can
@@ -173,6 +177,13 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
                 continue;
             }
             if b >= JOURNAL_LBA && b < JOURNAL_LBA + JOURNAL_BLOCKS
+            {
+                continue;
+            }
+            // Snapshot blocks change on snapshot_create / restore;
+            // their CRC is implicit in the snapshot SB copy at
+            // SNAPSHOT_LBA, not the live crc_table entry.
+            if b >= SNAPSHOT_LBA && b < SNAPSHOT_LBA + SNAPSHOT_BLOCKS
             {
                 continue;
             }

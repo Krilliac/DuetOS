@@ -13,7 +13,7 @@ use crate::format::{
     Extent, Node, Superblock, BITMAP_LBA, BLOCK_SIZE, CRC_TABLE_BLOCKS, CRC_TABLE_LBA,
     DATA_LBA, JOURNAL_BLOCKS, JOURNAL_LBA, MAGIC, MIN_TOTAL_BLOCKS, NODE_COUNT,
     NODE_KIND_DIR, NODE_SIZE, NODE_TABLE_BLOCKS, NODE_TABLE_LBA, NODES_PER_BLOCK,
-    ROOT_NODE_ID, SUPERBLOCK_LBA, VERSION,
+    ROOT_NODE_ID, SNAPSHOT_BLOCKS, SNAPSHOT_LBA, SUPERBLOCK_LBA, VERSION,
 };
 use crate::fs::{compute_sb_crc, FsError, FsResult};
 
@@ -45,6 +45,10 @@ pub fn format<D: BlockDevice + ?Sized>(dev: &mut D) -> FsResult<()>
     {
         bitmap.mark_used(JOURNAL_LBA + i);
     }
+    for i in 0..SNAPSHOT_BLOCKS
+    {
+        bitmap.mark_used(SNAPSHOT_LBA + i);
+    }
     let root_extent = DATA_LBA;
     bitmap.mark_used(root_extent);
 
@@ -61,6 +65,10 @@ pub fn format<D: BlockDevice + ?Sized>(dev: &mut D) -> FsResult<()>
     for i in 0..JOURNAL_BLOCKS
     {
         dev.write_block(JOURNAL_LBA + i, &zero).map_err(|_| FsError::Io)?;
+    }
+    for i in 0..SNAPSHOT_BLOCKS
+    {
+        dev.write_block(SNAPSHOT_LBA + i, &zero).map_err(|_| FsError::Io)?;
     }
     dev.write_block(root_extent, &zero).map_err(|_| FsError::Io)?;
 
@@ -96,6 +104,10 @@ pub fn format<D: BlockDevice + ?Sized>(dev: &mut D) -> FsResult<()>
     {
         crc_table.set(JOURNAL_LBA + i, zero_crc);
     }
+    for i in 0..SNAPSHOT_BLOCKS
+    {
+        crc_table.set(SNAPSHOT_LBA + i, zero_crc);
+    }
     crc_table.set(root_extent, crc32(&zero));
 
     // 6. Build superblock with CRC.
@@ -123,6 +135,12 @@ pub fn format<D: BlockDevice + ?Sized>(dev: &mut D) -> FsResult<()>
         kdf_t_cost: 0,
         kdf_p_cost: 0,
         kdf_salt: [0; crate::format::SALT_BYTES],
+        // v7 — snapshot slot present at SNAPSHOT_LBA but empty.
+        snapshot_lba: SNAPSHOT_LBA,
+        snapshot_blocks: SNAPSHOT_BLOCKS,
+        snapshot_present: 0,
+        snapshot_reserved: 0,
+        snapshot_timestamp_ns: 0,
     };
     sb.sb_crc32 = compute_sb_crc(&sb);
 

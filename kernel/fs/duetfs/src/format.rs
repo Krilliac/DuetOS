@@ -56,8 +56,26 @@ pub const JOURNAL_DESCRIPTOR_MAGIC: u32 = u32::from_le_bytes(*b"DJRN");
 pub const JOURNAL_STATE_EMPTY: u32 = 0;
 pub const JOURNAL_STATE_COMMITTED: u32 = 1;
 
-pub const DATA_LBA: u32 = JOURNAL_LBA + JOURNAL_BLOCKS; // 15
-pub const MIN_TOTAL_BLOCKS: u32 = DATA_LBA + 1; // 16
+// Snapshot region — v7. One slot stores a frozen copy of the FS's
+// metadata blocks: SB, bitmap, CRC table, node table. While a
+// snapshot is present (`SB.snapshot_present == 1`), every block that
+// the snapshot's bitmap records as in-use is pinned — the live
+// allocator refuses to reuse it. Restoration copies the slot back on
+// top of the live metadata, recovering the FS to its snapshotted
+// state. v7 ships ONE snapshot slot; multi-snapshot timeline lands
+// in a follow-up once the single-slot path is proven.
+pub const SNAPSHOT_LBA: u32 = JOURNAL_LBA + JOURNAL_BLOCKS; // 15
+pub const SNAPSHOT_SB_OFFSET: u32 = 0;
+pub const SNAPSHOT_BITMAP_OFFSET: u32 = 1;
+pub const SNAPSHOT_CRC_OFFSET: u32 = 2;
+pub const SNAPSHOT_NODE_TABLE_OFFSET: u32 = 3;
+pub const SNAPSHOT_BLOCKS: u32 = 3 + NODE_TABLE_BLOCKS; // 7
+
+pub const SNAPSHOT_PRESENT_NO: u32 = 0;
+pub const SNAPSHOT_PRESENT_YES: u32 = 1;
+
+pub const DATA_LBA: u32 = SNAPSHOT_LBA + SNAPSHOT_BLOCKS; // 22
+pub const MIN_TOTAL_BLOCKS: u32 = DATA_LBA + 1; // 23
 
 // CRC table: one block = 1024 × u32 entries. v3 cap = 1024 blocks.
 pub const CRC_TABLE_ENTRIES: u32 = (BLOCK_SIZE / 4) as u32;
@@ -67,7 +85,7 @@ pub const MAX_TOTAL_BLOCKS: u32 = CRC_TABLE_ENTRIES;
 pub const BITMAP_BITS: u32 = (BLOCK_SIZE as u32) * 8;
 
 pub const MAGIC: u64 = u64::from_le_bytes(*b"DuetFS01");
-pub const VERSION: u32 = 6;
+pub const VERSION: u32 = 7;
 
 // Encryption — v6. The volume is either fully encrypted or fully
 // unencrypted; per-file encryption isn't on the roadmap. Block 0
@@ -134,6 +152,15 @@ pub struct Superblock
     pub kdf_t_cost: u32,
     pub kdf_p_cost: u32,
     pub kdf_salt: [u8; SALT_BYTES],
+    // v7 — snapshot slot. `snapshot_present` is SNAPSHOT_PRESENT_*;
+    // when YES, the slot at SNAPSHOT_LBA holds a frozen metadata
+    // copy and the live allocator pins every block referenced by
+    // the slot's bitmap (no reuse → restoration is consistent).
+    pub snapshot_lba: u32,
+    pub snapshot_blocks: u32,
+    pub snapshot_present: u32,
+    pub snapshot_reserved: u32, // alignment + future timestamp
+    pub snapshot_timestamp_ns: u64,
 }
 
 #[repr(C)]

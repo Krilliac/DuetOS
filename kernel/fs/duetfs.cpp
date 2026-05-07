@@ -530,20 +530,20 @@ void DuetFsSelfTest()
     //     LZ4 + DuetFS storage compose end-to-end.
     {
         constexpr usize kPayloadLen = 4096;
-        u8 payload[kPayloadLen] = {};
+        u8 lz_plain[kPayloadLen] = {};
         // Highly redundant pattern: 16-byte phrase repeated. LZ4
         // compresses this near-trivially (>20× ratio).
         const char phrase[] = "duetfs/lz4 v7! ";
         for (usize i = 0; i < kPayloadLen; ++i)
         {
-            payload[i] = static_cast<u8>(phrase[i % (sizeof(phrase) - 1)]);
+            lz_plain[i] = static_cast<u8>(phrase[i % (sizeof(phrase) - 1)]);
         }
         const usize bound = duetfs_lz4_compress_bound(kPayloadLen);
         Expect(bound > 0 && bound < kPayloadLen + 256, "lz4 bound out of range");
         u8 compressed[4352] = {}; // > kPayloadLen + 256
         Expect(bound <= sizeof(compressed), "lz4 bound exceeds local buffer");
         usize comp_len = 0;
-        ExpectStatus(duetfs_lz4_compress(payload, kPayloadLen, compressed, sizeof(compressed), &comp_len), kStatusOk,
+        ExpectStatus(duetfs_lz4_compress(lz_plain, kPayloadLen, compressed, sizeof(compressed), &comp_len), kStatusOk,
                      "lz4_compress failed");
         Expect(comp_len > 0 && comp_len < kPayloadLen, "lz4_compress produced no shrink");
 
@@ -554,7 +554,7 @@ void DuetFsSelfTest()
         Expect(decomp_len == kPayloadLen, "lz4 decompressed size wrong");
         for (usize i = 0; i < kPayloadLen; ++i)
         {
-            if (decompressed[i] != payload[i])
+            if (decompressed[i] != lz_plain[i])
             {
                 duetos::core::PanicWithValue("duetfs/selftest", "lz4 round-trip mismatch", i);
             }
@@ -565,30 +565,85 @@ void DuetFsSelfTest()
         u32 lz_id = 0;
         ExpectStatus(duetfs_create_path(&scratch, reinterpret_cast<const u8*>("/lz4.bin"), 9, kKindFile, &lz_id),
                      kStatusOk, "create /lz4.bin failed");
-        usize wrote = 0;
-        ExpectStatus(duetfs_write_at(&scratch, lz_id, 0, compressed, comp_len, &wrote), kStatusOk,
+        usize lz_wrote = 0;
+        ExpectStatus(duetfs_write_at(&scratch, lz_id, 0, compressed, comp_len, &lz_wrote), kStatusOk,
                      "write /lz4.bin failed");
-        Expect(wrote == comp_len, "lz4 fs write short");
-        u8 readback[4352] = {};
-        usize got = 0;
-        ExpectStatus(duetfs_read_file(&scratch, lz_id, 0, readback, sizeof(readback), &got), kStatusOk,
+        Expect(lz_wrote == comp_len, "lz4 fs write short");
+        u8 lz_readback[4352] = {};
+        usize lz_got = 0;
+        ExpectStatus(duetfs_read_file(&scratch, lz_id, 0, lz_readback, sizeof(lz_readback), &lz_got), kStatusOk,
                      "read /lz4.bin failed");
-        Expect(got == comp_len, "lz4 fs read short");
+        Expect(lz_got == comp_len, "lz4 fs read short");
         u8 final_decomp[kPayloadLen] = {};
         usize final_len = 0;
-        ExpectStatus(duetfs_lz4_decompress(readback, got, final_decomp, sizeof(final_decomp), &final_len), kStatusOk,
-                     "lz4 final decompress failed");
+        ExpectStatus(duetfs_lz4_decompress(lz_readback, lz_got, final_decomp, sizeof(final_decomp), &final_len),
+                     kStatusOk, "lz4 final decompress failed");
         Expect(final_len == kPayloadLen, "lz4 final decompressed size wrong");
         for (usize i = 0; i < kPayloadLen; ++i)
         {
-            if (final_decomp[i] != payload[i])
+            if (final_decomp[i] != lz_plain[i])
             {
                 duetos::core::PanicWithValue("duetfs/selftest", "lz4 fs round-trip mismatch", i);
             }
         }
     }
 
-    KLOG_INFO("duetfs/selftest", "OK — v7 LZ4 + AES-XTS + Argon2 + journal + per-block CRC passed");
+    // 20. Snapshot round-trip: create a marker file, take a
+    //     snapshot, modify the FS (create another file + write to
+    //     existing file), restore the snapshot, verify the modified
+    //     state is gone and the snapshotted state is back.
+    {
+        // Pre-snapshot state: create /snap_pre.bin with known bytes.
+        u32 pre_id = 0;
+        ExpectStatus(duetfs_create_path(&scratch, reinterpret_cast<const u8*>("/snap_pre.bin"), 14, kKindFile, &pre_id),
+                     kStatusOk, "create /snap_pre.bin failed");
+        const char pre_payload[] = "pre-snapshot";
+        usize sw = 0;
+        ExpectStatus(duetfs_write_at(&scratch, pre_id, 0, pre_payload, sizeof(pre_payload) - 1, &sw), kStatusOk,
+                     "pre-snapshot write failed");
+
+        // Take the snapshot.
+        Expect(duetfs_snapshot_present(&scratch) == 0, "snapshot already present pre-create");
+        ExpectStatus(duetfs_snapshot_create(&scratch, /*ts_ns=*/123456789u), kStatusOk, "snapshot_create failed");
+        Expect(duetfs_snapshot_present(&scratch) == 1, "snapshot not present post-create");
+
+        // Modify post-snapshot: add /snap_post.bin and overwrite snap_pre.
+        u32 post_id = 0;
+        ExpectStatus(
+            duetfs_create_path(&scratch, reinterpret_cast<const u8*>("/snap_post.bin"), 15, kKindFile, &post_id),
+            kStatusOk, "create /snap_post.bin failed");
+        const char overwrite_payload[] = "post-overwrite";
+        ExpectStatus(duetfs_write_at(&scratch, pre_id, 0, overwrite_payload, sizeof(overwrite_payload) - 1, &sw),
+                     kStatusOk, "post-snapshot write failed");
+
+        // Verify the post-snapshot state is in effect.
+        ExpectStatus(duetfs_lookup(&scratch, reinterpret_cast<const u8*>("/snap_post.bin"), 15, &res), kStatusOk,
+                     "post-snapshot lookup failed");
+        u8 snap_buf[32] = {};
+        usize rg = 0;
+        ExpectStatus(duetfs_read_file(&scratch, pre_id, 0, snap_buf, sizeof(snap_buf), &rg), kStatusOk,
+                     "post-snapshot read failed");
+        Expect(BytesEqual(snap_buf, "post-overwrite", sizeof(overwrite_payload) - 1), "post-snapshot content wrong");
+
+        // Restore the snapshot.
+        ExpectStatus(duetfs_snapshot_restore(&scratch), kStatusOk, "snapshot_restore failed");
+
+        // Snapshot stays present after restore (slot keeps its copy).
+        Expect(duetfs_snapshot_present(&scratch) == 1, "snapshot vanished after restore");
+
+        // /snap_post.bin should be gone (it was created post-snapshot).
+        Expect(duetfs_lookup(&scratch, reinterpret_cast<const u8*>("/snap_post.bin"), 15, &res) == kStatusNotFound,
+               "post-snapshot file survived restore");
+
+        // /snap_pre.bin's content should be "pre-snapshot" again.
+        for (u32 i = 0; i < sizeof(snap_buf); ++i)
+            snap_buf[i] = 0;
+        ExpectStatus(duetfs_read_file(&scratch, pre_id, 0, snap_buf, sizeof(snap_buf), &rg), kStatusOk,
+                     "post-restore read failed");
+        Expect(BytesEqual(snap_buf, "pre-snapshot", sizeof(pre_payload) - 1), "post-restore content wrong");
+    }
+
+    KLOG_INFO("duetfs/selftest", "OK — v7 snapshots + LZ4 + AES-XTS + Argon2 + journal + CRC passed");
 }
 
 } // namespace duetos::fs::duetfs

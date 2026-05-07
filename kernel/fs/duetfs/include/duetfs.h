@@ -29,12 +29,14 @@ inline constexpr u32 kRootNodeId = 0;
 
 /// Magic identifying a DuetFS superblock — bytes "DuetFS01"
 /// little-endian (byte 0 = 'D' = 0x44, byte 7 = '1' = 0x31).
-/// Magic stayed across v1→v6; only the version field bumps.
+/// Magic stayed across v1→v7; only the version field bumps.
 inline constexpr u64 kMagic = 0x3130534674657544ull;
-inline constexpr u32 kVersion = 6; // v6 (AES-XTS encryption + Argon2 KDF)
+inline constexpr u32 kVersion = 7; // v7 (snapshots / CoW)
 inline constexpr u32 kJournalLba = 7;
 inline constexpr u32 kJournalBlocks = 8;
-inline constexpr u32 kDataLba = 15;
+inline constexpr u32 kSnapshotLba = 15;
+inline constexpr u32 kSnapshotBlocks = 7;
+inline constexpr u32 kDataLba = 22;
 inline constexpr u32 kSaltBytes = 16;
 inline constexpr u32 kXtsKeyBytes = 64;
 inline constexpr u32 kEncryptedNo = 0;
@@ -250,6 +252,22 @@ extern "C"
     /// Worst-case output size for duetfs_lz4_compress on an input of
     /// `n` bytes (includes the 4-byte size prefix). Cheap (no I/O).
     usize duetfs_lz4_compress_bound(usize n);
+
+    /// Take a snapshot of the live FS metadata. Pins every block
+    /// the live allocator currently considers in-use; allocations
+    /// after this call skip pinned blocks. `ts_ns` is opaque —
+    /// stored in the SB for diagnostic display ("snapshot taken
+    /// N seconds ago"). Returns kStatusOk or an error code.
+    u32 duetfs_snapshot_create(const Device* dev, u64 ts_ns);
+
+    /// Restore the snapshot slot on top of the live metadata. The
+    /// FS returns to exactly the state captured by the most recent
+    /// duetfs_snapshot_create. Idempotent.
+    u32 duetfs_snapshot_restore(const Device* dev);
+
+    /// Snapshot presence. 0 = absent, 1 = present, 0xFFFFFFFFu =
+    /// read error / corrupt SB.
+    u32 duetfs_snapshot_present(const Device* dev);
 }
 
 } // namespace duetos::fs::duetfs

@@ -95,6 +95,16 @@ impl BitmapAllocator
     /// Returns the LBA of the first block on success.
     pub fn find_run(&self, n: u32) -> Option<u32>
     {
+        self.find_run_with_pinned(n, None)
+    }
+
+    /// Same as `find_run` but treats blocks set in `pinned` as also-
+    /// in-use. Used by the snapshot-aware allocator when a snapshot
+    /// is present at SNAPSHOT_LBA — its bitmap copy is the pin set.
+    pub fn find_run_with_pinned(
+        &self, n: u32, pinned: Option<&[u8; BLOCK_SIZE]>,
+    ) -> Option<u32>
+    {
         if n == 0 || n > self.total_blocks
         {
             return None;
@@ -103,7 +113,12 @@ impl BitmapAllocator
         let mut run_len: u32 = 0;
         for b in 0..self.total_blocks
         {
-            if bit_get(&self.bits, b)
+            let pinned_set = match pinned
+            {
+                Some(bs) => bit_get(bs, b),
+                None => false,
+            };
+            if bit_get(&self.bits, b) || pinned_set
             {
                 run_start = None;
                 run_len = 0;
@@ -127,7 +142,15 @@ impl BitmapAllocator
     /// mark_used range. Returns the first LBA on success.
     pub fn alloc_run(&mut self, n: u32) -> Option<u32>
     {
-        let start = self.find_run(n)?;
+        self.alloc_run_with_pinned(n, None)
+    }
+
+    /// Snapshot-aware variant — skips blocks set in `pinned`.
+    pub fn alloc_run_with_pinned(
+        &mut self, n: u32, pinned: Option<&[u8; BLOCK_SIZE]>,
+    ) -> Option<u32>
+    {
+        let start = self.find_run_with_pinned(n, pinned)?;
         for i in 0..n
         {
             self.mark_used(start + i);
