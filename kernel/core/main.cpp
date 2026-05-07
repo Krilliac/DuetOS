@@ -4177,6 +4177,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                             {
                                 app_consumed = duetos::apps::taskman::TaskmanFeedChar(c);
                             }
+                            else if (active == duetos::apps::help::HelpWindow())
+                            {
+                                app_consumed = duetos::apps::help::HelpFeedChar(c);
+                            }
                         }
                     }
                 }
