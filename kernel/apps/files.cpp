@@ -51,10 +51,37 @@ enum class Pending : u8
     EmptyTrash = 3,          // trash: E arms; Y -> TrashEmpty
 };
 
+// Sort orders for the FAT32 + Trash listings. Cycled with 's' /
+// 'S'. Default Name (case-insensitive ascending) matches what
+// every commodity file manager opens with.
+enum class SortMode : u8
+{
+    Name = 0,
+    Size = 1,
+    Type = 2, // dirs first, then files; alphabetical within each
+    kCount = 3,
+};
+
+const char* SortModeName(SortMode m)
+{
+    switch (m)
+    {
+    case SortMode::Name:
+        return "name";
+    case SortMode::Size:
+        return "size";
+    case SortMode::Type:
+        return "type";
+    default:
+        return "?";
+    }
+}
+
 struct State
 {
     duetos::drivers::video::WindowHandle handle;
     Mode mode;
+    SortMode sort;
 
     // Ramfs view: stack of directory nodes from root down to the
     // current view. ramfs_depth == 1 at init (just the trusted root).
@@ -84,8 +111,93 @@ struct State
     u32 pending_idx;
 };
 
-constinit State g_state = {
-    duetos::drivers::video::kWindowInvalid, Mode::Ramfs, {}, 0, 0, {}, 0, 0, {}, 0, 0, Pending::None, 0};
+constinit State g_state = {duetos::drivers::video::kWindowInvalid,
+                           Mode::Ramfs,
+                           SortMode::Name,
+                           {},
+                           0,
+                           0,
+                           {},
+                           0,
+                           0,
+                           {},
+                           0,
+                           0,
+                           Pending::None,
+                           0};
+
+// Case-insensitive ASCII strcmp used by the Name + Type sort
+// comparators. Returns the standard <0 / 0 / >0 trichotomy.
+int FilesNameCmpCi(const char* a, const char* b)
+{
+    while (*a != '\0' && *b != '\0')
+    {
+        char ca = *a;
+        char cb = *b;
+        if (ca >= 'a' && ca <= 'z')
+            ca = static_cast<char>(ca - 32);
+        if (cb >= 'a' && cb <= 'z')
+            cb = static_cast<char>(cb - 32);
+        if (ca != cb)
+            return static_cast<int>(static_cast<unsigned char>(ca)) - static_cast<int>(static_cast<unsigned char>(cb));
+        ++a;
+        ++b;
+    }
+    if (*a == *b)
+        return 0;
+    return *a == '\0' ? -1 : 1;
+}
+
+bool FilesEntryLess(const duetos::fs::fat32::DirEntry& a, const duetos::fs::fat32::DirEntry& b, SortMode m)
+{
+    const bool a_dir = (a.attributes & 0x10) != 0;
+    const bool b_dir = (b.attributes & 0x10) != 0;
+    switch (m)
+    {
+    case SortMode::Name:
+        return FilesNameCmpCi(a.name, b.name) < 0;
+    case SortMode::Size:
+        if (a.size_bytes != b.size_bytes)
+            return a.size_bytes < b.size_bytes;
+        return FilesNameCmpCi(a.name, b.name) < 0;
+    case SortMode::Type:
+        if (a_dir != b_dir)
+            return a_dir; // dirs first
+        return FilesNameCmpCi(a.name, b.name) < 0;
+    default:
+        return FilesNameCmpCi(a.name, b.name) < 0;
+    }
+}
+
+// Insertion sort over the entries array. Both fat_entries and
+// trash_entries cap at kFatMax = 64; insertion sort is O(n^2)
+// worst case but trivially correct, allocator-free, and fast on
+// already-sorted-or-near input (which dominates after a rescan
+// followed by a sort-mode toggle).
+void SortFat32Array(duetos::fs::fat32::DirEntry* arr, u32 count, SortMode m)
+{
+    for (u32 i = 1; i < count; ++i)
+    {
+        duetos::fs::fat32::DirEntry tmp = arr[i];
+        u32 j = i;
+        while (j > 0 && FilesEntryLess(tmp, arr[j - 1], m))
+        {
+            arr[j] = arr[j - 1];
+            --j;
+        }
+        arr[j] = tmp;
+    }
+}
+
+void SortFat32Entries()
+{
+    SortFat32Array(g_state.fat_entries, g_state.fat_count, g_state.sort);
+}
+
+void SortTrashEntries()
+{
+    SortFat32Array(g_state.trash_entries, g_state.trash_count, g_state.sort);
+}
 
 u32 CountChildren(const duetos::fs::RamfsNode* dir)
 {
@@ -129,6 +241,7 @@ void RescanFat32()
         }
         g_state.fat_entries[g_state.fat_count++] = e;
     }
+    SortFat32Entries();
 }
 
 void RescanTrash()
@@ -139,6 +252,7 @@ void RescanTrash()
     if (v == nullptr)
         return;
     g_state.trash_count = duetos::apps::trash::TrashList(v, g_state.trash_entries, kFatMax);
+    SortTrashEntries();
 }
 
 u32 ModeCount()
@@ -926,6 +1040,72 @@ bool FilesFeedChar(char c)
             return RestoreSelectedTrash();
         }
         return false;
+    }
+    if (c == 's' || c == 'S')
+    {
+        // Cycle sort mode: name -> size -> type -> name. Re-sort
+        // both arrays so a subsequent T-toggle into Trash also
+        // shows the new order. Selection follows the previously-
+        // selected entry by name match where possible — better
+        // UX than "selection randomly jumps because the array
+        // reordered."
+        const auto next = static_cast<u8>(g_state.sort) + 1;
+        g_state.sort = (next >= static_cast<u8>(SortMode::kCount)) ? SortMode::Name : static_cast<SortMode>(next);
+        // Capture the selected name BEFORE re-sorting so we can
+        // find it again after the order changes.
+        char saved_name[128] = {};
+        u32 nlen = 0;
+        if (g_state.mode == Mode::Fat32 && g_state.fat_selection < g_state.fat_count)
+        {
+            const char* s = g_state.fat_entries[g_state.fat_selection].name;
+            for (; nlen + 1 < sizeof(saved_name) && s[nlen] != '\0'; ++nlen)
+                saved_name[nlen] = s[nlen];
+        }
+        else if (g_state.mode == Mode::Trash && g_state.trash_selection < g_state.trash_count)
+        {
+            const char* s = g_state.trash_entries[g_state.trash_selection].name;
+            for (; nlen + 1 < sizeof(saved_name) && s[nlen] != '\0'; ++nlen)
+                saved_name[nlen] = s[nlen];
+        }
+        SortFat32Entries();
+        SortTrashEntries();
+        // Re-anchor selection to the named entry.
+        if (nlen > 0)
+        {
+            if (g_state.mode == Mode::Fat32)
+            {
+                for (u32 i = 0; i < g_state.fat_count; ++i)
+                {
+                    if (FilesNameCmpCi(g_state.fat_entries[i].name, saved_name) == 0)
+                    {
+                        g_state.fat_selection = i;
+                        break;
+                    }
+                }
+            }
+            else if (g_state.mode == Mode::Trash)
+            {
+                for (u32 i = 0; i < g_state.trash_count; ++i)
+                {
+                    if (FilesNameCmpCi(g_state.trash_entries[i].name, saved_name) == 0)
+                    {
+                        g_state.trash_selection = i;
+                        break;
+                    }
+                }
+            }
+        }
+        char msg[32];
+        u32 mo = 0;
+        const char* lead = "files: sort by ";
+        for (u32 i = 0; lead[i] != '\0' && mo + 1 < sizeof(msg); ++i)
+            msg[mo++] = lead[i];
+        const char* sn = SortModeName(g_state.sort);
+        for (u32 i = 0; sn[i] != '\0' && mo + 1 < sizeof(msg); ++i)
+            msg[mo++] = sn[i];
+        msg[mo] = '\0';
+        duetos::drivers::video::NotifyShow(msg);
+        return true;
     }
     if (c == 'b' || c == 'B' || static_cast<u8>(c) == 0x08) // Back / Backspace
     {
