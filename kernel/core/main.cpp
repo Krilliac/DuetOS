@@ -482,6 +482,8 @@ void PrintShortcutHelp()
     ConsoleWriteln("    [ / ]  / LEFT/RT   PREV / NEXT MONTH");
     ConsoleWriteln("    { / }  / UP / DN   PREV / NEXT YEAR");
     ConsoleWriteln("    T                  JUMP TO TODAY");
+    ConsoleWriteln("    ENTER              ADD EVENT (selected date)");
+    ConsoleWriteln("    DEL                REMOVE EVENT (selected date)");
     ConsoleWriteln("");
     ConsoleWriteln("  SETTINGS BUTTONS");
     ConsoleWriteln("    THEME / OPACITY / TZ / LOG OUT / REBOOT / SHUTDOWN");
@@ -4009,7 +4011,8 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     }
                     else if (active == duetos::apps::calendar::CalendarWindow() &&
                              (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyArrowLeft ||
-                              ev.code == kKeyArrowRight || ev.code == kKeyPageUp || ev.code == kKeyPageDown))
+                              ev.code == kKeyArrowRight || ev.code == kKeyPageUp || ev.code == kKeyPageDown ||
+                              ev.code == kKeyDelete))
                     {
                         app_consumed = duetos::apps::calendar::CalendarFeedArrow(static_cast<duetos::u16>(ev.code));
                     }

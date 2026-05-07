@@ -3,7 +3,9 @@
 #include "arch/x86_64/rtc.h"
 #include "arch/x86_64/serial.h"
 #include "drivers/input/ps2kbd.h"
+#include "drivers/video/dialog.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/notify.h"
 #include "drivers/video/theme.h"
 #include "util/datetime.h"
 
@@ -155,6 +157,37 @@ struct State
 };
 
 constinit State g_state = {kWindowInvalid, 2026, 1, false, 0, 0, 0};
+
+// In-RAM event store. Each entry pins an event to a specific
+// date. v0 has no persistence — events vanish at reboot. The
+// kMaxEvents / kEventTextCap caps come from the public header
+// so callers (the dialog flow in main.cpp) can size buffers
+// against them.
+struct StoredEvent
+{
+    u32 year;
+    u8 month;
+    u8 day;
+    u8 _pad[2];
+    char text[kEventTextCap + 1]; // NUL-terminated
+};
+
+constinit StoredEvent g_events[kMaxEvents] = {};
+constinit u32 g_event_count = 0;
+
+bool ValidDate(u32 year, u8 month, u8 day)
+{
+    if (month < 1 || month > 12 || day < 1 || day > 31)
+        return false;
+    // Cheap upper-bound check — month-day validity is fully
+    // covered by the calendar's existing DaysInMonth helper at
+    // the renderer; the events store doesn't need to re-derive
+    // leap-year semantics. Year > 0 also rejects the "no
+    // selection" sentinel value.
+    if (year == 0)
+        return false;
+    return true;
+}
 
 // Pull current RTC date into view_year / view_month if the user
 // hasn't navigated yet. Called on every paint so the live month is
@@ -343,16 +376,53 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
                 (is_selected || is_today) ? today_accent : (current_month && (c == 0 || c == 6) ? select_dim : bg);
             const u32 inkfg = current_month ? fg : dim;
             FramebufferDrawString(dx, dy, dbuf, inkfg, inkbg);
+
+            // Event indicator: 3x3 dot in the bottom-right of
+            // the cell when the date has at least one event.
+            // Skipped on cells from adjacent months — keeps the
+            // indicator anchored to the visually-active month.
+            if (current_month && CalendarHasEvent(cell_year, static_cast<u8>(cell_month), static_cast<u8>(day)))
+            {
+                const u32 dot_x = cell_x + kCellW - 6;
+                const u32 dot_y = cell_y + kCellH - 6;
+                // Use the foreground colour for visibility — the
+                // selection / today highlights already shift the
+                // cell background, so a pure-fg dot stands out
+                // against either tone.
+                FramebufferFillRect(dot_x, dot_y, 3, 3, fg);
+            }
         }
     }
 
     // 1-px frame around the grid for visual lock-in.
     FramebufferDrawRect(grid_origin_x, grid_origin_y, grid_w, grid_h, dim, 1);
 
-    // Footer hint.
+    // Footer hint + selected-date event preview when applicable.
     {
         const u32 fy = oy + kHeaderH + kWeekdayH + grid_h + (kFooterH - 8) / 2 + 2;
-        FramebufferDrawString(ox + kMargin, fy, "[ ] MONTH   { } YEAR   T TODAY", dim, bg);
+        char ev_buf[kEventTextCap + 1] = {};
+        const bool has_ev =
+            (g_state.sel_year != 0) && CalendarFirstEventText(g_state.sel_year, static_cast<u8>(g_state.sel_month),
+                                                              static_cast<u8>(g_state.sel_day), ev_buf, sizeof(ev_buf));
+        if (has_ev)
+        {
+            // Show the first event's text on the footer row,
+            // prefixed with a small "*" to make it visually
+            // distinct from the static binding hint.
+            char line[kEventTextCap + 8];
+            u32 o = 0;
+            const char* lead = "* ";
+            while (*lead != '\0' && o + 1 < sizeof(line))
+                line[o++] = *lead++;
+            for (u32 i = 0; ev_buf[i] != '\0' && o + 1 < sizeof(line); ++i)
+                line[o++] = ev_buf[i];
+            line[o] = '\0';
+            FramebufferDrawString(ox + kMargin, fy, line, fg, bg);
+        }
+        else
+        {
+            FramebufferDrawString(ox + kMargin, fy, "[ ] MONTH  { } YEAR  T TODAY  ENTER ADD  DEL REMOVE", dim, bg);
+        }
     }
 }
 
@@ -474,6 +544,27 @@ bool CalendarFeedChar(char c)
         ResetToToday();
         return true;
     }
+    if (static_cast<u8>(c) == 0x0A) // Enter — add event for active date
+    {
+        duetos::drivers::video::InputBoxOpen(
+            "ADD EVENT", "Event text:", "",
+            [](duetos::drivers::video::DialogResult r, const char* text, void*)
+            {
+                if (r != duetos::drivers::video::DialogResult::Ok || text == nullptr || text[0] == '\0')
+                    return;
+                const bool ok = CalendarAddEventForSelected(text);
+                duetos::drivers::video::NotifyShow(ok ? "calendar: event added" : "calendar: event store full");
+            },
+            nullptr);
+        return true;
+    }
+    if (static_cast<u8>(c) == 0x7F || static_cast<u8>(c) == 0x08) // Delete / Backspace
+    {
+        const u32 n = CalendarRemoveEventsForSelected();
+        if (n > 0)
+            duetos::drivers::video::NotifyShow("calendar: event removed");
+        return true;
+    }
     return false;
 }
 
@@ -510,6 +601,13 @@ bool CalendarFeedArrow(u16 keycode)
     {
         Step(g_state.view_year, g_state.view_month, +12);
         g_state.initialised = true;
+        return true;
+    }
+    if (keycode == duetos::drivers::input::kKeyDelete)
+    {
+        const u32 n = CalendarRemoveEventsForSelected();
+        if (n > 0)
+            duetos::drivers::video::NotifyShow("calendar: event removed");
         return true;
     }
     return false;
@@ -599,7 +697,161 @@ void CalendarSelfTest()
             pass = false;
     }
 
-    SerialWrite(pass ? "[calendar] self-test OK (zeller + days + step)\n" : "[calendar] self-test FAILED\n");
+    // Event store round-trip: add 3 events, query, remove,
+    // verify the table is back to the pre-test count.
+    const u32 saved_event_count = g_event_count;
+    g_event_count = 0;
+    if (!CalendarAddEvent(2026, 5, 7, "DENTIST"))
+        pass = false;
+    if (!CalendarAddEvent(2026, 5, 14, "TAXES"))
+        pass = false;
+    if (!CalendarAddEvent(2026, 5, 7, "MEETING")) // 2nd event same day
+        pass = false;
+    if (!CalendarHasEvent(2026, 5, 7) || !CalendarHasEvent(2026, 5, 14))
+        pass = false;
+    if (CalendarHasEvent(2026, 5, 8))
+        pass = false;
+    char ebuf[kEventTextCap + 1];
+    if (!CalendarFirstEventText(2026, 5, 7, ebuf, sizeof(ebuf)))
+        pass = false;
+    // First event on 5/7 should be "DENTIST" — order of insertion
+    // is preserved by CalendarAddEvent's append-only contract.
+    if (ebuf[0] != 'D' || ebuf[1] != 'E' || ebuf[2] != 'N')
+        pass = false;
+    const u32 removed = CalendarRemoveEvents(2026, 5, 7);
+    if (removed != 2 || CalendarHasEvent(2026, 5, 7))
+        pass = false;
+    CalendarRemoveEvents(2026, 5, 14);
+    if (g_event_count != 0)
+        pass = false;
+    g_event_count = saved_event_count;
+    SerialWrite(pass ? "[calendar] self-test OK (zeller + days + step + events)\n" : "[calendar] self-test FAILED\n");
+}
+
+bool CalendarAddEvent(u32 year, u8 month, u8 day, const char* text)
+{
+    if (!ValidDate(year, month, day) || text == nullptr || text[0] == '\0')
+        return false;
+    if (g_event_count >= kMaxEvents)
+        return false;
+    StoredEvent& e = g_events[g_event_count++];
+    e.year = year;
+    e.month = month;
+    e.day = day;
+    u32 i = 0;
+    for (; i < kEventTextCap && text[i] != '\0'; ++i)
+        e.text[i] = text[i];
+    e.text[i] = '\0';
+    return true;
+}
+
+u32 CalendarRemoveEvents(u32 year, u8 month, u8 day)
+{
+    if (!ValidDate(year, month, day))
+        return 0;
+    u32 removed = 0;
+    u32 j = 0;
+    for (u32 i = 0; i < g_event_count; ++i)
+    {
+        const StoredEvent& e = g_events[i];
+        if (e.year == year && e.month == month && e.day == day)
+        {
+            ++removed;
+            continue;
+        }
+        if (j != i)
+            g_events[j] = e;
+        ++j;
+    }
+    g_event_count = j;
+    return removed;
+}
+
+bool CalendarHasEvent(u32 year, u8 month, u8 day)
+{
+    if (!ValidDate(year, month, day))
+        return false;
+    for (u32 i = 0; i < g_event_count; ++i)
+    {
+        const StoredEvent& e = g_events[i];
+        if (e.year == year && e.month == month && e.day == day)
+            return true;
+    }
+    return false;
+}
+
+bool CalendarFirstEventText(u32 year, u8 month, u8 day, char* out, u32 cap)
+{
+    if (out == nullptr || cap == 0 || cap < kEventTextCap + 1)
+        return false;
+    if (!ValidDate(year, month, day))
+        return false;
+    for (u32 i = 0; i < g_event_count; ++i)
+    {
+        const StoredEvent& e = g_events[i];
+        if (e.year == year && e.month == month && e.day == day)
+        {
+            u32 k = 0;
+            for (; k < kEventTextCap && e.text[k] != '\0'; ++k)
+                out[k] = e.text[k];
+            out[k] = '\0';
+            return true;
+        }
+    }
+    return false;
+}
+
+bool CalendarSelection(u32* year, u8* month, u8* day)
+{
+    if (year)
+        *year = 0;
+    if (month)
+        *month = 0;
+    if (day)
+        *day = 0;
+    if (g_state.sel_year == 0)
+        return false;
+    if (year)
+        *year = g_state.sel_year;
+    if (month)
+        *month = static_cast<u8>(g_state.sel_month);
+    if (day)
+        *day = static_cast<u8>(g_state.sel_day);
+    return true;
+}
+
+// Helper: derive (year, month, day) for the "active" date —
+// either the user's selection, or today's RTC date as a fallback.
+void ActiveDate(u32* y, u8* m, u8* d)
+{
+    if (g_state.sel_year != 0)
+    {
+        *y = g_state.sel_year;
+        *m = static_cast<u8>(g_state.sel_month);
+        *d = static_cast<u8>(g_state.sel_day);
+        return;
+    }
+    duetos::arch::RtcTime rtc{};
+    duetos::arch::RtcRead(&rtc);
+    *y = rtc.year;
+    *m = rtc.month;
+    *d = rtc.day;
+}
+
+bool CalendarAddEventForSelected(const char* text)
+{
+    u32 y;
+    u8 m, d;
+    ActiveDate(&y, &m, &d);
+    return CalendarAddEvent(y, m, d, text);
+}
+
+u32 CalendarRemoveEventsForSelected()
+{
+    u32 y;
+    u8 m, d;
+    ActiveDate(&y, &m, &d);
+    return CalendarRemoveEvents(y, m, d);
 }
 
 } // namespace duetos::apps::calendar
