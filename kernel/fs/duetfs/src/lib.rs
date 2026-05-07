@@ -25,6 +25,7 @@ extern crate alloc;
 mod kheap_alloc;
 mod alloc_bitmap;
 mod block_dev;
+mod compress;
 mod crc32;
 mod crc_table;
 mod crypto;

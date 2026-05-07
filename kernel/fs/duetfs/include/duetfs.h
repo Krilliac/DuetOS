@@ -237,6 +237,19 @@ extern "C"
     /// the key. `salt_buf_len` MUST be >= kSaltBytes.
     u32 duetfs_read_encryption_meta(const Device* dev, u32* out_encrypted, u32* out_m_cost, u32* out_t_cost,
                                     u32* out_p_cost, u8* out_salt, usize salt_buf_len);
+
+    /// LZ4 compress `src_len` bytes from `src` into `dst`. Output is
+    /// a size-prefixed LZ4 frame (u32-le uncompressed length header +
+    /// LZ4 bytes). Caller sizes `dst_max` via `duetfs_lz4_compress_bound`.
+    u32 duetfs_lz4_compress(const u8* src, usize src_len, u8* dst, usize dst_max, usize* out_len);
+
+    /// LZ4 decompress a size-prefixed frame from `src` into `dst`.
+    /// `dst_max` MUST be >= the original uncompressed length.
+    u32 duetfs_lz4_decompress(const u8* src, usize src_len, u8* dst, usize dst_max, usize* out_len);
+
+    /// Worst-case output size for duetfs_lz4_compress on an input of
+    /// `n` bytes (includes the 4-byte size prefix). Cheap (no I/O).
+    usize duetfs_lz4_compress_bound(usize n);
 }
 
 } // namespace duetos::fs::duetfs

@@ -522,7 +522,73 @@ void DuetFsSelfTest()
         Expect(diff_pw, "argon2id different passwords produced same key");
     }
 
-    KLOG_INFO("duetfs/selftest", "OK — v6 AES-XTS + Argon2 + journal + per-block CRC + symlinks + hardlinks passed");
+    // 19. LZ4 round-trip on a redundant payload — compressed size
+    //     should be smaller than uncompressed; decompression should
+    //     reproduce the original bytes verbatim. Then write the
+    //     compressed bytes through duetfs_write_at, read them back
+    //     through duetfs_read_file, decompress, and verify — proving
+    //     LZ4 + DuetFS storage compose end-to-end.
+    {
+        constexpr usize kPayloadLen = 4096;
+        u8 payload[kPayloadLen] = {};
+        // Highly redundant pattern: 16-byte phrase repeated. LZ4
+        // compresses this near-trivially (>20× ratio).
+        const char phrase[] = "duetfs/lz4 v7! ";
+        for (usize i = 0; i < kPayloadLen; ++i)
+        {
+            payload[i] = static_cast<u8>(phrase[i % (sizeof(phrase) - 1)]);
+        }
+        const usize bound = duetfs_lz4_compress_bound(kPayloadLen);
+        Expect(bound > 0 && bound < kPayloadLen + 256, "lz4 bound out of range");
+        u8 compressed[4352] = {}; // > kPayloadLen + 256
+        Expect(bound <= sizeof(compressed), "lz4 bound exceeds local buffer");
+        usize comp_len = 0;
+        ExpectStatus(duetfs_lz4_compress(payload, kPayloadLen, compressed, sizeof(compressed), &comp_len), kStatusOk,
+                     "lz4_compress failed");
+        Expect(comp_len > 0 && comp_len < kPayloadLen, "lz4_compress produced no shrink");
+
+        u8 decompressed[kPayloadLen] = {};
+        usize decomp_len = 0;
+        ExpectStatus(duetfs_lz4_decompress(compressed, comp_len, decompressed, sizeof(decompressed), &decomp_len),
+                     kStatusOk, "lz4_decompress failed");
+        Expect(decomp_len == kPayloadLen, "lz4 decompressed size wrong");
+        for (usize i = 0; i < kPayloadLen; ++i)
+        {
+            if (decompressed[i] != payload[i])
+            {
+                duetos::core::PanicWithValue("duetfs/selftest", "lz4 round-trip mismatch", i);
+            }
+        }
+
+        // FS round-trip: write the compressed bytes into a new file
+        // through duetfs_write_at, read them back, decompress, verify.
+        u32 lz_id = 0;
+        ExpectStatus(duetfs_create_path(&scratch, reinterpret_cast<const u8*>("/lz4.bin"), 9, kKindFile, &lz_id),
+                     kStatusOk, "create /lz4.bin failed");
+        usize wrote = 0;
+        ExpectStatus(duetfs_write_at(&scratch, lz_id, 0, compressed, comp_len, &wrote), kStatusOk,
+                     "write /lz4.bin failed");
+        Expect(wrote == comp_len, "lz4 fs write short");
+        u8 readback[4352] = {};
+        usize got = 0;
+        ExpectStatus(duetfs_read_file(&scratch, lz_id, 0, readback, sizeof(readback), &got), kStatusOk,
+                     "read /lz4.bin failed");
+        Expect(got == comp_len, "lz4 fs read short");
+        u8 final_decomp[kPayloadLen] = {};
+        usize final_len = 0;
+        ExpectStatus(duetfs_lz4_decompress(readback, got, final_decomp, sizeof(final_decomp), &final_len), kStatusOk,
+                     "lz4 final decompress failed");
+        Expect(final_len == kPayloadLen, "lz4 final decompressed size wrong");
+        for (usize i = 0; i < kPayloadLen; ++i)
+        {
+            if (final_decomp[i] != payload[i])
+            {
+                duetos::core::PanicWithValue("duetfs/selftest", "lz4 fs round-trip mismatch", i);
+            }
+        }
+    }
+
+    KLOG_INFO("duetfs/selftest", "OK — v7 LZ4 + AES-XTS + Argon2 + journal + per-block CRC passed");
 }
 
 } // namespace duetos::fs::duetfs

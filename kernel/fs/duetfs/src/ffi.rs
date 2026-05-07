@@ -13,6 +13,7 @@
 use core::ffi::{c_uchar, c_uint, c_void};
 
 use crate::block_dev::{BlockDevice, ExternBlockDevice, ExternBlockDeviceOps};
+use crate::compress;
 use crate::crypto;
 use crate::format::{
     BLOCK_SIZE, JOURNAL_LBA, NODE_KIND_DIR, NODE_KIND_FILE, NODE_KIND_UNUSED, ROOT_NODE_ID,
@@ -650,6 +651,86 @@ pub unsafe extern "C" fn duetfs_mkfs_encrypted(
         Ok(()) => STATUS_OK,
         Err(e) => err_to_status(e),
     }
+}
+
+// ----------------------------------------------------------------
+// LZ4 compression FFI — v7. Block-format primitives that operate on
+// kernel-staged buffers. The on-disk shape is the standard
+// "size-prefixed LZ4 frame" — a u32-le uncompressed-length header
+// followed by the LZ4 bytes — so external tooling decompresses the
+// raw payload as-is.
+// ----------------------------------------------------------------
+
+/// Compress `src_len` bytes from `src` into `dst`. The output is a
+/// size-prefixed LZ4 frame (u32-le uncompressed length header +
+/// LZ4 bytes). On success writes the byte count to `*out_len` and
+/// returns kStatusOk; on dst-too-small returns kStatusInvalid (caller
+/// queried the worst-case bound from `duetfs_lz4_compress_bound`).
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_lz4_compress(
+    src: *const u8, src_len: usize, dst: *mut u8, dst_max: usize, out_len: *mut usize,
+) -> c_uint
+{
+    if !out_len.is_null()
+    {
+        unsafe { *out_len = 0 };
+    }
+    if src.is_null() || dst.is_null()
+    {
+        return STATUS_INVALID;
+    }
+    let s = unsafe { core::slice::from_raw_parts(src, src_len) };
+    let d = unsafe { core::slice::from_raw_parts_mut(dst, dst_max) };
+    let n = compress::compress_prepend_size(s, d);
+    if n == 0 && src_len != 0
+    {
+        return STATUS_INVALID;
+    }
+    if !out_len.is_null()
+    {
+        unsafe { *out_len = n };
+    }
+    STATUS_OK
+}
+
+/// Decompress a size-prefixed LZ4 frame from `src` into `dst`. On
+/// success writes the byte count to `*out_len` and returns
+/// kStatusOk; on any error (truncated input, bad header, dst short)
+/// returns kStatusInvalid.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_lz4_decompress(
+    src: *const u8, src_len: usize, dst: *mut u8, dst_max: usize, out_len: *mut usize,
+) -> c_uint
+{
+    if !out_len.is_null()
+    {
+        unsafe { *out_len = 0 };
+    }
+    if src.is_null() || dst.is_null() || src_len == 0
+    {
+        return STATUS_INVALID;
+    }
+    let s = unsafe { core::slice::from_raw_parts(src, src_len) };
+    let d = unsafe { core::slice::from_raw_parts_mut(dst, dst_max) };
+    let n = compress::decompress_size_prepended(s, d);
+    if n == 0
+    {
+        return STATUS_INVALID;
+    }
+    if !out_len.is_null()
+    {
+        unsafe { *out_len = n };
+    }
+    STATUS_OK
+}
+
+/// Worst-case output size for `duetfs_lz4_compress` on an input of
+/// `n` bytes — caller sizes the dst buffer to this. Includes the
+/// 4-byte size header. Cheap (no I/O).
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_lz4_compress_bound(n: usize) -> usize
+{
+    compress::compress_bound(n)
 }
 
 /// Read the SB's encryption metadata without mounting the FS.

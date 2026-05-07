@@ -54,3 +54,7 @@ debug           = true
 aes        = { version = "0.8", default-features = false }
 xts-mode   = { version = "0.5", default-features = false }
 argon2     = { version = "0.5", default-features = false, features = ["alloc"] }
+# LZ4 — pure-Rust block-format compress / decompress (no_std). Used
+# for the v7 file-payload compression path; the in-memory layout is
+# the standard LZ4 frame so external tools can decompress as-is.
+lz4_flex   = { version = "0.11", default-features = false }
