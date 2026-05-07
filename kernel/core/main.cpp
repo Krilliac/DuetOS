@@ -432,6 +432,7 @@ void PrintShortcutHelp()
     ConsoleWriteln("    CTRL+O            LOAD FROM NOTES.TXT (FAT32)");
     ConsoleWriteln("    CTRL+F            FIND (case-insensitive)");
     ConsoleWriteln("    F3                FIND NEXT (wraps to start)");
+    ConsoleWriteln("    CTRL+H            FIND-AND-REPLACE (two prompts)");
     ConsoleWriteln("    STATUS FOOTER     L:line C:col  CHARS  WORDS  *MOD");
     ConsoleWriteln("");
     ConsoleWriteln("  CALCULATOR (WHEN ACTIVE)");
@@ -3209,6 +3210,81 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                             const bool ok = duetos::apps::notes::NotesFindSet(text);
                             duetos::drivers::video::CompositorUnlock();
                             duetos::drivers::video::NotifyShow(ok ? "find: match" : "find: no match");
+                        },
+                        nullptr);
+                    continue;
+                }
+            }
+
+            // Ctrl+H — open the Notes Find-and-Replace flow. Two
+            // chained InputBoxes: first asks for the search query,
+            // second for the replacement. The intermediate query
+            // is stashed in a static buffer because the dialog
+            // callback fires after the keyboard event loop has
+            // moved on. Active-window gated, like Ctrl+F.
+            if (ctrl && !alt && (ev.code == 'h' || ev.code == 'H'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                const bool is_notes =
+                    active != duetos::drivers::video::kWindowInvalid && active == duetos::apps::notes::NotesWindow();
+                duetos::drivers::video::CompositorUnlock();
+                if (is_notes)
+                {
+                    static char pending_query[64];
+                    pending_query[0] = '\0';
+                    duetos::drivers::video::InputBoxOpen(
+                        "REPLACE: FIND", "Find:", duetos::apps::notes::NotesFindQuery(),
+                        [](duetos::drivers::video::DialogResult r, const char* text, void*)
+                        {
+                            if (r != duetos::drivers::video::DialogResult::Ok || text == nullptr || text[0] == '\0')
+                                return;
+                            duetos::u32 i = 0;
+                            for (; i + 1 < sizeof(pending_query) && text[i] != '\0'; ++i)
+                                pending_query[i] = text[i];
+                            pending_query[i] = '\0';
+                            duetos::drivers::video::InputBoxOpen(
+                                "REPLACE: WITH", "Replace with:", "",
+                                [](duetos::drivers::video::DialogResult r2, const char* repl, void*)
+                                {
+                                    if (r2 != duetos::drivers::video::DialogResult::Ok)
+                                        return;
+                                    duetos::drivers::video::CompositorLock();
+                                    const duetos::u32 n = duetos::apps::notes::NotesReplaceAll(pending_query, repl);
+                                    duetos::drivers::video::CompositorUnlock();
+                                    if (n == 0)
+                                    {
+                                        duetos::drivers::video::NotifyShow("replace: no matches");
+                                    }
+                                    else
+                                    {
+                                        char msg[40];
+                                        duetos::u32 o = 0;
+                                        const char* lead = "replace: ";
+                                        for (duetos::u32 k = 0; lead[k] != '\0' && o + 1 < sizeof(msg); ++k)
+                                            msg[o++] = lead[k];
+                                        // Render n in decimal.
+                                        char tmp[12];
+                                        duetos::u32 nn = 0;
+                                        duetos::u32 v = n;
+                                        if (v == 0)
+                                            tmp[nn++] = '0';
+                                        else
+                                            while (v > 0 && nn < sizeof(tmp))
+                                            {
+                                                tmp[nn++] = static_cast<char>('0' + (v % 10));
+                                                v /= 10;
+                                            }
+                                        while (nn > 0 && o + 1 < sizeof(msg))
+                                            msg[o++] = tmp[--nn];
+                                        const char* tail = " match(es)";
+                                        for (duetos::u32 k = 0; tail[k] != '\0' && o + 1 < sizeof(msg); ++k)
+                                            msg[o++] = tail[k];
+                                        msg[o] = '\0';
+                                        duetos::drivers::video::NotifyShow(msg);
+                                    }
+                                },
+                                nullptr);
                         },
                         nullptr);
                     continue;

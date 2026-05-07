@@ -62,6 +62,7 @@ constexpr Row kRows[] = {
     {"  CTRL+S / CTRL+O   SAVE / LOAD NOTES.TXT", false},
     {"  CTRL+F            FIND (case-insensitive)", false},
     {"  F3                FIND NEXT (wraps to start)", false},
+    {"  CTRL+H            FIND-AND-REPLACE (two prompts)", false},
     {"  STATUS FOOTER     L:line C:col + word/char count", false},
     {"  *MOD              UNSAVED CHANGES", false},
     {"FILES", true},

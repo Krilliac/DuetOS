@@ -199,4 +199,19 @@ bool NotesFindStats(duetos::u32* total_out, duetos::u32* current_out);
 /// must NOT mutate the returned pointer.
 const char* NotesFindQuery();
 
+/// Replace every case-insensitive occurrence of `query` in the
+/// live buffer with `replacement`. Updates the cursor to the
+/// position of the first replacement (or end-of-buffer if no
+/// matches existed). Sets the dirty flag if any replacement
+/// was made. Returns the count of substitutions performed.
+///
+/// `query` empty / nullptr is a no-op (returns 0). `replacement`
+/// nullptr is treated as the empty string (delete-all-matches).
+/// If the post-replace buffer would exceed kBufCap, replacement
+/// stops at the first overflow point and the returned count
+/// reflects what was actually applied.
+///
+/// MUST be called with the compositor lock held.
+duetos::u32 NotesReplaceAll(const char* query, const char* replacement);
+
 } // namespace duetos::apps::notes

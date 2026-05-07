@@ -1406,4 +1406,90 @@ const char* NotesFindQuery()
     return g_find_query;
 }
 
+u32 NotesReplaceAll(const char* query, const char* replacement)
+{
+    using detail::g_buf;
+    using detail::g_cursor;
+    using detail::g_dirty;
+    using detail::g_len;
+    using detail::g_sel_anchor;
+    using detail::kBufCap;
+    using detail::kNoSelection;
+    if (query == nullptr || query[0] == '\0' || g_len == 0)
+        return 0;
+    u32 qlen = 0;
+    while (query[qlen] != '\0')
+        ++qlen;
+    if (qlen > g_len)
+        return 0;
+    const char* repl = (replacement == nullptr) ? "" : replacement;
+    u32 rlen = 0;
+    while (repl[rlen] != '\0')
+        ++rlen;
+
+    // Build the result into a scratch buffer, then copy back.
+    // Bounded by kBufCap so the post-replace buffer can't overflow.
+    char scratch[kBufCap];
+    u32 sout = 0;
+    u32 sin = 0;
+    u32 count = 0;
+    u32 first_pos = static_cast<u32>(-1);
+    while (sin < g_len)
+    {
+        bool match = false;
+        if (sin + qlen <= g_len)
+        {
+            match = true;
+            for (u32 j = 0; j < qlen; ++j)
+            {
+                char ca = g_buf[sin + j];
+                char cb = query[j];
+                if (ca >= 'a' && ca <= 'z')
+                    ca = static_cast<char>(ca - 32);
+                if (cb >= 'a' && cb <= 'z')
+                    cb = static_cast<char>(cb - 32);
+                if (ca != cb)
+                {
+                    match = false;
+                    break;
+                }
+            }
+        }
+        if (match)
+        {
+            // Bail out cleanly if the replacement would push the
+            // scratch buffer past kBufCap. Whatever has been
+            // committed so far is preserved.
+            if (sout + rlen > kBufCap)
+                break;
+            for (u32 k = 0; k < rlen; ++k)
+                scratch[sout++] = repl[k];
+            if (first_pos == static_cast<u32>(-1))
+                first_pos = sout - rlen;
+            sin += qlen;
+            ++count;
+        }
+        else
+        {
+            if (sout + 1 > kBufCap)
+                break;
+            scratch[sout++] = g_buf[sin++];
+        }
+    }
+    if (count == 0)
+        return 0;
+    // Copy the rest of the buffer that wasn't scanned (only
+    // happens when we bailed out on overflow above).
+    while (sin < g_len && sout < kBufCap)
+        scratch[sout++] = g_buf[sin++];
+
+    for (u32 i = 0; i < sout; ++i)
+        g_buf[i] = scratch[i];
+    g_len = sout;
+    g_cursor = (first_pos == static_cast<u32>(-1) || first_pos > g_len) ? g_len : first_pos + rlen;
+    g_sel_anchor = kNoSelection;
+    g_dirty = true;
+    return count;
+}
+
 } // namespace duetos::apps::notes
