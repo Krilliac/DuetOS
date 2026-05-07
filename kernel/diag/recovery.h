@@ -162,6 +162,7 @@ void OnTaskExited();
 // Template implementation — must live in the header.
 // ---------------------------------------------------------------------------
 
+#include "diag/fix_journal.h"
 #include "log/klog.h"
 
 namespace duetos::sched
@@ -181,6 +182,19 @@ template <typename Fn> RetryOutcome RetryWithBackoff(const char* label, Fn fn, c
     {
         if (fn())
         {
+            // Journal a soft-fault recovery if we needed >=1 retry.
+            // First attempts that succeed immediately are not gaps;
+            // the gap is "this path is flaky enough that retry is
+            // load-bearing." The reviewer can decide if the right
+            // fix is "fix the underlying flake" or "raise the
+            // attempt cap."
+            if (attempt > 0)
+            {
+                (void)::duetos::diag::FixJournalRecordSev(::duetos::diag::FixDetector::SoftFaultRecov, label,
+                                                          "retry-with-backoff succeeded; investigate the flake",
+                                                          static_cast<u64>(attempt), 0,
+                                                          /*severity=*/1);
+            }
             return RetryOutcome::Success;
         }
 
@@ -196,6 +210,12 @@ template <typename Fn> RetryOutcome RetryWithBackoff(const char* label, Fn fn, c
         delay *= 2; // exponential
     }
 
+    // Give-up is also a journal-worthy event. Pin format reuses
+    // the label so dedup groups by operation.
+    (void)::duetos::diag::FixJournalRecordSev(::duetos::diag::FixDetector::SoftFaultRecov, label,
+                                              "retry-with-backoff exhausted; consider a real fix",
+                                              static_cast<u64>(policy.max_attempts), 1,
+                                              /*severity=*/2);
     LogWithValue(LogLevel::Error, label, "retry: gave up after attempts", static_cast<u64>(policy.max_attempts));
     return RetryOutcome::GaveUp;
 }

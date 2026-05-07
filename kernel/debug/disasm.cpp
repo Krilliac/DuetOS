@@ -1,5 +1,6 @@
 #include "debug/disasm.h"
 
+#include "diag/fix_journal.h"
 #include "util/symbols.h"
 #include "log/klog.h"
 
@@ -1141,6 +1142,7 @@ u8 DecodeOne(const u8* bytes, u64 available, u64 va, DecodedInsn* out)
             return cur;
         }
         // GAP: covers MOVZX/MOVSX/CMOVcc/SETcc and others — when needed.
+        FIX_NOTE_GAP("debug/disasm.cpp:0x0F-prefix", "decode MOVZX/MOVSX/CMOVcc/SETcc");
         return fail_db(op);
     }
 

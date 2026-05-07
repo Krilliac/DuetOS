@@ -5,6 +5,7 @@
 #include "arch/x86_64/traps.h"
 #include "core/panic.h"
 #include "diag/debugcon.h"
+#include "diag/fix_journal_persist.h"
 #include "drivers/storage/ahci.h"
 #include "drivers/storage/nvme.h"
 #include "loader/dll_loader.h"
@@ -764,6 +765,14 @@ void PersistToDisk(u64 bytes)
             arch::SerialWriteHex(stor::NvmePanicLastWriteBytes());
             arch::SerialWrite("\n");
         }
+        // Fix journal piggybacks on the same panic-write budget,
+        // landing in the second half of the reserved region.
+        // Fires for BOTH soft panics (core::Panic / PanicWithValue,
+        // already wired in panic.cpp) AND hard crashes that take
+        // the trap-fired EmitMinidumpFromTrapFrame path. Either
+        // way the journal observed during the boot survives to
+        // the next session.
+        ::duetos::diag::FixJournalPanicWriteToNvme();
         return;
     }
     if (stor::AhciAvailable())

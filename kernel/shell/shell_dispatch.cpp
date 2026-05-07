@@ -650,7 +650,7 @@ const char* const kCommandSet[] = {
     "policy",   "purple",     "purpleteam", "mkdir",    "rmdir",    "truncate",  "realpath",   "id",        "groups",
     "nproc",    "arch",       "tty",        "type",     "printenv", "df",        "du",         "loadavg",   "clearhist",
     "pause",    "yes",        "sync",       "port",     "assert",   "watch",     "script",     "exit",      "mkfs",
-    "lastdump", "loadtest",   "stress",     "bench",    "dbg",
+    "lastdump", "loadtest",   "stress",     "bench",    "dbg",      "dfix",
 };
 const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1358,6 +1358,17 @@ void Dispatch(char* line)
         if (!RequireAdmin("PROBE"))
             return;
         CmdProbe(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "dfix"))
+    {
+        // Read-only operations on the fix journal don't need admin
+        // (they expose what the kernel has already chosen to make
+        // visible). mark-done changes journal state but only flips
+        // a per-record audited bit — no privilege escalation. Keep
+        // it consistent with `probe list` (no admin required) for
+        // the read paths and mark the write path symmetric.
+        CmdDfix(argc, argv);
         return;
     }
     if (StrEq(cmd, "instr"))

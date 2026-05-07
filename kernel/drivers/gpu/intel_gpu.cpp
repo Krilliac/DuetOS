@@ -9,6 +9,7 @@
 #include "drivers/gpu/intel_gpu.h"
 
 #include "arch/x86_64/serial.h"
+#include "diag/fix_journal.h"
 #include "drivers/gpu/intel_gsc_fw.h"
 #include "loader/firmware_loader.h"
 #include "log/klog.h"
@@ -183,6 +184,7 @@ void Probe(GpuInfo& g)
     // silicon — pokes that are wrong on Gen9..Gen13 will corrupt
     // an active engine. Free the buffer so the next Bringup
     // doesn't leak.
+    FIX_NOTE_STUB("drivers/gpu/intel_gpu.cpp:RCS_CTL", "wire RCS ring submit on validated silicon");
     mm::FreeDmaCoherent(ring);
 
     return ::duetos::core::Err{::duetos::core::ErrorCode::Unsupported};

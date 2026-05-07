@@ -189,6 +189,8 @@
 #include "ipc/handle_table.h"
 #include "diag/event_trace.h"
 #include "diag/fault_react.h"
+#include "diag/fix_journal.h"
+#include "diag/fix_journal_persist.h"
 #include "diag/gdb_server.h"
 #include "diag/minidump.h"
 #include "diag/perf_profile.h"
@@ -1507,6 +1509,17 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // Win32 stub miss, kernel #PF) are armed-log by default so
     // the first boot shows activity without any arming.
     duetos::debug::ProbeInit();
+
+    // Fix journal — observe-and-record gap detector. Recorders
+    // must be live BEFORE the syscall surface starts taking real
+    // calls so an unknown syscall on the first ring3 spawn lands
+    // a record. Init zeroes the .bss ring and resets stats; the
+    // selftest synthesizes one record per detector kind and
+    // verifies dedup + mark-done. Per Design-Decision #016 this
+    // is observe-only; nothing in the journal mutates kernel
+    // state.
+    duetos::diag::FixJournalInit();
+    DUETOS_BOOT_SELFTEST(duetos::diag::FixJournalSelfTest());
 
     // Phase::Drivers — framebuffer is the only "driver" with a
     // self-test that fits the registry shape today; PCI/NVMe/USB
@@ -2851,6 +2864,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // returns.
     duetos::core::KlogPersistInstall();
     DUETOS_BOOT_SELFTEST(duetos::core::KlogPersistSelfTest());
+
+    // Install the FAT32 sink for the fix journal — KERNEL.FIX on
+    // the root volume. Same install-after-FAT32 contract as klog;
+    // the rotation policy ages the prior session's KERNEL.FIX into
+    // KERNEL.F0..F<N-1> so a reviewer can pull gaps from previous
+    // boots too.
+    duetos::diag::FixJournalPersistInstall();
+    DUETOS_BOOT_SELFTEST(duetos::diag::FixJournalPersistSelfTest());
 
     // Session restore: read SESSION.CFG and apply the saved
     // theme + per-app window positions. No-op on first boot
@@ -4381,6 +4402,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             // tick. Outside the compositor lock so a slow FAT32
             // append never stalls the desktop redraw.
             duetos::core::KlogPersistFlush();
+            // Mirror the in-RAM fix journal to KERNEL.FIX on the
+            // same cadence. Bounded I/O — full ring snapshot is at
+            // most 128 KiB + 16 byte header, no-op when no records
+            // have been added since the last flush could be cheaply
+            // detected via stats but the rewrite itself is small
+            // enough that we just always write.
+            duetos::diag::FixJournalPersistFlush();
             // Autosave the theme + window-position session state.
             // Internally throttled — bytewise-equal payloads skip
             // the FAT32 write, so a stable session writes once

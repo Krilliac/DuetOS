@@ -143,6 +143,14 @@ u64 DeltaClampMonotonic(const char* counter_name, u64 now, u64 prev)
         // bounded scan + zero copy).
         ::duetos::fs::RamfsDumpsSnapshot();
 
+        // Refresh /proc/fixjournal from the live fix-journal ring.
+        // Same shape: bounded format, no allocations, refreshed on
+        // every heartbeat so the ramfs view is at most one tick
+        // stale. Reviewers (Claude or human) read this directly
+        // without needing a shell prompt; the userland flusher
+        // (slice 5) also pulls from here.
+        ::duetos::fs::RamfsFixJournalSnapshot();
+
         prev_tick_sample = sched_stats.total_ticks;
         prev_sched_stats = sched_stats;
         prev_heap_stats = heap_stats;

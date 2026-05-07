@@ -759,6 +759,11 @@ void Panic(const char* subsystem, const char* message)
     // hardware the OUTBs go nowhere and this is a no-op cost.
     duetos::diag::minidump::EmitMinidump(reinterpret_cast<u64>(__builtin_return_address(0)), arch::ReadRsp(),
                                          arch::ReadRbp(), /*exception_code=*/0);
+    // EmitMinidump → PersistToDisk also writes the fix journal to
+    // the second half of the NVMe crash-dump reservation. Both the
+    // soft (this) and hard (EmitMinidumpFromTrapFrame) paths share
+    // that PersistToDisk call site, so panicking here AND faulting
+    // through a trap both land the journal on disk.
 
     arch::SerialWrite("[panic] CPU halted — no recovery.\n");
     arch::Halt();
@@ -801,6 +806,11 @@ void PanicWithValue(const char* subsystem, const char* message, u64 value)
     // hardware the OUTBs go nowhere and this is a no-op cost.
     duetos::diag::minidump::EmitMinidump(reinterpret_cast<u64>(__builtin_return_address(0)), arch::ReadRsp(),
                                          arch::ReadRbp(), /*exception_code=*/0);
+    // EmitMinidump → PersistToDisk also writes the fix journal to
+    // the second half of the NVMe crash-dump reservation. Both the
+    // soft (this) and hard (EmitMinidumpFromTrapFrame) paths share
+    // that PersistToDisk call site, so panicking here AND faulting
+    // through a trap both land the journal on disk.
 
     arch::SerialWrite("[panic] CPU halted — no recovery.\n");
     arch::Halt();

@@ -106,6 +106,13 @@ void RamfsBoottraceSnapshot();
 /// a spinlock internally).
 void RamfsDumpsSnapshot();
 
+/// Refresh `/proc/fixjournal` from the live `diag::FixJournal*`
+/// ring. Tab-separated; header on the first line. Called from the
+/// heartbeat alongside `RamfsDumpsSnapshot` so the file's content
+/// is at most one tick stale. Used by reviewers (Claude or human)
+/// to triage observed gaps without a shell prompt.
+void RamfsFixJournalSnapshot();
+
 /// Format the native syscall number → name table into the static
 /// `/sys/syscalls` buffer. Each line is "<dec_nr>  SYS_FOO\n",
 /// in `kSyscallNames[]` order. Idempotent. Buffer is 8 KiB,
