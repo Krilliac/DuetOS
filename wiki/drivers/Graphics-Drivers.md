@@ -4,7 +4,8 @@
 >
 > **Execution context:** Kernel — IRQ + process; pixel ops in compositor pass
 >
-> **Maturity:** virtio-gpu v0 scanout; Intel/AMD/NVIDIA discovery only
+> **Maturity:** virtio-gpu v0 scanout; Intel/AMD/NVIDIA discovery only;
+> Vulkan ICD v0 (CPU-side lifecycle, command tape replay, scanout-backed clears)
 
 ## Overview
 
@@ -153,9 +154,171 @@ the per-pixel inner loops, so the per-frame cost is constant.
 identification (vendor / family / tier / arch / BAR0), and
 present-backend classification (`direct` / `virtio-gpu` /
 `none`) into one struct. Used by the `gfx` shell command and
-intended as the source of truth for the future Vulkan ICD's
-`vkGetPhysicalDeviceProperties` query and runtime mode-change
-paths.
+by the Vulkan ICD's `vkGetPhysicalDeviceProperties` /
+`vkGetPhysicalDeviceMemoryProperties` queries (it's the
+source of truth for vendorID, deviceName, framebuffer-sized
+DEVICE_LOCAL heap, and `maxFramebuffer*` limits).
+
+## Vulkan ICD (v0)
+
+`kernel/subsystems/graphics/{graphics.h, graphics.cpp,
+graphics_vk.cpp}` implements a CPU-side Vulkan 1.3 ICD subset.
+Lifecycle calls succeed (no more `ErrorIncompatibleDriver`
+sentinels); per-kind handle pools track live counts; the boot
+self-test (`GraphicsIcdSelfTest`) drives the canonical
+Instance → Device → Pipeline → CommandBuffer → Submit → Destroy
+flow and asserts every pool returns to zero.
+
+Implemented:
+
+- Instance / PhysicalDevice / Device / Queue lifecycle.
+- `vkGetPhysicalDeviceProperties` / `Features` /
+  `MemoryProperties` / `QueueFamilyProperties` — properties
+  sourced from `display_info::Query()` (vendor ID from PCI
+  vendor name, device name composed as
+  `DuetOS-vk-<vendor>-<family>`, framebuffer-sized
+  DEVICE_LOCAL heap, 16 MiB HOST_VISIBLE+COHERENT heap).
+- Instance / Device extension + layer enumeration (zero count
+  — no extensions yet).
+- `vkAllocateMemory` / `vkFreeMemory`, `vkCreateBuffer` /
+  `vkBindBufferMemory`, `vkCreateImage` / `vkBindImageMemory`,
+  `vkCreateImageView`. Host-visible memory is backed by
+  kheap so `vkMapMemory` returns a real pointer the caller
+  can read/write; `vkFlushMappedMemoryRanges` and
+  `vkInvalidateMappedMemoryRanges` are no-ops because memory
+  type 1 advertises HOST_COHERENT.
+- `vkCreateRenderPass` / `vkCreateFramebuffer`.
+- `vkCreateShaderModule` validates the SPIR-V magic word
+  `0x07230203` (LE) and rejects with `ErrorInvalidShaderNV`.
+  A v1 header walker then runs across every accepted blob and
+  aggregates entry-point / capability / execution-mode /
+  decoration counts; the result hangs off `VkGetShaderModuleInfoDuet`
+  (DuetOS-only diagnostic accessor — non-spec).  The bytecode
+  itself is still not executed.
+- `vkCreatePipelineLayout`, `vkCreateGraphicsPipeline`,
+  `vkCreateComputePipeline`.
+- `vkCreateCommandPool`, `vkAllocateCommandBuffers`,
+  `vkBeginCommandBuffer` / `vkEndCommandBuffer` /
+  `vkResetCommandBuffer`.
+- Recording: `vkCmdBeginRenderPass`, `vkCmdEndRenderPass`,
+  `vkCmdBindPipeline`, `vkCmdClearColorImage`, `vkCmdDraw`,
+  `vkCmdDrawIndexed`, `vkCmdSetViewport`, `vkCmdSetScissor`,
+  `vkCmdBindVertexBuffers`, `vkCmdBindIndexBuffer`,
+  `vkCmdCopyBuffer`, `vkCmdFillBuffer`, `vkCmdPipelineBarrier`,
+  `vkCmdPushConstants`, `vkCmdDispatch`,
+  `vkCmdCopyBufferToImage`, `vkCmdSetEvent`,
+  `vkCmdResetEvent`, `vkCmdWaitEvents`, `vkCmdBeginQuery`,
+  `vkCmdEndQuery`, `vkCmdResetQueryPool`,
+  `vkCmdWriteTimestamp`, `vkCmdBindDescriptorSets`. Each
+  opcode is appended to the command buffer's tape (32 ops
+  max). `vkResetCommandPool` resets every cb in the pool back
+  to Initial.
+- `vkQueueSubmit` walks the tape:
+  * `vkCmdClearColorImage` and `vkCmdBeginRenderPass` clears
+    against scanout-backed images forward to
+    `FramebufferFillRect` + `FramebufferAddDamage`.
+  * `vkCmdCopyBuffer` / `vkCmdFillBuffer` move bytes between
+    host-visible buffer-bound memory ranges (real
+    propagation, asserted by the self-test).
+  * `vkCmdCopyBufferToImage` against a scanout-backed image
+    runs through `FramebufferBlit` — a real texture-upload
+    path that turns a host-visible buffer of pixels into
+    framebuffer pixels.
+  * `vkCmdSetEvent` / `vkCmdResetEvent` flip the device-
+    visible event bit.
+  * `vkCmdWriteTimestamp` writes the kernel monotonic clock
+    (ns) into the query pool slot.
+  * `vkCmdEndQuery` writes a monotonic counter into the
+    query pool slot (occlusion queries get ordering, not
+    pixel counts — no rasterizer to sample).
+  Other opcodes are recorded for stats but produce no
+  visible output (no SPIR-V execution yet).
+- `vkCreateFence` / `vkWaitForFences` (always immediately
+  signalled — submits are synchronous in this ICD),
+  `vkCreateSemaphore`.
+- Descriptor sets: `vkCreateDescriptorSetLayout`,
+  `vkCreateDescriptorPool` (with `max_sets` budget enforcement),
+  `vkAllocateDescriptorSets`, `vkUpdateDescriptorSet` (DuetOS
+  one-binding-at-a-time variant of `vkUpdateDescriptorSets`),
+  `vkCmdBindDescriptorSets`, `vkFreeDescriptorSets`,
+  `vkResetDescriptorPool`.  Sets carry no resource state for
+  shaders to consume; the surface exists so a downstream
+  caller (DXVK, native compute) finds the full ladder today.
+- Loader plumbing: `vkEnumerateInstanceVersion`,
+  `vkGetInstanceProcAddr`, `vkGetDeviceProcAddr` (returns
+  opaque token, 0 for unknown / instance-only-from-device).
+- Vulkan 1.1 / 1.2 -shaped `Properties2` / `Features2` /
+  `MemoryProperties2` accept a pNext chain (ignored — no
+  extensions advertised) so a hosted SDK caller's setup runs.
+- `vkGetBufferMemoryRequirements` /
+  `vkGetImageMemoryRequirements` /
+  `vkGetDeviceMemoryCommitment` /
+  `vkGetBufferDeviceAddress` (returns the kheap pointer).
+- VK_KHR_dynamic_rendering: `vkCmdBeginRendering` /
+  `vkCmdEndRendering` — same scanout-clear path as
+  `vkCmdBeginRenderPass` for the attachment image.
+- Dynamic state setters: `vkCmdSetLineWidth`,
+  `vkCmdSetDepthBias`, `vkCmdSetBlendConstants`,
+  `vkCmdSetDepthBounds`, `vkCmdSetStencil{Compare,Write}Mask`,
+  `vkCmdSetStencilReference` — recorded only.
+- VK_EXT_debug_utils: `vkSetDebugUtilsObjectNameEXT` attaches
+  a label to any handle; `VkGetDebugUtilsObjectNameDuet`
+  reads it back.  Small fixed-size table (16 most recent).
+- Format introspection: `vkGetPhysicalDeviceFormatProperties` /
+  `vkGetPhysicalDeviceImageFormatProperties` (recognise
+  `VK_FORMAT_B8G8R8A8_UNORM` only; everything else reports
+  zero features / `ErrorFormatNotSupported`).
+- Push descriptors: `vkCmdPushDescriptorSetKHR` records each
+  write as a tape op for stats; no shader to consume.
+- Secondary command buffers: `VkAllocateCommandBuffers2`
+  (level=Secondary), `vkCmdExecuteCommands` recurses into the
+  secondary's tape during replay so its ops actually run.
+  Primary cbs passed to ExecuteCommands are rejected at record
+  time.
+- VK_EXT_debug_utils command-stream labels:
+  `vkCmdBeginDebugUtilsLabelEXT` / `End` / `Insert` (string
+  payload reuses the per-op push-constants slot).
+- Vulkan 1.1 array-form bind: `vkBindBufferMemory2` /
+  `vkBindImageMemory2`.
+- Image transfer suite: `vkCmdCopyImage`, `vkCmdBlitImage`,
+  `vkCmdCopyImageToBuffer`, `vkCmdResolveImage`,
+  `vkCmdUpdateBuffer` (real bytes when buffer host-visible),
+  `vkCmdClearAttachments`, `vkCmdClearDepthStencilImage`.
+- Sampler / Event / PipelineCache / QueryPool: full
+  create/destroy + supporting entry points. Pipeline cache
+  hands back a 32-byte VkPipelineCacheHeaderVersionOne-shaped
+  blob via `vkGetPipelineCacheData` so a caller's "round-trip
+  the cache to disk" path works. Query pools support
+  occlusion + timestamp; `vkCmdWriteTimestamp` writes the
+  kernel monotonic clock; `vkGetQueryPoolResults` returns
+  `NotReady` for slots that haven't been written.
+- WSI: `VkCreateDuetSurfaceKHR` (single platform-agnostic
+  surface bound to the kernel framebuffer),
+  `VkGetPhysicalDeviceSurfaceCapabilitiesKHR` /
+  `SurfaceFormatsKHR` / `SurfacePresentModesKHR`,
+  `vkCreateSwapchainKHR` (allocates 2-4 scanout-backed
+  images), `vkGetSwapchainImagesKHR`,
+  `vkAcquireNextImageKHR` (rotates the cursor),
+  `vkQueuePresentKHR` (validates the index and calls
+  `FramebufferPresent` so the compositor flushes the damage
+  rect).  Only `Fifo` present mode + `B8G8R8A8_UNORM`
+  format are advertised.
+
+Out of scope — deferred:
+
+- Real GPU command-ring submission (blocks on per-vendor
+  driver bring-up: Intel GuC/HuC, AMD MEC/RLC, NVIDIA GSP).
+- SPIR-V execution / shader translation.
+- Descriptor sets, descriptor pools.
+- Swapchain, surface, WSI (`vkAcquireNextImageKHR`,
+  `vkQueuePresentKHR`).
+- Multi-queue, cross-queue sync that actually blocks.
+- `vkCmdBeginRenderPass` clear-attachment painting (needs
+  framebuffer → image-view back-mapping).
+
+The `gfx` shell command surfaces every per-kind `*_live`
+counter plus submit / record / replay totals plus the SPIR-V
+validator's rejection count.
 
 ## Themes
 
@@ -179,8 +342,11 @@ recompose. Four themes ship:
 - **No GPU command queue.** Submission is direct register writes for
   virtio-gpu's tiny command set; a real GPU driver will need a
   proper queue.
-- **No Vulkan ICD yet.** Skeleton lives in
-  `kernel/subsystems/graphics/`.
+- **Vulkan ICD does not execute shaders.** SPIR-V blobs are
+  validated (magic-word check) + parsed (entry-point /
+  capability / decoration counts), but the bytecode is not
+  executed. `vkCmdDraw` is recorded for stats but produces
+  no pixels.
 - **Damage tracking is single-bbox.** A frame that touches the
   top-left and bottom-right corners flushes the whole surface. A
   list-of-rects damage tracker would help for chrome-heavy frames

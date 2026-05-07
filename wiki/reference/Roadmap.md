@@ -311,7 +311,10 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
   Z-buffer, D3D9 fixed-function lighting, real GPU command-ring
   submission.
 - **Blocks on:** per-vendor GPU drivers landing real command-
-  ring submission; Vulkan-first ICD then D3D translation layer.
+  ring submission; D3D-to-Vulkan thunk wiring (the Vulkan ICD
+  v0 lifecycle landed on `claude/native-vulkan-graphics-eoh5N`
+  — the D3D side still returns `E_FAIL` and needs to redirect
+  through the Vulkan path).
 
 ### Windowing — modal dialogs, common controls
 

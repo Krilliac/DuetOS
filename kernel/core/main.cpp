@@ -2755,8 +2755,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     const bool force_net_smoke = CmdlineMatches(cmdline, "netsmoke", "force");
     duetos::net::NetSmokeTestStart(force_net_smoke);
 
-    SerialWrite("[boot] Bringing up graphics ICD skeleton.\n");
+    SerialWrite("[boot] Bringing up graphics ICD.\n");
     duetos::subsystems::graphics::GraphicsIcdInit();
+    DUETOS_BOOT_SELFTEST(duetos::subsystems::graphics::GraphicsIcdSelfTest());
     duetos::subsystems::win32::GdiInit();
 
     SerialWrite("[boot] Bringing up block device layer.\n");

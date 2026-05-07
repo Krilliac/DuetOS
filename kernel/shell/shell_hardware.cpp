@@ -1078,25 +1078,121 @@ void CmdGfx(u32 argc, char** argv)
         return;
     }
 
-    // Surfaces the graphics ICD handle-table counters. The ICD is
-    // a trace-only skeleton today (see subsystems/graphics/graphics.h),
-    // so in the steady state all counts are zero unless something
-    // has exercised the Vk*/D3D*/DXGI entry points.
+    // Surfaces the graphics ICD handle-pool counters. The ICD now
+    // implements a real CPU-side Vulkan lifecycle (Instance, Device,
+    // CommandPool, ShaderModule, Pipeline, RenderPass, ...) plus a
+    // command tape that vkQueueSubmit replays — see
+    // subsystems/graphics/graphics.h. D3D translation thunks still
+    // E_FAIL for now.
     const auto s = duetos::subsystems::graphics::GraphicsStatsRead();
-    ConsoleWriteln("Graphics ICD (skeleton — no real driver)");
-    ConsoleWrite("  Vulkan instances: live=");
+    ConsoleWriteln("Graphics ICD (Vulkan v0; D3D translation skeleton)");
+    ConsoleWrite("  Vulkan instances:    live=");
     WriteU64Dec(s.vk_instances_live);
     ConsoleWrite(" created=");
     WriteU64Dec(s.vk_instances_created);
     ConsoleWrite(" destroyed=");
     WriteU64Dec(s.vk_instances_destroyed);
     ConsoleWriteChar('\n');
-    ConsoleWrite("  Vulkan devices:   live=");
+    ConsoleWrite("  Vulkan devices:      live=");
     WriteU64Dec(s.vk_devices_live);
     ConsoleWrite(" created=");
     WriteU64Dec(s.vk_devices_created);
     ConsoleWrite(" destroyed=");
     WriteU64Dec(s.vk_devices_destroyed);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  Vulkan resources live: cmdpools=");
+    WriteU64Dec(s.vk_command_pools_live);
+    ConsoleWrite(" cmdbufs=");
+    WriteU64Dec(s.vk_command_buffers_live);
+    ConsoleWrite(" shaders=");
+    WriteU64Dec(s.vk_shader_modules_live);
+    ConsoleWrite(" pipelines=");
+    WriteU64Dec(s.vk_pipelines_live);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("                         renderpasses=");
+    WriteU64Dec(s.vk_render_passes_live);
+    ConsoleWrite(" framebuffers=");
+    WriteU64Dec(s.vk_framebuffers_live);
+    ConsoleWrite(" images=");
+    WriteU64Dec(s.vk_images_live);
+    ConsoleWrite(" views=");
+    WriteU64Dec(s.vk_image_views_live);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("                         buffers=");
+    WriteU64Dec(s.vk_buffers_live);
+    ConsoleWrite(" memory=");
+    WriteU64Dec(s.vk_device_memory_live);
+    ConsoleWrite(" fences=");
+    WriteU64Dec(s.vk_fences_live);
+    ConsoleWrite(" semaphores=");
+    WriteU64Dec(s.vk_semaphores_live);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("                         dsl=");
+    WriteU64Dec(s.vk_descriptor_set_layouts_live);
+    ConsoleWrite(" dpools=");
+    WriteU64Dec(s.vk_descriptor_pools_live);
+    ConsoleWrite(" dsets=");
+    WriteU64Dec(s.vk_descriptor_sets_live);
+    ConsoleWrite(" dwrites=");
+    WriteU64Dec(s.vk_descriptor_writes);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("                         surfaces=");
+    WriteU64Dec(s.vk_surfaces_live);
+    ConsoleWrite(" swapchains=");
+    WriteU64Dec(s.vk_swapchains_live);
+    ConsoleWrite(" acquires=");
+    WriteU64Dec(s.vk_swapchain_acquires);
+    ConsoleWrite(" presents=");
+    WriteU64Dec(s.vk_swapchain_presents);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("                         samplers=");
+    WriteU64Dec(s.vk_samplers_live);
+    ConsoleWrite(" events=");
+    WriteU64Dec(s.vk_events_live);
+    ConsoleWrite(" pcaches=");
+    WriteU64Dec(s.vk_pipeline_caches_live);
+    ConsoleWrite(" qpools=");
+    WriteU64Dec(s.vk_query_pools_live);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  Vulkan submit traffic: submits=");
+    WriteU64Dec(s.vk_queue_submits);
+    ConsoleWrite(" recorded=");
+    WriteU64Dec(s.vk_command_recorded);
+    ConsoleWrite(" replayed=");
+    WriteU64Dec(s.vk_command_replayed);
+    ConsoleWrite(" clear-px=");
+    WriteU64Dec(s.vk_clear_pixels_painted);
+    ConsoleWrite(" upload-px=");
+    WriteU64Dec(s.vk_image_upload_pixels);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("                         copy-bytes=");
+    WriteU64Dec(s.vk_buffer_copy_bytes);
+    ConsoleWrite(" fill-bytes=");
+    WriteU64Dec(s.vk_buffer_fill_bytes);
+    ConsoleWrite(" pushes=");
+    WriteU64Dec(s.vk_push_constant_writes);
+    ConsoleWrite(" barriers=");
+    WriteU64Dec(s.vk_pipeline_barriers);
+    ConsoleWrite(" dispatches=");
+    WriteU64Dec(s.vk_dispatches);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("                         queries=");
+    WriteU64Dec(s.vk_queries_executed);
+    ConsoleWrite(" maps=");
+    WriteU64Dec(s.vk_memory_maps);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  SPIR-V parser: modules=");
+    WriteU64Dec(s.vk_spirv_modules_parsed);
+    ConsoleWrite(" rejected=");
+    WriteU64Dec(s.vk_invalid_spirv_rejections);
+    ConsoleWrite(" entry-points=");
+    WriteU64Dec(s.vk_spirv_entry_points_seen);
+    ConsoleWrite(" capabilities=");
+    WriteU64Dec(s.vk_spirv_capabilities_seen);
+    ConsoleWrite(" execution-modes=");
+    WriteU64Dec(s.vk_spirv_execution_modes_seen);
+    ConsoleWrite(" decorations=");
+    WriteU64Dec(s.vk_spirv_decorations_seen);
     ConsoleWriteChar('\n');
     ConsoleWrite("  D3D11/12 create calls: ");
     WriteU64Dec(s.d3d_create_calls);
