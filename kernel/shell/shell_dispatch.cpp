@@ -39,6 +39,7 @@
 #include "fs/tmpfs.h"
 #include "fs/vfs.h"
 #include "mm/frame_allocator.h"
+#include "sched/loadavg.h"
 #include "sched/sched.h"
 #include "diag/cleanroom_trace.h"
 #include "diag/crprobe.h"
@@ -67,7 +68,7 @@ void CmdHelp()
     ConsoleWriteln("  ABOUT        ABOUT DUETOS");
     ConsoleWriteln("  VERSION      DUETOS VERSION");
     ConsoleWriteln("  CLEAR        CLEAR THE CONSOLE");
-    ConsoleWriteln("  UPTIME       SECONDS SINCE BOOT");
+    ConsoleWriteln("  UPTIME       WALL TIME, UPTIME, USERS, LOAD AVERAGES");
     ConsoleWriteln("  DATE         WALL TIME + DATE");
     ConsoleWriteln("  WINDOWS      LIST REGISTERED WINDOWS");
     ConsoleWriteln("  THEME [N|LIST|NEXT]  SHOW / SWITCH / CYCLE DESKTOP THEME");
@@ -464,6 +465,20 @@ void CmdSysinfo()
     const u64 secs = duetos::sched::SchedNowTicks() / 100;
     WriteU64Dec(secs);
     ConsoleWriteln(" SECONDS");
+    u32 load_one = 0;
+    u32 load_five = 0;
+    u32 load_fifteen = 0;
+    duetos::sched::LoadavgSnapshot(&load_one, &load_five, &load_fifteen);
+    char load_buf[16];
+    ConsoleWrite("LOAD:    ");
+    duetos::sched::LoadavgFormat(load_buf, sizeof(load_buf), load_one);
+    ConsoleWrite(load_buf);
+    ConsoleWrite(", ");
+    duetos::sched::LoadavgFormat(load_buf, sizeof(load_buf), load_five);
+    ConsoleWrite(load_buf);
+    ConsoleWrite(", ");
+    duetos::sched::LoadavgFormat(load_buf, sizeof(load_buf), load_fifteen);
+    ConsoleWriteln(load_buf);
     duetos::arch::RtcTime t{};
     duetos::arch::RtcRead(&t);
     ConsoleWrite("WALL:    ");

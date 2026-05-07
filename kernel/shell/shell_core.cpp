@@ -17,6 +17,7 @@
 
 #include "arch/x86_64/rtc.h"
 #include "drivers/video/console.h"
+#include "sched/loadavg.h"
 #include "sched/sched.h"
 
 #include "security/auth.h"
@@ -30,6 +31,42 @@ namespace
 using duetos::drivers::video::ConsoleWrite;
 using duetos::drivers::video::ConsoleWriteChar;
 using duetos::drivers::video::ConsoleWriteln;
+
+void WriteUptimeDuration(u64 secs)
+{
+    const u64 days = secs / 86400;
+    secs %= 86400;
+    const u64 hours = secs / 3600;
+    secs %= 3600;
+    const u64 minutes = secs / 60;
+
+    if (days > 0)
+    {
+        WriteU64Dec(days);
+        ConsoleWrite(days == 1 ? " day, " : " days, ");
+    }
+    WriteU64Dec(hours);
+    ConsoleWriteChar(':');
+    WriteU8TwoDigits(static_cast<u8>(minutes));
+}
+
+void WriteLoadAverages()
+{
+    u32 one = 0;
+    u32 five = 0;
+    u32 fifteen = 0;
+    duetos::sched::LoadavgSnapshot(&one, &five, &fifteen);
+
+    char buf[16];
+    duetos::sched::LoadavgFormat(buf, sizeof(buf), one);
+    ConsoleWrite(buf);
+    ConsoleWrite(", ");
+    duetos::sched::LoadavgFormat(buf, sizeof(buf), five);
+    ConsoleWrite(buf);
+    ConsoleWrite(", ");
+    duetos::sched::LoadavgFormat(buf, sizeof(buf), fifteen);
+    ConsoleWrite(buf);
+}
 
 } // namespace
 
@@ -52,10 +89,28 @@ void CmdClear()
 
 void CmdUptime()
 {
+    // Match the operator-facing shape users expect from Unix-like
+    // systems: current wall time, human-readable duration, session
+    // count, and the scheduler's 1/5/15-minute load averages. DuetOS
+    // has one interactive shell session today, so the user count is
+    // a conservative 0/1 derived from the auth session rather than a
+    // fake utmp-style login table.
     const u64 secs = duetos::sched::SchedNowTicks() / 100;
-    ConsoleWrite("UPTIME ");
-    WriteU64Dec(secs);
-    ConsoleWriteln(" SECONDS");
+    duetos::arch::RtcTime t{};
+    duetos::arch::RtcRead(&t);
+
+    WriteU8TwoDigits(t.hour);
+    ConsoleWriteChar(':');
+    WriteU8TwoDigits(t.minute);
+    ConsoleWriteChar(':');
+    WriteU8TwoDigits(t.second);
+    ConsoleWrite(" up ");
+    WriteUptimeDuration(secs);
+
+    const bool logged_in = AuthCurrentUserName()[0] != '\0';
+    ConsoleWrite(logged_in ? ", 1 user, load average: " : ", 0 users, load average: ");
+    WriteLoadAverages();
+    ConsoleWriteChar('\n');
 }
 
 void CmdDate()
