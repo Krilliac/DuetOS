@@ -160,10 +160,15 @@ paths.
 GPU classes (`kGpuContext`, `kGpuSurface`, `kGpuCmdBuffer`,
 `kGpuMemory`) read through
 [`kernel/drivers/gpu/gpu_leak.h`](../../kernel/drivers/gpu/gpu_leak.h),
-a stable contract the GPU driver fills in as each resource type
-lands. Today every GPU accessor returns a zeroed snapshot (carrying a
-`// GAP:` marker); the leak detector itself does not need to change
-when GPU work begins populating those tables.
+a stable contract backed by the per-class resource tables in
+[`kernel/drivers/gpu/gpu_resources.h`](../../kernel/drivers/gpu/gpu_resources.h).
+Drivers register / release resources against those tables;
+the leak accessors are thin passthroughs over the snapshot side,
+and the per-process exit hook walks them to evict orphans owned
+by an exiting PID. virtio-gpu's scanout backing is the first
+real registrant (kernel-owned). Vendor GPU bring-ups (Intel /
+AMD / NVIDIA) wire into the same tables once their command-ring
+slices land.
 
 ## Known Limits / GAPs
 

@@ -281,7 +281,9 @@ The following `// GAP:` markers in source code track edge
 cases that the v0 happy path skips:
 
 - `kernel/drivers/net/iwlwifi_rings.cpp` — legacy <7000-series
-  RBD format; TX completion polling.
+  RBD format. (TX completion polling landed via
+  `IwlRingsPollTxCompletions` / `IwlRingsApplyTxCompletions`;
+  the IRQ wiring that calls them is the next slice.)
 - `kernel/mm/dma.cpp` — ARM64 port (`dsb ishst` + per-line
   `dc cvac`).
 - `kernel/subsystems/translation/translate.cpp` — `rseq`

@@ -1,55 +1,77 @@
 #include "drivers/gpu/gpu_leak.h"
 
+#include "drivers/gpu/gpu_resources.h"
+#include "log/klog.h"
+
 /*
- * DuetOS — GPU resource lifetime accounting (v0 implementation).
+ * DuetOS — GPU resource lifetime accounting (read-side).
  *
- * Each accessor returns a zeroed snapshot today. v0 GPU is
- * discovery-only — see `kernel/drivers/gpu/gpu.h`. Real per-
- * resource tables ship with the imminent GPU slice; when they
- * land, each accessor walks the corresponding driver-side table
- * and the matching `// GAP:` marker comes off.
- *
- * The detector calls these unconditionally; a zero return is the
- * correct answer until a resource type exists.
+ * Each accessor is a thin passthrough over `gpu_resources.h` —
+ * the four per-class tables that GPU drivers populate when they
+ * create contexts / surfaces / command buffers / VRAM allocations.
+ * The tables sit empty when no driver has registered anything
+ * (the v0 GPU steady state on every supported tier-1 device);
+ * they fill in as drivers come online.
  */
 
 namespace duetos::drivers::gpu
 {
 
+namespace
+{
+
+GpuClassSnapshot ToLeakSnapshot(const GpuResourceSnapshot& s)
+{
+    return GpuClassSnapshot{s.outstanding, s.peak, s.byte_cost};
+}
+
+} // namespace
+
 GpuClassSnapshot GpuLeakSnapshotContexts()
 {
-    // GAP: returns zero until per-process GPU context tracking lands
-    // in the GPU driver — revisit with the GPU slice.
-    return GpuClassSnapshot{0, 0, 0};
+    return ToLeakSnapshot(GpuResourcesSnapshot(GpuResourceClass::Context));
 }
 
 GpuClassSnapshot GpuLeakSnapshotSurfaces()
 {
-    // GAP: returns zero until surface lifetime tracking lands in the
-    // GPU driver — revisit with the GPU slice.
-    return GpuClassSnapshot{0, 0, 0};
+    return ToLeakSnapshot(GpuResourcesSnapshot(GpuResourceClass::Surface));
 }
 
 GpuClassSnapshot GpuLeakSnapshotCmdBuffers()
 {
-    // GAP: returns zero until command-buffer submission tracking
-    // lands in the GPU driver — revisit with the GPU slice.
-    return GpuClassSnapshot{0, 0, 0};
+    return ToLeakSnapshot(GpuResourcesSnapshot(GpuResourceClass::CmdBuffer));
 }
 
 GpuClassSnapshot GpuLeakSnapshotVram()
 {
-    // GAP: returns zero until VRAM/GTT byte accounting lands in the
-    // GPU driver — revisit with the GPU slice.
-    return GpuClassSnapshot{0, 0, 0};
+    return ToLeakSnapshot(GpuResourcesSnapshot(GpuResourceClass::Vram));
 }
 
 void GpuLeakReportProcessExit(u64 pid, const GpuClassSnapshot per_class[4])
 {
-    // GAP: no-op until the GPU driver has per-process resource tables
-    // to attribute against — revisit with the GPU slice.
-    (void)pid;
-    (void)per_class;
+    // Per-process residue eviction: walk the four tables and
+    // release every slot owned by `pid`. Resources tagged with
+    // `kPidKernel` are skipped (driver-owned, lifetime not bound
+    // to any user process). Bumping the per-class generation
+    // counters means a stale handle held in process state cannot
+    // accidentally retire a future resource.
+    const u32 evicted = GpuResourcesReleaseByPid(pid);
+
+    // The leak detector also passes us a snapshot of each class
+    // taken at exit time — useful to log alongside the eviction
+    // count so an operator can correlate "process X exited
+    // owning N GPU contexts" against the system-wide snapshot
+    // ("…out of M total"). The detector's caller already pre-
+    // populates `per_class` in (Context, Surface, CmdBuffer,
+    // VRAM) order.
+    if (evicted == 0)
+        return;
+    KLOG_WARN_2V("drivers/gpu/gpu_leak", "process exit released GPU residue", "pid", pid, "evicted",
+                 static_cast<u64>(evicted));
+    KLOG_DEBUG_V("drivers/gpu/gpu_leak", "  contexts at exit (system-wide outstanding)", per_class[0].outstanding);
+    KLOG_DEBUG_V("drivers/gpu/gpu_leak", "  surfaces at exit (system-wide byte_cost)", per_class[1].byte_cost);
+    KLOG_DEBUG_V("drivers/gpu/gpu_leak", "  cmd_buffers at exit (system-wide outstanding)", per_class[2].outstanding);
+    KLOG_DEBUG_V("drivers/gpu/gpu_leak", "  vram at exit (system-wide byte_cost)", per_class[3].byte_cost);
 }
 
 } // namespace duetos::drivers::gpu

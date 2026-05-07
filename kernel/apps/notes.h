@@ -100,12 +100,14 @@ bool NotesIsDirty();
 /// Notes window's WindowWheelFn at NotesInit time.
 void NotesOnWheel(duetos::i32 dz, duetos::u8 modifiers);
 
-/// Mouse double-click on the Notes window — currently a no-op
-/// (Notes has no list / icon model that benefits from double-
-/// click). Reserved entry point so the kernel's compositor-side
-/// dispatch can fan to every native app uniformly without
-/// per-app conditionals. Returns true iff the click was
-/// consumed.
+/// Mouse double-click on the Notes window — word-snap select.
+/// Maps the click to a buffer index (mirroring the visual-row /
+/// column walk used by `DrawFn`), then anchors the selection to
+/// the surrounding run of word chars (alnum + underscore).
+/// Clicks on whitespace / punctuation consume the event without
+/// disturbing the existing selection. Returns true iff the click
+/// was consumed (always, in v1 — Notes claims every double-click
+/// inside its window).
 bool NotesOnDoubleClick(duetos::u32 cx, duetos::u32 cy);
 
 /// Copy the entire buffer contents to the kernel clipboard

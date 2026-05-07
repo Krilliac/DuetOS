@@ -27,10 +27,11 @@
 #include "drivers/gpu/virtio_gpu.h"
 
 #include "arch/x86_64/serial.h"
+#include "drivers/gpu/gpu_resources.h"
+#include "drivers/pci/pci.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
 #include "mm/paging.h"
-#include "drivers/pci/pci.h"
 
 namespace duetos::drivers::gpu
 {
@@ -782,6 +783,13 @@ struct ResourceAttachBacking
 
 constinit VirtioScanoutInfo g_scanout = {};
 
+// GPU resource handles for the kernel-owned scanout. Registered
+// against `kPidKernel` (these outlive any user process) so the
+// leak detector's per-class snapshots include them and a future
+// teardown / re-setup path retires them cleanly.
+constinit GpuResourceHandle g_scanout_surface = kInvalidGpuResource;
+constinit GpuResourceHandle g_scanout_vram = kInvalidGpuResource;
+
 // Issue one header-returning command with a prebuilt request. Logs
 // a failure line and returns false if the response type isn't
 // RESP_OK_NODATA. `label` is purely for log clarity.
@@ -898,6 +906,14 @@ bool VirtioGpuSetupScanout(u32 width, u32 height)
     g_scanout.backing_phys = base;
     g_scanout.backing_bytes = bytes;
     g_scanout.backing_va = backing_va;
+
+    // Register with the GPU resource accountant: the scanout is
+    // a kernel-owned surface (host-side render target) and a
+    // matching VRAM-byte allocation (the guest-side backing).
+    // The leak detector's snapshot now reflects what the device
+    // actually owns instead of returning zero.
+    g_scanout_surface = GpuSurfaceRegister(kPidKernel, bytes, "virtio-gpu-scanout");
+    g_scanout_vram = GpuVramRegister(kPidKernel, bytes, "virtio-gpu-backing");
 
     arch::SerialWrite("[virtio-gpu] setup-scanout OK  res=");
     arch::SerialWriteHex(kScanoutResourceId);
