@@ -467,8 +467,10 @@ void PrintShortcutHelp()
     ConsoleWriteln("    E THEN Y          EMPTY TRASH (TRASH VIEW ONLY)");
     ConsoleWriteln("");
     ConsoleWriteln("  IMAGE VIEWER (WHEN ACTIVE)");
-    ConsoleWriteln("    N / P / LEFT/RT   NEXT / PREV BMP");
-    ConsoleWriteln("    R                 RESCAN DISK FOR BMPS");
+    ConsoleWriteln("    N / P / LEFT/RT   NEXT / PREV IMAGE");
+    ConsoleWriteln("    R                 RESCAN DISK FOR IMAGES");
+    ConsoleWriteln("    + / -             ZOOM IN / OUT (resize)");
+    ConsoleWriteln("    CTRL+WHEEL        ZOOM IN / OUT (mouse)");
     ConsoleWriteln("");
     ConsoleWriteln("  BROWSER (WHEN ACTIVE)");
     ConsoleWriteln("    U / TAB           ENTER URL EDIT");
