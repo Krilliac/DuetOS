@@ -535,4 +535,120 @@ void DoFileRename(arch::TrapFrame* frame)
     frame->rax = kStatusSuccess;
 }
 
+namespace
+{
+constexpr u64 kStatusSuccess = 0;
+constexpr u64 kStatusInvalidParameter = 0xC000000DULL;
+constexpr u64 kStatusObjectNameNotFound = 0xC0000034ULL;
+constexpr u64 kStatusObjectNameCollision = 0xC0000035ULL;
+
+bool CopyPathArg(arch::TrapFrame* frame, u64 user_ptr, u64 path_cap, char* dst)
+{
+    (void)frame;
+    if (path_cap == 0 || path_cap >= core::kSyscallPathMax)
+        return false;
+    if (!mm::CopyFromUser(dst, reinterpret_cast<const void*>(user_ptr), path_cap))
+        return false;
+    dst[path_cap] = '\0';
+    dst[core::kSyscallPathMax - 1] = '\0';
+    return true;
+}
+} // namespace
+
+void DoFileMkdir(arch::TrapFrame* frame)
+{
+    // rdi = user path, rsi = path_cap (excluding NUL).
+    KDBG_2V(Win32Thunk, "win32/file", "DoFileMkdir", "user_path", frame->rdi, "path_cap", frame->rsi);
+    core::Process* proc = core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = kStatusInvalidParameter;
+        return;
+    }
+    char kpath[core::kSyscallPathMax];
+    if (!CopyPathArg(frame, frame->rdi, frame->rsi, kpath))
+    {
+        frame->rax = kStatusInvalidParameter;
+        return;
+    }
+    frame->rax = fs::routing::MkdirForProcess(proc, kpath) ? kStatusSuccess : kStatusObjectNameCollision;
+}
+
+void DoFileSymlink(arch::TrapFrame* frame)
+{
+    // rdi = symlink path, rsi = path_cap, rdx = target, r10 = target_cap.
+    KDBG_2V(Win32Thunk, "win32/file", "DoFileSymlink", "user_path", frame->rdi, "user_target", frame->rdx);
+    core::Process* proc = core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = kStatusInvalidParameter;
+        return;
+    }
+    char kpath[core::kSyscallPathMax];
+    char ktarget[core::kSyscallPathMax];
+    if (!CopyPathArg(frame, frame->rdi, frame->rsi, kpath) || !CopyPathArg(frame, frame->rdx, frame->r10, ktarget))
+    {
+        frame->rax = kStatusInvalidParameter;
+        return;
+    }
+    frame->rax = fs::routing::SymlinkForProcess(proc, kpath, ktarget) ? kStatusSuccess : kStatusObjectNameCollision;
+}
+
+void DoFileLink(arch::TrapFrame* frame)
+{
+    // rdi = existing path, rsi = path_cap, rdx = new path, r10 = new path cap.
+    KDBG_2V(Win32Thunk, "win32/file", "DoFileLink", "user_existing", frame->rdi, "user_new", frame->rdx);
+    core::Process* proc = core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = kStatusInvalidParameter;
+        return;
+    }
+    char kex[core::kSyscallPathMax];
+    char knew[core::kSyscallPathMax];
+    if (!CopyPathArg(frame, frame->rdi, frame->rsi, kex) || !CopyPathArg(frame, frame->rdx, frame->r10, knew))
+    {
+        frame->rax = kStatusInvalidParameter;
+        return;
+    }
+    frame->rax = fs::routing::LinkForProcess(proc, kex, knew) ? kStatusSuccess : kStatusObjectNameCollision;
+}
+
+void DoFileReadlink(arch::TrapFrame* frame)
+{
+    // rdi = path, rsi = path_cap, rdx = user u8* dst, r10 = dst_max.
+    KDBG_2V(Win32Thunk, "win32/file", "DoFileReadlink", "user_path", frame->rdi, "user_dst", frame->rdx);
+    core::Process* proc = core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
+    char kpath[core::kSyscallPathMax];
+    if (!CopyPathArg(frame, frame->rdi, frame->rsi, kpath))
+    {
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
+    const u64 dst_max = frame->r10;
+    if (dst_max == 0 || dst_max >= core::kSyscallPathMax)
+    {
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
+    char kdst[core::kSyscallPathMax];
+    const u64 copied = fs::routing::ReadlinkForProcess(proc, kpath, kdst, dst_max);
+    if (copied == static_cast<u64>(-1))
+    {
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
+    if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rdx), kdst, copied + 1))
+    {
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
+    frame->rax = copied;
+}
+
 } // namespace duetos::subsystems::win32

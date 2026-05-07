@@ -30,6 +30,13 @@
 X(SYS_FILE_WRITE, (1ULL << ::duetos::core::kCapFsWrite))
 X(SYS_FILE_CREATE, (1ULL << ::duetos::core::kCapFsWrite))
 X(SYS_FILE_RENAME, (1ULL << ::duetos::core::kCapFsWrite))
+X(SYS_FILE_MKDIR, (1ULL << ::duetos::core::kCapFsWrite))
+X(SYS_FILE_SYMLINK, (1ULL << ::duetos::core::kCapFsWrite))
+X(SYS_FILE_LINK, (1ULL << ::duetos::core::kCapFsWrite))
+// SYS_FILE_READLINK is a read op but routes through the same fs::routing
+// path as the mutators; gate on kCapFsRead so a sandbox without read
+// privilege can't peek at link targets.
+X(SYS_FILE_READLINK, (1ULL << ::duetos::core::kCapFsRead))
 
 // kCapFsRead — read filesystem metadata / bytes.
 // SYS_FILE_OPEN intentionally omitted — open(O_CREAT) needs FsWrite

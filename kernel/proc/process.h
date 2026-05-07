@@ -531,6 +531,7 @@ struct Process
         None = 0, // slot is free
         Ramfs,
         Fat32,
+        DuetFs,
     };
     struct Win32FileHandle
     {
@@ -538,7 +539,16 @@ struct Process
         const fs::RamfsNode* ramfs_node; // valid iff kind == Ramfs
         u32 fat32_volume_idx;            // valid iff kind == Fat32
         fs::fat32::DirEntry fat32_entry; // valid iff kind == Fat32 (snapshot at open time)
-        u64 cursor;                      // current read position in bytes
+        // DuetFs-backed handle. `block_handle` indexes the kernel
+        // block-device table (or kBootHandleSentinel for the boot
+        // RAM volume); `node_id` is the resolved DuetFS inode id;
+        // `size_bytes` is captured at open time and refreshed on
+        // each WriteForProcess so SeekForProcess / FstatForProcess
+        // see the live size after appends.
+        u32 duetfs_block_handle; // valid iff kind == DuetFs
+        u32 duetfs_node_id;      // valid iff kind == DuetFs
+        u64 duetfs_size_bytes;   // valid iff kind == DuetFs
+        u64 cursor;              // current read position in bytes
         // Canary flag stamped at open / create time when the
         // resolved path matched `security::CanaryMatchesPath` or
         // `CanaryMatchesSuspiciousExtension`. Read on every

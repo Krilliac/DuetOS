@@ -848,6 +848,18 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_FILE_RENAME:
         subsystems::win32::DoFileRename(frame);
         return;
+    case SYS_FILE_MKDIR:
+        subsystems::win32::DoFileMkdir(frame);
+        return;
+    case SYS_FILE_SYMLINK:
+        subsystems::win32::DoFileSymlink(frame);
+        return;
+    case SYS_FILE_LINK:
+        subsystems::win32::DoFileLink(frame);
+        return;
+    case SYS_FILE_READLINK:
+        subsystems::win32::DoFileReadlink(frame);
+        return;
 
     case SYS_PROCESS_TERMINATE:
     {
