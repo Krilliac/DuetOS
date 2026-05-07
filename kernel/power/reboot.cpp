@@ -2,6 +2,7 @@
 
 #include "acpi/acpi.h"
 #include "arch/x86_64/cpu.h"
+#include "diag/fix_journal.h"
 #include "log/klog.h"
 
 namespace duetos::core
@@ -91,6 +92,7 @@ void SpinShortDelay()
     // GAP: no ACPI S5 path — see header. Without AML we can't
     // evaluate _PTS / _S5_ to drive the chipset to soft-off, so
     // we log the request, mask interrupts, and park the CPU.
+    FIX_NOTE_GAP("power/reboot.cpp:KernelHalt", "implement ACPI S5 via AML _PTS/_S5_");
     Log(LogLevel::Warn, "core/halt", "shutdown requested (no ACPI S5; CPU halted)");
     asm volatile("cli");
     for (;;)

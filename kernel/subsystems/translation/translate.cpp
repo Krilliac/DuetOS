@@ -31,6 +31,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/traps.h"
+#include "diag/fix_journal.h"
 #include "log/klog.h"
 #include "proc/process.h"
 #include "util/random.h"
@@ -367,6 +368,7 @@ i64 TranslateStatfs(arch::TrapFrame* f)
 // returning zeros.
 i64 TranslateDeliberateEnosys(arch::TrapFrame* /*f*/)
 {
+    FIX_NOTE_GAP("translate.cpp:DeliberateEnosys", "decide if any caller actually needs this syscall");
     return -38;
 }
 
@@ -378,6 +380,7 @@ i64 TranslateDeliberateEnosys(arch::TrapFrame* /*f*/)
 // rseq slot lands and a workload genuinely benefits from it.
 i64 TranslateRseq(arch::TrapFrame* /*f*/)
 {
+    FIX_NOTE_GAP("translate.cpp:TranslateRseq", "wire per-CPU rseq slot");
     // -ENOSYS is also what no-translation produces; the
     // difference is this one is DELIBERATE — we've considered
     // rseq and decided not to wire it up. Log as such.

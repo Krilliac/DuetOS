@@ -9,6 +9,7 @@
 #include "drivers/gpu/amd_gpu.h"
 
 #include "arch/x86_64/serial.h"
+#include "diag/fix_journal.h"
 #include "drivers/pci/pci.h"
 #include "log/klog.h"
 #include "mm/dma.h"
@@ -121,6 +122,7 @@ void Probe(GpuInfo& g)
     // / CP_RB0_CNTL with our ring physical address + log2 size,
     // then signals the SMU to wake the GFX engine. None of those
     // dependencies are wired up in v0.
+    FIX_NOTE_STUB("drivers/gpu/amd_gpu.cpp:CP_RB0", "wire MEC firmware load + CP ring submit");
     mm::FreeDmaCoherent(ring);
 
     return ::duetos::core::Err{::duetos::core::ErrorCode::Unsupported};

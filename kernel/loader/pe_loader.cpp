@@ -53,6 +53,7 @@
 #include "subsystems/win32/proc_env.h"
 #include "subsystems/win32/thunks.h"
 #include "diag/cleanroom_trace.h"
+#include "diag/fix_journal.h"
 #include "diag/kdbg.h"
 #include "log/klog.h"
 #include "loader/pe_exports.h"
@@ -1302,6 +1303,41 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
                                              : "unknown import -> catch-all NO-OP";
                 core::LogWithString(core::LogLevel::Warn, "pe-resolve", msg, "fn", fn_name);
                 core::LogWithString(core::LogLevel::Warn, "pe-resolve", "  from", "dll", dll_name);
+                // Record the gap. Build "<dll>!<fn>" into a 40-byte
+                // source_pin so the reviewer can grep the journal
+                // for "ntdll!Nt..." or "kernel32!Csr...". `data_named`
+                // is excluded — those resolved to a real proc-env slot
+                // and aren't a gap. Skipped when the journal isn't
+                // initialised (very early boot, before kernel_main
+                // has called FixJournalInit; static allocator
+                // ordering should make that unreachable in practice).
+                if (!data_named)
+                {
+                    char pin[40];
+                    u64 p = 0;
+                    if (dll_name != nullptr)
+                    {
+                        while (p < 30 && dll_name[p] != '\0')
+                        {
+                            pin[p] = dll_name[p];
+                            ++p;
+                        }
+                    }
+                    if (p < 39)
+                        pin[p++] = '!';
+                    if (fn_name != nullptr)
+                    {
+                        u64 f = 0;
+                        while (p < 39 && fn_name[f] != '\0')
+                        {
+                            pin[p++] = fn_name[f++];
+                        }
+                    }
+                    pin[p] = '\0';
+                    (void)::duetos::diag::FixJournalRecord(::duetos::diag::FixDetector::UnmappedThunk, pin,
+                                                           is_data ? "implement data import" : "implement Win32 thunk",
+                                                           h.image_base, 0);
+                }
                 // Only FUNCTION catch-alls need an IAT-slot-name
                 // mapping in the miss-logger table — data imports
                 // aren't called, just dereferenced, and will never
@@ -1409,7 +1445,31 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     // windows-kill.exe; accepting + logging lets us see how
     // far they get before the first real gap.
     if (ps != PeStatus::Ok && ps != PeStatus::ImportsPresent && ps != PeStatus::TlsPresent)
+    {
+        // Journal the rejection so the reviewer sees which PE
+        // characteristics our v0 loader can't handle yet, even
+        // when the rejection is silent on the boot log. Pin
+        // format `loader/pe:<status>` groups by reject reason.
+        char pin[40];
+        const char* tag = "loader/pe:";
+        u64 p = 0;
+        while (p < 39 && tag[p] != '\0')
+        {
+            pin[p] = tag[p];
+            ++p;
+        }
+        const char* sn = PeStatusName(ps);
+        u64 i = 0;
+        while (p < 39 && sn[i] != '\0')
+        {
+            pin[p++] = sn[i++];
+        }
+        pin[p] = '\0';
+        (void)::duetos::diag::FixJournalRecord(::duetos::diag::FixDetector::LoaderReject, pin,
+                                               "implement PE feature or improve loader policy", static_cast<u64>(ps),
+                                               file_len);
         return r;
+    }
 
     using namespace duetos::mm;
     using arch::SerialWrite;
