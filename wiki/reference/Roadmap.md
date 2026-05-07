@@ -496,23 +496,19 @@ and the same on-disk auto-mount path. Image cap dropped from 128 MiB
 to 4 MiB to make room for the single-block CRC table; future slice
 extends. Next:
 
-1. **Read-time per-block CRC verification** — today fsck-only; flip
-   the read hot-path switch.
-2. **Multi-block CRC table** — restore the 32 MiB / 128 MiB image cap.
-3. **CoW + journal** — durability / crash safety on file data writes.
-4. **Userland syscall surface** — make DuetFS reachable from PE/ELF
+1. **Multi-block CRC table** — restore the 32 MiB / 128 MiB image cap.
+2. **CoW + journal** — durability / crash safety on file data writes.
+3. **Userland syscall surface** — make DuetFS reachable from PE/ELF
    binaries. Routes file open/read/write through the existing VFS,
    which already has `VfsBackend::DuetFs`.
-5. **Separate dirent table** — decouples hard-link names from the
+4. **Separate dirent table** — decouples hard-link names from the
    inode's `name` (today's v3 caveat).
-6. **Auto-symlink resolution in `lookup_path`** with cycle detection.
-7. **Indirect extents** — files needing > 8 extents.
-8. **Multi-block dirs + B-tree directory index** — bump the 1024-child cap.
-9. **Auto-mkfs of a blank disk via shell command** — `mkfs.duetfs /disks/<dev>`.
-10. **Free-on-shrink `truncate`** — today shrink keeps extent blocks allocated.
-11. **fsck deeper checks** — orphan-node sweep, `parent_id` cycle detection.
-12. **AES-XTS encryption + Argon2 KDF** — full-disk encryption tier.
-13. **LZ4 compression** — optional per-file compression.
+5. **Auto-symlink resolution in `lookup_path`** with cycle detection.
+6. **Indirect extents** — files needing > 8 extents.
+7. **Multi-block dirs + B-tree directory index** — bump the 1024-child cap.
+8. **Auto-mkfs of a blank disk via shell command** — `mkfs.duetfs /disks/<dev>`.
+9. **AES-XTS encryption + Argon2 KDF** — full-disk encryption tier.
+10. **LZ4 compression** — optional per-file compression.
 
 ---
 

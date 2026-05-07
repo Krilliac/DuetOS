@@ -54,6 +54,58 @@ void ExpectStatus(u32 got, u32 want, const char* what)
     }
 }
 
+u32 ReadLe32(const u8* p)
+{
+    return static_cast<u32>(p[0]) | (static_cast<u32>(p[1]) << 8) | (static_cast<u32>(p[2]) << 16)
+           | (static_cast<u32>(p[3]) << 24);
+}
+
+void WriteLe32(u8* p, u32 v)
+{
+    p[0] = static_cast<u8>(v & 0xFFu);
+    p[1] = static_cast<u8>((v >> 8) & 0xFFu);
+    p[2] = static_cast<u8>((v >> 16) & 0xFFu);
+    p[3] = static_cast<u8>((v >> 24) & 0xFFu);
+}
+
+constexpr u32 kNodeParentIdOffset = 20;
+
+u32 NodeFieldOffset(u32 node_id, u32 field_off)
+{
+    constexpr u32 kNodeTableLba = 3;
+    constexpr u32 kNodesPerBlock = kBlockSize / kNodeSize;
+    const u32 lba = kNodeTableLba + node_id / kNodesPerBlock;
+    return lba * kBlockSize + (node_id % kNodesPerBlock) * kNodeSize + field_off;
+}
+
+u32 ReadNodeField(const u8* image, u32 node_id, u32 field_off)
+{
+    return ReadLe32(image + NodeFieldOffset(node_id, field_off));
+}
+
+void WriteNodeField(u8* image, u32 node_id, u32 field_off, u32 v)
+{
+    WriteLe32(image + NodeFieldOffset(node_id, field_off), v);
+}
+
+u32 ReadNodeExtentCount(const u8* image, u32 node_id)
+{
+    constexpr u32 kNodeExtentCountOffset = 8;
+    return ReadNodeField(image, node_id, kNodeExtentCountOffset);
+}
+
+u32 ReadNodeExtentBlocks(const u8* image, u32 node_id, u32 extent_idx)
+{
+    constexpr u32 kNodeExtentsOffset = 32 + 64;
+    return ReadNodeField(image, node_id, kNodeExtentsOffset + extent_idx * 8 + 4);
+}
+
+u32 ReadNodeXattrLba(const u8* image, u32 node_id)
+{
+    constexpr u32 kNodeXattrExtentOffset = 32 + 64 + kMaxInlineExtents * 8;
+    return ReadNodeField(image, node_id, kNodeXattrExtentOffset);
+}
+
 // Boot RAM disk handle (set by DuetFsBoot, used by the VFS routing
 // vtable in mount.cpp). u32 max == "unmounted".
 constinit u32 g_boot_handle = 0xFFFFFFFFu;
@@ -285,6 +337,22 @@ void DuetFsSelfTest()
                  "post-truncate lookup failed");
     Expect(res.size_bytes == 8192, "post-truncate size wrong");
     ExpectStatus(duetfs_truncate(&scratch, hello_id, 4), kStatusOk, "shrink truncate failed");
+    Expect(ReadNodeExtentCount(g_scratch_image, hello_id) == 1, "shrink truncate retained extra extents");
+    Expect(ReadNodeExtentBlocks(g_scratch_image, hello_id, 0) == 1, "shrink truncate retained tail blocks");
+
+    // Re-grow across the just-freed range. Bytes beyond the 4-byte
+    // logical size must come back zero, not stale pre-shrink data.
+    ExpectStatus(duetfs_truncate(&scratch, hello_id, 8192), kStatusOk, "regrow truncate failed");
+    u8 zero_probe[32] = {};
+    usize zero_got = 0;
+    ExpectStatus(duetfs_read_file(&scratch, hello_id, 4, zero_probe, sizeof(zero_probe), &zero_got), kStatusOk,
+                 "read post-regrow zero range failed");
+    Expect(zero_got == sizeof(zero_probe), "post-regrow zero range short");
+    for (usize i = 0; i < sizeof(zero_probe); ++i)
+    {
+        Expect(zero_probe[i] == 0, "post-regrow exposed stale truncate bytes");
+    }
+    ExpectStatus(duetfs_truncate(&scratch, hello_id, 4), kStatusOk, "second shrink truncate failed");
 
     // 7. ".." rejection.
     Expect(duetfs_lookup(&scratch, reinterpret_cast<const u8*>("/.."), 4, &res) == kStatusInvalid,
@@ -334,6 +402,20 @@ void DuetFsSelfTest()
            "fsck bitmap reported issues on clean FS");
     Expect(rep.block_crc_mismatch == 0, "fsck found per-block CRC mismatch on clean FS");
     Expect(rep.link_count_mismatch == 0, "fsck found link_count drift on clean FS");
+    Expect(rep.orphan_nodes == 0, "fsck found orphan nodes on clean FS");
+
+    // Parent-id cycle detection. Corrupt /hello.txt's parent_id to
+    // point at itself; the root dir entry still reaches the node,
+    // so only the parent-chain walk catches this. Restore the field
+    // before continuing so the rest of the self-test stays clean.
+    WriteNodeField(g_scratch_image, hello_id, kNodeParentIdOffset, hello_id);
+    rep = FsckReport{};
+    ExpectStatus(duetfs_fsck(&scratch, /*repair=*/0u, &rep), kStatusOk, "fsck parent-cycle probe failed");
+    Expect(rep.orphan_nodes >= 1, "fsck missed parent_id cycle");
+    WriteNodeField(g_scratch_image, hello_id, kNodeParentIdOffset, kRootNodeId);
+    rep = FsckReport{};
+    ExpectStatus(duetfs_fsck(&scratch, /*repair=*/0u, &rep), kStatusOk, "fsck post-cycle-restore failed");
+    Expect(rep.orphan_nodes == 0, "fsck parent-cycle restore left orphan count");
 
     // 11. Symbolic link: create /linkme.txt pointing at /big.bin,
     //     read it back through readlink + lookup the symlink.
@@ -377,6 +459,8 @@ void DuetFsSelfTest()
     //     data block (the root dir's child-id block at LBA = data_lba)
     //     and run fsck — should report exactly one block_crc_mismatch.
     g_scratch_image[kDataLba * kBlockSize] ^= 0x01u; // data_lba = 15 in v5
+    Expect(duetfs_lookup(&scratch, reinterpret_cast<const u8*>("/hello.txt"), 11, &res) == kStatusCorrupt,
+           "read-time CRC check missed data-block corruption");
     rep = FsckReport{};
     ExpectStatus(duetfs_fsck(&scratch, /*repair=*/0u, &rep), kStatusOk, "fsck post-corrupt failed");
     Expect(rep.block_crc_mismatch >= 1, "fsck missed per-block CRC corruption");
@@ -726,6 +810,29 @@ void DuetFsSelfTest()
                      kStatusOk, "xattr_list failed");
         // Each name + 1 byte NUL.
         Expect(llen == acl_name_len + 1 + note_name_len + 1, "xattr_list size wrong");
+
+        // Corrupt the xattr block itself. All xattr consumers should
+        // return kStatusCorrupt before parsing or rewriting records.
+        const u32 xattr_lba = ReadNodeXattrLba(g_scratch_image, hello_id);
+        Expect(xattr_lba >= kDataLba, "xattr lba missing before corruption probe");
+        g_scratch_image[xattr_lba * kBlockSize] ^= 0x01u;
+        xlen = 0;
+        Expect(duetfs_xattr_get(&scratch, reinterpret_cast<const u8*>(xpath), 11,
+                                reinterpret_cast<const u8*>(acl_name), acl_name_len, xbuf, sizeof(xbuf),
+                                &xlen) == kStatusCorrupt,
+               "xattr_get accepted CRC-corrupted block");
+        llen = 0;
+        Expect(duetfs_xattr_list(&scratch, reinterpret_cast<const u8*>(xpath), 11, lbuf2, sizeof(lbuf2),
+                                 &llen) == kStatusCorrupt,
+               "xattr_list accepted CRC-corrupted block");
+        Expect(duetfs_xattr_set(&scratch, reinterpret_cast<const u8*>(xpath), 11,
+                                reinterpret_cast<const u8*>(note_name), note_name_len,
+                                reinterpret_cast<const u8*>(note_value), note_value_len) == kStatusCorrupt,
+               "xattr_set rewrote CRC-corrupted block");
+        Expect(duetfs_xattr_remove(&scratch, reinterpret_cast<const u8*>(xpath), 11,
+                                   reinterpret_cast<const u8*>(note_name), note_name_len) == kStatusCorrupt,
+               "xattr_remove rewrote CRC-corrupted block");
+        g_scratch_image[xattr_lba * kBlockSize] ^= 0x01u;
 
         // Remove note.
         ExpectStatus(duetfs_xattr_remove(&scratch, reinterpret_cast<const u8*>(xpath), 11,

@@ -48,7 +48,7 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         }
         let lba = node.xattr_extent.block;
         let mut block = [0u8; BLOCK_SIZE];
-        self.dev.read_block(lba, &mut block).map_err(|_| FsError::Io)?;
+        self.read_data_block(lba, &mut block)?;
         match find_record(&block, name)
         {
             Some((value_off, value_len)) => {
@@ -73,7 +73,7 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         }
         let lba = node.xattr_extent.block;
         let mut block = [0u8; BLOCK_SIZE];
-        self.dev.read_block(lba, &mut block).map_err(|_| FsError::Io)?;
+        self.read_data_block(lba, &mut block)?;
         let mut needed: usize = 0;
         let mut written: usize = 0;
         for_each_record(&block, |name_off, name_len, _value_off, _value_len| {
@@ -119,7 +119,7 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         }
         else
         {
-            self.dev.read_block(node.xattr_extent.block, &mut block).map_err(|_| FsError::Io)?;
+            self.read_data_block(node.xattr_extent.block, &mut block)?;
         }
         // Strip the existing entry (if any), then append the new
         // record before the terminator.
@@ -149,7 +149,7 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         }
         let lba = node.xattr_extent.block;
         let mut block = [0u8; BLOCK_SIZE];
-        self.dev.read_block(lba, &mut block).map_err(|_| FsError::Io)?;
+        self.read_data_block(lba, &mut block)?;
         let (new_block, found) = rewrite_with_remove(&block, name);
         if !found
         {

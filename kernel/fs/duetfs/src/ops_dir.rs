@@ -39,7 +39,7 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         }
         let lba = self.dir_block(dir)?;
         let mut block = [0u8; BLOCK_SIZE];
-        self.dev.read_block(lba, &mut block).map_err(|_| FsError::Io)?;
+        self.read_data_block(lba, &mut block)?;
         for i in 0..dir.child_count
         {
             let off = (i as usize) * 4;
@@ -68,7 +68,7 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         }
         let lba = self.dir_block(&dir)?;
         let mut block = [0u8; BLOCK_SIZE];
-        self.dev.read_block(lba, &mut block).map_err(|_| FsError::Io)?;
+        self.read_data_block(lba, &mut block)?;
         let off = (dir.child_count as usize) * 4;
         block[off..off + 4].copy_from_slice(&child_id.to_le_bytes());
         self.write_data_block(lba, &block)?;
@@ -83,7 +83,7 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         let mut dir = self.read_node(dir_id)?;
         let lba = self.dir_block(&dir)?;
         let mut block = [0u8; BLOCK_SIZE];
-        self.dev.read_block(lba, &mut block).map_err(|_| FsError::Io)?;
+        self.read_data_block(lba, &mut block)?;
         let mut found_at: Option<usize> = None;
         for i in 0..dir.child_count
         {

@@ -263,6 +263,26 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         Ok(())
     }
 
+    /// Read a *data* block (LBA >= data_lba) and verify its
+    /// per-block CRC before handing bytes to callers. fsck still
+    /// uses raw block reads so it can report and repair corruption
+    /// instead of being blocked by the first mismatch.
+    pub(crate) fn read_data_block(&self, lba: u32, dst: &mut [u8]) -> FsResult<()>
+    {
+        if lba < self.sb.data_lba || lba >= self.sb.total_blocks || dst.len() != BLOCK_SIZE
+        {
+            return Err(FsError::Invalid);
+        }
+        self.dev.read_block(lba, dst).map_err(|_| FsError::Io)?;
+        let want_crc = self.crc_table.get(lba).ok_or(FsError::Corrupt)?;
+        let got_crc = crc32(dst);
+        if want_crc != got_crc
+        {
+            return Err(FsError::Corrupt);
+        }
+        Ok(())
+    }
+
     /// Write a *data* block (LBA >= data_lba). Updates the CRC
     /// table in lockstep. Use this for every file/dir-children
     /// block write so fsck can verify integrity later.

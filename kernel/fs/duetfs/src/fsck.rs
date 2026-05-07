@@ -14,11 +14,12 @@ use crate::block_dev::BlockDevice;
 use crate::crc32::crc32;
 use crate::format::{
     BITMAP_LBA, BLOCK_SIZE, CRC_TABLE_LBA, JOURNAL_BLOCKS, JOURNAL_LBA, MAX_INLINE_EXTENTS,
-    NODE_KIND_DIR, NODE_KIND_FILE, NODE_KIND_SYMLINK, NODE_TABLE_BLOCKS, NODE_TABLE_LBA,
-    SNAPSHOT_BLOCKS, SNAPSHOT_LBA, SUPERBLOCK_LBA,
+    NODE_COUNT, NODE_KIND_DIR, NODE_KIND_FILE, NODE_KIND_SYMLINK, NODE_TABLE_BLOCKS,
+    NODE_TABLE_LBA, SNAPSHOT_BLOCKS, SNAPSHOT_LBA, SUPERBLOCK_LBA,
 };
 use crate::fs::{compute_sb_crc, Fs, FsError, FsResult};
 use crate::mkfs;
+use crate::ops_dir::DIR_MAX_CHILDREN;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -58,9 +59,79 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
             want.mark_used(SNAPSHOT_LBA + i);
         }
 
+        // Reachability from the root dir. This is intentionally
+        // separate from the bitmap rebuild below: repair does not
+        // recycle orphan nodes yet, so the allocator still treats
+        // their extents as pinned. The signal is explicit in
+        // report.orphan_nodes until a future repair slice can clear
+        // those nodes safely.
+        let mut reachable = [false; NODE_COUNT as usize];
+        let mut stack = [0u32; NODE_COUNT as usize];
+        let mut top: usize = 0;
+        if self.sb.root_node < self.sb.node_count && (self.sb.root_node as usize) < reachable.len()
+        {
+            reachable[self.sb.root_node as usize] = true;
+            stack[top] = self.sb.root_node;
+            top += 1;
+        }
+        while top > 0
+        {
+            top -= 1;
+            let id = stack[top];
+            let node = self.read_node(id)?;
+            if node.kind != NODE_KIND_DIR || node.child_count == 0
+            {
+                continue;
+            }
+            if node.child_count > DIR_MAX_CHILDREN
+            {
+                report.bad_extents += 1;
+            }
+            if node.extent_count == 0
+                || node.extents[0].blocks == 0
+                || node.extents[0].block < self.sb.data_lba
+                || node.extents[0].block >= self.sb.total_blocks
+            {
+                report.bad_extents += 1;
+                continue;
+            }
+            let lba = node.extents[0].block;
+            let mut block = [0u8; BLOCK_SIZE];
+            self.dev.read_block(lba, &mut block).map_err(|_| FsError::Io)?;
+            let child_count = node.child_count.min(DIR_MAX_CHILDREN);
+            for i in 0..child_count
+            {
+                let off = (i as usize) * 4;
+                let cid = u32::from_le_bytes([
+                    block[off], block[off + 1], block[off + 2], block[off + 3],
+                ]);
+                if cid >= self.sb.node_count || (cid as usize) >= reachable.len()
+                {
+                    report.bad_extents += 1;
+                    continue;
+                }
+                let child = self.read_node(cid)?;
+                if child.kind != NODE_KIND_FILE
+                    && child.kind != NODE_KIND_DIR
+                    && child.kind != NODE_KIND_SYMLINK
+                {
+                    continue;
+                }
+                if !reachable[cid as usize]
+                {
+                    reachable[cid as usize] = true;
+                    if top < stack.len()
+                    {
+                        stack[top] = cid;
+                        top += 1;
+                    }
+                }
+            }
+        }
+
         // Per-node refcount derived from dir entries (so we can
         // catch link_count drift).
-        let mut ref_count = [0u32; 64]; // NODE_COUNT in v3
+        let mut ref_count = [0u32; NODE_COUNT as usize];
 
         for id in 0..self.sb.node_count
         {
@@ -114,10 +185,23 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
             // ref counters.
             if node.kind == NODE_KIND_DIR && node.child_count > 0
             {
+                if node.child_count > DIR_MAX_CHILDREN
+                {
+                    report.bad_extents += 1;
+                }
+                if node.extent_count == 0
+                    || node.extents[0].blocks == 0
+                    || node.extents[0].block < self.sb.data_lba
+                    || node.extents[0].block >= self.sb.total_blocks
+                {
+                    report.bad_extents += 1;
+                    continue;
+                }
                 let lba = node.extents[0].block;
                 let mut block = [0u8; BLOCK_SIZE];
                 self.dev.read_block(lba, &mut block).map_err(|_| FsError::Io)?;
-                for i in 0..node.child_count
+                let child_count = node.child_count.min(DIR_MAX_CHILDREN);
+                for i in 0..child_count
                 {
                     let off = (i as usize) * 4;
                     let cid = u32::from_le_bytes([
@@ -132,8 +216,11 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         }
 
         // Re-walk: compare derived ref_count to each node's
-        // link_count. The root dir has link_count=1 (self-loop),
-        // not derived from any parent's child list, so skip it.
+        // link_count and flag nodes that are either unreachable from
+        // root or whose parent_id chain never reaches root (cycle,
+        // invalid parent, or non-dir parent). The root dir has
+        // link_count=1 (self-loop), not derived from any parent's
+        // child list, so skip it.
         for id in 0..self.sb.node_count
         {
             let node = self.read_node(id)?;
@@ -141,10 +228,43 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
             {
                 continue;
             }
+            if node.kind != NODE_KIND_FILE
+                && node.kind != NODE_KIND_DIR
+                && node.kind != NODE_KIND_SYMLINK
+            {
+                continue;
+            }
             let derived = ref_count[id as usize];
             if derived != node.link_count
             {
                 report.link_count_mismatch += 1;
+            }
+
+            let mut parent_ok = false;
+            let mut seen = [false; NODE_COUNT as usize];
+            let mut cur = node.parent_id;
+            for _ in 0..self.sb.node_count
+            {
+                if cur == self.sb.root_node
+                {
+                    parent_ok = true;
+                    break;
+                }
+                if cur >= self.sb.node_count || (cur as usize) >= seen.len() || seen[cur as usize]
+                {
+                    break;
+                }
+                seen[cur as usize] = true;
+                let parent = self.read_node(cur)?;
+                if parent.kind != NODE_KIND_DIR
+                {
+                    break;
+                }
+                cur = parent.parent_id;
+            }
+            if !reachable[id as usize] || !parent_ok
+            {
+                report.orphan_nodes += 1;
             }
         }
 
