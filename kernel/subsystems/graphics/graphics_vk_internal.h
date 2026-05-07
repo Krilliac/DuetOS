@@ -432,6 +432,24 @@ void PaintScanoutClear(VkImage image, VkClearColorValue color);
 VkResult AppendOp(VkCommandBuffer cb, const CmdRecord& op);
 void ReplayCommandBuffer(VkCommandBuffer cb);
 
+// One-shot logging dedupe across the ICD.  Each entry-point id
+// gets a single boot-log line the first time it's reached;
+// subsequent calls are silent.  Storage (the seen-bitmap) lives
+// in graphics_vk.cpp.
+enum EpId
+{
+    EpCreateInstance,
+    EpEnumeratePhysicalDevices,
+    EpCreateDevice,
+    EpQueueSubmit,
+    EpCreateShaderModule,
+    EpCreateGraphicsPipeline,
+    EpCreateImage,
+    EpClearColorImage,
+    EpCount
+};
+void LogOnce(EpId id, const char* name);
+
 // ----- counter accessors used by the boot self-test ----------------
 //
 // Same shape as before the header expanded — the selftest TU
