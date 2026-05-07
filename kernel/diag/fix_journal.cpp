@@ -309,6 +309,25 @@ u64 FixJournalSnapshot(FixRecord* out, u64 cap)
     return lim;
 }
 
+u64 FixJournalSnapshotPanicSafe(FixRecord* out, u64 cap)
+{
+    if (out == nullptr || cap == 0)
+        return 0;
+    // No lock acquire — a hard crash that trapped while the
+    // recorder held g_lock would otherwise deadlock here.
+    // Read the count word with a single load; treat as best
+    // effort. Cap to capacity in case g_used was torn mid-write.
+    u64 used = g_used;
+    if (used > kFixJournalCapacity)
+        used = kFixJournalCapacity;
+    const u64 lim = (cap < used) ? cap : used;
+    for (u64 i = 0; i < lim; ++i)
+    {
+        out[i] = g_ring[used - 1 - i];
+    }
+    return lim;
+}
+
 ::duetos::core::Result<void> FixJournalMarkAudited(u32 seq)
 {
     ::duetos::sync::SpinLockGuard guard(g_lock);

@@ -142,6 +142,15 @@ void FixJournalDrainTrapPending();
 /// `/proc/fixjournal` view use this; nobody else should.
 u64 FixJournalSnapshot(FixRecord* out, u64 cap);
 
+/// Lock-free snapshot for panic / trap context. Skips the
+/// `g_lock` acquire so a hard crash that interrupted a recorder
+/// mid-update doesn't deadlock. Tradeoff: a record being written
+/// concurrently (vanishingly rare in panic — IRQs disabled, other
+/// CPUs NMI-halted) may be read in a torn state. Readers of the
+/// resulting on-disk file MUST validate `magic == kFixRecordMagic`
+/// before trusting record contents; torn records get filtered.
+u64 FixJournalSnapshotPanicSafe(FixRecord* out, u64 cap);
+
 /// Set the audited bit on a record by sequence number. Returns
 /// `Err{NotFound}` if the seq isn't in the ring (either never
 /// existed or was overwritten by wrap). Used by `dfix mark-done`.

@@ -98,6 +98,7 @@ def read_records(path: str) -> tuple[int, list[FixRecord]]:
         )
     records: list[FixRecord] = []
     cursor = HEADER_FMT.size
+    torn = 0
     for _ in range(count):
         chunk = data[cursor : cursor + RECORD_STRIDE]
         (
@@ -114,10 +115,14 @@ def read_records(path: str) -> tuple[int, list[FixRecord]]:
             source_pin,
             hint,
         ) = RECORD_FMT.unpack(chunk)
+        # Bad magic on a record == torn write or out-of-bounds
+        # noise inside the reserved region (panic-context lock-free
+        # snapshot can produce these). Skip rather than abort —
+        # the rest of the file is still useful.
         if rmagic != RECORD_MAGIC:
-            raise ValueError(
-                f"{path}: record at offset {cursor} has bad magic 0x{rmagic:08x}"
-            )
+            torn += 1
+            cursor += RECORD_STRIDE
+            continue
         records.append(
             FixRecord(
                 seq=seq,
@@ -134,6 +139,8 @@ def read_records(path: str) -> tuple[int, list[FixRecord]]:
             )
         )
         cursor += RECORD_STRIDE
+    if torn:
+        print(f"# {path}: skipped {torn} torn record(s) (bad magic)", file=sys.stderr)
     return version, records
 
 

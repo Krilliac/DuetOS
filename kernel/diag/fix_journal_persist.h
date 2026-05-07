@@ -75,4 +75,17 @@ bool FixJournalPersistInstalled();
 /// to COM1. SKIP if no FAT32 mount.
 void FixJournalPersistSelfTest();
 
+/// Tier-3: write the live ring to the NVMe fix-journal-reserved
+/// LBA region. Safe from panic/trap context — no allocations, no
+/// scheduler dependencies, no klog. Same on-disk format as the
+/// FAT32 file (16-byte header + FixRecord stream). Cap is 2 MiB
+/// (half of the crash-dump reservation); fix-journal payloads are
+/// bounded at 128 KiB so this is comfortable.
+///
+/// Returns true if the write completed; false if NVMe is offline,
+/// the reserved region wasn't found, or the chunked write
+/// reported a partial completion. The boot log records the
+/// outcome via SerialWrite (klog isn't safe at panic).
+bool FixJournalPanicWriteToNvme();
+
 } // namespace duetos::diag

@@ -1081,13 +1081,52 @@ bool NvmePanicWriteDump(const u8* bytes, u64 len)
         g_panic_last_bytes = 0;
         return false;
     }
-    // Cap the write at the reserved region size so a runaway
-    // length argument doesn't escape the reservation. Anything
-    // longer is a caller bug; ship what fits and surface the
-    // truncation.
-    const u64 reserved_bytes = u64(kNvmeDumpReservedSectors) * g_ctrl.ns_sector_size;
+    // Cap the write at HALF the reserved region size — the fix
+    // journal owns the back half. Splitting at half lets both
+    // panic writers coexist without a new reservation entry in
+    // the partition table; minidump payloads at v0 are well
+    // under 2 MiB.
+    const u64 reserved_bytes = u64(kNvmeDumpReservedSectors / 2) * g_ctrl.ns_sector_size;
     const u64 capped_len = (len > reserved_bytes) ? reserved_bytes : len;
     const u64 written = PanicWriteChunked(lba, bytes, capped_len);
+    return written == len;
+}
+
+u64 NvmeFixJournalReservedLba()
+{
+    const u64 base = NvmeDumpReservedLba();
+    if (base == 0)
+        return 0;
+    // Second half of the reserved region. 8192 sectors total →
+    // 4096 sectors offset = 2 MiB into the reservation.
+    return base + (kNvmeDumpReservedSectors / 2);
+}
+
+bool NvmePanicWriteFixJournal(const u8* bytes, u64 len)
+{
+    if (!NvmeAvailable())
+    {
+        // Don't clobber the minidump's last_ok / last_bytes
+        // bookkeeping — those reflect the minidump path. The
+        // fix-journal write either lands or doesn't; the
+        // caller's bookkeeping is separate (FixJournalGetStats).
+        return false;
+    }
+    const u64 lba = NvmeFixJournalReservedLba();
+    if (lba == 0)
+    {
+        return false;
+    }
+    const u64 reserved_bytes = u64(kNvmeDumpReservedSectors / 2) * g_ctrl.ns_sector_size;
+    const u64 capped_len = (len > reserved_bytes) ? reserved_bytes : len;
+    // PanicWriteChunked sets g_panic_last_*; we restore them so
+    // the minidump caller's view of NvmePanicWriteSucceededLast
+    // isn't disturbed by our piggyback write.
+    const bool prev_ok = g_panic_last_ok;
+    const u64 prev_bytes = g_panic_last_bytes;
+    const u64 written = PanicWriteChunked(lba, bytes, capped_len);
+    g_panic_last_ok = prev_ok;
+    g_panic_last_bytes = prev_bytes;
     return written == len;
 }
 

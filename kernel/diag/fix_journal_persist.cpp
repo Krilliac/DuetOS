@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "diag/fix_journal.h"
+#include "drivers/storage/nvme.h"
 #include "fs/fat32.h"
 #include "log/klog.h"
 
@@ -297,6 +298,69 @@ void FixJournalPersistSelfTest()
     }
 
     KLOG_INFO_V("smoke", "fix_journal_persist=ok records", static_cast<u64>(hdr.record_count));
+}
+
+namespace
+{
+
+// Panic-time scratch — same shape as the FAT32 file (header +
+// concatenated records), but assembled in BSS so the panic path
+// doesn't allocate. Sized to hold the worst-case ring snapshot
+// (1024 records * 128 B + 16 B header = 128 KiB + 16 B).
+constexpr u64 kPanicScratchBytes = sizeof(FixFileHeader) + kFixJournalCapacity * sizeof(FixRecord);
+u8 g_panic_scratch[kPanicScratchBytes] = {};
+
+} // namespace
+
+bool FixJournalPanicWriteToNvme()
+{
+    namespace stor = ::duetos::drivers::storage;
+    if (!stor::NvmeAvailable())
+    {
+        ::duetos::arch::SerialWrite("[fix-journal-persist] NVMe unavailable — skipping panic write\n");
+        return false;
+    }
+
+    // Lock-free snapshot — `FixJournalSnapshotPanicSafe` skips the
+    // SpinLock acquire so a hard crash that trapped inside a
+    // recorder (g_lock held on this CPU) doesn't self-deadlock.
+    // Other CPUs are NMI-halted by the time we land here, so a
+    // torn read across cores is also vanishingly rare. The reader
+    // (gen-fix-report.py) validates magic per record; torn rows
+    // get filtered.
+    FixRecord* records = reinterpret_cast<FixRecord*>(g_panic_scratch + sizeof(FixFileHeader));
+    const u64 n = FixJournalSnapshotPanicSafe(records, kFixJournalCapacity);
+
+    // Records arrive most-recent-first from FixJournalSnapshot;
+    // reverse in place so the on-disk file is oldest-first
+    // (matching the FAT32 sink's order). Two-pointer swap.
+    if (n > 1)
+    {
+        for (u64 i = 0, j = n - 1; i < j; ++i, --j)
+        {
+            const FixRecord tmp = records[i];
+            records[i] = records[j];
+            records[j] = tmp;
+        }
+    }
+
+    FixFileHeader* hdr = reinterpret_cast<FixFileHeader*>(g_panic_scratch);
+    hdr->magic = kFixFileMagic;
+    hdr->version = kFixFileVersion;
+    hdr->record_count = static_cast<u32>(n);
+    hdr->reserved = 0;
+
+    const u64 payload_bytes = sizeof(FixFileHeader) + n * sizeof(FixRecord);
+    const bool ok = stor::NvmePanicWriteFixJournal(g_panic_scratch, payload_bytes);
+    if (ok)
+    {
+        ::duetos::arch::SerialWrite("[fix-journal-persist] panic write -> NVMe ok\n");
+    }
+    else
+    {
+        ::duetos::arch::SerialWrite("[fix-journal-persist] panic write -> NVMe FAILED (partial or device error)\n");
+    }
+    return ok;
 }
 
 } // namespace duetos::diag

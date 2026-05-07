@@ -179,4 +179,17 @@ bool NvmePanicWriteSucceededLast();
 /// disk hits a write error part-way through.
 u64 NvmePanicLastWriteBytes();
 
+/// First LBA of the reserved fix-journal region — the second
+/// half of the crash-dump reservation. The minidump owns the
+/// first half (2 MiB at v0); the fix journal owns the back half.
+/// 0 if no namespace.
+u64 NvmeFixJournalReservedLba();
+
+/// Same contract as `NvmePanicWriteDump`, but writes to the
+/// second half of the reserved region — used by the panic path
+/// to durably persist the in-RAM fix journal before halting.
+/// Capped at half the reserved size (2 MiB at v0); fix journal
+/// payloads are bounded at 128 KiB so this is comfortable.
+bool NvmePanicWriteFixJournal(const u8* bytes, u64 len);
+
 } // namespace duetos::drivers::storage
