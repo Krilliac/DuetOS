@@ -5774,3 +5774,69 @@ doc helps future readers audit the trail.
   [`Win32-Surface-Status`](Win32-Surface-Status.md) is
   unaffected.
 
+## End-user app slate, batch 2 (2026-05-07)
+
+- **Decision:** ship a follow-up batch of usability features on
+  top of the apps that landed in the first slate:
+
+  1. **Calendar Shift+arrow day navigation** — plain arrows
+     keep their month / year semantics; Shift+arrows now step
+     the date selection ±1 day (left/right) or ±7 days (up/down).
+     `CalendarFeedArrow` grew a `modifiers` parameter (default
+     0). View follows the selection so the cell is always
+     visible. (`kernel/apps/calendar.cpp`.)
+
+  2. **Calendar event persistence** — `CalendarSave` /
+     `CalendarLoad` round-trip the event table to
+     `CALENDAR.TXT` on the FAT32 root. One line per event in
+     `YYYY-MM-DD\tEVENT\n` form; atomic save mirrors
+     `NotesSave`'s tmp + rename. Auto-loads at boot once
+     FAT32 is online. Bound to Ctrl+S / Ctrl+O when Calendar
+     is the active window. Persist self-test snapshots /
+     restores around a round-trip.
+
+  3. **Notes Ctrl+A + Ctrl+G** — select-all + goto-line.
+     `NotesSelectAll` anchors the selection at byte 0 with
+     the caret at end; `NotesGotoLine(N)` walks the buffer
+     counting newlines and parks the caret at line N's first
+     column (clamps for out-of-range targets). Ctrl+G opens
+     an InputBox; the callback parses + jumps.
+
+  4. **Help live filter** — Help-active-window consumes
+     printable ASCII into a 31-char case-insensitive
+     substring filter. Section headers survive when at
+     least one of their following rows matches, so the
+     filtered output stays grouped. Backspace pops; the
+     title line shows "TYPE TO FILTER" in dim until the
+     first key, then "FIND: <q>" in fg. No-match state
+     prints an explicit fallback line.
+
+  5. **ImageView '+' / '-' zoom** — keyboard equivalents of
+     the existing Ctrl+wheel zoom. Both grow / shrink the
+     window via `WindowResizeFromEdge`; FitThumbnail re-fits
+     on the next draw. '+' and '=' both bound (US layout
+     unshifted is '='); '-' and '_' both bound, matching the
+     same convention every browser uses for its zoom keys.
+
+- **Why:** all five close concrete usability gaps a user
+  doing real everyday work hits within minutes — the calendar
+  was useless without persistence, Notes had find-and-replace
+  but no select-all, the Help table was too long to scan at
+  ~70 rows, and ImageView's zoom required the mouse.
+
+- **What was rejected per slice:**
+  - Calendar event recurrence (weekly / monthly) — would
+    require a richer schema than `YYYY-MM-DD\tTEXT`. Defer
+    until a workload exposes the gap.
+  - Notes "save selection only" — selection model is single-
+    range; multi-cursor is the bigger lift if users need it.
+  - Help: section-header click to toggle collapse — needs a
+    per-section open/closed state. Defer.
+  - ImageView pan when zoomed past the window — current
+    FitThumbnail caps at source size; a real zoomed-pan model
+    is its own slice.
+
+- **Revisit when:** Process gains MemUsage(); FAT32 grows
+  mtime in DirEntry; multi-line InputBox lands; recurring
+  events become a real workload.
+
