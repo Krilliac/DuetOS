@@ -29,9 +29,11 @@ inline constexpr u32 kRootNodeId = 0;
 
 /// Magic identifying a DuetFS superblock — bytes "DuetFS01"
 /// little-endian (byte 0 = 'D' = 0x44, byte 7 = '1' = 0x31).
-/// Magic stayed across v1→v7; only the version field bumps.
+/// Magic stayed across v1→v8; only the version field bumps.
 inline constexpr u64 kMagic = 0x3130534674657544ull;
-inline constexpr u32 kVersion = 7; // v7 (snapshots / CoW)
+inline constexpr u32 kVersion = 8; // v8 (xattrs / ACLs)
+inline constexpr u32 kXattrNameMax = 255;
+inline constexpr u32 kXattrValueMax = 1024;
 inline constexpr u32 kJournalLba = 7;
 inline constexpr u32 kJournalBlocks = 8;
 inline constexpr u32 kSnapshotLba = 15;
@@ -268,6 +270,29 @@ extern "C"
     /// Snapshot presence. 0 = absent, 1 = present, 0xFFFFFFFFu =
     /// read error / corrupt SB.
     u32 duetfs_snapshot_present(const Device* dev);
+
+    /// Set / replace `name`'s value on the node at `path`. Allocates
+    /// the per-node xattr block on first set; rewrites in place on
+    /// subsequent calls. `name_len` <= kXattrNameMax (255);
+    /// `value_len` <= kXattrValueMax (1024). Use a name like
+    /// "system.posix_acl_access" for an ACL.
+    u32 duetfs_xattr_set(const Device* dev, const u8* path, usize path_max, const u8* name, usize name_len,
+                         const u8* value, usize value_len);
+
+    /// Read `name`'s value on the node at `path` into `dst`. Writes
+    /// the full value length to `*out_len` (may exceed `dst_max` —
+    /// caller probes for size by passing a 0-byte dst).
+    u32 duetfs_xattr_get(const Device* dev, const u8* path, usize path_max, const u8* name, usize name_len, u8* dst,
+                         usize dst_max, usize* out_len);
+
+    /// List xattr names on the node at `path` as a NUL-separated
+    /// stream in `dst`. Writes the bytes-needed to `*out_len`.
+    u32 duetfs_xattr_list(const Device* dev, const u8* path, usize path_max, u8* dst, usize dst_max, usize* out_len);
+
+    /// Remove `name`'s entry on the node at `path`. Returns
+    /// kStatusNotFound if no such xattr exists; frees the xattr
+    /// block if the last entry is removed.
+    u32 duetfs_xattr_remove(const Device* dev, const u8* path, usize path_max, const u8* name, usize name_len);
 }
 
 } // namespace duetos::fs::duetfs

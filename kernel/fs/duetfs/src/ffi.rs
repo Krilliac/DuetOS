@@ -776,6 +776,156 @@ pub unsafe extern "C" fn duetfs_snapshot_restore(desc: *const DuetFsDevice) -> c
     }
 }
 
+// ----------------------------------------------------------------
+// xattr FFI — v8. Per-node extended attributes. Path-addressed; the
+// kernel C++ side sees the same FFI shape as setxattr(2) / getxattr
+// / listxattr / removexattr.
+// ----------------------------------------------------------------
+
+/// Set / replace `name`'s value on the node at `path`. Allocates
+/// the per-node xattr block on first set; rewrites in place after.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_xattr_set(
+    desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize, name: *const c_uchar,
+    name_len: usize, value: *const u8, value_len: usize,
+) -> c_uint
+{
+    if name.is_null() || name_len == 0
+    {
+        return STATUS_INVALID;
+    }
+    if value.is_null() && value_len != 0
+    {
+        return STATUS_INVALID;
+    }
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else { return STATUS_INVALID };
+    let mut fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
+    let target = match fs.lookup_path(path_bytes) { Ok(r) => r, Err(e) => return err_to_status(e) };
+    let name_bytes = unsafe { core::slice::from_raw_parts(name, name_len) };
+    let value_bytes = if value_len == 0
+    {
+        &[] as &[u8]
+    }
+    else
+    {
+        unsafe { core::slice::from_raw_parts(value, value_len) }
+    };
+    match fs.xattr_set(target.node_id, name_bytes, value_bytes)
+    {
+        Ok(()) => STATUS_OK,
+        Err(e) => err_to_status(e),
+    }
+}
+
+/// Read `name`'s value on the node at `path` into `dst`. Writes the
+/// full value length (which may exceed `dst_max`) to `*out_len`.
+/// Caller treats `*out_len > dst_max` as "buffer too small".
+/// Returns kStatusOk on hit, kStatusNotFound on no such xattr.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_xattr_get(
+    desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize, name: *const c_uchar,
+    name_len: usize, dst: *mut u8, dst_max: usize, out_len: *mut usize,
+) -> c_uint
+{
+    if !out_len.is_null()
+    {
+        unsafe { *out_len = 0 };
+    }
+    if name.is_null() || name_len == 0
+    {
+        return STATUS_INVALID;
+    }
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else { return STATUS_INVALID };
+    let fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
+    let target = match fs.lookup_path(path_bytes) { Ok(r) => r, Err(e) => return err_to_status(e) };
+    let name_bytes = unsafe { core::slice::from_raw_parts(name, name_len) };
+    // dst can be empty for a probe call ("how big is the buffer I need?").
+    let dst_slice = if dst.is_null() || dst_max == 0
+    {
+        &mut [] as &mut [u8]
+    }
+    else
+    {
+        unsafe { core::slice::from_raw_parts_mut(dst, dst_max) }
+    };
+    match fs.xattr_get(target.node_id, name_bytes, dst_slice)
+    {
+        Ok(n) => {
+            if !out_len.is_null()
+            {
+                unsafe { *out_len = n };
+            }
+            STATUS_OK
+        }
+        Err(e) => err_to_status(e),
+    }
+}
+
+/// List xattr names on the node at `path` as a NUL-separated stream
+/// in `dst`. Writes the total bytes-needed to `*out_len`. Caller
+/// treats `*out_len > dst_max` as "buffer too small".
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_xattr_list(
+    desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize, dst: *mut u8,
+    dst_max: usize, out_len: *mut usize,
+) -> c_uint
+{
+    if !out_len.is_null()
+    {
+        unsafe { *out_len = 0 };
+    }
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else { return STATUS_INVALID };
+    let fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
+    let target = match fs.lookup_path(path_bytes) { Ok(r) => r, Err(e) => return err_to_status(e) };
+    let dst_slice = if dst.is_null() || dst_max == 0
+    {
+        &mut [] as &mut [u8]
+    }
+    else
+    {
+        unsafe { core::slice::from_raw_parts_mut(dst, dst_max) }
+    };
+    match fs.xattr_list(target.node_id, dst_slice)
+    {
+        Ok(n) => {
+            if !out_len.is_null()
+            {
+                unsafe { *out_len = n };
+            }
+            STATUS_OK
+        }
+        Err(e) => err_to_status(e),
+    }
+}
+
+/// Remove `name`'s entry on the node at `path`. Frees the xattr
+/// block if the last entry is removed. Returns kStatusNotFound when
+/// no such xattr exists.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_xattr_remove(
+    desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize, name: *const c_uchar,
+    name_len: usize,
+) -> c_uint
+{
+    if name.is_null() || name_len == 0
+    {
+        return STATUS_INVALID;
+    }
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else { return STATUS_INVALID };
+    let mut fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
+    let target = match fs.lookup_path(path_bytes) { Ok(r) => r, Err(e) => return err_to_status(e) };
+    let name_bytes = unsafe { core::slice::from_raw_parts(name, name_len) };
+    match fs.xattr_remove(target.node_id, name_bytes)
+    {
+        Ok(()) => STATUS_OK,
+        Err(e) => err_to_status(e),
+    }
+}
+
 /// Snapshot presence. 0 = absent, 1 = present, 0xFFFFFFFFu = read
 /// error / corrupt SB.
 #[no_mangle]

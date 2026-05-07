@@ -85,7 +85,15 @@ pub const MAX_TOTAL_BLOCKS: u32 = CRC_TABLE_ENTRIES;
 pub const BITMAP_BITS: u32 = (BLOCK_SIZE as u32) * 8;
 
 pub const MAGIC: u64 = u64::from_le_bytes(*b"DuetFS01");
-pub const VERSION: u32 = 7;
+pub const VERSION: u32 = 8;
+
+// xattr — v8. Each node gets at most one xattr block (4 KiB) of
+// total xattr storage. The block holds a stream of
+// (name_len: u16, value_len: u16, name_bytes, value_bytes) records,
+// terminated by a name_len of 0. Empty names are forbidden by
+// the FFI so the terminator never collides with a real entry.
+pub const XATTR_NAME_MAX: usize = 255;
+pub const XATTR_VALUE_MAX: usize = 1024;
 
 // Encryption — v6. The volume is either fully encrypted or fully
 // unencrypted; per-file encryption isn't on the roadmap. Block 0
@@ -177,7 +185,12 @@ pub struct Node
     pub reserved: u32,
     pub name: [u8; NAME_MAX],
     pub extents: [Extent; MAX_INLINE_EXTENTS],
-    pub pad: [u8; NODE_SIZE - 32 - NAME_MAX - 8 * MAX_INLINE_EXTENTS],
+    /// v8 — single xattr block for this node. `xattr_extent.blocks ==
+    /// 0` means no xattrs. The block holds a stream of
+    /// (name_len: u16, value_len: u16, name_bytes, value_bytes)
+    /// records terminated by name_len == 0.
+    pub xattr_extent: Extent,
+    pub pad: [u8; NODE_SIZE - 32 - NAME_MAX - 8 * MAX_INLINE_EXTENTS - 8],
 }
 
 const _: () = assert!(core::mem::size_of::<Node>() == NODE_SIZE);
@@ -198,7 +211,8 @@ impl Node
             reserved: 0,
             name: [0u8; NAME_MAX],
             extents: [Extent { block: 0, blocks: 0 }; MAX_INLINE_EXTENTS],
-            pad: [0u8; NODE_SIZE - 32 - NAME_MAX - 8 * MAX_INLINE_EXTENTS],
+            xattr_extent: Extent { block: 0, blocks: 0 },
+            pad: [0u8; NODE_SIZE - 32 - NAME_MAX - 8 * MAX_INLINE_EXTENTS - 8],
         }
     }
 

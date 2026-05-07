@@ -643,7 +643,79 @@ void DuetFsSelfTest()
         Expect(BytesEqual(snap_buf, "pre-snapshot", sizeof(pre_payload) - 1), "post-restore content wrong");
     }
 
-    KLOG_INFO("duetfs/selftest", "OK — v7 snapshots + LZ4 + AES-XTS + Argon2 + journal + CRC passed");
+    // 21. xattr / ACL round-trip on /hello.txt.
+    //     a. Set system.posix_acl_access (mock 8-byte ACL payload).
+    //     b. Set user.note (variable-length).
+    //     c. Get + verify each.
+    //     d. List names and verify both appear.
+    //     e. Remove user.note, verify list shrinks.
+    //     f. Probe a missing xattr (kStatusNotFound).
+    {
+        const char* xpath = "/hello.txt";
+        const u8 acl_value[8] = {0x02, 0x00, 0x00, 0x00, 0x07, 0x00, 0xFF, 0xFF};
+        const char* acl_name = "system.posix_acl_access";
+        const usize acl_name_len = 23;
+        const char* note_name = "user.note";
+        const usize note_name_len = 9;
+        const char note_value[] = "the quick brown fox";
+        const usize note_value_len = sizeof(note_value) - 1;
+
+        ExpectStatus(duetfs_xattr_set(&scratch, reinterpret_cast<const u8*>(xpath), 11,
+                                      reinterpret_cast<const u8*>(acl_name), acl_name_len, acl_value,
+                                      sizeof(acl_value)),
+                     kStatusOk, "xattr_set acl failed");
+        ExpectStatus(duetfs_xattr_set(&scratch, reinterpret_cast<const u8*>(xpath), 11,
+                                      reinterpret_cast<const u8*>(note_name), note_name_len,
+                                      reinterpret_cast<const u8*>(note_value), note_value_len),
+                     kStatusOk, "xattr_set note failed");
+
+        // Get acl.
+        u8 xbuf[64] = {};
+        usize xlen = 0;
+        ExpectStatus(duetfs_xattr_get(&scratch, reinterpret_cast<const u8*>(xpath), 11,
+                                      reinterpret_cast<const u8*>(acl_name), acl_name_len, xbuf, sizeof(xbuf), &xlen),
+                     kStatusOk, "xattr_get acl failed");
+        Expect(xlen == sizeof(acl_value), "xattr acl wrong size");
+        for (usize i = 0; i < sizeof(acl_value); ++i)
+        {
+            Expect(xbuf[i] == acl_value[i], "xattr acl content mismatch");
+        }
+
+        // Get note.
+        for (usize i = 0; i < sizeof(xbuf); ++i)
+            xbuf[i] = 0;
+        ExpectStatus(duetfs_xattr_get(&scratch, reinterpret_cast<const u8*>(xpath), 11,
+                                      reinterpret_cast<const u8*>(note_name), note_name_len, xbuf, sizeof(xbuf), &xlen),
+                     kStatusOk, "xattr_get note failed");
+        Expect(xlen == note_value_len, "xattr note wrong size");
+        Expect(BytesEqual(xbuf, note_value, note_value_len), "xattr note content mismatch");
+
+        // List — both names, NUL-separated.
+        u8 lbuf2[128] = {};
+        usize llen = 0;
+        ExpectStatus(duetfs_xattr_list(&scratch, reinterpret_cast<const u8*>(xpath), 11, lbuf2, sizeof(lbuf2), &llen),
+                     kStatusOk, "xattr_list failed");
+        // Each name + 1 byte NUL.
+        Expect(llen == acl_name_len + 1 + note_name_len + 1, "xattr_list size wrong");
+
+        // Remove note.
+        ExpectStatus(duetfs_xattr_remove(&scratch, reinterpret_cast<const u8*>(xpath), 11,
+                                         reinterpret_cast<const u8*>(note_name), note_name_len),
+                     kStatusOk, "xattr_remove note failed");
+        // Re-list — only acl now.
+        llen = 0;
+        ExpectStatus(duetfs_xattr_list(&scratch, reinterpret_cast<const u8*>(xpath), 11, lbuf2, sizeof(lbuf2), &llen),
+                     kStatusOk, "xattr_list post-remove failed");
+        Expect(llen == acl_name_len + 1, "xattr_list post-remove size wrong");
+
+        // Probe missing xattr.
+        Expect(duetfs_xattr_get(&scratch, reinterpret_cast<const u8*>(xpath), 11,
+                                reinterpret_cast<const u8*>(note_name), note_name_len, xbuf, sizeof(xbuf),
+                                &xlen) == kStatusNotFound,
+               "xattr_get of removed name returned ok");
+    }
+
+    KLOG_INFO("duetfs/selftest", "OK — v8 xattrs + snapshots + LZ4 + AES-XTS + Argon2 + journal + CRC passed");
 }
 
 } // namespace duetos::fs::duetfs

@@ -253,6 +253,13 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
                 self.free_run(e.block, e.blocks)?;
             }
         }
+        // v8 — also free the per-node xattr block. The unlink path
+        // already calls this before recycling the node, so a node
+        // with xattrs released cleanly never leaks the block.
+        if node.xattr_extent.blocks > 0 && node.xattr_extent.block != 0
+        {
+            self.free_run(node.xattr_extent.block, node.xattr_extent.blocks)?;
+        }
         Ok(())
     }
 
