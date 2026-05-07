@@ -189,6 +189,7 @@
 #include "ipc/handle_table.h"
 #include "diag/event_trace.h"
 #include "diag/fault_react.h"
+#include "diag/fix_journal.h"
 #include "diag/gdb_server.h"
 #include "diag/minidump.h"
 #include "diag/perf_profile.h"
@@ -1507,6 +1508,17 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // Win32 stub miss, kernel #PF) are armed-log by default so
     // the first boot shows activity without any arming.
     duetos::debug::ProbeInit();
+
+    // Fix journal — observe-and-record gap detector. Recorders
+    // must be live BEFORE the syscall surface starts taking real
+    // calls so an unknown syscall on the first ring3 spawn lands
+    // a record. Init zeroes the .bss ring and resets stats; the
+    // selftest synthesizes one record per detector kind and
+    // verifies dedup + mark-done. Per Design-Decision #016 this
+    // is observe-only; nothing in the journal mutates kernel
+    // state.
+    duetos::diag::FixJournalInit();
+    DUETOS_BOOT_SELFTEST(duetos::diag::FixJournalSelfTest());
 
     // Phase::Drivers — framebuffer is the only "driver" with a
     // self-test that fits the registry shape today; PCI/NVMe/USB

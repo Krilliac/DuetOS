@@ -102,6 +102,17 @@ enum class ProbeId : u8
     // attributable count (handles + slots + over-budget ticks).
     kLeakAttributable,
 
+    // Fix journal — fires from `diag::FixJournalRecord` when a
+    // brand-new (detector, source_pin) pair is interned (NOT on
+    // dedup hits, so a long-running boot that re-hits the same
+    // gap stays quiet). ArmedLog by default so a clean boot tells
+    // the operator how many unique gaps were observed and an
+    // attached GDB can `b duetos::debug::ProbeFire` to break on
+    // each new gap. The packed value carries the FixDetector in
+    // the low byte and the assigned sequence number in the
+    // high 32 bits (seq << 32 | detector).
+    kFixJournaled,
+
     kCount, // sentinel
 };
 

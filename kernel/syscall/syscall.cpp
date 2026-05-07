@@ -96,6 +96,7 @@
 #include "log/klog.h"
 #include "diag/cleanroom_trace.h"
 #include "diag/event_trace.h"
+#include "diag/fix_journal.h"
 #include "diag/log_names.h"
 #include "proc/process.h"
 #include "proc/ring3_smoke.h"
@@ -3536,6 +3537,42 @@ void SyscallDispatch(arch::TrapFrame* frame)
         {
             frame->rax = static_cast<u64>(t.rv);
             return;
+        }
+        // Record the gap in the fix journal before logging — dedup
+        // collapses repeat hits of the same number, so a workload
+        // calling syscall 999 in a tight loop generates one record
+        // not thousands. The reviewer wants to know which numbers
+        // are getting hit, with a sample caller rip for triage.
+        {
+            // Encode the syscall number into source_pin so dedup
+            // groups by (UnknownSyscall, num). 24 chars max is
+            // plenty for "syscall#" + a 16-digit hex.
+            char pin[32];
+            const char* hex = "0123456789abcdef";
+            pin[0] = 's';
+            pin[1] = 'y';
+            pin[2] = 's';
+            pin[3] = 'c';
+            pin[4] = 'a';
+            pin[5] = 'l';
+            pin[6] = 'l';
+            pin[7] = '#';
+            u64 n = num;
+            // Render up to 16 hex nibbles; trim leading zeros.
+            char raw[16];
+            for (int i = 15; i >= 0; --i)
+            {
+                raw[i] = hex[(n >> (i * 4)) & 0xF];
+            }
+            int first = 0;
+            while (first < 15 && raw[first] == '0')
+                ++first;
+            int p = 8;
+            for (int i = first; i < 16; ++i)
+                pin[p++] = raw[i];
+            pin[p] = '\0';
+            (void)::duetos::diag::FixJournalRecord(::duetos::diag::FixDetector::UnknownSyscall, pin,
+                                                   "implement or route this syscall number", num, frame->rip);
         }
         ReportUnknownSyscall(num, frame->rip);
         // Convention: -1 back to the caller for a bad syscall number.
