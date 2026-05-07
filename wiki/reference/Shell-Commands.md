@@ -50,7 +50,7 @@ the dispatcher (`RequireAdmin`).
 | `about` | One-line project banner | |
 | `version` | DuetOS version string | |
 | `uname [-a]` | Kernel identity; `-a` prints arch + tick count | |
-| `uptime` | Seconds since the scheduler came online | |
+| `uptime` | Wall time, duration, session count, load averages | Unix-style one-line status |
 | `date` | Wall time + date from CMOS RTC | `HH:MM:SS YYYY-MM-DD` |
 | `cal` | Current month grid via the RTC | |
 | `whoami` | Active session user | "(no session)" if logged out |

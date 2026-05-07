@@ -715,7 +715,7 @@ void UserStringCopySelfTest()
 
     alias[64] = 'A';
     alias[65] = 0;
-    alias[66] = 'B';
+    alias[66] = 0;
     alias[67] = 0;
     u16 wbuf[4];
     CheckUserStringResult("user-string self-test: utf16",

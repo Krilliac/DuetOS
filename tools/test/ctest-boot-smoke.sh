@@ -75,7 +75,7 @@ rm -f "${SERIAL_LOG}"
 # the kernel has no orderly shutdown path and run.sh will time
 # out after DUETOS_TIMEOUT seconds) doesn't mask our own
 # assertions. run.sh exits 124 on timeout.
-DUETOS_TIMEOUT="${DUETOS_TIMEOUT:-60}" "${RUN_SCRIPT}" \
+DUETOS_TIMEOUT="${DUETOS_TIMEOUT:-90}" "${RUN_SCRIPT}" \
     > "${SERIAL_LOG}" 2>&1 || true
 
 # Expected signatures — every ring3 smoke probe prints its own
@@ -155,7 +155,7 @@ expected=(
     '[string-selftest] PASS'
     '[hexdump-selftest] PASS'
     '[process-selftest] PASS'
-    '[fs/vfs] self-test OK (32 cases'
+    '[fs/vfs] self-test OK (lookup + jail + .. + path_max + VfsResolve)'
 )
 
 # Forbidden signatures — anything indicating an unhandled

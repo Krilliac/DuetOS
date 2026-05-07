@@ -317,6 +317,15 @@ constexpr u8 kManTimeBytes[] = "TIME CMD..\n"
                                "  Runs through the full shell pipeline (alias / env /\n"
                                "  redirect all apply).\n";
 
+constexpr u8 kManUptimeBytes[] = "UPTIME\n"
+                                  "  Prints current wall time, scheduler uptime, active shell\n"
+                                  "  session count, and 1/5/15-minute load averages.\n"
+                                  "  Format follows the familiar Unix uptime shape.\n";
+
+constexpr u8 kManLoadavgBytes[] = "LOADAVG\n"
+                                  "  Prints scheduler 1/5/15-minute load averages, then\n"
+                                  "  instantaneous task totals and online CPU count.\n";
+
 constexpr u8 kManSourceBytes[] = "SOURCE PATH\n"
                                  "  Runs each line of PATH as a shell command.\n"
                                  "  Blank lines and lines starting with # are skipped.\n"
@@ -376,6 +385,8 @@ MAN_NODE("history", kManHistoryBytes);
 MAN_NODE("alias", kManAliasBytes);
 MAN_NODE("env", kManEnvBytes);
 MAN_NODE("time", kManTimeBytes);
+MAN_NODE("uptime", kManUptimeBytes);
+MAN_NODE("loadavg", kManLoadavgBytes);
 MAN_NODE("source", kManSourceBytes);
 
 #undef MAN_NODE
@@ -392,6 +403,8 @@ constinit const RamfsNode* const k_trusted_etc_man_children[] = {
     &k_man_kManAliasBytes,
     &k_man_kManEnvBytes,
     &k_man_kManTimeBytes,
+    &k_man_kManUptimeBytes,
+    &k_man_kManLoadavgBytes,
     &k_man_kManSourceBytes,
     nullptr,
 };

@@ -14,7 +14,7 @@
  *   about     — project banner
  *   version   — DuetOS version tag
  *   clear     — wipe the console and show a fresh prompt
- *   uptime    — seconds since the scheduler came online
+ *   uptime    — wall time, duration, session count, load averages
  *   date      — current wall time + date from the CMOS RTC
  *   windows   — list every registered window + alive flag
  *   echo ...  — print the remainder of the line
