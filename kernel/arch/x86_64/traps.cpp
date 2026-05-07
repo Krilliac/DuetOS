@@ -110,6 +110,21 @@ constinit u64 g_fault_reserved_bit = 0;     // page-table poison
 constinit u64 g_fault_gp = 0;               // #GP
 constinit u64 g_fault_ud = 0;               // #UD
 
+// Recursive-fault sentinel. Set the moment a halt-bound path
+// (this dispatcher's kernel-mode Panic outcome OR core::Panic /
+// core::PanicWithValue) crosses into its diagnostic phase; read
+// at every entry to those same paths. A second fault while the
+// first one is still printing flips this off the dispatcher's
+// happy path and into HaltOnRecursiveFault, which emits one raw-
+// serial line and halts — no DumpDiagnostics, no symbol resolve,
+// no stack walk. The dump-during-dump recursion is the single
+// failure mode this guards against. Volatile because the read on
+// the second CPU's recursive entry must not be hoisted, and a
+// plain atomic isn't worth the overhead — once set, the value
+// never goes back, and any ordering between two simultaneous
+// panickers is acceptable.
+volatile u32 g_panic_in_progress = 0;
+
 // Classify a page fault into a short mnemonic the dump header
 // can show prominently. `err` is the hardware-pushed error code
 // (Intel SDM Vol 3 Table 4-15); `cr2` is the faulting VA;
@@ -399,6 +414,32 @@ u64 IrqNestDepthRaw()
 void IrqNestDepthSet(u64 /*v*/)
 {
     // stub
+}
+
+bool PanicInProgress()
+{
+    return g_panic_in_progress != 0;
+}
+
+void PanicInProgressMark()
+{
+    g_panic_in_progress = 1;
+}
+
+void HaltOnRecursiveFault(u64 vector, u64 rip)
+{
+    // Anything we touch here can re-fault (we're already on a
+    // potentially-corrupt stack, possibly with broken page tables
+    // or a wild GS base). Stick to raw SerialWrite — the panic-
+    // mode flag set by the first dump path makes it bypass its
+    // spinlock — and skip every heavy primitive (symbol resolve,
+    // VA region tag, page walk). One line, then halt.
+    SerialWrite("\n[recursive-fault] vec=");
+    SerialWriteHex(vector);
+    SerialWrite(" rip=");
+    SerialWriteHex(rip);
+    SerialWrite(" — short-circuiting panic dump\n");
+    Halt();
 }
 
 extern "C" void TrapDispatch(TrapFrame* frame)
@@ -818,6 +859,20 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // human-readable banner. Anything before BEGIN / after END is
     // free-form prose; the bracketed region is the machine-extract
     // -able dump record.
+
+    // Recursive-fault short-circuit. If we're already inside a
+    // halt-bound dump (this dispatcher entered its Panic branch on
+    // a previous trap, or core::Panic was running its
+    // DumpDiagnostics when something faulted), every diagnostic we
+    // could run from here is itself running on a potentially-
+    // corrupt frame and risks re-faulting. Emit one raw-serial
+    // marker so the operator sees the recursion and halt — losing
+    // the second dump beats triple-faulting.
+    if (PanicInProgress())
+    {
+        HaltOnRecursiveFault(frame->vector, frame->rip);
+    }
+    PanicInProgressMark();
 
     // Publish the trap-frame state to the GDB stub so a future
     // attach (or a stop-at-fault GDB session) sees the real
