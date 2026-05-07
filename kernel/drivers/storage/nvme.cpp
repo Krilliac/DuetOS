@@ -33,6 +33,7 @@
 #include "diag/kdbg.h"
 #include "drivers/pci/pci.h"
 #include "drivers/storage/block.h"
+#include "fs/gpt.h"
 #include "log/klog.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
@@ -952,12 +953,26 @@ u64 PanicWriteChunked(u64 base_lba, const u8* bytes, u64 len)
 
     u64 written = 0;
     u64 cur_lba = base_lba;
-    // The reserved region's last LBA, beyond which a write would
-    // wrap into a different namespace area. Bail out early
-    // rather than corrupting the controller's normal addressable
-    // range.
-    const u64 reserved_first = NvmeNamespaceSectorCount() - kNvmeDumpReservedSectors;
-    const u64 reserved_last = NvmeNamespaceSectorCount();
+    // The reserved region's bounds, beyond which a write would
+    // wrap into a different namespace area. NvmeDumpReservedLba
+    // consults GPT for a recorded reservation; sector_count comes
+    // from the same source if GPT hit, otherwise falls back to
+    // kNvmeDumpReservedSectors at the namespace tail.
+    const u64 reserved_first = NvmeDumpReservedLba();
+    if (reserved_first == 0)
+    {
+        return 0;
+    }
+    u64 reserved_count = kNvmeDumpReservedSectors;
+    {
+        u64 gpt_first = 0;
+        u64 gpt_count = 0;
+        if (fs::gpt::GptFindCrashDumpRegion(g_ctrl.block_handle, &gpt_first, &gpt_count) && gpt_first == reserved_first)
+        {
+            reserved_count = gpt_count;
+        }
+    }
+    const u64 reserved_last = reserved_first + reserved_count;
     if (cur_lba < reserved_first || cur_lba >= reserved_last)
     {
         return 0;
@@ -1030,6 +1045,19 @@ u64 NvmeDumpReservedLba()
     if (!NvmeAvailable())
     {
         return 0;
+    }
+    // Prefer a GPT-recorded reservation when one exists. Disk-
+    // installer-laid partitions with kDuetCrashDumpTypeGuid pin
+    // the dump region explicitly so user data sitting at the
+    // namespace tail isn't trampled. Falls back to the legacy
+    // "last kNvmeDumpReservedSectors of namespace" reservation
+    // when no GPT entry has been laid (early-boot-only disks).
+    u64 gpt_first = 0;
+    u64 gpt_count = 0;
+    if (fs::gpt::GptFindCrashDumpRegion(g_ctrl.block_handle, &gpt_first, &gpt_count) &&
+        gpt_count >= kNvmeDumpReservedSectors)
+    {
+        return gpt_first;
     }
     if (g_ctrl.ns_sector_count <= kNvmeDumpReservedSectors)
     {

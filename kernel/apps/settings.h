@@ -128,4 +128,18 @@ void SettingsKeyboardInit();
 void SettingsMouseInit();
 void SettingsDateTimeInit();
 
+/// Keyboard typematic — rate / delay indices currently shown by
+/// the Keyboard sub-panel and pushed to the PS/2 controller. The
+/// indices are the raw values accepted by Ps2KeyboardSetTypematic
+/// (rate ∈ [0, 31], delay ∈ [0, 3]). Exposed so the session-
+/// restore subsystem can round-trip them through SESSION.CFG;
+/// the values otherwise reset to BIOS defaults at every boot.
+u8 KeyboardTypematicRateIdx();
+u8 KeyboardTypematicDelayIdx();
+
+/// Apply rate + delay together. Both are clamped to the legal
+/// ranges, then pushed to the controller via the same path the
+/// F/S/D/Q keys take. Idempotent. Used by SessionRestoreApply.
+void KeyboardSetTypematicIdx(u8 rate, u8 delay);
+
 } // namespace duetos::apps::settings

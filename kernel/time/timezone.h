@@ -14,8 +14,6 @@
  *   - No zoneinfo database. Just a bare integer.
  *   - No DST awareness. The user adjusts manually if their
  *     locale has DST.
- *   - No persistence across reboot. Settings change to UTC at
- *     every boot (matching CMOS RTC, which DuetOS reads as UTC).
  *   - The Linux subsystem's CLOCK_REALTIME path is unaffected —
  *     g_realtime_offset_ns lives in syscall_time.cpp and answers
  *     a different question ("kernel-wide wall-clock skew from

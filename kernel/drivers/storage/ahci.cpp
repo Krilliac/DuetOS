@@ -21,16 +21,17 @@
 #include "drivers/storage/ahci.h"
 
 #include "arch/x86_64/serial.h"
-#include "diag/kdbg.h"
-#include "log/klog.h"
 #include "core/panic.h"
+#include "diag/kdbg.h"
+#include "drivers/pci/pci.h"
+#include "drivers/storage/block.h"
+#include "fs/gpt.h"
+#include "log/klog.h"
 #include "mm/dma.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
 #include "mm/paging.h"
 #include "mm/zone.h"
-#include "drivers/pci/pci.h"
-#include "drivers/storage/block.h"
 
 namespace duetos::drivers::storage
 {
@@ -778,6 +779,178 @@ void AhciSelfTest()
         return;
     }
     SerialWrite("[ahci] self-test OK (LBA 0 read + 0x55AA signature present)\n");
+}
+
+// ---------------------------------------------------------------
+// Panic-time surface — mirrors NVMe's contract.
+// ---------------------------------------------------------------
+
+namespace
+{
+
+// Outcome of the most recent AhciPanicWriteDump call. Read by
+// the `lastdump` shell + the panic-path fallback chain.
+constinit bool g_panic_last_ok = false;
+constinit u64 g_panic_last_bytes = 0;
+
+// First online port — the panic path writes here. Recomputed on
+// every call (the port table can change across teardown / re-init).
+Port* PanicPrimaryPort()
+{
+    for (u32 i = 0; i < g_port_count; ++i)
+    {
+        if (g_ports[i].online && g_ports[i].block_handle != kBlockHandleInvalid)
+        {
+            return &g_ports[i];
+        }
+    }
+    return nullptr;
+}
+
+// Walk a byte buffer through BuildCmd + IssueSlot0 in chunks
+// of up to kMaxSectorsPerXfer sectors. No allocations, no log
+// emission on the hot path — safe to call from panic context.
+// Returns the number of bytes successfully landed; sets the
+// global ok flag.
+u64 PanicWriteChunked(Port& p, u64 base_lba, const u8* bytes, u64 len, u64 reserved_first, u64 reserved_last)
+{
+    g_panic_last_ok = false;
+    g_panic_last_bytes = 0;
+    if (bytes == nullptr || len == 0)
+    {
+        return 0;
+    }
+    if (base_lba < reserved_first || base_lba >= reserved_last)
+    {
+        return 0;
+    }
+    u64 written = 0;
+    u64 cur_lba = base_lba;
+    while (written < len)
+    {
+        const u64 chunk_bytes_raw = len - written;
+        const u32 chunk_bytes = chunk_bytes_raw > (kMaxSectorsPerXfer * kSectorSize)
+                                    ? (kMaxSectorsPerXfer * kSectorSize)
+                                    : static_cast<u32>(chunk_bytes_raw);
+        const u32 sectors = (chunk_bytes + kSectorSize - 1) / kSectorSize;
+        if (sectors == 0)
+        {
+            break;
+        }
+        if (cur_lba + sectors > reserved_last)
+        {
+            break;
+        }
+        // BuildCmd reads from `bytes + written` via PRD physical
+        // address. The caller buffer (typically minidump's BSS
+        // staging buffer) is direct-mapped in the kernel's address
+        // space, so VirtToPhys returns a valid PA.
+        const mm::PhysAddr buf_phys = mm::VirtToPhys(const_cast<u8*>(bytes + written));
+        if (buf_phys == 0)
+        {
+            g_panic_last_bytes = written;
+            return written;
+        }
+        BuildCmd(p, kAtaCmdWriteDmaExt, cur_lba, static_cast<u16>(sectors), buf_phys, sectors * kSectorSize,
+                 /*dir_write=*/true);
+        if (!IssueSlot0(p.regs))
+        {
+            g_panic_last_bytes = written;
+            return written;
+        }
+        written += chunk_bytes;
+        cur_lba += sectors;
+    }
+    g_panic_last_ok = (written == len);
+    g_panic_last_bytes = written;
+    return written;
+}
+
+} // namespace
+
+bool AhciAvailable()
+{
+    return PanicPrimaryPort() != nullptr;
+}
+
+u32 AhciNamespaceSectorSize()
+{
+    return AhciAvailable() ? kSectorSize : 0u;
+}
+
+u64 AhciNamespaceSectorCount()
+{
+    Port* p = PanicPrimaryPort();
+    return (p != nullptr) ? p->sector_count : 0ULL;
+}
+
+u64 AhciDumpReservedLba()
+{
+    Port* p = PanicPrimaryPort();
+    if (p == nullptr)
+    {
+        return 0;
+    }
+    // Prefer a GPT-recorded reservation when one exists. Same
+    // policy as NvmeDumpReservedLba — the legacy "tail of drive"
+    // path is a fallback for early-boot disks that haven't been
+    // partitioned yet.
+    u64 gpt_first = 0;
+    u64 gpt_count = 0;
+    if (fs::gpt::GptFindCrashDumpRegion(p->block_handle, &gpt_first, &gpt_count) &&
+        gpt_count >= kAhciDumpReservedSectors)
+    {
+        return gpt_first;
+    }
+    if (p->sector_count <= kAhciDumpReservedSectors)
+    {
+        return 0;
+    }
+    return p->sector_count - kAhciDumpReservedSectors;
+}
+
+bool AhciPanicWriteDump(const u8* bytes, u64 len)
+{
+    Port* p = PanicPrimaryPort();
+    if (p == nullptr)
+    {
+        g_panic_last_ok = false;
+        g_panic_last_bytes = 0;
+        return false;
+    }
+    const u64 base_lba = AhciDumpReservedLba();
+    if (base_lba == 0)
+    {
+        g_panic_last_ok = false;
+        g_panic_last_bytes = 0;
+        return false;
+    }
+    // Determine the reservation's extent so writes can't escape
+    // the recorded region. Mirror NvmeDumpReservedLba's policy.
+    u64 reserved_count = kAhciDumpReservedSectors;
+    {
+        u64 gpt_first = 0;
+        u64 gpt_count = 0;
+        if (fs::gpt::GptFindCrashDumpRegion(p->block_handle, &gpt_first, &gpt_count) && gpt_first == base_lba)
+        {
+            reserved_count = gpt_count;
+        }
+    }
+    const u64 reserved_last = base_lba + reserved_count;
+    const u64 reserved_bytes = reserved_count * kSectorSize;
+    const u64 capped_len = (len > reserved_bytes) ? reserved_bytes : len;
+    const u64 written = PanicWriteChunked(*p, base_lba, bytes, capped_len, base_lba, reserved_last);
+    return written == len;
+}
+
+bool AhciPanicWriteSucceededLast()
+{
+    return g_panic_last_ok;
+}
+
+u64 AhciPanicLastWriteBytes()
+{
+    return g_panic_last_bytes;
 }
 
 } // namespace duetos::drivers::storage

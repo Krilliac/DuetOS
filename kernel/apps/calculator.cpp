@@ -1148,4 +1148,20 @@ void CalculatorSelfTest()
                          : "[calc] self-test FAILED\n");
 }
 
+i64 CalculatorMemoryValue()
+{
+    return g_state.memory;
+}
+
+bool CalculatorMemorySet()
+{
+    return g_state.memory_set;
+}
+
+void CalculatorMemoryRestore(i64 value, bool set)
+{
+    g_state.memory = set ? value : 0;
+    g_state.memory_set = set;
+}
+
 } // namespace duetos::apps::calculator

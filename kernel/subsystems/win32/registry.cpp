@@ -607,6 +607,7 @@ i64 DoSetValue(arch::TrapFrame* frame)
             return kNtStatusInvalidParameter;
         }
     }
+    RegistryHiveSave();
     return kNtStatusSuccess;
 }
 
@@ -661,6 +662,7 @@ i64 DoDeleteValue(arch::TrapFrame* frame)
             sv->name[0] = '\0';
             sv->size = 0;
         }
+        RegistryHiveSave();
         return kNtStatusSuccess;
     }
     // No sidecar entry yet — see if the name resolves to a static
@@ -689,6 +691,7 @@ i64 DoDeleteValue(arch::TrapFrame* frame)
         tomb->tombstone = true;
         tomb->type = 0;
         tomb->size = 0;
+        RegistryHiveSave();
         return kNtStatusSuccess;
     }
     return kNtStatusObjectNameNotFound;
@@ -1210,5 +1213,119 @@ void RegistrySelfTest()
     arch::SerialWrite("[registry-selftest] PASS (4 terminal + 8 prefix keys, ci-lookup, concat-path, child walker, "
                       "max-lens)\n");
 }
+
+namespace detail
+{
+
+namespace
+{
+
+// Public-POD ↔ internal helper. Both sidecar storage caps are
+// guaranteed to fit the HiveSnapshot's path/name/data fields
+// (the public POD's cap is set to match registry.cpp's private
+// constants — see kSidecarPoolSize / sizes in registry.h).
+static_assert(kSidecarPoolSize == kSidecarValueCap, "registry.h kSidecarPoolSize must track kSidecarValueCap");
+
+void CopyAscii(char* dst, u32 cap, const char* src)
+{
+    if (cap == 0)
+    {
+        return;
+    }
+    u32 i = 0;
+    if (src != nullptr)
+    {
+        for (; i + 1 < cap && src[i] != '\0'; ++i)
+        {
+            dst[i] = src[i];
+        }
+    }
+    dst[i] = '\0';
+}
+
+} // namespace
+
+bool SidecarSnapshotAt(u32 idx, HiveSnapshot* out)
+{
+    if (out == nullptr || idx >= kSidecarValueCap)
+    {
+        return false;
+    }
+    const SidecarValue& sv = g_sidecar[idx];
+    out->active = sv.in_use;
+    out->tombstone = sv.tombstone;
+    out->root = (sv.key != nullptr) ? sv.key->root : 0ULL;
+    out->type = sv.type;
+    out->size = sv.size;
+    CopyAscii(out->path, sizeof(out->path), (sv.key != nullptr) ? sv.key->path : "");
+    CopyAscii(out->name, sizeof(out->name), sv.name);
+    const u32 dlen = (sv.size <= sizeof(out->data)) ? sv.size : static_cast<u32>(sizeof(out->data));
+    for (u32 i = 0; i < dlen; ++i)
+    {
+        out->data[i] = sv.data[i];
+    }
+    for (u32 i = dlen; i < sizeof(out->data); ++i)
+    {
+        out->data[i] = 0;
+    }
+    return true;
+}
+
+bool SidecarRestoreOne(const HiveSnapshot* in)
+{
+    if (in == nullptr || !in->active)
+    {
+        return false;
+    }
+    const RegKey* key = LookupKey(in->root, in->path);
+    if (key == nullptr)
+    {
+        // Hive references a key the current build doesn't ship.
+        // Forward-compat: silently skip rather than failing the
+        // whole load.
+        return false;
+    }
+    SidecarValue* sv = SidecarFind(key, in->name);
+    if (sv == nullptr)
+    {
+        sv = SidecarAlloc();
+        if (sv == nullptr)
+        {
+            return false;
+        }
+    }
+    sv->in_use = true;
+    sv->tombstone = in->tombstone;
+    sv->key = key;
+    sv->type = in->type;
+    sv->size = in->size;
+    u32 i = 0;
+    for (; i + 1 < kSidecarNameMax && in->name[i] != '\0'; ++i)
+    {
+        sv->name[i] = in->name[i];
+    }
+    sv->name[i] = '\0';
+    const u32 dlen = (in->size <= kSidecarDataMax) ? in->size : kSidecarDataMax;
+    for (u32 k = 0; k < dlen; ++k)
+    {
+        sv->data[k] = in->data[k];
+    }
+    return true;
+}
+
+void SidecarReset()
+{
+    for (u32 i = 0; i < kSidecarValueCap; ++i)
+    {
+        g_sidecar[i].in_use = false;
+        g_sidecar[i].tombstone = false;
+        g_sidecar[i].key = nullptr;
+        g_sidecar[i].name[0] = '\0';
+        g_sidecar[i].type = 0;
+        g_sidecar[i].size = 0;
+    }
+}
+
+} // namespace detail
 
 } // namespace duetos::subsystems::win32::registry
