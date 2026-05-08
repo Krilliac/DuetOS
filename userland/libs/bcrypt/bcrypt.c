@@ -18,9 +18,9 @@ typedef unsigned short wchar_t16;
 #define STATUS_NOT_FOUND 0xC0000225UL
 #define STATUS_INVALID_PARAMETER 0xC000000DUL
 
-/* SHA-256 reference. ~80 lines. Pre-allocated state lives in a
- * single static slot — single-threaded callers only, matches
- * the v0 bcrypt scope. */
+/* SHA-256 reference. ~80 lines. Hash state is stored per handle
+ * below so different Win32 threads can hash concurrently without
+ * trampling a process-global singleton. */
 typedef struct
 {
     unsigned int h[8];
@@ -880,9 +880,12 @@ static int IsAes(const wchar_t16* algid)
     return wstr_eq(algid, "AES");
 }
 
-/* Per-algorithm hash slot. Single-threaded callers only. The slot
- * union holds whichever digest is live; g_hash_kind selects the
- * dispatcher branch. */
+/* Hash/key handles are process-local tagged integers backed by small
+ * static slot pools. That keeps this freestanding DLL heap-free while
+ * allowing independent Win32 threads to hold different BCrypt objects
+ * concurrently. Operations on the SAME handle are still caller-serialized
+ * just like any mutable streaming hash/key object; operations on different
+ * handles never share digest/key state. */
 typedef enum
 {
     HK_NONE = 0,
@@ -901,28 +904,71 @@ typedef enum
 #define BCRYPT_ALG_AES ((HANDLE)0x2006)
 #define BCRYPT_ALG_GENERIC ((HANDLE)0x2000)
 
-#define BCRYPT_HASH_SHA256 ((HANDLE)0x3001)
-#define BCRYPT_HASH_SHA1 ((HANDLE)0x3002)
-#define BCRYPT_HASH_MD5 ((HANDLE)0x3003)
-#define BCRYPT_HASH_SHA384 ((HANDLE)0x3004)
-#define BCRYPT_HASH_SHA512 ((HANDLE)0x3005)
 #define BCRYPT_HASH_GENERIC ((HANDLE)0x3000)
 
-/* Symmetric-key handle bases. AES key handles are 0x4001..0x4FFF;
- * a key carries its expanded round-key schedule (240 bytes for
- * AES-256, fits AES-128's 176 too) plus the active chaining mode. */
-#define BCRYPT_KEY_AES ((HANDLE)0x4001)
+#define BCRYPT_HASH_HANDLE_BASE 0x30000000ULL
+#define BCRYPT_HASH_HANDLE_STRIDE 0x100ULL
+#define BCRYPT_KEY_HANDLE_BASE 0x40000000ULL
+#define BCRYPT_KEY_HANDLE_STRIDE 0x100ULL
 
-static Sha256 g_sha256_slot;
-static Sha1 g_sha1_slot;
-static Md5 g_md5_slot;
-static Sha512 g_sha384_slot;
-static Sha512 g_sha512_slot;
-static int g_sha256_in_use;
-static int g_sha1_in_use;
-static int g_md5_in_use;
-static int g_sha384_in_use;
-static int g_sha512_in_use;
+#define BCRYPT_MAX_HASH_SLOTS 16
+#define BCRYPT_MAX_AES_KEYS 8
+
+typedef struct
+{
+    volatile int in_use;
+    HashKind kind;
+    union
+    {
+        Sha256 sha256;
+        Sha1 sha1;
+        Md5 md5;
+        Sha512 sha512; /* SHA-384 and SHA-512 share the core. */
+    } u;
+} HashSlot;
+
+typedef struct
+{
+    volatile int in_use;
+    unsigned char round_keys[240];
+    int rounds;
+    unsigned int chain_mode;
+} AesKeySlot;
+
+static HashSlot g_hash_slots[BCRYPT_MAX_HASH_SLOTS];
+
+static HANDLE make_hash_handle(unsigned int slot, HashKind kind)
+{
+    return (HANDLE)(ULONG_PTR)(BCRYPT_HASH_HANDLE_BASE + ((ULONG_PTR)slot * BCRYPT_HASH_HANDLE_STRIDE) +
+                               (ULONG_PTR)kind);
+}
+
+static int decode_hash_handle(HANDLE h, unsigned int* slot_out, HashKind* kind_out)
+{
+    const ULONG_PTR v = (ULONG_PTR)h;
+    if (v < BCRYPT_HASH_HANDLE_BASE)
+        return 0;
+    const ULONG_PTR off = v - BCRYPT_HASH_HANDLE_BASE;
+    const unsigned int slot = (unsigned int)(off / BCRYPT_HASH_HANDLE_STRIDE);
+    const unsigned int kind = (unsigned int)(off % BCRYPT_HASH_HANDLE_STRIDE);
+    if (slot >= BCRYPT_MAX_HASH_SLOTS || kind == HK_NONE || kind > HK_SHA512)
+        return 0;
+    *slot_out = slot;
+    *kind_out = (HashKind)kind;
+    return 1;
+}
+
+static HashSlot* hash_slot_from_handle(HANDLE h, HashKind want)
+{
+    unsigned int slot = 0;
+    HashKind kind = HK_NONE;
+    if (!decode_hash_handle(h, &slot, &kind))
+        return 0;
+    HashSlot* s = &g_hash_slots[slot];
+    if (!s->in_use || s->kind != kind || (want != HK_NONE && kind != want))
+        return 0;
+    return s;
+}
 
 static unsigned int hash_size_for_alg(HANDLE alg)
 {
@@ -970,6 +1016,36 @@ __declspec(dllexport) NTSTATUS BCryptCloseAlgorithmProvider(HANDLE h, ULONG flag
     return STATUS_SUCCESS;
 }
 
+static HashKind hash_kind_for_alg(HANDLE alg)
+{
+    if (alg == BCRYPT_ALG_SHA256)
+        return HK_SHA256;
+    if (alg == BCRYPT_ALG_SHA1)
+        return HK_SHA1;
+    if (alg == BCRYPT_ALG_MD5)
+        return HK_MD5;
+    if (alg == BCRYPT_ALG_SHA384)
+        return HK_SHA384;
+    if (alg == BCRYPT_ALG_SHA512)
+        return HK_SHA512;
+    return HK_NONE;
+}
+
+static void hash_slot_init(HashSlot* slot, HashKind kind)
+{
+    slot->kind = kind;
+    if (kind == HK_SHA256)
+        Sha256Init(&slot->u.sha256);
+    else if (kind == HK_SHA384)
+        Sha384Init(&slot->u.sha512);
+    else if (kind == HK_SHA512)
+        Sha512Init(&slot->u.sha512);
+    else if (kind == HK_SHA1)
+        Sha1Init(&slot->u.sha1);
+    else if (kind == HK_MD5)
+        Md5Init(&slot->u.md5);
+}
+
 __declspec(dllexport) NTSTATUS BCryptCreateHash(HANDLE alg, HANDLE* hash, unsigned char* obj, ULONG obj_len,
                                                 unsigned char* secret, ULONG secret_len, ULONG flags)
 {
@@ -980,56 +1056,45 @@ __declspec(dllexport) NTSTATUS BCryptCreateHash(HANDLE alg, HANDLE* hash, unsign
     (void)flags;
     if (hash == 0)
         return STATUS_INVALID_PARAMETER;
-    if (alg == BCRYPT_ALG_SHA256)
-    {
-        Sha256Init(&g_sha256_slot);
-        g_sha256_in_use = 1;
-        *hash = BCRYPT_HASH_SHA256;
-    }
-    else if (alg == BCRYPT_ALG_SHA384)
-    {
-        Sha384Init(&g_sha384_slot);
-        g_sha384_in_use = 1;
-        *hash = BCRYPT_HASH_SHA384;
-    }
-    else if (alg == BCRYPT_ALG_SHA512)
-    {
-        Sha512Init(&g_sha512_slot);
-        g_sha512_in_use = 1;
-        *hash = BCRYPT_HASH_SHA512;
-    }
-    else if (alg == BCRYPT_ALG_SHA1)
-    {
-        Sha1Init(&g_sha1_slot);
-        g_sha1_in_use = 1;
-        *hash = BCRYPT_HASH_SHA1;
-    }
-    else if (alg == BCRYPT_ALG_MD5)
-    {
-        Md5Init(&g_md5_slot);
-        g_md5_in_use = 1;
-        *hash = BCRYPT_HASH_MD5;
-    }
-    else
+
+    const HashKind kind = hash_kind_for_alg(alg);
+    if (kind == HK_NONE)
     {
         *hash = BCRYPT_HASH_GENERIC;
+        return STATUS_SUCCESS;
     }
-    return STATUS_SUCCESS;
+
+    for (unsigned int i = 0; i < BCRYPT_MAX_HASH_SLOTS; ++i)
+    {
+        if (__sync_bool_compare_and_swap(&g_hash_slots[i].in_use, 0, 1))
+        {
+            hash_slot_init(&g_hash_slots[i], kind);
+            *hash = make_hash_handle(i, kind);
+            return STATUS_SUCCESS;
+        }
+    }
+
+    return STATUS_INVALID_PARAMETER;
 }
 
 __declspec(dllexport) NTSTATUS BCryptHashData(HANDLE h, unsigned char* in, ULONG len, ULONG flags)
 {
     (void)flags;
-    if (h == BCRYPT_HASH_SHA256 && g_sha256_in_use)
-        Sha256Update(&g_sha256_slot, in, len);
-    else if (h == BCRYPT_HASH_SHA384 && g_sha384_in_use)
-        Sha512Update(&g_sha384_slot, in, len);
-    else if (h == BCRYPT_HASH_SHA512 && g_sha512_in_use)
-        Sha512Update(&g_sha512_slot, in, len);
-    else if (h == BCRYPT_HASH_SHA1 && g_sha1_in_use)
-        Sha1Update(&g_sha1_slot, in, len);
-    else if (h == BCRYPT_HASH_MD5 && g_md5_in_use)
-        Md5Update(&g_md5_slot, in, len);
+    if (len != 0 && in == 0)
+        return STATUS_INVALID_PARAMETER;
+
+    HashSlot* slot = hash_slot_from_handle(h, HK_NONE);
+    if (slot == 0)
+        return (h == BCRYPT_HASH_GENERIC) ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+
+    if (slot->kind == HK_SHA256)
+        Sha256Update(&slot->u.sha256, in, len);
+    else if (slot->kind == HK_SHA384 || slot->kind == HK_SHA512)
+        Sha512Update(&slot->u.sha512, in, len);
+    else if (slot->kind == HK_SHA1)
+        Sha1Update(&slot->u.sha1, in, len);
+    else if (slot->kind == HK_MD5)
+        Md5Update(&slot->u.md5, in, len);
     return STATUS_SUCCESS;
 }
 
@@ -1038,73 +1103,64 @@ __declspec(dllexport) NTSTATUS BCryptFinishHash(HANDLE h, unsigned char* out, UL
     (void)flags;
     if (out == 0)
         return STATUS_INVALID_PARAMETER;
-    if (h == BCRYPT_HASH_SHA256 && g_sha256_in_use)
+
+    HashSlot* slot = hash_slot_from_handle(h, HK_NONE);
+    if (slot == 0)
     {
-        unsigned char tmp[32];
-        Sha256Final(&g_sha256_slot, tmp);
-        g_sha256_in_use = 0;
-        ULONG cap = (len < 32) ? len : 32;
-        for (ULONG i = 0; i < cap; ++i)
-            out[i] = tmp[i];
+        if (h != BCRYPT_HASH_GENERIC)
+            return STATUS_INVALID_PARAMETER;
+        for (ULONG i = 0; i < len; ++i)
+            out[i] = 0;
         return STATUS_SUCCESS;
     }
-    if (h == BCRYPT_HASH_SHA384 && g_sha384_in_use)
+
+    unsigned char tmp[64];
+    ULONG digest_len = 0;
+    if (slot->kind == HK_SHA256)
     {
-        unsigned char tmp[48];
-        Sha512Final(&g_sha384_slot, tmp, 48);
-        g_sha384_in_use = 0;
-        ULONG cap = (len < 48) ? len : 48;
-        for (ULONG i = 0; i < cap; ++i)
-            out[i] = tmp[i];
-        return STATUS_SUCCESS;
+        Sha256Final(&slot->u.sha256, tmp);
+        digest_len = 32;
     }
-    if (h == BCRYPT_HASH_SHA512 && g_sha512_in_use)
+    else if (slot->kind == HK_SHA384)
     {
-        unsigned char tmp[64];
-        Sha512Final(&g_sha512_slot, tmp, 64);
-        g_sha512_in_use = 0;
-        ULONG cap = (len < 64) ? len : 64;
-        for (ULONG i = 0; i < cap; ++i)
-            out[i] = tmp[i];
-        return STATUS_SUCCESS;
+        Sha512Final(&slot->u.sha512, tmp, 48);
+        digest_len = 48;
     }
-    if (h == BCRYPT_HASH_SHA1 && g_sha1_in_use)
+    else if (slot->kind == HK_SHA512)
     {
-        unsigned char tmp[20];
-        Sha1Final(&g_sha1_slot, tmp);
-        g_sha1_in_use = 0;
-        ULONG cap = (len < 20) ? len : 20;
-        for (ULONG i = 0; i < cap; ++i)
-            out[i] = tmp[i];
-        return STATUS_SUCCESS;
+        Sha512Final(&slot->u.sha512, tmp, 64);
+        digest_len = 64;
     }
-    if (h == BCRYPT_HASH_MD5 && g_md5_in_use)
+    else if (slot->kind == HK_SHA1)
     {
-        unsigned char tmp[16];
-        Md5Final(&g_md5_slot, tmp);
-        g_md5_in_use = 0;
-        ULONG cap = (len < 16) ? len : 16;
-        for (ULONG i = 0; i < cap; ++i)
-            out[i] = tmp[i];
-        return STATUS_SUCCESS;
+        Sha1Final(&slot->u.sha1, tmp);
+        digest_len = 20;
     }
-    for (ULONG i = 0; i < len; ++i)
-        out[i] = 0;
+    else if (slot->kind == HK_MD5)
+    {
+        Md5Final(&slot->u.md5, tmp);
+        digest_len = 16;
+    }
+
+    const ULONG cap = (len < digest_len) ? len : digest_len;
+    for (ULONG i = 0; i < cap; ++i)
+        out[i] = tmp[i];
+
+    slot->kind = HK_NONE;
+    __sync_synchronize();
+    slot->in_use = 0;
     return STATUS_SUCCESS;
 }
 
 __declspec(dllexport) NTSTATUS BCryptDestroyHash(HANDLE h)
 {
-    if (h == BCRYPT_HASH_SHA256)
-        g_sha256_in_use = 0;
-    else if (h == BCRYPT_HASH_SHA384)
-        g_sha384_in_use = 0;
-    else if (h == BCRYPT_HASH_SHA512)
-        g_sha512_in_use = 0;
-    else if (h == BCRYPT_HASH_SHA1)
-        g_sha1_in_use = 0;
-    else if (h == BCRYPT_HASH_MD5)
-        g_md5_in_use = 0;
+    HashSlot* slot = hash_slot_from_handle(h, HK_NONE);
+    if (slot != 0)
+    {
+        slot->kind = HK_NONE;
+        __sync_synchronize();
+        slot->in_use = 0;
+    }
     return STATUS_SUCCESS;
 }
 
@@ -1115,10 +1171,26 @@ __declspec(dllexport) NTSTATUS BCryptDestroyHash(HANDLE h)
 #define BCRYPT_CHAIN_CBC 0u
 #define BCRYPT_CHAIN_ECB 1u
 
-static unsigned char g_aes_round_keys[240]; // fits AES-256
-static int g_aes_rounds;                    // 10 (AES-128) or 14 (AES-256)
-static int g_aes_in_use;
-static unsigned int g_aes_chain_mode = BCRYPT_CHAIN_CBC;
+static AesKeySlot g_aes_keys[BCRYPT_MAX_AES_KEYS];
+
+static HANDLE make_key_handle(unsigned int slot)
+{
+    return (HANDLE)(ULONG_PTR)(BCRYPT_KEY_HANDLE_BASE + ((ULONG_PTR)slot * BCRYPT_KEY_HANDLE_STRIDE) + 1ULL);
+}
+
+static AesKeySlot* key_slot_from_handle(HANDLE h)
+{
+    const ULONG_PTR v = (ULONG_PTR)h;
+    if (v < BCRYPT_KEY_HANDLE_BASE)
+        return 0;
+    const ULONG_PTR off = v - BCRYPT_KEY_HANDLE_BASE;
+    const unsigned int slot = (unsigned int)(off / BCRYPT_KEY_HANDLE_STRIDE);
+    const unsigned int tag = (unsigned int)(off % BCRYPT_KEY_HANDLE_STRIDE);
+    if (slot >= BCRYPT_MAX_AES_KEYS || tag != 1)
+        return 0;
+    AesKeySlot* k = &g_aes_keys[slot];
+    return k->in_use ? k : 0;
+}
 
 __declspec(dllexport) NTSTATUS BCryptGenerateSymmetricKey(HANDLE alg, HANDLE* out_key, unsigned char* key_obj,
                                                           ULONG key_obj_len, unsigned char* secret, ULONG secret_len,
@@ -1133,16 +1205,30 @@ __declspec(dllexport) NTSTATUS BCryptGenerateSymmetricKey(HANDLE alg, HANDLE* ou
         return STATUS_INVALID_PARAMETER;
     if (secret_len != 16 && secret_len != 32)
         return STATUS_INVALID_PARAMETER;
-    g_aes_rounds = aes_key_expansion(secret, (unsigned int)secret_len, g_aes_round_keys);
-    g_aes_in_use = 1;
-    *out_key = BCRYPT_KEY_AES;
-    return STATUS_SUCCESS;
+
+    for (unsigned int i = 0; i < BCRYPT_MAX_AES_KEYS; ++i)
+    {
+        if (__sync_bool_compare_and_swap(&g_aes_keys[i].in_use, 0, 1))
+        {
+            AesKeySlot* slot = &g_aes_keys[i];
+            slot->rounds = aes_key_expansion(secret, (unsigned int)secret_len, slot->round_keys);
+            slot->chain_mode = BCRYPT_CHAIN_CBC;
+            *out_key = make_key_handle(i);
+            return STATUS_SUCCESS;
+        }
+    }
+
+    return STATUS_INVALID_PARAMETER;
 }
 
 __declspec(dllexport) NTSTATUS BCryptDestroyKey(HANDLE k)
 {
-    if (k == BCRYPT_KEY_AES)
-        g_aes_in_use = 0;
+    AesKeySlot* slot = key_slot_from_handle(k);
+    if (slot != 0)
+    {
+        __sync_synchronize();
+        slot->in_use = 0;
+    }
     return STATUS_SUCCESS;
 }
 
@@ -1154,15 +1240,16 @@ __declspec(dllexport) NTSTATUS BCryptSetProperty(HANDLE h, const wchar_t16* prop
         return STATUS_INVALID_PARAMETER;
     /* The only property we honour is the AES chaining mode. The
      * value is a UTF-16 string ("ChainingModeCBC" / "ECB"). */
-    if (h == BCRYPT_KEY_AES && wstr_eq(prop, "ChainingMode"))
+    AesKeySlot* slot = key_slot_from_handle(h);
+    if (slot != 0 && wstr_eq(prop, "ChainingMode"))
     {
         if (value == 0 || value_len < 2)
             return STATUS_INVALID_PARAMETER;
         const wchar_t16* w = (const wchar_t16*)value;
         if (wstr_eq(w, "ChainingModeECB"))
-            g_aes_chain_mode = BCRYPT_CHAIN_ECB;
+            slot->chain_mode = BCRYPT_CHAIN_ECB;
         else
-            g_aes_chain_mode = BCRYPT_CHAIN_CBC; // default + explicit "ChainingModeCBC"
+            slot->chain_mode = BCRYPT_CHAIN_CBC; // default + explicit "ChainingModeCBC"
         return STATUS_SUCCESS;
     }
     return STATUS_NOT_FOUND;
@@ -1176,7 +1263,8 @@ __declspec(dllexport) NTSTATUS BCryptEncrypt(HANDLE k, unsigned char* in, ULONG 
     (void)flags;
     if (used)
         *used = 0;
-    if (k != BCRYPT_KEY_AES || !g_aes_in_use)
+    AesKeySlot* key = key_slot_from_handle(k);
+    if (key == 0)
         return STATUS_INVALID_PARAMETER;
     if (in == 0)
         return STATUS_INVALID_PARAMETER;
@@ -1193,11 +1281,11 @@ __declspec(dllexport) NTSTATUS BCryptEncrypt(HANDLE k, unsigned char* in, ULONG 
     }
     if (out_len < in_len)
         return STATUS_INVALID_PARAMETER;
-    if (g_aes_chain_mode == BCRYPT_CHAIN_CBC)
+    if (key->chain_mode == BCRYPT_CHAIN_CBC)
     {
         if (iv == 0 || iv_len != 16)
             return STATUS_INVALID_PARAMETER;
-        aes_cbc_encrypt(in, in_len, g_aes_round_keys, g_aes_rounds, iv, out);
+        aes_cbc_encrypt(in, in_len, key->round_keys, key->rounds, iv, out);
     }
     else
     {
@@ -1206,7 +1294,7 @@ __declspec(dllexport) NTSTATUS BCryptEncrypt(HANDLE k, unsigned char* in, ULONG 
             unsigned char block[16];
             for (int i = 0; i < 16; ++i)
                 block[i] = in[off + i];
-            aes_encrypt_block(block, g_aes_round_keys, g_aes_rounds);
+            aes_encrypt_block(block, key->round_keys, key->rounds);
             for (int i = 0; i < 16; ++i)
                 out[off + i] = block[i];
         }
@@ -1224,7 +1312,8 @@ __declspec(dllexport) NTSTATUS BCryptDecrypt(HANDLE k, unsigned char* in, ULONG 
     (void)flags;
     if (used)
         *used = 0;
-    if (k != BCRYPT_KEY_AES || !g_aes_in_use)
+    AesKeySlot* key = key_slot_from_handle(k);
+    if (key == 0)
         return STATUS_INVALID_PARAMETER;
     if (in == 0)
         return STATUS_INVALID_PARAMETER;
@@ -1238,11 +1327,11 @@ __declspec(dllexport) NTSTATUS BCryptDecrypt(HANDLE k, unsigned char* in, ULONG 
     }
     if (out_len < in_len)
         return STATUS_INVALID_PARAMETER;
-    if (g_aes_chain_mode == BCRYPT_CHAIN_CBC)
+    if (key->chain_mode == BCRYPT_CHAIN_CBC)
     {
         if (iv == 0 || iv_len != 16)
             return STATUS_INVALID_PARAMETER;
-        aes_cbc_decrypt(in, in_len, g_aes_round_keys, g_aes_rounds, iv, out);
+        aes_cbc_decrypt(in, in_len, key->round_keys, key->rounds, iv, out);
     }
     else
     {
@@ -1251,7 +1340,7 @@ __declspec(dllexport) NTSTATUS BCryptDecrypt(HANDLE k, unsigned char* in, ULONG 
             unsigned char block[16];
             for (int i = 0; i < 16; ++i)
                 block[i] = in[off + i];
-            aes_decrypt_block(block, g_aes_round_keys, g_aes_rounds);
+            aes_decrypt_block(block, key->round_keys, key->rounds);
             for (int i = 0; i < 16; ++i)
                 out[off + i] = block[i];
         }
@@ -1271,24 +1360,30 @@ __declspec(dllexport) NTSTATUS BCryptGetProperty(HANDLE h, const wchar_t16* prop
     if (!prop)
         return STATUS_INVALID_PARAMETER;
     unsigned int sz = hash_size_for_alg(h);
-    if (sz == 0)
+    unsigned int hash_block_len = 64;
+    unsigned int object_len = (unsigned int)sizeof(HashSlot);
+    unsigned int slot = 0;
+    HashKind handle_kind = HK_NONE;
+    if (sz == 0 && decode_hash_handle(h, &slot, &handle_kind))
     {
-        if (h == BCRYPT_HASH_SHA256)
+        if (handle_kind == HK_SHA256)
             sz = 32;
-        else if (h == BCRYPT_HASH_SHA384)
+        else if (handle_kind == HK_SHA384)
             sz = 48;
-        else if (h == BCRYPT_HASH_SHA512)
+        else if (handle_kind == HK_SHA512)
             sz = 64;
-        else if (h == BCRYPT_HASH_SHA1)
+        else if (handle_kind == HK_SHA1)
             sz = 20;
-        else if (h == BCRYPT_HASH_MD5)
+        else if (handle_kind == HK_MD5)
             sz = 16;
     }
     /* SHA-384 / SHA-512 use a 1024-bit (128 B) block; everything else
-     * we ship is 512-bit (64 B). Object-length is sized for the worst
-     * case our slots actually hold. */
+     * we ship is 512-bit (64 B). Object-length reports the slot payload
+     * this heap-free implementation reserves per streaming hash. */
     const int is_sha512_family =
-        (h == BCRYPT_ALG_SHA384 || h == BCRYPT_ALG_SHA512 || h == BCRYPT_HASH_SHA384 || h == BCRYPT_HASH_SHA512);
+        (h == BCRYPT_ALG_SHA384 || h == BCRYPT_ALG_SHA512 || handle_kind == HK_SHA384 || handle_kind == HK_SHA512);
+    if (is_sha512_family)
+        hash_block_len = 128;
     if (wstr_eq(prop, "HashDigestLength"))
     {
         if (result_len)
@@ -1307,9 +1402,9 @@ __declspec(dllexport) NTSTATUS BCryptGetProperty(HANDLE h, const wchar_t16* prop
     {
         unsigned int v;
         if (wstr_eq(prop, "BlockLength"))
-            v = is_sha512_family ? 128 : 64;
+            v = hash_block_len;
         else
-            v = is_sha512_family ? (unsigned int)sizeof(Sha512) : (unsigned int)sizeof(Sha256);
+            v = object_len;
         if (result_len)
             *result_len = 4;
         if (!out)
