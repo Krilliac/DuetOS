@@ -27,8 +27,8 @@
  *   - Fractional seconds / nanoseconds beyond the second (the
  *     ISO 8601 string carries optional ".SSS" sub-second; we
  *     parse but don't preserve).
- *   - Time-zone offset parsing other than 'Z' (UTC). POSIX TZ
- *     string parsing is its own porting-candidates row.
+ *   - POSIX TZ rule-string parsing; numeric ISO 8601 offsets are
+ *     parsed and normalised to UTC DateTime values.
  *   - Pre-Gregorian (Julian-calendar) dates. The Fliegel algorithm
  *     extends the Gregorian calendar back to year -4713 (proleptic
  *     Gregorian) which is fine for any modern timestamp.
@@ -108,6 +108,7 @@ u32 FormatIso8601(const DateTime& dt, char* out, u32 out_cap);
 ///   - `YYYY-MM-DDTHH:MM:SS`           (assume Z)
 ///   - `YYYY-MM-DDTHH:MM:SSZ`
 ///   - `YYYY-MM-DDTHH:MM:SS.fffZ`      (fractional seconds parsed but not preserved)
+///   - `YYYY-MM-DDTHH:MM:SS+HH:MM`    (normalised to UTC; `-HH:MM` also accepted)
 ///   - Date-only `YYYY-MM-DD`          (time fields zeroed)
 ///
 /// `len` is the number of bytes available at `s` (the parser

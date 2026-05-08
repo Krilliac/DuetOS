@@ -204,6 +204,62 @@ bool ReadFixedDigits(const char* s, u32 n, u32& v)
     return true;
 }
 
+bool AddSecondsToDateTime(DateTime& dt, i64 delta_secs)
+{
+    const u64 jdn_u = JulianDayFromYmd(dt.year, dt.month, dt.day);
+    if (jdn_u == kJulianDayInvalid)
+        return false;
+
+    i64 total = i64(dt.hour) * 3600 + i64(dt.minute) * 60 + i64(dt.second) + delta_secs;
+    i64 day_delta = total / 86400;
+    i64 sec_in_day = total % 86400;
+    if (sec_in_day < 0)
+    {
+        sec_in_day += 86400;
+        --day_delta;
+    }
+
+    const i64 jdn = i64(jdn_u) + day_delta;
+    if (jdn < 0)
+        return false;
+
+    YmdFromJulianDay(u64(jdn), dt.year, dt.month, dt.day);
+    dt.hour = u8(sec_in_day / 3600);
+    dt.minute = u8((sec_in_day / 60) % 60);
+    dt.second = u8(sec_in_day % 60);
+    return true;
+}
+
+bool ParseTimezoneOffsetSeconds(const char* s, u32 len, u32 i, i64& offset_secs)
+{
+    offset_secs = 0;
+    if (i >= len)
+        return false;
+
+    if (s[i] == 'Z')
+        return i + 1 == len;
+
+    if (s[i] != '+' && s[i] != '-')
+        return false;
+    const i64 sign = (s[i] == '+') ? 1 : -1;
+    if (i + 6 != len)
+        return false;
+
+    u32 off_hh = 0;
+    u32 off_mm = 0;
+    if (!ReadFixedDigits(s + i + 1, 2, off_hh))
+        return false;
+    if (s[i + 3] != ':')
+        return false;
+    if (!ReadFixedDigits(s + i + 4, 2, off_mm))
+        return false;
+    if (off_hh > 23 || off_mm > 59)
+        return false;
+
+    offset_secs = sign * (i64(off_hh) * 3600 + i64(off_mm) * 60);
+    return true;
+}
+
 } // namespace
 
 bool ParseIso8601(const char* s, u32 len, DateTime& out)
@@ -275,9 +331,19 @@ bool ParseIso8601(const char* s, u32 len, DateTime& out)
     }
     if (i == len)
         return true;
-    if (s[i] == 'Z' && i + 1 == len)
+
+    i64 offset_secs = 0;
+    if (!ParseTimezoneOffsetSeconds(s, len, i, offset_secs))
+        return false;
+
+    if (offset_secs == 0)
         return true;
-    return false; // any other suffix (e.g. +HH:MM) is unimplemented in v0
+
+    // ISO 8601 offsets describe local time relative to UTC. Convert
+    // to the UTC instant represented by the existing DateTime shape:
+    // `14:00+02:00` becomes `12:00Z`, while `23:30-02:00` rolls
+    // forward into the next UTC day.
+    return AddSecondsToDateTime(out, -offset_secs);
 }
 
 void DateTimeSelfTest()
@@ -355,6 +421,21 @@ void DateTimeSelfTest()
         // Fractional seconds.
         KASSERT(ParseIso8601("2026-05-03T14:07:30.123Z", 24, out), "util/datetime", "frac-sec parse failed");
         KASSERT(out.second == 30, "util/datetime", "frac-sec second field wrong");
+        // Numeric UTC offsets are normalised into the UTC DateTime shape.
+        KASSERT(ParseIso8601("2026-05-03T14:07:30+02:30", 25, out), "util/datetime",
+                "positive tz-offset parse failed");
+        KASSERT(out.year == 2026 && out.month == 5 && out.day == 3 && out.hour == 11 && out.minute == 37 &&
+                    out.second == 30,
+                "util/datetime", "positive tz-offset normalisation wrong");
+        KASSERT(ParseIso8601("2026-05-03T23:30:00-02:00", 25, out), "util/datetime",
+                "negative tz-offset parse failed");
+        KASSERT(out.year == 2026 && out.month == 5 && out.day == 4 && out.hour == 1 && out.minute == 30 &&
+                    out.second == 0,
+                "util/datetime", "negative tz-offset day rollover wrong");
+        KASSERT(ParseIso8601("2026-01-01T00:15:00+01:00", 25, out), "util/datetime",
+                "year-boundary tz-offset parse failed");
+        KASSERT(out.year == 2025 && out.month == 12 && out.day == 31 && out.hour == 23 && out.minute == 15,
+                "util/datetime", "year-boundary tz-offset rollover wrong");
     }
     // ----- Unix epoch round-trips.
     {
@@ -397,9 +478,11 @@ void DateTimeSelfTest()
         KASSERT(!ParseIso8601("2025-02-29", 10, out), "util/datetime", "non-leap Feb 29 not rejected");
         // Bad separator.
         KASSERT(!ParseIso8601("2026/05/03", 10, out), "util/datetime", "slash separator not rejected");
-        // Trailing garbage.
-        KASSERT(!ParseIso8601("2026-05-03T14:07:30+02:00", 25, out), "util/datetime",
-                "tz offset not rejected (v0 supports Z only)");
+        // Malformed timezone offset.
+        KASSERT(!ParseIso8601("2026-05-03T14:07:30+24:00", 25, out), "util/datetime",
+                "tz offset hour=24 not rejected");
+        KASSERT(!ParseIso8601("2026-05-03T14:07:30+02", 22, out), "util/datetime",
+                "short tz offset not rejected");
         // Empty fractional digits.
         KASSERT(!ParseIso8601("2026-05-03T14:07:30.Z", 21, out), "util/datetime", "empty frac not rejected");
     }
