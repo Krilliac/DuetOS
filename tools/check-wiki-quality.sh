@@ -89,7 +89,7 @@ while IFS= read -r mdfile; do
     [ "$local_name" = "_Template.md" ] && continue
 
     # Count headings beyond the title
-    heading_count=$(grep -cE '^##[^#]' "$mdfile" 2>/dev/null)
+    heading_count=$(grep -cE '^##[^#]' "$mdfile" 2>/dev/null || true)
     heading_count=${heading_count:-0}
     if [ "$heading_count" -lt 2 ] 2>/dev/null; then
         log_warning "  $local_name has fewer than 2 second-level headings (looks like a stub)"
