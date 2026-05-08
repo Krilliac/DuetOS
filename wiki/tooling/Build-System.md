@@ -27,6 +27,28 @@ cmake --preset x86_64-kasan       # Debug + KASAN-equivalent (when wired)
 
 Presets live in `CMakePresets.json` at the repo root.
 
+## Local Preflight Tools
+
+Two repository-owned scripts cover the checks contributors most often
+need before opening a PR:
+
+```bash
+# Read-only dependency check for the compiler, linker, PE fixture,
+# ISO, and optional QEMU smoke-test toolchains.
+tools/dev/doctor.sh --build
+tools/dev/doctor.sh --live
+
+# Local CI-style gate. Defaults to doctor + wiki checks +
+# clang-format dry-run + CMake configure. Expensive steps are opt-in.
+tools/dev/check-local.sh
+tools/dev/check-local.sh --build --ctest
+tools/dev/check-local.sh --all
+```
+
+Use `--preset <name>` with `check-local.sh` to validate one of the
+non-default presets from `CMakePresets.json`. `--all` includes the QEMU
+smoke harness, so it needs the live-test packages listed below.
+
 ## Build
 
 ```bash
