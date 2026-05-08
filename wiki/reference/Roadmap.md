@@ -237,30 +237,27 @@ In rough priority:
 
 ### USB mouse — high-DPI 16-bit XY (parser + injector landed)
 
-- **Today:** descriptor-driven decoding is in tree.
-  `HidExtractMouseLayout` walks a HID report descriptor and
-  records per-field bit offsets / sizes / sign for X / Y /
-  Wheel / AC Pan / Button-mask + the optional Report ID byte.
-  `HidMouseInjectWithLayout` extracts each named field at the
-  recorded bit offset (8 / 12 / 16 bits — sign-extended for
-  signed axes) and injects a `MousePacket`. The xHCI polling
-  loop calls the layout-aware path when
-  `dev.hid_mouse_layout_valid`, otherwise falls back to the
-  existing boot-protocol `HidMouseInjectN`.
+- **Today:** descriptor-driven decoding is in tree and wired
+  into xHCI mouse bring-up. `HidExtractMouseLayout` walks a HID
+  report descriptor and records per-field bit offsets / sizes /
+  sign for X / Y / Wheel / AC Pan / Button-mask + the optional
+  Report ID byte. `ParseConfigForHidBoot` now captures the HID
+  class descriptor's Report descriptor length, and
+  `BringUpHidKeyboard` issues `GET_DESCRIPTOR(Report)`
+  (kDescTypeReport = 0x22) for boot mice before endpoint
+  configuration. On success, `dev.hid_mouse_layout` is populated
+  and the polling loop calls `HidMouseInjectWithLayout`; on
+  failure, it still falls back to boot-protocol `HidMouseInjectN`.
 - **Self-tested:** boot-keyboard / boot-mouse / a synthetic
   high-DPI 5-button + 16-bit-XY + wheel + AC-Pan descriptor
   all round-trip through `HidExtractMouseLayout` with the
-  expected bit offsets at boot.
-- **Remaining (gated on real hardware):** wire
-  `GET_DESCRIPTOR(Report)` (kDescTypeReport = 0x22) into
-  the HID enumeration step in `xhci_enum.cpp` so
-  `dev.hid_mouse_layout` is populated for real mice — today
-  the layout slot stays invalid and the polling loop uses
-  the boot-protocol fallback. The HID class descriptor
-  inside the Configuration tree carries the report-descriptor
-  length; the fetch is one extra `DoControlIn` call. Defer
-  until the test fleet includes a high-DPI mouse to verify
-  the byte-level decode.
+  expected bit offsets at boot. xHCI descriptor self-tests also
+  cover HID class-descriptor report-length extraction for mouse
+  and keyboard configuration trees.
+- **Remaining (gated on real hardware):** plug in a high-DPI USB
+  mouse and verify the device-supplied Report descriptor produces
+  the expected 12/16-bit X/Y layout, button mask, wheel, and AC
+  Pan fields on real interrupt-IN reports.
 - **Owner:** `kernel/drivers/usb/`.
 
 ### Multi-monitor / runtime resolution change

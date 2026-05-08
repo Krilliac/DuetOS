@@ -664,6 +664,7 @@ bool InitOne(const HostControllerInfo& h, ControllerInfo& out)
 void XhciInit()
 {
     KLOG_TRACE_SCOPE("drivers/usb/xhci", "XhciInit");
+    XhciDescriptorSelfTest();
     if (g_init_done)
         return;
     g_init_done = true;

@@ -98,7 +98,8 @@ inline constexpr u32 kConfigDescriptorHeaderBytes = 9; // bLength..wTotalLength 
 [[maybe_unused]] inline constexpr u8 kDescTypeConfig = 0x02;
 inline constexpr u8 kDescTypeInterface = 0x04;
 inline constexpr u8 kDescTypeEndpoint = 0x05;
-[[maybe_unused]] inline constexpr u8 kDescTypeHid = 0x21;
+inline constexpr u8 kDescTypeHid = 0x21;
+inline constexpr u8 kDescTypeReport = 0x22;
 
 // Interface class 3 = HID; subclass 1 = Boot Interface; protocol
 // 1 = Keyboard, 2 = Mouse.
@@ -284,16 +285,11 @@ struct DeviceState
     u8 hid_prev[8];           // keyboard: previous report (mouse is stateless on keys)
     u64 hid_outstanding_phys; // TRB phys addr we're waiting on, or 0
 
-    // Mouse-layout cache. Populated when GET_DESCRIPTOR(Report)
-    // succeeds + HidExtractMouseLayout returns valid; consumed by
-    // HidMouseInjectWithLayout in the polling loop. When
+    // Mouse-layout cache. Populated from GET_DESCRIPTOR(Report)
+    // during HID mouse bring-up when the Configuration tree's HID
+    // class descriptor advertises a Report descriptor length. When
     // `hid_mouse_layout_valid == false` the polling loop falls back
-    // to `HidMouseInjectN` (boot-protocol assumptions). GAP:
-    // GET_DESCRIPTOR(Report) fetch is not yet wired
-    // (kDescTypeReport = 0x22); revisit when a real high-DPI mouse
-    // exists in the test fleet — the parser side (this slice)
-    // already produces the right layout from a synthetic
-    // 16-bit-XY descriptor, so the wiring is a small follow-on.
+    // to `HidMouseInjectN` (boot-protocol assumptions).
     bool hid_mouse_layout_valid;
     hid::HidMouseLayout hid_mouse_layout;
 
@@ -418,6 +414,7 @@ bool TrbEventCacheTake(u64 trb_phys, u32* completion_code, u32* residual, u32* t
 // tree. Populates `port` fields iff a HID boot device is found.
 // Returns true on found.
 bool ParseConfigForHidBoot(const u8* buf, u32 len, PortRecord& port);
+void XhciDescriptorSelfTest();
 
 // =====================================================================
 // Input Context builders (xhci_context.cpp)

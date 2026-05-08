@@ -214,13 +214,45 @@ bool FetchAndParseConfig(Runtime& rt, PortRecord& port)
 }
 
 // ---------------------------------------------------------------
-// HID Boot Keyboard — SET_CONFIGURATION, Configure Endpoint,
+// HID Boot Keyboard / Mouse — SET_CONFIGURATION, optional Report
+// descriptor fetch, Configure Endpoint.
 
 
 bool SetConfiguration(Runtime& rt, DeviceState* dev, u8 config_value)
 {
     return DoControlNoData(rt, dev, /*bmRequestType=*/0x00, kUsbReqSetConfiguration, /*wValue=*/u16(config_value),
                            /*wIndex=*/0, "SET_CONFIGURATION");
+}
+
+bool FetchHidMouseReportLayout(Runtime& rt, DeviceState* dev, const PortRecord& port)
+{
+    if (dev == nullptr || !port.hid_mouse || port.hid_report_desc_length == 0)
+        return false;
+
+    u16 reportLen = port.hid_report_desc_length;
+    if (reportLen > mm::kPageSize)
+        reportLen = u16(mm::kPageSize);
+    for (u32 i = 0; i < reportLen; ++i)
+        dev->scratch_virt[i] = 0;
+
+    if (!DoControlIn(rt, dev, /*bmRequestType=*/0x81, kUsbReqGetDescriptor, u16(u16(kDescTypeReport) << 8),
+                     u16(port.hid_interface_num), reportLen, "GET_DESCRIPTOR(HID Report)"))
+        return false;
+
+    hid::HidMouseLayout layout{};
+    if (!hid::HidExtractMouseLayout(dev->scratch_virt, reportLen, &layout))
+        return false;
+
+    dev->hid_mouse_layout = layout;
+    dev->hid_mouse_layout_valid = true;
+    arch::SerialWrite("[xhci]   HID mouse report layout: iface=");
+    arch::SerialWriteHex(port.hid_interface_num);
+    arch::SerialWrite(" bytes=");
+    arch::SerialWriteHex(reportLen);
+    arch::SerialWrite(" report_bits=");
+    arch::SerialWriteHex(layout.report_size_bits);
+    arch::SerialWrite("\n");
+    return true;
 }
 
 
@@ -238,6 +270,13 @@ bool BringUpHidKeyboard(Runtime& rt, PortRecord& port)
     // SET_CONFIGURATION first so the HID interface is selected.
     if (!SetConfiguration(rt, dev, port.hid_config_value))
         return false;
+
+    // Boot-protocol mice still work without a Report descriptor,
+    // but high-DPI / extra-button devices need the layout-aware
+    // path. Failure is non-fatal: the polling loop falls back to
+    // HidMouseInjectN when hid_mouse_layout_valid remains false.
+    if (port.hid_mouse)
+        (void)FetchHidMouseReportLayout(rt, dev, port);
 
     // Allocate the transfer ring + report buffer.
     mm::PhysAddr ring_phys = 0;
