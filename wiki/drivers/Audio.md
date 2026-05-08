@@ -38,6 +38,11 @@ The HDA driver:
   CBL, LVI, FORMAT, and stream tag. `RUN` is **not** set —
   flipping it requires real BDL entries pointing at audio buffer
   pages, which lands in the audio-server slice.
+- Provides `hda::FindFirstOutputPath()` as the v0 routing
+  heuristic: prefer Speaker, then Headphone Out, then Line Out
+  from the jack inventory, and pair the selected pin with the
+  first DAC node walked on that codec. This is intentionally a
+  bootstrap selector, not a full codec-topology solver.
 
 `winmm!waveOutWrite` still returns success with a `// STUB:`
 marker because no audio server consumes the armed stream.

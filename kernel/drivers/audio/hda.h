@@ -1,6 +1,7 @@
 #pragma once
 
 #include "drivers/audio/audio.h"
+#include "drivers/audio/hda_jack.h"
 #include "util/result.h"
 #include "util/types.h"
 
@@ -181,7 +182,29 @@ struct BdlEntry
 /// "drive the speaker pin" pass 0x40.
 ::duetos::core::Result<void> CodecSetPinWidgetControl(const AudioControllerInfo& a, u8 codec, u8 node, u8 payload);
 
-/// Stitched output-path bring-up — issues the four verbs the codec
+/// Best-effort output routing tuple selected from the codec
+/// inventory. `codec`/`dac_node`/`pin_node` are suitable inputs
+/// for ConfigureOutputPath once a stream descriptor has been
+/// armed; `target` records whether the selector picked Speaker,
+/// HpOut, or LineOut.
+struct OutputPath
+{
+    u8 codec;
+    u8 dac_node;
+    u8 pin_node;
+    HdaDefaultDevice target;
+};
+
+/// Find the first output path the v0 codec walker can justify:
+/// prefer an internal speaker pin, then headphone-out, then
+/// line-out, and pair it with the first DAC node recorded on the
+/// same codec. This deliberately does not claim full topology
+/// solving; it is a safe bootstrap heuristic for system-beep /
+/// smoke playback until the codec graph walker parses mixer and
+/// selector chains.
+::duetos::core::Result<OutputPath> FindFirstOutputPath();
+
+/// Stitched output-path bring-up — issues the five verbs the codec
 /// needs to make a DAC drive a speaker pin in tandem with an HDA
 /// stream descriptor:
 ///
@@ -198,11 +221,10 @@ struct BdlEntry
 ///   5. SET_CONVERTER_STREAM_CHANNEL(dac_node, stream_tag, 0) —
 ///      bind the DAC to the controller's stream descriptor.
 ///
-/// The codec walker `WalkCodec` records DAC / pin counts but does
-/// not pick a path — caller supplies the `dac_node` and `pin_node`
-/// from operator policy or future "find first speaker pin"
-/// heuristics. v0 leaves path-selection to the audio shell; this
-/// helper is the verb-sequence facade so a future "play system
+/// Call FindFirstOutputPath() for the v0 bootstrap selector. A
+/// future graph solver will replace that heuristic with real
+/// DAC → mixer / selector → pin topology traversal; this helper
+/// remains the verb-sequence facade so a future "play system
 /// beep" driver doesn't have to know the order.
 ///
 /// Returns Ok on success, NotReady when the HDA controller hasn't
