@@ -11,6 +11,13 @@
 #include "string.h"
 #include "unistd.h"
 
+#define DUET_USER_TRAP_UNREACHABLE()                                                                                   \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        __asm__ volatile("ud2" ::: "memory");                                                                          \
+        __builtin_unreachable();                                                                                       \
+    } while (0)
+
 ssize_t write(int fd, const void* buf, size_t len)
 {
     long rv;
@@ -50,7 +57,7 @@ int getpid(void)
 void exit(int code)
 {
     __asm__ volatile("int $0x80" ::"a"(DUET_SYS_EXIT), "D"((long)code) : "rcx", "r11");
-    __builtin_unreachable();
+    DUET_USER_TRAP_UNREACHABLE();
 }
 
 /* String helpers. Inline implementations — every userland binary

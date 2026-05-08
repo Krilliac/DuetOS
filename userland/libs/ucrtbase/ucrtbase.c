@@ -25,6 +25,12 @@ typedef unsigned int UINT;
 typedef unsigned long long size_t;
 
 #define UCRT_NORETURN __attribute__((noreturn))
+#define DUET_USER_TRAP_UNREACHABLE()                                                                                   \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        __asm__ volatile("ud2" ::: "memory");                                                                          \
+        __builtin_unreachable();                                                                                       \
+    } while (0)
 
 #define NO_BUILTIN_STR __attribute__((no_builtin("strlen", "strcmp", "strcpy", "strchr")))
 #define NO_BUILTIN_MEM __attribute__((no_builtin("memset", "memcpy")))
@@ -94,13 +100,13 @@ __declspec(dllexport) void _aligned_free(void* ptr)
 __declspec(dllexport) UCRT_NORETURN void exit(int code)
 {
     __asm__ volatile("int $0x80" : : "a"((long)0), "D"((long)code));
-    __builtin_unreachable();
+    DUET_USER_TRAP_UNREACHABLE();
 }
 
 __declspec(dllexport) UCRT_NORETURN void _exit(int code)
 {
     __asm__ volatile("int $0x80" : : "a"((long)0), "D"((long)code));
-    __builtin_unreachable();
+    DUET_USER_TRAP_UNREACHABLE();
 }
 
 /* ------------------------------------------------------------------
@@ -456,13 +462,13 @@ __declspec(dllexport) UCRT_NORETURN void terminate(void)
 {
     /* MSVC's convention: exit code 3 after abort-signal. */
     __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)3));
-    __builtin_unreachable();
+    DUET_USER_TRAP_UNREACHABLE();
 }
 
 __declspec(dllexport) UCRT_NORETURN void _invalid_parameter_noinfo_noreturn(void)
 {
     __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)0xC000000D)); /* STATUS_INVALID_PARAMETER */
-    __builtin_unreachable();
+    DUET_USER_TRAP_UNREACHABLE();
 }
 
 /* ------------------------------------------------------------------

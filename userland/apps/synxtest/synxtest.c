@@ -4,6 +4,13 @@
 typedef unsigned long u64;
 typedef long i64;
 
+#define DUET_USER_TRAP_UNREACHABLE()                                                                                   \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        __asm__ volatile("ud2" ::: "memory");                                                                          \
+        __builtin_unreachable();                                                                                       \
+    } while (0)
+
 // Compiler-emitted helpers for zero-init of stack arrays. clang
 // emits implicit calls to memset/memcpy for `char buf[N] = {0}`
 // even with -fno-builtin; provide the symbols ourselves so the
@@ -548,7 +555,7 @@ void _start(void)
         // Child path: print one line and exit immediately.
         TAG("[exe] fork.child running\n");
         sc1(231 /*exit_group*/, 0);
-        __builtin_unreachable();
+        DUET_USER_TRAP_UNREACHABLE();
     }
     RC("fork", fpid);
     if (fpid > 0)
@@ -563,7 +570,7 @@ void _start(void)
     if (vpid == 0)
     {
         sc1(231 /*exit_group*/, 0);
-        __builtin_unreachable();
+        DUET_USER_TRAP_UNREACHABLE();
     }
     RC("vfork", vpid);
     if (vpid > 0)
@@ -581,5 +588,5 @@ void _start(void)
     // exit_group(0x55)
     TAG("[exe] all done, exit 0x55\n");
     sc1(231 /*exit_group*/, 0x55);
-    __builtin_unreachable();
+    DUET_USER_TRAP_UNREACHABLE();
 }

@@ -77,8 +77,9 @@
     } while (0)
 
 /// Marks a code path as unreachable in correct builds. In debug,
-/// firing this panics; in release, it folds to `__builtin_unreachable()`
-/// so the optimizer is free to assume control never lands here.
+/// firing this panics; in release, it executes `ud2` before telling
+/// the optimizer control cannot continue. That keeps impossible-path
+/// corruption fail-loud even when release assertions are compiled out.
 ///
 /// Use this at the bottom of a switch on an exhaustive enum, or after
 /// a guaranteed-noreturn call, to communicate "you can't get here" to
@@ -90,5 +91,6 @@
         {                                                                                                              \
             ::duetos::core::Panic((subsys), "DEBUG_UNREACHABLE: " msg);                                                \
         }                                                                                                              \
+        asm volatile("ud2" ::: "memory");                                                                              \
         __builtin_unreachable();                                                                                       \
     } while (0)

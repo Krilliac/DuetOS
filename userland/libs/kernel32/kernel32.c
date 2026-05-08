@@ -39,6 +39,12 @@ typedef unsigned long ULONG;
 typedef unsigned long long UINT_PTR; /* 64-bit on x64 windows-msvc; DWORD is 32 */
 
 #define WIN32_NORETURN __attribute__((noreturn))
+#define DUET_USER_TRAP_UNREACHABLE()                                                                                   \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        __asm__ volatile("ud2" ::: "memory");                                                                          \
+        __builtin_unreachable();                                                                                       \
+    } while (0)
 
 /* ------------------------------------------------------------------
  * Process / thread identity (syscall-backed)
@@ -107,7 +113,7 @@ __declspec(dllexport) void SetLastError(DWORD err)
 __declspec(dllexport) WIN32_NORETURN void ExitProcess(UINT uExitCode)
 {
     __asm__ volatile("int $0x80" : : "a"((long)0), "D"((long)uExitCode));
-    __builtin_unreachable();
+    DUET_USER_TRAP_UNREACHABLE();
 }
 
 /* TerminateProcess(hProcess, uExitCode) — hProcess is ignored
@@ -117,7 +123,7 @@ __declspec(dllexport) WIN32_NORETURN BOOL TerminateProcess(HANDLE hProcess, UINT
 {
     (void)hProcess;
     __asm__ volatile("int $0x80" : : "a"((long)0), "D"((long)uExitCode));
-    __builtin_unreachable();
+    DUET_USER_TRAP_UNREACHABLE();
 }
 
 /* ------------------------------------------------------------------
@@ -3618,7 +3624,7 @@ __declspec(dllexport) WIN32_NORETURN void ExitThread(DWORD dwExitCode)
     /* For our single-thread-per-process model ExitThread ==
      * ExitProcess. Match the flat stub's behaviour. */
     __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)dwExitCode));
-    __builtin_unreachable();
+    DUET_USER_TRAP_UNREACHABLE();
 }
 
 __declspec(dllexport) BOOL GetExitCodeProcess(HANDLE hProcess, DWORD* lpExitCode)
