@@ -461,10 +461,15 @@ DuetFS slice (trigger #1 — on-disk filesystem parsing). See
 pinned in `/rust-toolchain.toml`; CMake builds drive cargo through
 each crate's leaf `CMakeLists.txt`.
 
-The remaining triggers still apply for **future** Rust subsystems
-(adding a second crate is a no-op on the toolchain side):
+The second and third Rust subsystems are now live: USB HID report-descriptor
+parsing (`kernel/drivers/usb/hid_rust/`) and USB class configuration parsing
+(`kernel/drivers/usb/class_rust/`) are standalone Rust rlibs called through
+hand-written C ABIs from the existing C++ USB class-driver surfaces. The USB
+class parser recognizes MSC bulk-only, hub, UVC, and Bluetooth USB descriptor
+sets. Remaining triggers for **future** Rust subsystems:
 
-1. **USB class drivers with descriptor parsing** — HID, MSC, hub.
+1. **Deeper USB class payload parsers** — MSC sense / hub status change / UVC
+   class-specific descriptor bodies beyond endpoint binding.
 2. **TCP/IP stack** — packet headers from untrusted peers; start at
    the protocol stack boundary, not the link layer.
 3. **Anything else with non-trivial parsing of attacker-supplied
@@ -489,13 +494,15 @@ The remaining triggers still apply for **future** Rust subsystems
   the FFI contract should be readable from the header alone.
 - **Toolchain pin lives in `/rust-toolchain.toml`.** Bumping it is
   its own PR.
-- **CMake side is a leaf custom_command** that calls `cargo build
-  --release --target x86_64-unknown-none -Z build-std=core,alloc -Z
-  build-std-features=compiler-builtins-mem` (mirror
-  `kernel/fs/duetfs/CMakeLists.txt`).
-- **`panic = "abort"`** — kernel can't unwind. Each crate provides
-  its own `#[panic_handler]` calling `duetos_rust_panic` (defined
-  per-crate in a sibling `*_rust_panic.cpp` shim).
+- **Workspace first.** Add the crate to `/Cargo.toml`; the root
+  workspace owns profiles and `/.cargo/config.toml` owns the
+  freestanding target / `build-std` defaults.
+- **One Rust staticlib link unit.** Subsystem crates are rlibs; add them
+  as dependencies of `/kernel/rust/Cargo.toml`. Only `/kernel/rust` calls
+  `duetos_add_rust_staticlib(...)`, preventing duplicate `core` / `alloc`
+  objects at the C++ kernel link.
+- **`panic = "abort"`** — kernel can't unwind. The aggregate crate owns
+  the single `#[panic_handler]`; subsystem rlibs must not define one.
 - **`lto = "thin"`** — fat LTO interacts badly with CMake.
 - **Forbidden:** Bazel / Nix / Meson; cbindgen; speculative deps.
 

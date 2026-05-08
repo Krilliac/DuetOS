@@ -36,7 +36,7 @@ slice-defining workload makes them earn their complexity.
 ## Files
 
 - `kernel/fs/duetfs/` — Rust crate (no_std, panic=abort)
-  - `Cargo.toml` — manifest; release profile is panic=abort, lto=thin.
+  - `Cargo.toml` — manifest; workspace-owned release profile is panic=abort, lto=thin.
   - `src/lib.rs` — module wiring + re-exports.
   - `src/format.rs` — on-disk types: `Superblock`, `Node`, kind tags, layout constants.
   - `src/block_dev.rs` — `BlockDevice` trait + `MemoryBlockDevice` (FFI-borrowing) + `ExternBlockDevice` (callback-driven).
@@ -47,12 +47,15 @@ slice-defining workload makes them earn their complexity.
   - `src/path.rs` — path iterator (same shape as `kernel/fs/vfs.h`).
   - `src/mkfs.rs` — formats an empty image with a root dir.
   - `src/ffi.rs` — C ABI surface (`duetfs_probe / duetfs_mkfs / duetfs_lookup / duetfs_read_file / duetfs_write_at / duetfs_create_path / duetfs_unlink_path / duetfs_truncate`).
-  - `src/panic.rs` — `#[panic_handler]` → `duetos_rust_panic` shim.
   - `include/duetfs.h` — hand-written C header (mirrored against `ffi.rs`).
-  - `CMakeLists.txt` — leaf target wrapping `cargo build`.
 - `kernel/fs/duetfs.{h,cpp}` — kernel-side adapter, `DuetFsBoot`, `DuetFsSelfTest`.
 - `kernel/fs/duetfs_block_dev.cpp` — `Device` builder helpers (memory + block-handle backed).
-- `kernel/fs/duetfs_rust_panic.cpp` — Rust → C++ panic bridge.
+- `kernel/fs/duetfs_rust_panic.cpp` — aggregate Rust → C++ panic / allocator bridge.
+- `kernel/rust/` — aggregate Rust staticlib link unit that depends on DuetFS and other Rust subsystem rlibs.
+- `Cargo.toml` — workspace root; owns shared Rust profiles for kernel-linked crates.
+- `Cargo.lock` — tracked Rust dependency lockfile; CMake cargo builds use `--locked`.
+- `.cargo/config.toml` — workspace cargo defaults for `x86_64-unknown-none` + `build-std`.
+- `cmake/DuetOSRust.cmake` — shared CMake helper used by the aggregate Rust staticlib.
 - `rust-toolchain.toml` — pinned nightly (rust-src + x86_64-unknown-none target).
 
 ## On-disk format (v3)

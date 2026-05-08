@@ -1,0 +1,21 @@
+# DuetOS kernel Rust link unit.
+#
+# Subsystem crates stay as standalone rlibs. This crate is the one staticlib the
+# C++ kernel links, so `core` / `alloc` / panic runtime appear exactly once.
+
+[package]
+name = "duetos_kernel_rust"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "DuetOS kernel Rust staticlib link unit"
+
+[lib]
+name = "duetos_kernel_rust"
+crate-type = ["staticlib"]
+
+[dependencies]
+duetfs = { path = "../fs/duetfs" }
+usbclass = { path = "../drivers/usb/class_rust" }
+usbhid = { path = "../drivers/usb/hid_rust" }

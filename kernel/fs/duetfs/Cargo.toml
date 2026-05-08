@@ -20,28 +20,15 @@
 [package]
 name    = "duetfs"
 version = "0.0.1"
-edition = "2021"
-publish = false
-license = "MIT"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
 description = "DuetOS native filesystem (v0). Clean-room rewrite inspired by RedoxFS."
 
 [lib]
 name       = "duetfs"
-crate-type = ["staticlib"]
+crate-type = ["rlib"]
 
-[profile.release]
-panic       = "abort"
-lto         = "thin"
-opt-level   = "z"
-codegen-units = 1
-strip       = true
-overflow-checks = true
-
-[profile.dev]
-panic           = "abort"
-opt-level       = 1
-overflow-checks = true
-debug           = true
 
 # Crypto deps — added in the v6 encryption slice.
 #   aes        — pure-Rust AES-128/256 block cipher (no_std).

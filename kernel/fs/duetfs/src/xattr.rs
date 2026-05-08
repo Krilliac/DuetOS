@@ -77,7 +77,7 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         let mut needed: usize = 0;
         let mut written: usize = 0;
         for_each_record(&block, |name_off, name_len, _value_off, _value_len| {
-            if needed + name_len + 1 <= dst.len()
+            if needed + name_len < dst.len()
             {
                 dst[written..written + name_len]
                     .copy_from_slice(&block[name_off..name_off + name_len]);

@@ -121,6 +121,7 @@
 #include "drivers/power/power.h"
 #include "drivers/usb/cdc_ecm.h"
 #include "drivers/usb/hid_descriptor.h"
+#include "drivers/usb/usb_class_desc.h"
 #include "drivers/usb/msc_scsi.h"
 #include "drivers/usb/usb.h"
 #include "drivers/usb/xhci.h"
@@ -2762,6 +2763,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // that dispatches events by TRB so class drivers don't race
     // with each other or the HID polling path.
     DUETOS_BOOT_SELFTEST(duetos::drivers::usb::hid::HidSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::usb::UsbClassDescriptorSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::usb::msc::MscSelfTest());
 
     SerialWrite("[boot] Detecting audio controllers.\n");

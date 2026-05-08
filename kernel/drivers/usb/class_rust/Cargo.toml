@@ -1,0 +1,17 @@
+# USB class configuration-descriptor parser for DuetOS.
+#
+# Parses untrusted USB configuration/interface/endpoint descriptor streams for
+# class-driver binding decisions. Kept as a standalone no_std rlib and exported
+# through a hand-written C ABI consumed by kernel/drivers/usb/usb_class_desc.cpp.
+
+[package]
+name = "usbclass"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "DuetOS USB class configuration descriptor parser"
+
+[lib]
+name = "usbclass"
+crate-type = ["rlib"]
