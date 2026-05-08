@@ -20,7 +20,7 @@ case "${mode}" in
 esac
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 readonly PRESET="${DUETOS_PRESET:-x86_64-debug}"
 readonly BUILD_DIR="${REPO_ROOT}/build/${PRESET}"
 readonly GDB_PORT="${DUETOS_GDB_PORT:-1234}"
@@ -35,7 +35,7 @@ if [[ "${mode}" == "demo" ]]; then
 else
     cmake --preset "${PRESET}" -DDUETOS_GDB_DEMO=OFF >/dev/null
 fi
-cmake --build "${BUILD_DIR}" --target duetos-kernel >/dev/null
+cmake --build "${BUILD_DIR}" --target duetos-iso >/dev/null
 
 # Kill any leftover QEMU from a previous launch — VSCode's task
 # system can leave orphans behind when a launch fails partway.
