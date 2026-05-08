@@ -3,7 +3,7 @@
 // One row per syscall whose authorisation reduces to "process must
 // hold a single static capability". The dispatcher consults this
 // table BEFORE any handler runs (`SyscallGate` in cap_gate.{h,cpp}):
-// missing caps return -1 and record a sandbox denial. The previous
+// missing caps return -EACCES and record a sandbox denial. The previous
 // in-line `CapSetHas` checks have been removed (A4-followup) — the
 // gate is now the sole authoritative check for every row below.
 //
