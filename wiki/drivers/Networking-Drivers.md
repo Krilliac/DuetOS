@@ -36,6 +36,9 @@ See [USB](USB.md) for the class-driver details.
 
 ## Wireless Driver Shells
 
+Firmware source classification, open-firmware candidates, and closed-blob handling are tracked in [Wireless and GPU Firmware Research](Wireless-Firmware.md).
+
+
 `kernel/drivers/net/wireless/`. Three families have chip-identification
 scaffolding wired in:
 

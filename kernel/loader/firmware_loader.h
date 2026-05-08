@@ -7,19 +7,19 @@
  * DuetOS — kernel firmware loader (scaffold).
  *
  * Centralizes the "load this vendor blob" surface that wireless and
- * GPU drivers need before they can do real work. The loader now uses
- * a VFS-backed lookup path (`/lib/firmware/<vendor>/<basename>` then
- * `/lib/firmware/<basename>`) and enforces optional size bounds.
- * Signature verification remains a follow-up slice:
+ * GPU drivers need before they can do real work. The loader uses a
+ * VFS-backed lookup path, prefers `/lib/firmware/duetos/open/`,
+ * unwraps DuetOS firmware packages after SHA-256 payload verification,
+ * and enforces optional size bounds.
  *
- *   1. A scan of `/lib/firmware/<vendor>/<filename>` (or a
- *      wireless-specific path) on the boot filesystem once
- *      VFS lookup of arbitrary paths is wired up.
- *   2. Per-vendor blob signature checks (Intel iwlwifi has a
- *      TLV format with vendor signatures; Realtek + Broadcom
- *      ship raw binaries).
- *   3. A small in-kernel cache of loaded blobs so the first
- *      bring-up of a chip doesn't re-read the boot media.
+ * Follow-up slices:
+ *
+ *   1. Per-vendor cryptographic signature checks (Intel iwlwifi has
+ *      a TLV format with vendor signatures; Realtek + Broadcom ship
+ *      raw binaries).
+ *   2. A firmware signing root for DuetOS package metadata.
+ *   3. A small in-kernel cache of loaded blobs so the first bring-up
+ *      of a chip doesn't re-read the boot media.
  *
  * Drivers use the loader through one call:
  *
@@ -43,25 +43,37 @@ struct FwLoadRequest
     // `iwlwifi-<gen>-<rev>.ucode`; rtl88xx uses
     // `rtlwifi/rtl<chip>fw.bin`; bcm43xx uses `b43/<chip>.fw`.
     const char* basename;
-    // Optional minimum + maximum size hints. The loader rejects
-    // blobs outside the range as malformed without parsing them.
-    // 0 means "no constraint".
+    // Optional minimum + maximum size hints. For raw blobs the
+    // bounds apply to the file size; for DuetOS firmware packages
+    // they apply to the verified payload size. 0 means "no
+    // constraint".
     u32 min_bytes;
     u32 max_bytes;
+
+    // Custom/lab firmware packages are denied by default even when
+    // their payload hash verifies. A bring-up shell command or lab
+    // harness must opt in explicitly for source-built experimental
+    // firmware.
+    bool allow_custom_lab_image;
 };
 
 struct FwBlob
 {
     const u8* data;
     u32 size;
-    // True iff the loader verified a vendor-format signature on
-    // the blob before returning it. v0: always false (no
-    // verification implemented). Drivers that REQUIRE signed
-    // firmware should refuse blobs where this is false until the
-    // verifier slice lands.
+    // True iff the loader verified integrity before returning the
+    // bytes. v0 verification means a DuetOS package envelope with a
+    // matching SHA-256 payload digest; vendor cryptographic signature
+    // checks remain per-family follow-up work.
     bool verified;
-    // Stable handle the caller passes back to `FwRelease`. v0: 0.
+    // Stable handle the caller passes back to `FwRelease`. v0: VFS node pointer.
     u64 handle;
+
+    // True iff the returned bytes came from a DuetOS firmware package
+    // and `data/size` point at the verified payload, not the envelope.
+    bool packaged;
+    bool source_rebuildable;
+    bool custom_lab_image;
 };
 
 enum class FwBackendKind : u8
