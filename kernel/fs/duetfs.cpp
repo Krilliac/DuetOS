@@ -13,6 +13,7 @@
 #include "arch/x86_64/hypervisor.h"
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "diag/fix_journal.h"
 #include "drivers/storage/block.h"
 #include "fs/duetfs.h"
 #include "fs/duetfs/include/duetfs.h"
@@ -204,6 +205,7 @@ u32 DuetFsBoot()
     // duetfs_probe (Rust). The boot mount itself is up; only the
     // auto-mount of on-disk DuetFS volumes is gated. Re-enable
     // once a runtime probe localises the wedge.
+    FIX_NOTE_GAP("fs/duetfs.cpp:EmulatorProbeSkip", "localise Rust duetfs_probe emulator boot-tail wedge");
     if (arch::IsEmulator())
     {
         arch::SerialWrite("[duetfs/boot] emulator detected — skipping on-disk probe loop\n");

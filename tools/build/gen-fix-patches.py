@@ -15,15 +15,20 @@ For each unique journal record:
   * UnmappedThunk where (dll, fn) IS in thunks_table.inc but the
     table points at a generic noop offset (kOffReturnZero /
     kOffReturnOne / kOffCritSecNop / kOffGetProcessHeap) -> emit a
-    markdown note explaining the entry is a placeholder and how to
-    either upgrade to a real implementation or mark it accepted.
+    named-equivalent bytecode patch at a fresh offset so the runtime
+    classifier stops re-journaling an accepted placeholder.
 
-  * UnknownSyscall -> emit a unified diff that scaffolds an explicit
-    case in syscall.cpp's main switch returning -ENOSYS, with a
-    TODO marker for the reviewer to flesh out.
+  * UnknownSyscall -> emit a markdown implementation brief with the
+    syscall number and journal context. Unknown syscall semantics are
+    ABI work, not safe mechanical source patches.
 
   * StubMarker / GapMarker / SoftFaultRecov / LoaderReject -> emit
-    a markdown note pointing at the source pin.
+    a detector-specific implementation brief pointing at the source pin.
+
+  * Optional marker manifests from gen-fix-markers.py -> emit
+    observability patches that add FIX_NOTE_STUB/FIX_NOTE_GAP macros
+    for safe in-function `// STUB:` / `// GAP:` markers that are not
+    yet represented in the runtime journal.
 
 By default, dry-run: writes .patch files under --out and prints a
 markdown summary to stdout. With --apply, prompts y/n before each
@@ -40,17 +45,19 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import struct
 import subprocess
 import sys
-from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
 FILE_MAGIC = 0x4A584946  # 'FIXJ'
+FILE_VERSION = 1
 RECORD_MAGIC = 0x52584946  # 'FIXR'
 RECORD_STRIDE = 128
+MAX_RECORDS = 1024
 
 DETECTORS = {
     0: "none",
@@ -90,23 +97,53 @@ class FixRecord:
         return bool(self.flags & 0x01)
 
 
+@dataclass
+class FixMarker:
+    file: str
+    line: int
+    kind: str
+    comment: str
+    has_macro: bool
+
+
 def read_records(path: str) -> list[FixRecord]:
-    """Parse a KERNEL.FIX file into a list of FixRecord."""
+    """Parse a KERNEL.FIX file into a list of FixRecord.
+
+    Patch generation deliberately accepts only the current, exact file
+    ABI. A stale/newer/truncated journal can otherwise produce patches
+    for the wrong records, which is worse than producing no patch at
+    all. Torn record payloads with bad per-record magic are skipped
+    after the enclosing file has passed size/version validation.
+    """
     with open(path, "rb") as fh:
         data = fh.read()
     if len(data) < HEADER_FMT.size:
         raise ValueError(f"{path}: file too short ({len(data)} bytes)")
-    magic, _ver, count, _rsvd = HEADER_FMT.unpack(data[: HEADER_FMT.size])
+    magic, version, count, reserved = HEADER_FMT.unpack(data[: HEADER_FMT.size])
     if magic != FILE_MAGIC:
         raise ValueError(f"{path}: bad magic 0x{magic:08x}")
+    if version != FILE_VERSION:
+        raise ValueError(f"{path}: unsupported version {version} (expected {FILE_VERSION})")
+    if reserved != 0:
+        raise ValueError(f"{path}: reserved header word is 0x{reserved:08x} (expected 0)")
+    if count > MAX_RECORDS:
+        raise ValueError(f"{path}: record count {count} exceeds journal capacity {MAX_RECORDS}")
+    expected = HEADER_FMT.size + count * RECORD_STRIDE
+    if len(data) != expected:
+        raise ValueError(
+            f"{path}: size {len(data)} != header({HEADER_FMT.size})"
+            f" + {count} records * {RECORD_STRIDE}"
+        )
     records: list[FixRecord] = []
     cursor = HEADER_FMT.size
+    torn = 0
     for _ in range(count):
         chunk = data[cursor : cursor + RECORD_STRIDE]
         fields = RECORD_FMT.unpack(chunk)
         rmagic = fields[0]
         cursor += RECORD_STRIDE
         if rmagic != RECORD_MAGIC:
+            torn += 1
             continue  # torn / panic-context noise
         records.append(
             FixRecord(
@@ -123,7 +160,38 @@ def read_records(path: str) -> list[FixRecord]:
                 hint=fields[11].split(b"\x00", 1)[0].decode("utf-8", "replace"),
             )
         )
+    if torn:
+        print(f"# {path}: skipped {torn} torn record(s) (bad magic)", file=sys.stderr)
     return records
+
+
+def load_markers(path: Path) -> list[FixMarker]:
+    """Load a gen-fix-markers.py JSON manifest."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"# warn: couldn't read markers manifest {path}: {exc}", file=sys.stderr)
+        return []
+    markers: list[FixMarker] = []
+    if not isinstance(raw, list):
+        print(f"# warn: markers manifest {path} is not a JSON array", file=sys.stderr)
+        return markers
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        try:
+            markers.append(
+                FixMarker(
+                    file=str(row["file"]),
+                    line=int(row["line"]),
+                    kind=str(row["kind"]).upper(),
+                    comment=str(row.get("comment", "")),
+                    has_macro=bool(row.get("has_macro", False)),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return markers
 
 
 # ---------------------------------------------------------------- thunks index
@@ -137,12 +205,13 @@ _THUNKS_BYTECODE_PATH = "kernel/subsystems/win32/thunks_bytecode.inc"
 # classifier in kernel/subsystems/win32/thunks.cpp.
 _NOOP_OFFSETS = {"kOffReturnZero", "kOffReturnOne", "kOffCritSecNop", "kOffGetProcessHeap"}
 
-# Bytecode templates for "named-equivalent" noops. Each entry gives
-# the bytes that produce identical behaviour to the generic noop
-# offset on the left, plus a one-line ASM comment for the patched
-# bytecode block. The classifier in thunks.cpp checks the offset
-# *value*, so aliasing isn't enough — we MUST emit fresh bytes at a
-# new offset to break out of the noop set.
+# Bytecode templates for "named-equivalent" noops. Every offset in
+# _NOOP_OFFSETS must either have a template here or an explicit note in
+# plan_actions(). Each entry gives the bytes that produce identical
+# behaviour to the generic/noop-ish offset on the left, plus a one-line
+# ASM comment for the patched bytecode block. The classifier in
+# thunks.cpp checks the offset *value*, so aliasing isn't enough — we
+# MUST emit fresh bytes at a new offset to break out of the noop set.
 _NOOP_TEMPLATES = {
     "kOffReturnZero": {
         "bytes": [0x31, 0xC0, 0xC3],
@@ -155,6 +224,10 @@ _NOOP_TEMPLATES = {
     "kOffCritSecNop": {
         "bytes": [0xC3],
         "asm": "ret                 ; named-equivalent of kOffCritSecNop",
+    },
+    "kOffGetProcessHeap": {
+        "bytes": [0x48, 0xC7, 0xC0, 0x00, 0x00, 0x00, 0x50, 0xC3],
+        "asm": "mov rax, 0x50000000; ret  ; named-equivalent of kOffGetProcessHeap",
     },
 }
 
@@ -307,6 +380,31 @@ def _hunk_insert_lines(file_rel: str, lines: list[str], idx: int, inserts: list[
     return "".join(out)
 
 
+def _const_name_from_export(fn: str, existing_consts: set[str]) -> str | None:
+    """Return a collision-free kOff* name for a generated thunk.
+
+    Export names can contain leading underscores, stdcall suffixes, or
+    other punctuation. Keep alphanumeric runs, preserve readable casing,
+    and append a stable suffix if the natural name already exists (for
+    example GetProcessHeap -> kOffGetProcessHeapNamedNoop).
+    """
+    cleaned = fn.lstrip("_")
+    parts = re.findall(r"[A-Za-z0-9]+", cleaned)
+    if not parts:
+        return None
+    base = "".join(part[:1].upper() + part[1:] for part in parts)
+    if not base:
+        return None
+    candidate = "kOff" + base
+    if candidate not in existing_consts:
+        return candidate
+    suffixes = ("NamedNoop", "AcceptedNoop", "FixJournalNoop")
+    for suffix in suffixes:
+        suffixed = candidate + suffix
+        if suffixed not in existing_consts:
+            return suffixed
+    return None
+
 def synth_named_noop_patch(
     dll: str, fn: str, current_const: str, seq: int, repo_root: Path
 ) -> str | None:
@@ -333,6 +431,9 @@ def synth_named_noop_patch(
     if not (cpp_path.exists() and bc_path.exists() and tbl_path.exists()):
         return None
     cpp_lines = cpp_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    existing_consts = set(
+        re.findall(r"constexpr\s+u32\s+(kOff[A-Za-z0-9_]+)\s*=", "".join(cpp_lines))
+    )
     size_re = re.compile(
         r"static_assert\(sizeof\(kThunksBytes\) == (0x[0-9a-fA-F]+),"
     )
@@ -347,13 +448,13 @@ def synth_named_noop_patch(
     if size_idx is None or current_size is None:
         return None
 
-    # 2. Synthesise a constant name from the function name. Trim
-    # leading underscores (MSVC convention) and capitalise the first
-    # letter so it looks like other kOff* names.
-    base = fn.lstrip("_")
-    if not base:
+    # 2. Synthesise a collision-free constant name from the export name.
+    # Leading underscores and punctuation are normal in PE exports; keep
+    # the generated identifier readable while avoiding existing kOff*
+    # declarations such as the real kOffGetProcessHeap.
+    new_const = _const_name_from_export(fn, existing_consts)
+    if new_const is None:
         return None
-    new_const = "kOff" + base[0].upper() + base[1:]
     new_offset = current_size
     new_bytes = tmpl["bytes"]
     new_size = current_size + len(new_bytes)
@@ -422,66 +523,185 @@ def synth_named_noop_patch(
     return tbl_hunk + cpp_const_hunk + cpp_size_hunk + bc_hunk
 
 
+_MARKER_SOURCE_SUFFIXES = {".c", ".cc", ".cpp"}
+_FIX_JOURNAL_INCLUDE = '#include "diag/fix_journal.h"\n'
+_MARKER_SKIP_REASONS = {
+    "kernel/mm/dma.cpp:122": (
+        "architecture-deferred cache-maintenance marker in a DMA hot path; "
+        "recording every sync would add journal lock traffic to normal device I/O"
+    ),
+}
+
+
+def _escape_cpp_string(value: str) -> str:
+    """Escape `value` as the contents of a C/C++ string literal."""
+    out: list[str] = []
+    for ch in value:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ord(ch) < 0x20:
+            out.append(f"\\x{ord(ch):02x}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _leading_spaces(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _line_is_marker(line: str) -> bool:
+    return re.match(r"^\s*//\s*(STUB|GAP):", line) is not None
+
+
+def _hunk_add_fix_journal_include(file_rel: str, lines: list[str]) -> str:
+    """Return an include hunk for diag/fix_journal.h, or empty if present."""
+    if any('"diag/fix_journal.h"' in ln for ln in lines):
+        return ""
+    include_indices = [i for i, ln in enumerate(lines) if ln.startswith("#include ")]
+    if not include_indices:
+        return ""
+    insert_at = include_indices[-1] + 1
+    return _hunk_insert_lines(file_rel, lines, insert_at, [_FIX_JOURNAL_INCLUDE])
+
+
+def synth_marker_observability_patch(marker: FixMarker, repo_root: Path) -> str | None:
+    """Generate a patch that makes a source STUB/GAP marker observable.
+
+    This intentionally handles only low-risk in-function markers in
+    kernel-owned .c/.cc/.cpp files. Header comments, namespace-scope
+    markers, and userland markers are skipped because inserting a
+    statement there could change declarations or break freestanding DLL
+    builds. The generated patch adds the fix-journal include when needed
+    and inserts a FIX_NOTE_* macro after the marker's contiguous comment
+    block.
+    """
+    if marker.has_macro:
+        return None
+    if marker.kind not in ("STUB", "GAP"):
+        return None
+    file_rel = marker.file
+    pin = f"{file_rel}:{marker.line}"
+    if pin in _MARKER_SKIP_REASONS:
+        return None
+    if not file_rel.startswith("kernel/"):
+        return None
+    path = repo_root / file_rel
+    if path.suffix not in _MARKER_SOURCE_SUFFIXES or not path.exists():
+        return None
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+    idx = marker.line - 1
+    if idx < 0 or idx >= len(lines):
+        return None
+    if not _line_is_marker(lines[idx]):
+        return None
+
+    indent = _leading_spaces(lines[idx])
+    if indent == 0:
+        # Very likely file/namespace scope. A macro statement would be invalid.
+        return None
+
+    insert_at = idx + 1
+    while insert_at < len(lines):
+        stripped = lines[insert_at].strip()
+        if not stripped:
+            insert_at += 1
+            continue
+        if stripped.startswith("//") and not _line_is_marker(lines[insert_at]):
+            insert_at += 1
+            continue
+        break
+    if insert_at >= len(lines):
+        return None
+    next_line = lines[insert_at]
+    if _leading_spaces(next_line) < indent or next_line.lstrip().startswith(("}", "#")):
+        return None
+
+    hint = marker.comment.strip() or f"observed {marker.kind.lower()} marker"
+    macro = (
+        " " * indent
+        + f'FIX_NOTE_{marker.kind}("{_escape_cpp_string(pin)}", "{_escape_cpp_string(hint)}");\n'
+    )
+    include_hunk = _hunk_add_fix_journal_include(file_rel, lines)
+    macro_hunk = _hunk_insert_lines(file_rel, lines, insert_at, [macro])
+    return include_hunk + macro_hunk
+
+
+def plan_marker_actions(markers: list[FixMarker], repo_root: Path) -> list[Action]:
+    actions: list[Action] = []
+    seen: set[tuple[str, int, str]] = set()
+    for marker in markers:
+        key = (marker.file, marker.line, marker.kind)
+        if key in seen or marker.has_macro:
+            continue
+        seen.add(key)
+        diff = synth_marker_observability_patch(marker, repo_root)
+        title = f"Make `{marker.file}:{marker.line}` {marker.kind} marker observable"
+        if diff:
+            safe_file = re.sub(r"[^A-Za-z0-9_.-]+", "-", marker.file)
+            actions.append(
+                Action(
+                    kind="patch",
+                    title=title,
+                    body=diff,
+                    filename=f"marker-{safe_file}-{marker.line}.patch",
+                )
+            )
+        else:
+            pin = f"{marker.file}:{marker.line}"
+            reason = _MARKER_SKIP_REASONS.get(
+                pin, "likely header/userland/namespace scope or unusual control flow"
+            )
+            actions.append(
+                Action(
+                    kind="note",
+                    title=f"Review unobservable marker `{marker.file}:{marker.line}`",
+                    body=(
+                        f"`{marker.file}:{marker.line}` is a `{marker.kind}` marker without a "
+                        f"nearby `FIX_NOTE_{marker.kind}` macro, but it is not safe for the "
+                        f"generator to patch automatically ({reason}). Add an observable macro "
+                        f"manually if runtime coverage should feed the fix journal. Comment: "
+                        f"{marker.comment or '(none)'}"
+                    ),
+                    filename=None,
+                )
+            )
+    return actions
+
+
 _SYSCALL_PATH = "kernel/syscall/syscall.cpp"
 
 
-def synth_syscall_patch(num: int, seq: int, repo_root: Path) -> str | None:
-    """Generate a unified diff that adds an explicit case to the
-    syscall switch returning -ENOSYS, with a TODO marker.
+def synth_syscall_brief(r: FixRecord, num: int) -> str:
+    """Generate a markdown implementation brief for an unknown syscall.
 
-    Inserted just before the `default:` arm of the main dispatcher
-    so the new case is reachable. Returns None if we can't find the
-    insertion point.
+    Unlike thunks-table misses, syscall semantics cannot be safely
+    repaired with a mechanical source patch. A new switch arm changes
+    the kernel ABI surface and must be implemented from the intended NT
+    or native contract, so the self-fix output stays advisory and carries
+    all journal context needed for a reviewer to write the real fix.
     """
-    path = repo_root / _SYSCALL_PATH
-    if not path.exists():
-        return None
-    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    # Find the LAST `default:` line indented with 4 spaces — that's
-    # the catch-all of the main syscall switch that fires
-    # ReportUnknownSyscall + records UnknownSyscall.
-    insert_at = None
-    for i in range(len(lines) - 1, -1, -1):
-        if lines[i].rstrip("\n") == "    default:":
-            insert_at = i
-            break
-    if insert_at is None:
-        return None
-
-    new_block = (
-        f"    case 0x{num:x}: // STUB: scaffolded from fix journal seq={seq} — implement\n"
-        f"    {{\n"
-        f"        // TODO: implement syscall #0x{num:x}. The fix journal observed at\n"
-        f"        //       least one caller hit this number. Returning -ENOSYS keeps\n"
-        f"        //       the call observable in the journal as a STUB hit until a\n"
-        f"        //       real implementation lands.\n"
-        f"        FIX_NOTE_STUB(syscall_unimpl_0x{num:x});\n"
-        f"        frame->rax = static_cast<u64>(-38); // -ENOSYS\n"
-        f"        return;\n"
-        f"    }}\n\n"
+    return (
+        f"Runtime reached syscall `0x{num:x}` with no dispatcher arm. "
+        f"Do not auto-scaffold a permanent `-ENOSYS` case: that only "
+        f"turns an unknown ABI gap into a known stub. Implement the "
+        f"intended syscall contract in `{_SYSCALL_PATH}` near the main "
+        f"switch default arm that records `UnknownSyscall`.\n\n"
+        f"Journal context:\n"
+        f"- seq: `{r.seq}`\n"
+        f"- repeat: `{r.repeat}`\n"
+        f"- source_pin: `{r.source_pin}`\n"
+        f"- caller_rip: `0x{r.caller_rip:016x}`\n"
+        f"- ctx_a: `0x{r.ctx_a:016x}`\n"
+        f"- ctx_b: `0x{r.ctx_b:016x}`\n"
+        f"- hint: `{r.hint or '(none)'}`\n"
     )
-
-    ctx_start = max(0, insert_at - 3)
-    ctx_lines = lines[ctx_start:insert_at]
-    after_lines = lines[insert_at : insert_at + 3]
-    new_block_lines = new_block.splitlines(keepends=True)
-
-    old_count = len(ctx_lines) + len(after_lines)
-    new_count = old_count + len(new_block_lines)
-
-    diff_lines: list[str] = []
-    diff_lines.append(f"--- a/{_SYSCALL_PATH}\n")
-    diff_lines.append(f"+++ b/{_SYSCALL_PATH}\n")
-    diff_lines.append(
-        f"@@ -{ctx_start + 1},{old_count} +{ctx_start + 1},{new_count} @@\n"
-    )
-    for ln in ctx_lines:
-        diff_lines.append(" " + ln)
-    for ln in new_block_lines:
-        diff_lines.append("+" + ln)
-    for ln in after_lines:
-        diff_lines.append(" " + ln)
-    return "".join(diff_lines)
 
 
 # ---------------------------------------------------------------- per-record action
@@ -572,16 +792,14 @@ def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path) 
             num = parse_syscall_pin(r.source_pin)
             if num is None:
                 continue
-            diff = synth_syscall_patch(num, r.seq, repo_root)
-            if diff:
-                actions.append(
-                    Action(
-                        kind="patch",
-                        title=f"Scaffold syscall #0x{num:x}",
-                        body=diff,
-                        filename=f"syscall-0x{num:x}.patch",
-                    )
+            actions.append(
+                Action(
+                    kind="note",
+                    title=f"Implement syscall #0x{num:x}",
+                    body=synth_syscall_brief(r, num),
+                    filename=None,
                 )
+            )
 
         elif r.detector_name in ("stub", "gap"):
             actions.append(
@@ -741,6 +959,12 @@ def main() -> int:
         help="run `git apply` on each patch after writing it (prompts unless --yes)",
     )
     ap.add_argument(
+        "--markers",
+        type=Path,
+        default=None,
+        help="optional gen-fix-markers.py JSON manifest; emits observability patches for safe unmacroed markers",
+    )
+    ap.add_argument(
         "--yes", action="store_true",
         help="skip confirmation prompts for --apply (DANGER)",
     )
@@ -761,11 +985,20 @@ def main() -> int:
             print(f"# skip {path}: {exc}", file=sys.stderr)
             continue
         all_records.extend(recs)
-    if not all_records:
+    if not all_records and not args.markers:
         print("# no readable fix-journal files", file=sys.stderr)
         return 1
 
     actions = plan_actions(all_records, thunks_index, repo_root)
+    if args.markers:
+        markers = load_markers(args.markers)
+        marker_actions = plan_marker_actions(markers, repo_root)
+        print(
+            f"# loaded {len(markers)} marker(s) from {args.markers}; "
+            f"generated {len(marker_actions)} marker action(s)",
+            file=sys.stderr,
+        )
+        actions.extend(marker_actions)
     patch_paths = write_patches(actions, args.out)
     print(render_markdown(actions, patch_paths))
 

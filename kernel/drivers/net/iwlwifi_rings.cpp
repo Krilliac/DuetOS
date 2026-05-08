@@ -1,6 +1,7 @@
 #include "drivers/net/iwlwifi_rings.h"
 
 #include "core/panic.h"
+#include "diag/fix_journal.h"
 #include "log/klog.h"
 #include "mm/dma.h"
 #include "mm/zone.h"
@@ -141,6 +142,7 @@ void FreeAllRings()
 // GAP: legacy < 7000-series RBD format (32-bit, shifted 8).
 void PopulateRbdRing(IwlRxRing& rx, mm::PhysAddr data_pool_base)
 {
+    FIX_NOTE_GAP("drivers/net/iwlwifi_rings.cpp:LegacyRbd32", "support legacy pre-7000 iwlwifi 32-bit RBD format");
     auto* rbd = static_cast<volatile u64*>(rx.virt_base);
     for (u32 i = 0; i < rx.size; ++i)
         rbd[i] = data_pool_base + static_cast<u64>(i) * kRxDataBufBytes;
