@@ -3,9 +3,10 @@
 # One-shot fix-journal cycle:
 #   1. boot a smoke profile (default pe-winapi)
 #   2. extract KERNEL.FIX from the on-disk NVMe image
-#   3. run gen-fix-report.py against it
-#   4. run gen-fix-patches.py against it (dry-run, --out=fix-patches/)
-#   5. print both reports + the boot summary line from serial
+#   3. generate a source STUB/GAP marker manifest
+#   4. run gen-fix-report.py against it + marker manifest
+#   5. run gen-fix-patches.py against it (dry-run, --out=fix-patches/)
+#   6. print both reports + the boot summary line from serial
 #
 # Usage:
 #   tools/qemu/run-fix-cycle.sh                       # default profile
@@ -35,6 +36,7 @@ BUILD_DIR="${REPO_ROOT}/build/${PRESET}"
 NVME_IMG="${BUILD_DIR}/nvme0.img"
 LOG_FILE="${BUILD_DIR}/fix-cycle-${PROFILE}.log"
 EXTRACTED_FIX="${BUILD_DIR}/KERNEL.FIX"
+MARKERS_JSON="${BUILD_DIR}/fix-markers.json"
 
 BASELINE_ARG=""
 for arg in "$@"; do
@@ -82,43 +84,93 @@ python3 - "$NVME_IMG" "$EXTRACTED_FIX" <<'PY'
 import struct
 import sys
 
+FILE_MAGIC_BYTES = b"FIXJ"
+FILE_MAGIC = 0x4A584946
+FILE_VERSION = 1
+HEADER_SIZE = 16
+RECORD_STRIDE = 128
+MAX_RECORDS = 1024
+HEADER = struct.Struct("<IIII")
+
 img_path, out_path = sys.argv[1], sys.argv[2]
 with open(img_path, "rb") as fh:
     data = fh.read()
-off = data.find(b"FIXJ")
-if off < 0:
-    print(f"[fix-cycle] no FIXJ magic in {img_path} — empty journal?", file=sys.stderr)
+
+candidates = []
+scan = 0
+while True:
+    off = data.find(FILE_MAGIC_BYTES, scan)
+    if off < 0:
+        break
+    scan = off + 1
+    if off + HEADER_SIZE > len(data):
+        continue
+    magic, ver, count, rsvd = HEADER.unpack(data[off : off + HEADER_SIZE])
+    if magic != FILE_MAGIC or ver != FILE_VERSION or rsvd != 0:
+        continue
+    if count > MAX_RECORDS:
+        continue
+    size = HEADER_SIZE + count * RECORD_STRIDE
+    if off + size > len(data):
+        continue
+    candidates.append((count, off, size))
+
+if not candidates:
+    print(
+        f"[fix-cycle] no valid FIXJ journal in {img_path}; "
+        "writing an empty FIXJ so marker-only generation can continue",
+        file=sys.stderr,
+    )
+    with open(out_path, "wb") as fh:
+        fh.write(HEADER.pack(FILE_MAGIC, FILE_VERSION, 0, 0))
     sys.exit(0)
-header = data[off : off + 16]
-magic, ver, count, _rsvd = struct.unpack("<IIII", header)
-if magic != 0x4A584946:
-    print(f"[fix-cycle] bad magic 0x{magic:08x} at {off}", file=sys.stderr)
-    sys.exit(1)
-size = 16 + count * 128
+
+# Multiple valid blobs can exist in the reserved region or FAT archive
+# chain. Prefer the richest snapshot; break ties by later offset, which
+# is usually the latest overwrite in a raw block image scan.
+count, off, size = max(candidates, key=lambda c: (c[0], c[1]))
 with open(out_path, "wb") as fh:
     fh.write(data[off : off + size])
-print(f"[fix-cycle] extracted {size} bytes ({count} records) -> {out_path}", file=sys.stderr)
+print(
+    f"[fix-cycle] found {len(candidates)} valid FIXJ candidate(s); "
+    f"selected offset {off} ({count} records, {size} bytes) -> {out_path}",
+    file=sys.stderr,
+)
 PY
 
-# Empty journal is a success state — nothing to triage.
-if [[ ! -s "${EXTRACTED_FIX}" ]]; then
-    echo "[fix-cycle] no records to triage. Done." >&2
-    exit 0
-fi
+# A zero-record journal is still useful when paired with the marker
+# manifest below: self-fix generation can create observability patches
+# for source STUB/GAP comments even when this smoke profile hit no
+# runtime gaps.
 
-# 3. Generate the markdown report.
+# 3. Generate the source marker manifest. The report uses it to
+#    show cold/unobservable markers; patch generation uses it to
+#    create safe FIX_NOTE_* observability patches for in-function
+#    source markers.
+python3 "${REPO_ROOT}/tools/build/gen-fix-markers.py" \
+    --root "${REPO_ROOT}" \
+    --output "${MARKERS_JSON}" >&2
+
+# 4. Generate the markdown report.
 echo "" >&2
 echo "[fix-cycle] === fix journal report ===" >&2
 if [[ -n "${BASELINE_ARG}" ]]; then
-    python3 "${REPO_ROOT}/tools/build/gen-fix-report.py" "${EXTRACTED_FIX}" "${BASELINE_ARG}"
+    python3 "${REPO_ROOT}/tools/build/gen-fix-report.py" \
+        "${EXTRACTED_FIX}" "${BASELINE_ARG}" \
+        --markers "${MARKERS_JSON}"
 else
-    python3 "${REPO_ROOT}/tools/build/gen-fix-report.py" "${EXTRACTED_FIX}"
+    python3 "${REPO_ROOT}/tools/build/gen-fix-report.py" \
+        "${EXTRACTED_FIX}" \
+        --markers "${MARKERS_JSON}"
 fi
 
-# 4. Generate candidate source patches.
+# 5. Generate candidate source patches.
 echo "" >&2
 echo "[fix-cycle] === patch generation ===" >&2
-python3 "${REPO_ROOT}/tools/build/gen-fix-patches.py" "${EXTRACTED_FIX}" --out="${FIX_OUT}"
+python3 "${REPO_ROOT}/tools/build/gen-fix-patches.py" \
+    "${EXTRACTED_FIX}" \
+    --markers "${MARKERS_JSON}" \
+    --out="${FIX_OUT}"
 
 echo "" >&2
 echo "[fix-cycle] done. Patches under ${FIX_OUT}/" >&2

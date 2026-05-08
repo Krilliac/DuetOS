@@ -1,6 +1,7 @@
 #include "drivers/gpu/intel_gsc_fw.h"
 
 #include "arch/x86_64/serial.h"
+#include "diag/fix_journal.h"
 #include "core/panic.h"
 #include "log/klog.h"
 
@@ -253,6 +254,8 @@ void IntelGscFwLog(const IntelGscFwParsed& parsed)
         // image is a strong signal an operator dropped a debug
         // build into /lib/firmware. Surface it once at WARN; a
         // follow-up slice can extend Image-Guard to block these.
+        FIX_NOTE_GAP("drivers/gpu/intel_gsc_fw.cpp:ManufacturingPartition",
+                     "extend Image-Guard to reject GSC manufacturing partitions");
         KLOG_WARN("drivers/gpu/intel-gsc-fw", "image carries manufacturing partitions — refuse for production deploys");
     }
 }

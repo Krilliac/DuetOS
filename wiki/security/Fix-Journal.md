@@ -73,7 +73,8 @@ The output is a markdown report grouping records by detector and source pin, sor
 A second host-side script consumes `KERNEL.FIX` and emits **candidate source patches** for the gaps the journal recorded. Same #016 contract as the rest of the subsystem — the kernel never auto-applies; the script just removes the mechanical busywork of writing the diff:
 
 ```sh
-$ python3 tools/build/gen-fix-patches.py KERNEL.FIX --out=fix-patches/
+$ python3 tools/build/gen-fix-markers.py --output markers.json
+$ python3 tools/build/gen-fix-patches.py KERNEL.FIX --markers markers.json --out=fix-patches/
 ```
 
 For each unique record:
@@ -81,19 +82,22 @@ For each unique record:
 | Detector | Auto-patch? | Action shape |
 |----------|-------------|--------------|
 | `unmapped_thunk` (not in `thunks_table.inc`) | YES | Inserts a row pointing at `kOffMissLogger` (safe catch-all) so the next boot logs each call site instead of silently returning 0 |
-| `unmapped_thunk` (in table at `kOffReturnZero/One/CritSecNop/GetProcessHeap`) | No | Markdown note explaining the entry is a placeholder; reviewer either upgrades the bytecode or replaces the generic `kOff*` with a distinct named offset (the noop classifier ignores any offset whose name isn't in the noop set) |
-| `unknown_syscall` | YES | Scaffolds an explicit `case 0x<num>:` arm in `syscall.cpp` that returns `-ENOSYS` plus a `FIX_NOTE_STUB` so future hits stay observable |
-| `stub` / `gap` / `soft_fault_recov` / `loader_reject` | No | Markdown note pointing at the source pin |
+| `unmapped_thunk` (in table at `kOffReturnZero/One/CritSecNop/GetProcessHeap`) | YES | Emits a named-equivalent bytecode patch at a fresh `kOff*` offset and rewrites the row, suppressing repeat journal noise for accepted placeholders while preserving a reviewable diff |
+| `unknown_syscall` | No | Emits a markdown implementation brief with syscall number, repeat count, caller RIP, ctx fields, and hint; syscall semantics are ABI work and should not be mechanically converted into permanent `-ENOSYS` stubs |
+| `stub` / `gap` / `soft_fault_recov` / `loader_reject` | No | Detector-specific implementation brief pointing at the source pin and captured runtime context |
+| marker manifest rows without `FIX_NOTE_*` (via `--markers`) | YES, when safe | Adds `diag/fix_journal.h` and a `FIX_NOTE_STUB` / `FIX_NOTE_GAP` macro for in-function kernel `.c/.cc/.cpp` markers; unsafe header/userland/namespace-scope rows become review notes |
 
-Patch files are unified diffs ready for `git apply`. Re-running after applying is safe — the script doesn't re-emit a patch for a row that already exists. Optional `--apply` runs `git apply` on each patch with a y/n prompt; `--yes` skips the prompts (use only in CI).
+Patch files are unified diffs ready for `git apply`. Re-running after applying is safe — the script doesn't re-emit a patch for a row that already exists. Optional `--apply` runs `git apply` on each patch with a y/n prompt; `--yes` skips the prompts (use only in CI). Marker-manifest generation is deliberately conservative: it only auto-inserts macros into indented, in-function kernel source markers where the macro is a valid statement. Header comments, userland DLL code, and namespace-scope declarations are surfaced as notes instead of risking an invalid patch.
 
-### Why no auto-apply for the noop-stub case?
+Current in-tree marker coverage is intentionally source-aware rather than blanket: GPU bring-up (`nvidia_gpu`, Intel GSC manufacturing partitions), DuetFS emulator probe gating, and iwlwifi legacy RBD encoding now feed the journal from their actual runtime branches. Architecture-deferred DMA cache maintenance remains comment-only because it sits on a hot synchronization path where a journal call on every DMA sync would be the wrong fix.
 
-When a thunk row already exists at `kOffReturnZero/One/CritSecNop`, the right answer depends on the call's semantics — the script can't tell whether the caller cares about the return value, whether a real implementation needs proc-env state, or whether the noop is genuinely the correct contract. The reviewer makes that call. Two patterns the script suggests:
+### Why generated noop patches still need review
+
+When a thunk row already exists at `kOffReturnZero/One/CritSecNop/GetProcessHeap`, the script can remove repeat journal noise by emitting a named-equivalent byte sequence at a fresh offset and rewriting the row. That patch is mechanical, but it is still a candidate patch: the reviewer must decide whether the generic behavior is genuinely the correct contract or whether the row deserves real ABI work instead. Two review outcomes are expected:
 
 1. **Real implementation**: write x86-64 bytecode in `kernel/subsystems/win32/thunks_bytecode.inc`, declare a `kOff<Name>` constant in `thunks.cpp`, and update the row. See the eight thunks landed alongside this script (`__chkstk`, `_cexit`, `_crt_atexit`, `_register_onexit_function`, `_initialize_onexit_table`, `_set_app_type`, `_configure_narrow_argv`, `FreeEnvironmentStringsW`) for worked examples covering page probing, atexit-list walking, and proc-env-backed value storage.
 
-2. **Named-equivalent noop**: when the noop IS the correct contract (e.g. `FreeEnvironmentStringsW` over a static env block), add a distinct `kOffFooBar` constant whose bytecode is literally the same `xor eax, eax; ret` / `mov eax, 1; ret` / `ret`. The noop classifier in `Win32ThunksLookupHashed` checks the offset *name*, not the bytes, so a named offset stops surfacing as a journal record on every boot.
+2. **Named-equivalent noop**: when the noop IS the correct contract (e.g. `FreeEnvironmentStringsW` over a static env block), accept the generated distinct `kOffFooBar` constant whose bytecode is equivalent to the generic helper. The noop classifier in `Win32ThunksLookupHashed` checks the offset *value*, not the bytes, so moving equivalent bytes to a fresh offset stops surfacing the row as a journal record on every boot.
 
 Both patterns keep the audit trail intact — the journal continues to record any TRULY unimplemented gap, while suppressing entries the reviewer has already decided about.
 

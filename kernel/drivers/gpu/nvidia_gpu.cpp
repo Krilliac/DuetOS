@@ -7,6 +7,7 @@
 #include "drivers/gpu/nvidia_gpu.h"
 
 #include "arch/x86_64/serial.h"
+#include "diag/fix_journal.h"
 #include "log/klog.h"
 #include "mm/dma.h"
 #include "mm/zone.h"
@@ -90,6 +91,7 @@ void Probe(GpuInfo& g)
     // the GSP RPC ring to allocate a channel, then writes the
     // pushbuffer GPA + size into the channel's USERD page. None
     // of that exists in v0.
+    FIX_NOTE_STUB("drivers/gpu/nvidia_gpu.cpp:GSP_CHANNEL", "wire GSP firmware load + RPC channel submit");
     mm::FreeDmaCoherent(pb);
 
     return ::duetos::core::Err{::duetos::core::ErrorCode::Unsupported};
