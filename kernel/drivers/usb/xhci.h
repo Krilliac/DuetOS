@@ -95,9 +95,10 @@ struct PortRecord
     bool hid_keyboard;
     bool hid_mouse;
     u8 hid_interface_num;
-    u8 hid_ep_addr;        // bEndpointAddress: bit 7 = IN direction
-    u16 hid_ep_max_packet; // wMaxPacketSize of the HID int-IN endpoint
-    u8 hid_ep_interval;    // bInterval, raw (USB units)
+    u8 hid_ep_addr;             // bEndpointAddress: bit 7 = IN direction
+    u16 hid_ep_max_packet;      // wMaxPacketSize of the HID int-IN endpoint
+    u8 hid_ep_interval;         // bInterval, raw (USB units)
+    u16 hid_report_desc_length; // HID class descriptor's Report descriptor byte count
 };
 
 /// Per-controller stats. One slot per discovered xHCI; populated
