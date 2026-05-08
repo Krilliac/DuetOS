@@ -9,6 +9,13 @@ typedef unsigned long u64;
 typedef unsigned short u16;
 typedef long i64;
 
+#define DUET_USER_TRAP_UNREACHABLE()                                                                                   \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        __asm__ volatile("ud2" ::: "memory");                                                                          \
+        __builtin_unreachable();                                                                                       \
+    } while (0)
+
 __attribute__((used)) void* memset(void* d, int c, unsigned long n)
 {
     unsigned char* p = (unsigned char*)d;
@@ -264,5 +271,5 @@ void _start(void)
 
     puts_raw("[net] all done, exit 0x70\n");
     sc1(231 /*exit_group*/, 0x70);
-    __builtin_unreachable();
+    DUET_USER_TRAP_UNREACHABLE();
 }

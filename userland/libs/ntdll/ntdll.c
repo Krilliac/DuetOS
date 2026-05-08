@@ -41,6 +41,12 @@ typedef unsigned short wchar_t16;
 #define NTSTATUS_INVALID_PARAMETER 0xC000000DUL
 
 #define NTDLL_NORETURN __attribute__((noreturn))
+#define DUET_USER_TRAP_UNREACHABLE()                                                                                   \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        __asm__ volatile("ud2" ::: "memory");                                                                          \
+        __builtin_unreachable();                                                                                       \
+    } while (0)
 
 /* ------------------------------------------------------------------
  * __chkstk — x86_64 stack probe
@@ -192,7 +198,7 @@ __declspec(dllexport) NTDLL_NORETURN NTSTATUS NtContinue(void* context, BOOL bTe
     (void)context;
     (void)bTestAlert;
     __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)0));
-    __builtin_unreachable();
+    DUET_USER_TRAP_UNREACHABLE();
 }
 
 /* NtAllocateVirtualMemory — honours hProcess (NtCurrentProcess()

@@ -116,6 +116,12 @@ __declspec(dllexport) NO_BUILTIN_MEMOPS void* memchr(const void* ptr, int c, siz
  * ------------------------------------------------------------------ */
 
 #define SEH_NORETURN __attribute__((noreturn))
+#define DUET_USER_TRAP_UNREACHABLE()                                                                                   \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        __asm__ volatile("ud2" ::: "memory");                                                                          \
+        __builtin_unreachable();                                                                                       \
+    } while (0)
 
 __declspec(dllexport) unsigned long __C_specific_handler(void* ExceptionRecord, void* EstablisherFrame,
                                                          void* ContextRecord, void* DispatcherContext)
@@ -152,19 +158,19 @@ __declspec(dllexport) SEH_NORETURN void _CxxThrowException(void* object, const v
     (void)object;
     (void)throwInfo;
     __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)3));
-    __builtin_unreachable();
+    DUET_USER_TRAP_UNREACHABLE();
 }
 
 __declspec(dllexport) SEH_NORETURN void _purecall(void)
 {
     __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)3));
-    __builtin_unreachable();
+    DUET_USER_TRAP_UNREACHABLE();
 }
 
 __declspec(dllexport) SEH_NORETURN void __std_terminate(void)
 {
     __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)3));
-    __builtin_unreachable();
+    DUET_USER_TRAP_UNREACHABLE();
 }
 
 __declspec(dllexport) void __std_exception_copy(void* from, void* to)
@@ -206,5 +212,5 @@ __declspec(dllexport) SEH_NORETURN void __CxxUnwind(void* target_frame, void* ta
     (void)exc_record;
     (void)return_value;
     __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)3));
-    __builtin_unreachable();
+    DUET_USER_TRAP_UNREACHABLE();
 }

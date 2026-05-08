@@ -31,6 +31,13 @@
 
 typedef long long i64;
 
+#define DUET_USER_TRAP_UNREACHABLE()                                                                                   \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        __asm__ volatile("ud2" ::: "memory");                                                                          \
+        __builtin_unreachable();                                                                                       \
+    } while (0)
+
 static inline i64 sys_write(i64 fd, const char* buf, i64 len)
 {
     i64 ret;
@@ -41,7 +48,7 @@ static inline i64 sys_write(i64 fd, const char* buf, i64 len)
 static inline void sys_exit(i64 code)
 {
     __asm__ volatile("int $0x80" : : "a"((i64)0), "D"(code) : "memory");
-    __builtin_unreachable();
+    DUET_USER_TRAP_UNREACHABLE();
 }
 
 static const char kMsg[] = "[hello-pe] Hello from a PE executable!\n";

@@ -78,6 +78,7 @@
 #include "subsystems/win32/gdi_objects.h"
 #include "subsystems/win32/heap_syscall.h"
 #include "subsystems/win32/vmap_syscall.h"
+#include "util/debug_assert.h"
 #include "subsystems/win32/tls_syscall.h"
 #include "subsystems/win32/file_syscall.h"
 #include "subsystems/win32/thread_syscall.h"
@@ -526,6 +527,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // frame on this task's kernel stack becomes orphaned and
         // will be KFree'd by the reaper along with the stack itself.
         sched::SchedExit();
+        DEBUG_UNREACHABLE("syscall", "SYS_EXIT returned from SchedExit");
     }
 
     case SYS_GETPID:

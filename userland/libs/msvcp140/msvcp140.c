@@ -21,6 +21,12 @@
 typedef int BOOL;
 
 #define NORETURN __attribute__((noreturn))
+#define DUET_USER_TRAP_UNREACHABLE()                                                                                   \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        __asm__ volatile("ud2" ::: "memory");                                                                          \
+        __builtin_unreachable();                                                                                       \
+    } while (0)
 
 /* ------------------------------------------------------------------
  * Throw helpers — SYS_EXIT(3) = abort. The MSVC C++ runtime
@@ -33,7 +39,7 @@ typedef int BOOL;
 __declspec(dllexport) NORETURN void msvcp_terminate(void)
 {
     __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)3));
-    __builtin_unreachable();
+    DUET_USER_TRAP_UNREACHABLE();
 }
 
 /* ------------------------------------------------------------------

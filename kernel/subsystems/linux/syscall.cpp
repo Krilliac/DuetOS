@@ -69,6 +69,7 @@
 #include "diag/log_names.h"
 #include "proc/process.h"
 #include "util/random.h"
+#include "util/debug_assert.h"
 #include "cpu/percpu.h"
 #include "fs/fat32.h"
 #include "mm/address_space.h"
@@ -686,10 +687,7 @@ i64 LinuxSchedYield()
 {
     DoExitGroup(status);
     // DoExitGroup calls sched::SchedExit which is [[noreturn]].
-    for (;;)
-    {
-        asm volatile("hlt");
-    }
+    DEBUG_UNREACHABLE("subsystems/linux", "LinuxExit returned from DoExitGroup");
 }
 i64 LinuxGetPid()
 {
