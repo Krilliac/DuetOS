@@ -29,6 +29,7 @@
 #include "shell/shell_internal.h"
 
 #include "arch/x86_64/serial.h"
+#include "diag/fix_journal.h"
 #include "drivers/net/net.h"
 #include "drivers/usb/cdc_ecm.h"
 #include "drivers/usb/rndis.h"
@@ -625,6 +626,8 @@ void CmdNetscan()
             WriteU64Dec(wifi.firmware_incompatible);
             ConsoleWrite(" load-error=");
             WriteU64Dec(wifi.firmware_load_error);
+            ConsoleWrite(" upload-failed=");
+            WriteU64Dec(wifi.firmware_upload_failed);
             ConsoleWriteln("");
             if (wifi.firmware_ready == 0)
             {
@@ -778,6 +781,74 @@ void CmdWifi(u32 argc, char** argv)
         ConsoleWriteln("WIFI: disconnected");
         return;
     }
+    if (StrEq(argv[1], "activate") || StrEq(argv[1], "capture"))
+    {
+        const bool capture = StrEq(argv[1], "capture");
+        duetos::core::CleanroomTraceRecord("wifi", capture ? "capture" : "activate", duetos::drivers::net::NicCount(),
+                                           duetos::net::wireless::diag::TotalRecorded(), 0);
+        if (capture)
+            duetos::net::wireless::diag::Clear();
+
+        duetos::drivers::net::NetInit();
+
+        const auto wifi = duetos::drivers::net::WirelessStatusRead();
+        ConsoleWrite("WIFI: hardware path activated adapters=");
+        WriteU64Dec(wifi.adapters_detected);
+        ConsoleWrite(" drivers=");
+        WriteU64Dec(wifi.drivers_online);
+        ConsoleWrite(" fw-ready=");
+        WriteU64Dec(wifi.firmware_ready);
+        ConsoleWrite(" missing=");
+        WriteU64Dec(wifi.firmware_missing);
+        ConsoleWrite(" incompatible=");
+        WriteU64Dec(wifi.firmware_incompatible);
+        ConsoleWrite(" load-error=");
+        WriteU64Dec(wifi.firmware_load_error);
+        ConsoleWrite(" upload-failed=");
+        WriteU64Dec(wifi.firmware_upload_failed);
+        ConsoleWriteln("");
+
+        for (u64 i = 0; i < duetos::drivers::net::NicCount(); ++i)
+        {
+            if (!duetos::drivers::net::NicIsWireless(i))
+                continue;
+            const auto& nic = duetos::drivers::net::Nic(i);
+            ConsoleWrite("  wifi");
+            WriteU64Dec(i);
+            ConsoleWrite(" vendor=");
+            ConsoleWrite(nic.vendor != nullptr ? nic.vendor : "?");
+            ConsoleWrite(" family=");
+            ConsoleWrite(nic.family != nullptr ? nic.family : "?");
+            ConsoleWrite(" did=");
+            WriteU64Hex(nic.device_id);
+            ConsoleWrite(" chip=");
+            WriteU64Hex(nic.chip_id);
+            ConsoleWrite(" online=");
+            ConsoleWrite(nic.driver_online ? "yes" : "no");
+            ConsoleWriteln("");
+        }
+
+        const auto fix = duetos::diag::FixJournalGetStats();
+        ConsoleWrite("WIFI: capture rings wifi-diag retained=");
+        WriteU64Dec(duetos::net::wireless::diag::EventCount());
+        ConsoleWrite(" total=");
+        WriteU64Dec(duetos::net::wireless::diag::TotalRecorded());
+        ConsoleWrite(" crtrace=");
+        WriteU64Dec(duetos::core::CleanroomTraceCount());
+        ConsoleWrite(" fix-unique=");
+        WriteU64Dec(fix.records_unique);
+        ConsoleWrite(" fix-dedup=");
+        WriteU64Dec(fix.dedup_hits);
+        ConsoleWriteln("");
+
+        if (capture)
+        {
+            duetos::net::wireless::diag::Dump(64);
+            duetos::diag::FixJournalEmitBootSummary();
+            ConsoleWriteln("WIFI: captured wifi diag, cleanroom trace counters, and fix-journal summary to serial");
+        }
+        return;
+    }
     if (StrEq(argv[1], "diag"))
     {
         if (argc >= 3 && StrEq(argv[2], "clear"))
@@ -812,7 +883,7 @@ void CmdWifi(u32 argc, char** argv)
         duetos::net::wireless::diag::Dump(max);
         return;
     }
-    ConsoleWriteln("WIFI: usage: wifi <status|scan|connect|disconnect|diag [N|clear]>");
+    ConsoleWriteln("WIFI: usage: wifi <status|activate|capture|scan|connect|disconnect|diag [N|clear]>");
 }
 
 void CmdFwPolicy(u32 argc, char** argv)

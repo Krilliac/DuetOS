@@ -1,7 +1,10 @@
 #include "drivers/net/iwlwifi.h"
 
 #include "arch/x86_64/serial.h"
+#include "diag/cleanroom_trace.h"
 #include "drivers/net/iwlwifi_fw.h"
+#include "drivers/net/iwlwifi_upload.h"
+#include "net/wireless/wifi_diag.h"
 #include "loader/firmware_loader.h"
 #include "log/klog.h"
 #include "sched/sched.h"
@@ -20,7 +23,7 @@ namespace
 // anyway.
 constexpr u32 kCsrHwRev = 0x028;   // u32 — silicon stepping + dash + sku
 constexpr u32 kCsrGpCntrl = 0x024; // u32 — power / sleep state
-constexpr u32 kCsrIntCoalescing = 0x004;
+constexpr u32 kCsrIntCoalescingReg = 0x004;
 [[maybe_unused]] constexpr u32 kCsrInt = 0x008;
 
 // HW_REV layout (Intel CSR programming guide):
@@ -62,6 +65,8 @@ const char* ChipIdShortString(u32 hw_rev)
 }
 
 constinit IwlwifiStats g_stats = {};
+
+namespace wdiag = duetos::net::wireless::diag;
 
 u32 Mmio32Read(const NicInfo& n, u64 off)
 {
@@ -170,8 +175,14 @@ bool IwlwifiBringUp(NicInfo& n)
     // chip is in deep sleep without a wake handshake — we don't have
     // firmware to do that handshake, so log and bail.
     const u32 hw_rev = Mmio32Read(n, kCsrHwRev);
+    const u64 bdf = (static_cast<u64>(n.bus) << 16) | (static_cast<u64>(n.device) << 8) | n.function;
+    wdiag::RecordOk(wdiag::Layer::Driver, "iwl-probe", bdf, n.device_id, hw_rev);
+    duetos::core::CleanroomTraceRecord("iwlwifi", "probe", bdf, n.device_id, hw_rev);
     if (hw_rev == 0xFFFFFFFFu || hw_rev == 0)
     {
+        wdiag::RecordErr(wdiag::Layer::Driver, "iwl-dead", static_cast<u32>(duetos::core::ErrorCode::IoError), bdf,
+                         n.device_id, hw_rev);
+        duetos::core::CleanroomTraceRecord("iwlwifi", "dead", bdf, n.device_id, hw_rev);
         arch::SerialWrite("[iwlwifi] chip not responsive (hw_rev=");
         arch::SerialWriteHex(hw_rev);
         arch::SerialWrite(") — leaving in probe-only state\n");
@@ -183,7 +194,8 @@ bool IwlwifiBringUp(NicInfo& n)
     // need to drive. Logging it now gives the firmware-loader slice
     // a known baseline.
     const u32 gp_cntrl = Mmio32Read(n, kCsrGpCntrl);
-    const u32 int_coal = Mmio32Read(n, kCsrIntCoalescing);
+    const u32 int_coal = Mmio32Read(n, kCsrIntCoalescingReg);
+    wdiag::RecordOk(wdiag::Layer::Driver, "iwl-csr", hw_rev, gp_cntrl, int_coal);
 
     n.chip_id = hw_rev;
     n.driver_online = true;
@@ -233,8 +245,31 @@ bool IwlwifiBringUp(NicInfo& n)
         if (p.has_value() && parsed.valid)
         {
             IwlFirmwareLog(parsed);
-            n.firmware_pending = false;
-            n.wireless_fw_state = NicInfo::WirelessFwState::Ready;
+            wdiag::RecordOk(wdiag::Layer::Driver, "iwl-fw-ready", parsed.ver_packed, parsed.total_records,
+                            parsed.sec_rt_count, parsed.human_readable);
+            duetos::core::CleanroomTraceRecord("iwlwifi", "fw-ready", bdf, parsed.ver_packed, parsed.total_records);
+
+            IwlUploadResult upload{};
+            const auto upload_result = IwlUploadDrive(n, parsed, &upload);
+            if (upload_result.has_value())
+            {
+                n.firmware_pending = false;
+                n.wireless_fw_state = NicInfo::WirelessFwState::Ready;
+                wdiag::RecordOk(wdiag::Layer::Driver, "iwl-upload-ok", upload.sections_uploaded, upload.bytes_uploaded,
+                                upload.alive_wait_polls);
+                duetos::core::CleanroomTraceRecord("iwlwifi", "upload-ok", bdf, upload.bytes_uploaded,
+                                                   upload.alive_wait_polls);
+            }
+            else
+            {
+                n.firmware_pending = true;
+                n.wireless_fw_state = NicInfo::WirelessFwState::UploadFailed;
+                wdiag::RecordErr(wdiag::Layer::Driver, "iwl-upload-fail", static_cast<u32>(upload_result.error()),
+                                 upload.sections_uploaded, upload.bytes_uploaded, static_cast<u32>(upload.failed_at));
+                duetos::core::CleanroomTraceRecord("iwlwifi", "upload-fail", bdf,
+                                                   static_cast<u32>(upload_result.error()),
+                                                   static_cast<u32>(upload.failed_at));
+            }
         }
         else
         {
@@ -242,6 +277,9 @@ bool IwlwifiBringUp(NicInfo& n)
                               "marking Incompatible\n");
             n.firmware_pending = true;
             n.wireless_fw_state = NicInfo::WirelessFwState::Incompatible;
+            wdiag::RecordErr(wdiag::Layer::Driver, "iwl-fw-parse", static_cast<u32>(duetos::core::ErrorCode::Corrupt),
+                             bdf, fw.value().size, 0);
+            duetos::core::CleanroomTraceRecord("iwlwifi", "fw-parse", bdf, fw.value().size, 0);
         }
         duetos::core::FwRelease(fw.value());
     }
@@ -252,12 +290,18 @@ bool IwlwifiBringUp(NicInfo& n)
         {
         case duetos::core::ErrorCode::NotFound:
             n.wireless_fw_state = NicInfo::WirelessFwState::Missing;
+            wdiag::RecordErr(wdiag::Layer::Driver, "iwl-fw-miss", static_cast<u32>(fw.error()), bdf, n.device_id, 0);
+            duetos::core::CleanroomTraceRecord("iwlwifi", "fw-miss", bdf, n.device_id, 0);
             break;
         case duetos::core::ErrorCode::Corrupt:
             n.wireless_fw_state = NicInfo::WirelessFwState::Incompatible;
+            wdiag::RecordErr(wdiag::Layer::Driver, "iwl-fw-bad", static_cast<u32>(fw.error()), bdf, n.device_id, 0);
+            duetos::core::CleanroomTraceRecord("iwlwifi", "fw-bad", bdf, n.device_id, 0);
             break;
         default:
             n.wireless_fw_state = NicInfo::WirelessFwState::LoadError;
+            wdiag::RecordErr(wdiag::Layer::Driver, "iwl-fw-load", static_cast<u32>(fw.error()), bdf, n.device_id, 0);
+            duetos::core::CleanroomTraceRecord("iwlwifi", "fw-load", bdf, static_cast<u32>(fw.error()), 0);
             break;
         }
     }
@@ -281,10 +325,35 @@ bool IwlwifiBringUp(NicInfo& n)
     arch::SerialWriteHex(int_coal);
     arch::SerialWrite(" silicon=");
     arch::SerialWrite(ChipIdShortString(hw_rev));
-    arch::SerialWrite(" status=fw-pending\n");
+    arch::SerialWrite(" status=");
+    switch (n.wireless_fw_state)
+    {
+    case NicInfo::WirelessFwState::Ready:
+        arch::SerialWrite("fw-ready");
+        break;
+    case NicInfo::WirelessFwState::UploadFailed:
+        arch::SerialWrite("upload-failed");
+        break;
+    case NicInfo::WirelessFwState::Incompatible:
+        arch::SerialWrite("fw-incompatible");
+        break;
+    case NicInfo::WirelessFwState::LoadError:
+        arch::SerialWrite("fw-load-error");
+        break;
+    default:
+        arch::SerialWrite("fw-missing");
+        break;
+    }
+    arch::SerialWrite("\n");
 
-    duetos::sched::SchedCreate(IwlwifiWatchEntry, &n, "iwlwifi-watch");
     return true;
+}
+
+void IwlwifiStartWatch(NicInfo& n)
+{
+    if (!n.driver_online || n.mmio_virt == nullptr)
+        return;
+    duetos::sched::SchedCreate(IwlwifiWatchEntry, &n, "iwlwifi-watch");
 }
 
 IwlwifiStats IwlwifiStatsRead()

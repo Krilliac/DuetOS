@@ -244,8 +244,14 @@ bool Bcm43xxBringUp(NicInfo& n)
     arch::SerialWrite(ChipFamilyString(chip_id_field));
     arch::SerialWrite(" status=fw-pending\n");
 
-    duetos::sched::SchedCreate(Bcm43xxWatchEntry, &n, "bcm43xx-watch");
     return true;
+}
+
+void Bcm43xxStartWatch(NicInfo& n)
+{
+    if (!n.driver_online || n.mmio_virt == nullptr)
+        return;
+    duetos::sched::SchedCreate(Bcm43xxWatchEntry, &n, "bcm43xx-watch");
 }
 
 Bcm43xxStats Bcm43xxStatsRead()

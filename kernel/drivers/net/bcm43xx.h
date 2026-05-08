@@ -21,7 +21,7 @@
  *   - Mark the NIC `driver_online=true`, `firmware_pending=true`.
  *     b43/brcmsmac/brcmfmac all need vendor microcode (.fw) before
  *     PHY init runs; without a firmware loader we stop here.
- *   - Spawn a `bcm43xx-watch` task that polls CORE_INFO at 1 Hz so
+ *   - NetInit starts a `bcm43xx-watch` task that polls CORE_INFO at 1 Hz so
  *     unexpected disappearance flips `driver_online`.
  *
  * Out of scope (deferred):
@@ -45,6 +45,10 @@ bool Bcm43xxMatches(u16 vendor_id, u16 device_id);
 /// firmware". Idempotent. Returns true iff CORE_INFO returned a
 /// plausible chip-id dword.
 bool Bcm43xxBringUp(NicInfo& n);
+
+/// Start the 1 Hz liveness watch after NetInit has copied the NIC
+/// record into the stable global NIC table.
+void Bcm43xxStartWatch(NicInfo& n);
 
 struct Bcm43xxStats
 {

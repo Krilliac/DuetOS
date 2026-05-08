@@ -29,11 +29,15 @@
 #include "arch/x86_64/cpu_mitigations.h"
 #include "arch/x86_64/hpet.h"
 #include "arch/x86_64/lapic.h"
+#include "arch/x86_64/serial.h"
 #include "arch/x86_64/smbios.h"
 #include "arch/x86_64/smp.h"
 #include "arch/x86_64/thermal.h"
 #include "arch/x86_64/timer.h"
-#include "time/tick.h"
+#include "diag/cleanroom_trace.h"
+#include "diag/fix_journal.h"
+#include "drivers/audio/audio.h"
+#include "drivers/audio/hda.h"
 #include "drivers/audio/hda_jack.h"
 #include "drivers/audio/hda_jack_inventory.h"
 #include "drivers/mei/mei.h"
@@ -45,8 +49,14 @@
 #include "drivers/gpu/virtio_gpu.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/input/ps2mouse.h"
+#include "drivers/net/net.h"
 #include "drivers/pci/pci.h"
 #include "drivers/power/power.h"
+#include "drivers/storage/ahci.h"
+#include "drivers/storage/block.h"
+#include "drivers/storage/nvme.h"
+#include "drivers/usb/usb.h"
+#include "drivers/usb/xhci.h"
 #include "drivers/video/console.h"
 #include "drivers/video/display_info.h"
 #include "drivers/video/framebuffer.h"
@@ -55,6 +65,7 @@
 #include "mm/paging.h"
 #include "sched/sched.h"
 #include "subsystems/graphics/graphics.h"
+#include "time/tick.h"
 #include "util/symbols.h"
 
 namespace duetos::core::shell::internal
@@ -99,6 +110,116 @@ inline u64 ReadMsrRaw(u32 msr)
     u32 lo, hi;
     asm volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
     return (static_cast<u64>(hi) << 32) | lo;
+}
+
+void SerialWriteHexField(const char* name, u64 value)
+{
+    duetos::arch::SerialWrite(" ");
+    duetos::arch::SerialWrite(name);
+    duetos::arch::SerialWrite("=");
+    duetos::arch::SerialWriteHex(value);
+}
+
+void RecordHardwareTrace(const char* phase)
+{
+    const auto kbd = duetos::drivers::input::Ps2KeyboardStats();
+    const auto mouse = duetos::drivers::input::Ps2MouseStatsRead();
+    const auto power = duetos::drivers::power::PowerSnapshotRead();
+    const auto wifi = duetos::drivers::net::WirelessStatusRead();
+
+    duetos::core::CleanroomTraceRecord("hw", phase, duetos::drivers::pci::PciDeviceCount(),
+                                       duetos::drivers::gpu::GpuCount(),
+                                       duetos::drivers::audio::AudioControllerCount());
+    duetos::core::CleanroomTraceRecord("hw", "usb-storage", duetos::drivers::usb::HostControllerCount(),
+                                       duetos::drivers::usb::xhci::XhciCount(),
+                                       duetos::drivers::storage::BlockDeviceCount());
+    duetos::core::CleanroomTraceRecord("hw", "disk-sectors", duetos::drivers::storage::NvmeNamespaceSectorCount(),
+                                       duetos::drivers::storage::AhciNamespaceSectorCount(),
+                                       duetos::drivers::mei::MeiDeviceCount());
+    duetos::core::CleanroomTraceRecord("hw", "net-input", duetos::drivers::net::NicCount(), wifi.adapters_detected,
+                                       kbd.irqs_seen + mouse.irqs_seen);
+    duetos::core::CleanroomTraceRecord("hw", "power", power.ac, power.battery.state,
+                                       (static_cast<u64>(power.package_temp_c) << 32) | power.cpu_temp_c);
+}
+
+void PrintHardwareCaptureSummary(bool serial)
+{
+    const auto kbd = duetos::drivers::input::Ps2KeyboardStats();
+    const auto mouse = duetos::drivers::input::Ps2MouseStatsRead();
+    const auto power = duetos::drivers::power::PowerSnapshotRead();
+    const auto wifi = duetos::drivers::net::WirelessStatusRead();
+    const auto fix = duetos::diag::FixJournalGetStats();
+
+    ConsoleWrite("HW: pci=");
+    WriteU64Dec(duetos::drivers::pci::PciDeviceCount());
+    ConsoleWrite(" gpu=");
+    WriteU64Dec(duetos::drivers::gpu::GpuCount());
+    ConsoleWrite(" audio=");
+    WriteU64Dec(duetos::drivers::audio::AudioControllerCount());
+    ConsoleWrite(" mei=");
+    WriteU64Dec(duetos::drivers::mei::MeiDeviceCount());
+    ConsoleWriteln("");
+
+    ConsoleWrite("HW: usb-hc=");
+    WriteU64Dec(duetos::drivers::usb::HostControllerCount());
+    ConsoleWrite(" xhci=");
+    WriteU64Dec(duetos::drivers::usb::xhci::XhciCount());
+    ConsoleWrite(" block=");
+    WriteU64Dec(duetos::drivers::storage::BlockDeviceCount());
+    ConsoleWrite(" nvme-sectors=");
+    WriteU64Dec(duetos::drivers::storage::NvmeNamespaceSectorCount());
+    ConsoleWrite(" ahci-sectors=");
+    WriteU64Dec(duetos::drivers::storage::AhciNamespaceSectorCount());
+    ConsoleWriteln("");
+
+    ConsoleWrite("HW: nic=");
+    WriteU64Dec(duetos::drivers::net::NicCount());
+    ConsoleWrite(" wifi-adapters=");
+    WriteU64Dec(wifi.adapters_detected);
+    ConsoleWrite(" wifi-upload-failed=");
+    WriteU64Dec(wifi.firmware_upload_failed);
+    ConsoleWrite(" hda-streams=");
+    WriteU64Dec(duetos::drivers::audio::hda::TotalStreamCount());
+    ConsoleWrite(" hda-armed=");
+    WriteU64Dec(duetos::drivers::audio::hda::ArmedStreamCount());
+    ConsoleWriteln("");
+
+    ConsoleWrite("HW: input kbd-irqs=");
+    WriteU64Dec(kbd.irqs_seen);
+    ConsoleWrite(" mouse-irqs=");
+    WriteU64Dec(mouse.irqs_seen);
+    ConsoleWrite(" mouse-packets=");
+    WriteU64Dec(mouse.packets_decoded);
+    ConsoleWrite(" ac=");
+    ConsoleWrite(duetos::drivers::power::AcStateName(power.ac));
+    ConsoleWrite(" bat=");
+    ConsoleWrite(duetos::drivers::power::BatteryStateName(power.battery.state));
+    ConsoleWriteln("");
+
+    ConsoleWrite("HW: traces crtrace=");
+    WriteU64Dec(duetos::core::CleanroomTraceCount());
+    ConsoleWrite(" fix-unique=");
+    WriteU64Dec(fix.records_unique);
+    ConsoleWrite(" fix-dedup=");
+    WriteU64Dec(fix.dedup_hits);
+    ConsoleWriteln("");
+
+    if (!serial)
+        return;
+
+    duetos::arch::SerialWrite("[hwcap] summary");
+    SerialWriteHexField("pci", duetos::drivers::pci::PciDeviceCount());
+    SerialWriteHexField("gpu", duetos::drivers::gpu::GpuCount());
+    SerialWriteHexField("audio", duetos::drivers::audio::AudioControllerCount());
+    SerialWriteHexField("usb_hc", duetos::drivers::usb::HostControllerCount());
+    SerialWriteHexField("xhci", duetos::drivers::usb::xhci::XhciCount());
+    SerialWriteHexField("block", duetos::drivers::storage::BlockDeviceCount());
+    SerialWriteHexField("nic", duetos::drivers::net::NicCount());
+    SerialWriteHexField("wifi", wifi.adapters_detected);
+    SerialWriteHexField("mei", duetos::drivers::mei::MeiDeviceCount());
+    SerialWriteHexField("crtrace", duetos::core::CleanroomTraceCount());
+    SerialWriteHexField("fix_unique", fix.records_unique);
+    duetos::arch::SerialWrite("\n");
 }
 
 // Rflags bit positions + names, parallel arrays so the
@@ -435,6 +556,40 @@ void CmdSmp()
     if (n == 1)
     {
         ConsoleWriteln("(BSP only; AP bring-up deferred — see decision log #021)");
+    }
+}
+
+void CmdHw(u32 argc, char** argv)
+{
+    const bool capture = (argc >= 2 && StrEq(argv[1], "capture"));
+    const bool activate = capture || (argc >= 2 && StrEq(argv[1], "activate"));
+    if (argc >= 2 && !activate && !StrEq(argv[1], "status"))
+    {
+        ConsoleWriteln("HW: usage: hw <status|activate|capture>");
+        return;
+    }
+
+    if (activate)
+    {
+        // Re-run only init paths documented as idempotent. UsbInit,
+        // PowerInit, and PS/2 init are intentionally single-shot, so
+        // this command captures their live counters instead of trying
+        // to replay controller init sequences that own IRQ routing.
+        duetos::drivers::gpu::GpuInit();
+        duetos::drivers::audio::AudioInit();
+        duetos::drivers::net::NetInit();
+        duetos::drivers::mei::MeiInit();
+        duetos::drivers::storage::NvmeInit();
+        duetos::drivers::storage::AhciInit();
+        duetos::drivers::usb::xhci::XhciInit();
+    }
+
+    RecordHardwareTrace(capture ? "capture" : (activate ? "activate" : "status"));
+    PrintHardwareCaptureSummary(capture);
+    if (capture)
+    {
+        duetos::diag::FixJournalEmitBootSummary();
+        ConsoleWriteln("HW: captured hardware summary, cleanroom trace records, and fix-journal summary to serial");
     }
 }
 
