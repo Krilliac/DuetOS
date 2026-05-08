@@ -3583,9 +3583,9 @@ __declspec(dllexport) HANDLE CreateThread(void* lpThreadAttributes, SIZE_T dwSta
                      : "=a"(rv)
                      : "a"((long long)45), "D"((long long)lpStartAddress), "S"((long long)lpParameter)
                      : "memory");
-    /* Win32 contract: NULL on failure. The kernel returns -1
-     * (cast as u64 = 0xFF..F) on failure; translate. */
-    if (rv == -1)
+    /* Win32 contract: NULL on failure. The kernel returns a
+     * negative errno on failure; translate every negative value. */
+    if (rv < 0)
     {
         if (lpThreadId != (DWORD*)0)
             *lpThreadId = 0;
@@ -3609,13 +3609,13 @@ __declspec(dllexport) BOOL GetExitCodeThread(HANDLE hThread, DWORD* lpExitCode)
 {
     long long rv;
     __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)55), "D"((long long)hThread) : "memory");
-    /* SYS_THREAD_EXIT_CODE returns u64(-1) on bad handle and
-     * the actual exit code (or STILL_ACTIVE = 0x103) otherwise.
+    /* SYS_THREAD_EXIT_CODE returns a negative errno on bad handle
+     * and the actual exit code (or STILL_ACTIVE = 0x103) otherwise.
      * Win32 contract: BOOL TRUE on success regardless of
      * STILL_ACTIVE; we always claim success (matches flat
      * stub's optimism). */
     if (lpExitCode != (DWORD*)0)
-        *lpExitCode = (rv == -1) ? 0x103 : (DWORD)rv;
+        *lpExitCode = (rv < 0) ? 0x103 : (DWORD)rv;
     return 1;
 }
 

@@ -163,8 +163,8 @@ __declspec(dllexport) int _configthreadlocale(int per_thread)
  * Both wrap SYS_THREAD_CREATE (syscall 45) which spawns a new Task
  * sharing the caller's Process / AddressSpace / cap set. The kernel
  * returns a Win32 pseudo-handle (kWin32ThreadBase + slot, i.e.
- * 0x400..0x407) on success or u64(-1) on failure (cap denied,
- * slot-table full, etc.). _beginthread's "auto-close" semantic is
+ * 0x400..0x407) on success or a negative errno on failure
+ * (cap denied, slot-table full, etc.). _beginthread's "auto-close" semantic is
  * a no-op here because the kernel reclaims slots on thread exit
  * regardless of CloseHandle calls.
  *
@@ -186,7 +186,7 @@ __declspec(dllexport) int _configthreadlocale(int per_thread)
 
 typedef unsigned long long uintptr_t;
 
-static inline uintptr_t ucrt_thread_create(void* start, void* arg)
+static inline long long ucrt_thread_create(void* start, void* arg)
 {
     long long rv;
     __asm__ volatile("int $0x80"
@@ -194,7 +194,7 @@ static inline uintptr_t ucrt_thread_create(void* start, void* arg)
                      : "a"((long long)45), "D"((long long)(unsigned long long)start),
                        "S"((long long)(unsigned long long)arg)
                      : "memory");
-    return (uintptr_t)rv;
+    return rv;
 }
 
 __declspec(dllexport) uintptr_t _beginthread(void (*start)(void*), unsigned stack_size, void* arg)
@@ -204,7 +204,8 @@ __declspec(dllexport) uintptr_t _beginthread(void (*start)(void*), unsigned stac
     {
         return (uintptr_t)-1L;
     }
-    return ucrt_thread_create((void*)start, arg);
+    const long long handle = ucrt_thread_create((void*)start, arg);
+    return handle < 0 ? (uintptr_t)-1L : (uintptr_t)handle;
 }
 
 __declspec(dllexport) uintptr_t _beginthreadex(void* security, unsigned stack_size, unsigned (*start)(void*), void* arg,
@@ -217,18 +218,22 @@ __declspec(dllexport) uintptr_t _beginthreadex(void* security, unsigned stack_si
     {
         return 0;
     }
-    const uintptr_t handle = ucrt_thread_create((void*)start, arg);
-    if (handle == (uintptr_t)-1L)
+    const long long handle = ucrt_thread_create((void*)start, arg);
+    if (handle < 0)
     {
+        if (thrdaddr != 0)
+        {
+            *thrdaddr = 0;
+        }
         return 0;
     }
     if (thrdaddr != 0)
     {
         // Use the low bits of the handle as the thread-id surrogate.
         // Win32 thread IDs are u32; the handle base 0x400 fits.
-        *thrdaddr = (unsigned)(handle & 0xFFFFFFFFu);
+        *thrdaddr = (unsigned)((uintptr_t)handle & 0xFFFFFFFFu);
     }
-    return handle;
+    return (uintptr_t)handle;
 }
 
 __declspec(dllexport) void _endthread(void)
