@@ -130,6 +130,41 @@ If you intentionally modify firmware for a lab experiment, add
 refuse it unless they set `allow_custom_lab_image` in the request. Do not use
 that path for normal boot or distribution images.
 
+## Installer integration
+
+The installer does not copy firmware into the git tree. Instead it stages
+operator-provided firmware packages into a build-time directory and points CMake
+at that directory with `-DDUETOS_FIRMWARE_STAGING_DIR=/path/to/stage`. The build
+generates a trusted-ramfs subtree at `/lib/firmware`, so the existing kernel
+firmware loader can find bytes through VFS during the first boot.
+
+The directory layout maps 1:1 under `/lib/firmware`. For the first open Wi-Fi
+bring-up loop, wrap the source-built AR9271/AR7010 firmware with
+`tools/firmware/mkduetfw.py`, then stage it like this:
+
+```text
+/path/to/stage/
+└── duetos/
+    └── open/
+        └── ath9k-htc/
+            └── htc_9271.fw.duetfw
+```
+
+At runtime, an `ath9k_htc` request with `vendor="ath9k-htc"` and
+`basename="htc_9271.fw.duetfw"` resolves in this order with the default
+`OpenThenVendor` policy:
+
+1. `/lib/firmware/duetos/open/ath9k-htc/htc_9271.fw.duetfw`
+2. `/lib/firmware/duetos/open/htc_9271.fw.duetfw`
+3. `/lib/firmware/ath9k-htc/htc_9271.fw.duetfw`
+4. `/lib/firmware/htc_9271.fw.duetfw`
+
+This makes installer images boot with Wi-Fi firmware available without bundling
+closed blobs in source control. Closed redistributable vendor firmware uses the
+same staging mechanism, but it should live under the vendor namespace rather
+than `duetos/open/`, and future package manifests must record its license and
+hash.
+
 ## Recommended first hardware loop
 
 Use an **AR9271/AR7010 USB adapter** as the open-firmware bring-up device:

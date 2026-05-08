@@ -18,6 +18,7 @@
 // kernel/CMakeLists.txt.
 #include "generated_hello_pe.h"
 #include "generated_usershell_elf.h"
+#include "generated_firmware_ramfs.h"
 
 // First PE that imports from kernel32.dll and is designed to
 // be RESOLVED (not just reported) by the Win32 subsystem.
@@ -798,8 +799,24 @@ constinit RamfsNode k_proc_dir = {
 };
 
 
+// /lib/firmware is generated from DUETOS_FIRMWARE_STAGING_DIR.
+// The directory exists even when no firmware was staged so the
+// firmware loader's VFS path is stable across installer images.
+constinit const RamfsNode* const k_trusted_lib_children[] = {
+    &generated::kFirmwareRamfsNode,
+    nullptr,
+};
+
+constinit RamfsNode k_trusted_lib_dir = {
+    .name = "lib",
+    .type = RamfsNodeType::kDir,
+    .children = k_trusted_lib_children,
+    .file_bytes = nullptr,
+    .file_size = 0,
+};
+
 constinit const RamfsNode* const k_trusted_root_children[] = {
-    &k_trusted_etc_dir, &k_trusted_bin_dir, &k_proc_dir, &k_sys_dir, nullptr,
+    &k_trusted_etc_dir, &k_trusted_bin_dir, &k_trusted_lib_dir, &k_proc_dir, &k_sys_dir, nullptr,
 };
 
 constinit RamfsNode k_trusted_root = {

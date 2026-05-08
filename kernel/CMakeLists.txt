@@ -83,6 +83,36 @@ set_source_files_properties(
 # ----------------------------------------------------------------------------
 set(DUETOS_EMBED_BLOB_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build/embed-blob.py")
 
+# Optional firmware staging tree. The installer (or a developer doing a
+# hardware bring-up image) can point this at a directory whose contents
+# should appear under /lib/firmware in the trusted ramfs. This keeps
+# redistributable/vendor firmware out of git while still letting the
+# Wi-Fi drivers use the normal VFS firmware-loader path on first boot.
+set(DUETOS_FIRMWARE_STAGING_DIR "" CACHE PATH
+    "Directory to embed under /lib/firmware for installer-staged Wi-Fi/GPU firmware")
+set(DUETOS_FIRMWARE_RAMFS_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build/gen-firmware-ramfs.py")
+set(DUETOS_FIRMWARE_RAMFS_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_firmware_ramfs.h")
+set(_duetos_firmware_deps "")
+if(DUETOS_FIRMWARE_STAGING_DIR)
+    if(NOT IS_DIRECTORY "${DUETOS_FIRMWARE_STAGING_DIR}")
+        message(FATAL_ERROR
+            "DUETOS_FIRMWARE_STAGING_DIR is set but is not a directory: ${DUETOS_FIRMWARE_STAGING_DIR}")
+    endif()
+    file(GLOB_RECURSE _duetos_firmware_deps CONFIGURE_DEPENDS
+        "${DUETOS_FIRMWARE_STAGING_DIR}/*")
+    message(STATUS "Installer firmware staging : ${DUETOS_FIRMWARE_STAGING_DIR}")
+else()
+    message(STATUS "Installer firmware staging : <empty>")
+endif()
+add_custom_command(
+    OUTPUT "${DUETOS_FIRMWARE_RAMFS_HEADER}"
+    COMMAND python3 "${DUETOS_FIRMWARE_RAMFS_SCRIPT}"
+            "${DUETOS_FIRMWARE_STAGING_DIR}" "${DUETOS_FIRMWARE_RAMFS_HEADER}"
+    DEPENDS "${DUETOS_FIRMWARE_RAMFS_SCRIPT}" ${_duetos_firmware_deps}
+    COMMENT "Generating installer-staged /lib/firmware ramfs tree"
+    VERBATIM)
+list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_FIRMWARE_RAMFS_HEADER}")
+
 # Helper: register a generated header that the kernel image embeds.
 #
 #   duetos_embed_blob(header
