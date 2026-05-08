@@ -212,11 +212,21 @@ In rough priority:
   AND control tier (crypto + EAPOL + 4-way handshake +
   wdev/MLME + per-vendor upload + ring scaffolds + DMA-coherent
   ring allocation + AES key wrap for encrypted M3 KeyData) all
-  landed. 13 boot self-tests pass; ~95M libFuzzer executions
-  with zero crashes.
-- **Blocks on:** real-hardware verification cycles. IRQ wiring
-  on per-vendor MSI/MSI-X. iwlwifi TFD descriptor build /
-  doorbell / per-RBD data buffers.
+  landed. Firmware parsers cover iwlwifi / rtl88xx / b43 envelopes,
+  and the firmware-source policy matrix now classifies open firmware
+  (ath9k_htc, b43/OpenFWWF) vs runtime-only closed blobs (Intel
+  iwlwifi, Intel GPU GuC/HuC/DMC, Realtek) vs research-only patch
+  frameworks. The iwlwifi TLV image builder now emits `.ucode`-style
+  containers from caller-owned sections, and the DuetOS firmware
+  package envelope (`DUETFWPK`) carries source flags + SHA-256 payload
+  verification with explicit opt-in for custom/lab images. 16
+  wireless/firmware boot self-tests pass; ~95M libFuzzer executions
+  completed before the policy/package/builder slices with zero crashes.
+- **Blocks on:** real-hardware verification cycles. Firmware package
+  signing root / key IDs. IRQ wiring on per-vendor
+  MSI/MSI-X. iwlwifi TFD descriptor build / doorbell / per-RBD
+  data buffers. Recommended first open-firmware loop: AR9271/AR7010
+  `ath9k_htc` USB adapter, then return to Intel iwlwifi.
 - **Unlocks:** Network flyout SSID picker, Settings → Network →
   Wi-Fi tab, captive-portal handler.
 - **Owner:** `kernel/drivers/net/wireless/` (per-vendor upload +

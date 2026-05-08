@@ -94,8 +94,10 @@
 #include "drivers/input/ps2mouse.h"
 #include "drivers/net/bcm43xx_fw.h"
 #include "drivers/net/bcm43xx_upload.h"
+#include "drivers/net/firmware_policy.h"
 #include "drivers/net/iwlwifi_fw.h"
 #include "drivers/net/iwlwifi_rings.h"
+#include "drivers/net/iwlwifi_ucode_builder.h"
 #include "drivers/net/iwlwifi_upload.h"
 #include "drivers/net/net.h"
 #include "drivers/net/rtl88xx_fw.h"
@@ -218,6 +220,7 @@
 #include "security/auth_pentest.h"
 #include "security/cap_audit.h"
 #include "loader/firmware_loader.h"
+#include "loader/firmware_package.h"
 #include "diag/heartbeat.h"
 #include "log/klog.h"
 #include "log/klog_persist.h"
@@ -2685,8 +2688,11 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Bringing up firmware loader (scaffold).\n");
     duetos::core::FwLoaderInit();
+    DUETOS_BOOT_SELFTEST(duetos::core::FwPackageSelfTest());
     duetos::net::wireless::diag::Init();
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::FirmwarePolicySelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::IwlFirmwareSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::IwlFirmwareBuilderSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::RtlFirmwareSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::BcmFirmwareSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::BeaconSelfTest());

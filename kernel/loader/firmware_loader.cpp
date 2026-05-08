@@ -1,4 +1,5 @@
 #include "loader/firmware_loader.h"
+#include "loader/firmware_package.h"
 
 #include "arch/x86_64/serial.h"
 #include "fs/ramfs.h"
@@ -95,6 +96,48 @@ bool BlobSizeAccepted(const FwLoadRequest& req, u64 bytes)
     return true;
 }
 
+::duetos::core::Result<FwBlob> PrepareFirmwareBlob(const FwLoadRequest& req, const fs::RamfsNode* n)
+{
+    if (n == nullptr || n->type != fs::RamfsNodeType::kFile || n->file_bytes == nullptr)
+        return ::duetos::core::Err{ErrorCode::Corrupt};
+    if (n->file_size > 0xFFFFFFFFu)
+        return ::duetos::core::Err{ErrorCode::Corrupt};
+
+    const u32 file_size = static_cast<u32>(n->file_size);
+    if (FwPackageLooksLike(n->file_bytes, file_size))
+    {
+        FwPackageParsed pkg{};
+        RESULT_TRY(FwPackageParse(n->file_bytes, file_size, &pkg));
+        if (!FwPackageLoadAllowed(pkg, req.allow_custom_lab_image))
+            return ::duetos::core::Err{ErrorCode::PermissionDenied};
+        if (!BlobSizeAccepted(req, pkg.payload_size))
+            return ::duetos::core::Err{ErrorCode::Corrupt};
+
+        FwBlob blob{};
+        blob.data = pkg.payload;
+        blob.size = pkg.payload_size;
+        blob.verified = true;
+        blob.handle = reinterpret_cast<u64>(n);
+        blob.packaged = true;
+        blob.source_rebuildable = FwPackageHasFlag(pkg, kFwPackageFlagSourceRebuildable);
+        blob.custom_lab_image = FwPackageHasFlag(pkg, kFwPackageFlagCustomLabImage);
+        return blob;
+    }
+
+    if (!BlobSizeAccepted(req, n->file_size))
+        return ::duetos::core::Err{ErrorCode::Corrupt};
+
+    FwBlob blob{};
+    blob.data = n->file_bytes;
+    blob.size = static_cast<u32>(n->file_size);
+    blob.verified = false;
+    blob.handle = reinterpret_cast<u64>(n);
+    blob.packaged = false;
+    blob.source_rebuildable = false;
+    blob.custom_lab_image = false;
+    return blob;
+}
+
 } // namespace
 
 void FwLoaderInit()
@@ -135,23 +178,17 @@ void FwLoaderInit()
             TraceRecord(req.vendor, req.basename, path, ErrorCode::NotFound, g_stats.policy);
             return ::duetos::core::Err{ErrorCode::NotFound};
         }
-        if (n->type != fs::RamfsNodeType::kFile || n->file_bytes == nullptr)
+        auto prepared = PrepareFirmwareBlob(req, n);
+        if (!prepared.has_value())
         {
-            TraceRecord(req.vendor, req.basename, path, ErrorCode::Corrupt, g_stats.policy);
-            return ::duetos::core::Err{ErrorCode::Corrupt};
+            const ErrorCode err = prepared.error();
+            TraceRecord(req.vendor, req.basename, path, err, g_stats.policy);
+            if (err == ErrorCode::PermissionDenied)
+                ++g_stats.verification_failures;
+            return ::duetos::core::Err{err};
         }
-        if (!BlobSizeAccepted(req, n->file_size))
-        {
-            TraceRecord(req.vendor, req.basename, path, ErrorCode::Corrupt, g_stats.policy);
-            return ::duetos::core::Err{ErrorCode::Corrupt};
-        }
-        FwBlob blob{};
-        blob.data = n->file_bytes;
-        blob.size = static_cast<u32>(n->file_size);
-        blob.verified = false;
-        blob.handle = reinterpret_cast<u64>(n);
         TraceRecord(req.vendor, req.basename, path, ErrorCode::Ok, g_stats.policy);
-        return blob;
+        return prepared;
     };
 
     auto try_and_log = [&](const char* prefix, bool with_vendor_prefix) -> ::duetos::core::Result<FwBlob>
@@ -163,6 +200,8 @@ void FwLoaderInit()
             KLOG_INFO_S("core/fw-loader", "firmware HIT", "path", path);
             arch::SerialWrite("[fw-loader] hit ");
             arch::SerialWrite(path);
+            if (r.value().packaged)
+                arch::SerialWrite(" (duetfw package)");
             arch::SerialWrite("\n");
             return r;
         }
