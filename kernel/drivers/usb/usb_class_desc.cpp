@@ -72,7 +72,7 @@ constexpr u8 kHubConfigDescriptor[] = {
 };
 
 constexpr u8 kUvcConfigDescriptor[] = {
-    0x09, 0x02, 0x2E, 0x00, 0x02, 0x01, 0x00, 0x80, 0xFA, // Config, total 46
+    0x09, 0x02, 0x30, 0x00, 0x02, 0x01, 0x00, 0x80, 0xFA, // Config, total 48
     0x09, 0x04, 0x00, 0x00, 0x01, 0x0E, 0x01, 0x00, 0x00, // VideoControl
     0x07, 0x05, 0x83, 0x03, 0x10, 0x00, 0x08,             // Interrupt IN
     0x09, 0x04, 0x01, 0x00, 0x02, 0x0E, 0x02, 0x00, 0x00, // VideoStreaming
@@ -144,6 +144,7 @@ void UsbClassDescriptorSelfTest()
         const bool ok = UsbClassParseConfigDescriptor(kUvcConfigDescriptor, sizeof(kUvcConfigDescriptor), &s);
         ExpectEq(u32(ok), 1, "uvc parse_ok");
         ExpectEq(s.interface_count, 2, "uvc interface_count");
+        ExpectEq(s.bytes_consumed, sizeof(kUvcConfigDescriptor), "uvc bytes_consumed");
         ExpectEq(s.flags & kUsbClassFlagUvcControl, kUsbClassFlagUvcControl, "uvc control flag");
         ExpectEq(s.flags & kUsbClassFlagUvcStreaming, kUsbClassFlagUvcStreaming, "uvc streaming flag");
         ExpectEq(s.uvc_control.interrupt_in, 0x83, "uvc control interrupt_in");
