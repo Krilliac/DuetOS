@@ -2284,16 +2284,6 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         SerialWrite("[boot] autologin=1 — skipping login gate\n");
     }
 
-    // `pentest=gui` arms the self-driving red-team runner that
-    // scripts keystrokes into the login gate + shell. See
-    // security/pentest_gui.cpp for the probe list. Deliberately
-    // requires an explicit opt-in — the final probe invokes
-    // `halt`, which is one-way.
-    if (CmdlineMatches(cmdline, "pentest", "gui"))
-    {
-        SerialWrite("[boot] pentest=gui — arming GUI pentest runner\n");
-        duetos::security::PentestGuiStart();
-    }
 
     // Phase::Vfs — ramfs init imperative (it lays down the v0 root
     // hierarchy + seed files); VFS self-test routes through the
@@ -4376,6 +4366,16 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     };
     duetos::sched::SchedCreate(kbd_reader, nullptr, "kbd-reader");
     SerialWrite("[bringup-tail] kbd-reader spawned\n");
+
+    // `pentest=gui` scripts keystrokes into the login gate + shell.
+    // Arm it only after the kbd-reader is live; starting it when the
+    // login gate opens overflows the keyboard injection ring because
+    // no reader exists yet to drain synthetic key events.
+    if (CmdlineMatches(cmdline, "pentest", "gui"))
+    {
+        SerialWrite("[boot] pentest=gui — arming GUI pentest runner\n");
+        duetos::security::PentestGuiStart();
+    }
 
     // Idle-timeout auto-lock watcher. Wakes once a second and
     // calls LoginLock when the active session has been idle past

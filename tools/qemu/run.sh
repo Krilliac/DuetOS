@@ -36,6 +36,17 @@ ISO_IMAGE="${BUILD_DIR}/duetos.iso"
 KERNEL_ELF="${BUILD_DIR}/kernel/duetos-kernel.elf"
 DISPLAY_MODE="${DUETOS_DISPLAY:-none}"
 TIMEOUT_SECS="${DUETOS_TIMEOUT:-}"
+
+# Back-compat with the documented invocation:
+#   tools/qemu/run.sh build/x86_64-debug/duetos.iso
+# Treat a leading .iso path as the boot image instead of forwarding it
+# to QEMU as an extra writable disk, which collides with the same file
+# when ISO_IMAGE already points there. Remaining argv stays available
+# for raw QEMU flags such as -s -S.
+if [[ $# -gt 0 && "${1}" == *.iso ]]; then
+    ISO_IMAGE="$1"
+    shift
+fi
 # Boot firmware: UEFI (OVMF) by default, SeaBIOS when
 # DUETOS_LEGACY=1. UEFI is the primary target for commodity
 # PC hardware post-2010; SeaBIOS stays available for
@@ -91,7 +102,7 @@ if [[ "${UEFI_MODE}" == "1" ]]; then
 fi
 
 if [[ -f "${ISO_IMAGE}" ]]; then
-    BOOT_SOURCE=(-cdrom "${ISO_IMAGE}" -boot d)
+    BOOT_SOURCE=(-drive "file=${ISO_IMAGE},index=2,media=cdrom,readonly=on,format=raw" -boot d)
 elif [[ -f "${KERNEL_ELF}" ]]; then
     echo "warning: ${ISO_IMAGE} not found, falling back to -kernel (Multiboot 1)." >&2
     echo "         This will NOT boot today — the kernel uses Multiboot 2." >&2
@@ -144,7 +155,7 @@ EOF
         echo "error: failed to build smoke ISO ${SMOKE_ISO}" >&2
         exit 1
     fi
-    BOOT_SOURCE=(-cdrom "${SMOKE_ISO}" -boot d)
+    BOOT_SOURCE=(-drive "file=${SMOKE_ISO},index=2,media=cdrom,readonly=on,format=raw" -boot d)
     echo "[run.sh] smoke profile=${SMOKE_PROFILE} iso=${SMOKE_ISO}" >&2
 fi
 
