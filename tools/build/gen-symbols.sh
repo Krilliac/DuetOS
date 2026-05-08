@@ -45,23 +45,42 @@ fi
 
 # Pick the best available tools. Prefer llvm-* — their output is
 # inlining-aware, and they demangle identically to what c++filt does.
-if command -v llvm-nm >/dev/null 2>&1; then
-    NM="llvm-nm"
-    NM_ARGS=(--print-size --demangle --defined-only --numeric-sort)
-elif command -v nm >/dev/null 2>&1; then
-    NM="nm"
-    NM_ARGS=(-S -C --defined-only -n)
+# Ubuntu's apt.llvm.org packages install version-suffixed binaries
+# (for example llvm-nm-20) without unsuffixed alternatives, so probe
+# the supported suffixes before falling back to GNU binutils.
+resolve_tool() {
+    local fallback="$1"
+    shift
+
+    local candidate
+    for candidate in "$@"; do
+        if command -v "${candidate}" >/dev/null 2>&1 && "${candidate}" --version >/dev/null 2>&1; then
+            echo "${candidate}"
+            return 0
+        fi
+    done
+
+    if command -v "${fallback}" >/dev/null 2>&1 && "${fallback}" --version >/dev/null 2>&1; then
+        echo "${fallback}"
+        return 0
+    fi
+
+    return 1
+}
+
+if NM="$(resolve_tool nm llvm-nm llvm-nm-20 llvm-nm-19 llvm-nm-18 llvm-nm-17 llvm-nm-16)"; then
+    if [[ "${NM}" == llvm-nm* ]]; then
+        NM_ARGS=(--print-size --demangle --defined-only --numeric-sort)
+    else
+        NM_ARGS=(-S -C --defined-only -n)
+    fi
 else
-    echo "gen-symbols: need llvm-nm or nm on PATH" >&2
+    echo "gen-symbols: need llvm-nm{-20,-19,-18,-17,-16} or nm on PATH" >&2
     exit 1
 fi
 
-if command -v llvm-addr2line >/dev/null 2>&1; then
-    ADDR2LINE="llvm-addr2line"
-elif command -v addr2line >/dev/null 2>&1; then
-    ADDR2LINE="addr2line"
-else
-    echo "gen-symbols: need llvm-addr2line or addr2line on PATH" >&2
+if ! ADDR2LINE="$(resolve_tool addr2line llvm-addr2line llvm-addr2line-20 llvm-addr2line-19 llvm-addr2line-18 llvm-addr2line-17 llvm-addr2line-16)"; then
+    echo "gen-symbols: need llvm-addr2line{-20,-19,-18,-17,-16} or addr2line on PATH" >&2
     exit 1
 fi
 

@@ -1769,7 +1769,7 @@ void Dispatch(char* line)
         CmdSpawn(argc, argv);
         return;
     }
-    if (StrEq(cmd, "kill"))
+    if (StrEq(cmd, "kill") || StrEq(cmd, "terminate"))
     {
         if (!RequireAdmin("KILL"))
             return;

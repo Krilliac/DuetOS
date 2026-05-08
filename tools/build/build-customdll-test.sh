@@ -46,7 +46,7 @@ resolve_dlltool() {
     fi
 
     local candidate
-    for candidate in llvm-dlltool llvm-dlltool-18 llvm-dlltool-17 llvm-dlltool-16 x86_64-w64-mingw32-dlltool; do
+    for candidate in llvm-dlltool llvm-dlltool-20 llvm-dlltool-19 llvm-dlltool-18 llvm-dlltool-17 llvm-dlltool-16 x86_64-w64-mingw32-dlltool; do
         if command -v "${candidate}" >/dev/null 2>&1; then
             echo "${candidate}"
             return 0
@@ -54,7 +54,7 @@ resolve_dlltool() {
     done
 
     echo "build-customdll-test.sh: no dlltool found." >&2
-    echo "  Tried DLLTOOL=${DLLTOOL} plus llvm-dlltool{-18,-17,-16} and x86_64-w64-mingw32-dlltool." >&2
+    echo "  Tried DLLTOOL=${DLLTOOL} plus llvm-dlltool{-20,-19,-18,-17,-16} and x86_64-w64-mingw32-dlltool." >&2
     echo "  Install llvm binutils (provides llvm-dlltool) or mingw-w64 binutils." >&2
     exit 1
 }
