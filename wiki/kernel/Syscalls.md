@@ -50,9 +50,10 @@ reads them to populate the [Syscall ABI specification](../specifications/Syscall
 
 Every privileged syscall checks `CurrentProcess()->caps` against a
 named capability bit before executing. Denials log
-`[sys] denied syscall=<NAME> pid=<P> cap=<NAME>` and return `-1` to
-user mode. Unprivileged syscalls (`SYS_GETPID`, `SYS_YIELD`, `SYS_EXIT`)
-run unchecked.
+`[sys] denied syscall=<NAME> pid=<P> cap=<NAME>` and return a stable
+negative errno to user mode (for example `-EACCES` for a failed
+capability gate). Unprivileged syscalls (`SYS_GETPID`, `SYS_YIELD`,
+`SYS_EXIT`) run unchecked.
 
 See [Capabilities](../security/Capabilities.md) for the cap inventory
 and gating model.
@@ -64,8 +65,10 @@ Syscall numbers are **ABI commitments once published**. Rules:
 1. Always add at the end of `syscall_names.def`. Never reuse a retired
    number — leave it as a deprecated stub if you must remove it.
 2. Argument order in the registers above is part of the ABI too.
-3. Return-value convention (negative on failure, zero or positive
-   value on success) is part of the ABI.
+3. Return-value convention (negative errno on failure, zero or positive
+   value on success) is part of the ABI. Kernel-internal `ErrorCode`
+   values are translated through `kernel/syscall/error.{h,cpp}` instead
+   of being collapsed to a generic `-1`.
 4. The capability bit a syscall checks is part of the ABI for any
    process image that ships a "requested caps" manifest.
 

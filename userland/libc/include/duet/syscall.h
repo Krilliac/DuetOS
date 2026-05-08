@@ -30,3 +30,23 @@
  * takes a NUL-terminated ASCII path pointer in rdi rather than
  * a file descriptor + buffer. */
 #define DUET_SYS_STDIN_READ 171
+
+/* Native syscall ABI errno values returned as negative rax payloads.
+ * Keep these in sync with kernel/syscall/error.h. */
+#define DUET_EPERM 1
+#define DUET_ENOENT 2
+#define DUET_EIO 5
+#define DUET_EBADF 9
+#define DUET_EAGAIN 11
+#define DUET_ENOMEM 12
+#define DUET_EACCES 13
+#define DUET_EFAULT 14
+#define DUET_EBUSY 16
+#define DUET_EEXIST 17
+#define DUET_ENODEV 19
+#define DUET_EINVAL 22
+#define DUET_ERANGE 34
+#define DUET_ENOSYS 38
+#define DUET_EOVERFLOW 75
+#define DUET_EOPNOTSUPP 95
+#define DUET_ETIMEDOUT 110

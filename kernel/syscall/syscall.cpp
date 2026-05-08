@@ -44,6 +44,7 @@
  */
 
 #include "syscall/cap_gate.h"
+#include "syscall/error.h"
 #include "syscall/syscall.h"
 
 #include "drivers/video/cursor.h"
@@ -352,12 +353,12 @@ void ReportUnknownSyscall(u64 num, u64 rip)
 // SYS_WRITE body. Copies up to `len` bytes from the user buffer,
 // truncates to kSyscallWriteMax, and spits them straight at COM1.
 // Only fd=1 (stdout) is recognised today — anything else is a
-// caller error and returns -1 so the pattern is immediately
+// caller error and returns -EBADF so the pattern is immediately
 // auditable. Returns the actual byte count written (possibly
-// truncated) or -1 on failure.
+// truncated) or a negative errno on failure.
 //
 // Cap check: fd=1 requires kCapSerialConsole. A sandboxed process
-// with an empty cap set sees -1 and nothing reaches the kernel
+// with an empty cap set sees -EACCES and nothing reaches the kernel
 // serial console. The denial is logged so it's trivially
 // auditable — without the log we'd be silently swallowing a
 // sandbox policy hit.
@@ -365,7 +366,7 @@ i64 DoWrite(u64 fd, const void* user_buf, u64 len)
 {
     if (fd != 1)
     {
-        return -1;
+        return kSysErrnoEBADF;
     }
 
     Process* proc = CurrentProcess();
@@ -392,7 +393,7 @@ i64 DoWrite(u64 fd, const void* user_buf, u64 len)
             arch::SerialWriteHex(proc->sandbox_denials);
             arch::SerialWrite("\n");
         }
-        return -1;
+        return kSysErrnoEACCES;
     }
 
     const u64 to_copy = (len > kSyscallWriteMax) ? kSyscallWriteMax : len;
@@ -408,7 +409,7 @@ i64 DoWrite(u64 fd, const void* user_buf, u64 len)
     u8 kbuf[kSyscallWriteMax];
     if (!mm::CopyFromUser(kbuf, user_buf, to_copy))
     {
-        return -1;
+        return kSysErrnoEFAULT;
     }
 
     // Drive COM1 with one SerialWriteN call — the per-port lock is
@@ -492,10 +493,11 @@ void SyscallDispatch(arch::TrapFrame* frame)
     // table; the per-handler conditional checks (foreign vs self
     // PID, fd=1 vs fd=2, etc.) still live in the switch arms below
     // and remain authoritative for those cases.
-    if (!SyscallGate(num, dispatch_proc).has_value())
+    const Result<void> gate_result = SyscallGate(num, dispatch_proc);
+    if (!gate_result.has_value())
     {
         KLOG_WARN_2V("syscall", "SyscallDispatch: capability gate denied", "num", num, "pid", dispatch_pid);
-        frame->rax = static_cast<u64>(-1);
+        frame->rax = ErrorCodeToNativeSyscallReturn(gate_result.error());
         return;
     }
 
@@ -3590,10 +3592,10 @@ void SyscallDispatch(arch::TrapFrame* frame)
                                                    "implement or route this syscall number", num, frame->rip);
         }
         ReportUnknownSyscall(num, frame->rip);
-        // Convention: -1 back to the caller for a bad syscall number.
-        // Two's-complement cast keeps the rax payload machine-visible
-        // as 0xFFFFFFFFFFFFFFFF rather than relying on enum promotion.
-        frame->rax = static_cast<u64>(-1);
+        // Convention: -ENOSYS back to the caller for a bad syscall
+        // number. Two's-complement cast keeps the rax payload
+        // machine-visible as a negative errno in rax.
+        frame->rax = static_cast<u64>(kSysErrnoENOSYS);
         return;
     }
     }

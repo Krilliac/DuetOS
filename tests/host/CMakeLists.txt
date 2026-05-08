@@ -85,6 +85,8 @@ function(add_host_test name)
 endfunction()
 
 add_host_test(result)
+add_host_test(syscall_error)
+target_sources(test_syscall_error PRIVATE "${CMAKE_SOURCE_DIR}/../../kernel/syscall/error.cpp")
 add_host_test(string)
 add_host_test(cvt)
 add_host_test(text_hash)
