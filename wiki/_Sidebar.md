@@ -28,6 +28,7 @@
 - [USB (xHCI + Class)](drivers/USB.md)
 - [Networking Drivers](drivers/Networking-Drivers.md)
 - [Wireless/GPU Firmware](drivers/Wireless-Firmware.md)
+- [Wi-Fi Onboarding](drivers/WiFi-Onboarding.md)
 - [Graphics Drivers](drivers/Graphics-Drivers.md)
 - [Audio](drivers/Audio.md)
 - [Input](drivers/Input.md)

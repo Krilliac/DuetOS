@@ -10,7 +10,8 @@
  * GPU drivers need before they can do real work. The loader uses a
  * VFS-backed lookup path, prefers `/lib/firmware/duetos/open/`,
  * unwraps DuetOS firmware packages after SHA-256 payload verification,
- * and enforces optional size bounds.
+ * accepts either the native basename or `<basename>.duetfw`, and enforces
+ * optional size bounds.
  *
  * Follow-up slices:
  *

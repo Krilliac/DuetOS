@@ -21,7 +21,7 @@ constinit u32 g_trace_head = 0;  // next write slot
 constinit u32 g_trace_count = 0; // number of valid entries
 
 bool BuildFirmwarePathWithPrefix(char* out, u32 cap, const char* prefix, const char* vendor, const char* basename,
-                                 bool with_vendor_prefix)
+                                 bool with_vendor_prefix, const char* suffix)
 {
     if (out == nullptr || cap < 4 || prefix == nullptr || prefix[0] == '\0' || basename == nullptr ||
         basename[0] == '\0')
@@ -52,6 +52,15 @@ bool BuildFirmwarePathWithPrefix(char* out, u32 cap, const char* prefix, const c
         if (idx + 1 >= cap)
             return false;
         out[idx++] = basename[i];
+    }
+    if (suffix != nullptr)
+    {
+        for (u32 i = 0; suffix[i] != '\0'; ++i)
+        {
+            if (idx + 1 >= cap)
+                return false;
+            out[idx++] = suffix[i];
+        }
     }
     out[idx] = '\0';
     return true;
@@ -165,9 +174,11 @@ void FwLoaderInit()
     ++g_stats.lookups;
     char path[kFwPathMax] = {};
 
-    auto try_one = [&](const char* prefix, bool with_vendor_prefix) -> ::duetos::core::Result<FwBlob>
+    auto try_one = [&](const char* prefix, bool with_vendor_prefix,
+                       const char* suffix) -> ::duetos::core::Result<FwBlob>
     {
-        if (!BuildFirmwarePathWithPrefix(path, sizeof(path), prefix, req.vendor, req.basename, with_vendor_prefix))
+        if (!BuildFirmwarePathWithPrefix(path, sizeof(path), prefix, req.vendor, req.basename, with_vendor_prefix,
+                                         suffix))
         {
             TraceRecord(req.vendor, req.basename, "<invalid-path>", ErrorCode::InvalidArgument, g_stats.policy);
             return ::duetos::core::Err{ErrorCode::InvalidArgument};
@@ -193,7 +204,15 @@ void FwLoaderInit()
 
     auto try_and_log = [&](const char* prefix, bool with_vendor_prefix) -> ::duetos::core::Result<FwBlob>
     {
-        auto r = try_one(prefix, with_vendor_prefix);
+        auto r = try_one(prefix, with_vendor_prefix, nullptr);
+        if (!r.has_value() && r.error() == ErrorCode::NotFound)
+        {
+            // Release/installer firmware kits store verified package envelopes
+            // beside the normal vendor basename as <basename>.duetfw. Drivers
+            // still request the hardware-native basename, and the loader
+            // unwraps the package before returning bytes.
+            r = try_one(prefix, with_vendor_prefix, ".duetfw");
+        }
         if (r.has_value())
         {
             ++g_stats.hits;

@@ -71,6 +71,19 @@ struct FirmwareSourceFacts
     bool source_available;
     bool modification_allowed;
     bool may_ship_in_tree;
+
+    // True for closed firmware that may be redistributed as an
+    // unmodified release/installer artifact outside the source tree.
+    bool may_ship_as_release_artifact;
+
+    // Closed redistributable firmware must carry the upstream license
+    // text/notice in the offline firmware kit so installers can show it
+    // before staging bytes into /lib/firmware.
+    bool requires_license_notice;
+
+    // Runtime packages must be hash-pinned by DUETFWPK/manifest metadata
+    // so first-boot Wi-Fi provisioning can verify exact payload bytes.
+    bool requires_exact_hash;
 };
 
 const char* FirmwareFamilyName(FirmwareFamily family);
