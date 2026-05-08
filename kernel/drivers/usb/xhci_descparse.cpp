@@ -192,13 +192,18 @@ bool ParseConfigForHidBoot(const u8* buf, u32 len, PortRecord& port)
             in_hid_iface = false;
             if (bInterfaceClass == kIfaceClassHid && bInterfaceSubClass == kIfaceSubclassBoot)
             {
-                if (bInterfaceProtocol == kIfaceProtocolKeyboard && !port.hid_keyboard)
+                // PortRecord represents one polled HID device. Claim the first
+                // boot keyboard/mouse interface only; otherwise a composite
+                // keyboard+mouse descriptor can overwrite the selected interface
+                // while keeping the endpoint/report length from the first one.
+                const bool already_claimed = port.hid_keyboard || port.hid_mouse;
+                if (!already_claimed && bInterfaceProtocol == kIfaceProtocolKeyboard)
                 {
                     port.hid_interface_num = bInterfaceNumber;
                     port.hid_keyboard = true;
                     in_hid_iface = true;
                 }
-                else if (bInterfaceProtocol == kIfaceProtocolMouse && !port.hid_mouse)
+                else if (!already_claimed && bInterfaceProtocol == kIfaceProtocolMouse)
                 {
                     port.hid_interface_num = bInterfaceNumber;
                     port.hid_mouse = true;

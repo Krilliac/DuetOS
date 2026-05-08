@@ -10,6 +10,8 @@
  * Modes:
  *   bench                     — usage
  *   bench kmalloc [ITERS]     — KMalloc(64) + KFree round-trip
+ *   bench kmalloc-scan [ITERS] — KMalloc(256) after 64 too-small
+ *                               freelist holes; measures pointer-chasing
  *   bench mutex   [ITERS]     — uncontended sched::Mutex acquire/release
  *   bench syscall [ITERS]     — SyscallDispatch(SYS_GETPID) — measures
  *                               the dispatcher path minus trap entry/exit
@@ -78,10 +80,13 @@ using duetos::drivers::video::ConsoleWriteln;
 // reschedule-IPI on multi-CPU boxes — so its default is 100x lower.
 // ------------------------------------------------------------------
 constexpr u64 kDefaultKmallocIters = 100'000;
+constexpr u64 kDefaultKmallocScanIters = 50'000;
 constexpr u64 kDefaultMutexIters = 100'000;
 constexpr u64 kDefaultSyscallIters = 100'000;
 constexpr u64 kDefaultWakeupIters = 10'000;
 constexpr u64 kKmallocSize = 64;
+constexpr u64 kKmallocScanLiveSlots = 128;
+constexpr u64 kKmallocScanSize = 256;
 
 struct BenchResult
 {
@@ -193,6 +198,72 @@ BenchResult RunKmalloc(u64 iters)
     if (iters > 0)
     {
         r.ns_per_op = ::duetos::time::TscToNanos(r.total_cycles) / iters;
+    }
+    return r;
+}
+
+
+// ------------------------------------------------------------------
+// fragmented kmalloc scan bench — keep 64 live 64-byte allocations as
+// separators and 64 freed 64-byte holes in front of the large tail run.
+// Each KMalloc(256) must reject every too-small hole before landing in
+// the tail. This is the benchmark that exercises kheap's freelist
+// pointer-chasing path and makes cache/prefetch changes measurable;
+// the normal kmalloc-64 row mostly measures the first freelist node.
+// ------------------------------------------------------------------
+BenchResult RunKmallocScan(u64 iters)
+{
+    BenchResult r{"kmalloc-scan64", iters, 0, 0};
+    if (iters == 0)
+    {
+        return r;
+    }
+
+    void* slots[kKmallocScanLiveSlots] = {};
+    for (u64 i = 0; i < kKmallocScanLiveSlots; ++i)
+    {
+        slots[i] = ::duetos::mm::KMalloc(kKmallocSize);
+        if (slots[i] == nullptr)
+        {
+            ConsoleWriteln("BENCH: kmalloc-scan setup failed — heap exhausted");
+            for (u64 j = 0; j < i; ++j)
+            {
+                ::duetos::mm::KFree(slots[j]);
+            }
+            return r;
+        }
+    }
+    for (u64 i = 0; i < kKmallocScanLiveSlots; i += 2)
+    {
+        ::duetos::mm::KFree(slots[i]);
+        slots[i] = nullptr;
+    }
+
+    u64 completed = 0;
+    const u64 t0 = ::duetos::time::ReadTsc();
+    for (; completed < iters; ++completed)
+    {
+        void* p = ::duetos::mm::KMalloc(kKmallocScanSize);
+        if (p == nullptr)
+        {
+            ConsoleWriteln("BENCH: kmalloc-scan iteration failed — heap exhausted");
+            break;
+        }
+        g_sink = p;
+        ::duetos::mm::KFree(p);
+    }
+    const u64 t1 = ::duetos::time::ReadTsc();
+
+    for (u64 i = 1; i < kKmallocScanLiveSlots; i += 2)
+    {
+        ::duetos::mm::KFree(slots[i]);
+    }
+
+    r.iters = completed;
+    r.total_cycles = t1 - t0;
+    if (completed > 0)
+    {
+        r.ns_per_op = ::duetos::time::TscToNanos(r.total_cycles) / completed;
     }
     return r;
 }
@@ -389,6 +460,7 @@ void PrintUsage()
     ConsoleWriteln("BENCH: kernel hot-path microbenchmarks (admin)");
     ConsoleWriteln("  bench                       — this help");
     ConsoleWriteln("  bench kmalloc [ITERS]       — KMalloc(64) + KFree round-trip");
+    ConsoleWriteln("  bench kmalloc-scan [ITERS]  — KMalloc(256) after 64 small holes");
     ConsoleWriteln("  bench mutex   [ITERS]       — uncontended sched::Mutex acq/rel");
     ConsoleWriteln("  bench syscall [ITERS]       — SyscallDispatch(SYS_GETPID)");
     ConsoleWriteln("  bench wakeup  [ITERS]       — KEvent set/wait, worker on peer CPU");
@@ -450,6 +522,19 @@ void CmdBench(u32 argc, char** argv)
         EmitSummary(r);
         return;
     }
+    if (StrEq(sub, "kmalloc-scan"))
+    {
+        const u64 iters = resolve_iters(kDefaultKmallocScanIters);
+        if (iters == 0)
+        {
+            return;
+        }
+        PrintHeader();
+        const auto r = RunKmallocScan(iters);
+        PrintRow(r);
+        EmitSummary(r);
+        return;
+    }
     if (StrEq(sub, "mutex"))
     {
         const u64 iters = resolve_iters(kDefaultMutexIters);
@@ -502,15 +587,17 @@ void CmdBench(u32 argc, char** argv)
         const u64 iters_long = (argc >= 3) ? (iters_short / 10 + 1) : kDefaultWakeupIters;
 
         PrintHeader();
-        BenchResult rows[4];
+        BenchResult rows[5];
         rows[0] = RunKmalloc(iters_short);
         PrintRow(rows[0]);
-        rows[1] = RunMutex(iters_short);
+        rows[1] = RunKmallocScan((argc >= 3) ? (iters_short / 2 + 1) : kDefaultKmallocScanIters);
         PrintRow(rows[1]);
-        rows[2] = RunSyscall(iters_short);
+        rows[2] = RunMutex(iters_short);
         PrintRow(rows[2]);
-        rows[3] = RunWakeup(iters_long);
+        rows[3] = RunSyscall(iters_short);
         PrintRow(rows[3]);
+        rows[4] = RunWakeup(iters_long);
+        PrintRow(rows[4]);
         for (const auto& r : rows)
         {
             EmitSummary(r);
