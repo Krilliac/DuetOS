@@ -1582,16 +1582,16 @@ __declspec(dllexport) NTSTATUS NtWriteVirtualMemory(HANDLE ProcessHandle, void* 
  * needs NtOpenThread, which is its own slice.
  *
  * Kernel returns rax = previous suspend count (a small non-
- * negative number) on success or u64(-1) on any error. We map
- * (-1) to STATUS_INVALID_HANDLE because that's the only error
- * the kernel surfaces today.
+ * negative number) on success or a negative errno on any error.
+ * We map every negative value to STATUS_INVALID_HANDLE because
+ * that is the only NTSTATUS this v0 surface distinguishes today.
  * ------------------------------------------------------------------ */
 __declspec(dllexport) NTSTATUS NtSuspendThread(HANDLE ThreadHandle, unsigned long* PreviousSuspendCount)
 {
     long long rc;
     /* SYS_THREAD_SUSPEND = 135 */
     __asm__ volatile("int $0x80" : "=a"(rc) : "a"((long long)135), "D"((long long)ThreadHandle) : "memory");
-    if (rc == -1)
+    if (rc < 0)
         return (NTSTATUS)0xC0000008L; /* STATUS_INVALID_HANDLE */
     if (PreviousSuspendCount != (unsigned long*)0)
         *PreviousSuspendCount = (unsigned long)rc;
@@ -1603,7 +1603,7 @@ __declspec(dllexport) NTSTATUS NtResumeThread(HANDLE ThreadHandle, unsigned long
     long long rc;
     /* SYS_THREAD_RESUME = 136 */
     __asm__ volatile("int $0x80" : "=a"(rc) : "a"((long long)136), "D"((long long)ThreadHandle) : "memory");
-    if (rc == -1)
+    if (rc < 0)
         return (NTSTATUS)0xC0000008L;
     if (PreviousSuspendCount != (unsigned long*)0)
         *PreviousSuspendCount = (unsigned long)rc;
@@ -4433,7 +4433,7 @@ __declspec(dllexport) NTSTATUS NtCreateFile(HANDLE* FileHandle, ULONG DesiredAcc
                          : "=a"(handle)
                          : "a"((long long)20), "D"((long long)path), "S"((long long)(path_len + 1))
                          : "memory");
-        if (handle == -1 && CreateDisposition == 3)
+        if (handle < 0 && CreateDisposition == 3)
         {
             /* OPEN_IF: open failed -> create. */
             __asm__ volatile("mov %4, %%r10\n\t"
@@ -4443,7 +4443,7 @@ __declspec(dllexport) NTSTATUS NtCreateFile(HANDLE* FileHandle, ULONG DesiredAcc
                                "d"((long long)0), "r"((long long)0)
                              : "r10", "memory");
         }
-        if (handle == -1)
+        if (handle < 0)
             status = (long long)0xC0000034ULL; /* OBJECT_NAME_NOT_FOUND */
     }
     else if (CreateDisposition == 2 /* CREATE */)
@@ -4455,14 +4455,14 @@ __declspec(dllexport) NTSTATUS NtCreateFile(HANDLE* FileHandle, ULONG DesiredAcc
                          : "a"((long long)44), "D"((long long)path), "S"((long long)(path_len + 1)), "d"((long long)0),
                            "r"((long long)0)
                          : "r10", "memory");
-        if (handle == -1)
+        if (handle < 0)
             status = (long long)0xC0000035ULL; /* OBJECT_NAME_COLLISION */
     }
     else
     {
         return (NTSTATUS)0xC0000002; /* NOT_IMPLEMENTED */
     }
-    if (handle == -1)
+    if (handle < 0)
         return (NTSTATUS)status;
     *FileHandle = (HANDLE)handle;
     /* IO_STATUS_BLOCK is { Status; Information } — write success
@@ -4506,7 +4506,7 @@ __declspec(dllexport) NTSTATUS NtOpenFile(HANDLE* FileHandle, ULONG DesiredAcces
                      : "=a"(handle)
                      : "a"((long long)20), "D"((long long)path), "S"((long long)(path_len + 1))
                      : "memory");
-    if (handle == -1)
+    if (handle < 0)
         return (NTSTATUS)0xC0000034;
     *FileHandle = (HANDLE)handle;
     if (IoStatusBlock != (void*)0)
@@ -4543,7 +4543,7 @@ __declspec(dllexport) NTSTATUS NtReadFile(HANDLE FileHandle, HANDLE Event, void*
                      : "=a"(n)
                      : "a"((long long)21), "D"((long long)FileHandle), "S"((long long)Buffer), "d"((long long)Length)
                      : "memory");
-    if (n == -1)
+    if (n < 0)
     {
         if (IoStatusBlock != (void*)0)
         {
@@ -4584,7 +4584,7 @@ __declspec(dllexport) NTSTATUS NtWriteFile(HANDLE FileHandle, HANDLE Event, void
                      : "=a"(n)
                      : "a"((long long)43), "D"((long long)FileHandle), "S"((long long)Buffer), "d"((long long)Length)
                      : "memory");
-    if (n == -1)
+    if (n < 0)
     {
         if (IoStatusBlock != (void*)0)
         {
@@ -4672,7 +4672,7 @@ __declspec(dllexport) NTSTATUS NtQueryInformationFile(HANDLE FileHandle, void* I
                          : "=a"(cur)
                          : "a"((long long)23), "D"((long long)FileHandle), "S"((long long)0), "d"((long long)1)
                          : "memory");
-        if (cur == -1)
+        if (cur < 0)
             return (NTSTATUS)0xC0000008;
         unsigned char* out = (unsigned char*)FileInformation;
         unsigned long long ucur = (unsigned long long)cur;
@@ -4713,7 +4713,7 @@ __declspec(dllexport) NTSTATUS NtSetInformationFile(HANDLE FileHandle, void* IoS
                          : "=a"(rv)
                          : "a"((long long)23), "D"((long long)FileHandle), "S"((long long)pos), "d"((long long)0)
                          : "memory");
-        if (rv == -1)
+        if (rv < 0)
             return (NTSTATUS)0xC0000008;
         if (IoStatusBlock != (void*)0)
         {

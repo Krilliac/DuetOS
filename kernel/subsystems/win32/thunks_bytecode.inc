@@ -2122,9 +2122,9 @@
     // LPDWORD lpThreadId); // [rsp+0x30] (optional out)
     //
     // DuetOS: SYS_THREAD_CREATE (45) with start_va in rdi,
-    // param in rsi. Returns handle or 0xFFFFFFFFFFFFFFFF on
-    // failure. The Win32 contract is "handle or NULL on fail" —
-    // we translate -1 to 0 at the tail.
+    // param in rsi. Returns a non-negative handle or negative errno
+    // on failure. The Win32 contract is "handle or NULL on fail" —
+    // we translate every negative return to 0 at the tail.
     //
     // --- CreateThread (offset 0x87F, 39 bytes) -----------------
     // Win64 ABI: rdi + rsi are callee-saved — save/restore around
@@ -2138,26 +2138,26 @@
     0x4C, 0x89, 0xC7,             // 0x881 mov rdi, r8 ; start
     0x4C, 0x89, 0xCE,             // 0x884 mov rsi, r9 ; param
     0xB8, 0x2D, 0x00, 0x00, 0x00, // 0x887 mov eax, 45 ; SYS_THREAD_CREATE
-    0xCD, 0x80,                   // 0x88C int 0x80 ; rax = handle or -1
+    0xCD, 0x80,                   // 0x88C int 0x80 ; rax = handle or negative errno
+    // Translate any negative errno to 0 for Win32 "NULL" handle
+    // semantics before publishing the optional thread-id surrogate.
+    0x48, 0x85, 0xC0,             // 0x88E test rax, rax
+    0x79, 0x04,                   // 0x891 jns +4 -> 0x897
+    0x31, 0xC0,                   // 0x893 xor eax, eax
+    0x90, 0x90,                   // 0x895 nop; nop (padding; keep thunk length stable)
     // We pushed 16 bytes, so lpThreadId (originally at [rsp+0x30])
     // is now at [rsp+0x40].
-    0x48, 0x8B, 0x4C, 0x24, 0x40, // 0x88E mov rcx, [rsp+0x40]
-    0x48, 0x85, 0xC9,             // 0x893 test rcx, rcx
-    0x74, 0x02,                   // 0x896 je +2 -> 0x89A
-    0x89, 0x01,                   // 0x898 mov [rcx], eax
-    // Translate -1 (any high bits set) to 0 for Win32 "NULL" handle
-    // semantics.
-    0x48, 0x83, 0xF8, 0xFF, // 0x89A cmp rax, -1
-    0x75, 0x03,             // 0x89E jne +3 -> 0x8A3
-    0x31, 0xC0,             // 0x8A0 xor eax, eax
-    0x90,                   // 0x8A2 nop (padding so cmp/jne/xor lands exactly 3 bytes)
-    0x5E,                   // 0x8A3 pop rsi
+    0x48, 0x8B, 0x4C, 0x24, 0x40, // 0x897 mov rcx, [rsp+0x40]
+    0x48, 0x85, 0xC9,             // 0x89C test rcx, rcx
+    0x74, 0x02,                   // 0x89F je +2 -> 0x8A3
+    0x89, 0x01,                   // 0x8A1 mov [rcx], eax
+    0x5E,                         // 0x8A3 pop rsi
     0x5F,                   // 0x8A4 pop rdi
     0xC3,                   // 0x8A5 ret
 
     // --- ThreadExitTramp (offset 0x8A6, 6 bytes) ---------------
     // Landing site when a Win32 thread proc returns. DoThreadCreate
-    // writes (kWin32ThunksVa + 0x8A2) to [stack_top - 8] so the
+    // writes (kWin32ThunksVa + 0x8A6) to [stack_top - 8] so the
     // thread proc's final `ret` pops this VA into RIP. The thread
     // proc's return value is still in EAX (Win32 __stdcall). We
     // copy it to EDI (SYS_EXIT's first arg) then issue SYS_EXIT(0).
