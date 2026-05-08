@@ -9,6 +9,7 @@
 #include "debug/probes.h"
 #include "log/klog.h"
 #include "core/panic.h"
+#include "util/cache.h"
 #include "util/debug_assert.h"
 
 namespace duetos::mm
@@ -127,6 +128,10 @@ void FreelistInsertAndCoalesce(ChunkHeader* chunk)
         ChunkHeader* cursor = g_freelist;
         while (cursor->next != nullptr && cursor->next < chunk)
         {
+            if (cursor->next->next != nullptr)
+            {
+                util::PrefetchReadOnce(cursor->next->next);
+            }
             cursor = cursor->next;
         }
         chunk->next = cursor->next;
@@ -221,6 +226,10 @@ void* KMalloc(u64 bytes)
         // overwritten by an OOB write. Either way: heap integrity is
         // gone — halt loud, don't silently heal.
         AssertMagic(cursor, kHeapMagicFree, "KMalloc: corrupt magic on freelist chunk");
+        if (cursor->next != nullptr)
+        {
+            util::PrefetchReadOnce(cursor->next);
+        }
 
         if (cursor->size >= needed)
         {
@@ -232,6 +241,7 @@ void* KMalloc(u64 bytes)
             if (remainder >= kMinSplit)
             {
                 auto* split = reinterpret_cast<ChunkHeader*>(reinterpret_cast<u8*>(cursor) + needed);
+                util::PrefetchWriteKeep(split);
                 split->size = remainder;
                 split->magic = kHeapMagicFree;
                 split->next = cursor->next;
@@ -359,6 +369,10 @@ KernelHeapStats KernelHeapStatsRead()
 
     for (const ChunkHeader* c = g_freelist; c != nullptr; c = c->next)
     {
+        if (c->next != nullptr)
+        {
+            util::PrefetchReadOnce(c->next);
+        }
         stats.free_bytes += c->size;
         ++stats.free_chunk_count;
         if (c->size > stats.largest_free_run)
@@ -402,6 +416,11 @@ u32 KernelHeapTopAllocators(HeapLeakEntry* out, u32 out_capacity)
         if (c->size == 0 || c->size > g_pool_bytes)
         {
             break;
+        }
+        const auto* next = reinterpret_cast<const ChunkHeader*>(reinterpret_cast<const u8*>(c) + c->size);
+        if (reinterpret_cast<const u8*>(next) < pool_end)
+        {
+            util::PrefetchReadOnce(next);
         }
         if (c->magic == kHeapMagicLive)
         {

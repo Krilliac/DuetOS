@@ -1659,6 +1659,13 @@ void OnTimerTick(u64 now_ticks)
 
 Task* CurrentTask()
 {
+    // Early boot self-tests can ask "what process is current?" before
+    // PerCpuInitBsp installs GSBASE. Treat that phase as kernel-only
+    // context instead of dereferencing an uninitialised GSBASE value.
+    if (!cpu::BspInstalled())
+    {
+        return nullptr;
+    }
     return Current();
 }
 
@@ -2284,6 +2291,11 @@ void SchedEnumerate(SchedEnumCb cb, void* cookie)
 {
     if (cb == nullptr)
         return;
+    // Debug app self-tests run before PerCpuInitBsp/SchedInit. At
+    // that point there is no task graph to enumerate, and touching
+    // Current() would dereference an uninitialised GSBASE value.
+    if (!cpu::BspInstalled())
+        return;
     // Brief CLI window so the timer IRQ + WaitQueueWake* can't
     // splice the lists mid-walk. The callback runs inside the
     // critical section — this is fine for Console writes
@@ -2342,6 +2354,10 @@ bool SchedIsPidZombie(u64 target_pid)
 
 u64 SchedCountChildrenOfPid(u64 parent_pid)
 {
+    if (!cpu::BspInstalled())
+    {
+        return 0;
+    }
     auto count_in = [&](Task* head, bool follow_sleep) -> u64
     {
         u64 n = 0;
@@ -2374,6 +2390,10 @@ u64 SchedCountChildrenOfPid(u64 parent_pid)
 
 core::Process* SchedFindProcessByPid(u64 target_pid)
 {
+    if (!cpu::BspInstalled())
+    {
+        return nullptr;
+    }
     auto match = [&](Task* t) -> core::Process*
     {
         if (t == nullptr)
@@ -2426,6 +2446,10 @@ core::Process* SchedFindProcessByPid(u64 target_pid)
 
 Task* SchedFindTaskByTid(u64 target_tid)
 {
+    if (!cpu::BspInstalled())
+    {
+        return nullptr;
+    }
     // Same walk shape as SchedFindProcessByPid — every list that
     // can hold a Task. Returns the first task whose id matches.
     // Caller must hold a stable reference to the task's owning

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "acpi/acpi.h"
+#include "util/cache.h"
 #include "util/types.h"
 
 /*
@@ -48,7 +49,7 @@ inline constexpr u8 kTopologyUnknownSmt = 0xFF;
 inline constexpr u8 kTopologyUnknownNode = 0xFF;
 inline constexpr u16 kTopologyUnknownCluster = 0xFFFF;
 
-struct alignas(64) Topology
+struct alignas(util::kCpuCacheLineBytes) Topology
 {
     u32 cpu_id;
     u32 apic_id;    // 32-bit value when CPUID 0x0B/0x1F is available
@@ -59,6 +60,8 @@ struct alignas(64) Topology
     u16 cluster_id; // mirrors PerCpu.cluster_id once AssignClusters runs
     u8 _pad[2];     // explicit pad to keep cache-line discipline
 };
+
+static_assert(sizeof(Topology) == util::kCpuCacheLineBytes, "Topology row must remain one cache line");
 
 /// Decode the BSP's own topology and populate slot 0 of the
 /// per-CPU topology table. Must run after `PerCpuInitBsp` (so
