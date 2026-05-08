@@ -42,6 +42,17 @@ The practical path is:
    digest; `kernel/loader/firmware_package.*` verifies that envelope before
    upload code sees the payload bytes.
 
+
+## First-boot Wi-Fi provisioning
+
+Normal laptop installs use an offline firmware kit, not a firmware-signature
+bypass. Build the kit with `tools/firmware/prepare-wifi-firmware.py` from a
+local `linux-firmware`-style tree, place it on installer media as
+`wifi-firmware-kit/`, and have the installer stage matching `.duetfw` packages
+before opening the Wi-Fi network picker. See
+[Wi-Fi Onboarding](WiFi-Onboarding.md) for the release artifact layout,
+installer flow, and acceptance checklist.
+
 ## Source landscape
 
 | Family | Practical DuetOS role | Firmware openness | Notes |

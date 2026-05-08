@@ -225,8 +225,11 @@ In rough priority:
 - **Blocks on:** real-hardware verification cycles. Firmware package
   signing root / key IDs. IRQ wiring on per-vendor
   MSI/MSI-X. iwlwifi TFD descriptor build / doorbell / per-RBD
-  data buffers. Recommended first open-firmware loop: AR9271/AR7010
-  `ath9k_htc` USB adapter, then return to Intel iwlwifi.
+  data buffers. Installer integration for the offline Wi-Fi firmware kit
+  (`tools/firmware/prepare-wifi-firmware.py` output staged from install
+  media or USB before the network picker opens). Recommended first
+  open-firmware loop: AR9271/AR7010 `ath9k_htc` USB adapter, then return
+  to Intel iwlwifi.
 - **Unlocks:** Network flyout SSID picker, Settings → Network →
   Wi-Fi tab, captive-portal handler.
 - **Owner:** `kernel/drivers/net/wireless/` (per-vendor upload +
