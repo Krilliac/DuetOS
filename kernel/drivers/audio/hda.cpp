@@ -244,6 +244,7 @@ struct HdaState
     u16 corb_wp;
     u32 codec_vendor[15];
     u32 codec_dac_count[15];
+    u8 codec_first_dac_node[15];
     u32 codec_adc_count[15];
     u32 codec_pin_count[15];
     u32 codec_amp_widget_count[15];
@@ -360,6 +361,7 @@ void WalkCodec(const AudioControllerInfo& a, u8 slot)
         return;
 
     u32 dac = 0;
+    u8 first_dac_node = 0;
     u32 adc = 0;
     u32 pin = 0;
     u32 amp_widgets = 0;
@@ -396,6 +398,8 @@ void WalkCodec(const AudioControllerInfo& a, u8 slot)
             switch (wtype)
             {
             case kHdaWidgetAudioOutput:
+                if (dac == 0)
+                    first_dac_node = widget_node;
                 ++dac;
                 break;
             case kHdaWidgetAudioInput:
@@ -457,6 +461,7 @@ void WalkCodec(const AudioControllerInfo& a, u8 slot)
     }
 
     g.codec_dac_count[slot] = dac;
+    g.codec_first_dac_node[slot] = first_dac_node;
     g.codec_adc_count[slot] = adc;
     g.codec_pin_count[slot] = pin;
     g.codec_amp_widget_count[slot] = amp_widgets;
@@ -504,6 +509,7 @@ void WalkCodec(const AudioControllerInfo& a, u8 slot)
         return ::duetos::core::Err{r.error()};
     g.dma = r.value();
     g.live = true;
+    HdaJackInventoryReset();
 
     // Read GCAP so the StreamArm() helper knows ISS / OSS bounds.
     const u16 gcap = Mmio16(a, kHdaRegGcap);
@@ -784,6 +790,46 @@ u32 IssueVerbAndPoll16(const AudioControllerInfo& a, u8 codec, u8 node, u32 verb
     if (!g.live)
         return 0;
     return IssueVerbRawAndPoll(a, EncodeVerb16(codec, node, verb12, payload16));
+}
+
+::duetos::core::Result<OutputPath> FindFirstOutputPath()
+{
+    if (!g.brought_up)
+        return ::duetos::core::Err{::duetos::core::ErrorCode::NotReady};
+
+    constexpr HdaDefaultDevice kPreference[] = {
+        HdaDefaultDevice::Speaker,
+        HdaDefaultDevice::HpOut,
+        HdaDefaultDevice::LineOut,
+    };
+
+    const u32 jack_count = HdaJackInventoryCount();
+    for (u32 pref = 0; pref < sizeof(kPreference) / sizeof(kPreference[0]); ++pref)
+    {
+        for (u32 idx = 0; idx < jack_count; ++idx)
+        {
+            HdaJackRecord rec{};
+            if (!HdaJackInventoryRead(idx, &rec))
+                continue;
+            if (rec.config.default_device != kPreference[pref])
+                continue;
+            if (rec.config.port_connectivity == HdaPortConnectivity::NoPhysicalConn)
+                continue;
+            if (rec.codec_slot >= 15)
+                continue;
+            if (g.codec_dac_count[rec.codec_slot] == 0 || g.codec_first_dac_node[rec.codec_slot] == 0)
+                continue;
+
+            OutputPath path{};
+            path.codec = rec.codec_slot;
+            path.dac_node = g.codec_first_dac_node[rec.codec_slot];
+            path.pin_node = rec.pin_node;
+            path.target = kPreference[pref];
+            return path;
+        }
+    }
+
+    return ::duetos::core::Err{::duetos::core::ErrorCode::NoDevice};
 }
 
 ::duetos::core::Result<void> CodecSetConverterFormat(const AudioControllerInfo& a, u8 codec, u8 node, u16 format)

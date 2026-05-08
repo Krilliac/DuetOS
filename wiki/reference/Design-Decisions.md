@@ -6340,3 +6340,29 @@ doc helps future readers audit the trail.
 
 
 
+
+
+
+## 2026-05-08 — HDA bootstrap output-path selector
+
+- **Decision:** Add `hda::FindFirstOutputPath()` as the first
+  consumer-facing HDA routing selector. It chooses the preferred
+  output pin from the jack inventory in Speaker → Headphone Out →
+  Line Out order and pairs that pin with the first DAC node the
+  codec walker recorded on the same codec.
+
+- **Why:** The existing `ConfigureOutputPath()` verb sequence was
+  useful plumbing, but callers still had to know which DAC and pin
+  nodes to pass. A conservative selector gives the upcoming system-
+  beep / smoke-playback path a stable tuple without prematurely
+  implementing the full HDA graph solver.
+
+- **What it rules out / defers:** This is not mixer / selector
+  topology solving. Codecs with a non-trivial DAC → mixer → pin
+  chain may need the future connection-list parser before audio can
+  route correctly. The selector skips any codec without a recorded
+  DAC and still requires a playback consumer to allocate DMA buffers,
+  fill a BDL, arm a stream, call `ConfigureOutputPath()`, and set RUN.
+
+- **Related roadmap track(s):** Audio — HDA stream programming and
+  first audible playback.

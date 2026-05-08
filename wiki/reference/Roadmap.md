@@ -200,10 +200,11 @@ In rough priority:
   observing samples land at the codec — needs a DMA-coherent
   buffer allocator path that's wired through the audio shell
   (or a system-beep driver), plus QEMU's `-device hda-output`
-  to verify the byte-level path. Also: a "find first speaker
-  pin" heuristic that picks the dac_node / pin_node pair to
-  hand `ConfigureOutputPath`. Today the helper is called by
-  no one — it's plumbing waiting for a consumer.
+  to verify the byte-level path. `FindFirstOutputPath()` now
+  supplies the bootstrap `dac_node` / `pin_node` pair for the
+  first speaker / headphone / line-out pin; the remaining gap is
+  a consumer that allocates real buffers and calls it as part of
+  playback.
 - **Owner:** `kernel/drivers/audio/`.
 
 ### Wireless — real-hardware verification
