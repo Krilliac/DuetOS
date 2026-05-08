@@ -655,17 +655,17 @@ const char* const kCommandSet[] = {
     "tac",      "nl",         "rev",        "expr",     "color",    "rand",      "flushtlb",   "checksum",  "repeat",
     "kill",     "exec",       "metrics",    "trace",    "read",     "guard",     "top",        "fatcat",    "fatls",
     "fatwrite", "fatappend",  "fatnew",     "fatrm",    "fattrunc", "fatmkdir",  "fatrmdir",   "linuxexec", "translate",
-    "smbios",   "power",      "battery",    "thermal",  "temp",     "gpu",       "lsgpu",      "gfx",       "nic",
-    "lsnic",    "ip",         "arp",        "ipv4",     "uuid",     "uuidgen",   "health",     "checkup",   "attacksim",
-    "redteam",  "memdump",    "leakcheck",  "ifconfig", "netinfo",  "dhcp",      "route",      "netscan",   "wifi",
-    "firewall", "fwpolicy",   "fwtrace",    "crtrace",  "crprobe",  "net",       "usbnet",     "instr",     "dumpstate",
-    "bp",       "breakpoint", "login",      "logout",   "passwd",   "useradd",   "userdel",    "users",     "who",
-    "su",       "idlelock",   "hwmon",      "vbe",      "ping",     "nslookup",  "ntp",        "http",      "shutdown",
-    "poweroff", "beep",       "inspect",    "theme",    "addr2sym", "cap-audit", "monitor",    "secevents", "events",
-    "policy",   "purple",     "purpleteam", "mkdir",    "rmdir",    "truncate",  "realpath",   "id",        "groups",
-    "nproc",    "arch",       "tty",        "type",     "printenv", "df",        "du",         "loadavg",   "clearhist",
-    "pause",    "yes",        "sync",       "port",     "assert",   "watch",     "script",     "exit",      "mkfs",
-    "lastdump", "loadtest",   "stress",     "bench",    "dbg",      "dfix",
+    "smbios",   "power",      "battery",    "thermal",  "temp",     "hw",        "hardware",   "gpu",       "lsgpu",
+    "gfx",      "nic",        "lsnic",      "ip",       "arp",      "ipv4",      "uuid",       "uuidgen",   "health",
+    "checkup",  "attacksim",  "redteam",    "memdump",  "leakcheck", "ifconfig",  "netinfo",    "dhcp",      "route",
+    "netscan",  "wifi",       "firewall",   "fwpolicy", "fwtrace",  "crtrace",   "crprobe",    "net",       "usbnet",
+    "instr",    "dumpstate",  "bp",         "breakpoint", "login",  "logout",    "passwd",     "useradd",   "userdel",
+    "users",    "who",        "su",         "idlelock", "hwmon",    "vbe",       "ping",       "nslookup",  "ntp",
+    "http",     "shutdown",   "poweroff",   "beep",     "inspect",  "theme",     "addr2sym",   "cap-audit", "monitor",
+    "secevents", "events",    "policy",     "purple",   "purpleteam", "mkdir",   "rmdir",      "truncate",  "realpath",
+    "id",       "groups",     "nproc",      "arch",     "tty",      "type",      "printenv",   "df",        "du",
+    "loadavg",  "clearhist",  "pause",      "yes",      "sync",     "port",      "assert",     "watch",     "script",
+    "exit",     "mkfs",       "lastdump",   "loadtest", "stress",   "bench",     "dbg",        "dfix",
 };
 const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1196,6 +1196,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "thermal") || StrEq(cmd, "temp"))
     {
         CmdThermal();
+        return;
+    }
+    if (StrEq(cmd, "hw") || StrEq(cmd, "hardware"))
+    {
+        CmdHw(argc, argv);
         return;
     }
     if (StrEq(cmd, "gpu") || StrEq(cmd, "lsgpu"))

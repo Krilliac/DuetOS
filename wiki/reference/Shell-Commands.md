@@ -191,6 +191,7 @@ All write-side FAT operations are admin-gated.
 | `power`, `battery` | AC / battery / thermal snapshot |
 | `thermal`, `temp` | Re-read MSR thermal sensors |
 | `hwmon` | Unified sensor view |
+| `hw`, `hardware` | Hardware-wide status / activation / serial capture (`status`, `activate`, `capture`) |
 | `gpu`, `lsgpu` | List discovered GPUs |
 | `gfx` | Graphics-stack overview (ICD counters + display info + render stats) |
 | `gfx reset` | Reset render-stats counters (frames composed/presented, dirty pixels) |
@@ -211,7 +212,7 @@ All write-side FAT operations are admin-gated.
 | `dhcp [renew]` | Show lease; renew sends a fresh DISCOVER | |
 | `route [-v]` | Default gateway + DNS | `-v` adds gateway ARP |
 | `netscan` | Wireless + wired networks reachable | |
-| `wifi <args>` | Wi-Fi management subcommands | |
+| `wifi <args>` | Wi-Fi management subcommands | `activate` ensures NIC bring-up has run; `capture` also dumps wifi-diag + fix-journal summary to serial |
 | `ping <ip>` | ICMP echo + 1s reply wait | |
 | `nslookup <name>` | DNS A-record lookup | Resolver 10.0.2.3 |
 | `ntp [ip]` | NTP query (default 216.239.35.0) | |

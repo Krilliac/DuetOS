@@ -61,6 +61,7 @@ struct NicInfo
         Missing,           // lookup miss in /lib/firmware
         Incompatible,      // blob found but rejected by size/format gates
         LoadError,         // generic backend / argument / I/O failure
+        UploadFailed,      // blob parsed, but hardware upload did not reach ALIVE
     };
 
     u16 vendor_id;
@@ -133,6 +134,7 @@ struct WirelessStatus
     u32 firmware_missing;
     u32 firmware_incompatible;
     u32 firmware_load_error;
+    u32 firmware_upload_failed;
 };
 WirelessStatus WirelessStatusRead();
 

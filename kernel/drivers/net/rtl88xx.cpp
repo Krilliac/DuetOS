@@ -255,8 +255,14 @@ bool Rtl88xxBringUp(NicInfo& n)
     arch::SerialWrite(CutVersionString(cfg1));
     arch::SerialWrite(" status=fw-pending\n");
 
-    duetos::sched::SchedCreate(Rtl88xxWatchEntry, &n, "rtl88xx-watch");
     return true;
+}
+
+void Rtl88xxStartWatch(NicInfo& n)
+{
+    if (!n.driver_online || n.mmio_virt == nullptr)
+        return;
+    duetos::sched::SchedCreate(Rtl88xxWatchEntry, &n, "rtl88xx-watch");
 }
 
 Rtl88xxStats Rtl88xxStatsRead()

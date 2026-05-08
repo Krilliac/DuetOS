@@ -1,6 +1,7 @@
 #include "drivers/net/iwlwifi_upload.h"
 
 #include "core/panic.h"
+#include "diag/fix_journal.h"
 #include "log/klog.h"
 #include "net/wireless/wifi_diag.h"
 #include "time/tick.h"
@@ -141,6 +142,7 @@ bool LoadSection(NicInfo& /*n*/, const IwlFwSection& sec, u32 sec_index, IwlUplo
     //   - program FH_TFD pointers
     //   - kick the firmware DMA engine via FH_TX_CONFIG_REG
     //   - wait for FH_TX_STATUS_REG to acknowledge.
+    FIX_NOTE_GAP("drivers/net/iwl_upload:dma", "wire iwlwifi TFD DMA upload");
     diag::RecordErr(diag::Layer::FwUpload, "section-load-need-dma",
                     static_cast<u32>(::duetos::core::ErrorCode::Unsupported), sec_index, sec.size, 0);
     if (r != nullptr)

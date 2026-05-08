@@ -17,18 +17,16 @@
  *     through Be2xx. Match logic mirrors the Linux iwlwifi pci_table.
  *   - Soft chip identification: read CSR_HW_REV; reject 0xFFFFFFFF
  *     (BAR mapping failed) or 0 (chip stuck in reset).
- *   - Mark the NIC `driver_online=true`, `firmware_pending=true`. The
- *     iwlwifi family REQUIRES a vendor-signed microcode blob loaded
- *     before any 802.11 association can occur; DuetOS has no
- *     firmware-loader subsystem yet, so the driver shell stops at
- *     chip identification and tells the user honestly.
- *   - Spawn an `iwlwifi-watch` task that periodically re-reads the
+ *   - Load and parse the selected vendor microcode blob when the
+ *     firmware backend can provide one, then drive the reset / upload /
+ *     ALIVE-wait state machine and expose upload failures distinctly.
+ *   - NetInit starts an `iwlwifi-watch` task that periodically re-reads the
  *     status register so the GUI's link indicator picks up an
  *     unexpected reset / removal cleanly.
  *
  * Out of scope (deferred):
- *   - Firmware loading (FW_LOAD_BUFFER + KEEP_WARM allocations,
- *     SECURE_BOOT handshake, microcode sections walk).
+ *   - Real TFD DMA section copy (FW_LOAD_BUFFER + KEEP_WARM
+ *     allocations) and SECURE_BOOT handshake.
  *   - TX/RX queue setup (TFD/RBD ring layouts differ across silicon
  *     revisions; needs the firmware for valid context-info layouts).
  *   - 802.11 management frames, scan, association, key install.
@@ -52,6 +50,10 @@ bool IwlwifiMatches(u16 vendor_id, u16 device_id);
 /// the cached result. Returns true iff the chip responded with a
 /// plausible (non-0/non-all-ones) HW_REV.
 bool IwlwifiBringUp(NicInfo& n);
+
+/// Start the 1 Hz liveness watch after NetInit has copied the NIC
+/// record into the stable global NIC table.
+void IwlwifiStartWatch(NicInfo& n);
 
 struct IwlwifiStats
 {

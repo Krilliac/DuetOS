@@ -876,7 +876,17 @@ void NetInit()
             KBP_PROBE_V(::duetos::debug::ProbeId::kProbeFail, nic.device_id);
             continue;
         }
-        g_nics[g_nic_count++] = nic;
+        const u64 nic_index = g_nic_count++;
+        g_nics[nic_index] = nic;
+        if (g_nics[nic_index].driver_online && NicIsWireless(nic_index))
+        {
+            if (IwlwifiMatches(g_nics[nic_index].vendor_id, g_nics[nic_index].device_id))
+                IwlwifiStartWatch(g_nics[nic_index]);
+            else if (Rtl88xxMatches(g_nics[nic_index].vendor_id, g_nics[nic_index].device_id))
+                Rtl88xxStartWatch(g_nics[nic_index]);
+            else if (Bcm43xxMatches(g_nics[nic_index].vendor_id, g_nics[nic_index].device_id))
+                Bcm43xxStartWatch(g_nics[nic_index]);
+        }
     }
 
     core::LogWithValue(core::LogLevel::Info, "drivers/net", "discovered NICs", g_nic_count);
@@ -1050,6 +1060,9 @@ WirelessStatus WirelessStatusRead()
             break;
         case NicInfo::WirelessFwState::LoadError:
             ++s.firmware_load_error;
+            break;
+        case NicInfo::WirelessFwState::UploadFailed:
+            ++s.firmware_upload_failed;
             break;
         case NicInfo::WirelessFwState::NotApplicable:
             break;

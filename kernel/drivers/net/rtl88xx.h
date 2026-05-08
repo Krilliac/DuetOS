@@ -22,7 +22,7 @@
  *     rtlwifi cards REQUIRE vendor firmware before the MAC can
  *     associate; without a firmware loader the shell stops at
  *     chip identification.
- *   - Spawn an `rtl88xx-watch` task that polls SYS_CFG1 once a
+ *   - NetInit starts an `rtl88xx-watch` task that polls SYS_CFG1 once a
  *     second so a hot-removed card flips `driver_online` off.
  *
  * Out of scope (deferred):
@@ -47,6 +47,10 @@ bool Rtl88xxMatches(u16 vendor_id, u16 device_id);
 /// firmware". Idempotent. Returns true iff SYS_CFG1 returned a
 /// plausible chip-version dword.
 bool Rtl88xxBringUp(NicInfo& n);
+
+/// Start the 1 Hz liveness watch after NetInit has copied the NIC
+/// record into the stable global NIC table.
+void Rtl88xxStartWatch(NicInfo& n);
 
 struct Rtl88xxStats
 {
