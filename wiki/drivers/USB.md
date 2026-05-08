@@ -30,6 +30,26 @@
 - Address Device + Get Descriptor(Device) on enumeration.
 - Bulk-transfer API shared with class drivers.
 
+## Rust Descriptor Parsers
+
+`kernel/drivers/usb/class_rust/` contains the no_std Rust configuration
+descriptor walker for class-driver binding. It recognizes MSC bulk-only
+interfaces, hubs, UVC control/streaming interfaces, and Bluetooth USB interfaces
+and records their endpoint sets.
+
+`kernel/drivers/usb/hid_rust/` contains the no_std Rust HID report-descriptor
+parser. `kernel/drivers/usb/hid_descriptor.cpp` keeps the public C++ API and
+self-tests, but the descriptor walk and mouse-layout extraction are Rust FFI
+calls. These parsers validate the aggregate `/kernel/rust` staticlib model for
+multiple USB-facing Rust subsystems.
+
+USB descriptors are treated as hostile input even though they come from
+"hardware": a malicious USB peripheral can return arbitrary bytes for descriptor
+requests, including impossible lengths, duplicate or high-numbered report IDs,
+truncated items, and deeply nested HID collections. The Rust crates keep that
+byte-level walk in safe slice-based code after a narrow C ABI validates the raw
+pointer/length pair.
+
 ## HID Boot Keyboard
 
 `kernel/drivers/usb/class/hid/keyboard/`.

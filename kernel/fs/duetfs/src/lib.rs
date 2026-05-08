@@ -36,7 +36,6 @@ mod journal;
 mod mkfs;
 mod ops;
 mod ops_dir;
-mod panic;
 mod path;
 mod snapshot;
 mod xattr;

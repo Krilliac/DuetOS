@@ -85,8 +85,7 @@ pub fn argon2id_kdf(
     // workspace; the alloc feature provides that. For our memory
     // budgets (4 MiB working set with default params) this is fine
     // — the kernel heap accommodates it during the brief mount.
-    let mut buf = Vec::new();
-    buf.resize(XTS_KEY_BYTES, 0);
+    let mut buf = Vec::from([0u8; XTS_KEY_BYTES]);
     if argon2.hash_password_into(password, salt, &mut buf).is_err()
     {
         return false;

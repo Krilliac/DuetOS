@@ -1,0 +1,18 @@
+# USB HID descriptor parsing for DuetOS.
+#
+# This is a standalone Rust parser crate at the USB HID class-driver boundary:
+# descriptor bytes come from devices and must be decoded without trusting length,
+# item shape, or collection balance. The C++ USB stack calls this crate through
+# the hand-written C ABI in include/usbhid.h.
+
+[package]
+name = "usbhid"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "DuetOS USB HID report descriptor parser"
+
+[lib]
+name = "usbhid"
+crate-type = ["rlib"]

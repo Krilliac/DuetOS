@@ -184,7 +184,7 @@ impl BitmapAllocator
 
 fn bit_get(bits: &[u8; BLOCK_SIZE], idx: u32) -> bool
 {
-    if (idx as u32) >= BITMAP_BITS
+    if idx >= BITMAP_BITS
     {
         return false;
     }
@@ -195,7 +195,7 @@ fn bit_get(bits: &[u8; BLOCK_SIZE], idx: u32) -> bool
 
 fn bit_set(bits: &mut [u8; BLOCK_SIZE], idx: u32, v: bool)
 {
-    if (idx as u32) >= BITMAP_BITS
+    if idx >= BITMAP_BITS
     {
         return;
     }

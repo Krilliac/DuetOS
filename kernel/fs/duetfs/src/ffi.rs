@@ -117,6 +117,9 @@ unsafe fn cstr_to_slice<'a>(p: *const c_uchar, max: usize) -> Option<&'a [u8]>
     Some(&bytes[..n])
 }
 
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_probe(desc: *const DuetFsDevice) -> c_uint
 {
@@ -124,6 +127,9 @@ pub unsafe extern "C" fn duetfs_probe(desc: *const DuetFsDevice) -> c_uint
     Fs::open(&mut dev).is_ok() as c_uint
 }
 
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_mkfs(desc: *const DuetFsDevice) -> c_uint
 {
@@ -135,6 +141,9 @@ pub unsafe extern "C" fn duetfs_mkfs(desc: *const DuetFsDevice) -> c_uint
     }
 }
 
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_lookup(
     desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize,
@@ -171,6 +180,9 @@ pub unsafe extern "C" fn duetfs_lookup(
     }
 }
 
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_read_file(
     desc: *const DuetFsDevice, node_id: u32, offset: u32, dst: *mut c_void, dst_max: usize,
@@ -201,6 +213,9 @@ pub unsafe extern "C" fn duetfs_read_file(
     }
 }
 
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_write_at(
     desc: *const DuetFsDevice, node_id: u32, offset: u32, src: *const c_void, src_max: usize,
@@ -233,6 +248,9 @@ pub unsafe extern "C" fn duetfs_write_at(
     }
 }
 
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_create_path(
     desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize, kind: u32,
@@ -273,6 +291,9 @@ pub unsafe extern "C" fn duetfs_create_path(
     }
 }
 
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_unlink_path(
     desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize,
@@ -290,6 +311,9 @@ pub unsafe extern "C" fn duetfs_unlink_path(
     }
 }
 
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_truncate(
     desc: *const DuetFsDevice, node_id: u32, new_size: u32,
@@ -318,6 +342,9 @@ pub struct DuetFsFsckReport
     pub link_count_mismatch: u32,
 }
 
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_fsck(
     desc: *const DuetFsDevice, repair: u32, out: *mut DuetFsFsckReport,
@@ -353,6 +380,9 @@ pub unsafe extern "C" fn duetfs_fsck(
 
 /// Create a symbolic link at `path` pointing at `target`. Both
 /// strings are NUL-terminated kernel buffers.
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_create_symlink(
     desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize,
@@ -385,6 +415,9 @@ pub unsafe extern "C" fn duetfs_create_symlink(
 /// Read a symlink's target into `dst`. Returns kStatusOk + bytes
 /// copied via `*out_copied`. Same shape as duetfs_read_file but
 /// requires the node to be a symlink.
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_readlink(
     desc: *const DuetFsDevice, node_id: u32, dst: *mut c_void, dst_max: usize,
@@ -420,6 +453,9 @@ pub unsafe extern "C" fn duetfs_readlink(
 /// existing name; passing a `new_path` whose last component
 /// differs from the target's name returns STATUS_INVALID until a
 /// future slice introduces a separate dirent table.
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_link(
     desc: *const DuetFsDevice, existing_path: *const c_uchar, existing_max: usize,
@@ -459,6 +495,9 @@ pub static DUETFS_ROOT_NODE_ID: u32 = ROOT_NODE_ID;
 /// Read a raw block at `lba` into `dst`. Bypasses the FS — useful
 /// for the journal self-test which inspects on-disk state directly.
 /// Returns kStatusOk on success.
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_block_read(
     desc: *const DuetFsDevice, lba: u32, dst: *mut u8,
@@ -485,6 +524,9 @@ pub unsafe extern "C" fn duetfs_block_read(
 /// Atomic against torn writes — either the new payload reaches the
 /// target or the FS is left exactly as it was. `payload` MUST point
 /// at a kernel-space buffer of at least kBlockSize bytes.
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_journal_apply(
     desc: *const DuetFsDevice, target_lba: u32, payload: *const u8,
@@ -513,6 +555,9 @@ pub unsafe extern "C" fn duetfs_journal_apply(
 /// (probe / lookup / mkfs aren't probe-only — only FFIs that go
 /// through Fs::open) will replay it. Used exclusively by the boot
 /// self-test in kernel/fs/duetfs.cpp.
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_journal_inject_for_test(
     desc: *const DuetFsDevice, target_lba: u32, payload: *const u8,
@@ -536,6 +581,9 @@ pub unsafe extern "C" fn duetfs_journal_inject_for_test(
 /// descriptor and are reported verbatim. Diagnostic — never fails
 /// the FS-open path (Fs::open replays first), so a clean mount
 /// always reports state == 0.
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_journal_state(desc: *const DuetFsDevice) -> c_uint
 {
@@ -565,6 +613,9 @@ pub unsafe extern "C" fn duetfs_journal_state(desc: *const DuetFsDevice) -> c_ui
 /// become the AES-256-XTS data-cipher key; the remaining 32 bytes
 /// the tweak-cipher key. Both are randomly distinguishable from
 /// each other by the KDF — Argon2id's output stream is uniform.
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_kdf_argon2id(
     password: *const u8, password_len: usize, salt: *const u8, salt_len: usize, m_cost_kib: u32,
@@ -591,6 +642,9 @@ pub unsafe extern "C" fn duetfs_kdf_argon2id(
 /// points at a 64-byte key (data || tweak). `sector` is the LBA —
 /// the XTS tweak is derived from it so the same plaintext at
 /// different LBAs produces different ciphertext.
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_xts_encrypt_block(
     key: *const u8, sector: u64, buf: *mut u8,
@@ -610,6 +664,9 @@ pub unsafe extern "C" fn duetfs_xts_encrypt_block(
 
 /// Decrypt a 4096-byte block in place. Inverse of
 /// `duetfs_xts_encrypt_block`.
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_xts_decrypt_block(
     key: *const u8, sector: u64, buf: *mut u8,
@@ -633,6 +690,9 @@ pub unsafe extern "C" fn duetfs_xts_decrypt_block(
 /// duetfs_kdf_argon2id). `salt` (16 bytes) and the (m_cost_kib,
 /// t_cost, p_cost) triple get persisted in the SB so a future
 /// mounter can re-derive the key from the same password.
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_mkfs_encrypted(
     desc: *const DuetFsDevice, salt: *const u8, salt_len: usize, m_cost_kib: u32, t_cost: u32,
@@ -667,6 +727,9 @@ pub unsafe extern "C" fn duetfs_mkfs_encrypted(
 /// LZ4 bytes). On success writes the byte count to `*out_len` and
 /// returns kStatusOk; on dst-too-small returns kStatusInvalid (caller
 /// queried the worst-case bound from `duetfs_lz4_compress_bound`).
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_lz4_compress(
     src: *const u8, src_len: usize, dst: *mut u8, dst_max: usize, out_len: *mut usize,
@@ -698,6 +761,9 @@ pub unsafe extern "C" fn duetfs_lz4_compress(
 /// success writes the byte count to `*out_len` and returns
 /// kStatusOk; on any error (truncated input, bad header, dst short)
 /// returns kStatusInvalid.
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_lz4_decompress(
     src: *const u8, src_len: usize, dst: *mut u8, dst_max: usize, out_len: *mut usize,
@@ -728,6 +794,9 @@ pub unsafe extern "C" fn duetfs_lz4_decompress(
 /// Worst-case output size for `duetfs_lz4_compress` on an input of
 /// `n` bytes — caller sizes the dst buffer to this. Includes the
 /// 4-byte size header. Cheap (no I/O).
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_lz4_compress_bound(n: usize) -> usize
 {
@@ -748,6 +817,9 @@ pub unsafe extern "C" fn duetfs_lz4_compress_bound(n: usize) -> usize
 /// `ts_ns` is opaque to the FS — typically the kernel monotonic
 /// clock at snapshot time. Stored verbatim in the SB so the C++
 /// side can render "snapshot taken N seconds ago".
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_snapshot_create(
     desc: *const DuetFsDevice, ts_ns: u64,
@@ -765,6 +837,9 @@ pub unsafe extern "C" fn duetfs_snapshot_create(
 /// returns to exactly the state captured by the most recent
 /// `duetfs_snapshot_create`. Idempotent — restoring an already-
 /// restored snapshot is a no-op re-apply.
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_snapshot_restore(desc: *const DuetFsDevice) -> c_uint
 {
@@ -784,6 +859,9 @@ pub unsafe extern "C" fn duetfs_snapshot_restore(desc: *const DuetFsDevice) -> c
 
 /// Set / replace `name`'s value on the node at `path`. Allocates
 /// the per-node xattr block on first set; rewrites in place after.
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_xattr_set(
     desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize, name: *const c_uchar,
@@ -822,6 +900,9 @@ pub unsafe extern "C" fn duetfs_xattr_set(
 /// full value length (which may exceed `dst_max`) to `*out_len`.
 /// Caller treats `*out_len > dst_max` as "buffer too small".
 /// Returns kStatusOk on hit, kStatusNotFound on no such xattr.
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_xattr_get(
     desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize, name: *const c_uchar,
@@ -866,6 +947,9 @@ pub unsafe extern "C" fn duetfs_xattr_get(
 /// List xattr names on the node at `path` as a NUL-separated stream
 /// in `dst`. Writes the total bytes-needed to `*out_len`. Caller
 /// treats `*out_len > dst_max` as "buffer too small".
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_xattr_list(
     desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize, dst: *mut u8,
@@ -904,6 +988,9 @@ pub unsafe extern "C" fn duetfs_xattr_list(
 /// Remove `name`'s entry on the node at `path`. Frees the xattr
 /// block if the last entry is removed. Returns kStatusNotFound when
 /// no such xattr exists.
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_xattr_remove(
     desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize, name: *const c_uchar,
@@ -928,6 +1015,9 @@ pub unsafe extern "C" fn duetfs_xattr_remove(
 
 /// Snapshot presence. 0 = absent, 1 = present, 0xFFFFFFFFu = read
 /// error / corrupt SB.
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_snapshot_present(desc: *const DuetFsDevice) -> c_uint
 {
@@ -953,6 +1043,9 @@ pub unsafe extern "C" fn duetfs_snapshot_present(desc: *const DuetFsDevice) -> c
 /// derive the key, and build the encrypted-Device wrapper before
 /// any other duetfs FFI call. `dev` here is the RAW device, NOT a
 /// crypto wrapper — the SB lives at LBA 0 plaintext.
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_read_encryption_meta(
     desc: *const DuetFsDevice, out_encrypted: *mut u32, out_m_cost: *mut u32, out_t_cost: *mut u32,

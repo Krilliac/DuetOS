@@ -62,8 +62,8 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
     {
         let root = self.read_node(ROOT_NODE_ID)?;
         let mut current = Resolved { node_id: ROOT_NODE_ID, node: root };
-        let mut iter = PathIter::new(path);
-        while let Some(comp) = iter.next()
+        let iter = PathIter::new(path);
+        for comp in iter
         {
             let comp = comp.ok_or(FsError::Invalid)?;
             if current.node.kind != NODE_KIND_DIR

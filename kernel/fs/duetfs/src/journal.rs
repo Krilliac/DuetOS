@@ -174,11 +174,11 @@ pub fn apply<D: BlockDevice + ?Sized>(
     write_descriptor(dev, jlba, &d)?;
     // 3. Apply payloads to their target LBAs.
     let mut buf = [0u8; BLOCK_SIZE];
-    for i in 0..ops.len()
+    for (i, target_lba) in targets.iter().copied().enumerate().take(ops.len())
     {
         let slot_lba = jlba + 1 + i as u32;
         dev.read_block(slot_lba, &mut buf).map_err(|_| FsError::Io)?;
-        dev.write_block(targets[i], &buf).map_err(|_| FsError::Io)?;
+        dev.write_block(target_lba, &buf).map_err(|_| FsError::Io)?;
     }
     // 4. Clear.
     let cleared = JournalDescriptor::empty();

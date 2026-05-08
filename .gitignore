@@ -130,6 +130,7 @@ lcov-report/
 # Rust
 target/
 Cargo.lock
+!/Cargo.lock
 
 # Python scratch (in tools/, scripts/)
 __pycache__/

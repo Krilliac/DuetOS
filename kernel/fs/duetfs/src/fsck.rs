@@ -300,14 +300,14 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
             {
                 continue;
             }
-            if b >= JOURNAL_LBA && b < JOURNAL_LBA + JOURNAL_BLOCKS
+            if (JOURNAL_LBA..JOURNAL_LBA + JOURNAL_BLOCKS).contains(&b)
             {
                 continue;
             }
             // Snapshot blocks change on snapshot_create / restore;
             // their CRC is implicit in the snapshot SB copy at
             // SNAPSHOT_LBA, not the live crc_table entry.
-            if b >= SNAPSHOT_LBA && b < SNAPSHOT_LBA + SNAPSHOT_BLOCKS
+            if (SNAPSHOT_LBA..SNAPSHOT_LBA + SNAPSHOT_BLOCKS).contains(&b)
             {
                 continue;
             }

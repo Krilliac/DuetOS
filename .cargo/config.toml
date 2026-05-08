@@ -1,0 +1,12 @@
+# DuetOS root cargo config.
+#
+# Applies to every Rust subsystem crate in the workspace. Crate-local .cargo
+# configs are unnecessary unless a subsystem has a legitimate per-crate target
+# override.
+
+[build]
+target = "x86_64-unknown-none"
+
+[unstable]
+build-std = ["core", "alloc"]
+build-std-features = ["compiler-builtins-mem"]
