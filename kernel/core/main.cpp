@@ -256,6 +256,7 @@
 #include "shell/shell.h"
 #include "syscall/syscall.h"
 #include "mm/kheap.h"
+#include "mm/slab.h"
 #include "mm/kstack.h"
 #include "mm/multiboot2.h"
 #include "mm/paging.h"
@@ -2589,6 +2590,19 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                        []()
                                        {
                                            duetos::sched::WorkPoolSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
+        // Slab allocator — fixed-size object cache layered over
+        // KMalloc. Self-test exercises alloc / free / multi-slab
+        // grow / LIFO reuse / Destroy lifecycle. Runs in
+        // Phase::Sched because the per-cache mutex requires the
+        // scheduler to be online; uncontended fast path doesn't
+        // block but the mutex still inspects the scheduler's
+        // current-task slot.
+        duetos::core::InitcallRegister(duetos::core::Phase::Sched, "slab-selftest",
+                                       []()
+                                       {
+                                           duetos::mm::SlabSelfTest();
                                            return duetos::core::Result<void>{};
                                        });
         // Dynamic event tracer self-test (plan D2). Verifies the
