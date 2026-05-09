@@ -6519,3 +6519,42 @@ doc helps future readers audit the trail.
   pattern-brush BitBlt.
 - **Related roadmap track(s):** T1-05 (landed), T2-02 (landed),
   T12-04 (landed).
+
+---
+
+## 2026-05-09 — T7-02 W/A symmetry + process-local named sync (T6-04 v0)
+
+- **Scope:** `userland/libs/kernel32/kernel32.c`
+- **Commit:** this slice
+- **Decision:** Two more roadmap items close in this commit:
+    1. **T7-02 W/A symmetry.** `GetCurrentDirectoryW`,
+       `GetFullPathNameA`, `GetDiskFreeSpace{A,W}`, and
+       `GetVolumeInformation{A,W}` now ship; the prior set covered
+       only one variant per pair (A or W). Volume name reports
+       "DuetOS", filesystem name reports "FAT32" (matches the
+       `Fat32Format` primitive), free/total cluster counts pin to
+       a 1 GiB ramfs-friendly geometry.
+    2. **T6-04 process-local named-sync v0.** `Create{Mutex,Event,
+       Semaphore}{A,W}` with a non-NULL `name` argument now check
+       a process-local 32-slot name table; on hit they return the
+       existing handle; on miss they allocate a fresh kernel
+       handle and record it. `Open{Mutex,Event,Semaphore}{A,W}`
+       look up the same table and return NULL on miss. This
+       satisfies all WITHIN-process named-sync probes (one
+       process opening the same name twice gets the same handle)
+       without a kernel-resident namespace.
+- **Why:** Both items unblock specific PE behaviour patterns: any
+  code that round-trips through `GetVolumeInformation` to label a
+  drive UI now sees real values; any code that uses named sync
+  for "I should run only once per process" patterns (the most
+  common in-process use of named primitives) now works without
+  the kernel-resident namespace landing.
+- **Rules out / defers:** Cross-process named sync (parent +
+  child sharing a named event) still needs the kernel-resident
+  namespace — that's the remainder of T6-04. The volume info
+  is canned (no per-volume labels yet); a real disk installer
+  would seed the value at format time.
+- **Revisit when:** kernel-resident named-sync namespace lands
+  (T6-04 follow-on), or a workload requires per-volume labels.
+- **Related roadmap track(s):** T7-02 (landed), T6-04 (v0
+  process-local landed; cross-process pending).

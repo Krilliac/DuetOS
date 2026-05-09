@@ -612,14 +612,20 @@ extends. Next:
 | T6-01 | kernel | P0 | Implement PE TLS: parse `IMAGE_DIRECTORY_ENTRY_TLS`, call callbacks before entry/DllMain, allocate per-thread TLS templates, set TEB TLS slot pointer, and implement `TlsAlloc` / `TlsSetValue` / `TlsGetValue` / `TlsFree`. | A PE with `__declspec(thread) int x = 42` reads independent `42` values from two threads. |
 | T6-02 | kernel | P1 | Implement x64 SEH: parse `.pdata`, implement `RtlLookupFunctionEntry`, `RtlVirtualUnwind`, `RtlUnwindEx`, `NtRaiseException`, context capture/restore, user exception dispatch for faults. | A PE `__try`/`__except` null write is caught and continues in the exception handler. |
 | T6-03 | kernel | P1 | Implement `CreateProcessA/W` and process/thread waiting/exit/open/terminate/duplicate handle semantics. | A parent PE creates a child PE, waits, and observes the child's exit code. |
-| T6-04 | kernel | P1 | Implement named mutex/event/semaphore namespace and open/create semantics with refcounted kernel objects. | Parent/child PEs synchronize through a named event. |
+| T6-04 | kernel | P1 | Implement named mutex/event/semaphore namespace and open/create semantics with refcounted kernel objects. (Process-local name dedup landed in `kernel32!Create{Mutex,Event,Semaphore}{A,W}` + `Open{Mutex,Event,Semaphore}{A,W}`; cross-process namespace still pending kernel-resident name table.) | Parent/child PEs synchronize through a named event. |
 
 ### Track 7 — File system
 
+> **T7-01** (FindFirstFile{A,W}, FindNextFile{A,W}, FindClose,
+> wildcard matching, iterator handles, full WIN32_FIND_DATA)
+> landed. **T7-02** namespace + path APIs ship: GetLogicalDrives,
+> GetDriveType{A,W}, GetCurrentDirectory{A,W}, SetCurrentDirectory{A,W},
+> GetFullPathName{A,W}, GetDiskFreeSpace{A,W}, GetVolumeInformation{A,W}.
+> The `C:` drive maps onto the ramfs root and System32 DLL paths
+> resolve through the Win32 thunks page.
+
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
-| T7-01 | fs | P1 | Implement `FindFirstFileA/W`, `FindNextFileA/W`, `FindClose`, wildcard matching, iterator handles, and full `WIN32_FIND_DATA`. | `FindFirstFile("C:\\*.*")` iterates root files without crashing. |
-| T7-02 | fs | P1 | Implement Win32 drive-letter namespace: `C:` mapping, System32 DLL path mapping, full-path and CWD APIs, drive type/logical drives/disk-free APIs. | Opening `C:\Windows\System32\kernel32.dll` finds the DuetOS DLL. |
 | T7-03 | fs | P1 | Complete `CreateFileA/W` sharing and overlapped I/O: IOCP, `ERROR_IO_PENDING`, overlapped events, and share-mode enforcement. | A PE using overlapped file reads receives completion through `GetQueuedCompletionStatus`. |
 | T7-04 | fs | P2 | Add scoped NTFS write support: create, write, truncate, delete, rename with MFT/index/journal/bitmap updates; no compression/encryption/ADS for v0. | PEs can perform basic writes to NTFS volumes. |
 | T7-05 | fs | P2 | Add FAT32 Long File Name read/write support for VFAT 0x0F entries and UTF-16/UTF-8 conversion. | FAT32 files with names longer than 8.3 are visible and creatable. |

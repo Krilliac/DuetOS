@@ -126,8 +126,10 @@ syscall routing shows up immediately.
 **Real implementations:**
 - File: `CreateFileA/W`, `ReadFile`, `WriteFile`,
   `SetFilePointer{,Ex}`, `GetFileSize{,Ex}`, `GetFileAttributes{A,W}`,
-  `CloseHandle`, `FindFirstFileW`, `FindNextFileW`, `FindClose`,
-  `GetCurrentDirectoryW`, `GetFullPathNameW`,
+  `CloseHandle`, `FindFirstFileA/W`, `FindNextFileA/W`, `FindClose`,
+  `GetCurrentDirectoryA/W`, `SetCurrentDirectoryA/W`,
+  `GetFullPathNameA/W`, `GetDiskFreeSpaceA/W`,
+  `GetVolumeInformationA/W`,
   `DeleteFileW`, `MoveFileExW`, `CopyFileW`,
   `CreateDirectoryW`, `RemoveDirectoryW`, `GetTempPathW`,
   `GetSystemDirectoryA/W`, `GetWindowsDirectoryW`
@@ -140,13 +142,19 @@ syscall routing shows up immediately.
   `OutputDebugStringA/W`, per-thread `GetLastError` / `SetLastError`
 - Threading: `CreateThread`, `WaitForSingleObject`,
   `WaitForMultipleObjects`, `Sleep`, `SleepEx`,
-  `CreateEventW`, `SetEvent`, `ResetEvent`, `PulseEvent`,
-  `CreateMutexW`, `ReleaseMutex`, `CreateSemaphoreW`,
+  `CreateEventA/W`, `OpenEventA/W`, `SetEvent`, `ResetEvent`,
+  `PulseEvent`, `CreateMutexA/W`, `OpenMutexA/W`,
+  `ReleaseMutex`, `CreateSemaphoreA/W`, `OpenSemaphoreA/W`,
   `ReleaseSemaphore`, `EnterCriticalSection`,
   `LeaveCriticalSection`, `InitializeCriticalSection`,
   `DeleteCriticalSection`, `TryEnterCriticalSection`,
   `InitializeSRWLock`, `AcquireSRWLockExclusive` /
-  `Shared`, `ReleaseSRWLockExclusive` / `Shared`
+  `Shared`, `ReleaseSRWLockExclusive` / `Shared`. Named
+  primitives use a process-local name table — second
+  Create with the same name returns the existing handle;
+  Open* succeeds for names registered in this process and
+  fails (NULL) otherwise. Cross-process named-namespace is
+  T6-04 follow-on.
 - TLS: `TlsAlloc`, `TlsFree`, `TlsGetValue`, `TlsSetValue`
 - Memory: `VirtualAlloc`, `VirtualFree`, `VirtualProtect`,
   `VirtualQuery`, `HeapCreate`, `HeapDestroy`, `HeapAlloc`,
