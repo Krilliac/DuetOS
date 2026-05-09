@@ -554,9 +554,14 @@ extends. Next:
 
 1. **Multi-block CRC table** — restore the 32 MiB / 128 MiB image cap.
 2. **CoW + journal** — durability / crash safety on file data writes.
-3. **Userland syscall surface** — make DuetFS reachable from PE/ELF
-   binaries. Routes file open/read/write through the existing VFS,
-   which already has `VfsBackend::DuetFs`.
+3. ~~**Userland syscall surface**~~ — landed. `kernel/fs/file_route.cpp`
+   recognises `/duetfs` and `/disks/duetfsN` mount paths via
+   `ParseDuetFsPath`, materialises a `duetfs::Device` per call,
+   and routes SYS_FILE_OPEN / SYS_FILE_READ / SYS_FILE_WRITE /
+   SYS_FILE_CREATE / SYS_OPEN / SYS_READ / SYS_FILE_LINK /
+   SYS_FILE_SYMLINK / SYS_FILE_READLINK through the matching
+   `duetfs_*` FFI calls. PE and ELF binaries see DuetFS volumes
+   through the same syscall surface as ramfs and FAT32 paths.
 4. **Separate dirent table** — decouples hard-link names from the
    inode's `name` (today's v3 caveat).
 5. **Auto-symlink resolution in `lookup_path`** with cycle detection.
