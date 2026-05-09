@@ -509,6 +509,7 @@ void CmdLsblk();
 void CmdLsgpt();
 void CmdLsmod();
 void CmdMkfs(u32 argc, char** argv);
+void CmdMkfsDuetfs(u32 argc, char** argv);
 void CmdLastdump();
 
 // ---------------------------------------------------------------

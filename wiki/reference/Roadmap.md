@@ -76,11 +76,17 @@ the same commit** that delivers the code.
   slabs carved out of the kheap, with a per-cache intrusive
   freelist. O(1) alloc / free, zero per-object header.
   Boot self-test runs in Phase::Sched.
+- **Freed-object poison landed** — `SlabFree` stamps
+  `kSlabFreedObjectPoison = 0xCC` across the trailing payload of
+  every freed slab object (skipping the first `sizeof(void*)`
+  bytes that hold the freelist link); fresh-slab carve uses the
+  same helper so every free object on the cache freelist looks
+  identical. `SlabAlloc` verifies the band before handing the
+  object out and panics on mismatch. Boot self-test checks that
+  re-allocated objects come back with the poison still present.
+  Helpers live in `mm/poison.h` (`PoisonSlabFreedObject` /
+  `CheckSlabFreedObjectPoison`).
 - **Remaining scope:**
-  - **Freed-object poison** — stamp `kSlabFreedObjectPoison =
-    0xCC` across freed slab objects on free + verify on alloc.
-    Catches use-after-free in slab-allocated objects without
-    KASAN's shadow-memory tax.
   - **KMalloc routing** — small KMalloc calls could route through
     pre-built size-classed caches automatically. Existing call
     sites are unchanged today; opt-in via direct `SlabAlloc`.
@@ -167,19 +173,22 @@ In rough priority:
   namespace 1 via `NvmePanicWriteDump` — a polled-completion
   path that reuses the driver's existing staging buffer +
   CQ phase-tag wait, with no scheduler / slab dependencies.
-  The path is exercised at every boot via
-  `DiskPersistSelfTest` so a regression surfaces in the
-  boot log instead of waiting for a real panic. The
-  `lastdump` shell command surfaces the on-disk LBA + byte
-  count alongside the in-RAM minidump status.
-- **Deferred:** the same persistence story for AHCI/SATA
-  namespaces (the AHCI driver doesn't have a panic-write
-  helper yet), and a real partition-table reservation so
-  the disk installer can allocate the dump region
-  explicitly instead of trusting the last 4 MiB to be
-  unused. Both items wait for a workload that legitimately
-  exercises a real-hardware AHCI disk; QEMU's NVMe path
-  covers the v0 verification.
+  **AHCI/SATA fallback also landed:** `AhciPanicWriteDump` /
+  `AhciDumpReservedLba` / `AhciAvailable` provide the same
+  contract — polled completion via the existing per-port
+  command list + FIS receive area, no allocations, GPT-first
+  + tail-of-drive fallback for the reserved region.
+  `minidump.cpp` consults NVMe first and AHCI as the
+  fallback when no NVMe namespace is online. Both paths are
+  exercised at every boot via `DiskPersistSelfTest` so a
+  regression surfaces in the boot log instead of waiting for
+  a real panic. The `lastdump` shell command surfaces the
+  on-disk LBA + byte count alongside the in-RAM minidump
+  status.
+- **Deferred:** real partition-table reservation so the disk
+  installer can allocate the dump region explicitly instead
+  of trusting the last 4 MiB to be unused. Waits for the
+  installer slice (Disk installer → orchestration layer).
 
 ---
 
@@ -412,14 +421,19 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
 
 - **Today:** Iface table (index, MAC, IPv4, bound state),
   rx/tx packet + byte counters, the firewall's per-iface
-  `tx_dropped_firewall` column, and a routing/DNS section
+  `tx_dropped_firewall` column, a routing/DNS section
   (gateway + DNS resolver + DHCP server + lease seconds)
-  pulled from `DhcpLeaseRead()` back the Start menu's
-  NETWORK STATUS entry (`kernel/apps/netstatus.cpp`).
-- **Blocks on:** Wi-Fi scan results from `kernel/net/wifi.cpp`
-  for an SSID picker. Routing surface is single-lease
-  today — multi-iface lease tracking happens when more than
-  one DHCP transaction can be live at once.
+  pulled from `DhcpLeaseRead()`, AND a `WI-FI SCAN`
+  section that calls `WifiScan(0, ...)` and renders the
+  resulting SSID / SEC / RSSI table. With no wireless
+  backend registered the section shows a placeholder hint.
+  All back the Start menu's NETWORK STATUS entry
+  (`kernel/apps/netstatus.cpp`).
+- **Blocks on:** real-hardware wireless backend (per the
+  Wireless roadmap row) so the SSID list reflects an actual
+  RF scan rather than the empty placeholder. Routing surface
+  is single-lease today — multi-iface lease tracking happens
+  when more than one DHCP transaction can be live at once.
 
 ### Terminal emulator (windowed userland shell)
 
@@ -540,15 +554,25 @@ extends. Next:
 
 1. **Multi-block CRC table** — restore the 32 MiB / 128 MiB image cap.
 2. **CoW + journal** — durability / crash safety on file data writes.
-3. **Userland syscall surface** — make DuetFS reachable from PE/ELF
-   binaries. Routes file open/read/write through the existing VFS,
-   which already has `VfsBackend::DuetFs`.
+3. ~~**Userland syscall surface**~~ — landed. `kernel/fs/file_route.cpp`
+   recognises `/duetfs` and `/disks/duetfsN` mount paths via
+   `ParseDuetFsPath`, materialises a `duetfs::Device` per call,
+   and routes SYS_FILE_OPEN / SYS_FILE_READ / SYS_FILE_WRITE /
+   SYS_FILE_CREATE / SYS_OPEN / SYS_READ / SYS_FILE_LINK /
+   SYS_FILE_SYMLINK / SYS_FILE_READLINK through the matching
+   `duetfs_*` FFI calls. PE and ELF binaries see DuetFS volumes
+   through the same syscall surface as ramfs and FAT32 paths.
 4. **Separate dirent table** — decouples hard-link names from the
    inode's `name` (today's v3 caveat).
 5. **Auto-symlink resolution in `lookup_path`** with cycle detection.
 6. **Indirect extents** — files needing > 8 extents.
 7. **Multi-block dirs + B-tree directory index** — bump the 1024-child cap.
-8. **Auto-mkfs of a blank disk via shell command** — `mkfs.duetfs /disks/<dev>`.
+8. ~~**Auto-mkfs of a blank disk via shell command**~~ — `mkfs.duetfs <handle> ERASE`
+   landed alongside the existing FAT32 `mkfs`. Same admin / confirmation-token
+   contract; uses `MakeBlockHandleDevice` to wrap the kernel block-device
+   handle and calls `duetfs_mkfs` followed by a probe re-validate. The
+   formatted volume isn't auto-mounted at runtime — the boot probe path
+   only mounts pre-formatted volumes; runtime auto-mount is a follow-on.
 9. **AES-XTS encryption + Argon2 KDF** — full-disk encryption tier.
 10. **LZ4 compression** — optional per-file compression.
 
@@ -619,7 +643,7 @@ extends. Next:
 
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
-| T5-01 | mm | P1 | Complete `NtAllocateVirtualMemory` / `VirtualAlloc` / `VirtualFree` / `VirtualProtect`: reserve/commit split, release, guard pages, correct protection flags, `VirtualQuery` / `NtQueryVirtualMemory`, and `MEM_WRITE_WATCH` rejection. | MSVC stack-probing apps survive first-thread stack setup. |
+| T5-01 | mm | P1 | Complete `NtAllocateVirtualMemory` / `VirtualAlloc` / `VirtualFree` / `VirtualProtect`: reserve/commit split, release, guard pages, correct protection flags, `VirtualQuery` / `NtQueryVirtualMemory`, and `MEM_WRITE_WATCH` rejection. (`VirtualQuery` / `NtQueryVirtualMemory` ship; `MEM_WRITE_WATCH` rejection ships — `VirtualAlloc` returns NULL when the flag is set rather than silently dropping the watch contract. Reserve/commit split, guard pages, and protection-bit enforcement still pending kernel-side region bookkeeping.) | MSVC stack-probing apps survive first-thread stack setup. |
 | T5-02 | mm | P1 | Implement multi-heap process allocator: `HeapCreate`, `HeapAlloc`, `HeapFree`, `HeapReAlloc`, `HeapSize`, `GetProcessHeap`, `HeapDestroy`, validation/compact no-ops, CRT malloc/free through the default heap. | A PE can allocate from and destroy a secondary heap without corrupting the default heap. |
 | T5-03 | mm | P2 | Implement real KASLR in the UEFI loader: memory-map scan, random 2 MiB-aligned base within a 64 MiB window, boot-info handoff, and boot-log reporting. | Two cold boots show different kernel `.text` load addresses. |
 | T5-04 | mm | P2 | Audit/complete buddy + slab allocators: coalescing, slab freelists or magazines, IRQ-safe `kmalloc` / `kfree`, and documentation of IRQ/process context safety. | Allocator behavior and context guarantees are tested and documented. |
@@ -641,26 +665,41 @@ extends. Next:
 > GetDriveType{A,W}, GetCurrentDirectory{A,W}, SetCurrentDirectory{A,W},
 > GetFullPathName{A,W}, GetDiskFreeSpace{A,W}, GetVolumeInformation{A,W}.
 > The `C:` drive maps onto the ramfs root and System32 DLL paths
-> resolve through the Win32 thunks page.
+> resolve through the Win32 thunks page. **T7-05** (FAT32 LFN read +
+> write for VFAT 0x0F entries) shipped: `kernel/fs/fat32_dir.cpp`
+> walks LFN fragment chains and stitches the UTF-16 codepoints into
+> `DirEntry::name`; `kernel/fs/fat32_create.cpp` writes the
+> SFN-checksummed LFN sequence + 8.3 fallback for any name that
+> needs case preservation, lower-case characters, or > 8.3 length.
+> Mixed 8.3 / LFN reads round-trip; UTF-16 / UTF-8 conversion runs
+> through the shared LFN encode/decode helpers.
 
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
 | T7-03 | fs | P1 | Complete `CreateFileA/W` sharing and overlapped I/O: IOCP, `ERROR_IO_PENDING`, overlapped events, and share-mode enforcement. | A PE using overlapped file reads receives completion through `GetQueuedCompletionStatus`. |
 | T7-04 | fs | P2 | Add scoped NTFS write support: create, write, truncate, delete, rename with MFT/index/journal/bitmap updates; no compression/encryption/ADS for v0. | PEs can perform basic writes to NTFS volumes. |
-| T7-05 | fs | P2 | Add FAT32 Long File Name read/write support for VFAT 0x0F entries and UTF-16/UTF-8 conversion. | FAT32 files with names longer than 8.3 are visible and creatable. |
 
 ### Track 8 — Scheduler
 
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
 | T8-01 | sched | P1 | Complete MLFQ priority aging/decay, Win32 priority class/thread mappings, and work-stealing priority behavior. | A high-priority thread preempts a low-priority thread within one 10 ms tick. |
-| T8-02 | sched | P1 | Implement APC queues and alertable waits for `QueueUserAPC`, `SleepEx`, `WaitForSingleObjectEx`, and `NtQueueApcThread`. (Process-local single-thread APC queue v0 landed: `QueueUserAPC` enqueues callbacks into a 16-slot per-process table; `SleepEx(_, TRUE)` and `WaitForSingleObjectEx(_, _, TRUE)` drain pending APCs for the calling thread and return `WAIT_IO_COMPLETION (0xC0)`. Cross-thread APC delivery still needs kernel-side per-thread APC queue + scheduler wake.) | `QueueUserAPC` wakes a target in `SleepEx(INFINITE, TRUE)` and executes the APC. |
+| T8-02 | sched | P1 | Implement APC queues and alertable waits for `QueueUserAPC`, `SleepEx`, `WaitForSingleObjectEx`, and `NtQueueApcThread`. (Process-local APC queue landed: `QueueUserAPC` enqueues callbacks into a 16-slot per-process table; `SleepEx(_, TRUE)` and `WaitForSingleObjectEx(_, _, TRUE)` both chunk into 10ms slices and poll the queue between each, so APCs queued from a peer thread fire within ~10ms — including the `INFINITE` case. `NtQueueApcThread` and a kernel-resident per-thread APC list still pending — that pair only matters once a workload depends on APC delivery into a kernel-blocked wait that can't be sliced from user space.) | `QueueUserAPC` wakes a target in `SleepEx(INFINITE, TRUE)` and executes the APC. |
 
 ### Track 9 — Security
 
-| ID | Scope | Priority | Task | Acceptance |
-| --- | --- | --- | --- | --- |
-| T9-01 | security | P1 | Implement user-mode PE ASLR for `DYNAMICBASE` images and per-process DLL randomization with relocation. (PE-image ASLR landed: ring3 spawn checks `PeIsDynamicBase` on the Optional Header DllCharacteristics; if set, picks a 64 KiB-aligned delta in [0, 64 MiB) from `RandomU64`; otherwise loads at preferred base. DLL randomisation still pending — DllLoad calls still pass `aslr_delta=0`.) | ASLR-enabled PEs load at randomized bases recorded in the address-space ledger. |
+> **T9-01** shipped: ring3 spawn checks `PeIsDynamicBase` on the
+> Optional Header DllCharacteristics; if set, picks a 64 KiB-aligned
+> delta in [0, 64 MiB) from `RandomU64`; otherwise loads at preferred
+> base. **Per-DLL randomisation also shipped** — every preloaded DLL
+> now draws its own `RandomU64`-derived 4 KiB-aligned delta in
+> [0, 1 MiB) when its DllCharacteristics has `IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE`,
+> and the DllLoad call passes that delta through. The smaller
+> per-DLL window keeps each DLL inside the gap between its preferred
+> base and the next DLL's preferred base (typical Windows DLLs are
+> spaced by tens of MiB) while still adding 8 bits of independent
+> entropy per DLL. Boot log surfaces both the resulting `base_va`
+> and `aslr_delta` for every DLL preload.
 > **T9-02** shipped: vcruntime140 ships `__security_cookie` /
 > `__security_check_cookie` / `__report_gsfailure` /
 > `__report_rangefailure`, AND the PE loader's

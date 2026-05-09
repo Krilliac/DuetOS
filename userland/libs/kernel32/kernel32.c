@@ -608,8 +608,16 @@ typedef unsigned int PROT;
 __declspec(dllexport) void* VirtualAlloc(void* lpAddress, SIZE_T dwSize, DWORD flAllocationType, DWORD flProtect)
 {
     (void)lpAddress;
-    (void)flAllocationType;
     (void)flProtect;
+    /* MEM_WRITE_WATCH (0x00200000) requires the kernel to track
+     * which pages have been written since the alloc — we don't
+     * have that bookkeeping. Reject explicitly so callers fall
+     * back to a non-watched allocation rather than silently
+     * receiving a region that won't honour GetWriteWatch. Real
+     * Windows returns NULL with GetLastError = ERROR_INVALID_PARAMETER
+     * when the kernel doesn't support MEM_WRITE_WATCH. */
+    if ((flAllocationType & 0x00200000u) != 0)
+        return (void*)0;
     long long rv;
     __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)28), "D"((long long)dwSize) : "memory");
     return (void*)rv;
@@ -3618,28 +3626,98 @@ static unsigned int win32_drain_apc_queue(void)
 
 __declspec(dllexport) DWORD WaitForSingleObjectEx(HANDLE h, DWORD timeout_ms, BOOL bAlertable)
 {
-    if (bAlertable)
+    if (!bAlertable)
+        return WaitForSingleObject(h, timeout_ms);
+    /* Alertable: chunk the wait into 10ms slices so a peer-queued
+     * APC observed in g_apc_queue fires promptly. Same rationale as
+     * SleepEx — without chunking, a peer thread's QueueUserAPC
+     * couldn't break the calling thread out of an INFINITE wait.
+     * The inner WaitForSingleObject returns WAIT_TIMEOUT (0x102) on
+     * a slice-level timeout; loop until either the overall budget
+     * is exhausted, an APC fires, or the wait actually signals. */
+    if (win32_drain_apc_queue() > 0)
+        return WAIT_IO_COMPLETION;
+    DWORD remaining = timeout_ms;
+    const DWORD kSliceMs = 10;
+    for (;;)
     {
-        /* If APCs are pending for this thread, fire them and
-         * return WAIT_IO_COMPLETION before consulting the wait
-         * primitive — matches the Win32 contract. */
+        DWORD chunk = kSliceMs;
+        if (timeout_ms != 0xFFFFFFFFu)
+        {
+            if (remaining == 0)
+                return WAIT_TIMEOUT;
+            if (remaining < kSliceMs)
+                chunk = remaining;
+        }
+        DWORD rv = WaitForSingleObject(h, chunk);
+        if (rv != WAIT_TIMEOUT)
+            return rv; /* signaled / abandoned / failed */
         if (win32_drain_apc_queue() > 0)
             return WAIT_IO_COMPLETION;
+        if (timeout_ms != 0xFFFFFFFFu)
+        {
+            if (remaining <= chunk)
+                remaining = 0;
+            else
+                remaining -= chunk;
+        }
     }
-    return WaitForSingleObject(h, timeout_ms);
 }
 
 /* SleepEx(dwMilliseconds, bAlertable) — alertable variant of Sleep.
  * If bAlertable=TRUE and APCs are pending, fire them and return
- * WAIT_IO_COMPLETION; otherwise sleep the requested duration. */
+ * WAIT_IO_COMPLETION; otherwise sleep the requested duration.
+ *
+ * Cross-thread APC delivery: when alertable, the sleep is chunked
+ * into 10ms slices so an APC queued from another thread (which
+ * lands in the process-wide g_apc_queue table) is observed within
+ * one slice. Without chunking, a thread asleep in SleepEx(INFINITE,
+ * TRUE) would never observe an APC queued from a peer until its
+ * own timer fired. The chunk size is small enough to keep the
+ * cross-thread wake latency bounded but large enough that the
+ * syscall traffic from a long Sleep is still amortised. */
 __declspec(dllexport) DWORD SleepEx(DWORD dwMilliseconds, BOOL bAlertable)
 {
     if (bAlertable && win32_drain_apc_queue() > 0)
         return WAIT_IO_COMPLETION;
-    /* Forward to Sleep (syscall 19 = SYS_SLEEP). */
-    long long discard;
-    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)19), "D"((long long)dwMilliseconds) : "memory");
-    return 0;
+    if (!bAlertable)
+    {
+        /* Non-alertable Sleep — single SYS_SLEEP syscall. */
+        long long discard;
+        __asm__ volatile("int $0x80"
+                         : "=a"(discard)
+                         : "a"((long long)19), "D"((long long)dwMilliseconds)
+                         : "memory");
+        return 0;
+    }
+    /* Alertable: chunk into 10ms slices, polling the APC queue
+     * between each. INFINITE (0xFFFFFFFF) loops until an APC fires.
+     * After the last partial slice expires, return 0 (timeout) as
+     * the contract requires. */
+    DWORD remaining = dwMilliseconds;
+    const DWORD kSliceMs = 10;
+    for (;;)
+    {
+        if (win32_drain_apc_queue() > 0)
+            return WAIT_IO_COMPLETION;
+        if (remaining == 0 && dwMilliseconds != 0xFFFFFFFFu)
+            return 0;
+        DWORD chunk = kSliceMs;
+        if (dwMilliseconds != 0xFFFFFFFFu && remaining < kSliceMs)
+            chunk = remaining;
+        long long discard;
+        __asm__ volatile("int $0x80"
+                         : "=a"(discard)
+                         : "a"((long long)19), "D"((long long)chunk)
+                         : "memory");
+        if (dwMilliseconds != 0xFFFFFFFFu)
+        {
+            if (remaining <= chunk)
+                remaining = 0;
+            else
+                remaining -= chunk;
+        }
+    }
 }
 
 /* ------------------------------------------------------------------

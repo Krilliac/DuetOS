@@ -3,6 +3,7 @@
 #include "arch/x86_64/serial.h"
 #include "drivers/video/framebuffer.h"
 #include "net/stack.h"
+#include "net/wifi.h"
 
 namespace duetos::apps::netstatus
 {
@@ -271,6 +272,109 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     append_str("s");
     line[o] = '\0';
     FramebufferDrawString(cx + kMargin, y, line, kFgDim, kBg);
+
+    // -- Wi-Fi scan section --
+    // Iface 0 is the only iface index we surface here; multi-radio
+    // boxes show up later when more than one wireless backend
+    // registers. WifiScan returns false (and logs a WARN) when no
+    // backend is registered for that iface — that's the common
+    // case today and we render a hint line so the operator knows
+    // the slot exists.
+    y += kRowH + 4;
+    if (y + kRowH >= cy + ch)
+    {
+        return;
+    }
+    FramebufferDrawString(cx + kMargin, y, "WI-FI SCAN", kHeaderFg, kBg);
+    y += kRowH + 4;
+
+    duetos::net::WifiScanResult scan[duetos::net::kWifiMaxScanResults];
+    u32 scan_count = 0;
+    const bool scanned = duetos::net::WifiScan(0, scan, duetos::net::kWifiMaxScanResults, &scan_count);
+    if (!scanned || scan_count == 0)
+    {
+        FramebufferDrawString(cx + kMargin, y, "  (no Wi-Fi backend registered yet)", kFgDim, kBg);
+        return;
+    }
+
+    FramebufferDrawString(cx + kMargin, y, "SSID                              SEC    RSSI", kFgDim, kBg);
+    y += kRowH;
+    for (u32 i = 0; i < scan_count && y + kRowH < cy + ch; ++i)
+    {
+        char row[80];
+        u32 r = 0;
+        // SSID column, padded to 33 chars.
+        u32 sl = 0;
+        while (scan[i].ssid[sl] != '\0' && sl < duetos::net::kWifiSsidMaxBytes)
+        {
+            if (r + 1 < sizeof(row))
+                row[r++] = scan[i].ssid[sl];
+            ++sl;
+        }
+        while (sl < 33 && r + 1 < sizeof(row))
+        {
+            row[r++] = ' ';
+            ++sl;
+        }
+        // Security label.
+        const char* sec = "OPEN ";
+        switch (scan[i].security)
+        {
+        case duetos::net::WifiSecurity::Open:
+            sec = "OPEN ";
+            break;
+        case duetos::net::WifiSecurity::Wpa2Psk:
+            sec = "WPA2 ";
+            break;
+        }
+        for (u32 k = 0; sec[k] != '\0' && r + 1 < sizeof(row); ++k)
+            row[r++] = sec[k];
+        if (r + 1 < sizeof(row))
+            row[r++] = ' ';
+        if (r + 1 < sizeof(row))
+            row[r++] = ' ';
+        // RSSI: signed dBm, typically [-100, 0]. Print as
+        // decimal with leading sign.
+        const i8 rssi = scan[i].rssi_dbm;
+        if (rssi < 0)
+        {
+            if (r + 1 < sizeof(row))
+                row[r++] = '-';
+            u32 v = static_cast<u32>(-static_cast<i32>(rssi));
+            char tmp[4];
+            u32 t = 0;
+            if (v == 0)
+                tmp[t++] = '0';
+            while (v != 0 && t < sizeof(tmp))
+            {
+                tmp[t++] = static_cast<char>('0' + (v % 10));
+                v /= 10;
+            }
+            while (t != 0 && r + 1 < sizeof(row))
+                row[r++] = tmp[--t];
+        }
+        else
+        {
+            u32 v = static_cast<u32>(rssi);
+            char tmp[4];
+            u32 t = 0;
+            if (v == 0)
+                tmp[t++] = '0';
+            while (v != 0 && t < sizeof(tmp))
+            {
+                tmp[t++] = static_cast<char>('0' + (v % 10));
+                v /= 10;
+            }
+            while (t != 0 && r + 1 < sizeof(row))
+                row[r++] = tmp[--t];
+        }
+        if (r < sizeof(row))
+            row[r] = '\0';
+        else
+            row[sizeof(row) - 1] = '\0';
+        FramebufferDrawString(cx + kMargin, y, row, kBound, kBg);
+        y += kRowH;
+    }
 }
 
 } // namespace

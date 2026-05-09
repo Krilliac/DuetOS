@@ -2505,7 +2505,21 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
             {
                 continue;
             }
-            const DllLoadResult dll = DllLoad(preload_set[i].bytes, preload_set[i].len, as, /*aslr_delta=*/0);
+            // Per-DLL ASLR: gated on the DLL's own
+            // IMAGE_DLL_CHARACTERISTICS_DYNAMIC_BASE bit (every
+            // modern MSVC-built DLL has it). Use a smaller
+            // randomisation window than the main PE — distinct
+            // DLLs already have distinct preferred image bases
+            // separated by tens of MB, so a 0..1 MiB jitter
+            // (8 bits × 4 KiB) is plenty of entropy without any
+            // realistic chance of two DLLs colliding after the
+            // shift. Each DLL draws its own entropy from
+            // RandomU64(), so even within one process the bases
+            // are independently randomised.
+            const bool dll_dynamic_base = duetos::core::PeIsDynamicBase(preload_set[i].bytes, preload_set[i].len);
+            const u64 dll_entropy = duetos::core::RandomU64();
+            const u64 dll_aslr_delta = dll_dynamic_base ? (dll_entropy & 0xFF) * 4096ULL : 0ULL;
+            const DllLoadResult dll = DllLoad(preload_set[i].bytes, preload_set[i].len, as, dll_aslr_delta);
             if (dll.status == DllLoadStatus::Ok)
             {
                 preloaded_dlls[preloaded_count] = dll.image;
@@ -2514,6 +2528,8 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
                 SerialWrite(preload_set[i].label);
                 SerialWrite(" base=");
                 SerialWriteHex(dll.image.base_va);
+                SerialWrite(" aslr_delta=");
+                SerialWriteHex(dll_aslr_delta);
                 SerialWrite(" (pre-PeLoad — visible to ResolveImports)\n");
             }
             else
