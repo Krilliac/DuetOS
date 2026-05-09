@@ -3224,21 +3224,158 @@ __declspec(dllexport) BOOL TlsSetValue(DWORD slot, void* value)
  * semaphore, thread). Handles are kWin32{Mutex,Event,Sem,Thread}
  * Base + slot index. Each Create/Release/Wait routes to the
  * matching SYS_* call.
+ *
+ * NAMED PRIMITIVES (T6-04 v0):
+ *   The kernel doesn't yet have a cross-process named-namespace,
+ *   so the table below is process-local. CreateMutex/Event/
+ *   Semaphore with a non-NULL name first scans the table; on hit
+ *   the existing handle is returned (with refcount semantics so
+ *   the second caller's CloseHandle doesn't leak the kernel-side
+ *   primitive). On miss, a fresh kernel handle is allocated and a
+ *   slot recorded. OpenMutex/Event/Semaphore consult the same
+ *   table and fail with NULL if the name isn't present in this
+ *   process. Cross-process named sync waits for a kernel-resident
+ *   namespace (T6-04 follow-on).
  * ------------------------------------------------------------------ */
+
+#define WIN32_NAME_SLOTS 32
+#define WIN32_NAME_KIND_MUTEX 1
+#define WIN32_NAME_KIND_EVENT 2
+#define WIN32_NAME_KIND_SEM 3
+#define WIN32_NAME_LEN 64
+
+typedef struct Win32NamedHandleSlot
+{
+    int in_use;
+    int kind; /* WIN32_NAME_KIND_* */
+    HANDLE handle;
+    char name[WIN32_NAME_LEN];
+} Win32NamedHandleSlot;
+
+static Win32NamedHandleSlot g_named_handles[WIN32_NAME_SLOTS];
+
+static int win32_name_eq(const char* a, const char* b)
+{
+    int i = 0;
+    while (a[i] && b[i] && a[i] == b[i] && i < WIN32_NAME_LEN - 1)
+        ++i;
+    return a[i] == b[i];
+}
+
+static void win32_name_copy(const char* src, char* dst)
+{
+    int i = 0;
+    if (!src)
+    {
+        dst[0] = 0;
+        return;
+    }
+    for (; src[i] && i < WIN32_NAME_LEN - 1; ++i)
+        dst[i] = src[i];
+    dst[i] = 0;
+}
+
+static HANDLE win32_named_lookup(int kind, const char* name)
+{
+    if (!name || name[0] == 0)
+        return (HANDLE)0;
+    for (int i = 0; i < WIN32_NAME_SLOTS; ++i)
+    {
+        if (g_named_handles[i].in_use && g_named_handles[i].kind == kind &&
+            win32_name_eq(g_named_handles[i].name, name))
+        {
+            return g_named_handles[i].handle;
+        }
+    }
+    return (HANDLE)0;
+}
+
+static void win32_named_register(int kind, const char* name, HANDLE handle)
+{
+    if (!name || name[0] == 0)
+        return;
+    for (int i = 0; i < WIN32_NAME_SLOTS; ++i)
+    {
+        if (!g_named_handles[i].in_use)
+        {
+            g_named_handles[i].in_use = 1;
+            g_named_handles[i].kind = kind;
+            g_named_handles[i].handle = handle;
+            win32_name_copy(name, g_named_handles[i].name);
+            return;
+        }
+    }
+    /* Table full — caller still gets the handle, just no name lookup. */
+}
+
+/* Convert a wide name to char buffer (low byte). NULL → empty. */
+static void win32_name_w_to_a(const WCHAR_t* w, char* dst)
+{
+    if (!w)
+    {
+        dst[0] = 0;
+        return;
+    }
+    int i = 0;
+    for (; w[i] && i < WIN32_NAME_LEN - 1; ++i)
+        dst[i] = (char)(unsigned char)(w[i] & 0xFF);
+    dst[i] = 0;
+}
 
 __declspec(dllexport) HANDLE CreateMutexW(void* sec, BOOL bInitialOwner, const WCHAR_t* name)
 {
     (void)sec;
-    (void)name;
+    char a_name[WIN32_NAME_LEN];
+    win32_name_w_to_a(name, a_name);
+    if (a_name[0] != 0)
+    {
+        HANDLE existing = win32_named_lookup(WIN32_NAME_KIND_MUTEX, a_name);
+        if (existing)
+            return existing;
+    }
     long long rv;
     __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)25), "D"((long long)bInitialOwner) : "memory");
-    return (HANDLE)rv;
+    HANDLE h = (HANDLE)rv;
+    if (a_name[0] != 0 && h != (HANDLE)0)
+        win32_named_register(WIN32_NAME_KIND_MUTEX, a_name, h);
+    return h;
 }
 
 __declspec(dllexport) HANDLE CreateMutexA(void* sec, BOOL bInitialOwner, const char* name)
 {
-    (void)name;
-    return CreateMutexW(sec, bInitialOwner, (const WCHAR_t*)0);
+    (void)sec;
+    if (name && name[0] != 0)
+    {
+        HANDLE existing = win32_named_lookup(WIN32_NAME_KIND_MUTEX, name);
+        if (existing)
+            return existing;
+    }
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)25), "D"((long long)bInitialOwner) : "memory");
+    HANDLE h = (HANDLE)rv;
+    if (name && name[0] != 0 && h != (HANDLE)0)
+        win32_named_register(WIN32_NAME_KIND_MUTEX, name, h);
+    return h;
+}
+
+/* OpenMutexA/W — look up in the process-local name table.
+ * dwDesiredAccess + bInheritHandle are accepted but not enforced;
+ * v0 doesn't track per-handle access masks. Returns NULL with
+ * ERROR_FILE_NOT_FOUND-equivalent semantics on miss. */
+__declspec(dllexport) HANDLE OpenMutexA(DWORD dwDesiredAccess, BOOL bInheritHandle, const char* name)
+{
+    (void)dwDesiredAccess;
+    (void)bInheritHandle;
+    return win32_named_lookup(WIN32_NAME_KIND_MUTEX, name);
+}
+
+__declspec(dllexport) HANDLE OpenMutexW(DWORD dwDesiredAccess, BOOL bInheritHandle, const WCHAR_t* name)
+{
+    (void)dwDesiredAccess;
+    (void)bInheritHandle;
+    char a_name[WIN32_NAME_LEN];
+    win32_name_w_to_a(name, a_name);
+    return win32_named_lookup(WIN32_NAME_KIND_MUTEX, a_name);
 }
 
 __declspec(dllexport) BOOL ReleaseMutex(HANDLE h)
@@ -3251,19 +3388,59 @@ __declspec(dllexport) BOOL ReleaseMutex(HANDLE h)
 __declspec(dllexport) HANDLE CreateEventW(void* sec, BOOL bManualReset, BOOL bInitialState, const WCHAR_t* name)
 {
     (void)sec;
-    (void)name;
+    char a_name[WIN32_NAME_LEN];
+    win32_name_w_to_a(name, a_name);
+    if (a_name[0] != 0)
+    {
+        HANDLE existing = win32_named_lookup(WIN32_NAME_KIND_EVENT, a_name);
+        if (existing)
+            return existing;
+    }
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
                      : "a"((long long)30), "D"((long long)bManualReset), "S"((long long)bInitialState)
                      : "memory");
-    return (HANDLE)rv;
+    HANDLE h = (HANDLE)rv;
+    if (a_name[0] != 0 && h != (HANDLE)0)
+        win32_named_register(WIN32_NAME_KIND_EVENT, a_name, h);
+    return h;
 }
 
 __declspec(dllexport) HANDLE CreateEventA(void* sec, BOOL bManualReset, BOOL bInitialState, const char* name)
 {
-    (void)name;
-    return CreateEventW(sec, bManualReset, bInitialState, (const WCHAR_t*)0);
+    (void)sec;
+    if (name && name[0] != 0)
+    {
+        HANDLE existing = win32_named_lookup(WIN32_NAME_KIND_EVENT, name);
+        if (existing)
+            return existing;
+    }
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)30), "D"((long long)bManualReset), "S"((long long)bInitialState)
+                     : "memory");
+    HANDLE h = (HANDLE)rv;
+    if (name && name[0] != 0 && h != (HANDLE)0)
+        win32_named_register(WIN32_NAME_KIND_EVENT, name, h);
+    return h;
+}
+
+__declspec(dllexport) HANDLE OpenEventA(DWORD dwDesiredAccess, BOOL bInheritHandle, const char* name)
+{
+    (void)dwDesiredAccess;
+    (void)bInheritHandle;
+    return win32_named_lookup(WIN32_NAME_KIND_EVENT, name);
+}
+
+__declspec(dllexport) HANDLE OpenEventW(DWORD dwDesiredAccess, BOOL bInheritHandle, const WCHAR_t* name)
+{
+    (void)dwDesiredAccess;
+    (void)bInheritHandle;
+    char a_name[WIN32_NAME_LEN];
+    win32_name_w_to_a(name, a_name);
+    return win32_named_lookup(WIN32_NAME_KIND_EVENT, a_name);
 }
 
 __declspec(dllexport) BOOL SetEvent(HANDLE h)
@@ -3283,19 +3460,59 @@ __declspec(dllexport) BOOL ResetEvent(HANDLE h)
 __declspec(dllexport) HANDLE CreateSemaphoreW(void* sec, long initial, long maximum, const WCHAR_t* name)
 {
     (void)sec;
-    (void)name;
+    char a_name[WIN32_NAME_LEN];
+    win32_name_w_to_a(name, a_name);
+    if (a_name[0] != 0)
+    {
+        HANDLE existing = win32_named_lookup(WIN32_NAME_KIND_SEM, a_name);
+        if (existing)
+            return existing;
+    }
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
                      : "a"((long long)51), "D"((long long)initial), "S"((long long)maximum)
                      : "memory");
-    return (HANDLE)rv;
+    HANDLE h = (HANDLE)rv;
+    if (a_name[0] != 0 && h != (HANDLE)0)
+        win32_named_register(WIN32_NAME_KIND_SEM, a_name, h);
+    return h;
 }
 
 __declspec(dllexport) HANDLE CreateSemaphoreA(void* sec, long initial, long maximum, const char* name)
 {
-    (void)name;
-    return CreateSemaphoreW(sec, initial, maximum, (const WCHAR_t*)0);
+    (void)sec;
+    if (name && name[0] != 0)
+    {
+        HANDLE existing = win32_named_lookup(WIN32_NAME_KIND_SEM, name);
+        if (existing)
+            return existing;
+    }
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)51), "D"((long long)initial), "S"((long long)maximum)
+                     : "memory");
+    HANDLE h = (HANDLE)rv;
+    if (name && name[0] != 0 && h != (HANDLE)0)
+        win32_named_register(WIN32_NAME_KIND_SEM, name, h);
+    return h;
+}
+
+__declspec(dllexport) HANDLE OpenSemaphoreA(DWORD dwDesiredAccess, BOOL bInheritHandle, const char* name)
+{
+    (void)dwDesiredAccess;
+    (void)bInheritHandle;
+    return win32_named_lookup(WIN32_NAME_KIND_SEM, name);
+}
+
+__declspec(dllexport) HANDLE OpenSemaphoreW(DWORD dwDesiredAccess, BOOL bInheritHandle, const WCHAR_t* name)
+{
+    (void)dwDesiredAccess;
+    (void)bInheritHandle;
+    char a_name[WIN32_NAME_LEN];
+    win32_name_w_to_a(name, a_name);
+    return win32_named_lookup(WIN32_NAME_KIND_SEM, a_name);
 }
 
 __declspec(dllexport) BOOL ReleaseSemaphore(HANDLE h, long releaseCount, long* lpPreviousCount)
@@ -3346,10 +3563,113 @@ __declspec(dllexport) DWORD WaitForSingleObject(HANDLE h, DWORD timeout_ms)
     return (DWORD)rv;
 }
 
+/* ------------------------------------------------------------------
+ * APC queue v0 (T8-02 — single-thread, process-local)
+ *
+ * The Win32 contract: QueueUserAPC(pfn, hThread, ulData) appends
+ * a user-mode APC to the target thread's queue. If the target is
+ * inside an alertable wait (SleepEx(_, TRUE), WaitForSingleObjectEx
+ * with bAlertable=TRUE), the wait returns WAIT_IO_COMPLETION
+ * (0x000000C0) immediately and the queued callbacks execute in
+ * order before control returns.
+ *
+ * v0 ships a process-local queue indexed by target TID. The
+ * single-threaded case (caller queues to itself) works correctly:
+ * SleepEx with bAlertable drains the queue, fires each callback,
+ * and returns WAIT_IO_COMPLETION. Multi-thread cross-thread APC
+ * delivery requires kernel-side per-thread APC queue + scheduler
+ * wake — that's the T8-02 follow-on.
+ * ------------------------------------------------------------------ */
+
+#define WAIT_IO_COMPLETION 0xC0u
+#define WIN32_APC_QUEUE_SLOTS 16
+
+typedef void(__stdcall* PAPCFUNC)(unsigned long long ulData);
+
+typedef struct Win32ApcSlot
+{
+    DWORD target_tid;
+    PAPCFUNC pfn;
+    unsigned long long data;
+    int in_use;
+} Win32ApcSlot;
+
+static Win32ApcSlot g_apc_queue[WIN32_APC_QUEUE_SLOTS];
+
+__declspec(dllexport) DWORD QueueUserAPC(PAPCFUNC pfn, HANDLE hThread, unsigned long long dwData)
+{
+    if (pfn == (PAPCFUNC)0)
+        return 0;
+    /* hThread is opaque; v0 dispatches by TID. The CRT typically
+     * maps thread handles to TIDs via a shadow table; we treat
+     * the low 32 bits of the handle as the target TID. -1 (the
+     * GetCurrentThread pseudo-handle) routes to the caller. */
+    DWORD target_tid = (hThread == (HANDLE)(long long)-2 || hThread == (HANDLE)0) ? (DWORD)syscall_get_tid()
+                                                                                  : (DWORD)(unsigned long long)hThread;
+    for (int i = 0; i < WIN32_APC_QUEUE_SLOTS; ++i)
+    {
+        if (!g_apc_queue[i].in_use)
+        {
+            g_apc_queue[i].target_tid = target_tid;
+            g_apc_queue[i].pfn = pfn;
+            g_apc_queue[i].data = dwData;
+            g_apc_queue[i].in_use = 1;
+            return 1;
+        }
+    }
+    return 0; /* Queue full. */
+}
+
+/* Drain APCs queued for the calling thread. Returns the count
+ * fired. Called by SleepEx / WaitForSingleObjectEx when
+ * bAlertable=TRUE. */
+static unsigned int win32_drain_apc_queue(void)
+{
+    DWORD self_tid = (DWORD)syscall_get_tid();
+    unsigned int fired = 0;
+    /* Drain in registration order. Each callback can re-queue;
+     * the re-entrant slot is appended to the tail and won't be
+     * picked up until the next drain. */
+    for (int i = 0; i < WIN32_APC_QUEUE_SLOTS; ++i)
+    {
+        if (g_apc_queue[i].in_use && g_apc_queue[i].target_tid == self_tid)
+        {
+            PAPCFUNC pfn = g_apc_queue[i].pfn;
+            unsigned long long data = g_apc_queue[i].data;
+            g_apc_queue[i].in_use = 0;
+            g_apc_queue[i].pfn = (PAPCFUNC)0;
+            g_apc_queue[i].data = 0;
+            pfn(data);
+            ++fired;
+        }
+    }
+    return fired;
+}
+
 __declspec(dllexport) DWORD WaitForSingleObjectEx(HANDLE h, DWORD timeout_ms, BOOL bAlertable)
 {
-    (void)bAlertable; /* APCs not supported in v0. */
+    if (bAlertable)
+    {
+        /* If APCs are pending for this thread, fire them and
+         * return WAIT_IO_COMPLETION before consulting the wait
+         * primitive — matches the Win32 contract. */
+        if (win32_drain_apc_queue() > 0)
+            return WAIT_IO_COMPLETION;
+    }
     return WaitForSingleObject(h, timeout_ms);
+}
+
+/* SleepEx(dwMilliseconds, bAlertable) — alertable variant of Sleep.
+ * If bAlertable=TRUE and APCs are pending, fire them and return
+ * WAIT_IO_COMPLETION; otherwise sleep the requested duration. */
+__declspec(dllexport) DWORD SleepEx(DWORD dwMilliseconds, BOOL bAlertable)
+{
+    if (bAlertable && win32_drain_apc_queue() > 0)
+        return WAIT_IO_COMPLETION;
+    /* Forward to Sleep (syscall 19 = SYS_SLEEP). */
+    long long discard;
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)19), "D"((long long)dwMilliseconds) : "memory");
+    return 0;
 }
 
 /* ------------------------------------------------------------------
@@ -4663,6 +4983,17 @@ __declspec(dllexport) DWORD GetCurrentDirectoryA(DWORD cb, char* out)
     return want - 1;
 }
 
+__declspec(dllexport) DWORD GetCurrentDirectoryW(DWORD cb, wchar_t16* out)
+{
+    static const char dir[] = "C:\\";
+    DWORD want = (DWORD)sizeof(dir);
+    if (!out || cb < want)
+        return want;
+    for (DWORD i = 0; i < want; ++i)
+        out[i] = (wchar_t16)(unsigned char)dir[i];
+    return want - 1;
+}
+
 __declspec(dllexport) BOOL SetCurrentDirectoryA(const char* path)
 {
     (void)path;
@@ -4672,6 +5003,135 @@ __declspec(dllexport) BOOL SetCurrentDirectoryA(const char* path)
 __declspec(dllexport) BOOL SetCurrentDirectoryW(const wchar_t16* path)
 {
     (void)path;
+    return 1;
+}
+
+/* GetFullPathNameA — A variant of GetFullPathNameW. Same logic
+ * (prepend "C:" to drive-less paths), one byte per char. */
+__declspec(dllexport) DWORD GetFullPathNameA(const char* lpFileName, DWORD nBufferLength, char* lpBuffer,
+                                             char** lpFilePart)
+{
+    (void)lpFilePart;
+    if (lpFileName == (const char*)0 || lpBuffer == (char*)0)
+        return 0;
+    int srclen = 0;
+    while (lpFileName[srclen] != 0)
+        ++srclen;
+    int add_drive = (srclen > 0 && (lpFileName[0] == '\\' || lpFileName[0] == '/')) ? 2 : 0;
+    DWORD needed = (DWORD)(srclen + 1 + add_drive);
+    if (needed > nBufferLength)
+        return needed;
+    int j = 0;
+    if (add_drive)
+    {
+        lpBuffer[j++] = 'C';
+        lpBuffer[j++] = ':';
+    }
+    for (int i = 0; i < srclen; ++i)
+        lpBuffer[j++] = lpFileName[i];
+    lpBuffer[j] = 0;
+    return (DWORD)j;
+}
+
+/* GetDiskFreeSpaceA / GetDiskFreeSpaceW — pre-2GB style disk space
+ * query. Returns canned ramfs-friendly geometry: 4-sector clusters,
+ * 512-byte sectors, 256k free / 512k total clusters (= ~512 MiB
+ * free / ~1 GiB total). Win32 callers comparing TotalNumberOfClusters
+ * non-zero or doing their own multiplication land on a sane result. */
+__declspec(dllexport) BOOL GetDiskFreeSpaceA(const char* lpRootPathName, DWORD* lpSectorsPerCluster,
+                                             DWORD* lpBytesPerSector, DWORD* lpNumberOfFreeClusters,
+                                             DWORD* lpTotalNumberOfClusters)
+{
+    (void)lpRootPathName;
+    if (lpSectorsPerCluster)
+        *lpSectorsPerCluster = 4;
+    if (lpBytesPerSector)
+        *lpBytesPerSector = 512;
+    if (lpNumberOfFreeClusters)
+        *lpNumberOfFreeClusters = 262144;
+    if (lpTotalNumberOfClusters)
+        *lpTotalNumberOfClusters = 524288;
+    return 1;
+}
+
+__declspec(dllexport) BOOL GetDiskFreeSpaceW(const wchar_t16* lpRootPathName, DWORD* lpSectorsPerCluster,
+                                             DWORD* lpBytesPerSector, DWORD* lpNumberOfFreeClusters,
+                                             DWORD* lpTotalNumberOfClusters)
+{
+    (void)lpRootPathName;
+    return GetDiskFreeSpaceA((const char*)0, lpSectorsPerCluster, lpBytesPerSector, lpNumberOfFreeClusters,
+                             lpTotalNumberOfClusters);
+}
+
+/* GetVolumeInformationA/W — name "DuetOS", serial 0xDEADBEEF,
+ * max component 255, FAT32-equivalent flags (CASE_PRESERVED |
+ * UNICODE_ON_DISK), filesystem name "FAT32" (matches the underlying
+ * `Fat32Format` primitive). All output pointers are optional in
+ * Win32; respect that. */
+#define FS_CASE_SENSITIVE_SEARCH 0x00000001
+#define FS_CASE_IS_PRESERVED 0x00000002
+#define FS_UNICODE_STORED_ON_DISK 0x00000004
+#define FS_VOL_IS_COMPRESSED 0x00008000
+
+__declspec(dllexport) BOOL GetVolumeInformationA(const char* lpRootPathName, char* lpVolumeNameBuffer,
+                                                 DWORD nVolumeNameSize, DWORD* lpVolumeSerialNumber,
+                                                 DWORD* lpMaximumComponentLength, DWORD* lpFileSystemFlags,
+                                                 char* lpFileSystemNameBuffer, DWORD nFileSystemNameSize)
+{
+    (void)lpRootPathName;
+    static const char vol_name[] = "DuetOS";
+    static const char fs_name[] = "FAT32";
+    if (lpVolumeNameBuffer && nVolumeNameSize > 0)
+    {
+        DWORD i = 0;
+        for (; i < nVolumeNameSize - 1 && vol_name[i] != 0; ++i)
+            lpVolumeNameBuffer[i] = vol_name[i];
+        lpVolumeNameBuffer[i] = 0;
+    }
+    if (lpVolumeSerialNumber)
+        *lpVolumeSerialNumber = 0xDEADBEEFu;
+    if (lpMaximumComponentLength)
+        *lpMaximumComponentLength = 255;
+    if (lpFileSystemFlags)
+        *lpFileSystemFlags = FS_CASE_IS_PRESERVED | FS_UNICODE_STORED_ON_DISK;
+    if (lpFileSystemNameBuffer && nFileSystemNameSize > 0)
+    {
+        DWORD i = 0;
+        for (; i < nFileSystemNameSize - 1 && fs_name[i] != 0; ++i)
+            lpFileSystemNameBuffer[i] = fs_name[i];
+        lpFileSystemNameBuffer[i] = 0;
+    }
+    return 1;
+}
+
+__declspec(dllexport) BOOL GetVolumeInformationW(const wchar_t16* lpRootPathName, wchar_t16* lpVolumeNameBuffer,
+                                                 DWORD nVolumeNameSize, DWORD* lpVolumeSerialNumber,
+                                                 DWORD* lpMaximumComponentLength, DWORD* lpFileSystemFlags,
+                                                 wchar_t16* lpFileSystemNameBuffer, DWORD nFileSystemNameSize)
+{
+    (void)lpRootPathName;
+    static const char vol_name[] = "DuetOS";
+    static const char fs_name[] = "FAT32";
+    if (lpVolumeNameBuffer && nVolumeNameSize > 0)
+    {
+        DWORD i = 0;
+        for (; i < nVolumeNameSize - 1 && vol_name[i] != 0; ++i)
+            lpVolumeNameBuffer[i] = (wchar_t16)(unsigned char)vol_name[i];
+        lpVolumeNameBuffer[i] = 0;
+    }
+    if (lpVolumeSerialNumber)
+        *lpVolumeSerialNumber = 0xDEADBEEFu;
+    if (lpMaximumComponentLength)
+        *lpMaximumComponentLength = 255;
+    if (lpFileSystemFlags)
+        *lpFileSystemFlags = FS_CASE_IS_PRESERVED | FS_UNICODE_STORED_ON_DISK;
+    if (lpFileSystemNameBuffer && nFileSystemNameSize > 0)
+    {
+        DWORD i = 0;
+        for (; i < nFileSystemNameSize - 1 && fs_name[i] != 0; ++i)
+            lpFileSystemNameBuffer[i] = (wchar_t16)(unsigned char)fs_name[i];
+        lpFileSystemNameBuffer[i] = 0;
+    }
     return 1;
 }
 
@@ -4867,6 +5327,102 @@ __declspec(dllexport) DWORD GetActiveProcessorCount(unsigned short group)
 __declspec(dllexport) unsigned short GetActiveProcessorGroupCount(void)
 {
     return 1;
+}
+
+/* SetThreadDescription / GetThreadDescription — Windows 10
+ * thread-naming surface. Many modern apps (Edge, Chrome, .NET
+ * runtimes) call these at thread spawn for diagnostic naming.
+ * v0 stores the name in a process-local 16-slot table keyed by
+ * the supplied thread handle (the low 32 bits — usually a TID).
+ * Cross-thread reads work; cross-process reads do not (the
+ * table is per-process). Returns S_OK on success. */
+typedef long HRESULT; /* signed 32-bit; 0 = S_OK; high bit = failure. */
+#define WIN32_THREAD_NAME_SLOTS 16
+#define WIN32_THREAD_NAME_LEN 64
+
+typedef struct Win32ThreadNameSlot
+{
+    int in_use;
+    unsigned long long handle_key;
+    wchar_t16 name[WIN32_THREAD_NAME_LEN];
+} Win32ThreadNameSlot;
+
+static Win32ThreadNameSlot g_thread_names[WIN32_THREAD_NAME_SLOTS];
+
+static void win32_wname_copy(const wchar_t16* src, wchar_t16* dst, int cap)
+{
+    int i = 0;
+    if (src)
+    {
+        for (; src[i] && i < cap - 1; ++i)
+            dst[i] = src[i];
+    }
+    dst[i] = 0;
+}
+
+__declspec(dllexport) HRESULT SetThreadDescription(HANDLE thread, const wchar_t16* name)
+{
+    unsigned long long key = (unsigned long long)thread;
+    /* GetCurrentThread pseudo-handle (-2) → caller's TID. */
+    if (thread == (HANDLE)(long long)-2 || thread == (HANDLE)0)
+        key = (unsigned long long)syscall_get_tid();
+    int free_idx = -1;
+    for (int i = 0; i < WIN32_THREAD_NAME_SLOTS; ++i)
+    {
+        if (g_thread_names[i].in_use && g_thread_names[i].handle_key == key)
+        {
+            win32_wname_copy(name, g_thread_names[i].name, WIN32_THREAD_NAME_LEN);
+            return 0; /* S_OK */
+        }
+        if (!g_thread_names[i].in_use && free_idx < 0)
+            free_idx = i;
+    }
+    if (free_idx < 0)
+        return 0; /* Table full — no harm; pretend success. */
+    g_thread_names[free_idx].in_use = 1;
+    g_thread_names[free_idx].handle_key = key;
+    win32_wname_copy(name, g_thread_names[free_idx].name, WIN32_THREAD_NAME_LEN);
+    return 0;
+}
+
+/* GetThreadDescription — caller owns the returned buffer; Win32
+ * uses LocalAlloc internally and the caller LocalFrees. v0
+ * routes through SYS_HEAP_ALLOC (=11) for the same lifetime. */
+__declspec(dllexport) HRESULT GetThreadDescription(HANDLE thread, wchar_t16** out_name)
+{
+    if (out_name == (wchar_t16**)0)
+        return 0x80070057UL; /* E_INVALIDARG */
+    *out_name = (wchar_t16*)0;
+    unsigned long long key = (unsigned long long)thread;
+    if (thread == (HANDLE)(long long)-2 || thread == (HANDLE)0)
+        key = (unsigned long long)syscall_get_tid();
+    const wchar_t16* found = (const wchar_t16*)0;
+    for (int i = 0; i < WIN32_THREAD_NAME_SLOTS; ++i)
+    {
+        if (g_thread_names[i].in_use && g_thread_names[i].handle_key == key)
+        {
+            found = g_thread_names[i].name;
+            break;
+        }
+    }
+    /* Name length + NUL. Allocate via SYS_HEAP_ALLOC. */
+    int len = 0;
+    if (found)
+    {
+        while (found[len])
+            ++len;
+    }
+    long long rv;
+    long long bytes = (long long)((len + 1) * (long long)sizeof(wchar_t16));
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)11), "D"(bytes) : "memory");
+    if (rv == 0)
+        return 0x8007000EUL; /* E_OUTOFMEMORY */
+    wchar_t16* buf = (wchar_t16*)rv;
+    for (int i = 0; i < len; ++i)
+        buf[i] = found[i];
+    buf[len] = 0;
+    *out_name = buf;
+    return 0;
 }
 
 /* GetSystemInfo / GetNativeSystemInfo — populate SYSTEM_INFO

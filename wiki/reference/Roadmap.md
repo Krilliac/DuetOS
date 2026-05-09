@@ -359,9 +359,23 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
 
 ### Winsock async surface
 
-- **Today:** synchronous BSD-socket subset works.
-- **Deferred:** WSAEventSelect + overlapped I/O + completion
-  ports.
+- **Today:** synchronous BSD-socket subset works. Async surface
+  v0 ships in `userland/libs/ws2_32/ws2_32.c`: `WSACreateEvent`
+  / `WSACloseEvent` / `WSASetEvent` / `WSAResetEvent` /
+  `WSAEventSelect` / `WSAEnumNetworkEvents` /
+  `WSAWaitForMultipleEvents` exist and route through a
+  process-local `WsaEventBinding[32]` table. Callers can
+  register their interest in network events without crashing
+  on a NULL-import lookup.
+- **Deferred:** Real async event delivery — the v0 ws2_32
+  binding registry has no producer side. The TCP stack
+  doesn't yet drive `pending` mask changes when a socket
+  becomes readable / writable / accepts a connection, so
+  `WSAEnumNetworkEvents` always reports zero events and
+  `WSAWaitForMultipleEvents` returns `WSA_WAIT_TIMEOUT`.
+  Overlapped I/O + IOCP-backed socket reads still pending
+  (kernel32's IOCP plumbing exists but isn't wired into the
+  socket read path).
 
 ---
 
@@ -546,19 +560,38 @@ extends. Next:
 
 ### Track 1 — Win32 windowing (message pump + GDI paint)
 
+> **T1-01** (per-window message queue + GetMessage/PeekMessage/PostMessage/
+> DispatchMessage) and **T1-02** (BeginPaint / EndPaint / TextOut /
+> InvalidateRect / UpdateWindow) landed and are exercised by
+> `windowed_hello` end-to-end + `msg_smoke` / `wndmsg_smoke` /
+> `gdi_smoke`. Syscalls 62/63/64 (`SYS_WIN_PEEK_MSG` /
+> `SYS_WIN_GET_MSG` / `SYS_WIN_POST_MSG`) carry messages;
+> `DispatchMessage` is pure-userland (calls the WNDPROC directly).
+> **T1-05** memory-DC + BitBlt landed: `gdi32!CreateCompatibleDC` /
+> `CreateCompatibleBitmap` / `SelectObject` / `DeleteDC` /
+> `DeleteObject` / `BitBlt` route through SYS_GDI_CREATE_COMPAT_DC
+> (106) / SYS_GDI_CREATE_COMPAT_BITMAP (107) / SYS_GDI_SELECT_OBJECT
+> (110) / SYS_GDI_DELETE_DC (111) / SYS_GDI_DELETE_OBJECT (112) /
+> SYS_GDI_BITBLT_DC (113) into the per-process MemDC + Bitmap
+> tables in `kernel/subsystems/win32/gdi_objects.cpp`.
+
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
-| T1-01 | win32 | P0 | Implement real per-window message queues: per-HWND 256-entry `MSG` ring; `PostMessage` / `SendMessage` / `PostQuitMessage` enqueue; blocking `GetMessage`, non-blocking `PeekMessage`; `TranslateMessage`; `DispatchMessage`; compositor-generated `WM_PAINT`, `WM_DESTROY`, `WM_CLOSE`, `WM_SIZE`, `WM_ACTIVATE`, `WM_SETFOCUS`, `WM_KILLFOCUS`. Syscalls: `SYS_WIN_POSTMSG` (62), `SYS_WIN_GETMSG` (63), `SYS_WIN_PEEKMSG` (64), `SYS_WIN_DISPATCHMSG` (65). | A PE with `GetMessage` → `TranslateMessage` → `DispatchMessage` remains alive and processes paint/close messages correctly. |
-| T1-02 | win32 | P0 | Implement GDI paint APIs: `BeginPaint` / `EndPaint` via `SYS_WIN_BEGINPAINT` (66) / `SYS_WIN_ENDPAINT` (67); HDC wraps the target window framebuffer; `BitBlt`, `TextOut`, `DrawTextA/W`, `ExtTextOutA/W`, `Rectangle`, `FillRect`, `Ellipse`; DC text/background state; brushes/pens; `InvalidateRect` / `UpdateWindow`. | A PE handles `WM_PAINT`, calls `BeginPaint` / `TextOut` / `EndPaint`, and visible text appears in the client area. |
-| T1-03 | win32 | P1 | Route keyboard and mouse to the foreground/captured window: scan-code → VK → `WM_KEYDOWN` / `WM_KEYUP` / `WM_CHAR`; mouse hit-test and client-coordinate events; capture; focus and foreground APIs. | A PE `MessageBox` can be dismissed by mouse, and a text field receives keystrokes. |
-| T1-04 | win32 | P1 | Add window Z-order, move, resize, minimize, maximize, restore, close chrome, and accurate `GetClientRect` / `GetWindowRect` / `AdjustWindowRectEx`. | PE windows can be dragged, resized, minimized, maximized/restored, and closed via title-bar interactions. |
-| T1-05 | win32 | P1 | Add memory/off-screen DC support: `CreateCompatibleDC`, `CreateCompatibleBitmap`, bitmap `SelectObject`, `DeleteDC`, `DeleteObject`, `GetDC`, `ReleaseDC`. | A PE renders to a compatible memory DC and `BitBlt`s the result to a screen DC correctly. |
+| T1-03 | win32 | P1 | Route keyboard and mouse to the foreground/captured window: scan-code → VK → `WM_KEYDOWN` / `WM_KEYUP` / `WM_CHAR`; mouse hit-test and client-coordinate events; capture; focus and foreground APIs. (Mouse-wheel routing landed; key/button routing pending.) | A PE `MessageBox` can be dismissed by mouse, and a text field receives keystrokes. |
+| T1-04 | win32 | P1 | Add window Z-order, move, resize, minimize, maximize, restore, close chrome. (`GetClientRect`, `GetWindowRect`, `AdjustWindowRect` / `AdjustWindowRectEx` / `AdjustWindowRectExForDpi` landed; chrome interactions still pending.) | PE windows can be dragged, resized, minimized, maximized/restored, and closed via title-bar interactions. |
 
 ### Track 2 — COM infrastructure
 
-| ID | Scope | Priority | Task | Acceptance |
-| --- | --- | --- | --- | --- |
-| T2-02 | win32 | P2 | Add shell COM objects and path helpers: `SHGetDesktopFolder`, `SHGetSpecialFolderPath`, `SHGetFolderPath`, and functional `IFileDialog` methods on the existing FileOpenDialog / FileSaveDialog registrations. | Shell-folder/file-dialog callers receive valid stubs or a simple native picker instead of class-unavailable failures. |
+> Path helpers (`SHGetSpecialFolderPath{A,W}`, `SHGetFolderPath{A,W}`),
+> `SHGetDesktopFolder`, and the IFileDialog / IFileOpenDialog /
+> IFileSaveDialog vtables on the FileOpenDialog / FileSaveDialog
+> factory registrations all ship — see
+> [`Win32-Surface-Status`](Win32-Surface-Status.md) §"shell32.dll"
+> and §"ole32.dll". `IFileDialog::Show` returns `S_FALSE` (user
+> cancelled) and `GetResult` fails cleanly so callers' fallback
+> branch runs without a real picker UI; setters succeed silently.
+> Track 2 has no remaining roadmap rows — a real picker UI is
+> Compositor.md follow-up work, not COM infrastructure.
 
 ### Track 3 — Networking
 
@@ -593,14 +626,20 @@ extends. Next:
 | T6-01 | kernel | P0 | Implement PE TLS: parse `IMAGE_DIRECTORY_ENTRY_TLS`, call callbacks before entry/DllMain, allocate per-thread TLS templates, set TEB TLS slot pointer, and implement `TlsAlloc` / `TlsSetValue` / `TlsGetValue` / `TlsFree`. | A PE with `__declspec(thread) int x = 42` reads independent `42` values from two threads. |
 | T6-02 | kernel | P1 | Implement x64 SEH: parse `.pdata`, implement `RtlLookupFunctionEntry`, `RtlVirtualUnwind`, `RtlUnwindEx`, `NtRaiseException`, context capture/restore, user exception dispatch for faults. | A PE `__try`/`__except` null write is caught and continues in the exception handler. |
 | T6-03 | kernel | P1 | Implement `CreateProcessA/W` and process/thread waiting/exit/open/terminate/duplicate handle semantics. | A parent PE creates a child PE, waits, and observes the child's exit code. |
-| T6-04 | kernel | P1 | Implement named mutex/event/semaphore namespace and open/create semantics with refcounted kernel objects. | Parent/child PEs synchronize through a named event. |
+| T6-04 | kernel | P1 | Implement named mutex/event/semaphore namespace and open/create semantics with refcounted kernel objects. (Process-local name dedup landed in `kernel32!Create{Mutex,Event,Semaphore}{A,W}` + `Open{Mutex,Event,Semaphore}{A,W}`; cross-process namespace still pending kernel-resident name table.) | Parent/child PEs synchronize through a named event. |
 
 ### Track 7 — File system
 
+> **T7-01** (FindFirstFile{A,W}, FindNextFile{A,W}, FindClose,
+> wildcard matching, iterator handles, full WIN32_FIND_DATA)
+> landed. **T7-02** namespace + path APIs ship: GetLogicalDrives,
+> GetDriveType{A,W}, GetCurrentDirectory{A,W}, SetCurrentDirectory{A,W},
+> GetFullPathName{A,W}, GetDiskFreeSpace{A,W}, GetVolumeInformation{A,W}.
+> The `C:` drive maps onto the ramfs root and System32 DLL paths
+> resolve through the Win32 thunks page.
+
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
-| T7-01 | fs | P1 | Implement `FindFirstFileA/W`, `FindNextFileA/W`, `FindClose`, wildcard matching, iterator handles, and full `WIN32_FIND_DATA`. | `FindFirstFile("C:\\*.*")` iterates root files without crashing. |
-| T7-02 | fs | P1 | Implement Win32 drive-letter namespace: `C:` mapping, System32 DLL path mapping, full-path and CWD APIs, drive type/logical drives/disk-free APIs. | Opening `C:\Windows\System32\kernel32.dll` finds the DuetOS DLL. |
 | T7-03 | fs | P1 | Complete `CreateFileA/W` sharing and overlapped I/O: IOCP, `ERROR_IO_PENDING`, overlapped events, and share-mode enforcement. | A PE using overlapped file reads receives completion through `GetQueuedCompletionStatus`. |
 | T7-04 | fs | P2 | Add scoped NTFS write support: create, write, truncate, delete, rename with MFT/index/journal/bitmap updates; no compression/encryption/ADS for v0. | PEs can perform basic writes to NTFS volumes. |
 | T7-05 | fs | P2 | Add FAT32 Long File Name read/write support for VFAT 0x0F entries and UTF-16/UTF-8 conversion. | FAT32 files with names longer than 8.3 are visible and creatable. |
@@ -610,15 +649,28 @@ extends. Next:
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
 | T8-01 | sched | P1 | Complete MLFQ priority aging/decay, Win32 priority class/thread mappings, and work-stealing priority behavior. | A high-priority thread preempts a low-priority thread within one 10 ms tick. |
-| T8-02 | sched | P1 | Implement APC queues and alertable waits for `QueueUserAPC`, `SleepEx`, `WaitForSingleObjectEx`, and `NtQueueApcThread`. | `QueueUserAPC` wakes a target in `SleepEx(INFINITE, TRUE)` and executes the APC. |
+| T8-02 | sched | P1 | Implement APC queues and alertable waits for `QueueUserAPC`, `SleepEx`, `WaitForSingleObjectEx`, and `NtQueueApcThread`. (Process-local single-thread APC queue v0 landed: `QueueUserAPC` enqueues callbacks into a 16-slot per-process table; `SleepEx(_, TRUE)` and `WaitForSingleObjectEx(_, _, TRUE)` drain pending APCs for the calling thread and return `WAIT_IO_COMPLETION (0xC0)`. Cross-thread APC delivery still needs kernel-side per-thread APC queue + scheduler wake.) | `QueueUserAPC` wakes a target in `SleepEx(INFINITE, TRUE)` and executes the APC. |
 
 ### Track 9 — Security
 
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
-| T9-01 | security | P1 | Implement user-mode PE ASLR for `DYNAMICBASE` images and per-process DLL randomization with relocation. | ASLR-enabled PEs load at randomized bases recorded in the address-space ledger. |
-| T9-02 | security | P2 | Seed MSVC `/GS` `__security_cookie` from the PE load config and terminate with `STATUS_STACK_BUFFER_OVERRUN` on cookie failure. | `/GS`-protected PEs receive a randomized cookie at process init. |
-| T9-03 | security | P2 | Install CFG no-op guard stubs and document `// GAP: CFG not enforced` until bitmap checking exists. | CFG-enabled PEs do not crash on indirect-call guard checks. |
+| T9-01 | security | P1 | Implement user-mode PE ASLR for `DYNAMICBASE` images and per-process DLL randomization with relocation. (PE-image ASLR landed: ring3 spawn checks `PeIsDynamicBase` on the Optional Header DllCharacteristics; if set, picks a 64 KiB-aligned delta in [0, 64 MiB) from `RandomU64`; otherwise loads at preferred base. DLL randomisation still pending — DllLoad calls still pass `aslr_delta=0`.) | ASLR-enabled PEs load at randomized bases recorded in the address-space ledger. |
+> **T9-02** shipped: vcruntime140 ships `__security_cookie` /
+> `__security_check_cookie` / `__report_gsfailure` /
+> `__report_rangefailure`, AND the PE loader's
+> `SeedSecurityCookie` reads `IMAGE_LOAD_CONFIG_DIRECTORY.SecurityCookie`
+> and stamps a fresh per-image cookie from the kernel RNG before
+> ring-3 entry. PEs without a load config (or with a pre-/GS
+> layout) silently skip the seed — the compiler-emitted save/check
+> pair still holds because it compares the cookie to itself across
+> one function call.
+>
+> **T9-03** (CFG no-op guard stubs) shipped: vcruntime140 exports
+> `_guard_check_icall`, `_guard_dispatch_icall`,
+> `_guard_xfg_check_icall`, and `_guard_xfg_dispatch_icall`. Bitmap
+> enforcement still GAP — see `// GAP: CFG not enforced` discipline
+> in the source.
 
 ### Track 10 — Build and CI
 
@@ -631,22 +683,39 @@ extends. Next:
 
 ### Track 11 — Kernel infrastructure gaps
 
+> **T11-01** ACPI parser coverage landed: RSDP/XSDT/RSDT discovery,
+> MADT (LAPIC + I/O APIC + Interrupt Source Override + LAPIC Address
+> Override), FADT (PM1A/B control, reset register, ACPI enable),
+> HPET (validation + main-counter enable), SRAT (CPU + Memory
+> Affinity for NUMA). AML interpreter remains the documented gap
+> for ACPI S5 / battery / lid-close (Track 11-05 + Drivers).
+> **T11-03** registry hive persistence landed:
+> `RegistryHiveLoad` runs at boot, every successful registry mutation
+> calls `RegistryHiveSave` (throttled by byte-compare). HKLM / HKCU
+> / HKU + the full Reg* CRUD + enumeration surface advapi32 + the
+> in-kernel registry serialise to the configured FAT32 hive.
+
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
-| T11-01 | kernel | P1 | Complete ACPI parser coverage for RSDP/XSDT, MADT LAPIC/I/O APIC/ISO, FADT PM/reset fields, HPET validation, and documented AML gap. | CPU topology, IRQ routing, power, and clocksource setup use parsed ACPI tables. |
 | T11-02 | kernel | P1 | Implement IPC pipes/mailslots: anonymous pipes, named pipes, connect/disconnect, ring-buffer semantics, EOF, and CreateProcess stdio redirection support. | Pipe-backed stdin/stdout/stderr redirection works across parent/child processes. |
-| T11-03 | kernel | P2 | Complete registry hive persistence for HKLM/HKCU/HKU, save/load serialization, dirty flush, CRUD, and enumeration APIs. | Registry writes persist across reboot and enumeration works. |
 | T11-04 | kernel | P2 | Implement waitable timers and multimedia timers with high-resolution timekeeping and APC/event callbacks. | Waitable timers and `timeSetEvent` callbacks fire accurately. |
 | T11-05 | kernel | P2 | Implement power management: ACPI S5 shutdown, ACPI/FADT reset fallback, and S3 stubs or suspend/resume path. | `ExitWindowsEx(EWX_POWEROFF)` powers off through ACPI S5 where supported. |
 
 ### Track 12 — Userland infrastructure
 
+> **T12-01** (LoadLibrary / GetProcAddress / FreeLibrary /
+> GetModuleHandle / GetModuleFileName) and **T12-02** (Windows 10
+> 19041 system + version info via GetSystemInfo /
+> GetNativeSystemInfo / GetVersionEx{A,W} / RtlGetVersion /
+> IsWow64Process=FALSE) landed. **T12-04** prioritised stdio
+> (`sscanf`, `fprintf`, `setvbuf`, `setbuf`, `fflush`, `tmpfile`,
+> `tmpnam`, `tmpnam_s`) ships in `ucrtbase`; the long tail
+> (positional args, multi-byte format directives, file-stream
+> buffering) waits for a workload that exercises it.
+
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
-| T12-01 | win32 | P1 | Implement runtime DLL loading: `LoadLibraryA/W`, `GetProcAddress` including ordinals, `FreeLibrary`, `GetModuleHandleA/W`, `GetModuleFileNameA/W`, refcounts, and DllMain attach/detach. | A PE can runtime-load `user32.dll` and resolve `MessageBoxA`. |
-| T12-02 | win32 | P1 | Return plausible Windows 10 system/version info through `GetSystemInfo`, `GetNativeSystemInfo`, `GetVersionExA/W`, `RtlGetVersion`, and `IsWow64Process=FALSE`. | Version-gated apps see Windows 10 2004/AMD64-compatible data. |
 | T12-03 | win32 | P2 | Implement `winmm` waveOut APIs over HDA/audio mixer: open, prepare/write/unprepare, close, and capabilities. | A PE can play 44.1/48 kHz 16-bit stereo through `waveOut*`. |
-| T12-04 | win32 | P2 | Audit and complete C11 stdio in `msvcrt` / `ucrtbase`, prioritizing `sscanf`, `fprintf`, `setvbuf`, `fflush`, and `tmpfile`. | CRT stdio smoke tests cover the newly real functions. |
 
 ### Track 13 — Documentation / wiki
 
@@ -658,31 +727,26 @@ extends. Next:
 
 ### Track 14 — Testing
 
+> **T14-02** (win32 pump test) is covered today by `windowed_hello`
+> (CreateWindowExA → ShowWindow → message pump → InvalidateRect →
+> WM_PAINT round-trip → SetTimer / WM_TIMER → SendMessage →
+> KillTimer) plus `msg_smoke`, `wndmsg_smoke`, and `gdi_smoke`. A
+> dedicated single-binary `win32_pump_test` would be a thin
+> consolidation of those probes — book that under T14-01 if a
+> regression-stress fixture is needed.
+
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
 | T14-01 | test | P1 | Add PE stress fixture covering threads, mutexes, events, file I/O, registry, heap, and printf for 30 seconds. | The stress PE exits 0 and joins the smoke corpus. |
-| T14-02 | test | P1 | Add `win32_pump_test` once T1-01/T1-02 land: creates a window, pumps messages, paints on `WM_PAINT`, handles `WM_CLOSE`. | The test validates the message-pump + GDI-paint path and exits 0. |
 | T14-03 | test | P2 | Add network loopback test once T3-01 lands: listener + connector exchange 1 MiB and verify CRC32. | The loopback test exits 0 after integrity verification. |
 
 ### Imported quick wins
 
-Most quick wins from the handoff already appear as real implementations in
-`Win32-Surface-Status`; keep this table only for regression-sensitive tracking
-or any item that is discovered to be incomplete during audit.
-
-| ID | Scope | Task | Acceptance |
-| --- | --- | --- | --- |
-| QW-01 | win32 | `GetComputerNameA/W` returns `DUETOS`. | Process smoke reports the expected computer name. |
-| QW-02 | win32 | `GetUserNameA/W` returns `user` or the logged-in username. | Token/process smoke reports a stable username. |
-| QW-03 | win32 | `GetTempPathA/W` returns `C:\\Temp\\` and ramfs has a temp directory. | Drive smoke can create temp paths/files. |
-| QW-04 | win32 | Windows/system directory APIs return `C:\\Windows` and `C:\\Windows\\System32`. | Process smoke reports both paths. |
-| QW-06 | win32 | `OutputDebugStringA/W` writes to the kernel serial/debug log. | Syscall stress emits debug strings without no-op loss. |
-| QW-07 | win32 | `IsDebuggerPresent` returns `FALSE`. | Anti-debug branch smoke sees non-debugger state. |
-| QW-08 | win32 | `GetProcessId(GetCurrentProcess())` matches `GetCurrentProcessId()`. | Process smoke validates both APIs. |
-| QW-09 | win32 | `MultiByteToWideChar` / `WideCharToMultiByte` support UTF-8, ACP-as-UTF-8, and OEMCP. | String/UTF-16 smoke round-trips supported code pages. |
-| QW-10 | win32 | `lstrcmp{,i}A/W`, `lstrlenA/W`, `lstrcpyA/W`, `lstrcatA/W` are thin string helpers. | String smoke validates compare/copy/concat/length. |
-| QW-11 | kernel | Flush `DUETOS_KLOG_DEFAULT` ring contents to serial on panic. | Panic logs preserve recent ring entries before halt/reset. |
-| QW-12 | build | Generate `compile_commands.json` from all presets. | Every configured preset build tree contains a compilation database. |
+All twelve imported quick wins (QW-01..QW-12) shipped — see
+[`Win32-Surface-Status`](Win32-Surface-Status.md) for the per-DLL
+inventory and [`Design-Decisions`](Design-Decisions.md) for the
+landing notes. The table is removed; future regressions surface
+through the per-DLL smoke tests in `userland/apps/*_smoke/`.
 
 ---
 

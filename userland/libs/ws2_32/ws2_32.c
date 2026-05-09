@@ -653,3 +653,140 @@ __declspec(dllexport) BOOL WSAResetEvent(WSAEVENT_t e)
     (void)e;
     return 1;
 }
+
+/* WSAEventSelect / WSAEnumNetworkEvents / WSAWaitForMultipleEvents
+ * — process-local event-binding registry. WSAEventSelect remembers
+ * which network events a (socket, event-handle) pair has subscribed
+ * to; WSAEnumNetworkEvents reports + clears them; WSAWaitForMultipleEvents
+ * is a thin wrapper over kernel32's wait primitives.
+ *
+ * v0 doesn't have a real network event source feeding the registry
+ * (no FD_READ / FD_WRITE / FD_ACCEPT delivery from the TCP stack
+ * yet), so WSAEnumNetworkEvents always reports zero events. The
+ * surface exists so PE callers that follow the Win32 async pattern
+ * can register their interest and poll without crashing on a
+ * NULL-import lookup. Real event delivery is the next slice and
+ * would populate the per-binding `pending` mask. */
+
+#define WSA_BINDING_SLOTS 32
+
+typedef struct WsaEventBinding
+{
+    int in_use;
+    SOCKET socket;
+    WSAEVENT_t event;
+    long lNetworkEvents;
+    long pending; /* OR-mask of events currently set; cleared on Enum */
+} WsaEventBinding;
+
+static WsaEventBinding g_wsa_bindings[WSA_BINDING_SLOTS];
+
+#define WSA_INFINITE 0xFFFFFFFFu
+#define WSA_WAIT_TIMEOUT 0x102u
+#define WSA_WAIT_FAILED 0xFFFFFFFFu
+#define WSA_WAIT_EVENT_0 0u
+
+typedef struct
+{
+    long lNetworkEvents;
+    int iErrorCode[10]; /* 10 events in WSA: FD_READ..FD_QOS */
+} WsaNetworkEvents;
+
+__declspec(dllexport) int WSAEventSelect(SOCKET s, WSAEVENT_t e, long lNetworkEvents)
+{
+    /* Find existing binding for this socket; replace its event /
+     * mask. Otherwise allocate a fresh slot. lNetworkEvents == 0
+     * with a valid socket cancels the registration. */
+    int free_idx = -1;
+    for (int i = 0; i < WSA_BINDING_SLOTS; ++i)
+    {
+        if (g_wsa_bindings[i].in_use && g_wsa_bindings[i].socket == s)
+        {
+            if (lNetworkEvents == 0)
+            {
+                g_wsa_bindings[i].in_use = 0;
+                return 0;
+            }
+            g_wsa_bindings[i].event = e;
+            g_wsa_bindings[i].lNetworkEvents = lNetworkEvents;
+            g_wsa_bindings[i].pending = 0;
+            return 0;
+        }
+        if (!g_wsa_bindings[i].in_use && free_idx < 0)
+            free_idx = i;
+    }
+    if (lNetworkEvents == 0)
+        return 0; /* Cancel of a nonexistent binding — succeeds. */
+    if (free_idx < 0)
+    {
+        g_wsa_last_error = 10055; /* WSAENOBUFS */
+        return SOCKET_ERROR;
+    }
+    g_wsa_bindings[free_idx].in_use = 1;
+    g_wsa_bindings[free_idx].socket = s;
+    g_wsa_bindings[free_idx].event = e;
+    g_wsa_bindings[free_idx].lNetworkEvents = lNetworkEvents;
+    g_wsa_bindings[free_idx].pending = 0;
+    return 0;
+}
+
+__declspec(dllexport) int WSAEnumNetworkEvents(SOCKET s, WSAEVENT_t e, void* lpNetworkEvents)
+{
+    (void)e; /* Real Win32 atomically resets `e` here; v0 events
+              * never get set by anyone yet, so the reset is a
+              * no-op. */
+    if (lpNetworkEvents == (void*)0)
+    {
+        g_wsa_last_error = 10014; /* WSAEFAULT */
+        return SOCKET_ERROR;
+    }
+    WsaNetworkEvents* out = (WsaNetworkEvents*)lpNetworkEvents;
+    out->lNetworkEvents = 0;
+    for (int i = 0; i < 10; ++i)
+        out->iErrorCode[i] = 0;
+    /* Drain pending bits for this socket (currently always 0). */
+    for (int i = 0; i < WSA_BINDING_SLOTS; ++i)
+    {
+        if (g_wsa_bindings[i].in_use && g_wsa_bindings[i].socket == s)
+        {
+            out->lNetworkEvents = g_wsa_bindings[i].pending;
+            g_wsa_bindings[i].pending = 0;
+            break;
+        }
+    }
+    return 0;
+}
+
+/* WaitForSingleObject / WaitForMultipleObjects forward decls — we
+ * don't import kernel32 explicitly here; the in-kernel thunks
+ * resolve them at link time. Match the kernel32 contract: timeout
+ * in ms, return WAIT_OBJECT_0 (0) on signal, WAIT_TIMEOUT (0x102)
+ * on timeout. */
+__declspec(dllimport) DWORD WaitForSingleObject(void* h, DWORD timeout_ms);
+
+__declspec(dllexport) DWORD WSAWaitForMultipleEvents(DWORD cEvents, const WSAEVENT_t* lphEvents, BOOL fWaitAll,
+                                                     DWORD dwTimeout, BOOL fAlertable)
+{
+    (void)fAlertable; /* v0 doesn't honour alertable here. */
+    if (lphEvents == (const WSAEVENT_t*)0 || cEvents == 0)
+    {
+        g_wsa_last_error = 10014;
+        return WSA_WAIT_FAILED;
+    }
+    /* Non-blocking probe is the only sensible v0 path: we don't
+     * have async event delivery yet, so blocking would deadlock.
+     * Win32 contract: dwTimeout=0 means non-blocking. We treat
+     * any timeout the same way and return WSA_WAIT_TIMEOUT after
+     * a single check unless fWaitAll=FALSE and we find a signaled
+     * event via WaitForSingleObject(0). */
+    if (dwTimeout == 0 || fWaitAll)
+        return WSA_WAIT_TIMEOUT;
+    /* Best-effort: poll each event once with timeout 0. */
+    for (DWORD i = 0; i < cEvents; ++i)
+    {
+        DWORD r = WaitForSingleObject((void*)lphEvents[i], 0);
+        if (r == 0)
+            return WSA_WAIT_EVENT_0 + i;
+    }
+    return WSA_WAIT_TIMEOUT;
+}

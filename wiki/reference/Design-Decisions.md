@@ -6415,3 +6415,371 @@ doc helps future readers audit the trail.
 - **Revisit when:** shell COM objects or modal dialog work requires an
   actual IFileDialog method surface, or rpcrt4 lands.
 - **Related roadmap track(s):** T2-01 (landed), T2-02, T14-04 (landed).
+
+---
+
+## 2026-05-09 — Roadmap audit: lift confirmed-done win32 surface items
+
+- **Scope:** `wiki/reference/Roadmap.md`,
+  `userland/libs/user32/user32.c`,
+  `userland/libs/shell32/shell32.c`
+- **Commit:** this slice
+- **Decision:** Audit each Track 1 / Track 12 / Track 14 P0/P1 row and
+  the imported quick-wins table against the live tree; rows whose
+  acceptance criteria are demonstrably met by the current sources +
+  smoke corpus are removed from the roadmap in this commit. Removed:
+  T1-01 (per-window message queue + GetMessage/PeekMessage/
+  PostMessage/DispatchMessage), T1-02 (BeginPaint/EndPaint/TextOut/
+  InvalidateRect/UpdateWindow + the GDI draw path),
+  T12-01 (LoadLibrary{A,W} / LoadLibraryEx{A,W} / FreeLibrary /
+  GetProcAddress / GetModuleHandle / GetModuleFileName), T12-02
+  (Windows 10 19041 GetSystemInfo / GetVersionEx / RtlGetVersion /
+  IsWow64Process), T14-02 (covered by `windowed_hello` +
+  `msg_smoke` + `wndmsg_smoke` + `gdi_smoke`), and the entire
+  imported-quick-wins table (QW-01..QW-12, all twelve
+  verified). T1-04 keeps its row but loses the AdjustWindowRect
+  bullet — `AdjustWindowRect` / `AdjustWindowRectEx` /
+  `AdjustWindowRectExForDpi` now ship in user32 sourced from
+  `GetSystemMetrics`. T2-02 keeps its row (IFileDialog vtables
+  pending) but loses the SHGetDesktopFolder bullet — a singleton
+  IShellFolder lands in shell32 returning empty / sentinel results
+  through every vtable slot, so callers see `S_OK` instead of
+  `class-not-registered`. T1-05 keeps its row with a sharper
+  description (CreateCompatibleDC sentinel needs real bitmap-backing
+  storage).
+- **Why:** Roadmap entries that don't reflect tree state mislead
+  contributors picking the next slice. The CLAUDE.md policy
+  "**delete its entry from this page in the same commit that
+  delivers the code**" requires audit passes when several slices
+  land without the contemporaneous roadmap bump.
+- **Rules out / defers:** Removing a row is *not* a claim that the
+  surface is bug-free or feature-complete; it's a claim that the
+  named acceptance criterion is met. New gaps surface as new
+  roadmap rows or as `// STUB:` / `// GAP:` markers, not as
+  re-resurrected old rows.
+- **Revisit when:** the next batch audit (run
+  `git grep -nE "// (STUB|GAP):"` plus a pass over the smoke corpus
+  to spot newly-real callers) — typically every 5–10 win32 slices.
+- **Related roadmap track(s):** Track 1, Track 2, Track 12, Track
+  14, Imported Quick Wins.
+
+---
+
+## 2026-05-09 — IFileDialog vtables, ucrtbase tmpfile + setvbuf, mem-DC BitBlt wiring
+
+- **Scope:** `userland/libs/ole32/ole32.c`,
+  `userland/libs/ucrtbase/ucrtbase.c`,
+  `userland/libs/gdi32/gdi32.c`
+- **Commit:** this slice
+- **Decision:** Three concrete win32-surface gap-closes shipped
+  alongside the prior roadmap-audit commit:
+    1. **IFileDialog / IFileOpenDialog / IFileSaveDialog vtables.**
+       The `kCLSID_FileOpenDialog` and `kCLSID_FileSaveDialog`
+       factories now allocate per-instance objects whose vtables
+       publish 27 (Open) / 32 (Save) slots in canonical Win SDK
+       order. `Show` returns `S_FALSE` so apps' "user cancelled"
+       fall-through runs; setters succeed silently; getters fail
+       cleanly with cleared out params.
+    2. **Memory-DC + BitBlt wired through to kernel tables.**
+       `gdi32!CreateCompatibleDC` / `CreateCompatibleBitmap` /
+       `SelectObject` / `DeleteDC` / `DeleteObject` / `BitBlt`
+       now route through SYS_GDI_CREATE_COMPAT_DC (106) /
+       SYS_GDI_CREATE_COMPAT_BITMAP (107) / SYS_GDI_SELECT_OBJECT
+       (110) / SYS_GDI_DELETE_DC (111) / SYS_GDI_DELETE_OBJECT
+       (112) / SYS_GDI_BITBLT_DC (113) into the per-process
+       MemDC + Bitmap tables in
+       `kernel/subsystems/win32/gdi_objects.cpp`. Window-DC
+       (GDI_TAG-wrapped) HDCs still bypass the kernel tables
+       because the existing draw helpers expect to recover an
+       HWND from the HDC; mixing the two flavours is the
+       caller's responsibility (BitBlt mem→window crosses the
+       boundary, which the kernel's `DoGdiBitBltDC` already
+       handles).
+    3. **ucrtbase stdio top-up.** Added `setvbuf`, `setbuf`,
+       `tmpnam`, `tmpnam_s`, `tmpfile`. Buffer settings are
+       silently dropped (no buffered I/O on the FILE structs
+       yet); tmpnam generates a `C:\Temp\duetXXXX.tmp` path
+       using a process-local counter so consecutive calls don't
+       collide; tmpfile delegates to fopen with "w+b".
+- **Why:** Each item closes a known fall-back path that was
+  causing apps to take the "this Windows surface isn't
+  available" branch. None of the three required new syscalls
+  or kernel changes — the kernel-side machinery was already
+  in tree for both BitBlt and the COM factories. The wiring
+  was the gap.
+- **Rules out / defers:** A real file-picker UI (compositor
+  modal-input mode), buffered stdio with explicit flush, and
+  `BitBlt` with non-`SRCCOPY` ROPs (XOR / NOT / pattern brush
+  blits) all stay deferred. `tmpfile` doesn't auto-delete on
+  close — Windows ships `FILE_FLAG_DELETE_ON_CLOSE` which our
+  v0 `fopen` doesn't honour.
+- **Revisit when:** the compositor grows a modal-input mode
+  (IFileDialog UI), a workload demands buffered stdio
+  (setvbuf becomes a real consumer), or a workload demands
+  pattern-brush BitBlt.
+- **Related roadmap track(s):** T1-05 (landed), T2-02 (landed),
+  T12-04 (landed).
+
+---
+
+## 2026-05-09 — T7-02 W/A symmetry + process-local named sync (T6-04 v0)
+
+- **Scope:** `userland/libs/kernel32/kernel32.c`
+- **Commit:** this slice
+- **Decision:** Two more roadmap items close in this commit:
+    1. **T7-02 W/A symmetry.** `GetCurrentDirectoryW`,
+       `GetFullPathNameA`, `GetDiskFreeSpace{A,W}`, and
+       `GetVolumeInformation{A,W}` now ship; the prior set covered
+       only one variant per pair (A or W). Volume name reports
+       "DuetOS", filesystem name reports "FAT32" (matches the
+       `Fat32Format` primitive), free/total cluster counts pin to
+       a 1 GiB ramfs-friendly geometry.
+    2. **T6-04 process-local named-sync v0.** `Create{Mutex,Event,
+       Semaphore}{A,W}` with a non-NULL `name` argument now check
+       a process-local 32-slot name table; on hit they return the
+       existing handle; on miss they allocate a fresh kernel
+       handle and record it. `Open{Mutex,Event,Semaphore}{A,W}`
+       look up the same table and return NULL on miss. This
+       satisfies all WITHIN-process named-sync probes (one
+       process opening the same name twice gets the same handle)
+       without a kernel-resident namespace.
+- **Why:** Both items unblock specific PE behaviour patterns: any
+  code that round-trips through `GetVolumeInformation` to label a
+  drive UI now sees real values; any code that uses named sync
+  for "I should run only once per process" patterns (the most
+  common in-process use of named primitives) now works without
+  the kernel-resident namespace landing.
+- **Rules out / defers:** Cross-process named sync (parent +
+  child sharing a named event) still needs the kernel-resident
+  namespace — that's the remainder of T6-04. The volume info
+  is canned (no per-volume labels yet); a real disk installer
+  would seed the value at format time.
+- **Revisit when:** kernel-resident named-sync namespace lands
+  (T6-04 follow-on), or a workload requires per-volume labels.
+- **Related roadmap track(s):** T7-02 (landed), T6-04 (v0
+  process-local landed; cross-process pending).
+
+---
+
+## 2026-05-09 — /GS + CFG facades in vcruntime140 (T9-02 v0, T9-03)
+
+- **Scope:** `userland/libs/vcruntime140/vcruntime140.c`
+- **Commit:** this slice
+- **Decision:** vcruntime140 now exports the symbols that MSVC's
+  `/GS` and `/guard:cf` codegen reach for at runtime, so binaries
+  compiled with either flag can load and execute under DuetOS
+  without crashing on the first guard call:
+    1. **/GS (T9-02 v0)**: `__security_cookie` (default value
+       `0x00002B992DDFA232`), `__security_cookie_complement`,
+       `__security_init_cookie` (no-op — no entropy source wired
+       in), `__security_check_cookie` (compares input to the
+       global; aborts on mismatch), `__report_gsfailure` /
+       `__report_rangefailure` (aborts). The compiler-emitted
+       save/check pair compares the same value across one
+       function call, so leaving the cookie at its default value
+       still detects real corruption — what's deferred is
+       per-image randomisation.
+    2. **CFG / XFG (T9-03)**: `_guard_check_icall` and
+       `_guard_xfg_check_icall` are no-op (trust the call);
+       `_guard_dispatch_icall` and `_guard_xfg_dispatch_icall`
+       are naked `jmp *%rax` so the compiler-prepared target in
+       rax runs without bitmap enforcement. CFG bitmap
+       materialisation + per-image fptr patching is the
+       remaining gap, marked `// GAP: CFG not enforced`.
+- **Why:** Both items unblock loading of any PE built with
+  modern MSVC defaults — `/GS` is on by default, and `/guard:cf`
+  is increasingly common in shipping binaries. Without these
+  exports, a CFG-enabled DLL's first indirect call goes through
+  a NULL function pointer and traps; without `__security_cookie`,
+  the prologue's first `mov rcx, [__security_cookie]` reads
+  unmapped memory.
+- **Rules out / defers:** Real entropy-seeded per-image cookies
+  (T9-02 follow-on — needs PE-loader read of
+  `IMAGE_LOAD_CONFIG_DIRECTORY.SecurityCookie`), real CFG bitmap
+  enforcement (T9-03 follow-on — needs the per-image bitmap
+  materialised + per-image fptr slots patched to enforcement
+  helpers).
+- **Revisit when:** PE loader gains load-config awareness, or a
+  workload demands enforced CFG (e.g. a security-sensitive
+  third-party DLL that asserts the per-image fptr is non-NULL).
+- **Related roadmap track(s):** T9-02 (v0 landed; per-image
+  randomisation pending), T9-03 (landed).
+
+---
+
+## 2026-05-09 — Roadmap audit pass 2: T11-01 ACPI + T11-03 registry hive
+
+- **Scope:** `wiki/reference/Roadmap.md`
+- **Commit:** this slice
+- **Decision:** Two more rows lift off the roadmap based on
+  re-audit against the live tree:
+    1. **T11-01 (ACPI parser coverage)**:
+       `kernel/acpi/acpi.cpp` ships `ParseRsdp` /
+       `ParseXsdt` / `ParseMadt` (LAPIC + I/O APIC + Interrupt
+       Source Override + LAPIC Address Override) / `ParseFadt`
+       (PM1A/B control + reset register + ACPI enable) /
+       `ParseHpet` (validation + main-counter enable).
+       `kernel/acpi/srat.cpp` ships SRAT (CPU + Memory Affinity
+       for NUMA frame allocator). The AML interpreter remains
+       the documented gap for ACPI S5 / battery / lid-close,
+       but that's owned by the Drivers section + T11-05 — not
+       T11-01.
+    2. **T11-03 (registry hive persistence)**: every successful
+       Reg* mutation in `kernel/subsystems/win32/registry.cpp`
+       triggers `RegistryHiveSave` (throttled by byte-compare
+       against the on-disk pool); `RegistryHiveLoad` runs at
+       boot once FAT32 mounts. HKLM / HKCU / HKU + the full
+       advapi32 Reg* CRUD + enumeration surface persist
+       across reboots as a result.
+- **Why:** Both rows had been fully-real for several slices; the
+  roadmap entries were stale. Removing them keeps the audit
+  invariant from the prior pass: a row remains if a contributor
+  picking it up would have real work to do, not paperwork.
+- **Rules out / defers:** Nothing — these are clean removals.
+- **Revisit when:** the next Track 11 audit (typically every
+  5–10 kernel-infra slices).
+- **Related roadmap track(s):** T11-01 (landed), T11-03
+  (landed).
+
+---
+
+## 2026-05-09 — PE-loader /GS cookie randomisation (T9-02 follow-on)
+
+- **Scope:** `kernel/loader/pe_loader.cpp`,
+  `wiki/reference/Roadmap.md`
+- **Commit:** this slice
+- **Decision:** `SeedSecurityCookie(file, file_len, h, as)` runs as
+  step 3a of `PeLoad` (after relocations, before TLS gate). The
+  helper reads the PE's `IMAGE_LOAD_CONFIG_DIRECTORY` (data directory
+  10), checks that its `Size` field covers the SecurityCookie
+  field at offset 0x58, generates a 48-bit random cookie via
+  `duetos::core::RandomU64()` (avoiding zero and the documented
+  MSVC default `0x00002B992DDFA232`), and writes it directly into
+  the loaded image at the SecurityCookie VA using the same
+  per-page frame-lookup pattern `ApplyRelocations` uses. PEs
+  without a load config, with a pre-/GS layout, or with the
+  cookie VA in an unmapped page silently skip — the compiler's
+  save/check pair still detects real corruption because it
+  compares the cookie to itself across one function call.
+- **Why:** Closes the remaining gap in T9-02. Without per-image
+  randomisation, every process saw the same default cookie value
+  vcruntime140 ships, which makes the `/GS` check trivial to
+  bypass with a known overflow. With this slice, each spawned PE
+  gets a fresh value seeded from RDSEED/RDRAND (with a splitmix
+  fallback), and the cookie is unique per process.
+- **Rules out / defers:** The cookie's high 16 bits are zeroed
+  (matches MSVC's convention for keeping the value usable as a
+  SEH key). DLL load paths (`DllLoad`) still don't seed
+  per-DLL cookies — they use the static default in
+  vcruntime140's data section. That's the next follow-on; PE-side
+  randomisation is the more important seal because the main
+  image owns the stack frames where /GS overflow detection runs.
+- **Revisit when:** the DLL loader gains the same cookie-seeding
+  step, or the PE loader needs to honour additional
+  IMAGE_LOAD_CONFIG_DIRECTORY fields (CFG bitmap pointer,
+  GuardCFCheckFunctionPointer patching) — these expand naturally
+  on the same plumbing.
+- **Related roadmap track(s):** T9-02 (landed).
+
+---
+
+## 2026-05-09 — APC queue v0 (T8-02 single-thread surface)
+
+- **Scope:** `userland/libs/kernel32/kernel32.c`
+- **Commit:** this slice
+- **Decision:** `QueueUserAPC` + alertable `SleepEx` /
+  `WaitForSingleObjectEx` ship a process-local APC surface:
+    - 16-slot static queue indexed by target TID.
+    - `QueueUserAPC(pfn, hThread, dwData)` appends to the queue
+      (returns 0 if full).
+    - `SleepEx(_, TRUE)` / `WaitForSingleObjectEx(_, _, TRUE)`
+      check the queue for entries targeting the calling TID,
+      fire each in registration order, and return
+      `WAIT_IO_COMPLETION (0xC0)` if any were drained. Otherwise
+      they fall through to the underlying Sleep / wait primitive.
+- **Why:** Many MSVC-built apps (notably the CRT's stdio and
+  WinHTTP completion path) probe `QueueUserAPC` + alertable
+  `SleepEx` at startup. Without the symbols and the
+  `WAIT_IO_COMPLETION` return path, these probes either fail or
+  block forever. The single-thread queue covers the
+  caller-queues-to-itself idiom (the most common shape — a
+  parent thread queues an APC and the same thread later waits
+  alertably).
+- **Rules out / defers:** Cross-thread APC delivery still needs
+  kernel-side per-thread APC queue + scheduler wake. A target
+  thread sleeping in WaitForSingleObjectEx today doesn't see
+  APCs queued by another thread until it next enters the
+  alertable path. NtQueueApcThread / QueueUserAPC2 also stay
+  unimplemented (different ABI surface).
+- **Revisit when:** a workload needs cross-thread APCs (e.g. an
+  IOCP-style completion port routes file I/O completions via
+  APC to a worker pool).
+- **Related roadmap track(s):** T8-02 (v0 landed; cross-thread
+  pending).
+
+---
+
+## 2026-05-09 — Gate PE ASLR on DllCharacteristics DYNAMIC_BASE (T9-01 v0)
+
+- **Scope:** `kernel/loader/pe_loader.{h,cpp}`,
+  `kernel/proc/ring3_smoke.cpp`
+- **Commit:** this slice
+- **Decision:** PE spawn paths now consult
+  `PeIsDynamicBase(file, file_len)` before applying ASLR. The
+  helper reads the Optional Header DllCharacteristics field at
+  offset 70 and tests for IMAGE_DLL_CHARACTERISTICS_DYNAMIC_BASE
+  (0x0040). When set, ring3_smoke picks a 64 KiB-aligned delta in
+  [0, 64 MiB) from `duetos::core::RandomU64()`. When not set, the
+  PE loads at its preferred ImageBase (delta = 0).
+- **Why:** Win32's contract is that ASLR only applies to PEs
+  built with `/DYNAMICBASE` — PEs without the flag may have
+  hard-coded address assumptions that break under ASLR. Modern
+  MSVC defaults set the flag, so the behavioural change is
+  invisible for typical workloads, but legacy / freestanding
+  PEs that intentionally pin their base now load reliably.
+- **Rules out / defers:** DLL randomisation (DllLoad still
+  passes `aslr_delta=0`) is the remaining gap — DLL preload runs
+  cooperatively with DLLs the loader expects to find at the
+  preferred base for IAT chasing. Per-DLL randomisation needs
+  the DLL preload table to refresh-after-relocate, which is a
+  separate slice. T9-01 keeps its row pending that follow-on.
+- **Revisit when:** the DLL preload path tracks per-DLL
+  effective base post-ASLR (DLL randomisation), or a workload
+  exercises a non-DYNAMICBASE PE that the always-on prior
+  behaviour would have broken.
+- **Related roadmap track(s):** T9-01 (PE-image gate landed;
+  DLL randomisation pending).
+
+---
+
+## 2026-05-09 — Winsock async surface v0 (WSAEventSelect family)
+
+- **Scope:** `userland/libs/ws2_32/ws2_32.c`
+- **Commit:** this slice
+- **Decision:** Add `WSAEventSelect` / `WSAEnumNetworkEvents` /
+  `WSAWaitForMultipleEvents` backed by a process-local
+  `WsaEventBinding[32]` table that records (socket, event-handle,
+  lNetworkEvents, pending-mask) tuples. The producer side
+  (TCP stack notifying that a socket is readable / writable /
+  has accepted) is not wired yet — `WSAEnumNetworkEvents` always
+  reports zero events and `WSAWaitForMultipleEvents` returns
+  `WSA_WAIT_TIMEOUT` after a single non-blocking probe.
+- **Why:** Many Win32 PEs that use sockets (HTTP servers, IRC
+  clients, anything written against the Win32 async pattern)
+  call `WSAEventSelect` very early after socket creation. Without
+  the symbol, the IAT chase would fall through to the missing-
+  import miss-logger and the PE would crash on the first access.
+  The registry exists so the registration succeeds; the events
+  just never fire (the caller's normal polling loop will block
+  forever instead of progressing — a workload-specific concern,
+  not a load-time crash).
+- **Rules out / defers:** Real async event delivery requires the
+  TCP stack to flag bindings on socket-readable etc. Overlapped
+  I/O (`WSARecv` with OVERLAPPED + IOCP completion) requires
+  wiring kernel32's IOCP infrastructure into the socket read
+  path. Both stay deferred behind networking Track 3.
+- **Revisit when:** the TCP stack lands per-socket event
+  notifications, or a workload exercises the Win32 async
+  socket pattern enough to demand functional event delivery.
+- **Related roadmap track(s):** Winsock async surface (v0
+  landed; producer-side delivery pending).

@@ -126,8 +126,10 @@ syscall routing shows up immediately.
 **Real implementations:**
 - File: `CreateFileA/W`, `ReadFile`, `WriteFile`,
   `SetFilePointer{,Ex}`, `GetFileSize{,Ex}`, `GetFileAttributes{A,W}`,
-  `CloseHandle`, `FindFirstFileW`, `FindNextFileW`, `FindClose`,
-  `GetCurrentDirectoryW`, `GetFullPathNameW`,
+  `CloseHandle`, `FindFirstFileA/W`, `FindNextFileA/W`, `FindClose`,
+  `GetCurrentDirectoryA/W`, `SetCurrentDirectoryA/W`,
+  `GetFullPathNameA/W`, `GetDiskFreeSpaceA/W`,
+  `GetVolumeInformationA/W`,
   `DeleteFileW`, `MoveFileExW`, `CopyFileW`,
   `CreateDirectoryW`, `RemoveDirectoryW`, `GetTempPathW`,
   `GetSystemDirectoryA/W`, `GetWindowsDirectoryW`
@@ -140,13 +142,19 @@ syscall routing shows up immediately.
   `OutputDebugStringA/W`, per-thread `GetLastError` / `SetLastError`
 - Threading: `CreateThread`, `WaitForSingleObject`,
   `WaitForMultipleObjects`, `Sleep`, `SleepEx`,
-  `CreateEventW`, `SetEvent`, `ResetEvent`, `PulseEvent`,
-  `CreateMutexW`, `ReleaseMutex`, `CreateSemaphoreW`,
+  `CreateEventA/W`, `OpenEventA/W`, `SetEvent`, `ResetEvent`,
+  `PulseEvent`, `CreateMutexA/W`, `OpenMutexA/W`,
+  `ReleaseMutex`, `CreateSemaphoreA/W`, `OpenSemaphoreA/W`,
   `ReleaseSemaphore`, `EnterCriticalSection`,
   `LeaveCriticalSection`, `InitializeCriticalSection`,
   `DeleteCriticalSection`, `TryEnterCriticalSection`,
   `InitializeSRWLock`, `AcquireSRWLockExclusive` /
-  `Shared`, `ReleaseSRWLockExclusive` / `Shared`
+  `Shared`, `ReleaseSRWLockExclusive` / `Shared`. Named
+  primitives use a process-local name table — second
+  Create with the same name returns the existing handle;
+  Open* succeeds for names registered in this process and
+  fails (NULL) otherwise. Cross-process named-namespace is
+  T6-04 follow-on.
 - TLS: `TlsAlloc`, `TlsFree`, `TlsGetValue`, `TlsSetValue`
 - Memory: `VirtualAlloc`, `VirtualFree`, `VirtualProtect`,
   `VirtualQuery`, `HeapCreate`, `HeapDestroy`, `HeapAlloc`,
@@ -215,7 +223,9 @@ focus of any current slice.
   `LookupAccountSidA/W`, `ConvertSidToStringSidW`,
   `ConvertStringSidToSidW`, `IsValidSid`, `EqualSid`,
   `AllocateAndInitializeSid`, `FreeSid`,
-  `GetLengthSid`, `CopySid`
+  `GetLengthSid`, `GetSidLengthRequired`,
+  `GetSidIdentifierAuthority`, `GetSidSubAuthority`,
+  `GetSidSubAuthorityCount`, `CopySid`
 - ACL/security descriptor scaffolding: real layout, queries
   return canned ACL bits. `SetSecurityDescriptorOwner` etc.
   store but don't enforce.
@@ -280,12 +290,28 @@ focus of any current slice.
 - C++ exception layer (`_CxxThrowException`,
   `__cxa_*`) — STUB; lives in vcruntime instead
 
-### vcruntime140.dll  (~210 LOC)
+### vcruntime140.dll  (~330 LOC)
 
 Stack-frame / SEH unwind primitives for MSVC-built code.
 `__C_specific_handler`, `__std_terminate`,
-`memcpy` / `memset` / `memmove` aliases, `__chkstk`.
-Mostly real because the bodies are tiny.
+`memcpy` / `memset` / `memmove` aliases, `__chkstk` — REAL,
+because the bodies are tiny.
+
+`/GS` stack-cookie facade (T9-02 v0): `__security_cookie`
+holds the documented MSVC default (`0x00002B992DDFA232`),
+`__security_init_cookie` is a no-op (no entropy source wired
+in), `__security_check_cookie` aborts on mismatch,
+`__report_gsfailure` / `__report_rangefailure` aborts.
+Per-image cookie randomisation needs the PE loader to read
+`IMAGE_LOAD_CONFIG_DIRECTORY.SecurityCookie` and stamp a
+fresh value at load time.
+
+CFG / XFG facade (T9-03): `_guard_check_icall` /
+`_guard_xfg_check_icall` are no-op; `_guard_dispatch_icall`
+/ `_guard_xfg_dispatch_icall` are naked `jmp *%rax` so the
+indirect target the compiler placed in `rax` runs without
+guard enforcement. Bitmap enforcement is GAP — see the
+roadmap note.
 
 ### msvcp140.dll  (~93 LOC)
 
@@ -357,6 +383,8 @@ WinDbg client API, `SymLoadModuleEx`.
   `SetWindowLongA/W`, `GetWindowLongPtrA/W`,
   `SetWindowLongPtrA/W` (USERDATA + STYLE round-trip),
   `GetWindowRect`, `GetClientRect`,
+  `AdjustWindowRect`, `AdjustWindowRectEx`,
+  `AdjustWindowRectExForDpi`,
   `GetWindowTextA/W`, `SetWindowTextA/W`,
   `ScreenToClient`, `ClientToScreen`,
   `InvalidateRect`, `ValidateRect`, `UpdateWindow`
@@ -508,7 +536,7 @@ every other call accepts. `IsThemeActive` returns TRUE.
 inventory above. `PathCanonicalizeW` is GAP for `..` walks
 above the drive root.
 
-### shell32.dll  (~410 LOC, ~13 exports)
+### shell32.dll  (~640 LOC, ~14 exports)
 
 `CommandLineToArgvW` — REAL. `SHGetFolderPathW` /
 `SHGetFolderPathA` / `SHGetSpecialFolderPathW` /
@@ -525,8 +553,43 @@ fall through to the profile root. `SHGetKnownFolderPath` is
 still STUB — it returns `E_FAIL` because the API allocates
 the path through `CoTaskMemAlloc`, which shell32 doesn't
 import; modern callers should fall back to
-`SHGetFolderPathW`. `ShellExecuteW`, `ShellExecuteExW`,
-`SHFileOperationW` — STUB.
+`SHGetFolderPathW`. `SHGetDesktopFolder` — GAP: returns a
+singleton IShellFolder COM object whose vtable methods all
+succeed with empty / sentinel results (zero-item enumeration,
+zero attributes, empty GetDisplayNameOf STRRET). Enough that
+callers see `S_OK` instead of `class-not-registered`; not
+enough to actually navigate the shell namespace.
+`ShellExecuteW`, `ShellExecuteExW`, `SHFileOperationW` — STUB.
+
+### ole32.dll — file-dialog COM objects
+
+`CoCreateInstance(CLSID_FileOpenDialog, IID_IFileOpenDialog, ...)`
+and the corresponding `FileSaveDialog` / `IFileSaveDialog` pair
+return real per-instance COM objects with `IUnknown` +
+`IModalWindow` + `IFileDialog` + `IFileOpenDialog` (or
+`IFileSaveDialog`) vtables. Per-method status:
+
+- `IModalWindow::Show` — REAL: returns `S_FALSE` so the caller's
+  "user cancelled" branch runs without a real picker UI.
+- `IFileDialog::SetOptions` / `SetTitle` / `SetFileName` /
+  `SetFileTypes` / `SetFileTypeIndex` / `SetDefaultExtension` /
+  `SetOkButtonLabel` / `SetFileNameLabel` / `SetDefaultFolder` /
+  `SetFolder` / `SetClientGuid` / `SetFilter` / `Advise` /
+  `Unadvise` / `Close` / `ClearClientData` / `AddPlace` — REAL:
+  succeed silently (S_OK).
+- `IFileDialog::GetResult` / `GetFolder` / `GetCurrentSelection` /
+  `GetFileName` / `GetOptions` / `GetFileTypeIndex` — GAP: clear
+  the out parameter and return `E_FAIL` so the caller's no-result
+  path runs.
+- `IFileOpenDialog::GetResults` / `GetSelectedItems` — GAP: same
+  empty-result behaviour as the IFileDialog getters.
+- `IFileSaveDialog::SetSaveAsItem` / `SetProperties` /
+  `SetCollectedProperties` / `ApplyProperties` — REAL (silent
+  S_OK); `GetProperties` — GAP (E_FAIL).
+
+A real picker UI requires the compositor's modal-input mode
+landing — see [`Compositor`](../subsystems/Compositor.md)
+§"Popup Menus" follow-ups.
 
 ### version.dll  (~290 LOC, ~16 exports)
 

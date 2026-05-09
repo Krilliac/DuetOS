@@ -214,3 +214,113 @@ __declspec(dllexport) SEH_NORETURN void __CxxUnwind(void* target_frame, void* ta
     __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)3));
     DUET_USER_TRAP_UNREACHABLE();
 }
+
+/* ------------------------------------------------------------------
+ * /GS stack-cookie facade (T9-02 v0)
+ *
+ * MSVC /GS-protected functions emit a save / check pair around the
+ * stack frame. The save reads `__security_cookie` and stores it
+ * just below the saved frame pointer; the check reloads it and
+ * calls `__security_check_cookie(saved)` on exit. The check function
+ * compares against `__security_cookie` and, on mismatch, calls
+ * `__report_gsfailure` (noreturn).
+ *
+ * v0 takes the lowest-effort posture: provide the variable +
+ * the check + the failure path as exports. The compiler's
+ * save/check pair is a self-consistent comparison of the same
+ * value across one function call — no external mutator can flip
+ * it — so the no-op check stays "consistent → no false abort".
+ * Real cookie randomisation requires the PE loader reading the
+ * SecurityCookie field of IMAGE_LOAD_CONFIG_DIRECTORY and
+ * stamping a per-image fresh value; that's the T9-02 follow-on.
+ *
+ * `__security_cookie` lives in vcruntime140's data section so
+ * every PE that imports it sees the same backing storage. The
+ * value below is the documented MSVC default cookie
+ * (`0x00002B992DDFA232` on x64), which the per-image cookie
+ * normally overrides at startup. Apps whose CRT calls
+ * `__security_init_cookie` (no-op here) keep the default.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) unsigned long long __security_cookie = 0x00002B992DDFA232ULL;
+__declspec(dllexport) unsigned long long __security_cookie_complement = ~0x00002B992DDFA232ULL;
+
+__declspec(dllexport) void __security_init_cookie(void)
+{
+    /* No randomness source wired in — leave the default in place. */
+}
+
+__declspec(dllexport) void __security_check_cookie(unsigned long long cookie)
+{
+    /* Compiler's save/check pair compares the value to itself
+     * across one function call; if they differ, real corruption
+     * occurred. Trip the abort path (matches Windows' contract:
+     * `__report_gsfailure` is noreturn). */
+    if (cookie != __security_cookie)
+    {
+        __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)3));
+        DUET_USER_TRAP_UNREACHABLE();
+    }
+}
+
+__declspec(dllexport) SEH_NORETURN void __report_gsfailure(unsigned long long cookie)
+{
+    (void)cookie;
+    __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)3));
+    DUET_USER_TRAP_UNREACHABLE();
+}
+
+/* MSVC also emits __report_rangefailure for /GS-related range
+ * checks (e.g. variable-length array bounds). Treat as fatal. */
+__declspec(dllexport) SEH_NORETURN void __report_rangefailure(void)
+{
+    __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)3));
+    DUET_USER_TRAP_UNREACHABLE();
+}
+
+/* ------------------------------------------------------------------
+ * CFG (Control Flow Guard) facade (T9-03 v0)
+ *
+ * CFG-enabled binaries (compiled with /guard:cf) call
+ * `_guard_check_icall(target)` before each indirect call to verify
+ * the target is in the per-image CFG bitmap. The PE loader
+ * normally patches the per-image function pointer slots
+ * (`__guard_check_icall_fptr`, `__guard_dispatch_icall_fptr`)
+ * to point at ntdll's enforcement helpers; absent that, the
+ * pointers stay at their compile-time defaults which point at
+ * exactly these no-op shims.
+ *
+ * v0 doesn't enforce CFG — the bitmap isn't materialised — so
+ * both helpers reduce to "trust the call." `_guard_check_icall`
+ * just returns; `_guard_dispatch_icall` is a naked tail call
+ * to whatever target the compiler put in `rax`.
+ *
+ * Real enforcement waits for a PE loader that walks
+ * IMAGE_LOAD_CONFIG_DIRECTORY's GuardCFCheckFunctionPointer
+ * field and either patches per-image slots to enforcement
+ * helpers or zeroes them so the compiler's default fallback
+ * (these shims) runs.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) void _guard_check_icall(void* target)
+{
+    (void)target;
+}
+
+/* `_guard_dispatch_icall` must do `jmp rax` (the indirect target
+ * the compiler placed in rax pre-call). Naked function so the
+ * prologue / epilogue don't clobber the register. */
+__declspec(dllexport) __attribute__((naked)) void _guard_dispatch_icall(void)
+{
+    __asm__ volatile("jmpq *%rax");
+}
+
+/* XFG (eXtended Flow Guard) — same shape as CFG but with a
+ * type-hash check. Same v0 stance: trust the call. */
+__declspec(dllexport) void _guard_xfg_check_icall(void* target)
+{
+    (void)target;
+}
+
+__declspec(dllexport) __attribute__((naked)) void _guard_xfg_dispatch_icall(void)
+{
+    __asm__ volatile("jmpq *%rax");
+}

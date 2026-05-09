@@ -1,14 +1,18 @@
 /*
- * userland/libs/gdi32/gdi32.c — 44 GDI stubs, with FillRect +
- * TextOutA/W + Rectangle + ExtTextOutA/W bridged to the kernel
- * compositor's per-window display list via SYS_GDI_* (65..68).
+ * userland/libs/gdi32/gdi32.c — GDI surface for PE callers.
  *
- * GetDC(hWnd) collapses the HWND into the HDC slot so later GDI
- * calls recover the window handle directly — we don't yet have a
- * DC table, a DC doesn't select into a bitmap, and CreateCompatibleDC
- * returns a sentinel that paints into nothing. The common idiom
- * `HDC hdc = GetDC(hwnd); FillRect(hdc, ...); ReleaseDC(hwnd, hdc);`
- * therefore works even without a real device context.
+ * Two HDC flavours coexist:
+ *   - "Window DC" (returned by GetDC / GetWindowDC): the HDC bit-
+ *     packs the HWND with GDI_TAG so later GDI calls can recover
+ *     the target window. Draws on a window DC route through
+ *     SYS_GDI_FILL_RECT / SYS_GDI_TEXT_OUT / SYS_GDI_RECTANGLE etc.
+ *     to the kernel compositor's per-window display list.
+ *   - "Memory DC" (returned by CreateCompatibleDC): the HDC is the
+ *     bare kernel-allocated MemDC handle from
+ *     `kernel/subsystems/win32/gdi_objects.cpp`. The matching
+ *     bitmap (allocated by CreateCompatibleBitmap) attaches via
+ *     SelectObject; BitBlt copies pixels mem→mem or mem→window
+ *     through SYS_GDI_BITBLT_DC.
  *
  * COLORREF on the Win32 side is 0x00BBGGRR; the kernel repacks to
  * 0x00RRGGBB before framebuffer writes, so we pass the user's value
@@ -45,6 +49,32 @@ typedef struct
 #define SYS_GDI_ELLIPSE 75
 #define SYS_GDI_SET_PIXEL 76
 #define SYS_GDI_DRAW_TEXT_W 126
+/* Memory-DC + bitmap-backed object surface — backed by per-process
+ * MemDC / Bitmap tables in `kernel/subsystems/win32/gdi_objects.cpp`.
+ * The DC + bitmap handles returned by these calls live in the kernel
+ * for the lifetime of the process; subsequent SelectObject /
+ * BitBlt / DeleteDC / DeleteObject calls dispatch against those
+ * tables. */
+#define SYS_GDI_CREATE_COMPAT_DC 106
+#define SYS_GDI_CREATE_COMPAT_BITMAP 107
+#define SYS_GDI_SELECT_OBJECT 110
+#define SYS_GDI_DELETE_DC 111
+#define SYS_GDI_DELETE_OBJECT 112
+#define SYS_GDI_BITBLT_DC 113
+
+static long long gdi32_syscall1(long n, long long a)
+{
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)n), "D"(a) : "memory");
+    return rv;
+}
+
+static long long gdi32_syscall3(long n, long long a, long long b, long long c)
+{
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)n), "D"(a), "S"(b), "d"(c) : "memory");
+    return rv;
+}
 
 /* Encode the HWND inside the HDC pointer so later GDI calls can
  * recover it. Bit layout: HDC == (HWND | GDI_TAG). GDI_TAG keeps
@@ -80,18 +110,27 @@ __declspec(dllexport) INT ReleaseDC(HANDLE hWnd, HDC dc)
     (void)dc;
     return 1;
 }
-/* CreateCompatibleDC has no HWND — stays a no-op sentinel; any
- * draw routed through it is silently dropped (the HWND recovered
- * from the sentinel is 0, which the kernel rejects). */
+/* CreateCompatibleDC — allocates a kernel-side MemDC (no pixel
+ * backing yet; that arrives via SelectObject of a compatible
+ * bitmap). The returned HDC is the bare kernel handle (NOT
+ * GDI_TAG-wrapped) so gdi32_hwnd_from_hdc returns 0 — the
+ * draw-into-window helpers correctly reject it, while
+ * BitBlt / SelectObject / DeleteDC look it up against the
+ * kernel MemDC table directly. */
 __declspec(dllexport) HDC CreateCompatibleDC(HDC dc)
 {
-    (void)dc;
-    return (HDC)GDI_TAG;
+    long long hdc = gdi32_syscall1(SYS_GDI_CREATE_COMPAT_DC, (long long)(unsigned long long)dc);
+    return (HDC)(unsigned long long)hdc;
 }
 __declspec(dllexport) BOOL DeleteDC(HDC dc)
 {
-    (void)dc;
-    return 1;
+    if (dc == (HDC)0)
+        return 0;
+    /* GDI_TAG-wrapped HDCs (window DCs) are not kernel-tracked;
+     * succeed silently. Real memory DCs get released. */
+    if (((unsigned long long)dc & GDI_TAG) == GDI_TAG)
+        return 1;
+    return gdi32_syscall1(SYS_GDI_DELETE_DC, (long long)(unsigned long long)dc) ? 1 : 0;
 }
 __declspec(dllexport) INT SaveDC(HDC dc)
 {
@@ -119,10 +158,11 @@ __declspec(dllexport) HBITMAP CreateBitmap(INT w, INT h, UINT planes, UINT bits_
 }
 __declspec(dllexport) HBITMAP CreateCompatibleBitmap(HDC dc, INT w, INT h)
 {
-    (void)dc;
-    (void)w;
-    (void)h;
-    return (HBITMAP)0xC0DEBABEULL;
+    if (w <= 0 || h <= 0)
+        return (HBITMAP)0;
+    long long hbmp =
+        gdi32_syscall3(SYS_GDI_CREATE_COMPAT_BITMAP, (long long)(unsigned long long)dc, (long long)w, (long long)h);
+    return (HBITMAP)(unsigned long long)hbmp;
 }
 __declspec(dllexport) HBITMAP CreateDIBSection(HDC dc, const void* bi, UINT usage, void** bits, HANDLE section,
                                                DWORD offset)
@@ -228,17 +268,39 @@ __declspec(dllexport) HGDIOBJ GetStockObject(INT idx)
 }
 __declspec(dllexport) HGDIOBJ SelectObject(HDC dc, HGDIOBJ obj)
 {
-    (void)dc;
-    /* Return a non-NULL "previously selected" sentinel so callers
-     * that null-check don't bail. */
     if (obj == (HGDIOBJ)0)
         return (HGDIOBJ)0;
-    return (HGDIOBJ)(unsigned long long)0xD0FFEDULL;
+    /* GDI_TAG-wrapped HDCs (window DCs) don't have an in-kernel DC
+     * table entry — return a non-NULL "previously selected" sentinel
+     * so callers that null-check don't bail. Real memory DCs route
+     * through the kernel which returns the previously-selected
+     * object handle (or 0 if none). */
+    if (((unsigned long long)dc & GDI_TAG) == GDI_TAG)
+        return (HGDIOBJ)(unsigned long long)0xD0FFEDULL;
+    long long prev =
+        gdi32_syscall3(SYS_GDI_SELECT_OBJECT, (long long)(unsigned long long)dc, (long long)(unsigned long long)obj, 0);
+    if (prev == 0)
+        return (HGDIOBJ)(unsigned long long)0xD0FFEDULL;
+    return (HGDIOBJ)(unsigned long long)prev;
 }
 __declspec(dllexport) BOOL DeleteObject(HGDIOBJ obj)
 {
-    (void)obj;
-    return 1;
+    if (obj == (HGDIOBJ)0)
+        return 0;
+    /* Brushes / pens / stocks — sentinel handles, no kernel state.
+     * Brushes carry tag 0xB...; pens / stock objects use small
+     * sentinels; only kernel-allocated bitmaps need to be released
+     * via the syscall. Treat any handle that isn't obviously a
+     * kernel-table handle (i.e. >= 0x100 and not in the brush /
+     * stock tag ranges) as a kernel bitmap. */
+    unsigned long long v = (unsigned long long)obj;
+    if ((v & 0xF0000000ULL) == 0xB0000000ULL)
+        return 1; /* brush sentinel */
+    if (v < 0x100)
+        return 1; /* stock-object sentinel range */
+    if (v == 0xD0FFEDULL)
+        return 1; /* SelectObject "prev" sentinel */
+    return gdi32_syscall1(SYS_GDI_DELETE_OBJECT, (long long)v) ? 1 : 0;
 }
 __declspec(dllexport) INT GetObjectA(HGDIOBJ obj, INT cb, void* buf)
 {
@@ -296,18 +358,38 @@ static BOOL gdi32_text_core(HANDLE hwnd, INT x, INT y, const char* text, UINT le
 }
 
 /* --- Draw calls --- */
+/* BitBlt — copy a `w x h` block from `src` at (sx,sy) to `dst`
+ * at (x,y). The kernel (`DoGdiBitBltDC`) requires the source to
+ * be a memory DC with a selected compatible bitmap; the
+ * destination can be a memory DC or a window-tagged HDC. The
+ * 9-arg form is packed into a contiguous struct on the user
+ * stack — Win64 calling convention only passes the first four
+ * args in registers, so this is the only sane way to keep all
+ * nine on a single syscall.
+ *
+ * Returns 1 on success, 0 if either DC isn't a kernel-managed
+ * memory DC, dimensions are invalid, or the copy is rejected
+ * (e.g. source rect out of bitmap bounds, dest blit-pool
+ * exceeded). ROP is currently ignored beyond SRCCOPY semantics
+ * — every blit is a tight memcpy in BGRA order. */
 __declspec(dllexport) BOOL BitBlt(HDC dst, INT x, INT y, INT w, INT h, HDC src, INT sx, INT sy, DWORD rop)
 {
-    (void)dst;
-    (void)x;
-    (void)y;
-    (void)w;
-    (void)h;
-    (void)src;
-    (void)sx;
-    (void)sy;
-    (void)rop;
-    return 1;
+    if (w <= 0 || h <= 0)
+        return 0;
+    /* Pack 9 args contiguous on the stack — must match the
+     * kernel's `BitBltArgs` struct in
+     * `kernel/subsystems/win32/gdi_objects.cpp` (9 x u64). */
+    unsigned long long args[9];
+    args[0] = (unsigned long long)dst;
+    args[1] = (unsigned long long)(unsigned int)x;
+    args[2] = (unsigned long long)(unsigned int)y;
+    args[3] = (unsigned long long)(unsigned int)w;
+    args[4] = (unsigned long long)(unsigned int)h;
+    args[5] = (unsigned long long)src;
+    args[6] = (unsigned long long)(unsigned int)sx;
+    args[7] = (unsigned long long)(unsigned int)sy;
+    args[8] = (unsigned long long)rop;
+    return gdi32_syscall1(SYS_GDI_BITBLT_DC, (long long)(unsigned long long)args) ? 1 : 0;
 }
 __declspec(dllexport) BOOL StretchBlt(HDC dst, INT x, INT y, INT w, INT h, HDC src, INT sx, INT sy, INT sw, INT sh,
                                       DWORD rop)

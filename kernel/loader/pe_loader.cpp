@@ -58,6 +58,7 @@
 #include "log/klog.h"
 #include "loader/pe_exports.h"
 #include "proc/process.h"
+#include "util/random.h"
 
 namespace duetos::core
 {
@@ -115,6 +116,14 @@ constexpr u64 kSectionHeaderCharacteristics = 36;
 constexpr u64 kDirEntryImport = 1;
 constexpr u64 kDirEntryBaseReloc = 5;
 constexpr u64 kDirEntryTls = 9;
+constexpr u64 kDirEntryLoadConfig = 10;
+
+// IMAGE_LOAD_CONFIG_DIRECTORY64 field offsets used by the
+// /GS cookie-randomisation slice. The LoadConfig struct grows
+// over MSVC versions; we only touch fields whose offsets have
+// been stable since the SecurityCookie field was added.
+constexpr u64 kLoadConfigSizeOffset = 0;        // u32 — Size of struct
+constexpr u64 kLoadConfigSecurityCookie = 0x58; // u64 — VA of __security_cookie
 
 // Stack layout: kV0StackTop is the one-past-last byte (initial rsp
 // is kV0StackTop - 8), kV0StackPages is how many 4 KiB pages we
@@ -559,6 +568,23 @@ PeStatus PeValidate(const u8* file, u64 file_len)
     return ParseHeaders(file, file_len, h);
 }
 
+// IMAGE_DLL_CHARACTERISTICS_DYNAMIC_BASE = 0x0040 (per the PE
+// spec). DllCharacteristics is a u16 at offset 70 in the
+// PE32+ Optional Header (right after Subsystem at 68).
+bool PeIsDynamicBase(const u8* file, u64 file_len)
+{
+    PeHeaders h{};
+    const PeStatus s = ParseHeaders(file, file_len, h);
+    if (s != PeStatus::Ok && s != PeStatus::ImportsPresent && s != PeStatus::TlsPresent)
+        return false;
+    constexpr u64 kOptHeaderDllCharacteristics = 70;
+    if (file_len < h.opt_base + kOptHeaderDllCharacteristics + 2)
+        return false;
+    const u16 chars = LeU16(file + h.opt_base + kOptHeaderDllCharacteristics);
+    constexpr u16 kDynamicBase = 0x0040;
+    return (chars & kDynamicBase) != 0;
+}
+
 // Resolve every entry in the import table by patching the IAT
 // in place. For each import descriptor:
 //   1. Read the DLL name from its Name RVA.
@@ -718,6 +744,80 @@ u64 CountTlsCallbacks(const u8* file, u64 file_len, const PeHeaders& h)
         ++count;
     }
     return count;
+}
+
+// Seed the per-image /GS stack cookie (T9-02 follow-on).
+//
+// MSVC `/GS`-protected functions emit a save/check pair around
+// the stack frame that compares against `__security_cookie`,
+// a per-image global. Without per-image randomisation, every
+// process's cookie is the documented MSVC default value
+// (vcruntime140 ships exactly that default), which makes the
+// check trivial to bypass with a known overflow.
+//
+// MSVC's CRT publishes the address of `__security_cookie` via
+// IMAGE_LOAD_CONFIG_DIRECTORY.SecurityCookie. We read that
+// field, generate a fresh u64 from the kernel RNG, and write
+// it directly into the loaded image's data section before
+// ring-3 entry.
+//
+// On PEs without a load config (older / freestanding builds)
+// or whose load config is too small to include SecurityCookie,
+// we silently skip — the compiler-emitted check still works
+// because it compares the cookie value to itself across one
+// function call.
+//
+// On the v0 happy path the cookie variable lives in a single
+// page, so a one-frame lookup + 8-byte write is enough. We
+// still handle the page-straddle case using the same pattern
+// as ApplyRelocations.
+bool SeedSecurityCookie(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm::AddressSpace* as)
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    const PeDataDir lc = ReadDataDir(file, h, kDirEntryLoadConfig);
+    if (lc.rva == 0 || lc.size == 0)
+        return true; // No load config — nothing to seed.
+    const u64 lc_off = RvaToFile(file, h, lc.rva);
+    if (lc_off == ~u64(0) || lc_off + 4 > file_len)
+        return true; // Malformed — silently skip.
+    const u32 cfg_size = LeU32(file + lc_off + kLoadConfigSizeOffset);
+    // Need at least Size + everything up through SecurityCookie.
+    if (cfg_size < kLoadConfigSecurityCookie + 8)
+        return true; // Pre-/GS load config layout — skip.
+    if (lc_off + kLoadConfigSecurityCookie + 8 > file_len)
+        return true; // Truncated — skip.
+    const u64 cookie_va = LeU64(file + lc_off + kLoadConfigSecurityCookie);
+    if (cookie_va == 0)
+        return true; // /GS disabled at compile time.
+    // Generate a random cookie. Avoid all-zero (the "uninitialised"
+    // sentinel MSVC checks for) and the documented default.
+    u64 cookie = duetos::core::RandomU64();
+    constexpr u64 kMsvcDefault = 0x00002B992DDFA232ULL;
+    if (cookie == 0 || cookie == kMsvcDefault)
+        cookie ^= 0x0123456789ABCDEFULL;
+    // Only the low 48 bits are kept on x64 (MSVC zeroes the high
+    // 16 to keep the cookie usable as a SEH key) — match that.
+    cookie &= 0x0000FFFFFFFFFFFFULL;
+    // Write the cookie 8 bytes via the same per-page lookup the
+    // relocation walker uses, so a page-straddle works correctly.
+    for (u64 b = 0; b < 8; ++b)
+    {
+        const u64 va = cookie_va + b;
+        const u64 page_va = va & ~0xFFFULL;
+        const mm::PhysAddr frame = mm::AddressSpaceLookupUserFrame(as, page_va);
+        if (frame == mm::kNullFrame)
+        {
+            SerialWrite("[pe-load] /GS cookie va unmapped — skipping seed\n");
+            return true; // best-effort; keep loading.
+        }
+        auto* direct = static_cast<u8*>(mm::PhysToVirt(frame));
+        direct[va & 0xFFFULL] = u8((cookie >> (b * 8)) & 0xFF);
+    }
+    SerialWrite("[pe-load] step3c /GS cookie seeded va=");
+    SerialWriteHex(cookie_va);
+    SerialWrite("\n");
+    return true;
 }
 
 // Walk the base-relocation directory and apply each entry to
@@ -1605,6 +1705,11 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
         return r;
     }
     SerialWrite("[pe-load] step3 relocs applied\n");
+
+    // 3a. /GS cookie randomisation (T9-02 follow-on). Best-effort:
+    //     SeedSecurityCookie always returns true (silently skips on
+    //     no-load-config / pre-/GS layout / unmapped cookie VA).
+    (void)SeedSecurityCookie(file, file_len, h, as);
 
     // 3b. TLS callback gate. MSVC-built PEs frequently ship a
     //     .tls section with an EMPTY callback array — the CRT
