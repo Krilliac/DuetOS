@@ -562,7 +562,12 @@ extends. Next:
 5. **Auto-symlink resolution in `lookup_path`** with cycle detection.
 6. **Indirect extents** — files needing > 8 extents.
 7. **Multi-block dirs + B-tree directory index** — bump the 1024-child cap.
-8. **Auto-mkfs of a blank disk via shell command** — `mkfs.duetfs /disks/<dev>`.
+8. ~~**Auto-mkfs of a blank disk via shell command**~~ — `mkfs.duetfs <handle> ERASE`
+   landed alongside the existing FAT32 `mkfs`. Same admin / confirmation-token
+   contract; uses `MakeBlockHandleDevice` to wrap the kernel block-device
+   handle and calls `duetfs_mkfs` followed by a probe re-validate. The
+   formatted volume isn't auto-mounted at runtime — the boot probe path
+   only mounts pre-formatted volumes; runtime auto-mount is a follow-on.
 9. **AES-XTS encryption + Argon2 KDF** — full-disk encryption tier.
 10. **LZ4 compression** — optional per-file compression.
 

@@ -17,6 +17,8 @@
 #include "drivers/storage/block.h"
 #include "drivers/storage/nvme.h"
 #include "drivers/video/console.h"
+#include "fs/duetfs.h"
+#include "fs/duetfs/include/duetfs.h"
 #include "fs/fat32.h"
 #include "fs/gpt.h"
 #include "fs/mount.h"
@@ -250,6 +252,95 @@ void CmdMkfs(u32 argc, char** argv)
     else
     {
         ConsoleWriteln("mkfs: laid down BPB but re-probe rejected — please file a bug");
+    }
+}
+
+// `mkfs.duetfs <handle> ERASE` — destructive. Lays down a fresh
+// DuetFS image on the named block-device handle. Same admin /
+// confirmation-token contract as `mkfs` (FAT32). After the format
+// the volume is NOT auto-mounted — the existing duetfs probe path
+// runs at boot and only mounts pre-formatted volumes; mounting a
+// fresh image at runtime is a follow-on slice.
+void CmdMkfsDuetfs(u32 argc, char** argv)
+{
+    namespace storage = duetos::drivers::storage;
+    namespace duetfs = duetos::fs::duetfs;
+    if (!RequireAdmin("MKFS.DUETFS"))
+        return;
+    if (argc < 3 || argv == nullptr)
+    {
+        ConsoleWriteln("usage: mkfs.duetfs <handle-hex> ERASE");
+        ConsoleWriteln("  handle  block-device handle from `lsblk` (hex)");
+        ConsoleWriteln("  ERASE   literal token — destructive, lays a fresh DuetFS image");
+        return;
+    }
+    duetos::u64 handle_u64 = 0;
+    if (!ParseU64Str(argv[1], &handle_u64) || handle_u64 >= 0xFFFFu)
+    {
+        ConsoleWrite("mkfs.duetfs: bad handle '");
+        ConsoleWrite(argv[1]);
+        ConsoleWriteln("'");
+        return;
+    }
+    const duetos::u32 handle = static_cast<duetos::u32>(handle_u64);
+    bool ok_handle = false;
+    for (duetos::u32 i = 0; i < storage::BlockDeviceCount(); ++i)
+    {
+        if (i == handle)
+        {
+            ok_handle = true;
+            break;
+        }
+    }
+    if (!ok_handle)
+    {
+        ConsoleWriteln("mkfs.duetfs: handle out of range — see `lsblk`");
+        return;
+    }
+    const bool confirm = argv[2][0] == 'E' && argv[2][1] == 'R' && argv[2][2] == 'A' && argv[2][3] == 'S' &&
+                         argv[2][4] == 'E' && argv[2][5] == '\0';
+    if (!confirm)
+    {
+        ConsoleWriteln("mkfs.duetfs: confirmation token missing — pass literal ERASE");
+        return;
+    }
+    if (!storage::BlockDeviceIsWritable(handle))
+    {
+        ConsoleWrite("mkfs.duetfs: handle not writable: ");
+        ConsoleWriteln(storage::BlockDeviceName(handle));
+        return;
+    }
+    const duetfs::Device dev = duetfs::MakeBlockHandleDevice(handle);
+    if (dev.read == nullptr || dev.write == nullptr || dev.block_count == 0)
+    {
+        ConsoleWriteln("mkfs.duetfs: block-handle adapter rejected the handle (sector size or count)");
+        return;
+    }
+    if (dev.read_only != 0)
+    {
+        ConsoleWriteln("mkfs.duetfs: block-handle adapter reports read-only");
+        return;
+    }
+    ConsoleWrite("mkfs.duetfs: formatting ");
+    ConsoleWrite(storage::BlockDeviceName(handle));
+    ConsoleWrite(" (");
+    WriteHexCol(static_cast<duetos::u64>(dev.block_count), 0);
+    ConsoleWriteln(" 4 KiB blocks) as DuetFS...");
+    const duetos::u32 st = duetfs::duetfs_mkfs(&dev);
+    if (st != duetfs::kStatusOk)
+    {
+        ConsoleWrite("mkfs.duetfs: duetfs_mkfs returned status=");
+        WriteHexCol(static_cast<duetos::u64>(st), 0);
+        ConsoleWriteln("");
+        return;
+    }
+    if (duetfs::duetfs_probe(&dev) != 0)
+    {
+        ConsoleWriteln("mkfs.duetfs OK — superblock probe re-validates");
+    }
+    else
+    {
+        ConsoleWriteln("mkfs.duetfs: laid down image but probe rejected — please file a bug");
     }
 }
 
