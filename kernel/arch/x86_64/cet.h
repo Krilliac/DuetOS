@@ -51,4 +51,33 @@ void CetProbe();
 /// Read the cached status. Zero-initialised before `CetProbe`.
 const CetStatus& CetGet();
 
+/// Enable CET on the current CPU if `CetProbe` reported support and
+/// the global build flag has not opted out. Sets CR4.CET, primes
+/// IA32_S_CET and IA32_U_CET via `CetEnableMsrs`, and (when an SSP
+/// argument is non-zero) installs the kernel shadow-stack top via
+/// `CetSetPl0Ssp`. Idempotent. The status struct's `*_enabled`
+/// fields flip to true on success.
+///
+/// Pass `kernel_ssp_top = 0` to defer SSP installation to a later
+/// per-CPU bring-up step (the AP path does this — each AP allocates
+/// its own shadow stack and calls CetEnable with that SSP).
+void CetEnable(u64 kernel_ssp_top);
+
 } // namespace duetos::arch
+
+extern "C"
+{
+
+    /// Write IA32_S_CET / IA32_U_CET. Implemented in cet_asm.S.
+    void CetEnableMsrs(duetos::u64 s_cet, duetos::u64 u_cet);
+
+    /// Write IA32_PL0_SSP. Implemented in cet_asm.S.
+    void CetSetPl0Ssp(duetos::u64 ssp_top);
+
+    /// Read the current shadow-stack pointer (RDSSPQ). Implemented in cet_asm.S.
+    duetos::u64 CetGetSsp(void);
+
+    /// Alias of CetSetPl0Ssp used at task switch. Implemented in cet_asm.S.
+    void CetSwitchSsp(duetos::u64 new_ssp);
+
+} // extern "C"

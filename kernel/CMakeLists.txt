@@ -169,8 +169,11 @@ duetos_embed_blob(generated_usershell_elf.h
     EXTRA_DEPS
         "${CMAKE_SOURCE_DIR}/userland/libc/src/crt0.S"
         "${CMAKE_SOURCE_DIR}/userland/libc/src/syscall.c"
+        "${CMAKE_SOURCE_DIR}/userland/libc/src/string.S"
+        "${CMAKE_SOURCE_DIR}/userland/libc/src/setjmp.S"
         "${CMAKE_SOURCE_DIR}/userland/libc/include/duet/syscall.h"
         "${CMAKE_SOURCE_DIR}/userland/libc/include/string.h"
+        "${CMAKE_SOURCE_DIR}/userland/libc/include/setjmp.h"
         "${CMAKE_SOURCE_DIR}/userland/libc/include/unistd.h"
         "${CMAKE_SOURCE_DIR}/userland/libc/usershell.lds"
     COMMENT     "Compiling + embedding /bin/usershell.elf (real userland shell)")

@@ -58,6 +58,8 @@ CFLAGS=(
 
 "${CLANG}" "${CFLAGS[@]}" -c "${LIBC_SRC}/crt0.S"     -o "${WORK_DIR}/crt0.o"
 "${CLANG}" "${CFLAGS[@]}" -c "${LIBC_SRC}/syscall.c"  -o "${WORK_DIR}/syscall.o"
+"${CLANG}" "${CFLAGS[@]}" -c "${LIBC_SRC}/string.S"   -o "${WORK_DIR}/string.o"
+"${CLANG}" "${CFLAGS[@]}" -c "${LIBC_SRC}/setjmp.S"   -o "${WORK_DIR}/setjmp.o"
 "${CLANG}" "${CFLAGS[@]}" -c "${SHELL_SRC}"           -o "${WORK_DIR}/shell.o"
 
 # Link. Static, no dynamic loader, no default libs. Entry is
@@ -90,6 +92,8 @@ CFLAGS=(
     -o "${WORK_DIR}/usershell.elf" \
     "${WORK_DIR}/crt0.o" \
     "${WORK_DIR}/syscall.o" \
+    "${WORK_DIR}/string.o" \
+    "${WORK_DIR}/setjmp.o" \
     "${WORK_DIR}/shell.o"
 
 if [[ ! -s "${WORK_DIR}/usershell.elf" ]]; then

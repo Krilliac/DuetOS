@@ -60,41 +60,9 @@ void exit(int code)
     DUET_USER_TRAP_UNREACHABLE();
 }
 
-/* String helpers. Inline implementations — every userland binary
- * gets these for free without a separate libc archive. */
-
-size_t strlen(const char* s)
-{
-    size_t n = 0;
-    while (s[n])
-        ++n;
-    return n;
-}
-
-void* memset(void* dst, int c, size_t n)
-{
-    unsigned char* p = (unsigned char*)dst;
-    unsigned char v = (unsigned char)c;
-    for (size_t i = 0; i < n; ++i)
-        p[i] = v;
-    return dst;
-}
-
-void* memcpy(void* dst, const void* src, size_t n)
-{
-    unsigned char* d = (unsigned char*)dst;
-    const unsigned char* s = (const unsigned char*)src;
-    for (size_t i = 0; i < n; ++i)
-        d[i] = s[i];
-    return dst;
-}
-
-int strcmp(const char* a, const char* b)
-{
-    while (*a && *a == *b)
-    {
-        ++a;
-        ++b;
-    }
-    return (int)(unsigned char)*a - (int)(unsigned char)*b;
-}
+/* String helpers — implemented in userland/libc/src/string.S
+ * (memcpy, memmove, memset, strlen, strcmp). The asm versions use
+ * `rep movsb` / `rep stosb` which the silicon optimises into a
+ * single microcoded operation on Ivy Bridge and later (the ERMS
+ * feature), beating any C byte loop by ~4x on aligned bulk copies
+ * and matching it on small ones. */

@@ -68,12 +68,86 @@ void CetProbe()
     SerialWrite(g_cet.ss_supported ? "supported" : "absent");
     SerialWrite(" ibt=");
     SerialWrite(g_cet.ibt_supported ? "supported" : "absent");
-    SerialWrite(" (enable deferred to E1-followup)\n");
+    SerialWrite("\n");
 }
 
 const CetStatus& CetGet()
 {
     return g_cet;
+}
+
+namespace
+{
+
+constexpr u64 kCr4Cet = 1ull << 23;
+
+constexpr u64 kSCetShStkEn = 1ull << 0; // SH_STK_EN
+constexpr u64 kSCetWrShStk = 1ull << 1; // WR_SHSTK_EN
+constexpr u64 kSCetEndbrEn = 1ull << 2; // ENDBR_EN
+constexpr u64 kSCetNoTrack = 1ull << 4; // NO_TRACK_EN
+
+u64 ReadCr4()
+{
+    u64 v;
+    asm volatile("mov %%cr4, %0" : "=r"(v));
+    return v;
+}
+
+void WriteCr4(u64 v)
+{
+    asm volatile("mov %0, %%cr4" : : "r"(v));
+}
+
+} // namespace
+
+void CetEnable(u64 kernel_ssp_top)
+{
+    if (!g_done)
+    {
+        CetProbe();
+    }
+
+    /* No-op if neither CET-SS nor CET-IBT is in silicon. The probe
+     * has logged that fact; nothing else to do. */
+    if (!g_cet.ss_supported && !g_cet.ibt_supported)
+    {
+        return;
+    }
+
+    /* CR4.CET gates whether the CPU consults IA32_S_CET / IA32_U_CET
+     * at all. Set it before writing the MSRs so the writes take
+     * effect immediately. */
+    WriteCr4(ReadCr4() | kCr4Cet);
+
+    u64 s_cet = 0;
+    u64 u_cet = 0;
+
+    if (g_cet.ss_supported)
+    {
+        s_cet |= kSCetShStkEn | kSCetWrShStk;
+        u_cet |= kSCetShStkEn | kSCetWrShStk;
+    }
+    if (g_cet.ibt_supported)
+    {
+        s_cet |= kSCetEndbrEn | kSCetNoTrack;
+        u_cet |= kSCetEndbrEn | kSCetNoTrack;
+    }
+
+    CetEnableMsrs(s_cet, u_cet);
+
+    if (g_cet.ss_supported && kernel_ssp_top != 0)
+    {
+        CetSetPl0Ssp(kernel_ssp_top);
+    }
+
+    g_cet.ss_enabled = g_cet.ss_supported;
+    g_cet.ibt_enabled = g_cet.ibt_supported;
+
+    SerialWrite("[cpu] cet: enabled (ss=");
+    SerialWrite(g_cet.ss_enabled ? "y" : "n");
+    SerialWrite(" ibt=");
+    SerialWrite(g_cet.ibt_enabled ? "y" : "n");
+    SerialWrite(")\n");
 }
 
 } // namespace duetos::arch

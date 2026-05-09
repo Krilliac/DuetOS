@@ -56,6 +56,7 @@
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/cet.h"
 #include "arch/x86_64/cpu_info.h"
+#include "arch/x86_64/fpu.h"
 #include "arch/x86_64/cpu_mitigations.h"
 #include "arch/x86_64/hypervisor.h"
 #include "arch/x86_64/gdt.h"
@@ -1032,6 +1033,8 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::arch::CpuInfoProbe();
     duetos::arch::CpuMitigationsProbe();
     duetos::arch::CetProbe();
+    duetos::arch::FpuInit();
+    duetos::arch::AsmEntryAnchorReport();
 
     SerialWrite("[boot] Detecting hypervisor.\n");
     duetos::arch::HypervisorProbe();
