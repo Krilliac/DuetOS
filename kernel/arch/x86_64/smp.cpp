@@ -470,6 +470,7 @@ u64 SmpStartAps()
         ap_pcpu->runq_tail_normal = nullptr;
         ap_pcpu->runq_head_idle = nullptr;
         ap_pcpu->runq_tail_idle = nullptr;
+        ap_pcpu->runq_normal_len = 0;
         // TSS slot wired by AllocateApGdt below, before the AP runs.
         ap_pcpu->tss = nullptr;
 

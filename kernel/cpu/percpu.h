@@ -174,6 +174,20 @@ struct PerCpu
     u16 cluster_id;
     u8 _pad_topo[6];
 
+    // Length of this CPU's Normal-band runqueue (does NOT count the
+    // currently-running task). Maintained by the scheduler under
+    // `g_sched_lock` alongside the head/tail pointers; readable
+    // without the lock for placement decisions (a stale read just
+    // costs a slightly suboptimal routing — the next wake corrects).
+    // Exists so wake placement (`RunqueuePush`) can pick the least-
+    // loaded peer in the parent's cluster instead of always routing
+    // to `last_cpu`. Idle-band tasks are pinned per-CPU and never
+    // load-balanced, so they get no counter — counting them would
+    // bias placement toward CPUs whose only "load" is their own
+    // idle thread.
+    u32 runq_normal_len;
+    u8 _pad_runq_len[4];
+
     // Everything below this line will grow as SMP matures:
     //   - per-CPU runqueue spinlock (today: shared g_sched_lock)
     //   - per-CPU heap magazine (when the heap grows per-CPU caching)
