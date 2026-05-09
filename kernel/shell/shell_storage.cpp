@@ -334,14 +334,49 @@ void CmdMkfsDuetfs(u32 argc, char** argv)
         ConsoleWriteln("");
         return;
     }
-    if (duetfs::duetfs_probe(&dev) != 0)
-    {
-        ConsoleWriteln("mkfs.duetfs OK — superblock probe re-validates");
-    }
-    else
+    if (duetfs::duetfs_probe(&dev) == 0)
     {
         ConsoleWriteln("mkfs.duetfs: laid down image but probe rejected — please file a bug");
+        return;
     }
+    // Auto-mount the freshly formatted volume at the first free
+    // /disks/duetfsN slot (N in 0..15). The boot probe path uses
+    // the same mount-point template; this just makes the volume
+    // immediately usable after a runtime mkfs without forcing a
+    // reboot. If every slot is taken, report success without a
+    // mount and let the operator shuffle by hand.
+    for (duetos::u32 n = 0; n < 16; ++n)
+    {
+        char mp[24] = {};
+        const char prefix[] = "/disks/duetfs";
+        for (duetos::u32 i = 0; i < sizeof(prefix) - 1; ++i)
+        {
+            mp[i] = prefix[i];
+        }
+        if (n < 10)
+        {
+            mp[sizeof(prefix) - 1] = static_cast<char>('0' + n);
+        }
+        else
+        {
+            mp[sizeof(prefix) - 1] = '1';
+            mp[sizeof(prefix)] = static_cast<char>('0' + (n - 10));
+        }
+        if (duetos::fs::VfsMountFind(mp) != nullptr)
+        {
+            continue;
+        }
+        const auto mid = duetos::fs::VfsMount(mp, duetos::fs::FsType::DuetFs, handle);
+        if (mid == duetos::fs::kInvalidMountId)
+        {
+            ConsoleWriteln("mkfs.duetfs: format OK but VfsMount refused — verify mount table");
+            return;
+        }
+        ConsoleWrite("mkfs.duetfs OK — mounted at ");
+        ConsoleWriteln(mp);
+        return;
+    }
+    ConsoleWriteln("mkfs.duetfs OK — superblock probe re-validates (no free /disks/duetfsN slot for auto-mount)");
 }
 
 // `lastdump` — operator readout for the last-built minidump.
