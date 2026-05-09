@@ -357,6 +357,8 @@ WinDbg client API, `SymLoadModuleEx`.
   `SetWindowLongA/W`, `GetWindowLongPtrA/W`,
   `SetWindowLongPtrA/W` (USERDATA + STYLE round-trip),
   `GetWindowRect`, `GetClientRect`,
+  `AdjustWindowRect`, `AdjustWindowRectEx`,
+  `AdjustWindowRectExForDpi`,
   `GetWindowTextA/W`, `SetWindowTextA/W`,
   `ScreenToClient`, `ClientToScreen`,
   `InvalidateRect`, `ValidateRect`, `UpdateWindow`
@@ -508,7 +510,7 @@ every other call accepts. `IsThemeActive` returns TRUE.
 inventory above. `PathCanonicalizeW` is GAP for `..` walks
 above the drive root.
 
-### shell32.dll  (~410 LOC, ~13 exports)
+### shell32.dll  (~640 LOC, ~14 exports)
 
 `CommandLineToArgvW` — REAL. `SHGetFolderPathW` /
 `SHGetFolderPathA` / `SHGetSpecialFolderPathW` /
@@ -525,8 +527,13 @@ fall through to the profile root. `SHGetKnownFolderPath` is
 still STUB — it returns `E_FAIL` because the API allocates
 the path through `CoTaskMemAlloc`, which shell32 doesn't
 import; modern callers should fall back to
-`SHGetFolderPathW`. `ShellExecuteW`, `ShellExecuteExW`,
-`SHFileOperationW` — STUB.
+`SHGetFolderPathW`. `SHGetDesktopFolder` — GAP: returns a
+singleton IShellFolder COM object whose vtable methods all
+succeed with empty / sentinel results (zero-item enumeration,
+zero attributes, empty GetDisplayNameOf STRRET). Enough that
+callers see `S_OK` instead of `class-not-registered`; not
+enough to actually navigate the shell namespace.
+`ShellExecuteW`, `ShellExecuteExW`, `SHFileOperationW` — STUB.
 
 ### version.dll  (~290 LOC, ~16 exports)
 

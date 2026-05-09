@@ -6415,3 +6415,50 @@ doc helps future readers audit the trail.
 - **Revisit when:** shell COM objects or modal dialog work requires an
   actual IFileDialog method surface, or rpcrt4 lands.
 - **Related roadmap track(s):** T2-01 (landed), T2-02, T14-04 (landed).
+
+---
+
+## 2026-05-09 — Roadmap audit: lift confirmed-done win32 surface items
+
+- **Scope:** `wiki/reference/Roadmap.md`,
+  `userland/libs/user32/user32.c`,
+  `userland/libs/shell32/shell32.c`
+- **Commit:** this slice
+- **Decision:** Audit each Track 1 / Track 12 / Track 14 P0/P1 row and
+  the imported quick-wins table against the live tree; rows whose
+  acceptance criteria are demonstrably met by the current sources +
+  smoke corpus are removed from the roadmap in this commit. Removed:
+  T1-01 (per-window message queue + GetMessage/PeekMessage/
+  PostMessage/DispatchMessage), T1-02 (BeginPaint/EndPaint/TextOut/
+  InvalidateRect/UpdateWindow + the GDI draw path),
+  T12-01 (LoadLibrary{A,W} / LoadLibraryEx{A,W} / FreeLibrary /
+  GetProcAddress / GetModuleHandle / GetModuleFileName), T12-02
+  (Windows 10 19041 GetSystemInfo / GetVersionEx / RtlGetVersion /
+  IsWow64Process), T14-02 (covered by `windowed_hello` +
+  `msg_smoke` + `wndmsg_smoke` + `gdi_smoke`), and the entire
+  imported-quick-wins table (QW-01..QW-12, all twelve
+  verified). T1-04 keeps its row but loses the AdjustWindowRect
+  bullet — `AdjustWindowRect` / `AdjustWindowRectEx` /
+  `AdjustWindowRectExForDpi` now ship in user32 sourced from
+  `GetSystemMetrics`. T2-02 keeps its row (IFileDialog vtables
+  pending) but loses the SHGetDesktopFolder bullet — a singleton
+  IShellFolder lands in shell32 returning empty / sentinel results
+  through every vtable slot, so callers see `S_OK` instead of
+  `class-not-registered`. T1-05 keeps its row with a sharper
+  description (CreateCompatibleDC sentinel needs real bitmap-backing
+  storage).
+- **Why:** Roadmap entries that don't reflect tree state mislead
+  contributors picking the next slice. The CLAUDE.md policy
+  "**delete its entry from this page in the same commit that
+  delivers the code**" requires audit passes when several slices
+  land without the contemporaneous roadmap bump.
+- **Rules out / defers:** Removing a row is *not* a claim that the
+  surface is bug-free or feature-complete; it's a claim that the
+  named acceptance criterion is met. New gaps surface as new
+  roadmap rows or as `// STUB:` / `// GAP:` markers, not as
+  re-resurrected old rows.
+- **Revisit when:** the next batch audit (run
+  `git grep -nE "// (STUB|GAP):"` plus a pass over the smoke corpus
+  to spot newly-real callers) — typically every 5–10 win32 slices.
+- **Related roadmap track(s):** Track 1, Track 2, Track 12, Track
+  14, Imported Quick Wins.

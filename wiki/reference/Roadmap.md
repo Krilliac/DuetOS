@@ -546,19 +546,33 @@ extends. Next:
 
 ### Track 1 — Win32 windowing (message pump + GDI paint)
 
+> **T1-01** (per-window message queue + GetMessage/PeekMessage/PostMessage/
+> DispatchMessage) and **T1-02** (BeginPaint / EndPaint / TextOut /
+> InvalidateRect / UpdateWindow) landed and are exercised by
+> `windowed_hello` end-to-end + `msg_smoke` / `wndmsg_smoke` /
+> `gdi_smoke`. Syscalls 62/63/64 (`SYS_WIN_PEEK_MSG` /
+> `SYS_WIN_GET_MSG` / `SYS_WIN_POST_MSG`) carry messages;
+> `DispatchMessage` is pure-userland (calls the WNDPROC directly).
+
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
-| T1-01 | win32 | P0 | Implement real per-window message queues: per-HWND 256-entry `MSG` ring; `PostMessage` / `SendMessage` / `PostQuitMessage` enqueue; blocking `GetMessage`, non-blocking `PeekMessage`; `TranslateMessage`; `DispatchMessage`; compositor-generated `WM_PAINT`, `WM_DESTROY`, `WM_CLOSE`, `WM_SIZE`, `WM_ACTIVATE`, `WM_SETFOCUS`, `WM_KILLFOCUS`. Syscalls: `SYS_WIN_POSTMSG` (62), `SYS_WIN_GETMSG` (63), `SYS_WIN_PEEKMSG` (64), `SYS_WIN_DISPATCHMSG` (65). | A PE with `GetMessage` → `TranslateMessage` → `DispatchMessage` remains alive and processes paint/close messages correctly. |
-| T1-02 | win32 | P0 | Implement GDI paint APIs: `BeginPaint` / `EndPaint` via `SYS_WIN_BEGINPAINT` (66) / `SYS_WIN_ENDPAINT` (67); HDC wraps the target window framebuffer; `BitBlt`, `TextOut`, `DrawTextA/W`, `ExtTextOutA/W`, `Rectangle`, `FillRect`, `Ellipse`; DC text/background state; brushes/pens; `InvalidateRect` / `UpdateWindow`. | A PE handles `WM_PAINT`, calls `BeginPaint` / `TextOut` / `EndPaint`, and visible text appears in the client area. |
-| T1-03 | win32 | P1 | Route keyboard and mouse to the foreground/captured window: scan-code → VK → `WM_KEYDOWN` / `WM_KEYUP` / `WM_CHAR`; mouse hit-test and client-coordinate events; capture; focus and foreground APIs. | A PE `MessageBox` can be dismissed by mouse, and a text field receives keystrokes. |
-| T1-04 | win32 | P1 | Add window Z-order, move, resize, minimize, maximize, restore, close chrome, and accurate `GetClientRect` / `GetWindowRect` / `AdjustWindowRectEx`. | PE windows can be dragged, resized, minimized, maximized/restored, and closed via title-bar interactions. |
-| T1-05 | win32 | P1 | Add memory/off-screen DC support: `CreateCompatibleDC`, `CreateCompatibleBitmap`, bitmap `SelectObject`, `DeleteDC`, `DeleteObject`, `GetDC`, `ReleaseDC`. | A PE renders to a compatible memory DC and `BitBlt`s the result to a screen DC correctly. |
+| T1-03 | win32 | P1 | Route keyboard and mouse to the foreground/captured window: scan-code → VK → `WM_KEYDOWN` / `WM_KEYUP` / `WM_CHAR`; mouse hit-test and client-coordinate events; capture; focus and foreground APIs. (Mouse-wheel routing landed; key/button routing pending.) | A PE `MessageBox` can be dismissed by mouse, and a text field receives keystrokes. |
+| T1-04 | win32 | P1 | Add window Z-order, move, resize, minimize, maximize, restore, close chrome. (`GetClientRect`, `GetWindowRect`, `AdjustWindowRect` / `AdjustWindowRectEx` / `AdjustWindowRectExForDpi` landed; chrome interactions still pending.) | PE windows can be dragged, resized, minimized, maximized/restored, and closed via title-bar interactions. |
+| T1-05 | win32 | P1 | Add memory/off-screen DC support: `CreateCompatibleDC`, `CreateCompatibleBitmap`, bitmap `SelectObject`, `DeleteDC`, `DeleteObject`, `GetDC`, `ReleaseDC`. (Stubs ship today — `CreateCompatibleDC` returns an unbacked sentinel; the gap is real bitmap backing storage so `BitBlt` between DCs preserves pixels.) | A PE renders to a compatible memory DC and `BitBlt`s the result to a screen DC correctly. |
 
 ### Track 2 — COM infrastructure
 
+> Path helpers (`SHGetSpecialFolderPath{A,W}`, `SHGetFolderPath{A,W}`)
+> have shipped since the earlier slice; `SHGetDesktopFolder` now
+> returns a singleton IShellFolder whose vtable methods succeed with
+> empty / sentinel results (zero-item enumeration, `Desktop`
+> display name) — enough that callers see `S_OK` instead of
+> `class-not-registered`. The remaining gap is the IFileDialog vtable
+> on the FileOpenDialog / FileSaveDialog factory registrations.
+
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
-| T2-02 | win32 | P2 | Add shell COM objects and path helpers: `SHGetDesktopFolder`, `SHGetSpecialFolderPath`, `SHGetFolderPath`, and functional `IFileDialog` methods on the existing FileOpenDialog / FileSaveDialog registrations. | Shell-folder/file-dialog callers receive valid stubs or a simple native picker instead of class-unavailable failures. |
+| T2-02 | win32 | P2 | Wire functional `IFileDialog` methods on the existing FileOpenDialog / FileSaveDialog factory registrations (today they expose only IUnknown via `simple_unknown_qi`). | Shell-folder/file-dialog callers receive valid stubs or a simple native picker instead of class-unavailable failures. |
 
 ### Track 3 — Networking
 
@@ -641,10 +655,14 @@ extends. Next:
 
 ### Track 12 — Userland infrastructure
 
+> **T12-01** (LoadLibrary / GetProcAddress / FreeLibrary /
+> GetModuleHandle / GetModuleFileName) and **T12-02** (Windows 10
+> 19041 system + version info via GetSystemInfo /
+> GetNativeSystemInfo / GetVersionEx{A,W} / RtlGetVersion /
+> IsWow64Process=FALSE) landed.
+
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
-| T12-01 | win32 | P1 | Implement runtime DLL loading: `LoadLibraryA/W`, `GetProcAddress` including ordinals, `FreeLibrary`, `GetModuleHandleA/W`, `GetModuleFileNameA/W`, refcounts, and DllMain attach/detach. | A PE can runtime-load `user32.dll` and resolve `MessageBoxA`. |
-| T12-02 | win32 | P1 | Return plausible Windows 10 system/version info through `GetSystemInfo`, `GetNativeSystemInfo`, `GetVersionExA/W`, `RtlGetVersion`, and `IsWow64Process=FALSE`. | Version-gated apps see Windows 10 2004/AMD64-compatible data. |
 | T12-03 | win32 | P2 | Implement `winmm` waveOut APIs over HDA/audio mixer: open, prepare/write/unprepare, close, and capabilities. | A PE can play 44.1/48 kHz 16-bit stereo through `waveOut*`. |
 | T12-04 | win32 | P2 | Audit and complete C11 stdio in `msvcrt` / `ucrtbase`, prioritizing `sscanf`, `fprintf`, `setvbuf`, `fflush`, and `tmpfile`. | CRT stdio smoke tests cover the newly real functions. |
 
@@ -658,31 +676,26 @@ extends. Next:
 
 ### Track 14 — Testing
 
+> **T14-02** (win32 pump test) is covered today by `windowed_hello`
+> (CreateWindowExA → ShowWindow → message pump → InvalidateRect →
+> WM_PAINT round-trip → SetTimer / WM_TIMER → SendMessage →
+> KillTimer) plus `msg_smoke`, `wndmsg_smoke`, and `gdi_smoke`. A
+> dedicated single-binary `win32_pump_test` would be a thin
+> consolidation of those probes — book that under T14-01 if a
+> regression-stress fixture is needed.
+
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
 | T14-01 | test | P1 | Add PE stress fixture covering threads, mutexes, events, file I/O, registry, heap, and printf for 30 seconds. | The stress PE exits 0 and joins the smoke corpus. |
-| T14-02 | test | P1 | Add `win32_pump_test` once T1-01/T1-02 land: creates a window, pumps messages, paints on `WM_PAINT`, handles `WM_CLOSE`. | The test validates the message-pump + GDI-paint path and exits 0. |
 | T14-03 | test | P2 | Add network loopback test once T3-01 lands: listener + connector exchange 1 MiB and verify CRC32. | The loopback test exits 0 after integrity verification. |
 
 ### Imported quick wins
 
-Most quick wins from the handoff already appear as real implementations in
-`Win32-Surface-Status`; keep this table only for regression-sensitive tracking
-or any item that is discovered to be incomplete during audit.
-
-| ID | Scope | Task | Acceptance |
-| --- | --- | --- | --- |
-| QW-01 | win32 | `GetComputerNameA/W` returns `DUETOS`. | Process smoke reports the expected computer name. |
-| QW-02 | win32 | `GetUserNameA/W` returns `user` or the logged-in username. | Token/process smoke reports a stable username. |
-| QW-03 | win32 | `GetTempPathA/W` returns `C:\\Temp\\` and ramfs has a temp directory. | Drive smoke can create temp paths/files. |
-| QW-04 | win32 | Windows/system directory APIs return `C:\\Windows` and `C:\\Windows\\System32`. | Process smoke reports both paths. |
-| QW-06 | win32 | `OutputDebugStringA/W` writes to the kernel serial/debug log. | Syscall stress emits debug strings without no-op loss. |
-| QW-07 | win32 | `IsDebuggerPresent` returns `FALSE`. | Anti-debug branch smoke sees non-debugger state. |
-| QW-08 | win32 | `GetProcessId(GetCurrentProcess())` matches `GetCurrentProcessId()`. | Process smoke validates both APIs. |
-| QW-09 | win32 | `MultiByteToWideChar` / `WideCharToMultiByte` support UTF-8, ACP-as-UTF-8, and OEMCP. | String/UTF-16 smoke round-trips supported code pages. |
-| QW-10 | win32 | `lstrcmp{,i}A/W`, `lstrlenA/W`, `lstrcpyA/W`, `lstrcatA/W` are thin string helpers. | String smoke validates compare/copy/concat/length. |
-| QW-11 | kernel | Flush `DUETOS_KLOG_DEFAULT` ring contents to serial on panic. | Panic logs preserve recent ring entries before halt/reset. |
-| QW-12 | build | Generate `compile_commands.json` from all presets. | Every configured preset build tree contains a compilation database. |
+All twelve imported quick wins (QW-01..QW-12) shipped — see
+[`Win32-Surface-Status`](Win32-Surface-Status.md) for the per-DLL
+inventory and [`Design-Decisions`](Design-Decisions.md) for the
+landing notes. The table is removed; future regressions surface
+through the per-DLL smoke tests in `userland/apps/*_smoke/`.
 
 ---
 

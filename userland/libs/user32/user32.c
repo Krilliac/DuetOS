@@ -880,6 +880,138 @@ __declspec(dllexport) BOOL GetWindowRect(HANDLE h, void* r)
     return user32_getrect_core(h, 0, r);
 }
 
+/* AdjustWindowRect / AdjustWindowRectEx — given a desired CLIENT
+ * rect and a style mask, expand the rect so it becomes the WINDOW
+ * rect (the bounds CreateWindow expects). Pure userland math
+ * sourced from GetSystemMetrics so frame / caption insets stay
+ * in sync with whatever the kernel composes (see DoWinGetMetric
+ * in `kernel/subsystems/win32/window_syscall.cpp`). */
+__declspec(dllexport) int GetSystemMetrics(int index);
+#define WS_BORDER 0x00800000u
+#define WS_DLGFRAME 0x00400000u
+#define WS_THICKFRAME 0x00040000u
+#define WS_CAPTION (WS_BORDER | WS_DLGFRAME)
+#define WS_VSCROLL 0x00200000u
+#define WS_HSCROLL 0x00100000u
+#define WS_EX_CLIENTEDGE 0x00000200u
+#define WS_EX_STATICEDGE 0x00020000u
+#define WS_EX_DLGMODALFRAME 0x00000001u
+
+/* GetSystemMetrics indices we read for frame math. */
+#define SM_CXBORDER 5
+#define SM_CYBORDER 6
+#define SM_CYCAPTION 4
+#define SM_CXFRAME 32
+#define SM_CYFRAME 33
+#define SM_CXVSCROLL 2
+#define SM_CYHSCROLL 3
+#define SM_CYMENU 15
+#define SM_CXEDGE 45
+#define SM_CYEDGE 46
+
+__declspec(dllexport) BOOL AdjustWindowRectEx(void* lpRect, DWORD dwStyle, BOOL bMenu, DWORD dwExStyle)
+{
+    if (!lpRect)
+        return 0;
+    int* r = (int*)lpRect;
+    int border_x = GetSystemMetrics(SM_CXBORDER);
+    int border_y = GetSystemMetrics(SM_CYBORDER);
+    if (border_x <= 0)
+        border_x = 1;
+    if (border_y <= 0)
+        border_y = 1;
+    int left_in = border_x;
+    int top_in = border_y;
+    int right_in = border_x;
+    int bot_in = border_y;
+    if ((dwStyle & WS_THICKFRAME) != 0)
+    {
+        int fx = GetSystemMetrics(SM_CXFRAME);
+        int fy = GetSystemMetrics(SM_CYFRAME);
+        if (fx <= 0)
+            fx = 2;
+        if (fy <= 0)
+            fy = 2;
+        left_in += fx;
+        right_in += fx;
+        top_in += fy;
+        bot_in += fy;
+    }
+    else if ((dwStyle & WS_DLGFRAME) != 0)
+    {
+        left_in += border_x;
+        right_in += border_x;
+        top_in += border_y;
+        bot_in += border_y;
+    }
+    if ((dwStyle & WS_CAPTION) == WS_CAPTION)
+    {
+        int cap = GetSystemMetrics(SM_CYCAPTION);
+        if (cap <= 0)
+            cap = 22;
+        top_in += cap;
+    }
+    if (bMenu)
+    {
+        int menu = GetSystemMetrics(SM_CYMENU);
+        if (menu <= 0)
+            menu = 19;
+        top_in += menu;
+    }
+    if ((dwStyle & WS_VSCROLL) != 0)
+    {
+        int sb = GetSystemMetrics(SM_CXVSCROLL);
+        if (sb <= 0)
+            sb = 16;
+        right_in += sb;
+    }
+    if ((dwStyle & WS_HSCROLL) != 0)
+    {
+        int sb = GetSystemMetrics(SM_CYHSCROLL);
+        if (sb <= 0)
+            sb = 16;
+        bot_in += sb;
+    }
+    if ((dwExStyle & WS_EX_CLIENTEDGE) != 0 || (dwExStyle & WS_EX_STATICEDGE) != 0)
+    {
+        int ex = GetSystemMetrics(SM_CXEDGE);
+        int ey = GetSystemMetrics(SM_CYEDGE);
+        if (ex <= 0)
+            ex = 2;
+        if (ey <= 0)
+            ey = 2;
+        left_in += ex;
+        right_in += ex;
+        top_in += ey;
+        bot_in += ey;
+    }
+    if ((dwExStyle & WS_EX_DLGMODALFRAME) != 0)
+    {
+        left_in += border_x + 2;
+        right_in += border_x + 2;
+        top_in += border_y + 2;
+        bot_in += border_y + 2;
+    }
+    r[0] -= left_in;
+    r[1] -= top_in;
+    r[2] += right_in;
+    r[3] += bot_in;
+    return 1;
+}
+
+__declspec(dllexport) BOOL AdjustWindowRect(void* lpRect, DWORD dwStyle, BOOL bMenu)
+{
+    return AdjustWindowRectEx(lpRect, dwStyle, bMenu, 0);
+}
+
+/* Win10+ DPI-aware variant; we don't track per-window DPI yet so
+ * dpi is ignored and behaviour matches the non-DPI form. */
+__declspec(dllexport) BOOL AdjustWindowRectExForDpi(void* lpRect, DWORD dwStyle, BOOL bMenu, DWORD dwExStyle, UINT dpi)
+{
+    (void)dpi;
+    return AdjustWindowRectEx(lpRect, dwStyle, bMenu, dwExStyle);
+}
+
 __declspec(dllexport) BOOL SetWindowTextA(HANDLE h, const char* text)
 {
     long long rv;

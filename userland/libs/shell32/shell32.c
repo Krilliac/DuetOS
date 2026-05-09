@@ -311,6 +311,237 @@ __declspec(dllexport) BOOL SHGetSpecialFolderPathA(HANDLE hWnd, char* path, int 
     return 1;
 }
 
+/* SHGetDesktopFolder — return a minimal IShellFolder COM object.
+ *
+ * The "desktop folder" in Win32 is the root of the shell namespace
+ * (everything reachable through the shell starts here). Real Windows
+ * returns an IShellFolder whose ParseDisplayName / EnumObjects /
+ * BindToObject methods walk the namespace.
+ *
+ * v0 returns a singleton object whose vtable methods all succeed
+ * with empty / sentinel results: enumeration yields zero items,
+ * parse fails cleanly, GetDisplayNameOf yields "Desktop". This is
+ * enough for callers that probe for the desktop folder and then
+ * graceful-fallback when the namespace is empty (most file-pickers,
+ * Win32 PE shell utilities). The class isn't `class-not-registered`
+ * any more — that's the v0 win this slice books.
+ */
+typedef struct IShellFolderVtbl IShellFolderVtbl;
+typedef struct IShellFolderObj
+{
+    const IShellFolderVtbl* lpVtbl;
+    unsigned long refs;
+} IShellFolderObj;
+
+struct IShellFolderVtbl
+{
+    /* IUnknown */
+    HRESULT(__stdcall* QueryInterface)(IShellFolderObj*, const void*, void**);
+    unsigned long(__stdcall* AddRef)(IShellFolderObj*);
+    unsigned long(__stdcall* Release)(IShellFolderObj*);
+    /* IShellFolder */
+    HRESULT(__stdcall* ParseDisplayName)
+    (IShellFolderObj*, HANDLE, void*, wchar_t16*, unsigned long*, void**, unsigned long*);
+    HRESULT(__stdcall* EnumObjects)(IShellFolderObj*, HANDLE, unsigned long, void**);
+    HRESULT(__stdcall* BindToObject)(IShellFolderObj*, const void*, void*, const void*, void**);
+    HRESULT(__stdcall* BindToStorage)(IShellFolderObj*, const void*, void*, const void*, void**);
+    HRESULT(__stdcall* CompareIDs)(IShellFolderObj*, long long, const void*, const void*);
+    HRESULT(__stdcall* CreateViewObject)(IShellFolderObj*, HANDLE, const void*, void**);
+    HRESULT(__stdcall* GetAttributesOf)(IShellFolderObj*, unsigned int, const void**, unsigned long*);
+    HRESULT(__stdcall* GetUIObjectOf)
+    (IShellFolderObj*, HANDLE, unsigned int, const void**, const void*, unsigned int*, void**);
+    HRESULT(__stdcall* GetDisplayNameOf)(IShellFolderObj*, const void*, unsigned long, void*);
+    HRESULT(__stdcall* SetNameOf)(IShellFolderObj*, HANDLE, const void*, const wchar_t16*, unsigned long, void**);
+};
+
+static HRESULT __stdcall sh_desktop_qi(IShellFolderObj* self, const void* riid, void** ppv)
+{
+    (void)riid;
+    if (!ppv)
+        return E_FAIL;
+    /* Return self for any requested interface — shell32 v0 is one
+     * shape. Real Windows would inspect riid and return E_NOINTERFACE
+     * for unrelated interfaces; we accept everything because callers
+     * that QI for IUnknown / IShellFolder / IPersist / IPersistFolder
+     * all walk the same vtable here. */
+    *ppv = self;
+    if (self)
+        ++self->refs;
+    return S_OK;
+}
+
+static unsigned long __stdcall sh_desktop_addref(IShellFolderObj* self)
+{
+    if (!self)
+        return 0;
+    return ++self->refs;
+}
+
+static unsigned long __stdcall sh_desktop_release(IShellFolderObj* self)
+{
+    if (!self)
+        return 0;
+    /* Singleton — never falls below 1, never freed. */
+    if (self->refs > 1)
+        --self->refs;
+    return self->refs;
+}
+
+static HRESULT __stdcall sh_desktop_parse_display_name(IShellFolderObj* self, HANDLE hwnd, void* bind, wchar_t16* name,
+                                                       unsigned long* eaten, void** pidl, unsigned long* attrs)
+{
+    (void)self;
+    (void)hwnd;
+    (void)bind;
+    (void)name;
+    if (eaten)
+        *eaten = 0;
+    if (pidl)
+        *pidl = (void*)0;
+    if (attrs)
+        *attrs = 0;
+    return E_FAIL; /* no namespace → can't parse */
+}
+
+static HRESULT __stdcall sh_desktop_enum_objects(IShellFolderObj* self, HANDLE hwnd, unsigned long flags, void** ppenum)
+{
+    (void)self;
+    (void)hwnd;
+    (void)flags;
+    if (ppenum)
+        *ppenum = (void*)0;
+    return S_OK; /* zero-item enumeration → caller's loop ends immediately */
+}
+
+static HRESULT __stdcall sh_desktop_bind_to_object(IShellFolderObj* self, const void* pidl, void* bind,
+                                                   const void* riid, void** out)
+{
+    (void)self;
+    (void)pidl;
+    (void)bind;
+    (void)riid;
+    if (out)
+        *out = (void*)0;
+    return E_FAIL;
+}
+
+static HRESULT __stdcall sh_desktop_bind_to_storage(IShellFolderObj* self, const void* pidl, void* bind,
+                                                    const void* riid, void** out)
+{
+    (void)self;
+    (void)pidl;
+    (void)bind;
+    (void)riid;
+    if (out)
+        *out = (void*)0;
+    return E_FAIL;
+}
+
+static HRESULT __stdcall sh_desktop_compare_ids(IShellFolderObj* self, long long lparam, const void* a, const void* b)
+{
+    (void)self;
+    (void)lparam;
+    (void)a;
+    (void)b;
+    return 0; /* "equal" — nothing distinguishes empty PIDLs */
+}
+
+static HRESULT __stdcall sh_desktop_create_view_object(IShellFolderObj* self, HANDLE owner, const void* riid,
+                                                       void** out)
+{
+    (void)self;
+    (void)owner;
+    (void)riid;
+    if (out)
+        *out = (void*)0;
+    return E_FAIL;
+}
+
+static HRESULT __stdcall sh_desktop_get_attributes_of(IShellFolderObj* self, unsigned int n, const void** pidls,
+                                                      unsigned long* attrs)
+{
+    (void)self;
+    (void)n;
+    (void)pidls;
+    if (attrs)
+        *attrs = 0;
+    return S_OK;
+}
+
+static HRESULT __stdcall sh_desktop_get_ui_object_of(IShellFolderObj* self, HANDLE hwnd, unsigned int n,
+                                                     const void** pidls, const void* riid, unsigned int* reserved,
+                                                     void** out)
+{
+    (void)self;
+    (void)hwnd;
+    (void)n;
+    (void)pidls;
+    (void)riid;
+    (void)reserved;
+    if (out)
+        *out = (void*)0;
+    return E_FAIL;
+}
+
+static HRESULT __stdcall sh_desktop_get_display_name_of(IShellFolderObj* self, const void* pidl, unsigned long flags,
+                                                        void* str)
+{
+    (void)self;
+    (void)pidl;
+    (void)flags;
+    /* Win32 STRRET uses a 264-byte struct — we don't depend on
+     * which form (cStr / pOleStr / uOffset) the caller probed; clear
+     * the discriminator and the buffer so a downstream scan stops at
+     * NUL whichever form it picks. */
+    if (str)
+    {
+        unsigned char* p = (unsigned char*)str;
+        for (int i = 0; i < 264; ++i)
+            p[i] = 0;
+    }
+    return S_OK;
+}
+
+static HRESULT __stdcall sh_desktop_set_name_of(IShellFolderObj* self, HANDLE hwnd, const void* pidl,
+                                                const wchar_t16* name, unsigned long flags, void** out)
+{
+    (void)self;
+    (void)hwnd;
+    (void)pidl;
+    (void)name;
+    (void)flags;
+    if (out)
+        *out = (void*)0;
+    return E_FAIL;
+}
+
+static const IShellFolderVtbl g_desktop_folder_vtbl = {
+    sh_desktop_qi,
+    sh_desktop_addref,
+    sh_desktop_release,
+    sh_desktop_parse_display_name,
+    sh_desktop_enum_objects,
+    sh_desktop_bind_to_object,
+    sh_desktop_bind_to_storage,
+    sh_desktop_compare_ids,
+    sh_desktop_create_view_object,
+    sh_desktop_get_attributes_of,
+    sh_desktop_get_ui_object_of,
+    sh_desktop_get_display_name_of,
+    sh_desktop_set_name_of,
+};
+
+static IShellFolderObj g_desktop_folder = {&g_desktop_folder_vtbl, 1};
+
+__declspec(dllexport) HRESULT SHGetDesktopFolder(void** ppshf)
+{
+    if (!ppshf)
+        return E_FAIL;
+    ++g_desktop_folder.refs;
+    *ppshf = &g_desktop_folder;
+    return S_OK;
+}
+
 __declspec(dllexport) HANDLE ShellExecuteW(HANDLE hWnd, const wchar_t16* verb, const wchar_t16* file,
                                            const wchar_t16* params, const wchar_t16* dir, int nShow)
 {
