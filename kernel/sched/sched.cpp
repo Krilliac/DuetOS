@@ -2749,6 +2749,19 @@ namespace
 {
     for (;;)
     {
+        // Drain any RCU callbacks queued on THIS CPU before
+        // halting. The grace contract guarantees no reader is
+        // mid-walk over the freed objects, and the idle task is
+        // by definition not in any RCU read-side critical
+        // section. Cost: one uncontended per-CPU SpinLock acquire
+        // and a count==0 check when the queue is empty.
+        //
+        // If callbacks DO fire, they consume time on this CPU
+        // that would otherwise be spent halted — turning idle
+        // cycles into useful reclamation work. Each AP runs its
+        // own copy of this loop, so reclamation parallelises
+        // across the box at zero scheduling cost.
+        sync::RcuReclaimLocal();
         arch::Sti();
         asm volatile("hlt");
     }
