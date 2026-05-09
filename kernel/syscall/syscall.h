@@ -31,6 +31,31 @@
 namespace duetos::core
 {
 
+// Native performance snapshot ABI used by psapi!GetPerformanceInfo
+// and kernel32!K32GetPerformanceInfo. Field order mirrors Win32's
+// PERFORMANCE_INFORMATION on x64: cb (u32), then SIZE_T counters,
+// then DWORD counts. Memory counters are page counts except PageSize.
+struct SystemPerformanceInfo
+{
+    u32 cb;
+    u32 _pad0;
+    u64 CommitTotal;
+    u64 CommitLimit;
+    u64 CommitPeak;
+    u64 PhysicalTotal;
+    u64 PhysicalAvailable;
+    u64 SystemCache;
+    u64 KernelTotal;
+    u64 KernelPaged;
+    u64 KernelNonpaged;
+    u64 PageSize;
+    u32 HandleCount;
+    u32 ProcessCount;
+    u32 ThreadCount;
+    u32 _pad1;
+};
+static_assert(sizeof(SystemPerformanceInfo) == 104, "x64 PERFORMANCE_INFORMATION-compatible size");
+
 enum SyscallNumber : u64
 {
     SYS_EXIT = 0,
@@ -1740,6 +1765,13 @@ enum SyscallNumber : u64
     SYS_FILE_SYMLINK = 181,
     SYS_FILE_LINK = 182,
     SYS_FILE_READLINK = 183,
+
+    // SYS_SYSTEM_PERFORMANCE_INFO — fills SystemPerformanceInfo
+    // with kernel-owned scheduler + frame-allocator counters.
+    //   rdi = user SystemPerformanceInfo*
+    //   rsi = byte capacity, must be >= sizeof(SystemPerformanceInfo)
+    // Returns 0 on success, -1 on bad pointer / short buffer.
+    SYS_SYSTEM_PERFORMANCE_INFO = 184,
 };
 
 /// Cursor-shape values the PE side hands the kernel via

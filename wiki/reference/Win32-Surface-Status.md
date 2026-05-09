@@ -557,14 +557,19 @@ canned values for username / domain / station). The rest STUB.
 ### psapi.dll  (~440 LOC, ~50 exports)
 
 > **Status:** process / module enumeration REAL — backed by
-> the kernel's process table. Working set / performance
-> queries STUB.
+> the kernel's process table. Performance information is backed
+> by scheduler + frame-allocator counters. Working-set mutation/delta
+> queries are success-no-op facades.
 
 `EnumProcesses`, `EnumProcessModules`, `GetModuleBaseNameW`,
 `GetModuleFileNameExW`, `GetProcessImageFileNameW`,
 `GetProcessMemoryInfo`, `QueryFullProcessImageNameW` — REAL.
-`QueryWorkingSet`, `EmptyWorkingSet`, `GetWsChanges`,
-`GetPerformanceInfo` — STUB.
+`GetPerformanceInfo` — GAP (frame totals/free/peak plus process
++ thread counts are kernel-backed; cache, kernel-pool subtotal, and
+global handle totals remain zero until those ledgers exist).
+`QueryWorkingSet`, `EmptyWorkingSet`, `GetWsChanges` — GAP
+(success with an empty/no-op working-set view until the kernel
+exports per-process residency telemetry).
 
 ---
 

@@ -762,6 +762,46 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_PERF_COUNTER:
         DoPerfCounter(frame);
         return;
+    case SYS_SYSTEM_PERFORMANCE_INFO:
+    {
+        if (frame->rdi == 0 || frame->rsi < sizeof(SystemPerformanceInfo))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+
+        const u64 total_frames = mm::TotalFrames();
+        const u64 free_frames = mm::FreeFramesCount();
+        const u64 used_frames = (total_frames >= free_frames) ? (total_frames - free_frames) : 0;
+        const auto sched_stats = sched::SchedStatsRead();
+
+        SystemPerformanceInfo info{};
+        info.cb = static_cast<u32>(sizeof(SystemPerformanceInfo));
+        info.CommitTotal = used_frames;
+        info.CommitLimit = total_frames;
+        info.CommitPeak = mm::PeakUsedFrames();
+        info.PhysicalTotal = total_frames;
+        info.PhysicalAvailable = free_frames;
+        // These Windows fields require ledgers DuetOS does not keep yet
+        // (cache residency, paged/nonpaged pool, global handle total).
+        // Leave them zero rather than publishing fabricated values.
+        info.SystemCache = 0;
+        info.KernelTotal = 0;
+        info.KernelPaged = 0;
+        info.KernelNonpaged = 0;
+        info.PageSize = mm::kPageSize;
+        info.HandleCount = 0;
+        info.ProcessCount = static_cast<u32>(ProcessLiveCount());
+        info.ThreadCount = static_cast<u32>(sched_stats.tasks_live);
+
+        if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rdi), &info, sizeof(info)))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        frame->rax = 0;
+        return;
+    }
     case SYS_NOW_NS:
         DoNowNs(frame);
         return;

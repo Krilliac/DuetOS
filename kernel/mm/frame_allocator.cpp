@@ -72,6 +72,7 @@ constinit u64 g_bitmap_bytes = 0;
 constinit u64 g_next_hint = 0; // search hint for AllocateFrame
 constinit u64 g_free_count = 0;
 constinit u64 g_total_frames = 0;
+constinit u64 g_peak_used_frames = 0;
 
 // NUMA bias state. Built from SRAT memory-affinity records during
 // FrameAllocatorInit (or, if SRAT was parsed AFTER init, lazily on
@@ -119,6 +120,11 @@ inline void BitmapMarkUsed(u64 frame)
     {
         byte = static_cast<u8>(byte | mask);
         --g_free_count;
+        const u64 used = g_total_frames - g_free_count;
+        if (used > g_peak_used_frames)
+        {
+            g_peak_used_frames = used;
+        }
     }
 }
 
@@ -397,6 +403,7 @@ void FrameAllocatorInit(uptr multiboot_info_phys)
     // "no memory" sentinel. Defense in depth over the 1 MiB reserve above.
     BitmapMarkUsed(0);
 
+    g_peak_used_frames = g_total_frames - g_free_count;
     g_next_hint = 0;
 }
 
@@ -1076,6 +1083,11 @@ u64 TotalFrames()
 u64 FreeFramesCount()
 {
     return g_free_count;
+}
+
+u64 PeakUsedFrames()
+{
+    return g_peak_used_frames;
 }
 
 void FrameAllocatorSetFailAfter(u64 n_remaining)

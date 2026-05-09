@@ -512,6 +512,11 @@ void RecordSandboxDenial(Cap cap)
     }
 }
 
+u64 ProcessLiveCount()
+{
+    return g_live_processes;
+}
+
 bool ShouldLogDenial(u64 denial_index)
 {
     // Rate-limit per-process denial log output. Always log the

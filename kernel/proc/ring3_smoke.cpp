@@ -113,7 +113,6 @@
 #include "generated_module_smoke_pe.h"
 #include "generated_paths_smoke_pe.h"
 #include "generated_process_smoke_pe.h"
-#include "generated_psapi_smoke_pe.h"
 #include "generated_registry_smoke_pe.h"
 #include "generated_rng_smoke_pe.h"
 #include "generated_string_smoke_pe.h"
@@ -3032,8 +3031,6 @@ void StartRing3SmokeTask()
             SpawnPeFile("ring3-version-smoke", fs::generated::kBinVersionSmokeBytes,
                         fs::generated::kBinVersionSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
                         mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-psapi-smoke", fs::generated::kBinPsapiSmokeBytes, fs::generated::kBinPsapiSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
             SpawnPeFile("ring3-com-smoke", fs::generated::kBinComSmokeBytes, fs::generated::kBinComSmokeBytes_len,
                         CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
             SpawnPeFile("ring3-dbghelp-smoke", fs::generated::kBinDbghelpSmokeBytes,
