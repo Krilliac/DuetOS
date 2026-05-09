@@ -166,6 +166,14 @@ struct Task
     u64 ticks_run;
     u64 schedin_tick;
 
+    // Win32 LastError slot. Windows stores this in the TEB at
+    // offset 0x68 and every thread gets an independent value. We
+    // don't expose a full writable TEB yet, so the scheduler-owned
+    // Task is the narrowest kernel-owned per-thread home. Syscalls
+    // SYS_GETLASTERROR / SYS_SETLASTERROR read/write this field.
+    u32 win32_last_error;
+    u32 _pad_win32_last_error;
+
     // Linux-ABI FS.base (MSR_FS_BASE). Meaningful only for tasks
     // whose process has abi_flavor == kAbiLinux — that's where
     // musl plants its TLS anchor via arch_prctl(ARCH_SET_FS).
@@ -861,6 +869,7 @@ void SchedInit()
     boot_task->kill_requested = false;               // kernel tasks never hit a budget
     boot_task->kill_reason = KillReason::TickBudget; // unused when kill_requested=false
     boot_task->suspend_count = 0;                    // boot/kernel tasks never get suspended
+    boot_task->win32_last_error = 0;                 // ERROR_SUCCESS, per-thread Win32 slot
     boot_task->last_cpu = cpu::CurrentCpu()->cpu_id; // BSP pin — boot task only ever runs here
 
     Current() = boot_task;
@@ -946,6 +955,7 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     t->kill_reason = KillReason::TickBudget;
     t->ticks_run = 0;
     t->schedin_tick = 0;
+    t->win32_last_error = 0; // ERROR_SUCCESS, per-thread Win32 slot
     t->fs_base = 0;
     t->irq_depth = 0;
     // No breakpoints on a fresh task. DR7 = 0 disables every slot
@@ -1677,6 +1687,28 @@ u64 CurrentTaskId()
         return ~0ULL;
     }
     return self->id;
+}
+
+u32 CurrentTaskWin32LastError()
+{
+    Task* self = CurrentTask();
+    if (self == nullptr)
+    {
+        return 0;
+    }
+    return self->win32_last_error;
+}
+
+u32 SetCurrentTaskWin32LastError(u32 err)
+{
+    Task* self = CurrentTask();
+    if (self == nullptr)
+    {
+        return 0;
+    }
+    const u32 previous = self->win32_last_error;
+    self->win32_last_error = err;
+    return previous;
 }
 
 u64 TaskId(const Task* t)

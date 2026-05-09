@@ -244,7 +244,7 @@ What works today:
 - Live Internet (DNS + TCP to a real Internet host) — Phase 6.
 
 What still doesn't work:
-- COM apartments, real `CoInitialize` / `CoCreateInstance` runtime.
+- Cross-process COM/RPC, monikers, structured storage, and real native file-dialog UI.
 - DirectX rendering (D3D9/11/12 DLLs are real COM-vtable shapes but
   the underlying device returns E_FAIL on real submits).
 - Modal dialogs, menus, common controls, scroll bars, outline fonts,

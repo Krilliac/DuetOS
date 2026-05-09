@@ -240,10 +240,22 @@ if(DUETOS_KASLR)
     add_compile_definitions(DUETOS_KASLR=1)
 endif()
 
+# KASAN-equivalent diagnostics. Clang's `-fsanitize=kernel-address`
+# does not support the x86_64-unknown-elf freestanding target used by
+# this kernel, so the KASAN preset enables the in-tree diagnostics
+# instead: heap trailer canaries, freed-payload poison, freed-page
+# poison, UBSAN, lock-order audit, and full cap audit. Real shadow
+# memory remains roadmap work gated on a slab allocator.
+option(DUETOS_KASAN
+    "Enable the in-tree KASAN-equivalent kernel memory diagnostics preset"
+    OFF)
+if(DUETOS_KASAN)
+    add_compile_definitions(DUETOS_KASAN=1)
+endif()
+
 # Link-time optimization. Off by default in debug (longer link time
-# obscures debug iteration); on by default in release if lld supports
-# it. Today we don't pass any LTO flags; this option is in place so a
-# future preset can flip it without touching the toolchain file.
+# obscures debug iteration). When enabled by a preset, kernel/CMakeLists.txt
+# applies ThinLTO flags to both kernel link stages.
 option(DUETOS_LTO
     "Enable link-time optimization for kernel image"
     OFF)
@@ -259,6 +271,7 @@ message(STATUS "  cap-gate audit       : ${DUETOS_CAP_AUDIT}")
 message(STATUS "  klog default level   : ${DUETOS_KLOG_DEFAULT}")
 message(STATUS "  klog compile floor   : ${DUETOS_KLOG_COMPILE_FLOOR}")
 message(STATUS "  KASLR                : ${DUETOS_KASLR}")
+message(STATUS "  KASAN diagnostics    : ${DUETOS_KASAN}")
 message(STATUS "  LTO                  : ${DUETOS_LTO}")
 
 add_subdirectory(kernel)

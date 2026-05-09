@@ -22,10 +22,16 @@ toolchain. The build produces:
 ```bash
 cmake --preset x86_64-debug       # Kernel + userland, debug
 cmake --preset x86_64-release     # Kernel + userland, release
-cmake --preset x86_64-kasan       # Debug + KASAN-equivalent (when wired)
+cmake --preset x86_64-kasan       # Debug + KASAN-equivalent diagnostics
 ```
 
-Presets live in `CMakePresets.json` at the repo root.
+Presets live in `CMakePresets.json` at the repo root. All configure
+presets inherit `CMAKE_EXPORT_COMPILE_COMMANDS=ON`, so each build tree
+contains a `compile_commands.json` database for clangd, clang-tidy, and
+other source-indexing tools after configuration. The `x86_64-kasan`
+preset enables the in-tree KASAN-equivalent diagnostics (`DUETOS_KASAN`)
+plus UBSAN, lock-order audit, and full capability-gate audit;
+`x86_64-debug-kasan` remains as a compatibility alias.
 
 ## Local Preflight Tools
 
