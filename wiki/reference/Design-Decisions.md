@@ -6604,3 +6604,39 @@ doc helps future readers audit the trail.
   third-party DLL that asserts the per-image fptr is non-NULL).
 - **Related roadmap track(s):** T9-02 (v0 landed; per-image
   randomisation pending), T9-03 (landed).
+
+---
+
+## 2026-05-09 — Roadmap audit pass 2: T11-01 ACPI + T11-03 registry hive
+
+- **Scope:** `wiki/reference/Roadmap.md`
+- **Commit:** this slice
+- **Decision:** Two more rows lift off the roadmap based on
+  re-audit against the live tree:
+    1. **T11-01 (ACPI parser coverage)**:
+       `kernel/acpi/acpi.cpp` ships `ParseRsdp` /
+       `ParseXsdt` / `ParseMadt` (LAPIC + I/O APIC + Interrupt
+       Source Override + LAPIC Address Override) / `ParseFadt`
+       (PM1A/B control + reset register + ACPI enable) /
+       `ParseHpet` (validation + main-counter enable).
+       `kernel/acpi/srat.cpp` ships SRAT (CPU + Memory Affinity
+       for NUMA frame allocator). The AML interpreter remains
+       the documented gap for ACPI S5 / battery / lid-close,
+       but that's owned by the Drivers section + T11-05 — not
+       T11-01.
+    2. **T11-03 (registry hive persistence)**: every successful
+       Reg* mutation in `kernel/subsystems/win32/registry.cpp`
+       triggers `RegistryHiveSave` (throttled by byte-compare
+       against the on-disk pool); `RegistryHiveLoad` runs at
+       boot once FAT32 mounts. HKLM / HKCU / HKU + the full
+       advapi32 Reg* CRUD + enumeration surface persist
+       across reboots as a result.
+- **Why:** Both rows had been fully-real for several slices; the
+  roadmap entries were stale. Removing them keeps the audit
+  invariant from the prior pass: a row remains if a contributor
+  picking it up would have real work to do, not paperwork.
+- **Rules out / defers:** Nothing — these are clean removals.
+- **Revisit when:** the next Track 11 audit (typically every
+  5–10 kernel-infra slices).
+- **Related roadmap track(s):** T11-01 (landed), T11-03
+  (landed).

@@ -661,11 +661,21 @@ extends. Next:
 
 ### Track 11 — Kernel infrastructure gaps
 
+> **T11-01** ACPI parser coverage landed: RSDP/XSDT/RSDT discovery,
+> MADT (LAPIC + I/O APIC + Interrupt Source Override + LAPIC Address
+> Override), FADT (PM1A/B control, reset register, ACPI enable),
+> HPET (validation + main-counter enable), SRAT (CPU + Memory
+> Affinity for NUMA). AML interpreter remains the documented gap
+> for ACPI S5 / battery / lid-close (Track 11-05 + Drivers).
+> **T11-03** registry hive persistence landed:
+> `RegistryHiveLoad` runs at boot, every successful registry mutation
+> calls `RegistryHiveSave` (throttled by byte-compare). HKLM / HKCU
+> / HKU + the full Reg* CRUD + enumeration surface advapi32 + the
+> in-kernel registry serialise to the configured FAT32 hive.
+
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
-| T11-01 | kernel | P1 | Complete ACPI parser coverage for RSDP/XSDT, MADT LAPIC/I/O APIC/ISO, FADT PM/reset fields, HPET validation, and documented AML gap. | CPU topology, IRQ routing, power, and clocksource setup use parsed ACPI tables. |
 | T11-02 | kernel | P1 | Implement IPC pipes/mailslots: anonymous pipes, named pipes, connect/disconnect, ring-buffer semantics, EOF, and CreateProcess stdio redirection support. | Pipe-backed stdin/stdout/stderr redirection works across parent/child processes. |
-| T11-03 | kernel | P2 | Complete registry hive persistence for HKLM/HKCU/HKU, save/load serialization, dirty flush, CRUD, and enumeration APIs. | Registry writes persist across reboot and enumeration works. |
 | T11-04 | kernel | P2 | Implement waitable timers and multimedia timers with high-resolution timekeeping and APC/event callbacks. | Waitable timers and `timeSetEvent` callbacks fire accurately. |
 | T11-05 | kernel | P2 | Implement power management: ACPI S5 shutdown, ACPI/FADT reset fallback, and S3 stubs or suspend/resume path. | `ExitWindowsEx(EWX_POWEROFF)` powers off through ACPI S5 where supported. |
 
