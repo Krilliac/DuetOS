@@ -3563,10 +3563,113 @@ __declspec(dllexport) DWORD WaitForSingleObject(HANDLE h, DWORD timeout_ms)
     return (DWORD)rv;
 }
 
+/* ------------------------------------------------------------------
+ * APC queue v0 (T8-02 — single-thread, process-local)
+ *
+ * The Win32 contract: QueueUserAPC(pfn, hThread, ulData) appends
+ * a user-mode APC to the target thread's queue. If the target is
+ * inside an alertable wait (SleepEx(_, TRUE), WaitForSingleObjectEx
+ * with bAlertable=TRUE), the wait returns WAIT_IO_COMPLETION
+ * (0x000000C0) immediately and the queued callbacks execute in
+ * order before control returns.
+ *
+ * v0 ships a process-local queue indexed by target TID. The
+ * single-threaded case (caller queues to itself) works correctly:
+ * SleepEx with bAlertable drains the queue, fires each callback,
+ * and returns WAIT_IO_COMPLETION. Multi-thread cross-thread APC
+ * delivery requires kernel-side per-thread APC queue + scheduler
+ * wake — that's the T8-02 follow-on.
+ * ------------------------------------------------------------------ */
+
+#define WAIT_IO_COMPLETION 0xC0u
+#define WIN32_APC_QUEUE_SLOTS 16
+
+typedef void(__stdcall* PAPCFUNC)(unsigned long long ulData);
+
+typedef struct Win32ApcSlot
+{
+    DWORD target_tid;
+    PAPCFUNC pfn;
+    unsigned long long data;
+    int in_use;
+} Win32ApcSlot;
+
+static Win32ApcSlot g_apc_queue[WIN32_APC_QUEUE_SLOTS];
+
+__declspec(dllexport) DWORD QueueUserAPC(PAPCFUNC pfn, HANDLE hThread, unsigned long long dwData)
+{
+    if (pfn == (PAPCFUNC)0)
+        return 0;
+    /* hThread is opaque; v0 dispatches by TID. The CRT typically
+     * maps thread handles to TIDs via a shadow table; we treat
+     * the low 32 bits of the handle as the target TID. -1 (the
+     * GetCurrentThread pseudo-handle) routes to the caller. */
+    DWORD target_tid = (hThread == (HANDLE)(long long)-2 || hThread == (HANDLE)0) ? (DWORD)syscall_get_tid()
+                                                                                  : (DWORD)(unsigned long long)hThread;
+    for (int i = 0; i < WIN32_APC_QUEUE_SLOTS; ++i)
+    {
+        if (!g_apc_queue[i].in_use)
+        {
+            g_apc_queue[i].target_tid = target_tid;
+            g_apc_queue[i].pfn = pfn;
+            g_apc_queue[i].data = dwData;
+            g_apc_queue[i].in_use = 1;
+            return 1;
+        }
+    }
+    return 0; /* Queue full. */
+}
+
+/* Drain APCs queued for the calling thread. Returns the count
+ * fired. Called by SleepEx / WaitForSingleObjectEx when
+ * bAlertable=TRUE. */
+static unsigned int win32_drain_apc_queue(void)
+{
+    DWORD self_tid = (DWORD)syscall_get_tid();
+    unsigned int fired = 0;
+    /* Drain in registration order. Each callback can re-queue;
+     * the re-entrant slot is appended to the tail and won't be
+     * picked up until the next drain. */
+    for (int i = 0; i < WIN32_APC_QUEUE_SLOTS; ++i)
+    {
+        if (g_apc_queue[i].in_use && g_apc_queue[i].target_tid == self_tid)
+        {
+            PAPCFUNC pfn = g_apc_queue[i].pfn;
+            unsigned long long data = g_apc_queue[i].data;
+            g_apc_queue[i].in_use = 0;
+            g_apc_queue[i].pfn = (PAPCFUNC)0;
+            g_apc_queue[i].data = 0;
+            pfn(data);
+            ++fired;
+        }
+    }
+    return fired;
+}
+
 __declspec(dllexport) DWORD WaitForSingleObjectEx(HANDLE h, DWORD timeout_ms, BOOL bAlertable)
 {
-    (void)bAlertable; /* APCs not supported in v0. */
+    if (bAlertable)
+    {
+        /* If APCs are pending for this thread, fire them and
+         * return WAIT_IO_COMPLETION before consulting the wait
+         * primitive — matches the Win32 contract. */
+        if (win32_drain_apc_queue() > 0)
+            return WAIT_IO_COMPLETION;
+    }
     return WaitForSingleObject(h, timeout_ms);
+}
+
+/* SleepEx(dwMilliseconds, bAlertable) — alertable variant of Sleep.
+ * If bAlertable=TRUE and APCs are pending, fire them and return
+ * WAIT_IO_COMPLETION; otherwise sleep the requested duration. */
+__declspec(dllexport) DWORD SleepEx(DWORD dwMilliseconds, BOOL bAlertable)
+{
+    if (bAlertable && win32_drain_apc_queue() > 0)
+        return WAIT_IO_COMPLETION;
+    /* Forward to Sleep (syscall 19 = SYS_SLEEP). */
+    long long discard;
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)19), "D"((long long)dwMilliseconds) : "memory");
+    return 0;
 }
 
 /* ------------------------------------------------------------------

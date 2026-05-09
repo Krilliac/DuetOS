@@ -6680,3 +6680,39 @@ doc helps future readers audit the trail.
   GuardCFCheckFunctionPointer patching) — these expand naturally
   on the same plumbing.
 - **Related roadmap track(s):** T9-02 (landed).
+
+---
+
+## 2026-05-09 — APC queue v0 (T8-02 single-thread surface)
+
+- **Scope:** `userland/libs/kernel32/kernel32.c`
+- **Commit:** this slice
+- **Decision:** `QueueUserAPC` + alertable `SleepEx` /
+  `WaitForSingleObjectEx` ship a process-local APC surface:
+    - 16-slot static queue indexed by target TID.
+    - `QueueUserAPC(pfn, hThread, dwData)` appends to the queue
+      (returns 0 if full).
+    - `SleepEx(_, TRUE)` / `WaitForSingleObjectEx(_, _, TRUE)`
+      check the queue for entries targeting the calling TID,
+      fire each in registration order, and return
+      `WAIT_IO_COMPLETION (0xC0)` if any were drained. Otherwise
+      they fall through to the underlying Sleep / wait primitive.
+- **Why:** Many MSVC-built apps (notably the CRT's stdio and
+  WinHTTP completion path) probe `QueueUserAPC` + alertable
+  `SleepEx` at startup. Without the symbols and the
+  `WAIT_IO_COMPLETION` return path, these probes either fail or
+  block forever. The single-thread queue covers the
+  caller-queues-to-itself idiom (the most common shape — a
+  parent thread queues an APC and the same thread later waits
+  alertably).
+- **Rules out / defers:** Cross-thread APC delivery still needs
+  kernel-side per-thread APC queue + scheduler wake. A target
+  thread sleeping in WaitForSingleObjectEx today doesn't see
+  APCs queued by another thread until it next enters the
+  alertable path. NtQueueApcThread / QueueUserAPC2 also stay
+  unimplemented (different ABI surface).
+- **Revisit when:** a workload needs cross-thread APCs (e.g. an
+  IOCP-style completion port routes file I/O completions via
+  APC to a worker pool).
+- **Related roadmap track(s):** T8-02 (v0 landed; cross-thread
+  pending).
