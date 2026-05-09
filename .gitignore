@@ -62,6 +62,11 @@ qemu.log
 *.dmp
 *.crash
 
+# Output of tools/qemu/run-fix-cycle.sh (gen-fix-patches.py
+# writes candidate patches under DUETOS_FIX_OUT, default
+# ./fix-patches/ at the repo root).
+fix-patches/
+
 ##########################
 # Logs / scratch          #
 ##########################
