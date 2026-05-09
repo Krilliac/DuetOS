@@ -3618,15 +3618,42 @@ static unsigned int win32_drain_apc_queue(void)
 
 __declspec(dllexport) DWORD WaitForSingleObjectEx(HANDLE h, DWORD timeout_ms, BOOL bAlertable)
 {
-    if (bAlertable)
+    if (!bAlertable)
+        return WaitForSingleObject(h, timeout_ms);
+    /* Alertable: chunk the wait into 10ms slices so a peer-queued
+     * APC observed in g_apc_queue fires promptly. Same rationale as
+     * SleepEx — without chunking, a peer thread's QueueUserAPC
+     * couldn't break the calling thread out of an INFINITE wait.
+     * The inner WaitForSingleObject returns WAIT_TIMEOUT (0x102) on
+     * a slice-level timeout; loop until either the overall budget
+     * is exhausted, an APC fires, or the wait actually signals. */
+    if (win32_drain_apc_queue() > 0)
+        return WAIT_IO_COMPLETION;
+    DWORD remaining = timeout_ms;
+    const DWORD kSliceMs = 10;
+    for (;;)
     {
-        /* If APCs are pending for this thread, fire them and
-         * return WAIT_IO_COMPLETION before consulting the wait
-         * primitive — matches the Win32 contract. */
+        DWORD chunk = kSliceMs;
+        if (timeout_ms != 0xFFFFFFFFu)
+        {
+            if (remaining == 0)
+                return WAIT_TIMEOUT;
+            if (remaining < kSliceMs)
+                chunk = remaining;
+        }
+        DWORD rv = WaitForSingleObject(h, chunk);
+        if (rv != WAIT_TIMEOUT)
+            return rv; /* signaled / abandoned / failed */
         if (win32_drain_apc_queue() > 0)
             return WAIT_IO_COMPLETION;
+        if (timeout_ms != 0xFFFFFFFFu)
+        {
+            if (remaining <= chunk)
+                remaining = 0;
+            else
+                remaining -= chunk;
+        }
     }
-    return WaitForSingleObject(h, timeout_ms);
 }
 
 /* SleepEx(dwMilliseconds, bAlertable) — alertable variant of Sleep.
