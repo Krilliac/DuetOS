@@ -260,6 +260,7 @@
 #include "mm/multiboot2.h"
 #include "mm/paging.h"
 #include "sched/sched.h"
+#include "sched/workpool.h"
 #include "security/attack_sim.h"
 #include "security/canary.h"
 #include "security/event_ring.h"
@@ -2576,6 +2577,18 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                        []()
                                        {
                                            duetos::ipc::KMailboxContentionSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
+        // Kernel work pool — N worker threads pulling work items
+        // from a shared bounded FIFO. Self-test fans 256 increment
+        // ops out across 4 workers with a queue intentionally
+        // smaller than the item count, so Submit's blocking path
+        // gets exercised alongside Drain quiescence and Shutdown
+        // teardown.
+        duetos::core::InitcallRegister(duetos::core::Phase::Sched, "workpool-selftest",
+                                       []()
+                                       {
+                                           duetos::sched::WorkPoolSelfTest();
                                            return duetos::core::Result<void>{};
                                        });
         // Dynamic event tracer self-test (plan D2). Verifies the
