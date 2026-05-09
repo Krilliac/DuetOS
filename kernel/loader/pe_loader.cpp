@@ -452,14 +452,22 @@ bool MapSection(const u8* file, const u8* sec, u64 image_base, duetos::mm::Addre
 
     for (u64 page_va = start; page_va < end; page_va += kPageSize)
     {
-        const PhysAddr frame = AllocateFrame();
+        // PE sections occasionally share a 4 KiB page with their neighbour
+        // (small SectionAlignment, or one section's BSS tail spilling
+        // into the next section's first page). Reuse the existing
+        // mapping on conflict — copy the bytes into the existing frame
+        // and skip a duplicate AddressSpaceMapUserPage call.
+        const PhysAddr existing = AddressSpaceLookupUserFrame(as, page_va);
+        const bool reusing = existing != kNullFrame;
+        const PhysAddr frame = reusing ? existing : AllocateFrame();
         if (frame == kNullFrame)
             return false;
         auto* frame_direct = static_cast<u8*>(PhysToVirt(frame));
         // AllocateFrame hands out zeroed frames; the bytes we
         // don't overwrite below stay zero, which serves as
         // both the PE "BSS" tail and any raw-size < virt-size
-        // padding.
+        // padding. On the reuse path, the previous section's
+        // bytes already live there — leave them alone.
 
         // Intersect this page with the section's raw (file)
         // bytes. Only the intersection is copied.
@@ -475,8 +483,11 @@ bool MapSection(const u8* file, const u8* sec, u64 image_base, duetos::mm::Addre
             for (u64 i = 0; i < n; ++i)
                 frame_direct[page_off + i] = file[file_off + i];
         }
-        AddressSpaceMapUserPage(as, page_va, frame, flags);
-        guard.Track(page_va);
+        if (!reusing)
+        {
+            AddressSpaceMapUserPage(as, page_va, frame, flags);
+            guard.Track(page_va);
+        }
     }
     return true;
 }
@@ -499,7 +510,12 @@ bool MapHeaders(const u8* file, u64 sizeof_headers, u64 image_base, duetos::mm::
 
     for (u64 page_va = start; page_va < end; page_va += kPageSize)
     {
-        const PhysAddr frame = AllocateFrame();
+        // Headers and the first section can share a page when the
+        // optional header's SizeOfHeaders + sections fit in fewer
+        // bytes than SectionAlignment. Reuse the existing mapping.
+        const PhysAddr existing = AddressSpaceLookupUserFrame(as, page_va);
+        const bool reusing = existing != kNullFrame;
+        const PhysAddr frame = reusing ? existing : AllocateFrame();
         if (frame == kNullFrame)
             return false;
         auto* direct = static_cast<u8*>(PhysToVirt(frame));
@@ -508,8 +524,11 @@ bool MapHeaders(const u8* file, u64 sizeof_headers, u64 image_base, duetos::mm::
         const u64 n = remain < kPageSize ? remain : kPageSize;
         for (u64 i = 0; i < n; ++i)
             direct[i] = file[file_off + i];
-        AddressSpaceMapUserPage(as, page_va, frame, kPagePresent | kPageUser | kPageNoExecute);
-        guard.Track(page_va);
+        if (!reusing)
+        {
+            AddressSpaceMapUserPage(as, page_va, frame, kPagePresent | kPageUser | kPageNoExecute);
+            guard.Track(page_va);
+        }
     }
     return true;
 }

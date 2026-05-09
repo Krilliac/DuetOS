@@ -183,7 +183,13 @@ bool MapHeadersPage(const u8* file, u64 sizeof_headers, u64 base_va, duetos::mm:
         return true;
     for (u64 page_va = start; page_va < end; page_va += kPageSize)
     {
-        const PhysAddr frame = AllocateFrame();
+        // PE binaries occasionally have headers that share a page with the
+        // first section (small SizeOfHeaders + tightly packed sections).
+        // Reuse the existing frame on conflict instead of allocating a
+        // new one.
+        const PhysAddr existing = AddressSpaceLookupUserFrame(as, page_va);
+        const bool reusing = existing != kNullFrame;
+        const PhysAddr frame = reusing ? existing : AllocateFrame();
         if (frame == kNullFrame)
             return false;
         auto* direct = static_cast<u8*>(PhysToVirt(frame));
@@ -192,9 +198,12 @@ bool MapHeadersPage(const u8* file, u64 sizeof_headers, u64 base_va, duetos::mm:
         const u64 n = remain < kPageSize ? remain : kPageSize;
         for (u64 i = 0; i < n; ++i)
             direct[i] = file[file_off + i];
-        for (u64 i = n; i < kPageSize; ++i)
-            direct[i] = 0;
-        AddressSpaceMapUserPage(as, page_va, frame, kPagePresent | kPageUser | kPageNoExecute);
+        if (!reusing)
+        {
+            for (u64 i = n; i < kPageSize; ++i)
+                direct[i] = 0;
+            AddressSpaceMapUserPage(as, page_va, frame, kPagePresent | kPageUser | kPageNoExecute);
+        }
     }
     return true;
 }
@@ -226,12 +235,25 @@ bool MapSection(const u8* file, const u8* sec, u64 base_va, duetos::mm::AddressS
 
     for (u64 page_va = start; page_va < end; page_va += kPageSize)
     {
-        const PhysAddr frame = AllocateFrame();
+        // PE sections can share a 4 KiB page when SectionAlignment is
+        // smaller than the page (or when a section's tail BSS-padding
+        // crosses a page boundary into another section's first page).
+        // On conflict, copy this section's contents into the existing
+        // frame and skip the AddressSpaceMapUserPage call — the prior
+        // mapping's flags must already cover the union of both
+        // sections, which the loader's section ordering and PE's
+        // FileAlignment normalisation makes structurally true.
+        const PhysAddr existing = AddressSpaceLookupUserFrame(as, page_va);
+        const bool reusing = existing != kNullFrame;
+        const PhysAddr frame = reusing ? existing : AllocateFrame();
         if (frame == kNullFrame)
             return false;
         auto* frame_direct = static_cast<u8*>(PhysToVirt(frame));
-        for (u64 i = 0; i < kPageSize; ++i)
-            frame_direct[i] = 0;
+        if (!reusing)
+        {
+            for (u64 i = 0; i < kPageSize; ++i)
+                frame_direct[i] = 0;
+        }
         const u64 copy_lo = page_va > seg_va ? page_va : seg_va;
         const u64 src_end = seg_va + raw_size;
         const u64 copy_hi_raw = page_va + kPageSize < src_end ? page_va + kPageSize : src_end;
@@ -244,7 +266,10 @@ bool MapSection(const u8* file, const u8* sec, u64 base_va, duetos::mm::AddressS
             for (u64 i = 0; i < n; ++i)
                 frame_direct[page_off + i] = file[file_off + i];
         }
-        AddressSpaceMapUserPage(as, page_va, frame, flags);
+        if (!reusing)
+        {
+            AddressSpaceMapUserPage(as, page_va, frame, flags);
+        }
     }
     return true;
 }
