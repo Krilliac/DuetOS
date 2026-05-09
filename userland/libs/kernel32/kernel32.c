@@ -5227,3 +5227,36 @@ __declspec(dllexport) BOOL K32QueryWorkingSet(HANDLE hProcess, void* buf, DWORD 
     }
     return 1;
 }
+
+typedef struct DUET_K32_PERFORMANCE_INFORMATION
+{
+    DWORD cb;
+    SIZE_T CommitTotal;
+    SIZE_T CommitLimit;
+    SIZE_T CommitPeak;
+    SIZE_T PhysicalTotal;
+    SIZE_T PhysicalAvailable;
+    SIZE_T SystemCache;
+    SIZE_T KernelTotal;
+    SIZE_T KernelPaged;
+    SIZE_T KernelNonpaged;
+    SIZE_T PageSize;
+    DWORD HandleCount;
+    DWORD ProcessCount;
+    DWORD ThreadCount;
+} DUET_K32_PERFORMANCE_INFORMATION;
+
+#define SYS_SYSTEM_PERFORMANCE_INFO 184LL
+
+__declspec(dllexport) BOOL K32GetPerformanceInfo(void* info, DWORD cb)
+{
+    if (info == (void*)0 || cb < sizeof(DUET_K32_PERFORMANCE_INFORMATION))
+        return 0;
+
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"(SYS_SYSTEM_PERFORMANCE_INFO), "D"(info), "S"((unsigned long long)cb)
+                     : "memory");
+    return rv == 0 ? 1 : 0;
+}

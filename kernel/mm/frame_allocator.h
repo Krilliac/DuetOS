@@ -121,6 +121,7 @@ void FreeContiguousFrames(PhysAddr base, u64 count);
 /// Diagnostic counters; cheap enough to read at any time.
 u64 TotalFrames();
 u64 FreeFramesCount();
+u64 PeakUsedFrames();
 
 /// Exercise Allocate / Free / Allocate end-to-end. Intended for use during
 /// boot only — prints to COM1 and halts with a [panic] message if anything

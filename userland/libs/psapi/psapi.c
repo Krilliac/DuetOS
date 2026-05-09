@@ -201,28 +201,53 @@ __declspec(dllexport) BOOL K32QueryWorkingSet(HANDLE hProcess, void* buf, DWORD 
     return QueryWorkingSet(hProcess, buf, cb);
 }
 
+typedef unsigned long long SIZE_T;
+
+typedef struct DUET_PERFORMANCE_INFORMATION
+{
+    DWORD cb;
+    SIZE_T CommitTotal;
+    SIZE_T CommitLimit;
+    SIZE_T CommitPeak;
+    SIZE_T PhysicalTotal;
+    SIZE_T PhysicalAvailable;
+    SIZE_T SystemCache;
+    SIZE_T KernelTotal;
+    SIZE_T KernelPaged;
+    SIZE_T KernelNonpaged;
+    SIZE_T PageSize;
+    DWORD HandleCount;
+    DWORD ProcessCount;
+    DWORD ThreadCount;
+} DUET_PERFORMANCE_INFORMATION;
+
+#define SYS_SYSTEM_PERFORMANCE_INFO 184LL
+
+static BOOL QueryPerformanceSnapshot(void* info, DWORD cb)
+{
+    if (info == (void*)0 || cb < sizeof(DUET_PERFORMANCE_INFORMATION))
+        return 0;
+
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"(SYS_SYSTEM_PERFORMANCE_INFO), "D"(info), "S"((unsigned long long)cb)
+                     : "memory");
+    return rv == 0 ? 1 : 0;
+}
+
 /* GetPerformanceInfo / K32GetPerformanceInfo — system-wide
- * performance snapshot. Fill canned values so callers showing
- * a system-info pane don't read garbage. */
+ * performance snapshot. The kernel fills the Win32-compatible
+ * PERFORMANCE_INFORMATION shape from scheduler and frame-allocator
+ * counters; memory counters are page counts except PageSize. */
 __declspec(dllexport) BOOL GetPerformanceInfo(void* info, DWORD cb)
 {
-    if (info == (void*)0 || cb == 0)
-        return 0;
-    unsigned char* b = (unsigned char*)info;
-    for (DWORD i = 0; i < cb; ++i)
-        b[i] = 0;
-    /* PERFORMANCE_INFORMATION starts with cb. */
-    if (cb >= 4)
-    {
-        unsigned int* p = (unsigned int*)info;
-        p[0] = cb;
-    }
-    return 1;
+    return QueryPerformanceSnapshot(info, cb);
 }
 
 __declspec(dllexport) BOOL K32GetPerformanceInfo(void* info, DWORD cb)
 {
-    return GetPerformanceInfo(info, cb);
+    return QueryPerformanceSnapshot(info, cb);
 }
 
 /* EmptyWorkingSet / K32EmptyWorkingSet — flush physical pages

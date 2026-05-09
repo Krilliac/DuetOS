@@ -8,6 +8,7 @@
  *   EnumProcessModules
  *   GetModuleFileNameExW
  *   GetProcessMemoryInfo
+ *   GetPerformanceInfo
  *   QueryWorkingSet
  *
  * Real PASS depends on the kernel exposing per-process metadata
@@ -105,6 +106,24 @@ void __cdecl mainCRTStartup(void)
         DWORD n = GetProcessImageFileNameW(GetCurrentProcess(), path, 260);
         Out("[psapi_smoke] GetProcessImageFileNameW= ");
         Out(n > 0 ? "PASS\r\n" : "FAIL\r\n");
+    }
+
+    /* GetPerformanceInfo. Counts are page units except PageSize. */
+    {
+        PERFORMANCE_INFORMATION perf = {0};
+        perf.cb = sizeof(perf);
+        BOOL ok = GetPerformanceInfo(&perf, sizeof(perf));
+        Out("[psapi_smoke] GetPerformanceInfo     = ");
+        if (ok && perf.cb == sizeof(perf) && perf.PageSize > 0 && perf.PhysicalTotal > 0 && perf.CommitLimit > 0)
+        {
+            Out("PASS pages=");
+            OutDec(perf.PhysicalTotal);
+            Out("\r\n");
+        }
+        else
+        {
+            Out("FAIL/STUB\r\n");
+        }
     }
 
     Out("[psapi_smoke] done\r\n");

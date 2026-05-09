@@ -1263,6 +1263,12 @@ u64 ProcessResolveDllExportByBase(const Process* proc, u64 base_va, const char* 
 /// to match in form). Returns 0 on miss.
 u64 ProcessFindDllBaseByName(const Process* proc, const char* dll_name);
 
+/// Current count of live Process objects. Diagnostic-only; the
+/// scheduler's task counters remain the source of truth for thread
+/// counts, while this exposes the process-lifetime counter maintained
+/// by ProcessCreate / ProcessRelease.
+u64 ProcessLiveCount();
+
 /// Self-test of the process model's pure helpers: CapSet bitmap
 /// operations, CapName lookup, the denial rate-limit predicate, and
 /// the boundary checks around kCapNone / kCapCount. Does NOT create
