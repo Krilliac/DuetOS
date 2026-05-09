@@ -6749,3 +6749,37 @@ doc helps future readers audit the trail.
   behaviour would have broken.
 - **Related roadmap track(s):** T9-01 (PE-image gate landed;
   DLL randomisation pending).
+
+---
+
+## 2026-05-09 — Winsock async surface v0 (WSAEventSelect family)
+
+- **Scope:** `userland/libs/ws2_32/ws2_32.c`
+- **Commit:** this slice
+- **Decision:** Add `WSAEventSelect` / `WSAEnumNetworkEvents` /
+  `WSAWaitForMultipleEvents` backed by a process-local
+  `WsaEventBinding[32]` table that records (socket, event-handle,
+  lNetworkEvents, pending-mask) tuples. The producer side
+  (TCP stack notifying that a socket is readable / writable /
+  has accepted) is not wired yet — `WSAEnumNetworkEvents` always
+  reports zero events and `WSAWaitForMultipleEvents` returns
+  `WSA_WAIT_TIMEOUT` after a single non-blocking probe.
+- **Why:** Many Win32 PEs that use sockets (HTTP servers, IRC
+  clients, anything written against the Win32 async pattern)
+  call `WSAEventSelect` very early after socket creation. Without
+  the symbol, the IAT chase would fall through to the missing-
+  import miss-logger and the PE would crash on the first access.
+  The registry exists so the registration succeeds; the events
+  just never fire (the caller's normal polling loop will block
+  forever instead of progressing — a workload-specific concern,
+  not a load-time crash).
+- **Rules out / defers:** Real async event delivery requires the
+  TCP stack to flag bindings on socket-readable etc. Overlapped
+  I/O (`WSARecv` with OVERLAPPED + IOCP completion) requires
+  wiring kernel32's IOCP infrastructure into the socket read
+  path. Both stay deferred behind networking Track 3.
+- **Revisit when:** the TCP stack lands per-socket event
+  notifications, or a workload exercises the Win32 async
+  socket pattern enough to demand functional event delivery.
+- **Related roadmap track(s):** Winsock async surface (v0
+  landed; producer-side delivery pending).

@@ -359,9 +359,23 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
 
 ### Winsock async surface
 
-- **Today:** synchronous BSD-socket subset works.
-- **Deferred:** WSAEventSelect + overlapped I/O + completion
-  ports.
+- **Today:** synchronous BSD-socket subset works. Async surface
+  v0 ships in `userland/libs/ws2_32/ws2_32.c`: `WSACreateEvent`
+  / `WSACloseEvent` / `WSASetEvent` / `WSAResetEvent` /
+  `WSAEventSelect` / `WSAEnumNetworkEvents` /
+  `WSAWaitForMultipleEvents` exist and route through a
+  process-local `WsaEventBinding[32]` table. Callers can
+  register their interest in network events without crashing
+  on a NULL-import lookup.
+- **Deferred:** Real async event delivery — the v0 ws2_32
+  binding registry has no producer side. The TCP stack
+  doesn't yet drive `pending` mask changes when a socket
+  becomes readable / writable / accepts a connection, so
+  `WSAEnumNetworkEvents` always reports zero events and
+  `WSAWaitForMultipleEvents` returns `WSA_WAIT_TIMEOUT`.
+  Overlapped I/O + IOCP-backed socket reads still pending
+  (kernel32's IOCP plumbing exists but isn't wired into the
+  socket read path).
 
 ---
 
