@@ -1,6 +1,7 @@
 #include "diag/fault_react.h"
 
 #include "core/panic.h"
+#include "diag/fix_journal.h"
 #include "log/klog.h"
 #include "proc/process.h"
 #include "sched/sched.h"
@@ -246,6 +247,19 @@ FaultReaction FaultReactDispatch(::duetos::core::FaultDomainId domain_id, const 
         ::duetos::core::LogWithValue(::duetos::core::LogLevel::Info,
                                      ev.source != nullptr ? ev.source : "diag/fault-react", FaultKindName(ev.kind),
                                      static_cast<u64>(ev.attempt_count));
+        // Journal the recovery: the dispatcher told the caller to
+        // retry, which the policy + floor agreed is safe. ctx_a is
+        // the FaultKind so the off-line patch generator can group by
+        // failure mode; ctx_b carries the attempt_count so a flake
+        // that stays under cap is distinguishable from one that
+        // never converges. RetryNow is the "the workaround
+        // succeeded if the caller retries" branch — pinning the
+        // record on the reporter's `source` string keeps dedup
+        // tight per call site.
+        (void)::duetos::diag::FixJournalRecordSev(
+            ::duetos::diag::FixDetector::SoftFaultRecov, ev.source != nullptr ? ev.source : "diag/fault-react",
+            "fault-react: caller-retry advised; investigate the flake", static_cast<u64>(ev.kind),
+            static_cast<u64>(ev.attempt_count), /*severity=*/static_cast<u16>(ev.severity));
         break;
 
     case FaultReaction::RestartDomain:
@@ -253,6 +267,17 @@ FaultReaction FaultReactDispatch(::duetos::core::FaultDomainId domain_id, const 
         ::duetos::core::LogWithValue(::duetos::core::LogLevel::Error,
                                      ev.source != nullptr ? ev.source : "diag/fault-react", FaultKindName(ev.kind),
                                      static_cast<u64>(domain_id));
+        // Journal the recovery: a domain restart is the bounded
+        // workaround for a per-subsystem fault. ctx_a is the
+        // FaultKind, ctx_b is the domain id. Dedup on (source,
+        // detector) groups repeated restarts of the same subsystem
+        // into a single record with repeat_count rising, which is
+        // exactly the signal that a driver is going through restart-
+        // loops and needs source-level attention.
+        (void)::duetos::diag::FixJournalRecordSev(
+            ::duetos::diag::FixDetector::SoftFaultRecov, ev.source != nullptr ? ev.source : "diag/fault-react",
+            "fault-react: domain restarted; recurrence implies bug", static_cast<u64>(ev.kind),
+            static_cast<u64>(domain_id), /*severity=*/static_cast<u16>(ev.severity));
         break;
 
     case FaultReaction::KillProcess:
