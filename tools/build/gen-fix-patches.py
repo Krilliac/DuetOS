@@ -47,10 +47,11 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import struct
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 FILE_MAGIC = 0x4A584946  # 'FIXJ'
@@ -786,6 +787,96 @@ def synth_syscall_brief(r: FixRecord, num: int) -> str:
     )
 
 
+@dataclass
+class SymbolResolver:
+    """Resolve kernel RIPs to `function (file:line)` via addr2line.
+
+    Single-shot: collect every RIP a record set references, run one
+    `addr2line` invocation with all of them, build a dict, and let
+    callers `.resolve(rip)` against it. Avoids the per-record fork
+    overhead while keeping the rest of the pipeline addr2line-tool-
+    agnostic — `llvm-addr2line` is preferred for its richer demangling
+    and inlining info, with binutils `addr2line` as the fallback.
+
+    A None elf_path produces a no-op resolver: `.resolve()` returns
+    the empty string. Lets the call sites stay unconditional and
+    keeps the pre-existing "no kernel ELF supplied" workflow valid.
+    """
+
+    elf_path: Path | None = None
+    _table: dict[int, str] = field(default_factory=dict)
+    _missing_tool_logged: bool = field(default=False)
+
+    @staticmethod
+    def _select_tool() -> str | None:
+        for candidate in ("llvm-addr2line", "addr2line"):
+            if shutil.which(candidate):
+                return candidate
+        return None
+
+    def prime(self, rips: list[int]) -> None:
+        """Populate the table for the given RIPs.
+
+        Skips zero / unmapped values up-front; addr2line emits
+        '?? at ??:0' for those, which adds noise without adding
+        signal."""
+        if self.elf_path is None:
+            return
+        if not self.elf_path.exists():
+            print(f"# kernel ELF not found: {self.elf_path}", file=sys.stderr)
+            return
+        unique = sorted({r for r in rips if r != 0 and r >> 48 == 0xFFFF})
+        if not unique:
+            return
+        tool = self._select_tool()
+        if tool is None:
+            if not self._missing_tool_logged:
+                print(
+                    "# warn: neither llvm-addr2line nor addr2line is on PATH; "
+                    "skipping symbol resolution",
+                    file=sys.stderr,
+                )
+                self._missing_tool_logged = True
+            return
+        try:
+            args = [tool, "-e", str(self.elf_path), "-f", "-i", "-p", "-C", "-s"]
+            args.extend(f"0x{r:x}" for r in unique)
+            out = subprocess.run(
+                args,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"# warn: addr2line invocation failed: {exc}", file=sys.stderr)
+            return
+        # `-p -i` produces one line per address (top frame); inline
+        # frames continue on subsequent lines indented with " (inlined by)".
+        # We keep only the top frame for each requested address — the
+        # display is best-effort, not a full backtrace.
+        lines = [ln for ln in out.stdout.splitlines() if ln and not ln.startswith(" (inlined by)")]
+        for rip, line in zip(unique, lines):
+            self._table[rip] = line.strip()
+        print(
+            f"# resolved {len(self._table)}/{len(unique)} RIP(s) "
+            f"via {tool} against {self.elf_path}",
+            file=sys.stderr,
+        )
+
+    def resolve(self, rip: int) -> str:
+        """Return a human display for `rip`, or empty string if unknown.
+
+        The returned form is whatever addr2line printed, e.g.
+        `Foo::Bar() at file.cpp:123` or `?? at ??:0` for an
+        unresolvable address. Callers decide whether to embed it
+        inline in the brief.
+        """
+        if rip == 0:
+            return ""
+        return self._table.get(rip, "")
+
+
 def _soft_fault_priority(repeat: int) -> tuple[str, str]:
     """Bucket the repeat_count into a triage priority.
 
@@ -801,7 +892,7 @@ def _soft_fault_priority(repeat: int) -> tuple[str, str]:
     return ("HIGH", "WARNING: hot path; the workaround is masking a real bug — fix or upgrade the policy")
 
 
-def synth_soft_fault_recov_brief(r: FixRecord) -> Action:
+def synth_soft_fault_recov_brief(r: FixRecord, resolver: SymbolResolver | None = None) -> Action:
     """Generate a structured markdown brief for a SoftFaultRecov record.
 
     SoftFaultRecov has two production producers (kernel/diag/fix_journal.h
@@ -849,29 +940,50 @@ def synth_soft_fault_recov_brief(r: FixRecord) -> Action:
             "user-copy fault fixup) that knew how to recover."
         )
         lines.append("")
-        lines.append(f"- Faulting RIP: `0x{r.caller_rip:016x}`")
-        lines.append(f"- Fixup RIP:    `0x{r.ctx_a:016x}` (jumped to)")
+        # If the resolver populated a symbol for this RIP, surface it
+        # inline so the reviewer doesn't have to round-trip through
+        # symbolize.sh. The resolver returns whatever addr2line printed
+        # (e.g. `CopyFromUser at kernel/mm/copy_user.cpp:142`); a
+        # `?? at ??:0` answer is filtered out as no-info.
+        fault_sym = resolver.resolve(r.caller_rip) if resolver is not None else ""
+        fixup_sym = resolver.resolve(r.ctx_a) if resolver is not None else ""
+        if fault_sym and not fault_sym.startswith("?? "):
+            lines.append(f"- Faulting RIP: `0x{r.caller_rip:016x}` — {fault_sym}")
+        else:
+            lines.append(f"- Faulting RIP: `0x{r.caller_rip:016x}`")
+        if fixup_sym and not fixup_sym.startswith("?? "):
+            lines.append(f"- Fixup RIP:    `0x{r.ctx_a:016x}` — {fixup_sym} (jumped to)")
+        else:
+            lines.append(f"- Fixup RIP:    `0x{r.ctx_a:016x}` (jumped to)")
         lines.append("")
         lines.append("**Recommended next step:**")
         lines.append("")
-        lines.append(
-            "1. Resolve the faulting RIP to a source line:\n"
-            "   ```sh\n"
-            f"   tools/debug/symbolize.sh build/x86_64-release/kernel/duetos-kernel.elf 0x{r.caller_rip:x}\n"
-            "   ```"
-        )
-        lines.append(
-            "2. Inspect the touch site. If the touch is on user memory, "
-            "verify the caller validated the pointer first. If the touch "
-            "is on kernel memory, the fault probably indicates a stale "
-            "mapping or a torn allocation — fix the producer, do not "
-            "rely on the extable to keep absorbing it."
-        )
+        if fault_sym and not fault_sym.startswith("?? "):
+            lines.append(
+                f"1. Inspect the touch site at `{fault_sym}`. If the "
+                f"touch is on user memory, verify the caller validated "
+                f"the pointer first. If the touch is on kernel memory, "
+                f"the fault probably indicates a stale mapping or a "
+                f"torn allocation — fix the producer, do not rely on "
+                f"the extable to keep absorbing it."
+            )
+        else:
+            lines.append(
+                "1. Resolve the faulting RIP to a source line:\n"
+                "   ```sh\n"
+                f"   tools/debug/symbolize.sh build/x86_64-debug/kernel/duetos-kernel.elf 0x{r.caller_rip:x}\n"
+                "   ```\n"
+                "2. Inspect the touch site. If the touch is on user memory, "
+                "verify the caller validated the pointer first. If the touch "
+                "is on kernel memory, the fault probably indicates a stale "
+                "mapping or a torn allocation — fix the producer, do not "
+                "rely on the extable to keep absorbing it."
+            )
         if r.repeat >= 10:
             lines.append(
-                "3. **Hot path** — at this repeat_count the fixup is "
-                "no longer an exception path; consider replacing the "
-                "raw touch with a `Try*` variant that returns "
+                "**Hot path** — at this repeat_count the fixup is no "
+                "longer an exception path; consider replacing the raw "
+                "touch with a `Try*` variant that returns "
                 "`Result<T, FaultKind>` instead of relying on extable "
                 "rescue."
             )
@@ -974,7 +1086,8 @@ class Action:
     filename: str | None  # for "patch" kind, the .patch filename
 
 
-def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path) -> list[Action]:
+def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path,
+                 resolver: SymbolResolver | None = None) -> list[Action]:
     actions: list[Action] = []
     seen: set[tuple[str, str]] = set()
     for r in records:
@@ -1075,7 +1188,7 @@ def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path) 
                 )
             )
         elif r.detector_name == "soft_fault_recov":
-            actions.append(synth_soft_fault_recov_brief(r))
+            actions.append(synth_soft_fault_recov_brief(r, resolver))
         elif r.detector_name == "loader_reject":
             actions.append(
                 Action(
@@ -1215,6 +1328,17 @@ def main() -> int:
         "--yes", action="store_true",
         help="skip confirmation prompts for --apply (DANGER)",
     )
+    ap.add_argument(
+        "--kernel-elf",
+        type=Path,
+        default=None,
+        help=(
+            "kernel ELF (preferably the debug build) used to resolve "
+            "caller_rip / ctx_a addresses to `function (file:line)` for "
+            "trap.recov records. Optional — if omitted, the briefs print "
+            "raw hex and a symbolize.sh hint."
+        ),
+    )
     args = ap.parse_args()
 
     repo_root = find_repo_root()
@@ -1236,7 +1360,18 @@ def main() -> int:
         print("# no readable fix-journal files", file=sys.stderr)
         return 1
 
-    actions = plan_actions(all_records, thunks_index, repo_root)
+    resolver = SymbolResolver(elf_path=args.kernel_elf)
+    if args.kernel_elf is not None:
+        # Prime once with every RIP a SoftFaultRecov record references —
+        # saves N forks of addr2line for N records.
+        rips: list[int] = []
+        for r in all_records:
+            if r.detector_name == "soft_fault_recov":
+                rips.append(r.caller_rip)
+                rips.append(r.ctx_a)
+        resolver.prime(rips)
+
+    actions = plan_actions(all_records, thunks_index, repo_root, resolver)
     if args.markers:
         markers = load_markers(args.markers)
         marker_actions = plan_marker_actions(markers, repo_root)

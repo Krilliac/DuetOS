@@ -164,12 +164,23 @@ else
         --markers "${MARKERS_JSON}"
 fi
 
-# 5. Generate candidate source patches.
+# 5. Generate candidate source patches. Pass the kernel ELF for
+#    symbol resolution if it's present — gen-fix-patches.py uses
+#    addr2line to surface trap.recov RIPs as `func (file:line)`
+#    inline. The debug build carries DWARF; the release build's
+#    ELF resolves to function names only. Either is better than
+#    raw hex.
+KERNEL_ELF="${BUILD_DIR}/kernel/duetos-kernel.elf"
+KERNEL_ELF_FLAG=()
+if [[ -f "${KERNEL_ELF}" ]]; then
+    KERNEL_ELF_FLAG=(--kernel-elf "${KERNEL_ELF}")
+fi
 echo "" >&2
 echo "[fix-cycle] === patch generation ===" >&2
 python3 "${REPO_ROOT}/tools/build/gen-fix-patches.py" \
     "${EXTRACTED_FIX}" \
     --markers "${MARKERS_JSON}" \
+    "${KERNEL_ELF_FLAG[@]}" \
     --out="${FIX_OUT}"
 
 echo "" >&2
