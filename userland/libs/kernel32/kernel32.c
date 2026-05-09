@@ -608,8 +608,16 @@ typedef unsigned int PROT;
 __declspec(dllexport) void* VirtualAlloc(void* lpAddress, SIZE_T dwSize, DWORD flAllocationType, DWORD flProtect)
 {
     (void)lpAddress;
-    (void)flAllocationType;
     (void)flProtect;
+    /* MEM_WRITE_WATCH (0x00200000) requires the kernel to track
+     * which pages have been written since the alloc — we don't
+     * have that bookkeeping. Reject explicitly so callers fall
+     * back to a non-watched allocation rather than silently
+     * receiving a region that won't honour GetWriteWatch. Real
+     * Windows returns NULL with GetLastError = ERROR_INVALID_PARAMETER
+     * when the kernel doesn't support MEM_WRITE_WATCH. */
+    if ((flAllocationType & 0x00200000u) != 0)
+        return (void*)0;
     long long rv;
     __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)28), "D"((long long)dwSize) : "memory");
     return (void*)rv;
