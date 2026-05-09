@@ -16,7 +16,7 @@ namespace
 // so its acquire-order vs the other tagged locks is worth
 // recording.
 constinit sync::SpinLock g_cleanroom_lock = {
-    .locked = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassCleanroomTrace};
+    .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassCleanroomTrace};
 
 // Sticky boot region — fills once, then locks. Captures the
 // driver init / PE-loader / firmware-loader events that fire
