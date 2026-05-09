@@ -173,19 +173,22 @@ In rough priority:
   namespace 1 via `NvmePanicWriteDump` — a polled-completion
   path that reuses the driver's existing staging buffer +
   CQ phase-tag wait, with no scheduler / slab dependencies.
-  The path is exercised at every boot via
-  `DiskPersistSelfTest` so a regression surfaces in the
-  boot log instead of waiting for a real panic. The
-  `lastdump` shell command surfaces the on-disk LBA + byte
-  count alongside the in-RAM minidump status.
-- **Deferred:** the same persistence story for AHCI/SATA
-  namespaces (the AHCI driver doesn't have a panic-write
-  helper yet), and a real partition-table reservation so
-  the disk installer can allocate the dump region
-  explicitly instead of trusting the last 4 MiB to be
-  unused. Both items wait for a workload that legitimately
-  exercises a real-hardware AHCI disk; QEMU's NVMe path
-  covers the v0 verification.
+  **AHCI/SATA fallback also landed:** `AhciPanicWriteDump` /
+  `AhciDumpReservedLba` / `AhciAvailable` provide the same
+  contract — polled completion via the existing per-port
+  command list + FIS receive area, no allocations, GPT-first
+  + tail-of-drive fallback for the reserved region.
+  `minidump.cpp` consults NVMe first and AHCI as the
+  fallback when no NVMe namespace is online. Both paths are
+  exercised at every boot via `DiskPersistSelfTest` so a
+  regression surfaces in the boot log instead of waiting for
+  a real panic. The `lastdump` shell command surfaces the
+  on-disk LBA + byte count alongside the in-RAM minidump
+  status.
+- **Deferred:** real partition-table reservation so the disk
+  installer can allocate the dump region explicitly instead
+  of trusting the last 4 MiB to be unused. Waits for the
+  installer slice (Disk installer → orchestration layer).
 
 ---
 
