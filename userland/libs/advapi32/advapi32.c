@@ -1267,8 +1267,49 @@ __declspec(dllexport) BOOL EqualSid(void* a, void* b)
 
 __declspec(dllexport) DWORD GetLengthSid(void* sid)
 {
-    (void)sid;
-    return 8; /* MAX_SID is 68; 8 is a SID with 0 sub-auths. */
+    if (sid == (void*)0)
+        return 8;
+    /* SID layout: byte 1 is SubAuthorityCount; total length is
+     * 8 + 4 * count. Return that for any well-formed SID; fall
+     * back to 8 (zero-sub-auth) on a NULL byte 1. */
+    const unsigned char* b = (const unsigned char*)sid;
+    return (DWORD)(8u + 4u * (unsigned)b[1]);
+}
+
+/* GetSidLengthRequired — caller-asked size for AllocateAndInitializeSid. */
+__declspec(dllexport) DWORD GetSidLengthRequired(unsigned char sub_count)
+{
+    return (DWORD)(8u + 4u * (unsigned)sub_count);
+}
+
+/* GetSidIdentifierAuthority — return pointer to the 6-byte
+ * authority field at offset 2 in the SID. Win32 returns the same
+ * pointer (no copy), so no allocation needed. NULL in → NULL out. */
+__declspec(dllexport) void* GetSidIdentifierAuthority(void* sid)
+{
+    if (sid == (void*)0)
+        return (void*)0;
+    return (void*)((unsigned char*)sid + 2);
+}
+
+/* GetSidSubAuthorityCount — pointer to the count byte at offset 1.
+ * Win32 returns a pointer (so the caller can in-place modify),
+ * not the value. */
+__declspec(dllexport) unsigned char* GetSidSubAuthorityCount(void* sid)
+{
+    if (sid == (void*)0)
+        return (unsigned char*)0;
+    return (unsigned char*)sid + 1;
+}
+
+/* GetSidSubAuthority — pointer to the n-th 4-byte sub-authority
+ * starting at offset 8. Caller is responsible for not indexing
+ * past `*GetSidSubAuthorityCount()`. */
+__declspec(dllexport) DWORD* GetSidSubAuthority(void* sid, DWORD n)
+{
+    if (sid == (void*)0)
+        return (DWORD*)0;
+    return (DWORD*)((unsigned char*)sid + 8 + 4 * n);
 }
 
 __declspec(dllexport) BOOL CopySid(DWORD dst_len, void* dst, void* src)

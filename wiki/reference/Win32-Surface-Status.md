@@ -223,7 +223,9 @@ focus of any current slice.
   `LookupAccountSidA/W`, `ConvertSidToStringSidW`,
   `ConvertStringSidToSidW`, `IsValidSid`, `EqualSid`,
   `AllocateAndInitializeSid`, `FreeSid`,
-  `GetLengthSid`, `CopySid`
+  `GetLengthSid`, `GetSidLengthRequired`,
+  `GetSidIdentifierAuthority`, `GetSidSubAuthority`,
+  `GetSidSubAuthorityCount`, `CopySid`
 - ACL/security descriptor scaffolding: real layout, queries
   return canned ACL bits. `SetSecurityDescriptorOwner` etc.
   store but don't enforce.
