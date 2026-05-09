@@ -123,6 +123,15 @@ u64 TotalFrames();
 u64 FreeFramesCount();
 u64 PeakUsedFrames();
 
+/// Flush every per-CPU warm pool back into the global bitmap. Used by
+/// the boot self-test to restore deterministic g_free_count semantics
+/// after a free sequence, and available to memory-pressure paths that
+/// would prefer maximally-coalesced bitmap state at the cost of a
+/// slower next allocation. The frame allocator stays usable across the
+/// drain — callers see at most a one-allocation latency bubble per
+/// CPU as their pool warms back up.
+void FrameAllocatorDrainPools();
+
 /// Exercise Allocate / Free / Allocate end-to-end. Intended for use during
 /// boot only — prints to COM1 and halts with a [panic] message if anything
 /// looks wrong.
