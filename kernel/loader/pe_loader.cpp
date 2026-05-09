@@ -568,6 +568,23 @@ PeStatus PeValidate(const u8* file, u64 file_len)
     return ParseHeaders(file, file_len, h);
 }
 
+// IMAGE_DLL_CHARACTERISTICS_DYNAMIC_BASE = 0x0040 (per the PE
+// spec). DllCharacteristics is a u16 at offset 70 in the
+// PE32+ Optional Header (right after Subsystem at 68).
+bool PeIsDynamicBase(const u8* file, u64 file_len)
+{
+    PeHeaders h{};
+    const PeStatus s = ParseHeaders(file, file_len, h);
+    if (s != PeStatus::Ok && s != PeStatus::ImportsPresent && s != PeStatus::TlsPresent)
+        return false;
+    constexpr u64 kOptHeaderDllCharacteristics = 70;
+    if (file_len < h.opt_base + kOptHeaderDllCharacteristics + 2)
+        return false;
+    const u16 chars = LeU16(file + h.opt_base + kOptHeaderDllCharacteristics);
+    constexpr u16 kDynamicBase = 0x0040;
+    return (chars & kDynamicBase) != 0;
+}
+
 // Resolve every entry in the import table by patching the IAT
 // in place. For each import descriptor:
 //   1. Read the DLL name from its Name RVA.

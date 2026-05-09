@@ -641,7 +641,7 @@ extends. Next:
 
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
-| T9-01 | security | P1 | Implement user-mode PE ASLR for `DYNAMICBASE` images and per-process DLL randomization with relocation. | ASLR-enabled PEs load at randomized bases recorded in the address-space ledger. |
+| T9-01 | security | P1 | Implement user-mode PE ASLR for `DYNAMICBASE` images and per-process DLL randomization with relocation. (PE-image ASLR landed: ring3 spawn checks `PeIsDynamicBase` on the Optional Header DllCharacteristics; if set, picks a 64 KiB-aligned delta in [0, 64 MiB) from `RandomU64`; otherwise loads at preferred base. DLL randomisation still pending — DllLoad calls still pass `aslr_delta=0`.) | ASLR-enabled PEs load at randomized bases recorded in the address-space ledger. |
 > **T9-02** shipped: vcruntime140 ships `__security_cookie` /
 > `__security_check_cookie` / `__report_gsfailure` /
 > `__report_rangefailure`, AND the PE loader's

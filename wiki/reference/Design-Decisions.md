@@ -6716,3 +6716,36 @@ doc helps future readers audit the trail.
   APC to a worker pool).
 - **Related roadmap track(s):** T8-02 (v0 landed; cross-thread
   pending).
+
+---
+
+## 2026-05-09 — Gate PE ASLR on DllCharacteristics DYNAMIC_BASE (T9-01 v0)
+
+- **Scope:** `kernel/loader/pe_loader.{h,cpp}`,
+  `kernel/proc/ring3_smoke.cpp`
+- **Commit:** this slice
+- **Decision:** PE spawn paths now consult
+  `PeIsDynamicBase(file, file_len)` before applying ASLR. The
+  helper reads the Optional Header DllCharacteristics field at
+  offset 70 and tests for IMAGE_DLL_CHARACTERISTICS_DYNAMIC_BASE
+  (0x0040). When set, ring3_smoke picks a 64 KiB-aligned delta in
+  [0, 64 MiB) from `duetos::core::RandomU64()`. When not set, the
+  PE loads at its preferred ImageBase (delta = 0).
+- **Why:** Win32's contract is that ASLR only applies to PEs
+  built with `/DYNAMICBASE` — PEs without the flag may have
+  hard-coded address assumptions that break under ASLR. Modern
+  MSVC defaults set the flag, so the behavioural change is
+  invisible for typical workloads, but legacy / freestanding
+  PEs that intentionally pin their base now load reliably.
+- **Rules out / defers:** DLL randomisation (DllLoad still
+  passes `aslr_delta=0`) is the remaining gap — DLL preload runs
+  cooperatively with DLLs the loader expects to find at the
+  preferred base for IAT chasing. Per-DLL randomisation needs
+  the DLL preload table to refresh-after-relocate, which is a
+  separate slice. T9-01 keeps its row pending that follow-on.
+- **Revisit when:** the DLL preload path tracks per-DLL
+  effective base post-ASLR (DLL randomisation), or a workload
+  exercises a non-DYNAMICBASE PE that the always-on prior
+  behaviour would have broken.
+- **Related roadmap track(s):** T9-01 (PE-image gate landed;
+  DLL randomisation pending).

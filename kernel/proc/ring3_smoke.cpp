@@ -2277,8 +2277,15 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     // typically 0x140000000 — well above those — so adding up to
     // ~64 MiB keeps us safely in the 0x140000000..0x144000000
     // band.
+    //
+    // ASLR is gated on IMAGE_DLL_CHARACTERISTICS_DYNAMIC_BASE
+    // (Win32 PEs without `/DYNAMICBASE` load at their preferred
+    // base — the assumption being that they may have hard-coded
+    // addresses they expect to find populated). PEs built with
+    // modern MSVC defaults all set this flag.
+    const bool dynamic_base = duetos::core::PeIsDynamicBase(pe_bytes, pe_len);
     const u64 entropy = duetos::core::RandomU64();
-    const u64 aslr_delta = (entropy & 0x3FF) * (64ULL * 1024);
+    const u64 aslr_delta = dynamic_base ? (entropy & 0x3FF) * (64ULL * 1024) : 0ULL;
 
     // Pre-load the per-spawn DLL set into
     // `as` BEFORE PeLoad runs so ResolveImports can consult

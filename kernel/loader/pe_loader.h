@@ -101,6 +101,14 @@ const char* PeStatusName(PeStatus s);
 /// succeed on the same buffer.
 PeStatus PeValidate(const u8* file, u64 file_len);
 
+/// True iff the PE's Optional Header DllCharacteristics field
+/// has IMAGE_DLL_CHARACTERISTICS_DYNAMIC_BASE (bit 0x0040)
+/// set. Spawn paths gate per-image ASLR on this flag — Win32's
+/// contract is that PEs without `/DYNAMICBASE` load at their
+/// preferred base. Returns false on malformed input rather
+/// than throwing.
+bool PeIsDynamicBase(const u8* file, u64 file_len);
+
 /// Dump a human-readable diagnostic report of the PE image to
 /// the serial console: DOS + NT header summary, section table,
 /// import directory (every DLL + function name), base-reloc
