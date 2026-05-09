@@ -109,7 +109,7 @@ for the full inventory.
 build/<preset>/
   kernel/duetos-kernel.elf       kernel ELF
   userland/libs/<dll>/<dll>.dll  per-DLL build artifact
-  userland/apps/<app>/<app>.exe  per-app PE
+  kernel/smoke-pes/<app>/<app>.exe  generated per-app PE
   duetos.iso                     hybrid ISO bootable on SeaBIOS + UEFI
 ```
 

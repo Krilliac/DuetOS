@@ -27,7 +27,7 @@ Win32 calls into syscalls and trust the kernel's return.
 | `msvcrt`, `msvcp140`, `vcruntime140` | Legacy CRT + C++ runtime |
 | `dbghelp`, `psapi`, `advapi32` | Debug helpers, registry, security |
 | `shell32`, `shlwapi` | Shell helpers, path utilities |
-| `ole32`, `oleaut32` | COM (returns `CLASS_E_CLASSNOTAVAILABLE` today) |
+| `ole32`, `oleaut32` | Lightweight COM runtime + BSTR / VARIANT helpers |
 | `winmm`, `bcrypt`, `crypt32` | Multimedia, crypto |
 | `comctl32`, `comdlg32`, `version`, `setupapi` | Common controls, dialogs, version, setup |
 | `iphlpapi`, `userenv`, `wtsapi32`, `dwmapi`, `uxtheme`, `secur32` | Net helpers, env, WTS, DWM/UX/secur32 |
@@ -80,6 +80,14 @@ The DLLs are not flat stubs. Real implementations land per slice:
   `lock cmpxchg` / `xchg`.
 - **Critical sections + SRW + InitOnce**: real spin-CAS on the
   caller's lock word with `SYS_YIELD` on contention.
+- **LastError** (`kernel32`): `GetLastError` / `SetLastError` use a
+  scheduler `Task` slot so Win32 threads in the same process keep
+  independent error state until the full writable TEB lands.
+- **COM runtime** (`ole32`, `oleaut32`): per-thread
+  `CoInitializeEx` state, process-local class-factory registration,
+  built-in FileOpenDialog / FileSaveDialog / StdComponentCategoriesMgr
+  factories, `REGDB_E_CLASSNOTREG` for unknown CLSIDs, and real
+  `CoTaskMem*` / BSTR helpers.
 
 ## DLL Authoring Conventions
 

@@ -999,6 +999,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     {
         SerialWrite(" +ubsan");
     }
+    if constexpr (duetos::core::kKasanDiagnostics)
+    {
+        SerialWrite(" +kasan");
+    }
     if constexpr (duetos::core::kKaslrEnabled)
     {
         SerialWrite(" +kaslr");

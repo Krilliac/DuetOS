@@ -317,12 +317,6 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
 
 ## Win32 / NT subsystem
 
-### COM apartments and runtime
-
-- **Today:** `CoInitialize` / `CoCreateInstance` are facades.
-  No real apartment model.
-- **Owner:** `userland/libs/ole32/`.
-
 ### DirectX real device backends
 
 - **Today:** D3D9/11/12 DLLs ship real COM-vtable shapes at
@@ -538,6 +532,157 @@ extends. Next:
 8. **Auto-mkfs of a blank disk via shell command** — `mkfs.duetfs /disks/<dev>`.
 9. **AES-XTS encryption + Argon2 KDF** — full-disk encryption tier.
 10. **LZ4 compression** — optional per-file compression.
+
+---
+
+## Full Project TODO import (2026-05-09)
+
+> **Source:** maintainer-provided "DuetOS — Full Project TODO" handoff.
+>
+> **Policy:** these entries are the canonical backlog index for the imported
+> task list. When a task lands, delete its row here, update the owning subsystem
+> wiki page, and add a design/history note when the change is project-visible.
+> Syscall numbers mentioned below are ABI; do not reuse retired numbers.
+
+### Track 1 — Win32 windowing (message pump + GDI paint)
+
+| ID | Scope | Priority | Task | Acceptance |
+| --- | --- | --- | --- | --- |
+| T1-01 | win32 | P0 | Implement real per-window message queues: per-HWND 256-entry `MSG` ring; `PostMessage` / `SendMessage` / `PostQuitMessage` enqueue; blocking `GetMessage`, non-blocking `PeekMessage`; `TranslateMessage`; `DispatchMessage`; compositor-generated `WM_PAINT`, `WM_DESTROY`, `WM_CLOSE`, `WM_SIZE`, `WM_ACTIVATE`, `WM_SETFOCUS`, `WM_KILLFOCUS`. Syscalls: `SYS_WIN_POSTMSG` (62), `SYS_WIN_GETMSG` (63), `SYS_WIN_PEEKMSG` (64), `SYS_WIN_DISPATCHMSG` (65). | A PE with `GetMessage` → `TranslateMessage` → `DispatchMessage` remains alive and processes paint/close messages correctly. |
+| T1-02 | win32 | P0 | Implement GDI paint APIs: `BeginPaint` / `EndPaint` via `SYS_WIN_BEGINPAINT` (66) / `SYS_WIN_ENDPAINT` (67); HDC wraps the target window framebuffer; `BitBlt`, `TextOut`, `DrawTextA/W`, `ExtTextOutA/W`, `Rectangle`, `FillRect`, `Ellipse`; DC text/background state; brushes/pens; `InvalidateRect` / `UpdateWindow`. | A PE handles `WM_PAINT`, calls `BeginPaint` / `TextOut` / `EndPaint`, and visible text appears in the client area. |
+| T1-03 | win32 | P1 | Route keyboard and mouse to the foreground/captured window: scan-code → VK → `WM_KEYDOWN` / `WM_KEYUP` / `WM_CHAR`; mouse hit-test and client-coordinate events; capture; focus and foreground APIs. | A PE `MessageBox` can be dismissed by mouse, and a text field receives keystrokes. |
+| T1-04 | win32 | P1 | Add window Z-order, move, resize, minimize, maximize, restore, close chrome, and accurate `GetClientRect` / `GetWindowRect` / `AdjustWindowRectEx`. | PE windows can be dragged, resized, minimized, maximized/restored, and closed via title-bar interactions. |
+| T1-05 | win32 | P1 | Add memory/off-screen DC support: `CreateCompatibleDC`, `CreateCompatibleBitmap`, bitmap `SelectObject`, `DeleteDC`, `DeleteObject`, `GetDC`, `ReleaseDC`. | A PE renders to a compatible memory DC and `BitBlt`s the result to a screen DC correctly. |
+
+### Track 2 — COM infrastructure
+
+| ID | Scope | Priority | Task | Acceptance |
+| --- | --- | --- | --- | --- |
+| T2-02 | win32 | P2 | Add shell COM objects and path helpers: `SHGetDesktopFolder`, `SHGetSpecialFolderPath`, `SHGetFolderPath`, and functional `IFileDialog` methods on the existing FileOpenDialog / FileSaveDialog registrations. | Shell-folder/file-dialog callers receive valid stubs or a simple native picker instead of class-unavailable failures. |
+
+### Track 3 — Networking
+
+| ID | Scope | Priority | Task | Acceptance |
+| --- | --- | --- | --- | --- |
+| T3-01 | net | P1 | Implement IPv4 TCP/UDP socket stack over e1000 and wire `ws2_32` APIs: ARP, ICMP echo, TCP handshake/data/teardown, UDP, kernel socket objects/handles, socket syscalls, `WSAStartup`, `socket`, `connect`, `send`, `recv`, `select`, name-resolution stubs, per-thread WSA error. | A PE can `socket(AF_INET, SOCK_STREAM, 0)` → connect to `127.0.0.1:port` → send/recv data in loopback. |
+| T3-02 | net | P2 | Add DHCP client for e1000 and expose the assigned address via `iphlpapi!GetAdaptersInfo`. | e1000 probe acquires an IPv4 lease and stores it in the kernel network state. |
+| T3-03 | net | P2 | Add DNS resolver for `getaddrinfo` / `gethostbyname` using UDP DNS, DHCP nameserver or fallback, and a 64-entry LRU cache. | Winsock name lookups resolve through real DNS and cache results. |
+
+### Track 4 — DirectX / graphics
+
+| ID | Scope | Priority | Task | Acceptance |
+| --- | --- | --- | --- | --- |
+| T4-01 | gfx | P1 | Make D3D11/DXGI swap chains present into the correct compositor window: map HWND to compositor rect via `SYS_WIN_HWND_TO_RECT` (68), correct `Present` coordinates, HWND-backed `GetBuffer`, and `ResizeBuffers`. | A PE clears a D3D11 swap chain and `Present`s the color in its own window. |
+| T4-02 | gfx | P2 | Implement Vulkan ICD v0 with software device, device/queue lifecycle, swapchain presentation, basic render-pass/framebuffer/command-buffer lifecycle, clear and flat-triangle draw paths; unimplemented paths return `VK_ERROR_INITIALIZATION_FAILED` without crashing. | Vulkan-capable smoke apps can create a software instance/device/swapchain and present simple output. |
+| T4-03 | gfx | P2 | Implement Intel iGPU Gen9+/Xe driver basics: PCI probe, MMIO BAR, GTT setup, command ring, 2D blitter acceleration. | BitBlt-heavy paths can use Intel blitter acceleration instead of framebuffer software fills. |
+| T4-04 | gfx | P3 | Add AMD/NVIDIA driver tracks with graceful fallback to software until real command submission exists. | Unsupported GPUs degrade cleanly to software paths. |
+
+### Track 5 — Memory manager
+
+| ID | Scope | Priority | Task | Acceptance |
+| --- | --- | --- | --- | --- |
+| T5-01 | mm | P1 | Complete `NtAllocateVirtualMemory` / `VirtualAlloc` / `VirtualFree` / `VirtualProtect`: reserve/commit split, release, guard pages, correct protection flags, `VirtualQuery` / `NtQueryVirtualMemory`, and `MEM_WRITE_WATCH` rejection. | MSVC stack-probing apps survive first-thread stack setup. |
+| T5-02 | mm | P1 | Implement multi-heap process allocator: `HeapCreate`, `HeapAlloc`, `HeapFree`, `HeapReAlloc`, `HeapSize`, `GetProcessHeap`, `HeapDestroy`, validation/compact no-ops, CRT malloc/free through the default heap. | A PE can allocate from and destroy a secondary heap without corrupting the default heap. |
+| T5-03 | mm | P2 | Implement real KASLR in the UEFI loader: memory-map scan, random 2 MiB-aligned base within a 64 MiB window, boot-info handoff, and boot-log reporting. | Two cold boots show different kernel `.text` load addresses. |
+| T5-04 | mm | P2 | Audit/complete buddy + slab allocators: coalescing, slab freelists or magazines, IRQ-safe `kmalloc` / `kfree`, and documentation of IRQ/process context safety. | Allocator behavior and context guarantees are tested and documented. |
+
+### Track 6 — Process and thread model
+
+| ID | Scope | Priority | Task | Acceptance |
+| --- | --- | --- | --- | --- |
+| T6-01 | kernel | P0 | Implement PE TLS: parse `IMAGE_DIRECTORY_ENTRY_TLS`, call callbacks before entry/DllMain, allocate per-thread TLS templates, set TEB TLS slot pointer, and implement `TlsAlloc` / `TlsSetValue` / `TlsGetValue` / `TlsFree`. | A PE with `__declspec(thread) int x = 42` reads independent `42` values from two threads. |
+| T6-02 | kernel | P1 | Implement x64 SEH: parse `.pdata`, implement `RtlLookupFunctionEntry`, `RtlVirtualUnwind`, `RtlUnwindEx`, `NtRaiseException`, context capture/restore, user exception dispatch for faults. | A PE `__try`/`__except` null write is caught and continues in the exception handler. |
+| T6-03 | kernel | P1 | Implement `CreateProcessA/W` and process/thread waiting/exit/open/terminate/duplicate handle semantics. | A parent PE creates a child PE, waits, and observes the child's exit code. |
+| T6-04 | kernel | P1 | Implement named mutex/event/semaphore namespace and open/create semantics with refcounted kernel objects. | Parent/child PEs synchronize through a named event. |
+
+### Track 7 — File system
+
+| ID | Scope | Priority | Task | Acceptance |
+| --- | --- | --- | --- | --- |
+| T7-01 | fs | P1 | Implement `FindFirstFileA/W`, `FindNextFileA/W`, `FindClose`, wildcard matching, iterator handles, and full `WIN32_FIND_DATA`. | `FindFirstFile("C:\\*.*")` iterates root files without crashing. |
+| T7-02 | fs | P1 | Implement Win32 drive-letter namespace: `C:` mapping, System32 DLL path mapping, full-path and CWD APIs, drive type/logical drives/disk-free APIs. | Opening `C:\Windows\System32\kernel32.dll` finds the DuetOS DLL. |
+| T7-03 | fs | P1 | Complete `CreateFileA/W` sharing and overlapped I/O: IOCP, `ERROR_IO_PENDING`, overlapped events, and share-mode enforcement. | A PE using overlapped file reads receives completion through `GetQueuedCompletionStatus`. |
+| T7-04 | fs | P2 | Add scoped NTFS write support: create, write, truncate, delete, rename with MFT/index/journal/bitmap updates; no compression/encryption/ADS for v0. | PEs can perform basic writes to NTFS volumes. |
+| T7-05 | fs | P2 | Add FAT32 Long File Name read/write support for VFAT 0x0F entries and UTF-16/UTF-8 conversion. | FAT32 files with names longer than 8.3 are visible and creatable. |
+
+### Track 8 — Scheduler
+
+| ID | Scope | Priority | Task | Acceptance |
+| --- | --- | --- | --- | --- |
+| T8-01 | sched | P1 | Complete MLFQ priority aging/decay, Win32 priority class/thread mappings, and work-stealing priority behavior. | A high-priority thread preempts a low-priority thread within one 10 ms tick. |
+| T8-02 | sched | P1 | Implement APC queues and alertable waits for `QueueUserAPC`, `SleepEx`, `WaitForSingleObjectEx`, and `NtQueueApcThread`. | `QueueUserAPC` wakes a target in `SleepEx(INFINITE, TRUE)` and executes the APC. |
+
+### Track 9 — Security
+
+| ID | Scope | Priority | Task | Acceptance |
+| --- | --- | --- | --- | --- |
+| T9-01 | security | P1 | Implement user-mode PE ASLR for `DYNAMICBASE` images and per-process DLL randomization with relocation. | ASLR-enabled PEs load at randomized bases recorded in the address-space ledger. |
+| T9-02 | security | P2 | Seed MSVC `/GS` `__security_cookie` from the PE load config and terminate with `STATUS_STACK_BUFFER_OVERRUN` on cookie failure. | `/GS`-protected PEs receive a randomized cookie at process init. |
+| T9-03 | security | P2 | Install CFG no-op guard stubs and document `// GAP: CFG not enforced` until bitmap checking exists. | CFG-enabled PEs do not crash on indirect-call guard checks. |
+
+### Track 10 — Build and CI
+
+| ID | Scope | Priority | Task | Acceptance |
+| --- | --- | --- | --- | --- |
+| T10-01 | build | P1 | Wire GitHub Actions CI for release build, parallel build, CTest smoke, clang-format dry-run, apt dependencies, cache, and ISO artifacts. | README shows a green CI badge from a passing workflow. |
+| T10-02 | build | P1 | Add `x86_64-kasan` preset, kernel-address sanitizer or freestanding-compatible custom shadow diagnostics, `DUETOS_KASAN=1`, and allocator gating. | `cmake --preset x86_64-kasan` builds a KASAN-diagnostic kernel. |
+| T10-03 | build | P2 | Add ThinLTO release preset/flags gated behind `DUETOS_LTO=ON` and optional CI coverage. | Release LTO build links successfully with lld. |
+| T10-04 | build | P2 | Add hosted `ctest` unit harness for Result, PE parser, VFS path resolution, registry lookup, and string helpers. | Host `ctest` runs without QEMU and covers the listed units. |
+
+### Track 11 — Kernel infrastructure gaps
+
+| ID | Scope | Priority | Task | Acceptance |
+| --- | --- | --- | --- | --- |
+| T11-01 | kernel | P1 | Complete ACPI parser coverage for RSDP/XSDT, MADT LAPIC/I/O APIC/ISO, FADT PM/reset fields, HPET validation, and documented AML gap. | CPU topology, IRQ routing, power, and clocksource setup use parsed ACPI tables. |
+| T11-02 | kernel | P1 | Implement IPC pipes/mailslots: anonymous pipes, named pipes, connect/disconnect, ring-buffer semantics, EOF, and CreateProcess stdio redirection support. | Pipe-backed stdin/stdout/stderr redirection works across parent/child processes. |
+| T11-03 | kernel | P2 | Complete registry hive persistence for HKLM/HKCU/HKU, save/load serialization, dirty flush, CRUD, and enumeration APIs. | Registry writes persist across reboot and enumeration works. |
+| T11-04 | kernel | P2 | Implement waitable timers and multimedia timers with high-resolution timekeeping and APC/event callbacks. | Waitable timers and `timeSetEvent` callbacks fire accurately. |
+| T11-05 | kernel | P2 | Implement power management: ACPI S5 shutdown, ACPI/FADT reset fallback, and S3 stubs or suspend/resume path. | `ExitWindowsEx(EWX_POWEROFF)` powers off through ACPI S5 where supported. |
+
+### Track 12 — Userland infrastructure
+
+| ID | Scope | Priority | Task | Acceptance |
+| --- | --- | --- | --- | --- |
+| T12-01 | win32 | P1 | Implement runtime DLL loading: `LoadLibraryA/W`, `GetProcAddress` including ordinals, `FreeLibrary`, `GetModuleHandleA/W`, `GetModuleFileNameA/W`, refcounts, and DllMain attach/detach. | A PE can runtime-load `user32.dll` and resolve `MessageBoxA`. |
+| T12-02 | win32 | P1 | Return plausible Windows 10 system/version info through `GetSystemInfo`, `GetNativeSystemInfo`, `GetVersionExA/W`, `RtlGetVersion`, and `IsWow64Process=FALSE`. | Version-gated apps see Windows 10 2004/AMD64-compatible data. |
+| T12-03 | win32 | P2 | Implement `winmm` waveOut APIs over HDA/audio mixer: open, prepare/write/unprepare, close, and capabilities. | A PE can play 44.1/48 kHz 16-bit stereo through `waveOut*`. |
+| T12-04 | win32 | P2 | Audit and complete C11 stdio in `msvcrt` / `ucrtbase`, prioritizing `sscanf`, `fprintf`, `setvbuf`, `fflush`, and `tmpfile`. | CRT stdio smoke tests cover the newly real functions. |
+
+### Track 13 — Documentation / wiki
+
+| ID | Scope | Priority | Task | Acceptance |
+| --- | --- | --- | --- | --- |
+| T13-01 | docs | P2 | Complete `wiki/reference/Win32-Surface-Status.md` by auditing DLL exports and live `// STUB:` / `// GAP:` inventory. | The page has a complete REAL/STUB/GAP/MISSING table for the Win32 surface. |
+| T13-02 | docs | P2 | Keep this Roadmap populated from the full project TODO and remove landed entries in the landing commit. | All imported tasks are represented here and removed as they land. |
+| T13-03 | docs | P2 | Document every assigned syscall number in `wiki/specifications/Syscall-ABI.md` with args, return, subsystem, and status. | New syscall work can detect ABI number collisions from the table. |
+
+### Track 14 — Testing
+
+| ID | Scope | Priority | Task | Acceptance |
+| --- | --- | --- | --- | --- |
+| T14-01 | test | P1 | Add PE stress fixture covering threads, mutexes, events, file I/O, registry, heap, and printf for 30 seconds. | The stress PE exits 0 and joins the smoke corpus. |
+| T14-02 | test | P1 | Add `win32_pump_test` once T1-01/T1-02 land: creates a window, pumps messages, paints on `WM_PAINT`, handles `WM_CLOSE`. | The test validates the message-pump + GDI-paint path and exits 0. |
+| T14-03 | test | P2 | Add network loopback test once T3-01 lands: listener + connector exchange 1 MiB and verify CRC32. | The loopback test exits 0 after integrity verification. |
+
+### Imported quick wins
+
+Most quick wins from the handoff already appear as real implementations in
+`Win32-Surface-Status`; keep this table only for regression-sensitive tracking
+or any item that is discovered to be incomplete during audit.
+
+| ID | Scope | Task | Acceptance |
+| --- | --- | --- | --- |
+| QW-01 | win32 | `GetComputerNameA/W` returns `DUETOS`. | Process smoke reports the expected computer name. |
+| QW-02 | win32 | `GetUserNameA/W` returns `user` or the logged-in username. | Token/process smoke reports a stable username. |
+| QW-03 | win32 | `GetTempPathA/W` returns `C:\\Temp\\` and ramfs has a temp directory. | Drive smoke can create temp paths/files. |
+| QW-04 | win32 | Windows/system directory APIs return `C:\\Windows` and `C:\\Windows\\System32`. | Process smoke reports both paths. |
+| QW-06 | win32 | `OutputDebugStringA/W` writes to the kernel serial/debug log. | Syscall stress emits debug strings without no-op loss. |
+| QW-07 | win32 | `IsDebuggerPresent` returns `FALSE`. | Anti-debug branch smoke sees non-debugger state. |
+| QW-08 | win32 | `GetProcessId(GetCurrentProcess())` matches `GetCurrentProcessId()`. | Process smoke validates both APIs. |
+| QW-09 | win32 | `MultiByteToWideChar` / `WideCharToMultiByte` support UTF-8, ACP-as-UTF-8, and OEMCP. | String/UTF-16 smoke round-trips supported code pages. |
+| QW-10 | win32 | `lstrcmp{,i}A/W`, `lstrlenA/W`, `lstrcpyA/W`, `lstrcatA/W` are thin string helpers. | String smoke validates compare/copy/concat/length. |
+| QW-11 | kernel | Flush `DUETOS_KLOG_DEFAULT` ring contents to serial on panic. | Panic logs preserve recent ring entries before halt/reset. |
+| QW-12 | build | Generate `compile_commands.json` from all presets. | Every configured preset build tree contains a compilation database. |
 
 ---
 

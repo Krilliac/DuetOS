@@ -137,7 +137,7 @@ syscall routing shows up immediately.
   `GetEnvironmentStringsW`, `FreeEnvironmentStringsW`,
   `GetSystemInfo`, `GetVersionExW`, `GetComputerNameW`,
   `GetUserNameA/W`, `GetStdHandle`, `WriteConsoleA/W`,
-  `OutputDebugStringA/W`
+  `OutputDebugStringA/W`, per-thread `GetLastError` / `SetLastError`
 - Threading: `CreateThread`, `WaitForSingleObject`,
   `WaitForMultipleObjects`, `Sleep`, `SleepEx`,
   `CreateEventW`, `SetEvent`, `ResetEvent`, `PulseEvent`,
@@ -974,27 +974,36 @@ STUB: hardware overlay, video memory paging, palette.
 
 ## 8. COM / automation
 
-### ole32.dll  (~440 LOC, ~30 exports)
+### ole32.dll  (~650 LOC, ~31 exports)
 
-> **Status:** facade-only. CoInitialize / CoUninitialize update
-> a per-thread counter; CoCreateInstance returns NULL.
+> **Status:** lightweight local COM runtime. `CoInitializeEx` /
+> `CoUninitialize` track per-thread apartment mode and init depth;
+> class lookup covers both static built-ins and process-local
+> `CoRegisterClassObject` factories.
 
 `CoInitialize{,Ex}`, `CoUninitialize`, `OleInitialize`,
-`OleUninitialize` — REAL counters. `CoTaskMemAlloc`,
+`OleUninitialize` — REAL per-thread counters with
+`RPC_E_CHANGED_MODE` on apartment-mode conflicts. `CoTaskMemAlloc`,
 `CoTaskMemFree`, `CoTaskMemRealloc` — REAL (forward to
 HeapAlloc / HeapFree).
 `CLSIDFromString`, `IIDFromString`, `StringFromCLSID`,
 `StringFromGUID2` — REAL.
-`CoCreateInstance{,Ex}`, `CoGetClassObject` — STUB return
-REGDB_E_CLASSNOTREG.
-`CoRegisterClassObject`, `CoRevokeClassObject`,
-`CoGetMalloc`, `GetRunningObjectTable`,
-`RegisterDragDrop`, `RevokeDragDrop` — STUB.
+`CoGetClassObject`, `CoCreateInstance{,Ex}` — REAL for
+registered in-process class factories plus built-in factory
+registrations for StdComponentCategoriesMgr / FileOpenDialog /
+FileSaveDialog; built-in instances expose safe `IUnknown` identity
+only for now; unknown CLSIDs return `REGDB_E_CLASSNOTREG`.
+`CoRegisterClassObject`, `CoRevokeClassObject` — REAL process-local
+factory table. `RegisterDragDrop`, `RevokeDragDrop`,
+`CoInitializeSecurity`, `CoSetProxyBlanket` — compatibility success
+facades. `CoGetMalloc`, `GetRunningObjectTable`,
+`CreateStreamOnHGlobal`, `GetHGlobalFromStream` — STUB.
 
-**MISSING entirely:** apartments / threading models, RPC
-marshalling, OBJREFs, monikers, structured storage
-(StgCreateStorageEx, etc.), persistent COM, classic OLE
-embedding.
+**MISSING entirely:** cross-process apartments, RPC marshalling,
+OBJREFs, monikers, structured storage (StgCreateStorageEx, etc.),
+persistent COM, classic OLE embedding, and a functional IFileDialog /
+native picker method surface behind the FileOpenDialog/FileSaveDialog
+registrations.
 
 ### oleaut32.dll  (~190 LOC, ~10 exports)
 

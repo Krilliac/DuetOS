@@ -6366,3 +6366,52 @@ doc helps future readers audit the trail.
 
 - **Related roadmap track(s):** Audio — HDA stream programming and
   first audible playback.
+
+---
+
+## 043 — Win32 LastError is task-local until writable TEBs land
+
+- **Scope:** `kernel/sched/sched.cpp`, `kernel/syscall/syscall.cpp`,
+  `userland/libs/kernel32/kernel32.c`
+- **Commit:** this slice
+- **Decision:** `SYS_GETLASTERROR` / `SYS_SETLASTERROR` read and write
+  a field on the scheduler `Task`, not on `Process`.
+- **Why:** Windows defines LastError as thread-local TEB state. DuetOS
+  already supports multiple Win32 threads per process, so the previous
+  process-wide slot let one thread clobber another thread's error code.
+  A full writable TEB/TLS model is larger Track 6 work; a Task field is
+  the narrowest kernel-owned per-thread storage available today.
+- **Rules out / defers:** This does not make the TEB's `LastErrorValue`
+  offset writable or observable from user code. Direct TEB field
+  semantics stay deferred to the full TEB/TLS implementation.
+- **Revisit when:** T6-01 lands writable per-thread TEB/TLS storage; at
+  that point the Task field should either mirror the TEB slot or be
+  removed in favour of direct TEB-backed reads.
+- **Related roadmap track(s):** QW-05, Track 6 (Process and Thread
+  Model).
+
+---
+
+## 2026-05-09 — Keep COM local until RPC / windowing need cross-process semantics
+
+- **Scope:** `userland/libs/ole32/ole32.c`, `userland/apps/com_smoke/com_smoke.c`
+- **Commit:** this change
+- **Decision:** The first real COM runtime is process-local: per-thread
+  `CoInitializeEx` state, an in-process `CoRegisterClassObject` table,
+  static factories for StdComponentCategoriesMgr / FileOpenDialog /
+  FileSaveDialog, and IUnknown/IClassFactory vtables. Unknown CLSIDs now
+  fail with `REGDB_E_CLASSNOTREG` rather than the older
+  class-unavailable facade.
+- **Why:** Compatibility probes overwhelmingly need local COM bootstrap
+  semantics before they need RPC, ROT, monikers, or cross-process
+  apartments. Returning the registry-style error for unknown classes lets
+  callers take their normal fallback path while known built-ins can be
+  queried and released safely.
+- **Rules out / defers:** Cross-process COM, RPC marshalling, OBJREFs,
+  structured storage, and real file-dialog UI remain separate slices. The
+  FileOpenDialog / FileSaveDialog registrations can be resolved and can
+  create safe `IUnknown` identities, but they are not usable picker
+  implementations yet.
+- **Revisit when:** shell COM objects or modal dialog work requires an
+  actual IFileDialog method surface, or rpcrt4 lands.
+- **Related roadmap track(s):** T2-01 (landed), T2-02, T14-04 (landed).

@@ -232,6 +232,13 @@ Task* CurrentTask();
 /// itself. Returns ~0 if called before SchedInit.
 u64 CurrentTaskId();
 
+/// Win32 last-error slot for the currently-running task. Windows stores
+/// LastError in the TEB, making it thread-local; DuetOS keeps the slot
+/// on Task until the full per-thread TEB/TLS model lands. Kernel-only
+/// or pre-scheduler callers read as ERROR_SUCCESS and ignore writes.
+u32 CurrentTaskWin32LastError();
+u32 SetCurrentTaskWin32LastError(u32 err);
+
 /// Read the task ID of an arbitrary `Task*`. Returns 0 for nullptr.
 /// Used by Win32 custom-diagnostics deadlock-detection to record a
 /// mutex's owner edge in the wait graph without exposing Task's

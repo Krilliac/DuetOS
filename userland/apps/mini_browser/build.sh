@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
 # Rebuild mini_browser.exe (Windows PE32+) from browser.c using mingw-w64.
-# The kernel build embeds the prebuilt .exe directly so this script only
-# needs to run when browser.c changes.
+# The kernel build now embeds the build-tree .exe produced by
+# userland/apps/build-smokes.sh; this helper remains for manual
+# one-off mini_browser rebuilds.
 #
 # Required: gcc-mingw-w64-x86-64 (Ubuntu: apt-get install gcc-mingw-w64-x86-64).
 #

@@ -554,37 +554,33 @@ void SyscallDispatch(arch::TrapFrame* frame)
 
     case SYS_GETLASTERROR:
     {
-        // Read Process.win32_last_error. Unprivileged — the
-        // slot belongs to the caller. Returns 0 if no process
-        // (shouldn't happen from ring 3, but defensive).
-        Process* proc = CurrentProcess();
-        frame->rax = (proc != nullptr) ? u64(proc->win32_last_error) : 0;
+        // Read the current Task's Win32 last-error slot. Windows
+        // LastError is thread-local; keeping it on Task preserves
+        // that contract even while the v0 TEB page is still mostly
+        // read-only scaffolding. Kernel-only callers defensively see
+        // ERROR_SUCCESS.
+        frame->rax = u64(sched::CurrentTaskWin32LastError());
         return;
     }
 
     case SYS_SETLASTERROR:
     {
-        // Write rdi (low 32 bits) into Process.win32_last_error.
-        // No return value (Win32 SetLastError is void). Still
-        // populate rax so the stub's epilogue doesn't leak the
-        // syscall number; use the PREVIOUS error so callers
-        // that want a read-modify-write can get it in one
-        // trip if we ever expose that pattern.
+        // Write rdi (low 32 bits) into the current Task's Win32
+        // last-error slot. Win32 SetLastError is void, but we keep
+        // returning the previous value in rax for diagnostics and
+        // for parity with the historical syscall behavior.
+        const u32 new_err = u32(frame->rdi & 0xFFFFFFFFULL);
+        frame->rax = u64(sched::SetCurrentTaskWin32LastError(new_err));
+
+        // Win32 custom error-provenance hook — records the RIP that
+        // just stamped the error so a debugger can answer "where did
+        // this code come from?" in one shot. The provenance record
+        // remains process-scoped because it is diagnostic metadata,
+        // not the LastError slot itself.
         Process* proc = CurrentProcess();
         if (proc != nullptr)
         {
-            frame->rax = u64(proc->win32_last_error);
-            const u32 new_err = u32(frame->rdi & 0xFFFFFFFFULL);
-            proc->win32_last_error = new_err;
-            // Win32 custom error-provenance hook — records the RIP
-            // that just stamped the error so a debugger can answer
-            // "where did this code come from?" in one shot. No-op
-            // unless kPolicyErrorProvenance is set.
             subsystems::win32::custom::OnLastErrorSet(proc, new_err, frame->rip, static_cast<u32>(SYS_SETLASTERROR));
-        }
-        else
-        {
-            frame->rax = 0;
         }
         return;
     }

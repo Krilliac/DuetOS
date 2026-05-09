@@ -1,82 +1,400 @@
 /*
- * userland/libs/ole32/ole32.c — 15 COM init + CoTaskMem stubs.
- * CoInitialize family returns S_OK. CoCreateInstance etc. return
- * E_NOTIMPL. CoTaskMem{Alloc,Free,Realloc} route to SYS_HEAP_*.
+ * userland/libs/ole32/ole32.c — minimal COM runtime for PE probes.
+ *
+ * This is still intentionally small, but it now models the contracts
+ * apps commonly test before using COM-heavy surfaces:
+ *   - per-thread CoInitializeEx / CoUninitialize state and mode checks;
+ *   - static + runtime class-factory lookup;
+ *   - IUnknown / IClassFactory objects for registered classes;
+ *   - CoTaskMem and GUID string helpers.
  */
 
 typedef int BOOL;
 typedef unsigned int DWORD;
 typedef unsigned long long SIZE_T;
 typedef unsigned long HRESULT;
+typedef unsigned long ULONG;
 typedef unsigned short wchar_t16;
 
 #define S_OK 0UL
 #define S_FALSE 1UL
 #define E_NOTIMPL 0x80004001UL
+#define E_NOINTERFACE 0x80004002UL
+#define E_POINTER 0x80004003UL
 #define E_INVALIDARG 0x80070057UL
 #define E_OUTOFMEMORY 0x8007000EUL
-#define CLASS_E_CLASSNOTAVAILABLE 0x80040111UL
+#define CLASS_E_NOAGGREGATION 0x80040110UL
+#define REGDB_E_CLASSNOTREG 0x80040154UL
+#define RPC_E_CHANGED_MODE 0x80010106UL
+
+#define COINIT_APARTMENTTHREADED 0x2u
+#define COINIT_MULTITHREADED 0x0u
+#define CLSCTX_INPROC_SERVER 0x1u
+#define REGCLS_MULTIPLEUSE 0x1u
+
+struct Guid
+{
+    unsigned int data1;
+    unsigned short data2;
+    unsigned short data3;
+    unsigned char data4[8];
+};
+
+typedef struct IUnknownVtbl IUnknownVtbl;
+typedef struct IClassFactoryVtbl IClassFactoryVtbl;
+
+typedef struct IUnknownLike
+{
+    const IUnknownVtbl* lpVtbl;
+    ULONG refs;
+    const struct Guid* clsid;
+} IUnknownLike;
+
+typedef struct IClassFactoryLike
+{
+    const IClassFactoryVtbl* lpVtbl;
+    ULONG refs;
+    const struct Guid* clsid;
+} IClassFactoryLike;
+
+struct IUnknownVtbl
+{
+    HRESULT (*QueryInterface)(IUnknownLike* self, const struct Guid* riid, void** ppv);
+    ULONG (*AddRef)(IUnknownLike* self);
+    ULONG (*Release)(IUnknownLike* self);
+};
+
+struct IClassFactoryVtbl
+{
+    HRESULT (*QueryInterface)(IClassFactoryLike* self, const struct Guid* riid, void** ppv);
+    ULONG (*AddRef)(IClassFactoryLike* self);
+    ULONG (*Release)(IClassFactoryLike* self);
+    HRESULT (*CreateInstance)(IClassFactoryLike* self, void* outer, const struct Guid* riid, void** ppv);
+    HRESULT (*LockServer)(IClassFactoryLike* self, BOOL lock);
+};
 
 /* Forward decl — CoTaskMemAlloc is defined later in this TU. */
 __declspec(dllexport) void* CoTaskMemAlloc(SIZE_T cb);
+__declspec(dllexport) void CoTaskMemFree(void* pv);
+
+static const struct Guid kIID_IUnknown = {
+    0x00000000u, 0x0000u, 0x0000u, {0xC0u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x46u}};
+static const struct Guid kIID_IClassFactory = {
+    0x00000001u, 0x0000u, 0x0000u, {0xC0u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x46u}};
+static const struct Guid kCLSID_FileOpenDialog = {
+    0xDC1C5A9Cu, 0xE88Au, 0x4DDEu, {0xA5u, 0xA1u, 0x60u, 0xF8u, 0x2Au, 0x20u, 0xAEu, 0xF7u}};
+static const struct Guid kCLSID_FileSaveDialog = {
+    0xC0B4E2F3u, 0xBA21u, 0x4773u, {0x8Du, 0xBAu, 0x33u, 0x5Eu, 0xC9u, 0x46u, 0xEBu, 0x8Bu}};
+static const struct Guid kCLSID_StdComponentCategoriesMgr = {
+    0x0002E005u, 0x0000u, 0x0000u, {0xC0u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x46u}};
+
+static int guid_equal(const void* a, const void* b)
+{
+    const unsigned char* aa = (const unsigned char*)a;
+    const unsigned char* bb = (const unsigned char*)b;
+    if (!aa || !bb)
+        return 0;
+    for (int i = 0; i < 16; ++i)
+    {
+        if (aa[i] != bb[i])
+            return 0;
+    }
+    return 1;
+}
+
+static DWORD current_tid(void)
+{
+    long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long)1) : "memory");
+    return (DWORD)rv;
+}
+
+#define COM_THREAD_SLOTS 32
+#define COM_FACTORY_SLOTS 16
+
+typedef struct ComThreadState
+{
+    DWORD used;
+    DWORD tid;
+    DWORD init_count;
+    DWORD coinit;
+} ComThreadState;
+
+typedef struct RegisteredFactory
+{
+    DWORD cookie;
+    struct Guid clsid;
+    void* factory;
+    DWORD context;
+    DWORD flags;
+} RegisteredFactory;
+
+static ComThreadState g_com_threads[COM_THREAD_SLOTS];
+static RegisteredFactory g_factories[COM_FACTORY_SLOTS];
+static DWORD g_next_cookie = 0xC0DE0001u;
+
+static ComThreadState* current_com_state(int create)
+{
+    DWORD tid = current_tid();
+    ComThreadState* empty = (ComThreadState*)0;
+    for (int i = 0; i < COM_THREAD_SLOTS; ++i)
+    {
+        if (g_com_threads[i].used && g_com_threads[i].tid == tid)
+            return &g_com_threads[i];
+        if (!empty && !g_com_threads[i].used)
+            empty = &g_com_threads[i];
+    }
+    if (!create || !empty)
+        return (ComThreadState*)0;
+    empty->used = 1;
+    empty->tid = tid;
+    empty->init_count = 0;
+    empty->coinit = COINIT_MULTITHREADED;
+    return empty;
+}
+
+static HRESULT com_initialize(DWORD coinit)
+{
+    /* Windows only allows one apartment model per thread. Ignore
+     * unsupported flag bits here; the low apartment bits are what
+     * compatibility probes check. */
+    DWORD mode = coinit & COINIT_APARTMENTTHREADED;
+    ComThreadState* st = current_com_state(1);
+    if (!st)
+        return E_OUTOFMEMORY;
+    if (st->init_count != 0)
+    {
+        if ((st->coinit & COINIT_APARTMENTTHREADED) != mode)
+            return RPC_E_CHANGED_MODE;
+        ++st->init_count;
+        return S_FALSE;
+    }
+    st->coinit = mode;
+    st->init_count = 1;
+    return S_OK;
+}
 
 __declspec(dllexport) HRESULT CoInitialize(void* reserved)
 {
     (void)reserved;
-    return S_OK;
+    return com_initialize(COINIT_APARTMENTTHREADED);
 }
 
 __declspec(dllexport) HRESULT CoInitializeEx(void* reserved, DWORD dwCoInit)
 {
     (void)reserved;
-    (void)dwCoInit;
-    return S_OK;
+    return com_initialize(dwCoInit);
 }
 
-__declspec(dllexport) void CoUninitialize(void) {}
+__declspec(dllexport) void CoUninitialize(void)
+{
+    ComThreadState* st = current_com_state(0);
+    if (!st || st->init_count == 0)
+        return;
+    --st->init_count;
+    if (st->init_count == 0)
+    {
+        st->used = 0;
+        st->tid = 0;
+        st->coinit = COINIT_MULTITHREADED;
+    }
+}
 
 __declspec(dllexport) HRESULT OleInitialize(void* reserved)
 {
     (void)reserved;
+    return com_initialize(COINIT_APARTMENTTHREADED);
+}
+
+__declspec(dllexport) void OleUninitialize(void)
+{
+    CoUninitialize();
+}
+
+static HRESULT simple_unknown_qi(IUnknownLike* self, const struct Guid* riid, void** ppv)
+{
+    if (!ppv)
+        return E_POINTER;
+    *ppv = (void*)0;
+    if (!self || !riid)
+        return E_INVALIDARG;
+    if (guid_equal(riid, &kIID_IUnknown))
+    {
+        ++self->refs;
+        *ppv = self;
+        return S_OK;
+    }
+    return E_NOINTERFACE;
+}
+
+static ULONG simple_unknown_addref(IUnknownLike* self)
+{
+    if (!self)
+        return 0;
+    return ++self->refs;
+}
+
+static ULONG simple_unknown_release(IUnknownLike* self)
+{
+    if (!self)
+        return 0;
+    if (self->refs > 0)
+        --self->refs;
+    ULONG refs = self->refs;
+    if (refs == 0)
+        CoTaskMemFree(self);
+    return refs;
+}
+
+static const IUnknownVtbl g_simple_unknown_vtbl = {simple_unknown_qi, simple_unknown_addref, simple_unknown_release};
+
+static HRESULT builtin_factory_qi(IClassFactoryLike* self, const struct Guid* riid, void** ppv)
+{
+    if (!ppv)
+        return E_POINTER;
+    *ppv = (void*)0;
+    if (!self || !riid)
+        return E_INVALIDARG;
+    if (guid_equal(riid, &kIID_IUnknown) || guid_equal(riid, &kIID_IClassFactory))
+    {
+        ++self->refs;
+        *ppv = self;
+        return S_OK;
+    }
+    return E_NOINTERFACE;
+}
+
+static ULONG builtin_factory_addref(IClassFactoryLike* self)
+{
+    if (!self)
+        return 0;
+    return ++self->refs;
+}
+
+static ULONG builtin_factory_release(IClassFactoryLike* self)
+{
+    if (!self)
+        return 0;
+    if (self->refs > 1)
+        --self->refs;
+    return self->refs;
+}
+
+static HRESULT builtin_factory_create(IClassFactoryLike* self, void* outer, const struct Guid* riid, void** ppv)
+{
+    if (!ppv)
+        return E_POINTER;
+    *ppv = (void*)0;
+    if (outer)
+        return CLASS_E_NOAGGREGATION;
+    if (!self || !riid)
+        return E_INVALIDARG;
+    IUnknownLike* obj = (IUnknownLike*)CoTaskMemAlloc(sizeof(IUnknownLike));
+    if (!obj)
+        return E_OUTOFMEMORY;
+    obj->lpVtbl = &g_simple_unknown_vtbl;
+    obj->refs = 1;
+    obj->clsid = self->clsid;
+    HRESULT hr = obj->lpVtbl->QueryInterface(obj, riid, ppv);
+    obj->lpVtbl->Release(obj);
+    return hr;
+}
+
+static HRESULT builtin_factory_lock(IClassFactoryLike* self, BOOL lock)
+{
+    (void)self;
+    (void)lock;
     return S_OK;
 }
 
-__declspec(dllexport) void OleUninitialize(void) {}
+static const IClassFactoryVtbl g_builtin_factory_vtbl = {
+    builtin_factory_qi, builtin_factory_addref, builtin_factory_release, builtin_factory_create, builtin_factory_lock};
+static IClassFactoryLike g_file_open_factory = {&g_builtin_factory_vtbl, 1, &kCLSID_FileOpenDialog};
+static IClassFactoryLike g_file_save_factory = {&g_builtin_factory_vtbl, 1, &kCLSID_FileSaveDialog};
+static IClassFactoryLike g_categories_factory = {&g_builtin_factory_vtbl, 1, &kCLSID_StdComponentCategoriesMgr};
 
-__declspec(dllexport) HRESULT CoCreateInstance(const void* rclsid, void* pUnkOuter, DWORD dwClsCtx, const void* riid,
-                                               void** ppv)
+static void* find_builtin_factory(const struct Guid* clsid)
 {
-    (void)rclsid;
-    (void)pUnkOuter;
-    (void)dwClsCtx;
-    (void)riid;
-    if (ppv)
-        *ppv = (void*)0;
-    return CLASS_E_CLASSNOTAVAILABLE;
+    if (!clsid)
+        return (void*)0;
+    if (guid_equal(clsid, &kCLSID_FileOpenDialog))
+        return &g_file_open_factory;
+    if (guid_equal(clsid, &kCLSID_FileSaveDialog))
+        return &g_file_save_factory;
+    if (guid_equal(clsid, &kCLSID_StdComponentCategoriesMgr))
+        return &g_categories_factory;
+    return (void*)0;
 }
 
-__declspec(dllexport) HRESULT CoCreateInstanceEx(const void* rclsid, void* pUnkOuter, DWORD dwClsCtx, void* pServerInfo,
-                                                 DWORD cmq, void* pResults)
+static void* find_registered_factory(const struct Guid* clsid, DWORD context)
 {
-    (void)rclsid;
-    (void)pUnkOuter;
-    (void)dwClsCtx;
-    (void)pServerInfo;
-    (void)cmq;
-    (void)pResults;
-    return CLASS_E_CLASSNOTAVAILABLE;
+    if (!clsid)
+        return (void*)0;
+    for (int i = 0; i < COM_FACTORY_SLOTS; ++i)
+    {
+        if (g_factories[i].cookie != 0 && guid_equal(&g_factories[i].clsid, clsid) &&
+            (context == 0 || (g_factories[i].context & context) != 0))
+            return g_factories[i].factory;
+    }
+    return (void*)0;
 }
 
 __declspec(dllexport) HRESULT CoGetClassObject(const void* rclsid, DWORD dwClsCtx, void* pvReserved, const void* riid,
                                                void** ppv)
 {
-    (void)rclsid;
-    (void)dwClsCtx;
     (void)pvReserved;
-    (void)riid;
-    if (ppv)
-        *ppv = (void*)0;
-    return CLASS_E_CLASSNOTAVAILABLE;
+    if (!ppv)
+        return E_POINTER;
+    *ppv = (void*)0;
+    if (!rclsid || !riid)
+        return E_INVALIDARG;
+    void* factory = find_registered_factory((const struct Guid*)rclsid, dwClsCtx ? dwClsCtx : CLSCTX_INPROC_SERVER);
+    if (!factory)
+        factory = find_builtin_factory((const struct Guid*)rclsid);
+    if (!factory)
+        return REGDB_E_CLASSNOTREG;
+    IClassFactoryLike* cf = (IClassFactoryLike*)factory;
+    return cf->lpVtbl->QueryInterface(cf, (const struct Guid*)riid, ppv);
+}
+
+__declspec(dllexport) HRESULT CoCreateInstance(const void* rclsid, void* pUnkOuter, DWORD dwClsCtx, const void* riid,
+                                               void** ppv)
+{
+    if (!ppv)
+        return E_POINTER;
+    *ppv = (void*)0;
+    IClassFactoryLike* cf = (IClassFactoryLike*)0;
+    HRESULT hr = CoGetClassObject(rclsid, dwClsCtx, (void*)0, &kIID_IClassFactory, (void**)&cf);
+    if (hr != S_OK)
+        return hr;
+    hr = cf->lpVtbl->CreateInstance(cf, pUnkOuter, (const struct Guid*)riid, ppv);
+    cf->lpVtbl->Release(cf);
+    return hr;
+}
+
+__declspec(dllexport) HRESULT CoCreateInstanceEx(const void* rclsid, void* pUnkOuter, DWORD dwClsCtx, void* pServerInfo,
+                                                 DWORD cmq, void* pResults)
+{
+    (void)pServerInfo;
+    if (cmq == 0 || !pResults)
+        return E_INVALIDARG;
+    /* MULTI_QI layout: const IID* pIID; IUnknown* pItf; HRESULT hr. */
+    struct MultiQi
+    {
+        const void* iid;
+        void* itf;
+        HRESULT hr;
+    };
+    struct MultiQi* qi = (struct MultiQi*)pResults;
+    HRESULT first_failure = S_OK;
+    for (DWORD i = 0; i < cmq; ++i)
+    {
+        qi[i].itf = (void*)0;
+        qi[i].hr = CoCreateInstance(rclsid, pUnkOuter, dwClsCtx, qi[i].iid, &qi[i].itf);
+        if (qi[i].hr != S_OK && first_failure == S_OK)
+            first_failure = qi[i].hr;
+    }
+    return first_failure;
 }
 
 /* Parse a single hex nibble. Returns 0..15 on success, -1 on miss. */
@@ -286,25 +604,47 @@ __declspec(dllexport) HRESULT CoGetMalloc(DWORD context, void** ppMalloc)
     return E_NOTIMPL;
 }
 
-/* CoRegisterClassObject / CoRevokeClassObject — class-factory
- * registration. v0 has no class-table; accept and return a fake
- * cookie so unregister doesn't trip an assert. */
+/* CoRegisterClassObject / CoRevokeClassObject — process-local
+ * class-factory table. The caller owns the factory lifetime; we keep
+ * the raw pointer and hand it back via CoGetClassObject. */
 __declspec(dllexport) HRESULT CoRegisterClassObject(const void* rclsid, void* unk, DWORD context, DWORD flags,
                                                     DWORD* cookie)
 {
-    (void)rclsid;
-    (void)unk;
-    (void)context;
-    (void)flags;
-    if (cookie)
-        *cookie = 0xC0DE0001u;
-    return S_OK;
+    if (!rclsid || !unk || !cookie)
+        return E_INVALIDARG;
+    for (int i = 0; i < COM_FACTORY_SLOTS; ++i)
+    {
+        if (g_factories[i].cookie == 0)
+        {
+            const unsigned char* src = (const unsigned char*)rclsid;
+            unsigned char* dst = (unsigned char*)&g_factories[i].clsid;
+            for (int b = 0; b < 16; ++b)
+                dst[b] = src[b];
+            g_factories[i].factory = unk;
+            g_factories[i].context = context ? context : CLSCTX_INPROC_SERVER;
+            g_factories[i].flags = flags ? flags : REGCLS_MULTIPLEUSE;
+            g_factories[i].cookie = g_next_cookie++;
+            *cookie = g_factories[i].cookie;
+            return S_OK;
+        }
+    }
+    return E_OUTOFMEMORY;
 }
 
 __declspec(dllexport) HRESULT CoRevokeClassObject(DWORD cookie)
 {
-    (void)cookie;
-    return S_OK;
+    if (cookie == 0)
+        return E_INVALIDARG;
+    for (int i = 0; i < COM_FACTORY_SLOTS; ++i)
+    {
+        if (g_factories[i].cookie == cookie)
+        {
+            g_factories[i].cookie = 0;
+            g_factories[i].factory = (void*)0;
+            return S_OK;
+        }
+    }
+    return REGDB_E_CLASSNOTREG;
 }
 
 __declspec(dllexport) HRESULT CoResumeClassObjects(void)

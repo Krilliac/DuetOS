@@ -14,7 +14,7 @@ toolchain. The build produces:
 
 - `kernel/duetos-kernel.elf` — the kernel ELF
 - `userland/libs/<dll>/<dll>.dll` — userland Win32 DLLs (PE32+)
-- `userland/apps/<app>/<app>.exe` — test fixtures (PE32+)
+- `kernel/smoke-pes/<app>/<app>.exe` — generated Win32 smoke fixtures (PE32+)
 - `duetos.iso` — hybrid ISO bootable on SeaBIOS + UEFI
 
 ## Presets
@@ -22,10 +22,16 @@ toolchain. The build produces:
 ```bash
 cmake --preset x86_64-debug       # Kernel + userland, debug
 cmake --preset x86_64-release     # Kernel + userland, release
-cmake --preset x86_64-kasan       # Debug + KASAN-equivalent (when wired)
+cmake --preset x86_64-kasan       # Debug + KASAN-equivalent diagnostics
 ```
 
-Presets live in `CMakePresets.json` at the repo root.
+Presets live in `CMakePresets.json` at the repo root. All configure
+presets inherit `CMAKE_EXPORT_COMPILE_COMMANDS=ON`, so each build tree
+contains a `compile_commands.json` database for clangd, clang-tidy, and
+other source-indexing tools after configuration. The `x86_64-kasan`
+preset enables the in-tree KASAN-equivalent diagnostics (`DUETOS_KASAN`)
+plus UBSAN, lock-order audit, and full capability-gate audit;
+`x86_64-debug-kasan` remains as a compatibility alias.
 
 ## Local Preflight Tools
 
@@ -68,6 +74,9 @@ Output trees:
 - **GNU assembler** via clang for `.S` files (Intel syntax)
 - **NASM 2.16+** if/when hand-written boot ASM lands; not required
   today
+- **MinGW-w64 x86_64 GCC** (`x86_64-w64-mingw32-gcc`) for
+  the generated Win32 smoke PE fixtures that CMake embeds from the
+  build tree
 - **Rust** via rustup nightly pinned in `rust-toolchain.toml` (when
   Rust subsystems land — see [Roadmap > Rust bring-up](../reference/Roadmap.md#rust-bring-up))
 

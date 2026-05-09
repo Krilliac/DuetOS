@@ -111,7 +111,7 @@ and [Capabilities](../security/Capabilities.md).
 
 ### What still doesn't work?
 
-- COM apartments, real `CoInitialize` / `CoCreateInstance` runtime
+- Cross-process COM/RPC, monikers, structured storage, and full native file dialogs
 - DirectX rendering beyond `Clear` + `Present` (D3D vtables exist but
   real `Draw*` returns `E_NOTIMPL`)
 - Modal dialogs, menus, common controls, scroll bars, outline fonts,

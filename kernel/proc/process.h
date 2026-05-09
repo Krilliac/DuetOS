@@ -314,19 +314,6 @@ struct Process
     u64 fs_write_window_bytes[kFsWriteWindowCount];
     u64 fs_write_window_start_tick[kFsWriteWindowCount];
 
-    // Win32 last-error slot. Read + written by the kernel32
-    // GetLastError / SetLastError stubs via SYS_GETLASTERROR /
-    // SYS_SETLASTERROR. In real Windows this lives in the TEB
-    // at offset 0x68 (thread-local). Multi-threading has since
-    // landed (SYS_THREAD_CREATE + kCapSpawnThread), but the
-    // slot still lives on the Process rather than each Task —
-    // so all threads of a process currently share a single
-    // last-error. Known gap for programs that rely on per-
-    // thread semantics; revisit when a real TEB lands. Zero-
-    // initialised by ProcessCreate — matches the Win32
-    // convention that fresh processes see ERROR_SUCCESS (0).
-    u32 win32_last_error;
-
     // Win32 process heap — a per-process free-list allocator.
     // `heap_base` is the fixed user VA where heap pages start
     // (kWin32HeapVa, 0x50000000). `heap_pages` is the count of

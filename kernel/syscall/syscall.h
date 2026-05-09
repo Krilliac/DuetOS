@@ -108,13 +108,14 @@ enum SyscallNumber : u64
     // stubs in kernel/subsystems/win32 need to distinguish.
     SYS_GETPROCID = 8,
     // SYS_GETLASTERROR / SYS_SETLASTERROR: Win32 last-error
-    // read/write. GetLastError takes no args, returns the
-    // caller's Process.win32_last_error. SetLastError takes
-    // rdi = new error code (low 32 bits), no return. Both
-    // are unprivileged — a process's own error slot is not
-    // cap-gated. In real Windows these live in the TEB at
-    // offset 0x68; v0 parks them on the Process struct and
-    // exposes them via syscalls until per-thread TEBs land.
+    // read/write. GetLastError takes no args and returns the
+    // caller's task-local Win32 error slot. SetLastError takes
+    // rdi = new error code (low 32 bits) and returns the previous
+    // value in rax for diagnostics. Both are unprivileged — a
+    // thread's own error slot is not cap-gated. Real Windows stores
+    // this in the TEB at offset 0x68; until the full writable TEB
+    // lands, DuetOS stores the value on the scheduler Task so
+    // threads in the same Process do not race each other.
     SYS_GETLASTERROR = 9,
     SYS_SETLASTERROR = 10,
 

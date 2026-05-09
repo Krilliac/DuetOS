@@ -192,11 +192,25 @@ inline constexpr bool kKaslrEnabled = false;
 #endif
 
 // -----------------------------------------------------------------
+// KASAN-equivalent diagnostics.
+//
+// Mirrors the top-level DUETOS_KASAN option. The kernel's current
+// diagnostic layer is in-tree rather than compiler-instrumented
+// shadow memory because clang rejects `-fsanitize=kernel-address`
+// for the freestanding x86_64-unknown-elf target.
+// -----------------------------------------------------------------
+#ifdef DUETOS_KASAN
+inline constexpr bool kKasanDiagnostics = (DUETOS_KASAN != 0);
+#else
+inline constexpr bool kKasanDiagnostics = false;
+#endif
+
+// -----------------------------------------------------------------
 // Link-time optimization.
 //
-// Today this knob does not propagate to compiler/linker flags — the
-// CMake option is in place so a future preset can wire `-flto` /
-// `-fuse-ld=lld` thinLTO into the toolchain without a TU edit.
+// Mirrors the top-level DUETOS_LTO option. Kernel CMake wiring
+// applies `-flto=thin` to both stage-1 and final kernel targets
+// when this is enabled.
 // -----------------------------------------------------------------
 #ifdef DUETOS_LTO
 inline constexpr bool kLtoEnabled = (DUETOS_LTO != 0);

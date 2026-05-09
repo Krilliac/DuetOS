@@ -88,7 +88,7 @@ __declspec(dllexport) HANDLE GetCurrentThread(void)
 
 /* ------------------------------------------------------------------
  * Last-error slot (syscall-backed)
- * Per-process u32 stored in Process.win32_last_error.
+ * Thread-local in kernel Task state until the full TEB surface lands.
  * ------------------------------------------------------------------ */
 
 /* SYS_GETLASTERROR = 9 */
