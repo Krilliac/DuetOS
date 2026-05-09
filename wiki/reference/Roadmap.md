@@ -642,8 +642,16 @@ extends. Next:
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
 | T9-01 | security | P1 | Implement user-mode PE ASLR for `DYNAMICBASE` images and per-process DLL randomization with relocation. | ASLR-enabled PEs load at randomized bases recorded in the address-space ledger. |
-| T9-02 | security | P2 | Seed MSVC `/GS` `__security_cookie` from the PE load config and terminate with `STATUS_STACK_BUFFER_OVERRUN` on cookie failure. (vcruntime140 ships `__security_cookie` + `__security_check_cookie` + `__report_gsfailure` + `__report_rangefailure`; the cookie holds the documented MSVC default value because per-image randomisation needs the PE loader to read `IMAGE_LOAD_CONFIG_DIRECTORY.SecurityCookie` and stamp a fresh value at load time.) | `/GS`-protected PEs receive a randomized cookie at process init. |
-
+> **T9-02** shipped: vcruntime140 ships `__security_cookie` /
+> `__security_check_cookie` / `__report_gsfailure` /
+> `__report_rangefailure`, AND the PE loader's
+> `SeedSecurityCookie` reads `IMAGE_LOAD_CONFIG_DIRECTORY.SecurityCookie`
+> and stamps a fresh per-image cookie from the kernel RNG before
+> ring-3 entry. PEs without a load config (or with a pre-/GS
+> layout) silently skip the seed — the compiler-emitted save/check
+> pair still holds because it compares the cookie to itself across
+> one function call.
+>
 > **T9-03** (CFG no-op guard stubs) shipped: vcruntime140 exports
 > `_guard_check_icall`, `_guard_dispatch_icall`,
 > `_guard_xfg_check_icall`, and `_guard_xfg_dispatch_icall`. Bitmap

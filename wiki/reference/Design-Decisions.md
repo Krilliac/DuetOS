@@ -6640,3 +6640,43 @@ doc helps future readers audit the trail.
   5–10 kernel-infra slices).
 - **Related roadmap track(s):** T11-01 (landed), T11-03
   (landed).
+
+---
+
+## 2026-05-09 — PE-loader /GS cookie randomisation (T9-02 follow-on)
+
+- **Scope:** `kernel/loader/pe_loader.cpp`,
+  `wiki/reference/Roadmap.md`
+- **Commit:** this slice
+- **Decision:** `SeedSecurityCookie(file, file_len, h, as)` runs as
+  step 3a of `PeLoad` (after relocations, before TLS gate). The
+  helper reads the PE's `IMAGE_LOAD_CONFIG_DIRECTORY` (data directory
+  10), checks that its `Size` field covers the SecurityCookie
+  field at offset 0x58, generates a 48-bit random cookie via
+  `duetos::core::RandomU64()` (avoiding zero and the documented
+  MSVC default `0x00002B992DDFA232`), and writes it directly into
+  the loaded image at the SecurityCookie VA using the same
+  per-page frame-lookup pattern `ApplyRelocations` uses. PEs
+  without a load config, with a pre-/GS layout, or with the
+  cookie VA in an unmapped page silently skip — the compiler's
+  save/check pair still detects real corruption because it
+  compares the cookie to itself across one function call.
+- **Why:** Closes the remaining gap in T9-02. Without per-image
+  randomisation, every process saw the same default cookie value
+  vcruntime140 ships, which makes the `/GS` check trivial to
+  bypass with a known overflow. With this slice, each spawned PE
+  gets a fresh value seeded from RDSEED/RDRAND (with a splitmix
+  fallback), and the cookie is unique per process.
+- **Rules out / defers:** The cookie's high 16 bits are zeroed
+  (matches MSVC's convention for keeping the value usable as a
+  SEH key). DLL load paths (`DllLoad`) still don't seed
+  per-DLL cookies — they use the static default in
+  vcruntime140's data section. That's the next follow-on; PE-side
+  randomisation is the more important seal because the main
+  image owns the stack frames where /GS overflow detection runs.
+- **Revisit when:** the DLL loader gains the same cookie-seeding
+  step, or the PE loader needs to honour additional
+  IMAGE_LOAD_CONFIG_DIRECTORY fields (CFG bitmap pointer,
+  GuardCFCheckFunctionPointer patching) — these expand naturally
+  on the same plumbing.
+- **Related roadmap track(s):** T9-02 (landed).
