@@ -5329,6 +5329,102 @@ __declspec(dllexport) unsigned short GetActiveProcessorGroupCount(void)
     return 1;
 }
 
+/* SetThreadDescription / GetThreadDescription — Windows 10
+ * thread-naming surface. Many modern apps (Edge, Chrome, .NET
+ * runtimes) call these at thread spawn for diagnostic naming.
+ * v0 stores the name in a process-local 16-slot table keyed by
+ * the supplied thread handle (the low 32 bits — usually a TID).
+ * Cross-thread reads work; cross-process reads do not (the
+ * table is per-process). Returns S_OK on success. */
+typedef long HRESULT; /* signed 32-bit; 0 = S_OK; high bit = failure. */
+#define WIN32_THREAD_NAME_SLOTS 16
+#define WIN32_THREAD_NAME_LEN 64
+
+typedef struct Win32ThreadNameSlot
+{
+    int in_use;
+    unsigned long long handle_key;
+    wchar_t16 name[WIN32_THREAD_NAME_LEN];
+} Win32ThreadNameSlot;
+
+static Win32ThreadNameSlot g_thread_names[WIN32_THREAD_NAME_SLOTS];
+
+static void win32_wname_copy(const wchar_t16* src, wchar_t16* dst, int cap)
+{
+    int i = 0;
+    if (src)
+    {
+        for (; src[i] && i < cap - 1; ++i)
+            dst[i] = src[i];
+    }
+    dst[i] = 0;
+}
+
+__declspec(dllexport) HRESULT SetThreadDescription(HANDLE thread, const wchar_t16* name)
+{
+    unsigned long long key = (unsigned long long)thread;
+    /* GetCurrentThread pseudo-handle (-2) → caller's TID. */
+    if (thread == (HANDLE)(long long)-2 || thread == (HANDLE)0)
+        key = (unsigned long long)syscall_get_tid();
+    int free_idx = -1;
+    for (int i = 0; i < WIN32_THREAD_NAME_SLOTS; ++i)
+    {
+        if (g_thread_names[i].in_use && g_thread_names[i].handle_key == key)
+        {
+            win32_wname_copy(name, g_thread_names[i].name, WIN32_THREAD_NAME_LEN);
+            return 0; /* S_OK */
+        }
+        if (!g_thread_names[i].in_use && free_idx < 0)
+            free_idx = i;
+    }
+    if (free_idx < 0)
+        return 0; /* Table full — no harm; pretend success. */
+    g_thread_names[free_idx].in_use = 1;
+    g_thread_names[free_idx].handle_key = key;
+    win32_wname_copy(name, g_thread_names[free_idx].name, WIN32_THREAD_NAME_LEN);
+    return 0;
+}
+
+/* GetThreadDescription — caller owns the returned buffer; Win32
+ * uses LocalAlloc internally and the caller LocalFrees. v0
+ * routes through SYS_HEAP_ALLOC (=11) for the same lifetime. */
+__declspec(dllexport) HRESULT GetThreadDescription(HANDLE thread, wchar_t16** out_name)
+{
+    if (out_name == (wchar_t16**)0)
+        return 0x80070057UL; /* E_INVALIDARG */
+    *out_name = (wchar_t16*)0;
+    unsigned long long key = (unsigned long long)thread;
+    if (thread == (HANDLE)(long long)-2 || thread == (HANDLE)0)
+        key = (unsigned long long)syscall_get_tid();
+    const wchar_t16* found = (const wchar_t16*)0;
+    for (int i = 0; i < WIN32_THREAD_NAME_SLOTS; ++i)
+    {
+        if (g_thread_names[i].in_use && g_thread_names[i].handle_key == key)
+        {
+            found = g_thread_names[i].name;
+            break;
+        }
+    }
+    /* Name length + NUL. Allocate via SYS_HEAP_ALLOC. */
+    int len = 0;
+    if (found)
+    {
+        while (found[len])
+            ++len;
+    }
+    long long rv;
+    long long bytes = (long long)((len + 1) * (long long)sizeof(wchar_t16));
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)11), "D"(bytes) : "memory");
+    if (rv == 0)
+        return 0x8007000EUL; /* E_OUTOFMEMORY */
+    wchar_t16* buf = (wchar_t16*)rv;
+    for (int i = 0; i < len; ++i)
+        buf[i] = found[i];
+    buf[len] = 0;
+    *out_name = buf;
+    return 0;
+}
+
 /* GetSystemInfo / GetNativeSystemInfo — populate SYSTEM_INFO
  * (48 bytes). Apps query this for page size + processor count. */
 __declspec(dllexport) void GetSystemInfo(void* info)
