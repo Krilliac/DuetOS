@@ -655,13 +655,19 @@ extends. Next:
 > GetDriveType{A,W}, GetCurrentDirectory{A,W}, SetCurrentDirectory{A,W},
 > GetFullPathName{A,W}, GetDiskFreeSpace{A,W}, GetVolumeInformation{A,W}.
 > The `C:` drive maps onto the ramfs root and System32 DLL paths
-> resolve through the Win32 thunks page.
+> resolve through the Win32 thunks page. **T7-05** (FAT32 LFN read +
+> write for VFAT 0x0F entries) shipped: `kernel/fs/fat32_dir.cpp`
+> walks LFN fragment chains and stitches the UTF-16 codepoints into
+> `DirEntry::name`; `kernel/fs/fat32_create.cpp` writes the
+> SFN-checksummed LFN sequence + 8.3 fallback for any name that
+> needs case preservation, lower-case characters, or > 8.3 length.
+> Mixed 8.3 / LFN reads round-trip; UTF-16 / UTF-8 conversion runs
+> through the shared LFN encode/decode helpers.
 
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
 | T7-03 | fs | P1 | Complete `CreateFileA/W` sharing and overlapped I/O: IOCP, `ERROR_IO_PENDING`, overlapped events, and share-mode enforcement. | A PE using overlapped file reads receives completion through `GetQueuedCompletionStatus`. |
 | T7-04 | fs | P2 | Add scoped NTFS write support: create, write, truncate, delete, rename with MFT/index/journal/bitmap updates; no compression/encryption/ADS for v0. | PEs can perform basic writes to NTFS volumes. |
-| T7-05 | fs | P2 | Add FAT32 Long File Name read/write support for VFAT 0x0F entries and UTF-16/UTF-8 conversion. | FAT32 files with names longer than 8.3 are visible and creatable. |
 
 ### Track 8 — Scheduler
 
