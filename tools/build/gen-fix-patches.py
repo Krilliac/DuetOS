@@ -69,6 +69,88 @@ DETECTORS = {
     6: "loader_reject",
 }
 
+# FaultKind enum from kernel/diag/fault_react.h. Used by the
+# SoftFaultRecov template to decode `ctx_a` for records that come
+# out of `FaultReactDispatch` (RetryNow / RestartDomain branches).
+# Records with `source_pin == "trap.recov"` come from the trap-
+# context extable path and use `caller_rip` instead.
+FAULT_KIND_NAMES = {
+    0: "device-timeout",
+    1: "dma-error",
+    2: "unexpected-status",
+    3: "firmware-lied",
+    4: "internal-invariant",
+    5: "hung",
+    6: "retry-exhausted",
+    7: "kernel-page-fault",
+    8: "user-page-fault",
+    9: "memory-corruption",
+    10: "stack-canary-failed",
+    11: "soft-lockup",
+    12: "unknown",
+}
+
+# Per-FaultKind suggested next-action templates. Each line is the
+# headline advice rendered into the markdown brief; the detail
+# beneath comes from the per-record fields.
+FAULT_KIND_FOLLOWUP = {
+    "device-timeout": (
+        "Extend the per-device timeout budget OR add a device-quirks "
+        "entry for the responder. A recurring DeviceTimeout that "
+        "recovers via retry usually means the spec-defined timeout "
+        "was too tight for this silicon revision."
+    ),
+    "dma-error": (
+        "Audit the DMA descriptor build path for cache-line alignment "
+        "and the IOMMU permission window. A single DmaError that "
+        "recovered via domain restart is usually a stale TLB entry; "
+        "repeats under sustained load mean the descriptor itself is "
+        "wrong."
+    ),
+    "unexpected-status": (
+        "The device returned a status word the driver couldn't decode. "
+        "Add the observed status to the device's status-decoder table "
+        "(if the value is in the spec) or to the device-quirks list "
+        "(if it's a vendor extension). Repeated recoveries with the "
+        "same caller_rip mean the decoder is missing a real spec "
+        "value, not a vendor quirk."
+    ),
+    "firmware-lied": (
+        "A device descriptor / capability word is inconsistent with "
+        "later behaviour. Tighten the bring-up validation so the "
+        "kernel rejects the device early rather than restarting "
+        "the domain at first use."
+    ),
+    "internal-invariant": (
+        "A subsystem state machine entered an invalid state and the "
+        "domain restarted. Trace the invariant back to its writers "
+        "(grep the offending field). A recurring InternalInvariant "
+        "means a writer is missing a transition; a one-off may be "
+        "a torn read across a missing memory barrier."
+    ),
+    "hung": (
+        "A subsystem thread missed its watchdog deadline. If the "
+        "subsystem is a poller, audit the poll budget. If it's an "
+        "IRQ-driven worker, check whether the wake path is racing "
+        "the sleep path."
+    ),
+    "retry-exhausted": (
+        "RetryWithBackoff gave up. Either the underlying operation "
+        "is fundamentally broken (treat as a hard fault, not a "
+        "retry candidate) or the budget needs a separate per-call-"
+        "site `RetryPolicy` that admits more attempts."
+    ),
+    "user-page-fault": (
+        "A ring-3 task touched memory it had no right to. The "
+        "dispatcher killed it (Class C) and recorded the recovery; "
+        "the userland fix lives in the task itself. Repeated "
+        "recoveries with the same `source` may indicate a "
+        "kernel/user ABI mismatch the kernel can detect earlier "
+        "(e.g. a syscall arg validation gap)."
+    ),
+}
+
+
 HEADER_FMT = struct.Struct("<IIII")
 RECORD_FMT = struct.Struct("<IIQQQQIHBB40s40s")
 assert RECORD_FMT.size == RECORD_STRIDE
@@ -704,6 +786,183 @@ def synth_syscall_brief(r: FixRecord, num: int) -> str:
     )
 
 
+def _soft_fault_priority(repeat: int) -> tuple[str, str]:
+    """Bucket the repeat_count into a triage priority.
+
+    SoftFaultRecov fires once per (detector, source_pin) and then dedupes
+    onto repeat_count. A single fire is the expected "we caught a one-
+    off"; a few hits is the "look at this when convenient" tier; many
+    hits is "this path is hot and the workaround is masking a real bug."
+    """
+    if repeat <= 2:
+        return ("LOW", "expected one-off; note for awareness")
+    if repeat <= 10:
+        return ("MEDIUM", "investigate: repeated recovery may indicate a real flake")
+    return ("HIGH", "WARNING: hot path; the workaround is masking a real bug — fix or upgrade the policy")
+
+
+def synth_soft_fault_recov_brief(r: FixRecord) -> Action:
+    """Generate a structured markdown brief for a SoftFaultRecov record.
+
+    SoftFaultRecov has two production producers (kernel/diag/fix_journal.h
+    documents both):
+
+      1. `source_pin == "trap.recov"` — the trap-context extable-fixup
+         path in `kernel/arch/x86_64/traps.cpp`. `caller_rip` holds the
+         faulting RIP (the kernel-mode #PF / #GP that was caught);
+         `ctx_a` holds the same RIP (deferred-record path stores it
+         in both slots). `ctx_b` is unused. The reviewer's lever is
+         `addr2line` on `caller_rip` against the kernel ELF.
+
+      2. `source_pin` shaped like a subsystem id (e.g. `drivers/usb/xhci`,
+         `kernel/health`, `diag/soft-lockup`) — the fault-react
+         dispatcher's RetryNow / RestartDomain branches. `ctx_a` holds
+         the FaultKind (decoded via FAULT_KIND_NAMES); `ctx_b` holds
+         either the attempt_count (RetryNow) or the FaultDomainId
+         (RestartDomain). `hint` discriminates which branch fired:
+         "fault-react: caller-retry advised; ..." vs
+         "fault-react: domain restarted; ...".
+
+    The brief is a `kind="note"` Action — SoftFaultRecov never has a
+    safe mechanical patch (the right fix is always domain-specific
+    and human-judged), so the output is advisory by design. Decision
+    #016 forbids the kernel from auto-applying anything anyway.
+    """
+    priority, priority_note = _soft_fault_priority(r.repeat)
+    is_trap = r.source_pin.strip() == "trap.recov"
+    is_retry = r.hint.startswith("fault-react: caller-retry")
+    is_restart = r.hint.startswith("fault-react: domain restarted")
+
+    lines: list[str] = []
+    lines.append(f"**Priority: {priority}** — {priority_note}")
+    lines.append("")
+    lines.append(f"Recovery has fired **{r.repeat}** time(s) since boot at this site.")
+    lines.append("")
+
+    if is_trap:
+        lines.append("### Source: extable trap-recovery path")
+        lines.append("")
+        lines.append(
+            "A kernel-mode #PF or #GP at the faulting RIP below was caught "
+            "by an extable row, the fixup ran, and execution resumed. The "
+            "kernel image at boot installed a safe-touch helper (e.g. the "
+            "user-copy fault fixup) that knew how to recover."
+        )
+        lines.append("")
+        lines.append(f"- Faulting RIP: `0x{r.caller_rip:016x}`")
+        lines.append(f"- Fixup RIP:    `0x{r.ctx_a:016x}` (jumped to)")
+        lines.append("")
+        lines.append("**Recommended next step:**")
+        lines.append("")
+        lines.append(
+            "1. Resolve the faulting RIP to a source line:\n"
+            "   ```sh\n"
+            f"   tools/debug/symbolize.sh build/x86_64-release/kernel/duetos-kernel.elf 0x{r.caller_rip:x}\n"
+            "   ```"
+        )
+        lines.append(
+            "2. Inspect the touch site. If the touch is on user memory, "
+            "verify the caller validated the pointer first. If the touch "
+            "is on kernel memory, the fault probably indicates a stale "
+            "mapping or a torn allocation — fix the producer, do not "
+            "rely on the extable to keep absorbing it."
+        )
+        if r.repeat >= 10:
+            lines.append(
+                "3. **Hot path** — at this repeat_count the fixup is "
+                "no longer an exception path; consider replacing the "
+                "raw touch with a `Try*` variant that returns "
+                "`Result<T, FaultKind>` instead of relying on extable "
+                "rescue."
+            )
+    elif is_retry:
+        kind_name = FAULT_KIND_NAMES.get(r.ctx_a, f"fault-kind#{r.ctx_a}")
+        followup = FAULT_KIND_FOLLOWUP.get(kind_name, "")
+        lines.append("### Source: fault-react `RetryNow` branch")
+        lines.append("")
+        lines.append(
+            f"The fault-react dispatcher told the caller in `{r.source_pin}` "
+            f"to retry a `{kind_name}` (Class D / transient hardware). The "
+            f"caller's previous attempt count was **{r.ctx_b}** before the "
+            f"recovery."
+        )
+        lines.append("")
+        lines.append(f"- Subsystem source: `{r.source_pin}`")
+        lines.append(f"- FaultKind:        `{kind_name}` (ctx_a=0x{r.ctx_a:x})")
+        lines.append(f"- Attempt count:    `{r.ctx_b}`")
+        lines.append(f"- Severity:         `{r.severity}`")
+        if followup:
+            lines.append("")
+            lines.append("**Recommended next step:** " + followup)
+        if r.ctx_b >= 3:
+            lines.append("")
+            lines.append(
+                "**Heads-up:** attempt_count ≥ 3 means the caller has "
+                "burned multiple retries before recovery. Consider "
+                "wrapping the call in `RetryWithBackoff` "
+                "(`kernel/diag/recovery.h`) so the budget is bounded "
+                "and the policy is one-line auditable."
+            )
+    elif is_restart:
+        kind_name = FAULT_KIND_NAMES.get(r.ctx_a, f"fault-kind#{r.ctx_a}")
+        followup = FAULT_KIND_FOLLOWUP.get(kind_name, "")
+        lines.append("### Source: fault-react `RestartDomain` branch")
+        lines.append("")
+        lines.append(
+            f"The fault-react dispatcher restarted fault-domain "
+            f"**id={r.ctx_b}** in response to a `{kind_name}` reported "
+            f"by `{r.source_pin}`. The domain marker fired; the "
+            f"watchdog will pick the restart up on its next tick."
+        )
+        lines.append("")
+        lines.append(f"- Subsystem source: `{r.source_pin}`")
+        lines.append(f"- FaultKind:        `{kind_name}` (ctx_a=0x{r.ctx_a:x})")
+        lines.append(f"- FaultDomainId:    `{r.ctx_b}`")
+        lines.append(f"- Severity:         `{r.severity}`")
+        if followup:
+            lines.append("")
+            lines.append("**Recommended next step:** " + followup)
+        if r.repeat >= 5:
+            lines.append("")
+            lines.append(
+                "**Restart loop suspected** — five-plus restarts of the "
+                "same domain in one boot means the restart isn't fixing "
+                "the underlying state. Either the fault is non-transient "
+                "(promote the Class B reaction to Halt for this kind), "
+                "or the domain's re-init path isn't actually clearing "
+                "the failing condition (audit the per-domain "
+                "`SubsystemRestart` callback)."
+            )
+    else:
+        lines.append("### Source: unrecognised SoftFaultRecov producer")
+        lines.append("")
+        lines.append(
+            f"Pin `{r.source_pin}` doesn't match either documented "
+            f"producer (`trap.recov` extable path or fault-react "
+            f"dispatcher pin). Either a new producer was added without "
+            f"updating this template, or the record is from an older "
+            f"kernel. Hint: `{r.hint or '(none)'}`."
+        )
+
+    lines.append("")
+    lines.append("---")
+    lines.append("Journal record:")
+    lines.append("```")
+    lines.append(f"seq         = {r.seq}")
+    lines.append(f"repeat      = {r.repeat}")
+    lines.append(f"ts_ns       = {r.ts_ns}")
+    lines.append(f"caller_rip  = 0x{r.caller_rip:016x}")
+    lines.append(f"ctx_a       = 0x{r.ctx_a:016x}")
+    lines.append(f"ctx_b       = 0x{r.ctx_b:016x}")
+    lines.append(f"source_pin  = {r.source_pin!r}")
+    lines.append(f"hint        = {r.hint!r}")
+    lines.append(f"severity    = {r.severity}")
+    lines.append("```")
+
+    title = f"Soft-fault recovery [{priority}] at `{r.source_pin}` (×{r.repeat})"
+    return Action(kind="note", title=title, body="\n".join(lines), filename=None)
+
+
 # ---------------------------------------------------------------- per-record action
 
 
@@ -816,19 +1075,7 @@ def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path) 
                 )
             )
         elif r.detector_name == "soft_fault_recov":
-            actions.append(
-                Action(
-                    kind="note",
-                    title=f"Soft-fault recovery hit: `{r.source_pin}`",
-                    body=(
-                        f"A retry-with-backoff path succeeded after at least one "
-                        f"failure at `{r.source_pin}`. Investigate root cause; "
-                        f"the journal pin identifies the call site. Hint: "
-                        f"{r.hint or '(none)'}."
-                    ),
-                    filename=None,
-                )
-            )
+            actions.append(synth_soft_fault_recov_brief(r))
         elif r.detector_name == "loader_reject":
             actions.append(
                 Action(
