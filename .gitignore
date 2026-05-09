@@ -45,6 +45,8 @@ Makefile
 *.dylib
 *.dll
 *.exe
+userland/apps/**/*.exe
+!userland/apps/windows_kill/windows-kill.exe
 *.pdb
 *.gch
 *.pch

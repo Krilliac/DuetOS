@@ -1,16 +1,39 @@
 #!/usr/bin/env bash
 #
-# Rebuild every PE smoke app via mingw-w64. The kernel build embeds
-# the prebuilt .exe files directly so this script only needs to run
-# when one of the C sources changes.
+# Rebuild every PE smoke app via mingw-w64. By default this writes
+# beside each source for local manual testing; CMake passes --out-dir
+# so kernel builds consume generated PEs from the build tree instead
+# of tracked executable artifacts.
 #
 # Required: gcc-mingw-w64-x86-64 (Ubuntu: apt-get install gcc-mingw-w64-x86-64).
 #
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+OUT_DIR=""
+if [[ $# -gt 0 ]]; then
+    case "$1" in
+        --out-dir)
+            if [[ $# -ne 2 ]]; then
+                echo "usage: $0 [--out-dir DIR]" >&2
+                exit 64
+            fi
+            OUT_DIR="$2"
+            ;;
+        *)
+            echo "usage: $0 [--out-dir DIR]" >&2
+            exit 64
+            ;;
+    esac
+fi
+
 cd "${SCRIPT_DIR}"
 
-CC=x86_64-w64-mingw32-gcc
+CC=${CC:-x86_64-w64-mingw32-gcc}
+if ! command -v "$CC" >/dev/null 2>&1; then
+    echo "error: $CC is required to build smoke PE fixtures" >&2
+    echo "hint: install gcc-mingw-w64-x86-64 or set CC to a compatible cross compiler" >&2
+    exit 127
+fi
 COMMON_FLAGS=(
     -nostdlib -ffreestanding -fno-stack-protector -mno-stack-arg-probe
     -e mainCRTStartup -Wl,--subsystem,console -Wl,--entry,mainCRTStartup
@@ -157,9 +180,17 @@ for app in "${!APPS[@]}"; do
     fi
     # The kernel CMake embed function looks for <app>/<app>.exe;
     # mini_browser predates that convention and uses browser.exe.
-    out="$app/${app}.exe"
-    if [[ "$app" == "mini_browser" ]]; then
-        out="$app/browser.exe"
+    if [[ -n "$OUT_DIR" ]]; then
+        mkdir -p "$OUT_DIR/$app"
+        out="$OUT_DIR/$app/${app}.exe"
+        if [[ "$app" == "mini_browser" ]]; then
+            out="$OUT_DIR/$app/browser.exe"
+        fi
+    else
+        out="$app/${app}.exe"
+        if [[ "$app" == "mini_browser" ]]; then
+            out="$app/browser.exe"
+        fi
     fi
     "$CC" "${COMMON_FLAGS[@]}" -o "$out" "$src" ${APPS[$app]}
     printf '  %-16s %d bytes\n' "$app" "$(stat -c%s "$out")"

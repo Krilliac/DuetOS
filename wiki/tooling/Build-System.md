@@ -14,7 +14,7 @@ toolchain. The build produces:
 
 - `kernel/duetos-kernel.elf` — the kernel ELF
 - `userland/libs/<dll>/<dll>.dll` — userland Win32 DLLs (PE32+)
-- `userland/apps/<app>/<app>.exe` — test fixtures (PE32+)
+- `kernel/smoke-pes/<app>/<app>.exe` — generated Win32 smoke fixtures (PE32+)
 - `duetos.iso` — hybrid ISO bootable on SeaBIOS + UEFI
 
 ## Presets
@@ -74,6 +74,9 @@ Output trees:
 - **GNU assembler** via clang for `.S` files (Intel syntax)
 - **NASM 2.16+** if/when hand-written boot ASM lands; not required
   today
+- **MinGW-w64 x86_64 GCC** (`x86_64-w64-mingw32-gcc`) for
+  the generated Win32 smoke PE fixtures that CMake embeds from the
+  build tree
 - **Rust** via rustup nightly pinned in `rust-toolchain.toml` (when
   Rust subsystems land — see [Roadmap > Rust bring-up](../reference/Roadmap.md#rust-bring-up))
 

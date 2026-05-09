@@ -265,36 +265,53 @@ add_custom_command(
     VERBATIM)
 list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_WINKILL_HEADER}")
 
+# Source-built Win32 smoke PE fixtures. These used to be checked-in
+# .exe files; keep them generated in the build tree so PRs do not carry
+# rebuilt executable artifacts. The helper script still supports manual
+# in-tree rebuilds, but CMake always drives it with --out-dir.
+set(DUETOS_SMOKE_PE_BUILD_SCRIPT "${CMAKE_SOURCE_DIR}/userland/apps/build-smokes.sh")
+set(DUETOS_SMOKE_PE_BUILD_DIR    "${CMAKE_CURRENT_BINARY_DIR}/smoke-pes")
+set(DUETOS_SMOKE_PE_STAMP        "${DUETOS_SMOKE_PE_BUILD_DIR}/.stamp")
+file(GLOB_RECURSE DUETOS_SMOKE_PE_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_SOURCE_DIR}/userland/apps/*.c")
+add_custom_command(
+    OUTPUT "${DUETOS_SMOKE_PE_STAMP}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${DUETOS_SMOKE_PE_BUILD_DIR}"
+    COMMAND "${DUETOS_SMOKE_PE_BUILD_SCRIPT}" --out-dir "${DUETOS_SMOKE_PE_BUILD_DIR}"
+    COMMAND "${CMAKE_COMMAND}" -E touch "${DUETOS_SMOKE_PE_STAMP}"
+    DEPENDS "${DUETOS_SMOKE_PE_BUILD_SCRIPT}" ${DUETOS_SMOKE_PE_SOURCES}
+    COMMENT "Compiling source-built Win32 smoke PE fixtures"
+    VERBATIM)
+add_custom_target(duetos-smoke-pes DEPENDS "${DUETOS_SMOKE_PE_STAMP}")
+
 # mini_browser.exe — minimal WinSock 2 PE that does an HTTP/1.0 GET to
-# www.google.com. Source is userland/apps/mini_browser/browser.c; the
-# prebuilt PE checked into the tree is what gets embedded so the
-# kernel build doesn't depend on mingw-w64 being installed. Rebuild
-# via userland/apps/mini_browser/build.sh when the source changes.
-set(DUETOS_MINIBROWSER_SRC    "${CMAKE_SOURCE_DIR}/userland/apps/mini_browser/browser.exe")
+# www.google.com. Source is userland/apps/mini_browser/browser.c and
+# CMake now embeds the build-tree PE produced by build-smokes.sh.
+set(DUETOS_MINIBROWSER_SRC    "${DUETOS_SMOKE_PE_BUILD_DIR}/mini_browser/browser.exe")
 set(DUETOS_MINIBROWSER_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_minibrowser_pe.h")
 add_custom_command(
     OUTPUT "${DUETOS_MINIBROWSER_HEADER}"
     COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
             "${DUETOS_MINIBROWSER_SRC}" "${DUETOS_MINIBROWSER_HEADER}"
             kBinMiniBrowserBytes --namespace "duetos::fs::generated"
-    DEPENDS "${DUETOS_MINIBROWSER_SRC}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+    DEPENDS "${DUETOS_SMOKE_PE_STAMP}" "${DUETOS_EMBED_BLOB_SCRIPT}"
     COMMENT "Embedding mini_browser PE /bin/mini_browser.exe"
     VERBATIM)
 list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_MINIBROWSER_HEADER}")
 
 # Surface-coverage PE smoke apps. Each one is a self-contained
-# console PE (~10 KB) targeting a single Win32 API surface.
-# Source lives in userland/apps/<name>/<name>.c; rebuild with
-# userland/apps/build-smokes.sh when sources change.
+# console PE (~10 KB) targeting a single Win32 API surface. Source
+# lives in userland/apps/<name>/<name>.c; CMake embeds build-tree
+# outputs so generated .exe files stay out of git.
 function(duetos_embed_smoke_pe app_name symbol)
-    set(_src "${CMAKE_SOURCE_DIR}/userland/apps/${app_name}/${app_name}.exe")
+    set(_src "${DUETOS_SMOKE_PE_BUILD_DIR}/${app_name}/${app_name}.exe")
     set(_hdr "${CMAKE_CURRENT_BINARY_DIR}/generated_${app_name}_pe.h")
     add_custom_command(
         OUTPUT "${_hdr}"
         COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
                 "${_src}" "${_hdr}"
                 "${symbol}" --namespace "duetos::fs::generated"
-        DEPENDS "${_src}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+        DEPENDS "${DUETOS_SMOKE_PE_STAMP}" "${DUETOS_EMBED_BLOB_SCRIPT}"
         COMMENT "Embedding ${app_name} PE"
         VERBATIM)
     set(DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_KERNEL_SHARED_SOURCES}" "${_hdr}" PARENT_SCOPE)
