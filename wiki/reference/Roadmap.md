@@ -663,7 +663,7 @@ extends. Next:
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
 | T8-01 | sched | P1 | Complete MLFQ priority aging/decay, Win32 priority class/thread mappings, and work-stealing priority behavior. | A high-priority thread preempts a low-priority thread within one 10 ms tick. |
-| T8-02 | sched | P1 | Implement APC queues and alertable waits for `QueueUserAPC`, `SleepEx`, `WaitForSingleObjectEx`, and `NtQueueApcThread`. (Process-local single-thread APC queue v0 landed: `QueueUserAPC` enqueues callbacks into a 16-slot per-process table; `SleepEx(_, TRUE)` and `WaitForSingleObjectEx(_, _, TRUE)` drain pending APCs for the calling thread and return `WAIT_IO_COMPLETION (0xC0)`. Cross-thread APC delivery still needs kernel-side per-thread APC queue + scheduler wake.) | `QueueUserAPC` wakes a target in `SleepEx(INFINITE, TRUE)` and executes the APC. |
+| T8-02 | sched | P1 | Implement APC queues and alertable waits for `QueueUserAPC`, `SleepEx`, `WaitForSingleObjectEx`, and `NtQueueApcThread`. (Process-local APC queue v0 landed: `QueueUserAPC` enqueues callbacks into a 16-slot per-process table; `SleepEx(_, TRUE)` chunks the sleep into 10ms slices and polls the queue between each, so APCs queued from a peer thread fire within ~10ms — including the `SleepEx(INFINITE, TRUE)` case. `WaitForSingleObjectEx(_, _, TRUE)` still only drains self-queued APCs at entry; chunked alertable handle-wait still needs kernel-side per-thread APC + scheduler wake.) | `QueueUserAPC` wakes a target in `SleepEx(INFINITE, TRUE)` and executes the APC. |
 
 ### Track 9 — Security
 

@@ -3631,15 +3631,58 @@ __declspec(dllexport) DWORD WaitForSingleObjectEx(HANDLE h, DWORD timeout_ms, BO
 
 /* SleepEx(dwMilliseconds, bAlertable) — alertable variant of Sleep.
  * If bAlertable=TRUE and APCs are pending, fire them and return
- * WAIT_IO_COMPLETION; otherwise sleep the requested duration. */
+ * WAIT_IO_COMPLETION; otherwise sleep the requested duration.
+ *
+ * Cross-thread APC delivery: when alertable, the sleep is chunked
+ * into 10ms slices so an APC queued from another thread (which
+ * lands in the process-wide g_apc_queue table) is observed within
+ * one slice. Without chunking, a thread asleep in SleepEx(INFINITE,
+ * TRUE) would never observe an APC queued from a peer until its
+ * own timer fired. The chunk size is small enough to keep the
+ * cross-thread wake latency bounded but large enough that the
+ * syscall traffic from a long Sleep is still amortised. */
 __declspec(dllexport) DWORD SleepEx(DWORD dwMilliseconds, BOOL bAlertable)
 {
     if (bAlertable && win32_drain_apc_queue() > 0)
         return WAIT_IO_COMPLETION;
-    /* Forward to Sleep (syscall 19 = SYS_SLEEP). */
-    long long discard;
-    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)19), "D"((long long)dwMilliseconds) : "memory");
-    return 0;
+    if (!bAlertable)
+    {
+        /* Non-alertable Sleep — single SYS_SLEEP syscall. */
+        long long discard;
+        __asm__ volatile("int $0x80"
+                         : "=a"(discard)
+                         : "a"((long long)19), "D"((long long)dwMilliseconds)
+                         : "memory");
+        return 0;
+    }
+    /* Alertable: chunk into 10ms slices, polling the APC queue
+     * between each. INFINITE (0xFFFFFFFF) loops until an APC fires.
+     * After the last partial slice expires, return 0 (timeout) as
+     * the contract requires. */
+    DWORD remaining = dwMilliseconds;
+    const DWORD kSliceMs = 10;
+    for (;;)
+    {
+        if (win32_drain_apc_queue() > 0)
+            return WAIT_IO_COMPLETION;
+        if (remaining == 0 && dwMilliseconds != 0xFFFFFFFFu)
+            return 0;
+        DWORD chunk = kSliceMs;
+        if (dwMilliseconds != 0xFFFFFFFFu && remaining < kSliceMs)
+            chunk = remaining;
+        long long discard;
+        __asm__ volatile("int $0x80"
+                         : "=a"(discard)
+                         : "a"((long long)19), "D"((long long)chunk)
+                         : "memory");
+        if (dwMilliseconds != 0xFFFFFFFFu)
+        {
+            if (remaining <= chunk)
+                remaining = 0;
+            else
+                remaining -= chunk;
+        }
+    }
 }
 
 /* ------------------------------------------------------------------
