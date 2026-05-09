@@ -535,6 +535,36 @@ callers see `S_OK` instead of `class-not-registered`; not
 enough to actually navigate the shell namespace.
 `ShellExecuteW`, `ShellExecuteExW`, `SHFileOperationW` — STUB.
 
+### ole32.dll — file-dialog COM objects
+
+`CoCreateInstance(CLSID_FileOpenDialog, IID_IFileOpenDialog, ...)`
+and the corresponding `FileSaveDialog` / `IFileSaveDialog` pair
+return real per-instance COM objects with `IUnknown` +
+`IModalWindow` + `IFileDialog` + `IFileOpenDialog` (or
+`IFileSaveDialog`) vtables. Per-method status:
+
+- `IModalWindow::Show` — REAL: returns `S_FALSE` so the caller's
+  "user cancelled" branch runs without a real picker UI.
+- `IFileDialog::SetOptions` / `SetTitle` / `SetFileName` /
+  `SetFileTypes` / `SetFileTypeIndex` / `SetDefaultExtension` /
+  `SetOkButtonLabel` / `SetFileNameLabel` / `SetDefaultFolder` /
+  `SetFolder` / `SetClientGuid` / `SetFilter` / `Advise` /
+  `Unadvise` / `Close` / `ClearClientData` / `AddPlace` — REAL:
+  succeed silently (S_OK).
+- `IFileDialog::GetResult` / `GetFolder` / `GetCurrentSelection` /
+  `GetFileName` / `GetOptions` / `GetFileTypeIndex` — GAP: clear
+  the out parameter and return `E_FAIL` so the caller's no-result
+  path runs.
+- `IFileOpenDialog::GetResults` / `GetSelectedItems` — GAP: same
+  empty-result behaviour as the IFileDialog getters.
+- `IFileSaveDialog::SetSaveAsItem` / `SetProperties` /
+  `SetCollectedProperties` / `ApplyProperties` — REAL (silent
+  S_OK); `GetProperties` — GAP (E_FAIL).
+
+A real picker UI requires the compositor's modal-input mode
+landing — see [`Compositor`](../subsystems/Compositor.md)
+§"Popup Menus" follow-ups.
+
 ### version.dll  (~290 LOC, ~16 exports)
 
 `GetFileVersionInfoSizeW`, `GetFileVersionInfoW`, `VerQueryValueW`

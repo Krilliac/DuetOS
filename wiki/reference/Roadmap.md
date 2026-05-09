@@ -553,26 +553,31 @@ extends. Next:
 > `gdi_smoke`. Syscalls 62/63/64 (`SYS_WIN_PEEK_MSG` /
 > `SYS_WIN_GET_MSG` / `SYS_WIN_POST_MSG`) carry messages;
 > `DispatchMessage` is pure-userland (calls the WNDPROC directly).
+> **T1-05** memory-DC + BitBlt landed: `gdi32!CreateCompatibleDC` /
+> `CreateCompatibleBitmap` / `SelectObject` / `DeleteDC` /
+> `DeleteObject` / `BitBlt` route through SYS_GDI_CREATE_COMPAT_DC
+> (106) / SYS_GDI_CREATE_COMPAT_BITMAP (107) / SYS_GDI_SELECT_OBJECT
+> (110) / SYS_GDI_DELETE_DC (111) / SYS_GDI_DELETE_OBJECT (112) /
+> SYS_GDI_BITBLT_DC (113) into the per-process MemDC + Bitmap
+> tables in `kernel/subsystems/win32/gdi_objects.cpp`.
 
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
 | T1-03 | win32 | P1 | Route keyboard and mouse to the foreground/captured window: scan-code → VK → `WM_KEYDOWN` / `WM_KEYUP` / `WM_CHAR`; mouse hit-test and client-coordinate events; capture; focus and foreground APIs. (Mouse-wheel routing landed; key/button routing pending.) | A PE `MessageBox` can be dismissed by mouse, and a text field receives keystrokes. |
 | T1-04 | win32 | P1 | Add window Z-order, move, resize, minimize, maximize, restore, close chrome. (`GetClientRect`, `GetWindowRect`, `AdjustWindowRect` / `AdjustWindowRectEx` / `AdjustWindowRectExForDpi` landed; chrome interactions still pending.) | PE windows can be dragged, resized, minimized, maximized/restored, and closed via title-bar interactions. |
-| T1-05 | win32 | P1 | Add memory/off-screen DC support: `CreateCompatibleDC`, `CreateCompatibleBitmap`, bitmap `SelectObject`, `DeleteDC`, `DeleteObject`, `GetDC`, `ReleaseDC`. (Stubs ship today — `CreateCompatibleDC` returns an unbacked sentinel; the gap is real bitmap backing storage so `BitBlt` between DCs preserves pixels.) | A PE renders to a compatible memory DC and `BitBlt`s the result to a screen DC correctly. |
 
 ### Track 2 — COM infrastructure
 
-> Path helpers (`SHGetSpecialFolderPath{A,W}`, `SHGetFolderPath{A,W}`)
-> have shipped since the earlier slice; `SHGetDesktopFolder` now
-> returns a singleton IShellFolder whose vtable methods succeed with
-> empty / sentinel results (zero-item enumeration, `Desktop`
-> display name) — enough that callers see `S_OK` instead of
-> `class-not-registered`. The remaining gap is the IFileDialog vtable
-> on the FileOpenDialog / FileSaveDialog factory registrations.
-
-| ID | Scope | Priority | Task | Acceptance |
-| --- | --- | --- | --- | --- |
-| T2-02 | win32 | P2 | Wire functional `IFileDialog` methods on the existing FileOpenDialog / FileSaveDialog factory registrations (today they expose only IUnknown via `simple_unknown_qi`). | Shell-folder/file-dialog callers receive valid stubs or a simple native picker instead of class-unavailable failures. |
+> Path helpers (`SHGetSpecialFolderPath{A,W}`, `SHGetFolderPath{A,W}`),
+> `SHGetDesktopFolder`, and the IFileDialog / IFileOpenDialog /
+> IFileSaveDialog vtables on the FileOpenDialog / FileSaveDialog
+> factory registrations all ship — see
+> [`Win32-Surface-Status`](Win32-Surface-Status.md) §"shell32.dll"
+> and §"ole32.dll". `IFileDialog::Show` returns `S_FALSE` (user
+> cancelled) and `GetResult` fails cleanly so callers' fallback
+> branch runs without a real picker UI; setters succeed silently.
+> Track 2 has no remaining roadmap rows — a real picker UI is
+> Compositor.md follow-up work, not COM infrastructure.
 
 ### Track 3 — Networking
 
@@ -659,12 +664,15 @@ extends. Next:
 > GetModuleHandle / GetModuleFileName) and **T12-02** (Windows 10
 > 19041 system + version info via GetSystemInfo /
 > GetNativeSystemInfo / GetVersionEx{A,W} / RtlGetVersion /
-> IsWow64Process=FALSE) landed.
+> IsWow64Process=FALSE) landed. **T12-04** prioritised stdio
+> (`sscanf`, `fprintf`, `setvbuf`, `setbuf`, `fflush`, `tmpfile`,
+> `tmpnam`, `tmpnam_s`) ships in `ucrtbase`; the long tail
+> (positional args, multi-byte format directives, file-stream
+> buffering) waits for a workload that exercises it.
 
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
 | T12-03 | win32 | P2 | Implement `winmm` waveOut APIs over HDA/audio mixer: open, prepare/write/unprepare, close, and capabilities. | A PE can play 44.1/48 kHz 16-bit stereo through `waveOut*`. |
-| T12-04 | win32 | P2 | Audit and complete C11 stdio in `msvcrt` / `ucrtbase`, prioritizing `sscanf`, `fprintf`, `setvbuf`, `fflush`, and `tmpfile`. | CRT stdio smoke tests cover the newly real functions. |
 
 ### Track 13 — Documentation / wiki
 

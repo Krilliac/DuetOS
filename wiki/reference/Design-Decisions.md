@@ -6462,3 +6462,60 @@ doc helps future readers audit the trail.
   to spot newly-real callers) — typically every 5–10 win32 slices.
 - **Related roadmap track(s):** Track 1, Track 2, Track 12, Track
   14, Imported Quick Wins.
+
+---
+
+## 2026-05-09 — IFileDialog vtables, ucrtbase tmpfile + setvbuf, mem-DC BitBlt wiring
+
+- **Scope:** `userland/libs/ole32/ole32.c`,
+  `userland/libs/ucrtbase/ucrtbase.c`,
+  `userland/libs/gdi32/gdi32.c`
+- **Commit:** this slice
+- **Decision:** Three concrete win32-surface gap-closes shipped
+  alongside the prior roadmap-audit commit:
+    1. **IFileDialog / IFileOpenDialog / IFileSaveDialog vtables.**
+       The `kCLSID_FileOpenDialog` and `kCLSID_FileSaveDialog`
+       factories now allocate per-instance objects whose vtables
+       publish 27 (Open) / 32 (Save) slots in canonical Win SDK
+       order. `Show` returns `S_FALSE` so apps' "user cancelled"
+       fall-through runs; setters succeed silently; getters fail
+       cleanly with cleared out params.
+    2. **Memory-DC + BitBlt wired through to kernel tables.**
+       `gdi32!CreateCompatibleDC` / `CreateCompatibleBitmap` /
+       `SelectObject` / `DeleteDC` / `DeleteObject` / `BitBlt`
+       now route through SYS_GDI_CREATE_COMPAT_DC (106) /
+       SYS_GDI_CREATE_COMPAT_BITMAP (107) / SYS_GDI_SELECT_OBJECT
+       (110) / SYS_GDI_DELETE_DC (111) / SYS_GDI_DELETE_OBJECT
+       (112) / SYS_GDI_BITBLT_DC (113) into the per-process
+       MemDC + Bitmap tables in
+       `kernel/subsystems/win32/gdi_objects.cpp`. Window-DC
+       (GDI_TAG-wrapped) HDCs still bypass the kernel tables
+       because the existing draw helpers expect to recover an
+       HWND from the HDC; mixing the two flavours is the
+       caller's responsibility (BitBlt mem→window crosses the
+       boundary, which the kernel's `DoGdiBitBltDC` already
+       handles).
+    3. **ucrtbase stdio top-up.** Added `setvbuf`, `setbuf`,
+       `tmpnam`, `tmpnam_s`, `tmpfile`. Buffer settings are
+       silently dropped (no buffered I/O on the FILE structs
+       yet); tmpnam generates a `C:\Temp\duetXXXX.tmp` path
+       using a process-local counter so consecutive calls don't
+       collide; tmpfile delegates to fopen with "w+b".
+- **Why:** Each item closes a known fall-back path that was
+  causing apps to take the "this Windows surface isn't
+  available" branch. None of the three required new syscalls
+  or kernel changes — the kernel-side machinery was already
+  in tree for both BitBlt and the COM factories. The wiring
+  was the gap.
+- **Rules out / defers:** A real file-picker UI (compositor
+  modal-input mode), buffered stdio with explicit flush, and
+  `BitBlt` with non-`SRCCOPY` ROPs (XOR / NOT / pattern brush
+  blits) all stay deferred. `tmpfile` doesn't auto-delete on
+  close — Windows ships `FILE_FLAG_DELETE_ON_CLOSE` which our
+  v0 `fopen` doesn't honour.
+- **Revisit when:** the compositor grows a modal-input mode
+  (IFileDialog UI), a workload demands buffered stdio
+  (setvbuf becomes a real consumer), or a workload demands
+  pattern-brush BitBlt.
+- **Related roadmap track(s):** T1-05 (landed), T2-02 (landed),
+  T12-04 (landed).

@@ -88,6 +88,19 @@ static const struct Guid kCLSID_FileSaveDialog = {
 static const struct Guid kCLSID_StdComponentCategoriesMgr = {
     0x0002E005u, 0x0000u, 0x0000u, {0xC0u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x46u}};
 
+/* IID_IModalWindow / IID_IFileDialog / IID_IFileOpenDialog /
+ * IID_IFileSaveDialog. Used by the per-CLSID factory dispatch
+ * to route IFileOpenDialog vs IFileSaveDialog QI to the correct
+ * vtable. */
+static const struct Guid kIID_IModalWindow = {
+    0xB4DB1657u, 0x70D7u, 0x485Eu, {0x8Eu, 0x3Eu, 0x6Fu, 0xCBu, 0x5Au, 0x5Cu, 0x18u, 0x02u}};
+static const struct Guid kIID_IFileDialog = {
+    0x42F85136u, 0xDB7Eu, 0x439Cu, {0x85u, 0xF1u, 0xE4u, 0x07u, 0x5Du, 0x13u, 0x5Fu, 0xC8u}};
+static const struct Guid kIID_IFileOpenDialog = {
+    0xD57C7288u, 0xD4ADu, 0x4768u, {0xBEu, 0x02u, 0x9Du, 0x96u, 0x95u, 0x32u, 0xD9u, 0x60u}};
+static const struct Guid kIID_IFileSaveDialog = {
+    0x84BCCD23u, 0x5FDEu, 0x4CDBu, {0xAEu, 0xA4u, 0xAFu, 0x64u, 0xB8u, 0x3Du, 0x78u, 0xABu}};
+
 static int guid_equal(const void* a, const void* b)
 {
     const unsigned char* aa = (const unsigned char*)a;
@@ -248,6 +261,354 @@ static ULONG simple_unknown_release(IUnknownLike* self)
 
 static const IUnknownVtbl g_simple_unknown_vtbl = {simple_unknown_qi, simple_unknown_addref, simple_unknown_release};
 
+/*
+ * IFileDialog / IFileOpenDialog / IFileSaveDialog v0 stubs.
+ *
+ * Both Open and Save dialogs share one object struct: the lpVtbl
+ * field selects which interface flavour the COM caller sees.
+ * Methods accept opaque void* arguments — the only consumer of
+ * COMDLG_FILTERSPEC / IShellItem / IPropertyStore here is the
+ * vtable slot index, not the body. Setters succeed silently
+ * (S_OK), getters fail cleanly (E_FAIL with NULL out), Show()
+ * returns S_FALSE meaning "user cancelled" so a caller's
+ * `if (FAILED(hr))` branch never fires and the standard
+ * "no result" branch runs. Real picker UI is gated on the
+ * compositor having a modal-input mode (see `Compositor.md`
+ * §"Popup Menus" follow-ups).
+ */
+
+typedef struct FileDialogObj
+{
+    const void* lpVtbl;
+    ULONG refs;
+    int role; /* 0 = open, 1 = save — selects the vtable */
+} FileDialogObj;
+
+static HRESULT __stdcall fd_qi(FileDialogObj* self, const struct Guid* riid, void** ppv)
+{
+    if (!ppv)
+        return E_POINTER;
+    *ppv = (void*)0;
+    if (!self || !riid)
+        return E_INVALIDARG;
+    /* Always-supported base interfaces. */
+    if (guid_equal(riid, &kIID_IUnknown) || guid_equal(riid, &kIID_IModalWindow) || guid_equal(riid, &kIID_IFileDialog))
+    {
+        ++self->refs;
+        *ppv = self;
+        return S_OK;
+    }
+    /* Role-specific interfaces. */
+    if (self->role == 0 && guid_equal(riid, &kIID_IFileOpenDialog))
+    {
+        ++self->refs;
+        *ppv = self;
+        return S_OK;
+    }
+    if (self->role == 1 && guid_equal(riid, &kIID_IFileSaveDialog))
+    {
+        ++self->refs;
+        *ppv = self;
+        return S_OK;
+    }
+    return E_NOINTERFACE;
+}
+
+static ULONG __stdcall fd_addref(FileDialogObj* self)
+{
+    if (!self)
+        return 0;
+    return ++self->refs;
+}
+
+static ULONG __stdcall fd_release(FileDialogObj* self)
+{
+    if (!self)
+        return 0;
+    if (self->refs > 0)
+        --self->refs;
+    ULONG refs = self->refs;
+    if (refs == 0)
+        CoTaskMemFree(self);
+    return refs;
+}
+
+/* IModalWindow::Show — return S_FALSE so the caller's
+ * "user cancelled" path runs without a real picker UI. */
+static HRESULT __stdcall fd_show(FileDialogObj* self, void* hwnd_owner)
+{
+    (void)self;
+    (void)hwnd_owner;
+    return S_FALSE;
+}
+
+/* IFileDialog setters all succeed silently. */
+static HRESULT __stdcall fd_set_one_ptr(FileDialogObj* self, const void* ignored1)
+{
+    (void)self;
+    (void)ignored1;
+    return S_OK;
+}
+
+static HRESULT __stdcall fd_set_two_ptr(FileDialogObj* self, const void* ignored1, const void* ignored2)
+{
+    (void)self;
+    (void)ignored1;
+    (void)ignored2;
+    return S_OK;
+}
+
+static HRESULT __stdcall fd_set_uint(FileDialogObj* self, unsigned int ignored)
+{
+    (void)self;
+    (void)ignored;
+    return S_OK;
+}
+
+static HRESULT __stdcall fd_set_dword(FileDialogObj* self, DWORD ignored)
+{
+    (void)self;
+    (void)ignored;
+    return S_OK;
+}
+
+static HRESULT __stdcall fd_clear(FileDialogObj* self)
+{
+    (void)self;
+    return S_OK;
+}
+
+static HRESULT __stdcall fd_advise(FileDialogObj* self, void* events, DWORD* cookie)
+{
+    (void)self;
+    (void)events;
+    if (cookie)
+        *cookie = 0;
+    return S_OK;
+}
+
+/* Getters — clear the out parameter and return E_FAIL so the
+ * caller's "no result" branch runs. */
+static HRESULT __stdcall fd_get_uint(FileDialogObj* self, unsigned int* out)
+{
+    (void)self;
+    if (out)
+        *out = 0;
+    return E_FAIL;
+}
+
+static HRESULT __stdcall fd_get_dword(FileDialogObj* self, DWORD* out)
+{
+    (void)self;
+    if (out)
+        *out = 0;
+    return E_FAIL;
+}
+
+static HRESULT __stdcall fd_get_pointer(FileDialogObj* self, void** out)
+{
+    (void)self;
+    if (out)
+        *out = (void*)0;
+    return E_FAIL;
+}
+
+static HRESULT __stdcall fd_get_pwstr(FileDialogObj* self, wchar_t16** out)
+{
+    (void)self;
+    if (out)
+        *out = (wchar_t16*)0;
+    return E_FAIL;
+}
+
+/* IFileDialog::SetFileTypes — count + array. Succeed silently. */
+static HRESULT __stdcall fd_set_file_types(FileDialogObj* self, unsigned int n, const void* arr)
+{
+    (void)self;
+    (void)n;
+    (void)arr;
+    return S_OK;
+}
+
+static HRESULT __stdcall fd_add_place(FileDialogObj* self, void* psi, int fdap)
+{
+    (void)self;
+    (void)psi;
+    (void)fdap;
+    return S_OK;
+}
+
+static HRESULT __stdcall fd_set_collected_props(FileDialogObj* self, void* desc_list, BOOL append_default)
+{
+    (void)self;
+    (void)desc_list;
+    (void)append_default;
+    return S_OK;
+}
+
+static HRESULT __stdcall fd_apply_props(FileDialogObj* self, void* psi, void* props, void* hwnd, void* sink)
+{
+    (void)self;
+    (void)psi;
+    (void)props;
+    (void)hwnd;
+    (void)sink;
+    return S_OK;
+}
+
+/* IFileDialog vtable layout (29 slots for IFileOpenDialog,
+ * 32 for IFileSaveDialog). Order is the canonical Win SDK order
+ * — slot index ABI must match real Windows so PE callers'
+ * dispatch through the C++ vtable lands in the right method.
+ *
+ * IUnknown (3): QI / AddRef / Release
+ * IModalWindow (1): Show
+ * IFileDialog (23): SetFileTypes, SetFileTypeIndex,
+ *   GetFileTypeIndex, Advise, Unadvise, SetOptions, GetOptions,
+ *   SetDefaultFolder, SetFolder, GetFolder, GetCurrentSelection,
+ *   SetFileName, GetFileName, SetTitle, SetOkButtonLabel,
+ *   SetFileNameLabel, GetResult, AddPlace, SetDefaultExtension,
+ *   Close, SetClientGuid, ClearClientData, SetFilter
+ * IFileOpenDialog (2): GetResults, GetSelectedItems
+ * IFileSaveDialog (5): SetSaveAsItem, SetProperties,
+ *   SetCollectedProperties, GetProperties, ApplyProperties
+ */
+
+typedef struct FileDialogVtbl
+{
+    /* IUnknown */
+    HRESULT(__stdcall* QueryInterface)(FileDialogObj*, const struct Guid*, void**);
+    ULONG(__stdcall* AddRef)(FileDialogObj*);
+    ULONG(__stdcall* Release)(FileDialogObj*);
+    /* IModalWindow */
+    HRESULT(__stdcall* Show)(FileDialogObj*, void*);
+    /* IFileDialog */
+    HRESULT(__stdcall* SetFileTypes)(FileDialogObj*, unsigned int, const void*);
+    HRESULT(__stdcall* SetFileTypeIndex)(FileDialogObj*, unsigned int);
+    HRESULT(__stdcall* GetFileTypeIndex)(FileDialogObj*, unsigned int*);
+    HRESULT(__stdcall* Advise)(FileDialogObj*, void*, DWORD*);
+    HRESULT(__stdcall* Unadvise)(FileDialogObj*, DWORD);
+    HRESULT(__stdcall* SetOptions)(FileDialogObj*, DWORD);
+    HRESULT(__stdcall* GetOptions)(FileDialogObj*, DWORD*);
+    HRESULT(__stdcall* SetDefaultFolder)(FileDialogObj*, const void*);
+    HRESULT(__stdcall* SetFolder)(FileDialogObj*, const void*);
+    HRESULT(__stdcall* GetFolder)(FileDialogObj*, void**);
+    HRESULT(__stdcall* GetCurrentSelection)(FileDialogObj*, void**);
+    HRESULT(__stdcall* SetFileName)(FileDialogObj*, const void*);
+    HRESULT(__stdcall* GetFileName)(FileDialogObj*, wchar_t16**);
+    HRESULT(__stdcall* SetTitle)(FileDialogObj*, const void*);
+    HRESULT(__stdcall* SetOkButtonLabel)(FileDialogObj*, const void*);
+    HRESULT(__stdcall* SetFileNameLabel)(FileDialogObj*, const void*);
+    HRESULT(__stdcall* GetResult)(FileDialogObj*, void**);
+    HRESULT(__stdcall* AddPlace)(FileDialogObj*, void*, int);
+    HRESULT(__stdcall* SetDefaultExtension)(FileDialogObj*, const void*);
+    HRESULT(__stdcall* Close)(FileDialogObj*, DWORD);
+    HRESULT(__stdcall* SetClientGuid)(FileDialogObj*, const void*);
+    HRESULT(__stdcall* ClearClientData)(FileDialogObj*);
+    HRESULT(__stdcall* SetFilter)(FileDialogObj*, const void*);
+    /* Open-only / Save-only tail — populated only on the matching
+     * vtable. Save tail is at the same offsets as Open's tail
+     * because they're independent vtables. */
+    HRESULT(__stdcall* RoleTail0)(FileDialogObj*, void**);
+    HRESULT(__stdcall* RoleTail1)(FileDialogObj*, void**);
+    HRESULT(__stdcall* RoleTail2)(FileDialogObj*, void*, BOOL);
+    HRESULT(__stdcall* RoleTail3)(FileDialogObj*, void**);
+    HRESULT(__stdcall* RoleTail4)(FileDialogObj*, void*, void*, void*, void*);
+} FileDialogVtbl;
+
+static const FileDialogVtbl g_file_open_dialog_vtbl = {
+    fd_qi,
+    fd_addref,
+    fd_release,
+    fd_show,
+    fd_set_file_types,
+    fd_set_uint,
+    fd_get_uint,
+    fd_advise,
+    fd_set_dword,
+    fd_set_dword,
+    fd_get_dword,
+    fd_set_one_ptr,
+    fd_set_one_ptr,
+    fd_get_pointer,
+    fd_get_pointer,
+    fd_set_one_ptr,
+    fd_get_pwstr,
+    fd_set_one_ptr,
+    fd_set_one_ptr,
+    fd_set_one_ptr,
+    fd_get_pointer,
+    fd_add_place,
+    fd_set_one_ptr,
+    fd_set_dword,
+    fd_set_one_ptr,
+    fd_clear,
+    fd_set_one_ptr,
+    /* IFileOpenDialog::GetResults / GetSelectedItems */
+    fd_get_pointer,
+    fd_get_pointer,
+    /* Save tail unused — leave as no-ops so a stray slot dispatch
+     * can't crash. */
+    (HRESULT(__stdcall*)(FileDialogObj*, void*, BOOL))fd_set_one_ptr,
+    fd_get_pointer,
+    (HRESULT(__stdcall*)(FileDialogObj*, void*, void*, void*, void*))fd_apply_props,
+};
+
+static const FileDialogVtbl g_file_save_dialog_vtbl = {
+    fd_qi,
+    fd_addref,
+    fd_release,
+    fd_show,
+    fd_set_file_types,
+    fd_set_uint,
+    fd_get_uint,
+    fd_advise,
+    fd_set_dword,
+    fd_set_dword,
+    fd_get_dword,
+    fd_set_one_ptr,
+    fd_set_one_ptr,
+    fd_get_pointer,
+    fd_get_pointer,
+    fd_set_one_ptr,
+    fd_get_pwstr,
+    fd_set_one_ptr,
+    fd_set_one_ptr,
+    fd_set_one_ptr,
+    fd_get_pointer,
+    fd_add_place,
+    fd_set_one_ptr,
+    fd_set_dword,
+    fd_set_one_ptr,
+    fd_clear,
+    fd_set_one_ptr,
+    /* IFileSaveDialog tail: SetSaveAsItem, SetProperties,
+     * SetCollectedProperties, GetProperties, ApplyProperties.
+     * The first two reuse Open-tail slots since Open's
+     * GetResults/GetSelectedItems slot signatures happen to
+     * match (single in/out pointer). */
+    fd_get_pointer, /* SetSaveAsItem accepts in-pointer; tolerated */
+    fd_get_pointer, /* SetProperties */
+    fd_set_collected_props,
+    fd_get_pointer,
+    fd_apply_props,
+};
+
+static HRESULT make_file_dialog(int role, const struct Guid* riid, void** ppv)
+{
+    FileDialogObj* obj = (FileDialogObj*)CoTaskMemAlloc(sizeof(FileDialogObj));
+    if (!obj)
+        return E_OUTOFMEMORY;
+    obj->lpVtbl = (role == 0) ? (const void*)&g_file_open_dialog_vtbl : (const void*)&g_file_save_dialog_vtbl;
+    obj->refs = 1;
+    obj->role = role;
+    HRESULT hr = fd_qi(obj, riid, ppv);
+    /* fd_qi bumped the refcount on success; release the
+     * make-time reference so refcount nets to 1. */
+    fd_release(obj);
+    return hr;
+}
+
 static HRESULT builtin_factory_qi(IClassFactoryLike* self, const struct Guid* riid, void** ppv)
 {
     if (!ppv)
@@ -289,6 +650,13 @@ static HRESULT builtin_factory_create(IClassFactoryLike* self, void* outer, cons
         return CLASS_E_NOAGGREGATION;
     if (!self || !riid)
         return E_INVALIDARG;
+    /* Per-CLSID dispatch: FileOpenDialog → IFileOpenDialog object,
+     * FileSaveDialog → IFileSaveDialog object, everything else
+     * (including StdComponentCategoriesMgr) → simple IUnknown. */
+    if (guid_equal(self->clsid, &kCLSID_FileOpenDialog))
+        return make_file_dialog(0, riid, ppv);
+    if (guid_equal(self->clsid, &kCLSID_FileSaveDialog))
+        return make_file_dialog(1, riid, ppv);
     IUnknownLike* obj = (IUnknownLike*)CoTaskMemAlloc(sizeof(IUnknownLike));
     if (!obj)
         return E_OUTOFMEMORY;

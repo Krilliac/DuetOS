@@ -951,6 +951,86 @@ __declspec(dllexport) int fflush(FILE* f)
     return 0;
 }
 
+/* setvbuf / setbuf — no-op success. The DuetOS CRT doesn't buffer
+ * stream output today (every fwrite / fputs / fprintf hits the
+ * underlying SYS_WRITE syscall directly). When buffered I/O lands,
+ * setvbuf needs to remember the buffer + mode on the FILE struct
+ * so the next fflush respects it. */
+#define _IOFBF 0
+#define _IOLBF 1
+#define _IONBF 2
+
+__declspec(dllexport) int setvbuf(FILE* f, char* buf, int mode, size_t size)
+{
+    (void)f;
+    (void)buf;
+    (void)mode;
+    (void)size;
+    return 0;
+}
+
+__declspec(dllexport) void setbuf(FILE* f, char* buf)
+{
+    (void)f;
+    (void)buf;
+}
+
+/* tmpnam / tmpfile — generate a temp-directory path and (for
+ * tmpfile) open a writable handle to it. The temp directory
+ * matches GetTempPathA's `C:\Temp\` so apps that round-trip
+ * through GetTempPath / fopen see the same root. The name
+ * counter is process-local; collisions are caller-visible
+ * (fopen returns NULL if the file exists). */
+static unsigned int g_tmp_counter = 0;
+
+#define L_tmpnam 32
+
+__declspec(dllexport) char* tmpnam(char* buf)
+{
+    static char internal_buf[L_tmpnam];
+    char* dst = buf ? buf : internal_buf;
+    /* Format: "C:\\Temp\\duetXXXX.tmp" — 19 bytes + NUL fits in 32. */
+    const char prefix[] = "C:\\Temp\\duet";
+    int i = 0;
+    while (prefix[i] && i < L_tmpnam - 1)
+    {
+        dst[i] = prefix[i];
+        ++i;
+    }
+    /* 4 hex digits of the counter so two consecutive calls
+     * produce different names. */
+    unsigned int v = ++g_tmp_counter;
+    const char hex[] = "0123456789ABCDEF";
+    for (int j = 3; j >= 0 && i < L_tmpnam - 1; --j)
+        dst[i++] = hex[(v >> (j * 4)) & 0xF];
+    const char suffix[] = ".tmp";
+    int k = 0;
+    while (suffix[k] && i < L_tmpnam - 1)
+        dst[i++] = suffix[k++];
+    dst[i] = 0;
+    return dst;
+}
+
+__declspec(dllexport) FILE* tmpfile(void)
+{
+    char name[L_tmpnam];
+    tmpnam(name);
+    /* "w+b" — read+write, truncate to zero. fopen handles the
+     * open. Note: we don't auto-delete on close (Windows has
+     * FILE_FLAG_DELETE_ON_CLOSE; our v0 doesn't). Caller is
+     * responsible for unlink if they care. */
+    return fopen(name, "w+b");
+}
+
+/* MSVC-suffixed variant: same behaviour, takes a buffer + size. */
+__declspec(dllexport) int tmpnam_s(char* buf, size_t size)
+{
+    if (!buf || size < L_tmpnam)
+        return 22; /* EINVAL */
+    tmpnam(buf);
+    return 0;
+}
+
 __declspec(dllexport) int fputs(const char* s, FILE* f)
 {
     if (!s || !f)
