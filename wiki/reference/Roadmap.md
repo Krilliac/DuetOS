@@ -56,31 +56,36 @@ the same commit** that delivers the code.
   consumes them; `AllocateFrame` biases toward the calling CPU's
   local node before falling back to the global pool). UMA boots
   (no SRAT) keep the historical global linear-scan path
-  byte-for-byte. See [CPU Topology](../kernel/CPU-Topology.md).
-- **Remaining scope:** the topology + cluster machinery has two
-  more profile-driven follow-ons:
+  byte-for-byte. **Placement affinity at wake landed** —
+  `RunqueuePush` now redirects from `last_cpu` to the least-
+  loaded same-cluster peer when the delta exceeds a 2-task
+  margin, using a new `runq_normal_len` counter on `PerCpu`.
+  See [CPU Topology](../kernel/CPU-Topology.md).
+- **Remaining scope:** one profile-driven follow-on left:
   - **Cluster-broadcast IPIs** — extend `arch::SmpSendIpi` with
     cluster-scoped destination bits when x2APIC cluster mode is
     in use; lets a wake or shootdown fan out within a cluster
     in one ICR write.
-  - **Placement affinity at spawn / wake** — at task creation
-    (and on `WaitQueueWakeOne`), route to the parent's cluster's
-    least-loaded CPU rather than just `last_cpu`. Adds a per-
-    cluster load counter.
-- **Blocks on:** profile evidence — both items are workload-
-  triggered, not pre-emptive.
+- **Blocks on:** profile evidence — workload-triggered, not
+  pre-emptive.
 
 ### Slab allocator + freed-object poison + real KASAN
 
-- **Scope:** implement a slab allocator (currently kheap is the
-  only allocator), then stamp `kSlabFreedObjectPoison = 0xCC`
-  across freed slab objects on free + verify on alloc. Real
-  KASAN is a much bigger lift (shadow-memory mapping, compiler
-  plugin integration, per-access shadow lookup).
-- **Blocks on:** slab allocator existence. Today's kheap red-zone
-  + frame poison + UBSAN cover most needs.
-- **When to land:** when a hot-path consumer demands sub-page
-  allocations and a slab cache is justified.
+- **Status:** **Slab allocator landed** — `kernel/mm/slab.{h,cpp}`.
+  Each `SlabCache` hands out fixed-size objects from 16 KiB
+  slabs carved out of the kheap, with a per-cache intrusive
+  freelist. O(1) alloc / free, zero per-object header.
+  Boot self-test runs in Phase::Sched.
+- **Remaining scope:**
+  - **Freed-object poison** — stamp `kSlabFreedObjectPoison =
+    0xCC` across freed slab objects on free + verify on alloc.
+    Catches use-after-free in slab-allocated objects without
+    KASAN's shadow-memory tax.
+  - **KMalloc routing** — small KMalloc calls could route through
+    pre-built size-classed caches automatically. Existing call
+    sites are unchanged today; opt-in via direct `SlabAlloc`.
+  - **Real KASAN** — shadow-memory mapping, compiler plugin
+    integration, per-access shadow lookup. Big lift; defer.
 
 ### Intel CET enable
 

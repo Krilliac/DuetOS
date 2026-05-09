@@ -68,6 +68,44 @@ struct CpuMitigations
     bool needs_mds_buf;   ///< True iff MDS-class attacks are in-scope. Read from `MDS_NO==0`.
     bool needs_ssbd;      ///< True iff SSB is in-scope. Read from `SSB_NO==0`.
     bool needs_taa_flush; ///< True iff TSX async abort is in-scope. Read from `TAA_NO==0`.
+
+    /// Spectre v2 (Branch Target Injection) hardware-mitigation
+    /// status, decoded from CPUID 7:0 EDX bits 26/27 + ARCH_CAPS
+    /// bit 1.
+    ///
+    ///   has_ibrs        — IA32_SPEC_CTRL.IBRS is recognised
+    ///                     (CPUID.7.0:EDX[26]). On this generation
+    ///                     IBRS is "set on every kernel entry";
+    ///                     non-zero perf cost.
+    ///   has_stibp       — Single-Thread Indirect Branch Predictor
+    ///                     (CPUID.7.0:EDX[27]) — needed for SMT.
+    ///   has_eibrs       — Enhanced IBRS (ARCH_CAPS.IBRS_ALL=1).
+    ///                     "Always-on" hardware mitigation; the
+    ///                     CPU itself prevents BTI on indirect
+    ///                     branches without per-entry MSR writes.
+    ///                     This is the critical bit — when set,
+    ///                     retpolines become pure indirect-call
+    ///                     tax.
+    bool has_ibrs;
+    bool has_stibp;
+    bool has_eibrs;
+
+    /// True iff the kernel's compiled-in retpoline thunks are
+    /// providing protection that the silicon does NOT.
+    /// false ⇒ the CPU mitigates BTI in hardware (eIBRS or no-
+    /// vulnerability silicon); the SW retpoline tax on every
+    /// indirect call is dead weight.
+    /// true  ⇒ retpolines are doing real work.
+    ///
+    /// Today the kernel ships with `-mretpoline` unconditionally;
+    /// flipping retpolines off at runtime needs an alternative-
+    /// patching framework (Linux's `.altinstructions` analogue) so
+    /// every `call __x86_indirect_thunk_rax` callsite can be
+    /// rewritten to a direct `jmp *%rax` at boot. Until that
+    /// framework lands this field is diagnostic only — the boot
+    /// log surfaces the perf opportunity so the operator (or a
+    /// future build profile) can act on it.
+    bool needs_retpolines;
 };
 
 /// Probe `IA32_ARCH_CAPABILITIES` once. Idempotent — second call

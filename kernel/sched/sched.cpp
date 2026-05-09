@@ -423,16 +423,91 @@ void RunqueuePushOn(cpu::PerCpu* target, Task* t)
         tail->next = t;
         tail = t;
     }
+    if (t->priority != TaskPriority::Idle)
+    {
+        ++target->runq_normal_len;
+    }
+}
+
+// Wake-time placement: prefer the task's `last_cpu` for cache
+// affinity, but if it's loaded relative to its same-cluster peers,
+// route the wake to the least-loaded peer in that cluster. The
+// threshold (`kClusterPlacementMargin`) prevents oscillation —
+// migrating on a one-task delta would ping-pong tasks between
+// equally-loaded CPUs and burn cache for no win. Two is the
+// smallest delta that guarantees the destination's queue length
+// after the push is strictly less than the source's queue length
+// before the push, so an idle peer is always a better landing
+// spot than an already-loaded `last_cpu`.
+//
+// Same-cluster only: cross-cluster routing is handled by the
+// existing work-stealing pass-1 fallback. Wake placement is the
+// hot path; we don't want to import a NUMA / package-cross cost
+// just because a peer happens to be idle.
+//
+// Caller holds g_sched_lock — same critical section as the
+// Push that follows, so the snapshot of every peer's
+// runq_normal_len is consistent. No lock-granularity dance is
+// required today; the post-split-per-CPU world will need a
+// try-lock probe instead.
+constexpr u32 kClusterPlacementMargin = 2;
+
+cpu::PerCpu* PickClusterPlacement(cpu::PerCpu* preferred)
+{
+    if (preferred == nullptr)
+    {
+        return nullptr;
+    }
+    if (preferred->runq_normal_len < kClusterPlacementMargin)
+    {
+        return preferred; // preferred CPU is light enough; keep affinity
+    }
+    const u16 cluster = preferred->cluster_id;
+    const u32 limit = arch::SmpCpuIdLimit();
+    cpu::PerCpu* best = preferred;
+    u32 best_len = preferred->runq_normal_len;
+    for (u32 i = 0; i < limit; ++i)
+    {
+        cpu::PerCpu* peer = arch::SmpGetPercpu(i);
+        if (peer == nullptr || peer == preferred)
+        {
+            continue;
+        }
+        if (peer->cluster_id != cluster)
+        {
+            continue; // cross-cluster routing handled by work-stealing
+        }
+        const u32 peer_len = peer->runq_normal_len;
+        if (best_len - peer_len >= kClusterPlacementMargin && peer_len < best_len)
+        {
+            best = peer;
+            best_len = peer_len;
+        }
+    }
+    return best;
 }
 
 // Convenience wrapper: route to the task's last_cpu (cache
-// affinity). Used by every wake-side enqueue. When the target CPU
-// is different from the current CPU, fire a reschedule-IPI so the
-// peer notices the wake within microseconds rather than waiting
-// up to one timer tick (10 ms) for its own preemption point.
+// affinity), shifting to a less-loaded peer in the same cluster
+// when last_cpu is busier than its neighbours by more than
+// `kClusterPlacementMargin`. Used by every wake-side enqueue.
+// When the target CPU is different from the current CPU, fire a
+// reschedule-IPI so the peer notices the wake within microseconds
+// rather than waiting up to one timer tick (10 ms) for its own
+// preemption point.
 void RunqueuePush(Task* t)
 {
-    cpu::PerCpu* target = TargetPerCpuFor(t);
+    cpu::PerCpu* preferred = TargetPerCpuFor(t);
+    cpu::PerCpu* target = (t->priority == TaskPriority::Idle) ? preferred : PickClusterPlacement(preferred);
+    if (target != preferred)
+    {
+        // Routed away from last_cpu — update it so the next wake
+        // starts from the new home rather than re-paying the
+        // re-route cost on every wake. Affinity follows the
+        // most recent dispatch, same contract as the work-
+        // stealing path's `head->last_cpu = self_id` update.
+        t->last_cpu = target->cpu_id;
+    }
     RunqueuePushOn(target, t);
     cpu::PerCpu* self = cpu::CurrentCpu();
     if (self != nullptr && target != self)
@@ -493,6 +568,11 @@ Task* RunqueuePop()
             RunqTailNormal(p) = nullptr;
         }
         t->next = nullptr;
+        // Mirror the increment in RunqueuePushOn — Normal-band only.
+        // KASSERT in case of double-pop / leak: a non-zero counter
+        // should never go negative on a real pop path.
+        KASSERT(p->runq_normal_len > 0, "sched", "RunqueuePop: normal_len underflow");
+        --p->runq_normal_len;
         return t;
     }
     t = RunqHeadIdle(p);
@@ -635,6 +715,8 @@ Task* StealNormalFromPeer()
                 RunqTailNormal(peer) = nullptr;
             }
             head->next = nullptr;
+            KASSERT(peer->runq_normal_len > 0, "sched", "Steal: peer normal_len underflow");
+            --peer->runq_normal_len;
             // Update affinity so the next wake routes to us — keeps
             // hot tasks on whichever CPU is actually running them.
             head->last_cpu = self_id;
@@ -1652,10 +1734,12 @@ void OnTimerTick(u64 now_ticks)
                     {
                         continue;
                     }
-                    for (Task* t = RunqHeadNormal(p); t != nullptr; t = t->next)
-                    {
-                        ++runnable;
-                    }
+                    // O(1) read of the Normal-band length — the
+                    // counter is maintained by the push / pop /
+                    // steal paths under the same g_sched_lock we
+                    // hold here, so the read is consistent with
+                    // the runqueue contents.
+                    runnable += p->runq_normal_len;
                 }
                 if (cur != nullptr && cur->state == TaskState::Running && cur->priority != TaskPriority::Idle)
                 {
