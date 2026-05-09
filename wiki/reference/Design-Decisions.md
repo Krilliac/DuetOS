@@ -6558,3 +6558,49 @@ doc helps future readers audit the trail.
   (T6-04 follow-on), or a workload requires per-volume labels.
 - **Related roadmap track(s):** T7-02 (landed), T6-04 (v0
   process-local landed; cross-process pending).
+
+---
+
+## 2026-05-09 — /GS + CFG facades in vcruntime140 (T9-02 v0, T9-03)
+
+- **Scope:** `userland/libs/vcruntime140/vcruntime140.c`
+- **Commit:** this slice
+- **Decision:** vcruntime140 now exports the symbols that MSVC's
+  `/GS` and `/guard:cf` codegen reach for at runtime, so binaries
+  compiled with either flag can load and execute under DuetOS
+  without crashing on the first guard call:
+    1. **/GS (T9-02 v0)**: `__security_cookie` (default value
+       `0x00002B992DDFA232`), `__security_cookie_complement`,
+       `__security_init_cookie` (no-op — no entropy source wired
+       in), `__security_check_cookie` (compares input to the
+       global; aborts on mismatch), `__report_gsfailure` /
+       `__report_rangefailure` (aborts). The compiler-emitted
+       save/check pair compares the same value across one
+       function call, so leaving the cookie at its default value
+       still detects real corruption — what's deferred is
+       per-image randomisation.
+    2. **CFG / XFG (T9-03)**: `_guard_check_icall` and
+       `_guard_xfg_check_icall` are no-op (trust the call);
+       `_guard_dispatch_icall` and `_guard_xfg_dispatch_icall`
+       are naked `jmp *%rax` so the compiler-prepared target in
+       rax runs without bitmap enforcement. CFG bitmap
+       materialisation + per-image fptr patching is the
+       remaining gap, marked `// GAP: CFG not enforced`.
+- **Why:** Both items unblock loading of any PE built with
+  modern MSVC defaults — `/GS` is on by default, and `/guard:cf`
+  is increasingly common in shipping binaries. Without these
+  exports, a CFG-enabled DLL's first indirect call goes through
+  a NULL function pointer and traps; without `__security_cookie`,
+  the prologue's first `mov rcx, [__security_cookie]` reads
+  unmapped memory.
+- **Rules out / defers:** Real entropy-seeded per-image cookies
+  (T9-02 follow-on — needs PE-loader read of
+  `IMAGE_LOAD_CONFIG_DIRECTORY.SecurityCookie`), real CFG bitmap
+  enforcement (T9-03 follow-on — needs the per-image bitmap
+  materialised + per-image fptr slots patched to enforcement
+  helpers).
+- **Revisit when:** PE loader gains load-config awareness, or a
+  workload demands enforced CFG (e.g. a security-sensitive
+  third-party DLL that asserts the per-image fptr is non-NULL).
+- **Related roadmap track(s):** T9-02 (v0 landed; per-image
+  randomisation pending), T9-03 (landed).

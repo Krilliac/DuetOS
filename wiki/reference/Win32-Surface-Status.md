@@ -288,12 +288,28 @@ focus of any current slice.
 - C++ exception layer (`_CxxThrowException`,
   `__cxa_*`) — STUB; lives in vcruntime instead
 
-### vcruntime140.dll  (~210 LOC)
+### vcruntime140.dll  (~330 LOC)
 
 Stack-frame / SEH unwind primitives for MSVC-built code.
 `__C_specific_handler`, `__std_terminate`,
-`memcpy` / `memset` / `memmove` aliases, `__chkstk`.
-Mostly real because the bodies are tiny.
+`memcpy` / `memset` / `memmove` aliases, `__chkstk` — REAL,
+because the bodies are tiny.
+
+`/GS` stack-cookie facade (T9-02 v0): `__security_cookie`
+holds the documented MSVC default (`0x00002B992DDFA232`),
+`__security_init_cookie` is a no-op (no entropy source wired
+in), `__security_check_cookie` aborts on mismatch,
+`__report_gsfailure` / `__report_rangefailure` aborts.
+Per-image cookie randomisation needs the PE loader to read
+`IMAGE_LOAD_CONFIG_DIRECTORY.SecurityCookie` and stamp a
+fresh value at load time.
+
+CFG / XFG facade (T9-03): `_guard_check_icall` /
+`_guard_xfg_check_icall` are no-op; `_guard_dispatch_icall`
+/ `_guard_xfg_dispatch_icall` are naked `jmp *%rax` so the
+indirect target the compiler placed in `rax` runs without
+guard enforcement. Bitmap enforcement is GAP — see the
+roadmap note.
 
 ### msvcp140.dll  (~93 LOC)
 

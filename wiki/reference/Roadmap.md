@@ -642,8 +642,13 @@ extends. Next:
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
 | T9-01 | security | P1 | Implement user-mode PE ASLR for `DYNAMICBASE` images and per-process DLL randomization with relocation. | ASLR-enabled PEs load at randomized bases recorded in the address-space ledger. |
-| T9-02 | security | P2 | Seed MSVC `/GS` `__security_cookie` from the PE load config and terminate with `STATUS_STACK_BUFFER_OVERRUN` on cookie failure. | `/GS`-protected PEs receive a randomized cookie at process init. |
-| T9-03 | security | P2 | Install CFG no-op guard stubs and document `// GAP: CFG not enforced` until bitmap checking exists. | CFG-enabled PEs do not crash on indirect-call guard checks. |
+| T9-02 | security | P2 | Seed MSVC `/GS` `__security_cookie` from the PE load config and terminate with `STATUS_STACK_BUFFER_OVERRUN` on cookie failure. (vcruntime140 ships `__security_cookie` + `__security_check_cookie` + `__report_gsfailure` + `__report_rangefailure`; the cookie holds the documented MSVC default value because per-image randomisation needs the PE loader to read `IMAGE_LOAD_CONFIG_DIRECTORY.SecurityCookie` and stamp a fresh value at load time.) | `/GS`-protected PEs receive a randomized cookie at process init. |
+
+> **T9-03** (CFG no-op guard stubs) shipped: vcruntime140 exports
+> `_guard_check_icall`, `_guard_dispatch_icall`,
+> `_guard_xfg_check_icall`, and `_guard_xfg_dispatch_icall`. Bitmap
+> enforcement still GAP — see `// GAP: CFG not enforced` discipline
+> in the source.
 
 ### Track 10 — Build and CI
 
