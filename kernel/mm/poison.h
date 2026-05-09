@@ -60,11 +60,56 @@ inline constexpr u64 kHeapTrailerCanaryBytes = 16; // 2 × u64.
 /// one constant.
 inline constexpr u8 kFreedPagePoison = 0xDE;
 
-/// Reserved for a future slab allocator. `0xCC` is the de-facto
-/// "scratch / freed object" pattern across many kernels and
-/// debuggers; pre-declaring it here keeps a future
-/// `slab.cpp` from minting yet another value.
+/// Pattern stamped over the unused-payload bytes of every free
+/// slab object. `0xCC` is the de-facto "scratch / freed object"
+/// pattern across many kernels and debuggers. The slab freelist
+/// is intrusive: the first `sizeof(void*)` bytes of a free object
+/// hold the freelist `next` pointer, so the poison covers only the
+/// trailing `[sizeof(void*), obj_size)` region. Every free object
+/// — both freshly-carved and SlabFree-returned — carries this
+/// pattern; SlabAlloc verifies it before handing the object out,
+/// catching one class of slab-object use-after-write.
 inline constexpr u8 kSlabFreedObjectPoison = 0xCC;
+
+/// Write `kSlabFreedObjectPoison` across the trailing payload of a
+/// slab object (everything past the `next` link). Caller owns the
+/// pointer and the size; the slab allocator stamps this on Free
+/// and on fresh-slab carve.
+inline void PoisonSlabFreedObject(void* obj, u64 obj_size, u64 link_bytes)
+{
+    if (obj_size <= link_bytes)
+    {
+        return;
+    }
+    auto* p = static_cast<u8*>(obj) + link_bytes;
+    const u64 n = obj_size - link_bytes;
+    for (u64 i = 0; i < n; ++i)
+    {
+        p[i] = kSlabFreedObjectPoison;
+    }
+}
+
+/// Verify the trailing-payload poison set by `PoisonSlabFreedObject`.
+/// Returns the byte offset of the first mismatch, or `obj_size` if
+/// every byte matched. Caller must check the result against
+/// `obj_size` to decide whether the object was clean.
+inline u64 CheckSlabFreedObjectPoison(const void* obj, u64 obj_size, u64 link_bytes)
+{
+    if (obj_size <= link_bytes)
+    {
+        return obj_size;
+    }
+    const auto* p = static_cast<const u8*>(obj) + link_bytes;
+    const u64 n = obj_size - link_bytes;
+    for (u64 i = 0; i < n; ++i)
+    {
+        if (p[i] != kSlabFreedObjectPoison)
+        {
+            return link_bytes + i;
+        }
+    }
+    return obj_size;
+}
 
 /// Write the trailer canary at `[ptr, ptr + kHeapTrailerCanaryBytes)`.
 /// Caller is responsible for the storage and for the alignment

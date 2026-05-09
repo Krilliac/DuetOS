@@ -76,11 +76,17 @@ the same commit** that delivers the code.
   slabs carved out of the kheap, with a per-cache intrusive
   freelist. O(1) alloc / free, zero per-object header.
   Boot self-test runs in Phase::Sched.
+- **Freed-object poison landed** — `SlabFree` stamps
+  `kSlabFreedObjectPoison = 0xCC` across the trailing payload of
+  every freed slab object (skipping the first `sizeof(void*)`
+  bytes that hold the freelist link); fresh-slab carve uses the
+  same helper so every free object on the cache freelist looks
+  identical. `SlabAlloc` verifies the band before handing the
+  object out and panics on mismatch. Boot self-test checks that
+  re-allocated objects come back with the poison still present.
+  Helpers live in `mm/poison.h` (`PoisonSlabFreedObject` /
+  `CheckSlabFreedObjectPoison`).
 - **Remaining scope:**
-  - **Freed-object poison** — stamp `kSlabFreedObjectPoison =
-    0xCC` across freed slab objects on free + verify on alloc.
-    Catches use-after-free in slab-allocated objects without
-    KASAN's shadow-memory tax.
   - **KMalloc routing** — small KMalloc calls could route through
     pre-built size-classed caches automatically. Existing call
     sites are unchanged today; opt-in via direct `SlabAlloc`.
@@ -658,9 +664,18 @@ extends. Next:
 
 ### Track 9 — Security
 
-| ID | Scope | Priority | Task | Acceptance |
-| --- | --- | --- | --- | --- |
-| T9-01 | security | P1 | Implement user-mode PE ASLR for `DYNAMICBASE` images and per-process DLL randomization with relocation. (PE-image ASLR landed: ring3 spawn checks `PeIsDynamicBase` on the Optional Header DllCharacteristics; if set, picks a 64 KiB-aligned delta in [0, 64 MiB) from `RandomU64`; otherwise loads at preferred base. DLL randomisation still pending — DllLoad calls still pass `aslr_delta=0`.) | ASLR-enabled PEs load at randomized bases recorded in the address-space ledger. |
+> **T9-01** shipped: ring3 spawn checks `PeIsDynamicBase` on the
+> Optional Header DllCharacteristics; if set, picks a 64 KiB-aligned
+> delta in [0, 64 MiB) from `RandomU64`; otherwise loads at preferred
+> base. **Per-DLL randomisation also shipped** — every preloaded DLL
+> now draws its own `RandomU64`-derived 4 KiB-aligned delta in
+> [0, 1 MiB) when its DllCharacteristics has `IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE`,
+> and the DllLoad call passes that delta through. The smaller
+> per-DLL window keeps each DLL inside the gap between its preferred
+> base and the next DLL's preferred base (typical Windows DLLs are
+> spaced by tens of MiB) while still adding 8 bits of independent
+> entropy per DLL. Boot log surfaces both the resulting `base_va`
+> and `aslr_delta` for every DLL preload.
 > **T9-02** shipped: vcruntime140 ships `__security_cookie` /
 > `__security_check_cookie` / `__report_gsfailure` /
 > `__report_rangefailure`, AND the PE loader's

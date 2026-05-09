@@ -25,6 +25,7 @@
 #include "core/panic.h"
 #include "log/klog.h"
 #include "mm/kheap.h"
+#include "mm/poison.h"
 #include "sched/sched.h"
 #include "util/types.h"
 
@@ -115,6 +116,13 @@ SlabFreeNode* GrowOneSlab(SlabCache* c)
     for (u64 i = c->objects_per_slab; i-- > 0;)
     {
         auto* obj_u8 = base_u8 + first_obj + i * c->obj_size;
+        // Stamp the trailing payload with the slab poison BEFORE the
+        // freelist link is written, so freshly-carved objects look
+        // identical to SlabFree-returned ones to the alloc-side
+        // verifier. The first sizeof(SlabFreeNode) bytes are about
+        // to be overwritten by the link, so don't bother poisoning
+        // them.
+        PoisonSlabFreedObject(obj_u8, c->obj_size, sizeof(SlabFreeNode));
         auto* node = reinterpret_cast<SlabFreeNode*>(obj_u8);
         node->next = head;
         head = node;
@@ -211,6 +219,17 @@ void* SlabAlloc(SlabCache* c)
     --c->obj_free;
     ++c->obj_in_use;
     ++c->alloc_count;
+    // Verify the trailing-payload poison before handing the object
+    // out. A mismatch means something wrote into the object between
+    // its last SlabFree and this SlabAlloc — i.e. a use-after-free
+    // on the slab side. The cache lock is still held; panic before
+    // releasing it so a probe can capture the offending cache state.
+    const u64 mismatch = CheckSlabFreedObjectPoison(node, c->obj_size, sizeof(SlabFreeNode));
+    if (mismatch != c->obj_size)
+    {
+        KLOG_WARN_S("slab", "freed-object poison mismatch", "cache", c->name);
+        KASSERT(false, "slab", "use-after-free in slab object");
+    }
     sched::MutexUnlock(&c->lock);
     return node;
 }
@@ -223,6 +242,10 @@ void SlabFree(SlabCache* c, void* obj)
     }
     KASSERT(c != nullptr, "slab", "SlabFree null cache");
     sched::MutexLock(&c->lock);
+    // Stamp the trailing payload with the slab poison BEFORE
+    // splicing the object back onto the freelist; the first
+    // sizeof(SlabFreeNode) bytes are about to hold the link.
+    PoisonSlabFreedObject(obj, c->obj_size, sizeof(SlabFreeNode));
     auto* node = static_cast<SlabFreeNode*>(obj);
     node->next = c->free_head;
     c->free_head = node;
@@ -291,6 +314,18 @@ void SlabSelfTest()
     void* reuse = SlabAlloc(c);
     KASSERT(reuse == ptrs[kAllocCount - 1], "slab", "self-test: LIFO ordering broken");
     ptrs[kAllocCount - 1] = reuse;
+
+    // Poison verification: the trailing payload of a re-allocated
+    // object must come back stamped with kSlabFreedObjectPoison
+    // (the freelist link occupies the first sizeof(SlabFreeNode)
+    // bytes; the rest is the poison band).
+    {
+        const auto* probe = static_cast<const u8*>(reuse) + sizeof(void*);
+        for (u32 i = 0; i < kObjSize - sizeof(void*); ++i)
+        {
+            KASSERT(probe[i] == kSlabFreedObjectPoison, "slab", "self-test: poison missing on reuse");
+        }
+    }
 
     // Drain everything.
     for (u32 i = 0; i < kAllocCount; ++i)
