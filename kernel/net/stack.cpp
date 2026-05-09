@@ -53,10 +53,14 @@ namespace
 
 u64 g_interface_count = 0;
 
-// ARP cache storage. Linear-scan lookup — 32 entries is enough
-// for the handful of machines we'd realistically reach from a v0
-// stack, and grows before the lookup cost matters.
+// ARP cache storage. Hash-bucketed lookup — entries are threaded
+// through `g_arp_hash_heads` chains keyed on (iface_index, ip).
+// 32 entries with 64 buckets keeps the average chain length under 1.
 ArpEntry g_arp_cache[kArpCacheCap] = {};
+// Bucket head indices into `g_arp_cache`; `kArpEntryNone` (0xFF)
+// terminates a chain. Initialised to all-empty in NetStackInit
+// — zero-init would alias to "head is entry 0", which is a bug.
+u8 g_arp_hash_heads[kArpHashSize] = {};
 ArpStats g_arp_stats = {};
 Ipv4Stats g_ipv4_stats = {};
 IcmpStats g_icmp_stats = {};
@@ -328,6 +332,19 @@ void NetStackInit()
     static constinit bool s_done = false;
     KASSERT(!s_done, "net/stack", "NetStackInit called twice");
     s_done = true;
+
+    // Mark every ARP hash bucket empty. Zero-init would make every
+    // bucket "point at entry 0" which is the wrong invariant — a
+    // freshly-empty bucket must signal end-of-chain to ArpLookup.
+    for (u32 i = 0; i < kArpHashSize; ++i)
+    {
+        g_arp_hash_heads[i] = kArpEntryNone;
+    }
+    for (u32 i = 0; i < kArpCacheCap; ++i)
+    {
+        g_arp_cache[i].next_idx = kArpEntryNone;
+    }
+
     WifiInit();
     firewall::FwInit();
 
@@ -671,26 +688,71 @@ u32 ArpEntryCount()
     return live;
 }
 
+namespace
+{
+
+// Hash (iface, ip) → bucket index. Murmur-style 32-bit avalanche
+// mixed against a Knuth-derived multiplier so adjacent IPs spread
+// across buckets instead of clustering. With kArpHashSize a power
+// of two we mask off the high bits.
+inline u32 ArpHash(u32 iface, Ipv4Address ip)
+{
+    u32 h = (static_cast<u32>(ip.octets[0]) << 24) | (static_cast<u32>(ip.octets[1]) << 16) |
+            (static_cast<u32>(ip.octets[2]) << 8) | static_cast<u32>(ip.octets[3]);
+    h ^= iface * 0x9E3779B9u;
+    h ^= h >> 16;
+    h *= 0x85EBCA6Bu;
+    h ^= h >> 13;
+    return h & (kArpHashSize - 1);
+}
+
+// Splice the entry at `idx` out of the bucket-`h` chain. Caller
+// has already verified the entry IS in that chain (because it
+// derived `h` from the entry's own (iface, ip)).
+void ArpUnlinkFromBucket(u8 idx, u32 h)
+{
+    u8* link = &g_arp_hash_heads[h];
+    while (*link != kArpEntryNone)
+    {
+        if (*link == idx)
+        {
+            *link = g_arp_cache[idx].next_idx;
+            g_arp_cache[idx].next_idx = kArpEntryNone;
+            return;
+        }
+        link = &g_arp_cache[*link].next_idx;
+    }
+}
+
+} // namespace
+
 const ArpEntry* ArpLookup(u32 iface_index, Ipv4Address ip)
 {
     const u64 now = NowTicks();
-    for (ArpEntry& e : g_arp_cache)
+    const u32 h = ArpHash(iface_index, ip);
+
+    u8* link = &g_arp_hash_heads[h];
+    while (*link != kArpEntryNone)
     {
-        if (e.expiry_ticks == 0)
-            continue;
-        if (e.iface_index != iface_index)
-            continue;
-        if (!IpEq(e.ip, ip))
-            continue;
-        if (now >= e.expiry_ticks)
+        const u8 idx = *link;
+        ArpEntry& e = g_arp_cache[idx];
+        if (e.iface_index == iface_index && IpEq(e.ip, ip))
         {
-            // Lazy expiry — clear the slot.
-            e.expiry_ticks = 0;
-            ++g_arp_stats.lookups_miss;
-            return nullptr;
+            if (now >= e.expiry_ticks)
+            {
+                // Lazy expiry: splice out of the chain so the next
+                // lookup doesn't re-traverse a dead entry, and free
+                // the slot for a future insert.
+                *link = e.next_idx;
+                e.next_idx = kArpEntryNone;
+                e.expiry_ticks = 0;
+                ++g_arp_stats.lookups_miss;
+                return nullptr;
+            }
+            ++g_arp_stats.lookups_hit;
+            return &e;
         }
-        ++g_arp_stats.lookups_hit;
-        return &e;
+        link = &e.next_idx;
     }
     ++g_arp_stats.lookups_miss;
     return nullptr;
@@ -699,10 +761,13 @@ const ArpEntry* ArpLookup(u32 iface_index, Ipv4Address ip)
 void ArpInsert(u32 iface_index, Ipv4Address ip, MacAddress mac)
 {
     const u64 now = NowTicks();
-    // First pass — refresh an existing entry if we find it.
-    for (ArpEntry& e : g_arp_cache)
+    const u32 h = ArpHash(iface_index, ip);
+
+    // Refresh an existing entry if it's already on this bucket's chain.
+    for (u8 idx = g_arp_hash_heads[h]; idx != kArpEntryNone; idx = g_arp_cache[idx].next_idx)
     {
-        if (e.expiry_ticks != 0 && e.iface_index == iface_index && IpEq(e.ip, ip))
+        ArpEntry& e = g_arp_cache[idx];
+        if (e.iface_index == iface_index && IpEq(e.ip, ip))
         {
             e.mac = mac;
             e.expiry_ticks = now + kArpEntryTtlTicks;
@@ -710,32 +775,57 @@ void ArpInsert(u32 iface_index, Ipv4Address ip, MacAddress mac)
             return;
         }
     }
-    // Second pass — slot into a free entry.
-    for (ArpEntry& e : g_arp_cache)
+
+    // Find a free or expired slot. Linear scan over the cache —
+    // 32 entries, runs at cache-miss frequency, not lookup frequency.
+    u8 free_idx = kArpEntryNone;
+    for (u32 i = 0; i < kArpCacheCap; ++i)
     {
-        if (e.expiry_ticks == 0)
+        if (g_arp_cache[i].expiry_ticks == 0 || g_arp_cache[i].expiry_ticks <= now)
         {
-            e.ip = ip;
-            e.mac = mac;
-            e.iface_index = iface_index;
-            e.expiry_ticks = now + kArpEntryTtlTicks;
-            ++g_arp_stats.inserts;
-            return;
+            free_idx = static_cast<u8>(i);
+            break;
         }
     }
-    // Third pass — evict the entry with the soonest expiry.
-    ArpEntry* victim = &g_arp_cache[0];
-    for (ArpEntry& e : g_arp_cache)
+
+    if (free_idx == kArpEntryNone)
     {
-        if (e.expiry_ticks < victim->expiry_ticks)
-            victim = &e;
+        // No free slot — evict the entry with the soonest expiry.
+        u32 victim = 0;
+        for (u32 i = 1; i < kArpCacheCap; ++i)
+        {
+            if (g_arp_cache[i].expiry_ticks < g_arp_cache[victim].expiry_ticks)
+            {
+                victim = i;
+            }
+        }
+        // Splice victim out of its current bucket so we don't leave
+        // a dangling chain link pointing at its repurposed slot.
+        const ArpEntry& v = g_arp_cache[victim];
+        if (v.expiry_ticks != 0)
+        {
+            ArpUnlinkFromBucket(static_cast<u8>(victim), ArpHash(v.iface_index, v.ip));
+        }
+        free_idx = static_cast<u8>(victim);
+        ++g_arp_stats.evictions;
     }
-    victim->ip = ip;
-    victim->mac = mac;
-    victim->iface_index = iface_index;
-    victim->expiry_ticks = now + kArpEntryTtlTicks;
+    else if (g_arp_cache[free_idx].expiry_ticks != 0)
+    {
+        // Slot was an expired entry, not a never-used one — splice
+        // it out of its old bucket before reusing.
+        const ArpEntry& v = g_arp_cache[free_idx];
+        ArpUnlinkFromBucket(free_idx, ArpHash(v.iface_index, v.ip));
+    }
+
+    // Initialise the slot and link onto the head of the new bucket.
+    ArpEntry& e = g_arp_cache[free_idx];
+    e.ip = ip;
+    e.mac = mac;
+    e.iface_index = iface_index;
+    e.expiry_ticks = now + kArpEntryTtlTicks;
+    e.next_idx = g_arp_hash_heads[h];
+    g_arp_hash_heads[h] = free_idx;
     ++g_arp_stats.inserts;
-    ++g_arp_stats.evictions;
 }
 
 bool ArpHandleIncoming(u32 iface_index, const void* frame, u64 len)

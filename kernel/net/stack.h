@@ -199,11 +199,15 @@ u32 ArpEntryCount();
 //   - Fixed-capacity cache (no per-entry heap alloc in v0).
 //   - Entries carry an expiry tick — defaults to 60 seconds, refreshed
 //     on any ARP reply that matches.
-//   - Lookups are O(N) linear scan over the small cap. When we need
-//     more entries we'll swap in an open-addressing hash.
+//   - Lookup is O(chain length) — entries are threaded through hash
+//     buckets keyed on (iface_index, ip). At cap 32 / 64 buckets the
+//     average chain length is ~0.5; worst case under a degenerate
+//     hash is still bounded by the cap.
 // -------------------------------------------------------------------
 
 inline constexpr u64 kArpCacheCap = 32;
+inline constexpr u64 kArpHashSize = 64;               ///< Power of two; 2x the cache cap.
+inline constexpr u8 kArpEntryNone = 0xFF;             ///< End-of-chain sentinel.
 inline constexpr u64 kArpEntryTtlTicks = 60ULL * 100; // 60 s at 100 Hz
 
 struct ArpEntry
@@ -212,6 +216,8 @@ struct ArpEntry
     MacAddress mac;
     u64 expiry_ticks; // 0 = slot free
     u32 iface_index;  // L2 interface the entry belongs to
+    u8 next_idx;      // chain link: index into g_arp_cache, or kArpEntryNone for tail
+    u8 _pad[3];
 };
 
 /// Look up an ARP entry by IPv4 address on the given interface.
