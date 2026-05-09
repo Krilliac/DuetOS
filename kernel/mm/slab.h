@@ -46,23 +46,30 @@
  *     the size classes we target (≤ 2 KiB).
  *
  * THREADING
- *   Each cache has its own `sched::Mutex`. Cache operations are
- *   safe from any kernel context that can take a sleeping mutex.
- *   IRQ-context allocation is OUT OF SCOPE for v0; the kheap
- *   itself isn't IRQ-safe today either, so the slab inherits the
- *   same restriction.
+ *   Each cache has its own `sched::Mutex` guarding the global
+ *   freelist + slab chain, AND a per-CPU "magazine" that caches
+ *   a small pool of recently-freed objects on the running CPU.
+ *   The fast path (alloc when the magazine has objects, free when
+ *   the magazine has room) only disables IRQs — no mutex, no
+ *   cross-CPU traffic. The slow path (magazine empty on alloc,
+ *   magazine full on free) takes the cache mutex and bulk-refills
+ *   or bulk-drains so the next ~kMagazineSize/2 ops on this CPU
+ *   stay on the fast path.
+ *
+ *   Cache operations are safe from any kernel context that can
+ *   take a sleeping mutex. IRQ-context allocation is OUT OF SCOPE
+ *   for v0; the kheap itself isn't IRQ-safe today either, so the
+ *   slab inherits the same restriction.
  *
  * SCOPE LIMITS (v0)
- *   - No per-CPU magazine (free-pool cached on the calling CPU).
- *     Future B2-followup: once the sched lock splits per-CPU,
- *     the same pattern lets slab caches add a magazine layer for
- *     truly lock-free fast-path alloc / free on the running CPU.
  *   - No object constructor / destructor. Objects are returned
  *     uninitialised; callers placement-new if they need it.
  *   - No KMalloc-replacement integration. Existing KMalloc /
  *     KFree call sites are unchanged. A future slice can add a
  *     "size-classed kheap" that routes small allocations through
  *     pre-built slab caches automatically.
+ *   - Magazine size is fixed (kMagazineSize). Adaptive sizing
+ *     based on cache miss rate is a future tuning knob.
  */
 
 namespace duetos::mm
@@ -110,11 +117,13 @@ struct SlabStats
 {
     u64 obj_size;
     u64 objects_per_slab;
-    u64 slabs;       ///< Total slabs ever allocated for this cache.
-    u64 obj_in_use;  ///< Currently allocated, awaiting SlabFree.
-    u64 obj_free;    ///< In a slab but not currently allocated.
-    u64 alloc_count; ///< Lifetime SlabAlloc calls that returned non-null.
-    u64 free_count;  ///< Lifetime SlabFree calls that did anything.
+    u64 slabs;          ///< Total slabs ever allocated for this cache.
+    u64 obj_in_use;     ///< Currently allocated, awaiting SlabFree.
+    u64 obj_free;       ///< In a slab but not currently allocated (global freelist + magazines).
+    u64 alloc_count;    ///< Lifetime SlabAlloc calls that returned non-null.
+    u64 free_count;     ///< Lifetime SlabFree calls that did anything.
+    u64 magazine_alloc; ///< Subset of alloc_count satisfied from a per-CPU magazine.
+    u64 magazine_free;  ///< Subset of free_count absorbed by a per-CPU magazine.
 };
 
 /// Cheap diagnostic snapshot. Racy under concurrent activity —
