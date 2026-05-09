@@ -170,6 +170,13 @@ class FixRecord:
     flags: int
     source_pin: str
     hint: str
+    # True when this record's (detector, source_pin) pair did not
+    # appear in any rotation-baseline file. Set by main() when the
+    # caller passes prior boots on argv after the current KERNEL.FIX.
+    # Defaults True so single-file invocations (no baseline) treat
+    # every record as NEW — which is the right framing for a first-
+    # ever cycle.
+    is_new: bool = True
 
     @property
     def detector_name(self) -> str:
@@ -877,19 +884,234 @@ class SymbolResolver:
         return self._table.get(rip, "")
 
 
-def _soft_fault_priority(repeat: int) -> tuple[str, str]:
-    """Bucket the repeat_count into a triage priority.
+def _new_tag(r: FixRecord) -> str:
+    """Title decoration showing whether the record is new this cycle.
 
-    SoftFaultRecov fires once per (detector, source_pin) and then dedupes
-    onto repeat_count. A single fire is the expected "we caught a one-
-    off"; a few hits is the "look at this when convenient" tier; many
-    hits is "this path is hot and the workaround is masking a real bug."
+    Returns ` [NEW]` (with the leading space) when the record's
+    (detector, source_pin) pair did not appear in any rotation
+    baseline. Empty string when the record is RESEEN. Title-decoration
+    style chosen so multi-record reports scan as "show me the NEW
+    rows first" without losing context for the others.
+    """
+    return " [NEW]" if r.is_new else ""
+
+
+def _priority_tier(repeat: int, kind_label: str = "recovery") -> tuple[str, str]:
+    """Generic LOW/MEDIUM/HIGH bucketing by repeat_count.
+
+    Used by every note-shaped detector that wants the same tiering
+    (StubMarker, GapMarker, LoaderReject, SoftFaultRecov). The
+    `kind_label` is folded into the message so each detector
+    surfaces the same band with detector-specific framing.
+    """
+    if repeat <= 2:
+        return ("LOW", f"expected one-off; note for awareness ({kind_label})")
+    if repeat <= 10:
+        return ("MEDIUM", f"repeated {kind_label}: investigate when convenient")
+    return ("HIGH", f"hot {kind_label}: workaround likely masking a real bug — fix or upgrade the policy")
+
+
+def _soft_fault_priority(repeat: int) -> tuple[str, str]:
+    """Soft-fault flavour of `_priority_tier` — kept under the original
+    name to preserve internal call-site signatures. `repeat <= 2`
+    returns LOW, etc. The wording is SoftFaultRecov-specific because
+    the brief framing asks the reviewer about a "workaround" rather
+    than a "marker hit."
     """
     if repeat <= 2:
         return ("LOW", "expected one-off; note for awareness")
     if repeat <= 10:
         return ("MEDIUM", "investigate: repeated recovery may indicate a real flake")
     return ("HIGH", "WARNING: hot path; the workaround is masking a real bug — fix or upgrade the policy")
+
+
+# Per-PeStatus follow-up advice. Pin format from the kernel side is
+# `loader/pe:<PeStatusName>` (kernel/loader/pe_loader.cpp:1620). Each
+# entry is the actionable "where to look in source" for that reject
+# class. Statuses not listed fall through to a generic message.
+PE_REJECT_FOLLOWUP = {
+    "TooSmall": "The PE buffer is shorter than a DOS stub. The image is malformed; reject is correct, no source change needed unless the producer (a loader / network path) is feeding truncated bytes.",
+    "BadDosMagic": "Bytes 0-1 are not 'MZ'. Either a non-PE blob reached PeLoad (a producer-side bug) or a real PE was corrupted in transit.",
+    "BadLfanewBounds": "The DOS stub's e_lfanew points past EOF — corrupted PE. Reject is correct.",
+    "BadNtSignature": "PE\\0\\0 missing at e_lfanew. Reject is correct; investigate the producer.",
+    "BadMachine": "Image targets a machine other than IMAGE_FILE_MACHINE_AMD64 (0x8664). To support more architectures (i386 / ARM64), gate machine validation in `kernel/loader/pe_loader.cpp` and add the per-machine entry stubs.",
+    "NotPe32Plus": "OptionalHeader.Magic != 0x20B (PE32+ AMD64). For 32-bit PE (Magic 0x10B) support, lift the magic check and add a 32-bit OptionalHeader parser path.",
+    "SectionAlignUnsup": "SectionAlignment != 4096. Most production PEs use 4 KiB; non-4 KiB section alignment is rare (custom PEs / packed binaries). Add multi-alignment support in section walking + page mapping.",
+    "FileAlignUnsup": "FileAlignment is not a power-of-2 in [512, 4096]. Same shape as SectionAlignUnsup — rare; extend if a target PE actually trips it.",
+    "SectionCountZero": "PE has zero sections. Either a malformed file or an image relying on a section-less init path (uncommon).",
+    "OptHeaderOutOfBounds": "SizeOfOptionalHeader is shorter than required. Malformed PE.",
+    "SectionOutOfBounds": "A section's raw data extends past EOF. Malformed PE.",
+    "ImportsPresent": "Imports directory is non-empty AND at least one import is unresolved. **Most fixable** of the reject classes — usually means a thunks_table.inc row is missing. Check the UnmappedThunk records in this report; they identify the specific DLL!fn pairs to add.",
+    "RelocsNonEmpty": "Base reloc directory is non-empty. The PE was linked at an ImageBase that conflicts with the kernel's mapping; v0 doesn't walk the .reloc table. **Fix shape:** implement a base-reloc walker in `kernel/loader/pe_loader.cpp`. Required to load PEs that don't link with `/FIXED:NO` set inversely.",
+    "TlsPresent": "TLS Directory non-empty. v0 tolerates this only when the callbacks array is empty (MSVC's placeholder). If real TLS callbacks are needed, see TlsCallbacksUnsupported below.",
+    "TlsCallbacksUnsupported": "TLS Directory has at least one non-null callback VA. **Fix shape:** add a ring-3 thunk that calls each callback before entry — the kernel needs to walk the callback array, allocate a small bootstrap stub in user memory, and route process entry through it. Significant slice (think DLL TLS init).",
+    "StubsPageAllocFail": "Out of physical memory during PE load — the stubs page (the kernel-side stub trampolines) couldn't allocate. Investigate frame-allocator pressure under PE load; this isn't a loader-policy gap, it's a system-resource failure.",
+    "ImageBaseOutOfRange": "ImageBase or ImageBase+SizeOfImage is outside the canonical user low half (>0x00007FFFFFFFFFFF). This is a hostile / malformed PE — the reject IS the fix. Repeated hits are an attack signal worth feeding to the security log.",
+}
+
+
+def synth_loader_reject_brief(r: FixRecord, resolver: SymbolResolver | None = None) -> Action:
+    """Generate a per-status brief for a LoaderReject record.
+
+    The kernel side records the pin as `loader/pe:<PeStatusName>` and
+    stuffs the PeStatus enum value in ctx_a + the file_len in ctx_b
+    (kernel/loader/pe_loader.cpp:1634). We split off the status name
+    and surface the per-status fix shape from PE_REJECT_FOLLOWUP.
+
+    Two patches the generator does NOT auto-apply, by design:
+      - A 'fix the malformed PE' patch — the kernel is right to
+        reject it, the bug is producer-side.
+      - A 'land RelocsNonEmpty support' patch — that's a real
+        kernel slice that needs human design choices.
+    Both surfaces would harm by pretending mechanical fixes exist.
+    """
+    priority, priority_note = _priority_tier(r.repeat, kind_label="loader rejection")
+    status = ""
+    if r.source_pin.startswith("loader/pe:"):
+        status = r.source_pin[len("loader/pe:"):]
+
+    lines: list[str] = []
+    lines.append(f"**Priority: {priority}** — {priority_note}")
+    lines.append("")
+    lines.append(f"PE loader rejected an image with status `{status or r.source_pin}` "
+                 f"({r.repeat} occurrence(s) since boot, image_size={r.ctx_b} bytes).")
+    lines.append("")
+
+    followup = PE_REJECT_FOLLOWUP.get(status)
+    if followup:
+        lines.append(f"**What this status means + fix shape:**")
+        lines.append("")
+        lines.append(followup)
+    else:
+        lines.append(
+            f"Status `{status}` is not in the per-status follow-up "
+            f"table; the kernel rejected for a reason this script "
+            f"doesn't recognise. Either the kernel added a new "
+            f"PeStatus enumerator without updating this table, or "
+            f"the on-disk record is from a different version. Pin: "
+            f"`{r.source_pin}`."
+        )
+
+    if r.repeat >= 5:
+        lines.append("")
+        lines.append(
+            f"**Recurring rejection ({r.repeat}× since boot)** — the "
+            f"same PE shape is being retried. Investigate the producer "
+            f"(retry loop in a userland tool, a smoke test re-running "
+            f"the same broken binary)."
+        )
+
+    # Caller RIP — for a LoaderReject, this is the loader's own RIP
+    # at the reject site, useful as a breadcrumb to confirm which
+    # rejection branch fired.
+    if resolver is not None:
+        sym = resolver.resolve(r.caller_rip)
+        if sym and not sym.startswith("?? "):
+            lines.append("")
+            lines.append(f"Loader site: `{sym}` (rip=`0x{r.caller_rip:016x}`)")
+
+    lines.append("")
+    lines.append("---")
+    lines.append("Journal record:")
+    lines.append("```")
+    lines.append(f"seq         = {r.seq}")
+    lines.append(f"repeat      = {r.repeat}")
+    lines.append(f"caller_rip  = 0x{r.caller_rip:016x}")
+    lines.append(f"ctx_a       = 0x{r.ctx_a:016x}  (PeStatus enum value)")
+    lines.append(f"ctx_b       = 0x{r.ctx_b:016x}  (file_len)")
+    lines.append(f"source_pin  = {r.source_pin!r}")
+    lines.append(f"hint        = {r.hint!r}")
+    lines.append("```")
+
+    title = f"Loader reject [{priority}]{_new_tag(r)} `{status or r.source_pin}` (×{r.repeat})"
+    return Action(kind="note", title=title, body="\n".join(lines), filename=None)
+
+
+def synth_marker_hit_brief(r: FixRecord, resolver: SymbolResolver | None = None) -> Action:
+    """Generate a tier-aware brief for a StubMarker / GapMarker hit.
+
+    Both detectors record:
+      - source_pin: the file:line ("kernel/foo.cpp:42") OR an
+        auto-derived `func+0xOFF` if the recorder didn't supply
+        one (auto-derivation is KASLR-stable via the embedded
+        symbol table — see fix_journal.h:121).
+      - hint: the `// STUB:` / `// GAP:` comment text.
+      - caller_rip: where in the kernel the marker fired.
+      - repeat: how many times this site was reached.
+
+    Tiering: a STUB hit once is "this code is reachable, look at
+    it"; a STUB hit 100× is "this is a hot path masquerading as
+    incomplete." Same scale as SoftFaultRecov / LoaderReject.
+
+    Two extra bits of polish vs the prior generic note:
+      - resolver-driven addr2line lookup so an auto-derived
+        `func+0xOFF` pin gets a `(file.cpp:line)` tail when a
+        kernel ELF is supplied;
+      - GapMarker upgrade hint when repeat is high — a marker
+        flagged "happy path works, edge unimpl" but firing
+        repeatedly is probably actually a STUB.
+    """
+    is_stub = r.detector_name == "stub"
+    label = "STUB" if is_stub else "GAP"
+    priority, priority_note = _priority_tier(r.repeat, kind_label=f"{label} marker hit")
+
+    lines: list[str] = []
+    lines.append(f"**Priority: {priority}** — {priority_note}")
+    lines.append("")
+
+    sym = resolver.resolve(r.caller_rip) if resolver is not None else ""
+    if sym and not sym.startswith("?? "):
+        lines.append(f"Source pin: `{r.source_pin}`")
+        lines.append(f"Resolved:   `{sym}` (rip=`0x{r.caller_rip:016x}`)")
+    else:
+        lines.append(f"Source pin: `{r.source_pin}` (rip=`0x{r.caller_rip:016x}`)")
+    lines.append("")
+    lines.append(f"`// {label}:` marker reached at runtime — repeat_count = **{r.repeat}**.")
+    lines.append("")
+    if is_stub:
+        lines.append(
+            "**Recommended next step:** open the source pin and replace "
+            "the STUB body with the documented behaviour. The presence of "
+            "the marker here means the runtime did NOT do the right thing "
+            "even on the v0 happy path — every caller along this trail "
+            "saw incorrect behaviour."
+        )
+    else:
+        lines.append(
+            "**Recommended next step:** open the source pin and decide "
+            "whether the gap is still acceptable. GAPs are 'happy path "
+            "works, edge case missing' — the runtime hit IS the happy "
+            "path, so the marker is doing its job. The fix is to "
+            "implement the documented edge case OR to remove the "
+            "marker once the gap is no longer relevant."
+        )
+        if r.repeat >= 10:
+            lines.append("")
+            lines.append(
+                f"**Heads-up: repeat={r.repeat} is high for a GAP.** A "
+                f"GAP that fires this often probably isn't a 'happy "
+                f"path works' marker — it's a STUB in disguise. "
+                f"Consider converting `// GAP:` → `// STUB:` so the "
+                f"surface inventory accurately reflects 'broken on "
+                f"the hot path' rather than 'documented edge case.'"
+            )
+
+    lines.append("")
+    lines.append(f"Marker text: {r.hint!r}")
+
+    lines.append("")
+    lines.append("---")
+    lines.append("Journal record:")
+    lines.append("```")
+    lines.append(f"seq         = {r.seq}")
+    lines.append(f"repeat      = {r.repeat}")
+    lines.append(f"caller_rip  = 0x{r.caller_rip:016x}")
+    lines.append(f"source_pin  = {r.source_pin!r}")
+    lines.append(f"hint        = {r.hint!r}")
+    lines.append("```")
+
+    title = f"{label} marker [{priority}]{_new_tag(r)} at `{r.source_pin}` (×{r.repeat})"
+    return Action(kind="note", title=title, body="\n".join(lines), filename=None)
 
 
 def synth_soft_fault_recov_brief(r: FixRecord, resolver: SymbolResolver | None = None) -> Action:
@@ -923,6 +1145,7 @@ def synth_soft_fault_recov_brief(r: FixRecord, resolver: SymbolResolver | None =
     is_trap = r.source_pin.strip() == "trap.recov"
     is_retry = r.hint.startswith("fault-react: caller-retry")
     is_restart = r.hint.startswith("fault-react: domain restarted")
+    is_kill = r.hint.startswith("fault-react: process killed")
 
     lines: list[str] = []
     lines.append(f"**Priority: {priority}** — {priority_note}")
@@ -1045,6 +1268,37 @@ def synth_soft_fault_recov_brief(r: FixRecord, resolver: SymbolResolver | None =
                 "the failing condition (audit the per-domain "
                 "`SubsystemRestart` callback)."
             )
+    elif is_kill:
+        kind_name = FAULT_KIND_NAMES.get(r.ctx_a, f"fault-kind#{r.ctx_a}")
+        followup = FAULT_KIND_FOLLOWUP.get(kind_name, "")
+        lines.append("### Source: fault-react `KillProcess` branch")
+        lines.append("")
+        lines.append(
+            f"The fault-react dispatcher signalled the offending task "
+            f"(pid={r.ctx_b}) for termination after a `{kind_name}` "
+            f"reported by `{r.source_pin}`. This is the Class-C "
+            f"recovery path — the kernel kept running, the user "
+            f"task got killed."
+        )
+        lines.append("")
+        lines.append(f"- Subsystem source: `{r.source_pin}`")
+        lines.append(f"- FaultKind:        `{kind_name}` (ctx_a=0x{r.ctx_a:x})")
+        lines.append(f"- Victim pid:       `{r.ctx_b}`")
+        lines.append(f"- Severity:         `{r.severity}`")
+        if followup:
+            lines.append("")
+            lines.append("**Recommended next step:** " + followup)
+        if r.repeat >= 5:
+            lines.append("")
+            lines.append(
+                "**Kill loop suspected** — five-plus same-pin kills in "
+                "one boot suggests a service supervisor (init, a "
+                "watchdog, a respawning daemon) is restarting the "
+                "offending task and it's hitting the same fault each "
+                "cycle. Investigate the producer of the user-mode "
+                "fault: the kernel's reject is correct; the fix is "
+                "in userland or at the syscall-arg validation seam."
+            )
     else:
         lines.append("### Source: unrecognised SoftFaultRecov producer")
         lines.append("")
@@ -1071,7 +1325,7 @@ def synth_soft_fault_recov_brief(r: FixRecord, resolver: SymbolResolver | None =
     lines.append(f"severity    = {r.severity}")
     lines.append("```")
 
-    title = f"Soft-fault recovery [{priority}] at `{r.source_pin}` (×{r.repeat})"
+    title = f"Soft-fault recovery [{priority}]{_new_tag(r)} at `{r.source_pin}` (×{r.repeat})"
     return Action(kind="note", title=title, body="\n".join(lines), filename=None)
 
 
@@ -1167,42 +1421,18 @@ def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path,
             actions.append(
                 Action(
                     kind="note",
-                    title=f"Implement syscall #0x{num:x}",
+                    title=f"Implement syscall #0x{num:x}{_new_tag(r)}",
                     body=synth_syscall_brief(r, num),
                     filename=None,
                 )
             )
 
         elif r.detector_name in ("stub", "gap"):
-            actions.append(
-                Action(
-                    kind="note",
-                    title=f"Visit `{r.source_pin}` ({r.detector_name})",
-                    body=(
-                        f"`{r.source_pin}` was reached at runtime; the source pin "
-                        f"already names the file:line. Open it and either complete "
-                        f"the implementation (STUB) or document why the GAP is "
-                        f"acceptable for v0. Hint: {r.hint or '(none)'}."
-                    ),
-                    filename=None,
-                )
-            )
+            actions.append(synth_marker_hit_brief(r, resolver))
         elif r.detector_name == "soft_fault_recov":
             actions.append(synth_soft_fault_recov_brief(r, resolver))
         elif r.detector_name == "loader_reject":
-            actions.append(
-                Action(
-                    kind="note",
-                    title=f"PE/ELF loader rejected: `{r.source_pin}`",
-                    body=(
-                        f"The loader rejected an image with status `{r.source_pin}`. "
-                        f"Extending the loader to handle the status is the fix shape; "
-                        f"see `kernel/loader/pe_loader.cpp` for the reject taxonomy. "
-                        f"Hint: {r.hint or '(none)'}."
-                    ),
-                    filename=None,
-                )
-            )
+            actions.append(synth_loader_reject_brief(r, resolver))
     return actions
 
 
@@ -1348,26 +1578,56 @@ def main() -> int:
         file=sys.stderr,
     )
 
-    all_records: list[FixRecord] = []
-    for path in args.files:
+    # Treat args.files[0] as the CURRENT boot and any subsequent
+    # files as prior-boot rotation baselines (KERNEL.F0..F3 by
+    # convention). Each current-boot record is classified NEW if no
+    # prior file carries a record with the same (detector,
+    # source_pin) key, else RESEEN. Single-file invocations skip
+    # the classification — every record stays is_new=True, which
+    # matches the framing "this is the first cycle, everything is
+    # new from the reviewer's POV."
+    current_records: list[FixRecord] = []
+    baseline_keys: set[tuple[str, str]] = set()
+    for idx, path in enumerate(args.files):
         try:
             recs = read_records(path)
         except (FileNotFoundError, ValueError) as exc:
             print(f"# skip {path}: {exc}", file=sys.stderr)
             continue
-        all_records.extend(recs)
+        if idx == 0:
+            current_records.extend(recs)
+        else:
+            for r in recs:
+                baseline_keys.add((r.detector_name, r.source_pin))
+    if baseline_keys:
+        new_count = 0
+        for r in current_records:
+            if (r.detector_name, r.source_pin) in baseline_keys:
+                r.is_new = False
+            else:
+                new_count += 1
+        print(
+            f"# baseline: {len(baseline_keys)} (detector, pin) keys from prior boots; "
+            f"NEW this boot: {new_count}/{len(current_records)}",
+            file=sys.stderr,
+        )
+    all_records = current_records
     if not all_records and not args.markers:
         print("# no readable fix-journal files", file=sys.stderr)
         return 1
 
     resolver = SymbolResolver(elf_path=args.kernel_elf)
     if args.kernel_elf is not None:
-        # Prime once with every RIP a SoftFaultRecov record references —
-        # saves N forks of addr2line for N records.
+        # Prime once with every kernel-RIP any record references —
+        # one batched addr2line call covers the whole batch instead
+        # of N forks. SoftFaultRecov records carry both `caller_rip`
+        # AND `ctx_a` (which holds the faulting RIP for trap.recov);
+        # every other detector contributes just `caller_rip`. The
+        # resolver itself filters out non-kernel addresses up front.
         rips: list[int] = []
         for r in all_records:
+            rips.append(r.caller_rip)
             if r.detector_name == "soft_fault_recov":
-                rips.append(r.caller_rip)
                 rips.append(r.ctx_a)
         resolver.prime(rips)
 

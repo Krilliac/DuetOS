@@ -302,6 +302,21 @@ FaultReaction FaultReactDispatch(::duetos::core::FaultDomainId domain_id, const 
                                      ev.source != nullptr ? ev.source : "diag/fault-react", FaultKindName(ev.kind),
                                      victim->pid);
         ::duetos::sched::FlagCurrentForKill(::duetos::sched::KillReason::UserKill);
+        // Journal the recovery: KillProcess is the bounded workaround
+        // for a Class-C user-task fault. The kernel "recovered" by
+        // signalling the offending task for termination — the next
+        // Schedule() unwinds it through ProcessRelease and the
+        // kernel keeps running. ctx_a is the FaultKind, ctx_b is the
+        // victim pid. Dedup on (source, FaultKind) groups repeated
+        // kills of the same caller into a single record with rising
+        // repeat_count; that pattern is the signal that a user task
+        // is in a kill-loop (e.g. a respawning service that hits the
+        // same wild pointer every cycle). The off-line patch
+        // generator's HIGH-priority bucket flags the loop.
+        (void)::duetos::diag::FixJournalRecordSev(
+            ::duetos::diag::FixDetector::SoftFaultRecov, ev.source != nullptr ? ev.source : "diag/fault-react",
+            "fault-react: process killed; recurrence implies user-task loop", static_cast<u64>(ev.kind), victim->pid,
+            /*severity=*/static_cast<u16>(ev.severity));
         break;
     }
 
