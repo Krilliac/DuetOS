@@ -1,19 +1,30 @@
 /*
- * DuetOS — quiescent-state RCU, v0 (plan B1.4).
+ * DuetOS — quiescent-state RCU.
  *
- * See `rcu.h` for the public contract. v0 is a single-CPU
- * formulation: a callback enqueued at tick T is reclaimable
- * once `g_ticks > T` (any subsequent tick is a quiescent
- * state). Once SMP lands and per-CPU counters exist, the
- * grace-period rule generalises to "every CPU has ticked at
- * least once since enqueue".
+ * See `rcu.h` for the public contract. Per-CPU callback queues:
+ * each CPU pushes onto its own ring; reclamation walks every queue
+ * (`RcuReclaim`) or only the caller's (`RcuReclaimLocal`). Each
+ * queue has its own ticket spinlock — the local-CPU fast path
+ * sees uncontended acquires while a cross-CPU `RcuReclaim` walks
+ * peer queues without racing the peer's own `RcuCall`.
+ *
+ * Grace-period rule: a callback enqueued at tick T is reclaimable
+ * once `g_ticks > T`. The tick counter is a single global atomic
+ * advanced by every CPU's `RcuTick` call, so a callback enqueued
+ * on any CPU sees a quiescent state as soon as any CPU completes
+ * a scheduler tick. Once SMP demands strict per-CPU QS proof,
+ * the rule generalises to "every CPU's local tick > T" — the
+ * queue layout already supports it.
  */
 
 #include "sync/rcu.h"
 
+#include "acpi/acpi.h"
 #include "arch/x86_64/cpu.h"
 #include "core/panic.h"
+#include "cpu/percpu.h"
 #include "log/klog.h"
+#include "sync/spinlock.h"
 #include "util/types.h"
 
 namespace duetos::sync
@@ -22,7 +33,7 @@ namespace duetos::sync
 namespace
 {
 
-constexpr u32 kRcuQueueDepth = 256;
+constexpr u32 kRcuPerCpuQueueDepth = 64;
 
 struct PendingCb
 {
@@ -31,13 +42,67 @@ struct PendingCb
     u64 enqueue_tick;
 };
 
-constinit PendingCb g_queue[kRcuQueueDepth] = {};
-constinit u32 g_head = 0;  ///< Next slot to write.
-constinit u32 g_tail = 0;  ///< Next slot to reclaim.
-constinit u32 g_count = 0; ///< Live callbacks.
+struct RcuPerCpuQueue
+{
+    // Per-queue spinlock. Uncontended for the local-only path
+    // (RcuCall + RcuReclaimLocal both run on the queue's owning
+    // CPU). Contended only when a cross-CPU caller invokes
+    // RcuReclaim — the lock prevents the peer's concurrent
+    // RcuCall from racing with the drain's index updates.
+    SpinLock lock;
+    PendingCb slots[kRcuPerCpuQueueDepth];
+    u32 head;  ///< Next slot to write.
+    u32 tail;  ///< Next slot to reclaim.
+    u32 count; ///< Live callbacks.
+};
+
+constinit RcuPerCpuQueue g_per_cpu[acpi::kMaxCpus] = {};
 constinit u64 g_ticks = 0; ///< Monotonic tick count fed by RcuTick.
 constinit u64 g_calls_queued = 0;
 constinit u64 g_calls_completed = 0;
+constinit u64 g_calls_dropped = 0;
+
+// Drain `q` of every callback whose enqueue tick is now in the past.
+// Pops one callback per loop iteration under the queue's spinlock,
+// releases the lock BEFORE invoking the callback (which may free
+// memory and is not safe to run with IRQs disabled), and counts the
+// invocation. Returns total invocations.
+u32 DrainQueue(RcuPerCpuQueue& q)
+{
+    u32 invoked = 0;
+    while (true)
+    {
+        PendingCb cb{};
+        bool got = false;
+        {
+            SpinLockGuard guard(q.lock);
+            if (q.count > 0)
+            {
+                const u64 now = __atomic_load_n(&g_ticks, __ATOMIC_RELAXED);
+                const PendingCb& head = q.slots[q.tail];
+                if (now > head.enqueue_tick)
+                {
+                    cb = head;
+                    q.tail = (q.tail + 1) % kRcuPerCpuQueueDepth;
+                    --q.count;
+                    got = true;
+                }
+            }
+        }
+        if (!got)
+        {
+            break;
+        }
+        // Run the callback OUTSIDE the spinlock + IRQ-off scope.
+        // Callbacks may KFree, take other locks, or do bounded
+        // work that's not safe under arch::Cli. The grace contract
+        // already guarantees no reader is mid-walk.
+        cb.fn(cb.arg);
+        ++invoked;
+        __atomic_add_fetch(&g_calls_completed, 1, __ATOMIC_RELAXED);
+    }
+    return invoked;
+}
 
 } // namespace
 
@@ -48,67 +113,78 @@ bool RcuCall(RcuCallback cb, void* arg)
         KLOG_WARN("sync/rcu", "RcuCall: null callback rejected");
         return false;
     }
-    arch::Cli();
-    if (g_count >= kRcuQueueDepth)
+
+    // Reading CurrentCpuId before the lock is fine: a migration
+    // before SpinLockAcquire would just route us to a peer's queue
+    // (which still gets the callback enqueued correctly). After
+    // the lock is held, IRQs are disabled and we cannot migrate.
+    const u32 cpu = cpu::CurrentCpuIdOrBsp();
+    if (cpu >= acpi::kMaxCpus)
     {
-        arch::Sti();
-        KLOG_ONCE_WARN("sync/rcu", "RcuCall: queue full — callback DROPPED, will leak (raise kRcuQueueDepth)");
+        __atomic_add_fetch(&g_calls_dropped, 1, __ATOMIC_RELAXED);
         return false;
     }
-    g_queue[g_head] = {cb, arg, g_ticks};
-    g_head = (g_head + 1) % kRcuQueueDepth;
-    ++g_count;
-    ++g_calls_queued;
-    arch::Sti();
+    RcuPerCpuQueue& q = g_per_cpu[cpu];
+
+    SpinLockGuard guard(q.lock);
+    if (q.count >= kRcuPerCpuQueueDepth)
+    {
+        // This CPU's queue is saturated. Falling through to a peer
+        // would race with cross-CPU drains, so fail cleanly. The
+        // caller treats a false return as a memory leak — same
+        // contract as the pre-per-CPU queue.
+        __atomic_add_fetch(&g_calls_dropped, 1, __ATOMIC_RELAXED);
+        KLOG_ONCE_WARN("sync/rcu", "RcuCall: per-CPU queue full — callback DROPPED, will leak");
+        return false;
+    }
+    q.slots[q.head] = {cb, arg, __atomic_load_n(&g_ticks, __ATOMIC_RELAXED)};
+    q.head = (q.head + 1) % kRcuPerCpuQueueDepth;
+    ++q.count;
+    __atomic_add_fetch(&g_calls_queued, 1, __ATOMIC_RELAXED);
     return true;
 }
 
 void RcuTick()
 {
-    // Single store; safe from IRQ context.
+    // Single store; safe from IRQ context. Advanced by any CPU,
+    // observed by every CPU as the grace-period clock.
     __atomic_add_fetch(&g_ticks, 1, __ATOMIC_RELAXED);
 }
 
 u32 RcuReclaim()
 {
     u32 reclaimed = 0;
-    while (true)
+    for (u32 cpu = 0; cpu < acpi::kMaxCpus; ++cpu)
     {
-        arch::Cli();
-        if (g_count == 0)
-        {
-            arch::Sti();
-            break;
-        }
-        const u64 now = __atomic_load_n(&g_ticks, __ATOMIC_RELAXED);
-        const PendingCb& head = g_queue[g_tail];
-        // v0 grace rule: any tick AFTER enqueue suffices.
-        // Generalises to per-CPU once SMP lands.
-        if (now <= head.enqueue_tick)
-        {
-            arch::Sti();
-            break;
-        }
-        const PendingCb cb = head;
-        g_tail = (g_tail + 1) % kRcuQueueDepth;
-        --g_count;
-        ++g_calls_completed;
-        arch::Sti();
-
-        cb.fn(cb.arg);
-        ++reclaimed;
+        reclaimed += DrainQueue(g_per_cpu[cpu]);
     }
     return reclaimed;
 }
 
+u32 RcuReclaimLocal()
+{
+    // Reading CurrentCpuId without an IRQ-off guard is fine: a
+    // migration before DrainQueue starts at most points us at a
+    // peer's queue, and DrainQueue is correct on any queue (the
+    // per-callback grace check is global, not local). The idle-
+    // thread caller pins us to a specific CPU anyway — idle tasks
+    // aren't migrated by the scheduler.
+    const u32 cpu = cpu::CurrentCpuIdOrBsp();
+    if (cpu >= acpi::kMaxCpus)
+    {
+        return 0;
+    }
+    return DrainQueue(g_per_cpu[cpu]);
+}
+
 u64 RcuCallsQueued()
 {
-    return g_calls_queued;
+    return __atomic_load_n(&g_calls_queued, __ATOMIC_RELAXED);
 }
 
 u64 RcuCallsCompleted()
 {
-    return g_calls_completed;
+    return __atomic_load_n(&g_calls_completed, __ATOMIC_RELAXED);
 }
 
 namespace
@@ -129,14 +205,14 @@ void RcuSelfTest()
     KLOG_INFO("sync/rcu", "self-test: queue + reclaim cycle");
 
     g_test_counter = 0;
-    const u64 baseline_q = g_calls_queued;
-    const u64 baseline_c = g_calls_completed;
+    const u64 baseline_q = RcuCallsQueued();
+    const u64 baseline_c = RcuCallsCompleted();
 
     if (!RcuCall(&TestCb, &g_test_counter))
     {
         core::Panic("sync/rcu", "self-test: enqueue failed on empty queue");
     }
-    if (g_calls_queued != baseline_q + 1)
+    if (RcuCallsQueued() != baseline_q + 1)
     {
         core::Panic("sync/rcu", "self-test: queued counter didn't advance");
     }
@@ -163,7 +239,7 @@ void RcuSelfTest()
     {
         core::Panic("sync/rcu", "self-test: callback did not run");
     }
-    if (g_calls_completed != baseline_c + 1)
+    if (RcuCallsCompleted() != baseline_c + 1)
     {
         core::Panic("sync/rcu", "self-test: completed counter didn't advance");
     }
@@ -172,6 +248,13 @@ void RcuSelfTest()
     if (RcuReclaim() != 0)
     {
         core::Panic("sync/rcu", "self-test: reclaim on empty queue non-zero");
+    }
+
+    // Local reclaim path is a separate codepath — verify it also
+    // observes the same emptiness.
+    if (RcuReclaimLocal() != 0)
+    {
+        core::Panic("sync/rcu", "self-test: local reclaim on empty queue non-zero");
     }
 
     KLOG_INFO("sync/rcu", "self-test OK (enqueue + grace + reclaim verified)");

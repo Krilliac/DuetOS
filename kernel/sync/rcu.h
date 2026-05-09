@@ -32,7 +32,9 @@
  *   - Writers: `RcuCall(callback, arg)` defers tear-down until
  *     a grace period elapses.
  *   - Quiescent-state polling tied to `OnTimerTick`.
- *   - Single global queue (per-CPU upgrade lands with B2 SMP).
+ *   - Per-CPU callback queues — every CPU drains its own pending
+ *     list without contending against peers; `RcuReclaim()` walks
+ *     every queue, `RcuReclaimLocal()` walks just the caller's.
  *
  * NOT IN SCOPE
  *   - Synchronous wait (`synchronize_rcu`) — every consumer
@@ -74,11 +76,17 @@ bool RcuCall(RcuCallback cb, void* arg);
 /// was queued.
 void RcuTick();
 
-/// Reclaim path. Walks the pending-callbacks list and invokes
-/// any whose grace period has elapsed. Called from the boot
-/// task / a future RCU kthread; safe to call from any task
+/// Reclaim path. Walks every CPU's pending-callbacks queue and
+/// invokes any whose grace period has elapsed. Called from the
+/// boot task / a future RCU kthread; safe to call from any task
 /// context but NOT from IRQ (callbacks may free memory).
 u32 RcuReclaim();
+
+/// Reclaim only the calling CPU's pending callbacks. Cheap, no
+/// cross-CPU traffic — designed for the idle-thread drain hook
+/// where each AP picks up its own queue between HALTs. Returns
+/// the number of callbacks actually invoked.
+u32 RcuReclaimLocal();
 
 /// Diagnostic: total callbacks ever queued.
 u64 RcuCallsQueued();

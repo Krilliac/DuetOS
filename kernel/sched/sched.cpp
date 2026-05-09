@@ -360,7 +360,7 @@ constinit u64 g_tasks_exited = 0;
 // graph (sync/lockdep.h) records every "lock-X-was-held when sched
 // was acquired" pairing. Untagged locks pay nothing; the scheduler
 // runqueue is THE most contended global, so it gets first.
-constinit sync::SpinLock g_sched_lock{.owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassSched};
+constinit sync::SpinLock g_sched_lock{.next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassSched};
 
 // Current() and NeedResched() moved to cpu::PerCpu. Per-CPU accessors
 // keep call sites terse and read unambiguously: Current() is the
