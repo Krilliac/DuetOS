@@ -1993,42 +1993,6 @@ __declspec(dllexport) BOOL EnumSystemLocalesA(BOOL(__stdcall* cb)(char*), DWORD 
     return 1;
 }
 
-__declspec(dllexport) BOOL GetVolumeInformationW(const wchar_t16* root, wchar_t16* vol_name, DWORD vol_name_len,
-                                                 DWORD* serial, DWORD* max_comp, DWORD* fs_flags, wchar_t16* fs_name,
-                                                 DWORD fs_name_len)
-{
-    (void)root;
-    if (vol_name != (wchar_t16*)0 && vol_name_len > 0)
-    {
-        static const wchar_t16 vn[] = {'D', 'u', 'e', 't', 'O', 'S', 0};
-        DWORD i = 0;
-        while (i < vol_name_len - 1 && vn[i] != 0)
-        {
-            vol_name[i] = vn[i];
-            ++i;
-        }
-        vol_name[i] = 0;
-    }
-    if (serial != (DWORD*)0)
-        *serial = 0xCAFEBABE;
-    if (max_comp != (DWORD*)0)
-        *max_comp = 255;
-    if (fs_flags != (DWORD*)0)
-        *fs_flags = 0;
-    if (fs_name != (wchar_t16*)0 && fs_name_len > 0)
-    {
-        static const wchar_t16 fn[] = {'D', 'U', 'E', 'T', 'F', 'S', 0};
-        DWORD i = 0;
-        while (i < fs_name_len - 1 && fn[i] != 0)
-        {
-            fs_name[i] = fn[i];
-            ++i;
-        }
-        fs_name[i] = 0;
-    }
-    return 1;
-}
-
 __declspec(dllexport) BOOL GetDiskFreeSpaceExW(const wchar_t16* dir, void* avail, void* total, void* free_)
 {
     (void)dir;
@@ -3595,6 +3559,12 @@ typedef struct Win32ApcSlot
 } Win32ApcSlot;
 
 static Win32ApcSlot g_apc_queue[WIN32_APC_QUEUE_SLOTS];
+
+/* Forward declarations — definitions live in the critical-section
+ * block further down. APC queue dispatch needs them before they're
+ * defined. */
+static long long syscall_get_tid(void);
+static void syscall_yield(void);
 
 __declspec(dllexport) DWORD QueueUserAPC(PAPCFUNC pfn, HANDLE hThread, unsigned long long dwData)
 {

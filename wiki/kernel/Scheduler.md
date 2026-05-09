@@ -138,6 +138,15 @@ invariants:
 - `WaitQueueBlockTimeout(deadline_ticks)` couples the two: woken
   whichever fires first (signal vs timeout). Used by driver
   command-completion paths.
+- `WorkPool` (`kernel/sched/workpool.h`) is the consolidating
+  primitive on top of `Mutex` + `Condvar`: N worker tasks pulling
+  `(fn, arg)` items from a shared bounded FIFO. Subsystems that
+  would otherwise hand-roll a one-shot `SchedCreate` per request
+  use `WorkPoolSubmit` instead — items run concurrently across
+  CPUs, back-pressure on a full queue is automatic, and the
+  pool's `Drain` / `Shutdown` give a clean quiescence point. Boot
+  self-test (`workpool-selftest`, Phase::Sched) exercises Submit
+  blocking, Drain, and worker join.
 
 The contract: every block-yields-to-scheduler primitive must clear
 `Running` before pushing onto a wait list, and the corresponding wake

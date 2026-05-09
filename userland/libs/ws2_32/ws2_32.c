@@ -757,36 +757,25 @@ __declspec(dllexport) int WSAEnumNetworkEvents(SOCKET s, WSAEVENT_t e, void* lpN
     return 0;
 }
 
-/* WaitForSingleObject / WaitForMultipleObjects forward decls — we
- * don't import kernel32 explicitly here; the in-kernel thunks
- * resolve them at link time. Match the kernel32 contract: timeout
- * in ms, return WAIT_OBJECT_0 (0) on signal, WAIT_TIMEOUT (0x102)
- * on timeout. */
-__declspec(dllimport) DWORD WaitForSingleObject(void* h, DWORD timeout_ms);
-
 __declspec(dllexport) DWORD WSAWaitForMultipleEvents(DWORD cEvents, const WSAEVENT_t* lphEvents, BOOL fWaitAll,
                                                      DWORD dwTimeout, BOOL fAlertable)
 {
     (void)fAlertable; /* v0 doesn't honour alertable here. */
+    (void)dwTimeout;
+    (void)fWaitAll;
     if (lphEvents == (const WSAEVENT_t*)0 || cEvents == 0)
     {
         g_wsa_last_error = 10014;
         return WSA_WAIT_FAILED;
     }
-    /* Non-blocking probe is the only sensible v0 path: we don't
-     * have async event delivery yet, so blocking would deadlock.
-     * Win32 contract: dwTimeout=0 means non-blocking. We treat
-     * any timeout the same way and return WSA_WAIT_TIMEOUT after
-     * a single check unless fWaitAll=FALSE and we find a signaled
-     * event via WaitForSingleObject(0). */
-    if (dwTimeout == 0 || fWaitAll)
-        return WSA_WAIT_TIMEOUT;
-    /* Best-effort: poll each event once with timeout 0. */
-    for (DWORD i = 0; i < cEvents; ++i)
-    {
-        DWORD r = WaitForSingleObject((void*)lphEvents[i], 0);
-        if (r == 0)
-            return WSA_WAIT_EVENT_0 + i;
-    }
+    /* v0 has no async event delivery: an event manually-set via
+     * WSASetEvent stays signaled until WSAResetEvent, but no
+     * socket I/O completion ever raises one. The honest answer
+     * for every poll is "timeout". We return WSA_WAIT_TIMEOUT
+     * unconditionally; a caller that depends on event-driven
+     * wakeups gets a clean "no event ready" result instead of a
+     * deadlock. Importing kernel32.WaitForSingleObject from a
+     * freestanding stub-built DLL is also a non-starter — there
+     * is no kernel32 import library at link time here. */
     return WSA_WAIT_TIMEOUT;
 }
