@@ -421,14 +421,19 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
 
 - **Today:** Iface table (index, MAC, IPv4, bound state),
   rx/tx packet + byte counters, the firewall's per-iface
-  `tx_dropped_firewall` column, and a routing/DNS section
+  `tx_dropped_firewall` column, a routing/DNS section
   (gateway + DNS resolver + DHCP server + lease seconds)
-  pulled from `DhcpLeaseRead()` back the Start menu's
-  NETWORK STATUS entry (`kernel/apps/netstatus.cpp`).
-- **Blocks on:** Wi-Fi scan results from `kernel/net/wifi.cpp`
-  for an SSID picker. Routing surface is single-lease
-  today — multi-iface lease tracking happens when more than
-  one DHCP transaction can be live at once.
+  pulled from `DhcpLeaseRead()`, AND a `WI-FI SCAN`
+  section that calls `WifiScan(0, ...)` and renders the
+  resulting SSID / SEC / RSSI table. With no wireless
+  backend registered the section shows a placeholder hint.
+  All back the Start menu's NETWORK STATUS entry
+  (`kernel/apps/netstatus.cpp`).
+- **Blocks on:** real-hardware wireless backend (per the
+  Wireless roadmap row) so the SSID list reflects an actual
+  RF scan rather than the empty placeholder. Routing surface
+  is single-lease today — multi-iface lease tracking happens
+  when more than one DHCP transaction can be live at once.
 
 ### Terminal emulator (windowed userland shell)
 
