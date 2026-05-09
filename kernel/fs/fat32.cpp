@@ -158,6 +158,33 @@ bool ReadCluster(const Volume& v, u32 cluster)
     return drivers::storage::BlockDeviceRead(v.block_handle, lba, v.sectors_per_cluster, g_scratch) == 0;
 }
 
+// Single-entry FAT sector cache. A FAT32 sector at 512 B holds
+// 128 4-byte entries; at 4096 B it holds 1024 — and a sequential
+// cluster-chain walk hits the same sector ~N consecutive times
+// before crossing a sector boundary. Caching one sector at a time
+// turns the per-entry block-layer round-trip into a per-sector one
+// for the dominant case (file reads, directory walks).
+//
+// The cache is a single slot, not a hash table — adding more
+// associativity only pays off for workloads that interleave reads
+// against multiple FAT regions. The chain walker is naturally
+// sector-local; one slot is enough.
+struct FatSectorCache
+{
+    bool valid;
+    u32 block_handle;
+    u64 lba;
+    u32 sector_bytes;
+    u8 data[4096];
+};
+
+constinit FatSectorCache g_fat_cache = {};
+
+void Fat32InvalidateFatCache()
+{
+    g_fat_cache.valid = false;
+}
+
 // Read the FAT entry for `cluster`. Returns 0x0FFFFFFF on I/O error
 // — caller treats it as EOC and the walk terminates cleanly. The
 // I/O failure is surfaced via a WARN log so an operator can tell
@@ -170,11 +197,36 @@ u32 ReadFatEntry(const Volume& v, u32 cluster)
     const u32 sec_off = byte_off / v.bytes_per_sector;
     const u32 byte_in_sec = byte_off % v.bytes_per_sector;
     const u64 lba = v.reserved_sectors + sec_off;
+
+    // Cache hit — same volume's block handle, same FAT sector LBA,
+    // sector size matches what we cached. Returning out of the
+    // cached buffer skips the block-layer call entirely.
+    if (g_fat_cache.valid && g_fat_cache.block_handle == v.block_handle && g_fat_cache.lba == lba &&
+        g_fat_cache.sector_bytes == v.bytes_per_sector)
+    {
+        return LeU32(g_fat_cache.data + byte_in_sec) & 0x0FFFFFFFu;
+    }
+
+    // Cache miss — read the sector and refill. ReadSector lands
+    // bytes in g_scratch; copy into g_fat_cache.data so subsequent
+    // cluster reads (or unrelated sector consumers) don't clobber
+    // the cached bytes.
     if (!ReadSector(v.block_handle, lba))
     {
         KLOG_WARN_V("fs/fat32", "ReadFatEntry sector read failed; treating chain as EOC", static_cast<u64>(lba));
         return 0x0FFFFFFFu;
     }
+    const u32 cache_bytes = v.bytes_per_sector <= sizeof(g_fat_cache.data) ? v.bytes_per_sector
+                                                                           : static_cast<u32>(sizeof(g_fat_cache.data));
+    for (u32 i = 0; i < cache_bytes; ++i)
+    {
+        g_fat_cache.data[i] = g_scratch[i];
+    }
+    g_fat_cache.block_handle = v.block_handle;
+    g_fat_cache.lba = lba;
+    g_fat_cache.sector_bytes = v.bytes_per_sector;
+    g_fat_cache.valid = (cache_bytes == v.bytes_per_sector);
+
     return LeU32(g_scratch + byte_in_sec) & 0x0FFFFFFFu;
 }
 } // namespace internal

@@ -64,7 +64,19 @@ bool ReadCluster(const Volume& v, u32 cluster);
 
 // Read the FAT entry for `cluster`. Returns 0x0FFFFFFF on I/O
 // error so the walker terminates cleanly instead of looping.
+//
+// Backed by a single-entry FAT sector cache: a sequential walk
+// over consecutive cluster numbers (the dominant case for file
+// reads) hits the cache for ~1023 of every 1024 calls and pays
+// one block-layer round-trip every 1024 entries instead of one
+// per entry.
 u32 ReadFatEntry(const Volume& v, u32 cluster);
+
+// Invalidate the FAT sector cache. Any path that mutates an
+// on-disk FAT sector (WriteFatEntry, format) MUST call this so
+// the next ReadFatEntry sees the new bits instead of a stale
+// pre-write copy.
+void Fat32InvalidateFatCache();
 
 // Name predicates used by every walker.
 bool IsDotEntry(const char* n);
