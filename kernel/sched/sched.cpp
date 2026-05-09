@@ -360,7 +360,7 @@ constinit u64 g_tasks_exited = 0;
 // graph (sync/lockdep.h) records every "lock-X-was-held when sched
 // was acquired" pairing. Untagged locks pay nothing; the scheduler
 // runqueue is THE most contended global, so it gets first.
-constinit sync::SpinLock g_sched_lock{.locked = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassSched};
+constinit sync::SpinLock g_sched_lock{.next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassSched};
 
 // Current() and NeedResched() moved to cpu::PerCpu. Per-CPU accessors
 // keep call sites terse and read unambiguously: Current() is the
@@ -2749,6 +2749,19 @@ namespace
 {
     for (;;)
     {
+        // Drain any RCU callbacks queued on THIS CPU before
+        // halting. The grace contract guarantees no reader is
+        // mid-walk over the freed objects, and the idle task is
+        // by definition not in any RCU read-side critical
+        // section. Cost: one uncontended per-CPU SpinLock acquire
+        // and a count==0 check when the queue is empty.
+        //
+        // If callbacks DO fire, they consume time on this CPU
+        // that would otherwise be spent halted — turning idle
+        // cycles into useful reclamation work. Each AP runs its
+        // own copy of this loop, so reclamation parallelises
+        // across the box at zero scheduling cost.
+        sync::RcuReclaimLocal();
         arch::Sti();
         asm volatile("hlt");
     }

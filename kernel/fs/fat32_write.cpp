@@ -54,6 +54,10 @@ bool WriteFatEntry(const Volume& v, u32 cluster, u32 value)
         if (drivers::storage::BlockDeviceWrite(v.block_handle, lba, 1, g_scratch) != 0)
             return false;
     }
+    // The on-disk FAT sector just changed under us. The reader cache
+    // could be holding a pre-write snapshot of the same LBA — drop
+    // it so the next ReadFatEntry refills with the new bits.
+    Fat32InvalidateFatCache();
     return true;
 }
 

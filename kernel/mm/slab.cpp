@@ -22,7 +22,10 @@
 
 #include "mm/slab.h"
 
+#include "acpi/acpi.h"
+#include "arch/x86_64/cpu.h"
 #include "core/panic.h"
+#include "cpu/percpu.h"
 #include "log/klog.h"
 #include "mm/kheap.h"
 #include "mm/poison.h"
@@ -50,6 +53,20 @@ struct Slab
     u32 _pad;
 };
 
+// Per-CPU magazine size. A small power-of-two so the magazine
+// itself fits in a few cache lines and the alloc/free fast path
+// is a bounded handful of instructions. Bulk refill / drain on a
+// magazine miss takes kMagazineSize / 2 objects so the next ~half
+// magazine of operations on this CPU can stay on the fast path.
+inline constexpr u32 kMagazineSize = 16;
+
+struct Magazine
+{
+    u32 count; ///< 0..kMagazineSize objects currently cached.
+    u32 _pad;
+    void* objs[kMagazineSize]; ///< LIFO; pop from objs[--count], push at objs[count++].
+};
+
 bool IsPowerOfTwo(u32 x)
 {
     return x != 0 && (x & (x - 1)) == 0;
@@ -59,6 +76,34 @@ u64 RoundUp(u64 v, u64 align)
 {
     return (v + align - 1) & ~(align - 1);
 }
+
+constexpr u64 kRflagsIfBit = 1ULL << 9;
+
+inline u64 ReadRflagsLocal()
+{
+    u64 f;
+    asm volatile("pushfq; pop %0" : "=r"(f)::"memory");
+    return f;
+}
+
+// IRQ-off scope guard for the magazine fast path. Disabling
+// interrupts on the running CPU pins us there for the duration —
+// no preemption to a different CPU mid-magazine, no IRQ handler
+// stomping the magazine while we hold a half-updated count.
+struct IrqOff
+{
+    u64 saved_rflags;
+    IrqOff() : saved_rflags(ReadRflagsLocal()) { arch::Cli(); }
+    ~IrqOff()
+    {
+        if ((saved_rflags & kRflagsIfBit) != 0)
+        {
+            arch::Sti();
+        }
+    }
+    IrqOff(const IrqOff&) = delete;
+    IrqOff& operator=(const IrqOff&) = delete;
+};
 
 } // namespace
 
@@ -70,13 +115,22 @@ struct SlabCache
     u32 objects_per_slab; ///< Computed at Create.
 
     Slab* slab_head;         ///< Chain of every slab owned by this cache.
-    SlabFreeNode* free_head; ///< Cache-wide freelist of unused objects.
+    SlabFreeNode* free_head; ///< Cache-wide freelist of unused objects (mutex-protected).
 
+    // Counters touched on both the magazine fast path (lock-free) and
+    // the global slow path (under c->lock). All access goes through
+    // __atomic_* with relaxed ordering — these are bookkeeping, not
+    // synchronization, and a torn read of one counter can't break
+    // any caller's allocation.
     u64 slabs;
     u64 obj_in_use;
     u64 obj_free;
     u64 alloc_count;
     u64 free_count;
+    u64 magazine_alloc; ///< Allocs satisfied from a per-CPU magazine.
+    u64 magazine_free;  ///< Frees absorbed by a per-CPU magazine.
+
+    Magazine magazines[acpi::kMaxCpus];
 };
 
 namespace
@@ -131,9 +185,23 @@ SlabFreeNode* GrowOneSlab(SlabCache* c)
     // Link the slab into the cache.
     slab->next = c->slab_head;
     c->slab_head = slab;
-    ++c->slabs;
-    c->obj_free += c->objects_per_slab;
+    __atomic_add_fetch(&c->slabs, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&c->obj_free, c->objects_per_slab, __ATOMIC_RELAXED);
     return head;
+}
+
+// Pop one object off the global freelist. Caller holds c->lock.
+// Returns nullptr iff the freelist is empty AND a fresh slab grow
+// would be required (callers that want to grow do so explicitly).
+SlabFreeNode* PopGlobalFreelist(SlabCache* c)
+{
+    SlabFreeNode* node = c->free_head;
+    if (node == nullptr)
+    {
+        return nullptr;
+    }
+    c->free_head = node->next;
+    return node;
 }
 
 } // namespace
@@ -188,7 +256,26 @@ void SlabCacheDestroy(SlabCache* c)
         return;
     }
     sched::MutexLock(&c->lock);
-    KASSERT(c->obj_in_use == 0, "slab", "Destroy with live allocations");
+
+    // Drain every CPU's magazine back onto the global freelist
+    // BEFORE checking obj_in_use. Magazined objects aren't "in
+    // use" by a caller, so they don't fail the live-allocations
+    // check; but draining is the cleanest way to ensure the
+    // poison invariants hold across destruction and to make the
+    // bookkeeping snapshot below internally consistent.
+    for (u32 cpu = 0; cpu < acpi::kMaxCpus; ++cpu)
+    {
+        Magazine& m = c->magazines[cpu];
+        while (m.count > 0)
+        {
+            auto* node = static_cast<SlabFreeNode*>(m.objs[--m.count]);
+            node->next = c->free_head;
+            c->free_head = node;
+        }
+    }
+
+    const u64 in_use = __atomic_load_n(&c->obj_in_use, __ATOMIC_RELAXED);
+    KASSERT(in_use == 0, "slab", "Destroy with live allocations");
     Slab* s = c->slab_head;
     while (s != nullptr)
     {
@@ -203,35 +290,121 @@ void SlabCacheDestroy(SlabCache* c)
 void* SlabAlloc(SlabCache* c)
 {
     KASSERT(c != nullptr, "slab", "SlabAlloc null cache");
-    sched::MutexLock(&c->lock);
-    if (c->free_head == nullptr)
+
+    void* obj = nullptr;
+
+    // ---- Fast path: pop from this CPU's magazine. -----------------
     {
-        SlabFreeNode* fresh = GrowOneSlab(c);
-        if (fresh == nullptr)
+        IrqOff guard;
+        const u32 cpu = cpu::CurrentCpuIdOrBsp();
+        if (cpu < acpi::kMaxCpus)
         {
-            sched::MutexUnlock(&c->lock);
-            return nullptr;
+            Magazine& m = c->magazines[cpu];
+            if (m.count > 0)
+            {
+                obj = m.objs[--m.count];
+                __atomic_sub_fetch(&c->obj_free, 1, __ATOMIC_RELAXED);
+                __atomic_add_fetch(&c->obj_in_use, 1, __ATOMIC_RELAXED);
+                __atomic_add_fetch(&c->alloc_count, 1, __ATOMIC_RELAXED);
+                __atomic_add_fetch(&c->magazine_alloc, 1, __ATOMIC_RELAXED);
+            }
         }
-        c->free_head = fresh;
     }
-    SlabFreeNode* node = c->free_head;
-    c->free_head = node->next;
-    --c->obj_free;
-    ++c->obj_in_use;
-    ++c->alloc_count;
+
+    if (obj == nullptr)
+    {
+        // ---- Slow path: take cache mutex, pull a batch from the
+        // global freelist into the magazine, and return the head to
+        // the caller. Bulk refill (kMagazineSize / 2 objects) so the
+        // next ~half-magazine of allocs on this CPU stay fast-path.
+        sched::MutexLock(&c->lock);
+        if (c->free_head == nullptr)
+        {
+            SlabFreeNode* fresh = GrowOneSlab(c);
+            if (fresh == nullptr)
+            {
+                sched::MutexUnlock(&c->lock);
+                return nullptr;
+            }
+            c->free_head = fresh;
+        }
+
+        SlabFreeNode* head = PopGlobalFreelist(c);
+        // Pull up to kMagazineSize / 2 ADDITIONAL objects into a
+        // refill list. May come up short if the freelist drains; the
+        // splice below copes with any count, including zero.
+        SlabFreeNode* refill = nullptr;
+        u32 refill_count = 0;
+        while (refill_count < kMagazineSize / 2)
+        {
+            SlabFreeNode* n = PopGlobalFreelist(c);
+            if (n == nullptr)
+            {
+                break;
+            }
+            n->next = refill;
+            refill = n;
+            ++refill_count;
+        }
+        sched::MutexUnlock(&c->lock);
+
+        // Counter updates: caller's object becomes in-use (alloc),
+        // refill objects stay free (their location changed, not
+        // their state). Single batched atomic per counter.
+        __atomic_sub_fetch(&c->obj_free, 1, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&c->obj_in_use, 1, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&c->alloc_count, 1, __ATOMIC_RELAXED);
+
+        obj = head;
+
+        // Splice the refill list into THIS CPU's magazine. Must be
+        // done with IRQs disabled so a preemption mid-splice can't
+        // migrate us and corrupt the wrong magazine.
+        if (refill != nullptr)
+        {
+            IrqOff guard;
+            const u32 cpu = cpu::CurrentCpuIdOrBsp();
+            if (cpu < acpi::kMaxCpus)
+            {
+                Magazine& m = c->magazines[cpu];
+                while (refill != nullptr && m.count < kMagazineSize)
+                {
+                    SlabFreeNode* next = refill->next;
+                    m.objs[m.count++] = refill;
+                    refill = next;
+                }
+            }
+        }
+
+        // Magazine couldn't take everything (only happens if it was
+        // already partially full from a parallel free path) — return
+        // the leftovers to the global freelist. Cold path within a
+        // cold path; clarity over micro-optimisation.
+        if (refill != nullptr)
+        {
+            sched::MutexLock(&c->lock);
+            while (refill != nullptr)
+            {
+                SlabFreeNode* next = refill->next;
+                refill->next = c->free_head;
+                c->free_head = refill;
+                refill = next;
+            }
+            sched::MutexUnlock(&c->lock);
+        }
+    }
+
     // Verify the trailing-payload poison before handing the object
     // out. A mismatch means something wrote into the object between
     // its last SlabFree and this SlabAlloc — i.e. a use-after-free
-    // on the slab side. The cache lock is still held; panic before
-    // releasing it so a probe can capture the offending cache state.
-    const u64 mismatch = CheckSlabFreedObjectPoison(node, c->obj_size, sizeof(SlabFreeNode));
+    // on the slab side.
+    const u64 mismatch = CheckSlabFreedObjectPoison(obj, c->obj_size, sizeof(SlabFreeNode));
     if (mismatch != c->obj_size)
     {
         KLOG_WARN_S("slab", "freed-object poison mismatch", "cache", c->name);
         KASSERT(false, "slab", "use-after-free in slab object");
     }
-    sched::MutexUnlock(&c->lock);
-    return node;
+    return obj;
 }
 
 void SlabFree(SlabCache* c, void* obj)
@@ -241,18 +414,70 @@ void SlabFree(SlabCache* c, void* obj)
         return;
     }
     KASSERT(c != nullptr, "slab", "SlabFree null cache");
-    sched::MutexLock(&c->lock);
-    // Stamp the trailing payload with the slab poison BEFORE
-    // splicing the object back onto the freelist; the first
-    // sizeof(SlabFreeNode) bytes are about to hold the link.
+
+    // Stamp the trailing payload with the slab poison BEFORE the
+    // freelist link gets written into the first sizeof(SlabFreeNode)
+    // bytes. Done outside any lock — the caller has already returned
+    // the object to us, so the bytes are ours to scribble on.
     PoisonSlabFreedObject(obj, c->obj_size, sizeof(SlabFreeNode));
+
+    // ---- Fast path: push into this CPU's magazine. ---------------
+    {
+        IrqOff guard;
+        const u32 cpu = cpu::CurrentCpuIdOrBsp();
+        if (cpu < acpi::kMaxCpus)
+        {
+            Magazine& m = c->magazines[cpu];
+            if (m.count < kMagazineSize)
+            {
+                m.objs[m.count++] = obj;
+                __atomic_sub_fetch(&c->obj_in_use, 1, __ATOMIC_RELAXED);
+                __atomic_add_fetch(&c->obj_free, 1, __ATOMIC_RELAXED);
+                __atomic_add_fetch(&c->free_count, 1, __ATOMIC_RELAXED);
+                __atomic_add_fetch(&c->magazine_free, 1, __ATOMIC_RELAXED);
+                return;
+            }
+        }
+    }
+
+    // ---- Slow path: magazine full (or no per-CPU slot). Drop into
+    // the global freelist. While we hold the lock, opportunistically
+    // bulk-drain half this CPU's magazine back to global so the next
+    // ~half-magazine of frees on this CPU stay fast-path.
+    SlabFreeNode* drain_head = nullptr;
+    u32 drain_count = 0;
+    {
+        IrqOff guard;
+        const u32 cpu = cpu::CurrentCpuIdOrBsp();
+        if (cpu < acpi::kMaxCpus)
+        {
+            Magazine& m = c->magazines[cpu];
+            while (drain_count < kMagazineSize / 2 && m.count > 0)
+            {
+                auto* node = static_cast<SlabFreeNode*>(m.objs[--m.count]);
+                node->next = drain_head;
+                drain_head = node;
+                ++drain_count;
+            }
+        }
+    }
+
+    sched::MutexLock(&c->lock);
     auto* node = static_cast<SlabFreeNode*>(obj);
     node->next = c->free_head;
     c->free_head = node;
-    ++c->obj_free;
-    --c->obj_in_use;
-    ++c->free_count;
+    while (drain_head != nullptr)
+    {
+        SlabFreeNode* next = drain_head->next;
+        drain_head->next = c->free_head;
+        c->free_head = drain_head;
+        drain_head = next;
+    }
     sched::MutexUnlock(&c->lock);
+
+    __atomic_sub_fetch(&c->obj_in_use, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&c->obj_free, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&c->free_count, 1, __ATOMIC_RELAXED);
 }
 
 SlabStats SlabCacheStatsRead(const SlabCache* c)
@@ -264,11 +489,13 @@ SlabStats SlabCacheStatsRead(const SlabCache* c)
     }
     s.obj_size = c->obj_size;
     s.objects_per_slab = c->objects_per_slab;
-    s.slabs = c->slabs;
-    s.obj_in_use = c->obj_in_use;
-    s.obj_free = c->obj_free;
-    s.alloc_count = c->alloc_count;
-    s.free_count = c->free_count;
+    s.slabs = __atomic_load_n(&c->slabs, __ATOMIC_RELAXED);
+    s.obj_in_use = __atomic_load_n(&c->obj_in_use, __ATOMIC_RELAXED);
+    s.obj_free = __atomic_load_n(&c->obj_free, __ATOMIC_RELAXED);
+    s.alloc_count = __atomic_load_n(&c->alloc_count, __ATOMIC_RELAXED);
+    s.free_count = __atomic_load_n(&c->free_count, __ATOMIC_RELAXED);
+    s.magazine_alloc = __atomic_load_n(&c->magazine_alloc, __ATOMIC_RELAXED);
+    s.magazine_free = __atomic_load_n(&c->magazine_free, __ATOMIC_RELAXED);
     return s;
 }
 

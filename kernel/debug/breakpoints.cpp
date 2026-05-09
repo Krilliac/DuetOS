@@ -102,7 +102,7 @@ struct BpEntry
 };
 
 // Tagged with `kLockClassBreakpoints` for lockdep.
-sync::SpinLock g_lock{.locked = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassBreakpoints};
+sync::SpinLock g_lock{.next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassBreakpoints};
 BpEntry g_sw_table[kMaxSwSlots]{};
 BpEntry g_hw_table[kMaxHwSlots]{};
 u32 g_next_id = 1;

@@ -27,7 +27,7 @@ namespace
 {
 
 // Tagged with `kLockClassKObject` for lockdep.
-constinit sync::SpinLock g_kobject_lock{.locked = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassKObject};
+constinit sync::SpinLock g_kobject_lock{.next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassKObject};
 
 [[noreturn]] void PanicKObj(const char* what)
 {

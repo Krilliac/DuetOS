@@ -32,6 +32,7 @@
 #include "mm/page.h"
 #include "mm/poison.h"
 
+#include "acpi/acpi.h"
 #include "acpi/srat.h"
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
@@ -97,6 +98,61 @@ constinit u8 g_numa_node_count = 0;
 // next Allocate* returns kNullFrame and the counter stays at 0
 // (further injection requires another SetFailAfter call). 0 disables.
 constinit u64 g_fail_after = 0;
+
+// Per-CPU warm pool. Each CPU caches up to kFramePoolDepth recently-
+// freed frames. AllocateFrame's fast path pops from the running CPU's
+// pool, skipping the bitmap scan entirely; FreeFrame's fast path
+// pushes onto the pool, skipping BitmapMarkFree. Pool entries stay
+// bitmap=USED for their entire pool lifetime so a peer CPU walking
+// the bitmap can never hand the same frame out twice.
+//
+// Trade: a fixed memory cap (kFramePoolDepth * acpi::kMaxCpus * 8 B
+// = 2 KiB worst case for 32-CPU box) plus up to 8 frames per CPU
+// of "cached" memory that doesn't show up in FreeFramesCount() in
+// exchange for O(1) alloc/free on the size class that dominates
+// kheap and slab churn. The pool can be drained explicitly via
+// FrameAllocatorDrainPools when the bitmap-accurate count matters
+// (boot self-test, memory-pressure responses).
+inline constexpr u32 kFramePoolDepth = 8;
+
+struct FramePool
+{
+    u32 count;
+    u32 _pad;
+    PhysAddr frames[kFramePoolDepth];
+};
+
+constinit FramePool g_frame_pools[acpi::kMaxCpus] = {};
+constinit u64 g_pool_alloc_hits = 0;
+constinit u64 g_pool_free_hits = 0;
+
+constexpr u64 kFrameRflagsIfBit = 1ULL << 9;
+
+inline u64 FrameReadRflags()
+{
+    u64 f;
+    asm volatile("pushfq; pop %0" : "=r"(f)::"memory");
+    return f;
+}
+
+// IRQ-off scope guard for pool fast paths. Disabling interrupts on
+// the running CPU pins us there (no migration mid-access) and keeps
+// any IRQ handler that itself allocates frames from observing a
+// half-updated pool.
+struct FramePoolIrqOff
+{
+    u64 saved_rflags;
+    FramePoolIrqOff() : saved_rflags(FrameReadRflags()) { arch::Cli(); }
+    ~FramePoolIrqOff()
+    {
+        if ((saved_rflags & kFrameRflagsIfBit) != 0)
+        {
+            arch::Sti();
+        }
+    }
+    FramePoolIrqOff(const FramePoolIrqOff&) = delete;
+    FramePoolIrqOff& operator=(const FramePoolIrqOff&) = delete;
+};
 
 // Local alias keeps call sites tidy; delegates to the central core::Panic
 // so the output format matches every other subsystem.
@@ -771,6 +827,46 @@ PhysAddr AllocateFrameNode(u8 node)
 
 PhysAddr AllocateFrame()
 {
+    // ---- Per-CPU warm pool fast path ------------------------------
+    // Skip when OOM injection is active so the test counter still
+    // drives the failing leg the slow path is meant to exercise.
+    if (g_fail_after == 0)
+    {
+        PhysAddr from_pool = kNullFrame;
+        {
+            FramePoolIrqOff guard;
+            const u32 cpu = cpu::CurrentCpuIdOrBsp();
+            if (cpu < acpi::kMaxCpus)
+            {
+                FramePool& p = g_frame_pools[cpu];
+                if (p.count > 0)
+                {
+                    from_pool = p.frames[--p.count];
+                    ++g_pool_alloc_hits;
+                }
+            }
+        }
+        if (from_pool != kNullFrame)
+        {
+            // Frame is bitmap=USED already (it came from FreeFrame's
+            // pool push, which keeps the bitmap bit set). Zero before
+            // returning to satisfy the same info-leak invariant as
+            // the slow path: any prior content (including the 0xDE
+            // poison stamped on free) is wiped before a new caller
+            // can read it.
+            if (from_pool >= kDirectMapBytes)
+            {
+                PanicFrame("AllocateFrame: pool frame past direct map, cannot zero");
+            }
+            auto* virt = static_cast<u8*>(PhysToVirt(from_pool));
+            for (u64 b = 0; b < kPageSize; ++b)
+            {
+                virt[b] = 0;
+            }
+            return from_pool;
+        }
+    }
+
     // Hot path with NUMA bias. When SRAT memory-affinity records
     // were registered, route through `AllocateFrameNode` with the
     // current CPU's local node (for free on UMA — kNoNode falls
@@ -939,10 +1035,54 @@ void FreeFrame(PhysAddr frame)
     // higher-half direct map.
     PoisonFreedPage(PhysToVirt(frame), kPageSize);
 
+    // ---- Per-CPU warm pool fast path ------------------------------
+    // Park the freed frame on the running CPU's pool instead of
+    // marking the bitmap bit clear. The bitmap bit stays set so a
+    // peer CPU's slow-path scan can never hand the same frame out
+    // twice. AllocateFrame's matching fast path will pop it back
+    // (after re-zeroing) without a bitmap walk.
+    {
+        FramePoolIrqOff guard;
+        const u32 cpu = cpu::CurrentCpuIdOrBsp();
+        if (cpu < acpi::kMaxCpus)
+        {
+            FramePool& p = g_frame_pools[cpu];
+            if (p.count < kFramePoolDepth)
+            {
+                p.frames[p.count++] = frame;
+                ++g_pool_free_hits;
+                return;
+            }
+        }
+    }
+
     BitmapMarkFree(index);
     if (index < g_next_hint)
     {
         g_next_hint = index;
+    }
+}
+
+void FrameAllocatorDrainPools()
+{
+    // Push every per-CPU pool entry back onto the bitmap. Visit each
+    // pool in turn — the frame allocator is single-threaded today, so
+    // walking peer pools without IPI/lock is fine. Once SMP makes
+    // FreeFrame concurrent, this becomes "drain MY pool" + a broadcast
+    // IPI that asks each peer to drain its own.
+    for (u32 cpu = 0; cpu < acpi::kMaxCpus; ++cpu)
+    {
+        FramePool& p = g_frame_pools[cpu];
+        while (p.count > 0)
+        {
+            const PhysAddr frame = p.frames[--p.count];
+            const u64 index = frame >> kPageSizeLog2;
+            BitmapMarkFree(index);
+            if (index < g_next_hint)
+            {
+                g_next_hint = index;
+            }
+        }
     }
 }
 
@@ -956,6 +1096,12 @@ PhysAddr AllocateContiguousFrames(u64 count)
     {
         return AllocateFrame();
     }
+    // Pool frames are bitmap=USED, so a multi-frame run that's
+    // partially in some CPU's pool would be invisible to the
+    // contiguous scan and produce a spurious OOM. Drain pools
+    // before scanning so every parked frame is once again
+    // reachable through the bitmap.
+    FrameAllocatorDrainPools();
     // Test-only OOM injection mirrors the AllocateFrame path so multi-
     // frame allocations also exercise the failing leg.
     if (g_fail_after != 0)
@@ -1168,6 +1314,12 @@ void FrameAllocatorSelfTest()
     FreeFrame(a);
     FreeFrame(b);
     FreeFrame(c);
+
+    // Pool frames stay bitmap=USED, so a fast-path absorption of the
+    // three frees would leave g_free_count three short of baseline.
+    // Drain pools before the check so the assertion reflects total
+    // allocator state, not just the fraction in the bitmap.
+    FrameAllocatorDrainPools();
 
     if (g_free_count != free_before)
     {

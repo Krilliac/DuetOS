@@ -41,13 +41,16 @@ inline constexpr u64 kKernelHeapBytes = 2ULL * 1024 * 1024;
 
 struct KernelHeapStats
 {
-    u64 pool_bytes;       // total pool size including all headers
-    u64 used_bytes;       // sum of allocated chunk sizes (incl. headers)
-    u64 free_bytes;       // sum of free chunk sizes (incl. headers)
-    u64 alloc_count;      // lifetime KMalloc calls that returned non-null
-    u64 free_count;       // lifetime KFree calls that did anything
-    u64 largest_free_run; // largest contiguous free chunk right now
-    u64 free_chunk_count; // number of nodes on the freelist (fragmentation)
+    u64 pool_bytes;         // total pool size including all headers
+    u64 used_bytes;         // sum of allocated chunk sizes (incl. headers)
+    u64 free_bytes;         // sum of free chunk sizes (incl. headers, including binned)
+    u64 alloc_count;        // lifetime KMalloc calls that returned non-null
+    u64 free_count;         // lifetime KFree calls that did anything
+    u64 largest_free_run;   // largest contiguous free chunk on the main freelist
+    u64 free_chunk_count;   // number of nodes on the freelist (fragmentation, excludes bins)
+    u64 binned_chunk_count; ///< Chunks currently parked in size-class bins (also "free").
+    u64 bin_alloc_hits;     ///< Allocations satisfied by a size-class bin (no freelist walk).
+    u64 bin_free_hits;      ///< Frees absorbed by a size-class bin (no coalesce).
 };
 
 /// Carve a contiguous pool out of the physical frame allocator and seed the
@@ -63,8 +66,17 @@ void* KMalloc(u64 bytes);
 /// KMalloc, or double-freeing, is a kernel bug and triggers a panic.
 void KFree(void* ptr);
 
-/// Snapshot of allocator state. Cheap (O(freelist length)).
+/// Snapshot of allocator state. Cheap (O(freelist length + bin chunks)).
 KernelHeapStats KernelHeapStatsRead();
+
+/// Push every chunk currently parked in a size-class bin back onto the
+/// main coalescing freelist. After this returns, the bin fast path is
+/// empty for every size class — the next round of size-class alloc/free
+/// activity warms it up again. Used by the self-test (so the
+/// "everything coalesced back" invariant is checkable after small-size
+/// allocations) and available to memory-pressure paths that prefer
+/// fewer free chunks at the cost of a slower next allocation.
+void KernelHeapDrainBins();
 
 /// One row of the heap-leak ranking — a (caller RIP, bytes outstanding,
 /// allocation count) tuple. The reporter sorts descending by `bytes`.

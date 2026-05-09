@@ -4,21 +4,33 @@
 #include "util/types.h"
 
 /*
- * DuetOS — kernel spinlock primitive (v0).
+ * DuetOS — kernel spinlock primitive.
  *
- * Test-and-set spinlock with interrupt save/restore. Used to guard
- * data structures that are accessed from both IRQ context and task
+ * FIFO ticket lock with interrupt save/restore. Used to guard data
+ * structures that are accessed from both IRQ context and task
  * context, or from multiple CPUs once SMP lands.
  *
  * Design:
+ *   - Two u32s: `next_ticket` is the dispenser, `now_serving` is the
+ *     ticket currently holding the lock. Acquire atomic-fetch-adds
+ *     `next_ticket` to claim a ticket, then spins reading
+ *     `now_serving` until equality. Release increments `now_serving`
+ *     to hand the lock to the next ticket in line.
+ *   - FIFO fairness: waiters are served in the order they arrived.
+ *     A burst of acquires from N CPUs cannot lock-starve any
+ *     individual one — the ticket they each grabbed bounds wait
+ *     time at "ticket - now_serving" predecessors.
  *   - Zero-initialized = unlocked. Safe to declare `constinit` /
- *     `static SpinLock x{};` anywhere. The class_id field also
+ *     `static SpinLock x{};` anywhere. Both ticket fields start at
+ *     0, which means "ticket 0 is being served and is also the next
+ *     to be handed out" → the lock is free. The class_id field also
  *     zero-initialises to `kLockClassUnclassified` (0), so untagged
  *     locks bypass lockdep with a single compare-and-skip.
  *   - Acquire disables interrupts on the calling CPU (saving the
  *     previous RFLAGS.IF so nested acquires restore correctly on
- *     release) and then busy-waits on an atomic CAS.
- *   - Release writes zero back to the word and restores RFLAGS.IF.
+ *     release) before grabbing a ticket.
+ *   - Release increments `now_serving` with release ordering and
+ *     restores RFLAGS.IF.
  *   - Owner-CPU tracking is debug-only; `owner_cpu` is written under
  *     the lock and read only for diagnostics. Do not rely on it for
  *     correctness.
@@ -31,9 +43,9 @@
  *   - Not recursive. A CPU that re-acquires a lock it already holds
  *     will deadlock itself. `SpinLockAssertHeld` is offered for
  *     callers that want to document the invariant.
- *   - No priority inheritance / MCS queueing. Fine for the contention
- *     levels we expect at v0 (single CPU, rare IRQ-vs-task contention).
- *     Upgrade to ticket / MCS when contention shows up in profiles.
+ *   - Single shared `now_serving` cache line. MCS queueing (one
+ *     wait slot per waiter) is a future move when ticket contention
+ *     shows up as cache-line ping-pong in profiles.
  *   - Waiters spin — no fallback to sleep. Holding a spinlock across
  *     any blocking call (SchedYield, WaitQueueBlock, KMalloc if it
  *     ever blocks) is a contract violation. Kernel code holding a
@@ -47,10 +59,17 @@ namespace duetos::sync
 
 struct SpinLock
 {
-    // 0 = free, 1 = held. Intentionally u32 (not bool) — xchg on a u32
-    // is one instruction on x86_64 and lets us expose a stable ABI for
-    // assembly callers later.
-    volatile u32 locked;
+    // Ticket dispenser: each Acquire fetch-adds this and uses the
+    // pre-increment value as its ticket number. Wraps cleanly at
+    // u32 — even at 1 ns per acquire, wrap takes ~4.3 s of constant
+    // contention on a single lock, well past any realistic critical
+    // section. The pair (next_ticket, now_serving) is free iff they
+    // are equal.
+    volatile u32 next_ticket;
+
+    // Ticket currently holding the lock. Acquire spins until its
+    // ticket equals this value; Release increments it.
+    volatile u32 now_serving;
 
     // Diagnostic only: CPU index of current holder (or 0xFFFFFFFF if
     // unlocked). Never consulted for correctness.
@@ -74,8 +93,8 @@ struct IrqFlags
 };
 
 /// Acquire the lock. Disables interrupts on the current CPU, saves the
-/// prior RFLAGS, then busy-waits until the lock word flips from 0 to 1
-/// via `xchg` (implicitly atomic on x86).
+/// prior RFLAGS, atomically grabs a ticket, then busy-waits until that
+/// ticket is being served. FIFO ordering across competing CPUs.
 [[nodiscard]] IrqFlags SpinLockAcquire(SpinLock& lock);
 
 /// Release the lock and restore the caller's prior interrupt state.

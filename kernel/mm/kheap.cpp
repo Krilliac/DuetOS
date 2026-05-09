@@ -82,6 +82,57 @@ constinit ChunkHeader* g_freelist = nullptr;
 constinit u64 g_alloc_count = 0;
 constinit u64 g_free_count = 0;
 
+// Size-class bins. Each bin holds a LIFO stack of free chunks of one
+// exact size, parked OUTSIDE the coalescing freelist. KMalloc checks
+// the matching bin before walking the freelist; KFree pushes onto the
+// matching bin before the freelist insert + coalesce. The trade is:
+// pay a fixed-size per-class memory cap (kBinDepth * chunk_size per
+// class) and modest external fragmentation in exchange for O(1)
+// alloc/free on the size classes the workload actually hammers.
+//
+// Index = (chunk_size - kMinBinChunkSize) / kHeapAlignment. A chunk
+// is the smallest thing the heap can hand out (header + one alignment
+// unit of payload + trailer canary); kBinCount classes above that
+// cover [kMinBinChunkSize, kMinBinChunkSize + kBinCount * 16) bytes
+// of chunk size, i.e. payloads of [kHeapAlignment, kHeapAlignment +
+// (kBinCount - 1) * 16] bytes. With kBinCount=12 + kHeapAlignment=16
+// + canary=16 + header=32, that covers payloads of 16..192 B — the
+// hot range for slab-cache plumbing, ring entries, and small driver
+// objects that don't earn a dedicated SlabCache.
+constexpr u32 kMinBinChunkSize = static_cast<u32>(sizeof(ChunkHeader) + kHeapAlignment + kHeapTrailerCanaryBytes);
+constexpr u32 kBinCount = 12;
+constexpr u32 kBinDepth = 8;
+
+constinit ChunkHeader* g_bins[kBinCount] = {};
+constinit u32 g_bin_count[kBinCount] = {};
+constinit u64 g_bin_alloc_hits = 0;
+constinit u64 g_bin_free_hits = 0;
+
+constexpr u32 kInvalidBin = 0xFFFFFFFFu;
+
+inline u32 BinIndexForChunkSize(u64 chunk_size)
+{
+    if (chunk_size < kMinBinChunkSize)
+    {
+        return kInvalidBin;
+    }
+    const u64 over = chunk_size - kMinBinChunkSize;
+    if ((over % kHeapAlignment) != 0)
+    {
+        // Bin chunk sizes are always multiples of kHeapAlignment beyond
+        // kMinBinChunkSize; a non-multiple means caller asked for a
+        // size that doesn't map cleanly. Defensive — KMalloc rounds
+        // payload to alignment so this shouldn't fire in practice.
+        return kInvalidBin;
+    }
+    const u64 idx = over / kHeapAlignment;
+    if (idx >= kBinCount)
+    {
+        return kInvalidBin;
+    }
+    return static_cast<u32>(idx);
+}
+
 [[noreturn]] void PanicHeap(const char* message)
 {
     core::Panic("mm/kheap", message);
@@ -215,6 +266,32 @@ void* KMalloc(u64 bytes)
     // user payload — see mm/poison.h.
     const u64 payload = RoundUp(bytes, kHeapAlignment);
     const u64 needed = sizeof(ChunkHeader) + payload + kHeapTrailerCanaryBytes;
+
+    // ---- Size-class bin fast path ---------------------------------
+    // If the requested chunk size lands in a size class AND the bin
+    // for that class has a parked chunk, pop it without walking the
+    // address-ordered freelist. The parked chunk's size is exactly
+    // `needed` (bins are size-exact), so no split or trailing-fit
+    // logic runs here — just retag, restamp the canary, and return.
+    {
+        const u32 bin = BinIndexForChunkSize(needed);
+        if (bin != kInvalidBin && g_bins[bin] != nullptr)
+        {
+            ChunkHeader* hot = g_bins[bin];
+            AssertMagic(hot, kHeapMagicFree, "KMalloc: bin head not Free");
+            DEBUG_ASSERT(hot->size == needed, "mm/kheap", "bin entry size mismatch");
+            g_bins[bin] = hot->next;
+            --g_bin_count[bin];
+            hot->magic = kHeapMagicLive;
+            hot->next = nullptr;
+            hot->caller_rip = reinterpret_cast<u64>(__builtin_return_address(0));
+            ++g_alloc_count;
+            ++g_bin_alloc_hits;
+            u8* canary_at = reinterpret_cast<u8*>(hot) + hot->size - kHeapTrailerCanaryBytes;
+            WriteHeapTrailerCanary(canary_at);
+            return reinterpret_cast<void*>(reinterpret_cast<u8*>(hot) + sizeof(ChunkHeader));
+        }
+    }
 
     ChunkHeader* prev = nullptr;
     ChunkHeader* cursor = g_freelist;
@@ -356,6 +433,25 @@ void KFree(void* ptr)
     chunk->magic = kHeapMagicFree;
     PoisonPayload(chunk);
 
+    // ---- Size-class bin fast path ---------------------------------
+    // If this chunk fits a size class AND that class's bin has room,
+    // park it there instead of running the freelist insert + double
+    // coalesce walk. The next KMalloc of the same size pops it
+    // straight back out without any freelist work.
+    {
+        const u32 bin = BinIndexForChunkSize(chunk->size);
+        if (bin != kInvalidBin && g_bin_count[bin] < kBinDepth)
+        {
+            chunk->next = g_bins[bin];
+            chunk->caller_rip = 0;
+            g_bins[bin] = chunk;
+            ++g_bin_count[bin];
+            ++g_free_count;
+            ++g_bin_free_hits;
+            return;
+        }
+    }
+
     FreelistInsertAndCoalesce(chunk);
     ++g_free_count;
 }
@@ -366,6 +462,8 @@ KernelHeapStats KernelHeapStatsRead()
     stats.pool_bytes = g_pool_bytes;
     stats.alloc_count = g_alloc_count;
     stats.free_count = g_free_count;
+    stats.bin_alloc_hits = g_bin_alloc_hits;
+    stats.bin_free_hits = g_bin_free_hits;
 
     for (const ChunkHeader* c = g_freelist; c != nullptr; c = c->next)
     {
@@ -380,8 +478,38 @@ KernelHeapStats KernelHeapStatsRead()
             stats.largest_free_run = c->size;
         }
     }
+    // Bins also hold free chunks. Account their bytes against the
+    // pool so used_bytes correctly identifies live allocations and
+    // doesn't drift as the bin populations shift.
+    for (u32 b = 0; b < kBinCount; ++b)
+    {
+        for (const ChunkHeader* c = g_bins[b]; c != nullptr; c = c->next)
+        {
+            stats.free_bytes += c->size;
+            ++stats.binned_chunk_count;
+        }
+    }
     stats.used_bytes = stats.pool_bytes - stats.free_bytes;
     return stats;
+}
+
+void KernelHeapDrainBins()
+{
+    for (u32 b = 0; b < kBinCount; ++b)
+    {
+        ChunkHeader* head = g_bins[b];
+        g_bins[b] = nullptr;
+        g_bin_count[b] = 0;
+        while (head != nullptr)
+        {
+            ChunkHeader* next = head->next;
+            // Magic is already Free; size is exact for the bin. Push
+            // back into the address-ordered freelist so coalescing
+            // restores the pool to one big chunk if the rest is empty.
+            FreelistInsertAndCoalesce(head);
+            head = next;
+        }
+    }
 }
 
 u32 KernelHeapTopAllocators(HeapLeakEntry* out, u32 out_capacity)

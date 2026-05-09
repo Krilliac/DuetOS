@@ -51,7 +51,7 @@ constinit u64 g_high_water_slots = 0;
 // lock on here first.
 // Tagged with `kLockClassKStack` for lockdep — see sync/lockdep.h
 // for the canonical order convention.
-constinit sync::SpinLock g_kstack_lock{.locked = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassKStack};
+constinit sync::SpinLock g_kstack_lock{.next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassKStack};
 
 [[noreturn]] void PanicKstack(const char* message, u64 value)
 {

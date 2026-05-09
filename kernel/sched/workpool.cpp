@@ -2,23 +2,38 @@
  * DuetOS — kernel work pool: implementation.
  *
  * See `workpool.h` for the public contract. This TU owns the
- * pool struct, the slot ring, the worker entry function, the
- * lifecycle of every spawned worker, and the boot self-test.
+ * pool struct, the per-lane slot rings, the worker entry function,
+ * the lifecycle of every spawned worker, and the boot self-test.
  *
- * State invariants (held under `inner`):
- *   - count <= capacity
- *   - active <= worker_count
- *   - workers_alive <= worker_count
- *   - shutdown == true => no further Submit calls (KASSERT'd)
+ * SHAPE
+ *   The queue is split into N "lanes" (one per worker). Each lane
+ *   has its own slots, lock, and not_full condvar. Submitters
+ *   round-robin across lanes; workers prefer their own lane and
+ *   steal from peers when their own is empty. The shared shutdown /
+ *   drain / wake state is carried by a single `inner` mutex +
+ *   condvars on the pool.
  *
- * The worker loop pattern is the textbook bounded-buffer
- * consumer with a separate "drained" condvar so Drain doesn't
- * race against `not_empty` wakes meant for workers — see the
- * banner above WorkerMain.
+ * STATE INVARIANTS
+ *   (under `p->inner`)
+ *     - count_total == sum of every lane's count
+ *     - active <= worker_count
+ *     - workers_alive <= worker_count
+ *     - shutdown == true => no further Submit calls (KASSERT'd)
+ *
+ *   (under `lane.lock`)
+ *     - lane.count <= lane.capacity
+ *     - lane.head + count == lane.tail (mod capacity)
+ *
+ * LOCK ORDER
+ *   `lane.lock` → `inner`. Submit and Worker both take a lane lock
+ *   first (briefly) and then the inner lock for shared bookkeeping.
+ *   Worker waits on `not_empty` under `inner` ONLY (no lane lock
+ *   held while sleeping).
  */
 
 #include "sched/workpool.h"
 
+#include "acpi/acpi.h"
 #include "core/panic.h"
 #include "log/klog.h"
 #include "mm/kheap.h"
@@ -37,100 +52,164 @@ struct WorkItem
     void* arg;
 };
 
-} // namespace
-
-struct WorkPool
+struct WorkPoolLane
 {
-    sched::Mutex inner;
-    sched::Condvar not_empty; ///< Workers wait here when the queue is empty.
-    sched::Condvar not_full;  ///< Submitters wait here when the queue is full.
-    sched::Condvar drained;   ///< Drain waiters wake when count == 0 && active == 0.
-    sched::Condvar exited;    ///< Shutdown waits here for workers_alive to hit 0.
-
+    sched::Mutex lock;
+    sched::Condvar not_full; ///< Submitters wait here when THIS lane is full.
     WorkItem* slots;
     u32 capacity;
     u32 count;
     u32 head; ///< Next slot a Submit will write to.
     u32 tail; ///< Next slot a worker will read from.
+};
+
+} // namespace
+
+struct WorkPool
+{
+    sched::Mutex inner;
+    sched::Condvar not_empty;   ///< Workers wait here when count_total == 0.
+    sched::Condvar space_avail; ///< Submitters wait here when every lane was full at scan time.
+    sched::Condvar drained;     ///< Drain waiters wake when count_total == 0 && active == 0.
+    sched::Condvar exited;      ///< Shutdown waits here for workers_alive to hit 0.
 
     u32 worker_count;  ///< Worker threads spawned at Create.
-    u32 workers_alive; ///< Worker threads still running (drops on shutdown exit).
+    u32 workers_alive; ///< Worker threads still running.
     u32 active;        ///< Workers currently inside a work-item callback.
-    bool shutdown;     ///< Set by Shutdown; tells workers to exit when queue empties.
+    u64 count_total;   ///< Sum across every lane; updated under `inner`.
+    bool shutdown;     ///< Set by Shutdown; tells workers to exit when queues empty.
 
-    const char* name_prefix; ///< Caller-owned; must outlive the pool.
+    u32 lane_count;
+    WorkPoolLane* lanes;
+
+    u32 next_submit_lane; ///< Round-robin counter for Submit, atomic.
+
+    const char* name_prefix;
 };
 
 namespace
 {
 
-// Worker main loop. Pulls items from the queue and runs them
-// until Shutdown is requested AND the queue is empty. The
-// "drain" condvar is signalled whenever the worker observes a
-// fully-quiescent pool (queue empty + no other worker active)
-// after completing an item — that's the exact condition Drain
-// is waiting on, and the worker is in the perfect position to
-// notice it.
+// Per-worker context handed to WorkerMain so each thread knows which
+// lane is its "preferred" starting point for the steal scan.
+struct WorkerCtx
+{
+    WorkPool* pool;
+    u32 idx; ///< 0..worker_count-1; doubles as preferred lane index.
+};
+
+// Try to claim one item from `l`. Returns true on success and writes
+// the item into `*out`. Caller must NOT hold `inner` (we take the
+// lane lock briefly + signal not_full). Used by both the local-lane
+// path and the steal scan.
+bool TryPopFromLane(WorkPoolLane& l, WorkItem* out)
+{
+    sched::MutexLock(&l.lock);
+    if (l.count == 0)
+    {
+        sched::MutexUnlock(&l.lock);
+        return false;
+    }
+    *out = l.slots[l.tail];
+    l.tail = (l.tail + 1) % l.capacity;
+    --l.count;
+    sched::CondvarSignal(&l.not_full);
+    sched::MutexUnlock(&l.lock);
+    return true;
+}
+
+// Worker main loop. Pulls items from its preferred lane first,
+// then steals from peers when the local lane is empty. Blocks on
+// the pool-wide `not_empty` condvar when every lane is dry.
 void WorkerMain(void* arg)
 {
-    auto* p = static_cast<WorkPool*>(arg);
+    auto* ctx = static_cast<WorkerCtx*>(arg);
+    WorkPool* p = ctx->pool;
+    const u32 my_idx = ctx->idx;
 
     for (;;)
     {
+        // ---- Sleep until there's work or shutdown ---------------
         sched::MutexLock(&p->inner);
-
-        // Wait for either work to arrive or for shutdown to be
-        // requested. Shutdown alone is not enough — a worker
-        // must drain queued items before exiting so a Submit
-        // followed immediately by Shutdown still completes
-        // every submitted item.
-        while (p->count == 0 && !p->shutdown)
+        while (p->count_total == 0 && !p->shutdown)
         {
             sched::CondvarWait(&p->not_empty, &p->inner);
         }
-
-        if (p->count == 0 && p->shutdown)
+        if (p->count_total == 0 && p->shutdown)
         {
             --p->workers_alive;
-            // Signal Shutdown's join-equivalent waiter. The
-            // last worker to leave wakes Shutdown so it can
-            // free the pool.
             if (p->workers_alive == 0)
             {
                 sched::CondvarBroadcast(&p->exited);
             }
             sched::MutexUnlock(&p->inner);
+            duetos::mm::KFree(ctx);
             sched::SchedExit();
-            // SchedExit is [[noreturn]]; the loop never reaches
-            // here.
+            // [[noreturn]] above; flow does not reach here.
         }
-
-        WorkItem item = p->slots[p->tail];
-        p->tail = (p->tail + 1) % p->capacity;
-        --p->count;
-        ++p->active;
-
-        // A producer waiting on a full queue is now welcome.
-        sched::CondvarSignal(&p->not_full);
-
         sched::MutexUnlock(&p->inner);
 
-        // Run the user callback OUTSIDE the pool mutex. This
-        // is the whole point of the pool — concurrent execution
-        // of independent items.
+        // ---- Scan lanes starting at the preferred slot ----------
+        // The wake above only proves count_total WAS > 0 at some
+        // point; a peer may have grabbed the only item. Pop is
+        // best-effort across every lane.
+        WorkItem item{};
+        bool got = false;
+        for (u32 i = 0; i < p->lane_count; ++i)
+        {
+            const u32 lane_idx = (my_idx + i) % p->lane_count;
+            if (TryPopFromLane(p->lanes[lane_idx], &item))
+            {
+                got = true;
+                break;
+            }
+        }
+        if (!got)
+        {
+            // Spurious wake / lost race — go back to wait.
+            continue;
+        }
+
+        // ---- Account the pop, run the callback -----------------
+        sched::MutexLock(&p->inner);
+        --p->count_total;
+        ++p->active;
+        // A pop opens space in some lane — wake any submitter
+        // that was waiting because every lane was full.
+        sched::CondvarSignal(&p->space_avail);
+        sched::MutexUnlock(&p->inner);
+
+        // Run the user callback OUTSIDE every pool lock. This is
+        // the whole point of the pool — concurrent execution of
+        // independent items.
         item.fn(item.arg);
 
         sched::MutexLock(&p->inner);
         --p->active;
-        // Quiescence check: if this worker just finished the
-        // last in-flight item AND no further items are queued,
-        // wake every Drain caller.
-        if (p->count == 0 && p->active == 0)
+        if (p->count_total == 0 && p->active == 0)
         {
             sched::CondvarBroadcast(&p->drained);
         }
         sched::MutexUnlock(&p->inner);
     }
+}
+
+void DestroyLanes(WorkPool* p)
+{
+    if (p == nullptr || p->lanes == nullptr)
+    {
+        return;
+    }
+    for (u32 i = 0; i < p->lane_count; ++i)
+    {
+        if (p->lanes[i].slots != nullptr)
+        {
+            duetos::mm::KFree(p->lanes[i].slots);
+            p->lanes[i].slots = nullptr;
+        }
+    }
+    duetos::mm::KFree(p->lanes);
+    p->lanes = nullptr;
 }
 
 } // namespace
@@ -148,48 +227,83 @@ WorkPool* WorkPoolCreate(u32 worker_count, u32 queue_capacity, const char* name_
         return nullptr;
     }
     *p = WorkPool{};
-    p->slots = static_cast<WorkItem*>(duetos::mm::KMalloc(sizeof(WorkItem) * queue_capacity));
-    if (p->slots == nullptr)
+    p->worker_count = worker_count;
+    p->name_prefix = name_prefix;
+
+    // One lane per worker — bounded by acpi::kMaxCpus so a caller
+    // that requests more workers than the architecture supports
+    // is silently capped. Each lane gets queue_capacity / lane_count
+    // slots (rounded up to at least 1) so the TOTAL pool capacity
+    // matches the caller's request.
+    p->lane_count = worker_count <= acpi::kMaxCpus ? worker_count : static_cast<u32>(acpi::kMaxCpus);
+    const u32 per_lane = (queue_capacity + p->lane_count - 1) / p->lane_count;
+
+    p->lanes = static_cast<WorkPoolLane*>(duetos::mm::KMalloc(sizeof(WorkPoolLane) * p->lane_count));
+    if (p->lanes == nullptr)
     {
         duetos::mm::KFree(p);
         return nullptr;
     }
-    p->capacity = queue_capacity;
-    p->worker_count = worker_count;
-    p->name_prefix = name_prefix;
+    for (u32 i = 0; i < p->lane_count; ++i)
+    {
+        p->lanes[i] = WorkPoolLane{};
+    }
+    for (u32 i = 0; i < p->lane_count; ++i)
+    {
+        p->lanes[i].capacity = per_lane;
+        p->lanes[i].slots = static_cast<WorkItem*>(duetos::mm::KMalloc(sizeof(WorkItem) * per_lane));
+        if (p->lanes[i].slots == nullptr)
+        {
+            DestroyLanes(p);
+            duetos::mm::KFree(p);
+            return nullptr;
+        }
+    }
 
-    // Spawn workers under the pool mutex so a worker that wakes
+    // Spawn workers under the inner mutex so a worker that wakes
     // before WorkPoolCreate returns sees workers_alive consistent
     // with the actual spawn count.
     sched::MutexLock(&p->inner);
     for (u32 i = 0; i < worker_count; ++i)
     {
-        // Per-worker name buffer is owned by the pool and lives
-        // alongside the WorkPool struct — workers stay alive for
-        // the pool's lifetime, so a single shared prefix is
-        // sufficient. The scheduler keeps its own copy of the
-        // pointer, not the bytes; we pass the prefix unchanged
-        // and accept that all workers in a pool share a label.
-        sched::Task* t = sched::SchedCreate(&WorkerMain, p, p->name_prefix);
-        if (t == nullptr)
+        auto* ctx = static_cast<WorkerCtx*>(duetos::mm::KMalloc(sizeof(WorkerCtx)));
+        if (ctx == nullptr)
         {
-            // Roll back the half-built pool. Mark shutdown +
-            // wake any worker that already started; they'll
-            // exit through the normal shutdown path.
             p->shutdown = true;
             sched::CondvarBroadcast(&p->not_empty);
-            // Wait for the workers we DID spawn to exit before
-            // freeing the storage their stacks never read.
             while (p->workers_alive > 0)
             {
                 sched::CondvarWait(&p->exited, &p->inner);
             }
             sched::MutexUnlock(&p->inner);
-            duetos::mm::KFree(p->slots);
+            DestroyLanes(p);
+            duetos::mm::KFree(p);
+            return nullptr;
+        }
+        ctx->pool = p;
+        ctx->idx = i;
+        sched::Task* t = sched::SchedCreate(&WorkerMain, ctx, p->name_prefix);
+        if (t == nullptr)
+        {
+            duetos::mm::KFree(ctx);
+            p->shutdown = true;
+            sched::CondvarBroadcast(&p->not_empty);
+            while (p->workers_alive > 0)
+            {
+                sched::CondvarWait(&p->exited, &p->inner);
+            }
+            sched::MutexUnlock(&p->inner);
+            DestroyLanes(p);
             duetos::mm::KFree(p);
             KLOG_WARN_S("workpool", "WorkPoolCreate: SchedCreate failed", "name", name_prefix);
             return nullptr;
         }
+        // Bias each worker toward its preferred CPU so the work-
+        // item callback's CPU-local data has a chance to stay
+        // warm. SchedSetAffinity is a soft hint today — the
+        // scheduler may still migrate — but the bias is what we
+        // need to pair with round-robin Submit for spread.
+        sched::SchedSetAffinity(t, i % static_cast<u32>(acpi::kMaxCpus));
         ++p->workers_alive;
     }
     sched::MutexUnlock(&p->inner);
@@ -198,47 +312,96 @@ WorkPool* WorkPoolCreate(u32 worker_count, u32 queue_capacity, const char* name_
     return p;
 }
 
+namespace
+{
+
+// Try to push (fn, arg) onto the lane indexed by `lane_idx`.
+// Returns true on success. On failure, the lane was full at the
+// moment of the test; caller decides whether to wait or move on.
+bool TryPushToLane(WorkPool* p, u32 lane_idx, WorkFn fn, void* arg)
+{
+    WorkPoolLane& l = p->lanes[lane_idx];
+    sched::MutexLock(&l.lock);
+    if (l.count >= l.capacity)
+    {
+        sched::MutexUnlock(&l.lock);
+        return false;
+    }
+    l.slots[l.head] = WorkItem{fn, arg};
+    l.head = (l.head + 1) % l.capacity;
+    ++l.count;
+    sched::MutexUnlock(&l.lock);
+
+    sched::MutexLock(&p->inner);
+    ++p->count_total;
+    sched::CondvarSignal(&p->not_empty);
+    sched::MutexUnlock(&p->inner);
+    return true;
+}
+
+} // namespace
+
 void WorkPoolSubmit(WorkPool* p, WorkFn fn, void* arg)
 {
     KASSERT(p != nullptr, "workpool", "WorkPoolSubmit null pool");
     KASSERT(fn != nullptr, "workpool", "WorkPoolSubmit null fn");
-    sched::MutexLock(&p->inner);
     KASSERT(!p->shutdown, "workpool", "WorkPoolSubmit on shutdown pool");
-    while (p->count == p->capacity)
+
+    while (true)
     {
-        sched::CondvarWait(&p->not_full, &p->inner);
+        // Round-robin over lanes. The fast path is one trylock that
+        // either succeeds or sees a full lane; on full we move on
+        // to the next index instead of blocking the caller.
+        const u32 start = __atomic_fetch_add(&p->next_submit_lane, 1, __ATOMIC_RELAXED);
+        bool any_full = false;
+        for (u32 i = 0; i < p->lane_count; ++i)
+        {
+            const u32 lane_idx = (start + i) % p->lane_count;
+            if (TryPushToLane(p, lane_idx, fn, arg))
+            {
+                return;
+            }
+            any_full = true;
+        }
+        // Every lane was full at the moment we scanned. Wait on
+        // ANY lane's not_full so we can retry as soon as a worker
+        // pops an item somewhere.
+        if (any_full)
+        {
+            // Every lane was full at the moment we scanned. Wait on
+            // the pool-wide space_avail condvar; workers signal it
+            // on every successful pop, so we wake as soon as ANY
+            // lane has room. The retry loop covers any lost wakeup.
+            sched::MutexLock(&p->inner);
+            sched::CondvarWait(&p->space_avail, &p->inner);
+            sched::MutexUnlock(&p->inner);
+        }
     }
-    p->slots[p->head] = WorkItem{fn, arg};
-    p->head = (p->head + 1) % p->capacity;
-    ++p->count;
-    sched::CondvarSignal(&p->not_empty);
-    sched::MutexUnlock(&p->inner);
 }
 
 bool WorkPoolTrySubmit(WorkPool* p, WorkFn fn, void* arg)
 {
     KASSERT(p != nullptr, "workpool", "WorkPoolTrySubmit null pool");
     KASSERT(fn != nullptr, "workpool", "WorkPoolTrySubmit null fn");
-    sched::MutexLock(&p->inner);
     KASSERT(!p->shutdown, "workpool", "WorkPoolTrySubmit on shutdown pool");
-    if (p->count == p->capacity)
+
+    const u32 start = __atomic_fetch_add(&p->next_submit_lane, 1, __ATOMIC_RELAXED);
+    for (u32 i = 0; i < p->lane_count; ++i)
     {
-        sched::MutexUnlock(&p->inner);
-        return false;
+        const u32 lane_idx = (start + i) % p->lane_count;
+        if (TryPushToLane(p, lane_idx, fn, arg))
+        {
+            return true;
+        }
     }
-    p->slots[p->head] = WorkItem{fn, arg};
-    p->head = (p->head + 1) % p->capacity;
-    ++p->count;
-    sched::CondvarSignal(&p->not_empty);
-    sched::MutexUnlock(&p->inner);
-    return true;
+    return false;
 }
 
 void WorkPoolDrain(WorkPool* p)
 {
     KASSERT(p != nullptr, "workpool", "WorkPoolDrain null pool");
     sched::MutexLock(&p->inner);
-    while (p->count != 0 || p->active != 0)
+    while (p->count_total != 0 || p->active != 0)
     {
         sched::CondvarWait(&p->drained, &p->inner);
     }
@@ -249,16 +412,11 @@ void WorkPoolShutdown(WorkPool* p)
 {
     KASSERT(p != nullptr, "workpool", "WorkPoolShutdown null pool");
     sched::MutexLock(&p->inner);
-    // Wait for any in-flight items first — Shutdown's contract
-    // is "drain, then exit", same as glibc's pthread_pool_destroy.
-    while (p->count != 0 || p->active != 0)
+    while (p->count_total != 0 || p->active != 0)
     {
         sched::CondvarWait(&p->drained, &p->inner);
     }
     p->shutdown = true;
-    // Every worker is currently in the not_empty wait; broadcast
-    // wakes every one of them, each observes shutdown + empty
-    // queue and exits.
     sched::CondvarBroadcast(&p->not_empty);
     while (p->workers_alive > 0)
     {
@@ -266,13 +424,13 @@ void WorkPoolShutdown(WorkPool* p)
     }
     sched::MutexUnlock(&p->inner);
 
-    duetos::mm::KFree(p->slots);
+    DestroyLanes(p);
     duetos::mm::KFree(p);
 }
 
 u32 WorkPoolPending(const WorkPool* p)
 {
-    return p == nullptr ? 0u : p->count;
+    return p == nullptr ? 0u : static_cast<u32>(p->count_total);
 }
 
 u32 WorkPoolActive(const WorkPool* p)
@@ -287,12 +445,6 @@ u32 WorkPoolActive(const WorkPool* p)
 namespace
 {
 
-// The self-test exercises the entire lifecycle. Counter is
-// incremented by every worker without explicit synchronisation
-// — the pool's own queue serialises Submit/Receive, but
-// callbacks run concurrently. We use a sched::Mutex inside the
-// callback to serialise the increment so the final value is
-// deterministic regardless of how many CPUs the workers land on.
 struct SelfTestState
 {
     sched::Mutex lock;

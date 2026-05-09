@@ -89,20 +89,99 @@ bool MountPrefixMatch(const char* path, u32 path_len, const char* mount_point, u
     return path[mount_len] == '\0' || path[mount_len] == '/';
 }
 
-// Locate a child named [name, name+name_len) inside `dir`. O(children)
-// linear scan. Returns nullptr if dir is null, not a directory, has
-// no children, or no match.
+// Dentry cache. Maps (parent, component_name) → child for ramfs
+// directory lookups. The ramfs trees are constexpr / `.rodata` so
+// we can't store hash links inside the nodes themselves; this is
+// a side table of cached hits (only successful FindChild results
+// land here). Subsequent lookups of the same component within
+// the same parent skip the linear scan.
+//
+// Size: 128 slots × 24 B = ~3 KiB. Single-bucket open addressing
+// — on collision the older entry is overwritten. Hit-only caching
+// keeps the eviction policy trivial; misses always pay the
+// linear scan, which is fine because the ramfs tree is small
+// and each missed name is unlikely to be repeated under the
+// same parent.
+constexpr u32 kDentryCacheSize = 128;
+static_assert((kDentryCacheSize & (kDentryCacheSize - 1)) == 0, "dentry cache size must be a power of two");
+
+struct DentryCacheEntry
+{
+    const RamfsNode* parent; ///< nullptr = empty slot
+    const RamfsNode* child;
+    u32 name_hash; ///< Full hash; used as a quick tiebreaker against same-bucket misses.
+};
+
+constinit DentryCacheEntry g_dentry_cache[kDentryCacheSize] = {};
+constinit u64 g_dentry_cache_hits = 0;
+constinit u64 g_dentry_cache_misses = 0;
+
+inline u32 DentryHash(const RamfsNode* parent, const char* name, u64 name_len)
+{
+    // Mix the parent pointer into the seed so identical component
+    // names under different parents land in different buckets.
+    u32 h = static_cast<u32>(reinterpret_cast<uptr>(parent) >> 4);
+    for (u64 i = 0; i < name_len; ++i)
+    {
+        h = h * 131u + static_cast<u32>(static_cast<u8>(name[i]));
+    }
+    return h;
+}
+
+const RamfsNode* DentryCacheLookup(const RamfsNode* parent, const char* name, u64 name_len)
+{
+    const u32 hash = DentryHash(parent, name, name_len);
+    const u32 bucket = hash & (kDentryCacheSize - 1);
+    const DentryCacheEntry& e = g_dentry_cache[bucket];
+    if (e.parent != parent || e.name_hash != hash || e.child == nullptr)
+    {
+        return nullptr;
+    }
+    // Verify the actual name bytes match — the hash + parent equality
+    // is necessary but not sufficient (32-bit hash collisions exist).
+    if (!StrEqN(name, name_len, e.child->name))
+    {
+        return nullptr;
+    }
+    ++g_dentry_cache_hits;
+    return e.child;
+}
+
+void DentryCacheInsert(const RamfsNode* parent, const RamfsNode* child)
+{
+    if (parent == nullptr || child == nullptr || child->name == nullptr)
+    {
+        return;
+    }
+    const u64 name_len = CStrLen(child->name);
+    const u32 hash = DentryHash(parent, child->name, name_len);
+    const u32 bucket = hash & (kDentryCacheSize - 1);
+    g_dentry_cache[bucket].parent = parent;
+    g_dentry_cache[bucket].child = child;
+    g_dentry_cache[bucket].name_hash = hash;
+}
+
+// Locate a child named [name, name+name_len) inside `dir`. Hits the
+// dentry cache first; falls through to an O(children) linear scan
+// on miss and seeds the cache with the result. Returns nullptr if
+// dir is null, not a directory, has no children, or no match.
 const RamfsNode* FindChild(const RamfsNode* dir, const char* name, u64 name_len)
 {
     if (!RamfsIsDir(dir) || dir->children == nullptr)
     {
         return nullptr;
     }
+    if (const RamfsNode* hit = DentryCacheLookup(dir, name, name_len))
+    {
+        return hit;
+    }
+    ++g_dentry_cache_misses;
     for (u64 i = 0; dir->children[i] != nullptr; ++i)
     {
         const RamfsNode* c = dir->children[i];
         if (StrEqN(name, name_len, c->name))
         {
+            DentryCacheInsert(dir, c);
             return c;
         }
     }
