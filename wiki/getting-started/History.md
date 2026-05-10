@@ -315,6 +315,60 @@ the 2026-05-06 entries in
 [`Design-Decisions`](../reference/Design-Decisions.md) for the
 rationale.
 
+## Phase 6.6 — Roadmap audit + Win32 fillers (2026-05-10)
+
+A two-day audit pass against
+[`reference/Roadmap.md`](../reference/Roadmap.md) closed ten
+imported-TODO rows. Five rows landed real code; five were
+documentation flushes for work that had already shipped piecemeal
+and never had its row deleted.
+
+**Code shipped this phase:**
+
+- **Track 1 (windowing)** — `kernel/core/main.cpp` kbd-reader
+  now posts `WM_KEYUP` / `WM_SYSKEYUP` to the focused PE on
+  release edges (T1-03 closed). Re-audit confirmed the row's
+  other claimed residuals (`SetCapture` and
+  `SetForegroundWindow`) had already shipped earlier — the
+  mouse-routing block honours `WindowGetCapture()`,
+  `SetForegroundWindow` plumbs through `WindowRaise` to set
+  `g_active_window`.
+- **Track 11 (kernel infrastructure)** — `userland/libs/kernel32`
+  and `userland/libs/winmm` ship per-process polling-thread
+  timer surfaces (T11-04 closed). `CreateWaitableTimer` /
+  `SetWaitableTimer` / `WaitForSingleObject` round-trip
+  through a 16-slot table + lazily-spawned 10 ms service
+  thread that fires `SetEvent` when due. `timeSetEvent`
+  mirrors the same pattern for multimedia callbacks.
+- **Track 3 (networking)** — new `kSockOpGetLease = 13` op on
+  `SYS_SOCKET_OP` snapshots the kernel's DHCP lease into a
+  40-byte user buffer. `iphlpapi!GetAdaptersInfo` now emits
+  a two-record chain (eth0 from the lease + loopback);
+  `ws2_32!getaddrinfo` resolves IP literals + "localhost"
+  locally and falls through a 16-slot LRU cache + the
+  kernel resolver for everything else (T3-02 + T3-03 closed).
+
+**Closed retroactively (work shipped earlier, row never deleted):**
+
+- **Track 1** — T1-04 chrome interactions (title-bar drag,
+  click min/max-restore/close, double-click toggle, Alt+F4,
+  snap shortcuts).
+- **Track 4** — T4-01 D3D11/DXGI swap-chain present, T4-02
+  Vulkan ICD v0, T4-04 AMD/NVIDIA/Intel GPU probe + clean
+  software-fallback.
+- **Track 10** — T10-01 GitHub Actions CI, T10-02
+  `x86_64-kasan` preset, T10-03 `x86_64-release-lto` preset.
+
+After this phase the remaining open imported-TODO rows are: T3-01
+(socket loopback round-trip), T4-03 (Intel iGPU command ring),
+T5-01..04 (memory manager polish), T6-01..04 (process/thread
+model), T7-03/T7-04 (overlapped I/O + NTFS write), T8-01/T8-02
+(MLFQ aging + cross-thread APC), T10-04 (host ctest harness
+extension), T11-02/T11-05 (IPC pipes + power management),
+T12-03 (winmm waveOut over HDA), T13-01/T13-03 (Win32-Surface-
+Status audit + per-syscall arg/return docs), T14-01/T14-03
+(PE stress + network loopback fixtures).
+
 ---
 
 ## How to read the rest of the tree
