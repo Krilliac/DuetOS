@@ -1205,6 +1205,7 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 195 | `SYS_HEAPEX_FREE` |
 | 196 | `SYS_HEAPEX_SIZE` |
 | 197 | `SYS_HEAPEX_REALLOC` |
+| 198 | `SYS_AUDIO_DEVICE_INFO` |
 <!-- /AUTO:syscall_list -->
 
 ## Native Syscall Argument / Return Reference
@@ -1426,4 +1427,5 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 195 | `SYS_HEAPEX_FREE` | `rdi` = u64 heap_handle rsi = u64 ptr Returns 0 | 0 |
 | 196 | `SYS_HEAPEX_SIZE` | `rdi` = u64 heap_handle rsi = u64 ptr | bytes or 0 on bad handle / pointer |
 | 197 | `SYS_HEAPEX_REALLOC` | `rdi` = u64 heap_handle rsi = u64 ptr        (0 = alloc) rdx = u6... | the new VA or 0 on failure |
+| 198 | `SYS_AUDIO_DEVICE_INFO` | `rdi` = u64 op 0 = number of HDA-class output devices (typically ... | 48000 |
 <!-- /AUTO:syscall_args -->

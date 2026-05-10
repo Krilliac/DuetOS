@@ -1904,6 +1904,21 @@ enum SyscallNumber : u64
     //   rdx = u64 new_size   (0 = free)
     // Returns the new VA or 0 on failure.
     SYS_HEAPEX_REALLOC = 197,
+
+    // SYS_AUDIO_DEVICE_INFO — query the audio backend for
+    // playback-device presence + capabilities. Backs Win32
+    // winmm `waveOutGetNumDevs` / `waveOutOpen`.
+    //   rdi = u64 op
+    //         0 = number of HDA-class output devices (typically
+    //             0 on a non-audio host or 1 with HDA brought up)
+    //         1 = first device's preferred sample rate (Hz),
+    //             0 if no device. v0 returns 48000.
+    //         2 = first device's preferred channel count, 0 if
+    //             no device. v0 returns 2 (stereo).
+    //         3 = first device's preferred bit depth, 0 if no
+    //             device. v0 returns 16.
+    // Returns the queried value, or 0 on bad op / no device.
+    SYS_AUDIO_DEVICE_INFO = 198,
 };
 
 // Inheritable stdio bundle for SYS_PROCESS_SPAWN_EX. Each entry

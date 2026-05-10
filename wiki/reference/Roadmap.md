@@ -980,7 +980,7 @@ Track 3 has no remaining roadmap rows.
 
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
-| T12-03 | win32 | P2 | Implement `winmm` waveOut APIs over HDA/audio mixer: open, prepare/write/unprepare, close, and capabilities. | A PE can play 44.1/48 kHz 16-bit stereo through `waveOut*`. |
+| T12-03 | win32 | P2 | Implement `winmm` waveOut APIs over HDA/audio mixer: open, prepare/write/unprepare, close, and capabilities. (API surface partial — `winmm!waveOutGetNumDevs` returns 1 when an HDA codec is brought up via the new `SYS_AUDIO_DEVICE_INFO = 198` syscall; `waveOutOpen` returns a real sentinel handle so PEs that fall through to `MMSYSERR_NODRIVER` no longer get rejected at probe time. `waveOutPrepareHeader` stamps `WHDR_PREPARED`, `waveOutWrite` stamps `WHDR_DONE` synchronously, `waveOutUnprepareHeader` clears the flag — a poll-for-completion loop terminates. Real-playback path still gated on the DMA-coherent buffer pool + BDL programming under §"Audio — HDA codec / stream programming"; samples are accepted but silently dropped today.) | A PE can play 44.1/48 kHz 16-bit stereo through `waveOut*`. |
 
 ### Track 13 — Documentation / wiki
 

@@ -7753,3 +7753,49 @@ doc helps future readers audit the trail.
   template lands.
 - **Related roadmap track(s):** T6-01 partial — dynamic TLS
   closed; static TLS + callbacks defer.
+
+## 2026-05-10 — winmm waveOut API surface (T12-03 partial)
+
+- **What changed:**
+  - New syscall `SYS_AUDIO_DEVICE_INFO = 198` queries the audio
+    backend for HDA-class controller presence + the canonical
+    48 kHz / stereo / 16-bit format. Counts only HDA controllers
+    (not AC'97 / legacy) since winmm's playback path has no
+    backend wired for those today.
+  - `winmm!waveOutGetNumDevs` returns 1 when an HDA codec is
+    brought up, 0 otherwise — replacing the always-zero stub.
+  - `winmm!waveOutOpen` returns a real sentinel handle
+    (`MM_AUDIO_HDA_HANDLE_SENTINEL = 0xA1A0001`) when a device
+    is present so PEs no longer get `MMSYSERR_NODRIVER` at
+    probe time.
+  - `waveOutPrepareHeader` stamps `WHDR_PREPARED`,
+    `waveOutWrite` stamps `WHDR_DONE` synchronously,
+    `waveOutUnprepareHeader` clears the prepared flag. A poll-
+    for-completion loop terminates because the buffer is
+    immediately marked done.
+- **Why:** Two audiences depend on this surface:
+  1. PEs that probe waveOut at startup and gate functionality
+     on success — they now get past the probe and continue
+     normally. Even though no audio plays, the rest of the
+     program runs.
+  2. PEs that wait for `WHDR_DONE` before proceeding — they
+     no longer hang.
+  Real playback rides on the DMA-coherent buffer pool +
+  BDL programming work under the "Audio — HDA codec / stream
+  programming" Roadmap row, which is its own slice.
+- **Rules out / defers:**
+  - Real samples reaching the codec. Buffers are accepted but
+    dropped. Closing this needs DMA buffer alloc + BDL
+    program + RUN bit + completion notification — kernel-side
+    work that crosses the audio backend.
+  - waveIn (recording). Same scaffolding gap as waveOut.
+  - Mixer / waveOutSetVolume hardware backend. The volume
+    setter still no-ops; the stored value isn't propagated to
+    the codec amp gain.
+  - waveOutGetDevCaps (per-device capability query). Currently
+    NOOP; could plumb through SYS_AUDIO_DEVICE_INFO with
+    additional ops.
+- **Revisit when:** the DMA-coherent buffer pool + BDL+RUN
+  path lands, or a workload depends on real playback.
+- **Related roadmap track(s):** T12-03 partial — API surface
+  closed; backend playback defer.
