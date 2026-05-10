@@ -35,10 +35,19 @@ add when a real workload demands recovery from primary corruption).
 
 - **No backup header fallback.** Primary header is the source of
   truth.
-- **No partition writes.** `GptInitDisk` round-trips through
-  `GptProbe` on a RAM-disk fixture so the layout-and-checksum logic is
-  exercised, but installing onto a real disk requires per-vendor
-  bootloader copy + GPT write. See [Roadmap](../reference/Roadmap.md#disk-installer).
+- **Installer orchestration shipped** (see
+  `kernel/fs/installer.{h,cpp}` +
+  `kernel/shell/shell_storage.cpp::CmdInstall`). The
+  `install <handle> INSTALL` shell command lays down a 3-partition
+  layout (ESP, system, crash-dump) backed by `GptInitDisk`,
+  formats ESP + system with `Fat32Format`, and mounts the result.
+  Crash-dump partition uses `kDuetCrashDumpTypeGuid` so the
+  panic-time NVMe / AHCI dump path discovers it via
+  `GptFindCrashDumpRegion` next boot. **Bootloader-bytes copy**
+  (writing real `BOOTX64.EFI` + `duetos-kernel.elf` into the
+  freshly-formatted ESP) is the residual — see
+  [`Daily-Driver-Readiness`](../reference/Daily-Driver-Readiness.md)
+  Tier 0 for the path forward.
 
 ## Related Pages
 

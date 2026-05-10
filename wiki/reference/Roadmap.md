@@ -397,13 +397,20 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
 
 ### ACPI S5 / soft-off shutdown
 
-- **Today:** Start menu's SHUT DOWN action calls `KernelHalt`
-  in `kernel/power/reboot.cpp` — logs a sentinel, masks
-  interrupts, and parks the boot CPU in `arch::Halt()`. Chipset
-  stays powered; the operator (or a VM `quit`) cuts power.
-- **Blocks on:** AML interpreter to evaluate `_PTS` / `_GTS` /
-  `\_S5_`. Without that we can't drive the chipset's soft-off
-  state. Same blocker the per-CPU sleep state work has.
+- **Today:** Start menu's SHUT DOWN action calls `KernelHalt`,
+  which now tries `acpi::AcpiShutdown()` first. `AcpiShutdown`
+  reads SLP_TYPa / SLP_TYPb via `AmlReadS5`, which decodes both
+  the classic `Name(_S5_, Package(...))` form (UEFI / QEMU) AND
+  the `Method(_S5_) { Return(Package(...)) }` form (some
+  consumer firmware). On match it writes the SLP_TYP value into
+  PM1A_CNT + PM1B_CNT, transitioning the chipset to soft-off.
+  Falls through to QEMU's debug ports (0x604 / 0xB004 / 0x4004)
+  on miss, then masks IRQs and parks the boot CPU as the
+  documented last resort.
+- **Blocks on:** real AML method evaluation for `_PTS` / `_GTS`
+  on chipsets that need them executed at runtime (rather than
+  pre-evaluated at firmware time). Same blocker the per-CPU
+  sleep state work has — wider AML interpreter slice.
 
 ### Device Manager — virtio + eject + hot-unplug
 
@@ -464,18 +471,29 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
 
 ### Disk installer
 
-- **Today:** boots from ISO only. Live system; no install. The
-  building blocks exist — `fs::gpt::GptInitDisk` writes a fresh
-  GPT (PMBR + primary header + entries + backup header),
-  `fs::fat32::Fat32Format` lays down a FAT32 BPB on a partition,
-  and `fs::gpt::FormatGuid` renders 16-byte GUIDs for diagnostics
-  / installer-step UI.
-- **Blocks on:** the orchestration layer (a userland or shell
-  installer that walks "pick disk → confirm erase → GPT-init →
-  FAT32-format → copy kernel + initrd → install bootloader") and
-  bootloader copy (a writer that puts a UEFI-loadable image into
-  the ESP). The DESTRUCTIVE primitives intentionally don't ship
-  user-facing surfaces yet — that's the shell-command slice.
+- **Today:** orchestration layer shipped as the kernel-shell
+  `install <handle> INSTALL` command, backed by
+  `kernel/fs/installer.{h,cpp}::Install`. Lays down a fresh GPT
+  with three partitions (ESP, 64 MiB; system, remainder; crash-
+  dump, 4 MiB tail with `kDuetCrashDumpTypeGuid`), formats ESP +
+  system as FAT32, seeds `/esp/boot/grub/grub.cfg` with a
+  chainload stub pointing at `/system/boot/duetos-kernel.elf`,
+  mounts ESP at `/esp` and system at `/system`. Admin-gated +
+  literal `INSTALL` confirmation token + 100 MiB minimum disk
+  size. UUID-v4-stamped GUIDs for the disk + each partition;
+  RFC-4122-canonical name strings.
+- **Remaining residual — bootloader-bytes copy:** v0 lays down
+  the partition skeleton + the chainload stub but does not write
+  a real `BOOTX64.EFI` to `/esp/EFI/BOOT/` or
+  `duetos-kernel.elf` to `/system/boot/`. Two viable paths:
+  (1) embed the running kernel image into the ramfs at build
+  time (classic two-stage bootstrap — bytes-of-stage-1 are the
+  blob in stage-2; doubles the build pass); or
+  (2) pull the bytes from an out-of-band source the operator
+  stages first (USB / network / ISO-chainload). Either is a
+  follow-on slice. Until then operators can run the orchestrator
+  to validate disk layout + then drop the bootloader bytes onto
+  the freshly-mounted `/esp` from another source.
 
 ### System updater
 

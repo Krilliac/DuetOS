@@ -438,6 +438,40 @@ cross-thread APC), T10-04 (host ctest harness extension),
 T12-03 (winmm waveOut over HDA), T13-03 (per-syscall arg/return
 docs).
 
+## Phase 6.7 — Tier-0 daily-driver: disk installer + Method-form `_S5_` (2026-05-10)
+
+A focused pass against `wiki/reference/Daily-Driver-Readiness.md`'s
+Tier-0 gaps.
+
+- **Disk installer orchestration shipped** — new `install <handle>
+  INSTALL` shell command (`kernel/fs/installer.{h,cpp}`,
+  `kernel/shell/shell_storage.cpp::CmdInstall`) lays down a fresh
+  3-partition GPT (ESP / system / crash-dump), formats ESP +
+  system as FAT32, seeds `/esp/boot/grub/grub.cfg` with a
+  chainload stub + `/system/boot/.duetos-installed` sentinel, and
+  mounts the new partitions at `/esp` + `/system`. Crash-dump
+  partition uses `kDuetCrashDumpTypeGuid` so the existing
+  `GptFindCrashDumpRegion` path picks it up next boot. UUID-v4
+  GUIDs throughout. Admin + literal `INSTALL` confirmation +
+  100 MiB minimum-disk gate. Bootloader-bytes copy
+  (`BOOTX64.EFI` + `duetos-kernel.elf` onto the freshly-formatted
+  ESP) remains a follow-on slice — embedding the running kernel
+  into ramfs is the classic two-stage bootstrap problem.
+- **Method-form `_S5_` decode shipped** — `AmlReadS5` now accepts
+  both the classic `Name(_S5_, Package(...))` form (UEFI / QEMU)
+  AND the `Method(_S5_) { Return(Package(...)) }` form used by
+  some consumer firmware. The walker reads the method's
+  PkgLength, skips NameString + MethodFlags, and scans (bounded
+  16-byte span) for the `Return(Package(...))` byte sequence.
+  Closes the gap for chipsets that pre-evaluate `_PTS` / `_GTS`
+  but define `_S5_` as a method body.
+
+What's still open in Tier 0: bootloader-bytes copy on the
+installer; writable native FS; NTFS write; system updater;
+full AML method interpreter (`_PTS` / `_GTS` runtime evaluation).
+See [`Daily-Driver-Readiness`](../reference/Daily-Driver-Readiness.md)
+for the live drilldown.
+
 ---
 
 ## How to read the rest of the tree

@@ -21,6 +21,7 @@
 #include "fs/duetfs/include/duetfs.h"
 #include "fs/fat32.h"
 #include "fs/gpt.h"
+#include "fs/installer.h"
 #include "fs/mount.h"
 
 namespace duetos::core::shell::internal
@@ -377,6 +378,94 @@ void CmdMkfsDuetfs(u32 argc, char** argv)
         return;
     }
     ConsoleWriteln("mkfs.duetfs OK — superblock probe re-validates (no free /disks/duetfsN slot for auto-mount)");
+}
+
+// `install <handle> INSTALL` — run the disk-installer pipeline.
+// DESTRUCTIVE. Lays down a fresh GPT (ESP + system + crash-dump),
+// formats ESP and system as FAT32, seeds /esp/boot/grub/grub.cfg
+// with a chainload stub, and mounts the new partitions at /esp +
+// /system. Bootloader-bytes copy (BOOTX64.EFI + duetos-kernel.elf)
+// is a follow-on slice — see wiki/reference/Daily-Driver-Readiness.md
+// Tier 0 for the residual scope. Admin-gated; requires the literal
+// "INSTALL" confirmation token to proceed.
+void CmdInstall(u32 argc, char** argv)
+{
+    namespace storage = duetos::drivers::storage;
+    namespace inst = duetos::fs::installer;
+    if (!RequireAdmin("INSTALL"))
+        return;
+    if (argc < 3 || argv == nullptr)
+    {
+        ConsoleWriteln("usage: install <handle-hex> INSTALL");
+        ConsoleWriteln("  handle   block-device handle from `lsblk` (hex)");
+        ConsoleWriteln("  INSTALL  literal token — destructive, lays a fresh GPT + ESP + system");
+        ConsoleWriteln("");
+        ConsoleWriteln("layout (~100 MiB minimum):");
+        ConsoleWriteln("  LBA 0..33       — PMBR + primary GPT");
+        ConsoleWriteln("  LBA 34..        — ESP (FAT32, 64 MiB)");
+        ConsoleWriteln("  LBA esp_end+1.. — System (FAT32, takes remaining space)");
+        ConsoleWriteln("  last 4 MiB      — Crash-dump (kDuetCrashDumpTypeGuid)");
+        ConsoleWriteln("  trailing 33 LBA — Backup GPT");
+        return;
+    }
+    duetos::u64 handle_u64 = 0;
+    if (!ParseU64Str(argv[1], &handle_u64) || handle_u64 >= 0xFFFFu)
+    {
+        ConsoleWrite("install: bad handle '");
+        ConsoleWrite(argv[1]);
+        ConsoleWriteln("'");
+        return;
+    }
+    const duetos::u32 handle = static_cast<duetos::u32>(handle_u64);
+    if (handle >= storage::BlockDeviceCount())
+    {
+        ConsoleWriteln("install: handle out of range — see `lsblk`");
+        return;
+    }
+    const bool confirm = argv[2][0] == 'I' && argv[2][1] == 'N' && argv[2][2] == 'S' && argv[2][3] == 'T' &&
+                         argv[2][4] == 'A' && argv[2][5] == 'L' && argv[2][6] == 'L' && argv[2][7] == '\0';
+    if (!confirm)
+    {
+        ConsoleWriteln("install: confirmation token missing — pass literal INSTALL");
+        return;
+    }
+    ConsoleWrite("install: target ");
+    ConsoleWrite(storage::BlockDeviceName(handle));
+    ConsoleWrite(" (");
+    WriteHexCol(storage::BlockDeviceSectorCount(handle), 0);
+    ConsoleWriteln(" sectors)");
+
+    inst::Report report{};
+    const inst::Status st = inst::Install(handle, &report);
+    if (st != inst::Status::Ok)
+    {
+        ConsoleWrite("install: failed — ");
+        ConsoleWriteln(inst::StatusName(st));
+        return;
+    }
+    ConsoleWriteln("install: complete");
+    ConsoleWrite("  ESP        handle=");
+    WriteHexCol(report.esp_handle, 4);
+    ConsoleWrite(" lba ");
+    WriteHexCol(report.esp_first_lba, 0);
+    ConsoleWrite("..");
+    WriteHexCol(report.esp_last_lba, 0);
+    ConsoleWriteln(" mounted at /esp");
+    ConsoleWrite("  System     handle=");
+    WriteHexCol(report.system_handle, 4);
+    ConsoleWrite(" lba ");
+    WriteHexCol(report.system_first_lba, 0);
+    ConsoleWrite("..");
+    WriteHexCol(report.system_last_lba, 0);
+    ConsoleWriteln(" mounted at /system");
+    ConsoleWrite("  Crash-dump lba ");
+    WriteHexCol(report.crashdump_first_lba, 0);
+    ConsoleWrite("..");
+    WriteHexCol(report.crashdump_last_lba, 0);
+    ConsoleWriteln(" reserved (DuetOS-private type GUID)");
+    ConsoleWriteln("note: bootloader bytes (BOOTX64.EFI + duetos-kernel.elf)");
+    ConsoleWriteln("      are NOT copied by v0 — stage them via the offline path.");
+    ConsoleWriteln("      See wiki/reference/Daily-Driver-Readiness.md, Tier 0.");
 }
 
 // `lastdump` — operator readout for the last-built minidump.

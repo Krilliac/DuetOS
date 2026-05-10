@@ -7858,3 +7858,62 @@ doc helps future readers audit the trail.
   a real PAGE_NOACCESS gap.
 - **Related roadmap track(s):** T5-01 partial — reserve/commit
   + protection closed; guard pages + true NOACCESS defer.
+
+## 2026-05-10 — Disk-installer orchestration + Method-form `_S5_` decode
+
+- **What:** two Tier-0 daily-driver gaps closed in one pass.
+  - **`install <handle> INSTALL` shell command** (`kernel/fs/installer.{h,cpp}`,
+    `kernel/shell/shell_storage.cpp::CmdInstall`). Drives the destructive
+    sequence that turns a blank block device into a DuetOS-bootable
+    layout: `GptInitDisk` (3-partition GPT — ESP, system, crash-dump),
+    `Fat32Format` on ESP + system, ESP `boot/grub/grub.cfg` + system
+    `boot/.duetos-installed` sentinel writes, `VfsMount(/esp)` +
+    `VfsMount(/system)`. Admin-gated; literal `INSTALL` confirmation
+    token; refuses disks under 100 MiB. Disk + per-partition unique
+    GUIDs are RFC-4122 v4 (`FillRandomGuid` stamps version + variant
+    bits over `RandomU64()`). Crash-dump partition uses
+    `kDuetCrashDumpTypeGuid` so the existing `GptFindCrashDumpRegion`
+    path discovers it on next boot.
+  - **AML method-form `_S5_` decode** (`kernel/acpi/aml.cpp::AmlReadS5`).
+    The namespace walker already records `Method(_S5_)` entries
+    (kind = AmlObjectKind::Method); `AmlReadS5` now also accepts
+    those. It reads the method's PkgLength to bound the body, skips
+    NameString + MethodFlags, and scans for the canonical
+    `Return(Package(...))` byte sequence (`0xA4 0x12`). Bounded
+    16-byte scan span keeps malformed AML from becoming a foothold.
+- **Why:** the installer was the highest-impact Tier-0 gap — without
+  it DuetOS was ISO-only, no on-disk life. The primitives (GPT-init,
+  FAT32-format, partition block devices, mount registry) all shipped
+  earlier; the orchestration was the missing piece. The Method-form
+  `_S5_` decode is the smallest possible step toward "actually
+  shutting down on real consumer firmware" — most modern UEFI uses
+  the Name form, but a meaningful slice of OEM-modified firmware
+  (especially older / locked machines) defines `_S5_` as a method.
+- **Rules out / defers:**
+  - **Bootloader-bytes copy.** v0 of the installer lays down the
+    partition skeleton and the chainload stub, not the actual
+    `BOOTX64.EFI` + `duetos-kernel.elf` bytes on disk. Embedding the
+    running kernel into ramfs is the bootstrap problem (kernel.elf
+    bytes change after the embed, requiring a two-stage build).
+    Out-of-band staging (USB / network / ISO chainload) is the
+    likely first cut. The installer prints a follow-up note pointing
+    at this.
+  - **Full AML method interpreter.** Method bodies more complex than
+    `Return(Package{...})` — sub-method calls, conditionals, integer
+    expressions, `_PTS` / `_GTS` evaluation — are still beyond the
+    walker. Closing this is its own slice.
+  - **Self-test for Install at boot.** A KMalloc-backed RAM block
+    device caps at the 2 MiB kheap; an installer self-test would
+    need a ≥ 100 MiB synthetic disk. The constituent primitives
+    (`GptSelfTest`, `Fat32SelfTest`, mount-table + partition-block
+    self-tests) cover the components; the orchestration is exercised
+    by the operator running `install <handle> INSTALL` on a real
+    target.
+- **Revisit when:** the bootloader-bytes path lands (graduates this
+  entry to a "fully shipped" line) or a real chipset surfaces an
+  `_S5_` Method body the v0 scanner can't decode (extends the
+  scanner toward a real interpreter).
+- **Related roadmap track(s):** End-user features → Disk installer
+  (orchestration closed; bootloader-bytes residual remains);
+  End-user features → ACPI S5 (method-form `_S5_` closed; full
+  AML interpreter still open).

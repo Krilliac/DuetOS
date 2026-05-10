@@ -789,11 +789,19 @@ u32 AmlNamespaceCountByKind(AmlObjectKind k)
     return n;
 }
 
-// Read the two-byte SLP_TYP values encoded in a Name ( _S5,
-// Package (4) { SLP_TYPa, SLP_TYPb, ... } ) declaration. The
-// namespace builder already registered the Name node; we find it,
-// step past the 4-byte "_S5_" name string and the Package opcode
-// + length, then decode two AML ByteConst / ZeroOp / OneOp items.
+// Read the two-byte SLP_TYP values encoded in `\_S5` /  `\_S5_`.
+// Two firmware shapes are recognised:
+//
+//   1. Name(_S5_, Package(4) { SLP_TYPa, SLP_TYPb, ... })  — the
+//      classic UEFI / QEMU shape. The namespace builder records
+//      this with `kind == Name` and aml_offset pointing at the
+//      4-char "_S5_" NameString.
+//
+//   2. Method(_S5_, 0, NotSerialized) { Return(Package(4)
+//      { SLP_TYPa, SLP_TYPb, ... }) }  — used by some consumer
+//      firmware (notably older OEM-modified UEFIs). The namespace
+//      builder records this with `kind == Method` and aml_offset
+//      pointing at the 0x14 MethodOp byte.
 //
 // Returns true on a clean extract. On any shape deviation the
 // caller stays in "shutdown unsupported" — we don't guess bits.
@@ -804,7 +812,7 @@ bool AmlReadS5(u8* slp_typa, u8* slp_typb)
     const AmlNamespaceEntry* entry = AmlNamespaceFind("\\_S5_");
     if (entry == nullptr)
         entry = AmlNamespaceFind("\\_S5");
-    if (entry == nullptr || entry->kind != AmlObjectKind::Name)
+    if (entry == nullptr || (entry->kind != AmlObjectKind::Name && entry->kind != AmlObjectKind::Method))
         return false;
 
     const u8* aml = nullptr;
@@ -843,7 +851,80 @@ bool AmlReadS5(u8* slp_typa, u8* slp_typb)
     // a corrupt entry stashed UINT32_MAX-3 in aml_offset.
     if (entry->aml_offset > aml_len || aml_len - entry->aml_offset < 4)
         return false;
-    u32 p = entry->aml_offset + 4; // past the 4-char "_S5_" name
+    u32 p = 0;
+    if (entry->kind == AmlObjectKind::Name)
+    {
+        p = entry->aml_offset + 4; // past the 4-char "_S5_" name
+    }
+    else
+    {
+        // Method-form: aml_offset points at MethodOp (0x14).
+        // Layout: 0x14 PkgLength NameString MethodFlags TermList.
+        // We need to land `p` on the PackageOp inside the
+        // body's `Return(Package(...))`. Real OEM bodies in the
+        // wild are tiny — a single Return(Package{...}) — so we
+        // scan forward looking for the canonical sequence
+        // ReturnOp (0xA4) immediately followed by PackageOp (0x12).
+        // The match has to lie inside the method's PkgLength
+        // span; we don't trust offsets past it.
+        if (entry->aml_offset >= aml_len || aml[entry->aml_offset] != 0x14 /* MethodOp */)
+            return false;
+        u32 q = entry->aml_offset + 1;
+        if (q >= aml_len)
+            return false;
+        // Decode PkgLength to compute the method's end.
+        const u8 pkg_lead = aml[q];
+        const u32 pkg_extra = pkg_lead >> 6;
+        u32 pkg_len_local = pkg_lead & 0x3F;
+        if (pkg_extra > 0)
+        {
+            // Multi-byte PkgLength: the leading nibble's low 4
+            // bits become the bottom 4 bits of the length, then
+            // the next pkg_extra bytes are appended high-order.
+            pkg_len_local = pkg_lead & 0x0F;
+            for (u32 k = 0; k < pkg_extra; ++k)
+            {
+                if (q + 1 + k >= aml_len)
+                    return false;
+                pkg_len_local |= static_cast<u32>(aml[q + 1 + k]) << (4 + k * 8);
+            }
+        }
+        const u32 method_end_off = q + pkg_len_local;
+        if (method_end_off > aml_len || method_end_off < q)
+            return false;
+        // Skip past PkgLength + NameString (4 bytes for "_S5_") +
+        // MethodFlags (1 byte) to reach the body. NameString here
+        // is unprefixed (no '\' or '^') because the namespace
+        // builder validated it as 4 ASCII chars; consumer
+        // firmware uses exactly that form for `_S5_`.
+        u32 r = q + 1 + pkg_extra; // past PkgLength
+        if (r + 4 + 1 > method_end_off)
+            return false;
+        r += 4; // past "_S5_"
+        ++r;    // past MethodFlags
+        // Scan body for ReturnOp (0xA4) followed by PackageOp (0x12).
+        // 16-byte cap on scan span: real method bodies for _S5_ are
+        // 8 bytes total; refusing anything longer keeps this from
+        // becoming a foothold for malformed AML.
+        u32 scan_end = method_end_off;
+        if (scan_end - r > 16)
+            scan_end = r + 16;
+        u32 s = 0;
+        bool found = false;
+        for (u32 k = r; k + 1 < scan_end; ++k)
+        {
+            if (aml[k] == 0xA4 /* ReturnOp */ && aml[k + 1] == 0x12 /* PackageOp */)
+            {
+                s = k + 2; // past ReturnOp + PackageOp opcode
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+            return false;
+        p = s - 1; // back up so the existing PackageOp validation
+                   // below sees the 0x12 byte.
+    }
     if (p + 2 > aml_len || aml[p] != 0x12 /* PackageOp */)
         return false;
     ++p;
