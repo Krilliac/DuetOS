@@ -7,6 +7,7 @@
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
 #include "debug/probes.h"
+#include "diag/fix_journal.h"
 #include "log/klog.h"
 #include "core/panic.h"
 #include "util/cache.h"
@@ -372,6 +373,18 @@ void* KMalloc(u64 bytes)
     KLOG_ONCE_WARN("mm/kheap", "pool exhausted (KMalloc returned null)");
     KLOG_CRITICAL_AV(::duetos::core::LogArea::Memory, "mm/kheap", "KMalloc OOM — pool exhausted, request size", bytes);
     KBP_PROBE_V(::duetos::debug::ProbeId::kHeapAllocFail, bytes);
+    // Journal the OOM: KMalloc returning null is a "the workaround
+    // (caller's nullptr-handling) is now load-bearing" event from
+    // the fix-journal's perspective. Pin = "mm/kheap" so dedup
+    // groups every OOM under one record (the journal shouldn't blow
+    // up under sustained pressure); ctx_a = request size; ctx_b =
+    // total free bytes at fail time so the off-line tooling can see
+    // whether the request was just outsized vs. pool was actually
+    // exhausted.
+    (void)::duetos::diag::FixJournalRecordSev(
+        ::duetos::diag::FixDetector::SoftFaultRecov, "mm/kheap",
+        "kheap OOM: KMalloc returned null; investigate caller's null-handling and pool sizing", bytes,
+        KernelHeapStatsRead().free_bytes, /*severity=*/2);
     return nullptr;
 }
 

@@ -47,10 +47,11 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import struct
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 FILE_MAGIC = 0x4A584946  # 'FIXJ'
@@ -68,6 +69,88 @@ DETECTORS = {
     5: "soft_fault_recov",
     6: "loader_reject",
 }
+
+# FaultKind enum from kernel/diag/fault_react.h. Used by the
+# SoftFaultRecov template to decode `ctx_a` for records that come
+# out of `FaultReactDispatch` (RetryNow / RestartDomain branches).
+# Records with `source_pin == "trap.recov"` come from the trap-
+# context extable path and use `caller_rip` instead.
+FAULT_KIND_NAMES = {
+    0: "device-timeout",
+    1: "dma-error",
+    2: "unexpected-status",
+    3: "firmware-lied",
+    4: "internal-invariant",
+    5: "hung",
+    6: "retry-exhausted",
+    7: "kernel-page-fault",
+    8: "user-page-fault",
+    9: "memory-corruption",
+    10: "stack-canary-failed",
+    11: "soft-lockup",
+    12: "unknown",
+}
+
+# Per-FaultKind suggested next-action templates. Each line is the
+# headline advice rendered into the markdown brief; the detail
+# beneath comes from the per-record fields.
+FAULT_KIND_FOLLOWUP = {
+    "device-timeout": (
+        "Extend the per-device timeout budget OR add a device-quirks "
+        "entry for the responder. A recurring DeviceTimeout that "
+        "recovers via retry usually means the spec-defined timeout "
+        "was too tight for this silicon revision."
+    ),
+    "dma-error": (
+        "Audit the DMA descriptor build path for cache-line alignment "
+        "and the IOMMU permission window. A single DmaError that "
+        "recovered via domain restart is usually a stale TLB entry; "
+        "repeats under sustained load mean the descriptor itself is "
+        "wrong."
+    ),
+    "unexpected-status": (
+        "The device returned a status word the driver couldn't decode. "
+        "Add the observed status to the device's status-decoder table "
+        "(if the value is in the spec) or to the device-quirks list "
+        "(if it's a vendor extension). Repeated recoveries with the "
+        "same caller_rip mean the decoder is missing a real spec "
+        "value, not a vendor quirk."
+    ),
+    "firmware-lied": (
+        "A device descriptor / capability word is inconsistent with "
+        "later behaviour. Tighten the bring-up validation so the "
+        "kernel rejects the device early rather than restarting "
+        "the domain at first use."
+    ),
+    "internal-invariant": (
+        "A subsystem state machine entered an invalid state and the "
+        "domain restarted. Trace the invariant back to its writers "
+        "(grep the offending field). A recurring InternalInvariant "
+        "means a writer is missing a transition; a one-off may be "
+        "a torn read across a missing memory barrier."
+    ),
+    "hung": (
+        "A subsystem thread missed its watchdog deadline. If the "
+        "subsystem is a poller, audit the poll budget. If it's an "
+        "IRQ-driven worker, check whether the wake path is racing "
+        "the sleep path."
+    ),
+    "retry-exhausted": (
+        "RetryWithBackoff gave up. Either the underlying operation "
+        "is fundamentally broken (treat as a hard fault, not a "
+        "retry candidate) or the budget needs a separate per-call-"
+        "site `RetryPolicy` that admits more attempts."
+    ),
+    "user-page-fault": (
+        "A ring-3 task touched memory it had no right to. The "
+        "dispatcher killed it (Class C) and recorded the recovery; "
+        "the userland fix lives in the task itself. Repeated "
+        "recoveries with the same `source` may indicate a "
+        "kernel/user ABI mismatch the kernel can detect earlier "
+        "(e.g. a syscall arg validation gap)."
+    ),
+}
+
 
 HEADER_FMT = struct.Struct("<IIII")
 RECORD_FMT = struct.Struct("<IIQQQQIHBB40s40s")
@@ -87,6 +170,13 @@ class FixRecord:
     flags: int
     source_pin: str
     hint: str
+    # True when this record's (detector, source_pin) pair did not
+    # appear in any rotation-baseline file. Set by main() when the
+    # caller passes prior boots on argv after the current KERNEL.FIX.
+    # Defaults True so single-file invocations (no baseline) treat
+    # every record as NEW — which is the right framing for a first-
+    # ever cycle.
+    is_new: bool = True
 
     @property
     def detector_name(self) -> str:
@@ -704,6 +794,541 @@ def synth_syscall_brief(r: FixRecord, num: int) -> str:
     )
 
 
+@dataclass
+class SymbolResolver:
+    """Resolve kernel RIPs to `function (file:line)` via addr2line.
+
+    Single-shot: collect every RIP a record set references, run one
+    `addr2line` invocation with all of them, build a dict, and let
+    callers `.resolve(rip)` against it. Avoids the per-record fork
+    overhead while keeping the rest of the pipeline addr2line-tool-
+    agnostic — `llvm-addr2line` is preferred for its richer demangling
+    and inlining info, with binutils `addr2line` as the fallback.
+
+    A None elf_path produces a no-op resolver: `.resolve()` returns
+    the empty string. Lets the call sites stay unconditional and
+    keeps the pre-existing "no kernel ELF supplied" workflow valid.
+    """
+
+    elf_path: Path | None = None
+    _table: dict[int, str] = field(default_factory=dict)
+    _missing_tool_logged: bool = field(default=False)
+
+    @staticmethod
+    def _select_tool() -> str | None:
+        for candidate in ("llvm-addr2line", "addr2line"):
+            if shutil.which(candidate):
+                return candidate
+        return None
+
+    def prime(self, rips: list[int]) -> None:
+        """Populate the table for the given RIPs.
+
+        Skips zero / unmapped values up-front; addr2line emits
+        '?? at ??:0' for those, which adds noise without adding
+        signal."""
+        if self.elf_path is None:
+            return
+        if not self.elf_path.exists():
+            print(f"# kernel ELF not found: {self.elf_path}", file=sys.stderr)
+            return
+        unique = sorted({r for r in rips if r != 0 and r >> 48 == 0xFFFF})
+        if not unique:
+            return
+        tool = self._select_tool()
+        if tool is None:
+            if not self._missing_tool_logged:
+                print(
+                    "# warn: neither llvm-addr2line nor addr2line is on PATH; "
+                    "skipping symbol resolution",
+                    file=sys.stderr,
+                )
+                self._missing_tool_logged = True
+            return
+        try:
+            args = [tool, "-e", str(self.elf_path), "-f", "-i", "-p", "-C", "-s"]
+            args.extend(f"0x{r:x}" for r in unique)
+            out = subprocess.run(
+                args,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"# warn: addr2line invocation failed: {exc}", file=sys.stderr)
+            return
+        # `-p -i` produces one line per address (top frame); inline
+        # frames continue on subsequent lines indented with " (inlined by)".
+        # We keep only the top frame for each requested address — the
+        # display is best-effort, not a full backtrace.
+        lines = [ln for ln in out.stdout.splitlines() if ln and not ln.startswith(" (inlined by)")]
+        for rip, line in zip(unique, lines):
+            self._table[rip] = line.strip()
+        print(
+            f"# resolved {len(self._table)}/{len(unique)} RIP(s) "
+            f"via {tool} against {self.elf_path}",
+            file=sys.stderr,
+        )
+
+    def resolve(self, rip: int) -> str:
+        """Return a human display for `rip`, or empty string if unknown.
+
+        The returned form is whatever addr2line printed, e.g.
+        `Foo::Bar() at file.cpp:123` or `?? at ??:0` for an
+        unresolvable address. Callers decide whether to embed it
+        inline in the brief.
+        """
+        if rip == 0:
+            return ""
+        return self._table.get(rip, "")
+
+
+def _new_tag(r: FixRecord) -> str:
+    """Title decoration showing whether the record is new this cycle.
+
+    Returns ` [NEW]` (with the leading space) when the record's
+    (detector, source_pin) pair did not appear in any rotation
+    baseline. Empty string when the record is RESEEN. Title-decoration
+    style chosen so multi-record reports scan as "show me the NEW
+    rows first" without losing context for the others.
+    """
+    return " [NEW]" if r.is_new else ""
+
+
+def _priority_tier(repeat: int, kind_label: str = "recovery") -> tuple[str, str]:
+    """Generic LOW/MEDIUM/HIGH bucketing by repeat_count.
+
+    Used by every note-shaped detector that wants the same tiering
+    (StubMarker, GapMarker, LoaderReject, SoftFaultRecov). The
+    `kind_label` is folded into the message so each detector
+    surfaces the same band with detector-specific framing.
+    """
+    if repeat <= 2:
+        return ("LOW", f"expected one-off; note for awareness ({kind_label})")
+    if repeat <= 10:
+        return ("MEDIUM", f"repeated {kind_label}: investigate when convenient")
+    return ("HIGH", f"hot {kind_label}: workaround likely masking a real bug — fix or upgrade the policy")
+
+
+def _soft_fault_priority(repeat: int) -> tuple[str, str]:
+    """Soft-fault flavour of `_priority_tier` — kept under the original
+    name to preserve internal call-site signatures. `repeat <= 2`
+    returns LOW, etc. The wording is SoftFaultRecov-specific because
+    the brief framing asks the reviewer about a "workaround" rather
+    than a "marker hit."
+    """
+    if repeat <= 2:
+        return ("LOW", "expected one-off; note for awareness")
+    if repeat <= 10:
+        return ("MEDIUM", "investigate: repeated recovery may indicate a real flake")
+    return ("HIGH", "WARNING: hot path; the workaround is masking a real bug — fix or upgrade the policy")
+
+
+# Per-PeStatus follow-up advice. Pin format from the kernel side is
+# `loader/pe:<PeStatusName>` (kernel/loader/pe_loader.cpp:1620). Each
+# entry is the actionable "where to look in source" for that reject
+# class. Statuses not listed fall through to a generic message.
+PE_REJECT_FOLLOWUP = {
+    "TooSmall": "The PE buffer is shorter than a DOS stub. The image is malformed; reject is correct, no source change needed unless the producer (a loader / network path) is feeding truncated bytes.",
+    "BadDosMagic": "Bytes 0-1 are not 'MZ'. Either a non-PE blob reached PeLoad (a producer-side bug) or a real PE was corrupted in transit.",
+    "BadLfanewBounds": "The DOS stub's e_lfanew points past EOF — corrupted PE. Reject is correct.",
+    "BadNtSignature": "PE\\0\\0 missing at e_lfanew. Reject is correct; investigate the producer.",
+    "BadMachine": "Image targets a machine other than IMAGE_FILE_MACHINE_AMD64 (0x8664). To support more architectures (i386 / ARM64), gate machine validation in `kernel/loader/pe_loader.cpp` and add the per-machine entry stubs.",
+    "NotPe32Plus": "OptionalHeader.Magic != 0x20B (PE32+ AMD64). For 32-bit PE (Magic 0x10B) support, lift the magic check and add a 32-bit OptionalHeader parser path.",
+    "SectionAlignUnsup": "SectionAlignment != 4096. Most production PEs use 4 KiB; non-4 KiB section alignment is rare (custom PEs / packed binaries). Add multi-alignment support in section walking + page mapping.",
+    "FileAlignUnsup": "FileAlignment is not a power-of-2 in [512, 4096]. Same shape as SectionAlignUnsup — rare; extend if a target PE actually trips it.",
+    "SectionCountZero": "PE has zero sections. Either a malformed file or an image relying on a section-less init path (uncommon).",
+    "OptHeaderOutOfBounds": "SizeOfOptionalHeader is shorter than required. Malformed PE.",
+    "SectionOutOfBounds": "A section's raw data extends past EOF. Malformed PE.",
+    "ImportsPresent": "Imports directory is non-empty AND at least one import is unresolved. **Most fixable** of the reject classes — usually means a thunks_table.inc row is missing. Check the UnmappedThunk records in this report; they identify the specific DLL!fn pairs to add.",
+    "RelocsNonEmpty": "Base reloc directory is non-empty. The PE was linked at an ImageBase that conflicts with the kernel's mapping; v0 doesn't walk the .reloc table. **Fix shape:** implement a base-reloc walker in `kernel/loader/pe_loader.cpp`. Required to load PEs that don't link with `/FIXED:NO` set inversely.",
+    "TlsPresent": "TLS Directory non-empty. v0 tolerates this only when the callbacks array is empty (MSVC's placeholder). If real TLS callbacks are needed, see TlsCallbacksUnsupported below.",
+    "TlsCallbacksUnsupported": "TLS Directory has at least one non-null callback VA. **Fix shape:** add a ring-3 thunk that calls each callback before entry — the kernel needs to walk the callback array, allocate a small bootstrap stub in user memory, and route process entry through it. Significant slice (think DLL TLS init).",
+    "StubsPageAllocFail": "Out of physical memory during PE load — the stubs page (the kernel-side stub trampolines) couldn't allocate. Investigate frame-allocator pressure under PE load; this isn't a loader-policy gap, it's a system-resource failure.",
+    "ImageBaseOutOfRange": "ImageBase or ImageBase+SizeOfImage is outside the canonical user low half (>0x00007FFFFFFFFFFF). This is a hostile / malformed PE — the reject IS the fix. Repeated hits are an attack signal worth feeding to the security log.",
+}
+
+
+def synth_loader_reject_brief(r: FixRecord, resolver: SymbolResolver | None = None) -> Action:
+    """Generate a per-status brief for a LoaderReject record.
+
+    The kernel side records the pin as `loader/pe:<PeStatusName>` and
+    stuffs the PeStatus enum value in ctx_a + the file_len in ctx_b
+    (kernel/loader/pe_loader.cpp:1634). We split off the status name
+    and surface the per-status fix shape from PE_REJECT_FOLLOWUP.
+
+    Two patches the generator does NOT auto-apply, by design:
+      - A 'fix the malformed PE' patch — the kernel is right to
+        reject it, the bug is producer-side.
+      - A 'land RelocsNonEmpty support' patch — that's a real
+        kernel slice that needs human design choices.
+    Both surfaces would harm by pretending mechanical fixes exist.
+    """
+    priority, priority_note = _priority_tier(r.repeat, kind_label="loader rejection")
+    status = ""
+    if r.source_pin.startswith("loader/pe:"):
+        status = r.source_pin[len("loader/pe:"):]
+
+    lines: list[str] = []
+    lines.append(f"**Priority: {priority}** — {priority_note}")
+    lines.append("")
+    lines.append(f"PE loader rejected an image with status `{status or r.source_pin}` "
+                 f"({r.repeat} occurrence(s) since boot, image_size={r.ctx_b} bytes).")
+    lines.append("")
+
+    followup = PE_REJECT_FOLLOWUP.get(status)
+    if followup:
+        lines.append(f"**What this status means + fix shape:**")
+        lines.append("")
+        lines.append(followup)
+    else:
+        lines.append(
+            f"Status `{status}` is not in the per-status follow-up "
+            f"table; the kernel rejected for a reason this script "
+            f"doesn't recognise. Either the kernel added a new "
+            f"PeStatus enumerator without updating this table, or "
+            f"the on-disk record is from a different version. Pin: "
+            f"`{r.source_pin}`."
+        )
+
+    if r.repeat >= 5:
+        lines.append("")
+        lines.append(
+            f"**Recurring rejection ({r.repeat}× since boot)** — the "
+            f"same PE shape is being retried. Investigate the producer "
+            f"(retry loop in a userland tool, a smoke test re-running "
+            f"the same broken binary)."
+        )
+
+    # Caller RIP — for a LoaderReject, this is the loader's own RIP
+    # at the reject site, useful as a breadcrumb to confirm which
+    # rejection branch fired.
+    if resolver is not None:
+        sym = resolver.resolve(r.caller_rip)
+        if sym and not sym.startswith("?? "):
+            lines.append("")
+            lines.append(f"Loader site: `{sym}` (rip=`0x{r.caller_rip:016x}`)")
+
+    lines.append("")
+    lines.append("---")
+    lines.append("Journal record:")
+    lines.append("```")
+    lines.append(f"seq         = {r.seq}")
+    lines.append(f"repeat      = {r.repeat}")
+    lines.append(f"caller_rip  = 0x{r.caller_rip:016x}")
+    lines.append(f"ctx_a       = 0x{r.ctx_a:016x}  (PeStatus enum value)")
+    lines.append(f"ctx_b       = 0x{r.ctx_b:016x}  (file_len)")
+    lines.append(f"source_pin  = {r.source_pin!r}")
+    lines.append(f"hint        = {r.hint!r}")
+    lines.append("```")
+
+    title = f"Loader reject [{priority}]{_new_tag(r)} `{status or r.source_pin}` (×{r.repeat})"
+    return Action(kind="note", title=title, body="\n".join(lines), filename=None)
+
+
+def synth_marker_hit_brief(r: FixRecord, resolver: SymbolResolver | None = None) -> Action:
+    """Generate a tier-aware brief for a StubMarker / GapMarker hit.
+
+    Both detectors record:
+      - source_pin: the file:line ("kernel/foo.cpp:42") OR an
+        auto-derived `func+0xOFF` if the recorder didn't supply
+        one (auto-derivation is KASLR-stable via the embedded
+        symbol table — see fix_journal.h:121).
+      - hint: the `// STUB:` / `// GAP:` comment text.
+      - caller_rip: where in the kernel the marker fired.
+      - repeat: how many times this site was reached.
+
+    Tiering: a STUB hit once is "this code is reachable, look at
+    it"; a STUB hit 100× is "this is a hot path masquerading as
+    incomplete." Same scale as SoftFaultRecov / LoaderReject.
+
+    Two extra bits of polish vs the prior generic note:
+      - resolver-driven addr2line lookup so an auto-derived
+        `func+0xOFF` pin gets a `(file.cpp:line)` tail when a
+        kernel ELF is supplied;
+      - GapMarker upgrade hint when repeat is high — a marker
+        flagged "happy path works, edge unimpl" but firing
+        repeatedly is probably actually a STUB.
+    """
+    is_stub = r.detector_name == "stub"
+    label = "STUB" if is_stub else "GAP"
+    priority, priority_note = _priority_tier(r.repeat, kind_label=f"{label} marker hit")
+
+    lines: list[str] = []
+    lines.append(f"**Priority: {priority}** — {priority_note}")
+    lines.append("")
+
+    sym = resolver.resolve(r.caller_rip) if resolver is not None else ""
+    if sym and not sym.startswith("?? "):
+        lines.append(f"Source pin: `{r.source_pin}`")
+        lines.append(f"Resolved:   `{sym}` (rip=`0x{r.caller_rip:016x}`)")
+    else:
+        lines.append(f"Source pin: `{r.source_pin}` (rip=`0x{r.caller_rip:016x}`)")
+    lines.append("")
+    lines.append(f"`// {label}:` marker reached at runtime — repeat_count = **{r.repeat}**.")
+    lines.append("")
+    if is_stub:
+        lines.append(
+            "**Recommended next step:** open the source pin and replace "
+            "the STUB body with the documented behaviour. The presence of "
+            "the marker here means the runtime did NOT do the right thing "
+            "even on the v0 happy path — every caller along this trail "
+            "saw incorrect behaviour."
+        )
+    else:
+        lines.append(
+            "**Recommended next step:** open the source pin and decide "
+            "whether the gap is still acceptable. GAPs are 'happy path "
+            "works, edge case missing' — the runtime hit IS the happy "
+            "path, so the marker is doing its job. The fix is to "
+            "implement the documented edge case OR to remove the "
+            "marker once the gap is no longer relevant."
+        )
+        if r.repeat >= 10:
+            lines.append("")
+            lines.append(
+                f"**Heads-up: repeat={r.repeat} is high for a GAP.** A "
+                f"GAP that fires this often probably isn't a 'happy "
+                f"path works' marker — it's a STUB in disguise. "
+                f"Consider converting `// GAP:` → `// STUB:` so the "
+                f"surface inventory accurately reflects 'broken on "
+                f"the hot path' rather than 'documented edge case.'"
+            )
+
+    lines.append("")
+    lines.append(f"Marker text: {r.hint!r}")
+
+    lines.append("")
+    lines.append("---")
+    lines.append("Journal record:")
+    lines.append("```")
+    lines.append(f"seq         = {r.seq}")
+    lines.append(f"repeat      = {r.repeat}")
+    lines.append(f"caller_rip  = 0x{r.caller_rip:016x}")
+    lines.append(f"source_pin  = {r.source_pin!r}")
+    lines.append(f"hint        = {r.hint!r}")
+    lines.append("```")
+
+    title = f"{label} marker [{priority}]{_new_tag(r)} at `{r.source_pin}` (×{r.repeat})"
+    return Action(kind="note", title=title, body="\n".join(lines), filename=None)
+
+
+def synth_soft_fault_recov_brief(r: FixRecord, resolver: SymbolResolver | None = None) -> Action:
+    """Generate a structured markdown brief for a SoftFaultRecov record.
+
+    SoftFaultRecov has two production producers (kernel/diag/fix_journal.h
+    documents both):
+
+      1. `source_pin == "trap.recov"` — the trap-context extable-fixup
+         path in `kernel/arch/x86_64/traps.cpp`. `caller_rip` holds the
+         faulting RIP (the kernel-mode #PF / #GP that was caught);
+         `ctx_a` holds the same RIP (deferred-record path stores it
+         in both slots). `ctx_b` is unused. The reviewer's lever is
+         `addr2line` on `caller_rip` against the kernel ELF.
+
+      2. `source_pin` shaped like a subsystem id (e.g. `drivers/usb/xhci`,
+         `kernel/health`, `diag/soft-lockup`) — the fault-react
+         dispatcher's RetryNow / RestartDomain branches. `ctx_a` holds
+         the FaultKind (decoded via FAULT_KIND_NAMES); `ctx_b` holds
+         either the attempt_count (RetryNow) or the FaultDomainId
+         (RestartDomain). `hint` discriminates which branch fired:
+         "fault-react: caller-retry advised; ..." vs
+         "fault-react: domain restarted; ...".
+
+    The brief is a `kind="note"` Action — SoftFaultRecov never has a
+    safe mechanical patch (the right fix is always domain-specific
+    and human-judged), so the output is advisory by design. Decision
+    #016 forbids the kernel from auto-applying anything anyway.
+    """
+    priority, priority_note = _soft_fault_priority(r.repeat)
+    is_trap = r.source_pin.strip() == "trap.recov"
+    is_retry = r.hint.startswith("fault-react: caller-retry")
+    is_restart = r.hint.startswith("fault-react: domain restarted")
+    is_kill = r.hint.startswith("fault-react: process killed")
+
+    lines: list[str] = []
+    lines.append(f"**Priority: {priority}** — {priority_note}")
+    lines.append("")
+    lines.append(f"Recovery has fired **{r.repeat}** time(s) since boot at this site.")
+    lines.append("")
+
+    if is_trap:
+        lines.append("### Source: extable trap-recovery path")
+        lines.append("")
+        lines.append(
+            "A kernel-mode #PF or #GP at the faulting RIP below was caught "
+            "by an extable row, the fixup ran, and execution resumed. The "
+            "kernel image at boot installed a safe-touch helper (e.g. the "
+            "user-copy fault fixup) that knew how to recover."
+        )
+        lines.append("")
+        # If the resolver populated a symbol for this RIP, surface it
+        # inline so the reviewer doesn't have to round-trip through
+        # symbolize.sh. The resolver returns whatever addr2line printed
+        # (e.g. `CopyFromUser at kernel/mm/copy_user.cpp:142`); a
+        # `?? at ??:0` answer is filtered out as no-info.
+        fault_sym = resolver.resolve(r.caller_rip) if resolver is not None else ""
+        fixup_sym = resolver.resolve(r.ctx_a) if resolver is not None else ""
+        if fault_sym and not fault_sym.startswith("?? "):
+            lines.append(f"- Faulting RIP: `0x{r.caller_rip:016x}` — {fault_sym}")
+        else:
+            lines.append(f"- Faulting RIP: `0x{r.caller_rip:016x}`")
+        if fixup_sym and not fixup_sym.startswith("?? "):
+            lines.append(f"- Fixup RIP:    `0x{r.ctx_a:016x}` — {fixup_sym} (jumped to)")
+        else:
+            lines.append(f"- Fixup RIP:    `0x{r.ctx_a:016x}` (jumped to)")
+        lines.append("")
+        lines.append("**Recommended next step:**")
+        lines.append("")
+        if fault_sym and not fault_sym.startswith("?? "):
+            lines.append(
+                f"1. Inspect the touch site at `{fault_sym}`. If the "
+                f"touch is on user memory, verify the caller validated "
+                f"the pointer first. If the touch is on kernel memory, "
+                f"the fault probably indicates a stale mapping or a "
+                f"torn allocation — fix the producer, do not rely on "
+                f"the extable to keep absorbing it."
+            )
+        else:
+            lines.append(
+                "1. Resolve the faulting RIP to a source line:\n"
+                "   ```sh\n"
+                f"   tools/debug/symbolize.sh build/x86_64-debug/kernel/duetos-kernel.elf 0x{r.caller_rip:x}\n"
+                "   ```\n"
+                "2. Inspect the touch site. If the touch is on user memory, "
+                "verify the caller validated the pointer first. If the touch "
+                "is on kernel memory, the fault probably indicates a stale "
+                "mapping or a torn allocation — fix the producer, do not "
+                "rely on the extable to keep absorbing it."
+            )
+        if r.repeat >= 10:
+            lines.append(
+                "**Hot path** — at this repeat_count the fixup is no "
+                "longer an exception path; consider replacing the raw "
+                "touch with a `Try*` variant that returns "
+                "`Result<T, FaultKind>` instead of relying on extable "
+                "rescue."
+            )
+    elif is_retry:
+        kind_name = FAULT_KIND_NAMES.get(r.ctx_a, f"fault-kind#{r.ctx_a}")
+        followup = FAULT_KIND_FOLLOWUP.get(kind_name, "")
+        lines.append("### Source: fault-react `RetryNow` branch")
+        lines.append("")
+        lines.append(
+            f"The fault-react dispatcher told the caller in `{r.source_pin}` "
+            f"to retry a `{kind_name}` (Class D / transient hardware). The "
+            f"caller's previous attempt count was **{r.ctx_b}** before the "
+            f"recovery."
+        )
+        lines.append("")
+        lines.append(f"- Subsystem source: `{r.source_pin}`")
+        lines.append(f"- FaultKind:        `{kind_name}` (ctx_a=0x{r.ctx_a:x})")
+        lines.append(f"- Attempt count:    `{r.ctx_b}`")
+        lines.append(f"- Severity:         `{r.severity}`")
+        if followup:
+            lines.append("")
+            lines.append("**Recommended next step:** " + followup)
+        if r.ctx_b >= 3:
+            lines.append("")
+            lines.append(
+                "**Heads-up:** attempt_count ≥ 3 means the caller has "
+                "burned multiple retries before recovery. Consider "
+                "wrapping the call in `RetryWithBackoff` "
+                "(`kernel/diag/recovery.h`) so the budget is bounded "
+                "and the policy is one-line auditable."
+            )
+    elif is_restart:
+        kind_name = FAULT_KIND_NAMES.get(r.ctx_a, f"fault-kind#{r.ctx_a}")
+        followup = FAULT_KIND_FOLLOWUP.get(kind_name, "")
+        lines.append("### Source: fault-react `RestartDomain` branch")
+        lines.append("")
+        lines.append(
+            f"The fault-react dispatcher restarted fault-domain "
+            f"**id={r.ctx_b}** in response to a `{kind_name}` reported "
+            f"by `{r.source_pin}`. The domain marker fired; the "
+            f"watchdog will pick the restart up on its next tick."
+        )
+        lines.append("")
+        lines.append(f"- Subsystem source: `{r.source_pin}`")
+        lines.append(f"- FaultKind:        `{kind_name}` (ctx_a=0x{r.ctx_a:x})")
+        lines.append(f"- FaultDomainId:    `{r.ctx_b}`")
+        lines.append(f"- Severity:         `{r.severity}`")
+        if followup:
+            lines.append("")
+            lines.append("**Recommended next step:** " + followup)
+        if r.repeat >= 5:
+            lines.append("")
+            lines.append(
+                "**Restart loop suspected** — five-plus restarts of the "
+                "same domain in one boot means the restart isn't fixing "
+                "the underlying state. Either the fault is non-transient "
+                "(promote the Class B reaction to Halt for this kind), "
+                "or the domain's re-init path isn't actually clearing "
+                "the failing condition (audit the per-domain "
+                "`SubsystemRestart` callback)."
+            )
+    elif is_kill:
+        kind_name = FAULT_KIND_NAMES.get(r.ctx_a, f"fault-kind#{r.ctx_a}")
+        followup = FAULT_KIND_FOLLOWUP.get(kind_name, "")
+        lines.append("### Source: fault-react `KillProcess` branch")
+        lines.append("")
+        lines.append(
+            f"The fault-react dispatcher signalled the offending task "
+            f"(pid={r.ctx_b}) for termination after a `{kind_name}` "
+            f"reported by `{r.source_pin}`. This is the Class-C "
+            f"recovery path — the kernel kept running, the user "
+            f"task got killed."
+        )
+        lines.append("")
+        lines.append(f"- Subsystem source: `{r.source_pin}`")
+        lines.append(f"- FaultKind:        `{kind_name}` (ctx_a=0x{r.ctx_a:x})")
+        lines.append(f"- Victim pid:       `{r.ctx_b}`")
+        lines.append(f"- Severity:         `{r.severity}`")
+        if followup:
+            lines.append("")
+            lines.append("**Recommended next step:** " + followup)
+        if r.repeat >= 5:
+            lines.append("")
+            lines.append(
+                "**Kill loop suspected** — five-plus same-pin kills in "
+                "one boot suggests a service supervisor (init, a "
+                "watchdog, a respawning daemon) is restarting the "
+                "offending task and it's hitting the same fault each "
+                "cycle. Investigate the producer of the user-mode "
+                "fault: the kernel's reject is correct; the fix is "
+                "in userland or at the syscall-arg validation seam."
+            )
+    else:
+        lines.append("### Source: unrecognised SoftFaultRecov producer")
+        lines.append("")
+        lines.append(
+            f"Pin `{r.source_pin}` doesn't match either documented "
+            f"producer (`trap.recov` extable path or fault-react "
+            f"dispatcher pin). Either a new producer was added without "
+            f"updating this template, or the record is from an older "
+            f"kernel. Hint: `{r.hint or '(none)'}`."
+        )
+
+    lines.append("")
+    lines.append("---")
+    lines.append("Journal record:")
+    lines.append("```")
+    lines.append(f"seq         = {r.seq}")
+    lines.append(f"repeat      = {r.repeat}")
+    lines.append(f"ts_ns       = {r.ts_ns}")
+    lines.append(f"caller_rip  = 0x{r.caller_rip:016x}")
+    lines.append(f"ctx_a       = 0x{r.ctx_a:016x}")
+    lines.append(f"ctx_b       = 0x{r.ctx_b:016x}")
+    lines.append(f"source_pin  = {r.source_pin!r}")
+    lines.append(f"hint        = {r.hint!r}")
+    lines.append(f"severity    = {r.severity}")
+    lines.append("```")
+
+    title = f"Soft-fault recovery [{priority}]{_new_tag(r)} at `{r.source_pin}` (×{r.repeat})"
+    return Action(kind="note", title=title, body="\n".join(lines), filename=None)
+
+
 # ---------------------------------------------------------------- per-record action
 
 
@@ -715,7 +1340,8 @@ class Action:
     filename: str | None  # for "patch" kind, the .patch filename
 
 
-def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path) -> list[Action]:
+def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path,
+                 resolver: SymbolResolver | None = None) -> list[Action]:
     actions: list[Action] = []
     seen: set[tuple[str, str]] = set()
     for r in records:
@@ -795,54 +1421,18 @@ def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path) 
             actions.append(
                 Action(
                     kind="note",
-                    title=f"Implement syscall #0x{num:x}",
+                    title=f"Implement syscall #0x{num:x}{_new_tag(r)}",
                     body=synth_syscall_brief(r, num),
                     filename=None,
                 )
             )
 
         elif r.detector_name in ("stub", "gap"):
-            actions.append(
-                Action(
-                    kind="note",
-                    title=f"Visit `{r.source_pin}` ({r.detector_name})",
-                    body=(
-                        f"`{r.source_pin}` was reached at runtime; the source pin "
-                        f"already names the file:line. Open it and either complete "
-                        f"the implementation (STUB) or document why the GAP is "
-                        f"acceptable for v0. Hint: {r.hint or '(none)'}."
-                    ),
-                    filename=None,
-                )
-            )
+            actions.append(synth_marker_hit_brief(r, resolver))
         elif r.detector_name == "soft_fault_recov":
-            actions.append(
-                Action(
-                    kind="note",
-                    title=f"Soft-fault recovery hit: `{r.source_pin}`",
-                    body=(
-                        f"A retry-with-backoff path succeeded after at least one "
-                        f"failure at `{r.source_pin}`. Investigate root cause; "
-                        f"the journal pin identifies the call site. Hint: "
-                        f"{r.hint or '(none)'}."
-                    ),
-                    filename=None,
-                )
-            )
+            actions.append(synth_soft_fault_recov_brief(r, resolver))
         elif r.detector_name == "loader_reject":
-            actions.append(
-                Action(
-                    kind="note",
-                    title=f"PE/ELF loader rejected: `{r.source_pin}`",
-                    body=(
-                        f"The loader rejected an image with status `{r.source_pin}`. "
-                        f"Extending the loader to handle the status is the fix shape; "
-                        f"see `kernel/loader/pe_loader.cpp` for the reject taxonomy. "
-                        f"Hint: {r.hint or '(none)'}."
-                    ),
-                    filename=None,
-                )
-            )
+            actions.append(synth_loader_reject_brief(r, resolver))
     return actions
 
 
@@ -968,6 +1558,17 @@ def main() -> int:
         "--yes", action="store_true",
         help="skip confirmation prompts for --apply (DANGER)",
     )
+    ap.add_argument(
+        "--kernel-elf",
+        type=Path,
+        default=None,
+        help=(
+            "kernel ELF (preferably the debug build) used to resolve "
+            "caller_rip / ctx_a addresses to `function (file:line)` for "
+            "trap.recov records. Optional — if omitted, the briefs print "
+            "raw hex and a symbolize.sh hint."
+        ),
+    )
     args = ap.parse_args()
 
     repo_root = find_repo_root()
@@ -977,19 +1578,60 @@ def main() -> int:
         file=sys.stderr,
     )
 
-    all_records: list[FixRecord] = []
-    for path in args.files:
+    # Treat args.files[0] as the CURRENT boot and any subsequent
+    # files as prior-boot rotation baselines (KERNEL.F0..F3 by
+    # convention). Each current-boot record is classified NEW if no
+    # prior file carries a record with the same (detector,
+    # source_pin) key, else RESEEN. Single-file invocations skip
+    # the classification — every record stays is_new=True, which
+    # matches the framing "this is the first cycle, everything is
+    # new from the reviewer's POV."
+    current_records: list[FixRecord] = []
+    baseline_keys: set[tuple[str, str]] = set()
+    for idx, path in enumerate(args.files):
         try:
             recs = read_records(path)
         except (FileNotFoundError, ValueError) as exc:
             print(f"# skip {path}: {exc}", file=sys.stderr)
             continue
-        all_records.extend(recs)
+        if idx == 0:
+            current_records.extend(recs)
+        else:
+            for r in recs:
+                baseline_keys.add((r.detector_name, r.source_pin))
+    if baseline_keys:
+        new_count = 0
+        for r in current_records:
+            if (r.detector_name, r.source_pin) in baseline_keys:
+                r.is_new = False
+            else:
+                new_count += 1
+        print(
+            f"# baseline: {len(baseline_keys)} (detector, pin) keys from prior boots; "
+            f"NEW this boot: {new_count}/{len(current_records)}",
+            file=sys.stderr,
+        )
+    all_records = current_records
     if not all_records and not args.markers:
         print("# no readable fix-journal files", file=sys.stderr)
         return 1
 
-    actions = plan_actions(all_records, thunks_index, repo_root)
+    resolver = SymbolResolver(elf_path=args.kernel_elf)
+    if args.kernel_elf is not None:
+        # Prime once with every kernel-RIP any record references —
+        # one batched addr2line call covers the whole batch instead
+        # of N forks. SoftFaultRecov records carry both `caller_rip`
+        # AND `ctx_a` (which holds the faulting RIP for trap.recov);
+        # every other detector contributes just `caller_rip`. The
+        # resolver itself filters out non-kernel addresses up front.
+        rips: list[int] = []
+        for r in all_records:
+            rips.append(r.caller_rip)
+            if r.detector_name == "soft_fault_recov":
+                rips.append(r.ctx_a)
+        resolver.prime(rips)
+
+    actions = plan_actions(all_records, thunks_index, repo_root, resolver)
     if args.markers:
         markers = load_markers(args.markers)
         marker_actions = plan_marker_actions(markers, repo_root)

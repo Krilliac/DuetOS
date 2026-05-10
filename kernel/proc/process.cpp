@@ -4,6 +4,7 @@
 #include "ipc/kobject.h"
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
+#include "diag/fix_journal.h"
 #include "diag/hexdump.h"
 #include "diag/leak_detector.h"
 #include "diag/log_names.h"
@@ -96,8 +97,8 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     p->tick_budget = tick_budget;
     p->ticks_used = 0;
     p->sandbox_denials = 0;
-    p->heap_base = 0;        // PeLoad fills these when the PE has
-    p->heap_pages = 0;       // imports — see subsystems/win32/heap.cpp
+    p->heap_base = 0;  // PeLoad fills these when the PE has
+    p->heap_pages = 0; // imports — see subsystems/win32/heap.cpp
     p->heap_free_head = 0;
     // Linux fd table: reserve stdin/stdout/stderr, mark rest unused.
     for (u32 i = 0; i < 16; ++i)
@@ -488,6 +489,35 @@ void RecordSandboxDenial(Cap cap)
     if (ShouldLogDenial(p->sandbox_denials))
     {
         KBP_PROBE_V(::duetos::debug::ProbeId::kSandboxDenialCap, static_cast<u64>(cap));
+        // Journal the denial. Pin = `cap/<CapName>` so dedup groups
+        // every denial of a particular capability under a single
+        // record (one record per cap, regardless of how many pids
+        // hit it). ctx_a = the offending pid; ctx_b = the
+        // post-increment denial count for that pid. The off-line
+        // tooling renders this as a SoftFaultRecov record under the
+        // unrecognised-producer branch today; a follow-up could
+        // teach the template to recognise the `cap/` pin prefix
+        // and emit a denial-specific brief (which capability is
+        // the most-denied? which pid is hitting it?).
+        char pin[40];
+        const char* prefix = "cap/";
+        u64 pp = 0;
+        while (pp < 39 && prefix[pp] != '\0')
+        {
+            pin[pp] = prefix[pp];
+            ++pp;
+        }
+        const char* cn = CapName(cap);
+        u64 ci = 0;
+        while (pp < 39 && cn[ci] != '\0')
+        {
+            pin[pp++] = cn[ci++];
+        }
+        pin[pp] = '\0';
+        (void)::duetos::diag::FixJournalRecordSev(
+            ::duetos::diag::FixDetector::SoftFaultRecov, pin,
+            "sandbox: cap-gated syscall denied; review whether the cap should be granted or the call rejected", p->pid,
+            p->sandbox_denials, /*severity=*/1);
     }
 
     // Threshold-crossing: fire once at exactly kSandbox-

@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+#
+# Wrap `run-fix-cycle.sh` and turn its output (auto-applicable
+# patches under fix-patches/, advisory notes printed to stdout)
+# into a feature branch ready for `gh pr create`:
+#
+#   1. Run the fix-cycle (boot smoke -> KERNEL.FIX -> patches +
+#      report). Bail if the smoke itself fails.
+#   2. Verify the working tree is clean (refuse to mix in-flight
+#      changes with auto-generated ones).
+#   3. Create branch `claude/fix-from-journal-<timestamp>` off
+#      whichever branch is currently checked out.
+#   4. For each *.patch under fix-patches/, `git apply` it. If
+#      any apply cleanly, commit them as ONE commit per patch
+#      with a structured message that names the journal record.
+#      Patches that fail `git apply --check` are skipped with
+#      a note in the cover letter.
+#   5. Drop the rendered markdown report under
+#      docs/fix-cycle-reports/<timestamp>.md so the advisory
+#      notes are tracked in the branch alongside the patches.
+#   6. Print the branch name, the count of applied/skipped
+#      patches, and a one-liner the operator can paste into
+#      `gh pr create --fill --head <branch>`.
+#
+# Decision #016 still holds: this script does NOT push, does
+# NOT open the PR, does NOT mark records as audited. It only
+# stages mechanical fixes for human review.
+#
+# Usage:
+#   tools/qemu/dfix-to-branch.sh                       # default profile
+#   DUETOS_SMOKE_PROFILE=ring3 tools/qemu/dfix-to-branch.sh
+#
+# Pass-through env vars (forwarded to run-fix-cycle.sh):
+#   DUETOS_PRESET            (default x86_64-debug)
+#   DUETOS_SMOKE_PROFILE     (default pe-winapi)
+#   DUETOS_TIMEOUT           (default 300)
+#   DUETOS_FIX_OUT           (default fix-patches/)
+#
+# Override branch name:
+#   DUETOS_FIX_BRANCH=my-branch tools/qemu/dfix-to-branch.sh
+#
+# Skip the cycle and use existing fix-patches/ output:
+#   DUETOS_FIX_SKIP_CYCLE=1 tools/qemu/dfix-to-branch.sh
+
+set -euo pipefail
+
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+PRESET="${DUETOS_PRESET:-x86_64-debug}"
+PROFILE="${DUETOS_SMOKE_PROFILE:-pe-winapi}"
+FIX_OUT="${DUETOS_FIX_OUT:-${REPO_ROOT}/fix-patches}"
+SKIP_CYCLE="${DUETOS_FIX_SKIP_CYCLE:-0}"
+BRANCH_NAME="${DUETOS_FIX_BRANCH:-}"
+TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+if [[ -z "${BRANCH_NAME}" ]]; then
+    BRANCH_NAME="claude/fix-from-journal-${TIMESTAMP}"
+fi
+
+echo "[dfix-to-branch] preset=${PRESET} profile=${PROFILE} branch=${BRANCH_NAME}" >&2
+
+# Working-tree must be clean before we start mutating it.
+if ! git -C "${REPO_ROOT}" diff --quiet || ! git -C "${REPO_ROOT}" diff --cached --quiet; then
+    echo "[dfix-to-branch] error: working tree is dirty; commit/stash first" >&2
+    git -C "${REPO_ROOT}" status --short >&2
+    exit 64
+fi
+ORIG_BRANCH="$(git -C "${REPO_ROOT}" rev-parse --abbrev-ref HEAD)"
+echo "[dfix-to-branch] base branch: ${ORIG_BRANCH}" >&2
+
+# 1. Run the cycle (unless explicitly skipped).
+if [[ "${SKIP_CYCLE}" != "1" ]]; then
+    DUETOS_PRESET="${PRESET}" \
+    DUETOS_SMOKE_PROFILE="${PROFILE}" \
+    DUETOS_FIX_OUT="${FIX_OUT}" \
+        "${SCRIPT_DIR}/run-fix-cycle.sh" > "${FIX_OUT}/cycle-report-${TIMESTAMP}.md"
+fi
+
+REPORT_FILE="${FIX_OUT}/cycle-report-${TIMESTAMP}.md"
+if [[ ! -f "${REPORT_FILE}" ]]; then
+    # Fall back to the most recent report if SKIP_CYCLE was set.
+    REPORT_FILE="$(ls -t "${FIX_OUT}"/cycle-report-*.md 2>/dev/null | head -1 || true)"
+fi
+
+# 2. Collect the patch files. Empty fix-patches/ is a "nothing to do"
+# success — every gap was already addressed.
+shopt -s nullglob
+PATCH_FILES=("${FIX_OUT}"/*.patch)
+shopt -u nullglob
+if [[ ${#PATCH_FILES[@]} -eq 0 ]]; then
+    echo "[dfix-to-branch] no patches under ${FIX_OUT}/; nothing to land" >&2
+    exit 0
+fi
+echo "[dfix-to-branch] found ${#PATCH_FILES[@]} patch(es) under ${FIX_OUT}/" >&2
+
+# 3. Branch off the current head. Same naming rule as the harness:
+# every Claude-driven branch is `claude/<slug>`.
+git -C "${REPO_ROOT}" checkout -b "${BRANCH_NAME}" >&2
+
+# 4. Apply each patch. Skip cleanly if `git apply --check` fails so
+# we don't corrupt the index — the advisory note still goes into
+# the cover letter so the reviewer knows what didn't apply.
+applied=0
+skipped=0
+declare -a APPLIED_NAMES=()
+declare -a SKIPPED_NAMES=()
+for patch_path in "${PATCH_FILES[@]}"; do
+    patch_name="$(basename "${patch_path}")"
+    if ! git -C "${REPO_ROOT}" apply --check "${patch_path}" 2>/dev/null; then
+        echo "[dfix-to-branch] skip (does not apply cleanly): ${patch_name}" >&2
+        SKIPPED_NAMES+=("${patch_name}")
+        skipped=$((skipped + 1))
+        continue
+    fi
+    git -C "${REPO_ROOT}" apply "${patch_path}"
+    git -C "${REPO_ROOT}" add -A
+    # Subject line: short, scannable in `git log --oneline`.
+    # Body: pointer at the journal record + the source patch.
+    git -C "${REPO_ROOT}" commit -m "fix-journal: apply auto-generated patch ${patch_name}
+
+Generated by tools/qemu/run-fix-cycle.sh against the
+${PROFILE} smoke profile (preset=${PRESET}, timestamp=${TIMESTAMP}).
+Source: ${patch_path#${REPO_ROOT}/}.
+
+Per Decision #016 the kernel never auto-applies fixes; this
+commit is a mechanical apply staged for human review."
+    APPLIED_NAMES+=("${patch_name}")
+    applied=$((applied + 1))
+done
+
+# 5. Drop the rendered report so the notes ride along with the patches.
+if [[ -f "${REPORT_FILE}" ]]; then
+    REPORT_DEST_DIR="${REPO_ROOT}/docs/fix-cycle-reports"
+    mkdir -p "${REPORT_DEST_DIR}"
+    REPORT_DEST="${REPORT_DEST_DIR}/${TIMESTAMP}.md"
+    cp "${REPORT_FILE}" "${REPORT_DEST}"
+    git -C "${REPO_ROOT}" add "${REPORT_DEST}"
+    git -C "${REPO_ROOT}" commit -m "fix-journal: capture cycle report ${TIMESTAMP}
+
+Tracked snapshot of the run-fix-cycle output: gen-fix-report.py
+markdown table + per-record briefs from gen-fix-patches.py.
+Includes notes that did NOT have an auto-applicable patch — the
+reviewer's checklist for everything in the journal that needs
+human attention."
+fi
+
+# 6. Tell the operator what to do next. We deliberately stop short
+# of `gh pr create` — pushing + opening the PR is a human-driven
+# action, every time.
+echo "" >&2
+echo "[dfix-to-branch] === summary ===" >&2
+echo "  branch:   ${BRANCH_NAME}"
+echo "  applied:  ${applied} / ${#PATCH_FILES[@]} patch(es)"
+if [[ ${skipped} -gt 0 ]]; then
+    echo "  skipped:  ${skipped} (would not apply cleanly):"
+    for n in "${SKIPPED_NAMES[@]}"; do
+        echo "    - ${n}"
+    done
+fi
+if [[ -f "${REPORT_FILE}" ]]; then
+    echo "  report:   docs/fix-cycle-reports/${TIMESTAMP}.md (committed)"
+fi
+echo "" >&2
+echo "Next step (operator-driven, not automated):"
+echo "  git push -u origin ${BRANCH_NAME}"
+echo "  gh pr create --fill --head ${BRANCH_NAME}"

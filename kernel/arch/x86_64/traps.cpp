@@ -39,6 +39,7 @@
 #include "diag/diag_decode.h"
 #include "diag/event_trace.h"
 #include "diag/fault_react.h"
+#include "diag/fix_journal.h"
 #include "diag/gdb_server.h"
 #include "security/fault_domain.h"
 #include "diag/hexdump.h"
@@ -699,6 +700,20 @@ extern "C" void TrapDispatch(TrapFrame* frame)
                 SerialWriteHex(hit->domain_id);
                 SerialWrite("\n");
             }
+            // Journal the soft-fault recovery so the off-line fix
+            // pipeline (gen-fix-report.py / gen-fix-patches.py) sees
+            // "this kernel touch is flaky enough that the extable
+            // catches it." A single such record per (faulting RIP)
+            // dedups: the entry stays at repeat_count=1 for the rare
+            // SMAP-violation case we already understand, but if a
+            // production touch starts firing here the count rises and
+            // the report flags the new pin for human attention. Trap
+            // context: deferred path; the heartbeat drain promotes the
+            // single-slot pending into a full FixRecord with detector-
+            // aware pin "trap.recov" + hint "extable / canary / fixup
+            // recovered in trap" (see fix_journal.cpp:357-363).
+            ::duetos::diag::FixJournalRecordFromTrap(::duetos::diag::FixDetector::SoftFaultRecov, frame->rip,
+                                                     hit->fixup_rip);
             frame->rip = hit->fixup_rip;
             return;
         }

@@ -100,7 +100,18 @@ constexpr const char* kDumpEndMarker = "=== DUETOS CRASH DUMP END ===\n";
 // table (name + base_va..base_va+size per entry). Lets a
 // reader resolve a user-space rip against the right module
 // without a separate symbolizer pass.
-constexpr u64 kDumpSchemaVersion = 6;
+//
+// v7 (2026-05-09): probe fire-count snapshot emitted after the
+// process VM info and before held-locks. Walks `debug::ProbeList`
+// and lists every probe whose fire_count > 0 since boot, formatted
+// as `name : count [armed|disarmed]`. Tells a triage reader at a
+// glance which named events the kernel observed (capability
+// denials, stub misses, AP bring-up, OOMs, …) without requiring
+// the log ring still hold the original `[probe] …` lines — the
+// ring rolls on busy boots, but the per-probe counters never do.
+// A clean run with every probe at zero collapses to a single
+// "(no probes have fired)" line so the section stays cheap.
+constexpr u64 kDumpSchemaVersion = 7;
 
 void WriteLabelled(const char* label, u64 value)
 {
@@ -341,6 +352,56 @@ void DumpLbr()
         arch::SerialWrite("\n         to  =");
         WriteAddressWithSymbol(snap.to[i]);
         arch::SerialWrite("\n");
+    }
+}
+
+// Snapshot the static-probe table and emit a section listing
+// every probe that has fired at least once since boot. Each
+// surviving line reads
+//     name : count [armed|disarmed]
+// where `armed` covers both ArmedLog and ArmedSuspend (a probe
+// can only have a non-zero fire_count if it was armed at the
+// moment of fire, but the operator may have disarmed it
+// afterwards). A clean run with every count at zero prints a
+// single "(no probes have fired)" line so the section stays
+// short on a healthy boot.
+//
+// Why panic-time and not just the live `probe list` shell
+// command: the host-side parser of the crash dump never has the
+// shell available — the dump file IS the post-mortem record. By
+// embedding the counts here we let the operator answer "did the
+// kernel observe any noteworthy events on the way to this
+// panic?" without re-running the workload. Crucially this
+// includes panics that fire long after the original event (a
+// stub_miss at boot leading to a much-later ring-3 fault) where
+// the log ring may have rolled past the original `[probe] …`
+// line.
+void DumpProbeFires()
+{
+    // Snapshot into a local array. ProbeId::kCount is small
+    // (under 30 entries today) so the buffer is cheap and
+    // staying off the heap keeps the panic path allocation-free.
+    constexpr u64 kProbeMax = 64;
+    debug::ProbeInfo info[kProbeMax];
+    const u64 n = debug::ProbeList(info, kProbeMax);
+    arch::SerialWrite("[panic] --- probe fires (since boot) ---\n");
+    u64 emitted = 0;
+    for (u64 i = 0; i < n; ++i)
+    {
+        if (info[i].fire_count == 0)
+        {
+            continue;
+        }
+        arch::SerialWrite("  ");
+        arch::SerialWrite(info[i].name != nullptr ? info[i].name : "<noname>");
+        arch::SerialWrite(" : ");
+        arch::SerialWriteHex(info[i].fire_count);
+        arch::SerialWrite(info[i].arm == debug::ProbeArm::Disarmed ? " [disarmed]\n" : " [armed]\n");
+        ++emitted;
+    }
+    if (emitted == 0)
+    {
+        arch::SerialWrite("  (no probes have fired)\n");
     }
 }
 
@@ -710,6 +771,7 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
     DumpLbr();
     sched::DumpCurrentTaskSyscallTrail();
     DumpProcessVmInfo();
+    DumpProbeFires();
     DumpHeldLocksLocal();
     DumpLogRing();
     DumpInflightScopes();
