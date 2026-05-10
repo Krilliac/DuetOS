@@ -83,15 +83,16 @@ userland. See [Subsystem Isolation](../kernel/Subsystem-Isolation.md).
 <!-- AUTO:driver_list -->
 | Class | Source files | Path |
 |-------|--------------|------|
-| `audio` | 2 | `kernel/drivers/audio/` |
-| `gpu` | 3 | `kernel/drivers/gpu/` |
+| `audio` | 5 | `kernel/drivers/audio/` |
+| `gpu` | 15 | `kernel/drivers/gpu/` |
 | `input` | 2 | `kernel/drivers/input/` |
-| `net` | 4 | `kernel/drivers/net/` |
+| `mei` | 1 | `kernel/drivers/mei/` |
+| `net` | 13 | `kernel/drivers/net/` |
 | `pci` | 1 | `kernel/drivers/pci/` |
 | `power` | 1 | `kernel/drivers/power/` |
 | `storage` | 3 | `kernel/drivers/storage/` |
-| `usb` | 19 | `kernel/drivers/usb/` |
-| `video` | 14 | `kernel/drivers/video/` |
+| `usb` | 20 | `kernel/drivers/usb/` |
+| `video` | 25 | `kernel/drivers/video/` |
 <!-- /AUTO:driver_list -->
 
 _The driver inventory above is auto-synced by `docs/sync-wiki.sh sync`

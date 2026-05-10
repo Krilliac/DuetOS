@@ -1803,7 +1803,184 @@ enum SyscallNumber : u64
     // writes on the write end appended, regardless of which
     // process holds either handle.
     SYS_WIN32_CREATE_PIPE = 186,
+
+    // SYS_QUEUE_USER_APC — kernel-resident APC queue insertion.
+    // Backs Win32 QueueUserAPC and ntdll!NtQueueApcThread for the
+    // cross-thread same-process delivery case. The kernel queue is
+    // owned by the TARGET task's process: we resolve the target tid
+    // to its Process via SchedFindTaskByTid, then push a slot onto
+    // that process's `apc_slots[]` table. Cross-process delivery
+    // is GAP — same-process is the only contract today.
+    //   rdi = u64 target_tid          // 0 / -2 / current tid = self
+    //   rsi = u64 pfn                  // user-mode PAPCFUNC VA
+    //   rdx = u64 data                 // ulData passed to pfn
+    // Returns 0 on success, (u64)-1 on table-full / cross-process
+    // / unknown tid. Cap-gated on kCapSpawnThread (the same gate
+    // that lets the caller create a thread it could otherwise
+    // QueueUserAPC against).
+    SYS_QUEUE_USER_APC = 187,
+
+    // SYS_DRAIN_USER_APC — pop one APC targeted at the calling
+    // task. Drained in registration order. Caller invokes the
+    // returned (pfn, data) from user mode after this syscall
+    // returns; the kernel does not invoke user code.
+    //   rdi = u64* user out_pfn        // VA written on success
+    //   rsi = u64* user out_data       // VA written on success
+    // Returns 1 if an APC was drained, 0 if the queue was empty
+    // for the caller, (u64)-1 on bad user pointer.
+    SYS_DRAIN_USER_APC = 188,
+
+    // SYS_PRIORITY_CLASS — get/set the calling process's Win32
+    // priority class. Field stored on Process; the scheduler does
+    // not yet honour it (single-band runqueue), so the value is
+    // recorded for fidelity to GetPriorityClass + SetPriorityClass
+    // contracts. A future MLFQ rebuild reads it on enqueue.
+    //   rdi = u64 op                   // 0 = get, 1 = set
+    //   rsi = u32 new_class            // ignored when op == 0
+    // Returns the current (post-op) priority class on success,
+    // 0 on bad op. Always cap-allowed; affects only the caller's
+    // Process — no cross-process priority knob today.
+    SYS_PRIORITY_CLASS = 189,
+
+    // SYS_PROCESS_SPAWN_EX — extended subprocess spawn carrying
+    // an inheritable-stdio bundle. Backs CreateProcess when
+    // STARTF_USESTDHANDLES is set on the STARTUPINFO. Same path
+    // resolution rules as SYS_PROCESS_SPAWN (158); the additional
+    // bundle pins (stdin, stdout, stderr) handles from the
+    // caller's win32_handles table that the spawner copies into
+    // the child's table before ring-3 entry.
+    //   rdi = const char* user path           // NUL-terminated
+    //   rsi = u64 flags                        // reserved (ignored)
+    //   rdx = const ProcessSpawnStdio* bundle  // 24 bytes; nullptr = no inheritance
+    // Returns the new pid on success, (u64)-1 on failure (any
+    // inherited handle resolves to a non-pipe / non-file slot,
+    // child handle table full, target path unreadable).
+    SYS_PROCESS_SPAWN_EX = 190,
+
+    // SYS_GET_INHERITED_STD — read one of the calling process's
+    // inherited stdio handles. Backs kernel32!GetStdHandle's
+    // pre-check before falling back to the legacy pseudo-handle.
+    //   rdi = u64 idx                  // 0=stdin, 1=stdout, 2=stderr
+    // Returns the inherited Win32 file handle (kWin32HandleBase
+    // range) on success, 0 if no inheritance was set up at spawn,
+    // (u64)-1 on bad idx.
+    SYS_GET_INHERITED_STD = 191,
+
+    // SYS_HEAPEX_CREATE — allocate a fresh secondary heap.
+    // Backs Win32 HeapCreate.
+    //   rdi = u64 pages   (clamped to kWin32ExtraHeapPagesMax)
+    // Returns the heap handle (also the base VA) on success,
+    // 0 on table-full / OOM.
+    SYS_HEAPEX_CREATE = 192,
+
+    // SYS_HEAPEX_DESTROY — tear down a secondary heap.
+    // Returns 1 on success, 0 on bad handle. The default heap
+    // is non-destroyable; HeapDestroy on it returns 1 (no-op).
+    //   rdi = u64 heap_handle
+    SYS_HEAPEX_DESTROY = 193,
+
+    // SYS_HEAPEX_ALLOC — allocate from a specific heap.
+    // Backs Win32 HeapAlloc(hHeap, ...).
+    //   rdi = u64 heap_handle (0 = default)
+    //   rsi = u64 size
+    // Returns user VA or 0 on OOM.
+    SYS_HEAPEX_ALLOC = 194,
+
+    // SYS_HEAPEX_FREE — free a block from a specific heap.
+    //   rdi = u64 heap_handle
+    //   rsi = u64 ptr
+    // Returns 0.
+    SYS_HEAPEX_FREE = 195,
+
+    // SYS_HEAPEX_SIZE — payload size of a block in a specific
+    // heap. Returns bytes or 0 on bad handle / pointer.
+    //   rdi = u64 heap_handle
+    //   rsi = u64 ptr
+    SYS_HEAPEX_SIZE = 196,
+
+    // SYS_HEAPEX_REALLOC — resize a block in a specific heap.
+    //   rdi = u64 heap_handle
+    //   rsi = u64 ptr        (0 = alloc)
+    //   rdx = u64 new_size   (0 = free)
+    // Returns the new VA or 0 on failure.
+    SYS_HEAPEX_REALLOC = 197,
+
+    // SYS_AUDIO_DEVICE_INFO — query the audio backend for
+    // playback-device presence + capabilities. Backs Win32
+    // winmm `waveOutGetNumDevs` / `waveOutOpen`.
+    //   rdi = u64 op
+    //         0 = number of HDA-class output devices (typically
+    //             0 on a non-audio host or 1 with HDA brought up)
+    //         1 = first device's preferred sample rate (Hz),
+    //             0 if no device. v0 returns 48000.
+    //         2 = first device's preferred channel count, 0 if
+    //             no device. v0 returns 2 (stereo).
+    //         3 = first device's preferred bit depth, 0 if no
+    //             device. v0 returns 16.
+    // Returns the queried value, or 0 on bad op / no device.
+    SYS_AUDIO_DEVICE_INFO = 198,
+
+    // SYS_VIRTUAL_ALLOC — region-tracking VirtualAlloc with
+    // reserve/commit split (T5-01). Backs Win32
+    // kernel32!VirtualAlloc.
+    //   rdi = u64 size_bytes        // rounded up to page multiples
+    //   rsi = u64 alloc_type         // MEM_RESERVE (0x2000) | MEM_COMMIT (0x1000)
+    //   rdx = u64 protection         // PAGE_READONLY / READWRITE / NOACCESS / etc.
+    //   r10 = u64 hint_va            // 0 = pick from arena bump cursor; non-zero
+    //                                //  resolves to existing region for COMMIT
+    //                                //  on a prior RESERVE
+    // Returns the region's base VA on success (each call returns
+    // the SAME base when committing into a prior reservation), or
+    // 0 on table-full / OOM / invalid args. v0 enforcement:
+    //  - MEM_RESERVE alone allocates a region slot, no frames,
+    //    no page-table mappings.
+    //  - MEM_COMMIT alone (hint_va == 0) is alloc-and-commit in
+    //    one shot: behaves like the old SYS_VMAP.
+    //  - MEM_RESERVE | MEM_COMMIT is alloc-and-commit.
+    //  - MEM_COMMIT with hint_va inside an existing reservation
+    //    commits the touched range without allocating a new
+    //    region.
+    SYS_VIRTUAL_ALLOC = 199,
+
+    // SYS_VIRTUAL_FREE — region-tracking VirtualFree.
+    //   rdi = u64 base_va
+    //   rsi = u64 size_bytes        // 0 with MEM_RELEASE = release the
+    //                                //  whole region
+    //   rdx = u64 free_type         // MEM_DECOMMIT (0x4000) | MEM_RELEASE (0x8000)
+    // Returns 1 on success, 0 on bad VA / size / type mix.
+    // MEM_DECOMMIT unmaps the matching pages but keeps the
+    // reservation. MEM_RELEASE unmaps every committed page +
+    // clears the region slot.
+    SYS_VIRTUAL_FREE = 200,
+
+    // SYS_VIRTUAL_PROTECT — region-tracking VirtualProtect.
+    //   rdi = u64 base_va
+    //   rsi = u64 size_bytes
+    //   rdx = u64 new_protection    // raw PAGE_*
+    //   r10 = u64* old_prot_out     // user-supplied; receives the
+    //                                //  previous protection of base_va
+    // Returns 1 on success, 0 on miss / W^X violation.
+    // v0 honours PAGE_READONLY, PAGE_READWRITE, PAGE_NOACCESS;
+    // PAGE_EXECUTE_* are rejected because vmap pages are
+    // permanently NX (W^X enforcement).
+    SYS_VIRTUAL_PROTECT = 201,
 };
+
+// Inheritable stdio bundle for SYS_PROCESS_SPAWN_EX. Each entry
+// is a Win32-shaped handle in the caller's win32_handles table
+// (kWin32HandleBase + slot). Zero in any slot means "child
+// inherits no handle for this stream" — child's GetStdHandle
+// returns the legacy pseudo-handle. The kernel-side spawner
+// resolves each non-zero handle in the parent, then materialises
+// a matching child-side handle that points at the same backing
+// pipe / file. Layout is part of the SYS_PROCESS_SPAWN_EX ABI.
+struct ProcessSpawnStdio
+{
+    u64 stdin_handle;  // Win32 file handle (0 = no inheritance)
+    u64 stdout_handle; // Win32 file handle (0 = no inheritance)
+    u64 stderr_handle; // Win32 file handle (0 = no inheritance)
+};
+static_assert(sizeof(ProcessSpawnStdio) == 24, "SYS_PROCESS_SPAWN_EX ABI: stdio bundle is 24 bytes");
 
 /// Cursor-shape values the PE side hands the kernel via
 /// SYS_GDI_SET_CURSOR. Mirrors the kernel's internal

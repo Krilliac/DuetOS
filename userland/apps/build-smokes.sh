@@ -128,6 +128,7 @@ declare -A APPS=(
     [proc2_smoke]="-lkernel32"
     [find_smoke]="-lkernel32"
     [iocp2_smoke]="-lkernel32"
+    [iocp_overlapped_smoke]="-lkernel32"
     [signal_smoke]="-lkernel32 -lmsvcrt"
     [timer_smoke]="-lkernel32 -luser32 -lwinmm"
     [pe_stress]="-lkernel32 -ladvapi32"

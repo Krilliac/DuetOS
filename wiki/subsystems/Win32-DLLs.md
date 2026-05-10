@@ -112,7 +112,7 @@ The DLLs are not flat stubs. Real implementations land per slice:
    and refresh `docs/sync-wiki.sh` output.
 
 <!-- AUTO:dll_list -->
-*38 DLLs preloaded into every Win32 PE process.*
+*46 DLLs preloaded into every Win32 PE process.*
 
 | DLL | Exports (approx) | Path |
 |-----|------------------|------|
@@ -123,11 +123,17 @@ The DLLs are not flat stubs. Real implementations land per slice:
 | `crypt32` | 0 | `userland/libs/crypt32/` |
 | `customdll2` | 0 | `userland/libs/customdll2/` |
 | `customdll` | 0 | `userland/libs/customdll/` |
+| `d2d1` | 0 | `userland/libs/d2d1/` |
 | `d3d11` | 0 | `userland/libs/d3d11/` |
 | `d3d12` | 0 | `userland/libs/d3d12/` |
 | `d3d9` | 0 | `userland/libs/d3d9/` |
+| `d3dcompiler` | 0 | `userland/libs/d3dcompiler/` |
 | `dbghelp` | 0 | `userland/libs/dbghelp/` |
+| `ddraw` | 0 | `userland/libs/ddraw/` |
+| `dinput8` | 0 | `userland/libs/dinput8/` |
+| `dsound` | 0 | `userland/libs/dsound/` |
 | `dwmapi` | 0 | `userland/libs/dwmapi/` |
+| `dwrite` | 0 | `userland/libs/dwrite/` |
 | `dxgi` | 0 | `userland/libs/dxgi/` |
 | `gdi32` | 0 | `userland/libs/gdi32/` |
 | `iphlpapi` | 0 | `userland/libs/iphlpapi/` |
@@ -154,6 +160,8 @@ The DLLs are not flat stubs. Real implementations land per slice:
 | `winmm` | 0 | `userland/libs/winmm/` |
 | `ws2_32` | 0 | `userland/libs/ws2_32/` |
 | `wtsapi32` | 0 | `userland/libs/wtsapi32/` |
+| `xaudio2_8` | 0 | `userland/libs/xaudio2_8/` |
+| `xinput1_4` | 0 | `userland/libs/xinput1_4/` |
 <!-- /AUTO:dll_list -->
 
 _Inventory above is auto-synced from `userland/libs/<dll>/` by

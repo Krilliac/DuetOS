@@ -54,6 +54,38 @@ struct alignas(kHeapAlignment) ChunkHeader
 static_assert(sizeof(ChunkHeader) == 32, "Header must be 32 bytes");
 static_assert(sizeof(ChunkHeader) % kHeapAlignment == 0, "Header must preserve payload alignment");
 
+// IRQ-off scope guard. KMalloc / KFree mutate the global address-
+// ordered freelist + size-class bin pointers; without bracketing,
+// an IRQ handler that itself allocates (frame allocator, slab, log
+// ring growth) could re-enter the kheap and observe a half-updated
+// freelist. Mirrors `mm/frame_allocator.cpp::FramePoolIrqOff` and
+// `mm/slab.cpp::IrqOff` — same shape, same restore-iff-was-on
+// rules, so the kheap follows the rest of the allocator family
+// (T5-04: IRQ-safe kmalloc/kfree).
+constexpr u64 kKheapRflagsIfBit = 1ULL << 9;
+
+inline u64 ReadKheapRflags()
+{
+    u64 f;
+    asm volatile("pushfq; pop %0" : "=r"(f)::"memory");
+    return f;
+}
+
+struct KheapIrqOff
+{
+    u64 saved_rflags;
+    KheapIrqOff() : saved_rflags(ReadKheapRflags()) { arch::Cli(); }
+    ~KheapIrqOff()
+    {
+        if ((saved_rflags & kKheapRflagsIfBit) != 0)
+        {
+            arch::Sti();
+        }
+    }
+    KheapIrqOff(const KheapIrqOff&) = delete;
+    KheapIrqOff& operator=(const KheapIrqOff&) = delete;
+};
+
 [[noreturn]] void PanicHeapCorrupt(const char* what, const ChunkHeader* chunk)
 {
     core::PanicWithValue("mm/kheap", what, reinterpret_cast<u64>(chunk));
@@ -260,6 +292,10 @@ void* KMalloc(u64 bytes)
     {
         return nullptr;
     }
+    // IRQ-disable for the duration of the alloc — bracketing the
+    // freelist + bins mutation matches the rest of the allocator
+    // family (frame allocator, slab). See KheapIrqOff above.
+    KheapIrqOff irq_guard;
 
     // Round payload up to alignment so a future split also produces an
     // aligned chunk. Header is already aligned by construction. Add a
@@ -394,6 +430,10 @@ void KFree(void* ptr)
     {
         return;
     }
+    // IRQ-disable for the duration of the free — same rationale
+    // as KMalloc's bracket. The pool-bounds check below doesn't
+    // need locking but the freelist/bin-push paths do.
+    KheapIrqOff irq_guard;
     if (!InsidePool(ptr))
     {
         // Caller-side bug — `ptr` was not handed out by KMalloc.

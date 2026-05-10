@@ -85,11 +85,12 @@ another PID still hits the cap gate and fails (or succeeds if
 | 4 | `kCapFsWrite` |
 | 5 | `kCapInput` |
 | 6 | `kCapNet` |
-| 7 | `kCapNetRecv` |
-| 8 | `kCapNetSend` |
-| 9 | `kCapNone` |
-| 10 | `kCapSerialConsole` |
-| 11 | `kCapSpawnThread` |
+| 7 | `kCapNetAdmin` |
+| 8 | `kCapNetRecv` |
+| 9 | `kCapNetSend` |
+| 10 | `kCapNone` |
+| 11 | `kCapSerialConsole` |
+| 12 | `kCapSpawnThread` |
 <!-- /AUTO:cap_list -->
 
 _The capability inventory above is auto-synced by

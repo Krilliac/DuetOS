@@ -222,12 +222,54 @@ __declspec(dllexport) MMRESULT mciSendStringA(const char* cmd, char* ret, UINT r
     return 0x110;
 }
 
-/* waveOut*: digital-audio output. v0 has no audio backend wired
- * to user-mode, so each call pretends success but no-ops. Common
- * games / tools probe this at startup. */
+/* waveOut*: digital-audio output. T12-03 partial — surfaces the
+ * real HDA device count via SYS_AUDIO_DEVICE_INFO (op 0) so a PE
+ * that probes "is audio available?" sees `1` when an HDA codec
+ * has been brought up, `0` otherwise. waveOutOpen returns a
+ * sentinel handle when a device is present so the caller's
+ * subsequent waveOutPrepareHeader / waveOutWrite calls can
+ * proceed; samples are still dropped because the kernel-side DMA
+ * buffer alloc + BDL programming are deferred (see Roadmap
+ * §"Audio — HDA codec / stream programming"). The full
+ * "samples reach the codec" path lands when the DMA-coherent
+ * buffer pool grows the audio backend.
+ *
+ * WAVEHDR layout that waveOutPrepareHeader / waveOutWrite expect:
+ *   +0  LPSTR     lpData
+ *   +8  DWORD     dwBufferLength
+ *   +12 DWORD     dwBytesRecorded
+ *   +16 DWORD_PTR dwUser
+ *   +24 DWORD     dwFlags          ← WHDR_PREPARED = 0x2, WHDR_DONE = 0x1
+ *   +28 DWORD     dwLoops
+ *   +32 LPWAVEHDR lpNext
+ *   +40 DWORD_PTR reserved
+ * Stamping WHDR_DONE on Write is what real Windows does after
+ * the device has played the buffer; mirroring that lets a PE's
+ * "did the buffer drain?" loop terminate even though no audio
+ * actually played.
+ */
+#define WHDR_DONE 0x00000001u
+#define WHDR_PREPARED 0x00000002u
+
+#define MM_AUDIO_HDA_HANDLE_SENTINEL ((HANDLE)0xA1A0001ULL)
+
+static long long winmm_audio_device_info(long long op)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)198), /* SYS_AUDIO_DEVICE_INFO */
+                       "D"(op)
+                     : "memory");
+    return rv;
+}
+
 __declspec(dllexport) UINT waveOutGetNumDevs(void)
 {
-    return 0; /* No devices. */
+    long long n = winmm_audio_device_info(0);
+    if (n < 0)
+        return 0;
+    return (UINT)n;
 }
 
 __declspec(dllexport) MMRESULT waveOutOpen(HANDLE* h, UINT id, const void* fmt, void* cb, unsigned long long user,
@@ -238,9 +280,15 @@ __declspec(dllexport) MMRESULT waveOutOpen(HANDLE* h, UINT id, const void* fmt, 
     (void)cb;
     (void)user;
     (void)flags;
+    if (winmm_audio_device_info(0) <= 0)
+    {
+        if (h)
+            *h = (HANDLE)0;
+        return 0x6; /* MMSYSERR_NODRIVER — caller falls back. */
+    }
     if (h)
-        *h = (HANDLE)0;
-    return 0x6; /* MMSYSERR_NODRIVER — caller falls back. */
+        *h = MM_AUDIO_HDA_HANDLE_SENTINEL;
+    return MMSYSERR_NOERROR;
 }
 
 __declspec(dllexport) MMRESULT waveOutClose(HANDLE h)
@@ -252,24 +300,50 @@ __declspec(dllexport) MMRESULT waveOutClose(HANDLE h)
 __declspec(dllexport) MMRESULT waveOutPrepareHeader(HANDLE h, void* hdr, UINT cb)
 {
     (void)h;
-    (void)hdr;
     (void)cb;
+    /* Stamp WHDR_PREPARED into dwFlags (offset +24 in WAVEHDR). */
+    if (hdr != (void*)0)
+    {
+        unsigned char* p = (unsigned char*)hdr;
+        DWORD f;
+        __builtin_memcpy(&f, p + 24, sizeof(f));
+        f |= WHDR_PREPARED;
+        __builtin_memcpy(p + 24, &f, sizeof(f));
+    }
     return MMSYSERR_NOERROR;
 }
 
 __declspec(dllexport) MMRESULT waveOutUnprepareHeader(HANDLE h, void* hdr, UINT cb)
 {
     (void)h;
-    (void)hdr;
     (void)cb;
+    if (hdr != (void*)0)
+    {
+        unsigned char* p = (unsigned char*)hdr;
+        DWORD f;
+        __builtin_memcpy(&f, p + 24, sizeof(f));
+        f &= ~WHDR_PREPARED;
+        __builtin_memcpy(p + 24, &f, sizeof(f));
+    }
     return MMSYSERR_NOERROR;
 }
 
 __declspec(dllexport) MMRESULT waveOutWrite(HANDLE h, void* hdr, UINT cb)
 {
     (void)h;
-    (void)hdr;
     (void)cb;
+    /* Stamp WHDR_DONE so a poll-for-completion loop terminates.
+     * Real Windows sets this after the device drains the buffer;
+     * v0 has no real playback, so we synthesise immediate
+     * completion. */
+    if (hdr != (void*)0)
+    {
+        unsigned char* p = (unsigned char*)hdr;
+        DWORD f;
+        __builtin_memcpy(&f, p + 24, sizeof(f));
+        f |= WHDR_DONE;
+        __builtin_memcpy(p + 24, &f, sizeof(f));
+    }
     return MMSYSERR_NOERROR;
 }
 

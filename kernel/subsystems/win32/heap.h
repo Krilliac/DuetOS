@@ -122,4 +122,45 @@ u64 Win32HeapSize(duetos::core::Process* proc, u64 user_ptr);
 /// a time through the AS lookup used by PeekU64/PokeU64.
 u64 Win32HeapRealloc(duetos::core::Process* proc, u64 user_ptr, u64 new_size);
 
+/// HeapCreate — allocate a fresh secondary heap inside the
+/// process's extra-heap arena. `pages` is clamped to
+/// kWin32ExtraHeapPagesMax (16 pages = 64 KiB). Returns a
+/// non-zero base VA on success (also serves as the heap
+/// handle) or 0 on table-full / OOM. The returned handle is
+/// disjoint from the default heap sentinel
+/// (Process::heap_base = kWin32HeapVa = 0x50000000) so
+/// HeapAlloc / HeapFree dispatch by handle value.
+u64 Win32HeapExCreate(duetos::core::Process* proc, u64 pages);
+
+/// HeapDestroy — unmap the secondary heap's pages, mark the
+/// slot free. Returns true on success, false on bad handle.
+/// The default heap (handle == proc->heap_base) is non-
+/// destroyable; HeapDestroy on it returns false.
+bool Win32HeapExDestroy(duetos::core::Process* proc, u64 heap_handle);
+
+/// Resolve a heap handle (the base VA returned by HeapCreate
+/// or the default-heap sentinel) into a slot pointer. Returns
+/// nullptr if the handle is not a registered heap; returns the
+/// pseudo-default-handle slot (a stable singleton inside this
+/// translation unit) when the handle matches the process's
+/// default heap so callers can treat both with one code path.
+/// Used by the syscall layer to dispatch HeapAlloc / HeapFree
+/// / HeapSize / HeapReAlloc against the right heap.
+struct Win32HeapBinding
+{
+    u64 base_va;
+    u64 pages;
+    u64* free_head_ptr; // pointer into either Process::heap_free_head or extra_heaps[].free_head
+};
+bool Win32HeapResolveHandle(duetos::core::Process* proc, u64 heap_handle, Win32HeapBinding* out);
+
+/// Allocate / free / size / realloc on an arbitrary heap
+/// binding. Same semantics as the default-heap variants
+/// above; these accept any binding produced by
+/// Win32HeapResolveHandle.
+u64 Win32HeapAllocOnBinding(duetos::core::Process* proc, const Win32HeapBinding& b, u64 size);
+void Win32HeapFreeOnBinding(duetos::core::Process* proc, const Win32HeapBinding& b, u64 user_ptr);
+u64 Win32HeapSizeOnBinding(duetos::core::Process* proc, const Win32HeapBinding& b, u64 user_ptr);
+u64 Win32HeapReallocOnBinding(duetos::core::Process* proc, const Win32HeapBinding& b, u64 user_ptr, u64 new_size);
+
 } // namespace duetos::win32

@@ -191,6 +191,19 @@ sync_syscall_page() {
         done)
 
     update_auto_section "$page" "syscall_list" "$body"
+
+    # ------------------------------------------------------------------
+    # Per-syscall args / return reference (T13-03). Body is generated
+    # by tools/build/gen-syscall-doc.py from the doc-comments above
+    # each enum entry in kernel/syscall/syscall.h.
+    # ------------------------------------------------------------------
+    if grep -qF "<!-- AUTO:syscall_args -->" "$page"; then
+        local args_body
+        args_body=$(python3 "${PROJECT_ROOT}/tools/build/gen-syscall-doc.py" 2>/dev/null || true)
+        if [ -n "$args_body" ]; then
+            update_auto_section "$page" "syscall_args" "$args_body"
+        fi
+    fi
 }
 
 # ============================================================================

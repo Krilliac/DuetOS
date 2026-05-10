@@ -1183,4 +1183,249 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 126 | `SYS_GDI_DRAW_TEXT_W` |
 | 127 | `SYS_GDI_GET_SYS_COLOR` |
 | 128 | `SYS_GDI_GET_SYS_COLOR_BRUSH` |
+| 170 | `SYS_WIN_GET_MOUSE_DELTA` |
+| 173 | `SYS_WIN_TRACK_POPUP` |
+| 174 | `SYS_GDI_SET_CURSOR` |
+| 175 | `SYS_GDI_CREATE_CURSOR` |
+| 180 | `SYS_FILE_MKDIR` |
+| 181 | `SYS_FILE_SYMLINK` |
+| 182 | `SYS_FILE_LINK` |
+| 183 | `SYS_FILE_READLINK` |
+| 184 | `SYS_SYSTEM_PERFORMANCE_INFO` |
+| 185 | `SYS_NAMED_KOBJ_OPEN_OR_CREATE` |
+| 186 | `SYS_WIN32_CREATE_PIPE` |
+| 187 | `SYS_QUEUE_USER_APC` |
+| 188 | `SYS_DRAIN_USER_APC` |
+| 189 | `SYS_PRIORITY_CLASS` |
+| 190 | `SYS_PROCESS_SPAWN_EX` |
+| 191 | `SYS_GET_INHERITED_STD` |
+| 192 | `SYS_HEAPEX_CREATE` |
+| 193 | `SYS_HEAPEX_DESTROY` |
+| 194 | `SYS_HEAPEX_ALLOC` |
+| 195 | `SYS_HEAPEX_FREE` |
+| 196 | `SYS_HEAPEX_SIZE` |
+| 197 | `SYS_HEAPEX_REALLOC` |
+| 198 | `SYS_AUDIO_DEVICE_INFO` |
 <!-- /AUTO:syscall_list -->
+
+## Native Syscall Argument / Return Reference
+
+> Auto-generated from `kernel/syscall/syscall.h` doc-comments by
+> `tools/build/gen-syscall-doc.py`. Each row records what the
+> handler expects in registers and what it returns. A `—` cell
+> means the upstream comment didn't surface enough information
+> for the extractor — fix the doc-comment in `syscall.h`, then
+> regenerate. The script also warns on any number drift between
+> the enum and `syscall_names.def` so a doc rebuild can detect
+> ABI-number collisions before they ship.
+>
+> Regenerate via:
+>
+> ```bash
+> python3 tools/build/gen-syscall-doc.py \
+>     --out /tmp/syscall-args.md
+> ```
+>
+> Then paste the output between the AUTO markers below; the wiki
+> sync script (`docs/sync-wiki.sh`) calls the same generator on
+> every sync.
+
+<!-- AUTO:syscall_args -->
+| # | Symbol | Args | Returns |
+|---|--------|------|---------|
+| 0 | `SYS_EXIT` | — | — |
+| 1 | `SYS_GETPID` | — | — |
+| 2 | `SYS_WRITE` | — | — |
+| 3 | `SYS_YIELD` | — | — |
+| 4 | `SYS_STAT` | `rdi` = user pointer to NUL-terminated path; `rsi` = user pointer to a u64 output slot that receives the file ... | 0 on success, -1 on any failure (path not found, path out of jail, bad user p... |
+| 5 | `SYS_READ` | `rdi` = user pointer to NUL-terminated path; `rsi` = user pointer to destination buffer; `rdx` = buffer capacity in bytes | number of bytes actually written on success (≤ both the file size and the buf... |
+| 6 | `SYS_DROPCAPS` | `rdi` = bitmask of caps to remove from the calling process's CapSet | 0 always |
+| 7 | `SYS_SPAWN` | `rdi` = user pointer to NUL-terminated ELF path; `rsi` = path length (caller-supplied to bound the CopyFromUser) | the new child pid on success, or (u64)-1 on any failure (cap missing, path ou... |
+| 8 | `SYS_GETPROCID` | — | CurrentProcess()->pid — distinct from SYS_GETPID, which returns the scheduler... |
+| 9 | `SYS_GETLASTERROR` | `rdi` = new error code (low 32 bits) and returns the previous val... | the caller's task-local Win32 error slot |
+| 10 | `SYS_SETLASTERROR` | — | — |
+| 11 | `SYS_HEAP_ALLOC` | `rdi` = size in bytes | the user VA of the allocation (0 on OOM) |
+| 12 | `SYS_HEAP_FREE` | — | — |
+| 13 | `SYS_PERF_COUNTER` | — | the kernel tick counter from arch::TimerTicks() — a monotonically increasing ... |
+| 14 | `SYS_HEAP_SIZE` | `rdi` = user pointer previously returned by SYS_HEAP_ALLOC | the block's payload capacity in bytes (the rounded-up allocation size recorde... |
+| 15 | `SYS_HEAP_REALLOC` | `rdi` = existing user pointer (may be 0 to request a fresh alloca...; `rsi` = new requested size in bytes | the new user VA (possibly equal to rdi if the existing block already fit) or ... |
+| 16 | `SYS_WIN32_MISS_LOG` | `rdi` = VA of the IAT slot that was just called (produced by the ... | address to compute the slot) |
+| 17 | `SYS_GETTIME_FT` | — | the current wall-clock time as a Windows FILETIME — a u64 count of 100-nanose... |
+| 18 | `SYS_NOW_NS` | — | nanoseconds since boot in rax |
+| 19 | `SYS_SLEEP_MS` | `rdi` = milliseconds to block | 0 on wake |
+| 20 | `SYS_FILE_OPEN` | `rdi` = user pointer to NUL-terminated ASCII path; `rsi` = path-length cap (caller-supplied to bound the CopyFromUser) | a Win32-shaped handle (Process::kWin32HandleBase + slot_idx, i |
+| 21 | `SYS_FILE_READ` | `rdi` = handle (Win32-shaped); `rsi` = user dst buffer; `rdx` = byte count cap | bytes actually copied (≤ both `rdx` and remaining bytes in the file from the ... |
+| 22 | `SYS_FILE_CLOSE` | `rdi` = handle | 0 on success or no-op (closing an already-closed / never-opened handle is a d... |
+| 23 | `SYS_FILE_SEEK` | `rdi` = handle; `rsi` = signed offset; `rdx` = whence (0 = SET | the new cursor position (relative to file start) on success, or u64(-1) on fa... |
+| 24 | `SYS_FILE_FSTAT` | `rdi` = handle; `rsi` = user pointer to a u64 output slot that receives the file ... | 0 on success, u64(-1) on bad handle / bad user pointer |
+| 25 | `SYS_MUTEX_CREATE` | `rdi` = bInitialOwner (0 or 1) | a Win32 pseudo-handle (Process::kWin32MutexBase + slot_idx, i |
+| 26 | `SYS_MUTEX_WAIT` | `rdi` = mutex handle; `rsi` = timeout in ms (0xFFFFFFFF = INFINITE) | WAIT_OBJECT_0 immediately |
+| 27 | `SYS_MUTEX_RELEASE` | `rdi` = mutex handle | 0 on success, u64(-1) on bad handle or non-owner release (ERROR_NOT_OWNER) |
+| 28 | `SYS_VMAP` | `rdi` = byte size (rounded up to next page) | the base VA of the allocation on success, or 0 on failure (arena exhausted / ... |
+| 29 | `SYS_VUNMAP` | `rdi` = VA; `rsi` = size | 0 on success, u64(-1) on failure |
+| 30 | `SYS_EVENT_CREATE` | `rdi` = bManualReset (0 or 1); `rsi` = bInitialState (0 or 1) | Process::kWin32EventBase + slot (= 0x300 |
+| 31 | `SYS_EVENT_SET` | `rdi` = event handle | 0 on success, u64(-1) on bad handle |
+| 32 | `SYS_EVENT_RESET` | `rdi` = event handle | 0 on success, u64(-1) on bad handle |
+| 33 | `SYS_EVENT_WAIT` | `rdi` = event handle; `rsi` = timeout_ms | WAIT_OBJECT_0 (0) on success, WAIT_TIMEOUT (0x102) on timeout, or u64(-1) on ... |
+| 34 | `SYS_TLS_ALLOC` | — | the lowest unused TLS slot index (0 |
+| 35 | `SYS_TLS_FREE` | `rdi` = slot index | 0 on success, u64(-1) on bad index / unallocated slot |
+| 36 | `SYS_TLS_GET` | `rdi` = slot index | the stored u64 value, or 0 if the index is invalid / unallocated (Win32 TlsGe... |
+| 37 | `SYS_TLS_SET` | `rdi` = slot index; `rsi` = value | 0 on success, u64(-1) on bad index |
+| 38 | `SYS_BP_INSTALL` | `rdi` = va; `rsi` = BpKind (1=exec; `rdx` = length (1/2/4/8) | a non-zero breakpoint id on success, or u64(-1) on error |
+| 39 | `SYS_BP_REMOVE` | `rdi` = id | 0 on success, u64(-1) on unknown id |
+| 40 | `SYS_GETTIME_ST` | `rdi` = user pointer to a 16-byte SYSTEMTIME struct | 0 on success, u64(-1) on EFAULT |
+| 41 | `SYS_ST_TO_FT` | `rdi` = user pointer to an input SYSTEMTIME; `rsi` = user pointer to an output FILETIME | 0 on success |
+| 42 | `SYS_FT_TO_ST` | `rdi` = user pointer to an input FILETIME; `rsi` = user pointer to an output SYSTEMTIME | — |
+| 43 | `SYS_FILE_WRITE` | `rdi` = handle (Win32-shaped; `rsi` = user pointer to source bytes; `rdx` = byte count | bytes written (0 |
+| 44 | `SYS_FILE_CREATE` | `rdi` = user pointer to NUL-terminated ASCII path; `rsi` = path-buffer cap (bytes); `rdx` = user pointer to initial bytes (may be 0/null for empty file); `r10` = initial byte count | a Win32 pseudo- handle (kWin32HandleBase + slot_idx) on success, u64(-1) on f... |
+| 45 | `SYS_THREAD_CREATE` | `rdi` = user-mode start VA (thread proc); `rsi` = user-mode parameter (passed as RCX on thread entry per Wi... | a Win32 pseudo-handle (kWin32ThreadBase + slot_idx, i |
+| 46 | `SYS_DEBUG_PRINT` | `rdi` = user pointer to NUL-terminated ASCII string | — |
+| 47 | `SYS_MEM_STATUS` | `rdi` = user pointer to a 64-byte Win32 MEMORYSTATUSEX struct | — |
+| 48 | `SYS_WAIT_MULTI` | `rdi` = count; `rsi` = user pointer to handle array; `rdx` = bWaitAll; `r10` = timeout_ms | WAIT_OBJECT_0+i / WAIT_TIMEOUT / WAIT_FAILED |
+| 49 | `SYS_SYSTEM_INFO` | `rdi` = user pointer to Win32 SYSTEM_INFO (48 bytes) | — |
+| 50 | `SYS_DEBUG_PRINTW` | `rdi` = user pointer to NUL-terminated UTF-16LE string | — |
+| 51 | `SYS_SEM_CREATE` | `rdi` = initial count; `rsi` = max count | Win32SemaphoreHandle (0x500 |
+| 52 | `SYS_SEM_RELEASE` | `rdi` = handle; `rsi` = release count | PREVIOUS count on success |
+| 53 | `SYS_SEM_WAIT` | `rdi` = handle; `rsi` = timeout_ms | 0 (WAIT_OBJECT_0) |
+| 54 | `SYS_THREAD_WAIT` | `rdi` = thread handle (0x400; `rsi` = timeout_ms | — |
+| 55 | `SYS_THREAD_EXIT_CODE` | `rdi` = thread handle (0x400 | the recorded exit code (u32) as u64, or 0x103 (STILL_ACTIVE) if the thread is... |
+| 56 | `SYS_NT_INVOKE` | `rdi` = NT syscall number (e | the translated NTSTATUS in rax, or STATUS_NOT_IMPLEMENTED (0xC0000002) for an... |
+| 57 | `SYS_DLL_PROC_ADDRESS` | `rdi` = HMODULE (the DLL's load base VA; `rsi` = user pointer to a NUL-terminated ASCII function name | the absolute VA of the exported function on hit, or 0 on miss (module not in ... |
+| 58 | `SYS_WIN_CREATE` | `rdi` = x (u32; `rsi` = y (u32) rdx = width (u32; `r10` = height (u32; `r8` = user pointer to NUL-terminated ASCII title (bounded copy | 0 (WM_QUIT) |
+| 59 | `SYS_WIN_DESTROY` | `rdi` = HWND returned by SYS_WIN_CREATE (biased | — |
+| 60 | `SYS_WIN_SHOW` | `rdi` = HWND (biased) rsi = cmd rax = 0 (Win32 ShowWindow's "BOOL... | — |
+| 61 | `SYS_WIN_MSGBOX` | `rdi` = user pointer to NUL-terminated ASCII text (bounded to kWi... | — |
+| 62 | `SYS_WIN_PEEK_MSG` | `rdi` = user pointer to a 4×u64 output slot: [hwnd_biased; `rsi` = HWND filter (biased) — 0 = any window owned by the caller...; `rdx` = bRemove (0 = peek only | — |
+| 63 | `SYS_WIN_GET_MSG` | `rdi` = user pointer to a 4×u64 output slot (same layout as PEEK_...; `rsi` = HWND filter (biased) — 0 = any | — |
+| 64 | `SYS_WIN_POST_MSG` | `rdi` = HWND (biased) rsi = message code (UINT — WM_* id) rdx = w... | — |
+| 65 | `SYS_GDI_FILL_RECT` | `rdi` = HWND (biased) rsi = x (i32 client-local) rdx = y (i32 cli... | — |
+| 66 | `SYS_GDI_TEXT_OUT` | `rdi` = HWND (biased) rsi = x (i32 client-local) rdx = y (i32 cli...; `r8` = text length (bytes; `r9` = COLORREF (0x00BBGGRR | — |
+| 67 | `SYS_GDI_RECTANGLE` | — | — |
+| 68 | `SYS_GDI_CLEAR` | `rdi` = HWND (biased) rax = 1 on success | — |
+| 69 | `SYS_WIN_MOVE` | `rdi` = HWND (biased) rsi = x (u32; `rdx` = y (u32)                     — ignored if r9 bit 0 r10 = w...; `r8` = h (u32; `r9` = flags: bit 0 = nomove (SWP_NOMOVE) | — |
+| 70 | `SYS_WIN_GET_RECT` | `rdi` = HWND (biased) rsi = rect selector: 0 = window rect (outer...; `rdx` = user pointer to a 16-byte RECT (left | — |
+| 71 | `SYS_WIN_SET_TEXT` | `rdi` = HWND (biased) rsi = user pointer to ASCII text (NUL-termi... | — |
+| 72 | `SYS_WIN_TIMER_SET` | `rdi` = HWND (biased) rsi = timer_id (u32; `rdx` = interval in ms (rounds up to scheduler ticks) rax = timer... | — |
+| 73 | `SYS_WIN_TIMER_KILL` | `rdi` = HWND (biased) rsi = timer_id rax = 1 on success | — |
+| 74 | `SYS_GDI_LINE` | `rdi` = HWND (biased) rsi = x0; `rdx` = y0; `r10` = x1; `r8` = y1 (i32 client-local) r9  = COLORREF | — |
+| 75 | `SYS_GDI_ELLIPSE` | — | — |
+| 76 | `SYS_GDI_SET_PIXEL` | `rdi` = HWND; `rsi` = x; `rdx` = y; `r10` = COLORREF | — |
+| 77 | `SYS_WIN_GET_KEYSTATE` | `rdi` = virtual-key / character code (low 8 bits used) | — |
+| 78 | `SYS_WIN_GET_CURSOR` | `rdi` = user pointer to a 2×i32 POINT (x | — |
+| 79 | `SYS_WIN_SET_CURSOR` | `rdi` = x; `rsi` = y (framebuffer coords | — |
+| 80 | `SYS_WIN_SET_CAPTURE` | `rdi` = HWND | — |
+| 81 | `SYS_WIN_RELEASE_CAPTURE` | — | — |
+| 82 | `SYS_WIN_GET_CAPTURE` | — | — |
+| 83 | `SYS_WIN_CLIP_SET_TEXT` | `rdi` = user pointer to NUL-terminated ASCII (nullable) | — |
+| 84 | `SYS_WIN_CLIP_GET_TEXT` | `rdi` = user buffer pointer; `rsi` = buffer capacity | — |
+| 85 | `SYS_WIN_GET_LONG` | `rdi` = HWND (biased) rsi = slot index (0=WNDPROC | — |
+| 86 | `SYS_WIN_SET_LONG` | `rdi` = HWND; `rsi` = index; `rdx` = value | — |
+| 87 | `SYS_WIN_INVALIDATE` | `rdi` = HWND; `rsi` = bErase (ignored in v1 | — |
+| 88 | `SYS_WIN_VALIDATE` | `rdi` = HWND | — |
+| 89 | `SYS_WIN_GET_ACTIVE` | — | — |
+| 90 | `SYS_WIN_SET_ACTIVE` | `rdi` = HWND | — |
+| 91 | `SYS_WIN_GET_METRIC` | `rdi` = SM_* index (see user32 stub) | — |
+| 92 | `SYS_WIN_ENUM` | `rdi` = user pointer to u64[cap] rsi = cap (#entries) rax = actua... | — |
+| 93 | `SYS_WIN_FIND` | `rdi` = user pointer to ASCII title (NUL-terminated) rax = biased... | — |
+| 94 | `SYS_WIN_SET_PARENT` | `rdi` = HWND (child; `rsi` = HWND (parent | — |
+| 95 | `SYS_WIN_GET_PARENT` | `rdi` = HWND | — |
+| 96 | `SYS_WIN_GET_RELATED` | `rdi` = HWND; `rsi` = rel kind (0=Next | — |
+| 97 | `SYS_WIN_SET_FOCUS` | `rdi` = HWND (0 = clear focus) | — |
+| 98 | `SYS_WIN_GET_FOCUS` | — | — |
+| 99 | `SYS_WIN_CARET` | `rdi` = op (0=Create; `rsi` = arg1 (Create: width; `rdx` = arg2 (Create: height; `r10` = arg3 (Create: HWND owner | — |
+| 100 | `SYS_WIN_BEEP` | `rdi` = frequency in Hz (0 = use Win32 MB_OK default 800) rsi = d... | — |
+| 101 | `SYS_GFX_D3D_STUB` | `rdi` = kind: 1 = D3D11CreateDevice / D3D11CreateDeviceAndSwapCha... | E_FAIL from a D3D/DXGI IAT stub |
+| 102 | `SYS_GDI_BITBLT` | `rdi` = HWND (biased Win32 handle; `rsi` = dst_x (client-relative; `rdx` = dst_y r10 = src_w (pixels; `r8` = src_h r9  = user VA of `src_w * src_h` BGRA8888 pixels (r... | — |
+| 103 | `SYS_WIN_BEGIN_PAINT` | `rdi` = HWND (biased) rsi = user VA of PAINTSTRUCT (72 B) to fill | — |
+| 104 | `SYS_WIN_END_PAINT` | `rdi` = HWND (biased); `rsi` = PAINTSTRUCT* (ignored) | — |
+| 105 | `SYS_GDI_FILL_RECT_USER` | `rdi` = HWND (biased) rsi = user VA of RECT { i32 left; `rdx` = colour (treated as RGB u32 | — |
+| 106 | `SYS_GDI_CREATE_COMPAT_DC` | `rdi` = hdc_src (ignored in v0) | — |
+| 107 | `SYS_GDI_CREATE_COMPAT_BITMAP` | `rdi` = hdc (ignored); `rsi` = width; `rdx` = height | — |
+| 108 | `SYS_GDI_CREATE_SOLID_BRUSH` | `rdi` = COLORREF (0x00BBGGRR Win32 layout) | — |
+| 109 | `SYS_GDI_GET_STOCK_OBJECT` | `rdi` = stock index (0 | 0 in v0) |
+| 110 | `SYS_GDI_SELECT_OBJECT` | `rdi` = HDC; `rsi` = HGDIOBJ | previously-selected object in rax |
+| 111 | `SYS_GDI_DELETE_DC` | `rdi` = HDC | 1) on window DCs or invalid handles |
+| 112 | `SYS_GDI_DELETE_OBJECT` | `rdi` = HGDIOBJ | — |
+| 114 | `SYS_GDI_SET_TEXT_COLOR` | `rdi` = HDC; `rsi` = COLORREF (0x00BBGGRR) | `rsi` unchanged so SetTextColor / GetTextColor pairs keep their Win32 semanti... |
+| 115 | `SYS_GDI_SET_BK_COLOR` | — | — |
+| 116 | `SYS_GDI_SET_BK_MODE` | `rdi` = HDC; `rsi` = mode (1 = TRANSPARENT | — |
+| 117 | `SYS_GDI_STRETCH_BLT_DC` | — | — |
+| 118 | `SYS_GDI_CREATE_PEN` | `rdi` = style (ignored in v0); `rsi` = width; `rdx` = COLORREF | — |
+| 119 | `SYS_GDI_MOVE_TO_EX` | `rdi` = HDC; `rsi` = x; `rdx` = y; `r10` = user LPPOINT (may be 0) | — |
+| 120 | `SYS_GDI_LINE_TO` | `rdi` = HDC; `rsi` = x1 (end); `rdx` = y1 | — |
+| 121 | `SYS_GDI_DRAW_TEXT_USER` | `rdi` = HDC rsi = user text pointer rdx = text length (-1 for NUL... | — |
+| 122 | `SYS_GDI_RECTANGLE_FILLED` | `rdi` = HDC; `rsi` = x; `rdx` = y; `r10` = w; `r8` = h | — |
+| 123 | `SYS_GDI_ELLIPSE_FILLED` | — | — |
+| 124 | `SYS_GDI_PAT_BLT` | `rdi` = HDC; `rsi` = x; `rdx` = y; `r10` = w; `r8` = h | — |
+| 125 | `SYS_GDI_TEXT_OUT_W` | — | — |
+| 126 | `SYS_GDI_DRAW_TEXT_W` | — | — |
+| 127 | `SYS_GDI_GET_SYS_COLOR` | `rdi` = nIndex (COLOR_WINDOW=5 | — |
+| 128 | `SYS_GDI_GET_SYS_COLOR_BRUSH` | `rdi` = nIndex | — |
+| 113 | `SYS_GDI_BITBLT_DC` | — | — |
+| 129 | `SYS_WIN32_CUSTOM` | — | — |
+| 130 | `SYS_REGISTRY` | — | NTSTATUS in rax (kNtStatusSuccess = 0, STATUS_OBJECT_NAME_NOT_FOUND = 0xC0000... |
+| 131 | `SYS_PROCESS_OPEN` | `rdi` = target PID (u64) | — |
+| 132 | `SYS_PROCESS_VM_READ` | `rdi` = target process handle (kWin32ProcessBase + idx) rsi = tar... | STATUS_PARTIAL_COPY (0x8000000D) with the byte count populated |
+| 133 | `SYS_PROCESS_VM_WRITE` | `rdi` = target process handle rsi = target VA (in the target's us... | — |
+| 134 | `SYS_PROCESS_VM_QUERY` | `rdi` = target process handle rsi = target VA to probe rdx = call... | a single-page region: BaseAddress = the 4 KiB-aligned start of the page conta... |
+| 135 | `SYS_THREAD_SUSPEND` | `rdi` = thread handle (kWin32ThreadBase + idx in caller's own win... | — |
+| 136 | `SYS_THREAD_RESUME` | — | shape as SYS_THREAD_SUSPEND |
+| 137 | `SYS_THREAD_GET_CONTEXT` | `rdi` = thread handle (caller's win32_threads[] entry); `rsi` = user pointer to a Win32Context buffer (defined in this he...; `rdx` = ContextFlags filter (CONTEXT_INTEGER / CONTEXT_CONTROL / ... | — |
+| 138 | `SYS_THREAD_SET_CONTEXT` | — | — |
+| 139 | `SYS_THREAD_OPEN` | `rdi` = target TID (the unique Task::id | — |
+| 140 | `SYS_SECTION_CREATE` | `rdi` = size_bytes (1; `rsi` = Win32 PAGE_* protection on creation; `rdx` = inout u64* base_va; `r10` = inout u64* view_size; `r8` = Win32 PAGE_* view protection | STATUS_NOT_IMPLEMENTED |
+| 141 | `SYS_SECTION_MAP` | — | — |
+| 142 | `SYS_SECTION_UNMAP` | — | — |
+| 143 | `SYS_FILE_UNLINK` | `rdi` = const char* user_path; `rsi` = path_len (excluding NUL); `rdx` = const char* user_dst; `r10` = dst_len | — |
+| 144 | `SYS_FILE_RENAME` | — | — |
+| 145 | `SYS_PROCESS_TERMINATE` | `rdi` = ProcessHandle (NtCurrentProcess = -1 → self-task-exit; `rsi` = exit status (passed through to SchedExit on the self path); `rdx` = user buffer; `r10` = buffer cap; `r8` = user u32* return_length | — |
+| 146 | `SYS_THREAD_TERMINATE` | — | — |
+| 147 | `SYS_PROCESS_QUERY_INFO` | — | — |
+| 148 | `SYS_VM_ALLOCATE` | `rdi` = ProcessHandle (-1 = self); `rsi` = base_addr (0 = pick any aligned); `rdx` = size in bytes (rounded up to a page); `r10` = AllocationType (MEM_COMMIT | MEM_RESERVE; `r8` = protect flags (PAGE_*; `r9` = user u64* base out (set on success) | — |
+| 149 | `SYS_VM_FREE` | — | — |
+| 150 | `SYS_VM_PROTECT` | — | — |
+| 151 | `SYS_FILE_QUERY_ATTRIBUTES` | `rdi` = const char* user_path (NUL-terminated; `rsi` = path_len (excluding NUL); `rdx` = u8* user out buffer (FILE_NETWORK_OPEN_INFORMATION layout...; `r10` = buffer cap | — |
+| 152 | `SYS_EXECVE` | `rdi` = const char* user_path (NUL-terminated; `rsi` = path_len | NTSTATUS / -errno on failure |
+| 153 | `SYS_SOCKET_OP` | `rdi` = op (kSockOp* below) rsi/rdx/r10/r8/r9 = op-specific args ...; `rdx` = type (SOCK_STREAM=1 / SOCK_DGRAM=2); `rsi` = sock idx; `r10` = addrlen; `r8` = user dest sockaddr; `r9` = dest addrlen | kernel socket pool index >= 0 on success, negative errno on failure |
+| 154 | `SYS_DIR_OPEN` | `rdi` = const char* user_path | kWin32DirBase + idx (= 0xA00 |
+| 155 | `SYS_DIR_NEXT` | — | — |
+| 156 | `SYS_DIR_REWIND` | `rdi` = HANDLE | 0 on success, -1 on bad handle |
+| 157 | `SYS_DIR_NOTIFY` | `rdi` = HANDLE  (must be a kWin32DirBase-range dir handle) rsi = ...; `r10` = u64 user_buffer  (FILE_NOTIFY_INFORMATION sequence) r8  =... | bytes written or -1 on bad handle / overrun |
+| 158 | `SYS_PROCESS_SPAWN` | — | the new pid or -1 |
+| 159 | `SYS_IOCP_CREATE` | — | — |
+| 160 | `SYS_IOCP_SET` | — | — |
+| 161 | `SYS_IOCP_REMOVE` | — | — |
+| 162 | `SYS_IOCP_CLOSE` | — | — |
+| 163 | `SYS_JOB_CREATE` | — | — |
+| 164 | `SYS_JOB_ASSIGN` | — | — |
+| 165 | `SYS_JOB_IS_IN` | — | — |
+| 166 | `SYS_JOB_TERMINATE` | — | — |
+| 167 | `SYS_JOB_QUERY` | — | — |
+| 168 | `SYS_JOB_CLOSE` | — | — |
+| 169 | `SYS_TOKEN_ADJUST` | `rdi` = u32 disable_all       (0 / 1) rsi = const u8* user_new   ...; `rdx` = u32 user_new_byte_len (0 if disable_all == 1) r10 = u8* u...; `r8` = u32 user_prev_byte_cap  Returns: 0  on full success (ever... | — |
+| 170 | `SYS_WIN_GET_MOUSE_DELTA` | `rdi` = user pointer to a 16-byte DIMOUSESTATE-shaped buffer { i3... | — |
+| 171 | `SYS_STDIN_READ` | `rdi` = user pointer to a destination byte buffer; `rsi` = capacity in bytes (must be > 0 | "as much as is ready," not "fill the buffer") |
+| 172 | `SYS_DLL_BASE_BY_NAME` | `rdi` = user pointer to NUL-terminated ASCII name; `rsi` = name length in bytes (excluding the NUL) | its base VA |
+| 173 | `SYS_WIN_TRACK_POPUP` | `rdi` = user pointer to a TrackPopupReq struct (see below): u32 c...; `rsi` = u32 max_count          // sanity cap | — |
+| 174 | `SYS_GDI_SET_CURSOR` | `rdi` = u32 shape    // GdiCursorShape enum (below) rax = previou... | — |
+| 175 | `SYS_GDI_CREATE_CURSOR` | `rdi` = const u8* mask_ptr   // 240 bytes (12*20); `rsi` = u32 size             // sanity-check; `rdx` = (y_hot << 8) | x_hot // hotspot inside sprite | a u32 HCURSOR sentinel (≥ 256) the PE then hands to SetCursor via the existin... |
+| 180 | `SYS_FILE_MKDIR` | `rdi` = const char* user_path; `rsi` = path_len (excluding NUL); `rdx` = const char* user_target; `r10` = target_len | -1 (other backends will hook in as they grow these primitives) |
+| 181 | `SYS_FILE_SYMLINK` | — | — |
+| 182 | `SYS_FILE_LINK` | — | — |
+| 183 | `SYS_FILE_READLINK` | — | — |
+| 184 | `SYS_SYSTEM_PERFORMANCE_INFO` | `rdi` = user SystemPerformanceInfo* rsi = byte capacity | 0 on success, -1 on bad pointer / short buffer |
+| 185 | `SYS_NAMED_KOBJ_OPEN_OR_CREATE` | `rdi` = type (0 = mutex; `rsi` = user const char* name (UTF-8 NUL-terminated) rdx = name l...; `r10` = init_state_or_owner — type-specific: mutex:     bInitialO...; `r8` = open_only (1 = OpenMutex/Event/Semaphore semantics — fail... | — |
+| 186 | `SYS_WIN32_CREATE_PIPE` | `rdi` = user u64* read_handle_out  — caller-allocated rsi = user ... | 0 on success, (u64)-1 on table-full / pipe-pool-full |
+| 187 | `SYS_QUEUE_USER_APC` | `rdi` = u64 target_tid          // 0 / -2 / current tid = self rs... | 0 on success, (u64)-1 on table-full / cross-process / unknown tid |
+| 188 | `SYS_DRAIN_USER_APC` | `rdi` = u64* user out_pfn        // VA written on success rsi = u... | 1 if an APC was drained, 0 if the queue was empty for the caller, (u64)-1 on ... |
+| 189 | `SYS_PRIORITY_CLASS` | `rdi` = u64 op                   // 0 = get; `rsi` = u32 new_class            // ignored when op == 0 Returns ... | the current (post-op) priority class on success, 0 on bad op |
+| 190 | `SYS_PROCESS_SPAWN_EX` | `rdi` = const char* user path           // NUL-terminated rsi = u... | the new pid on success, (u64)-1 on failure (any inherited handle resolves to ... |
+| 191 | `SYS_GET_INHERITED_STD` | `rdi` = u64 idx                  // 0=stdin | the inherited Win32 file handle (kWin32HandleBase range) on success, 0 if no ... |
+| 192 | `SYS_HEAPEX_CREATE` | `rdi` = u64 pages   (clamped to kWin32ExtraHeapPagesMax) Returns ... | the heap handle (also the base VA) on success, 0 on table-full / OOM |
+| 193 | `SYS_HEAPEX_DESTROY` | `rdi` = u64 heap_handle | 1 on success, 0 on bad handle |
+| 194 | `SYS_HEAPEX_ALLOC` | `rdi` = u64 heap_handle (0 = default) rsi = u64 size Returns user... | user VA or 0 on OOM |
+| 195 | `SYS_HEAPEX_FREE` | `rdi` = u64 heap_handle rsi = u64 ptr Returns 0 | 0 |
+| 196 | `SYS_HEAPEX_SIZE` | `rdi` = u64 heap_handle rsi = u64 ptr | bytes or 0 on bad handle / pointer |
+| 197 | `SYS_HEAPEX_REALLOC` | `rdi` = u64 heap_handle rsi = u64 ptr        (0 = alloc) rdx = u6... | the new VA or 0 on failure |
+| 198 | `SYS_AUDIO_DEVICE_INFO` | `rdi` = u64 op 0 = number of HDA-class output devices (typically ... | 48000 |
+<!-- /AUTO:syscall_args -->

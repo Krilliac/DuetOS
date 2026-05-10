@@ -239,6 +239,15 @@ u64 CurrentTaskId();
 u32 CurrentTaskWin32LastError();
 u32 SetCurrentTaskWin32LastError(u32 err);
 
+/// Win32 TLS slot value (per-thread). The slot ALLOCATION bitmap
+/// stays on Process — TlsAlloc returns one shared index. The
+/// VALUE per slot is per-thread: TlsSetValue / TlsGetValue read
+/// and write the calling Task's `win32_tls_slot_value[idx]`. idx
+/// must be < 64 (kWin32TlsCap); higher indices read 0 / writes
+/// silently drop. Kernel-only callers read 0 and ignore writes.
+u64 CurrentTaskTlsSlotValue(u32 idx);
+void SetCurrentTaskTlsSlotValue(u32 idx, u64 value);
+
 /// Read the task ID of an arbitrary `Task*`. Returns 0 for nullptr.
 /// Used by Win32 custom-diagnostics deadlock-detection to record a
 /// mutex's owner edge in the wait graph without exposing Task's

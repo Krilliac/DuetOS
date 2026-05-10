@@ -7437,3 +7437,424 @@ doc helps future readers audit the trail.
   paths (multi-connector burst, dual-mode listener).
 - **Related roadmap track(s):** T3-01 + T14-03 closed (Track 3
   + Track 14 fully closed).
+
+## 2026-05-10 — Kernel APC queue + NtQueueApcThread (T8-02)
+
+- **What changed:**
+  - New `Process::apc_slots[16]` ring carrying (target_tid, pfn,
+    data) triples — the kernel-resident half of the APC delivery
+    contract. Lives next to the existing user-space queue in
+    `kernel32`, which now serves as the overflow buffer.
+  - New syscalls `SYS_QUEUE_USER_APC = 187` +
+    `SYS_DRAIN_USER_APC = 188`. Enqueue is cap-gated on
+    `kCapSpawnThread` (same bar that lets a caller create a
+    thread it could otherwise queue an APC against) and refuses
+    cross-process targets — `SchedFindTaskByTid` resolves the
+    target's owning Process and the handler returns -1 if it
+    doesn't match the caller's. Drain pops the first slot whose
+    `target_tid` matches `CurrentTaskId()`.
+  - `kernel32!QueueUserAPC` tries the kernel queue first, falls
+    back to the legacy user-space ring on overflow / cap denial.
+    `kernel32!win32_drain_apc_queue` drains both queues.
+    `ntdll!NtQueueApcThread` / `NtQueueApcThreadEx` route through
+    `SYS_QUEUE_USER_APC`; `SystemArgument1` / `SystemArgument2`
+    are dropped (NormalContext is packed as `ulData`).
+  - Boot self-test (`ApcSelfTest`) drives queue / drain /
+    cross-tid isolation / capacity overflow on a stand-in
+    Process so any regression surfaces in the boot log.
+- **Why:** The roadmap row called out two follow-ons:
+  `NtQueueApcThread` and a kernel-resident per-thread APC list.
+  The user-space queue worked for same-process polling but was
+  invisible to the kernel — `NtQueueApcThread` and any future
+  cross-thread "wake target out of a kernel-blocked alertable
+  wait" path needed a queue the kernel can see. The 16-slot
+  per-process kernel ring sized to match the existing user-space
+  queue keeps the contract symmetric.
+- **Rules out / defers:**
+  - Cross-process APC delivery. Same-process is the v0 contract
+    — cross-process needs target-side wake (a reschedule IPI to
+    the target CPU after the enqueue) and a kernel-blocked
+    alertable wait that the kernel can wake on the target's
+    behalf. The roadmap row notes the deferral.
+  - True three-arg `NtQueueApcThread` fidelity. The kernel queue
+    carries one `ulData` payload; SystemArgument1/2 are ignored.
+    Real apps relying on the three-arg form get the first arg
+    only — which matches the SDK's `QueueUserAPC` shape; the
+    extended shape is rare in practice.
+  - Per-thread APC lists (vs. per-process). With at most 16
+    pending APCs across all threads in a process, the
+    target-tid scan inside the slot table is O(16) — not worth a
+    per-thread split until a workload demands it.
+- **Revisit when:** a real workload's profile shows kernel APC
+  delivery latency dominating (would motivate per-thread
+  splitting) or a PE depends on cross-process APC (would
+  motivate the IPI-wake path).
+- **Related roadmap track(s):** T8-02 closed.
+
+## 2026-05-10 — CreateProcess stdio inheritance (T6-03 stdio)
+
+- **What changed:**
+  - New syscall `SYS_PROCESS_SPAWN_EX = 190` carrying a 24-byte
+    `ProcessSpawnStdio` bundle (`stdin_handle / stdout_handle /
+    stderr_handle`, each a Win32-shaped handle in the parent's
+    `win32_handles` table). The kernel-side spawner walks the
+    bundle pre-spawn (rejecting unsupported handle kinds
+    cleanly), spawns via the existing `SpawnPeFile / SpawnElfFile`,
+    then duplicates each non-zero handle into the child's table.
+    Pipe handles bump the per-end pool refcount via
+    `PipeRetainRead/Write` so the parent's CloseHandle doesn't
+    tear the child's view down.
+  - New syscall `SYS_GET_INHERITED_STD = 191` reads
+    `Process::std_handles[idx]` (idx 0/1/2 = stdin/stdout/stderr)
+    so `kernel32!GetStdHandle` can return the inherited Win32
+    handle when it exists, falling back to the legacy
+    pseudo-handle (-10/-11/-12) otherwise.
+  - `kernel32!CreateProcessA/W` decodes
+    `STARTUPINFO.dwFlags & STARTF_USESTDHANDLES` from the
+    104-byte STARTUPINFO layout and routes to the new syscall
+    when set; falls back to `SYS_PROCESS_SPAWN` otherwise so
+    non-inheriting callers see no behaviour change.
+- **Why:** A parent that wants to read its child's stdout —
+  the canonical CreateProcess use case — needed the child's
+  WriteFile(STD_OUTPUT_HANDLE, ...) to land on the parent's
+  CreatePipe-allocated read end instead of the global serial
+  console. Without per-process stdio handles, every child
+  shared one stdout fd and the parent had no read path.
+- **Rules out / defers:**
+  - Process-attribute lists (PROC_THREAD_ATTRIBUTE_*). The
+    Win32 STARTUPINFOEX layout extends STARTUPINFO with an
+    attribute list pointer; v0 ignores it. Same precedent as
+    `lpDesktop / lpReserved` — recorded in user space, not
+    consulted by the kernel.
+  - Cursor-share inheritance. Child gets a fresh `cursor = 0`
+    on each duplicated handle. Real Windows shares the open
+    file description's cursor — that's a separate slice
+    once a workload exercises shared offsets across processes.
+  - Job-object propagation, environment-block parsing,
+    duplicate-handle ACL gating. All ride later.
+- **Revisit when:** a workload depends on shared cursors,
+  STARTUPINFOEX attribute lists, or full Job-object
+  inheritance.
+- **Related roadmap track(s):** T6-03 stdio half closed; the
+  CreateProcess + wait + exit-code half was already covered by
+  the pre-existing PROCESS_OPEN / Wait / Exit path.
+
+## 2026-05-10 — Win32 priority class on Process (T8-01 partial)
+
+- **What changed:**
+  - `Process::win32_priority_class` (u32) records the Windows
+    priority-class constant (NORMAL_PRIORITY_CLASS = 0x20,
+    HIGH_PRIORITY_CLASS = 0x80, etc.).
+  - New syscall `SYS_PRIORITY_CLASS = 189` (op=get/set) round-trips
+    the value. `kernel32!SetPriorityClass / GetPriorityClass`
+    route through it; the previous kernel-side
+    `kOffReturnPrioNormal` thunk fallback stays as the
+    catch-all for old PEs that don't bind the real export.
+- **Why:** Two of the three T8-01 acceptance prongs (priority
+  class storage + Win32 priority class mapping) are scheduler-
+  independent — the value just needs to round-trip through
+  Process state. The third prong (priority aging / decay /
+  preemption) requires per-CPU runqueue lock-splitting (the
+  B2-followup row) before adding bands makes sense.
+- **Rules out / defers:**
+  - Scheduler bias on the priority class value. The runqueue
+    is single-band; the value is recorded but not consulted on
+    enqueue. A future MLFQ rebuild reads it.
+  - Per-thread priority (`SetThreadPriority`). The Win32 thread
+    priority is a delta off the process's class; v0 ignores
+    the delta entirely.
+  - Cross-process SetPriorityClass on a non-self handle.
+    `kernel32!SetPriorityClass` ignores `hProcess` and modifies
+    only the calling process — fits v0's "no cross-process
+    process-wide knobs" stance.
+- **Revisit when:** the scheduler split (B2-followup) lands
+  and a workload exercises priority-class-driven scheduling.
+- **Related roadmap track(s):** T8-01 partial — full closure
+  rides on the per-CPU lock split.
+
+## 2026-05-10 — Multi-heap process allocator (T5-02)
+
+- **What changed:**
+  - `Process::extra_heaps[4]` carries up-to-16-page secondary
+    heaps (1 MiB stride from 0x55000000). The first-fit walker
+    in `kernel/subsystems/win32/heap.cpp` was refactored to take
+    a `Win32HeapBinding` (base, pages, free-head pointer); the
+    legacy `Win32HeapAlloc / Free / Size / Realloc` are now
+    thin wrappers that build a binding for the default heap.
+  - New syscalls:
+    `SYS_HEAPEX_CREATE = 192` (allocate frames + map RW+NX +
+    seed free list), `SYS_HEAPEX_DESTROY = 193` (unmap pages +
+    free slot), `SYS_HEAPEX_ALLOC / FREE / SIZE / REALLOC =
+    194 / 195 / 196 / 197` (handle in rdi, payload args in
+    rsi/rdx). `Win32HeapResolveHandle` resolves both 0 and
+    `kWin32HeapVa` to the default heap so userland can pass
+    either as a handle without crossing the secondary-heap path.
+  - `kernel32!HeapAlloc / HeapFree / HeapSize / HeapReAlloc /
+    HeapCreate / HeapDestroy` route through the new syscalls;
+    `dwFlags & HEAP_ZERO_MEMORY = 0x8` is honoured in user
+    space (the kernel doesn't know which payload the caller
+    cares about, so userland zeros after a successful alloc).
+  - CRT `malloc / free / realloc` continue routing through the
+    legacy `SYS_HEAP_ALLOC` (11) / `SYS_HEAP_FREE` (12) /
+    `SYS_HEAP_REALLOC` (15) on the default heap. No userland
+    rebuild required for those paths.
+- **Why:** A PE that calls `HeapCreate` followed by
+  `HeapAlloc(hHeap, ...)` previously got the same heap as
+  `GetProcessHeap` — corrupting the default heap's free list
+  if the secondary heap had different lifetime semantics. The
+  acceptance ("a PE can allocate from and destroy a secondary
+  heap without corrupting the default heap") needs each heap
+  to keep its own free list; the binding refactor lets one
+  walker serve both.
+- **Rules out / defers:**
+  - Heap coalescing on free. Adjacent freed blocks stay
+    separate; fragmentation is accepted (same v0 contract as
+    the default heap).
+  - Heap growth past 16 pages. `HeapCreate` clamps the page
+    request silently. A workload that hits the cap can grow
+    `kWin32ExtraHeapPagesMax`.
+  - More than 4 simultaneous secondary heaps. Cap matches
+    typical Win32 apps (CRT keeps one private heap; most apps
+    never call HeapCreate).
+  - HEAP_GENERATE_EXCEPTIONS / HEAP_NO_SERIALIZE /
+    HEAP_REALLOC_IN_PLACE_ONLY flag handling. Ignored at the
+    user-space wrapper.
+  - HeapWalk / HeapValidate / HeapCompact behaviour on
+    secondary heaps. Existing kernel32 stubs return success
+    for the default heap; secondary-heap-aware versions ride
+    once a workload exercises them.
+- **Revisit when:** a workload exercises one of the deferred
+  capabilities (in-place realloc, walk/validate on a
+  secondary heap, > 4 heaps, > 64 KiB heap).
+- **Related roadmap track(s):** T5-02 closed.
+
+## 2026-05-10 — Overlapped I/O via IOCP (T7-03)
+
+- **What changed:**
+  - `kernel32!CreateIoCompletionPort(hFile, hExisting, key, ...)`
+    now registers a (file_handle → iocp_handle, key) binding in
+    a 16-slot user-space table when `hFile` is a kernel file
+    handle (range 0x100..0x10F). The existing port creation
+    path is unchanged; binding is purely additive.
+  - `kernel32!ReadFile` / `WriteFile` honour `lpOverlapped` for
+    kernel file handles: read `OVERLAPPED.Offset` /
+    `.OffsetHigh`, seek to that position via SYS_FILE_SEEK,
+    perform the synchronous read/write, then stamp
+    `OVERLAPPED.Internal` (status code) + `.InternalHigh`
+    (bytes transferred). If the handle is bound to an IOCP,
+    a completion packet (key, OVERLAPPED*, bytes) is posted
+    to the bound port via the existing in-process IOCP ring
+    so a subsequent `GetQueuedCompletionStatus` surfaces the
+    result.
+  - End-to-end smoke (`userland/apps/iocp_overlapped_smoke/`)
+    exercises CreateFileA + WriteFile + reopen + bind + ReadFile
+    with OVERLAPPED + GetQueuedCompletionStatus + payload check.
+- **Why:** The acceptance row called out a PE using overlapped
+  reads receiving completion through GQCS. The existing IOCP
+  ring worked for `PostQueuedCompletionStatus`-driven posts but
+  the kernel never connected file I/O to the ring — every
+  overlapped read silently dropped the completion. The 16-slot
+  binding table + ReadFile/WriteFile patch closes the loop in
+  user space without a kernel-side I/O queue rewrite.
+- **Rules out / defers:**
+  - True `ERROR_IO_PENDING` async completion. The I/O is
+    synchronous; the completion packet is posted before
+    `ReadFile` returns. Real Windows allows the I/O to be
+    pending while the caller waits on GQCS — that needs a
+    kernel-side I/O scheduler (DPCs, deferred completion).
+  - Share-mode enforcement (`FILE_SHARE_READ` /
+    `FILE_SHARE_WRITE` etc.) on CreateFileA/W. v0 doesn't
+    track share modes; concurrent opens on the same file
+    succeed regardless. Acceptable until a workload races.
+  - `OVERLAPPED.hEvent` signaling. Apps using a manual-reset
+    event for sync still see the event un-signalled even
+    though the I/O completes. Easy to layer on top of the
+    existing user-side event API once a workload demands it.
+  - Cross-thread completion delivery. The user-side IOCP
+    ring is in-process; a cross-process IOCP would need a
+    kernel-side port pool (which we already have via SYS_IOCP_*
+    but don't wire to ReadFile/WriteFile yet).
+- **Revisit when:** a workload depends on real async semantics
+  (ERROR_IO_PENDING + in-flight I/O), share-mode enforcement,
+  or hEvent signaling.
+- **Related roadmap track(s):** T7-03 closed.
+
+## 2026-05-10 — IRQ-safe KMalloc / KFree (T5-04 partial)
+
+- **What changed:**
+  - `kernel/mm/kheap.cpp` gets a `KheapIrqOff` RAII that
+    disables interrupts on entry and restores `IF` only if it
+    was set on entry. Same shape as
+    `FramePoolIrqOff` (frame allocator) and `IrqOff` (slab).
+    Both `KMalloc` and `KFree` now bracket their state-mutating
+    body with a `KheapIrqOff irq_guard;`.
+  - `wiki/kernel/Memory-Management.md` gains an
+    "Allocator family — context contract" table summarising
+    IRQ-safety + SMP-safety + sleep status across frame
+    allocator / kheap / slab / kstack.
+- **Why:** The kheap was previously single-CPU + IRQ-unsafe.
+  Any IRQ handler that itself called `KMalloc` (event-trace
+  growth, log ring resize, frame-allocator audit-trail buffer)
+  could re-enter the heap mid-mutation and observe a half-
+  updated freelist — a class of bug that would surface only
+  under load. Bracketing with IRQ-disable matches the rest of
+  the allocator family and closes the immediate window without
+  waiting for the SMP lock-split.
+- **Rules out / defers:**
+  - SMP-safe heap. The `KheapIrqOff` brace handles re-entrance
+    on a single CPU; cross-CPU contention still races. Adding
+    `spin_lock_irqsave` rides on the per-CPU scheduler-lock
+    split (B2-followup) so the lockdep ordering can absorb
+    the new dependency.
+  - Buddy coalescing on the kheap. Adjacent free chunks stay
+    separate; fragmentation is accepted (same v0 contract).
+  - Per-CPU slab magazines. Profile evidence triggers it.
+- **Revisit when:** SMP brings actual cross-CPU heap contention,
+  or a profile shows fragmentation hurting workloads.
+- **Related roadmap track(s):** T5-04 partial — IRQ-safety + docs
+  closed; coalescing + magazines deferred.
+
+## 2026-05-10 — Per-thread Win32 TLS slot values (T6-01 partial)
+
+- **What changed:**
+  - `sched::Task` gets a 64-slot `win32_tls_slot_value[64]`
+    array (512 bytes per task, ~15 KiB at peak across ~30 live
+    tasks). Reachable via two new accessors
+    `sched::CurrentTaskTlsSlotValue(idx)` /
+    `SetCurrentTaskTlsSlotValue(idx, value)` that mirror the
+    existing `CurrentTaskWin32LastError` shape.
+  - `kernel/subsystems/win32/tls_syscall.cpp` (DoTlsGet /
+    DoTlsSet) now reads/writes the per-thread storage
+    instead of `Process::tls_slot_value`. DoTlsAlloc still
+    uses `Process::tls_slot_in_use` for the allocation
+    bitmap — TlsAlloc returns one shared slot index across
+    every thread in the process, by Win32 contract.
+- **Why:** Pre-fix, every thread in the same Process shared
+  one `Process::tls_slot_value[]` array. Two threads calling
+  `TlsSetValue(5, x)` would clobber each other — a correctness
+  bug, since dynamic TLS is supposed to give each thread an
+  independent value per slot. Single-threaded Win32 PEs didn't
+  trip it, but `pe_stress` and any future multithreaded smoke
+  would. Per-thread storage closes that gap.
+- **Rules out / defers:**
+  - Static TLS via `__declspec(thread)`. The compiler-emitted
+    code reads through `gs:[0x58]`
+    (`TEB.ThreadLocalStoragePointer`) into a per-module TLS
+    block. The PE loader still rejects PEs with a non-empty
+    TLS callback array (`pe_loader.cpp` step 3b), and even
+    PEs with an empty callback array don't get a per-thread
+    template allocation today. Full closure needs the
+    template-walk + per-thread block alloc + TEB.TLSPtr
+    population + TLS-callback ring-3 thunk.
+  - Larger slot caps (the 64-slot v0 limit fits every CRT we
+    ship; lifting it costs 8 bytes per slot per Task).
+- **Revisit when:** a real PE depends on `__declspec(thread)`,
+  or the PE-loader follow-up that wires the static-TLS
+  template lands.
+- **Related roadmap track(s):** T6-01 partial — dynamic TLS
+  closed; static TLS + callbacks defer.
+
+## 2026-05-10 — winmm waveOut API surface (T12-03 partial)
+
+- **What changed:**
+  - New syscall `SYS_AUDIO_DEVICE_INFO = 198` queries the audio
+    backend for HDA-class controller presence + the canonical
+    48 kHz / stereo / 16-bit format. Counts only HDA controllers
+    (not AC'97 / legacy) since winmm's playback path has no
+    backend wired for those today.
+  - `winmm!waveOutGetNumDevs` returns 1 when an HDA codec is
+    brought up, 0 otherwise — replacing the always-zero stub.
+  - `winmm!waveOutOpen` returns a real sentinel handle
+    (`MM_AUDIO_HDA_HANDLE_SENTINEL = 0xA1A0001`) when a device
+    is present so PEs no longer get `MMSYSERR_NODRIVER` at
+    probe time.
+  - `waveOutPrepareHeader` stamps `WHDR_PREPARED`,
+    `waveOutWrite` stamps `WHDR_DONE` synchronously,
+    `waveOutUnprepareHeader` clears the prepared flag. A poll-
+    for-completion loop terminates because the buffer is
+    immediately marked done.
+- **Why:** Two audiences depend on this surface:
+  1. PEs that probe waveOut at startup and gate functionality
+     on success — they now get past the probe and continue
+     normally. Even though no audio plays, the rest of the
+     program runs.
+  2. PEs that wait for `WHDR_DONE` before proceeding — they
+     no longer hang.
+  Real playback rides on the DMA-coherent buffer pool +
+  BDL programming work under the "Audio — HDA codec / stream
+  programming" Roadmap row, which is its own slice.
+- **Rules out / defers:**
+  - Real samples reaching the codec. Buffers are accepted but
+    dropped. Closing this needs DMA buffer alloc + BDL
+    program + RUN bit + completion notification — kernel-side
+    work that crosses the audio backend.
+  - waveIn (recording). Same scaffolding gap as waveOut.
+  - Mixer / waveOutSetVolume hardware backend. The volume
+    setter still no-ops; the stored value isn't propagated to
+    the codec amp gain.
+  - waveOutGetDevCaps (per-device capability query). Currently
+    NOOP; could plumb through SYS_AUDIO_DEVICE_INFO with
+    additional ops.
+- **Revisit when:** the DMA-coherent buffer pool + BDL+RUN
+  path lands, or a workload depends on real playback.
+- **Related roadmap track(s):** T12-03 partial — API surface
+  closed; backend playback defer.
+
+## 2026-05-10 — VirtualAlloc reserve/commit + protection (T5-01 partial)
+
+- **What changed:**
+  - `Process::vmap_regions[16]` records `{base_va, pages,
+    committed_bits (u32 bitmap), protection}` per Win32-style
+    VirtualAlloc region. Carved out of the existing vmap arena
+    (kWin32VmapBase = 0x40000000), region cap at 32 pages
+    matches the bitmap width.
+  - Three new syscalls: `SYS_VIRTUAL_ALLOC = 199`,
+    `SYS_VIRTUAL_FREE = 200`, `SYS_VIRTUAL_PROTECT = 201`. The
+    alloc handler dispatches on the `MEM_RESERVE` /
+    `MEM_COMMIT` flag combo:
+    * `MEM_RESERVE` alone — claim a region slot, no frame alloc.
+    * `MEM_RESERVE | MEM_COMMIT` — claim + map all pages.
+    * `MEM_COMMIT` alone with non-zero `hint_va` — commit the
+      touched pages of an existing reservation.
+  - `SYS_VIRTUAL_FREE` honours `MEM_DECOMMIT` (unmap pages,
+    keep slot) and `MEM_RELEASE` (unmap + clear slot).
+  - `SYS_VIRTUAL_PROTECT` translates `PAGE_*` to the AS layer's
+    page flags and calls `AddressSpaceProtectUserPage` for each
+    committed page in the touched range. `PAGE_EXECUTE*` is
+    rejected (W^X enforcement).
+  - `kernel32!VirtualAlloc / VirtualFree / VirtualProtect`
+    route through the new ABI; the legacy `SYS_VMAP` (28) /
+    `SYS_VUNMAP` (29) entry points stay as the bump-arena
+    fallback for in-tree callers that haven't been migrated
+    yet (no caller currently uses them, but the entry points
+    remain to keep the ABI surface forward-compatible).
+- **Why:** MSVC CRT startup probes the stack with
+  reserve-then-commit; AppVerifier and a few telemetry libraries
+  call `VirtualProtect` to flip a page from RW to RO before
+  re-checking. Pre-fix: every call returned the same RW+NX
+  page regardless of caller intent, so a real PAGE_READONLY
+  request silently received writable memory. Real region
+  tracking + AS-level protect closes that gap.
+- **Rules out / defers:**
+  - PAGE_GUARD / one-shot trap-then-reset semantics. Real
+    Windows fires STATUS_GUARD_PAGE_VIOLATION on first touch
+    and auto-clears the flag. v0 rejects PAGE_GUARD at the
+    protection translator and returns 0 from VirtualAlloc /
+    VirtualProtect.
+  - PAGE_NOACCESS that actually traps on read. v0 maps as
+    "Present + User + NX, no Writable" — read still works.
+    Closing the gap needs the AS layer to support the "not
+    present but reserved" PTE state without confusing the
+    region tracker.
+  - Cross-region merging / splitting on partial commit. v0
+    refuses MEM_RESERVE | MEM_COMMIT on a hint_va that lands
+    inside an existing reservation; only the explicit "commit
+    into existing" path handles partial commit.
+  - NtAllocateVirtualMemory ABI mirror. The Win32 syscall
+    forwards to the same SYS_VIRTUAL_ALLOC path; ntdll's
+    Native API stub is still a thin wrapper.
+- **Revisit when:** an MSVC PE depends on PAGE_GUARD (typically
+  thread-stack-overflow probes), or PE startup fails because of
+  a real PAGE_NOACCESS gap.
+- **Related roadmap track(s):** T5-01 partial — reserve/commit
+  + protection closed; guard pages + true NOACCESS defer.

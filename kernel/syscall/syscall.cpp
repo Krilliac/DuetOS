@@ -47,6 +47,7 @@
 #include "syscall/error.h"
 #include "syscall/syscall.h"
 
+#include "drivers/audio/audio.h"
 #include "drivers/video/cursor.h"
 
 #include "arch/x86_64/cpu.h"
@@ -85,6 +86,7 @@
 #include "subsystems/win32/thread_syscall.h"
 #include "subsystems/win32/mutex_syscall.h"
 #include "subsystems/win32/event_syscall.h"
+#include "subsystems/win32/apc_syscall.h"
 #include "subsystems/win32/named_kobj_syscall.h"
 #include "subsystems/win32/pipe_syscall.h"
 #include "subsystems/win32/semaphore_syscall.h"
@@ -806,6 +808,185 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_WIN32_CREATE_PIPE:
         ::duetos::subsystems::win32::DoWin32CreatePipe(frame);
         return;
+    case SYS_QUEUE_USER_APC:
+        ::duetos::subsystems::win32::DoQueueUserApc(frame);
+        return;
+    case SYS_DRAIN_USER_APC:
+        ::duetos::subsystems::win32::DoDrainUserApc(frame);
+        return;
+    case SYS_PRIORITY_CLASS:
+    {
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        const u64 op = frame->rdi;
+        const u32 new_class = static_cast<u32>(frame->rsi);
+        if (op == 1) // set
+            proc->win32_priority_class = new_class;
+        frame->rax = static_cast<u64>(proc->win32_priority_class);
+        return;
+    }
+    case SYS_PROCESS_SPAWN_EX:
+    {
+        const i64 rv = ::duetos::subsystems::win32::SysProcessSpawnEx(frame->rdi, frame->rsi, frame->rdx);
+        frame->rax = static_cast<u64>(rv);
+        return;
+    }
+    case SYS_GET_INHERITED_STD:
+    {
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 idx = frame->rdi;
+        if (idx > 2)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        frame->rax = proc->std_handles[idx];
+        return;
+    }
+    case SYS_HEAPEX_CREATE:
+    {
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        frame->rax = ::duetos::win32::Win32HeapExCreate(proc, frame->rdi);
+        return;
+    }
+    case SYS_HEAPEX_DESTROY:
+    {
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        frame->rax = ::duetos::win32::Win32HeapExDestroy(proc, frame->rdi) ? 1 : 0;
+        return;
+    }
+    case SYS_HEAPEX_ALLOC:
+    {
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        ::duetos::win32::Win32HeapBinding b{};
+        if (!::duetos::win32::Win32HeapResolveHandle(proc, frame->rdi, &b))
+        {
+            frame->rax = 0;
+            return;
+        }
+        frame->rax = ::duetos::win32::Win32HeapAllocOnBinding(proc, b, frame->rsi);
+        return;
+    }
+    case SYS_HEAPEX_FREE:
+    {
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        ::duetos::win32::Win32HeapBinding b{};
+        if (!::duetos::win32::Win32HeapResolveHandle(proc, frame->rdi, &b))
+        {
+            frame->rax = 0;
+            return;
+        }
+        ::duetos::win32::Win32HeapFreeOnBinding(proc, b, frame->rsi);
+        frame->rax = 0;
+        return;
+    }
+    case SYS_HEAPEX_SIZE:
+    {
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        ::duetos::win32::Win32HeapBinding b{};
+        if (!::duetos::win32::Win32HeapResolveHandle(proc, frame->rdi, &b))
+        {
+            frame->rax = 0;
+            return;
+        }
+        frame->rax = ::duetos::win32::Win32HeapSizeOnBinding(proc, b, frame->rsi);
+        return;
+    }
+    case SYS_HEAPEX_REALLOC:
+    {
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        ::duetos::win32::Win32HeapBinding b{};
+        if (!::duetos::win32::Win32HeapResolveHandle(proc, frame->rdi, &b))
+        {
+            frame->rax = 0;
+            return;
+        }
+        frame->rax = ::duetos::win32::Win32HeapReallocOnBinding(proc, b, frame->rsi, frame->rdx);
+        return;
+    }
+    case SYS_VIRTUAL_ALLOC:
+        ::duetos::subsystems::win32::DoVirtualAlloc(frame);
+        return;
+    case SYS_VIRTUAL_FREE:
+        ::duetos::subsystems::win32::DoVirtualFree(frame);
+        return;
+    case SYS_VIRTUAL_PROTECT:
+        ::duetos::subsystems::win32::DoVirtualProtect(frame);
+        return;
+    case SYS_AUDIO_DEVICE_INFO:
+    {
+        // Count HDA-class controllers only — winmm waveOut has
+        // no AC'97 / legacy backend wired today, so reporting
+        // those would mislead the caller into opening a path
+        // that returns ENODEV downstream. The first-device
+        // capability questions answer the v0 canonical
+        // 48 kHz / stereo / 16-bit format that HDA streams
+        // ship with.
+        u64 hda_count = 0;
+        const u64 total = ::duetos::drivers::audio::AudioControllerCount();
+        for (u64 i = 0; i < total; ++i)
+        {
+            if (::duetos::drivers::audio::AudioController(i).kind == ::duetos::drivers::audio::AudioKind::Hda)
+                ++hda_count;
+        }
+        switch (frame->rdi)
+        {
+        case 0:
+            frame->rax = hda_count;
+            return;
+        case 1:
+            frame->rax = hda_count > 0 ? 48000ULL : 0ULL;
+            return;
+        case 2:
+            frame->rax = hda_count > 0 ? 2ULL : 0ULL;
+            return;
+        case 3:
+            frame->rax = hda_count > 0 ? 16ULL : 0ULL;
+            return;
+        default:
+            frame->rax = 0;
+            return;
+        }
+    }
     case SYS_NOW_NS:
         DoNowNs(frame);
         return;

@@ -95,8 +95,28 @@ First-fit + coalescing freelist over a 2 MiB pool.
   below minimum / above pool — catches double-free and wild-pointer
   corruption immediately.
 
-KMalloc/KFree are **not yet IRQ-safe and not yet SMP-safe**. SMP bring-up
-will add `spin_lock_irqsave`. Until then, document on every caller.
+KMalloc/KFree are **IRQ-safe** (T5-04, 2026-05-10): every entry
+brackets the freelist + bin mutations with a `KheapIrqOff` RAII
+that disables interrupts and restores `IF` only if it was set on
+entry. Same shape the frame allocator's `FramePoolIrqOff` and the
+slab cache's `IrqOff` use. **Not yet SMP-safe** — adding the
+`spin_lock_irqsave` brace lands with the per-CPU scheduler-lock
+split (B2-followup).
+
+### Allocator family — context contract
+
+| Allocator | Function | IRQ-safe | SMP-safe | Sleeps |
+|-----------|----------|----------|----------|--------|
+| Frame allocator | `AllocateFrame` / `FreeFrame` | yes (`FramePoolIrqOff`) | no | no |
+| Kernel heap | `KMalloc` / `KFree` | yes (`KheapIrqOff`) | no | no |
+| Slab cache | `SlabAlloc` / `SlabFree` | yes (`IrqOff`) | no (per-cache mutex held briefly) | no |
+| Kernel stacks | `KStackAlloc` | no — caller must be in process context | no | no |
+
+Allocators that do NOT sleep are safe to call from any kernel
+context: timer IRQ, IPI handler, panic path, syscall fast path.
+The frame allocator + kheap + slab all qualify. The kernel-stack
+allocator allocates 4 frames + page-table walk and is documented
+as process-context only.
 
 **Zero-init pattern**: every kernel struct that embeds sync primitives
 (`SpinLock`, `Mutex`, etc.) must be `memset(0)` before first use. The

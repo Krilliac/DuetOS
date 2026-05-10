@@ -4,9 +4,17 @@
 #include "arch/x86_64/traps.h"
 #include "log/klog.h"
 #include "proc/process.h"
+#include "sched/sched.h"
 
 namespace duetos::subsystems::win32
 {
+
+// TLS slot ALLOCATION bitmap: per-process — TlsAlloc returns one
+// shared index. TLS slot VALUES: per-thread — read/written through
+// `sched::CurrentTaskTlsSlotValue` / `SetCurrentTaskTlsSlotValue`.
+// (T6-01 partial: per-thread storage closes the cross-thread bleed
+// the v0 single-threaded shim had; full static-TLS template + TLS
+// callbacks in the PE loader still defer.)
 
 void DoTlsAlloc(arch::TrapFrame* frame)
 {
@@ -36,7 +44,15 @@ void DoTlsAlloc(arch::TrapFrame* frame)
         return;
     }
     proc->tls_slot_in_use |= (1ULL << slot);
-    proc->tls_slot_value[slot] = 0; // TlsAlloc: initial value is NULL
+    // The PROCESS-level value array (`proc->tls_slot_value`) is now
+    // the cross-thread template — left at 0 by ProcessCreate's
+    // memset; new threads pick this up in their per-thread copy
+    // when their first TlsGetValue runs (currently still 0).
+    proc->tls_slot_value[slot] = 0;
+    // Reset the calling thread's per-thread value too — TlsAlloc
+    // contract is "the caller observes 0 in the freshly-allocated
+    // slot regardless of what was there before reuse."
+    sched::SetCurrentTaskTlsSlotValue(static_cast<u32>(slot), 0);
     arch::Sti();
     KLOG_DEBUG_V("win32/tls", "DoTlsAlloc: granted slot", slot);
     frame->rax = slot;
@@ -72,6 +88,14 @@ void DoTlsFree(arch::TrapFrame* frame)
     }
     proc->tls_slot_in_use &= ~(1ULL << idx);
     proc->tls_slot_value[idx] = 0;
+    // The other tasks' per-thread copies are not cleared here —
+    // they remain "garbage" from the freed-slot's perspective,
+    // matching Win32's "TlsFree doesn't reach across threads"
+    // contract. A subsequent TlsAlloc that reuses the slot zeroes
+    // the calling thread's view; other threads see 0 the next
+    // time they TlsGetValue (the new value, not the stale one
+    // from before TlsFree).
+    sched::SetCurrentTaskTlsSlotValue(static_cast<u32>(idx), 0);
     arch::Sti();
     KLOG_DEBUG_V("win32/tls", "DoTlsFree: released slot", idx);
     frame->rax = 0;
@@ -80,13 +104,6 @@ void DoTlsFree(arch::TrapFrame* frame)
 void DoTlsGet(arch::TrapFrame* frame)
 {
     KLOG_TRACE_V("win32/tls", "DoTlsGet: idx", frame->rdi);
-    core::Process* proc = core::CurrentProcess();
-    if (proc == nullptr)
-    {
-        KLOG_WARN("win32/tls", "DoTlsGet: no current Process");
-        frame->rax = 0;
-        return;
-    }
     const u64 idx = frame->rdi;
     if (idx >= core::Process::kWin32TlsCap)
     {
@@ -95,20 +112,13 @@ void DoTlsGet(arch::TrapFrame* frame)
         return;
     }
     // Win32 TlsGetValue returns 0 for unallocated slots too, so no
-    // in-use check; just return the stored value.
-    frame->rax = proc->tls_slot_value[idx];
+    // in-use check; just return the stored per-thread value.
+    frame->rax = sched::CurrentTaskTlsSlotValue(static_cast<u32>(idx));
 }
 
 void DoTlsSet(arch::TrapFrame* frame)
 {
     KLOG_TRACE_V("win32/tls", "DoTlsSet: idx", frame->rdi);
-    core::Process* proc = core::CurrentProcess();
-    if (proc == nullptr)
-    {
-        KLOG_WARN("win32/tls", "DoTlsSet: no current Process");
-        frame->rax = static_cast<u64>(-1);
-        return;
-    }
     const u64 idx = frame->rdi;
     if (idx >= core::Process::kWin32TlsCap)
     {
@@ -116,7 +126,7 @@ void DoTlsSet(arch::TrapFrame* frame)
         frame->rax = static_cast<u64>(-1);
         return;
     }
-    proc->tls_slot_value[idx] = frame->rsi;
+    sched::SetCurrentTaskTlsSlotValue(static_cast<u32>(idx), frame->rsi);
     frame->rax = 0;
 }
 

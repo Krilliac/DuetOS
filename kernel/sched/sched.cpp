@@ -174,6 +174,23 @@ struct Task
     u32 win32_last_error;
     u32 _pad_win32_last_error;
 
+    // Win32 TLS (Thread-Local Storage) per-thread slot values.
+    // The slot ALLOCATION bitmap (`Process::tls_slot_in_use`) is
+    // per-process — TlsAlloc returns a slot index every thread in
+    // the process shares. The stored VALUE per slot, by contract,
+    // is per-thread: thread A's TlsSetValue(slot=5, x) must NOT
+    // be observable by thread B's TlsGetValue(slot=5). v0 stored
+    // values on Process and shared across threads — correct only
+    // for single-threaded programs. Storing per-thread closes the
+    // gap. T6-01 (partial): full PE TLS callbacks + static-TLS
+    // template still defer; this is the runtime-API half.
+    //
+    // 512 bytes per Task. With ~30 tasks at peak the cost is ~15
+    // KiB, which the kheap absorbs without notice. Kernel-only
+    // tasks (idle, workers, reaper) never call TlsAlloc / Set /
+    // Get and leave the array zero-initialised.
+    u64 win32_tls_slot_value[64];
+
     // Linux-ABI FS.base (MSR_FS_BASE). Meaningful only for tasks
     // whose process has abi_flavor == kAbiLinux — that's where
     // musl plants its TLS anchor via arch_prctl(ARCH_SET_FS).
@@ -360,7 +377,8 @@ constinit u64 g_tasks_exited = 0;
 // graph (sync/lockdep.h) records every "lock-X-was-held when sched
 // was acquired" pairing. Untagged locks pay nothing; the scheduler
 // runqueue is THE most contended global, so it gets first.
-constinit sync::SpinLock g_sched_lock{.next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassSched};
+constinit sync::SpinLock g_sched_lock{
+    .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassSched};
 
 // Current() and NeedResched() moved to cpu::PerCpu. Per-CPU accessors
 // keep call sites terse and read unambiguously: Current() is the
@@ -1798,6 +1816,26 @@ u32 SetCurrentTaskWin32LastError(u32 err)
     const u32 previous = self->win32_last_error;
     self->win32_last_error = err;
     return previous;
+}
+
+u64 CurrentTaskTlsSlotValue(u32 idx)
+{
+    Task* self = CurrentTask();
+    if (self == nullptr || idx >= 64)
+    {
+        return 0;
+    }
+    return self->win32_tls_slot_value[idx];
+}
+
+void SetCurrentTaskTlsSlotValue(u32 idx, u64 value)
+{
+    Task* self = CurrentTask();
+    if (self == nullptr || idx >= 64)
+    {
+        return;
+    }
+    self->win32_tls_slot_value[idx] = value;
 }
 
 u64 TaskId(const Task* t)

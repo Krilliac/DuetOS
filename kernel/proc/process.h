@@ -853,6 +853,33 @@ struct Process
     u64 vmap_base;                                 // = kWin32VmapBase after PE load
     u64 vmap_pages_used;                           // bump cursor in pages
 
+    // VirtualAlloc reserve/commit tracking (T5-01 partial). Each
+    // region records a contiguous VA range carved out of the
+    // vmap arena, the per-page commit state, and the Win32
+    // protection bits the caller asked for. RESERVE-only regions
+    // have `committed_bitmap == 0`; COMMIT-on-existing-RESERVE
+    // sets the matching bits and maps frames. RELEASE clears the
+    // slot and unmaps any committed pages; DECOMMIT clears the
+    // bits and unmaps but keeps the region.
+    //
+    // 16 slots × up to 32 pages per region (= 128 KiB max region)
+    // is plenty for v0 — typical CRT VirtualAlloc usage is two
+    // regions (heap fallback + TLS slot table) of a few pages
+    // each. Max region size matches the bitmap width (u32). Grow
+    // both when a workload demands.
+    struct Win32VmapRegion
+    {
+        bool in_use;
+        u8 _pad[3];
+        u32 protection;     // raw Win32 flProtect (PAGE_*)
+        u64 base_va;        // 0 = slot free
+        u32 pages;          // total pages in the reservation
+        u32 committed_bits; // bit i set = page i is committed (mapped to a frame)
+    };
+    static constexpr u64 kWin32VmapRegionCap = 16;
+    static constexpr u32 kWin32VmapRegionPagesMax = 32;
+    Win32VmapRegion vmap_regions[kWin32VmapRegionCap];
+
     // Linux signal-handler table — backs rt_sigaction. Each slot
     // records the user-space handler VA + flags + mask. v0 does
     // NOT deliver signals (no trampoline, no pending queue), but
@@ -1069,6 +1096,84 @@ struct Process
         sched::WaitQueue waiters;
     };
     StdinRing stdin_ring;
+
+    // Kernel-resident APC queue. Backs Win32 QueueUserAPC and
+    // ntdll!NtQueueApcThread. Each slot pins a (target_tid, pfn,
+    // data) triple; the entry is queued by SYS_QUEUE_USER_APC and
+    // popped by SYS_DRAIN_USER_APC when the targeted task wakes
+    // from an alertable wait. Cross-thread same-process delivery
+    // works regardless of whether the target was blocked in user
+    // mode or kernel mode — the kernel queue is the source of
+    // truth, and the alertable-wait slicing on the userland side
+    // polls SYS_DRAIN_USER_APC every chunk to fire ready APCs.
+    //
+    // 16 slots matches the legacy user-space queue sizing in
+    // userland/libs/kernel32. Real Windows queues unbounded APCs;
+    // a workload that hits the cap can grow to a KMalloc'd ring.
+    struct ApcSlot
+    {
+        u64 target_tid; // sched::Task::id of the destination
+        u64 pfn;        // user-mode callback VA (PAPCFUNC)
+        u64 data;       // ulData passed to pfn
+        u8 in_use;      // 1 = pending, 0 = empty
+        u8 _pad[7];
+    };
+    static constexpr u32 kApcSlotCap = 16;
+    ApcSlot apc_slots[kApcSlotCap];
+
+    // Win32 priority class — backs SetPriorityClass / GetPriorityClass.
+    // Values mirror Microsoft's contract:
+    //   IDLE_PRIORITY_CLASS         = 0x40
+    //   BELOW_NORMAL_PRIORITY_CLASS = 0x4000
+    //   NORMAL_PRIORITY_CLASS       = 0x20
+    //   ABOVE_NORMAL_PRIORITY_CLASS = 0x8000
+    //   HIGH_PRIORITY_CLASS         = 0x80
+    //   REALTIME_PRIORITY_CLASS     = 0x100
+    // The scheduler is single-band today; the field is recorded
+    // and surfaced through GetPriorityClass for fidelity but
+    // doesn't yet bias scheduling. A future MLFQ rebuild reads it
+    // to pick a band on enqueue.
+    u32 win32_priority_class;
+    u8 _priority_pad[4];
+
+    // Inherited stdio handles — populated at spawn by
+    // CreateProcess(STARTF_USESTDHANDLES). Each is a Win32-shaped
+    // handle copied verbatim from the parent's handle table; the
+    // kernel materialises the matching child-side slot during
+    // spawn (see SysProcessSpawnEx). Zero = no inheritance for
+    // that slot, in which case GetStdHandle returns the legacy
+    // pseudo-handle (-10/-11/-12) and WriteFile routes through
+    // SYS_WRITE(fd=1) for stdout / fd=2 for stderr.
+    //
+    // Index: 0 = stdin, 1 = stdout, 2 = stderr.
+    u64 std_handles[3];
+
+    // Extra Win32 heaps — backs HeapCreate / HeapDestroy.
+    // The default per-process heap stays at `heap_base /
+    // heap_pages / heap_free_head` (kWin32HeapVa, 256 KiB);
+    // HeapCreate carves a fresh region out of the extra-heap
+    // arena (kWin32ExtraHeapArenaBase = 0x55000000), maps the
+    // requested page count RW+NX, and seeds an independent
+    // free list. Each slot's `base_va` is stable for the life
+    // of the heap; HeapDestroy unmaps the pages and clears
+    // the slot.
+    //
+    // 4 slots × up to 16 pages (64 KiB) per heap. Cap matches
+    // typical workloads (CRT keeps one private heap; most apps
+    // never call HeapCreate). Grow when a workload demands.
+    struct Win32ExtraHeap
+    {
+        bool in_use;
+        u8 _pad[7];
+        u64 base_va;   // 0 = slot free
+        u64 pages;     // page count actually mapped
+        u64 free_head; // user VA of first free block (0 = full)
+    };
+    static constexpr u64 kWin32ExtraHeapCap = 4;
+    static constexpr u64 kWin32ExtraHeapPagesMax = 16;
+    static constexpr u64 kWin32ExtraHeapArenaBase = 0x55000000ULL;
+    static constexpr u64 kWin32ExtraHeapStride = 0x100000ULL; // 1 MiB per slot
+    Win32ExtraHeap extra_heaps[kWin32ExtraHeapCap];
 
     u64 refcount;
 };

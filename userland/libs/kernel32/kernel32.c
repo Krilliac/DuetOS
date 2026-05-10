@@ -166,14 +166,88 @@ __declspec(dllexport) BOOL SetConsoleCtrlHandler(void* handler, BOOL add)
  * "hello world" caller today.
  * ------------------------------------------------------------------ */
 
+/* Per-process inherited stdio handles. The kernel writes them
+ * into Process::std_handles[] at spawn (SYS_PROCESS_SPAWN_EX);
+ * SYS_GET_INHERITED_STD reads them back. PEs that weren't started
+ * with STARTF_USESTDHANDLES see 0 here and fall through to the
+ * legacy pseudo-handle return.
+ */
+typedef long long ll_;
+static HANDLE win32_get_inherited_std_handle(DWORD nStdHandle)
+{
+    /* STD_INPUT_HANDLE = -10, STD_OUTPUT_HANDLE = -11, STD_ERROR_HANDLE = -12 */
+    int idx;
+    if (nStdHandle == 0xFFFFFFF6u) /* -10 stdin */
+        idx = 0;
+    else if (nStdHandle == 0xFFFFFFF5u) /* -11 stdout */
+        idx = 1;
+    else if (nStdHandle == 0xFFFFFFF4u) /* -12 stderr */
+        idx = 2;
+    else
+        return (HANDLE)0;
+    ll_ rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((ll_)191), /* SYS_GET_INHERITED_STD */
+                       "D"((ll_)idx)
+                     : "memory");
+    if (rv <= 0 || rv == (ll_)~0ULL)
+        return (HANDLE)0;
+    return (HANDLE)(UINT_PTR)rv;
+}
+
 __declspec(dllexport) HANDLE GetStdHandle(DWORD nStdHandle)
 {
+    /* If the parent supplied an inheritable handle for this
+     * stream via CreateProcess(STARTF_USESTDHANDLES), return
+     * that real handle so WriteFile / ReadFile route through
+     * the kernel handle path (pipe / file). Otherwise fall
+     * back to the legacy zero-extended pseudo-handle. */
+    HANDLE inherited = win32_get_inherited_std_handle(nStdHandle);
+    if (inherited != (HANDLE)0)
+        return inherited;
+
     /* Zero-extend DWORD to HANDLE (pointer-sized on x64).
      * STD_OUTPUT_HANDLE = -11 as DWORD = 0xFFFFFFF5 becomes
      * 0x00000000FFFFFFF5 as a HANDLE — same as the flat stub's
      * `mov eax, ecx; ret`. UINT_PTR is 64-bit so the cast-
      * chain stays warning-clean under MSVC's LLP64 layout. */
     return (HANDLE)(UINT_PTR)nStdHandle;
+}
+
+/* SetPriorityClass / GetPriorityClass — store the Win32 priority
+ * class on the calling Process. The scheduler is single-band
+ * today, so the value is purely advisory; round-trips through
+ * SYS_PRIORITY_CLASS for fidelity. Returns the (post-op) class
+ * code; 0 = unsupported. */
+__declspec(dllexport) BOOL SetPriorityClass(HANDLE hProcess, DWORD dwPriorityClass)
+{
+    (void)hProcess; /* v0: caller's process only. */
+    ll_ rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((ll_)189), /* SYS_PRIORITY_CLASS */
+                       "D"((ll_)1),   /* op = set */
+                       "S"((ll_)dwPriorityClass)
+                     : "memory");
+    return rv != 0;
+}
+
+__declspec(dllexport) DWORD GetPriorityClass(HANDLE hProcess)
+{
+    (void)hProcess;
+    ll_ rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((ll_)189), /* SYS_PRIORITY_CLASS */
+                       "D"((ll_)0),   /* op = get */
+                       "S"((ll_)0)
+                     : "memory");
+    /* Default to NORMAL_PRIORITY_CLASS when the kernel reports 0
+     * (process freshly spawned without an explicit Set). */
+    if (rv == 0)
+        return 0x20u; /* NORMAL_PRIORITY_CLASS */
+    return (DWORD)rv;
 }
 
 /* ------------------------------------------------------------------
@@ -607,19 +681,34 @@ typedef unsigned int PROT;
 
 __declspec(dllexport) void* VirtualAlloc(void* lpAddress, SIZE_T dwSize, DWORD flAllocationType, DWORD flProtect)
 {
-    (void)lpAddress;
-    (void)flProtect;
     /* MEM_WRITE_WATCH (0x00200000) requires the kernel to track
      * which pages have been written since the alloc — we don't
      * have that bookkeeping. Reject explicitly so callers fall
      * back to a non-watched allocation rather than silently
-     * receiving a region that won't honour GetWriteWatch. Real
-     * Windows returns NULL with GetLastError = ERROR_INVALID_PARAMETER
-     * when the kernel doesn't support MEM_WRITE_WATCH. */
+     * receiving a region that won't honour GetWriteWatch. */
     if ((flAllocationType & 0x00200000u) != 0)
         return (void*)0;
+    /* T5-01 partial: route through SYS_VIRTUAL_ALLOC (199) which
+     * tracks regions, honours reserve/commit, and respects
+     * flProtect. Default flAllocationType = 0 (no flag) acts
+     * like real Windows MEM_RESERVE|MEM_COMMIT — alloc-and-commit.
+     * Default flProtect = 0 maps to PAGE_READWRITE. */
+    DWORD alloc_type = flAllocationType;
+    if ((alloc_type & 0x3000u) == 0) /* neither MEM_COMMIT nor MEM_RESERVE */
+        alloc_type |= 0x1000u | 0x2000u;
+    DWORD prot = flProtect;
+    if (prot == 0)
+        prot = 0x04u; /* PAGE_READWRITE */
+    /* SYS_VIRTUAL_ALLOC reads r10 for the hint VA. GCC/Clang's
+     * register asm syntax pins a specific register across the
+     * inline asm so r10 lands where the kernel expects. */
+    register long long _r10 asm("r10") = (long long)(unsigned long long)(UINT_PTR)lpAddress;
     long long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)28), "D"((long long)dwSize) : "memory");
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)199), /* SYS_VIRTUAL_ALLOC */
+                       "D"((long long)dwSize), "S"((long long)alloc_type), "d"((long long)prot), "r"(_r10)
+                     : "memory");
     return (void*)rv;
 }
 
@@ -634,15 +723,20 @@ __declspec(dllexport) void* VirtualAllocEx(HANDLE hProcess, void* lpAddress, SIZ
 
 __declspec(dllexport) BOOL VirtualFree(void* lpAddress, SIZE_T dwSize, DWORD dwFreeType)
 {
-    (void)dwFreeType;
+    /* T5-01 partial: route through SYS_VIRTUAL_FREE (200) which
+     * honours MEM_DECOMMIT (0x4000) vs MEM_RELEASE (0x8000).
+     * If neither flag is set, default to MEM_RELEASE — caller's
+     * intent matches Win32's "release everything" pattern. */
+    DWORD ft = dwFreeType;
+    if ((ft & 0xC000u) == 0)
+        ft |= 0x8000u;
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"((long long)29), "D"((long long)lpAddress), "S"((long long)dwSize)
+                     : "a"((long long)200), /* SYS_VIRTUAL_FREE */
+                       "D"((long long)lpAddress), "S"((long long)dwSize), "d"((long long)ft)
                      : "memory");
-    /* SYS_VUNMAP returns 0 on hit, -1 on miss; Win32 wants
-     * BOOL TRUE on hit. */
-    return rv == 0 ? 1 : 0;
+    return rv != 0;
 }
 
 __declspec(dllexport) BOOL VirtualFreeEx(HANDLE hProcess, void* lpAddress, SIZE_T dwSize, DWORD dwFreeType)
@@ -653,15 +747,19 @@ __declspec(dllexport) BOOL VirtualFreeEx(HANDLE hProcess, void* lpAddress, SIZE_
 
 __declspec(dllexport) BOOL VirtualProtect(void* lpAddress, SIZE_T dwSize, DWORD flNewProtect, DWORD* lpflOldProtect)
 {
-    (void)lpAddress;
-    (void)dwSize;
-    (void)flNewProtect;
-    /* Every vmap page is RW+NX by construction (W^X). Round-
-     * trip PAGE_READWRITE (= 0x04) as the "previous" protection
-     * so MSVC CRT's probe path sees a plausible value. */
-    if (lpflOldProtect != (DWORD*)0)
-        *lpflOldProtect = 0x04;
-    return 1;
+    /* T5-01 partial: route through SYS_VIRTUAL_PROTECT (201). The
+     * kernel-side handler updates the page tables for committed
+     * pages and writes the previous protection into the caller's
+     * out pointer. Pages outside the W^X envelope (any
+     * PAGE_EXECUTE_*) are rejected with rax=0. */
+    register long long _r10 asm("r10") = (long long)(unsigned long long)(UINT_PTR)lpflOldProtect;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)201), /* SYS_VIRTUAL_PROTECT */
+                       "D"((long long)lpAddress), "S"((long long)dwSize), "d"((long long)flNewProtect), "r"(_r10)
+                     : "memory");
+    return rv != 0;
 }
 
 __declspec(dllexport) BOOL VirtualProtectEx(HANDLE hProcess, void* lpAddress, SIZE_T dwSize, DWORD flNewProtect,
@@ -1611,6 +1709,14 @@ __declspec(dllexport) BOOL IsProcessInJob(HANDLE proc, HANDLE job, BOOL* in_job)
  * matches the rest of the v0 kernel32 surface; matches the
  * smoke-test usage pattern of "post N, get N within the same
  * thread".
+ *
+ * T7-03: file→IOCP binding table. CreateIoCompletionPort with
+ * a non-INVALID hFile + non-NULL hExisting registers the
+ * binding so subsequent overlapped ReadFile / WriteFile calls
+ * post a completion packet to the bound port. Only handles
+ * inside the kernel-file-handle range (kWin32HandleBase ..
+ * +kWin32HandleCap) are valid binding sources; others ignore
+ * the call and return the existing port.
  */
 #define DUETOS_IOCP_RING 32
 typedef struct
@@ -1629,36 +1735,37 @@ typedef struct
 #define DUETOS_IOCP_MAX 4
 static DuetosIocp g_iocp[DUETOS_IOCP_MAX];
 
-__declspec(dllexport) HANDLE CreateIoCompletionPort(HANDLE fileHandle, HANDLE existing, unsigned long long key,
-                                                    DWORD numThreads)
+#define DUETOS_IOCP_BINDING_SLOTS 16
+typedef struct
 {
-    (void)fileHandle;
-    (void)key;
-    (void)numThreads;
-    if (existing != (HANDLE)0)
-        return existing; /* Associate fileHandle with existing port — STUB. */
-    for (int i = 0; i < DUETOS_IOCP_MAX; ++i)
-        if (!g_iocp[i].in_use)
-        {
-            g_iocp[i].head = 0;
-            g_iocp[i].tail = 0;
-            g_iocp[i].in_use = 1;
-            return (HANDLE)(unsigned long long)(0x8000 + i);
-        }
-    return (HANDLE)0;
-}
+    int in_use;
+    HANDLE file_handle;
+    HANDLE iocp_handle;
+    unsigned long long completion_key;
+} DuetosIocpBinding;
+static DuetosIocpBinding g_iocp_bindings[DUETOS_IOCP_BINDING_SLOTS];
 
-__declspec(dllexport) BOOL PostQueuedCompletionStatus(HANDLE iocp, DWORD bytes, unsigned long long key, void* ov)
+static int win32_iocp_slot_of_handle(HANDLE iocp)
 {
-    unsigned long long h = (unsigned long long)iocp;
+    unsigned long long h = (unsigned long long)(UINT_PTR)iocp;
     if (h < 0x8000 || h >= 0x8000 + DUETOS_IOCP_MAX)
-        return 0;
+        return -1;
     int slot = (int)(h - 0x8000);
     if (!g_iocp[slot].in_use)
+        return -1;
+    return slot;
+}
+
+/* Push a completion packet onto a port. Drops on full ring
+ * (matches PostQueuedCompletionStatus's behaviour). Returns 1
+ * on enqueue, 0 on full/closed. */
+static int win32_iocp_post_internal(int slot, DWORD bytes, unsigned long long key, void* ov)
+{
+    if (slot < 0 || slot >= DUETOS_IOCP_MAX || !g_iocp[slot].in_use)
         return 0;
     int next = (g_iocp[slot].tail + 1) % DUETOS_IOCP_RING;
     if (next == g_iocp[slot].head)
-        return 0; /* full */
+        return 0;
     g_iocp[slot].ring[g_iocp[slot].tail].bytes = bytes;
     g_iocp[slot].ring[g_iocp[slot].tail].key = key;
     g_iocp[slot].ring[g_iocp[slot].tail].ov = ov;
@@ -1666,15 +1773,72 @@ __declspec(dllexport) BOOL PostQueuedCompletionStatus(HANDLE iocp, DWORD bytes, 
     return 1;
 }
 
+/* Look up a binding for a given file handle. Returns the
+ * matching slot index in g_iocp_bindings, or -1 on miss. */
+static int win32_iocp_lookup_binding(HANDLE file_handle)
+{
+    for (int i = 0; i < DUETOS_IOCP_BINDING_SLOTS; ++i)
+    {
+        if (g_iocp_bindings[i].in_use && g_iocp_bindings[i].file_handle == file_handle)
+            return i;
+    }
+    return -1;
+}
+
+__declspec(dllexport) HANDLE CreateIoCompletionPort(HANDLE fileHandle, HANDLE existing, unsigned long long key,
+                                                    DWORD numThreads)
+{
+    (void)numThreads;
+    HANDLE iocp = existing;
+    if (iocp == (HANDLE)0)
+    {
+        for (int i = 0; i < DUETOS_IOCP_MAX; ++i)
+            if (!g_iocp[i].in_use)
+            {
+                g_iocp[i].head = 0;
+                g_iocp[i].tail = 0;
+                g_iocp[i].in_use = 1;
+                iocp = (HANDLE)(unsigned long long)(0x8000 + i);
+                break;
+            }
+        if (iocp == (HANDLE)0)
+            return (HANDLE)0;
+    }
+    /* Win32 sentinel: INVALID_HANDLE_VALUE = (HANDLE)-1 means
+     * "create the port, no file binding". Only valid file
+     * handles establish a binding. */
+    const unsigned long long fh_raw = (unsigned long long)(UINT_PTR)fileHandle;
+    if (fileHandle != (HANDLE)0 && fileHandle != (HANDLE)(long long)-1 && fh_raw >= 0x100ULL && fh_raw < 0x110ULL)
+    {
+        for (int i = 0; i < DUETOS_IOCP_BINDING_SLOTS; ++i)
+        {
+            if (!g_iocp_bindings[i].in_use)
+            {
+                g_iocp_bindings[i].in_use = 1;
+                g_iocp_bindings[i].file_handle = fileHandle;
+                g_iocp_bindings[i].iocp_handle = iocp;
+                g_iocp_bindings[i].completion_key = key;
+                break;
+            }
+        }
+    }
+    return iocp;
+}
+
+__declspec(dllexport) BOOL PostQueuedCompletionStatus(HANDLE iocp, DWORD bytes, unsigned long long key, void* ov)
+{
+    int slot = win32_iocp_slot_of_handle(iocp);
+    if (slot < 0)
+        return 0;
+    return win32_iocp_post_internal(slot, bytes, key, ov) ? 1 : 0;
+}
+
 __declspec(dllexport) BOOL GetQueuedCompletionStatus(HANDLE iocp, DWORD* bytes, unsigned long long* key, void** ov,
                                                      DWORD timeout)
 {
     (void)timeout;
-    unsigned long long h = (unsigned long long)iocp;
-    if (h < 0x8000 || h >= 0x8000 + DUETOS_IOCP_MAX)
-        return 0;
-    int slot = (int)(h - 0x8000);
-    if (!g_iocp[slot].in_use)
+    int slot = win32_iocp_slot_of_handle(iocp);
+    if (slot < 0)
         return 0;
     if (g_iocp[slot].head == g_iocp[slot].tail)
         return 0; /* empty — could also block, but v0 is non-blocking. */
@@ -1686,6 +1850,40 @@ __declspec(dllexport) BOOL GetQueuedCompletionStatus(HANDLE iocp, DWORD* bytes, 
         *ov = g_iocp[slot].ring[g_iocp[slot].head].ov;
     g_iocp[slot].head = (g_iocp[slot].head + 1) % DUETOS_IOCP_RING;
     return 1;
+}
+
+/* OVERLAPPED layout (Microsoft SDK):
+ *   +0  ULONG_PTR Internal       — completion status (NTSTATUS)
+ *   +8  ULONG_PTR InternalHigh   — bytes transferred
+ *   +16 DWORD     Offset         — file offset low
+ *   +20 DWORD     OffsetHigh     — file offset high
+ *   +24 HANDLE    hEvent         — optional event signaled on done
+ * Used by ReadFile / WriteFile when lpOverlapped != NULL.
+ */
+#define OVERLAPPED_OFF_INTERNAL 0
+#define OVERLAPPED_OFF_INTERNAL_HIGH 8
+#define OVERLAPPED_OFF_OFFSET_LO 16
+#define OVERLAPPED_OFF_OFFSET_HI 20
+#define OVERLAPPED_OFF_HEVENT 24
+
+static unsigned long long win32_overlapped_offset(const void* ov)
+{
+    if (ov == (const void*)0)
+        return 0xFFFFFFFFFFFFFFFFULL;
+    const unsigned char* p = (const unsigned char*)ov;
+    DWORD lo, hi;
+    __builtin_memcpy(&lo, p + OVERLAPPED_OFF_OFFSET_LO, sizeof(lo));
+    __builtin_memcpy(&hi, p + OVERLAPPED_OFF_OFFSET_HI, sizeof(hi));
+    return ((unsigned long long)hi << 32) | lo;
+}
+
+static void win32_overlapped_complete(void* ov, unsigned long long status, unsigned long long bytes)
+{
+    if (ov == (void*)0)
+        return;
+    unsigned char* p = (unsigned char*)ov;
+    __builtin_memcpy(p + OVERLAPPED_OFF_INTERNAL, &status, sizeof(status));
+    __builtin_memcpy(p + OVERLAPPED_OFF_INTERNAL_HIGH, &bytes, sizeof(bytes));
 }
 
 /* CreateTimerQueue / DeleteTimerQueue — sentinel handle. */
@@ -2698,7 +2896,6 @@ typedef void* LPDWORD_t; /* DWORD* via opaque pointer to avoid C-warning chains 
 
 __declspec(dllexport) BOOL WriteFile(HANDLE hFile, const void* buf, DWORD n, DWORD* lpWritten, void* lpOverlapped)
 {
-    (void)lpOverlapped;
     /* Anonymous pipe: push bytes into the in-process ring instead
      * of routing to stdout. Drop oldest on overflow to keep the
      * producer non-blocking; matches the v0 stdin-ring policy on
@@ -2723,9 +2920,28 @@ __declspec(dllexport) BOOL WriteFile(HANDLE hFile, const void* buf, DWORD n, DWO
 
     /* Kernel file handle (Win32-shaped pseudo-handle): 0x100..0x10F.
      * Route through SYS_FILE_WRITE so the per-handle cursor +
-     * canary wall + cap gate fire. */
+     * canary wall + cap gate fire. T7-03: when lpOverlapped is
+     * supplied, honour OVERLAPPED.Offset (seek before write) and
+     * write OVERLAPPED.Internal / InternalHigh on completion. If
+     * the file is bound to an IOCP via CreateIoCompletionPort,
+     * post a completion packet so GetQueuedCompletionStatus
+     * surfaces the result. */
     if (h_raw >= 0x100ULL && h_raw < 0x110ULL)
     {
+        if (lpOverlapped != (void*)0)
+        {
+            const unsigned long long ov_off = win32_overlapped_offset(lpOverlapped);
+            if (ov_off != 0xFFFFFFFFFFFFFFFFULL)
+            {
+                long long seek_rv;
+                __asm__ volatile("int $0x80"
+                                 : "=a"(seek_rv)
+                                 : "a"((long long)23),                                              /* SYS_FILE_SEEK */
+                                   "D"((long long)h_raw), "S"((long long)ov_off), "d"((long long)0) /* SEEK_SET */
+                                 : "memory");
+                (void)seek_rv;
+            }
+        }
         long long rv;
         __asm__ volatile("int $0x80"
                          : "=a"(rv)
@@ -2733,8 +2949,19 @@ __declspec(dllexport) BOOL WriteFile(HANDLE hFile, const void* buf, DWORD n, DWO
                            "D"((long long)h_raw), "S"((long long)buf), "d"((long long)n)
                          : "memory");
         const int ok = (rv >= 0 && (unsigned long long)rv != ~0ULL);
+        const DWORD bytes = ok ? (DWORD)rv : 0;
         if (lpWritten != (DWORD*)0)
-            *lpWritten = ok ? (DWORD)rv : 0;
+            *lpWritten = bytes;
+        if (lpOverlapped != (void*)0)
+        {
+            win32_overlapped_complete(lpOverlapped, ok ? 0ULL : 0xC0000001ULL, (unsigned long long)bytes);
+            const int bidx = win32_iocp_lookup_binding(hFile);
+            if (bidx >= 0)
+            {
+                const int slot = win32_iocp_slot_of_handle(g_iocp_bindings[bidx].iocp_handle);
+                win32_iocp_post_internal(slot, bytes, g_iocp_bindings[bidx].completion_key, lpOverlapped);
+            }
+        }
         return ok ? 1 : 0;
     }
 
@@ -2864,7 +3091,6 @@ __declspec(dllexport) HANDLE CreateFileW(const wchar_t16* lpFileName, DWORD dwDe
 
 __declspec(dllexport) BOOL ReadFile(HANDLE h, void* buf, DWORD count, DWORD* lpRead, void* lpOverlapped)
 {
-    (void)lpOverlapped;
     /* Anonymous pipe: drain bytes from the in-process ring set up
      * by CreatePipe rather than dispatching SYS_FILE_READ (which
      * doesn't know the pipe sentinel handle and would return -1).
@@ -2900,16 +3126,46 @@ __declspec(dllexport) BOOL ReadFile(HANDLE h, void* buf, DWORD count, DWORD* lpR
 
     /* Kernel file handle range — same numeric band as WriteFile.
      * Anything else falls through to SYS_FILE_READ which will
-     * reject it with -1; we mirror that as FALSE. */
+     * reject it with -1; we mirror that as FALSE. T7-03: honour
+     * lpOverlapped for kernel file handles — seek to
+     * OVERLAPPED.Offset, read, stamp Internal/InternalHigh, and
+     * post a completion packet if the file is IOCP-bound. */
+    if (h_raw >= 0x100ULL && h_raw < 0x110ULL && lpOverlapped != (void*)0)
+    {
+        const unsigned long long ov_off = win32_overlapped_offset(lpOverlapped);
+        if (ov_off != 0xFFFFFFFFFFFFFFFFULL)
+        {
+            long long seek_rv;
+            __asm__ volatile("int $0x80"
+                             : "=a"(seek_rv)
+                             : "a"((long long)23),                                              /* SYS_FILE_SEEK */
+                               "D"((long long)h_raw), "S"((long long)ov_off), "d"((long long)0) /* SEEK_SET */
+                             : "memory");
+            (void)seek_rv;
+        }
+    }
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
                      : "a"((long long)21), /* SYS_FILE_READ */
                        "D"((long long)h_raw), "S"((long long)buf), "d"((long long)count)
                      : "memory");
+    const int ok = (rv >= 0);
+    const DWORD bytes = ok ? (DWORD)rv : 0;
     if (lpRead != (DWORD*)0)
-        *lpRead = rv >= 0 ? (DWORD)rv : 0;
-    return rv >= 0 ? 1 : 0;
+        *lpRead = bytes;
+    if (lpOverlapped != (void*)0)
+    {
+        win32_overlapped_complete(lpOverlapped, ok ? 0ULL : 0xC0000011ULL /* STATUS_END_OF_FILE */,
+                                  (unsigned long long)bytes);
+        const int bidx = win32_iocp_lookup_binding(h);
+        if (bidx >= 0)
+        {
+            const int slot = win32_iocp_slot_of_handle(g_iocp_bindings[bidx].iocp_handle);
+            win32_iocp_post_internal(slot, bytes, g_iocp_bindings[bidx].completion_key, lpOverlapped);
+        }
+    }
+    return ok ? 1 : 0;
 }
 
 __declspec(dllexport) BOOL SetFilePointerEx(HANDLE h, long long liDistance, long long* lpNewPosition,
@@ -3001,48 +3257,76 @@ __declspec(dllexport) BOOL QueryPerformanceFrequency(long long* lpFrequency)
 
 __declspec(dllexport) HANDLE GetProcessHeap(void)
 {
-    /* Sentinel — same value as the flat stub returned, matching
-     * the per-process heap base. */
+    /* Sentinel — matches the kernel-side default-heap base
+     * (kWin32HeapVa = 0x50000000). The kernel resolves both 0
+     * and 0x50000000 to the default heap; either value is
+     * legal for routing. */
     return (HANDLE)0x50000000ULL;
 }
 
+/* HeapAlloc / HeapFree / HeapSize / HeapReAlloc — route through
+ * SYS_HEAPEX_* (192-197) so a HeapCreate-supplied heap handle
+ * targets the right secondary heap. The default-heap sentinel
+ * (0x50000000) and 0 both resolve to the per-process default
+ * heap on the kernel side. dwFlags is honoured for HEAP_ZERO_MEMORY
+ * (0x00000008) — the alloc paths zero the payload before
+ * returning. Other flags (HEAP_GENERATE_EXCEPTIONS,
+ * HEAP_NO_SERIALIZE) are ignored.
+ */
+#define HEAP_ZERO_MEMORY 0x00000008u
+
 __declspec(dllexport) void* HeapAlloc(HANDLE hHeap, DWORD dwFlags, SIZE_T dwBytes)
 {
-    (void)hHeap;
-    (void)dwFlags;
     long long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)11), "D"((long long)dwBytes) : "memory");
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)194), /* SYS_HEAPEX_ALLOC */
+                       "D"((long long)(unsigned long long)(UINT_PTR)hHeap), "S"((long long)dwBytes)
+                     : "memory");
+    if (rv != 0 && (dwFlags & HEAP_ZERO_MEMORY) != 0)
+    {
+        unsigned char* dst = (unsigned char*)(unsigned long long)rv;
+        for (SIZE_T i = 0; i < dwBytes; ++i)
+            dst[i] = 0;
+    }
     return (void*)rv;
 }
 
 __declspec(dllexport) BOOL HeapFree(HANDLE hHeap, DWORD dwFlags, void* lpMem)
 {
-    (void)hHeap;
     (void)dwFlags;
     if (lpMem == (void*)0)
         return 1;
     long long discard;
-    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)12), "D"((long long)lpMem) : "memory");
+    __asm__ volatile("int $0x80"
+                     : "=a"(discard)
+                     : "a"((long long)195), /* SYS_HEAPEX_FREE */
+                       "D"((long long)(unsigned long long)(UINT_PTR)hHeap), "S"((long long)lpMem)
+                     : "memory");
     return 1;
 }
 
 __declspec(dllexport) SIZE_T HeapSize(HANDLE hHeap, DWORD dwFlags, const void* lpMem)
 {
-    (void)hHeap;
     (void)dwFlags;
     long long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)14), "D"((long long)lpMem) : "memory");
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)196), /* SYS_HEAPEX_SIZE */
+                       "D"((long long)(unsigned long long)(UINT_PTR)hHeap), "S"((long long)lpMem)
+                     : "memory");
     return (SIZE_T)rv;
 }
 
 __declspec(dllexport) void* HeapReAlloc(HANDLE hHeap, DWORD dwFlags, void* lpMem, SIZE_T dwBytes)
 {
-    (void)hHeap;
     (void)dwFlags;
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"((long long)15), "D"((long long)lpMem), "S"((long long)dwBytes)
+                     : "a"((long long)197), /* SYS_HEAPEX_REALLOC */
+                       "D"((long long)(unsigned long long)(UINT_PTR)hHeap), "S"((long long)lpMem),
+                       "d"((long long)dwBytes)
                      : "memory");
     return (void*)rv;
 }
@@ -3050,17 +3334,33 @@ __declspec(dllexport) void* HeapReAlloc(HANDLE hHeap, DWORD dwFlags, void* lpMem
 __declspec(dllexport) HANDLE HeapCreate(DWORD flOptions, SIZE_T dwInitialSize, SIZE_T dwMaximumSize)
 {
     (void)flOptions;
-    (void)dwInitialSize;
     (void)dwMaximumSize;
-    /* All heaps collapse to the per-process default. Return the
-     * sentinel from GetProcessHeap. */
-    return (HANDLE)0x50000000ULL;
+    /* Round initial size up to pages (4 KiB). Cap at 16 pages
+     * (kWin32ExtraHeapPagesMax) on the kernel side; passing more
+     * is silently clamped. dwInitialSize == 0 -> 1 page. */
+    unsigned long long pages = ((unsigned long long)dwInitialSize + 0xFFFULL) >> 12;
+    if (pages == 0)
+        pages = 1;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)192), /* SYS_HEAPEX_CREATE */
+                       "D"((long long)pages)
+                     : "memory");
+    if (rv == 0)
+        return (HANDLE)0;
+    return (HANDLE)(UINT_PTR)rv;
 }
 
 __declspec(dllexport) BOOL HeapDestroy(HANDLE hHeap)
 {
-    (void)hHeap;
-    return 1; /* Pretend success — we don't refcount heaps. */
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)193), /* SYS_HEAPEX_DESTROY */
+                       "D"((long long)(unsigned long long)(UINT_PTR)hHeap)
+                     : "memory");
+    return rv != 0;
 }
 
 /* ------------------------------------------------------------------
@@ -3690,6 +3990,21 @@ __declspec(dllexport) DWORD QueueUserAPC(PAPCFUNC pfn, HANDLE hThread, unsigned 
      * GetCurrentThread pseudo-handle) routes to the caller. */
     DWORD target_tid = (hThread == (HANDLE)(long long)-2 || hThread == (HANDLE)0) ? (DWORD)syscall_get_tid()
                                                                                   : (DWORD)(unsigned long long)hThread;
+    /* Try the kernel-resident queue first — that path delivers
+     * across kernel-blocked alertable waits without relying on the
+     * 10ms slice-poll. Fall through to the legacy user-space queue
+     * on any failure (queue full, foreign tid, kCapSpawnThread
+     * denied) so single-threaded callers still see the same
+     * happy-path semantics they did before T8-02 wiring. */
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)187), /* SYS_QUEUE_USER_APC */
+                       "D"((long long)target_tid), "S"((long long)pfn), "d"((long long)dwData)
+                     : "memory");
+    if (rv == 0)
+        return 1;
+
     for (int i = 0; i < WIN32_APC_QUEUE_SLOTS; ++i)
     {
         if (!g_apc_queue[i].in_use)
@@ -3706,14 +4021,34 @@ __declspec(dllexport) DWORD QueueUserAPC(PAPCFUNC pfn, HANDLE hThread, unsigned 
 
 /* Drain APCs queued for the calling thread. Returns the count
  * fired. Called by SleepEx / WaitForSingleObjectEx when
- * bAlertable=TRUE. */
+ * bAlertable=TRUE. Drains both the kernel-resident queue
+ * (SYS_DRAIN_USER_APC = 188) and the legacy user-space queue. */
 static unsigned int win32_drain_apc_queue(void)
 {
     DWORD self_tid = (DWORD)syscall_get_tid();
     unsigned int fired = 0;
-    /* Drain in registration order. Each callback can re-queue;
-     * the re-entrant slot is appended to the tail and won't be
-     * picked up until the next drain. */
+    /* Drain the kernel queue first. Each successful pop returns
+     * the (pfn, data) pair; we invoke from user mode. */
+    for (;;)
+    {
+        unsigned long long pfn_raw = 0;
+        unsigned long long data = 0;
+        long long rv;
+        __asm__ volatile("int $0x80"
+                         : "=a"(rv)
+                         : "a"((long long)188), /* SYS_DRAIN_USER_APC */
+                           "D"((long long)&pfn_raw), "S"((long long)&data)
+                         : "memory");
+        if (rv != 1)
+            break;
+        PAPCFUNC pfn = (PAPCFUNC)(void*)(unsigned long long)pfn_raw;
+        if (pfn != (PAPCFUNC)0)
+        {
+            pfn(data);
+            ++fired;
+        }
+    }
+    /* Then drain the legacy user-space overflow queue. */
     for (int i = 0; i < WIN32_APC_QUEUE_SLOTS; ++i)
     {
         if (g_apc_queue[i].in_use && g_apc_queue[i].target_tid == self_tid)
@@ -4791,6 +5126,70 @@ struct ProcessInformation_t
     DWORD dwThreadId;
 };
 
+/* STARTUPINFO layout: Win32's STARTUPINFOA/W is 104 bytes on x64.
+ * Field order is shared between A and W (only lpDesktop / lpTitle
+ * point at different string types). We decode dwFlags + the three
+ * std handles to drive STARTF_USESTDHANDLES inheritance.
+ *
+ * Offsets (from the SDK):
+ *   +0   DWORD cb              ; sizeof(STARTUPINFO)
+ *   +8   LPSTR lpReserved      ; (8 bytes)
+ *   +16  LPSTR lpDesktop       ; (8 bytes)
+ *   +24  LPSTR lpTitle         ; (8 bytes)
+ *   +32  DWORD dwX
+ *   +36  DWORD dwY
+ *   +40  DWORD dwXSize
+ *   +44  DWORD dwYSize
+ *   +48  DWORD dwXCountChars
+ *   +52  DWORD dwYCountChars
+ *   +56  DWORD dwFillAttribute
+ *   +60  DWORD dwFlags
+ *   +64  WORD  wShowWindow
+ *   +66  WORD  cbReserved2
+ *   +72  LPBYTE lpReserved2
+ *   +80  HANDLE hStdInput
+ *   +88  HANDLE hStdOutput
+ *   +96  HANDLE hStdError
+ */
+#define STARTF_USESTDHANDLES 0x00000100
+#define STARTUPINFO_FLAGS_OFFSET 60
+#define STARTUPINFO_STDIN_OFFSET 80
+#define STARTUPINFO_STDOUT_OFFSET 88
+#define STARTUPINFO_STDERR_OFFSET 96
+
+struct ProcessSpawnStdio_t
+{
+    unsigned long long stdin_handle;
+    unsigned long long stdout_handle;
+    unsigned long long stderr_handle;
+};
+
+static void win32_extract_stdio_bundle(const void* lpStartupInfo, BOOL bInheritHandles, struct ProcessSpawnStdio_t* out,
+                                       int* have_bundle)
+{
+    *have_bundle = 0;
+    out->stdin_handle = 0;
+    out->stdout_handle = 0;
+    out->stderr_handle = 0;
+    if (lpStartupInfo == (const void*)0)
+        return;
+    if (!bInheritHandles)
+        return;
+    const unsigned char* base = (const unsigned char*)lpStartupInfo;
+    DWORD flags;
+    __builtin_memcpy(&flags, base + STARTUPINFO_FLAGS_OFFSET, sizeof(flags));
+    if ((flags & STARTF_USESTDHANDLES) == 0)
+        return;
+    HANDLE h_in, h_out, h_err;
+    __builtin_memcpy(&h_in, base + STARTUPINFO_STDIN_OFFSET, sizeof(h_in));
+    __builtin_memcpy(&h_out, base + STARTUPINFO_STDOUT_OFFSET, sizeof(h_out));
+    __builtin_memcpy(&h_err, base + STARTUPINFO_STDERR_OFFSET, sizeof(h_err));
+    out->stdin_handle = (unsigned long long)(UINT_PTR)h_in;
+    out->stdout_handle = (unsigned long long)(UINT_PTR)h_out;
+    out->stderr_handle = (unsigned long long)(UINT_PTR)h_err;
+    *have_bundle = 1;
+}
+
 __declspec(dllexport) BOOL CreateProcessA(const char* lpApplicationName, char* lpCommandLine, void* lpProcessAttributes,
                                           void* lpThreadAttributes, BOOL bInheritHandles, DWORD dwCreationFlags,
                                           void* lpEnvironment, const char* lpCurrentDirectory, void* lpStartupInfo,
@@ -4798,22 +5197,36 @@ __declspec(dllexport) BOOL CreateProcessA(const char* lpApplicationName, char* l
 {
     (void)lpProcessAttributes;
     (void)lpThreadAttributes;
-    (void)bInheritHandles;
     (void)dwCreationFlags;
     (void)lpEnvironment;
     (void)lpCurrentDirectory;
-    (void)lpStartupInfo;
     const char* path = lpApplicationName;
     if (path == (const char*)0)
         path = lpCommandLine; // first arg of cmdline ≈ executable
     if (path == (const char*)0)
         return 0;
+
+    struct ProcessSpawnStdio_t bundle;
+    int have_bundle = 0;
+    win32_extract_stdio_bundle(lpStartupInfo, bInheritHandles, &bundle, &have_bundle);
+
     long long pid;
-    __asm__ volatile("int $0x80"
-                     : "=a"(pid)
-                     : "a"((long long)158), /* SYS_PROCESS_SPAWN */
-                       "D"((long long)path), "S"((long long)0)
-                     : "memory");
+    if (have_bundle)
+    {
+        __asm__ volatile("int $0x80"
+                         : "=a"(pid)
+                         : "a"((long long)190), /* SYS_PROCESS_SPAWN_EX */
+                           "D"((long long)path), "S"((long long)0), "d"((long long)&bundle)
+                         : "memory");
+    }
+    else
+    {
+        __asm__ volatile("int $0x80"
+                         : "=a"(pid)
+                         : "a"((long long)158), /* SYS_PROCESS_SPAWN */
+                           "D"((long long)path), "S"((long long)0)
+                         : "memory");
+    }
     if (pid < 0)
         return 0;
     if (lpProcessInformation != (void*)0)
