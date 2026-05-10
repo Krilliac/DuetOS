@@ -359,15 +359,31 @@ and never had its row deleted.
 - **Track 10** — T10-01 GitHub Actions CI, T10-02
   `x86_64-kasan` preset, T10-03 `x86_64-release-lto` preset.
 
-After this phase the remaining open imported-TODO rows are: T3-01
+**Second pass (same day) — Track 13 + 14 closures:**
+
+- **Track 13** — T13-01 Win32-Surface-Status audit (summary
+  count refresh + waitable-timer status flips +
+  kernel32 / winmm narrative refresh) and T13-02
+  Roadmap-population discipline (the audit-driven session
+  itself satisfies the row).
+- **Track 14** — T14-01 PE stress fixture
+  (`userland/apps/pe_stress/pe_stress.c`, five worker threads
+  beating heap / mutex / event / file / registry for 2 s,
+  embedded into the boot smoke corpus).
+
+Closing tally for the day: **13 imported-TODO rows closed** (5
+with new code: T1-03 WM_KEYUP, T11-04 waitable + multimedia
+timers, T3-02 + T3-03 networking, T14-01 PE stress; 8 with
+documentation flushes for work that had landed earlier).
+
+After both passes the remaining open imported-TODO rows are: T3-01
 (socket loopback round-trip), T4-03 (Intel iGPU command ring),
 T5-01..04 (memory manager polish), T6-01..04 (process/thread
 model), T7-03/T7-04 (overlapped I/O + NTFS write), T8-01/T8-02
 (MLFQ aging + cross-thread APC), T10-04 (host ctest harness
 extension), T11-02/T11-05 (IPC pipes + power management),
-T12-03 (winmm waveOut over HDA), T13-01/T13-03 (Win32-Surface-
-Status audit + per-syscall arg/return docs), T14-01/T14-03
-(PE stress + network loopback fixtures).
+T12-03 (winmm waveOut over HDA), T13-03 (per-syscall arg/return
+docs), T14-03 (network loopback test, gated on T3-01).
 
 ---
 
