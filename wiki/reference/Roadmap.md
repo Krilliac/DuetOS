@@ -596,6 +596,17 @@ extends. Next:
 > `gdi_smoke`. Syscalls 62/63/64 (`SYS_WIN_PEEK_MSG` /
 > `SYS_WIN_GET_MSG` / `SYS_WIN_POST_MSG`) carry messages;
 > `DispatchMessage` is pure-userland (calls the WNDPROC directly).
+> **T1-04** chrome interactions shipped: the kernel mouse-reader in
+> `kernel/core/main.cpp` posts `WindowRaise` on any in-window press
+> for Z-order, runs `WindowPointInMinBox` / `WindowPointInMaxBox` /
+> the close-glyph hit-test for click-to-min / click-to-max-restore /
+> click-to-close, double-click in the title-bar toggles
+> max ↔ restore, Alt+F4 closes (with the Notes dirty-prompt), and
+> Ctrl+Alt+Arrow drives the snap shortcuts (Left/Right halves, Up
+> maximize, Down restore-or-minimize). Title-bar press-and-drag
+> moves the window through `WindowMoveTo`. The system-menu (NC
+> right-click) Move / Size entries fall through `ModalInputBegin`
+> for the cursor-follow interactive forms.
 > **T1-05** memory-DC + BitBlt landed: `gdi32!CreateCompatibleDC` /
 > `CreateCompatibleBitmap` / `SelectObject` / `DeleteDC` /
 > `DeleteObject` / `BitBlt` route through SYS_GDI_CREATE_COMPAT_DC
@@ -606,8 +617,7 @@ extends. Next:
 
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
-| T1-03 | win32 | P1 | Route keyboard and mouse to the foreground/captured window: scan-code → VK → `WM_KEYDOWN` / `WM_KEYUP` / `WM_CHAR`; mouse hit-test and client-coordinate events; capture; focus and foreground APIs. (Mouse-wheel routing landed; key/button routing pending.) | A PE `MessageBox` can be dismissed by mouse, and a text field receives keystrokes. |
-| T1-04 | win32 | P1 | Add window Z-order, move, resize, minimize, maximize, restore, close chrome. (`GetClientRect`, `GetWindowRect`, `AdjustWindowRect` / `AdjustWindowRectEx` / `AdjustWindowRectExForDpi` landed; chrome interactions still pending.) | PE windows can be dragged, resized, minimized, maximized/restored, and closed via title-bar interactions. |
+| T1-03 | win32 | P1 | Finish keyboard/mouse routing to the foreground/captured window: outstanding pieces are `WM_KEYUP` (0x0101) / `WM_SYSKEYUP` (0x0105) edges (today only press + char post), `SetCapture` / `ReleaseCapture` actually overriding the kernel hit-test (today the user32 entry points return success but the kernel mouse loop still routes by HWND under cursor), and `SetForegroundWindow` honouring the PE-requested HWND outside of explicit raise-on-press (today returns success but doesn't change the active window). `WM_KEYDOWN` / `WM_SYSKEYDOWN` / `WM_CHAR` / `WM_SYSCHAR` and `WM_MOUSEMOVE` / `WM_LBUTTONDOWN` / `WM_LBUTTONUP` / `WM_LBUTTONDBLCLK` + mouse-wheel are all routed today. | A PE that `SetCapture()`s a button keeps receiving `WM_LBUTTONUP` after the cursor leaves the window, and `WM_KEYUP` fires for every released key on the focused PE. |
 
 ### Track 2 — COM infrastructure
 

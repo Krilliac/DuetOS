@@ -1,6 +1,6 @@
 # DuetOS — Design Decisions Log
 
-_Last updated: 2026-05-06 (damage tracking + render stats + display info aggregator)_
+_Last updated: 2026-05-10 (input routing to focused PE + window chrome interactions)_
 
 The most recent formal entries below run through 042 (HPET self-test);
 slices that landed during 2026-04-25 → 2026-05-04 (windowing / GDI /
@@ -6783,3 +6783,63 @@ doc helps future readers audit the trail.
   socket pattern enough to demand functional event delivery.
 - **Related roadmap track(s):** Winsock async surface (v0
   landed; producer-side delivery pending).
+
+---
+
+## 2026-05-10 — Input routing to focused PE + window chrome interactions (T1-03 v0 / T1-04 closed)
+
+- **Scope:** `kernel/core/main.cpp`,
+  `kernel/drivers/video/widget.{h,cpp}`,
+  `kernel/drivers/video/modal_input.{h,cpp}`,
+  `kernel/subsystems/win32/window_syscall.cpp`,
+  `userland/libs/user32/user32.c`,
+  `wiki/subsystems/Compositor.md`,
+  `wiki/reference/Roadmap.md`
+- **Commit:** post-audit roll-up (this commit is the
+  documentation flush; the code landed across the prior slices
+  this audit is reconciling).
+- **Decision:** The kernel mouse-reader and kbd-reader in
+  `kernel/core/main.cpp` are the canonical Win32 input router.
+  Keystrokes targeting a window with `owner_pid > 0` post
+  `WM_KEYDOWN` / `WM_SYSKEYDOWN` (Alt held → SYS variant) and
+  `WM_CHAR` / `WM_SYSCHAR` to the per-window message ring,
+  with lParam bit 29 set for SYS forms. Mouse motion and
+  primary-button edges post `WM_MOUSEMOVE` (0x0200) /
+  `WM_LBUTTONDOWN` (0x0201) / `WM_LBUTTONUP` (0x0202) with
+  client-coordinate lParam packing; double-click adds
+  `WM_LBUTTONDBLCLK` (0x0203). Wheel events post
+  `WM_MOUSEWHEEL` (0x020A) with the standard 120-step
+  zDelta. Window chrome (close / max / min glyphs, title-bar
+  press-and-drag, double-click max-toggle, resize bands at the
+  4-px borders) lives in the same kernel mouse loop and reaches
+  `WindowClose` / `WindowMaximize` / `WindowMinimize` /
+  `WindowRestore` / `WindowMoveTo` / `WindowResizeFromEdge`.
+  Right-click on the title bar opens the system menu via the
+  shared kernel popup-menu primitive; the Move / Size system-
+  menu items hand off to `ModalInputBegin` for cursor-follow
+  interactive forms. Keyboard parity: `Alt+F4` closes,
+  `Ctrl+Alt+Arrow` runs the snap shortcuts. Z-order tracks any
+  in-window press through `WindowRaise`.
+- **Why:** Before this lands the kernel mouse loop was the only
+  surface that spoke directly to the input source (PS/2 +
+  xHCI HID), so any per-PE message routing has to live there
+  too — pushing it into userland would cost a syscall per packet
+  and serialise with the focused PE's own pump. The same
+  argument applies to the chrome buttons: hit-test against
+  `g_windows[h]` is a kernel-side data structure, so the
+  press handler is naturally kernel-side as well.
+- **Rules out / defers:** `WM_KEYUP` / `WM_SYSKEYUP` aren't yet
+  posted (the kbd-reader only fires on press / repeat edges
+  for the PE branch); `SetCapture` / `ReleaseCapture` track
+  the captured HWND in user32 but the kernel mouse loop still
+  routes by HWND-under-cursor on every packet, so a captured
+  PE button doesn't yet receive button-up events outside its
+  client area; `SetForegroundWindow` returns success but
+  doesn't yet rewrite `WindowActive()` outside an explicit
+  raise-on-press. All three are the residual half of T1-03.
+- **Revisit when:** a workload depends on KEYUP edges (e.g.
+  game input), or `SetCapture` is needed for a real drag
+  gesture initiated by a PE (e.g. a slider widget).
+- **Related roadmap track(s):** T1-03 (residual KEYUP +
+  capture/foreground gaps tracked on the row); T1-04 closed
+  with this entry.
