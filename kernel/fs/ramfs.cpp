@@ -51,6 +51,7 @@
 // same helper lives at `wiki/tooling/Native-Apps.md`.
 #include "generated_hello_native_native.h"
 #include "generated_nat_calc_native.h"
+#include "generated_nat_sysinfo_native.h"
 
 /*
  * Seed trees are declared at file scope as constinit data so the
@@ -977,6 +978,16 @@ const u8* RamfsNatCalcBytes()
 u64 RamfsNatCalcSize()
 {
     return ::duetos::fs::generated::kBinNatCalcBytes_len;
+}
+
+const u8* RamfsNatSysinfoBytes()
+{
+    return ::duetos::fs::generated::kBinNatSysinfoBytes;
+}
+
+u64 RamfsNatSysinfoSize()
+{
+    return ::duetos::fs::generated::kBinNatSysinfoBytes_len;
 }
 
 namespace

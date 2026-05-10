@@ -41,15 +41,16 @@ userland/libc/src/string.S             ← strlen rax-clobber fix
 userland/native-apps/<name>/<name>.c   ← per-app source root
 ```
 
-Plus two demo apps that boot every smoke run:
+Plus three portable native apps that boot every smoke run:
 
 | App | Source | Sentinel | Demonstrates |
 |-----|--------|----------|--------------|
 | `hello_native` | `userland/native-apps/hello_native/hello_native.c` | `[hello-native] portable native ELF spawned` | The pipeline works; libc `print_fmt` substitutes `%d` / `%x`. |
 | `nat_calc` | `userland/native-apps/nat_calc/nat_calc.c` | `[nat-calc] all eval cases passed` | Real logic in a portable app — recursive-descent arithmetic eval with operator precedence + parens. |
+| `nat_sysinfo` | `userland/native-apps/nat_sysinfo/nat_sysinfo.c` | `[nat-sysinfo] report complete` | Real syscalls (SYS_SYSTEM_INFO=49, SYS_MEM_STATUS=47, SYS_GETTIME_ST=40) reached from portable user code; reports arch + CPU count + memory + UTC time. Pure-CLI peer of the in-kernel `sysmon` widget app. |
 
-Both spawn at boot from `kernel/core/main.cpp` next to
-`usershell.elf`. The smoke harness can grep for either sentinel
+All three spawn at boot from `kernel/core/main.cpp` next to
+`usershell.elf`. The smoke harness can grep for any sentinel
 to detect a regression in the native-app pipeline.
 
 ## Adding a new portable app
@@ -106,37 +107,41 @@ floating point. The format string + args are bounded by the
 SysV varargs ABI; `-mgeneral-regs-only` is set on the build so
 no float varargs work even if you ask for them.
 
-## Migration roadmap (the 57 in-kernel apps)
+## Stay vs move — verdict (audit of `kernel/apps/`)
 
-Migrating each in-kernel app is two distinct chunks of work:
+Per-file scan of every TU in `kernel/apps/` (33 unique app
+stems, 36 cpp files, 20.5 k LOC) looking for widget-framework
+references (`widget::`, `drivers::video::`, `Window()`,
+`DrawText`, `FillRect`, `RegisterWindow`, `InvalidateRect`,
+`BeginPaint`, `Framebuffer*`):
 
-1. **The widget-framework half.** All 57 apps render through
-   the in-kernel widget framework (`kernel/drivers/video/widget.cpp`).
-   Migration needs a userland widget library (`libduet-widget` or
-   similar) that talks to the kernel compositor via syscalls
-   (`SYS_WIN_*`, `SYS_GDI_*` are already there for Win32 PE
-   apps; the same surface works for native callers). This is
-   a multi-slice piece of work — own scope.
-2. **The per-app port.** Each app's logic gets lifted into a
-   `userland/native-apps/<name>/` directory, depends on
-   `libduet-widget` instead of the kernel widget classes, and
-   gets registered via `duetos_native_app()`.
+| Bucket | Count | Files | Status |
+|--------|-------|-------|--------|
+| **User-facing widget-bound GUI apps** | 31 | about, browser, calculator, calendar, charmap, clock, dbg, dbg_render, devicemgr, files, firewall, gfxdemo, gfxdemo_modes, help, hexview, imageview, magnifier, netstatus, notes, notify_center, screenshot, settings (×6), sysmon, taskman, theme, timezone, trash | **Stay in kernel.** Every one has 8+ widget call sites. Migration needs `libduet-widget` first — own multi-slice scope. |
+| **TU-internal helpers (not user-facing)** | 2 | dbg_core, notes_persist | **Stay in kernel.** Both have 0 widget refs but they're parent-app implementation files; they move only when the parent app moves. |
+| **Already-portable candidates** | 0 | — | None today. |
 
-Until #1 lands, only **CLI-style apps** can move. Of the 57,
-most are widget-bound; the small set of truly CLI-style ones
-(or app-internal helpers like `dbg_core` / `notes_internal` /
-`notes_persist` that are TU helpers, not user-facing) can move
-with no widget work. The bulk of the migration waits on #1.
+The audit's blunt answer: **no kernel app moves out as a 1:1
+migration this session.** Every user-facing one touches widget
+state through the kernel compositor's C++ classes; ripping any
+of them out before `libduet-widget` lands would leave a stub
+that can't actually draw.
 
-### Current categorisation
+What this commit DOES is the next-best thing — ship **CLI peers**
+of selected GUI apps. Each peer is a portable native ELF
+(`userland/native-apps/<name>/`) that exposes the same
+functionality as a stdout-only command-line tool. The GUI app
+keeps its window; the peer keeps the platform honest by proving
+the same kernel state is reachable from portable user code.
 
-| Bucket | Count | Status | Notes |
-|--------|-------|--------|-------|
-| Widget-framework GUI apps | ~28 | Blocked on `libduet-widget` | calc, notes, files, browser, taskman, clock, gfxdemo, calendar, charmap, hexview, imageview, settings (×6 sub-pages), netstatus, devicemgr, sysmon, firewall, magnifier, screenshot, trash, notify_center, about, help, dbg, gfxdemo_modes |
-| App-internal C++ helpers (not user-facing) | ~5 | Won't migrate (they go away with the app) | dbg_core, dbg_internal, dbg_render, notes_internal, notes_persist |
-| Already-portable candidates | 0 | None — every visible app touches widgets | |
+### CLI peers shipped
 
-### Order of operations
+| GUI app (stays in kernel) | Portable CLI peer | Status |
+|---------------------------|-------------------|--------|
+| `kernel/apps/sysmon.cpp` | `userland/native-apps/nat_sysinfo/` | **Shipped this commit.** Reports arch + CPU count + memory + UTC time. |
+| `kernel/apps/calculator.cpp` | `userland/native-apps/nat_calc/` | Shipped last commit. Evaluates arithmetic expressions. |
+
+### Migration order (when `libduet-widget` lands)
 
 1. **Land `libduet-widget`** — userland C++ wrapping
    `SYS_WIN_*` / `SYS_GDI_*` into a Widget API mirroring the
@@ -144,14 +149,30 @@ with no widget work. The bulk of the migration waits on #1.
    one-line s/`#include "drivers/video/widget.h"`/
    `#include "duet/widget.h"`/ and a relink.
 2. **Pick a canary app** to migrate (probably `about` — small,
-   read-only, single window). Verify the round-trip end-to-end.
-3. **Mechanical sweep** of the remaining 27 apps using the
-   canary as the template.
+   read-only, single window, 369 lines / 16 widget refs).
+   Verify the round-trip end-to-end.
+3. **Mechanical sweep** of the remaining 30 user-facing apps
+   using the canary as the template. Migrate the
+   TU-internal helpers (`dbg_core`, `notes_persist`) alongside
+   their parents.
 4. **Remove `kernel/apps/`** sources once all apps are out;
-   the kernel image drops by ~20.5k LOC.
+   the kernel image drops by ~20.5 k LOC.
 5. **Wire duet-pkg** to ship native apps as packages — the
    app embeds today are temporary; once the installer is
-   common, apps should be installed not embedded.
+   common, apps should be installed, not embedded.
+
+### Why not just rip out the widgets today
+
+Looked into it. The kernel widget classes (`widget::Widget`,
+`widget::Window`) take direct pointers to compositor-side
+state — `m_video_buf`, `m_dirty_rects`, the per-window paint
+callback. There's no syscall surface today for "create a window
++ get a framebuffer pointer back to a user pointer". The
+Win32 `SYS_WIN_*` + `SYS_GDI_BITBLT` set is half the path
+(`windowed_hello` proves it works for PE apps); the rest is
+`libduet-widget` doing the same translation from a native
+C++ API the existing apps already speak. Worth doing — just
+its own slice.
 
 ## Build path
 

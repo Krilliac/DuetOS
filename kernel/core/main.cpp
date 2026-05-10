@@ -2352,6 +2352,15 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         SerialWriteHex(pid);
         SerialWrite("\n");
     }
+    {
+        const auto pid = duetos::core::SpawnElfFile(
+            "/bin/nat_sysinfo", duetos::fs::RamfsNatSysinfoBytes(), duetos::fs::RamfsNatSysinfoSize(),
+            duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
+            duetos::core::kTickBudgetTrusted);
+        SerialWrite("[boot] nat_sysinfo pid=");
+        SerialWriteHex(pid);
+        SerialWrite("\n");
+    }
 
     // Login gate — blocks keyboard input from reaching the shell
     // until a valid session is open. TTY mode prints a classic

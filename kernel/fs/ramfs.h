@@ -186,5 +186,7 @@ const u8* RamfsHelloNativeBytes();
 u64 RamfsHelloNativeSize();
 const u8* RamfsNatCalcBytes();
 u64 RamfsNatCalcSize();
+const u8* RamfsNatSysinfoBytes();
+u64 RamfsNatSysinfoSize();
 
 } // namespace duetos::fs
