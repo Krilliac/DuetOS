@@ -496,6 +496,31 @@ A second cut against the same Tier-0 row.
   kCrashDumpSectors + kGptOverheadSectors`) so the layout floor
   tracks the partition sizing constants automatically.
 
+## Phase 6.9 — Installer DuetFS option + DuetFS audit (2026-05-10)
+
+A correction pass + an installer extension.
+
+- **Audit-driven correction.** The Daily-Driver-Readiness Tier-0
+  row claimed "DuetFS read-only". In fact DuetFS ships with the
+  full write surface (`duetfs_write_at` / `duetfs_create_path`
+  / `duetfs_unlink_path` / `duetfs_truncate` / `duetfs_link` /
+  `duetfs_create_symlink`), a journal, AES-XTS sector
+  encryption, Argon2id KDF, LZ4 compression, snapshots, and
+  CRC-checked blocks; auto-mounted at `/duetfs` (RAM-backed)
+  on every boot and at `/disks/duetfsN` for on-disk volumes.
+  Refreshed the row to describe what's actually shipped.
+- **Installer `--duetfs` flag.** New `kDuetFsTypeGuid` GPT
+  partition-type GUID lands in `kernel/fs/gpt.h`. `Install` now
+  takes a `use_duetfs_system` parameter; when set, the system
+  partition is formatted with `duetfs_mkfs` (cookied through
+  `MakeBlockHandleDevice`), typed `kDuetFsTypeGuid`, and mounted
+  at `/system` via `FsType::DuetFs`. Default behaviour
+  (`install <handle> INSTALL`) is unchanged: FAT32 system
+  partition, `kSystemTypeGuid` (Microsoft Basic Data),
+  interoperable with Windows / Linux fdisk. Operators wanting
+  a journalled, encryption-capable native FS pass
+  `install <handle> INSTALL --duetfs`.
+
 ---
 
 ## How to read the rest of the tree

@@ -472,15 +472,20 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
 ### Disk installer
 
 - **Today:** orchestration layer shipped as the kernel-shell
-  `install <handle> INSTALL` command, backed by
+  `install <handle> INSTALL [--duetfs]` command, backed by
   `kernel/fs/installer.{h,cpp}::Install`. Lays down a fresh GPT
   with three partitions (ESP, 64 MiB; system, remainder; crash-
-  dump, 4 MiB tail with `kDuetCrashDumpTypeGuid`), formats ESP +
-  system as FAT32, seeds `/esp/boot/grub/grub.cfg` with a
+  dump, 4 MiB tail with `kDuetCrashDumpTypeGuid`). ESP is always
+  FAT32 (UEFI-spec-mandated). The system partition is FAT32 by
+  default (interoperable with Windows / Linux fdisk) or DuetFS
+  with `--duetfs` (journalled, CRC-checked blocks, encryption /
+  compression / snapshots available; partition type
+  `kDuetFsTypeGuid`). Seeds `/esp/boot/grub/grub.cfg` with a
   chainload stub pointing at `/system/boot/duetos-kernel.elf`,
-  mounts ESP at `/esp` and system at `/system`. Admin-gated +
-  literal `INSTALL` confirmation token + 100 MiB minimum disk
-  size. UUID-v4-stamped GUIDs for the disk + each partition;
+  stamps a real `BOOTX64.EFI` into `/esp/EFI/BOOT/`, mounts ESP
+  at `/esp` and system at `/system`. Admin-gated + literal
+  `INSTALL` confirmation token + 100 MiB minimum disk size.
+  UUID-v4-stamped GUIDs for the disk + each partition;
   RFC-4122-canonical name strings.
 - **UEFI loader bytes shipped:** the installer now stamps a real
   `BOOTX64.EFI` (the PE32+ image built by `boot/uefi/`) into

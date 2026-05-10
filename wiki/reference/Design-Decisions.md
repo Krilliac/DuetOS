@@ -7979,3 +7979,69 @@ doc helps future readers audit the trail.
 - **Related roadmap track(s):** End-user features → Disk
   installer (residual now is kernel-ELF copy only; UEFI loader
   closed).
+
+## 2026-05-10 — Installer `--duetfs` + DuetFS audit
+
+- **What:** correction pass + an installer extension.
+  - **Audit-driven correction.** The Daily-Driver-Readiness Tier-0
+    row claimed DuetFS was "read-only". In fact DuetFS ships with
+    the full write surface (`duetfs_write_at` /
+    `duetfs_create_path` / `duetfs_unlink_path` /
+    `duetfs_truncate` / `duetfs_link` / `duetfs_create_symlink`),
+    a journal, AES-XTS sector encryption, Argon2id KDF, LZ4
+    compression, snapshots, and CRC-checked blocks — all
+    exercised by per-feature self-tests at every boot. Auto-
+    mounted at `/duetfs` (RAM-backed, 256 KiB) and at
+    `/disks/duetfsN` for on-disk volumes. Wired through
+    `kernel/fs/file_route.cpp` so `SYS_FILE_OPEN` /
+    `SYS_FILE_READ` / `SYS_FILE_WRITE` reach `duetfs_*` for
+    DuetFS-backed handles. Refreshed the row to describe what's
+    actually shipped.
+  - **`kDuetFsTypeGuid` GPT type GUID** landed in
+    `kernel/fs/gpt.h`, paralleling `kDuetCrashDumpTypeGuid`.
+    Picked so the printable bytes spell "DUETOSDUETOSDUET" — a
+    DuetFS volume self-identifies in `lsgpt` output and external
+    tooling (`fdisk -l`) classifies it as "unknown DuetOS"
+    rather than misidentifying as Microsoft Basic Data.
+  - **Installer `--duetfs` flag** in
+    `kernel/fs/installer.{h,cpp}` and
+    `kernel/shell/shell_storage.cpp::CmdInstall`. `Install` now
+    takes `bool use_duetfs_system`; when true the system
+    partition is formatted with `duetfs::duetfs_mkfs` (cookied
+    through `duetfs::MakeBlockHandleDevice`), typed
+    `kDuetFsTypeGuid`, and mounted via `FsType::DuetFs`. Default
+    behaviour unchanged: FAT32, `kSystemTypeGuid` (Microsoft
+    Basic Data), interoperable. `WriteSystemSentinel` is skipped
+    on `--duetfs` for now — DuetFS path-create needs a NUL-
+    terminated path through the Rust ABI which the installer
+    doesn't currently wrap. The post-mkfs `duetfs_probe` success
+    is the proof the partition is initialised; the sentinel was
+    cosmetic.
+- **Why:** the installer was the most-requested "make this OS
+  installable" item. DuetFS as the system FS gives operators a
+  journalled / encryption-capable native filesystem for the
+  partition that holds the kernel + user data, while keeping the
+  ESP FAT32 (which UEFI mandates). The audit correction matters
+  because a wiki claim that's wrong about a fully-shipped feature
+  hides the work from the next reader and lets stale "missing"
+  rows accumulate.
+- **Rules out / defers:**
+  - **DuetFS sentinel write at install time.** Path-create
+    through the Rust ABI requires NUL-terminated path bytes
+    + size; not yet wrapped. Cosmetic; defer until a workload
+    exercises the path-create surface from C++.
+  - **DuetFS-as-`/`-root direct boot.** Currently the kernel
+    chain goes UEFI → FAT32 ESP → multiboot2 → DuetOS kernel →
+    DuetFS at `/system`. Booting a DuetFS partition directly
+    would need a DuetFS reader in GRUB / UEFI, OR a tiny FAT
+    partition holding just the kernel ELF that pivots to DuetFS
+    immediately. The pivot path is mechanical once the
+    kernel-ELF embed lands; the GRUB-DuetFS-reader path is
+    upstream-GRUB scope.
+- **Revisit when:** the kernel-ELF embed lands on the installer
+  (graduates the disk-installer track entirely) or a workload
+  exercises the DuetFS path-create surface from C++.
+- **Related roadmap track(s):** End-user features → Disk
+  installer (residual is now kernel-ELF copy only); Filesystem →
+  DuetFS follow-ups (the row's "writable native FS" gap was
+  always closed; visibility was the issue).

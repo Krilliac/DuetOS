@@ -22,6 +22,8 @@
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
 #include "drivers/storage/block.h"
+#include "fs/duetfs.h"
+#include "fs/duetfs/include/duetfs.h"
 #include "fs/fat32.h"
 #include "fs/gpt.h"
 #include "fs/mount.h"
@@ -181,7 +183,7 @@ const char* StatusName(Status s)
     return "?";
 }
 
-Status Install(u32 block_handle, Report* out_report)
+Status Install(u32 block_handle, bool use_duetfs_system, Report* out_report)
 {
     if (out_report == nullptr)
         return Status::InvalidHandle;
@@ -235,7 +237,7 @@ Status Install(u32 block_handle, Report* out_report)
     specs[0].attributes = 0;
     specs[0].name_utf16le = esp_name;
 
-    specs[1].type_guid = kSystemTypeGuid;
+    specs[1].type_guid = use_duetfs_system ? gpt::kDuetFsTypeGuid : kSystemTypeGuid;
     specs[1].unique_guid = sys_unique;
     specs[1].first_lba = sys_first;
     specs[1].last_lba = sys_last;
@@ -282,35 +284,70 @@ Status Install(u32 block_handle, Report* out_report)
         core::Log(core::LogLevel::Error, "fs/installer", "Install: Fat32Format(ESP) failed");
         return Status::EspFormatFailed;
     }
-    if (!fat32::Fat32Format(sys_handle, sys_last - sys_first + 1))
+    if (use_duetfs_system)
     {
-        core::Log(core::LogLevel::Error, "fs/installer", "Install: Fat32Format(system) failed");
-        return Status::SystemFormatFailed;
+        // DuetFS chose for the system partition. Adapter cookies up
+        // a Device that points at the partition block handle, then
+        // mkfs lays down a fresh DuetFS image.
+        const duetfs::Device sys_dev = duetfs::MakeBlockHandleDevice(sys_handle);
+        if (sys_dev.read == nullptr || sys_dev.write == nullptr || sys_dev.block_count == 0 || sys_dev.read_only != 0)
+        {
+            core::Log(core::LogLevel::Error, "fs/installer", "Install: DuetFS adapter rejected the partition handle");
+            return Status::SystemFormatFailed;
+        }
+        const u32 mkfs_st = duetfs::duetfs_mkfs(&sys_dev);
+        if (mkfs_st != duetfs::kStatusOk)
+        {
+            core::Log(core::LogLevel::Error, "fs/installer", "Install: duetfs_mkfs(system) failed");
+            return Status::SystemFormatFailed;
+        }
+        if (duetfs::duetfs_probe(&sys_dev) == 0)
+        {
+            core::Log(core::LogLevel::Error, "fs/installer", "Install: DuetFS post-format probe rejected");
+            return Status::SystemFormatFailed;
+        }
+    }
+    else
+    {
+        if (!fat32::Fat32Format(sys_handle, sys_last - sys_first + 1))
+        {
+            core::Log(core::LogLevel::Error, "fs/installer", "Install: Fat32Format(system) failed");
+            return Status::SystemFormatFailed;
+        }
     }
 
     u32 esp_vol_idx = 0;
-    u32 sys_vol_idx = 0;
     if (!fat32::Fat32Probe(esp_handle, &esp_vol_idx))
     {
         core::Log(core::LogLevel::Error, "fs/installer", "Install: ESP probe after format failed");
         return Status::EspFormatFailed;
     }
-    if (!fat32::Fat32Probe(sys_handle, &sys_vol_idx))
+    if (!use_duetfs_system)
     {
-        core::Log(core::LogLevel::Error, "fs/installer", "Install: system probe after format failed");
-        return Status::SystemFormatFailed;
+        u32 sys_vol_idx = 0;
+        if (!fat32::Fat32Probe(sys_handle, &sys_vol_idx))
+        {
+            core::Log(core::LogLevel::Error, "fs/installer", "Install: system probe after format failed");
+            return Status::SystemFormatFailed;
+        }
+        if (!WriteSystemSentinel(fat32::Fat32Volume(sys_vol_idx)))
+        {
+            // Sentinel is informational; format succeeded so we
+            // don't unwind. Log loud.
+            core::Log(core::LogLevel::Warn, "fs/installer", "Install: system sentinel write failed (continuing)");
+        }
     }
+    // DuetFS sentinel write is left as a follow-on — DuetFS
+    // create_path needs an absolute-path NUL-terminated buffer
+    // routed through the Rust ABI, which the installer doesn't
+    // currently wrap. The duetfs_probe success above is the
+    // strong proof that the partition is initialised; the sentinel
+    // is cosmetic.
 
     if (!WriteEspGrubStub(fat32::Fat32Volume(esp_vol_idx)))
     {
         core::Log(core::LogLevel::Error, "fs/installer", "Install: ESP grub.cfg write failed");
         return Status::EspGrubCfgWriteFailed;
-    }
-    if (!WriteSystemSentinel(fat32::Fat32Volume(sys_vol_idx)))
-    {
-        // Sentinel is informational; format succeeded so we don't
-        // unwind. Log loud.
-        core::Log(core::LogLevel::Warn, "fs/installer", "Install: system sentinel write failed (continuing)");
     }
 
     const MountId esp_mount = VfsMount("/esp", FsType::Fat32, esp_handle);
@@ -319,7 +356,8 @@ Status Install(u32 block_handle, Report* out_report)
         core::Log(core::LogLevel::Error, "fs/installer", "Install: VfsMount(/esp) failed");
         return Status::EspMountFailed;
     }
-    const MountId sys_mount = VfsMount("/system", FsType::Fat32, sys_handle);
+    const FsType sys_fs_type = use_duetfs_system ? FsType::DuetFs : FsType::Fat32;
+    const MountId sys_mount = VfsMount("/system", sys_fs_type, sys_handle);
     if (sys_mount == kInvalidMountId)
     {
         core::Log(core::LogLevel::Error, "fs/installer", "Install: VfsMount(/system) failed");

@@ -111,7 +111,13 @@ const char* StatusName(Status s);
 /// logs a one-line `core::Log` reason. Caller is responsible for
 /// having already verified the user-typed "INSTALL" confirmation
 /// token before reaching here.
-Status Install(u32 block_handle, Report* out_report);
+///
+/// `use_duetfs_system` selects the filesystem laid down on the
+/// system partition: false (default) → FAT32 (familiar tooling
+/// elsewhere can read it), true → DuetFS (journalled writes,
+/// CRC-checked blocks, encryption / compression / snapshots
+/// available). The ESP is always FAT32 (UEFI-spec-mandated).
+Status Install(u32 block_handle, bool use_duetfs_system, Report* out_report);
 
 /// Pure-math layout planner — given `disk_sectors`, fills in the
 /// inclusive LBA ranges Install would assign for ESP / system /

@@ -396,14 +396,16 @@ void CmdInstall(u32 argc, char** argv)
         return;
     if (argc < 3 || argv == nullptr)
     {
-        ConsoleWriteln("usage: install <handle-hex> INSTALL");
-        ConsoleWriteln("  handle   block-device handle from `lsblk` (hex)");
-        ConsoleWriteln("  INSTALL  literal token — destructive, lays a fresh GPT + ESP + system");
+        ConsoleWriteln("usage: install <handle-hex> INSTALL [--duetfs]");
+        ConsoleWriteln("  handle    block-device handle from `lsblk` (hex)");
+        ConsoleWriteln("  INSTALL   literal token — destructive, lays a fresh GPT + ESP + system");
+        ConsoleWriteln("  --duetfs  format the system partition as DuetFS (journalled, CRC,");
+        ConsoleWriteln("            encryption-capable). Default: FAT32 (interoperable).");
         ConsoleWriteln("");
         ConsoleWriteln("layout (~100 MiB minimum):");
         ConsoleWriteln("  LBA 0..33       — PMBR + primary GPT");
         ConsoleWriteln("  LBA 34..        — ESP (FAT32, 64 MiB)");
-        ConsoleWriteln("  LBA esp_end+1.. — System (FAT32, takes remaining space)");
+        ConsoleWriteln("  LBA esp_end+1.. — System (FAT32 or DuetFS, takes remaining space)");
         ConsoleWriteln("  last 4 MiB      — Crash-dump (kDuetCrashDumpTypeGuid)");
         ConsoleWriteln("  trailing 33 LBA — Backup GPT");
         return;
@@ -429,14 +431,33 @@ void CmdInstall(u32 argc, char** argv)
         ConsoleWriteln("install: confirmation token missing — pass literal INSTALL");
         return;
     }
+    bool use_duetfs = false;
+    if (argc >= 4 && argv[3] != nullptr)
+    {
+        const char* flag = argv[3];
+        if (flag[0] == '-' && flag[1] == '-' && flag[2] == 'd' && flag[3] == 'u' && flag[4] == 'e' && flag[5] == 't' &&
+            flag[6] == 'f' && flag[7] == 's' && flag[8] == '\0')
+        {
+            use_duetfs = true;
+        }
+        else
+        {
+            ConsoleWrite("install: unrecognised flag '");
+            ConsoleWrite(flag);
+            ConsoleWriteln("' — only --duetfs is supported");
+            return;
+        }
+    }
     ConsoleWrite("install: target ");
     ConsoleWrite(storage::BlockDeviceName(handle));
     ConsoleWrite(" (");
     WriteHexCol(storage::BlockDeviceSectorCount(handle), 0);
-    ConsoleWriteln(" sectors)");
+    ConsoleWrite(" sectors, system=");
+    ConsoleWrite(use_duetfs ? "DuetFS" : "FAT32");
+    ConsoleWriteln(")");
 
     inst::Report report{};
-    const inst::Status st = inst::Install(handle, &report);
+    const inst::Status st = inst::Install(handle, use_duetfs, &report);
     if (st != inst::Status::Ok)
     {
         ConsoleWrite("install: failed — ");
