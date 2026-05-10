@@ -371,19 +371,33 @@ and never had its row deleted.
   beating heap / mutex / event / file / registry for 2 s,
   embedded into the boot smoke corpus).
 
-Closing tally for the day: **14 imported-TODO rows closed** —
-T1-03, T1-04, T3-02, T3-03, T4-01, T4-02, T4-04, T10-01, T10-02,
-T10-03, T11-04, T13-01, T13-02, T14-01. Five with new code
-(T1-03 WM_KEYUP, T11-04 waitable + multimedia timers,
-T3-02 + T3-03 networking, T14-01 PE stress); nine with
-documentation flushes for work that had landed earlier.
+**Third pass (same day) — Track 6 + 11 closures:**
 
-After both passes the remaining open imported-TODO rows are: T3-01
+- **Track 11** — T11-05 ACPI S5 shutdown (KernelHalt now wires
+  through the existing AML `\_S5_` extractor +
+  `acpi::AcpiShutdown` PM1A/PM1B writer; QEMU shutdown ports
+  are the second-tier fallback).
+- **Track 6** — T6-04 cross-process named-object namespace:
+  new `kernel/ipc/named_kobjects.{h,cpp}` (32-slot LRU table)
+  + `kernel/subsystems/win32/named_kobj_syscall.{h,cpp}` +
+  `SYS_NAMED_KOBJ_OPEN_OR_CREATE = 185`. Userland kernel32's
+  `Create{Mutex,Event,Semaphore}{A,W}` and `Open*` consult
+  the kernel-resident table when a name is provided.
+
+Closing tally for the day: **16 imported-TODO rows closed** —
+T1-03, T1-04, T3-02, T3-03, T4-01, T4-02, T4-04, T6-04,
+T10-01, T10-02, T10-03, T11-04, T11-05, T13-01, T13-02, T14-01.
+Seven with new code (T1-03 WM_KEYUP, T11-04 waitable + mm
+timers, T3-02 + T3-03 networking, T11-05 KernelHalt wiring,
+T6-04 named-kobj namespace, T14-01 PE stress); nine with
+documentation flushes.
+
+After three passes the remaining open imported-TODO rows are: T3-01
 (socket loopback round-trip), T4-03 (Intel iGPU command ring),
-T5-01..04 (memory manager polish), T6-01..04 (process/thread
-model), T7-03/T7-04 (overlapped I/O + NTFS write), T8-01/T8-02
-(MLFQ aging + cross-thread APC), T10-04 (host ctest harness
-extension), T11-02/T11-05 (IPC pipes + power management),
+T5-01..04 (memory manager polish), T6-01..03 (PE TLS / SEH /
+CreateProcess), T7-03/T7-04 (overlapped I/O + NTFS write),
+T8-01/T8-02 (MLFQ aging + cross-thread APC), T10-04 (host
+ctest harness extension), T11-02 (cross-process pipes),
 T12-03 (winmm waveOut over HDA), T13-03 (per-syscall arg/return
 docs), T14-03 (network loopback test, gated on T3-01).
 
