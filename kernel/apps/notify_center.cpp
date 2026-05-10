@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "drivers/input/ps2kbd.h"
+#include "drivers/video/dialog.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/notify.h"
 #include "drivers/video/scrollbar.h"
@@ -63,12 +64,33 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     const u32 row_w = (cw > duetos::drivers::video::kScrollbarWidth + kPad)
                           ? cw - duetos::drivers::video::kScrollbarWidth - kPad
                           : cw;
+    // Per-kind tag glyph rendered in a 4-px coloured stripe at
+    // the row's left edge. Severity reads at a glance without
+    // needing colour-blind operators to parse the panel tint.
+    auto kind_stripe_rgb = [](duetos::drivers::video::NotifyKind k) -> u32
+    {
+        switch (k)
+        {
+        case duetos::drivers::video::NotifyKind::Success:
+            return 0x0050C050u;
+        case duetos::drivers::video::NotifyKind::Warning:
+            return 0x00E0A040u;
+        case duetos::drivers::video::NotifyKind::Error:
+            return 0x00E04040u;
+        case duetos::drivers::video::NotifyKind::Info:
+        default:
+            return 0x004060A0u;
+        }
+    };
     for (u32 i = 0; i < visible; ++i)
     {
         const u32 idx = g_scroll + i;
         const u32 row_y = list_top + i * kRowH;
         const bool sel = (idx == g_selection);
         FramebufferFillRect(cx, row_y, row_w, kRowH, sel ? sel_bg : bg);
+        // Severity stripe: 3 px wide, full row height.
+        const auto kind = duetos::drivers::video::NotifyHistoryGetKind(idx);
+        FramebufferFillRect(cx, row_y, 3, kRowH, kind_stripe_rgb(kind));
         char buf[duetos::drivers::video::kNotifyMaxText + 8];
         u32 o = 0;
         buf[o++] = '[';
@@ -79,7 +101,7 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
         buf[o++] = ' ';
         const u32 wrote = duetos::drivers::video::NotifyHistoryGet(idx, buf + o, sizeof(buf) - o);
         buf[o + wrote] = '\0';
-        FramebufferDrawString(cx + kPad, row_y + 2, buf, sel ? sel_fg : fg, sel ? sel_bg : bg);
+        FramebufferDrawString(cx + kPad + 4, row_y + 2, buf, sel ? sel_fg : fg, sel ? sel_bg : bg);
     }
     // Scrollbar registration so the kernel mouse loop can
     // hit-test this app's scrollbar with the rest.
@@ -108,7 +130,31 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
         duetos::drivers::video::WindowSetScrollbar(g_handle, s);
     }
     // Footer hint.
-    FramebufferDrawString(cx + kPad, cy + ch - 12, "J/K UP/DN PG WHEEL  Ctrl+Shift+N also dumps to console", dim, bg);
+    FramebufferDrawString(cx + kPad, cy + ch - 12, "J/K UP/DN HOME/END PG  X/DEL=CLEAR  Ctrl+Shift+N=DUMP", dim, bg);
+}
+
+void OnClearConfirm(duetos::drivers::video::DialogResult result, const char* /*text*/, void* /*user*/)
+{
+    if (result == duetos::drivers::video::DialogResult::Ok)
+    {
+        duetos::drivers::video::NotifyHistoryClear();
+        g_selection = 0;
+        g_scroll = 0;
+        duetos::drivers::video::NotifyShowKind("notify history cleared", duetos::drivers::video::NotifyKind::Info);
+    }
+}
+
+void RequestClearConfirm()
+{
+    if (duetos::drivers::video::NotifyHistoryCount() == 0)
+    {
+        duetos::drivers::video::NotifyShowKind("notify history is empty", duetos::drivers::video::NotifyKind::Info);
+        return;
+    }
+    // Caller is the kbd-reader thread, holding the compositor
+    // lock — same context every other DialogOpen call uses.
+    duetos::drivers::video::MessageBoxOpen("CLEAR HISTORY", "Discard every notification entry?", OnClearConfirm,
+                                           nullptr);
 }
 
 } // namespace
@@ -132,6 +178,11 @@ bool NotifyCenterFeedChar(char c)
         return NotifyCenterFeedArrow(duetos::drivers::input::kKeyArrowDown);
     if (c == 'k' || c == 'K')
         return NotifyCenterFeedArrow(duetos::drivers::input::kKeyArrowUp);
+    if (c == 'x' || c == 'X')
+    {
+        RequestClearConfirm();
+        return true;
+    }
     return false;
 }
 
@@ -139,6 +190,14 @@ bool NotifyCenterFeedArrow(duetos::u16 keycode)
 {
     using namespace duetos::drivers::input;
     const u32 n = duetos::drivers::video::NotifyHistoryCount();
+    // Delete fires the clear-confirm even on an empty ring; the
+    // confirm path itself reports the empty case via toast so
+    // the operator gets feedback either way.
+    if (keycode == kKeyDelete)
+    {
+        RequestClearConfirm();
+        return true;
+    }
     if (n == 0)
         return true;
     switch (keycode)
@@ -156,6 +215,12 @@ bool NotifyCenterFeedArrow(duetos::u16 keycode)
         return true;
     case kKeyPageDown:
         g_selection = (g_selection + 8 < n) ? g_selection + 8 : n - 1;
+        return true;
+    case kKeyHome:
+        g_selection = 0;
+        return true;
+    case kKeyEnd:
+        g_selection = n - 1;
         return true;
     default:
         return false;

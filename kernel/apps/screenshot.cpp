@@ -149,7 +149,9 @@ bool ScreenshotCapture()
     using arch::SerialWrite;
     using drivers::video::CursorPopWait;
     using drivers::video::CursorPushWait;
+    using drivers::video::NotifyKind;
     using drivers::video::NotifyShow;
+    using drivers::video::NotifyShowKind;
 
     const fat::Volume* v = fat::Fat32Volume(0);
     if (v == nullptr)
@@ -207,7 +209,7 @@ bool ScreenshotCapture()
     {
         SerialWrite("[shot] capture: scratch alloc failed\n");
         CursorPopWait();
-        NotifyShow("screenshot: out of memory");
+        NotifyShowKind("screenshot: out of memory", NotifyKind::Error);
         return false;
     }
     duetos::util::BmpWriteHeader32(scratch, fb.width, fb.height, /*top_down=*/true);
@@ -215,7 +217,7 @@ bool ScreenshotCapture()
     {
         SerialWrite("[shot] capture: write failed (disk full?)\n");
         CursorPopWait();
-        NotifyShow("screenshot: write failed");
+        NotifyShowKind("screenshot: write failed", NotifyKind::Error);
         return false;
     }
 
@@ -238,7 +240,7 @@ bool ScreenshotCapture()
         toast[to++] = path[j];
     }
     toast[to] = '\0';
-    NotifyShow(toast);
+    NotifyShowKind(toast, NotifyKind::Success);
     duetos::drivers::video::SoundCueChime();
     return true;
 }
@@ -249,7 +251,9 @@ bool ScreenshotCaptureTga()
     using arch::SerialWrite;
     using drivers::video::CursorPopWait;
     using drivers::video::CursorPushWait;
+    using drivers::video::NotifyKind;
     using drivers::video::NotifyShow;
+    using drivers::video::NotifyShowKind;
 
     const fat::Volume* v = fat::Fat32Volume(0);
     if (v == nullptr)
@@ -297,7 +301,7 @@ bool ScreenshotCaptureTga()
     {
         SerialWrite("[shot] tga: scratch alloc failed\n");
         CursorPopWait();
-        NotifyShow("screenshot: out of memory");
+        NotifyShowKind("screenshot: out of memory", NotifyKind::Error);
         return false;
     }
     if (!duetos::util::TgaWriteHeader32(scratch, fb.width, fb.height))
@@ -305,14 +309,14 @@ bool ScreenshotCaptureTga()
         mm::KFree(scratch);
         SerialWrite("[shot] tga: header build failed (oversize dim?)\n");
         CursorPopWait();
-        NotifyShow("screenshot: tga header failed");
+        NotifyShowKind("screenshot: tga header failed", NotifyKind::Error);
         return false;
     }
     if (!StreamRows(v, path, fb.width, fb.height, scratch, duetos::util::kTgaHeaderBytes, rows))
     {
         SerialWrite("[shot] tga: write failed (disk full?)\n");
         CursorPopWait();
-        NotifyShow("screenshot: write failed");
+        NotifyShowKind("screenshot: write failed", NotifyKind::Error);
         return false;
     }
 
@@ -333,7 +337,7 @@ bool ScreenshotCaptureTga()
         toast[to++] = path[j];
     }
     toast[to] = '\0';
-    NotifyShow(toast);
+    NotifyShowKind(toast, NotifyKind::Success);
     duetos::drivers::video::SoundCueChime();
     return true;
 }

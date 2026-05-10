@@ -3329,7 +3329,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 {
                     const bool ok = duetos::apps::notes::NotesSave();
                     duetos::drivers::video::CompositorUnlock();
-                    duetos::drivers::video::NotifyShow(ok ? "saved to NOTES.TXT" : "save failed");
+                    duetos::drivers::video::NotifyShowKind(ok ? "saved to NOTES.TXT" : "save failed",
+                                                           ok ? duetos::drivers::video::NotifyKind::Success
+                                                              : duetos::drivers::video::NotifyKind::Error);
                     SerialWrite(ok ? "[ui] ^S notes saved\n" : "[ui] ^S notes save FAILED\n");
                     continue;
                 }
@@ -3338,7 +3340,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 {
                     const bool ok = duetos::apps::calendar::CalendarSave();
                     duetos::drivers::video::CompositorUnlock();
-                    duetos::drivers::video::NotifyShow(ok ? "saved to CALENDAR.TXT" : "calendar save failed");
+                    duetos::drivers::video::NotifyShowKind(ok ? "saved to CALENDAR.TXT" : "calendar save failed",
+                                                           ok ? duetos::drivers::video::NotifyKind::Success
+                                                              : duetos::drivers::video::NotifyKind::Error);
                     SerialWrite(ok ? "[ui] ^S calendar saved\n" : "[ui] ^S calendar save FAILED\n");
                     continue;
                 }
@@ -3661,7 +3665,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 {
                     const bool ok = duetos::apps::notes::NotesLoad();
                     duetos::drivers::video::CompositorUnlock();
-                    duetos::drivers::video::NotifyShow(ok ? "loaded NOTES.TXT" : "load failed (no NOTES.TXT?)");
+                    duetos::drivers::video::NotifyShowKind(ok ? "loaded NOTES.TXT" : "load failed (no NOTES.TXT?)",
+                                                           ok ? duetos::drivers::video::NotifyKind::Success
+                                                              : duetos::drivers::video::NotifyKind::Error);
                     SerialWrite(ok ? "[ui] ^O notes loaded\n" : "[ui] ^O notes load FAILED\n");
                     continue;
                 }
@@ -3670,7 +3676,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 {
                     const bool ok = duetos::apps::calendar::CalendarLoad();
                     duetos::drivers::video::CompositorUnlock();
-                    duetos::drivers::video::NotifyShow(ok ? "loaded CALENDAR.TXT" : "calendar load failed");
+                    duetos::drivers::video::NotifyShowKind(ok ? "loaded CALENDAR.TXT" : "calendar load failed",
+                                                           ok ? duetos::drivers::video::NotifyKind::Success
+                                                              : duetos::drivers::video::NotifyKind::Error);
                     SerialWrite(ok ? "[ui] ^O calendar loaded\n" : "[ui] ^O calendar load FAILED\n");
                     continue;
                 }
@@ -3848,7 +3856,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 duetos::drivers::video::CompositorLock();
                 const bool ok = duetos::apps::screenshot::ScreenshotCapture();
                 duetos::drivers::video::CompositorUnlock();
-                duetos::drivers::video::NotifyShow(ok ? "screenshot saved" : "screenshot failed");
+                duetos::drivers::video::NotifyShowKind(ok ? "screenshot saved" : "screenshot failed",
+                                                       ok ? duetos::drivers::video::NotifyKind::Success
+                                                          : duetos::drivers::video::NotifyKind::Error);
                 SerialWrite(ok ? "[ui] ^Alt+P screenshot saved\n" : "[ui] ^Alt+P screenshot FAILED\n");
                 continue;
             }
@@ -3863,7 +3873,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 duetos::drivers::video::CompositorLock();
                 const bool ok_tga = duetos::apps::screenshot::ScreenshotCaptureTga();
                 duetos::drivers::video::CompositorUnlock();
-                duetos::drivers::video::NotifyShow(ok_tga ? "screenshot (TGA) saved" : "screenshot (TGA) failed");
+                duetos::drivers::video::NotifyShowKind(ok_tga ? "screenshot (TGA) saved" : "screenshot (TGA) failed",
+                                                       ok_tga ? duetos::drivers::video::NotifyKind::Success
+                                                              : duetos::drivers::video::NotifyKind::Error);
                 SerialWrite(ok_tga ? "[ui] ^Alt+T screenshot (TGA) saved\n" : "[ui] ^Alt+T screenshot (TGA) FAILED\n");
                 continue;
             }
@@ -4234,7 +4246,8 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     }
                     else if (active == duetos::apps::notify_center::NotifyCenterWindow() &&
                              (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyPageUp ||
-                              ev.code == kKeyPageDown))
+                              ev.code == kKeyPageDown || ev.code == kKeyHome || ev.code == kKeyEnd ||
+                              ev.code == kKeyDelete))
                     {
                         app_consumed =
                             duetos::apps::notify_center::NotifyCenterFeedArrow(static_cast<duetos::u16>(ev.code));

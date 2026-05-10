@@ -687,11 +687,12 @@ bool TrashSelectedFat32()
     }
     else if (rc == duetos::apps::trash::MoveResult::Collision)
     {
-        duetos::drivers::video::NotifyShow("trash: name collision (empty first)");
+        duetos::drivers::video::NotifyShowKind("trash: name collision (empty first)",
+                                               duetos::drivers::video::NotifyKind::Warning);
     }
     else
     {
-        duetos::drivers::video::NotifyShow("trash: move failed");
+        duetos::drivers::video::NotifyShowKind("trash: move failed", duetos::drivers::video::NotifyKind::Error);
     }
     return true;
 }
@@ -722,7 +723,7 @@ bool RestoreSelectedTrash()
     }
     else
     {
-        duetos::drivers::video::NotifyShow("restore failed");
+        duetos::drivers::video::NotifyShowKind("restore failed", duetos::drivers::video::NotifyKind::Error);
     }
     return true;
 }
@@ -750,7 +751,7 @@ bool PermDeleteSelectedTrash()
     }
     else
     {
-        duetos::drivers::video::NotifyShow("perm-delete failed");
+        duetos::drivers::video::NotifyShowKind("perm-delete failed", duetos::drivers::video::NotifyKind::Error);
     }
     return true;
 }
@@ -852,11 +853,12 @@ void FilesInit(duetos::drivers::video::WindowHandle handle)
             }
             if (rc == duetos::apps::trash::MoveResult::Collision)
             {
-                duetos::drivers::video::NotifyShow("trash: name collision");
+                duetos::drivers::video::NotifyShowKind("trash: name collision",
+                                                       duetos::drivers::video::NotifyKind::Warning);
                 duetos::drivers::video::SoundCueError();
                 return false;
             }
-            duetos::drivers::video::NotifyShow("trash: failed");
+            duetos::drivers::video::NotifyShowKind("trash: failed", duetos::drivers::video::NotifyKind::Error);
             duetos::drivers::video::SoundCueError();
             return false;
         },
@@ -1422,7 +1424,7 @@ void FilesDispatchContextAction(duetos::u32 action, duetos::u32 ctx)
                 }
                 else
                 {
-                    duetos::drivers::video::NotifyShow("rename failed");
+                    duetos::drivers::video::NotifyShowKind("rename failed", duetos::drivers::video::NotifyKind::Error);
                     duetos::drivers::video::SoundCueError();
                     duetos::arch::SerialWrite("[files] rename FAILED: ");
                     duetos::arch::SerialWrite(src);

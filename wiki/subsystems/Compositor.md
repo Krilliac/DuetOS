@@ -193,14 +193,37 @@ drag-to-resize.
 ## Notification History
 
 `notify.{h,cpp}` retains the last 16 distinct toasts displayed
-via `NotifyShowFor`. Duplicate-text pushes coalesce so a
-service that fires the same toast every second doesn't burn
-through the ring. The history is exposed via
-`NotifyHistoryCount()` + `NotifyHistoryGet(idx, out, cap)`;
-v1's only consumer is the `Ctrl+Shift+N` hotkey in
-`kernel/core/main.cpp`, which dumps the ring to the
-framebuffer console between two banner lines. A dedicated
-Notification Center app is a future slice.
+via `NotifyShowFor` / `NotifyShowKindFor`. Duplicate
+`(text, kind)` pushes coalesce so a service that fires the
+same toast every second doesn't burn through the ring; a
+different-kind push of the same text DOES land so an operator
+sees an Info→Warning→Error transition. The history is exposed
+via `NotifyHistoryCount()` + `NotifyHistoryGet(idx, out, cap)`
++ `NotifyHistoryGetKind(idx)` + `NotifyHistoryClear()`.
+Consumers:
+
+- `Ctrl+Shift+N` in `kernel/core/main.cpp` — dumps the ring to
+  the framebuffer console between two banner lines.
+- **Notification Center** (`kernel/apps/notify_center.cpp`) —
+  windowed reader. Bindings: J/K Up/Down navigate, PageUp /
+  PageDown step by 8, Home / End jump to newest / oldest, X /
+  Del clears the ring (MessageBox confirm). A 3-px coloured
+  stripe at each row's left edge encodes the severity:
+  blue (Info), green (Success), amber (Warning), red (Error).
+
+### Toast Severity (`NotifyKind`)
+
+`NotifyKind::Info` (default) paints with the theme's taskbar
+accent so the toast reads as system chrome. `Success` uses a
+dark green, `Warning` a dark amber, `Error` a dark red — all
+paired with a 1-px theme-coloured border. Callers pick the
+kind through `NotifyShowKind(text, kind)` /
+`NotifyShowKindFor(text, kind, ttl)`. `NotifyShow` and
+`NotifyShowFor` continue to default to `Info` so existing call
+sites are unchanged. Failure paths (screenshot write, file
+load / rename, trash move, calendar / notes save) ship with
+`NotifyKind::Error`; the matching success arm uses
+`NotifyKind::Success`.
 
 ## First-Run Welcome
 
@@ -296,11 +319,6 @@ Action-id allocation:
   pump immediately.
 - **Keyboard / mouse routing to the focused window**: input still
   goes to the native console even when a Win32 PE is focused.
-- **Interactive Move / Size from the system menu**: GAP. Win32's
-  Move / Size enter a modal-input state that follows the cursor
-  until the next click; we don't have modal input. Move
-  one-shot-recenters the window under the cursor as a degraded
-  stand-in; Size is shown disabled.
 - **Submenu marshaling across `SYS_WIN_TRACK_POPUP`**: GAP. PE
   apps that need nested menus call `TrackPopupMenu` recursively
   from their `WM_COMMAND` handler.
@@ -311,26 +329,15 @@ Action-id allocation:
   shape via `CursorSetShape`, but PE apps have no
   `SYS_GDI_SETCURSOR` to request a shape change. Cursor shape
   is owned entirely by the kernel hit-test today.
-- **ImageView wheel = next/prev only**: zoom is deferred until
-  ImageView grows zoom state.
-- **Scrollbar per-app drag-the-thumb wiring**: the
-  `ScrollbarHitTest` + `ScrollbarDragTo` API exists, but apps
-  (Files, Browser) don't yet route press / drag events into
-  it. Each consumer needs a press-edge handler that hit-tests
-  its scrollbar rect + a drag-state slot for the grab offset.
-  Wheel dispatch covers the common case in the meantime.
-- **Notification Center app**: deferred. The retention ring is
-  in place (`NotifyHistoryCount` + `NotifyHistoryGet`); the
-  v1 consumer is the `Ctrl+Shift+N` console dump. A windowed
-  reader would be a small app on top of the same API.
+- **ImageView zoom**: Ctrl+wheel and `+` / `-` keys zoom by
+  resizing the window; `FitThumbnail` reflows the image into
+  the new content area on next decode. No independent
+  zoom-without-resize state — pan is implicit through window
+  position.
 - **Drag-and-drop between windows**: not in scope. Needs a
   per-window drop-target registry, a `kDraggingItem` global,
   and ghost-image rendering during drag — more invasive than
   any single-app feature.
-- **Desktop right-click "Move / Size" modal-input mode**:
-  Move enters interactive-cursor-follow until a click; not
-  yet implemented (system menu Move re-centres the window
-  under the cursor as a degraded stand-in).
 - **Audio feedback / system sounds**: gated on HDA codec
   programming (Roadmap.md). PC speaker exists but is not
   wired to any UI event.
@@ -341,9 +348,12 @@ Action-id allocation:
   Date-Time)**: each is its own slice per CLAUDE.md.
 - **Trash / ramfs mode in Files**: only FAT32 mode has a v0
   context menu; other modes fall through to the kernel-window menu.
-- **Modal dialogs, common controls, scroll bars, outline fonts,
-  multi-threaded message queues**: all on the windowing track's
-  deferred list.
+- **Win32 common controls, outline fonts, multi-threaded
+  message queues**: still on the windowing track's deferred
+  list. (Native modal dialogs ship via `dialog.{h,cpp}` —
+  `MessageBox` / `InputBox`; native scrollbars ship via
+  `scrollbar.{h,cpp}` with full hit-test + drag-the-thumb
+  wiring in the kernel mouse loop.)
 
 ## Related Pages
 

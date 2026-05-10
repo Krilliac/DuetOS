@@ -891,7 +891,7 @@ void ImageViewInit(WindowHandle handle)
                 duetos::drivers::video::NotifyShow("loaded in image viewer");
                 return true;
             }
-            duetos::drivers::video::NotifyShow("imageview: load failed");
+            duetos::drivers::video::NotifyShowKind("imageview: load failed", duetos::drivers::video::NotifyKind::Error);
             return false;
         },
         1u << static_cast<u32>(duetos::drivers::video::DndKind::FileEntry));
