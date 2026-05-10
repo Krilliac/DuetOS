@@ -146,6 +146,43 @@ the same commit** that delivers the code.
   - **Class K — FS write paths.** When ext4 write, NTFS directory
     parsing, or any filesystem write-remount path lands, re-audit
     the class.
+  - **Class V — programmable kernel filters.** Do not adopt an
+    unprivileged-JIT BPF-equivalent. If a programmable filter
+    surface is needed (sockets, tracing), gate it behind a
+    capability or run it through a formally-verified interpreter.
+    The verifier-bypass CVE family (CVE-2020-8835 et al.) is
+    structural — patches do not retire the class.
+  - **Class W — GPU command submission.** Before any user-mode
+    surface submits a GPU command buffer, the design must
+    interpose a kernel translation step that produces a
+    verified-shape submission the user cannot edit after the
+    point of validation. Direct user→GPU IOCTL is the load-bearing
+    assumption behind NVIDIA / AMD / Intel GPU CVE families.
+  - **Class FF — TLB shootdown (SMP blocker).** The SMP AP-bringup
+    slice MUST ship with a `tlb_shootdown(addr_space, range)`
+    helper that IPIs remote CPUs currently in the target address
+    space and waits for ack. Today's uniprocessor `invlpg`
+    (`address_space.cpp:430`) becomes a remote-CPU UAF the day
+    APs run. Track as **blocker for the SMP slice**, not a
+    follow-up.
+  - **Class GG — lock hierarchy (SMP blocker).** Document the
+    kernel lock hierarchy in the sched header
+    (`process_table > runqueue > wait_queue > kobject` or
+    equivalent) and add a debug-only "lock rank" assertion before
+    per-CPU runqueues land. Avoid sleeping with a spinlock held;
+    `WaitQueueBlock` (`sched.h:550`) already requires `Cli`.
+  - **Class II — KASLR (lift from "deferred" before multi-tenant).**
+    Kernel image base is fixed at `0xFFFFFFFF80000000`
+    (`boot/linker.ld:30`). Acceptable for a single-tenant developer
+    kernel; **must land before any deployment that runs code
+    from more than one trust domain** (multi-user, network-facing
+    PE sandbox, container-like surfaces). Move out of "settled —
+    DEFERRED" status at that milestone.
+  - **Class CC — `-fstack-protector-strong` flag.** The canary
+    symbol (`stack_canary.cpp`) is implemented and the failure
+    path panics cleanly, but `-fstack-protector-strong` is not
+    visible in the kernel CMake flags audited. Add it
+    explicitly; it should not be relying on a compiler default.
 - **When to revisit:** every time a high-impact public Linux/Windows
   kernel CVE drops, walk the audit doc and update verdicts before
   the next slice lands in the affected area.
