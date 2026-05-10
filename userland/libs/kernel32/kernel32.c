@@ -1700,41 +1700,10 @@ __declspec(dllexport) BOOL DeleteTimerQueue(HANDLE q)
     return 1;
 }
 
-/* CreateWaitableTimerW — sentinel; immediate signal on wait if the
- * relative due-time is "very soon". The smoke test uses 100 ms
- * which is short enough that returning a pre-signaled event-style
- * handle works in single-thread tests. We reuse the manual-reset
- * Event slot machinery via an actual SYS_HANDLE_CREATE_EVENT call. */
-__declspec(dllexport) HANDLE CreateWaitableTimerW(void* sa, BOOL manualReset, const WCHAR_t* name)
-{
-    (void)sa;
-    (void)name;
-    /* Allocate via SYS_HANDLE_CREATE_EVENT (manual, signaled). */
-    long long h;
-    __asm__ volatile("int $0x80"
-                     : "=a"(h)
-                     : "a"((long long)33),                                      /* SYS_HANDLE_CREATE_EVENT */
-                       "D"((long long)(manualReset ? 1 : 0)), "S"((long long)1) /* initially signaled */
-                     : "memory");
-    return (HANDLE)h;
-}
-
-__declspec(dllexport) BOOL SetWaitableTimer(HANDLE t, void* due, long period, void* completion, void* arg, BOOL resume)
-{
-    (void)t;
-    (void)due;
-    (void)period;
-    (void)completion;
-    (void)arg;
-    (void)resume;
-    return 1;
-}
-
-__declspec(dllexport) BOOL CancelWaitableTimer(HANDLE t)
-{
-    (void)t;
-    return 1;
-}
+/* CreateWaitableTimerW / SetWaitableTimer / CancelWaitableTimer
+ * land below CreateThread (which the service-thread spawn depends
+ * on). See the comment block on the implementation for the v0
+ * polling-thread design. */
 
 /* WTSGetActiveConsoleSessionId stub — return 1. */
 __declspec(dllexport) DWORD WTSGetActiveConsoleSessionId(void)
@@ -3684,10 +3653,7 @@ __declspec(dllexport) DWORD SleepEx(DWORD dwMilliseconds, BOOL bAlertable)
     {
         /* Non-alertable Sleep — single SYS_SLEEP syscall. */
         long long discard;
-        __asm__ volatile("int $0x80"
-                         : "=a"(discard)
-                         : "a"((long long)19), "D"((long long)dwMilliseconds)
-                         : "memory");
+        __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)19), "D"((long long)dwMilliseconds) : "memory");
         return 0;
     }
     /* Alertable: chunk into 10ms slices, polling the APC queue
@@ -3706,10 +3672,7 @@ __declspec(dllexport) DWORD SleepEx(DWORD dwMilliseconds, BOOL bAlertable)
         if (dwMilliseconds != 0xFFFFFFFFu && remaining < kSliceMs)
             chunk = remaining;
         long long discard;
-        __asm__ volatile("int $0x80"
-                         : "=a"(discard)
-                         : "a"((long long)19), "D"((long long)chunk)
-                         : "memory");
+        __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)19), "D"((long long)chunk) : "memory");
         if (dwMilliseconds != 0xFFFFFFFFu)
         {
             if (remaining <= chunk)
@@ -3971,6 +3934,184 @@ __declspec(dllexport) DWORD ResumeThread(HANDLE hThread)
      * immediately. Return 0 (= "thread was not previously
      * suspended"), matching the flat stub's behaviour. */
     return 0;
+}
+
+/* Waitable-timer v0. CreateWaitableTimerW allocates a manual-reset
+ * Event in the unsignaled state and reserves a slot in the per-process
+ * timer table. SetWaitableTimer records the absolute due time (and
+ * period for periodic timers), then resets the event. A single
+ * lazily-spawned service thread polls the table every 10 ms and calls
+ * SetEvent on any timer whose due time has arrived. CancelWaitableTimer
+ * marks the slot inactive without touching the event signal state.
+ *
+ * Out of scope:
+ *   - APC completion routines (the `completion`/`arg` parameters are
+ *     accepted but never invoked — needs cross-thread APC delivery,
+ *     Track 8-02).
+ *   - Resume from suspend (`fResume == TRUE` is silently ignored —
+ *     ACPI S3 not implemented).
+ *   - Sub-10ms resolution. The polling cadence is the floor.
+ */
+typedef struct
+{
+    HANDLE event_handle;
+    unsigned long long due_ms;    /* absolute boot-relative ms */
+    unsigned long long period_ms; /* 0 = single-shot */
+    int active;
+} DUETOS_WTIMER_SLOT;
+#define DUETOS_WTIMER_MAX 16
+static DUETOS_WTIMER_SLOT g_wtimers[DUETOS_WTIMER_MAX];
+static volatile int g_wtimer_thread_started = 0;
+
+static int wtimer_find_slot(HANDLE h)
+{
+    for (int i = 0; i < DUETOS_WTIMER_MAX; ++i)
+    {
+        if (g_wtimers[i].event_handle == h)
+            return i;
+    }
+    return -1;
+}
+
+static int wtimer_alloc_slot(HANDLE h)
+{
+    for (int i = 0; i < DUETOS_WTIMER_MAX; ++i)
+    {
+        if (g_wtimers[i].event_handle == (HANDLE)0)
+        {
+            g_wtimers[i].event_handle = h;
+            g_wtimers[i].due_ms = 0;
+            g_wtimers[i].period_ms = 0;
+            g_wtimers[i].active = 0;
+            return i;
+        }
+    }
+    return -1;
+}
+
+static DWORD wtimer_service_thread(void* arg)
+{
+    (void)arg;
+    /* Poll every 10 ms — same cadence as the kernel scheduler tick.
+     * Sub-tick resolution would just spin the CPU without delivering
+     * a finer signal. */
+    for (;;)
+    {
+        ULONGLONG now = GetTickCount64();
+        for (int i = 0; i < DUETOS_WTIMER_MAX; ++i)
+        {
+            if (g_wtimers[i].active && now >= g_wtimers[i].due_ms)
+            {
+                SetEvent(g_wtimers[i].event_handle);
+                if (g_wtimers[i].period_ms > 0)
+                {
+                    /* Re-arm: bump due_ms by period so a slow service
+                     * pass that misses several intervals catches up
+                     * by firing once at the next quantum rather than
+                     * burst-firing every missed interval. */
+                    g_wtimers[i].due_ms = now + g_wtimers[i].period_ms;
+                }
+                else
+                {
+                    g_wtimers[i].active = 0;
+                }
+            }
+        }
+        Sleep(10);
+    }
+    return 0;
+}
+
+static void wtimer_ensure_service(void)
+{
+    /* Single-flag race is acceptable: spawning two service threads
+     * by accident still produces correct behaviour (both threads see
+     * the same table); the only cost is one extra thread of memory.
+     * A real CompareAndSwap would be overkill for this case. */
+    if (g_wtimer_thread_started)
+        return;
+    g_wtimer_thread_started = 1;
+    DWORD tid = 0;
+    HANDLE h = CreateThread((void*)0, 0, wtimer_service_thread, (void*)0, 0, &tid);
+    (void)h;
+}
+
+__declspec(dllexport) HANDLE CreateWaitableTimerW(void* sa, BOOL manualReset, const WCHAR_t* name)
+{
+    (void)sa;
+    (void)name;
+    /* Allocate via SYS_HANDLE_CREATE_EVENT (caller-chosen reset
+     * mode, INITIALLY UNSIGNALED — flips signaled when the timer
+     * fires). */
+    long long h;
+    __asm__ volatile("int $0x80"
+                     : "=a"(h)
+                     : "a"((long long)33),                                      /* SYS_HANDLE_CREATE_EVENT */
+                       "D"((long long)(manualReset ? 1 : 0)), "S"((long long)0) /* initially unsignaled */
+                     : "memory");
+    if (h == 0)
+        return (HANDLE)0;
+    int slot = wtimer_alloc_slot((HANDLE)h);
+    if (slot < 0)
+    {
+        /* Out of slots — return failure. The event is leaked, but
+         * the leak is bounded by DUETOS_WTIMER_MAX failures. */
+        return (HANDLE)0;
+    }
+    return (HANDLE)h;
+}
+
+__declspec(dllexport) HANDLE CreateWaitableTimerA(void* sa, BOOL manualReset, const char* name)
+{
+    (void)name;
+    return CreateWaitableTimerW(sa, manualReset, (const WCHAR_t*)0);
+}
+
+__declspec(dllexport) BOOL SetWaitableTimer(HANDLE t, void* due, long period, void* completion, void* arg, BOOL resume)
+{
+    (void)completion; /* APC completion routines: GAP — Track 8-02 */
+    (void)arg;
+    (void)resume; /* fResume: GAP — ACPI S3 not implemented */
+    if (t == (HANDLE)0 || due == (void*)0)
+        return 0;
+    int slot = wtimer_find_slot(t);
+    if (slot < 0)
+        return 0;
+    /* due is a LARGE_INTEGER*: positive => absolute FILETIME (100-ns
+     * units since 1601), negative => relative 100-ns intervals from
+     * now. v0 only supports the relative form (the absolute form
+     * needs a FILETIME → boot-relative-ms conversion that depends on
+     * the system time being set, which v0 doesn't yet do). */
+    long long lq = *(long long*)due;
+    unsigned long long delay_ms;
+    if (lq < 0)
+    {
+        /* -lq is relative 100-ns intervals → ms */
+        delay_ms = (unsigned long long)(-lq) / 10000ULL;
+    }
+    else
+    {
+        /* Absolute FILETIME — no conversion table; treat as "fire
+         * immediately" so callers don't hang forever. */
+        delay_ms = 0;
+    }
+    ResetEvent(t);
+    g_wtimers[slot].due_ms = GetTickCount64() + delay_ms;
+    g_wtimers[slot].period_ms = (period > 0) ? (unsigned long long)period : 0;
+    g_wtimers[slot].active = 1;
+    wtimer_ensure_service();
+    return 1;
+}
+
+__declspec(dllexport) BOOL CancelWaitableTimer(HANDLE t)
+{
+    if (t == (HANDLE)0)
+        return 0;
+    int slot = wtimer_find_slot(t);
+    if (slot < 0)
+        return 0;
+    g_wtimers[slot].active = 0;
+    return 1;
 }
 
 __declspec(dllexport) BOOL GetExitCodeThread(HANDLE hThread, DWORD* lpExitCode)

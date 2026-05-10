@@ -768,11 +768,24 @@ extends. Next:
 > calls `RegistryHiveSave` (throttled by byte-compare). HKLM / HKCU
 > / HKU + the full Reg* CRUD + enumeration surface advapi32 + the
 > in-kernel registry serialise to the configured FAT32 hive.
+> **T11-04** waitable + multimedia timers shipped:
+> `userland/libs/kernel32/kernel32.c` allocates a manual-reset Event
+> per `CreateWaitableTimer{A,W}` call and reserves a slot in the
+> per-process timer table; `SetWaitableTimer` records the absolute
+> due time + period and resets the event; a single lazily-spawned
+> service thread polls the table every 10 ms and fires `SetEvent`
+> for any timer whose due time has arrived. Periodic timers re-arm
+> from the fire instant. `userland/libs/winmm/winmm.c` mirrors the
+> same pattern for `timeSetEvent` — the registered TIMECALLBACK
+> fires from a winmm-owned service thread, with TIME_PERIODIC
+> re-arming and `timeKillEvent` deactivating the slot. Out of
+> scope: APC completion routines for waitable timers (Track 8-02
+> covers cross-thread APC delivery), TIME_CALLBACK_EVENT_SET /
+> EVENT_PULSE flags for `timeSetEvent`, sub-10 ms resolution.
 
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
 | T11-02 | kernel | P1 | Implement IPC pipes/mailslots: anonymous pipes, named pipes, connect/disconnect, ring-buffer semantics, EOF, and CreateProcess stdio redirection support. | Pipe-backed stdin/stdout/stderr redirection works across parent/child processes. |
-| T11-04 | kernel | P2 | Implement waitable timers and multimedia timers with high-resolution timekeeping and APC/event callbacks. | Waitable timers and `timeSetEvent` callbacks fire accurately. |
 | T11-05 | kernel | P2 | Implement power management: ACPI S5 shutdown, ACPI/FADT reset fallback, and S3 stubs or suspend/resume path. | `ExitWindowsEx(EWX_POWEROFF)` powers off through ACPI S5 where supported. |
 
 ### Track 12 — Userland infrastructure

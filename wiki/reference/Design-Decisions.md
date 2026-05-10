@@ -6949,3 +6949,64 @@ doc helps future readers audit the trail.
   framings when there isn't one. One bullet = one canonical
   description of a GAP. Trivial cleanup.
 - **Related roadmap track(s):** none — pure docs hygiene.
+
+---
+
+## 2026-05-10 — Waitable + multimedia timers (T11-04 closed)
+
+- **Scope:** `userland/libs/kernel32/kernel32.c`,
+  `userland/libs/winmm/winmm.c`,
+  `wiki/reference/Roadmap.md`
+- **Commit:** this slice
+- **Decision:** Waitable timers and multimedia timers both use a
+  per-process polling service thread that wakes every 10 ms,
+  walks a fixed-size table, and either fires `SetEvent` (waitable
+  case) or invokes a TIMECALLBACK (multimedia case) for any
+  slot whose absolute due time has arrived. Periodic timers
+  re-arm from the fire instant; single-shot timers
+  self-deactivate. The service thread is lazily spawned at the
+  first `SetWaitableTimer` / `timeSetEvent` call so processes
+  that never use timers don't pay for the thread. Both tables
+  are sized at 16 slots — the same cap kernel32's existing
+  per-process resource tables use (TLS slots, APC queue, named
+  object dedup); workloads that need more get the `MAX_TIMERS`
+  return rather than silent overflow.
+- **Why:** `CreateWaitableTimer` previously returned a
+  pre-signaled manual-reset event so any `WaitForSingleObject`
+  fell through immediately — workloads using
+  `CreateWaitableTimer` + `SetWaitableTimer(-100ms)` as a sleep
+  substitute saw zero delay instead of 100 ms. `timeSetEvent`
+  returned 0 and never invoked the callback. Both shapes are
+  required by the Track 11-04 acceptance ("Waitable timers and
+  `timeSetEvent` callbacks fire accurately"). A polling service
+  thread is the simplest path that doesn't require new kernel
+  syscalls — the kernel side already has CreateThread + SetEvent
+  + GetTickCount64; the only userland-side change is the table
+  + thread.
+- **Rules out / defers:**
+  - APC completion routines on waitable timers
+    (`SetWaitableTimer`'s `pfnCompletionRoutine` / `lpArgToCompletionRoutine`
+    parameters are accepted and ignored). Cross-thread APC
+    delivery is Track 8-02; until that lands, the completion
+    routine couldn't run on the caller's thread anyway.
+  - TIME_CALLBACK_EVENT_SET / TIME_CALLBACK_EVENT_PULSE flag
+    variants of `timeSetEvent`. The pulse-event surface needs
+    a per-process pulse path that's safe from a service thread,
+    which the v0 event implementation doesn't have.
+  - Sub-10 ms resolution. The polling cadence is the floor.
+    `timeBeginPeriod(1)` is accepted (returns success) but
+    doesn't actually shorten the cadence.
+  - Resume from suspend (`fResume == TRUE` is silently ignored
+    — ACPI S3 not implemented, Track 11-05).
+  - Absolute FILETIME due times. `SetWaitableTimer` only honours
+    relative (negative) due values; absolute (positive) values
+    are coerced to "fire immediately" so callers don't hang
+    forever. A FILETIME → boot-relative-ms conversion table
+    needs the system clock to be set, which v0 doesn't yet do.
+- **Revisit when:** a workload exercises one of the deferred
+  paths (a media-player that wants 1 ms ticks, a SetWaitableTimer
+  caller that depends on APC completion, a thread that pulses
+  an event-based mm-timer). Each is a separate slice keyed off
+  the missing infrastructure (Track 8-02 / event pulse surface
+  / system-clock setting).
+- **Related roadmap track(s):** T11-04 closed.
