@@ -274,8 +274,6 @@ message(STATUS "  KASLR                : ${DUETOS_KASLR}")
 message(STATUS "  KASAN diagnostics    : ${DUETOS_KASAN}")
 message(STATUS "  LTO                  : ${DUETOS_LTO}")
 
-add_subdirectory(kernel)
-
 # UEFI loader (boot/uefi/) — Phase A toolchain proof. Builds a
 # PE32+ EFI Application ("BOOTX64.EFI") that prints a banner and
 # halts. Wired separately from the kernel because UEFI requires a
@@ -284,7 +282,13 @@ add_subdirectory(kernel)
 # clang/lld-link directly via add_custom_command rather than fight
 # the kernel's freestanding-ELF toolchain file. Phase B replaces
 # efi_main with a real ELF loader + multiboot2-shim handoff.
+#
+# Added BEFORE kernel/ so the kernel's ramfs embed-blob step can
+# depend on ${DUETOS_UEFI_EFI} (cached after this subdirectory is
+# processed) without a forward-reference.
 add_subdirectory(boot/uefi)
+
+add_subdirectory(kernel)
 
 # ----------------------------------------------------------------------------
 # Test harness — boots the built kernel in QEMU and greps the serial log for

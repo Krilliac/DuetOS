@@ -268,6 +268,25 @@ add_custom_command(
     VERBATIM)
 list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_WINKILL_HEADER}")
 
+# ----------------------------------------------------------------------------
+# UEFI loader bytes — embed BOOTX64.EFI into the kernel image so the
+# disk installer can copy it onto the freshly-formatted ESP. Same
+# embed pattern as windows-kill above; depends on the duetos-uefi
+# target output set by add_subdirectory(boot/uefi). DUETOS_UEFI_EFI
+# is cached by boot/uefi/CMakeLists.txt; that subdirectory is
+# processed before this one (see CMakeLists.txt at the repo root).
+# ----------------------------------------------------------------------------
+set(DUETOS_BOOTX64_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_bootx64_efi.h")
+add_custom_command(
+    OUTPUT "${DUETOS_BOOTX64_HEADER}"
+    COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
+            "${DUETOS_UEFI_EFI}" "${DUETOS_BOOTX64_HEADER}"
+            kBinBootX64EfiBytes --namespace "duetos::fs::generated"
+    DEPENDS "${DUETOS_UEFI_EFI}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Embedding UEFI loader BOOTX64.EFI for the disk installer"
+    VERBATIM)
+list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_BOOTX64_HEADER}")
+
 # Source-built Win32 smoke PE fixtures. These used to be checked-in
 # .exe files; keep them generated in the build tree so PRs do not carry
 # rebuilt executable artifacts. The helper script still supports manual

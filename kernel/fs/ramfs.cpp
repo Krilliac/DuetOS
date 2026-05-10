@@ -37,6 +37,14 @@
 // subsystem) but PeReport still dumps the full gap on boot.
 #include "generated_winkill_pe.h"
 
+// UEFI loader bytes (PE32+ EFI Application). Embedded so the
+// disk installer can stamp a real BOOTX64.EFI into the freshly-
+// formatted ESP at /esp/EFI/BOOT/BOOTX64.EFI. Source artifact
+// is built by add_subdirectory(boot/uefi) at the top level;
+// the embed step lives in kernel/CMakeLists.txt next to the
+// windows-kill embed.
+#include "generated_bootx64_efi.h"
+
 /*
  * Seed trees are declared at file scope as constinit data so the
  * whole structure lives in .rodata. Children arrays are similarly
@@ -319,9 +327,9 @@ constexpr u8 kManTimeBytes[] = "TIME CMD..\n"
                                "  redirect all apply).\n";
 
 constexpr u8 kManUptimeBytes[] = "UPTIME\n"
-                                  "  Prints current wall time, scheduler uptime, active shell\n"
-                                  "  session count, and 1/5/15-minute load averages.\n"
-                                  "  Format follows the familiar Unix uptime shape.\n";
+                                 "  Prints current wall time, scheduler uptime, active shell\n"
+                                 "  session count, and 1/5/15-minute load averages.\n"
+                                 "  Format follows the familiar Unix uptime shape.\n";
 
 constexpr u8 kManLoadavgBytes[] = "LOADAVG\n"
                                   "  Prints scheduler 1/5/15-minute load averages, then\n"
@@ -393,21 +401,9 @@ MAN_NODE("source", kManSourceBytes);
 #undef MAN_NODE
 
 constinit const RamfsNode* const k_trusted_etc_man_children[] = {
-    &k_man_kManLsBytes,
-    &k_man_kManCatBytes,
-    &k_man_kManEchoBytes,
-    &k_man_kManCpBytes,
-    &k_man_kManMvBytes,
-    &k_man_kManGrepBytes,
-    &k_man_kManFindBytes,
-    &k_man_kManHistoryBytes,
-    &k_man_kManAliasBytes,
-    &k_man_kManEnvBytes,
-    &k_man_kManTimeBytes,
-    &k_man_kManUptimeBytes,
-    &k_man_kManLoadavgBytes,
-    &k_man_kManSourceBytes,
-    nullptr,
+    &k_man_kManLsBytes,   &k_man_kManCatBytes,    &k_man_kManEchoBytes,    &k_man_kManCpBytes,     &k_man_kManMvBytes,
+    &k_man_kManGrepBytes, &k_man_kManFindBytes,   &k_man_kManHistoryBytes, &k_man_kManAliasBytes,  &k_man_kManEnvBytes,
+    &k_man_kManTimeBytes, &k_man_kManUptimeBytes, &k_man_kManLoadavgBytes, &k_man_kManSourceBytes, nullptr,
 };
 
 constinit RamfsNode k_trusted_etc_man_dir = {
@@ -923,6 +919,16 @@ const u8* RamfsUsershellElfBytes()
 u64 RamfsUsershellElfSize()
 {
     return sizeof(kBinUsershellElfBytes);
+}
+
+const u8* RamfsBootX64EfiBytes()
+{
+    return ::duetos::fs::generated::kBinBootX64EfiBytes;
+}
+
+u64 RamfsBootX64EfiSize()
+{
+    return ::duetos::fs::generated::kBinBootX64EfiBytes_len;
 }
 
 namespace

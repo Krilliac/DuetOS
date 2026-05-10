@@ -482,18 +482,31 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
   literal `INSTALL` confirmation token + 100 MiB minimum disk
   size. UUID-v4-stamped GUIDs for the disk + each partition;
   RFC-4122-canonical name strings.
-- **Remaining residual — bootloader-bytes copy:** v0 lays down
-  the partition skeleton + the chainload stub but does not write
-  a real `BOOTX64.EFI` to `/esp/EFI/BOOT/` or
-  `duetos-kernel.elf` to `/system/boot/`. Two viable paths:
-  (1) embed the running kernel image into the ramfs at build
-  time (classic two-stage bootstrap — bytes-of-stage-1 are the
-  blob in stage-2; doubles the build pass); or
-  (2) pull the bytes from an out-of-band source the operator
-  stages first (USB / network / ISO-chainload). Either is a
-  follow-on slice. Until then operators can run the orchestrator
-  to validate disk layout + then drop the bootloader bytes onto
-  the freshly-mounted `/esp` from another source.
+- **UEFI loader bytes shipped:** the installer now stamps a real
+  `BOOTX64.EFI` (the PE32+ image built by `boot/uefi/`) into
+  `/esp/EFI/BOOT/BOOTX64.EFI` — the canonical UEFI fall-back
+  removable-media path. Bytes come from an in-kernel ramfs blob
+  populated at build time by `kernel/CMakeLists.txt`'s embed
+  step (depends on the `duetos-uefi` CMake target produced by
+  `boot/uefi/`). Real-hardware UEFI firmware that boots a
+  removable disk without an explicit boot variable now finds the
+  loader by the spec-mandated path.
+- **Remaining residual — kernel-ELF copy:** the installer does
+  not yet write a real `duetos-kernel.elf` into `/system/boot/`.
+  Embedding the running kernel into ramfs is the bootstrap
+  problem (kernel.elf bytes change after you embed them; classic
+  two-stage build — stage-1 produces bytes, stage-2 embeds the
+  stage-1 bytes; doubles the build pass). Out-of-band staging
+  (USB / network / ISO chainload) is the likely first cut. The
+  grub.cfg + BOOTX64.EFI on disk already point at the expected
+  on-disk kernel path, so once the kernel bytes land there boot
+  just works.
+- **Layout-math self-test runs every boot.** `PlanLayout` is
+  exercised against canonical sizes (just-too-small,
+  100 MiB / 1 GiB / 1 TiB) at `[fs/installer] self-test OK`;
+  a regression in the partition planner surfaces immediately
+  rather than waiting for an operator to run `install` on a
+  real disk.
 
 ### System updater
 

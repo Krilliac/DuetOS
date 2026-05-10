@@ -7917,3 +7917,65 @@ doc helps future readers audit the trail.
   (orchestration closed; bootloader-bytes residual remains);
   End-user features → ACPI S5 (method-form `_S5_` closed; full
   AML interpreter still open).
+
+## 2026-05-10 — Installer UEFI-loader copy + layout self-test
+
+- **What:** the disk installer now ships the easy half of the
+  bootloader-bytes residual.
+  - **`BOOTX64.EFI` embedded into the kernel image.** New
+    `generated_bootx64_efi.h` produced by a custom command in
+    `kernel/CMakeLists.txt` that runs `embed-blob.py` on the
+    `${DUETOS_UEFI_EFI}` artifact (set by `boot/uefi/CMakeLists.txt`).
+    Top-level `CMakeLists.txt` reorders so `boot/uefi` is processed
+    before `kernel`, exposing the cache var to the kernel
+    `add_custom_command`. New accessors
+    `RamfsBootX64EfiBytes()` / `RamfsBootX64EfiSize()` in
+    `fs/ramfs.{h,cpp}`.
+  - **`installer.cpp::WriteEspGrubStub`** now also writes
+    `/EFI/BOOT/BOOTX64.EFI` to the freshly-formatted ESP from the
+    embedded blob — the canonical UEFI fall-back removable-media
+    path. Real-hardware UEFI firmware finds the loader by the
+    spec-mandated path with no explicit boot-variable setup.
+  - **`PlanLayout` factored out** of `Install` and exposed in
+    `installer.h`. Pure math (no I/O); takes `disk_sectors`,
+    fills the six LBA fields of a `Report`. `Install` calls it
+    first thing.
+  - **`InstallerSelfTest`** wired into the boot path next to
+    `Fat32SelfTest`. Exercises `PlanLayout` against four canonical
+    sizes (just-too-small, just-large-enough at
+    `kMinInstallSectors`, 1 GiB, 1 TiB) and the null-out case.
+    Panics on layout regression. Surfaced a real off-by-some bug
+    in the original `kMinInstallSectors = 196608` constant — the
+    actual minimum is `ESP + min-system + crash-dump + GPT
+    overhead = 204867`. Replaced the hard-coded number with a
+    computed expression so future bumps to `kEspSectors` /
+    `kCrashDumpSectors` stay self-consistent.
+- **Why:** the bootloader-bytes residual was the headline
+  remaining gap on the installer. Splitting it into "UEFI loader
+  bytes" (a separate build artifact, no bootstrap problem) and
+  "kernel-ELF bytes" (the real two-stage problem) lets us close
+  half cleanly. The ESP now has a complete loader skeleton —
+  grub.cfg + BOOTX64.EFI both present at the right paths — so
+  the only piece still pending is the kernel ELF itself.
+  Layout-math self-test is cheap and pays for itself the first
+  time a constant drifts.
+- **Rules out / defers:**
+  - **Two-stage kernel-ELF embed.** Real path forward — build
+    once to produce kernel-stage-1.elf, build again to embed
+    those bytes as a blob in kernel-stage-2.elf. Doubles build
+    time; the alternative is out-of-band staging (USB / network /
+    ISO chainload) which keeps build cheap. Defer until the cost
+    of doubling build time becomes a nuisance.
+  - **Self-test against a real RAM disk.** A 100+ MiB synthetic
+    disk would exceed the 2 MiB kheap; testing the full
+    `Install` pipeline at boot needs a different allocation
+    strategy. The `GptSelfTest` + `Fat32SelfTest` cover the
+    constituent primitives; `InstallerSelfTest` covers the
+    layout math. End-to-end verification is shell-driven on
+    real targets.
+- **Revisit when:** the kernel-ELF embed lands (full
+  `installer.cpp` ships, deletes the residual row from
+  `Daily-Driver-Readiness.md` Tier 0).
+- **Related roadmap track(s):** End-user features → Disk
+  installer (residual now is kernel-ELF copy only; UEFI loader
+  closed).

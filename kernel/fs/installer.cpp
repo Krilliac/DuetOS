@@ -19,10 +19,13 @@
 
 #include "fs/installer.h"
 
+#include "arch/x86_64/serial.h"
+#include "core/panic.h"
 #include "drivers/storage/block.h"
 #include "fs/fat32.h"
 #include "fs/gpt.h"
 #include "fs/mount.h"
+#include "fs/ramfs.h"
 #include "log/klog.h"
 #include "util/random.h"
 
@@ -116,6 +119,20 @@ bool WriteEspGrubStub(const fat32::Volume* vol)
     const u64 cfg_len = sizeof(kGrubCfgPayload) - 1;
     if (fat32::Fat32CreateAtPath(vol, "/boot/grub/grub.cfg", kGrubCfgPayload, cfg_len) != static_cast<i64>(cfg_len))
         return false;
+    // Drop the embedded BOOTX64.EFI bytes at the canonical UEFI
+    // fall-back removable-media path. UEFI firmware that boots a
+    // removable disk without an explicit boot variable looks for
+    // \EFI\BOOT\BOOTX64.EFI; this is what makes the freshly-
+    // installed disk actually boot on real hardware. Bytes come
+    // from the in-kernel ramfs blob populated at build time by
+    // kernel/CMakeLists.txt's BOOTX64.EFI embed step.
+    const u8* efi_bytes = RamfsBootX64EfiBytes();
+    const u64 efi_len = RamfsBootX64EfiSize();
+    if (efi_bytes != nullptr && efi_len > 0)
+    {
+        if (fat32::Fat32CreateAtPath(vol, "/EFI/BOOT/BOOTX64.EFI", efi_bytes, efi_len) != static_cast<i64>(efi_len))
+            return false;
+    }
     return true;
 }
 
@@ -180,45 +197,19 @@ Status Install(u32 block_handle, Report* out_report)
         return Status::NotWritable;
     }
     const u64 disk_sectors = storage::BlockDeviceSectorCount(block_handle);
-    if (disk_sectors < kMinInstallSectors)
+    Report layout{};
+    const Status plan = PlanLayout(disk_sectors, &layout);
+    if (plan != Status::Ok)
     {
-        core::Log(core::LogLevel::Warn, "fs/installer", "Install: disk under 100 MiB minimum");
-        return Status::DiskTooSmall;
+        core::Log(core::LogLevel::Warn, "fs/installer", "Install: layout planner refused this disk size");
+        return plan;
     }
-
-    // ----------------------------------------------------------
-    // Layout (sector indices, inclusive, 512-byte sectors):
-    //   PMBR + primary header + entries: 0..33
-    //   ESP                           : 34..(34 + ESP - 1)
-    //   System                        : ESP_end+1..(disk_end - crashdump - 33)
-    //   Crash-dump                    : (disk_end - crashdump - 33)..(disk_end - 34)
-    //   Backup entries + header       : (disk_end - 33)..(disk_end - 1)
-    //
-    // System partition takes "everything else" so the user gets
-    // every spare sector. On a 100 MiB disk the system gets ~32
-    // MiB; on a 1 TB disk the system gets ~999.9 GB.
-    // ----------------------------------------------------------
-    const u64 first_usable = 34;
-    const u64 last_usable = disk_sectors - 34; // inclusive — UEFI 5.3.2
-
-    const u64 esp_first = first_usable;
-    const u64 esp_last = esp_first + kEspSectors - 1;
-
-    const u64 crash_last = last_usable;
-    const u64 crash_first = crash_last - kCrashDumpSectors + 1;
-
-    const u64 sys_first = esp_last + 1;
-    const u64 sys_last = crash_first - 1;
-
-    if (sys_first > sys_last || sys_last - sys_first + 1 < 65536)
-    {
-        // FAT32 spec floor is 65525 clusters; Fat32Format rejects
-        // anything under 65536 sectors at 512B sector size + 1
-        // sector/cluster. We've already checked kMinInstallSectors
-        // up front so this is defence in depth.
-        core::Log(core::LogLevel::Warn, "fs/installer", "Install: layout left no room for system partition");
-        return Status::DiskTooSmall;
-    }
+    const u64 esp_first = layout.esp_first_lba;
+    const u64 esp_last = layout.esp_last_lba;
+    const u64 sys_first = layout.system_first_lba;
+    const u64 sys_last = layout.system_last_lba;
+    const u64 crash_first = layout.crashdump_first_lba;
+    const u64 crash_last = layout.crashdump_last_lba;
 
     u8 disk_guid[gpt::kGuidBytes];
     u8 esp_unique[gpt::kGuidBytes];
@@ -349,6 +340,118 @@ Status Install(u32 block_handle, Report* out_report)
 
     core::Log(core::LogLevel::Info, "fs/installer", "Install: complete");
     return Status::Ok;
+}
+
+Status PlanLayout(u64 disk_sectors, Report* out_report)
+{
+    if (out_report == nullptr)
+        return Status::InvalidHandle;
+    if (disk_sectors < kMinInstallSectors)
+        return Status::DiskTooSmall;
+
+    // Layout (sector indices, inclusive, 512-byte sectors):
+    //   PMBR + primary header + entries: 0..33
+    //   ESP                           : 34..(34 + ESP - 1)
+    //   System                        : ESP_end+1..(crashdump_first - 1)
+    //   Crash-dump                    : (last_usable - crashdump + 1)..last_usable
+    //   Backup entries + header       : (disk_end - 33)..(disk_end - 1)
+    //
+    // System partition takes "everything else" so the user gets
+    // every spare sector. On a 100 MiB disk the system gets ~32
+    // MiB; on a 1 TB disk the system gets ~999.9 GB.
+    const u64 first_usable = 34;
+    const u64 last_usable = disk_sectors - 34; // inclusive — UEFI 5.3.2
+
+    const u64 esp_first = first_usable;
+    const u64 esp_last = esp_first + kEspSectors - 1;
+
+    const u64 crash_last = last_usable;
+    const u64 crash_first = crash_last - kCrashDumpSectors + 1;
+
+    const u64 sys_first = esp_last + 1;
+    const u64 sys_last = crash_first - 1;
+
+    if (sys_first > sys_last || sys_last - sys_first + 1 < kMinSystemSectors)
+        return Status::DiskTooSmall;
+
+    out_report->esp_first_lba = esp_first;
+    out_report->esp_last_lba = esp_last;
+    out_report->system_first_lba = sys_first;
+    out_report->system_last_lba = sys_last;
+    out_report->crashdump_first_lba = crash_first;
+    out_report->crashdump_last_lba = crash_last;
+    return Status::Ok;
+}
+
+namespace
+{
+
+void AssertOrPanic(bool cond, const char* msg)
+{
+    if (!cond)
+    {
+        core::Log(core::LogLevel::Error, "fs/installer", msg);
+        core::Panic("fs/installer", msg);
+    }
+}
+
+bool LayoutOk(const Report& r)
+{
+    return r.esp_first_lba <= r.esp_last_lba && r.esp_last_lba < r.system_first_lba &&
+           r.system_first_lba <= r.system_last_lba && r.system_last_lba < r.crashdump_first_lba &&
+           r.crashdump_first_lba <= r.crashdump_last_lba;
+}
+
+} // namespace
+
+void InstallerSelfTest()
+{
+    // Just-too-small: kMinInstallSectors - 1 must refuse.
+    {
+        Report r{};
+        const Status s = PlanLayout(kMinInstallSectors - 1, &r);
+        AssertOrPanic(s == Status::DiskTooSmall, "selftest: undersized disk should refuse");
+    }
+    // Just-large-enough: kMinInstallSectors must succeed and produce a
+    // sane layout.
+    {
+        Report r{};
+        const Status s = PlanLayout(kMinInstallSectors, &r);
+        AssertOrPanic(s == Status::Ok, "selftest: kMinInstallSectors should succeed");
+        AssertOrPanic(LayoutOk(r), "selftest: 100 MiB layout malformed");
+        AssertOrPanic(r.esp_last_lba - r.esp_first_lba + 1 == kEspSectors, "selftest: ESP did not match kEspSectors");
+        AssertOrPanic(r.crashdump_last_lba - r.crashdump_first_lba + 1 == kCrashDumpSectors,
+                      "selftest: crash-dump did not match kCrashDumpSectors");
+        AssertOrPanic(r.system_last_lba - r.system_first_lba + 1 >= kMinSystemSectors,
+                      "selftest: system partition under FAT32 floor");
+    }
+    // 1 GiB disk (2 097 152 sectors at 512B): ESP + crash-dump fixed,
+    // system absorbs the rest.
+    {
+        Report r{};
+        const Status s = PlanLayout(2097152ULL, &r);
+        AssertOrPanic(s == Status::Ok, "selftest: 1 GiB disk should succeed");
+        AssertOrPanic(LayoutOk(r), "selftest: 1 GiB layout malformed");
+        AssertOrPanic(r.system_last_lba - r.system_first_lba + 1 > 65536,
+                      "selftest: 1 GiB system partition implausibly small");
+    }
+    // 1 TiB disk (2 147 483 648 sectors at 512B): same shape, much
+    // larger system partition. Sanity-check the system span is on
+    // the order of the disk.
+    {
+        Report r{};
+        const Status s = PlanLayout(2147483648ULL, &r);
+        AssertOrPanic(s == Status::Ok, "selftest: 1 TiB disk should succeed");
+        AssertOrPanic(LayoutOk(r), "selftest: 1 TiB layout malformed");
+        const u64 sys_span = r.system_last_lba - r.system_first_lba + 1;
+        AssertOrPanic(sys_span > 2000000000ULL, "selftest: 1 TiB system partition shrunk");
+    }
+    // Null-out: must reject without writing.
+    {
+        const Status s = PlanLayout(2097152ULL, nullptr);
+        AssertOrPanic(s == Status::InvalidHandle, "selftest: null report must refuse");
+    }
+    arch::SerialWrite("[fs/installer] self-test OK (PlanLayout: 100 MiB / 1 GiB / 1 TiB / undersized refused)\n");
 }
 
 } // namespace duetos::fs::installer

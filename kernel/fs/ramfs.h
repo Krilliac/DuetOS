@@ -155,4 +155,11 @@ void RamfsInspectSnapshot();
 const u8* RamfsUsershellElfBytes();
 u64 RamfsUsershellElfSize();
 
+/// Embedded UEFI loader bytes (PE32+ EFI Application built by
+/// `add_subdirectory(boot/uefi)`). Used by the disk installer to
+/// stamp a real BOOTX64.EFI into the freshly-formatted ESP. Bytes
+/// live for the kernel's entire lifetime (constexpr `.rodata`).
+const u8* RamfsBootX64EfiBytes();
+u64 RamfsBootX64EfiSize();
+
 } // namespace duetos::fs

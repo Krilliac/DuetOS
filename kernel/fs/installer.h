@@ -29,7 +29,8 @@
  *
  * Pre-conditions enforced by `Install`:
  *   - block handle is registered + writable
- *   - disk_sector_count >= kMinInstallSectors (96 MiB at 512B)
+ *   - disk_sector_count >= kMinInstallSectors (~100 MiB at 512B —
+ *     ESP + min-system + crash-dump + GPT overhead)
  *   - caller already passed the user-typed "INSTALL" confirmation
  *
  * Side effects:
@@ -49,9 +50,22 @@
 namespace duetos::fs::installer
 {
 
-inline constexpr u64 kMinInstallSectors = 196608; // 96 MiB at 512B sectors
-inline constexpr u64 kEspSectors = 131072;        // 64 MiB ESP (ample for kernel + grub.cfg + multiple kernels)
-inline constexpr u64 kCrashDumpSectors = 8192;    // 4 MiB crash-dump tail
+inline constexpr u64 kEspSectors = 131072;     // 64 MiB ESP (ample for kernel + grub.cfg + multiple kernels)
+inline constexpr u64 kCrashDumpSectors = 8192; // 4 MiB crash-dump tail
+
+// Smallest system-partition span we accept. FAT32 spec floor is
+// 65525 clusters; Fat32Format itself rejects partitions under
+// 65536 sectors (32 MiB at 512B sectors).
+inline constexpr u64 kMinSystemSectors = 65536;
+
+// GPT overhead: 1 PMBR + 1 primary header + 32 primary entries +
+// 1 backup header + 32 backup entries = 67 reserved sectors.
+inline constexpr u64 kGptOverheadSectors = 67;
+
+// Smallest disk we'll install onto. Computed so the constants
+// stay self-consistent: bumping kEspSectors / kCrashDumpSectors /
+// kMinSystemSectors automatically lifts the floor.
+inline constexpr u64 kMinInstallSectors = kEspSectors + kMinSystemSectors + kCrashDumpSectors + kGptOverheadSectors;
 
 /// Result of an install attempt. `disk_handle` is the parent block
 /// handle the install ran against; `esp_handle` and `system_handle`
@@ -98,5 +112,23 @@ const char* StatusName(Status s);
 /// having already verified the user-typed "INSTALL" confirmation
 /// token before reaching here.
 Status Install(u32 block_handle, Report* out_report);
+
+/// Pure-math layout planner — given `disk_sectors`, fills in the
+/// inclusive LBA ranges Install would assign for ESP / system /
+/// crash-dump (matching the main pipeline's layout). Returns
+/// `Status::Ok` and populates `*out_report`'s six LBA fields if
+/// the disk is large enough; returns `Status::DiskTooSmall`
+/// otherwise. Other Report fields stay at their boot state. Used
+/// by the boot-time self-test to assert the layout math against
+/// known disk sizes without touching block I/O.
+Status PlanLayout(u64 disk_sectors, Report* out_report);
+
+/// Boot-time self-test: exercises the layout planner against
+/// canonical disk sizes (just-too-small, just-large-enough,
+/// 1 GB, 1 TB) and asserts the resulting LBA ranges are sane
+/// (non-overlapping, monotonic, system >= 65536 sectors,
+/// crash-dump = kCrashDumpSectors, ESP = kEspSectors). Panics on
+/// any mismatch. Cheap — runs once at boot.
+void InstallerSelfTest();
 
 } // namespace duetos::fs::installer

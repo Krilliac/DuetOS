@@ -141,6 +141,7 @@
 #include "fs/fat32.h"
 #include "fs/file_route.h"
 #include "fs/gpt.h"
+#include "fs/installer.h"
 #include "fs/ntfs.h"
 #include "apps/calculator.h"
 #include "apps/about.h"
@@ -2957,6 +2958,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // fs/fat32 fault domain self-registers via
     // KERNEL_INITCALL(Drivers, "fs/fat32.module", ...) in
     // `kernel/fs/fat32.cpp`.
+
+    // Disk-installer layout-math self-test. Pure math (no block I/O,
+    // no GPT writes), so cheap to run on every boot. A regression
+    // here means the partition layout planner drifted — surfaces
+    // immediately rather than waiting for an operator to type
+    // `install <handle> INSTALL` on a real disk.
+    DUETOS_BOOT_SELFTEST(duetos::fs::installer::InstallerSelfTest());
 
     // Auto-register every probed FAT32 volume in the mount registry
     // so `VfsMountResolve` (and therefore the file-routing layer)

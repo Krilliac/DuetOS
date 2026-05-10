@@ -472,6 +472,30 @@ full AML method interpreter (`_PTS` / `_GTS` runtime evaluation).
 See [`Daily-Driver-Readiness`](../reference/Daily-Driver-Readiness.md)
 for the live drilldown.
 
+## Phase 6.8 — Installer UEFI-loader copy + layout self-test (2026-05-10)
+
+A second cut against the same Tier-0 row.
+
+- **`BOOTX64.EFI` embedded into the kernel image** via a new
+  custom command in `kernel/CMakeLists.txt` (depends on the
+  `${DUETOS_UEFI_EFI}` artifact set by `boot/uefi/`). Top-level
+  CMake reordered so `boot/uefi` processes before `kernel`,
+  exposing the cache var to the kernel embed step. New ramfs
+  accessors `RamfsBootX64EfiBytes()` / `RamfsBootX64EfiSize()`.
+- **Installer now stamps `BOOTX64.EFI` into `/EFI/BOOT/`** on the
+  freshly-formatted ESP — the canonical UEFI fall-back removable-
+  media path. Combined with the existing `grub.cfg` stub, the ESP
+  now has a complete loader skeleton; the only piece still
+  pending is `duetos-kernel.elf` on the system partition.
+- **`PlanLayout` factored out** of `Install` as a pure-math
+  helper. New `InstallerSelfTest` runs at every boot
+  (`100 MiB / 1 GiB / 1 TiB / undersized refused`) and surfaced
+  a real off-by-some bug in the original `kMinInstallSectors`
+  constant. Replaced the hard-coded number with a
+  computed expression (`kEspSectors + kMinSystemSectors +
+  kCrashDumpSectors + kGptOverheadSectors`) so the layout floor
+  tracks the partition sizing constants automatically.
+
 ---
 
 ## How to read the rest of the tree
