@@ -1643,7 +1643,12 @@ void OnTimerTick(u64 now_ticks)
     // Idle / kernel-boot tasks pass TID=0 which the detector
     // ignores. A long-running same-TID streak across the
     // threshold (~1 second) emits one warning per streak.
-    diag::SoftLockupTick(now_ticks, (cur != nullptr) ? TaskId(cur) : 0);
+    // Per-CPU idle tasks own real TIDs (e.g. "idle-bsp", "idle-N");
+    // collapse them to the TID=0 sentinel so the detector treats
+    // every idle task as the legitimate "always on-CPU" case
+    // rather than warning every time the BSP idles for 1s.
+    const bool cur_is_idle = (cur != nullptr) && (cur->priority == TaskPriority::Idle);
+    diag::SoftLockupTick(now_ticks, (cur != nullptr && !cur_is_idle) ? TaskId(cur) : 0);
     sync::RcuTick();
     // D2 instrumentation. arg0 = vector (32 = LAPIC timer),
     // arg1 = current_tid. Tagging IRQs lets a tracer dump
