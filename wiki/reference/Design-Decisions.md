@@ -7713,3 +7713,43 @@ doc helps future readers audit the trail.
   or a profile shows fragmentation hurting workloads.
 - **Related roadmap track(s):** T5-04 partial — IRQ-safety + docs
   closed; coalescing + magazines deferred.
+
+## 2026-05-10 — Per-thread Win32 TLS slot values (T6-01 partial)
+
+- **What changed:**
+  - `sched::Task` gets a 64-slot `win32_tls_slot_value[64]`
+    array (512 bytes per task, ~15 KiB at peak across ~30 live
+    tasks). Reachable via two new accessors
+    `sched::CurrentTaskTlsSlotValue(idx)` /
+    `SetCurrentTaskTlsSlotValue(idx, value)` that mirror the
+    existing `CurrentTaskWin32LastError` shape.
+  - `kernel/subsystems/win32/tls_syscall.cpp` (DoTlsGet /
+    DoTlsSet) now reads/writes the per-thread storage
+    instead of `Process::tls_slot_value`. DoTlsAlloc still
+    uses `Process::tls_slot_in_use` for the allocation
+    bitmap — TlsAlloc returns one shared slot index across
+    every thread in the process, by Win32 contract.
+- **Why:** Pre-fix, every thread in the same Process shared
+  one `Process::tls_slot_value[]` array. Two threads calling
+  `TlsSetValue(5, x)` would clobber each other — a correctness
+  bug, since dynamic TLS is supposed to give each thread an
+  independent value per slot. Single-threaded Win32 PEs didn't
+  trip it, but `pe_stress` and any future multithreaded smoke
+  would. Per-thread storage closes that gap.
+- **Rules out / defers:**
+  - Static TLS via `__declspec(thread)`. The compiler-emitted
+    code reads through `gs:[0x58]`
+    (`TEB.ThreadLocalStoragePointer`) into a per-module TLS
+    block. The PE loader still rejects PEs with a non-empty
+    TLS callback array (`pe_loader.cpp` step 3b), and even
+    PEs with an empty callback array don't get a per-thread
+    template allocation today. Full closure needs the
+    template-walk + per-thread block alloc + TEB.TLSPtr
+    population + TLS-callback ring-3 thunk.
+  - Larger slot caps (the 64-slot v0 limit fits every CRT we
+    ship; lifting it costs 8 bytes per slot per Task).
+- **Revisit when:** a real PE depends on `__declspec(thread)`,
+  or the PE-loader follow-up that wires the static-TLS
+  template lands.
+- **Related roadmap track(s):** T6-01 partial — dynamic TLS
+  closed; static TLS + callbacks defer.
