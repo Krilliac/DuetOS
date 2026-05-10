@@ -69,6 +69,7 @@ EventRecord g_event_data[kPoolCapacity];
 PipelineCacheRecord g_pipeline_cache_data[kPoolCapacity];
 QueryPoolRecord g_query_pool_data[kPoolCapacity];
 PhysicalDeviceRecord g_phys_data[kPoolCapacity];
+QueueRecord g_queue_data[kPoolCapacity];
 
 Pool g_instance_pool;
 Pool g_phys_pool;
@@ -224,7 +225,18 @@ void VkDestroyInstance(VkInstance inst)
 {
     if (inst == 0 || !HandleInRange(inst, kInstanceBase))
         return;
-    (void)PoolFree(g_instance_pool, SlotOf(inst, kInstanceBase));
+    const u32 inst_slot = SlotOf(inst, kInstanceBase);
+    // Per Vulkan spec, destroying an instance invalidates every
+    // physical device enumerated from it. Walk g_phys_pool and
+    // free any handle whose owning_instance_slot matches.
+    // Without this, the boot self-test's leak walk reports a
+    // "physical-device" pool leak after teardown.
+    for (u32 s = 0; s < kPoolCapacity; ++s)
+    {
+        if (PoolIsLive(g_phys_pool, s) && g_phys_data[s].owning_instance_slot == inst_slot)
+            (void)PoolFree(g_phys_pool, s);
+    }
+    (void)PoolFree(g_instance_pool, inst_slot);
 }
 
 VkResult VkEnumeratePhysicalDevices(VkInstance inst, u32* count, VkPhysicalDevice* devs)
@@ -265,6 +277,10 @@ VkResult VkEnumeratePhysicalDevices(VkInstance inst, u32* count, VkPhysicalDevic
         // (a multi-GPU host gets distinct VkPhysicalDevice
         // properties per handle, not the same struct repeated).
         g_phys_data[slot].gpu_index = i;
+        // Pin the handle to the owning instance so VkDestroyInstance
+        // can walk g_phys_pool and release every phys this enumerate
+        // call produced (Vulkan spec: phys lifetime <= instance).
+        g_phys_data[slot].owning_instance_slot = SlotOf(inst, kInstanceBase);
         devs[i] = HandleFor(kPhysDevBase, slot);
     }
     *count = give;
@@ -586,7 +602,18 @@ void VkDestroyDevice(VkDevice dev)
 {
     if (dev == 0 || !HandleInRange(dev, kDeviceBase))
         return;
-    (void)PoolFree(g_device_pool, SlotOf(dev, kDeviceBase));
+    const u32 dev_slot = SlotOf(dev, kDeviceBase);
+    // Per Vulkan spec, queues retrieved from a device share the
+    // device's lifetime — destroying the device implicitly retires
+    // every queue handle from it. Without this walk the boot
+    // self-test's leak-checker reports a "queue" pool leak after
+    // every clean teardown.
+    for (u32 s = 0; s < kPoolCapacity; ++s)
+    {
+        if (PoolIsLive(g_queue_pool, s) && g_queue_data[s].owning_device_slot == dev_slot)
+            (void)PoolFree(g_queue_pool, s);
+    }
+    (void)PoolFree(g_device_pool, dev_slot);
 }
 
 VkResult VkGetDeviceQueue(VkDevice dev, VkQueue* out)
@@ -596,6 +623,10 @@ VkResult VkGetDeviceQueue(VkDevice dev, VkQueue* out)
     u32 slot = 0;
     if (!PoolAlloc(g_queue_pool, &slot))
         return VkResult::ErrorOutOfHostMemory;
+    // Pin the queue to its owning device so VkDestroyDevice can
+    // walk g_queue_pool and release every queue retrieved from
+    // this device (Vulkan spec: queue lifetime <= device).
+    g_queue_data[slot].owning_device_slot = SlotOf(dev, kDeviceBase);
     if (out != nullptr)
         *out = HandleFor(kQueueBase, slot);
     return VkResult::Success;

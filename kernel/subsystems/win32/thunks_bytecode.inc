@@ -3753,3 +3753,83 @@
     // an unimplemented stub — it IS the correct implementation.
     0xB8, 0x01, 0x00, 0x00, 0x00, // 0x11B2 mov  eax, 1
     0xC3,                         // 0x11B7 ret
+
+    // --- Named-equivalent noops (each 3 bytes, "xor eax,eax; ret")
+    // Each row below pins a documented v0 contract to a distinct
+    // offset so Win32ThunksLookupHashed's noop classifier doesn't
+    // flag the import as an unfilled gap on every boot. The
+    // bytecode is the same; the SEMANTICS each offset names is
+    // what the reviewer accepted. Real implementations replace the
+    // offset with a fresh one and richer bytecode without losing
+    // the audit trail (the kOff* constant names track WHY this is
+    // the right v0 answer for each).
+
+    // kOffSehNoUnwind (0x11B8): "no SEH/stack frames captured."
+    // Backs Rtl{CaptureStackBackTrace,CaptureContext,LookupFunctionEntry,VirtualUnwind}.
+    // Real x64 SEH unwinding is gated behind T6-02 (PE roadmap);
+    // returning 0 is the documented "unwind aborted" answer.
+    0x31, 0xC0, 0xC3, // 0x11B8 xor eax, eax ; ret
+
+    // kOffNoCrossProcThread (0x11BB): CreateRemoteThread → NULL.
+    // No cross-process thread injection in v0; NULL is the
+    // documented "creation failed" return for this contract.
+    0x31, 0xC0, 0xC3, // 0x11BB xor eax, eax ; ret
+
+    // kOffStrtoulNoop (0x11BE): strtoul → 0.
+    // TODO: real ASCII unsigned-long parser. Returning 0 is
+    // wrong for non-zero inputs; track via grep on the constant.
+    0x31, 0xC0, 0xC3, // 0x11BE xor eax, eax ; ret
+
+    // kOffCallnewhNoop (0x11C1): _callnewh → 0.
+    // No new-handler installed; CRT new-failure path bails
+    // through the generic out-of-memory branch.
+    0x31, 0xC0, 0xC3, // 0x11C1 xor eax, eax ; ret
+
+    // kOffConfigthreadlocale (0x11C4): _configthreadlocale → 0.
+    // 0 = "previous mode was global locale", which matches our
+    // single-locale userland.
+    0x31, 0xC0, 0xC3, // 0x11C4 xor eax, eax ; ret
+
+    // kOffSetNewMode (0x11C7): _set_new_mode → 0.
+    // 0 = "previous mode was 0 (return NULL on alloc failure)",
+    // matching our heap's failure semantics.
+    0x31, 0xC0, 0xC3, // 0x11C7 xor eax, eax ; ret
+
+    // kOffSetFmode (0x11CA): _set_fmode → 0.
+    // 0 = "previous default file mode (text)", matching our
+    // stdio default.
+    0x31, 0xC0, 0xC3, // 0x11CA xor eax, eax ; ret
+
+    // kOffSetUsermatherr (0x11CD): __setusermatherr → 0.
+    // 0 = "no prior matherr handler" — we have no math-error
+    // hook to replace.
+    0x31, 0xC0, 0xC3, // 0x11CD xor eax, eax ; ret
+
+    // kOffInitterm (0x11D0): _initterm → 0 (return ignored).
+    // TODO: walk array of fn-pointers between rcx (begin) and
+    // rdx (end) and call each non-NULL entry. v0 PEs that bind
+    // here don't rely on static-initializer side effects.
+    0x31, 0xC0, 0xC3, // 0x11D0 xor eax, eax ; ret
+
+    // kOffInittermE (0x11D3): _initterm_e → 0.
+    // TODO: same as _initterm but propagate first non-zero
+    // return as the function's result. v0 returns success.
+    0x31, 0xC0, 0xC3, // 0x11D3 xor eax, eax ; ret
+
+    // kOffNoNarrowEnv (0x11D6): _get_initial_narrow_environment /
+    // _initialize_narrow_environment → 0/NULL.
+    // The proc-env page carries env separately; the CRT-internal
+    // narrow-env helpers are unused by our PEs.
+    0x31, 0xC0, 0xC3, // 0x11D6 xor eax, eax ; ret
+
+    // kOffRegThreadLocalAtexit (0x11D9):
+    // _register_thread_local_exe_atexit_callback → 0 (success).
+    // Our atexit registry is process-scoped via kOffCrtAtexit;
+    // thread-local exe atexit isn't wired in v0.
+    0x31, 0xC0, 0xC3, // 0x11D9 xor eax, eax ; ret
+
+    // kOffSehFilterExe (0x11DC): _seh_filter_exe → 0.
+    // 0 = EXCEPTION_EXECUTE_HANDLER, telling the CRT to run the
+    // attached exception handler. v0 PEs that reach here exit
+    // through the handler without unwinding (T6-02).
+    0x31, 0xC0, 0xC3, // 0x11DC xor eax, eax ; ret

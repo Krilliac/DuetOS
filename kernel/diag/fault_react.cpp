@@ -238,10 +238,20 @@ FaultReaction FaultReactDispatch(::duetos::core::FaultDomainId domain_id, const 
     switch (chosen)
     {
     case FaultReaction::Continue:
+    {
+        // For a domain-less reporter (soft-lockup, kheap OOM,
+        // sandbox-cap denial, …) the domain_id is the kFaultDomainInvalid
+        // sentinel and tells the reader nothing — surface the
+        // reporter's `aux` instead (TID, address, syscall #), which
+        // is the actionable signal. When a real domain is bound,
+        // the domain id remains the more useful identifier.
+        const u64 aux_val = static_cast<u64>(ev.aux);
+        const bool aux_actionable = (domain_id == ::duetos::core::kFaultDomainInvalid) && (aux_val != 0);
         ::duetos::core::LogWithValue(::duetos::core::LogLevel::Warn,
                                      ev.source != nullptr ? ev.source : "diag/fault-react", FaultKindName(ev.kind),
-                                     static_cast<u64>(domain_id));
+                                     aux_actionable ? aux_val : static_cast<u64>(domain_id));
         break;
+    }
 
     case FaultReaction::RetryNow:
         ::duetos::core::LogWithValue(::duetos::core::LogLevel::Info,

@@ -208,12 +208,22 @@ void RcuSelfTest()
     const u64 baseline_q = RcuCallsQueued();
     const u64 baseline_c = RcuCallsCompleted();
 
+    // The scheduler tick ISR drives RcuTick() asynchronously, so a
+    // timer fire between enqueue and the "no QS yet" assertion would
+    // advance g_ticks and reclaim our callback prematurely. Disable
+    // interrupts across the deterministic assertions; only the
+    // post-tick reclaim count is intrinsically tied to a known
+    // g_ticks delta.
+    arch::Cli();
+
     if (!RcuCall(&TestCb, &g_test_counter))
     {
+        arch::Sti();
         core::Panic("sync/rcu", "self-test: enqueue failed on empty queue");
     }
     if (RcuCallsQueued() != baseline_q + 1)
     {
+        arch::Sti();
         core::Panic("sync/rcu", "self-test: queued counter didn't advance");
     }
 
@@ -221,10 +231,12 @@ void RcuSelfTest()
     // enqueue-tick equals g_ticks.
     if (RcuReclaim() != 0)
     {
+        arch::Sti();
         core::Panic("sync/rcu", "self-test: reclaim fired without QS");
     }
     if (g_test_counter != 0)
     {
+        arch::Sti();
         core::Panic("sync/rcu", "self-test: callback ran prematurely");
     }
 
@@ -233,20 +245,24 @@ void RcuSelfTest()
     const u32 reclaimed = RcuReclaim();
     if (reclaimed != 1)
     {
+        arch::Sti();
         core::Panic("sync/rcu", "self-test: reclaim count != 1");
     }
     if (g_test_counter != 1)
     {
+        arch::Sti();
         core::Panic("sync/rcu", "self-test: callback did not run");
     }
     if (RcuCallsCompleted() != baseline_c + 1)
     {
+        arch::Sti();
         core::Panic("sync/rcu", "self-test: completed counter didn't advance");
     }
 
     // Re-reclaim with empty queue is a no-op.
     if (RcuReclaim() != 0)
     {
+        arch::Sti();
         core::Panic("sync/rcu", "self-test: reclaim on empty queue non-zero");
     }
 
@@ -254,8 +270,11 @@ void RcuSelfTest()
     // observes the same emptiness.
     if (RcuReclaimLocal() != 0)
     {
+        arch::Sti();
         core::Panic("sync/rcu", "self-test: local reclaim on empty queue non-zero");
     }
+
+    arch::Sti();
 
     KLOG_INFO("sync/rcu", "self-test OK (enqueue + grace + reclaim verified)");
 }
