@@ -93,6 +93,40 @@ the same commit** that delivers the code.
   - **Real KASAN** — shadow-memory mapping, compiler plugin
     integration, per-access shadow lookup. Big lift; defer.
 
+### Linux CVE audit — pre-landing invariants
+
+- **Status:** Audit log opened against the "Copy Fail" + "Dirty Frag"
+  disclosure wave (CVE-2026-31431, CVE-2026-43284, CVE-2026-43500).
+  See [`wiki/security/Linux-CVE-Audit.md`](../security/Linux-CVE-Audit.md)
+  for the eight-class verdict matrix.
+- **Open items** (each must be honoured **before** the matching surface
+  lands, not retrofitted after):
+  - **Class E — slab zero-on-alloc helper.** `SlabAlloc` returns
+    poison-stamped memory; callers must initialise every field. Provide
+    a `SlabAllocZeroed()` helper or per-cache `zero_on_alloc` flag
+    before any slab consumer holds a flag-style field with
+    attacker-observable semantics (Dirty Pipe root cause was a missed
+    zero of `pipe_buffer.flags`).
+  - **Class D — COW / `fork()`.** When demand-paged COW lands, the
+    dirty-bit clear-and-fault sequence must be atomic with respect
+    to any region-shrink primitive (`madvise(DONTNEED)` and friends).
+    Linux's Dirty COW fix gated this on `FOLL_WRITE`; mirror the
+    invariant in the v0 design, do not patch it in later.
+  - **Class C — zero-copy sendmsg / IPsec.** When skb-equivalent
+    fragments or any `MSG_SPLICE_PAGES`-style send path lands, every
+    externally-backed fragment must carry an ownership marker, and
+    every in-place transform (decryption, decompression, checksum
+    rewrite) must refuse to operate on a marked fragment. Bake into
+    the network-stack ABI from day one.
+  - **Class B — user-facing crypto API.** If a socket-style crypto
+    surface is ever added (AF_ALG-equivalent), it must refuse src/dst
+    aliasing on user-supplied scatterlists for any operation that
+    doesn't byte-copy the full output. Auth-tag-skip + in-place was
+    the Copy Fail root cause.
+- **When to revisit:** every time a high-impact public Linux kernel
+  CVE drops, walk the eight classes in the audit doc and update
+  verdicts before the next slice lands in the affected area.
+
 ### Intel CET enable
 
 - **Scope:** write `IA32_S_CET` / `IA32_PL0_SSP`, allocate

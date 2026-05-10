@@ -63,6 +63,7 @@
 - [Fix Journal](security/Fix-Journal.md)
 - [Kernel Modularization](security/Kernel-Modularization.md)
 - [Malware Hard-Stop Plan](security/Malware-Hard-Stop-Plan.md)
+- [Linux CVE Audit](security/Linux-CVE-Audit.md)
 
 ### Tooling
 - [Build System](tooling/Build-System.md)
