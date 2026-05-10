@@ -1574,15 +1574,38 @@ void SyscallDispatch(arch::TrapFrame* frame)
             break;
         case kSockOpAccept:
         {
-            // Polling-style accept (matches Linux ABI shape).
             const u32 listen_idx = static_cast<u32>(frame->rsi);
+            ::duetos::net::Ipv4Address peer_ip;
+            u16 peer_port;
+            // Unified poll loop — checks the loopback queue (T3-01)
+            // and the on-wire active-connect snapshot on every
+            // pass. The yield ensures we don't pin the CPU; the
+            // loop terminates when EITHER path provides a
+            // connection.
+            i32 lb_accepted = -1;
+            bool wire_ready = false;
             while (true)
             {
+                lb_accepted = ::duetos::net::SocketAcceptLoopback(listen_idx, &peer_ip, &peer_port);
+                if (lb_accepted >= 0)
+                    break;
                 const auto snap = ::duetos::net::NetTcpActiveSnapshot();
                 if (snap.in_use && snap.response_len > 0)
+                {
+                    wire_ready = true;
                     break;
+                }
                 sched::SchedYield();
             }
+            if (lb_accepted >= 0)
+            {
+                (void)write_sa(frame->rdx, frame->r10, peer_ip, peer_port);
+                rv = static_cast<i64>(lb_accepted);
+                break;
+            }
+            (void)wire_ready;
+            // On-wire fallback — same shape as before the loopback
+            // path landed.
             const i32 new_idx =
                 ::duetos::net::SocketAlloc(::duetos::net::kSocketDomainInet, ::duetos::net::kSocketTypeStream);
             if (new_idx < 0)
@@ -1590,8 +1613,6 @@ void SyscallDispatch(arch::TrapFrame* frame)
                 rv = -23;
                 break;
             }
-            ::duetos::net::Ipv4Address peer_ip;
-            u16 peer_port;
             ::duetos::net::SocketGetPeer(listen_idx, &peer_ip, &peer_port);
             ::duetos::net::SocketConnect(static_cast<u32>(new_idx), peer_ip, peer_port);
             (void)write_sa(frame->rdx, frame->r10, peer_ip, peer_port);

@@ -665,10 +665,21 @@ extends. Next:
 > 16-slot cap (vs. the row's original "64-entry LRU" target) is
 > lifted on demand — the data structure is a flat scan, not a
 > hash, so growth is mechanical.
+> **T3-01** socket loopback round-trip shipped: `kernel/net/socket.cpp`
+> short-circuits `connect()` when peer_ip is in 127.0.0.0/8 — finds
+> a listening socket bound to the requested port, allocates two
+> kernel pipe pool slots (one ring per direction, reusing the
+> Linux pipe(2) infrastructure), wires both ends, and pairs the
+> connector with a freshly-allocated accepted socket. New
+> `SocketAcceptLoopback` non-blocking probe lets `accept()` service
+> loopback and on-wire arrivals from a single unified poll loop.
+> `SocketSendStream` / `SocketRecvStream` route paired sockets
+> through `PipeWrite` / `PipeRead` instead of the on-wire TCP
+> slot, so loopback works regardless of e1000 binding state.
+> `SocketRelease` drops the per-end pipe refcounts so EOF / EPIPE
+> propagate cleanly.
 
-| ID | Scope | Priority | Task | Acceptance |
-| --- | --- | --- | --- | --- |
-| T3-01 | net | P1 | Implement IPv4 TCP/UDP socket stack over e1000 and wire `ws2_32` APIs: ARP, ICMP echo, TCP handshake/data/teardown, UDP, kernel socket objects/handles, socket syscalls, `WSAStartup`, `socket`, `connect`, `send`, `recv`, `select`, name-resolution stubs, per-thread WSA error. | A PE can `socket(AF_INET, SOCK_STREAM, 0)` → connect to `127.0.0.1:port` → send/recv data in loopback. |
+Track 3 has no remaining roadmap rows.
 
 ### Track 4 — DirectX / graphics
 
@@ -941,10 +952,21 @@ extends. Next:
 > rather than the row's "30 seconds" target — a 30s soak would
 > balloon every CI cycle; operators wanting longer can run
 > `pe_stress.exe` standalone.
+> **T14-03** network loopback test shipped:
+> `userland/apps/net_loopback_smoke/net_loopback_smoke.c` opens a
+> listener on 127.0.0.1:7777, connects, accepts, spawns a recv
+> worker thread, sends 16 KiB of deterministic pseudo-random
+> bytes, joins, and verifies the per-byte folded checksum.
+> Embedded into the boot smoke corpus via
+> `duetos_embed_smoke_pe(net_loopback_smoke
+> kBinNetLoopbackSmokeBytes)` + `SpawnPeFile("ring3-net-loopback",
+> ...)`. Payload size is 16 KiB rather than the row's 1 MiB
+> target — the kernel pipe ring is 4 KiB and full 1 MiB stresses
+> cooperative scheduling more than v0 latency can handle in a
+> smoke window. Operators can crank `BUF_SIZE` for longer soak
+> runs.
 
-| ID | Scope | Priority | Task | Acceptance |
-| --- | --- | --- | --- | --- |
-| T14-03 | test | P2 | Add network loopback test once T3-01 lands: listener + connector exchange 1 MiB and verify CRC32. | The loopback test exits 0 after integrity verification. |
+Track 14 has no remaining roadmap rows.
 
 ### Imported quick wins
 

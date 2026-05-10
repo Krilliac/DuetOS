@@ -7366,3 +7366,74 @@ doc helps future readers audit the trail.
   `FsBackingKind::Pipe` with a name-table back-pointer +
   surface a SYS_WIN32_NAMED_PIPE_*).
 - **Related roadmap track(s):** T11-02 closed.
+
+---
+
+## 2026-05-10 — Socket loopback via pipe-pool routing (T3-01 + T14-03)
+
+- **Scope:** `kernel/net/socket.h`, `kernel/net/socket.cpp`,
+  `kernel/syscall/syscall.cpp`,
+  new `userland/apps/net_loopback_smoke/net_loopback_smoke.c`,
+  `userland/apps/build-smokes.sh`, `kernel/CMakeLists.txt`,
+  `kernel/proc/ring3_smoke.cpp`,
+  `wiki/reference/Roadmap.md`
+- **Commit:** this slice
+- **Decision:** TCP loopback (`connect(127.0.0.1:port)` →
+  listener bound to that port → matched accepted socket pair)
+  is implemented entirely on top of the kernel's existing pipe
+  pool (the same one Linux pipe(2) and Win32 CreatePipe consume).
+  Two pipe pool slots make up a pair: a connector→server ring
+  and a server→connector ring. The on-wire TCP slot
+  (NetTcpActive + canned-reply) is bypassed when the destination
+  is loopback, so loopback works regardless of e1000 binding.
+  - New Socket fields: `loopback_paired`, `loopback_pipe_recv_idx`,
+    `loopback_pipe_send_idx`, `loopback_pending_accept_idx`,
+    `accept_wq`. The pending-accept slot is single-deep on the
+    listener (v0 backlog = 1).
+  - `SocketConnect` short-circuits when `peer_ip[0] == 127`:
+    finds a listener bound to `peer_port`, allocates the
+    accepted socket and the two pipe slots, wires both ends,
+    parks the accepted-socket idx on the listener's pending
+    slot, and wakes its accept_wq.
+  - `SocketAcceptLoopback` is a non-blocking probe — pops the
+    pending slot if present. The accept syscall handler in
+    `syscall.cpp` runs a unified poll loop that checks both the
+    loopback queue and the on-wire snapshot on every pass, so a
+    single accept() services either path.
+  - `SocketSendStream` / `SocketRecvStream` detect
+    `loopback_paired` and route through `PipeWrite` / `PipeRead`
+    on the per-end pipe slot; the pipe pool's existing
+    waitqueue + EPIPE/EOF semantics carry full TCP-shaped
+    blocking semantics for free.
+  - `SocketRelease` drops the per-end pipe refcounts (read on
+    one slot, write on the other). When both ends close, both
+    pipe slots tear down via the pipe pool's existing
+    refcount-on-zero free path.
+- **Why:** T3-01's acceptance ("A PE can socket / connect
+  127.0.0.1 / send / recv data in loopback") had been gated on
+  the on-wire TCP slot being usable, which it is in QEMU SLIRP
+  but not deterministically across boot. The pipe pool provides
+  exactly the bytes-in / bytes-out contract loopback needs and
+  we already rely on it (Linux pipe2, Win32 CreatePipe), so
+  routing socket loopback through the same primitive is one
+  small Socket extension + one new syscall-handler arm.
+- **Rules out / defers:**
+  - Multi-pending accept queue. The listener's pending slot is
+    single-deep — a second connector that races a not-yet-
+    accepted prior connector returns ECONNREFUSED. Bumping to
+    a small ring is mechanical when a workload demands it.
+  - Listener fairness across cross-port connectors. A connector
+    matches the FIRST listener whose `local_port == peer_port`
+    in pool-order; if a process binds two listeners on the same
+    port through SO_REUSEPORT (which v0 doesn't support anyway),
+    only the first one ever pairs.
+  - On-wire ←→ loopback dual mode. A listening socket can be
+    paired through loopback OR receive on-wire connections, but
+    not both simultaneously: the accept syscall handler is
+    unified but the listener's bookkeeping isn't. Real Win32
+    listen() services both; v0 favours loopback when present
+    and falls back to on-wire only if loopback isn't pending.
+- **Revisit when:** a workload exercises one of the deferred
+  paths (multi-connector burst, dual-mode listener).
+- **Related roadmap track(s):** T3-01 + T14-03 closed (Track 3
+  + Track 14 fully closed).

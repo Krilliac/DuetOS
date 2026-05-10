@@ -190,6 +190,7 @@
 #include "generated_signal_smoke_pe.h"
 #include "generated_timer_smoke_pe.h"
 #include "generated_pe_stress_pe.h"
+#include "generated_net_loopback_smoke_pe.h"
 #include "generated_winsock_ext_smoke_pe.h"
 #include "generated_advapi_smoke_pe.h"
 #include "generated_heap3_smoke_pe.h"
@@ -3231,6 +3232,9 @@ void StartRing3SmokeTask()
                         CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
             SpawnPeFile("ring3-pe-stress", fs::generated::kBinPeStressBytes, fs::generated::kBinPeStressBytes_len,
                         CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+            SpawnPeFile("ring3-net-loopback", fs::generated::kBinNetLoopbackSmokeBytes,
+                        fs::generated::kBinNetLoopbackSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
             SpawnPeFile("ring3-winsock-ext-smoke", fs::generated::kBinWinsockExtSmokeBytes,
                         fs::generated::kBinWinsockExtSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
                         mm::kFrameBudgetTrusted, kTickBudgetTrusted);
