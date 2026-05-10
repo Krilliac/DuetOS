@@ -313,14 +313,15 @@ add_test(NAME duetos-boot-smoke
 )
 set_tests_properties(duetos-boot-smoke PROPERTIES
     LABELS "smoke;boot;win32"
-    # 120s wall clock — the smoke driver's own DUETOS_TIMEOUT
-    # defaults to 30s for the QEMU run, but boot + ring3 smoke
-    # probes + signature verification on the slowest hosts (no
-    # KVM, full debug instrumentation) routinely takes 60-75s.
-    # The previous 60s was tight and would flake intermittently;
-    # 120s gives headroom without masking real regressions
-    # (a hung kernel still trips the inner DUETOS_TIMEOUT first).
-    TIMEOUT 120
+    # 200s wall clock. The smoke driver's inner DUETOS_TIMEOUT
+    # defaults to 150s (bumped from 90s when the native-app
+    # spawn block + nat_calc + nat_sysinfo started pushing the
+    # post-smoke phase past 90s on slow CI hosts). The outer
+    # ctest TIMEOUT needs ~50s of headroom over the inner so the
+    # signature-verification pass can finish after QEMU exits.
+    # A hung kernel still trips the inner DUETOS_TIMEOUT first;
+    # this only guards against the harness itself wedging.
+    TIMEOUT 200
     # Exit 2 from ctest-boot-smoke.sh means a prerequisite is
     # missing (qemu / iso) — CTEST should report SKIP rather
     # than FAIL. Mirrors the duetos-uefi-smoke convention.

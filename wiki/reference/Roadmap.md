@@ -185,10 +185,18 @@ In rough priority:
   a real panic. The `lastdump` shell command surfaces the
   on-disk LBA + byte count alongside the in-RAM minidump
   status.
-- **Deferred:** real partition-table reservation so the disk
-  installer can allocate the dump region explicitly instead
-  of trusting the last 4 MiB to be unused. Waits for the
-  installer slice (Disk installer → orchestration layer).
+- **Installer integration shipped.** `install <handle> INSTALL`
+  reserves a 4 MiB tail partition typed `kDuetCrashDumpTypeGuid`.
+  Both `NvmePanicWriteDump` and `AhciPanicWriteDump` now consult
+  `fs::gpt::GptFindCrashDumpRegion` first — if the disk was
+  laid down by the installer, the dump lands on the reserved
+  partition; otherwise the tail-of-drive fallback runs.
+  Verified end-to-end at every boot via `DiskPersistSelfTest`.
+- **Real-hardware verification:** outstanding. The QEMU debugcon
+  + the in-RAM minidump buffer prove the encode + transport
+  layers; an unforced panic on an installed laptop is the last
+  step to graduate this row from "shipped" to "lived through
+  it once."
 
 ---
 
