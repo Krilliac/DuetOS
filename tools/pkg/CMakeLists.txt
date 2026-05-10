@@ -68,6 +68,19 @@ FetchContent_Declare(tomlplusplus
     GIT_SHALLOW    TRUE)
 FetchContent_MakeAvailable(tomlplusplus)
 
+# libsodium — SHA-256 + Ed25519. The system package on every
+# distro we care about (apt: libsodium-dev, brew: libsodium,
+# pacman: libsodium) ships pkg-config metadata. FetchContent
+# fall-back is deliberately omitted — libsodium's autotools
+# build doesn't play well with FetchContent, and rolling our
+# own crypto is forbidden per the spec.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
+
+# libcurl — HTTP / HTTPS / Range support. Same pkg-config path;
+# every distro packages it.
+pkg_check_modules(CURL REQUIRED IMPORTED_TARGET libcurl)
+
 # ----------------------------------------------------------------------------
 # Library: everything but main(), so tests can link the same code.
 # ----------------------------------------------------------------------------
@@ -76,10 +89,16 @@ add_library(duet-pkg-lib STATIC
     src/repo/repo_manifest.cpp
     src/repo/package_manifest.cpp
     src/registry/registry.cpp
+    src/crypto/verifier.cpp
+    src/crypto/keying.cpp
+    src/net/fetcher.cpp
     src/cli/cli.cpp
 )
 target_include_directories(duet-pkg-lib PUBLIC src)
-target_link_libraries(duet-pkg-lib PUBLIC tomlplusplus::tomlplusplus)
+target_link_libraries(duet-pkg-lib
+    PUBLIC tomlplusplus::tomlplusplus
+    PRIVATE PkgConfig::SODIUM PkgConfig::CURL
+)
 target_compile_definitions(duet-pkg-lib PUBLIC TOML_EXCEPTIONS=0)
 
 # ----------------------------------------------------------------------------
@@ -97,5 +116,16 @@ target_link_libraries(test_manifest_parse PRIVATE duet-pkg-lib)
 target_compile_definitions(test_manifest_parse PRIVATE
     DUET_PKG_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
 add_test(NAME manifest_parse COMMAND test_manifest_parse)
+
+add_executable(test_verifier tests/test_verifier.cpp)
+target_link_libraries(test_verifier PRIVATE duet-pkg-lib PkgConfig::SODIUM)
+target_compile_definitions(test_verifier PRIVATE
+    DUET_PKG_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
+add_test(NAME verifier COMMAND test_verifier)
+
+add_executable(test_fetcher tests/test_fetcher.cpp)
+target_link_libraries(test_fetcher PRIVATE duet-pkg-lib)
+add_test(NAME fetcher COMMAND test_fetcher)
+set_tests_properties(fetcher PROPERTIES SKIP_RETURN_CODE 77)
 
 message(STATUS "duet-pkg configured (C++${CMAKE_CXX_STANDARD}, sanitizers=${DUETOS_PKG_SANITIZERS})")

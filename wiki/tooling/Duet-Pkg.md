@@ -12,7 +12,7 @@ The implementation lands in seven phases (see
 spec); this page describes the **current** state of the
 binary plus pointers to what's coming.
 
-## What ships today (Phase 1)
+## What ships today (Phases 1–3)
 
 | Subcommand | Status | Notes |
 |------------|--------|-------|
@@ -20,6 +20,22 @@ binary plus pointers to what's coming.
 | `info <repo.toml> <name>` | Implemented | Parses a local repo manifest and prints one package's fields. Phase 4 swaps the path argument out for a synced-repo lookup. |
 | `--help` / `-h` | Implemented | Lists every documented subcommand + which phase implements each. |
 | `install` / `remove` / `update` / `search` / `repo *` / `key *` / `install-local` / `build` | Stubs | Print `not yet implemented in this phase`. The verbs are recognised so misspellings still produce `unknown subcommand`; the implementations land in later phases. |
+
+Phase 2 added the crypto core (`src/crypto/`):
+SHA-256 (`Sha256HexOfFile`, `VerifySha256`), Ed25519 detached
+signatures (`VerifySignature` + `VerifySignatureOfFile`), PEM
+key loader (`LoadPublicKeyFromFile`), `ed25519:<base64>` parse +
+round-trip (`ParsePublicKeyFromTomlString` /
+`PublicKeyToTomlString`), and a canonical key fingerprint
+(SHA-256 of raw 32 bytes, lowercase hex). All via libsodium —
+no roll-your-own crypto.
+
+Phase 3 added the network core (`src/net/`): `Download` over
+HTTP/HTTPS via libcurl with progress callback + resume via
+`Range:` headers (with automatic fallback to a full download
+when the server returns 200 instead of 206). TLS verification
+on by default; `FetchOptions::allow_insecure` is the only knob
+that turns it off.
 
 ## Layout
 
