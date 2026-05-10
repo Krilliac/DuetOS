@@ -166,14 +166,88 @@ __declspec(dllexport) BOOL SetConsoleCtrlHandler(void* handler, BOOL add)
  * "hello world" caller today.
  * ------------------------------------------------------------------ */
 
+/* Per-process inherited stdio handles. The kernel writes them
+ * into Process::std_handles[] at spawn (SYS_PROCESS_SPAWN_EX);
+ * SYS_GET_INHERITED_STD reads them back. PEs that weren't started
+ * with STARTF_USESTDHANDLES see 0 here and fall through to the
+ * legacy pseudo-handle return.
+ */
+typedef long long ll_;
+static HANDLE win32_get_inherited_std_handle(DWORD nStdHandle)
+{
+    /* STD_INPUT_HANDLE = -10, STD_OUTPUT_HANDLE = -11, STD_ERROR_HANDLE = -12 */
+    int idx;
+    if (nStdHandle == 0xFFFFFFF6u) /* -10 stdin */
+        idx = 0;
+    else if (nStdHandle == 0xFFFFFFF5u) /* -11 stdout */
+        idx = 1;
+    else if (nStdHandle == 0xFFFFFFF4u) /* -12 stderr */
+        idx = 2;
+    else
+        return (HANDLE)0;
+    ll_ rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((ll_)191), /* SYS_GET_INHERITED_STD */
+                       "D"((ll_)idx)
+                     : "memory");
+    if (rv <= 0 || rv == (ll_)~0ULL)
+        return (HANDLE)0;
+    return (HANDLE)(UINT_PTR)rv;
+}
+
 __declspec(dllexport) HANDLE GetStdHandle(DWORD nStdHandle)
 {
+    /* If the parent supplied an inheritable handle for this
+     * stream via CreateProcess(STARTF_USESTDHANDLES), return
+     * that real handle so WriteFile / ReadFile route through
+     * the kernel handle path (pipe / file). Otherwise fall
+     * back to the legacy zero-extended pseudo-handle. */
+    HANDLE inherited = win32_get_inherited_std_handle(nStdHandle);
+    if (inherited != (HANDLE)0)
+        return inherited;
+
     /* Zero-extend DWORD to HANDLE (pointer-sized on x64).
      * STD_OUTPUT_HANDLE = -11 as DWORD = 0xFFFFFFF5 becomes
      * 0x00000000FFFFFFF5 as a HANDLE — same as the flat stub's
      * `mov eax, ecx; ret`. UINT_PTR is 64-bit so the cast-
      * chain stays warning-clean under MSVC's LLP64 layout. */
     return (HANDLE)(UINT_PTR)nStdHandle;
+}
+
+/* SetPriorityClass / GetPriorityClass — store the Win32 priority
+ * class on the calling Process. The scheduler is single-band
+ * today, so the value is purely advisory; round-trips through
+ * SYS_PRIORITY_CLASS for fidelity. Returns the (post-op) class
+ * code; 0 = unsupported. */
+__declspec(dllexport) BOOL SetPriorityClass(HANDLE hProcess, DWORD dwPriorityClass)
+{
+    (void)hProcess; /* v0: caller's process only. */
+    ll_ rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((ll_)189), /* SYS_PRIORITY_CLASS */
+                       "D"((ll_)1),   /* op = set */
+                       "S"((ll_)dwPriorityClass)
+                     : "memory");
+    return rv != 0;
+}
+
+__declspec(dllexport) DWORD GetPriorityClass(HANDLE hProcess)
+{
+    (void)hProcess;
+    ll_ rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((ll_)189), /* SYS_PRIORITY_CLASS */
+                       "D"((ll_)0),   /* op = get */
+                       "S"((ll_)0)
+                     : "memory");
+    /* Default to NORMAL_PRIORITY_CLASS when the kernel reports 0
+     * (process freshly spawned without an explicit Set). */
+    if (rv == 0)
+        return 0x20u; /* NORMAL_PRIORITY_CLASS */
+    return (DWORD)rv;
 }
 
 /* ------------------------------------------------------------------
@@ -3690,6 +3764,21 @@ __declspec(dllexport) DWORD QueueUserAPC(PAPCFUNC pfn, HANDLE hThread, unsigned 
      * GetCurrentThread pseudo-handle) routes to the caller. */
     DWORD target_tid = (hThread == (HANDLE)(long long)-2 || hThread == (HANDLE)0) ? (DWORD)syscall_get_tid()
                                                                                   : (DWORD)(unsigned long long)hThread;
+    /* Try the kernel-resident queue first — that path delivers
+     * across kernel-blocked alertable waits without relying on the
+     * 10ms slice-poll. Fall through to the legacy user-space queue
+     * on any failure (queue full, foreign tid, kCapSpawnThread
+     * denied) so single-threaded callers still see the same
+     * happy-path semantics they did before T8-02 wiring. */
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)187), /* SYS_QUEUE_USER_APC */
+                       "D"((long long)target_tid), "S"((long long)pfn), "d"((long long)dwData)
+                     : "memory");
+    if (rv == 0)
+        return 1;
+
     for (int i = 0; i < WIN32_APC_QUEUE_SLOTS; ++i)
     {
         if (!g_apc_queue[i].in_use)
@@ -3706,14 +3795,34 @@ __declspec(dllexport) DWORD QueueUserAPC(PAPCFUNC pfn, HANDLE hThread, unsigned 
 
 /* Drain APCs queued for the calling thread. Returns the count
  * fired. Called by SleepEx / WaitForSingleObjectEx when
- * bAlertable=TRUE. */
+ * bAlertable=TRUE. Drains both the kernel-resident queue
+ * (SYS_DRAIN_USER_APC = 188) and the legacy user-space queue. */
 static unsigned int win32_drain_apc_queue(void)
 {
     DWORD self_tid = (DWORD)syscall_get_tid();
     unsigned int fired = 0;
-    /* Drain in registration order. Each callback can re-queue;
-     * the re-entrant slot is appended to the tail and won't be
-     * picked up until the next drain. */
+    /* Drain the kernel queue first. Each successful pop returns
+     * the (pfn, data) pair; we invoke from user mode. */
+    for (;;)
+    {
+        unsigned long long pfn_raw = 0;
+        unsigned long long data = 0;
+        long long rv;
+        __asm__ volatile("int $0x80"
+                         : "=a"(rv)
+                         : "a"((long long)188), /* SYS_DRAIN_USER_APC */
+                           "D"((long long)&pfn_raw), "S"((long long)&data)
+                         : "memory");
+        if (rv != 1)
+            break;
+        PAPCFUNC pfn = (PAPCFUNC)(void*)(unsigned long long)pfn_raw;
+        if (pfn != (PAPCFUNC)0)
+        {
+            pfn(data);
+            ++fired;
+        }
+    }
+    /* Then drain the legacy user-space overflow queue. */
     for (int i = 0; i < WIN32_APC_QUEUE_SLOTS; ++i)
     {
         if (g_apc_queue[i].in_use && g_apc_queue[i].target_tid == self_tid)
@@ -4791,6 +4900,70 @@ struct ProcessInformation_t
     DWORD dwThreadId;
 };
 
+/* STARTUPINFO layout: Win32's STARTUPINFOA/W is 104 bytes on x64.
+ * Field order is shared between A and W (only lpDesktop / lpTitle
+ * point at different string types). We decode dwFlags + the three
+ * std handles to drive STARTF_USESTDHANDLES inheritance.
+ *
+ * Offsets (from the SDK):
+ *   +0   DWORD cb              ; sizeof(STARTUPINFO)
+ *   +8   LPSTR lpReserved      ; (8 bytes)
+ *   +16  LPSTR lpDesktop       ; (8 bytes)
+ *   +24  LPSTR lpTitle         ; (8 bytes)
+ *   +32  DWORD dwX
+ *   +36  DWORD dwY
+ *   +40  DWORD dwXSize
+ *   +44  DWORD dwYSize
+ *   +48  DWORD dwXCountChars
+ *   +52  DWORD dwYCountChars
+ *   +56  DWORD dwFillAttribute
+ *   +60  DWORD dwFlags
+ *   +64  WORD  wShowWindow
+ *   +66  WORD  cbReserved2
+ *   +72  LPBYTE lpReserved2
+ *   +80  HANDLE hStdInput
+ *   +88  HANDLE hStdOutput
+ *   +96  HANDLE hStdError
+ */
+#define STARTF_USESTDHANDLES 0x00000100
+#define STARTUPINFO_FLAGS_OFFSET 60
+#define STARTUPINFO_STDIN_OFFSET 80
+#define STARTUPINFO_STDOUT_OFFSET 88
+#define STARTUPINFO_STDERR_OFFSET 96
+
+struct ProcessSpawnStdio_t
+{
+    unsigned long long stdin_handle;
+    unsigned long long stdout_handle;
+    unsigned long long stderr_handle;
+};
+
+static void win32_extract_stdio_bundle(const void* lpStartupInfo, BOOL bInheritHandles, struct ProcessSpawnStdio_t* out,
+                                       int* have_bundle)
+{
+    *have_bundle = 0;
+    out->stdin_handle = 0;
+    out->stdout_handle = 0;
+    out->stderr_handle = 0;
+    if (lpStartupInfo == (const void*)0)
+        return;
+    if (!bInheritHandles)
+        return;
+    const unsigned char* base = (const unsigned char*)lpStartupInfo;
+    DWORD flags;
+    __builtin_memcpy(&flags, base + STARTUPINFO_FLAGS_OFFSET, sizeof(flags));
+    if ((flags & STARTF_USESTDHANDLES) == 0)
+        return;
+    HANDLE h_in, h_out, h_err;
+    __builtin_memcpy(&h_in, base + STARTUPINFO_STDIN_OFFSET, sizeof(h_in));
+    __builtin_memcpy(&h_out, base + STARTUPINFO_STDOUT_OFFSET, sizeof(h_out));
+    __builtin_memcpy(&h_err, base + STARTUPINFO_STDERR_OFFSET, sizeof(h_err));
+    out->stdin_handle = (unsigned long long)(UINT_PTR)h_in;
+    out->stdout_handle = (unsigned long long)(UINT_PTR)h_out;
+    out->stderr_handle = (unsigned long long)(UINT_PTR)h_err;
+    *have_bundle = 1;
+}
+
 __declspec(dllexport) BOOL CreateProcessA(const char* lpApplicationName, char* lpCommandLine, void* lpProcessAttributes,
                                           void* lpThreadAttributes, BOOL bInheritHandles, DWORD dwCreationFlags,
                                           void* lpEnvironment, const char* lpCurrentDirectory, void* lpStartupInfo,
@@ -4798,22 +4971,36 @@ __declspec(dllexport) BOOL CreateProcessA(const char* lpApplicationName, char* l
 {
     (void)lpProcessAttributes;
     (void)lpThreadAttributes;
-    (void)bInheritHandles;
     (void)dwCreationFlags;
     (void)lpEnvironment;
     (void)lpCurrentDirectory;
-    (void)lpStartupInfo;
     const char* path = lpApplicationName;
     if (path == (const char*)0)
         path = lpCommandLine; // first arg of cmdline ≈ executable
     if (path == (const char*)0)
         return 0;
+
+    struct ProcessSpawnStdio_t bundle;
+    int have_bundle = 0;
+    win32_extract_stdio_bundle(lpStartupInfo, bInheritHandles, &bundle, &have_bundle);
+
     long long pid;
-    __asm__ volatile("int $0x80"
-                     : "=a"(pid)
-                     : "a"((long long)158), /* SYS_PROCESS_SPAWN */
-                       "D"((long long)path), "S"((long long)0)
-                     : "memory");
+    if (have_bundle)
+    {
+        __asm__ volatile("int $0x80"
+                         : "=a"(pid)
+                         : "a"((long long)190), /* SYS_PROCESS_SPAWN_EX */
+                           "D"((long long)path), "S"((long long)0), "d"((long long)&bundle)
+                         : "memory");
+    }
+    else
+    {
+        __asm__ volatile("int $0x80"
+                         : "=a"(pid)
+                         : "a"((long long)158), /* SYS_PROCESS_SPAWN */
+                           "D"((long long)path), "S"((long long)0)
+                         : "memory");
+    }
     if (pid < 0)
         return 0;
     if (lpProcessInformation != (void*)0)

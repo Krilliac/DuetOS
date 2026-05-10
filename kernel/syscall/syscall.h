@@ -1803,7 +1803,85 @@ enum SyscallNumber : u64
     // writes on the write end appended, regardless of which
     // process holds either handle.
     SYS_WIN32_CREATE_PIPE = 186,
+
+    // SYS_QUEUE_USER_APC — kernel-resident APC queue insertion.
+    // Backs Win32 QueueUserAPC and ntdll!NtQueueApcThread for the
+    // cross-thread same-process delivery case. The kernel queue is
+    // owned by the TARGET task's process: we resolve the target tid
+    // to its Process via SchedFindTaskByTid, then push a slot onto
+    // that process's `apc_slots[]` table. Cross-process delivery
+    // is GAP — same-process is the only contract today.
+    //   rdi = u64 target_tid          // 0 / -2 / current tid = self
+    //   rsi = u64 pfn                  // user-mode PAPCFUNC VA
+    //   rdx = u64 data                 // ulData passed to pfn
+    // Returns 0 on success, (u64)-1 on table-full / cross-process
+    // / unknown tid. Cap-gated on kCapSpawnThread (the same gate
+    // that lets the caller create a thread it could otherwise
+    // QueueUserAPC against).
+    SYS_QUEUE_USER_APC = 187,
+
+    // SYS_DRAIN_USER_APC — pop one APC targeted at the calling
+    // task. Drained in registration order. Caller invokes the
+    // returned (pfn, data) from user mode after this syscall
+    // returns; the kernel does not invoke user code.
+    //   rdi = u64* user out_pfn        // VA written on success
+    //   rsi = u64* user out_data       // VA written on success
+    // Returns 1 if an APC was drained, 0 if the queue was empty
+    // for the caller, (u64)-1 on bad user pointer.
+    SYS_DRAIN_USER_APC = 188,
+
+    // SYS_PRIORITY_CLASS — get/set the calling process's Win32
+    // priority class. Field stored on Process; the scheduler does
+    // not yet honour it (single-band runqueue), so the value is
+    // recorded for fidelity to GetPriorityClass + SetPriorityClass
+    // contracts. A future MLFQ rebuild reads it on enqueue.
+    //   rdi = u64 op                   // 0 = get, 1 = set
+    //   rsi = u32 new_class            // ignored when op == 0
+    // Returns the current (post-op) priority class on success,
+    // 0 on bad op. Always cap-allowed; affects only the caller's
+    // Process — no cross-process priority knob today.
+    SYS_PRIORITY_CLASS = 189,
+
+    // SYS_PROCESS_SPAWN_EX — extended subprocess spawn carrying
+    // an inheritable-stdio bundle. Backs CreateProcess when
+    // STARTF_USESTDHANDLES is set on the STARTUPINFO. Same path
+    // resolution rules as SYS_PROCESS_SPAWN (158); the additional
+    // bundle pins (stdin, stdout, stderr) handles from the
+    // caller's win32_handles table that the spawner copies into
+    // the child's table before ring-3 entry.
+    //   rdi = const char* user path           // NUL-terminated
+    //   rsi = u64 flags                        // reserved (ignored)
+    //   rdx = const ProcessSpawnStdio* bundle  // 24 bytes; nullptr = no inheritance
+    // Returns the new pid on success, (u64)-1 on failure (any
+    // inherited handle resolves to a non-pipe / non-file slot,
+    // child handle table full, target path unreadable).
+    SYS_PROCESS_SPAWN_EX = 190,
+
+    // SYS_GET_INHERITED_STD — read one of the calling process's
+    // inherited stdio handles. Backs kernel32!GetStdHandle's
+    // pre-check before falling back to the legacy pseudo-handle.
+    //   rdi = u64 idx                  // 0=stdin, 1=stdout, 2=stderr
+    // Returns the inherited Win32 file handle (kWin32HandleBase
+    // range) on success, 0 if no inheritance was set up at spawn,
+    // (u64)-1 on bad idx.
+    SYS_GET_INHERITED_STD = 191,
 };
+
+// Inheritable stdio bundle for SYS_PROCESS_SPAWN_EX. Each entry
+// is a Win32-shaped handle in the caller's win32_handles table
+// (kWin32HandleBase + slot). Zero in any slot means "child
+// inherits no handle for this stream" — child's GetStdHandle
+// returns the legacy pseudo-handle. The kernel-side spawner
+// resolves each non-zero handle in the parent, then materialises
+// a matching child-side handle that points at the same backing
+// pipe / file. Layout is part of the SYS_PROCESS_SPAWN_EX ABI.
+struct ProcessSpawnStdio
+{
+    u64 stdin_handle;  // Win32 file handle (0 = no inheritance)
+    u64 stdout_handle; // Win32 file handle (0 = no inheritance)
+    u64 stderr_handle; // Win32 file handle (0 = no inheritance)
+};
+static_assert(sizeof(ProcessSpawnStdio) == 24, "SYS_PROCESS_SPAWN_EX ABI: stdio bundle is 24 bytes");
 
 /// Cursor-shape values the PE side hands the kernel via
 /// SYS_GDI_SET_CURSOR. Mirrors the kernel's internal

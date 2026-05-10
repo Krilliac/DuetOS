@@ -746,9 +746,26 @@ Track 3 has no remaining roadmap rows.
 
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
+> **T6-03** stdio inheritance shipped: new `SYS_PROCESS_SPAWN_EX = 190`
+> takes a 24-byte `ProcessSpawnStdio` bundle (stdin / stdout / stderr
+> Win32 handles); the spawner duplicates each handle into the
+> child's `win32_handles` table at spawn time, retains pipe-pool
+> refcounts, and writes the inherited handles into the child's
+> `Process::std_handles[]`. `kernel32!CreateProcessA/W` decodes
+> `STARTUPINFO.dwFlags & STARTF_USESTDHANDLES` and routes the
+> three handle slots through the new syscall; non-inherit calls
+> still use `SYS_PROCESS_SPAWN`. New `SYS_GET_INHERITED_STD = 191`
+> + `kernel32!GetStdHandle` consult the per-process slot before
+> falling back to the legacy pseudo-handle. CreateProcessA/W +
+> waiting/exit (NtWaitForSingleObject on the process handle) +
+> NtTerminateProcess + duplicate-handle (NtDuplicateObject) all
+> work today; the parent-creates-child-waits-observes-exit-code
+> round-trip is exercised by the existing `pe_stress` smoke.
+
+| ID | Scope | Priority | Task | Acceptance |
+| --- | --- | --- | --- | --- |
 | T6-01 | kernel | P0 | Implement PE TLS: parse `IMAGE_DIRECTORY_ENTRY_TLS`, call callbacks before entry/DllMain, allocate per-thread TLS templates, set TEB TLS slot pointer, and implement `TlsAlloc` / `TlsSetValue` / `TlsGetValue` / `TlsFree`. | A PE with `__declspec(thread) int x = 42` reads independent `42` values from two threads. |
 | T6-02 | kernel | P1 | Implement x64 SEH: parse `.pdata`, implement `RtlLookupFunctionEntry`, `RtlVirtualUnwind`, `RtlUnwindEx`, `NtRaiseException`, context capture/restore, user exception dispatch for faults. | A PE `__try`/`__except` null write is caught and continues in the exception handler. |
-| T6-03 | kernel | P1 | Implement `CreateProcessA/W` and process/thread waiting/exit/open/terminate/duplicate handle semantics. | A parent PE creates a child PE, waits, and observes the child's exit code. |
 
 ### Track 7 — File system
 
@@ -774,10 +791,37 @@ Track 3 has no remaining roadmap rows.
 
 ### Track 8 — Scheduler
 
+> **T8-02** kernel-resident APC queue + `NtQueueApcThread` shipped:
+> `Process::apc_slots[16]` carries (target_tid, pfn, data) triples;
+> new syscalls `SYS_QUEUE_USER_APC = 187` + `SYS_DRAIN_USER_APC = 188`
+> insert/pop entries with cap-gating on `kCapSpawnThread` and
+> same-process restriction on the target tid. `kernel32!QueueUserAPC`
+> tries the kernel queue first and falls back to the legacy
+> user-space queue on overflow; `kernel32!win32_drain_apc_queue`
+> drains both kernel and user-space queues during alertable
+> waits. `ntdll!NtQueueApcThread` / `NtQueueApcThreadEx` route the
+> first three SDK args (NormalContext as ulData) through the new
+> syscall — full three-arg fidelity (SystemArgument1/2) is GAP.
+> Cross-process delivery is still GAP — same-process targeting
+> covers the workloads that depend on APCs today; cross-process
+> would require a target-side wakeup IPI which lands with the
+> per-thread kernel-side APC list. Boot self-test
+> (`ApcSelfTest`) exercises queue / drain / cross-tid
+> isolation / capacity overflow on every boot.
+
+> **T8-01** Win32 priority class mapping shipped: new syscall
+> `SYS_PRIORITY_CLASS = 189` (op=get/set) on a per-process
+> `Process::win32_priority_class` field; `kernel32!SetPriorityClass`
+> + `GetPriorityClass` route through it. The scheduler is
+> single-band today, so the value is recorded for fidelity but
+> doesn't yet bias scheduling. Full MLFQ priority aging/decay
+> and work-stealing priority behaviour ride on the lock-split
+> (B2-followup row above) — once `g_sched_lock` is per-CPU the
+> band-aware enqueue / steal logic becomes a one-slice add-on.
+
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
-| T8-01 | sched | P1 | Complete MLFQ priority aging/decay, Win32 priority class/thread mappings, and work-stealing priority behavior. | A high-priority thread preempts a low-priority thread within one 10 ms tick. |
-| T8-02 | sched | P1 | Implement APC queues and alertable waits for `QueueUserAPC`, `SleepEx`, `WaitForSingleObjectEx`, and `NtQueueApcThread`. (Process-local APC queue landed: `QueueUserAPC` enqueues callbacks into a 16-slot per-process table; `SleepEx(_, TRUE)` and `WaitForSingleObjectEx(_, _, TRUE)` both chunk into 10ms slices and poll the queue between each, so APCs queued from a peer thread fire within ~10ms — including the `INFINITE` case. `NtQueueApcThread` and a kernel-resident per-thread APC list still pending — that pair only matters once a workload depends on APC delivery into a kernel-blocked wait that can't be sliced from user space.) | `QueueUserAPC` wakes a target in `SleepEx(INFINITE, TRUE)` and executes the APC. |
+| T8-01-followon | sched | P1 | MLFQ priority aging/decay + work-stealing priority behavior. The Win32 priority class field is wired today (`Process::win32_priority_class`); the scheduler still ignores it. Lands once the per-CPU scheduler-lock split lets the runqueue grow priority bands without inflating the global lock's hot path. | A high-priority thread preempts a low-priority thread within one 10 ms tick. |
 
 ### Track 9 — Security
 
@@ -923,10 +967,18 @@ Track 3 has no remaining roadmap rows.
 > imported-TODO entry (or shrinks it to its true residual) in the
 > same commit; `Design-Decisions.md` carries an entry per closure
 > recording what's deferred.
-
-| ID | Scope | Priority | Task | Acceptance |
-| --- | --- | --- | --- | --- |
-| T13-03 | docs | P2 | Document every assigned syscall number in `wiki/specifications/Syscall-ABI.md` with args, return, subsystem, and status. | New syscall work can detect ABI number collisions from the table. |
+> **T13-03** per-syscall args/return doc-gen shipped: new
+> `tools/build/gen-syscall-doc.py` parses the doc-comments above each
+> `SYS_NAME = N` entry in `kernel/syscall/syscall.h`, extracts the
+> `rdi=… rsi=… returns…` clauses, cross-checks numbers against
+> `kernel/syscall/syscall_names.def` (warns on drift), and emits a
+> markdown table with columns (#, name, args, returns) into the
+> `<!-- AUTO:syscall_args -->` block in
+> [`Syscall-ABI`](../specifications/Syscall-ABI.md).
+> `docs/sync-wiki.sh sync` calls the generator on every sync. Future
+> syscall additions land their docs in the source comment and the
+> table refreshes from `sync-wiki.sh` — no manual table maintenance.
+> Track 13 has no remaining roadmap rows.
 
 ### Track 14 — Testing
 

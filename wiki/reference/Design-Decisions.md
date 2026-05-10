@@ -7437,3 +7437,137 @@ doc helps future readers audit the trail.
   paths (multi-connector burst, dual-mode listener).
 - **Related roadmap track(s):** T3-01 + T14-03 closed (Track 3
   + Track 14 fully closed).
+
+## 2026-05-10 — Kernel APC queue + NtQueueApcThread (T8-02)
+
+- **What changed:**
+  - New `Process::apc_slots[16]` ring carrying (target_tid, pfn,
+    data) triples — the kernel-resident half of the APC delivery
+    contract. Lives next to the existing user-space queue in
+    `kernel32`, which now serves as the overflow buffer.
+  - New syscalls `SYS_QUEUE_USER_APC = 187` +
+    `SYS_DRAIN_USER_APC = 188`. Enqueue is cap-gated on
+    `kCapSpawnThread` (same bar that lets a caller create a
+    thread it could otherwise queue an APC against) and refuses
+    cross-process targets — `SchedFindTaskByTid` resolves the
+    target's owning Process and the handler returns -1 if it
+    doesn't match the caller's. Drain pops the first slot whose
+    `target_tid` matches `CurrentTaskId()`.
+  - `kernel32!QueueUserAPC` tries the kernel queue first, falls
+    back to the legacy user-space ring on overflow / cap denial.
+    `kernel32!win32_drain_apc_queue` drains both queues.
+    `ntdll!NtQueueApcThread` / `NtQueueApcThreadEx` route through
+    `SYS_QUEUE_USER_APC`; `SystemArgument1` / `SystemArgument2`
+    are dropped (NormalContext is packed as `ulData`).
+  - Boot self-test (`ApcSelfTest`) drives queue / drain /
+    cross-tid isolation / capacity overflow on a stand-in
+    Process so any regression surfaces in the boot log.
+- **Why:** The roadmap row called out two follow-ons:
+  `NtQueueApcThread` and a kernel-resident per-thread APC list.
+  The user-space queue worked for same-process polling but was
+  invisible to the kernel — `NtQueueApcThread` and any future
+  cross-thread "wake target out of a kernel-blocked alertable
+  wait" path needed a queue the kernel can see. The 16-slot
+  per-process kernel ring sized to match the existing user-space
+  queue keeps the contract symmetric.
+- **Rules out / defers:**
+  - Cross-process APC delivery. Same-process is the v0 contract
+    — cross-process needs target-side wake (a reschedule IPI to
+    the target CPU after the enqueue) and a kernel-blocked
+    alertable wait that the kernel can wake on the target's
+    behalf. The roadmap row notes the deferral.
+  - True three-arg `NtQueueApcThread` fidelity. The kernel queue
+    carries one `ulData` payload; SystemArgument1/2 are ignored.
+    Real apps relying on the three-arg form get the first arg
+    only — which matches the SDK's `QueueUserAPC` shape; the
+    extended shape is rare in practice.
+  - Per-thread APC lists (vs. per-process). With at most 16
+    pending APCs across all threads in a process, the
+    target-tid scan inside the slot table is O(16) — not worth a
+    per-thread split until a workload demands it.
+- **Revisit when:** a real workload's profile shows kernel APC
+  delivery latency dominating (would motivate per-thread
+  splitting) or a PE depends on cross-process APC (would
+  motivate the IPI-wake path).
+- **Related roadmap track(s):** T8-02 closed.
+
+## 2026-05-10 — CreateProcess stdio inheritance (T6-03 stdio)
+
+- **What changed:**
+  - New syscall `SYS_PROCESS_SPAWN_EX = 190` carrying a 24-byte
+    `ProcessSpawnStdio` bundle (`stdin_handle / stdout_handle /
+    stderr_handle`, each a Win32-shaped handle in the parent's
+    `win32_handles` table). The kernel-side spawner walks the
+    bundle pre-spawn (rejecting unsupported handle kinds
+    cleanly), spawns via the existing `SpawnPeFile / SpawnElfFile`,
+    then duplicates each non-zero handle into the child's table.
+    Pipe handles bump the per-end pool refcount via
+    `PipeRetainRead/Write` so the parent's CloseHandle doesn't
+    tear the child's view down.
+  - New syscall `SYS_GET_INHERITED_STD = 191` reads
+    `Process::std_handles[idx]` (idx 0/1/2 = stdin/stdout/stderr)
+    so `kernel32!GetStdHandle` can return the inherited Win32
+    handle when it exists, falling back to the legacy
+    pseudo-handle (-10/-11/-12) otherwise.
+  - `kernel32!CreateProcessA/W` decodes
+    `STARTUPINFO.dwFlags & STARTF_USESTDHANDLES` from the
+    104-byte STARTUPINFO layout and routes to the new syscall
+    when set; falls back to `SYS_PROCESS_SPAWN` otherwise so
+    non-inheriting callers see no behaviour change.
+- **Why:** A parent that wants to read its child's stdout —
+  the canonical CreateProcess use case — needed the child's
+  WriteFile(STD_OUTPUT_HANDLE, ...) to land on the parent's
+  CreatePipe-allocated read end instead of the global serial
+  console. Without per-process stdio handles, every child
+  shared one stdout fd and the parent had no read path.
+- **Rules out / defers:**
+  - Process-attribute lists (PROC_THREAD_ATTRIBUTE_*). The
+    Win32 STARTUPINFOEX layout extends STARTUPINFO with an
+    attribute list pointer; v0 ignores it. Same precedent as
+    `lpDesktop / lpReserved` — recorded in user space, not
+    consulted by the kernel.
+  - Cursor-share inheritance. Child gets a fresh `cursor = 0`
+    on each duplicated handle. Real Windows shares the open
+    file description's cursor — that's a separate slice
+    once a workload exercises shared offsets across processes.
+  - Job-object propagation, environment-block parsing,
+    duplicate-handle ACL gating. All ride later.
+- **Revisit when:** a workload depends on shared cursors,
+  STARTUPINFOEX attribute lists, or full Job-object
+  inheritance.
+- **Related roadmap track(s):** T6-03 stdio half closed; the
+  CreateProcess + wait + exit-code half was already covered by
+  the pre-existing PROCESS_OPEN / Wait / Exit path.
+
+## 2026-05-10 — Win32 priority class on Process (T8-01 partial)
+
+- **What changed:**
+  - `Process::win32_priority_class` (u32) records the Windows
+    priority-class constant (NORMAL_PRIORITY_CLASS = 0x20,
+    HIGH_PRIORITY_CLASS = 0x80, etc.).
+  - New syscall `SYS_PRIORITY_CLASS = 189` (op=get/set) round-trips
+    the value. `kernel32!SetPriorityClass / GetPriorityClass`
+    route through it; the previous kernel-side
+    `kOffReturnPrioNormal` thunk fallback stays as the
+    catch-all for old PEs that don't bind the real export.
+- **Why:** Two of the three T8-01 acceptance prongs (priority
+  class storage + Win32 priority class mapping) are scheduler-
+  independent — the value just needs to round-trip through
+  Process state. The third prong (priority aging / decay /
+  preemption) requires per-CPU runqueue lock-splitting (the
+  B2-followup row) before adding bands makes sense.
+- **Rules out / defers:**
+  - Scheduler bias on the priority class value. The runqueue
+    is single-band; the value is recorded but not consulted on
+    enqueue. A future MLFQ rebuild reads it.
+  - Per-thread priority (`SetThreadPriority`). The Win32 thread
+    priority is a delta off the process's class; v0 ignores
+    the delta entirely.
+  - Cross-process SetPriorityClass on a non-self handle.
+    `kernel32!SetPriorityClass` ignores `hProcess` and modifies
+    only the calling process — fits v0's "no cross-process
+    process-wide knobs" stance.
+- **Revisit when:** the scheduler split (B2-followup) lands
+  and a workload exercises priority-class-driven scheduling.
+- **Related roadmap track(s):** T8-01 partial — full closure
+  rides on the per-CPU lock split.

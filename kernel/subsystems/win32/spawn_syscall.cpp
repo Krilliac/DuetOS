@@ -29,6 +29,9 @@
 #include "mm/paging.h"
 #include "proc/process.h"
 #include "proc/ring3_smoke.h"
+#include "sched/sched.h"
+#include "subsystems/linux/syscall_pipe.h"
+#include "syscall/syscall.h"
 
 namespace duetos::subsystems::win32
 {
@@ -181,6 +184,186 @@ i64 SysProcessSpawn(u64 user_path, u64 flags)
     arch::SerialWrite(path);
     arch::SerialWrite("\" fmt=");
     arch::SerialWriteHex(static_cast<u64>(fmt));
+    arch::SerialWrite("\n");
+    return static_cast<i64>(pid);
+}
+
+namespace
+{
+
+// Resolve a Win32-shaped handle in `parent` to its win32_handles
+// slot index. Returns Process::kWin32HandleCap if the handle is
+// not a valid file/pipe handle in this process. Used by the
+// stdio-inheritance path to copy the parent's slot into the
+// child's table.
+u64 ResolveParentHandleSlot(::duetos::core::Process* parent, u64 raw_handle)
+{
+    using ::duetos::core::Process;
+    if (raw_handle < Process::kWin32HandleBase)
+        return Process::kWin32HandleCap;
+    const u64 idx = raw_handle - Process::kWin32HandleBase;
+    if (idx >= Process::kWin32HandleCap)
+        return Process::kWin32HandleCap;
+    if (parent->win32_handles[idx].kind == Process::FsBackingKind::None)
+        return Process::kWin32HandleCap;
+    return idx;
+}
+
+// Find a free Win32FileHandle slot in `child`. Returns the slot
+// index or Process::kWin32HandleCap if the table is full.
+u64 ChildFindFreeSlot(::duetos::core::Process* child)
+{
+    using ::duetos::core::Process;
+    for (u64 i = 0; i < Process::kWin32HandleCap; ++i)
+    {
+        if (child->win32_handles[i].kind == Process::FsBackingKind::None)
+            return i;
+    }
+    return Process::kWin32HandleCap;
+}
+
+// Duplicate a single parent slot into the first free child slot.
+// Returns the assigned child handle (kWin32HandleBase + slot)
+// on success, 0 on any failure (table-full / unsupported kind).
+// Pipe handles bump the per-end pool refcount so the child holds
+// its own reference.
+u64 InheritOneStdHandle(::duetos::core::Process* parent, ::duetos::core::Process* child, u64 parent_handle)
+{
+    using ::duetos::core::Process;
+    if (parent_handle == 0)
+        return 0;
+    const u64 parent_slot = ResolveParentHandleSlot(parent, parent_handle);
+    if (parent_slot == Process::kWin32HandleCap)
+        return 0;
+    const u64 child_slot = ChildFindFreeSlot(child);
+    if (child_slot == Process::kWin32HandleCap)
+        return 0;
+    const auto& src = parent->win32_handles[parent_slot];
+    auto& dst = child->win32_handles[child_slot];
+    dst = src;      // copy-by-value — fat32_path / pipe_pool_idx / cursor follow
+    dst.cursor = 0; // child reads from start (Win32 contract: inherited handles don't share cursor)
+    dst.is_canary = false;
+
+    if (src.kind == Process::FsBackingKind::Pipe)
+    {
+        if (src.pipe_is_write_end)
+            ::duetos::subsystems::linux::internal::PipeRetainWrite(src.pipe_pool_idx);
+        else
+            ::duetos::subsystems::linux::internal::PipeRetainRead(src.pipe_pool_idx);
+    }
+    return Process::kWin32HandleBase + child_slot;
+}
+
+} // namespace
+
+i64 SysProcessSpawnEx(u64 user_path, u64 flags, u64 user_stdio_bundle)
+{
+    (void)flags;
+    using ::duetos::core::CapSetHas;
+    using ::duetos::core::kCapSpawnThread;
+    using ::duetos::core::Process;
+    using ::duetos::core::ProcessSpawnStdio;
+
+    Process* caller = ::duetos::core::CurrentProcess();
+    if (caller == nullptr)
+        return -1;
+    if (!CapSetHas(caller->caps, kCapSpawnThread))
+    {
+        ::duetos::core::RecordSandboxDenial(kCapSpawnThread);
+        return -1;
+    }
+
+    char path[128];
+    if (!::duetos::mm::CopyUserCString(path, sizeof(path), reinterpret_cast<const void*>(user_path)).ok())
+        return -1;
+
+    // Optionally copy the bundle. Zero pointer = no inheritance.
+    ProcessSpawnStdio bundle{};
+    bool have_bundle = false;
+    if (user_stdio_bundle != 0)
+    {
+        if (!::duetos::mm::CopyFromUser(&bundle, reinterpret_cast<const void*>(user_stdio_bundle), sizeof(bundle)))
+            return -1;
+        have_bundle = true;
+    }
+
+    // Pre-validate every supplied parent handle BEFORE spawning so
+    // a bad handle aborts cleanly (no half-spawned child to tear
+    // down). Pipe handles aren't refcounted yet — the retain only
+    // happens after we know the child slot is reserved.
+    if (have_bundle)
+    {
+        const u64 candidates[3] = {bundle.stdin_handle, bundle.stdout_handle, bundle.stderr_handle};
+        for (u64 i = 0; i < 3; ++i)
+        {
+            if (candidates[i] == 0)
+                continue;
+            const u64 slot = ResolveParentHandleSlot(caller, candidates[i]);
+            if (slot == Process::kWin32HandleCap)
+                return -1;
+            const auto kind = caller->win32_handles[slot].kind;
+            // v0 supports inheriting Pipe / Fat32 / Ramfs / DuetFs
+            // — same set the child can already operate on through
+            // the file-route layer.
+            if (kind != Process::FsBackingKind::Pipe && kind != Process::FsBackingKind::Fat32 &&
+                kind != Process::FsBackingKind::Ramfs && kind != Process::FsBackingKind::DuetFs)
+                return -1;
+        }
+    }
+
+    u64 file_len = 0;
+    u8* bytes = ReadFileToHeap(path, file_len);
+    if (bytes == nullptr)
+    {
+        arch::SerialWrite("[win32/spawn-ex] read failed path=\"");
+        arch::SerialWrite(path);
+        arch::SerialWrite("\"\n");
+        return -1;
+    }
+    const i32 fmt = DetectFormat(bytes, file_len);
+    if (fmt == 0)
+    {
+        ::duetos::mm::KFree(bytes);
+        return -1;
+    }
+    char namebuf[32];
+    const char* name = LeafName(path, namebuf);
+    constexpr u64 kFrameBudget = 256;
+    u64 pid = 0;
+    if (fmt == 1)
+        pid = ::duetos::core::SpawnPeFile(name, bytes, file_len, caller->caps, caller->root, kFrameBudget,
+                                          caller->tick_budget);
+    else
+        pid = ::duetos::core::SpawnElfFile(name, bytes, file_len, caller->caps, caller->root, kFrameBudget,
+                                           caller->tick_budget);
+    ::duetos::mm::KFree(bytes);
+
+    if (pid == 0 || pid == static_cast<u64>(-1))
+        return -1;
+
+    // Stitch the inheritable handles into the freshly-created
+    // child. SpawnPeFile / SpawnElfFile have already created the
+    // child Process and registered it; we look it up by pid.
+    if (have_bundle)
+    {
+        Process* child = ::duetos::sched::SchedFindProcessByPid(pid);
+        if (child != nullptr)
+        {
+            const u64 inherited_in = InheritOneStdHandle(caller, child, bundle.stdin_handle);
+            const u64 inherited_out = InheritOneStdHandle(caller, child, bundle.stdout_handle);
+            const u64 inherited_err = InheritOneStdHandle(caller, child, bundle.stderr_handle);
+            child->std_handles[0] = inherited_in;
+            child->std_handles[1] = inherited_out;
+            child->std_handles[2] = inherited_err;
+        }
+    }
+
+    arch::SerialWrite("[win32/spawn-ex] ok pid=");
+    arch::SerialWriteHex(pid);
+    arch::SerialWrite(" path=\"");
+    arch::SerialWrite(path);
+    arch::SerialWrite("\" stdio=");
+    arch::SerialWriteHex(have_bundle ? 1 : 0);
     arch::SerialWrite("\n");
     return static_cast<i64>(pid);
 }

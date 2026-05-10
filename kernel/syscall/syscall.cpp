@@ -85,6 +85,7 @@
 #include "subsystems/win32/thread_syscall.h"
 #include "subsystems/win32/mutex_syscall.h"
 #include "subsystems/win32/event_syscall.h"
+#include "subsystems/win32/apc_syscall.h"
 #include "subsystems/win32/named_kobj_syscall.h"
 #include "subsystems/win32/pipe_syscall.h"
 #include "subsystems/win32/semaphore_syscall.h"
@@ -806,6 +807,50 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_WIN32_CREATE_PIPE:
         ::duetos::subsystems::win32::DoWin32CreatePipe(frame);
         return;
+    case SYS_QUEUE_USER_APC:
+        ::duetos::subsystems::win32::DoQueueUserApc(frame);
+        return;
+    case SYS_DRAIN_USER_APC:
+        ::duetos::subsystems::win32::DoDrainUserApc(frame);
+        return;
+    case SYS_PRIORITY_CLASS:
+    {
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        const u64 op = frame->rdi;
+        const u32 new_class = static_cast<u32>(frame->rsi);
+        if (op == 1) // set
+            proc->win32_priority_class = new_class;
+        frame->rax = static_cast<u64>(proc->win32_priority_class);
+        return;
+    }
+    case SYS_PROCESS_SPAWN_EX:
+    {
+        const i64 rv = ::duetos::subsystems::win32::SysProcessSpawnEx(frame->rdi, frame->rsi, frame->rdx);
+        frame->rax = static_cast<u64>(rv);
+        return;
+    }
+    case SYS_GET_INHERITED_STD:
+    {
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 idx = frame->rdi;
+        if (idx > 2)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        frame->rax = proc->std_handles[idx];
+        return;
+    }
     case SYS_NOW_NS:
         DoNowNs(frame);
         return;

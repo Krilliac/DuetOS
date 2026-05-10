@@ -251,6 +251,7 @@
 #include "diag/ubsan.h"
 #include "subsystems/linux/ring3_smoke.h"
 #include "subsystems/linux/syscall.h"
+#include "subsystems/win32/apc_selftest.h"
 #include "subsystems/win32/custom_selftest.h"
 #include "subsystems/win32/gdi_objects.h"
 #include "subsystems/win32/nt_coverage.h"
@@ -2726,6 +2727,11 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::ipc::KWaitableSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::ipc::KFileSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::ipc::NamedKObjectSelfTest());
+    // Kernel-resident APC queue (T8-02). Exercises queue / drain
+    // / cross-tid isolation / capacity overflow on a stand-in
+    // Process so any regression in apc_syscall.cpp is caught
+    // before a real PE drives QueueUserAPC / NtQueueApcThread.
+    DUETOS_BOOT_SELFTEST(duetos::subsystems::win32::ApcSelfTest());
     // Linux fd-table helper self-test (Linux fd → KFile
     // migration). Exercises LinuxFdAllocLowest / AttachKFile /
     // Dup / SetCloexec / CloseOnExec / Close on a stand-in

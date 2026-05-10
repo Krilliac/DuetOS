@@ -2958,27 +2958,46 @@ __declspec(dllexport) NTSTATUS NtSignalAndWaitForSingleObject(HANDLE ObjectToSig
     return NtWaitForSingleObject(WaitableObject, Alertable, (const long long*)Time);
 }
 
+/* NtQueueApcThread / NtQueueApcThreadEx — route user-mode APCs
+ * through the kernel-resident queue (SYS_QUEUE_USER_APC = 187).
+ * The native Win32 contract: ApcRoutine is invoked as
+ *   ApcRoutine(NormalContext, SystemArgument1, SystemArgument2)
+ * when the target enters an alertable wait. The kernel queue
+ * carries a single ulData payload; we pack NormalContext as that
+ * payload and ignore SystemArgument1/2 in v0 — the same SDK
+ * shape kernel32!QueueUserAPC uses (single ulData). PE callers
+ * that need the three-arg shape can fall back to a userland
+ * shim that recovers SA1/SA2 from a side table.
+ *
+ * Returns STATUS_SUCCESS on success, STATUS_NOT_IMPLEMENTED
+ * on cross-process / unknown-tid (kernel returns -1). The
+ * thread handle is opaque; v0 takes the low 32 bits as the
+ * target tid, the same convention kernel32!QueueUserAPC uses.
+ */
 __declspec(dllexport) NTSTATUS NtQueueApcThread(HANDLE ThreadHandle, void* ApcRoutine, void* NormalContext,
                                                 void* SystemArgument1, void* SystemArgument2)
 {
-    (void)ThreadHandle;
-    (void)ApcRoutine;
-    (void)NormalContext;
     (void)SystemArgument1;
     (void)SystemArgument2;
-    return (NTSTATUS)0xC0000002;
+    if (ApcRoutine == (void*)0)
+        return (NTSTATUS)0xC000000DL; /* STATUS_INVALID_PARAMETER */
+    long long target_tid = (long long)(unsigned long long)ThreadHandle;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)187), /* SYS_QUEUE_USER_APC */
+                       "D"(target_tid), "S"((long long)ApcRoutine), "d"((long long)NormalContext)
+                     : "memory");
+    if (rv != 0)
+        return (NTSTATUS)0xC0000002L; /* STATUS_NOT_IMPLEMENTED — caller falls back */
+    return (NTSTATUS)0;
 }
 
 __declspec(dllexport) NTSTATUS NtQueueApcThreadEx(HANDLE ThreadHandle, HANDLE ReserveHandle, void* ApcRoutine,
                                                   void* NormalContext, void* SystemArgument1, void* SystemArgument2)
 {
-    (void)ThreadHandle;
     (void)ReserveHandle;
-    (void)ApcRoutine;
-    (void)NormalContext;
-    (void)SystemArgument1;
-    (void)SystemArgument2;
-    return (NTSTATUS)0xC0000002;
+    return NtQueueApcThread(ThreadHandle, ApcRoutine, NormalContext, SystemArgument1, SystemArgument2);
 }
 
 __declspec(dllexport) NTSTATUS NtAlertThread(HANDLE ThreadHandle)
