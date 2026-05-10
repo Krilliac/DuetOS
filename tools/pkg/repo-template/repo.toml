@@ -1,0 +1,22 @@
+[repo]
+name        = "official"
+maintainer  = "Nathan"
+version     = 1
+# Set to "ed25519:<base64-encoded-32-byte-public-key>" — must
+# match keys/official.pub. duet-pkg-pack prints the value at the
+# end of every `create` run.
+signing_key = "ed25519:REPLACE_WITH_BASE64_OF_OFFICIAL_PUB"
+base_url    = "https://REPLACE_WITH_GH_USERNAME.github.io/duetos-packages/packages/"
+
+# Append a [[packages]] block per package via the [[packages]]
+# snippet duet-pkg-pack prints. Example shape:
+#
+# [[packages]]
+# name        = "myapp"
+# version     = "1.0.0"
+# arch        = "x86_64"
+# description = "What myapp does"
+# deps        = []
+# binary_url  = "myapp-1.0.0-x86_64.tar.gz"
+# sha256      = "abc..."
+# license     = "MIT"

@@ -352,4 +352,131 @@ Expected<void> Installer::InstallOne(const resolve::ResolvedPackage& pkg, bool a
     return {};
 }
 
+Expected<std::string> Installer::InstallLocal(const std::filesystem::path& tar_path)
+{
+    if (!std::filesystem::exists(tar_path))
+    {
+        return std::unexpected(MakeError(ErrorCode::FilesystemError, "no such tarball: " + tar_path.string()));
+    }
+    // 1. Compute SHA-256 of the tarball — recorded in the
+    // registry entry for forensic audit + matches the contract
+    // documented in DUETOS_PKG_IMPLEMENTATION.md.
+    auto sha_or = duet::crypto::Sha256HexOfFile(tar_path);
+    if (!sha_or)
+        return std::unexpected(sha_or.error());
+
+    // 2. Extract to a partial dir we can later rename to the
+    // canonical version dir.
+    const auto tmp = std::filesystem::temp_directory_path() /
+                     ("duet-pkg-local-" + std::to_string(std::hash<std::string>{}(tar_path.string())));
+    std::filesystem::remove_all(tmp);
+    auto extract = ExtractTarGz(tar_path, tmp);
+    if (!extract)
+    {
+        std::filesystem::remove_all(tmp);
+        return std::unexpected(extract.error());
+    }
+
+    // 3. Read manifest.toml from the extracted tree. Without
+    // one, install-local has no way to know the version + name;
+    // require the manifest.
+    const auto inner_manifest = tmp / "manifest.toml";
+    if (!std::filesystem::exists(inner_manifest))
+    {
+        std::filesystem::remove_all(tmp);
+        return std::unexpected(
+            MakeError(ErrorCode::ManifestMissingField, "tarball " + tar_path.string() + " is missing manifest.toml"));
+    }
+    auto manifest_or = duet::repo::LoadPackageManifestFromFile(inner_manifest);
+    if (!manifest_or)
+    {
+        std::filesystem::remove_all(tmp);
+        return std::unexpected(manifest_or.error());
+    }
+    const auto& manifest = *manifest_or;
+    if (manifest.name.empty() || manifest.version.empty())
+    {
+        std::filesystem::remove_all(tmp);
+        return std::unexpected(
+            MakeError(ErrorCode::ManifestMissingField, "tarball manifest.toml requires name + version"));
+    }
+    std::fprintf(stderr, "warning: installing unsigned local package '%s' %s — verify source yourself.\n",
+                 manifest.name.c_str(), manifest.version.c_str());
+
+    // 4. Move the staging dir to the canonical version dir.
+    const auto final_dir = VersionDir(manifest.name, manifest.version);
+    std::error_code ec;
+    std::filesystem::create_directories(final_dir.parent_path(), ec);
+    if (ec)
+    {
+        std::filesystem::remove_all(tmp);
+        return std::unexpected(
+            MakeError(ErrorCode::FilesystemError, "mkdir -p " + final_dir.parent_path().string(), ec.message()));
+    }
+    std::filesystem::remove_all(final_dir, ec);
+    std::filesystem::rename(tmp, final_dir, ec);
+    if (ec)
+    {
+        // Fall back to a recursive copy + remove (rename across
+        // filesystems would otherwise error with EXDEV).
+        std::filesystem::copy(tmp, final_dir,
+                              std::filesystem::copy_options::recursive | std::filesystem::copy_options::copy_symlinks,
+                              ec);
+        std::filesystem::remove_all(tmp);
+        if (ec)
+        {
+            return std::unexpected(
+                MakeError(ErrorCode::InstallFailed, "move staging dir to " + final_dir.string(), ec.message()));
+        }
+    }
+
+    // 5. Update `current` + emit bin shims (same as remote install).
+    auto cur = AtomicSymlink(manifest.version, CurrentSymlink(manifest.name));
+    if (!cur)
+    {
+        std::filesystem::remove_all(final_dir);
+        return std::unexpected(cur.error());
+    }
+    std::vector<std::string> bin_targets = manifest.install.bin;
+    if (bin_targets.empty())
+    {
+        const auto candidate = final_dir / "bin" / manifest.name;
+        if (std::filesystem::exists(candidate))
+            bin_targets.push_back("bin/" + manifest.name);
+    }
+    for (const auto& rel_bin : bin_targets)
+    {
+        const auto leaf = std::filesystem::path{rel_bin}.filename();
+        if (leaf.empty())
+            continue;
+        const auto link = m_paths.bin_prefix / leaf;
+        const auto target_rel = CurrentSymlink(manifest.name) / rel_bin;
+        auto sym = AtomicSymlink(target_rel, link);
+        if (!sym)
+        {
+            std::filesystem::remove_all(final_dir);
+            return std::unexpected(sym.error());
+        }
+    }
+
+    // 6. Register the install. `installed_from = "local"` so
+    // `list` reports the provenance accurately.
+    duet::registry::Registry reg{m_paths.registry_root};
+    duet::registry::RegistryEntry entry;
+    entry.name = manifest.name;
+    entry.version = manifest.version;
+    entry.installed_at = Iso8601Utc();
+    entry.installed_from = "local";
+    entry.install_prefix = final_dir.string();
+    entry.sha256 = *sha_or;
+    entry.deps = manifest.deps;
+    auto wr = reg.Write(entry);
+    if (!wr)
+    {
+        std::filesystem::remove_all(final_dir);
+        return std::unexpected(wr.error());
+    }
+    return manifest.name;
+}
+
 } // namespace duet::install

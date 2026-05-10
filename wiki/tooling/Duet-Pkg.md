@@ -12,7 +12,7 @@ The implementation lands in seven phases (see
 spec); this page describes the **current** state of the
 binary plus pointers to what's coming.
 
-## What ships today (Phases 1–5)
+## What ships today (Phases 1–7 — complete)
 
 | Subcommand | Status | Notes |
 |------------|--------|-------|
@@ -61,6 +61,37 @@ runs the inverse, gated on a reverse-dep check that refuses
 removal of a package any other installed package depends on
 unless `--force`. The CLI's `install` / `remove` / `update`
 subcommands all dispatch through these.
+
+Phase 6 added the power-user paths.
+`Installer::InstallLocal(tar)` accepts a local tarball,
+extracts it, reads the in-tarball `manifest.toml`, hashes the
+tarball for the registry record, and runs the same place +
+symlink + register pipeline as the remote install — minus the
+signature step (the operator passing a path is the trust gate;
+a loud stderr warning surfaces the choice). The recipe
+`Builder` in `src/build/builder.{hpp,cpp}` parses
+`recipe.toml`, downloads + verifies the source tarball, runs
+the build system (`cmake | make | script`) into a staging
+prefix, packages staging into a `.tar.gz`, and hands the
+result to `InstallLocal`. The CLI's `install-local` and
+`build` subcommands wire both.
+
+Phase 7 added the search surface + the maintainer-side
+packaging tool + the validating CI workflow. The
+`duet-pkg search <query>` subcommand does case-insensitive
+substring match against name + description across all synced
+repos, ranks by match-offset (name hit at byte 0 beats
+description hit at byte 12), and tags each hit with its
+installed-state. The `duet-pkg-pack` binary (separate target,
+same lib) accepts `--name / --version / --bin / --dep` flags +
+an Ed25519 private-key PEM (or `DUETOS_SIGNING_KEY` env), stages
+the package, tars it, signs the tarball, and prints the exact
+`[[packages]]` block + key fingerprint for the repo maintainer
+to paste into `repo.toml`. The repo template at
+`tools/pkg/repo-template/` ships a fully-working
+`.github/workflows/validate.yml` (calls `validate.py`) that
+re-parses every manifest, re-hashes every tarball, and
+re-verifies every signature on every PR.
 
 ## Layout
 
@@ -157,17 +188,15 @@ set. Exit codes: 0 on success, 2 for argument / shape errors,
 
 ## What lands next
 
-| Phase | Scope | Anchor row in [`Daily-Driver-Readiness`](../reference/Daily-Driver-Readiness.md) |
-|-------|-------|----------------------------------------------------------------------------------|
-| 2 | SHA-256 + Ed25519 verification (libsodium) | — |
-| 3 | HTTP/HTTPS download via libcurl + resume | — |
-| 4 | `repo add/remove/list/sync` + trust DB | — |
-| 5 | Resolver + installer + uninstaller | — |
-| 6 | `install-local` + build-from-recipe | — |
-| 7 | `search` + repo-side CI + `duet-pkg-pack` | — |
+All seven planned phases are complete. Future work:
 
-Phases run strictly sequentially per the spec; each must build,
-link, and pass its tests before the next is touched.
+- Per-process syscall integration when DuetOS hosts duet-pkg
+  itself (the dev-host builds are the current verification).
+- A native HLSL-aware build system for DirectX-bearing packages
+  (depends on the Win32 graphics track).
+- Mirror lists + per-package signature counts.
+- `duet-pkg-pack create` from a recipe (currently it only
+  packages already-built bins).
 
 ## Related Pages
 

@@ -1,5 +1,6 @@
 #include "cli/cli.hpp"
 
+#include "build/builder.hpp"
 #include "crypto/keying.hpp"
 #include "install/installer.hpp"
 #include "install/uninstaller.hpp"
@@ -7,9 +8,11 @@
 #include "repo/repo_manager.hpp"
 #include "repo/repo_manifest.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <unordered_map>
 #include <utility>
 
 namespace duet::cli
@@ -47,11 +50,14 @@ constexpr BoolFlag kBoolFlags[] = {
     {"--insecure", &ParsedArgs::flag_insecure},   {"--force", &ParsedArgs::flag_force},
 };
 
-[[nodiscard]] Expected<int> CmdNotYet(std::string_view subcommand)
-{
-    return std::unexpected(MakeError(ErrorCode::InvalidArgument, std::string{"subcommand '"} + std::string{subcommand} +
-                                                                     "' is not yet implemented in this phase"));
-}
+// Every documented subcommand now has a real implementation, so
+// CmdNotYet is dead. Kept commented out so a future-spec addition
+// can re-instate the stub pattern.
+//
+// [[nodiscard]] Expected<int> CmdNotYet(std::string_view subcommand)
+// {
+//     return std::unexpected(MakeError(ErrorCode::InvalidArgument, ...));
+// }
 
 [[nodiscard]] Expected<int> CmdRepo(const ParsedArgs& args)
 {
@@ -254,6 +260,137 @@ constexpr BoolFlag kBoolFlags[] = {
     return 0;
 }
 
+// Case-insensitive "needle in haystack" used by search. Returns
+// the byte offset of the first match (for ranking) or
+// std::string::npos.
+[[nodiscard]] std::size_t CaseInsensitiveFind(std::string_view haystack, std::string_view needle) noexcept
+{
+    if (needle.empty())
+        return 0;
+    if (haystack.size() < needle.size())
+        return std::string::npos;
+    auto lower = [](char c) noexcept { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + ('a' - 'A')) : c; };
+    for (std::size_t i = 0; i + needle.size() <= haystack.size(); ++i)
+    {
+        bool match = true;
+        for (std::size_t k = 0; k < needle.size(); ++k)
+        {
+            if (lower(haystack[i + k]) != lower(needle[k]))
+            {
+                match = false;
+                break;
+            }
+        }
+        if (match)
+            return i;
+    }
+    return std::string::npos;
+}
+
+[[nodiscard]] Expected<int> CmdSearch(const ParsedArgs& args)
+{
+    if (args.positional.empty())
+    {
+        return std::unexpected(MakeError(ErrorCode::InvalidArgument, "search: usage `search <query>`"));
+    }
+    const std::string_view query = args.positional[0];
+    duet::repo::RepoManager mgr{duet::repo::RepoManager::DefaultConfigRoot()};
+    auto repos = LoadAllReposOrdered(mgr);
+    if (!repos)
+        return std::unexpected(repos.error());
+
+    // Build the installed-versions map so we can flag matches as
+    // already-installed.
+    duet::registry::Registry reg{duet::install::DefaultInstallPaths().registry_root};
+    std::unordered_map<std::string, std::string> installed;
+    if (auto all = reg.LoadAll(); all)
+    {
+        for (const auto& e : *all)
+            installed[e.name] = e.version;
+    }
+
+    // Score = (name-match offset, description-match offset). Lower
+    // = better match (name hit at byte 0 is best). Packages with
+    // no match in either are filtered out.
+    struct Hit
+    {
+        std::string repo;
+        const duet::repo::RepoPackageEntry* entry;
+        std::size_t name_off;
+        std::size_t desc_off;
+    };
+    std::vector<Hit> hits;
+    for (const auto& [name, manifest] : *repos)
+    {
+        for (const auto& pkg : manifest.packages)
+        {
+            const auto n = CaseInsensitiveFind(pkg.name, query);
+            const auto d = CaseInsensitiveFind(pkg.description, query);
+            if (n == std::string::npos && d == std::string::npos)
+                continue;
+            hits.push_back({name, &pkg, n, d});
+        }
+    }
+    if (hits.empty())
+    {
+        std::printf("no matches for '%.*s'\n", static_cast<int>(query.size()), query.data());
+        return 0;
+    }
+    std::sort(hits.begin(), hits.end(),
+              [](const Hit& a, const Hit& b)
+              {
+                  if (a.name_off != b.name_off)
+                      return a.name_off < b.name_off;
+                  if (a.desc_off != b.desc_off)
+                      return a.desc_off < b.desc_off;
+                  return a.entry->name < b.entry->name;
+              });
+    std::printf("%-24s %-12s %-16s %-10s %s\n", "NAME", "VERSION", "REPO", "INSTALLED", "DESCRIPTION");
+    for (const auto& h : hits)
+    {
+        auto it = installed.find(h.entry->name);
+        const std::string state = it == installed.end() ? "-" : (it->second == h.entry->version ? "yes" : "old");
+        std::printf("%-24s %-12s %-16s %-10s %s\n", h.entry->name.c_str(), h.entry->version.c_str(), h.repo.c_str(),
+                    state.c_str(), h.entry->description.c_str());
+    }
+    return 0;
+}
+
+[[nodiscard]] Expected<int> CmdInstallLocal(const ParsedArgs& args)
+{
+    if (args.positional.empty())
+    {
+        return std::unexpected(
+            MakeError(ErrorCode::InvalidArgument, "install-local: usage `install-local <tarball.tar.gz>`"));
+    }
+    duet::repo::RepoManager mgr{duet::repo::RepoManager::DefaultConfigRoot()};
+    duet::install::Installer installer{duet::install::DefaultInstallPaths(), mgr};
+    auto name = installer.InstallLocal(std::filesystem::path{args.positional[0]});
+    if (!name)
+        return std::unexpected(name.error());
+    std::printf("installed local: %s\n", name->c_str());
+    return 0;
+}
+
+[[nodiscard]] Expected<int> CmdBuild(const ParsedArgs& args)
+{
+    if (args.positional.empty())
+    {
+        return std::unexpected(MakeError(ErrorCode::InvalidArgument, "build: usage `build <recipe.toml>`"));
+    }
+    auto recipe_or = duet::build::ParseRecipeFromFile(std::filesystem::path{args.positional[0]});
+    if (!recipe_or)
+        return std::unexpected(recipe_or.error());
+    duet::repo::RepoManager mgr{duet::repo::RepoManager::DefaultConfigRoot()};
+    duet::install::Installer installer{duet::install::DefaultInstallPaths(), mgr};
+    duet::build::Builder builder{installer};
+    auto rc = builder.Build(*recipe_or, args.flag_insecure);
+    if (!rc)
+        return std::unexpected(rc.error());
+    std::printf("built + installed: %s %s\n", recipe_or->name.c_str(), recipe_or->version.c_str());
+    return 0;
+}
+
 [[nodiscard]] Expected<int> CmdKey(const ParsedArgs& args)
 {
     namespace repo = duet::repo;
@@ -408,23 +545,37 @@ void PrintUsage()
                          "\n"
                          "usage: duet-pkg <subcommand> [options]\n"
                          "\n"
-                         "Phase 1 subcommands (implemented):\n"
-                         "  list --installed                 list locally installed packages\n"
-                         "  info <repo.toml> <name>          show one package from a local repo manifest\n"
+                         "Package operations:\n"
+                         "  install <name> [--insecure]                 install a package + deps\n"
+                         "  remove <name> [--force]                     uninstall a package\n"
+                         "  update [<name>] [--insecure]                upgrade one (or all) installed packages\n"
+                         "  install-local <tarball>                     install an unsigned local tarball\n"
+                         "  build <recipe.toml> [--insecure]            build from a recipe + install\n"
+                         "  list --installed                            list locally installed packages\n"
+                         "  info <repo.toml> <name>                     show one package from a local repo manifest\n"
+                         "  search <query>                              search across all synced repos\n"
                          "\n"
-                         "Phase 1 stubs (NotImplemented; arrive in later phases):\n"
-                         "  install <name>                   Phase 5\n"
-                         "  remove <name>                    Phase 5\n"
-                         "  update [<name>]                  Phase 5\n"
-                         "  search <query>                   Phase 7\n"
-                         "  repo add/remove/list/sync        Phase 4\n"
-                         "  key list/trust/revoke            Phase 4\n"
-                         "  install-local <path>             Phase 6\n"
-                         "  build <recipe.toml>              Phase 6\n"
+                         "Repo + trust management:\n"
+                         "  repo add <url> --trust-key <fp>             register a repo + pin its key\n"
+                         "  repo remove <name>                          unregister a repo + drop its key\n"
+                         "  repo list                                   list registered repos\n"
+                         "  repo sync [<name>] [--insecure]             re-fetch + re-verify repo indexes\n"
+                         "  key list                                    list trusted key fingerprints\n"
+                         "  key trust <pem-or-ed25519:...>              add a key to the trust DB\n"
+                         "  key revoke <fp>                             drop a key from the trust DB\n"
                          "\n"
                          "Global flags:\n"
-                         "  -v, --verbose                    show error detail\n"
-                         "  -h, --help                       show this message\n");
+                         "  -v, --verbose                               show error detail\n"
+                         "  --insecure                                  disable TLS verification\n"
+                         "  --force                                     bypass safety prompts (uninstall)\n"
+                         "  -h, --help                                  show this message\n"
+                         "\n"
+                         "Env vars:\n"
+                         "  DUET_PKG_CONFIG_DIR   default /etc/duet-pkg\n"
+                         "  DUET_PKG_REGISTRY     default /var/lib/duet-pkg/installed\n"
+                         "  DUET_PKG_PREFIX       default /pkg\n"
+                         "  DUET_PKG_BIN_PREFIX   default /usr/local/bin\n"
+                         "  DUET_PKG_CACHE        default /var/cache/duet-pkg\n");
 }
 
 Expected<ParsedArgs> ParseArgs(std::span<const std::string_view> argv)
@@ -532,10 +683,12 @@ Expected<int> Run(const ParsedArgs& args)
         return CmdRemove(args);
     if (sub == "update")
         return CmdUpdate(args);
-    if (sub == "search" || sub == "install-local" || sub == "build")
-    {
-        return CmdNotYet(sub);
-    }
+    if (sub == "install-local")
+        return CmdInstallLocal(args);
+    if (sub == "build")
+        return CmdBuild(args);
+    if (sub == "search")
+        return CmdSearch(args);
     PrintUsage();
     return std::unexpected(
         MakeError(ErrorCode::InvalidArgument, std::string{"unknown subcommand: "} + std::string{sub}));

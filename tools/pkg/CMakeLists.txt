@@ -96,6 +96,7 @@ add_library(duet-pkg-lib STATIC
     src/resolve/resolver.cpp
     src/install/installer.cpp
     src/install/uninstaller.cpp
+    src/build/builder.cpp
     src/cli/cli.cpp
 )
 target_include_directories(duet-pkg-lib PUBLIC src)
@@ -110,6 +111,10 @@ target_compile_definitions(duet-pkg-lib PUBLIC TOML_EXCEPTIONS=0)
 # ----------------------------------------------------------------------------
 add_executable(duet-pkg src/main.cpp)
 target_link_libraries(duet-pkg PRIVATE duet-pkg-lib)
+
+# Phase 7 packaging tool.
+add_executable(duet-pkg-pack src/pack/pack_main.cpp)
+target_link_libraries(duet-pkg-pack PRIVATE duet-pkg-lib PkgConfig::SODIUM)
 
 # ----------------------------------------------------------------------------
 # Tests.
@@ -145,5 +150,20 @@ add_executable(test_installer tests/test_installer.cpp)
 target_link_libraries(test_installer PRIVATE duet-pkg-lib PkgConfig::SODIUM)
 add_test(NAME installer COMMAND test_installer)
 set_tests_properties(installer PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+
+add_executable(test_install_local tests/test_install_local.cpp)
+target_link_libraries(test_install_local PRIVATE duet-pkg-lib)
+add_test(NAME install_local COMMAND test_install_local)
+set_tests_properties(install_local PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+
+add_executable(test_builder tests/test_builder.cpp)
+target_link_libraries(test_builder PRIVATE duet-pkg-lib)
+add_test(NAME builder COMMAND test_builder)
+set_tests_properties(builder PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+
+add_executable(test_search tests/test_search.cpp)
+target_link_libraries(test_search PRIVATE duet-pkg-lib PkgConfig::SODIUM)
+add_test(NAME search COMMAND test_search WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+set_tests_properties(search PROPERTIES TIMEOUT 30)
 
 message(STATUS "duet-pkg configured (C++${CMAKE_CXX_STANDARD}, sanitizers=${DUETOS_PKG_SANITIZERS})")

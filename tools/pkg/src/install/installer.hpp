@@ -77,6 +77,14 @@ class Installer
                                                   const std::vector<std::pair<std::string, repo::RepoManifest>>& repos,
                                                   bool allow_insecure = false);
 
+    /// Install a tarball from a local path. Skips signature
+    /// verification (the operator passing a path is the trust
+    /// gate; the installer prints a stderr warning). Reads the
+    /// in-tarball `manifest.toml` to discover bin shims; if the
+    /// manifest is missing, falls back to the
+    /// `bin/<pkg-name>` convention.
+    [[nodiscard]] Expected<std::string> InstallLocal(const std::filesystem::path& tar_path);
+
   private:
     [[nodiscard]] Expected<void> InstallOne(const resolve::ResolvedPackage& pkg, bool allow_insecure);
 
