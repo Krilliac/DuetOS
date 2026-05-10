@@ -496,16 +496,29 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
   `boot/uefi/`). Real-hardware UEFI firmware that boots a
   removable disk without an explicit boot variable now finds the
   loader by the spec-mandated path.
-- **Remaining residual — kernel-ELF copy:** the installer does
-  not yet write a real `duetos-kernel.elf` into `/system/boot/`.
-  Embedding the running kernel into ramfs is the bootstrap
-  problem (kernel.elf bytes change after you embed them; classic
-  two-stage build — stage-1 produces bytes, stage-2 embeds the
-  stage-1 bytes; doubles the build pass). Out-of-band staging
-  (USB / network / ISO chainload) is the likely first cut. The
-  grub.cfg + BOOTX64.EFI on disk already point at the expected
-  on-disk kernel path, so once the kernel bytes land there boot
-  just works.
+- **Kernel-ELF embed shipped as opt-in:** new CMake option
+  `DUETOS_INSTALLER_KERNEL_EMBED` (default OFF) drives a
+  `.incbin` directive in a generated
+  `kernel_elf_blob.S` that pulls the stage-1 `duetos-kernel.elf`
+  bytes into stage 2's `.rodata`. New ramfs accessors
+  `RamfsKernelElfBytes()` / `RamfsKernelElfSize()` expose the
+  blob; the installer's `WriteSystemSentinel` writes
+  `/system/boot/duetos-kernel.elf` whenever the size is non-zero.
+  When the option is OFF (default — keeps build cost off the
+  iteration loop) the blob is a 0-byte stub and the installer
+  prints a one-line note pointing at out-of-band staging.
+  `.incbin` keeps compile time constant regardless of file size;
+  the cost is binary-size only (~10 MiB → ~21 MiB on debug; ISO
+  ~18 MiB → ~28 MiB).
+- **Remaining residual — DMA-zone fix on the embed path:** with
+  the embed ON, the larger kernel image consumes the entire
+  0..16 MiB DMA zone and trips the `mm/zone` boot self-test.
+  Linker-script change to place the blob at a higher physical
+  region (32 MiB+) is the closing slice. Until then the option
+  produces a kernel that lays down a correct image but won't
+  self-boot — useful for "build the installer once, install onto
+  a different machine" workflows but not for live-iterating on
+  the embed path.
 - **Layout-math self-test runs every boot.** `PlanLayout` is
   exercised against canonical sizes (just-too-small,
   100 MiB / 1 GiB / 1 TiB) at `[fs/installer] self-test OK`;

@@ -148,6 +148,21 @@ bool WriteSystemSentinel(const fat32::Volume* vol)
     if (fat32::Fat32CreateAtPath(vol, "/boot/.duetos-installed", kSystemSentinelPayload, sentinel_len) !=
         static_cast<i64>(sentinel_len))
         return false;
+    // Optional kernel.elf write. Bytes come from the .incbin blob
+    // in kernel_elf_blob.S, which is the stage-1 kernel ELF when
+    // the build option DUETOS_INSTALLER_KERNEL_EMBED is ON. When
+    // it's OFF, RamfsKernelElfSize() returns 0 and we skip — the
+    // grub.cfg already on the freshly-formatted ESP points at this
+    // path, so the operator stages the bytes from an out-of-band
+    // source (USB / network) before first install-target boot.
+    const u8* kern_bytes = RamfsKernelElfBytes();
+    const u64 kern_len = RamfsKernelElfSize();
+    if (kern_bytes != nullptr && kern_len > 0)
+    {
+        if (fat32::Fat32CreateAtPath(vol, "/boot/duetos-kernel.elf", kern_bytes, kern_len) !=
+            static_cast<i64>(kern_len))
+            return false;
+    }
     return true;
 }
 

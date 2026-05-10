@@ -162,4 +162,16 @@ u64 RamfsUsershellElfSize();
 const u8* RamfsBootX64EfiBytes();
 u64 RamfsBootX64EfiSize();
 
+/// Embedded stage-1 kernel ELF bytes for the disk installer.
+/// Populated from a `.incbin` directive in
+/// `kernel_elf_blob.S` (built by tools/build/gen-kernel-blob.sh).
+/// When the build option `DUETOS_INSTALLER_KERNEL_EMBED` is ON,
+/// the bytes are the freshly-built `duetos-kernel-stage1.elf` and
+/// `RamfsKernelElfSize()` returns its real length (~10 MiB on a
+/// debug build). When OFF (default), the bytes are absent and
+/// `RamfsKernelElfSize()` returns 0; the installer detects this
+/// and skips the kernel-ELF write step with a one-line note.
+const u8* RamfsKernelElfBytes();
+u64 RamfsKernelElfSize();
+
 } // namespace duetos::fs

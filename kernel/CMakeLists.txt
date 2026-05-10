@@ -697,9 +697,26 @@ set(USBCLASS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/drivers/usb/class_rust/inc
 set(USBHID_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/drivers/usb/hid_rust/include")
 set(DUETFS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/fs/duetfs/include")
 
+# Stage 1 needs a stub `kernel_elf_blob` so ramfs.cpp's references
+# to kBinKernelElfBytes / kBinKernelElfBytes_len link cleanly.
+# Stage 2 swaps in the real (or zero-len) blob populated by
+# DUETOS_INSTALLER_KERNEL_EMBED. (DUETOS_KERNEL_BLOB_GEN is also
+# referenced below for the stage-2 emit; set both here.)
+set(DUETOS_KERNEL_BLOB_GEN "${CMAKE_SOURCE_DIR}/tools/build/gen-kernel-blob.sh")
+set(DUETOS_KERNEL_BLOB_STAGE1_S "${CMAKE_CURRENT_BINARY_DIR}/kernel_elf_blob_stage1_stub.S")
+add_custom_command(
+    OUTPUT "${DUETOS_KERNEL_BLOB_STAGE1_S}"
+    COMMAND "${DUETOS_KERNEL_BLOB_GEN}"
+            "${DUETOS_KERNEL_BLOB_STAGE1_S}"
+            "--empty"
+    DEPENDS "${DUETOS_KERNEL_BLOB_GEN}"
+    COMMENT "Generating stage-1 kernel-blob stub (always empty — stage 2 swaps in the real one)"
+    VERBATIM)
+
 add_executable(duetos-kernel-stage1
     ${DUETOS_KERNEL_SHARED_SOURCES}
     util/symbols_stub.cpp
+    "${DUETOS_KERNEL_BLOB_STAGE1_S}"
 )
 target_link_libraries(duetos-kernel-stage1 PRIVATE "${DUETOS_KERNEL_RUST_STATIC_LIB}")
 target_include_directories(duetos-kernel-stage1 PRIVATE
@@ -745,6 +762,45 @@ add_custom_command(
 )
 
 # ----------------------------------------------------------------------------
+# Optional: embed the stage-1 kernel ELF bytes into stage 2 so the disk
+# installer can write a real /system/boot/duetos-kernel.elf onto the
+# freshly-formatted system partition. Off by default — embedding ~10 MiB
+# roughly doubles the kernel image size (and therefore the ISO + the
+# memory GRUB loads at boot time). Operators who want a fully self-
+# installable image enable this; iteration loops keep the cost off.
+#
+# Implementation note: `.incbin` is processed by the assembler in
+# constant time, no matter how big the file. A constexpr u8 array
+# literal would balloon compile time linearly with file size.
+# ----------------------------------------------------------------------------
+option(DUETOS_INSTALLER_KERNEL_EMBED
+    "Embed stage-1 kernel.elf bytes for the disk installer (doubles kernel size)" OFF)
+
+set(DUETOS_KERNEL_BLOB_S "${CMAKE_CURRENT_BINARY_DIR}/kernel_elf_blob.S")
+if(DUETOS_INSTALLER_KERNEL_EMBED)
+    add_custom_command(
+        OUTPUT "${DUETOS_KERNEL_BLOB_S}"
+        COMMAND "${DUETOS_KERNEL_BLOB_GEN}"
+                "${DUETOS_KERNEL_BLOB_S}"
+                "$<TARGET_FILE:duetos-kernel-stage1>"
+        DEPENDS duetos-kernel-stage1 "${DUETOS_KERNEL_BLOB_GEN}"
+        COMMENT "Generating .incbin blob for stage-1 kernel ELF (installer kernel-embed enabled)"
+        VERBATIM)
+else()
+    # Off path: emit a trivial blob with len = 0 so the symbols
+    # exist for the linker but the installer detects "no embedded
+    # kernel.elf" and prints the staging-required note.
+    add_custom_command(
+        OUTPUT "${DUETOS_KERNEL_BLOB_S}"
+        COMMAND "${DUETOS_KERNEL_BLOB_GEN}"
+                "${DUETOS_KERNEL_BLOB_S}"
+                "--empty"
+        DEPENDS "${DUETOS_KERNEL_BLOB_GEN}"
+        COMMENT "Generating empty installer kernel-embed stub (DUETOS_INSTALLER_KERNEL_EMBED=OFF)"
+        VERBATIM)
+endif()
+
+# ----------------------------------------------------------------------------
 # Stage 2: final kernel. Same source set as stage 1, but the stub is
 # replaced by the generated TU. The generated TU defines the same
 # three extern "C" symbols the resolver looks up, now populated with
@@ -753,6 +809,7 @@ add_custom_command(
 add_executable(duetos-kernel
     ${DUETOS_KERNEL_SHARED_SOURCES}
     "${DUETOS_SYMBOLS_GENERATED}"
+    "${DUETOS_KERNEL_BLOB_S}"
 )
 target_link_libraries(duetos-kernel PRIVATE "${DUETOS_KERNEL_RUST_STATIC_LIB}")
 target_include_directories(duetos-kernel PRIVATE

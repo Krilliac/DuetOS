@@ -151,6 +151,12 @@ CI is wired in `.github/workflows/`:
 
 See [Architecture Overview > CI topology](../getting-started/Architecture-Overview.md#14-ci-topology-and-artifact-channels).
 
+## Optional Knobs
+
+| CMake option | Default | What it does |
+|--------------|---------|--------------|
+| `DUETOS_INSTALLER_KERNEL_EMBED` | `OFF` | Embed the stage-1 `duetos-kernel.elf` bytes into stage 2 via `.incbin` so the disk-installer's `install <handle> INSTALL` writes a real `/system/boot/duetos-kernel.elf` onto the freshly-formatted system partition. **Cost**: doubles the kernel binary size (~10 MiB → ~21 MiB on debug); ISO grows from ~18 MiB to ~28 MiB. **Boot caveat**: the larger kernel image consumes most of the 0..16 MiB DMA zone, currently tripping the `mm/zone` boot self-test. Closing that needs a linker-script change to place the blob at a higher physical region (e.g. 32 MiB+) — separate slice. Until then the option is "build-only" (image lays down, but the resulting kernel doesn't boot itself; the bytes are correct for an installer that targets a different machine).<br>Build with: `cmake -DDUETOS_INSTALLER_KERNEL_EMBED=ON --preset x86_64-debug`. |
+
 ## Build Optimisations
 
 Effective speedups in current use:

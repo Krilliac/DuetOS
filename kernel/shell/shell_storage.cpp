@@ -23,6 +23,7 @@
 #include "fs/gpt.h"
 #include "fs/installer.h"
 #include "fs/mount.h"
+#include "fs/ramfs.h"
 
 namespace duetos::core::shell::internal
 {
@@ -484,9 +485,32 @@ void CmdInstall(u32 argc, char** argv)
     ConsoleWrite("..");
     WriteHexCol(report.crashdump_last_lba, 0);
     ConsoleWriteln(" reserved (DuetOS-private type GUID)");
-    ConsoleWriteln("note: bootloader bytes (BOOTX64.EFI + duetos-kernel.elf)");
-    ConsoleWriteln("      are NOT copied by v0 — stage them via the offline path.");
-    ConsoleWriteln("      See wiki/reference/Daily-Driver-Readiness.md, Tier 0.");
+    // Bootloader bytes status. BOOTX64.EFI is always embedded (small
+    // — 6 KiB — built by boot/uefi/) and stamped into the ESP. The
+    // kernel ELF is gated by DUETOS_INSTALLER_KERNEL_EMBED; report
+    // accordingly so the operator knows whether out-of-band staging
+    // is still needed.
+    const duetos::u64 kern_len = duetos::fs::RamfsKernelElfSize();
+    ConsoleWriteln("  ESP /EFI/BOOT/BOOTX64.EFI written from embedded blob");
+    if (use_duetfs)
+    {
+        ConsoleWriteln("  /system formatted as DuetFS — kernel.elf path-create");
+        ConsoleWriteln("    through the Rust ABI is a follow-on; stage the kernel");
+        ConsoleWriteln("    ELF onto /system/boot/ from another OS.");
+    }
+    else if (kern_len == 0)
+    {
+        ConsoleWriteln("  /system kernel.elf not embedded (DUETOS_INSTALLER_KERNEL_EMBED=OFF)");
+        ConsoleWriteln("    — stage /system/boot/duetos-kernel.elf from the live ISO");
+        ConsoleWriteln("    or via USB. Rebuild with -DDUETOS_INSTALLER_KERNEL_EMBED=ON");
+        ConsoleWriteln("    for a fully self-installable image.");
+    }
+    else
+    {
+        ConsoleWrite("  /system /boot/duetos-kernel.elf written (");
+        WriteHexCol(kern_len, 0);
+        ConsoleWriteln(" bytes)");
+    }
 }
 
 // `lastdump` — operator readout for the last-built minidump.

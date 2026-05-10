@@ -931,6 +931,27 @@ u64 RamfsBootX64EfiSize()
     return ::duetos::fs::generated::kBinBootX64EfiBytes_len;
 }
 
+// kBinKernelElfBytes / kBinKernelElfBytes_len are defined in the
+// generated kernel_elf_blob.S — outside any namespace because the
+// assembler emits raw global symbols. Declare them here with the
+// extern "C" linkage to match.
+extern "C"
+{
+    extern const u8 kBinKernelElfBytes[];
+    extern const u8 kBinKernelElfBytes_end[];
+    extern const u64 kBinKernelElfBytes_len;
+}
+
+const u8* RamfsKernelElfBytes()
+{
+    return kBinKernelElfBytes;
+}
+
+u64 RamfsKernelElfSize()
+{
+    return kBinKernelElfBytes_len;
+}
+
 namespace
 {
 

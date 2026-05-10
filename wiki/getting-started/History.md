@@ -521,6 +521,36 @@ A correction pass + an installer extension.
   a journalled, encryption-capable native FS pass
   `install <handle> INSTALL --duetfs`.
 
+## Phase 6.10 — Installer kernel-ELF embed via `.incbin` (2026-05-10)
+
+Closes the easy half of the kernel-ELF residual; documents the
+hard half.
+
+- **Opt-in `.incbin` blob.** New CMake option
+  `DUETOS_INSTALLER_KERNEL_EMBED` (default OFF) drives
+  `tools/build/gen-kernel-blob.sh` which emits a tiny
+  `kernel_elf_blob.S` that .incbins the stage-1 kernel ELF.
+  `.incbin` is processed by the assembler in constant time, so
+  embedding ~10 MiB doesn't blow up compile time the way a
+  constexpr-array literal would. Stage 1 carries a separate
+  always-empty stub blob so its references resolve. New ramfs
+  accessors `RamfsKernelElfBytes()` / `RamfsKernelElfSize()`
+  expose the bytes; `WriteSystemSentinel` writes
+  `/system/boot/duetos-kernel.elf` whenever the size is non-zero.
+  When the option is OFF (default) the blob is a 0-byte stub and
+  the installer prints a one-line note pointing at out-of-band
+  staging.
+- **Cost trade.** With ON: kernel binary ~10 MiB → ~21 MiB; ISO
+  ~18 MiB → ~28 MiB. Runtime cost: the larger image consumes
+  the entire 0..16 MiB DMA zone and trips the `mm/zone` boot
+  self-test. Closing that needs a linker-script change to place
+  the blob at a higher physical region (32 MiB+). Until then the
+  option is "image-correct, doesn't self-boot" — useful for
+  "build the installer ISO once on machine A, run it to install
+  onto machine B" but not for live-iterating on the embed path
+  itself. Documented in
+  [`Build-System`](../tooling/Build-System.md) §"Optional Knobs".
+
 ---
 
 ## How to read the rest of the tree
