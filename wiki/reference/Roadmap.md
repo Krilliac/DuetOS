@@ -123,9 +123,32 @@ the same commit** that delivers the code.
     aliasing on user-supplied scatterlists for any operation that
     doesn't byte-copy the full output. Auth-tag-skip + in-place was
     the Copy Fail root cause.
-- **When to revisit:** every time a high-impact public Linux kernel
-  CVE drops, walk the eight classes in the audit doc and update
-  verdicts before the next slice lands in the affected area.
+  - **Class M — AML `pkg_end` overflow.** `kernel/acpi/aml.cpp`
+    lines 554/588/633 compute `pkg_end = after_op + pkg_len` then
+    check `pkg_end > end`. The addition can theoretically wrap u32
+    (pkg_len is 28-bit). Rewrite as `pkg_len > end - after_op`. Low
+    risk (AML tables are bounded in practice), high cleanliness.
+  - **Class N — Spectre v1 helper.** No `array_index_nospec`-style
+    masked-index helper exists. Add `MaskedIndex(idx, bound)` (and
+    the underlying constant-time mask) for syscall dispatch tables
+    that take user-supplied indices, and apply at the callsites.
+    KPTI remains separately deferred (existing entry below).
+  - **Class O — saturating refcount.** `KObjectAcquire` /
+    `KObjectRelease` are not saturating. Today the spinlock + cap
+    gate make a 2³² overflow path unreachable, but the next
+    "shareable handle" surface should land with a saturating helper
+    so the invariant survives a permission change.
+  - **Class I — Bluetooth upper stack.** When L2CAP / RFCOMM / SDP
+    land, the protocol-parser invariants from class C apply.
+  - **Class L — IPv6 reassembly.** When IPv6 lands, every fragment
+    length/offset comparison uses `len > end - off`-style (never
+    `end - len` directly).
+  - **Class K — FS write paths.** When ext4 write, NTFS directory
+    parsing, or any filesystem write-remount path lands, re-audit
+    the class.
+- **When to revisit:** every time a high-impact public Linux/Windows
+  kernel CVE drops, walk the audit doc and update verdicts before
+  the next slice lands in the affected area.
 
 ### Intel CET enable
 
