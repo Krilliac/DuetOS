@@ -146,9 +146,12 @@
 #include "apps/about.h"
 #include "apps/browser.h"
 #include "apps/calendar.h"
+#include "apps/charmap.h"
 #include "apps/clock.h"
 #include "apps/notify_center.h"
 #include "apps/devicemgr.h"
+#include "apps/hexview.h"
+#include "apps/sysmon.h"
 #include "apps/files.h"
 #include "apps/firewall.h"
 #include "apps/dbg.h"
@@ -2030,6 +2033,50 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::drivers::video::ThemeRegisterWindow(Role::NotifyCenter, notify_handle);
     duetos::apps::notify_center::NotifyCenterInit(notify_handle);
 
+    // SYSMON — rolling system monitor: heap-used % + free-list
+    // fragmentation, sampled once per ui-ticker tick. About
+    // shows a snapshot; Sysmon shows the trend.
+    duetos::drivers::video::WindowChrome sysmon_chrome = theme_chrome(Role::Sysmon);
+    sysmon_chrome.x = 320;
+    sysmon_chrome.y = 100;
+    sysmon_chrome.w = 380;
+    sysmon_chrome.h = 280;
+    const duetos::drivers::video::WindowHandle sysmon_handle =
+        duetos::drivers::video::WindowRegister(sysmon_chrome, "SYSTEM MONITOR");
+    duetos::drivers::video::ThemeRegisterWindow(Role::Sysmon, sysmon_handle);
+    duetos::apps::sysmon::SysmonInit(sysmon_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::sysmon::SysmonSelfTest());
+
+    // HEXVIEW — read-only hex / ASCII inspector for FAT32 root
+    // files. Loads up to 1 MiB per file; J/K scrolls one row,
+    // PageUp/Down by one screen, N/P cycles files. Wider than
+    // most app windows because the canonical hex layout is
+    // ~616 px (8 + 16*3 + 16 char cells).
+    duetos::drivers::video::WindowChrome hex_chrome = theme_chrome(Role::HexView);
+    hex_chrome.x = 80;
+    hex_chrome.y = 80;
+    hex_chrome.w = 640;
+    hex_chrome.h = 360;
+    const duetos::drivers::video::WindowHandle hex_handle =
+        duetos::drivers::video::WindowRegister(hex_chrome, "HEX VIEWER");
+    duetos::drivers::video::ThemeRegisterWindow(Role::HexView, hex_handle);
+    duetos::apps::hexview::HexViewInit(hex_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::hexview::HexViewSelfTest());
+
+    // CHARMAP — codepoint grid; Enter copies selected glyph as
+    // UTF-8 to the clipboard so it pastes into Notes / Calculator
+    // / Browser via the standard Ctrl+V path.
+    duetos::drivers::video::WindowChrome charmap_chrome = theme_chrome(Role::CharMap);
+    charmap_chrome.x = 240;
+    charmap_chrome.y = 90;
+    charmap_chrome.w = 400;
+    charmap_chrome.h = 320;
+    const duetos::drivers::video::WindowHandle charmap_handle =
+        duetos::drivers::video::WindowRegister(charmap_chrome, "CHARACTER MAP");
+    duetos::drivers::video::ThemeRegisterWindow(Role::CharMap, charmap_handle);
+    duetos::apps::charmap::CharMapInit(charmap_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::charmap::CharMapSelfTest());
+
     // NETWORK STATUS — read-only viewer over net::stack accessors.
     // No ThemeRole today; the chrome is seeded from Settings'
     // palette so it sits in the same slate-grey "tools" family.
@@ -3329,7 +3376,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 {
                     const bool ok = duetos::apps::notes::NotesSave();
                     duetos::drivers::video::CompositorUnlock();
-                    duetos::drivers::video::NotifyShow(ok ? "saved to NOTES.TXT" : "save failed");
+                    duetos::drivers::video::NotifyShowKind(ok ? "saved to NOTES.TXT" : "save failed",
+                                                           ok ? duetos::drivers::video::NotifyKind::Success
+                                                              : duetos::drivers::video::NotifyKind::Error);
                     SerialWrite(ok ? "[ui] ^S notes saved\n" : "[ui] ^S notes save FAILED\n");
                     continue;
                 }
@@ -3338,7 +3387,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 {
                     const bool ok = duetos::apps::calendar::CalendarSave();
                     duetos::drivers::video::CompositorUnlock();
-                    duetos::drivers::video::NotifyShow(ok ? "saved to CALENDAR.TXT" : "calendar save failed");
+                    duetos::drivers::video::NotifyShowKind(ok ? "saved to CALENDAR.TXT" : "calendar save failed",
+                                                           ok ? duetos::drivers::video::NotifyKind::Success
+                                                              : duetos::drivers::video::NotifyKind::Error);
                     SerialWrite(ok ? "[ui] ^S calendar saved\n" : "[ui] ^S calendar save FAILED\n");
                     continue;
                 }
@@ -3661,7 +3712,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 {
                     const bool ok = duetos::apps::notes::NotesLoad();
                     duetos::drivers::video::CompositorUnlock();
-                    duetos::drivers::video::NotifyShow(ok ? "loaded NOTES.TXT" : "load failed (no NOTES.TXT?)");
+                    duetos::drivers::video::NotifyShowKind(ok ? "loaded NOTES.TXT" : "load failed (no NOTES.TXT?)",
+                                                           ok ? duetos::drivers::video::NotifyKind::Success
+                                                              : duetos::drivers::video::NotifyKind::Error);
                     SerialWrite(ok ? "[ui] ^O notes loaded\n" : "[ui] ^O notes load FAILED\n");
                     continue;
                 }
@@ -3670,7 +3723,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 {
                     const bool ok = duetos::apps::calendar::CalendarLoad();
                     duetos::drivers::video::CompositorUnlock();
-                    duetos::drivers::video::NotifyShow(ok ? "loaded CALENDAR.TXT" : "calendar load failed");
+                    duetos::drivers::video::NotifyShowKind(ok ? "loaded CALENDAR.TXT" : "calendar load failed",
+                                                           ok ? duetos::drivers::video::NotifyKind::Success
+                                                              : duetos::drivers::video::NotifyKind::Error);
                     SerialWrite(ok ? "[ui] ^O calendar loaded\n" : "[ui] ^O calendar load FAILED\n");
                     continue;
                 }
@@ -3848,7 +3903,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 duetos::drivers::video::CompositorLock();
                 const bool ok = duetos::apps::screenshot::ScreenshotCapture();
                 duetos::drivers::video::CompositorUnlock();
-                duetos::drivers::video::NotifyShow(ok ? "screenshot saved" : "screenshot failed");
+                duetos::drivers::video::NotifyShowKind(ok ? "screenshot saved" : "screenshot failed",
+                                                       ok ? duetos::drivers::video::NotifyKind::Success
+                                                          : duetos::drivers::video::NotifyKind::Error);
                 SerialWrite(ok ? "[ui] ^Alt+P screenshot saved\n" : "[ui] ^Alt+P screenshot FAILED\n");
                 continue;
             }
@@ -3863,7 +3920,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 duetos::drivers::video::CompositorLock();
                 const bool ok_tga = duetos::apps::screenshot::ScreenshotCaptureTga();
                 duetos::drivers::video::CompositorUnlock();
-                duetos::drivers::video::NotifyShow(ok_tga ? "screenshot (TGA) saved" : "screenshot (TGA) failed");
+                duetos::drivers::video::NotifyShowKind(ok_tga ? "screenshot (TGA) saved" : "screenshot (TGA) failed",
+                                                       ok_tga ? duetos::drivers::video::NotifyKind::Success
+                                                              : duetos::drivers::video::NotifyKind::Error);
                 SerialWrite(ok_tga ? "[ui] ^Alt+T screenshot (TGA) saved\n" : "[ui] ^Alt+T screenshot (TGA) FAILED\n");
                 continue;
             }
@@ -4234,10 +4293,25 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     }
                     else if (active == duetos::apps::notify_center::NotifyCenterWindow() &&
                              (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyPageUp ||
-                              ev.code == kKeyPageDown))
+                              ev.code == kKeyPageDown || ev.code == kKeyHome || ev.code == kKeyEnd ||
+                              ev.code == kKeyDelete))
                     {
                         app_consumed =
                             duetos::apps::notify_center::NotifyCenterFeedArrow(static_cast<duetos::u16>(ev.code));
+                    }
+                    else if (active == duetos::apps::hexview::HexViewWindow() &&
+                             (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyArrowLeft ||
+                              ev.code == kKeyArrowRight || ev.code == kKeyPageUp || ev.code == kKeyPageDown ||
+                              ev.code == kKeyHome || ev.code == kKeyEnd))
+                    {
+                        app_consumed = duetos::apps::hexview::HexViewFeedArrow(static_cast<duetos::u16>(ev.code));
+                    }
+                    else if (active == duetos::apps::charmap::CharMapWindow() &&
+                             (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyArrowLeft ||
+                              ev.code == kKeyArrowRight || ev.code == kKeyPageUp || ev.code == kKeyPageDown ||
+                              ev.code == kKeyHome || ev.code == kKeyEnd || ev.code == kKeyDelete))
+                    {
+                        app_consumed = duetos::apps::charmap::CharMapFeedArrow(static_cast<duetos::u16>(ev.code));
                     }
                     else if (active == duetos::apps::notes::NotesWindow() &&
                              (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyArrowLeft ||
@@ -4306,6 +4380,18 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                             else if (active == duetos::apps::notify_center::NotifyCenterWindow())
                             {
                                 app_consumed = duetos::apps::notify_center::NotifyCenterFeedChar(c);
+                            }
+                            else if (active == duetos::apps::hexview::HexViewWindow())
+                            {
+                                app_consumed = duetos::apps::hexview::HexViewFeedChar(c);
+                            }
+                            else if (active == duetos::apps::charmap::CharMapWindow())
+                            {
+                                app_consumed = duetos::apps::charmap::CharMapFeedChar(c);
+                            }
+                            else if (active == duetos::apps::sysmon::SysmonWindow())
+                            {
+                                app_consumed = duetos::apps::sysmon::SysmonFeedChar(c);
                             }
                             else if (active == duetos::apps::dbg::DbgWindow())
                             {
@@ -4515,6 +4601,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             // the FAT32 write, so a stable session writes once
             // and then idles.
             duetos::core::SessionRestoreSave();
+            // Push one sample into Sysmon's rolling ring. Cheap —
+            // a heap stats read + a registry walk. No-op when the
+            // app hasn't been initialised yet.
+            duetos::apps::sysmon::SysmonTick();
             duetos::drivers::video::CompositorLock();
             // While the login gate is up the full-screen login
             // panel owns the framebuffer. Repaint it from its
@@ -4636,6 +4726,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         static const duetos::drivers::video::MenuItem kSystemItems[] = {
             {"SETTINGS", 100 + static_cast<duetos::u32>(StartMenuRole::Settings), 0, nullptr, 0},
             {"TASK MANAGER", 100 + static_cast<duetos::u32>(StartMenuRole::TaskManager), 0, nullptr, 0},
+            {"SYSTEM MONITOR", 100 + static_cast<duetos::u32>(StartMenuRole::Sysmon), 0, nullptr, 0},
             {"KERNEL LOG", 100 + static_cast<duetos::u32>(StartMenuRole::LogView), 0, nullptr, 0},
             {"NETWORK STATUS", 60, 0, nullptr, 0},
             {"DEVICE MANAGER", 61, 0, nullptr, 0},
@@ -4643,6 +4734,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             {nullptr, 0, kMenuItemFlagSeparator, nullptr, 0},
             {"CYCLE WINDOWS", 2, 0, nullptr, 0},
             {"SWITCH TO TTY", 5, 0, nullptr, 0},
+        };
+        static const duetos::drivers::video::MenuItem kUtilitiesItems[] = {
+            {"HEX VIEWER", 100 + static_cast<duetos::u32>(StartMenuRole::HexView), 0, nullptr, 0},
+            {"CHARACTER MAP", 100 + static_cast<duetos::u32>(StartMenuRole::CharMap), 0, nullptr, 0},
         };
         static const duetos::drivers::video::MenuItem kPowerItems[] = {
             {"LOCK", 42, 0, nullptr, 0},
@@ -4665,16 +4760,18 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         // Six-row root. USER APPS is disabled when empty so the
         // user sees the bucket (and learns about the /APPS slot)
         // without firing a launcher path that resolves to nothing.
-        static duetos::drivers::video::MenuItem kStartItems[6] = {};
+        static duetos::drivers::video::MenuItem kStartItems[7] = {};
         kStartItems[0] = {"APPS", 0, kMenuItemFlagSubmenu, kAppsItems, sizeof(kAppsItems) / sizeof(kAppsItems[0])};
-        kStartItems[1] = {"SYSTEM", 0, kMenuItemFlagSubmenu, kSystemItems,
+        kStartItems[1] = {"UTILITIES", 0, kMenuItemFlagSubmenu, kUtilitiesItems,
+                          sizeof(kUtilitiesItems) / sizeof(kUtilitiesItems[0])};
+        kStartItems[2] = {"SYSTEM", 0, kMenuItemFlagSubmenu, kSystemItems,
                           sizeof(kSystemItems) / sizeof(kSystemItems[0])};
-        kStartItems[2] = {(user_apps_count == 0) ? "USER APPS (EMPTY)" : "USER APPS", 0,
+        kStartItems[3] = {(user_apps_count == 0) ? "USER APPS (EMPTY)" : "USER APPS", 0,
                           kMenuItemFlagSubmenu | (user_apps_count == 0 ? kMenuItemFlagDisabled : 0u), kUserAppsItems,
                           user_apps_count};
-        kStartItems[3] = {nullptr, 0, kMenuItemFlagSeparator, nullptr, 0};
-        kStartItems[4] = {"SCREENSHOT", 50, 0, nullptr, 0};
-        kStartItems[5] = {"POWER", 0, kMenuItemFlagSubmenu, kPowerItems, sizeof(kPowerItems) / sizeof(kPowerItems[0])};
+        kStartItems[4] = {nullptr, 0, kMenuItemFlagSeparator, nullptr, 0};
+        kStartItems[5] = {"SCREENSHOT", 50, 0, nullptr, 0};
+        kStartItems[6] = {"POWER", 0, kMenuItemFlagSubmenu, kPowerItems, sizeof(kPowerItems) / sizeof(kPowerItems[0])};
         constexpr duetos::u32 start_items_count = sizeof(kStartItems) / sizeof(kStartItems[0]);
         static const duetos::drivers::video::MenuItem kDesktopMenuItems[] = {
             {"HELP / SHORTCUTS", 6, 0, nullptr, 0}, {"ABOUT DUETOS", 1, 0, nullptr, 0},

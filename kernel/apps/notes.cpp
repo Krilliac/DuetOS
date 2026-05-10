@@ -912,7 +912,7 @@ bool NotesOnDrop(const duetos::drivers::video::DndPayload& payload, u32 /*cx*/, 
         duetos::drivers::video::NotifyShow("loaded into notes");
         return true;
     }
-    duetos::drivers::video::NotifyShow("notes: load failed");
+    duetos::drivers::video::NotifyShowKind("notes: load failed", duetos::drivers::video::NotifyKind::Error);
     return false;
 }
 

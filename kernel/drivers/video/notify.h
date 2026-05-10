@@ -30,13 +30,39 @@ namespace duetos::drivers::video
 inline constexpr u32 kNotifyMaxText = 80;
 inline constexpr u32 kNotifyDefaultTtlTicks = 3; // seconds at 1 Hz compose
 
+/// Severity classification for a toast. Drives the panel
+/// background colour so an operator can distinguish a passive
+/// status update ("file saved") from a warning ("battery 5%")
+/// or an error ("write failed") at a glance. Stored in the
+/// history ring so the Notification Center can colour rows
+/// after the live toast has expired.
+enum class NotifyKind : u8
+{
+    Info = 0,    // theme accent — neutral status update
+    Success = 1, // green band — operation completed
+    Warning = 2, // amber band — attention requested
+    Error = 3,   // red band   — operation failed
+};
+
 /// Display `text` (truncated to kNotifyMaxText) for the default
 /// TTL. nullptr / empty text dismisses any active toast.
+/// Equivalent to `NotifyShowKind(text, NotifyKind::Info)`.
 void NotifyShow(const char* text);
 
 /// Display `text` for `ttl_ticks` compose ticks (≈ seconds).
-/// `ttl_ticks == 0` dismisses any active toast.
+/// `ttl_ticks == 0` dismisses any active toast. Equivalent to
+/// `NotifyShowKindFor(text, NotifyKind::Info, ttl_ticks)`.
 void NotifyShowFor(const char* text, u32 ttl_ticks);
+
+/// Display `text` with explicit severity. Default TTL.
+void NotifyShowKind(const char* text, NotifyKind kind);
+
+/// Full-form: display `text` with explicit severity and TTL.
+/// Coalesces against the history ring's front by (text, kind):
+/// pushing the same kind+text pair twice in a row leaves the
+/// ring unchanged. Different kind with the same text DOES push
+/// — operators want to see the transition from Info to Error.
+void NotifyShowKindFor(const char* text, NotifyKind kind, u32 ttl_ticks);
 
 /// True iff a toast is currently visible.
 bool NotifyIsActive();
@@ -68,5 +94,16 @@ u32 NotifyHistoryCount();
 /// number of bytes written (excluding NUL); 0 if `idx` is out
 /// of range or `out` is null.
 u32 NotifyHistoryGet(u32 idx, char* out, u32 cap);
+
+/// Read the severity of entry `idx`. Returns `NotifyKind::Info`
+/// for out-of-range indices so callers don't need a second
+/// bounds check.
+NotifyKind NotifyHistoryGetKind(u32 idx);
+
+/// Drop every entry in the history ring. The live toast (if any)
+/// is left alone — operators dismiss that with `NotifyShow(nullptr)`
+/// or wait for the TTL. After this call `NotifyHistoryCount()`
+/// returns 0.
+void NotifyHistoryClear();
 
 } // namespace duetos::drivers::video

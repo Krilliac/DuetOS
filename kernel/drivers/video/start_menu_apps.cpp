@@ -146,6 +146,21 @@ bool ResolveTargetName(const char* s, ThemeRole* out)
         *out = ThemeRole::Calendar;
         return true;
     }
+    if (StrEqI(s, "sysmon") || StrEqI(s, "monitor"))
+    {
+        *out = ThemeRole::Sysmon;
+        return true;
+    }
+    if (StrEqI(s, "hex") || StrEqI(s, "hexview") || StrEqI(s, "hexviewer"))
+    {
+        *out = ThemeRole::HexView;
+        return true;
+    }
+    if (StrEqI(s, "charmap") || StrEqI(s, "characters"))
+    {
+        *out = ThemeRole::CharMap;
+        return true;
+    }
     return false;
 }
 

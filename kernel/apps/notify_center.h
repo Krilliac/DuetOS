@@ -14,10 +14,11 @@
  * this gives the user a windowed surface they can browse.
  *
  * Bindings (when this window is focused):
- *   J / Down  — next entry
- *   K / Up    — previous entry
- *   PageUp / PageDown — page step
- *   X / Del   — clear all (requires confirm via MessageBox)
+ *   J / Down            — next entry
+ *   K / Up              — previous entry
+ *   PageUp / PageDown   — page step
+ *   Home / End          — jump to newest / oldest
+ *   X / Del             — clear all (MessageBox confirm)
  *
  * Context: kernel. Pure read-only on the notify ring.
  */

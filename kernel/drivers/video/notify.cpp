@@ -16,30 +16,34 @@ struct ToastState
     char text[kNotifyMaxText + 1];
     u32 len;
     u32 ttl;
+    NotifyKind kind;
 };
 
 constinit ToastState g_toast = {};
 
 // History ring. Front-loaded: index 0 is the most recent
 // displayed toast, index `count - 1` is the oldest. Pushed on
-// every NotifyShowFor that has non-empty text. Duplicate-text
-// pushes coalesce — a service that fires the same toast every
-// second won't fill the ring with the same string.
+// every NotifyShowFor that has non-empty text. Duplicate
+// (text, kind) pushes coalesce — a service that fires the same
+// toast every second won't fill the ring with the same string.
+// Different-kind pushes of the same text DO push so an operator
+// sees the Info→Warning→Error transition.
 struct HistorySlot
 {
     char text[kNotifyMaxText + 1];
     u32 len;
+    NotifyKind kind;
 };
 
 constinit HistorySlot g_history[kNotifyHistoryCap] = {};
 constinit u32 g_history_count = 0;
 
-bool HistoryFrontMatches(const char* text, u32 len)
+bool HistoryFrontMatches(const char* text, u32 len, NotifyKind kind)
 {
     if (g_history_count == 0)
         return false;
     const HistorySlot& f = g_history[0];
-    if (f.len != len)
+    if (f.len != len || f.kind != kind)
         return false;
     for (u32 i = 0; i < len; ++i)
     {
@@ -49,9 +53,9 @@ bool HistoryFrontMatches(const char* text, u32 len)
     return true;
 }
 
-void HistoryPush(const char* text, u32 len)
+void HistoryPush(const char* text, u32 len, NotifyKind kind)
 {
-    if (HistoryFrontMatches(text, len))
+    if (HistoryFrontMatches(text, len, kind))
         return;
     // Shift down by one to make room at the front. Drop the
     // oldest entry if the ring is full.
@@ -67,8 +71,30 @@ void HistoryPush(const char* text, u32 len)
     }
     dst.text[len] = '\0';
     dst.len = len;
+    dst.kind = kind;
     if (g_history_count < kNotifyHistoryCap)
         ++g_history_count;
+}
+
+// RGB swatches for each severity. Picked to read against
+// `theme.banner_fg` (which is light in every shipped theme) and
+// to match the "panel + 1px dark border" chrome the live toast
+// uses. Info falls through to the theme's accent so each
+// theme's palette still drives the neutral case.
+u32 KindPanelRgb(NotifyKind kind, u32 theme_accent)
+{
+    switch (kind)
+    {
+    case NotifyKind::Success:
+        return 0x00305030u;
+    case NotifyKind::Warning:
+        return 0x00604020u;
+    case NotifyKind::Error:
+        return 0x00603030u;
+    case NotifyKind::Info:
+    default:
+        return theme_accent;
+    }
 }
 
 u32 StrLenCapped(const char* s, u32 cap)
@@ -89,10 +115,20 @@ u32 StrLenCapped(const char* s, u32 cap)
 
 void NotifyShow(const char* text)
 {
-    NotifyShowFor(text, kNotifyDefaultTtlTicks);
+    NotifyShowKindFor(text, NotifyKind::Info, kNotifyDefaultTtlTicks);
 }
 
 void NotifyShowFor(const char* text, u32 ttl_ticks)
+{
+    NotifyShowKindFor(text, NotifyKind::Info, ttl_ticks);
+}
+
+void NotifyShowKind(const char* text, NotifyKind kind)
+{
+    NotifyShowKindFor(text, kind, kNotifyDefaultTtlTicks);
+}
+
+void NotifyShowKindFor(const char* text, NotifyKind kind, u32 ttl_ticks)
 {
     if (text == nullptr || text[0] == '\0' || ttl_ticks == 0)
     {
@@ -108,7 +144,8 @@ void NotifyShowFor(const char* text, u32 ttl_ticks)
     g_toast.text[n] = '\0';
     g_toast.len = n;
     g_toast.ttl = ttl_ticks;
-    HistoryPush(g_toast.text, n);
+    g_toast.kind = kind;
+    HistoryPush(g_toast.text, n, kind);
 }
 
 u32 NotifyHistoryCount()
@@ -128,6 +165,24 @@ u32 NotifyHistoryGet(u32 idx, char* out, u32 cap)
     }
     out[take] = '\0';
     return take;
+}
+
+NotifyKind NotifyHistoryGetKind(u32 idx)
+{
+    if (idx >= g_history_count)
+        return NotifyKind::Info;
+    return g_history[idx].kind;
+}
+
+void NotifyHistoryClear()
+{
+    for (u32 i = 0; i < g_history_count; ++i)
+    {
+        g_history[i].text[0] = '\0';
+        g_history[i].len = 0;
+        g_history[i].kind = NotifyKind::Info;
+    }
+    g_history_count = 0;
 }
 
 bool NotifyIsActive()
@@ -168,16 +223,18 @@ void NotifyRedraw()
     const u32 baseline = (fb.height > tb_h) ? fb.height - tb_h : 0;
     const u32 box_y = (baseline > box_h + margin) ? baseline - box_h - margin : 0;
 
-    // Background panel: theme's taskbar accent so the toast reads
-    // as "system chrome" rather than app content. Border matches
-    // window_border for visual consistency with the rest of the
-    // chrome.
-    FramebufferFillRect(box_x, box_y, box_w, box_h, th.taskbar_accent);
+    // Background panel: severity-driven (Info uses theme accent;
+    // Warning / Error / Success use fixed swatches that read as
+    // "system chrome" but visually distinct from neutral status).
+    // Border matches window_border for visual consistency with
+    // the rest of the chrome.
+    const u32 panel_rgb = KindPanelRgb(g_toast.kind, th.taskbar_accent);
+    FramebufferFillRect(box_x, box_y, box_w, box_h, panel_rgb);
     FramebufferDrawRect(box_x, box_y, box_w, box_h, th.window_border, 1);
 
     const u32 text_x = box_x + padding_x;
     const u32 text_y = box_y + padding_y;
-    FramebufferDrawString(text_x, text_y, g_toast.text, th.banner_fg, th.taskbar_accent);
+    FramebufferDrawString(text_x, text_y, g_toast.text, th.banner_fg, panel_rgb);
 
     --g_toast.ttl;
     if (g_toast.ttl == 0)
@@ -195,6 +252,15 @@ void NotifySelfTest()
     // Save state so the live toast (if any) is restored after the test.
     const ToastState save = g_toast;
 
+    // Snapshot + clear the history ring; the test scribbles into
+    // it and we restore the operator's view at the end.
+    HistorySlot saved_history[kNotifyHistoryCap];
+    for (u32 i = 0; i < kNotifyHistoryCap; ++i)
+        saved_history[i] = g_history[i];
+    const u32 saved_history_count = g_history_count;
+    NotifyHistoryClear();
+    ok = ok && (NotifyHistoryCount() == 0);
+
     g_toast = {};
     ok = ok && !NotifyIsActive();
 
@@ -202,6 +268,7 @@ void NotifySelfTest()
     ok = ok && NotifyIsActive();
     ok = ok && (g_toast.len == 5);
     ok = ok && (g_toast.ttl == kNotifyDefaultTtlTicks);
+    ok = ok && (g_toast.kind == NotifyKind::Info);
 
     NotifyShowFor("X", 7);
     ok = ok && (g_toast.ttl == 7);
@@ -212,8 +279,38 @@ void NotifySelfTest()
     NotifyShowFor("over-long ........................................................................truncated", 3);
     ok = ok && (g_toast.len == kNotifyMaxText);
 
+    // Severity round-trip: Warning toast keeps its kind in the
+    // history slot.
+    NotifyShow(nullptr);
+    NotifyHistoryClear();
+    NotifyShowKind("battery 5%", NotifyKind::Warning);
+    ok = ok && (g_toast.kind == NotifyKind::Warning);
+    ok = ok && (NotifyHistoryCount() == 1);
+    ok = ok && (NotifyHistoryGetKind(0) == NotifyKind::Warning);
+
+    // Same text, different kind → ring DOES push (Info→Error
+    // transition is operator-meaningful).
+    NotifyShowKind("battery 5%", NotifyKind::Error);
+    ok = ok && (NotifyHistoryCount() == 2);
+    ok = ok && (NotifyHistoryGetKind(0) == NotifyKind::Error);
+    ok = ok && (NotifyHistoryGetKind(1) == NotifyKind::Warning);
+
+    // Same (text, kind) → ring coalesces.
+    NotifyShowKind("battery 5%", NotifyKind::Error);
+    ok = ok && (NotifyHistoryCount() == 2);
+
+    // Out-of-range kind read returns Info as a safe fallback.
+    ok = ok && (NotifyHistoryGetKind(99) == NotifyKind::Info);
+
+    NotifyHistoryClear();
+    ok = ok && (NotifyHistoryCount() == 0);
+
     NotifyShow(nullptr);
 
+    // Restore the operator's history ring + the live toast.
+    for (u32 i = 0; i < kNotifyHistoryCap; ++i)
+        g_history[i] = saved_history[i];
+    g_history_count = saved_history_count;
     g_toast = save;
 
     SerialWrite(ok ? "[notify] self-test OK\n" : "[notify] self-test FAILED\n");

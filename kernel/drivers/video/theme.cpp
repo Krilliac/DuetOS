@@ -87,6 +87,9 @@ constexpr Theme kClassic = {
             0x00305880, // Browser  — sky blue, "online" hue
             0x00305880, // Calendar  — same as Browser/About/Help (info-panel family)
             0x00305880, // NotifyCenter
+            0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
+            0x00404858, // HexView — slate "tool" hue
+            0x00604070, // CharMap — muted-purple "utility" hue
         },
     .role_client =
         {
@@ -104,6 +107,9 @@ constexpr Theme kClassic = {
             0x00101828, // Browser — dark blue ground for plain-text reading
             0x00101828, // Calendar  — same as Browser/About/Help (info-panel family)
             0x00305880, // NotifyCenter
+            0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
+            0x00404858, // HexView — slate "tool" hue
+            0x00604070, // CharMap — muted-purple "utility" hue
         },
 
     .console_fg = 0x0080F088,
@@ -158,6 +164,9 @@ constexpr Theme kAmber = {
             0x00604024, // Browser  — amber-tinted bronze
             0x00604024, // Calendar  — same as Browser/About/Help (info-panel family)
             0x00305880, // NotifyCenter
+            0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
+            0x00404858, // HexView — slate "tool" hue
+            0x00604070, // CharMap — muted-purple "utility" hue
         },
     .role_client =
         {
@@ -175,6 +184,9 @@ constexpr Theme kAmber = {
             0x00100800, // Browser
             0x00100800, // Calendar  — same as Browser/About/Help (info-panel family)
             0x00305880, // NotifyCenter
+            0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
+            0x00404858, // HexView — slate "tool" hue
+            0x00604070, // CharMap — muted-purple "utility" hue
         },
 
     .console_fg = 0x00FFA830,
@@ -233,6 +245,9 @@ constexpr Theme kSlate10 = {
             0x000078D7, // Browser      — Win10 system blue, "browser" hue
             0x000078D7, // Calendar  — same as Browser/About/Help (info-panel family)
             0x00305880, // NotifyCenter
+            0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
+            0x00404858, // HexView — slate "tool" hue
+            0x00604070, // CharMap — muted-purple "utility" hue
         },
     .role_client =
         {
@@ -250,6 +265,9 @@ constexpr Theme kSlate10 = {
             0x00252529, // Browser — Slate panel
             0x00252529, // Calendar  — same as Browser/About/Help (info-panel family)
             0x00305880, // NotifyCenter
+            0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
+            0x00404858, // HexView — slate "tool" hue
+            0x00604070, // CharMap — muted-purple "utility" hue
         },
 
     .console_fg = 0x00D4D4D4, // VSCode default editor ink
@@ -314,6 +332,9 @@ constexpr Theme kDuet = {
             0x002A323C, // Browser      — slate panel (matches About/Help)
             0x002A323C, // Calendar  — same as Browser/About/Help (info-panel family)
             0x00305880, // NotifyCenter
+            0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
+            0x00404858, // HexView — slate "tool" hue
+            0x00604070, // CharMap — muted-purple "utility" hue
         },
     .role_client =
         {
@@ -331,6 +352,9 @@ constexpr Theme kDuet = {
             0x00141A22, // Browser
             0x00141A22, // Calendar  — same as Browser/About/Help (info-panel family)
             0x00305880, // NotifyCenter
+            0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
+            0x00404858, // HexView — slate "tool" hue
+            0x00604070, // CharMap — muted-purple "utility" hue
         },
 
     .console_fg = 0x00E8EDF2, // `--ink` — JetBrains-Mono ink in the prototype
@@ -394,6 +418,9 @@ constexpr Theme kDuetLight = {
             0x00086A60, // Browser      — deeper teal (matches ImageView accent)
             0x00086A60, // Calendar  — same as Browser/About/Help (info-panel family)
             0x00305880, // NotifyCenter
+            0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
+            0x00404858, // HexView — slate "tool" hue
+            0x00604070, // CharMap — muted-purple "utility" hue
         },
     .role_client =
         {
@@ -411,6 +438,9 @@ constexpr Theme kDuetLight = {
             0x00ECEEF1, // Browser
             0x00ECEEF1, // Calendar  — same as Browser/About/Help (info-panel family)
             0x00305880, // NotifyCenter
+            0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
+            0x00404858, // HexView — slate "tool" hue
+            0x00604070, // CharMap — muted-purple "utility" hue
         },
 
     .console_fg = 0x00161A20,
@@ -466,6 +496,9 @@ constexpr Theme kDuetBlue = {
             0x002A323C, // Browser      — slate panel
             0x002A323C, // Calendar  — same as Browser/About/Help (info-panel family)
             0x00305880, // NotifyCenter
+            0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
+            0x00404858, // HexView — slate "tool" hue
+            0x00604070, // CharMap — muted-purple "utility" hue
         },
     .role_client =
         {
@@ -477,6 +510,9 @@ constexpr Theme kDuetBlue = {
             0x00141A22, // Browser
             0x00141A22, // Calendar  — same as Browser/About/Help (info-panel family)
             0x00305880, // NotifyCenter
+            0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
+            0x00404858, // HexView — slate "tool" hue
+            0x00604070, // CharMap — muted-purple "utility" hue
         },
     .console_fg = 0x00E8EDF2,
     .console_bg = 0x000F1319,
@@ -516,6 +552,9 @@ constexpr Theme kDuetViolet = {
             0x002A323C, // Browser      — slate panel
             0x002A323C, // Calendar  — same as Browser/About/Help (info-panel family)
             0x00305880, // NotifyCenter
+            0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
+            0x00404858, // HexView — slate "tool" hue
+            0x00604070, // CharMap — muted-purple "utility" hue
         },
     .role_client =
         {
@@ -527,6 +566,9 @@ constexpr Theme kDuetViolet = {
             0x00141A22, // Browser
             0x00141A22, // Calendar  — same as Browser/About/Help (info-panel family)
             0x00305880, // NotifyCenter
+            0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
+            0x00404858, // HexView — slate "tool" hue
+            0x00604070, // CharMap — muted-purple "utility" hue
         },
     .console_fg = 0x00E8EDF2,
     .console_bg = 0x000F1319,
@@ -566,6 +608,9 @@ constexpr Theme kDuetGreen = {
             0x002A323C, // Browser      — slate panel
             0x002A323C, // Calendar  — same as Browser/About/Help (info-panel family)
             0x00305880, // NotifyCenter
+            0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
+            0x00404858, // HexView — slate "tool" hue
+            0x00604070, // CharMap — muted-purple "utility" hue
         },
     .role_client =
         {
@@ -577,6 +622,9 @@ constexpr Theme kDuetGreen = {
             0x00141A22, // Browser
             0x00141A22, // Calendar  — same as Browser/About/Help (info-panel family)
             0x00305880, // NotifyCenter
+            0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
+            0x00404858, // HexView — slate "tool" hue
+            0x00604070, // CharMap — muted-purple "utility" hue
         },
     .console_fg = 0x00E8EDF2,
     .console_bg = 0x000F1319,
@@ -635,6 +683,9 @@ constexpr Theme kDuetClassic = {
             0x00204878, // Browser      — Win9x dark blue (matches ImageView)
             0x00204878, // Calendar  — same as Browser/About/Help (info-panel family)
             0x00305880, // NotifyCenter
+            0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
+            0x00404858, // HexView — slate "tool" hue
+            0x00604070, // CharMap — muted-purple "utility" hue
         },
     .role_client =
         {
@@ -652,6 +703,9 @@ constexpr Theme kDuetClassic = {
             0x00FFFFFF, // Browser      — paper white for readability
             0x00FFFFFF, // Calendar  — same as Browser/About/Help (info-panel family)
             0x00305880, // NotifyCenter
+            0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
+            0x00404858, // HexView — slate "tool" hue
+            0x00604070, // CharMap — muted-purple "utility" hue
         },
 
     .console_fg = 0x00000000,
@@ -709,6 +763,9 @@ constexpr Theme kHighContrast = {
             0x00FFFF00, // Browser
             0x00FFFF00, // Calendar  — same as Browser/About/Help (info-panel family)
             0x00305880, // NotifyCenter
+            0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
+            0x00404858, // HexView — slate "tool" hue
+            0x00604070, // CharMap — muted-purple "utility" hue
         },
     .role_client =
         {
@@ -720,6 +777,9 @@ constexpr Theme kHighContrast = {
             0x00000000, // Browser
             0x00000000, // Calendar  — same as Browser/About/Help (info-panel family)
             0x00305880, // NotifyCenter
+            0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
+            0x00404858, // HexView — slate "tool" hue
+            0x00604070, // CharMap — muted-purple "utility" hue
         },
 
     .console_fg = 0x00FFFFFF,
