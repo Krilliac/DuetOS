@@ -70,7 +70,8 @@ jobs:
             sleep $((attempt * 5))
           done
           sudo apt-get install -y clang-18 lld-18 llvm-18 cmake ninja-build python3 \
-                                  grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools
+                                  grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools \
+                                  gcc-mingw-w64-x86-64
           sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
           sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
           sudo ln -sf /usr/bin/lld-link-18 /usr/local/bin/lld-link
@@ -102,7 +103,8 @@ jobs:
             sleep $((attempt * 5))
           done
           sudo apt-get install -y clang-18 lld-18 llvm-18 cmake ninja-build python3 \
-                                  grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools
+                                  grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools \
+                                  gcc-mingw-w64-x86-64
           sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
           sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
           sudo ln -sf /usr/bin/lld-link-18 /usr/local/bin/lld-link
@@ -161,7 +163,8 @@ jobs:
           done
           sudo apt-get install -y clang-18 lld-18 llvm-18 cmake ninja-build python3 \
                                   qemu-system-x86 grub-common grub-pc-bin \
-                                  grub-efi-amd64-bin xorriso mtools ovmf
+                                  grub-efi-amd64-bin xorriso mtools ovmf \
+                                  gcc-mingw-w64-x86-64
           sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
           sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
           sudo ln -sf /usr/bin/lld-link-18 /usr/local/bin/lld-link
