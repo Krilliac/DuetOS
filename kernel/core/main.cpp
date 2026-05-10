@@ -254,6 +254,7 @@
 #include "subsystems/win32/apc_selftest.h"
 #include "subsystems/win32/custom_selftest.h"
 #include "subsystems/win32/heap_selftest.h"
+#include "subsystems/win32/vmap_selftest.h"
 #include "subsystems/win32/gdi_objects.h"
 #include "subsystems/win32/nt_coverage.h"
 #include "subsystems/win32/registry.h"
@@ -2737,6 +2738,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // LIFO-reuse + OOM round-trip on a flat-buffer mini-walker
     // that mirrors the binding-based production code path.
     DUETOS_BOOT_SELFTEST(duetos::subsystems::win32::Win32HeapSelfTest());
+    // VirtualAlloc reserve/commit region tracker (T5-01 partial).
+    // Verifies the bitmap state-machine: reserve, partial commit,
+    // partial decommit, release, capacity overflow.
+    DUETOS_BOOT_SELFTEST(duetos::subsystems::win32::Win32VmapSelfTest());
     // Linux fd-table helper self-test (Linux fd → KFile
     // migration). Exercises LinuxFdAllocLowest / AttachKFile /
     // Dup / SetCloexec / CloseOnExec / Close on a stand-in

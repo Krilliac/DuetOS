@@ -901,7 +901,7 @@ Track 3 has no remaining roadmap rows.
 
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
-| T10-04 | build | P2 | Extend the hosted `ctest` harness to cover the four listed pillars. (Result, string, syscall_error, cvt, text_hash, d3dcompiler, damage_rect, wild_address are wired today; PE parser, VFS path resolution, registry lookup are still kernel-only.) | Host `ctest` runs without QEMU and covers Result + PE parser + VFS path resolution + registry lookup + string helpers. |
+| T10-04 | build | P2 | Extend the hosted `ctest` harness to cover the four listed pillars. (Result, string, syscall_error, cvt, text_hash, d3dcompiler, damage_rect, wild_address, **disk_path** wired today — disk_path covers the canonical `/disk/<idx>/<rest>` parser used by the Win32 spawn + Fat32 file-route path layers. PE parser + VFS-path-resolve-with-mount-crossings + registry-lookup are still kernel-only because each pulls in too many transitively-kernel headers to be worth shimming for the host build; the algorithmic-contract pattern (test re-states the kernel routine inline, asserts inputs/outputs against canonical cases) is what scales here. Add per-primitive tests as they grow self-contained enough to mirror.) | Host `ctest` runs without QEMU and covers Result + PE parser + VFS path resolution + registry lookup + string helpers. |
 
 ### Track 11 — Kernel infrastructure gaps
 
