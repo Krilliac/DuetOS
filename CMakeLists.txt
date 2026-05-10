@@ -361,3 +361,38 @@ message(STATUS "  Toolchain  : ${CMAKE_TOOLCHAIN_FILE}")
 message(STATUS "  C compiler : ${CMAKE_C_COMPILER}")
 message(STATUS "  Linker     : ${CMAKE_LINKER}")
 message(STATUS "")
+
+# ----------------------------------------------------------------------------
+# Optional host-side tools — duet-pkg (the federated package manager).
+#
+# These are HOSTED binaries (need libc, libstdc++, libcurl, libsodium,
+# <filesystem>, <expected>), so they cannot share the freestanding
+# `cmake/toolchains/x86_64-kernel.cmake` toolchain the kernel uses.
+# Drive them via ExternalProject_Add with no toolchain inheritance, so
+# `cmake --build . --target duet-pkg` from the root build dir works
+# without polluting the kernel's compiler flags.
+#
+# OFF by default — most kernel-only flows don't need duet-pkg, and the
+# ExternalProject pulls toml++ (and later libcurl + libsodium) via
+# FetchContent the first time it configures. Operators wanting the
+# package manager run: `cmake -DDUETOS_BUILD_TOOLS=ON ...`.
+# ----------------------------------------------------------------------------
+option(DUETOS_BUILD_TOOLS "Build host-side tools (duet-pkg, ...)" OFF)
+if(DUETOS_BUILD_TOOLS)
+    include(ExternalProject)
+    ExternalProject_Add(duet-pkg-ext
+        PREFIX           "${CMAKE_BINARY_DIR}/tools/duet-pkg"
+        SOURCE_DIR       "${CMAKE_SOURCE_DIR}/tools/pkg"
+        # Force the system compiler + no toolchain file. Pass through
+        # the build type so a debug parent build gets a debug
+        # duet-pkg.
+        CMAKE_ARGS
+            -DCMAKE_TOOLCHAIN_FILE=
+            -DCMAKE_C_COMPILER=cc
+            -DCMAKE_CXX_COMPILER=c++
+            -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+        INSTALL_COMMAND  ""
+        BUILD_ALWAYS     TRUE
+        TEST_COMMAND     ${CMAKE_CTEST_COMMAND} --output-on-failure
+    )
+endif()

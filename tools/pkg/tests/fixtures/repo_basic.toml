@@ -1,0 +1,32 @@
+[repo]
+name        = "official"
+maintainer  = "Nathan"
+version     = 1
+signing_key = "ed25519:AAAAC3NzaC1lZDI1NTE5AAAAITESTKEYBYTESDONOTUSE"
+base_url    = "https://example.org/packages/"
+
+[[packages]]
+name        = "libz"
+version     = "1.3.1"
+description = "zlib compression library"
+arch        = "x86_64"
+deps        = []
+binary_url  = "libz-1.3.1-x86_64.tar.gz"
+sha256      = "def456"
+source_url  = "https://github.com/madler/zlib"
+license     = "Zlib"
+size_bytes  = 204800
+installed_size_bytes = 614400
+
+[[packages]]
+name        = "neovim"
+version     = "0.10.0"
+description = "Hyperextensible Vim-based text editor"
+arch        = "x86_64"
+deps        = ["libc", "libz"]
+binary_url  = "neovim-0.10.0-x86_64.tar.gz"
+sha256      = "abc123"
+source_url  = "https://github.com/neovim/neovim"
+license     = "Apache-2.0"
+size_bytes  = 8388608
+installed_size_bytes = 24117248

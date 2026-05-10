@@ -1,0 +1,13 @@
+name        = "neovim"
+version     = "0.10.0"
+arch        = "x86_64"
+description = "Hyperextensible Vim-based text editor"
+license     = "Apache-2.0"
+maintainer  = "Nathan"
+source_url  = "https://github.com/neovim/neovim"
+deps        = ["libc", "libz"]
+
+[install]
+bin   = ["bin/nvim"]
+lib   = []
+share = ["share/nvim"]

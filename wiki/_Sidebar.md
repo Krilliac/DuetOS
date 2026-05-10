@@ -74,6 +74,7 @@
 - [Debugger](tooling/Debugger.md)
 - [QEMU Smoke Tests](tooling/QEMU-Smoke.md)
 - [Wiki Auto-Sections](tooling/Wiki-Auto-Sections.md)
+- [duet-pkg (package manager)](tooling/Duet-Pkg.md)
 
 ### Specifications
 - [Syscall ABI](specifications/Syscall-ABI.md)
