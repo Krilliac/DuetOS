@@ -825,11 +825,27 @@ extends. Next:
 > scope: APC completion routines for waitable timers (Track 8-02
 > covers cross-thread APC delivery), TIME_CALLBACK_EVENT_SET /
 > EVENT_PULSE flags for `timeSetEvent`, sub-10 ms resolution.
+> **T11-05** power management shipped:
+> `kernel/power/reboot.cpp::KernelHalt` now tries
+> `acpi::AcpiShutdown()` first (parses AML `\_S5_` from DSDT/SSDT
+> via the existing AML namespace walker, then writes
+> `(SLP_TYP << 10) | SLP_EN` to PM1A_CNT + PM1B_CNT). On hardware
+> where the AML extractor or PM1 block is unavailable, falls
+> through to QEMU-known shutdown ports (0x604 / 0xB004 / 0x4004)
+> that the chipset model honours, then masks interrupts and parks
+> the boot CPU as the documented last resort. The companion
+> `KernelReboot` already chained `acpi::AcpiReset()` (FADT
+> RESET_REG) → 0xCF9 (PC-AT chipset) → 8042 keyboard-controller
+> → triple-fault. Real hardware that needs `_PTS` / `_GTS`
+> method execution to drive the chipset to soft-off may still
+> stay powered (the AML interpreter parses Names, not Methods);
+> the happy path covers QEMU and most consumer firmware that
+> pre-evaluates `_PTS` to a no-op. S3 (suspend-to-RAM) stays
+> deferred until a workload demands it.
 
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
 | T11-02 | kernel | P1 | Implement IPC pipes/mailslots: anonymous pipes, named pipes, connect/disconnect, ring-buffer semantics, EOF, and CreateProcess stdio redirection support. | Pipe-backed stdin/stdout/stderr redirection works across parent/child processes. |
-| T11-05 | kernel | P2 | Implement power management: ACPI S5 shutdown, ACPI/FADT reset fallback, and S3 stubs or suspend/resume path. | `ExitWindowsEx(EWX_POWEROFF)` powers off through ACPI S5 where supported. |
 
 ### Track 12 — Userland infrastructure
 

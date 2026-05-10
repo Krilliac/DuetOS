@@ -7189,3 +7189,44 @@ doc helps future readers audit the trail.
 - **Related roadmap track(s):** Track 13 (T13-01 + T13-02
   closed; T13-03 stays open). Track 14 (T14-01 closed; T14-02
   was already closed; T14-03 stays open until T3-01 lands).
+
+---
+
+## 2026-05-10 — Wire AcpiShutdown into KernelHalt (T11-05 closed)
+
+- **Scope:** `kernel/power/reboot.cpp`,
+  `kernel/power/reboot.h`,
+  `wiki/reference/Roadmap.md`
+- **Commit:** this slice
+- **Decision:** `KernelHalt` had a long-standing `// GAP:` marker
+  claiming ACPI S5 wasn't implemented because no AML interpreter
+  existed. The AML interpreter actually shipped earlier
+  (`kernel/acpi/aml.cpp::AmlReadS5` walks the DSDT/SSDT
+  namespace for `\_S5_` and extracts SLP_TYP_A / SLP_TYP_B), and
+  `acpi::AcpiShutdown` chains the AML extract with the PM1A_CNT
+  + PM1B_CNT register write. KernelHalt now calls
+  `AcpiShutdown` first, falls through to the QEMU-known
+  shutdown ports (0x604 q35, 0xB004 piix, 0x4004 — the chipset
+  models honour these even when the FADT didn't carry a usable
+  PM1A address), and parks the CPU as the documented last
+  resort. The companion `KernelReboot` already chained
+  `AcpiReset` (FADT RESET_REG) → 0xCF9 → 8042 → triple-fault;
+  the row's reset-fallback acceptance was met, only the S5
+  acceptance was outstanding.
+- **Why:** The Track 11-05 acceptance ("ExitWindowsEx
+  (EWX_POWEROFF) powers off through ACPI S5 where supported")
+  hinges on the kernel's halt path actually issuing the S5
+  write. The AML interpreter to extract `\_S5_` and the
+  PM1-register writer were both already in tree; the only
+  missing piece was the `AcpiShutdown` call from `KernelHalt`
+  itself. A two-line change.
+- **Rules out / defers:** Real `_PTS` / `_GTS` method execution.
+  The AML interpreter parses `Name`, not `Method` — firmware
+  that requires `_PTS` to drive an EC or set a chipset bit
+  before the PM1A write may stay powered. The QEMU shutdown
+  ports cover the test fleet; bare-metal that needs `_PTS`
+  is a future slice. S3 (suspend-to-RAM) stays deferred.
+- **Revisit when:** a target machine in the test fleet stays
+  powered after a `KernelHalt` call, indicating it needs the
+  AML method-execution path.
+- **Related roadmap track(s):** T11-05 closed.
