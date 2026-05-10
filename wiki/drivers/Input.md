@@ -56,20 +56,30 @@ planned but not yet implemented.
 
 ## Compositor Routing
 
-The compositor's focused window receives keyboard events via
-`SYS_WIN_*` message-pump syscalls. Today input still goes to the
-native console even when a Win32 PE window is focused — keyboard /
-mouse routing to the target window is on the windowing track's
-deferred list. See
-[History](../getting-started/History.md) for the windowing-track status.
+The compositor's focused window receives keyboard + mouse events
+via `SYS_WIN_*` message-pump syscalls. The kernel kbd-reader and
+mouse-reader in `kernel/core/main.cpp` post `WM_KEYDOWN` /
+`WM_SYSKEYDOWN` / `WM_KEYUP` / `WM_SYSKEYUP` / `WM_CHAR` /
+`WM_SYSCHAR` (Alt held flips KEYDOWN/KEYUP/CHAR to their SYS
+variants and sets lParam bit 29) plus `WM_MOUSEMOVE` (0x0200) /
+`WM_LBUTTONDOWN` (0x0201) / `WM_LBUTTONUP` (0x0202) /
+`WM_LBUTTONDBLCLK` (0x0203) / `WM_MOUSEWHEEL` (0x020A) to the
+focused PE, with client-coordinate lParam packing. The mouse
+route consults `WindowGetCapture()` first so a `SetCapture`d
+window keeps receiving events after the cursor leaves.
+`SetForegroundWindow` plumbs through `SetActiveWindow` →
+`SYS_WIN_SET_ACTIVE` → `WindowRaise` and rewrites the active
+window. See [Compositor](../subsystems/Compositor.md) §"Window
+Chrome Interactions" for the full chrome-press dispatch.
 
 ## Known Limits / GAPs
 
 - **No USB HID mouse driver yet.**
-- **Input routing** still goes to the native console even with a
-  Win32 PE window focused.
 - **No raw input** API (`Win32 GetRawInputData`) — the few PEs that
   use it fall back to the message-pump path.
+- **No IME / non-Latin layouts** — PS/2 + xHCI HID drivers
+  hardcode US layout. See
+  [Roadmap](../reference/Roadmap.md#ime--non-latin-input).
 
 ## Related Pages
 

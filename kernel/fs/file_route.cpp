@@ -33,6 +33,7 @@
 #include "fs/mount.h"
 #include "fs/ramfs.h"
 #include "fs/vfs.h"
+#include "subsystems/linux/syscall_pipe.h"
 #include "log/klog.h"
 #include "proc/process.h"
 #include "security/canary.h"
@@ -423,6 +424,23 @@ u64 ReadForProcess(::duetos::core::Process* proc, u64 handle, void* dst, u64 len
         return u64(-1);
     if (len == 0)
         return 0;
+
+    if (h.kind == Process::FsBackingKind::Pipe)
+    {
+        // Pipe ends bypass the cursor / size machinery entirely
+        // — the underlying ring buffer owns its own consumer
+        // pointer. ReadForProcess on the write end is invalid
+        // (returns -1); read end blocks via PipeRead's existing
+        // wait-queue when the ring is empty AND writers remain.
+        if (h.pipe_is_write_end)
+            return u64(-1);
+        const i64 got =
+            ::duetos::subsystems::linux::internal::PipeRead(h.pipe_pool_idx, reinterpret_cast<u64>(dst), len);
+        if (got < 0)
+            return u64(-1);
+        return static_cast<u64>(got);
+    }
+
     const u64 size = HandleSize(h);
     if (h.cursor >= size)
         return 0; // EOF
@@ -477,6 +495,22 @@ u64 WriteForProcess(::duetos::core::Process* proc, u64 handle, const void* src, 
         return u64(-1);
     if (len == 0)
         return 0;
+
+    if (h.kind == Process::FsBackingKind::Pipe)
+    {
+        // Pipe ends — read end can't be written; write end appends
+        // to the ring through the existing pipe pool. PipeWrite
+        // blocks on the wait-queue if the ring is full AND readers
+        // remain; returns 0 with EPIPE-equivalent semantics if
+        // every reader has closed.
+        if (!h.pipe_is_write_end)
+            return u64(-1);
+        const i64 wrote = ::duetos::subsystems::linux::internal::PipeWrite(
+            h.pipe_pool_idx, reinterpret_cast<u64>(const_cast<void*>(src)), len);
+        if (wrote < 0)
+            return u64(-1);
+        return static_cast<u64>(wrote);
+    }
     // Canary wall — handle-stamped variant. Closes the
     // "write-to-existing-canary" gap the path-only check
     // couldn't cover (the write syscall doesn't carry a path
@@ -785,10 +819,23 @@ u64 CloseForProcess(::duetos::core::Process* proc, u64 handle)
     if (slot == u64(-1))
         return 0;
     Process::Win32FileHandle& h = proc->win32_handles[slot];
+    // Pipe ends: drop the per-end refcount BEFORE clearing the
+    // slot. The pipe pool walks read_refs / write_refs to decide
+    // when to free the buffer + wake the opposite end (EOF /
+    // EPIPE semantics); skipping the release would leak the slot.
+    if (h.kind == Process::FsBackingKind::Pipe)
+    {
+        if (h.pipe_is_write_end)
+            ::duetos::subsystems::linux::internal::PipeReleaseWrite(h.pipe_pool_idx);
+        else
+            ::duetos::subsystems::linux::internal::PipeReleaseRead(h.pipe_pool_idx);
+    }
     h.kind = Process::FsBackingKind::None;
     h.ramfs_node = nullptr;
     h.fat32_volume_idx = 0;
     h.cursor = 0;
+    h.pipe_pool_idx = 0;
+    h.pipe_is_write_end = false;
     (void)CopyPathInto(h.fat32_path, nullptr);
     return 0;
 }

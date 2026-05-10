@@ -177,8 +177,16 @@ slices land.
   single-CPU assumption today.
 - **No 2 MiB / 1 GiB PS support for new mappings** — straightforward
   add when the framebuffer driver demands it.
-- **No buddy / slab allocator** on top of the freelist heap. See the
-  [Roadmap](../reference/Roadmap.md#slab-allocator--freed-object-poison--real-kasan).
+- **Slab allocator landed** — `kernel/mm/slab.{h,cpp}`. Each
+  `SlabCache` hands out fixed-size objects from 16 KiB slabs
+  carved out of the kheap, with a per-cache intrusive freelist
+  and freed-object poison. Boot self-test runs in
+  `Phase::Sched`. **Buddy allocator** isn't yet on top — small
+  KMalloc allocations still go through the kheap freelist; the
+  slab is opt-in via direct `SlabAlloc`. See the
+  [Roadmap](../reference/Roadmap.md#slab-allocator--freed-object-poison--real-kasan)
+  for the remaining KMalloc-routing follow-on and the deferred
+  real KASAN work.
 - **No reclaim or compaction.** `FreeFrame` is the only path frames
   re-enter the pool.
 

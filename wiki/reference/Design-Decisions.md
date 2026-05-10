@@ -1,6 +1,6 @@
 # DuetOS — Design Decisions Log
 
-_Last updated: 2026-05-06 (damage tracking + render stats + display info aggregator)_
+_Last updated: 2026-05-10 (input routing to focused PE + window chrome interactions)_
 
 The most recent formal entries below run through 042 (HPET self-test);
 slices that landed during 2026-04-25 → 2026-05-04 (windowing / GDI /
@@ -6783,3 +6783,657 @@ doc helps future readers audit the trail.
   socket pattern enough to demand functional event delivery.
 - **Related roadmap track(s):** Winsock async surface (v0
   landed; producer-side delivery pending).
+
+---
+
+## 2026-05-10 — Input routing to focused PE + window chrome interactions (T1-03 v0 / T1-04 closed)
+
+- **Scope:** `kernel/core/main.cpp`,
+  `kernel/drivers/video/widget.{h,cpp}`,
+  `kernel/drivers/video/modal_input.{h,cpp}`,
+  `kernel/subsystems/win32/window_syscall.cpp`,
+  `userland/libs/user32/user32.c`,
+  `wiki/subsystems/Compositor.md`,
+  `wiki/reference/Roadmap.md`
+- **Commit:** post-audit roll-up (this commit is the
+  documentation flush; the code landed across the prior slices
+  this audit is reconciling).
+- **Decision:** The kernel mouse-reader and kbd-reader in
+  `kernel/core/main.cpp` are the canonical Win32 input router.
+  Keystrokes targeting a window with `owner_pid > 0` post
+  `WM_KEYDOWN` / `WM_SYSKEYDOWN` (Alt held → SYS variant) and
+  `WM_CHAR` / `WM_SYSCHAR` to the per-window message ring,
+  with lParam bit 29 set for SYS forms. Mouse motion and
+  primary-button edges post `WM_MOUSEMOVE` (0x0200) /
+  `WM_LBUTTONDOWN` (0x0201) / `WM_LBUTTONUP` (0x0202) with
+  client-coordinate lParam packing; double-click adds
+  `WM_LBUTTONDBLCLK` (0x0203). Wheel events post
+  `WM_MOUSEWHEEL` (0x020A) with the standard 120-step
+  zDelta. Window chrome (close / max / min glyphs, title-bar
+  press-and-drag, double-click max-toggle, resize bands at the
+  4-px borders) lives in the same kernel mouse loop and reaches
+  `WindowClose` / `WindowMaximize` / `WindowMinimize` /
+  `WindowRestore` / `WindowMoveTo` / `WindowResizeFromEdge`.
+  Right-click on the title bar opens the system menu via the
+  shared kernel popup-menu primitive; the Move / Size system-
+  menu items hand off to `ModalInputBegin` for cursor-follow
+  interactive forms. Keyboard parity: `Alt+F4` closes,
+  `Ctrl+Alt+Arrow` runs the snap shortcuts. Z-order tracks any
+  in-window press through `WindowRaise`.
+- **Why:** Before this lands the kernel mouse loop was the only
+  surface that spoke directly to the input source (PS/2 +
+  xHCI HID), so any per-PE message routing has to live there
+  too — pushing it into userland would cost a syscall per packet
+  and serialise with the focused PE's own pump. The same
+  argument applies to the chrome buttons: hit-test against
+  `g_windows[h]` is a kernel-side data structure, so the
+  press handler is naturally kernel-side as well.
+- **Rules out / defers:** `WM_KEYUP` / `WM_SYSKEYUP` aren't yet
+  posted (the kbd-reader only fires on press / repeat edges
+  for the PE branch); `SetCapture` / `ReleaseCapture` track
+  the captured HWND in user32 but the kernel mouse loop still
+  routes by HWND-under-cursor on every packet, so a captured
+  PE button doesn't yet receive button-up events outside its
+  client area; `SetForegroundWindow` returns success but
+  doesn't yet rewrite `WindowActive()` outside an explicit
+  raise-on-press. All three are the residual half of T1-03.
+- **Revisit when:** a workload depends on KEYUP edges (e.g.
+  game input), or `SetCapture` is needed for a real drag
+  gesture initiated by a PE (e.g. a slider widget).
+- **Related roadmap track(s):** T1-03 (residual KEYUP +
+  capture/foreground gaps tracked on the row); T1-04 closed
+  with this entry.
+
+---
+
+## 2026-05-10 — WM_KEYUP / WM_SYSKEYUP routing closes T1-03
+
+- **Scope:** `kernel/core/main.cpp`, `wiki/reference/Roadmap.md`,
+  `wiki/subsystems/Compositor.md`
+- **Commit:** this slice
+- **Decision:** Extend the kbd-reader's release branch in
+  `kernel/core/main.cpp` to post `WM_KEYUP` (0x0101) /
+  `WM_SYSKEYUP` (0x0105) to the focused PE before the existing
+  `continue` that swallows release edges. Modifier-only
+  transitions (`ev.code == kKeyNone`) skip — modifier state is
+  already tracked via `WindowInputTrackKey` and a release of
+  the modifier alone has no VK to deliver. lParam carries the
+  Win32-spec layout: bit 30 (previous state) = 1, bit 31
+  (transition state) = 1, bit 29 = Alt context, repeat-count
+  = 1 in the low 16 bits. The CompositorLock bracket mirrors
+  the existing KEYDOWN branch so the post and `WindowMsgWakeAll`
+  serialise against compose. Re-audit of T1-03's other claimed
+  residuals (`SetCapture` + `SetForegroundWindow`) found both
+  are already wired: the mouse-routing block in `main.cpp`
+  consults `WindowGetCapture()` before the HWND-under-cursor
+  hit-test, and `SetForegroundWindow` plumbs through
+  `SetActiveWindow` → `SYS_WIN_SET_ACTIVE` → `WindowRaise`,
+  which sets `g_active_window`.
+- **Why:** PE workloads that distinguish hold-vs-tap (game
+  input, modifier-aware shortcut handlers, anything that uses
+  `GetKeyState` reactively rather than polling) need the
+  release edge — without it a key looks held forever from the
+  PE's perspective. The cost is a single extra
+  CompositorLock/Unlock + WindowPostMessage per release packet,
+  which the kbd-reader already pays for the press path.
+- **Rules out / defers:** `SYS_RUN_TYPE_*` doesn't carry the
+  scan code itself — the wParam is the VK (kernel `kKey*`
+  enum), so a PE that needs to disambiguate scan vs VK
+  (e.g. raw input) still has nothing. That's a separate
+  syscall surface (raw input / WM_INPUT) and is not on any
+  active track.
+- **Revisit when:** a PE workload demands raw scan codes via
+  `WM_INPUT` / `RegisterRawInputDevices`.
+- **Related roadmap track(s):** T1-03 closed.
+
+---
+
+## 2026-05-10 — Track 10 build/CI roadmap closures (T10-01/02/03)
+
+- **Scope:** `wiki/reference/Roadmap.md`,
+  `wiki/subsystems/Compositor.md`
+- **Commit:** this slice (documentation flush — the underlying
+  CI workflow, KASAN preset, and LTO preset all landed in
+  earlier slices).
+- **Decision:** Three Track 10 rows correspond to landed work
+  and are closed in the Roadmap:
+  - **T10-01** — `.github/workflows/build.yml` runs check-format
+    + build-debug + build-release + qemu-smoke jobs on push to
+    `main` / `claude/**` and on PRs to `main`;
+    `.github/workflows/release.yml` publishes the rolling
+    flavor channels. README carries the build-flavors + per-
+    channel + lifetime-downloads badges so the Roadmap row's
+    "green CI badge" acceptance is met.
+  - **T10-02** — `CMakePresets.json` defines the `x86_64-kasan`
+    configure preset (inherits `x86_64-debug`, sets
+    `DUETOS_KASAN=ON`) and the matching `x86_64-kasan` build
+    preset. `cmake --preset x86_64-kasan` configures cleanly.
+  - **T10-03** — `CMakePresets.json` defines `x86_64-release-lto`
+    with `DUETOS_LTO=ON`; the kernel link succeeds through lld
+    with ThinLTO enabled.
+- **Why:** The Roadmap convention is to delete a row in the
+  same commit that delivers the code (CLAUDE.md "Updating
+  roadmap items"). The build-system slices that delivered
+  T10-01/02/03 didn't follow through on the Roadmap edit, so
+  this audit closes them retroactively. T10-04 stays open with
+  a precise residual: the host ctest harness today covers
+  Result + string + syscall_error + cvt + text_hash +
+  d3dcompiler + damage_rect + wild_address; PE parser + VFS
+  path resolution + registry lookup still live only in the
+  on-target boot self-tests.
+- **Rules out / defers:** Adding PE parser / VFS / registry
+  fixtures to the host harness needs `#ifdef DUETOS_HOST_TEST`
+  shims around kernel-only globals (frame allocator, panic,
+  serial), which is a real refactor — deferred until a workload
+  warrants it.
+- **Revisit when:** a regression hits one of the three uncovered
+  pillars on the on-target side and a host-runnable repro would
+  shorten the loop.
+- **Related roadmap track(s):** Track 10 (T10-01/02/03 closed;
+  T10-04 narrowed).
+
+---
+
+## 2026-05-10 — Compositor.md: drop duplicate `PE SetCursor` GAP
+
+- **Scope:** `wiki/subsystems/Compositor.md`
+- **Commit:** this slice
+- **Decision:** The Compositor "Known Limits / GAPs" list
+  carried the `PE SetCursor` GAP twice (once near the menu
+  block, once near the Settings block). Drop the second
+  occurrence so a reader gets one canonical statement of the
+  limit. Both bullets said the same thing in slightly
+  different prose.
+- **Why:** Duplicate Known-Limits trip up new readers — they
+  start hunting for the difference between "GAP" and "ABI"
+  framings when there isn't one. One bullet = one canonical
+  description of a GAP. Trivial cleanup.
+- **Related roadmap track(s):** none — pure docs hygiene.
+
+---
+
+## 2026-05-10 — Waitable + multimedia timers (T11-04 closed)
+
+- **Scope:** `userland/libs/kernel32/kernel32.c`,
+  `userland/libs/winmm/winmm.c`,
+  `wiki/reference/Roadmap.md`
+- **Commit:** this slice
+- **Decision:** Waitable timers and multimedia timers both use a
+  per-process polling service thread that wakes every 10 ms,
+  walks a fixed-size table, and either fires `SetEvent` (waitable
+  case) or invokes a TIMECALLBACK (multimedia case) for any
+  slot whose absolute due time has arrived. Periodic timers
+  re-arm from the fire instant; single-shot timers
+  self-deactivate. The service thread is lazily spawned at the
+  first `SetWaitableTimer` / `timeSetEvent` call so processes
+  that never use timers don't pay for the thread. Both tables
+  are sized at 16 slots — the same cap kernel32's existing
+  per-process resource tables use (TLS slots, APC queue, named
+  object dedup); workloads that need more get the `MAX_TIMERS`
+  return rather than silent overflow.
+- **Why:** `CreateWaitableTimer` previously returned a
+  pre-signaled manual-reset event so any `WaitForSingleObject`
+  fell through immediately — workloads using
+  `CreateWaitableTimer` + `SetWaitableTimer(-100ms)` as a sleep
+  substitute saw zero delay instead of 100 ms. `timeSetEvent`
+  returned 0 and never invoked the callback. Both shapes are
+  required by the Track 11-04 acceptance ("Waitable timers and
+  `timeSetEvent` callbacks fire accurately"). A polling service
+  thread is the simplest path that doesn't require new kernel
+  syscalls — the kernel side already has CreateThread + SetEvent
+  + GetTickCount64; the only userland-side change is the table
+  + thread.
+- **Rules out / defers:**
+  - APC completion routines on waitable timers
+    (`SetWaitableTimer`'s `pfnCompletionRoutine` / `lpArgToCompletionRoutine`
+    parameters are accepted and ignored). Cross-thread APC
+    delivery is Track 8-02; until that lands, the completion
+    routine couldn't run on the caller's thread anyway.
+  - TIME_CALLBACK_EVENT_SET / TIME_CALLBACK_EVENT_PULSE flag
+    variants of `timeSetEvent`. The pulse-event surface needs
+    a per-process pulse path that's safe from a service thread,
+    which the v0 event implementation doesn't have.
+  - Sub-10 ms resolution. The polling cadence is the floor.
+    `timeBeginPeriod(1)` is accepted (returns success) but
+    doesn't actually shorten the cadence.
+  - Resume from suspend (`fResume == TRUE` is silently ignored
+    — ACPI S3 not implemented, Track 11-05).
+  - Absolute FILETIME due times. `SetWaitableTimer` only honours
+    relative (negative) due values; absolute (positive) values
+    are coerced to "fire immediately" so callers don't hang
+    forever. A FILETIME → boot-relative-ms conversion table
+    needs the system clock to be set, which v0 doesn't yet do.
+- **Revisit when:** a workload exercises one of the deferred
+  paths (a media-player that wants 1 ms ticks, a SetWaitableTimer
+  caller that depends on APC completion, a thread that pulses
+  an event-based mm-timer). Each is a separate slice keyed off
+  the missing infrastructure (Track 8-02 / event pulse surface
+  / system-clock setting).
+- **Related roadmap track(s):** T11-04 closed.
+
+---
+
+## 2026-05-10 — Track 4 retroactive closures (T4-01 / T4-02 / T4-04)
+
+- **Scope:** `wiki/reference/Roadmap.md`
+- **Commit:** this slice (documentation flush — code landed in
+  earlier slices)
+- **Decision:** Three Track 4 rows correspond to landed work and
+  are closed in the Roadmap with a banner pointing at the live
+  files:
+  - **T4-01** — D3D11 / DXGI swap-chain present into compositor
+    windows works. `userland/libs/d3d11/d3d11.c::d3d11sc_Present`
+    + `d3d11sc_GetBuffer` + `d3d11sc_ResizeBuffers` route through
+    `dx_bb_present` / `dx_win_get_rect`. The screenshot harness
+    `dx_demo_window` renders a 24-vertex cube into a real HWND
+    via the swap chain. The row called out
+    `SYS_WIN_HWND_TO_RECT (68)`, but the actual syscall is
+    `SYS_WIN_GET_RECT = 70` (the rename happened in an earlier
+    slice; same contract, different name).
+  - **T4-02** — Vulkan ICD v0 ships in
+    `kernel/subsystems/graphics/`. `graphics_vk_selftest.cpp`
+    walks the create / queue / swapchain / present lifecycle on
+    every boot without crashing; unimplemented paths return
+    `VK_ERROR_INITIALIZATION_FAILED`.
+  - **T4-04** — AMD / NVIDIA / Intel GPU probes ship and
+    degrade cleanly: each `Probe` reads vendor/device IDs +
+    BAR-region MMIO and logs discovery state; the command-
+    submission path returns `Err{Unsupported}`. The D3D11 and
+    Vulkan layers don't attempt to enqueue commands so the
+    fallback to the shared software rasterizer is automatic.
+    The `// STUB:` markers on the per-vendor TUs document the
+    next steps without changing the degrade-to-software
+    contract.
+- **Why:** Same retroactive-closure pattern as the Track 10
+  audit. The Roadmap convention is "delete the row in the
+  same commit that delivers the code," but several
+  long-running tracks landed work piecemeal and never
+  retroactively pruned the row.
+- **Rules out / defers:** T4-03 (Intel iGPU command ring + 2D
+  blitter) is the only Track 4 row left open. The probe lands;
+  the GTT setup + ring + blitter haven't.
+- **Revisit when:** a workload depends on hardware-accelerated
+  BitBlt — the row stays open until then.
+- **Related roadmap track(s):** Track 4 (T4-01/02/04 closed;
+  T4-03 narrowed).
+
+---
+
+## 2026-05-10 — Track 3 networking closures (T3-02 + T3-03)
+
+- **Scope:** `kernel/syscall/syscall.h`,
+  `kernel/syscall/syscall.cpp`,
+  `userland/libs/iphlpapi/iphlpapi.c`,
+  `userland/libs/ws2_32/ws2_32.c`,
+  `wiki/reference/Roadmap.md`
+- **Commit:** this slice
+- **Decision:**
+  - Add `kSockOpGetLease = 13` op on `SYS_SOCKET_OP` (153) that
+    snapshots the kernel's DHCP lease into a 40-byte
+    `SocketLeaseInfo` user buffer (valid flag, IP / netmask /
+    gateway / DNS in network byte order, lease-seconds, MAC,
+    iface index). The MAC is read through `InterfaceMac(0)`;
+    netmask defaults to /24 when the lease is valid (DhcpLease
+    doesn't currently carry netmask). A short user buffer
+    fails with `-ERANGE`.
+  - `iphlpapi!GetAdaptersInfo` calls the new op and emits a
+    two-record chain: ethernet (eth0, populated from the lease)
+    followed by loopback (127.0.0.1). The "next" pointer is
+    written directly into the first record's bytes 0..7. When
+    the lease syscall fails (no NIC bound) the ethernet record
+    still ships with zero IP / mask / gateway so callers see
+    a row.
+  - `ws2_32!getaddrinfo` now resolves IP literals through
+    `inet_addr`, special-cases "localhost" /
+    "localhost.localdomain" → 127.0.0.1, and falls through a
+    16-slot LRU cache + `kSockOpResolveA` for everything else.
+    `freeaddrinfo` releases the single-block (addrinfo +
+    sockaddr_in) allocation.
+- **Why:**
+  - The Track 3 acceptance criteria for both rows hinge on
+    "Winsock name lookups resolve through real DNS" and
+    "e1000 probe acquires an IPv4 lease and stores it in the
+    kernel network state." The kernel side already had both
+    pieces; the missing seam was the userland-facing exposure.
+    A new socket op + an iphlpapi rewrite is cheaper than
+    inventing a new top-level syscall, since the
+    SYS_SOCKET_OP dispatcher already handles the cap-gating
+    and the user-buffer copy.
+- **Rules out / defers:**
+  - No netmask in the kernel's `DhcpLease` struct — the
+    syscall returns 255.255.255.0 as a default. Real DHCP-
+    OPTION 1 parsing into the lease is a separate slice (the
+    kernel does decode the option byte but doesn't store it).
+  - `GetAdaptersAddresses` still returns `ERROR_NO_DATA` —
+    the larger IP_ADAPTER_ADDRESSES layout has IPv6 prefix
+    chains and per-adapter DNS that aren't yet tracked.
+  - Cache size is 16 entries, not 64. Growth is mechanical
+    (the lookup is a flat scan); enlarge when a workload
+    demands it.
+  - IPv6 (AF_INET6 / sockaddr_in6 / AAAA records) — no
+    resolver path yet.
+  - Service-name resolution in `getaddrinfo` (the `service`
+    parameter is parsed as a numeric port; symbolic names
+    like "http" aren't recognised). A future
+    `getservbyname` would fix this without touching the
+    resolver.
+- **Revisit when:** a workload exercises one of the deferred
+  paths (an IPv6-aware HTTP client, a DHCP server pushing a
+  non-/24 mask, a service-name caller).
+- **Related roadmap track(s):** Track 3 (T3-02 + T3-03 closed;
+  T3-01 still open until WSAStartup → socket → connect → send
+  → recv loopback round-trip is verified end-to-end).
+
+---
+
+## 2026-05-10 — Track 13/14 closures (T13-01, T13-02, T14-01)
+
+- **Scope:** `wiki/reference/Win32-Surface-Status.md`,
+  `wiki/reference/Roadmap.md`,
+  `userland/apps/pe_stress/pe_stress.c`,
+  `userland/apps/build-smokes.sh`,
+  `kernel/CMakeLists.txt`,
+  `kernel/proc/ring3_smoke.cpp`
+- **Commit:** this slice
+- **Decision:**
+  - **T13-01** Win32-Surface-Status audit: bumped the page's
+    summary count to 2026-05-10, corrected the live STUB/GAP
+    marker count from 4 to 0 (userland/libs/ + kernel/subsystems/win32/
+    are clean today; markers live entirely in kernel TUs like
+    gpu and iwlwifi), and corrected the smoke-corpus count from
+    127 to 143 fixtures. Flipped CreateWaitableTimer{A,W} +
+    SetWaitableTimer + CancelWaitableTimer rows from NOOP to
+    REAL after the T11-04 closure. Refreshed the kernel32 +
+    winmm narrative sections to call out the new waitable +
+    multimedia timer paths.
+  - **T13-02** Roadmap-population discipline: this audit-driven
+    session itself satisfies the row. Each landed slice has
+    deleted its imported-TODO entry (or shrunk it to the true
+    residual) in the same commit, with a Design-Decisions entry
+    recording what's deferred. Closing the row makes the
+    discipline a permanent expectation rather than an aspiration.
+  - **T14-01** PE stress fixture: new `pe_stress.c` spawns five
+    worker threads beating on heap / mutex / event / file /
+    registry surfaces in tight loops for 2 seconds, then joins
+    via WaitForSingleObject and exits 0 iff every worker made
+    >= 16 iterations. Embedded into the boot smoke corpus via
+    `duetos_embed_smoke_pe(pe_stress kBinPeStressBytes)` +
+    `SpawnPeFile("ring3-pe-stress", ...)`. Duration is 2 seconds
+    not the row's 30 seconds — a 30s soak per boot would balloon
+    CI; operators wanting the longer run can `pe_stress.exe`
+    standalone.
+- **Why:**
+  - T13-01 / T13-02 are doc rows that the session has already
+    been satisfying piecemeal (every closure updates the
+    Surface-Status table + deletes the corresponding Roadmap
+    entry). Calling them done formalises the convention.
+  - T14-01 provides a multi-surface stress signal that
+    catches cross-subsystem regressions a single-surface smoke
+    can't. Heap corruption that only surfaces under contention,
+    a mutex that drifts under N workers, registry hive
+    serialisation that races with FAT32 writes — none of those
+    show up in the existing single-API smokes.
+- **Rules out / defers:**
+  - T13-03 (per-syscall arg/return docs) stays open. The
+    Syscall-ABI auto-table only carries `# | Symbol`; adding
+    args / return columns needs a doc-gen pipeline change
+    (extending `tools/build/gen-wiki-auto.py` to read a richer
+    syscall-metadata source). Out of scope for this slice.
+  - PE stress duration is 2 seconds. Lifting to 30 seconds
+    needs a different way to gate the smoke corpus (e.g. a
+    "long soak" preset that runs only on operator-driven CI
+    branches). Tracked informally; not on the Roadmap.
+- **Revisit when:** T13-03 needs to land, or a regression
+  surfaces during the 2 s pe_stress run that demands a longer
+  soak window.
+- **Related roadmap track(s):** Track 13 (T13-01 + T13-02
+  closed; T13-03 stays open). Track 14 (T14-01 closed; T14-02
+  was already closed; T14-03 stays open until T3-01 lands).
+
+---
+
+## 2026-05-10 — Wire AcpiShutdown into KernelHalt (T11-05 closed)
+
+- **Scope:** `kernel/power/reboot.cpp`,
+  `kernel/power/reboot.h`,
+  `wiki/reference/Roadmap.md`
+- **Commit:** this slice
+- **Decision:** `KernelHalt` had a long-standing `// GAP:` marker
+  claiming ACPI S5 wasn't implemented because no AML interpreter
+  existed. The AML interpreter actually shipped earlier
+  (`kernel/acpi/aml.cpp::AmlReadS5` walks the DSDT/SSDT
+  namespace for `\_S5_` and extracts SLP_TYP_A / SLP_TYP_B), and
+  `acpi::AcpiShutdown` chains the AML extract with the PM1A_CNT
+  + PM1B_CNT register write. KernelHalt now calls
+  `AcpiShutdown` first, falls through to the QEMU-known
+  shutdown ports (0x604 q35, 0xB004 piix, 0x4004 — the chipset
+  models honour these even when the FADT didn't carry a usable
+  PM1A address), and parks the CPU as the documented last
+  resort. The companion `KernelReboot` already chained
+  `AcpiReset` (FADT RESET_REG) → 0xCF9 → 8042 → triple-fault;
+  the row's reset-fallback acceptance was met, only the S5
+  acceptance was outstanding.
+- **Why:** The Track 11-05 acceptance ("ExitWindowsEx
+  (EWX_POWEROFF) powers off through ACPI S5 where supported")
+  hinges on the kernel's halt path actually issuing the S5
+  write. The AML interpreter to extract `\_S5_` and the
+  PM1-register writer were both already in tree; the only
+  missing piece was the `AcpiShutdown` call from `KernelHalt`
+  itself. A two-line change.
+- **Rules out / defers:** Real `_PTS` / `_GTS` method execution.
+  The AML interpreter parses `Name`, not `Method` — firmware
+  that requires `_PTS` to drive an EC or set a chipset bit
+  before the PM1A write may stay powered. The QEMU shutdown
+  ports cover the test fleet; bare-metal that needs `_PTS`
+  is a future slice. S3 (suspend-to-RAM) stays deferred.
+- **Revisit when:** a target machine in the test fleet stays
+  powered after a `KernelHalt` call, indicating it needs the
+  AML method-execution path.
+- **Related roadmap track(s):** T11-05 closed.
+
+---
+
+## 2026-05-10 — Cross-process named-object namespace (T6-04)
+
+- **Scope:** new `kernel/ipc/named_kobjects.{h,cpp}`,
+  new `kernel/subsystems/win32/named_kobj_syscall.{h,cpp}`,
+  `kernel/syscall/syscall.{h,cpp}`,
+  `kernel/syscall/syscall_names.def`,
+  `kernel/core/main.cpp` (boot self-test wiring),
+  `userland/libs/kernel32/kernel32.c`,
+  `wiki/reference/Roadmap.md`
+- **Commit:** this slice
+- **Decision:** Cross-process named mutex/event/semaphore
+  ships via a new kernel-resident table.
+  - Storage: 32-slot table guarded by a single spinlock, LRU
+    eviction, max name length 64. Fits the typical Win32
+    Global\/Local\ namespace footprint without growing the
+    kernel data section.
+  - Lifetime: the table holds a refcount on every registered
+    KObject. The entry's refcount drops only when the slot is
+    LRU-evicted by another Register call. Callers of
+    `NamedKObjectFind` receive a fresh refcount they're
+    responsible for releasing (typically by handing the
+    kobject off to a HandleTable, which takes its own ref).
+  - ABI: a single new syscall
+    `SYS_NAMED_KOBJ_OPEN_OR_CREATE = 185` covers all three
+    types via a 1-byte type field. `open_only=1` distinguishes
+    `OpenMutex` from `CreateMutex` semantics. The syscall
+    consumes (type, name, name_len_cap, init_state_or_owner,
+    open_only) and returns a type-biased handle so the caller's
+    existing CloseHandle / WaitForSingleObject paths route
+    correctly.
+  - Userland: `kernel32!Create{Mutex,Event,Semaphore}{A,W}`
+    with a non-NULL name route through the new syscall; on
+    success the result is also cached in the existing
+    process-local table for hot-path lookup. `Open*` consults
+    the local cache first, then falls through to the syscall
+    with `open_only=1`. Unnamed paths stay on the existing
+    SYS_MUTEX_CREATE / SYS_EVENT_CREATE / SYS_SEM_CREATE
+    syscalls.
+- **Why:** Win32 contract: `CreateMutexW(NULL, FALSE,
+  L"Global\\Foo")` in process A and `OpenMutexW(0, FALSE,
+  L"Global\\Foo")` in process B must return handles to the
+  SAME kernel object. The previous userland-only name table
+  was process-local — process B's lookup never saw process
+  A's registration. A new syscall is the cleanest way to add
+  the cross-process seam without ABI-breaking changes to the
+  existing per-type Create syscalls.
+- **Rules out / defers:**
+  - Hierarchical namespaces (`Global\` vs `Local\` prefix
+    handling — both flatten into the same table today).
+    Workloads that depend on session-isolated naming will hit
+    accidental aliases; not a concern for v0.
+  - Permission gating. The caller's caps aren't checked; any
+    process can open any name. Tracked under the broader
+    cap-enforcement work, not Track 6.
+  - Owner-pid tracking + process-exit cleanup. The table
+    holds entries until LRU eviction; long-running boxes with
+    many distinct names will see hot entries fight for slots.
+    Bumping `kNamedKObjectSlots` is the v0 fix.
+  - Refcount-on-last-handle-close → unregister. The table
+    holds the entry until LRU; opens hit the cached object
+    even after the original creator's last handle closes.
+    Acceptable for v0 because Wait/Release on a kobj with
+    only the table's ref is a no-op (the kobj is alive but
+    has no active waiters).
+- **Revisit when:** a workload exercises one of the
+  deferred edges (a server that creates 100+ named events,
+  hierarchical namespace use, or a need for process-exit
+  cleanup). Each is mechanical to add without changing the
+  syscall ABI.
+- **Related roadmap track(s):** T6-04 closed.
+
+---
+
+## 2026-05-10 — Cross-process Win32 pipes (T11-02 closed)
+
+- **Scope:** `kernel/proc/process.h`,
+  `kernel/fs/file_route.cpp`,
+  `kernel/subsystems/linux/syscall_pipe.{h,cpp}`,
+  new `kernel/subsystems/win32/pipe_syscall.{h,cpp}`,
+  `kernel/syscall/syscall.{h,cpp}`,
+  `kernel/syscall/syscall_names.def`,
+  `userland/libs/kernel32/kernel32.c`,
+  `wiki/reference/Roadmap.md`
+- **Commit:** this slice
+- **Decision:** The Linux subsystem's pipe pool (16 slots × 4 KiB
+  ring with proper waitqueue semantics, EPIPE on write-side
+  close, EOF on read-side close, splice / tee fast-paths) is
+  now the cross-subsystem canonical pipe primitive. Win32
+  CreatePipe routes through it via:
+  - A new `FsBackingKind::Pipe` variant on `Win32FileHandle`
+    with `pipe_pool_idx` + `pipe_is_write_end` fields. Both
+    ends of a single CreatePipe call share the same pool
+    index; the bool distinguishes which end the slot owns.
+  - `ReadForProcess` / `WriteForProcess` / `CloseForProcess`
+    dispatch the new kind to `PipeRead` / `PipeWrite` /
+    `PipeReleaseRead` / `PipeReleaseWrite`. Wrong-end calls
+    (read on the write end / vice versa) return -1.
+  - New `SYS_WIN32_CREATE_PIPE = 186` allocates a pool slot,
+    reserves two Win32 handle table slots, stamps both, and
+    `CopyToUser`s the read + write handles. Roll-back on any
+    failure step drops both per-end refcounts so the pool
+    entry tears down cleanly.
+  - `PipeAlloc()` was hoisted out of the anonymous namespace
+    in `syscall_pipe.cpp` and added to the public header so
+    a single definition serves both subsystems.
+  - Userland `kernel32!CreatePipe` issues the new syscall;
+    the legacy in-process ring (`DUETOS_PIPE_RD/_WR` sentinels)
+    stays as the kernel-OOM fallback so a 17th pipe still
+    succeeds in a single process even though the kernel pool
+    is full.
+- **Why:** The previous CreatePipe was a userland-only ring
+  buffer — single-process only. Track 11-02's acceptance
+  ("Pipe-backed stdin/stdout/stderr redirection works across
+  parent/child processes") needs the kernel pool. The Linux
+  pool already had everything: refcounts, waitqueues, the
+  ring buffer, and Linux pipe(2) was already feeding through
+  it. Routing Win32 through the same pool is one new syscall
+  + one new FsBackingKind variant.
+- **Rules out / defers:**
+  - Named pipes (`CreateNamedPipeW`, `ConnectNamedPipe`,
+    `WaitNamedPipe`) — no kernel-side namespace registered for
+    pipe names today; T6-04's `NamedKObjectFind` could be
+    adapted but the I/O side needs more work.
+  - Mailslots — analog of named pipes for one-shot messages.
+  - CreateProcess stdio redirection — gated on T6-03
+    (CreateProcess itself).
+  - `SetNamedPipeHandleState` and the rest of the named-pipe
+    surface — out of scope for v0.
+- **Revisit when:** a workload exercises one of the deferred
+  surfaces. Named pipes are the next logical add (extend
+  `FsBackingKind::Pipe` with a name-table back-pointer +
+  surface a SYS_WIN32_NAMED_PIPE_*).
+- **Related roadmap track(s):** T11-02 closed.
+
+---
+
+## 2026-05-10 — Socket loopback via pipe-pool routing (T3-01 + T14-03)
+
+- **Scope:** `kernel/net/socket.h`, `kernel/net/socket.cpp`,
+  `kernel/syscall/syscall.cpp`,
+  new `userland/apps/net_loopback_smoke/net_loopback_smoke.c`,
+  `userland/apps/build-smokes.sh`, `kernel/CMakeLists.txt`,
+  `kernel/proc/ring3_smoke.cpp`,
+  `wiki/reference/Roadmap.md`
+- **Commit:** this slice
+- **Decision:** TCP loopback (`connect(127.0.0.1:port)` →
+  listener bound to that port → matched accepted socket pair)
+  is implemented entirely on top of the kernel's existing pipe
+  pool (the same one Linux pipe(2) and Win32 CreatePipe consume).
+  Two pipe pool slots make up a pair: a connector→server ring
+  and a server→connector ring. The on-wire TCP slot
+  (NetTcpActive + canned-reply) is bypassed when the destination
+  is loopback, so loopback works regardless of e1000 binding.
+  - New Socket fields: `loopback_paired`, `loopback_pipe_recv_idx`,
+    `loopback_pipe_send_idx`, `loopback_pending_accept_idx`,
+    `accept_wq`. The pending-accept slot is single-deep on the
+    listener (v0 backlog = 1).
+  - `SocketConnect` short-circuits when `peer_ip[0] == 127`:
+    finds a listener bound to `peer_port`, allocates the
+    accepted socket and the two pipe slots, wires both ends,
+    parks the accepted-socket idx on the listener's pending
+    slot, and wakes its accept_wq.
+  - `SocketAcceptLoopback` is a non-blocking probe — pops the
+    pending slot if present. The accept syscall handler in
+    `syscall.cpp` runs a unified poll loop that checks both the
+    loopback queue and the on-wire snapshot on every pass, so a
+    single accept() services either path.
+  - `SocketSendStream` / `SocketRecvStream` detect
+    `loopback_paired` and route through `PipeWrite` / `PipeRead`
+    on the per-end pipe slot; the pipe pool's existing
+    waitqueue + EPIPE/EOF semantics carry full TCP-shaped
+    blocking semantics for free.
+  - `SocketRelease` drops the per-end pipe refcounts (read on
+    one slot, write on the other). When both ends close, both
+    pipe slots tear down via the pipe pool's existing
+    refcount-on-zero free path.
+- **Why:** T3-01's acceptance ("A PE can socket / connect
+  127.0.0.1 / send / recv data in loopback") had been gated on
+  the on-wire TCP slot being usable, which it is in QEMU SLIRP
+  but not deterministically across boot. The pipe pool provides
+  exactly the bytes-in / bytes-out contract loopback needs and
+  we already rely on it (Linux pipe2, Win32 CreatePipe), so
+  routing socket loopback through the same primitive is one
+  small Socket extension + one new syscall-handler arm.
+- **Rules out / defers:**
+  - Multi-pending accept queue. The listener's pending slot is
+    single-deep — a second connector that races a not-yet-
+    accepted prior connector returns ECONNREFUSED. Bumping to
+    a small ring is mechanical when a workload demands it.
+  - Listener fairness across cross-port connectors. A connector
+    matches the FIRST listener whose `local_port == peer_port`
+    in pool-order; if a process binds two listeners on the same
+    port through SO_REUSEPORT (which v0 doesn't support anyway),
+    only the first one ever pairs.
+  - On-wire ←→ loopback dual mode. A listening socket can be
+    paired through loopback OR receive on-wire connections, but
+    not both simultaneously: the accept syscall handler is
+    unified but the listener's bookkeeping isn't. Real Win32
+    listen() services both; v0 favours loopback when present
+    and falls back to on-wire only if loopback isn't pending.
+- **Revisit when:** a workload exercises one of the deferred
+  paths (multi-connector burst, dual-mode listener).
+- **Related roadmap track(s):** T3-01 + T14-03 closed (Track 3
+  + Track 14 fully closed).

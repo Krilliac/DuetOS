@@ -1700,41 +1700,10 @@ __declspec(dllexport) BOOL DeleteTimerQueue(HANDLE q)
     return 1;
 }
 
-/* CreateWaitableTimerW — sentinel; immediate signal on wait if the
- * relative due-time is "very soon". The smoke test uses 100 ms
- * which is short enough that returning a pre-signaled event-style
- * handle works in single-thread tests. We reuse the manual-reset
- * Event slot machinery via an actual SYS_HANDLE_CREATE_EVENT call. */
-__declspec(dllexport) HANDLE CreateWaitableTimerW(void* sa, BOOL manualReset, const WCHAR_t* name)
-{
-    (void)sa;
-    (void)name;
-    /* Allocate via SYS_HANDLE_CREATE_EVENT (manual, signaled). */
-    long long h;
-    __asm__ volatile("int $0x80"
-                     : "=a"(h)
-                     : "a"((long long)33),                                      /* SYS_HANDLE_CREATE_EVENT */
-                       "D"((long long)(manualReset ? 1 : 0)), "S"((long long)1) /* initially signaled */
-                     : "memory");
-    return (HANDLE)h;
-}
-
-__declspec(dllexport) BOOL SetWaitableTimer(HANDLE t, void* due, long period, void* completion, void* arg, BOOL resume)
-{
-    (void)t;
-    (void)due;
-    (void)period;
-    (void)completion;
-    (void)arg;
-    (void)resume;
-    return 1;
-}
-
-__declspec(dllexport) BOOL CancelWaitableTimer(HANDLE t)
-{
-    (void)t;
-    return 1;
-}
+/* CreateWaitableTimerW / SetWaitableTimer / CancelWaitableTimer
+ * land below CreateThread (which the service-thread spawn depends
+ * on). See the comment block on the implementation for the v0
+ * polling-thread design. */
 
 /* WTSGetActiveConsoleSessionId stub — return 1. */
 __declspec(dllexport) DWORD WTSGetActiveConsoleSessionId(void)
@@ -2358,7 +2327,21 @@ __declspec(dllexport) HANDLE OpenProcess(DWORD access, BOOL inherit, DWORD pid)
     return (HANDLE)(long long)-1; /* current-process pseudo-handle */
 }
 
-/* CreatePipe — anonymous pipe. Single in-process buffered ring. */
+/* CreatePipe — anonymous cross-process pipe (T11-02).
+ *
+ * Routes through SYS_WIN32_CREATE_PIPE (186): the kernel
+ * allocates a pipe pool slot (the same pool the Linux pipe(2)
+ * syscall uses) and writes two Win32-shaped file handles back
+ * to the caller. ReadFile / WriteFile / CloseHandle on those
+ * handles dispatch by FsBackingKind through the file-route
+ * layer to PipeRead / PipeWrite / PipeReleaseRead / PipeReleaseWrite.
+ *
+ * The legacy in-process ring (DUETOS_PIPE_RD / DUETOS_PIPE_WR
+ * sentinels) is kept as a fallback for callers that hit the
+ * kernel-side OOM path — the kernel's pipe pool is fixed at
+ * 16 slots, and a workload that allocates 17 pipes still gets
+ * a (process-local, non-cross-process) ring rather than a
+ * NULL handle. */
 typedef struct
 {
     unsigned char buf[4096];
@@ -2376,6 +2359,25 @@ __declspec(dllexport) BOOL CreatePipe(HANDLE* rd, HANDLE* wr, void* sa, DWORD sz
     (void)sz;
     if (rd == (HANDLE*)0 || wr == (HANDLE*)0)
         return 0;
+    /* SYS_WIN32_CREATE_PIPE = 186. Returns 0 on success with
+     * both handles written to the user pointers; non-zero on
+     * pool / table full. */
+    unsigned long long read_h = 0;
+    unsigned long long write_h = 0;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)186), "D"((long long)&read_h), "S"((long long)&write_h)
+                     : "memory");
+    if (rv == 0 && read_h != 0 && write_h != 0)
+    {
+        *rd = (HANDLE)(UINT_PTR)read_h;
+        *wr = (HANDLE)(UINT_PTR)write_h;
+        return 1;
+    }
+    /* Kernel-side allocation failed — fall back to the in-process
+     * ring. Loses cross-process semantics but keeps existing
+     * single-process callers working. */
     g_pipe.head = 0;
     g_pipe.tail = 0;
     g_pipe.in_use = 1;
@@ -3294,6 +3296,25 @@ static void win32_name_w_to_a(const WCHAR_t* w, char* dst)
     dst[i] = 0;
 }
 
+/* SYS_NAMED_KOBJ_OPEN_OR_CREATE = 185. type: 0=mutex, 1=event,
+ * 2=semaphore. open_only=1 for the Open* family (fail with -1
+ * if no existing entry); 0 for the Create* family. Returns the
+ * type-biased handle on success, (long long)-1 on failure. */
+static long long win32_named_kobj_call(unsigned int type, const char* name, unsigned long long init, int open_only)
+{
+    long long rv;
+    register long long r10 __asm__("r10") = (long long)init;
+    register long long r8 __asm__("r8") = (long long)open_only;
+    /* Pass the maximum cap (64) as length cap so the kernel
+     * walks at most 64 bytes — bounded by the user's NUL. */
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)185), "D"((long long)type), "S"((long long)name), "d"((long long)WIN32_NAME_LEN),
+                       "r"(r10), "r"(r8)
+                     : "memory");
+    return rv;
+}
+
 __declspec(dllexport) HANDLE CreateMutexW(void* sec, BOOL bInitialOwner, const WCHAR_t* name)
 {
     (void)sec;
@@ -3301,9 +3322,18 @@ __declspec(dllexport) HANDLE CreateMutexW(void* sec, BOOL bInitialOwner, const W
     win32_name_w_to_a(name, a_name);
     if (a_name[0] != 0)
     {
-        HANDLE existing = win32_named_lookup(WIN32_NAME_KIND_MUTEX, a_name);
-        if (existing)
-            return existing;
+        /* Named — route through the kernel-resident namespace
+         * (T6-04). Two processes opening the same name see the
+         * same kernel object. */
+        long long rv = win32_named_kobj_call(0 /*mutex*/, a_name, (unsigned long long)bInitialOwner, 0);
+        if (rv != -1)
+        {
+            win32_named_register(WIN32_NAME_KIND_MUTEX, a_name, (HANDLE)rv);
+            return (HANDLE)rv;
+        }
+        /* Kernel-side dedup failed (table full / OOM) — fall
+         * through to the unnamed create path so the caller
+         * still gets a usable handle. */
     }
     long long rv;
     __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)25), "D"((long long)bInitialOwner) : "memory");
@@ -3318,9 +3348,12 @@ __declspec(dllexport) HANDLE CreateMutexA(void* sec, BOOL bInitialOwner, const c
     (void)sec;
     if (name && name[0] != 0)
     {
-        HANDLE existing = win32_named_lookup(WIN32_NAME_KIND_MUTEX, name);
-        if (existing)
-            return existing;
+        long long rv = win32_named_kobj_call(0 /*mutex*/, name, (unsigned long long)bInitialOwner, 0);
+        if (rv != -1)
+        {
+            win32_named_register(WIN32_NAME_KIND_MUTEX, name, (HANDLE)rv);
+            return (HANDLE)rv;
+        }
     }
     long long rv;
     __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)25), "D"((long long)bInitialOwner) : "memory");
@@ -3330,7 +3363,7 @@ __declspec(dllexport) HANDLE CreateMutexA(void* sec, BOOL bInitialOwner, const c
     return h;
 }
 
-/* OpenMutexA/W — look up in the process-local name table.
+/* OpenMutexA/W — look up the kernel-resident named-object table.
  * dwDesiredAccess + bInheritHandle are accepted but not enforced;
  * v0 doesn't track per-handle access masks. Returns NULL with
  * ERROR_FILE_NOT_FOUND-equivalent semantics on miss. */
@@ -3338,7 +3371,17 @@ __declspec(dllexport) HANDLE OpenMutexA(DWORD dwDesiredAccess, BOOL bInheritHand
 {
     (void)dwDesiredAccess;
     (void)bInheritHandle;
-    return win32_named_lookup(WIN32_NAME_KIND_MUTEX, name);
+    if (!name || name[0] == 0)
+        return (HANDLE)0;
+    /* Process-local cache hit short-circuits the syscall. */
+    HANDLE local = win32_named_lookup(WIN32_NAME_KIND_MUTEX, name);
+    if (local)
+        return local;
+    long long rv = win32_named_kobj_call(0 /*mutex*/, name, 0, 1 /*open_only*/);
+    if (rv == -1)
+        return (HANDLE)0;
+    win32_named_register(WIN32_NAME_KIND_MUTEX, name, (HANDLE)rv);
+    return (HANDLE)rv;
 }
 
 __declspec(dllexport) HANDLE OpenMutexW(DWORD dwDesiredAccess, BOOL bInheritHandle, const WCHAR_t* name)
@@ -3347,7 +3390,16 @@ __declspec(dllexport) HANDLE OpenMutexW(DWORD dwDesiredAccess, BOOL bInheritHand
     (void)bInheritHandle;
     char a_name[WIN32_NAME_LEN];
     win32_name_w_to_a(name, a_name);
-    return win32_named_lookup(WIN32_NAME_KIND_MUTEX, a_name);
+    if (a_name[0] == 0)
+        return (HANDLE)0;
+    HANDLE local = win32_named_lookup(WIN32_NAME_KIND_MUTEX, a_name);
+    if (local)
+        return local;
+    long long rv = win32_named_kobj_call(0 /*mutex*/, a_name, 0, 1 /*open_only*/);
+    if (rv == -1)
+        return (HANDLE)0;
+    win32_named_register(WIN32_NAME_KIND_MUTEX, a_name, (HANDLE)rv);
+    return (HANDLE)rv;
 }
 
 __declspec(dllexport) BOOL ReleaseMutex(HANDLE h)
@@ -3364,9 +3416,13 @@ __declspec(dllexport) HANDLE CreateEventW(void* sec, BOOL bManualReset, BOOL bIn
     win32_name_w_to_a(name, a_name);
     if (a_name[0] != 0)
     {
-        HANDLE existing = win32_named_lookup(WIN32_NAME_KIND_EVENT, a_name);
-        if (existing)
-            return existing;
+        unsigned long long init = (unsigned long long)((bManualReset ? 1 : 0) | (bInitialState ? 2 : 0));
+        long long rv = win32_named_kobj_call(1 /*event*/, a_name, init, 0);
+        if (rv != -1)
+        {
+            win32_named_register(WIN32_NAME_KIND_EVENT, a_name, (HANDLE)rv);
+            return (HANDLE)rv;
+        }
     }
     long long rv;
     __asm__ volatile("int $0x80"
@@ -3384,9 +3440,13 @@ __declspec(dllexport) HANDLE CreateEventA(void* sec, BOOL bManualReset, BOOL bIn
     (void)sec;
     if (name && name[0] != 0)
     {
-        HANDLE existing = win32_named_lookup(WIN32_NAME_KIND_EVENT, name);
-        if (existing)
-            return existing;
+        unsigned long long init = (unsigned long long)((bManualReset ? 1 : 0) | (bInitialState ? 2 : 0));
+        long long rv = win32_named_kobj_call(1 /*event*/, name, init, 0);
+        if (rv != -1)
+        {
+            win32_named_register(WIN32_NAME_KIND_EVENT, name, (HANDLE)rv);
+            return (HANDLE)rv;
+        }
     }
     long long rv;
     __asm__ volatile("int $0x80"
@@ -3403,7 +3463,16 @@ __declspec(dllexport) HANDLE OpenEventA(DWORD dwDesiredAccess, BOOL bInheritHand
 {
     (void)dwDesiredAccess;
     (void)bInheritHandle;
-    return win32_named_lookup(WIN32_NAME_KIND_EVENT, name);
+    if (!name || name[0] == 0)
+        return (HANDLE)0;
+    HANDLE local = win32_named_lookup(WIN32_NAME_KIND_EVENT, name);
+    if (local)
+        return local;
+    long long rv = win32_named_kobj_call(1 /*event*/, name, 0, 1 /*open_only*/);
+    if (rv == -1)
+        return (HANDLE)0;
+    win32_named_register(WIN32_NAME_KIND_EVENT, name, (HANDLE)rv);
+    return (HANDLE)rv;
 }
 
 __declspec(dllexport) HANDLE OpenEventW(DWORD dwDesiredAccess, BOOL bInheritHandle, const WCHAR_t* name)
@@ -3412,7 +3481,16 @@ __declspec(dllexport) HANDLE OpenEventW(DWORD dwDesiredAccess, BOOL bInheritHand
     (void)bInheritHandle;
     char a_name[WIN32_NAME_LEN];
     win32_name_w_to_a(name, a_name);
-    return win32_named_lookup(WIN32_NAME_KIND_EVENT, a_name);
+    if (a_name[0] == 0)
+        return (HANDLE)0;
+    HANDLE local = win32_named_lookup(WIN32_NAME_KIND_EVENT, a_name);
+    if (local)
+        return local;
+    long long rv = win32_named_kobj_call(1 /*event*/, a_name, 0, 1 /*open_only*/);
+    if (rv == -1)
+        return (HANDLE)0;
+    win32_named_register(WIN32_NAME_KIND_EVENT, a_name, (HANDLE)rv);
+    return (HANDLE)rv;
 }
 
 __declspec(dllexport) BOOL SetEvent(HANDLE h)
@@ -3436,9 +3514,14 @@ __declspec(dllexport) HANDLE CreateSemaphoreW(void* sec, long initial, long maxi
     win32_name_w_to_a(name, a_name);
     if (a_name[0] != 0)
     {
-        HANDLE existing = win32_named_lookup(WIN32_NAME_KIND_SEM, a_name);
-        if (existing)
-            return existing;
+        unsigned long long init =
+            ((unsigned long long)(unsigned long)initial) | (((unsigned long long)(unsigned long)maximum) << 32);
+        long long rv = win32_named_kobj_call(2 /*sem*/, a_name, init, 0);
+        if (rv != -1)
+        {
+            win32_named_register(WIN32_NAME_KIND_SEM, a_name, (HANDLE)rv);
+            return (HANDLE)rv;
+        }
     }
     long long rv;
     __asm__ volatile("int $0x80"
@@ -3456,9 +3539,14 @@ __declspec(dllexport) HANDLE CreateSemaphoreA(void* sec, long initial, long maxi
     (void)sec;
     if (name && name[0] != 0)
     {
-        HANDLE existing = win32_named_lookup(WIN32_NAME_KIND_SEM, name);
-        if (existing)
-            return existing;
+        unsigned long long init =
+            ((unsigned long long)(unsigned long)initial) | (((unsigned long long)(unsigned long)maximum) << 32);
+        long long rv = win32_named_kobj_call(2 /*sem*/, name, init, 0);
+        if (rv != -1)
+        {
+            win32_named_register(WIN32_NAME_KIND_SEM, name, (HANDLE)rv);
+            return (HANDLE)rv;
+        }
     }
     long long rv;
     __asm__ volatile("int $0x80"
@@ -3475,7 +3563,16 @@ __declspec(dllexport) HANDLE OpenSemaphoreA(DWORD dwDesiredAccess, BOOL bInherit
 {
     (void)dwDesiredAccess;
     (void)bInheritHandle;
-    return win32_named_lookup(WIN32_NAME_KIND_SEM, name);
+    if (!name || name[0] == 0)
+        return (HANDLE)0;
+    HANDLE local = win32_named_lookup(WIN32_NAME_KIND_SEM, name);
+    if (local)
+        return local;
+    long long rv = win32_named_kobj_call(2 /*sem*/, name, 0, 1 /*open_only*/);
+    if (rv == -1)
+        return (HANDLE)0;
+    win32_named_register(WIN32_NAME_KIND_SEM, name, (HANDLE)rv);
+    return (HANDLE)rv;
 }
 
 __declspec(dllexport) HANDLE OpenSemaphoreW(DWORD dwDesiredAccess, BOOL bInheritHandle, const WCHAR_t* name)
@@ -3484,7 +3581,16 @@ __declspec(dllexport) HANDLE OpenSemaphoreW(DWORD dwDesiredAccess, BOOL bInherit
     (void)bInheritHandle;
     char a_name[WIN32_NAME_LEN];
     win32_name_w_to_a(name, a_name);
-    return win32_named_lookup(WIN32_NAME_KIND_SEM, a_name);
+    if (a_name[0] == 0)
+        return (HANDLE)0;
+    HANDLE local = win32_named_lookup(WIN32_NAME_KIND_SEM, a_name);
+    if (local)
+        return local;
+    long long rv = win32_named_kobj_call(2 /*sem*/, a_name, 0, 1 /*open_only*/);
+    if (rv == -1)
+        return (HANDLE)0;
+    win32_named_register(WIN32_NAME_KIND_SEM, a_name, (HANDLE)rv);
+    return (HANDLE)rv;
 }
 
 __declspec(dllexport) BOOL ReleaseSemaphore(HANDLE h, long releaseCount, long* lpPreviousCount)
@@ -3684,10 +3790,7 @@ __declspec(dllexport) DWORD SleepEx(DWORD dwMilliseconds, BOOL bAlertable)
     {
         /* Non-alertable Sleep — single SYS_SLEEP syscall. */
         long long discard;
-        __asm__ volatile("int $0x80"
-                         : "=a"(discard)
-                         : "a"((long long)19), "D"((long long)dwMilliseconds)
-                         : "memory");
+        __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)19), "D"((long long)dwMilliseconds) : "memory");
         return 0;
     }
     /* Alertable: chunk into 10ms slices, polling the APC queue
@@ -3706,10 +3809,7 @@ __declspec(dllexport) DWORD SleepEx(DWORD dwMilliseconds, BOOL bAlertable)
         if (dwMilliseconds != 0xFFFFFFFFu && remaining < kSliceMs)
             chunk = remaining;
         long long discard;
-        __asm__ volatile("int $0x80"
-                         : "=a"(discard)
-                         : "a"((long long)19), "D"((long long)chunk)
-                         : "memory");
+        __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)19), "D"((long long)chunk) : "memory");
         if (dwMilliseconds != 0xFFFFFFFFu)
         {
             if (remaining <= chunk)
@@ -3971,6 +4071,184 @@ __declspec(dllexport) DWORD ResumeThread(HANDLE hThread)
      * immediately. Return 0 (= "thread was not previously
      * suspended"), matching the flat stub's behaviour. */
     return 0;
+}
+
+/* Waitable-timer v0. CreateWaitableTimerW allocates a manual-reset
+ * Event in the unsignaled state and reserves a slot in the per-process
+ * timer table. SetWaitableTimer records the absolute due time (and
+ * period for periodic timers), then resets the event. A single
+ * lazily-spawned service thread polls the table every 10 ms and calls
+ * SetEvent on any timer whose due time has arrived. CancelWaitableTimer
+ * marks the slot inactive without touching the event signal state.
+ *
+ * Out of scope:
+ *   - APC completion routines (the `completion`/`arg` parameters are
+ *     accepted but never invoked — needs cross-thread APC delivery,
+ *     Track 8-02).
+ *   - Resume from suspend (`fResume == TRUE` is silently ignored —
+ *     ACPI S3 not implemented).
+ *   - Sub-10ms resolution. The polling cadence is the floor.
+ */
+typedef struct
+{
+    HANDLE event_handle;
+    unsigned long long due_ms;    /* absolute boot-relative ms */
+    unsigned long long period_ms; /* 0 = single-shot */
+    int active;
+} DUETOS_WTIMER_SLOT;
+#define DUETOS_WTIMER_MAX 16
+static DUETOS_WTIMER_SLOT g_wtimers[DUETOS_WTIMER_MAX];
+static volatile int g_wtimer_thread_started = 0;
+
+static int wtimer_find_slot(HANDLE h)
+{
+    for (int i = 0; i < DUETOS_WTIMER_MAX; ++i)
+    {
+        if (g_wtimers[i].event_handle == h)
+            return i;
+    }
+    return -1;
+}
+
+static int wtimer_alloc_slot(HANDLE h)
+{
+    for (int i = 0; i < DUETOS_WTIMER_MAX; ++i)
+    {
+        if (g_wtimers[i].event_handle == (HANDLE)0)
+        {
+            g_wtimers[i].event_handle = h;
+            g_wtimers[i].due_ms = 0;
+            g_wtimers[i].period_ms = 0;
+            g_wtimers[i].active = 0;
+            return i;
+        }
+    }
+    return -1;
+}
+
+static DWORD wtimer_service_thread(void* arg)
+{
+    (void)arg;
+    /* Poll every 10 ms — same cadence as the kernel scheduler tick.
+     * Sub-tick resolution would just spin the CPU without delivering
+     * a finer signal. */
+    for (;;)
+    {
+        ULONGLONG now = GetTickCount64();
+        for (int i = 0; i < DUETOS_WTIMER_MAX; ++i)
+        {
+            if (g_wtimers[i].active && now >= g_wtimers[i].due_ms)
+            {
+                SetEvent(g_wtimers[i].event_handle);
+                if (g_wtimers[i].period_ms > 0)
+                {
+                    /* Re-arm: bump due_ms by period so a slow service
+                     * pass that misses several intervals catches up
+                     * by firing once at the next quantum rather than
+                     * burst-firing every missed interval. */
+                    g_wtimers[i].due_ms = now + g_wtimers[i].period_ms;
+                }
+                else
+                {
+                    g_wtimers[i].active = 0;
+                }
+            }
+        }
+        Sleep(10);
+    }
+    return 0;
+}
+
+static void wtimer_ensure_service(void)
+{
+    /* Single-flag race is acceptable: spawning two service threads
+     * by accident still produces correct behaviour (both threads see
+     * the same table); the only cost is one extra thread of memory.
+     * A real CompareAndSwap would be overkill for this case. */
+    if (g_wtimer_thread_started)
+        return;
+    g_wtimer_thread_started = 1;
+    DWORD tid = 0;
+    HANDLE h = CreateThread((void*)0, 0, wtimer_service_thread, (void*)0, 0, &tid);
+    (void)h;
+}
+
+__declspec(dllexport) HANDLE CreateWaitableTimerW(void* sa, BOOL manualReset, const WCHAR_t* name)
+{
+    (void)sa;
+    (void)name;
+    /* Allocate via SYS_HANDLE_CREATE_EVENT (caller-chosen reset
+     * mode, INITIALLY UNSIGNALED — flips signaled when the timer
+     * fires). */
+    long long h;
+    __asm__ volatile("int $0x80"
+                     : "=a"(h)
+                     : "a"((long long)33),                                      /* SYS_HANDLE_CREATE_EVENT */
+                       "D"((long long)(manualReset ? 1 : 0)), "S"((long long)0) /* initially unsignaled */
+                     : "memory");
+    if (h == 0)
+        return (HANDLE)0;
+    int slot = wtimer_alloc_slot((HANDLE)h);
+    if (slot < 0)
+    {
+        /* Out of slots — return failure. The event is leaked, but
+         * the leak is bounded by DUETOS_WTIMER_MAX failures. */
+        return (HANDLE)0;
+    }
+    return (HANDLE)h;
+}
+
+__declspec(dllexport) HANDLE CreateWaitableTimerA(void* sa, BOOL manualReset, const char* name)
+{
+    (void)name;
+    return CreateWaitableTimerW(sa, manualReset, (const WCHAR_t*)0);
+}
+
+__declspec(dllexport) BOOL SetWaitableTimer(HANDLE t, void* due, long period, void* completion, void* arg, BOOL resume)
+{
+    (void)completion; /* APC completion routines: GAP — Track 8-02 */
+    (void)arg;
+    (void)resume; /* fResume: GAP — ACPI S3 not implemented */
+    if (t == (HANDLE)0 || due == (void*)0)
+        return 0;
+    int slot = wtimer_find_slot(t);
+    if (slot < 0)
+        return 0;
+    /* due is a LARGE_INTEGER*: positive => absolute FILETIME (100-ns
+     * units since 1601), negative => relative 100-ns intervals from
+     * now. v0 only supports the relative form (the absolute form
+     * needs a FILETIME → boot-relative-ms conversion that depends on
+     * the system time being set, which v0 doesn't yet do). */
+    long long lq = *(long long*)due;
+    unsigned long long delay_ms;
+    if (lq < 0)
+    {
+        /* -lq is relative 100-ns intervals → ms */
+        delay_ms = (unsigned long long)(-lq) / 10000ULL;
+    }
+    else
+    {
+        /* Absolute FILETIME — no conversion table; treat as "fire
+         * immediately" so callers don't hang forever. */
+        delay_ms = 0;
+    }
+    ResetEvent(t);
+    g_wtimers[slot].due_ms = GetTickCount64() + delay_ms;
+    g_wtimers[slot].period_ms = (period > 0) ? (unsigned long long)period : 0;
+    g_wtimers[slot].active = 1;
+    wtimer_ensure_service();
+    return 1;
+}
+
+__declspec(dllexport) BOOL CancelWaitableTimer(HANDLE t)
+{
+    if (t == (HANDLE)0)
+        return 0;
+    int slot = wtimer_find_slot(t);
+    if (slot < 0)
+        return 0;
+    g_wtimers[slot].active = 0;
+    return 1;
 }
 
 __declspec(dllexport) BOOL GetExitCodeThread(HANDLE hThread, DWORD* lpExitCode)

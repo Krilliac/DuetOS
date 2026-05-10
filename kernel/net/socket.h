@@ -94,9 +94,34 @@ struct Socket
     // socket can't read connection state.
     u32 tcp_owner_token; // 0 = doesn't own; >0 = pool idx + 1
 
+    // Loopback short-circuit (T3-01). When a connect() targets
+    // 127.x.x.x and a listener is bound to the requested port,
+    // both ends are paired through two kernel pipe pool slots
+    // (one ring per direction). Send/recv on a paired socket
+    // bypass the on-wire TCP stack entirely.
+    //
+    //   loopback_paired         — true iff this socket is a
+    //                             loopback pair endpoint.
+    //   loopback_pipe_recv_idx  — pipe pool idx this end reads
+    //                             from (peer writes into).
+    //   loopback_pipe_send_idx  — pipe pool idx this end writes
+    //                             to (peer reads from).
+    //   loopback_pending_accept_idx — listener-only: index of an
+    //                             accepted socket pending pickup
+    //                             via SocketAccept. -1 = no pending
+    //                             connection.
+    bool loopback_paired;
+    i32 loopback_pipe_recv_idx;
+    i32 loopback_pipe_send_idx;
+    i32 loopback_pending_accept_idx;
+
     // Blocking primitives — readers wait on this when the queue /
     // TCP state isn't ready; writers / RX paths wake it.
     sched::WaitQueue read_wq;
+    // Listener-only — accept() blocks here when no pending
+    // connection is queued; SocketConnect's loopback path wakes
+    // it after wiring the pair.
+    sched::WaitQueue accept_wq;
 };
 
 /// Allocate a fresh socket (refs = 1). Returns pool index or -1 on
@@ -134,6 +159,15 @@ bool SocketConnect(u32 idx, Ipv4Address peer_ip, u16 peer_port);
 /// caller must already have called SocketBind. backlog parameter
 /// stored but unused.
 bool SocketListen(u32 idx, u32 backlog);
+
+/// Non-blocking probe of the listener's loopback accept queue.
+/// Returns the accepted socket's pool index when a paired
+/// connector is pending (T3-01 loopback path), -1 otherwise.
+/// Callers compose this with their own poll/yield loop to block;
+/// the accept syscall handler does this so a single accept()
+/// services both loopback and on-wire arrivals without an
+/// explicit dispatch.
+i32 SocketAcceptLoopback(u32 listener_idx, Ipv4Address* out_peer_ip, u16* out_peer_port);
 
 /// SOCK_DGRAM send. Builds + transmits an IPv4 UDP datagram via
 /// stack.cpp::NetUdpSend; if dst_ip / dst_port are zero, falls

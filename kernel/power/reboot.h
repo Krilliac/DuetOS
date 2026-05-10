@@ -25,11 +25,16 @@ namespace duetos::core
 
 [[noreturn]] void KernelReboot();
 
-// GAP: ACPI S5 / soft-off not yet implemented — no AML interpreter,
-// no _PTS / _GTS evaluation. KernelHalt logs a sentinel and parks
-// the boot CPU in `arch::Halt()`. The chipset stays powered; the
-// VM operator (or the user) is expected to cut power. Replace
-// when AML support lands.
+// KernelHalt — ACPI S5 soft-off path. Tries `acpi::AcpiShutdown()`
+// first (parses AML `\_S5_` from DSDT/SSDT for the SLP_TYP value
+// and writes `(SLP_TYP << 10) | SLP_EN` to PM1A/PM1B). On hardware
+// where the AML extractor or PM1 block is unavailable, falls
+// through to QEMU-known shutdown ports, then masks interrupts and
+// parks the boot CPU. Real hardware that needs `_PTS` / `_GTS`
+// method execution to drive the chipset to soft-off may stay
+// powered (the AML interpreter parses Names, not Methods); the
+// happy path covers QEMU and most consumer firmware that
+// pre-evaluates `_PTS` to a no-op.
 [[noreturn]] void KernelHalt();
 
 } // namespace duetos::core

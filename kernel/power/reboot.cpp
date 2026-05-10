@@ -89,11 +89,39 @@ void SpinShortDelay()
 
 [[noreturn]] void KernelHalt()
 {
-    // GAP: no ACPI S5 path — see header. Without AML we can't
-    // evaluate _PTS / _S5_ to drive the chipset to soft-off, so
-    // we log the request, mask interrupts, and park the CPU.
-    FIX_NOTE_GAP("power/reboot.cpp:KernelHalt", "implement ACPI S5 via AML _PTS/_S5_");
-    Log(LogLevel::Warn, "core/halt", "shutdown requested (no ACPI S5; CPU halted)");
+    Log(LogLevel::Warn, "core/halt", "shutdown requested — trying ACPI S5");
+
+    // 1. ACPI S5 via the AML _S5_ extractor + PM1A/PM1B write.
+    //    AcpiShutdown returns false on missing `\_S5`, missing PM1
+    //    block, or any AML-shape deviation; on success the chipset
+    //    has already been told to soft-off and we shouldn't reach
+    //    the next line. If we DO reach it, fall through to the
+    //    QEMU-known shutdown ports.
+    if (acpi::AcpiShutdown())
+    {
+        SpinShortDelay();
+    }
+
+    // 2. QEMU-specific shutdown ports. Some platforms wire the
+    //    PM1A control register at 0x604 (q35), 0xB004 (piix), or
+    //    0x4004; others surface a debug-exit at 0x501. Writing
+    //    SLP_TYP=5 + SLP_EN=1 = 0x2000 to the PM1A register tells
+    //    the chipset model to soft-off. Reaches the chipset on
+    //    QEMU even when the FADT didn't carry a usable PM1A
+    //    address (some old machine types ship pm1a_cnt_blk=0).
+    Log(LogLevel::Warn, "core/halt", "trying QEMU shutdown ports (0x604 / 0xB004 / 0x4004)");
+    arch::Outw(0x604, 0x2000);
+    SpinShortDelay();
+    arch::Outw(0xB004, 0x2000);
+    SpinShortDelay();
+    arch::Outw(0x4004, 0x3400);
+    SpinShortDelay();
+
+    // 3. Last resort — mask interrupts and park the CPU. The
+    //    chipset stays powered; the operator (or VM `quit`) cuts
+    //    power. Documented fallback for hardware that needs
+    //    `_PTS` / `_GTS` method execution we don't run yet.
+    Log(LogLevel::Warn, "core/halt", "all shutdown paths failed — CPU halted");
     asm volatile("cli");
     for (;;)
     {

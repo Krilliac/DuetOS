@@ -85,6 +85,8 @@
 #include "subsystems/win32/thread_syscall.h"
 #include "subsystems/win32/mutex_syscall.h"
 #include "subsystems/win32/event_syscall.h"
+#include "subsystems/win32/named_kobj_syscall.h"
+#include "subsystems/win32/pipe_syscall.h"
 #include "subsystems/win32/semaphore_syscall.h"
 #include "subsystems/win32/dir_syscall.h"
 #include "subsystems/win32/iocp_job.h"
@@ -798,6 +800,12 @@ void SyscallDispatch(arch::TrapFrame* frame)
         frame->rax = 0;
         return;
     }
+    case SYS_NAMED_KOBJ_OPEN_OR_CREATE:
+        ::duetos::subsystems::win32::DoNamedKObjOpenOrCreate(frame);
+        return;
+    case SYS_WIN32_CREATE_PIPE:
+        ::duetos::subsystems::win32::DoWin32CreatePipe(frame);
+        return;
     case SYS_NOW_NS:
         DoNowNs(frame);
         return;
@@ -1566,15 +1574,38 @@ void SyscallDispatch(arch::TrapFrame* frame)
             break;
         case kSockOpAccept:
         {
-            // Polling-style accept (matches Linux ABI shape).
             const u32 listen_idx = static_cast<u32>(frame->rsi);
+            ::duetos::net::Ipv4Address peer_ip;
+            u16 peer_port;
+            // Unified poll loop — checks the loopback queue (T3-01)
+            // and the on-wire active-connect snapshot on every
+            // pass. The yield ensures we don't pin the CPU; the
+            // loop terminates when EITHER path provides a
+            // connection.
+            i32 lb_accepted = -1;
+            bool wire_ready = false;
             while (true)
             {
+                lb_accepted = ::duetos::net::SocketAcceptLoopback(listen_idx, &peer_ip, &peer_port);
+                if (lb_accepted >= 0)
+                    break;
                 const auto snap = ::duetos::net::NetTcpActiveSnapshot();
                 if (snap.in_use && snap.response_len > 0)
+                {
+                    wire_ready = true;
                     break;
+                }
                 sched::SchedYield();
             }
+            if (lb_accepted >= 0)
+            {
+                (void)write_sa(frame->rdx, frame->r10, peer_ip, peer_port);
+                rv = static_cast<i64>(lb_accepted);
+                break;
+            }
+            (void)wire_ready;
+            // On-wire fallback — same shape as before the loopback
+            // path landed.
             const i32 new_idx =
                 ::duetos::net::SocketAlloc(::duetos::net::kSocketDomainInet, ::duetos::net::kSocketTypeStream);
             if (new_idx < 0)
@@ -1582,8 +1613,6 @@ void SyscallDispatch(arch::TrapFrame* frame)
                 rv = -23;
                 break;
             }
-            ::duetos::net::Ipv4Address peer_ip;
-            u16 peer_port;
             ::duetos::net::SocketGetPeer(listen_idx, &peer_ip, &peer_port);
             ::duetos::net::SocketConnect(static_cast<u32>(new_idx), peer_ip, peer_port);
             (void)write_sa(frame->rdx, frame->r10, peer_ip, peer_port);
@@ -1719,6 +1748,57 @@ void SyscallDispatch(arch::TrapFrame* frame)
             const u32 be = (u32(dns.ip.octets[0])) | (u32(dns.ip.octets[1]) << 8) | (u32(dns.ip.octets[2]) << 16) |
                            (u32(dns.ip.octets[3]) << 24);
             if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rdx), &be, sizeof(be)))
+            {
+                rv = -14;
+                break;
+            }
+            rv = 0;
+            break;
+        }
+        case kSockOpGetLease:
+        {
+            // Snapshot the kernel's DHCP lease state into the
+            // user-supplied SocketLeaseInfo buffer (40 bytes).
+            // See syscall.h for the field layout.
+            struct SocketLeaseInfo
+            {
+                u32 valid;
+                u32 ip_be;
+                u32 netmask_be;
+                u32 gateway_be;
+                u32 dns_be;
+                u32 lease_seconds;
+                u8 mac[6];
+                u8 iface_index;
+                u8 reserved0;
+                u8 reserved1[8];
+            };
+            static_assert(sizeof(SocketLeaseInfo) == 40, "SocketLeaseInfo must be 40 bytes");
+            const u64 cap = frame->rdx;
+            if (cap < sizeof(SocketLeaseInfo))
+            {
+                rv = -34; // ERANGE
+                break;
+            }
+            SocketLeaseInfo info{};
+            const auto lease = ::duetos::net::DhcpLeaseRead();
+            info.valid = lease.valid ? 1u : 0u;
+            const auto pack_be = [](const ::duetos::net::Ipv4Address& a) -> u32 {
+                return (u32(a.octets[0])) | (u32(a.octets[1]) << 8) | (u32(a.octets[2]) << 16) |
+                       (u32(a.octets[3]) << 24);
+            };
+            info.ip_be = pack_be(lease.ip);
+            info.gateway_be = pack_be(lease.router);
+            info.dns_be = pack_be(lease.dns);
+            info.lease_seconds = lease.lease_secs;
+            // No netmask in DhcpLease; default to /24 when valid so
+            // iphlpapi consumers don't see a 0.0.0.0 mask.
+            info.netmask_be = lease.valid ? 0x00FFFFFFu : 0u; // 255.255.255.0 in network byte order
+            info.iface_index = 0;
+            const auto mac = ::duetos::net::InterfaceMac(0);
+            for (u32 i = 0; i < 6; ++i)
+                info.mac[i] = mac.octets[i];
+            if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rsi), &info, sizeof(info)))
             {
                 rv = -14;
                 break;

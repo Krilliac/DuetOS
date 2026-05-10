@@ -13,9 +13,18 @@
 namespace duetos::subsystems::linux::internal
 {
 
-// Pipe pool — read/write/release. PipeAlloc lives inside
-// syscall_pipe.cpp because only DoPipe2 calls it; the cross-
-// TU surface is just the per-end ops.
+// PipeAlloc — claim a fresh pipe pool slot. Initialises both
+// refcounts to 1 (one for the read end, one for the write end)
+// so the caller can hand each end off to its own fd / handle
+// table without further refcount bumps. Returns the pool index
+// (>= 0) on success, -1 on full / OOM.
+i32 PipeAlloc();
+
+// Pipe pool — read/write/release. PipeAlloc is the cross-TU
+// allocator (used by both Linux DoPipe2 and Win32 CreatePipe);
+// the per-end ops are the cross-TU surface so DoRead / DoWrite /
+// DoClose in sibling TUs can dispatch on state without depending
+// on the pool internals.
 i64 PipeRead(u32 idx, u64 user_dst, u64 len);
 i64 PipeWrite(u32 idx, u64 user_src, u64 len);
 void PipeReleaseRead(u32 idx);

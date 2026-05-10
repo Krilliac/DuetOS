@@ -107,6 +107,54 @@ in `widget.{h,cpp}`. The dispatcher fans out:
 The kernel's mouse loop clamps `|dz| <= 8` per packet to defang
 fast-wheel runaway and recomposes after each dispatch.
 
+## Window Chrome Interactions
+
+The kernel mouse-reader (`kernel/core/main.cpp`) owns every
+non-client-area gesture; PE and native windows go through the same
+path. On a press inside a window:
+
+- **Close glyph hit** → `WindowClose(h)` (with the Notes
+  dirty-close prompt routed through `MessageBoxOpen` for the
+  Notes role).
+- **Maximise glyph hit** → toggles `WindowMaximize` ↔
+  `WindowRestore`. The pre-maximize bounds are snapshotted into
+  `g_windows[h].saved_*` so Restore returns to the exact
+  press-time geometry.
+- **Minimise glyph hit** → `WindowMinimize(h)` (the window stops
+  composing; the taskbar tile shows the minimised state and a
+  tile-click restores).
+- **Title-bar press (no glyph hit)** → arms the move-drag with
+  `(grab_offset_x, grab_offset_y) = (cx − wx, cy − wy)`; subsequent
+  motion packets call `WindowMoveTo(h, cx − grab_x, cy − grab_y)`.
+  Title-bar **double-click** (within `WindowDoubleClickTicks()`,
+  same hwnd) toggles maximise ↔ restore and consumes the second
+  click so a fast triple-click doesn't fire a third toggle.
+- **Resize-band press (4 px from any edge / corner)** → see
+  [Window Edge + Corner Resize](#window-edge--corner-resize).
+
+Keyboard shortcuts for the same operations:
+
+| Shortcut | Effect |
+|---|---|
+| `Alt+F4` | Close active (Notes prompts on dirty buffer) |
+| `Ctrl+Alt+Left` | Snap-left half (`WindowSnapLeft`) |
+| `Ctrl+Alt+Right` | Snap-right half (`WindowSnapRight`) |
+| `Ctrl+Alt+Up` | Maximise active |
+| `Ctrl+Alt+Down` | Restore (if maximised) or minimise |
+
+The system menu (NC right-click on the title bar) routes Move /
+Size through `ModalInputBegin` so the cursor follows the press
+delta until the next click commits or Esc cancels (`drivers/video/
+modal_input.{h,cpp}`). Min / Max / Restore / Close items in the
+system menu and the enriched window menu (right-click on a kernel-
+app body) all reach `WindowMinimize` / `WindowMaximize` /
+`WindowRestore` / `WindowClose` directly.
+
+A click anywhere inside an inactive window calls `WindowRaise`
+before the press is dispatched so Z-order tracks the click in
+addition to explicit `BringWindowToTop` / `SetForegroundWindow`
+syscalls.
+
 ## Double-Click
 
 Press-edge double-click detection lives in
@@ -333,8 +381,6 @@ Action-id allocation:
 - **Per-window message queues**: `GetMessage` / `PeekMessage` return
   `WM_QUIT` for unhandled paths so event-driven programs exit their
   pump immediately.
-- **Keyboard / mouse routing to the focused window**: input still
-  goes to the native console even when a Win32 PE is focused.
 - **Submenu marshaling across `SYS_WIN_TRACK_POPUP`**: GAP. PE
   apps that need nested menus call `TrackPopupMenu` recursively
   from their `WM_COMMAND` handler.
@@ -357,9 +403,6 @@ Action-id allocation:
 - **Audio feedback / system sounds**: gated on HDA codec
   programming (Roadmap.md). PC speaker exists but is not
   wired to any UI event.
-- **PE `SetCursor` ABI**: gated on a new `SYS_GDI_*` syscall.
-  Native windows can change cursor shape via `CursorSetShape`,
-  but PE apps have no equivalent.
 - **Settings GUIs (Display / Sound / Keyboard / Mouse /
   Date-Time)**: each is its own slice per CLAUDE.md.
 - **Trash / ramfs mode in Files**: only FAT32 mode has a v0

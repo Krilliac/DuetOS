@@ -210,6 +210,7 @@
 #include "ipc/kobject.h"
 #include "ipc/ksemaphore.h"
 #include "ipc/kwaitable.h"
+#include "ipc/named_kobjects.h"
 #include "sync/lockdep.h"
 #include "sync/rcu.h"
 #include "sync/rwlock.h"
@@ -2724,6 +2725,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::ipc::KMailboxSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::ipc::KWaitableSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::ipc::KFileSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::ipc::NamedKObjectSelfTest());
     // Linux fd-table helper self-test (Linux fd → KFile
     // migration). Exercises LinuxFdAllocLowest / AttachKFile /
     // Dup / SetCloexec / CloseOnExec / Close on a stand-in
@@ -3086,6 +3088,44 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             duetos::drivers::video::WindowInputTrackKey(static_cast<duetos::u16>(ev.code), !ev.is_release);
             if (ev.is_release || ev.code == kKeyNone)
             {
+                // PE-routed key release. The press / char branch
+                // below is skipped for releases (the legacy reader
+                // contract is "press only"), but a focused PE that
+                // tracks WM_KEYUP / WM_SYSKEYUP — game input,
+                // shortcut handlers, anything that distinguishes
+                // hold-vs-tap — needs the release edge too. Modifier-
+                // only transitions (kKeyNone) carry no VK so they
+                // skip; modifier state itself is already tracked via
+                // WindowInputTrackKey above.
+                if (ev.is_release && ev.code != kKeyNone)
+                {
+                    duetos::drivers::video::CompositorLock();
+                    const auto active_pe = duetos::drivers::video::WindowActive();
+                    const duetos::u64 pe_pid = (active_pe != duetos::drivers::video::kWindowInvalid)
+                                                   ? duetos::drivers::video::WindowOwnerPid(active_pe)
+                                                   : 0;
+                    if (pe_pid > 0)
+                    {
+                        // lParam layout for KEYUP: bit 30 (previous
+                        // state) = 1, bit 31 (transition state) = 1,
+                        // bit 29 = Alt context (mirrors WM_KEYDOWN).
+                        // Repeat count (bits 0..15) is always 1 for
+                        // releases — auto-repeat collapses on press.
+                        constexpr duetos::u32 kWmKeyUp = 0x0101;
+                        constexpr duetos::u32 kWmSysKeyUp = 0x0105;
+                        const bool alt_held = (ev.modifiers & kKeyModAlt) != 0;
+                        const duetos::u64 lp_base = 1ull | (1ull << 30) | (1ull << 31);
+                        const duetos::u64 lp = alt_held ? (lp_base | (1ull << 29)) : lp_base;
+                        const duetos::u32 keyup_msg = alt_held ? kWmSysKeyUp : kWmKeyUp;
+                        duetos::drivers::video::WindowPostMessage(active_pe, keyup_msg, ev.code, lp);
+                        duetos::drivers::video::CompositorUnlock();
+                        duetos::drivers::video::WindowMsgWakeAll();
+                    }
+                    else
+                    {
+                        duetos::drivers::video::CompositorUnlock();
+                    }
+                }
                 continue;
             }
             const bool alt = (ev.modifiers & kKeyModAlt) != 0;

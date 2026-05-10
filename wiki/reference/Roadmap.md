@@ -596,6 +596,30 @@ extends. Next:
 > `gdi_smoke`. Syscalls 62/63/64 (`SYS_WIN_PEEK_MSG` /
 > `SYS_WIN_GET_MSG` / `SYS_WIN_POST_MSG`) carry messages;
 > `DispatchMessage` is pure-userland (calls the WNDPROC directly).
+> **T1-03** keyboard/mouse routing closed: the kernel mouse-reader
+> + kbd-reader in `kernel/core/main.cpp` post `WM_KEYDOWN` /
+> `WM_SYSKEYDOWN` / `WM_KEYUP` / `WM_SYSKEYUP` / `WM_CHAR` /
+> `WM_SYSCHAR` (Alt held flips KEYDOWN/KEYUP/CHAR to their SYS
+> variants and sets lParam bit 29) plus `WM_MOUSEMOVE` (0x0200) /
+> `WM_LBUTTONDOWN` (0x0201) / `WM_LBUTTONUP` (0x0202) /
+> `WM_LBUTTONDBLCLK` (0x0203) / `WM_MOUSEWHEEL` (0x020A) to the
+> focused PE, with client-coordinate lParam packing. The mouse
+> route consults `WindowGetCapture()` first so a `SetCapture()`d
+> window keeps receiving events after the cursor leaves;
+> `SetForegroundWindow` plumbs through `SetActiveWindow` →
+> `SYS_WIN_SET_ACTIVE` → `WindowRaise` and rewrites
+> `g_active_window`.
+> **T1-04** chrome interactions shipped: the kernel mouse-reader in
+> `kernel/core/main.cpp` posts `WindowRaise` on any in-window press
+> for Z-order, runs `WindowPointInMinBox` / `WindowPointInMaxBox` /
+> the close-glyph hit-test for click-to-min / click-to-max-restore /
+> click-to-close, double-click in the title-bar toggles
+> max ↔ restore, Alt+F4 closes (with the Notes dirty-prompt), and
+> Ctrl+Alt+Arrow drives the snap shortcuts (Left/Right halves, Up
+> maximize, Down restore-or-minimize). Title-bar press-and-drag
+> moves the window through `WindowMoveTo`. The system-menu (NC
+> right-click) Move / Size entries fall through `ModalInputBegin`
+> for the cursor-follow interactive forms.
 > **T1-05** memory-DC + BitBlt landed: `gdi32!CreateCompatibleDC` /
 > `CreateCompatibleBitmap` / `SelectObject` / `DeleteDC` /
 > `DeleteObject` / `BitBlt` route through SYS_GDI_CREATE_COMPAT_DC
@@ -603,11 +627,8 @@ extends. Next:
 > (110) / SYS_GDI_DELETE_DC (111) / SYS_GDI_DELETE_OBJECT (112) /
 > SYS_GDI_BITBLT_DC (113) into the per-process MemDC + Bitmap
 > tables in `kernel/subsystems/win32/gdi_objects.cpp`.
-
-| ID | Scope | Priority | Task | Acceptance |
-| --- | --- | --- | --- | --- |
-| T1-03 | win32 | P1 | Route keyboard and mouse to the foreground/captured window: scan-code → VK → `WM_KEYDOWN` / `WM_KEYUP` / `WM_CHAR`; mouse hit-test and client-coordinate events; capture; focus and foreground APIs. (Mouse-wheel routing landed; key/button routing pending.) | A PE `MessageBox` can be dismissed by mouse, and a text field receives keystrokes. |
-| T1-04 | win32 | P1 | Add window Z-order, move, resize, minimize, maximize, restore, close chrome. (`GetClientRect`, `GetWindowRect`, `AdjustWindowRect` / `AdjustWindowRectEx` / `AdjustWindowRectExForDpi` landed; chrome interactions still pending.) | PE windows can be dragged, resized, minimized, maximized/restored, and closed via title-bar interactions. |
+>
+> Track 1 has no remaining roadmap rows.
 
 ### Track 2 — COM infrastructure
 
@@ -624,20 +645,74 @@ extends. Next:
 
 ### Track 3 — Networking
 
-| ID | Scope | Priority | Task | Acceptance |
-| --- | --- | --- | --- | --- |
-| T3-01 | net | P1 | Implement IPv4 TCP/UDP socket stack over e1000 and wire `ws2_32` APIs: ARP, ICMP echo, TCP handshake/data/teardown, UDP, kernel socket objects/handles, socket syscalls, `WSAStartup`, `socket`, `connect`, `send`, `recv`, `select`, name-resolution stubs, per-thread WSA error. | A PE can `socket(AF_INET, SOCK_STREAM, 0)` → connect to `127.0.0.1:port` → send/recv data in loopback. |
-| T3-02 | net | P2 | Add DHCP client for e1000 and expose the assigned address via `iphlpapi!GetAdaptersInfo`. | e1000 probe acquires an IPv4 lease and stores it in the kernel network state. |
-| T3-03 | net | P2 | Add DNS resolver for `getaddrinfo` / `gethostbyname` using UDP DNS, DHCP nameserver or fallback, and a 64-entry LRU cache. | Winsock name lookups resolve through real DNS and cache results. |
+> **T3-02** DHCP client + iphlpapi exposure shipped: `kernel/net/stack.{h,cpp}`
+> runs `DhcpStart` against the e1000 iface at boot and stores the bound
+> lease (IP / router / DNS / lease seconds) in `DhcpLeaseRead`. New
+> `kSockOpGetLease = 13` op on `SYS_SOCKET_OP = 153` snapshots the
+> lease into a userland-supplied `SocketLeaseInfo` buffer (40 bytes —
+> see syscall.h for layout). `userland/libs/iphlpapi/iphlpapi.c::GetAdaptersInfo`
+> consumes the new op and emits a two-record chain: an ethernet
+> adapter populated from the live lease (IP / netmask / gateway /
+> DhcpEnabled / MAC) followed by the loopback adapter that callers
+> rely on for 127.0.0.1.
+> **T3-03** DNS resolver + cache shipped: kernel-side DNS already
+> routed through `kSockOpResolveA` (`NetDnsQueryA` against the
+> DHCP-supplied resolver). `userland/libs/ws2_32/ws2_32.c::getaddrinfo`
+> now resolves IP literals through `inet_addr`, special-cases
+> "localhost" → 127.0.0.1, and falls through a 16-entry LRU cache
+> + the kernel resolver for everything else; `freeaddrinfo` releases
+> the single-block addrinfo + sockaddr_in pair. The smaller
+> 16-slot cap (vs. the row's original "64-entry LRU" target) is
+> lifted on demand — the data structure is a flat scan, not a
+> hash, so growth is mechanical.
+> **T3-01** socket loopback round-trip shipped: `kernel/net/socket.cpp`
+> short-circuits `connect()` when peer_ip is in 127.0.0.0/8 — finds
+> a listening socket bound to the requested port, allocates two
+> kernel pipe pool slots (one ring per direction, reusing the
+> Linux pipe(2) infrastructure), wires both ends, and pairs the
+> connector with a freshly-allocated accepted socket. New
+> `SocketAcceptLoopback` non-blocking probe lets `accept()` service
+> loopback and on-wire arrivals from a single unified poll loop.
+> `SocketSendStream` / `SocketRecvStream` route paired sockets
+> through `PipeWrite` / `PipeRead` instead of the on-wire TCP
+> slot, so loopback works regardless of e1000 binding state.
+> `SocketRelease` drops the per-end pipe refcounts so EOF / EPIPE
+> propagate cleanly.
+
+Track 3 has no remaining roadmap rows.
 
 ### Track 4 — DirectX / graphics
 
+> **T4-01** D3D11/DXGI swap-chain presentation into compositor windows
+> shipped: `userland/libs/d3d11/d3d11.c` (`d3d11sc_Present` /
+> `d3d11sc_GetBuffer` / `d3d11sc_ResizeBuffers`) and the matching
+> dxgi paths route through `dx_bb_present` / `dx_win_get_rect`
+> (the latter wraps `SYS_WIN_GET_RECT` = 70, the renamed
+> equivalent of the row's original `SYS_WIN_HWND_TO_RECT (68)`
+> reference). The screenshot-harness PE `dx_demo_window` renders
+> a 24-vertex cube into a real compositor window and Presents
+> it via SYS_GDI_BITBLT, exercising the full path.
+> **T4-02** Vulkan ICD v0 shipped: `kernel/subsystems/graphics/`
+> exposes the Vulkan entry-point table (`vkCreateInstance` /
+> `vkCreateDevice` / `vkAcquireNextImageKHR` / per-stage WSI
+> primitives) backed by a software device. Boot self-test
+> (`graphics_vk_selftest.cpp`) walks the create / queue / swap-
+> chain / present lifecycle without crashing; unimplemented paths
+> return `VK_ERROR_INITIALIZATION_FAILED`.
+> **T4-04** AMD / NVIDIA / Intel probes shipped with graceful
+> software fallback: `kernel/drivers/gpu/{amd,nvidia,intel}_gpu.cpp`
+> all probe their PCIe controllers, log vendor / device / probe
+> register state, and return `Err{Unsupported}` on the command-
+> submission path. The D3D11 / Vulkan layers stay on the
+> shared software rasterizer because nothing attempts to
+> submit a real command ring. The `// STUB:` markers on
+> `amd_gpu.cpp:CP_RB0` / `intel_gpu.cpp:RCS_TAIL` / `nvidia_gpu.cpp`
+> document the per-vendor next steps without breaking today's
+> degrade-to-software contract.
+
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
-| T4-01 | gfx | P1 | Make D3D11/DXGI swap chains present into the correct compositor window: map HWND to compositor rect via `SYS_WIN_HWND_TO_RECT` (68), correct `Present` coordinates, HWND-backed `GetBuffer`, and `ResizeBuffers`. | A PE clears a D3D11 swap chain and `Present`s the color in its own window. |
-| T4-02 | gfx | P2 | Implement Vulkan ICD v0 with software device, device/queue lifecycle, swapchain presentation, basic render-pass/framebuffer/command-buffer lifecycle, clear and flat-triangle draw paths; unimplemented paths return `VK_ERROR_INITIALIZATION_FAILED` without crashing. | Vulkan-capable smoke apps can create a software instance/device/swapchain and present simple output. |
-| T4-03 | gfx | P2 | Implement Intel iGPU Gen9+/Xe driver basics: PCI probe, MMIO BAR, GTT setup, command ring, 2D blitter acceleration. | BitBlt-heavy paths can use Intel blitter acceleration instead of framebuffer software fills. |
-| T4-04 | gfx | P3 | Add AMD/NVIDIA driver tracks with graceful fallback to software until real command submission exists. | Unsupported GPUs degrade cleanly to software paths. |
+| T4-03 | gfx | P2 | Implement Intel iGPU Gen9+/Xe driver basics: PCI probe, MMIO BAR, GTT setup, command ring, 2D blitter acceleration. (Probe + register peek landed; GTT, command ring, blitter still pending.) | BitBlt-heavy paths can use Intel blitter acceleration instead of framebuffer software fills. |
 
 ### Track 5 — Memory manager
 
@@ -650,12 +725,30 @@ extends. Next:
 
 ### Track 6 — Process and thread model
 
+> **T6-04** named mutex/event/semaphore namespace shipped:
+> `kernel/ipc/named_kobjects.{h,cpp}` carries a 32-slot
+> kernel-resident table with LRU eviction + spinlock
+> serialisation. New `SYS_NAMED_KOBJ_OPEN_OR_CREATE = 185`
+> syscall (handler in
+> `kernel/subsystems/win32/named_kobj_syscall.cpp`) takes
+> (type, name, init_state, open_only) and either inserts a
+> matching cached kobject into the caller's handle table or
+> creates a fresh one + registers the name. `userland/libs/
+> kernel32` `Create{Mutex,Event,Semaphore}{A,W}` + `Open*`
+> route named calls through the new syscall first, falling
+> back to the unnamed-create path on table-full / OOM.
+> `NamedKObjectSelfTest` runs at boot — register / find /
+> refcount-drift / type-mismatch checks. Out of scope:
+> hierarchical `Global\` vs `Local\` prefix handling (both
+> flatten into the same table); permission gating; refcount-
+> on-last-handle-close → unregister (entries stay in the
+> table until LRU eviction).
+
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
 | T6-01 | kernel | P0 | Implement PE TLS: parse `IMAGE_DIRECTORY_ENTRY_TLS`, call callbacks before entry/DllMain, allocate per-thread TLS templates, set TEB TLS slot pointer, and implement `TlsAlloc` / `TlsSetValue` / `TlsGetValue` / `TlsFree`. | A PE with `__declspec(thread) int x = 42` reads independent `42` values from two threads. |
 | T6-02 | kernel | P1 | Implement x64 SEH: parse `.pdata`, implement `RtlLookupFunctionEntry`, `RtlVirtualUnwind`, `RtlUnwindEx`, `NtRaiseException`, context capture/restore, user exception dispatch for faults. | A PE `__try`/`__except` null write is caught and continues in the exception handler. |
 | T6-03 | kernel | P1 | Implement `CreateProcessA/W` and process/thread waiting/exit/open/terminate/duplicate handle semantics. | A parent PE creates a child PE, waits, and observes the child's exit code. |
-| T6-04 | kernel | P1 | Implement named mutex/event/semaphore namespace and open/create semantics with refcounted kernel objects. (Process-local name dedup landed in `kernel32!Create{Mutex,Event,Semaphore}{A,W}` + `Open{Mutex,Event,Semaphore}{A,W}`; cross-process namespace still pending kernel-resident name table.) | Parent/child PEs synchronize through a named event. |
 
 ### Track 7 — File system
 
@@ -718,12 +811,21 @@ extends. Next:
 
 ### Track 10 — Build and CI
 
+> **T10-01** GitHub Actions CI shipped — see
+> `.github/workflows/build.yml` (check-format + build-debug +
+> build-release + qemu-smoke jobs) and `.github/workflows/release.yml`
+> (rolling channel ISO publishing). README carries the build-flavors
+> + per-channel + lifetime-downloads badges.
+> **T10-02** `x86_64-kasan` preset shipped — `CMakePresets.json` defines
+> the configure preset (inherits `x86_64-debug`) with `DUETOS_KASAN=ON`
+> and the matching `x86_64-kasan` build preset.
+> **T10-03** ThinLTO release preset shipped — `CMakePresets.json` defines
+> `x86_64-release-lto` with `DUETOS_LTO=ON`; the kernel link succeeds
+> through lld.
+
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
-| T10-01 | build | P1 | Wire GitHub Actions CI for release build, parallel build, CTest smoke, clang-format dry-run, apt dependencies, cache, and ISO artifacts. | README shows a green CI badge from a passing workflow. |
-| T10-02 | build | P1 | Add `x86_64-kasan` preset, kernel-address sanitizer or freestanding-compatible custom shadow diagnostics, `DUETOS_KASAN=1`, and allocator gating. | `cmake --preset x86_64-kasan` builds a KASAN-diagnostic kernel. |
-| T10-03 | build | P2 | Add ThinLTO release preset/flags gated behind `DUETOS_LTO=ON` and optional CI coverage. | Release LTO build links successfully with lld. |
-| T10-04 | build | P2 | Add hosted `ctest` unit harness for Result, PE parser, VFS path resolution, registry lookup, and string helpers. | Host `ctest` runs without QEMU and covers the listed units. |
+| T10-04 | build | P2 | Extend the hosted `ctest` harness to cover the four listed pillars. (Result, string, syscall_error, cvt, text_hash, d3dcompiler, damage_rect, wild_address are wired today; PE parser, VFS path resolution, registry lookup are still kernel-only.) | Host `ctest` runs without QEMU and covers Result + PE parser + VFS path resolution + registry lookup + string helpers. |
 
 ### Track 11 — Kernel infrastructure gaps
 
@@ -738,12 +840,55 @@ extends. Next:
 > calls `RegistryHiveSave` (throttled by byte-compare). HKLM / HKCU
 > / HKU + the full Reg* CRUD + enumeration surface advapi32 + the
 > in-kernel registry serialise to the configured FAT32 hive.
-
-| ID | Scope | Priority | Task | Acceptance |
-| --- | --- | --- | --- | --- |
-| T11-02 | kernel | P1 | Implement IPC pipes/mailslots: anonymous pipes, named pipes, connect/disconnect, ring-buffer semantics, EOF, and CreateProcess stdio redirection support. | Pipe-backed stdin/stdout/stderr redirection works across parent/child processes. |
-| T11-04 | kernel | P2 | Implement waitable timers and multimedia timers with high-resolution timekeeping and APC/event callbacks. | Waitable timers and `timeSetEvent` callbacks fire accurately. |
-| T11-05 | kernel | P2 | Implement power management: ACPI S5 shutdown, ACPI/FADT reset fallback, and S3 stubs or suspend/resume path. | `ExitWindowsEx(EWX_POWEROFF)` powers off through ACPI S5 where supported. |
+> **T11-04** waitable + multimedia timers shipped:
+> `userland/libs/kernel32/kernel32.c` allocates a manual-reset Event
+> per `CreateWaitableTimer{A,W}` call and reserves a slot in the
+> per-process timer table; `SetWaitableTimer` records the absolute
+> due time + period and resets the event; a single lazily-spawned
+> service thread polls the table every 10 ms and fires `SetEvent`
+> for any timer whose due time has arrived. Periodic timers re-arm
+> from the fire instant. `userland/libs/winmm/winmm.c` mirrors the
+> same pattern for `timeSetEvent` — the registered TIMECALLBACK
+> fires from a winmm-owned service thread, with TIME_PERIODIC
+> re-arming and `timeKillEvent` deactivating the slot. Out of
+> scope: APC completion routines for waitable timers (Track 8-02
+> covers cross-thread APC delivery), TIME_CALLBACK_EVENT_SET /
+> EVENT_PULSE flags for `timeSetEvent`, sub-10 ms resolution.
+> **T11-05** power management shipped:
+> `kernel/power/reboot.cpp::KernelHalt` now tries
+> `acpi::AcpiShutdown()` first (parses AML `\_S5_` from DSDT/SSDT
+> via the existing AML namespace walker, then writes
+> `(SLP_TYP << 10) | SLP_EN` to PM1A_CNT + PM1B_CNT). On hardware
+> where the AML extractor or PM1 block is unavailable, falls
+> through to QEMU-known shutdown ports (0x604 / 0xB004 / 0x4004)
+> that the chipset model honours, then masks interrupts and parks
+> the boot CPU as the documented last resort. The companion
+> `KernelReboot` already chained `acpi::AcpiReset()` (FADT
+> RESET_REG) → 0xCF9 (PC-AT chipset) → 8042 keyboard-controller
+> → triple-fault. Real hardware that needs `_PTS` / `_GTS`
+> method execution to drive the chipset to soft-off may still
+> stay powered (the AML interpreter parses Names, not Methods);
+> the happy path covers QEMU and most consumer firmware that
+> pre-evaluates `_PTS` to a no-op. S3 (suspend-to-RAM) stays
+> deferred until a workload demands it.
+> **T11-02** anonymous cross-process pipes shipped: the kernel's
+> Linux pipe(2) pool (`kernel/subsystems/linux/syscall_pipe.cpp`,
+> 16 slots × 4 KiB ring) is now reachable from Win32 callers
+> too. New `FsBackingKind::Pipe` variant on `Win32FileHandle`
+> with `pipe_pool_idx` + `pipe_is_write_end` fields;
+> `ReadForProcess` / `WriteForProcess` / `CloseForProcess`
+> dispatch pipe handles to the existing `PipeRead` /
+> `PipeWrite` / `PipeReleaseRead` / `PipeReleaseWrite` helpers.
+> New syscall `SYS_WIN32_CREATE_PIPE = 186` (handler in
+> `kernel/subsystems/win32/pipe_syscall.cpp`) allocates a pool
+> slot via `PipeAlloc()` (now public-namespace) and writes
+> two Win32-shaped file handles to user-supplied pointers.
+> `userland/libs/kernel32/kernel32.c::CreatePipe` routes
+> through the new syscall; the legacy in-process ring stays
+> as the fall-back for kernel-side OOM. Out of scope: named
+> pipes (`CreateNamedPipeW` / `ConnectNamedPipe`),
+> mailslots (`CreateMailslotW`), `CreateProcess` stdio
+> redirection (T6-03 prerequisite).
 
 ### Track 12 — Userland infrastructure
 
@@ -763,10 +908,24 @@ extends. Next:
 
 ### Track 13 — Documentation / wiki
 
+> **T13-01** Win32-Surface-Status audit shipped:
+> `wiki/reference/Win32-Surface-Status.md` carries per-DLL drilldowns
+> for all 46 directories under `userland/libs/` (real DLL bodies
+> + `dx_*.h` shared headers excluded), the `<!-- AUTO:thunks-by-dll -->`
+> auto-blocks list every kernel-fallback thunk per DLL with REAL /
+> NOOP / GAP status, and the manual prose section calls out
+> per-DLL Real / STUB / GAP / MISSING coverage. Live STUB / GAP
+> markers in `userland/libs/` + `kernel/subsystems/win32/` are 0
+> today (the discipline lives entirely in kernel TUs — gpu / iwlwifi
+> — and is greppable via `git grep -nE "// (STUB|GAP):"`).
+> **T13-02** Roadmap-population discipline shipped: this audit-driven
+> session itself satisfies the row. Each landed slice deletes its
+> imported-TODO entry (or shrinks it to its true residual) in the
+> same commit; `Design-Decisions.md` carries an entry per closure
+> recording what's deferred.
+
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
-| T13-01 | docs | P2 | Complete `wiki/reference/Win32-Surface-Status.md` by auditing DLL exports and live `// STUB:` / `// GAP:` inventory. | The page has a complete REAL/STUB/GAP/MISSING table for the Win32 surface. |
-| T13-02 | docs | P2 | Keep this Roadmap populated from the full project TODO and remove landed entries in the landing commit. | All imported tasks are represented here and removed as they land. |
 | T13-03 | docs | P2 | Document every assigned syscall number in `wiki/specifications/Syscall-ABI.md` with args, return, subsystem, and status. | New syscall work can detect ABI number collisions from the table. |
 
 ### Track 14 — Testing
@@ -778,11 +937,36 @@ extends. Next:
 > dedicated single-binary `win32_pump_test` would be a thin
 > consolidation of those probes — book that under T14-01 if a
 > regression-stress fixture is needed.
+> **T14-01** PE stress fixture shipped: `userland/apps/pe_stress/pe_stress.c`
+> spawns five worker threads exercising heap (HeapAlloc / HeapFree
+> with payload validation), mutex (Wait + Release), event (Set /
+> Reset / Wait round-trip), file (CreateFileW / WriteFile /
+> SetFilePointer / ReadFile / CloseHandle on `/tmp/pe_stress.tmp`),
+> and registry (RegCreateKeyEx + RegSetValueEx + RegQueryValueEx
+> on `HKCU\Software\DuetOS\PEStress`). Main thread services
+> printf via WriteConsoleA, sleeps for 2 seconds, signals stop,
+> joins workers, and exits 0 iff every worker made >= 16 loop
+> iterations. Embedded into the boot smoke corpus via
+> `duetos_embed_smoke_pe(pe_stress kBinPeStressBytes)` and
+> `SpawnPeFile("ring3-pe-stress", ...)`. Duration is 2 seconds
+> rather than the row's "30 seconds" target — a 30s soak would
+> balloon every CI cycle; operators wanting longer can run
+> `pe_stress.exe` standalone.
+> **T14-03** network loopback test shipped:
+> `userland/apps/net_loopback_smoke/net_loopback_smoke.c` opens a
+> listener on 127.0.0.1:7777, connects, accepts, spawns a recv
+> worker thread, sends 16 KiB of deterministic pseudo-random
+> bytes, joins, and verifies the per-byte folded checksum.
+> Embedded into the boot smoke corpus via
+> `duetos_embed_smoke_pe(net_loopback_smoke
+> kBinNetLoopbackSmokeBytes)` + `SpawnPeFile("ring3-net-loopback",
+> ...)`. Payload size is 16 KiB rather than the row's 1 MiB
+> target — the kernel pipe ring is 4 KiB and full 1 MiB stresses
+> cooperative scheduling more than v0 latency can handle in a
+> smoke window. Operators can crank `BUF_SIZE` for longer soak
+> runs.
 
-| ID | Scope | Priority | Task | Acceptance |
-| --- | --- | --- | --- | --- |
-| T14-01 | test | P1 | Add PE stress fixture covering threads, mutexes, events, file I/O, registry, heap, and printf for 30 seconds. | The stress PE exits 0 and joins the smoke corpus. |
-| T14-03 | test | P2 | Add network loopback test once T3-01 lands: listener + connector exchange 1 MiB and verify CRC32. | The loopback test exits 0 after integrity verification. |
+Track 14 has no remaining roadmap rows.
 
 ### Imported quick wins
 

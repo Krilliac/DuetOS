@@ -1,4 +1,16 @@
-/* iphlpapi.dll — IP helper API. No network; all fail. */
+/* iphlpapi.dll — IP helper API.
+ *
+ * GetAdaptersInfo emits a chain of two IP_ADAPTER_INFO records:
+ *   1. Ethernet adapter (queried from the kernel's DHCP lease via
+ *      kSockOpGetLease op = 13 over SYS_SOCKET_OP = 153). When no
+ *      lease is bound the IP / mask / gateway fields show 0.0.0.0
+ *      but the record still appears so callers see a NIC entry.
+ *   2. Loopback adapter (127.0.0.1 / 255.0.0.0).
+ *
+ * GetAdaptersAddresses still reports ERROR_NO_DATA — the larger
+ * IP_ADAPTER_ADDRESSES layout has IPv6 prefix lists, dual-stack
+ * gateway chains, and per-adapter DNS that we don't track yet.
+ */
 typedef unsigned long DWORD;
 typedef unsigned long ULONG;
 typedef int BOOL;
@@ -7,6 +19,69 @@ typedef unsigned short wchar_t16;
 
 #define ERROR_NOT_SUPPORTED 50UL
 #define ERROR_NO_DATA 232UL
+
+typedef struct
+{
+    unsigned int valid;
+    unsigned int ip_be;
+    unsigned int netmask_be;
+    unsigned int gateway_be;
+    unsigned int dns_be;
+    unsigned int lease_seconds;
+    unsigned char mac[6];
+    unsigned char iface_index;
+    unsigned char reserved0;
+    unsigned char reserved1[8];
+} IPHLP_LEASE;
+
+static long long iphlp_sock_op(long long op, long long a1, long long a2, long long a3)
+{
+    long long rv;
+    __asm__ volatile("mov %4, %%r10\n\t"
+                     "xor %%r8, %%r8\n\t"
+                     "xor %%r9, %%r9\n\t"
+                     "int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)153), "D"(op), "S"(a1), "d"(a2), "r"(a3)
+                     : "r10", "r8", "r9", "memory");
+    return rv;
+}
+
+static int iphlp_get_lease(IPHLP_LEASE* out)
+{
+    long long rv = iphlp_sock_op(13 /* kSockOpGetLease */, 0, (long long)out, (long long)sizeof(*out));
+    return rv == 0 ? 1 : 0;
+}
+
+/* Format an IPv4 address (network byte order) into the caller's
+ * buffer as a NUL-terminated dotted-decimal string. */
+static void iphlp_format_ip(unsigned int be, char* out)
+{
+    int pos = 0;
+    for (int i = 0; i < 4; ++i)
+    {
+        unsigned int oct = (be >> (i * 8)) & 0xFFu;
+        if (oct >= 100)
+        {
+            out[pos++] = '0' + (char)(oct / 100);
+            oct %= 100;
+            out[pos++] = '0' + (char)(oct / 10);
+            out[pos++] = '0' + (char)(oct % 10);
+        }
+        else if (oct >= 10)
+        {
+            out[pos++] = '0' + (char)(oct / 10);
+            out[pos++] = '0' + (char)(oct % 10);
+        }
+        else
+        {
+            out[pos++] = '0' + (char)oct;
+        }
+        if (i != 3)
+            out[pos++] = '.';
+    }
+    out[pos] = '\0';
+}
 
 /* IP_ADAPTER_INFO layout (relevant fields, sized for v0):
  *   +0    Next pointer (8 bytes)
@@ -20,48 +95,78 @@ typedef unsigned short wchar_t16;
  *   +424  DhcpEnabled (UINT)
  *   +428  CurrentIpAddress (ptr)
  *   +436  IpAddressList (IP_ADDR_STRING: 4+16+16+4 = 40 bytes)
+ *   +476  GatewayList   (IP_ADDR_STRING)
  *   ... rest zero-filled
- * Real Windows reports a chain of all NICs; v0 reports a single
- * "DuetOS Loopback" entry so any caller that just gates on
- * "any adapter present" makes progress. */
+ */
 #define IPHLP_ADAPTER_INFO_SIZE 640
-__declspec(dllexport) DWORD GetAdaptersInfo(void* adapter_info, ULONG* out_buf_len)
+
+static void iphlp_zero(unsigned char* b, ULONG n)
 {
-    if (!out_buf_len)
-        return 87; /* ERROR_INVALID_PARAMETER */
-    ULONG needed = IPHLP_ADAPTER_INFO_SIZE;
-    if (!adapter_info || *out_buf_len < needed)
-    {
-        *out_buf_len = needed;
-        return 111; /* ERROR_BUFFER_OVERFLOW */
-    }
-    unsigned char* b = (unsigned char*)adapter_info;
-    for (ULONG i = 0; i < needed; ++i)
+    for (ULONG i = 0; i < n; ++i)
         b[i] = 0;
-    /* AdapterName at +12 = "Loopback" */
+}
+
+static void iphlp_fill_loopback(unsigned char* b)
+{
     static const char kName[] = "Loopback";
+    static const char kDesc[] = "DuetOS Loopback";
     for (int i = 0; kName[i]; ++i)
         b[12 + i] = (unsigned char)kName[i];
-    /* Description at +272 = "DuetOS Loopback" */
-    static const char kDesc[] = "DuetOS Loopback";
     for (int i = 0; kDesc[i]; ++i)
         b[272 + i] = (unsigned char)kDesc[i];
-    /* AddressLength at +404 = 6 (MAC). */
     b[404] = 6;
-    /* MAC at +408: 02:00:00:00:00:01 (locally administered). */
     b[408 + 0] = 0x02;
     b[408 + 5] = 0x01;
-    /* Index at +416 = 1. */
     b[416] = 1;
-    /* Type at +420 = MIB_IF_TYPE_LOOPBACK (24). */
-    b[420] = 24;
-    /* IpAddressList: IpAddress[16] = "127.0.0.1\0", IpMask[16] = "255.0.0.0\0". */
+    b[420] = 24; /* MIB_IF_TYPE_LOOPBACK */
     static const char kIp[] = "127.0.0.1";
     for (int i = 0; kIp[i]; ++i)
         b[436 + 8 + i] = (unsigned char)kIp[i];
     static const char kMask[] = "255.0.0.0";
     for (int i = 0; kMask[i]; ++i)
         b[436 + 8 + 16 + i] = (unsigned char)kMask[i];
+}
+
+static void iphlp_fill_ethernet(unsigned char* b, const IPHLP_LEASE* lease)
+{
+    static const char kName[] = "eth0";
+    static const char kDesc[] = "DuetOS Ethernet (e1000)";
+    for (int i = 0; kName[i]; ++i)
+        b[12 + i] = (unsigned char)kName[i];
+    for (int i = 0; kDesc[i]; ++i)
+        b[272 + i] = (unsigned char)kDesc[i];
+    b[404] = 6;
+    for (int i = 0; i < 6; ++i)
+        b[408 + i] = lease->mac[i];
+    b[416] = 0;
+    b[420] = 6;                             /* MIB_IF_TYPE_ETHERNET_CSMACD */
+    b[424] = (unsigned char)(lease->valid); /* DhcpEnabled */
+    iphlp_format_ip(lease->ip_be, (char*)(b + 436 + 8));
+    iphlp_format_ip(lease->netmask_be, (char*)(b + 436 + 8 + 16));
+    iphlp_format_ip(lease->gateway_be, (char*)(b + 476 + 8));
+}
+
+__declspec(dllexport) DWORD GetAdaptersInfo(void* adapter_info, ULONG* out_buf_len)
+{
+    if (!out_buf_len)
+        return 87; /* ERROR_INVALID_PARAMETER */
+    /* Two-record chain — ethernet + loopback. */
+    ULONG needed = IPHLP_ADAPTER_INFO_SIZE * 2;
+    if (!adapter_info || *out_buf_len < needed)
+    {
+        *out_buf_len = needed;
+        return 111; /* ERROR_BUFFER_OVERFLOW */
+    }
+    unsigned char* base = (unsigned char*)adapter_info;
+    iphlp_zero(base, needed);
+    IPHLP_LEASE lease = {0};
+    iphlp_get_lease(&lease);
+    iphlp_fill_ethernet(base, &lease);
+    unsigned char* second = base + IPHLP_ADAPTER_INFO_SIZE;
+    unsigned long long second_va = (unsigned long long)second;
+    for (int i = 0; i < 8; ++i)
+        base[i] = (unsigned char)((second_va >> (i * 8)) & 0xFFu);
+    iphlp_fill_loopback(second);
     *out_buf_len = needed;
     return 0;
 }

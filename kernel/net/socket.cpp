@@ -11,6 +11,7 @@
 #include "drivers/net/net.h"
 #include "log/klog.h"
 #include "mm/kheap.h"
+#include "subsystems/linux/syscall_pipe.h"
 
 namespace duetos::net
 {
@@ -120,8 +121,14 @@ i32 SocketAlloc(u16 domain, u16 type)
         s.udp_count = 0;
         s.udp_rx = rx;
         s.tcp_owner_token = 0;
+        s.loopback_paired = false;
+        s.loopback_pipe_recv_idx = -1;
+        s.loopback_pipe_send_idx = -1;
+        s.loopback_pending_accept_idx = -1;
         s.read_wq.head = nullptr;
         s.read_wq.tail = nullptr;
+        s.accept_wq.head = nullptr;
+        s.accept_wq.tail = nullptr;
         g_tcp_consumed[i] = 0;
         ++g_stats.allocs;
         arch::Sti();
@@ -159,8 +166,14 @@ void SocketRelease(u32 idx)
         return;
     }
     sched::WaitQueueWakeAll(&s.read_wq);
+    sched::WaitQueueWakeAll(&s.accept_wq);
     if (s.tcp_owner_token != 0 && g_tcp_owner == idx + 1)
         g_tcp_owner = 0;
+    // Loopback pair: drop the per-end pipe refcounts. The pipe pool
+    // tears the slot down when both refcounts hit zero, so the peer
+    // socket sees EOF / EPIPE as soon as IT releases too.
+    const i32 lb_recv = s.loopback_pipe_recv_idx;
+    const i32 lb_send = s.loopback_pipe_send_idx;
     SocketDgram* rx = s.udp_rx;
     s.in_use = false;
     s.refs = 0;
@@ -177,11 +190,19 @@ void SocketRelease(u32 idx)
     s.udp_tail = 0;
     s.udp_rx = nullptr;
     s.tcp_owner_token = 0;
+    s.loopback_paired = false;
+    s.loopback_pipe_recv_idx = -1;
+    s.loopback_pipe_send_idx = -1;
+    s.loopback_pending_accept_idx = -1;
     g_tcp_consumed[idx] = 0;
     ++g_stats.releases;
     arch::Sti();
     if (rx != nullptr)
         mm::KFree(rx);
+    if (lb_recv >= 0)
+        ::duetos::subsystems::linux::internal::PipeReleaseRead(static_cast<u32>(lb_recv));
+    if (lb_send >= 0)
+        ::duetos::subsystems::linux::internal::PipeReleaseWrite(static_cast<u32>(lb_send));
 }
 
 bool SocketAlive(u32 idx)
@@ -325,6 +346,94 @@ bool SocketConnect(u32 idx, Ipv4Address peer_ip, u16 peer_port)
         arch::Sti();
         return true;
     }
+    // SOCK_STREAM loopback short-circuit (T3-01). When the peer
+    // is in 127.0.0.0/8 and a listener is bound to the requested
+    // port, both ends pair through two kernel pipe pool slots
+    // (one ring per direction). Send/recv on a paired socket
+    // bypass the on-wire TCP stack entirely, so loopback works
+    // even when the e1000 path isn't bound.
+    const bool is_loopback_ip = (peer_ip.octets[0] == 127);
+    if (is_loopback_ip)
+    {
+        i32 listener_idx = -1;
+        for (u32 i = 0; i < kSocketPoolCap; ++i)
+        {
+            if (g_pool[i].in_use && g_pool[i].type == kSocketTypeStream && g_pool[i].listening &&
+                g_pool[i].local_port == peer_port)
+            {
+                listener_idx = static_cast<i32>(i);
+                break;
+            }
+        }
+        if (listener_idx < 0)
+        {
+            arch::Sti();
+            return false; // ECONNREFUSED equivalent
+        }
+        if (g_pool[listener_idx].loopback_pending_accept_idx != -1)
+        {
+            // A prior connector is still waiting for accept. v0
+            // single-slot accept queue. Caller can retry.
+            arch::Sti();
+            return false;
+        }
+        // Allocate the accepted-side socket BEFORE wiring pipes —
+        // pool exhaustion fails cleanly without leaking pipe
+        // entries.
+        arch::Sti();
+        const i32 accepted_idx = SocketAlloc(kSocketDomainInet, kSocketTypeStream);
+        if (accepted_idx < 0)
+            return false;
+        // Allocate two pipe pool slots — one A→B, one B→A. PipeAlloc
+        // returns each slot with read_refs=1 + write_refs=1, which
+        // is exactly the per-end ownership model we need (each side
+        // owns one read end and one write end).
+        const i32 c2s_pipe = ::duetos::subsystems::linux::internal::PipeAlloc();
+        if (c2s_pipe < 0)
+        {
+            SocketRelease(static_cast<u32>(accepted_idx));
+            return false;
+        }
+        const i32 s2c_pipe = ::duetos::subsystems::linux::internal::PipeAlloc();
+        if (s2c_pipe < 0)
+        {
+            ::duetos::subsystems::linux::internal::PipeReleaseRead(static_cast<u32>(c2s_pipe));
+            ::duetos::subsystems::linux::internal::PipeReleaseWrite(static_cast<u32>(c2s_pipe));
+            SocketRelease(static_cast<u32>(accepted_idx));
+            return false;
+        }
+        // Wire up. connector writes c2s_pipe → accepted reads it;
+        // accepted writes s2c_pipe → connector reads it.
+        arch::Cli();
+        Socket& cs = g_pool[idx];
+        Socket& as = g_pool[accepted_idx];
+        cs.peer_ip = peer_ip;
+        cs.peer_port = peer_port;
+        cs.connected = true;
+        cs.loopback_paired = true;
+        cs.loopback_pipe_send_idx = c2s_pipe;
+        cs.loopback_pipe_recv_idx = s2c_pipe;
+        as.local_ip = peer_ip;
+        as.local_port = peer_port;
+        as.bound = true;
+        // Accepted-side peer is the connector — no real IP today
+        // (the connector socket binds to an ephemeral local port
+        // only on demand). Use 127.0.0.1 / 0 as a stable sentinel.
+        Ipv4Address loopback_ip = {{127, 0, 0, 1}};
+        as.peer_ip = loopback_ip;
+        as.peer_port = 0;
+        as.connected = true;
+        as.loopback_paired = true;
+        as.loopback_pipe_send_idx = s2c_pipe;
+        as.loopback_pipe_recv_idx = c2s_pipe;
+        g_pool[listener_idx].loopback_pending_accept_idx = accepted_idx;
+        sched::WaitQueueWakeAll(&g_pool[listener_idx].accept_wq);
+        ++g_stats.connects;
+        arch::Sti();
+        KLOG_INFO_2V("net/socket", "SocketConnect: loopback paired", "idx", idx, "peer_port", peer_port);
+        return true;
+    }
+
     // SOCK_STREAM — claim the single-slot active-connect machine.
     // The single-slot active-connect machine may be in use by
     // another caller (kernel net-smoke probe, prior socket).
@@ -524,10 +633,25 @@ i64 SocketSendStream(u32 idx, const u8* data, u32 len)
         return -88;
     if ((s.shutdown_flags & 0x2) != 0)
         return -32;
-    if (!s.connected || s.tcp_owner_token == 0)
+    if (!s.connected)
         return -107;
     if (len == 0)
         return 0;
+    // Loopback short-circuit (T3-01): write to the per-pair pipe
+    // ring instead of the on-wire TCP slot. PipeWrite blocks on
+    // the wait-queue if the ring is full AND the peer hasn't
+    // closed its read end; returns 0 / -EPIPE if every reader has
+    // closed.
+    if (s.loopback_paired && s.loopback_pipe_send_idx >= 0)
+    {
+        const i64 wrote = ::duetos::subsystems::linux::internal::PipeWrite(static_cast<u32>(s.loopback_pipe_send_idx),
+                                                                           reinterpret_cast<u64>(data), len);
+        if (wrote > 0)
+            ++g_stats.stream_tx;
+        return wrote;
+    }
+    if (s.tcp_owner_token == 0)
+        return -107;
     // The stack waits until the SYN+ACK lands before flagging
     // Established. NetTcpActiveSend rejects pre-Established sends;
     // a caller that hammers send() during the handshake gets a
@@ -557,6 +681,18 @@ i64 SocketRecvStream(u32 idx, u8* out, u32 cap)
         return 0;
     if (!s.connected)
         return -107;
+    // Loopback short-circuit (T3-01): read from the per-pair pipe
+    // ring instead of the on-wire TCP slot. PipeRead blocks on
+    // the wait-queue if the ring is empty AND writers remain;
+    // returns 0 (EOF) when every writer has closed.
+    if (s.loopback_paired && s.loopback_pipe_recv_idx >= 0)
+    {
+        const i64 got = ::duetos::subsystems::linux::internal::PipeRead(static_cast<u32>(s.loopback_pipe_recv_idx),
+                                                                        reinterpret_cast<u64>(out), cap);
+        if (got > 0)
+            ++g_stats.stream_rx;
+        return got;
+    }
     while (true)
     {
         const TcpActiveSnapshot snap = NetTcpActiveSnapshot();
@@ -607,6 +743,40 @@ bool SocketShutdown(u32 idx, u32 how)
     sched::WaitQueueWakeAll(&s.read_wq);
     arch::Sti();
     return true;
+}
+
+i32 SocketAcceptLoopback(u32 listener_idx, Ipv4Address* out_peer_ip, u16* out_peer_port)
+{
+    // Non-blocking probe — returns -1 immediately when no
+    // connector is pending. Callers that want to block compose
+    // this with their own poll/yield loop (e.g. the accept
+    // syscall handler in syscall.cpp), which lets a single
+    // accept() service both the loopback and the on-wire paths
+    // without an explicit dispatch.
+    if (listener_idx >= kSocketPoolCap)
+        return -1;
+    arch::Cli();
+    Socket& l = g_pool[listener_idx];
+    if (!l.in_use || l.type != kSocketTypeStream || !l.listening || l.loopback_pending_accept_idx == -1)
+    {
+        arch::Sti();
+        return -1;
+    }
+    const i32 accepted = l.loopback_pending_accept_idx;
+    l.loopback_pending_accept_idx = -1;
+    Ipv4Address peer_ip = {{127, 0, 0, 1}};
+    u16 peer_port = 0;
+    if (accepted >= 0 && static_cast<u32>(accepted) < kSocketPoolCap)
+    {
+        peer_ip = g_pool[accepted].peer_ip;
+        peer_port = g_pool[accepted].peer_port;
+    }
+    arch::Sti();
+    if (out_peer_ip != nullptr)
+        *out_peer_ip = peer_ip;
+    if (out_peer_port != nullptr)
+        *out_peer_port = peer_port;
+    return accepted;
 }
 
 void SocketGetLocal(u32 idx, Ipv4Address* out_ip, u16* out_port)

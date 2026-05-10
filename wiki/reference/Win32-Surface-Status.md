@@ -53,13 +53,20 @@ When a slice ADDS a new DLL or new method:
 2. Surface it in the corresponding subsystem wiki page (`wiki/
    subsystems/Win32-DLLs.md` for shipping DLLs).
 
-## Summary counts (2026-05-04)
+## Summary counts (2026-05-10)
 
-- **Shipping DLLs:** 38 (Win32 user-mode + DirectX peripheral)
+- **Shipping DLLs:** 46 dirs in `userland/libs/` (Win32 user-mode +
+  DirectX peripheral). Two `dx_*.h` files in the same tree are
+  shared headers, not DLLs.
 - **Approximate exports:** ~1100 across all shipping DLLs
-- **Source LOC across `userland/libs/`:** ~38 000
-- **Live STUB / GAP markers** (`git grep -nE "// (STUB|GAP):"`): 4
-- **Win32 PE smoke coverage:** 127 PE smoke apps boot-tested per run
+- **Source LOC across `userland/libs/`:** ~40 000
+- **Live STUB / GAP markers** in user-mode + win32 subsystem
+  (`git grep -nE "// (STUB|GAP):" -- 'userland/libs/' 'kernel/subsystems/win32/'`): 0
+  — STUB/GAP discipline now lives entirely in kernel TUs (gpu,
+  iwlwifi, etc.). Userland DLL stubs are documented in this page
+  rather than via inline markers; see the per-DLL drilldown below.
+- **Win32 PE smoke coverage:** 143 fixtures in `userland/apps/`
+  boot-tested per run
 
 The marker count is a lower bound on known-stub paths — most stubs
 are inline (one-liners that return E_NOTIMPL or zero-fill an out
@@ -284,6 +291,14 @@ syscall routing shows up immediately.
   `Sleep`, `GetSystemTime`, `GetLocalTime`,
   `SystemTimeToFileTime`, `FileTimeToSystemTime`,
   `FileTimeToLocalFileTime`, `LocalFileTimeToFileTime`
+- Waitable timers: `CreateWaitableTimerA/W`,
+  `SetWaitableTimer`, `CancelWaitableTimer`. Per-process
+  16-slot table + lazily-spawned 10 ms polling service
+  thread fires `SetEvent` when due_time arrives;
+  `TIME_PERIODIC`-equivalent timers re-arm. APC completion
+  routines (the `pfnCompletionRoutine` parameter) accepted
+  but not invoked — Track 8-02 covers cross-thread APC
+  delivery. `CreateWaitableTimerExW` still NOOP.
 - Module: `LoadLibraryA/W`, `LoadLibraryExW`, `FreeLibrary`,
   `GetProcAddress`, `GetModuleHandleA/W`,
   `GetModuleFileNameA/W`, `GetModuleHandleExA/W`
@@ -337,7 +352,7 @@ syscall routing shows up immediately.
 | `CancelIo` | NOOP | `kOffReturnOne` |
 | `CancelIoEx` | NOOP | `kOffReturnOne` |
 | `CancelSynchronousIo` | NOOP | `kOffReturnOne` |
-| `CancelWaitableTimer` | NOOP | `kOffReturnZero` |
+| `CancelWaitableTimer` | REAL | kernel32.dll export (T11-04) |
 | `CloseHandle` | REAL | `kOffCloseHandle` |
 | `CompareStringA` | REAL | `kOffReturnTwo` |
 | `CompareStringEx` | REAL | `kOffReturnTwo` |
@@ -375,9 +390,9 @@ syscall routing shows up immediately.
 | `CreateSemaphoreW` | REAL | `kOffCreateSemaphoreW` |
 | `CreateThread` | REAL | `kOffCreateThreadReal` |
 | `CreateToolhelp32Snapshot` | NOOP | `kOffReturnOne` |
-| `CreateWaitableTimerA` | NOOP | `kOffReturnZero` |
+| `CreateWaitableTimerA` | REAL | kernel32.dll export (T11-04) |
 | `CreateWaitableTimerExW` | NOOP | `kOffReturnZero` |
-| `CreateWaitableTimerW` | NOOP | `kOffReturnZero` |
+| `CreateWaitableTimerW` | REAL | kernel32.dll export (T11-04) |
 | `DebugActiveProcess` | NOOP | `kOffReturnZero` |
 | `DebugActiveProcessStop` | NOOP | `kOffReturnZero` |
 | `DebugBreak` | NOOP | `kOffCritSecNop` |
@@ -688,7 +703,7 @@ syscall routing shows up immediately.
 | `SetThreadLocale` | NOOP | `kOffReturnOne` |
 | `SetThreadPriority` | NOOP | `kOffReturnOne` |
 | `SetUnhandledExceptionFilter` | REAL | `kOffSetUnhandledFilter` |
-| `SetWaitableTimer` | NOOP | `kOffReturnZero` |
+| `SetWaitableTimer` | REAL | kernel32.dll export (T11-04) |
 | `SetWaitableTimerEx` | NOOP | `kOffReturnZero` |
 | `SizeofResource` | NOOP | `kOffReturnZero` |
 | `Sleep` | REAL | `kOffSleep` |
@@ -1586,13 +1601,19 @@ sign / verify, key derivation (`BCryptDeriveKeyPBKDF2` etc.).
 
 ## 6. Multimedia
 
-### winmm.dll  (~170 LOC, ~10 exports)
+### winmm.dll  (~250 LOC, ~10 exports)
 
 `timeGetTime`, `timeBeginPeriod`, `timeEndPeriod`,
 `timeGetDevCaps` — REAL.
-`timeSetEvent`, `timeKillEvent` — REAL (multimedia timer
-maps to `SetTimer`).
+`timeSetEvent`, `timeKillEvent` — REAL (T11-04). 16-slot
+multimedia-timer table + lazily-spawned 10 ms polling
+service thread invokes the registered TIMECALLBACK when
+due_time arrives. `TIME_PERIODIC` re-arms; one-shot
+self-deactivates. The thread spawns through direct
+`SYS_THREAD_CREATE` / `SYS_SLEEP_MS` syscalls because
+winmm.dll's build pipeline doesn't link kernel32.dll.
 `PlaySoundW` — STUB silent. `mciSendStringW` — STUB.
+`waveOut*` — STUB (T12-03 — needs HDA backend wiring).
 
 ### dsound.dll, ddraw.dll, xaudio2_8.dll, xinput1_4.dll
 

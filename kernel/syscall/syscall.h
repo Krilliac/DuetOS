@@ -1773,6 +1773,36 @@ enum SyscallNumber : u64
     //   rsi = byte capacity, must be >= sizeof(SystemPerformanceInfo)
     // Returns 0 on success, -1 on bad pointer / short buffer.
     SYS_SYSTEM_PERFORMANCE_INFO = 184,
+
+    // SYS_NAMED_KOBJ_OPEN_OR_CREATE — kernel-resident named-object
+    // namespace lookup. Backs Win32 Create{Mutex,Event,Semaphore}
+    // and Open{Mutex,Event,Semaphore} when a name is provided.
+    //   rdi = type (0 = mutex, 1 = event, 2 = semaphore)
+    //   rsi = user const char* name (UTF-8 NUL-terminated)
+    //   rdx = name length cap (caller-supplied; max 64)
+    //   r10 = init_state_or_owner — type-specific:
+    //         mutex:     bInitialOwner (0 / 1)
+    //         event:     bit 0 = manual_reset, bit 1 = initial_state
+    //         semaphore: low 32 = initial count, high 32 = maximum
+    //   r8  = open_only (1 = OpenMutex/Event/Semaphore semantics —
+    //         fail with -ENOENT if no existing entry; 0 = create on
+    //         miss)
+    // Returns: handle (with kWin32{Mutex,Event,Semaphore}Base
+    // bias added) on success, (u64)-1 on bad params / OOM /
+    // open-only-miss.
+    SYS_NAMED_KOBJ_OPEN_OR_CREATE = 185,
+
+    // SYS_WIN32_CREATE_PIPE — anonymous cross-process pipe.
+    // Backs Win32 CreatePipe in `userland/libs/kernel32`.
+    //   rdi = user u64* read_handle_out  — caller-allocated
+    //   rsi = user u64* write_handle_out — caller-allocated
+    // Returns 0 on success, (u64)-1 on table-full / pipe-pool-full.
+    // On success both pointers receive a Win32-shaped file handle
+    // (kWin32HandleBase + slot). The two handles share a kernel
+    // pipe pool slot — reads on the read end consume bytes that
+    // writes on the write end appended, regardless of which
+    // process holds either handle.
+    SYS_WIN32_CREATE_PIPE = 186,
 };
 
 /// Cursor-shape values the PE side hands the kernel via
@@ -1823,6 +1853,23 @@ inline constexpr u64 kSockOpGetPeer = 11;
 // negative errno on miss / timeout. Routes to NetDnsQueryA against
 // the DHCP-supplied resolver, with a built-in 3-second wait.
 inline constexpr u64 kSockOpResolveA = 12;
+// kSockOpGetLease: snapshot the current DHCP lease into the caller-
+// supplied SocketLeaseInfo buffer. rsi = user SocketLeaseInfo* out.
+// rdx = user-supplied buffer size (must be >= sizeof(SocketLeaseInfo);
+// short buffers fail with -ERANGE = -34).
+//
+// SocketLeaseInfo layout (40 bytes):
+//   +0  u32 valid          1 if a lease has been bound; 0 = not yet
+//   +4  u32 ip_be          IPv4 in network byte order (0 if !valid)
+//   +8  u32 netmask_be     subnet mask, network byte order
+//   +12 u32 gateway_be     default gateway, network byte order
+//   +16 u32 dns_be         primary DNS, network byte order
+//   +20 u32 lease_seconds  remaining lease seconds (0 = unknown / no decay)
+//   +24 u8  mac[6]         hardware MAC of the bound interface
+//   +30 u8  iface_index    NIC index in the kernel's iface table
+//   +31 u8  reserved
+//   +32 u8  reserved[8]    zeroed by the kernel
+inline constexpr u64 kSockOpGetLease = 13;
 
 // Win32 CONTEXT — first 0x100 bytes (integer + control + the
 // segment / rflags slot). Field order and offsets match the
