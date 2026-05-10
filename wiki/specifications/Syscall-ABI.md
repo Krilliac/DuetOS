@@ -1199,6 +1199,12 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 189 | `SYS_PRIORITY_CLASS` |
 | 190 | `SYS_PROCESS_SPAWN_EX` |
 | 191 | `SYS_GET_INHERITED_STD` |
+| 192 | `SYS_HEAPEX_CREATE` |
+| 193 | `SYS_HEAPEX_DESTROY` |
+| 194 | `SYS_HEAPEX_ALLOC` |
+| 195 | `SYS_HEAPEX_FREE` |
+| 196 | `SYS_HEAPEX_SIZE` |
+| 197 | `SYS_HEAPEX_REALLOC` |
 <!-- /AUTO:syscall_list -->
 
 ## Native Syscall Argument / Return Reference
@@ -1414,4 +1420,10 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 189 | `SYS_PRIORITY_CLASS` | `rdi` = u64 op                   // 0 = get; `rsi` = u32 new_class            // ignored when op == 0 Returns ... | the current (post-op) priority class on success, 0 on bad op |
 | 190 | `SYS_PROCESS_SPAWN_EX` | `rdi` = const char* user path           // NUL-terminated rsi = u... | the new pid on success, (u64)-1 on failure (any inherited handle resolves to ... |
 | 191 | `SYS_GET_INHERITED_STD` | `rdi` = u64 idx                  // 0=stdin | the inherited Win32 file handle (kWin32HandleBase range) on success, 0 if no ... |
+| 192 | `SYS_HEAPEX_CREATE` | `rdi` = u64 pages   (clamped to kWin32ExtraHeapPagesMax) Returns ... | the heap handle (also the base VA) on success, 0 on table-full / OOM |
+| 193 | `SYS_HEAPEX_DESTROY` | `rdi` = u64 heap_handle | 1 on success, 0 on bad handle |
+| 194 | `SYS_HEAPEX_ALLOC` | `rdi` = u64 heap_handle (0 = default) rsi = u64 size Returns user... | user VA or 0 on OOM |
+| 195 | `SYS_HEAPEX_FREE` | `rdi` = u64 heap_handle rsi = u64 ptr Returns 0 | 0 |
+| 196 | `SYS_HEAPEX_SIZE` | `rdi` = u64 heap_handle rsi = u64 ptr | bytes or 0 on bad handle / pointer |
+| 197 | `SYS_HEAPEX_REALLOC` | `rdi` = u64 heap_handle rsi = u64 ptr        (0 = alloc) rdx = u6... | the new VA or 0 on failure |
 <!-- /AUTO:syscall_args -->

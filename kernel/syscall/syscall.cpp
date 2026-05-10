@@ -851,6 +851,97 @@ void SyscallDispatch(arch::TrapFrame* frame)
         frame->rax = proc->std_handles[idx];
         return;
     }
+    case SYS_HEAPEX_CREATE:
+    {
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        frame->rax = ::duetos::win32::Win32HeapExCreate(proc, frame->rdi);
+        return;
+    }
+    case SYS_HEAPEX_DESTROY:
+    {
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        frame->rax = ::duetos::win32::Win32HeapExDestroy(proc, frame->rdi) ? 1 : 0;
+        return;
+    }
+    case SYS_HEAPEX_ALLOC:
+    {
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        ::duetos::win32::Win32HeapBinding b{};
+        if (!::duetos::win32::Win32HeapResolveHandle(proc, frame->rdi, &b))
+        {
+            frame->rax = 0;
+            return;
+        }
+        frame->rax = ::duetos::win32::Win32HeapAllocOnBinding(proc, b, frame->rsi);
+        return;
+    }
+    case SYS_HEAPEX_FREE:
+    {
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        ::duetos::win32::Win32HeapBinding b{};
+        if (!::duetos::win32::Win32HeapResolveHandle(proc, frame->rdi, &b))
+        {
+            frame->rax = 0;
+            return;
+        }
+        ::duetos::win32::Win32HeapFreeOnBinding(proc, b, frame->rsi);
+        frame->rax = 0;
+        return;
+    }
+    case SYS_HEAPEX_SIZE:
+    {
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        ::duetos::win32::Win32HeapBinding b{};
+        if (!::duetos::win32::Win32HeapResolveHandle(proc, frame->rdi, &b))
+        {
+            frame->rax = 0;
+            return;
+        }
+        frame->rax = ::duetos::win32::Win32HeapSizeOnBinding(proc, b, frame->rsi);
+        return;
+    }
+    case SYS_HEAPEX_REALLOC:
+    {
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        ::duetos::win32::Win32HeapBinding b{};
+        if (!::duetos::win32::Win32HeapResolveHandle(proc, frame->rdi, &b))
+        {
+            frame->rax = 0;
+            return;
+        }
+        frame->rax = ::duetos::win32::Win32HeapReallocOnBinding(proc, b, frame->rsi, frame->rdx);
+        return;
+    }
     case SYS_NOW_NS:
         DoNowNs(frame);
         return;

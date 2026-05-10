@@ -3075,48 +3075,76 @@ __declspec(dllexport) BOOL QueryPerformanceFrequency(long long* lpFrequency)
 
 __declspec(dllexport) HANDLE GetProcessHeap(void)
 {
-    /* Sentinel — same value as the flat stub returned, matching
-     * the per-process heap base. */
+    /* Sentinel — matches the kernel-side default-heap base
+     * (kWin32HeapVa = 0x50000000). The kernel resolves both 0
+     * and 0x50000000 to the default heap; either value is
+     * legal for routing. */
     return (HANDLE)0x50000000ULL;
 }
 
+/* HeapAlloc / HeapFree / HeapSize / HeapReAlloc — route through
+ * SYS_HEAPEX_* (192-197) so a HeapCreate-supplied heap handle
+ * targets the right secondary heap. The default-heap sentinel
+ * (0x50000000) and 0 both resolve to the per-process default
+ * heap on the kernel side. dwFlags is honoured for HEAP_ZERO_MEMORY
+ * (0x00000008) — the alloc paths zero the payload before
+ * returning. Other flags (HEAP_GENERATE_EXCEPTIONS,
+ * HEAP_NO_SERIALIZE) are ignored.
+ */
+#define HEAP_ZERO_MEMORY 0x00000008u
+
 __declspec(dllexport) void* HeapAlloc(HANDLE hHeap, DWORD dwFlags, SIZE_T dwBytes)
 {
-    (void)hHeap;
-    (void)dwFlags;
     long long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)11), "D"((long long)dwBytes) : "memory");
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)194), /* SYS_HEAPEX_ALLOC */
+                       "D"((long long)(unsigned long long)(UINT_PTR)hHeap), "S"((long long)dwBytes)
+                     : "memory");
+    if (rv != 0 && (dwFlags & HEAP_ZERO_MEMORY) != 0)
+    {
+        unsigned char* dst = (unsigned char*)(unsigned long long)rv;
+        for (SIZE_T i = 0; i < dwBytes; ++i)
+            dst[i] = 0;
+    }
     return (void*)rv;
 }
 
 __declspec(dllexport) BOOL HeapFree(HANDLE hHeap, DWORD dwFlags, void* lpMem)
 {
-    (void)hHeap;
     (void)dwFlags;
     if (lpMem == (void*)0)
         return 1;
     long long discard;
-    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)12), "D"((long long)lpMem) : "memory");
+    __asm__ volatile("int $0x80"
+                     : "=a"(discard)
+                     : "a"((long long)195), /* SYS_HEAPEX_FREE */
+                       "D"((long long)(unsigned long long)(UINT_PTR)hHeap), "S"((long long)lpMem)
+                     : "memory");
     return 1;
 }
 
 __declspec(dllexport) SIZE_T HeapSize(HANDLE hHeap, DWORD dwFlags, const void* lpMem)
 {
-    (void)hHeap;
     (void)dwFlags;
     long long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)14), "D"((long long)lpMem) : "memory");
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)196), /* SYS_HEAPEX_SIZE */
+                       "D"((long long)(unsigned long long)(UINT_PTR)hHeap), "S"((long long)lpMem)
+                     : "memory");
     return (SIZE_T)rv;
 }
 
 __declspec(dllexport) void* HeapReAlloc(HANDLE hHeap, DWORD dwFlags, void* lpMem, SIZE_T dwBytes)
 {
-    (void)hHeap;
     (void)dwFlags;
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"((long long)15), "D"((long long)lpMem), "S"((long long)dwBytes)
+                     : "a"((long long)197), /* SYS_HEAPEX_REALLOC */
+                       "D"((long long)(unsigned long long)(UINT_PTR)hHeap), "S"((long long)lpMem),
+                       "d"((long long)dwBytes)
                      : "memory");
     return (void*)rv;
 }
@@ -3124,17 +3152,33 @@ __declspec(dllexport) void* HeapReAlloc(HANDLE hHeap, DWORD dwFlags, void* lpMem
 __declspec(dllexport) HANDLE HeapCreate(DWORD flOptions, SIZE_T dwInitialSize, SIZE_T dwMaximumSize)
 {
     (void)flOptions;
-    (void)dwInitialSize;
     (void)dwMaximumSize;
-    /* All heaps collapse to the per-process default. Return the
-     * sentinel from GetProcessHeap. */
-    return (HANDLE)0x50000000ULL;
+    /* Round initial size up to pages (4 KiB). Cap at 16 pages
+     * (kWin32ExtraHeapPagesMax) on the kernel side; passing more
+     * is silently clamped. dwInitialSize == 0 -> 1 page. */
+    unsigned long long pages = ((unsigned long long)dwInitialSize + 0xFFFULL) >> 12;
+    if (pages == 0)
+        pages = 1;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)192), /* SYS_HEAPEX_CREATE */
+                       "D"((long long)pages)
+                     : "memory");
+    if (rv == 0)
+        return (HANDLE)0;
+    return (HANDLE)(UINT_PTR)rv;
 }
 
 __declspec(dllexport) BOOL HeapDestroy(HANDLE hHeap)
 {
-    (void)hHeap;
-    return 1; /* Pretend success — we don't refcount heaps. */
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)193), /* SYS_HEAPEX_DESTROY */
+                       "D"((long long)(unsigned long long)(UINT_PTR)hHeap)
+                     : "memory");
+    return rv != 0;
 }
 
 /* ------------------------------------------------------------------

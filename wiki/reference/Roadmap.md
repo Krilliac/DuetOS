@@ -719,7 +719,25 @@ Track 3 has no remaining roadmap rows.
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
 | T5-01 | mm | P1 | Complete `NtAllocateVirtualMemory` / `VirtualAlloc` / `VirtualFree` / `VirtualProtect`: reserve/commit split, release, guard pages, correct protection flags, `VirtualQuery` / `NtQueryVirtualMemory`, and `MEM_WRITE_WATCH` rejection. (`VirtualQuery` / `NtQueryVirtualMemory` ship; `MEM_WRITE_WATCH` rejection ships — `VirtualAlloc` returns NULL when the flag is set rather than silently dropping the watch contract. Reserve/commit split, guard pages, and protection-bit enforcement still pending kernel-side region bookkeeping.) | MSVC stack-probing apps survive first-thread stack setup. |
-| T5-02 | mm | P1 | Implement multi-heap process allocator: `HeapCreate`, `HeapAlloc`, `HeapFree`, `HeapReAlloc`, `HeapSize`, `GetProcessHeap`, `HeapDestroy`, validation/compact no-ops, CRT malloc/free through the default heap. | A PE can allocate from and destroy a secondary heap without corrupting the default heap. |
+> **T5-02** multi-heap process allocator shipped:
+> `Process::extra_heaps[4]` carries up-to-16-page secondary
+> heaps (1 MiB stride starting at 0x55000000). New syscalls
+> `SYS_HEAPEX_CREATE = 192` / `SYS_HEAPEX_DESTROY = 193` /
+> `SYS_HEAPEX_ALLOC = 194` / `SYS_HEAPEX_FREE = 195` /
+> `SYS_HEAPEX_SIZE = 196` / `SYS_HEAPEX_REALLOC = 197` route
+> by heap handle (handle 0 / `kWin32HeapVa = 0x50000000` resolve
+> to the default heap). The first-fit walker was refactored
+> through a new `Win32HeapBinding` (base, pages, free-head
+> pointer) so the same code-path serves both default and
+> secondary heaps. `kernel32!HeapCreate` / `HeapDestroy` /
+> `HeapAlloc` / `HeapFree` / `HeapSize` / `HeapReAlloc` route
+> through the new ABI; `dwFlags & HEAP_ZERO_MEMORY` is honoured
+> by zeroing the returned payload in user space.
+> CRT `malloc/free/realloc` continue routing through
+> `SYS_HEAP_ALLOC` (11) / `SYS_HEAP_FREE` (12) /
+> `SYS_HEAP_REALLOC` (15) on the default heap — backward
+> compatible. `HeapDestroy` on the default-heap sentinel
+> returns success (no-op) so CRT cleanup paths don't trip.
 | T5-03 | mm | P2 | Implement real KASLR in the UEFI loader: memory-map scan, random 2 MiB-aligned base within a 64 MiB window, boot-info handoff, and boot-log reporting. | Two cold boots show different kernel `.text` load addresses. |
 | T5-04 | mm | P2 | Audit/complete buddy + slab allocators: coalescing, slab freelists or magazines, IRQ-safe `kmalloc` / `kfree`, and documentation of IRQ/process context safety. | Allocator behavior and context guarantees are tested and documented. |
 

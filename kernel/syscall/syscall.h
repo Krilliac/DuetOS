@@ -1865,6 +1865,45 @@ enum SyscallNumber : u64
     // range) on success, 0 if no inheritance was set up at spawn,
     // (u64)-1 on bad idx.
     SYS_GET_INHERITED_STD = 191,
+
+    // SYS_HEAPEX_CREATE — allocate a fresh secondary heap.
+    // Backs Win32 HeapCreate.
+    //   rdi = u64 pages   (clamped to kWin32ExtraHeapPagesMax)
+    // Returns the heap handle (also the base VA) on success,
+    // 0 on table-full / OOM.
+    SYS_HEAPEX_CREATE = 192,
+
+    // SYS_HEAPEX_DESTROY — tear down a secondary heap.
+    // Returns 1 on success, 0 on bad handle. The default heap
+    // is non-destroyable; HeapDestroy on it returns 1 (no-op).
+    //   rdi = u64 heap_handle
+    SYS_HEAPEX_DESTROY = 193,
+
+    // SYS_HEAPEX_ALLOC — allocate from a specific heap.
+    // Backs Win32 HeapAlloc(hHeap, ...).
+    //   rdi = u64 heap_handle (0 = default)
+    //   rsi = u64 size
+    // Returns user VA or 0 on OOM.
+    SYS_HEAPEX_ALLOC = 194,
+
+    // SYS_HEAPEX_FREE — free a block from a specific heap.
+    //   rdi = u64 heap_handle
+    //   rsi = u64 ptr
+    // Returns 0.
+    SYS_HEAPEX_FREE = 195,
+
+    // SYS_HEAPEX_SIZE — payload size of a block in a specific
+    // heap. Returns bytes or 0 on bad handle / pointer.
+    //   rdi = u64 heap_handle
+    //   rsi = u64 ptr
+    SYS_HEAPEX_SIZE = 196,
+
+    // SYS_HEAPEX_REALLOC — resize a block in a specific heap.
+    //   rdi = u64 heap_handle
+    //   rsi = u64 ptr        (0 = alloc)
+    //   rdx = u64 new_size   (0 = free)
+    // Returns the new VA or 0 on failure.
+    SYS_HEAPEX_REALLOC = 197,
 };
 
 // Inheritable stdio bundle for SYS_PROCESS_SPAWN_EX. Each entry

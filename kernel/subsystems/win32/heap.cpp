@@ -135,23 +135,21 @@ bool Win32HeapInit(duetos::core::Process* proc)
     return true;
 }
 
-u64 Win32HeapAlloc(duetos::core::Process* proc, u64 size)
+u64 Win32HeapAllocOnBinding(duetos::core::Process* proc, const Win32HeapBinding& b, u64 size)
 {
-    if (proc == nullptr || proc->heap_free_head == 0)
+    if (proc == nullptr || b.free_head_ptr == nullptr || *b.free_head_ptr == 0)
         return 0;
     if (size == 0)
         size = 1; // Win32: HeapAlloc(size=0) returns a unique non-null ptr.
 
     const u64 needed = RoundRequestToBlockSize(size);
 
-    // First-fit: walk the free list, find the first block
-    // whose size >= needed. `prev` tracks the predecessor so
-    // we can splice the chosen block out. Quarantined blocks
-    // (kPolicyQuarantineFree opt-in) are skipped until their
-    // hold expires — keeps freshly-freed payloads from being
-    // handed straight back out, which is the common UAF window.
+    // First-fit walk on the binding's free list. Same shape as
+    // the legacy default-heap path, but reads/writes the head
+    // through the binding pointer so secondary heaps don't
+    // perturb the default-heap state.
     u64 prev = 0;
-    u64 cur = proc->heap_free_head;
+    u64 cur = *b.free_head_ptr;
     while (cur != 0)
     {
         const u64 block_size = PeekU64(proc, cur + 0);
@@ -161,75 +159,72 @@ u64 Win32HeapAlloc(duetos::core::Process* proc, u64 size)
             const u64 leftover = block_size - needed;
             if (leftover >= kHeaderSize + kMinSplitPayload)
             {
-                // Split. Keep the low part as the allocated
-                // block; the high part becomes a fresh free
-                // block inheriting `cur`'s next pointer.
                 const u64 split_va = cur + needed;
                 PokeU64(proc, split_va + 0, leftover);
                 PokeU64(proc, split_va + 8, block_next);
-                PokeU64(proc, cur + 0, needed); // shrink the allocated block's header
+                PokeU64(proc, cur + 0, needed);
                 if (prev == 0)
-                    proc->heap_free_head = split_va;
+                    *b.free_head_ptr = split_va;
                 else
                     PokeU64(proc, prev + 8, split_va);
             }
             else
             {
-                // Take the whole block. Splice out of list.
                 if (prev == 0)
-                    proc->heap_free_head = block_next;
+                    *b.free_head_ptr = block_next;
                 else
                     PokeU64(proc, prev + 8, block_next);
-                // Header size already equals block_size — no change.
             }
-            // Payload lives immediately after the 8-byte
-            // in-use header. We keep the `next` field of the
-            // header as garbage (caller will overwrite it as
-            // part of their data).
             return cur + kHeaderSize;
         }
         prev = cur;
         cur = block_next;
     }
 
-    // No free block large enough. Win32 returns NULL when
-    // HEAP_GENERATE_EXCEPTIONS isn't set — we never honor
-    // that flag, so always NULL on OOM.
-    KLOG_ONCE_WARN("win32/heap", "process heap exhausted (HeapAlloc returned NULL)");
+    KLOG_ONCE_WARN("win32/heap", "heap exhausted (HeapAlloc returned NULL)");
     return 0;
 }
 
-void Win32HeapFree(duetos::core::Process* proc, u64 user_ptr)
+u64 Win32HeapAlloc(duetos::core::Process* proc, u64 size)
 {
-    if (proc == nullptr || user_ptr == 0)
-        return; // Win32: free(NULL) is a no-op.
-    const u64 block_hdr = user_ptr - kHeaderSize;
-    // Bounds-check: block must be inside the heap region.
-    if (block_hdr < proc->heap_base)
+    if (proc == nullptr)
+        return 0;
+    Win32HeapBinding b{proc->heap_base, proc->heap_pages, &proc->heap_free_head};
+    return Win32HeapAllocOnBinding(proc, b, size);
+}
+
+void Win32HeapFreeOnBinding(duetos::core::Process* proc, const Win32HeapBinding& b, u64 user_ptr)
+{
+    if (proc == nullptr || user_ptr == 0 || b.free_head_ptr == nullptr)
         return;
-    if (block_hdr >= proc->heap_base + proc->heap_pages * duetos::mm::kPageSize)
+    const u64 block_hdr = user_ptr - kHeaderSize;
+    if (block_hdr < b.base_va)
+        return;
+    if (block_hdr >= b.base_va + b.pages * duetos::mm::kPageSize)
         return;
     const u64 block_size = PeekU64(proc, block_hdr + 0);
-    // Prepend to the free list. O(1) insertion, no coalescing.
-    // The header's `size` field is preserved from allocation;
-    // we just update `next`.
-    PokeU64(proc, block_hdr + 8, proc->heap_free_head);
-    proc->heap_free_head = block_hdr;
-    // Win32 custom quarantine hook: blocks the just-freed payload
-    // from reuse for kQuarantineTicks ticks under
-    // kPolicyQuarantineFree. No-op when the policy bit is off.
+    PokeU64(proc, block_hdr + 8, *b.free_head_ptr);
+    *b.free_head_ptr = block_hdr;
     if (block_size > kHeaderSize)
         duetos::subsystems::win32::custom::OnHeapFree(proc, user_ptr, block_size - kHeaderSize);
 }
 
-u64 Win32HeapSize(duetos::core::Process* proc, u64 user_ptr)
+void Win32HeapFree(duetos::core::Process* proc, u64 user_ptr)
+{
+    if (proc == nullptr)
+        return;
+    Win32HeapBinding b{proc->heap_base, proc->heap_pages, &proc->heap_free_head};
+    Win32HeapFreeOnBinding(proc, b, user_ptr);
+}
+
+u64 Win32HeapSizeOnBinding(duetos::core::Process* proc, const Win32HeapBinding& b, u64 user_ptr)
 {
     if (proc == nullptr || user_ptr == 0)
         return 0;
     const u64 block_hdr = user_ptr - kHeaderSize;
-    if (block_hdr < proc->heap_base)
+    if (block_hdr < b.base_va)
         return 0;
-    if (block_hdr >= proc->heap_base + proc->heap_pages * duetos::mm::kPageSize)
+    if (block_hdr >= b.base_va + b.pages * duetos::mm::kPageSize)
         return 0;
     const u64 block_size = PeekU64(proc, block_hdr + 0);
     if (block_size < kHeaderSize)
@@ -237,31 +232,30 @@ u64 Win32HeapSize(duetos::core::Process* proc, u64 user_ptr)
     return block_size - kHeaderSize;
 }
 
-u64 Win32HeapRealloc(duetos::core::Process* proc, u64 user_ptr, u64 new_size)
+u64 Win32HeapSize(duetos::core::Process* proc, u64 user_ptr)
 {
     if (proc == nullptr)
         return 0;
-    // realloc(NULL, size) ≡ malloc(size). Matches both the
-    // ucrt realloc contract and Windows HeapReAlloc's behaviour
-    // when lpMem is NULL (though real Windows returns an error
-    // for HeapReAlloc(NULL) — our version collapses the two
-    // paths since callers can't tell the difference without a
-    // working GetLastError and we don't set one here).
+    Win32HeapBinding b{proc->heap_base, proc->heap_pages, &proc->heap_free_head};
+    return Win32HeapSizeOnBinding(proc, b, user_ptr);
+}
+
+u64 Win32HeapReallocOnBinding(duetos::core::Process* proc, const Win32HeapBinding& b, u64 user_ptr, u64 new_size)
+{
+    if (proc == nullptr)
+        return 0;
     if (user_ptr == 0)
-        return Win32HeapAlloc(proc, new_size);
-    // realloc(ptr, 0) — ucrt convention: free and return NULL.
-    // Win32 HeapReAlloc with size 0 is undefined; ucrt / msvcrt
-    // realloc with size 0 frees.
+        return Win32HeapAllocOnBinding(proc, b, new_size);
     if (new_size == 0)
     {
-        Win32HeapFree(proc, user_ptr);
+        Win32HeapFreeOnBinding(proc, b, user_ptr);
         return 0;
     }
 
     const u64 block_hdr = user_ptr - kHeaderSize;
-    if (block_hdr < proc->heap_base)
+    if (block_hdr < b.base_va)
         return 0;
-    if (block_hdr >= proc->heap_base + proc->heap_pages * duetos::mm::kPageSize)
+    if (block_hdr >= b.base_va + b.pages * duetos::mm::kPageSize)
         return 0;
     const u64 old_block_size = PeekU64(proc, block_hdr + 0);
     if (old_block_size < kHeaderSize)
@@ -276,7 +270,7 @@ u64 Win32HeapRealloc(duetos::core::Process* proc, u64 user_ptr, u64 new_size)
     if (new_size <= old_payload)
         return user_ptr;
 
-    const u64 new_ptr = Win32HeapAlloc(proc, new_size);
+    const u64 new_ptr = Win32HeapAllocOnBinding(proc, b, new_size);
     if (new_ptr == 0)
         return 0; // alloc failed; caller keeps old pointer.
 
@@ -300,7 +294,7 @@ u64 Win32HeapRealloc(duetos::core::Process* proc, u64 user_ptr, u64 new_size)
             // heap region, which PeLoad mapped every page of.
             // Defensive: free the new block so we don't leak
             // on this unexpected path.
-            Win32HeapFree(proc, new_ptr);
+            Win32HeapFreeOnBinding(proc, b, new_ptr);
             return 0;
         }
         const u64 src_off = src_va - src_page;
@@ -320,8 +314,145 @@ u64 Win32HeapRealloc(duetos::core::Process* proc, u64 user_ptr, u64 new_size)
         dst_va += chunk;
         remaining -= chunk;
     }
-    Win32HeapFree(proc, user_ptr);
+    Win32HeapFreeOnBinding(proc, b, user_ptr);
     return new_ptr;
+}
+
+u64 Win32HeapRealloc(duetos::core::Process* proc, u64 user_ptr, u64 new_size)
+{
+    if (proc == nullptr)
+        return 0;
+    Win32HeapBinding b{proc->heap_base, proc->heap_pages, &proc->heap_free_head};
+    return Win32HeapReallocOnBinding(proc, b, user_ptr, new_size);
+}
+
+bool Win32HeapResolveHandle(duetos::core::Process* proc, u64 heap_handle, Win32HeapBinding* out)
+{
+    if (proc == nullptr || out == nullptr)
+        return false;
+    // Default heap: handle == proc->heap_base (also the value
+    // GetProcessHeap returned in the v0 single-heap path).
+    if (heap_handle == proc->heap_base || heap_handle == 0 || heap_handle == kWin32HeapVa)
+    {
+        out->base_va = proc->heap_base;
+        out->pages = proc->heap_pages;
+        out->free_head_ptr = &proc->heap_free_head;
+        return true;
+    }
+    using duetos::core::Process;
+    for (u64 i = 0; i < Process::kWin32ExtraHeapCap; ++i)
+    {
+        if (proc->extra_heaps[i].in_use && proc->extra_heaps[i].base_va == heap_handle)
+        {
+            out->base_va = proc->extra_heaps[i].base_va;
+            out->pages = proc->extra_heaps[i].pages;
+            out->free_head_ptr = &proc->extra_heaps[i].free_head;
+            return true;
+        }
+    }
+    return false;
+}
+
+u64 Win32HeapExCreate(duetos::core::Process* proc, u64 pages)
+{
+    using namespace duetos::mm;
+    using duetos::core::Process;
+    if (proc == nullptr || proc->as == nullptr)
+        return 0;
+    if (pages == 0)
+        pages = 1;
+    if (pages > Process::kWin32ExtraHeapPagesMax)
+        pages = Process::kWin32ExtraHeapPagesMax;
+
+    // Find a free slot.
+    u64 slot = Process::kWin32ExtraHeapCap;
+    for (u64 i = 0; i < Process::kWin32ExtraHeapCap; ++i)
+    {
+        if (!proc->extra_heaps[i].in_use)
+        {
+            slot = i;
+            break;
+        }
+    }
+    if (slot == Process::kWin32ExtraHeapCap)
+    {
+        KLOG_ONCE_WARN("win32/heap", "HeapCreate: no free extra-heap slot");
+        return 0;
+    }
+
+    const u64 base_va = Process::kWin32ExtraHeapArenaBase + slot * Process::kWin32ExtraHeapStride;
+    // Map fresh frames RW+NX. On any frame failure, unmap the
+    // pages we already mapped to keep the AS clean — this slot
+    // stays available for a future, smaller HeapCreate.
+    u64 mapped = 0;
+    for (; mapped < pages; ++mapped)
+    {
+        const PhysAddr frame = AllocateFrame();
+        if (frame == kNullFrame)
+            break;
+        AddressSpaceMapUserPage(proc->as, base_va + mapped * kPageSize, frame,
+                                kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
+    }
+    if (mapped < pages)
+    {
+        for (u64 i = 0; i < mapped; ++i)
+            AddressSpaceUnmapUserPage(proc->as, base_va + i * kPageSize);
+        return 0;
+    }
+
+    proc->extra_heaps[slot].in_use = true;
+    proc->extra_heaps[slot].base_va = base_va;
+    proc->extra_heaps[slot].pages = pages;
+
+    const u64 heap_bytes = pages * kPageSize;
+    PokeU64(proc, base_va + 0, heap_bytes);
+    PokeU64(proc, base_va + 8, 0);
+    proc->extra_heaps[slot].free_head = base_va;
+
+    arch::SerialWrite("[w32-heap] ex-create pid=");
+    arch::SerialWriteHex(proc->pid);
+    arch::SerialWrite(" slot=");
+    arch::SerialWriteHex(slot);
+    arch::SerialWrite(" base=");
+    arch::SerialWriteHex(base_va);
+    arch::SerialWrite(" pages=");
+    arch::SerialWriteHex(pages);
+    arch::SerialWrite("\n");
+    return base_va;
+}
+
+bool Win32HeapExDestroy(duetos::core::Process* proc, u64 heap_handle)
+{
+    using namespace duetos::mm;
+    using duetos::core::Process;
+    if (proc == nullptr)
+        return false;
+    // Refuse to destroy the default heap — Win32 lets HeapDestroy
+    // succeed on GetProcessHeap() but the runtime undermines the
+    // CRT if it actually goes through. Return true (success) so
+    // a caller's ABI-conformant cleanup path doesn't trip on the
+    // sentinel; the unmap is a no-op.
+    if (heap_handle == proc->heap_base)
+        return true;
+    for (u64 i = 0; i < Process::kWin32ExtraHeapCap; ++i)
+    {
+        if (proc->extra_heaps[i].in_use && proc->extra_heaps[i].base_va == heap_handle)
+        {
+            const u64 base = proc->extra_heaps[i].base_va;
+            const u64 pages = proc->extra_heaps[i].pages;
+            for (u64 p = 0; p < pages; ++p)
+                AddressSpaceUnmapUserPage(proc->as, base + p * kPageSize);
+            proc->extra_heaps[i].in_use = false;
+            proc->extra_heaps[i].base_va = 0;
+            proc->extra_heaps[i].pages = 0;
+            proc->extra_heaps[i].free_head = 0;
+            arch::SerialWrite("[w32-heap] ex-destroy slot=");
+            arch::SerialWriteHex(i);
+            arch::SerialWrite("\n");
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace duetos::win32

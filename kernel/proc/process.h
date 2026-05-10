@@ -1121,6 +1121,33 @@ struct Process
     // Index: 0 = stdin, 1 = stdout, 2 = stderr.
     u64 std_handles[3];
 
+    // Extra Win32 heaps — backs HeapCreate / HeapDestroy.
+    // The default per-process heap stays at `heap_base /
+    // heap_pages / heap_free_head` (kWin32HeapVa, 256 KiB);
+    // HeapCreate carves a fresh region out of the extra-heap
+    // arena (kWin32ExtraHeapArenaBase = 0x55000000), maps the
+    // requested page count RW+NX, and seeds an independent
+    // free list. Each slot's `base_va` is stable for the life
+    // of the heap; HeapDestroy unmaps the pages and clears
+    // the slot.
+    //
+    // 4 slots × up to 16 pages (64 KiB) per heap. Cap matches
+    // typical workloads (CRT keeps one private heap; most apps
+    // never call HeapCreate). Grow when a workload demands.
+    struct Win32ExtraHeap
+    {
+        bool in_use;
+        u8 _pad[7];
+        u64 base_va;   // 0 = slot free
+        u64 pages;     // page count actually mapped
+        u64 free_head; // user VA of first free block (0 = full)
+    };
+    static constexpr u64 kWin32ExtraHeapCap = 4;
+    static constexpr u64 kWin32ExtraHeapPagesMax = 16;
+    static constexpr u64 kWin32ExtraHeapArenaBase = 0x55000000ULL;
+    static constexpr u64 kWin32ExtraHeapStride = 0x100000ULL; // 1 MiB per slot
+    Win32ExtraHeap extra_heaps[kWin32ExtraHeapCap];
+
     u64 refcount;
 };
 

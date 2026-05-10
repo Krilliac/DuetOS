@@ -7571,3 +7571,59 @@ doc helps future readers audit the trail.
   and a workload exercises priority-class-driven scheduling.
 - **Related roadmap track(s):** T8-01 partial — full closure
   rides on the per-CPU lock split.
+
+## 2026-05-10 — Multi-heap process allocator (T5-02)
+
+- **What changed:**
+  - `Process::extra_heaps[4]` carries up-to-16-page secondary
+    heaps (1 MiB stride from 0x55000000). The first-fit walker
+    in `kernel/subsystems/win32/heap.cpp` was refactored to take
+    a `Win32HeapBinding` (base, pages, free-head pointer); the
+    legacy `Win32HeapAlloc / Free / Size / Realloc` are now
+    thin wrappers that build a binding for the default heap.
+  - New syscalls:
+    `SYS_HEAPEX_CREATE = 192` (allocate frames + map RW+NX +
+    seed free list), `SYS_HEAPEX_DESTROY = 193` (unmap pages +
+    free slot), `SYS_HEAPEX_ALLOC / FREE / SIZE / REALLOC =
+    194 / 195 / 196 / 197` (handle in rdi, payload args in
+    rsi/rdx). `Win32HeapResolveHandle` resolves both 0 and
+    `kWin32HeapVa` to the default heap so userland can pass
+    either as a handle without crossing the secondary-heap path.
+  - `kernel32!HeapAlloc / HeapFree / HeapSize / HeapReAlloc /
+    HeapCreate / HeapDestroy` route through the new syscalls;
+    `dwFlags & HEAP_ZERO_MEMORY = 0x8` is honoured in user
+    space (the kernel doesn't know which payload the caller
+    cares about, so userland zeros after a successful alloc).
+  - CRT `malloc / free / realloc` continue routing through the
+    legacy `SYS_HEAP_ALLOC` (11) / `SYS_HEAP_FREE` (12) /
+    `SYS_HEAP_REALLOC` (15) on the default heap. No userland
+    rebuild required for those paths.
+- **Why:** A PE that calls `HeapCreate` followed by
+  `HeapAlloc(hHeap, ...)` previously got the same heap as
+  `GetProcessHeap` — corrupting the default heap's free list
+  if the secondary heap had different lifetime semantics. The
+  acceptance ("a PE can allocate from and destroy a secondary
+  heap without corrupting the default heap") needs each heap
+  to keep its own free list; the binding refactor lets one
+  walker serve both.
+- **Rules out / defers:**
+  - Heap coalescing on free. Adjacent freed blocks stay
+    separate; fragmentation is accepted (same v0 contract as
+    the default heap).
+  - Heap growth past 16 pages. `HeapCreate` clamps the page
+    request silently. A workload that hits the cap can grow
+    `kWin32ExtraHeapPagesMax`.
+  - More than 4 simultaneous secondary heaps. Cap matches
+    typical Win32 apps (CRT keeps one private heap; most apps
+    never call HeapCreate).
+  - HEAP_GENERATE_EXCEPTIONS / HEAP_NO_SERIALIZE /
+    HEAP_REALLOC_IN_PLACE_ONLY flag handling. Ignored at the
+    user-space wrapper.
+  - HeapWalk / HeapValidate / HeapCompact behaviour on
+    secondary heaps. Existing kernel32 stubs return success
+    for the default heap; secondary-heap-aware versions ride
+    once a workload exercises them.
+- **Revisit when:** a workload exercises one of the deferred
+  capabilities (in-place realloc, walk/validate on a
+  secondary heap, > 4 heaps, > 64 KiB heap).
+- **Related roadmap track(s):** T5-02 closed.
