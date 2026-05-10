@@ -343,6 +343,12 @@ struct QueryPoolRecord
 struct PhysicalDeviceRecord
 {
     u32 gpu_index;
+    u32 owning_instance_slot; ///< Slot in g_instance_pool that allocated this phys; freed on VkDestroyInstance.
+};
+
+struct QueueRecord
+{
+    u32 owning_device_slot; ///< Slot in g_device_pool that vkGetDeviceQueue allocated from; freed on VkDestroyDevice.
 };
 
 // -------------------------------------------------------------------
@@ -391,6 +397,7 @@ extern EventRecord g_event_data[kPoolCapacity];
 extern PipelineCacheRecord g_pipeline_cache_data[kPoolCapacity];
 extern QueryPoolRecord g_query_pool_data[kPoolCapacity];
 extern PhysicalDeviceRecord g_phys_data[kPoolCapacity];
+extern QueueRecord g_queue_data[kPoolCapacity];
 
 // -------------------------------------------------------------------
 // Aggregate counters.
