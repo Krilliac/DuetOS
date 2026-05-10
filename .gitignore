@@ -8,8 +8,15 @@
 # CMake / build output   #
 ##########################
 
-build/
-build-*/
+# Anchored to repo root: the project's CMake build dir is /build/.
+# Sub-paths like /tools/build/ are real source directories and
+# must NOT be ignored. (Without the leading slash, gitignore
+# matches `build/` at any level — which silently ignores Python
+# helpers under tools/build/ and forced every existing script
+# there to be `git add -f`'d. This anchored form is the correct
+# fix.)
+/build/
+/build-*/
 out/
 cmake-build-*/
 

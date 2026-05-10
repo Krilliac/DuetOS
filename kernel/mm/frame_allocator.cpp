@@ -39,6 +39,7 @@
 #include "cpu/percpu.h"
 #include "cpu/topology.h"
 #include "debug/probes.h"
+#include "diag/fix_journal.h"
 #include "diag/kdbg.h"
 #include "log/klog.h"
 #include "core/panic.h"
@@ -822,6 +823,17 @@ PhysAddr AllocateFrameNode(u8 node)
     KLOG_CRITICAL_A(::duetos::core::LogArea::Memory, "mm/frame", "AllocateFrameNode: physical OOM");
     KDBG(Mm, "mm/frame", "AllocateFrameNode OOM");
     KBP_PROBE(::duetos::debug::ProbeId::kPhysAllocFail);
+    // Journal the OOM as a SoftFaultRecov: the caller's null-handling
+    // is the workaround that's now load-bearing. Pin = "mm/frame-alloc"
+    // so dedup groups every physical OOM under a single record (the
+    // journal must not amplify pressure under sustained allocation
+    // failures). ctx_a is the frames-free-at-fail count so the off-line
+    // tooling can see whether the request was just outsized vs. the
+    // bitmap was actually exhausted.
+    (void)::duetos::diag::FixJournalRecordSev(
+        ::duetos::diag::FixDetector::SoftFaultRecov, "mm/frame-alloc",
+        "physical OOM: AllocateFrameNode returned kNullFrame; investigate caller's null-handling and frame budget",
+        FreeFramesCount(), /*ctx_b=*/0, /*severity=*/2);
     return kNullFrame;
 }
 
