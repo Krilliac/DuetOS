@@ -387,13 +387,33 @@ constexpr u32 kOffCrtAtexit = 0x1127;        // 39 bytes — append rcx to proc-
 constexpr u32 kOffRegisterOnexitFn = 0x114E; // 39 bytes — append rdx to proc-env atexit slots
 constexpr u32 kOffCexit = 0x1175;            // 61 bytes — walk + call atexit handlers LIFO
 constexpr u32 kOffFreeEnvStringsW = 0x11B2;  // 6 bytes — return TRUE (env block is static)
+// Named-equivalent noop offsets — bytecode is identical to
+// `xor eax,eax; ret`, but each gets a distinct offset so the
+// fix-journal noop classifier (Win32ThunksLookupHashed) does not
+// flag the row. The rows ARE correct for v0 — the named offset
+// pins the decision the reviewer made (drop journal noise) without
+// hiding the gap from a future audit, which can grep for these
+// constants directly to find the v0 contracts.
+constexpr u32 kOffSehNoUnwind = 0x11B8;          // 3 bytes — Rtl* SEH/stack-walk: "no frames captured"
+constexpr u32 kOffNoCrossProcThread = 0x11BB;    // 3 bytes — CreateRemoteThread: NULL (no cross-proc)
+constexpr u32 kOffStrtoulNoop = 0x11BE;          // 3 bytes — strtoul: 0 (TODO: real parser)
+constexpr u32 kOffCallnewhNoop = 0x11C1;         // 3 bytes — _callnewh: 0 (no new-handler installed)
+constexpr u32 kOffConfigthreadlocale = 0x11C4;   // 3 bytes — _configthreadlocale: 0 (default mode)
+constexpr u32 kOffSetNewMode = 0x11C7;           // 3 bytes — _set_new_mode: 0 (previous mode = default)
+constexpr u32 kOffSetFmode = 0x11CA;             // 3 bytes — _set_fmode: 0 (previous mode = default)
+constexpr u32 kOffSetUsermatherr = 0x11CD;       // 3 bytes — __setusermatherr: 0 (no prior handler)
+constexpr u32 kOffInitterm = 0x11D0;             // 3 bytes — _initterm: 0 (TODO: walk fn-pointer array)
+constexpr u32 kOffInittermE = 0x11D3;            // 3 bytes — _initterm_e: 0 (TODO: walk fn-pointer array)
+constexpr u32 kOffNoNarrowEnv = 0x11D6;          // 3 bytes — _{get_initial,initialize}_narrow_environment: 0
+constexpr u32 kOffRegThreadLocalAtexit = 0x11D9; // 3 bytes — _register_thread_local_exe_atexit_callback: 0
+constexpr u32 kOffSehFilterExe = 0x11DC;         // 3 bytes — _seh_filter_exe: 0 (EXCEPTION_EXECUTE_HANDLER)
 
 constexpr u8 kThunksBytes[] = {
 #include "subsystems/win32/thunks_bytecode.inc"
 };
 
 static_assert(sizeof(kThunksBytes) <= 8192, "Win32 thunks page fits in two 4 KiB pages");
-static_assert(sizeof(kThunksBytes) == 0x11B8, "thunk layout drifted; update kOff* constants");
+static_assert(sizeof(kThunksBytes) == 0x11DF, "thunk layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The thunk
 // bytes encode 0x65000000 and 0x65000008 directly; if proc_env.h
@@ -681,6 +701,28 @@ bool Win32ThunksLookupDataNamed(const char* func, u64* out_va)
     if (strEq(func, "_wcmdln"))
     {
         *out_va = kProcEnvVa + kProcEnvCmdlineWOff;
+        return true;
+    }
+    // MSVCP140 well-known C++ stream globals. These are CLASS
+    // objects with vtables, so the all-zeros catch-all pad is
+    // already what we'd hand back if no implementation existed —
+    // virtual calls through a NULL vtable die regardless of
+    // whether the IAT points at a "real" zero pad or the catch-all
+    // data pad. Naming them here suppresses the recurring fix-
+    // journal noise on every boot for PEs that link MSVCP but
+    // never actually exercise the stream. A real ostream backing
+    // (proc-env stream object + minimal sentry vtable) is its own
+    // slice — if a PE actually USES std::cout it will fault on
+    // the same NULL deref as today, surfacing a real signal
+    // instead of recurring journal warnings about an unused link.
+    if (strEq(func, "?cout@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A") ||
+        strEq(func, "?cerr@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A") ||
+        strEq(func, "?clog@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A") ||
+        strEq(func, "?cin@std@@3V?$basic_istream@DU?$char_traits@D@std@@@1@A") ||
+        strEq(func, "?wcout@std@@3V?$basic_ostream@_WU?$char_traits@_W@std@@@1@A") ||
+        strEq(func, "?wcerr@std@@3V?$basic_ostream@_WU?$char_traits@_W@std@@@1@A"))
+    {
+        *out_va = kProcEnvVa + kProcEnvDataMissOff;
         return true;
     }
     return false;

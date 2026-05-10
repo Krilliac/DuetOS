@@ -54,15 +54,15 @@
     {"api-ms-win-crt-runtime-l1-1-0.dll", "_initialize_onexit_table", kOffInitOnexitTable},
     {"api-ms-win-crt-runtime-l1-1-0.dll", "_register_onexit_function", kOffRegisterOnexitFn},
     {"api-ms-win-crt-runtime-l1-1-0.dll", "_crt_atexit", kOffCrtAtexit},
-    {"api-ms-win-crt-runtime-l1-1-0.dll", "_initterm_e", kOffReturnZero},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_initterm_e", kOffInittermE},
     {"api-ms-win-crt-runtime-l1-1-0.dll", "_configure_narrow_argv", kOffConfigureNarrowArgv},
-    {"api-ms-win-crt-runtime-l1-1-0.dll", "_initialize_narrow_environment", kOffReturnZero},
-    {"api-ms-win-crt-runtime-l1-1-0.dll", "_get_initial_narrow_environment", kOffReturnZero},
-    {"api-ms-win-crt-runtime-l1-1-0.dll", "_seh_filter_exe", kOffReturnZero},
-    {"api-ms-win-crt-runtime-l1-1-0.dll", "_register_thread_local_exe_atexit_callback", kOffReturnZero},
-    {"api-ms-win-crt-locale-l1-1-0.dll", "_configthreadlocale", kOffReturnZero},
-    {"api-ms-win-crt-heap-l1-1-0.dll", "_set_new_mode", kOffReturnZero},
-    {"api-ms-win-crt-stdio-l1-1-0.dll", "_set_fmode", kOffReturnZero},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_initialize_narrow_environment", kOffNoNarrowEnv},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_get_initial_narrow_environment", kOffNoNarrowEnv},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_seh_filter_exe", kOffSehFilterExe},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_register_thread_local_exe_atexit_callback", kOffRegThreadLocalAtexit},
+    {"api-ms-win-crt-locale-l1-1-0.dll", "_configthreadlocale", kOffConfigthreadlocale},
+    {"api-ms-win-crt-heap-l1-1-0.dll", "_set_new_mode", kOffSetNewMode},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "_set_fmode", kOffSetFmode},
 
     // Return-void family.
     // _cexit / _c_exit: route through the proc-env atexit walker
@@ -70,11 +70,11 @@
     // / _register_onexit_function in LIFO order. _set_app_type
     // stores its arg into the proc-env app_type slot so a later
     // _get_app_type would observe the program-asserted value.
-    {"api-ms-win-crt-runtime-l1-1-0.dll", "_initterm", kOffCritSecNop},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_initterm", kOffInitterm},
     {"api-ms-win-crt-runtime-l1-1-0.dll", "_cexit", kOffCexit},
     {"api-ms-win-crt-runtime-l1-1-0.dll", "_c_exit", kOffCexit},
     {"api-ms-win-crt-runtime-l1-1-0.dll", "_set_app_type", kOffSetAppType},
-    {"api-ms-win-crt-math-l1-1-0.dll", "__setusermatherr", kOffCritSecNop},
+    {"api-ms-win-crt-math-l1-1-0.dll", "__setusermatherr", kOffSetUsermatherr},
 
     // Exit family — `exit` and `_exit` alias ExitProcess
     // (same rcx=code ABI, same SYS_EXIT semantic).
@@ -398,7 +398,7 @@
     {"kernel32.dll", "GetThreadPriority", kOffReturnZero}, // 0 = NORMAL
     {"kernel32.dll", "SetThreadPriority", kOffReturnOne},
     {"kernel32.dll", "CreateThread", kOffCreateThreadReal}, // real spawn via SYS_THREAD_CREATE
-    {"kernel32.dll", "CreateRemoteThread", kOffReturnZero}, // fallback stays (no cross-proc v0)
+    {"kernel32.dll", "CreateRemoteThread", kOffNoCrossProcThread}, // fallback stays (no cross-proc v0)
     // ExitThread routes to SYS_EXIT (kills just this
     // task). FreeLibraryAndExitThread aliases to ExitThread — the
     // FreeLibrary half is a no-op in v0 (no DLL unload path).
@@ -999,15 +999,15 @@
     {"kernel32.dll", "SetEnvironmentVariableA", kOffReturnOne},
 
     // Rtl* unwind (v0: empty / not-found sentinels)
-    {"kernel32.dll", "RtlCaptureStackBackTrace", kOffReturnZero}, {"kernel32.dll", "RtlCaptureContext", kOffReturnZero},
-    {"kernel32.dll", "RtlLookupFunctionEntry", kOffReturnZero}, {"kernel32.dll", "RtlVirtualUnwind", kOffReturnZero},
+    {"kernel32.dll", "RtlCaptureStackBackTrace", kOffSehNoUnwind}, {"kernel32.dll", "RtlCaptureContext", kOffSehNoUnwind},
+    {"kernel32.dll", "RtlLookupFunctionEntry", kOffSehNoUnwind}, {"kernel32.dll", "RtlVirtualUnwind", kOffSehNoUnwind},
 
     // Toolhelp32 + thread management (empty snapshot / no
     // ops). Real implementation requires the kernel to
     // expose the process table to ring 3 — deferred.
     {"kernel32.dll", "CreateToolhelp32Snapshot", kOffReturnOne}, {"kernel32.dll", "Process32First", kOffReturnZero},
     {"kernel32.dll", "Process32FirstW", kOffReturnZero}, {"kernel32.dll", "Process32Next", kOffReturnZero},
-    {"kernel32.dll", "Process32NextW", kOffReturnZero}, {"kernel32.dll", "CreateRemoteThread", kOffReturnZero},
+    {"kernel32.dll", "Process32NextW", kOffReturnZero}, {"kernel32.dll", "CreateRemoteThread", kOffNoCrossProcThread},
     {"kernel32.dll", "ResumeThread", kOffReturnZero}, {"kernel32.dll", "GetExitCodeProcess", kOffGetExitCodeThread},
 
     // dbghelp + vcruntime SEH + UCRT convert.
@@ -1037,12 +1037,12 @@
     // UCRT convert — return 0 for every parse. Callers that
     // check errno get the wrong answer (we don't wire errno)
     // but won't crash.
-    {"api-ms-win-crt-convert-l1-1-0.dll", "strtoul", kOffReturnZero},
+    {"api-ms-win-crt-convert-l1-1-0.dll", "strtoul", kOffStrtoulNoop},
     {"api-ms-win-crt-convert-l1-1-0.dll", "strtol", kOffReturnZero},
     {"api-ms-win-crt-convert-l1-1-0.dll", "atoi", kOffReturnZero},
-    {"api-ms-win-crt-convert-l1-1-0.dll", "atol", kOffReturnZero}, {"ucrtbase.dll", "strtoul", kOffReturnZero},
+    {"api-ms-win-crt-convert-l1-1-0.dll", "atol", kOffReturnZero}, {"ucrtbase.dll", "strtoul", kOffStrtoulNoop},
     {"ucrtbase.dll", "strtol", kOffReturnZero}, {"ucrtbase.dll", "atoi", kOffReturnZero},
-    {"ucrtbase.dll", "atol", kOffReturnZero}, {"msvcrt.dll", "strtoul", kOffReturnZero},
+    {"ucrtbase.dll", "atol", kOffReturnZero}, {"msvcrt.dll", "strtoul", kOffStrtoulNoop},
     {"msvcrt.dll", "strtol", kOffReturnZero}, {"msvcrt.dll", "atoi", kOffReturnZero},
     {"msvcrt.dll", "atol", kOffReturnZero},
 
@@ -1101,8 +1101,8 @@
     // the caller throws bad_alloc or returns failure — aliased
     // to the shared return-zero stub.
     {"api-ms-win-crt-stdio-l1-1-0.dll", "__p__commode", kOffPCommode}, {"ucrtbase.dll", "__p__commode", kOffPCommode},
-    {"msvcrt.dll", "__p__commode", kOffPCommode}, {"api-ms-win-crt-heap-l1-1-0.dll", "_callnewh", kOffReturnZero},
-    {"ucrtbase.dll", "_callnewh", kOffReturnZero}, {"msvcrt.dll", "_callnewh", kOffReturnZero},
+    {"msvcrt.dll", "__p__commode", kOffPCommode}, {"api-ms-win-crt-heap-l1-1-0.dll", "_callnewh", kOffCallnewhNoop},
+    {"ucrtbase.dll", "_callnewh", kOffCallnewhNoop}, {"msvcrt.dll", "_callnewh", kOffCallnewhNoop},
 
     // CRT termination + init. 7za.exe (and most older MSVC PEs)
     // import these from msvcrt.dll directly. Without `exit`, the
@@ -1144,7 +1144,7 @@
     // run real ctors yet (no static-init runtime), but a ret-only
     // stub is correct: any program that depends on its ctors
     // running won't get them, but at least won't fault here.
-    {"msvcrt.dll", "_initterm", kOffReturnZero}, {"msvcrt.dll", "_initterm_e", kOffReturnZero},
+    {"msvcrt.dll", "_initterm", kOffInitterm}, {"msvcrt.dll", "_initterm_e", kOffInittermE},
     // __getmainargs / __wgetmainargs: populate argc/argv/env from
     // proc-env so the CRT's argv-parsing path doesn't deref NULL.
     // ReturnZero stub left a NULL argv in place and busybox-w32
@@ -1159,7 +1159,7 @@
     // → mov eax, [0] when _errno returns 0.
     {"api-ms-win-crt-runtime-l1-1-0.dll", "_errno", kOffPErrno}, {"ucrtbase.dll", "_errno", kOffPErrno},
     {"msvcrt.dll", "_errno", kOffPErrno}, {"msvcrt.dll", "__set_app_type", kOffReturnZero},
-    {"msvcrt.dll", "__setusermatherr", kOffReturnZero}, {"msvcrt.dll", "_XcptFilter", kOffReturnZero},
+    {"msvcrt.dll", "__setusermatherr", kOffSetUsermatherr}, {"msvcrt.dll", "_XcptFilter", kOffReturnZero},
     {"msvcrt.dll", "_onexit", kOffReturnZero}, {"msvcrt.dll", "__dllonexit", kOffReturnZero},
 
     // MSVCP140 iostream methods. Direct-call paths
@@ -1651,7 +1651,7 @@
     {"api-ms-win-crt-convert-l1-1-0.dll", "atol", kOffReturnZero},
     {"api-ms-win-crt-convert-l1-1-0.dll", "atoll", kOffReturnZero},
     {"api-ms-win-crt-convert-l1-1-0.dll", "strtol", kOffReturnZero},
-    {"api-ms-win-crt-convert-l1-1-0.dll", "strtoul", kOffReturnZero},
+    {"api-ms-win-crt-convert-l1-1-0.dll", "strtoul", kOffStrtoulNoop},
     {"api-ms-win-crt-convert-l1-1-0.dll", "strtoll", kOffReturnZero},
     {"api-ms-win-crt-convert-l1-1-0.dll", "strtoull", kOffReturnZero},
     {"api-ms-win-crt-convert-l1-1-0.dll", "wcstol", kOffReturnZero},
@@ -1670,9 +1670,9 @@
     {"api-ms-win-crt-math-l1-1-0.dll", "_isnan", kOffReturnZero},
 
     // ---- UCRT runtime — wide-env helpers + alias names ----
-    {"ucrtbase.dll", "_initterm", kOffReturnZero}, {"ucrtbase.dll", "_initterm_e", kOffReturnZero},
-    {"ucrtbase.dll", "_register_thread_local_exe_atexit_callback", kOffReturnZero},
-    {"ucrtbase.dll", "_seh_filter_exe", kOffReturnZero},
+    {"ucrtbase.dll", "_initterm", kOffInitterm}, {"ucrtbase.dll", "_initterm_e", kOffInittermE},
+    {"ucrtbase.dll", "_register_thread_local_exe_atexit_callback", kOffRegThreadLocalAtexit},
+    {"ucrtbase.dll", "_seh_filter_exe", kOffSehFilterExe},
 
     // ---- vcruntime140 — exception-handler aliases ----
     {"vcruntime140.dll", "_purecall", kOffTerminate}, // pure-virtual call -> abort

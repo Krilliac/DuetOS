@@ -1465,7 +1465,13 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
                     core::LogWithString(core::LogLevel::Error, "pe-resolve", "  from", "dll", dll_name);
                     return false;
                 }
-                is_noop_stub = true;
+                // Only the catch-all branches resolved to a generic
+                // noop. data_named pointed the IAT slot at a real
+                // proc-env-backed location; treating it as a noop
+                // would re-journal it on every boot via the
+                // noop-stub path below, defeating the dedup the
+                // data-named lookup provides.
+                is_noop_stub = !data_named;
                 const char* msg = data_named ? "data import -> proc-env named slot"
                                   : is_data  ? "unknown import -> data-miss zero pad"
                                              : "unknown import -> catch-all NO-OP";
