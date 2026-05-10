@@ -6843,3 +6843,45 @@ doc helps future readers audit the trail.
 - **Related roadmap track(s):** T1-03 (residual KEYUP +
   capture/foreground gaps tracked on the row); T1-04 closed
   with this entry.
+
+---
+
+## 2026-05-10 — WM_KEYUP / WM_SYSKEYUP routing closes T1-03
+
+- **Scope:** `kernel/core/main.cpp`, `wiki/reference/Roadmap.md`,
+  `wiki/subsystems/Compositor.md`
+- **Commit:** this slice
+- **Decision:** Extend the kbd-reader's release branch in
+  `kernel/core/main.cpp` to post `WM_KEYUP` (0x0101) /
+  `WM_SYSKEYUP` (0x0105) to the focused PE before the existing
+  `continue` that swallows release edges. Modifier-only
+  transitions (`ev.code == kKeyNone`) skip — modifier state is
+  already tracked via `WindowInputTrackKey` and a release of
+  the modifier alone has no VK to deliver. lParam carries the
+  Win32-spec layout: bit 30 (previous state) = 1, bit 31
+  (transition state) = 1, bit 29 = Alt context, repeat-count
+  = 1 in the low 16 bits. The CompositorLock bracket mirrors
+  the existing KEYDOWN branch so the post and `WindowMsgWakeAll`
+  serialise against compose. Re-audit of T1-03's other claimed
+  residuals (`SetCapture` + `SetForegroundWindow`) found both
+  are already wired: the mouse-routing block in `main.cpp`
+  consults `WindowGetCapture()` before the HWND-under-cursor
+  hit-test, and `SetForegroundWindow` plumbs through
+  `SetActiveWindow` → `SYS_WIN_SET_ACTIVE` → `WindowRaise`,
+  which sets `g_active_window`.
+- **Why:** PE workloads that distinguish hold-vs-tap (game
+  input, modifier-aware shortcut handlers, anything that uses
+  `GetKeyState` reactively rather than polling) need the
+  release edge — without it a key looks held forever from the
+  PE's perspective. The cost is a single extra
+  CompositorLock/Unlock + WindowPostMessage per release packet,
+  which the kbd-reader already pays for the press path.
+- **Rules out / defers:** `SYS_RUN_TYPE_*` doesn't carry the
+  scan code itself — the wParam is the VK (kernel `kKey*`
+  enum), so a PE that needs to disambiguate scan vs VK
+  (e.g. raw input) still has nothing. That's a separate
+  syscall surface (raw input / WM_INPUT) and is not on any
+  active track.
+- **Revisit when:** a PE workload demands raw scan codes via
+  `WM_INPUT` / `RegisterRawInputDevices`.
+- **Related roadmap track(s):** T1-03 closed.

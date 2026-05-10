@@ -381,19 +381,6 @@ Action-id allocation:
 - **Per-window message queues**: `GetMessage` / `PeekMessage` return
   `WM_QUIT` for unhandled paths so event-driven programs exit their
   pump immediately.
-- **`WM_KEYUP` / `WM_SYSKEYUP` not routed to PEs**: the kernel
-  mouse-reader posts `WM_KEYDOWN` / `WM_SYSKEYDOWN` / `WM_CHAR` /
-  `WM_SYSCHAR` to the focused PE today, but key release edges
-  drop on the floor. The input event source carries
-  `is_release` already; the gap is the kernel-side post in
-  `kernel/core/main.cpp`. Tracked as the residual half of
-  Roadmap row T1-03.
-- **`SetCapture` / `ReleaseCapture` are stateful no-ops**: the
-  USER32 entry points record/return the captured HWND, but the
-  kernel mouse loop routes by HWND-under-cursor on every packet,
-  so a PE button that wants to receive `WM_LBUTTONUP` after the
-  cursor leaves the window doesn't yet. Same row (T1-03) gates
-  the kernel-side override.
 - **Submenu marshaling across `SYS_WIN_TRACK_POPUP`**: GAP. PE
   apps that need nested menus call `TrackPopupMenu` recursively
   from their `WM_COMMAND` handler.

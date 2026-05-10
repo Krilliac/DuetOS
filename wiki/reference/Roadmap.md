@@ -596,6 +596,19 @@ extends. Next:
 > `gdi_smoke`. Syscalls 62/63/64 (`SYS_WIN_PEEK_MSG` /
 > `SYS_WIN_GET_MSG` / `SYS_WIN_POST_MSG`) carry messages;
 > `DispatchMessage` is pure-userland (calls the WNDPROC directly).
+> **T1-03** keyboard/mouse routing closed: the kernel mouse-reader
+> + kbd-reader in `kernel/core/main.cpp` post `WM_KEYDOWN` /
+> `WM_SYSKEYDOWN` / `WM_KEYUP` / `WM_SYSKEYUP` / `WM_CHAR` /
+> `WM_SYSCHAR` (Alt held flips KEYDOWN/KEYUP/CHAR to their SYS
+> variants and sets lParam bit 29) plus `WM_MOUSEMOVE` (0x0200) /
+> `WM_LBUTTONDOWN` (0x0201) / `WM_LBUTTONUP` (0x0202) /
+> `WM_LBUTTONDBLCLK` (0x0203) / `WM_MOUSEWHEEL` (0x020A) to the
+> focused PE, with client-coordinate lParam packing. The mouse
+> route consults `WindowGetCapture()` first so a `SetCapture()`d
+> window keeps receiving events after the cursor leaves;
+> `SetForegroundWindow` plumbs through `SetActiveWindow` →
+> `SYS_WIN_SET_ACTIVE` → `WindowRaise` and rewrites
+> `g_active_window`.
 > **T1-04** chrome interactions shipped: the kernel mouse-reader in
 > `kernel/core/main.cpp` posts `WindowRaise` on any in-window press
 > for Z-order, runs `WindowPointInMinBox` / `WindowPointInMaxBox` /
@@ -614,10 +627,8 @@ extends. Next:
 > (110) / SYS_GDI_DELETE_DC (111) / SYS_GDI_DELETE_OBJECT (112) /
 > SYS_GDI_BITBLT_DC (113) into the per-process MemDC + Bitmap
 > tables in `kernel/subsystems/win32/gdi_objects.cpp`.
-
-| ID | Scope | Priority | Task | Acceptance |
-| --- | --- | --- | --- | --- |
-| T1-03 | win32 | P1 | Finish keyboard/mouse routing to the foreground/captured window: outstanding pieces are `WM_KEYUP` (0x0101) / `WM_SYSKEYUP` (0x0105) edges (today only press + char post), `SetCapture` / `ReleaseCapture` actually overriding the kernel hit-test (today the user32 entry points return success but the kernel mouse loop still routes by HWND under cursor), and `SetForegroundWindow` honouring the PE-requested HWND outside of explicit raise-on-press (today returns success but doesn't change the active window). `WM_KEYDOWN` / `WM_SYSKEYDOWN` / `WM_CHAR` / `WM_SYSCHAR` and `WM_MOUSEMOVE` / `WM_LBUTTONDOWN` / `WM_LBUTTONUP` / `WM_LBUTTONDBLCLK` + mouse-wheel are all routed today. | A PE that `SetCapture()`s a button keeps receiving `WM_LBUTTONUP` after the cursor leaves the window, and `WM_KEYUP` fires for every released key on the focused PE. |
+>
+> Track 1 has no remaining roadmap rows.
 
 ### Track 2 — COM infrastructure
 
