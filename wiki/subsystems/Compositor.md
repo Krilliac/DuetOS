@@ -22,12 +22,28 @@ framebuffer:
 
 - **Native apps** (`kernel/apps/`): Calculator, Notepad, Files, Task
   Manager, Kernel Log, Clock, GFX Demo, About / System Info, Help,
-  Calendar, Image Viewer, Browser (HTTP only), Trash. Each is an
-  in-kernel native app, registered via a `ThemeRole` enum entry +
-  per-theme palette extension; the compositor scans the role table
-  on every recompose and the Start menu's `/APPS/*.MNF` enumerator
-  raises the matching window when a manifest specifies
-  `target=<role>`.
+  Calendar, Image Viewer, Browser (HTTP only), Trash, Notification
+  Center, **System Monitor (Sysmon)**, **Hex Viewer**, **Character
+  Map**. Each is an in-kernel native app, registered via a
+  `ThemeRole` enum entry + per-theme palette extension; the
+  compositor scans the role table on every recompose and the Start
+  menu's `/APPS/*.MNF` enumerator raises the matching window when a
+  manifest specifies `target=<role>`.
+
+  - **Sysmon** — rolling 64-sample chart of heap-used % and
+    free-list fragmentation, sampled by the 1 Hz ui-ticker. About
+    answers "what's the heap right now"; Sysmon answers "is the
+    heap leaking" by surfacing the trend.
+  - **Hex Viewer** — read-only hex / ASCII inspector for FAT32
+    root files (capped at 1 MiB per file). Classic 16-bytes-per-row
+    layout with offset / hex / ASCII gutter. Wired into the kernel
+    scrollbar drag-the-thumb path.
+  - **Character Map** — codepoint grid over the bitmap font's
+    printable range (0x20..0x7E ASCII; Tab toggles to the full
+    0x20..0xFF range that includes the font8x8 extended glyphs).
+    Enter / Space copies the selected glyph as UTF-8 to the
+    clipboard so it pastes into Notes / Calculator / Browser via
+    the standard Ctrl+V path.
 - **Win32 PE windows**: `windowed_hello` paints with `Rectangle` /
   `Ellipse` / `DrawTextW` / `FillRect`, dispatches `WM_PAINT` /
   `WM_TIMER` / `WM_LBUTTONDOWN` through a user-registered `WndProc`,
