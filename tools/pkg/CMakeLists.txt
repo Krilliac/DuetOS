@@ -88,10 +88,14 @@ add_library(duet-pkg-lib STATIC
     src/error.cpp
     src/repo/repo_manifest.cpp
     src/repo/package_manifest.cpp
+    src/repo/repo_manager.cpp
     src/registry/registry.cpp
     src/crypto/verifier.cpp
     src/crypto/keying.cpp
     src/net/fetcher.cpp
+    src/resolve/resolver.cpp
+    src/install/installer.cpp
+    src/install/uninstaller.cpp
     src/cli/cli.cpp
 )
 target_include_directories(duet-pkg-lib PUBLIC src)
@@ -127,5 +131,19 @@ add_executable(test_fetcher tests/test_fetcher.cpp)
 target_link_libraries(test_fetcher PRIVATE duet-pkg-lib)
 add_test(NAME fetcher COMMAND test_fetcher)
 set_tests_properties(fetcher PROPERTIES SKIP_RETURN_CODE 77)
+
+add_executable(test_repo_manager tests/test_repo_manager.cpp)
+target_link_libraries(test_repo_manager PRIVATE duet-pkg-lib PkgConfig::SODIUM)
+add_test(NAME repo_manager COMMAND test_repo_manager)
+set_tests_properties(repo_manager PROPERTIES SKIP_RETURN_CODE 77)
+
+add_executable(test_resolver tests/test_resolver.cpp)
+target_link_libraries(test_resolver PRIVATE duet-pkg-lib)
+add_test(NAME resolver COMMAND test_resolver)
+
+add_executable(test_installer tests/test_installer.cpp)
+target_link_libraries(test_installer PRIVATE duet-pkg-lib PkgConfig::SODIUM)
+add_test(NAME installer COMMAND test_installer)
+set_tests_properties(installer PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
 
 message(STATUS "duet-pkg configured (C++${CMAKE_CXX_STANDARD}, sanitizers=${DUETOS_PKG_SANITIZERS})")

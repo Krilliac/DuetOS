@@ -12,7 +12,7 @@ The implementation lands in seven phases (see
 spec); this page describes the **current** state of the
 binary plus pointers to what's coming.
 
-## What ships today (Phases 1–3)
+## What ships today (Phases 1–5)
 
 | Subcommand | Status | Notes |
 |------------|--------|-------|
@@ -36,6 +36,31 @@ HTTP/HTTPS via libcurl with progress callback + resume via
 when the server returns 200 instead of 206). TLS verification
 on by default; `FetchOptions::allow_insecure` is the only knob
 that turns it off.
+
+Phase 4 added the repo manager (`src/repo/repo_manager.{hpp,cpp}`):
+`repo add/remove/list/sync` end-to-end, with `repo add` fetching
+the remote `repo.toml` + `repo.toml.sig`, parsing the embedded
+`signing_key`, checking its SHA-256 fingerprint matches the
+caller's `--trust-key`, verifying the detached signature, then
+caching everything to `$DUET_PKG_CONFIG_DIR` (default
+`/etc/duet-pkg`). Trust DB primitives (`SaveTrustedKey`,
+`LoadTrustedKey`, `RemoveTrustedKey`, `ListTrustedFingerprints`)
+back the `key list/trust/revoke` subcommands.
+
+Phase 5 added the resolver + installer + uninstaller. The
+resolver (`src/resolve/resolver.{hpp,cpp}`) is Kahn's-algorithm
+topo sort over the package dep graph, with stable name-sort
+tie-breaking, repo-priority "first-write-wins" lookup, and hard
+detection of cycles / missing deps / missing target. The
+installer (`src/install/installer.{hpp,cpp}`) does the full
+download → SHA-256-verify → Ed25519-verify-against-repo-key →
+`tar xzf` → atomic `current` symlink → `/usr/local/bin/<leaf>`
+shim → registry entry write pipeline, with rollback on any step
+failure. The uninstaller (`src/install/uninstaller.{hpp,cpp}`)
+runs the inverse, gated on a reverse-dep check that refuses
+removal of a package any other installed package depends on
+unless `--force`. The CLI's `install` / `remove` / `update`
+subcommands all dispatch through these.
 
 ## Layout
 

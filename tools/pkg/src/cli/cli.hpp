@@ -27,6 +27,8 @@ struct ParsedArgs
     bool flag_available = false;
     bool flag_verbose = false;
     bool flag_help = false;
+    bool flag_insecure = false;   // --insecure (disable TLS verify)
+    bool flag_force = false;      // --force (replace / bypass safety prompts)
     std::string_view opt_repo;    // --repo <name>
     std::string_view opt_version; // --version <ver>
     std::string_view opt_repo_url;
