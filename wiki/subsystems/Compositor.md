@@ -403,9 +403,6 @@ Action-id allocation:
 - **Audio feedback / system sounds**: gated on HDA codec
   programming (Roadmap.md). PC speaker exists but is not
   wired to any UI event.
-- **PE `SetCursor` ABI**: gated on a new `SYS_GDI_*` syscall.
-  Native windows can change cursor shape via `CursorSetShape`,
-  but PE apps have no equivalent.
 - **Settings GUIs (Display / Sound / Keyboard / Mouse /
   Date-Time)**: each is its own slice per CLAUDE.md.
 - **Trash / ramfs mode in Files**: only FAT32 mode has a v0

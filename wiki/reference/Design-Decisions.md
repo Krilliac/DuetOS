@@ -6885,3 +6885,67 @@ doc helps future readers audit the trail.
 - **Revisit when:** a PE workload demands raw scan codes via
   `WM_INPUT` / `RegisterRawInputDevices`.
 - **Related roadmap track(s):** T1-03 closed.
+
+---
+
+## 2026-05-10 — Track 10 build/CI roadmap closures (T10-01/02/03)
+
+- **Scope:** `wiki/reference/Roadmap.md`,
+  `wiki/subsystems/Compositor.md`
+- **Commit:** this slice (documentation flush — the underlying
+  CI workflow, KASAN preset, and LTO preset all landed in
+  earlier slices).
+- **Decision:** Three Track 10 rows correspond to landed work
+  and are closed in the Roadmap:
+  - **T10-01** — `.github/workflows/build.yml` runs check-format
+    + build-debug + build-release + qemu-smoke jobs on push to
+    `main` / `claude/**` and on PRs to `main`;
+    `.github/workflows/release.yml` publishes the rolling
+    flavor channels. README carries the build-flavors + per-
+    channel + lifetime-downloads badges so the Roadmap row's
+    "green CI badge" acceptance is met.
+  - **T10-02** — `CMakePresets.json` defines the `x86_64-kasan`
+    configure preset (inherits `x86_64-debug`, sets
+    `DUETOS_KASAN=ON`) and the matching `x86_64-kasan` build
+    preset. `cmake --preset x86_64-kasan` configures cleanly.
+  - **T10-03** — `CMakePresets.json` defines `x86_64-release-lto`
+    with `DUETOS_LTO=ON`; the kernel link succeeds through lld
+    with ThinLTO enabled.
+- **Why:** The Roadmap convention is to delete a row in the
+  same commit that delivers the code (CLAUDE.md "Updating
+  roadmap items"). The build-system slices that delivered
+  T10-01/02/03 didn't follow through on the Roadmap edit, so
+  this audit closes them retroactively. T10-04 stays open with
+  a precise residual: the host ctest harness today covers
+  Result + string + syscall_error + cvt + text_hash +
+  d3dcompiler + damage_rect + wild_address; PE parser + VFS
+  path resolution + registry lookup still live only in the
+  on-target boot self-tests.
+- **Rules out / defers:** Adding PE parser / VFS / registry
+  fixtures to the host harness needs `#ifdef DUETOS_HOST_TEST`
+  shims around kernel-only globals (frame allocator, panic,
+  serial), which is a real refactor — deferred until a workload
+  warrants it.
+- **Revisit when:** a regression hits one of the three uncovered
+  pillars on the on-target side and a host-runnable repro would
+  shorten the loop.
+- **Related roadmap track(s):** Track 10 (T10-01/02/03 closed;
+  T10-04 narrowed).
+
+---
+
+## 2026-05-10 — Compositor.md: drop duplicate `PE SetCursor` GAP
+
+- **Scope:** `wiki/subsystems/Compositor.md`
+- **Commit:** this slice
+- **Decision:** The Compositor "Known Limits / GAPs" list
+  carried the `PE SetCursor` GAP twice (once near the menu
+  block, once near the Settings block). Drop the second
+  occurrence so a reader gets one canonical statement of the
+  limit. Both bullets said the same thing in slightly
+  different prose.
+- **Why:** Duplicate Known-Limits trip up new readers — they
+  start hunting for the difference between "GAP" and "ABI"
+  framings when there isn't one. One bullet = one canonical
+  description of a GAP. Trivial cleanup.
+- **Related roadmap track(s):** none — pure docs hygiene.

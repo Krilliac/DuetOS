@@ -739,12 +739,21 @@ extends. Next:
 
 ### Track 10 — Build and CI
 
+> **T10-01** GitHub Actions CI shipped — see
+> `.github/workflows/build.yml` (check-format + build-debug +
+> build-release + qemu-smoke jobs) and `.github/workflows/release.yml`
+> (rolling channel ISO publishing). README carries the build-flavors
+> + per-channel + lifetime-downloads badges.
+> **T10-02** `x86_64-kasan` preset shipped — `CMakePresets.json` defines
+> the configure preset (inherits `x86_64-debug`) with `DUETOS_KASAN=ON`
+> and the matching `x86_64-kasan` build preset.
+> **T10-03** ThinLTO release preset shipped — `CMakePresets.json` defines
+> `x86_64-release-lto` with `DUETOS_LTO=ON`; the kernel link succeeds
+> through lld.
+
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
-| T10-01 | build | P1 | Wire GitHub Actions CI for release build, parallel build, CTest smoke, clang-format dry-run, apt dependencies, cache, and ISO artifacts. | README shows a green CI badge from a passing workflow. |
-| T10-02 | build | P1 | Add `x86_64-kasan` preset, kernel-address sanitizer or freestanding-compatible custom shadow diagnostics, `DUETOS_KASAN=1`, and allocator gating. | `cmake --preset x86_64-kasan` builds a KASAN-diagnostic kernel. |
-| T10-03 | build | P2 | Add ThinLTO release preset/flags gated behind `DUETOS_LTO=ON` and optional CI coverage. | Release LTO build links successfully with lld. |
-| T10-04 | build | P2 | Add hosted `ctest` unit harness for Result, PE parser, VFS path resolution, registry lookup, and string helpers. | Host `ctest` runs without QEMU and covers the listed units. |
+| T10-04 | build | P2 | Extend the hosted `ctest` harness to cover the four listed pillars. (Result, string, syscall_error, cvt, text_hash, d3dcompiler, damage_rect, wild_address are wired today; PE parser, VFS path resolution, registry lookup are still kernel-only.) | Host `ctest` runs without QEMU and covers Result + PE parser + VFS path resolution + registry lookup + string helpers. |
 
 ### Track 11 — Kernel infrastructure gaps
 
