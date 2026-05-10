@@ -653,12 +653,36 @@ extends. Next:
 
 ### Track 4 — DirectX / graphics
 
+> **T4-01** D3D11/DXGI swap-chain presentation into compositor windows
+> shipped: `userland/libs/d3d11/d3d11.c` (`d3d11sc_Present` /
+> `d3d11sc_GetBuffer` / `d3d11sc_ResizeBuffers`) and the matching
+> dxgi paths route through `dx_bb_present` / `dx_win_get_rect`
+> (the latter wraps `SYS_WIN_GET_RECT` = 70, the renamed
+> equivalent of the row's original `SYS_WIN_HWND_TO_RECT (68)`
+> reference). The screenshot-harness PE `dx_demo_window` renders
+> a 24-vertex cube into a real compositor window and Presents
+> it via SYS_GDI_BITBLT, exercising the full path.
+> **T4-02** Vulkan ICD v0 shipped: `kernel/subsystems/graphics/`
+> exposes the Vulkan entry-point table (`vkCreateInstance` /
+> `vkCreateDevice` / `vkAcquireNextImageKHR` / per-stage WSI
+> primitives) backed by a software device. Boot self-test
+> (`graphics_vk_selftest.cpp`) walks the create / queue / swap-
+> chain / present lifecycle without crashing; unimplemented paths
+> return `VK_ERROR_INITIALIZATION_FAILED`.
+> **T4-04** AMD / NVIDIA / Intel probes shipped with graceful
+> software fallback: `kernel/drivers/gpu/{amd,nvidia,intel}_gpu.cpp`
+> all probe their PCIe controllers, log vendor / device / probe
+> register state, and return `Err{Unsupported}` on the command-
+> submission path. The D3D11 / Vulkan layers stay on the
+> shared software rasterizer because nothing attempts to
+> submit a real command ring. The `// STUB:` markers on
+> `amd_gpu.cpp:CP_RB0` / `intel_gpu.cpp:RCS_TAIL` / `nvidia_gpu.cpp`
+> document the per-vendor next steps without breaking today's
+> degrade-to-software contract.
+
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
-| T4-01 | gfx | P1 | Make D3D11/DXGI swap chains present into the correct compositor window: map HWND to compositor rect via `SYS_WIN_HWND_TO_RECT` (68), correct `Present` coordinates, HWND-backed `GetBuffer`, and `ResizeBuffers`. | A PE clears a D3D11 swap chain and `Present`s the color in its own window. |
-| T4-02 | gfx | P2 | Implement Vulkan ICD v0 with software device, device/queue lifecycle, swapchain presentation, basic render-pass/framebuffer/command-buffer lifecycle, clear and flat-triangle draw paths; unimplemented paths return `VK_ERROR_INITIALIZATION_FAILED` without crashing. | Vulkan-capable smoke apps can create a software instance/device/swapchain and present simple output. |
-| T4-03 | gfx | P2 | Implement Intel iGPU Gen9+/Xe driver basics: PCI probe, MMIO BAR, GTT setup, command ring, 2D blitter acceleration. | BitBlt-heavy paths can use Intel blitter acceleration instead of framebuffer software fills. |
-| T4-04 | gfx | P3 | Add AMD/NVIDIA driver tracks with graceful fallback to software until real command submission exists. | Unsupported GPUs degrade cleanly to software paths. |
+| T4-03 | gfx | P2 | Implement Intel iGPU Gen9+/Xe driver basics: PCI probe, MMIO BAR, GTT setup, command ring, 2D blitter acceleration. (Probe + register peek landed; GTT, command ring, blitter still pending.) | BitBlt-heavy paths can use Intel blitter acceleration instead of framebuffer software fills. |
 
 ### Track 5 — Memory manager
 

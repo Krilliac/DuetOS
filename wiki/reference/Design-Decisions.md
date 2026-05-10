@@ -7010,3 +7010,49 @@ doc helps future readers audit the trail.
   the missing infrastructure (Track 8-02 / event pulse surface
   / system-clock setting).
 - **Related roadmap track(s):** T11-04 closed.
+
+---
+
+## 2026-05-10 — Track 4 retroactive closures (T4-01 / T4-02 / T4-04)
+
+- **Scope:** `wiki/reference/Roadmap.md`
+- **Commit:** this slice (documentation flush — code landed in
+  earlier slices)
+- **Decision:** Three Track 4 rows correspond to landed work and
+  are closed in the Roadmap with a banner pointing at the live
+  files:
+  - **T4-01** — D3D11 / DXGI swap-chain present into compositor
+    windows works. `userland/libs/d3d11/d3d11.c::d3d11sc_Present`
+    + `d3d11sc_GetBuffer` + `d3d11sc_ResizeBuffers` route through
+    `dx_bb_present` / `dx_win_get_rect`. The screenshot harness
+    `dx_demo_window` renders a 24-vertex cube into a real HWND
+    via the swap chain. The row called out
+    `SYS_WIN_HWND_TO_RECT (68)`, but the actual syscall is
+    `SYS_WIN_GET_RECT = 70` (the rename happened in an earlier
+    slice; same contract, different name).
+  - **T4-02** — Vulkan ICD v0 ships in
+    `kernel/subsystems/graphics/`. `graphics_vk_selftest.cpp`
+    walks the create / queue / swapchain / present lifecycle on
+    every boot without crashing; unimplemented paths return
+    `VK_ERROR_INITIALIZATION_FAILED`.
+  - **T4-04** — AMD / NVIDIA / Intel GPU probes ship and
+    degrade cleanly: each `Probe` reads vendor/device IDs +
+    BAR-region MMIO and logs discovery state; the command-
+    submission path returns `Err{Unsupported}`. The D3D11 and
+    Vulkan layers don't attempt to enqueue commands so the
+    fallback to the shared software rasterizer is automatic.
+    The `// STUB:` markers on the per-vendor TUs document the
+    next steps without changing the degrade-to-software
+    contract.
+- **Why:** Same retroactive-closure pattern as the Track 10
+  audit. The Roadmap convention is "delete the row in the
+  same commit that delivers the code," but several
+  long-running tracks landed work piecemeal and never
+  retroactively pruned the row.
+- **Rules out / defers:** T4-03 (Intel iGPU command ring + 2D
+  blitter) is the only Track 4 row left open. The probe lands;
+  the GTT setup + ring + blitter haven't.
+- **Revisit when:** a workload depends on hardware-accelerated
+  BitBlt — the row stays open until then.
+- **Related roadmap track(s):** Track 4 (T4-01/02/04 closed;
+  T4-03 narrowed).
