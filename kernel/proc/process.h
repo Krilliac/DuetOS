@@ -519,6 +519,7 @@ struct Process
         Ramfs,
         Fat32,
         DuetFs,
+        Pipe, // cross-process pipe end (Linux pipe pool slot)
     };
     struct Win32FileHandle
     {
@@ -556,6 +557,13 @@ struct Process
         // bounded in-place write.
         static constexpr u64 kFat32PathCap = 64;
         char fat32_path[kFat32PathCap];
+        // Pipe-backed handle. `pipe_pool_idx` indexes the kernel
+        // pipe pool (kernel/subsystems/linux/syscall_pipe.cpp);
+        // `pipe_is_write_end` distinguishes the write side from
+        // the read side. Both ends of a single CreatePipe call
+        // share the same pool index.
+        u32 pipe_pool_idx;      // valid iff kind == Pipe
+        bool pipe_is_write_end; // valid iff kind == Pipe
     };
     static constexpr u64 kWin32HandleCap = 16;
     static constexpr u64 kWin32HandleBase = 0x100;

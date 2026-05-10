@@ -2327,7 +2327,21 @@ __declspec(dllexport) HANDLE OpenProcess(DWORD access, BOOL inherit, DWORD pid)
     return (HANDLE)(long long)-1; /* current-process pseudo-handle */
 }
 
-/* CreatePipe — anonymous pipe. Single in-process buffered ring. */
+/* CreatePipe — anonymous cross-process pipe (T11-02).
+ *
+ * Routes through SYS_WIN32_CREATE_PIPE (186): the kernel
+ * allocates a pipe pool slot (the same pool the Linux pipe(2)
+ * syscall uses) and writes two Win32-shaped file handles back
+ * to the caller. ReadFile / WriteFile / CloseHandle on those
+ * handles dispatch by FsBackingKind through the file-route
+ * layer to PipeRead / PipeWrite / PipeReleaseRead / PipeReleaseWrite.
+ *
+ * The legacy in-process ring (DUETOS_PIPE_RD / DUETOS_PIPE_WR
+ * sentinels) is kept as a fallback for callers that hit the
+ * kernel-side OOM path — the kernel's pipe pool is fixed at
+ * 16 slots, and a workload that allocates 17 pipes still gets
+ * a (process-local, non-cross-process) ring rather than a
+ * NULL handle. */
 typedef struct
 {
     unsigned char buf[4096];
@@ -2345,6 +2359,25 @@ __declspec(dllexport) BOOL CreatePipe(HANDLE* rd, HANDLE* wr, void* sa, DWORD sz
     (void)sz;
     if (rd == (HANDLE*)0 || wr == (HANDLE*)0)
         return 0;
+    /* SYS_WIN32_CREATE_PIPE = 186. Returns 0 on success with
+     * both handles written to the user pointers; non-zero on
+     * pool / table full. */
+    unsigned long long read_h = 0;
+    unsigned long long write_h = 0;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)186), "D"((long long)&read_h), "S"((long long)&write_h)
+                     : "memory");
+    if (rv == 0 && read_h != 0 && write_h != 0)
+    {
+        *rd = (HANDLE)(UINT_PTR)read_h;
+        *wr = (HANDLE)(UINT_PTR)write_h;
+        return 1;
+    }
+    /* Kernel-side allocation failed — fall back to the in-process
+     * ring. Loses cross-process semantics but keeps existing
+     * single-process callers working. */
     g_pipe.head = 0;
     g_pipe.tail = 0;
     g_pipe.in_use = 1;

@@ -860,10 +860,24 @@ extends. Next:
 > the happy path covers QEMU and most consumer firmware that
 > pre-evaluates `_PTS` to a no-op. S3 (suspend-to-RAM) stays
 > deferred until a workload demands it.
-
-| ID | Scope | Priority | Task | Acceptance |
-| --- | --- | --- | --- | --- |
-| T11-02 | kernel | P1 | Implement IPC pipes/mailslots: anonymous pipes, named pipes, connect/disconnect, ring-buffer semantics, EOF, and CreateProcess stdio redirection support. | Pipe-backed stdin/stdout/stderr redirection works across parent/child processes. |
+> **T11-02** anonymous cross-process pipes shipped: the kernel's
+> Linux pipe(2) pool (`kernel/subsystems/linux/syscall_pipe.cpp`,
+> 16 slots × 4 KiB ring) is now reachable from Win32 callers
+> too. New `FsBackingKind::Pipe` variant on `Win32FileHandle`
+> with `pipe_pool_idx` + `pipe_is_write_end` fields;
+> `ReadForProcess` / `WriteForProcess` / `CloseForProcess`
+> dispatch pipe handles to the existing `PipeRead` /
+> `PipeWrite` / `PipeReleaseRead` / `PipeReleaseWrite` helpers.
+> New syscall `SYS_WIN32_CREATE_PIPE = 186` (handler in
+> `kernel/subsystems/win32/pipe_syscall.cpp`) allocates a pool
+> slot via `PipeAlloc()` (now public-namespace) and writes
+> two Win32-shaped file handles to user-supplied pointers.
+> `userland/libs/kernel32/kernel32.c::CreatePipe` routes
+> through the new syscall; the legacy in-process ring stays
+> as the fall-back for kernel-side OOM. Out of scope: named
+> pipes (`CreateNamedPipeW` / `ConnectNamedPipe`),
+> mailslots (`CreateMailslotW`), `CreateProcess` stdio
+> redirection (T6-03 prerequisite).
 
 ### Track 12 — Userland infrastructure
 

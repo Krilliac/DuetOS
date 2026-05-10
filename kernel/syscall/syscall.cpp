@@ -86,6 +86,7 @@
 #include "subsystems/win32/mutex_syscall.h"
 #include "subsystems/win32/event_syscall.h"
 #include "subsystems/win32/named_kobj_syscall.h"
+#include "subsystems/win32/pipe_syscall.h"
 #include "subsystems/win32/semaphore_syscall.h"
 #include "subsystems/win32/dir_syscall.h"
 #include "subsystems/win32/iocp_job.h"
@@ -801,6 +802,9 @@ void SyscallDispatch(arch::TrapFrame* frame)
     }
     case SYS_NAMED_KOBJ_OPEN_OR_CREATE:
         ::duetos::subsystems::win32::DoNamedKObjOpenOrCreate(frame);
+        return;
+    case SYS_WIN32_CREATE_PIPE:
+        ::duetos::subsystems::win32::DoWin32CreatePipe(frame);
         return;
     case SYS_NOW_NS:
         DoNowNs(frame);

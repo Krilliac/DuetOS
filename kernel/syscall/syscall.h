@@ -1791,6 +1791,18 @@ enum SyscallNumber : u64
     // bias added) on success, (u64)-1 on bad params / OOM /
     // open-only-miss.
     SYS_NAMED_KOBJ_OPEN_OR_CREATE = 185,
+
+    // SYS_WIN32_CREATE_PIPE — anonymous cross-process pipe.
+    // Backs Win32 CreatePipe in `userland/libs/kernel32`.
+    //   rdi = user u64* read_handle_out  — caller-allocated
+    //   rsi = user u64* write_handle_out — caller-allocated
+    // Returns 0 on success, (u64)-1 on table-full / pipe-pool-full.
+    // On success both pointers receive a Win32-shaped file handle
+    // (kWin32HandleBase + slot). The two handles share a kernel
+    // pipe pool slot — reads on the read end consume bytes that
+    // writes on the write end appended, regardless of which
+    // process holds either handle.
+    SYS_WIN32_CREATE_PIPE = 186,
 };
 
 /// Cursor-shape values the PE side hands the kernel via

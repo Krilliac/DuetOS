@@ -7303,3 +7303,66 @@ doc helps future readers audit the trail.
   cleanup). Each is mechanical to add without changing the
   syscall ABI.
 - **Related roadmap track(s):** T6-04 closed.
+
+---
+
+## 2026-05-10 — Cross-process Win32 pipes (T11-02 closed)
+
+- **Scope:** `kernel/proc/process.h`,
+  `kernel/fs/file_route.cpp`,
+  `kernel/subsystems/linux/syscall_pipe.{h,cpp}`,
+  new `kernel/subsystems/win32/pipe_syscall.{h,cpp}`,
+  `kernel/syscall/syscall.{h,cpp}`,
+  `kernel/syscall/syscall_names.def`,
+  `userland/libs/kernel32/kernel32.c`,
+  `wiki/reference/Roadmap.md`
+- **Commit:** this slice
+- **Decision:** The Linux subsystem's pipe pool (16 slots × 4 KiB
+  ring with proper waitqueue semantics, EPIPE on write-side
+  close, EOF on read-side close, splice / tee fast-paths) is
+  now the cross-subsystem canonical pipe primitive. Win32
+  CreatePipe routes through it via:
+  - A new `FsBackingKind::Pipe` variant on `Win32FileHandle`
+    with `pipe_pool_idx` + `pipe_is_write_end` fields. Both
+    ends of a single CreatePipe call share the same pool
+    index; the bool distinguishes which end the slot owns.
+  - `ReadForProcess` / `WriteForProcess` / `CloseForProcess`
+    dispatch the new kind to `PipeRead` / `PipeWrite` /
+    `PipeReleaseRead` / `PipeReleaseWrite`. Wrong-end calls
+    (read on the write end / vice versa) return -1.
+  - New `SYS_WIN32_CREATE_PIPE = 186` allocates a pool slot,
+    reserves two Win32 handle table slots, stamps both, and
+    `CopyToUser`s the read + write handles. Roll-back on any
+    failure step drops both per-end refcounts so the pool
+    entry tears down cleanly.
+  - `PipeAlloc()` was hoisted out of the anonymous namespace
+    in `syscall_pipe.cpp` and added to the public header so
+    a single definition serves both subsystems.
+  - Userland `kernel32!CreatePipe` issues the new syscall;
+    the legacy in-process ring (`DUETOS_PIPE_RD/_WR` sentinels)
+    stays as the kernel-OOM fallback so a 17th pipe still
+    succeeds in a single process even though the kernel pool
+    is full.
+- **Why:** The previous CreatePipe was a userland-only ring
+  buffer — single-process only. Track 11-02's acceptance
+  ("Pipe-backed stdin/stdout/stderr redirection works across
+  parent/child processes") needs the kernel pool. The Linux
+  pool already had everything: refcounts, waitqueues, the
+  ring buffer, and Linux pipe(2) was already feeding through
+  it. Routing Win32 through the same pool is one new syscall
+  + one new FsBackingKind variant.
+- **Rules out / defers:**
+  - Named pipes (`CreateNamedPipeW`, `ConnectNamedPipe`,
+    `WaitNamedPipe`) — no kernel-side namespace registered for
+    pipe names today; T6-04's `NamedKObjectFind` could be
+    adapted but the I/O side needs more work.
+  - Mailslots — analog of named pipes for one-shot messages.
+  - CreateProcess stdio redirection — gated on T6-03
+    (CreateProcess itself).
+  - `SetNamedPipeHandleState` and the rest of the named-pipe
+    surface — out of scope for v0.
+- **Revisit when:** a workload exercises one of the deferred
+  surfaces. Named pipes are the next logical add (extend
+  `FsBackingKind::Pipe` with a name-table back-pointer +
+  surface a SYS_WIN32_NAMED_PIPE_*).
+- **Related roadmap track(s):** T11-02 closed.

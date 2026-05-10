@@ -87,6 +87,27 @@ Eventfd g_eventfd_pool[kEventfdPoolCap];
 // ============================================================
 // Pipe pool helpers
 // ============================================================
+// PipeAlloc moved out of the anonymous namespace below so the
+// header declaration (used by Win32 CreatePipe routing as well
+// as Linux pipe2) can resolve to a single definition.
+
+void PipeMaybeFree(u32 idx)
+{
+    // Caller already holds cli.
+    Pipe& p = g_pipe_pool[idx];
+    if (p.read_refs == 0 && p.write_refs == 0 && p.in_use)
+    {
+        u8* b = p.buf;
+        p.in_use = false;
+        p.buf = nullptr;
+        // Free outside cli — same rationale as alloc.
+        arch::Sti();
+        mm::KFree(b);
+        arch::Cli();
+    }
+}
+
+} // namespace
 
 i32 PipeAlloc()
 {
@@ -132,24 +153,6 @@ i32 PipeAlloc()
     arch::Sti();
     return -1;
 }
-
-void PipeMaybeFree(u32 idx)
-{
-    // Caller already holds cli.
-    Pipe& p = g_pipe_pool[idx];
-    if (p.read_refs == 0 && p.write_refs == 0 && p.in_use)
-    {
-        u8* b = p.buf;
-        p.in_use = false;
-        p.buf = nullptr;
-        // Free outside cli — same rationale as alloc.
-        arch::Sti();
-        mm::KFree(b);
-        arch::Cli();
-    }
-}
-
-} // namespace
 
 void PipeRetainRead(u32 idx)
 {
