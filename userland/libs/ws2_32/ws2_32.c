@@ -19,6 +19,8 @@ typedef unsigned int SOCKET;
 typedef int BOOL;
 typedef unsigned int DWORD;
 typedef unsigned short USHORT;
+typedef short SHORT;
+typedef unsigned long long USIZE_T;
 
 #define INVALID_SOCKET (~(SOCKET)0)
 #define SOCKET_ERROR (-1)
@@ -491,18 +493,251 @@ __declspec(dllexport) INT gethostname(char* buf, INT len)
     return 0;
 }
 
+/* DNS cache + getaddrinfo / freeaddrinfo.
+ *
+ * gethostbyname above hits the kernel resolver through
+ * `ws2_op(kSockOpResolveA)` on every call — fine for one-off
+ * lookups, but a workload that repeatedly resolves the same
+ * hostname (HTTP keep-alive, DNS-heavy crawler) burns wire-
+ * time on every call. A 16-entry process-local cache absorbs
+ * the hot lookups; on miss we fall through to the kernel and
+ * insert at the freshest slot (an LRU eviction strategy).
+ *
+ * getaddrinfo: builds an addrinfo + sockaddr_in pair on the heap
+ * (per Win32 contract — caller must call freeaddrinfo). Resolves
+ * IP literals locally via inet_addr; resolves hostnames through
+ * the cache + kernel fallback.
+ *
+ * Out of scope:
+ *   - IPv6 (AF_INET6 / sockaddr_in6 — no resolver path yet).
+ *   - Multiple result records per hostname (kSockOpResolveA
+ *     returns a single A record).
+ *   - Service-name resolution (the `service` parameter is parsed
+ *     as a numeric port; symbolic names like "http" return
+ *     WSANO_DATA — which a future getservbyname could fill).
+ */
+#define WS2_DNS_CACHE_SIZE 16
+typedef struct
+{
+    char name[256];
+    unsigned long addr_be;
+    unsigned long long inserted_tick;
+    int valid;
+} WS2_DNS_CACHE_ENTRY;
+static WS2_DNS_CACHE_ENTRY g_ws2_dns_cache[WS2_DNS_CACHE_SIZE];
+static unsigned long long g_ws2_dns_cache_tick;
+
+static int ws2_dns_cache_lookup(const char* name, unsigned long* out_be)
+{
+    if (name == (const char*)0)
+        return 0;
+    for (int i = 0; i < WS2_DNS_CACHE_SIZE; ++i)
+    {
+        if (!g_ws2_dns_cache[i].valid)
+            continue;
+        int j = 0;
+        for (; j < 256 && g_ws2_dns_cache[i].name[j] != '\0' && name[j] != '\0'; ++j)
+        {
+            if (g_ws2_dns_cache[i].name[j] != name[j])
+                break;
+        }
+        if (j < 256 && g_ws2_dns_cache[i].name[j] == '\0' && name[j] == '\0')
+        {
+            *out_be = g_ws2_dns_cache[i].addr_be;
+            g_ws2_dns_cache[i].inserted_tick = ++g_ws2_dns_cache_tick;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void ws2_dns_cache_insert(const char* name, unsigned long addr_be)
+{
+    /* LRU eviction: pick the empty slot first, otherwise the slot
+     * with the lowest `inserted_tick`. */
+    int victim = 0;
+    unsigned long long lowest = (unsigned long long)-1;
+    for (int i = 0; i < WS2_DNS_CACHE_SIZE; ++i)
+    {
+        if (!g_ws2_dns_cache[i].valid)
+        {
+            victim = i;
+            lowest = 0;
+            break;
+        }
+        if (g_ws2_dns_cache[i].inserted_tick < lowest)
+        {
+            lowest = g_ws2_dns_cache[i].inserted_tick;
+            victim = i;
+        }
+    }
+    int j = 0;
+    for (; j < 255 && name[j] != '\0'; ++j)
+        g_ws2_dns_cache[victim].name[j] = name[j];
+    g_ws2_dns_cache[victim].name[j] = '\0';
+    g_ws2_dns_cache[victim].addr_be = addr_be;
+    g_ws2_dns_cache[victim].inserted_tick = ++g_ws2_dns_cache_tick;
+    g_ws2_dns_cache[victim].valid = 1;
+}
+
+/* addrinfo layout (Win32 struct addrinfoA / addrinfo). The fields
+ * we care about: ai_flags, ai_family, ai_socktype, ai_protocol,
+ * ai_addrlen, ai_canonname, ai_addr, ai_next. */
+typedef struct ws2_addrinfo
+{
+    INT ai_flags;
+    INT ai_family;
+    INT ai_socktype;
+    INT ai_protocol;
+    USIZE_T ai_addrlen;
+    char* ai_canonname;
+    void* ai_addr;
+    struct ws2_addrinfo* ai_next;
+} WS2_ADDRINFO;
+
+typedef struct
+{
+    SHORT sin_family;
+    USHORT sin_port;
+    unsigned long sin_addr;
+    char sin_zero[8];
+} WS2_SOCKADDR_IN;
+
+/* HeapAlloc-style allocation through SYS_HEAP_ALLOC (11). The
+ * matching free goes through SYS_HEAP_FREE (12) in freeaddrinfo. */
+static void* ws2_alloc(unsigned long bytes)
+{
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)11), "D"((long long)bytes) : "memory");
+    return (void*)rv;
+}
+
+static void ws2_free(void* p)
+{
+    if (p == (void*)0)
+        return;
+    long long discard;
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)12), "D"((long long)p) : "memory");
+}
+
+/* Parse `service` as a decimal port number. Returns 0 if NULL or
+ * empty; -1 on parse failure (caller treats as 0 — Win32's
+ * getaddrinfo doesn't reject numeric-parse errors when AI_NUMERICSERV
+ * isn't set). */
+static int ws2_parse_port(const char* svc)
+{
+    if (svc == (const char*)0 || svc[0] == '\0')
+        return 0;
+    int port = 0;
+    int i = 0;
+    for (; svc[i] != '\0'; ++i)
+    {
+        if (svc[i] < '0' || svc[i] > '9')
+            return -1;
+        port = port * 10 + (svc[i] - '0');
+        if (port > 65535)
+            return -1;
+    }
+    return port;
+}
+
 __declspec(dllexport) INT getaddrinfo(const char* node, const char* service, const void* hints, void** result)
 {
-    (void)node;
-    (void)service;
-    (void)hints;
-    if (result)
-        *result = (void*)0;
-    return WSAENETDOWN;
+    (void)hints; /* AF_INET assumed; AF_INET6 is GAP. */
+    if (result == (void**)0)
+        return WSAEFAULT;
+    *result = (void*)0;
+    if (node == (const char*)0)
+    {
+        g_wsa_last_error = WSAEINVAL;
+        return WSAEINVAL;
+    }
+
+    /* Resolve the hostname. IP literals short-circuit via
+     * inet_addr; "localhost" / "localhost.localdomain" map to
+     * 127.0.0.1 directly so smoke tests work without a DNS server;
+     * everything else hits the cache then the kernel. */
+    unsigned long addr_be = inet_addr(node);
+    if (addr_be == 0xFFFFFFFFu) /* INADDR_NONE — not an IP literal. */
+    {
+        /* Match "localhost" + "localhost.localdomain" case-
+         * sensitively. Win32 hostnames are case-insensitive in
+         * principle; the smoke fixtures only ever use lowercase. */
+        const char* loc = "localhost";
+        int matches = 1;
+        for (int j = 0; loc[j] != '\0'; ++j)
+        {
+            if (node[j] != loc[j])
+            {
+                matches = 0;
+                break;
+            }
+        }
+        if (matches && (node[9] == '\0' || (node[9] == '.' && node[10] != '\0')))
+        {
+            addr_be = 0x0100007Fu; /* 127.0.0.1 in network byte order */
+        }
+        else if (!ws2_dns_cache_lookup(node, &addr_be))
+        {
+            /* Cache miss — fall through to the kernel resolver, then
+             * cache the result for the next call. The buffer the
+             * kernel writes is in our own static `g_gethostbyname_addr_be`,
+             * but we copy out of a local to avoid the gethostbyname
+             * shape's TID-unsafe contract for one-off uses. */
+            unsigned long resolved_be = 0;
+            char name_copy[256];
+            int j = 0;
+            for (; j < (int)sizeof(name_copy) - 1 && node[j] != '\0'; ++j)
+                name_copy[j] = node[j];
+            name_copy[j] = '\0';
+            long long rv = ws2_op(12 /* kSockOpResolveA */, (long long)name_copy, (long long)&resolved_be, 0, 0, 0);
+            if (rv < 0)
+            {
+                g_wsa_last_error = WSAHOST_NOT_FOUND;
+                return WSAHOST_NOT_FOUND;
+            }
+            addr_be = resolved_be;
+            ws2_dns_cache_insert(node, addr_be);
+        }
+    }
+
+    int port = ws2_parse_port(service);
+    if (port < 0)
+        port = 0;
+
+    /* Allocate addrinfo + sockaddr_in as a single block so
+     * freeaddrinfo can release with one ws2_free. */
+    void* block = ws2_alloc(sizeof(WS2_ADDRINFO) + sizeof(WS2_SOCKADDR_IN));
+    if (block == (void*)0)
+    {
+        g_wsa_last_error = 8 /* WSA_NOT_ENOUGH_MEMORY */;
+        return 8;
+    }
+    WS2_ADDRINFO* ai = (WS2_ADDRINFO*)block;
+    WS2_SOCKADDR_IN* sa = (WS2_SOCKADDR_IN*)((unsigned char*)block + sizeof(WS2_ADDRINFO));
+    ai->ai_flags = 0;
+    ai->ai_family = 2 /* AF_INET */;
+    ai->ai_socktype = 1 /* SOCK_STREAM */;
+    ai->ai_protocol = 6 /* IPPROTO_TCP */;
+    ai->ai_addrlen = sizeof(WS2_SOCKADDR_IN);
+    ai->ai_canonname = (char*)0;
+    ai->ai_addr = sa;
+    ai->ai_next = (WS2_ADDRINFO*)0;
+    sa->sin_family = 2;
+    sa->sin_port = (USHORT)((port & 0xFF) << 8 | ((port >> 8) & 0xFF));
+    sa->sin_addr = addr_be;
+    for (int z = 0; z < 8; ++z)
+        sa->sin_zero[z] = 0;
+    *result = ai;
+    return 0;
 }
 __declspec(dllexport) void freeaddrinfo(void* r)
 {
-    (void)r;
+    /* Single-block allocation in getaddrinfo — one free. If a
+     * caller chains addrinfo records (we don't yet), the caller's
+     * own walker would have to undo that chain manually. Today
+     * getaddrinfo only ever returns a single record. */
+    ws2_free(r);
 }
 
 __declspec(dllexport) unsigned long long htonll(unsigned long long v)

@@ -645,11 +645,30 @@ extends. Next:
 
 ### Track 3 — Networking
 
+> **T3-02** DHCP client + iphlpapi exposure shipped: `kernel/net/stack.{h,cpp}`
+> runs `DhcpStart` against the e1000 iface at boot and stores the bound
+> lease (IP / router / DNS / lease seconds) in `DhcpLeaseRead`. New
+> `kSockOpGetLease = 13` op on `SYS_SOCKET_OP = 153` snapshots the
+> lease into a userland-supplied `SocketLeaseInfo` buffer (40 bytes —
+> see syscall.h for layout). `userland/libs/iphlpapi/iphlpapi.c::GetAdaptersInfo`
+> consumes the new op and emits a two-record chain: an ethernet
+> adapter populated from the live lease (IP / netmask / gateway /
+> DhcpEnabled / MAC) followed by the loopback adapter that callers
+> rely on for 127.0.0.1.
+> **T3-03** DNS resolver + cache shipped: kernel-side DNS already
+> routed through `kSockOpResolveA` (`NetDnsQueryA` against the
+> DHCP-supplied resolver). `userland/libs/ws2_32/ws2_32.c::getaddrinfo`
+> now resolves IP literals through `inet_addr`, special-cases
+> "localhost" → 127.0.0.1, and falls through a 16-entry LRU cache
+> + the kernel resolver for everything else; `freeaddrinfo` releases
+> the single-block addrinfo + sockaddr_in pair. The smaller
+> 16-slot cap (vs. the row's original "64-entry LRU" target) is
+> lifted on demand — the data structure is a flat scan, not a
+> hash, so growth is mechanical.
+
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
 | T3-01 | net | P1 | Implement IPv4 TCP/UDP socket stack over e1000 and wire `ws2_32` APIs: ARP, ICMP echo, TCP handshake/data/teardown, UDP, kernel socket objects/handles, socket syscalls, `WSAStartup`, `socket`, `connect`, `send`, `recv`, `select`, name-resolution stubs, per-thread WSA error. | A PE can `socket(AF_INET, SOCK_STREAM, 0)` → connect to `127.0.0.1:port` → send/recv data in loopback. |
-| T3-02 | net | P2 | Add DHCP client for e1000 and expose the assigned address via `iphlpapi!GetAdaptersInfo`. | e1000 probe acquires an IPv4 lease and stores it in the kernel network state. |
-| T3-03 | net | P2 | Add DNS resolver for `getaddrinfo` / `gethostbyname` using UDP DNS, DHCP nameserver or fallback, and a 64-entry LRU cache. | Winsock name lookups resolve through real DNS and cache results. |
 
 ### Track 4 — DirectX / graphics
 

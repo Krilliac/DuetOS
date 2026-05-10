@@ -7056,3 +7056,70 @@ doc helps future readers audit the trail.
   BitBlt — the row stays open until then.
 - **Related roadmap track(s):** Track 4 (T4-01/02/04 closed;
   T4-03 narrowed).
+
+---
+
+## 2026-05-10 — Track 3 networking closures (T3-02 + T3-03)
+
+- **Scope:** `kernel/syscall/syscall.h`,
+  `kernel/syscall/syscall.cpp`,
+  `userland/libs/iphlpapi/iphlpapi.c`,
+  `userland/libs/ws2_32/ws2_32.c`,
+  `wiki/reference/Roadmap.md`
+- **Commit:** this slice
+- **Decision:**
+  - Add `kSockOpGetLease = 13` op on `SYS_SOCKET_OP` (153) that
+    snapshots the kernel's DHCP lease into a 40-byte
+    `SocketLeaseInfo` user buffer (valid flag, IP / netmask /
+    gateway / DNS in network byte order, lease-seconds, MAC,
+    iface index). The MAC is read through `InterfaceMac(0)`;
+    netmask defaults to /24 when the lease is valid (DhcpLease
+    doesn't currently carry netmask). A short user buffer
+    fails with `-ERANGE`.
+  - `iphlpapi!GetAdaptersInfo` calls the new op and emits a
+    two-record chain: ethernet (eth0, populated from the lease)
+    followed by loopback (127.0.0.1). The "next" pointer is
+    written directly into the first record's bytes 0..7. When
+    the lease syscall fails (no NIC bound) the ethernet record
+    still ships with zero IP / mask / gateway so callers see
+    a row.
+  - `ws2_32!getaddrinfo` now resolves IP literals through
+    `inet_addr`, special-cases "localhost" /
+    "localhost.localdomain" → 127.0.0.1, and falls through a
+    16-slot LRU cache + `kSockOpResolveA` for everything else.
+    `freeaddrinfo` releases the single-block (addrinfo +
+    sockaddr_in) allocation.
+- **Why:**
+  - The Track 3 acceptance criteria for both rows hinge on
+    "Winsock name lookups resolve through real DNS" and
+    "e1000 probe acquires an IPv4 lease and stores it in the
+    kernel network state." The kernel side already had both
+    pieces; the missing seam was the userland-facing exposure.
+    A new socket op + an iphlpapi rewrite is cheaper than
+    inventing a new top-level syscall, since the
+    SYS_SOCKET_OP dispatcher already handles the cap-gating
+    and the user-buffer copy.
+- **Rules out / defers:**
+  - No netmask in the kernel's `DhcpLease` struct — the
+    syscall returns 255.255.255.0 as a default. Real DHCP-
+    OPTION 1 parsing into the lease is a separate slice (the
+    kernel does decode the option byte but doesn't store it).
+  - `GetAdaptersAddresses` still returns `ERROR_NO_DATA` —
+    the larger IP_ADAPTER_ADDRESSES layout has IPv6 prefix
+    chains and per-adapter DNS that aren't yet tracked.
+  - Cache size is 16 entries, not 64. Growth is mechanical
+    (the lookup is a flat scan); enlarge when a workload
+    demands it.
+  - IPv6 (AF_INET6 / sockaddr_in6 / AAAA records) — no
+    resolver path yet.
+  - Service-name resolution in `getaddrinfo` (the `service`
+    parameter is parsed as a numeric port; symbolic names
+    like "http" aren't recognised). A future
+    `getservbyname` would fix this without touching the
+    resolver.
+- **Revisit when:** a workload exercises one of the deferred
+  paths (an IPv6-aware HTTP client, a DHCP server pushing a
+  non-/24 mask, a service-name caller).
+- **Related roadmap track(s):** Track 3 (T3-02 + T3-03 closed;
+  T3-01 still open until WSAStartup → socket → connect → send
+  → recv loopback round-trip is verified end-to-end).

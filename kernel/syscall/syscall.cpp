@@ -1726,6 +1726,57 @@ void SyscallDispatch(arch::TrapFrame* frame)
             rv = 0;
             break;
         }
+        case kSockOpGetLease:
+        {
+            // Snapshot the kernel's DHCP lease state into the
+            // user-supplied SocketLeaseInfo buffer (40 bytes).
+            // See syscall.h for the field layout.
+            struct SocketLeaseInfo
+            {
+                u32 valid;
+                u32 ip_be;
+                u32 netmask_be;
+                u32 gateway_be;
+                u32 dns_be;
+                u32 lease_seconds;
+                u8 mac[6];
+                u8 iface_index;
+                u8 reserved0;
+                u8 reserved1[8];
+            };
+            static_assert(sizeof(SocketLeaseInfo) == 40, "SocketLeaseInfo must be 40 bytes");
+            const u64 cap = frame->rdx;
+            if (cap < sizeof(SocketLeaseInfo))
+            {
+                rv = -34; // ERANGE
+                break;
+            }
+            SocketLeaseInfo info{};
+            const auto lease = ::duetos::net::DhcpLeaseRead();
+            info.valid = lease.valid ? 1u : 0u;
+            const auto pack_be = [](const ::duetos::net::Ipv4Address& a) -> u32 {
+                return (u32(a.octets[0])) | (u32(a.octets[1]) << 8) | (u32(a.octets[2]) << 16) |
+                       (u32(a.octets[3]) << 24);
+            };
+            info.ip_be = pack_be(lease.ip);
+            info.gateway_be = pack_be(lease.router);
+            info.dns_be = pack_be(lease.dns);
+            info.lease_seconds = lease.lease_secs;
+            // No netmask in DhcpLease; default to /24 when valid so
+            // iphlpapi consumers don't see a 0.0.0.0 mask.
+            info.netmask_be = lease.valid ? 0x00FFFFFFu : 0u; // 255.255.255.0 in network byte order
+            info.iface_index = 0;
+            const auto mac = ::duetos::net::InterfaceMac(0);
+            for (u32 i = 0; i < 6; ++i)
+                info.mac[i] = mac.octets[i];
+            if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rsi), &info, sizeof(info)))
+            {
+                rv = -14;
+                break;
+            }
+            rv = 0;
+            break;
+        }
         }
         frame->rax = static_cast<u64>(rv);
         return;
