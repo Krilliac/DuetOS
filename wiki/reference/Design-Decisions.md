@@ -7230,3 +7230,76 @@ doc helps future readers audit the trail.
   powered after a `KernelHalt` call, indicating it needs the
   AML method-execution path.
 - **Related roadmap track(s):** T11-05 closed.
+
+---
+
+## 2026-05-10 — Cross-process named-object namespace (T6-04)
+
+- **Scope:** new `kernel/ipc/named_kobjects.{h,cpp}`,
+  new `kernel/subsystems/win32/named_kobj_syscall.{h,cpp}`,
+  `kernel/syscall/syscall.{h,cpp}`,
+  `kernel/syscall/syscall_names.def`,
+  `kernel/core/main.cpp` (boot self-test wiring),
+  `userland/libs/kernel32/kernel32.c`,
+  `wiki/reference/Roadmap.md`
+- **Commit:** this slice
+- **Decision:** Cross-process named mutex/event/semaphore
+  ships via a new kernel-resident table.
+  - Storage: 32-slot table guarded by a single spinlock, LRU
+    eviction, max name length 64. Fits the typical Win32
+    Global\/Local\ namespace footprint without growing the
+    kernel data section.
+  - Lifetime: the table holds a refcount on every registered
+    KObject. The entry's refcount drops only when the slot is
+    LRU-evicted by another Register call. Callers of
+    `NamedKObjectFind` receive a fresh refcount they're
+    responsible for releasing (typically by handing the
+    kobject off to a HandleTable, which takes its own ref).
+  - ABI: a single new syscall
+    `SYS_NAMED_KOBJ_OPEN_OR_CREATE = 185` covers all three
+    types via a 1-byte type field. `open_only=1` distinguishes
+    `OpenMutex` from `CreateMutex` semantics. The syscall
+    consumes (type, name, name_len_cap, init_state_or_owner,
+    open_only) and returns a type-biased handle so the caller's
+    existing CloseHandle / WaitForSingleObject paths route
+    correctly.
+  - Userland: `kernel32!Create{Mutex,Event,Semaphore}{A,W}`
+    with a non-NULL name route through the new syscall; on
+    success the result is also cached in the existing
+    process-local table for hot-path lookup. `Open*` consults
+    the local cache first, then falls through to the syscall
+    with `open_only=1`. Unnamed paths stay on the existing
+    SYS_MUTEX_CREATE / SYS_EVENT_CREATE / SYS_SEM_CREATE
+    syscalls.
+- **Why:** Win32 contract: `CreateMutexW(NULL, FALSE,
+  L"Global\\Foo")` in process A and `OpenMutexW(0, FALSE,
+  L"Global\\Foo")` in process B must return handles to the
+  SAME kernel object. The previous userland-only name table
+  was process-local — process B's lookup never saw process
+  A's registration. A new syscall is the cleanest way to add
+  the cross-process seam without ABI-breaking changes to the
+  existing per-type Create syscalls.
+- **Rules out / defers:**
+  - Hierarchical namespaces (`Global\` vs `Local\` prefix
+    handling — both flatten into the same table today).
+    Workloads that depend on session-isolated naming will hit
+    accidental aliases; not a concern for v0.
+  - Permission gating. The caller's caps aren't checked; any
+    process can open any name. Tracked under the broader
+    cap-enforcement work, not Track 6.
+  - Owner-pid tracking + process-exit cleanup. The table
+    holds entries until LRU eviction; long-running boxes with
+    many distinct names will see hot entries fight for slots.
+    Bumping `kNamedKObjectSlots` is the v0 fix.
+  - Refcount-on-last-handle-close → unregister. The table
+    holds the entry until LRU; opens hit the cached object
+    even after the original creator's last handle closes.
+    Acceptable for v0 because Wait/Release on a kobj with
+    only the table's ref is a no-op (the kobj is alive but
+    has no active waiters).
+- **Revisit when:** a workload exercises one of the
+  deferred edges (a server that creates 100+ named events,
+  hierarchical namespace use, or a need for process-exit
+  cleanup). Each is mechanical to add without changing the
+  syscall ABI.
+- **Related roadmap track(s):** T6-04 closed.

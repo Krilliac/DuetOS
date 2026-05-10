@@ -3263,6 +3263,25 @@ static void win32_name_w_to_a(const WCHAR_t* w, char* dst)
     dst[i] = 0;
 }
 
+/* SYS_NAMED_KOBJ_OPEN_OR_CREATE = 185. type: 0=mutex, 1=event,
+ * 2=semaphore. open_only=1 for the Open* family (fail with -1
+ * if no existing entry); 0 for the Create* family. Returns the
+ * type-biased handle on success, (long long)-1 on failure. */
+static long long win32_named_kobj_call(unsigned int type, const char* name, unsigned long long init, int open_only)
+{
+    long long rv;
+    register long long r10 __asm__("r10") = (long long)init;
+    register long long r8 __asm__("r8") = (long long)open_only;
+    /* Pass the maximum cap (64) as length cap so the kernel
+     * walks at most 64 bytes — bounded by the user's NUL. */
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)185), "D"((long long)type), "S"((long long)name), "d"((long long)WIN32_NAME_LEN),
+                       "r"(r10), "r"(r8)
+                     : "memory");
+    return rv;
+}
+
 __declspec(dllexport) HANDLE CreateMutexW(void* sec, BOOL bInitialOwner, const WCHAR_t* name)
 {
     (void)sec;
@@ -3270,9 +3289,18 @@ __declspec(dllexport) HANDLE CreateMutexW(void* sec, BOOL bInitialOwner, const W
     win32_name_w_to_a(name, a_name);
     if (a_name[0] != 0)
     {
-        HANDLE existing = win32_named_lookup(WIN32_NAME_KIND_MUTEX, a_name);
-        if (existing)
-            return existing;
+        /* Named — route through the kernel-resident namespace
+         * (T6-04). Two processes opening the same name see the
+         * same kernel object. */
+        long long rv = win32_named_kobj_call(0 /*mutex*/, a_name, (unsigned long long)bInitialOwner, 0);
+        if (rv != -1)
+        {
+            win32_named_register(WIN32_NAME_KIND_MUTEX, a_name, (HANDLE)rv);
+            return (HANDLE)rv;
+        }
+        /* Kernel-side dedup failed (table full / OOM) — fall
+         * through to the unnamed create path so the caller
+         * still gets a usable handle. */
     }
     long long rv;
     __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)25), "D"((long long)bInitialOwner) : "memory");
@@ -3287,9 +3315,12 @@ __declspec(dllexport) HANDLE CreateMutexA(void* sec, BOOL bInitialOwner, const c
     (void)sec;
     if (name && name[0] != 0)
     {
-        HANDLE existing = win32_named_lookup(WIN32_NAME_KIND_MUTEX, name);
-        if (existing)
-            return existing;
+        long long rv = win32_named_kobj_call(0 /*mutex*/, name, (unsigned long long)bInitialOwner, 0);
+        if (rv != -1)
+        {
+            win32_named_register(WIN32_NAME_KIND_MUTEX, name, (HANDLE)rv);
+            return (HANDLE)rv;
+        }
     }
     long long rv;
     __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)25), "D"((long long)bInitialOwner) : "memory");
@@ -3299,7 +3330,7 @@ __declspec(dllexport) HANDLE CreateMutexA(void* sec, BOOL bInitialOwner, const c
     return h;
 }
 
-/* OpenMutexA/W — look up in the process-local name table.
+/* OpenMutexA/W — look up the kernel-resident named-object table.
  * dwDesiredAccess + bInheritHandle are accepted but not enforced;
  * v0 doesn't track per-handle access masks. Returns NULL with
  * ERROR_FILE_NOT_FOUND-equivalent semantics on miss. */
@@ -3307,7 +3338,17 @@ __declspec(dllexport) HANDLE OpenMutexA(DWORD dwDesiredAccess, BOOL bInheritHand
 {
     (void)dwDesiredAccess;
     (void)bInheritHandle;
-    return win32_named_lookup(WIN32_NAME_KIND_MUTEX, name);
+    if (!name || name[0] == 0)
+        return (HANDLE)0;
+    /* Process-local cache hit short-circuits the syscall. */
+    HANDLE local = win32_named_lookup(WIN32_NAME_KIND_MUTEX, name);
+    if (local)
+        return local;
+    long long rv = win32_named_kobj_call(0 /*mutex*/, name, 0, 1 /*open_only*/);
+    if (rv == -1)
+        return (HANDLE)0;
+    win32_named_register(WIN32_NAME_KIND_MUTEX, name, (HANDLE)rv);
+    return (HANDLE)rv;
 }
 
 __declspec(dllexport) HANDLE OpenMutexW(DWORD dwDesiredAccess, BOOL bInheritHandle, const WCHAR_t* name)
@@ -3316,7 +3357,16 @@ __declspec(dllexport) HANDLE OpenMutexW(DWORD dwDesiredAccess, BOOL bInheritHand
     (void)bInheritHandle;
     char a_name[WIN32_NAME_LEN];
     win32_name_w_to_a(name, a_name);
-    return win32_named_lookup(WIN32_NAME_KIND_MUTEX, a_name);
+    if (a_name[0] == 0)
+        return (HANDLE)0;
+    HANDLE local = win32_named_lookup(WIN32_NAME_KIND_MUTEX, a_name);
+    if (local)
+        return local;
+    long long rv = win32_named_kobj_call(0 /*mutex*/, a_name, 0, 1 /*open_only*/);
+    if (rv == -1)
+        return (HANDLE)0;
+    win32_named_register(WIN32_NAME_KIND_MUTEX, a_name, (HANDLE)rv);
+    return (HANDLE)rv;
 }
 
 __declspec(dllexport) BOOL ReleaseMutex(HANDLE h)
@@ -3333,9 +3383,13 @@ __declspec(dllexport) HANDLE CreateEventW(void* sec, BOOL bManualReset, BOOL bIn
     win32_name_w_to_a(name, a_name);
     if (a_name[0] != 0)
     {
-        HANDLE existing = win32_named_lookup(WIN32_NAME_KIND_EVENT, a_name);
-        if (existing)
-            return existing;
+        unsigned long long init = (unsigned long long)((bManualReset ? 1 : 0) | (bInitialState ? 2 : 0));
+        long long rv = win32_named_kobj_call(1 /*event*/, a_name, init, 0);
+        if (rv != -1)
+        {
+            win32_named_register(WIN32_NAME_KIND_EVENT, a_name, (HANDLE)rv);
+            return (HANDLE)rv;
+        }
     }
     long long rv;
     __asm__ volatile("int $0x80"
@@ -3353,9 +3407,13 @@ __declspec(dllexport) HANDLE CreateEventA(void* sec, BOOL bManualReset, BOOL bIn
     (void)sec;
     if (name && name[0] != 0)
     {
-        HANDLE existing = win32_named_lookup(WIN32_NAME_KIND_EVENT, name);
-        if (existing)
-            return existing;
+        unsigned long long init = (unsigned long long)((bManualReset ? 1 : 0) | (bInitialState ? 2 : 0));
+        long long rv = win32_named_kobj_call(1 /*event*/, name, init, 0);
+        if (rv != -1)
+        {
+            win32_named_register(WIN32_NAME_KIND_EVENT, name, (HANDLE)rv);
+            return (HANDLE)rv;
+        }
     }
     long long rv;
     __asm__ volatile("int $0x80"
@@ -3372,7 +3430,16 @@ __declspec(dllexport) HANDLE OpenEventA(DWORD dwDesiredAccess, BOOL bInheritHand
 {
     (void)dwDesiredAccess;
     (void)bInheritHandle;
-    return win32_named_lookup(WIN32_NAME_KIND_EVENT, name);
+    if (!name || name[0] == 0)
+        return (HANDLE)0;
+    HANDLE local = win32_named_lookup(WIN32_NAME_KIND_EVENT, name);
+    if (local)
+        return local;
+    long long rv = win32_named_kobj_call(1 /*event*/, name, 0, 1 /*open_only*/);
+    if (rv == -1)
+        return (HANDLE)0;
+    win32_named_register(WIN32_NAME_KIND_EVENT, name, (HANDLE)rv);
+    return (HANDLE)rv;
 }
 
 __declspec(dllexport) HANDLE OpenEventW(DWORD dwDesiredAccess, BOOL bInheritHandle, const WCHAR_t* name)
@@ -3381,7 +3448,16 @@ __declspec(dllexport) HANDLE OpenEventW(DWORD dwDesiredAccess, BOOL bInheritHand
     (void)bInheritHandle;
     char a_name[WIN32_NAME_LEN];
     win32_name_w_to_a(name, a_name);
-    return win32_named_lookup(WIN32_NAME_KIND_EVENT, a_name);
+    if (a_name[0] == 0)
+        return (HANDLE)0;
+    HANDLE local = win32_named_lookup(WIN32_NAME_KIND_EVENT, a_name);
+    if (local)
+        return local;
+    long long rv = win32_named_kobj_call(1 /*event*/, a_name, 0, 1 /*open_only*/);
+    if (rv == -1)
+        return (HANDLE)0;
+    win32_named_register(WIN32_NAME_KIND_EVENT, a_name, (HANDLE)rv);
+    return (HANDLE)rv;
 }
 
 __declspec(dllexport) BOOL SetEvent(HANDLE h)
@@ -3405,9 +3481,14 @@ __declspec(dllexport) HANDLE CreateSemaphoreW(void* sec, long initial, long maxi
     win32_name_w_to_a(name, a_name);
     if (a_name[0] != 0)
     {
-        HANDLE existing = win32_named_lookup(WIN32_NAME_KIND_SEM, a_name);
-        if (existing)
-            return existing;
+        unsigned long long init =
+            ((unsigned long long)(unsigned long)initial) | (((unsigned long long)(unsigned long)maximum) << 32);
+        long long rv = win32_named_kobj_call(2 /*sem*/, a_name, init, 0);
+        if (rv != -1)
+        {
+            win32_named_register(WIN32_NAME_KIND_SEM, a_name, (HANDLE)rv);
+            return (HANDLE)rv;
+        }
     }
     long long rv;
     __asm__ volatile("int $0x80"
@@ -3425,9 +3506,14 @@ __declspec(dllexport) HANDLE CreateSemaphoreA(void* sec, long initial, long maxi
     (void)sec;
     if (name && name[0] != 0)
     {
-        HANDLE existing = win32_named_lookup(WIN32_NAME_KIND_SEM, name);
-        if (existing)
-            return existing;
+        unsigned long long init =
+            ((unsigned long long)(unsigned long)initial) | (((unsigned long long)(unsigned long)maximum) << 32);
+        long long rv = win32_named_kobj_call(2 /*sem*/, name, init, 0);
+        if (rv != -1)
+        {
+            win32_named_register(WIN32_NAME_KIND_SEM, name, (HANDLE)rv);
+            return (HANDLE)rv;
+        }
     }
     long long rv;
     __asm__ volatile("int $0x80"
@@ -3444,7 +3530,16 @@ __declspec(dllexport) HANDLE OpenSemaphoreA(DWORD dwDesiredAccess, BOOL bInherit
 {
     (void)dwDesiredAccess;
     (void)bInheritHandle;
-    return win32_named_lookup(WIN32_NAME_KIND_SEM, name);
+    if (!name || name[0] == 0)
+        return (HANDLE)0;
+    HANDLE local = win32_named_lookup(WIN32_NAME_KIND_SEM, name);
+    if (local)
+        return local;
+    long long rv = win32_named_kobj_call(2 /*sem*/, name, 0, 1 /*open_only*/);
+    if (rv == -1)
+        return (HANDLE)0;
+    win32_named_register(WIN32_NAME_KIND_SEM, name, (HANDLE)rv);
+    return (HANDLE)rv;
 }
 
 __declspec(dllexport) HANDLE OpenSemaphoreW(DWORD dwDesiredAccess, BOOL bInheritHandle, const WCHAR_t* name)
@@ -3453,7 +3548,16 @@ __declspec(dllexport) HANDLE OpenSemaphoreW(DWORD dwDesiredAccess, BOOL bInherit
     (void)bInheritHandle;
     char a_name[WIN32_NAME_LEN];
     win32_name_w_to_a(name, a_name);
-    return win32_named_lookup(WIN32_NAME_KIND_SEM, a_name);
+    if (a_name[0] == 0)
+        return (HANDLE)0;
+    HANDLE local = win32_named_lookup(WIN32_NAME_KIND_SEM, a_name);
+    if (local)
+        return local;
+    long long rv = win32_named_kobj_call(2 /*sem*/, a_name, 0, 1 /*open_only*/);
+    if (rv == -1)
+        return (HANDLE)0;
+    win32_named_register(WIN32_NAME_KIND_SEM, a_name, (HANDLE)rv);
+    return (HANDLE)rv;
 }
 
 __declspec(dllexport) BOOL ReleaseSemaphore(HANDLE h, long releaseCount, long* lpPreviousCount)

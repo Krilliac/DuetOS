@@ -1773,6 +1773,24 @@ enum SyscallNumber : u64
     //   rsi = byte capacity, must be >= sizeof(SystemPerformanceInfo)
     // Returns 0 on success, -1 on bad pointer / short buffer.
     SYS_SYSTEM_PERFORMANCE_INFO = 184,
+
+    // SYS_NAMED_KOBJ_OPEN_OR_CREATE — kernel-resident named-object
+    // namespace lookup. Backs Win32 Create{Mutex,Event,Semaphore}
+    // and Open{Mutex,Event,Semaphore} when a name is provided.
+    //   rdi = type (0 = mutex, 1 = event, 2 = semaphore)
+    //   rsi = user const char* name (UTF-8 NUL-terminated)
+    //   rdx = name length cap (caller-supplied; max 64)
+    //   r10 = init_state_or_owner — type-specific:
+    //         mutex:     bInitialOwner (0 / 1)
+    //         event:     bit 0 = manual_reset, bit 1 = initial_state
+    //         semaphore: low 32 = initial count, high 32 = maximum
+    //   r8  = open_only (1 = OpenMutex/Event/Semaphore semantics —
+    //         fail with -ENOENT if no existing entry; 0 = create on
+    //         miss)
+    // Returns: handle (with kWin32{Mutex,Event,Semaphore}Base
+    // bias added) on success, (u64)-1 on bad params / OOM /
+    // open-only-miss.
+    SYS_NAMED_KOBJ_OPEN_OR_CREATE = 185,
 };
 
 /// Cursor-shape values the PE side hands the kernel via

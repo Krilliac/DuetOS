@@ -210,6 +210,7 @@
 #include "ipc/kobject.h"
 #include "ipc/ksemaphore.h"
 #include "ipc/kwaitable.h"
+#include "ipc/named_kobjects.h"
 #include "sync/lockdep.h"
 #include "sync/rcu.h"
 #include "sync/rwlock.h"
@@ -2724,6 +2725,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::ipc::KMailboxSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::ipc::KWaitableSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::ipc::KFileSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::ipc::NamedKObjectSelfTest());
     // Linux fd-table helper self-test (Linux fd → KFile
     // migration). Exercises LinuxFdAllocLowest / AttachKFile /
     // Dup / SetCloexec / CloseOnExec / Close on a stand-in

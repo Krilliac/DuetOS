@@ -714,12 +714,30 @@ extends. Next:
 
 ### Track 6 — Process and thread model
 
+> **T6-04** named mutex/event/semaphore namespace shipped:
+> `kernel/ipc/named_kobjects.{h,cpp}` carries a 32-slot
+> kernel-resident table with LRU eviction + spinlock
+> serialisation. New `SYS_NAMED_KOBJ_OPEN_OR_CREATE = 185`
+> syscall (handler in
+> `kernel/subsystems/win32/named_kobj_syscall.cpp`) takes
+> (type, name, init_state, open_only) and either inserts a
+> matching cached kobject into the caller's handle table or
+> creates a fresh one + registers the name. `userland/libs/
+> kernel32` `Create{Mutex,Event,Semaphore}{A,W}` + `Open*`
+> route named calls through the new syscall first, falling
+> back to the unnamed-create path on table-full / OOM.
+> `NamedKObjectSelfTest` runs at boot — register / find /
+> refcount-drift / type-mismatch checks. Out of scope:
+> hierarchical `Global\` vs `Local\` prefix handling (both
+> flatten into the same table); permission gating; refcount-
+> on-last-handle-close → unregister (entries stay in the
+> table until LRU eviction).
+
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
 | T6-01 | kernel | P0 | Implement PE TLS: parse `IMAGE_DIRECTORY_ENTRY_TLS`, call callbacks before entry/DllMain, allocate per-thread TLS templates, set TEB TLS slot pointer, and implement `TlsAlloc` / `TlsSetValue` / `TlsGetValue` / `TlsFree`. | A PE with `__declspec(thread) int x = 42` reads independent `42` values from two threads. |
 | T6-02 | kernel | P1 | Implement x64 SEH: parse `.pdata`, implement `RtlLookupFunctionEntry`, `RtlVirtualUnwind`, `RtlUnwindEx`, `NtRaiseException`, context capture/restore, user exception dispatch for faults. | A PE `__try`/`__except` null write is caught and continues in the exception handler. |
 | T6-03 | kernel | P1 | Implement `CreateProcessA/W` and process/thread waiting/exit/open/terminate/duplicate handle semantics. | A parent PE creates a child PE, waits, and observes the child's exit code. |
-| T6-04 | kernel | P1 | Implement named mutex/event/semaphore namespace and open/create semantics with refcounted kernel objects. (Process-local name dedup landed in `kernel32!Create{Mutex,Event,Semaphore}{A,W}` + `Open{Mutex,Event,Semaphore}{A,W}`; cross-process namespace still pending kernel-resident name table.) | Parent/child PEs synchronize through a named event. |
 
 ### Track 7 — File system
 
