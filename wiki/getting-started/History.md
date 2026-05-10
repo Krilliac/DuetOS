@@ -384,22 +384,39 @@ and never had its row deleted.
   `Create{Mutex,Event,Semaphore}{A,W}` and `Open*` consult
   the kernel-resident table when a name is provided.
 
-Closing tally for the day: **16 imported-TODO rows closed** —
-T1-03, T1-04, T3-02, T3-03, T4-01, T4-02, T4-04, T6-04,
-T10-01, T10-02, T10-03, T11-04, T11-05, T13-01, T13-02, T14-01.
-Seven with new code (T1-03 WM_KEYUP, T11-04 waitable + mm
-timers, T3-02 + T3-03 networking, T11-05 KernelHalt wiring,
-T6-04 named-kobj namespace, T14-01 PE stress); nine with
-documentation flushes.
+**Fourth pass (same day) — Track 11 IPC pipes:**
 
-After three passes the remaining open imported-TODO rows are: T3-01
+- **Track 11** — T11-02 anonymous cross-process pipes: the
+  Linux subsystem's pipe pool (16 slots × 4 KiB ring +
+  waitqueue + EPIPE/EOF semantics) is now reachable from
+  Win32 too. New `FsBackingKind::Pipe` variant +
+  `pipe_pool_idx` / `pipe_is_write_end` fields on
+  `Win32FileHandle`; new `SYS_WIN32_CREATE_PIPE = 186`
+  syscall (handler in `kernel/subsystems/win32/pipe_syscall.cpp`).
+  `userland/libs/kernel32/kernel32.c::CreatePipe` routes
+  through the kernel pool; legacy in-process ring stays as
+  the kernel-OOM fallback. `ReadForProcess` /
+  `WriteForProcess` / `CloseForProcess` dispatch the new
+  kind to the existing Linux pipe pool helpers — single
+  definition, two subsystems.
+
+Closing tally for the day: **17 imported-TODO rows closed** —
+T1-03, T1-04, T3-02, T3-03, T4-01, T4-02, T4-04, T6-04,
+T10-01, T10-02, T10-03, T11-02, T11-04, T11-05, T13-01,
+T13-02, T14-01. Eight with new code (T1-03 WM_KEYUP, T11-04
+waitable + mm timers, T3-02 + T3-03 networking, T11-05
+KernelHalt wiring, T6-04 named-kobj namespace, T11-02 cross-
+process pipes, T14-01 PE stress); nine with documentation
+flushes.
+
+After four passes the remaining open imported-TODO rows are: T3-01
 (socket loopback round-trip), T4-03 (Intel iGPU command ring),
 T5-01..04 (memory manager polish), T6-01..03 (PE TLS / SEH /
 CreateProcess), T7-03/T7-04 (overlapped I/O + NTFS write),
 T8-01/T8-02 (MLFQ aging + cross-thread APC), T10-04 (host
-ctest harness extension), T11-02 (cross-process pipes),
-T12-03 (winmm waveOut over HDA), T13-03 (per-syscall arg/return
-docs), T14-03 (network loopback test, gated on T3-01).
+ctest harness extension), T12-03 (winmm waveOut over HDA),
+T13-03 (per-syscall arg/return docs), T14-03 (network loopback
+test, gated on T3-01).
 
 ---
 
