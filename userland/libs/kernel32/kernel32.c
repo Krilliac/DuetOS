@@ -681,19 +681,34 @@ typedef unsigned int PROT;
 
 __declspec(dllexport) void* VirtualAlloc(void* lpAddress, SIZE_T dwSize, DWORD flAllocationType, DWORD flProtect)
 {
-    (void)lpAddress;
-    (void)flProtect;
     /* MEM_WRITE_WATCH (0x00200000) requires the kernel to track
      * which pages have been written since the alloc — we don't
      * have that bookkeeping. Reject explicitly so callers fall
      * back to a non-watched allocation rather than silently
-     * receiving a region that won't honour GetWriteWatch. Real
-     * Windows returns NULL with GetLastError = ERROR_INVALID_PARAMETER
-     * when the kernel doesn't support MEM_WRITE_WATCH. */
+     * receiving a region that won't honour GetWriteWatch. */
     if ((flAllocationType & 0x00200000u) != 0)
         return (void*)0;
+    /* T5-01 partial: route through SYS_VIRTUAL_ALLOC (199) which
+     * tracks regions, honours reserve/commit, and respects
+     * flProtect. Default flAllocationType = 0 (no flag) acts
+     * like real Windows MEM_RESERVE|MEM_COMMIT — alloc-and-commit.
+     * Default flProtect = 0 maps to PAGE_READWRITE. */
+    DWORD alloc_type = flAllocationType;
+    if ((alloc_type & 0x3000u) == 0) /* neither MEM_COMMIT nor MEM_RESERVE */
+        alloc_type |= 0x1000u | 0x2000u;
+    DWORD prot = flProtect;
+    if (prot == 0)
+        prot = 0x04u; /* PAGE_READWRITE */
+    /* SYS_VIRTUAL_ALLOC reads r10 for the hint VA. GCC/Clang's
+     * register asm syntax pins a specific register across the
+     * inline asm so r10 lands where the kernel expects. */
+    register long long _r10 asm("r10") = (long long)(unsigned long long)(UINT_PTR)lpAddress;
     long long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)28), "D"((long long)dwSize) : "memory");
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)199), /* SYS_VIRTUAL_ALLOC */
+                       "D"((long long)dwSize), "S"((long long)alloc_type), "d"((long long)prot), "r"(_r10)
+                     : "memory");
     return (void*)rv;
 }
 
@@ -708,15 +723,20 @@ __declspec(dllexport) void* VirtualAllocEx(HANDLE hProcess, void* lpAddress, SIZ
 
 __declspec(dllexport) BOOL VirtualFree(void* lpAddress, SIZE_T dwSize, DWORD dwFreeType)
 {
-    (void)dwFreeType;
+    /* T5-01 partial: route through SYS_VIRTUAL_FREE (200) which
+     * honours MEM_DECOMMIT (0x4000) vs MEM_RELEASE (0x8000).
+     * If neither flag is set, default to MEM_RELEASE — caller's
+     * intent matches Win32's "release everything" pattern. */
+    DWORD ft = dwFreeType;
+    if ((ft & 0xC000u) == 0)
+        ft |= 0x8000u;
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"((long long)29), "D"((long long)lpAddress), "S"((long long)dwSize)
+                     : "a"((long long)200), /* SYS_VIRTUAL_FREE */
+                       "D"((long long)lpAddress), "S"((long long)dwSize), "d"((long long)ft)
                      : "memory");
-    /* SYS_VUNMAP returns 0 on hit, -1 on miss; Win32 wants
-     * BOOL TRUE on hit. */
-    return rv == 0 ? 1 : 0;
+    return rv != 0;
 }
 
 __declspec(dllexport) BOOL VirtualFreeEx(HANDLE hProcess, void* lpAddress, SIZE_T dwSize, DWORD dwFreeType)
@@ -727,15 +747,19 @@ __declspec(dllexport) BOOL VirtualFreeEx(HANDLE hProcess, void* lpAddress, SIZE_
 
 __declspec(dllexport) BOOL VirtualProtect(void* lpAddress, SIZE_T dwSize, DWORD flNewProtect, DWORD* lpflOldProtect)
 {
-    (void)lpAddress;
-    (void)dwSize;
-    (void)flNewProtect;
-    /* Every vmap page is RW+NX by construction (W^X). Round-
-     * trip PAGE_READWRITE (= 0x04) as the "previous" protection
-     * so MSVC CRT's probe path sees a plausible value. */
-    if (lpflOldProtect != (DWORD*)0)
-        *lpflOldProtect = 0x04;
-    return 1;
+    /* T5-01 partial: route through SYS_VIRTUAL_PROTECT (201). The
+     * kernel-side handler updates the page tables for committed
+     * pages and writes the previous protection into the caller's
+     * out pointer. Pages outside the W^X envelope (any
+     * PAGE_EXECUTE_*) are rejected with rax=0. */
+    register long long _r10 asm("r10") = (long long)(unsigned long long)(UINT_PTR)lpflOldProtect;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)201), /* SYS_VIRTUAL_PROTECT */
+                       "D"((long long)lpAddress), "S"((long long)dwSize), "d"((long long)flNewProtect), "r"(_r10)
+                     : "memory");
+    return rv != 0;
 }
 
 __declspec(dllexport) BOOL VirtualProtectEx(HANDLE hProcess, void* lpAddress, SIZE_T dwSize, DWORD flNewProtect,

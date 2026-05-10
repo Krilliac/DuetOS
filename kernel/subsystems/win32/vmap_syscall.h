@@ -22,4 +22,11 @@ namespace duetos::subsystems::win32
 void DoVmap(arch::TrapFrame* frame);
 void DoVunmap(arch::TrapFrame* frame);
 
+// SYS_VIRTUAL_ALLOC / SYS_VIRTUAL_FREE / SYS_VIRTUAL_PROTECT
+// (T5-01 partial). Region-tracking variants honouring
+// reserve/commit split + Win32 protection bits.
+void DoVirtualAlloc(arch::TrapFrame* frame);
+void DoVirtualFree(arch::TrapFrame* frame);
+void DoVirtualProtect(arch::TrapFrame* frame);
+
 } // namespace duetos::subsystems::win32

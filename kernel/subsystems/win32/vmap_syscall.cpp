@@ -107,4 +107,383 @@ void DoVunmap(arch::TrapFrame* frame)
     KLOG_ONCE_INFO("win32/vmap", "DoVunmap: v0 leaks (no per-region free)");
 }
 
+// Win32 alloc-type / protection bits we recognise. The full set is
+// well-documented in the SDK; we honour the ones whose semantics
+// the kernel can enforce today.
+namespace
+{
+constexpr u64 kMemCommit = 0x00001000ULL;
+constexpr u64 kMemReserve = 0x00002000ULL;
+constexpr u64 kMemDecommit = 0x00004000ULL;
+constexpr u64 kMemRelease = 0x00008000ULL;
+constexpr u64 kMemWriteWatch = 0x00200000ULL;
+
+constexpr u64 kPageNoAccess = 0x01;
+constexpr u64 kPageReadOnly = 0x02;
+constexpr u64 kPageReadWrite = 0x04;
+constexpr u64 kPageExecute = 0x10;
+constexpr u64 kPageExecuteRead = 0x20;
+constexpr u64 kPageExecuteReadWrite = 0x40;
+constexpr u64 kPageGuard = 0x100;
+
+// Translate Win32 protection to AS page flags. Returns true on
+// success; out_flags receives kPagePresent + kPageUser plus the
+// matching read / write / execute bits. NOACCESS is mapped as
+// "Present + User + NX, no Writable" — caller traps on read too
+// because we can't fully clear Present without confusing the
+// region tracker. v0 enforces W^X: any *EXECUTE* protection is
+// rejected here (vmap pages stay NX).
+bool Win32ProtToPageFlags(u64 prot, u64& out_flags)
+{
+    out_flags = mm::kPagePresent | mm::kPageUser | mm::kPageNoExecute;
+    switch (prot)
+    {
+    case kPageNoAccess:
+        // Closest we can get without confusing the region tracker.
+        // A guard / NOACCESS region traps on write (no Writable),
+        // and a future slice can extend the AS layer to clear
+        // Present too.
+        return true;
+    case kPageReadOnly:
+        return true;
+    case kPageReadWrite:
+        out_flags |= mm::kPageWritable;
+        return true;
+    case kPageExecute:
+    case kPageExecuteRead:
+    case kPageExecuteReadWrite:
+        // W^X — refuse any executable mapping in the heap arena.
+        return false;
+    default:
+        // Unknown protection bits (PAGE_GUARD combos, etc.) — refuse.
+        if ((prot & kPageGuard) != 0)
+            return false;
+        return false;
+    }
+}
+
+// Find an existing region whose [base_va, base_va + pages*4096)
+// covers `va`. Returns the slot index or kCap on miss.
+u64 FindRegionContaining(const ::duetos::core::Process* proc, u64 va)
+{
+    using ::duetos::core::Process;
+    for (u64 i = 0; i < Process::kWin32VmapRegionCap; ++i)
+    {
+        const auto& r = proc->vmap_regions[i];
+        if (!r.in_use)
+            continue;
+        if (va >= r.base_va && va < r.base_va + static_cast<u64>(r.pages) * mm::kPageSize)
+            return i;
+    }
+    return Process::kWin32VmapRegionCap;
+}
+
+u64 FindFreeRegionSlot(const ::duetos::core::Process* proc)
+{
+    using ::duetos::core::Process;
+    for (u64 i = 0; i < Process::kWin32VmapRegionCap; ++i)
+        if (!proc->vmap_regions[i].in_use)
+            return i;
+    return Process::kWin32VmapRegionCap;
+}
+
+// Allocate frames + map for the page indices in `commit_mask`.
+// Returns true on full success. On partial OOM, unmaps the pages
+// that were mapped and returns false; the region's
+// committed_bits stays unchanged on failure.
+bool CommitPages(::duetos::core::Process* proc, ::duetos::core::Process::Win32VmapRegion& r, u32 commit_mask,
+                 u64 page_flags)
+{
+    using namespace ::duetos::mm;
+    u32 mapped_mask = 0;
+    for (u32 i = 0; i < r.pages; ++i)
+    {
+        if ((commit_mask & (1u << i)) == 0)
+            continue;
+        if ((r.committed_bits & (1u << i)) != 0)
+            continue; // already committed — caller's race
+        const PhysAddr f = AllocateFrame();
+        if (f == kNullFrame)
+        {
+            // Roll back.
+            for (u32 j = 0; j < i; ++j)
+                if ((mapped_mask & (1u << j)) != 0)
+                    AddressSpaceUnmapUserPage(proc->as, r.base_va + j * kPageSize);
+            return false;
+        }
+        AddressSpaceMapUserPage(proc->as, r.base_va + i * kPageSize, f, page_flags);
+        mapped_mask |= (1u << i);
+    }
+    r.committed_bits |= mapped_mask;
+    return true;
+}
+
+void DecommitPages(::duetos::core::Process* proc, ::duetos::core::Process::Win32VmapRegion& r, u32 mask)
+{
+    for (u32 i = 0; i < r.pages; ++i)
+    {
+        if ((mask & (1u << i)) != 0 && (r.committed_bits & (1u << i)) != 0)
+        {
+            ::duetos::mm::AddressSpaceUnmapUserPage(proc->as, r.base_va + i * ::duetos::mm::kPageSize);
+            r.committed_bits &= ~(1u << i);
+        }
+    }
+}
+
+} // namespace
+
+void DoVirtualAlloc(arch::TrapFrame* frame)
+{
+    using ::duetos::core::Process;
+    Process* proc = ::duetos::core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+    const u64 size_bytes = frame->rdi;
+    const u64 alloc_type = frame->rsi;
+    const u64 protection = frame->rdx;
+    const u64 hint_va = frame->r10;
+
+    if (size_bytes == 0)
+    {
+        frame->rax = 0;
+        return;
+    }
+    if ((alloc_type & kMemWriteWatch) != 0)
+    {
+        // Reject — same as the legacy path.
+        frame->rax = 0;
+        return;
+    }
+
+    const u32 pages = static_cast<u32>((size_bytes + mm::kPageSize - 1) / mm::kPageSize);
+    if (pages == 0 || pages > Process::kWin32VmapRegionPagesMax)
+    {
+        frame->rax = 0;
+        return;
+    }
+
+    u64 page_flags = 0;
+    if (!Win32ProtToPageFlags(protection, page_flags))
+    {
+        frame->rax = 0;
+        return;
+    }
+
+    const bool reserve_only = (alloc_type & kMemCommit) == 0 && (alloc_type & kMemReserve) != 0;
+    const bool commit_into_existing = (alloc_type & kMemCommit) != 0 && (alloc_type & kMemReserve) == 0 && hint_va != 0;
+    const bool reserve_and_commit = !reserve_only && !commit_into_existing;
+
+    if (commit_into_existing)
+    {
+        // Find the matching region; commit the touched pages.
+        const u64 idx = FindRegionContaining(proc, hint_va);
+        if (idx == Process::kWin32VmapRegionCap)
+        {
+            frame->rax = 0;
+            return;
+        }
+        auto& r = proc->vmap_regions[idx];
+        const u64 first_page = (hint_va - r.base_va) / mm::kPageSize;
+        const u64 last_page = first_page + pages;
+        if (last_page > r.pages)
+        {
+            frame->rax = 0;
+            return;
+        }
+        u32 commit_mask = 0;
+        for (u64 i = first_page; i < last_page; ++i)
+            commit_mask |= (1u << i);
+        if (!CommitPages(proc, r, commit_mask, page_flags))
+        {
+            frame->rax = 0;
+            return;
+        }
+        r.protection = static_cast<u32>(protection);
+        frame->rax = r.base_va;
+        return;
+    }
+
+    // Fresh reservation. Carve out a contiguous range from the
+    // bump cursor.
+    if (proc->vmap_pages_used + pages > Process::kWin32VmapCapPages)
+    {
+        frame->rax = 0;
+        return;
+    }
+    const u64 slot = FindFreeRegionSlot(proc);
+    if (slot == Process::kWin32VmapRegionCap)
+    {
+        frame->rax = 0;
+        return;
+    }
+
+    auto& r = proc->vmap_regions[slot];
+    r.in_use = true;
+    r.base_va = proc->vmap_base + proc->vmap_pages_used * mm::kPageSize;
+    r.pages = pages;
+    r.protection = static_cast<u32>(protection);
+    r.committed_bits = 0;
+    proc->vmap_pages_used += pages;
+
+    if (reserve_and_commit)
+    {
+        u32 mask = 0;
+        for (u32 i = 0; i < pages; ++i)
+            mask |= (1u << i);
+        if (!CommitPages(proc, r, mask, page_flags))
+        {
+            // Unwind the reservation. The bump cursor stays —
+            // bump-only arena leaks on partial failure.
+            r.in_use = false;
+            r.base_va = 0;
+            r.pages = 0;
+            r.protection = 0;
+            r.committed_bits = 0;
+            frame->rax = 0;
+            return;
+        }
+    }
+    frame->rax = r.base_va;
+}
+
+void DoVirtualFree(arch::TrapFrame* frame)
+{
+    using ::duetos::core::Process;
+    Process* proc = ::duetos::core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+    const u64 base_va = frame->rdi;
+    const u64 size_bytes = frame->rsi;
+    const u64 free_type = frame->rdx;
+
+    if (base_va == 0)
+    {
+        frame->rax = 0;
+        return;
+    }
+
+    const u64 idx = FindRegionContaining(proc, base_va);
+    if (idx == Process::kWin32VmapRegionCap)
+    {
+        frame->rax = 0;
+        return;
+    }
+    auto& r = proc->vmap_regions[idx];
+
+    const bool release = (free_type & kMemRelease) != 0;
+    const bool decommit = (free_type & kMemDecommit) != 0;
+    if (release == decommit) // both or neither — illegal mix
+    {
+        frame->rax = 0;
+        return;
+    }
+
+    if (release)
+    {
+        // Win32 contract: MEM_RELEASE requires size == 0 and
+        // base_va == region.base_va.
+        if (size_bytes != 0 || base_va != r.base_va)
+        {
+            frame->rax = 0;
+            return;
+        }
+        u32 mask = 0;
+        for (u32 i = 0; i < r.pages; ++i)
+            mask |= (1u << i);
+        DecommitPages(proc, r, mask);
+        r.in_use = false;
+        r.base_va = 0;
+        r.pages = 0;
+        r.protection = 0;
+        r.committed_bits = 0;
+        frame->rax = 1;
+        return;
+    }
+
+    // MEM_DECOMMIT — unmap the touched pages, keep the
+    // reservation slot.
+    const u32 pages = (size_bytes == 0) ? r.pages : static_cast<u32>((size_bytes + mm::kPageSize - 1) / mm::kPageSize);
+    const u64 first_page = (base_va - r.base_va) / mm::kPageSize;
+    if (first_page + pages > r.pages)
+    {
+        frame->rax = 0;
+        return;
+    }
+    u32 mask = 0;
+    for (u64 i = first_page; i < first_page + pages; ++i)
+        mask |= (1u << i);
+    DecommitPages(proc, r, mask);
+    frame->rax = 1;
+}
+
+void DoVirtualProtect(arch::TrapFrame* frame)
+{
+    using ::duetos::core::Process;
+    Process* proc = ::duetos::core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+    const u64 base_va = frame->rdi;
+    const u64 size_bytes = frame->rsi;
+    const u64 new_prot = frame->rdx;
+    const u64 user_old_prot = frame->r10;
+
+    if (base_va == 0 || size_bytes == 0)
+    {
+        frame->rax = 0;
+        return;
+    }
+    const u64 idx = FindRegionContaining(proc, base_va);
+    if (idx == Process::kWin32VmapRegionCap)
+    {
+        frame->rax = 0;
+        return;
+    }
+    auto& r = proc->vmap_regions[idx];
+
+    u64 new_flags = 0;
+    if (!Win32ProtToPageFlags(new_prot, new_flags))
+    {
+        frame->rax = 0;
+        return;
+    }
+
+    const u32 pages = static_cast<u32>((size_bytes + mm::kPageSize - 1) / mm::kPageSize);
+    const u64 first_page = (base_va - r.base_va) / mm::kPageSize;
+    if (first_page + pages > r.pages)
+    {
+        frame->rax = 0;
+        return;
+    }
+
+    const u32 prev_prot = r.protection;
+    if (user_old_prot != 0)
+    {
+        u32 v = prev_prot;
+        if (!::duetos::mm::CopyToUser(reinterpret_cast<void*>(user_old_prot), &v, sizeof(v)))
+        {
+            frame->rax = 0;
+            return;
+        }
+    }
+
+    for (u32 i = 0; i < pages; ++i)
+    {
+        const u32 page_idx = static_cast<u32>(first_page) + i;
+        if ((r.committed_bits & (1u << page_idx)) == 0)
+            continue; // not committed — protection is a future-on-commit hint
+        ::duetos::mm::AddressSpaceProtectUserPage(proc->as, r.base_va + page_idx * mm::kPageSize, new_flags);
+    }
+    r.protection = static_cast<u32>(new_prot);
+    frame->rax = 1;
+}
+
 } // namespace duetos::subsystems::win32

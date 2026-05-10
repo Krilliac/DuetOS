@@ -1919,6 +1919,51 @@ enum SyscallNumber : u64
     //             device. v0 returns 16.
     // Returns the queried value, or 0 on bad op / no device.
     SYS_AUDIO_DEVICE_INFO = 198,
+
+    // SYS_VIRTUAL_ALLOC — region-tracking VirtualAlloc with
+    // reserve/commit split (T5-01). Backs Win32
+    // kernel32!VirtualAlloc.
+    //   rdi = u64 size_bytes        // rounded up to page multiples
+    //   rsi = u64 alloc_type         // MEM_RESERVE (0x2000) | MEM_COMMIT (0x1000)
+    //   rdx = u64 protection         // PAGE_READONLY / READWRITE / NOACCESS / etc.
+    //   r10 = u64 hint_va            // 0 = pick from arena bump cursor; non-zero
+    //                                //  resolves to existing region for COMMIT
+    //                                //  on a prior RESERVE
+    // Returns the region's base VA on success (each call returns
+    // the SAME base when committing into a prior reservation), or
+    // 0 on table-full / OOM / invalid args. v0 enforcement:
+    //  - MEM_RESERVE alone allocates a region slot, no frames,
+    //    no page-table mappings.
+    //  - MEM_COMMIT alone (hint_va == 0) is alloc-and-commit in
+    //    one shot: behaves like the old SYS_VMAP.
+    //  - MEM_RESERVE | MEM_COMMIT is alloc-and-commit.
+    //  - MEM_COMMIT with hint_va inside an existing reservation
+    //    commits the touched range without allocating a new
+    //    region.
+    SYS_VIRTUAL_ALLOC = 199,
+
+    // SYS_VIRTUAL_FREE — region-tracking VirtualFree.
+    //   rdi = u64 base_va
+    //   rsi = u64 size_bytes        // 0 with MEM_RELEASE = release the
+    //                                //  whole region
+    //   rdx = u64 free_type         // MEM_DECOMMIT (0x4000) | MEM_RELEASE (0x8000)
+    // Returns 1 on success, 0 on bad VA / size / type mix.
+    // MEM_DECOMMIT unmaps the matching pages but keeps the
+    // reservation. MEM_RELEASE unmaps every committed page +
+    // clears the region slot.
+    SYS_VIRTUAL_FREE = 200,
+
+    // SYS_VIRTUAL_PROTECT — region-tracking VirtualProtect.
+    //   rdi = u64 base_va
+    //   rsi = u64 size_bytes
+    //   rdx = u64 new_protection    // raw PAGE_*
+    //   r10 = u64* old_prot_out     // user-supplied; receives the
+    //                                //  previous protection of base_va
+    // Returns 1 on success, 0 on miss / W^X violation.
+    // v0 honours PAGE_READONLY, PAGE_READWRITE, PAGE_NOACCESS;
+    // PAGE_EXECUTE_* are rejected because vmap pages are
+    // permanently NX (W^X enforcement).
+    SYS_VIRTUAL_PROTECT = 201,
 };
 
 // Inheritable stdio bundle for SYS_PROCESS_SPAWN_EX. Each entry

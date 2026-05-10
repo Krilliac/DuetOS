@@ -7799,3 +7799,62 @@ doc helps future readers audit the trail.
   path lands, or a workload depends on real playback.
 - **Related roadmap track(s):** T12-03 partial — API surface
   closed; backend playback defer.
+
+## 2026-05-10 — VirtualAlloc reserve/commit + protection (T5-01 partial)
+
+- **What changed:**
+  - `Process::vmap_regions[16]` records `{base_va, pages,
+    committed_bits (u32 bitmap), protection}` per Win32-style
+    VirtualAlloc region. Carved out of the existing vmap arena
+    (kWin32VmapBase = 0x40000000), region cap at 32 pages
+    matches the bitmap width.
+  - Three new syscalls: `SYS_VIRTUAL_ALLOC = 199`,
+    `SYS_VIRTUAL_FREE = 200`, `SYS_VIRTUAL_PROTECT = 201`. The
+    alloc handler dispatches on the `MEM_RESERVE` /
+    `MEM_COMMIT` flag combo:
+    * `MEM_RESERVE` alone — claim a region slot, no frame alloc.
+    * `MEM_RESERVE | MEM_COMMIT` — claim + map all pages.
+    * `MEM_COMMIT` alone with non-zero `hint_va` — commit the
+      touched pages of an existing reservation.
+  - `SYS_VIRTUAL_FREE` honours `MEM_DECOMMIT` (unmap pages,
+    keep slot) and `MEM_RELEASE` (unmap + clear slot).
+  - `SYS_VIRTUAL_PROTECT` translates `PAGE_*` to the AS layer's
+    page flags and calls `AddressSpaceProtectUserPage` for each
+    committed page in the touched range. `PAGE_EXECUTE*` is
+    rejected (W^X enforcement).
+  - `kernel32!VirtualAlloc / VirtualFree / VirtualProtect`
+    route through the new ABI; the legacy `SYS_VMAP` (28) /
+    `SYS_VUNMAP` (29) entry points stay as the bump-arena
+    fallback for in-tree callers that haven't been migrated
+    yet (no caller currently uses them, but the entry points
+    remain to keep the ABI surface forward-compatible).
+- **Why:** MSVC CRT startup probes the stack with
+  reserve-then-commit; AppVerifier and a few telemetry libraries
+  call `VirtualProtect` to flip a page from RW to RO before
+  re-checking. Pre-fix: every call returned the same RW+NX
+  page regardless of caller intent, so a real PAGE_READONLY
+  request silently received writable memory. Real region
+  tracking + AS-level protect closes that gap.
+- **Rules out / defers:**
+  - PAGE_GUARD / one-shot trap-then-reset semantics. Real
+    Windows fires STATUS_GUARD_PAGE_VIOLATION on first touch
+    and auto-clears the flag. v0 rejects PAGE_GUARD at the
+    protection translator and returns 0 from VirtualAlloc /
+    VirtualProtect.
+  - PAGE_NOACCESS that actually traps on read. v0 maps as
+    "Present + User + NX, no Writable" — read still works.
+    Closing the gap needs the AS layer to support the "not
+    present but reserved" PTE state without confusing the
+    region tracker.
+  - Cross-region merging / splitting on partial commit. v0
+    refuses MEM_RESERVE | MEM_COMMIT on a hint_va that lands
+    inside an existing reservation; only the explicit "commit
+    into existing" path handles partial commit.
+  - NtAllocateVirtualMemory ABI mirror. The Win32 syscall
+    forwards to the same SYS_VIRTUAL_ALLOC path; ntdll's
+    Native API stub is still a thin wrapper.
+- **Revisit when:** an MSVC PE depends on PAGE_GUARD (typically
+  thread-stack-overflow probes), or PE startup fails because of
+  a real PAGE_NOACCESS gap.
+- **Related roadmap track(s):** T5-01 partial — reserve/commit
+  + protection closed; guard pages + true NOACCESS defer.

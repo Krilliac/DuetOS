@@ -853,6 +853,33 @@ struct Process
     u64 vmap_base;                                 // = kWin32VmapBase after PE load
     u64 vmap_pages_used;                           // bump cursor in pages
 
+    // VirtualAlloc reserve/commit tracking (T5-01 partial). Each
+    // region records a contiguous VA range carved out of the
+    // vmap arena, the per-page commit state, and the Win32
+    // protection bits the caller asked for. RESERVE-only regions
+    // have `committed_bitmap == 0`; COMMIT-on-existing-RESERVE
+    // sets the matching bits and maps frames. RELEASE clears the
+    // slot and unmaps any committed pages; DECOMMIT clears the
+    // bits and unmaps but keeps the region.
+    //
+    // 16 slots × up to 32 pages per region (= 128 KiB max region)
+    // is plenty for v0 — typical CRT VirtualAlloc usage is two
+    // regions (heap fallback + TLS slot table) of a few pages
+    // each. Max region size matches the bitmap width (u32). Grow
+    // both when a workload demands.
+    struct Win32VmapRegion
+    {
+        bool in_use;
+        u8 _pad[3];
+        u32 protection;     // raw Win32 flProtect (PAGE_*)
+        u64 base_va;        // 0 = slot free
+        u32 pages;          // total pages in the reservation
+        u32 committed_bits; // bit i set = page i is committed (mapped to a frame)
+    };
+    static constexpr u64 kWin32VmapRegionCap = 16;
+    static constexpr u32 kWin32VmapRegionPagesMax = 32;
+    Win32VmapRegion vmap_regions[kWin32VmapRegionCap];
+
     // Linux signal-handler table — backs rt_sigaction. Each slot
     // records the user-space handler VA + flags + mask. v0 does
     // NOT deliver signals (no trampoline, no pending queue), but

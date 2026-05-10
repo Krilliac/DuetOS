@@ -943,6 +943,15 @@ void SyscallDispatch(arch::TrapFrame* frame)
         frame->rax = ::duetos::win32::Win32HeapReallocOnBinding(proc, b, frame->rsi, frame->rdx);
         return;
     }
+    case SYS_VIRTUAL_ALLOC:
+        ::duetos::subsystems::win32::DoVirtualAlloc(frame);
+        return;
+    case SYS_VIRTUAL_FREE:
+        ::duetos::subsystems::win32::DoVirtualFree(frame);
+        return;
+    case SYS_VIRTUAL_PROTECT:
+        ::duetos::subsystems::win32::DoVirtualProtect(frame);
+        return;
     case SYS_AUDIO_DEVICE_INFO:
     {
         // Count HDA-class controllers only — winmm waveOut has
