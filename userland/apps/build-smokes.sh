@@ -130,6 +130,7 @@ declare -A APPS=(
     [iocp2_smoke]="-lkernel32"
     [signal_smoke]="-lkernel32 -lmsvcrt"
     [timer_smoke]="-lkernel32 -luser32 -lwinmm"
+    [pe_stress]="-lkernel32 -ladvapi32"
     [winsock_ext_smoke]="-lkernel32 -lws2_32"
     [key_smoke]="-lkernel32 -luser32"
     [reg2_smoke]="-lkernel32 -ladvapi32"

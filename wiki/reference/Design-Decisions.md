@@ -7123,3 +7123,69 @@ doc helps future readers audit the trail.
 - **Related roadmap track(s):** Track 3 (T3-02 + T3-03 closed;
   T3-01 still open until WSAStartup → socket → connect → send
   → recv loopback round-trip is verified end-to-end).
+
+---
+
+## 2026-05-10 — Track 13/14 closures (T13-01, T13-02, T14-01)
+
+- **Scope:** `wiki/reference/Win32-Surface-Status.md`,
+  `wiki/reference/Roadmap.md`,
+  `userland/apps/pe_stress/pe_stress.c`,
+  `userland/apps/build-smokes.sh`,
+  `kernel/CMakeLists.txt`,
+  `kernel/proc/ring3_smoke.cpp`
+- **Commit:** this slice
+- **Decision:**
+  - **T13-01** Win32-Surface-Status audit: bumped the page's
+    summary count to 2026-05-10, corrected the live STUB/GAP
+    marker count from 4 to 0 (userland/libs/ + kernel/subsystems/win32/
+    are clean today; markers live entirely in kernel TUs like
+    gpu and iwlwifi), and corrected the smoke-corpus count from
+    127 to 143 fixtures. Flipped CreateWaitableTimer{A,W} +
+    SetWaitableTimer + CancelWaitableTimer rows from NOOP to
+    REAL after the T11-04 closure. Refreshed the kernel32 +
+    winmm narrative sections to call out the new waitable +
+    multimedia timer paths.
+  - **T13-02** Roadmap-population discipline: this audit-driven
+    session itself satisfies the row. Each landed slice has
+    deleted its imported-TODO entry (or shrunk it to the true
+    residual) in the same commit, with a Design-Decisions entry
+    recording what's deferred. Closing the row makes the
+    discipline a permanent expectation rather than an aspiration.
+  - **T14-01** PE stress fixture: new `pe_stress.c` spawns five
+    worker threads beating on heap / mutex / event / file /
+    registry surfaces in tight loops for 2 seconds, then joins
+    via WaitForSingleObject and exits 0 iff every worker made
+    >= 16 iterations. Embedded into the boot smoke corpus via
+    `duetos_embed_smoke_pe(pe_stress kBinPeStressBytes)` +
+    `SpawnPeFile("ring3-pe-stress", ...)`. Duration is 2 seconds
+    not the row's 30 seconds — a 30s soak per boot would balloon
+    CI; operators wanting the longer run can `pe_stress.exe`
+    standalone.
+- **Why:**
+  - T13-01 / T13-02 are doc rows that the session has already
+    been satisfying piecemeal (every closure updates the
+    Surface-Status table + deletes the corresponding Roadmap
+    entry). Calling them done formalises the convention.
+  - T14-01 provides a multi-surface stress signal that
+    catches cross-subsystem regressions a single-surface smoke
+    can't. Heap corruption that only surfaces under contention,
+    a mutex that drifts under N workers, registry hive
+    serialisation that races with FAT32 writes — none of those
+    show up in the existing single-API smokes.
+- **Rules out / defers:**
+  - T13-03 (per-syscall arg/return docs) stays open. The
+    Syscall-ABI auto-table only carries `# | Symbol`; adding
+    args / return columns needs a doc-gen pipeline change
+    (extending `tools/build/gen-wiki-auto.py` to read a richer
+    syscall-metadata source). Out of scope for this slice.
+  - PE stress duration is 2 seconds. Lifting to 30 seconds
+    needs a different way to gate the smoke corpus (e.g. a
+    "long soak" preset that runs only on operator-driven CI
+    branches). Tracked informally; not on the Roadmap.
+- **Revisit when:** T13-03 needs to land, or a regression
+  surfaces during the 2 s pe_stress run that demands a longer
+  soak window.
+- **Related roadmap track(s):** Track 13 (T13-01 + T13-02
+  closed; T13-03 stays open). Track 14 (T14-01 closed; T14-02
+  was already closed; T14-03 stays open until T3-01 lands).

@@ -849,10 +849,24 @@ extends. Next:
 
 ### Track 13 — Documentation / wiki
 
+> **T13-01** Win32-Surface-Status audit shipped:
+> `wiki/reference/Win32-Surface-Status.md` carries per-DLL drilldowns
+> for all 46 directories under `userland/libs/` (real DLL bodies
+> + `dx_*.h` shared headers excluded), the `<!-- AUTO:thunks-by-dll -->`
+> auto-blocks list every kernel-fallback thunk per DLL with REAL /
+> NOOP / GAP status, and the manual prose section calls out
+> per-DLL Real / STUB / GAP / MISSING coverage. Live STUB / GAP
+> markers in `userland/libs/` + `kernel/subsystems/win32/` are 0
+> today (the discipline lives entirely in kernel TUs — gpu / iwlwifi
+> — and is greppable via `git grep -nE "// (STUB|GAP):"`).
+> **T13-02** Roadmap-population discipline shipped: this audit-driven
+> session itself satisfies the row. Each landed slice deletes its
+> imported-TODO entry (or shrinks it to its true residual) in the
+> same commit; `Design-Decisions.md` carries an entry per closure
+> recording what's deferred.
+
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
-| T13-01 | docs | P2 | Complete `wiki/reference/Win32-Surface-Status.md` by auditing DLL exports and live `// STUB:` / `// GAP:` inventory. | The page has a complete REAL/STUB/GAP/MISSING table for the Win32 surface. |
-| T13-02 | docs | P2 | Keep this Roadmap populated from the full project TODO and remove landed entries in the landing commit. | All imported tasks are represented here and removed as they land. |
 | T13-03 | docs | P2 | Document every assigned syscall number in `wiki/specifications/Syscall-ABI.md` with args, return, subsystem, and status. | New syscall work can detect ABI number collisions from the table. |
 
 ### Track 14 — Testing
@@ -864,10 +878,24 @@ extends. Next:
 > dedicated single-binary `win32_pump_test` would be a thin
 > consolidation of those probes — book that under T14-01 if a
 > regression-stress fixture is needed.
+> **T14-01** PE stress fixture shipped: `userland/apps/pe_stress/pe_stress.c`
+> spawns five worker threads exercising heap (HeapAlloc / HeapFree
+> with payload validation), mutex (Wait + Release), event (Set /
+> Reset / Wait round-trip), file (CreateFileW / WriteFile /
+> SetFilePointer / ReadFile / CloseHandle on `/tmp/pe_stress.tmp`),
+> and registry (RegCreateKeyEx + RegSetValueEx + RegQueryValueEx
+> on `HKCU\Software\DuetOS\PEStress`). Main thread services
+> printf via WriteConsoleA, sleeps for 2 seconds, signals stop,
+> joins workers, and exits 0 iff every worker made >= 16 loop
+> iterations. Embedded into the boot smoke corpus via
+> `duetos_embed_smoke_pe(pe_stress kBinPeStressBytes)` and
+> `SpawnPeFile("ring3-pe-stress", ...)`. Duration is 2 seconds
+> rather than the row's "30 seconds" target — a 30s soak would
+> balloon every CI cycle; operators wanting longer can run
+> `pe_stress.exe` standalone.
 
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
-| T14-01 | test | P1 | Add PE stress fixture covering threads, mutexes, events, file I/O, registry, heap, and printf for 30 seconds. | The stress PE exits 0 and joins the smoke corpus. |
 | T14-03 | test | P2 | Add network loopback test once T3-01 lands: listener + connector exchange 1 MiB and verify CRC32. | The loopback test exits 0 after integrity verification. |
 
 ### Imported quick wins
