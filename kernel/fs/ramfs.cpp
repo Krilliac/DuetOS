@@ -45,6 +45,13 @@
 // windows-kill embed.
 #include "generated_bootx64_efi.h"
 
+// Portable native ELF apps — first batch via the new
+// `duetos_native_app()` CMake helper. The migration plan that
+// moves the in-kernel apps under `kernel/apps/` out via the
+// same helper lives at `wiki/tooling/Native-Apps.md`.
+#include "generated_hello_native_native.h"
+#include "generated_nat_calc_native.h"
+
 /*
  * Seed trees are declared at file scope as constinit data so the
  * whole structure lives in .rodata. Children arrays are similarly
@@ -950,6 +957,26 @@ const u8* RamfsKernelElfBytes()
 u64 RamfsKernelElfSize()
 {
     return kBinKernelElfBytes_len;
+}
+
+const u8* RamfsHelloNativeBytes()
+{
+    return ::duetos::fs::generated::kBinHelloNativeBytes;
+}
+
+u64 RamfsHelloNativeSize()
+{
+    return ::duetos::fs::generated::kBinHelloNativeBytes_len;
+}
+
+const u8* RamfsNatCalcBytes()
+{
+    return ::duetos::fs::generated::kBinNatCalcBytes;
+}
+
+u64 RamfsNatCalcSize()
+{
+    return ::duetos::fs::generated::kBinNatCalcBytes_len;
 }
 
 namespace

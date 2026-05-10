@@ -178,6 +178,47 @@ duetos_embed_blob(generated_usershell_elf.h
         "${CMAKE_SOURCE_DIR}/userland/libc/usershell.lds"
     COMMENT     "Compiling + embedding /bin/usershell.elf (real userland shell)")
 
+# Helper: register a portable native ELF app from
+# `userland/native-apps/<name>/<name>.c`. Compiles via
+# tools/build/build-native-app.sh, links against the userland
+# libc, embeds the bytes via embed-blob.py. Output header lives
+# at ${CMAKE_CURRENT_BINARY_DIR}/generated_<name>_native.h and
+# exposes `kBin<Name>NativeBytes` in `duetos::fs::generated`.
+#
+# Used for every new portable native app — see
+# `wiki/tooling/Native-Apps.md` for the migration plan that
+# moves the in-kernel apps under `kernel/apps/` out via the
+# same helper.
+function(duetos_native_app app_name)
+    set(_header "${CMAKE_CURRENT_BINARY_DIR}/generated_${app_name}_native.h")
+    set(_script "${CMAKE_SOURCE_DIR}/tools/build/build-native-app.sh")
+    set(_app_src "${CMAKE_SOURCE_DIR}/userland/native-apps/${app_name}/${app_name}.c")
+    set(_libc_deps
+        "${CMAKE_SOURCE_DIR}/userland/libc/src/crt0.S"
+        "${CMAKE_SOURCE_DIR}/userland/libc/src/syscall.c"
+        "${CMAKE_SOURCE_DIR}/userland/libc/src/string.S"
+        "${CMAKE_SOURCE_DIR}/userland/libc/src/setjmp.S"
+        "${CMAKE_SOURCE_DIR}/userland/libc/src/stdio.c"
+        "${CMAKE_SOURCE_DIR}/userland/libc/include/duet/syscall.h"
+        "${CMAKE_SOURCE_DIR}/userland/libc/include/string.h"
+        "${CMAKE_SOURCE_DIR}/userland/libc/include/setjmp.h"
+        "${CMAKE_SOURCE_DIR}/userland/libc/include/stdio.h"
+        "${CMAKE_SOURCE_DIR}/userland/libc/include/unistd.h"
+        "${CMAKE_SOURCE_DIR}/userland/libc/usershell.lds")
+    add_custom_command(
+        OUTPUT  "${_header}"
+        COMMAND "${_script}" "${CMAKE_SOURCE_DIR}" "${_header}" "${app_name}"
+        DEPENDS "${_app_src}" "${_script}" "${DUETOS_EMBED_BLOB_SCRIPT}" ${_libc_deps}
+        COMMENT "Building + embedding portable native app /bin/${app_name}"
+        VERBATIM)
+    set(DUETOS_KERNEL_SHARED_SOURCES
+        ${DUETOS_KERNEL_SHARED_SOURCES} "${_header}"
+        PARENT_SCOPE)
+endfunction()
+
+duetos_native_app(hello_native)
+duetos_native_app(nat_calc)
+
 duetos_embed_blob(generated_hello_winapi.h
     SCRIPT   "${CMAKE_SOURCE_DIR}/tools/build/build-hello-winapi.sh"
     SRC      "${CMAKE_SOURCE_DIR}/userland/apps/hello_winapi/hello.c"

@@ -174,4 +174,17 @@ u64 RamfsBootX64EfiSize();
 const u8* RamfsKernelElfBytes();
 u64 RamfsKernelElfSize();
 
+/// Portable native ELF demo apps. Built from
+/// `userland/native-apps/<name>/<name>.c` via the
+/// `duetos_native_app()` CMake helper, embedded into ramfs at
+/// build time. Spawned by main.cpp's ring-3 init to prove the
+/// portable-app pipeline survives every regression. See
+/// `wiki/tooling/Native-Apps.md` for the migration plan that
+/// uses this helper to move the in-kernel apps under
+/// `kernel/apps/` out into separate ELFs.
+const u8* RamfsHelloNativeBytes();
+u64 RamfsHelloNativeSize();
+const u8* RamfsNatCalcBytes();
+u64 RamfsNatCalcSize();
+
 } // namespace duetos::fs

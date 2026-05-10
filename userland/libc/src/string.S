@@ -106,13 +106,18 @@ memset:
     .type strlen, @function
 strlen:
     endbr64
-    mov     rax, rdi              /* save start pointer */
+    /* Save the start pointer in a register repne scasb won't
+     * touch. rax IS NOT safe — we need its low byte (al = 0) as
+     * the scan target for `repne scasb`, and `xor al, al` would
+     * corrupt the saved pointer. r8 is caller-saved and unused by
+     * the SysV varargs / scratch contract here. */
+    mov     r8, rdi
     xor     ecx, ecx
     not     rcx                   /* rcx = -1 = SIZE_MAX */
     xor     al, al                /* scan target = NUL */
     repne scasb
     /* rdi now points one past the NUL. Length = (rdi - 1) - start. */
-    sub     rdi, rax
+    sub     rdi, r8
     lea     rax, [rdi - 1]
     ret
     .size strlen, . - strlen
