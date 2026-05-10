@@ -371,10 +371,12 @@ and never had its row deleted.
   beating heap / mutex / event / file / registry for 2 s,
   embedded into the boot smoke corpus).
 
-Closing tally for the day: **13 imported-TODO rows closed** (5
-with new code: T1-03 WM_KEYUP, T11-04 waitable + multimedia
-timers, T3-02 + T3-03 networking, T14-01 PE stress; 8 with
-documentation flushes for work that had landed earlier).
+Closing tally for the day: **14 imported-TODO rows closed** —
+T1-03, T1-04, T3-02, T3-03, T4-01, T4-02, T4-04, T10-01, T10-02,
+T10-03, T11-04, T13-01, T13-02, T14-01. Five with new code
+(T1-03 WM_KEYUP, T11-04 waitable + multimedia timers,
+T3-02 + T3-03 networking, T14-01 PE stress); nine with
+documentation flushes for work that had landed earlier.
 
 After both passes the remaining open imported-TODO rows are: T3-01
 (socket loopback round-trip), T4-03 (Intel iGPU command ring),
