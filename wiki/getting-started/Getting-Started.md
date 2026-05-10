@@ -69,7 +69,8 @@ Not enough argument. Use -h for help.
 
 That last block is a real MSVC-built third-party Windows PE
 (`windows-kill.exe`) printing to our serial console after going through
-our PE loader, our 29 userland DLLs, our scheduler, and our syscalls.
+our PE loader, our 44 production userland DLLs (38 preloaded), our
+scheduler, and our syscalls.
 
 ## Run the Hosted Tests
 

@@ -21,7 +21,8 @@ a second entry ABI into our kernel so a Linux ELF binary can call
 
 No. Wine is useful prior art and is studied as a reference, but we do
 not vendor it or link against it. The Win32 user-mode DLLs in
-`userland/libs/` (29 DLLs, ~760 exports) are reimplementations.
+`userland/libs/` (44 production DLLs, ~1100 exports) are
+reimplementations.
 
 ### Is this ReactOS?
 

@@ -9,8 +9,11 @@
 ## Overview
 
 DuetOS uses `int 0x80` as the single native syscall gate. There are
-~57 numbered calls today (`SYS_*`). Both native binaries and the Win32
-translator DLL surface marshal into this same gate.
+~190 numbered calls today (`SYS_*` numbered up through 201, with a
+few retired in the 0..201 range — see
+[`Syscall-ABI`](../specifications/Syscall-ABI.md) for the canonical
+table). Both native binaries and the Win32 translator DLL surface
+marshal into this same gate.
 
 ## Calling Convention
 

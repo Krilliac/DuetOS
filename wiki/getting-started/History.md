@@ -136,16 +136,18 @@ The current phase rebuilt the Win32 subsystem around real DLLs:
    forwarders get resolved recursively across the preloaded set at
    IAT-patch time.
 6. **The retirement wave**. Every row in the flat stubs table that
-   could be replaced with userland C code got replaced. Today the
-   preload set ships 29 userland DLLs — `kernel32` (155 exports),
-   `ntdll` (114), `ucrtbase` (72), `user32` (73), `gdi32` (44),
-   `kernelbase` (44 forwarders), plus `msvcrt`, `msvcp140`,
-   `vcruntime140`, `dbghelp`, `advapi32`, `shell32`, `shlwapi`,
-   `ole32`, `oleaut32`, `winmm`, `bcrypt`, `psapi`, `crypt32`,
-   `comctl32`, `comdlg32`, `version`, `setupapi`, `iphlpapi`,
-   `userenv`, `wtsapi32`, `dwmapi`, `uxtheme`, `secur32`,
-   `ws2_32`, `wininet`, `winhttp`, `d3d9`/`11`/`12`, `dxgi` —
-   totalling ~760 exports.
+   could be replaced with userland C code got replaced. By the close
+   of Phase 4 the preload set shipped 29 userland DLLs (`kernel32`,
+   `ntdll`, `ucrtbase`, `user32`, `gdi32`, `kernelbase`, plus
+   `msvcrt`, `msvcp140`, `vcruntime140`, `dbghelp`, `advapi32`,
+   `shell32`, `shlwapi`, `ole32`, `oleaut32`, `winmm`, `bcrypt`,
+   `psapi`, `crypt32`, `comctl32`, `comdlg32`, `version`, `setupapi`,
+   `iphlpapi`, `userenv`, `wtsapi32`, `dwmapi`, `uxtheme`, `secur32`,
+   `ws2_32`, `wininet`, `winhttp`, `d3d9`/`11`/`12`, `dxgi`)
+   totalling ~760 exports. Phase 5 and beyond grew the surface to 44
+   production DLLs / ~1100 exports — see
+   [`Win32-Surface-Status`](../reference/Win32-Surface-Status.md) for
+   the live inventory.
 
 Every Win32-imports process preloads the full set. Per-process cost:
 ~96 frames.

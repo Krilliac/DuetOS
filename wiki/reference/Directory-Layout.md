@@ -25,7 +25,7 @@ userland/
   shell/              command shell — planned
   tools/              native userland utilities — planned
   apps/               sample/test apps (native + PE)
-  libs/               29 userland Win32 DLLs shipped into every Win32-imports PE
+  libs/               44 production userland Win32 DLLs (38 preloaded into every Win32-imports PE; remainder load on demand)
 third_party/          vendored dependencies (compiler-rt fragments, zlib, etc.)
 tools/
   build/              build helpers, image builders, initrd packer
@@ -100,8 +100,10 @@ win32/                flat-stubs page (legacy fallback), Win32 syscall handlers
 
 ## Userland DLLs (`userland/libs/`)
 
-29 DLLs as of writing — see [Win32 DLLs](../subsystems/Win32-DLLs.md)
-for the full inventory.
+44 production DLLs (and 2 dev test fixtures) as of writing — see
+[Win32 DLLs](../subsystems/Win32-DLLs.md) for the per-DLL list and
+[Win32-Surface-Status](Win32-Surface-Status.md) for the live
+implementation-status drilldown.
 
 ## Build Output Layout
 
