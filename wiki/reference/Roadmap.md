@@ -739,7 +739,7 @@ Track 3 has no remaining roadmap rows.
 > compatible. `HeapDestroy` on the default-heap sentinel
 > returns success (no-op) so CRT cleanup paths don't trip.
 | T5-03 | mm | P2 | Implement real KASLR in the UEFI loader: memory-map scan, random 2 MiB-aligned base within a 64 MiB window, boot-info handoff, and boot-log reporting. | Two cold boots show different kernel `.text` load addresses. |
-| T5-04 | mm | P2 | Audit/complete buddy + slab allocators: coalescing, slab freelists or magazines, IRQ-safe `kmalloc` / `kfree`, and documentation of IRQ/process context safety. | Allocator behavior and context guarantees are tested and documented. |
+| T5-04 | mm | P2 | Audit/complete buddy + slab allocators: coalescing, slab freelists or magazines, IRQ-safe `kmalloc` / `kfree`, and documentation of IRQ/process context safety. (IRQ-safe `KMalloc` / `KFree` shipped — `KheapIrqOff` RAII brackets the freelist mutations, mirroring `FramePoolIrqOff` and the slab cache's `IrqOff`. Allocator-family context contract documented in [`Memory-Management`](../kernel/Memory-Management.md) §"Allocator family — context contract". Buddy coalescing on the kheap and per-CPU slab magazines remain deferred — both ride on real workload signals; the linear-scan freelist + per-cache freelist are sufficient for v0.) | Allocator behavior and context guarantees are tested and documented. |
 
 ### Track 6 — Process and thread model
 
@@ -801,10 +801,24 @@ Track 3 has no remaining roadmap rows.
 > needs case preservation, lower-case characters, or > 8.3 length.
 > Mixed 8.3 / LFN reads round-trip; UTF-16 / UTF-8 conversion runs
 > through the shared LFN encode/decode helpers.
+> **T7-03** overlapped I/O via IOCP shipped: `kernel32!CreateIoCompletionPort`
+> registers a (file_handle → iocp_handle, completion_key) binding
+> (16-slot table) when called with a non-INVALID hFile;
+> `kernel32!ReadFile` / `WriteFile` honour `lpOverlapped` for
+> kernel file handles by seeking to `OVERLAPPED.Offset`, performing
+> the synchronous I/O, stamping `OVERLAPPED.Internal` (NTSTATUS) +
+> `InternalHigh` (bytes), and posting a completion packet to the
+> bound IOCP. `GetQueuedCompletionStatus` drains the packet. End-
+> to-end smoke PE (`userland/apps/iocp_overlapped_smoke/`) wires
+> the full path: write file, re-open, bind, read with
+> `OVERLAPPED`, drain. Out of scope: real `ERROR_IO_PENDING`
+> async completion (the I/O is synchronous + the packet is posted
+> before the syscall returns); share-mode enforcement on
+> `CreateFileA/W` (FILE_SHARE_* flags ignored — same as v0
+> single-handle-per-file contract); `OVERLAPPED.hEvent` signaling.
 
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
-| T7-03 | fs | P1 | Complete `CreateFileA/W` sharing and overlapped I/O: IOCP, `ERROR_IO_PENDING`, overlapped events, and share-mode enforcement. | A PE using overlapped file reads receives completion through `GetQueuedCompletionStatus`. |
 | T7-04 | fs | P2 | Add scoped NTFS write support: create, write, truncate, delete, rename with MFT/index/journal/bitmap updates; no compression/encryption/ADS for v0. | PEs can perform basic writes to NTFS volumes. |
 
 ### Track 8 — Scheduler

@@ -1685,6 +1685,14 @@ __declspec(dllexport) BOOL IsProcessInJob(HANDLE proc, HANDLE job, BOOL* in_job)
  * matches the rest of the v0 kernel32 surface; matches the
  * smoke-test usage pattern of "post N, get N within the same
  * thread".
+ *
+ * T7-03: file→IOCP binding table. CreateIoCompletionPort with
+ * a non-INVALID hFile + non-NULL hExisting registers the
+ * binding so subsequent overlapped ReadFile / WriteFile calls
+ * post a completion packet to the bound port. Only handles
+ * inside the kernel-file-handle range (kWin32HandleBase ..
+ * +kWin32HandleCap) are valid binding sources; others ignore
+ * the call and return the existing port.
  */
 #define DUETOS_IOCP_RING 32
 typedef struct
@@ -1703,36 +1711,37 @@ typedef struct
 #define DUETOS_IOCP_MAX 4
 static DuetosIocp g_iocp[DUETOS_IOCP_MAX];
 
-__declspec(dllexport) HANDLE CreateIoCompletionPort(HANDLE fileHandle, HANDLE existing, unsigned long long key,
-                                                    DWORD numThreads)
+#define DUETOS_IOCP_BINDING_SLOTS 16
+typedef struct
 {
-    (void)fileHandle;
-    (void)key;
-    (void)numThreads;
-    if (existing != (HANDLE)0)
-        return existing; /* Associate fileHandle with existing port — STUB. */
-    for (int i = 0; i < DUETOS_IOCP_MAX; ++i)
-        if (!g_iocp[i].in_use)
-        {
-            g_iocp[i].head = 0;
-            g_iocp[i].tail = 0;
-            g_iocp[i].in_use = 1;
-            return (HANDLE)(unsigned long long)(0x8000 + i);
-        }
-    return (HANDLE)0;
-}
+    int in_use;
+    HANDLE file_handle;
+    HANDLE iocp_handle;
+    unsigned long long completion_key;
+} DuetosIocpBinding;
+static DuetosIocpBinding g_iocp_bindings[DUETOS_IOCP_BINDING_SLOTS];
 
-__declspec(dllexport) BOOL PostQueuedCompletionStatus(HANDLE iocp, DWORD bytes, unsigned long long key, void* ov)
+static int win32_iocp_slot_of_handle(HANDLE iocp)
 {
-    unsigned long long h = (unsigned long long)iocp;
+    unsigned long long h = (unsigned long long)(UINT_PTR)iocp;
     if (h < 0x8000 || h >= 0x8000 + DUETOS_IOCP_MAX)
-        return 0;
+        return -1;
     int slot = (int)(h - 0x8000);
     if (!g_iocp[slot].in_use)
+        return -1;
+    return slot;
+}
+
+/* Push a completion packet onto a port. Drops on full ring
+ * (matches PostQueuedCompletionStatus's behaviour). Returns 1
+ * on enqueue, 0 on full/closed. */
+static int win32_iocp_post_internal(int slot, DWORD bytes, unsigned long long key, void* ov)
+{
+    if (slot < 0 || slot >= DUETOS_IOCP_MAX || !g_iocp[slot].in_use)
         return 0;
     int next = (g_iocp[slot].tail + 1) % DUETOS_IOCP_RING;
     if (next == g_iocp[slot].head)
-        return 0; /* full */
+        return 0;
     g_iocp[slot].ring[g_iocp[slot].tail].bytes = bytes;
     g_iocp[slot].ring[g_iocp[slot].tail].key = key;
     g_iocp[slot].ring[g_iocp[slot].tail].ov = ov;
@@ -1740,15 +1749,72 @@ __declspec(dllexport) BOOL PostQueuedCompletionStatus(HANDLE iocp, DWORD bytes, 
     return 1;
 }
 
+/* Look up a binding for a given file handle. Returns the
+ * matching slot index in g_iocp_bindings, or -1 on miss. */
+static int win32_iocp_lookup_binding(HANDLE file_handle)
+{
+    for (int i = 0; i < DUETOS_IOCP_BINDING_SLOTS; ++i)
+    {
+        if (g_iocp_bindings[i].in_use && g_iocp_bindings[i].file_handle == file_handle)
+            return i;
+    }
+    return -1;
+}
+
+__declspec(dllexport) HANDLE CreateIoCompletionPort(HANDLE fileHandle, HANDLE existing, unsigned long long key,
+                                                    DWORD numThreads)
+{
+    (void)numThreads;
+    HANDLE iocp = existing;
+    if (iocp == (HANDLE)0)
+    {
+        for (int i = 0; i < DUETOS_IOCP_MAX; ++i)
+            if (!g_iocp[i].in_use)
+            {
+                g_iocp[i].head = 0;
+                g_iocp[i].tail = 0;
+                g_iocp[i].in_use = 1;
+                iocp = (HANDLE)(unsigned long long)(0x8000 + i);
+                break;
+            }
+        if (iocp == (HANDLE)0)
+            return (HANDLE)0;
+    }
+    /* Win32 sentinel: INVALID_HANDLE_VALUE = (HANDLE)-1 means
+     * "create the port, no file binding". Only valid file
+     * handles establish a binding. */
+    const unsigned long long fh_raw = (unsigned long long)(UINT_PTR)fileHandle;
+    if (fileHandle != (HANDLE)0 && fileHandle != (HANDLE)(long long)-1 && fh_raw >= 0x100ULL && fh_raw < 0x110ULL)
+    {
+        for (int i = 0; i < DUETOS_IOCP_BINDING_SLOTS; ++i)
+        {
+            if (!g_iocp_bindings[i].in_use)
+            {
+                g_iocp_bindings[i].in_use = 1;
+                g_iocp_bindings[i].file_handle = fileHandle;
+                g_iocp_bindings[i].iocp_handle = iocp;
+                g_iocp_bindings[i].completion_key = key;
+                break;
+            }
+        }
+    }
+    return iocp;
+}
+
+__declspec(dllexport) BOOL PostQueuedCompletionStatus(HANDLE iocp, DWORD bytes, unsigned long long key, void* ov)
+{
+    int slot = win32_iocp_slot_of_handle(iocp);
+    if (slot < 0)
+        return 0;
+    return win32_iocp_post_internal(slot, bytes, key, ov) ? 1 : 0;
+}
+
 __declspec(dllexport) BOOL GetQueuedCompletionStatus(HANDLE iocp, DWORD* bytes, unsigned long long* key, void** ov,
                                                      DWORD timeout)
 {
     (void)timeout;
-    unsigned long long h = (unsigned long long)iocp;
-    if (h < 0x8000 || h >= 0x8000 + DUETOS_IOCP_MAX)
-        return 0;
-    int slot = (int)(h - 0x8000);
-    if (!g_iocp[slot].in_use)
+    int slot = win32_iocp_slot_of_handle(iocp);
+    if (slot < 0)
         return 0;
     if (g_iocp[slot].head == g_iocp[slot].tail)
         return 0; /* empty — could also block, but v0 is non-blocking. */
@@ -1760,6 +1826,40 @@ __declspec(dllexport) BOOL GetQueuedCompletionStatus(HANDLE iocp, DWORD* bytes, 
         *ov = g_iocp[slot].ring[g_iocp[slot].head].ov;
     g_iocp[slot].head = (g_iocp[slot].head + 1) % DUETOS_IOCP_RING;
     return 1;
+}
+
+/* OVERLAPPED layout (Microsoft SDK):
+ *   +0  ULONG_PTR Internal       — completion status (NTSTATUS)
+ *   +8  ULONG_PTR InternalHigh   — bytes transferred
+ *   +16 DWORD     Offset         — file offset low
+ *   +20 DWORD     OffsetHigh     — file offset high
+ *   +24 HANDLE    hEvent         — optional event signaled on done
+ * Used by ReadFile / WriteFile when lpOverlapped != NULL.
+ */
+#define OVERLAPPED_OFF_INTERNAL 0
+#define OVERLAPPED_OFF_INTERNAL_HIGH 8
+#define OVERLAPPED_OFF_OFFSET_LO 16
+#define OVERLAPPED_OFF_OFFSET_HI 20
+#define OVERLAPPED_OFF_HEVENT 24
+
+static unsigned long long win32_overlapped_offset(const void* ov)
+{
+    if (ov == (const void*)0)
+        return 0xFFFFFFFFFFFFFFFFULL;
+    const unsigned char* p = (const unsigned char*)ov;
+    DWORD lo, hi;
+    __builtin_memcpy(&lo, p + OVERLAPPED_OFF_OFFSET_LO, sizeof(lo));
+    __builtin_memcpy(&hi, p + OVERLAPPED_OFF_OFFSET_HI, sizeof(hi));
+    return ((unsigned long long)hi << 32) | lo;
+}
+
+static void win32_overlapped_complete(void* ov, unsigned long long status, unsigned long long bytes)
+{
+    if (ov == (void*)0)
+        return;
+    unsigned char* p = (unsigned char*)ov;
+    __builtin_memcpy(p + OVERLAPPED_OFF_INTERNAL, &status, sizeof(status));
+    __builtin_memcpy(p + OVERLAPPED_OFF_INTERNAL_HIGH, &bytes, sizeof(bytes));
 }
 
 /* CreateTimerQueue / DeleteTimerQueue — sentinel handle. */
@@ -2772,7 +2872,6 @@ typedef void* LPDWORD_t; /* DWORD* via opaque pointer to avoid C-warning chains 
 
 __declspec(dllexport) BOOL WriteFile(HANDLE hFile, const void* buf, DWORD n, DWORD* lpWritten, void* lpOverlapped)
 {
-    (void)lpOverlapped;
     /* Anonymous pipe: push bytes into the in-process ring instead
      * of routing to stdout. Drop oldest on overflow to keep the
      * producer non-blocking; matches the v0 stdin-ring policy on
@@ -2797,9 +2896,28 @@ __declspec(dllexport) BOOL WriteFile(HANDLE hFile, const void* buf, DWORD n, DWO
 
     /* Kernel file handle (Win32-shaped pseudo-handle): 0x100..0x10F.
      * Route through SYS_FILE_WRITE so the per-handle cursor +
-     * canary wall + cap gate fire. */
+     * canary wall + cap gate fire. T7-03: when lpOverlapped is
+     * supplied, honour OVERLAPPED.Offset (seek before write) and
+     * write OVERLAPPED.Internal / InternalHigh on completion. If
+     * the file is bound to an IOCP via CreateIoCompletionPort,
+     * post a completion packet so GetQueuedCompletionStatus
+     * surfaces the result. */
     if (h_raw >= 0x100ULL && h_raw < 0x110ULL)
     {
+        if (lpOverlapped != (void*)0)
+        {
+            const unsigned long long ov_off = win32_overlapped_offset(lpOverlapped);
+            if (ov_off != 0xFFFFFFFFFFFFFFFFULL)
+            {
+                long long seek_rv;
+                __asm__ volatile("int $0x80"
+                                 : "=a"(seek_rv)
+                                 : "a"((long long)23),                                              /* SYS_FILE_SEEK */
+                                   "D"((long long)h_raw), "S"((long long)ov_off), "d"((long long)0) /* SEEK_SET */
+                                 : "memory");
+                (void)seek_rv;
+            }
+        }
         long long rv;
         __asm__ volatile("int $0x80"
                          : "=a"(rv)
@@ -2807,8 +2925,19 @@ __declspec(dllexport) BOOL WriteFile(HANDLE hFile, const void* buf, DWORD n, DWO
                            "D"((long long)h_raw), "S"((long long)buf), "d"((long long)n)
                          : "memory");
         const int ok = (rv >= 0 && (unsigned long long)rv != ~0ULL);
+        const DWORD bytes = ok ? (DWORD)rv : 0;
         if (lpWritten != (DWORD*)0)
-            *lpWritten = ok ? (DWORD)rv : 0;
+            *lpWritten = bytes;
+        if (lpOverlapped != (void*)0)
+        {
+            win32_overlapped_complete(lpOverlapped, ok ? 0ULL : 0xC0000001ULL, (unsigned long long)bytes);
+            const int bidx = win32_iocp_lookup_binding(hFile);
+            if (bidx >= 0)
+            {
+                const int slot = win32_iocp_slot_of_handle(g_iocp_bindings[bidx].iocp_handle);
+                win32_iocp_post_internal(slot, bytes, g_iocp_bindings[bidx].completion_key, lpOverlapped);
+            }
+        }
         return ok ? 1 : 0;
     }
 
@@ -2938,7 +3067,6 @@ __declspec(dllexport) HANDLE CreateFileW(const wchar_t16* lpFileName, DWORD dwDe
 
 __declspec(dllexport) BOOL ReadFile(HANDLE h, void* buf, DWORD count, DWORD* lpRead, void* lpOverlapped)
 {
-    (void)lpOverlapped;
     /* Anonymous pipe: drain bytes from the in-process ring set up
      * by CreatePipe rather than dispatching SYS_FILE_READ (which
      * doesn't know the pipe sentinel handle and would return -1).
@@ -2974,16 +3102,46 @@ __declspec(dllexport) BOOL ReadFile(HANDLE h, void* buf, DWORD count, DWORD* lpR
 
     /* Kernel file handle range — same numeric band as WriteFile.
      * Anything else falls through to SYS_FILE_READ which will
-     * reject it with -1; we mirror that as FALSE. */
+     * reject it with -1; we mirror that as FALSE. T7-03: honour
+     * lpOverlapped for kernel file handles — seek to
+     * OVERLAPPED.Offset, read, stamp Internal/InternalHigh, and
+     * post a completion packet if the file is IOCP-bound. */
+    if (h_raw >= 0x100ULL && h_raw < 0x110ULL && lpOverlapped != (void*)0)
+    {
+        const unsigned long long ov_off = win32_overlapped_offset(lpOverlapped);
+        if (ov_off != 0xFFFFFFFFFFFFFFFFULL)
+        {
+            long long seek_rv;
+            __asm__ volatile("int $0x80"
+                             : "=a"(seek_rv)
+                             : "a"((long long)23),                                              /* SYS_FILE_SEEK */
+                               "D"((long long)h_raw), "S"((long long)ov_off), "d"((long long)0) /* SEEK_SET */
+                             : "memory");
+            (void)seek_rv;
+        }
+    }
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
                      : "a"((long long)21), /* SYS_FILE_READ */
                        "D"((long long)h_raw), "S"((long long)buf), "d"((long long)count)
                      : "memory");
+    const int ok = (rv >= 0);
+    const DWORD bytes = ok ? (DWORD)rv : 0;
     if (lpRead != (DWORD*)0)
-        *lpRead = rv >= 0 ? (DWORD)rv : 0;
-    return rv >= 0 ? 1 : 0;
+        *lpRead = bytes;
+    if (lpOverlapped != (void*)0)
+    {
+        win32_overlapped_complete(lpOverlapped, ok ? 0ULL : 0xC0000011ULL /* STATUS_END_OF_FILE */,
+                                  (unsigned long long)bytes);
+        const int bidx = win32_iocp_lookup_binding(h);
+        if (bidx >= 0)
+        {
+            const int slot = win32_iocp_slot_of_handle(g_iocp_bindings[bidx].iocp_handle);
+            win32_iocp_post_internal(slot, bytes, g_iocp_bindings[bidx].completion_key, lpOverlapped);
+        }
+    }
+    return ok ? 1 : 0;
 }
 
 __declspec(dllexport) BOOL SetFilePointerEx(HANDLE h, long long liDistance, long long* lpNewPosition,

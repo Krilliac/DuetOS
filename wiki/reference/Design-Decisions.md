@@ -7627,3 +7627,89 @@ doc helps future readers audit the trail.
   capabilities (in-place realloc, walk/validate on a
   secondary heap, > 4 heaps, > 64 KiB heap).
 - **Related roadmap track(s):** T5-02 closed.
+
+## 2026-05-10 — Overlapped I/O via IOCP (T7-03)
+
+- **What changed:**
+  - `kernel32!CreateIoCompletionPort(hFile, hExisting, key, ...)`
+    now registers a (file_handle → iocp_handle, key) binding in
+    a 16-slot user-space table when `hFile` is a kernel file
+    handle (range 0x100..0x10F). The existing port creation
+    path is unchanged; binding is purely additive.
+  - `kernel32!ReadFile` / `WriteFile` honour `lpOverlapped` for
+    kernel file handles: read `OVERLAPPED.Offset` /
+    `.OffsetHigh`, seek to that position via SYS_FILE_SEEK,
+    perform the synchronous read/write, then stamp
+    `OVERLAPPED.Internal` (status code) + `.InternalHigh`
+    (bytes transferred). If the handle is bound to an IOCP,
+    a completion packet (key, OVERLAPPED*, bytes) is posted
+    to the bound port via the existing in-process IOCP ring
+    so a subsequent `GetQueuedCompletionStatus` surfaces the
+    result.
+  - End-to-end smoke (`userland/apps/iocp_overlapped_smoke/`)
+    exercises CreateFileA + WriteFile + reopen + bind + ReadFile
+    with OVERLAPPED + GetQueuedCompletionStatus + payload check.
+- **Why:** The acceptance row called out a PE using overlapped
+  reads receiving completion through GQCS. The existing IOCP
+  ring worked for `PostQueuedCompletionStatus`-driven posts but
+  the kernel never connected file I/O to the ring — every
+  overlapped read silently dropped the completion. The 16-slot
+  binding table + ReadFile/WriteFile patch closes the loop in
+  user space without a kernel-side I/O queue rewrite.
+- **Rules out / defers:**
+  - True `ERROR_IO_PENDING` async completion. The I/O is
+    synchronous; the completion packet is posted before
+    `ReadFile` returns. Real Windows allows the I/O to be
+    pending while the caller waits on GQCS — that needs a
+    kernel-side I/O scheduler (DPCs, deferred completion).
+  - Share-mode enforcement (`FILE_SHARE_READ` /
+    `FILE_SHARE_WRITE` etc.) on CreateFileA/W. v0 doesn't
+    track share modes; concurrent opens on the same file
+    succeed regardless. Acceptable until a workload races.
+  - `OVERLAPPED.hEvent` signaling. Apps using a manual-reset
+    event for sync still see the event un-signalled even
+    though the I/O completes. Easy to layer on top of the
+    existing user-side event API once a workload demands it.
+  - Cross-thread completion delivery. The user-side IOCP
+    ring is in-process; a cross-process IOCP would need a
+    kernel-side port pool (which we already have via SYS_IOCP_*
+    but don't wire to ReadFile/WriteFile yet).
+- **Revisit when:** a workload depends on real async semantics
+  (ERROR_IO_PENDING + in-flight I/O), share-mode enforcement,
+  or hEvent signaling.
+- **Related roadmap track(s):** T7-03 closed.
+
+## 2026-05-10 — IRQ-safe KMalloc / KFree (T5-04 partial)
+
+- **What changed:**
+  - `kernel/mm/kheap.cpp` gets a `KheapIrqOff` RAII that
+    disables interrupts on entry and restores `IF` only if it
+    was set on entry. Same shape as
+    `FramePoolIrqOff` (frame allocator) and `IrqOff` (slab).
+    Both `KMalloc` and `KFree` now bracket their state-mutating
+    body with a `KheapIrqOff irq_guard;`.
+  - `wiki/kernel/Memory-Management.md` gains an
+    "Allocator family — context contract" table summarising
+    IRQ-safety + SMP-safety + sleep status across frame
+    allocator / kheap / slab / kstack.
+- **Why:** The kheap was previously single-CPU + IRQ-unsafe.
+  Any IRQ handler that itself called `KMalloc` (event-trace
+  growth, log ring resize, frame-allocator audit-trail buffer)
+  could re-enter the heap mid-mutation and observe a half-
+  updated freelist — a class of bug that would surface only
+  under load. Bracketing with IRQ-disable matches the rest of
+  the allocator family and closes the immediate window without
+  waiting for the SMP lock-split.
+- **Rules out / defers:**
+  - SMP-safe heap. The `KheapIrqOff` brace handles re-entrance
+    on a single CPU; cross-CPU contention still races. Adding
+    `spin_lock_irqsave` rides on the per-CPU scheduler-lock
+    split (B2-followup) so the lockdep ordering can absorb
+    the new dependency.
+  - Buddy coalescing on the kheap. Adjacent free chunks stay
+    separate; fragmentation is accepted (same v0 contract).
+  - Per-CPU slab magazines. Profile evidence triggers it.
+- **Revisit when:** SMP brings actual cross-CPU heap contention,
+  or a profile shows fragmentation hurting workloads.
+- **Related roadmap track(s):** T5-04 partial — IRQ-safety + docs
+  closed; coalescing + magazines deferred.
