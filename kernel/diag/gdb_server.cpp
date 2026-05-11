@@ -16,6 +16,7 @@
 #include "cpu/percpu.h"
 #include "debug/breakpoints.h"
 #include "log/klog.h"
+#include "util/saturating.h"
 
 namespace duetos::diag::gdb
 {
@@ -100,9 +101,12 @@ constinit GdbServerWriteByte g_sink = nullptr;
 constinit const GdbServerRegSnapshot* g_regs = nullptr;
 constinit GdbServerRegSnapshot* g_regs_writable = nullptr;
 
-constinit u64 g_packets_received = 0;
-constinit u64 g_packets_bad_csum = 0;
-constinit u64 g_packets_handled = 0;
+// GDB packet counters — saturating per class BB. A noisy or
+// malicious peer cannot wrap any of these to zero and obscure
+// the traffic in operator audit / `inspect gdb` output.
+constinit util::SatU64 g_packets_received = 0;
+constinit util::SatU64 g_packets_bad_csum = 0;
+constinit util::SatU64 g_packets_handled = 0;
 
 // RFLAGS.TF — set on `s` (single-step), cleared on `c`.
 constexpr u64 kRflagsTf = 1ULL << 8;

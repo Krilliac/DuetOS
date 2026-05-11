@@ -7,6 +7,7 @@
 #include "sched/sched.h"
 #include "security/domain_dump.h"
 #include "security/fault_domain.h"
+#include "util/saturating.h"
 
 namespace duetos::diag
 {
@@ -42,10 +43,12 @@ struct PendingFault
     bool valid;
 };
 constinit PendingFault g_pending[kPolicySlotCount] = {};
-constinit u64 g_pending_overwrites = 0;
+// Lifetime tallies — saturating per class BB. Read by inspect /
+// shell health; never used in modular arithmetic.
+constinit util::SatU64 g_pending_overwrites = 0;
 
-constinit u64 g_dispatch_count = 0;
-constinit u64 g_reaction_counts[5] = {0, 0, 0, 0, 0}; // indexed by FaultReaction
+constinit util::SatU64 g_dispatch_count = 0;
+constinit util::SatU64 g_reaction_counts[5] = {}; // indexed by FaultReaction
 
 bool StrStartsWith(const char* s, const char* prefix)
 {

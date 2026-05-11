@@ -73,65 +73,75 @@ void SaturatingSelfTest()
         const u32 a = 0xFFFFFFFFu;
         const u32 b = 1u;
         const u32 r = SatAdd<u32>(a, b);
-        KASSERT(r == 0xFFFFFFFFu, "util/saturating",
-                "self-test: SatAdd u32 max+1 should clamp to max");
+        KASSERT(r == 0xFFFFFFFFu, "util/saturating", "self-test: SatAdd u32 max+1 should clamp to max");
     }
     // Add: 5 + 7 (u32) must be 12, no clamp.
     {
         const u32 r = SatAdd<u32>(5u, 7u);
-        KASSERT(r == 12u, "util/saturating",
-                "self-test: SatAdd 5+7 should be 12");
+        KASSERT(r == 12u, "util/saturating", "self-test: SatAdd 5+7 should be 12");
     }
     // Sub: 0 - 1 (u32) must clamp to 0.
     {
         const u32 r = SatSub<u32>(0u, 1u);
-        KASSERT(r == 0u, "util/saturating",
-                "self-test: SatSub u32 0-1 should clamp to 0");
+        KASSERT(r == 0u, "util/saturating", "self-test: SatSub u32 0-1 should clamp to 0");
     }
     // Sub: 10 - 3 (u32) must be 7, no clamp.
     {
         const u32 r = SatSub<u32>(10u, 3u);
-        KASSERT(r == 7u, "util/saturating",
-                "self-test: SatSub 10-3 should be 7");
+        KASSERT(r == 7u, "util/saturating", "self-test: SatSub 10-3 should be 7");
     }
     // Mul: 0x10000 * 0x10000 (u32) must clamp to 0xFFFFFFFF.
     {
         const u32 r = SatMul<u32>(0x10000u, 0x10000u);
-        KASSERT(r == 0xFFFFFFFFu, "util/saturating",
-                "self-test: SatMul u32 0x10000*0x10000 should clamp to max");
+        KASSERT(r == 0xFFFFFFFFu, "util/saturating", "self-test: SatMul u32 0x10000*0x10000 should clamp to max");
     }
     // Mul: 100 * 200 (u32) must be 20000, no clamp.
     {
         const u32 r = SatMul<u32>(100u, 200u);
-        KASSERT(r == 20000u, "util/saturating",
-                "self-test: SatMul 100*200 should be 20000");
+        KASSERT(r == 20000u, "util/saturating", "self-test: SatMul 100*200 should be 20000");
     }
     // u64 add edge.
     {
         const u64 r = SatAdd<u64>(0xFFFFFFFFFFFFFFFFull, 1ull);
-        KASSERT(r == 0xFFFFFFFFFFFFFFFFull, "util/saturating",
-                "self-test: SatAdd u64 max+1 should clamp to max");
+        KASSERT(r == 0xFFFFFFFFFFFFFFFFull, "util/saturating", "self-test: SatAdd u64 max+1 should clamp to max");
     }
     // Wrapper type ++ saturates at max.
     {
         SatU8 c{255};
         ++c;
-        KASSERT(static_cast<u8>(c) == 255, "util/saturating",
-                "self-test: SatU8 ++ at max should saturate");
+        KASSERT(static_cast<u8>(c) == 255, "util/saturating", "self-test: SatU8 ++ at max should saturate");
     }
     // Wrapper type -- saturates at 0.
     {
         SatU16 c{0};
         --c;
-        KASSERT(static_cast<u16>(c) == 0, "util/saturating",
-                "self-test: SatU16 -- at 0 should saturate");
+        KASSERT(static_cast<u16>(c) == 0, "util/saturating", "self-test: SatU16 -- at 0 should saturate");
     }
     // Wrapper type += normal path.
     {
         SatU32 c{100u};
         c += 50u;
-        KASSERT(static_cast<u32>(c) == 150u, "util/saturating",
-                "self-test: SatU32 += in-range should add normally");
+        KASSERT(static_cast<u32>(c) == 150u, "util/saturating", "self-test: SatU32 += in-range should add normally");
+    }
+    // SatAtomicAdd: in-range add commits and returns the new value.
+    {
+        u64 v = 100ull;
+        const u64 r = SatAtomicAdd<u64>(&v, 50ull);
+        KASSERT(r == 150ull && v == 150ull, "util/saturating", "self-test: SatAtomicAdd in-range should add normally");
+    }
+    // SatAtomicAdd: overflow clamps to type-max and stores it.
+    {
+        u32 v = 0xFFFFFFFEu;
+        const u32 r = SatAtomicAdd<u32>(&v, 5u);
+        KASSERT(r == 0xFFFFFFFFu && v == 0xFFFFFFFFu, "util/saturating",
+                "self-test: SatAtomicAdd overflow should clamp + store max");
+    }
+    // SatAtomicAdd: at-max + n is a no-op clamp (already at the cap).
+    {
+        u64 v = 0xFFFFFFFFFFFFFFFFull;
+        const u64 r = SatAtomicAdd<u64>(&v, 1ull);
+        KASSERT(r == 0xFFFFFFFFFFFFFFFFull && v == 0xFFFFFFFFFFFFFFFFull, "util/saturating",
+                "self-test: SatAtomicAdd at max stays at max");
     }
 
     arch::SerialWrite("[util/saturating] self-test OK\n");
