@@ -2792,6 +2792,214 @@ __declspec(dllexport) int LCMapStringW(unsigned long Locale, DWORD dwMapFlags, c
     return src_len;
 }
 
+/* CompareStringW / CompareStringA — ordinal compare with optional
+ * case-fold (NORM_IGNORECASE = 0x0001). The kernel32 thunk fallback
+ * (kOffReturnTwo) always returns 2 (CSTR_EQUAL), which mis-sorts any
+ * non-equal strings. The real Win32 contract is to return one of:
+ *   CSTR_LESS_THAN    = 1   (lhs <  rhs)
+ *   CSTR_EQUAL        = 2   (lhs == rhs)
+ *   CSTR_GREATER_THAN = 3   (lhs >  rhs)
+ *   0                       (error / invalid arg)
+ * v0 implements ordinal compare (no locale collation tables) which
+ * matches the documented behaviour when LOCALE_INVARIANT or
+ * LOCALE_NEUTRAL is passed. NORM_IGNORECASE folds A-Z → a-z. */
+__declspec(dllexport) int CompareStringW(unsigned long Locale, DWORD dwCmpFlags, const wchar_t16* lpString1,
+                                         int cchCount1, const wchar_t16* lpString2, int cchCount2)
+{
+    (void)Locale;
+    const unsigned long NORM_IGNORECASE = 0x00000001;
+    if (lpString1 == (const WCHAR_t*)0 || lpString2 == (const WCHAR_t*)0)
+        return 0;
+    int n1 = cchCount1;
+    if (n1 < 0)
+    {
+        n1 = 0;
+        while (lpString1[n1] != 0)
+            ++n1;
+    }
+    int n2 = cchCount2;
+    if (n2 < 0)
+    {
+        n2 = 0;
+        while (lpString2[n2] != 0)
+            ++n2;
+    }
+    int n = n1 < n2 ? n1 : n2;
+    int fold = (dwCmpFlags & NORM_IGNORECASE) != 0;
+    for (int i = 0; i < n; ++i)
+    {
+        wchar_t16 a = lpString1[i];
+        wchar_t16 b = lpString2[i];
+        if (fold)
+        {
+            if (a >= 'A' && a <= 'Z')
+                a = (wchar_t16)(a + ('a' - 'A'));
+            if (b >= 'A' && b <= 'Z')
+                b = (wchar_t16)(b + ('a' - 'A'));
+        }
+        if (a < b)
+            return 1;
+        if (a > b)
+            return 3;
+    }
+    if (n1 < n2)
+        return 1;
+    if (n1 > n2)
+        return 3;
+    return 2;
+}
+
+__declspec(dllexport) int CompareStringA(unsigned long Locale, DWORD dwCmpFlags, const char* lpString1, int cchCount1,
+                                         const char* lpString2, int cchCount2)
+{
+    (void)Locale;
+    const unsigned long NORM_IGNORECASE = 0x00000001;
+    if (lpString1 == (const char*)0 || lpString2 == (const char*)0)
+        return 0;
+    int n1 = cchCount1;
+    if (n1 < 0)
+    {
+        n1 = 0;
+        while (lpString1[n1] != 0)
+            ++n1;
+    }
+    int n2 = cchCount2;
+    if (n2 < 0)
+    {
+        n2 = 0;
+        while (lpString2[n2] != 0)
+            ++n2;
+    }
+    int n = n1 < n2 ? n1 : n2;
+    int fold = (dwCmpFlags & NORM_IGNORECASE) != 0;
+    for (int i = 0; i < n; ++i)
+    {
+        unsigned char a = (unsigned char)lpString1[i];
+        unsigned char b = (unsigned char)lpString2[i];
+        if (fold)
+        {
+            if (a >= 'A' && a <= 'Z')
+                a = (unsigned char)(a + ('a' - 'A'));
+            if (b >= 'A' && b <= 'Z')
+                b = (unsigned char)(b + ('a' - 'A'));
+        }
+        if (a < b)
+            return 1;
+        if (a > b)
+            return 3;
+    }
+    if (n1 < n2)
+        return 1;
+    if (n1 > n2)
+        return 3;
+    return 2;
+}
+
+__declspec(dllexport) int CompareStringEx(const wchar_t16* lpLocaleName, DWORD dwCmpFlags, const wchar_t16* lpString1,
+                                          int cchCount1, const wchar_t16* lpString2, int cchCount2,
+                                          void* lpVersionInformation, void* lpReserved, void* lParam)
+{
+    (void)lpLocaleName;
+    (void)lpVersionInformation;
+    (void)lpReserved;
+    (void)lParam;
+    return CompareStringW(0, dwCmpFlags, lpString1, cchCount1, lpString2, cchCount2);
+}
+
+/* GetStringTypeW / GetStringTypeA — classify each input char into
+ * CT_CTYPE1 bitfields. v0 covers ASCII; anything 0x80+ gets zero
+ * (the conservative default — caller treats as "unknown class"). */
+__declspec(dllexport) BOOL GetStringTypeW(DWORD dwInfoType, const wchar_t16* lpSrcStr, int cchSrc,
+                                          unsigned short* lpCharType)
+{
+    /* C1_UPPER  = 0x0001, C1_LOWER  = 0x0002, C1_DIGIT = 0x0004,
+     * C1_SPACE  = 0x0008, C1_PUNCT  = 0x0010, C1_CNTRL = 0x0020,
+     * C1_BLANK  = 0x0040, C1_XDIGIT = 0x0080, C1_ALPHA = 0x0100. */
+    if (lpSrcStr == (const WCHAR_t*)0 || lpCharType == (unsigned short*)0)
+        return 0;
+    int n = cchSrc;
+    if (n < 0)
+    {
+        n = 0;
+        while (lpSrcStr[n] != 0)
+            ++n;
+    }
+    /* dwInfoType: CT_CTYPE1 = 1, CT_CTYPE2 = 2, CT_CTYPE3 = 4. We
+     * support CT_CTYPE1 properly; CT_CTYPE2/3 fill zeros (which
+     * matches "no class info available"). */
+    if (dwInfoType != 1)
+    {
+        for (int i = 0; i < n; ++i)
+            lpCharType[i] = 0;
+        return 1;
+    }
+    for (int i = 0; i < n; ++i)
+    {
+        unsigned short c = (unsigned short)lpSrcStr[i];
+        unsigned short t = 0;
+        if (c >= 'A' && c <= 'Z')
+            t |= 0x0001 | 0x0100; /* UPPER | ALPHA */
+        if (c >= 'a' && c <= 'z')
+            t |= 0x0002 | 0x0100; /* LOWER | ALPHA */
+        if (c >= '0' && c <= '9')
+            t |= 0x0004 | 0x0080; /* DIGIT | XDIGIT */
+        if ((c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))
+            t |= 0x0080; /* XDIGIT */
+        if (c == ' ')
+            t |= 0x0008 | 0x0040; /* SPACE | BLANK */
+        if (c == '\t')
+            t |= 0x0008 | 0x0040;
+        if (c == '\n' || c == '\r' || c == '\v' || c == '\f')
+            t |= 0x0008;
+        if (c < 0x20 || c == 0x7F)
+            t |= 0x0020; /* CNTRL */
+        if ((c >= 0x21 && c <= 0x2F) || (c >= 0x3A && c <= 0x40) || (c >= 0x5B && c <= 0x60) ||
+            (c >= 0x7B && c <= 0x7E))
+            t |= 0x0010; /* PUNCT */
+        lpCharType[i] = t;
+    }
+    return 1;
+}
+
+__declspec(dllexport) BOOL GetStringTypeA(unsigned long Locale, DWORD dwInfoType, const char* lpSrcStr, int cchSrc,
+                                          unsigned short* lpCharType)
+{
+    (void)Locale;
+    /* Translate single-byte input to wide on the stack — same v0
+     * ASCII-range classification applies. Cap at 256 chars per call;
+     * larger inputs chunk through the loop. */
+    if (lpSrcStr == (const char*)0 || lpCharType == (unsigned short*)0)
+        return 0;
+    int n = cchSrc;
+    if (n < 0)
+    {
+        n = 0;
+        while (lpSrcStr[n] != 0)
+            ++n;
+    }
+    wchar_t16 wbuf[256];
+    int off = 0;
+    while (off < n)
+    {
+        int chunk = n - off;
+        if (chunk > 256)
+            chunk = 256;
+        for (int i = 0; i < chunk; ++i)
+            wbuf[i] = (wchar_t16)(unsigned char)lpSrcStr[off + i];
+        if (!GetStringTypeW(dwInfoType, wbuf, chunk, lpCharType + off))
+            return 0;
+        off += chunk;
+    }
+    return 1;
+}
+
+__declspec(dllexport) BOOL GetStringTypeExW(unsigned long Locale, DWORD dwInfoType, const wchar_t16* lpSrcStr,
+                                            int cchSrc, unsigned short* lpCharType)
+{
+    (void)Locale;
+    return GetStringTypeW(dwInfoType, lpSrcStr, cchSrc, lpCharType);
+}
+
 /* FormatMessageW — canned messages for FORMAT_MESSAGE_FROM_SYSTEM
  * with a few common error codes. Fully real localisation /
  * inserts deferred until we have a real ntdll error table. */
