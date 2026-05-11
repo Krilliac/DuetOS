@@ -18,6 +18,7 @@
 #include "proc/process.h"
 #include "mm/address_space.h"
 #include "mm/paging.h"
+#include "util/nospec.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -74,6 +75,8 @@ i64 DoFchdir(u64 fd)
         KLOG_WARN_V("linux/path", "DoFchdir: EBADF (no proc or out-of-range fd)", fd);
         return kEBADF;
     }
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    fd = util::MaskedIndex(fd, 16);
     if (p->linux_fds[fd].state == 0)
     {
         KLOG_WARN_V("linux/path", "DoFchdir: EBADF (fd not open)", fd);

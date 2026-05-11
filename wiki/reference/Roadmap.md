@@ -109,9 +109,20 @@ the same commit** that delivers the code.
     sites in `kernel/acpi/aml.cpp` to use `pkg_len > end - after_op`
     (compare-the-difference). Structurally cannot wrap.
   - **Class N — `MaskedIndex` Spectre-v1 helper** added in
-    `kernel/util/nospec.h` (32- and 64-bit forms). Apply at any
-    syscall dispatch site that uses a user-supplied integer as an
-    array index after a runtime bounds check.
+    `kernel/util/nospec.h` (32- and 64-bit forms) and applied
+    across the audited user-controlled dispatch sites: Win32 NT
+    handle table (`ipc/handle_table.cpp` Lookup / LookupRef /
+    Remove), Win32 thread / process / GDI handle dispatch
+    (`syscall/syscall.cpp`, `subsystems/win32/gdi_objects.cpp`),
+    Win32 file handle resolver
+    (`fs/file_route.cpp::HandleToSlot`), Linux fd dispatch in
+    `linux/syscall_io.cpp` + `syscall_file.cpp` +
+    `syscall_path.cpp` + `syscall_xattr.cpp` +
+    `pidfd_splice.cpp`. Discipline for new code: after the
+    `if (idx >= kCap) return -EINVAL;` runtime check, mask the
+    index with `util::MaskedIndex(idx, kCap)` before the array
+    load — the check protects correctness, the mask bounds the
+    speculative window. KPTI remains independently deferred.
   - **Class O — saturating refcount.** `KObjectAcquire` now uses
     `util::RefcountIncSaturating`; refuses the increment at
     `UINT32_MAX` and logs a panic-or-warn rather than wrapping.
@@ -157,13 +168,6 @@ the same commit** that delivers the code.
     aliasing on user-supplied scatterlists for any operation that
     doesn't byte-copy the full output. Auth-tag-skip + in-place was
     the Copy Fail root cause.
-  - **Class N follow-up (apply the helper).** The
-    `util::MaskedIndex` helper is now in the tree; the
-    follow-on slice walks every syscall-dispatch table where a
-    user-supplied integer indexes an array (Linux syscall table,
-    Win32 syscall thunk table, NT object-type table) and
-    inserts `MaskedIndex` at the dispatch site. KPTI remains
-    separately deferred.
   - **Class I — Bluetooth upper stack.** When L2CAP / RFCOMM / SDP
     land, the protocol-parser invariants from class C apply.
   - **Class L — IPv6 reassembly.** When IPv6 lands, every fragment

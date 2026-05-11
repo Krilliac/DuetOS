@@ -81,6 +81,7 @@
 #include "subsystems/win32/heap_syscall.h"
 #include "subsystems/win32/vmap_syscall.h"
 #include "util/debug_assert.h"
+#include "util/nospec.h"
 #include "subsystems/win32/tls_syscall.h"
 #include "subsystems/win32/file_syscall.h"
 #include "subsystems/win32/thread_syscall.h"
@@ -262,7 +263,10 @@ sched::Task* LookupThreadHandle(Process* caller, u64 handle)
     }
     if (handle >= Process::kWin32ThreadBase && handle < Process::kWin32ThreadBase + Process::kWin32ThreadCap)
     {
-        const u64 idx = handle - Process::kWin32ThreadBase;
+        // Spectre v1 nospec: the bounds check above is architectural;
+        // mask the index so a misprediction can't speculate a load
+        // past the win32_threads[] table.
+        const u64 idx = util::MaskedIndex(handle - Process::kWin32ThreadBase, Process::kWin32ThreadCap);
         if (caller->win32_threads[idx].in_use)
         {
             return caller->win32_threads[idx].task;
@@ -272,7 +276,7 @@ sched::Task* LookupThreadHandle(Process* caller, u64 handle)
     if (handle >= Process::kWin32ForeignThreadBase &&
         handle < Process::kWin32ForeignThreadBase + Process::kWin32ForeignThreadCap)
     {
-        const u64 idx = handle - Process::kWin32ForeignThreadBase;
+        const u64 idx = util::MaskedIndex(handle - Process::kWin32ForeignThreadBase, Process::kWin32ForeignThreadCap);
         if (caller->win32_foreign_threads[idx].in_use)
         {
             return caller->win32_foreign_threads[idx].task;
@@ -291,11 +295,13 @@ Process* LookupProcessHandle(Process* caller, u64 handle)
     {
         return nullptr;
     }
-    const u64 idx = handle - Process::kWin32ProcessBase;
+    u64 idx = handle - Process::kWin32ProcessBase;
     if (idx >= Process::kWin32ProcessCap)
     {
         return nullptr;
     }
+    // Spectre v1 nospec — see LookupThreadHandle for the rationale.
+    idx = util::MaskedIndex(idx, Process::kWin32ProcessCap);
     if (!caller->win32_proc_handles[idx].in_use)
     {
         return nullptr;
@@ -849,7 +855,11 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = static_cast<u64>(-1);
             return;
         }
-        frame->rax = proc->std_handles[idx];
+        // Spectre v1 nospec: array length is 3 (stdin/stdout/stderr).
+        // Bound the speculative load to the table even if the branch
+        // mispredicts.
+        const u64 masked_idx = util::MaskedIndex(idx, 3);
+        frame->rax = proc->std_handles[masked_idx];
         return;
     }
     case SYS_HEAPEX_CREATE:
@@ -2895,7 +2905,8 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = kStillActive;
             return;
         }
-        const u64 slot = handle - Process::kWin32ThreadBase;
+        // Spectre v1 nospec — see LookupThreadHandle for the rationale.
+        const u64 slot = util::MaskedIndex(handle - Process::kWin32ThreadBase, Process::kWin32ThreadCap);
         if (!proc->win32_threads[slot].in_use)
         {
             frame->rax = kStillActive;
@@ -2916,7 +2927,8 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = static_cast<u64>(-1);
             return;
         }
-        const u64 slot = handle - Process::kWin32ThreadBase;
+        // Spectre v1 nospec — see LookupThreadHandle for the rationale.
+        const u64 slot = util::MaskedIndex(handle - Process::kWin32ThreadBase, Process::kWin32ThreadCap);
         const auto& th = proc->win32_threads[slot];
         if (!th.in_use)
         {
@@ -3022,7 +3034,8 @@ void SyscallDispatch(arch::TrapFrame* frame)
                         // Use exit_code (set by SYS_EXIT) instead
                         // of TaskIsDead (th.task may be a reaped
                         // pointer). Valid as long as in_use holds.
-                        const u64 slot = h - Process::kWin32ThreadBase;
+                        // Spectre v1 nospec — see LookupThreadHandle.
+                        const u64 slot = util::MaskedIndex(h - Process::kWin32ThreadBase, Process::kWin32ThreadCap);
                         const auto& th = proc->win32_threads[slot];
                         if (th.in_use && th.exit_code != 0x103)
                             sig = true;

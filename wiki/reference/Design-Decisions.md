@@ -8101,3 +8101,86 @@ doc helps future readers audit the trail.
 - **Related roadmap track(s):** End-user features → Disk
   installer (kernel-ELF embed shipped as opt-in; DMA-zone fix
   is the closing residual).
+
+## 2026-05-11 — Spectre v1 nospec at audited dispatch sites (Class N follow-up)
+
+- **Context:** `util::MaskedIndex` had been in the tree since the
+  Linux CVE audit (Class N) but only two callsites — Linux fd
+  dispatch in `syscall_io.cpp::DoRead` / `DoWrite` — actually used
+  it. The roadmap row called for the helper to be walked across
+  every syscall-dispatch table where a user-supplied integer
+  indexes an array (Linux fd, Win32 NT handle table, Win32 thread
+  / process / GDI handle tables) and inserted at the dispatch
+  site. Without the masks, a misprediction of the `if (idx >= N)`
+  branch could still speculate the array load past the table even
+  though the architectural path was correctly bounded — the same
+  class as Spectre v1 / bounds-check bypass in Linux.
+- **Decision:** Apply `util::MaskedIndex(idx, bound)` between the
+  runtime bounds check and the array load at every audited
+  user-controlled dispatch site. The check stays unchanged (it
+  protects correctness); the mask is the speculative-window
+  bound.
+- **Sites hardened in this slice:**
+  - **Win32 NT object handle table** — `HandleTableLookup`,
+    `HandleTableLookupRef`, `HandleTableRemove` in
+    `kernel/ipc/handle_table.cpp` (drives every
+    `HandleTableLookup(KObjectType::*)` consumer — events,
+    mutexes, semaphores, files, mailboxes, waitables — so each
+    NT-object subsystem inherits the mitigation from one
+    chokepoint).
+  - **Win32 thread / process handle dispatch** —
+    `LookupThreadHandle`, `LookupProcessHandle`,
+    `SYS_THREAD_EXIT_CODE`, `SYS_THREAD_WAIT`, the
+    wait-multiple poll loop's thread branch, and
+    `SYS_GET_INHERITED_STD` in `kernel/syscall/syscall.cpp`.
+  - **Win32 GDI handle tables** — `GdiLookupMemDC`,
+    `GdiLookupBitmap`, `GdiLookupBrush`, `GdiLookupPen`,
+    `GdiWindowDcState`, `GdiSysColor`, `GdiSysColorBrush` in
+    `kernel/subsystems/win32/gdi_objects.cpp`.
+  - **Win32 file handle resolver** — `HandleToSlot` in
+    `kernel/fs/file_route.cpp` (chokepoint for every consumer
+    of `proc->win32_handles[slot]`).
+  - **Linux fd dispatch** — `DoClose`, `DoFstat` in
+    `syscall_file.cpp`; `DoFchdir` in `syscall_path.cpp`;
+    `ResolveFdToPath` in `syscall_xattr.cpp`;
+    `DoPidfdSendSignal`, `DoPidfdGetfd`, `DoSplice`, `DoTee`,
+    `DoVmsplice` in `pidfd_splice.cpp`.
+- **Alternatives considered (and why not):**
+  - Compiler-emitted `__builtin_constant_p`-style speculation
+    fence at every branch — drags Spectre v1 cost into the
+    architectural critical path and the kernel already
+    correctly bounds-checks. The mask cost is one AND on the
+    register-already-loaded index.
+  - One global "all kernel arrays are sliced through a masked
+    helper" wrapper type — too invasive for v0; mechanical
+    site-by-site application keeps the diff inspectable and
+    leaves the architectural code shapes intact.
+  - LFENCE between check and load — heavier than the mask
+    (pipeline serialisation vs. an AND), and the mask covers
+    the same threat class for the case of a user-controlled
+    index after a bounds check.
+- **Trade-offs:**
+  - One additional `sub` + `sar 63` + `and` per dispatch
+    (~3 cycles on modern x86_64). Negligible against the
+    syscall trap entry cost.
+  - Long-tail Linux fd dispatch sites — `syscall_fs_mut.cpp`,
+    `inotify.cpp`, `fanotify.cpp`, `syscall_mm.cpp`,
+    `syscall_socket.cpp`, `syscall_async_io.cpp`,
+    `extra_syscalls.cpp`, `syscall_misc.cpp`,
+    `syscall_stub.cpp` — still validate but don't mask. The
+    discipline is documented in `Linux-CVE-Audit.md`: any new
+    or touched dispatch site applies the mask. Touching every
+    file in one slice would be a mechanical edit that risks
+    behaviour drift; the high-impact chokepoints (NT handle
+    table, file handle resolver, GDI handles, Linux fd
+    dispatch in the IO / fstat / fchdir / xattr / splice
+    families) are covered now and the rest converges as the
+    code is touched.
+- **Revisit when:** any new syscall handler lands that resolves
+  a user-supplied integer to an array index, or any of the
+  long-tail Linux fd files is touched for unrelated work — the
+  mask is a one-line addition between the bounds check and the
+  array load.
+- **Related roadmap track(s):** Kernel / runtime → Linux CVE
+  audit (Class N — `MaskedIndex` follow-up landed). KPTI
+  (Class N's other half) remains separately deferred.

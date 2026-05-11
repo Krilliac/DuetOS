@@ -21,6 +21,7 @@
 #include "mm/paging.h"
 #include "proc/process.h"
 #include "sync/spinlock.h"
+#include "util/nospec.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -130,6 +131,8 @@ bool ResolveFdToPath(u64 fd, char* path_out)
         return false;
     if (fd >= 16)
         return false;
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    fd = ::duetos::util::MaskedIndex(fd, 16);
     const auto& slot = p->linux_fds[fd];
     if (slot.state != 2 /*regular file*/)
         return false;

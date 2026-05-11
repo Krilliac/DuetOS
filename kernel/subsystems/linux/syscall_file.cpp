@@ -30,6 +30,7 @@
 #include "mm/paging.h"
 #include "security/canary.h"
 #include "subsystems/win32/dir_syscall.h"
+#include "util/nospec.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -284,6 +285,8 @@ i64 DoClose(u64 fd)
     {
         return kEBADF;
     }
+    // Spectre v1 nospec — see DoWrite for the rationale.
+    fd = util::MaskedIndex(fd, 16);
     // fd 0/1/2 are reserved-tty, never file handles; refuse close.
     if (fd < 3 || p->linux_fds[fd].state == 0)
     {
@@ -330,6 +333,8 @@ i64 DoFstat(u64 fd, u64 user_buf)
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || fd >= 16)
         return kEBADF;
+    // Spectre v1 nospec — see DoWrite for the rationale.
+    fd = util::MaskedIndex(fd, 16);
     const auto state = p->linux_fds[fd].state;
     fs::fat32::DirEntry entry;
     for (u64 i = 0; i < sizeof(entry.name); ++i)

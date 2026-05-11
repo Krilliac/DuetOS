@@ -29,6 +29,7 @@
 #include "mm/paging.h"
 #include "proc/process.h"
 #include "sched/sched.h"
+#include "util/nospec.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -154,6 +155,8 @@ i64 DoPidfdSendSignal(u64 pidfd, u64 sig, u64 user_info, u64 flags)
     core::Process* caller = core::CurrentProcess();
     if (caller == nullptr || pidfd >= 16 || caller->linux_fds[pidfd].state != 12)
         return kEBADF;
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    pidfd = util::MaskedIndex(pidfd, 16);
     const u64 target_pid = caller->linux_fds[pidfd].first_cluster;
     core::Process* target = sched::SchedFindProcessByPid(target_pid);
     if (target == nullptr)
@@ -183,12 +186,15 @@ i64 DoPidfdGetfd(u64 pidfd, u64 target_fd, u64 flags)
         core::RecordSandboxDenial(kCapDebug);
         return kEPERM;
     }
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    pidfd = util::MaskedIndex(pidfd, 16);
     const u64 target_pid = caller->linux_fds[pidfd].first_cluster;
     core::Process* target = sched::SchedFindProcessByPid(target_pid);
     if (target == nullptr)
         return kESRCH;
     if (target_fd >= 16 || target->linux_fds[target_fd].state == 0)
         return kEBADF;
+    target_fd = util::MaskedIndex(target_fd, 16);
 
     // Find a free slot in caller's table.
     i32 caller_slot = -1;
@@ -288,6 +294,9 @@ i64 DoSplice(u64 fd_in, u64 user_off_in, u64 fd_out, u64 user_off_out, u64 len, 
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || fd_in >= 16 || fd_out >= 16)
         return kEBADF;
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    fd_in = util::MaskedIndex(fd_in, 16);
+    fd_out = util::MaskedIndex(fd_out, 16);
     if (p->linux_fds[fd_in].state == 0 || p->linux_fds[fd_out].state == 0)
         return kEBADF;
     if (len == 0)
@@ -317,6 +326,9 @@ i64 DoTee(u64 fd_in, u64 fd_out, u64 len, u64 flags)
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || fd_in >= 16 || fd_out >= 16)
         return kEBADF;
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    fd_in = util::MaskedIndex(fd_in, 16);
+    fd_out = util::MaskedIndex(fd_out, 16);
     // tee requires both ends to be pipes per Linux. Source is the
     // read end (state 3), destination is the write end (state 4).
     if (p->linux_fds[fd_in].state != 3 || p->linux_fds[fd_out].state != 4)
@@ -334,6 +346,8 @@ i64 DoVmsplice(u64 fd, u64 user_iov, u64 nr_segs, u64 flags)
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || fd >= 16)
         return kEBADF;
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    fd = util::MaskedIndex(fd, 16);
     // vmsplice writes iovec → pipe. v0 collapses to "iterate the
     // iovec and PipeWrite each segment." iovec layout: u64 base +
     // u64 len repeated nr_segs times.

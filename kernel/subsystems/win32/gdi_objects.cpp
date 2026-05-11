@@ -39,6 +39,7 @@
 #include "mm/kheap.h"
 #include "mm/paging.h"
 #include "subsystems/win32/window_syscall.h"
+#include "util/nospec.h"
 
 namespace duetos::subsystems::win32
 {
@@ -77,12 +78,21 @@ u64 GdiHandleType(u64 h)
     return 0;
 }
 
+// Spectre v1 nospec: GDI handle payloads come from user space (the
+// low 16 bits of the HANDLE passed by ring 3). The bounds check
+// already filters architecturally-out-of-range indices, but a
+// misprediction could speculate the `g_*[idx]` load with a wider
+// idx. Mask after the runtime check to bound the speculative load
+// to the table.
 MemDC* GdiLookupMemDC(u64 h)
 {
     if ((h & kGdiTagMask) != kGdiTagMemDC)
         return nullptr;
-    const u32 idx = HandleIndex(h);
-    if (idx >= kMaxMemDcs || !g_mem_dcs[idx].alive)
+    u32 idx = HandleIndex(h);
+    if (idx >= kMaxMemDcs)
+        return nullptr;
+    idx = util::MaskedIndex32(idx, kMaxMemDcs);
+    if (!g_mem_dcs[idx].alive)
         return nullptr;
     return &g_mem_dcs[idx];
 }
@@ -91,8 +101,11 @@ Bitmap* GdiLookupBitmap(u64 h)
 {
     if ((h & kGdiTagMask) != kGdiTagBitmap)
         return nullptr;
-    const u32 idx = HandleIndex(h);
-    if (idx >= kMaxBitmaps || !g_bitmaps[idx].alive)
+    u32 idx = HandleIndex(h);
+    if (idx >= kMaxBitmaps)
+        return nullptr;
+    idx = util::MaskedIndex32(idx, kMaxBitmaps);
+    if (!g_bitmaps[idx].alive)
         return nullptr;
     return &g_bitmaps[idx];
 }
@@ -101,8 +114,11 @@ Brush* GdiLookupBrush(u64 h)
 {
     if ((h & kGdiTagMask) != kGdiTagBrush)
         return nullptr;
-    const u32 idx = HandleIndex(h);
-    if (idx >= kMaxBrushes || !g_brushes[idx].alive)
+    u32 idx = HandleIndex(h);
+    if (idx >= kMaxBrushes)
+        return nullptr;
+    idx = util::MaskedIndex32(idx, kMaxBrushes);
+    if (!g_brushes[idx].alive)
         return nullptr;
     return &g_brushes[idx];
 }
@@ -111,8 +127,11 @@ Pen* GdiLookupPen(u64 h)
 {
     if ((h & kGdiTagMask) != kGdiTagPen)
         return nullptr;
-    const u32 idx = HandleIndex(h);
-    if (idx >= kMaxPens || !g_pens[idx].alive)
+    u32 idx = HandleIndex(h);
+    if (idx >= kMaxPens)
+        return nullptr;
+    idx = util::MaskedIndex32(idx, kMaxPens);
+    if (!g_pens[idx].alive)
         return nullptr;
     return &g_pens[idx];
 }
@@ -121,6 +140,7 @@ WindowDcState* GdiWindowDcState(u32 window_handle)
 {
     if (window_handle >= kMaxWindowDcSlots)
         return nullptr;
+    window_handle = util::MaskedIndex32(window_handle, kMaxWindowDcSlots);
     WindowDcState* s = &g_win_dcs[window_handle];
     if (!s->init)
     {
@@ -194,6 +214,8 @@ u32 GdiSysColor(u32 index)
 {
     if (index >= kSysColorCount)
         return 0x00C0C0C0;
+    // Spectre v1 nospec — see GdiLookupMemDC for the rationale.
+    index = util::MaskedIndex32(index, kSysColorCount);
     return kSysColorMap[index];
 }
 
@@ -201,6 +223,7 @@ u64 GdiSysColorBrush(u32 index)
 {
     if (index >= kSysColorCount)
         return 0;
+    index = util::MaskedIndex32(index, kSysColorCount);
     if (g_sys_color_brushes[index] != 0)
         return g_sys_color_brushes[index];
     const u64 h = GdiCreateSolidBrush(kSysColorMap[index]);

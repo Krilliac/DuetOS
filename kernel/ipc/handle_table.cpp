@@ -15,6 +15,7 @@
 #include "ipc/kobject.h"
 #include "log/klog.h"
 #include "sync/spinlock.h"
+#include "util/nospec.h"
 #include "util/result.h"
 #include "util/types.h"
 
@@ -66,8 +67,12 @@ KObject* HandleTableLookup(HandleTable& table, Handle h, KObjectType expected_ty
     {
         return nullptr;
     }
+    // Spectre v1 nospec: a misprediction of HandleInRange could
+    // speculate `table.slots[h]` for an h past the cap. Mask the
+    // index so the speculative load is bounded to [0, capacity).
+    const Handle masked_h = static_cast<Handle>(util::MaskedIndex32(static_cast<u32>(h), kHandleTableCapacity));
     sync::SpinLockGuard guard(table.lock);
-    KObject* obj = table.slots[h].obj;
+    KObject* obj = table.slots[masked_h].obj;
     if (obj == nullptr)
     {
         return nullptr;
@@ -85,10 +90,12 @@ KObject* HandleTableLookupRef(HandleTable& table, Handle h, KObjectType expected
     {
         return nullptr;
     }
+    // Spectre v1 nospec — see HandleTableLookup for the rationale.
+    const Handle masked_h = static_cast<Handle>(util::MaskedIndex32(static_cast<u32>(h), kHandleTableCapacity));
     KObject* obj = nullptr;
     {
         sync::SpinLockGuard guard(table.lock);
-        obj = table.slots[h].obj;
+        obj = table.slots[masked_h].obj;
         if (obj == nullptr)
         {
             return nullptr;
@@ -116,16 +123,18 @@ KObject* HandleTableLookupRef(HandleTable& table, Handle h, KObjectType expected
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
     }
 
+    // Spectre v1 nospec — see HandleTableLookup for the rationale.
+    const Handle masked_h = static_cast<Handle>(util::MaskedIndex32(static_cast<u32>(h), kHandleTableCapacity));
     KObject* dropped = nullptr;
     {
         sync::SpinLockGuard guard(table.lock);
-        if (table.slots[h].obj == nullptr)
+        if (table.slots[masked_h].obj == nullptr)
         {
             KLOG_WARN_AV(::duetos::core::LogArea::IPC, "ipc/handle_table", "Remove: empty slot", static_cast<u64>(h));
             return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
         }
-        dropped = table.slots[h].obj;
-        table.slots[h].obj = nullptr;
+        dropped = table.slots[masked_h].obj;
+        table.slots[masked_h].obj = nullptr;
     }
     KLOG_TRACE_AV(::duetos::core::LogArea::IPC, "ipc/handle_table", "remove ok handle", static_cast<u64>(h));
     // Release outside the table lock — destroy callbacks may
