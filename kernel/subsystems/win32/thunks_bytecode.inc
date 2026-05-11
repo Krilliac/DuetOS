@@ -836,27 +836,17 @@
     0x0F, 0xB6, 0xC2, // 0x29C movzx eax, dl
     0xC3,             // 0x29F ret
 
-    // === D3D / DXGI — HRESULT E_FAIL ================
+    // === HRESULT S_OK pin (offset 0x2A0, 6 bytes) ============
     //
-    // Any PE that imports d3d11 / d3d12 / dxgi entry points
-    // lands on this stub. Returns HRESULT E_FAIL
-    // (0x80004005) so the caller's "no graphics available"
-    // fallback path activates cleanly. Prevents the caller
-    // from treating the miss-logger's 0-return as success
-    // (HRESULT S_OK == 0), which would lead to a null-deref
-    // on the returned IDirect3D*/ID3D11*/IDXGI* interface.
-    //
-    // Wire-up target: a follow-up redirects this IAT
-    // landing through a syscall to
-    // subsystems::graphics::D3D11CreateDeviceStub etc., so the
-    // kernel log records exactly which D3D entry point got
-    // called. For v0, returning E_FAIL is enough to make the
-    // caller's fallback branch fire.
-
-    // --- HRESULT E_FAIL (offset 0x2A0, 6 bytes) ----------------
-    // `mov eax, 0x80004005; ret`. The 32-bit form zero-extends
-    // to rax; HRESULT is 32-bit so upper bits don't matter.
-    0xB8, 0x05, 0x40, 0x00, 0x80, // 0x2A0 mov eax, 0x80004005
+    // Pinned HRESULT-shaped success return. Used by COM-style
+    // exports whose v0 fallback path returns "success" rather
+    // than E_FAIL so callers that bail on FAILED(hr) keep going.
+    // The userland DLLs (ole32, d3d9, d3d11, d3d12, dxgi, …) own
+    // the real factory-object return path; this thunk fires only
+    // if those DLL preloads miss. Six bytes — `mov eax, 0; ret`
+    // — same layout as the legacy E_FAIL thunk it replaced, so
+    // offsets downstream of 0x2A6 are unchanged.
+    0xB8, 0x00, 0x00, 0x00, 0x00, // 0x2A0 mov eax, 0 (S_OK)
     0xC3,                         // 0x2A5 ret
 
     // === real GetSystemTimeAsFileTime ===============

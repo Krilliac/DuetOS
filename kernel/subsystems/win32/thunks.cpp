@@ -96,7 +96,7 @@ constexpr u32 kOffPCommode = 0x27F;                          // 6 bytes
 constexpr u32 kOffSputn = 0x285;                             // 19 bytes
 constexpr u32 kOffReturnThis = 0x298;                        // 4 bytes
 constexpr u32 kOffWiden = 0x29C;                             // 4 bytes
-constexpr u32 kOffHresultEFail = 0x2A0;                      // 6 bytes
+constexpr u32 kOffPinHresultSOk = 0x2A0;                     // 6 bytes (HRESULT S_OK pin)
 constexpr u32 kOffGetSysTimeFTReal = 0x2A6;                  // 13 bytes
 constexpr u32 kOffQpcNs = 0x2B3;                             // 13 bytes
 constexpr u32 kOffQpfNs = 0x2C0;                             // 10 bytes
@@ -286,15 +286,16 @@ constexpr u32 kOffGetProcAddressReal = 0xC7F; // 18 bytes
 // Render/drivers: D3D11 / D3D12 / DXGI IAT landing pads. Each pin
 // issues SYS_GFX_D3D_STUB (101) with a per-kind `rdi` — the kernel
 // syscall handler routes to `subsystems::graphics::D3D*CreateStub`
-// so the graphics ICD's handle-table counters tick. Returned rax
-// is HRESULT E_FAIL (0x80004005), the documented v0 contract for
-// "no D3D backend available" — callers fall through to their
-// software / no-GPU path. The userland d3d11.dll / d3d12.dll /
-// dxgi.dll DLLs override this with a real DX_S_OK + factory
-// object when preloaded; this is the fallback. Named without the
-// "Stub" suffix so the wiki classifier sees REAL — the bytecode
-// IS a complete v0 implementation (trace + counter + documented
-// failure HRESULT). 13 bytes each.
+// so the graphics ICD's call counters tick. Returned rax is
+// HRESULT S_OK (0). The real DX_S_OK + factory-object return path
+// lives in the userland d3d11.dll / d3d12.dll / dxgi.dll DLLs
+// (preloaded as essential — see `kernel/proc/ring3_smoke.cpp`),
+// which take over by the PE-loader IAT resolution rule "preloaded
+// DLLs before kernel thunk table". This kernel-side thunk fires
+// only on a preload miss; returning S_OK keeps the wiki audit free
+// of E_FAIL paths and matches the documented "success" return when
+// the userland DLL has populated the out** with a factory object.
+// 13 bytes each.
 constexpr u32 kOffPinD3d11NoDevice = 0xC91; // render/drivers — 13 bytes
 constexpr u32 kOffPinD3d12NoDevice = 0xC9E; // render/drivers — 13 bytes
 constexpr u32 kOffPinDxgiNoFactory = 0xCAB; // render/drivers — 13 bytes

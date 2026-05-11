@@ -1691,21 +1691,21 @@ landing — see [`Compositor`](../subsystems/Compositor.md)
 
 | Method | Status | Routed to |
 |--------|--------|-----------|
-| `CLSIDFromProgID` | REAL | `kOffHresultEFail` |
-| `CLSIDFromString` | REAL | `kOffHresultEFail` |
-| `CoCreateInstance` | REAL | `kOffHresultEFail` |
-| `CoCreateInstanceEx` | REAL | `kOffHresultEFail` |
-| `CoGetClassObject` | REAL | `kOffHresultEFail` |
+| `CLSIDFromProgID` | REAL | `kOffPinHresultSOk` |
+| `CLSIDFromString` | REAL | `kOffPinHresultSOk` |
+| `CoCreateInstance` | REAL | `kOffPinHresultSOk` |
+| `CoCreateInstanceEx` | REAL | `kOffPinHresultSOk` |
+| `CoGetClassObject` | REAL | `kOffPinHresultSOk` |
 | `CoInitialize` | REAL | `kOffPinReturn0` |
 | `CoInitializeEx` | REAL | `kOffPinReturn0` |
 | `CoTaskMemAlloc` | REAL | `kOffPinReturn0` |
 | `CoTaskMemFree` | REAL | `kOffPinVoidNop` |
 | `CoTaskMemRealloc` | REAL | `kOffPinReturn0` |
 | `CoUninitialize` | REAL | `kOffPinVoidNop` |
-| `IIDFromString` | REAL | `kOffHresultEFail` |
+| `IIDFromString` | REAL | `kOffPinHresultSOk` |
 | `OleInitialize` | REAL | `kOffPinReturn0` |
 | `OleUninitialize` | REAL | `kOffPinVoidNop` |
-| `StringFromCLSID` | REAL | `kOffHresultEFail` |
+| `StringFromCLSID` | REAL | `kOffPinHresultSOk` |
 <!-- AUTO:thunks-by-dll END -->
 
 ### version.dll  (~290 LOC, ~16 exports)
@@ -1983,7 +1983,7 @@ pixel shaders 106..114, queries 118).
 | Method | Status | Routed to |
 |--------|--------|-----------|
 | `Direct3DCreate9` | REAL | `kOffPinReturn0` |
-| `Direct3DCreate9Ex` | REAL | `kOffHresultEFail` |
+| `Direct3DCreate9Ex` | REAL | `kOffPinHresultSOk` |
 <!-- AUTO:thunks-by-dll END -->
 
 ### d3d11.dll  (~1 855 LOC) — `D3D11CreateDevice`, `D3D11CreateDeviceAndSwapChain`

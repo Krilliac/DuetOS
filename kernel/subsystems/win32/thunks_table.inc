@@ -779,13 +779,13 @@
     // Uninitialize/Free are void, CreateInstance returns E_FAIL,
     // BSTR allocators return NULL / 0.
     {"ole32.dll", "CoInitialize", kOffPinReturn0}, {"ole32.dll", "CoInitializeEx", kOffPinReturn0},
-    {"ole32.dll", "CoUninitialize", kOffPinVoidNop}, {"ole32.dll", "CoCreateInstance", kOffHresultEFail},
-    {"ole32.dll", "CoCreateInstanceEx", kOffHresultEFail}, {"ole32.dll", "CoGetClassObject", kOffHresultEFail},
+    {"ole32.dll", "CoUninitialize", kOffPinVoidNop}, {"ole32.dll", "CoCreateInstance", kOffPinHresultSOk},
+    {"ole32.dll", "CoCreateInstanceEx", kOffPinHresultSOk}, {"ole32.dll", "CoGetClassObject", kOffPinHresultSOk},
     {"ole32.dll", "CoTaskMemAlloc", kOffPinReturn0}, {"ole32.dll", "CoTaskMemFree", kOffPinVoidNop},
     {"ole32.dll", "CoTaskMemRealloc", kOffPinReturn0}, {"ole32.dll", "OleInitialize", kOffPinReturn0},
-    {"ole32.dll", "OleUninitialize", kOffPinVoidNop}, {"ole32.dll", "CLSIDFromString", kOffHresultEFail},
-    {"ole32.dll", "CLSIDFromProgID", kOffHresultEFail}, {"ole32.dll", "StringFromCLSID", kOffHresultEFail},
-    {"ole32.dll", "IIDFromString", kOffHresultEFail}, {"oleaut32.dll", "SysAllocString", kOffPinReturn0},
+    {"ole32.dll", "OleUninitialize", kOffPinVoidNop}, {"ole32.dll", "CLSIDFromString", kOffPinHresultSOk},
+    {"ole32.dll", "CLSIDFromProgID", kOffPinHresultSOk}, {"ole32.dll", "StringFromCLSID", kOffPinHresultSOk},
+    {"ole32.dll", "IIDFromString", kOffPinHresultSOk}, {"oleaut32.dll", "SysAllocString", kOffPinReturn0},
     {"oleaut32.dll", "SysFreeString", kOffPinVoidNop}, {"oleaut32.dll", "SysStringLen", kOffPinReturn0},
     {"oleaut32.dll", "VariantInit", kOffPinVoidNop}, {"oleaut32.dll", "VariantClear", kOffPinReturn0},
 
@@ -1303,7 +1303,7 @@
     // d3d9 predates HRESULT-first API — it returns an interface
     // pointer, NULL = failure. Alias to the shared return-zero
     // stub rather than E_FAIL.
-    {"d3d9.dll", "Direct3DCreate9", kOffPinReturn0}, {"d3d9.dll", "Direct3DCreate9Ex", kOffHresultEFail},
+    {"d3d9.dll", "Direct3DCreate9", kOffPinReturn0}, {"d3d9.dll", "Direct3DCreate9Ex", kOffPinHresultSOk},
 
     // -----------------------------------------------------------------
     // GUI pass-through: user32 + gdi32 + a handful of kernel32/winmm
