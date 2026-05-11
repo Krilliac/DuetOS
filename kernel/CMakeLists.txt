@@ -333,51 +333,107 @@ list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_BOOTX64_HEADER}")
 # .exe files; keep them generated in the build tree so PRs do not carry
 # rebuilt executable artifacts. The helper script still supports manual
 # in-tree rebuilds, but CMake always drives it with --out-dir.
+#
+# Toolchain dependency: build-smokes.sh requires `x86_64-w64-mingw32-gcc`
+# (the Win32 cross-compiler). If it's not on the host we degrade
+# gracefully — the build still succeeds, each smoke PE header is
+# emitted as a `_len = 0` stub via embed-blob.py's `--empty` mode,
+# and the kernel's `SpawnPeFile` skips zero-length blobs at boot.
+# This mirrors the duetos-iso pattern: missing optional tooling
+# disables a feature with a clear status message rather than
+# breaking the kernel build.
+find_program(MINGW_W64_GCC x86_64-w64-mingw32-gcc)
 set(DUETOS_SMOKE_PE_BUILD_SCRIPT "${CMAKE_SOURCE_DIR}/userland/apps/build-smokes.sh")
 set(DUETOS_SMOKE_PE_BUILD_DIR    "${CMAKE_CURRENT_BINARY_DIR}/smoke-pes")
 set(DUETOS_SMOKE_PE_STAMP        "${DUETOS_SMOKE_PE_BUILD_DIR}/.stamp")
-file(GLOB_RECURSE DUETOS_SMOKE_PE_SOURCES CONFIGURE_DEPENDS
-    "${CMAKE_SOURCE_DIR}/userland/apps/*.c")
-add_custom_command(
-    OUTPUT "${DUETOS_SMOKE_PE_STAMP}"
-    COMMAND "${CMAKE_COMMAND}" -E make_directory "${DUETOS_SMOKE_PE_BUILD_DIR}"
-    COMMAND "${DUETOS_SMOKE_PE_BUILD_SCRIPT}" --out-dir "${DUETOS_SMOKE_PE_BUILD_DIR}"
-    COMMAND "${CMAKE_COMMAND}" -E touch "${DUETOS_SMOKE_PE_STAMP}"
-    DEPENDS "${DUETOS_SMOKE_PE_BUILD_SCRIPT}" ${DUETOS_SMOKE_PE_SOURCES}
-    COMMENT "Compiling source-built Win32 smoke PE fixtures"
-    VERBATIM)
+if(MINGW_W64_GCC)
+    file(GLOB_RECURSE DUETOS_SMOKE_PE_SOURCES CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/userland/apps/*.c")
+    add_custom_command(
+        OUTPUT "${DUETOS_SMOKE_PE_STAMP}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${DUETOS_SMOKE_PE_BUILD_DIR}"
+        COMMAND "${DUETOS_SMOKE_PE_BUILD_SCRIPT}" --out-dir "${DUETOS_SMOKE_PE_BUILD_DIR}"
+        COMMAND "${CMAKE_COMMAND}" -E touch "${DUETOS_SMOKE_PE_STAMP}"
+        DEPENDS "${DUETOS_SMOKE_PE_BUILD_SCRIPT}" ${DUETOS_SMOKE_PE_SOURCES}
+        COMMENT "Compiling source-built Win32 smoke PE fixtures"
+        VERBATIM)
+else()
+    # No mingw cross-compiler: emit an empty stamp so the embed
+    # step still has a dependency it can satisfy, and let each
+    # `duetos_embed_smoke_pe` call route through embed-blob.py
+    # `--empty` (see below).
+    add_custom_command(
+        OUTPUT "${DUETOS_SMOKE_PE_STAMP}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${DUETOS_SMOKE_PE_BUILD_DIR}"
+        COMMAND "${CMAKE_COMMAND}" -E touch "${DUETOS_SMOKE_PE_STAMP}"
+        COMMENT "Skipping Win32 smoke PE compilation (x86_64-w64-mingw32-gcc not found)"
+        VERBATIM)
+    message(STATUS "Win32 smoke PE fixtures disabled (x86_64-w64-mingw32-gcc not found).")
+    message(STATUS "  Install with: sudo apt-get install -y gcc-mingw-w64-x86-64")
+    message(STATUS "  The kernel will still build; smoke PE blobs are emitted as _len=0 stubs.")
+    message(STATUS "  After installing, re-run cmake configure (or rebuild with --fresh) to pick it up.")
+endif()
 add_custom_target(duetos-smoke-pes DEPENDS "${DUETOS_SMOKE_PE_STAMP}")
 
 # mini_browser.exe — minimal WinSock 2 PE that does an HTTP/1.0 GET to
 # www.google.com. Source is userland/apps/mini_browser/browser.c and
 # CMake now embeds the build-tree PE produced by build-smokes.sh.
+# (Stubbed to a zero-length blob when MINGW_W64_GCC is missing — see
+# the smoke-PE gate above.)
 set(DUETOS_MINIBROWSER_SRC    "${DUETOS_SMOKE_PE_BUILD_DIR}/mini_browser/browser.exe")
 set(DUETOS_MINIBROWSER_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_minibrowser_pe.h")
-add_custom_command(
-    OUTPUT "${DUETOS_MINIBROWSER_HEADER}"
-    COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
-            "${DUETOS_MINIBROWSER_SRC}" "${DUETOS_MINIBROWSER_HEADER}"
-            kBinMiniBrowserBytes --namespace "duetos::fs::generated"
-    DEPENDS "${DUETOS_SMOKE_PE_STAMP}" "${DUETOS_EMBED_BLOB_SCRIPT}"
-    COMMENT "Embedding mini_browser PE /bin/mini_browser.exe"
-    VERBATIM)
+if(MINGW_W64_GCC)
+    add_custom_command(
+        OUTPUT "${DUETOS_MINIBROWSER_HEADER}"
+        COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
+                "${DUETOS_MINIBROWSER_SRC}" "${DUETOS_MINIBROWSER_HEADER}"
+                kBinMiniBrowserBytes --namespace "duetos::fs::generated"
+        DEPENDS "${DUETOS_SMOKE_PE_STAMP}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Embedding mini_browser PE /bin/mini_browser.exe"
+        VERBATIM)
+else()
+    add_custom_command(
+        OUTPUT "${DUETOS_MINIBROWSER_HEADER}"
+        COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}" --empty
+                "${DUETOS_MINIBROWSER_HEADER}"
+                kBinMiniBrowserBytes --namespace "duetos::fs::generated"
+        DEPENDS "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Emitting mini_browser PE stub (mingw absent)"
+        VERBATIM)
+endif()
 list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_MINIBROWSER_HEADER}")
 
 # Surface-coverage PE smoke apps. Each one is a self-contained
 # console PE (~10 KB) targeting a single Win32 API surface. Source
 # lives in userland/apps/<name>/<name>.c; CMake embeds build-tree
 # outputs so generated .exe files stay out of git.
+#
+# Branch on MINGW_W64_GCC: with mingw present, embed the real .exe;
+# without, route through embed-blob.py `--empty` so the kernel builds
+# without the cross-compiler. The kernel's SpawnPeFile checks
+# `pe_len == 0` and skips, so missing fixtures don't break boot.
 function(duetos_embed_smoke_pe app_name symbol)
     set(_src "${DUETOS_SMOKE_PE_BUILD_DIR}/${app_name}/${app_name}.exe")
     set(_hdr "${CMAKE_CURRENT_BINARY_DIR}/generated_${app_name}_pe.h")
-    add_custom_command(
-        OUTPUT "${_hdr}"
-        COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
-                "${_src}" "${_hdr}"
-                "${symbol}" --namespace "duetos::fs::generated"
-        DEPENDS "${DUETOS_SMOKE_PE_STAMP}" "${DUETOS_EMBED_BLOB_SCRIPT}"
-        COMMENT "Embedding ${app_name} PE"
-        VERBATIM)
+    if(MINGW_W64_GCC)
+        add_custom_command(
+            OUTPUT "${_hdr}"
+            COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
+                    "${_src}" "${_hdr}"
+                    "${symbol}" --namespace "duetos::fs::generated"
+            DEPENDS "${DUETOS_SMOKE_PE_STAMP}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+            COMMENT "Embedding ${app_name} PE"
+            VERBATIM)
+    else()
+        add_custom_command(
+            OUTPUT "${_hdr}"
+            COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}" --empty
+                    "${_hdr}"
+                    "${symbol}" --namespace "duetos::fs::generated"
+            DEPENDS "${DUETOS_EMBED_BLOB_SCRIPT}"
+            COMMENT "Emitting ${app_name} PE stub (mingw absent)"
+            VERBATIM)
+    endif()
     set(DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_KERNEL_SHARED_SOURCES}" "${_hdr}" PARENT_SCOPE)
 endfunction()
 

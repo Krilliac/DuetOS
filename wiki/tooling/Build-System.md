@@ -74,9 +74,17 @@ Output trees:
 - **GNU assembler** via clang for `.S` files (Intel syntax)
 - **NASM 2.16+** if/when hand-written boot ASM lands; not required
   today
-- **MinGW-w64 x86_64 GCC** (`x86_64-w64-mingw32-gcc`) for
-  the generated Win32 smoke PE fixtures that CMake embeds from the
-  build tree
+- **MinGW-w64 x86_64 GCC** (`x86_64-w64-mingw32-gcc`) — *optional*.
+  Used by `userland/apps/build-smokes.sh` to compile the Win32 smoke
+  PE fixtures that CMake embeds into the kernel image. If it isn't
+  on the host, CMake detects this at configure time, prints a STATUS
+  message naming the install command, and emits each smoke-PE header
+  as a `_len = 0` stub via `tools/build/embed-blob.py --empty`. The
+  kernel's `SpawnPeFile` checks `pe_len == 0` and skips zero-length
+  blobs, so missing fixtures don't break the build or the boot path;
+  the smoke PEs simply don't run. Install with
+  `sudo apt-get install -y gcc-mingw-w64-x86-64` and re-run CMake
+  configure (or `cmake --build --fresh`) to pick it up.
 - **Rust** via rustup nightly pinned in `rust-toolchain.toml` (when
   Rust subsystems land — see [Roadmap > Rust bring-up](../reference/Roadmap.md#rust-bring-up))
 
