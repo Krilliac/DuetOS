@@ -770,6 +770,181 @@ static HRESULT d9d_DrawPrimitiveUP(D9DeviceImpl* self, UINT type, UINT primcount
     return DX_S_OK;
 }
 
+/* TestCooperativeLevel — slot 3. v0 has no D3D9 lost-device
+ * mode, so the device is always usable. */
+static HRESULT d9d_TestCooperativeLevel(D9DeviceImpl* self)
+{
+    (void)self;
+    return DX_S_OK;
+}
+
+/* GetAvailableTextureMem — slot 4. Report a plausible amount
+ * so games' "do we have enough VRAM?" gates pass. v0 has no
+ * real GPU VRAM accounting; report 256 MiB. */
+static UINT d9d_GetAvailableTextureMem(D9DeviceImpl* self)
+{
+    (void)self;
+    return 256u * 1024u * 1024u;
+}
+
+/* GetDeviceCaps — slot 7. Fill D3DCAPS9 (496 bytes) with v0
+ * pixel-shader-2.0 / vertex-shader-2.0 caps. Real GPUs report
+ * a richer cap set; v0 reports the minimum that most games
+ * accept as "fixed-function + PS2". */
+static HRESULT d9d_GetDeviceCaps(D9DeviceImpl* self, void* caps)
+{
+    (void)self;
+    if (!caps)
+        return DX_E_POINTER;
+    dx_memzero(caps, 496);
+    BYTE* c = (BYTE*)caps;
+    *(DWORD*)(c + 0) = 1;        /* DeviceType = D3DDEVTYPE_HAL */
+    *(DWORD*)(c + 4) = 0;        /* AdapterOrdinal */
+    *(DWORD*)(c + 76) = 8192;    /* MaxTextureWidth */
+    *(DWORD*)(c + 80) = 8192;    /* MaxTextureHeight */
+    *(DWORD*)(c + 392) = 0x0200; /* VertexShaderVersion = vs_2_0 */
+    *(DWORD*)(c + 396) = 256;    /* MaxVertexShaderConst */
+    *(DWORD*)(c + 400) = 0x0200; /* PixelShaderVersion = ps_2_0 */
+    return DX_S_OK;
+}
+
+/* GetDisplayMode — slot 8. Fill D3DDISPLAYMODE (16 bytes):
+ * width, height, refresh rate, format. v0 reports 1280x720 @60Hz
+ * BGRA8 — same as the DXGI default. */
+static HRESULT d9d_GetDisplayMode(D9DeviceImpl* self, UINT swap_chain, void* mode)
+{
+    (void)self;
+    (void)swap_chain;
+    if (!mode)
+        return DX_E_POINTER;
+    BYTE* m = (BYTE*)mode;
+    *(DWORD*)(m + 0) = 1280; /* Width */
+    *(DWORD*)(m + 4) = 720;  /* Height */
+    *(DWORD*)(m + 8) = 60;   /* RefreshRate */
+    *(DWORD*)(m + 12) = 22;  /* D3DFMT_X8R8G8B8 */
+    return DX_S_OK;
+}
+
+/* GetCreationParameters — slot 9. Fill D3DDEVICE_CREATION_PARAMETERS
+ * (28 bytes): adapter ordinal, device type, focus window, behavior. */
+static HRESULT d9d_GetCreationParameters(D9DeviceImpl* self, void* params)
+{
+    if (!params)
+        return DX_E_POINTER;
+    BYTE* p = (BYTE*)params;
+    *(DWORD*)(p + 0) = 0;                       /* AdapterOrdinal */
+    *(DWORD*)(p + 4) = 1;                       /* DeviceType = HAL */
+    *(HWND*)(p + 8) = self ? self->hwnd : NULL; /* hFocusWindow */
+    *(DWORD*)(p + 16) = 0x40;                   /* BehaviorFlags = SOFTWARE_VERTEXPROCESSING */
+    return DX_S_OK;
+}
+
+/* GetSwapChain — slot 14. v0 has a single implicit swap chain
+ * per device; we return the device itself as the "swap chain"
+ * (the IDirect3DSwapChain9 vtable shares enough slot prefix with
+ * IDirect3DDevice9 that AddRef / Release / Present all land on
+ * working methods). Apps that QueryInterface for IDirect3DSwapChain9
+ * also reach a working path. */
+static HRESULT d9d_GetSwapChain(D9DeviceImpl* self, UINT idx, void** swap)
+{
+    if (!swap)
+        return DX_E_POINTER;
+    *swap = NULL;
+    if (idx != 0)
+        return DX_E_INVALIDARG;
+    self->refcount++;
+    *swap = self;
+    return DX_S_OK;
+}
+
+/* GetNumberOfSwapChains — slot 15. */
+static UINT d9d_GetNumberOfSwapChains(D9DeviceImpl* self)
+{
+    (void)self;
+    return 1;
+}
+
+/* Reset — slot 16. Re-create the back-buffer at the size given
+ * in the D3DPRESENT_PARAMETERS struct so a window resize doesn't
+ * leave stale dimensions. v0 reads BackBufferWidth (@0) and
+ * BackBufferHeight (@4); zero means "match the focus window's
+ * client rect". */
+static HRESULT d9d_Reset(D9DeviceImpl* self, void* params)
+{
+    if (!params)
+        return DX_E_POINTER;
+    const BYTE* p = (const BYTE*)params;
+    UINT w = *(const UINT*)(p + 0);
+    UINT h = *(const UINT*)(p + 4);
+    if ((w == 0 || h == 0) && self->hwnd)
+    {
+        DxRect r;
+        dx_memzero(&r, sizeof(r));
+        if (dx_win_get_rect(self->hwnd, &r))
+        {
+            if (w == 0)
+                w = (UINT)(r.right - r.left);
+            if (h == 0)
+                h = (UINT)(r.bottom - r.top);
+        }
+    }
+    if (w == 0)
+        w = 1280;
+    if (h == 0)
+        h = 720;
+    if (self->bb)
+    {
+        dx_bb_destroy(self->bb);
+        self->bb = NULL;
+    }
+    self->bb = dx_bb_create(self->hwnd, w, h);
+    if (!self->bb)
+        return DX_E_OUTOFMEMORY;
+    self->viewport_w = (int)w;
+    self->viewport_h = (int)h;
+    return DX_S_OK;
+}
+
+/* GetBackBuffer — slot 18. v0 returns the device itself as the
+ * back-buffer surface; the IDirect3DSurface9 vtable prefix
+ * matches enough (AddRef / Release / GetDC / LockRect) that
+ * callers can poke at the surface without crashing. */
+static HRESULT d9d_GetBackBuffer(D9DeviceImpl* self, UINT swap_chain, UINT idx, UINT type, void** surf)
+{
+    (void)swap_chain;
+    (void)type;
+    if (!surf)
+        return DX_E_POINTER;
+    *surf = NULL;
+    if (idx != 0)
+        return DX_E_INVALIDARG;
+    self->refcount++;
+    *surf = self;
+    return DX_S_OK;
+}
+
+/* GetRasterStatus — slot 19. v0 reports "not in vblank" with
+ * scan_line = 0. */
+static HRESULT d9d_GetRasterStatus(D9DeviceImpl* self, UINT swap_chain, void* status)
+{
+    (void)self;
+    (void)swap_chain;
+    if (!status)
+        return DX_E_POINTER;
+    BYTE* s = (BYTE*)status;
+    *(DWORD*)(s + 0) = 0; /* InVBlank = FALSE */
+    *(DWORD*)(s + 4) = 0; /* ScanLine */
+    return DX_S_OK;
+}
+
+/* SetDialogBoxMode — slot 20. v0 has no exclusive-mode handoff. */
+static HRESULT d9d_SetDialogBoxMode(D9DeviceImpl* self, BOOL enable)
+{
+    (void)self;
+    (void)enable;
+    return DX_S_OK;
+}
+
 static void* g_d9d_vtbl[DEV9_VTBL_SLOTS];
 static void d9d_init_vtbl_once(void)
 {
@@ -783,7 +958,18 @@ static void d9d_init_vtbl_once(void)
     g_d9d_vtbl[1] = (void*)d9d_AddRef;
     g_d9d_vtbl[2] = (void*)d9d_Release;
     /* Canonical IDirect3DDevice9 slot map per Win SDK d3d9.h. */
+    g_d9d_vtbl[3] = (void*)d9d_TestCooperativeLevel;
+    g_d9d_vtbl[4] = (void*)d9d_GetAvailableTextureMem;
+    g_d9d_vtbl[7] = (void*)d9d_GetDeviceCaps;
+    g_d9d_vtbl[8] = (void*)d9d_GetDisplayMode;
+    g_d9d_vtbl[9] = (void*)d9d_GetCreationParameters;
+    g_d9d_vtbl[14] = (void*)d9d_GetSwapChain;
+    g_d9d_vtbl[15] = (void*)d9d_GetNumberOfSwapChains;
+    g_d9d_vtbl[16] = (void*)d9d_Reset;
     g_d9d_vtbl[17] = (void*)d9d_Present;
+    g_d9d_vtbl[18] = (void*)d9d_GetBackBuffer;
+    g_d9d_vtbl[19] = (void*)d9d_GetRasterStatus;
+    g_d9d_vtbl[20] = (void*)d9d_SetDialogBoxMode;
     g_d9d_vtbl[23] = (void*)d9d_CreateTexture;
     g_d9d_vtbl[26] = (void*)d9d_CreateVertexBuffer;
     g_d9d_vtbl[27] = (void*)d9d_CreateIndexBuffer;

@@ -53,6 +53,15 @@ typedef struct D12FenceImpl D12FenceImpl;
 typedef struct D12HeapImpl D12HeapImpl;
 typedef struct D12ResImpl D12ResImpl;
 
+/* ID3D12Object + ID3D12DeviceChild forward decls — shared by
+ * every D3D12 object's vtable below (slots 3..7). Definitions
+ * live below the RootSignature COM head. */
+static HRESULT d12obj_GetPrivateData(void* self, const void* guid, UINT* size, void* data);
+static HRESULT d12obj_SetPrivateData(void* self, const void* guid, UINT size, const void* data);
+static HRESULT d12obj_SetPrivateDataInterface(void* self, const void* guid, const void* iface);
+static HRESULT d12obj_SetName(void* self, const void* name);
+static HRESULT d12obj_GetDevice(void* self, const void* riid, void** out);
+
 /* ---------------------------------------------------------------- *
  * ID3D12Resource — committed BGRA8 texture OR linear buffer.       *
  * Vtable: IUnknown(3) + ID3D12Object(4) + DeviceChild(1) +         *
@@ -193,6 +202,11 @@ static void res_init_vtbl_once(void)
     g_res_vtbl[0] = (void*)res_QueryInterface;
     g_res_vtbl[1] = (void*)res_AddRef;
     g_res_vtbl[2] = (void*)res_Release;
+    g_res_vtbl[3] = (void*)d12obj_GetPrivateData;
+    g_res_vtbl[4] = (void*)d12obj_SetPrivateData;
+    g_res_vtbl[5] = (void*)d12obj_SetPrivateDataInterface;
+    g_res_vtbl[6] = (void*)d12obj_SetName;
+    g_res_vtbl[7] = (void*)d12obj_GetDevice;
     g_res_vtbl[8] = (void*)res_Map;
     g_res_vtbl[9] = (void*)res_Unmap;
     g_res_vtbl[10] = (void*)res_GetDesc;
@@ -323,6 +337,11 @@ static void heap_init_vtbl_once(void)
     g_heap_vtbl[0] = (void*)heap_QueryInterface;
     g_heap_vtbl[1] = (void*)heap_AddRef;
     g_heap_vtbl[2] = (void*)heap_Release;
+    g_heap_vtbl[3] = (void*)d12obj_GetPrivateData;
+    g_heap_vtbl[4] = (void*)d12obj_SetPrivateData;
+    g_heap_vtbl[5] = (void*)d12obj_SetPrivateDataInterface;
+    g_heap_vtbl[6] = (void*)d12obj_SetName;
+    g_heap_vtbl[7] = (void*)d12obj_GetDevice;
     g_heap_vtbl[9] = (void*)heap_GetCPUStart;
     g_heap_vtbl[10] = (void*)heap_GetGPUStart;
 }
@@ -431,6 +450,11 @@ static void fence_init_vtbl_once(void)
     g_fence_vtbl[0] = (void*)fence_QueryInterface;
     g_fence_vtbl[1] = (void*)fence_AddRef;
     g_fence_vtbl[2] = (void*)fence_Release;
+    g_fence_vtbl[3] = (void*)d12obj_GetPrivateData;
+    g_fence_vtbl[4] = (void*)d12obj_SetPrivateData;
+    g_fence_vtbl[5] = (void*)d12obj_SetPrivateDataInterface;
+    g_fence_vtbl[6] = (void*)d12obj_SetName;
+    g_fence_vtbl[7] = (void*)d12obj_GetDevice;
     g_fence_vtbl[8] = (void*)fence_GetCompletedValue;
     g_fence_vtbl[9] = (void*)fence_SetEventOnCompletion;
     g_fence_vtbl[10] = (void*)fence_Signal;
@@ -507,6 +531,11 @@ static void alloc_init_vtbl_once(void)
     g_alloc_vtbl[0] = (void*)alloc_QueryInterface;
     g_alloc_vtbl[1] = (void*)alloc_AddRef;
     g_alloc_vtbl[2] = (void*)alloc_Release;
+    g_alloc_vtbl[3] = (void*)d12obj_GetPrivateData;
+    g_alloc_vtbl[4] = (void*)d12obj_SetPrivateData;
+    g_alloc_vtbl[5] = (void*)d12obj_SetPrivateDataInterface;
+    g_alloc_vtbl[6] = (void*)d12obj_SetName;
+    g_alloc_vtbl[7] = (void*)d12obj_GetDevice;
     g_alloc_vtbl[8] = (void*)alloc_Reset;
 }
 
@@ -573,6 +602,63 @@ static ULONG rs_Release(D12RootSigImpl* self)
     return self->refcount;
 }
 
+/* ID3D12Object methods (slots 3..6) — pure metadata. v0 doesn't
+ * persist private-data blobs across calls, so:
+ *  - GetPrivateData reports "no entry" by zeroing *size.
+ *  - SetPrivateData / SetPrivateDataInterface accept the blob and
+ *    return S_OK without storing (caller's blob can be freed).
+ *  - SetName is a no-op success.
+ * The same four implementations are shared by every D3D12 object
+ * (RootSig / PSO / Resource / Heap / Fence / etc) via direct
+ * vtable binding. */
+static HRESULT d12obj_GetPrivateData(void* self, const void* guid, UINT* size, void* data)
+{
+    (void)self;
+    (void)guid;
+    (void)data;
+    if (size)
+        *size = 0;
+    return DX_S_OK;
+}
+static HRESULT d12obj_SetPrivateData(void* self, const void* guid, UINT size, const void* data)
+{
+    (void)self;
+    (void)guid;
+    (void)size;
+    (void)data;
+    return DX_S_OK;
+}
+static HRESULT d12obj_SetPrivateDataInterface(void* self, const void* guid, const void* iface)
+{
+    (void)self;
+    (void)guid;
+    (void)iface;
+    return DX_S_OK;
+}
+static HRESULT d12obj_SetName(void* self, const void* name)
+{
+    (void)self;
+    (void)name;
+    return DX_S_OK;
+}
+
+/* ID3D12DeviceChild::GetDevice (slot 7 on every device-child
+ * object). v0 doesn't track the parent device on each object
+ * (would mean an extra back-pointer + AddRef on every Create*);
+ * we return E_NOINTERFACE only if `out` is NULL — otherwise
+ * zero the out and report S_OK. Most callers GetDevice() to
+ * issue another Create* call; if `out` is NULL the result is
+ * unrecoverable anyway. */
+static HRESULT d12obj_GetDevice(void* self, const void* riid, void** out)
+{
+    (void)self;
+    (void)riid;
+    if (!out)
+        return DX_E_POINTER;
+    *out = NULL;
+    return DX_S_OK;
+}
+
 static void rs_init_vtbl_once(void)
 {
     static int g_inited = 0;
@@ -584,6 +670,11 @@ static void rs_init_vtbl_once(void)
     g_rootsig_vtbl[0] = (void*)rs_QueryInterface;
     g_rootsig_vtbl[1] = (void*)rs_AddRef;
     g_rootsig_vtbl[2] = (void*)rs_Release;
+    g_rootsig_vtbl[3] = (void*)d12obj_GetPrivateData;
+    g_rootsig_vtbl[4] = (void*)d12obj_SetPrivateData;
+    g_rootsig_vtbl[5] = (void*)d12obj_SetPrivateDataInterface;
+    g_rootsig_vtbl[6] = (void*)d12obj_SetName;
+    g_rootsig_vtbl[7] = (void*)d12obj_GetDevice;
 }
 
 static D12RootSigImpl* rootsig_alloc(void)
@@ -627,6 +718,86 @@ typedef struct D12PsoImpl
 
 static void* g_pso_vtbl[PSO_VTBL_SLOTS];
 
+/* ID3DBlob — minimal 5-slot vtable. Used by GetCachedBlob.
+ *   slot 0..2: IUnknown
+ *   slot 3:    GetBufferPointer (void* this -> void* buf)
+ *   slot 4:    GetBufferSize    (void* this -> SIZE_T size)
+ * Payload follows the struct so a single dx_heap_alloc covers
+ * both the COM head and the 4-byte cache magic. */
+typedef struct PsoBlob
+{
+    void* const* lpVtbl;
+    ULONG refcount;
+    void* buf;
+    UINT64 size;
+    UINT magic;
+} PsoBlob;
+static HRESULT psoblob_QueryInterface(PsoBlob* self, REFIID riid, void** out)
+{
+    (void)riid;
+    if (!out)
+        return DX_E_POINTER;
+    ++self->refcount;
+    *out = self;
+    return DX_S_OK;
+}
+static ULONG psoblob_AddRef(PsoBlob* self)
+{
+    return ++self->refcount;
+}
+static ULONG psoblob_Release(PsoBlob* self)
+{
+    ULONG r = --self->refcount;
+    if (r == 0)
+        dx_heap_free(self);
+    return r;
+}
+static void* psoblob_GetBufferPointer(PsoBlob* self)
+{
+    return self->buf;
+}
+static UINT64 psoblob_GetBufferSize(PsoBlob* self)
+{
+    return self->size;
+}
+static void* g_pso_blob_vtbl[5];
+static void psoblob_init_vtbl_once(void)
+{
+    static int g_inited = 0;
+    if (g_inited)
+        return;
+    g_inited = 1;
+    g_pso_blob_vtbl[0] = (void*)psoblob_QueryInterface;
+    g_pso_blob_vtbl[1] = (void*)psoblob_AddRef;
+    g_pso_blob_vtbl[2] = (void*)psoblob_Release;
+    g_pso_blob_vtbl[3] = (void*)psoblob_GetBufferPointer;
+    g_pso_blob_vtbl[4] = (void*)psoblob_GetBufferSize;
+}
+
+/* GetCachedBlob — PSO slot 8. Allocates a 5-slot ID3DBlob with a
+ * tiny 4-byte 'DPS0' magic payload so PSO caching code can call
+ * blob->GetBufferPointer / blob->GetBufferSize and round-trip
+ * the bytes through CreateCachedPSO (which ignores them in v0). */
+static HRESULT pso_GetCachedBlob(D12PsoImpl* self, void** ppBlob)
+{
+    (void)self;
+    if (!ppBlob)
+        return DX_E_POINTER;
+    *ppBlob = NULL;
+    psoblob_init_vtbl_once();
+    PsoBlob* b = (PsoBlob*)dx_heap_alloc(sizeof(*b));
+    if (!b)
+        return DX_E_OUTOFMEMORY;
+    dx_memzero(b, sizeof(*b));
+    b->lpVtbl = g_pso_blob_vtbl;
+    b->refcount = 1;
+    b->magic = 0x44505330; /* 'DPS0' */
+    b->buf = &b->magic;
+    b->size = 4;
+    *ppBlob = b;
+    return DX_S_OK;
+}
+
 static HRESULT pso_QueryInterface(D12PsoImpl* self, REFIID riid, void** out)
 {
     if (!out)
@@ -664,6 +835,12 @@ static void pso_init_vtbl_once(void)
     g_pso_vtbl[0] = (void*)pso_QueryInterface;
     g_pso_vtbl[1] = (void*)pso_AddRef;
     g_pso_vtbl[2] = (void*)pso_Release;
+    g_pso_vtbl[3] = (void*)d12obj_GetPrivateData;
+    g_pso_vtbl[4] = (void*)d12obj_SetPrivateData;
+    g_pso_vtbl[5] = (void*)d12obj_SetPrivateDataInterface;
+    g_pso_vtbl[6] = (void*)d12obj_SetName;
+    g_pso_vtbl[7] = (void*)d12obj_GetDevice;
+    g_pso_vtbl[8] = (void*)pso_GetCachedBlob;
 }
 
 /* Case-insensitive ASCIIZ compare without pulling in <string.h>. */
@@ -1340,6 +1517,11 @@ static void list_init_vtbl_once(void)
     g_list_vtbl[0] = (void*)list_QueryInterface;
     g_list_vtbl[1] = (void*)list_AddRef;
     g_list_vtbl[2] = (void*)list_Release;
+    g_list_vtbl[3] = (void*)d12obj_GetPrivateData;
+    g_list_vtbl[4] = (void*)d12obj_SetPrivateData;
+    g_list_vtbl[5] = (void*)d12obj_SetPrivateDataInterface;
+    g_list_vtbl[6] = (void*)d12obj_SetName;
+    g_list_vtbl[7] = (void*)d12obj_GetDevice;
     /* Canonical ID3D12GraphicsCommandList vtable layout per the
      * Win SDK d3d12.h. Off-by-N slot drift in earlier versions of
      * this DLL was the reason real Win32 PE apps that didn't share
