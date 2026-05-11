@@ -338,6 +338,57 @@ See [`wiki/tooling/Git-Workflow.md`](wiki/tooling/Git-Workflow.md) for the polli
 4. Keep individual grep/search outputs short. Use flags like `--include` and `-l` (list files only) to limit output size.
 5. If you do hit the timeout, retry the same step in a shorter form. Don't repeat the entire task from scratch.
 
+## Live-Boot Verification — Fix Anything You Surface
+
+Adding a feature, fixing a bug, or unblocking a halt always reveals
+the next layer of issues. **Fix what the live boot surfaces, even if
+it predates your slice.** A regression "I didn't cause" is still
+visible to anyone who picks up the codebase next; deferring it just
+buries the cost.
+
+The rules:
+
+- **After every fix, run the live boot and re-scan for warnings,
+  errors, panics, and intermittent crashes.** Use:
+  `grep -nE "\[E\] |PANIC|TRIPLE|FAIL|out of range|task-kill" /tmp/duetos-*.log`.
+  Anything new in the post-fix log gets a same-session fix unless the
+  user explicitly says "stop after my slice."
+- **Scope is whatever the boot exposes.** Don't carve "in scope" vs
+  "out of scope" along authorship lines — the question is whether the
+  issue is in the live boot now. If the answer is yes, fix it.
+- **A symptom-cluster gets one investigation.** When the live boot
+  shows N similar failures (e.g. several PE smoke tests failing),
+  trace ONE to its root cause first. The root usually explains the
+  cluster; fixing it retires N issues at once.
+- **Lost-page collisions are a class.** If two structures share a
+  randomised base / a fixed VA / a slab class, the failure mode is
+  whichever was loaded LATER silently overwrites the EARLIER, and the
+  EARLIER's callers fault at a valid-looking RIP. When you see
+  ring-3 #GP/#UD/#PF at an address inside a DLL or a stub region,
+  check the load log for two `base=0x...` lines at the same address
+  BEFORE chasing the calling code. This was the root of the
+  intermittent vcruntime140 memmove crash in 2026-05-11.
+- **Boot self-tests pass silently by default.** A self-test that
+  ONLY emits its FAIL line on failure won't show up in the log when
+  it passes — that's the contract. If you want grep-able proof of
+  PASS, emit an explicit `[<subsys>-selftest] PASS (...)` line via
+  `arch::SerialWrite` so a release-build log carries the sentinel.
+  Do NOT promote every PASS to KLOG_INFO — that defeats the log-level
+  system. Self-tests that don't need PASS verification should stay
+  silent.
+- **One run is not enough for intermittent symptoms.** If a smoke PE
+  crashes on this boot but not the previous one, the bug is ASLR /
+  scheduling / order dependent. Re-run a few times to confirm
+  intermittency, then look for collision or ordering bugs (see the
+  lost-page-collisions rule above). Don't conclude "the previous run
+  was fine, so this is flaky and not worth fixing" — intermittent
+  bugs ARE bugs, just sensitive to randomness.
+- **The user telling you "don't defer" means investigate even when
+  the trail leaves your obvious scope.** Follow it down. A bad ASLR
+  delta in `kernel/proc/ring3_smoke.cpp` is yours to fix even if your
+  commit message says "ipc: named pipes." Commit messages are
+  per-slice, but the live boot is shared.
+
 ## Wiring Things In — Functionality Is Not Optional
 
 A system that exists but is never initialized, called, or connected is **worse than not existing**. In kernel space, dead code is not merely wasteful — it rots silently until the day a refactor accidentally re-enables it and triple-faults the box.

@@ -109,6 +109,15 @@ PeStatus PeValidate(const u8* file, u64 file_len);
 /// than throwing.
 bool PeIsDynamicBase(const u8* file, u64 file_len);
 
+/// Read the optional-header `ImageBase` (preferred base VA) +
+/// `SizeOfImage` from `file`. Returns 0 on parse failure so the
+/// caller can fall back to a default. Used by pre-load loops to
+/// reserve non-overlapping regions BEFORE calling DllLoad — the
+/// alternative is to map pages, detect a collision, and rewind,
+/// which is far more expensive than parsing the header.
+u64 PePreferredBaseOf(const u8* file, u64 file_len);
+u64 PeImageSizeOf(const u8* file, u64 file_len);
+
 /// Dump a human-readable diagnostic report of the PE image to
 /// the serial console: DOS + NT header summary, section table,
 /// import directory (every DLL + function name), base-reloc

@@ -1089,29 +1089,32 @@ __declspec(dllexport) BOOL SetEnvironmentVariableW(const WCHAR_t* name, const wc
 }
 
 /* GetCommandLineA / GetCommandLineW — return a stable pointer to
- * the calling process's command-line string. v0 doesn't actually
- * pass args to PE binaries (SpawnPeFile takes no argv); the
- * canonical Win32 contract still requires the function to return
- * a non-null, non-freeable pointer that's at least the program
- * name. We hand back an empty string ("") so:
- *   - CRT startup that does `for (p = GetCommandLineA(); *p && *p
- *     != ' '; ++p);` terminates immediately on the NUL.
- *   - argv parsers see a 0-length command line + zero arg count.
- *   - Pointer compare against null doesn't trip the "no command
- *     line" branch some binaries take to ExitProcess.
- * The buffer is process-static so the pointer stays valid for
- * the calling process's lifetime — same shape as real Windows. */
-static char g_cmdline_a[1] = {0};
-static wchar_t16 g_cmdline_w[1] = {0};
+ * the calling process's command-line string.
+ *
+ * The kernel populates a per-process "proc-env" page (mapped at
+ * fixed VA 0x65000000 for every PE that has imports — see
+ * kernel/subsystems/win32/proc_env.{h,cpp}). The page carries the
+ * program name as both UTF-16LE and ASCII command lines at
+ * kProcEnvVa + kProcEnvCmdline{W,A}Off (0x65000300 / 0x65000380).
+ *
+ * We return those addresses directly. The CRT then sees a real,
+ * non-empty command line starting with the program name —
+ * matching what the kernel thunk-fallback already returns for
+ * any PE that didn't link kernel32.dll's real export.
+ *
+ * Multi-arg cmdlines arrive when SpawnPeFile gains an argv path;
+ * the proc-env layout already reserves enough room. */
+#define DUETOS_PROC_ENV_CMDLINE_W_VA 0x0000000065000300ULL
+#define DUETOS_PROC_ENV_CMDLINE_A_VA 0x0000000065000380ULL
 
 __declspec(dllexport) const char* GetCommandLineA(void)
 {
-    return g_cmdline_a;
+    return (const char*)(UINT_PTR)DUETOS_PROC_ENV_CMDLINE_A_VA;
 }
 
 __declspec(dllexport) const wchar_t16* GetCommandLineW(void)
 {
-    return g_cmdline_w;
+    return (const wchar_t16*)(UINT_PTR)DUETOS_PROC_ENV_CMDLINE_W_VA;
 }
 
 __declspec(dllexport) DWORD GetEnvironmentVariableA(const char* name, char* buf, DWORD size)
@@ -6099,7 +6102,8 @@ __declspec(dllexport) UINT GetTempFileNameW(const wchar_t16* dir, const wchar_t1
 
 __declspec(dllexport) DWORD GetCurrentDirectoryA(DWORD cb, char* out)
 {
-    static const char dir[] = "C:\\";
+    /* "X:\" sentinel — see GetCurrentDirectoryW for rationale. */
+    static const char dir[] = "X:\\";
     DWORD want = sizeof(dir);
     if (!out || cb < want)
         return want;
@@ -6110,7 +6114,13 @@ __declspec(dllexport) DWORD GetCurrentDirectoryA(DWORD cb, char* out)
 
 __declspec(dllexport) DWORD GetCurrentDirectoryW(DWORD cb, wchar_t16* out)
 {
-    static const char dir[] = "C:\\";
+    /* "X:\" matches the v0 sentinel returned by the kernel
+     * thunk-table fallback for GetModuleFileNameW and is what
+     * userland/apps/hello_winapi probes for. The drive letter is
+     * deliberately not "C:" because DuetOS doesn't have a real
+     * drive-letter namespace; "X:" makes it visually distinct
+     * from a Windows-shaped path and signals "v0 placeholder". */
+    static const char dir[] = "X:\\";
     DWORD want = (DWORD)sizeof(dir);
     if (!out || cb < want)
         return want;

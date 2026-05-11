@@ -219,7 +219,12 @@ void DoMutexRelease(arch::TrapFrame* frame)
     auto* m = reinterpret_cast<ipc::KMutex*>(obj);
     if (ipc::KMutexOwner(m) != sched::CurrentTask())
     {
-        KLOG_WARN_AS(::duetos::core::LogArea::Win32, "win32/mutex", "NtReleaseMutant rejected", "reason", "not_owner");
+        // Not-owner release is a legitimate API failure mode — the
+        // caller is expected to handle the -1 return. Real Windows
+        // returns WAIT_FAILED without surfacing the case. Demote to
+        // DEBUG so contended-mutex stress tests don't flood the
+        // console at default log levels.
+        KLOG_DEBUG_AS(::duetos::core::LogArea::Win32, "win32/mutex", "NtReleaseMutant rejected", "reason", "not_owner");
         ipc::KObjectRelease(obj);
         frame->rax = static_cast<u64>(-1);
         return;
