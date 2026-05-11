@@ -95,7 +95,7 @@ __declspec(dllexport) DWORD GetProcessImageFileNameW(HANDLE hProcess, wchar_t16*
 __declspec(dllexport) DWORD GetProcessImageFileNameA(HANDLE hProcess, char* name, DWORD cch)
 {
     (void)hProcess;
-    static const char path[] = "C:\\bin\\ring3.exe";
+    static const char path[] = "X:\\bin\\ring3.exe";
     if (name == (char*)0 || cch == 0)
         return 0;
     int i = 0;
@@ -445,7 +445,7 @@ __declspec(dllexport) DWORD GetModuleFileNameExA(HANDLE hProcess, HANDLE mod, ch
 {
     (void)hProcess;
     (void)mod;
-    static const char path[] = "C:\\bin\\ring3.exe";
+    static const char path[] = "X:\\bin\\ring3.exe";
     if (name == (char*)0 || cch == 0)
         return 0;
     int i = 0;

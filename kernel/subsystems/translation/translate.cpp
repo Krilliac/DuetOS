@@ -64,35 +64,9 @@ constexpr i64 kStatusInvalidParam = static_cast<i64>(0xC000000Dll);
 constexpr i64 kStatusAccessDenied = static_cast<i64>(0xC0000022ll);
 constexpr i64 kStatusUnsuccessful = static_cast<i64>(0xC0000001ll);
 
-// Linux syscall numbers owned by the translation unit.
-//
-// Ownership policy:
-//   - Primary Linux dispatcher owns every syscall with a live Do*
-//     handler in kernel/subsystems/linux/syscall.cpp.
-//   - Translation unit owns miss-path gap filling only.
-//   - Deliberate overlaps are forbidden unless explicitly allowlisted
-//     in tools/linux-compat/check-syscall-ownership.py.
-enum : u64
-{
-    kSysPipe = 22,
-    kSysSocket = 41,
-    kSysClone = 56,
-    kSysFork = 57,
-    kSysVfork = 58,
-    kSysExecve = 59,
-    kSysWait4 = 61,
-    kSysUmask = 95,
-    kSysStatfs = 137,
-    kSysFstatfs = 138,
-    kSysPipe2 = 293,
-    kSysClone3 = 435,
-    kSysRseq = 334,
-};
-
-// Per-direction hit counters. Bucketed on syscall_nr & 0x3FF so
-// both dispatch tables fit (Linux ~0..400, native 0..30). Simple
+// Native hit counter. Bucketed on syscall_nr & 0x3FF (native
+// dispatch is 0..30; one bucket per nr is plenty). Simple
 // static table — no dynamic growth needed at this scale.
-constinit HitTable g_linux_hits = {};
 constinit HitTable g_native_hits = {};
 
 // Translator overhead telemetry. Cheap RDTSC delta around each
@@ -108,7 +82,6 @@ struct OverheadTally
     u64 cycles_total = 0;
     u64 cycles_max = 0;
 };
-constinit OverheadTally g_linux_overhead = {};
 constinit OverheadTally g_native_overhead = {};
 
 // Miss-log sampling state. Hot probe paths can call unknown numbers
@@ -123,7 +96,6 @@ struct MissSampleTable
     u64 suppressed_total = 0;
     u64 suppressed_reported = 0;
 };
-constinit MissSampleTable g_linux_miss_sampling = {};
 constinit MissSampleTable g_native_miss_sampling = {};
 
 inline u64 ReadTsc()
@@ -303,87 +275,6 @@ void LogMiss(const char* origin, arch::TrapFrame* f, const char* name)
     SerialWriteHex(f->r9);
     SerialWrite("]\n");
 }
-
-// LinuxGapFill helpers — only ever called from the Linux gap-fill
-// dispatcher above (now `#if 0`'d out since the Linux dispatcher
-// has dense spec coverage). Wrap in #if 0 so the unused-function
-// warning stays quiet; keep as reference until next refactor.
-#if 0
-constexpr i64 kEFAULT = -14;
-
-// umask(mask) — returns the OLD umask. Linux-standard default is
-// 022. We have no permission model so nothing actually enforces
-// it; the value is purely for compat with programs that track +
-// restore the process's umask during setup.
-i64 TranslateUmask(arch::TrapFrame* /*f*/)
-{
-    return 022;
-}
-
-// statfs(path, buf) / fstatfs(fd, buf) — filesystem statistics.
-// Fill a zeroed struct statfs with sensible-looking FAT32 totals
-// (we don't track exact block counts per-mount) so musl's `df`
-// / "is enough space available" probes don't choke.
-i64 TranslateStatfs(arch::TrapFrame* f)
-{
-    const u64 user_buf = f->rsi;
-    if (user_buf == 0)
-        return kEFAULT;
-    struct Statfs
-    {
-        i64 f_type;
-        i64 f_bsize;
-        u64 f_blocks;
-        u64 f_bfree;
-        u64 f_bavail;
-        u64 f_files;
-        u64 f_ffree;
-        u64 f_fsid[2];
-        i64 f_namelen;
-        i64 f_frsize;
-        i64 f_flags;
-        i64 f_spare[4];
-    };
-    Statfs s;
-    for (u64 i = 0; i < sizeof(s); ++i)
-        reinterpret_cast<u8*>(&s)[i] = 0;
-    s.f_type = 0x4d44;   // "MD" — MS-DOS/FAT magic
-    s.f_bsize = 4096;    // our cluster size
-    s.f_blocks = 0x1000; // 16 MiB notional
-    s.f_bfree = 0x800;   // half-free
-    s.f_bavail = 0x800;
-    s.f_namelen = 255;
-    s.f_frsize = 4096;
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), &s, sizeof(s)))
-        return kEFAULT;
-    return 0;
-}
-
-// pipe / pipe2 / socket: deliberate -ENOSYS. We have no pipe,
-// no socket. Logging as TU-handled (vs. primary-unhandled)
-// makes it clear we've considered these and aren't silently
-// returning zeros.
-i64 TranslateDeliberateEnosys(arch::TrapFrame* /*f*/)
-{
-    FIX_NOTE_GAP("translate.cpp:DeliberateEnosys", "decide if any caller actually needs this syscall");
-    return -38;
-}
-
-// GAP: rseq (restartable sequences) — v0 happy path returns
-// -ENOSYS, which is exactly what real Linux returns on a
-// CONFIG_RSEQ=n kernel. glibc and newer musl detect this at
-// startup and fall back to non-rseq paths, so this is the
-// correct contract for callers; revisit when a real per-CPU
-// rseq slot lands and a workload genuinely benefits from it.
-i64 TranslateRseq(arch::TrapFrame* /*f*/)
-{
-    FIX_NOTE_GAP("translate.cpp:TranslateRseq", "wire per-CPU rseq slot");
-    // -ENOSYS is also what no-translation produces; the
-    // difference is this one is DELIBERATE — we've considered
-    // rseq and decided not to wire it up. Log as such.
-    return -38;
-}
-#endif
 
 // ----- native → Linux/Win32 translations -----
 
@@ -683,82 +574,10 @@ const char* NtName(u64 nr)
     return (entry != nullptr) ? entry->nt_name : nullptr;
 }
 
-const HitTable& LinuxHitsRead()
-{
-    return g_linux_hits;
-}
 const HitTable& NativeHitsRead()
 {
     return g_native_hits;
 }
-
-// LinuxGapFill REMOVED — see translate.h. The Linux dispatcher
-// now has dense 0..462 spec coverage; the gap-fill TU was
-// unreachable for valid Linux ELFs. The function below is the
-// last-pre-removal copy for reference; it is no longer
-// declared in translate.h and no caller exists.
-#if 0
-Result LinuxGapFill(arch::TrapFrame* frame)
-{
-    KLOG_TRACE_SCOPE("translate", "LinuxGapFill");
-    // Ownership: this path is for unresolved dispatcher misses only.
-    // RDTSC window around the gap-fill body. Reads are serialising-
-    // free so we capture the cost of the handler without paying a
-    // barrier per sample. See `BumpOverhead` comment for rationale.
-    const u64 tsc_entry = ReadTsc();
-    const u64 nr = frame->rax;
-    Result r{false, 0};
-    switch (nr)
-    {
-    case kSysRseq:
-        LogTranslation("linux", nr, "synthetic:enosys-deliberate");
-        r = {true, TranslateRseq(frame)};
-        break;
-    case kSysUmask:
-        LogTranslation("linux", nr, "synthetic:022-default");
-        r = {true, TranslateUmask(frame)};
-        break;
-    case kSysStatfs:
-    case kSysFstatfs:
-        LogTranslation("linux", nr, "synthetic:fat32-style-statfs");
-        r = {true, TranslateStatfs(frame)};
-        break;
-    case kSysPipe:
-    case kSysPipe2:
-    case kSysSocket:
-        LogTranslation("linux", nr, "synthetic:enosys-no-ipc");
-        r = {true, TranslateDeliberateEnosys(frame)};
-        break;
-    case kSysFork:
-    case kSysVfork:
-    case kSysClone:
-    case kSysClone3:
-    case kSysExecve:
-    case kSysWait4:
-        // Process creation / wait: v0 DuetOS has no fork, no
-        // clone, no wait. Cleanly reject at the translator so
-        // these don't fall through to `[linux-miss]` noise in
-        // the log on every compiled-C binary that links to a
-        // CRT that probes for fork before deciding not to use
-        // it. A real implementation needs AS-clone + fd-table-
-        // clone + scheduler hooks — well beyond v0 scope.
-        LogTranslation("linux", nr, "synthetic:enosys-no-process-create");
-        r = {true, TranslateDeliberateEnosys(frame)};
-        break;
-    default:
-        if (ShouldLogMiss(g_linux_miss_sampling, nr))
-            LogMiss("linux", frame, LinuxName(nr));
-        break;
-    }
-    if (r.handled)
-        BumpHits(g_linux_hits, nr);
-    // Close the TSC window before returning. Count misses too —
-    // a miss costs real cycles (LogMiss is a serial write) and
-    // the operator wants to see that cost surface in the summary.
-    BumpOverhead(g_linux_overhead, ReadTsc() - tsc_entry);
-    return r;
-}
-#endif
 
 Result NativeGapFill(arch::TrapFrame* frame)
 {
@@ -869,7 +688,6 @@ Result NtTranslateToLinux(arch::TrapFrame* frame)
 // Emit a one-shot summary of translator overhead. Called by the
 // kheartbeat loop so the numbers roll into the normal telemetry
 // cadence without a dedicated shell command. Format:
-//   [translate-overhead] linux  calls=N total_c=C avg_c=A max_c=M
 //   [translate-overhead] native calls=N total_c=C avg_c=A max_c=M
 // Cycles are raw TSC deltas; on the QEMU host TSC runs at the
 // CPU's nominal frequency (qemu reports a fixed rate) so dividing
@@ -878,19 +696,6 @@ Result NtTranslateToLinux(arch::TrapFrame* frame)
 // tell you the TSC Hz.
 void TranslatorOverheadDump()
 {
-    arch::SerialWrite("[translate-overhead] linux  calls=");
-    arch::SerialWriteHex(g_linux_overhead.calls);
-    arch::SerialWrite(" total_c=");
-    arch::SerialWriteHex(g_linux_overhead.cycles_total);
-    if (g_linux_overhead.calls > 0)
-    {
-        arch::SerialWrite(" avg_c=");
-        arch::SerialWriteHex(g_linux_overhead.cycles_total / g_linux_overhead.calls);
-    }
-    arch::SerialWrite(" max_c=");
-    arch::SerialWriteHex(g_linux_overhead.cycles_max);
-    arch::SerialWrite("\n");
-
     arch::SerialWrite("[translate-overhead] native calls=");
     arch::SerialWriteHex(g_native_overhead.calls);
     arch::SerialWrite(" total_c=");
@@ -904,7 +709,6 @@ void TranslatorOverheadDump()
     arch::SerialWriteHex(g_native_overhead.cycles_max);
     arch::SerialWrite("\n");
 
-    DumpSuppressedMissSummary("linux", g_linux_miss_sampling);
     DumpSuppressedMissSummary("native", g_native_miss_sampling);
 }
 

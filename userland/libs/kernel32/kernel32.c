@@ -2811,12 +2811,15 @@ __declspec(dllexport) BOOL GetComputerNameExW(int name_type, wchar_t16* buf, DWO
     return 1;
 }
 
-/* GetLogicalDriveStringsA — return "C:\\\0\0". */
+/* GetLogicalDriveStringsA — return "X:\\\0\0" to match the
+ * X-drive sentinel that GetLogicalDrives, GetTempPath,
+ * GetWindowsDirectory, GetSystemDirectory and the env-var
+ * defaults all use. */
 __declspec(dllexport) DWORD GetLogicalDriveStringsA(DWORD bufsz, char* buf)
 {
     if (bufsz < 5 || buf == (char*)0)
         return 5;
-    buf[0] = 'C';
+    buf[0] = 'X';
     buf[1] = ':';
     buf[2] = '\\';
     buf[3] = 0;
@@ -6877,7 +6880,7 @@ __declspec(dllexport) DWORD K32GetProcessImageFileNameW(HANDLE hProcess, wchar_t
 __declspec(dllexport) DWORD K32GetProcessImageFileNameA(HANDLE hProcess, char* name, DWORD cch)
 {
     (void)hProcess;
-    static const char path[] = "C:\\bin\\ring3.exe";
+    static const char path[] = "X:\\bin\\ring3.exe";
     if (name == (char*)0 || cch == 0)
         return 0;
     int i = 0;

@@ -187,20 +187,9 @@ void CmdLinuxexec(u32 argc, char** argv)
 void CmdTranslate()
 {
     namespace tx = duetos::subsystems::translation;
-    const auto& linux = tx::LinuxHitsRead();
     const auto& native = tx::NativeHitsRead();
     ConsoleWriteln("TRANSLATION UNIT HIT TABLE");
     ConsoleWriteln("  DIR     NR     HITS");
-    for (u32 i = 0; i < 1024; ++i)
-    {
-        if (linux.buckets[i] == 0)
-            continue;
-        ConsoleWrite("  linux   0x");
-        WriteU64Hex(i, 3);
-        ConsoleWrite("  ");
-        WriteU64Dec(linux.buckets[i]);
-        ConsoleWriteln("");
-    }
     for (u32 i = 0; i < 1024; ++i)
     {
         if (native.buckets[i] == 0)

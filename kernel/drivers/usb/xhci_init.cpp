@@ -771,7 +771,7 @@ void XhciInit()
     // Reset the device table so a subsequent XhciInit re-allocates
     // slots cleanly. Frames behind the rings are leaked until we
     // teach the allocator to take them back after a full HCH
-    // quiesce — intentional, matches the per-controller TODO above.
+    // quiesce — intentional, matches the per-controller leak note above.
     for (u32 i = 0; i < kMaxDevicesTotal; ++i)
         ZeroBytes(&g_devices[i], sizeof(DeviceState));
     g_device_count = 0;

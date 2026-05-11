@@ -144,7 +144,7 @@ def parse_translation_map(path: Path):
                 current_handler = ""
         return mapping
 
-    return parse_gapfill("LinuxGapFill"), parse_gapfill("NativeGapFill")
+    return parse_gapfill("NativeGapFill")
 
 
 def render_markdown(rows):
@@ -188,15 +188,11 @@ def main():
     native_rows = parse_native_syscalls(args.syscall_h)
     linux_by_nr = parse_linux_table(args.linux_table)
     nt_rows = parse_nt_table(args.nt_table)
-    linux_gapfill, native_gapfill = parse_translation_map(args.translate_cpp)
+    native_gapfill = parse_translation_map(args.translate_cpp)
 
     linux_rows = []
     for nr, entry in sorted(linux_by_nr.items()):
-        if nr in linux_gapfill:
-            status = "translated"
-            owner = f"kernel/subsystems/translation/translate.cpp::{linux_gapfill[nr]['handler']}"
-            fallback = linux_gapfill[nr]["behavior"]
-        elif entry["state"] == "implemented":
+        if entry["state"] == "implemented":
             status = "implemented"
             owner = "kernel/subsystems/linux/syscall.cpp::Do*"
             fallback = "none (handled in linux dispatcher)"
