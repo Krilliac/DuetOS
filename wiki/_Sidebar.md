@@ -73,6 +73,9 @@
 - [Debugging](tooling/Debugging.md)
 - [Debugger](tooling/Debugger.md)
 - [QEMU Smoke Tests](tooling/QEMU-Smoke.md)
+- [Wiki Auto-Sections](tooling/Wiki-Auto-Sections.md)
+- [duet-pkg (package manager)](tooling/Duet-Pkg.md)
+- [Portable Native Apps](tooling/Native-Apps.md)
 
 ### Specifications
 - [Syscall ABI](specifications/Syscall-ABI.md)
@@ -80,6 +83,7 @@
 
 ### Reference
 - [Roadmap](reference/Roadmap.md)
+- [Daily-Driver Readiness](reference/Daily-Driver-Readiness.md)
 - [Design Decisions Log](reference/Design-Decisions.md)
 - [Directory Layout](reference/Directory-Layout.md)
 - [Knowledge Base Index](reference/Knowledge-Base-Index.md)

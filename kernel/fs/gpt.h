@@ -174,6 +174,23 @@ inline constexpr u8 kDuetCrashDumpTypeGuid[kGuidBytes] = {
     0x48, 0x5F, 0x44, 0x55, 0x4D, 0x50, // u8[6] BE: 0x48 0x5F 0x44 0x55 0x4D 0x50
 };
 
+/// DuetOS-private partition type GUID for DuetFS system partitions.
+/// Picked so the printable bytes spell "DUETOSDU ETOSDUET" — a
+/// disk-installer that lays down GPT and chooses DuetFS for the
+/// system partition marks the entry with this type so external
+/// tooling (and a future DuetFS bootloader chain) can identify
+/// the volume without probing every FAT-shaped partition.
+///
+/// Bytes are stored as an UEFI-canonical mixed-endian GUID:
+///   44554554-4F53-4475-4554-4F53445545544F
+inline constexpr u8 kDuetFsTypeGuid[kGuidBytes] = {
+    0x54, 0x45, 0x55, 0x44,             // u32 LE: 0x44554554 ("DUET")
+    0x53, 0x4F,                         // u16 LE: 0x4F53     ("OS")
+    0x75, 0x44,                         // u16 LE: 0x4475     ("Du")
+    0x45, 0x54,                         // u8[2] BE: 0x45 0x54 ("ET")
+    0x4F, 0x53, 0x44, 0x55, 0x45, 0x54, // u8[6] BE:           ("OSDUET")
+};
+
 /// Search every probed Disk for a partition whose type_guid
 /// matches kDuetCrashDumpTypeGuid AND whose block_handle equals
 /// `block_handle`. On hit, fills *first_lba_out and *sector_count_out

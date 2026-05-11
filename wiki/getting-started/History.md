@@ -136,16 +136,18 @@ The current phase rebuilt the Win32 subsystem around real DLLs:
    forwarders get resolved recursively across the preloaded set at
    IAT-patch time.
 6. **The retirement wave**. Every row in the flat stubs table that
-   could be replaced with userland C code got replaced. Today the
-   preload set ships 29 userland DLLs — `kernel32` (155 exports),
-   `ntdll` (114), `ucrtbase` (72), `user32` (73), `gdi32` (44),
-   `kernelbase` (44 forwarders), plus `msvcrt`, `msvcp140`,
-   `vcruntime140`, `dbghelp`, `advapi32`, `shell32`, `shlwapi`,
-   `ole32`, `oleaut32`, `winmm`, `bcrypt`, `psapi`, `crypt32`,
-   `comctl32`, `comdlg32`, `version`, `setupapi`, `iphlpapi`,
-   `userenv`, `wtsapi32`, `dwmapi`, `uxtheme`, `secur32`,
-   `ws2_32`, `wininet`, `winhttp`, `d3d9`/`11`/`12`, `dxgi` —
-   totalling ~760 exports.
+   could be replaced with userland C code got replaced. By the close
+   of Phase 4 the preload set shipped 29 userland DLLs (`kernel32`,
+   `ntdll`, `ucrtbase`, `user32`, `gdi32`, `kernelbase`, plus
+   `msvcrt`, `msvcp140`, `vcruntime140`, `dbghelp`, `advapi32`,
+   `shell32`, `shlwapi`, `ole32`, `oleaut32`, `winmm`, `bcrypt`,
+   `psapi`, `crypt32`, `comctl32`, `comdlg32`, `version`, `setupapi`,
+   `iphlpapi`, `userenv`, `wtsapi32`, `dwmapi`, `uxtheme`, `secur32`,
+   `ws2_32`, `wininet`, `winhttp`, `d3d9`/`11`/`12`, `dxgi`)
+   totalling ~760 exports. Phase 5 and beyond grew the surface to 44
+   production DLLs / ~1100 exports — see
+   [`Win32-Surface-Status`](../reference/Win32-Surface-Status.md) for
+   the live inventory.
 
 Every Win32-imports process preloads the full set. Per-process cost:
 ~96 frames.
@@ -435,6 +437,119 @@ polish), T6-01..03 (PE TLS / SEH / CreateProcess), T7-03/T7-04
 cross-thread APC), T10-04 (host ctest harness extension),
 T12-03 (winmm waveOut over HDA), T13-03 (per-syscall arg/return
 docs).
+
+## Phase 6.7 — Tier-0 daily-driver: disk installer + Method-form `_S5_` (2026-05-10)
+
+A focused pass against `wiki/reference/Daily-Driver-Readiness.md`'s
+Tier-0 gaps.
+
+- **Disk installer orchestration shipped** — new `install <handle>
+  INSTALL` shell command (`kernel/fs/installer.{h,cpp}`,
+  `kernel/shell/shell_storage.cpp::CmdInstall`) lays down a fresh
+  3-partition GPT (ESP / system / crash-dump), formats ESP +
+  system as FAT32, seeds `/esp/boot/grub/grub.cfg` with a
+  chainload stub + `/system/boot/.duetos-installed` sentinel, and
+  mounts the new partitions at `/esp` + `/system`. Crash-dump
+  partition uses `kDuetCrashDumpTypeGuid` so the existing
+  `GptFindCrashDumpRegion` path picks it up next boot. UUID-v4
+  GUIDs throughout. Admin + literal `INSTALL` confirmation +
+  100 MiB minimum-disk gate. Bootloader-bytes copy
+  (`BOOTX64.EFI` + `duetos-kernel.elf` onto the freshly-formatted
+  ESP) remains a follow-on slice — embedding the running kernel
+  into ramfs is the classic two-stage bootstrap problem.
+- **Method-form `_S5_` decode shipped** — `AmlReadS5` now accepts
+  both the classic `Name(_S5_, Package(...))` form (UEFI / QEMU)
+  AND the `Method(_S5_) { Return(Package(...)) }` form used by
+  some consumer firmware. The walker reads the method's
+  PkgLength, skips NameString + MethodFlags, and scans (bounded
+  16-byte span) for the `Return(Package(...))` byte sequence.
+  Closes the gap for chipsets that pre-evaluate `_PTS` / `_GTS`
+  but define `_S5_` as a method body.
+
+What's still open in Tier 0: bootloader-bytes copy on the
+installer; writable native FS; NTFS write; system updater;
+full AML method interpreter (`_PTS` / `_GTS` runtime evaluation).
+See [`Daily-Driver-Readiness`](../reference/Daily-Driver-Readiness.md)
+for the live drilldown.
+
+## Phase 6.8 — Installer UEFI-loader copy + layout self-test (2026-05-10)
+
+A second cut against the same Tier-0 row.
+
+- **`BOOTX64.EFI` embedded into the kernel image** via a new
+  custom command in `kernel/CMakeLists.txt` (depends on the
+  `${DUETOS_UEFI_EFI}` artifact set by `boot/uefi/`). Top-level
+  CMake reordered so `boot/uefi` processes before `kernel`,
+  exposing the cache var to the kernel embed step. New ramfs
+  accessors `RamfsBootX64EfiBytes()` / `RamfsBootX64EfiSize()`.
+- **Installer now stamps `BOOTX64.EFI` into `/EFI/BOOT/`** on the
+  freshly-formatted ESP — the canonical UEFI fall-back removable-
+  media path. Combined with the existing `grub.cfg` stub, the ESP
+  now has a complete loader skeleton; the only piece still
+  pending is `duetos-kernel.elf` on the system partition.
+- **`PlanLayout` factored out** of `Install` as a pure-math
+  helper. New `InstallerSelfTest` runs at every boot
+  (`100 MiB / 1 GiB / 1 TiB / undersized refused`) and surfaced
+  a real off-by-some bug in the original `kMinInstallSectors`
+  constant. Replaced the hard-coded number with a
+  computed expression (`kEspSectors + kMinSystemSectors +
+  kCrashDumpSectors + kGptOverheadSectors`) so the layout floor
+  tracks the partition sizing constants automatically.
+
+## Phase 6.9 — Installer DuetFS option + DuetFS audit (2026-05-10)
+
+A correction pass + an installer extension.
+
+- **Audit-driven correction.** The Daily-Driver-Readiness Tier-0
+  row claimed "DuetFS read-only". In fact DuetFS ships with the
+  full write surface (`duetfs_write_at` / `duetfs_create_path`
+  / `duetfs_unlink_path` / `duetfs_truncate` / `duetfs_link` /
+  `duetfs_create_symlink`), a journal, AES-XTS sector
+  encryption, Argon2id KDF, LZ4 compression, snapshots, and
+  CRC-checked blocks; auto-mounted at `/duetfs` (RAM-backed)
+  on every boot and at `/disks/duetfsN` for on-disk volumes.
+  Refreshed the row to describe what's actually shipped.
+- **Installer `--duetfs` flag.** New `kDuetFsTypeGuid` GPT
+  partition-type GUID lands in `kernel/fs/gpt.h`. `Install` now
+  takes a `use_duetfs_system` parameter; when set, the system
+  partition is formatted with `duetfs_mkfs` (cookied through
+  `MakeBlockHandleDevice`), typed `kDuetFsTypeGuid`, and mounted
+  at `/system` via `FsType::DuetFs`. Default behaviour
+  (`install <handle> INSTALL`) is unchanged: FAT32 system
+  partition, `kSystemTypeGuid` (Microsoft Basic Data),
+  interoperable with Windows / Linux fdisk. Operators wanting
+  a journalled, encryption-capable native FS pass
+  `install <handle> INSTALL --duetfs`.
+
+## Phase 6.10 — Installer kernel-ELF embed via `.incbin` (2026-05-10)
+
+Closes the easy half of the kernel-ELF residual; documents the
+hard half.
+
+- **Opt-in `.incbin` blob.** New CMake option
+  `DUETOS_INSTALLER_KERNEL_EMBED` (default OFF) drives
+  `tools/build/gen-kernel-blob.sh` which emits a tiny
+  `kernel_elf_blob.S` that .incbins the stage-1 kernel ELF.
+  `.incbin` is processed by the assembler in constant time, so
+  embedding ~10 MiB doesn't blow up compile time the way a
+  constexpr-array literal would. Stage 1 carries a separate
+  always-empty stub blob so its references resolve. New ramfs
+  accessors `RamfsKernelElfBytes()` / `RamfsKernelElfSize()`
+  expose the bytes; `WriteSystemSentinel` writes
+  `/system/boot/duetos-kernel.elf` whenever the size is non-zero.
+  When the option is OFF (default) the blob is a 0-byte stub and
+  the installer prints a one-line note pointing at out-of-band
+  staging.
+- **Cost trade.** With ON: kernel binary ~10 MiB → ~21 MiB; ISO
+  ~18 MiB → ~28 MiB. Runtime cost: the larger image consumes
+  the entire 0..16 MiB DMA zone and trips the `mm/zone` boot
+  self-test. Closing that needs a linker-script change to place
+  the blob at a higher physical region (32 MiB+). Until then the
+  option is "image-correct, doesn't self-boot" — useful for
+  "build the installer ISO once on machine A, run it to install
+  onto machine B" but not for live-iterating on the embed path
+  itself. Documented in
+  [`Build-System`](../tooling/Build-System.md) §"Optional Knobs".
 
 ---
 

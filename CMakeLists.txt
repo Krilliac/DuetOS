@@ -274,8 +274,6 @@ message(STATUS "  KASLR                : ${DUETOS_KASLR}")
 message(STATUS "  KASAN diagnostics    : ${DUETOS_KASAN}")
 message(STATUS "  LTO                  : ${DUETOS_LTO}")
 
-add_subdirectory(kernel)
-
 # UEFI loader (boot/uefi/) — Phase A toolchain proof. Builds a
 # PE32+ EFI Application ("BOOTX64.EFI") that prints a banner and
 # halts. Wired separately from the kernel because UEFI requires a
@@ -284,7 +282,13 @@ add_subdirectory(kernel)
 # clang/lld-link directly via add_custom_command rather than fight
 # the kernel's freestanding-ELF toolchain file. Phase B replaces
 # efi_main with a real ELF loader + multiboot2-shim handoff.
+#
+# Added BEFORE kernel/ so the kernel's ramfs embed-blob step can
+# depend on ${DUETOS_UEFI_EFI} (cached after this subdirectory is
+# processed) without a forward-reference.
 add_subdirectory(boot/uefi)
+
+add_subdirectory(kernel)
 
 # ----------------------------------------------------------------------------
 # Test harness — boots the built kernel in QEMU and greps the serial log for
@@ -309,14 +313,15 @@ add_test(NAME duetos-boot-smoke
 )
 set_tests_properties(duetos-boot-smoke PROPERTIES
     LABELS "smoke;boot;win32"
-    # 120s wall clock — the smoke driver's own DUETOS_TIMEOUT
-    # defaults to 30s for the QEMU run, but boot + ring3 smoke
-    # probes + signature verification on the slowest hosts (no
-    # KVM, full debug instrumentation) routinely takes 60-75s.
-    # The previous 60s was tight and would flake intermittently;
-    # 120s gives headroom without masking real regressions
-    # (a hung kernel still trips the inner DUETOS_TIMEOUT first).
-    TIMEOUT 120
+    # 200s wall clock. The smoke driver's inner DUETOS_TIMEOUT
+    # defaults to 150s (bumped from 90s when the native-app
+    # spawn block + nat_calc + nat_sysinfo started pushing the
+    # post-smoke phase past 90s on slow CI hosts). The outer
+    # ctest TIMEOUT needs ~50s of headroom over the inner so the
+    # signature-verification pass can finish after QEMU exits.
+    # A hung kernel still trips the inner DUETOS_TIMEOUT first;
+    # this only guards against the harness itself wedging.
+    TIMEOUT 200
     # Exit 2 from ctest-boot-smoke.sh means a prerequisite is
     # missing (qemu / iso) — CTEST should report SKIP rather
     # than FAIL. Mirrors the duetos-uefi-smoke convention.
@@ -357,3 +362,38 @@ message(STATUS "  Toolchain  : ${CMAKE_TOOLCHAIN_FILE}")
 message(STATUS "  C compiler : ${CMAKE_C_COMPILER}")
 message(STATUS "  Linker     : ${CMAKE_LINKER}")
 message(STATUS "")
+
+# ----------------------------------------------------------------------------
+# Optional host-side tools — duet-pkg (the federated package manager).
+#
+# These are HOSTED binaries (need libc, libstdc++, libcurl, libsodium,
+# <filesystem>, <expected>), so they cannot share the freestanding
+# `cmake/toolchains/x86_64-kernel.cmake` toolchain the kernel uses.
+# Drive them via ExternalProject_Add with no toolchain inheritance, so
+# `cmake --build . --target duet-pkg` from the root build dir works
+# without polluting the kernel's compiler flags.
+#
+# OFF by default — most kernel-only flows don't need duet-pkg, and the
+# ExternalProject pulls toml++ (and later libcurl + libsodium) via
+# FetchContent the first time it configures. Operators wanting the
+# package manager run: `cmake -DDUETOS_BUILD_TOOLS=ON ...`.
+# ----------------------------------------------------------------------------
+option(DUETOS_BUILD_TOOLS "Build host-side tools (duet-pkg, ...)" OFF)
+if(DUETOS_BUILD_TOOLS)
+    include(ExternalProject)
+    ExternalProject_Add(duet-pkg-ext
+        PREFIX           "${CMAKE_BINARY_DIR}/tools/duet-pkg"
+        SOURCE_DIR       "${CMAKE_SOURCE_DIR}/tools/pkg"
+        # Force the system compiler + no toolchain file. Pass through
+        # the build type so a debug parent build gets a debug
+        # duet-pkg.
+        CMAKE_ARGS
+            -DCMAKE_TOOLCHAIN_FILE=
+            -DCMAKE_C_COMPILER=cc
+            -DCMAKE_CXX_COMPILER=c++
+            -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+        INSTALL_COMMAND  ""
+        BUILD_ALWAYS     TRUE
+        TEST_COMMAND     ${CMAKE_CTEST_COMMAND} --output-on-failure
+    )
+endif()

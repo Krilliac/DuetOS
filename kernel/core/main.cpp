@@ -141,6 +141,7 @@
 #include "fs/fat32.h"
 #include "fs/file_route.h"
 #include "fs/gpt.h"
+#include "fs/installer.h"
 #include "fs/ntfs.h"
 #include "apps/calculator.h"
 #include "apps/about.h"
@@ -2326,6 +2327,41 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         SerialWrite("\n");
     }
 
+    // Portable native ELF demo apps. Both compiled by the new
+    // `duetos_native_app()` CMake helper (see kernel/CMakeLists.txt)
+    // and embedded into ramfs the same way usershell.elf is.
+    // hello_native is a "did the pipeline survive?" smoke; nat_calc
+    // exercises the userland libc's printf-family + a recursive-
+    // descent expression evaluator. Same trusted-cap set + frame
+    // budget as the shell.
+    {
+        const auto pid = duetos::core::SpawnElfFile(
+            "/bin/hello_native", duetos::fs::RamfsHelloNativeBytes(), duetos::fs::RamfsHelloNativeSize(),
+            duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
+            duetos::core::kTickBudgetTrusted);
+        SerialWrite("[boot] hello_native pid=");
+        SerialWriteHex(pid);
+        SerialWrite("\n");
+    }
+    {
+        const auto pid = duetos::core::SpawnElfFile(
+            "/bin/nat_calc", duetos::fs::RamfsNatCalcBytes(), duetos::fs::RamfsNatCalcSize(),
+            duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
+            duetos::core::kTickBudgetTrusted);
+        SerialWrite("[boot] nat_calc pid=");
+        SerialWriteHex(pid);
+        SerialWrite("\n");
+    }
+    {
+        const auto pid = duetos::core::SpawnElfFile(
+            "/bin/nat_sysinfo", duetos::fs::RamfsNatSysinfoBytes(), duetos::fs::RamfsNatSysinfoSize(),
+            duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
+            duetos::core::kTickBudgetTrusted);
+        SerialWrite("[boot] nat_sysinfo pid=");
+        SerialWriteHex(pid);
+        SerialWrite("\n");
+    }
+
     // Login gate — blocks keyboard input from reaching the shell
     // until a valid session is open. TTY mode prints a classic
     // `username:` / `password:` banner; desktop mode paints a
@@ -2957,6 +2993,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // fs/fat32 fault domain self-registers via
     // KERNEL_INITCALL(Drivers, "fs/fat32.module", ...) in
     // `kernel/fs/fat32.cpp`.
+
+    // Disk-installer layout-math self-test. Pure math (no block I/O,
+    // no GPT writes), so cheap to run on every boot. A regression
+    // here means the partition layout planner drifted — surfaces
+    // immediately rather than waiting for an operator to type
+    // `install <handle> INSTALL` on a real disk.
+    DUETOS_BOOT_SELFTEST(duetos::fs::installer::InstallerSelfTest());
 
     // Auto-register every probed FAT32 volume in the mount registry
     // so `VfsMountResolve` (and therefore the file-routing layer)

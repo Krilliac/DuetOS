@@ -155,4 +155,38 @@ void RamfsInspectSnapshot();
 const u8* RamfsUsershellElfBytes();
 u64 RamfsUsershellElfSize();
 
+/// Embedded UEFI loader bytes (PE32+ EFI Application built by
+/// `add_subdirectory(boot/uefi)`). Used by the disk installer to
+/// stamp a real BOOTX64.EFI into the freshly-formatted ESP. Bytes
+/// live for the kernel's entire lifetime (constexpr `.rodata`).
+const u8* RamfsBootX64EfiBytes();
+u64 RamfsBootX64EfiSize();
+
+/// Embedded stage-1 kernel ELF bytes for the disk installer.
+/// Populated from a `.incbin` directive in
+/// `kernel_elf_blob.S` (built by tools/build/gen-kernel-blob.sh).
+/// When the build option `DUETOS_INSTALLER_KERNEL_EMBED` is ON,
+/// the bytes are the freshly-built `duetos-kernel-stage1.elf` and
+/// `RamfsKernelElfSize()` returns its real length (~10 MiB on a
+/// debug build). When OFF (default), the bytes are absent and
+/// `RamfsKernelElfSize()` returns 0; the installer detects this
+/// and skips the kernel-ELF write step with a one-line note.
+const u8* RamfsKernelElfBytes();
+u64 RamfsKernelElfSize();
+
+/// Portable native ELF demo apps. Built from
+/// `userland/native-apps/<name>/<name>.c` via the
+/// `duetos_native_app()` CMake helper, embedded into ramfs at
+/// build time. Spawned by main.cpp's ring-3 init to prove the
+/// portable-app pipeline survives every regression. See
+/// `wiki/tooling/Native-Apps.md` for the migration plan that
+/// uses this helper to move the in-kernel apps under
+/// `kernel/apps/` out into separate ELFs.
+const u8* RamfsHelloNativeBytes();
+u64 RamfsHelloNativeSize();
+const u8* RamfsNatCalcBytes();
+u64 RamfsNatCalcSize();
+const u8* RamfsNatSysinfoBytes();
+u64 RamfsNatSysinfoSize();
+
 } // namespace duetos::fs

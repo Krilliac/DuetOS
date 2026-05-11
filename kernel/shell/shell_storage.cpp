@@ -21,7 +21,9 @@
 #include "fs/duetfs/include/duetfs.h"
 #include "fs/fat32.h"
 #include "fs/gpt.h"
+#include "fs/installer.h"
 #include "fs/mount.h"
+#include "fs/ramfs.h"
 
 namespace duetos::core::shell::internal
 {
@@ -377,6 +379,138 @@ void CmdMkfsDuetfs(u32 argc, char** argv)
         return;
     }
     ConsoleWriteln("mkfs.duetfs OK — superblock probe re-validates (no free /disks/duetfsN slot for auto-mount)");
+}
+
+// `install <handle> INSTALL` — run the disk-installer pipeline.
+// DESTRUCTIVE. Lays down a fresh GPT (ESP + system + crash-dump),
+// formats ESP and system as FAT32, seeds /esp/boot/grub/grub.cfg
+// with a chainload stub, and mounts the new partitions at /esp +
+// /system. Bootloader-bytes copy (BOOTX64.EFI + duetos-kernel.elf)
+// is a follow-on slice — see wiki/reference/Daily-Driver-Readiness.md
+// Tier 0 for the residual scope. Admin-gated; requires the literal
+// "INSTALL" confirmation token to proceed.
+void CmdInstall(u32 argc, char** argv)
+{
+    namespace storage = duetos::drivers::storage;
+    namespace inst = duetos::fs::installer;
+    if (!RequireAdmin("INSTALL"))
+        return;
+    if (argc < 3 || argv == nullptr)
+    {
+        ConsoleWriteln("usage: install <handle-hex> INSTALL [--duetfs]");
+        ConsoleWriteln("  handle    block-device handle from `lsblk` (hex)");
+        ConsoleWriteln("  INSTALL   literal token — destructive, lays a fresh GPT + ESP + system");
+        ConsoleWriteln("  --duetfs  format the system partition as DuetFS (journalled, CRC,");
+        ConsoleWriteln("            encryption-capable). Default: FAT32 (interoperable).");
+        ConsoleWriteln("");
+        ConsoleWriteln("layout (~100 MiB minimum):");
+        ConsoleWriteln("  LBA 0..33       — PMBR + primary GPT");
+        ConsoleWriteln("  LBA 34..        — ESP (FAT32, 64 MiB)");
+        ConsoleWriteln("  LBA esp_end+1.. — System (FAT32 or DuetFS, takes remaining space)");
+        ConsoleWriteln("  last 4 MiB      — Crash-dump (kDuetCrashDumpTypeGuid)");
+        ConsoleWriteln("  trailing 33 LBA — Backup GPT");
+        return;
+    }
+    duetos::u64 handle_u64 = 0;
+    if (!ParseU64Str(argv[1], &handle_u64) || handle_u64 >= 0xFFFFu)
+    {
+        ConsoleWrite("install: bad handle '");
+        ConsoleWrite(argv[1]);
+        ConsoleWriteln("'");
+        return;
+    }
+    const duetos::u32 handle = static_cast<duetos::u32>(handle_u64);
+    if (handle >= storage::BlockDeviceCount())
+    {
+        ConsoleWriteln("install: handle out of range — see `lsblk`");
+        return;
+    }
+    const bool confirm = argv[2][0] == 'I' && argv[2][1] == 'N' && argv[2][2] == 'S' && argv[2][3] == 'T' &&
+                         argv[2][4] == 'A' && argv[2][5] == 'L' && argv[2][6] == 'L' && argv[2][7] == '\0';
+    if (!confirm)
+    {
+        ConsoleWriteln("install: confirmation token missing — pass literal INSTALL");
+        return;
+    }
+    bool use_duetfs = false;
+    if (argc >= 4 && argv[3] != nullptr)
+    {
+        const char* flag = argv[3];
+        if (flag[0] == '-' && flag[1] == '-' && flag[2] == 'd' && flag[3] == 'u' && flag[4] == 'e' && flag[5] == 't' &&
+            flag[6] == 'f' && flag[7] == 's' && flag[8] == '\0')
+        {
+            use_duetfs = true;
+        }
+        else
+        {
+            ConsoleWrite("install: unrecognised flag '");
+            ConsoleWrite(flag);
+            ConsoleWriteln("' — only --duetfs is supported");
+            return;
+        }
+    }
+    ConsoleWrite("install: target ");
+    ConsoleWrite(storage::BlockDeviceName(handle));
+    ConsoleWrite(" (");
+    WriteHexCol(storage::BlockDeviceSectorCount(handle), 0);
+    ConsoleWrite(" sectors, system=");
+    ConsoleWrite(use_duetfs ? "DuetFS" : "FAT32");
+    ConsoleWriteln(")");
+
+    inst::Report report{};
+    const inst::Status st = inst::Install(handle, use_duetfs, &report);
+    if (st != inst::Status::Ok)
+    {
+        ConsoleWrite("install: failed — ");
+        ConsoleWriteln(inst::StatusName(st));
+        return;
+    }
+    ConsoleWriteln("install: complete");
+    ConsoleWrite("  ESP        handle=");
+    WriteHexCol(report.esp_handle, 4);
+    ConsoleWrite(" lba ");
+    WriteHexCol(report.esp_first_lba, 0);
+    ConsoleWrite("..");
+    WriteHexCol(report.esp_last_lba, 0);
+    ConsoleWriteln(" mounted at /esp");
+    ConsoleWrite("  System     handle=");
+    WriteHexCol(report.system_handle, 4);
+    ConsoleWrite(" lba ");
+    WriteHexCol(report.system_first_lba, 0);
+    ConsoleWrite("..");
+    WriteHexCol(report.system_last_lba, 0);
+    ConsoleWriteln(" mounted at /system");
+    ConsoleWrite("  Crash-dump lba ");
+    WriteHexCol(report.crashdump_first_lba, 0);
+    ConsoleWrite("..");
+    WriteHexCol(report.crashdump_last_lba, 0);
+    ConsoleWriteln(" reserved (DuetOS-private type GUID)");
+    // Bootloader bytes status. BOOTX64.EFI is always embedded (small
+    // — 6 KiB — built by boot/uefi/) and stamped into the ESP. The
+    // kernel ELF is gated by DUETOS_INSTALLER_KERNEL_EMBED; report
+    // accordingly so the operator knows whether out-of-band staging
+    // is still needed.
+    const duetos::u64 kern_len = duetos::fs::RamfsKernelElfSize();
+    ConsoleWriteln("  ESP /EFI/BOOT/BOOTX64.EFI written from embedded blob");
+    if (use_duetfs)
+    {
+        ConsoleWriteln("  /system formatted as DuetFS — kernel.elf path-create");
+        ConsoleWriteln("    through the Rust ABI is a follow-on; stage the kernel");
+        ConsoleWriteln("    ELF onto /system/boot/ from another OS.");
+    }
+    else if (kern_len == 0)
+    {
+        ConsoleWriteln("  /system kernel.elf not embedded (DUETOS_INSTALLER_KERNEL_EMBED=OFF)");
+        ConsoleWriteln("    — stage /system/boot/duetos-kernel.elf from the live ISO");
+        ConsoleWriteln("    or via USB. Rebuild with -DDUETOS_INSTALLER_KERNEL_EMBED=ON");
+        ConsoleWriteln("    for a fully self-installable image.");
+    }
+    else
+    {
+        ConsoleWrite("  /system /boot/duetos-kernel.elf written (");
+        WriteHexCol(kern_len, 0);
+        ConsoleWriteln(" bytes)");
+    }
 }
 
 // `lastdump` — operator readout for the last-built minidump.

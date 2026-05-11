@@ -7858,3 +7858,246 @@ doc helps future readers audit the trail.
   a real PAGE_NOACCESS gap.
 - **Related roadmap track(s):** T5-01 partial — reserve/commit
   + protection closed; guard pages + true NOACCESS defer.
+
+## 2026-05-10 — Disk-installer orchestration + Method-form `_S5_` decode
+
+- **What:** two Tier-0 daily-driver gaps closed in one pass.
+  - **`install <handle> INSTALL` shell command** (`kernel/fs/installer.{h,cpp}`,
+    `kernel/shell/shell_storage.cpp::CmdInstall`). Drives the destructive
+    sequence that turns a blank block device into a DuetOS-bootable
+    layout: `GptInitDisk` (3-partition GPT — ESP, system, crash-dump),
+    `Fat32Format` on ESP + system, ESP `boot/grub/grub.cfg` + system
+    `boot/.duetos-installed` sentinel writes, `VfsMount(/esp)` +
+    `VfsMount(/system)`. Admin-gated; literal `INSTALL` confirmation
+    token; refuses disks under 100 MiB. Disk + per-partition unique
+    GUIDs are RFC-4122 v4 (`FillRandomGuid` stamps version + variant
+    bits over `RandomU64()`). Crash-dump partition uses
+    `kDuetCrashDumpTypeGuid` so the existing `GptFindCrashDumpRegion`
+    path discovers it on next boot.
+  - **AML method-form `_S5_` decode** (`kernel/acpi/aml.cpp::AmlReadS5`).
+    The namespace walker already records `Method(_S5_)` entries
+    (kind = AmlObjectKind::Method); `AmlReadS5` now also accepts
+    those. It reads the method's PkgLength to bound the body, skips
+    NameString + MethodFlags, and scans for the canonical
+    `Return(Package(...))` byte sequence (`0xA4 0x12`). Bounded
+    16-byte scan span keeps malformed AML from becoming a foothold.
+- **Why:** the installer was the highest-impact Tier-0 gap — without
+  it DuetOS was ISO-only, no on-disk life. The primitives (GPT-init,
+  FAT32-format, partition block devices, mount registry) all shipped
+  earlier; the orchestration was the missing piece. The Method-form
+  `_S5_` decode is the smallest possible step toward "actually
+  shutting down on real consumer firmware" — most modern UEFI uses
+  the Name form, but a meaningful slice of OEM-modified firmware
+  (especially older / locked machines) defines `_S5_` as a method.
+- **Rules out / defers:**
+  - **Bootloader-bytes copy.** v0 of the installer lays down the
+    partition skeleton and the chainload stub, not the actual
+    `BOOTX64.EFI` + `duetos-kernel.elf` bytes on disk. Embedding the
+    running kernel into ramfs is the bootstrap problem (kernel.elf
+    bytes change after the embed, requiring a two-stage build).
+    Out-of-band staging (USB / network / ISO chainload) is the
+    likely first cut. The installer prints a follow-up note pointing
+    at this.
+  - **Full AML method interpreter.** Method bodies more complex than
+    `Return(Package{...})` — sub-method calls, conditionals, integer
+    expressions, `_PTS` / `_GTS` evaluation — are still beyond the
+    walker. Closing this is its own slice.
+  - **Self-test for Install at boot.** A KMalloc-backed RAM block
+    device caps at the 2 MiB kheap; an installer self-test would
+    need a ≥ 100 MiB synthetic disk. The constituent primitives
+    (`GptSelfTest`, `Fat32SelfTest`, mount-table + partition-block
+    self-tests) cover the components; the orchestration is exercised
+    by the operator running `install <handle> INSTALL` on a real
+    target.
+- **Revisit when:** the bootloader-bytes path lands (graduates this
+  entry to a "fully shipped" line) or a real chipset surfaces an
+  `_S5_` Method body the v0 scanner can't decode (extends the
+  scanner toward a real interpreter).
+- **Related roadmap track(s):** End-user features → Disk installer
+  (orchestration closed; bootloader-bytes residual remains);
+  End-user features → ACPI S5 (method-form `_S5_` closed; full
+  AML interpreter still open).
+
+## 2026-05-10 — Installer UEFI-loader copy + layout self-test
+
+- **What:** the disk installer now ships the easy half of the
+  bootloader-bytes residual.
+  - **`BOOTX64.EFI` embedded into the kernel image.** New
+    `generated_bootx64_efi.h` produced by a custom command in
+    `kernel/CMakeLists.txt` that runs `embed-blob.py` on the
+    `${DUETOS_UEFI_EFI}` artifact (set by `boot/uefi/CMakeLists.txt`).
+    Top-level `CMakeLists.txt` reorders so `boot/uefi` is processed
+    before `kernel`, exposing the cache var to the kernel
+    `add_custom_command`. New accessors
+    `RamfsBootX64EfiBytes()` / `RamfsBootX64EfiSize()` in
+    `fs/ramfs.{h,cpp}`.
+  - **`installer.cpp::WriteEspGrubStub`** now also writes
+    `/EFI/BOOT/BOOTX64.EFI` to the freshly-formatted ESP from the
+    embedded blob — the canonical UEFI fall-back removable-media
+    path. Real-hardware UEFI firmware finds the loader by the
+    spec-mandated path with no explicit boot-variable setup.
+  - **`PlanLayout` factored out** of `Install` and exposed in
+    `installer.h`. Pure math (no I/O); takes `disk_sectors`,
+    fills the six LBA fields of a `Report`. `Install` calls it
+    first thing.
+  - **`InstallerSelfTest`** wired into the boot path next to
+    `Fat32SelfTest`. Exercises `PlanLayout` against four canonical
+    sizes (just-too-small, just-large-enough at
+    `kMinInstallSectors`, 1 GiB, 1 TiB) and the null-out case.
+    Panics on layout regression. Surfaced a real off-by-some bug
+    in the original `kMinInstallSectors = 196608` constant — the
+    actual minimum is `ESP + min-system + crash-dump + GPT
+    overhead = 204867`. Replaced the hard-coded number with a
+    computed expression so future bumps to `kEspSectors` /
+    `kCrashDumpSectors` stay self-consistent.
+- **Why:** the bootloader-bytes residual was the headline
+  remaining gap on the installer. Splitting it into "UEFI loader
+  bytes" (a separate build artifact, no bootstrap problem) and
+  "kernel-ELF bytes" (the real two-stage problem) lets us close
+  half cleanly. The ESP now has a complete loader skeleton —
+  grub.cfg + BOOTX64.EFI both present at the right paths — so
+  the only piece still pending is the kernel ELF itself.
+  Layout-math self-test is cheap and pays for itself the first
+  time a constant drifts.
+- **Rules out / defers:**
+  - **Two-stage kernel-ELF embed.** Real path forward — build
+    once to produce kernel-stage-1.elf, build again to embed
+    those bytes as a blob in kernel-stage-2.elf. Doubles build
+    time; the alternative is out-of-band staging (USB / network /
+    ISO chainload) which keeps build cheap. Defer until the cost
+    of doubling build time becomes a nuisance.
+  - **Self-test against a real RAM disk.** A 100+ MiB synthetic
+    disk would exceed the 2 MiB kheap; testing the full
+    `Install` pipeline at boot needs a different allocation
+    strategy. The `GptSelfTest` + `Fat32SelfTest` cover the
+    constituent primitives; `InstallerSelfTest` covers the
+    layout math. End-to-end verification is shell-driven on
+    real targets.
+- **Revisit when:** the kernel-ELF embed lands (full
+  `installer.cpp` ships, deletes the residual row from
+  `Daily-Driver-Readiness.md` Tier 0).
+- **Related roadmap track(s):** End-user features → Disk
+  installer (residual now is kernel-ELF copy only; UEFI loader
+  closed).
+
+## 2026-05-10 — Installer `--duetfs` + DuetFS audit
+
+- **What:** correction pass + an installer extension.
+  - **Audit-driven correction.** The Daily-Driver-Readiness Tier-0
+    row claimed DuetFS was "read-only". In fact DuetFS ships with
+    the full write surface (`duetfs_write_at` /
+    `duetfs_create_path` / `duetfs_unlink_path` /
+    `duetfs_truncate` / `duetfs_link` / `duetfs_create_symlink`),
+    a journal, AES-XTS sector encryption, Argon2id KDF, LZ4
+    compression, snapshots, and CRC-checked blocks — all
+    exercised by per-feature self-tests at every boot. Auto-
+    mounted at `/duetfs` (RAM-backed, 256 KiB) and at
+    `/disks/duetfsN` for on-disk volumes. Wired through
+    `kernel/fs/file_route.cpp` so `SYS_FILE_OPEN` /
+    `SYS_FILE_READ` / `SYS_FILE_WRITE` reach `duetfs_*` for
+    DuetFS-backed handles. Refreshed the row to describe what's
+    actually shipped.
+  - **`kDuetFsTypeGuid` GPT type GUID** landed in
+    `kernel/fs/gpt.h`, paralleling `kDuetCrashDumpTypeGuid`.
+    Picked so the printable bytes spell "DUETOSDUETOSDUET" — a
+    DuetFS volume self-identifies in `lsgpt` output and external
+    tooling (`fdisk -l`) classifies it as "unknown DuetOS"
+    rather than misidentifying as Microsoft Basic Data.
+  - **Installer `--duetfs` flag** in
+    `kernel/fs/installer.{h,cpp}` and
+    `kernel/shell/shell_storage.cpp::CmdInstall`. `Install` now
+    takes `bool use_duetfs_system`; when true the system
+    partition is formatted with `duetfs::duetfs_mkfs` (cookied
+    through `duetfs::MakeBlockHandleDevice`), typed
+    `kDuetFsTypeGuid`, and mounted via `FsType::DuetFs`. Default
+    behaviour unchanged: FAT32, `kSystemTypeGuid` (Microsoft
+    Basic Data), interoperable. `WriteSystemSentinel` is skipped
+    on `--duetfs` for now — DuetFS path-create needs a NUL-
+    terminated path through the Rust ABI which the installer
+    doesn't currently wrap. The post-mkfs `duetfs_probe` success
+    is the proof the partition is initialised; the sentinel was
+    cosmetic.
+- **Why:** the installer was the most-requested "make this OS
+  installable" item. DuetFS as the system FS gives operators a
+  journalled / encryption-capable native filesystem for the
+  partition that holds the kernel + user data, while keeping the
+  ESP FAT32 (which UEFI mandates). The audit correction matters
+  because a wiki claim that's wrong about a fully-shipped feature
+  hides the work from the next reader and lets stale "missing"
+  rows accumulate.
+- **Rules out / defers:**
+  - **DuetFS sentinel write at install time.** Path-create
+    through the Rust ABI requires NUL-terminated path bytes
+    + size; not yet wrapped. Cosmetic; defer until a workload
+    exercises the path-create surface from C++.
+  - **DuetFS-as-`/`-root direct boot.** Currently the kernel
+    chain goes UEFI → FAT32 ESP → multiboot2 → DuetOS kernel →
+    DuetFS at `/system`. Booting a DuetFS partition directly
+    would need a DuetFS reader in GRUB / UEFI, OR a tiny FAT
+    partition holding just the kernel ELF that pivots to DuetFS
+    immediately. The pivot path is mechanical once the
+    kernel-ELF embed lands; the GRUB-DuetFS-reader path is
+    upstream-GRUB scope.
+- **Revisit when:** the kernel-ELF embed lands on the installer
+  (graduates the disk-installer track entirely) or a workload
+  exercises the DuetFS path-create surface from C++.
+- **Related roadmap track(s):** End-user features → Disk
+  installer (residual is now kernel-ELF copy only); Filesystem →
+  DuetFS follow-ups (the row's "writable native FS" gap was
+  always closed; visibility was the issue).
+
+## 2026-05-10 — Installer kernel-ELF embed via `.incbin` (opt-in)
+
+- **What:** new CMake option `DUETOS_INSTALLER_KERNEL_EMBED`
+  (default OFF) drives a `.incbin` directive in
+  `kernel_elf_blob.S`, generated by
+  `tools/build/gen-kernel-blob.sh`, that pulls the stage-1
+  `duetos-kernel.elf` bytes into stage 2's `.rodata`. Stage 1
+  carries a separate always-empty stub blob (so its references
+  link cleanly). New ramfs accessors `RamfsKernelElfBytes()` /
+  `RamfsKernelElfSize()` expose the bytes; the installer's
+  `WriteSystemSentinel` writes `/system/boot/duetos-kernel.elf`
+  whenever the size is non-zero. The shell `install` command's
+  final summary now reports which of the three bytes states
+  (BOOTX64.EFI written; kernel.elf-with-DuetFS-skipped;
+  kernel.elf-not-embedded; kernel.elf-written-N-bytes) actually
+  ran.
+- **Why `.incbin`:** the existing `embed-blob.py` emits constexpr
+  byte-array literals which compile in time linear with file
+  size; a 10 MiB blob would balloon kernel compile time by
+  minutes. `.incbin` is processed by the assembler in constant
+  time — no matter how big the file. Cost is binary size only.
+- **Why opt-in:** ON path doubles kernel binary (~10 MiB →
+  ~21 MiB) and ISO size (~18 MiB → ~28 MiB), AND surfaces a
+  runtime issue: the larger image consumes the entire 0..16 MiB
+  DMA zone and trips the `mm/zone` boot self-test. Default OFF
+  keeps build cost off the iteration loop and lets us land the
+  pipeline (embed-blob → ramfs accessor → installer write)
+  without forcing the linker-script slice that fixes the DMA
+  zone. Operators wanting a self-installable ISO build with
+  `-DDUETOS_INSTALLER_KERNEL_EMBED=ON` and currently get an
+  image-correct but non-self-bootable kernel — useful for
+  "build on machine A, install onto machine B" workflows.
+- **Rules out / defers:**
+  - **Self-booting embed path.** Linker-script slice that
+    places the blob at a higher physical region (32 MiB+) so
+    the DMA zone stays usable. Mechanical once we decide the
+    layout; deferred because the ON path's "build once, install
+    elsewhere" use case is sufficient for now.
+  - **Runtime self-image extraction.** Reading the kernel
+    image from physical memory at install time would dodge the
+    bootstrap problem entirely (no embed needed) and also
+    bypass the binary-doubling cost. More invasive — needs to
+    emit a valid ELF from the live segments — but a real path
+    forward.
+  - **Two-stage symbol table on the embedded kernel.** The
+    embedded bytes are stage-1 (stub symbols, no addr2line
+    table). An installed kernel would have stub-symbol
+    backtraces. Acceptable; future-stage embed could chain
+    further.
+- **Revisit when:** the linker-script slice lands (opens
+  self-bootable embed) or a workload demands runtime self-image
+  extraction.
+- **Related roadmap track(s):** End-user features → Disk
+  installer (kernel-ELF embed shipped as opt-in; DMA-zone fix
+  is the closing residual).

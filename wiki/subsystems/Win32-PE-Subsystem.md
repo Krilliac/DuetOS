@@ -20,7 +20,7 @@ emulator, no host OS underneath.
 ```
 Windows PE applications
         |  imports
-Win32 translator DLLs       userland/libs/   (29 DLLs, ~760 exports)
+Win32 translator DLLs       userland/libs/   (44 production DLLs, ~1100 exports)
         |  int 0x80
 Native DuetOS kernel
         |
@@ -43,7 +43,8 @@ Not enough argument. Use -h for help.
 
 That is `windows-kill.exe` — a real third-party 80 KB MSVC PE with 52
 imports across 6 DLLs (SEH + TLS + resources) — printing through our
-PE loader, our 29 userland DLLs, our scheduler, and our syscalls.
+PE loader, our 44 production userland DLLs (38 preloaded), our
+scheduler, and our syscalls.
 
 ## End-to-end Call Flow Example: `ws2_32!send`
 
@@ -69,7 +70,7 @@ sockets.
 | EAT parser | `kernel/loader/pe_exports.cpp` | `IMAGE_EXPORT_DIRECTORY`, binary-search lookup |
 | DLL loader | `kernel/loader/dll_loader.cpp` | Maps a DLL into a process, applies relocs, parses EAT |
 | Win32 syscall handlers | `kernel/subsystems/win32/` | `SYS_WIN_*`, `SYS_GDI_*`, `SYS_FILE_*`, `SYS_HEAP_*` etc. |
-| Translator DLLs | `userland/libs/{kernel32,ntdll,user32,gdi32,...}` | 29 DLLs, ~760 exports |
+| Translator DLLs | `userland/libs/{kernel32,ntdll,user32,gdi32,...}` | 44 production DLLs, ~1100 exports |
 | Flat-stubs page (legacy) | `kernel/subsystems/win32/` | Fallback for anything not yet ported to a real DLL |
 
 ## Per-process Bringup
@@ -78,7 +79,9 @@ When a PE spawns:
 
 1. PE bytes validated; `PeReport` summarises every directory.
 2. New `mm::AddressSpace` allocated.
-3. **Full preload set of 29 userland DLLs** mapped into the new AS.
+3. **Preload set of 38 userland DLLs** (out of 44 production DLLs in
+   `userland/libs/`) mapped into the new AS. The remaining DLLs load
+   on demand via `LoadLibraryA/W` -> `DllLoad`.
 4. PE sections mapped with characteristic-driven flags (W^X enforced).
 5. DIR64 base relocations applied.
 6. Imports walked: each `(dll, name)` resolved against the preloaded

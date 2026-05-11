@@ -75,7 +75,15 @@ rm -f "${SERIAL_LOG}"
 # the kernel has no orderly shutdown path and run.sh will time
 # out after DUETOS_TIMEOUT seconds) doesn't mask our own
 # assertions. run.sh exits 124 on timeout.
-DUETOS_TIMEOUT="${DUETOS_TIMEOUT:-90}" "${RUN_SCRIPT}" \
+# Default bumped from 90s → 150s. QEMU TCG on a slower CI host
+# routinely needs ~70-90s just to reach the post-smoke phase
+# (kernel-heap + paging + SMP + smoke spawn + winkill PE +
+# native-app spawns). The 90s default left no headroom; CI runs
+# saw flaky "MISSING: Windows Kill" failures when winkill ran
+# slightly slower than usual. 150s is comfortable on every
+# host the project has tested on while still keeping the smoke
+# under 3 minutes wall-clock.
+DUETOS_TIMEOUT="${DUETOS_TIMEOUT:-150}" "${RUN_SCRIPT}" \
     > "${SERIAL_LOG}" 2>&1 || true
 
 # Expected signatures — every ring3 smoke probe prints its own
@@ -156,6 +164,16 @@ expected=(
     '[hexdump-selftest] PASS'
     '[process-selftest] PASS'
     '[fs/vfs] self-test OK (lookup + jail + .. + path_max + VfsResolve)'
+    # Disk-installer layout self-test (pure math, no I/O). A
+    # regression here means the partition planner drifted.
+    '[fs/installer] self-test OK'
+    # Portable native ELF apps spawned by main.cpp next to the
+    # usershell. Each is a sentinel that regression-traps the
+    # native-app pipeline (build → embed → spawn → libc syscall
+    # → exit). See `wiki/tooling/Native-Apps.md`.
+    '[hello-native] portable native ELF spawned'
+    '[nat-calc] all eval cases passed'
+    '[nat-sysinfo] report complete'
 )
 
 # Forbidden signatures — anything indicating an unhandled

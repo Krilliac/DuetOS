@@ -4,7 +4,8 @@
 >
 > **Execution context:** Userland — DLLs run in the target process's user-mode context
 >
-> **Maturity:** 29 DLLs preloaded into every Win32 PE process
+> **Maturity:** 44 production DLLs in tree (38 preloaded into every
+> Win32 PE process; remainder load on demand)
 
 ## Overview
 
@@ -14,27 +15,23 @@ They are *not* parallel subsystems — there is one TCP stack in the
 kernel, one VFS, one registry, one window manager. The DLLs marshal
 Win32 calls into syscalls and trust the kernel's return.
 
-## DLL Inventory (canonical 29)
+## DLL Inventory (44 production DLLs)
 
-| DLL | Notes |
-|-----|-------|
-| `kernel32` | 155 exports — base API |
-| `ntdll`    | 114 exports — NT API |
-| `user32`   | windowing + messages + modal-dialog STUB facades |
-| `gdi32`    | 44 exports — drawing |
-| `kernelbase` | 44 forwarders to kernel32 |
-| `ucrtbase` | 72 exports — modern UCRT (`fopen`, `printf`, …) |
-| `msvcrt`, `msvcp140`, `vcruntime140` | Legacy CRT + C++ runtime |
-| `dbghelp`, `psapi`, `advapi32` | Debug helpers, registry, security |
-| `shell32`, `shlwapi` | Shell helpers, path utilities |
-| `ole32`, `oleaut32` | Lightweight COM runtime + BSTR / VARIANT helpers |
-| `winmm`, `bcrypt`, `crypt32` | Multimedia, crypto |
-| `comctl32`, `comdlg32`, `version`, `setupapi` | Common controls, dialogs, version, setup |
-| `iphlpapi`, `userenv`, `wtsapi32`, `dwmapi`, `uxtheme`, `secur32` | Net helpers, env, WTS, DWM/UX/secur32 |
-| `ws2_32`, `wininet`, `winhttp` | Network sockets, HTTP |
-| `d3d9`, `d3d11`, `d3d12`, `dxgi` | DirectX v0 (Clear + Present) |
+| Group | DLLs |
+|-------|------|
+| Foundation | `ntdll`, `kernel32`, `kernelbase`, `advapi32`, `msvcrt`, `vcruntime140`, `msvcp140`, `ucrtbase`, `dbghelp` |
+| Windowing / GDI / theming | `user32`, `gdi32`, `comctl32`, `comdlg32`, `dwmapi`, `uxtheme` |
+| Path / shell / version | `shlwapi`, `shell32`, `ole32`, `oleaut32`, `version`, `setupapi`, `userenv`, `wtsapi32`, `psapi` |
+| Networking | `ws2_32`, `iphlpapi`, `wininet`, `winhttp`, `crypt32`, `secur32` |
+| Crypto / RNG | `bcrypt` |
+| Multimedia | `winmm`, `dsound`, `xaudio2_8`, `xinput1_4` |
+| DirectX surface | `d3d9`, `d3d11`, `d3d12`, `dxgi`, `d2d1`, `dwrite`, `dinput8`, `ddraw`, `d3dcompiler` |
 
-Total: ~760 exports across 29 DLLs.
+Total: ~1100 exports across the 44 production DLLs (plus 2
+`customdll*` test fixtures used by the dev-time export-resolver
+smoke). For per-DLL drilldown, LOC, and per-method REAL / GAP /
+STUB / MISSING status, see
+[`Win32-Surface-Status`](../reference/Win32-Surface-Status.md).
 
 ## Load Time
 

@@ -20,8 +20,8 @@ surface, the full set of user-mode DLLs (`kernel32`, `ntdll`, `user32`,
 `gdi32`, `ucrtbase`, `msvcp140`, …) all live in this repo, co-equal with
 the native ABI.
 
-Currently runs x86_64. UEFI boot on commodity hardware. 33 slices of
-development and one live-verified fact:
+Currently runs x86_64. UEFI boot on commodity hardware. The
+project's live-verified fact:
 
 ```
 Windows Kill 1.1.4 | Windows Kill Library 3.1.3
@@ -29,8 +29,9 @@ Not enough argument. Use -h for help.
 ```
 
 That's a real MSVC-built third-party Windows PE printing to our serial
-console after going through our PE loader, our 29 userland DLLs, our
-scheduler, and our syscalls. Bits as shipped, running on DuetOS.
+console after going through our PE loader, our 44 production userland
+DLLs (38 preloaded into every Win32 PE process), our scheduler, and
+our syscalls. Bits as shipped, running on DuetOS.
 
 ---
 
@@ -57,7 +58,7 @@ navigation with `tools/check-wiki-nav.sh`.
 - **Kernel** (`kernel/`) — Multiboot2 boot, 4-level paging, per-process
   address spaces, SMP-aware round-robin scheduler, W^X + SMEP/SMAP +
   ASLR + stack canaries + retpoline, capability-based IPC,
-  `int 0x80` native syscall ABI (~57 numbered calls). PCIe, NVMe,
+  `int 0x80` native syscall ABI (~190 numbered calls). PCIe, NVMe,
   AHCI, xHCI/USB, PS/2, HDA, e1000. HPET-calibrated LAPIC timer.
   Kernel-mode breakpoint subsystem with hardware DR gates. Live crash
   dump with inline symbol resolution.
@@ -67,14 +68,18 @@ navigation with `tools/check-wiki-nav.sh`.
   relocations, walks the Export Address Table, resolves imports
   against preloaded DLLs with forwarder chasing, falls through to a
   legacy stubs path for anything not yet ported.
-- **Win32 translator DLLs** (`userland/libs/`) — 29 userland DLLs
-  totalling ~760 exports. `kernel32` (155), `ntdll` (114), `ucrtbase`
-  (72), `user32` (73), `gdi32` (44), `kernelbase` (44 forwarders),
-  plus `msvcrt`, `msvcp140`, `vcruntime140`, `dbghelp`, `advapi32`,
-  `shell32`, `shlwapi`, `ole32`, `oleaut32`, `winmm`, `bcrypt`,
-  `psapi`, `crypt32`, `comctl32`, `comdlg32`, `version`, `setupapi`,
-  `iphlpapi`, `userenv`, `wtsapi32`, `dwmapi`, `uxtheme`, `secur32`,
-  `ws2_32`, `wininet`, `winhttp`, `d3d9`/`11`/`12`, `dxgi`.
+- **Win32 translator DLLs** (`userland/libs/`) — 44 production userland
+  DLLs totalling ~1100 exports (38 preloaded into every Win32 PE
+  process; remainder load on demand). `kernel32`, `ntdll`, `ucrtbase`,
+  `user32`, `gdi32`, `kernelbase`, plus `msvcrt`, `msvcp140`,
+  `vcruntime140`, `dbghelp`, `advapi32`, `shell32`, `shlwapi`, `ole32`,
+  `oleaut32`, `winmm`, `bcrypt`, `psapi`, `crypt32`, `comctl32`,
+  `comdlg32`, `version`, `setupapi`, `iphlpapi`, `userenv`, `wtsapi32`,
+  `dwmapi`, `uxtheme`, `secur32`, `ws2_32`, `wininet`, `winhttp`,
+  `d3d9`/`11`/`12`, `dxgi`, `d2d1`, `dwrite`, `dinput8`, `xinput1_4`,
+  `xaudio2_8`, `dsound`, `ddraw`, `d3dcompiler`. Per-DLL implementation
+  status drilldown lives in
+  [`Win32-Surface-Status`](wiki/reference/Win32-Surface-Status.md).
 - **Real implementations** — registry, `fopen`/`fread`/`fseek`/`fgets`,
   `printf` formatting, `getenv`, heap (`malloc`/`HeapAlloc`), atomics,
   critical sections, SRW locks, InitOnce, time, threads, mutexes,
@@ -91,7 +96,7 @@ navigation with `tools/check-wiki-nav.sh`.
 ```
 Windows PE applications
         ↓ imports
-Win32 translator DLLs  (userland/libs/, 29 DLLs)
+Win32 translator DLLs  (userland/libs/, 44 production DLLs)
         ↓ int 0x80
 Native DuetOS kernel
         ↓
@@ -401,7 +406,8 @@ userland/
   apps/        test fixtures (hello_pe, hello_winapi, windows-kill,
                thread_stress, syscall_stress, customdll_test,
                reg_fopen_test, …)
-  libs/        29 userland DLLs shipped into every Win32-imports PE
+  libs/        44 production userland DLLs (38 preloaded into every
+               Win32-imports PE; remainder load on demand)
 tools/         build helpers, QEMU launcher, embed-blob, gen-symbols,
                wiki check scripts
 docs/          screenshots, theme prototypes, ABI data files (csv/json),

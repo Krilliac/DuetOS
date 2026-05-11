@@ -185,10 +185,18 @@ In rough priority:
   a real panic. The `lastdump` shell command surfaces the
   on-disk LBA + byte count alongside the in-RAM minidump
   status.
-- **Deferred:** real partition-table reservation so the disk
-  installer can allocate the dump region explicitly instead
-  of trusting the last 4 MiB to be unused. Waits for the
-  installer slice (Disk installer → orchestration layer).
+- **Installer integration shipped.** `install <handle> INSTALL`
+  reserves a 4 MiB tail partition typed `kDuetCrashDumpTypeGuid`.
+  Both `NvmePanicWriteDump` and `AhciPanicWriteDump` now consult
+  `fs::gpt::GptFindCrashDumpRegion` first — if the disk was
+  laid down by the installer, the dump lands on the reserved
+  partition; otherwise the tail-of-drive fallback runs.
+  Verified end-to-end at every boot via `DiskPersistSelfTest`.
+- **Real-hardware verification:** outstanding. The QEMU debugcon
+  + the in-RAM minidump buffer prove the encode + transport
+  layers; an unforced panic on an installed laptop is the last
+  step to graduate this row from "shipped" to "lived through
+  it once."
 
 ---
 
@@ -397,13 +405,20 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
 
 ### ACPI S5 / soft-off shutdown
 
-- **Today:** Start menu's SHUT DOWN action calls `KernelHalt`
-  in `kernel/power/reboot.cpp` — logs a sentinel, masks
-  interrupts, and parks the boot CPU in `arch::Halt()`. Chipset
-  stays powered; the operator (or a VM `quit`) cuts power.
-- **Blocks on:** AML interpreter to evaluate `_PTS` / `_GTS` /
-  `\_S5_`. Without that we can't drive the chipset's soft-off
-  state. Same blocker the per-CPU sleep state work has.
+- **Today:** Start menu's SHUT DOWN action calls `KernelHalt`,
+  which now tries `acpi::AcpiShutdown()` first. `AcpiShutdown`
+  reads SLP_TYPa / SLP_TYPb via `AmlReadS5`, which decodes both
+  the classic `Name(_S5_, Package(...))` form (UEFI / QEMU) AND
+  the `Method(_S5_) { Return(Package(...)) }` form (some
+  consumer firmware). On match it writes the SLP_TYP value into
+  PM1A_CNT + PM1B_CNT, transitioning the chipset to soft-off.
+  Falls through to QEMU's debug ports (0x604 / 0xB004 / 0x4004)
+  on miss, then masks IRQs and parks the boot CPU as the
+  documented last resort.
+- **Blocks on:** real AML method evaluation for `_PTS` / `_GTS`
+  on chipsets that need them executed at runtime (rather than
+  pre-evaluated at firmware time). Same blocker the per-CPU
+  sleep state work has — wider AML interpreter slice.
 
 ### Device Manager — virtio + eject + hot-unplug
 
@@ -464,18 +479,60 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
 
 ### Disk installer
 
-- **Today:** boots from ISO only. Live system; no install. The
-  building blocks exist — `fs::gpt::GptInitDisk` writes a fresh
-  GPT (PMBR + primary header + entries + backup header),
-  `fs::fat32::Fat32Format` lays down a FAT32 BPB on a partition,
-  and `fs::gpt::FormatGuid` renders 16-byte GUIDs for diagnostics
-  / installer-step UI.
-- **Blocks on:** the orchestration layer (a userland or shell
-  installer that walks "pick disk → confirm erase → GPT-init →
-  FAT32-format → copy kernel + initrd → install bootloader") and
-  bootloader copy (a writer that puts a UEFI-loadable image into
-  the ESP). The DESTRUCTIVE primitives intentionally don't ship
-  user-facing surfaces yet — that's the shell-command slice.
+- **Today:** orchestration layer shipped as the kernel-shell
+  `install <handle> INSTALL [--duetfs]` command, backed by
+  `kernel/fs/installer.{h,cpp}::Install`. Lays down a fresh GPT
+  with three partitions (ESP, 64 MiB; system, remainder; crash-
+  dump, 4 MiB tail with `kDuetCrashDumpTypeGuid`). ESP is always
+  FAT32 (UEFI-spec-mandated). The system partition is FAT32 by
+  default (interoperable with Windows / Linux fdisk) or DuetFS
+  with `--duetfs` (journalled, CRC-checked blocks, encryption /
+  compression / snapshots available; partition type
+  `kDuetFsTypeGuid`). Seeds `/esp/boot/grub/grub.cfg` with a
+  chainload stub pointing at `/system/boot/duetos-kernel.elf`,
+  stamps a real `BOOTX64.EFI` into `/esp/EFI/BOOT/`, mounts ESP
+  at `/esp` and system at `/system`. Admin-gated + literal
+  `INSTALL` confirmation token + 100 MiB minimum disk size.
+  UUID-v4-stamped GUIDs for the disk + each partition;
+  RFC-4122-canonical name strings.
+- **UEFI loader bytes shipped:** the installer now stamps a real
+  `BOOTX64.EFI` (the PE32+ image built by `boot/uefi/`) into
+  `/esp/EFI/BOOT/BOOTX64.EFI` — the canonical UEFI fall-back
+  removable-media path. Bytes come from an in-kernel ramfs blob
+  populated at build time by `kernel/CMakeLists.txt`'s embed
+  step (depends on the `duetos-uefi` CMake target produced by
+  `boot/uefi/`). Real-hardware UEFI firmware that boots a
+  removable disk without an explicit boot variable now finds the
+  loader by the spec-mandated path.
+- **Kernel-ELF embed shipped as opt-in:** new CMake option
+  `DUETOS_INSTALLER_KERNEL_EMBED` (default OFF) drives a
+  `.incbin` directive in a generated
+  `kernel_elf_blob.S` that pulls the stage-1 `duetos-kernel.elf`
+  bytes into stage 2's `.rodata`. New ramfs accessors
+  `RamfsKernelElfBytes()` / `RamfsKernelElfSize()` expose the
+  blob; the installer's `WriteSystemSentinel` writes
+  `/system/boot/duetos-kernel.elf` whenever the size is non-zero.
+  When the option is OFF (default — keeps build cost off the
+  iteration loop) the blob is a 0-byte stub and the installer
+  prints a one-line note pointing at out-of-band staging.
+  `.incbin` keeps compile time constant regardless of file size;
+  the cost is binary-size only (~10 MiB → ~21 MiB on debug; ISO
+  ~18 MiB → ~28 MiB).
+- **Remaining residual — DMA-zone fix on the embed path:** with
+  the embed ON, the larger kernel image consumes the entire
+  0..16 MiB DMA zone and trips the `mm/zone` boot self-test.
+  Linker-script change to place the blob at a higher physical
+  region (32 MiB+) is the closing slice. Until then the option
+  produces a kernel that lays down a correct image but won't
+  self-boot — useful for "build the installer once, install onto
+  a different machine" workflows but not for live-iterating on
+  the embed path.
+- **Layout-math self-test runs every boot.** `PlanLayout` is
+  exercised against canonical sizes (just-too-small,
+  100 MiB / 1 GiB / 1 TiB) at `[fs/installer] self-test OK`;
+  a regression in the partition planner surfaces immediately
+  rather than waiting for an operator to run `install` on a
+  real disk.
 
 ### System updater
 

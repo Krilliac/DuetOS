@@ -150,6 +150,10 @@ All write-side FAT operations are admin-gated.
 | `fatmkdir <path>` | Create a directory (admin) |
 | `fatrmdir <path>` | Remove an empty directory (admin) |
 | `read <handle> <lba> [count]` | Hexdump sectors from a block device (admin) |
+| `mkfs <handle> ERASE` | Lay down a fresh FAT32 BPB on the named handle (DESTRUCTIVE, admin) |
+| `mkfs.duetfs <handle> ERASE` | Lay down a fresh DuetFS image on the named handle (DESTRUCTIVE, admin) |
+| `install <handle> INSTALL [--duetfs]` | Run the disk-installer pipeline: GPT (ESP / system / crash-dump) + FAT32 ESP format + system format (FAT32 default, DuetFS with `--duetfs`) + ESP grub.cfg stub + BOOTX64.EFI copy + auto-mount /esp + /system (DESTRUCTIVE, admin, ≥100 MiB minimum disk) |
+| `lastdump` | Last in-RAM minidump readout (signature + size) |
 
 ## Environment & shell state
 

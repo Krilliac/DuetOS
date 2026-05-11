@@ -178,6 +178,48 @@ duetos_embed_blob(generated_usershell_elf.h
         "${CMAKE_SOURCE_DIR}/userland/libc/usershell.lds"
     COMMENT     "Compiling + embedding /bin/usershell.elf (real userland shell)")
 
+# Helper: register a portable native ELF app from
+# `userland/native-apps/<name>/<name>.c`. Compiles via
+# tools/build/build-native-app.sh, links against the userland
+# libc, embeds the bytes via embed-blob.py. Output header lives
+# at ${CMAKE_CURRENT_BINARY_DIR}/generated_<name>_native.h and
+# exposes `kBin<Name>NativeBytes` in `duetos::fs::generated`.
+#
+# Used for every new portable native app — see
+# `wiki/tooling/Native-Apps.md` for the migration plan that
+# moves the in-kernel apps under `kernel/apps/` out via the
+# same helper.
+function(duetos_native_app app_name)
+    set(_header "${CMAKE_CURRENT_BINARY_DIR}/generated_${app_name}_native.h")
+    set(_script "${CMAKE_SOURCE_DIR}/tools/build/build-native-app.sh")
+    set(_app_src "${CMAKE_SOURCE_DIR}/userland/native-apps/${app_name}/${app_name}.c")
+    set(_libc_deps
+        "${CMAKE_SOURCE_DIR}/userland/libc/src/crt0.S"
+        "${CMAKE_SOURCE_DIR}/userland/libc/src/syscall.c"
+        "${CMAKE_SOURCE_DIR}/userland/libc/src/string.S"
+        "${CMAKE_SOURCE_DIR}/userland/libc/src/setjmp.S"
+        "${CMAKE_SOURCE_DIR}/userland/libc/src/stdio.c"
+        "${CMAKE_SOURCE_DIR}/userland/libc/include/duet/syscall.h"
+        "${CMAKE_SOURCE_DIR}/userland/libc/include/string.h"
+        "${CMAKE_SOURCE_DIR}/userland/libc/include/setjmp.h"
+        "${CMAKE_SOURCE_DIR}/userland/libc/include/stdio.h"
+        "${CMAKE_SOURCE_DIR}/userland/libc/include/unistd.h"
+        "${CMAKE_SOURCE_DIR}/userland/libc/usershell.lds")
+    add_custom_command(
+        OUTPUT  "${_header}"
+        COMMAND "${_script}" "${CMAKE_SOURCE_DIR}" "${_header}" "${app_name}"
+        DEPENDS "${_app_src}" "${_script}" "${DUETOS_EMBED_BLOB_SCRIPT}" ${_libc_deps}
+        COMMENT "Building + embedding portable native app /bin/${app_name}"
+        VERBATIM)
+    set(DUETOS_KERNEL_SHARED_SOURCES
+        ${DUETOS_KERNEL_SHARED_SOURCES} "${_header}"
+        PARENT_SCOPE)
+endfunction()
+
+duetos_native_app(hello_native)
+duetos_native_app(nat_calc)
+duetos_native_app(nat_sysinfo)
+
 duetos_embed_blob(generated_hello_winapi.h
     SCRIPT   "${CMAKE_SOURCE_DIR}/tools/build/build-hello-winapi.sh"
     SRC      "${CMAKE_SOURCE_DIR}/userland/apps/hello_winapi/hello.c"
@@ -267,6 +309,25 @@ add_custom_command(
     COMMENT "Embedding real Windows PE /bin/windows-kill.exe"
     VERBATIM)
 list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_WINKILL_HEADER}")
+
+# ----------------------------------------------------------------------------
+# UEFI loader bytes — embed BOOTX64.EFI into the kernel image so the
+# disk installer can copy it onto the freshly-formatted ESP. Same
+# embed pattern as windows-kill above; depends on the duetos-uefi
+# target output set by add_subdirectory(boot/uefi). DUETOS_UEFI_EFI
+# is cached by boot/uefi/CMakeLists.txt; that subdirectory is
+# processed before this one (see CMakeLists.txt at the repo root).
+# ----------------------------------------------------------------------------
+set(DUETOS_BOOTX64_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_bootx64_efi.h")
+add_custom_command(
+    OUTPUT "${DUETOS_BOOTX64_HEADER}"
+    COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
+            "${DUETOS_UEFI_EFI}" "${DUETOS_BOOTX64_HEADER}"
+            kBinBootX64EfiBytes --namespace "duetos::fs::generated"
+    DEPENDS "${DUETOS_UEFI_EFI}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Embedding UEFI loader BOOTX64.EFI for the disk installer"
+    VERBATIM)
+list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_BOOTX64_HEADER}")
 
 # Source-built Win32 smoke PE fixtures. These used to be checked-in
 # .exe files; keep them generated in the build tree so PRs do not carry
@@ -678,9 +739,26 @@ set(USBCLASS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/drivers/usb/class_rust/inc
 set(USBHID_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/drivers/usb/hid_rust/include")
 set(DUETFS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/fs/duetfs/include")
 
+# Stage 1 needs a stub `kernel_elf_blob` so ramfs.cpp's references
+# to kBinKernelElfBytes / kBinKernelElfBytes_len link cleanly.
+# Stage 2 swaps in the real (or zero-len) blob populated by
+# DUETOS_INSTALLER_KERNEL_EMBED. (DUETOS_KERNEL_BLOB_GEN is also
+# referenced below for the stage-2 emit; set both here.)
+set(DUETOS_KERNEL_BLOB_GEN "${CMAKE_SOURCE_DIR}/tools/build/gen-kernel-blob.sh")
+set(DUETOS_KERNEL_BLOB_STAGE1_S "${CMAKE_CURRENT_BINARY_DIR}/kernel_elf_blob_stage1_stub.S")
+add_custom_command(
+    OUTPUT "${DUETOS_KERNEL_BLOB_STAGE1_S}"
+    COMMAND "${DUETOS_KERNEL_BLOB_GEN}"
+            "${DUETOS_KERNEL_BLOB_STAGE1_S}"
+            "--empty"
+    DEPENDS "${DUETOS_KERNEL_BLOB_GEN}"
+    COMMENT "Generating stage-1 kernel-blob stub (always empty — stage 2 swaps in the real one)"
+    VERBATIM)
+
 add_executable(duetos-kernel-stage1
     ${DUETOS_KERNEL_SHARED_SOURCES}
     util/symbols_stub.cpp
+    "${DUETOS_KERNEL_BLOB_STAGE1_S}"
 )
 target_link_libraries(duetos-kernel-stage1 PRIVATE "${DUETOS_KERNEL_RUST_STATIC_LIB}")
 target_include_directories(duetos-kernel-stage1 PRIVATE
@@ -726,6 +804,45 @@ add_custom_command(
 )
 
 # ----------------------------------------------------------------------------
+# Optional: embed the stage-1 kernel ELF bytes into stage 2 so the disk
+# installer can write a real /system/boot/duetos-kernel.elf onto the
+# freshly-formatted system partition. Off by default — embedding ~10 MiB
+# roughly doubles the kernel image size (and therefore the ISO + the
+# memory GRUB loads at boot time). Operators who want a fully self-
+# installable image enable this; iteration loops keep the cost off.
+#
+# Implementation note: `.incbin` is processed by the assembler in
+# constant time, no matter how big the file. A constexpr u8 array
+# literal would balloon compile time linearly with file size.
+# ----------------------------------------------------------------------------
+option(DUETOS_INSTALLER_KERNEL_EMBED
+    "Embed stage-1 kernel.elf bytes for the disk installer (doubles kernel size)" OFF)
+
+set(DUETOS_KERNEL_BLOB_S "${CMAKE_CURRENT_BINARY_DIR}/kernel_elf_blob.S")
+if(DUETOS_INSTALLER_KERNEL_EMBED)
+    add_custom_command(
+        OUTPUT "${DUETOS_KERNEL_BLOB_S}"
+        COMMAND "${DUETOS_KERNEL_BLOB_GEN}"
+                "${DUETOS_KERNEL_BLOB_S}"
+                "$<TARGET_FILE:duetos-kernel-stage1>"
+        DEPENDS duetos-kernel-stage1 "${DUETOS_KERNEL_BLOB_GEN}"
+        COMMENT "Generating .incbin blob for stage-1 kernel ELF (installer kernel-embed enabled)"
+        VERBATIM)
+else()
+    # Off path: emit a trivial blob with len = 0 so the symbols
+    # exist for the linker but the installer detects "no embedded
+    # kernel.elf" and prints the staging-required note.
+    add_custom_command(
+        OUTPUT "${DUETOS_KERNEL_BLOB_S}"
+        COMMAND "${DUETOS_KERNEL_BLOB_GEN}"
+                "${DUETOS_KERNEL_BLOB_S}"
+                "--empty"
+        DEPENDS "${DUETOS_KERNEL_BLOB_GEN}"
+        COMMENT "Generating empty installer kernel-embed stub (DUETOS_INSTALLER_KERNEL_EMBED=OFF)"
+        VERBATIM)
+endif()
+
+# ----------------------------------------------------------------------------
 # Stage 2: final kernel. Same source set as stage 1, but the stub is
 # replaced by the generated TU. The generated TU defines the same
 # three extern "C" symbols the resolver looks up, now populated with
@@ -734,6 +851,7 @@ add_custom_command(
 add_executable(duetos-kernel
     ${DUETOS_KERNEL_SHARED_SOURCES}
     "${DUETOS_SYMBOLS_GENERATED}"
+    "${DUETOS_KERNEL_BLOB_S}"
 )
 target_link_libraries(duetos-kernel PRIVATE "${DUETOS_KERNEL_RUST_STATIC_LIB}")
 target_include_directories(duetos-kernel PRIVATE
