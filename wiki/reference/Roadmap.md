@@ -17,6 +17,34 @@ the same commit** that delivers the code.
 
 ## Kernel / runtime
 
+### Ring3 ELF smoke #DF (regression, observed 2026-05-11)
+
+- **Status:** **Live boot reproducer.** `tools/qemu/run.sh
+  build/x86_64-debug/duetos.iso` (or any flavour) reliably
+  double-faults in the first ELF smoke spawn. Crash chain:
+  `SpawnElfFile` → `ElfLoad` → `LoadSegment` →
+  `AddressSpaceMapUserPage+0x14c` → inlined → `RwLockAcquireExclusive+0x25`
+  → #DF, then recursive #GP in the panic-dump path.
+- **Pre-existing on origin/main** (verified by rebuilding the
+  clean merge point `96e9026` and booting). Not caused by the
+  CVE-audit fixes (M/E/N/O/CC/FF/GG/II) — those compiled cleanly
+  and the KASLR / TLB-shootdown / lock-hierarchy paths self-test
+  fine.
+- **Where to look:** the trap frame in the dump has wild values
+  (cs=0x200202, ss=non-canonical, rsp=0x10), suggesting the
+  `#DF` frame itself was corrupted — i.e. the original fault was
+  something else and the IST-stack handoff scribbled the saved
+  state. Worth investigating whether the IST stack is sized
+  correctly for `-fstack-protector-strong` prologues that now
+  fire on every kernel function, OR whether the `sched::Mutex`
+  inside `RwLock.inner` is missing an init step that the
+  zero-init relies on.
+- **Action:** the next slice in this area should either
+  (a) reproduce under GDB stub (`tools/debug/duetos-gdb-attach.sh`)
+  and walk back to the original fault before recursion, OR
+  (b) bisect commits between the last known-good ring3 boot and
+  `96e9026` to find the regressing change.
+
 ### B2-followup — split `g_sched_lock` per-CPU
 
 - **Status:** SMP per-CPU runqueues + work-stealing + reschedule-IPI

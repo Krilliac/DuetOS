@@ -113,8 +113,16 @@ stack_bottom:
      * emulator gate hid the symptom by skipping the FAT32 sink
      * (= no klog flush during PE-resolve = no Fat32 call depth = no
      * overflow); this fix removes the underlying cause so the gate
-     * can come out. */
-    .skip 65536                 /* 64 KiB boot stack */
+     * can come out.
+     *
+     * 2026-05-11: bumped from 64 KiB → 128 KiB to recover the headroom
+     * eaten by `-fstack-protector-strong` (now explicit per the CVE
+     * audit class CC fix). The canary prologue/epilogue adds 16-24
+     * bytes per stack frame; deep call chains (ring3 ELF spawn →
+     * ElfLoad → LoadSegment → AddressSpaceMapUserPage →
+     * RwLockExclusiveGuard → MutexLock → Sti) overflowed the prior
+     * 64 KiB and produced a #DF with a scrambled trap frame. */
+    .skip 131072                /* 128 KiB boot stack */
 stack_top:
 
 

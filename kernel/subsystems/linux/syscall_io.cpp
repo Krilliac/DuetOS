@@ -34,6 +34,7 @@
 #include "mm/address_space.h"
 #include "proc/process.h"
 #include "security/canary.h"
+#include "util/nospec.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -80,6 +81,12 @@ i64 DoWrite(u64 fd, u64 user_buf, u64 len)
         return kEBADF;
     }
     core::Process* p = core::CurrentProcess();
+    // Spectre v1 nospec: even though the runtime check above proves
+    // fd < 16, the speculator could redirect through the branch and
+    // dereference linux_fds[fd] for an OOB fd. Mask the index so the
+    // speculative load is bounded to [0, 16). wiki/security/Linux-CVE-Audit.md
+    // class N.
+    fd = util::MaskedIndex(fd, 16);
     if (p == nullptr || p->linux_fds[fd].state == 0)
     {
         KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/io", "write: fd not open (state=0) -> EBADF; fd", fd);
@@ -241,6 +248,8 @@ i64 DoRead(u64 fd, u64 user_buf, u64 len)
         KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/io", "read: fd out of range -> EBADF; fd", fd);
         return kEBADF;
     }
+    // Spectre v1 nospec — see DoWrite for the rationale.
+    fd = util::MaskedIndex(fd, 16);
     // Pipe-read end → dispatch to pipe pool.
     if (p->linux_fds[fd].state == 3)
         return PipeRead(p->linux_fds[fd].first_cluster, user_buf, len);
