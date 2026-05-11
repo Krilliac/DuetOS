@@ -976,6 +976,17 @@ endif()
 target_compile_options(duetos-kernel        PRIVATE -fconstexpr-steps=20000000)
 target_compile_options(duetos-kernel-stage1 PRIVATE -fconstexpr-steps=20000000)
 
+# Stack-protector — wiki/security/Linux-CVE-Audit.md class CC.
+# `-fstack-protector-strong` emits the canary prologue/epilogue on
+# any function with a local array, an `alloca`, or an address-taken
+# local. The TU-level `-fno-stack-protector` override on
+# security/stack_canary.cpp (above) keeps the canary updater itself
+# from sampling __stack_chk_guard mid-write. Setting this flag here
+# means the compiler default doesn't matter — what the kernel gets
+# is explicit.
+target_compile_options(duetos-kernel        PRIVATE -fstack-protector-strong)
+target_compile_options(duetos-kernel-stage1 PRIVATE -fstack-protector-strong)
+
 if(DUETOS_LTO)
     set(DUETOS_LTO_FLAGS -flto=thin)
     target_compile_options(duetos-kernel        PRIVATE ${DUETOS_LTO_FLAGS})

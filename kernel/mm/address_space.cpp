@@ -29,6 +29,7 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/smp.h"
 #include "log/klog.h"
 #include "core/panic.h"
 #include "cpu/percpu.h"
@@ -425,13 +426,14 @@ bool AddressSpaceUnmapUserPage(AddressSpace* as, u64 virt)
     }
     *pte = 0;
 
-    // TLB flush only when the touched AS is the one live on this
-    // CPU; other CPUs pick up the change at their next CR3 load
-    // (no cross-CPU shootdown in v0 — SMP activation is pending).
-    if (AddressSpaceCurrent() == as)
-    {
-        Invlpg(virt);
-    }
+    // Flush both the local TLB (if this CPU is in `as`) AND every
+    // peer CPU whose CR3 also maps `as`. On uniprocessor the helper
+    // collapses to the local invlpg; on SMP it sends a TLB-shootdown
+    // IPI and waits for ack. See wiki/security/Linux-CVE-Audit.md
+    // class FF for the threat model — without the broadcast, a peer
+    // CPU keeps writing through a stale RW TLB entry to a frame
+    // that's been recycled into a different process.
+    TlbShootdownAddr(as, virt);
 
     // Compact the region table — swap the dying slot with the last
     // in-use slot. Order doesn't matter; destroy walks `region_count`
@@ -596,8 +598,10 @@ bool AddressSpaceProtectUserPage(AddressSpace* as, u64 virt, u64 new_flags)
         return false;
     const u64 frame = *pte & kAddrMask;
     *pte = frame | (new_flags | kPagePresent);
-    if (AddressSpaceCurrent() == as)
-        Invlpg(virt);
+    // Protect downgrades (e.g. RW→RO) leave stale RW entries in
+    // peer-CPU TLBs that allow writes through after the PTE was
+    // already narrowed. Broadcast the shootdown. See class FF.
+    TlbShootdownAddr(as, virt);
     return true;
 }
 
@@ -617,10 +621,7 @@ bool AddressSpaceUnmapBorrowedPage(AddressSpace* as, u64 virt)
         return false;
     }
     *pte = 0;
-    if (AddressSpaceCurrent() == as)
-    {
-        Invlpg(virt);
-    }
+    TlbShootdownAddr(as, virt);
     return true;
 }
 
@@ -806,6 +807,51 @@ void AddressSpaceSelfTest()
     AddressSpaceRelease(b);
 
     arch::SerialWrite("[mm/as] isolation self-test OK\n");
+}
+
+// ---------------------------------------------------------------------------
+// TLB shootdown. See address_space.h for the contract.
+//
+// Today (uniprocessor v0) the implementation is a local `invlpg` per page
+// when the caller's CPU is in the target AS, plus a defensive `invlpg` on
+// the same CPU when it's NOT — the latter is a no-op for the hardware
+// (the entry can't be cached) but documents the intent.
+//
+// When SMP comes online, the broadcast path lights up: every AP whose
+// current AS matches `as` is sent the TLB-shootdown IPI; the helper waits
+// for each target to ack via a generation counter before returning, so
+// the caller can rely on "shootdown done" semantics. The IPI vector and
+// handler are owned by arch/x86_64/smp.{h,cpp}.
+// ---------------------------------------------------------------------------
+
+void TlbShootdownAddr(AddressSpace* as, u64 virt)
+{
+    // Local flush — fast path. AddressSpaceCurrent() == as means
+    // the page we just unmapped is in this CPU's active CR3, so
+    // its TLB definitely has a stale entry; invlpg evicts it.
+    if (AddressSpaceCurrent() == as)
+    {
+        Invlpg(virt);
+    }
+
+    // Remote flush — broadcast to every AP whose CR3 matches `as`.
+    // No-op when only the BSP is online. The arch layer owns the
+    // per-CPU "current AS" lookup and the IPI vector encoding.
+    arch::SmpTlbShootdownAddr(as, virt);
+}
+
+void TlbShootdownRange(AddressSpace* as, u64 virt, u64 len)
+{
+    const u64 page = 0x1000;
+    const u64 end = virt + len;
+    for (u64 v = virt & ~(page - 1); v < end; v += page)
+    {
+        if (AddressSpaceCurrent() == as)
+        {
+            Invlpg(v);
+        }
+    }
+    arch::SmpTlbShootdownRange(as, virt, len);
 }
 
 } // namespace duetos::mm

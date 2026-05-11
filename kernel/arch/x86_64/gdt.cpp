@@ -72,7 +72,17 @@ alignas(16) constinit Tss g_bsp_tss = {};
 // runs to detect a blown IST (which would otherwise corrupt
 // neighbouring BSS silently). Matches the per-task stack canary
 // pattern in kernel/sched/sched.cpp.
-constexpr u64 kIstStackBytes = 4096;
+//
+// Sized at 16 KiB (was 4 KiB). With `-fstack-protector-strong`
+// enabled kernel-wide every function with a local array gets an
+// 8-byte canary slot in its prologue + a load+cmp in the epilogue,
+// inflating the per-call stack footprint enough that a deeply
+// nested trap (panic-dump → backtrace → symbolize) blew past the
+// 4 KiB IST limit, corrupted the saved trap frame, and produced
+// the recursive-fault observed on 2026-05-11. 16 KiB matches the
+// kernel-task stack size and leaves headroom for the symbolize
+// machinery that runs inside the dump path.
+constexpr u64 kIstStackBytes = 16384;
 constexpr u64 kIstStackCanary = 0xC0DEB0B0CAFED00DULL;
 alignas(16) constinit u8 g_ist_stack_df[kIstStackBytes] = {};
 alignas(16) constinit u8 g_ist_stack_mc[kIstStackBytes] = {};

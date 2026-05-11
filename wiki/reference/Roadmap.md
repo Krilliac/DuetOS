@@ -17,6 +17,54 @@ the same commit** that delivers the code.
 
 ## Kernel / runtime
 
+### Ring3 ELF smoke #DF (regression, observed 2026-05-11)
+
+- **Status:** **Live boot reproducer.** `tools/qemu/run.sh
+  build/x86_64-debug/duetos.iso` (or any flavour) reliably
+  double-faults in the first ELF smoke spawn. Crash chain:
+  `SpawnElfFile` → `ElfLoad` → `LoadSegment` →
+  `AddressSpaceMapUserPage+0x14c` → inlined → `RwLockAcquireExclusive+0x25`
+  → #DF, then recursive #GP in the panic-dump path.
+- **Pre-existing on origin/main** (verified by rebuilding the
+  clean merge point `96e9026` and booting). Not caused by the
+  CVE-audit fixes (M/E/N/O/CC/FF/GG/II) — those compiled cleanly
+  and the KASLR / TLB-shootdown / lock-hierarchy paths self-test
+  fine.
+- **Where to look:** the trap frame in the dump has wild values
+  (cs=0x200202, ss=non-canonical, rsp=0x10), suggesting the
+  `#DF` frame itself was corrupted — i.e. the original fault was
+  something else and the IST-stack handoff scribbled the saved
+  state. Worth investigating whether the IST stack is sized
+  correctly for `-fstack-protector-strong` prologues that now
+  fire on every kernel function, OR whether the `sched::Mutex`
+  inside `RwLock.inner` is missing an init step that the
+  zero-init relies on.
+- **Action:** the next slice in this area should either
+  (a) reproduce under GDB stub (`tools/debug/duetos-gdb-attach.sh`)
+  and walk back to the original fault before recursion, OR
+  (b) bisect commits between the last known-good ring3 boot and
+  `96e9026` to find the regressing change.
+
+### Early-boot CurrentCpu() returns before BSP install (UBSAN finding)
+
+- **Status:** UBSAN-clean elsewhere; this site fires `type-mismatch`
+  warnings during early boot, then quiets once BSP per-CPU is up.
+- **Sites:** `kernel/sched/sched.cpp:390:31` and
+  `kernel/mm/address_space.cpp:644:31` — both do
+  `cpu::CurrentCpu()->current_task` / `current_as` from inline
+  accessors called by early-boot self-tests before
+  `PerCpuInitBsp` runs. `CurrentCpu()` reads GSBASE MSR; if GSBASE
+  isn't set, it returns null and `->current_task` is a null deref.
+  The reads happen to be benign (we read a field whose offset
+  lands on a mapped page elsewhere) but it's UB by the standard.
+- **Fix:** either
+  (a) initialise BSP per-CPU strictly before any code that can
+      call `Current()` / `AddressSpaceCurrent()`, OR
+  (b) make `Current()` and `AddressSpaceCurrent()` null-safe with
+      an explicit `g_bsp_installed` check (the same flag
+      `CurrentCpuIdOrBsp` already consults).
+- Tracked: 2026-05-11.
+
 ### B2-followup — split `g_sched_lock` per-CPU
 
 - **Status:** SMP per-CPU runqueues + work-stealing + reschedule-IPI
@@ -92,6 +140,107 @@ the same commit** that delivers the code.
     sites are unchanged today; opt-in via direct `SlabAlloc`.
   - **Real KASAN** — shadow-memory mapping, compiler plugin
     integration, per-access shadow lookup. Big lift; defer.
+
+### Linux CVE audit — pre-landing invariants
+
+- **Status:** Audit log opened against the "Copy Fail" + "Dirty Frag"
+  disclosure wave (CVE-2026-31431, CVE-2026-43284, CVE-2026-43500).
+  See [`wiki/security/Linux-CVE-Audit.md`](../security/Linux-CVE-Audit.md)
+  for the eight-class verdict matrix.
+- **Landed items (2026-05-11):**
+  - **Class E — `SlabAllocZeroed()` helper** added in
+    `kernel/mm/slab.{h,cpp}`. New flag-bearing slab consumers
+    should prefer the zeroed variant; the raw `SlabAlloc` is left
+    in place because most existing callers do their own
+    field-by-field init.
+  - **Class M — AML `pkg_end` overflow** rewritten at all three
+    sites in `kernel/acpi/aml.cpp` to use `pkg_len > end - after_op`
+    (compare-the-difference). Structurally cannot wrap.
+  - **Class N — `MaskedIndex` Spectre-v1 helper** added in
+    `kernel/util/nospec.h` (32- and 64-bit forms). Apply at any
+    syscall dispatch site that uses a user-supplied integer as an
+    array index after a runtime bounds check.
+  - **Class O — saturating refcount.** `KObjectAcquire` now uses
+    `util::RefcountIncSaturating`; refuses the increment at
+    `UINT32_MAX` and logs a panic-or-warn rather than wrapping.
+  - **Class CC — `-fstack-protector-strong`** is now explicit on
+    both `duetos-kernel` and `duetos-kernel-stage1` in
+    `kernel/CMakeLists.txt` (TU-level `-fno-stack-protector`
+    override on `security/stack_canary.cpp` preserved).
+  - **Class FF — TLB shootdown infrastructure.** New
+    `mm::TlbShootdownAddr` / `TlbShootdownRange` (declared in
+    `mm/address_space.h`), backed by
+    `arch::SmpTlbShootdownAddr / Range` and a new IPI vector
+    (`kTlbShootdownIpiVector = 0xF9`) installed alongside the
+    reschedule IPI. The unmap / protect / unmap-borrowed paths
+    in `address_space.cpp` now broadcast instead of doing only a
+    local `invlpg`. Uniprocessor today => helper short-circuits
+    to local-only; the day APs run, the broadcast lights up.
+  - **Class GG — lock hierarchy.** Full canonical hierarchy and
+    the absolute rules (no-sleep-with-spinlock, no-lock-across-CR3,
+    no-lock-across-shootdown) are documented in
+    `kernel/sync/lockdep.h`. Per-CPU-runqueue rule pre-flagged.
+  - **Class II — KASLR scaffolding.** New `kernel/security/kaslr.{h,cpp}`
+    computes a 2-MiB-aligned candidate slide from `core::RandomU64`
+    at boot and exposes it via `KaslrGetCandidateSlide`. The
+    slide-application stub (PIE-build + relocation pass) is the
+    follow-on; until then `KaslrGetKernelSlide` returns 0, but
+    every consumer reads from this single source of truth so the
+    flip is a one-line change.
+- **Still open** (each must be honoured **before** the matching surface
+  lands, not retrofitted after):
+  - **Class D — COW / `fork()`.** When demand-paged COW lands, the
+    dirty-bit clear-and-fault sequence must be atomic with respect
+    to any region-shrink primitive (`madvise(DONTNEED)` and friends).
+    Linux's Dirty COW fix gated this on `FOLL_WRITE`; mirror the
+    invariant in the v0 design, do not patch it in later.
+  - **Class C — zero-copy sendmsg / IPsec.** When skb-equivalent
+    fragments or any `MSG_SPLICE_PAGES`-style send path lands, every
+    externally-backed fragment must carry an ownership marker, and
+    every in-place transform (decryption, decompression, checksum
+    rewrite) must refuse to operate on a marked fragment. Bake into
+    the network-stack ABI from day one.
+  - **Class B — user-facing crypto API.** If a socket-style crypto
+    surface is ever added (AF_ALG-equivalent), it must refuse src/dst
+    aliasing on user-supplied scatterlists for any operation that
+    doesn't byte-copy the full output. Auth-tag-skip + in-place was
+    the Copy Fail root cause.
+  - **Class N follow-up (apply the helper).** The
+    `util::MaskedIndex` helper is now in the tree; the
+    follow-on slice walks every syscall-dispatch table where a
+    user-supplied integer indexes an array (Linux syscall table,
+    Win32 syscall thunk table, NT object-type table) and
+    inserts `MaskedIndex` at the dispatch site. KPTI remains
+    separately deferred.
+  - **Class I — Bluetooth upper stack.** When L2CAP / RFCOMM / SDP
+    land, the protocol-parser invariants from class C apply.
+  - **Class L — IPv6 reassembly.** When IPv6 lands, every fragment
+    length/offset comparison uses `len > end - off`-style (never
+    `end - len` directly).
+  - **Class K — FS write paths.** When ext4 write, NTFS directory
+    parsing, or any filesystem write-remount path lands, re-audit
+    the class.
+  - **Class V — programmable kernel filters.** Do not adopt an
+    unprivileged-JIT BPF-equivalent. If a programmable filter
+    surface is needed (sockets, tracing), gate it behind a
+    capability or run it through a formally-verified interpreter.
+    The verifier-bypass CVE family (CVE-2020-8835 et al.) is
+    structural — patches do not retire the class.
+  - **Class W — GPU command submission.** Before any user-mode
+    surface submits a GPU command buffer, the design must
+    interpose a kernel translation step that produces a
+    verified-shape submission the user cannot edit after the
+    point of validation. Direct user→GPU IOCTL is the load-bearing
+    assumption behind NVIDIA / AMD / Intel GPU CVE families.
+  - **Class II follow-up (apply the slide).** The KASLR
+    candidate slide is computed at boot; the follow-on slice
+    builds the kernel as a PIE, emits a relocation table the
+    early-boot stub iterates, applies the slide, and flips
+    `KaslrGetKernelSlide` to return the candidate. Must land
+    before any multi-tenant deployment.
+- **When to revisit:** every time a high-impact public Linux/Windows
+  kernel CVE drops, walk the audit doc and update verdicts before
+  the next slice lands in the affected area.
 
 ### Intel CET enable
 

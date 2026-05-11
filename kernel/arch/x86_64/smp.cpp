@@ -13,6 +13,7 @@
 #include "core/panic.h"
 #include "cpu/percpu.h"
 #include "cpu/topology.h"
+#include "mm/address_space.h"
 #include "mm/kheap.h"
 #include "mm/page.h"
 #include "sched/sched.h"
@@ -267,11 +268,161 @@ void ReschedIpiHandler()
 {
     sched::SetNeedResched();
 }
+
+// TLB-shootdown IPI request. Filled by SmpTlbShootdown{Addr,Range} on
+// the requesting CPU, read by every target CPU's IPI handler. A simple
+// "current request" model is fine for v0: shootdown is rare, the
+// requesting CPU holds the page-table mutation atomic with a brief lock
+// in the caller, and overlapping shootdowns from different CPUs would
+// be serialised by that same lock. If contention shows up, swap to a
+// per-CPU mailbox.
+struct TlbShootdownRequest
+{
+    mm::AddressSpace* as;
+    u64 virt_start;
+    u64 virt_end;       // half-open; equal to virt_start + 0x1000 for single-page
+    volatile u64 acks;  // bumped by each target CPU when done
+};
+volatile TlbShootdownRequest* g_tlb_request = nullptr;
+
+// TLB-shootdown IPI handler. Runs with IF=0 on the target CPU. Flushes
+// the requested range if the target's current AS matches, then acks.
+void TlbShootdownIpiHandler()
+{
+    // Take a local snapshot so we can ack before re-checking; the
+    // request struct is owned by the requesting CPU's stack and is
+    // safe to read until the requestor sees ack count reach the
+    // target count.
+    volatile TlbShootdownRequest* req = g_tlb_request;
+    if (req == nullptr)
+    {
+        return;
+    }
+    // Only flush if our CR3 holds the target AS — peer CPUs in a
+    // different AS have no cached entry for these VAs.
+    mm::AddressSpace* current = mm::AddressSpaceCurrent();
+    if (current == req->as)
+    {
+        const u64 page = 0x1000;
+        for (u64 v = req->virt_start; v < req->virt_end; v += page)
+        {
+            asm volatile("invlpg (%0)" : : "r"(v) : "memory");
+        }
+    }
+    // Ack — atomic increment via x86 LOCK XADD; the requestor spins
+    // on this counter reaching the target count.
+    asm volatile("lock incq %0" : "+m"(req->acks) : : "memory");
+}
 } // namespace
 
 void SmpInstallReschedIpiHandler()
 {
     IrqInstall(kReschedIpiVector, ReschedIpiHandler);
+}
+
+void SmpInstallTlbShootdownIpiHandler()
+{
+    IrqInstall(kTlbShootdownIpiVector, TlbShootdownIpiHandler);
+}
+
+namespace
+{
+// Helper: broadcast a TLB-shootdown IPI to every online CPU other than
+// the requestor whose current AS matches `as`. Sets up the request
+// struct, sends the IPI, and busy-waits for every target to ack.
+// No-op when peer count is 0 (uniprocessor or all peers in other AS).
+void SmpTlbShootdownBroadcast(mm::AddressSpace* as, u64 virt_start, u64 virt_end)
+{
+    const u32 limit = SmpCpuIdLimit();
+    if (limit <= 1)
+    {
+        return; // single CPU: no peers
+    }
+
+    // Build the request struct on this stack. Targets read it via the
+    // global pointer; the requesting CPU owns the lifetime.
+    TlbShootdownRequest req{};
+    req.as = as;
+    req.virt_start = virt_start;
+    req.virt_end = virt_end;
+    req.acks = 0;
+
+    cpu::PerCpu* self = cpu::CurrentCpu();
+    const u32 self_id = (self != nullptr) ? self->cpu_id : 0u;
+
+    // Count targets first (peers in the matching AS), so we know when
+    // the ack counter is complete. A peer that's idle / in another AS
+    // is not a target — TlbShootdownIpiHandler exits without acking
+    // because the AS check fails... wait, that's wrong. Re-think:
+    //
+    // The handler always acks; the AS check only governs whether to
+    // invlpg. We must IPI EVERY peer so they all ack. The handler
+    // already does this. Peer count is therefore `online peers`.
+    u64 target_count = 0;
+    for (u32 id = 0; id < limit; ++id)
+    {
+        if (id == self_id)
+            continue;
+        cpu::PerCpu* peer = SmpGetPercpu(id);
+        if (peer == nullptr)
+            continue;
+        ++target_count;
+    }
+    if (target_count == 0)
+    {
+        return;
+    }
+
+    g_tlb_request = &req;
+
+    // Fire IPIs to each peer. Same fixed-delivery shape as the
+    // reschedule IPI — no destination shorthand, exact LAPIC IDs so
+    // we know which CPUs we asked.
+    constexpr u32 kIcrDeliveryFixed = 0U << 8;
+    constexpr u32 icr_low_base = kIcrDeliveryFixed | kIcrLevelAssert;
+    for (u32 id = 0; id < limit; ++id)
+    {
+        if (id == self_id)
+            continue;
+        cpu::PerCpu* peer = SmpGetPercpu(id);
+        if (peer == nullptr)
+            continue;
+        SmpSendIpi(static_cast<u8>(peer->lapic_id),
+                   icr_low_base | kTlbShootdownIpiVector);
+    }
+
+    // Spin until every target has acked. The handler runs with IF=0
+    // and just hits a `lock inc` + iretq, so the worst-case wait is
+    // the round-trip IPI latency — microseconds on healthy hardware.
+    // A bounded spin keeps us from hanging forever if a peer's LAPIC
+    // mis-fires; on timeout we log + proceed (better to risk a
+    // stale TLB on one CPU than to hang the requesting CPU).
+    constexpr u64 kSpinLimit = 1'000'000;
+    u64 spins = 0;
+    while (req.acks < target_count && spins < kSpinLimit)
+    {
+        asm volatile("pause" ::: "memory");
+        ++spins;
+    }
+    if (req.acks < target_count)
+    {
+        KLOG_WARN("arch/smp", "tlb shootdown timeout — some peer did not ack");
+    }
+    g_tlb_request = nullptr;
+}
+} // namespace
+
+void SmpTlbShootdownAddr(mm::AddressSpace* as, u64 virt)
+{
+    SmpTlbShootdownBroadcast(as, virt, virt + 0x1000);
+}
+
+void SmpTlbShootdownRange(mm::AddressSpace* as, u64 virt, u64 len)
+{
+    const u64 page = 0x1000;
+    const u64 start = virt & ~(page - 1);
+    const u64 end = (virt + len + page - 1) & ~(page - 1);
+    SmpTlbShootdownBroadcast(as, start, end);
 }
 
 void SmpSendReschedIpi(u32 cpu_id)

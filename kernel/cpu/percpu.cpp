@@ -90,6 +90,19 @@ void PerCpuInitBsp()
 
 PerCpu* CurrentCpu()
 {
+    // Before BSP install, callers (early-boot self-tests reaching
+    // sched::Current() / mm::AddressSpaceCurrent() through inline
+    // accessors) would read GSBASE = 0 and the next `->field`
+    // deref would be a null-deref UB — UBSAN flagged this with
+    // a type-mismatch report at sched.cpp:390 / address_space.cpp:644.
+    // Falling back to the static BSP slot here gives every accessor
+    // a non-null pointer with valid `current_task` /
+    // `current_as` slots before BSP install completes, removing
+    // the early-boot UB while the post-install path is unchanged.
+    if (!g_bsp_installed)
+    {
+        return &g_bsp_percpu;
+    }
     PerCpu* p;
     // "mov %%gs:0, %0" reads the first qword of the per-CPU region
     // treating it as an offset from GSBASE — but we want the BASE

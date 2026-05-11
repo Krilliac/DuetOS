@@ -325,6 +325,40 @@ struct AddressSpaceStats
 };
 AddressSpaceStats AddressSpaceStatsRead();
 
+// ---------------------------------------------------------------------------
+// TLB shootdown — required for SMP page-protection downgrades and unmaps.
+//
+// Single-CPU `invlpg` flushes the only TLB that holds the mapping. The
+// moment more than one CPU runs in the same AS (or has cached a kernel-
+// half mapping that's being unmapped), every page-protection downgrade
+// or unmap MUST broadcast an invalidation to those CPUs *before* the
+// caller treats the page as no-longer-mapped. Otherwise a remote CPU
+// keeps writing through its stale RW TLB entry to a frame that's been
+// recycled — a classic UAF on the page granularity.
+//
+// wiki/security/Linux-CVE-Audit.md class FF.
+//
+// Today on uniprocessor: shootdown collapses to a local `invlpg` (already
+// done by the caller paths). The API exists so the unmap/protect callers
+// don't have to grow SMP-awareness scattered through their bodies — they
+// call TlbShootdown* once and the helper decides what to do based on
+// SmpCpusOnline().
+// ---------------------------------------------------------------------------
+
+/// Flush a single virtual address from every CPU's TLB that has `as`
+/// active, including the current CPU. Safe to call before SMP comes
+/// up — collapses to a local `invlpg` when only the BSP is online.
+/// Must be called AFTER the PTE is cleared (or downgraded) in memory;
+/// the helper does not synchronise with the page-table mutation.
+void TlbShootdownAddr(AddressSpace* as, u64 virt);
+
+/// Flush a contiguous virtual range `[virt, virt + len)`. Same rules
+/// as TlbShootdownAddr. Caller is responsible for breaking the range
+/// up into page-sized invalidations if the range is large enough that
+/// a full CR3 reload would be cheaper — the helper does per-page
+/// invlpg only.
+void TlbShootdownRange(AddressSpace* as, u64 virt, u64 len);
+
 /// Boot-time self-test: create two ASes, map a unique user page in
 /// AS-A, verify the page is REACHABLE in AS-A's tables and
 /// UNREACHABLE in AS-B's tables, and verify that

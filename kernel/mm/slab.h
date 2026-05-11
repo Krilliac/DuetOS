@@ -105,7 +105,22 @@ void SlabCacheDestroy(SlabCache* c);
 /// freelist is non-empty; O(K) (K = objects per slab) when a
 /// fresh slab has to be carved. Returns nullptr if the
 /// underlying `KMalloc(kSlabBytes)` fails.
+///
+/// IMPORTANT: the returned object's payload contains the freed-
+/// object poison pattern (`kSlabFreedObjectPoison`), not zeros.
+/// Callers that need a clean object must either initialise every
+/// field before any other kernel code reads it, or use
+/// `SlabAllocZeroed`. See `wiki/security/Linux-CVE-Audit.md`
+/// class E (Dirty-Pipe root cause was a missed flag-zero on a
+/// freshly-allocated `pipe_buffer`).
 void* SlabAlloc(SlabCache* c);
+
+/// `SlabAlloc` then `memset` the returned object to zero. Same
+/// failure semantics (nullptr on backing-slab exhaustion). Use
+/// this for any object whose semantics include a "default state"
+/// the caller depends on — flag-style fields, refcount, pointer
+/// members that must be null on first use.
+void* SlabAllocZeroed(SlabCache* c);
 
 /// Return `obj` to the cache. Must have been returned by
 /// `SlabAlloc` on the SAME cache; the slab allocator does not

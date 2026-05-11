@@ -23,7 +23,8 @@
             "inherits": "x86_64-base",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug",
-                "DUETOS_GDB_SERVER": "ON"
+                "DUETOS_GDB_SERVER": "ON",
+                "DUETOS_ENABLE_UBSAN": "ON"
             }
         },
         {

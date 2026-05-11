@@ -1,6 +1,7 @@
 #pragma once
 
 #include "util/result.h"
+#include "util/saturating.h"
 #include "util/types.h"
 
 /*
@@ -87,7 +88,11 @@ struct FaultDomain
     Result<void> (*init)();                    // idempotent init; return Err on failure
     Result<void> (*teardown)();                // free resources; must leave the
                                                // subsystem ready for a fresh init
-    u32 restart_count;                         // lifetime restart events
+    // Saturating: a misbehaving driver in a tight restart loop can't
+    // wrap this counter, which is the input to the throttle policy.
+    // Without saturation, 2^32 restarts wrap to 0 and the throttle
+    // re-arms fresh. wiki/security/Linux-CVE-Audit.md class BB.
+    util::SatU32 restart_count;                // lifetime restart events
     u64 last_restart_ticks;                    // scheduler-tick of the most recent restart
     bool alive;                                // false iff teardown ran and init hasn't yet.
                                                // Trap-safe single-bit projection of `state`
