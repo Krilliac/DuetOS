@@ -4,6 +4,7 @@
 #include "fs/mount.h"
 #include "log/klog.h"
 #include "core/panic.h"
+#include "util/saturating.h"
 
 namespace duetos::fs
 {
@@ -113,8 +114,10 @@ struct DentryCacheEntry
 };
 
 constinit DentryCacheEntry g_dentry_cache[kDentryCacheSize] = {};
-constinit u64 g_dentry_cache_hits = 0;
-constinit u64 g_dentry_cache_misses = 0;
+// Lifetime cache stats — saturating per class BB. Reported by
+// inspect / shell; never used for modular arithmetic.
+constinit util::SatU64 g_dentry_cache_hits = 0;
+constinit util::SatU64 g_dentry_cache_misses = 0;
 
 inline u32 DentryHash(const RamfsNode* parent, const char* name, u64 name_len)
 {

@@ -17,54 +17,6 @@ the same commit** that delivers the code.
 
 ## Kernel / runtime
 
-### Ring3 ELF smoke #DF (regression, observed 2026-05-11)
-
-- **Status:** **Live boot reproducer.** `tools/qemu/run.sh
-  build/x86_64-debug/duetos.iso` (or any flavour) reliably
-  double-faults in the first ELF smoke spawn. Crash chain:
-  `SpawnElfFile` → `ElfLoad` → `LoadSegment` →
-  `AddressSpaceMapUserPage+0x14c` → inlined → `RwLockAcquireExclusive+0x25`
-  → #DF, then recursive #GP in the panic-dump path.
-- **Pre-existing on origin/main** (verified by rebuilding the
-  clean merge point `96e9026` and booting). Not caused by the
-  CVE-audit fixes (M/E/N/O/CC/FF/GG/II) — those compiled cleanly
-  and the KASLR / TLB-shootdown / lock-hierarchy paths self-test
-  fine.
-- **Where to look:** the trap frame in the dump has wild values
-  (cs=0x200202, ss=non-canonical, rsp=0x10), suggesting the
-  `#DF` frame itself was corrupted — i.e. the original fault was
-  something else and the IST-stack handoff scribbled the saved
-  state. Worth investigating whether the IST stack is sized
-  correctly for `-fstack-protector-strong` prologues that now
-  fire on every kernel function, OR whether the `sched::Mutex`
-  inside `RwLock.inner` is missing an init step that the
-  zero-init relies on.
-- **Action:** the next slice in this area should either
-  (a) reproduce under GDB stub (`tools/debug/duetos-gdb-attach.sh`)
-  and walk back to the original fault before recursion, OR
-  (b) bisect commits between the last known-good ring3 boot and
-  `96e9026` to find the regressing change.
-
-### Early-boot CurrentCpu() returns before BSP install (UBSAN finding)
-
-- **Status:** UBSAN-clean elsewhere; this site fires `type-mismatch`
-  warnings during early boot, then quiets once BSP per-CPU is up.
-- **Sites:** `kernel/sched/sched.cpp:390:31` and
-  `kernel/mm/address_space.cpp:644:31` — both do
-  `cpu::CurrentCpu()->current_task` / `current_as` from inline
-  accessors called by early-boot self-tests before
-  `PerCpuInitBsp` runs. `CurrentCpu()` reads GSBASE MSR; if GSBASE
-  isn't set, it returns null and `->current_task` is a null deref.
-  The reads happen to be benign (we read a field whose offset
-  lands on a mapped page elsewhere) but it's UB by the standard.
-- **Fix:** either
-  (a) initialise BSP per-CPU strictly before any code that can
-      call `Current()` / `AddressSpaceCurrent()`, OR
-  (b) make `Current()` and `AddressSpaceCurrent()` null-safe with
-      an explicit `g_bsp_installed` check (the same flag
-      `CurrentCpuIdOrBsp` already consults).
-- Tracked: 2026-05-11.
-
 ### B2-followup — split `g_sched_lock` per-CPU
 
 - **Status:** SMP per-CPU runqueues + work-stealing + reschedule-IPI

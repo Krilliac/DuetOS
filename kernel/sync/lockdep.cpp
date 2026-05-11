@@ -19,6 +19,7 @@
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
 #include "log/klog.h"
+#include "util/saturating.h"
 #include "util/types.h"
 
 namespace duetos::sync
@@ -52,9 +53,11 @@ constinit PerCpuHeld g_per_cpu[kLockdepCpuMax] = {};
 #define g_held_stack g_per_cpu[0].stack
 #define g_held_depth g_per_cpu[0].depth
 
-// Counters.
-constinit u64 g_inversions = 0;
-constinit u64 g_edges_recorded = 0;
+// Counters — saturating per class BB. A noisy workload that keeps
+// finding fresh inversion candidates cannot wrap g_inversions to
+// zero and fool the post-boot audit into reporting a clean graph.
+constinit util::SatU64 g_inversions = 0;
+constinit util::SatU64 g_edges_recorded = 0;
 
 // Inversion-warnings-promote-to-panic knob (plan D1-followup).
 // Default false: a kernel boot under instrumentation can complete

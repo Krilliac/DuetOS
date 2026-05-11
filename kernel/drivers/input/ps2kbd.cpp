@@ -33,6 +33,7 @@
 #include "core/panic.h"
 #include "sched/sched.h"
 #include "security/login.h"
+#include "util/saturating.h"
 
 // Defined in exceptions.S — the stub for vector 0x21 that pushes a zero
 // error code, pushes the vector, and jumps to isr_common (which calls
@@ -104,9 +105,13 @@ constinit u64 g_ring_tail = 0; // read cursor (task)
 
 constinit duetos::sched::WaitQueue g_readers{};
 
-constinit u64 g_irqs_seen = 0;
-constinit u64 g_bytes_buffered = 0;
-constinit u64 g_bytes_dropped = 0;
+// Lifetime stats — saturating per class BB. Note g_ring_head and
+// g_ring_tail above STAY plain u64: they're indexed with
+// `& kRingMask`, and `head - tail` is the live-count read; both
+// patterns require modular u64 arithmetic that SatU64 would break.
+constinit util::SatU64 g_irqs_seen = 0;
+constinit util::SatU64 g_bytes_buffered = 0;
+constinit util::SatU64 g_bytes_dropped = 0;
 
 // External key-event injection ring. KeyboardInjectEvent pushes
 // pre-cooked events here; Ps2KeyboardReadEvent drains this ring

@@ -44,6 +44,7 @@
 #include "log/klog.h"
 #include "core/panic.h"
 #include "util/debug_assert.h"
+#include "util/saturating.h"
 
 // Linker-script symbols. Both are PHYSICAL addresses: the kernel image is
 // loaded contiguously starting at 1 MiB and the bitmap reservation needs
@@ -124,8 +125,11 @@ struct FramePool
 };
 
 constinit FramePool g_frame_pools[acpi::kMaxCpus] = {};
-constinit u64 g_pool_alloc_hits = 0;
-constinit u64 g_pool_free_hits = 0;
+// Frame-pool hit counters — saturating per class BB (wrap → defense
+// gap in long-running boots). Read by inspect / shell health command;
+// never used for arithmetic that depends on modular wrap.
+constinit util::SatU64 g_pool_alloc_hits = 0;
+constinit util::SatU64 g_pool_free_hits = 0;
 
 constexpr u64 kFrameRflagsIfBit = 1ULL << 9;
 

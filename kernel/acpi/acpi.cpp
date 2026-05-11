@@ -373,6 +373,25 @@ const SdtHeader* PhysToHeader(u64 phys)
     return static_cast<const SdtHeader*>(mm::PhysToVirt(phys));
 }
 
+// XSDT entries are 8-byte physical pointers stored right after the
+// 36-byte SdtHeader. 36 is u32-aligned but not u64-aligned, so a
+// plain `reinterpret_cast<const u64*>` indexed read is a misaligned
+// u64 load — UBSAN flags it as type-mismatch (it would also #GP on
+// architectures stricter than x86). Read via byte-wise copy instead;
+// every UBSAN type-mismatch report from acpi.cpp resolves once the
+// five XSDT loops (FindTable's loop, FindAllSsdts's loop, and the
+// SSDT cache walks) all go through this helper.
+inline u64 XsdtEntryAt(const SdtHeader* xsdt, u64 i)
+{
+    const auto* bytes = reinterpret_cast<const u8*>(xsdt) + sizeof(SdtHeader) + i * sizeof(u64);
+    u64 v = 0;
+    for (u64 j = 0; j < sizeof(u64); ++j)
+    {
+        v |= static_cast<u64>(bytes[j]) << (j * 8);
+    }
+    return v;
+}
+
 const SdtHeader* FindTable(const Rsdp& rsdp, const char* sig4)
 {
     // Prefer XSDT (64-bit entry pointers) on ACPI 2.0+ firmware. Fall back
@@ -390,10 +409,9 @@ const SdtHeader* FindTable(const Rsdp& rsdp, const char* sig4)
         }
 
         const u64 count = (xsdt->length - sizeof(SdtHeader)) / sizeof(u64);
-        const auto* entries = reinterpret_cast<const u64*>(reinterpret_cast<uptr>(xsdt) + sizeof(SdtHeader));
         for (u64 i = 0; i < count; ++i)
         {
-            const auto* h = PhysToHeader(entries[i]);
+            const auto* h = PhysToHeader(XsdtEntryAt(xsdt, i));
             if (BytesEqual(h->signature, sig4, 4))
             {
                 return h;
@@ -569,10 +587,10 @@ void CollectSsdts(const Rsdp& rsdp)
         // Underflow guard: malformed firmware could ship `length <
         // sizeof(SdtHeader)`. Treat as zero entries.
         const u64 count = (xsdt->length >= sizeof(SdtHeader)) ? (xsdt->length - sizeof(SdtHeader)) / sizeof(u64) : 0;
-        const auto* entries = reinterpret_cast<const u64*>(reinterpret_cast<uptr>(xsdt) + sizeof(SdtHeader));
         for (u64 i = 0; i < count; ++i)
         {
-            const auto* h = PhysToHeader(entries[i]);
+            const u64 entry = XsdtEntryAt(xsdt, i);
+            const auto* h = PhysToHeader(entry);
             if (BytesEqual(h->signature, "SSDT", 4))
             {
                 if (!ChecksumOk(h, h->length))
@@ -584,7 +602,7 @@ void CollectSsdts(const Rsdp& rsdp)
                     core::Log(core::LogLevel::Warn, "acpi", "SSDT checksum failed; skipping table");
                     continue;
                 }
-                CacheSsdt(entries[i], h->length);
+                CacheSsdt(entry, h->length);
             }
         }
         return;

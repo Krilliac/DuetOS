@@ -24,6 +24,7 @@
 #include "diag/fault_react.h"
 #include "log/klog.h"
 #include "security/fault_domain.h"
+#include "util/saturating.h"
 #include "util/types.h"
 
 namespace duetos::diag
@@ -32,7 +33,10 @@ namespace duetos::diag
 namespace
 {
 
-constinit u64 g_reports = 0;
+// Per-handler total — saturating per class BB. An adversarial path
+// that keeps hitting one UBSAN handler cannot wrap the report count
+// to zero and fool the "report freshness" health probe.
+constinit util::SatU64 g_reports = 0;
 
 // Source location pointed to by every handler. Filename is a string
 // literal embedded in the calling TU's rodata; we don't own it.
