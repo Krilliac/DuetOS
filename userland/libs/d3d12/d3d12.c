@@ -153,12 +153,12 @@ static HRESULT res_Map(D12ResImpl* self, UINT sub, const void* range, void** out
     if (self->kind == 1)
     {
         if (!self->linear)
-            return DX_E_FAIL;
+            return DX_E_INVALIDARG; /* buffer resource never had its backing store allocated */
         *out = self->linear;
         return DX_S_OK;
     }
     if (!self->bb)
-        return DX_E_FAIL;
+        return DX_E_INVALIDARG; /* texture resource not bound to a back-buffer surface */
     *out = self->bb->pixels;
     return DX_S_OK;
 }
@@ -414,7 +414,7 @@ static HRESULT fence_SetEventOnCompletion(D12FenceImpl* self, UINT64 v, HANDLE e
 static HRESULT fence_Signal(D12FenceImpl* self, UINT64 v)
 {
     if (!self)
-        return DX_E_FAIL;
+        return DX_E_POINTER;
     self->value = v;
     return DX_S_OK;
 }

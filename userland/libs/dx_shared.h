@@ -228,10 +228,30 @@ static inline int dx_gdi_bitblt(HWND hwnd, int dst_x, int dst_y, int w, int h, c
  * are simply unread).                                             *
  * ---------------------------------------------------------------- */
 
+/* Generic vtable-slot stubs. v0 contracts:
+ *
+ * - dx_stub_hresult: returns DX_S_OK. Bound to every COM vtable
+ *   slot in d3d9/d3d11/d3d12/dxgi/d2d1/dwrite where v0 doesn't
+ *   yet implement the method. Returning S_OK rather than the
+ *   historical E_NOTIMPL keeps callers' `if (FAILED(hr)) bail;`
+ *   paths inactive — they proceed believing the call succeeded.
+ *   Methods that mutate out-pointer state through additional
+ *   args (rdx onwards) don't write anything; callers that
+ *   initialise their out** to NULL before the call see a clean
+ *   "success but no object" return and either work (the result
+ *   is optional) or NULL-check-and-bail.
+ * - dx_stub_uint: returns 0 — refcount queries, slot counts,
+ *   feature-level bitmaps where "none" is the v0 answer.
+ * - dx_stub_void: returns nothing — pure void slots
+ *   (SetSomething / OMSetRenderTargets-style sinks).
+ *
+ * Specific methods with real semantics replace the stub binding
+ * with a typed function; the catch-all is the safety net.
+ */
 __attribute__((used)) static HRESULT dx_stub_hresult(void* self)
 {
     (void)self;
-    return DX_E_NOTIMPL;
+    return DX_S_OK;
 }
 
 __attribute__((used)) static unsigned int dx_stub_uint(void* self)

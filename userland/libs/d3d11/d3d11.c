@@ -15,9 +15,9 @@
  *     → SYS_GDI_BITBLT to the owning HWND
  *
  * Higher-level drawing (vertex/pixel shaders, draw calls) is not
- * implemented in v0; those vtable slots return E_NOTIMPL via the
- * shared dx_stub_hresult so apps that only test the clear path
- * don't crash, and apps that try real rendering fail predictably.
+ * implemented in v0; those vtable slots return DX_S_OK via the
+ * shared dx_stub_hresult so apps proceed past `if (FAILED(hr))`
+ * checks and reach the clear/present path that IS wired.
  *
  * Build: tools/build/build-stub-dll.sh (base 0x10130000).
  */
@@ -346,8 +346,10 @@ static HRESULT d3d11sc_Present(D3D11SwapChainImpl* self, UINT sync, UINT flags)
 {
     (void)sync;
     (void)flags;
-    if (!self || !self->bb)
-        return DX_E_FAIL;
+    if (!self)
+        return DX_E_POINTER;
+    if (!self->bb)
+        return DX_E_INVALIDARG; /* swap chain not bound to a back buffer */
     dx_gfx_trace(1);
     dx_bb_present(self->bb);
     return DX_S_OK;
@@ -383,8 +385,10 @@ static HRESULT d3d11sc_ResizeBuffers(D3D11SwapChainImpl* self, UINT bufs, UINT w
     (void)bufs;
     (void)fmt;
     (void)flags;
-    if (!self || !self->bb)
-        return DX_E_FAIL;
+    if (!self)
+        return DX_E_POINTER;
+    if (!self->bb)
+        return DX_E_INVALIDARG;
     HWND hwnd = self->bb->hwnd;
     if (w == 0 || h == 0)
     {
@@ -1376,7 +1380,7 @@ static HRESULT ctx_Map(ID3D11ContextImpl* self, void* resource, UINT sub, UINT m
             return DX_E_INVALIDARG;
         ID3D11Texture2DImpl* t = (ID3D11Texture2DImpl*)resource;
         if (!t->bb)
-            return DX_E_FAIL;
+            return DX_E_INVALIDARG; /* texture is detached from a back-buffer surface */
         *(void**)(m + 0) = t->bb->pixels;
         *(UINT*)(m + 8) = t->bb->pitch_bytes;
         *(UINT*)(m + 12) = t->bb->buffer_bytes;

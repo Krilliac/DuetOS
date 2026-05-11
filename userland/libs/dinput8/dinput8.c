@@ -320,7 +320,15 @@ static HRESULT didev_GetDeviceState(DiDeviceImpl* self, DWORD size, void* data)
 
         BYTE scratch[16] = {0};
         if (!dx_get_mouse_delta(scratch))
-            return DX_E_FAIL;
+        {
+            /* No movement reported by the input syscall — return
+             * S_OK with a zeroed buffer (matches DI's "successful
+             * poll, no events" idiom for mouse devices). */
+            BYTE* zp = (BYTE*)data;
+            for (DWORD i = 0; i < size; ++i)
+                zp[i] = 0;
+            return DX_S_OK;
+        }
         BYTE* p = (BYTE*)data;
         for (DWORD i = 0; i < (size < 16 ? size : 16); ++i)
             p[i] = scratch[i];

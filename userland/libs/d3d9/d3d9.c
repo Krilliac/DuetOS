@@ -311,8 +311,10 @@ static HRESULT d9d_Clear(D9DeviceImpl* self, DWORD count, const void* rects, DWO
     (void)flags;
     (void)z;
     (void)stencil;
-    if (!self || !self->bb)
-        return DX_E_FAIL;
+    if (!self)
+        return DX_E_POINTER;
+    if (!self->bb)
+        return DX_E_INVALIDARG;
     /* Convert D3DCOLOR ARGB → BGRA float and reuse dx_bb_clear_rgba. */
     BYTE a = (BYTE)((color >> 24) & 0xFF);
     BYTE r = (BYTE)((color >> 16) & 0xFF);
@@ -328,8 +330,10 @@ static HRESULT d9d_Present(D9DeviceImpl* self, const void* src, const void* dst,
     (void)src;
     (void)dst;
     (void)dirty;
-    if (!self || !self->bb)
-        return DX_E_FAIL;
+    if (!self)
+        return DX_E_POINTER;
+    if (!self->bb)
+        return DX_E_INVALIDARG;
     HWND saved = self->bb->hwnd;
     if (hwnd_override)
         self->bb->hwnd = hwnd_override;
@@ -445,7 +449,7 @@ static HRESULT d9d_SetViewport(D9DeviceImpl* self, const void* vp)
 static HRESULT d9d_SetRenderState(D9DeviceImpl* self, DWORD state, DWORD value)
 {
     if (!self)
-        return DX_E_FAIL;
+        return DX_E_POINTER;
     if (state < D9_RENDERSTATE_MAX)
         self->render_state[state] = value;
     return DX_S_OK;
@@ -488,7 +492,7 @@ static HRESULT d9d_SetStreamSource(D9DeviceImpl* self, UINT stream, D9BufImpl* v
 static HRESULT d9d_SetIndices(D9DeviceImpl* self, D9BufImpl* ib)
 {
     if (!self)
-        return DX_E_FAIL;
+        return DX_E_POINTER;
     self->index_buffer = (ib && ib->lpVtbl == g_d9_ib_vtbl) ? ib : NULL;
     return DX_S_OK;
 }
@@ -726,8 +730,10 @@ static void d9_emit_prims(D9DeviceImpl* self, const BYTE* base, UINT stride, UIN
 /* DrawPrimitive(type, startVertex, primcount) — slot 81. */
 static HRESULT d9d_DrawPrimitive(D9DeviceImpl* self, UINT type, UINT vstart, UINT primcount)
 {
-    if (!self || !self->stream_vb || self->stream_stride == 0)
-        return DX_E_FAIL;
+    if (!self)
+        return DX_E_POINTER;
+    if (!self->stream_vb || self->stream_stride == 0)
+        return DX_E_INVALIDARG;
     const BYTE* base = self->stream_vb->storage + self->stream_offset;
     d9_emit_prims(self, base, self->stream_stride, type, vstart, primcount, NULL, 0);
     return DX_S_OK;
@@ -739,8 +745,10 @@ static HRESULT d9d_DrawIndexedPrimitive(D9DeviceImpl* self, UINT type, INT base_
 {
     (void)min_vtx;
     (void)num_verts;
-    if (!self || !self->stream_vb || self->stream_stride == 0 || !self->index_buffer)
-        return DX_E_FAIL;
+    if (!self)
+        return DX_E_POINTER;
+    if (!self->stream_vb || self->stream_stride == 0 || !self->index_buffer)
+        return DX_E_INVALIDARG;
     const BYTE* vb_base = self->stream_vb->storage + self->stream_offset;
     UINT index_stride = self->index_buffer->stride;
     const BYTE* idx_base = self->index_buffer->storage + start_idx * index_stride;
@@ -754,8 +762,10 @@ static HRESULT d9d_DrawIndexedPrimitive(D9DeviceImpl* self, UINT type, INT base_
 /* DrawPrimitiveUP(type, primcount, vertexData, vertexStride) — slot 83. */
 static HRESULT d9d_DrawPrimitiveUP(D9DeviceImpl* self, UINT type, UINT primcount, const void* data, UINT stride)
 {
-    if (!self || !data || stride == 0)
-        return DX_E_FAIL;
+    if (!self)
+        return DX_E_POINTER;
+    if (!data || stride == 0)
+        return DX_E_INVALIDARG;
     d9_emit_prims(self, (const BYTE*)data, stride, type, 0, primcount, NULL, 0);
     return DX_S_OK;
 }
