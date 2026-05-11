@@ -1,0 +1,982 @@
+# Syscall ABI Coverage Matrix
+
+_Auto-generated; do not edit by hand._
+
+
+
+| ABI | number | name | status | owner file/function | fallback behavior |
+| --- | ---: | --- | --- | --- | --- |
+| linux | 0 | `read` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 1 | `write` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 2 | `open` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 3 | `close` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 4 | `stat` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 5 | `fstat` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 6 | `lstat` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 7 | `poll` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 8 | `lseek` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 9 | `mmap` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 10 | `mprotect` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 11 | `munmap` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 12 | `brk` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 13 | `rt_sigaction` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 14 | `rt_sigprocmask` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 15 | `rt_sigreturn` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 16 | `ioctl` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 17 | `pread64` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 18 | `pwrite64` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 19 | `readv` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 20 | `writev` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 21 | `access` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 22 | `pipe` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 23 | `select` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 24 | `sched_yield` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 25 | `mremap` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 26 | `msync` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 27 | `mincore` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 28 | `madvise` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 32 | `dup` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 33 | `dup2` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 34 | `pause` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 35 | `nanosleep` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 36 | `getitimer` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 37 | `alarm` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 38 | `setitimer` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 39 | `getpid` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 40 | `sendfile` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 41 | `socket` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 42 | `connect` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 43 | `accept` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 44 | `sendto` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 45 | `recvfrom` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 46 | `sendmsg` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 47 | `recvmsg` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 48 | `shutdown` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 49 | `bind` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 50 | `listen` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 51 | `getsockname` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 52 | `getpeername` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 53 | `socketpair` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 54 | `setsockopt` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 55 | `getsockopt` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 56 | `clone` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 57 | `fork` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 60 | `exit` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 61 | `wait4` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 62 | `kill` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 63 | `uname` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 72 | `fcntl` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 73 | `flock` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 74 | `fsync` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 75 | `fdatasync` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 76 | `truncate` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 77 | `ftruncate` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 78 | `getdents` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 79 | `getcwd` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 80 | `chdir` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 81 | `fchdir` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 82 | `rename` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 83 | `mkdir` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 84 | `rmdir` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 85 | `creat` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 86 | `link` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 87 | `unlink` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 88 | `symlink` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 89 | `readlink` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 90 | `chmod` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 91 | `fchmod` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 92 | `chown` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 93 | `fchown` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 94 | `lchown` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 96 | `gettimeofday` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 97 | `getrlimit` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 98 | `getrusage` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 99 | `sysinfo` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 100 | `times` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 101 | `ptrace` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 102 | `getuid` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 103 | `syslog` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 104 | `getgid` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 105 | `setuid` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 106 | `setgid` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 107 | `geteuid` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 108 | `getegid` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 109 | `setpgid` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 110 | `getppid` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 111 | `getpgrp` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 112 | `setsid` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 113 | `setreuid` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 114 | `setregid` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 115 | `getgroups` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 116 | `setgroups` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 117 | `setresuid` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 118 | `getresuid` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 119 | `setresgid` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 120 | `getresgid` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 121 | `getpgid` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 122 | `setfsuid` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 123 | `setfsgid` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 124 | `getsid` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 125 | `capget` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 126 | `capset` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 127 | `rt_sigpending` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 128 | `rt_sigtimedwait` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 129 | `rt_sigqueueinfo` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 130 | `rt_sigsuspend` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 131 | `sigaltstack` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 132 | `utime` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 133 | `mknod` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 134 | `uselib` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 135 | `personality` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 136 | `ustat` | unimplemented | `kernel/subsystems/linux/syscall.cpp::DispatchSyscall` | -ENOSYS |
+| linux | 139 | `sysfs` | unimplemented | `kernel/subsystems/linux/syscall.cpp::DispatchSyscall` | -ENOSYS |
+| linux | 140 | `getpriority` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 141 | `setpriority` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 142 | `sched_setparam` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 143 | `sched_getparam` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 144 | `sched_setscheduler` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 145 | `sched_getscheduler` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 146 | `sched_get_priority_max` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 147 | `sched_get_priority_min` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 148 | `sched_rr_get_interval` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 149 | `mlock` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 150 | `munlock` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 151 | `mlockall` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 152 | `munlockall` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 153 | `vhangup` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 154 | `modify_ldt` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 156 | `_sysctl` | unimplemented | `kernel/subsystems/linux/syscall.cpp::DispatchSyscall` | -ENOSYS |
+| linux | 157 | `prctl` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 158 | `arch_prctl` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 159 | `adjtimex` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 160 | `setrlimit` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 162 | `sync` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 163 | `acct` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 164 | `settimeofday` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 165 | `mount` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 166 | `umount2` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 174 | `create_module` | unimplemented | `kernel/subsystems/linux/syscall.cpp::DispatchSyscall` | -ENOSYS |
+| linux | 177 | `get_kernel_syms` | unimplemented | `kernel/subsystems/linux/syscall.cpp::DispatchSyscall` | -ENOSYS |
+| linux | 178 | `query_module` | unimplemented | `kernel/subsystems/linux/syscall.cpp::DispatchSyscall` | -ENOSYS |
+| linux | 180 | `nfsservctl` | unimplemented | `kernel/subsystems/linux/syscall.cpp::DispatchSyscall` | -ENOSYS |
+| linux | 181 | `getpmsg` | unimplemented | `kernel/subsystems/linux/syscall.cpp::DispatchSyscall` | -ENOSYS |
+| linux | 182 | `putpmsg` | unimplemented | `kernel/subsystems/linux/syscall.cpp::DispatchSyscall` | -ENOSYS |
+| linux | 183 | `afs_syscall` | unimplemented | `kernel/subsystems/linux/syscall.cpp::DispatchSyscall` | -ENOSYS |
+| linux | 184 | `tuxcall` | unimplemented | `kernel/subsystems/linux/syscall.cpp::DispatchSyscall` | -ENOSYS |
+| linux | 185 | `security` | unimplemented | `kernel/subsystems/linux/syscall.cpp::DispatchSyscall` | -ENOSYS |
+| linux | 186 | `gettid` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 187 | `readahead` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 188 | `setxattr` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 189 | `lsetxattr` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 190 | `fsetxattr` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 191 | `getxattr` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 192 | `lgetxattr` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 193 | `fgetxattr` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 194 | `listxattr` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 195 | `llistxattr` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 196 | `flistxattr` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 197 | `removexattr` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 198 | `lremovexattr` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 199 | `fremovexattr` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 200 | `tkill` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 201 | `time` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 202 | `futex` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 203 | `sched_setaffinity` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 204 | `sched_getaffinity` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 205 | `set_thread_area` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 211 | `get_thread_area` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 212 | `lookup_dcookie` | unimplemented | `kernel/subsystems/linux/syscall.cpp::DispatchSyscall` | -ENOSYS |
+| linux | 213 | `epoll_create` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 214 | `epoll_ctl_old` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 215 | `epoll_wait_old` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 216 | `remap_file_pages` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 217 | `getdents64` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 218 | `set_tid_address` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 219 | `restart_syscall` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 221 | `fadvise64` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 222 | `timer_create` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 223 | `timer_settime` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 224 | `timer_gettime` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 225 | `timer_getoverrun` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 226 | `timer_delete` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 227 | `clock_settime` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 228 | `clock_gettime` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 229 | `clock_getres` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 230 | `clock_nanosleep` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 231 | `exit_group` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 232 | `epoll_wait` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 233 | `epoll_ctl` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 234 | `tgkill` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 235 | `utimes` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 236 | `vserver` | unimplemented | `kernel/subsystems/linux/syscall.cpp::DispatchSyscall` | -ENOSYS |
+| linux | 247 | `waitid` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 251 | `ioprio_set` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 252 | `ioprio_get` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 257 | `openat` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 258 | `mkdirat` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 259 | `mknodat` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 260 | `fchownat` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 261 | `futimesat` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 262 | `newfstatat` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 263 | `unlinkat` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 264 | `renameat` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 265 | `linkat` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 266 | `symlinkat` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 267 | `readlinkat` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 268 | `fchmodat` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 269 | `faccessat` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 270 | `pselect6` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 271 | `ppoll` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 272 | `unshare` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 273 | `set_robust_list` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 274 | `get_robust_list` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 277 | `sync_file_range` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 280 | `utimensat` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 281 | `epoll_pwait` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 282 | `signalfd` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 283 | `timerfd_create` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 284 | `eventfd` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 285 | `fallocate` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 286 | `timerfd_settime` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 287 | `timerfd_gettime` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 288 | `accept4` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 290 | `eventfd2` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 291 | `epoll_create1` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 292 | `dup3` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 293 | `pipe2` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 295 | `preadv` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 296 | `pwritev` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 297 | `rt_tgsigqueueinfo` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 299 | `recvmmsg` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 302 | `prlimit64` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 305 | `clock_adjtime` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 306 | `syncfs` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 307 | `sendmmsg` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 308 | `setns` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 309 | `getcpu` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 310 | `process_vm_readv` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 311 | `process_vm_writev` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 312 | `kcmp` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 314 | `sched_setattr` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 315 | `sched_getattr` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 316 | `renameat2` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 317 | `seccomp` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 318 | `getrandom` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 324 | `membarrier` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 325 | `mlock2` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 327 | `preadv2` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 328 | `pwritev2` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 333 | `io_pgetevents` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 334 | `rseq` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 435 | `clone3` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 437 | `openat2` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 439 | `faccessat2` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 441 | `epoll_pwait2` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 443 | `quotactl_fd` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 447 | `memfd_secret` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 449 | `futex_waitv` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 450 | `set_mempolicy_home_node` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 451 | `cachestat` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 452 | `fchmodat2` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 453 | `map_shadow_stack` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 454 | `futex_wake` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 455 | `futex_wait` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 456 | `futex_requeue` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 457 | `statmount` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 458 | `listmount` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 459 | `lsm_get_self_attr` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 460 | `lsm_set_self_attr` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| linux | 461 | `lsm_list_modules` | implemented | `kernel/subsystems/linux/syscall.cpp::Do*` | none (handled in linux dispatcher) |
+| native | 0 | `SYS_EXIT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 1 | `SYS_GETPID` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 2 | `SYS_WRITE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 3 | `SYS_YIELD` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 4 | `SYS_STAT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 5 | `SYS_READ` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 6 | `SYS_DROPCAPS` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 7 | `SYS_SPAWN` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 8 | `SYS_GETPROCID` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 9 | `SYS_GETLASTERROR` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 10 | `SYS_SETLASTERROR` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 11 | `SYS_HEAP_ALLOC` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 12 | `SYS_HEAP_FREE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 13 | `SYS_PERF_COUNTER` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 14 | `SYS_HEAP_SIZE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 15 | `SYS_HEAP_REALLOC` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 16 | `SYS_WIN32_MISS_LOG` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 17 | `SYS_GETTIME_FT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 18 | `SYS_NOW_NS` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 19 | `SYS_SLEEP_MS` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 20 | `SYS_FILE_OPEN` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 21 | `SYS_FILE_READ` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 22 | `SYS_FILE_CLOSE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 23 | `SYS_FILE_SEEK` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 24 | `SYS_FILE_FSTAT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 25 | `SYS_MUTEX_CREATE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 26 | `SYS_MUTEX_WAIT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 27 | `SYS_MUTEX_RELEASE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 28 | `SYS_VMAP` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 29 | `SYS_VUNMAP` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 30 | `SYS_EVENT_CREATE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 31 | `SYS_EVENT_SET` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 32 | `SYS_EVENT_RESET` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 33 | `SYS_EVENT_WAIT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 34 | `SYS_TLS_ALLOC` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 35 | `SYS_TLS_FREE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 36 | `SYS_TLS_GET` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 37 | `SYS_TLS_SET` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 38 | `SYS_BP_INSTALL` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 39 | `SYS_BP_REMOVE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 40 | `SYS_GETTIME_ST` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 41 | `SYS_ST_TO_FT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 42 | `SYS_FT_TO_ST` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 43 | `SYS_FILE_WRITE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 44 | `SYS_FILE_CREATE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 45 | `SYS_THREAD_CREATE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 46 | `SYS_DEBUG_PRINT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 47 | `SYS_MEM_STATUS` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 48 | `SYS_WAIT_MULTI` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 49 | `SYS_SYSTEM_INFO` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 50 | `SYS_DEBUG_PRINTW` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 51 | `SYS_SEM_CREATE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 52 | `SYS_SEM_RELEASE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 53 | `SYS_SEM_WAIT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 54 | `SYS_THREAD_WAIT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 55 | `SYS_THREAD_EXIT_CODE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 56 | `SYS_NT_INVOKE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 57 | `SYS_DLL_PROC_ADDRESS` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 58 | `SYS_WIN_CREATE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 59 | `SYS_WIN_DESTROY` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 60 | `SYS_WIN_SHOW` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 61 | `SYS_WIN_MSGBOX` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 62 | `SYS_WIN_PEEK_MSG` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 63 | `SYS_WIN_GET_MSG` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 64 | `SYS_WIN_POST_MSG` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 65 | `SYS_GDI_FILL_RECT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 66 | `SYS_GDI_TEXT_OUT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 67 | `SYS_GDI_RECTANGLE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 68 | `SYS_GDI_CLEAR` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 69 | `SYS_WIN_MOVE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 70 | `SYS_WIN_GET_RECT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 71 | `SYS_WIN_SET_TEXT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 72 | `SYS_WIN_TIMER_SET` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 73 | `SYS_WIN_TIMER_KILL` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 74 | `SYS_GDI_LINE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 75 | `SYS_GDI_ELLIPSE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 76 | `SYS_GDI_SET_PIXEL` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 77 | `SYS_WIN_GET_KEYSTATE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 78 | `SYS_WIN_GET_CURSOR` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 79 | `SYS_WIN_SET_CURSOR` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 80 | `SYS_WIN_SET_CAPTURE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 81 | `SYS_WIN_RELEASE_CAPTURE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 82 | `SYS_WIN_GET_CAPTURE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 83 | `SYS_WIN_CLIP_SET_TEXT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 84 | `SYS_WIN_CLIP_GET_TEXT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 85 | `SYS_WIN_GET_LONG` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 86 | `SYS_WIN_SET_LONG` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 87 | `SYS_WIN_INVALIDATE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 88 | `SYS_WIN_VALIDATE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 89 | `SYS_WIN_GET_ACTIVE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 90 | `SYS_WIN_SET_ACTIVE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 91 | `SYS_WIN_GET_METRIC` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 92 | `SYS_WIN_ENUM` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 93 | `SYS_WIN_FIND` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 94 | `SYS_WIN_SET_PARENT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 95 | `SYS_WIN_GET_PARENT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 96 | `SYS_WIN_GET_RELATED` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 97 | `SYS_WIN_SET_FOCUS` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 98 | `SYS_WIN_GET_FOCUS` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 99 | `SYS_WIN_CARET` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 100 | `SYS_WIN_BEEP` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 101 | `SYS_GFX_D3D_STUB` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 102 | `SYS_GDI_BITBLT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 103 | `SYS_WIN_BEGIN_PAINT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 104 | `SYS_WIN_END_PAINT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 105 | `SYS_GDI_FILL_RECT_USER` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 106 | `SYS_GDI_CREATE_COMPAT_DC` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 107 | `SYS_GDI_CREATE_COMPAT_BITMAP` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 108 | `SYS_GDI_CREATE_SOLID_BRUSH` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 109 | `SYS_GDI_GET_STOCK_OBJECT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 110 | `SYS_GDI_SELECT_OBJECT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 111 | `SYS_GDI_DELETE_DC` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 112 | `SYS_GDI_DELETE_OBJECT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 113 | `SYS_GDI_BITBLT_DC` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 114 | `SYS_GDI_SET_TEXT_COLOR` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 115 | `SYS_GDI_SET_BK_COLOR` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 116 | `SYS_GDI_SET_BK_MODE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 117 | `SYS_GDI_STRETCH_BLT_DC` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 118 | `SYS_GDI_CREATE_PEN` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 119 | `SYS_GDI_MOVE_TO_EX` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 120 | `SYS_GDI_LINE_TO` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 121 | `SYS_GDI_DRAW_TEXT_USER` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 122 | `SYS_GDI_RECTANGLE_FILLED` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 123 | `SYS_GDI_ELLIPSE_FILLED` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 124 | `SYS_GDI_PAT_BLT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 125 | `SYS_GDI_TEXT_OUT_W` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 126 | `SYS_GDI_DRAW_TEXT_W` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 127 | `SYS_GDI_GET_SYS_COLOR` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 128 | `SYS_GDI_GET_SYS_COLOR_BRUSH` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 129 | `SYS_WIN32_CUSTOM` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 130 | `SYS_REGISTRY` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 131 | `SYS_PROCESS_OPEN` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 132 | `SYS_PROCESS_VM_READ` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 133 | `SYS_PROCESS_VM_WRITE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 134 | `SYS_PROCESS_VM_QUERY` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 135 | `SYS_THREAD_SUSPEND` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 136 | `SYS_THREAD_RESUME` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 137 | `SYS_THREAD_GET_CONTEXT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 138 | `SYS_THREAD_SET_CONTEXT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 139 | `SYS_THREAD_OPEN` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 140 | `SYS_SECTION_CREATE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 141 | `SYS_SECTION_MAP` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 142 | `SYS_SECTION_UNMAP` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 143 | `SYS_FILE_UNLINK` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 144 | `SYS_FILE_RENAME` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 145 | `SYS_PROCESS_TERMINATE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 146 | `SYS_THREAD_TERMINATE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 147 | `SYS_PROCESS_QUERY_INFO` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 148 | `SYS_VM_ALLOCATE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 149 | `SYS_VM_FREE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 150 | `SYS_VM_PROTECT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 151 | `SYS_FILE_QUERY_ATTRIBUTES` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 152 | `SYS_EXECVE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 153 | `SYS_SOCKET_OP` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 154 | `SYS_DIR_OPEN` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 155 | `SYS_DIR_NEXT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 156 | `SYS_DIR_REWIND` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 157 | `SYS_DIR_NOTIFY` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 158 | `SYS_PROCESS_SPAWN` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 159 | `SYS_IOCP_CREATE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 160 | `SYS_IOCP_SET` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 161 | `SYS_IOCP_REMOVE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 162 | `SYS_IOCP_CLOSE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 163 | `SYS_JOB_CREATE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 164 | `SYS_JOB_ASSIGN` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 165 | `SYS_JOB_IS_IN` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 166 | `SYS_JOB_TERMINATE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 167 | `SYS_JOB_QUERY` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 168 | `SYS_JOB_CLOSE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 169 | `SYS_TOKEN_ADJUST` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 170 | `SYS_WIN_GET_MOUSE_DELTA` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 171 | `SYS_STDIN_READ` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 172 | `SYS_DLL_BASE_BY_NAME` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 173 | `SYS_WIN_TRACK_POPUP` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 174 | `SYS_GDI_SET_CURSOR` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 175 | `SYS_GDI_CREATE_CURSOR` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 180 | `SYS_FILE_MKDIR` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 181 | `SYS_FILE_SYMLINK` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 182 | `SYS_FILE_LINK` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 183 | `SYS_FILE_READLINK` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 184 | `SYS_SYSTEM_PERFORMANCE_INFO` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 185 | `SYS_NAMED_KOBJ_OPEN_OR_CREATE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 186 | `SYS_WIN32_CREATE_PIPE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 187 | `SYS_QUEUE_USER_APC` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 188 | `SYS_DRAIN_USER_APC` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 189 | `SYS_PRIORITY_CLASS` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 190 | `SYS_PROCESS_SPAWN_EX` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 191 | `SYS_GET_INHERITED_STD` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 192 | `SYS_HEAPEX_CREATE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 193 | `SYS_HEAPEX_DESTROY` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 194 | `SYS_HEAPEX_ALLOC` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 195 | `SYS_HEAPEX_FREE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 196 | `SYS_HEAPEX_SIZE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 197 | `SYS_HEAPEX_REALLOC` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 198 | `SYS_AUDIO_DEVICE_INFO` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 199 | `SYS_VIRTUAL_ALLOC` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 200 | `SYS_VIRTUAL_FREE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 201 | `SYS_VIRTUAL_PROTECT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 202 | `SYS_NAMED_PIPE_CREATE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 203 | `SYS_NAMED_PIPE_OPEN` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 512 | `native_gapfill_0x200` | translated | `kernel/subsystems/translation/translate.cpp::NativeClockNs` | linux-self:NowNs |
+| native | 513 | `native_gapfill_0x201` | translated | `kernel/subsystems/translation/translate.cpp::NativeGetRandom` | synthetic:xorshift-from-rdtsc |
+| native | 528 | `native_gapfill_0x210` | translated | `kernel/subsystems/translation/translate.cpp::NativeWin32Alloc` | win32:HeapAlloc |
+| native | 529 | `native_gapfill_0x211` | translated | `kernel/subsystems/translation/translate.cpp::NativeWin32Free` | win32:HeapFree |
+| nt | 0 | `NtAccessCheck` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 1 | `NtWorkerFactoryWorkerReady` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 2 | `NtAcceptConnectPort` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 3 | `NtMapUserPhysicalPagesScatter` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 4 | `NtWaitForSingleObject` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_MUTEX_WAIT` | routes to native SYS_MUTEX_WAIT |
+| nt | 5 | `NtCallbackReturn` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 6 | `NtReadFile` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_FILE_READ` | routes to native SYS_FILE_READ |
+| nt | 7 | `NtDeviceIoControlFile` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 8 | `NtWriteFile` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_FILE_WRITE` | routes to native SYS_FILE_WRITE |
+| nt | 9 | `NtRemoveIoCompletion` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 10 | `NtReleaseSemaphore` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 11 | `NtReplyWaitReceivePort` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 12 | `NtReplyPort` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 13 | `NtSetInformationThread` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 14 | `NtSetEvent` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_EVENT_SET` | routes to native SYS_EVENT_SET |
+| nt | 15 | `NtClose` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_FILE_CLOSE` | routes to native SYS_FILE_CLOSE |
+| nt | 16 | `NtQueryObject` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 17 | `NtQueryInformationFile` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_FILE_FSTAT` | routes to native SYS_FILE_FSTAT |
+| nt | 18 | `NtOpenKey` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_REGISTRY` | routes to native SYS_REGISTRY |
+| nt | 19 | `NtEnumerateValueKey` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_REGISTRY` | routes to native SYS_REGISTRY |
+| nt | 20 | `NtFindAtom` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 21 | `NtQueryDefaultLocale` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 22 | `NtQueryKey` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_REGISTRY` | routes to native SYS_REGISTRY |
+| nt | 23 | `NtQueryValueKey` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_REGISTRY` | routes to native SYS_REGISTRY |
+| nt | 24 | `NtAllocateVirtualMemory` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_VM_ALLOCATE` | routes to native SYS_VM_ALLOCATE |
+| nt | 25 | `NtQueryInformationProcess` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_PROCESS_QUERY_INFO` | routes to native SYS_PROCESS_QUERY_INFO |
+| nt | 26 | `NtWaitForMultipleObjects32` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 27 | `NtWriteFileGather` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 28 | `NtSetInformationProcess` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 29 | `NtCreateKey` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 30 | `NtFreeVirtualMemory` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_VM_FREE` | routes to native SYS_VM_FREE |
+| nt | 31 | `NtImpersonateClientOfPort` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 32 | `NtReleaseMutant` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_MUTEX_RELEASE` | routes to native SYS_MUTEX_RELEASE |
+| nt | 33 | `NtQueryInformationToken` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 34 | `NtRequestWaitReplyPort` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 35 | `NtQueryVirtualMemory` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_PROCESS_VM_QUERY` | routes to native SYS_PROCESS_VM_QUERY |
+| nt | 36 | `NtOpenThreadToken` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 37 | `NtQueryInformationThread` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 38 | `NtOpenProcess` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_PROCESS_OPEN` | routes to native SYS_PROCESS_OPEN |
+| nt | 39 | `NtSetInformationFile` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_FILE_SEEK` | routes to native SYS_FILE_SEEK |
+| nt | 40 | `NtMapViewOfSection` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_SECTION_MAP` | routes to native SYS_SECTION_MAP |
+| nt | 41 | `NtAccessCheckAndAuditAlarm` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 42 | `NtUnmapViewOfSection` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_SECTION_UNMAP` | routes to native SYS_SECTION_UNMAP |
+| nt | 43 | `NtReplyWaitReceivePortEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 44 | `NtTerminateProcess` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_PROCESS_TERMINATE` | routes to native SYS_PROCESS_TERMINATE |
+| nt | 45 | `NtSetEventBoostPriority` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 46 | `NtReadFileScatter` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 47 | `NtOpenThreadTokenEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 48 | `NtOpenProcessTokenEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 49 | `NtQueryPerformanceCounter` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_PERF_COUNTER` | routes to native SYS_PERF_COUNTER |
+| nt | 50 | `NtEnumerateKey` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_REGISTRY` | routes to native SYS_REGISTRY |
+| nt | 51 | `NtOpenFile` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_FILE_OPEN` | routes to native SYS_FILE_OPEN |
+| nt | 52 | `NtDelayExecution` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_SLEEP_MS` | routes to native SYS_SLEEP_MS |
+| nt | 53 | `NtQueryDirectoryFile` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 54 | `NtQuerySystemInformation` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 55 | `NtOpenSection` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 56 | `NtQueryTimer` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 57 | `NtFsControlFile` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 58 | `NtWriteVirtualMemory` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_PROCESS_VM_WRITE` | routes to native SYS_PROCESS_VM_WRITE |
+| nt | 59 | `NtCloseObjectAuditAlarm` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 60 | `NtDuplicateObject` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 61 | `NtQueryAttributesFile` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_FILE_QUERY_ATTRIBUTES` | routes to native SYS_FILE_QUERY_ATTRIBUTES |
+| nt | 62 | `NtClearEvent` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 63 | `NtReadVirtualMemory` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_PROCESS_VM_READ` | routes to native SYS_PROCESS_VM_READ |
+| nt | 64 | `NtOpenEvent` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 65 | `NtAdjustPrivilegesToken` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 66 | `NtDuplicateToken` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 67 | `NtContinue` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 68 | `NtQueryDefaultUILanguage` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 69 | `NtQueueApcThread` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 70 | `NtYieldExecution` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_YIELD` | routes to native SYS_YIELD |
+| nt | 71 | `NtAddAtom` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 72 | `NtCreateEvent` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_EVENT_CREATE` | routes to native SYS_EVENT_CREATE |
+| nt | 73 | `NtQueryVolumeInformationFile` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 74 | `NtCreateSection` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_SECTION_CREATE` | routes to native SYS_SECTION_CREATE |
+| nt | 75 | `NtFlushBuffersFile` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_NT_INVOKE` | routes to native SYS_NT_INVOKE |
+| nt | 76 | `NtApphelpCacheControl` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 77 | `NtCreateProcessEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 78 | `NtCreateThread` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 79 | `NtIsProcessInJob` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 80 | `NtProtectVirtualMemory` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_VM_PROTECT` | routes to native SYS_VM_PROTECT |
+| nt | 81 | `NtQuerySection` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 82 | `NtResumeThread` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_THREAD_RESUME` | routes to native SYS_THREAD_RESUME |
+| nt | 83 | `NtTerminateThread` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_NT_INVOKE` | routes to native SYS_NT_INVOKE |
+| nt | 84 | `NtReadRequestData` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 85 | `NtCreateFile` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_FILE_OPEN` | routes to native SYS_FILE_OPEN |
+| nt | 86 | `NtQueryEvent` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 87 | `NtWriteRequestData` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 88 | `NtOpenDirectoryObject` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 89 | `NtAccessCheckByTypeAndAuditAlarm` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 90 | `NtQuerySystemTime` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_GETTIME_FT` | routes to native SYS_GETTIME_FT |
+| nt | 91 | `NtWaitForMultipleObjects` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_EVENT_WAIT` | routes to native SYS_EVENT_WAIT |
+| nt | 92 | `NtSetInformationObject` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 93 | `NtCancelIoFile` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 94 | `NtTraceEvent` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 95 | `NtPowerInformation` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 96 | `NtSetValueKey` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_REGISTRY` | routes to native SYS_REGISTRY |
+| nt | 97 | `NtCancelTimer` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 98 | `NtSetTimer` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 99 | `NtAccessCheckByType` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 100 | `NtAccessCheckByTypeResultList` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 101 | `NtAccessCheckByTypeResultListAndAuditAlarm` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 102 | `NtAccessCheckByTypeResultListAndAuditAlarmByHandle` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 103 | `NtAcquireCrossVmMutant` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 104 | `NtAcquireProcessActivityReference` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 105 | `NtAddAtomEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 106 | `NtAddBootEntry` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 107 | `NtAddDriverEntry` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 108 | `NtAdjustGroupsToken` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 109 | `NtAdjustTokenClaimsAndDeviceGroups` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 110 | `NtAlertMultipleThreadByThreadId` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 111 | `NtAlertResumeThread` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_THREAD_RESUME` | routes to native SYS_THREAD_RESUME |
+| nt | 112 | `NtAlertThread` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 113 | `NtAlertThreadByThreadId` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 114 | `NtAlertThreadByThreadIdEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 115 | `NtAllocateLocallyUniqueId` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 116 | `NtAllocateReserveObject` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 117 | `NtAllocateUserPhysicalPages` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 118 | `NtAllocateUserPhysicalPagesEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 119 | `NtAllocateUuids` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 120 | `NtAllocateVirtualMemoryEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 121 | `NtAlpcAcceptConnectPort` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 122 | `NtAlpcCancelMessage` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 123 | `NtAlpcConnectPort` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 124 | `NtAlpcConnectPortEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 125 | `NtAlpcCreatePort` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 126 | `NtAlpcCreatePortSection` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 127 | `NtAlpcCreateResourceReserve` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 128 | `NtAlpcCreateSectionView` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 129 | `NtAlpcCreateSecurityContext` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 130 | `NtAlpcDeletePortSection` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 131 | `NtAlpcDeleteResourceReserve` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 132 | `NtAlpcDeleteSectionView` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 133 | `NtAlpcDeleteSecurityContext` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 134 | `NtAlpcDisconnectPort` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 135 | `NtAlpcImpersonateClientContainerOfPort` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 136 | `NtAlpcImpersonateClientOfPort` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 137 | `NtAlpcOpenSenderProcess` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 138 | `NtAlpcOpenSenderThread` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 139 | `NtAlpcQueryInformation` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 140 | `NtAlpcQueryInformationMessage` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 141 | `NtAlpcRevokeSecurityContext` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 142 | `NtAlpcSendWaitReceivePort` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 143 | `NtAlpcSetInformation` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 144 | `NtAreMappedFilesTheSame` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 145 | `NtAssignProcessToJobObject` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 146 | `NtAssociateWaitCompletionPacket` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 147 | `NtCallEnclave` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 148 | `NtCancelIoFileEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 149 | `NtCancelSynchronousIoFile` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 150 | `NtCancelTimer2` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 151 | `NtCancelWaitCompletionPacket` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 152 | `NtChangeProcessState` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 153 | `NtChangeThreadState` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 154 | `NtCommitComplete` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 155 | `NtCommitEnlistment` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 156 | `NtCommitRegistryTransaction` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 157 | `NtCommitTransaction` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 158 | `NtCompactKeys` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 159 | `NtCompareObjects` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 160 | `NtCompareSigningLevels` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 161 | `NtCompareTokens` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 162 | `NtCompleteConnectPort` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 163 | `NtCompressKey` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 164 | `NtConnectPort` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 165 | `NtContinueEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 166 | `NtConvertBetweenAuxiliaryCounterAndPerformanceCounter` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 167 | `NtCopyFileChunk` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 168 | `NtCreateCpuPartition` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 169 | `NtCreateCrossVmEvent` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 170 | `NtCreateCrossVmMutant` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 171 | `NtCreateDebugObject` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 172 | `NtCreateDirectoryObject` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 173 | `NtCreateDirectoryObjectEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 174 | `NtCreateEnclave` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 175 | `NtCreateEnlistment` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 176 | `NtCreateEventPair` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 177 | `NtCreateIRTimer` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 178 | `NtCreateIoCompletion` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 179 | `NtCreateIoRing` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 180 | `NtCreateJobObject` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 181 | `NtCreateJobSet` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 182 | `NtCreateKeyTransacted` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 183 | `NtCreateKeyedEvent` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 184 | `NtCreateLowBoxToken` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 185 | `NtCreateMailslotFile` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 186 | `NtCreateMutant` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_MUTEX_CREATE` | routes to native SYS_MUTEX_CREATE |
+| nt | 187 | `NtCreateNamedPipeFile` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 188 | `NtCreatePagingFile` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 189 | `NtCreatePartition` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 190 | `NtCreatePort` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 191 | `NtCreatePrivateNamespace` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 192 | `NtCreateProcess` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 193 | `NtCreateProcessStateChange` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 194 | `NtCreateProfile` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 195 | `NtCreateProfileEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 196 | `NtCreateRegistryTransaction` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 197 | `NtCreateResourceManager` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 198 | `NtCreateSectionEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 199 | `NtCreateSemaphore` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 200 | `NtCreateSymbolicLinkObject` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 201 | `NtCreateThreadEx` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_THREAD_CREATE` | routes to native SYS_THREAD_CREATE |
+| nt | 202 | `NtCreateThreadStateChange` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 203 | `NtCreateTimer` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 204 | `NtCreateTimer2` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 205 | `NtCreateToken` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 206 | `NtCreateTokenEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 207 | `NtCreateTransaction` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 208 | `NtCreateTransactionManager` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 209 | `NtCreateUserProcess` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 210 | `NtCreateWaitCompletionPacket` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 211 | `NtCreateWaitablePort` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 212 | `NtCreateWnfStateName` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 213 | `NtCreateWorkerFactory` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 214 | `NtDebugActiveProcess` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 215 | `NtDebugContinue` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 216 | `NtDeleteAtom` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 217 | `NtDeleteBootEntry` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 218 | `NtDeleteDriverEntry` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 219 | `NtDeleteFile` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_FILE_UNLINK` | routes to native SYS_FILE_UNLINK |
+| nt | 220 | `NtDeleteKey` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 221 | `NtDeleteObjectAuditAlarm` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 222 | `NtDeletePrivateNamespace` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 223 | `NtDeleteValueKey` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_REGISTRY` | routes to native SYS_REGISTRY |
+| nt | 224 | `NtDeleteWnfStateData` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 225 | `NtDeleteWnfStateName` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 226 | `NtDirectGraphicsCall` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 227 | `NtDisableLastKnownGood` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 228 | `NtDisplayString` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 229 | `NtDrawText` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 230 | `NtEnableLastKnownGood` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 231 | `NtEnumerateBootEntries` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 232 | `NtEnumerateDriverEntries` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 233 | `NtEnumerateSystemEnvironmentValuesEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 234 | `NtEnumerateTransactionObject` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 235 | `NtExtendSection` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 236 | `NtFilterBootOption` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 237 | `NtFilterToken` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 238 | `NtFilterTokenEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 239 | `NtFlushBuffersFileEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 240 | `NtFlushInstallUILanguage` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 241 | `NtFlushInstructionCache` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 242 | `NtFlushKey` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_REGISTRY` | routes to native SYS_REGISTRY |
+| nt | 243 | `NtFlushProcessWriteBuffers` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 244 | `NtFlushVirtualMemory` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 245 | `NtFlushWriteBuffer` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 246 | `NtFreeUserPhysicalPages` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 247 | `NtFreezeRegistry` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 248 | `NtFreezeTransactions` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 249 | `NtGetCachedSigningLevel` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 250 | `NtGetCompleteWnfStateSubscription` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 251 | `NtGetContextThread` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_THREAD_GET_CONTEXT` | routes to native SYS_THREAD_GET_CONTEXT |
+| nt | 252 | `NtGetCurrentProcessorNumber` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_NT_INVOKE` | routes to native SYS_NT_INVOKE |
+| nt | 253 | `NtGetCurrentProcessorNumberEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 254 | `NtGetDevicePowerState` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 255 | `NtGetMUIRegistryInfo` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 256 | `NtGetNextProcess` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 257 | `NtGetNextThread` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 258 | `NtGetNlsSectionPtr` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 259 | `NtGetNotificationResourceManager` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 260 | `NtGetWriteWatch` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 261 | `NtImpersonateAnonymousToken` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 262 | `NtImpersonateThread` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 263 | `NtInitializeEnclave` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 264 | `NtInitializeNlsFiles` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 265 | `NtInitializeRegistry` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 266 | `NtInitiatePowerAction` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 267 | `NtIsSystemResumeAutomatic` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 268 | `NtIsUILanguageComitted` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 269 | `NtListenPort` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 270 | `NtLoadDriver` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 271 | `NtLoadEnclaveData` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 272 | `NtLoadKey` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 273 | `NtLoadKey2` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 274 | `NtLoadKey3` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 275 | `NtLoadKeyEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 276 | `NtLockFile` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 277 | `NtLockProductActivationKeys` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 278 | `NtLockRegistryKey` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 279 | `NtLockVirtualMemory` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 280 | `NtMakePermanentObject` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 281 | `NtMakeTemporaryObject` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 282 | `NtManageHotPatch` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 283 | `NtManagePartition` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 284 | `NtMapCMFModule` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 285 | `NtMapUserPhysicalPages` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 286 | `NtMapViewOfSectionEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 287 | `NtModifyBootEntry` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 288 | `NtModifyDriverEntry` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 289 | `NtNotifyChangeDirectoryFile` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 290 | `NtNotifyChangeDirectoryFileEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 291 | `NtNotifyChangeKey` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 292 | `NtNotifyChangeMultipleKeys` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 293 | `NtNotifyChangeSession` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 294 | `NtOpenCpuPartition` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 295 | `NtOpenEnlistment` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 296 | `NtOpenEventPair` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 297 | `NtOpenIoCompletion` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 298 | `NtOpenJobObject` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 299 | `NtOpenKeyEx` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_REGISTRY` | routes to native SYS_REGISTRY |
+| nt | 300 | `NtOpenKeyTransacted` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 301 | `NtOpenKeyTransactedEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 302 | `NtOpenKeyedEvent` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 303 | `NtOpenMutant` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 304 | `NtOpenObjectAuditAlarm` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 305 | `NtOpenPartition` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 306 | `NtOpenPrivateNamespace` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 307 | `NtOpenProcessToken` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 308 | `NtOpenRegistryTransaction` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 309 | `NtOpenResourceManager` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 310 | `NtOpenSemaphore` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 311 | `NtOpenSession` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 312 | `NtOpenSymbolicLinkObject` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 313 | `NtOpenThread` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_THREAD_OPEN` | routes to native SYS_THREAD_OPEN |
+| nt | 314 | `NtOpenTimer` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 315 | `NtOpenTransaction` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 316 | `NtOpenTransactionManager` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 317 | `NtPlugPlayControl` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 318 | `NtPrePrepareComplete` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 319 | `NtPrePrepareEnlistment` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 320 | `NtPrepareComplete` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 321 | `NtPrepareEnlistment` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 322 | `NtPrivilegeCheck` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 323 | `NtPrivilegeObjectAuditAlarm` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 324 | `NtPrivilegedServiceAuditAlarm` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 325 | `NtPropagationComplete` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 326 | `NtPropagationFailed` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 327 | `NtPssCaptureVaSpaceBulk` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 328 | `NtPulseEvent` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 329 | `NtQueryAuxiliaryCounterFrequency` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 330 | `NtQueryBootEntryOrder` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 331 | `NtQueryBootOptions` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 332 | `NtQueryDebugFilterState` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 333 | `NtQueryDirectoryFileEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 334 | `NtQueryDirectoryObject` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 335 | `NtQueryDriverEntryOrder` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 336 | `NtQueryEaFile` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 337 | `NtQueryFullAttributesFile` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_FILE_QUERY_ATTRIBUTES` | routes to native SYS_FILE_QUERY_ATTRIBUTES |
+| nt | 338 | `NtQueryInformationAtom` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 339 | `NtQueryInformationByName` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 340 | `NtQueryInformationCpuPartition` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 341 | `NtQueryInformationEnlistment` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 342 | `NtQueryInformationJobObject` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 343 | `NtQueryInformationPort` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 344 | `NtQueryInformationResourceManager` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 345 | `NtQueryInformationTransaction` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 346 | `NtQueryInformationTransactionManager` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 347 | `NtQueryInformationWorkerFactory` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 348 | `NtQueryInstallUILanguage` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 349 | `NtQueryIntervalProfile` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 350 | `NtQueryIoCompletion` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 351 | `NtQueryIoRingCapabilities` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 352 | `NtQueryLicenseValue` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 353 | `NtQueryMultipleValueKey` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 354 | `NtQueryMutant` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 355 | `NtQueryOpenSubKeys` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 356 | `NtQueryOpenSubKeysEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 357 | `NtQueryPortInformationProcess` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 358 | `NtQueryQuotaInformationFile` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 359 | `NtQuerySecurityAttributesToken` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 360 | `NtQuerySecurityObject` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 361 | `NtQuerySecurityPolicy` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 362 | `NtQuerySemaphore` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 363 | `NtQuerySymbolicLinkObject` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 364 | `NtQuerySystemEnvironmentValue` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 365 | `NtQuerySystemEnvironmentValueEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 366 | `NtQuerySystemInformationEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 367 | `NtQueryTimerResolution` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 368 | `NtQueryWnfStateData` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 369 | `NtQueryWnfStateNameInformation` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 370 | `NtQueueApcThreadEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 371 | `NtQueueApcThreadEx2` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 372 | `NtRaiseException` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 373 | `NtRaiseHardError` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 374 | `NtReadOnlyEnlistment` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 375 | `NtReadVirtualMemoryEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 376 | `NtRecoverEnlistment` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 377 | `NtRecoverResourceManager` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 378 | `NtRecoverTransactionManager` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 379 | `NtRegisterProtocolAddressInformation` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 380 | `NtRegisterThreadTerminatePort` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 381 | `NtReleaseKeyedEvent` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 382 | `NtReleaseWorkerFactoryWorker` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 383 | `NtRemoveIoCompletionEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 384 | `NtRemoveProcessDebug` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 385 | `NtRenameKey` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 386 | `NtRenameTransactionManager` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 387 | `NtReplaceKey` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 388 | `NtReplacePartitionUnit` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 389 | `NtReplyWaitReplyPort` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 390 | `NtRequestPort` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 391 | `NtResetEvent` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_EVENT_RESET` | routes to native SYS_EVENT_RESET |
+| nt | 392 | `NtResetWriteWatch` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 393 | `NtRestoreKey` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 394 | `NtResumeProcess` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 395 | `NtRevertContainerImpersonation` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 396 | `NtRollbackComplete` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 397 | `NtRollbackEnlistment` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 398 | `NtRollbackRegistryTransaction` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 399 | `NtRollbackTransaction` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 400 | `NtRollforwardTransactionManager` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 401 | `NtSaveKey` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 402 | `NtSaveKeyEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 403 | `NtSaveMergedKeys` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 404 | `NtSecureConnectPort` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 405 | `NtSerializeBoot` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 406 | `NtSetBootEntryOrder` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 407 | `NtSetBootOptions` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 408 | `NtSetCachedSigningLevel` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 409 | `NtSetCachedSigningLevel2` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 410 | `NtSetContextThread` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_THREAD_SET_CONTEXT` | routes to native SYS_THREAD_SET_CONTEXT |
+| nt | 411 | `NtSetDebugFilterState` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 412 | `NtSetDefaultHardErrorPort` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 413 | `NtSetDefaultLocale` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 414 | `NtSetDefaultUILanguage` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 415 | `NtSetDriverEntryOrder` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 416 | `NtSetEaFile` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 417 | `NtSetEventEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 418 | `NtSetHighEventPair` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 419 | `NtSetHighWaitLowEventPair` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 420 | `NtSetIRTimer` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 421 | `NtSetInformationCpuPartition` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 422 | `NtSetInformationDebugObject` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 423 | `NtSetInformationEnlistment` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 424 | `NtSetInformationIoRing` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 425 | `NtSetInformationJobObject` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 426 | `NtSetInformationKey` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 427 | `NtSetInformationResourceManager` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 428 | `NtSetInformationSymbolicLink` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 429 | `NtSetInformationToken` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 430 | `NtSetInformationTransaction` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 431 | `NtSetInformationTransactionManager` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 432 | `NtSetInformationVirtualMemory` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 433 | `NtSetInformationWorkerFactory` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 434 | `NtSetIntervalProfile` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 435 | `NtSetIoCompletion` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 436 | `NtSetIoCompletionEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 437 | `NtSetLdtEntries` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 438 | `NtSetLowEventPair` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 439 | `NtSetLowWaitHighEventPair` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 440 | `NtSetQuotaInformationFile` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 441 | `NtSetSecurityObject` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 442 | `NtSetSystemEnvironmentValue` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 443 | `NtSetSystemEnvironmentValueEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 444 | `NtSetSystemInformation` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 445 | `NtSetSystemPowerState` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 446 | `NtSetSystemTime` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 447 | `NtSetThreadExecutionState` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 448 | `NtSetTimer2` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 449 | `NtSetTimerEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 450 | `NtSetTimerResolution` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 451 | `NtSetUuidSeed` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 452 | `NtSetVolumeInformationFile` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 453 | `NtSetWnfProcessNotificationEvent` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 454 | `NtShutdownSystem` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 455 | `NtShutdownWorkerFactory` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 456 | `NtSignalAndWaitForSingleObject` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 457 | `NtSinglePhaseReject` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 458 | `NtStartProfile` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 459 | `NtStopProfile` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 460 | `NtSubmitIoRing` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 461 | `NtSubscribeWnfStateChange` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 462 | `NtSuspendProcess` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 463 | `NtSuspendThread` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_THREAD_SUSPEND` | routes to native SYS_THREAD_SUSPEND |
+| nt | 464 | `NtSystemDebugControl` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 465 | `NtTerminateEnclave` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 466 | `NtTerminateJobObject` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 467 | `NtTestAlert` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 468 | `NtThawRegistry` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 469 | `NtThawTransactions` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 470 | `NtTraceControl` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 471 | `NtTranslateFilePath` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 472 | `NtUmsThreadYield` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 473 | `NtUnloadDriver` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 474 | `NtUnloadKey` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 475 | `NtUnloadKey2` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 476 | `NtUnloadKeyEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 477 | `NtUnlockFile` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 478 | `NtUnlockVirtualMemory` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 479 | `NtUnmapViewOfSectionEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 480 | `NtUnsubscribeWnfStateChange` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 481 | `NtUpdateWnfStateData` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 482 | `NtVdmControl` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 483 | `NtWaitForAlertByThreadId` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 484 | `NtWaitForDebugEvent` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 485 | `NtWaitForKeyedEvent` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 486 | `NtWaitForWorkViaWorkerFactory` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 487 | `NtWaitHighEventPair` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 488 | `NtWaitLowEventPair` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
