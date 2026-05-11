@@ -1787,6 +1787,33 @@ void ReplayCommandBuffer(VkCommandBuffer cb)
         case CmdOp::SetScissor:
         case CmdOp::BindVertexBuffer:
         case CmdOp::BindIndexBuffer:
+        // Indirect / dynamic-state-2 / sync2 / subpass / extended-query
+        // recorded entries — no GPU side effect in v0; the AppendOp at
+        // record time already ticked the per-op counter, so the
+        // replay walk just acknowledges and moves on.
+        case CmdOp::DrawIndirect:
+        case CmdOp::DrawIndexedIndirect:
+        case CmdOp::DispatchIndirect:
+        case CmdOp::SetCullMode:
+        case CmdOp::SetFrontFace:
+        case CmdOp::SetPrimitiveTopology:
+        case CmdOp::SetDepthTestEnable:
+        case CmdOp::SetDepthWriteEnable:
+        case CmdOp::SetDepthCompareOp:
+        case CmdOp::SetStencilTestEnable:
+        case CmdOp::SetStencilOp:
+        case CmdOp::SetDepthBoundsTestEnable:
+        case CmdOp::SetViewportWithCount:
+        case CmdOp::SetScissorWithCount:
+        case CmdOp::BindVertexBuffers2:
+        case CmdOp::NextSubpass:
+        case CmdOp::CopyQueryPoolResults:
+        case CmdOp::BeginQueryIndexed:
+        case CmdOp::EndQueryIndexed:
+        case CmdOp::SetEvent2:
+        case CmdOp::ResetEvent2:
+        case CmdOp::WaitEvents2:
+        case CmdOp::PipelineBarrier2:
         case CmdOp::None:
             break;
         }

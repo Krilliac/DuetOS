@@ -644,6 +644,94 @@ VkResult VkCmdSetStencilWriteMask(VkCommandBuffer cb, u32 face_mask, u32 write_m
 VkResult VkCmdSetStencilReference(VkCommandBuffer cb, u32 face_mask, u32 reference);
 
 // -------------------------------------------------------------------
+// Indirect draw / dispatch (VK 1.0 core).
+// -------------------------------------------------------------------
+//
+// The "indirect" forms read their parameters from a buffer at
+// replay time instead of from the cb's tape. v0 records the
+// buffer handle + offset; the replay walks them when the draw
+// reaches the pipeline, treating non-mapped buffers as zero
+// draws.
+VkResult VkCmdDrawIndirect(VkCommandBuffer cb, VkBuffer buffer, u64 offset, u32 draw_count, u32 stride);
+VkResult VkCmdDrawIndexedIndirect(VkCommandBuffer cb, VkBuffer buffer, u64 offset, u32 draw_count, u32 stride);
+VkResult VkCmdDispatchIndirect(VkCommandBuffer cb, VkBuffer buffer, u64 offset);
+
+// -------------------------------------------------------------------
+// VK 1.3 core dynamic state ("dynamic state 2").
+// -------------------------------------------------------------------
+//
+// Promoted from VK_EXT_extended_dynamic_state{1,2,3} into core in
+// 1.3. v0 records the value into the cb's tape so submission stats
+// see the call; the rasterizer doesn't consume any of them yet.
+VkResult VkCmdSetCullMode(VkCommandBuffer cb, u32 cull_mode);
+VkResult VkCmdSetFrontFace(VkCommandBuffer cb, u32 front_face);
+VkResult VkCmdSetPrimitiveTopology(VkCommandBuffer cb, u32 topology);
+VkResult VkCmdSetDepthTestEnable(VkCommandBuffer cb, u32 enable);
+VkResult VkCmdSetDepthWriteEnable(VkCommandBuffer cb, u32 enable);
+VkResult VkCmdSetDepthCompareOp(VkCommandBuffer cb, u32 compare_op);
+VkResult VkCmdSetStencilTestEnable(VkCommandBuffer cb, u32 enable);
+VkResult VkCmdSetStencilOp(VkCommandBuffer cb, u32 face_mask, u32 fail_op, u32 pass_op, u32 depth_fail_op,
+                           u32 compare_op);
+VkResult VkCmdSetDepthBoundsTestEnable(VkCommandBuffer cb, u32 enable);
+VkResult VkCmdSetViewportWithCount(VkCommandBuffer cb, u32 count, const VkViewport* viewports);
+VkResult VkCmdSetScissorWithCount(VkCommandBuffer cb, u32 count, const VkRect2D* scissors);
+VkResult VkCmdBindVertexBuffers2(VkCommandBuffer cb, u32 first_binding, u32 count, const VkBuffer* buffers,
+                                 const u64* offsets, const u64* sizes, const u64* strides);
+
+// -------------------------------------------------------------------
+// Render-pass subpass advance (VK 1.0 core).
+// -------------------------------------------------------------------
+//
+// Multi-subpass passes need a transition point between subpasses.
+// v0 has single-subpass passes today; the call is recorded for
+// stats and advances the cb's subpass counter so downstream
+// asserts don't trip.
+VkResult VkCmdNextSubpass(VkCommandBuffer cb, u32 contents);
+
+// -------------------------------------------------------------------
+// Query — extended forms.
+// -------------------------------------------------------------------
+
+/// Copy query-pool results into a host-visible buffer at submit
+/// time. v0 records the (pool, range, dst_buffer, dst_offset,
+/// stride, flags) tuple; replay walks the pool's result array and
+/// writes 64-bit zeros for each slot when flags carry the WAIT bit
+/// (the bit demands a blocking wait on a pool with no producer —
+/// v0's queries never get written, so zero is the documented
+/// "result not yet available" value).
+VkResult VkCmdCopyQueryPoolResults(VkCommandBuffer cb, VkQueryPool pool, u32 first_query, u32 query_count,
+                                   VkBuffer dst_buffer, u64 dst_offset, u64 stride, u32 flags);
+
+/// Indexed query begin / end — VK_EXT_transform_feedback. The
+/// `index` selects a transform-feedback stream; v0 has no XFB
+/// pipeline so the index is recorded but unused.
+VkResult VkCmdBeginQueryIndexed(VkCommandBuffer cb, VkQueryPool pool, u32 query, u32 flags, u32 index);
+VkResult VkCmdEndQueryIndexed(VkCommandBuffer cb, VkQueryPool pool, u32 query, u32 index);
+
+// -------------------------------------------------------------------
+// Synchronization2 (VK 1.3 core, promoted from VK_KHR_synchronization2).
+// -------------------------------------------------------------------
+//
+// Replace the legacy single-stage-mask APIs with a unified
+// VkDependencyInfo that carries memory + buffer + image barriers
+// in one call. v0 doesn't do real GPU-side hazard tracking; the
+// calls are recorded into the cb's tape so submit stats see them.
+VkResult VkCmdSetEvent2(VkCommandBuffer cb, VkEvent event, u64 stage_mask);
+VkResult VkCmdResetEvent2(VkCommandBuffer cb, VkEvent event, u64 stage_mask);
+VkResult VkCmdWaitEvents2(VkCommandBuffer cb, u32 count, const VkEvent* events);
+VkResult VkCmdPipelineBarrier2(VkCommandBuffer cb, u64 src_stage_mask, u64 dst_stage_mask, u32 dependency_flags);
+
+// -------------------------------------------------------------------
+// Physical-device sparse image queries.
+// -------------------------------------------------------------------
+//
+// Sparse resources are not supported in v0; the count returned
+// is always zero (which the spec defines as "no sparse formats
+// supported for this combination").
+VkResult VkGetPhysicalDeviceSparseImageFormatProperties(VkPhysicalDevice phys, u32 format, u32 type, u32 samples,
+                                                        u32 usage, u32 tiling, u32* count);
+
+// -------------------------------------------------------------------
 // VK_KHR_dynamic_rendering — render passes without VkRenderPass.
 // -------------------------------------------------------------------
 //

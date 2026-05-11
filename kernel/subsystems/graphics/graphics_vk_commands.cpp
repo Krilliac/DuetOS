@@ -503,4 +503,280 @@ VkResult VkCmdClearDepthStencilImage(VkCommandBuffer cb, VkImage image, float de
     return AppendOp(cb, op);
 }
 
+// -------------------------------------------------------------------
+// Indirect draw / dispatch (VK 1.0 core).
+// -------------------------------------------------------------------
+
+VkResult VkCmdDrawIndirect(VkCommandBuffer cb, VkBuffer buffer, u64 offset, u32 draw_count, u32 stride)
+{
+    if (!HandleInRange(buffer, kBufferBase) || !PoolIsLive(g_buffer_pool, SlotOf(buffer, kBufferBase)))
+        return VkResult::ErrorInitializationFailed;
+    CmdRecord op{};
+    op.op = CmdOp::DrawIndirect;
+    op.src_buffer = buffer;
+    op.src_offset = offset;
+    op.vertex_count = draw_count;
+    op.first_vertex = stride;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdDrawIndexedIndirect(VkCommandBuffer cb, VkBuffer buffer, u64 offset, u32 draw_count, u32 stride)
+{
+    if (!HandleInRange(buffer, kBufferBase) || !PoolIsLive(g_buffer_pool, SlotOf(buffer, kBufferBase)))
+        return VkResult::ErrorInitializationFailed;
+    CmdRecord op{};
+    op.op = CmdOp::DrawIndexedIndirect;
+    op.src_buffer = buffer;
+    op.src_offset = offset;
+    op.index_count = draw_count;
+    op.first_index = stride;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdDispatchIndirect(VkCommandBuffer cb, VkBuffer buffer, u64 offset)
+{
+    if (!HandleInRange(buffer, kBufferBase) || !PoolIsLive(g_buffer_pool, SlotOf(buffer, kBufferBase)))
+        return VkResult::ErrorInitializationFailed;
+    CmdRecord op{};
+    op.op = CmdOp::DispatchIndirect;
+    op.src_buffer = buffer;
+    op.src_offset = offset;
+    return AppendOp(cb, op);
+}
+
+// -------------------------------------------------------------------
+// VK 1.3 core dynamic state — recorded only.
+// -------------------------------------------------------------------
+
+VkResult VkCmdSetCullMode(VkCommandBuffer cb, u32 cull_mode)
+{
+    CmdRecord op{};
+    op.op = CmdOp::SetCullMode;
+    op.vertex_count = cull_mode;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdSetFrontFace(VkCommandBuffer cb, u32 front_face)
+{
+    CmdRecord op{};
+    op.op = CmdOp::SetFrontFace;
+    op.vertex_count = front_face;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdSetPrimitiveTopology(VkCommandBuffer cb, u32 topology)
+{
+    CmdRecord op{};
+    op.op = CmdOp::SetPrimitiveTopology;
+    op.vertex_count = topology;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdSetDepthTestEnable(VkCommandBuffer cb, u32 enable)
+{
+    CmdRecord op{};
+    op.op = CmdOp::SetDepthTestEnable;
+    op.vertex_count = enable;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdSetDepthWriteEnable(VkCommandBuffer cb, u32 enable)
+{
+    CmdRecord op{};
+    op.op = CmdOp::SetDepthWriteEnable;
+    op.vertex_count = enable;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdSetDepthCompareOp(VkCommandBuffer cb, u32 compare_op)
+{
+    CmdRecord op{};
+    op.op = CmdOp::SetDepthCompareOp;
+    op.vertex_count = compare_op;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdSetStencilTestEnable(VkCommandBuffer cb, u32 enable)
+{
+    CmdRecord op{};
+    op.op = CmdOp::SetStencilTestEnable;
+    op.vertex_count = enable;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdSetStencilOp(VkCommandBuffer cb, u32 face_mask, u32 fail_op, u32 pass_op, u32 depth_fail_op,
+                           u32 compare_op)
+{
+    CmdRecord op{};
+    op.op = CmdOp::SetStencilOp;
+    op.vertex_count = face_mask;
+    op.first_vertex = fail_op;
+    op.instance_count = pass_op;
+    op.first_instance = depth_fail_op;
+    op.index_count = compare_op;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdSetDepthBoundsTestEnable(VkCommandBuffer cb, u32 enable)
+{
+    CmdRecord op{};
+    op.op = CmdOp::SetDepthBoundsTestEnable;
+    op.vertex_count = enable;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdSetViewportWithCount(VkCommandBuffer cb, u32 count, const VkViewport* viewports)
+{
+    (void)viewports;
+    CmdRecord op{};
+    op.op = CmdOp::SetViewportWithCount;
+    op.vertex_count = count;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdSetScissorWithCount(VkCommandBuffer cb, u32 count, const VkRect2D* scissors)
+{
+    CmdRecord op{};
+    op.op = CmdOp::SetScissorWithCount;
+    op.vertex_count = count;
+    if (count > 0 && scissors != nullptr)
+        op.area = scissors[0];
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdBindVertexBuffers2(VkCommandBuffer cb, u32 first_binding, u32 count, const VkBuffer* buffers,
+                                 const u64* offsets, const u64* sizes, const u64* strides)
+{
+    (void)sizes;
+    (void)strides;
+    if (count == 0)
+        return VkResult::Success;
+    if (buffers == nullptr)
+        return VkResult::ErrorInitializationFailed;
+    for (u32 i = 0; i < count; ++i)
+    {
+        if (!HandleInRange(buffers[i], kBufferBase) || !PoolIsLive(g_buffer_pool, SlotOf(buffers[i], kBufferBase)))
+            return VkResult::ErrorInitializationFailed;
+    }
+    CmdRecord op{};
+    op.op = CmdOp::BindVertexBuffers2;
+    op.vertex_buffer = buffers[0];
+    op.vertex_offset_bytes = (offsets != nullptr) ? offsets[0] : 0;
+    op.vertex_binding = first_binding;
+    return AppendOp(cb, op);
+}
+
+// -------------------------------------------------------------------
+// Subpass advance.
+// -------------------------------------------------------------------
+
+VkResult VkCmdNextSubpass(VkCommandBuffer cb, u32 contents)
+{
+    CmdRecord op{};
+    op.op = CmdOp::NextSubpass;
+    op.vertex_count = contents;
+    return AppendOp(cb, op);
+}
+
+// -------------------------------------------------------------------
+// Extended query commands.
+// -------------------------------------------------------------------
+
+VkResult VkCmdCopyQueryPoolResults(VkCommandBuffer cb, VkQueryPool pool, u32 first_query, u32 query_count,
+                                   VkBuffer dst_buffer, u64 dst_offset, u64 stride, u32 flags)
+{
+    if (!HandleInRange(dst_buffer, kBufferBase) || !PoolIsLive(g_buffer_pool, SlotOf(dst_buffer, kBufferBase)))
+        return VkResult::ErrorInitializationFailed;
+    CmdRecord op{};
+    op.op = CmdOp::CopyQueryPoolResults;
+    op.dst_buffer = dst_buffer;
+    op.dst_offset = dst_offset;
+    op.first_index = first_query;
+    op.index_count = query_count;
+    op.vertex_count = static_cast<u32>(stride);
+    op.first_instance = flags;
+    op.vertex_offset_bytes = pool;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdBeginQueryIndexed(VkCommandBuffer cb, VkQueryPool pool, u32 query, u32 flags, u32 index)
+{
+    CmdRecord op{};
+    op.op = CmdOp::BeginQueryIndexed;
+    op.vertex_offset_bytes = pool;
+    op.first_index = query;
+    op.first_instance = flags;
+    op.vertex_count = index;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdEndQueryIndexed(VkCommandBuffer cb, VkQueryPool pool, u32 query, u32 index)
+{
+    CmdRecord op{};
+    op.op = CmdOp::EndQueryIndexed;
+    op.vertex_offset_bytes = pool;
+    op.first_index = query;
+    op.vertex_count = index;
+    return AppendOp(cb, op);
+}
+
+// -------------------------------------------------------------------
+// Synchronization2 (recorded only — v0 has no GPU hazard tracking).
+// -------------------------------------------------------------------
+
+VkResult VkCmdSetEvent2(VkCommandBuffer cb, VkEvent event, u64 stage_mask)
+{
+    CmdRecord op{};
+    op.op = CmdOp::SetEvent2;
+    op.index_buffer = event;
+    op.index_offset = stage_mask;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdResetEvent2(VkCommandBuffer cb, VkEvent event, u64 stage_mask)
+{
+    CmdRecord op{};
+    op.op = CmdOp::ResetEvent2;
+    op.index_buffer = event;
+    op.index_offset = stage_mask;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdWaitEvents2(VkCommandBuffer cb, u32 count, const VkEvent* events)
+{
+    (void)events;
+    CmdRecord op{};
+    op.op = CmdOp::WaitEvents2;
+    op.vertex_count = count;
+    return AppendOp(cb, op);
+}
+
+VkResult VkCmdPipelineBarrier2(VkCommandBuffer cb, u64 src_stage_mask, u64 dst_stage_mask, u32 dependency_flags)
+{
+    CmdRecord op{};
+    op.op = CmdOp::PipelineBarrier2;
+    op.src_offset = src_stage_mask;
+    op.dst_offset = dst_stage_mask;
+    op.vertex_count = dependency_flags;
+    return AppendOp(cb, op);
+}
+
+// -------------------------------------------------------------------
+// Physical-device sparse format queries.
+// -------------------------------------------------------------------
+
+VkResult VkGetPhysicalDeviceSparseImageFormatProperties(VkPhysicalDevice phys, u32 format, u32 type, u32 samples,
+                                                        u32 usage, u32 tiling, u32* count)
+{
+    (void)phys;
+    (void)format;
+    (void)type;
+    (void)samples;
+    (void)usage;
+    (void)tiling;
+    if (count != nullptr)
+        *count = 0; // no sparse formats supported in v0
+    return VkResult::Success;
+}
+
 } // namespace duetos::subsystems::graphics
