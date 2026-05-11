@@ -84,10 +84,10 @@ inline constexpr u32 kMaxFaultDomainDeps = 64;
 
 struct FaultDomain
 {
-    const char* name;                          // short label: "drivers/usb/xhci"
-    Result<void> (*init)();                    // idempotent init; return Err on failure
-    Result<void> (*teardown)();                // free resources; must leave the
-                                               // subsystem ready for a fresh init
+    const char* name;           // short label: "drivers/usb/xhci"
+    Result<void> (*init)();     // idempotent init; return Err on failure
+    Result<void> (*teardown)(); // free resources; must leave the
+                                // subsystem ready for a fresh init
     // Saturating: a misbehaving driver in a tight restart loop can't
     // wrap this counter, which is the input to the throttle policy.
     // Without saturation, 2^32 restarts wrap to 0 and the throttle

@@ -213,6 +213,7 @@
 #include "ipc/ksemaphore.h"
 #include "ipc/kwaitable.h"
 #include "ipc/named_kobjects.h"
+#include "ipc/named_pipes.h"
 #include "sync/lockdep.h"
 #include "sync/rcu.h"
 #include "sync/rwlock.h"
@@ -2347,28 +2348,28 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // descent expression evaluator. Same trusted-cap set + frame
     // budget as the shell.
     {
-        const auto pid = duetos::core::SpawnElfFile(
-            "/bin/hello_native", duetos::fs::RamfsHelloNativeBytes(), duetos::fs::RamfsHelloNativeSize(),
-            duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
-            duetos::core::kTickBudgetTrusted);
+        const auto pid = duetos::core::SpawnElfFile("/bin/hello_native", duetos::fs::RamfsHelloNativeBytes(),
+                                                    duetos::fs::RamfsHelloNativeSize(), duetos::core::CapSetTrusted(),
+                                                    duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
+                                                    duetos::core::kTickBudgetTrusted);
         SerialWrite("[boot] hello_native pid=");
         SerialWriteHex(pid);
         SerialWrite("\n");
     }
     {
-        const auto pid = duetos::core::SpawnElfFile(
-            "/bin/nat_calc", duetos::fs::RamfsNatCalcBytes(), duetos::fs::RamfsNatCalcSize(),
-            duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
-            duetos::core::kTickBudgetTrusted);
+        const auto pid =
+            duetos::core::SpawnElfFile("/bin/nat_calc", duetos::fs::RamfsNatCalcBytes(), duetos::fs::RamfsNatCalcSize(),
+                                       duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(),
+                                       duetos::mm::kFrameBudgetTrusted, duetos::core::kTickBudgetTrusted);
         SerialWrite("[boot] nat_calc pid=");
         SerialWriteHex(pid);
         SerialWrite("\n");
     }
     {
-        const auto pid = duetos::core::SpawnElfFile(
-            "/bin/nat_sysinfo", duetos::fs::RamfsNatSysinfoBytes(), duetos::fs::RamfsNatSysinfoSize(),
-            duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
-            duetos::core::kTickBudgetTrusted);
+        const auto pid = duetos::core::SpawnElfFile("/bin/nat_sysinfo", duetos::fs::RamfsNatSysinfoBytes(),
+                                                    duetos::fs::RamfsNatSysinfoSize(), duetos::core::CapSetTrusted(),
+                                                    duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
+                                                    duetos::core::kTickBudgetTrusted);
         SerialWrite("[boot] nat_sysinfo pid=");
         SerialWriteHex(pid);
         SerialWrite("\n");
@@ -2777,6 +2778,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::ipc::KWaitableSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::ipc::KFileSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::ipc::NamedKObjectSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::ipc::NamedPipeSelfTest());
     // Kernel-resident APC queue (T8-02). Exercises queue / drain
     // / cross-tid isolation / capacity overflow on a stand-in
     // Process so any regression in apc_syscall.cpp is caught

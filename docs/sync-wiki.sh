@@ -358,10 +358,28 @@ check_stale_references() {
         esac
         grep -oE '`(kernel|userland|boot|subsystems|tools|tests)/[^`[:space:]]+\.(h|hpp|c|cpp|rs|S|md|sh|py)`' "$wfile" 2>/dev/null \
             | tr -d '`' | sort -u | while read -r ref_path; do
-                if [ ! -e "$PROJECT_ROOT/$ref_path" ]; then
-                    log_warning "  $(basename "$wfile"): references missing path \`$ref_path\`"
-                    WARNINGS=$((WARNINGS + 1))
+                # Skip refs that are glob/template strings rather than
+                # literal paths. The wiki uses these to mean "every file
+                # matching the pattern" — the linter would only catch
+                # them by expanding the glob, which it doesn't do.
+                case "$ref_path" in
+                    *\**|*\{*|*\<*|*\?*)
+                        continue
+                        ;;
+                esac
+                # Try the literal path first; if missing, try with a
+                # `kernel/` prefix. The wiki sometimes writes
+                # `subsystems/win32/foo.cpp` as a shortform for
+                # `kernel/subsystems/win32/foo.cpp` — both should count
+                # as live.
+                if [ -e "$PROJECT_ROOT/$ref_path" ]; then
+                    continue
                 fi
+                if [ -e "$PROJECT_ROOT/kernel/$ref_path" ]; then
+                    continue
+                fi
+                log_warning "  $(basename "$wfile"): references missing path \`$ref_path\`"
+                WARNINGS=$((WARNINGS + 1))
             done
     done
 }

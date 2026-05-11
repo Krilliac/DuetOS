@@ -175,8 +175,7 @@ void DmaSelfTest()
             // runs. Warn and continue; the alloc path is already
             // proven correct by the rejection cases above (lines
             // ~148/157).
-            KLOG_WARN_V("mm/dma", "self-test: alloc returned error — skipping zone test",
-                        static_cast<u64>(r.error()));
+            KLOG_WARN_V("mm/dma", "self-test: alloc returned error — skipping zone test", static_cast<u64>(r.error()));
             continue;
         }
         DmaBuffer buf = r.value();

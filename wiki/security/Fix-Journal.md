@@ -144,8 +144,8 @@ Both patterns keep the audit trail intact — the journal continues to record an
 
 | File | Role | LOC |
 |------|------|-----|
-| `kernel/diag/fix_journal.h/.cpp` | Public API + ring + dedup + selftest | 165 + 430 |
-| `kernel/diag/fix_journal_persist.h/.cpp` | Tier-2 FAT32 sink + Tier-3 NVMe panic write | 90 + 320 |
+| `kernel/diag/fix_journal.{h,cpp}` | Public API + ring + dedup + selftest | 165 + 430 |
+| `kernel/diag/fix_journal_persist.{h,cpp}` | Tier-2 FAT32 sink + Tier-3 NVMe panic write | 90 + 320 |
 | `kernel/shell/shell_diag.cpp` | `dfix` command (5 sub-operations) | 280 |
 | `kernel/fs/ramfs.cpp` (additions) | `/proc/fixjournal` snapshot view | ~80 |
 | `tools/build/gen-fix-report.py` | Offline markdown summarizer | 250 |

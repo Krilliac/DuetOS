@@ -351,8 +351,16 @@ syscall routing shows up immediately.
 - Process: `CreateProcessA/W` is structurally working but
   `STARTUPINFO` is mostly ignored; `CreateProcessAsUserW` always
   fails (no token impersonation)
-- IPC: `CreateNamedPipeW`, `ConnectNamedPipe`, anonymous pipe
-  helpers — pipes work, named pipes are STUB
+- IPC: anonymous pipes (`CreatePipe`) + named pipes
+  (`CreateNamedPipeA/W`, `CreateFileA/W` against `\\.\pipe\NAME`,
+  `ConnectNamedPipe`, `DisconnectNamedPipe`, `WaitNamedPipeA/W`)
+  ship in v0. Named pipes back onto the kernel `ipc::named_pipes`
+  registry + the existing pipe pool. `PIPE_ACCESS_INBOUND` and
+  `PIPE_ACCESS_OUTBOUND` are honoured; `PIPE_ACCESS_DUPLEX` is
+  rejected (sub-GAP — needs two pool slots). `ConnectNamedPipe`
+  is a synchronous no-op that succeeds (no overlapped wait —
+  sub-GAP). `PIPE_TYPE_MESSAGE` accepted but reads behave as
+  `PIPE_TYPE_BYTE` (no message framing — sub-GAP).
 - Job objects (`CreateJobObjectW`, `SetInformationJobObject`,
   `AssignProcessToJobObject`) — STUB
 - Fiber API (`CreateFiber`, `SwitchToFiber`, `DeleteFiber`)

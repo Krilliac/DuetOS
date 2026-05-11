@@ -5845,7 +5845,7 @@ doc helps future readers audit the trail.
 ### DD-RUST-001 — Rust toolchain bootstrap via DuetFS v0
 
 - **Scope & commit:** `kernel/fs/duetfs/` (Rust crate) +
-  `kernel/fs/duetfs.{h,cpp}` + `kernel/fs/duetfs_image.cpp` +
+  `kernel/fs/duetfs.{h,cpp}` + `kernel/fs/duetfs_block_dev.cpp` +
   `kernel/fs/duetfs_rust_panic.cpp` + `rust-toolchain.toml`. First
   Rust subsystem in the kernel.
 
@@ -8184,3 +8184,78 @@ doc helps future readers audit the trail.
 - **Related roadmap track(s):** Kernel / runtime → Linux CVE
   audit (Class N — `MaskedIndex` follow-up landed). KPTI
   (Class N's other half) remains separately deferred.
+
+## 2026-05-11 — Win32 named pipes on top of the anonymous-pipe pool
+
+- **Scope:** `kernel/ipc/named_pipes.{h,cpp}`,
+  `kernel/subsystems/win32/named_pipe_syscall.{h,cpp}`,
+  `kernel/proc/process.h` (`Win32FileHandle.named_pipe_registry_slot`),
+  `kernel/fs/file_route.cpp` (`CloseForProcess` server-side cleanup),
+  `kernel/syscall/syscall.h` + `syscall.cpp` + `syscall_names.def`
+  (`SYS_NAMED_PIPE_CREATE = 202`, `SYS_NAMED_PIPE_OPEN = 203`),
+  `userland/libs/kernel32/kernel32.c`
+  (`CreateNamedPipeA/W`, `ConnectNamedPipe`, `DisconnectNamedPipe`,
+  `WaitNamedPipeA/W`, `CreateFileW` prefix branch).
+- **Commit:** this slice.
+- **Decision:** ship Windows named pipes as a thin registry layer
+  on top of the existing kernel pipe pool (the same 16-slot ring
+  buffer that Linux `pipe(2)` and Win32 anonymous `CreatePipe`
+  already share). The kernel maps `NAME` → `pool_idx` in a 16-slot
+  table guarded by a spinlock; `CreateNamedPipeA/W` allocates the
+  pool slot + registers, `CreateFileW("\\.\pipe\NAME")` recognises
+  the prefix in userland and dispatches `SYS_NAMED_PIPE_OPEN` to
+  bump the opposite-end refcount and hand a client `Win32FileHandle`
+  to the caller. The server end carries a new
+  `named_pipe_registry_slot` field on `Win32FileHandle`; the file
+  close path drops the registry entry + any orphan opposite-end
+  reservation when the server closes before any client connected.
+- **Why:**
+  - One source of truth per resource — the pipe pool was already
+    the data-ring + blocking-IO + EOF/EPIPE substrate for both
+    Linux `pipe(2)` and Win32 `CreatePipe`. Reusing it for named
+    pipes prevents the obvious "two pipe implementations that
+    drift" failure mode.
+  - The lifecycle bug class for IPC primitives is leaks. By
+    making the registry hold the orphan opposite-end ref and
+    placing the cleanup inside the server's `CloseForProcess`
+    branch, a server that exits before a client connects can't
+    pin the 4 KiB ring buffer forever.
+  - The userland surface stays bounded — kernel32 picks up
+    five new exports + a 10-line prefix check on `CreateFileW`.
+    No new ABI primitive surfaces to PE callers beyond the
+    Windows-standard names and `\\.\pipe\` paths.
+- **What it rules out / defers:**
+  - `PIPE_ACCESS_DUPLEX` — needs two pool slots backing a single
+    server `Win32FileHandle`. The handle struct holds one
+    `(pool_idx, is_write_end)` tuple; growing it to carry two
+    tuples touches every existing pipe consumer. Documented as a
+    sub-GAP in `ipc/named_pipes.h`; `CreateNamedPipeA` rejects
+    `PIPE_ACCESS_DUPLEX` at the boundary so callers see
+    `INVALID_HANDLE_VALUE` rather than a silent INBOUND downgrade.
+  - `PIPE_TYPE_MESSAGE` framing — message boundaries require the
+    pipe pool to track per-write lengths; v0 ring is byte-oriented.
+    Accepted at the syscall layer but reads behave as
+    `PIPE_TYPE_BYTE`.
+  - Overlapped `ConnectNamedPipe` — v0 returns synchronously with
+    success; the kernel registry doesn't track "server is waiting"
+    state. Adequate for the typical CreateNamedPipe →
+    CreateFile race-tolerant client/server pattern.
+  - Multi-instance pipes (Windows `nMaxInstances > 1`). Each name
+    maps to exactly one pool slot. A second `CreateNamedPipe`
+    against the same name fails with `INVALID_HANDLE_VALUE`
+    (Windows `ERROR_PIPE_BUSY` shape).
+  - Security descriptors / ACLs / `Global\` vs `Local\` namespace
+    prefixes — the registry holds bare names without any
+    permission gate. Same posture as `ipc::named_kobjects`.
+- **Revisit when:**
+  - A real workload arrives that uses `PIPE_ACCESS_DUPLEX`
+    (most named-pipe Windows servers do). Bring up the wider
+    `Win32FileHandle` shape that holds (server-read pool_idx,
+    server-write pool_idx) in lockstep.
+  - A multi-instance pipe pattern arrives — the registry's flat
+    array becomes a chained list per name.
+  - A workload depends on `ConnectNamedPipe` synchronising with a
+    client connect — wire it through a `KEvent` per registry slot
+    that the open path sets.
+- **Related roadmap track(s):** Track 11 (kernel infrastructure
+  gaps) — companion to T11-02 (anonymous cross-process pipes).

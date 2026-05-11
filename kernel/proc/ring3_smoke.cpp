@@ -2509,19 +2509,64 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
             }
             // Per-DLL ASLR: gated on the DLL's own
             // IMAGE_DLL_CHARACTERISTICS_DYNAMIC_BASE bit (every
-            // modern MSVC-built DLL has it). Use a smaller
-            // randomisation window than the main PE — distinct
-            // DLLs already have distinct preferred image bases
-            // separated by tens of MB, so a 0..1 MiB jitter
-            // (8 bits × 4 KiB) is plenty of entropy without any
-            // realistic chance of two DLLs colliding after the
-            // shift. Each DLL draws its own entropy from
-            // RandomU64(), so even within one process the bases
-            // are independently randomised.
+            // modern MSVC-built DLL has it). 0..1 MiB jitter (8
+            // bits × 4 KiB) drawn from RandomU64. Collision check
+            // below ensures two DLLs with close preferred bases
+            // (e.g. vcruntime140 at 0x10300000, xinput1_4 at
+            // 0x10280000 — only 0.5 MiB apart) don't end up
+            // mapped on top of each other after the jitter shifts
+            // them. Without this, the second DllLoad silently
+            // overwrites the first's pages and any IAT slot that
+            // points into the first DLL's range now reads garbage
+            // — typically manifesting as a ring-3 #GP/#UD/#PF at a
+            // valid-looking RIP inside a previously-loaded DLL.
             const bool dll_dynamic_base = duetos::core::PeIsDynamicBase(preload_set[i].bytes, preload_set[i].len);
-            const u64 dll_entropy = duetos::core::RandomU64();
-            const u64 dll_aslr_delta = dll_dynamic_base ? (dll_entropy & 0xFF) * 4096ULL : 0ULL;
-            const DllLoadResult dll = DllLoad(preload_set[i].bytes, preload_set[i].len, as, dll_aslr_delta);
+            u64 dll_aslr_delta = 0;
+            DllLoadResult dll{};
+            dll.status = DllLoadStatus::HeaderParseFailed;
+            constexpr u32 kMaxRollAttempts = 32;
+            for (u32 attempt = 0; attempt < kMaxRollAttempts; ++attempt)
+            {
+                const u64 dll_entropy = duetos::core::RandomU64();
+                const u64 trial_delta = dll_dynamic_base ? (dll_entropy & 0xFF) * 4096ULL : 0ULL;
+                // Peek at the would-be base+size so we can test
+                // for overlap with already-loaded DLLs without
+                // actually mapping pages. PeImageSizeOf returns 0
+                // on parse failure; let DllLoad re-detect that.
+                const u64 trial_size = duetos::core::PeImageSizeOf(preload_set[i].bytes, preload_set[i].len);
+                const u64 trial_pref = duetos::core::PePreferredBaseOf(preload_set[i].bytes, preload_set[i].len);
+                if (trial_size == 0 || trial_pref == 0)
+                {
+                    dll_aslr_delta = trial_delta;
+                    dll = DllLoad(preload_set[i].bytes, preload_set[i].len, as, dll_aslr_delta);
+                    break;
+                }
+                const u64 trial_base = trial_pref + trial_delta;
+                bool collides = false;
+                for (u64 j = 0; j < preloaded_count; ++j)
+                {
+                    const u64 a_start = preloaded_dlls[j].base_va;
+                    const u64 a_end = a_start + preloaded_dlls[j].size;
+                    const u64 b_start = trial_base;
+                    const u64 b_end = b_start + trial_size;
+                    if (a_start < b_end && b_start < a_end)
+                    {
+                        collides = true;
+                        break;
+                    }
+                }
+                if (collides && dll_dynamic_base)
+                {
+                    // Re-roll. Falls through to the no-jitter path
+                    // on the last attempt to avoid an infinite
+                    // wedge if 32 random pulls all collide.
+                    if (attempt + 1 < kMaxRollAttempts)
+                        continue;
+                }
+                dll_aslr_delta = trial_delta;
+                dll = DllLoad(preload_set[i].bytes, preload_set[i].len, as, dll_aslr_delta);
+                break;
+            }
             if (dll.status == DllLoadStatus::Ok)
             {
                 preloaded_dlls[preloaded_count] = dll.image;

@@ -238,7 +238,11 @@ inline bool IsDispatchedVector(u64 vector)
     // through the same dispatch + EOI path as a hardware IRQ so
     // the post-handler need_resched check fires Schedule() before
     // iretq, matching the timer-tick preemption shape.
-    if (vector == 0xF8)
+    // TLB-shootdown IPI (0xF9) shares the same shape; both are
+    // installed by SMP bring-up (kernel/arch/x86_64/smp.cpp).
+    // Without the 0xF9 leg the IrqInstall registration path would
+    // halt the kernel mid-boot the moment SMP wires up shootdowns.
+    if (vector == 0xF8 || vector == 0xF9)
         return true;
     return false;
 }

@@ -144,8 +144,8 @@ void ZoneSelfTest()
             // runs. Warn and skip the ceiling check instead of
             // taking down the boot; the zone allocator itself is
             // already proven correct by the OOM-reporting path.
-            KLOG_WARN_S("mm/zone", "self-test: allocate returned null — skipping ceiling check",
-                        "zone", (z == Zone::Dma ? "dma" : (z == Zone::Dma32 ? "dma32" : "normal")));
+            KLOG_WARN_S("mm/zone", "self-test: allocate returned null — skipping ceiling check", "zone",
+                        (z == Zone::Dma ? "dma" : (z == Zone::Dma32 ? "dma32" : "normal")));
             continue;
         }
         // Verify the per-zone physical-address ceiling actually

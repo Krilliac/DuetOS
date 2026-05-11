@@ -280,8 +280,8 @@ struct TlbShootdownRequest
 {
     mm::AddressSpace* as;
     u64 virt_start;
-    u64 virt_end;       // half-open; equal to virt_start + 0x1000 for single-page
-    volatile u64 acks;  // bumped by each target CPU when done
+    u64 virt_end;      // half-open; equal to virt_start + 0x1000 for single-page
+    volatile u64 acks; // bumped by each target CPU when done
 };
 volatile TlbShootdownRequest* g_tlb_request = nullptr;
 
@@ -387,8 +387,7 @@ void SmpTlbShootdownBroadcast(mm::AddressSpace* as, u64 virt_start, u64 virt_end
         cpu::PerCpu* peer = SmpGetPercpu(id);
         if (peer == nullptr)
             continue;
-        SmpSendIpi(static_cast<u8>(peer->lapic_id),
-                   icr_low_base | kTlbShootdownIpiVector);
+        SmpSendIpi(static_cast<u8>(peer->lapic_id), icr_low_base | kTlbShootdownIpiVector);
     }
 
     // Spin until every target has acked. The handler runs with IF=0

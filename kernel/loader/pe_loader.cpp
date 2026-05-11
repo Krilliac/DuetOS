@@ -604,6 +604,24 @@ bool PeIsDynamicBase(const u8* file, u64 file_len)
     return (chars & kDynamicBase) != 0;
 }
 
+u64 PePreferredBaseOf(const u8* file, u64 file_len)
+{
+    PeHeaders h{};
+    const PeStatus s = ParseHeaders(file, file_len, h);
+    if (s != PeStatus::Ok && s != PeStatus::ImportsPresent && s != PeStatus::TlsPresent)
+        return 0;
+    return h.image_base;
+}
+
+u64 PeImageSizeOf(const u8* file, u64 file_len)
+{
+    PeHeaders h{};
+    const PeStatus s = ParseHeaders(file, file_len, h);
+    if (s != PeStatus::Ok && s != PeStatus::ImportsPresent && s != PeStatus::TlsPresent)
+        return 0;
+    return h.image_size;
+}
+
 // Resolve every entry in the import table by patching the IAT
 // in place. For each import descriptor:
 //   1. Read the DLL name from its Name RVA.

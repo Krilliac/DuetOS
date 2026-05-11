@@ -1964,6 +1964,40 @@ enum SyscallNumber : u64
     // PAGE_EXECUTE_* are rejected because vmap pages are
     // permanently NX (W^X enforcement).
     SYS_VIRTUAL_PROTECT = 201,
+
+    // SYS_NAMED_PIPE_CREATE — server-side CreateNamedPipe.
+    // Backs Win32 CreateNamedPipeA / CreateNamedPipeW.
+    //
+    //   rdi = const char* user name      // bare pipe name (no
+    //                                    //  "\\.\pipe\" prefix; the
+    //                                    //  userland thunk strips it)
+    //   rsi = u64 name_len_cap           // bounds the name copy
+    //   rdx = u64 open_mode              // PIPE_ACCESS_INBOUND (1)
+    //                                    //  or PIPE_ACCESS_OUTBOUND (2);
+    //                                    //  PIPE_ACCESS_DUPLEX (3) is
+    //                                    //  rejected — sub-GAP
+    // Returns a Win32-shaped file handle (kWin32HandleBase + slot)
+    // for the server end on success, (u64)-1 on:
+    //   - bad open_mode (DUPLEX or unrecognised)
+    //   - name already registered (ERROR_PIPE_BUSY shape)
+    //   - registry / handle-table / pipe-pool full
+    // The server end's CloseHandle releases the registry entry; if
+    // no client connected before close, the orphan opposite-end ref
+    // is also released so the pipe pool slot frees.
+    SYS_NAMED_PIPE_CREATE = 202,
+
+    // SYS_NAMED_PIPE_OPEN — client-side CreateFile against a
+    // "\\.\pipe\NAME" path. Backs Win32 CreateFileW prefix
+    // recognition in `userland/libs/kernel32`.
+    //
+    //   rdi = const char* user name      // bare pipe name
+    //   rsi = u64 name_len_cap
+    // Returns a Win32-shaped file handle for the client end on
+    // success, (u64)-1 on miss (name not registered, server end
+    // already closed) or handle-table full. The client's handle
+    // does not touch the registry on close — it's an ordinary
+    // pipe-pool handle from that point onward.
+    SYS_NAMED_PIPE_OPEN = 203,
 };
 
 // Inheritable stdio bundle for SYS_PROCESS_SPAWN_EX. Each entry

@@ -338,6 +338,146 @@ See [`wiki/tooling/Git-Workflow.md`](wiki/tooling/Git-Workflow.md) for the polli
 4. Keep individual grep/search outputs short. Use flags like `--include` and `-l` (list files only) to limit output size.
 5. If you do hit the timeout, retry the same step in a shorter form. Don't repeat the entire task from scratch.
 
+## Fix Anything You Surface — No Deferring
+
+Every kind of work — adding a feature, fixing a bug, refactoring,
+auditing, reading the live boot, running CI, running tests, running
+static analysis, running clang-format, running the linker, running
+a fuzzer, reviewing a diff, reading a docs page — reveals the next
+layer of issues. **Fix everything that surfaces, even if it
+predates your slice, even if it's outside the obvious authorship
+boundary of your task.** A "not my code" regression is still
+visible to whoever picks up the codebase next; deferring just
+buries the cost and the next session pays interest on it.
+
+This rule supersedes the "anti-bloat / don't add features beyond
+what the task requires" rule WHEN AND ONLY WHEN the additional
+work is fixing something concretely broken right now (a failing
+test, a non-zero CI signal, a warning, a panic, a wrong value
+returned from a real call, an obviously-stale comment, a probe
+that emits a sentinel). It does NOT license speculative
+refactoring, future-proofing, or "while I'm here" rewrites — those
+remain anti-bloat targets.
+
+The discipline:
+
+- **After every change, re-scan every surface that produces
+  signal**, not just the one you started with. The signals are
+  cheap; running them is cheap; the cost of letting one rot is
+  high. Concretely:
+  - Live boot log: `grep -nE "\[E\] |PANIC|TRIPLE|FAIL|out of range|task-kill|kernel oops" /tmp/duetos-*.log`
+  - Build: `cmake --build build/<preset>` — every `warning:` line is a fix target, every error is.
+  - Hosted tests: `cd build/<preset> && ctest --output-on-failure` — every non-PASS is a fix target.
+  - clang-format: `find kernel userland \( -name '*.h' -o -name '*.cpp' \) | xargs clang-format --dry-run --Werror` — every violation is a fix target.
+  - Wiki sync: `bash docs/sync-wiki.sh sync` — every "stale references" line is a fix target.
+  - Static greps: `git grep -nE "// (STUB|GAP):"` — the live inventory is itself the audit list.
+  - CI: every red check on the branch's PR is a fix target. Poll until they're all green.
+  - Anything else the user invokes during the session.
+
+  If a signal source you haven't run could plausibly find something
+  related to your change, run it. "I assumed it was clean" is not a
+  defence when the next boot shows the line you missed.
+
+- **Scope is whatever the signal exposes**, not whatever fits the
+  commit message. Don't carve "in scope" vs "out of scope" along
+  authorship, file, subsystem, slice-plan, or pretty-PR lines. The
+  question is whether the issue is observable now. If yes, fix it.
+  Commit messages are per-slice; the codebase is shared.
+
+- **A symptom-cluster gets one investigation, not N.** When N
+  similar failures appear (several PE smoke tests failing, several
+  identical warnings, several CI checks red for the same reason),
+  trace ONE to its root cause before touching the others. The root
+  usually explains the cluster; fixing it retires N issues at
+  once. The reverse — "patch each symptom locally" — is how a
+  codebase grows the long tail of fragile workarounds that the
+  anti-bloat rule warns against.
+
+- **Class-of-bug pattern matching.** Some failure shapes recur
+  across slices; when you see the shape, check for the class
+  before chasing the calling code:
+  - **Lost-page / lost-slot collisions.** Two structures share a
+    randomised base / a fixed VA / a slab class — whichever
+    landed LATER silently overwrites the EARLIER, and the
+    EARLIER's callers fault at a valid-looking RIP. Symptom:
+    ring-3 #GP/#UD/#PF at an address inside a DLL or stub
+    region; or a kernel value reading-back changed without an
+    observable writer. Root: two `base=0x...` lines at the same
+    address, or two slab callers with the same cache pointer.
+    This was the vcruntime140 memmove crash in 2026-05-11.
+  - **Stale-comment drift.** A comment claims a behaviour the
+    code no longer implements (e.g. "v0 returns empty cmdline"
+    when the code routes through a populated proc-env page now).
+    Symptom: tests that the comment justifies fail. Root: code
+    moved on, comment didn't. Fix both.
+  - **Sentinel divergence.** Two paths claim the same "v0
+    placeholder" but spell it differently (e.g. `"X:\\"` vs
+    `"C:\\"`). Symptom: a smoke test that checked one sentinel
+    flags the other path. Root: one was updated, the other
+    wasn't. Pick one and align both.
+  - **Whitelist incompleteness.** A predicate enumerates the
+    legal set explicitly (`if (x == A) ...`) but a new member
+    of the set was added elsewhere and the predicate wasn't
+    updated. Symptom: kernel halts / refuses / mis-routes on
+    the new member. Root: per-call-site allow-lists. Fix: add
+    the new member, AND consider converting to a property test
+    so future additions don't need a new whitelist edit. This
+    was the F9 IrqInstall halt in 2026-05-11.
+  - **Refcount asymmetry.** Acquire path adds a refcount the
+    release path doesn't drop, or vice versa. Symptom: leaked
+    object pinned forever, or use-after-free. Root: an exit /
+    error / orphan path that bypasses the matching half. Walk
+    EVERY exit from the acquiring scope and verify each one
+    either succeeded-and-handed-off OR failed-and-rolled-back.
+  - **Log-level abuse.** A WARN/ERROR log fires on a legitimate
+    API failure mode (e.g. `WaitForSingleObject` timeout,
+    `ReleaseMutex` from non-owner). Symptom: the log floods on
+    normal contended workloads. Root: log level wrong. Demote
+    to DEBUG; the calling code's return-value handling is the
+    real notification channel.
+
+- **Self-tests pass silently by default.** A self-test that only
+  emits its FAIL line on failure won't show up when it passes —
+  that's the contract. If you want grep-able proof of PASS, emit
+  one explicit `[<subsys>-selftest] PASS (...)` line via
+  `arch::SerialWrite`. Do NOT promote every PASS to KLOG_INFO —
+  that defeats the log-level system. The reverse applies too:
+  the absence of a FAIL line is NOT proof of pass — it could be
+  proof the self-test was never called. Verify the BOOT_SELFTEST
+  hook exists.
+
+- **One run is not enough for intermittent symptoms.** If a test
+  crashes on this run but not the previous one, the bug is ASLR
+  / scheduling / hash-order / GC-timing / cache-warmup / clock-
+  jitter dependent. Re-run a few times to confirm
+  intermittency, then look for the class-of-bug shapes above
+  (collisions and refcount asymmetries are the usual suspects).
+  Don't conclude "the previous run was fine, so this is flaky
+  and not worth fixing." Intermittent bugs ARE bugs — they're
+  just sensitive to randomness, and they hit in production
+  proportionally to that sensitivity.
+
+- **Follow the trail wherever it goes.** A regression's root cause
+  doesn't respect file boundaries, slice plans, or your commit
+  message. A bad ASLR delta in `kernel/proc/ring3_smoke.cpp` is
+  yours to fix even if you opened the session for "ipc: named
+  pipes." If the trail leads to a subsystem you haven't worked
+  in, read enough to understand the fix without breaking
+  invariants, then make it. If the trail leads out of the
+  codebase (build tool, toolchain bug, kernel command-line),
+  document the workaround and what we'd need to fix upstream.
+
+- **"No deferring" is the default, not the exception.** The user
+  saying "fix everything, no deferring" is the explicit form of a
+  rule that should be the implicit default. Do not propose
+  follow-up slices, do not file "we should address this later"
+  notes in commit messages, do not stash issues in a TODO file.
+  Fix it now or argue concretely why the fix can't land in this
+  session (cyclic dependency that needs a real refactor, change
+  bigger than the context window, fix needs a runtime artefact
+  that doesn't exist yet). "It's not my code" is not such an
+  argument.
+
 ## Wiring Things In — Functionality Is Not Optional
 
 A system that exists but is never initialized, called, or connected is **worse than not existing**. In kernel space, dead code is not merely wasteful — it rots silently until the day a refactor accidentally re-enables it and triple-faults the box.
