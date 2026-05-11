@@ -34,7 +34,8 @@ namespace
 // File-scope watchlist. Single-app, single-table — protected by
 // a small spinlock so the timer-driven Refresh and the operator-
 // driven Add/Remove can't tear each other up.
-sync::SpinLock g_watch_lock{.next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
+sync::SpinLock g_watch_lock{
+    .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
 WatchEntry g_watch[kWatchMax]{};
 
 void StrCopyTrunc(char* dst, u32 cap, const char* src)

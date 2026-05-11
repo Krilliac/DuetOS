@@ -68,6 +68,26 @@ fi
 # BUILD_DIR matches the directory the iso lives in.
 export DUETOS_PRESET="$(basename "${BIN_DIR}")"
 
+# Many of the expected signatures below are emitted at
+# `LogLevel::Info` (e.g. `[I] drivers/gpu : discovered GPUs`).
+# Release builds run with `DUETOS_KLOG_DEFAULT=Warn` so those
+# lines are runtime-filtered and the smoke verifier sees
+# MISSING for every one of them — even though the kernel is
+# fine. The .github/workflows CI only runs this test on the
+# debug build (matching that policy); locally, a `ctest` from
+# a release `build/` directory would fail spuriously. Skip
+# in that case rather than fail, so a developer who configured
+# `cmake --preset x86_64-release` and runs `ctest` doesn't get
+# a red signal for a known log-level mismatch.
+case "${DUETOS_PRESET}" in
+    *release*|*lto*)
+        echo "SKIP: boot-smoke expects Info-level signatures; ${DUETOS_PRESET} runs at Warn"
+        echo "      (CI runs this test on the debug build — see"
+        echo "      .github/workflows/build.yml qemu-smoke job.)"
+        exit 2
+        ;;
+esac
+
 SERIAL_LOG="${BIN_DIR}/ctest-smoke-serial.log"
 rm -f "${SERIAL_LOG}"
 

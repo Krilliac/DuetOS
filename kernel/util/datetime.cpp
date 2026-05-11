@@ -422,13 +422,11 @@ void DateTimeSelfTest()
         KASSERT(ParseIso8601("2026-05-03T14:07:30.123Z", 24, out), "util/datetime", "frac-sec parse failed");
         KASSERT(out.second == 30, "util/datetime", "frac-sec second field wrong");
         // Numeric UTC offsets are normalised into the UTC DateTime shape.
-        KASSERT(ParseIso8601("2026-05-03T14:07:30+02:30", 25, out), "util/datetime",
-                "positive tz-offset parse failed");
+        KASSERT(ParseIso8601("2026-05-03T14:07:30+02:30", 25, out), "util/datetime", "positive tz-offset parse failed");
         KASSERT(out.year == 2026 && out.month == 5 && out.day == 3 && out.hour == 11 && out.minute == 37 &&
                     out.second == 30,
                 "util/datetime", "positive tz-offset normalisation wrong");
-        KASSERT(ParseIso8601("2026-05-03T23:30:00-02:00", 25, out), "util/datetime",
-                "negative tz-offset parse failed");
+        KASSERT(ParseIso8601("2026-05-03T23:30:00-02:00", 25, out), "util/datetime", "negative tz-offset parse failed");
         KASSERT(out.year == 2026 && out.month == 5 && out.day == 4 && out.hour == 1 && out.minute == 30 &&
                     out.second == 0,
                 "util/datetime", "negative tz-offset day rollover wrong");
@@ -479,10 +477,8 @@ void DateTimeSelfTest()
         // Bad separator.
         KASSERT(!ParseIso8601("2026/05/03", 10, out), "util/datetime", "slash separator not rejected");
         // Malformed timezone offset.
-        KASSERT(!ParseIso8601("2026-05-03T14:07:30+24:00", 25, out), "util/datetime",
-                "tz offset hour=24 not rejected");
-        KASSERT(!ParseIso8601("2026-05-03T14:07:30+02", 22, out), "util/datetime",
-                "short tz offset not rejected");
+        KASSERT(!ParseIso8601("2026-05-03T14:07:30+24:00", 25, out), "util/datetime", "tz offset hour=24 not rejected");
+        KASSERT(!ParseIso8601("2026-05-03T14:07:30+02", 22, out), "util/datetime", "short tz offset not rejected");
         // Empty fractional digits.
         KASSERT(!ParseIso8601("2026-05-03T14:07:30.Z", 21, out), "util/datetime", "empty frac not rejected");
     }

@@ -198,8 +198,7 @@ static DWORD __stdcall reg_worker(LPVOID arg)
 
 static int worker_progress_ok(void)
 {
-    return g_heap_iters >= 16 && g_mutex_iters >= 16 && g_event_iters >= 16 && g_file_iters >= 16 &&
-           g_reg_iters >= 16;
+    return g_heap_iters >= 16 && g_mutex_iters >= 16 && g_event_iters >= 16 && g_file_iters >= 16 && g_reg_iters >= 16;
 }
 
 void __cdecl mainCRTStartup(void)

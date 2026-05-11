@@ -67,8 +67,8 @@ constinit LogEntry g_log_ring[kLogRingCapacity] = {};
 // / ~946 / ~977) so an underflow would compute a giant start
 // offset and the reader would walk garbage; saturation keeps the
 // arithmetic monotonic. wiki/security/Linux-CVE-Audit.md class BB.
-constinit util::SatU64 g_log_ring_next = 0;  // monotonically increasing write cursor
-constinit u64 g_log_ring_count = 0; // saturates at kLogRingCapacity
+constinit util::SatU64 g_log_ring_next = 0; // monotonically increasing write cursor
+constinit u64 g_log_ring_count = 0;         // saturates at kLogRingCapacity
 
 constinit bool g_color_enabled = true;
 

@@ -5845,7 +5845,7 @@ doc helps future readers audit the trail.
 ### DD-RUST-001 — Rust toolchain bootstrap via DuetFS v0
 
 - **Scope & commit:** `kernel/fs/duetfs/` (Rust crate) +
-  `kernel/fs/duetfs.{h,cpp}` + `kernel/fs/duetfs_image.cpp` +
+  `kernel/fs/duetfs.{h,cpp}` + `kernel/fs/duetfs_block_dev.cpp` +
   `kernel/fs/duetfs_rust_panic.cpp` + `rust-toolchain.toml`. First
   Rust subsystem in the kernel.
 

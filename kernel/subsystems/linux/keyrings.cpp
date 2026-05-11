@@ -145,12 +145,14 @@ i64 DoAddKey(u64 user_type, u64 user_desc, u64 user_payload, u64 plen, u64 keyri
     char desc[kKeyDescCap];
     u8 payload[kKeyPayloadCap];
     const auto type_copy = mm::CopyUserCString(type, sizeof(type), reinterpret_cast<const void*>(user_type));
-    if (type_copy.status == mm::UserStringCopyStatus::Fault || type_copy.status == mm::UserStringCopyStatus::BadArgument)
+    if (type_copy.status == mm::UserStringCopyStatus::Fault ||
+        type_copy.status == mm::UserStringCopyStatus::BadArgument)
         return kEFAULT;
     if (type_copy.status == mm::UserStringCopyStatus::NoTerminator)
         return kENAMETOOLONG;
     const auto desc_copy = mm::CopyUserCString(desc, sizeof(desc), reinterpret_cast<const void*>(user_desc));
-    if (desc_copy.status == mm::UserStringCopyStatus::Fault || desc_copy.status == mm::UserStringCopyStatus::BadArgument)
+    if (desc_copy.status == mm::UserStringCopyStatus::Fault ||
+        desc_copy.status == mm::UserStringCopyStatus::BadArgument)
         return kEFAULT;
     if (desc_copy.status == mm::UserStringCopyStatus::NoTerminator)
         return kENAMETOOLONG;
@@ -202,12 +204,14 @@ i64 DoRequestKey(u64 user_type, u64 user_desc, u64 user_callout, u64 dest_keyrin
     char type[kKeyTypeCap];
     char desc[kKeyDescCap];
     const auto type_copy = mm::CopyUserCString(type, sizeof(type), reinterpret_cast<const void*>(user_type));
-    if (type_copy.status == mm::UserStringCopyStatus::Fault || type_copy.status == mm::UserStringCopyStatus::BadArgument)
+    if (type_copy.status == mm::UserStringCopyStatus::Fault ||
+        type_copy.status == mm::UserStringCopyStatus::BadArgument)
         return kEFAULT;
     if (type_copy.status == mm::UserStringCopyStatus::NoTerminator)
         return kENAMETOOLONG;
     const auto desc_copy = mm::CopyUserCString(desc, sizeof(desc), reinterpret_cast<const void*>(user_desc));
-    if (desc_copy.status == mm::UserStringCopyStatus::Fault || desc_copy.status == mm::UserStringCopyStatus::BadArgument)
+    if (desc_copy.status == mm::UserStringCopyStatus::Fault ||
+        desc_copy.status == mm::UserStringCopyStatus::BadArgument)
         return kEFAULT;
     if (desc_copy.status == mm::UserStringCopyStatus::NoTerminator)
         return kENAMETOOLONG;

@@ -208,8 +208,51 @@ echo "[run.sh] minidump sink=${MINIDUMP_FILE}" >&2
 #          kernel would drive on real hardware over USB-UART.
 #   stdio — when the human log isn't on COM1 anyway. Rare;
 #           supported for completeness.
+# Probe whether DUETOS_GDB_PORT is bindable. If the caller pinned
+# it explicitly, honour the pin and fail loudly if it's busy. If
+# they took the default and 1234 is in use (typical: a leftover
+# qemu from a previous run, or a concurrent ctest), pick a free
+# ephemeral port instead. Without this, the ctest boot-smoke
+# fails to even spawn qemu when the port is held — yielding a
+# blizzard of MISSING signatures despite the kernel being fine.
+duetos_gdb_port_is_pinned=0
+if [[ -n "${DUETOS_GDB_PORT:-}" ]]; then
+    duetos_gdb_port_is_pinned=1
+fi
+DUETOS_GDB_PORT="${DUETOS_GDB_PORT:-1234}"
+if [[ "${DUETOS_GDB_TRANSPORT:-tcp}" == "tcp" ]] && command -v python3 > /dev/null 2>&1; then
+    # Try to bind the requested port. If python3 can't grab it, the
+    # port is in use (or otherwise unbindable). Pinned port: exit
+    # with a clear message. Default port: silently fall back to a
+    # python-picked ephemeral port. python3 is the lowest-common-
+    # denominator probe — `ss` / `netstat` are missing on minimal
+    # images.
+    # `|| true` keeps a python non-zero exit (port unbindable) from
+    # tripping `set -e`. The probe distinguishes the free / busy
+    # cases by stdout content (`free`) not by exit code.
+    duetos_gdb_probe_rc=$(python3 - "${DUETOS_GDB_PORT}" 2>/dev/null <<'PY' || true
+import socket, sys
+port = int(sys.argv[1])
+s = socket.socket()
+try:
+    s.bind(("", port))
+    print("free")
+finally:
+    s.close()
+PY
+)
+    if [[ "${duetos_gdb_probe_rc}" != "free" ]]; then
+        if [[ ${duetos_gdb_port_is_pinned} -eq 1 ]]; then
+            echo "[run.sh] error: DUETOS_GDB_PORT=${DUETOS_GDB_PORT} is not bindable" >&2
+            exit 2
+        fi
+        DUETOS_GDB_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()')"
+        echo "[run.sh] default GDB port busy — falling back to ${DUETOS_GDB_PORT}" >&2
+    fi
+fi
+
 case "${DUETOS_GDB_TRANSPORT:-tcp}" in
-    tcp)   DUETOS_GDB_TRANSPORT_QEMU="tcp::${DUETOS_GDB_PORT:-1234},server=on,wait=off" ;;
+    tcp)   DUETOS_GDB_TRANSPORT_QEMU="tcp::${DUETOS_GDB_PORT},server=on,wait=off" ;;
     pty)   DUETOS_GDB_TRANSPORT_QEMU="pty" ;;
     stdio) DUETOS_GDB_TRANSPORT_QEMU="stdio" ;;
     *)

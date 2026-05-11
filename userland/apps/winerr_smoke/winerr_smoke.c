@@ -27,7 +27,7 @@ typedef DWORD(__stdcall* LPTHREAD_START_ROUTINE)(LPVOID);
 #define FORMAT_MESSAGE_IGNORE_INSERTS 0x00000200u
 #define FORMAT_MESSAGE_FROM_SYSTEM 0x00001000u
 #define SEM_FAILCRITICALERRORS 0x0001u
-#define STD_OUTPUT_HANDLE ((DWORD)-11)
+#define STD_OUTPUT_HANDLE ((DWORD) - 11)
 
 __declspec(dllimport) HANDLE __stdcall GetStdHandle(DWORD nStdHandle);
 __declspec(dllimport) BOOL __stdcall WriteConsoleA(HANDLE hConsoleOutput, const void* lpBuffer,

@@ -2348,28 +2348,28 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // descent expression evaluator. Same trusted-cap set + frame
     // budget as the shell.
     {
-        const auto pid = duetos::core::SpawnElfFile(
-            "/bin/hello_native", duetos::fs::RamfsHelloNativeBytes(), duetos::fs::RamfsHelloNativeSize(),
-            duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
-            duetos::core::kTickBudgetTrusted);
+        const auto pid = duetos::core::SpawnElfFile("/bin/hello_native", duetos::fs::RamfsHelloNativeBytes(),
+                                                    duetos::fs::RamfsHelloNativeSize(), duetos::core::CapSetTrusted(),
+                                                    duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
+                                                    duetos::core::kTickBudgetTrusted);
         SerialWrite("[boot] hello_native pid=");
         SerialWriteHex(pid);
         SerialWrite("\n");
     }
     {
-        const auto pid = duetos::core::SpawnElfFile(
-            "/bin/nat_calc", duetos::fs::RamfsNatCalcBytes(), duetos::fs::RamfsNatCalcSize(),
-            duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
-            duetos::core::kTickBudgetTrusted);
+        const auto pid =
+            duetos::core::SpawnElfFile("/bin/nat_calc", duetos::fs::RamfsNatCalcBytes(), duetos::fs::RamfsNatCalcSize(),
+                                       duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(),
+                                       duetos::mm::kFrameBudgetTrusted, duetos::core::kTickBudgetTrusted);
         SerialWrite("[boot] nat_calc pid=");
         SerialWriteHex(pid);
         SerialWrite("\n");
     }
     {
-        const auto pid = duetos::core::SpawnElfFile(
-            "/bin/nat_sysinfo", duetos::fs::RamfsNatSysinfoBytes(), duetos::fs::RamfsNatSysinfoSize(),
-            duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
-            duetos::core::kTickBudgetTrusted);
+        const auto pid = duetos::core::SpawnElfFile("/bin/nat_sysinfo", duetos::fs::RamfsNatSysinfoBytes(),
+                                                    duetos::fs::RamfsNatSysinfoSize(), duetos::core::CapSetTrusted(),
+                                                    duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
+                                                    duetos::core::kTickBudgetTrusted);
         SerialWrite("[boot] nat_sysinfo pid=");
         SerialWriteHex(pid);
         SerialWrite("\n");

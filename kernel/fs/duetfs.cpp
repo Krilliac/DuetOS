@@ -57,8 +57,8 @@ void ExpectStatus(u32 got, u32 want, const char* what)
 
 u32 ReadLe32(const u8* p)
 {
-    return static_cast<u32>(p[0]) | (static_cast<u32>(p[1]) << 8) | (static_cast<u32>(p[2]) << 16)
-           | (static_cast<u32>(p[3]) << 24);
+    return static_cast<u32>(p[0]) | (static_cast<u32>(p[1]) << 8) | (static_cast<u32>(p[2]) << 16) |
+           (static_cast<u32>(p[3]) << 24);
 }
 
 void WriteLe32(u8* p, u32 v)
@@ -819,13 +819,12 @@ void DuetFsSelfTest()
         Expect(xattr_lba >= kDataLba, "xattr lba missing before corruption probe");
         g_scratch_image[xattr_lba * kBlockSize] ^= 0x01u;
         xlen = 0;
-        Expect(duetfs_xattr_get(&scratch, reinterpret_cast<const u8*>(xpath), 11,
-                                reinterpret_cast<const u8*>(acl_name), acl_name_len, xbuf, sizeof(xbuf),
-                                &xlen) == kStatusCorrupt,
+        Expect(duetfs_xattr_get(&scratch, reinterpret_cast<const u8*>(xpath), 11, reinterpret_cast<const u8*>(acl_name),
+                                acl_name_len, xbuf, sizeof(xbuf), &xlen) == kStatusCorrupt,
                "xattr_get accepted CRC-corrupted block");
         llen = 0;
-        Expect(duetfs_xattr_list(&scratch, reinterpret_cast<const u8*>(xpath), 11, lbuf2, sizeof(lbuf2),
-                                 &llen) == kStatusCorrupt,
+        Expect(duetfs_xattr_list(&scratch, reinterpret_cast<const u8*>(xpath), 11, lbuf2, sizeof(lbuf2), &llen) ==
+                   kStatusCorrupt,
                "xattr_list accepted CRC-corrupted block");
         Expect(duetfs_xattr_set(&scratch, reinterpret_cast<const u8*>(xpath), 11,
                                 reinterpret_cast<const u8*>(note_name), note_name_len,

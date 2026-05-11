@@ -23,8 +23,8 @@ namespace
 // which is plenty (Linux uses ~1 GiB on x86_64). 2 MiB alignment
 // keeps the slid kernel landing on a PD boundary so the kernel-
 // half page tables don't need split.
-constexpr u64 kSlideAlignment = 2ull * 1024 * 1024;       // 2 MiB
-constexpr u64 kSlideMaxSlots = 512;                       // 1 GiB total range
+constexpr u64 kSlideAlignment = 2ull * 1024 * 1024; // 2 MiB
+constexpr u64 kSlideMaxSlots = 512;                 // 1 GiB total range
 
 bool g_initialized = false;
 u64 g_candidate_slide = 0;
@@ -92,15 +92,13 @@ void KaslrSelfTest()
     // Candidate must be page-aligned.
     if ((g_candidate_slide & (kSlideAlignment - 1)) != 0)
     {
-        KLOG_WARN_V("security/kaslr", "candidate slide is not 2-MiB-aligned",
-                    g_candidate_slide);
+        KLOG_WARN_V("security/kaslr", "candidate slide is not 2-MiB-aligned", g_candidate_slide);
         return;
     }
     // Candidate must be within the documented range.
     if (g_candidate_slide >= kSlideAlignment * kSlideMaxSlots)
     {
-        KLOG_WARN_V("security/kaslr", "candidate slide exceeds slot range",
-                    g_candidate_slide);
+        KLOG_WARN_V("security/kaslr", "candidate slide exceeds slot range", g_candidate_slide);
         return;
     }
     KLOG_INFO("security/kaslr", "self-test OK");
