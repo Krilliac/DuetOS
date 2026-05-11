@@ -9,6 +9,7 @@
 #include "mm/kheap.h"
 #include "util/bmp.h"
 #include "util/png.h"
+#include "util/saturating.h"
 #include "util/tga.h"
 
 namespace duetos::apps::imageview
@@ -448,7 +449,13 @@ bool DecodeBmp(const fs::fat32::Volume* v, const fs::fat32::DirEntry* e, const c
         StatusSet("out of kheap memory");
         return false;
     }
-    const u64 row_bytes = static_cast<u64>(info.width) * 4;
+    const u64 row_bytes = duetos::util::SatMul(static_cast<u64>(info.width), static_cast<u64>(4));
+    if (row_bytes == 0xFFFFFFFFFFFFFFFFull)
+    {
+        StatusSet("image dimensions overflow");
+        FreePixels();
+        return false;
+    }
     void* row_alloc = mm::KMalloc(row_bytes);
     if (row_alloc == nullptr)
     {
@@ -534,7 +541,18 @@ bool DecodeTga(const fs::fat32::Volume* v, const fs::fat32::DirEntry* e, const c
     }
 
     // Allocate the intermediate full-resolution decode buffer.
-    const u64 inter_bytes = static_cast<u64>(info.width) * info.height * 4;
+    // Saturating multiply guards against a crafted TGA header
+    // claiming u32-max dimensions; an overflow saturates to
+    // UINT64_MAX which we reject before reaching KMalloc.
+    const u64 pixel_count = duetos::util::SatMul(static_cast<u64>(info.width), static_cast<u64>(info.height));
+    const u64 inter_bytes = duetos::util::SatMul(pixel_count, static_cast<u64>(4));
+    if (inter_bytes == 0xFFFFFFFFFFFFFFFFull)
+    {
+        mm::KFree(file_alloc);
+        StatusSet("TGA dimensions overflow: ");
+        StatusAppendStr(name);
+        return false;
+    }
     void* inter_alloc = mm::KMalloc(inter_bytes);
     if (inter_alloc == nullptr)
     {
@@ -645,11 +663,25 @@ bool DecodePng(const fs::fat32::Volume* v, const fs::fat32::DirEntry* e, const c
 
     // PngDecode wants scratch large enough for IDAT-bytes +
     // (width*4 + 1) * height filtered scanlines. file_buf already
-    // holds the IDAT; we add the filtered-rows bound.
-    const u64 filtered_bytes = (static_cast<u64>(info.width) * 4 + 1) * info.height;
-    const u64 scratch_bytes = filtered_bytes + read; // generous upper bound
+    // holds the IDAT; we add the filtered-rows bound. Use
+    // SatMul/SatAdd so a crafted PNG IHDR claiming u32-max
+    // dimensions saturates instead of wrapping into a tiny
+    // KMalloc that PngDecode then overruns.
+    const u64 w64 = static_cast<u64>(info.width);
+    const u64 h64 = static_cast<u64>(info.height);
+    const u64 row_bytes = duetos::util::SatAdd(duetos::util::SatMul(w64, static_cast<u64>(4)), static_cast<u64>(1));
+    const u64 filtered_bytes = duetos::util::SatMul(row_bytes, h64);
+    const u64 scratch_bytes = duetos::util::SatAdd(filtered_bytes, static_cast<u64>(read));
+    const u64 inter_bytes = duetos::util::SatMul(duetos::util::SatMul(w64, h64), static_cast<u64>(4));
+    if (scratch_bytes == 0xFFFFFFFFFFFFFFFFull || inter_bytes == 0xFFFFFFFFFFFFFFFFull)
+    {
+        mm::KFree(file_alloc);
+        StatusSet("PNG dimensions overflow: ");
+        StatusAppendStr(name);
+        return false;
+    }
     void* scratch_alloc = mm::KMalloc(scratch_bytes);
-    void* inter_alloc = mm::KMalloc(static_cast<u64>(info.width) * info.height * 4);
+    void* inter_alloc = mm::KMalloc(inter_bytes);
     if (scratch_alloc == nullptr || inter_alloc == nullptr)
     {
         mm::KFree(file_alloc);
