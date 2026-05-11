@@ -78,10 +78,53 @@ inline constexpr LockClass kLockClassMax = 256;
 /// 0x01..0x3F range are reserved for hot globals; the self-test
 /// uses 0x40..0xFF for scratch classes (see lockdep.cpp).
 ///
-/// Ordering convention (the order locks should be acquired in if
-/// nested): scheduler runqueue → kobject ledger → kstack arena →
-/// PCI config. Acquiring against this order is what lockdep is
-/// here to flag.
+/// ==========================================================
+/// CANONICAL KERNEL LOCK HIERARCHY (acquire-top-down only)
+/// wiki/security/Linux-CVE-Audit.md class GG.
+/// ==========================================================
+///
+/// Acquire in this order when nested. Releasing is LIFO (any
+/// order that respects "no lock outlives a lock acquired after
+/// it"). Lockdep flags any inversion against this graph as a
+/// "deadlock waiting to happen" — fix the code, not the rule.
+///
+///   1.  kLockClassSched         (scheduler runqueue / wait-queue)
+///   2.  kLockClassCompositor    (UI compositor — runs from kernel task)
+///   3.  kLockClassKObject       (IPC object refcount ledger)
+///   4.  kLockClassKStack        (kernel-stack arena)
+///   5.  kLockClassFat32         (FAT32 driver mutex)
+///   6.  kLockClassWifi          (WiFi driver mutex)
+///   7.  kLockClassBreakpoints   (kernel-debug breakpoint table)
+///   8.  kLockClassCleanroomTrace (cleanroom-mode trace ring)
+///   9.  kLockClassPciConfig     (PCI configuration access)
+///
+/// ABSOLUTE RULES (do not violate even with lockdep off):
+///
+///   - **No sleeping with a spinlock held.** The scheduler's
+///     `WaitQueueBlock` already requires interrupts off (Cli);
+///     a spinlock held across a wake-or-block can deadlock the
+///     CPU. Locks 1..9 above are spinlocks or mutexes; the
+///     mutex variants (Fat32, Compositor) MAY sleep but the
+///     spinlock variants (Sched, KObject) MUST NOT be held
+///     across a sleep.
+///
+///   - **No lock held across CR3 switch.** `AddressSpaceActivate`
+///     flips CR3; any lock whose backing data lives in the
+///     outgoing AS becomes inaccessible immediately. Drop every
+///     lock before the switch.
+///
+///   - **No lock held across TlbShootdownAddr / Range.** The
+///     shootdown spins waiting for peer-CPU acks; if those
+///     peers are blocked on the same lock, you deadlock. See
+///     wiki/security/Linux-CVE-Audit.md class FF.
+///
+/// PRE-LANDING FOR PER-CPU RUNQUEUES (B2-followup):
+/// The single-CPU sched lock today is conservative — every wake
+/// serialises through it. When `g_sched_lock` splits per-CPU,
+/// inter-CPU wakes will need to acquire a SECOND CPU's
+/// runqueue lock, and the rule "always lower-cpu-id first"
+/// gets added to this list. Until then, hold at most one
+/// runqueue lock at a time.
 inline constexpr LockClass kLockClassSched = 0x01;
 inline constexpr LockClass kLockClassKObject = 0x02;
 inline constexpr LockClass kLockClassKStack = 0x03;

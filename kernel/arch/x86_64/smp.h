@@ -7,6 +7,11 @@ namespace duetos::cpu
 struct PerCpu;
 }
 
+namespace duetos::mm
+{
+struct AddressSpace;
+}
+
 /*
  * SMP AP bring-up.
  *
@@ -140,5 +145,31 @@ void SmpStopReleaseNmi();
 /// the flip, so an NMI that arrives between the LAPIC ICR write
 /// and this read sees a consistent value.
 bool SmpGdbStopActive();
+
+// ---------------------------------------------------------------------------
+// TLB shootdown — see kernel/mm/address_space.h for the high-level contract.
+// These declarations exist on the arch side because they own the LAPIC IPI
+// vector and the per-CPU "current AS" lookup needed to filter recipients.
+// ---------------------------------------------------------------------------
+
+/// TLB shootdown IPI vector. Sibling of `kReschedIpiVector`. Lives in the
+/// 240..254 range reserved by `traps.cpp` for kernel-internal IPIs.
+inline constexpr u8 kTlbShootdownIpiVector = 0xF9;
+
+/// Broadcast a single-address invalidation to every peer CPU whose
+/// current CR3 maps `as`. No-op when only the BSP is online (peer set
+/// is empty). The caller is responsible for the local `invlpg` — this
+/// helper only handles remote CPUs.
+void SmpTlbShootdownAddr(mm::AddressSpace* as, u64 virt);
+
+/// Broadcast a per-page invalidation across the half-open range
+/// `[virt, virt + len)` to every peer CPU whose current CR3 maps `as`.
+/// Same locality rules as SmpTlbShootdownAddr.
+void SmpTlbShootdownRange(mm::AddressSpace* as, u64 virt, u64 len);
+
+/// Install the IDT handler for `kTlbShootdownIpiVector`. Called once
+/// alongside `SmpInstallReschedIpiHandler` during early boot, before
+/// any AP could fire the IPI.
+void SmpInstallTlbShootdownIpiHandler();
 
 } // namespace duetos::arch

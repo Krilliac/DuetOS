@@ -551,9 +551,14 @@ struct Walker
         u32 plen_consumed = 0;
         if (!ReadPkgLength(base + after_op, end - after_op, &pkg_len, &plen_consumed))
             return false;
-        const u32 pkg_end = after_op + pkg_len;
-        if (pkg_end > end)
+        // Overflow-safe: compare pkg_len against the remaining slice
+        // instead of computing pkg_end = after_op + pkg_len first
+        // (which could wrap u32 for a maliciously crafted SSDT and
+        // pass a > end check after wrapping small). See
+        // wiki/security/Linux-CVE-Audit.md class M.
+        if (pkg_len > end - after_op)
             return false;
+        const u32 pkg_end = after_op + pkg_len;
         const u32 name_off = after_op + plen_consumed;
         NameStringInfo ns;
         u32 consumed = 0;
@@ -585,9 +590,10 @@ struct Walker
         u32 plen_consumed = 0;
         if (!ReadPkgLength(base + after_op, end - after_op, &pkg_len, &plen_consumed))
             return false;
-        const u32 pkg_end = after_op + pkg_len;
-        if (pkg_end > end)
+        // Overflow-safe — see HandleContainer note above.
+        if (pkg_len > end - after_op)
             return false;
+        const u32 pkg_end = after_op + pkg_len;
         const u32 name_off = after_op + plen_consumed;
         NameStringInfo ns;
         u32 consumed = 0;
@@ -630,9 +636,10 @@ struct Walker
         u32 plen_consumed = 0;
         if (!ReadPkgLength(base + after_op, end - after_op, &pkg_len, &plen_consumed))
             return false;
-        const u32 pkg_end = after_op + pkg_len;
-        if (pkg_end > end)
+        // Overflow-safe — see HandleContainer note above.
+        if (pkg_len > end - after_op)
             return false;
+        const u32 pkg_end = after_op + pkg_len;
         (void)start;
         next_pos_ = pkg_end;
         return true;

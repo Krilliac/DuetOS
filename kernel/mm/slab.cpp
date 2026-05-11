@@ -30,6 +30,7 @@
 #include "mm/kheap.h"
 #include "mm/poison.h"
 #include "sched/sched.h"
+#include "util/string.h"
 #include "util/types.h"
 
 namespace duetos::mm
@@ -404,6 +405,19 @@ void* SlabAlloc(SlabCache* c)
         KLOG_WARN_S("slab", "freed-object poison mismatch", "cache", c->name);
         KASSERT(false, "slab", "use-after-free in slab object");
     }
+    return obj;
+}
+
+void* SlabAllocZeroed(SlabCache* c)
+{
+    void* obj = SlabAlloc(c);
+    if (obj == nullptr)
+        return nullptr;
+    // Wipe the freed-object poison pattern. SlabAlloc has already
+    // verified it, so callers can trust that what gets memset to 0
+    // here was unambiguously a freed (or fresh-carved) slot — no
+    // live-object data leaks through.
+    memset(obj, 0, c->obj_size);
     return obj;
 }
 

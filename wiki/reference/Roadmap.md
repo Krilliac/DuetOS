@@ -99,14 +99,48 @@ the same commit** that delivers the code.
   disclosure wave (CVE-2026-31431, CVE-2026-43284, CVE-2026-43500).
   See [`wiki/security/Linux-CVE-Audit.md`](../security/Linux-CVE-Audit.md)
   for the eight-class verdict matrix.
-- **Open items** (each must be honoured **before** the matching surface
+- **Landed items (2026-05-11):**
+  - **Class E — `SlabAllocZeroed()` helper** added in
+    `kernel/mm/slab.{h,cpp}`. New flag-bearing slab consumers
+    should prefer the zeroed variant; the raw `SlabAlloc` is left
+    in place because most existing callers do their own
+    field-by-field init.
+  - **Class M — AML `pkg_end` overflow** rewritten at all three
+    sites in `kernel/acpi/aml.cpp` to use `pkg_len > end - after_op`
+    (compare-the-difference). Structurally cannot wrap.
+  - **Class N — `MaskedIndex` Spectre-v1 helper** added in
+    `kernel/util/nospec.h` (32- and 64-bit forms). Apply at any
+    syscall dispatch site that uses a user-supplied integer as an
+    array index after a runtime bounds check.
+  - **Class O — saturating refcount.** `KObjectAcquire` now uses
+    `util::RefcountIncSaturating`; refuses the increment at
+    `UINT32_MAX` and logs a panic-or-warn rather than wrapping.
+  - **Class CC — `-fstack-protector-strong`** is now explicit on
+    both `duetos-kernel` and `duetos-kernel-stage1` in
+    `kernel/CMakeLists.txt` (TU-level `-fno-stack-protector`
+    override on `security/stack_canary.cpp` preserved).
+  - **Class FF — TLB shootdown infrastructure.** New
+    `mm::TlbShootdownAddr` / `TlbShootdownRange` (declared in
+    `mm/address_space.h`), backed by
+    `arch::SmpTlbShootdownAddr / Range` and a new IPI vector
+    (`kTlbShootdownIpiVector = 0xF9`) installed alongside the
+    reschedule IPI. The unmap / protect / unmap-borrowed paths
+    in `address_space.cpp` now broadcast instead of doing only a
+    local `invlpg`. Uniprocessor today => helper short-circuits
+    to local-only; the day APs run, the broadcast lights up.
+  - **Class GG — lock hierarchy.** Full canonical hierarchy and
+    the absolute rules (no-sleep-with-spinlock, no-lock-across-CR3,
+    no-lock-across-shootdown) are documented in
+    `kernel/sync/lockdep.h`. Per-CPU-runqueue rule pre-flagged.
+  - **Class II — KASLR scaffolding.** New `kernel/security/kaslr.{h,cpp}`
+    computes a 2-MiB-aligned candidate slide from `core::RandomU64`
+    at boot and exposes it via `KaslrGetCandidateSlide`. The
+    slide-application stub (PIE-build + relocation pass) is the
+    follow-on; until then `KaslrGetKernelSlide` returns 0, but
+    every consumer reads from this single source of truth so the
+    flip is a one-line change.
+- **Still open** (each must be honoured **before** the matching surface
   lands, not retrofitted after):
-  - **Class E — slab zero-on-alloc helper.** `SlabAlloc` returns
-    poison-stamped memory; callers must initialise every field. Provide
-    a `SlabAllocZeroed()` helper or per-cache `zero_on_alloc` flag
-    before any slab consumer holds a flag-style field with
-    attacker-observable semantics (Dirty Pipe root cause was a missed
-    zero of `pipe_buffer.flags`).
   - **Class D — COW / `fork()`.** When demand-paged COW lands, the
     dirty-bit clear-and-fault sequence must be atomic with respect
     to any region-shrink primitive (`madvise(DONTNEED)` and friends).
@@ -123,21 +157,13 @@ the same commit** that delivers the code.
     aliasing on user-supplied scatterlists for any operation that
     doesn't byte-copy the full output. Auth-tag-skip + in-place was
     the Copy Fail root cause.
-  - **Class M — AML `pkg_end` overflow.** `kernel/acpi/aml.cpp`
-    lines 554/588/633 compute `pkg_end = after_op + pkg_len` then
-    check `pkg_end > end`. The addition can theoretically wrap u32
-    (pkg_len is 28-bit). Rewrite as `pkg_len > end - after_op`. Low
-    risk (AML tables are bounded in practice), high cleanliness.
-  - **Class N — Spectre v1 helper.** No `array_index_nospec`-style
-    masked-index helper exists. Add `MaskedIndex(idx, bound)` (and
-    the underlying constant-time mask) for syscall dispatch tables
-    that take user-supplied indices, and apply at the callsites.
-    KPTI remains separately deferred (existing entry below).
-  - **Class O — saturating refcount.** `KObjectAcquire` /
-    `KObjectRelease` are not saturating. Today the spinlock + cap
-    gate make a 2³² overflow path unreachable, but the next
-    "shareable handle" surface should land with a saturating helper
-    so the invariant survives a permission change.
+  - **Class N follow-up (apply the helper).** The
+    `util::MaskedIndex` helper is now in the tree; the
+    follow-on slice walks every syscall-dispatch table where a
+    user-supplied integer indexes an array (Linux syscall table,
+    Win32 syscall thunk table, NT object-type table) and
+    inserts `MaskedIndex` at the dispatch site. KPTI remains
+    separately deferred.
   - **Class I — Bluetooth upper stack.** When L2CAP / RFCOMM / SDP
     land, the protocol-parser invariants from class C apply.
   - **Class L — IPv6 reassembly.** When IPv6 lands, every fragment
@@ -158,31 +184,12 @@ the same commit** that delivers the code.
     verified-shape submission the user cannot edit after the
     point of validation. Direct user→GPU IOCTL is the load-bearing
     assumption behind NVIDIA / AMD / Intel GPU CVE families.
-  - **Class FF — TLB shootdown (SMP blocker).** The SMP AP-bringup
-    slice MUST ship with a `tlb_shootdown(addr_space, range)`
-    helper that IPIs remote CPUs currently in the target address
-    space and waits for ack. Today's uniprocessor `invlpg`
-    (`address_space.cpp:430`) becomes a remote-CPU UAF the day
-    APs run. Track as **blocker for the SMP slice**, not a
-    follow-up.
-  - **Class GG — lock hierarchy (SMP blocker).** Document the
-    kernel lock hierarchy in the sched header
-    (`process_table > runqueue > wait_queue > kobject` or
-    equivalent) and add a debug-only "lock rank" assertion before
-    per-CPU runqueues land. Avoid sleeping with a spinlock held;
-    `WaitQueueBlock` (`sched.h:550`) already requires `Cli`.
-  - **Class II — KASLR (lift from "deferred" before multi-tenant).**
-    Kernel image base is fixed at `0xFFFFFFFF80000000`
-    (`boot/linker.ld:30`). Acceptable for a single-tenant developer
-    kernel; **must land before any deployment that runs code
-    from more than one trust domain** (multi-user, network-facing
-    PE sandbox, container-like surfaces). Move out of "settled —
-    DEFERRED" status at that milestone.
-  - **Class CC — `-fstack-protector-strong` flag.** The canary
-    symbol (`stack_canary.cpp`) is implemented and the failure
-    path panics cleanly, but `-fstack-protector-strong` is not
-    visible in the kernel CMake flags audited. Add it
-    explicitly; it should not be relying on a compiler default.
+  - **Class II follow-up (apply the slide).** The KASLR
+    candidate slide is computed at boot; the follow-on slice
+    builds the kernel as a PIE, emits a relocation table the
+    early-boot stub iterates, applies the slide, and flips
+    `KaslrGetKernelSlide` to return the candidate. Must land
+    before any multi-tenant deployment.
 - **When to revisit:** every time a high-impact public Linux/Windows
   kernel CVE drops, walk the audit doc and update verdicts before
   the next slice lands in the affected area.

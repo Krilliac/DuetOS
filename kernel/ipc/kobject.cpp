@@ -17,6 +17,7 @@
 #include "core/panic.h"
 #include "log/klog.h"
 #include "sync/spinlock.h"
+#include "util/nospec.h"
 #include "util/result.h"
 #include "util/types.h"
 
@@ -101,7 +102,17 @@ void KObjectAcquire(KObject* obj)
         core::DebugPanicOrWarn("ipc/kobject", "KObjectAcquire on dead object (refcount already 0)");
         return;
     }
-    ++obj->refcount;
+    // Saturating increment — the spinlock makes the read+write
+    // atomic, but a future "shareable handle" surface could let
+    // an unprivileged path drive u32 increments to wrap. Refuse
+    // at the ceiling rather than allow CVE-2016-0728-style
+    // refcount-overflow-to-UAF. wiki/security/Linux-CVE-Audit.md
+    // class O.
+    if (!util::RefcountIncSaturating(&obj->refcount))
+    {
+        core::DebugPanicOrWarn("ipc/kobject", "KObjectAcquire refcount saturated");
+        return;
+    }
 }
 
 void KObjectRelease(KObject* obj)

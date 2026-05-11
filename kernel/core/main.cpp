@@ -225,6 +225,7 @@
 #include "security/auth.h"
 #include "security/auth_pentest.h"
 #include "security/cap_audit.h"
+#include "security/kaslr.h"
 #include "loader/firmware_loader.h"
 #include "loader/firmware_package.h"
 #include "diag/heartbeat.h"
@@ -1120,6 +1121,15 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::core::RandomSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::Crc32SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::Base64SelfTest());
+
+    // KASLR — compute the candidate slide from the now-seeded entropy
+    // pool. The slide isn't applied to the kernel image yet (that
+    // depends on a PIE-build + relocation slice landing), but every
+    // consumer of `KaslrGetKernelSlide` reads from one source of truth
+    // so the day the slide-application stub lands, no audit pass is
+    // needed. See wiki/security/Linux-CVE-Audit.md class II.
+    duetos::security::KaslrInit();
+    DUETOS_BOOT_SELFTEST(duetos::security::KaslrSelfTest());
     // NOTE: The stack canary has already been randomized from RDTSC
     // in boot.S before kernel_main was called. The C++ helper
     // `RandomizeStackCanary` in stack_canary.cpp is kept as an API
@@ -6184,6 +6194,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // wake (e.g. WaitQueueWakeOne firing on the BSP and routing to
     // the AP's runqueue) will pull the IPI trigger.
     duetos::arch::SmpInstallReschedIpiHandler();
+    // TLB-shootdown IPI must be installed BEFORE APs come online —
+    // the moment a peer CPU runs in any AS the BSP could be unmapping
+    // a page from, the shootdown IPI is the only thing keeping that
+    // peer's TLB from carrying a stale entry into a recycled frame.
+    // wiki/security/Linux-CVE-Audit.md class FF.
+    duetos::arch::SmpInstallTlbShootdownIpiHandler();
 
     // Bring up APs. SmpStartAps calls SchedSleepTicks(1) between
     // INIT and SIPI; the dedicated idle task installed at the top
