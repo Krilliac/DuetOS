@@ -246,9 +246,16 @@ bool RndisQueryMac(u8 mac_out[6])
         return false;
     // info_off is from the start of RequestID (offset 8); add 8 to
     // get an absolute offset into the reply buffer.
-    const u32 abs = 8 + info_off;
-    if (abs + 6 > sizeof(reply))
+    //
+    // Overflow-safe bound: a malicious peer that returns info_off
+    // close to UINT32_MAX would make `8 + info_off` wrap u32 small,
+    // pass the `abs + 6 > sizeof(reply)` check, and steer the MAC
+    // read to arbitrary attacker-influenced bytes from the front of
+    // `reply`. Compare-the-difference against the static buffer cap
+    // (subtract is constant-folded; cannot wrap).
+    if (info_off > sizeof(reply) - 14)
         return false;
+    const u32 abs = 8 + info_off;
     for (u32 i = 0; i < 6; ++i)
         mac_out[i] = reply[abs + i];
     return true;
