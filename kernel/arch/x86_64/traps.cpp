@@ -46,6 +46,7 @@
 #include "diag/minidump.h"
 #include "diag/log_names.h"
 #include "core/panic.h"
+#include "util/saturating.h"
 #include "util/symbols.h"
 #include "syscall/syscall.h"
 #include "cpu/percpu.h"
@@ -97,7 +98,12 @@ constinit IrqHandler g_irq_handlers[256] = {};
 // interrupt — interrupts are masked during handler dispatch so
 // no intra-vector race is possible; cross-vector increments
 // through this table are independent slots.
-constinit u64 g_irq_counts[256] = {};
+// Saturating: an attacker who can drive an IRQ vector (e.g. via a
+// device that floods completion interrupts) cannot wrap a counter
+// and confuse the runtime checker's IRQ-storm detector. Saturation
+// preserves "the counter never gets smaller," which is the property
+// the detector relies on. wiki/security/Linux-CVE-Audit.md class BB.
+constinit util::SatU64 g_irq_counts[256] = {};
 
 // Global fault counters by category. Bumped on every CPU
 // exception dump (user-mode task-kill or kernel panic). Read

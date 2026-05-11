@@ -45,6 +45,26 @@ the same commit** that delivers the code.
   (b) bisect commits between the last known-good ring3 boot and
   `96e9026` to find the regressing change.
 
+### Early-boot CurrentCpu() returns before BSP install (UBSAN finding)
+
+- **Status:** UBSAN-clean elsewhere; this site fires `type-mismatch`
+  warnings during early boot, then quiets once BSP per-CPU is up.
+- **Sites:** `kernel/sched/sched.cpp:390:31` and
+  `kernel/mm/address_space.cpp:644:31` — both do
+  `cpu::CurrentCpu()->current_task` / `current_as` from inline
+  accessors called by early-boot self-tests before
+  `PerCpuInitBsp` runs. `CurrentCpu()` reads GSBASE MSR; if GSBASE
+  isn't set, it returns null and `->current_task` is a null deref.
+  The reads happen to be benign (we read a field whose offset
+  lands on a mapped page elsewhere) but it's UB by the standard.
+- **Fix:** either
+  (a) initialise BSP per-CPU strictly before any code that can
+      call `Current()` / `AddressSpaceCurrent()`, OR
+  (b) make `Current()` and `AddressSpaceCurrent()` null-safe with
+      an explicit `g_bsp_installed` check (the same flag
+      `CurrentCpuIdOrBsp` already consults).
+- Tracked: 2026-05-11.
+
 ### B2-followup — split `g_sched_lock` per-CPU
 
 - **Status:** SMP per-CPU runqueues + work-stealing + reschedule-IPI

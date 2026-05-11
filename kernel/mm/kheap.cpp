@@ -12,6 +12,7 @@
 #include "core/panic.h"
 #include "util/cache.h"
 #include "util/debug_assert.h"
+#include "util/saturating.h"
 
 namespace duetos::mm
 {
@@ -112,8 +113,8 @@ inline void AssertMagic(const ChunkHeader* chunk, u64 expected, const char* cont
 constinit u8* g_pool_base = nullptr;
 constinit u64 g_pool_bytes = 0;
 constinit ChunkHeader* g_freelist = nullptr;
-constinit u64 g_alloc_count = 0;
-constinit u64 g_free_count = 0;
+constinit util::SatU64 g_alloc_count = 0;
+constinit util::SatU64 g_free_count = 0;
 
 // Size-class bins. Each bin holds a LIFO stack of free chunks of one
 // exact size, parked OUTSIDE the coalescing freelist. KMalloc checks

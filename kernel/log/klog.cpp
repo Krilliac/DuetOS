@@ -37,6 +37,7 @@
 #include "sched/sched.h"
 #include "util/build_config.h"
 #include "util/datetime.h"
+#include "util/saturating.h"
 
 namespace duetos::core
 {
@@ -61,7 +62,12 @@ struct LogEntry
 };
 
 constinit LogEntry g_log_ring[kLogRingCapacity] = {};
-constinit u64 g_log_ring_next = 0;  // monotonically increasing write cursor
+// Saturating: a log-flood attack cannot wrap the write cursor.
+// Reads do `g_log_ring_next - g_log_ring_count` (line ~580 / ~879
+// / ~946 / ~977) so an underflow would compute a giant start
+// offset and the reader would walk garbage; saturation keeps the
+// arithmetic monotonic. wiki/security/Linux-CVE-Audit.md class BB.
+constinit util::SatU64 g_log_ring_next = 0;  // monotonically increasing write cursor
 constinit u64 g_log_ring_count = 0; // saturates at kLogRingCapacity
 
 constinit bool g_color_enabled = true;
