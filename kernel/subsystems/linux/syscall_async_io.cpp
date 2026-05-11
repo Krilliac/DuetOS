@@ -48,6 +48,7 @@
 #include "mm/paging.h"
 #include "proc/process.h"
 #include "sched/sched.h"
+#include "util/nospec.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -354,7 +355,11 @@ void TicksToItimerspec(u64 ticks, i64& sec_out, i64& nsec_out)
 i64 DoTimerfdSettime(u64 fd, u64 flags, u64 user_new, u64 user_old)
 {
     core::Process* p = core::CurrentProcess();
-    if (p == nullptr || fd >= 16 || p->linux_fds[fd].state != 7)
+    if (p == nullptr || fd >= 16)
+        return kEBADF;
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    fd = util::MaskedIndex(fd, 16);
+    if (p->linux_fds[fd].state != 7)
         return kEBADF;
     const u32 idx = p->linux_fds[fd].first_cluster;
     if (idx >= kTimerfdPoolCap)
@@ -415,7 +420,11 @@ i64 DoTimerfdSettime(u64 fd, u64 flags, u64 user_new, u64 user_old)
 i64 DoTimerfdGettime(u64 fd, u64 user_curr)
 {
     core::Process* p = core::CurrentProcess();
-    if (p == nullptr || fd >= 16 || p->linux_fds[fd].state != 7)
+    if (p == nullptr || fd >= 16)
+        return kEBADF;
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    fd = util::MaskedIndex(fd, 16);
+    if (p->linux_fds[fd].state != 7)
         return kEBADF;
     const u32 idx = p->linux_fds[fd].first_cluster;
     if (idx >= kTimerfdPoolCap)
@@ -545,7 +554,11 @@ i64 DoSignalfd(u64 fd, u64 user_mask, u64 sigsetsize, u64 flags)
     if (fd != static_cast<u64>(-1))
     {
         // Update existing signalfd's mask in place.
-        if (fd >= 16 || p->linux_fds[fd].state != 8)
+        if (fd >= 16)
+            return kEINVAL;
+        // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+        fd = util::MaskedIndex(fd, 16);
+        if (p->linux_fds[fd].state != 8)
             return kEINVAL;
         const u32 idx = p->linux_fds[fd].first_cluster;
         if (idx >= kSignalfdPoolCap)
@@ -629,6 +642,8 @@ u32 LinuxFdEpollReady(u32 fd, u32 interest_mask)
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || fd >= 16)
         return 0;
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    fd = util::MaskedIndex32(fd, 16);
     const auto& slot = p->linux_fds[fd];
     if (slot.state == 0)
         return kEPOLLERR | kEPOLLHUP;
@@ -772,9 +787,14 @@ i64 DoEpollCtl(u64 epfd, u64 op, u64 fd, u64 user_event)
     constexpr u64 kEpollCtlDel = 2;
     constexpr u64 kEpollCtlMod = 3;
     core::Process* p = core::CurrentProcess();
-    if (p == nullptr || epfd >= 16 || p->linux_fds[epfd].state != 9)
+    if (p == nullptr || epfd >= 16 || fd >= 16)
         return kEBADF;
-    if (fd >= 16 || p->linux_fds[fd].state == 0)
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    epfd = util::MaskedIndex(epfd, 16);
+    fd = util::MaskedIndex(fd, 16);
+    if (p->linux_fds[epfd].state != 9)
+        return kEBADF;
+    if (p->linux_fds[fd].state == 0)
         return kEBADF;
     const u32 idx = p->linux_fds[epfd].first_cluster;
     if (idx >= kEpollPoolCap)

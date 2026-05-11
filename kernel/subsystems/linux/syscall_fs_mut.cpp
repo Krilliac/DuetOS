@@ -27,6 +27,7 @@
 #include "fs/fat32.h"
 #include "security/canary.h"
 #include "subsystems/linux/inotify.h"
+#include "util/nospec.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -72,7 +73,11 @@ i64 DoFchmod(u64 fd, u64 mode)
 {
     (void)mode;
     core::Process* p = core::CurrentProcess();
-    if (p == nullptr || fd >= 16 || p->linux_fds[fd].state == 0)
+    if (p == nullptr || fd >= 16)
+        return kEBADF;
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    fd = util::MaskedIndex(fd, 16);
+    if (p->linux_fds[fd].state == 0)
         return kEBADF;
     return 0;
 }
@@ -147,7 +152,11 @@ i64 DoTruncate(u64 user_path, u64 length)
 i64 DoFtruncate(u64 fd, u64 length)
 {
     core::Process* p = core::CurrentProcess();
-    if (p == nullptr || fd >= 16 || p->linux_fds[fd].state != 2)
+    if (p == nullptr || fd >= 16)
+        return kEBADF;
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    fd = util::MaskedIndex(fd, 16);
+    if (p->linux_fds[fd].state != 2)
         return kEBADF;
     if (!RequireFsWrite(p))
         return kEACCES;
@@ -398,7 +407,9 @@ i64 DoUtimensat(i64 dirfd, u64 user_path, u64 user_times, u64 flags)
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || dirfd < 0 || dirfd >= 16)
         return kEBADF;
-    if (p->linux_fds[dirfd].state == 0)
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    const u64 masked_dirfd = util::MaskedIndex(static_cast<u64>(dirfd), 16);
+    if (p->linux_fds[masked_dirfd].state == 0)
         return kEBADF;
     return 0;
 }

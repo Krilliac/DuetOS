@@ -44,6 +44,7 @@
 #include "mm/page.h"
 #include "mm/paging.h"
 #include "proc/process.h"
+#include "util/nospec.h"
 #include "sched/sched.h"
 
 namespace duetos::subsystems::linux::internal
@@ -334,6 +335,9 @@ i64 DoCopyFileRange(u64 fd_in, u64 user_off_in, u64 fd_out, u64 user_off_out, u6
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || fd_in >= 16 || fd_out >= 16)
         return kEBADF;
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    fd_in = util::MaskedIndex(fd_in, 16);
+    fd_out = util::MaskedIndex(fd_out, 16);
     if (p->linux_fds[fd_in].state != 2 || p->linux_fds[fd_out].state != 2)
         return kEINVAL; // both ends must be regular files
     if (len == 0)

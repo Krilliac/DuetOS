@@ -110,15 +110,19 @@ the same commit** that delivers the code.
     (compare-the-difference). Structurally cannot wrap.
   - **Class N — `MaskedIndex` Spectre-v1 helper** added in
     `kernel/util/nospec.h` (32- and 64-bit forms) and applied
-    across the audited user-controlled dispatch sites: Win32 NT
+    across every audited user-controlled dispatch site: Win32 NT
     handle table (`ipc/handle_table.cpp` Lookup / LookupRef /
     Remove), Win32 thread / process / GDI handle dispatch
     (`syscall/syscall.cpp`, `subsystems/win32/gdi_objects.cpp`),
     Win32 file handle resolver
-    (`fs/file_route.cpp::HandleToSlot`), Linux fd dispatch in
-    `linux/syscall_io.cpp` + `syscall_file.cpp` +
-    `syscall_path.cpp` + `syscall_xattr.cpp` +
-    `pidfd_splice.cpp`. Discipline for new code: after the
+    (`fs/file_route.cpp::HandleToSlot`), and the full Linux fd
+    dispatch surface across `linux/syscall_io.cpp`,
+    `syscall_file.cpp`, `syscall_path.cpp`, `syscall_xattr.cpp`,
+    `pidfd_splice.cpp`, `syscall_fs_mut.cpp`, `syscall_fd.cpp`,
+    `syscall_socket.cpp`, `syscall_mm.cpp`,
+    `syscall_async_io.cpp`, `inotify.cpp`, `fanotify.cpp`,
+    `syscall_misc.cpp`, `extra_syscalls.cpp`, and
+    `syscall_stub.cpp`. Discipline for new code: after the
     `if (idx >= kCap) return -EINVAL;` runtime check, mask the
     index with `util::MaskedIndex(idx, kCap)` before the array
     load — the check protects correctness, the mask bounds the

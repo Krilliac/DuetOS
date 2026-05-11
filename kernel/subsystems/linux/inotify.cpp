@@ -23,6 +23,7 @@
 #include "mm/paging.h"
 #include "proc/process.h"
 #include "sched/sched.h"
+#include "util/nospec.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -367,7 +368,11 @@ i64 InotifyInit1(u64 flags)
 i64 DoInotifyAddWatch(u64 fd, u64 user_path, u64 mask)
 {
     core::Process* p = core::CurrentProcess();
-    if (p == nullptr || fd >= 16 || p->linux_fds[fd].state != 10)
+    if (p == nullptr || fd >= 16)
+        return kEBADF;
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    fd = util::MaskedIndex(fd, 16);
+    if (p->linux_fds[fd].state != 10)
         return kEBADF;
     const u32 idx = p->linux_fds[fd].first_cluster;
     if (idx >= kInotifyPoolCap)
@@ -422,7 +427,11 @@ i64 DoInotifyRmWatch(u64 fd, u64 wd_arg)
 {
     const i32 wd = static_cast<i32>(static_cast<i64>(wd_arg));
     core::Process* p = core::CurrentProcess();
-    if (p == nullptr || fd >= 16 || p->linux_fds[fd].state != 10)
+    if (p == nullptr || fd >= 16)
+        return kEBADF;
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    fd = util::MaskedIndex(fd, 16);
+    if (p->linux_fds[fd].state != 10)
         return kEBADF;
     const u32 idx = p->linux_fds[fd].first_cluster;
     if (idx >= kInotifyPoolCap)

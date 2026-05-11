@@ -21,6 +21,7 @@
 
 #include "log/klog.h"
 #include "proc/process.h"
+#include "util/nospec.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -54,6 +55,8 @@ i64 DoDup(u64 fd)
         KLOG_WARN_V("linux/fd", "DoDup: EBADF (fd out of range or no Process)", fd);
         return kEBADF;
     }
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    fd = util::MaskedIndex(fd, 16);
     if (p->linux_fds[fd].state == 0)
     {
         KLOG_WARN_V("linux/fd", "DoDup: EBADF (fd not open)", fd);
@@ -88,6 +91,9 @@ i64 DoDup2(u64 oldfd, u64 newfd)
         KLOG_WARN_2V("linux/fd", "DoDup2: EBADF", "oldfd", oldfd, "newfd", newfd);
         return kEBADF;
     }
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    oldfd = util::MaskedIndex(oldfd, 16);
+    newfd = util::MaskedIndex(newfd, 16);
     if (p->linux_fds[oldfd].state == 0)
     {
         KLOG_WARN_V("linux/fd", "DoDup2: EBADF (oldfd not open)", oldfd);
@@ -149,6 +155,8 @@ i64 DoFcntl(u64 fd, u64 cmd, u64 arg)
         KLOG_WARN_V("linux/fd", "DoFcntl: EBADF (out-of-range fd or no Process)", fd);
         return kEBADF;
     }
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    fd = util::MaskedIndex(fd, 16);
     if (p->linux_fds[fd].state == 0)
     {
         KLOG_WARN_V("linux/fd", "DoFcntl: EBADF (fd not open)", fd);

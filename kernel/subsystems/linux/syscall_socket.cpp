@@ -22,6 +22,7 @@
 #include "net/stack.h"
 #include "proc/process.h"
 #include "sched/sched.h"
+#include "util/nospec.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -127,6 +128,8 @@ bool FdIsSocket(::duetos::core::Process* p, u64 fd, u32& out_idx)
 {
     if (fd >= 16)
         return false;
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    fd = ::duetos::util::MaskedIndex(fd, 16);
     if (p->linux_fds[fd].state != 6)
         return false;
     out_idx = p->linux_fds[fd].first_cluster;
