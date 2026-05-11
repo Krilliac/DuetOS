@@ -29,6 +29,15 @@
  *   dispatch to borrow from — anything a Win32 stub "has" is just
  *   a particular native call. When native missing → Linux
  *   translation makes sense, that path works the same way.
+ *
+ *   A symmetric `Win32ThunkToNative` would only earn its keep if
+ *   a Win32 verb genuinely lacked a native call AND a Linux
+ *   call could supply the missing semantics. Today every Win32
+ *   verb we ship is reachable through either a direct handler
+ *   under `kernel/subsystems/win32/` (the per-family
+ *   `xxx_syscall.cpp` TUs) or the thunks-bytecode noop. When a
+ *   future PE drives demand for a verb that's a Linux primitive
+ *   but not a native one, add the entry here.
  */
 
 namespace duetos::arch
@@ -86,19 +95,29 @@ struct HitTable
 };
 const HitTable& NativeHitsRead();
 
-/// Emit a `[translate-overhead] native …` line to the serial log.
-/// The line carries raw TSC counts: calls, total cycles, average
-/// per call, max seen. Also emits a `[translate-miss-suppressed]`
-/// line with cumulative + delta counts for sampled miss logs.
-/// Called by the kheartbeat loop so the numbers roll in on the
-/// same cadence as the other telemetry; a shell command can call
-/// it on demand too.
+/// Emit `[translate-overhead] native …` + `nt …` lines to the
+/// serial log. Each line carries raw TSC counts: calls, total
+/// cycles, average per call, max seen. Also emits a
+/// `[translate-miss-suppressed]` line with cumulative + delta
+/// counts for sampled miss logs. Called by the kheartbeat loop
+/// so the numbers roll in on the same cadence as the other
+/// telemetry; a shell command can call it on demand too.
 ///
 /// Why cycles and not nanoseconds: TSC frequency is CPU-specific;
 /// we don't have a reliable TSC→ns calibration in the kernel yet.
 /// Operators divide by the host CPU's TSC Hz (dmesg reports it)
 /// to convert, or just read the numbers as relative costs.
 void TranslatorOverheadDump();
+
+/// One-shot end-of-boot summary line for CI consumption:
+///   [smoke] translate_summary native_calls=… native_total_c=…
+///           native_max_c=… native_miss_emitted=…
+///           native_miss_suppressed=… nt_calls=… nt_total_c=…
+///           nt_max_c=… nt_miss_total=…
+/// Single line, space-separated key=hexvalue pairs so the smoke
+/// harness can grep + awk against it. Keys are stable; adding new
+/// keys is backwards-compatible.
+void TranslatorBootSummaryEmit();
 
 // Public name-lookup helpers — the generated Linux + NT syscall
 // tables are compiled into this TU, so any subsystem that wants

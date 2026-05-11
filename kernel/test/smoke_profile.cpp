@@ -5,6 +5,7 @@
 #include "arch/x86_64/serial.h"
 #include "diag/fix_journal.h"
 #include "sched/sched.h"
+#include "subsystems/translation/translate.h"
 
 namespace duetos::test
 {
@@ -328,6 +329,12 @@ void SmokeProfileSleepAndExit()
     // tools/qemu/run-fix-cycle.sh can pick them up alongside the
     // standard sentinel.
     ::duetos::diag::FixJournalEmitBootSummary();
+
+    // Translator boot summary — one-line key=hexvalue snapshot of
+    // native + NT translator activity for the same CI-grep pattern.
+    // Cheap (a few atomic reads); useful for catching unexpected
+    // miss-spikes or pathological per-call overheads between runs.
+    ::duetos::subsystems::translation::TranslatorBootSummaryEmit();
 
     // Sentinel that the CI script greps for. The "complete" suffix
     // is the only thing the assertion list checks under a smoke

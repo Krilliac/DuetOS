@@ -84,6 +84,14 @@ struct OverheadTally
 };
 constinit OverheadTally g_native_overhead = {};
 
+// NT-translation telemetry. NT calls don't share the native
+// bucket array because the number spaces overlap (NT 0x1D3 is
+// a valid native nr too); a separate summary tally keeps the
+// CI assertion unambiguous. `calls` counts handled translations
+// only; misses are reported separately via the miss-log path.
+constinit OverheadTally g_nt_overhead = {};
+constinit u64 g_nt_miss_total = 0;
+
 // Miss-log sampling state. Hot probe paths can call unknown numbers
 // thousands of times; writing every miss to COM1 dominates runtime.
 // Keep the first few misses fully visible, then sample at powers of
@@ -359,7 +367,8 @@ i64 NativeWin32Free(arch::TrapFrame* f)
 
 // Bedrock NT syscall numbers we translate. Kept as a handful
 // with clean 1:1 Linux mappings — expand as real ntdll-shim
-// demand arrives.
+// demand arrives. Numbers come from the j00ru table embedded in
+// `kernel/subsystems/win32/nt_syscall_table_generated.h`.
 enum : u64
 {
     kNtClose = 0x000F,
@@ -372,6 +381,14 @@ enum : u64
     kNtFlushBuffersFile = 0x004B,
     kNtGetTickCount = 0x0171,
     kNtQuerySystemTime = 0x005A,
+    // v0 safe synthetic-success calls — NT semantics are a no-op
+    // in our subset, so a one-line success keeps the ntdll shim
+    // moving without pretending we honour every info class.
+    kNtSetInformationThread = 0x000D,
+    kNtQueryDefaultLocale = 0x0015,
+    kNtQueryDefaultUILanguage = 0x0044,
+    kNtFlushInstructionCache = 0x00F1,
+    kNtTestAlert = 0x01D3,
 };
 
 // POSIX errno (Linux helpers return negative) → NTSTATUS.
@@ -545,6 +562,70 @@ i64 NtDoQuerySystemTime(arch::TrapFrame* f)
     return kStatusSuccess;
 }
 
+// NtSetInformationThread(HANDLE Thread, THREADINFOCLASS Class,
+// PVOID Info, ULONG Length): real Windows treats most info classes
+// as silent-success no-ops once validation passes; v0 has no
+// thread-info-class effects (priority/affinity/etc.) so synthetic
+// STATUS_SUCCESS matches what the CRT startup sequence expects.
+// GAP: thread-info classes that DO matter (TLS slot, exit status)
+// — revisit when a real workload depends on one.
+i64 NtDoSetInformationThread(arch::TrapFrame* /*f*/)
+{
+    return kStatusSuccess;
+}
+
+// NtQueryDefaultLocale(BOOLEAN UserProfile, PLCID DefaultLocaleId).
+// We report LOCALE_NEUTRAL_LCID en-US (0x0409); the ntdll shim that
+// asks at startup just wants a stable value to thread through to
+// the user-mode locale tables.
+// GAP: locale is not settable — NtSetDefaultLocale not wired.
+i64 NtDoQueryDefaultLocale(arch::TrapFrame* f)
+{
+    const u64 user_lcid = f->rdx;
+    if (user_lcid == 0)
+        return kStatusInvalidParam;
+    const u32 lcid = 0x0409u; // en-US
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_lcid), &lcid, sizeof(lcid)))
+        return kStatusInvalidParam;
+    return kStatusSuccess;
+}
+
+// NtQueryDefaultUILanguage(PLANGID DefaultUILanguageId). Same
+// shape as the LCID variant; report 0x0409 (LANGIDFROMLCID of
+// en-US).
+// GAP: UI language is not settable — NtSetDefaultUILanguage not wired.
+i64 NtDoQueryDefaultUILanguage(arch::TrapFrame* f)
+{
+    const u64 user_langid = f->rsi;
+    if (user_langid == 0)
+        return kStatusInvalidParam;
+    const u16 langid = 0x0409u; // en-US
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_langid), &langid, sizeof(langid)))
+        return kStatusInvalidParam;
+    return kStatusSuccess;
+}
+
+// NtFlushInstructionCache(HANDLE Process, PVOID Addr, SIZE_T Len):
+// x86_64 has coherent instruction caches across stores in the
+// same address space, so a same-process flush is architecturally
+// a no-op. Cross-process flushes would need IPI fan-out; v0
+// doesn't ship cross-process JIT, so synthetic success is correct
+// for the only callers we see.
+i64 NtDoFlushInstructionCache(arch::TrapFrame* /*f*/)
+{
+    return kStatusSuccess;
+}
+
+// NtTestAlert(): drain a pending alert. v0 has no alertable-wait
+// state machine, so there's nothing to drain — STATUS_SUCCESS
+// matches the "no alert was pending" Windows behaviour.
+// GAP: alertable waits not wired — once they land this should
+// consume the alert flag and run any queued user-APC.
+i64 NtDoTestAlert(arch::TrapFrame* /*f*/)
+{
+    return kStatusSuccess;
+}
+
 // Log an NT-translation entry so the boot log is grep-able.
 void LogNtTranslation(u64 nt_nr, const char* target)
 {
@@ -621,6 +702,7 @@ Result NativeGapFill(arch::TrapFrame* frame)
 Result NtTranslateToLinux(arch::TrapFrame* frame)
 {
     KLOG_TRACE_SCOPE("translate", "NtTranslateToLinux");
+    const u64 tsc_entry = ReadTsc();
     const u64 nt_nr = frame->rdi;
     Result r{false, 0};
     switch (nt_nr)
@@ -657,6 +739,26 @@ Result NtTranslateToLinux(arch::TrapFrame* frame)
         LogNtTranslation(nt_nr, "linux:now-ns->filetime");
         r = {true, NtDoQuerySystemTime(frame)};
         break;
+    case kNtSetInformationThread:
+        LogNtTranslation(nt_nr, "synthetic:success-noop");
+        r = {true, NtDoSetInformationThread(frame)};
+        break;
+    case kNtQueryDefaultLocale:
+        LogNtTranslation(nt_nr, "synthetic:en-US-lcid");
+        r = {true, NtDoQueryDefaultLocale(frame)};
+        break;
+    case kNtQueryDefaultUILanguage:
+        LogNtTranslation(nt_nr, "synthetic:en-US-langid");
+        r = {true, NtDoQueryDefaultUILanguage(frame)};
+        break;
+    case kNtFlushInstructionCache:
+        LogNtTranslation(nt_nr, "synthetic:icache-coherent-x86");
+        r = {true, NtDoFlushInstructionCache(frame)};
+        break;
+    case kNtTestAlert:
+        LogNtTranslation(nt_nr, "synthetic:no-alert-pending");
+        r = {true, NtDoTestAlert(frame)};
+        break;
     case kNtTerminateThread:
         LogNtTranslation(nt_nr, "linux:exit");
         NtDoTerminateThread(frame); // [[noreturn]]
@@ -670,6 +772,7 @@ Result NtTranslateToLinux(arch::TrapFrame* frame)
         // STATUS_NOT_IMPLEMENTED so the ntdll shim can bail
         // cleanly. Log once at the same sampling cadence as the
         // Linux-miss path.
+        ++g_nt_miss_total;
         if (ShouldLogMiss(g_native_miss_sampling, nt_nr))
         {
             arch::SerialWrite("[nt-translate-miss] nt_nr=");
@@ -682,6 +785,8 @@ Result NtTranslateToLinux(arch::TrapFrame* frame)
         r = {false, kStatusNotImplemented};
         break;
     }
+    if (r.handled)
+        BumpOverhead(g_nt_overhead, ReadTsc() - tsc_entry);
     return r;
 }
 
@@ -689,6 +794,7 @@ Result NtTranslateToLinux(arch::TrapFrame* frame)
 // kheartbeat loop so the numbers roll into the normal telemetry
 // cadence without a dedicated shell command. Format:
 //   [translate-overhead] native calls=N total_c=C avg_c=A max_c=M
+//   [translate-overhead] nt     calls=N total_c=C avg_c=A max_c=M
 // Cycles are raw TSC deltas; on the QEMU host TSC runs at the
 // CPU's nominal frequency (qemu reports a fixed rate) so dividing
 // by that frequency yields nanoseconds. We emit raw cycles and
@@ -709,7 +815,51 @@ void TranslatorOverheadDump()
     arch::SerialWriteHex(g_native_overhead.cycles_max);
     arch::SerialWrite("\n");
 
+    arch::SerialWrite("[translate-overhead] nt     calls=");
+    arch::SerialWriteHex(g_nt_overhead.calls);
+    arch::SerialWrite(" total_c=");
+    arch::SerialWriteHex(g_nt_overhead.cycles_total);
+    if (g_nt_overhead.calls > 0)
+    {
+        arch::SerialWrite(" avg_c=");
+        arch::SerialWriteHex(g_nt_overhead.cycles_total / g_nt_overhead.calls);
+    }
+    arch::SerialWrite(" max_c=");
+    arch::SerialWriteHex(g_nt_overhead.cycles_max);
+    arch::SerialWrite(" miss_total=");
+    arch::SerialWriteHex(g_nt_miss_total);
+    arch::SerialWrite("\n");
+
     DumpSuppressedMissSummary("native", g_native_miss_sampling);
+}
+
+// One-shot, end-of-boot structured summary that CI smoke harnesses
+// grep for. Single line, space-separated `key=hexvalue` pairs so
+// `tools/qemu/run-fix-cycle.sh`-style consumers can `awk` against
+// it without parsing the multi-line overhead dump. Keys are stable;
+// adding new ones is backwards-compatible.
+void TranslatorBootSummaryEmit()
+{
+    arch::SerialWrite("[smoke] translate_summary");
+    arch::SerialWrite(" native_calls=");
+    arch::SerialWriteHex(g_native_overhead.calls);
+    arch::SerialWrite(" native_total_c=");
+    arch::SerialWriteHex(g_native_overhead.cycles_total);
+    arch::SerialWrite(" native_max_c=");
+    arch::SerialWriteHex(g_native_overhead.cycles_max);
+    arch::SerialWrite(" native_miss_emitted=");
+    arch::SerialWriteHex(g_native_miss_sampling.emitted_total);
+    arch::SerialWrite(" native_miss_suppressed=");
+    arch::SerialWriteHex(g_native_miss_sampling.suppressed_total);
+    arch::SerialWrite(" nt_calls=");
+    arch::SerialWriteHex(g_nt_overhead.calls);
+    arch::SerialWrite(" nt_total_c=");
+    arch::SerialWriteHex(g_nt_overhead.cycles_total);
+    arch::SerialWrite(" nt_max_c=");
+    arch::SerialWriteHex(g_nt_overhead.cycles_max);
+    arch::SerialWrite(" nt_miss_total=");
+    arch::SerialWriteHex(g_nt_miss_total);
+    arch::SerialWrite("\n");
 }
 
 } // namespace duetos::subsystems::translation
