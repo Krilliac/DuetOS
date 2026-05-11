@@ -39,6 +39,7 @@
 #include "mm/paging.h"
 #include "proc/process.h"
 #include "sched/sched.h"
+#include "util/nospec.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -378,7 +379,11 @@ i64 DoFanotifyMark(u64 fd, u64 flags, u64 mask, u64 dirfd, u64 user_path)
     constexpr u64 kFanMarkRemove = 0x02;
     constexpr u64 kFanMarkFlush = 0x80;
     core::Process* p = core::CurrentProcess();
-    if (p == nullptr || fd >= 16 || p->linux_fds[fd].state != 15)
+    if (p == nullptr || fd >= 16)
+        return kEBADF;
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    fd = util::MaskedIndex(fd, 16);
+    if (p->linux_fds[fd].state != 15)
         return kEBADF;
     const u32 idx = p->linux_fds[fd].first_cluster;
     if (idx >= kFanotifyPoolCap)

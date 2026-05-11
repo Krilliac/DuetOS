@@ -42,22 +42,26 @@ namespace duetos::util
 /// through MaskedIndex when reading from the array. The check
 /// protects correctness; the mask protects the speculative
 /// window. Both are required.
+///
+/// Implementation: the mask is built from the `(idx < bound)`
+/// comparison promoted to 0 / 1 and negated to all-0s / all-1s.
+/// On x86_64 the compiler lowers this to `cmp + sbb` (or
+/// equivalently `cmp + setb + neg`) — three flag-driven
+/// instructions, no branch the speculator can mispredict. Works
+/// for the full u64 idx range; an earlier "sign bit of
+/// (idx - bound)" formula failed for idx > 2^63 + bound because
+/// the wrapped difference stayed in the top half and the mask
+/// resolved to all-1s, letting the speculator carry the bad idx
+/// through.
 [[nodiscard]] constexpr u64 MaskedIndex(u64 idx, u64 bound)
 {
-    // If idx < bound, (idx - bound) sets the sign bit; sign-
-    // extending arithmetic right-shift by 63 replicates it into
-    // a 64-bit mask of all-ones. The compiler-visible logic is
-    // branchless and the speculator cannot redirect through a
-    // smaller (or zero) bound to a larger idx.
-    const u64 diff = idx - bound;
-    const u64 mask = static_cast<u64>(static_cast<i64>(diff) >> 63);
+    const u64 mask = 0ULL - static_cast<u64>(idx < bound);
     return idx & mask;
 }
 
 [[nodiscard]] constexpr u32 MaskedIndex32(u32 idx, u32 bound)
 {
-    const u32 diff = idx - bound;
-    const u32 mask = static_cast<u32>(static_cast<i32>(diff) >> 31);
+    const u32 mask = 0U - static_cast<u32>(idx < bound);
     return idx & mask;
 }
 

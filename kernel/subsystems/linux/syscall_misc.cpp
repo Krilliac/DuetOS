@@ -18,6 +18,7 @@
 #include "subsystems/linux/syscall_internal.h"
 
 #include "proc/process.h"
+#include "util/nospec.h"
 #include "util/random.h"
 #include "fs/fat32.h"
 #include "mm/address_space.h"
@@ -278,7 +279,9 @@ i64 DoPoll(u64 user_fds, u64 nfds, i64 timeout_ms)
             continue;
         if (p == nullptr)
             continue;
-        const u8 state = p->linux_fds[static_cast<u64>(fds[i].fd)].state;
+        // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+        const u64 masked_fd = util::MaskedIndex(static_cast<u64>(fds[i].fd), 16);
+        const u8 state = p->linux_fds[masked_fd].state;
         if (state == 0)
         {
             fds[i].revents = 0x20; // POLLNVAL
@@ -337,6 +340,8 @@ i64 DoGetdents64(u64 fd, u64 user_buf, u64 count)
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || fd >= 16)
         return kEBADF;
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    fd = util::MaskedIndex(fd, 16);
     const u32 state = p->linux_fds[fd].state;
     if (state == 0)
         return kEBADF;
@@ -498,7 +503,11 @@ i64 DoFlock(u64 fd, u64 op)
     constexpr u64 kLockNb = 4;
     (void)kLockNb;
     core::Process* p = core::CurrentProcess();
-    if (p == nullptr || fd >= 16 || p->linux_fds[fd].state == 0)
+    if (p == nullptr || fd >= 16)
+        return kEBADF;
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    fd = util::MaskedIndex(fd, 16);
+    if (p->linux_fds[fd].state == 0)
         return kEBADF;
     const u64 cmd = op & ~kLockNb;
     if (cmd != kLockSh && cmd != kLockEx && cmd != kLockUn)
@@ -766,6 +775,8 @@ i64 DoGetdents(u64 fd, u64 user_buf, u64 count)
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || fd >= 16)
         return kEBADF;
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    fd = util::MaskedIndex(fd, 16);
     const u32 state = p->linux_fds[fd].state;
     if (state == 0)
         return kEBADF;

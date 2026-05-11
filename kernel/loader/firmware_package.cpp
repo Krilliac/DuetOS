@@ -183,8 +183,15 @@ bool FwPackageLooksLike(const u8* blob, u32 blob_size)
 
     const u32 payload_offset = ReadLe32(blob, 20);
     const u32 payload_size = ReadLe32(blob, 24);
-    if (payload_offset < header_bytes || payload_offset > blob_size || payload_size == 0 || payload_size > blob_size ||
-        payload_offset + payload_size > blob_size)
+    // Overflow-safe bounds: a crafted package with payload_offset and
+    // payload_size both near UINT32_MAX would pass `payload_offset +
+    // payload_size > blob_size` after the sum wraps u32 small. Compare
+    // the difference instead — `payload_size > blob_size - payload_offset`
+    // cannot wrap because the prior `payload_offset > blob_size` check
+    // makes the subtraction non-negative. Class M discipline (see
+    // wiki/security/Linux-CVE-Audit.md).
+    if (payload_offset < header_bytes || payload_offset > blob_size || payload_size == 0 ||
+        payload_size > blob_size - payload_offset)
         return ::duetos::core::Err{ErrorCode::Corrupt};
 
     u8 digest[crypto::kSha256DigestBytes] = {};

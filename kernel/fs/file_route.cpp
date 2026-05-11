@@ -38,6 +38,7 @@
 #include "proc/process.h"
 #include "security/canary.h"
 #include "subsystems/linux/inotify.h"
+#include "util/nospec.h"
 
 namespace duetos::fs::routing
 {
@@ -228,12 +229,18 @@ u64 FindFreeSlot(::duetos::core::Process* proc)
 }
 
 // Validate handle id, return slot index or u64(-1).
+//
+// Spectre v1 nospec: every consumer of this function uses the
+// returned slot as a direct array index into win32_handles[]. The
+// runtime bounds check protects correctness; we additionally mask
+// the slot so a misprediction can't speculate a load past the
+// table.
 u64 HandleToSlot(u64 handle)
 {
     using ::duetos::core::Process;
     if (handle < Process::kWin32HandleBase || handle >= Process::kWin32HandleBase + Process::kWin32HandleCap)
         return u64(-1);
-    return handle - Process::kWin32HandleBase;
+    return ::duetos::util::MaskedIndex(handle - Process::kWin32HandleBase, Process::kWin32HandleCap);
 }
 
 // Per-handle byte size accessor — every backing knows it.

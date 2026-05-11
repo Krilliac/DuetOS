@@ -24,6 +24,7 @@
 #include "mm/page.h"
 #include "mm/paging.h"
 #include "proc/process.h"
+#include "util/nospec.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -314,6 +315,8 @@ i64 DoMmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
         KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/mm", "mmap file: fd out of range -> EBADF; fd", fd);
         return kEBADF;
     }
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    fd = util::MaskedIndex(fd, 16);
     if (p->linux_fds[fd].state != 2)
     {
         KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/mm", "mmap file: fd not open -> EBADF; fd", fd);

@@ -31,6 +31,7 @@
 #include "mm/paging.h"
 #include "proc/process.h"
 #include "sched/sched.h"
+#include "util/nospec.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -253,7 +254,11 @@ i64 DoFadvise64(u64 fd, u64 offset, u64 len, u64 advice)
     (void)len;
     (void)advice;
     core::Process* p = core::CurrentProcess();
-    if (p == nullptr || fd >= 16 || p->linux_fds[fd].state == 0)
+    if (p == nullptr || fd >= 16)
+        return kEBADF;
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    fd = util::MaskedIndex(fd, 16);
+    if (p->linux_fds[fd].state == 0)
         return kEBADF;
     return 0;
 }
@@ -266,7 +271,11 @@ i64 DoReadahead(u64 fd, u64 offset, u64 count)
     (void)offset;
     (void)count;
     core::Process* p = core::CurrentProcess();
-    if (p == nullptr || fd >= 16 || p->linux_fds[fd].state == 0)
+    if (p == nullptr || fd >= 16)
+        return kEBADF;
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    fd = util::MaskedIndex(fd, 16);
+    if (p->linux_fds[fd].state == 0)
         return kEBADF;
     return 0;
 }
