@@ -5,6 +5,7 @@
 #include "log/klog.h"
 #include "sync/spinlock.h"
 #include "time/tick.h"
+#include "util/saturating.h"
 
 namespace duetos::net::wireless::diag
 {
@@ -13,11 +14,14 @@ namespace
 {
 
 constinit Event g_ring[kRingCapacity] = {};
-constinit u32 g_head = 0;     // next write slot
-constinit u32 g_count = 0;    // valid entries (≤ capacity)
-constinit u64 g_total = 0;    // monotonic recorded count
-constinit u64 g_dropped = 0;  // total events overwritten
-constinit u32 g_seq_next = 0; // next sequence number
+constinit u32 g_head = 0;  // next write slot
+constinit u32 g_count = 0; // valid entries (≤ capacity)
+// Lifetime stats — saturating per class BB. A diag flood from a
+// pathological driver cannot wrap the counters to zero and obscure
+// the storm in operator audit.
+constinit util::SatU64 g_total = 0;   // monotonic recorded count
+constinit util::SatU64 g_dropped = 0; // total events overwritten
+constinit u32 g_seq_next = 0;         // next sequence number
 constinit bool g_init_done = false;
 constinit duetos::sync::SpinLock g_lock = {};
 

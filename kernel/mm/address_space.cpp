@@ -53,9 +53,11 @@ constexpr u64 kKernelHalfFirstIndex = 256;
 
 // Lifetime counters — maintained inside the public release/create
 // paths. Plain globals because v0 has no AS allocator concurrency.
-constinit u64 g_created = 0;
-constinit u64 g_destroyed = 0;
-constinit u64 g_cr3_switches = 0;
+// Saturating: class BB (wrap-to-zero defense gap). Reported by
+// inspect / health; never used for modular arithmetic.
+constinit util::SatU64 g_created = 0;
+constinit util::SatU64 g_destroyed = 0;
+constinit util::SatU64 g_cr3_switches = 0;
 
 [[noreturn]] void PanicAs(const char* message, u64 value)
 {

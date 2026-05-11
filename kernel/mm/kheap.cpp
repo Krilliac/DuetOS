@@ -139,8 +139,10 @@ constexpr u32 kBinDepth = 8;
 
 constinit ChunkHeader* g_bins[kBinCount] = {};
 constinit u32 g_bin_count[kBinCount] = {};
-constinit u64 g_bin_alloc_hits = 0;
-constinit u64 g_bin_free_hits = 0;
+// Bin hit counters — saturating per class BB. Reported via inspect /
+// shell health, never used for modular arithmetic.
+constinit util::SatU64 g_bin_alloc_hits = 0;
+constinit util::SatU64 g_bin_free_hits = 0;
 
 constexpr u32 kInvalidBin = 0xFFFFFFFFu;
 

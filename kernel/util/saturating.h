@@ -68,48 +68,103 @@ void SatLogClamp(const char* tag, u64 attempted, u64 clamped, void* caller_rip);
 // Free-function operations on plain primitives.
 // ---------------------------------------------------------------
 
-template <typename T>
-[[nodiscard]] inline T SatAdd(T a, T b)
+template <typename T> [[nodiscard]] inline T SatAdd(T a, T b)
 {
     static_assert(sizeof(T) <= 8, "SatAdd: T too wide");
     T result;
     if (__builtin_add_overflow(a, b, &result))
     {
         const T maxv = static_cast<T>(~static_cast<T>(0));
-        SatLogClamp("add", static_cast<u64>(a) + static_cast<u64>(b),
-                    static_cast<u64>(maxv), __builtin_return_address(0));
+        SatLogClamp("add", static_cast<u64>(a) + static_cast<u64>(b), static_cast<u64>(maxv),
+                    __builtin_return_address(0));
         return maxv;
     }
     return result;
 }
 
-template <typename T>
-[[nodiscard]] inline T SatSub(T a, T b)
+template <typename T> [[nodiscard]] inline T SatSub(T a, T b)
 {
     static_assert(sizeof(T) <= 8, "SatSub: T too wide");
     T result;
     if (__builtin_sub_overflow(a, b, &result))
     {
-        SatLogClamp("sub", static_cast<u64>(a), 0,
-                    __builtin_return_address(0));
+        SatLogClamp("sub", static_cast<u64>(a), 0, __builtin_return_address(0));
         return 0;
     }
     return result;
 }
 
-template <typename T>
-[[nodiscard]] inline T SatMul(T a, T b)
+template <typename T> [[nodiscard]] inline T SatMul(T a, T b)
 {
     static_assert(sizeof(T) <= 8, "SatMul: T too wide");
     T result;
     if (__builtin_mul_overflow(a, b, &result))
     {
         const T maxv = static_cast<T>(~static_cast<T>(0));
-        SatLogClamp("mul", static_cast<u64>(a) * static_cast<u64>(b),
-                    static_cast<u64>(maxv), __builtin_return_address(0));
+        SatLogClamp("mul", static_cast<u64>(a) * static_cast<u64>(b), static_cast<u64>(maxv),
+                    __builtin_return_address(0));
         return maxv;
     }
     return result;
+}
+
+// ---------------------------------------------------------------
+// SMP-safe saturating increment for atomically-shared counters.
+//
+// WHY THIS EXISTS
+//   The wrapper Saturating<T> + the free SatAdd helpers above are
+//   single-threaded — wrapping a counter that real kernel code
+//   touches with `__atomic_add_fetch` would silently strip the
+//   atomicity. Wrap with SatAtomicAdd instead: a CAS loop loads
+//   the current value, computes the saturated sum, and commits
+//   atomically. On overflow it clamps to type-max and emits the
+//   same SatLogClamp WARN as the single-threaded path.
+//
+// USE WHEN
+//   - The counter is shared across CPUs / IRQ context, AND
+//   - The semantics tolerate stalling at the cap (every event
+//     past the cap registers as "still at max"; loss of finer
+//     count is the price of not-wrapping).
+//
+// DO NOT USE WHEN
+//   - The counter participates in modular arithmetic (ring
+//     write/read indices, ticket-lock counters, sequence numbers
+//     used as `idx % cap`) — those need plain wrap.
+//   - You need fetch-then-CAS semantics for some other reason.
+//
+// MEMORY ORDER
+//   RELAXED on both load and store. Saturating counters are
+//   diagnostic / liveness — the only invariant is "monotonic and
+//   bounded." If a future caller needs ordering against unrelated
+//   memory, take SEQ_CST locally around it.
+template <typename T> inline T SatAtomicAdd(T* p, T n)
+{
+    static_assert(sizeof(T) <= 8, "SatAtomicAdd: T too wide");
+    const T maxv = static_cast<T>(~static_cast<T>(0));
+    T cur = __atomic_load_n(p, __ATOMIC_RELAXED);
+    while (true)
+    {
+        T next;
+        const bool overflow = __builtin_add_overflow(cur, n, &next);
+        if (overflow)
+        {
+            next = maxv;
+        }
+        // CAS publishes `next`; on failure `cur` reloads with
+        // the actual value seen and we retry. The single-shot
+        // overflow log fires only on the iteration that actually
+        // commits, so SMP contention can't multiply the WARN
+        // count.
+        if (__atomic_compare_exchange_n(p, &cur, next, /*weak=*/false, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+        {
+            if (overflow)
+            {
+                SatLogClamp("atom-add", static_cast<u64>(cur) + static_cast<u64>(n), static_cast<u64>(maxv),
+                            __builtin_return_address(0));
+            }
+            return next;
+        }
+    }
 }
 
 // ---------------------------------------------------------------
@@ -119,8 +174,7 @@ template <typename T>
 // struct is wire-compatible with u32.
 // ---------------------------------------------------------------
 
-template <typename T>
-struct Saturating
+template <typename T> struct Saturating
 {
     T value;
 
@@ -147,9 +201,7 @@ struct Saturating
     {
         if (value == static_cast<T>(~static_cast<T>(0)))
         {
-            SatLogClamp("inc", static_cast<u64>(value) + 1,
-                        static_cast<u64>(value),
-                        __builtin_return_address(0));
+            SatLogClamp("inc", static_cast<u64>(value) + 1, static_cast<u64>(value), __builtin_return_address(0));
         }
         else
         {
@@ -167,8 +219,7 @@ struct Saturating
     {
         if (value == 0)
         {
-            SatLogClamp("dec", 0, 0,
-                        __builtin_return_address(0));
+            SatLogClamp("dec", 0, 0, __builtin_return_address(0));
         }
         else
         {
@@ -184,7 +235,7 @@ struct Saturating
     }
 };
 
-using SatU8  = Saturating<u8>;
+using SatU8 = Saturating<u8>;
 using SatU16 = Saturating<u16>;
 using SatU32 = Saturating<u32>;
 using SatU64 = Saturating<u64>;

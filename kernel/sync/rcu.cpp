@@ -25,6 +25,7 @@
 #include "cpu/percpu.h"
 #include "log/klog.h"
 #include "sync/spinlock.h"
+#include "util/saturating.h"
 #include "util/types.h"
 
 namespace duetos::sync
@@ -121,7 +122,7 @@ bool RcuCall(RcuCallback cb, void* arg)
     const u32 cpu = cpu::CurrentCpuIdOrBsp();
     if (cpu >= acpi::kMaxCpus)
     {
-        __atomic_add_fetch(&g_calls_dropped, 1, __ATOMIC_RELAXED);
+        util::SatAtomicAdd<u64>(&g_calls_dropped, 1);
         return false;
     }
     RcuPerCpuQueue& q = g_per_cpu[cpu];
@@ -133,7 +134,7 @@ bool RcuCall(RcuCallback cb, void* arg)
         // would race with cross-CPU drains, so fail cleanly. The
         // caller treats a false return as a memory leak — same
         // contract as the pre-per-CPU queue.
-        __atomic_add_fetch(&g_calls_dropped, 1, __ATOMIC_RELAXED);
+        util::SatAtomicAdd<u64>(&g_calls_dropped, 1);
         KLOG_ONCE_WARN("sync/rcu", "RcuCall: per-CPU queue full — callback DROPPED, will leak");
         return false;
     }

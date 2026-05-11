@@ -30,6 +30,7 @@
  */
 
 #include "mm/frame_allocator.h"
+#include "util/saturating.h"
 #include "util/types.h"
 
 namespace duetos::core
@@ -55,7 +56,13 @@ struct Section
 {
     bool in_use;
     u32 num_pages;
-    u32 refcount;
+    // Open-handles + active-mappings. Saturating: an attacker driving
+    // NtDuplicateHandle on the same section against a Win32 PE
+    // process cannot wrap a u32 increment past 2^32 to fold to a low
+    // value and trigger a premature SectionRelease teardown (CVE-class
+    // refcount-overflow-to-UAF; wiki/security/Linux-CVE-Audit.md
+    // class O). Saturation caps at u32 max.
+    util::SatU32 refcount;
     u32 page_protect;     // Win32 PAGE_* on creation
     mm::PhysAddr* frames; // owned, length = num_pages, 0 entries are unallocated
 };

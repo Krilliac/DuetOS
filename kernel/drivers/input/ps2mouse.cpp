@@ -11,6 +11,7 @@
 #include "core/panic.h"
 #include "security/login.h"
 #include "sched/sched.h"
+#include "util/saturating.h"
 
 // Vector 0x2C = IRQ 12. Stub lives in exceptions.S alongside
 // isr_33 (kbd, IRQ 1); both follow the same isr_common path.
@@ -82,9 +83,12 @@ constinit u8 g_packet_bytes[3] = {0, 0, 0};
 
 constinit duetos::sched::WaitQueue g_readers{};
 
-constinit u64 g_irqs_seen = 0;
-constinit u64 g_packets_decoded = 0;
-constinit u64 g_bytes_dropped = 0;
+// Lifetime stats — saturating per class BB. Ring cursors above stay
+// plain u64 because they're indexed with `& kRingMask` (modular
+// arithmetic that SatU64 would freeze).
+constinit util::SatU64 g_irqs_seen = 0;
+constinit util::SatU64 g_packets_decoded = 0;
+constinit util::SatU64 g_bytes_dropped = 0;
 
 // "Available" guard. Ps2MouseInit flips this true only after the
 // mouse ACKed its enable-reporting command. If init failed softly,

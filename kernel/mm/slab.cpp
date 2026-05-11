@@ -30,6 +30,7 @@
 #include "mm/kheap.h"
 #include "mm/poison.h"
 #include "sched/sched.h"
+#include "util/saturating.h"
 #include "util/string.h"
 #include "util/types.h"
 
@@ -306,8 +307,8 @@ void* SlabAlloc(SlabCache* c)
                 obj = m.objs[--m.count];
                 __atomic_sub_fetch(&c->obj_free, 1, __ATOMIC_RELAXED);
                 __atomic_add_fetch(&c->obj_in_use, 1, __ATOMIC_RELAXED);
-                __atomic_add_fetch(&c->alloc_count, 1, __ATOMIC_RELAXED);
-                __atomic_add_fetch(&c->magazine_alloc, 1, __ATOMIC_RELAXED);
+                util::SatAtomicAdd<u64>(&c->alloc_count, 1);
+                util::SatAtomicAdd<u64>(&c->magazine_alloc, 1);
             }
         }
     }
@@ -354,7 +355,7 @@ void* SlabAlloc(SlabCache* c)
         // their state). Single batched atomic per counter.
         __atomic_sub_fetch(&c->obj_free, 1, __ATOMIC_RELAXED);
         __atomic_add_fetch(&c->obj_in_use, 1, __ATOMIC_RELAXED);
-        __atomic_add_fetch(&c->alloc_count, 1, __ATOMIC_RELAXED);
+        util::SatAtomicAdd<u64>(&c->alloc_count, 1);
 
         obj = head;
 
@@ -447,8 +448,8 @@ void SlabFree(SlabCache* c, void* obj)
                 m.objs[m.count++] = obj;
                 __atomic_sub_fetch(&c->obj_in_use, 1, __ATOMIC_RELAXED);
                 __atomic_add_fetch(&c->obj_free, 1, __ATOMIC_RELAXED);
-                __atomic_add_fetch(&c->free_count, 1, __ATOMIC_RELAXED);
-                __atomic_add_fetch(&c->magazine_free, 1, __ATOMIC_RELAXED);
+                util::SatAtomicAdd<u64>(&c->free_count, 1);
+                util::SatAtomicAdd<u64>(&c->magazine_free, 1);
                 return;
             }
         }
@@ -491,7 +492,7 @@ void SlabFree(SlabCache* c, void* obj)
 
     __atomic_sub_fetch(&c->obj_in_use, 1, __ATOMIC_RELAXED);
     __atomic_add_fetch(&c->obj_free, 1, __ATOMIC_RELAXED);
-    __atomic_add_fetch(&c->free_count, 1, __ATOMIC_RELAXED);
+    util::SatAtomicAdd<u64>(&c->free_count, 1);
 }
 
 SlabStats SlabCacheStatsRead(const SlabCache* c)

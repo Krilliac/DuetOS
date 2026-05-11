@@ -1,6 +1,7 @@
 #pragma once
 
 #include "util/types.h"
+#include "util/saturating.h"
 #include "mm/frame_allocator.h"
 #include "mm/paging.h"
 #include "sync/rwlock.h"
@@ -111,7 +112,13 @@ struct AddressSpace
 {
     PhysAddr pml4_phys; // CR3 value (low 12 bits already zero)
     u64* pml4_virt;     // direct-map alias for kernel-side editing
-    u64 refcount;       // tasks holding this AS
+    // tasks holding this AS. Saturating: a runaway Retain loop (or
+    // attacker driving cross-process handle duplication) cannot wrap
+    // the counter past 2^64 to zero and trigger a premature
+    // teardown. Lifetime arithmetic on a 64-bit counter is
+    // astronomical in practice; saturation closes the wrap-to-UAF
+    // defense gap regardless.
+    util::SatU64 refcount;
 
     // Maximum number of user frames this AS is allowed to own.
     // MapUserPage rejects new mappings once region_count reaches

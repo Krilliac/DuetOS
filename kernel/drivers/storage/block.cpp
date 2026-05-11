@@ -3,6 +3,7 @@
 #include "arch/x86_64/serial.h"
 #include "log/klog.h"
 #include "mm/kheap.h"
+#include "util/saturating.h"
 
 namespace duetos::drivers::storage
 {
@@ -234,7 +235,10 @@ constexpr u64 kMaxWriteRules = 32;
 constinit WriteRule g_write_rules[kMaxWriteRules] = {};
 constinit u64 g_write_rule_count = 0;
 constinit WriteGuardMode g_write_guard_mode = WriteGuardMode::Off;
-constinit u64 g_write_guard_deny_count = 0;
+// Write-guard deny stat — saturating per class BB. A flood of denied
+// writes from a misbehaving (or malicious) workload cannot wrap the
+// counter to zero and obscure the deny pattern in post-incident audit.
+constinit util::SatU64 g_write_guard_deny_count = 0;
 
 // Returns the first rule that covers any byte of [lba, lba+count)
 // on the given device, or nullptr if none matches.

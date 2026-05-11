@@ -8,19 +8,26 @@
 
 #include "drivers/video/render_stats.h"
 
+#include "util/saturating.h"
+
 namespace duetos::drivers::video
 {
 
 namespace
 {
 
-constinit u64 g_frames_composed = 0;
-constinit u64 g_frames_presented = 0;
-constinit u64 g_frames_clean = 0;
-constinit u64 g_frames_full = 0;
-constinit u64 g_frames_partial = 0;
-constinit u64 g_dirty_pixels_total = 0;
-constinit u64 g_surface_pixels_total = 0;
+// Render lifetime counters — saturating per class BB. A long-running
+// desktop session at 60 fps × full-screen damage can plausibly reach
+// the dirty/surface pixel ceilings; saturation closes the
+// wrap-to-zero defense gap without breaking any pixel-ratio
+// computation (those use local u64s).
+constinit util::SatU64 g_frames_composed = 0;
+constinit util::SatU64 g_frames_presented = 0;
+constinit util::SatU64 g_frames_clean = 0;
+constinit util::SatU64 g_frames_full = 0;
+constinit util::SatU64 g_frames_partial = 0;
+constinit util::SatU64 g_dirty_pixels_total = 0;
+constinit util::SatU64 g_surface_pixels_total = 0;
 constinit u32 g_last_x = 0;
 constinit u32 g_last_y = 0;
 constinit u32 g_last_w = 0;

@@ -42,6 +42,7 @@
 #include "diag/diag_decode.h"
 #include "log/klog.h"
 #include "core/panic.h"
+#include "util/saturating.h"
 
 namespace duetos::mm
 {
@@ -60,9 +61,11 @@ constexpr u64 kAddrMask = 0x000FFFFFFFFFF000ULL; // bits 12..51 = phys frame
 
 constinit u64* g_pml4 = nullptr; // virtual pointer to the active PML4
 constinit u64 g_mmio_cursor = 0; // bump-allocator offset within MMIO arena
-constinit u64 g_tables_allocated = 0;
-constinit u64 g_mappings_installed = 0;
-constinit u64 g_mappings_removed = 0;
+// Page-table mutation counters — saturating per class BB. Reported
+// via inspect/health, not used for arithmetic that depends on wrap.
+constinit util::SatU64 g_tables_allocated = 0;
+constinit util::SatU64 g_mappings_installed = 0;
+constinit util::SatU64 g_mappings_removed = 0;
 
 [[noreturn]] void PanicPaging(const char* message, u64 value)
 {
@@ -681,7 +684,8 @@ void UserStringCopySelfTest()
                           UserStringCopyStatus::BadArgument, 0);
     CheckChar("user-string self-test: null source clears", buf[0], 0);
 
-    CheckUserStringResult("user-string self-test: empty", CopyUserCString(buf, sizeof(buf), reinterpret_cast<const void*>(kUserTestVa)),
+    CheckUserStringResult("user-string self-test: empty",
+                          CopyUserCString(buf, sizeof(buf), reinterpret_cast<const void*>(kUserTestVa)),
                           UserStringCopyStatus::Ok, 0);
     CheckChar("user-string self-test: empty terminator", buf[0], 0);
 

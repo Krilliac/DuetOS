@@ -109,13 +109,19 @@ constinit util::SatU64 g_irq_counts[256] = {};
 // exception dump (user-mode task-kill or kernel panic). Read
 // only by diagnostic paths (shell health command / log prints);
 // no hot-path dependency on these.
-constinit u64 g_fault_access_violation = 0; // non-present #PF
-constinit u64 g_fault_nx_violation = 0;     // present + instr fetch
-constinit u64 g_fault_write_to_ro = 0;      // present + write
-constinit u64 g_fault_stack_overflow = 0;   // #PF cr2 near rsp
-constinit u64 g_fault_reserved_bit = 0;     // page-table poison
-constinit u64 g_fault_gp = 0;               // #GP
-constinit u64 g_fault_ud = 0;               // #UD
+//
+// Saturating: a malicious workload that floods one fault class
+// (e.g. a ring-3 loop hammering NX violations) cannot wrap the
+// per-class counter to zero and obscure attack-detection in
+// later audits. wiki/security/Linux-CVE-Audit.md class BB
+// (free-running counter wrap → defense gap).
+constinit util::SatU64 g_fault_access_violation = 0; // non-present #PF
+constinit util::SatU64 g_fault_nx_violation = 0;     // present + instr fetch
+constinit util::SatU64 g_fault_write_to_ro = 0;      // present + write
+constinit util::SatU64 g_fault_stack_overflow = 0;   // #PF cr2 near rsp
+constinit util::SatU64 g_fault_reserved_bit = 0;     // page-table poison
+constinit util::SatU64 g_fault_gp = 0;               // #GP
+constinit util::SatU64 g_fault_ud = 0;               // #UD
 
 // Recursive-fault sentinel. Set the moment a halt-bound path
 // (this dispatcher's kernel-mode Panic outcome OR core::Panic /

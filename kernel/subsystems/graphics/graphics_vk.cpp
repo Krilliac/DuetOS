@@ -1660,7 +1660,15 @@ void ReplayCopyBufferToImage(const CmdRecord& op)
     const u64 byte_count = static_cast<u64>(region_w) * region_h * 4u;
     if (op.src_offset + byte_count > src.size)
         return;
-    const u32* pixels = reinterpret_cast<const u32*>(static_cast<const u8*>(src.backing) + op.src_offset);
+    // src.backing came from KMalloc (u64-aligned). The
+    // src_offset that lands `pixels` at a non-u32-aligned
+    // address would be a caller bug — UBSAN flags it as
+    // type-mismatch and FramebufferBlit's u32 stores would
+    // emit unaligned ops. Refuse rather than propagate.
+    const u8* base = static_cast<const u8*>(src.backing) + op.src_offset;
+    if ((reinterpret_cast<uptr>(base) & 3u) != 0)
+        return;
+    const u32* pixels = reinterpret_cast<const u32*>(base);
     // FramebufferBlit expects a tightly packed src_pitch_px == width.
     drivers::video::FramebufferBlit(0, 0, pixels, region_w, region_h, region_w);
     drivers::video::FramebufferAddDamage(0, 0, region_w, region_h);
