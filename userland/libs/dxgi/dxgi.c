@@ -114,8 +114,10 @@ static HRESULT sc_Present(IDXGISwapChainImpl* self, UINT sync, UINT flags)
 {
     (void)sync;
     (void)flags;
-    if (!self || !self->bb)
-        return DX_E_FAIL;
+    if (!self)
+        return DX_E_POINTER;
+    if (!self->bb)
+        return DX_E_INVALIDARG;
     dx_gfx_trace(3);
     dx_bb_present(self->bb);
     return DX_S_OK;
@@ -153,8 +155,10 @@ static HRESULT sc_ResizeBuffers(IDXGISwapChainImpl* self, UINT bufs, UINT w, UIN
     (void)bufs;
     (void)fmt;
     (void)flags;
-    if (!self || !self->bb)
-        return DX_E_FAIL;
+    if (!self)
+        return DX_E_POINTER;
+    if (!self->bb)
+        return DX_E_INVALIDARG;
     HWND hwnd = self->bb->hwnd;
     if (w == 0 || h == 0)
     {

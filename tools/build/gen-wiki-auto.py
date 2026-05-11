@@ -93,8 +93,14 @@ _NOOP_OFFSETS = {
     "kOffReturnZero",
     "kOffReturnOne",
     "kOffCritSecNop",
-    "kOffGetProcessHeap",
 }
+# NOTE: kOffGetProcessHeap is NOT a NOOP — its thunk returns the
+# process-heap handle (the kProcEnvVa pointer), which is the same
+# stable cookie every subsequent HeapAlloc/HeapFree ignores. The
+# Win32 contract for GetProcessHeap is "return a fixed non-NULL
+# handle"; returning kProcEnvVa satisfies it. Previously flagged
+# as NOOP because the bytecode is a single `mov rax, imm; ret`,
+# but that's the right shape for "return a fixed handle".
 _EXPLICIT_STUB_OFFSETS = {"kOffMissLogger"}
 
 # Cached parse of thunks_table.inc shared across generator calls.

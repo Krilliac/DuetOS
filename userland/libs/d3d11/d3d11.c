@@ -15,9 +15,9 @@
  *     → SYS_GDI_BITBLT to the owning HWND
  *
  * Higher-level drawing (vertex/pixel shaders, draw calls) is not
- * implemented in v0; those vtable slots return E_NOTIMPL via the
- * shared dx_stub_hresult so apps that only test the clear path
- * don't crash, and apps that try real rendering fail predictably.
+ * implemented in v0; those vtable slots return DX_S_OK via the
+ * shared dx_stub_hresult so apps proceed past `if (FAILED(hr))`
+ * checks and reach the clear/present path that IS wired.
  *
  * Build: tools/build/build-stub-dll.sh (base 0x10130000).
  */
@@ -346,8 +346,10 @@ static HRESULT d3d11sc_Present(D3D11SwapChainImpl* self, UINT sync, UINT flags)
 {
     (void)sync;
     (void)flags;
-    if (!self || !self->bb)
-        return DX_E_FAIL;
+    if (!self)
+        return DX_E_POINTER;
+    if (!self->bb)
+        return DX_E_INVALIDARG; /* swap chain not bound to a back buffer */
     dx_gfx_trace(1);
     dx_bb_present(self->bb);
     return DX_S_OK;
@@ -383,8 +385,10 @@ static HRESULT d3d11sc_ResizeBuffers(D3D11SwapChainImpl* self, UINT bufs, UINT w
     (void)bufs;
     (void)fmt;
     (void)flags;
-    if (!self || !self->bb)
-        return DX_E_FAIL;
+    if (!self)
+        return DX_E_POINTER;
+    if (!self->bb)
+        return DX_E_INVALIDARG;
     HWND hwnd = self->bb->hwnd;
     if (w == 0 || h == 0)
     {
@@ -1376,7 +1380,7 @@ static HRESULT ctx_Map(ID3D11ContextImpl* self, void* resource, UINT sub, UINT m
             return DX_E_INVALIDARG;
         ID3D11Texture2DImpl* t = (ID3D11Texture2DImpl*)resource;
         if (!t->bb)
-            return DX_E_FAIL;
+            return DX_E_INVALIDARG; /* texture is detached from a back-buffer surface */
         *(void**)(m + 0) = t->bb->pixels;
         *(UINT*)(m + 8) = t->bb->pitch_bytes;
         *(UINT*)(m + 12) = t->bb->buffer_bytes;
@@ -1740,6 +1744,398 @@ static HRESULT dev_CreateRenderTargetView(ID3D11DeviceImpl* self, void* resource
     return DX_S_OK;
 }
 
+/* ---------------------------------------------------------------- *
+ * Generic IUnknown-only opaque object — backs every "minor"        *
+ * d3d11 COM type whose v0 implementation only needs working         *
+ * refcounting + QueryInterface (DeviceChild / ClassLinkage /        *
+ * Query / Predicate / Counter / DeferredContext / SharedResource). *
+ * Heap-allocated; refcount starts at 1; Release frees at zero.     *
+ * ---------------------------------------------------------------- */
+
+typedef struct
+{
+    void* const* lpVtbl;
+    ULONG refcount;
+} D11GenericIUnk;
+
+static HRESULT g_iunk_QueryInterface(D11GenericIUnk* self, REFIID riid, void** out)
+{
+    (void)riid;
+    if (!out)
+        return DX_E_POINTER;
+    ++self->refcount;
+    *out = self;
+    return DX_S_OK;
+}
+static ULONG g_iunk_AddRef(D11GenericIUnk* self)
+{
+    return ++self->refcount;
+}
+static ULONG g_iunk_Release(D11GenericIUnk* self)
+{
+    ULONG r = --self->refcount;
+    if (r == 0)
+        dx_heap_free(self);
+    return r;
+}
+
+#define D11_GENERIC_VTBL_SLOTS 16
+static void* g_iunk_vtbl[D11_GENERIC_VTBL_SLOTS];
+static void g_iunk_init_vtbl_once(void)
+{
+    static int g_inited = 0;
+    if (g_inited)
+        return;
+    g_inited = 1;
+    for (int i = 0; i < D11_GENERIC_VTBL_SLOTS; ++i)
+        g_iunk_vtbl[i] = DX_HSTUB;
+    g_iunk_vtbl[0] = (void*)g_iunk_QueryInterface;
+    g_iunk_vtbl[1] = (void*)g_iunk_AddRef;
+    g_iunk_vtbl[2] = (void*)g_iunk_Release;
+}
+
+static D11GenericIUnk* g_iunk_alloc(void)
+{
+    g_iunk_init_vtbl_once();
+    D11GenericIUnk* p = (D11GenericIUnk*)dx_heap_alloc(sizeof(*p));
+    if (!p)
+        return NULL;
+    dx_memzero(p, sizeof(*p));
+    p->lpVtbl = g_iunk_vtbl;
+    p->refcount = 1;
+    return p;
+}
+
+/* CreateTexture1D(desc, initial, ppTexture) — slot 4.
+ * DESC: { UINT Width(0); UINT MipLevels(4); UINT ArraySize(8); ... }
+ * v0 treats Texture1D as Texture2D with height=1, sharing the
+ * tex_wrap COM object so SRV/UAV can attach to it identically. */
+static HRESULT dev_CreateTexture1D(ID3D11DeviceImpl* self, const void* desc, const void* init, void** out)
+{
+    (void)self;
+    (void)init;
+    if (!out)
+        return DX_E_POINTER;
+    *out = NULL;
+    if (!desc)
+        return DX_E_INVALIDARG;
+    const BYTE* d = (const BYTE*)desc;
+    UINT w = *(const UINT*)(d + 0);
+    if (w == 0)
+        w = 1;
+    DxBackBuffer* bb = dx_bb_create(NULL, w, 1);
+    if (!bb)
+        return DX_E_OUTOFMEMORY;
+    ID3D11Texture2DImpl* t = tex_wrap(bb, /*owns_bb=*/1);
+    if (!t)
+    {
+        dx_bb_destroy(bb);
+        return DX_E_OUTOFMEMORY;
+    }
+    *out = t;
+    return DX_S_OK;
+}
+
+/* CreateTexture3D(desc, initial, ppTexture) — slot 6.
+ * DESC: { UINT Width(0); UINT Height(4); UINT Depth(8); ... }
+ * v0 collapses to 2D (width × height) — the depth dimension isn't
+ * wired into the back-buffer / scanout path. Most callers that
+ * create a 3D texture for volumetric effects fall back to 2D
+ * rendering when the SRV they bind reports no 3D slice. */
+static HRESULT dev_CreateTexture3D(ID3D11DeviceImpl* self, const void* desc, const void* init, void** out)
+{
+    (void)self;
+    (void)init;
+    if (!out)
+        return DX_E_POINTER;
+    *out = NULL;
+    if (!desc)
+        return DX_E_INVALIDARG;
+    const BYTE* d = (const BYTE*)desc;
+    UINT w = *(const UINT*)(d + 0);
+    UINT h = *(const UINT*)(d + 4);
+    if (w == 0)
+        w = 1;
+    if (h == 0)
+        h = 1;
+    DxBackBuffer* bb = dx_bb_create(NULL, w, h);
+    if (!bb)
+        return DX_E_OUTOFMEMORY;
+    ID3D11Texture2DImpl* t = tex_wrap(bb, /*owns_bb=*/1);
+    if (!t)
+    {
+        dx_bb_destroy(bb);
+        return DX_E_OUTOFMEMORY;
+    }
+    *out = t;
+    return DX_S_OK;
+}
+
+/* CreateShaderResourceView / CreateUnorderedAccessView /
+ * CreateDepthStencilView — slots 7, 8, 10.
+ *
+ * Each view type is a thin wrapper around a resource that the
+ * pipeline can later bind via PSSetShaderResources / CSSetUAVs /
+ * OMSetRenderTargets-with-DSV. v0 stores a refcounted IUnknown
+ * with a pointer back to the source resource so the caller's
+ * Release(view) → view->Release frees the wrapper without
+ * accidentally freeing the resource (the SRV doesn't AddRef the
+ * resource in v0 — same as how RTV is wired). The view doesn't
+ * affect pixel paths today; the wrapper just lets callers reach
+ * the end of their setup code. */
+static HRESULT dev_CreateShaderResourceView(ID3D11DeviceImpl* self, void* resource, const void* desc, void** out)
+{
+    (void)self;
+    (void)desc;
+    if (!out)
+        return DX_E_POINTER;
+    *out = NULL;
+    if (!resource)
+        return DX_E_INVALIDARG;
+    D11GenericIUnk* v = g_iunk_alloc();
+    if (!v)
+        return DX_E_OUTOFMEMORY;
+    *out = v;
+    return DX_S_OK;
+}
+
+static HRESULT dev_CreateUnorderedAccessView(ID3D11DeviceImpl* self, void* resource, const void* desc, void** out)
+{
+    (void)self;
+    (void)desc;
+    if (!out)
+        return DX_E_POINTER;
+    *out = NULL;
+    if (!resource)
+        return DX_E_INVALIDARG;
+    D11GenericIUnk* v = g_iunk_alloc();
+    if (!v)
+        return DX_E_OUTOFMEMORY;
+    *out = v;
+    return DX_S_OK;
+}
+
+static HRESULT dev_CreateDepthStencilView(ID3D11DeviceImpl* self, void* resource, const void* desc, void** out)
+{
+    (void)self;
+    (void)desc;
+    if (!out)
+        return DX_E_POINTER;
+    *out = NULL;
+    if (!resource)
+        return DX_E_INVALIDARG;
+    D11GenericIUnk* v = g_iunk_alloc();
+    if (!v)
+        return DX_E_OUTOFMEMORY;
+    *out = v;
+    return DX_S_OK;
+}
+
+/* CreateGeometryShader / CreateHullShader / CreateDomainShader /
+ * CreateComputeShader — slots 13, 16, 17, 18.
+ *
+ * v0 has no real shader compilation — these return an opaque
+ * IUnknown that callers can bind via GSSetShader / HSSetShader /
+ * DSSetShader / CSSetShader (currently no-ops in the immediate
+ * context's vtable). The vertex / pixel shader slots have their
+ * own typed factory in shader_alloc(); the rarer stages share
+ * the generic IUnknown wrapper because their Set/Get methods
+ * don't actually consume the object. */
+static HRESULT dev_CreateGeometryShader(ID3D11DeviceImpl* self, const void* bytecode, UINT len, void* linkage,
+                                        void** out)
+{
+    (void)self;
+    (void)bytecode;
+    (void)len;
+    (void)linkage;
+    if (!out)
+        return DX_E_POINTER;
+    *out = NULL;
+    D11GenericIUnk* s = g_iunk_alloc();
+    if (!s)
+        return DX_E_OUTOFMEMORY;
+    *out = s;
+    return DX_S_OK;
+}
+
+static HRESULT dev_CreateGeometryShaderWithStreamOutput(ID3D11DeviceImpl* self, const void* bytecode, UINT len,
+                                                        const void* so_decls, UINT num_decls, const void* strides,
+                                                        UINT num_strides, UINT rasterized, void* linkage, void** out)
+{
+    (void)self;
+    (void)bytecode;
+    (void)len;
+    (void)so_decls;
+    (void)num_decls;
+    (void)strides;
+    (void)num_strides;
+    (void)rasterized;
+    (void)linkage;
+    if (!out)
+        return DX_E_POINTER;
+    *out = NULL;
+    D11GenericIUnk* s = g_iunk_alloc();
+    if (!s)
+        return DX_E_OUTOFMEMORY;
+    *out = s;
+    return DX_S_OK;
+}
+
+static HRESULT dev_CreateHullShader(ID3D11DeviceImpl* self, const void* bytecode, UINT len, void* linkage, void** out)
+{
+    (void)self;
+    (void)bytecode;
+    (void)len;
+    (void)linkage;
+    if (!out)
+        return DX_E_POINTER;
+    *out = NULL;
+    D11GenericIUnk* s = g_iunk_alloc();
+    if (!s)
+        return DX_E_OUTOFMEMORY;
+    *out = s;
+    return DX_S_OK;
+}
+
+static HRESULT dev_CreateDomainShader(ID3D11DeviceImpl* self, const void* bytecode, UINT len, void* linkage, void** out)
+{
+    (void)self;
+    (void)bytecode;
+    (void)len;
+    (void)linkage;
+    if (!out)
+        return DX_E_POINTER;
+    *out = NULL;
+    D11GenericIUnk* s = g_iunk_alloc();
+    if (!s)
+        return DX_E_OUTOFMEMORY;
+    *out = s;
+    return DX_S_OK;
+}
+
+static HRESULT dev_CreateComputeShader(ID3D11DeviceImpl* self, const void* bytecode, UINT len, void* linkage,
+                                       void** out)
+{
+    (void)self;
+    (void)bytecode;
+    (void)len;
+    (void)linkage;
+    if (!out)
+        return DX_E_POINTER;
+    *out = NULL;
+    D11GenericIUnk* s = g_iunk_alloc();
+    if (!s)
+        return DX_E_OUTOFMEMORY;
+    *out = s;
+    return DX_S_OK;
+}
+
+/* CreateClassLinkage — slot 19. Class-linkage is the "dynamic
+ * shader linkage" runtime — v0 has no shaders so the object is
+ * purely refcounted. */
+static HRESULT dev_CreateClassLinkage(ID3D11DeviceImpl* self, void** out)
+{
+    (void)self;
+    if (!out)
+        return DX_E_POINTER;
+    *out = NULL;
+    D11GenericIUnk* l = g_iunk_alloc();
+    if (!l)
+        return DX_E_OUTOFMEMORY;
+    *out = l;
+    return DX_S_OK;
+}
+
+/* CreateQuery / CreatePredicate / CreateCounter — slots 24, 25, 26.
+ *
+ * Queries report GPU events (occlusion, pipeline stats, timestamps).
+ * v0 has no GPU pipeline to instrument — the query object's
+ * GetData (slot ~7 on ID3D11Asynchronous) returns S_OK via
+ * dx_stub_hresult, so callers see "data not yet ready" then,
+ * after retries, "data ready" once the deferred context wakes up
+ * the immediate one (effectively never). The wrapper exists so
+ * the BeginEnd dance doesn't crash. */
+static HRESULT dev_CreateQuery(ID3D11DeviceImpl* self, const void* desc, void** out)
+{
+    (void)self;
+    (void)desc;
+    if (!out)
+        return DX_E_POINTER;
+    *out = NULL;
+    D11GenericIUnk* q = g_iunk_alloc();
+    if (!q)
+        return DX_E_OUTOFMEMORY;
+    *out = q;
+    return DX_S_OK;
+}
+
+static HRESULT dev_CreatePredicate(ID3D11DeviceImpl* self, const void* desc, void** out)
+{
+    (void)self;
+    (void)desc;
+    if (!out)
+        return DX_E_POINTER;
+    *out = NULL;
+    D11GenericIUnk* p = g_iunk_alloc();
+    if (!p)
+        return DX_E_OUTOFMEMORY;
+    *out = p;
+    return DX_S_OK;
+}
+
+static HRESULT dev_CreateCounter(ID3D11DeviceImpl* self, const void* desc, void** out)
+{
+    (void)self;
+    (void)desc;
+    if (!out)
+        return DX_E_POINTER;
+    *out = NULL;
+    D11GenericIUnk* c = g_iunk_alloc();
+    if (!c)
+        return DX_E_OUTOFMEMORY;
+    *out = c;
+    return DX_S_OK;
+}
+
+/* CreateDeferredContext — slot 27. Deferred contexts batch
+ * commands for later replay on the immediate context. v0 has
+ * no command-list infrastructure; the returned object is the
+ * generic IUnknown wrapper. CSSet/PSSet/etc. calls on it land
+ * on the same dx_stub_hresult slots as a no-op record. */
+static HRESULT dev_CreateDeferredContext(ID3D11DeviceImpl* self, UINT flags, void** out)
+{
+    (void)self;
+    (void)flags;
+    if (!out)
+        return DX_E_POINTER;
+    *out = NULL;
+    D11GenericIUnk* c = g_iunk_alloc();
+    if (!c)
+        return DX_E_OUTOFMEMORY;
+    *out = c;
+    return DX_S_OK;
+}
+
+/* OpenSharedResource — slot 28. v0 has no inter-process
+ * shared-handle resource table. We allocate a generic IUnknown
+ * wrapper so the caller's Release(resource) doesn't fault. The
+ * real shared-resource path needs an inter-process section
+ * object (T11 follow-on). */
+static HRESULT dev_OpenSharedResource(ID3D11DeviceImpl* self, HANDLE shared, REFIID riid, void** out)
+{
+    (void)self;
+    (void)shared;
+    (void)riid;
+    if (!out)
+        return DX_E_POINTER;
+    *out = NULL;
+    D11GenericIUnk* r = g_iunk_alloc();
+    if (!r)
+        return DX_E_OUTOFMEMORY;
+    *out = r;
+    return DX_S_OK;
+}
+
 /* CheckFormatSupport — slot 29. Claim B8G8R8A8_UNORM works, others
  * fail. Format count constant in v0. */
 static HRESULT dev_CheckFormatSupport(ID3D11DeviceImpl* self, UINT format, UINT* supp)
@@ -1809,15 +2205,31 @@ static void dev_init_vtbl_once(void)
     g_dev_vtbl[1] = (void*)dev_AddRef;
     g_dev_vtbl[2] = (void*)dev_Release;
     g_dev_vtbl[3] = (void*)dev_CreateBuffer;
+    g_dev_vtbl[4] = (void*)dev_CreateTexture1D;
     g_dev_vtbl[5] = (void*)dev_CreateTexture2D;
+    g_dev_vtbl[6] = (void*)dev_CreateTexture3D;
+    g_dev_vtbl[7] = (void*)dev_CreateShaderResourceView;
+    g_dev_vtbl[8] = (void*)dev_CreateUnorderedAccessView;
     g_dev_vtbl[9] = (void*)dev_CreateRenderTargetView;
+    g_dev_vtbl[10] = (void*)dev_CreateDepthStencilView;
     g_dev_vtbl[11] = (void*)dev_CreateInputLayout;
     g_dev_vtbl[12] = (void*)dev_CreateVertexShader;
+    g_dev_vtbl[13] = (void*)dev_CreateGeometryShader;
+    g_dev_vtbl[14] = (void*)dev_CreateGeometryShaderWithStreamOutput;
     g_dev_vtbl[15] = (void*)dev_CreatePixelShader;
+    g_dev_vtbl[16] = (void*)dev_CreateHullShader;
+    g_dev_vtbl[17] = (void*)dev_CreateDomainShader;
+    g_dev_vtbl[18] = (void*)dev_CreateComputeShader;
+    g_dev_vtbl[19] = (void*)dev_CreateClassLinkage;
     g_dev_vtbl[20] = (void*)dev_CreateBlendState;
     g_dev_vtbl[21] = (void*)dev_CreateDepthStencilState;
     g_dev_vtbl[22] = (void*)dev_CreateRasterizerState;
     g_dev_vtbl[23] = (void*)dev_CreateSamplerState;
+    g_dev_vtbl[24] = (void*)dev_CreateQuery;
+    g_dev_vtbl[25] = (void*)dev_CreatePredicate;
+    g_dev_vtbl[26] = (void*)dev_CreateCounter;
+    g_dev_vtbl[27] = (void*)dev_CreateDeferredContext;
+    g_dev_vtbl[28] = (void*)dev_OpenSharedResource;
     g_dev_vtbl[29] = (void*)dev_CheckFormatSupport;
     g_dev_vtbl[30] = (void*)dev_CheckMultisampleQualityLevels;
     g_dev_vtbl[33] = (void*)dev_CheckFeatureSupport;

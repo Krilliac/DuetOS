@@ -139,6 +139,12 @@ set +e
     /export:ExpandEnvironmentStringsA \
     /export:GetCPInfo \
     /export:LCMapStringW \
+    /export:CompareStringW \
+    /export:CompareStringA \
+    /export:CompareStringEx \
+    /export:GetStringTypeW \
+    /export:GetStringTypeA \
+    /export:GetStringTypeExW \
     /export:FormatMessageW \
     /export:GetUserDefaultLCID \
     /export:GetSystemDefaultLCID \

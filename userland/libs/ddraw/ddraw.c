@@ -107,8 +107,8 @@ static HRESULT dds_Blt(DdsImpl* self, void* dst_rect, DdsImpl* src, void* src_re
     (void)src_rect;
     (void)fx;
     if (!self->bb)
-        return DX_E_FAIL;
-    if (flags & 0x0400) /* DDBLT_COLORFILL — fx contains DDBLTFX with dwFillColor at +12 */
+        return DX_E_INVALIDARG; /* surface detached from back buffer */
+    if (flags & 0x0400)         /* DDBLT_COLORFILL — fx contains DDBLTFX with dwFillColor at +12 */
     {
         DWORD color = 0;
         if (fx)

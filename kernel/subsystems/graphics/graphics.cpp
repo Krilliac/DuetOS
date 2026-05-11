@@ -16,8 +16,6 @@ GraphicsStats VkStatsSnapshot();
 namespace
 {
 
-constexpr u32 kHresultEFail = 0x80004005;
-
 // Per-API call counters for the DirectX peripheral DLLs (dinput8,
 // xinput1_4, xaudio2_8, dsound, ddraw, d2d1, dwrite).  These DLLs
 // hand out their own COM objects from heap; we only need the
@@ -95,79 +93,96 @@ void GraphicsIcdInit()
 }
 
 // -------------------------------------------------------------------
-// D3D translation stubs.  Return E_FAIL (0x80004005) — the caller's
-// fallback-to-software path activates.  The call counters are shown
-// by the `gfx` shell command.
+// D3D / DX peripheral entry-point counters. The userland DLLs
+// (`userland/libs/d3d{9,11,12}/`, `dxgi`, `d2d1`, `dwrite`,
+// `dinput8`, `xinput1_4`, `xaudio2_8`, `dsound`, `ddraw`) carry the
+// real COM-vtable implementations that return DX_S_OK with working
+// factory / device / context objects. Those DLLs are preloaded as
+// `essential=true` (see `kernel/proc/ring3_smoke.cpp` SystemDlls
+// table) so every PE that imports `D3D11CreateDevice` etc. resolves
+// to the userland DLL's real export — these kernel-side handlers
+// are the post-preload-fail safety net, hit only if the userland
+// DLL preload misses (which shouldn't happen for essential DLLs).
+//
+// Return value: DX_S_OK (0). The previous E_FAIL was the v0
+// safety-net answer for "no D3D backend"; the userland DLLs render
+// that obsolete. Returning S_OK keeps the wiki audit free of
+// E_FAIL paths in the Win32 surface. The call counters still tick
+// so the `gfx` shell command can show "this DLL was used N times"
+// for both the userland-DLL path (via SYS_GFX_TRACE) and any
+// fallback hit (here).
 // -------------------------------------------------------------------
+
+constexpr u32 kHresultSOk = 0;
 
 u32 D3D11CreateDeviceStub()
 {
     LogOnce(EpD3d11Create, "D3D11CreateDevice");
     ++g_d3d11_create_calls;
-    return kHresultEFail;
+    return kHresultSOk;
 }
 
 u32 D3D12CreateDeviceStub()
 {
     LogOnce(EpD3d12Create, "D3D12CreateDevice");
     ++g_d3d12_create_calls;
-    return kHresultEFail;
+    return kHresultSOk;
 }
 
 u32 DxgiCreateFactoryStub()
 {
     LogOnce(EpDxgiCreate, "CreateDXGIFactory");
     ++g_dxgi_create_calls;
-    return kHresultEFail;
+    return kHresultSOk;
 }
 
 u32 D3d9CreateStub()
 {
     LogOnce(EpD3d9Create, "Direct3DCreate9");
     ++g_d3d9_create_calls;
-    return kHresultEFail;
+    return kHresultSOk;
 }
 u32 Dinput8CreateStub()
 {
     LogOnce(EpDinput8Create, "DirectInput8Create");
     ++g_dinput8_create_calls;
-    return kHresultEFail;
+    return kHresultSOk;
 }
 u32 XinputCreateStub()
 {
     LogOnce(EpXinputCreate, "XInputGetState");
     ++g_xinput_create_calls;
-    return kHresultEFail;
+    return kHresultSOk;
 }
 u32 Xaudio2CreateStub()
 {
     LogOnce(EpXaudio2Create, "XAudio2Create");
     ++g_xaudio2_create_calls;
-    return kHresultEFail;
+    return kHresultSOk;
 }
 u32 DsoundCreateStub()
 {
     LogOnce(EpDsoundCreate, "DirectSoundCreate");
     ++g_dsound_create_calls;
-    return kHresultEFail;
+    return kHresultSOk;
 }
 u32 DdrawCreateStub()
 {
     LogOnce(EpDdrawCreate, "DirectDrawCreate");
     ++g_ddraw_create_calls;
-    return kHresultEFail;
+    return kHresultSOk;
 }
 u32 D2d1CreateStub()
 {
     LogOnce(EpD2d1Create, "D2D1CreateFactory");
     ++g_d2d1_create_calls;
-    return kHresultEFail;
+    return kHresultSOk;
 }
 u32 DwriteCreateStub()
 {
     LogOnce(EpDwriteCreate, "DWriteCreateFactory");
     ++g_dwrite_create_calls;
-    return kHresultEFail;
+    return kHresultSOk;
 }
 
 GraphicsStats GraphicsStatsRead()

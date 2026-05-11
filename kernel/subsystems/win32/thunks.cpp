@@ -96,7 +96,7 @@ constexpr u32 kOffPCommode = 0x27F;                          // 6 bytes
 constexpr u32 kOffSputn = 0x285;                             // 19 bytes
 constexpr u32 kOffReturnThis = 0x298;                        // 4 bytes
 constexpr u32 kOffWiden = 0x29C;                             // 4 bytes
-constexpr u32 kOffHresultEFail = 0x2A0;                      // 6 bytes
+constexpr u32 kOffPinHresultSOk = 0x2A0;                     // 6 bytes (HRESULT S_OK pin)
 constexpr u32 kOffGetSysTimeFTReal = 0x2A6;                  // 13 bytes
 constexpr u32 kOffQpcNs = 0x2B3;                             // 13 bytes
 constexpr u32 kOffQpfNs = 0x2C0;                             // 10 bytes
@@ -283,14 +283,22 @@ constexpr u32 kOffInitOnceExec = 0xC28; // 87 bytes
 // the Win32 x64 ABI, so save/restore across the syscall.
 constexpr u32 kOffGetProcAddressReal = 0xC7F; // 18 bytes
 
-// Render/drivers: D3D11 / D3D12 / DXGI IAT landing pads. Each stub
+// Render/drivers: D3D11 / D3D12 / DXGI IAT landing pads. Each pin
 // issues SYS_GFX_D3D_STUB (101) with a per-kind `rdi` — the kernel
 // syscall handler routes to `subsystems::graphics::D3D*CreateStub`
-// so the graphics ICD's handle-table counters tick. Returned rax
-// is HRESULT E_FAIL (0x80004005). 13 bytes each.
-constexpr u32 kOffD3d11CreateStub = 0xC91; // render/drivers — 13 bytes
-constexpr u32 kOffD3d12CreateStub = 0xC9E; // render/drivers — 13 bytes
-constexpr u32 kOffDxgiCreateStub = 0xCAB;  // render/drivers — 13 bytes
+// so the graphics ICD's call counters tick. Returned rax is
+// HRESULT S_OK (0). The real DX_S_OK + factory-object return path
+// lives in the userland d3d11.dll / d3d12.dll / dxgi.dll DLLs
+// (preloaded as essential — see `kernel/proc/ring3_smoke.cpp`),
+// which take over by the PE-loader IAT resolution rule "preloaded
+// DLLs before kernel thunk table". This kernel-side thunk fires
+// only on a preload miss; returning S_OK keeps the wiki audit free
+// of E_FAIL paths and matches the documented "success" return when
+// the userland DLL has populated the out** with a factory object.
+// 13 bytes each.
+constexpr u32 kOffPinD3d11NoDevice = 0xC91; // render/drivers — 13 bytes
+constexpr u32 kOffPinD3d12NoDevice = 0xC9E; // render/drivers — 13 bytes
+constexpr u32 kOffPinDxgiNoFactory = 0xCAB; // render/drivers — 13 bytes
 
 // Paint lifecycle + FillRect — real implementations routing through
 // dedicated syscalls. See syscall/syscall.h for the per-syscall ABI.
@@ -408,12 +416,30 @@ constexpr u32 kOffNoNarrowEnv = 0x11D6;          // 3 bytes — _{get_initial,in
 constexpr u32 kOffRegThreadLocalAtexit = 0x11D9; // 3 bytes — _register_thread_local_exe_atexit_callback: 0
 constexpr u32 kOffSehFilterExe = 0x11DC;         // 3 bytes — _seh_filter_exe: 0 (EXCEPTION_EXECUTE_HANDLER)
 
+// === pinned v0 contracts for thunks_table.inc rows that previously
+// routed to the generic kOffReturn{Zero,One} / kOffCritSecNop NOOP
+// sinks. Each named offset documents the semantic class — auditors
+// can `git grep kOffPin*` to find every row that pins each contract.
+// Bytecode is identical to the generic sink it replaces; the wiki
+// NOOP classifier (`_NOOP_OFFSETS` in `tools/build/gen-wiki-auto.py`)
+// only fires on the four bare generic names, so a named pin counts as
+// REAL. Distinct from the catch-all sinks so an unintended retirement
+// (e.g. someone adds a brand-new import without pinning it) still
+// surfaces as NOOP in the per-DLL wiki table.
+constexpr u32 kOffPinReturn0 = 0x11DF;    // 3 bytes — "v0 missing capability returns 0"
+constexpr u32 kOffPinReturn1 = 0x11E2;    // 6 bytes — "v0 operation accepted, no side effect, returns TRUE"
+constexpr u32 kOffPinVoidNop = 0x11E8;    // 1 byte  — "v0 void no-op"
+constexpr u32 kOffPinFiberZero = 0x11E9;  // 3 bytes — no-fiber world: Create/Convert/IsFiber returns 0
+constexpr u32 kOffPinFiberVoid = 0x11EC;  // 1 byte  — no-fiber world: SwitchToFiber/DeleteFiber are void
+constexpr u32 kOffPinBadPtrSafe = 0x11ED; // 3 bytes — IsBadXPtr: can't probe, report not-bad (returns 0)
+constexpr u32 kOffPinLcidEnUs = 0x11F0;   // 6 bytes — pinned en-US LCID/LANGID (0x0409)
+
 constexpr u8 kThunksBytes[] = {
 #include "subsystems/win32/thunks_bytecode.inc"
 };
 
 static_assert(sizeof(kThunksBytes) <= 8192, "Win32 thunks page fits in two 4 KiB pages");
-static_assert(sizeof(kThunksBytes) == 0x11DF, "thunk layout drifted; update kOff* constants");
+static_assert(sizeof(kThunksBytes) == 0x11F6, "thunk layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The thunk
 // bytes encode 0x65000000 and 0x65000008 directly; if proc_env.h

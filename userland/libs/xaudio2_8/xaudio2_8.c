@@ -298,16 +298,84 @@ __declspec(dllexport) HRESULT XAudio2Create(void** out, UINT flags, UINT process
     return DX_S_OK;
 }
 
+/* CreateAudioReverb / CreateAudioVolumeMeter — return a minimal
+ * IUnknown-only COM object so callers that integrate the APO
+ * into their effect chain see success. The object's
+ * IUnknown::QueryInterface returns itself for any riid (the
+ * caller's "is this an IXAPO?" probe succeeds); AddRef / Release
+ * count refs; no real signal processing is performed. v0
+ * matches XAudio2's "effect inserted but inert" semantics —
+ * audio still plays through, the effect just doesn't modify it. */
+
+typedef struct
+{
+    void** lpVtbl;
+    int refcount;
+} XapoImpl;
+
+static HRESULT xapo_QueryInterface(XapoImpl* self, const void* riid, void** out)
+{
+    (void)riid;
+    if (!out)
+        return DX_E_POINTER;
+    ++self->refcount;
+    *out = self;
+    return DX_S_OK;
+}
+static unsigned long xapo_AddRef(XapoImpl* self)
+{
+    return ++self->refcount;
+}
+static unsigned long xapo_Release(XapoImpl* self)
+{
+    int r = --self->refcount;
+    if (r <= 0)
+        dx_heap_free(self);
+    return r > 0 ? r : 0;
+}
+
+#define XAPO_VTBL_SLOTS 12
+static void* g_xapo_vtbl[XAPO_VTBL_SLOTS];
+static void xapo_init_vtbl_once(void)
+{
+    static int g_inited = 0;
+    if (g_inited)
+        return;
+    g_inited = 1;
+    for (int i = 0; i < XAPO_VTBL_SLOTS; ++i)
+        g_xapo_vtbl[i] = DX_HSTUB; /* GetRegistrationProperties / IsInputFormatSupported /
+                                    * IsOutputFormatSupported / Initialize / Reset /
+                                    * LockForProcess / UnlockForProcess / Process /
+                                    * CalcInputFrames / CalcOutputFrames — all S_OK no-op. */
+    g_xapo_vtbl[0] = (void*)xapo_QueryInterface;
+    g_xapo_vtbl[1] = (void*)xapo_AddRef;
+    g_xapo_vtbl[2] = (void*)xapo_Release;
+}
+
+static HRESULT create_xapo_object(void** out)
+{
+    if (!out)
+        return DX_E_POINTER;
+    xapo_init_vtbl_once();
+    XapoImpl* x = (XapoImpl*)dx_heap_alloc(sizeof(*x));
+    if (!x)
+    {
+        *out = NULL;
+        return DX_E_OUTOFMEMORY;
+    }
+    dx_memzero(x, sizeof(*x));
+    x->lpVtbl = g_xapo_vtbl;
+    x->refcount = 1;
+    *out = x;
+    return DX_S_OK;
+}
+
 __declspec(dllexport) HRESULT CreateAudioReverb(void** out)
 {
-    if (out)
-        *out = NULL;
-    return DX_E_NOTIMPL;
+    return create_xapo_object(out);
 }
 
 __declspec(dllexport) HRESULT CreateAudioVolumeMeter(void** out)
 {
-    if (out)
-        *out = NULL;
-    return DX_E_NOTIMPL;
+    return create_xapo_object(out);
 }
