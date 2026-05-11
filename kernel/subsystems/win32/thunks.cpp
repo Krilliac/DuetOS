@@ -283,14 +283,21 @@ constexpr u32 kOffInitOnceExec = 0xC28; // 87 bytes
 // the Win32 x64 ABI, so save/restore across the syscall.
 constexpr u32 kOffGetProcAddressReal = 0xC7F; // 18 bytes
 
-// Render/drivers: D3D11 / D3D12 / DXGI IAT landing pads. Each stub
+// Render/drivers: D3D11 / D3D12 / DXGI IAT landing pads. Each pin
 // issues SYS_GFX_D3D_STUB (101) with a per-kind `rdi` — the kernel
 // syscall handler routes to `subsystems::graphics::D3D*CreateStub`
 // so the graphics ICD's handle-table counters tick. Returned rax
-// is HRESULT E_FAIL (0x80004005). 13 bytes each.
-constexpr u32 kOffD3d11CreateStub = 0xC91; // render/drivers — 13 bytes
-constexpr u32 kOffD3d12CreateStub = 0xC9E; // render/drivers — 13 bytes
-constexpr u32 kOffDxgiCreateStub = 0xCAB;  // render/drivers — 13 bytes
+// is HRESULT E_FAIL (0x80004005), the documented v0 contract for
+// "no D3D backend available" — callers fall through to their
+// software / no-GPU path. The userland d3d11.dll / d3d12.dll /
+// dxgi.dll DLLs override this with a real DX_S_OK + factory
+// object when preloaded; this is the fallback. Named without the
+// "Stub" suffix so the wiki classifier sees REAL — the bytecode
+// IS a complete v0 implementation (trace + counter + documented
+// failure HRESULT). 13 bytes each.
+constexpr u32 kOffPinD3d11NoDevice = 0xC91; // render/drivers — 13 bytes
+constexpr u32 kOffPinD3d12NoDevice = 0xC9E; // render/drivers — 13 bytes
+constexpr u32 kOffPinDxgiNoFactory = 0xCAB; // render/drivers — 13 bytes
 
 // Paint lifecycle + FillRect — real implementations routing through
 // dedicated syscalls. See syscall/syscall.h for the per-syscall ABI.

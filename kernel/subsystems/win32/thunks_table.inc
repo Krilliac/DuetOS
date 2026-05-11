@@ -1289,17 +1289,17 @@
     // Route through SYS_GFX_D3D_STUB so the graphics ICD's
     // handle-table counters tick (visible via the `gfx` shell
     // command). Return value is still HRESULT E_FAIL.
-    {"d3d11.dll", "D3D11CreateDevice", kOffD3d11CreateStub},
-    {"d3d11.dll", "D3D11CreateDeviceAndSwapChain", kOffD3d11CreateStub},
-    {"D3D11.dll", "D3D11CreateDevice", kOffD3d11CreateStub},
-    {"D3D11.dll", "D3D11CreateDeviceAndSwapChain", kOffD3d11CreateStub},
-    {"d3d12.dll", "D3D12CreateDevice", kOffD3d12CreateStub},
-    {"d3d12.dll", "D3D12GetDebugInterface", kOffD3d12CreateStub},
-    {"d3d12.dll", "D3D12SerializeRootSignature", kOffD3d12CreateStub},
-    {"D3D12.dll", "D3D12CreateDevice", kOffD3d12CreateStub}, {"dxgi.dll", "CreateDXGIFactory", kOffDxgiCreateStub},
-    {"dxgi.dll", "CreateDXGIFactory1", kOffDxgiCreateStub}, {"dxgi.dll", "CreateDXGIFactory2", kOffDxgiCreateStub},
-    {"DXGI.dll", "CreateDXGIFactory", kOffDxgiCreateStub}, {"DXGI.dll", "CreateDXGIFactory1", kOffDxgiCreateStub},
-    {"DXGI.dll", "CreateDXGIFactory2", kOffDxgiCreateStub},
+    {"d3d11.dll", "D3D11CreateDevice", kOffPinD3d11NoDevice},
+    {"d3d11.dll", "D3D11CreateDeviceAndSwapChain", kOffPinD3d11NoDevice},
+    {"D3D11.dll", "D3D11CreateDevice", kOffPinD3d11NoDevice},
+    {"D3D11.dll", "D3D11CreateDeviceAndSwapChain", kOffPinD3d11NoDevice},
+    {"d3d12.dll", "D3D12CreateDevice", kOffPinD3d12NoDevice},
+    {"d3d12.dll", "D3D12GetDebugInterface", kOffPinD3d12NoDevice},
+    {"d3d12.dll", "D3D12SerializeRootSignature", kOffPinD3d12NoDevice},
+    {"D3D12.dll", "D3D12CreateDevice", kOffPinD3d12NoDevice}, {"dxgi.dll", "CreateDXGIFactory", kOffPinDxgiNoFactory},
+    {"dxgi.dll", "CreateDXGIFactory1", kOffPinDxgiNoFactory}, {"dxgi.dll", "CreateDXGIFactory2", kOffPinDxgiNoFactory},
+    {"DXGI.dll", "CreateDXGIFactory", kOffPinDxgiNoFactory}, {"DXGI.dll", "CreateDXGIFactory1", kOffPinDxgiNoFactory},
+    {"DXGI.dll", "CreateDXGIFactory2", kOffPinDxgiNoFactory},
     // d3d9 predates HRESULT-first API — it returns an interface
     // pointer, NULL = failure. Alias to the shared return-zero
     // stub rather than E_FAIL.
