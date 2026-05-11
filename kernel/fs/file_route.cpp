@@ -33,6 +33,7 @@
 #include "fs/mount.h"
 #include "fs/ramfs.h"
 #include "fs/vfs.h"
+#include "ipc/named_pipes.h"
 #include "subsystems/linux/syscall_pipe.h"
 #include "log/klog.h"
 #include "proc/process.h"
@@ -836,6 +837,12 @@ u64 CloseForProcess(::duetos::core::Process* proc, u64 handle)
             ::duetos::subsystems::linux::internal::PipeReleaseWrite(h.pipe_pool_idx);
         else
             ::duetos::subsystems::linux::internal::PipeReleaseRead(h.pipe_pool_idx);
+        // Server end of a named pipe: drop the registry entry
+        // and any orphan opposite-end reservation (no client
+        // ever connected) before the slot is reused. Client
+        // ends and anonymous pipes keep slot == -1 and skip.
+        if (h.named_pipe_registry_slot >= 0)
+            ::duetos::ipc::NamedPipeOnServerClose(h.named_pipe_registry_slot);
     }
     h.kind = Process::FsBackingKind::None;
     h.ramfs_node = nullptr;
@@ -843,6 +850,7 @@ u64 CloseForProcess(::duetos::core::Process* proc, u64 handle)
     h.cursor = 0;
     h.pipe_pool_idx = 0;
     h.pipe_is_write_end = false;
+    h.named_pipe_registry_slot = -1;
     (void)CopyPathInto(h.fat32_path, nullptr);
     return 0;
 }

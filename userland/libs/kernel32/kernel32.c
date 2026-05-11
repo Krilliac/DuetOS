@@ -2584,6 +2584,167 @@ __declspec(dllexport) BOOL CreatePipe(HANDLE* rd, HANDLE* wr, void* sa, DWORD sz
     return 1;
 }
 
+/* Win32 named-pipe surface — CreateNamedPipeA/W + helpers.
+ *
+ * Backed by SYS_NAMED_PIPE_CREATE (202) on the server side and the
+ * "\\.\pipe\NAME" prefix branch of CreateFileW on the client side
+ * (which dispatches SYS_NAMED_PIPE_OPEN (203)). The kernel
+ * ipc::named_pipes registry maps the name to a kernel pipe-pool
+ * slot; ReadFile / WriteFile / CloseHandle on the returned handles
+ * dispatch through the same FsBackingKind::Pipe code path that
+ * anonymous CreatePipe handles already use.
+ *
+ * v0 honours PIPE_ACCESS_INBOUND (0x01) and PIPE_ACCESS_OUTBOUND
+ * (0x02) only. DUPLEX (0x03) requires two pool slots and is
+ * rejected at the syscall layer; callers see INVALID_HANDLE_VALUE.
+ * ConnectNamedPipe is a no-op that returns TRUE (clients may
+ * already have connected by the time the server calls it; v0 has
+ * no overlapped-wait surface). WaitNamedPipe is a one-shot
+ * "is the name registered?" probe. */
+
+#define DUETOS_PIPE_ACCESS_INBOUND 0x00000001UL
+#define DUETOS_PIPE_ACCESS_OUTBOUND 0x00000002UL
+#define DUETOS_PIPE_ACCESS_DUPLEX 0x00000003UL
+
+#define DUETOS_PIPE_NAME_PREFIX_LEN 9 /* "\\.\pipe\" or "//./pipe/" */
+
+static int duetos_named_pipe_strip_prefix_a(const char* in, char* out, int out_cap)
+{
+    if (in == (const char*)0 || out == (char*)0 || out_cap <= 1)
+        return 0;
+    int i = 0;
+    int j = 0;
+    /* Accept either "\\.\pipe\" or the slash-normalised form
+     * "//./pipe/". Anything else fails — the kernel registry holds
+     * bare names only. */
+    if (!((in[0] == '\\' && in[1] == '\\' && in[2] == '.' && in[3] == '\\' && in[4] == 'p' && in[5] == 'i' &&
+           in[6] == 'p' && in[7] == 'e' && in[8] == '\\') ||
+          (in[0] == '/' && in[1] == '/' && in[2] == '.' && in[3] == '/' && in[4] == 'p' && in[5] == 'i' &&
+           in[6] == 'p' && in[7] == 'e' && in[8] == '/')))
+        return 0;
+    i = DUETOS_PIPE_NAME_PREFIX_LEN;
+    while (j + 1 < out_cap && in[i] != '\0')
+        out[j++] = in[i++];
+    out[j] = '\0';
+    return j;
+}
+
+__declspec(dllexport) HANDLE CreateNamedPipeA(const char* lpName, DWORD dwOpenMode, DWORD dwPipeMode,
+                                              DWORD nMaxInstances, DWORD nOutBufferSize, DWORD nInBufferSize,
+                                              DWORD nDefaultTimeOut, void* lpSecurityAttributes)
+{
+    (void)dwPipeMode;
+    (void)nMaxInstances;
+    (void)nOutBufferSize;
+    (void)nInBufferSize;
+    (void)nDefaultTimeOut;
+    (void)lpSecurityAttributes;
+    char bare[96];
+    const int name_len = duetos_named_pipe_strip_prefix_a(lpName, bare, sizeof(bare));
+    if (name_len <= 0)
+        return (HANDLE)(long long)-1; /* INVALID_HANDLE_VALUE */
+    const unsigned long mode = (dwOpenMode & DUETOS_PIPE_ACCESS_DUPLEX);
+    /* DUPLEX is rejected at the kernel boundary too; fail fast here
+     * so callers can fall back without paying the syscall cost. */
+    if (mode != DUETOS_PIPE_ACCESS_INBOUND && mode != DUETOS_PIPE_ACCESS_OUTBOUND)
+        return (HANDLE)(long long)-1;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)202), /* SYS_NAMED_PIPE_CREATE */
+                       "D"((long long)bare), "S"((long long)name_len), "d"((long long)mode)
+                     : "memory");
+    return (HANDLE)rv;
+}
+
+__declspec(dllexport) HANDLE CreateNamedPipeW(const wchar_t16* lpName, DWORD dwOpenMode, DWORD dwPipeMode,
+                                              DWORD nMaxInstances, DWORD nOutBufferSize, DWORD nInBufferSize,
+                                              DWORD nDefaultTimeOut, void* lpSecurityAttributes)
+{
+    if (lpName == (const wchar_t16*)0)
+        return (HANDLE)(long long)-1;
+    char ascii[128];
+    int j = 0;
+    while (j < (int)(sizeof(ascii) - 1) && lpName[j] != 0)
+    {
+        ascii[j] = (char)(lpName[j] & 0xFF);
+        ++j;
+    }
+    ascii[j] = '\0';
+    return CreateNamedPipeA(ascii, dwOpenMode, dwPipeMode, nMaxInstances, nOutBufferSize, nInBufferSize,
+                            nDefaultTimeOut, lpSecurityAttributes);
+}
+
+/* ConnectNamedPipe — Win32 contract: block until a client connects
+ * (or return immediately with ERROR_PIPE_CONNECTED if one already
+ * has). v0's kernel registry doesn't expose an "is connected?"
+ * probe, and clients can connect at any time after CreateNamedPipe
+ * returns, so we treat ConnectNamedPipe as a non-blocking always-
+ * succeed. Server code that relies on the synchronisation gets a
+ * GAP — documented in ipc/named_pipes.h. */
+__declspec(dllexport) BOOL ConnectNamedPipe(HANDLE h, void* lpOverlapped)
+{
+    (void)h;
+    (void)lpOverlapped;
+    return 1;
+}
+
+/* DisconnectNamedPipe — server-side disconnect. The Win32 contract
+ * lets the server keep the handle and re-issue ConnectNamedPipe;
+ * v0 just no-ops and returns TRUE. The caller's eventual CloseHandle
+ * tears down the pipe pool slot and registry entry. */
+__declspec(dllexport) BOOL DisconnectNamedPipe(HANDLE h)
+{
+    (void)h;
+    return 1;
+}
+
+/* WaitNamedPipe — caller wants to know if a server is listening on
+ * NAME before calling CreateFile. v0 tries an OPEN, and if it
+ * succeeds, immediately closes the new handle and returns TRUE.
+ * Caller should still CreateFile to obtain the real client handle.
+ * dwTimeout is ignored — the registry is non-blocking. */
+__declspec(dllexport) BOOL WaitNamedPipeA(const char* lpName, DWORD dwTimeout)
+{
+    (void)dwTimeout;
+    char bare[96];
+    const int name_len = duetos_named_pipe_strip_prefix_a(lpName, bare, sizeof(bare));
+    if (name_len <= 0)
+        return 0;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)203), /* SYS_NAMED_PIPE_OPEN */
+                       "D"((long long)bare), "S"((long long)name_len)
+                     : "memory");
+    if (rv < 0x100 || rv >= 0x110)
+        return 0;
+    /* Close the test-open handle so the caller's real CreateFileW
+     * can take its place — single-instance pipes have only one
+     * client slot. */
+    __asm__ volatile("int $0x80"
+                     :
+                     : "a"((long long)22), /* SYS_FILE_CLOSE */
+                       "D"(rv)
+                     : "memory");
+    return 1;
+}
+
+__declspec(dllexport) BOOL WaitNamedPipeW(const wchar_t16* lpName, DWORD dwTimeout)
+{
+    if (lpName == (const wchar_t16*)0)
+        return 0;
+    char ascii[128];
+    int j = 0;
+    while (j < (int)(sizeof(ascii) - 1) && lpName[j] != 0)
+    {
+        ascii[j] = (char)(lpName[j] & 0xFF);
+        ++j;
+    }
+    ascii[j] = '\0';
+    return WaitNamedPipeA(ascii, dwTimeout);
+}
+
 /* VirtualQuery — return MEMORY_BASIC_INFORMATION for the supplied
  * pointer. v0 reports MEM_COMMIT|PAGE_READWRITE for any non-NULL
  * input — sufficient for stdio probes that just want the call to
@@ -3288,6 +3449,23 @@ __declspec(dllexport) HANDLE CreateFileW(const wchar_t16* lpFileName, DWORD dwDe
     }
     ascii[j] = '\0';
     i = j;
+    /* Named-pipe prefix recognition. After backslash normalisation,
+     * "\\.\pipe\NAME" becomes "//./pipe/NAME". Route through
+     * SYS_NAMED_PIPE_OPEN (203) with the bare name instead of
+     * dispatching SYS_FILE_OPEN (which would miss in ramfs / FAT32). */
+    if (j > 9 && ascii[0] == '/' && ascii[1] == '/' && ascii[2] == '.' && ascii[3] == '/' && ascii[4] == 'p' &&
+        ascii[5] == 'i' && ascii[6] == 'p' && ascii[7] == 'e' && ascii[8] == '/')
+    {
+        const char* name = ascii + 9;
+        const int name_len = j - 9;
+        long long rv_pipe;
+        __asm__ volatile("int $0x80"
+                         : "=a"(rv_pipe)
+                         : "a"((long long)203), /* SYS_NAMED_PIPE_OPEN */
+                           "D"((long long)name), "S"((long long)name_len)
+                         : "memory");
+        return (HANDLE)rv_pipe;
+    }
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)

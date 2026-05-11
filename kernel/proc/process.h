@@ -564,6 +564,15 @@ struct Process
         // share the same pool index.
         u32 pipe_pool_idx;      // valid iff kind == Pipe
         bool pipe_is_write_end; // valid iff kind == Pipe
+        // Named-pipe registry slot for the SERVER end of a
+        // CreateNamedPipe-allocated pipe. >= 0 = this handle is
+        // the server end; CloseForProcess routes through
+        // NamedPipeOnServerClose to drop the registry entry and
+        // any orphan opposite-end ref. -1 = anonymous pipe or
+        // client end of a named pipe (no registry housekeeping).
+        // Stored as i8 because the registry has 16 slots; a wider
+        // table needs only a typedef bump.
+        i8 named_pipe_registry_slot;
     };
     static constexpr u64 kWin32HandleCap = 16;
     static constexpr u64 kWin32HandleBase = 0x100;

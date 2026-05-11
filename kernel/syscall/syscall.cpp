@@ -89,6 +89,7 @@
 #include "subsystems/win32/event_syscall.h"
 #include "subsystems/win32/apc_syscall.h"
 #include "subsystems/win32/named_kobj_syscall.h"
+#include "subsystems/win32/named_pipe_syscall.h"
 #include "subsystems/win32/pipe_syscall.h"
 #include "subsystems/win32/semaphore_syscall.h"
 #include "subsystems/win32/dir_syscall.h"
@@ -961,6 +962,12 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     case SYS_VIRTUAL_PROTECT:
         ::duetos::subsystems::win32::DoVirtualProtect(frame);
+        return;
+    case SYS_NAMED_PIPE_CREATE:
+        ::duetos::subsystems::win32::DoNamedPipeCreate(frame);
+        return;
+    case SYS_NAMED_PIPE_OPEN:
+        ::duetos::subsystems::win32::DoNamedPipeOpen(frame);
         return;
     case SYS_AUDIO_DEVICE_INFO:
     {

@@ -47,6 +47,8 @@ void StampPipeEnd(::duetos::core::Process::Win32FileHandle& h, u32 pool_idx, boo
     h.fat32_path[0] = '\0';
     h.pipe_pool_idx = pool_idx;
     h.pipe_is_write_end = is_write_end;
+    // Anonymous pipes don't sit in the named-pipe registry.
+    h.named_pipe_registry_slot = -1;
 }
 
 } // namespace

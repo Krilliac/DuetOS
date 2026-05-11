@@ -553,6 +553,58 @@ hard half.
 
 ---
 
+## Phase 6.11 — Win32 named pipes (2026-05-11)
+
+Companion to the anonymous cross-process pipes that landed under
+T11-02: Win32 PEs can now use `CreateNamedPipeA/W` +
+`CreateFileW("\\.\pipe\NAME")` end-to-end, on top of the existing
+kernel pipe pool.
+
+- **What landed.**
+  - **Kernel registry.** `kernel/ipc/named_pipes.{h,cpp}` — a
+    16-slot table mapping `NAME` → `(pool_idx, server_is_writer,
+    client_connected)` under a spinlock. `NamedPipeRegisterServer`
+    is the server-create hook; `NamedPipeConnectClient` is the
+    client-open hook; `NamedPipeOnServerClose` releases the
+    orphan opposite-end refcount if no client connected before
+    server close, preventing a 4 KiB ring-buffer leak.
+  - **Syscalls.** `SYS_NAMED_PIPE_CREATE = 202` (server) and
+    `SYS_NAMED_PIPE_OPEN = 203` (client) ship in
+    `kernel/syscall/syscall.h` + the dispatch table in
+    `syscall.cpp`. Handlers live in
+    `kernel/subsystems/win32/named_pipe_syscall.cpp`.
+  - **Handle table.** `Process::Win32FileHandle` carries a new
+    `named_pipe_registry_slot` field (i8, -1 = anonymous /
+    client). `kernel/fs/file_route.cpp::CloseForProcess` consults
+    it on `FsBackingKind::Pipe` closes to call
+    `NamedPipeOnServerClose` for the server-side handle.
+  - **Userland.** `userland/libs/kernel32/kernel32.c` adds
+    `CreateNamedPipeA`, `CreateNamedPipeW`, `ConnectNamedPipe`,
+    `DisconnectNamedPipe`, `WaitNamedPipeA`, and `WaitNamedPipeW`.
+    `CreateFileW` recognises the `\\.\pipe\` (or `//./pipe/`
+    after slash normalisation) prefix and dispatches
+    `SYS_NAMED_PIPE_OPEN` instead of `SYS_FILE_OPEN`.
+  - **Boot self-test.** `NamedPipeSelfTest` exercises register +
+    duplicate-reject + connect + miss + orphan cleanup against
+    the live pipe pool. Wired through `DUETOS_BOOT_SELFTEST` in
+    `kernel/core/main.cpp` alongside `NamedKObjectSelfTest`.
+- **What's still GAP.**
+  - `PIPE_ACCESS_DUPLEX` is rejected at the syscall layer
+    (needs two pool slots). Documented in
+    [`Win32-Surface-Status`](../reference/Win32-Surface-Status.md)
+    §kernel32.dll.
+  - `PIPE_TYPE_MESSAGE` framing — message boundaries unsupported;
+    reads behave as `PIPE_TYPE_BYTE`.
+  - Overlapped `ConnectNamedPipe` — v0 returns synchronously
+    with success. Workloads that depend on the server-blocks-
+    until-client-connects synchronisation hit a sub-GAP.
+  - Multi-instance pipes (`nMaxInstances > 1`) — each name
+    occupies exactly one pool slot.
+  - Security descriptors / ACLs / `Global\` vs `Local\` namespace
+    prefixes — bare names only.
+
+---
+
 ## How to read the rest of the tree
 
 - `CLAUDE.md` — the authoritative project context, coding standards,

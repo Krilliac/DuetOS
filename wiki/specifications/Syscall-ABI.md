@@ -1206,6 +1206,11 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 196 | `SYS_HEAPEX_SIZE` |
 | 197 | `SYS_HEAPEX_REALLOC` |
 | 198 | `SYS_AUDIO_DEVICE_INFO` |
+| 199 | `SYS_VIRTUAL_ALLOC` |
+| 200 | `SYS_VIRTUAL_FREE` |
+| 201 | `SYS_VIRTUAL_PROTECT` |
+| 202 | `SYS_NAMED_PIPE_CREATE` |
+| 203 | `SYS_NAMED_PIPE_OPEN` |
 <!-- /AUTO:syscall_list -->
 
 ## Native Syscall Argument / Return Reference
@@ -1428,4 +1433,9 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 196 | `SYS_HEAPEX_SIZE` | `rdi` = u64 heap_handle rsi = u64 ptr | bytes or 0 on bad handle / pointer |
 | 197 | `SYS_HEAPEX_REALLOC` | `rdi` = u64 heap_handle rsi = u64 ptr        (0 = alloc) rdx = u6... | the new VA or 0 on failure |
 | 198 | `SYS_AUDIO_DEVICE_INFO` | `rdi` = u64 op 0 = number of HDA-class output devices (typically ... | 48000 |
+| 199 | `SYS_VIRTUAL_ALLOC` | `rdi` = u64 size_bytes        // rounded up to page multiples rsi...; `r10` = u64 hint_va            // 0 = pick from arena bump cursor | the region's base VA on success (each call returns the SAME base when committ... |
+| 200 | `SYS_VIRTUAL_FREE` | `rdi` = u64 base_va rsi = u64 size_bytes        // 0 with MEM_REL... | 1 on success, 0 on bad VA / size / type mix |
+| 201 | `SYS_VIRTUAL_PROTECT` | `rdi` = u64 base_va rsi = u64 size_bytes rdx = u64 new_protection... | 1 on success, 0 on miss / W^X violation |
+| 202 | `SYS_NAMED_PIPE_CREATE` | `rdi` = const char* user name      // bare pipe name (no //  "\; `rsi` = u64 name_len_cap           // bounds the name copy rdx = ... | a Win32-shaped file handle (kWin32HandleBase + slot) for the server end on su... |
+| 203 | `SYS_NAMED_PIPE_OPEN` | `rdi` = const char* user name      // bare pipe name rsi = u64 na... | a Win32-shaped file handle for the client end on success, (u64)-1 on miss (na... |
 <!-- /AUTO:syscall_args -->
