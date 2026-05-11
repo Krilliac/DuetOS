@@ -85,6 +85,35 @@ multiboot2_header_end:
  * ------------------------------------------------------------------------- */
 .section .bss.boot, "aw", @nobits
 .align 4096
+
+/* Stack FIRST in .bss.boot. The page tables follow ABOVE it (higher
+ * addresses). On x86_64 the stack grows DOWN — overflow goes below
+ * `stack_bottom`. By placing stack_bottom at the very start of
+ * .bss.boot (lowest address in this section), an overflow grows
+ * into the .bss.boot section's preceding region (.rodata.boot at
+ * 0x1010e0 + .text.boot + .multiboot2 + ELF headers — read-only or
+ * unmapped). The result is a hard #PF / #GP at the moment of
+ * overflow rather than silent corruption of the live page tables.
+ *
+ * History: stack used to sit AFTER the page tables (boot_pml4 ..
+ * boot_pd ahead of stack_bottom). With page tables IMMEDIATELY
+ * BELOW the stack base, every overflow scribbled the live PD/PDPT
+ * before any fault could be raised, producing the #DF observed
+ * during ring3 ELF smoke on 2026-05-11. Reordered 2026-05-11.
+ *
+ * Stack size history:
+ *   - 16 KiB: pe-winapi / pe-winkill overflow (Fat32LookupPath chain).
+ *   - 64 KiB: held until -fstack-protector-strong landed kernel-wide
+ *     (the canary prologue adds 16-24 bytes per frame, eating headroom
+ *     on the deep PE/ELF-load chain).
+ *   - 128 KiB: post-canary headroom recovery (2026-05-11).
+ */
+.align 16
+stack_bottom:
+    .skip 131072                /* 128 KiB boot stack */
+stack_top:
+
+.align 4096
 boot_pml4:
     .skip 4096
 boot_pdpt:
@@ -93,37 +122,6 @@ boot_pdpt_high:
     .skip 4096
 boot_pd:
     .skip 4096
-
-.align 16
-stack_bottom:
-    /* Boot stack used by kernel_main forever (the BSP "main" thread
-     * keeps using this stack via its higher-half alias — see "Switch
-     * onto the boot stack via its HIGH-VMA alias" below). Sized to
-     * match the per-task kstack (kKernelStackPages = 16 = 64 KiB) so
-     * the PE loader / FAT32 sink / klog flush call chains, which all
-     * run synchronously in kernel_main's context during smoke
-     * profiles, don't overflow.
-     *
-     * History: was 16 KiB. pe-winapi / pe-winkill consume ~20 KiB
-     * (Fat32LookupPath alone allocates a 0x1f0-byte frame on top of
-     * a deep PE-resolve / FAT32-sink chain). The overflow grew DOWN
-     * past stack_bottom into adjacent .bss.boot (boot_pd at 0x105000,
-     * boot_pdpt_high at 0x104000), zeroing page-table entries and
-     * triple-faulting on the next kernel-half access. 3423df7's
-     * emulator gate hid the symptom by skipping the FAT32 sink
-     * (= no klog flush during PE-resolve = no Fat32 call depth = no
-     * overflow); this fix removes the underlying cause so the gate
-     * can come out.
-     *
-     * 2026-05-11: bumped from 64 KiB → 128 KiB to recover the headroom
-     * eaten by `-fstack-protector-strong` (now explicit per the CVE
-     * audit class CC fix). The canary prologue/epilogue adds 16-24
-     * bytes per stack frame; deep call chains (ring3 ELF spawn →
-     * ElfLoad → LoadSegment → AddressSpaceMapUserPage →
-     * RwLockExclusiveGuard → MutexLock → Sti) overflowed the prior
-     * 64 KiB and produced a #DF with a scrambled trap frame. */
-    .skip 131072                /* 128 KiB boot stack */
-stack_top:
 
 
 /* ---------------------------------------------------------------------------
