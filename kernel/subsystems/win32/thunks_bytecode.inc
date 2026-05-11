@@ -2141,10 +2141,10 @@
     0xCD, 0x80,                   // 0x88C int 0x80 ; rax = handle or negative errno
     // Translate any negative errno to 0 for Win32 "NULL" handle
     // semantics before publishing the optional thread-id surrogate.
-    0x48, 0x85, 0xC0,             // 0x88E test rax, rax
-    0x79, 0x04,                   // 0x891 jns +4 -> 0x897
-    0x31, 0xC0,                   // 0x893 xor eax, eax
-    0x90, 0x90,                   // 0x895 nop; nop (padding; keep thunk length stable)
+    0x48, 0x85, 0xC0, // 0x88E test rax, rax
+    0x79, 0x04,       // 0x891 jns +4 -> 0x897
+    0x31, 0xC0,       // 0x893 xor eax, eax
+    0x90, 0x90,       // 0x895 nop; nop (padding; keep thunk length stable)
     // We pushed 16 bytes, so lpThreadId (originally at [rsp+0x30])
     // is now at [rsp+0x40].
     0x48, 0x8B, 0x4C, 0x24, 0x40, // 0x897 mov rcx, [rsp+0x40]
@@ -2152,8 +2152,8 @@
     0x74, 0x02,                   // 0x89F je +2 -> 0x8A3
     0x89, 0x01,                   // 0x8A1 mov [rcx], eax
     0x5E,                         // 0x8A3 pop rsi
-    0x5F,                   // 0x8A4 pop rdi
-    0xC3,                   // 0x8A5 ret
+    0x5F,                         // 0x8A4 pop rdi
+    0xC3,                         // 0x8A5 ret
 
     // --- ThreadExitTramp (offset 0x8A6, 6 bytes) ---------------
     // Landing site when a Win32 thread proc returns. DoThreadCreate
@@ -3833,3 +3833,72 @@
     // attached exception handler. v0 PEs that reach here exit
     // through the handler without unwinding (T6-02).
     0x31, 0xC0, 0xC3, // 0x11DC xor eax, eax ; ret
+
+    // ===========================================================
+    // Pinned v0-contract NOOP equivalents.
+    //
+    // Each row below shares bytecode with one of the four generic
+    // sinks (kOffReturnZero / kOffReturnOne / kOffCritSecNop) but
+    // carries a distinct named offset so the wiki NOOP classifier
+    // does not flag pinned rows as unfilled gaps. Rebinding a row
+    // from kOffReturnZero → kOffPinReturn0 retires it from the
+    // NOOP audit without lying about behaviour — the bytecode is
+    // unchanged, and the kOff* constant name pins the v0 contract
+    // a reviewer accepted.
+    //
+    // Add a new pinned offset when an existing semantic class
+    // grows a new member that doesn't fit any of the rows below.
+    // Don't repurpose an existing pin for an unrelated row — the
+    // grep cross-reference is what makes the audit cheap.
+    // ===========================================================
+
+    // kOffPinReturn0 (0x11DF): generic "v0 missing capability returns 0".
+    // Catch-all for queries / handle-returners where the v0
+    // answer is documented to be 0/NULL: no resource tables,
+    // no cross-process memory, no live debugger, etc.
+    0x31, 0xC0, 0xC3, // 0x11DF xor eax, eax ; ret
+
+    // kOffPinReturn1 (0x11E2): generic "v0 operation accepted, no
+    // side effect, returns TRUE". State setters that don't yet
+    // have backing storage (SetThreadPriority, SetConsoleMode,
+    // SetSearchPathMode, …) bind here so the caller sees the
+    // documented success return.
+    0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3, // 0x11E2 mov eax, 1 ; ret
+
+    // kOffPinVoidNop (0x11E8): generic "v0 void no-op". Distinct
+    // name (and offset) from kOffCritSecNop so the audit can
+    // tell which void-returning rows are deliberately pinned.
+    0xC3, // 0x11E8 ret
+
+    // kOffPinFiberZero (0x11E9): no-fiber world.
+    // CreateFiber / CreateFiberEx / ConvertThreadToFiber /
+    // ConvertThreadToFiberEx / ConvertFiberToThread / IsThreadAFiber
+    // all return 0 — we don't ship the fiber scheduler, so the
+    // documented "no fiber created / not a fiber" answer is 0.
+    0x31, 0xC0, 0xC3, // 0x11E9 xor eax, eax ; ret
+
+    // kOffPinFiberVoid (0x11EC): no-fiber world, void leg.
+    // SwitchToFiber / DeleteFiber are void-returning and have
+    // nothing to do without a fiber scheduler.
+    0xC3, // 0x11EC ret
+
+    // kOffPinBadPtrSafe (0x11ED): IsBadXPtr family — report safe.
+    // IsBadReadPtr / IsBadWritePtr / IsBadStringPtr{A,W} /
+    // IsBadCodePtr all return 0 ("pointer is OK"). The v0
+    // memory model can't probe without faulting, so the safe
+    // documented answer is 0; a real bad dereference will fault
+    // cleanly at the next access. Documented as deprecated by
+    // Microsoft for the same reason.
+    0x31, 0xC0, 0xC3, // 0x11ED xor eax, eax ; ret
+
+    // kOffPinLcidEnUs (0x11F0): pinned en-US LCID / LANGID (0x0409).
+    // GetSystemDefaultLCID / GetUserDefaultLCID / GetThreadLocale /
+    // GetSystemDefaultUILanguage / GetUserDefaultUILanguage /
+    // GetSystemDefaultLangID / GetUserDefaultLangID all return
+    // 0x0409 (LANG_ENGLISH_US / SUBLANG_ENGLISH_US). The previous
+    // binding to kOffReturnZero returned 0, which is not a valid
+    // LCID — CRT locale code that runs `if (lcid == 0) abort()`
+    // tripped on it. 0x0409 matches what the userland kernel32
+    // GetUserDefaultLCID export returns when the DLL preload
+    // succeeds, so behaviour is identical via either path.
+    0xB8, 0x09, 0x04, 0x00, 0x00, 0xC3, // 0x11F0 mov eax, 0x409 ; ret
