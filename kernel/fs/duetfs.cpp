@@ -75,6 +75,16 @@ u32 NodeFieldOffset(u32 node_id, u32 field_off)
 {
     constexpr u32 kNodeTableLba = 3;
     constexpr u32 kNodesPerBlock = kBlockSize / kNodeSize;
+    // Cap node_id so `lba * kBlockSize` can't wrap u32. With
+    // kBlockSize=4096 the wrap point is lba >= 2^20, i.e.
+    // node_id >= 2^20 * kNodesPerBlock. Real DuetFS images
+    // never reach that — but a malformed on-disk inode pointer
+    // could, so refuse before the multiply. Callers treat a
+    // returned 0 as "block 0 / superblock" which then fails the
+    // downstream signature check.
+    constexpr u32 kMaxNodeId = 0x10000000U; // 256 Mi nodes
+    if (node_id >= kMaxNodeId)
+        return 0;
     const u32 lba = kNodeTableLba + node_id / kNodesPerBlock;
     return lba * kBlockSize + (node_id % kNodesPerBlock) * kNodeSize + field_off;
 }
