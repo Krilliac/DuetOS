@@ -40,6 +40,19 @@ struct DuetosBmpInfo
     u8 _pad[2];
 };
 
+struct DuetosTgaInfo
+{
+    u32 width;
+    u32 height;
+    u32 bpp;
+    u32 image_type;
+    u32 pixel_offset;
+    u8 top_down;
+    u8 right_to_left;
+    u8 ok;
+    u8 _pad;
+};
+
 extern "C"
 {
     /// Validate a PNG header: 8-byte signature, IHDR length / tag /
@@ -55,6 +68,14 @@ extern "C"
     /// `out->ok = 1` only if every field passes; `out->top_down`
     /// is 1 when the DIB height was negative (origin upper-left).
     bool duetos_img_meta_parse_bmp(const u8* buf, usize len, DuetosBmpInfo* out);
+
+    /// Validate a TGA 18-byte header. Returns true with
+    /// `out->ok = 1` only if the image type is 2 (uncompressed
+    /// true-colour), the pixel depth is 24 or 32, and dimensions
+    /// fit in the 16384 × 16384 cap. `out->pixel_offset` accounts
+    /// for the optional image-id field and (tolerantly) any
+    /// trailing colormap bytes some encoders leave dangling.
+    bool duetos_img_meta_parse_tga(const u8* buf, usize len, DuetosTgaInfo* out);
 }
 
 } // namespace duetos::util::img_meta

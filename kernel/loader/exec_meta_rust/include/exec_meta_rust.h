@@ -12,7 +12,7 @@
 namespace duetos::loader::exec_meta
 {
 
-// Layout pinned by the matching Rust #[repr(C)] struct. The C++
+// Layouts pinned by the matching Rust #[repr(C)] structs. The C++
 // wrappers do a field-by-field copy on the way out so layout drift
 // can't silently break the loaders.
 struct DuetosPePrefix
@@ -20,6 +20,20 @@ struct DuetosPePrefix
     u32 nt_base;       // file offset of "PE\0\0"
     u16 section_count; // FileHeader.NumberOfSections
     u16 _pad;
+};
+
+struct DuetosPeImage
+{
+    u32 nt_base;
+    u16 section_count;
+    u16 opt_header_size;
+    u32 opt_base;
+    u32 image_size;
+    u32 entry_rva;
+    u32 _pad1;
+    u64 image_base;
+    u32 section_base;
+    u32 _pad2;
 };
 
 extern "C"
@@ -44,6 +58,26 @@ extern "C"
     /// here just gates the early "is this an AMD64 PE/COFF image
     /// at all?" decision.
     bool duetos_exec_meta_pe_validate_prefix(const u8* buf, usize len, DuetosPePrefix* out_prefix, u32* out_status);
+
+    /// Validate everything the PE prefix walker checks, plus the
+    /// optional-header magic (PE32+), section + file alignment,
+    /// image base + size in canonical low half, section-table
+    /// bounds, and per-section raw extent fit.
+    ///
+    /// On success, `*out_image` carries the data the loader needs
+    /// to map the image: `nt_base`, `section_count`,
+    /// `opt_header_size`, `opt_base`, `image_size`, `entry_rva`,
+    /// `image_base`, `section_base`. On failure, `*out_status`
+    /// carries one of the PeStatus enumerators
+    /// (byte-identical to the C++ `duetos::core::PeStatus` enum:
+    /// 0..5 are the prefix codes, 6 = NotPe32Plus,
+    /// 7 = SectionAlignUnsup, 8 = FileAlignUnsup,
+    /// 9 = SectionCountZero, 10 = OptHeaderOutOfBounds,
+    /// 11 = SectionOutOfBounds, 17 = ImageBaseOutOfRange).
+    ///
+    /// The deeper data-directory walks (Imports / BaseReloc / TLS)
+    /// still live in `kernel/loader/pe_loader.cpp` for now.
+    bool duetos_exec_meta_pe_validate_image(const u8* buf, usize len, DuetosPeImage* out_image, u32* out_status);
 }
 
 } // namespace duetos::loader::exec_meta

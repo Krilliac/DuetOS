@@ -47,6 +47,29 @@ pub enum DuetosPePrefixStatus {
     BadMachine = 5,
 }
 
+/// Extension of DuetosPePrefixStatus: values 6..11 + 17 of the C++
+/// `duetos::core::PeStatus` enum. Returned by
+/// `duetos_exec_meta_pe_validate_image`. Values 12..16 are NOT
+/// emitted here (they cover data-directory checks / OOM, which
+/// still live in the C++ loader for now).
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DuetosPeImageStatus {
+    Ok = 0,
+    TooSmall = 1,
+    BadDosMagic = 2,
+    BadLfanewBounds = 3,
+    BadNtSignature = 4,
+    BadMachine = 5,
+    NotPe32Plus = 6,
+    SectionAlignUnsup = 7,
+    FileAlignUnsup = 8,
+    SectionCountZero = 9,
+    OptHeaderOutOfBounds = 10,
+    SectionOutOfBounds = 11,
+    ImageBaseOutOfRange = 17,
+}
+
 // ---------- helpers ----------
 
 fn slice_from_raw<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
@@ -269,6 +292,181 @@ pub extern "C" fn duetos_exec_meta_pe_validate_prefix(
     status == DuetosPePrefixStatus::Ok
 }
 
+// ---------- PE/COFF image (deeper validation) ----------
+//
+// Picks up where the prefix walker stopped: optional-header magic
+// (PE32+ only), section / file alignment, image base + size in
+// canonical low half, section-table bounds + per-section raw extent
+// fit. Stops before the data-directory walks (Imports / BaseReloc /
+// TLS) — those still live in the C++ loader because their fix-up
+// paths are tightly tied to address-space mapping.
+
+/// Offset of FileHeader.SizeOfOptionalHeader within FileHeader.
+const PE_FILEHDR_OFF_SIZE_OF_OPT_HEADER: usize = 16;
+/// PE32+ optional-header magic.
+const PE_OPT_MAGIC_PE32_PLUS: u16 = 0x020B;
+/// Optional-header offsets (PE32+, the only variant we accept).
+const PE_OPT_OFF_SECTION_ALIGNMENT: usize = 32;
+const PE_OPT_OFF_FILE_ALIGNMENT: usize = 36;
+const PE_OPT_OFF_SIZE_OF_IMAGE: usize = 56;
+const PE_OPT_OFF_IMAGE_BASE: usize = 24;
+const PE_OPT_OFF_ADDRESS_OF_ENTRY_POINT: usize = 16;
+const PE_OPT_OFF_NUMBER_OF_RVA_AND_SIZES: usize = 108;
+/// Section-header bytes.
+const PE_SECTION_HEADER_SIZE: usize = 40;
+const PE_SECTION_OFF_POINTER_TO_RAW_DATA: usize = 20;
+const PE_SECTION_OFF_SIZE_OF_RAW_DATA: usize = 16;
+/// Page alignment we enforce on SectionAlignment.
+const PE_PAGE_ALIGN: u32 = 4096;
+/// Canonical low-half user VA ceiling.
+const PE_USER_MAX: u64 = 0x0000_7FFF_FFFF_FFFF;
+
+/// Deeper PE image-validation output. Superset of `DuetosPePrefix`;
+/// callers that just need the cheap "is this an AMD64 PE?" gate
+/// can still use the prefix function.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct DuetosPeImage {
+    pub nt_base: u32,
+    pub section_count: u16,
+    pub opt_header_size: u16,
+    pub opt_base: u32,
+    pub image_size: u32,
+    pub entry_rva: u32,
+    pub _pad1: u32,
+    pub image_base: u64,
+    pub section_base: u32,
+    pub _pad2: u32,
+}
+
+fn pe_validate_image(buf: &[u8], out: &mut DuetosPeImage) -> DuetosPeImageStatus {
+    *out = DuetosPeImage::default();
+    // Run the prefix walker first to share the bounds-check logic.
+    let mut prefix = DuetosPePrefix::default();
+    match pe_validate_prefix(buf, &mut prefix) {
+        DuetosPePrefixStatus::Ok => {}
+        DuetosPePrefixStatus::TooSmall => return DuetosPeImageStatus::TooSmall,
+        DuetosPePrefixStatus::BadDosMagic => return DuetosPeImageStatus::BadDosMagic,
+        DuetosPePrefixStatus::BadLfanewBounds => return DuetosPeImageStatus::BadLfanewBounds,
+        DuetosPePrefixStatus::BadNtSignature => return DuetosPeImageStatus::BadNtSignature,
+        DuetosPePrefixStatus::BadMachine => return DuetosPeImageStatus::BadMachine,
+    }
+    out.nt_base = prefix.nt_base;
+    out.section_count = prefix.section_count;
+    if out.section_count == 0 {
+        return DuetosPeImageStatus::SectionCountZero;
+    }
+    // FileHeader.SizeOfOptionalHeader.
+    let file_hdr = out.nt_base as usize + 4;
+    out.opt_header_size = load_u16_le(buf, file_hdr + PE_FILEHDR_OFF_SIZE_OF_OPT_HEADER);
+    out.opt_base = out.nt_base + 4 + PE_FILE_HEADER_SIZE as u32;
+    // Need enough optional-header bytes to reach our last-read field
+    // (NumberOfRvaAndSizes is the deepest u32 we touch).
+    let min_opt = (PE_OPT_OFF_NUMBER_OF_RVA_AND_SIZES + 4) as u16;
+    if out.opt_header_size < min_opt {
+        return DuetosPeImageStatus::OptHeaderOutOfBounds;
+    }
+    let opt_end = (out.opt_base as u64) + (out.opt_header_size as u64);
+    if opt_end > buf.len() as u64 {
+        return DuetosPeImageStatus::OptHeaderOutOfBounds;
+    }
+    let opt = out.opt_base as usize;
+    // OptionalHeader.Magic at offset 0 → PE32+ only.
+    let opt_magic = load_u16_le(buf, opt);
+    if opt_magic != PE_OPT_MAGIC_PE32_PLUS {
+        return DuetosPeImageStatus::NotPe32Plus;
+    }
+    // SectionAlignment must equal page size — the loader maps each
+    // section at (ImageBase + VirtualAddress), and a sub-page
+    // SectionAlignment would mean two sections share a page with
+    // conflicting protections.
+    let section_alignment = load_u32_le(buf, opt + PE_OPT_OFF_SECTION_ALIGNMENT);
+    if section_alignment != PE_PAGE_ALIGN {
+        return DuetosPeImageStatus::SectionAlignUnsup;
+    }
+    let file_alignment = load_u32_le(buf, opt + PE_OPT_OFF_FILE_ALIGNMENT);
+    if file_alignment != 512 && file_alignment != 1024 && file_alignment != 2048 && file_alignment != 4096 {
+        return DuetosPeImageStatus::FileAlignUnsup;
+    }
+    out.image_base = load_u64_le(buf, opt + PE_OPT_OFF_IMAGE_BASE);
+    out.entry_rva = load_u32_le(buf, opt + PE_OPT_OFF_ADDRESS_OF_ENTRY_POINT);
+    out.image_size = load_u32_le(buf, opt + PE_OPT_OFF_SIZE_OF_IMAGE);
+    // ImageBase + SizeOfImage must fit in canonical low half — a
+    // malicious PE with a kernel-half ImageBase would otherwise
+    // drive AddressSpaceMapUserPage into PanicAs and DoS the kernel.
+    if out.image_base > PE_USER_MAX {
+        return DuetosPeImageStatus::ImageBaseOutOfRange;
+    }
+    if out.image_size > 0 && (out.image_size as u64 - 1) > (PE_USER_MAX - out.image_base) {
+        return DuetosPeImageStatus::ImageBaseOutOfRange;
+    }
+    // Section table follows the optional header.
+    out.section_base = out.opt_base + out.opt_header_size as u32;
+    let section_table_bytes = (out.section_count as u64).saturating_mul(PE_SECTION_HEADER_SIZE as u64);
+    let section_table_end = (out.section_base as u64).saturating_add(section_table_bytes);
+    if section_table_end > buf.len() as u64 {
+        return DuetosPeImageStatus::SectionOutOfBounds;
+    }
+    // Cross-check every section's raw extent fits in the file.
+    for i in 0..out.section_count {
+        let sec = out.section_base as usize + (i as usize) * PE_SECTION_HEADER_SIZE;
+        let raw_off = load_u32_le(buf, sec + PE_SECTION_OFF_POINTER_TO_RAW_DATA);
+        let raw_sz = load_u32_le(buf, sec + PE_SECTION_OFF_SIZE_OF_RAW_DATA);
+        let raw_end = (raw_off as u64).saturating_add(raw_sz as u64);
+        if raw_end > buf.len() as u64 {
+            return DuetosPeImageStatus::SectionOutOfBounds;
+        }
+    }
+    DuetosPeImageStatus::Ok
+}
+
+/// Helper concentrating the only raw-pointer dereference the image
+/// FFI entry performs. Keeps clippy's `not_unsafe_ptr_arg_deref`
+/// quiet.
+fn write_pe_image(out: *mut DuetosPeImage, value: DuetosPeImage) {
+    if out.is_null() {
+        return;
+    }
+    // SAFETY: FFI contract pins `out` as a writable
+    // `DuetosPeImage`-sized region; we never retain the pointer.
+    unsafe { ptr::write(out, value) };
+}
+
+/// FFI: validate everything up to (but not including) the data
+/// directories. On Ok, `*out_image` carries nt_base / section_count
+/// / opt_header_size / opt_base / image_base / entry_rva /
+/// image_size / section_base. On failure, `*out_status` carries one
+/// of the PeStatus enumerators (byte-identical to the C++ enum:
+/// 0/1/2/3/4/5 = prefix codes, 6 = NotPe32Plus, 7 = SectionAlignUnsup,
+/// 8 = FileAlignUnsup, 9 = SectionCountZero, 10 = OptHeaderOutOfBounds,
+/// 11 = SectionOutOfBounds, 17 = ImageBaseOutOfRange).
+#[no_mangle]
+pub extern "C" fn duetos_exec_meta_pe_validate_image(
+    buf: *const u8,
+    len: usize,
+    out_image: *mut DuetosPeImage,
+    out_status: *mut u32,
+) -> bool {
+    let mut image = DuetosPeImage::default();
+    let status = match slice_from_raw(buf, len) {
+        Some(slice) => pe_validate_image(slice, &mut image),
+        None => DuetosPeImageStatus::TooSmall,
+    };
+    write_status_pe_image(out_status, status);
+    write_pe_image(out_image, image);
+    status == DuetosPeImageStatus::Ok
+}
+
+/// Like `write_status_pe` but for the image-validator's wider enum.
+fn write_status_pe_image(out: *mut u32, value: DuetosPeImageStatus) {
+    if out.is_null() {
+        return;
+    }
+    // SAFETY: FFI contract pins `out` as a writable u32-sized
+    // region; we never retain the pointer past the call.
+    unsafe { ptr::write(out, value as u32) };
+}
+
 // ---------- hosted tests ----------
 
 #[cfg(test)]
@@ -304,6 +502,7 @@ mod tests {
     // --- ELF ---
 
     extern crate alloc;
+    use alloc::vec;
     use alloc::vec::Vec;
 
     #[test]
@@ -457,5 +656,171 @@ mod tests {
         let buf = [0u8; 10];
         let mut prefix = DuetosPePrefix::default();
         assert_eq!(pe_validate_prefix(&buf, &mut prefix), DuetosPePrefixStatus::TooSmall);
+    }
+
+    // --- PE deeper image validation ---
+
+    fn make_min_pe_image() -> Vec<u8> {
+        // Build a minimal PE32+ image with one zero-extent section.
+        // Layout: DOS stub (0x40) + PE sig (4) + FileHeader (20) +
+        // OptionalHeader (112) + 1 SectionHeader (40) = 0xDC bytes.
+        let nt_base: u32 = 0x40;
+        let opt_size: u16 = 112;
+        let mut buf = Vec::new();
+        buf.resize(0x40, 0);
+        buf[0..2].copy_from_slice(&DOS_MAGIC.to_le_bytes());
+        buf[0x3C..0x40].copy_from_slice(&nt_base.to_le_bytes());
+        // PE signature.
+        buf.extend_from_slice(&PE_SIGNATURE.to_le_bytes());
+        // FileHeader: Machine, NumberOfSections, TimeDateStamp,
+        // PointerToSymbolTable, NumberOfSymbols,
+        // SizeOfOptionalHeader, Characteristics.
+        buf.extend_from_slice(&PE_MACHINE_AMD64.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes()); // 1 section
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&opt_size.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        // OptionalHeader (PE32+, 112 bytes — minimum that reaches
+        // NumberOfRvaAndSizes at offset 108).
+        let mut opt = vec![0u8; opt_size as usize];
+        opt[0..2].copy_from_slice(&PE_OPT_MAGIC_PE32_PLUS.to_le_bytes());
+        // AddressOfEntryPoint at +16, ImageBase at +24, SectionAlignment at +32,
+        // FileAlignment at +36, SizeOfImage at +56.
+        opt[16..20].copy_from_slice(&0x1000u32.to_le_bytes()); // entry_rva
+        opt[24..32].copy_from_slice(&0x0040_0000u64.to_le_bytes()); // ImageBase
+        opt[32..36].copy_from_slice(&PE_PAGE_ALIGN.to_le_bytes()); // SectionAlignment
+        opt[36..40].copy_from_slice(&512u32.to_le_bytes()); // FileAlignment
+        opt[56..60].copy_from_slice(&0x1000u32.to_le_bytes()); // SizeOfImage
+                                                               // NumberOfRvaAndSizes at +108.
+        opt[108..112].copy_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&opt);
+        // One section header — 40 bytes, all zero (raw_off + raw_sz = 0, fits trivially).
+        buf.resize(buf.len() + 40, 0);
+        buf
+    }
+
+    #[test]
+    fn pe_image_minimal_passes() {
+        let buf = make_min_pe_image();
+        let mut image = DuetosPeImage::default();
+        assert_eq!(pe_validate_image(&buf, &mut image), DuetosPeImageStatus::Ok);
+        assert_eq!(image.section_count, 1);
+        assert_eq!(image.image_base, 0x0040_0000);
+        assert_eq!(image.entry_rva, 0x1000);
+        assert_eq!(image.image_size, 0x1000);
+    }
+
+    #[test]
+    fn pe_image_zero_sections_rejects() {
+        let mut buf = make_min_pe_image();
+        // FileHeader.NumberOfSections at nt_base+4+2 = 0x46.
+        buf[0x46..0x48].copy_from_slice(&0u16.to_le_bytes());
+        let mut image = DuetosPeImage::default();
+        assert_eq!(
+            pe_validate_image(&buf, &mut image),
+            DuetosPeImageStatus::SectionCountZero
+        );
+    }
+
+    #[test]
+    fn pe_image_pe32_not_plus_rejects() {
+        let mut buf = make_min_pe_image();
+        // OptionalHeader.Magic at opt_base = nt_base + 24 = 0x58.
+        // PE32 (not PE32+) magic is 0x010B.
+        buf[0x58..0x5A].copy_from_slice(&0x010Bu16.to_le_bytes());
+        let mut image = DuetosPeImage::default();
+        assert_eq!(pe_validate_image(&buf, &mut image), DuetosPeImageStatus::NotPe32Plus);
+    }
+
+    #[test]
+    fn pe_image_bad_section_alignment_rejects() {
+        let mut buf = make_min_pe_image();
+        // SectionAlignment at opt_base + 32 = 0x78.
+        buf[0x78..0x7C].copy_from_slice(&0x200u32.to_le_bytes()); // 512, not 4096
+        let mut image = DuetosPeImage::default();
+        assert_eq!(
+            pe_validate_image(&buf, &mut image),
+            DuetosPeImageStatus::SectionAlignUnsup
+        );
+    }
+
+    #[test]
+    fn pe_image_bad_file_alignment_rejects() {
+        let mut buf = make_min_pe_image();
+        // FileAlignment at opt_base + 36 = 0x7C. Spec allows
+        // 512..4096; 256 is illegal.
+        buf[0x7C..0x80].copy_from_slice(&256u32.to_le_bytes());
+        let mut image = DuetosPeImage::default();
+        assert_eq!(pe_validate_image(&buf, &mut image), DuetosPeImageStatus::FileAlignUnsup);
+    }
+
+    #[test]
+    fn pe_image_kernel_half_image_base_rejects() {
+        let mut buf = make_min_pe_image();
+        // ImageBase at opt_base + 24 = 0x70. Set to a kernel-half VA.
+        buf[0x70..0x78].copy_from_slice(&0xFFFF_FFFF_8000_0000u64.to_le_bytes());
+        let mut image = DuetosPeImage::default();
+        assert_eq!(
+            pe_validate_image(&buf, &mut image),
+            DuetosPeImageStatus::ImageBaseOutOfRange
+        );
+    }
+
+    #[test]
+    fn pe_image_image_base_plus_size_overflow_rejects() {
+        let mut buf = make_min_pe_image();
+        // ImageBase near the top of low-half + SizeOfImage = 16 MiB
+        // → fits inside `PE_USER_MAX - image_base = 0xFFFF` only if
+        // size <= 0x10000, so a 16-MiB SizeOfImage should reject
+        // with `ImageBaseOutOfRange`. Offsets within the optional
+        // header: ImageBase at opt_base+24, SizeOfImage at +56.
+        buf[0x70..0x78].copy_from_slice(&0x0000_7FFF_FFFF_0000u64.to_le_bytes()); // ImageBase
+        buf[0x90..0x94].copy_from_slice(&0x0100_0000u32.to_le_bytes()); // SizeOfImage = 16 MiB
+        let mut image = DuetosPeImage::default();
+        assert_eq!(
+            pe_validate_image(&buf, &mut image),
+            DuetosPeImageStatus::ImageBaseOutOfRange
+        );
+    }
+
+    #[test]
+    fn pe_image_truncated_optional_header_rejects() {
+        let mut buf = make_min_pe_image();
+        // SizeOfOptionalHeader at nt_base+4+16 = 0x54. Force <
+        // NumberOfRvaAndSizes_offset+4 = 112.
+        buf[0x54..0x56].copy_from_slice(&100u16.to_le_bytes());
+        let mut image = DuetosPeImage::default();
+        assert_eq!(
+            pe_validate_image(&buf, &mut image),
+            DuetosPeImageStatus::OptHeaderOutOfBounds
+        );
+    }
+
+    #[test]
+    fn pe_image_section_raw_extent_overflows_rejects() {
+        let mut buf = make_min_pe_image();
+        // SectionHeader starts at opt_base + opt_header_size =
+        // 0x58 + 112 = 0xC8. PointerToRawData at +20, SizeOfRawData
+        // at +16. Stuff in u32::MAX values that would overflow when
+        // added.
+        let sec_base = 0xC8usize;
+        buf[sec_base + PE_SECTION_OFF_POINTER_TO_RAW_DATA..sec_base + PE_SECTION_OFF_POINTER_TO_RAW_DATA + 4]
+            .copy_from_slice(&u32::MAX.to_le_bytes());
+        buf[sec_base + PE_SECTION_OFF_SIZE_OF_RAW_DATA..sec_base + PE_SECTION_OFF_SIZE_OF_RAW_DATA + 4]
+            .copy_from_slice(&0x10u32.to_le_bytes());
+        let mut image = DuetosPeImage::default();
+        assert_eq!(
+            pe_validate_image(&buf, &mut image),
+            DuetosPeImageStatus::SectionOutOfBounds
+        );
+    }
+
+    #[test]
+    fn pe_image_short_input_returns_too_small() {
+        let buf = [0u8; 10];
+        let mut image = DuetosPeImage::default();
+        assert_eq!(pe_validate_image(&buf, &mut image), DuetosPeImageStatus::TooSmall);
     }
 }

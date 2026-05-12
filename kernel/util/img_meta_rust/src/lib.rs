@@ -39,6 +39,20 @@ pub struct DuetosBmpInfo {
     pub _pad: [u8; 2],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct DuetosTgaInfo {
+    pub width: u32,
+    pub height: u32,
+    pub bpp: u32,
+    pub image_type: u32,
+    pub pixel_offset: u32,
+    pub top_down: u8,
+    pub right_to_left: u8,
+    pub ok: u8,
+    pub _pad: u8,
+}
+
 // ---------- helpers ----------
 //
 // Every raw-pointer dereference is concentrated in helpers so the
@@ -221,6 +235,91 @@ pub extern "C" fn duetos_img_meta_parse_bmp(buf: *const u8, len: usize, out: *mu
     parse_bmp_header(slice, dst)
 }
 
+// ---------- TGA ----------
+
+const TGA_HEADER_BYTES: usize = 18;
+const TGA_MAX_DIM: u32 = 16384;
+/// Truevision image-type 2: uncompressed true-colour. The other
+/// types (RLE, colormapped, grayscale) are deferred to a future
+/// slice — the v0 C++ decoder rejects them too.
+const TGA_IMAGE_TYPE_UNCOMPRESSED_TRUECOLOR: u32 = 2;
+/// Image-descriptor byte bits.
+const TGA_DESCRIPTOR_ORIGIN_TOP: u8 = 0x20;
+const TGA_DESCRIPTOR_ORIGIN_RIGHT: u8 = 0x10;
+
+fn parse_tga_header(buf: &[u8], out: &mut DuetosTgaInfo) -> bool {
+    if buf.len() < TGA_HEADER_BYTES {
+        return false;
+    }
+    let id_length = buf[0] as u32;
+    let colormap_type = buf[1];
+    let image_type = buf[2] as u32;
+    // Colormap spec: 5 bytes at offset 3 (origin, length, entry-size).
+    let colormap_length = load_u16_le(buf, 5) as u32;
+    let colormap_entry_size = buf[7];
+    let width = load_u16_le(buf, 12) as u32;
+    let height = load_u16_le(buf, 14) as u32;
+    let pixel_depth = buf[16];
+    let descriptor = buf[17];
+
+    if image_type != TGA_IMAGE_TYPE_UNCOMPRESSED_TRUECOLOR {
+        return false;
+    }
+    // True-colour rejects an attached colormap (per TGA spec).
+    if colormap_type != 0 {
+        return false;
+    }
+    if pixel_depth != 24 && pixel_depth != 32 {
+        return false;
+    }
+    if width == 0 || height == 0 || width > TGA_MAX_DIM || height > TGA_MAX_DIM {
+        return false;
+    }
+
+    // For TYPE-2 the colormap fields should be zero; tolerant
+    // decoders skip a non-zero colormap if present. Compute the
+    // byte length so pixel_offset moves past it.
+    let mut colormap_bytes: u32 = 0;
+    if colormap_length != 0 {
+        // bits → bytes, rounded up.
+        let entry_bytes = (colormap_entry_size as u32).saturating_add(7) / 8;
+        colormap_bytes = colormap_length.saturating_mul(entry_bytes);
+    }
+    // pixel_offset = header + id_length + colormap_bytes, saturating.
+    let pixel_offset = (TGA_HEADER_BYTES as u32)
+        .saturating_add(id_length)
+        .saturating_add(colormap_bytes);
+
+    out.width = width;
+    out.height = height;
+    out.bpp = pixel_depth as u32;
+    out.image_type = image_type;
+    out.pixel_offset = pixel_offset;
+    out.top_down = if (descriptor & TGA_DESCRIPTOR_ORIGIN_TOP) != 0 {
+        1
+    } else {
+        0
+    };
+    out.right_to_left = if (descriptor & TGA_DESCRIPTOR_ORIGIN_RIGHT) != 0 {
+        1
+    } else {
+        0
+    };
+    out.ok = 1;
+    true
+}
+
+#[no_mangle]
+pub extern "C" fn duetos_img_meta_parse_tga(buf: *const u8, len: usize, out: *mut DuetosTgaInfo) -> bool {
+    let Some(dst) = out_init(out) else {
+        return false;
+    };
+    let Some(slice) = slice_from_raw(buf, len) else {
+        return false;
+    };
+    parse_tga_header(slice, dst)
+}
+
 // ---------- hosted tests ----------
 
 #[cfg(test)]
@@ -394,5 +493,107 @@ mod tests {
         let buf = [0u8; 10];
         let mut out = DuetosBmpInfo::default();
         assert!(!parse_bmp_header(&buf, &mut out));
+    }
+
+    // --- TGA ---
+
+    fn make_tga_header(width: u16, height: u16, depth: u8, descriptor: u8, image_type: u8) -> [u8; 18] {
+        let mut buf = [0u8; 18];
+        buf[2] = image_type;
+        buf[12..14].copy_from_slice(&width.to_le_bytes());
+        buf[14..16].copy_from_slice(&height.to_le_bytes());
+        buf[16] = depth;
+        buf[17] = descriptor;
+        buf
+    }
+
+    #[test]
+    fn tga_top_down_32bpp_parses() {
+        let buf = make_tga_header(320, 200, 32, TGA_DESCRIPTOR_ORIGIN_TOP, 2);
+        let mut out = DuetosTgaInfo::default();
+        assert!(parse_tga_header(&buf, &mut out));
+        assert_eq!(out.width, 320);
+        assert_eq!(out.height, 200);
+        assert_eq!(out.bpp, 32);
+        assert_eq!(out.image_type, 2);
+        assert_eq!(out.pixel_offset, 18);
+        assert_eq!(out.top_down, 1);
+        assert_eq!(out.right_to_left, 0);
+        assert_eq!(out.ok, 1);
+    }
+
+    #[test]
+    fn tga_bottom_up_24bpp_parses() {
+        let buf = make_tga_header(8, 8, 24, 0, 2);
+        let mut out = DuetosTgaInfo::default();
+        assert!(parse_tga_header(&buf, &mut out));
+        assert_eq!(out.bpp, 24);
+        assert_eq!(out.top_down, 0);
+    }
+
+    #[test]
+    fn tga_rle_rejects() {
+        // image_type 10 = RLE true-colour — not supported in v0.
+        let buf = make_tga_header(8, 8, 32, 0, 10);
+        let mut out = DuetosTgaInfo::default();
+        assert!(!parse_tga_header(&buf, &mut out));
+    }
+
+    #[test]
+    fn tga_colormapped_rejects() {
+        // image_type 1 = uncompressed colour-mapped — not supported.
+        let mut buf = make_tga_header(8, 8, 32, 0, 1);
+        buf[1] = 1; // colormap_type set
+        let mut out = DuetosTgaInfo::default();
+        assert!(!parse_tga_header(&buf, &mut out));
+    }
+
+    #[test]
+    fn tga_8bpp_rejects() {
+        let buf = make_tga_header(8, 8, 8, 0, 2);
+        let mut out = DuetosTgaInfo::default();
+        assert!(!parse_tga_header(&buf, &mut out));
+    }
+
+    #[test]
+    fn tga_overlong_dim_rejects() {
+        // width=20000 doesn't fit u16, so a hostile encoder could
+        // wrap. We test the documented cap (16384) via a u16 value
+        // that's > 16384.
+        let buf = make_tga_header(16385, 8, 32, 0, 2);
+        let mut out = DuetosTgaInfo::default();
+        assert!(!parse_tga_header(&buf, &mut out));
+    }
+
+    #[test]
+    fn tga_zero_dim_rejects() {
+        let buf = make_tga_header(0, 8, 32, 0, 2);
+        let mut out = DuetosTgaInfo::default();
+        assert!(!parse_tga_header(&buf, &mut out));
+    }
+
+    #[test]
+    fn tga_too_short_rejects() {
+        let buf = [0u8; 10];
+        let mut out = DuetosTgaInfo::default();
+        assert!(!parse_tga_header(&buf, &mut out));
+    }
+
+    #[test]
+    fn tga_id_length_shifts_pixel_offset() {
+        // id_length = 5 → pixel_offset = 18 + 5.
+        let mut buf = make_tga_header(8, 8, 32, 0, 2);
+        buf[0] = 5;
+        let mut out = DuetosTgaInfo::default();
+        assert!(parse_tga_header(&buf, &mut out));
+        assert_eq!(out.pixel_offset, 23);
+    }
+
+    #[test]
+    fn tga_right_to_left_flag_round_trips() {
+        let buf = make_tga_header(8, 8, 32, TGA_DESCRIPTOR_ORIGIN_RIGHT, 2);
+        let mut out = DuetosTgaInfo::default();
+        assert!(parse_tga_header(&buf, &mut out));
+        assert_eq!(out.right_to_left, 1);
     }
 }
