@@ -503,18 +503,27 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
   / `WSACloseEvent` / `WSASetEvent` / `WSAResetEvent` /
   `WSAEventSelect` / `WSAEnumNetworkEvents` /
   `WSAWaitForMultipleEvents` exist and route through a
-  process-local `WsaEventBinding[32]` table. Callers can
-  register their interest in network events without crashing
-  on a NULL-import lookup.
-- **Deferred:** Real async event delivery — the v0 ws2_32
-  binding registry has no producer side. The TCP stack
-  doesn't yet drive `pending` mask changes when a socket
-  becomes readable / writable / accepts a connection, so
-  `WSAEnumNetworkEvents` always reports zero events and
-  `WSAWaitForMultipleEvents` returns `WSA_WAIT_TIMEOUT`.
-  Overlapped I/O + IOCP-backed socket reads still pending
+  process-local `WsaEventBinding[32]` table.
+  **Producer side shipped:** new kernel-side helper
+  `net::SocketPollEvents(idx)` returns the current
+  `FD_READ` / `FD_WRITE` / `FD_ACCEPT` / `FD_CLOSE`
+  bitmask for a socket (`kSockOpPollEvents = 14` on
+  SYS_SOCKET_OP). `WSAEnumNetworkEvents` queries the kernel
+  on every call and ORs the result into the binding's
+  `pending` mask masked by the user's subscribed events,
+  then resets the event handle to match the Win32 atomic-
+  reset contract. `WSAWaitForMultipleEvents` runs a 10 ms-
+  cadence polling loop: every iteration walks the bindings,
+  `SetEvent`s any whose socket has activity, then probes
+  each `lphEvents` entry with a 0 ms `SYS_EVENT_WAIT`;
+  returns the matching index on a signaled event or
+  `WSA_WAIT_TIMEOUT` after `dwTimeout` ms.
+- **Deferred:** Overlapped I/O + IOCP-backed socket reads
   (kernel32's IOCP plumbing exists but isn't wired into the
-  socket read path).
+  socket read path); kernel-direct event signaling at the
+  moment of socket activity (today's polling cadence is the
+  CPU-time tradeoff); `fWaitAll == TRUE` semantics (current
+  impl returns on first ready event regardless).
 
 ---
 

@@ -620,6 +620,55 @@ static void ws2_free(void* p)
     __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)12), "D"((long long)p) : "memory");
 }
 
+/* SYS_SLEEP_MS (19): suspend the calling thread for `ms`
+ * milliseconds. ms == 0 yields the time slice. */
+static void ws2_sleep_ms(unsigned long ms)
+{
+    long long discard;
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)19), "D"((long long)ms) : "memory");
+}
+
+/* SYS_NOW_NS (18): nanoseconds since boot. */
+static unsigned long long ws2_now_ns(void)
+{
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)18) : "memory");
+    return (unsigned long long)rv;
+}
+
+/* SYS_EVENT_SET (31) / SYS_EVENT_WAIT (33): poke Win32 event
+ * handles from the freestanding ws2_32 without dragging in a
+ * kernel32 import. The handle values are the same opaque cookies
+ * kernel32 returns; the syscall validates them against the
+ * process's win32 handle table. */
+static void ws2_event_set(void* handle)
+{
+    if (handle == (void*)0)
+        return;
+    long long discard;
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)31), "D"((long long)handle) : "memory");
+}
+
+static long long ws2_event_wait(void* handle, unsigned long timeout_ms)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)33), "D"((long long)handle), "S"((long long)timeout_ms)
+                     : "memory");
+    return rv;
+}
+
+/* Query the kernel's FD_* readiness bitmask for a socket. Issues
+ * SYS_SOCKET_OP with op=kSockOpPollEvents=14, rsi=sock_idx. */
+static long ws2_poll_events(SOCKET s)
+{
+    const long long rv = ws2_op(14LL, (long long)s, 0, 0, 0, 0);
+    if (rv < 0)
+        return 0;
+    return (long)(unsigned long)rv;
+}
+
 /* Parse `service` as a decimal port number. Returns 0 if NULL or
  * empty; -1 on parse failure (caller treats as 0 — Win32's
  * getaddrinfo doesn't reject numeric-parse errors when AI_NUMERICSERV
@@ -893,15 +942,17 @@ __declspec(dllexport) BOOL WSAResetEvent(WSAEVENT_t e)
  * — process-local event-binding registry. WSAEventSelect remembers
  * which network events a (socket, event-handle) pair has subscribed
  * to; WSAEnumNetworkEvents reports + clears them; WSAWaitForMultipleEvents
- * is a thin wrapper over kernel32's wait primitives.
+ * polls binding readiness and signals event handles when sockets
+ * become readable / writable / accept-pending / closed.
  *
- * v0 doesn't have a real network event source feeding the registry
- * (no FD_READ / FD_WRITE / FD_ACCEPT delivery from the TCP stack
- * yet), so WSAEnumNetworkEvents always reports zero events. The
- * surface exists so PE callers that follow the Win32 async pattern
- * can register their interest and poll without crashing on a
- * NULL-import lookup. Real event delivery is the next slice and
- * would populate the per-binding `pending` mask. */
+ * Producer side wired through `kSockOpPollEvents` (SYS_SOCKET_OP
+ * op=14): the kernel reports the current FD_* bitmask for a
+ * socket on demand. Each WSAEnumNetworkEvents call queries this
+ * and ORs the result into the binding's `pending` mask (masked
+ * by the user's subscribed events); WSAWaitForMultipleEvents
+ * runs a short-interval polling loop, calling SetEvent on any
+ * binding whose socket has activity, so a caller blocked in
+ * WaitForMultipleObjects-shape wakes when a real event lands. */
 
 #define WSA_BINDING_SLOTS 32
 
@@ -967,9 +1018,6 @@ __declspec(dllexport) int WSAEventSelect(SOCKET s, WSAEVENT_t e, long lNetworkEv
 
 __declspec(dllexport) int WSAEnumNetworkEvents(SOCKET s, WSAEVENT_t e, void* lpNetworkEvents)
 {
-    (void)e; /* Real Win32 atomically resets `e` here; v0 events
-              * never get set by anyone yet, so the reset is a
-              * no-op. */
     if (lpNetworkEvents == (void*)0)
     {
         g_wsa_last_error = 10014; /* WSAEFAULT */
@@ -979,15 +1027,30 @@ __declspec(dllexport) int WSAEnumNetworkEvents(SOCKET s, WSAEVENT_t e, void* lpN
     out->lNetworkEvents = 0;
     for (int i = 0; i < 10; ++i)
         out->iErrorCode[i] = 0;
-    /* Drain pending bits for this socket (currently always 0). */
+    /* Producer-side merge: query the kernel for the socket's
+     * current FD_* readiness and OR it into the binding's
+     * `pending` mask, masked by the user's subscribed events.
+     * Matches the Winsock contract that Enum returns events
+     * accumulated since the last Enum / EventSelect. */
+    const long now_ready = ws2_poll_events(s);
     for (int i = 0; i < WSA_BINDING_SLOTS; ++i)
     {
         if (g_wsa_bindings[i].in_use && g_wsa_bindings[i].socket == s)
         {
+            g_wsa_bindings[i].pending |= (now_ready & g_wsa_bindings[i].lNetworkEvents);
             out->lNetworkEvents = g_wsa_bindings[i].pending;
             g_wsa_bindings[i].pending = 0;
             break;
         }
+    }
+    /* Real Win32 atomically resets `e` on this call. The event
+     * was signaled by `ws2_event_set` from WSAWaitForMultipleEvents
+     * when activity was detected; reset it here so the next
+     * Wait blocks again until the next state transition. */
+    if (e != (WSAEVENT_t)0)
+    {
+        long long discard;
+        __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)32), "D"((long long)e) : "memory");
     }
     return 0;
 }
@@ -996,21 +1059,57 @@ __declspec(dllexport) DWORD WSAWaitForMultipleEvents(DWORD cEvents, const WSAEVE
                                                      DWORD dwTimeout, BOOL fAlertable)
 {
     (void)fAlertable; /* v0 doesn't honour alertable here. */
-    (void)dwTimeout;
-    (void)fWaitAll;
+    (void)fWaitAll;   /* GAP: fWaitAll==TRUE reduces to fWaitAll==FALSE
+                       *      (return on the first ready event). */
     if (lphEvents == (const WSAEVENT_t*)0 || cEvents == 0)
     {
         g_wsa_last_error = 10014;
         return WSA_WAIT_FAILED;
     }
-    /* v0 has no async event delivery: an event manually-set via
-     * WSASetEvent stays signaled until WSAResetEvent, but no
-     * socket I/O completion ever raises one. The honest answer
-     * for every poll is "timeout". We return WSA_WAIT_TIMEOUT
-     * unconditionally; a caller that depends on event-driven
-     * wakeups gets a clean "no event ready" result instead of a
-     * deadlock. Importing kernel32.WaitForSingleObject from a
-     * freestanding stub-built DLL is also a non-starter — there
-     * is no kernel32 import library at link time here. */
-    return WSA_WAIT_TIMEOUT;
+
+    /* Polling loop. Each iteration:
+     *   1. Walk the event-binding registry; for any binding whose
+     *      socket has a fresh FD_* event the caller subscribed to,
+     *      SetEvent the bound event handle (so it shows up in the
+     *      per-event WaitForSingleObject probe below).
+     *   2. Probe each event in lphEvents with a 0 ms wait. A
+     *      WAIT_OBJECT_0 (0) return means that index is signaled —
+     *      hand it back immediately.
+     *   3. If the overall timeout has elapsed, return WSA_WAIT_TIMEOUT.
+     *   4. Sleep 10 ms and loop.
+     *
+     * 10 ms cadence trades latency for CPU — fine for v0; future
+     * work moves the producer side into the kernel proper so the
+     * event handle is signaled at the moment of socket activity. */
+    const unsigned long long start = ws2_now_ns();
+    const unsigned long long timeout_ns =
+        (dwTimeout == WSA_INFINITE) ? 0ULL : ((unsigned long long)dwTimeout * 1000000ULL);
+    for (;;)
+    {
+        /* Step 1 — fan socket readiness out to event handles. */
+        for (int i = 0; i < WSA_BINDING_SLOTS; ++i)
+        {
+            if (!g_wsa_bindings[i].in_use)
+                continue;
+            const long ready = ws2_poll_events(g_wsa_bindings[i].socket) & g_wsa_bindings[i].lNetworkEvents;
+            if (ready != 0)
+                ws2_event_set(g_wsa_bindings[i].event);
+        }
+        /* Step 2 — non-blocking probe of every event in lphEvents. */
+        for (DWORD i = 0; i < cEvents; ++i)
+        {
+            const long long r = ws2_event_wait(lphEvents[i], 0);
+            if (r == 0) /* WAIT_OBJECT_0 */
+                return WSA_WAIT_EVENT_0 + i;
+        }
+        /* Step 3 — overall timeout. */
+        if (dwTimeout != WSA_INFINITE)
+        {
+            const unsigned long long now = ws2_now_ns();
+            if (now - start >= timeout_ns)
+                return WSA_WAIT_TIMEOUT;
+        }
+        /* Step 4 — back off. */
+        ws2_sleep_ms(10);
+    }
 }

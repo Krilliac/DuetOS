@@ -2004,6 +2004,13 @@ void SyscallDispatch(arch::TrapFrame* frame)
             rv = 0;
             break;
         }
+        case kSockOpPollEvents:
+        {
+            // rsi = sock idx. Returns FD_* bitmask, 0 on dead idx.
+            const u32 sock_idx = static_cast<u32>(frame->rsi);
+            rv = static_cast<i64>(::duetos::net::SocketPollEvents(sock_idx));
+            break;
+        }
         }
         frame->rax = static_cast<u64>(rv);
         return;

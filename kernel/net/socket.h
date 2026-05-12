@@ -209,6 +209,22 @@ bool SocketUdpDispatch(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 ds
 /// TCP segment handler when the canned-reply buffer grew.
 void SocketTcpRxNotify();
 
+/// Async-IO readiness probe — returns a bitmask of Winsock
+/// `FD_*` events currently active on `idx`. Drives the producer
+/// side of `WSAEnumNetworkEvents` / `WSAWaitForMultipleEvents`:
+/// every Enum / Wait call probes via this and ORs the result
+/// into the per-binding mask. Pure read; no blocking, no state
+/// transition.
+///
+/// Returned bits (mirror of Winsock FD_* constants):
+///   bit 0  (0x01)  FD_READ    — recv would return data without blocking
+///   bit 1  (0x02)  FD_WRITE   — send would not block (always for v0)
+///   bit 3  (0x08)  FD_ACCEPT  — listener has a pending loopback pair
+///   bit 5  (0x20)  FD_CLOSE   — peer FIN or shutdown(RD) on this end
+///
+/// Returns 0 on dead idx.
+u32 SocketPollEvents(u32 idx);
+
 /// Stats accessor — boot/shell reporting.
 struct SocketStats
 {
