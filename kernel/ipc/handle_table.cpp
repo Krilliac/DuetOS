@@ -46,12 +46,22 @@ bool HandleInRange(Handle h)
     }
 
     sync::SpinLockGuard guard(table.lock);
-    // Skip slot 0 — kHandleInvalid is the "no handle" sentinel.
-    for (u32 i = 1; i < kHandleTableCapacity; ++i)
+    // Two-pass scan starting at the post-hint index. Skips the
+    // typically-busy prefix on a sparse table; degrades to a
+    // full scan when the table is dense. Slot 0 stays reserved
+    // for kHandleInvalid.
+    const u32 start = (table.next_free_hint + 1u) % kHandleTableCapacity;
+    for (u32 step = 0; step < kHandleTableCapacity; ++step)
     {
+        u32 i = start + step;
+        if (i >= kHandleTableCapacity)
+            i -= kHandleTableCapacity;
+        if (i == 0)
+            continue; // reserved sentinel slot
         if (table.slots[i].obj == nullptr)
         {
             table.slots[i].obj = obj;
+            table.next_free_hint = i;
             KLOG_TRACE_AV(::duetos::core::LogArea::IPC, "ipc/handle_table", "insert ok handle", static_cast<u64>(i));
             return static_cast<Handle>(i);
         }
