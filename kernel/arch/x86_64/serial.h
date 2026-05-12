@@ -83,6 +83,15 @@ void SerialWriteN(const char* data, u64 len);
 /// the function level.
 void SerialWriteHex(u64 value);
 
+/// Monotonically-increasing count of bytes that have reached the
+/// UART since boot. Sampled by the init-wedge watchdog in the
+/// timer IRQ to detect "no progress has been logged in N seconds
+/// while the timer kept firing" — the canonical signature of a
+/// driver bring-up deadlock (xHCI reset wait, locked mutex,
+/// non-responding MMIO poll). Reads are unsynchronised; an 8-byte
+/// load is atomic on x86_64 and the writer is the single boot CPU.
+u64 SerialBytesWritten();
+
 /// Non-blocking read of one byte from COM1. Returns the received byte
 /// in the low 8 bits, or -1 if the receive buffer is empty. The serial
 /// receive path is intentionally lock-free: only the per-CPU input

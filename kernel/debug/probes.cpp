@@ -48,6 +48,7 @@ constexpr ProbeRow kProbeTable[] = {
     {ProbeId::kElfLoaderOom, "loader.elf_oom", ProbeArm::ArmedLog},
     {ProbeId::kProbeFail, "drivers.probe_fail", ProbeArm::ArmedLog},
     {ProbeId::kTopologyParseFailed, "topo.parse_failed", ProbeArm::ArmedLog},
+    {ProbeId::kBootInitWedge, "boot.init_wedge", ProbeArm::ArmedLog},
     {ProbeId::kRing3Spawn, "ring3.spawn", ProbeArm::Disarmed},
     {ProbeId::kProcessCreate, "proc.create", ProbeArm::Disarmed},
     {ProbeId::kProcessDestroy, "proc.destroy", ProbeArm::Disarmed},

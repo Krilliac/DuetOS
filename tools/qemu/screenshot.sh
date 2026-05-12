@@ -61,6 +61,23 @@ OVMF_VARS_TEMPLATE="${DUETOS_OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
 OVMF_VARS_COPY="${BUILD_DIR}/screen-ovmf-vars.fd"
 cp "${OVMF_VARS_TEMPLATE}" "${OVMF_VARS_COPY}"
 
+# DUETOS_NO_USB=1 skips the xHCI host controller + usb-kbd
+# attachment. Under TCG QEMU the xHCI emulation has an
+# intermittent reset-loop wedge that costs the entire boot,
+# without changing the captured image. PS/2 keyboard via the
+# ICH9 LPC stays available for typing — and the screenshot
+# harness doesn't need keyboard input anyway since GRUB nav
+# is driven through the monitor. Leaving usb on the boot is
+# strictly cheaper for the screenshot path; if you need the
+# xhci surface tested (driver work / regression), unset it.
+USB_ARGS=()
+if [[ "${DUETOS_NO_USB:-0}" != "1" ]]; then
+    USB_ARGS=(
+        -device "qemu-xhci,id=xhci"
+        -device "usb-kbd,bus=xhci.0"
+    )
+fi
+
 qemu-system-x86_64 \
     -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}" \
     -drive "if=pflash,format=raw,file=${OVMF_VARS_COPY}" \
@@ -75,8 +92,7 @@ qemu-system-x86_64 \
     -device "ahci,id=ahci1" \
     -drive "file=${SATA_IMAGE},if=none,id=sata0,format=raw" \
     -device "ide-hd,bus=ahci1.0,drive=sata0" \
-    -device "qemu-xhci,id=xhci" \
-    -device "usb-kbd,bus=xhci.0" \
+    "${USB_ARGS[@]}" \
     -cdrom "${ISO_IMAGE}" -boot d &
 QEMU_PID=$!
 
@@ -101,22 +117,29 @@ elif [[ "${DUETOS_DEMO:-0}" == "1" ]]; then
 fi
 if [[ -n "${GRUB_NAV}" ]]; then
     (
-        sleep 1  # let QEMU come up + monitor socket appear
+        # The QEMU monitor socket and GRUB's keystroke-eating loop
+        # both take a moment to settle. 3 s puts the first sendkey
+        # well after GRUB has drawn the menu (which takes ~2 s under
+        # UEFI+OVMF) and well before the 10 s auto-select countdown
+        # fires. Each down-arrow also waits 0.4 s so GRUB has time
+        # to repaint the highlight band — too fast and the menu
+        # skips entries.
+        sleep 3
         python3 - <<'PY' "${MON_SOCK}" "${GRUB_NAV}"
 import socket, sys, time
 p, n_str = sys.argv[1], sys.argv[2]
 n = int(n_str)
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-for _ in range(30):
+for _ in range(60):
     try:
         s.connect(p); break
     except (FileNotFoundError, ConnectionRefusedError):
-        time.sleep(0.2)
-def send(cmd):
-    s.sendall((cmd + "\n").encode()); time.sleep(0.2)
+        time.sleep(0.25)
+def send(cmd, settle=0.4):
+    s.sendall((cmd + "\n").encode()); time.sleep(settle)
 for _ in range(n):
     send("sendkey down")
-send("sendkey ret")
+send("sendkey ret", settle=0.2)
 s.close()
 PY
     ) &

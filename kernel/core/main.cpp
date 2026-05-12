@@ -3939,6 +3939,51 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 continue;
             }
 
+            // Ctrl+Alt+Arrow snaps the focused window to a half of
+            // the work area. The Win key isn't exposed by the PS/2
+            // path so Ctrl+Alt is the surrogate modifier (matches
+            // the rest of this handler's chords).
+            //   Left  → left half       (Win+Left analogue)
+            //   Right → right half      (Win+Right analogue)
+            //   Up    → top half        (Win+Up analogue)
+            //   Down  → bottom half     (Win+Down analogue)
+            // The active window is the snap target; if there is no
+            // active window the chord is a silent no-op. Recompose
+            // after the snap so the new geometry paints.
+            if (ctrl && alt &&
+                (ev.code == duetos::drivers::input::kKeyArrowLeft ||
+                 ev.code == duetos::drivers::input::kKeyArrowRight || ev.code == duetos::drivers::input::kKeyArrowUp ||
+                 ev.code == duetos::drivers::input::kKeyArrowDown))
+            {
+                const duetos::drivers::video::WindowHandle active = duetos::drivers::video::WindowActive();
+                if (active != duetos::drivers::video::kWindowInvalid)
+                {
+                    duetos::drivers::video::CompositorLock();
+                    switch (ev.code)
+                    {
+                    case duetos::drivers::input::kKeyArrowLeft:
+                        duetos::drivers::video::WindowSnapLeft(active);
+                        break;
+                    case duetos::drivers::input::kKeyArrowRight:
+                        duetos::drivers::video::WindowSnapRight(active);
+                        break;
+                    case duetos::drivers::input::kKeyArrowUp:
+                        duetos::drivers::video::WindowSnapTop(active);
+                        break;
+                    case duetos::drivers::input::kKeyArrowDown:
+                        duetos::drivers::video::WindowSnapBottom(active);
+                        break;
+                    default:
+                        break;
+                    }
+                    duetos::drivers::video::CursorHide();
+                    duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                    duetos::drivers::video::CursorShow();
+                    duetos::drivers::video::CompositorUnlock();
+                }
+                continue;
+            }
+
             // Ctrl+Alt+B toggles the taskbar dock edge between
             // Bottom (default) and Top. Re-anchor + recompose
             // so the new placement appears immediately. Useful
@@ -6284,6 +6329,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     (void)duetos::core::RunPhase(duetos::core::Phase::Userland);
 
     duetos::core::StartHeartbeatThread();
+
+    // Inform the init-wedge watchdog (in arch/timer.cpp) that
+    // bring-up has fully finished. Steady-state quiet windows after
+    // this point — the idle loop, compositor naps with no input
+    // pending — are legitimate and shouldn't fire the wedge probe.
+    duetos::arch::MarkInitComplete();
 
     SerialWrite("[boot] All subsystems online. Entering idle loop.\n");
 

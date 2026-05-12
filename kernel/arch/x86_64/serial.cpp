@@ -47,6 +47,16 @@ volatile u32 g_serial_panic_mode = 0;
 // boots land in the smoke matrix, this graduates to a per-CPU array.
 volatile u32 g_serial_in_progress = 0;
 
+// Monotonically-increasing byte counter, bumped on every byte that
+// reaches the UART. Used by the init-wedge watchdog in
+// `arch/x86_64/timer.cpp` to detect "nothing has been logged in N
+// seconds while the timer was still firing", which catches a
+// non-progressing driver bring-up (xHCI reset deadlock, locked
+// mutex, busy-spin) before it eats the boot timeout. Read via
+// `SerialBytesWritten()` below — non-atomic on 8-byte aligned u64
+// loads is fine on x86_64 single-CPU.
+constinit u64 g_serial_bytes_written = 0;
+
 // Drive the UART directly. No locking, no panic-mode check — the
 // callers above have already decided whether they hold the lock or
 // have bypassed it. Each byte spins on the LSR transmit-empty bit
@@ -58,6 +68,7 @@ void WriteByteRaw(u8 byte)
         // Spin until the transmitter holding register is empty.
     }
     Outb(kCom1Port + kRegData, byte);
+    ++g_serial_bytes_written;
 }
 
 void WriteCharRaw(char c)
@@ -276,6 +287,11 @@ duetos::i32 SerialCom2ReadByteNonblocking()
         return -1;
     }
     return static_cast<duetos::i32>(Inb(kCom2Port + kRegData));
+}
+
+u64 SerialBytesWritten()
+{
+    return g_serial_bytes_written;
 }
 
 } // namespace duetos::arch

@@ -66,6 +66,12 @@ enum class ProbeId : u8
                           // to cluster=0 for at least one CPU; locality-
                           // aware steal degrades to round-robin for the
                           // affected CPU
+    kBootInitWedge,       // boot init went silent for >N seconds while the
+                          // timer was still firing — a driver bring-up
+                          // wedge or non-progressing wait. Caller passes
+                          // the elapsed-silence tick count as `value`;
+                          // attached GDB can `b duetos::debug::ProbeFire`
+                          // to halt at the exact tick the wedge tripped.
 
     // Medium-frequency events — disarmed by default, the
     // operator arms these when hunting a specific issue.

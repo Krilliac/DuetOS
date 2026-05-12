@@ -250,6 +250,14 @@ void ThemeRegisterWindow(ThemeRole role, WindowHandle h);
 /// window by name without touching kernel-internal tables.
 WindowHandle ThemeRoleWindow(ThemeRole role);
 
+/// Reverse of ThemeRoleWindow: look up the role registered for
+/// `h`. Returns true + writes the role on hit, false otherwise.
+/// Used by the taskbar to paint per-role app glyphs in each tab
+/// (Calculator → `=`, Notes → ruled rows, etc.) so users can
+/// identify the app from the taskbar by its icon shape, not just
+/// the title text.
+bool ThemeRoleForWindow(WindowHandle h, ThemeRole* out);
+
 /// Re-publish every themed colour into the live UI:
 ///   - every registered window's chrome (border, title, client,
 ///     close button)

@@ -51,4 +51,11 @@ u64 TimerTicks();
 /// when the workload exposes drift.`
 void LapicTimerStartOnCurrent();
 
+/// Inform the init-wedge watchdog that boot init has finished. After
+/// this call, steady-state quiet windows (idle loop, compositor naps
+/// with no UI activity) stop counting toward the silent-heartbeats
+/// threshold. Idempotent; called from `core/main.cpp` at the end of
+/// the `Userland` phase.
+void MarkInitComplete();
+
 } // namespace duetos::arch

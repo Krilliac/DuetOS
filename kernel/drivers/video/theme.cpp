@@ -883,6 +883,23 @@ WindowHandle ThemeRoleWindow(ThemeRole role)
     return h;
 }
 
+bool ThemeRoleForWindow(WindowHandle h, ThemeRole* out)
+{
+    if (out == nullptr || h == kWindowInvalid)
+    {
+        return false;
+    }
+    for (u32 i = 0; i < static_cast<u32>(ThemeRole::kCount); ++i)
+    {
+        if (g_role_window[i] == h)
+        {
+            *out = static_cast<ThemeRole>(i);
+            return true;
+        }
+    }
+    return false;
+}
+
 void ThemeRegisterWindow(ThemeRole role, WindowHandle h)
 {
     const u32 idx = static_cast<u32>(role);

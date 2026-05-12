@@ -281,6 +281,12 @@ void WindowSnapLeft(WindowHandle h);
 /// Snap `h` to the right half. Mirrors Win10's Win+Right.
 void WindowSnapRight(WindowHandle h);
 
+/// Snap `h` to the top / bottom half. Mirrors Win10's Win+Up /
+/// Win+Down tile chords. Together with SnapLeft / SnapRight
+/// gives a complete four-direction tile keyboard surface.
+void WindowSnapTop(WindowHandle h);
+void WindowSnapBottom(WindowHandle h);
+
 /// Per-window opacity, 0..255. 0xFF = fully opaque (default).
 /// Lower values fade the window via a post-paint black-alpha
 /// overlay — fake-transparency cue without a real compositor
