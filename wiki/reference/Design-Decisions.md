@@ -8471,3 +8471,71 @@ a real C++ caller now goes through its FFI.
   Future Rust work is either (a) expanding an existing
   production crate's FFI surface or (b) a new crate landing
   with its first real C++ caller.
+
+## 2026-05-12 — DuetFS auto-symlink resolution + APC three-arg fidelity
+
+- **Scope:**
+  - `kernel/fs/duetfs/src/ops.rs`, `kernel/fs/duetfs/src/fs.rs`,
+    `kernel/fs/duetfs/src/ffi.rs`, `kernel/fs/duetfs/include/duetfs.h`,
+    `kernel/fs/duetfs.cpp` (auto-symlink resolution).
+  - `kernel/proc/process.h`, `kernel/subsystems/win32/apc_syscall.cpp`,
+    `kernel/subsystems/win32/apc_selftest.cpp`,
+    `kernel/syscall/syscall.h`, `userland/libs/ntdll/ntdll.c`,
+    `userland/libs/kernel32/kernel32.c` (APC SA1/SA2).
+- **Decision:**
+  1. `Fs::lookup_path` now follows symbolic links at **intermediate**
+     path components transparently (POSIX `lstat` semantics) and
+     stops at the final symlink so `readlink` keeps a node to read.
+     A new `Fs::lookup_path_follow` / `duetfs_lookup_follow` FFI
+     resolves the final component too (POSIX `stat`). Both cap the
+     traversal at `MAX_SYMLINK_HOPS = 8` and surface
+     `FsError::SymlinkLoop` / `kStatusSymlinkLoop = 16` on cyclic /
+     over-deep chains. The path-rewrite scratch buffer is 4 KiB and
+     also clamps oversized rewrites to the same error.
+  2. `Process::ApcSlot` grew `arg1` / `arg2` fields holding
+     `SystemArgument1` / `SystemArgument2` for the Nt-style 3-arg
+     APC contract. `SYS_QUEUE_USER_APC` now reads them from
+     r10 / r8; `SYS_DRAIN_USER_APC` writes them through optional
+     user-pointer sinks on rdx / r10, so binaries built against the
+     original 2-pointer ABI (`rdi=&pfn, rsi=&data`) continue to
+     work without code changes. `kernel32!win32_drain_apc_queue`
+     calls the routine through a 3-arg `PIO_APC_ROUTINE` shape
+     (`pfn(NormalContext, SA1, SA2)`) — PAPCFUNC callees ignore
+     the trailing register inputs per the Microsoft x64 ABI, so
+     `kernel32!QueueUserAPC` callers that zero r10 / r8 are
+     unaffected. `ntdll!NtQueueApcThread` /
+     `NtQueueApcThreadEx` now route all five SDK args through the
+     kernel queue (was three).
+- **Why:**
+  - Symlink chains are unavoidable once the FS hosts more than one
+    PE drop (the typical Windows install pattern relies on
+    intermediate symlink-into-system32-equivalent paths). Without
+    auto-resolution every caller would re-implement the
+    `readlink` + retry loop locally; with auto-resolution the
+    failure mode is one bounded loop instead of N unbounded ones.
+  - The `SystemArgument1/2` gap was bleeding into NT-shaped APC
+    callers that depend on the three-arg `PIO_APC_ROUTINE`
+    contract. Storing the extra two words in the kernel slot and
+    threading them through the drain path closes the gap without
+    breaking single-arg PAPCFUNC delivery, since the x64 ABI puts
+    each arg in a separate register.
+- **What it rules out / defers:**
+  - **Symlink follow on intermediate components is now mandatory** —
+    callers that want the old "stop at the first symlink" behaviour
+    have no syscall today. A future slice can add an `LFLAG_NOFOLLOW`
+    bit on a lookup variant if a workload demands it.
+  - **The legacy user-space APC overflow queue stays 1-arg.** It
+    is reachable only from `kernel32!QueueUserAPC` (single-`ulData`),
+    so the omission is structural rather than missing.
+  - **Cross-process APC delivery is still GAP.** Same-process
+    targeting covers today's workloads; cross-process needs a
+    target-side wakeup IPI + per-thread kernel APC list and is
+    its own slice.
+- **Revisit when:**
+  - A workload generates real-world symlink chains > 8 hops
+    legitimately (rare on POSIX; SYMLOOP_MAX = 8 is the Linux
+    default, so a higher cap should be a deliberate decision).
+  - The first NT-shaped APC consumer ships and exposes SA1 / SA2
+    semantics that the kernel slot currently stores verbatim.
+- **Related roadmap track(s):** Storage / filesystem (DuetFS
+  follow-ups), Track 8 (Scheduler / APC).

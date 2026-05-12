@@ -16,6 +16,7 @@ first Rust subsystem in the kernel. v3 ships:
 - read / write (with auto-grow that appends inline extents — up to 8 per node)
 - truncate (grow + shrink; shrink frees full tail blocks and zeroes retained stale ranges)
 - **symbolic links** (`create_symlink` / `readlink`, target stored inline up to 1 KiB)
+- **auto-symlink resolution** in `lookup_path` (POSIX-`lstat`-style — intermediate links followed transparently, final left as-is for `readlink`); `duetfs_lookup_follow` is the POSIX-`stat`-style variant that also resolves the final component. Cycle detection caps the chain at `MAX_SYMLINK_HOPS = 8` and surfaces `kStatusSymlinkLoop`.
 - **hard links** (`link`, with `link_count` refcount on every node; unlink decrements, only frees on 0)
 - **fsck** with per-block CRC verification, link_count drift detection, repair
 - **read-time CRC verification** for file, symlink-target, directory, and xattr data blocks
@@ -46,7 +47,7 @@ slice-defining workload makes them earn their complexity.
   - `src/ops_dir.rs` — directory + extent helpers (`find_in_dir / dir_add_child / dir_remove_child / grow_file`).
   - `src/path.rs` — path iterator (same shape as `kernel/fs/vfs.h`).
   - `src/mkfs.rs` — formats an empty image with a root dir.
-  - `src/ffi.rs` — C ABI surface (`duetfs_probe / duetfs_mkfs / duetfs_lookup / duetfs_read_file / duetfs_write_at / duetfs_create_path / duetfs_unlink_path / duetfs_truncate`).
+  - `src/ffi.rs` — C ABI surface (`duetfs_probe / duetfs_mkfs / duetfs_lookup / duetfs_lookup_follow / duetfs_read_file / duetfs_write_at / duetfs_create_path / duetfs_unlink_path / duetfs_truncate`).
   - `include/duetfs.h` — hand-written C header (mirrored against `ffi.rs`).
 - `kernel/fs/duetfs.{h,cpp}` — kernel-side adapter, `DuetFsBoot`, `DuetFsSelfTest`.
 - `kernel/fs/duetfs_block_dev.cpp` — `Device` builder helpers (memory + block-handle backed).

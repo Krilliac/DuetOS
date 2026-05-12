@@ -1813,21 +1813,30 @@ enum SyscallNumber : u64
     // is GAP — same-process is the only contract today.
     //   rdi = u64 target_tid          // 0 / -2 / current tid = self
     //   rsi = u64 pfn                  // user-mode PAPCFUNC VA
-    //   rdx = u64 data                 // ulData passed to pfn
+    //   rdx = u64 data                 // NormalContext (1st pfn arg)
+    //   r10 = u64 arg1                 // SystemArgument1 (2nd pfn arg)
+    //   r8  = u64 arg2                 // SystemArgument2 (3rd pfn arg)
     // Returns 0 on success, (u64)-1 on table-full / cross-process
     // / unknown tid. Cap-gated on kCapSpawnThread (the same gate
     // that lets the caller create a thread it could otherwise
-    // QueueUserAPC against).
+    // QueueUserAPC against). Single-arg callers (legacy
+    // QueueUserAPC) leave r10/r8 zeroed; the kernel stores them
+    // verbatim and the drain path copies them back regardless.
     SYS_QUEUE_USER_APC = 187,
 
     // SYS_DRAIN_USER_APC — pop one APC targeted at the calling
     // task. Drained in registration order. Caller invokes the
-    // returned (pfn, data) from user mode after this syscall
-    // returns; the kernel does not invoke user code.
+    // returned (pfn, data, arg1, arg2) from user mode after this
+    // syscall returns; the kernel does not invoke user code.
     //   rdi = u64* user out_pfn        // VA written on success
     //   rsi = u64* user out_data       // VA written on success
+    //   rdx = u64* user out_arg1       // NULL = skip (legacy callers)
+    //   r10 = u64* user out_arg2       // NULL = skip (legacy callers)
     // Returns 1 if an APC was drained, 0 if the queue was empty
-    // for the caller, (u64)-1 on bad user pointer.
+    // for the caller, (u64)-1 on bad user pointer. The pfn / data
+    // out pointers are mandatory; arg1 / arg2 are optional so
+    // legacy callers built against the original 2-pointer ABI
+    // continue to work without modification.
     SYS_DRAIN_USER_APC = 188,
 
     // SYS_PRIORITY_CLASS — get/set the calling process's Win32

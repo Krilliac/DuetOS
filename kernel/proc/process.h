@@ -1122,8 +1122,10 @@ struct Process
     struct ApcSlot
     {
         u64 target_tid; // sched::Task::id of the destination
-        u64 pfn;        // user-mode callback VA (PAPCFUNC)
-        u64 data;       // ulData passed to pfn
+        u64 pfn;        // user-mode callback VA (PAPCFUNC / PIO_APC_ROUTINE)
+        u64 data;       // NormalContext / ulData (1st arg passed to pfn)
+        u64 arg1;       // SystemArgument1 — Nt-style 3-arg APC payload
+        u64 arg2;       // SystemArgument2 — Nt-style 3-arg APC payload
         u8 in_use;      // 1 = pending, 0 = empty
         u8 _pad[7];
     };

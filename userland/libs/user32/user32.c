@@ -2291,6 +2291,21 @@ __declspec(dllexport) BOOL Beep(DWORD freq, DWORD dur)
 #define USER32_MF_POPUP 0x0010u
 #define USER32_MF_SEPARATOR 0x0800u
 
+/* TPM_* flag bits — mirror kTpFlag* in
+ * kernel/subsystems/win32/window_syscall.cpp. The kernel honours
+ * RETURNCMD / NONOTIFY / *ALIGN; other bits are accepted but
+ * inert in v0 (e.g. TPM_LEFTBUTTON / TPM_RIGHTBUTTON only matter
+ * once the mouse-reader filters menu activation by which button
+ * fired the click, which still defaults to left). */
+#define USER32_TPM_LEFTBUTTON 0x0000u
+#define USER32_TPM_RIGHTBUTTON 0x0002u
+#define USER32_TPM_LEFTALIGN 0x0000u
+#define USER32_TPM_CENTERALIGN 0x0004u
+#define USER32_TPM_RIGHTALIGN 0x0008u
+#define USER32_TPM_TOPALIGN 0x0000u
+#define USER32_TPM_VCENTERALIGN 0x0010u
+#define USER32_TPM_BOTTOMALIGN 0x0020u
+#define USER32_TPM_NONOTIFY 0x0080u
 #define USER32_TPM_RETURNCMD 0x0100u
 
 /* Kernel mirror — must agree with kMenuItemFlag* in

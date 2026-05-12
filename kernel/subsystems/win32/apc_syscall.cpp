@@ -5,9 +5,14 @@
  * (16 entries, see process.h). SYS_QUEUE_USER_APC writes into the
  * TARGET task's process queue; SYS_DRAIN_USER_APC pops the first
  * entry whose `target_tid` matches the calling task. The kernel
- * never invokes the user-mode pfn — it only stages the (pfn, data)
- * pair so the caller can call it from ring 3 after returning from
- * SYS_DRAIN_USER_APC.
+ * never invokes the user-mode pfn — it only stages the
+ * (pfn, NormalContext, SystemArgument1, SystemArgument2) tuple so
+ * the caller can call it from ring 3 after returning from
+ * SYS_DRAIN_USER_APC. Single-argument PAPCFUNC callers leave the
+ * SA1 / SA2 register inputs zeroed and the SA1 / SA2 user-pointer
+ * outputs at NULL — the kernel stores and copies-back whatever
+ * was passed, so 1-arg and 3-arg shapes share the slot table
+ * without an ABI fork.
  *
  * Cross-process delivery is GAP: SYS_QUEUE_USER_APC requires the
  * target task's owning Process to match the caller. NtQueueApcThread
@@ -69,6 +74,13 @@ void DoQueueUserApc(arch::TrapFrame* frame)
     u64 target_tid = frame->rdi;
     const u64 pfn = frame->rsi;
     const u64 data = frame->rdx;
+    // Nt-style three-arg APC payload — SystemArgument1 / SystemArgument2.
+    // Legacy QueueUserAPC callers leave r10/r8 zeroed (they only
+    // pass rdi/rsi/rdx); the kernel stores whatever was passed and
+    // hands it back on drain, so single-arg callers remain wire-
+    // compatible without code changes.
+    const u64 arg1 = frame->r10;
+    const u64 arg2 = frame->r8;
 
     if (pfn == 0)
     {
@@ -109,6 +121,8 @@ void DoQueueUserApc(arch::TrapFrame* frame)
             target_proc->apc_slots[i].target_tid = target_tid;
             target_proc->apc_slots[i].pfn = pfn;
             target_proc->apc_slots[i].data = data;
+            target_proc->apc_slots[i].arg1 = arg1;
+            target_proc->apc_slots[i].arg2 = arg2;
             target_proc->apc_slots[i].in_use = 1;
             frame->rax = 0;
             return;
@@ -132,6 +146,13 @@ void DoDrainUserApc(arch::TrapFrame* frame)
 
     const u64 user_pfn_out = frame->rdi;
     const u64 user_data_out = frame->rsi;
+    // SystemArgument1 / SystemArgument2 sinks — optional. NULL
+    // means "drop"; the original SYS_DRAIN_USER_APC contract took
+    // only pfn + data and we keep that path working by treating
+    // the new outs as opt-in. Legacy kernel32!win32_drain_apc_queue
+    // callers can ride the same syscall without an ABI fork.
+    const u64 user_arg1_out = frame->rdx;
+    const u64 user_arg2_out = frame->r10;
     if (user_pfn_out == 0 || user_data_out == 0)
     {
         frame->rax = kBadResult;
@@ -147,11 +168,15 @@ void DoDrainUserApc(arch::TrapFrame* frame)
         {
             const u64 pfn = caller->apc_slots[i].pfn;
             const u64 data = caller->apc_slots[i].data;
+            const u64 arg1 = caller->apc_slots[i].arg1;
+            const u64 arg2 = caller->apc_slots[i].arg2;
             // Free the slot BEFORE copying out so a faulting copy
             // doesn't strand the entry in the queue.
             caller->apc_slots[i].in_use = 0;
             caller->apc_slots[i].pfn = 0;
             caller->apc_slots[i].data = 0;
+            caller->apc_slots[i].arg1 = 0;
+            caller->apc_slots[i].arg2 = 0;
             caller->apc_slots[i].target_tid = 0;
 
             if (!::duetos::mm::CopyToUser(reinterpret_cast<void*>(user_pfn_out), &pfn, sizeof(pfn)) ||
@@ -161,6 +186,26 @@ void DoDrainUserApc(arch::TrapFrame* frame)
                 // the failure so the caller doesn't loop forever.
                 frame->rax = kBadResult;
                 return;
+            }
+            // SA1 / SA2 are opt-in — only copy if the caller passed
+            // a non-NULL sink. A faulting write here mirrors the
+            // pfn/data failure semantics: surface kBadResult so the
+            // caller doesn't loop forever on a half-delivered APC.
+            if (user_arg1_out != 0)
+            {
+                if (!::duetos::mm::CopyToUser(reinterpret_cast<void*>(user_arg1_out), &arg1, sizeof(arg1)))
+                {
+                    frame->rax = kBadResult;
+                    return;
+                }
+            }
+            if (user_arg2_out != 0)
+            {
+                if (!::duetos::mm::CopyToUser(reinterpret_cast<void*>(user_arg2_out), &arg2, sizeof(arg2)))
+                {
+                    frame->rax = kBadResult;
+                    return;
+                }
             }
             frame->rax = 1;
             return;
