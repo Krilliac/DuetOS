@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "net/hci_rust/include/hci_rust.h"
 
 namespace duetos::net::bluetooth
 {
@@ -162,21 +163,17 @@ bool HciParseReadLocalVersion(const u8* buf, u32 len, HciReadLocalVersion* out)
     if (out == nullptr)
         return false;
     *out = {};
-    if (buf == nullptr || len < 9)
+    if (buf == nullptr)
         return false;
-    // §7.4.1 return parameters (9 bytes):
-    //   [0] Status
-    //   [1] HCI_Version
-    //   [2..3] HCI_Revision (LE u16)
-    //   [4] LMP_Version
-    //   [5..6] Manufacturer_Name (LE u16)
-    //   [7..8] LMP_Subversion (LE u16)
-    out->status = buf[0];
-    out->hci_version = buf[1];
-    out->hci_revision = ReadLeU16(buf + 2);
-    out->lmp_version = buf[4];
-    out->manufacturer_name = ReadLeU16(buf + 5);
-    out->lmp_subversion = ReadLeU16(buf + 7);
+    ::duetos::net::hci_rust::DuetosHciReadLocalVersion r{};
+    if (!::duetos::net::hci_rust::duetos_hci_parse_read_local_version(buf, len, &r) || r.ok == 0)
+        return false;
+    out->status = r.status;
+    out->hci_version = r.hci_version;
+    out->hci_revision = r.hci_revision;
+    out->lmp_version = r.lmp_version;
+    out->manufacturer_name = r.manufacturer_name;
+    out->lmp_subversion = r.lmp_subversion;
     return true;
 }
 
@@ -185,14 +182,14 @@ bool HciParseReadBdAddr(const u8* buf, u32 len, HciReadBdAddr* out)
     if (out == nullptr)
         return false;
     *out = {};
-    if (buf == nullptr || len < 7)
+    if (buf == nullptr)
         return false;
-    // §7.4.6 return parameters (7 bytes):
-    //   [0]    Status
-    //   [1..6] BD_ADDR (6 bytes, little-endian)
-    out->status = buf[0];
+    ::duetos::net::hci_rust::DuetosHciReadBdAddr r{};
+    if (!::duetos::net::hci_rust::duetos_hci_parse_read_bd_addr(buf, len, &r) || r.ok == 0)
+        return false;
+    out->status = r.status;
     for (u32 i = 0; i < 6; ++i)
-        out->bd_addr[i] = buf[1 + i];
+        out->bd_addr[i] = r.bd_addr[i];
     return true;
 }
 

@@ -3,6 +3,7 @@
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
 #include "log/klog.h"
+#include "net/wifi80211_rust/include/wifi80211_rust.h"
 
 namespace duetos::net::wireless
 {
@@ -13,19 +14,6 @@ namespace
 u16 ReadLe16(const u8* buf, u32 off)
 {
     return static_cast<u16>(buf[off]) | static_cast<u16>(static_cast<u16>(buf[off + 1]) << 8);
-}
-
-u32 ReadLe32(const u8* buf, u32 off)
-{
-    return static_cast<u32>(buf[off]) | (static_cast<u32>(buf[off + 1]) << 8) | (static_cast<u32>(buf[off + 2]) << 16) |
-           (static_cast<u32>(buf[off + 3]) << 24);
-}
-
-u64 ReadLe64(const u8* buf, u32 off)
-{
-    u64 lo = ReadLe32(buf, off);
-    u64 hi = ReadLe32(buf, off + 4);
-    return lo | (hi << 32);
 }
 
 // Encode a 4-byte cipher/AKM suite (3-byte OUI + 1-byte type) as
@@ -239,41 +227,54 @@ const char* WirelessSecurityName(WirelessSecurity s)
     if (frame_size < kFrameMacHeaderBytes + kBeaconFixedBodyBytes)
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
 
-    parsed->frame_control = ReadLe16(frame, 0);
-    if (FcType(parsed->frame_control) != FrameType::Management)
+    // First gate: the Rust frame-header walker rejects extension
+    // frames + truncated headers in one shot. Beacon/Probe-Response
+    // are management frames (type=0); the subtype check happens
+    // immediately below.
+    ::duetos::net::wifi80211::DuetosWifiFrameHeader rust_hdr{};
+    if (!::duetos::net::wifi80211::duetos_wifi80211_parse_frame_header(frame, frame_size, &rust_hdr) ||
+        rust_hdr.ok == 0)
         return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
 
-    const u8 sub = FcSubtype(parsed->frame_control);
-    parsed->subtype = static_cast<MgmtSubtype>(sub);
+    parsed->frame_control = ReadLe16(frame, 0);
+    if (rust_hdr.frame_type != 0)
+        return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
+
+    parsed->subtype = static_cast<MgmtSubtype>(rust_hdr.frame_subtype);
     if (parsed->subtype != MgmtSubtype::Beacon && parsed->subtype != MgmtSubtype::ProbeResponse)
         return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
 
-    // MAC header: addr1 = 4..10 (DA, broadcast for beacon),
-    // addr2 = 10..16 (source / TA), addr3 = 16..22 (BSSID).
+    // MAC header: addr1 = broadcast for beacon, addr2 = source,
+    // addr3 = BSSID. The Rust walker has already validated the
+    // 24-byte minimum length.
     for (u32 i = 0; i < 6; ++i)
     {
-        parsed->source[i] = frame[10 + i];
-        parsed->bssid[i] = frame[16 + i];
+        parsed->source[i] = rust_hdr.addr2[i];
+        parsed->bssid[i] = rust_hdr.addr3[i];
     }
 
-    // Fixed body prefix.
-    const u32 body_off = kFrameMacHeaderBytes;
-    parsed->timestamp = ReadLe64(frame, body_off);
-    parsed->beacon_interval = ReadLe16(frame, body_off + 8);
-    parsed->capability_info = ReadLe16(frame, body_off + 10);
-
-    // IE walk.
-    u32 off = body_off + kBeaconFixedBodyBytes;
+    // Fixed body prefix: also from Rust.
+    ::duetos::net::wifi80211::DuetosWifiBeaconBody rust_body{};
+    if (!::duetos::net::wifi80211::duetos_wifi80211_parse_beacon_body(frame, frame_size, &rust_body) ||
+        rust_body.ok == 0)
+        return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
+    parsed->timestamp = rust_body.timestamp;
+    parsed->beacon_interval = rust_body.beacon_interval;
+    parsed->capability_info = rust_body.capability_info;
+    // IE walk — each step goes through the Rust IE decoder so a
+    // malformed length field can't slip past the bounds check.
+    u32 off = rust_body.ie_list_offset;
     while (off + 2 <= frame_size)
     {
-        const u8 id = frame[off];
-        const u8 len = frame[off + 1];
-        if (off + 2 + static_cast<u32>(len) > frame_size)
+        ::duetos::net::wifi80211::DuetosWifiIe rust_ie{};
+        if (!::duetos::net::wifi80211::duetos_wifi80211_parse_ie(frame, frame_size, off, &rust_ie) || rust_ie.ok == 0)
         {
             // Truncated IE — stop walking but keep what we have.
             break;
         }
-        const u8* payload = frame + off + 2;
+        const u8 id = rust_ie.id;
+        const u8 len = rust_ie.len;
+        const u8* payload = frame + rust_ie.payload_offset;
         ++parsed->ie_count;
 
         switch (id)

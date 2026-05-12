@@ -1,33 +1,21 @@
 /*
  * DuetOS — ext4 read-only filesystem driver: implementation.
  *
- * Companion to ext4.h — see there for the mount struct and the
- * read-only API exposed via VFS.
- *
- * WHAT
- *   Mounts an ext4 partition (read-only at v0), parses the
- *   superblock + block-group descriptors, and exposes inode
- *   lookups + file reads. Supports the multi-block-directory
- *   variant (extent-mapped dir blocks instead of linear).
- *
- * HOW
- *   Inode walk: superblock -> bgdesc -> inode table -> inode.
- *   File reads follow the extent tree at depth >= 1 (linear
- *   block-list at depth 0). Each block read goes through the
- *   block-layer cache.
- *
- *   No write support at v0. Mount mode is the kernel's
- *   primary interop with Linux data partitions; write would
- *   require journal handling which is a large slice on its
- *   own.
+ * Byte parsing for the superblock, group descriptor, inode record,
+ * extent header / leaf / index, and linux_dirent records lives in
+ * Rust (`kernel/fs/ext4_rust`). This C++ TU owns block I/O,
+ * scratch buffers, the per-volume registry, the depth>0 extent
+ * tree DFS (because it needs to dispatch real block reads against
+ * scratch), and logging.
  */
 
 #include "fs/ext4.h"
 
 #include "arch/x86_64/serial.h"
-#include "log/klog.h"
 #include "diag/log_names.h"
 #include "drivers/storage/block.h"
+#include "fs/ext4_rust/include/ext4_rust.h"
+#include "log/klog.h"
 
 namespace duetos::fs::ext4
 {
@@ -35,79 +23,22 @@ namespace duetos::fs::ext4
 namespace
 {
 
+using duetos::fs::ext4_rust::DuetosExt4DirEntry;
+using duetos::fs::ext4_rust::DuetosExt4Extent;
+using duetos::fs::ext4_rust::DuetosExt4ExtentHeader;
+using duetos::fs::ext4_rust::DuetosExt4ExtentIndex;
+using duetos::fs::ext4_rust::DuetosExt4GroupDesc;
+using duetos::fs::ext4_rust::DuetosExt4Inode;
+using duetos::fs::ext4_rust::DuetosExt4Superblock;
+
 constinit Volume g_volumes[kMaxVolumes] = {};
 u32 g_volume_count = 0;
 
-// Static scratch buffer — kernel stack isn't in the direct map
-// and BlockDeviceRead requires a direct-mapped destination.
-// 1024 bytes covers the ext4 superblock; alignas(16) matches
-// NVMe / AHCI DMA alignment expectations.
-alignas(16) constinit u8 g_scratch[1024] = {};
-// Block scratch — 4 KiB covers the common block size (4 KiB) in one
-// read. Used for group descriptor table + inode table reads, and for
-// directory data blocks during the extent-tree walk.
+alignas(16) constinit u8 g_scratch[2048] = {};
 alignas(16) constinit u8 g_block_scratch[4096] = {};
-// Extent-node scratch — held distinct from g_block_scratch so an
-// interior node stays valid across the leaf-data reads it dispatches.
 alignas(16) constinit u8 g_extent_node_scratch[4096] = {};
 
-// Pull a little-endian u16/u32/u64 out of a raw byte buffer.
-inline u16 LeU16(const u8* p)
-{
-    return u16(p[0]) | (u16(p[1]) << 8);
-}
-inline u32 LeU32(const u8* p)
-{
-    return u32(p[0]) | (u32(p[1]) << 8) | (u32(p[2]) << 16) | (u32(p[3]) << 24);
-}
-
-// Superblock field offsets (relative to the superblock start, NOT
-// the LBA start). See include/linux/ext4_fs.h / e2fsprogs.
-constexpr u64 kSbOffInodeCount = 0x00;
-constexpr u64 kSbOffBlockCountLo = 0x04;
-constexpr u64 kSbOffFirstDataBlock = 0x14;
-constexpr u64 kSbOffLogBlockSize = 0x18; // block_size = 1024 << this
-constexpr u64 kSbOffBlocksPerGroup = 0x20;
-constexpr u64 kSbOffInodesPerGroup = 0x28;
-constexpr u64 kSbOffMagic = 0x38;
-constexpr u64 kSbOffRevLevel = 0x4C;
-constexpr u64 kSbOffInodeSize = 0x58; // u16; 128 / 256
-constexpr u64 kSbOffFeatureCompat = 0x5C;
-constexpr u64 kSbOffFeatureIncompat = 0x60;
-constexpr u64 kSbOffFeatureRoCompat = 0x64;
-constexpr u64 kSbOffVolumeName = 0x78; // 16 bytes
-
-// Group-descriptor offsets (classic 32-byte layout; 64-bit FS also
-// has 64-byte entries, which we treat identically for the low 32).
-constexpr u64 kGdBlockBitmapLo = 0x00;
-constexpr u64 kGdInodeBitmapLo = 0x04;
-constexpr u64 kGdInodeTableLo = 0x08;
-constexpr u64 kGdFreeBlocksLo = 0x0C;
-constexpr u64 kGdFreeInodesLo = 0x0E;
-constexpr u64 kGdUsedDirsLo = 0x10;
-
-// Inode field offsets.
-constexpr u64 kInoMode = 0x00;       // u16
-constexpr u64 kInoUid = 0x02;        // u16
-constexpr u64 kInoSizeLo = 0x04;     // u32
-constexpr u64 kInoAtime = 0x08;      // u32
-constexpr u64 kInoCtime = 0x0C;      // u32
-constexpr u64 kInoMtime = 0x10;      // u32
-constexpr u64 kInoGid = 0x18;        // u16
-constexpr u64 kInoLinksCount = 0x1A; // u16
-constexpr u64 kInoBlocksLo = 0x1C;   // u32
-constexpr u64 kInoFlags = 0x20;      // u32
-constexpr u64 kInoBlock0 = 0x28;     // first of i_block[15] / extent header
-constexpr u64 kInoSizeHi = 0x6C;     // u32 (large_file feature)
-
-constexpr u32 kInodeFlagExtents = 0x80000; // EXT4_EXTENTS_FL
-constexpr u16 kExtentHeaderMagic = 0xF30A;
 constexpr u32 kRootInodeNumber = 2;
-constexpr u32 kFeatureRoCompatLargeFile = 0x02;
-
-// Classify a probe result as ext2 / ext3 / ext4 from feature bits.
-// FEATURE_INCOMPAT_EXTENTS (0x40) is the ext4 signature;
-// FEATURE_COMPAT_HAS_JOURNAL (0x04) upgrades ext2 -> ext3.
 constexpr u32 kFeatureIncompatExtents = 0x40;
 constexpr u32 kFeatureCompatHasJournal = 0x04;
 
@@ -127,8 +58,6 @@ void ByteZero(void* dst, u64 n)
         d[i] = 0;
 }
 
-// Read `count` sectors beginning at `lba` into g_block_scratch.
-// Returns false on error or if `bytes` exceeds the scratch size.
 bool ReadIntoBlockScratch(u32 block_handle, u64 lba, u32 sector_size, u64 bytes)
 {
     if (sector_size == 0 || bytes == 0 || bytes > sizeof(g_block_scratch))
@@ -137,53 +66,6 @@ bool ReadIntoBlockScratch(u32 block_handle, u64 lba, u32 sector_size, u64 bytes)
     if (count == 0 || (bytes % sector_size) != 0)
         return false;
     return drivers::storage::BlockDeviceRead(block_handle, lba, count, g_block_scratch) >= 0;
-}
-
-// Decode group descriptor 0 from a scratch buffer where the GDT
-// starts. Returns true on success. Only populates the low 32-bit
-// fields; 64-bit FS has upper halves at offset +0x20 which we
-// ignore (the ext4 probe doesn't need them to locate the inode
-// table on < 2^32 volumes, i.e. anything under 16 TiB with 4 KiB
-// blocks).
-bool DecodeGroupDesc0(const u8* buf, GroupDesc* out)
-{
-    out->block_bitmap_block = LeU32(buf + kGdBlockBitmapLo);
-    out->inode_bitmap_block = LeU32(buf + kGdInodeBitmapLo);
-    out->inode_table_block = LeU32(buf + kGdInodeTableLo);
-    out->free_blocks_count = LeU16(buf + kGdFreeBlocksLo);
-    out->free_inodes_count = LeU16(buf + kGdFreeInodesLo);
-    out->used_dirs_count = LeU16(buf + kGdUsedDirsLo);
-    return out->inode_table_block != 0;
-}
-
-// Decode an inode record from the start of `buf`. `ino_size` is
-// the filesystem's on-disk inode size.
-bool DecodeInode(const u8* buf, u16 ino_size, u32 feature_ro_compat, InodeInfo* out)
-{
-    if (ino_size < 0x80)
-        return false;
-    out->mode = LeU16(buf + kInoMode);
-    out->uid = LeU16(buf + kInoUid);
-    const u32 size_lo = LeU32(buf + kInoSizeLo);
-    u64 size = size_lo;
-    if ((feature_ro_compat & kFeatureRoCompatLargeFile) && ino_size >= 0x70)
-        size |= u64(LeU32(buf + kInoSizeHi)) << 32;
-    out->size_bytes = size;
-    out->atime = LeU32(buf + kInoAtime);
-    out->ctime = LeU32(buf + kInoCtime);
-    out->mtime = LeU32(buf + kInoMtime);
-    out->gid = LeU16(buf + kInoGid);
-    out->links_count = LeU16(buf + kInoLinksCount);
-    out->blocks_lo = LeU32(buf + kInoBlocksLo);
-    out->flags = LeU32(buf + kInoFlags);
-    out->uses_extents = (out->flags & kInodeFlagExtents) != 0;
-    out->block0_magic = LeU16(buf + kInoBlock0);
-    // Capture the full 60-byte i_block[15] region so a subsequent
-    // directory or inline-data walk doesn't need to re-read the
-    // inode from disk.
-    for (u32 i = 0; i < 60; ++i)
-        out->i_block[i] = buf[kInoBlock0 + i];
-    return true;
 }
 
 const char* InodeModeType(u16 mode)
@@ -233,72 +115,49 @@ const char* Ext4FileTypeName(u8 ft)
     }
 }
 
-// Extent header / entry offsets.
-constexpr u64 kEhMagic = 0x00;
-constexpr u64 kEhEntries = 0x02;
-constexpr u64 kEhMax = 0x04;
-constexpr u64 kEhDepth = 0x06;
-// Leaf-extent fields. (ee_block at offset 0 — tracked in the
-// comment but we only need length + phys for a single-extent walk.)
-constexpr u64 kEeLength = 0x04;
-constexpr u64 kEePhysHi = 0x06;
-constexpr u64 kEePhysLo = 0x08;
-// Index-entry fields (depth>0 nodes). ei_block at offset 0 (logical
-// span — unused here), ei_leaf_lo + ei_leaf_hi point at the next
-// node's physical block.
-constexpr u64 kEiLeafLo = 0x04;
-constexpr u64 kEiLeafHi = 0x08;
-
-// Parse one directory block's worth of linux_dirent records into
-// `out_entries[]`. `block` points to the start of the block;
-// `block_size` is its byte length. Returns the number of entries
-// appended.
+// Walk one directory block's linux_dirent records via the Rust
+// FFI. Appends entries to `out_entries[]` past `already`.
 u32 ParseDirBlock(const u8* block, u32 block_size, Ext4DirEntry* out_entries, u32 cap, u32 already)
 {
     u32 produced = already;
     u32 off = 0;
     while (off + 8 <= block_size && produced < cap)
     {
-        const u32 inode = LeU32(block + off + 0);
-        const u16 rec_len = LeU16(block + off + 4);
-        const u8 name_len = block[off + 6];
-        const u8 file_type = block[off + 7];
-        if (rec_len < 8 || rec_len + off > block_size || (rec_len & 0x3) != 0)
+        DuetosExt4DirEntry rec{};
+        const u32 consumed = duetos::fs::ext4_rust::duetos_ext4_parse_dirent(block, block_size, off, &rec);
+        if (consumed == 0)
             break;
-        // inode==0 means "unused slot" — skip its name but honour rec_len.
-        if (inode != 0 && name_len > 0)
+        if (rec.ok != 0)
         {
             Ext4DirEntry& e = out_entries[produced++];
-            e.inode = inode;
-            e.file_type = file_type;
-            const u32 copy = (name_len < sizeof(e.name) - 1) ? name_len : u32(sizeof(e.name) - 1);
+            e.inode = rec.inode;
+            e.file_type = rec.file_type;
+            const u32 copy = (rec.name_len < sizeof(e.name) - 1) ? u32(rec.name_len) : u32(sizeof(e.name) - 1);
             for (u32 i = 0; i < copy; ++i)
-                e.name[i] = char(block[off + 8 + i]);
+                e.name[i] = char(block[rec.name_offset + i]);
             e.name[copy] = '\0';
         }
-        off += rec_len;
+        off += consumed;
     }
     return produced;
 }
 
-// Process leaf extents from a buffer that begins with the 12-byte
-// extent header. `entries` is the already-capped leaf count. Each
-// leaf-data block is read into g_block_scratch and parsed for
-// linux_dirent records. `produced` is updated; `any_failed` is
-// raised on a block-read error so the caller can flag the log line.
-void ProcessLeafExtents(Volume& v, u32 sector_size, const u8* hdr, u16 entries, u32& produced, bool& any_failed)
+void ProcessLeafExtents(Volume& v, u32 sector_size, const u8* hdr_buf, u32 hdr_buf_len, u16 entries, u32& produced,
+                        bool& any_failed)
 {
     for (u16 ei = 0; ei < entries && produced < kMaxRootDirEntries; ++ei)
     {
-        const u8* ext = hdr + 12 + u64(ei) * 12;
-        const u16 len_blocks = LeU16(ext + kEeLength);
-        const u64 phys = (u64(LeU16(ext + kEePhysHi)) << 32) | LeU32(ext + kEePhysLo);
-        if (len_blocks == 0 || phys == 0)
-            continue;
-
-        for (u16 bi = 0; bi < len_blocks && produced < kMaxRootDirEntries; ++bi)
+        DuetosExt4Extent ext{};
+        if (!duetos::fs::ext4_rust::duetos_ext4_parse_extent_leaf(hdr_buf, hdr_buf_len, ei, &ext))
         {
-            const u64 block_phys = phys + bi;
+            any_failed = true;
+            break;
+        }
+        if (ext.length_blocks == 0 || ext.physical_block == 0)
+            continue;
+        for (u16 bi = 0; bi < ext.length_blocks && produced < kMaxRootDirEntries; ++bi)
+        {
+            const u64 block_phys = ext.physical_block + bi;
             const u64 lba = block_phys * v.block_size / sector_size;
             if (!ReadIntoBlockScratch(v.block_handle, lba, sector_size, v.block_size))
             {
@@ -315,18 +174,8 @@ void ProcessLeafExtents(Volume& v, u32 sector_size, const u8* hdr, u16 entries, 
     }
 }
 
-// Iterative DFS over an extent tree whose root header is in `root_hdr`
-// (the inode's inline i_block) at depth>=1. `root_count` is the
-// already-capped count of inline index records.
-//
-// Each interior node is read into g_extent_node_scratch (kept distinct
-// from g_block_scratch so a leaf walk dispatched mid-traversal does not
-// clobber the node we are still iterating). The DFS is bounded by
-// `kMaxExtentNodeVisits` to keep a corrupt or hostile tree from
-// looping forever — there is no parent pointer in the on-disk format
-// to detect cycles directly.
-void WalkExtentIndexTree(Volume& v, u32 sector_size, const u8* root_hdr, u16 root_count, u32& produced,
-                         u32& leaves_visited, bool& any_failed)
+void WalkExtentIndexTree(Volume& v, u32 sector_size, const u8* root_buf, u32 root_buf_len, u16 root_count,
+                         u32& produced, u32& leaves_visited, bool& any_failed)
 {
     constexpr u32 kMaxExtentNodeVisits = 64;
     u64 stack[kMaxExtentNodeVisits];
@@ -348,9 +197,13 @@ void WalkExtentIndexTree(Volume& v, u32 sector_size, const u8* root_hdr, u16 roo
 
     for (u16 ei = 0; ei < root_count; ++ei)
     {
-        const u8* idx = root_hdr + 12 + u64(ei) * 12;
-        const u64 phys = (u64(LeU16(idx + kEiLeafHi)) << 32) | LeU32(idx + kEiLeafLo);
-        if (!push(phys))
+        DuetosExt4ExtentIndex idx{};
+        if (!duetos::fs::ext4_rust::duetos_ext4_parse_extent_index(root_buf, root_buf_len, ei, &idx))
+        {
+            any_failed = true;
+            break;
+        }
+        if (!push(idx.leaf_block))
             break;
     }
 
@@ -360,8 +213,6 @@ void WalkExtentIndexTree(Volume& v, u32 sector_size, const u8* root_hdr, u16 roo
         any_failed = true;
         return;
     }
-    // Cap interior-node entries against the on-disk block size so a
-    // malformed entries-count can't walk past the buffer.
     const u16 max_records_per_node = u16((v.block_size - 12) / 12);
 
     u32 visits = 0;
@@ -384,7 +235,9 @@ void WalkExtentIndexTree(Volume& v, u32 sector_size, const u8* root_hdr, u16 roo
             any_failed = true;
             continue;
         }
-        if (LeU16(g_extent_node_scratch + kEhMagic) != kExtentHeaderMagic)
+        DuetosExt4ExtentHeader hdr{};
+        if (!duetos::fs::ext4_rust::duetos_ext4_parse_extent_header(g_extent_node_scratch,
+                                                                    sizeof(g_extent_node_scratch), &hdr))
         {
             arch::SerialWrite("[ext4]   extent node magic mismatch (block=");
             arch::SerialWriteHex(phys);
@@ -392,84 +245,78 @@ void WalkExtentIndexTree(Volume& v, u32 sector_size, const u8* root_hdr, u16 roo
             any_failed = true;
             continue;
         }
-        const u16 child_entries = LeU16(g_extent_node_scratch + kEhEntries);
-        const u16 child_depth = LeU16(g_extent_node_scratch + kEhDepth);
-        const u16 cap_entries = child_entries < max_records_per_node ? child_entries : max_records_per_node;
+        const u16 cap_entries = hdr.entries < max_records_per_node ? hdr.entries : max_records_per_node;
 
-        if (child_depth == 0)
+        if (hdr.depth == 0)
         {
-            ProcessLeafExtents(v, sector_size, g_extent_node_scratch, cap_entries, produced, any_failed);
+            ProcessLeafExtents(v, sector_size, g_extent_node_scratch, sizeof(g_extent_node_scratch), cap_entries,
+                               produced, any_failed);
             ++leaves_visited;
         }
         else
         {
             for (u16 ei = 0; ei < cap_entries; ++ei)
             {
-                const u8* idx = g_extent_node_scratch + 12 + u64(ei) * 12;
-                const u64 child_phys = (u64(LeU16(idx + kEiLeafHi)) << 32) | LeU32(idx + kEiLeafLo);
-                if (!push(child_phys))
+                DuetosExt4ExtentIndex idx{};
+                if (!duetos::fs::ext4_rust::duetos_ext4_parse_extent_index(g_extent_node_scratch,
+                                                                           sizeof(g_extent_node_scratch), ei, &idx))
+                {
+                    any_failed = true;
+                    break;
+                }
+                if (!push(idx.leaf_block))
                     break;
             }
         }
     }
 }
 
-// Walk the root-directory data blocks. Requires `v.root_inode_valid`
-// and that the root inode uses the extent tree (the common ext4
-// layout). Depth==0 walks the up-to-4 inline leaf extents; depth>0
-// descends through interior index nodes via WalkExtentIndexTree,
-// which tops out at 64 node visits to bound a corrupt tree.
 void WalkRootDir(Volume& v)
 {
     if (!v.root_inode_valid || !v.root_inode.uses_extents)
         return;
     const u8* ib = v.root_inode.i_block;
-    if (LeU16(ib + kEhMagic) != kExtentHeaderMagic)
+    DuetosExt4ExtentHeader hdr{};
+    if (!duetos::fs::ext4_rust::duetos_ext4_parse_extent_header(ib, 60, &hdr))
     {
         arch::SerialWrite("[ext4]   root-dir extent header magic mismatch\n");
         return;
     }
-    const u16 entries = LeU16(ib + kEhEntries);
-    const u16 max_entries = LeU16(ib + kEhMax);
-    const u16 depth = LeU16(ib + kEhDepth);
-    if (entries == 0 || max_entries == 0)
+    if (hdr.entries == 0 || hdr.max == 0)
         return;
 
     const u32 sector_size = drivers::storage::BlockDeviceSectorSize(v.block_handle);
     if (sector_size == 0 || v.block_size == 0 || (v.block_size % sector_size) != 0)
         return;
 
-    // i_block holds the 12-byte header followed by up to 4 records
-    // (12 bytes each) — leaf extents at depth==0, index entries at
-    // depth>0.
     constexpr u16 kInlineMaxRecords = 4;
-    const u16 root_count = entries < kInlineMaxRecords ? entries : kInlineMaxRecords;
+    const u16 root_count = hdr.entries < kInlineMaxRecords ? hdr.entries : kInlineMaxRecords;
 
     v.root_dir_entry_count = 0;
     u32 produced = 0;
     u32 leaves_visited = 0;
     bool any_block_failed = false;
 
-    if (depth == 0)
+    if (hdr.depth == 0)
     {
-        ProcessLeafExtents(v, sector_size, ib, root_count, produced, any_block_failed);
+        ProcessLeafExtents(v, sector_size, ib, 60, root_count, produced, any_block_failed);
         leaves_visited = root_count;
     }
     else
     {
-        WalkExtentIndexTree(v, sector_size, ib, root_count, produced, leaves_visited, any_block_failed);
+        WalkExtentIndexTree(v, sector_size, ib, 60, root_count, produced, leaves_visited, any_block_failed);
     }
 
     v.root_dir_entry_count = produced;
 
     arch::SerialWrite("[ext4]   root-dir entries: ");
     arch::SerialWriteHex(v.root_dir_entry_count);
-    arch::SerialWrite(depth == 0 ? " (extents=" : " (depth=");
-    if (depth == 0)
+    arch::SerialWrite(hdr.depth == 0 ? " (extents=" : " (depth=");
+    if (hdr.depth == 0)
         arch::SerialWriteHex(leaves_visited);
     else
     {
-        arch::SerialWriteHex(depth);
+        arch::SerialWriteHex(hdr.depth);
         arch::SerialWrite(" leaves=");
         arch::SerialWriteHex(leaves_visited);
     }
@@ -489,19 +336,12 @@ void WalkRootDir(Volume& v)
     }
 }
 
-// Read the group-descriptor table (group 0) + the root inode, fill
-// the corresponding fields in `v`. Best-effort: failure here just
-// leaves the volume with the probe-only metadata.
 void ReadGroup0AndRootInode(Volume& v)
 {
     const u32 sector_size = drivers::storage::BlockDeviceSectorSize(v.block_handle);
     if (sector_size == 0 || v.block_size == 0)
         return;
 
-    // GDT sits at block `first_data_block + 1`. For 4 KiB blocks
-    // with first_data_block = 0 that's block 1 (LBA 8 on 512-byte
-    // devices); for 1 KiB blocks with first_data_block = 1 that's
-    // block 2 (LBA 4).
     const u64 gdt_block = u64(v.first_data_block) + 1;
     const u64 gdt_lba = gdt_block * v.block_size / sector_size;
     if (!ReadIntoBlockScratch(v.block_handle, gdt_lba, sector_size, v.block_size))
@@ -509,9 +349,17 @@ void ReadGroup0AndRootInode(Volume& v)
         arch::SerialWrite("[ext4]   gdt read failed\n");
         return;
     }
-    if (!DecodeGroupDesc0(g_block_scratch, &v.group0))
+    DuetosExt4GroupDesc gd{};
+    if (!duetos::fs::ext4_rust::duetos_ext4_parse_group_desc0(g_block_scratch, sizeof(g_block_scratch), &gd))
         return;
     v.group0_valid = true;
+    v.group0.block_bitmap_block = gd.block_bitmap_block;
+    v.group0.inode_bitmap_block = gd.inode_bitmap_block;
+    v.group0.inode_table_block = gd.inode_table_block;
+    v.group0.free_blocks_count = gd.free_blocks_count;
+    v.group0.free_inodes_count = gd.free_inodes_count;
+    v.group0.used_dirs_count = gd.used_dirs_count;
+
     arch::SerialWrite("[ext4]   gdt0 block_bitmap=");
     arch::SerialWriteHex(v.group0.block_bitmap_block);
     arch::SerialWrite(" inode_bitmap=");
@@ -526,30 +374,42 @@ void ReadGroup0AndRootInode(Volume& v)
     arch::SerialWriteHex(v.group0.used_dirs_count);
     arch::SerialWrite("\n");
 
-    // Root inode is inode 2 (inodes are 1-based; 1 is reserved for
-    // the defective-blocks list). Inodes-per-group tells us which
-    // group; for inode 2, that's always group 0.
     if (v.inode_size == 0 || v.inodes_per_group == 0)
         return;
     const u32 index_in_group = (kRootInodeNumber - 1) % v.inodes_per_group;
     const u64 byte_offset_in_table = u64(index_in_group) * v.inode_size;
     const u64 inode_table_lba = u64(v.group0.inode_table_block) * v.block_size / sector_size;
-    // Read one block's worth at the inode table start; the root
-    // inode is the second record, well within 4 KiB.
     if (!ReadIntoBlockScratch(v.block_handle, inode_table_lba, sector_size, v.block_size))
     {
         arch::SerialWrite("[ext4]   inode-table read failed\n");
         return;
     }
-    // Guard: the inode must fit within the scratch.
     if (byte_offset_in_table + v.inode_size > v.block_size)
     {
         arch::SerialWrite("[ext4]   root inode outside first block (inode_size skew)\n");
         return;
     }
-    if (!DecodeInode(g_block_scratch + byte_offset_in_table, v.inode_size, v.feature_ro_compat, &v.root_inode))
+    DuetosExt4Inode ino{};
+    if (!duetos::fs::ext4_rust::duetos_ext4_parse_inode(g_block_scratch + byte_offset_in_table,
+                                                        v.block_size - byte_offset_in_table, v.inode_size,
+                                                        v.feature_ro_compat, &ino))
         return;
     v.root_inode_valid = true;
+    v.root_inode.mode = ino.mode;
+    v.root_inode.uid = ino.uid;
+    v.root_inode.size_bytes = ino.size_bytes;
+    v.root_inode.atime = ino.atime;
+    v.root_inode.ctime = ino.ctime;
+    v.root_inode.mtime = ino.mtime;
+    v.root_inode.gid = ino.gid;
+    v.root_inode.links_count = ino.links_count;
+    v.root_inode.blocks_lo = ino.blocks_lo;
+    v.root_inode.flags = ino.flags;
+    v.root_inode.uses_extents = ino.uses_extents != 0;
+    v.root_inode.block0_magic = ino.block0_magic;
+    for (u32 i = 0; i < 60; ++i)
+        v.root_inode.i_block[i] = ino.i_block[i];
+
     arch::SerialWrite("[ext4]   root_inode mode=");
     arch::SerialWriteHex(v.root_inode.mode);
     ::duetos::core::SerialWriteInodeMode(v.root_inode.mode);
@@ -568,7 +428,7 @@ void ReadGroup0AndRootInode(Volume& v)
     {
         arch::SerialWrite(" i_block[0]_magic=");
         arch::SerialWriteHex(v.root_inode.block0_magic);
-        arch::SerialWrite(v.root_inode.block0_magic == kExtentHeaderMagic ? " (valid)" : " (unexpected)");
+        arch::SerialWrite(v.root_inode.block0_magic == 0xF30A ? " (valid)" : " (unexpected)");
     }
     arch::SerialWrite("\n");
 
@@ -583,65 +443,36 @@ void ReadGroup0AndRootInode(Volume& v)
     using ::duetos::core::ErrorCode;
     if (g_volume_count >= kMaxVolumes)
         return Err{ErrorCode::BadState};
-    // Reject obviously invalid block handles before issuing the read —
-    // BlockDeviceRead would log+fail anyway, but rejecting up front
-    // keeps the per-disk error path single-edged.
     if (block_handle >= drivers::storage::BlockDeviceCount())
         return Err{ErrorCode::InvalidArgument};
-    // Read the 1024-byte superblock. ext4 superblock lives at byte
-    // 1024 regardless of block size — LBA 2 on a 512-byte-sector
-    // device. We read 2 sectors (1024 bytes) into the static
-    // scratch.
-    const i32 rc = drivers::storage::BlockDeviceRead(block_handle, kSuperblockLba, 2, g_scratch);
+    // Read enough to cover offset 1024 + 1024-byte superblock = 2048
+    // bytes, which is exactly our scratch.
+    const i32 rc = drivers::storage::BlockDeviceRead(block_handle, 0, 4, g_scratch);
     if (rc < 0)
         return Err{ErrorCode::IoError};
-    const u8* sb = g_scratch;
 
-    const u16 magic = LeU16(sb + kSbOffMagic);
-    if (magic != kSuperblockMagic)
+    DuetosExt4Superblock sb{};
+    if (!duetos::fs::ext4_rust::duetos_ext4_parse_superblock(g_scratch, sizeof(g_scratch), &sb))
         return Err{ErrorCode::NotFound};
-
-    // Reject pathological s_log_block_size values BEFORE we shift —
-    // a u32 shift count >= 32 is undefined behaviour, and ext4's
-    // block_size = 1024 << s_log_block_size legitimately tops out
-    // at 65536 (s_log_block_size = 6). A corrupt-or-hostile
-    // superblock with s_log_block_size = 0xFFFFFFFF would otherwise
-    // wrap our shift and produce a wild block_size that cascades
-    // into divide-by-zero / overflow downstream.
-    const u32 log_block_size = LeU32(sb + kSbOffLogBlockSize);
-    if (log_block_size > 6)
-        return Err{ErrorCode::Corrupt};
+    if (sb.ok == 0)
+        return Err{ErrorCode::NotFound};
 
     Volume& v = g_volumes[g_volume_count];
     ByteZero(&v, sizeof(v));
     v.block_handle = block_handle;
-    v.block_size = u32(1024) << log_block_size;
-    v.block_count = LeU32(sb + kSbOffBlockCountLo);
-    v.inode_count = LeU32(sb + kSbOffInodeCount);
-    v.first_data_block = LeU32(sb + kSbOffFirstDataBlock);
-    v.blocks_per_group = LeU32(sb + kSbOffBlocksPerGroup);
-    v.inodes_per_group = LeU32(sb + kSbOffInodesPerGroup);
-    v.rev_level = LeU32(sb + kSbOffRevLevel);
-    v.feature_compat = LeU32(sb + kSbOffFeatureCompat);
-    v.feature_incompat = LeU32(sb + kSbOffFeatureIncompat);
-    v.feature_ro_compat = LeU32(sb + kSbOffFeatureRoCompat);
-    // s_inode_size only exists in rev_level >= 1. Rev 0 (ext2)
-    // inodes are always 128 bytes.
-    v.inode_size = (v.rev_level >= 1) ? LeU16(sb + kSbOffInodeSize) : 128;
-    if (v.inode_size == 0)
-        v.inode_size = 128;
-    // Reject zero blocks_per_group / inodes_per_group: both are
-    // divisors in the group-descriptor and inode-table walks.
-    // A zero value here is either a corrupt superblock or a
-    // pre-format zeroed sector — either way, refuse the mount.
-    if (v.blocks_per_group == 0 || v.inodes_per_group == 0)
-        return Err{ErrorCode::Corrupt};
-    // inode_size must fit inside one block — the inode-table walk
-    // assumes inode N's bytes lie within the same block read.
-    if (v.inode_size > v.block_size)
-        return Err{ErrorCode::Corrupt};
+    v.block_size = u32(1024) << sb.log_block_size;
+    v.block_count = sb.blocks_count_lo;
+    v.inode_count = sb.inodes_count;
+    v.first_data_block = sb.first_data_block;
+    v.blocks_per_group = sb.blocks_per_group;
+    v.inodes_per_group = sb.inodes_per_group;
+    v.rev_level = sb.rev_level;
+    v.feature_compat = sb.feature_compat;
+    v.feature_incompat = sb.feature_incompat;
+    v.feature_ro_compat = sb.feature_ro_compat;
+    v.inode_size = sb.inode_size;
     for (u32 i = 0; i < 16; ++i)
-        v.label[i] = char(sb[kSbOffVolumeName + i]);
+        v.label[i] = char(sb.volume_name[i]);
     v.label[16] = '\0';
 
     const u32 idx = g_volume_count++;
@@ -701,10 +532,6 @@ void Ext4ScanAll()
     const u32 n = drivers::storage::BlockDeviceCount();
     for (u32 i = 0; i < n; ++i)
     {
-        // Probe every block device. NotFound is the expected "this
-        // isn't an ext4 volume" outcome — silent. IoError or
-        // BadState (registry full) bubble up as one-line logs so a
-        // failing disk or bumped kMaxVolumes ceiling is visible.
         auto r = Ext4Probe(i);
         if (!r && r.error() != ::duetos::core::ErrorCode::NotFound)
         {
