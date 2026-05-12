@@ -3086,10 +3086,25 @@ u64 WaitQueueWakeAll(WaitQueue* wq)
 {
     KASSERT(wq != nullptr, "sched", "WaitQueueWakeAll null queue");
 
+    // Drain the queue under a single lock acquire. The old loop
+    // called WaitQueueWakeOne per waiter, which re-took
+    // g_sched_lock N times; that's the dominant cost on a
+    // broadcast wake (CondVar broadcast, barrier release) when
+    // N is large. Setting need_resched once at the end matches
+    // the per-wake semantics since it's a per-CPU edge-trigger
+    // flag — repeated stores within one critical section are
+    // indistinguishable from one.
     u64 count = 0;
-    while (WaitQueueWakeOne(wq) != nullptr)
     {
-        ++count;
+        sync::SpinLockGuard guard(g_sched_lock);
+        while (WaitQueueWakeOneLocked(wq) != nullptr)
+        {
+            ++count;
+        }
+    }
+    if (count != 0)
+    {
+        NeedResched() = true;
     }
     return count;
 }
