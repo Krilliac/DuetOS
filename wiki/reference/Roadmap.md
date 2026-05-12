@@ -479,12 +479,20 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
   implementation can be a doc-error sentinel today.
 - **Menus shipped (v0):** popup menus + WM_CONTEXTMENU
   dispatch + the Win32 menu API surface land on
-  `claude/right-click-context-menu-mPDDD`. Residual GAPs:
-  interactive Move / Size (need modal-input mode), submenu
-  marshaling across `SYS_WIN_TRACK_POPUP`, `TPM_*` flags
-  beyond `TPM_RETURNCMD`, Files-app rename UI (needs a
-  text-input modal), Trash / ramfs Files context menus,
-  menubars + `LoadMenu` resource loading. See
+  `claude/right-click-context-menu-mPDDD`. `TPM_*` flag
+  coverage now also includes `TPM_NONOTIFY` (suppresses the
+  WM_COMMAND post when RETURNCMD is clear) and the six
+  alignment bits (`TPM_LEFTALIGN` / `TPM_CENTERALIGN` /
+  `TPM_RIGHTALIGN` / `TPM_TOPALIGN` / `TPM_VCENTERALIGN` /
+  `TPM_BOTTOMALIGN`) — the menu primitive's fixed
+  240×(N·22+4) geometry is shifted before `MenuOpen` so the
+  panel lands where the SDK contract says it should.
+  Residual GAPs: interactive Move / Size (need modal-input
+  mode), submenu marshaling across `SYS_WIN_TRACK_POPUP`,
+  `TPM_LEFTBUTTON` / `TPM_RIGHTBUTTON` activation filtering,
+  Files-app rename UI (needs a text-input modal),
+  Trash / ramfs Files context menus, menubars +
+  `LoadMenu` resource loading. See
   [`Compositor`](../subsystems/Compositor.md) §"Popup Menus"
   for the live state.
 

@@ -2219,6 +2219,22 @@ namespace
 constexpr u32 kTpMaxItems = duetos::drivers::video::kMenuMaxStack > 0 ? 12u : 12u;
 constexpr u32 kTpLabelMax = 32;
 constexpr u32 kTpFlagReturnCmd = 0x0100; // matches Win32 TPM_RETURNCMD
+constexpr u32 kTpFlagNoNotify = 0x0080;  // matches Win32 TPM_NONOTIFY
+// Horizontal alignment bits — TPM_LEFTALIGN is the default (0).
+constexpr u32 kTpFlagCenterAlign = 0x0004; // matches Win32 TPM_CENTERALIGN
+constexpr u32 kTpFlagRightAlign = 0x0008;  // matches Win32 TPM_RIGHTALIGN
+// Vertical alignment bits — TPM_TOPALIGN is the default (0).
+constexpr u32 kTpFlagVCenterAlign = 0x0010; // matches Win32 TPM_VCENTERALIGN
+constexpr u32 kTpFlagBottomAlign = 0x0020;  // matches Win32 TPM_BOTTOMALIGN
+
+// Menu primitive geometry mirrors `kernel/drivers/video/menu.cpp` —
+// 240 px fixed width, 22 px per row, +4 px for the 2-px border on
+// top and bottom. Aligning the menu against (x, y) needs these
+// before we open, since the menu primitive itself only takes a
+// top-left anchor.
+constexpr u32 kMenuWidth = 240;
+constexpr u32 kMenuRowHeight = 22;
+constexpr u32 kMenuVPadding = 4;
 
 // Wire format the userland TrackPopupMenu thunk packs onto the
 // caller's stack and passes via rdi. Fixed-size to keep the
@@ -2358,11 +2374,28 @@ void DoWinTrackPopup(arch::TrapFrame* frame)
     // Open the menu under the compositor lock so the mouse-reader
     // sees a consistent state.
     CompositorLock();
-    // Clamp the anchor into the framebuffer to keep the panel on
-    // screen even when the caller passes a negative or off-screen
-    // origin.
+
+    // Apply TPM_*ALIGN flags. Default is TPM_LEFTALIGN | TPM_TOPALIGN
+    // (both bits zero), which matches the historical behaviour of
+    // treating (screen_x, screen_y) as the top-left anchor.
+    //   TPM_CENTERALIGN  → menu centred on screen_x (shift left by w/2)
+    //   TPM_RIGHTALIGN   → menu right edge at screen_x (shift left by w)
+    //   TPM_VCENTERALIGN → menu centred on screen_y (shift up by h/2)
+    //   TPM_BOTTOMALIGN  → menu bottom edge at screen_y (shift up by h)
+    const u32 menu_h = req.count * kMenuRowHeight + kMenuVPadding;
     i32 ax = req.screen_x;
     i32 ay = req.screen_y;
+    if ((req.flags & kTpFlagCenterAlign) != 0)
+        ax -= static_cast<i32>(kMenuWidth / 2);
+    else if ((req.flags & kTpFlagRightAlign) != 0)
+        ax -= static_cast<i32>(kMenuWidth);
+    if ((req.flags & kTpFlagVCenterAlign) != 0)
+        ay -= static_cast<i32>(menu_h / 2);
+    else if ((req.flags & kTpFlagBottomAlign) != 0)
+        ay -= static_cast<i32>(menu_h);
+    // Clamp the anchor into the framebuffer to keep the panel on
+    // screen even when the caller passes a negative or off-screen
+    // origin (or alignment math pushed it off-screen).
     if (ax < 0)
         ax = 0;
     if (ay < 0)
@@ -2398,7 +2431,10 @@ void DoWinTrackPopup(arch::TrapFrame* frame)
     // If TPM_RETURNCMD is NOT set, also post WM_COMMAND to the
     // owner so a Win32 app that wires its menu through WndProc
     // sees the click without inspecting the syscall return.
-    if (action != 0 && (caller_flags & kTpFlagReturnCmd) == 0)
+    // TPM_NONOTIFY suppresses the WM_COMMAND notification
+    // regardless of RETURNCMD — used by callers that read the
+    // syscall result directly but don't want a WndProc roundtrip.
+    if (action != 0 && (caller_flags & kTpFlagReturnCmd) == 0 && (caller_flags & kTpFlagNoNotify) == 0)
     {
         constexpr u32 kWmCommand = 0x0111;
         CompositorLock();
