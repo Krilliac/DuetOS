@@ -122,6 +122,32 @@ u32 IwlRingsPollTxCompletions(NicInfo& n, IwlRingState* state, u32 queue_id);
 /// the slot-reclaim walk without a live chip.
 u32 IwlRingsApplyTxCompletions(IwlRingState* state, u32 queue_id, u32 chip_rdptr);
 
+/// Per-NIC singleton activation. Called once by the (future)
+/// firmware-loader slice after a successful microcode upload —
+/// initializes the singleton TX/RX ring state and records the
+/// owning NIC. Subsequent watch-task ticks call
+/// `IwlRingsServicePending` which polls TX completions on every
+/// queue. Idempotent (a second Activate on the same owner is a
+/// no-op); Activate on a second NIC while one is already
+/// attached returns Unsupported (v0 supports at most one
+/// iwlwifi NIC).
+::duetos::core::Result<void> IwlRingsActivate(NicInfo& n);
+
+/// Tear down the singleton ring state and clear the owner.
+/// Called by `NetShutdown` and when the owning NIC's
+/// `driver_online` flag flips back to false. Safe if no Activate
+/// preceded it.
+void IwlRingsDeactivate();
+
+/// Watch-task service hook. If a ring state is currently attached
+/// to `n`, polls every TX queue for completions (the periodic-
+/// poll fallback the `IwlRingsPollTxCompletions` docstring calls
+/// out) and services any RX bookkeeping. Returns the total
+/// number of TFD slots reclaimed across all queues (0 when no
+/// rings are attached or every queue is idle). Lightweight —
+/// safe to call on every watch tick without throttling.
+u32 IwlRingsServicePending(NicInfo& n);
+
 void IwlRingsSelfTest();
 
 } // namespace duetos::drivers::net

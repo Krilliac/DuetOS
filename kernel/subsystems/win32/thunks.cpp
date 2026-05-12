@@ -404,14 +404,14 @@ constexpr u32 kOffFreeEnvStringsW = 0x11B2;  // 6 bytes — return TRUE (env blo
 // constants directly to find the v0 contracts.
 constexpr u32 kOffSehNoUnwind = 0x11B8;          // 3 bytes — Rtl* SEH/stack-walk: "no frames captured"
 constexpr u32 kOffNoCrossProcThread = 0x11BB;    // 3 bytes — CreateRemoteThread: NULL (no cross-proc)
-constexpr u32 kOffStrtoulNoop = 0x11BE;          // 3 bytes — strtoul: 0 (TODO: real parser)
+constexpr u32 kOffStrtoul = 0x11F6;              // 212 bytes — real ASCII unsigned-long parser
 constexpr u32 kOffCallnewhNoop = 0x11C1;         // 3 bytes — _callnewh: 0 (no new-handler installed)
 constexpr u32 kOffConfigthreadlocale = 0x11C4;   // 3 bytes — _configthreadlocale: 0 (default mode)
 constexpr u32 kOffSetNewMode = 0x11C7;           // 3 bytes — _set_new_mode: 0 (previous mode = default)
 constexpr u32 kOffSetFmode = 0x11CA;             // 3 bytes — _set_fmode: 0 (previous mode = default)
 constexpr u32 kOffSetUsermatherr = 0x11CD;       // 3 bytes — __setusermatherr: 0 (no prior handler)
-constexpr u32 kOffInitterm = 0x11D0;             // 3 bytes — _initterm: 0 (TODO: walk fn-pointer array)
-constexpr u32 kOffInittermE = 0x11D3;            // 3 bytes — _initterm_e: 0 (TODO: walk fn-pointer array)
+constexpr u32 kOffInitterm = 0x12CA;             // 42 bytes — real fn-pointer-array walker
+constexpr u32 kOffInittermE = 0x12F4;            // 46 bytes — fn-pointer walker w/ first-non-zero propagation
 constexpr u32 kOffNoNarrowEnv = 0x11D6;          // 3 bytes — _{get_initial,initialize}_narrow_environment: 0
 constexpr u32 kOffRegThreadLocalAtexit = 0x11D9; // 3 bytes — _register_thread_local_exe_atexit_callback: 0
 constexpr u32 kOffSehFilterExe = 0x11DC;         // 3 bytes — _seh_filter_exe: 0 (EXCEPTION_EXECUTE_HANDLER)
@@ -439,7 +439,7 @@ constexpr u8 kThunksBytes[] = {
 };
 
 static_assert(sizeof(kThunksBytes) <= 8192, "Win32 thunks page fits in two 4 KiB pages");
-static_assert(sizeof(kThunksBytes) == 0x11F6, "thunk layout drifted; update kOff* constants");
+static_assert(sizeof(kThunksBytes) == 0x1322, "thunk layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The thunk
 // bytes encode 0x65000000 and 0x65000008 directly; if proc_env.h

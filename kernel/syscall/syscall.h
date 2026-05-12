@@ -2090,6 +2090,13 @@ inline constexpr u64 kSockOpResolveA = 12;
 //   +31 u8  reserved
 //   +32 u8  reserved[8]    zeroed by the kernel
 inline constexpr u64 kSockOpGetLease = 13;
+// kSockOpPollEvents: non-blocking readiness probe for the Winsock
+// async surface. rsi = u32 sock idx. Returns an FD_* bitmask in
+// rax (see `net::SocketPollEvents`), 0 for dead idx. Drives the
+// producer side of `WSAEnumNetworkEvents` /
+// `WSAWaitForMultipleEvents`: every Enum / Wait call probes here
+// and ORs the result into the per-binding pending mask.
+inline constexpr u64 kSockOpPollEvents = 14;
 
 // Win32 CONTEXT — first 0x100 bytes (integer + control + the
 // segment / rflags slot). Field order and offsets match the

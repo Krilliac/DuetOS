@@ -55,6 +55,7 @@
 #include "debug/probes.h"
 #include "mm/kstack.h"
 #include "sched/sched.h"
+#include "subsystems/win32/vmap_syscall.h"
 #include "arch/x86_64/smp.h"
 
 // user_copy.S labels, exposed to the trap dispatcher for the
@@ -754,6 +755,23 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     //     Reserved for kernel-mode bugs where continued execution
     //     accumulates damage.
     const bool from_user = (frame->cs & 3) == 3;
+
+    // Ring-3 #PF: give the Win32 PAGE_GUARD recovery the first
+    // bite. If cr2 lies inside a vmap region's currently-guard-
+    // armed page, the helper clears the guard bit, re-applies the
+    // base protection, and we return so the faulting instruction
+    // is retried. Otherwise the fault flows through the normal
+    // IsolateTask policy below. Full STATUS_GUARD_PAGE_VIOLATION
+    // delivery is gated on T6-02 (x64 SEH); v0 silently re-arms,
+    // which still services the common stack-grow probe pattern.
+    if (frame->vector == 14 && from_user)
+    {
+        const u64 cr2 = ReadCr2();
+        if (::duetos::subsystems::win32::Win32VmapPageGuardClear(cr2))
+        {
+            return;
+        }
+    }
 
     // Breakpoint subsystem gets first refusal on #BP (vec 3) and
     // #DB (vec 1), REGARDLESS of ring. A user-mode task that

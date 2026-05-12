@@ -1001,7 +1001,7 @@ focus of any current slice.
 | `strcpy` | REAL | `kOffStrcpy` |
 | `strlen` | REAL | `kOffStrlen` |
 | `strtol` | REAL | `kOffPinReturn0` |
-| `strtoul` | REAL | `kOffStrtoulNoop` |
+| `strtoul` | REAL | `kOffStrtoul` |
 | `wcslen` | REAL | `kOffWcslen` |
 <!-- AUTO:thunks-by-dll END -->
 
@@ -1187,7 +1187,7 @@ math (sqrt, pow, exp, log, sin, cos, tan via Taylor series).
 | `strcpy` | REAL | `kOffStrcpy` |
 | `strlen` | REAL | `kOffStrlen` |
 | `strtol` | REAL | `kOffPinReturn0` |
-| `strtoul` | REAL | `kOffStrtoulNoop` |
+| `strtoul` | REAL | `kOffStrtoul` |
 | `terminate` | REAL | `kOffTerminate` |
 | `wcslen` | REAL | `kOffWcslen` |
 <!-- AUTO:thunks-by-dll END -->

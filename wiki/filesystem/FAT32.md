@@ -35,18 +35,25 @@ the standard manner. The driver reads the FAT in 4 KiB chunks
 
 ## Known Limits / GAPs
 
-- **No write path.** Reading is fine; writing requires FAT update +
-  directory entry update + cluster reservation, deferred.
+- **In-place + append + create + delete + rename write paths
+  shipped** — `Fat32WriteInPlace`, `Fat32AppendAtPath`,
+  `Fat32CreateAtPath`, `Fat32DeleteAtPath`, `Fat32RenameAtPath`,
+  exercised by Notes / Files / Screenshot / session restore.
+  **Mid-file writes that grow a cluster chain are not yet
+  supported** — writing into a region that would extend the
+  file beyond its existing cluster count rejects with `-1`.
+  Append-then-write is the workaround for grow-heavy workloads.
 - **No FAT16 / FAT12 fallback.** FAT32 only.
 - **No exFAT** despite the project pillar mentioning it for
   interoperability — exFAT is a separate code path and a separate
   slice.
+- **Cross-volume rename rejected** by `Fat32RenameAtPath` and the
+  file-route layer — the operation has no atomic primitive within
+  one volume's FAT, so cross-volume rename would require copy +
+  delete with rollback. Same volume rename is fully supported.
 
-The kernel-side write API has landed (`Fat32WriteInPlace`,
-`Fat32AppendAtPath`, `Fat32CreateAtPath`, `Fat32DeleteAtPath`,
-`Fat32RenameAtPath`) and is exercised by Notes / Files / Screenshot /
-session restore. Mid-file writes that grow a cluster chain are still
-roadmap work — see [Roadmap](../reference/Roadmap.md).
+See [Roadmap](../reference/Roadmap.md) for the cluster-chain
+growth work.
 
 ## Related Pages
 

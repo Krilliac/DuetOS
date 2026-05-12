@@ -1,51 +1,16 @@
-// Path iterator shared by ops.rs and the FFI layer.
+// Path helpers used by the duetfs ops + FFI layers.
 //
-// Same shape rules as kernel/fs/vfs.h:
+// Component-walk rules (same shape as kernel/fs/vfs.h):
 //   - leading '/' tolerated
 //   - "." accepted and skipped
 //   - ".." rejected (no parent climb)
 //   - empty components ("//") tolerated
 //   - trailing slash tolerated
-
-pub struct PathIter<'a> {
-    bytes: &'a [u8],
-    rejected: bool,
-}
-
-impl<'a> PathIter<'a> {
-    pub fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, rejected: false }
-    }
-}
-
-// Yields Some(Some(component)) for each valid component, or
-// Some(None) once on a rejected sequence (".." at any depth).
-impl<'a> Iterator for PathIter<'a> {
-    type Item = Option<&'a [u8]>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.rejected {
-            return None;
-        }
-        while let Some((b'/', rest)) = self.bytes.split_first() {
-            self.bytes = rest;
-        }
-        if self.bytes.is_empty() {
-            return None;
-        }
-        let end = self.bytes.iter().position(|&b| b == b'/').unwrap_or(self.bytes.len());
-        let (head, rest) = self.bytes.split_at(end);
-        self.bytes = rest;
-        if head == b"." {
-            return self.next();
-        }
-        if head == b".." {
-            self.rejected = true;
-            return Some(None);
-        }
-        Some(Some(head))
-    }
-}
+//
+// The dedicated iterator that previously lived here was retired
+// once split_parent_and_name became the only caller — the
+// ops.rs path-walker inlines the simpler "split on every '/'"
+// loop and applies the same .. rejection rule there.
 
 /// Split `path` into `(parent_path, last_component)`. Returns None
 /// if the path has no components or the last component is invalid

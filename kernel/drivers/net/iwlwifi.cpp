@@ -3,6 +3,7 @@
 #include "arch/x86_64/serial.h"
 #include "diag/cleanroom_trace.h"
 #include "drivers/net/iwlwifi_fw.h"
+#include "drivers/net/iwlwifi_rings.h"
 #include "drivers/net/iwlwifi_upload.h"
 #include "net/wireless/wifi_diag.h"
 #include "loader/firmware_loader.h"
@@ -92,10 +93,22 @@ void IwlwifiWatchEntry(void* arg)
             ++g_stats.unexpected_dead_polls;
             // Mark the NIC offline so the GUI flips the indicator.
             // Don't tear MMIO down — a future firmware loader may
-            // bring it back.
+            // bring it back. Drop any attached TX rings so a future
+            // re-attach starts clean.
+            if (n->driver_online)
+            {
+                IwlRingsDeactivate();
+            }
             n->driver_online = false;
             n->link_up = false;
         }
+        // Periodic-poll fallback for TX completions: the IRQ-driven
+        // path is the canonical caller, but in v0 (no real MSI-X
+        // wiring) the watch task is the producer of TX-completion
+        // signals. No-op when rings aren't attached (firmware
+        // loader hasn't activated them yet); ready the moment a
+        // future Activate call lands. RX bookkeeping rides along.
+        (void)IwlRingsServicePending(*n);
         // Sleep ~1 s on a 100 Hz tick.
         duetos::sched::SchedSleepTicks(100);
     }

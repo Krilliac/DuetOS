@@ -428,6 +428,62 @@ u32 IwlRingsServiceRx(NicInfo& n, IwlRingState* state)
     return 0;
 }
 
+// ---------------------------------------------------------------
+// Singleton attachment for the watch-task TX/RX poll. v0 supports
+// at most one iwlwifi NIC at a time; the future firmware-loader
+// slice calls `IwlRingsActivate` after a successful microcode
+// upload, and the existing `iwlwifi-watch` task calls
+// `IwlRingsServicePending` on every tick to drain TX completions.
+// ---------------------------------------------------------------
+namespace
+{
+IwlRingState g_singleton_state{};
+NicInfo* g_singleton_owner = nullptr;
+} // namespace
+
+::duetos::core::Result<void> IwlRingsActivate(NicInfo& n)
+{
+    if (g_singleton_owner == &n)
+        return {}; // already attached to this NIC
+    if (g_singleton_owner != nullptr)
+    {
+        KLOG_WARN_A(::duetos::core::LogArea::Wireless, "drivers/net/iwlwifi_rings",
+                    "Activate: another NIC already owns the singleton ring state");
+        return ::duetos::core::Err{::duetos::core::ErrorCode::Unsupported};
+    }
+    auto r = IwlRingsInit(n, &g_singleton_state);
+    if (!r.has_value())
+        return r;
+    g_singleton_owner = &n;
+    return {};
+}
+
+void IwlRingsDeactivate()
+{
+    if (g_singleton_owner == nullptr)
+        return;
+    (void)IwlRingsTeardown(*g_singleton_owner, &g_singleton_state);
+    g_singleton_state = {};
+    g_singleton_owner = nullptr;
+}
+
+u32 IwlRingsServicePending(NicInfo& n)
+{
+    // No-op when this NIC isn't the singleton owner (either no
+    // rings attached at all, or a different NIC owns them). The
+    // common v0 path: firmware loader hasn't landed, no Activate
+    // has been called, return 0 cheaply.
+    if (g_singleton_owner != &n)
+        return 0;
+    u32 total = 0;
+    for (u32 q = 0; q < kIwlNumTxQueues; ++q)
+        total += IwlRingsPollTxCompletions(n, &g_singleton_state, q);
+    // RX bookkeeping — currently a counter bump; will start
+    // returning real frame counts when the RBD data path lands.
+    (void)IwlRingsServiceRx(n, &g_singleton_state);
+    return total;
+}
+
 void IwlRingsSelfTest()
 {
     KLOG_TRACE_SCOPE("drivers/net/iwlwifi_rings", "IwlRingsSelfTest");

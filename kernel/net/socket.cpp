@@ -860,4 +860,77 @@ SocketStats SocketStatsRead()
     return g_stats;
 }
 
+u32 SocketPollEvents(u32 idx)
+{
+    // Winsock FD_* constants we expose here:
+    //   FD_READ    0x01 — recv would not block
+    //   FD_WRITE   0x02 — send would not block
+    //   FD_ACCEPT  0x08 — listener has a pending pair
+    //   FD_CLOSE   0x20 — peer FIN / local shutdown(RD)
+    constexpr u32 kFdRead = 0x01u;
+    constexpr u32 kFdWrite = 0x02u;
+    constexpr u32 kFdAccept = 0x08u;
+    constexpr u32 kFdClose = 0x20u;
+
+    if (idx >= kSocketPoolCap)
+        return 0;
+    const Socket& s = g_pool[idx];
+    if (!s.in_use)
+        return 0;
+
+    u32 events = 0;
+
+    if (s.type == kSocketTypeDgram)
+    {
+        if (s.udp_count > 0)
+            events |= kFdRead;
+        // UDP sends never block in v0 (best-effort transmit).
+        events |= kFdWrite;
+        if ((s.shutdown_flags & 0x1) != 0)
+            events |= kFdClose;
+        return events;
+    }
+
+    // SOCK_STREAM
+    if (s.listening)
+    {
+        if (s.loopback_pending_accept_idx != -1)
+            events |= kFdAccept;
+        return events;
+    }
+
+    // Connected (or in-progress) STREAM socket. Loopback pair:
+    // route the readiness through the pipe ring. On-wire path:
+    // ask the TCP active snapshot whether any unread bytes are
+    // sitting beyond the per-socket cursor.
+    if (s.loopback_paired)
+    {
+        if (s.loopback_pipe_recv_idx >= 0 &&
+            ::duetos::subsystems::linux::internal::PipeReadReady(static_cast<u32>(s.loopback_pipe_recv_idx)))
+            events |= kFdRead;
+        if (s.loopback_pipe_send_idx >= 0 &&
+            ::duetos::subsystems::linux::internal::PipeWriteReady(static_cast<u32>(s.loopback_pipe_send_idx)))
+            events |= kFdWrite;
+    }
+    else if (s.connected)
+    {
+        const TcpActiveSnapshot snap = NetTcpActiveSnapshot();
+        if (snap.in_use && snap.response_len > g_tcp_consumed[idx])
+            events |= kFdRead;
+        // v0 doesn't track per-socket TX window; once connected
+        // the send path is always callable (NetTcpActiveSend
+        // returns 0 EAGAIN when the handshake hasn't completed,
+        // but at that point `s.connected` is also false).
+        events |= kFdWrite;
+        // Peer FIN: TCP slot complete + we've drained everything.
+        if (snap.in_use && snap.response_complete && snap.response_len <= g_tcp_consumed[idx])
+            events |= kFdClose;
+    }
+
+    if ((s.shutdown_flags & 0x1) != 0)
+        events |= kFdClose;
+
+    return events;
+}
+
 } // namespace duetos::net

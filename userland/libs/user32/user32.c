@@ -2749,11 +2749,332 @@ __declspec(dllexport) BOOL DrawMenuBar(HANDLE hwnd)
     return 1;
 }
 
-/* --- Charset / virtual-key conversion --- */
+/* --- Charset / virtual-key conversion ---
+ *
+ * MapVirtualKey converts between virtual-key codes (VK_*), PS/2
+ * set-1 scan codes, and character codes. The mapping is keyboard-
+ * layout-dependent on real Windows; v0 commits to US layout and
+ * documents the rest as a GAP — every PE the smoke tests run
+ * against assumes US, and the layout-table machinery (HKL ->
+ * keyboard.dll preload, OEM key tables) isn't wired yet.
+ *
+ * Supported `type` selectors:
+ *   MAPVK_VK_TO_VSC  (0): VK_* -> PS/2 set-1 scan code (or 0 if no
+ *                          unambiguous mapping).
+ *   MAPVK_VSC_TO_VK  (1): PS/2 scan code -> VK_*.
+ *   MAPVK_VK_TO_CHAR (2): VK_* -> UPPERCASE printable char on US
+ *                          layout (low 16 bits). Non-printable
+ *                          VK_* (modifiers, function keys) returns
+ *                          0.
+ *   MAPVK_VSC_TO_VK_EX (3): scan -> VK with extended info, same
+ *                            mapping as MAPVK_VSC_TO_VK in v0
+ *                            (we don't carry extended-key state).
+ *
+ * GAP: layout-aware mapping (non-US, dead keys, AltGr-introduced
+ *      characters) is not implemented. */
+
+#ifndef MAPVK_VK_TO_VSC
+#define MAPVK_VK_TO_VSC 0u
+#define MAPVK_VSC_TO_VK 1u
+#define MAPVK_VK_TO_CHAR 2u
+#define MAPVK_VSC_TO_VK_EX 3u
+#endif
+
+/* PS/2 set-1 scan codes for VK_A..VK_Z (index = VK - 'A'). */
+static const unsigned char k_vk_alpha_to_vsc[26] = {
+    0x1E, 0x30, 0x2E, 0x20, 0x12, 0x21, 0x22, 0x23, /* A B C D E F G H */
+    0x17, 0x24, 0x25, 0x26, 0x32, 0x31, 0x18, 0x19, /* I J K L M N O P */
+    0x10, 0x13, 0x1F, 0x14, 0x16, 0x2F, 0x11, 0x2D, /* Q R S T U V W X */
+    0x15, 0x2C                                      /* Y Z */
+};
+/* PS/2 set-1 scan codes for VK_0..VK_9 (top row, index = VK - '0'). */
+static const unsigned char k_vk_digit_to_vsc[10] = {0x0B, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A};
+
+static UINT vk_to_vsc(UINT vk)
+{
+    if (vk >= 'A' && vk <= 'Z')
+        return k_vk_alpha_to_vsc[vk - 'A'];
+    if (vk >= '0' && vk <= '9')
+        return k_vk_digit_to_vsc[vk - '0'];
+    /* Numpad VK_NUMPAD0..9 (0x60..0x69). */
+    if (vk >= 0x60 && vk <= 0x69)
+    {
+        static const unsigned char k_numpad[10] = {0x52, 0x4F, 0x50, 0x51, 0x4B, 0x4C, 0x4D, 0x47, 0x48, 0x49};
+        return k_numpad[vk - 0x60];
+    }
+    switch (vk)
+    {
+    case 0x08:
+        return 0x0E; /* VK_BACK     */
+    case 0x09:
+        return 0x0F; /* VK_TAB      */
+    case 0x0D:
+        return 0x1C; /* VK_RETURN   */
+    case 0x10:
+        return 0x2A; /* VK_SHIFT    -> left shift */
+    case 0x11:
+        return 0x1D; /* VK_CONTROL  -> left ctrl  */
+    case 0x12:
+        return 0x38; /* VK_MENU     -> left alt   */
+    case 0x14:
+        return 0x3A; /* VK_CAPITAL  */
+    case 0x1B:
+        return 0x01; /* VK_ESCAPE   */
+    case 0x20:
+        return 0x39; /* VK_SPACE    */
+    case 0x21:
+        return 0x49; /* VK_PRIOR    (pgup, numpad) */
+    case 0x22:
+        return 0x51; /* VK_NEXT     (pgdn, numpad) */
+    case 0x23:
+        return 0x4F; /* VK_END      */
+    case 0x24:
+        return 0x47; /* VK_HOME     */
+    case 0x25:
+        return 0x4B; /* VK_LEFT     */
+    case 0x26:
+        return 0x48; /* VK_UP       */
+    case 0x27:
+        return 0x4D; /* VK_RIGHT    */
+    case 0x28:
+        return 0x50; /* VK_DOWN     */
+    case 0x2D:
+        return 0x52; /* VK_INSERT   */
+    case 0x2E:
+        return 0x53; /* VK_DELETE   */
+    case 0x6A:
+        return 0x37; /* VK_MULTIPLY */
+    case 0x6B:
+        return 0x4E; /* VK_ADD      */
+    case 0x6D:
+        return 0x4A; /* VK_SUBTRACT */
+    case 0x6E:
+        return 0x53; /* VK_DECIMAL  */
+    case 0x6F:
+        return 0x35; /* VK_DIVIDE   */
+    case 0x70:
+        return 0x3B; /* VK_F1       */
+    case 0x71:
+        return 0x3C; /* VK_F2       */
+    case 0x72:
+        return 0x3D; /* VK_F3       */
+    case 0x73:
+        return 0x3E; /* VK_F4       */
+    case 0x74:
+        return 0x3F; /* VK_F5       */
+    case 0x75:
+        return 0x40; /* VK_F6       */
+    case 0x76:
+        return 0x41; /* VK_F7       */
+    case 0x77:
+        return 0x42; /* VK_F8       */
+    case 0x78:
+        return 0x43; /* VK_F9       */
+    case 0x79:
+        return 0x44; /* VK_F10      */
+    case 0x7A:
+        return 0x57; /* VK_F11      */
+    case 0x7B:
+        return 0x58; /* VK_F12      */
+    case 0xBA:
+        return 0x27; /* VK_OEM_1     ';' */
+    case 0xBB:
+        return 0x0D; /* VK_OEM_PLUS  '=' */
+    case 0xBC:
+        return 0x33; /* VK_OEM_COMMA ',' */
+    case 0xBD:
+        return 0x0C; /* VK_OEM_MINUS '-' */
+    case 0xBE:
+        return 0x34; /* VK_OEM_PERIOD '.' */
+    case 0xBF:
+        return 0x35; /* VK_OEM_2     '/' */
+    case 0xC0:
+        return 0x29; /* VK_OEM_3     '`' */
+    case 0xDB:
+        return 0x1A; /* VK_OEM_4     '[' */
+    case 0xDC:
+        return 0x2B; /* VK_OEM_5     '\\' */
+    case 0xDD:
+        return 0x1B; /* VK_OEM_6     ']' */
+    case 0xDE:
+        return 0x28; /* VK_OEM_7     '\'' */
+    default:
+        return 0;
+    }
+}
+
+static UINT vk_to_char(UINT vk)
+{
+    if (vk >= 'A' && vk <= 'Z')
+        return vk; /* uppercase per docs */
+    if (vk >= '0' && vk <= '9')
+        return vk;
+    if (vk >= 0x60 && vk <= 0x69)
+        return (UINT)('0' + (vk - 0x60));
+    switch (vk)
+    {
+    case 0x20:
+        return ' ';
+    case 0x6A:
+        return '*';
+    case 0x6B:
+        return '+';
+    case 0x6D:
+        return '-';
+    case 0x6E:
+        return '.';
+    case 0x6F:
+        return '/';
+    case 0xBA:
+        return ';';
+    case 0xBB:
+        return '=';
+    case 0xBC:
+        return ',';
+    case 0xBD:
+        return '-';
+    case 0xBE:
+        return '.';
+    case 0xBF:
+        return '/';
+    case 0xC0:
+        return '`';
+    case 0xDB:
+        return '[';
+    case 0xDC:
+        return '\\';
+    case 0xDD:
+        return ']';
+    case 0xDE:
+        return '\'';
+    default:
+        return 0; /* modifiers, function keys: no char */
+    }
+}
+
+static UINT vsc_to_vk(UINT vsc)
+{
+    /* Reverse the VK_A..VK_Z table. Small enough to scan linearly. */
+    for (UINT i = 0; i < 26; ++i)
+        if (k_vk_alpha_to_vsc[i] == (unsigned char)vsc)
+            return 'A' + i;
+    for (UINT i = 0; i < 10; ++i)
+        if (k_vk_digit_to_vsc[i] == (unsigned char)vsc)
+            return '0' + i;
+    switch (vsc)
+    {
+    case 0x0E:
+        return 0x08; /* VK_BACK   */
+    case 0x0F:
+        return 0x09; /* VK_TAB    */
+    case 0x1C:
+        return 0x0D; /* VK_RETURN */
+    case 0x2A:
+        return 0x10; /* VK_SHIFT  */
+    case 0x36:
+        return 0x10; /* right shift -> VK_SHIFT */
+    case 0x1D:
+        return 0x11; /* VK_CONTROL */
+    case 0x38:
+        return 0x12; /* VK_MENU   */
+    case 0x3A:
+        return 0x14; /* VK_CAPITAL */
+    case 0x01:
+        return 0x1B; /* VK_ESCAPE */
+    case 0x39:
+        return 0x20; /* VK_SPACE  */
+    case 0x49:
+        return 0x21; /* VK_PRIOR  */
+    case 0x51:
+        return 0x22; /* VK_NEXT   */
+    case 0x4F:
+        return 0x23; /* VK_END    */
+    case 0x47:
+        return 0x24; /* VK_HOME   */
+    case 0x4B:
+        return 0x25; /* VK_LEFT   */
+    case 0x48:
+        return 0x26; /* VK_UP     */
+    case 0x4D:
+        return 0x27; /* VK_RIGHT  */
+    case 0x50:
+        return 0x28; /* VK_DOWN   */
+    case 0x52:
+        return 0x2D; /* VK_INSERT */
+    case 0x53:
+        return 0x2E; /* VK_DELETE */
+    case 0x37:
+        return 0x6A; /* VK_MULTIPLY */
+    case 0x4E:
+        return 0x6B; /* VK_ADD    */
+    case 0x4A:
+        return 0x6D; /* VK_SUBTRACT */
+    case 0x35:
+        return 0x6F; /* VK_DIVIDE / VK_OEM_2 — '/' wins */
+    case 0x3B:
+        return 0x70; /* VK_F1     */
+    case 0x3C:
+        return 0x71;
+    case 0x3D:
+        return 0x72;
+    case 0x3E:
+        return 0x73;
+    case 0x3F:
+        return 0x74;
+    case 0x40:
+        return 0x75;
+    case 0x41:
+        return 0x76;
+    case 0x42:
+        return 0x77;
+    case 0x43:
+        return 0x78;
+    case 0x44:
+        return 0x79;
+    case 0x57:
+        return 0x7A; /* VK_F11    */
+    case 0x58:
+        return 0x7B; /* VK_F12    */
+    case 0x27:
+        return 0xBA; /* VK_OEM_1 ';' */
+    case 0x0D:
+        return 0xBB; /* VK_OEM_PLUS '=' */
+    case 0x33:
+        return 0xBC; /* VK_OEM_COMMA */
+    case 0x0C:
+        return 0xBD; /* VK_OEM_MINUS */
+    case 0x34:
+        return 0xBE; /* VK_OEM_PERIOD */
+    case 0x29:
+        return 0xC0; /* VK_OEM_3 '`' */
+    case 0x1A:
+        return 0xDB; /* VK_OEM_4 '[' */
+    case 0x2B:
+        return 0xDC; /* VK_OEM_5 '\\' */
+    case 0x1B:
+        return 0xDD; /* VK_OEM_6 ']' */
+    case 0x28:
+        return 0xDE; /* VK_OEM_7 '\'' */
+    default:
+        return 0;
+    }
+}
+
 __declspec(dllexport) UINT MapVirtualKeyA(UINT code, UINT type)
 {
-    (void)type;
-    return code; /* Pass-through as a v0 placeholder. */
+    switch (type)
+    {
+    case MAPVK_VK_TO_VSC:
+        return vk_to_vsc(code);
+    case MAPVK_VSC_TO_VK:
+        return vsc_to_vk(code);
+    case MAPVK_VK_TO_CHAR:
+        return vk_to_char(code);
+    case MAPVK_VSC_TO_VK_EX:
+        return vsc_to_vk(code);
+    default:
+        return 0;
+    }
 }
 __declspec(dllexport) UINT MapVirtualKeyW(UINT code, UINT type)
 {
@@ -2761,7 +3082,7 @@ __declspec(dllexport) UINT MapVirtualKeyW(UINT code, UINT type)
 }
 __declspec(dllexport) UINT MapVirtualKeyExA(UINT code, UINT type, HANDLE layout)
 {
-    (void)layout;
+    (void)layout; /* GAP: per-layout HKL not honored — v0 is US-only. */
     return MapVirtualKeyA(code, type);
 }
 __declspec(dllexport) UINT MapVirtualKeyExW(UINT code, UINT type, HANDLE layout)

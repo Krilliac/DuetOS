@@ -1161,19 +1161,90 @@ __declspec(dllexport) BOOL SetEnvironmentVariableA(const char* name, const char*
 
 __declspec(dllexport) DWORD ExpandEnvironmentStringsW(const wchar_t16* src, wchar_t16* dst, DWORD size)
 {
-    /* v0: copy literal text only; %VAR% expansion is unimplemented. */
+    /* Scan src and substitute %NAME% references with the matching
+     * environment-variable value (case-insensitive lookup via
+     * GetEnvironmentVariableW). Unmatched %NAME% (no closing '%'
+     * within the env-name buffer cap, or name not in the table)
+     * is emitted verbatim, preserving the documented Win32
+     * behaviour.
+     *
+     * Single-pass: we always advance `out` so the return value is
+     * the full required size (including NUL) even when the
+     * caller's buffer is too small. Writes to dst are gated on
+     * `dst != NULL && out + 1 < size` so we never overrun the
+     * supplied buffer and always leave one slot for the terminator. */
     if (src == (const WCHAR_t*)0)
         return 0;
-    int n = wstr_len(src) + 1; /* including NUL */
-    if (dst == (wchar_t16*)0 || size == 0)
-        return (DWORD)n;
-    if ((DWORD)n > size)
+
+    DWORD out = 0; /* chars produced so far (excluding NUL) */
+    DWORD i = 0;
+    for (;;)
     {
-        wstr_copy(dst, src, (int)size);
-        return (DWORD)n;
+        wchar_t16 c = src[i];
+        if (c == 0)
+            break;
+        if (c == (wchar_t16)'%')
+        {
+            /* Look ahead for the closing '%'. Cap the search at
+             * DUETOS_ENV_NAME-1 so a stray '%' followed by a long
+             * run of non-'%' characters doesn't blow our scratch
+             * buffer or take a quadratic walk. */
+            DWORD name_max = (DWORD)(DUETOS_ENV_NAME - 1);
+            DWORD k = 0;
+            while (k < name_max && src[i + 1 + k] != 0 && src[i + 1 + k] != (wchar_t16)'%')
+                ++k;
+            if (k > 0 && src[i + 1 + k] == (wchar_t16)'%')
+            {
+                wchar_t16 name_buf[DUETOS_ENV_NAME];
+                for (DWORD m = 0; m < k; ++m)
+                    name_buf[m] = src[i + 1 + m];
+                name_buf[k] = 0;
+
+                wchar_t16 val_buf[DUETOS_ENV_VAL];
+                DWORD got = GetEnvironmentVariableW(name_buf, val_buf, (DWORD)DUETOS_ENV_VAL);
+                if (got > 0 && got <= (DWORD)DUETOS_ENV_VAL)
+                {
+                    /* `got` includes the NUL — value length is got-1. */
+                    DWORD vlen = got - 1;
+                    for (DWORD m = 0; m < vlen; ++m)
+                    {
+                        if (dst != (wchar_t16*)0 && out + 1 < size)
+                            dst[out] = val_buf[m];
+                        ++out;
+                    }
+                    i = i + 1 + k + 1; /* skip past closing '%' */
+                    continue;
+                }
+                /* Unknown variable — emit %NAME% verbatim. */
+                if (dst != (wchar_t16*)0 && out + 1 < size)
+                    dst[out] = (wchar_t16)'%';
+                ++out;
+                for (DWORD m = 0; m < k; ++m)
+                {
+                    if (dst != (wchar_t16*)0 && out + 1 < size)
+                        dst[out] = src[i + 1 + m];
+                    ++out;
+                }
+                if (dst != (wchar_t16*)0 && out + 1 < size)
+                    dst[out] = (wchar_t16)'%';
+                ++out;
+                i = i + 1 + k + 1;
+                continue;
+            }
+            /* No closing '%' within range — fall through and emit
+             * the bare '%' as a literal character. */
+        }
+        if (dst != (wchar_t16*)0 && out + 1 < size)
+            dst[out] = c;
+        ++out;
+        ++i;
     }
-    wstr_copy(dst, src, (int)size);
-    return (DWORD)n;
+    if (dst != (wchar_t16*)0 && size > 0)
+    {
+        DWORD term = (out < size) ? out : (size - 1);
+        dst[term] = 0;
+    }
+    return out + 1; /* total chars required including NUL */
 }
 
 /* ------------------------------------------------------------------
@@ -3205,19 +3276,46 @@ __declspec(dllexport) DWORD FormatMessageW(DWORD dwFlags, const void* lpSource, 
 
 __declspec(dllexport) DWORD ExpandEnvironmentStringsA(const char* src, char* dst, DWORD size)
 {
+    /* Route through the wide implementation so the %VAR% expansion
+     * lives in one place. Convert src ASCII → UTF-16, expand,
+     * convert the result back to ASCII. The narrow buffer caps the
+     * intermediate at DUETOS_ENV_VAL * DUETOS_ENV_MAX which is
+     * comfortably larger than any path or command-line value the
+     * v0 env table can hold. */
     if (src == (const char*)0)
         return 0;
-    int i = 0;
-    while (src[i] != 0)
-        ++i;
-    int total = i + 1;
+
+    enum
+    {
+        kScratch = DUETOS_ENV_VAL * 8
+    };
+    wchar_t16 wsrc[kScratch];
+    wchar_t16 wdst[kScratch];
+
+    int slen = 0;
+    while (slen < kScratch - 1 && src[slen] != 0)
+    {
+        wsrc[slen] = (wchar_t16)(unsigned char)src[slen];
+        ++slen;
+    }
+    wsrc[slen] = 0;
+
+    DWORD wresult = ExpandEnvironmentStringsW(wsrc, wdst, (DWORD)kScratch);
+    /* wresult includes the NUL. The expanded text is in wdst[0..wresult-1]. */
     if (dst == (char*)0 || size == 0)
-        return (DWORD)total;
+        return wresult;
+
+    DWORD copy_len = wresult; /* includes NUL */
+    if (copy_len > size)
+        copy_len = size; /* truncate but always leave NUL */
+    if (copy_len == 0)
+        return wresult;
+
     DWORD j;
-    for (j = 0; j < size - 1 && src[j] != 0; ++j)
-        dst[j] = src[j];
+    for (j = 0; j + 1 < copy_len; ++j)
+        dst[j] = (char)(wdst[j] & 0xFF);
     dst[j] = 0;
-    return (DWORD)total;
+    return wresult;
 }
 
 __declspec(dllexport) wchar_t16* lstrcatW(wchar_t16* dst, const wchar_t16* src)

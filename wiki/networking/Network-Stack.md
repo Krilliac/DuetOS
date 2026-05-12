@@ -116,8 +116,14 @@ throughput display.
 
 - **No IPv6.** v6 is on the deferred list — IPv4 covers the workload
   surface today.
-- **No async winsock surface.** `WSAAsyncSelect`, `WSAEventSelect`,
-  IOCP — none implemented. Synchronous BSD-socket subset works.
+- **`WSAEventSelect` / `WSAEnumNetworkEvents` /
+  `WSAWaitForMultipleEvents` shipped** with a real producer
+  side — `kSockOpPollEvents` (op 14 on `SYS_SOCKET_OP = 153`)
+  reports the current FD_READ / FD_WRITE / FD_ACCEPT / FD_CLOSE
+  bitmask per socket, and the userland Wait loop polls every
+  10 ms to signal event handles. **`WSAAsyncSelect` (window-
+  message delivery) and IOCP overlapped socket reads are still
+  out of scope.**
 - **TCP is single-stream-friendly.** Real congestion control is
   basic; bulk-transfer throughput optimisation is deferred.
 - **No connection tracking** in the firewall — flipping the

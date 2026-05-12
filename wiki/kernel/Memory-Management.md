@@ -192,9 +192,13 @@ slices land.
 
 ## Known Limits / GAPs
 
-- **No SMP locking yet** in the heap, frame allocator, or page-table
-  walker. SMP bring-up will add irq-save spinlocks. Caller documents
-  single-CPU assumption today.
+- **IRQ-safe `KMalloc` / `KFree` shipped** — every allocator-
+  family mutation runs under `KheapIrqOff` / `FramePoolIrqOff` /
+  the slab cache's `IrqOff`, which save and restore the local
+  CPU's IFLAGS. The allocators are still single-lock — moving
+  to per-CPU runqueue-style fan-out is the next layer once a
+  profile demands it (see B2-followup in
+  [Roadmap](../reference/Roadmap.md)).
 - **No 2 MiB / 1 GiB PS support for new mappings** — straightforward
   add when the framebuffer driver demands it.
 - **Slab allocator landed** — `kernel/mm/slab.{h,cpp}`. Each
@@ -202,11 +206,11 @@ slices land.
   carved out of the kheap, with a per-cache intrusive freelist
   and freed-object poison. Boot self-test runs in
   `Phase::Sched`. **Buddy allocator** isn't yet on top — small
-  KMalloc allocations still go through the kheap freelist; the
-  slab is opt-in via direct `SlabAlloc`. See the
+  KMalloc allocations still go through the kheap freelist's
+  size-class bins; the slab is opt-in via direct `SlabAlloc`.
+  See the
   [Roadmap](../reference/Roadmap.md#slab-allocator--freed-object-poison--real-kasan)
-  for the remaining KMalloc-routing follow-on and the deferred
-  real KASAN work.
+  for the deferred real KASAN work.
 - **No reclaim or compaction.** `FreeFrame` is the only path frames
   re-enter the pool.
 

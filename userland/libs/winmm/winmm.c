@@ -39,7 +39,9 @@ static ULONGLONG winmm_now_ms(void)
  * kernel32.dll import library), so reach the kernel directly via
  * the same int-0x80 surface kernel32 uses internally:
  *   SYS_THREAD_CREATE = 45 (rdi = start VA, rsi = arg)
- *   SYS_SLEEP_MS      = 19 (rdi = ms) */
+ *   SYS_SLEEP_MS      = 19 (rdi = ms)
+ *   SYS_EVENT_SET     = 31 (rdi = event handle)
+ *   SYS_EVENT_RESET   = 32 (rdi = event handle) */
 typedef DWORD (*WINMM_THREAD_FN)(void*);
 static long long winmm_thread_create(WINMM_THREAD_FN fn, void* arg)
 {
@@ -51,6 +53,22 @@ static void winmm_sleep_ms(DWORD ms)
 {
     long long rv;
     __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)19), "D"((long long)ms) : "memory");
+    (void)rv;
+}
+static void winmm_event_set(void* handle)
+{
+    if (handle == (void*)0)
+        return;
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)31), "D"((long long)handle) : "memory");
+    (void)rv;
+}
+static void winmm_event_reset(void* handle)
+{
+    if (handle == (void*)0)
+        return;
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)32), "D"((long long)handle) : "memory");
     (void)rv;
 }
 
@@ -78,19 +96,35 @@ __declspec(dllexport) MMRESULT timeGetDevCaps(void* caps, UINT size)
     return MMSYSERR_NOERROR;
 }
 
-/* timeSetEvent v0. A polling service thread runs every 10 ms, fires
- * callbacks whose due time has arrived, and re-arms periodic ones.
- * Single-shot timers self-deactivate on fire. timeKillEvent
+/* timeSetEvent v0. A polling service thread runs every 10 ms,
+ * fires callbacks whose due time has arrived, and re-arms periodic
+ * ones. Single-shot timers self-deactivate on fire. timeKillEvent
  * deactivates a slot by id.
  *
+ * Callback shapes honoured (low nibble of `flags`):
+ *   TIME_CALLBACK_FUNCTION  (0x00) — call `cb` as TIMECALLBACK.
+ *   TIME_CALLBACK_EVENT_SET (0x10) — treat `cb` as HANDLE,
+ *                                    SetEvent it (signaled).
+ *   TIME_CALLBACK_EVENT_PULSE (0x20) — treat `cb` as HANDLE,
+ *                                    SetEvent then ResetEvent (a
+ *                                    close-enough PulseEvent — wakes
+ *                                    any waiter that was already in
+ *                                    the wait, then drops the
+ *                                    signal). Real Win32 PulseEvent
+ *                                    is deprecated and famously
+ *                                    racy; the SetEvent+ResetEvent
+ *                                    pair is the documented
+ *                                    workaround.
+ *
  * Out of scope:
- *   - TIME_CALLBACK_EVENT_SET / EVENT_PULSE flags (they pulse an
- *     HANDLE event instead of calling fptr; the event surface
- *     doesn't yet have a per-process pulse path that's safe to
- *     call from the service thread).
  *   - Sub-10 ms resolution (the polling cadence is the floor).
  */
 typedef void(__stdcall* TIMECALLBACK)(UINT uTimerID, UINT uMsg, DWORD_PTR dwUser, DWORD_PTR dw1, DWORD_PTR dw2);
+
+#define TIME_CALLBACK_FUNCTION 0x0000U
+#define TIME_CALLBACK_EVENT_SET 0x0010U
+#define TIME_CALLBACK_EVENT_PULSE 0x0020U
+#define TIME_CALLBACK_TYPE_MASK 0x0030U
 
 typedef struct
 {
@@ -118,6 +152,7 @@ static DWORD winmm_mmtimer_service_thread(void* arg)
             {
                 TIMECALLBACK cb = g_mmtimers[i].callback;
                 DWORD_PTR user = g_mmtimers[i].user;
+                const UINT callback_type = g_mmtimers[i].flags & TIME_CALLBACK_TYPE_MASK;
                 /* Fire callback before rearming so a re-entrant
                  * callback that calls timeKillEvent on its own id
                  * sees the slot still alive. The callback runs on
@@ -125,7 +160,19 @@ static DWORD winmm_mmtimer_service_thread(void* arg)
                  * timer callback is called from a system thread, so
                  * callers must not assume the calling thread's
                  * locale / TLS. */
-                if (cb)
+                if (callback_type == TIME_CALLBACK_EVENT_SET)
+                {
+                    winmm_event_set((void*)cb);
+                }
+                else if (callback_type == TIME_CALLBACK_EVENT_PULSE)
+                {
+                    /* Pulse = Set then Reset. Wakes any waiters
+                     * who were already blocked; drops the signal
+                     * before new waiters can latch onto it. */
+                    winmm_event_set((void*)cb);
+                    winmm_event_reset((void*)cb);
+                }
+                else if (cb)
                 {
                     cb((UINT)(i + 1), 0 /*MM_TIMER*/, user, 0, 0);
                 }

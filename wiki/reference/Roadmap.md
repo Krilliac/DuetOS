@@ -436,7 +436,14 @@ cases that the v0 happy path skips:
 - `kernel/drivers/net/iwlwifi_rings.cpp` — legacy <7000-series
   RBD format. (TX completion polling landed via
   `IwlRingsPollTxCompletions` / `IwlRingsApplyTxCompletions`;
-  the IRQ wiring that calls them is the next slice.)
+  **periodic-poll wiring landed** — the existing `iwlwifi-watch`
+  task calls the new `IwlRingsServicePending` hook on every
+  tick, which drains every TX queue and services RX
+  bookkeeping. No-op when rings aren't attached (firmware
+  loader hasn't called `IwlRingsActivate` yet); ready to
+  drain the moment a future Activate lands. Real MSI-X
+  interrupt-driven dispatch is the next layer beyond this
+  fallback.)
 - `kernel/mm/dma.cpp` — ARM64 port (`dsb ishst` + per-line
   `dc cvac`).
 - `kernel/subsystems/translation/translate.cpp` — `rseq`
@@ -503,18 +510,27 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
   / `WSACloseEvent` / `WSASetEvent` / `WSAResetEvent` /
   `WSAEventSelect` / `WSAEnumNetworkEvents` /
   `WSAWaitForMultipleEvents` exist and route through a
-  process-local `WsaEventBinding[32]` table. Callers can
-  register their interest in network events without crashing
-  on a NULL-import lookup.
-- **Deferred:** Real async event delivery — the v0 ws2_32
-  binding registry has no producer side. The TCP stack
-  doesn't yet drive `pending` mask changes when a socket
-  becomes readable / writable / accepts a connection, so
-  `WSAEnumNetworkEvents` always reports zero events and
-  `WSAWaitForMultipleEvents` returns `WSA_WAIT_TIMEOUT`.
-  Overlapped I/O + IOCP-backed socket reads still pending
+  process-local `WsaEventBinding[32]` table.
+  **Producer side shipped:** new kernel-side helper
+  `net::SocketPollEvents(idx)` returns the current
+  `FD_READ` / `FD_WRITE` / `FD_ACCEPT` / `FD_CLOSE`
+  bitmask for a socket (`kSockOpPollEvents = 14` on
+  SYS_SOCKET_OP). `WSAEnumNetworkEvents` queries the kernel
+  on every call and ORs the result into the binding's
+  `pending` mask masked by the user's subscribed events,
+  then resets the event handle to match the Win32 atomic-
+  reset contract. `WSAWaitForMultipleEvents` runs a 10 ms-
+  cadence polling loop: every iteration walks the bindings,
+  `SetEvent`s any whose socket has activity, then probes
+  each `lphEvents` entry with a 0 ms `SYS_EVENT_WAIT`;
+  returns the matching index on a signaled event or
+  `WSA_WAIT_TIMEOUT` after `dwTimeout` ms.
+- **Deferred:** Overlapped I/O + IOCP-backed socket reads
   (kernel32's IOCP plumbing exists but isn't wired into the
-  socket read path).
+  socket read path); kernel-direct event signaling at the
+  moment of socket activity (today's polling cadence is the
+  CPU-time tradeoff); `fWaitAll == TRUE` semantics (current
+  impl returns on first ready event regardless).
 
 ---
 
@@ -920,7 +936,7 @@ Track 3 has no remaining roadmap rows.
 
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
-| T5-01 | mm | P1 | Complete `NtAllocateVirtualMemory` / `VirtualAlloc` / `VirtualFree` / `VirtualProtect`: reserve/commit split, release, guard pages, correct protection flags, `VirtualQuery` / `NtQueryVirtualMemory`, and `MEM_WRITE_WATCH` rejection. (Reserve/commit split + protection-bit enforcement shipped — `Process::vmap_regions[16]` tracks (base_va, pages, committed_bitmap, protection) per region; new syscalls `SYS_VIRTUAL_ALLOC = 199` / `SYS_VIRTUAL_FREE = 200` / `SYS_VIRTUAL_PROTECT = 201` honour `MEM_RESERVE` / `MEM_COMMIT` / `MEM_DECOMMIT` / `MEM_RELEASE` and the `PAGE_*` protection bits via `AddressSpaceProtectUserPage`. `kernel32!VirtualAlloc / VirtualFree / VirtualProtect` route through the new ABI. `VirtualQuery` / `NtQueryVirtualMemory` + `MEM_WRITE_WATCH` rejection were already shipped. Guard pages — full `PAGE_GUARD` semantics that fault on first touch then auto-reset — still pending; v0 rejects PAGE_GUARD at the protection-translate stage.) | MSVC stack-probing apps survive first-thread stack setup. |
+| T5-01 | mm | P1 | Complete `NtAllocateVirtualMemory` / `VirtualAlloc` / `VirtualFree` / `VirtualProtect`: reserve/commit split, release, guard pages, correct protection flags, `VirtualQuery` / `NtQueryVirtualMemory`, and `MEM_WRITE_WATCH` rejection. (Reserve/commit split + protection-bit enforcement shipped — `Process::vmap_regions[16]` tracks (base_va, pages, committed_bitmap, protection, **guard_bitmap**) per region; new syscalls `SYS_VIRTUAL_ALLOC = 199` / `SYS_VIRTUAL_FREE = 200` / `SYS_VIRTUAL_PROTECT = 201` honour `MEM_RESERVE` / `MEM_COMMIT` / `MEM_DECOMMIT` / `MEM_RELEASE` and the `PAGE_*` protection bits via `AddressSpaceProtectUserPage`. `kernel32!VirtualAlloc / VirtualFree / VirtualProtect` route through the new ABI. `VirtualQuery` / `NtQueryVirtualMemory` + `MEM_WRITE_WATCH` rejection were already shipped. **Guard pages shipped (one-shot fault+resume):** PAGE_GUARD-combined protections (`PAGE_READWRITE \| PAGE_GUARD`, etc.) are accepted by `Win32ProtToPageFlags`; the guard-armed page is mapped without the Writable bit so the first write traps. The ring-3 #PF handler in `traps.cpp` calls `Win32VmapPageGuardClear(cr2)` BEFORE the IsolateTask policy fires — on a hit the guard bit is cleared, the underlying base protection is re-applied, and the faulting instruction is retried. Full STATUS_GUARD_PAGE_VIOLATION delivery to userland is still gated on T6-02 (x64 SEH); v0's silent re-arm still serves the common stack-grow probe pattern (the next write succeeds after the first fault).) | MSVC stack-probing apps survive first-thread stack setup. |
 > **T5-02** multi-heap process allocator shipped:
 > `Process::extra_heaps[4]` carries up-to-16-page secondary
 > heaps (1 MiB stride starting at 0x55000000). New syscalls
@@ -1111,7 +1127,7 @@ Track 3 has no remaining roadmap rows.
 
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
-| T10-04 | build | P2 | Extend the hosted `ctest` harness to cover the four listed pillars. (Result, string, syscall_error, cvt, text_hash, d3dcompiler, damage_rect, wild_address, **disk_path** wired today — disk_path covers the canonical `/disk/<idx>/<rest>` parser used by the Win32 spawn + Fat32 file-route path layers. PE parser + VFS-path-resolve-with-mount-crossings + registry-lookup are still kernel-only because each pulls in too many transitively-kernel headers to be worth shimming for the host build; the algorithmic-contract pattern (test re-states the kernel routine inline, asserts inputs/outputs against canonical cases) is what scales here. Add per-primitive tests as they grow self-contained enough to mirror.) | Host `ctest` runs without QEMU and covers Result + PE parser + VFS path resolution + registry lookup + string helpers. |
+| T10-04 | build | P2 | Extend the hosted `ctest` harness to cover the four listed pillars. (Result, string, syscall_error, cvt, text_hash, d3dcompiler, damage_rect, wild_address, disk_path, **vfs_resolve**, **registry_path** wired today — vfs_resolve covers the longest-prefix mount-point matcher in `kernel/fs/mount.cpp::VfsMountResolve` (component-boundary correct + longest-match-wins + inactive-entries-ignored), registry_path covers the case-insensitive `PathEqualCi` + the forgiving `ConcatRegPath` (trailing-slash trim + leading-slash strip + empty-sub reopens-parent + cap-bounded overflow rejection). PE parser is still kernel-only because it pulls in too many transitively-kernel headers to be worth shimming for the host build; the algorithmic-contract pattern (test re-states the kernel routine inline, asserts inputs/outputs against canonical cases) is what scales here. Add per-primitive tests as they grow self-contained enough to mirror.) | Host `ctest` runs without QEMU and covers Result + PE parser + VFS path resolution + registry lookup + string helpers. |
 
 ### Track 11 — Kernel infrastructure gaps
 

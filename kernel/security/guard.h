@@ -130,15 +130,18 @@ const Report* GuardLastReport();
 /// have to construct an ImageDescriptor.
 bool GateThread(ImageKind kind, const char* name);
 
-/// Load the persistent allow-list from tmpfs (one hex FNV-1a
-/// hash per line). Called from GuardInit. Safe if the file is
-/// absent — missing file means an empty allowlist.
+/// Load the persistent allow-list from tmpfs (one hex SHA-256
+/// digest per line, 64 chars). Called from GuardInit. Safe if
+/// the file is absent — missing file means an empty allowlist.
+/// Lines that don't parse as 64 hex chars are skipped, so an
+/// allow-list left over from the previous FNV-1a layout is
+/// quietly retired on first boot.
 void GuardLoadAllowlist();
 
-/// Append a hash to the persistent allowlist. Called by the
-/// prompter when the user answers "yes" so the same image is
-/// pre-allowed on the next boot.
-void GuardRememberAllow(u64 hash);
+/// Append a hash (SHA-256, 32 raw bytes) to the persistent
+/// allowlist. Called by the prompter when the user answers "yes"
+/// so the same image is pre-allowed on the next boot.
+void GuardRememberAllow(const u8 hash[32]);
 
 /// Boot-time init: zero counters, seed the allow/deny tables,
 /// load the persistent allowlist from tmpfs, drop into Advisory
