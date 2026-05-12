@@ -50,7 +50,14 @@ constexpr u8 kPitGateOut2Mask = 1U << 5;
 // handler can't race with itself. SMP bring-up will swap this for
 // std::atomic<u64> (or __atomic_fetch_add) and the read accessor below
 // will become an acquire load.
-constinit u64 g_ticks = 0;
+//
+// `volatile` here is load-bearing under LTO + -O3: without it the
+// optimizer can hoist `g_ticks` out of any spin loop that doesn't
+// otherwise touch state the IRQ handler writes to (e.g. the wireless
+// MLME scan-wait loop in `MlmeScanAndWait`). The IRQ handler's
+// `++g_ticks;` is the only writer; the volatile keeps every reader
+// observing the fresh value across loop iterations.
+constinit volatile u64 g_ticks = 0;
 constinit u64 g_lapic_ticks_per_period = 0;
 
 // Init-wedge watchdog state. The timer IRQ samples the running serial
@@ -75,7 +82,11 @@ constexpr u64 kWedgeBytesIgnore = 96; // length of "[tick-irq] g_ticks=0x...\n" 
 
 void TimerHandler()
 {
-    ++g_ticks;
+    // C++23 deprecates `++x;` on a volatile object; do the load/add/store
+    // explicitly. Single-CPU, IRQ-handler-only writer, so there's no race
+    // with a concurrent writer — the volatile is purely to prevent the
+    // compiler from caching reads in spin loops elsewhere.
+    g_ticks = g_ticks + 1;
     // Pet the NMI watchdog. If this handler ever stops firing,
     // the watchdog's PMU overflow will catch it via NMI even
     // while IF is cleared. Cheap (single store) so it stays in
