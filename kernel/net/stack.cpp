@@ -765,8 +765,32 @@ void ArpInsert(u32 iface_index, Ipv4Address ip, MacAddress mac)
     const u32 h = ArpHash(iface_index, ip);
 
     // Refresh an existing entry if it's already on this bucket's chain.
-    for (u8 idx = g_arp_hash_heads[h]; idx != kArpEntryNone; idx = g_arp_cache[idx].next_idx)
+    //
+    // Bounded by `kArpCacheCap` iterations. If a race between the
+    // rx-poll task and the bringup path's NetStackInit had left a
+    // chain with a cycle (or simply pointing back into itself
+    // through a stale next_idx during a concurrent unlink), this
+    // for-loop used to spin forever with IRQs disabled — which on
+    // a single-CPU TCG boot looked like "the timer just stopped
+    // firing", because the watchdog couldn't run. The bound also
+    // covers the more mundane corruption case (a u8 next_idx field
+    // got clobbered by a wild write) by reaching the limit and
+    // walking out. On a healthy chain the limit is never hit since
+    // each bucket holds at most kArpCacheCap entries.
+    u32 walked = 0;
+    for (u8 idx = g_arp_hash_heads[h]; idx != kArpEntryNone && walked < kArpCacheCap;
+         idx = g_arp_cache[idx].next_idx, ++walked)
     {
+        if (idx >= kArpCacheCap)
+        {
+            // Bucket head or next_idx out of range — chain is
+            // corrupted. Reset this bucket to empty and proceed
+            // to the free-slot path. The lost entries leak space
+            // until their TTLs expire; that's strictly better than
+            // looping forever with IRQs disabled.
+            g_arp_hash_heads[h] = kArpEntryNone;
+            break;
+        }
         ArpEntry& e = g_arp_cache[idx];
         if (e.iface_index == iface_index && IpEq(e.ip, ip))
         {

@@ -78,6 +78,23 @@ if [[ "${DUETOS_NO_USB:-0}" != "1" ]]; then
     )
 fi
 
+# Always pass `-net none` for the screenshot harness. QEMU 8.2
+# defaults to adding an e1000e + a user-mode netdev when no
+# `-netdev` is given, and the kernel's net stack bring-up under
+# that default occasionally wedges in ArpInsert when an ARP
+# reply / DHCP offer races with the rx-poll task spawn (see
+# kernel/net/stack.cpp:771 — chain walk against a partially-
+# initialised hash bucket). The screenshot doesn't need a
+# functional network, so dropping the default NIC removes the
+# race entirely. Networking-specific screenshots can override
+# by setting DUETOS_NET_DEVICE to a full `-netdev … -device …`
+# pair (not used today; kept as a future hook).
+NET_ARGS=(-net none)
+if [[ -n "${DUETOS_NET_DEVICE:-}" ]]; then
+    # shellcheck disable=SC2206
+    NET_ARGS=(${DUETOS_NET_DEVICE})
+fi
+
 qemu-system-x86_64 \
     -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}" \
     -drive "if=pflash,format=raw,file=${OVMF_VARS_COPY}" \
@@ -93,6 +110,7 @@ qemu-system-x86_64 \
     -drive "file=${SATA_IMAGE},if=none,id=sata0,format=raw" \
     -device "ide-hd,bus=ahci1.0,drive=sata0" \
     "${USB_ARGS[@]}" \
+    "${NET_ARGS[@]}" \
     -cdrom "${ISO_IMAGE}" -boot d &
 QEMU_PID=$!
 
@@ -159,7 +177,14 @@ fi
 # past the default poll timeout. `bringup-complete` is the earliest
 # marker that guarantees the compositor has composed.
 readonly BOOT_MARKER="${DUETOS_BOOT_MARKER:-bringup-complete}"
-for _ in $(seq 1 "${DUETOS_BOOT_WAIT_SECS:-60}"); do
+# Boot wait budget: under QEMU TCG (no /dev/kvm), the full
+# storage stack (NVMe + AHCI + e1000 + xHCI) emulates ~20× slower
+# than real-time. A bringup-complete signal that fires at t=22 s
+# guest time can take ~440 s wall on a fully-equipped harness
+# host. 600 s default keeps a comfortable margin; CI runners with
+# KVM see this finish in under a minute, so the budget is mostly
+# inert there. Manual overrides via DUETOS_BOOT_WAIT_SECS.
+for _ in $(seq 1 "${DUETOS_BOOT_WAIT_SECS:-600}"); do
     if [[ -f "${SERIAL_LOG}" ]] && grep -q "${BOOT_MARKER}" "${SERIAL_LOG}"; then
         break
     fi

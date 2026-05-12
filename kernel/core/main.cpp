@@ -2608,6 +2608,63 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWrite("[boot] Bringing up periodic timer.\n");
     duetos::time::TimerInit();
 
+    // Arm the NMI watchdog as soon as the timer IRQ is firing so
+    // any subsequent driver-bring-up wedge (xHCI reset wait, audio
+    // controller hang, stuck MMIO poll, IRQ-disabled spinlock
+    // deadlock) panics with a useful trap frame instead of leaving
+    // the box silently halted. The watchdog uses a perfmon
+    // overflow that delivers as NMI, so even an IRQ-masked spinlock
+    // wedge wakes the panic path. Silently no-ops if the CPU
+    // doesn't advertise architectural perfmon (typical on QEMU
+    // TCG without `-cpu max`) — the init-wedge watchdog in
+    // arch/timer.cpp then takes over as the timer-IRQ-based
+    // fallback. Previously this was deferred to the very end of
+    // boot, which meant a hang in any earlier driver had no
+    // hardware-level detector at all.
+    duetos::arch::NmiWatchdogInit();
+
+    // init-wedge-panic=<N>: turn the init-wedge watchdog from
+    // warn-only into a hard panic after N silent-heartbeats. The
+    // cmdline value is a small decimal; conservative parse —
+    // multi-digit accepted, single-digit common. 0 / missing keeps
+    // the default warn-only behaviour. Useful for CI and stress
+    // runs where a wedge must surface as a fault rather than as a
+    // silent timeout.
+    {
+        const char* cur = cmdline;
+        const char* kkey = "init-wedge-panic=";
+        while (cur != nullptr && *cur != '\0')
+        {
+            const char* hit = nullptr;
+            // Find "init-wedge-panic=" anywhere in cmdline.
+            for (const char* p = cur; *p != '\0'; ++p)
+            {
+                duetos::u32 i = 0;
+                while (kkey[i] != '\0' && p[i] == kkey[i])
+                {
+                    ++i;
+                }
+                if (kkey[i] == '\0')
+                {
+                    hit = p + i;
+                    break;
+                }
+            }
+            if (hit == nullptr)
+            {
+                break;
+            }
+            duetos::u32 val = 0;
+            while (*hit >= '0' && *hit <= '9')
+            {
+                val = val * 10u + duetos::u32(*hit - '0');
+                ++hit;
+            }
+            duetos::arch::SetInitWedgePanicThreshold(val);
+            break;
+        }
+    }
+
     SerialWrite("[boot] Bringing up scheduler.\n");
     duetos::sched::SchedInit();
     // Per-task syscall-trail self-test — exercises the ring

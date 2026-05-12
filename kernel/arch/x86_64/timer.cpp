@@ -69,6 +69,7 @@ constinit u64 g_last_progress_byte_count = 0;
 constinit u32 g_silent_heartbeats = 0;
 constinit bool g_init_complete = false;
 constinit bool g_wedge_warned = false;
+constinit u32 g_wedge_panic_threshold = 0; // 0 = warn-only; >0 = panic after N silent heartbeats
 constexpr u32 kWedgeSilentHeartbeatsThreshold = 3;
 constexpr u64 kWedgeBytesIgnore = 96; // length of "[tick-irq] g_ticks=0x...\n" plus slack
 
@@ -146,6 +147,21 @@ void TimerHandler()
                     SerialWriteHex(byte_count_before);
                     SerialWrite("\n");
                     duetos::debug::ProbeFire(duetos::debug::ProbeId::kBootInitWedge, 0, g_silent_heartbeats * 5);
+                }
+                // Escalation: if the operator armed the panic path
+                // via `init-wedge-panic=<N>` on the kernel cmdline,
+                // the watchdog turns from advisory into a hard fault
+                // once `N` silent heartbeats have passed. Useful for
+                // CI: leave default (warn only), turn on for fuzz
+                // / stress runs that need an unambiguous failure.
+                if (g_wedge_panic_threshold > 0 && g_silent_heartbeats >= g_wedge_panic_threshold)
+                {
+                    SerialWrite("[init-wedge] PANIC: silent_heartbeats=");
+                    SerialWriteHex(g_silent_heartbeats);
+                    SerialWrite(" >= configured panic threshold ");
+                    SerialWriteHex(g_wedge_panic_threshold);
+                    SerialWrite("\n");
+                    duetos::core::Panic("init-wedge", "boot init wedged");
                 }
             }
             else
@@ -260,6 +276,11 @@ void LapicTimerStartOnCurrent()
 void MarkInitComplete()
 {
     g_init_complete = true;
+}
+
+void SetInitWedgePanicThreshold(u32 silent_heartbeats)
+{
+    g_wedge_panic_threshold = silent_heartbeats;
 }
 
 } // namespace duetos::arch
