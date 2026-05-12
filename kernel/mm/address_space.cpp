@@ -648,6 +648,22 @@ void AddressSpaceActivate(AddressSpace* as)
         return; // fast path: no-op same-AS switch
     }
 
+    // Maintain the per-AS CPU mask used by TLB shootdown to scope
+    // the IPI to peers that actually have this AS loaded. Clear
+    // first, then set on the new AS — order matters so a concurrent
+    // shootdown from a third CPU never sees us in both masks at
+    // once (it could over-IPI us; correctness is preserved).
+    const u32 bit = 1u << (p->cpu_id & 31u);
+    AddressSpace* old_as = p->current_as;
+    if (old_as != nullptr)
+    {
+        __atomic_fetch_and(&old_as->active_cpu_mask, ~bit, __ATOMIC_RELEASE);
+    }
+    if (as != nullptr)
+    {
+        __atomic_fetch_or(&as->active_cpu_mask, bit, __ATOMIC_ACQUIRE);
+    }
+
     const PhysAddr cr3 = (as != nullptr) ? as->pml4_phys : BootPml4Phys();
     arch::WriteCr3(cr3);
     p->current_as = as;

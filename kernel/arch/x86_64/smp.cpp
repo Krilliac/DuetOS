@@ -350,40 +350,52 @@ void SmpTlbShootdownBroadcast(mm::AddressSpace* as, u64 virt_start, u64 virt_end
     cpu::PerCpu* self = cpu::CurrentCpu();
     const u32 self_id = (self != nullptr) ? self->cpu_id : 0u;
 
-    // Count targets first (peers in the matching AS), so we know when
-    // the ack counter is complete. A peer that's idle / in another AS
-    // is not a target — TlbShootdownIpiHandler exits without acking
-    // because the AS check fails... wait, that's wrong. Re-think:
+    // Targeted broadcast: only IPI peers whose CR3 currently holds
+    // this AS. The AS's `active_cpu_mask` is maintained by
+    // AddressSpaceActivate. A peer that left the AS between our
+    // snapshot and the IPI is safe — switching CR3 invalidates the
+    // outgoing AS's TLB on x86 (non-global pages), so re-entry
+    // re-walks the up-to-date page tables. A peer that entered the
+    // AS after our snapshot is also safe for the same reason: its
+    // TLB started empty under the new CR3.
     //
-    // The handler always acks; the AS check only governs whether to
-    // invlpg. We must IPI EVERY peer so they all ack. The handler
-    // already does this. Peer count is therefore `online peers`.
-    u64 target_count = 0;
-    for (u32 id = 0; id < limit; ++id)
+    // `as == nullptr` (kernel-AS shootdown) falls back to a full
+    // broadcast since the boot PML4 has no per-AS tracking.
+    u32 mask = 0;
+    if (as != nullptr)
     {
-        if (id == self_id)
-            continue;
-        cpu::PerCpu* peer = SmpGetPercpu(id);
-        if (peer == nullptr)
-            continue;
-        ++target_count;
+        mask = __atomic_load_n(&as->active_cpu_mask, __ATOMIC_ACQUIRE);
     }
-    if (target_count == 0)
+    else
+    {
+        for (u32 id = 0; id < limit; ++id)
+        {
+            cpu::PerCpu* peer = SmpGetPercpu(id);
+            if (peer != nullptr)
+                mask |= (1u << (id & 31u));
+        }
+    }
+    // Don't IPI ourselves.
+    mask &= ~(1u << (self_id & 31u));
+    if (mask == 0)
     {
         return;
     }
+    const u64 target_count = static_cast<u64>(__builtin_popcount(mask));
 
     g_tlb_request = &req;
 
-    // Fire IPIs to each peer. Same fixed-delivery shape as the
-    // reschedule IPI — no destination shorthand, exact LAPIC IDs so
-    // we know which CPUs we asked.
+    // Fire IPIs to each peer in the mask. Same fixed-delivery shape
+    // as the reschedule IPI — no destination shorthand, exact LAPIC
+    // IDs so we know which CPUs we asked.
     constexpr u32 kIcrDeliveryFixed = 0U << 8;
     constexpr u32 icr_low_base = kIcrDeliveryFixed | kIcrLevelAssert;
-    for (u32 id = 0; id < limit; ++id)
+    for (u32 id = 0; id < limit && mask != 0; ++id)
     {
-        if (id == self_id)
+        const u32 bit = 1u << (id & 31u);
+        if ((mask & bit) == 0)
             continue;
+        mask &= ~bit;
         cpu::PerCpu* peer = SmpGetPercpu(id);
         if (peer == nullptr)
             continue;
