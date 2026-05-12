@@ -313,15 +313,19 @@ add_test(NAME duetos-boot-smoke
 )
 set_tests_properties(duetos-boot-smoke PROPERTIES
     LABELS "smoke;boot;win32"
-    # 200s wall clock. The smoke driver's inner DUETOS_TIMEOUT
-    # defaults to 150s (bumped from 90s when the native-app
-    # spawn block + nat_calc + nat_sysinfo started pushing the
-    # post-smoke phase past 90s on slow CI hosts). The outer
-    # ctest TIMEOUT needs ~50s of headroom over the inner so the
-    # signature-verification pass can finish after QEMU exits.
+    # 720 s wall clock. The smoke driver's inner DUETOS_TIMEOUT
+    # adapts to the acceleration mode: 150 s when /dev/kvm is
+    # reachable (CI runners on bare metal — kernel completes the
+    # smoke in well under a minute), 600 s under TCG (dev
+    # workstations / unprivileged sandboxes — the JIT can't keep
+    # up with the storage stack's MMIO chatter). The outer ctest
+    # TIMEOUT needs headroom over whichever path runs so the
+    # signature-verification pass has time to finish after QEMU
+    # exits. 720 s = 600 s inner cap + 120 s harness headroom for
+    # the TCG path; KVM finishes long before either timer fires.
     # A hung kernel still trips the inner DUETOS_TIMEOUT first;
     # this only guards against the harness itself wedging.
-    TIMEOUT 200
+    TIMEOUT 720
     # Exit 2 from ctest-boot-smoke.sh means a prerequisite is
     # missing (qemu / iso) — CTEST should report SKIP rather
     # than FAIL. Mirrors the duetos-uefi-smoke convention.

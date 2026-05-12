@@ -91,20 +91,56 @@ esac
 SERIAL_LOG="${BIN_DIR}/ctest-smoke-serial.log"
 rm -f "${SERIAL_LOG}"
 
+# Build a per-test ISO with `pe-smokes=1` baked into the GRUB
+# cmdline. Without it, the kernel's `interactive_emu_boot` gate
+# (emulator + boot=desktop + !pe-smokes) silently skips
+# hello_pe / hello_winapi / winkill / native-app spawns to keep
+# the interactive `tools/qemu/run.sh` path fast on TCG. The boot-
+# smoke test, by contrast, EXISTS to verify those spawns — so we
+# explicitly opt back in. Mirrors run.sh's DUETOS_SMOKE_PROFILE
+# ISO sidecar pattern so the canonical grub.cfg / iso stay
+# untouched.
+SMOKE_ISO_STAGE="${BIN_DIR}/ctest-boot-smoke-iso-stage"
+SMOKE_ISO="${BIN_DIR}/ctest-boot-smoke.iso"
+rm -rf "${SMOKE_ISO_STAGE}"
+mkdir -p "${SMOKE_ISO_STAGE}/boot/grub"
+cp "${BIN_DIR}/kernel/iso-stage/boot/duetos-kernel.elf" "${SMOKE_ISO_STAGE}/boot/duetos-kernel.elf"
+cat > "${SMOKE_ISO_STAGE}/boot/grub/grub.cfg" <<EOF
+set timeout=0
+set default=0
+menuentry "DuetOS — boot smoke (pe-smokes opt-in)" {
+    multiboot2 /boot/duetos-kernel.elf boot=desktop autologin=1 pe-smokes=1
+    boot
+}
+EOF
+if command -v grub-mkrescue > /dev/null 2>&1; then
+    grub-mkrescue --compress=xz -o "${SMOKE_ISO}" "${SMOKE_ISO_STAGE}" > /dev/null 2>&1 || true
+fi
+
 # Boot. `|| true` so a non-zero exit from QEMU (e.g. timeout —
 # the kernel has no orderly shutdown path and run.sh will time
 # out after DUETOS_TIMEOUT seconds) doesn't mask our own
 # assertions. run.sh exits 124 on timeout.
-# Default bumped from 90s → 150s. QEMU TCG on a slower CI host
-# routinely needs ~70-90s just to reach the post-smoke phase
-# (kernel-heap + paging + SMP + smoke spawn + winkill PE +
-# native-app spawns). The 90s default left no headroom; CI runs
-# saw flaky "MISSING: Windows Kill" failures when winkill ran
-# slightly slower than usual. 150s is comfortable on every
-# host the project has tested on while still keeping the smoke
-# under 3 minutes wall-clock.
-DUETOS_TIMEOUT="${DUETOS_TIMEOUT:-150}" "${RUN_SCRIPT}" \
-    > "${SERIAL_LOG}" 2>&1 || true
+# Pick the inner timeout from the acceleration mode the run will
+# actually use. KVM completes the full smoke (kernel boot + PE
+# spawn + native-app spawns + signature emission) in well under
+# 60 s; TCG on the same host takes ~5-10× longer because the
+# JIT can't keep up with the storage stack's MMIO chatter. A
+# single 150 s budget was comfortable for KVM but routinely
+# timed out for TCG-only hosts (no /dev/kvm — dev workstations,
+# unprivileged sandboxes); split it explicitly so each path
+# gets headroom without the other paying for it.
+if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+    DEFAULT_INNER_TIMEOUT=150
+else
+    DEFAULT_INNER_TIMEOUT=600
+fi
+# DUETOS_SMOKE_ISO is consumed by run.sh as an override of the
+# canonical ISO_IMAGE; this lets us swap in the pe-smokes=1
+# sidecar without forking the run-launch helper.
+DUETOS_TIMEOUT="${DUETOS_TIMEOUT:-${DEFAULT_INNER_TIMEOUT}}" \
+DUETOS_SMOKE_ISO="${SMOKE_ISO}" \
+    "${RUN_SCRIPT}" > "${SERIAL_LOG}" 2>&1 || true
 
 # Expected signatures — every ring3 smoke probe prints its own
 # line. See kernel/proc/ring3_smoke.cpp.
