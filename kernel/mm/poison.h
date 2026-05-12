@@ -82,10 +82,21 @@ inline void PoisonSlabFreedObject(void* obj, u64 obj_size, u64 link_bytes)
         return;
     }
     auto* p = static_cast<u8*>(obj) + link_bytes;
-    const u64 n = obj_size - link_bytes;
-    for (u64 i = 0; i < n; ++i)
+    u64 n = obj_size - link_bytes;
+    // 8-byte chunked stamp via a u64 pattern. Slab objects are
+    // aligned to >= 8 bytes (slab.cpp guarantees this) so the
+    // u64* store is safe without an alignment prologue.
+    constexpr u64 kPatternWord = 0xCCCCCCCCCCCCCCCCULL;
+    while (n >= 8)
     {
-        p[i] = kSlabFreedObjectPoison;
+        *reinterpret_cast<u64*>(p) = kPatternWord;
+        p += 8;
+        n -= 8;
+    }
+    while (n != 0)
+    {
+        *p++ = kSlabFreedObjectPoison;
+        --n;
     }
 }
 
@@ -101,7 +112,32 @@ inline u64 CheckSlabFreedObjectPoison(const void* obj, u64 obj_size, u64 link_by
     }
     const auto* p = static_cast<const u8*>(obj) + link_bytes;
     const u64 n = obj_size - link_bytes;
-    for (u64 i = 0; i < n; ++i)
+    // 8-byte chunked compare: a clean object is the dominant case,
+    // so the bulk loop short-circuits on the FIRST mismatched word
+    // and the byte-precise offset is recovered from the trailing
+    // bytes of that word. Slab alignment >= 8 lets us load u64
+    // without a head fixup.
+    constexpr u64 kPatternWord = 0xCCCCCCCCCCCCCCCCULL;
+    u64 i = 0;
+    while (i + 8 <= n)
+    {
+        if (*reinterpret_cast<const u64*>(p + i) != kPatternWord)
+        {
+            // Word-level mismatch — pinpoint the byte.
+            for (u64 j = 0; j < 8; ++j)
+            {
+                if (p[i + j] != kSlabFreedObjectPoison)
+                {
+                    return link_bytes + i + j;
+                }
+            }
+            // Unreachable: the u64 compare said mismatch, the
+            // byte walk must find it.
+            return link_bytes + i;
+        }
+        i += 8;
+    }
+    for (; i < n; ++i)
     {
         if (p[i] != kSlabFreedObjectPoison)
         {

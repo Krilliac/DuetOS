@@ -22,6 +22,15 @@ namespace duetos::core
 
 u64 RequiredCapMask(u64 syscall_number)
 {
+    // Most syscalls aren't in the cap table — the handler enforces
+    // its own auth (e.g. SYS_PROCESS_OPEN cap-checks foreign PIDs
+    // only). Bail without walking the table when the number is
+    // outside the known range. Single compare on the common path
+    // vs 24-row linear scan.
+    if (syscall_number < kSyscallCapTableMin || syscall_number > kSyscallCapTableMax)
+    {
+        return 0;
+    }
     for (u32 i = 0; i < kSyscallCapTableCount; ++i)
     {
         if (kSyscallCapTable[i].nr == syscall_number)
