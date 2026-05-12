@@ -8641,3 +8641,232 @@ a real C++ caller now goes through its FFI.
   `StealNormalFromPeer`'s post-split design.
 - **Related roadmap track(s):** Topology-driven follow-ons (now
   one item left: cluster-broadcast IPIs).
+
+---
+
+## 2026-05-12 — SMBIOS table walker lifted to Rust (`duetos_smbios`)
+
+- **Scope:** New `kernel/arch/x86_64/smbios_rust/` crate (Cargo.toml,
+  `src/lib.rs`, `include/smbios_rust.h`).
+  `kernel/arch/x86_64/smbios.cpp` refactored to delegate every
+  byte-level decode to the crate; the C++ side keeps the legacy-BIOS
+  scan window (`PhysToVirt` of `0xF0000..0x100000` in 16-byte
+  strides), single-init guarding, summary-cache write-back, and the
+  boot-log line.
+- **Decision:** Promote SMBIOS entry-point + structure-table parsing
+  to a production Rust subsystem alongside ACPI / NTFS / exFAT /
+  ext4 / 802.11 / HCI. The crate exposes three FFI entry points:
+  `duetos_smbios_parse_entry_point` (validates `_SM_` 2.x or `_SM3_`
+  3.x anchor: signature, length, 8-bit additive checksum, table-
+  length cap), `duetos_smbios_parse_structure` (decodes the four-byte
+  header + walks the trailing strings region to a double-NUL
+  terminator with per-string + per-table caps), and
+  `duetos_smbios_read_string` (resolves a 1-based string index inside
+  the bounded strings region).
+- **Why this is its own surface:** The v0 C++ walker had two genuine
+  over-read paths in firmware-controlled bytes:
+  `NextStructure` walked raw memory past the last byte of the
+  declared `table_length` chasing a double-NUL terminator, and
+  `SmbiosString` chased NUL-terminated entries without any per-entry
+  cap. A buggy or hostile firmware that omits a terminator could
+  feed the BIOS scan window's tail bytes (or whatever followed in
+  the direct map) into the summary cache. Slice-bounded Rust catches
+  both — the FFI never sees a raw pointer past the declared
+  `table_length`, and each string entry is capped at
+  `SMBIOS_STRING_LENGTH_CAP = 1024` bytes (enough headroom for spec-
+  bounded fields, ~8× the largest real-world SMBIOS string).
+- **Caps:** Table length capped at 1 MiB (real tables are 1-50 KiB);
+  per-string length capped at 1 KiB. The 1 MiB ceiling keeps a
+  malformed firmware from making the walker spin for half a second
+  on every boot.
+- **3.x anchor preference:** When both `_SM_` and `_SM3_` appear at
+  the same scan position, the parser dispatches to the 3.x decoder
+  first because the 3.x anchor publishes a 64-bit table physical
+  address (the 2.x anchor's 32-bit pointer can't reach above 4 GiB
+  even when the firmware places the table there).
+- **What it rules out / defers:** Per-structure body decoders (BIOS
+  Info / System Info / Chassis / Processor) stay in C++ — they read
+  at fixed byte offsets within the Rust-validated bounded slice,
+  which is short enough that the win-vs-cost of porting individual
+  field offsets is too small to justify. UEFI runtime-services SMBIOS
+  configuration-table handoff stays deferred until the UEFI-direct
+  boot path lands — the legacy scan-window path covers Multiboot2
+  + QEMU + every real BIOS today.
+- **Tests:** 19 hosted unit tests in `smbios_rust/src/lib.rs::tests`
+  cover anchor decode (both revisions, bad signature, bad checksum,
+  missing `_DMI_`, oversize table, zero table, short buffer, 3.x-
+  preference), structure walking (minimal table round-trip, no-
+  strings record, malformed-length, length-overflows-table, no
+  double-NUL terminator, overlong unterminated string, end-of-table
+  with cropped trailer, type-1-at-EOF-without-trailer), and string
+  resolution (zero-index reject, out-of-range index).
+- **Revisit when:** UEFI runtime-services boot path lands — add a
+  `SmbiosInitFromConfigTable(u64 va)` overload that bypasses the
+  scan window and feeds the entry-point bytes directly to
+  `duetos_smbios_parse_entry_point`.
+- **Related roadmap track(s):** Rust bring-up — fourteenth production
+  crate. ACPI/SMBIOS/PCI capability-table P2 row in
+  [`Rust-Subsystems`](../tooling/Rust-Subsystems.md) — SMBIOS lifted;
+  PCI-extended capabilities remain in C++ pending real-workload
+  signal.
+
+---
+
+## 2026-05-12 — PCI/PCIe capability walkers + Multiboot2 walker lifted to Rust
+
+- **Scope:** Two new Rust crates land alongside the SMBIOS crate.
+  - `kernel/drivers/pci/caps_rust/` (`duetos_pci_caps`) — exposes
+    `parse_standard_cap_at` / `find_standard_cap` over the 8-bit
+    "next" chain at config-space offset 0x34, and
+    `parse_extended_cap_at` / `find_extended_cap` over the PCIe
+    12-bit "next" chain at ECAM offset 0x100.
+  - `kernel/mm/multiboot2_rust/` (`duetos_multiboot2`) — exposes
+    `parse_header`, `next_tag`, `parse_mmap`, and
+    `parse_mmap_entry` over the bootloader-controlled info struct.
+- **Decision:** Lift two more byte-walker subsystems to Rust as
+  part of the running "attacker-controlled bytes → validated
+  plan" pattern. With these two, sixteen production Rust crates
+  live in the kernel tree.
+  - **PCI caps:** the v0 C++ walker
+    (`PciFindCapability`) already had cycle protection and a hop
+    cap, but the offset arithmetic and "low two bits of pointer
+    are reserved" mask were the kind of thing that drifts in
+    review when a new caller comes along. The Rust walker
+    centralises that and adds the PCIe-extended-cap surface
+    (`PciFindExtCapability`) that the v0 C++ side never grew. C++
+    now materialises the device's 256-byte config space into a
+    flat buffer once per call (64 dword reads via the existing
+    `PciConfigRead32`), then hands the slice to Rust — the
+    Rust walker never touches the I/O ports, which is the right
+    boundary because port arbitration is a kernel-owned effect.
+  - **Multiboot2:** the v0 C++ walker
+    (`frame_allocator.cpp::ForEachMmapEntry`) trusted the
+    bootloader's `total_size` and `tag->size` fields without an
+    explicit upper bound — a hostile bootloader could publish a
+    `total_size` of `0xFFFF_FFFF` and a runaway tag chain. The
+    Rust walker caps `total_size` at 64 MiB (real GRUB blocks are
+    ~1 KiB), rejects malformed tag sizes, and rejects mmap-entry
+    `base + length` arithmetic overflow.
+- **Why this is the right shape:**
+  - **PCI** is hardware-controlled config bytes. A device choosing
+    to advertise an unaligned / cycling / out-of-range cap pointer
+    is exactly the bug shape that turns a parser into an
+    arbitrary-MMIO-read primitive.
+  - **Multiboot2** is bootloader-controlled bytes that arrive
+    before paging is fully set up. A walker bug here can become
+    the kind of pre-paging memory disclosure that's hard to even
+    log against.
+- **What the crates do NOT do:**
+  - The PCI crate does not decode per-capability bodies (MSI table
+    fields, AER status registers, etc.). The C++ driver still
+    reads bit-level fields at known offsets within the bounded
+    slice the walker validated.
+  - The Multiboot2 crate does not decode framebuffer / ACPI-RSDP /
+    cmdline tag bodies. The C++ side reads those at fixed offsets
+    within the tag's validated slice.
+- **`PciFindExtCapability` is wired but disarmed v0:** legacy
+  I/O-port config-space reads only address the first 256 bytes;
+  the extended cap chain lives at offset 0x100+ in ECAM. The
+  v0 stub returns 0 unconditionally. A future slice that adds an
+  MMCONFIG-routed read primitive (`PciEcamRead*`) materialises
+  the device's full 4 KiB ECAM into a buffer and calls
+  `duetos_pci_caps_find_extended` on it — the Rust walker is
+  already there. The point of landing the entry point now is to
+  pin the FFI contract so downstream drivers can be written
+  against it.
+- **Tests:** 32 hosted unit tests across the two crates.
+  - `caps_rust` (17 tests): standard chain happy path
+    (find MSI-X), missing cap, no-caps-present, self-loop, out-of-
+    range next, unaligned low-bit mask, head-below-floor, ext-cap
+    chain happy path (find AER / SR-IOV), ext-cap missing, all-
+    zero ECAM head ("no ext caps"), ext-cap self-loop, unaligned
+    ext-cap next, oversize ext-cap next, short config slice, and
+    out-of-bounds offset for parse-at.
+  - `multiboot2_rust` (15 tests): header round-trip, oversize
+    total, short buffer, zero size, total exceeds slice, walk
+    minimal info finds mmap then end, tag short size, tag
+    overruns slice, low-offset tag, mmap unsupported version,
+    mmap bad entry size, mmap entry base+length overflow, short
+    mmap-entry buffer, zero-length entry accepted, alignment-
+    padding observed.
+- **Revisit when:**
+  - First PCIe driver wants AER / ATS / SR-IOV → add MMCONFIG-
+    routed `PciEcamRead*` + the four-line `PciFindExtCapability`
+    body that calls it.
+  - UEFI direct-boot path replaces Multiboot2 → the same Rust
+    walker pattern applies to the EFI configuration-table walk;
+    factor out the slice-bounded "find-tag-by-GUID" pattern
+    into a sibling crate if the surface justifies it.
+- **Related roadmap track(s):** Rust bring-up — fifteenth and
+  sixteenth production crates. ACPI/SMBIOS/PCI capability-table
+  P2 row in [`Rust-Subsystems`](../tooling/Rust-Subsystems.md) —
+  now fully addressed; the PCI half lands here.
+
+---
+
+## 2026-05-12 — JPEG header validator added to img_meta_rust
+
+- **Scope:** New `parse_jpeg_header` function in
+  `kernel/util/img_meta_rust/src/lib.rs` exporting
+  `duetos_img_meta_parse_jpeg` over a new `DuetosJpegInfo` C-ABI
+  struct. New `kernel/util/jpeg.{h,cpp}` exposing the C++ wrapper
+  `JpegParseHeader` in the same shape as `PngParseHeader` /
+  `BmpParseHeader` / `TgaParseHeader`.
+- **Decision:** Extend the existing PNG / BMP / TGA family with
+  the natural fourth member. JPEG header validation matches the
+  same "attacker-controlled bytes → validated dimensions"
+  contract that already justifies the other three: the SOI
+  marker, segment-length fields, SOF body shape, and SOS-before-
+  SOF ordering are all fixed-size validation surfaces a hostile
+  file can use to inject mis-sized lengths, out-of-range
+  component counts, or oversize dimensions.
+- **Scope inside the validator:**
+  - SOI marker (`FFD8`) recognition at offset 0.
+  - Segment hop over all length-bearing markers, including
+    APP0 / APP1 / APP2 / DQT / DRI / COM, until the first SOF
+    marker is found.
+  - Stand-alone marker handling (SOI / EOI / TEM / RST0..RST7
+    don't carry a length field — the walker treats them
+    correctly).
+  - Fill-byte (0xFF padding before a real marker) tolerated
+    per ISO/IEC 10918-1 Annex B.1.1.2.
+  - SOF body decode: precision (8 / 12 / 16), height (u16 BE),
+    width (u16 BE), components (1 / 3 / 4). Other values reject.
+  - 16384 × 16384 dimension cap to match the other img_meta
+    parsers.
+- **Out of scope (deliberate):**
+  - JPEG decoder itself. The Huffman / DCT / dequantisation /
+    IDCT / colour-conversion passes are several thousand lines
+    and we'd want a real consumer (image viewer, thumbnail
+    cache, wallpaper format extension) before paying that cost.
+  - EXIF tag walking. The validator hops past APP1 without
+    reading its body.
+  - JPEG-2000 / JPEG-XL / arithmetic-coded JPEG.
+- **No current C++ caller — speculative-but-paired-with-tools:**
+  The end-user-features Roadmap lists "PNG / JPEG / PDF / video
+  viewers" as a deferred surface. When that lands, the viewer
+  doesn't have to write the validator from scratch; it has the
+  same Rust-side primitive PNG / BMP / TGA do today. This is the
+  one case where we ship a Rust function without a current C++
+  caller — justified because the C++ wrapper `JpegParseHeader`
+  is in tree and ready, the FFI contract is pinned, and the
+  validator is bounded (no decoder, no allocations, no internal
+  state). A future viewer adding the validator's call site is a
+  pure additive change.
+- **Tests:** 13 new hosted cases in
+  `img_meta_rust/src/lib.rs::tests`, bringing the crate's test
+  count from 25 to 38: baseline SOF0 round-trip, progressive
+  SOF2 round-trip, grayscale (1 component), bad SOI, too short,
+  zero dimension, overlong dimension (`JPEG_MAX_DIM + 1`),
+  invalid component count (2), DHT-marker-in-SOF-range hopped
+  past correctly, segment length overruns buffer, SOS-before-
+  SOF rejected, fill-byte padding tolerated, segment length
+  below 2 rejected.
+- **Revisit when:** A JPEG decoder lands. The validator's
+  `sof_marker` field already distinguishes baseline (`0xC0`)
+  from progressive (`0xC2`) etc., so the decoder can route by
+  frame type without re-parsing the SOF.
+- **Related roadmap track(s):** Rust bring-up — production crate
+  expansion (img_meta_rust grows from 3 to 4 image-format
+  validators). End-user-features "PNG / JPEG / PDF / video
+  viewers" — JPEG now has its header foundation.

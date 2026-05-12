@@ -37,10 +37,11 @@
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/lapic.h"
 #include "arch/x86_64/serial.h"
-#include "log/klog.h"
-#include "diag/log_names.h"
 #include "core/panic.h"
+#include "diag/log_names.h"
+#include "log/klog.h"
 #include "mm/paging.h"
+#include "pci_caps_rust.h"
 #include "sync/spinlock.h"
 
 namespace duetos::drivers::pci
@@ -462,37 +463,68 @@ void PciMsixFunctionUnmask(DeviceAddress addr)
     return out;
 }
 
+namespace
+{
+
+// Materialise the 256-byte standard configuration space of a
+// device into a stack buffer, then hand the slice to the Rust
+// walker. Reading via the I/O-port accessors is the only way to
+// hit the device's config registers; reading them once into a
+// flat buffer (a) gives Rust a real `&[u8]` to bounds-check
+// against, and (b) avoids paying for any byte twice if the
+// device's chain walker reads each byte more than once.
+void MaterialiseStandardConfig(DeviceAddress addr, u8* dst)
+{
+    for (u64 dword = 0; dword < 64; ++dword)
+    {
+        const u32 v = PciConfigRead32(addr, static_cast<u8>(dword * 4));
+        dst[dword * 4 + 0] = static_cast<u8>(v & 0xFFU);
+        dst[dword * 4 + 1] = static_cast<u8>((v >> 8) & 0xFFU);
+        dst[dword * 4 + 2] = static_cast<u8>((v >> 16) & 0xFFU);
+        dst[dword * 4 + 3] = static_cast<u8>((v >> 24) & 0xFFU);
+    }
+}
+
+} // namespace
+
 u8 PciFindCapability(DeviceAddress addr, u8 cap_id)
 {
-    // Status register bit 4 at offset 0x06 == "Capabilities List present".
+    // Status register bit 4 at offset 0x06 == "Capabilities List
+    // present". The Rust walker re-checks the head pointer, but
+    // an early "no caps" return is faster than materialising the
+    // whole 256-byte config.
     const u16 status = PciConfigRead16(addr, 0x06);
     if ((status & (1U << 4)) == 0)
     {
         return 0;
     }
 
-    // First capability pointer lives at 0x34 (header-0) or 0x14 for
-    // CardBus bridges. We only handle header-0 devices today — caller
-    // should not pass bridges with type != 0. Low two bits of the
-    // pointer are reserved and must be masked off.
-    u8 cursor = PciConfigRead8(addr, 0x34) & 0xFC;
+    u8 config[256] = {};
+    MaterialiseStandardConfig(addr, config);
 
-    // Bounded walk: a malformed device could produce a cycle;
-    // terminate after 48 hops (any real device has fewer than that).
-    for (int i = 0; i < 48 && cursor != 0; ++i)
+    ::duetos::drivers::pci::caps_rust::DuetosPciCap out = {};
+    if (::duetos::drivers::pci::caps_rust::duetos_pci_caps_find_standard(config, sizeof(config), cap_id, &out))
     {
-        const u8 id = PciConfigRead8(addr, cursor);
-        if (id == cap_id)
-        {
-            return cursor;
-        }
-        const u8 next = PciConfigRead8(addr, static_cast<u8>(cursor + 1)) & 0xFC;
-        if (next == cursor)
-        {
-            break; // self-loop; give up silently
-        }
-        cursor = next;
+        return static_cast<u8>(out.offset);
     }
+    return 0;
+}
+
+u16 PciFindExtCapability(DeviceAddress addr, u16 ext_cap_id)
+{
+    // PCIe extended caps live in ECAM (offset 0x100+). The legacy
+    // I/O-port mechanism (PORT_CONFIG_ADDRESS) only addresses the
+    // first 256 bytes; without an MMCONFIG mapping for this device
+    // we can't read the extended chain. Return 0 to signal "no
+    // ext-cap surface" so callers fall back to whatever path
+    // doesn't require AER / SR-IOV / ATS.
+    //
+    // A future slice that adds an MMCONFIG-routed read primitive
+    // (PciEcamRead*) would materialise [0..4096] into a 4 KiB
+    // buffer and call duetos_pci_caps_find_extended on it; the
+    // Rust walker doesn't care which path the bytes came from.
+    (void)addr;
+    (void)ext_cap_id;
     return 0;
 }
 

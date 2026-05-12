@@ -316,7 +316,11 @@ pub extern "C" fn duetos_usbhid_parse_descriptor(
                     // HID reports never exceed a few hundred fields per
                     // collection; 4096 is far past anything legitimate.
                     const MAX_REPORT_COUNT: u32 = 4096;
-                    gs.report_count = if data > MAX_REPORT_COUNT { MAX_REPORT_COUNT } else { data };
+                    gs.report_count = if data > MAX_REPORT_COUNT {
+                        MAX_REPORT_COUNT
+                    } else {
+                        data
+                    };
                 }
                 GLOBAL_REPORT_ID => {
                     gs.report_id = data;

@@ -151,11 +151,24 @@ constexpr u8 kPciCapMsi = 0x05;
 constexpr u8 kPciCapPcie = 0x10;
 constexpr u8 kPciCapMsix = 0x11;
 
-/// Find the first capability with the given ID. Returns the config-
-/// space offset where that capability's header lives (always non-
-/// zero for the low 16 reserved offsets), or 0 if not found / no
-/// capabilities list present.
+/// Find the first standard capability with the given ID. Returns
+/// the config-space offset where that capability's header lives
+/// (always non-zero for the low 16 reserved offsets), or 0 if not
+/// found / no capabilities list present.
 u8 PciFindCapability(DeviceAddress addr, u8 cap_id);
+
+/// Find the first PCIe extended capability with the given ID
+/// (offset 0x100+ in ECAM). Returns the offset where the cap
+/// header lives, or 0 if the chain doesn't carry that cap,
+/// nothing's in the extended region, or the device isn't reachable
+/// via MMCONFIG (legacy I/O-port reads can't see past 0xFF, so we
+/// return 0 unconditionally on the legacy path).
+///
+/// Common ext-cap IDs:
+///   0x0001 — Advanced Error Reporting (AER)
+///   0x000F — Address Translation Services (ATS)
+///   0x0010 — Single-Root I/O Virtualization (SR-IOV)
+u16 PciFindExtCapability(DeviceAddress addr, u16 ext_cap_id);
 
 // -----------------------------------------------------------------
 // MSI-X routing helpers.

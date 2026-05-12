@@ -146,8 +146,11 @@ dependencies = [
  "duetos_ext4",
  "duetos_hci",
  "duetos_img_meta",
+ "duetos_multiboot2",
  "duetos_net_parsers",
  "duetos_ntfs",
+ "duetos_pci_caps",
+ "duetos_smbios",
  "duetos_usb_msc_scsi",
  "duetos_wifi80211",
  "usbclass",
@@ -155,11 +158,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "duetos_multiboot2"
+version = "0.0.1"
+
+[[package]]
 name = "duetos_net_parsers"
 version = "0.0.1"
 
 [[package]]
 name = "duetos_ntfs"
+version = "0.0.1"
+
+[[package]]
+name = "duetos_pci_caps"
+version = "0.0.1"
+
+[[package]]
+name = "duetos_smbios"
 version = "0.0.1"
 
 [[package]]

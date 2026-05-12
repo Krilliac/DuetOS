@@ -1,0 +1,64 @@
+# DuetOS PCI / PCIe capability list walkers.
+#
+# Walks the two attacker-controlled capability chains a PCI device
+# exposes through its configuration space:
+#
+#   - Standard capability list (8-bit "next" pointers, head at
+#     offset 0x34). Holds Power Management, MSI, MSI-X, PCIe, AF,
+#     SATA HBA-specific, and a few others. Used by every modern
+#     PCI driver in the kernel for MSI-X probe.
+#
+#   - PCIe extended capability list (12-bit "next" pointers, head
+#     at offset 0x100). Holds Advanced Error Reporting (AER),
+#     Address Translation Services (ATS), Single-Root I/O
+#     Virtualization (SR-IOV), Latency Tolerance Reporting, and
+#     so on. Today's kernel does not walk this; future driver
+#     features that need any of these will use the new
+#     `PciFindExtCapability` C++ entry point that delegates here.
+#
+# The risk surface is the same in both chains: a malicious or
+# buggy device can choose arbitrary "next" pointers, including
+# self-loops, chains longer than 256 entries (the upper bound on
+# standard config space), out-of-range pointers, or unaligned
+# offsets. A C-side walker that drops a bounds check anywhere on
+# the path can become an arbitrary MMIO read primitive. Slice-
+# bounded Rust catches all four shapes — the FFI sees a
+# `config[0..4096]` byte slice the caller has already mapped via
+# the kernel's ECAM helpers, and every pointer read clamps to that
+# slice.
+#
+# Scope (v0):
+#   - parse_standard_cap_at — decode one cap header at offset `off`.
+#     Returns (id, next_offset). Catches unaligned / out-of-range
+#     next pointers and self-loops.
+#   - find_standard_cap — walk the standard chain looking for a
+#     given cap_id, returning the first matching offset.
+#   - parse_extended_cap_at — decode one PCIe extended cap header
+#     (32-bit: ID:16 | rev:4 | next:12). Catches the same
+#     malformed-shapes as the standard walker.
+#   - find_extended_cap — walk the extended chain (offset 0x100+)
+#     for a given ext_cap_id.
+#
+# Not in scope (v0):
+#   - Per-capability body decoders (MSI table fields, AER status
+#     bits, etc). Drivers already do this with bit-level reads at
+#     known config-space offsets within the bounded slice the
+#     walker validated.
+#   - Vendor-specific (`VSEC`) extended capabilities. The walker
+#     skips them; a future caller wanting VSEC payloads can read
+#     past the 4-byte ECAP header itself.
+
+[package]
+name = "duetos_pci_caps"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "DuetOS PCI + PCIe capability list walkers"
+
+[lib]
+name = "duetos_pci_caps"
+crate-type = ["rlib"]
+
+[lints]
+workspace = true
