@@ -880,10 +880,22 @@ struct Process
     {
         bool in_use;
         u8 _pad[3];
-        u32 protection;     // raw Win32 flProtect (PAGE_*)
+        u32 protection;     // raw Win32 flProtect (PAGE_*) — last value set
         u64 base_va;        // 0 = slot free
         u32 pages;          // total pages in the reservation
         u32 committed_bits; // bit i set = page i is committed (mapped to a frame)
+        // PAGE_GUARD per-page bitmap. Bit i set = page i is guard-armed
+        // (mapped no-Writable so the next write traps). The page-fault
+        // handler in `kernel/arch/x86_64/traps.cpp` consults this
+        // bitmap on every ring-3 #PF; on hit it clears the bit,
+        // restores the underlying protection encoded in
+        // `protection` (with PAGE_GUARD stripped), and returns so the
+        // faulting instruction retries — one-shot guard semantics
+        // matching the Win32 contract. Full STATUS_GUARD_PAGE_VIOLATION
+        // delivery is gated on T6-02 (x64 SEH); v0 silently re-arms
+        // the access, which still serves the common stack-grow probe
+        // use-case (the next push succeeds after the first fault).
+        u32 guard_bits;
     };
     static constexpr u64 kWin32VmapRegionCap = 16;
     static constexpr u32 kWin32VmapRegionPagesMax = 32;

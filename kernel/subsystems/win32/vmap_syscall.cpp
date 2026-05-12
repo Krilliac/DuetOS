@@ -133,10 +133,18 @@ constexpr u64 kPageGuard = 0x100;
 // because we can't fully clear Present without confusing the
 // region tracker. v0 enforces W^X: any *EXECUTE* protection is
 // rejected here (vmap pages stay NX).
-bool Win32ProtToPageFlags(u64 prot, u64& out_flags)
+//
+// PAGE_GUARD combos (e.g. PAGE_READWRITE | PAGE_GUARD) are
+// recognised: out_is_guard is set true and out_flags is forced
+// to the NOACCESS shape (no Writable) so the first touch traps.
+// The fault handler then strips the guard bit and re-applies the
+// base protection via `Win32VmapPageGuardClear` (see below).
+bool Win32ProtToPageFlags(u64 prot, u64& out_flags, bool& out_is_guard)
 {
+    out_is_guard = (prot & kPageGuard) != 0;
+    const u64 base = prot & ~kPageGuard;
     out_flags = mm::kPagePresent | mm::kPageUser | mm::kPageNoExecute;
-    switch (prot)
+    switch (base)
     {
     case kPageNoAccess:
         // Closest we can get without confusing the region tracker.
@@ -145,9 +153,14 @@ bool Win32ProtToPageFlags(u64 prot, u64& out_flags)
         // Present too.
         return true;
     case kPageReadOnly:
+        // If guard-armed, keep the no-Writable shape. Otherwise the
+        // user explicitly asked for read-only.
         return true;
     case kPageReadWrite:
-        out_flags |= mm::kPageWritable;
+        // Guard-armed: drop the Writable bit so the first write
+        // faults. Otherwise install Writable as usual.
+        if (!out_is_guard)
+            out_flags |= mm::kPageWritable;
         return true;
     case kPageExecute:
     case kPageExecuteRead:
@@ -155,11 +168,16 @@ bool Win32ProtToPageFlags(u64 prot, u64& out_flags)
         // W^X — refuse any executable mapping in the heap arena.
         return false;
     default:
-        // Unknown protection bits (PAGE_GUARD combos, etc.) — refuse.
-        if ((prot & kPageGuard) != 0)
-            return false;
+        // Unrecognised protection bit combination.
         return false;
     }
+}
+
+// Back-compat shim for callers that don't need the guard bit.
+bool Win32ProtToPageFlags(u64 prot, u64& out_flags)
+{
+    bool unused = false;
+    return Win32ProtToPageFlags(prot, out_flags, unused);
 }
 
 // Find an existing region whose [base_va, base_va + pages*4096)
@@ -266,7 +284,8 @@ void DoVirtualAlloc(arch::TrapFrame* frame)
     }
 
     u64 page_flags = 0;
-    if (!Win32ProtToPageFlags(protection, page_flags))
+    bool is_guard = false;
+    if (!Win32ProtToPageFlags(protection, page_flags, is_guard))
     {
         frame->rax = 0;
         return;
@@ -302,6 +321,10 @@ void DoVirtualAlloc(arch::TrapFrame* frame)
             return;
         }
         r.protection = static_cast<u32>(protection);
+        if (is_guard)
+            r.guard_bits |= commit_mask;
+        else
+            r.guard_bits &= ~commit_mask;
         frame->rax = r.base_va;
         return;
     }
@@ -326,6 +349,7 @@ void DoVirtualAlloc(arch::TrapFrame* frame)
     r.pages = pages;
     r.protection = static_cast<u32>(protection);
     r.committed_bits = 0;
+    r.guard_bits = 0;
     proc->vmap_pages_used += pages;
 
     if (reserve_and_commit)
@@ -342,9 +366,12 @@ void DoVirtualAlloc(arch::TrapFrame* frame)
             r.pages = 0;
             r.protection = 0;
             r.committed_bits = 0;
+            r.guard_bits = 0;
             frame->rax = 0;
             return;
         }
+        if (is_guard)
+            r.guard_bits = mask;
     }
     frame->rax = r.base_va;
 }
@@ -450,7 +477,8 @@ void DoVirtualProtect(arch::TrapFrame* frame)
     auto& r = proc->vmap_regions[idx];
 
     u64 new_flags = 0;
-    if (!Win32ProtToPageFlags(new_prot, new_flags))
+    bool is_guard = false;
+    if (!Win32ProtToPageFlags(new_prot, new_flags, is_guard))
     {
         frame->rax = 0;
         return;
@@ -475,15 +503,56 @@ void DoVirtualProtect(arch::TrapFrame* frame)
         }
     }
 
+    u32 touched_mask = 0;
     for (u32 i = 0; i < pages; ++i)
     {
         const u32 page_idx = static_cast<u32>(first_page) + i;
         if ((r.committed_bits & (1u << page_idx)) == 0)
             continue; // not committed — protection is a future-on-commit hint
         ::duetos::mm::AddressSpaceProtectUserPage(proc->as, r.base_va + page_idx * mm::kPageSize, new_flags);
+        touched_mask |= (1u << page_idx);
     }
     r.protection = static_cast<u32>(new_prot);
+    // Guard bookkeeping: any page just touched gets its guard bit
+    // set or cleared in line with the new protection. Pages outside
+    // the touched range keep whatever guard state they had — the
+    // user only addressed a subrange, so their bits stay put.
+    if (is_guard)
+        r.guard_bits |= touched_mask;
+    else
+        r.guard_bits &= ~touched_mask;
     frame->rax = 1;
+}
+
+bool Win32VmapPageGuardClear(u64 cr2)
+{
+    using ::duetos::core::Process;
+    Process* proc = ::duetos::core::CurrentProcess();
+    if (proc == nullptr)
+        return false;
+    const u64 idx = FindRegionContaining(proc, cr2);
+    if (idx == Process::kWin32VmapRegionCap)
+        return false;
+    auto& r = proc->vmap_regions[idx];
+    const u64 page_off = (cr2 - r.base_va) / mm::kPageSize;
+    if (page_off >= r.pages)
+        return false;
+    const u32 page_idx = static_cast<u32>(page_off);
+    if ((r.guard_bits & (1u << page_idx)) == 0)
+        return false; // not guard-armed
+    if ((r.committed_bits & (1u << page_idx)) == 0)
+        return false; // uncommitted — fault is legitimate
+    // Strip the guard bit from the stored protection and re-derive
+    // the page flags. If translation rejects (shouldn't — the base
+    // was validated at alloc/protect time), bail and let the normal
+    // fault path handle the access.
+    const u64 base_prot = static_cast<u64>(r.protection) & ~kPageGuard;
+    u64 base_flags = 0;
+    if (!Win32ProtToPageFlags(base_prot, base_flags))
+        return false;
+    ::duetos::mm::AddressSpaceProtectUserPage(proc->as, r.base_va + page_idx * mm::kPageSize, base_flags);
+    r.guard_bits &= ~(1u << page_idx);
+    return true;
 }
 
 } // namespace duetos::subsystems::win32
