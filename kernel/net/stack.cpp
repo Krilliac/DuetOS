@@ -45,6 +45,7 @@
 #include "core/panic.h"
 #include "drivers/net/net.h"
 #include "sched/sched.h"
+#include "util/string.h"
 
 namespace duetos::net
 {
@@ -249,10 +250,8 @@ bool SendArpRequest(u32 iface_index, Ipv4Address target_ip)
     }
 
     u8 req[42] = {};
-    for (u64 i = 0; i < 6; ++i)
-        req[i] = 0xFF; // Ethernet broadcast
-    for (u64 i = 0; i < 6; ++i)
-        req[6 + i] = ifc.mac.octets[i];
+    memset(req, 0xFF, 6); // Ethernet broadcast dst
+    memcpy(req + 6, ifc.mac.octets, 6);
     req[12] = 0x08;
     req[13] = 0x06; // ARP
     req[14] = 0x00;
@@ -263,12 +262,9 @@ bool SendArpRequest(u32 iface_index, Ipv4Address target_ip)
     req[19] = 0x04;
     req[20] = 0x00;
     req[21] = 0x01; // request
-    for (u64 i = 0; i < 6; ++i)
-        req[22 + i] = ifc.mac.octets[i];
-    for (u64 i = 0; i < 4; ++i)
-        req[28 + i] = ifc.ip.octets[i];
-    for (u64 i = 0; i < 4; ++i)
-        req[38 + i] = target_ip.octets[i];
+    memcpy(req + 22, ifc.mac.octets, 6);
+    memcpy(req + 28, ifc.ip.octets, 4);
+    memcpy(req + 38, target_ip.octets, 4);
 
     ++g_arp_stats.tx_requests;
     const bool ok = IfaceTx(iface_index, req, sizeof(req));
@@ -470,8 +466,7 @@ void NetStackInit()
         const u64 baseline_rx_udp = Ipv4StatsRead().rx_udp;
         u8 frame[14 + 20 + 8] = {}; // eth + ip + udp
         // Ethernet.
-        for (u64 i = 0; i < 6; ++i)
-            frame[i] = 0xFF; // dst = bcast
+        memset(frame, 0xFF, 6); // dst = bcast
         frame[6] = 0x52;
         frame[7] = 0x54;
         frame[8] = 0x00;
@@ -537,9 +532,7 @@ void NetStackInit()
         {
             if (len > sizeof(s_last_tx))
                 return false;
-            const auto* b = static_cast<const u8*>(frame);
-            for (u64 i = 0; i < len; ++i)
-                s_last_tx[i] = b[i];
+            memcpy(s_last_tx, frame, len);
             s_last_tx_len = len;
             return true;
         }
@@ -555,10 +548,8 @@ void NetStackInit()
     {
         u8 req[42] = {};
         // Ethernet: broadcast dst, peer src, ARP ethertype.
-        for (u64 i = 0; i < 6; ++i)
-            req[i] = 0xFF;
-        for (u64 i = 0; i < 6; ++i)
-            req[6 + i] = peer_mac.octets[i];
+        memset(req, 0xFF, 6);
+        memcpy(req + 6, peer_mac.octets, 6);
         req[12] = 0x08;
         req[13] = 0x06;
         // ARP header: htype=1, ptype=0x0800, hlen=6, plen=4, oper=1.
@@ -570,13 +561,10 @@ void NetStackInit()
         req[19] = 0x04;
         req[20] = 0x00;
         req[21] = 0x01;
-        for (u64 i = 0; i < 6; ++i)
-            req[22 + i] = peer_mac.octets[i];
-        for (u64 i = 0; i < 4; ++i)
-            req[28 + i] = peer_ip.octets[i];
+        memcpy(req + 22, peer_mac.octets, 6);
+        memcpy(req + 28, peer_ip.octets, 4);
         // THA zeros, TPA = our test IP.
-        for (u64 i = 0; i < 4; ++i)
-            req[38 + i] = test_ip.octets[i];
+        memcpy(req + 38, test_ip.octets, 4);
 
         s_last_tx_len = 0;
         NetStackInjectRx(/*iface_index=*/1, req, sizeof(req));
@@ -1192,16 +1180,13 @@ bool Ipv4HandleIncoming(u32 iface_index, const void* frame, u64 len)
         const u64 reply_len = u64(total_len) + 14;
 
         // Ethernet: swap src/dst, ethertype = IPv4.
-        for (u64 i = 0; i < 6; ++i)
-            reply[i] = eth[6 + i]; // dst = incoming src
-        for (u64 i = 0; i < 6; ++i)
-            reply[6 + i] = ifc.mac.octets[i];
+        memcpy(reply, eth + 6, 6); // dst = incoming src
+        memcpy(reply + 6, ifc.mac.octets, 6);
         reply[12] = 0x08;
         reply[13] = 0x00;
 
         // Copy IPv4 header + ICMP payload.
-        for (u64 i = 0; i < total_len; ++i)
-            reply[14 + i] = ip[i];
+        memcpy(reply + 14, ip, total_len);
         // Swap src/dst addresses.
         u8* r_ip = reply + 14;
         for (u64 i = 0; i < 4; ++i)

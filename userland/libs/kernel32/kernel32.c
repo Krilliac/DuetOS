@@ -2171,6 +2171,9 @@ __declspec(dllexport) int GetDateFormatA(unsigned long lcid, DWORD flags, const 
         return needed;
     if (buf == (char*)0 || cchData < needed)
         return 0;
+    /* len is bounded by sizeof(tmp) (=32); the byte loop unrolls
+     * cleanly under -O2 and avoids a memcpy call into a libc the
+     * userland DLL doesn't link. */
     for (int i = 0; i < len; ++i)
         buf[i] = tmp[i];
     buf[len] = 0;
@@ -5381,11 +5384,9 @@ static void NormalizePathW(const wchar_t16* in, char* out, unsigned long out_cap
     out[ci] = '\0';
     /* Reuse the A-variant glob extract by copying through. */
     char tmp[64];
-    for (unsigned long i = 0; i < sizeof(tmp); ++i)
-        tmp[i] = 0;
+    __builtin_memset(tmp, 0, sizeof(tmp));
     NormalizePathA(out, tmp, sizeof(tmp), pattern_out, pat_cap);
-    for (unsigned long i = 0; i < sizeof(tmp); ++i)
-        out[i] = tmp[i];
+    __builtin_memcpy(out, tmp, sizeof(tmp));
 }
 
 /* Case-insensitive Win32 glob matcher. Honours '*' (match any

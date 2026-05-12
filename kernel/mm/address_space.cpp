@@ -554,10 +554,9 @@ AddressSpace* AddressSpaceFork(const AddressSpace* parent)
             return nullptr;
         }
         // Copy page contents through the direct-map alias.
-        const u8* src = static_cast<const u8*>(PhysToVirt(parent_frame));
-        u8* dst = static_cast<u8*>(PhysToVirt(child_frame));
-        for (u64 j = 0; j < kPageSize; ++j)
-            dst[j] = src[j];
+        const void* src = PhysToVirt(parent_frame);
+        void* dst = PhysToVirt(child_frame);
+        memcpy(dst, src, kPageSize);
         AddressSpaceMapUserPage(child, va, child_frame, flags);
     }
     return child;
