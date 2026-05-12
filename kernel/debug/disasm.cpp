@@ -1400,10 +1400,37 @@ u8 DecodeOne(const u8* bytes, u64 available, u64 va, DecodedInsn* out)
             record_bytes(cur);
             return cur;
         }
-        // GAP: remaining 0x0F-prefix opcodes (POPCNT/LZCNT under
-        // 0xF3 prefix, MOVNT*, SSE/AVX) decode as `db` until they
-        // earn a slice.
-        FIX_NOTE_GAP("debug/disasm.cpp:0x0F-prefix", "decode POPCNT/LZCNT/MOVNT/SSE");
+        // F3 0F B8 / F3 0F BD: POPCNT / LZCNT r{16,32,64},
+        // r/m{16,32,64}. Same opcode shape; the F3 REP prefix
+        // distinguishes them from BSWAP family. The 0F B8 base
+        // is JMP-far in real mode and unused in long mode, so
+        // when the REP prefix is present we read it as POPCNT.
+        // 0F BD without F3 is BSR (handled above); with F3 it's
+        // LZCNT.
+        if (p.rep && (op2 == 0xB8 || op2 == 0xBD))
+        {
+            if (cur >= available)
+                return fail_db(op);
+            const ModRm mr = DecodeModRmByte(bytes[cur], p);
+            ++cur;
+            const OpW w = GprWidth(p, false);
+            char rm_buf[48] = {0};
+            const u8 rm_extra = FormatRmOperand(rm_buf, sizeof(rm_buf), mr, w, w, p, &bytes[cur], available - cur);
+            if (rm_extra == 0xFF)
+                return fail_db(op);
+            cur += rm_extra;
+            StrCopy(out->mnemonic, kBufMnem, op2 == 0xB8 ? "popcnt" : "lzcnt");
+            StrAppend(out->operands, kBufOpr, RegName(mr.reg_idx, w, p.rex_seen));
+            StrAppend(out->operands, kBufOpr, ", ");
+            StrAppend(out->operands, kBufOpr, rm_buf);
+            out->len = cur;
+            out->decoded = true;
+            record_bytes(cur);
+            return cur;
+        }
+        // GAP: remaining 0x0F-prefix opcodes (MOVNT*, SSE/AVX,
+        // PSHUF/PUNPCK etc.) decode as `db` until they earn a slice.
+        FIX_NOTE_GAP("debug/disasm.cpp:0x0F-prefix", "decode MOVNT/SSE/AVX");
         return fail_db(op);
     }
 
@@ -1484,6 +1511,8 @@ bool SelfTest()
         0x0F, 0xB1, 0xCB,                         // cmpxchg ebx, ecx
         0x48, 0x0F, 0xC1, 0xCB,                   // xadd rbx, rcx
         0x0F, 0x18, 0x0D, 0x00, 0x00, 0x00, 0x00, // prefetcht0 [rip+0]
+        0xF3, 0x0F, 0xB8, 0xC1,                   // popcnt eax, ecx
+        0xF3, 0x48, 0x0F, 0xBD, 0xD8,             // lzcnt rbx, rax
         0xC4, 0xE3, 0x71, 0x60, 0xC1, 0x00,       // VEX-prefixed → must reject as `db`
     };
     struct Expected
@@ -1518,6 +1547,8 @@ bool SelfTest()
         {"cmpxchg", 3},
         {"xadd", 4},
         {"prefetcht0", 7},
+        {"popcnt", 4},
+        {"lzcnt", 5},
         // The VEX byte rejects as `db 0xC4`, then the decoder walks
         // forward one byte at a time through the rest until end.
         {"db", 1},
