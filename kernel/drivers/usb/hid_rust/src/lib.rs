@@ -307,7 +307,17 @@ pub extern "C" fn duetos_usbhid_parse_descriptor(
                     }
                 }
                 GLOBAL_REPORT_SIZE => gs.report_size = data,
-                GLOBAL_REPORT_COUNT => gs.report_count = data,
+                GLOBAL_REPORT_COUNT => {
+                    // Cap at a generous-but-bounded value so a malicious
+                    // HID descriptor declaring `report_count = u32::MAX`
+                    // cannot drive the downstream
+                    // `for field_index in 0..gs.report_count` loop into
+                    // a multi-billion-iteration DoS in IRQ context. Real
+                    // HID reports never exceed a few hundred fields per
+                    // collection; 4096 is far past anything legitimate.
+                    const MAX_REPORT_COUNT: u32 = 4096;
+                    gs.report_count = if data > MAX_REPORT_COUNT { MAX_REPORT_COUNT } else { data };
+                }
                 GLOBAL_REPORT_ID => {
                     gs.report_id = data;
                     // HID Report IDs are one-byte, non-zero values. Keep the

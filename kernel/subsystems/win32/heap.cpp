@@ -197,6 +197,13 @@ void Win32HeapFreeOnBinding(duetos::core::Process* proc, const Win32HeapBinding&
 {
     if (proc == nullptr || user_ptr == 0 || b.free_head_ptr == nullptr)
         return;
+    // user_ptr must be far enough above zero that `user_ptr -
+    // kHeaderSize` doesn't wrap u64. The downstream upper-bound
+    // check at line 203 already rejects the wrapped value, but
+    // gate up-front so the intermediate `block_hdr` doesn't get
+    // exposed to any code path that adds it to anything.
+    if (user_ptr < kHeaderSize)
+        return;
     const u64 block_hdr = user_ptr - kHeaderSize;
     if (block_hdr < b.base_va)
         return;

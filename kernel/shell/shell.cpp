@@ -218,11 +218,52 @@ void ShellBackspace()
     ConsoleWriteChar('\b');
 }
 
+// Returns true if the typed line starts with a verb whose
+// command line carries a plaintext password — `su`, `login`,
+// `passwd` all take the password as a positional argv. Pushing
+// those lines into the history ring would let `history` / `!N`
+// recall them verbatim. Skip the history-push for those lines
+// only; everything else is recorded normally.
+static bool ShellLineHasSecret(const char* line)
+{
+    if (line == nullptr)
+        return false;
+    // Skip leading whitespace then match the first token (lowercase
+    // ASCII verbs). We compare a small fixed set; the dispatcher
+    // lower-cases internally before its own match, so anchoring to
+    // a single case here is consistent.
+    u32 i = 0;
+    while (line[i] == ' ' || line[i] == '\t')
+        ++i;
+    auto starts_with = [&](const char* tok) -> bool
+    {
+        u32 j = 0;
+        while (tok[j] != '\0')
+        {
+            const char a = line[i + j];
+            // Accept either case so an upper-case "SU" is also
+            // detected — the shell verb table matches case-
+            // insensitively at dispatch time.
+            const char a_lo = (a >= 'A' && a <= 'Z') ? static_cast<char>(a - 'A' + 'a') : a;
+            if (a_lo != tok[j])
+                return false;
+            ++j;
+        }
+        // Token boundary: next char must be whitespace or end.
+        const char after = line[i + j];
+        return after == '\0' || after == ' ' || after == '\t';
+    };
+    return starts_with("su") || starts_with("login") || starts_with("passwd");
+}
+
 void ShellSubmit()
 {
     g_input[g_len] = '\0';
     ConsoleWriteChar('\n');
-    HistoryPush(g_input);
+    if (!ShellLineHasSecret(g_input))
+    {
+        HistoryPush(g_input);
+    }
     g_history_cursor = 0;
     Dispatch(g_input);
     g_len = 0;

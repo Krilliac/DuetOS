@@ -771,9 +771,19 @@ i64 DoFallocate(u64 fd, u64 mode, u64 offset, u64 len)
     auto* p = ::duetos::core::CurrentProcess();
     if (p == nullptr || fd >= 16)
         return kEBADF;
-    auto& slot = p->linux_fds[fd];
+    // Spectre v1 nospec — mirror every other linux_fds[] accessor so
+    // a speculative load past the bound can't leak adjacent state.
+    const u64 fd_masked = ::duetos::util::MaskedIndex(fd, 16);
+    auto& slot = p->linux_fds[fd_masked];
     if (slot.state != 2 /*regular file*/)
         return kEBADF;
+    // Overflow-safe end computation. Without this, a caller passing
+    // offset near u64-max with a small len would wrap `want_end` to
+    // a tiny value, bypass the `<= slot.size` check, and truncate
+    // the file via Fat32TruncateAtPath(..., wrapped_end). Reject
+    // before the add.
+    if (len > 0 && offset > (~u64(0)) - len)
+        return kEINVAL;
     const u64 want_end = offset + len;
     if (want_end <= slot.size)
         return 0; // already large enough; mode==0 spec is satisfied.
