@@ -1569,19 +1569,23 @@ __declspec(dllexport) int rand(void)
 }
 
 /* ------------------------------------------------------------------
- * getenv / _putenv — v0 has no env block. All lookups
- * report "not found"; _putenv silently succeeds.
+ * getenv / _putenv — small static defaults block plus a mutable
+ * overlay that `_putenv` / `_putenv_s` write into. `getenv`
+ * consults the overlay first so user-set variables shadow the
+ * built-in defaults.
+ *
+ * GAP: process-wide env block. The overlay is per-DLL-instance
+ * (one ucrtbase per process), which matches MSVC's contract for
+ * statically-linked CRT but won't survive a fork. v0 has no fork
+ * primitive so this is the right shape for now.
  * ------------------------------------------------------------------ */
 
-/* Static environment block. Real Windows programs consult
- * these during CRT init (PATH for spawn, TEMP for temp files,
- * USERNAME for profile lookup). Keeping them here as file-local
- * constants means even a no-libc freestanding PE can call
- * getenv() meaningfully.
- *
- * The return-pointer storage is the literal string data —
- * callers must not mutate. Real MSVC ucrt does the same
- * (getenv returns pointer into a per-process env block). */
+/* Static defaults. Real Windows programs consult these during
+ * CRT init (PATH for spawn, TEMP for temp files, USERNAME for
+ * profile lookup). The return-pointer storage is the literal
+ * string data — callers must not mutate. Real MSVC ucrt does
+ * the same (getenv returns pointer into a per-process env
+ * block). */
 
 static const struct
 {
@@ -1625,10 +1629,72 @@ static int env_name_eq(const char* a, const char* b)
     return *a == 0 && *b == 0;
 }
 
+#define UCRT_ENV_OVERLAY_MAX 32
+#define UCRT_ENV_NAME_MAX 64
+#define UCRT_ENV_VAL_MAX 256
+
+static struct
+{
+    int in_use;
+    char name[UCRT_ENV_NAME_MAX];
+    char value[UCRT_ENV_VAL_MAX];
+} g_env_overlay[UCRT_ENV_OVERLAY_MAX];
+
+static int env_copy_bounded(char* dst, const char* src, int max)
+{
+    int i = 0;
+    while (i + 1 < max && src[i] != 0)
+    {
+        dst[i] = src[i];
+        ++i;
+    }
+    dst[i] = 0;
+    return i;
+}
+
+static int env_overlay_find(const char* name)
+{
+    for (int i = 0; i < UCRT_ENV_OVERLAY_MAX; ++i)
+        if (g_env_overlay[i].in_use && env_name_eq(g_env_overlay[i].name, name))
+            return i;
+    return -1;
+}
+
+static int env_overlay_upsert(const char* name, const char* value)
+{
+    /* Empty value unsets the variable. */
+    int existing = env_overlay_find(name);
+    if (value == (const char*)0 || value[0] == 0)
+    {
+        if (existing >= 0)
+            g_env_overlay[existing].in_use = 0;
+        return 0;
+    }
+    int slot = existing;
+    if (slot < 0)
+    {
+        for (int i = 0; i < UCRT_ENV_OVERLAY_MAX; ++i)
+            if (!g_env_overlay[i].in_use)
+            {
+                slot = i;
+                break;
+            }
+    }
+    if (slot < 0)
+        return -1; /* overlay full */
+    env_copy_bounded(g_env_overlay[slot].name, name, UCRT_ENV_NAME_MAX);
+    env_copy_bounded(g_env_overlay[slot].value, value, UCRT_ENV_VAL_MAX);
+    g_env_overlay[slot].in_use = 1;
+    return 0;
+}
+
 __declspec(dllexport) char* getenv(const char* name)
 {
     if (!name)
         return (char*)0;
+    int ov = env_overlay_find(name);
+    if (ov >= 0)
+        return g_env_overlay[ov].value;
     for (size_t i = 0; i < sizeof(k_env_vars) / sizeof(k_env_vars[0]); ++i)
         if (env_name_eq(k_env_vars[i].name, name))
             return (char*)k_env_vars[i].value;
@@ -1637,21 +1703,38 @@ __declspec(dllexport) char* getenv(const char* name)
 
 __declspec(dllexport) int _putenv(const char* entry)
 {
-    (void)entry;
-    return 0;
+    /* `entry` is "NAME=VALUE". Empty VALUE unsets the variable.
+     * Returns 0 on success, -1 on error (no '=' or overlay full). */
+    if (entry == (const char*)0)
+        return -1;
+    int eq = -1;
+    for (int i = 0; entry[i] != 0; ++i)
+        if (entry[i] == '=')
+        {
+            eq = i;
+            break;
+        }
+    if (eq <= 0)
+        return -1; /* no '=' or empty name */
+    char name_buf[UCRT_ENV_NAME_MAX];
+    int n = (eq < UCRT_ENV_NAME_MAX - 1) ? eq : (UCRT_ENV_NAME_MAX - 1);
+    for (int i = 0; i < n; ++i)
+        name_buf[i] = entry[i];
+    name_buf[n] = 0;
+    return env_overlay_upsert(name_buf, entry + eq + 1);
 }
 
 __declspec(dllexport) int _putenv_s(const char* name, const char* value)
 {
-    (void)name;
-    (void)value;
+    /* MSVC contract: NULL name → EINVAL (22). Empty value unsets. */
+    if (name == (const char*)0 || name[0] == 0)
+        return 22; /* EINVAL */
+    if (value == (const char*)0)
+        return 22;
+    if (env_overlay_upsert(name, value) != 0)
+        return 12; /* ENOMEM — overlay full */
     return 0;
 }
-
-__declspec(dllexport) unsigned long _errno_dummy(void)
-{
-    return 0;
-} /* placeholder */
 
 /* _errno() returns a pointer to the thread's errno slot.
  * Single-thread in v0; return the address of a global. */
