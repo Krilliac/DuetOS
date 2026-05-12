@@ -13,9 +13,9 @@ use crate::alloc_bitmap::BitmapAllocator;
 use crate::block_dev::BlockDevice;
 use crate::crc32::crc32;
 use crate::format::{
-    BITMAP_LBA, BLOCK_SIZE, CRC_TABLE_LBA, JOURNAL_BLOCKS, JOURNAL_LBA, MAX_INLINE_EXTENTS,
-    NODE_COUNT, NODE_KIND_DIR, NODE_KIND_FILE, NODE_KIND_SYMLINK, NODE_TABLE_BLOCKS,
-    NODE_TABLE_LBA, SNAPSHOT_BLOCKS, SNAPSHOT_LBA, SUPERBLOCK_LBA,
+    BITMAP_LBA, BLOCK_SIZE, CRC_TABLE_LBA, JOURNAL_BLOCKS, JOURNAL_LBA, MAX_INLINE_EXTENTS, NODE_COUNT, NODE_KIND_DIR,
+    NODE_KIND_FILE, NODE_KIND_SYMLINK, NODE_TABLE_BLOCKS, NODE_TABLE_LBA, SNAPSHOT_BLOCKS, SNAPSHOT_LBA,
+    SUPERBLOCK_LBA,
 };
 use crate::fs::{compute_sb_crc, Fs, FsError, FsResult};
 use crate::mkfs;
@@ -23,8 +23,7 @@ use crate::ops_dir::DIR_MAX_CHILDREN;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-pub struct FsckReport
-{
+pub struct FsckReport {
     pub leaked_blocks: u32,
     pub missing_blocks: u32,
     pub orphan_nodes: u32,
@@ -35,10 +34,8 @@ pub struct FsckReport
     pub link_count_mismatch: u32,
 }
 
-impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
-{
-    pub fn fsck(&mut self, repair: bool) -> FsResult<FsckReport>
-    {
+impl<'d, D: BlockDevice + ?Sized> Fs<'d, D> {
+    pub fn fsck(&mut self, repair: bool) -> FsResult<FsckReport> {
         let mut report = FsckReport::default();
         let mut want = BitmapAllocator::fresh(self.sb.total_blocks);
 
@@ -46,16 +43,13 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         want.mark_used(SUPERBLOCK_LBA);
         want.mark_used(BITMAP_LBA);
         want.mark_used(CRC_TABLE_LBA);
-        for i in 0..NODE_TABLE_BLOCKS
-        {
+        for i in 0..NODE_TABLE_BLOCKS {
             want.mark_used(NODE_TABLE_LBA + i);
         }
-        for i in 0..JOURNAL_BLOCKS
-        {
+        for i in 0..JOURNAL_BLOCKS {
             want.mark_used(JOURNAL_LBA + i);
         }
-        for i in 0..SNAPSHOT_BLOCKS
-        {
+        for i in 0..SNAPSHOT_BLOCKS {
             want.mark_used(SNAPSHOT_LBA + i);
         }
 
@@ -68,23 +62,19 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         let mut reachable = [false; NODE_COUNT as usize];
         let mut stack = [0u32; NODE_COUNT as usize];
         let mut top: usize = 0;
-        if self.sb.root_node < self.sb.node_count && (self.sb.root_node as usize) < reachable.len()
-        {
+        if self.sb.root_node < self.sb.node_count && (self.sb.root_node as usize) < reachable.len() {
             reachable[self.sb.root_node as usize] = true;
             stack[top] = self.sb.root_node;
             top += 1;
         }
-        while top > 0
-        {
+        while top > 0 {
             top -= 1;
             let id = stack[top];
             let node = self.read_node(id)?;
-            if node.kind != NODE_KIND_DIR || node.child_count == 0
-            {
+            if node.kind != NODE_KIND_DIR || node.child_count == 0 {
                 continue;
             }
-            if node.child_count > DIR_MAX_CHILDREN
-            {
+            if node.child_count > DIR_MAX_CHILDREN {
                 report.bad_extents += 1;
             }
             if node.extent_count == 0
@@ -99,29 +89,20 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
             let mut block = [0u8; BLOCK_SIZE];
             self.dev.read_block(lba, &mut block).map_err(|_| FsError::Io)?;
             let child_count = node.child_count.min(DIR_MAX_CHILDREN);
-            for i in 0..child_count
-            {
+            for i in 0..child_count {
                 let off = (i as usize) * 4;
-                let cid = u32::from_le_bytes([
-                    block[off], block[off + 1], block[off + 2], block[off + 3],
-                ]);
-                if cid >= self.sb.node_count || (cid as usize) >= reachable.len()
-                {
+                let cid = u32::from_le_bytes([block[off], block[off + 1], block[off + 2], block[off + 3]]);
+                if cid >= self.sb.node_count || (cid as usize) >= reachable.len() {
                     report.bad_extents += 1;
                     continue;
                 }
                 let child = self.read_node(cid)?;
-                if child.kind != NODE_KIND_FILE
-                    && child.kind != NODE_KIND_DIR
-                    && child.kind != NODE_KIND_SYMLINK
-                {
+                if child.kind != NODE_KIND_FILE && child.kind != NODE_KIND_DIR && child.kind != NODE_KIND_SYMLINK {
                     continue;
                 }
-                if !reachable[cid as usize]
-                {
+                if !reachable[cid as usize] {
                     reachable[cid as usize] = true;
-                    if top < stack.len()
-                    {
+                    if top < stack.len() {
                         stack[top] = cid;
                         top += 1;
                     }
@@ -133,26 +114,19 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         // catch link_count drift).
         let mut ref_count = [0u32; NODE_COUNT as usize];
 
-        for id in 0..self.sb.node_count
-        {
+        for id in 0..self.sb.node_count {
             let node = self.read_node(id)?;
-            if node.kind == 0
-            {
+            if node.kind == 0 {
                 continue;
             }
-            if node.kind != NODE_KIND_FILE
-                && node.kind != NODE_KIND_DIR
-                && node.kind != NODE_KIND_SYMLINK
-            {
+            if node.kind != NODE_KIND_FILE && node.kind != NODE_KIND_DIR && node.kind != NODE_KIND_SYMLINK {
                 report.orphan_nodes += 1;
                 continue;
             }
             let n_ext = (node.extent_count as usize).min(MAX_INLINE_EXTENTS);
-            for i in 0..n_ext
-            {
+            for i in 0..n_ext {
                 let e = node.extents[i];
-                if e.blocks == 0
-                {
+                if e.blocks == 0 {
                     continue;
                 }
                 if e.block < self.sb.data_lba
@@ -162,20 +136,16 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
                     report.bad_extents += 1;
                     continue;
                 }
-                for k in 0..e.blocks
-                {
+                for k in 0..e.blocks {
                     let b = e.block + k;
-                    if want.is_set(b)
-                    {
+                    if want.is_set(b) {
                         // Hard links share extents — if the same
                         // block is reachable from multiple nodes
                         // that's fine for symlinks/files, only
                         // problematic for unrelated nodes. v3 fsck
                         // doesn't dedupe shares; counts as leaked.
                         report.leaked_blocks += 1;
-                    }
-                    else
-                    {
+                    } else {
                         want.mark_used(b);
                     }
                 }
@@ -183,10 +153,8 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
 
             // For dirs, walk the child list and bump the children's
             // ref counters.
-            if node.kind == NODE_KIND_DIR && node.child_count > 0
-            {
-                if node.child_count > DIR_MAX_CHILDREN
-                {
+            if node.kind == NODE_KIND_DIR && node.child_count > 0 {
+                if node.child_count > DIR_MAX_CHILDREN {
                     report.bad_extents += 1;
                 }
                 if node.extent_count == 0
@@ -201,14 +169,10 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
                 let mut block = [0u8; BLOCK_SIZE];
                 self.dev.read_block(lba, &mut block).map_err(|_| FsError::Io)?;
                 let child_count = node.child_count.min(DIR_MAX_CHILDREN);
-                for i in 0..child_count
-                {
+                for i in 0..child_count {
                     let off = (i as usize) * 4;
-                    let cid = u32::from_le_bytes([
-                        block[off], block[off + 1], block[off + 2], block[off + 3],
-                    ]);
-                    if (cid as usize) < ref_count.len()
-                    {
+                    let cid = u32::from_le_bytes([block[off], block[off + 1], block[off + 2], block[off + 3]]);
+                    if (cid as usize) < ref_count.len() {
                         ref_count[cid as usize] += 1;
                     }
                 }
@@ -221,64 +185,49 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         // invalid parent, or non-dir parent). The root dir has
         // link_count=1 (self-loop), not derived from any parent's
         // child list, so skip it.
-        for id in 0..self.sb.node_count
-        {
+        for id in 0..self.sb.node_count {
             let node = self.read_node(id)?;
-            if node.kind == 0 || id == self.sb.root_node
-            {
+            if node.kind == 0 || id == self.sb.root_node {
                 continue;
             }
-            if node.kind != NODE_KIND_FILE
-                && node.kind != NODE_KIND_DIR
-                && node.kind != NODE_KIND_SYMLINK
-            {
+            if node.kind != NODE_KIND_FILE && node.kind != NODE_KIND_DIR && node.kind != NODE_KIND_SYMLINK {
                 continue;
             }
             let derived = ref_count[id as usize];
-            if derived != node.link_count
-            {
+            if derived != node.link_count {
                 report.link_count_mismatch += 1;
             }
 
             let mut parent_ok = false;
             let mut seen = [false; NODE_COUNT as usize];
             let mut cur = node.parent_id;
-            for _ in 0..self.sb.node_count
-            {
-                if cur == self.sb.root_node
-                {
+            for _ in 0..self.sb.node_count {
+                if cur == self.sb.root_node {
                     parent_ok = true;
                     break;
                 }
-                if cur >= self.sb.node_count || (cur as usize) >= seen.len() || seen[cur as usize]
-                {
+                if cur >= self.sb.node_count || (cur as usize) >= seen.len() || seen[cur as usize] {
                     break;
                 }
                 seen[cur as usize] = true;
                 let parent = self.read_node(cur)?;
-                if parent.kind != NODE_KIND_DIR
-                {
+                if parent.kind != NODE_KIND_DIR {
                     break;
                 }
                 cur = parent.parent_id;
             }
-            if !reachable[id as usize] || !parent_ok
-            {
+            if !reachable[id as usize] || !parent_ok {
                 report.orphan_nodes += 1;
             }
         }
 
         // Diff bitmap.
-        for b in 0..self.sb.total_blocks
-        {
+        for b in 0..self.sb.total_blocks {
             let on_disk = self.bitmap.is_set(b);
             let should = want.is_set(b);
-            if on_disk && !should
-            {
+            if on_disk && !should {
                 report.leaked_blocks += 1;
-            }
-            else if !on_disk && should
-            {
+            } else if !on_disk && should {
                 report.missing_blocks += 1;
             }
         }
@@ -294,38 +243,31 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         // descriptor CRC + payload CRCs cover its integrity instead,
         // so skip the journal range here.
         let mut buf = [0u8; BLOCK_SIZE];
-        for b in 0..self.sb.total_blocks
-        {
-            if b == CRC_TABLE_LBA
-            {
+        for b in 0..self.sb.total_blocks {
+            if b == CRC_TABLE_LBA {
                 continue;
             }
-            if (JOURNAL_LBA..JOURNAL_LBA + JOURNAL_BLOCKS).contains(&b)
-            {
+            if (JOURNAL_LBA..JOURNAL_LBA + JOURNAL_BLOCKS).contains(&b) {
                 continue;
             }
             // Snapshot blocks change on snapshot_create / restore;
             // their CRC is implicit in the snapshot SB copy at
             // SNAPSHOT_LBA, not the live crc_table entry.
-            if (SNAPSHOT_LBA..SNAPSHOT_LBA + SNAPSHOT_BLOCKS).contains(&b)
-            {
+            if (SNAPSHOT_LBA..SNAPSHOT_LBA + SNAPSHOT_BLOCKS).contains(&b) {
                 continue;
             }
-            if !want.is_set(b)
-            {
+            if !want.is_set(b) {
                 continue;
             }
             self.dev.read_block(b, &mut buf).map_err(|_| FsError::Io)?;
             let want_crc = self.crc_table.get(b).unwrap_or(0);
             let got_crc = crc32(&buf);
-            if want_crc != got_crc
-            {
+            if want_crc != got_crc {
                 report.block_crc_mismatch += 1;
             }
         }
 
-        if repair
-        {
+        if repair {
             self.bitmap = want;
             self.bitmap.flush(self.dev).map_err(|_| FsError::Io)?;
             self.sb.free_blocks = self.bitmap.free_count();
@@ -339,10 +281,8 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
             // — leave its crc_table entries pointing at whatever the
             // current bytes hash to, but the verifier above skips
             // them so the entry's value doesn't matter.
-            for b in 0..self.sb.total_blocks
-            {
-                if b == CRC_TABLE_LBA
-                {
+            for b in 0..self.sb.total_blocks {
+                if b == CRC_TABLE_LBA {
                     self.crc_table.set(b, 0);
                     continue;
                 }

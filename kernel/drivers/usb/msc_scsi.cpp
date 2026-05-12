@@ -3,6 +3,7 @@
 #include "arch/x86_64/serial.h"
 #include "log/klog.h"
 #include "core/panic.h"
+#include "msc_scsi_rust.h"
 
 namespace duetos::drivers::usb::msc
 {
@@ -65,18 +66,6 @@ void CbwHeader(u8* out, u32 tag, u32 data_len, u8 flags, u8 lun, u8 cb_length)
     out[12] = flags;
     out[13] = lun & 0x0F;
     out[14] = cb_length & 0x1F;
-}
-
-// Trim trailing spaces from a 'n'-wide fixed-string field and
-// copy to `dst` (n+1 bytes, NUL-terminated).
-void CopyTrimmed(char* dst, const u8* src, u32 n)
-{
-    u32 end = n;
-    while (end > 0 && src[end - 1] == ' ')
-        --end;
-    for (u32 i = 0; i < end; ++i)
-        dst[i] = char(src[i]);
-    dst[end] = '\0';
 }
 
 } // namespace
@@ -293,26 +282,44 @@ bool MscParseCsw(const u8* buf, u32 len, Csw* out)
     return out->signature_valid;
 }
 
+// Parsers below delegate to the Rust crate `duetos_usb_msc_scsi` —
+// bounds-checked slice traversal of attacker-supplied bytes from a
+// USB device's SCSI replies. Each C++ wrapper does field-by-field
+// copy out of the Rust struct so layout drift between the two
+// halves can't silently break callers.
+
 bool MscParseInquiryData(const u8* buf, u32 len, InquiryData* out)
 {
-    if (out == nullptr || buf == nullptr || len < 36)
+    if (out == nullptr)
         return false;
+    rust::DuetosMscInquiryData r{};
+    if (!rust::duetos_msc_parse_inquiry(buf, static_cast<usize>(len), &r))
+    {
+        ByteZero(out, sizeof(*out));
+        return false;
+    }
     ByteZero(out, sizeof(*out));
-    out->peripheral_type = u8(buf[0] & 0x1F);
-    out->removable = (buf[1] & 0x80) ? 1 : 0;
-    out->version = u8(buf[2] & 0x07);
-    CopyTrimmed(out->vendor_id, buf + 8, 8);
-    CopyTrimmed(out->product_id, buf + 16, 16);
-    CopyTrimmed(out->product_rev, buf + 32, 4);
+    out->peripheral_type = r.peripheral_type;
+    out->removable = r.removable;
+    out->version = r.version;
+    for (u32 i = 0; i < 9; ++i)
+        out->vendor_id[i] = static_cast<char>(r.vendor_id[i]);
+    for (u32 i = 0; i < 17; ++i)
+        out->product_id[i] = static_cast<char>(r.product_id[i]);
+    for (u32 i = 0; i < 5; ++i)
+        out->product_rev[i] = static_cast<char>(r.product_rev[i]);
     return true;
 }
 
 bool MscParseReadCapacity10(const u8* buf, u32 len, ReadCapacity10* out)
 {
-    if (out == nullptr || buf == nullptr || len < 8)
+    if (out == nullptr)
         return false;
-    out->last_lba = ReadBeU32(buf + 0);
-    out->block_size = ReadBeU32(buf + 4);
+    rust::DuetosMscReadCapacity10 r{};
+    if (!rust::duetos_msc_parse_read_capacity_10(buf, static_cast<usize>(len), &r))
+        return false;
+    out->last_lba = r.last_lba;
+    out->block_size = r.block_size;
     return true;
 }
 
@@ -320,15 +327,14 @@ bool MscParseGetConfigHeader(const u8* buf, u32 len, GetConfigHeader* out)
 {
     if (out == nullptr)
         return false;
-    ByteZero(out, sizeof(*out));
-    if (buf == nullptr || len < 8)
+    rust::DuetosMscGetConfigHeader r{};
+    if (!rust::duetos_msc_parse_get_config_header(buf, static_cast<usize>(len), &r))
+    {
+        ByteZero(out, sizeof(*out));
         return false;
-    // GET CONFIGURATION feature header (MMC-6 §6.6.2):
-    //   [0..4) BE u32 data_length (excludes itself)
-    //   [4..6) reserved
-    //   [6..8) BE u16 current_profile
-    out->data_length = ReadBeU32(buf + 0);
-    out->current_profile = u16(u16(buf[6]) << 8 | buf[7]);
+    }
+    out->data_length = r.data_length;
+    out->current_profile = r.current_profile;
     return true;
 }
 
@@ -336,16 +342,15 @@ bool MscParseReadTocHeader(const u8* buf, u32 len, ReadTocHeader* out)
 {
     if (out == nullptr)
         return false;
-    ByteZero(out, sizeof(*out));
-    if (buf == nullptr || len < 4)
+    rust::DuetosMscReadTocHeader r{};
+    if (!rust::duetos_msc_parse_read_toc_header(buf, static_cast<usize>(len), &r))
+    {
+        ByteZero(out, sizeof(*out));
         return false;
-    // READ TOC format-0 header:
-    //   [0..2) BE u16 toc_data_length (excludes itself)
-    //   [2]    first track
-    //   [3]    last track
-    out->toc_data_length = u16(u16(buf[0]) << 8 | buf[1]);
-    out->first_track = buf[2];
-    out->last_track = buf[3];
+    }
+    out->toc_data_length = r.toc_data_length;
+    out->first_track = r.first_track;
+    out->last_track = r.last_track;
     return true;
 }
 
@@ -353,28 +358,21 @@ bool MscParseDiscInformation(const u8* buf, u32 len, DiscInformation* out)
 {
     if (out == nullptr)
         return false;
-    ByteZero(out, sizeof(*out));
-    if (buf == nullptr || len < 12)
+    rust::DuetosMscDiscInformation r{};
+    if (!rust::duetos_msc_parse_disc_information(buf, static_cast<usize>(len), &r))
+    {
+        ByteZero(out, sizeof(*out));
         return false;
-    // READ DISC INFORMATION standard format (MMC-6 §6.22.3.2):
-    //   [0..2) BE u16 length (excludes itself)
-    //   [2]    bit[7:5] DataType, bit[4] Erasable, bit[3:2] State of last session, bit[1:0] Disc status
-    //   [3]    first track on disc
-    //   [4]    number of sessions (LSB)
-    //   [5]    first track in last session (LSB)
-    //   [6]    last track in last session (LSB)
-    //   [7]    DID_V/DBC_V/URU/DAC_V/Reserved/Legacy/BG_FORMAT_STATUS
-    //   [8]    disc type
-    out->length = u16(u16(buf[0]) << 8 | buf[1]);
-    const u8 b2 = buf[2];
-    out->disc_status = u8(b2 & 0x03);
-    out->state_of_last_sess = u8((b2 >> 2) & 0x03);
-    out->erasable = u8((b2 >> 4) & 0x01);
-    out->first_track_on_disc = buf[3];
-    out->num_sessions_lsb = buf[4];
-    out->first_track_in_last_session_lsb = buf[5];
-    out->last_track_in_last_session_lsb = buf[6];
-    out->disc_type = buf[8];
+    }
+    out->length = r.length;
+    out->disc_status = r.disc_status;
+    out->state_of_last_sess = r.state_of_last_sess;
+    out->erasable = r.erasable;
+    out->first_track_on_disc = r.first_track_on_disc;
+    out->num_sessions_lsb = r.num_sessions_lsb;
+    out->first_track_in_last_session_lsb = r.first_track_in_last_session_lsb;
+    out->last_track_in_last_session_lsb = r.last_track_in_last_session_lsb;
+    out->disc_type = r.disc_type;
     return true;
 }
 

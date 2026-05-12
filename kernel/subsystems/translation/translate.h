@@ -29,6 +29,15 @@
  *   dispatch to borrow from — anything a Win32 stub "has" is just
  *   a particular native call. When native missing → Linux
  *   translation makes sense, that path works the same way.
+ *
+ *   A symmetric `Win32ThunkToNative` would only earn its keep if
+ *   a Win32 verb genuinely lacked a native call AND a Linux
+ *   call could supply the missing semantics. Today every Win32
+ *   verb we ship is reachable through either a direct handler
+ *   under `kernel/subsystems/win32/` (the per-family
+ *   `xxx_syscall.cpp` TUs) or the thunks-bytecode noop. When a
+ *   future PE drives demand for a verb that's a Linux primitive
+ *   but not a native one, add the entry here.
  */
 
 namespace duetos::arch
@@ -46,18 +55,17 @@ struct Result
     i64 rv;       // the (already-composed) return value; caller writes to frame->rax
 };
 
-// LinuxGapFill REMOVED — the Linux dispatcher now has dense
-// 0..462 spec coverage (every syscall has a kSys constant +
-// case). The gap-fill TU was unreachable for valid Linux
-// ELFs. The Linux dispatcher's default arm now logs a
-// `[linux-miss] unknown syscall nr=...` line directly
-// instead of detouring through this TU.
-
 // Fill a native syscall the core dispatcher did not handle.
-// Symmetric counterpart of LinuxGapFill — translations run in
-// the OTHER direction: native ← Linux primitives / Win32 heap.
+// Translations run native ← Linux primitives / Win32 heap.
 // Arguments live in frame->rdi/rsi/rdx/etc; `frame->rax` carries
 // the native syscall number.
+//
+// History: a symmetric `LinuxGapFill` existed when the Linux
+// dispatcher's coverage was sparse. The Linux dispatcher now has
+// dense 0..462 spec coverage so the gap-fill TU was unreachable
+// for valid Linux ELFs; it was removed. The Linux dispatcher's
+// default arm now logs a `[linux-miss] unknown syscall nr=...`
+// line directly instead of detouring through this TU.
 Result NativeGapFill(arch::TrapFrame* frame);
 
 // Translate an NT (Windows kernel) syscall invocation to a Linux
@@ -77,30 +85,39 @@ Result NativeGapFill(arch::TrapFrame* frame);
 // specific Windows binaries reach for specific NT calls.
 Result NtTranslateToLinux(arch::TrapFrame* frame);
 
-// Per-direction hit counters. Indexed by the lowest 10 bits of
-// the syscall number (covers both Linux's ~400-entry table and
-// native's ~30-entry table). Tracks "translation ran AND
-// succeeded." Expose for a shell diagnostic.
+// Native-direction hit counter. Indexed by the lowest 10 bits of
+// the syscall number (native's ~30-entry table fits comfortably).
+// Tracks "translation ran AND succeeded." Exposed for a shell
+// diagnostic.
 struct HitTable
 {
     u32 buckets[1024];
 };
-const HitTable& LinuxHitsRead();
 const HitTable& NativeHitsRead();
 
-/// Emit `[translate-overhead] linux …` + `native …` lines to the
+/// Emit `[translate-overhead] native …` + `nt …` lines to the
 /// serial log. Each line carries raw TSC counts: calls, total
-/// cycles, average per call, max seen. Also emits
-/// `[translate-miss-suppressed]` lines with cumulative + delta
-/// counts for sampled miss logs. Called by the kheartbeat loop so
-/// the numbers roll in on the same cadence as the other telemetry;
-/// a shell command can call it on demand too.
+/// cycles, average per call, max seen. Also emits a
+/// `[translate-miss-suppressed]` line with cumulative + delta
+/// counts for sampled miss logs. Called by the kheartbeat loop
+/// so the numbers roll in on the same cadence as the other
+/// telemetry; a shell command can call it on demand too.
 ///
 /// Why cycles and not nanoseconds: TSC frequency is CPU-specific;
 /// we don't have a reliable TSC→ns calibration in the kernel yet.
 /// Operators divide by the host CPU's TSC Hz (dmesg reports it)
 /// to convert, or just read the numbers as relative costs.
 void TranslatorOverheadDump();
+
+/// One-shot end-of-boot summary line for CI consumption:
+///   [smoke] translate_summary native_calls=… native_total_c=…
+///           native_max_c=… native_miss_emitted=…
+///           native_miss_suppressed=… nt_calls=… nt_total_c=…
+///           nt_max_c=… nt_miss_total=…
+/// Single line, space-separated key=hexvalue pairs so the smoke
+/// harness can grep + awk against it. Keys are stable; adding new
+/// keys is backwards-compatible.
+void TranslatorBootSummaryEmit();
 
 // Public name-lookup helpers — the generated Linux + NT syscall
 // tables are compiled into this TU, so any subsystem that wants

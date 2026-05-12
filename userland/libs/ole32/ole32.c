@@ -351,14 +351,6 @@ static HRESULT __stdcall fd_set_one_ptr(FileDialogObj* self, const void* ignored
     return S_OK;
 }
 
-static HRESULT __stdcall fd_set_two_ptr(FileDialogObj* self, const void* ignored1, const void* ignored2)
-{
-    (void)self;
-    (void)ignored1;
-    (void)ignored2;
-    return S_OK;
-}
-
 static HRESULT __stdcall fd_set_uint(FileDialogObj* self, unsigned int ignored)
 {
     (void)self;

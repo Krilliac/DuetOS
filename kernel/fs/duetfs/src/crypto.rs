@@ -21,9 +21,10 @@
 // the slot is reserved (Superblock::reserved_after_kdf) but no
 // caller plumbing for it.
 
-use aes::Aes256;
-use aes::cipher::{KeyInit, generic_array::GenericArray};
 use alloc::vec::Vec;
+
+use aes::cipher::{generic_array::GenericArray, KeyInit};
+use aes::Aes256;
 use argon2::{Algorithm, Argon2, Params, Version};
 use xts_mode::Xts128;
 
@@ -32,8 +33,7 @@ pub const SECTOR_BYTES: usize = 4096; // matches BLOCK_SIZE
 
 /// Build an XTS context from a 64-byte key. The first 32 bytes are
 /// the data-cipher key; the last 32 are the tweak-cipher key.
-fn make_xts(key: &[u8; XTS_KEY_BYTES]) -> Xts128<Aes256>
-{
+fn make_xts(key: &[u8; XTS_KEY_BYTES]) -> Xts128<Aes256> {
     let cipher_1 = Aes256::new(GenericArray::from_slice(&key[..32]));
     let cipher_2 = Aes256::new(GenericArray::from_slice(&key[32..]));
     Xts128::<Aes256>::new(cipher_1, cipher_2)
@@ -43,8 +43,7 @@ fn make_xts(key: &[u8; XTS_KEY_BYTES]) -> Xts128<Aes256>
 /// it determines the XTS tweak so the same plaintext at different
 /// LBAs produces different ciphertext (a property XTS gives that
 /// raw AES-CBC doesn't).
-pub fn xts_encrypt_in_place(key: &[u8; XTS_KEY_BYTES], sector: u64, buf: &mut [u8])
-{
+pub fn xts_encrypt_in_place(key: &[u8; XTS_KEY_BYTES], sector: u64, buf: &mut [u8]) {
     debug_assert_eq!(buf.len(), SECTOR_BYTES);
     let xts = make_xts(key);
     let tweak = xts_mode::get_tweak_default(sector as u128);
@@ -53,8 +52,7 @@ pub fn xts_encrypt_in_place(key: &[u8; XTS_KEY_BYTES], sector: u64, buf: &mut [u
 
 /// Decrypt one 4096-byte sector in place. Inverse of
 /// `xts_encrypt_in_place` — same key + same sector.
-pub fn xts_decrypt_in_place(key: &[u8; XTS_KEY_BYTES], sector: u64, buf: &mut [u8])
-{
+pub fn xts_decrypt_in_place(key: &[u8; XTS_KEY_BYTES], sector: u64, buf: &mut [u8]) {
     debug_assert_eq!(buf.len(), SECTOR_BYTES);
     let xts = make_xts(key);
     let tweak = xts_mode::get_tweak_default(sector as u128);
@@ -71,12 +69,14 @@ pub fn xts_decrypt_in_place(key: &[u8; XTS_KEY_BYTES], sector: u64, buf: &mut [u
 /// short enough that a single mount is fast, long enough to make
 /// brute-force search expensive.
 pub fn argon2id_kdf(
-    password: &[u8], salt: &[u8], m_cost_kib: u32, t_cost: u32, p_cost: u32,
+    password: &[u8],
+    salt: &[u8],
+    m_cost_kib: u32,
+    t_cost: u32,
+    p_cost: u32,
     out_key: &mut [u8; XTS_KEY_BYTES],
-) -> bool
-{
-    let params = match Params::new(m_cost_kib, t_cost, p_cost, Some(XTS_KEY_BYTES))
-    {
+) -> bool {
+    let params = match Params::new(m_cost_kib, t_cost, p_cost, Some(XTS_KEY_BYTES)) {
         Ok(p) => p,
         Err(_) => return false,
     };
@@ -86,8 +86,7 @@ pub fn argon2id_kdf(
     // budgets (4 MiB working set with default params) this is fine
     // — the kernel heap accommodates it during the brief mount.
     let mut buf = Vec::from([0u8; XTS_KEY_BYTES]);
-    if argon2.hash_password_into(password, salt, &mut buf).is_err()
-    {
+    if argon2.hash_password_into(password, salt, &mut buf).is_err() {
         return false;
     }
     out_key.copy_from_slice(&buf);

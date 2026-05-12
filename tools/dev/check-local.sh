@@ -9,6 +9,7 @@ PRESET="x86_64-debug"
 RUN_DOCTOR=1
 RUN_WIKI=1
 RUN_FORMAT=1
+RUN_RUST=1
 RUN_CONFIGURE=1
 RUN_BUILD=0
 RUN_CTEST=0
@@ -31,6 +32,7 @@ Options:
   --no-doctor       Skip host-toolchain doctor
   --no-wiki         Skip wiki navigation/quality checks
   --no-format       Skip clang-format dry-run
+  --no-rust         Skip cargo fmt + clippy on the Rust workspace
   --no-configure    Skip CMake configure
   -h, --help        Show this help
 USAGE
@@ -83,6 +85,10 @@ while [[ $# -gt 0 ]]; do
             RUN_FORMAT=0
             shift
             ;;
+        --no-rust)
+            RUN_RUST=0
+            shift
+            ;;
         --no-configure)
             RUN_CONFIGURE=0
             shift
@@ -124,6 +130,20 @@ if [[ ${RUN_FORMAT} -eq 1 ]]; then
         fi
         clang-format --dry-run --Werror "${sources[@]}"
     '
+fi
+
+if [[ ${RUN_RUST} -eq 1 ]]; then
+    # rustfmt + clippy + hosted unit tests gate every kernel-linked
+    # Rust crate. cargo is provided by the pinned nightly in
+    # /rust-toolchain.toml; if it's not on PATH the doctor step above
+    # will have already flagged it.
+    if command -v cargo >/dev/null 2>&1; then
+        run_step "cargo fmt --check (workspace)" cargo fmt --check --all
+        run_step "cargo clippy (workspace)" cargo clippy --workspace --release --locked -- -D warnings
+        run_step "rustc --test (host crates)" "${REPO_ROOT}/tools/dev/cargo-host-test.sh"
+    else
+        printf '\n==> cargo missing — skipping Rust workspace checks\n' >&2
+    fi
 fi
 
 if [[ ${RUN_CONFIGURE} -eq 1 ]]; then

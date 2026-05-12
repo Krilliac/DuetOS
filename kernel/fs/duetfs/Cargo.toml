@@ -45,3 +45,6 @@ argon2     = { version = "0.5", default-features = false, features = ["alloc"] }
 # for the v7 file-payload compression path; the in-memory layout is
 # the standard LZ4 frame so external tools can decompress as-is.
 lz4_flex   = { version = "0.11", default-features = false }
+
+[lints]
+workspace = true

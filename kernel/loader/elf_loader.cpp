@@ -3,6 +3,7 @@
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
 #include "debug/probes.h"
+#include "exec_meta_rust.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
@@ -32,7 +33,6 @@ inline u64 LeU64(const u8* p)
 }
 
 constexpr u32 kPtLoad = 1;
-constexpr u16 kEmX86_64 = 0x3E;
 
 } // namespace
 
@@ -70,95 +70,14 @@ const char* ElfStatusName(ElfStatus s)
 
 ElfStatus ElfValidate(const u8* file, u64 file_len)
 {
-    if (file == nullptr || file_len < 64)
-    {
-        return ElfStatus::TooSmall;
-    }
-    if (!(file[0] == 0x7F && file[1] == 'E' && file[2] == 'L' && file[3] == 'F'))
-    {
-        return ElfStatus::BadMagic;
-    }
-    if (file[4] != 2)
-    {
-        return ElfStatus::NotElf64;
-    }
-    if (file[5] != 1)
-    {
-        return ElfStatus::NotLittleEndian;
-    }
-    if (file[6] != 1)
-    {
-        return ElfStatus::BadVersion;
-    }
-    const u16 e_machine = LeU16(file + 18);
-    if (e_machine != kEmX86_64)
-    {
-        return ElfStatus::BadMachine;
-    }
-    const u64 e_phoff = LeU64(file + 32);
-    const u16 e_phentsize = LeU16(file + 54);
-    const u16 e_phnum = LeU16(file + 56);
-    if (e_phoff == 0 || e_phnum == 0 || e_phentsize < 56)
-    {
-        return ElfStatus::NoProgramHeaders;
-    }
-    // All program headers must fit inside the file. Do every addition
-    // as an overflow-checked step: a malicious ELF with e_phoff near
-    // UINT64_MAX and a non-zero phtbl size would otherwise wrap and
-    // pass the file-length check while indexing far past `file`.
-    const u64 phtbl_bytes = static_cast<u64>(e_phnum) * e_phentsize;
-    if (e_phoff > file_len || phtbl_bytes > file_len - e_phoff)
-    {
-        return ElfStatus::HeaderOutOfBounds;
-    }
-    // For each PT_LOAD, the file bytes it declares must fit.
-    // Also check the classic alignment invariant:
-    //   p_offset % p_align == p_vaddr % p_align
-    // A violation means the file wasn't built for page-at-a-time
-    // loading without shuffling bytes around.
-    for (u16 i = 0; i < e_phnum; ++i)
-    {
-        const u64 off = e_phoff + static_cast<u64>(i) * e_phentsize;
-        const u8* p = file + off;
-        const u32 p_type = LeU32(p);
-        if (p_type != kPtLoad)
-            continue;
-        const u64 p_offset = LeU64(p + 8);
-        const u64 p_vaddr = LeU64(p + 16);
-        const u64 p_filesz = LeU64(p + 32);
-        const u64 p_memsz = LeU64(p + 40);
-        const u64 p_align = LeU64(p + 48);
-        // Overflow-safe bounds: a crafted ELF with p_offset = UINT64_MAX
-        // and p_filesz = 0x10 would pass `p_offset + p_filesz > file_len`
-        // after wrapping unless we compare subtractively.
-        if (p_offset > file_len || p_filesz > file_len - p_offset)
-        {
-            return ElfStatus::SegmentOutOfBounds;
-        }
-        // memsz >= filesz is required by the spec.
-        if (p_memsz < p_filesz)
-        {
-            return ElfStatus::SegmentOutOfBounds;
-        }
-        // User VAs must live in the canonical low half. Checking against
-        // kUserMax subtractively keeps the arithmetic overflow-safe and
-        // stops a malformed ELF from tripping the kernel-half panic
-        // inside AddressSpaceMapUserPage.
-        constexpr u64 kUserMax = 0x00007FFFFFFFFFFFULL;
-        if (p_vaddr > kUserMax)
-        {
-            return ElfStatus::SegmentOutOfBounds;
-        }
-        if (p_memsz > 0 && (p_memsz - 1) > (kUserMax - p_vaddr))
-        {
-            return ElfStatus::SegmentOutOfBounds;
-        }
-        if (p_align > 1 && ((p_offset % p_align) != (p_vaddr % p_align)))
-        {
-            return ElfStatus::UnalignedSegment;
-        }
-    }
-    return ElfStatus::Ok;
+    // Validation lives in the Rust crate `duetos_exec_meta` —
+    // bounds-checked slice traversal of the ELF64 header + every
+    // PT_LOAD segment, with overflow-safe arithmetic against
+    // attacker-crafted file offsets near U64_MAX. The status
+    // enumerators are byte-identical to ElfStatus so the FFI
+    // round-trips cleanly through a u32 cast.
+    const u32 raw = ::duetos::loader::exec_meta::duetos_exec_meta_elf_validate(file, static_cast<usize>(file_len));
+    return static_cast<ElfStatus>(raw);
 }
 
 u64 ElfEntry(const u8* file)

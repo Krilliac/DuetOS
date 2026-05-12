@@ -36,6 +36,7 @@
 #include "net/firewall.h"
 #include "net/socket.h"
 #include "net/wifi.h"
+#include "parsers_rust.h"
 
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/timer.h"
@@ -1474,32 +1475,16 @@ constexpr u64 kDhcpFrameBytes = 236 + 4 + 64; // BOOTP + magic + options region
 // Walk the option-byte stream looking for `opt_code`. On hit, sets
 // `*out_data` + `*out_len` to the value bytes and returns true.
 // Handles the DHCP `pad` (0) + `end` (255) short options.
+//
+// Implementation lives in the Rust crate `duetos_net_parsers` for
+// bounds-checked slice traversal on attacker-controlled bytes; the
+// C++ wrapper just adapts to the existing `u64` / `bool` types.
 bool DhcpFindOption(const u8* opts, u64 opts_len, u8 opt_code, const u8** out_data, u8* out_len)
 {
+    using ::duetos::net::parsers::duetos_parsers_dhcp_find_option;
     if (opts == nullptr || out_data == nullptr || out_len == nullptr)
         return false;
-    u64 i = 0;
-    while (i < opts_len)
-    {
-        const u8 c = opts[i++];
-        if (c == 0)
-            continue; // pad
-        if (c == kDhcpOptEnd)
-            return false;
-        if (i >= opts_len)
-            return false;
-        const u8 l = opts[i++];
-        if (i + l > opts_len)
-            return false;
-        if (c == opt_code)
-        {
-            *out_data = opts + i;
-            *out_len = l;
-            return true;
-        }
-        i += l;
-    }
-    return false;
+    return duetos_parsers_dhcp_find_option(opts, static_cast<usize>(opts_len), opt_code, out_data, out_len);
 }
 
 void DhcpBuildPayload(u8* buf, u64 cap, u8 msg_type, u32 xid, const MacAddress& mac, bool include_requested_ip,
@@ -2297,23 +2282,16 @@ constexpr u16 kDnsEphemeralPort = 54321;
 // sequences + RFC 1035 §4.1.4 name-compression pointers (top two
 // bits of a byte = 11 means "this byte + next one together form
 // a 14-bit offset into the packet"). Returns the offset after
-// the name, or `len` on truncation.
+// the name, or `len` on truncation / invalid input / guard cap.
+//
+// Implementation lives in the Rust crate `duetos_net_parsers` —
+// bounds-checked slice traversal with an explicit iteration cap.
 u64 DnsSkipName(const u8* buf, u64 offset, u64 len)
 {
-    for (u32 guard = 0; guard < 1024 && offset < len; ++guard)
-    {
-        const u8 b = buf[offset];
-        if (b == 0)
-            return offset + 1;
-        if ((b & 0xC0) == 0xC0)
-            return (offset + 2 <= len) ? (offset + 2) : len;
-        if (b > 63)
-            return len; // invalid label length
-        if (offset + 1 + b > len)
-            return len;
-        offset += 1 + b;
-    }
-    return len;
+    using ::duetos::net::parsers::duetos_parsers_dns_skip_name;
+    if (buf == nullptr)
+        return len;
+    return static_cast<u64>(duetos_parsers_dns_skip_name(buf, static_cast<usize>(offset), static_cast<usize>(len)));
 }
 
 void DnsOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, const void* payload, u64 len)

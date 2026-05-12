@@ -16,3 +16,6 @@ description = "DuetOS USB HID report descriptor parser"
 [lib]
 name = "usbhid"
 crate-type = ["rlib"]
+
+[lints]
+workspace = true

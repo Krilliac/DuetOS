@@ -45,6 +45,7 @@
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
 #include "debug/probes.h"
+#include "exec_meta_rust.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
@@ -83,24 +84,19 @@ inline u64 LeU64(const u8* p)
     return static_cast<u64>(LeU32(p)) | (static_cast<u64>(LeU32(p + 4)) << 32);
 }
 
-// ---- PE constants (the handful the v0 loader cares about) ----
-constexpr u16 kDosMagic = 0x5A4D;        // 'M','Z' in LE
-constexpr u32 kPeSignature = 0x00004550; // 'P','E',0,0 in LE
-constexpr u16 kMachineAmd64 = 0x8664;
-constexpr u16 kOptMagicPe32Plus = 0x020B;
+// ---- PE constants (the handful the v0 loader still uses) ----
+// The PE-prefix + image-validation constants (DosMagic, PeSig,
+// MachineAmd64, OptMagicPe32Plus, FileHeaderSize,
+// OptHeaderAddressOfEntryPoint / ImageBase / SectionAlignment /
+// FileAlignment / SizeOfImage) all moved to the Rust crate
+// `duetos_exec_meta`. What stays here is the C++-side data-
+// directory + section-mapping shape used by ParseHeaders'
+// post-validation tail and by MapSection.
 constexpr u32 kPageAlign = 4096;
 
-// Offsets inside the IMAGE_FILE_HEADER (20 bytes) and the
-// PE32+ IMAGE_OPTIONAL_HEADER. Hand-coded rather than pulled
-// from <winnt.h> so the kernel stays self-contained — we never
-// include Windows SDK headers, and PE layout is an ABI-stable
-// part of the PE spec anyway.
-constexpr u64 kFileHeaderSize = 20;
-constexpr u64 kOptHeaderAddressOfEntryPoint = 16;
-constexpr u64 kOptHeaderImageBase = 24;
-constexpr u64 kOptHeaderSectionAlignment = 32;
-constexpr u64 kOptHeaderFileAlignment = 36;
-constexpr u64 kOptHeaderSizeOfImage = 56;
+// Offsets inside the IMAGE_OPTIONAL_HEADER + IMAGE_SECTION_HEADER
+// that the C++ code still reaches into. Hand-coded so the kernel
+// stays self-contained.
 constexpr u64 kOptHeaderSizeOfHeaders = 60;
 constexpr u64 kOptHeaderNumberOfRvaAndSizes = 108;
 constexpr u64 kOptHeaderDataDirectories = 112;
@@ -286,97 +282,35 @@ PeDataDir ReadDataDir(const u8* file, const PeHeaders& h, u64 idx)
 // Parse and validate. PeHeaders is populated iff status is Ok.
 PeStatus ParseHeaders(const u8* file, u64 file_len, PeHeaders& out)
 {
-    // DOS stub: need at least e_lfanew (offset 0x3C + 4 bytes).
-    if (file == nullptr || file_len < 0x40)
-        return PeStatus::TooSmall;
-    if (LeU16(file) != kDosMagic)
-        return PeStatus::BadDosMagic;
-
-    const u32 e_lfanew = LeU32(file + 0x3C);
-    // NT header = 4 bytes sig + 20 FileHeader + 240 PE32+ OptHeader.
-    // Demand at least sig + FileHeader; OptHeader size is read
-    // from FileHeader and bounds-checked below.
-    if (u64(e_lfanew) + 4 + kFileHeaderSize > file_len)
-        return PeStatus::BadLfanewBounds;
-    out.nt_base = e_lfanew;
-
-    if (LeU32(file + out.nt_base) != kPeSignature)
-        return PeStatus::BadNtSignature;
-
-    const u8* file_hdr = file + out.nt_base + 4;
-    const u16 machine = LeU16(file_hdr + 0);
-    if (machine != kMachineAmd64)
-        return PeStatus::BadMachine;
-    out.section_count = LeU16(file_hdr + 2);
-    if (out.section_count == 0)
-        return PeStatus::SectionCountZero;
-    out.opt_header_size = LeU16(file_hdr + 16);
-
-    out.opt_base = out.nt_base + 4 + kFileHeaderSize;
-    // Need enough optional header bytes to reach our
-    // last-read field (NumberOfRvaAndSizes + data dirs).
-    const u64 min_opt = kOptHeaderNumberOfRvaAndSizes + 4;
-    if (out.opt_header_size < min_opt)
-        return PeStatus::OptHeaderOutOfBounds;
-    if (out.opt_base + out.opt_header_size > file_len)
-        return PeStatus::OptHeaderOutOfBounds;
-
-    const u8* opt = file + out.opt_base;
-    if (LeU16(opt) != kOptMagicPe32Plus)
-        return PeStatus::NotPe32Plus;
-
-    const u32 section_alignment = LeU32(opt + kOptHeaderSectionAlignment);
-    const u32 file_alignment = LeU32(opt + kOptHeaderFileAlignment);
-    // SectionAlignment must equal our page size — the loader
-    // maps each section at (ImageBase + VirtualAddress), and a
-    // sub-page SectionAlignment would mean two sections could
-    // share a page with conflicting protections. Refuse.
-    if (section_alignment != kPageAlign)
-        return PeStatus::SectionAlignUnsup;
-    // FileAlignment: the MS spec allows any power-of-2 in the
-    // range [512, SectionAlignment]. Real-world PEs (Chrome,
-    // ripgrep, the MS UCRT DLLs) use 512; our own toolchain
-    // uses 4096 for v0's hello.exe. MapSection already copies
-    // on a per-page intersection, so any FileAlignment works
-    // for the copy itself. Gate only on "is it a legal value".
-    if (file_alignment != 512 && file_alignment != 1024 && file_alignment != 2048 && file_alignment != 4096)
-        return PeStatus::FileAlignUnsup;
-
-    out.image_base = LeU64(opt + kOptHeaderImageBase);
-    out.entry_rva = LeU32(opt + kOptHeaderAddressOfEntryPoint);
-    out.image_size = LeU32(opt + kOptHeaderSizeOfImage);
-
-    // ImageBase + SizeOfImage must fit in the canonical low half. Without
-    // this gate, a hostile PE specifying ImageBase = 0xFFFFFFFF80000000
-    // (kernel-half) would reach MapHeaders → AddressSpaceMapUserPage,
-    // which PanicAs's on a kernel-half virt — DoS-ing the kernel from any
-    // execve-style spawn path (mm/address_space.cpp:315). Validate here
-    // instead, before any allocation.
-    constexpr u64 kPeUserMax = 0x00007FFFFFFFFFFFULL;
-    if (out.image_base > kPeUserMax)
-        return PeStatus::ImageBaseOutOfRange;
-    if (out.image_size > 0 && (u64(out.image_size) - 1) > (kPeUserMax - out.image_base))
-        return PeStatus::ImageBaseOutOfRange;
-
-    // Section headers follow the optional header. Populate
-    // `out.section_base` BEFORE any rejection check so PeReport
-    // can walk the section table even on "rejected" PEs — the
-    // diagnostic path has to work on exactly the PEs we can't
-    // load yet.
-    out.section_base = out.opt_base + out.opt_header_size;
-    const u64 section_table_bytes = u64(out.section_count) * kSectionHeaderSize;
-    if (out.section_base + section_table_bytes > file_len)
-        return PeStatus::SectionOutOfBounds;
-
-    // Cross-check every section's raw extent fits in the file.
-    for (u16 i = 0; i < out.section_count; ++i)
-    {
-        const u8* sec = file + out.section_base + u64(i) * kSectionHeaderSize;
-        const u32 raw_off = LeU32(sec + kSectionHeaderPointerToRawData);
-        const u32 raw_sz = LeU32(sec + kSectionHeaderSizeOfRawData);
-        if (u64(raw_off) + u64(raw_sz) > file_len)
-            return PeStatus::SectionOutOfBounds;
-    }
+    // Image validation (DOS stub, PE signature, AMD64 machine,
+    // optional-header magic, section/file alignment, image-base
+    // low-half bound, section-table bounds, per-section raw
+    // extent) lives in the Rust crate `duetos_exec_meta`. The
+    // first 12 PeStatus enumerators plus `ImageBaseOutOfRange`
+    // (17) are byte-identical to the Rust crate's image-status
+    // enum so the FFI round-trips cleanly through a u32 cast.
+    //
+    // The Rust validator populates `out_image` AS IT GOES (even
+    // on failure return), mirroring the diagnostic-friendly
+    // behaviour the C++ inline code had — `PeReport` needs the
+    // partially-filled `out` to walk a rejected PE's section
+    // table. The wrapper copies every field unconditionally so
+    // that contract holds whether the call succeeded or not.
+    using ::duetos::loader::exec_meta::duetos_exec_meta_pe_validate_image;
+    using ::duetos::loader::exec_meta::DuetosPeImage;
+    DuetosPeImage image{};
+    u32 status = 0;
+    duetos_exec_meta_pe_validate_image(file, static_cast<usize>(file_len), &image, &status);
+    out.nt_base = image.nt_base;
+    out.section_count = image.section_count;
+    out.opt_header_size = image.opt_header_size;
+    out.opt_base = image.opt_base;
+    out.image_size = image.image_size;
+    out.entry_rva = image.entry_rva;
+    out.image_base = image.image_base;
+    out.section_base = image.section_base;
+    if (status != static_cast<u32>(PeStatus::Ok))
+        return static_cast<PeStatus>(status);
 
     // Data Directories: v0 rejects any image with a non-empty
     // Import, BaseReloc, or TLS directory. These are the three
@@ -384,6 +318,7 @@ PeStatus ParseHeaders(const u8* file, u64 file_len, PeHeaders& out)
     // parsing them is done separately by PeReport, which runs
     // BEFORE this function on the spawn path so the log
     // carries a full picture even when we reject.
+    const u8* opt = file + out.opt_base;
     const u32 num_dirs = LeU32(opt + kOptHeaderNumberOfRvaAndSizes);
     const u64 dir_bytes = u64(num_dirs) * kDataDirEntrySize;
     if (kOptHeaderDataDirectories + dir_bytes > out.opt_header_size)

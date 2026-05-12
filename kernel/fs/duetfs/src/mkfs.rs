@@ -10,22 +10,18 @@ use crate::block_dev::BlockDevice;
 use crate::crc32::crc32;
 use crate::crc_table::CrcTable;
 use crate::format::{
-    Extent, Node, Superblock, BITMAP_LBA, BLOCK_SIZE, CRC_TABLE_BLOCKS, CRC_TABLE_LBA,
-    DATA_LBA, JOURNAL_BLOCKS, JOURNAL_LBA, MAGIC, MIN_TOTAL_BLOCKS, NODE_COUNT,
-    NODE_KIND_DIR, NODE_SIZE, NODE_TABLE_BLOCKS, NODE_TABLE_LBA, NODES_PER_BLOCK,
-    ROOT_NODE_ID, SNAPSHOT_BLOCKS, SNAPSHOT_LBA, SUPERBLOCK_LBA, VERSION,
+    Extent, Node, Superblock, BITMAP_LBA, BLOCK_SIZE, CRC_TABLE_BLOCKS, CRC_TABLE_LBA, DATA_LBA, JOURNAL_BLOCKS,
+    JOURNAL_LBA, MAGIC, MIN_TOTAL_BLOCKS, NODES_PER_BLOCK, NODE_COUNT, NODE_KIND_DIR, NODE_SIZE, NODE_TABLE_BLOCKS,
+    NODE_TABLE_LBA, ROOT_NODE_ID, SNAPSHOT_BLOCKS, SNAPSHOT_LBA, SUPERBLOCK_LBA, VERSION,
 };
 use crate::fs::{compute_sb_crc, FsError, FsResult};
 
-pub fn format<D: BlockDevice + ?Sized>(dev: &mut D) -> FsResult<()>
-{
+pub fn format<D: BlockDevice + ?Sized>(dev: &mut D) -> FsResult<()> {
     let total_blocks = dev.block_count();
-    if total_blocks < MIN_TOTAL_BLOCKS
-    {
+    if total_blocks < MIN_TOTAL_BLOCKS {
         return Err(FsError::NoSpaceData);
     }
-    if dev.is_read_only()
-    {
+    if dev.is_read_only() {
         return Err(FsError::ReadOnly);
     }
 
@@ -33,20 +29,16 @@ pub fn format<D: BlockDevice + ?Sized>(dev: &mut D) -> FsResult<()>
     let mut bitmap = BitmapAllocator::fresh(total_blocks);
     bitmap.mark_used(SUPERBLOCK_LBA);
     bitmap.mark_used(BITMAP_LBA);
-    for i in 0..CRC_TABLE_BLOCKS
-    {
+    for i in 0..CRC_TABLE_BLOCKS {
         bitmap.mark_used(CRC_TABLE_LBA + i);
     }
-    for i in 0..NODE_TABLE_BLOCKS
-    {
+    for i in 0..NODE_TABLE_BLOCKS {
         bitmap.mark_used(NODE_TABLE_LBA + i);
     }
-    for i in 0..JOURNAL_BLOCKS
-    {
+    for i in 0..JOURNAL_BLOCKS {
         bitmap.mark_used(JOURNAL_LBA + i);
     }
-    for i in 0..SNAPSHOT_BLOCKS
-    {
+    for i in 0..SNAPSHOT_BLOCKS {
         bitmap.mark_used(SNAPSHOT_LBA + i);
     }
     let root_extent = DATA_LBA;
@@ -58,16 +50,13 @@ pub fn format<D: BlockDevice + ?Sized>(dev: &mut D) -> FsResult<()>
     //    before state, so a fully-zeroed descriptor is treated as a
     //    no-op by replay).
     let zero = [0u8; BLOCK_SIZE];
-    for i in 0..NODE_TABLE_BLOCKS
-    {
+    for i in 0..NODE_TABLE_BLOCKS {
         dev.write_block(NODE_TABLE_LBA + i, &zero).map_err(|_| FsError::Io)?;
     }
-    for i in 0..JOURNAL_BLOCKS
-    {
+    for i in 0..JOURNAL_BLOCKS {
         dev.write_block(JOURNAL_LBA + i, &zero).map_err(|_| FsError::Io)?;
     }
-    for i in 0..SNAPSHOT_BLOCKS
-    {
+    for i in 0..SNAPSHOT_BLOCKS {
         dev.write_block(SNAPSHOT_LBA + i, &zero).map_err(|_| FsError::Io)?;
     }
     dev.write_block(root_extent, &zero).map_err(|_| FsError::Io)?;
@@ -76,7 +65,10 @@ pub fn format<D: BlockDevice + ?Sized>(dev: &mut D) -> FsResult<()>
     //    (a directory's "link" is its self-reference).
     let mut root = Node::unused();
     root.kind = NODE_KIND_DIR;
-    root.extents[0] = Extent { block: root_extent, blocks: 1 };
+    root.extents[0] = Extent {
+        block: root_extent,
+        blocks: 1,
+    };
     root.extent_count = 1;
     root.parent_id = ROOT_NODE_ID;
     root.link_count = 1;
@@ -94,18 +86,15 @@ pub fn format<D: BlockDevice + ?Sized>(dev: &mut D) -> FsResult<()>
     dev.read_block(BITMAP_LBA, &mut buf).map_err(|_| FsError::Io)?;
     crc_table.set(BITMAP_LBA, crc32(&buf));
     crc_table.set(CRC_TABLE_LBA, 0);
-    for i in 0..NODE_TABLE_BLOCKS
-    {
+    for i in 0..NODE_TABLE_BLOCKS {
         dev.read_block(NODE_TABLE_LBA + i, &mut buf).map_err(|_| FsError::Io)?;
         crc_table.set(NODE_TABLE_LBA + i, crc32(&buf));
     }
     let zero_crc = crc32(&zero);
-    for i in 0..JOURNAL_BLOCKS
-    {
+    for i in 0..JOURNAL_BLOCKS {
         crc_table.set(JOURNAL_LBA + i, zero_crc);
     }
-    for i in 0..SNAPSHOT_BLOCKS
-    {
+    for i in 0..SNAPSHOT_BLOCKS {
         crc_table.set(SNAPSHOT_LBA + i, zero_crc);
     }
     crc_table.set(root_extent, crc32(&zero));
@@ -162,17 +151,12 @@ pub fn format<D: BlockDevice + ?Sized>(dev: &mut D) -> FsResult<()>
     Ok(())
 }
 
-fn write_node_to_table<D: BlockDevice + ?Sized>(
-    dev: &mut D, id: u32, node: &Node,
-) -> FsResult<()>
-{
+fn write_node_to_table<D: BlockDevice + ?Sized>(dev: &mut D, id: u32, node: &Node) -> FsResult<()> {
     let lba = NODE_TABLE_LBA + id / (NODES_PER_BLOCK as u32);
     let off = (id as usize % NODES_PER_BLOCK) * NODE_SIZE;
     let mut block = [0u8; BLOCK_SIZE];
     dev.read_block(lba, &mut block).map_err(|_| FsError::Io)?;
-    let raw = unsafe {
-        core::slice::from_raw_parts((node as *const Node) as *const u8, NODE_SIZE)
-    };
+    let raw = unsafe { core::slice::from_raw_parts((node as *const Node) as *const u8, NODE_SIZE) };
     block[off..off + NODE_SIZE].copy_from_slice(raw);
     dev.write_block(lba, &block).map_err(|_| FsError::Io)
 }
@@ -180,10 +164,7 @@ fn write_node_to_table<D: BlockDevice + ?Sized>(
 /// Rewrite the on-disk superblock from `sb`. Caller is responsible
 /// for setting `sb.sb_crc32` to the correct CRC. Used by fsck after
 /// repair.
-pub(crate) fn rewrite_superblock<D: BlockDevice + ?Sized>(
-    dev: &mut D, sb: &Superblock,
-) -> FsResult<()>
-{
+pub(crate) fn rewrite_superblock<D: BlockDevice + ?Sized>(dev: &mut D, sb: &Superblock) -> FsResult<()> {
     let mut block = [0u8; BLOCK_SIZE];
     let raw = unsafe {
         core::slice::from_raw_parts(
@@ -205,9 +186,12 @@ pub(crate) fn rewrite_superblock<D: BlockDevice + ?Sized>(
 /// a future mounter can read the salt + cost params before it has
 /// the key.
 pub fn format_encrypted<D: BlockDevice + ?Sized>(
-    dev: &mut D, salt: &[u8; crate::format::SALT_BYTES], m_cost_kib: u32, t_cost: u32, p_cost: u32,
-) -> FsResult<()>
-{
+    dev: &mut D,
+    salt: &[u8; crate::format::SALT_BYTES],
+    m_cost_kib: u32,
+    t_cost: u32,
+    p_cost: u32,
+) -> FsResult<()> {
     format(dev)?;
     // Read the SB back to inherit the just-written values, swap in
     // the encryption metadata, re-CRC, and write again. The SB write

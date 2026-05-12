@@ -58,6 +58,36 @@ jobs:
           fi
           clang-format --dry-run --Werror "${SRCS[@]}"
 
+  check-rust:
+    # rustfmt + clippy gate for every kernel-linked Rust crate.
+    # rustfmt config lives in /rustfmt.toml; clippy policy lives in
+    # the [workspace.lints.clippy] block of /Cargo.toml. Toolchain
+    # pin (channel + components) lives in /rust-toolchain.toml so
+    # rustup auto-installs the right nightly + rust-src/rustfmt/clippy
+    # on first use.
+    name: cargo fmt + clippy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+            sh -s -- -y --default-toolchain none --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Sync toolchain (auto from /rust-toolchain.toml)
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup show
+          rustup component add rustfmt clippy
+      - name: cargo fmt --check
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo fmt --check --all
+      - name: cargo clippy
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo clippy --workspace --release --locked -- -D warnings
+
   build-debug:
     name: build debug
     runs-on: ubuntu-24.04
@@ -480,7 +510,7 @@ jobs:
     # would be silently lost when the asset object is replaced.
     name: snapshot lifetime downloads
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [check-format, build-debug, build-release, qemu-smoke, host-tests]
+    needs: [check-format, check-rust, build-debug, build-release, qemu-smoke, host-tests]
     uses: ./.github/workflows/lifetime-downloads.yml
     permissions:
       contents: write
@@ -493,7 +523,7 @@ jobs:
     name: publish rolling channels
     runs-on: ubuntu-24.04
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [check-format, build-debug, build-release, qemu-smoke, host-tests, pre-publish-lifetime-snapshot]
+    needs: [check-format, check-rust, build-debug, build-release, qemu-smoke, host-tests, pre-publish-lifetime-snapshot]
     permissions:
       contents: write
     steps:

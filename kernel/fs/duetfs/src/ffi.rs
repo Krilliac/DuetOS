@@ -16,8 +16,7 @@ use crate::block_dev::{BlockDevice, ExternBlockDevice, ExternBlockDeviceOps};
 use crate::compress;
 use crate::crypto;
 use crate::format::{
-    BLOCK_SIZE, JOURNAL_LBA, NODE_KIND_DIR, NODE_KIND_FILE, NODE_KIND_UNUSED, ROOT_NODE_ID,
-    SALT_BYTES, SUPERBLOCK_LBA,
+    BLOCK_SIZE, JOURNAL_LBA, NODE_KIND_DIR, NODE_KIND_FILE, NODE_KIND_UNUSED, ROOT_NODE_ID, SALT_BYTES, SUPERBLOCK_LBA,
 };
 use crate::fs::{Fs, FsError};
 use crate::journal;
@@ -46,8 +45,7 @@ const STATUS_NOT_A_SYMLINK: u32 = 14;
 const STATUS_XDEV_LINK: u32 = 15;
 
 #[repr(C)]
-pub struct DuetFsDevice
-{
+pub struct DuetFsDevice {
     pub cookie: *mut c_void,
     pub block_count: u32,
     pub read_only: u32,
@@ -56,8 +54,7 @@ pub struct DuetFsDevice
 }
 
 #[repr(C)]
-pub struct DuetFsLookupResult
-{
+pub struct DuetFsLookupResult {
     pub kind: u32,
     pub node_id: u32,
     pub size_bytes: u32,
@@ -66,10 +63,8 @@ pub struct DuetFsLookupResult
 
 const KIND_MISS: u32 = u32::MAX;
 
-fn err_to_status(e: FsError) -> u32
-{
-    match e
-    {
+fn err_to_status(e: FsError) -> u32 {
+    match e {
         FsError::Invalid => STATUS_INVALID,
         FsError::NotFound => STATUS_NOT_FOUND,
         FsError::NotADir => STATUS_NOT_A_DIR,
@@ -91,25 +86,24 @@ fn err_to_status(e: FsError) -> u32
 // SAFETY: caller guarantees `desc` is valid + readable, and that
 // every callback operates correctly on its cookie for the lifetime
 // of this call. No retention across calls.
-unsafe fn make_dev(desc: *const DuetFsDevice) -> Option<ExternBlockDevice>
-{
-    if desc.is_null()
-    {
+unsafe fn make_dev(desc: *const DuetFsDevice) -> Option<ExternBlockDevice> {
+    if desc.is_null() {
         return None;
     }
     let d = unsafe { &*desc };
     Some(ExternBlockDevice {
         cookie: d.cookie,
         block_count: d.block_count,
-        ops: ExternBlockDeviceOps { read: d.read, write: d.write },
+        ops: ExternBlockDeviceOps {
+            read: d.read,
+            write: d.write,
+        },
         read_only: d.read_only != 0,
     })
 }
 
-unsafe fn cstr_to_slice<'a>(p: *const c_uchar, max: usize) -> Option<&'a [u8]>
-{
-    if p.is_null() || max == 0
-    {
+unsafe fn cstr_to_slice<'a>(p: *const c_uchar, max: usize) -> Option<&'a [u8]> {
+    if p.is_null() || max == 0 {
         return None;
     }
     let bytes = unsafe { core::slice::from_raw_parts(p, max) };
@@ -121,9 +115,10 @@ unsafe fn cstr_to_slice<'a>(p: *const c_uchar, max: usize) -> Option<&'a [u8]>
 /// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
-pub unsafe extern "C" fn duetfs_probe(desc: *const DuetFsDevice) -> c_uint
-{
-    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return 0 };
+pub unsafe extern "C" fn duetfs_probe(desc: *const DuetFsDevice) -> c_uint {
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else {
+        return 0;
+    };
     Fs::open(&mut dev).is_ok() as c_uint
 }
 
@@ -131,11 +126,11 @@ pub unsafe extern "C" fn duetfs_probe(desc: *const DuetFsDevice) -> c_uint
 /// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
-pub unsafe extern "C" fn duetfs_mkfs(desc: *const DuetFsDevice) -> c_uint
-{
-    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
-    match mkfs::format(&mut dev)
-    {
+pub unsafe extern "C" fn duetfs_mkfs(desc: *const DuetFsDevice) -> c_uint {
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else {
+        return STATUS_INVALID;
+    };
+    match mkfs::format(&mut dev) {
         Ok(()) => STATUS_OK,
         Err(e) => err_to_status(e),
     }
@@ -146,12 +141,12 @@ pub unsafe extern "C" fn duetfs_mkfs(desc: *const DuetFsDevice) -> c_uint
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_lookup(
-    desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize,
+    desc: *const DuetFsDevice,
+    path: *const c_uchar,
+    path_max: usize,
     out: *mut DuetFsLookupResult,
-) -> c_uint
-{
-    if !out.is_null()
-    {
+) -> c_uint {
+    if !out.is_null() {
         unsafe {
             (*out).kind = KIND_MISS;
             (*out).node_id = 0;
@@ -159,14 +154,19 @@ pub unsafe extern "C" fn duetfs_lookup(
             (*out).child_count = 0;
         }
     }
-    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
-    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else { return STATUS_INVALID };
-    let fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
-    match fs.lookup_path(path_bytes)
-    {
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else {
+        return STATUS_INVALID;
+    };
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else {
+        return STATUS_INVALID;
+    };
+    let fs = match Fs::open(&mut dev) {
+        Ok(f) => f,
+        Err(e) => return err_to_status(e),
+    };
+    match fs.lookup_path(path_bytes) {
         Ok(r) => {
-            if !out.is_null()
-            {
+            if !out.is_null() {
                 unsafe {
                     (*out).kind = r.node.kind;
                     (*out).node_id = r.node_id;
@@ -185,26 +185,30 @@ pub unsafe extern "C" fn duetfs_lookup(
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_read_file(
-    desc: *const DuetFsDevice, node_id: u32, offset: u32, dst: *mut c_void, dst_max: usize,
+    desc: *const DuetFsDevice,
+    node_id: u32,
+    offset: u32,
+    dst: *mut c_void,
+    dst_max: usize,
     out_copied: *mut usize,
-) -> c_uint
-{
-    if !out_copied.is_null()
-    {
+) -> c_uint {
+    if !out_copied.is_null() {
         unsafe { *out_copied = 0 };
     }
-    if dst.is_null() || dst_max == 0
-    {
+    if dst.is_null() || dst_max == 0 {
         return STATUS_INVALID;
     }
-    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
-    let fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else {
+        return STATUS_INVALID;
+    };
+    let fs = match Fs::open(&mut dev) {
+        Ok(f) => f,
+        Err(e) => return err_to_status(e),
+    };
     let buf = unsafe { core::slice::from_raw_parts_mut(dst as *mut u8, dst_max) };
-    match fs.read_at(node_id, offset, buf)
-    {
+    match fs.read_at(node_id, offset, buf) {
         Ok(n) => {
-            if !out_copied.is_null()
-            {
+            if !out_copied.is_null() {
                 unsafe { *out_copied = n as usize };
             }
             STATUS_OK
@@ -218,28 +222,34 @@ pub unsafe extern "C" fn duetfs_read_file(
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_write_at(
-    desc: *const DuetFsDevice, node_id: u32, offset: u32, src: *const c_void, src_max: usize,
+    desc: *const DuetFsDevice,
+    node_id: u32,
+    offset: u32,
+    src: *const c_void,
+    src_max: usize,
     out_written: *mut usize,
-) -> c_uint
-{
-    if !out_written.is_null()
-    {
+) -> c_uint {
+    if !out_written.is_null() {
         unsafe { *out_written = 0 };
     }
-    if src.is_null() && src_max != 0
-    {
+    if src.is_null() && src_max != 0 {
         return STATUS_INVALID;
     }
-    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
-    let mut fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
-    let buf = if src.is_null() { &[] as &[u8] } else {
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else {
+        return STATUS_INVALID;
+    };
+    let mut fs = match Fs::open(&mut dev) {
+        Ok(f) => f,
+        Err(e) => return err_to_status(e),
+    };
+    let buf = if src.is_null() {
+        &[] as &[u8]
+    } else {
         unsafe { core::slice::from_raw_parts(src as *const u8, src_max) }
     };
-    match fs.write_at(node_id, offset, buf)
-    {
+    match fs.write_at(node_id, offset, buf) {
         Ok(n) => {
-            if !out_written.is_null()
-            {
+            if !out_written.is_null() {
                 unsafe { *out_written = n as usize };
             }
             STATUS_OK
@@ -253,36 +263,43 @@ pub unsafe extern "C" fn duetfs_write_at(
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_create_path(
-    desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize, kind: u32,
+    desc: *const DuetFsDevice,
+    path: *const c_uchar,
+    path_max: usize,
+    kind: u32,
     out_node_id: *mut u32,
-) -> c_uint
-{
-    if !out_node_id.is_null()
-    {
+) -> c_uint {
+    if !out_node_id.is_null() {
         unsafe { *out_node_id = 0 };
     }
-    if kind != NODE_KIND_FILE && kind != NODE_KIND_DIR
-    {
+    if kind != NODE_KIND_FILE && kind != NODE_KIND_DIR {
         return STATUS_INVALID;
     }
-    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
-    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else { return STATUS_INVALID };
-    let Some((parent_path, name)) = split_parent_and_name(path_bytes) else { return STATUS_INVALID };
-    let mut fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
-    let parent = match fs.lookup_path(parent_path) { Ok(r) => r, Err(e) => return err_to_status(e) };
-    let res = if kind == NODE_KIND_FILE
-    {
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else {
+        return STATUS_INVALID;
+    };
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else {
+        return STATUS_INVALID;
+    };
+    let Some((parent_path, name)) = split_parent_and_name(path_bytes) else {
+        return STATUS_INVALID;
+    };
+    let mut fs = match Fs::open(&mut dev) {
+        Ok(f) => f,
+        Err(e) => return err_to_status(e),
+    };
+    let parent = match fs.lookup_path(parent_path) {
+        Ok(r) => r,
+        Err(e) => return err_to_status(e),
+    };
+    let res = if kind == NODE_KIND_FILE {
         fs.create_file(parent.node_id, name)
-    }
-    else
-    {
+    } else {
         fs.create_dir(parent.node_id, name)
     };
-    match res
-    {
+    match res {
         Ok(id) => {
-            if !out_node_id.is_null()
-            {
+            if !out_node_id.is_null() {
                 unsafe { *out_node_id = id };
             }
             STATUS_OK
@@ -296,16 +313,28 @@ pub unsafe extern "C" fn duetfs_create_path(
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_unlink_path(
-    desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize,
-) -> c_uint
-{
-    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
-    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else { return STATUS_INVALID };
-    let Some((parent_path, name)) = split_parent_and_name(path_bytes) else { return STATUS_INVALID };
-    let mut fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
-    let parent = match fs.lookup_path(parent_path) { Ok(r) => r, Err(e) => return err_to_status(e) };
-    match fs.unlink(parent.node_id, name)
-    {
+    desc: *const DuetFsDevice,
+    path: *const c_uchar,
+    path_max: usize,
+) -> c_uint {
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else {
+        return STATUS_INVALID;
+    };
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else {
+        return STATUS_INVALID;
+    };
+    let Some((parent_path, name)) = split_parent_and_name(path_bytes) else {
+        return STATUS_INVALID;
+    };
+    let mut fs = match Fs::open(&mut dev) {
+        Ok(f) => f,
+        Err(e) => return err_to_status(e),
+    };
+    let parent = match fs.lookup_path(parent_path) {
+        Ok(r) => r,
+        Err(e) => return err_to_status(e),
+    };
+    match fs.unlink(parent.node_id, name) {
         Ok(()) => STATUS_OK,
         Err(e) => err_to_status(e),
     }
@@ -315,14 +344,15 @@ pub unsafe extern "C" fn duetfs_unlink_path(
 /// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
-pub unsafe extern "C" fn duetfs_truncate(
-    desc: *const DuetFsDevice, node_id: u32, new_size: u32,
-) -> c_uint
-{
-    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
-    let mut fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
-    match fs.truncate(node_id, new_size)
-    {
+pub unsafe extern "C" fn duetfs_truncate(desc: *const DuetFsDevice, node_id: u32, new_size: u32) -> c_uint {
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else {
+        return STATUS_INVALID;
+    };
+    let mut fs = match Fs::open(&mut dev) {
+        Ok(f) => f,
+        Err(e) => return err_to_status(e),
+    };
+    match fs.truncate(node_id, new_size) {
         Ok(()) => STATUS_OK,
         Err(e) => err_to_status(e),
     }
@@ -330,8 +360,7 @@ pub unsafe extern "C" fn duetfs_truncate(
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-pub struct DuetFsFsckReport
-{
+pub struct DuetFsFsckReport {
     pub leaked_blocks: u32,
     pub missing_blocks: u32,
     pub orphan_nodes: u32,
@@ -346,21 +375,20 @@ pub struct DuetFsFsckReport
 /// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
-pub unsafe extern "C" fn duetfs_fsck(
-    desc: *const DuetFsDevice, repair: u32, out: *mut DuetFsFsckReport,
-) -> c_uint
-{
-    if !out.is_null()
-    {
+pub unsafe extern "C" fn duetfs_fsck(desc: *const DuetFsDevice, repair: u32, out: *mut DuetFsFsckReport) -> c_uint {
+    if !out.is_null() {
         unsafe { *out = DuetFsFsckReport::default() };
     }
-    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
-    let mut fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
-    match fs.fsck(repair != 0)
-    {
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else {
+        return STATUS_INVALID;
+    };
+    let mut fs = match Fs::open(&mut dev) {
+        Ok(f) => f,
+        Err(e) => return err_to_status(e),
+    };
+    match fs.fsck(repair != 0) {
         Ok(r) => {
-            if !out.is_null()
-            {
+            if !out.is_null() {
                 unsafe {
                     (*out).leaked_blocks = r.leaked_blocks;
                     (*out).missing_blocks = r.missing_blocks;
@@ -385,25 +413,39 @@ pub unsafe extern "C" fn duetfs_fsck(
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_create_symlink(
-    desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize,
-    target: *const c_uchar, target_max: usize, out_node_id: *mut u32,
-) -> c_uint
-{
-    if !out_node_id.is_null()
-    {
+    desc: *const DuetFsDevice,
+    path: *const c_uchar,
+    path_max: usize,
+    target: *const c_uchar,
+    target_max: usize,
+    out_node_id: *mut u32,
+) -> c_uint {
+    if !out_node_id.is_null() {
         unsafe { *out_node_id = 0 };
     }
-    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
-    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else { return STATUS_INVALID };
-    let Some(target_bytes) = (unsafe { cstr_to_slice(target, target_max) }) else { return STATUS_INVALID };
-    let Some((parent_path, name)) = split_parent_and_name(path_bytes) else { return STATUS_INVALID };
-    let mut fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
-    let parent = match fs.lookup_path(parent_path) { Ok(r) => r, Err(e) => return err_to_status(e) };
-    match fs.create_symlink(parent.node_id, name, target_bytes)
-    {
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else {
+        return STATUS_INVALID;
+    };
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else {
+        return STATUS_INVALID;
+    };
+    let Some(target_bytes) = (unsafe { cstr_to_slice(target, target_max) }) else {
+        return STATUS_INVALID;
+    };
+    let Some((parent_path, name)) = split_parent_and_name(path_bytes) else {
+        return STATUS_INVALID;
+    };
+    let mut fs = match Fs::open(&mut dev) {
+        Ok(f) => f,
+        Err(e) => return err_to_status(e),
+    };
+    let parent = match fs.lookup_path(parent_path) {
+        Ok(r) => r,
+        Err(e) => return err_to_status(e),
+    };
+    match fs.create_symlink(parent.node_id, name, target_bytes) {
         Ok(id) => {
-            if !out_node_id.is_null()
-            {
+            if !out_node_id.is_null() {
                 unsafe { *out_node_id = id };
             }
             STATUS_OK
@@ -420,26 +462,29 @@ pub unsafe extern "C" fn duetfs_create_symlink(
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_readlink(
-    desc: *const DuetFsDevice, node_id: u32, dst: *mut c_void, dst_max: usize,
+    desc: *const DuetFsDevice,
+    node_id: u32,
+    dst: *mut c_void,
+    dst_max: usize,
     out_copied: *mut usize,
-) -> c_uint
-{
-    if !out_copied.is_null()
-    {
+) -> c_uint {
+    if !out_copied.is_null() {
         unsafe { *out_copied = 0 };
     }
-    if dst.is_null() || dst_max == 0
-    {
+    if dst.is_null() || dst_max == 0 {
         return STATUS_INVALID;
     }
-    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
-    let fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else {
+        return STATUS_INVALID;
+    };
+    let fs = match Fs::open(&mut dev) {
+        Ok(f) => f,
+        Err(e) => return err_to_status(e),
+    };
     let buf = unsafe { core::slice::from_raw_parts_mut(dst as *mut u8, dst_max) };
-    match fs.readlink(node_id, buf)
-    {
+    match fs.readlink(node_id, buf) {
         Ok(n) => {
-            if !out_copied.is_null()
-            {
+            if !out_copied.is_null() {
                 unsafe { *out_copied = n as usize };
             }
             STATUS_OK
@@ -458,21 +503,37 @@ pub unsafe extern "C" fn duetfs_readlink(
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_link(
-    desc: *const DuetFsDevice, existing_path: *const c_uchar, existing_max: usize,
-    new_path: *const c_uchar, new_max: usize,
-) -> c_uint
-{
-    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    desc: *const DuetFsDevice,
+    existing_path: *const c_uchar,
+    existing_max: usize,
+    new_path: *const c_uchar,
+    new_max: usize,
+) -> c_uint {
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else {
+        return STATUS_INVALID;
+    };
     let Some(existing_bytes) = (unsafe { cstr_to_slice(existing_path, existing_max) }) else {
         return STATUS_INVALID;
     };
-    let Some(new_bytes) = (unsafe { cstr_to_slice(new_path, new_max) }) else { return STATUS_INVALID };
-    let Some((parent_path, name)) = split_parent_and_name(new_bytes) else { return STATUS_INVALID };
-    let mut fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
-    let target = match fs.lookup_path(existing_bytes) { Ok(r) => r, Err(e) => return err_to_status(e) };
-    let parent = match fs.lookup_path(parent_path) { Ok(r) => r, Err(e) => return err_to_status(e) };
-    match fs.link(target.node_id, parent.node_id, name)
-    {
+    let Some(new_bytes) = (unsafe { cstr_to_slice(new_path, new_max) }) else {
+        return STATUS_INVALID;
+    };
+    let Some((parent_path, name)) = split_parent_and_name(new_bytes) else {
+        return STATUS_INVALID;
+    };
+    let mut fs = match Fs::open(&mut dev) {
+        Ok(f) => f,
+        Err(e) => return err_to_status(e),
+    };
+    let target = match fs.lookup_path(existing_bytes) {
+        Ok(r) => r,
+        Err(e) => return err_to_status(e),
+    };
+    let parent = match fs.lookup_path(parent_path) {
+        Ok(r) => r,
+        Err(e) => return err_to_status(e),
+    };
+    match fs.link(target.node_id, parent.node_id, name) {
         Ok(()) => STATUS_OK,
         Err(e) => err_to_status(e),
     }
@@ -499,22 +560,18 @@ pub static DUETFS_ROOT_NODE_ID: u32 = ROOT_NODE_ID;
 /// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
-pub unsafe extern "C" fn duetfs_block_read(
-    desc: *const DuetFsDevice, lba: u32, dst: *mut u8,
-) -> c_uint
-{
-    if dst.is_null()
-    {
+pub unsafe extern "C" fn duetfs_block_read(desc: *const DuetFsDevice, lba: u32, dst: *mut u8) -> c_uint {
+    if dst.is_null() {
         return STATUS_INVALID;
     }
-    let Some(dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
-    if lba >= dev.block_count()
-    {
+    let Some(dev) = (unsafe { make_dev(desc) }) else {
+        return STATUS_INVALID;
+    };
+    if lba >= dev.block_count() {
         return STATUS_INVALID;
     }
     let buf = unsafe { core::slice::from_raw_parts_mut(dst, BLOCK_SIZE) };
-    match dev.read_block(lba, buf)
-    {
+    match dev.read_block(lba, buf) {
         Ok(()) => STATUS_OK,
         Err(_) => STATUS_IO,
     }
@@ -529,20 +586,21 @@ pub unsafe extern "C" fn duetfs_block_read(
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_journal_apply(
-    desc: *const DuetFsDevice, target_lba: u32, payload: *const u8,
-) -> c_uint
-{
-    if payload.is_null()
-    {
+    desc: *const DuetFsDevice,
+    target_lba: u32,
+    payload: *const u8,
+) -> c_uint {
+    if payload.is_null() {
         return STATUS_INVALID;
     }
-    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else {
+        return STATUS_INVALID;
+    };
     let buf = unsafe { core::slice::from_raw_parts(payload, BLOCK_SIZE) };
     // txn_id of 1 is fine for the standalone helper — Fs::open's
     // replay path doesn't depend on monotonicity (it only reads the
     // descriptor's `state`).
-    match journal::apply(&mut dev, JOURNAL_LBA, 1, &[(target_lba, buf)])
-    {
+    match journal::apply(&mut dev, JOURNAL_LBA, 1, &[(target_lba, buf)]) {
         Ok(()) => STATUS_OK,
         Err(e) => err_to_status(e),
     }
@@ -560,17 +618,18 @@ pub unsafe extern "C" fn duetfs_journal_apply(
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_journal_inject_for_test(
-    desc: *const DuetFsDevice, target_lba: u32, payload: *const u8,
-) -> c_uint
-{
-    if payload.is_null()
-    {
+    desc: *const DuetFsDevice,
+    target_lba: u32,
+    payload: *const u8,
+) -> c_uint {
+    if payload.is_null() {
         return STATUS_INVALID;
     }
-    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else {
+        return STATUS_INVALID;
+    };
     let buf = unsafe { core::slice::from_raw_parts(payload, BLOCK_SIZE) };
-    match journal::inject_committed_for_test(&mut dev, JOURNAL_LBA, 1, &[(target_lba, buf)])
-    {
+    match journal::inject_committed_for_test(&mut dev, JOURNAL_LBA, 1, &[(target_lba, buf)]) {
         Ok(()) => STATUS_OK,
         Err(e) => err_to_status(e),
     }
@@ -585,11 +644,11 @@ pub unsafe extern "C" fn duetfs_journal_inject_for_test(
 /// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
-pub unsafe extern "C" fn duetfs_journal_state(desc: *const DuetFsDevice) -> c_uint
-{
-    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return c_uint::MAX };
-    match journal::peek_descriptor(&mut dev, JOURNAL_LBA)
-    {
+pub unsafe extern "C" fn duetfs_journal_state(desc: *const DuetFsDevice) -> c_uint {
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else {
+        return c_uint::MAX;
+    };
+    match journal::peek_descriptor(&mut dev, JOURNAL_LBA) {
         Ok(d) => d.state,
         Err(_) => c_uint::MAX,
     }
@@ -618,19 +677,22 @@ pub unsafe extern "C" fn duetfs_journal_state(desc: *const DuetFsDevice) -> c_ui
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_kdf_argon2id(
-    password: *const u8, password_len: usize, salt: *const u8, salt_len: usize, m_cost_kib: u32,
-    t_cost: u32, p_cost: u32, out_key: *mut u8,
-) -> c_uint
-{
-    if password.is_null() || salt.is_null() || out_key.is_null() || password_len == 0 || salt_len == 0
-    {
+    password: *const u8,
+    password_len: usize,
+    salt: *const u8,
+    salt_len: usize,
+    m_cost_kib: u32,
+    t_cost: u32,
+    p_cost: u32,
+    out_key: *mut u8,
+) -> c_uint {
+    if password.is_null() || salt.is_null() || out_key.is_null() || password_len == 0 || salt_len == 0 {
         return STATUS_INVALID;
     }
     let pw = unsafe { core::slice::from_raw_parts(password, password_len) };
     let s = unsafe { core::slice::from_raw_parts(salt, salt_len) };
     let mut key = [0u8; crypto::XTS_KEY_BYTES];
-    if !crypto::argon2id_kdf(pw, s, m_cost_kib, t_cost, p_cost, &mut key)
-    {
+    if !crypto::argon2id_kdf(pw, s, m_cost_kib, t_cost, p_cost, &mut key) {
         return STATUS_INVALID;
     }
     let dst = unsafe { core::slice::from_raw_parts_mut(out_key, crypto::XTS_KEY_BYTES) };
@@ -646,12 +708,8 @@ pub unsafe extern "C" fn duetfs_kdf_argon2id(
 /// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
-pub unsafe extern "C" fn duetfs_xts_encrypt_block(
-    key: *const u8, sector: u64, buf: *mut u8,
-) -> c_uint
-{
-    if key.is_null() || buf.is_null()
-    {
+pub unsafe extern "C" fn duetfs_xts_encrypt_block(key: *const u8, sector: u64, buf: *mut u8) -> c_uint {
+    if key.is_null() || buf.is_null() {
         return STATUS_INVALID;
     }
     let mut k = [0u8; crypto::XTS_KEY_BYTES];
@@ -668,12 +726,8 @@ pub unsafe extern "C" fn duetfs_xts_encrypt_block(
 /// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
-pub unsafe extern "C" fn duetfs_xts_decrypt_block(
-    key: *const u8, sector: u64, buf: *mut u8,
-) -> c_uint
-{
-    if key.is_null() || buf.is_null()
-    {
+pub unsafe extern "C" fn duetfs_xts_decrypt_block(key: *const u8, sector: u64, buf: *mut u8) -> c_uint {
+    if key.is_null() || buf.is_null() {
         return STATUS_INVALID;
     }
     let mut k = [0u8; crypto::XTS_KEY_BYTES];
@@ -695,20 +749,23 @@ pub unsafe extern "C" fn duetfs_xts_decrypt_block(
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_mkfs_encrypted(
-    desc: *const DuetFsDevice, salt: *const u8, salt_len: usize, m_cost_kib: u32, t_cost: u32,
+    desc: *const DuetFsDevice,
+    salt: *const u8,
+    salt_len: usize,
+    m_cost_kib: u32,
+    t_cost: u32,
     p_cost: u32,
-) -> c_uint
-{
-    if salt.is_null() || salt_len != SALT_BYTES
-    {
+) -> c_uint {
+    if salt.is_null() || salt_len != SALT_BYTES {
         return STATUS_INVALID;
     }
-    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else {
+        return STATUS_INVALID;
+    };
     let mut salt_arr = [0u8; SALT_BYTES];
     let raw = unsafe { core::slice::from_raw_parts(salt, SALT_BYTES) };
     salt_arr.copy_from_slice(raw);
-    match mkfs::format_encrypted(&mut dev, &salt_arr, m_cost_kib, t_cost, p_cost)
-    {
+    match mkfs::format_encrypted(&mut dev, &salt_arr, m_cost_kib, t_cost, p_cost) {
         Ok(()) => STATUS_OK,
         Err(e) => err_to_status(e),
     }
@@ -732,26 +789,25 @@ pub unsafe extern "C" fn duetfs_mkfs_encrypted(
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_lz4_compress(
-    src: *const u8, src_len: usize, dst: *mut u8, dst_max: usize, out_len: *mut usize,
-) -> c_uint
-{
-    if !out_len.is_null()
-    {
+    src: *const u8,
+    src_len: usize,
+    dst: *mut u8,
+    dst_max: usize,
+    out_len: *mut usize,
+) -> c_uint {
+    if !out_len.is_null() {
         unsafe { *out_len = 0 };
     }
-    if src.is_null() || dst.is_null()
-    {
+    if src.is_null() || dst.is_null() {
         return STATUS_INVALID;
     }
     let s = unsafe { core::slice::from_raw_parts(src, src_len) };
     let d = unsafe { core::slice::from_raw_parts_mut(dst, dst_max) };
     let n = compress::compress_prepend_size(s, d);
-    if n == 0 && src_len != 0
-    {
+    if n == 0 && src_len != 0 {
         return STATUS_INVALID;
     }
-    if !out_len.is_null()
-    {
+    if !out_len.is_null() {
         unsafe { *out_len = n };
     }
     STATUS_OK
@@ -766,26 +822,25 @@ pub unsafe extern "C" fn duetfs_lz4_compress(
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_lz4_decompress(
-    src: *const u8, src_len: usize, dst: *mut u8, dst_max: usize, out_len: *mut usize,
-) -> c_uint
-{
-    if !out_len.is_null()
-    {
+    src: *const u8,
+    src_len: usize,
+    dst: *mut u8,
+    dst_max: usize,
+    out_len: *mut usize,
+) -> c_uint {
+    if !out_len.is_null() {
         unsafe { *out_len = 0 };
     }
-    if src.is_null() || dst.is_null() || src_len == 0
-    {
+    if src.is_null() || dst.is_null() || src_len == 0 {
         return STATUS_INVALID;
     }
     let s = unsafe { core::slice::from_raw_parts(src, src_len) };
     let d = unsafe { core::slice::from_raw_parts_mut(dst, dst_max) };
     let n = compress::decompress_size_prepended(s, d);
-    if n == 0
-    {
+    if n == 0 {
         return STATUS_INVALID;
     }
-    if !out_len.is_null()
-    {
+    if !out_len.is_null() {
         unsafe { *out_len = n };
     }
     STATUS_OK
@@ -798,8 +853,7 @@ pub unsafe extern "C" fn duetfs_lz4_decompress(
 /// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
-pub unsafe extern "C" fn duetfs_lz4_compress_bound(n: usize) -> usize
-{
+pub unsafe extern "C" fn duetfs_lz4_compress_bound(n: usize) -> usize {
     compress::compress_bound(n)
 }
 
@@ -821,13 +875,11 @@ pub unsafe extern "C" fn duetfs_lz4_compress_bound(n: usize) -> usize
 /// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
-pub unsafe extern "C" fn duetfs_snapshot_create(
-    desc: *const DuetFsDevice, ts_ns: u64,
-) -> c_uint
-{
-    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
-    match snapshot::create(&mut dev, ts_ns)
-    {
+pub unsafe extern "C" fn duetfs_snapshot_create(desc: *const DuetFsDevice, ts_ns: u64) -> c_uint {
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else {
+        return STATUS_INVALID;
+    };
+    match snapshot::create(&mut dev, ts_ns) {
         Ok(()) => STATUS_OK,
         Err(e) => err_to_status(e),
     }
@@ -841,11 +893,11 @@ pub unsafe extern "C" fn duetfs_snapshot_create(
 /// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
-pub unsafe extern "C" fn duetfs_snapshot_restore(desc: *const DuetFsDevice) -> c_uint
-{
-    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
-    match snapshot::restore(&mut dev)
-    {
+pub unsafe extern "C" fn duetfs_snapshot_restore(desc: *const DuetFsDevice) -> c_uint {
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else {
+        return STATUS_INVALID;
+    };
+    match snapshot::restore(&mut dev) {
         Ok(()) => STATUS_OK,
         Err(e) => err_to_status(e),
     }
@@ -864,33 +916,41 @@ pub unsafe extern "C" fn duetfs_snapshot_restore(desc: *const DuetFsDevice) -> c
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_xattr_set(
-    desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize, name: *const c_uchar,
-    name_len: usize, value: *const u8, value_len: usize,
-) -> c_uint
-{
-    if name.is_null() || name_len == 0
-    {
+    desc: *const DuetFsDevice,
+    path: *const c_uchar,
+    path_max: usize,
+    name: *const c_uchar,
+    name_len: usize,
+    value: *const u8,
+    value_len: usize,
+) -> c_uint {
+    if name.is_null() || name_len == 0 {
         return STATUS_INVALID;
     }
-    if value.is_null() && value_len != 0
-    {
+    if value.is_null() && value_len != 0 {
         return STATUS_INVALID;
     }
-    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
-    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else { return STATUS_INVALID };
-    let mut fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
-    let target = match fs.lookup_path(path_bytes) { Ok(r) => r, Err(e) => return err_to_status(e) };
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else {
+        return STATUS_INVALID;
+    };
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else {
+        return STATUS_INVALID;
+    };
+    let mut fs = match Fs::open(&mut dev) {
+        Ok(f) => f,
+        Err(e) => return err_to_status(e),
+    };
+    let target = match fs.lookup_path(path_bytes) {
+        Ok(r) => r,
+        Err(e) => return err_to_status(e),
+    };
     let name_bytes = unsafe { core::slice::from_raw_parts(name, name_len) };
-    let value_bytes = if value_len == 0
-    {
+    let value_bytes = if value_len == 0 {
         &[] as &[u8]
-    }
-    else
-    {
+    } else {
         unsafe { core::slice::from_raw_parts(value, value_len) }
     };
-    match fs.xattr_set(target.node_id, name_bytes, value_bytes)
-    {
+    match fs.xattr_set(target.node_id, name_bytes, value_bytes) {
         Ok(()) => STATUS_OK,
         Err(e) => err_to_status(e),
     }
@@ -905,37 +965,45 @@ pub unsafe extern "C" fn duetfs_xattr_set(
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_xattr_get(
-    desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize, name: *const c_uchar,
-    name_len: usize, dst: *mut u8, dst_max: usize, out_len: *mut usize,
-) -> c_uint
-{
-    if !out_len.is_null()
-    {
+    desc: *const DuetFsDevice,
+    path: *const c_uchar,
+    path_max: usize,
+    name: *const c_uchar,
+    name_len: usize,
+    dst: *mut u8,
+    dst_max: usize,
+    out_len: *mut usize,
+) -> c_uint {
+    if !out_len.is_null() {
         unsafe { *out_len = 0 };
     }
-    if name.is_null() || name_len == 0
-    {
+    if name.is_null() || name_len == 0 {
         return STATUS_INVALID;
     }
-    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
-    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else { return STATUS_INVALID };
-    let fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
-    let target = match fs.lookup_path(path_bytes) { Ok(r) => r, Err(e) => return err_to_status(e) };
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else {
+        return STATUS_INVALID;
+    };
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else {
+        return STATUS_INVALID;
+    };
+    let fs = match Fs::open(&mut dev) {
+        Ok(f) => f,
+        Err(e) => return err_to_status(e),
+    };
+    let target = match fs.lookup_path(path_bytes) {
+        Ok(r) => r,
+        Err(e) => return err_to_status(e),
+    };
     let name_bytes = unsafe { core::slice::from_raw_parts(name, name_len) };
     // dst can be empty for a probe call ("how big is the buffer I need?").
-    let dst_slice = if dst.is_null() || dst_max == 0
-    {
+    let dst_slice = if dst.is_null() || dst_max == 0 {
         &mut [] as &mut [u8]
-    }
-    else
-    {
+    } else {
         unsafe { core::slice::from_raw_parts_mut(dst, dst_max) }
     };
-    match fs.xattr_get(target.node_id, name_bytes, dst_slice)
-    {
+    match fs.xattr_get(target.node_id, name_bytes, dst_slice) {
         Ok(n) => {
-            if !out_len.is_null()
-            {
+            if !out_len.is_null() {
                 unsafe { *out_len = n };
             }
             STATUS_OK
@@ -952,31 +1020,38 @@ pub unsafe extern "C" fn duetfs_xattr_get(
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_xattr_list(
-    desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize, dst: *mut u8,
-    dst_max: usize, out_len: *mut usize,
-) -> c_uint
-{
-    if !out_len.is_null()
-    {
+    desc: *const DuetFsDevice,
+    path: *const c_uchar,
+    path_max: usize,
+    dst: *mut u8,
+    dst_max: usize,
+    out_len: *mut usize,
+) -> c_uint {
+    if !out_len.is_null() {
         unsafe { *out_len = 0 };
     }
-    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
-    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else { return STATUS_INVALID };
-    let fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
-    let target = match fs.lookup_path(path_bytes) { Ok(r) => r, Err(e) => return err_to_status(e) };
-    let dst_slice = if dst.is_null() || dst_max == 0
-    {
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else {
+        return STATUS_INVALID;
+    };
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else {
+        return STATUS_INVALID;
+    };
+    let fs = match Fs::open(&mut dev) {
+        Ok(f) => f,
+        Err(e) => return err_to_status(e),
+    };
+    let target = match fs.lookup_path(path_bytes) {
+        Ok(r) => r,
+        Err(e) => return err_to_status(e),
+    };
+    let dst_slice = if dst.is_null() || dst_max == 0 {
         &mut [] as &mut [u8]
-    }
-    else
-    {
+    } else {
         unsafe { core::slice::from_raw_parts_mut(dst, dst_max) }
     };
-    match fs.xattr_list(target.node_id, dst_slice)
-    {
+    match fs.xattr_list(target.node_id, dst_slice) {
         Ok(n) => {
-            if !out_len.is_null()
-            {
+            if !out_len.is_null() {
                 unsafe { *out_len = n };
             }
             STATUS_OK
@@ -993,21 +1068,31 @@ pub unsafe extern "C" fn duetfs_xattr_list(
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_xattr_remove(
-    desc: *const DuetFsDevice, path: *const c_uchar, path_max: usize, name: *const c_uchar,
+    desc: *const DuetFsDevice,
+    path: *const c_uchar,
+    path_max: usize,
+    name: *const c_uchar,
     name_len: usize,
-) -> c_uint
-{
-    if name.is_null() || name_len == 0
-    {
+) -> c_uint {
+    if name.is_null() || name_len == 0 {
         return STATUS_INVALID;
     }
-    let Some(mut dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
-    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else { return STATUS_INVALID };
-    let mut fs = match Fs::open(&mut dev) { Ok(f) => f, Err(e) => return err_to_status(e) };
-    let target = match fs.lookup_path(path_bytes) { Ok(r) => r, Err(e) => return err_to_status(e) };
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else {
+        return STATUS_INVALID;
+    };
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else {
+        return STATUS_INVALID;
+    };
+    let mut fs = match Fs::open(&mut dev) {
+        Ok(f) => f,
+        Err(e) => return err_to_status(e),
+    };
+    let target = match fs.lookup_path(path_bytes) {
+        Ok(r) => r,
+        Err(e) => return err_to_status(e),
+    };
     let name_bytes = unsafe { core::slice::from_raw_parts(name, name_len) };
-    match fs.xattr_remove(target.node_id, name_bytes)
-    {
+    match fs.xattr_remove(target.node_id, name_bytes) {
         Ok(()) => STATUS_OK,
         Err(e) => err_to_status(e),
     }
@@ -1019,19 +1104,16 @@ pub unsafe extern "C" fn duetfs_xattr_remove(
 /// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
-pub unsafe extern "C" fn duetfs_snapshot_present(desc: *const DuetFsDevice) -> c_uint
-{
-    let Some(dev) = (unsafe { make_dev(desc) }) else { return c_uint::MAX };
+pub unsafe extern "C" fn duetfs_snapshot_present(desc: *const DuetFsDevice) -> c_uint {
+    let Some(dev) = (unsafe { make_dev(desc) }) else {
+        return c_uint::MAX;
+    };
     let mut block = [0u8; BLOCK_SIZE];
-    if dev.read_block(SUPERBLOCK_LBA, &mut block).is_err()
-    {
+    if dev.read_block(SUPERBLOCK_LBA, &mut block).is_err() {
         return c_uint::MAX;
     }
-    let sb = unsafe {
-        core::ptr::read_unaligned(block.as_ptr() as *const crate::format::Superblock)
-    };
-    if sb.magic != crate::format::MAGIC || sb.version != crate::format::VERSION
-    {
+    let sb = unsafe { core::ptr::read_unaligned(block.as_ptr() as *const crate::format::Superblock) };
+    if sb.magic != crate::format::MAGIC || sb.version != crate::format::VERSION {
         return c_uint::MAX;
     }
     sb.snapshot_present
@@ -1048,45 +1130,41 @@ pub unsafe extern "C" fn duetfs_snapshot_present(desc: *const DuetFsDevice) -> c
 /// for the duration of the call; DuetFS never retains them after returning.
 #[no_mangle]
 pub unsafe extern "C" fn duetfs_read_encryption_meta(
-    desc: *const DuetFsDevice, out_encrypted: *mut u32, out_m_cost: *mut u32, out_t_cost: *mut u32,
-    out_p_cost: *mut u32, out_salt: *mut u8, salt_buf_len: usize,
-) -> c_uint
-{
-    let Some(dev) = (unsafe { make_dev(desc) }) else { return STATUS_INVALID };
-    if salt_buf_len < SALT_BYTES
-    {
+    desc: *const DuetFsDevice,
+    out_encrypted: *mut u32,
+    out_m_cost: *mut u32,
+    out_t_cost: *mut u32,
+    out_p_cost: *mut u32,
+    out_salt: *mut u8,
+    salt_buf_len: usize,
+) -> c_uint {
+    let Some(dev) = (unsafe { make_dev(desc) }) else {
+        return STATUS_INVALID;
+    };
+    if salt_buf_len < SALT_BYTES {
         return STATUS_INVALID;
     }
     let mut block = [0u8; BLOCK_SIZE];
-    if dev.read_block(0, &mut block).is_err()
-    {
+    if dev.read_block(0, &mut block).is_err() {
         return STATUS_IO;
     }
-    let sb = unsafe {
-        core::ptr::read_unaligned(block.as_ptr() as *const crate::format::Superblock)
-    };
-    if sb.magic != crate::format::MAGIC || sb.version != crate::format::VERSION
-    {
+    let sb = unsafe { core::ptr::read_unaligned(block.as_ptr() as *const crate::format::Superblock) };
+    if sb.magic != crate::format::MAGIC || sb.version != crate::format::VERSION {
         return STATUS_INVALID;
     }
-    if !out_encrypted.is_null()
-    {
+    if !out_encrypted.is_null() {
         unsafe { *out_encrypted = sb.encrypted };
     }
-    if !out_m_cost.is_null()
-    {
+    if !out_m_cost.is_null() {
         unsafe { *out_m_cost = sb.kdf_m_cost_kib };
     }
-    if !out_t_cost.is_null()
-    {
+    if !out_t_cost.is_null() {
         unsafe { *out_t_cost = sb.kdf_t_cost };
     }
-    if !out_p_cost.is_null()
-    {
+    if !out_p_cost.is_null() {
         unsafe { *out_p_cost = sb.kdf_p_cost };
     }
-    if !out_salt.is_null()
-    {
+    if !out_salt.is_null() {
         let dst = unsafe { core::slice::from_raw_parts_mut(out_salt, SALT_BYTES) };
         dst.copy_from_slice(&sb.kdf_salt);
     }

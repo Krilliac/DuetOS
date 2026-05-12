@@ -8,7 +8,7 @@
 // Total syscalls listed: 374
 // Implemented (Do<Name> body in some syscall_*.cpp): 267
 // Dispatched (kSys<Name> case but no Do<Name>; inline impl): 93
-// Effective coverage (Implemented + Dispatched + LinuxGapFill): 360
+// Effective coverage (Implemented + Dispatched): 360
 // Coverage (implemented): 71%
 // Coverage (effective): 96%
 //

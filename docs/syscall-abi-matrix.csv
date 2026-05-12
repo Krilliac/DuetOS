@@ -1,378 +1,285 @@
 abi,number,name,status,owner,fallback
-linux,0,read,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,1,write,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,2,open,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,3,close,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,4,stat,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,5,fstat,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,6,lstat,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,7,poll,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,8,lseek,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,9,mmap,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,10,mprotect,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,11,munmap,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,12,brk,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,13,rt_sigaction,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,14,rt_sigprocmask,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,15,rt_sigreturn,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,16,ioctl,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,17,pread64,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,18,pwrite64,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,19,readv,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,20,writev,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,21,access,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,22,pipe,translated,kernel/subsystems/translation/translate.cpp::TranslateDeliberateEnosys,synthetic:enosys-no-ipc
-linux,23,select,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,24,sched_yield,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,25,mremap,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,26,msync,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,27,mincore,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,28,madvise,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,29,shmget,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,30,shmat,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,31,shmctl,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,32,dup,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,33,dup2,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,34,pause,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,35,nanosleep,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,36,getitimer,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,37,alarm,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,38,setitimer,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,39,getpid,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,40,sendfile,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,41,socket,translated,kernel/subsystems/translation/translate.cpp::TranslateDeliberateEnosys,synthetic:enosys-no-ipc
-linux,42,connect,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,43,accept,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,44,sendto,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,45,recvfrom,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,46,sendmsg,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,47,recvmsg,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,48,shutdown,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,49,bind,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,50,listen,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,51,getsockname,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,52,getpeername,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,53,socketpair,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,54,setsockopt,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,55,getsockopt,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,56,clone,translated,kernel/subsystems/translation/translate.cpp::TranslateDeliberateEnosys,synthetic:enosys-no-process-create
-linux,57,fork,translated,kernel/subsystems/translation/translate.cpp::TranslateDeliberateEnosys,synthetic:enosys-no-process-create
-linux,58,vfork,translated,kernel/subsystems/translation/translate.cpp::TranslateDeliberateEnosys,synthetic:enosys-no-process-create
-linux,59,execve,translated,kernel/subsystems/translation/translate.cpp::TranslateDeliberateEnosys,synthetic:enosys-no-process-create
-linux,60,exit,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,61,wait4,translated,kernel/subsystems/translation/translate.cpp::TranslateDeliberateEnosys,synthetic:enosys-no-process-create
-linux,62,kill,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,63,uname,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,64,semget,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,65,semop,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,66,semctl,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,67,shmdt,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,68,msgget,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,69,msgsnd,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,70,msgrcv,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,71,msgctl,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,72,fcntl,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,73,flock,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,74,fsync,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,75,fdatasync,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,76,truncate,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,77,ftruncate,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,78,getdents,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,79,getcwd,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,80,chdir,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,81,fchdir,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,82,rename,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,83,mkdir,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,84,rmdir,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,85,creat,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,86,link,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,87,unlink,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,88,symlink,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,89,readlink,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,90,chmod,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,91,fchmod,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,92,chown,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,93,fchown,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,94,lchown,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,95,umask,translated,kernel/subsystems/translation/translate.cpp::TranslateUmask,synthetic:022-default
-linux,96,gettimeofday,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,97,getrlimit,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,98,getrusage,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,99,sysinfo,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,100,times,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,101,ptrace,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,102,getuid,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,103,syslog,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,104,getgid,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,105,setuid,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,106,setgid,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,107,geteuid,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,108,getegid,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,109,setpgid,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,110,getppid,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,111,getpgrp,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,112,setsid,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,113,setreuid,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,114,setregid,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,115,getgroups,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,116,setgroups,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,117,setresuid,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,118,getresuid,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,119,setresgid,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,120,getresgid,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,121,getpgid,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,122,setfsuid,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,123,setfsgid,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,124,getsid,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,125,capget,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,126,capset,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,127,rt_sigpending,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,128,rt_sigtimedwait,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,129,rt_sigqueueinfo,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,130,rt_sigsuspend,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,131,sigaltstack,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,132,utime,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,133,mknod,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,134,uselib,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,135,personality,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
+linux,0,read,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,1,write,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,2,open,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,3,close,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,4,stat,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,5,fstat,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,6,lstat,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,7,poll,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,8,lseek,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,9,mmap,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,10,mprotect,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,11,munmap,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,12,brk,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,13,rt_sigaction,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,14,rt_sigprocmask,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,15,rt_sigreturn,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,16,ioctl,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,17,pread64,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,18,pwrite64,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,19,readv,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,20,writev,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,21,access,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,22,pipe,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,23,select,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,24,sched_yield,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,25,mremap,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,26,msync,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,27,mincore,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,28,madvise,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,32,dup,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,33,dup2,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,34,pause,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,35,nanosleep,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,36,getitimer,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,37,alarm,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,38,setitimer,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,39,getpid,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,40,sendfile,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,41,socket,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,42,connect,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,43,accept,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,44,sendto,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,45,recvfrom,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,46,sendmsg,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,47,recvmsg,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,48,shutdown,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,49,bind,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,50,listen,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,51,getsockname,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,52,getpeername,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,53,socketpair,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,54,setsockopt,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,55,getsockopt,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,56,clone,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,57,fork,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,60,exit,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,61,wait4,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,62,kill,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,63,uname,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,72,fcntl,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,73,flock,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,74,fsync,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,75,fdatasync,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,76,truncate,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,77,ftruncate,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,78,getdents,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,79,getcwd,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,80,chdir,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,81,fchdir,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,82,rename,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,83,mkdir,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,84,rmdir,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,85,creat,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,86,link,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,87,unlink,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,88,symlink,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,89,readlink,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,90,chmod,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,91,fchmod,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,92,chown,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,93,fchown,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,94,lchown,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,96,gettimeofday,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,97,getrlimit,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,98,getrusage,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,99,sysinfo,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,100,times,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,101,ptrace,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,102,getuid,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,103,syslog,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,104,getgid,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,105,setuid,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,106,setgid,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,107,geteuid,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,108,getegid,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,109,setpgid,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,110,getppid,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,111,getpgrp,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,112,setsid,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,113,setreuid,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,114,setregid,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,115,getgroups,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,116,setgroups,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,117,setresuid,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,118,getresuid,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,119,setresgid,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,120,getresgid,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,121,getpgid,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,122,setfsuid,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,123,setfsgid,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,124,getsid,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,125,capget,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,126,capset,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,127,rt_sigpending,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,128,rt_sigtimedwait,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,129,rt_sigqueueinfo,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,130,rt_sigsuspend,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,131,sigaltstack,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,132,utime,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,133,mknod,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,134,uselib,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,135,personality,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
 linux,136,ustat,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,137,statfs,translated,kernel/subsystems/translation/translate.cpp::TranslateStatfs,synthetic:fat32-style-statfs
-linux,138,fstatfs,translated,kernel/subsystems/translation/translate.cpp::TranslateStatfs,synthetic:fat32-style-statfs
 linux,139,sysfs,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,140,getpriority,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,141,setpriority,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,142,sched_setparam,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,143,sched_getparam,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,144,sched_setscheduler,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,145,sched_getscheduler,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,146,sched_get_priority_max,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,147,sched_get_priority_min,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,148,sched_rr_get_interval,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,149,mlock,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,150,munlock,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,151,mlockall,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,152,munlockall,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,153,vhangup,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,154,modify_ldt,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,155,pivot_root,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
+linux,140,getpriority,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,141,setpriority,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,142,sched_setparam,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,143,sched_getparam,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,144,sched_setscheduler,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,145,sched_getscheduler,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,146,sched_get_priority_max,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,147,sched_get_priority_min,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,148,sched_rr_get_interval,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,149,mlock,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,150,munlock,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,151,mlockall,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,152,munlockall,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,153,vhangup,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,154,modify_ldt,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
 linux,156,_sysctl,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,157,prctl,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,158,arch_prctl,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,159,adjtimex,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,160,setrlimit,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,161,chroot,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,162,sync,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,163,acct,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,164,settimeofday,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,165,mount,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,166,umount2,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,167,swapon,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,168,swapoff,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,169,reboot,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,170,sethostname,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,171,setdomainname,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,172,iopl,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,173,ioperm,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
+linux,157,prctl,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,158,arch_prctl,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,159,adjtimex,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,160,setrlimit,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,162,sync,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,163,acct,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,164,settimeofday,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,165,mount,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,166,umount2,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
 linux,174,create_module,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,175,init_module,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,176,delete_module,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
 linux,177,get_kernel_syms,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
 linux,178,query_module,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,179,quotactl,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
 linux,180,nfsservctl,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
 linux,181,getpmsg,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
 linux,182,putpmsg,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
 linux,183,afs_syscall,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
 linux,184,tuxcall,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
 linux,185,security,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,186,gettid,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,187,readahead,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,188,setxattr,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,189,lsetxattr,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,190,fsetxattr,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,191,getxattr,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,192,lgetxattr,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,193,fgetxattr,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,194,listxattr,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,195,llistxattr,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,196,flistxattr,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,197,removexattr,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,198,lremovexattr,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,199,fremovexattr,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,200,tkill,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,201,time,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,202,futex,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,203,sched_setaffinity,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,204,sched_getaffinity,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,205,set_thread_area,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,206,io_setup,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,207,io_destroy,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,208,io_getevents,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,209,io_submit,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,210,io_cancel,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,211,get_thread_area,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
+linux,186,gettid,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,187,readahead,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,188,setxattr,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,189,lsetxattr,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,190,fsetxattr,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,191,getxattr,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,192,lgetxattr,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,193,fgetxattr,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,194,listxattr,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,195,llistxattr,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,196,flistxattr,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,197,removexattr,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,198,lremovexattr,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,199,fremovexattr,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,200,tkill,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,201,time,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,202,futex,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,203,sched_setaffinity,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,204,sched_getaffinity,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,205,set_thread_area,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,211,get_thread_area,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
 linux,212,lookup_dcookie,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,213,epoll_create,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,214,epoll_ctl_old,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,215,epoll_wait_old,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,216,remap_file_pages,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,217,getdents64,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,218,set_tid_address,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,219,restart_syscall,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,220,semtimedop,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,221,fadvise64,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,222,timer_create,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,223,timer_settime,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,224,timer_gettime,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,225,timer_getoverrun,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,226,timer_delete,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,227,clock_settime,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,228,clock_gettime,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,229,clock_getres,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,230,clock_nanosleep,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,231,exit_group,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,232,epoll_wait,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,233,epoll_ctl,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,234,tgkill,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,235,utimes,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
+linux,213,epoll_create,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,214,epoll_ctl_old,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,215,epoll_wait_old,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,216,remap_file_pages,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,217,getdents64,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,218,set_tid_address,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,219,restart_syscall,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,221,fadvise64,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,222,timer_create,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,223,timer_settime,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,224,timer_gettime,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,225,timer_getoverrun,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,226,timer_delete,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,227,clock_settime,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,228,clock_gettime,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,229,clock_getres,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,230,clock_nanosleep,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,231,exit_group,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,232,epoll_wait,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,233,epoll_ctl,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,234,tgkill,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,235,utimes,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
 linux,236,vserver,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,237,mbind,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,238,set_mempolicy,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,239,get_mempolicy,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,240,mq_open,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,241,mq_unlink,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,242,mq_timedsend,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,243,mq_timedreceive,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,244,mq_notify,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,245,mq_getsetattr,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,246,kexec_load,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,247,waitid,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,248,add_key,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,249,request_key,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,250,keyctl,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,251,ioprio_set,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,252,ioprio_get,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,253,inotify_init,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,254,inotify_add_watch,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,255,inotify_rm_watch,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,256,migrate_pages,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,257,openat,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,258,mkdirat,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,259,mknodat,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,260,fchownat,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,261,futimesat,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,262,newfstatat,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,263,unlinkat,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,264,renameat,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,265,linkat,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,266,symlinkat,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,267,readlinkat,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,268,fchmodat,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,269,faccessat,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,270,pselect6,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,271,ppoll,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,272,unshare,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,273,set_robust_list,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,274,get_robust_list,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,275,splice,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,276,tee,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,277,sync_file_range,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,278,vmsplice,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,279,move_pages,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,280,utimensat,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,281,epoll_pwait,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,282,signalfd,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,283,timerfd_create,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,284,eventfd,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,285,fallocate,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,286,timerfd_settime,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,287,timerfd_gettime,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,288,accept4,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,289,signalfd4,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,290,eventfd2,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,291,epoll_create1,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,292,dup3,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,293,pipe2,translated,kernel/subsystems/translation/translate.cpp::TranslateDeliberateEnosys,synthetic:enosys-no-ipc
-linux,294,inotify_init1,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,295,preadv,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,296,pwritev,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,297,rt_tgsigqueueinfo,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,298,perf_event_open,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,299,recvmmsg,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,300,fanotify_init,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,301,fanotify_mark,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,302,prlimit64,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,303,name_to_handle_at,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,304,open_by_handle_at,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,305,clock_adjtime,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,306,syncfs,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,307,sendmmsg,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,308,setns,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,309,getcpu,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,310,process_vm_readv,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,311,process_vm_writev,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,312,kcmp,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,313,finit_module,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,314,sched_setattr,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,315,sched_getattr,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,316,renameat2,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,317,seccomp,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,318,getrandom,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,319,memfd_create,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,320,kexec_file_load,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,321,bpf,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,322,execveat,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,323,userfaultfd,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,324,membarrier,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,325,mlock2,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,326,copy_file_range,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,327,preadv2,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,328,pwritev2,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,329,pkey_mprotect,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,330,pkey_alloc,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,331,pkey_free,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,332,statx,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,333,io_pgetevents,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,334,rseq,translated,kernel/subsystems/translation/translate.cpp::TranslateRseq,synthetic:enosys-deliberate
-linux,424,pidfd_send_signal,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,425,io_uring_setup,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,426,io_uring_enter,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,427,io_uring_register,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,428,open_tree,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,429,move_mount,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,430,fsopen,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,431,fsconfig,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,432,fsmount,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,433,fspick,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,434,pidfd_open,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,435,clone3,translated,kernel/subsystems/translation/translate.cpp::TranslateDeliberateEnosys,synthetic:enosys-no-process-create
-linux,436,close_range,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,437,openat2,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,438,pidfd_getfd,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,439,faccessat2,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,440,process_madvise,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,441,epoll_pwait2,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,442,mount_setattr,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,443,quotactl_fd,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,444,landlock_create_ruleset,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,445,landlock_add_rule,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,446,landlock_restrict_self,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,447,memfd_secret,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,448,process_mrelease,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,449,futex_waitv,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,450,set_mempolicy_home_node,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,451,cachestat,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,452,fchmodat2,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,453,map_shadow_stack,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,454,futex_wake,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,455,futex_wait,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,456,futex_requeue,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,457,statmount,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,458,listmount,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,459,lsm_get_self_attr,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,460,lsm_set_self_attr,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,461,lsm_list_modules,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
-linux,462,mseal,unimplemented,kernel/subsystems/linux/syscall.cpp::DispatchSyscall,-ENOSYS
+linux,247,waitid,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,251,ioprio_set,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,252,ioprio_get,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,257,openat,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,258,mkdirat,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,259,mknodat,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,260,fchownat,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,261,futimesat,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,262,newfstatat,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,263,unlinkat,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,264,renameat,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,265,linkat,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,266,symlinkat,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,267,readlinkat,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,268,fchmodat,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,269,faccessat,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,270,pselect6,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,271,ppoll,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,272,unshare,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,273,set_robust_list,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,274,get_robust_list,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,277,sync_file_range,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,280,utimensat,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,281,epoll_pwait,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,282,signalfd,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,283,timerfd_create,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,284,eventfd,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,285,fallocate,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,286,timerfd_settime,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,287,timerfd_gettime,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,288,accept4,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,290,eventfd2,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,291,epoll_create1,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,292,dup3,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,293,pipe2,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,295,preadv,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,296,pwritev,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,297,rt_tgsigqueueinfo,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,299,recvmmsg,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,302,prlimit64,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,305,clock_adjtime,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,306,syncfs,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,307,sendmmsg,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,308,setns,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,309,getcpu,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,310,process_vm_readv,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,311,process_vm_writev,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,312,kcmp,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,314,sched_setattr,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,315,sched_getattr,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,316,renameat2,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,317,seccomp,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,318,getrandom,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,324,membarrier,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,325,mlock2,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,327,preadv2,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,328,pwritev2,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,333,io_pgetevents,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,334,rseq,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,435,clone3,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,437,openat2,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,439,faccessat2,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,441,epoll_pwait2,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,443,quotactl_fd,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,447,memfd_secret,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,449,futex_waitv,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,450,set_mempolicy_home_node,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,451,cachestat,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,452,fchmodat2,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,453,map_shadow_stack,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,454,futex_wake,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,455,futex_wait,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,456,futex_requeue,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,457,statmount,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,458,listmount,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,459,lsm_get_self_attr,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,460,lsm_set_self_attr,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
+linux,461,lsm_list_modules,implemented,kernel/subsystems/linux/syscall.cpp::Do*,none (handled in linux dispatcher)
 native,0,SYS_EXIT,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
 native,1,SYS_GETPID,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
 native,2,SYS_WRITE,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
@@ -525,6 +432,54 @@ native,148,SYS_VM_ALLOCATE,implemented,kernel/syscall/syscall.h::SyscallNumber,n
 native,149,SYS_VM_FREE,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
 native,150,SYS_VM_PROTECT,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
 native,151,SYS_FILE_QUERY_ATTRIBUTES,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,152,SYS_EXECVE,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,153,SYS_SOCKET_OP,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,154,SYS_DIR_OPEN,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,155,SYS_DIR_NEXT,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,156,SYS_DIR_REWIND,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,157,SYS_DIR_NOTIFY,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,158,SYS_PROCESS_SPAWN,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,159,SYS_IOCP_CREATE,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,160,SYS_IOCP_SET,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,161,SYS_IOCP_REMOVE,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,162,SYS_IOCP_CLOSE,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,163,SYS_JOB_CREATE,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,164,SYS_JOB_ASSIGN,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,165,SYS_JOB_IS_IN,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,166,SYS_JOB_TERMINATE,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,167,SYS_JOB_QUERY,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,168,SYS_JOB_CLOSE,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,169,SYS_TOKEN_ADJUST,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,170,SYS_WIN_GET_MOUSE_DELTA,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,171,SYS_STDIN_READ,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,172,SYS_DLL_BASE_BY_NAME,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,173,SYS_WIN_TRACK_POPUP,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,174,SYS_GDI_SET_CURSOR,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,175,SYS_GDI_CREATE_CURSOR,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,180,SYS_FILE_MKDIR,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,181,SYS_FILE_SYMLINK,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,182,SYS_FILE_LINK,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,183,SYS_FILE_READLINK,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,184,SYS_SYSTEM_PERFORMANCE_INFO,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,185,SYS_NAMED_KOBJ_OPEN_OR_CREATE,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,186,SYS_WIN32_CREATE_PIPE,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,187,SYS_QUEUE_USER_APC,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,188,SYS_DRAIN_USER_APC,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,189,SYS_PRIORITY_CLASS,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,190,SYS_PROCESS_SPAWN_EX,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,191,SYS_GET_INHERITED_STD,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,192,SYS_HEAPEX_CREATE,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,193,SYS_HEAPEX_DESTROY,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,194,SYS_HEAPEX_ALLOC,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,195,SYS_HEAPEX_FREE,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,196,SYS_HEAPEX_SIZE,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,197,SYS_HEAPEX_REALLOC,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,198,SYS_AUDIO_DEVICE_INFO,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,199,SYS_VIRTUAL_ALLOC,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,200,SYS_VIRTUAL_FREE,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,201,SYS_VIRTUAL_PROTECT,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,202,SYS_NAMED_PIPE_CREATE,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,203,SYS_NAMED_PIPE_OPEN,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
 native,512,native_gapfill_0x200,translated,kernel/subsystems/translation/translate.cpp::NativeClockNs,linux-self:NowNs
 native,513,native_gapfill_0x201,translated,kernel/subsystems/translation/translate.cpp::NativeGetRandom,synthetic:xorshift-from-rdtsc
 native,528,native_gapfill_0x210,translated,kernel/subsystems/translation/translate.cpp::NativeWin32Alloc,win32:HeapAlloc
@@ -579,7 +534,7 @@ nt,46,NtReadFileScatter,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStub
 nt,47,NtOpenThreadTokenEx,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
 nt,48,NtOpenProcessTokenEx,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
 nt,49,NtQueryPerformanceCounter,translated,kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_PERF_COUNTER,routes to native SYS_PERF_COUNTER
-nt,50,NtEnumerateKey,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
+nt,50,NtEnumerateKey,translated,kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_REGISTRY,routes to native SYS_REGISTRY
 nt,51,NtOpenFile,translated,kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_FILE_OPEN,routes to native SYS_FILE_OPEN
 nt,52,NtDelayExecution,translated,kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_SLEEP_MS,routes to native SYS_SLEEP_MS
 nt,53,NtQueryDirectoryFile,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED

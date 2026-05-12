@@ -976,11 +976,11 @@ __declspec(dllexport) void setbuf(FILE* f, char* buf)
 }
 
 /* tmpnam / tmpfile — generate a temp-directory path and (for
- * tmpfile) open a writable handle to it. The temp directory
- * matches GetTempPathA's `C:\Temp\` so apps that round-trip
- * through GetTempPath / fopen see the same root. The name
- * counter is process-local; collisions are caller-visible
- * (fopen returns NULL if the file exists). */
+ * tmpfile) open a writable handle to it. The drive sentinel
+ * matches GetTempPathA's `X:\` (see kernel32.c) so apps that
+ * round-trip through GetTempPath / fopen see the same root.
+ * The name counter is process-local; collisions are
+ * caller-visible (fopen returns NULL if the file exists). */
 static unsigned int g_tmp_counter = 0;
 
 #define L_tmpnam 32
@@ -989,8 +989,8 @@ __declspec(dllexport) char* tmpnam(char* buf)
 {
     static char internal_buf[L_tmpnam];
     char* dst = buf ? buf : internal_buf;
-    /* Format: "C:\\Temp\\duetXXXX.tmp" — 19 bytes + NUL fits in 32. */
-    const char prefix[] = "C:\\Temp\\duet";
+    /* Format: "X:\\Temp\\duetXXXX.tmp" — 19 bytes + NUL fits in 32. */
+    const char prefix[] = "X:\\Temp\\duet";
     int i = 0;
     while (prefix[i] && i < L_tmpnam - 1)
     {

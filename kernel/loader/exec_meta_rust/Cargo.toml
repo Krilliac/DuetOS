@@ -1,0 +1,40 @@
+# Executable-image metadata validators for DuetOS.
+#
+# Two parsers, both consume attacker-controlled image bytes from
+# disk and decide "is this plausibly the kind of executable our
+# loaders can map?" — i.e. the pre-mapping gate that runs on every
+# PE or ELF before any address-space mutation. Validation in safe
+# Rust slice traversal; the C++ loaders (kernel/loader/pe_loader.cpp,
+# kernel/loader/elf_loader.cpp) keep the mapping logic.
+#
+# Scope (v0):
+#   - elf_validate         — full ELF64 header + PT_LOAD bounds.
+#   - pe_validate_prefix   — DOS stub + e_lfanew + PE signature +
+#                            Machine == AMD64. (The deeper
+#                            optional-header / section-table /
+#                            data-directory parsing stays in C++
+#                            for now; a follow-up slice can pull
+#                            it in.)
+#
+# Not in scope (v0):
+#   - PE optional-header / section-table / data-directory parsing.
+#     Replacing that means re-deriving the full ParseHeaders state
+#     machine in pe_loader.cpp, which is its own slice. The prefix
+#     validation here covers the bytes a malformed file most
+#     commonly fails on.
+#   - Mach-O / a.out / COFF — DuetOS only loads ELF + PE.
+
+[package]
+name = "duetos_exec_meta"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "DuetOS ELF + PE/COFF metadata validators"
+
+[lib]
+name = "duetos_exec_meta"
+crate-type = ["rlib"]
+
+[lints]
+workspace = true

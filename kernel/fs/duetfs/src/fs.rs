@@ -12,16 +12,14 @@ use crate::block_dev::BlockDevice;
 use crate::crc32::crc32;
 use crate::crc_table::CrcTable;
 use crate::format::{
-    Node, Superblock, BITMAP_LBA, BLOCK_SIZE, CRC_TABLE_BLOCKS, CRC_TABLE_LBA, DATA_LBA,
-    JOURNAL_BLOCKS, JOURNAL_LBA, MAGIC, MAX_INLINE_EXTENTS, NAME_MAX, NODE_COUNT,
-    NODE_KIND_UNUSED, NODE_SIZE, NODE_TABLE_BLOCKS, NODE_TABLE_LBA, NODES_PER_BLOCK,
-    ROOT_NODE_ID, SNAPSHOT_BLOCKS, SNAPSHOT_LBA, SUPERBLOCK_LBA, VERSION,
+    Node, Superblock, BITMAP_LBA, BLOCK_SIZE, CRC_TABLE_BLOCKS, CRC_TABLE_LBA, DATA_LBA, JOURNAL_BLOCKS, JOURNAL_LBA,
+    MAGIC, MAX_INLINE_EXTENTS, NAME_MAX, NODES_PER_BLOCK, NODE_COUNT, NODE_KIND_UNUSED, NODE_SIZE, NODE_TABLE_BLOCKS,
+    NODE_TABLE_LBA, ROOT_NODE_ID, SNAPSHOT_BLOCKS, SNAPSHOT_LBA, SUPERBLOCK_LBA, VERSION,
 };
 use crate::journal;
 
 #[derive(Clone, Copy)]
-pub enum FsError
-{
+pub enum FsError {
     Io,
     NotFound,
     NotADir,
@@ -42,8 +40,7 @@ pub enum FsError
 
 pub type FsResult<T> = Result<T, FsError>;
 
-pub struct Fs<'d, D: BlockDevice + ?Sized + 'd>
-{
+pub struct Fs<'d, D: BlockDevice + ?Sized + 'd> {
     pub(crate) dev: &'d mut D,
     pub(crate) sb: Superblock,
     pub(crate) bitmap: BitmapAllocator,
@@ -58,10 +55,8 @@ pub struct Fs<'d, D: BlockDevice + ?Sized + 'd>
     pub(crate) next_txn_id: u32,
 }
 
-impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
-{
-    pub fn open(dev: &'d mut D) -> FsResult<Self>
-    {
+impl<'d, D: BlockDevice + ?Sized> Fs<'d, D> {
+    pub fn open(dev: &'d mut D) -> FsResult<Self> {
         let mut block = [0u8; BLOCK_SIZE];
         dev.read_block(SUPERBLOCK_LBA, &mut block).map_err(|_| FsError::Io)?;
         let sb = read_superblock(&block);
@@ -85,8 +80,7 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         }
         let want_crc = sb.sb_crc32;
         let got_crc = compute_sb_crc(&sb);
-        if want_crc != got_crc
-        {
+        if want_crc != got_crc {
             return Err(FsError::Corrupt);
         }
         // Replay any committed-but-unfinished journal txn. Must run
@@ -95,34 +89,34 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         // read-only mount the journal can still hold a committed txn;
         // skip replay (the dev refuses writes anyway) and accept that
         // structural integrity matches whatever's on disk.
-        let next_txn_id = if dev.is_read_only()
-        {
+        let next_txn_id = if dev.is_read_only() {
             1
-        }
-        else
-        {
+        } else {
             journal::replay(dev, JOURNAL_LBA)?
         };
         let bitmap = BitmapAllocator::load(dev, sb.total_blocks).map_err(|_| FsError::Io)?;
         let crc_table = CrcTable::load(dev).map_err(|_| FsError::Io)?;
-        Ok(Self { dev, sb, bitmap, crc_table, next_txn_id })
+        Ok(Self {
+            dev,
+            sb,
+            bitmap,
+            crc_table,
+            next_txn_id,
+        })
     }
 
     #[allow(dead_code)]
-    pub fn superblock(&self) -> &Superblock
-    {
+    pub fn superblock(&self) -> &Superblock {
         &self.sb
     }
 
     #[allow(dead_code)]
-    pub fn free_blocks(&self) -> u32
-    {
+    pub fn free_blocks(&self) -> u32 {
         self.bitmap.free_count()
     }
 
     #[allow(dead_code)]
-    pub fn sync(&mut self) -> FsResult<()>
-    {
+    pub fn sync(&mut self) -> FsResult<()> {
         self.bitmap.flush(self.dev).map_err(|_| FsError::Io)?;
         self.crc_table.flush(self.dev).map_err(|_| FsError::Io)?;
         Ok(())
@@ -130,10 +124,8 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
 
     // -------- Node table I/O --------
 
-    pub(crate) fn read_node(&self, id: u32) -> FsResult<Node>
-    {
-        if id >= self.sb.node_count
-        {
+    pub(crate) fn read_node(&self, id: u32) -> FsResult<Node> {
+        if id >= self.sb.node_count {
             return Err(FsError::NotFound);
         }
         let lba = self.sb.node_table_lba + id / (NODES_PER_BLOCK as u32);
@@ -141,26 +133,21 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         let mut block = [0u8; BLOCK_SIZE];
         self.dev.read_block(lba, &mut block).map_err(|_| FsError::Io)?;
         let mut node = Node::unused();
-        unsafe {
-            core::slice::from_raw_parts_mut((&mut node) as *mut Node as *mut u8, NODE_SIZE)
-        }
-        .copy_from_slice(&block[off..off + NODE_SIZE]);
+        unsafe { core::slice::from_raw_parts_mut((&mut node) as *mut Node as *mut u8, NODE_SIZE) }
+            .copy_from_slice(&block[off..off + NODE_SIZE]);
         Ok(node)
     }
 
-    pub(crate) fn write_node(&mut self, id: u32, node: &Node) -> FsResult<()>
-    {
-        if id >= self.sb.node_count
-        {
+    pub(crate) fn write_node(&mut self, id: u32, node: &Node) -> FsResult<()> {
+        if id >= self.sb.node_count {
             return Err(FsError::Invalid);
         }
         let lba = self.sb.node_table_lba + id / (NODES_PER_BLOCK as u32);
         let off = (id as usize % NODES_PER_BLOCK) * NODE_SIZE;
         let mut block = [0u8; BLOCK_SIZE];
         self.dev.read_block(lba, &mut block).map_err(|_| FsError::Io)?;
-        block[off..off + NODE_SIZE].copy_from_slice(unsafe {
-            core::slice::from_raw_parts((node as *const Node) as *const u8, NODE_SIZE)
-        });
+        block[off..off + NODE_SIZE]
+            .copy_from_slice(unsafe { core::slice::from_raw_parts((node as *const Node) as *const u8, NODE_SIZE) });
         // Atomic via the journal: the node-table block + the matching
         // CRC-table block move together. Without this, a torn write
         // between the two leaves the on-disk node valid but its CRC
@@ -172,18 +159,17 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         let txn_id = self.next_txn_id;
         self.next_txn_id = txn_id.saturating_add(1).max(1);
         journal::apply(
-            self.dev, JOURNAL_LBA, txn_id,
+            self.dev,
+            JOURNAL_LBA,
+            txn_id,
             &[(lba, &block), (CRC_TABLE_LBA, &crc_block)],
         )?;
         Ok(())
     }
 
-    pub(crate) fn alloc_node(&mut self) -> FsResult<u32>
-    {
-        for id in 0..self.sb.node_count
-        {
-            if self.read_node(id)?.kind == NODE_KIND_UNUSED
-            {
+    pub(crate) fn alloc_node(&mut self) -> FsResult<u32> {
+        for id in 0..self.sb.node_count {
+            if self.read_node(id)?.kind == NODE_KIND_UNUSED {
                 return Ok(id);
             }
         }
@@ -192,25 +178,19 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
 
     // -------- Block allocation --------
 
-    pub(crate) fn alloc_run(&mut self, n: u32) -> FsResult<u32>
-    {
+    pub(crate) fn alloc_run(&mut self, n: u32) -> FsResult<u32> {
         // When a snapshot is present, its bitmap copy pins every
         // block the snapshot references. The live allocator skips
         // those blocks so a future restore retains every byte the
         // snapshot captured. The read happens once per alloc — the
         // snapshot bitmap doesn't change during normal FS operation,
         // only on snapshot_create / restore.
-        let pinned_buf: Option<[u8; BLOCK_SIZE]> = if self.sb.snapshot_present
-            == crate::format::SNAPSHOT_PRESENT_YES
-        {
+        let pinned_buf: Option<[u8; BLOCK_SIZE]> = if self.sb.snapshot_present == crate::format::SNAPSHOT_PRESENT_YES {
             Some(crate::snapshot::read_pinned_bitmap(self.dev)?)
-        }
-        else
-        {
+        } else {
             None
         };
-        let lba = match pinned_buf.as_ref()
-        {
+        let lba = match pinned_buf.as_ref() {
             Some(pinned) => self.bitmap.alloc_run_with_pinned(n, Some(pinned)),
             None => self.bitmap.alloc_run(n),
         }
@@ -222,8 +202,7 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         self.crc_table.set(BITMAP_LBA, crc32(&bm));
         // Zero each newly-allocated data block + checksum.
         let zero = [0u8; BLOCK_SIZE];
-        for i in 0..n
-        {
+        for i in 0..n {
             self.dev.write_block(lba + i, &zero).map_err(|_| FsError::Io)?;
             self.crc_table.set(lba + i, crc32(&zero));
         }
@@ -231,8 +210,7 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         Ok(lba)
     }
 
-    pub(crate) fn free_run(&mut self, lba: u32, n: u32) -> FsResult<()>
-    {
+    pub(crate) fn free_run(&mut self, lba: u32, n: u32) -> FsResult<()> {
         self.bitmap.free_run(lba, n);
         self.bitmap.flush(self.dev).map_err(|_| FsError::Io)?;
         let mut bm = [0u8; BLOCK_SIZE];
@@ -244,22 +222,18 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         Ok(())
     }
 
-    pub(crate) fn free_node_extents(&mut self, node: &Node) -> FsResult<()>
-    {
+    pub(crate) fn free_node_extents(&mut self, node: &Node) -> FsResult<()> {
         let n = (node.extent_count as usize).min(MAX_INLINE_EXTENTS);
-        for i in 0..n
-        {
+        for i in 0..n {
             let e = node.extents[i];
-            if e.blocks > 0 && e.block != 0
-            {
+            if e.blocks > 0 && e.block != 0 {
                 self.free_run(e.block, e.blocks)?;
             }
         }
         // v8 — also free the per-node xattr block. The unlink path
         // already calls this before recycling the node, so a node
         // with xattrs released cleanly never leaks the block.
-        if node.xattr_extent.blocks > 0 && node.xattr_extent.block != 0
-        {
+        if node.xattr_extent.blocks > 0 && node.xattr_extent.block != 0 {
             self.free_run(node.xattr_extent.block, node.xattr_extent.blocks)?;
         }
         Ok(())
@@ -269,17 +243,14 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
     /// per-block CRC before handing bytes to callers. fsck still
     /// uses raw block reads so it can report and repair corruption
     /// instead of being blocked by the first mismatch.
-    pub(crate) fn read_data_block(&self, lba: u32, dst: &mut [u8]) -> FsResult<()>
-    {
-        if lba < self.sb.data_lba || lba >= self.sb.total_blocks || dst.len() != BLOCK_SIZE
-        {
+    pub(crate) fn read_data_block(&self, lba: u32, dst: &mut [u8]) -> FsResult<()> {
+        if lba < self.sb.data_lba || lba >= self.sb.total_blocks || dst.len() != BLOCK_SIZE {
             return Err(FsError::Invalid);
         }
         self.dev.read_block(lba, dst).map_err(|_| FsError::Io)?;
         let want_crc = self.crc_table.get(lba).ok_or(FsError::Corrupt)?;
         let got_crc = crc32(dst);
-        if want_crc != got_crc
-        {
+        if want_crc != got_crc {
             return Err(FsError::Corrupt);
         }
         Ok(())
@@ -288,10 +259,8 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
     /// Write a *data* block (LBA >= data_lba). Updates the CRC
     /// table in lockstep. Use this for every file/dir-children
     /// block write so fsck can verify integrity later.
-    pub(crate) fn write_data_block(&mut self, lba: u32, src: &[u8]) -> FsResult<()>
-    {
-        if lba < self.sb.data_lba || src.len() != BLOCK_SIZE
-        {
+    pub(crate) fn write_data_block(&mut self, lba: u32, src: &[u8]) -> FsResult<()> {
+        if lba < self.sb.data_lba || src.len() != BLOCK_SIZE {
             return Err(FsError::Invalid);
         }
         self.dev.write_block(lba, src).map_err(|_| FsError::Io)?;
@@ -300,16 +269,12 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         Ok(())
     }
 
-    pub(crate) fn validate_name(&self, name: &[u8]) -> FsResult<()>
-    {
-        if name.is_empty() || name.len() > NAME_MAX
-        {
+    pub(crate) fn validate_name(&self, name: &[u8]) -> FsResult<()> {
+        if name.is_empty() || name.len() > NAME_MAX {
             return Err(FsError::NameTooLong);
         }
-        for &b in name
-        {
-            if b == 0 || b == b'/' || b == b':'
-            {
+        for &b in name {
+            if b == 0 || b == b'/' || b == b':' {
                 return Err(FsError::Invalid);
             }
         }
@@ -317,8 +282,7 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
     }
 }
 
-fn read_superblock(block: &[u8]) -> Superblock
-{
+fn read_superblock(block: &[u8]) -> Superblock {
     let mut sb = Superblock {
         magic: 0,
         version: 0,
@@ -357,8 +321,7 @@ fn read_superblock(block: &[u8]) -> Superblock
     sb
 }
 
-pub(crate) fn compute_sb_crc(sb: &Superblock) -> u32
-{
+pub(crate) fn compute_sb_crc(sb: &Superblock) -> u32 {
     let mut copy = *sb;
     copy.sb_crc32 = 0;
     let raw = unsafe {

@@ -22,7 +22,6 @@
 
 extern crate alloc;
 
-mod kheap_alloc;
 mod alloc_bitmap;
 mod block_dev;
 mod compress;
@@ -33,6 +32,7 @@ mod format;
 mod fs;
 mod fsck;
 mod journal;
+mod kheap_alloc;
 mod mkfs;
 mod ops;
 mod ops_dir;

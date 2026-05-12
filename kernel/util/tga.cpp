@@ -1,6 +1,7 @@
 #include "util/tga.h"
 
 #include "core/panic.h"
+#include "img_meta_rust.h"
 
 namespace duetos::util
 {
@@ -8,78 +9,42 @@ namespace duetos::util
 namespace
 {
 
-// Layout of the 18-byte header.
-constexpr u32 kHdrIdLength = 0;         // u8
-constexpr u32 kHdrColorMapType = 1;     // u8
-constexpr u32 kHdrImageType = 2;        // u8
-constexpr u32 kHdrColorMapSpec = 3;     // 5 bytes
-constexpr u32 kHdrImageWidth = 12;      // u16 LE
-constexpr u32 kHdrImageHeight = 14;     // u16 LE
-constexpr u32 kHdrPixelDepth = 16;      // u8
-constexpr u32 kHdrImageDescriptor = 17; // u8
-
-// Image-descriptor bits.
-constexpr u8 kDescriptorOriginTop = 0x20;
-constexpr u8 kDescriptorOriginRight = 0x10;
-
+// Layout-byte offsets used by `TgaWriteHeader32` + `BuildFixture32Bpp`
+// below. The parser side of these constants now lives in
+// kernel/util/img_meta_rust/src/lib.rs.
+constexpr u32 kHdrImageType = 2;
+constexpr u32 kHdrImageWidth = 12;
+constexpr u32 kHdrImageHeight = 14;
+constexpr u32 kHdrPixelDepth = 16;
+constexpr u32 kHdrImageDescriptor = 17;
 constexpr u32 kImageTypeUncompressedTrueColor = 2;
-
-inline u16 LoadU16Le(const u8* p)
-{
-    return u16(p[0]) | u16(u16(p[1]) << 8);
-}
-
-inline u16 LoadU16LeAt(const u8* base, u32 off)
-{
-    return LoadU16Le(base + off);
-}
+constexpr u8 kDescriptorOriginTop = 0x20;
 
 } // namespace
 
 TgaInfo TgaParseHeader(const u8* hdr)
 {
+    // Validation lives in the Rust crate `duetos_img_meta` —
+    // bounds-checked walker, image-type / colormap / pixel-depth /
+    // dimension gates, descriptor-bit decode. C++ wrapper does
+    // field-by-field copy on the way out so layout drift between
+    // Rust and C++ can't silently break callers. The historic C++
+    // signature took no length parameter and assumed `hdr` carried
+    // at least 18 bytes; we pass kTgaHeaderBytes down to the Rust
+    // crate so a future shorter-than-expected caller still gets a
+    // clean failure rather than reading uninit memory.
     TgaInfo info = {};
-
-    const u8 id_length = hdr[kHdrIdLength];
-    const u8 colormap_type = hdr[kHdrColorMapType];
-    const u8 image_type = hdr[kHdrImageType];
-    const u16 colormap_length = LoadU16LeAt(hdr, kHdrColorMapSpec + 2);
-    const u8 colormap_entry_size = hdr[kHdrColorMapSpec + 4];
-    const u16 width = LoadU16LeAt(hdr, kHdrImageWidth);
-    const u16 height = LoadU16LeAt(hdr, kHdrImageHeight);
-    const u8 pixel_depth = hdr[kHdrPixelDepth];
-    const u8 descriptor = hdr[kHdrImageDescriptor];
-
-    if (image_type != kImageTypeUncompressedTrueColor)
-        return info; // RLE / colormapped / grayscale deferred
-    if (colormap_type != 0)
-        return info; // True-color rejects an attached colormap
-    if (pixel_depth != 24 && pixel_depth != 32)
+    img_meta::DuetosTgaInfo r{};
+    if (!img_meta::duetos_img_meta_parse_tga(hdr, static_cast<usize>(kTgaHeaderBytes), &r))
         return info;
-    if (width == 0 || height == 0)
-        return info;
-    if (width > kTgaMaxDim || height > kTgaMaxDim)
-        return info;
-
-    // For TYPE-2 the colormap fields should be zero, but tolerant
-    // decoders skip a non-zero colormap if present (some encoders
-    // leave the entries dangling). Compute the byte length anyway.
-    u32 colormap_bytes = 0;
-    if (colormap_length != 0)
-    {
-        // bits → bytes, rounded up
-        const u32 entry_bytes = (u32(colormap_entry_size) + 7u) / 8u;
-        colormap_bytes = u32(colormap_length) * entry_bytes;
-    }
-
-    info.width = width;
-    info.height = height;
-    info.bpp = pixel_depth;
-    info.image_type = image_type;
-    info.pixel_offset = kTgaHeaderBytes + u32(id_length) + colormap_bytes;
-    info.top_down = (descriptor & kDescriptorOriginTop) != 0;
-    info.right_to_left = (descriptor & kDescriptorOriginRight) != 0;
-    info.ok = true;
+    info.width = r.width;
+    info.height = r.height;
+    info.bpp = r.bpp;
+    info.image_type = r.image_type;
+    info.pixel_offset = r.pixel_offset;
+    info.top_down = (r.top_down != 0);
+    info.right_to_left = (r.right_to_left != 0);
+    info.ok = (r.ok != 0);
     return info;
 }
 

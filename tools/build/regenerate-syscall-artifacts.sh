@@ -22,3 +22,9 @@ python3 tools/build/gen-syscall-matrix.py \
     --out-json docs/syscall-abi-matrix.json \
     --out-csv docs/syscall-abi-matrix.csv \
     --out-md docs/syscall-abi-matrix.md
+
+# Generators emit templated whitespace that doesn't match clang-format's
+# project style; normalise on the way out so the working tree stays clean.
+clang-format -i \
+    kernel/subsystems/linux/linux_syscall_table_generated.h \
+    kernel/subsystems/win32/nt_syscall_table_generated.h

@@ -1,0 +1,30 @@
+# DuetOS NTFS metadata walker — skeleton.
+#
+# Foundation crate for an eventual read-only NTFS driver. v0 ships
+# only the boot-sector signature check + cluster/sector layout
+# extraction; the MFT, attribute records, runlists, and INDX entries
+# are tracked in `wiki/filesystem/NTFS.md` as the next slices to land.
+#
+# Status: SKELETON. There is no C++ caller yet — DuetOS ships only
+# FAT32 + DuetFS. The crate exists so a future read-only NTFS driver
+# (the mount path in `kernel/fs/file_route.cpp`, the boot probe in
+# `kernel/core/main.cpp::ProbeFilesystems`) has the bytes-walker
+# layer ready to call into.
+#
+# Spec: ECMA-167 / Microsoft NTFS. v0 targets the on-disk format
+# documented at https://flatcap.github.io/linux-ntfs/ntfs/.
+
+[package]
+name = "duetos_ntfs"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "DuetOS NTFS metadata walker (skeleton)"
+
+[lib]
+name = "duetos_ntfs"
+crate-type = ["rlib"]
+
+[lints]
+workspace = true

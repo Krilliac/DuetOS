@@ -15,3 +15,6 @@ description = "DuetOS USB class configuration descriptor parser"
 [lib]
 name = "usbclass"
 crate-type = ["rlib"]
+
+[lints]
+workspace = true

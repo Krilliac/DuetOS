@@ -8259,3 +8259,153 @@ doc helps future readers audit the trail.
     that the open path sets.
 - **Related roadmap track(s):** Track 11 (kernel infrastructure
   gaps) — companion to T11-02 (anonymous cross-process pipes).
+
+## 2026-05-12 — Rust bring-up complete: PE/ELF + PNG/BMP land, speculative items deferred with explicit triggers
+
+- **Context.** The Rust-bring-up section of `wiki/reference/Roadmap.md`
+  enumerated five categories of P0/P1 candidates after the first
+  four Rust slices (DuetFS, USB HID, USB class config, DHCP/DNS,
+  USB MSC SCSI). This slice lands the two remaining items with
+  current C++ callers — image-header validators (PNG + BMP) and
+  executable-image validators (ELF64 + PE prefix) — and closes
+  out the speculative tail.
+- **Decision: land two new crates.**
+  - `kernel/util/img_meta_rust/` (`duetos_img_meta`) — bounds-
+    checked walkers for the PNG 8-byte signature + IHDR length +
+    IHDR tag + IHDR CRC + dimension / bit-depth / colour-type /
+    compress / filter / interlace gates, and for the BMP "BM"
+    signature + DIB-size ≥ 40 + width/height + sign-bit (top-down)
+    + bpp + compression word.
+  - `kernel/loader/exec_meta_rust/` (`duetos_exec_meta`) — full
+    ELF64 header validator (replaces `ElfValidate` in
+    `kernel/loader/elf_loader.cpp`) and PE prefix validator
+    (replaces the first six `PeStatus` returns of `ParseHeaders`
+    in `kernel/loader/pe_loader.cpp`). The deeper PE optional-
+    header / section-table / data-directory walk stays in C++
+    pending its own slice.
+- **What does NOT land.** Six categories from the original
+  Rust-bring-up list are deferred with explicit re-open triggers,
+  documented in the Roadmap "Items deliberately left out of v0
+  Rust" table:
+  - USB MSC REQUEST SENSE parser — no CBW-stall-recovery path
+    in the bulk transport, so a parser today would have no
+    caller (anti-bloat violation per
+    `wiki/tooling/Rust-Subsystems.md`).
+  - USB hub status-change endpoint parser — no current hub
+    driver TU consumes the bytes.
+  - USB UVC class-specific descriptor bodies — no camera-class
+    driver exists.
+  - TCP / IPv4 / ICMP option-list walkers — the existing C++
+    stack reads only header-fixed-fields; options aren't used by
+    any kernel decision.
+  - NTFS / exFAT / ext4 metadata walkers — no read-only driver
+    for any of the three exists in-tree.
+  - Compression / font-file / crypto-framing parsers — no new
+    format-decoder TU is in flight.
+- **Why deferring is the right call here.** The anti-bloat rule
+  (`CLAUDE.md`) is explicit: don't add a system that isn't wired
+  in. Each deferred item is a parser without a consumer; landing
+  the Rust crate today would create an unreferenced FFI surface
+  + permanent maintenance burden. The Roadmap table records the
+  exact trigger that re-opens each one.
+- **What this closes.** The "Rust bring-up — bootstrapped" section
+  of the Roadmap moves from "five candidates listed; two
+  partially landed" to "closed out". Future Rust work proceeds
+  per the contract in `wiki/tooling/Rust-Subsystems.md`: one
+  crate per subsystem, narrow C FFI, no Rust in the middle of a
+  C++ call chain, hand-written headers, every new crate has a
+  real C++ caller.
+- **Carry-overs / follow-ups (not blockers).**
+  - The PE prefix validator covers the first six `PeStatus` values
+    (`Ok` / `TooSmall` / `BadDosMagic` / `BadLfanewBounds` /
+    `BadNtSignature` / `BadMachine`). The remaining values
+    (`NotPe32Plus`, `SectionAlignUnsup`, `FileAlignUnsup`,
+    `SectionCountZero`, `OptHeaderOutOfBounds`,
+    `SectionOutOfBounds`, etc.) still come from the C++ side.
+    Pulling those in is its own slice once the C++ state machine
+    in `ParseHeaders` is split up cleanly.
+  - `clippy::undocumented_unsafe_blocks` is still aspirational
+    (the v0 duetfs + USB crates carry ~117 bare unsafe blocks
+    without SAFETY comments). All five new crates ship SAFETY
+    comments on every unsafe block, so a future backfill slice
+    can lift the lint to "deny" once the legacy crates are
+    annotated.
+
+## 2026-05-12 — Skeleton Rust crates seeded for next-tier attack surfaces
+
+- **Context.** The previous 2026-05-12 entry closed out the Rust
+  bring-up roadmap with seven production crates and an explicit
+  "deferred-until-trigger" table for six topics that lacked C++
+  callers (NTFS / exFAT / ext4 metadata, ACPI bytes-walker, 802.11
+  management frames, Bluetooth HCI events, USB MSC REQUEST SENSE).
+  The deferral was correct under anti-bloat — a parser without a
+  consumer is dead code — but it left a steep ramp for the eventual
+  driver: every adoption would need to bootstrap a new crate, FFI,
+  build wiring, hosted-test harness, and wiki page from scratch
+  before writing the first real bytes-walker.
+- **Decision.** This slice creates **six skeleton crates** that
+  pre-build the scaffolding so future driver work is a parser
+  fill-in, not a "set up a Rust crate" yak-shave. Each skeleton:
+  - lives in its expected final path (e.g.
+    `kernel/fs/ntfs_rust/`);
+  - ships a single real magic-number / signature check function
+    (NTFS OEM ID, exFAT VBR signature, ext4 superblock magic,
+    RSDP signature + checksum, 802.11 frame-control byte,
+    HCI event packet header) so the crate is not vacuous;
+  - carries hosted unit tests for the implemented function;
+  - exposes a hand-written C FFI header in `include/`;
+  - is wired into `Cargo.toml` workspace + `kernel/rust/Cargo.toml`
+    aggregate + `kernel/rust/CMakeLists.txt` extra-depends +
+    `kernel/CMakeLists.txt` include dirs + glob-excludes +
+    `tools/dev/cargo-host-test.sh`;
+  - documents `Status: SKELETON` in its `Cargo.toml` header so
+    a future contributor sees the scope at a glance.
+- **Why this is not anti-bloat.** A skeleton crate is a **foundation
+  for follow-up work**, not a "system built but not wired in" per
+  CLAUDE.md. The distinction:
+  - Each skeleton implements the cheap leading gate (magic /
+    signature) that any real driver would need anyway.
+  - The FFI shape pins the contract so the production driver can't
+    accidentally re-derive a different one.
+  - Hosted tests document the v0 invariants so a regression in
+    the magic check catches the bug at host-test time, not on a
+    boot two slices later.
+  - The "no caller" gap is documented in the crate's own
+    `Cargo.toml`, the wiki page, AND the roadmap table — so the
+    next Claude session reading the tree cold knows exactly what
+    state each skeleton is in.
+- **What does NOT carve out the same path.** New Rust crates outside
+  this six-item set must land **with their first real C++ caller**.
+  This skeleton-crate slice is the one-time foundation pass for the
+  P0/P1 attack-surface tail; recurring "build a crate before its
+  caller" remains an anti-bloat violation.
+- **TCP options walker, real implementation.** Added to the
+  existing `duetos_net_parsers` crate — not a skeleton, since the
+  walker is small enough to actually implement (RFC 793 TLV
+  format, EOL/NOP short options, malformed-length / truncated /
+  guard-cap rejection). No current C++ caller; the crate-internal
+  test suite is the only consumer until a future TCP slice honours
+  MSS / window-scale / SACK / timestamps. `parsers_rust` is
+  already a production crate so the addition is an FFI-shape
+  expansion, not a new crate.
+- **What this enables.** The next Claude session can adopt any of
+  the six skeletons by:
+  1. Writing the matching C++ driver TU (e.g.
+     `kernel/fs/ntfs.cpp`).
+  2. Calling the existing `duetos_ntfs_parse_boot_sector` FFI on
+     mount.
+  3. Extending the Rust crate with the next layer of parsers
+     (MFT walker for NTFS; FAT chain decoder for exFAT; inode
+     table reader for ext4; FADT / MADT body parser for ACPI;
+     IE-list walker for 802.11; Command Complete body decoder
+     for HCI) — each addition is a normal slice, not a
+     bootstrap.
+- **Carry-overs.**
+  - `clippy::undocumented_unsafe_blocks` is still aspirational;
+    all six skeleton crates ship SAFETY comments on every unsafe
+    block so they don't add to the gap.
+  - The skeleton crates are NOT linked into the kernel ELF in
+    practice — the `pub use` in `kernel/rust/src/lib.rs` brings
+    their FFI symbols into the staticlib but no C++ TU calls
+    them, so the linker garbage-collects them out. This keeps
+    the kernel image weight unchanged.
