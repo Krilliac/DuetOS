@@ -31,6 +31,7 @@
 #include "mm/multiboot2.h"
 #include "mm/page.h"
 #include "mm/poison.h"
+#include "multiboot2_rust.h"
 
 #include "acpi/acpi.h"
 #include "acpi/srat.h"
@@ -224,37 +225,85 @@ inline void ReserveRange(u64 start_phys, u64 end_phys)
 }
 
 // ---------------------------------------------------------------------------
-// Multiboot2 tag iteration. The total_size field in the info header bounds
-// the walk; each tag's size field advances to the next (8-byte aligned).
+// Multiboot2 tag iteration. The info structure is bootloader-controlled, so
+// every cursor advance + mmap entry decode goes through the Rust walker in
+// kernel/mm/multiboot2_rust/. This C++ shim turns the kernel-side
+// `MultibootMmapEntry` callback contract into FFI calls.
 // ---------------------------------------------------------------------------
+
+// Upper bound on the byte slice the Rust walker is willing to
+// trust. We don't know the bootloader's claimed `total_size`
+// until we've parsed the header, so we pass an upper-bound here
+// that's:
+//   (a) larger than any plausible real info block (GRUB ships
+//       ~1 KiB; we cap at 64 MiB inside the Rust crate too),
+//   (b) reachable from `info_phys` via the kernel's identity
+//       direct map (PagingInit maps the first 1 GiB physical →
+//       higher-half, and the info struct always lives in low
+//       memory because GRUB places it right after the kernel
+//       image).
+// The Rust parser cross-checks that the bootloader's claimed
+// `total_size` doesn't exceed this bound AND doesn't exceed its
+// own 64 MiB hard cap.
+constexpr usize kMultibootProbeUpperBoundBytes = 64u * 1024u * 1024u;
+
 template <typename Callback> void ForEachMmapEntry(uptr info_phys, Callback&& cb)
 {
-    const auto* info = reinterpret_cast<const MultibootInfoHeader*>(info_phys);
-    uptr cursor = info_phys + sizeof(MultibootInfoHeader);
-    const uptr end = info_phys + info->total_size;
+    using namespace ::duetos::mm::multiboot2_rust;
+    const u8* info = reinterpret_cast<const u8*>(info_phys);
 
-    while (cursor < end)
+    DuetosMultibootInfoHeader hdr = {};
+    if (!duetos_multiboot2_parse_header(info, kMultibootProbeUpperBoundBytes, &hdr))
     {
-        const auto* tag = reinterpret_cast<const MultibootTagHeader*>(cursor);
-        if (tag->type == kMultibootTagEnd)
+        return;
+    }
+    const usize info_len = static_cast<usize>(hdr.total_size);
+
+    u32 cursor = static_cast<u32>(sizeof(MultibootInfoHeader));
+    for (u32 hops = 0; hops < MULTIBOOT_TAG_HOP_CAP; ++hops)
+    {
+        DuetosMultibootTag tag = {};
+        if (!duetos_multiboot2_next_tag(info, info_len, cursor, &tag))
+        {
+            break;
+        }
+        if (tag.tag_type == MULTIBOOT_TAG_END)
         {
             break;
         }
 
-        if (tag->type == kMultibootTagMmap)
+        if (tag.tag_type == MULTIBOOT_TAG_MMAP)
         {
-            const auto* mmap = reinterpret_cast<const MultibootMmapTag*>(tag);
-            uptr entry_addr = cursor + sizeof(MultibootMmapTag);
-            const uptr mmap_end = cursor + mmap->size;
-            while (entry_addr + sizeof(MultibootMmapEntry) <= mmap_end)
+            DuetosMultibootMmap mmap = {};
+            if (duetos_multiboot2_parse_mmap(info, info_len, tag.offset, tag.size, &mmap))
             {
-                const auto* entry = reinterpret_cast<const MultibootMmapEntry*>(entry_addr);
-                cb(*entry);
-                entry_addr += mmap->entry_size;
+                u32 entry_off = mmap.entries_offset;
+                const u32 entries_end = mmap.entries_offset + mmap.entries_byte_len;
+                while (entry_off + mmap.entry_size <= entries_end)
+                {
+                    DuetosMultibootMmapEntry e = {};
+                    if (!duetos_multiboot2_parse_mmap_entry(info, info_len, entry_off, &e))
+                    {
+                        break;
+                    }
+                    // Translate to the kernel-side C++ shape that
+                    // the existing callbacks expect.
+                    MultibootMmapEntry kernel_entry{};
+                    kernel_entry.base_addr = e.base_addr;
+                    kernel_entry.length = e.length;
+                    kernel_entry.type = e.entry_type;
+                    kernel_entry.reserved = e.reserved;
+                    cb(kernel_entry);
+                    entry_off += mmap.entry_size;
+                }
             }
         }
 
-        cursor += (tag->size + 7u) & ~uptr{7};
+        cursor = tag.next_offset;
+        if (cursor >= info_len)
+        {
+            break;
+        }
     }
 }
 

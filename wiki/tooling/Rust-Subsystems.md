@@ -4,11 +4,11 @@
 >
 > **Execution context:** Kernel build tooling and kernel-linked Rust crates.
 >
-> **Maturity:** Stable foundation; fourteen production Rust subsystems live in the kernel tree.
+> **Maturity:** Stable foundation; sixteen production Rust subsystems live in the kernel tree.
 >
-> Production: DuetFS, USB HID, USB class config, DHCP / DNS / TCP-options byte-walkers, USB MSC SCSI responses, PNG / BMP / TGA header validators, ELF / PE-image validators, NTFS metadata walker, exFAT metadata walker, ext4 metadata walker, ACPI table walker, IEEE 802.11 management-frame walker, Bluetooth HCI walker, and SMBIOS table walker.
+> Production: DuetFS, USB HID, USB class config, DHCP / DNS / TCP-options byte-walkers, USB MSC SCSI responses, PNG / BMP / TGA header validators, ELF / PE-image validators, NTFS metadata walker, exFAT metadata walker, ext4 metadata walker, ACPI table walker, IEEE 802.11 management-frame walker, Bluetooth HCI walker, SMBIOS table walker, PCI / PCIe capability list walkers, and Multiboot2 info-structure walker.
 >
-> All fourteen crates have a current C++ caller; there are no skeleton crates left in this slice.
+> All sixteen crates have a current C++ caller; there are no skeleton crates left in this slice.
 
 ## Overview
 
@@ -144,6 +144,25 @@ The repository now has one shared Rust foundation **and actual Rust subsystem co
   keeps the legacy-BIOS scan window (`PhysToVirt(0xF0000)` +
   16-byte stride), single-init guarding, the BIOS / system /
   chassis / processor field extraction, and the boot-log line.
+- `/kernel/drivers/pci/caps_rust/` (`duetos_pci_caps`) walks both
+  the standard capability list (8-bit "next" pointers, head at
+  config-space offset 0x34) and the PCIe extended capability
+  list (12-bit "next" pointers, head at ECAM offset 0x100).
+  Each chain hop is bounded; self-loops, out-of-range pointers,
+  unaligned next-offsets, and the all-zero "no ext caps"
+  sentinel are clamped to end-of-list. `kernel/drivers/pci/pci.cpp`
+  materialises the device's standard config into a 256-byte
+  buffer and routes `PciFindCapability` through the crate. The
+  new `PciFindExtCapability` entry point is ready for the
+  MMCONFIG-routed read primitive that a future PCIe driver
+  needing AER / SR-IOV / ATS will add.
+- `/kernel/mm/multiboot2_rust/` (`duetos_multiboot2`) validates
+  the Multiboot2 info-structure header and walks the tag list +
+  the mmap entry array. The bootloader-controlled `total_size`
+  is capped at 64 MiB; each tag's `size` field is validated to
+  fit in the remaining slice; mmap-entry base+length overflow
+  is rejected. `kernel/mm/frame_allocator.cpp::ForEachMmapEntry`
+  delegates every cursor advance to the crate.
 - `/cmake/DuetOSRust.cmake` exposes `duetos_add_rust_staticlib(...)`, used by
   `/kernel/rust/CMakeLists.txt` to build the aggregate Rust link unit.
 

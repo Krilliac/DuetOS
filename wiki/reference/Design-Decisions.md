@@ -8709,3 +8709,95 @@ a real C++ caller now goes through its FFI.
   [`Rust-Subsystems`](../tooling/Rust-Subsystems.md) — SMBIOS lifted;
   PCI-extended capabilities remain in C++ pending real-workload
   signal.
+
+---
+
+## 2026-05-12 — PCI/PCIe capability walkers + Multiboot2 walker lifted to Rust
+
+- **Scope:** Two new Rust crates land alongside the SMBIOS crate.
+  - `kernel/drivers/pci/caps_rust/` (`duetos_pci_caps`) — exposes
+    `parse_standard_cap_at` / `find_standard_cap` over the 8-bit
+    "next" chain at config-space offset 0x34, and
+    `parse_extended_cap_at` / `find_extended_cap` over the PCIe
+    12-bit "next" chain at ECAM offset 0x100.
+  - `kernel/mm/multiboot2_rust/` (`duetos_multiboot2`) — exposes
+    `parse_header`, `next_tag`, `parse_mmap`, and
+    `parse_mmap_entry` over the bootloader-controlled info struct.
+- **Decision:** Lift two more byte-walker subsystems to Rust as
+  part of the running "attacker-controlled bytes → validated
+  plan" pattern. With these two, sixteen production Rust crates
+  live in the kernel tree.
+  - **PCI caps:** the v0 C++ walker
+    (`PciFindCapability`) already had cycle protection and a hop
+    cap, but the offset arithmetic and "low two bits of pointer
+    are reserved" mask were the kind of thing that drifts in
+    review when a new caller comes along. The Rust walker
+    centralises that and adds the PCIe-extended-cap surface
+    (`PciFindExtCapability`) that the v0 C++ side never grew. C++
+    now materialises the device's 256-byte config space into a
+    flat buffer once per call (64 dword reads via the existing
+    `PciConfigRead32`), then hands the slice to Rust — the
+    Rust walker never touches the I/O ports, which is the right
+    boundary because port arbitration is a kernel-owned effect.
+  - **Multiboot2:** the v0 C++ walker
+    (`frame_allocator.cpp::ForEachMmapEntry`) trusted the
+    bootloader's `total_size` and `tag->size` fields without an
+    explicit upper bound — a hostile bootloader could publish a
+    `total_size` of `0xFFFF_FFFF` and a runaway tag chain. The
+    Rust walker caps `total_size` at 64 MiB (real GRUB blocks are
+    ~1 KiB), rejects malformed tag sizes, and rejects mmap-entry
+    `base + length` arithmetic overflow.
+- **Why this is the right shape:**
+  - **PCI** is hardware-controlled config bytes. A device choosing
+    to advertise an unaligned / cycling / out-of-range cap pointer
+    is exactly the bug shape that turns a parser into an
+    arbitrary-MMIO-read primitive.
+  - **Multiboot2** is bootloader-controlled bytes that arrive
+    before paging is fully set up. A walker bug here can become
+    the kind of pre-paging memory disclosure that's hard to even
+    log against.
+- **What the crates do NOT do:**
+  - The PCI crate does not decode per-capability bodies (MSI table
+    fields, AER status registers, etc.). The C++ driver still
+    reads bit-level fields at known offsets within the bounded
+    slice the walker validated.
+  - The Multiboot2 crate does not decode framebuffer / ACPI-RSDP /
+    cmdline tag bodies. The C++ side reads those at fixed offsets
+    within the tag's validated slice.
+- **`PciFindExtCapability` is wired but disarmed v0:** legacy
+  I/O-port config-space reads only address the first 256 bytes;
+  the extended cap chain lives at offset 0x100+ in ECAM. The
+  v0 stub returns 0 unconditionally. A future slice that adds an
+  MMCONFIG-routed read primitive (`PciEcamRead*`) materialises
+  the device's full 4 KiB ECAM into a buffer and calls
+  `duetos_pci_caps_find_extended` on it — the Rust walker is
+  already there. The point of landing the entry point now is to
+  pin the FFI contract so downstream drivers can be written
+  against it.
+- **Tests:** 32 hosted unit tests across the two crates.
+  - `caps_rust` (17 tests): standard chain happy path
+    (find MSI-X), missing cap, no-caps-present, self-loop, out-of-
+    range next, unaligned low-bit mask, head-below-floor, ext-cap
+    chain happy path (find AER / SR-IOV), ext-cap missing, all-
+    zero ECAM head ("no ext caps"), ext-cap self-loop, unaligned
+    ext-cap next, oversize ext-cap next, short config slice, and
+    out-of-bounds offset for parse-at.
+  - `multiboot2_rust` (15 tests): header round-trip, oversize
+    total, short buffer, zero size, total exceeds slice, walk
+    minimal info finds mmap then end, tag short size, tag
+    overruns slice, low-offset tag, mmap unsupported version,
+    mmap bad entry size, mmap entry base+length overflow, short
+    mmap-entry buffer, zero-length entry accepted, alignment-
+    padding observed.
+- **Revisit when:**
+  - First PCIe driver wants AER / ATS / SR-IOV → add MMCONFIG-
+    routed `PciEcamRead*` + the four-line `PciFindExtCapability`
+    body that calls it.
+  - UEFI direct-boot path replaces Multiboot2 → the same Rust
+    walker pattern applies to the EFI configuration-table walk;
+    factor out the slice-bounded "find-tag-by-GUID" pattern
+    into a sibling crate if the surface justifies it.
+- **Related roadmap track(s):** Rust bring-up — fifteenth and
+  sixteenth production crates. ACPI/SMBIOS/PCI capability-table
+  P2 row in [`Rust-Subsystems`](../tooling/Rust-Subsystems.md) —
+  now fully addressed; the PCI half lands here.

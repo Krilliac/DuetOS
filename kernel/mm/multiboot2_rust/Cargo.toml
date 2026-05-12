@@ -1,0 +1,54 @@
+# DuetOS Multiboot2 information-structure walker.
+#
+# The Multiboot2 info structure is produced by the bootloader
+# (GRUB, today; in principle anything that implements the spec)
+# and handed to the kernel as a physical pointer. The kernel reads
+# it once at boot to set up the physical frame allocator, the
+# framebuffer driver, and the ACPI RSDP path.
+#
+# Risk surface: a malicious or buggy bootloader can produce an
+# info structure whose `total_size` overflows, whose tag list
+# overruns the declared total, whose tags have `size < 8` (header
+# already-counted), whose mmap entries claim impossibly-overlapping
+# ranges, or whose alignment-padding lies. A C-side cursor walker
+# that drops a check anywhere on the path can land on attacker-
+# chosen memory and feed it back to allocator init as a "free
+# region" — turning the frame allocator into an arbitrary write
+# primitive before paging is even fully online.
+#
+# Slice-bounded Rust catches all of these: the FFI sees a
+# `info[0..total_size]` byte slice the caller has materialised,
+# and every cursor advance clamps to that slice. Tags with
+# malformed sizes are rejected rather than retried.
+#
+# Scope (v0):
+#   - parse_header — validates the 8-byte info header. Returns
+#     `total_size` (and a `reserved` echo). Caps total at 64 MiB.
+#   - next_tag — given the cursor's current offset, decodes one
+#     tag header and returns (type, size, padded_next_offset).
+#     Caller stops on `type == 0` (end tag).
+#   - parse_mmap_tag — decodes the mmap-tag header at `off`:
+#     entry_size, entry_version, and the bounded byte range that
+#     holds the entries.
+#   - parse_mmap_entry — decodes one mmap entry at the supplied
+#     offset (base_addr, length, type).
+#
+# Not in scope (v0):
+#   - Framebuffer / ACPI RSDP / cmdline tag bodies. Those are
+#     fixed-shape and the C++ side reads them at known byte
+#     offsets within the bounded slice the walker returned.
+
+[package]
+name = "duetos_multiboot2"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "DuetOS Multiboot2 info-structure walker"
+
+[lib]
+name = "duetos_multiboot2"
+crate-type = ["rlib"]
+
+[lints]
+workspace = true
