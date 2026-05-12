@@ -795,6 +795,18 @@ VkResult VkCreateImage(VkDevice dev, VkExtent3D extent, u32 flags, VkImage* out)
     LogOnce(EpCreateImage, "vkCreateImage");
     if (!HandleInRange(dev, kDeviceBase) || !PoolIsLive(g_device_pool, SlotOf(dev, kDeviceBase)))
         return VkResult::ErrorInitializationFailed;
+    // Bound the extent so `VkGetImageMemoryRequirements` can't be
+    // tricked into computing `width*height*4` past u64 — and so a
+    // future real-GPU bring-up doesn't try to back a 4 PB image.
+    // The advertised `maxExtent` from VkGetPhysicalDeviceImage-
+    // FormatProperties is {16384, 16384, 1}; enforce the same cap
+    // here at creation time.
+    constexpr u32 kMaxImageDim = 16384;
+    if (extent.width == 0 || extent.width > kMaxImageDim || extent.height == 0 || extent.height > kMaxImageDim ||
+        extent.depth == 0 || extent.depth > 1)
+    {
+        return VkResult::ErrorInitializationFailed;
+    }
     u32 slot = 0;
     if (!PoolAlloc(g_image_pool, &slot))
         return VkResult::ErrorOutOfHostMemory;

@@ -1396,11 +1396,22 @@ void Dispatch(char* line)
     }
     if (StrEq(cmd, "instr"))
     {
+        // Disassembles arbitrary kernel memory. Same threat class
+        // as memdump / read — gate to admin so an unprivileged
+        // shell-redirect can't dump kernel code or peek at secrets
+        // by walking instruction byte streams.
+        if (!RequireAdmin("INSTR"))
+            return;
         CmdInstr(argc, argv);
         return;
     }
     if (StrEq(cmd, "addr2sym"))
     {
+        // Reverse-symbol-lookup exposes KASLR layout / kernel
+        // function bases. Gate to admin so an unprivileged probe
+        // can't enumerate the kernel symbol map.
+        if (!RequireAdmin("ADDR2SYM"))
+            return;
         CmdAddr2Sym(argc, argv);
         return;
     }

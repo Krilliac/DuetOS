@@ -1849,7 +1849,15 @@ void OnTimerTick(u64 now_ticks)
     {
         static volatile u64 s_last_sample = 0;
         const u64 kSamplePeriod = 5ULL * ::duetos::time::TickHz();
-        if (now_ticks - s_last_sample >= kSamplePeriod)
+        // Signed-diff form: `now_ticks - s_last_sample` is unsigned,
+        // so once `now_ticks` wraps past UINT64_MAX -> 0 the
+        // straight comparison would produce a huge positive value
+        // and immediately satisfy the condition forever, or the
+        // opposite (depending on the wrap distance), freezing
+        // loadavg sampling. Cast through i64 so the comparison
+        // works across the wrap. Mirrors the TickReached pattern
+        // at line ~993.
+        if (static_cast<i64>(now_ticks - s_last_sample) >= static_cast<i64>(kSamplePeriod))
         {
             s_last_sample = now_ticks;
             u32 runnable = 0;
