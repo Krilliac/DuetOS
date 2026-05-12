@@ -436,7 +436,14 @@ cases that the v0 happy path skips:
 - `kernel/drivers/net/iwlwifi_rings.cpp` — legacy <7000-series
   RBD format. (TX completion polling landed via
   `IwlRingsPollTxCompletions` / `IwlRingsApplyTxCompletions`;
-  the IRQ wiring that calls them is the next slice.)
+  **periodic-poll wiring landed** — the existing `iwlwifi-watch`
+  task calls the new `IwlRingsServicePending` hook on every
+  tick, which drains every TX queue and services RX
+  bookkeeping. No-op when rings aren't attached (firmware
+  loader hasn't called `IwlRingsActivate` yet); ready to
+  drain the moment a future Activate lands. Real MSI-X
+  interrupt-driven dispatch is the next layer beyond this
+  fallback.)
 - `kernel/mm/dma.cpp` — ARM64 port (`dsb ishst` + per-line
   `dc cvac`).
 - `kernel/subsystems/translation/translate.cpp` — `rseq`
