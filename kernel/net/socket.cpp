@@ -499,12 +499,26 @@ i32 SocketAccept(u32 listener_idx, Ipv4Address* out_peer_ip, u16* out_peer_port)
                 *out_peer_port = peer_port;
             return new_idx;
         }
-        // Nothing ready — sleep on the listener's accept queue (T3-01
-        // loopback wakers fire it; the v1 TCP path will wake it via
-        // the TCB notify when a child hits ESTABLISHED via a future
-        // wire connection that we don't currently get notified for.
-        // For now we yield + retry on a short timer.
-        sched::SchedSleepTicks(1);
+        // Nothing ready. Block on the TCB's accept wait queue with
+        // a short timeout — the TCP RX path wakes it via
+        // NotifyParentAccept when a wire child hits ESTABLISHED;
+        // the timeout lets the loopback wakers (which fire on the
+        // socket-layer accept_wq, not the TCB's) still make progress
+        // without a busy loop.
+        sched::WaitQueue* wq = tcp::AcceptWaitQueue(listener_tcb);
+        if (wq != nullptr)
+        {
+            arch::Cli();
+            // Re-check under the lock so we don't lose a wake that
+            // arrived between the AcceptNonblocking check and now.
+            if (l.in_use && l.loopback_pending_accept_idx == -1)
+                sched::WaitQueueBlockTimeout(wq, /*ticks=*/5);
+            arch::Sti();
+        }
+        else
+        {
+            sched::SchedSleepTicks(5);
+        }
     }
 }
 
