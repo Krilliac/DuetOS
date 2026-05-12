@@ -17,9 +17,9 @@ using duetos::core::kSysErrnoEBUSY;
 using duetos::core::kSysErrnoEEXIST;
 using duetos::core::kSysErrnoEINVAL;
 using duetos::core::kSysErrnoEIO;
-using duetos::core::kSysErrnoENOMEM;
-using duetos::core::kSysErrnoENOENT;
 using duetos::core::kSysErrnoENODEV;
+using duetos::core::kSysErrnoENOENT;
+using duetos::core::kSysErrnoENOMEM;
 using duetos::core::kSysErrnoEOPNOTSUPP;
 using duetos::core::kSysErrnoEOVERFLOW;
 using duetos::core::kSysErrnoERANGE;
@@ -46,8 +46,7 @@ int main()
     EXPECT_EQ(ErrorCodeToNativeErrno(ErrorCode::NoDevice), kSysErrnoENODEV);
     EXPECT_EQ(ErrorCodeToNativeErrno(ErrorCode::Unknown), kSysErrnoEIO);
 
-    EXPECT_EQ(ErrorCodeToNativeSyscallReturn(ErrorCode::PermissionDenied),
-              static_cast<duetos::u64>(kSysErrnoEACCES));
+    EXPECT_EQ(ErrorCodeToNativeSyscallReturn(ErrorCode::PermissionDenied), static_cast<duetos::u64>(kSysErrnoEACCES));
 
     return duetos_host_test::finish_main("test_syscall_error");
 }
