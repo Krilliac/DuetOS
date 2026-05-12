@@ -109,6 +109,7 @@
 #include "drivers/net/rtl88xx_fw.h"
 #include "drivers/net/rtl88xx_upload.h"
 #include "net/bluetooth/diag.h"
+#include "net/drsh/drsh.h"
 #include "net/bluetooth/hci.h"
 #include "net/wireless/beacon.h"
 #include "net/wireless/inventory.h"
@@ -2927,6 +2928,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // software FakeAp peer + LoopbackDriver. Equivalent to
     // Linux's `mac80211_hwsim` for our stack.
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::test::WirelessE2ESelfTest());
+
+    // DRSH remote-access service: initialise state structures but
+    // do NOT start a listener. The admin opts in via `drshd passwd
+    // ...` + `drshd start` once the service is wanted. Self-test
+    // round-trips one encrypted frame through the in-memory transport.
+    duetos::net::drsh::DrshInit();
+    DUETOS_BOOT_SELFTEST(duetos::net::drsh::DrshSelfTest());
 
     SerialWrite("[boot] Detecting NICs.\n");
     duetos::drivers::net::NetInit();
