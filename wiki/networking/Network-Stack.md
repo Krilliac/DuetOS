@@ -4,7 +4,8 @@
 >
 > **Execution context:** Kernel — IRQ for RX/TX completions, softirq for stack
 >
-> **Maturity:** v0 — DHCP + DNS + TCP/UDP live; async winsock surface deferred
+> **Maturity:** v1 TCP (multi-connection, sliding-window, retransmit)
+> + v0 of every other protocol; async winsock surface deferred
 
 ## Overview
 
@@ -42,7 +43,11 @@ See [Networking Drivers](../drivers/Networking-Drivers.md).
 - **IPv4** with proper TTL / fragmentation handling
 - **ICMP** (ping)
 - **UDP**
-- **TCP** — synchronous send / recv, listen / accept
+- **TCP v1** — full RFC-793 state machine, sliding window,
+  retransmit with RFC-6298 RTO, out-of-order reassembly, Reno
+  congestion control. Up to 256 concurrent TCBs per host. See
+  [TCP State Machine](TCP-State-Machine.md) for the design + RFC
+  mapping.
 - **DHCP client** — gets an IP from the local network
 - **DNS resolver** — `getaddrinfo`-equivalent
 
@@ -124,8 +129,11 @@ throughput display.
   10 ms to signal event handles. **`WSAAsyncSelect` (window-
   message delivery) and IOCP overlapped socket reads are still
   out of scope.**
-- **TCP is single-stream-friendly.** Real congestion control is
-  basic; bulk-transfer throughput optimisation is deferred.
+- **TCP NewReno fast retransmit + Reno congestion control;
+  no SACK blocks, no CUBIC** yet. SACK-permitted is negotiated
+  so the option stays available without renegotiation when SACK
+  generation lands. See [TCP State Machine](TCP-State-Machine.md#known-limits--gaps-v1)
+  for the full v1 GAP list.
 - **No connection tracking** in the firewall — flipping the
   default-deny inbound policy on without it would break TCP
   connects we initiated, since the peer's reply would arrive
@@ -136,6 +144,8 @@ throughput display.
 
 ## Related Pages
 
+- [TCP State Machine](TCP-State-Machine.md) — TCB layout, RFC-793 state
+  diagram, retransmit + reassembly + congestion-control internals.
 - [Networking Drivers](../drivers/Networking-Drivers.md)
 - [Live Internet Verification](Live-Internet.md)
 - [Win32 PE Subsystem](../subsystems/Win32-PE-Subsystem.md) — `ws2_32`

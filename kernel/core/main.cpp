@@ -138,6 +138,7 @@
 #include "net/net_smoke.h"
 #include "net/firewall.h"
 #include "net/stack.h"
+#include "net/tcp.h"
 #include "subsystems/graphics/graphics.h"
 #include "drivers/storage/ahci.h"
 #include "drivers/storage/block.h"
@@ -3007,12 +3008,11 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWrite("[boot] Bringing up network stack skeleton.\n");
     duetos::net::NetStackInit();
     DUETOS_BOOT_SELFTEST(duetos::net::firewall::FwSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::tcp::SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::core::IdleLockSelfTest());
-    // Smoke test runs in its own task. It owns the (single) TCP
-    // slot during its run and installs the boot HTTP listener
-    // afterwards via NetSmokeInstallBootListener — so an active
-    // connect to www.google.com (step 4) doesn't collide with
-    // the listener's TcpListen call. `netsmoke=force` opts in to
+    // Smoke test runs in its own task. v1 TCP allows the smoke
+    // probe and any other concurrent listener to coexist; the v0
+    // single-slot collision is gone. `netsmoke=force` opts in to
     // running on emulator (QEMU SLIRP supports DNS+TCP egress).
     const bool force_net_smoke = CmdlineMatches(cmdline, "netsmoke", "force");
     duetos::net::NetSmokeTestStart(force_net_smoke);

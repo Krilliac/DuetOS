@@ -1,6 +1,7 @@
 #pragma once
 
 #include "net/stack.h"
+#include "net/tcp.h"
 #include "sched/sched.h"
 #include "util/types.h"
 
@@ -14,16 +15,16 @@
  * marshaling; this layer owns the kernel-resident state and the
  * RX dispatch through net/stack.cpp's L4 paths.
  *
- * Supported family/types in v0:
+ * Supported family/types:
  *   AF_INET + SOCK_DGRAM  — full bind / sendto / recvfrom + connect
  *                           (so plain send/recv works on a connected
  *                           UDP socket). Multi-socket multiplexed by
  *                           local port.
- *   AF_INET + SOCK_STREAM — connect / send / recv on top of the
- *                           single-slot TCP active-connect machinery
- *                           in stack.cpp. One TCP socket can be
- *                           Established at a time; concurrent
- *                           Established slots are a separate slice.
+ *   AF_INET + SOCK_STREAM — backed by net/tcp.cpp's TCB table. Real
+ *                           multi-connection support: many listeners,
+ *                           many concurrent accepted sockets. v0 used
+ *                           to share a single TCP slot; v1 dropped
+ *                           that limit.
  *
  * Refcounting matches the pipe/eventfd pools: dup() bumps refs;
  * close() drops refs; pool entry is freed and any RX queue drained
@@ -35,18 +36,16 @@
  * RX delivery: NetUdpDispatch in stack.cpp checks the socket pool
  * via SocketUdpDispatch BEFORE the legacy UdpBinding table — once
  * a port is owned by a socket, the legacy callback path doesn't
- * fire for it. That's intentional: UDP applications take ownership
- * by binding through socket(); the legacy table stays for kernel-
- * resident callers (DHCP / DNS / NTP).
+ * fire for it. TCP RX is fully owned by net/tcp.cpp; the socket
+ * layer reads via tcp::RecvNonblocking and writes via tcp::Send.
  */
 
 namespace duetos::net
 {
 
-inline constexpr u32 kSocketPoolCap = 8;
+inline constexpr u32 kSocketPoolCap = 256;
 inline constexpr u32 kSocketUdpRxQueueCap = 8;      // per-socket RX queue depth
 inline constexpr u32 kSocketDgramPayloadCap = 1500; // standard MTU
-inline constexpr u32 kSocketTcpRxBufBytes = 65536;  // matches kTcpActiveBufBytes
 
 inline constexpr u16 kSocketDomainInet = 2;
 inline constexpr u32 kSocketTypeStream = 1;
@@ -88,28 +87,16 @@ struct Socket
     u32 _pad2;
     SocketDgram* udp_rx; // KMalloc'd kSocketUdpRxQueueCap * sizeof(SocketDgram)
 
-    // TCP — bridges to the single-slot machine in stack.cpp. Only
-    // one TCP socket can be Established at a time in v0; the
-    // tcp_owner field arbitrates: if g_tcp_owner != idx + 1, this
-    // socket can't read connection state.
-    u32 tcp_owner_token; // 0 = doesn't own; >0 = pool idx + 1
+    // SOCK_STREAM — a handle into the TCB table (net/tcp.cpp). 0
+    // when the socket is bound but not yet listening / connecting,
+    // non-zero once Listen/Connect/Accept has populated a TCB.
+    tcp::TcbId tcb;
 
     // Loopback short-circuit (T3-01). When a connect() targets
     // 127.x.x.x and a listener is bound to the requested port,
     // both ends are paired through two kernel pipe pool slots
     // (one ring per direction). Send/recv on a paired socket
     // bypass the on-wire TCP stack entirely.
-    //
-    //   loopback_paired         — true iff this socket is a
-    //                             loopback pair endpoint.
-    //   loopback_pipe_recv_idx  — pipe pool idx this end reads
-    //                             from (peer writes into).
-    //   loopback_pipe_send_idx  — pipe pool idx this end writes
-    //                             to (peer reads from).
-    //   loopback_pending_accept_idx — listener-only: index of an
-    //                             accepted socket pending pickup
-    //                             via SocketAccept. -1 = no pending
-    //                             connection.
     bool loopback_paired;
     i32 loopback_pipe_recv_idx;
     i32 loopback_pipe_send_idx;
@@ -132,41 +119,40 @@ i32 SocketAlloc(u16 domain, u16 type);
 void SocketRetain(u32 idx);
 
 /// Decrement refs; on last release, drain RX queue + free pool entry
-/// + tear down any owned TCP slot.
+/// + close any owned TCB.
 void SocketRelease(u32 idx);
 
 /// True iff `idx` is a live pool entry.
 bool SocketAlive(u32 idx);
 
-/// Accessor — read-only. Returns nullptr on dead idx. Pointer valid
-/// until the next SocketRelease on this idx.
+/// Accessor — read-only. Returns nullptr on dead idx.
 const Socket* SocketGet(u32 idx);
 
 /// Bind the socket to a local port. UDP: claims the port in the
-/// shared port table (returns false if already claimed by another
-/// socket OR by a legacy NetUdpBindRx callback). TCP: records the
-/// port + ip; TcpListen integration happens in SocketListen.
-/// `local_ip = 0.0.0.0` means "any interface".
+/// shared port table. TCP: records the port + ip; the TCB is built
+/// in SocketListen / SocketConnect. `local_ip = 0.0.0.0` means
+/// "any interface".
 bool SocketBind(u32 idx, Ipv4Address local_ip, u16 local_port);
 
-/// Set peer endpoint. UDP: just records peer for send()/recv()
-/// without explicit destination. TCP: kicks off the active-connect
-/// state machine in stack.cpp; returns false if another TCP socket
-/// already owns the slot or NetTcpConnect refuses.
+/// Set peer endpoint. UDP: just records peer. TCP: kicks off the
+/// active-connect state machine in tcp::Connect.
 bool SocketConnect(u32 idx, Ipv4Address peer_ip, u16 peer_port);
 
-/// Mark socket as listening (TCP). For now v0 stays simple: the
-/// caller must already have called SocketBind. backlog parameter
-/// stored but unused.
+/// Mark socket as listening (TCP). Allocates a tcp::TcbId via
+/// tcp::Listen with the requested backlog (clamped to
+/// tcp::kListenBacklogMax).
 bool SocketListen(u32 idx, u32 backlog);
+
+/// Accept the next ready connection. Blocks on the listener's
+/// accept wait queue until one of:
+///   - a loopback pair is waiting (T3-01)
+///   - the TCB table delivers an ESTABLISHED child via tcp::AcceptNonblocking
+/// Returns the new socket pool index (refs=1), or -1 on bad listener.
+i32 SocketAccept(u32 listener_idx, Ipv4Address* out_peer_ip, u16* out_peer_port);
 
 /// Non-blocking probe of the listener's loopback accept queue.
 /// Returns the accepted socket's pool index when a paired
 /// connector is pending (T3-01 loopback path), -1 otherwise.
-/// Callers compose this with their own poll/yield loop to block;
-/// the accept syscall handler does this so a single accept()
-/// services both loopback and on-wire arrivals without an
-/// explicit dispatch.
 i32 SocketAcceptLoopback(u32 listener_idx, Ipv4Address* out_peer_ip, u16* out_peer_port);
 
 /// SOCK_DGRAM send. Builds + transmits an IPv4 UDP datagram via
@@ -181,45 +167,35 @@ i64 SocketSendDgram(u32 idx, Ipv4Address dst_ip, u16 dst_port, const u8* data, u
 /// bytes copied or -errno.
 i64 SocketRecvDgram(u32 idx, u8* out, u32 cap, u32* out_len, Ipv4Address* out_src_ip, u16* out_src_port);
 
-/// SOCK_STREAM send. v0 routes to the shared TCP active-connect
-/// slot; only the owning socket can transmit. Returns bytes queued
-/// or -errno.
+/// SOCK_STREAM send. Pushes onto the TCB's snd buffer; blocks until
+/// at least one byte is accepted (or until shutdown / EPIPE).
+/// Returns bytes queued or -errno.
 i64 SocketSendStream(u32 idx, const u8* data, u32 len);
 
-/// SOCK_STREAM recv. Reads from the shared TCP active-connect
-/// buffer at the per-socket cursor. Returns bytes copied or 0 on
-/// peer FIN, or -errno.
+/// SOCK_STREAM recv. Reads from the TCB's RX buffer. Returns bytes
+/// copied; 0 on orderly EOF (peer FIN + buffer drained); -errno on
+/// error.
 i64 SocketRecvStream(u32 idx, u8* out, u32 cap);
 
 /// shutdown(2) half-close. how: 0 = SHUT_RD, 1 = SHUT_WR, 2 = SHUT_RDWR.
 bool SocketShutdown(u32 idx, u32 how);
 
-/// Get / set sockname endpoints. Both copy into caller-owned out
-/// pointers; either may be null.
+/// Get / set sockname endpoints.
 void SocketGetLocal(u32 idx, Ipv4Address* out_ip, u16* out_port);
 void SocketGetPeer(u32 idx, Ipv4Address* out_ip, u16* out_port);
 
-/// L4 RX hook — called from stack.cpp's UDP demux BEFORE the
-/// legacy UdpBinding table. Returns true if a socket consumed
-/// the datagram. Safe to call from the driver's RX task context.
+/// L4 RX hook — UDP datagram dispatch. TCP is dispatched directly
+/// from net/stack.cpp's IPv4 path into net/tcp.cpp::OnSegment.
 bool SocketUdpDispatch(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, const void* payload, u64 len);
-
-/// L4 RX hook — TCP. Wakes any reader blocked on the active-
-/// connect slot once new data arrived. Called from stack.cpp's
-/// TCP segment handler when the canned-reply buffer grew.
-void SocketTcpRxNotify();
 
 /// Async-IO readiness probe — returns a bitmask of Winsock
 /// `FD_*` events currently active on `idx`. Drives the producer
-/// side of `WSAEnumNetworkEvents` / `WSAWaitForMultipleEvents`:
-/// every Enum / Wait call probes via this and ORs the result
-/// into the per-binding mask. Pure read; no blocking, no state
-/// transition.
+/// side of `WSAEnumNetworkEvents` / `WSAWaitForMultipleEvents`.
 ///
 /// Returned bits (mirror of Winsock FD_* constants):
 ///   bit 0  (0x01)  FD_READ    — recv would return data without blocking
-///   bit 1  (0x02)  FD_WRITE   — send would not block (always for v0)
-///   bit 3  (0x08)  FD_ACCEPT  — listener has a pending loopback pair
+///   bit 1  (0x02)  FD_WRITE   — send would not block
+///   bit 3  (0x08)  FD_ACCEPT  — listener has a pending connection
 ///   bit 5  (0x20)  FD_CLOSE   — peer FIN or shutdown(RD) on this end
 ///
 /// Returns 0 on dead idx.

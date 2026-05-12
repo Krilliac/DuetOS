@@ -36,6 +36,7 @@
 #include "drivers/video/console.h"
 #include "net/bluetooth/diag.h"
 #include "net/firewall.h"
+#include "net/socket.h"
 #include "net/stack.h"
 #include "net/wifi.h"
 #include "net/wireless/inventory.h"
@@ -217,46 +218,62 @@ void CmdHttp(u32 argc, char** argv)
     put(argv[1]);
     put("\r\nConnection: close\r\n\r\n");
 
-    if (!duetos::net::NetTcpConnect(/*iface_index=*/0, dst, port, reinterpret_cast<const u8*>(req), ri))
+    const i32 sock = duetos::net::SocketAlloc(duetos::net::kSocketDomainInet, duetos::net::kSocketTypeStream);
+    if (sock < 0)
     {
-        ConsoleWriteln("HTTP: connect failed (slot busy / ARP miss / oversized req)");
+        ConsoleWriteln("HTTP: socket pool exhausted");
+        return;
+    }
+    if (!duetos::net::SocketConnect(static_cast<u32>(sock), dst, port))
+    {
+        duetos::net::SocketRelease(static_cast<u32>(sock));
+        ConsoleWriteln("HTTP: connect failed");
         return;
     }
     ConsoleWrite("HTTP: connecting to ");
     ConsoleWrite(argv[1]);
     ConsoleWriteln(" ...");
-
-    // Poll up to 4 s for the response to arrive + FIN.
-    for (u32 i = 0; i < 400; ++i)
+    // Send the request.
     {
-        duetos::sched::SchedSleepTicks(1);
-        const auto s = duetos::net::NetTcpActiveSnapshot();
-        if (s.response_complete)
+        u32 sent = 0;
+        while (sent < ri)
         {
-            // Print the captured bytes.
-            u8 buf[2048];
-            const u32 n = duetos::net::NetTcpActiveRead(buf, sizeof(buf));
-            ConsoleWrite("HTTP: ");
-            WriteU64Dec(n);
-            ConsoleWriteln(" bytes received");
-            // Print the first ~16 lines of the response so the
-            // user can see headers + a bit of body.
-            u32 lines = 0;
-            for (u32 j = 0; j < n && lines < 16; ++j)
-            {
-                const char c = static_cast<char>(buf[j]);
-                if (c == '\n')
-                    ++lines;
-                if (c == '\r')
-                    continue;
-                if (c == '\n' || (c >= 0x20 && c <= 0x7E))
-                    ConsoleWriteChar(c);
-            }
-            ConsoleWriteln("");
-            return;
+            const i64 n = duetos::net::SocketSendStream(static_cast<u32>(sock), reinterpret_cast<const u8*>(req) + sent,
+                                                        ri - sent);
+            if (n <= 0)
+                break;
+            sent += static_cast<u32>(n);
         }
     }
-    ConsoleWriteln("HTTP: no complete response within 4s");
+    duetos::net::SocketShutdown(static_cast<u32>(sock), /*how=*/1); // SHUT_WR -> FIN
+
+    u8 buf[2048];
+    u32 total = 0;
+    for (u32 round = 0; round < 400 && total < sizeof(buf); ++round)
+    {
+        const i64 n = duetos::net::SocketRecvStream(static_cast<u32>(sock), buf + total, sizeof(buf) - total);
+        if (n == 0)
+            break; // peer FIN
+        if (n < 0)
+            break;
+        total += static_cast<u32>(n);
+    }
+    duetos::net::SocketRelease(static_cast<u32>(sock));
+    ConsoleWrite("HTTP: ");
+    WriteU64Dec(total);
+    ConsoleWriteln(" bytes received");
+    u32 lines = 0;
+    for (u32 j = 0; j < total && lines < 16; ++j)
+    {
+        const char c = static_cast<char>(buf[j]);
+        if (c == '\n')
+            ++lines;
+        if (c == '\r')
+            continue;
+        if (c == '\n' || (c >= 0x20 && c <= 0x7E))
+            ConsoleWriteChar(c);
+    }
+    ConsoleWriteln("");
 }
 
 void CmdNtp(u32 argc, char** argv)

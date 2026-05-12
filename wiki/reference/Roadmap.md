@@ -901,8 +901,41 @@ extends. Next:
 > slot, so loopback works regardless of e1000 binding state.
 > `SocketRelease` drops the per-end pipe refcounts so EOF / EPIPE
 > propagate cleanly.
+> **T3-04** TCP v1 multi-connection state machine shipped (2026-05-12):
+> `kernel/net/tcp.{h,cpp}` hosts a 256-entry TCB table with hash-bucketed
+> 5-tuple lookup, real LISTEN backlog, full RFC-793 lifecycle, sliding
+> window flow control, out-of-order reassembly, RFC-6298 retransmit
+> with RTO backoff, Reno fast-retransmit + slow-start congestion
+> control, and RFC-7323 window-scale + timestamps. The v0 single-slot
+> machine that used to live in `stack.cpp` is gone — every direct
+> caller (browser app, shell HTTP command, net-smoke, syscall accept,
+> linux subsystem accept, DRSH) now reaches TCP through `net/socket.cpp`,
+> which holds a `tcp::TcbId` per stream socket. See
+> [`networking/TCP-State-Machine.md`](../networking/TCP-State-Machine.md)
+> for design + RFC mapping. The next Phase-1 follow-ons (SACK block
+> generation, CUBIC, SYN cookies) live as their own rows below.
 
-Track 3 has no remaining roadmap rows.
+#### Follow-up rows on TCP v1
+
+- **T3-05** SACK block generation + RFC-6675 SACK-driven recovery.
+  SACK-permitted is already advertised on the SYN, so peers won't
+  renegotiate. Trigger: the first multi-gigabit bulk transfer in CI.
+- **T3-06** CUBIC congestion control over Reno. Needs a microsecond
+  clocksource — read directly from HPET or wire the LAPIC TSC-deadline
+  path. Trigger: long-haul throughput probe shows Reno's growth
+  curve dominating the pipe-fill time.
+- **T3-07** RFC-4987 SYN cookies for SYN-flood defence. Today the
+  backlog overflow drops SYNs silently. Trigger: the first inbound
+  service hits a sustained SYN flood.
+- **T3-08** Per-bucket TCB spinlocks for SMP. v1 uses one
+  `arch::Cli` window per public entry; the bucket structure is in
+  place for the swap. Trigger: SMP runqueues land and we start
+  seeing serialisation in TCP RX.
+- **T3-09** TCP_NODELAY / Nagle policy. Public `SetNoDelay` is
+  wired; the segment dispatch already coalesces under MSS but the
+  Nagle predicate ("hold small writes if data is in flight") needs
+  the v1 send buffer policy. Trigger: an interactive workload
+  (DRSH shell, SSH-2) shows the input-echo round-trip dominating.
 
 ### Track 4 — DirectX / graphics
 

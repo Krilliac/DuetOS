@@ -492,92 +492,11 @@ bool DhcpStart(u32 iface_index);
 DhcpLease DhcpLeaseRead();
 
 // -------------------------------------------------------------------
-// TCP (passive-listen, single-connection, no retransmit) — v0.
-//
-// Scope: accept one incoming connection on a bound port; on any
-// received data, reply with a canned payload + FIN; close on the
-// peer's FIN. No retransmit, no sliding window, no out-of-order
-// reassembly, no TCP options past MSS. Enough to serve a one-shot
-// "hello" response to a browser or netcat, which is the v0 bar.
+// TCP. The full multi-connection TCB state machine + retransmit +
+// reassembly + sliding window lives in net/tcp.{h,cpp}. This header
+// no longer exposes a v0 single-slot surface — every caller goes
+// through the socket layer (net/socket.{h,cpp}) or directly through
+// the tcp:: namespace.
 // -------------------------------------------------------------------
-
-struct TcpStats
-{
-    u64 rx_packets;
-    u64 rx_out_of_state;
-    u64 syn_ack_tx;
-    u64 data_ack_tx;
-    u64 data_tx;
-    u64 fin_tx;
-    u64 rst_tx;
-};
-TcpStats TcpStatsRead();
-
-/// Bind a single TCP port to reply with `canned_reply` bytes on
-/// the first data segment of an accepted connection, then close.
-/// Only one listen slot in v0; a second call replaces the first.
-/// Returns false if `canned_len` exceeds kTcpMaxCannedReply.
-///
-/// 4 KiB lets a real HTTP request (with cookies / a long URL /
-/// a User-Agent and a few headers) fit. The previous 512-byte
-/// cap forced the browser app to truncate its request line on
-/// any non-trivial path.
-inline constexpr u32 kTcpMaxCannedReply = 4096;
-bool TcpListen(u16 local_port, const u8* canned_reply, u32 canned_len);
-
-// -------------------------------------------------------------------
-// TCP active connect (single-shot, same slot as passive listen).
-//
-// Sends a SYN to `dst_ip:dst_port`, and once the handshake
-// completes, transmits `request` bytes as data. Captures the
-// peer's response into an internal buffer that
-// `NetTcpActiveRead` exposes. Hands the socket close on FIN.
-// Mutually exclusive with TcpListen — v0 has one slot, first
-// come wins.
-// -------------------------------------------------------------------
-
-inline constexpr u32 kTcpActiveBufBytes = 65536;
-
-struct TcpActiveSnapshot
-{
-    bool in_use;
-    bool established;       // we received SYN+ACK from the server
-    bool response_complete; // server sent FIN
-    u32 response_len;       // bytes in the RX buffer (caller reads via NetTcpActiveRead)
-};
-
-/// Kick off an active connect. `request` is sent after the
-/// three-way handshake completes; `request_len` must be
-/// <= kTcpMaxCannedReply. Returns false on slot-busy /
-/// oversize / unresolved L2 destination after ARP attempts.
-bool NetTcpConnect(u32 iface_index, Ipv4Address dst_ip, u16 dst_port, const u8* request, u32 request_len);
-
-/// Copy up to `cap` bytes of the RX buffer into `out`, returns
-/// bytes copied. Safe to call during or after the response; reads
-/// are idempotent (buffer isn't consumed). Set `out = nullptr` to
-/// just snapshot the length.
-u32 NetTcpActiveRead(u8* out, u32 cap);
-
-/// Same as NetTcpActiveRead, but starts at byte offset `start`
-/// inside the buffer. The socket layer uses this to track per-
-/// socket read cursors against the shared single-slot RX buffer.
-/// Returns bytes copied (0 if start >= response_len). Caller
-/// reads from `out`; not destructive.
-u32 NetTcpActiveReadAt(u32 start, u8* out, u32 cap);
-
-TcpActiveSnapshot NetTcpActiveSnapshot();
-
-/// Send additional data on the active-connect TCP slot (role =
-/// Client, state = Established). Returns the number of bytes
-/// pushed onto the wire (capped at kTcpMaxCannedReply per call;
-/// caller chunks). Returns 0 on wrong state / wrong role / slot
-/// not in use. Used by the BSD socket layer to honour send()
-/// after connect() completes.
-u32 NetTcpActiveSend(const u8* data, u32 len);
-
-/// Send a FIN on the active-connect slot to half-close the
-/// outgoing direction. Used by SocketShutdown(SHUT_WR). Returns
-/// false if the slot isn't in Established / SynSent state.
-bool NetTcpActiveCloseTx();
 
 } // namespace duetos::net

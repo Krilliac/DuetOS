@@ -5,7 +5,9 @@
 #include "drivers/usb/cdc_ecm.h"
 #include "drivers/usb/rndis.h"
 #include "log/klog.h"
+#include "net/socket.h"
 #include "net/stack.h"
+#include "net/tcp.h"
 #include "sched/sched.h"
 
 namespace duetos::net
@@ -96,16 +98,13 @@ bool DoDnsLookup(Ipv4Address resolver, const char* name, Ipv4Address& out_ip, u3
 enum class HttpGetResult : u8
 {
     Ok,
-    SendRejected, // NetTcpConnect returned false (slot busy / ARP miss / ifce missing)
+    SendRejected, // socket alloc/connect failed
     Timeout,      // sent but no reply within deadline
     NotHttp,      // got bytes but not an HTTP status line
 };
 
 HttpGetResult DoHttpGet(Ipv4Address dst, const char* host_header, u32& out_status_code, u32 timeout_ticks)
 {
-    // Hand-built minimal HTTP/1.0 GET. Avoid HTTP/1.1 — it requires
-    // chunked / connection-management we don't have, and the v0
-    // single-shot "send + read until FIN" loop fits 1.0 perfectly.
     char request[256];
     u32 off = 0;
     const char* parts[] = {"GET / HTTP/1.0\r\nHost: ", host_header,
@@ -115,34 +114,56 @@ HttpGetResult DoHttpGet(Ipv4Address dst, const char* host_header, u32& out_statu
         for (u32 i = 0; p[i] != '\0' && off + 1 < sizeof(request); ++i)
             request[off++] = p[i];
     }
-    if (!NetTcpConnect(/*iface_index=*/0, dst, /*dst_port=*/80, reinterpret_cast<const u8*>(request), off))
+    const i32 sock = SocketAlloc(kSocketDomainInet, kSocketTypeStream);
+    if (sock < 0)
         return HttpGetResult::SendRejected;
-    out_status_code = 0;
-    for (u32 i = 0; i < timeout_ticks; ++i)
+    if (!SocketConnect(static_cast<u32>(sock), dst, /*dst_port=*/80))
     {
-        duetos::sched::SchedSleepTicks(1);
-        const auto snap = NetTcpActiveSnapshot();
-        if (snap.response_complete || snap.response_len >= 64)
+        SocketRelease(static_cast<u32>(sock));
+        return HttpGetResult::SendRejected;
+    }
+    {
+        u32 sent = 0;
+        while (sent < off)
         {
-            // Decode "HTTP/1.x SSS " status code from the first
-            // up-to-13 bytes of the response.
-            u8 head[16] = {};
-            const u32 got = NetTcpActiveRead(head, sizeof(head) - 1);
-            if (got >= 12 && head[0] == 'H' && head[1] == 'T' && head[2] == 'T' && head[3] == 'P')
-            {
-                u32 code = 0;
-                for (u32 j = 9; j < 12; ++j)
-                {
-                    if (head[j] >= '0' && head[j] <= '9')
-                        code = code * 10 + u32(head[j] - '0');
-                }
-                out_status_code = code;
-                return HttpGetResult::Ok;
-            }
-            return HttpGetResult::NotHttp;
+            const i64 n =
+                SocketSendStream(static_cast<u32>(sock), reinterpret_cast<const u8*>(request) + sent, off - sent);
+            if (n <= 0)
+                break;
+            sent += static_cast<u32>(n);
         }
     }
-    return HttpGetResult::Timeout;
+    SocketShutdown(static_cast<u32>(sock), /*how=*/1);
+    out_status_code = 0;
+    u8 head[16] = {};
+    u32 got = 0;
+    for (u32 i = 0; i < timeout_ticks && got < sizeof(head) - 1; ++i)
+    {
+        const i64 n = SocketRecvStream(static_cast<u32>(sock), head + got, sizeof(head) - 1 - got);
+        if (n == 0)
+            break;
+        if (n < 0)
+        {
+            duetos::sched::SchedSleepTicks(1);
+            continue;
+        }
+        got += static_cast<u32>(n);
+    }
+    SocketRelease(static_cast<u32>(sock));
+    if (got >= 12 && head[0] == 'H' && head[1] == 'T' && head[2] == 'T' && head[3] == 'P')
+    {
+        u32 code = 0;
+        for (u32 j = 9; j < 12; ++j)
+        {
+            if (head[j] >= '0' && head[j] <= '9')
+                code = code * 10 + u32(head[j] - '0');
+        }
+        out_status_code = code;
+        return HttpGetResult::Ok;
+    }
+    if (got == 0)
+        return HttpGetResult::Timeout;
+    return HttpGetResult::NotHttp;
 }
 
 void NetSmokeEntry(void*)
@@ -246,8 +267,7 @@ void NetSmokeEntry(void*)
             break;
         }
         case HttpGetResult::SendRejected:
-            arch::SerialWrite("[net-smoke] step 4: skipped — NetTcpConnect rejected (likely TCP slot busy with the "
-                              "boot listener; v0 single-slot limitation)\n");
+            arch::SerialWrite("[net-smoke] step 4: skipped — socket alloc/connect rejected\n");
             break;
         case HttpGetResult::NotHttp:
             arch::SerialWrite("[net-smoke] step 4: PARTIAL — TCP handshake established, but reply was not HTTP\n");
@@ -266,19 +286,11 @@ void NetSmokeEntry(void*)
     }
 
     arch::SerialWrite("[net-smoke] done\n");
-
-    // Hand the TCP slot back to the boot HTTP listener. main.cpp
-    // used to install this directly after NetStackInit, but the
-    // single-slot v0 TCP impl made that incompatible with the
-    // active-connect step above. Installing here keeps the same
-    // post-boot behaviour (port 7777 serves a canned hello).
-    static const char kHello[] = "HTTP/1.0 200 OK\r\n"
-                                 "Content-Type: text/plain\r\n"
-                                 "Content-Length: 24\r\n"
-                                 "\r\n"
-                                 "Hello from DuetOS!\r\n\r\n";
-    TcpListen(7777, reinterpret_cast<const u8*>(kHello), sizeof(kHello) - 1);
-    arch::SerialWrite("[net-smoke] boot listener installed on tcp/7777\n");
+    // The v0 boot-time "canned hello" listener on tcp/7777 is gone.
+    // The v1 TCP stack supports many concurrent listeners; a real
+    // listener is now opt-in via `tcp listen 7777` from the kernel
+    // shell or a userland test harness. See wiki/networking/Network-
+    // Stack.md for the migration note.
 
     // USB-net auto-probe is intentionally NOT called here. With a
     // real RNDIS device attached, the bring-up succeeds but the

@@ -15,10 +15,9 @@
  *   - HTTP/1.0 GET only — POST / PUT / cookies / redirects are not
  *     followed (a 30x response is reported to the user but the
  *     Location header is not auto-fetched).
- *   - Body cap is `kTcpActiveBufBytes` (2048 bytes) — the kernel's
- *     single-slot TCP receive buffer. Pages larger than this show
- *     a `(truncated)` banner. Downloading anything bigger is gated
- *     on growing that buffer or moving to a streaming API.
+ *   - Body cap is `kHttpResponseCap` (64 KiB). Pages larger than
+ *     this show a `(truncated)` banner — streamed downloads to disk
+ *     are a follow-up.
  *   - No JavaScript, no CSS, no images, no layout. The renderer is
  *     a tag stripper: HTML tags collapse to whitespace, common
  *     entities (`&amp;` `&lt;` `&gt;` `&quot;` `&nbsp;` `&apos;`)

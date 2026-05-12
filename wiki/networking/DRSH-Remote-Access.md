@@ -14,7 +14,7 @@ crypto that public-key auth needs.
 | Password KDF | PBKDF2-HMAC-SHA256, 4096 iters |
 | Auth | Mutual challenge-response over a pre-shared password |
 | Channels per session | 1 (shell **or** desktop), v0 |
-| Concurrent sessions | 1, v0 (limited by the kernel's TCP slot) |
+| Concurrent sessions | Up to 256 (bounded by TCP v1 TCB table). The single-session limit was retired when the kernel landed multi-connection TCP. |
 
 Source: [`kernel/net/drsh/`](../../kernel/net/drsh/). Shell command:
 `drshd`.
@@ -67,11 +67,13 @@ DRSH does **not** provide:
   because PMK is a deterministic function of `(password, nonce_s)`. A
   follow-up ECDHE handshake variant will land once an in-tree
   big-int + curve subsystem exists.
-- **Multi-session multiplex**. The kernel TCP stack hosts one
-  bidirectional connection at a time in v0; the service refuses a
-  second accept while one is live. The protocol itself is single-
-  session by design — multi-session arrives by deploying multiple
-  daemons on different ports, or by waiting on TCP stack v1.
+- **Multi-session is hard-bounded by the kernel TCB table.** The
+  kernel's TCP v1 stack hosts up to 256 concurrent TCBs (see
+  [`TCP State Machine`](TCP-State-Machine.md)). The DRSH service
+  itself accepts on a single port; each accept lands a fresh TCB
+  on its own 5-tuple, so multiple clients can connect at once
+  without colliding. The v0 "single concurrent session" GAP that
+  used to live here has been retired.
 
 ## Wire protocol
 
@@ -190,9 +192,9 @@ frame — input is responsive, redraws are batched.
 These are intentional, documented limits. Each one points at a
 future slice that lifts it.
 
-- **Single concurrent on-wire session.** Tied to the kernel's
-  one-slot TCP stack. Loopback paired sessions work today
-  (`SocketAcceptLoopback`). Lifted by stack v1.
+- ~~**Single concurrent on-wire session.**~~ Lifted by TCP v1
+  (2026-05-12) — the kernel now hosts up to 256 concurrent
+  connections via the TCB table.
 - **Pre-shared key only.** No public-key auth. Lifted by adding
   ECDHE on top of an in-tree curve25519 implementation.
 - **Single channel per session.** The service runs the channel

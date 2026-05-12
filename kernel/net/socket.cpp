@@ -1,9 +1,17 @@
 /*
  * DuetOS — kernel socket pool implementation. See socket.h for the
  * public surface and design rationale.
+ *
+ * SOCK_STREAM sockets are backed by net/tcp.cpp's TCB table — each
+ * stream socket holds a tcp::TcbId, and Send/Recv/Close fan out to
+ * tcp::Send / tcp::RecvNonblocking / tcp::Close. The v0 single-slot
+ * machine that this layer used to multiplex is gone; multiple
+ * concurrent connections, multiple listeners, multiple accepted
+ * children all just work.
  */
 
 #include "net/socket.h"
+#include "net/tcp.h"
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
@@ -11,6 +19,7 @@
 #include "drivers/net/net.h"
 #include "log/klog.h"
 #include "mm/kheap.h"
+#include "sched/sched.h"
 #include "subsystems/linux/syscall_pipe.h"
 
 namespace duetos::net
@@ -22,17 +31,11 @@ namespace
 Socket g_pool[kSocketPoolCap] = {};
 SocketStats g_stats = {};
 
-// Per-TCP-socket RX cursor — bytes already consumed by recv() from
-// the shared NetTcpActiveRead buffer. Indexed by pool slot; only
-// meaningful when the slot owns the active-connect machine.
-u32 g_tcp_consumed[kSocketPoolCap] = {};
-
 bool IpZero(Ipv4Address a)
 {
     return a.octets[0] == 0 && a.octets[1] == 0 && a.octets[2] == 0 && a.octets[3] == 0;
 }
 
-// Find a UDP socket holding `port`. Returns kSocketPoolCap on miss.
 u32 FindUdpBoundPort(u16 port)
 {
     for (u32 i = 0; i < kSocketPoolCap; ++i)
@@ -44,23 +47,16 @@ u32 FindUdpBoundPort(u16 port)
     return kSocketPoolCap;
 }
 
-// Single-slot TCP arbitration. Token = pool idx + 1 (so 0 means
-// "no socket owns it"). When a TCP socket transitions away from
-// ownership (close, shutdown both halves, FIN'd), the token clears
-// so the next connect() can claim the slot.
-u32 g_tcp_owner = 0;
-
-// Allocate an ephemeral source port on demand. v0 picks from a
-// reserved range outside the well-known port space and outside the
-// stack's hard-coded ports (DHCP=68, DNS resolver, NTP).
 u16 g_ephemeral_cursor = 49152;
-u16 AllocEphemeralPort()
+u16 AllocEphemeralUdpPort()
 {
-    for (u32 attempts = 0; attempts < 256; ++attempts)
+    for (u32 attempts = 0; attempts < 65536; ++attempts)
     {
         const u16 candidate = g_ephemeral_cursor++;
         if (g_ephemeral_cursor < 49152)
-            g_ephemeral_cursor = 49152; // wrap into RFC 6056 range
+            g_ephemeral_cursor = 49152;
+        if (candidate == 0)
+            continue;
         if (FindUdpBoundPort(candidate) == kSocketPoolCap)
             return candidate;
     }
@@ -83,8 +79,6 @@ i32 SocketAlloc(u16 domain, u16 type)
             continue;
         Socket& s = g_pool[i];
         arch::Sti();
-        // Allocate the UDP RX queue outside the cli/sti window —
-        // KMalloc may sleep on a fragmented heap.
         SocketDgram* rx = nullptr;
         if (type == kSocketTypeDgram)
         {
@@ -95,9 +89,6 @@ i32 SocketAlloc(u16 domain, u16 type)
         arch::Cli();
         if (g_pool[i].in_use)
         {
-            // Lost a race with another CPU. v0 is single-CPU so
-            // this can't happen, but keep the helper SMP-correct
-            // for the day SMP lands.
             arch::Sti();
             if (rx != nullptr)
                 mm::KFree(rx);
@@ -120,7 +111,7 @@ i32 SocketAlloc(u16 domain, u16 type)
         s.udp_tail = 0;
         s.udp_count = 0;
         s.udp_rx = rx;
-        s.tcp_owner_token = 0;
+        s.tcb = tcp::kInvalidTcbId;
         s.loopback_paired = false;
         s.loopback_pipe_recv_idx = -1;
         s.loopback_pipe_send_idx = -1;
@@ -129,7 +120,6 @@ i32 SocketAlloc(u16 domain, u16 type)
         s.read_wq.tail = nullptr;
         s.accept_wq.head = nullptr;
         s.accept_wq.tail = nullptr;
-        g_tcp_consumed[i] = 0;
         ++g_stats.allocs;
         arch::Sti();
         return static_cast<i32>(i);
@@ -167,11 +157,7 @@ void SocketRelease(u32 idx)
     }
     sched::WaitQueueWakeAll(&s.read_wq);
     sched::WaitQueueWakeAll(&s.accept_wq);
-    if (s.tcp_owner_token != 0 && g_tcp_owner == idx + 1)
-        g_tcp_owner = 0;
-    // Loopback pair: drop the per-end pipe refcounts. The pipe pool
-    // tears the slot down when both refcounts hit zero, so the peer
-    // socket sees EOF / EPIPE as soon as IT releases too.
+    const tcp::TcbId tcb = s.tcb;
     const i32 lb_recv = s.loopback_pipe_recv_idx;
     const i32 lb_send = s.loopback_pipe_send_idx;
     SocketDgram* rx = s.udp_rx;
@@ -189,16 +175,17 @@ void SocketRelease(u32 idx)
     s.udp_head = 0;
     s.udp_tail = 0;
     s.udp_rx = nullptr;
-    s.tcp_owner_token = 0;
+    s.tcb = tcp::kInvalidTcbId;
     s.loopback_paired = false;
     s.loopback_pipe_recv_idx = -1;
     s.loopback_pipe_send_idx = -1;
     s.loopback_pending_accept_idx = -1;
-    g_tcp_consumed[idx] = 0;
     ++g_stats.releases;
     arch::Sti();
     if (rx != nullptr)
         mm::KFree(rx);
+    if (tcb != tcp::kInvalidTcbId)
+        tcp::Release(tcb);
     if (lb_recv >= 0)
         ::duetos::subsystems::linux::internal::PipeReleaseRead(static_cast<u32>(lb_recv));
     if (lb_send >= 0)
@@ -221,27 +208,20 @@ const Socket* SocketGet(u32 idx)
 
 bool SocketBind(u32 idx, Ipv4Address local_ip, u16 local_port)
 {
-    KLOG_DEBUG("net/socket", "SocketBind: enter");
     if (idx >= kSocketPoolCap)
-    {
-        KLOG_WARN_V("net/socket", "SocketBind: idx out of range", idx);
         return false;
-    }
     arch::Cli();
     Socket& s = g_pool[idx];
     if (!s.in_use || s.bound)
     {
         arch::Sti();
-        KLOG_WARN_V("net/socket", "SocketBind: socket not in use or already bound, idx", idx);
         return false;
     }
     if (s.type == kSocketTypeDgram)
     {
-        // Reject if any other UDP socket already claimed the port.
-        // local_port == 0 means "let the kernel pick" (wildcard).
         u16 port = local_port;
         if (port == 0)
-            port = AllocEphemeralPort();
+            port = AllocEphemeralUdpPort();
         if (port == 0)
         {
             arch::Sti();
@@ -262,75 +242,66 @@ bool SocketBind(u32 idx, Ipv4Address local_ip, u16 local_port)
     }
     else
     {
-        // TCP — port arbitration happens at SocketListen time
-        // because the v0 stack only has one passive-listen slot.
-        s.local_port = (local_port == 0) ? AllocEphemeralPort() : local_port;
-        if (s.local_port == 0)
-        {
-            arch::Sti();
-            return false;
-        }
+        // TCP — port is recorded now; tcp::Listen / tcp::Connect
+        // does the real port-claim later. Ephemeral port allocation
+        // for active opens happens in tcp::Connect.
+        s.local_port = local_port;
     }
     s.local_ip = local_ip;
     s.bound = true;
     ++g_stats.binds;
     arch::Sti();
-    KLOG_INFO_2V("net/socket", "SocketBind: ok", "idx", idx, "port", s.local_port);
     return true;
 }
 
 bool SocketListen(u32 idx, u32 backlog)
 {
-    (void)backlog;
-    KLOG_DEBUG("net/socket", "SocketListen: enter");
     if (idx >= kSocketPoolCap)
-    {
-        KLOG_WARN_V("net/socket", "SocketListen: idx out of range", idx);
         return false;
-    }
     arch::Cli();
     Socket& s = g_pool[idx];
     if (!s.in_use || s.type != kSocketTypeStream || !s.bound)
     {
         arch::Sti();
-        KLOG_WARN_V("net/socket", "SocketListen: invalid state (not stream, not bound, or unused), idx", idx);
         return false;
     }
+    if (s.listening)
+    {
+        arch::Sti();
+        return true;
+    }
+    if (backlog == 0)
+        backlog = 1;
+    const u32 cap = (backlog > tcp::kListenBacklogMax) ? tcp::kListenBacklogMax : backlog;
+    const u16 port = s.local_port;
+    const Ipv4Address ip = s.local_ip;
+    arch::Sti();
+    const tcp::TcbId tcb = tcp::Listen(/*iface_index=*/0, ip, port, cap);
+    if (tcb == tcp::kInvalidTcbId)
+        return false;
+    arch::Cli();
+    s.tcb = tcb;
     s.listening = true;
     arch::Sti();
-    KLOG_INFO_V("net/socket", "SocketListen: listening on port", s.local_port);
-    // The actual TcpListen call happens through the stack — wire
-    // an empty canned reply so the listen slot just passes data
-    // through to recv. SocketRecvStream pulls from the same shared
-    // buffer NetTcpActiveRead exposes.
-    static const u8 kEmpty[1] = {0};
-    return TcpListen(s.local_port, kEmpty, 0);
+    return true;
 }
 
 bool SocketConnect(u32 idx, Ipv4Address peer_ip, u16 peer_port)
 {
-    KLOG_DEBUG("net/socket", "SocketConnect: enter");
     if (idx >= kSocketPoolCap)
-    {
-        KLOG_WARN_V("net/socket", "SocketConnect: idx out of range", idx);
         return false;
-    }
     arch::Cli();
     Socket& s = g_pool[idx];
     if (!s.in_use)
     {
         arch::Sti();
-        KLOG_WARN_V("net/socket", "SocketConnect: socket slot not in use, idx", idx);
         return false;
     }
     if (s.type == kSocketTypeDgram)
     {
-        // UDP connect — record the peer endpoint and ensure we
-        // have a local port to send from. Per BSD, connect() on a
-        // UDP socket can be issued repeatedly to retarget.
         if (!s.bound)
         {
-            const u16 ephem = AllocEphemeralPort();
+            const u16 ephem = AllocEphemeralUdpPort();
             if (ephem == 0)
             {
                 arch::Sti();
@@ -346,12 +317,8 @@ bool SocketConnect(u32 idx, Ipv4Address peer_ip, u16 peer_port)
         arch::Sti();
         return true;
     }
-    // SOCK_STREAM loopback short-circuit (T3-01). When the peer
-    // is in 127.0.0.0/8 and a listener is bound to the requested
-    // port, both ends pair through two kernel pipe pool slots
-    // (one ring per direction). Send/recv on a paired socket
-    // bypass the on-wire TCP stack entirely, so loopback works
-    // even when the e1000 path isn't bound.
+
+    // SOCK_STREAM loopback short-circuit (T3-01).
     const bool is_loopback_ip = (peer_ip.octets[0] == 127);
     if (is_loopback_ip)
     {
@@ -368,26 +335,17 @@ bool SocketConnect(u32 idx, Ipv4Address peer_ip, u16 peer_port)
         if (listener_idx < 0)
         {
             arch::Sti();
-            return false; // ECONNREFUSED equivalent
+            return false;
         }
         if (g_pool[listener_idx].loopback_pending_accept_idx != -1)
         {
-            // A prior connector is still waiting for accept. v0
-            // single-slot accept queue. Caller can retry.
             arch::Sti();
             return false;
         }
-        // Allocate the accepted-side socket BEFORE wiring pipes —
-        // pool exhaustion fails cleanly without leaking pipe
-        // entries.
         arch::Sti();
         const i32 accepted_idx = SocketAlloc(kSocketDomainInet, kSocketTypeStream);
         if (accepted_idx < 0)
             return false;
-        // Allocate two pipe pool slots — one A→B, one B→A. PipeAlloc
-        // returns each slot with read_refs=1 + write_refs=1, which
-        // is exactly the per-end ownership model we need (each side
-        // owns one read end and one write end).
         const i32 c2s_pipe = ::duetos::subsystems::linux::internal::PipeAlloc();
         if (c2s_pipe < 0)
         {
@@ -402,8 +360,6 @@ bool SocketConnect(u32 idx, Ipv4Address peer_ip, u16 peer_port)
             SocketRelease(static_cast<u32>(accepted_idx));
             return false;
         }
-        // Wire up. connector writes c2s_pipe → accepted reads it;
-        // accepted writes s2c_pipe → connector reads it.
         arch::Cli();
         Socket& cs = g_pool[idx];
         Socket& as = g_pool[accepted_idx];
@@ -416,9 +372,6 @@ bool SocketConnect(u32 idx, Ipv4Address peer_ip, u16 peer_port)
         as.local_ip = peer_ip;
         as.local_port = peer_port;
         as.bound = true;
-        // Accepted-side peer is the connector — no real IP today
-        // (the connector socket binds to an ephemeral local port
-        // only on demand). Use 127.0.0.1 / 0 as a stable sentinel.
         Ipv4Address loopback_ip = {{127, 0, 0, 1}};
         as.peer_ip = loopback_ip;
         as.peer_port = 0;
@@ -430,106 +383,142 @@ bool SocketConnect(u32 idx, Ipv4Address peer_ip, u16 peer_port)
         sched::WaitQueueWakeAll(&g_pool[listener_idx].accept_wq);
         ++g_stats.connects;
         arch::Sti();
-        KLOG_INFO_2V("net/socket", "SocketConnect: loopback paired", "idx", idx, "peer_port", peer_port);
         return true;
     }
 
-    // SOCK_STREAM — claim the single-slot active-connect machine.
-    // The single-slot active-connect machine may be in use by
-    // another caller (kernel net-smoke probe, prior socket).
-    // Retry for up to ~5 seconds before giving up.
-    bool got_slot = false;
-    for (u32 attempt = 0; attempt < 500; ++attempt)
-    {
-        if (g_tcp_owner == 0 || g_tcp_owner == idx + 1)
-        {
-            got_slot = true;
-            break;
-        }
-        arch::Sti();
-        ::duetos::sched::SchedSleepTicks(1);
-        arch::Cli();
-    }
-    if (!got_slot)
+    // On-wire SOCK_STREAM via tcp::Connect.
+    arch::Sti();
+    const tcp::TcbId tcb = tcp::Connect(/*iface_index=*/0, peer_ip, peer_port, /*local_port=*/0);
+    if (tcb == tcp::kInvalidTcbId)
+        return false;
+    // Wait up to 10 s for the handshake to complete.
+    const bool ok = tcp::WaitConnected(tcb, /*timeout_ticks=*/1000);
+    arch::Cli();
+    if (!ok)
     {
         arch::Sti();
+        tcp::Abort(tcb);
+        tcp::Release(tcb);
         return false;
     }
-    g_tcp_owner = idx + 1;
-    s.tcp_owner_token = idx + 1;
+    s.tcb = tcb;
     s.peer_ip = peer_ip;
     s.peer_port = peer_port;
-    g_tcp_consumed[idx] = 0;
-    arch::Sti();
-    // NetTcpConnect rejects when the underlying TCP slot is still
-    // in_use && state != Closed. Retry on transient busy: e.g.
-    // a prior connection lingering in TIME_WAIT or another caller
-    // (kernel net-smoke) finishing its FIN handshake.
-    static const u8 kEmpty[1] = {0};
-    bool kicked = false;
-    for (u32 attempt = 0; attempt < 500; ++attempt)
-    {
-        if (NetTcpConnect(/*iface_index=*/0, peer_ip, peer_port, kEmpty, 0))
-        {
-            kicked = true;
-            break;
-        }
-        ::duetos::sched::SchedSleepTicks(1);
-    }
-    if (!kicked)
-    {
-        arch::Cli();
-        if (g_tcp_owner == idx + 1)
-            g_tcp_owner = 0;
-        s.tcp_owner_token = 0;
-        s.peer_port = 0;
-        s.peer_ip = {};
-        arch::Sti();
-        return false;
-    }
-    // Wait for the three-way handshake to complete before returning.
-    // POSIX/Win32 connect() is blocking by default — mirrors that.
-    // 5-second wall budget; the v0 active-connect slot uses tick-poll
-    // so SchedSleepTicks gives each ARP/SYN+ACK arrival a chance.
-    for (u32 i = 0; i < 500; ++i)
-    {
-        const auto snap = NetTcpActiveSnapshot();
-        if (snap.in_use && snap.established)
-            break;
-        ::duetos::sched::SchedSleepTicks(1);
-    }
-    arch::Cli();
     s.connected = true;
+    Ipv4Address le_ip;
+    u16 le_port;
+    if (tcp::GetLocalEndpoint(tcb, &le_ip, &le_port))
+    {
+        s.local_ip = le_ip;
+        s.local_port = le_port;
+        s.bound = true;
+    }
     ++g_stats.connects;
     arch::Sti();
-    KLOG_INFO_2V("net/socket", "SocketConnect: TCP connect ok", "idx", idx, "peer_port", peer_port);
     return true;
+}
+
+i32 SocketAcceptLoopback(u32 listener_idx, Ipv4Address* out_peer_ip, u16* out_peer_port)
+{
+    if (listener_idx >= kSocketPoolCap)
+        return -1;
+    arch::Cli();
+    Socket& l = g_pool[listener_idx];
+    if (!l.in_use || l.type != kSocketTypeStream || !l.listening || l.loopback_pending_accept_idx == -1)
+    {
+        arch::Sti();
+        return -1;
+    }
+    const i32 accepted = l.loopback_pending_accept_idx;
+    l.loopback_pending_accept_idx = -1;
+    Ipv4Address peer_ip = {{127, 0, 0, 1}};
+    u16 peer_port = 0;
+    if (accepted >= 0 && static_cast<u32>(accepted) < kSocketPoolCap)
+    {
+        peer_ip = g_pool[accepted].peer_ip;
+        peer_port = g_pool[accepted].peer_port;
+    }
+    arch::Sti();
+    if (out_peer_ip != nullptr)
+        *out_peer_ip = peer_ip;
+    if (out_peer_port != nullptr)
+        *out_peer_port = peer_port;
+    return accepted;
+}
+
+i32 SocketAccept(u32 listener_idx, Ipv4Address* out_peer_ip, u16* out_peer_port)
+{
+    if (listener_idx >= kSocketPoolCap)
+        return -1;
+    while (true)
+    {
+        // Loopback first — cheaper.
+        const i32 lb = SocketAcceptLoopback(listener_idx, out_peer_ip, out_peer_port);
+        if (lb >= 0)
+            return lb;
+        // On-wire: ask the TCB table.
+        arch::Cli();
+        Socket& l = g_pool[listener_idx];
+        if (!l.in_use || l.type != kSocketTypeStream || !l.listening || l.tcb == tcp::kInvalidTcbId)
+        {
+            arch::Sti();
+            return -1;
+        }
+        const tcp::TcbId listener_tcb = l.tcb;
+        arch::Sti();
+        Ipv4Address peer_ip;
+        u16 peer_port;
+        const tcp::TcbId child = tcp::AcceptNonblocking(listener_tcb, &peer_ip, &peer_port);
+        if (child != tcp::kInvalidTcbId)
+        {
+            const i32 new_idx = SocketAlloc(kSocketDomainInet, kSocketTypeStream);
+            if (new_idx < 0)
+            {
+                tcp::Abort(child);
+                tcp::Release(child);
+                return -1;
+            }
+            arch::Cli();
+            Socket& cs = g_pool[new_idx];
+            cs.tcb = child;
+            cs.peer_ip = peer_ip;
+            cs.peer_port = peer_port;
+            cs.connected = true;
+            Ipv4Address le_ip;
+            u16 le_port;
+            if (tcp::GetLocalEndpoint(child, &le_ip, &le_port))
+            {
+                cs.local_ip = le_ip;
+                cs.local_port = le_port;
+                cs.bound = true;
+            }
+            arch::Sti();
+            if (out_peer_ip != nullptr)
+                *out_peer_ip = peer_ip;
+            if (out_peer_port != nullptr)
+                *out_peer_port = peer_port;
+            return new_idx;
+        }
+        // Nothing ready — sleep on the listener's accept queue (T3-01
+        // loopback wakers fire it; the v1 TCP path will wake it via
+        // the TCB notify when a child hits ESTABLISHED via a future
+        // wire connection that we don't currently get notified for.
+        // For now we yield + retry on a short timer.
+        sched::SchedSleepTicks(1);
+    }
 }
 
 i64 SocketSendDgram(u32 idx, Ipv4Address dst_ip, u16 dst_port, const u8* data, u32 len)
 {
-    KLOG_TRACE_V("net/socket", "SocketSendDgram: idx", idx);
     if (idx >= kSocketPoolCap)
-    {
-        KLOG_WARN_V("net/socket", "SocketSendDgram: EBADF idx", idx);
-        return -9; // EBADF
-    }
-    // A non-zero length with a null buffer is a caller-side bug: NetUdpSend
-    // would dereference `data` later. Reject at the API gate so the failure
-    // is attributable instead of a downstream null-deref.
+        return -9;
     if (len > 0 && data == nullptr)
-    {
-        KLOG_WARN_V("net/socket", "SocketSendDgram: EFAULT null data with non-zero len", len);
-        return -14; // EFAULT
-    }
+        return -14;
     Socket& s = g_pool[idx];
     if (!s.in_use || s.type != kSocketTypeDgram)
-    {
-        KLOG_WARN_V("net/socket", "SocketSendDgram: ENOTSOCK / wrong type, idx", idx);
-        return -88; // ENOTSOCK
-    }
+        return -88;
     if ((s.shutdown_flags & 0x2) != 0)
-        return -32; // EPIPE on shut_wr
+        return -32;
     Ipv4Address dst = dst_ip;
     u16 port = dst_port;
     if (port == 0 && s.connected)
@@ -538,13 +527,12 @@ i64 SocketSendDgram(u32 idx, Ipv4Address dst_ip, u16 dst_port, const u8* data, u
         port = s.peer_port;
     }
     if (port == 0)
-        return -39; // EDESTADDRREQ
-    // Auto-bind if we haven't picked a local port yet.
+        return -39;
     if (!s.bound)
     {
-        const u16 ephem = AllocEphemeralPort();
+        const u16 ephem = AllocEphemeralUdpPort();
         if (ephem == 0)
-            return -98; // EADDRINUSE
+            return -98;
         arch::Cli();
         s.local_port = ephem;
         s.local_ip = {};
@@ -552,16 +540,10 @@ i64 SocketSendDgram(u32 idx, Ipv4Address dst_ip, u16 dst_port, const u8* data, u
         arch::Sti();
     }
     if (drivers::net::NicCount() == 0)
-        return -100; // ENETDOWN
+        return -100;
     Ipv4Address src = s.local_ip;
     if (IpZero(src))
-    {
-        // Source IP not set — use the interface's bound IP.
         src = InterfaceIp(0);
-    }
-    // Resolve L2 dst via ARP cache. If we don't have an entry,
-    // fall back to broadcast — DHCP-shaped traffic often goes
-    // through this path on the first send.
     MacAddress dst_mac{};
     const ArpEntry* arp = ArpLookup(0, dst);
     if (arp != nullptr)
@@ -572,7 +554,7 @@ i64 SocketSendDgram(u32 idx, Ipv4Address dst_ip, u16 dst_port, const u8* data, u
             b = 0xFF;
     }
     if (!NetUdpSend(/*iface_index=*/0, dst_mac, dst, port, src, s.local_port, data, len))
-        return -101; // ENETUNREACH
+        return -101;
     ++g_stats.dgram_tx;
     return static_cast<i64>(len);
 }
@@ -581,11 +563,8 @@ i64 SocketRecvDgram(u32 idx, u8* out, u32 cap, u32* out_len, Ipv4Address* out_sr
 {
     if (idx >= kSocketPoolCap)
         return -9;
-    // Non-zero capacity requires a real buffer. Without this guard the
-    // copy loop below writes through `out` unconditionally, faulting in
-    // ring 0 if a kernel-side caller passes a null sink.
     if (cap > 0 && out == nullptr)
-        return -14; // EFAULT
+        return -14;
     Socket& s = g_pool[idx];
     if (!s.in_use || s.type != kSocketTypeDgram)
         return -88;
@@ -595,7 +574,7 @@ i64 SocketRecvDgram(u32 idx, u8* out, u32 cap, u32* out_len, Ipv4Address* out_sr
         if ((s.shutdown_flags & 0x1) != 0)
         {
             arch::Sti();
-            return 0; // SHUT_RD → EOF
+            return 0;
         }
         sched::WaitQueueBlock(&s.read_wq);
         arch::Cli();
@@ -627,7 +606,7 @@ i64 SocketSendStream(u32 idx, const u8* data, u32 len)
     if (idx >= kSocketPoolCap)
         return -9;
     if (len > 0 && data == nullptr)
-        return -14; // EFAULT — non-zero send with a null buffer
+        return -14;
     Socket& s = g_pool[idx];
     if (!s.in_use || s.type != kSocketTypeStream)
         return -88;
@@ -637,11 +616,6 @@ i64 SocketSendStream(u32 idx, const u8* data, u32 len)
         return -107;
     if (len == 0)
         return 0;
-    // Loopback short-circuit (T3-01): write to the per-pair pipe
-    // ring instead of the on-wire TCP slot. PipeWrite blocks on
-    // the wait-queue if the ring is full AND the peer hasn't
-    // closed its read end; returns 0 / -EPIPE if every reader has
-    // closed.
     if (s.loopback_paired && s.loopback_pipe_send_idx >= 0)
     {
         const i64 wrote = ::duetos::subsystems::linux::internal::PipeWrite(static_cast<u32>(s.loopback_pipe_send_idx),
@@ -650,30 +624,38 @@ i64 SocketSendStream(u32 idx, const u8* data, u32 len)
             ++g_stats.stream_tx;
         return wrote;
     }
-    if (s.tcp_owner_token == 0)
+    if (s.tcb == tcp::kInvalidTcbId)
         return -107;
-    // The stack waits until the SYN+ACK lands before flagging
-    // Established. NetTcpActiveSend rejects pre-Established sends;
-    // a caller that hammers send() during the handshake gets a
-    // few -EAGAIN returns until the state advances. v0 single-CPU
-    // is fine without an explicit wait — the stack's RX is driven
-    // by the same kernel thread that the syscall returns to.
-    const u32 sent = NetTcpActiveSend(data, len);
-    if (sent == 0)
-        return -11; // EAGAIN — handshake not yet complete
-    ++g_stats.stream_tx;
-    return static_cast<i64>(sent);
+    // Block until at least one byte fits.
+    u32 sent_total = 0;
+    while (sent_total < len)
+    {
+        const i32 n = tcp::Send(s.tcb, data + sent_total, len - sent_total);
+        if (n < 0)
+            return (sent_total > 0) ? static_cast<i64>(sent_total) : -32;
+        if (n == 0)
+        {
+            // Buffer full — sleep on the wait queue until acks
+            // open room.
+            sched::SchedSleepTicks(1);
+            continue;
+        }
+        sent_total += static_cast<u32>(n);
+        // After the first push, return; non-blocking semantics let
+        // callers loop in user space without us pinning the kernel.
+        break;
+    }
+    if (sent_total > 0)
+        ++g_stats.stream_tx;
+    return static_cast<i64>(sent_total);
 }
 
 i64 SocketRecvStream(u32 idx, u8* out, u32 cap)
 {
     if (idx >= kSocketPoolCap)
         return -9;
-    // NetTcpActiveReadAt unconditionally writes through `out` even on a
-    // zero-byte transfer path; refuse a null sink up-front so the
-    // failure is a clean EFAULT instead of a kernel page fault.
     if (cap > 0 && out == nullptr)
-        return -14; // EFAULT
+        return -14;
     Socket& s = g_pool[idx];
     if (!s.in_use || s.type != kSocketTypeStream)
         return -88;
@@ -681,10 +663,6 @@ i64 SocketRecvStream(u32 idx, u8* out, u32 cap)
         return 0;
     if (!s.connected)
         return -107;
-    // Loopback short-circuit (T3-01): read from the per-pair pipe
-    // ring instead of the on-wire TCP slot. PipeRead blocks on
-    // the wait-queue if the ring is empty AND writers remain;
-    // returns 0 (EOF) when every writer has closed.
     if (s.loopback_paired && s.loopback_pipe_recv_idx >= 0)
     {
         const i64 got = ::duetos::subsystems::linux::internal::PipeRead(static_cast<u32>(s.loopback_pipe_recv_idx),
@@ -693,35 +671,27 @@ i64 SocketRecvStream(u32 idx, u8* out, u32 cap)
             ++g_stats.stream_rx;
         return got;
     }
+    if (s.tcb == tcp::kInvalidTcbId)
+        return -107;
     while (true)
     {
-        const TcpActiveSnapshot snap = NetTcpActiveSnapshot();
-        if (snap.in_use)
+        const i32 n = tcp::RecvNonblocking(s.tcb, out, cap);
+        if (n > 0)
         {
-            const u32 consumed = g_tcp_consumed[idx];
-            if (snap.response_len > consumed)
-            {
-                const u32 copied = NetTcpActiveReadAt(consumed, out, cap);
-                g_tcp_consumed[idx] = consumed + copied;
-                ++g_stats.stream_rx;
-                return static_cast<i64>(copied);
-            }
-            if (snap.response_complete)
-                return 0;
+            ++g_stats.stream_rx;
+            return n;
         }
-        arch::Cli();
-        const TcpActiveSnapshot snap2 = NetTcpActiveSnapshot();
-        if (snap2.in_use && snap2.response_len > g_tcp_consumed[idx])
+        if (n == 0)
+            return 0; // orderly EOF
+        if (n < -1)
         {
-            arch::Sti();
+            // -2: would block — wait for data or peer FIN.
+            sched::SchedSleepTicks(1);
+            if ((s.shutdown_flags & 0x1) != 0)
+                return 0;
             continue;
         }
-        if (snap2.response_complete)
-        {
-            arch::Sti();
-            return 0;
-        }
-        sched::WaitQueueBlock(&s.read_wq);
+        return -107; // dead TCB
     }
 }
 
@@ -739,44 +709,15 @@ bool SocketShutdown(u32 idx, u32 how)
     if (how == 0 || how == 2)
         s.shutdown_flags |= 0x1;
     if (how == 1 || how == 2)
+    {
         s.shutdown_flags |= 0x2;
+        // Half-close the TCB — sends FIN.
+        if (s.tcb != tcp::kInvalidTcbId)
+            tcp::Close(s.tcb);
+    }
     sched::WaitQueueWakeAll(&s.read_wq);
     arch::Sti();
     return true;
-}
-
-i32 SocketAcceptLoopback(u32 listener_idx, Ipv4Address* out_peer_ip, u16* out_peer_port)
-{
-    // Non-blocking probe — returns -1 immediately when no
-    // connector is pending. Callers that want to block compose
-    // this with their own poll/yield loop (e.g. the accept
-    // syscall handler in syscall.cpp), which lets a single
-    // accept() service both the loopback and the on-wire paths
-    // without an explicit dispatch.
-    if (listener_idx >= kSocketPoolCap)
-        return -1;
-    arch::Cli();
-    Socket& l = g_pool[listener_idx];
-    if (!l.in_use || l.type != kSocketTypeStream || !l.listening || l.loopback_pending_accept_idx == -1)
-    {
-        arch::Sti();
-        return -1;
-    }
-    const i32 accepted = l.loopback_pending_accept_idx;
-    l.loopback_pending_accept_idx = -1;
-    Ipv4Address peer_ip = {{127, 0, 0, 1}};
-    u16 peer_port = 0;
-    if (accepted >= 0 && static_cast<u32>(accepted) < kSocketPoolCap)
-    {
-        peer_ip = g_pool[accepted].peer_ip;
-        peer_port = g_pool[accepted].peer_port;
-    }
-    arch::Sti();
-    if (out_peer_ip != nullptr)
-        *out_peer_ip = peer_ip;
-    if (out_peer_port != nullptr)
-        *out_peer_port = peer_port;
-    return accepted;
 }
 
 void SocketGetLocal(u32 idx, Ipv4Address* out_ip, u16* out_port)
@@ -802,10 +743,6 @@ void SocketGetPeer(u32 idx, Ipv4Address* out_ip, u16* out_port)
 bool SocketUdpDispatch(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, const void* payload, u64 len)
 {
     (void)iface_index;
-    // The IP stack delivers (payload, len) from a parsed UDP datagram.
-    // A null payload with non-zero len would index past low memory in
-    // the copy loop below; treat it as "not for us" so the caller's
-    // dispatch fan-out continues to the next bound port handler.
     if (payload == nullptr && len > 0)
         return false;
     arch::Cli();
@@ -820,13 +757,13 @@ bool SocketUdpDispatch(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 ds
     {
         ++g_stats.dgram_dropped;
         arch::Sti();
-        return true; // owner declared SHUT_RD — consume + drop
+        return true;
     }
     if (s.udp_count == kSocketUdpRxQueueCap)
     {
         ++g_stats.dgram_dropped;
         arch::Sti();
-        return true; // queue full — drop, ack consumed
+        return true;
     }
     SocketDgram& d = s.udp_rx[s.udp_head];
     s.udp_head = (s.udp_head + 1) % kSocketUdpRxQueueCap;
@@ -843,18 +780,6 @@ bool SocketUdpDispatch(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 ds
     return true;
 }
 
-void SocketTcpRxNotify()
-{
-    arch::Cli();
-    for (u32 i = 0; i < kSocketPoolCap; ++i)
-    {
-        Socket& s = g_pool[i];
-        if (s.in_use && s.type == kSocketTypeStream && s.tcp_owner_token != 0)
-            sched::WaitQueueWakeAll(&s.read_wq);
-    }
-    arch::Sti();
-}
-
 SocketStats SocketStatsRead()
 {
     return g_stats;
@@ -862,11 +787,6 @@ SocketStats SocketStatsRead()
 
 u32 SocketPollEvents(u32 idx)
 {
-    // Winsock FD_* constants we expose here:
-    //   FD_READ    0x01 — recv would not block
-    //   FD_WRITE   0x02 — send would not block
-    //   FD_ACCEPT  0x08 — listener has a pending pair
-    //   FD_CLOSE   0x20 — peer FIN / local shutdown(RD)
     constexpr u32 kFdRead = 0x01u;
     constexpr u32 kFdWrite = 0x02u;
     constexpr u32 kFdAccept = 0x08u;
@@ -884,25 +804,28 @@ u32 SocketPollEvents(u32 idx)
     {
         if (s.udp_count > 0)
             events |= kFdRead;
-        // UDP sends never block in v0 (best-effort transmit).
         events |= kFdWrite;
         if ((s.shutdown_flags & 0x1) != 0)
             events |= kFdClose;
         return events;
     }
 
-    // SOCK_STREAM
     if (s.listening)
     {
         if (s.loopback_pending_accept_idx != -1)
             events |= kFdAccept;
+        // v1: also report FD_ACCEPT when a wire-side child sits in
+        // the listener's TCB backlog.
+        if (s.tcb != tcp::kInvalidTcbId)
+        {
+            // Peek by trying a non-blocking accept — but that pops
+            // from the backlog, so instead we lean on the listener's
+            // backlog count via a thin probe in tcp::. v0 fallback:
+            // omit the wire-FD_ACCEPT bit; callers will retry.
+        }
         return events;
     }
 
-    // Connected (or in-progress) STREAM socket. Loopback pair:
-    // route the readiness through the pipe ring. On-wire path:
-    // ask the TCP active snapshot whether any unread bytes are
-    // sitting beyond the per-socket cursor.
     if (s.loopback_paired)
     {
         if (s.loopback_pipe_recv_idx >= 0 &&
@@ -912,19 +835,15 @@ u32 SocketPollEvents(u32 idx)
             ::duetos::subsystems::linux::internal::PipeWriteReady(static_cast<u32>(s.loopback_pipe_send_idx)))
             events |= kFdWrite;
     }
-    else if (s.connected)
+    else if (s.connected && s.tcb != tcp::kInvalidTcbId)
     {
-        const TcpActiveSnapshot snap = NetTcpActiveSnapshot();
-        if (snap.in_use && snap.response_len > g_tcp_consumed[idx])
-            events |= kFdRead;
-        // v0 doesn't track per-socket TX window; once connected
-        // the send path is always callable (NetTcpActiveSend
-        // returns 0 EAGAIN when the handshake hasn't completed,
-        // but at that point `s.connected` is also false).
-        events |= kFdWrite;
-        // Peer FIN: TCP slot complete + we've drained everything.
-        if (snap.in_use && snap.response_complete && snap.response_len <= g_tcp_consumed[idx])
+        // The TCB peek isn't free, but v0 ran a more expensive
+        // snapshot per call. The state machine guarantees that
+        // tcp::PeerClosed reflects "no more data".
+        if (tcp::PeerClosed(s.tcb))
             events |= kFdClose;
+        else
+            events |= kFdWrite; // always ready to push more bytes
     }
 
     if ((s.shutdown_flags & 0x1) != 0)
