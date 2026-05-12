@@ -329,6 +329,17 @@ void DumpCurrentTaskSyscallTrail();
 /// self-tests when DUETOS_BOOT_SELFTESTS is on.
 void SyscallTrailSelfTest();
 
+/// Boot-time check: verify the periodic-balance decision function
+/// against synthetic per-CPU queue lengths. Saves and restores
+/// every CPU's `runq_normal_len` under `g_sched_lock` so concurrent
+/// timer-tick balancing on peer CPUs can't observe the synthetic
+/// state. On a single-CPU boot the test only covers the limit<=1
+/// short-circuit (no peer to migrate from); on SMP boots it
+/// exercises the margin threshold and the same-cluster filter.
+/// Panics on mismatch; emits one `[sched-loadbalance-selftest] PASS`
+/// line on success so CI can grep for it.
+void LoadBalanceSelfTest();
+
 /// Top (high address) of the current task's kernel stack. Returns 0 for
 /// the boot task (it never had a scheduler-managed kernel stack — it
 /// runs on the boot.S stack, which is irrelevant for ring-3 RSP0

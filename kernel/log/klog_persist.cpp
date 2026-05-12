@@ -393,17 +393,24 @@ void LineSink(LogLevel /*level*/, LogArea area, const char* line, u32 line_len)
     // when the buffer crosses the half-full mark on a newline, or
     // when it fills. A line bigger than the buffer is handled by
     // flushing on overflow and re-entering the loop.
+    //
+    // CRITICAL: keep `g_in_flush` set across the FlushArea calls.
+    // The earlier save/restore-to-false pattern defeated the
+    // re-entry guard — FlushArea calls into fat32, which under
+    // I/O failure emits KLOG_WARN, which re-enters LineSink
+    // here. With `g_in_flush == false` mid-flush, the guard at
+    // the entry let the re-entry through, and the recursive
+    // FlushArea / fat32 / klog cycle blew the kernel stack and
+    // landed a #DF. Holding the flag set throughout the flush
+    // makes the inner re-entry return early via the line-382
+    // guard, dropping the inner log line — exactly the right
+    // recovery for "we're already trying to persist; don't
+    // recurse."
     for (u32 i = 0; i < line_len; ++i)
     {
         if (a->used >= sizeof(a->buf))
         {
-            // Buffer full — flush in-place (resets a->used).
-            // Re-entrant FAT32 logs would normally be guarded by
-            // g_in_flush, but we already set it above.
-            const bool saved = g_in_flush;
-            g_in_flush = false;
             FlushArea(a);
-            g_in_flush = saved;
             if (a->used >= sizeof(a->buf))
             {
                 // Flush failed for some reason — drop remainder
@@ -417,10 +424,7 @@ void LineSink(LogLevel /*level*/, LogArea area, const char* line, u32 line_len)
     // chunks rather than one append per line.
     if (a->used >= sizeof(a->buf) / 2 && line[line_len - 1] == '\n')
     {
-        const bool saved = g_in_flush;
-        g_in_flush = false;
         FlushArea(a);
-        g_in_flush = saved;
     }
     g_in_flush = false;
 }

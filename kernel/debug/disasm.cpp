@@ -1223,7 +1223,15 @@ u8 DecodeOne(const u8* bytes, u64 available, u64 va, DecodedInsn* out)
         }
         // 0F BC: BSF r{16,32,64}, r/m{16,32,64} — bit scan forward.
         // 0F BD: BSR r{16,32,64}, r/m{16,32,64} — bit scan reverse.
-        if (op2 == 0xBC || op2 == 0xBD)
+        //
+        // The F3 REP prefix changes the semantics: F3 0F BC = TZCNT
+        // (BMI1) and F3 0F BD = LZCNT (LZCNT/ABM). Skip this BSF/BSR
+        // branch when `p.rep` is set so the dedicated POPCNT/LZCNT
+        // handler below catches the prefixed encoding. Without this
+        // gate, the LZCNT bytes `F3 48 0F BD D8` decoded as BSR
+        // (the F3 was correctly stored on the prefix struct but the
+        // BSF/BSR branch never consulted it).
+        if ((op2 == 0xBC || op2 == 0xBD) && !p.rep)
         {
             if (cur >= available)
                 return fail_db(op);
@@ -1400,14 +1408,14 @@ u8 DecodeOne(const u8* bytes, u64 available, u64 va, DecodedInsn* out)
             record_bytes(cur);
             return cur;
         }
-        // F3 0F B8 / F3 0F BD: POPCNT / LZCNT r{16,32,64},
-        // r/m{16,32,64}. Same opcode shape; the F3 REP prefix
-        // distinguishes them from BSWAP family. The 0F B8 base
-        // is JMP-far in real mode and unused in long mode, so
-        // when the REP prefix is present we read it as POPCNT.
-        // 0F BD without F3 is BSR (handled above); with F3 it's
-        // LZCNT.
-        if (p.rep && (op2 == 0xB8 || op2 == 0xBD))
+        // F3 0F B8 / F3 0F BC / F3 0F BD: POPCNT / TZCNT / LZCNT
+        // r{16,32,64}, r/m{16,32,64}. Same opcode shape; the F3
+        // REP prefix distinguishes them from BSWAP / BSF / BSR.
+        // The 0F B8 base is JMP-far in real mode and unused in
+        // long mode, so when the REP prefix is present we read
+        // it as POPCNT. 0F BD without F3 is BSR; with F3 it's
+        // LZCNT. 0F BC without F3 is BSF; with F3 it's TZCNT.
+        if (p.rep && (op2 == 0xB8 || op2 == 0xBC || op2 == 0xBD))
         {
             if (cur >= available)
                 return fail_db(op);
@@ -1419,7 +1427,12 @@ u8 DecodeOne(const u8* bytes, u64 available, u64 va, DecodedInsn* out)
             if (rm_extra == 0xFF)
                 return fail_db(op);
             cur += rm_extra;
-            StrCopy(out->mnemonic, kBufMnem, op2 == 0xB8 ? "popcnt" : "lzcnt");
+            const char* mnem = "popcnt";
+            if (op2 == 0xBC)
+                mnem = "tzcnt";
+            else if (op2 == 0xBD)
+                mnem = "lzcnt";
+            StrCopy(out->mnemonic, kBufMnem, mnem);
             StrAppend(out->operands, kBufOpr, RegName(mr.reg_idx, w, p.rex_seen));
             StrAppend(out->operands, kBufOpr, ", ");
             StrAppend(out->operands, kBufOpr, rm_buf);

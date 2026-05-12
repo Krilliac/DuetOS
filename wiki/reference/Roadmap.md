@@ -51,16 +51,24 @@ the same commit** that delivers the code.
 
 - **Status:** v0 clustering landed — `cpu::Topology` + SRAT parser
   + cluster-aware two-pass `StealNormalFromPeer`. NUMA-aware
-  frame allocator landed in this slice (`acpi::srat` now records
-  Memory-Affinity records; `FrameAllocatorBuildNumaRanges`
-  consumes them; `AllocateFrame` biases toward the calling CPU's
-  local node before falling back to the global pool). UMA boots
-  (no SRAT) keep the historical global linear-scan path
-  byte-for-byte. **Placement affinity at wake landed** —
-  `RunqueuePush` now redirects from `last_cpu` to the least-
-  loaded same-cluster peer when the delta exceeds a 2-task
-  margin, using a new `runq_normal_len` counter on `PerCpu`.
-  See [CPU Topology](../kernel/CPU-Topology.md).
+  frame allocator landed (`acpi::srat` records Memory-Affinity
+  records; `FrameAllocatorBuildNumaRanges` consumes them;
+  `AllocateFrame` biases toward the calling CPU's local node).
+  UMA boots (no SRAT) keep the historical global linear-scan
+  path byte-for-byte. **Placement affinity at wake landed** —
+  `RunqueuePush` redirects from `last_cpu` to the least-loaded
+  same-cluster peer when the delta exceeds a 2-task margin.
+  **Periodic active load balancer landed** — `PeriodicBalanceTick`
+  fires from `OnTimerTick` every `kBalancePeriodTicks` per CPU,
+  phase-shifted by `cpu_id`; migrates one Ready task from the
+  heaviest same-cluster peer when the imbalance is ≥
+  `kBalanceMargin` (4). Covers the case where neither wake
+  placement nor work-stealing fires — two CPUs both busy with
+  long-running tasks, neither going idle, no new wake events.
+  Boot self-test `sched-loadbalance-selftest` (Phase::Userland)
+  verifies the decision function. See
+  [CPU Topology](../kernel/CPU-Topology.md) and
+  [Scheduler](../kernel/Scheduler.md).
 - **Remaining scope:** one profile-driven follow-on left:
   - **Cluster-broadcast IPIs** — extend `arch::SmpSendIpi` with
     cluster-scoped destination bits when x2APIC cluster mode is

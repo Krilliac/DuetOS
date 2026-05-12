@@ -4,7 +4,7 @@
 >
 > **Execution context:** Kernel — `Schedule()` runs after IRQ EOI or in `cli` cooperative paths
 >
-> **Maturity:** SMP-online — per-CPU runqueues, work-stealing, reschedule-IPI; single global `g_sched_lock` (per-CPU lock split deferred)
+> **Maturity:** SMP-online — per-CPU runqueues, work-stealing, reschedule-IPI, cluster-aware wake placement, periodic active load balancer; single global `g_sched_lock` (per-CPU lock split deferred)
 
 ## Overview
 
@@ -122,6 +122,27 @@ behaviour is identical to the pre-clustering scheduler — no
 regression. See [CPU Topology](CPU-Topology.md) for how cluster
 IDs are assigned at boot.
 
+**Periodic active balancing**: covers the case neither wake
+placement nor work-stealing can — two CPUs both busy with
+long-running tasks, neither going idle, no new wake events. Fired
+from `OnTimerTick` every `kBalancePeriodTicks` (8 ticks ≈ 80 ms at
+100 Hz), phase-shifted by `cpu_id` so different CPUs balance on
+different ticks. Migrates one Ready task from the heaviest
+same-cluster peer when `peer.runq_normal_len ≥ self.runq_normal_len
++ kBalanceMargin` (margin = 4). After one migration the delta drops
+to 2, which equals `kClusterPlacementMargin` — the wake-side floor
+— so the system settles without oscillation.
+
+Cross-cluster active migration is intentionally absent: the cache
+penalty for crossing a NUMA / package boundary dwarfs the imbalance
+cost. Cross-cluster idle peers are handled by work-stealing's pass 1.
+Operator-pinned steady-state load uses `SchedSetAffinity`.
+
+Boot self-test: `sched-loadbalance-selftest` (Phase::Userland)
+verifies the decision function — same-cluster scoping, margin
+threshold, UP short-circuit. Emits one `[sched-loadbalance-selftest] PASS`
+line so CI can grep for it.
+
 ## Blocking Primitives (sister doc)
 
 `SchedSleepTicks`, `WaitQueue`, and `Mutex` were added on top of the
@@ -154,12 +175,14 @@ must transition `Ready` and re-enqueue.
 
 ## Known Limits / GAPs
 
-- **No SMP yet.** Single CPU. SMP bringup will introduce per-CPU
-  runqueues, work-stealing, irq-save spinlock around the runqueue, and
-  per-CPU `need_resched`. See [SMP AP Bringup Scope](../advanced/SMP-AP-Bringup-Scope.md).
-- **No priorities.** Every task is equal weight. A real-time class can
-  layer on without rewriting the core (separate priority-0 runqueue
-  checked first).
+- **Single global `g_sched_lock`.** Per-CPU runqueues are in place
+  (`cpu::PerCpu`) but every mutation still serialises on one global
+  ticket spinlock. Per-CPU lock split is Roadmap **B2-followup** —
+  defer until profiles show contention.
+- **No priorities beyond Normal/Idle.** Within Normal every task is
+  equal weight. The Win32 priority class is wired (`Process::win32_priority_class`)
+  but the scheduler ignores it; aging / decay rides on the per-CPU
+  lock split (Roadmap T8-01-followon).
 - **No userland scheduling specifics in the core yet.** Ring 3 entry
   added TSS + IST stacks and CR3 swap on context switch where the
   target task's `AddressSpace` differs.

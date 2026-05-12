@@ -149,10 +149,25 @@ inline constexpr LockClass kLockClassCompositor = 0x09;
 
 /// Maximum simultaneous holders per CPU. A code path that acquires
 /// more than this many locks at once trips a warning and lockdep
-/// degrades to "skip the deepest lock" — the existing kernel
-/// already caps held-lock-stack depth at 8 in panic snapshots, so
-/// matching that is the right v0 budget.
-inline constexpr u32 kLockdepHeldMax = 8;
+/// degrades to "skip the deepest lock" — once a push is dropped,
+/// the matching release later finds nothing on the held stack and
+/// emits "release with no matching held entry" once per orphaned
+/// release.
+///
+/// The original v0 cap of 8 matched the panic-dump snapshot cap,
+/// but steady-state DuetOS already reaches a deeper nest in
+/// production paths: fs/fat32 path resolution holds fs/vfs +
+/// fs/fat32 + handle-table + sched + several mutexes (kmutex,
+/// kfile pool, compositor flush). Once the late Phase::Userland
+/// self-tests (ELF/DLL/Win32-custom/load-balance) populate the
+/// heap, the steady-state fs/compositor pump can hit 30+ levels
+/// on long-running boots, especially during compositor↔fat32
+/// inversion-warning storms where every detected inversion adds
+/// to the held-stack churn. 128 gives ~10× the observed real
+/// maximum so the lockdep view stays accurate without inflating
+/// the per-CPU memory footprint meaningfully (128 × 1 byte =
+/// 128 B per CPU).
+inline constexpr u32 kLockdepHeldMax = 128;
 
 /// Optional metadata: associate a stable name with a class ID so
 /// inversion reports can print something readable. Multiple

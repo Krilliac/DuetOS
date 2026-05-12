@@ -1,6 +1,6 @@
 # CPU Topology & Scheduler Clustering
 
-> **Maturity:** v0 — locality-aware work-stealing only. NUMA-aware page allocation, per-cluster runqueues, cluster-broadcast IPIs, and placement affinity at task spawn/wake are deferred follow-ups.
+> **Maturity:** v0 — locality-aware work-stealing, NUMA-aware frame allocator, cluster-aware wake placement, and periodic active load balancing. Per-cluster runqueues and cluster-broadcast IPIs remain deferred follow-ups.
 
 ## What this is
 
@@ -21,12 +21,28 @@ Single-cluster systems are the common case (every commodity desktop CPU). They c
 
 ## Scheduler integration
 
-`StealNormalFromPeer` (`kernel/sched/sched.cpp`) is the only consumer of `cluster_id` today. The work-stealing walk is two passes:
+Three scheduler paths consume `cluster_id`:
 
-```
-pass 0: for each peer in round-robin order, skip if peer.cluster_id != self.cluster_id; try steal
-pass 1: for each peer in round-robin order, skip if peer.cluster_id == self.cluster_id; try steal
-```
+1. **Work-stealing** (`StealNormalFromPeer`, idle-pull). Two-pass walk:
+
+   ```
+   pass 0: for each peer in round-robin order, skip if peer.cluster_id != self.cluster_id; try steal
+   pass 1: for each peer in round-robin order, skip if peer.cluster_id == self.cluster_id; try steal
+   ```
+
+2. **Wake placement** (`PickClusterPlacement`, on every Normal-band
+   wake-side enqueue). Routes from the task's `last_cpu` to the
+   least-loaded peer in the same cluster when `last_cpu.runq_normal_len
+   - peer.runq_normal_len ≥ kClusterPlacementMargin (2)`. Cross-cluster
+   peers are skipped; cross-cluster routing is the work-stealing
+   pass-1 fallback's job.
+
+3. **Periodic active load balancing** (`PeriodicBalanceTick`, fired
+   from `OnTimerTick` every `kBalancePeriodTicks` per CPU,
+   phase-shifted by `cpu_id`). Pulls one Ready task from the heaviest
+   same-cluster peer when the imbalance is `≥ kBalanceMargin (4)`.
+   Same-cluster only — see `kernel/sched/sched.cpp` `PickBalanceVictim`
+   for the design rationale.
 
 No new locks. `g_sched_lock` still covers all per-CPU runqueue access. `cluster_id` is a `u16` field on `cpu::PerCpu`, appended past the syscall-stub-relevant offsets (`kPerCpuKernelRsp = 32`, `kPerCpuUserRspScratch = 40` are guarded by `static_assert`s in `kernel/cpu/percpu.h`).
 
@@ -84,17 +100,15 @@ bits  0..15: package_id
 - `kernel/cpu/topology.h` / `topology.cpp` — public API + implementation
 - `kernel/acpi/srat.h` / `srat.cpp` — SRAT walker
 - `kernel/cpu/percpu.h` — `PerCpu.cluster_id` (with offset `static_assert`s)
-- `kernel/sched/sched.cpp` — `StealNormalFromPeer` two-pass loop
+- `kernel/sched/sched.cpp` — `StealNormalFromPeer` two-pass loop, `PickClusterPlacement` wake-side router, `PickBalanceVictim` / `PeriodicBalanceTick` periodic balancer
 - `kernel/arch/x86_64/smp.cpp` — `TopologyInitAp` invocation in `ApEntryFromTrampoline`
 - `kernel/core/main.cpp` — `TopologyInitBsp` + `TopologyAssignClusters` + `TopologyDump` wiring
 - `kernel/debug/probes.h` / `probes.cpp` — `kTopologyParseFailed`
 
 ## Follow-on slices (deferred)
 
-- **NUMA-aware page allocator** — frame allocator queries SRAT memory-affinity records (subtype 1) and prefers the requesting CPU's node.
 - **Per-cluster runqueue split** — decompose `g_sched_lock` along cluster boundaries; intra-cluster moves bypass the global lock. Roadmap entry **B2-followup**.
 - **Cluster-broadcast IPIs** — extend `arch::SmpSendIpi` with cluster-scoped destination bits when `x2APIC` cluster mode is in use.
-- **Placement affinity** — at task creation / wake, route to the parent's cluster's least-loaded CPU rather than just `last_cpu`.
 
 ## Related pages
 

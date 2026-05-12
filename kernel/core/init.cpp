@@ -74,6 +74,30 @@ Result<void> InitcallRegister(Phase phase, const char* name, InitcallFn fn)
     return {};
 }
 
+bool InitcallUnregister(const char* name)
+{
+    if (name == nullptr)
+    {
+        return false;
+    }
+    for (u32 i = 0; i < g_initcall_count; ++i)
+    {
+        // Pointer-equality match: every registrant passes a stable
+        // string literal, and the unregister site uses the same one.
+        if (g_initcalls[i].name == name)
+        {
+            for (u32 j = i + 1; j < g_initcall_count; ++j)
+            {
+                g_initcalls[j - 1] = g_initcalls[j];
+            }
+            --g_initcall_count;
+            g_initcalls[g_initcall_count] = InitcallRecord{};
+            return true;
+        }
+    }
+    return false;
+}
+
 u32 InitcallCount()
 {
     return g_initcall_count;
@@ -231,11 +255,21 @@ void InitSelfTest()
     }
 
     // Negative path 2: a failing callback halts the phase and surfaces the error.
-    must_ok(InitcallRegister(Phase::Userland, "init.selftest.fail", SelfTestFailing), "register failing");
+    constexpr const char* kSelfTestFailRow = "init.selftest.fail";
+    must_ok(InitcallRegister(Phase::Userland, kSelfTestFailRow, SelfTestFailing), "register failing");
     Result<void> r_fail = RunPhase(Phase::Userland);
     if (r_fail.has_value())
     {
         Panic("init self-test", "RunPhase returned Ok despite failing callback");
+    }
+    // Retire the failing row so it doesn't poison the late-boot
+    // RunPhase(Userland) that picks up every real Userland self-test
+    // (elf-loader-unwind, dll-loader, win32-custom, sched-loadbalance,
+    // ...). Without retirement the late phase aborts on the
+    // deliberate failure and skips every self-test registered after it.
+    if (!InitcallUnregister(kSelfTestFailRow))
+    {
+        Panic("init self-test", "InitcallUnregister failed to retire the failing row");
     }
 
     arch::SerialWrite("[init] self-test: 3 phases x 1 callback ran in order; failure path surfaces error. OK.\n");

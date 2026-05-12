@@ -6396,6 +6396,16 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                            duetos::subsystems::win32::custom::Win32CustomSelfTest();
                                            return duetos::core::Result<void>{};
                                        });
+        // Periodic load-balancer decision test. Lives in Phase::Userland
+        // because it needs SmpStartAps + TopologyAssignClusters to have
+        // run — earlier phases only see the BSP, which exercises the
+        // single-CPU short-circuit but never the cluster + margin paths.
+        duetos::core::InitcallRegister(duetos::core::Phase::Userland, "sched-loadbalance-selftest",
+                                       []()
+                                       {
+                                           duetos::sched::LoadBalanceSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
     }
     (void)duetos::core::RunPhase(duetos::core::Phase::Userland);
 
