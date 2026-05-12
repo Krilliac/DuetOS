@@ -111,6 +111,7 @@
 #include "net/bluetooth/diag.h"
 #include "net/bluetooth/hci.h"
 #include "net/wireless/beacon.h"
+#include "net/wireless/inventory.h"
 #include "crypto/aes.h"
 #include "crypto/aes_keywrap.h"
 #include "crypto/hmac.h"
@@ -2909,6 +2910,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::AthHtcUploadSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::AthHtcSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::Mt76FirmwareSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::wireless::WirelessInventorySelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::BeaconSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::bluetooth::HciSelfTest());
     duetos::net::bluetooth::BluetoothDiagInit();
@@ -2994,6 +2996,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // cache, matches VID/PID, and runs the HTC firmware download
     // protocol for each adapter found.
     duetos::drivers::net::AthHtcInit();
+    // Wireless hardware inventory: emit a single, easy-to-grep boot-log
+    // block that lists every detected Wi-Fi adapter and the firmware
+    // basename it needs. First thing a real-hardware tester reads.
+    duetos::net::wireless::WirelessInventoryDump();
 
     SerialWrite("[boot] Detecting audio controllers.\n");
     duetos::drivers::audio::AudioInit();
