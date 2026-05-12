@@ -88,13 +88,18 @@ struct Task
     // mutually exclusive; at most one of those is the task's home
     // at any given moment.
     Task* next;
-    // `sleep_next` is a SEPARATE intrusive link used only for the
-    // sleep queue. Kept out of `next` so a task can be parked on
-    // BOTH a wait queue (via `next`) and the sleep queue (via
-    // `sleep_next`) simultaneously — that's how
-    // WaitQueueBlockTimeout implements "wake me on event OR on
-    // timer, whichever comes first."
+    // `sleep_next` / `sleep_prev` form a SEPARATE doubly-linked
+    // intrusive list used only for the sleep queue. Kept out of
+    // `next` so a task can be parked on BOTH a wait queue (via
+    // `next`) and the sleep queue (via `sleep_{next,prev}`)
+    // simultaneously — that's how WaitQueueBlockTimeout implements
+    // "wake me on event OR on timer, whichever comes first." The
+    // `sleep_prev` link lets SleepqueueRemove unlink in O(1)
+    // (a timed waiter being woken explicitly is the common case);
+    // without it, removal had to re-walk the sorted list looking
+    // for the predecessor.
     Task* sleep_next;
+    Task* sleep_prev;
     // Back-pointer to the WaitQueue a Blocked task is currently on
     // (nullptr otherwise). Lets OnTimerTick unlink a timed-waiter
     // from its wait queue when the timeout path wakes it first.
@@ -335,11 +340,111 @@ constinit Task* g_sleep_head = nullptr; // sorted by wake_tick (ascending)
 constinit u64 g_tick_now = 0;
 constinit u64 g_next_task_id = 0;
 constinit u64 g_context_switches = 0;
-constinit u64 g_tasks_live = 0;
-constinit u64 g_tasks_sleeping = 0;
-constinit u64 g_tasks_blocked = 0;
-constinit u64 g_tasks_created = 0;
-constinit u64 g_tasks_reaped = 0;
+// g_tasks_* counters moved to PerCpu::sched_tasks_*. Reads sum
+// across all online CPUs (see SchedStatsRead); writes target
+// cpu::CurrentCpu()'s per-CPU slot. Increments and decrements may
+// land on different CPUs but the cross-CPU sum stays correct.
+
+// Per-CPU stat counter accessors. Inlined to keep the hot
+// scheduler paths compact; cpu::CurrentCpu() lowers to a single
+// gs:[0] load on x86, so this is byte-equivalent to the prior
+// global increment.
+inline void SchedCpuIncLive()
+{
+    ++cpu::CurrentCpu()->sched_tasks_live;
+}
+inline void SchedCpuDecLive()
+{
+    --cpu::CurrentCpu()->sched_tasks_live;
+}
+inline void SchedCpuIncSleeping()
+{
+    ++cpu::CurrentCpu()->sched_tasks_sleeping;
+}
+inline void SchedCpuDecSleeping()
+{
+    --cpu::CurrentCpu()->sched_tasks_sleeping;
+}
+inline void SchedCpuIncBlocked()
+{
+    ++cpu::CurrentCpu()->sched_tasks_blocked;
+}
+inline void SchedCpuDecBlocked()
+{
+    --cpu::CurrentCpu()->sched_tasks_blocked;
+}
+inline void SchedCpuIncCreated()
+{
+    ++cpu::CurrentCpu()->sched_tasks_created;
+}
+inline void SchedCpuIncReaped()
+{
+    ++cpu::CurrentCpu()->sched_tasks_reaped;
+}
+
+// Cross-CPU sum walks for read-side. Used by SchedStatsRead; cold
+// path (operator runs `top` or `ps`), no atomic ops needed since
+// caller observes a snapshot whose precision is best-effort.
+inline u64 SchedSumLive()
+{
+    u64 sum = 0;
+    const u32 limit = arch::SmpCpuIdLimit();
+    for (u32 id = 0; id < limit; ++id)
+    {
+        cpu::PerCpu* p = arch::SmpGetPercpu(id);
+        if (p != nullptr)
+            sum += p->sched_tasks_live;
+    }
+    return sum;
+}
+inline u64 SchedSumSleeping()
+{
+    u64 sum = 0;
+    const u32 limit = arch::SmpCpuIdLimit();
+    for (u32 id = 0; id < limit; ++id)
+    {
+        cpu::PerCpu* p = arch::SmpGetPercpu(id);
+        if (p != nullptr)
+            sum += p->sched_tasks_sleeping;
+    }
+    return sum;
+}
+inline u64 SchedSumBlocked()
+{
+    u64 sum = 0;
+    const u32 limit = arch::SmpCpuIdLimit();
+    for (u32 id = 0; id < limit; ++id)
+    {
+        cpu::PerCpu* p = arch::SmpGetPercpu(id);
+        if (p != nullptr)
+            sum += p->sched_tasks_blocked;
+    }
+    return sum;
+}
+inline u64 SchedSumCreated()
+{
+    u64 sum = 0;
+    const u32 limit = arch::SmpCpuIdLimit();
+    for (u32 id = 0; id < limit; ++id)
+    {
+        cpu::PerCpu* p = arch::SmpGetPercpu(id);
+        if (p != nullptr)
+            sum += p->sched_tasks_created;
+    }
+    return sum;
+}
+inline u64 SchedSumReaped()
+{
+    u64 sum = 0;
+    const u32 limit = arch::SmpCpuIdLimit();
+    for (u32 id = 0; id < limit; ++id)
+    {
+        cpu::PerCpu* p = arch::SmpGetPercpu(id);
+        if (p != nullptr)
+            sum += p->sched_tasks_reaped;
+    }
+    return sum;
+}
 // System-wide CPU accounting. `g_total_ticks` counts every timer
 // tick since boot; `g_idle_ticks` counts the subset where the idle
 // task was on-CPU. Their ratio is the system CPU-busy fraction —
@@ -809,9 +914,12 @@ void RunqueueOrSuspendPush(Task* t)
 void SleepqueueInsert(Task* t)
 {
     t->sleep_next = nullptr;
+    t->sleep_prev = nullptr;
     if (g_sleep_head == nullptr || t->wake_tick < g_sleep_head->wake_tick)
     {
         t->sleep_next = g_sleep_head;
+        if (g_sleep_head != nullptr)
+            g_sleep_head->sleep_prev = t;
         g_sleep_head = t;
         return;
     }
@@ -822,32 +930,28 @@ void SleepqueueInsert(Task* t)
         it = it->sleep_next;
     }
     t->sleep_next = it->sleep_next;
+    t->sleep_prev = it;
+    if (it->sleep_next != nullptr)
+        it->sleep_next->sleep_prev = t;
     it->sleep_next = t;
 }
 
 // Remove a task from the sleep queue. Used when an explicit wake
-// beats the timer path for a timed waiter. Linear walk — fine for
-// the sleep queue sizes we expect; becomes a hotspot only if
-// thousands of timed waits are outstanding at once.
+// beats the timer path for a timed waiter. O(1) via the
+// sleep_prev back-pointer maintained by SleepqueueInsert; without
+// it removal was an O(n) walk to find the predecessor.
 void SleepqueueRemove(Task* t)
 {
-    if (g_sleep_head == t)
-    {
-        g_sleep_head = t->sleep_next;
-        t->sleep_next = nullptr;
-        return;
-    }
-
-    Task* it = g_sleep_head;
-    while (it != nullptr && it->sleep_next != t)
-    {
-        it = it->sleep_next;
-    }
-    if (it != nullptr)
-    {
-        it->sleep_next = t->sleep_next;
-    }
+    Task* prev = t->sleep_prev;
+    Task* next = t->sleep_next;
+    if (prev != nullptr)
+        prev->sleep_next = next;
+    else if (g_sleep_head == t)
+        g_sleep_head = next;
+    if (next != nullptr)
+        next->sleep_prev = prev;
     t->sleep_next = nullptr;
+    t->sleep_prev = nullptr;
 }
 
 // Remove a task from a specific wait queue. Used when a timeout
@@ -961,6 +1065,7 @@ void SchedInit()
     boot_task->name = "kboot";
     boot_task->next = nullptr;
     boot_task->sleep_next = nullptr;
+    boot_task->sleep_prev = nullptr;
     boot_task->waiting_on = nullptr;
     boot_task->wake_by_timeout = false;
     boot_task->priority = TaskPriority::Normal;
@@ -973,8 +1078,8 @@ void SchedInit()
     boot_task->last_cpu = cpu::CurrentCpu()->cpu_id; // BSP pin — boot task only ever runs here
 
     Current() = boot_task;
-    g_tasks_created = 1;
-    g_tasks_live = 1;
+    SchedCpuIncCreated();
+    SchedCpuIncLive();
 
     SerialWrite("[sched] online; task 0 is \"kboot\"\n");
     KLOG_INFO("sched", "online; task 0 is kboot");
@@ -1046,6 +1151,7 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     t->name = name;
     t->next = nullptr;
     t->sleep_next = nullptr;
+    t->sleep_prev = nullptr;
     t->waiting_on = nullptr;
     t->wake_by_timeout = false;
     t->priority = priority;
@@ -1111,8 +1217,8 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     {
         sync::SpinLockGuard guard(g_sched_lock);
         RunqueuePush(t);
-        ++g_tasks_created;
-        ++g_tasks_live;
+        SchedCpuIncCreated();
+        SchedCpuIncLive();
     }
 
     SerialWrite("[sched] created task id=");
@@ -1340,7 +1446,7 @@ void Schedule()
             // wake the reaper.
             prev->state = TaskState::Dead;
             ++g_tasks_exited;
-            --g_tasks_live;
+            SchedCpuDecLive();
             prev->next = g_zombies;
             g_zombies = prev;
             // Wake the reaper; it's blocked on g_reaper_wq and
@@ -1519,7 +1625,7 @@ void SchedSleepTicks(u64 ticks)
     {
         sync::SpinLockGuard guard(g_sched_lock);
         SleepqueueInsert(current);
-        ++g_tasks_sleeping;
+        SchedCpuIncSleeping();
     }
     Schedule();
     arch::Sti();
@@ -1546,7 +1652,7 @@ void SchedSleepUntil(u64 deadline_tick)
     {
         sync::SpinLockGuard guard(g_sched_lock);
         SleepqueueInsert(current);
-        ++g_tasks_sleeping;
+        SchedCpuIncSleeping();
     }
     Schedule();
     arch::Sti();
@@ -1563,7 +1669,7 @@ void SchedExit()
     arch::Cli();
     Task* self = Current();
     // SchedExit must fire exactly once per task. A second call would
-    // double-decrement g_tasks_live, double-push onto the zombie list
+    // double-decrement sched_tasks_live, double-push onto the zombie list
     // (corrupting the intrusive `next` link), and re-arm the reaper
     // on an already-reaped slot. The public contract is [[noreturn]]
     // so this should be structurally unreachable; the assert catches
@@ -1572,7 +1678,7 @@ void SchedExit()
     KASSERT(self->state != TaskState::Dead, "sched", "SchedExit called twice on same task");
     self->state = TaskState::Dead;
     ++g_tasks_exited;
-    --g_tasks_live;
+    SchedCpuDecLive();
     KBP_PROBE_V(::duetos::debug::ProbeId::kThreadExit, self->id);
 
     // Recovery Class C extension point — ring-3 process kill will grow
@@ -1695,8 +1801,11 @@ void OnTimerTick(u64 now_ticks)
         {
             Task* woken = g_sleep_head;
             g_sleep_head = woken->sleep_next;
+            if (g_sleep_head != nullptr)
+                g_sleep_head->sleep_prev = nullptr;
             woken->sleep_next = nullptr;
-            --g_tasks_sleeping;
+            woken->sleep_prev = nullptr;
+            SchedCpuDecSleeping();
 
             // If the task was on a wait queue with a timeout, the
             // timer won the race — detach from the wait queue and
@@ -1710,7 +1819,7 @@ void OnTimerTick(u64 now_ticks)
                 WaitQueueUnlink(wq, woken);
                 woken->waiting_on = nullptr;
                 woken->wake_by_timeout = true;
-                --g_tasks_blocked;
+                SchedCpuDecBlocked();
             }
 
             woken->wake_tick = 0;
@@ -2015,12 +2124,12 @@ SchedStats SchedStatsRead()
 {
     return SchedStats{
         .context_switches = g_context_switches,
-        .tasks_live = g_tasks_live,
-        .tasks_sleeping = g_tasks_sleeping,
-        .tasks_blocked = g_tasks_blocked,
-        .tasks_created = g_tasks_created,
+        .tasks_live = SchedSumLive(),
+        .tasks_sleeping = SchedSumSleeping(),
+        .tasks_blocked = SchedSumBlocked(),
+        .tasks_created = SchedSumCreated(),
         .tasks_exited = g_tasks_exited,
-        .tasks_reaped = g_tasks_reaped,
+        .tasks_reaped = SchedSumReaped(),
         .total_ticks = g_total_ticks,
         .idle_ticks = g_idle_ticks,
     };
@@ -2130,23 +2239,34 @@ bool IsProtectedTask(const Task* t)
     return false;
 }
 
-// Detach `t` from g_sleep_head (threaded by sleep_next).
-// No-op if t isn't on the list. Caller holds CLI.
+// Detach `t` from g_sleep_head. O(1) via the sleep_prev back-
+// pointer; no-op if t isn't on the list (both links nullptr).
+// Caller holds CLI.
 void SleepQueueRemove(Task* t)
 {
-    Task** pp = &g_sleep_head;
-    while (*pp != nullptr)
-    {
-        if (*pp == t)
-        {
-            *pp = t->sleep_next;
-            t->sleep_next = nullptr;
-            if (g_tasks_sleeping > 0)
-                --g_tasks_sleeping;
-            return;
-        }
-        pp = &(*pp)->sleep_next;
-    }
+    // A task on the list always has prev != nullptr OR is the
+    // head. Off-list tasks have both nullptr AND aren't the
+    // head, so this safely no-ops them.
+    if (t->sleep_prev == nullptr && g_sleep_head != t)
+        return;
+    Task* prev = t->sleep_prev;
+    Task* next = t->sleep_next;
+    if (prev != nullptr)
+        prev->sleep_next = next;
+    else
+        g_sleep_head = next;
+    if (next != nullptr)
+        next->sleep_prev = prev;
+    t->sleep_next = nullptr;
+    t->sleep_prev = nullptr;
+    // With per-CPU counters the prior "decrement only if >0" guard
+    // would need a cross-CPU sum-walk on the hot path. Drop the
+    // guard: the caller already established `t` was on the sleep
+    // queue (early-return above for off-list tasks), so the
+    // decrement is matched. Per-CPU partial sums may go transiently
+    // negative if the increment landed on a different CPU; the
+    // cross-CPU sum stays correct.
+    SchedCpuDecSleeping();
 }
 
 } // namespace
@@ -2748,9 +2868,9 @@ namespace
                 mm::FreeKernelStack(dead->stack_base, dead->stack_size);
             }
             mm::KFree(dead);
-            ++g_tasks_reaped;
+            SchedCpuIncReaped();
 
-            core::LogWithValue(core::LogLevel::Info, "sched/reaper", "reaped task id", g_tasks_reaped);
+            core::LogWithValue(core::LogLevel::Info, "sched/reaper", "reaped task id", SchedSumReaped());
         }
     }
 }
@@ -2955,7 +3075,7 @@ void WaitQueueBlock(WaitQueue* wq)
             wq->tail->next = t;
             wq->tail = t;
         }
-        ++g_tasks_blocked;
+        SchedCpuIncBlocked();
     }
 
     Schedule();
@@ -3001,14 +3121,14 @@ bool WaitQueueBlockTimeout(WaitQueue* wq, u64 ticks)
             wq->tail->next = t;
             wq->tail = t;
         }
-        ++g_tasks_blocked;
+        SchedCpuIncBlocked();
 
         // Enqueue on the sleep queue so the timer path can fire
         // if nobody wakes us first. Both lists hold the same
         // Task* — the two wake paths race, and whichever wins
         // unlinks the loser.
         SleepqueueInsert(t);
-        ++g_tasks_sleeping;
+        SchedCpuIncSleeping();
     }
 
     Schedule();
@@ -3046,14 +3166,14 @@ Task* WaitQueueWakeOneLocked(WaitQueue* wq)
     if (t->wake_tick != 0)
     {
         SleepqueueRemove(t);
-        --g_tasks_sleeping;
+        SchedCpuDecSleeping();
     }
     t->waiting_on = nullptr;
     t->wake_tick = 0;
     t->wake_by_timeout = false;
     // Suspended waiters get reparked instead of unblocked.
     RunqueueOrSuspendPush(t);
-    --g_tasks_blocked;
+    SchedCpuDecBlocked();
     return t;
 }
 
@@ -3086,10 +3206,25 @@ u64 WaitQueueWakeAll(WaitQueue* wq)
 {
     KASSERT(wq != nullptr, "sched", "WaitQueueWakeAll null queue");
 
+    // Drain the queue under a single lock acquire. The old loop
+    // called WaitQueueWakeOne per waiter, which re-took
+    // g_sched_lock N times; that's the dominant cost on a
+    // broadcast wake (CondVar broadcast, barrier release) when
+    // N is large. Setting need_resched once at the end matches
+    // the per-wake semantics since it's a per-CPU edge-trigger
+    // flag — repeated stores within one critical section are
+    // indistinguishable from one.
     u64 count = 0;
-    while (WaitQueueWakeOne(wq) != nullptr)
     {
-        ++count;
+        sync::SpinLockGuard guard(g_sched_lock);
+        while (WaitQueueWakeOneLocked(wq) != nullptr)
+        {
+            ++count;
+        }
+    }
+    if (count != 0)
+    {
+        NeedResched() = true;
     }
     return count;
 }
@@ -3299,7 +3434,7 @@ void CondvarWait(Condvar* cv, Mutex* m)
             cv->waiters.tail->next = t;
             cv->waiters.tail = t;
         }
-        ++g_tasks_blocked;
+        SchedCpuIncBlocked();
     }
 
     Schedule();
@@ -3364,10 +3499,10 @@ bool CondvarWaitTimeout(Condvar* cv, Mutex* m, u64 ticks)
             cv->waiters.tail->next = t;
             cv->waiters.tail = t;
         }
-        ++g_tasks_blocked;
+        SchedCpuIncBlocked();
 
         SleepqueueInsert(t);
-        ++g_tasks_sleeping;
+        SchedCpuIncSleeping();
     }
 
     Schedule();

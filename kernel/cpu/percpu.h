@@ -188,6 +188,23 @@ struct PerCpu
     u32 runq_normal_len;
     u8 _pad_runq_len[4];
 
+    // Per-CPU scheduler stat counters. Maintained under
+    // g_sched_lock on the CPU that does the state transition,
+    // read by SchedStats via a cross-CPU sum-walk. Splitting these
+    // off the global g_tasks_* counters removes the cache-line
+    // ping-pong that was happening every time any CPU touched the
+    // global counter line while the sched lock was held.
+    //
+    // Increments and decrements may land on different CPUs (a task
+    // created on CPU 0 might be reaped on CPU 3); per-CPU partial
+    // sums can therefore go transiently negative. The cross-CPU
+    // SUM is always non-negative and correct.
+    u64 sched_tasks_live;
+    u64 sched_tasks_sleeping;
+    u64 sched_tasks_blocked;
+    u64 sched_tasks_created;
+    u64 sched_tasks_reaped;
+
     // Everything below this line will grow as SMP matures:
     //   - per-CPU runqueue spinlock (today: shared g_sched_lock)
     //   - per-CPU heap magazine (when the heap grows per-CPU caching)

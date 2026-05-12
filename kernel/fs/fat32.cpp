@@ -44,6 +44,7 @@
 #include "log/klog.h"
 #include "sched/sched.h"
 #include "security/driver_domain.h"
+#include "util/string.h"
 
 namespace duetos::fs::fat32
 {
@@ -121,10 +122,23 @@ void VZero(void* p, u64 n)
 // through this volatile helper to keep link-time honest.
 void CopyEntry(DirEntry& dst, const DirEntry& src)
 {
-    auto* d = reinterpret_cast<volatile u8*>(&dst);
-    auto* s = reinterpret_cast<const volatile u8*>(&src);
-    for (u64 i = 0; i < sizeof(DirEntry); ++i)
-        d[i] = s[i];
+    // 8-byte chunked copy with volatile semantics preserved. The
+    // bulk word loop covers all-but-the-last-7 bytes; the byte
+    // tail picks up the rest. volatile u64 / u8 read/store keeps
+    // the compiler from coalescing or reordering even with LTO.
+    constexpr u64 kWords = sizeof(DirEntry) / 8;
+    constexpr u64 kTailBytes = sizeof(DirEntry) % 8;
+    auto* dw = reinterpret_cast<volatile u64*>(&dst);
+    const auto* sw = reinterpret_cast<const volatile u64*>(&src);
+    for (u64 i = 0; i < kWords; ++i)
+        dw[i] = sw[i];
+    if constexpr (kTailBytes != 0)
+    {
+        auto* db = reinterpret_cast<volatile u8*>(&dst) + kWords * 8;
+        const auto* sb = reinterpret_cast<const volatile u8*>(&src) + kWords * 8;
+        for (u64 i = 0; i < kTailBytes; ++i)
+            db[i] = sb[i];
+    }
 }
 
 // Little-endian readers straight off a byte buffer.
@@ -218,10 +232,7 @@ u32 ReadFatEntry(const Volume& v, u32 cluster)
     }
     const u32 cache_bytes = v.bytes_per_sector <= sizeof(g_fat_cache.data) ? v.bytes_per_sector
                                                                            : static_cast<u32>(sizeof(g_fat_cache.data));
-    for (u32 i = 0; i < cache_bytes; ++i)
-    {
-        g_fat_cache.data[i] = g_scratch[i];
-    }
+    memcpy(g_fat_cache.data, g_scratch, cache_bytes);
     g_fat_cache.block_handle = v.block_handle;
     g_fat_cache.lba = lba;
     g_fat_cache.sector_bytes = v.bytes_per_sector;

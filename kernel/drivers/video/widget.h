@@ -487,6 +487,13 @@ bool WindowPopMessageAny(u64 pid, WindowMsg* out);
 /// pump polls this, yields on false, and re-enters GetMessage.
 bool WindowAnyMessagePending(u64 pid);
 
+/// Peek (no remove) the first pending message across ANY alive
+/// window owned by `pid`. Walks the window table once with
+/// direct field accesses, fusing what was three nested public-API
+/// calls (WindowIsAlive + WindowOwnerPid + WindowPeekMessage) per
+/// iteration in the caller. Returns false if no message exists.
+bool WindowPeekMessageAny(u64 pid, WindowMsg* out);
+
 /// Close every alive window whose owner_pid matches `pid`. Called
 /// from `ProcessRelease` when the last task holding a Process
 /// drops its reference — guarantees that a ring-3 PE that exited

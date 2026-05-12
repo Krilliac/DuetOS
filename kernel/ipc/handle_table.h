@@ -58,6 +58,14 @@ struct HandleTable
 {
     HandleSlot slots[kHandleTableCapacity];
     sync::SpinLock lock;
+    /// Index to start the next insert scan from. The previous
+    /// allocation lands at slots[next_free_hint]; the next insert
+    /// starts looking at slots[next_free_hint + 1] and wraps. With
+    /// a sparsely-populated table this skips the typically-busy
+    /// prefix; with a full table behaviour is identical to a
+    /// from-zero scan. Zero-init is correct (the unused slot 0 is
+    /// reserved for kHandleInvalid, so wrap-skipping it is OK).
+    u32 next_free_hint;
 };
 
 /// Insert `obj` into the table. The table takes ownership of the

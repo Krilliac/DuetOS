@@ -12,6 +12,7 @@
 #include "debug/probes.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
+#include "mm/address_space.h"
 #include "mm/kheap.h"
 #include "util/string.h"
 #include "subsystems/win32/custom.h"

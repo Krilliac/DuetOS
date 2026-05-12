@@ -10,18 +10,65 @@
 // `-fno-builtin`. A kernel without them fails to link the
 // moment any subsystem zero-inits a ring-buffer entry.
 //
-// Implementations are deliberately minimal and byte-oriented:
-// no SSE (kernel runs `-mno-sse`), no fancy alignment tricks.
-// `memmove` handles overlap; `memcpy` aliases to it because the
-// caller-correctness guarantee is weaker than the trivial gain
-// from forbidding overlap.
+// The kernel runs `-mno-sse -mgeneral-regs-only`, so no SIMD —
+// but 64-bit integer regs (rax/rcx/...) are general-regs and
+// safe. These routines copy/fill in 64-byte unrolled chunks of
+// 8-byte stores, with a byte tail; for n < 8 they fall through
+// to a byte loop directly.
+//
+// `memcpy` forwards to `memmove` because the strict-no-overlap
+// guarantee isn't worth a duplicate body when the unrolled
+// forward path is already the common case.
 
 extern "C" void* memset(void* dst, int c, duetos::usize n)
 {
     auto* p = static_cast<duetos::u8*>(dst);
     const auto v = static_cast<duetos::u8>(c);
-    for (duetos::usize i = 0; i < n; ++i)
-        p[i] = v;
+    if (n < 8)
+    {
+        for (duetos::usize i = 0; i < n; ++i)
+            p[i] = v;
+        return dst;
+    }
+    // Build a 64-bit pattern from the byte value.
+    duetos::u64 pat = v;
+    pat |= pat << 8;
+    pat |= pat << 16;
+    pat |= pat << 32;
+    // Align destination to 8 bytes for the chunked store.
+    while ((reinterpret_cast<duetos::usize>(p) & 7u) != 0)
+    {
+        *p++ = v;
+        --n;
+    }
+    // 64-byte chunks (8x 8-byte stores).
+    while (n >= 64)
+    {
+        auto* q = reinterpret_cast<duetos::u64*>(p);
+        q[0] = pat;
+        q[1] = pat;
+        q[2] = pat;
+        q[3] = pat;
+        q[4] = pat;
+        q[5] = pat;
+        q[6] = pat;
+        q[7] = pat;
+        p += 64;
+        n -= 64;
+    }
+    // 8-byte tail.
+    while (n >= 8)
+    {
+        *reinterpret_cast<duetos::u64*>(p) = pat;
+        p += 8;
+        n -= 8;
+    }
+    // Sub-8 byte tail.
+    while (n != 0)
+    {
+        *p++ = v;
+        --n;
+    }
     return dst;
 }
 
@@ -33,11 +80,53 @@ extern "C" void* memmove(void* dst, const void* src, duetos::usize n)
         return dst;
     if (d < s)
     {
-        for (duetos::usize i = 0; i < n; ++i)
-            d[i] = s[i];
+        // Forward copy.
+        if (n < 8)
+        {
+            for (duetos::usize i = 0; i < n; ++i)
+                d[i] = s[i];
+            return dst;
+        }
+        // 64-byte unrolled chunks of 8-byte loads/stores. We
+        // don't require alignment — x86 tolerates unaligned
+        // 8-byte access at a small (cache-line-cross) cost
+        // that's still cheaper than per-byte work.
+        while (n >= 64)
+        {
+            auto* qd = reinterpret_cast<duetos::u64*>(d);
+            const auto* qs = reinterpret_cast<const duetos::u64*>(s);
+            qd[0] = qs[0];
+            qd[1] = qs[1];
+            qd[2] = qs[2];
+            qd[3] = qs[3];
+            qd[4] = qs[4];
+            qd[5] = qs[5];
+            qd[6] = qs[6];
+            qd[7] = qs[7];
+            d += 64;
+            s += 64;
+            n -= 64;
+        }
+        while (n >= 8)
+        {
+            *reinterpret_cast<duetos::u64*>(d) = *reinterpret_cast<const duetos::u64*>(s);
+            d += 8;
+            s += 8;
+            n -= 8;
+        }
+        while (n != 0)
+        {
+            *d++ = *s++;
+            --n;
+        }
     }
     else
     {
+        // Backward copy for overlap where dst is above src.
+        // Keep this branch byte-oriented — overlapping moves
+        // are rare in the kernel and bulk throughput here
+        // doesn't merit the complexity of a reverse 8-byte
+        // unroll.
         for (duetos::usize i = n; i > 0; --i)
             d[i - 1] = s[i - 1];
     }

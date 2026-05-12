@@ -392,7 +392,13 @@ bool PeExportLookupOrdinal(const PeExports& exp, u32 ordinal, PeExport& out)
     if (ordinal < exp.base_ordinal)
         return false;
     const u32 idx = ordinal - exp.base_ordinal;
-    return PeExportAt(exp, idx, out);
+    // Ordinal lookups don't need the ENT-side name attached —
+    // the only field a real import resolver uses is rva (or
+    // forwarder, populated from rva). Skip the O(num_names)
+    // ENT walk that PeExportAt does and populate directly
+    // from the EAT row. PeExportAt remains available for
+    // callers (PeExportsReport) that actually want the name.
+    return PopulateFromIndex(exp, idx, nullptr, out);
 }
 
 // 3-way compare two NUL-terminated strings. Returns <0/0/>0 in

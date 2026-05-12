@@ -60,6 +60,30 @@ inline constexpr SyscallCapEntry kSyscallCapTable[] = {
 
 inline constexpr u32 kSyscallCapTableCount = sizeof(kSyscallCapTable) / sizeof(kSyscallCapTable[0]);
 
+// Compile-time min/max syscall numbers in the cap table. RequiredCapMask
+// uses these for a range-bail before the linear scan: most syscall
+// numbers are NOT in this table (handlers handle their own auth), so a
+// single compare lets us return 0 without walking 24 rows. Computed via
+// constexpr fold over the table so adding rows updates them automatically.
+inline constexpr u64 SyscallCapTableMin()
+{
+    u64 m = kSyscallCapTable[0].nr;
+    for (u32 i = 1; i < kSyscallCapTableCount; ++i)
+        if (kSyscallCapTable[i].nr < m)
+            m = kSyscallCapTable[i].nr;
+    return m;
+}
+inline constexpr u64 SyscallCapTableMax()
+{
+    u64 m = kSyscallCapTable[0].nr;
+    for (u32 i = 1; i < kSyscallCapTableCount; ++i)
+        if (kSyscallCapTable[i].nr > m)
+            m = kSyscallCapTable[i].nr;
+    return m;
+}
+inline constexpr u64 kSyscallCapTableMin = SyscallCapTableMin();
+inline constexpr u64 kSyscallCapTableMax = SyscallCapTableMax();
+
 /// Look up the static cap mask for a syscall number. Returns 0 for
 /// any number not present in the table — that's the "handler
 /// enforces" signal, not an error. Linear scan; the table has

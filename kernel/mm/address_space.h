@@ -144,6 +144,18 @@ struct AddressSpace
     u16 region_count;
     AddressSpaceUserRegion regions[kMaxUserVmRegionsPerAs];
 
+    // Bitmask of CPU ids that currently have THIS AS loaded in CR3.
+    // Bit (1u << cpu_id) is set by AddressSpaceActivate when a CPU
+    // switches in, cleared when the same CPU switches to a different
+    // AS. The TLB shootdown broadcast consults this mask and only
+    // IPIs CPUs whose bit is set, avoiding wake-ups on peers that
+    // have no cached TLB entries for the target AS. Updates use
+    // atomic OR/AND so concurrent activates from different CPUs
+    // compose. u32 covers the kMaxCpus=32 cap (acpi/acpi.h); growing
+    // past that needs a wider mask.
+    volatile u32 active_cpu_mask;
+    u8 _pad_acm[4];
+
     // RwLock for concurrent access to `regions[]` + `region_count`
     // (plan B1-followup, 2026-04-28). Today every AS is owned by a
     // single Task — there's no real concurrency on this table, so

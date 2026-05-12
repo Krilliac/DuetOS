@@ -253,12 +253,20 @@ if(DUETOS_KASAN)
     add_compile_definitions(DUETOS_KASAN=1)
 endif()
 
-# Link-time optimization. Off by default in debug (longer link time
-# obscures debug iteration). When enabled by a preset, kernel/CMakeLists.txt
-# applies ThinLTO flags to both kernel link stages.
+# Link-time optimization. Defaults ON for Release (cross-TU inlining
+# of klog/cap-gate hot paths visibly speeds the steady-state kernel)
+# and OFF for Debug (long link times obscure debug iteration; LTO
+# also reorders code, which makes triple-fault chases harder). When
+# enabled, kernel/CMakeLists.txt applies ThinLTO flags to both
+# kernel link stages.
+if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+    set(_duetos_lto_default ON)
+else()
+    set(_duetos_lto_default OFF)
+endif()
 option(DUETOS_LTO
     "Enable link-time optimization for kernel image"
-    OFF)
+    ${_duetos_lto_default})
 if(DUETOS_LTO)
     add_compile_definitions(DUETOS_LTO=1)
 endif()

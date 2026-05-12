@@ -1,12 +1,25 @@
 #pragma once
 
 #include "fs/fat32.h"
-#include "fs/ramfs.h"
 #include "ipc/handle_table.h"
 #include "loader/dll_loader.h"
-#include "mm/address_space.h"
 #include "sched/sched.h"
 #include "util/types.h"
+
+// AddressSpace and RamfsNode are used in this header only via
+// pointer fields and pointer-typed function signatures. Forward-
+// declaring them lets the 80+ TUs that include proc/process.h
+// skip the transitive parse of the full mm/ and fs/ headers; TUs
+// that touch the actual struct members include the relevant
+// header directly.
+namespace duetos::mm
+{
+struct AddressSpace;
+}
+namespace duetos::fs
+{
+struct RamfsNode;
+}
 
 /*
  * DuetOS process + capability model — v0.

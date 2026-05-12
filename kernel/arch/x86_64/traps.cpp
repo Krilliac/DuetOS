@@ -49,6 +49,7 @@
 #include "util/saturating.h"
 #include "util/symbols.h"
 #include "syscall/syscall.h"
+#include "acpi/acpi.h"
 #include "cpu/percpu.h"
 #include "debug/breakpoints.h"
 #include "debug/extable.h"
@@ -93,18 +94,22 @@ constexpr duetos::u8* g_copy_user_fault_fixup = ::__copy_user_fault_fixup;
 // action.
 constinit IrqHandler g_irq_handlers[256] = {};
 
-// Per-vector cumulative handler-invocation count. Read by the
-// runtime checker's IRQ-storm detector via IrqCountForVector.
-// Written only from the IRQ dispatch path on the CPU serving the
-// interrupt — interrupts are masked during handler dispatch so
-// no intra-vector race is possible; cross-vector increments
-// through this table are independent slots.
-// Saturating: an attacker who can drive an IRQ vector (e.g. via a
-// device that floods completion interrupts) cannot wrap a counter
-// and confuse the runtime checker's IRQ-storm detector. Saturation
-// preserves "the counter never gets smaller," which is the property
-// the detector relies on. wiki/security/Linux-CVE-Audit.md class BB.
-constinit util::SatU64 g_irq_counts[256] = {};
+// Per-vector cumulative handler-invocation count. Stored per-CPU
+// so the IRQ dispatch path (which fires hundreds of times per
+// second per CPU on the timer alone) doesn't bounce a single
+// cache line between cores. Each CPU writes only its own row;
+// IrqCountForVector sums across CPUs for the read side.
+//
+// Plain u64 rather than SatU64 inside the per-CPU array: the
+// write is a single-CPU operation under IF=0, so the saturating
+// SatLogClamp warning at u64-max would fire on a wrap that takes
+// thousands of years of continuous IRQ traffic to reach. The
+// sum-walk on read still respects each row's monotonicity.
+//
+// Memory cost: kMaxCpus * 256 * 8 = 64 KiB of static. Acceptable
+// for a kernel-static; no per-PerCpu growth (PerCpu cache-line
+// footprint matters for the IPI/wake hot path).
+constinit u64 g_irq_counts_per_cpu[acpi::kMaxCpus][256] = {};
 
 // Global fault counters by category. Bumped on every CPU
 // exception dump (user-mode task-kill or kernel panic). Read
@@ -469,7 +474,12 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     if (IsDispatchedVector(frame->vector))
     {
         const u8 v = static_cast<u8>(frame->vector);
-        ++g_irq_counts[v];
+        cpu::PerCpu* pc = cpu::CurrentCpu();
+        const u32 cpu_id = (pc != nullptr) ? pc->cpu_id : 0u;
+        if (cpu_id < acpi::kMaxCpus)
+        {
+            ++g_irq_counts_per_cpu[cpu_id][v];
+        }
         const IrqHandler h = g_irq_handlers[v];
         if (h != nullptr)
         {
@@ -1138,7 +1148,17 @@ extern "C" void TrapDispatch(TrapFrame* frame)
 
 u64 IrqCountForVector(u8 v)
 {
-    return g_irq_counts[v];
+    // Sum per-CPU rows for this vector. Each CPU's row is written
+    // only by itself with IF=0, so the per-row read is consistent.
+    // The total may transiently miss an in-flight increment on
+    // another CPU; the runtime checker's storm detector tolerates
+    // that (it samples deltas across two reads).
+    u64 sum = 0;
+    for (u32 cpu = 0; cpu < acpi::kMaxCpus; ++cpu)
+    {
+        sum += g_irq_counts_per_cpu[cpu][v];
+    }
+    return sum;
 }
 
 FaultCounts FaultCountsSnapshot()
