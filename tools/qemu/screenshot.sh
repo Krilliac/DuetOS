@@ -83,16 +83,29 @@ QEMU_PID=$!
 # Ensure QEMU is cleaned up on any exit.
 trap 'kill "${QEMU_PID}" 2>/dev/null || true; rm -f "${MON_SOCK}"' EXIT
 
-# If DUETOS_DEMO=1, drive GRUB via the monitor DURING its 3-
-# second timeout window: arrow-down past "Desktop" + "TTY" entries
-# to land on "Desktop (demo widgets)", then enter. Must happen
-# before GRUB auto-selects the default.
-if [[ "${DUETOS_DEMO:-0}" == "1" ]]; then
+# If DUETOS_DEMO=1, drive GRUB via the monitor DURING its
+# countdown window: arrow-down past "Desktop" + "TTY" entries to
+# land on "Desktop (demo widgets)" (entry 3), then enter. Must
+# happen before GRUB auto-selects the default.
+#
+# DUETOS_GRUB_ENTRY=<N> generalises this to any entry index in
+# boot/grub/grub.cfg — useful for the autologin variants
+# (entries 5/6 for Classic/Slate10 autologin, 10/11 for Duet
+# Amber/Duet autologin) so the screenshot harness captures a
+# composed desktop instead of the login gate.
+GRUB_NAV=""
+if [[ -n "${DUETOS_GRUB_ENTRY:-}" ]]; then
+    GRUB_NAV="${DUETOS_GRUB_ENTRY}"
+elif [[ "${DUETOS_DEMO:-0}" == "1" ]]; then
+    GRUB_NAV="3"
+fi
+if [[ -n "${GRUB_NAV}" ]]; then
     (
         sleep 1  # let QEMU come up + monitor socket appear
-        python3 - <<'PY' "${MON_SOCK}"
+        python3 - <<'PY' "${MON_SOCK}" "${GRUB_NAV}"
 import socket, sys, time
-p = sys.argv[1]
+p, n_str = sys.argv[1], sys.argv[2]
+n = int(n_str)
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 for _ in range(30):
     try:
@@ -101,8 +114,8 @@ for _ in range(30):
         time.sleep(0.2)
 def send(cmd):
     s.sendall((cmd + "\n").encode()); time.sleep(0.2)
-send("sendkey down")
-send("sendkey down")
+for _ in range(n):
+    send("sendkey down")
 send("sendkey ret")
 s.close()
 PY
@@ -110,16 +123,27 @@ PY
 fi
 
 # Poll the serial log for a marker that means "desktop is composed
-# and the scheduler is running". kheartbeat fires periodically; once
-# we see one line, the compositor has painted at least once.
+# and the scheduler is running". `bringup-complete` fires once all
+# subsystems including the compositor have come online, BEFORE the
+# ring-3 PE smoke spawns that can add tens of seconds of guest time
+# on a TCG-emulated host. The desktop is already painting at this
+# point, so the screendump captures a representative frame without
+# waiting on the smoke tail.
+#
+# Historical: this was `kheartbeat`, which fires from a scheduler
+# thread that only starts AFTER the full ring-3 spawn chain has
+# settled — on a TCG host with no /dev/kvm that pushed the marker
+# past the default poll timeout. `bringup-complete` is the earliest
+# marker that guarantees the compositor has composed.
+readonly BOOT_MARKER="${DUETOS_BOOT_MARKER:-bringup-complete}"
 for _ in $(seq 1 "${DUETOS_BOOT_WAIT_SECS:-60}"); do
-    if [[ -f "${SERIAL_LOG}" ]] && grep -q "kheartbeat" "${SERIAL_LOG}"; then
+    if [[ -f "${SERIAL_LOG}" ]] && grep -q "${BOOT_MARKER}" "${SERIAL_LOG}"; then
         break
     fi
     sleep 1
 done
-if ! grep -q "kheartbeat" "${SERIAL_LOG}" 2>/dev/null; then
-    echo "error: kheartbeat marker never appeared in ${SERIAL_LOG}" >&2
+if ! grep -q "${BOOT_MARKER}" "${SERIAL_LOG}" 2>/dev/null; then
+    echo "error: '${BOOT_MARKER}' marker never appeared in ${SERIAL_LOG}" >&2
     tail -40 "${SERIAL_LOG}" >&2 || true
     exit 1
 fi

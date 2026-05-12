@@ -702,12 +702,11 @@ void WindowDraw(const WindowChrome& w)
         }
     }
 
-    // Soft drop shadow on the right + bottom edges. Makes the
-    // active window read as raised relative to the desktop and
-    // recedes the inactive ones into the surface — a small
-    // chrome polish that costs ~depth × (w + h) alpha-blended
-    // pixels per window.
-    FramebufferDropShadow(w.x, w.y, w.w, w.h, 4, 0x60);
+    // Drop shadow is painted by WindowDrawAllOrdered with depth +
+    // alpha tuned for the active vs inactive state. Centralising it
+    // there means every WindowDraw caller (currently only
+    // WindowDrawAllOrdered) gets focus-aware depth without having
+    // to thread an is_active flag down through the chrome paint.
 }
 
 namespace
@@ -1472,6 +1471,19 @@ void WindowDrawAllOrdered()
         {
             drawn.colour_title = kInactiveTitleRgb;
         }
+        // Focus-aware drop shadow. Painted BEFORE the chrome so the
+        // window covers the inner shadow bands; only the right +
+        // bottom fringe shows. The active window gets a deeper /
+        // stronger cast (6-px / α 0x88) so it visibly hovers above
+        // the desktop in the macOS / Win11 idiom; inactive windows
+        // get a shallow / faint cast (2-px / α 0x30) so they recede
+        // into the surface. Single-window scenes still get the
+        // active treatment regardless of the focus state — there's
+        // nothing else competing for the eye.
+        const bool only_window = (g_window_count == 1);
+        const u32 shadow_depth = (is_active || only_window) ? 6U : 2U;
+        const u8 shadow_alpha = (is_active || only_window) ? 0x88U : 0x30U;
+        FramebufferDropShadow(drawn.x, drawn.y, drawn.w, drawn.h, shadow_depth, shadow_alpha);
         WindowDraw(drawn);
         // Rounded-corner approximation for the Duet theme. The
         // chrome itself is painted as a rectangle; we then

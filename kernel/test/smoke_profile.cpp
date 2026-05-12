@@ -16,6 +16,17 @@ namespace
 SmokeProfile g_profile = SmokeProfile::None;
 bool g_initialised = false;
 
+// True if the boot cmdline carried `boot=desktop` — i.e. the user
+// asked for the interactive GUI, not a smoke or TTY profile.
+// Under an emulator we use this to gate off the Ring3 / PE smoke
+// spawns that would otherwise add tens of seconds of TCG-emulated
+// guest time before the desktop becomes interactive. Bare metal
+// keeps the full coverage; explicit `smoke=<profile>` keeps the
+// full coverage. `pe-smokes=1` on the cmdline opts the desktop
+// boot back IN to running the smokes (debug / regression workflow).
+bool g_desktop_boot = false;
+bool g_force_pe_smokes = false;
+
 /// Match a `key=value` token in `cmdline`. Same semantics as
 /// kernel/core/main.cpp's CmdlineMatches but the result is the
 /// matched value's first character so we can dispatch by string.
@@ -122,6 +133,30 @@ SmokeProfile SmokeProfileInit(const char* cmdline)
     g_initialised = true;
     g_profile = SmokeProfile::None;
 
+    // Detect `boot=desktop` and the `pe-smokes=1` opt-back-in,
+    // independent of the smoke profile. The intent is "if the user
+    // asked for an interactive GUI under an emulator, prioritise
+    // time-to-interactive over running the regression smokes that
+    // a CI job would normally invoke via smoke=<profile>".
+    const char* boot_val = CmdlineFindValue(cmdline, "boot");
+    if (boot_val != nullptr)
+    {
+        const char* end = boot_val;
+        while (*end != '\0' && *end != ' ' && *end != '\t')
+        {
+            ++end;
+        }
+        if (TokenMatches(boot_val, end, "desktop"))
+        {
+            g_desktop_boot = true;
+        }
+    }
+    const char* pe_val = CmdlineFindValue(cmdline, "pe-smokes");
+    if (pe_val != nullptr && pe_val[0] == '1')
+    {
+        g_force_pe_smokes = true;
+    }
+
     const char* value = CmdlineFindValue(cmdline, "smoke");
     if (value == nullptr)
     {
@@ -216,13 +251,22 @@ bool SmokeProfileShouldSpawn(SmokeTarget target)
         // (thread-stress, syscall-stress, customdll-test, reg-fopen-test)
         // are MMIO-emulation-heavy and slow boot to a crawl. Skip them
         // there; bare metal still runs everything.
+        //
+        // Additional gate: if `boot=desktop` was passed under an
+        // emulator and the user did NOT opt back in via `pe-smokes=1`,
+        // skip the four PE/Ring3 smokes too. The desktop boot is for
+        // interactive use; the smokes would add ~30 s of TCG-emulated
+        // guest time (= many minutes of wall time) before the user
+        // can actually click anything. CI invokes the smokes through
+        // explicit `smoke=<profile>` and is unaffected.
+        const bool interactive_emu_boot = duetos::arch::IsEmulator() && g_desktop_boot && !g_force_pe_smokes;
         switch (target)
         {
         case SmokeTarget::Ring3:
         case SmokeTarget::PeHello:
         case SmokeTarget::PeWinapi:
         case SmokeTarget::PeWinkill:
-            return true;
+            return !interactive_emu_boot;
         case SmokeTarget::PeOther:
         case SmokeTarget::Linux:
             return !duetos::arch::IsEmulator();

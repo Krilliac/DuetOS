@@ -324,12 +324,29 @@ void TaskbarRedraw()
         // chrome active/inactive distinction. Rounded fill +
         // outline match the START button so the tray reads as
         // a coherent set of affordances rather than mismatched
-        // styles.
+        // styles. Active tabs get a vertical gradient — same
+        // "lifted top" idiom as the window chrome — so the focused
+        // tab visibly pops out of the strip; inactive tabs stay
+        // flat to recede into the surface.
         const u32 tab_bg = is_active ? g_accent : g_tab_inactive;
         constexpr u32 tab_radius = 3;
         const u32 tab_h_eff = g_h - 8;
-        FramebufferFillRoundRect(tab_x, g_y + 4, tab_w, tab_h_eff, tab_radius, tab_bg);
+        if (is_active)
+        {
+            FramebufferFillRectGradient(tab_x, g_y + 4, tab_w, tab_h_eff, LightenRgb(g_accent, 32), g_accent);
+        }
+        else
+        {
+            FramebufferFillRoundRect(tab_x, g_y + 4, tab_w, tab_h_eff, tab_radius, tab_bg);
+        }
         FramebufferDrawRoundRect(tab_x, g_y + 4, tab_w, tab_h_eff, tab_radius, g_border);
+        // 1-px highlight ridge across the top edge of the active
+        // tab. Matches the window-chrome highlight band so the
+        // tab reads as a small piece of chrome lifted off the strip.
+        if (is_active && tab_w > 2 * tab_radius)
+        {
+            FramebufferFillRect(tab_x + tab_radius, g_y + 5, tab_w - 2 * tab_radius, 1, LightenRgb(g_accent, 56));
+        }
         // Focus dot under the active tab. Per the spec the dot
         // is 14 px wide for running-but-not-pinned active apps
         // and 8 px wide for pinned-and-active apps — the size

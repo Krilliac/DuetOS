@@ -71,15 +71,25 @@ void TimerHandler()
     {
         core::LogWithValue(core::LogLevel::Debug, "arch/timer", "tick", g_ticks);
     }
-    // ALSO emit an unfiltered direct-serial heartbeat at 1 Hz so a
-    // CI failure log shows whether the timer kept firing during a
+    // ALSO emit an unfiltered direct-serial heartbeat so a CI
+    // failure log shows whether the timer kept firing during a
     // wedge. The kheartbeat scheduler thread depends on the
     // scheduler being healthy; this depends only on timer IRQs
     // being delivered. If the smoke task hangs but [tick-irq]
     // keeps printing, the timer is alive and the wedge is in
     // task wakeup. If [tick-irq] also stops, IRQs themselves
     // were disabled or the LAPIC stopped.
-    if ((g_ticks % kTickFrequencyHz) == 0)
+    //
+    // Period is 5 s rather than 1 s. The UART is the dominant
+    // slow path under QEMU TCG (~50 us per character), and 30+
+    // bytes/second of heartbeat-only traffic measurably extends
+    // boot. 5 s still resolves a wedge well within any
+    // human-noticed timeout, and matches the kheartbeat thread's
+    // own 5 s cadence so the two complementary signals interleave
+    // predictably. Real-hardware boots aren't UART-bound so the
+    // lower cadence costs them nothing.
+    constexpr u64 kRawHeartbeatPeriodTicks = 5U * kTickFrequencyHz;
+    if ((g_ticks % kRawHeartbeatPeriodTicks) == 0)
     {
         SerialWrite("[tick-irq] g_ticks=");
         SerialWriteHex(g_ticks);
