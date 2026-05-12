@@ -665,53 +665,40 @@ DuetFS slice (trigger #1 — on-disk filesystem parsing). See
 pinned in `/rust-toolchain.toml`; CMake builds drive cargo through
 each crate's leaf `CMakeLists.txt`.
 
-Seven production Rust subsystems are live: USB HID report-descriptor
+Thirteen production Rust subsystems are live: USB HID report-descriptor
 parsing (`kernel/drivers/usb/hid_rust/`), USB class configuration
 parsing (`kernel/drivers/usb/class_rust/`), DHCPv4 + DNSv1 + TCP-options
 walkers (`kernel/net/parsers_rust/`), USB MSC SCSI response parsers
 (`kernel/drivers/usb/msc_scsi_rust/`), PNG / BMP / TGA header
-validators (`kernel/util/img_meta_rust/`), and ELF64 / PE-image
-validators (`kernel/loader/exec_meta_rust/`). All seven have current
-C++ callers; the canonical inventory lives at
+validators (`kernel/util/img_meta_rust/`), ELF64 / PE-image
+validators (`kernel/loader/exec_meta_rust/`), NTFS metadata walker
+(`kernel/fs/ntfs_rust/`), exFAT metadata walker
+(`kernel/fs/exfat_rust/`), ext4 metadata walker
+(`kernel/fs/ext4_rust/`), ACPI table walker (`kernel/acpi/acpi_rust/`),
+IEEE 802.11 management-frame walker (`kernel/net/wifi80211_rust/`),
+and Bluetooth HCI walker (`kernel/net/hci_rust/`). All thirteen
+have current C++ callers; the canonical inventory lives at
 [`wiki/tooling/Rust-Subsystems.md`](../tooling/Rust-Subsystems.md).
 
-Six **skeleton crates** also land, each scoped to a single attack-
-surface byte-walker that DuetOS doesn't have a C++ consumer for yet
-but plausibly will:
-
-| Crate | Initial scope | Adoption trigger |
-| --- | --- | --- |
-| `duetos_ntfs` | NTFS boot-sector signature + BPB sanity | Read-only NTFS driver lands |
-| `duetos_exfat` | exFAT VBR signature + cluster layout | Read-only exFAT driver lands |
-| `duetos_ext4` | ext4 superblock magic + headline fields | Read-only ext4 driver lands |
-| `duetos_acpi` | RSDP v1/v2 + ACPI table-header walker | A C++ caller adopts the FFI for new-table parsing |
-| `duetos_wifi80211` | 802.11 frame-control + 3-addr header | MLME state machine adopts the FFI |
-| `duetos_hci` | Bluetooth HCI event packet header | A driver under `kernel/net/bluetooth/` adopts the FFI |
-
-Skeleton crates ship a real magic-number check + hosted unit tests
-+ a hand-written FFI header so adopting them is a bytes-walker
-fill-in, not a "bootstrap a crate from scratch" yak-shave.
-See [`wiki/tooling/Rust-Subsystems.md`](../tooling/Rust-Subsystems.md)
-"Skeleton crates" for the full scope per crate.
+The six skeleton crates seeded in the 2026-05-12 slice (NTFS,
+exFAT, ext4, ACPI, 802.11, HCI) have all been **lifted to
+production** in a subsequent slice: each crate grew the next
+layer of parsers and a real C++ caller now goes through its FFI.
 
 The Rust-bring-up checklist is **closed out**. Future Rust work happens
-through one of three channels:
+through one of two channels:
 
-1. **A skeleton crate gets adopted by a real C++ driver.** The crate
-   expands its FFI surface as the driver consumes deeper layers
-   (e.g. `duetos_ntfs` grows an MFT walker the moment an NTFS driver
-   lands at `kernel/fs/ntfs.cpp`).
-2. **Existing production crates grow to cover their successor surface**
+1. **Existing production crates grow to cover their successor surface**
    — `msc_scsi_rust` adds REQUEST SENSE when the bulk-transport
    CBW-stall recovery path lands; `exec_meta_rust` absorbs the rest
    of the PE data-directory walk when the C++ `ParseHeaders` state
-   machine gets split up.
-3. **New crates land per the contract in
+   machine gets split up; `duetos_ntfs` grows an INDX entry walker
+   when a directory-enumeration slice lands.
+2. **New crates land per the contract in
    [`wiki/tooling/Rust-Subsystems.md`](../tooling/Rust-Subsystems.md)**
    — one crate per subsystem, narrow C FFI, no Rust in the middle of
    a C++ call chain. New crates land **with** their first real C++
-   caller (the skeleton-crate carve-out is a one-time foundation
-   pass, not a recurring pattern).
+   caller.
 
 **Not** triggers (unchanged):
 

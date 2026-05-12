@@ -4,11 +4,11 @@
 >
 > **Execution context:** Kernel build tooling and kernel-linked Rust crates.
 >
-> **Maturity:** Stable foundation; seven production Rust subsystems plus six **skeleton** crates seeded for future C++ callers.
+> **Maturity:** Stable foundation; thirteen production Rust subsystems live in the kernel tree.
 >
-> Production: DuetFS, USB HID, USB class config, DHCP / DNS / TCP-options byte-walkers, USB MSC SCSI responses, PNG / BMP / TGA header validators, and ELF / PE-image validators.
+> Production: DuetFS, USB HID, USB class config, DHCP / DNS / TCP-options byte-walkers, USB MSC SCSI responses, PNG / BMP / TGA header validators, ELF / PE-image validators, NTFS metadata walker, exFAT metadata walker, ext4 metadata walker, ACPI table walker, IEEE 802.11 management-frame walker, and Bluetooth HCI walker.
 >
-> Skeleton (no current C++ caller — see "Skeleton crates" §): `ntfs_rust`, `exfat_rust`, `ext4_rust`, `acpi_rust`, `wifi80211_rust`, `hci_rust`. Each ships a magic-number / signature check + hosted unit tests + a hand-written FFI header so a future caller can adopt the bytes-walker layer with zero scaffolding work.
+> All thirteen crates have a current C++ caller; there are no skeleton crates left in this slice.
 
 ## Overview
 
@@ -99,45 +99,41 @@ The repository now has one shared Rust foundation **and actual Rust subsystem co
   the data-directory walks) delegate to this crate; the C++ side keeps
   data-directory checks, address-space mapping, capability checks, and
   process creation.
+- `/kernel/fs/ntfs_rust/` (`duetos_ntfs`) parses NTFS boot sectors,
+  MFT record headers, resident `$FILE_NAME` attributes, and runlist
+  (mapping-pairs) entries. `kernel/fs/ntfs.cpp` delegates byte
+  parsing to this crate; UTF-16 → ASCII translation stays in C++.
+- `/kernel/fs/exfat_rust/` (`duetos_exfat`) parses exFAT VBRs,
+  derives cluster geometry, walks the FAT chain (4-byte LE per
+  cluster), and decodes dirent sets (File 0x85 + Stream-Extension
+  0xC0 + FileName 0xC1 tuples). `kernel/fs/exfat.cpp` delegates
+  byte parsing to this crate.
+- `/kernel/fs/ext4_rust/` (`duetos_ext4`) parses ext2/3/4
+  superblocks, group descriptors, inode records, extent headers,
+  extent leaves / index nodes, and linux_dirent records.
+  `kernel/fs/ext4.cpp` delegates byte parsing to this crate;
+  block I/O, scratch management, and the depth>0 extent-tree DFS
+  stay in C++.
+- `/kernel/acpi/acpi_rust/` (`duetos_acpi`) parses RSDP v1 / v2,
+  ACPI table headers, MADT entry headers, FADT body fields, MCFG
+  entries, HPET descriptors, and SRAT memory-affinity entries.
+  `kernel/acpi/acpi.cpp::AcpiInit` delegates the RSDP
+  signature + checksum validation to the crate; `ParseFadt`
+  cross-validates its packed-struct overlay against the Rust
+  decoder.
+- `/kernel/net/wifi80211_rust/` (`duetos_wifi80211`) parses 802.11
+  frame headers, Beacon / Probe Response body prefixes, the IE
+  (Information Element) list, and EAPOL-Key (4-way handshake)
+  descriptors. `kernel/net/wireless/beacon.cpp::BeaconParse`
+  delegates the frame header, body, and IE walks to the crate.
+- `/kernel/net/hci_rust/` (`duetos_hci`) parses Bluetooth HCI
+  event packets and the Command Complete, Command Status,
+  Disconnection Complete, LE Meta, Read_Local_Version, and
+  Read_BD_ADDR bodies. `kernel/net/bluetooth/hci.cpp` delegates
+  the Read_Local_Version + Read_BD_ADDR rparam decoders to the
+  crate.
 - `/cmake/DuetOSRust.cmake` exposes `duetos_add_rust_staticlib(...)`, used by
   `/kernel/rust/CMakeLists.txt` to build the aggregate Rust link unit.
-
-## Skeleton crates
-
-Six crates land in this slice as **scaffolded foundations** for future
-attack-surface coverage. Each ships:
-
-- a `Cargo.toml` with workspace lints inherited;
-- a `src/lib.rs` containing one or two real magic-number / signature
-  checks plus hosted unit tests for them;
-- a hand-written C FFI header in `include/`;
-- workspace + aggregate-staticlib + CMake wiring identical to the
-  production crates;
-- documented status in the crate's `Cargo.toml` header (`Status:
-  SKELETON`) so a future contributor sees the scope at a glance.
-
-There is intentionally **no C++ caller** for any skeleton crate. The
-goal is to make adoption a bytes-walker fill-in, not a "set up the
-crate, the FFI, the build, the tests, the workspace" yak-shave. When
-a real driver lands, it just calls the existing `duetos_*` FFI and
-the skeleton expands into a production parser.
-
-| Crate | Path | Initial scope | Trigger that flips it to production |
-| --- | --- | --- | --- |
-| `duetos_ntfs` | `kernel/fs/ntfs_rust/` | NTFS boot-sector signature + BPB sanity | Read-only NTFS driver under `kernel/fs/ntfs.cpp` lands |
-| `duetos_exfat` | `kernel/fs/exfat_rust/` | exFAT VBR signature + cluster layout | Read-only exFAT driver lands |
-| `duetos_ext4` | `kernel/fs/ext4_rust/` | ext4 superblock magic + headline fields | Read-only ext4 driver lands |
-| `duetos_acpi` | `kernel/acpi/acpi_rust/` | RSDP v1 / v2 + ACPI table-header walker | A C++ caller in `kernel/acpi/` adopts the FFI for new-table parsing |
-| `duetos_wifi80211` | `kernel/net/wifi80211_rust/` | 802.11 frame-control byte + 3-addr header | MLME state machine in `kernel/net/wireless/` adopts the FFI |
-| `duetos_hci` | `kernel/net/hci_rust/` | HCI event packet header (type + code + length) | Bluetooth driver under `kernel/net/bluetooth/` adopts the FFI |
-
-Skeleton crates carry the same FFI discipline as the production crates:
-no `unsafe` outside the FFI wall, slice traversal only, every public
-extern fn delegates raw-pointer derefs to a named helper. Lifting any
-skeleton to production is a slice that adds the next layer of parsers
-(MFT walker, FAT chain decoder, inode table reader, FADT/MADT body
-parser, IE-list walker, Command Complete body decoder, …) without
-needing to re-bootstrap the FFI.
 
 ## Lint + format policy
 

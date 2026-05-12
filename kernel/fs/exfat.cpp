@@ -1,8 +1,19 @@
+/*
+ * DuetOS — exFAT driver, v0 probe + root-directory walk.
+ *
+ * Byte-parsing lives in Rust (`kernel/fs/exfat_rust`): boot-sector
+ * probe, geometry derivation, FAT chain walker, and dirent-set
+ * decoder. This C++ TU owns block I/O, scratch buffers, the
+ * per-volume registry, logging, and the UTF-16 → ASCII glyph
+ * filter.
+ */
+
 #include "fs/exfat.h"
 
 #include "arch/x86_64/serial.h"
-#include "log/klog.h"
 #include "drivers/storage/block.h"
+#include "fs/exfat_rust/include/exfat_rust.h"
+#include "log/klog.h"
 #include "util/unicode.h"
 
 namespace duetos::fs::exfat
@@ -16,15 +27,10 @@ u32 g_volume_count = 0;
 
 // Scratch buffers. 4 KiB covers 8×512-byte sectors or 1×4 KiB
 // sector; one cluster at minimum spc_shift=0 still fits 128 dir
-// entries which is plenty for our per-volume cap. BlockDeviceRead
-// needs a direct-map destination, so stack buffers won't do.
+// entries.
 alignas(16) constinit u8 g_scratch[512] = {};
 alignas(16) constinit u8 g_dir_scratch[4096] = {};
 
-// Freestanding kernel — no libc memset. A whole-struct `= {}` on
-// Volume (which includes kMaxDirEntries × 144-byte DirEntry array)
-// would emit a memset call the link can't resolve. This helper
-// keeps every zero-init explicit.
 void ByteZero(void* dst, u64 n)
 {
     auto* d = static_cast<volatile u8*>(dst);
@@ -32,112 +38,23 @@ void ByteZero(void* dst, u64 n)
         d[i] = 0;
 }
 
-// exFAT boot-sector offsets (per Microsoft's exFAT file system spec).
-constexpr u64 kOffFileSystemName = 0x03; // "EXFAT   " (8 bytes)
-constexpr u64 kOffPartitionOffset = 0x40;
-constexpr u64 kOffVolumeLength = 0x48;
-constexpr u64 kOffFatOffset = 0x50;
-constexpr u64 kOffClusterHeapOffset = 0x58;
-constexpr u64 kOffClusterCount = 0x5C;
-constexpr u64 kOffFirstClusterOfRoot = 0x60;
-constexpr u64 kOffBytesPerSectorShift = 0x6C;
-constexpr u64 kOffSectorsPerClusterShift = 0x6D;
-constexpr u64 kOffBootSig = 0x1FE;
-
-// Directory-entry offsets (per the exFAT spec, §7).
-constexpr u64 kFileEntryAttributes = 0x04;
-constexpr u64 kStreamEntryNameLength = 0x03;
-constexpr u64 kStreamEntryValidDataLen = 0x08;
-constexpr u64 kStreamEntryFirstCluster = 0x14;
-constexpr u64 kStreamEntryDataLength = 0x18;
-
-inline u16 LeU16(const u8* p)
+// Decode the UTF-16 name span the Rust dirent walker returned into
+// the caller's ASCII buffer using the project's safe-glyph filter.
+void DecodeDirentName(const u8* buf, const DuetosExfatDirEntry& src, char* out_name, u64 out_cap)
 {
-    return u16(p[0]) | (u16(p[1]) << 8);
-}
-inline u32 LeU32(const u8* p)
-{
-    return u32(p[0]) | (u32(p[1]) << 8) | (u32(p[2]) << 16) | (u32(p[3]) << 24);
-}
-inline u64 LeU64(const u8* p)
-{
-    u64 r = 0;
-    for (u64 i = 0; i < 8; ++i)
-        r |= u64(p[i]) << (i * 8);
-    return r;
-}
-
-bool MatchesFsName(const u8* sect)
-{
-    const u8 ref[8] = {'E', 'X', 'F', 'A', 'T', ' ', ' ', ' '};
-    for (u64 i = 0; i < 8; ++i)
+    u64 write_pos = 0;
+    for (u8 u = 0; u < src.name_units; ++u)
     {
-        if (sect[kOffFileSystemName + i] != ref[i])
-            return false;
+        const u64 byte_off = static_cast<u64>(src.name_offset) + static_cast<u64>(u) * 2;
+        const u16 cp = static_cast<u16>(buf[byte_off]) | (static_cast<u16>(buf[byte_off + 1]) << 8);
+        const char c = duetos::util::Utf16CpToSafeAscii(u32(cp));
+        if (c == '\0')
+            break;
+        if (write_pos + 1 < out_cap)
+            out_name[write_pos++] = c;
     }
-    return true;
-}
-
-// Parse one "entry set" starting at `start_idx` within `buf`.
-// Returns the number of 32-byte slots consumed (SecondaryCount +
-// 1), or 0 if this isn't a usable file entry. `buf_entries` is
-// the total entry count in the buffer for bounds checks.
-u32 ParseFileEntrySet(const u8* buf, u32 start_idx, u32 buf_entries, DirEntry* out)
-{
-    // Bound the primary-entry read against the buffer — the directory
-    // walker normally advances one slot at a time so this should
-    // always pass, but a corrupt directory whose previous entry-set
-    // claimed an oversized SecondaryCount could push start_idx past
-    // the buffer end.
-    if (start_idx >= buf_entries)
-        return 0;
-    const u8* file_ent = buf + u64(start_idx) * 32;
-    if ((file_ent[0] & 0x7F) != (kDirEntryFile & 0x7F))
-        return 0;
-    // Deleted entries have bit 7 of the type clear.
-    if ((file_ent[0] & 0x80) == 0)
-        return 0;
-
-    const u8 secondary_count = file_ent[1];
-    if (secondary_count < 2) // need at least StreamExt + 1 FileName
-        return 1;
-    const u32 total = u32(secondary_count) + 1;
-    if (start_idx + total > buf_entries)
-        return 1;
-
-    const u8* stream_ent = file_ent + 32;
-    if ((stream_ent[0] & 0x7F) != (kDirEntryStreamExt & 0x7F))
-        return total;
-
-    const u8 name_length = stream_ent[kStreamEntryNameLength];
-
-    ByteZero(out, sizeof(*out));
-    out->attributes = u8(LeU16(file_ent + kFileEntryAttributes));
-    out->valid_data_len = LeU64(stream_ent + kStreamEntryValidDataLen);
-    out->first_cluster = LeU32(stream_ent + kStreamEntryFirstCluster);
-    out->size_bytes = LeU64(stream_ent + kStreamEntryDataLength);
-
-    // Walk the FileName entries (0xC1), each contributing up to
-    // 15 UTF-16 code units. Cap the decoded name at name[128].
-    u32 name_pos = 0;
-    u32 remaining_units = name_length;
-    for (u32 k = 2; k < total; ++k)
-    {
-        const u8* name_ent = file_ent + u64(k) * 32;
-        if ((name_ent[0] & 0x7F) != (kDirEntryFileName & 0x7F))
-            continue;
-        for (u32 u = 0; u < 15 && remaining_units > 0; ++u, --remaining_units)
-        {
-            const u16 cp = LeU16(name_ent + 2 + u * 2);
-            const char c = duetos::util::Utf16CpToSafeAscii(u32(cp));
-            if (c == '\0')
-                break;
-            if (name_pos + 1 < sizeof(out->name))
-                out->name[name_pos++] = c;
-        }
-    }
-    out->name[name_pos] = '\0';
-    return total;
+    if (out_cap > 0)
+        out_name[write_pos] = '\0';
 }
 
 void WalkRootDir(Volume& v)
@@ -145,15 +62,10 @@ void WalkRootDir(Volume& v)
     const u32 bps = 1u << v.bytes_per_sector_shift;
     const u32 spc = 1u << v.sectors_per_cluster_shift;
     const u64 cluster_bytes = u64(bps) * spc;
-    // First cluster of root. exFAT clusters are 2-indexed, matching
-    // FAT32 convention.
     if (v.first_cluster_of_root < 2)
         return;
     const u64 root_sector = u64(v.cluster_heap_offset_sectors) + u64(v.first_cluster_of_root - 2) * spc;
 
-    // Read up to sizeof(g_dir_scratch) of the root cluster. 4 KiB
-    // is 128 entries; v0 cap is kMaxDirEntries=32 so even a very
-    // full volume stays within this single read.
     u64 bytes_to_read = cluster_bytes;
     if (bytes_to_read > sizeof(g_dir_scratch))
         bytes_to_read = sizeof(g_dir_scratch);
@@ -180,31 +92,39 @@ void WalkRootDir(Volume& v)
         if (v.root_entry_count >= kMaxDirEntries)
             break;
 
-        // Parse directly into the registry slot so the sizeof
-        // DirEntry (144+ bytes with name[128]) never appears on the
-        // RHS of a struct copy — the freestanding link has no
-        // memcpy.
-        const u32 before = v.root_entry_count;
-        DirEntry* slot = &v.root_entries[before];
-        const u32 consumed = ParseFileEntrySet(g_dir_scratch, idx, entry_count, slot);
-        if (consumed == 0)
+        DuetosExfatDirEntry rust_entry{};
+        if (!duetos_exfat_parse_dirent_set(g_dir_scratch, bytes_to_read, idx, entry_count, &rust_entry))
         {
-            ++idx;
+            // Hard parse error — refuse to keep walking; the rest
+            // of the buffer is no longer trustworthy.
+            break;
+        }
+        const u8 consumed = rust_entry.slots_consumed == 0 ? 1 : rust_entry.slots_consumed;
+        if (rust_entry.ok == 0)
+        {
+            idx += consumed;
             continue;
         }
-        if (consumed > 1)
-        {
-            v.root_entry_count = before + 1;
-            arch::SerialWrite("[exfat]   entry ");
-            arch::SerialWrite(slot->name);
-            arch::SerialWrite("  attr=");
-            arch::SerialWriteHex(slot->attributes);
-            arch::SerialWrite(" first_cluster=");
-            arch::SerialWriteHex(slot->first_cluster);
-            arch::SerialWrite(" size=");
-            arch::SerialWriteHex(slot->size_bytes);
-            arch::SerialWrite("\n");
-        }
+
+        const u32 before = v.root_entry_count;
+        DirEntry* slot = &v.root_entries[before];
+        ByteZero(slot, sizeof(*slot));
+        slot->attributes = rust_entry.attributes;
+        slot->valid_data_len = rust_entry.valid_data_len;
+        slot->first_cluster = rust_entry.first_cluster;
+        slot->size_bytes = rust_entry.size_bytes;
+        DecodeDirentName(g_dir_scratch, rust_entry, slot->name, sizeof(slot->name));
+        v.root_entry_count = before + 1;
+
+        arch::SerialWrite("[exfat]   entry ");
+        arch::SerialWrite(slot->name);
+        arch::SerialWrite("  attr=");
+        arch::SerialWriteHex(slot->attributes);
+        arch::SerialWrite(" first_cluster=");
+        arch::SerialWriteHex(slot->first_cluster);
+        arch::SerialWrite(" size=");
+        arch::SerialWriteHex(slot->size_bytes);
+        arch::SerialWrite("\n");
         idx += consumed;
     }
     arch::SerialWrite("[exfat]   parsed ");
@@ -225,42 +145,29 @@ void WalkRootDir(Volume& v)
     const i32 rc = drivers::storage::BlockDeviceRead(block_handle, kBootSectorLba, 1, g_scratch);
     if (rc < 0)
         return Err{ErrorCode::IoError};
-    const u8* sect = g_scratch;
-    if (sect[kOffBootSig] != 0x55 || sect[kOffBootSig + 1] != 0xAA)
+
+    DuetosExfatBootSector bs{};
+    if (!duetos_exfat_parse_boot_sector(g_scratch, sizeof(g_scratch), &bs))
         return Err{ErrorCode::NotFound};
-    if (!MatchesFsName(sect))
+    if (bs.ok == 0)
         return Err{ErrorCode::NotFound};
 
-    // exFAT spec §3.1.13/14: BytesPerSectorShift in [9, 12]
-    // (512 .. 4096 bytes), SectorsPerClusterShift in
-    // [0, 25 - BytesPerSectorShift] (max cluster 32 MiB).
-    // Reject anything outside the spec — `1u << shift` on a
-    // shift count >= 32 is undefined behaviour, and a hostile
-    // boot sector with shift=63 would otherwise cascade into
-    // wild geometry numbers. WalkRootDir already guards against
-    // bps==0 but only reactively after the shift has happened.
-    const u8 bps_shift = sect[kOffBytesPerSectorShift];
-    const u8 spc_shift = sect[kOffSectorsPerClusterShift];
-    if (bps_shift < 9 || bps_shift > 12)
-        return Err{ErrorCode::Corrupt};
-    if (spc_shift > (25 - bps_shift))
+    DuetosExfatGeometry geom{};
+    if (!duetos_exfat_derive_geometry(&bs, &geom) || geom.ok == 0)
         return Err{ErrorCode::Corrupt};
 
-    // Build the volume record directly in its registry slot — avoids
-    // a whole-struct copy (kMaxDirEntries × sizeof(DirEntry) would
-    // otherwise emit a memcpy call the freestanding kernel can't
-    // link).
     Volume& v = g_volumes[g_volume_count];
     ByteZero(&v, sizeof(v));
     v.block_handle = block_handle;
-    v.partition_offset_bytes = LeU64(sect + kOffPartitionOffset);
-    v.volume_length_sectors = LeU64(sect + kOffVolumeLength);
-    v.fat_offset_sectors = LeU32(sect + kOffFatOffset);
-    v.cluster_heap_offset_sectors = LeU32(sect + kOffClusterHeapOffset);
-    v.cluster_count = LeU32(sect + kOffClusterCount);
-    v.first_cluster_of_root = LeU32(sect + kOffFirstClusterOfRoot);
-    v.bytes_per_sector_shift = bps_shift;
-    v.sectors_per_cluster_shift = spc_shift;
+    // Field-by-field copy from the Rust struct to the C++ Volume.
+    v.partition_offset_bytes = bs.partition_offset;
+    v.volume_length_sectors = bs.volume_length;
+    v.fat_offset_sectors = bs.fat_offset;
+    v.cluster_heap_offset_sectors = bs.cluster_heap_offset;
+    v.cluster_count = bs.cluster_count;
+    v.first_cluster_of_root = bs.root_dir_first_cluster;
+    v.bytes_per_sector_shift = bs.bytes_per_sector_shift;
+    v.sectors_per_cluster_shift = bs.sectors_per_cluster_shift;
 
     arch::SerialWrite("[exfat] probe OK handle=");
     arch::SerialWriteHex(block_handle);

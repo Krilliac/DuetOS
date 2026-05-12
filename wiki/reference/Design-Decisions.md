@@ -1,6 +1,6 @@
 # DuetOS — Design Decisions Log
 
-_Last updated: 2026-05-10 (input routing to focused PE + window chrome interactions)_
+_Last updated: 2026-05-12 (skeleton Rust crates lifted to production)_
 
 The most recent formal entries below run through 042 (HPET self-test);
 slices that landed during 2026-04-25 → 2026-05-04 (windowing / GDI /
@@ -8409,3 +8409,65 @@ doc helps future readers audit the trail.
     their FFI symbols into the staticlib but no C++ TU calls
     them, so the linker garbage-collects them out. This keeps
     the kernel image weight unchanged.
+
+
+## 2026-05-12 — Skeleton Rust crates lifted to production
+
+All six skeleton crates seeded in the same day's earlier slice
+(`ntfs_rust`, `exfat_rust`, `ext4_rust`, `acpi_rust`,
+`wifi80211_rust`, `hci_rust`) are now production-grade in this
+follow-up slice: each crate gained the next layer of parsers, and
+a real C++ caller now goes through its FFI.
+
+- **NTFS.** Added MFT record header decoder, resident
+  `$FILE_NAME` attribute walker, mapping-pairs runlist decoder.
+  `kernel/fs/ntfs.cpp` delegates the boot-sector parse, the MFT
+  record header decode, and the `$FILE_NAME` extraction to the
+  crate; UTF-16 → ASCII translation stays in C++ because it
+  draws on `util::Utf16CpToSafeAscii`. 22 hosted unit tests.
+- **exFAT.** Added FAT chain walker (4-byte LE per cluster) and
+  the File 0x85 / Stream-Extension 0xC0 / FileName 0xC1 dirent
+  set decoder. `kernel/fs/exfat.cpp` delegates byte parsing to
+  the crate. 16 hosted unit tests.
+- **ext4.** Added superblock, group-descriptor, inode, extent
+  header / leaf / index, and linux_dirent decoders.
+  `kernel/fs/ext4.cpp` routes every byte parse through the
+  crate; depth>0 extent-tree DFS stays in C++ because it
+  dispatches real block reads against scratch buffers. 21
+  hosted unit tests.
+- **ACPI.** Added MADT entry header walker, FADT body decoder,
+  MCFG entry decoder, HPET decoder, SRAT memory-affinity
+  decoder. `kernel/acpi/acpi.cpp::AcpiInit` delegates the RSDP
+  validation to the crate; `ParseFadt` cross-validates against
+  the Rust decoder. 19 hosted unit tests.
+- **802.11.** Added IE-list walker, Beacon / Probe Response
+  body decoder, EAPOL-Key (4-way handshake) descriptor parser.
+  `kernel/net/wireless/beacon.cpp::BeaconParse` delegates the
+  frame header, body, and IE walks to the crate. 12 hosted
+  unit tests.
+- **HCI.** Added Command Complete, Command Status,
+  Disconnection Complete, LE Meta, Read_Local_Version, and
+  Read_BD_ADDR body decoders. `kernel/net/bluetooth/hci.cpp`
+  routes the Read_Local_Version + Read_BD_ADDR rparam decoders
+  through the crate; the event-header parser stays in C++
+  because its no-packet-type-prefix convention differs from
+  the Rust API's transport-prefix model. 16 hosted unit
+  tests.
+- **Discipline carryovers.**
+  - Every new parser is `no_std`, slice-traversal-only, with
+    `unsafe` confined to the FFI wall and SAFETY comments on
+    every block.
+  - Hosted unit test count climbed from 119 to 191 across the
+    10 test-bearing crates (the +72 covers each new parser
+    branch with both happy-path and rejection cases).
+  - Field-by-field copy in the C++ wrappers between the Rust
+    structs and any pre-existing C++ struct, so layout drift
+    can't silently break callers.
+  - The clippy `not_unsafe_ptr_arg_deref` lint stays clean
+    because every raw-pointer deref lives behind a named
+    helper (`slice_from_raw`, `out_init`,
+    `read_boot_sector_by_ptr`, …).
+- **Result.** No skeleton crates remain in the Rust workspace.
+  Future Rust work is either (a) expanding an existing
+  production crate's FFI surface or (b) a new crate landing
+  with its first real C++ caller.

@@ -1,8 +1,19 @@
+/*
+ * DuetOS — NTFS driver, v0 probe + $MFT system-record walk.
+ *
+ * The byte-parsing layer lives in Rust (`kernel/fs/ntfs_rust`):
+ * boot-sector validation, MFT record header decode, resident
+ * $FILE_NAME attribute walk, and mapping-pairs runlist decode.
+ * This C++ TU owns block I/O, the per-volume registry, scratch
+ * buffers, logging, and the UTF-16 → ASCII glyph filter.
+ */
+
 #include "fs/ntfs.h"
 
 #include "arch/x86_64/serial.h"
-#include "log/klog.h"
 #include "drivers/storage/block.h"
+#include "fs/ntfs_rust/include/ntfs_rust.h"
+#include "log/klog.h"
 #include "util/unicode.h"
 
 namespace duetos::fs::ntfs
@@ -19,52 +30,6 @@ alignas(16) constinit u8 g_scratch[512] = {};
 // 4096-byte records (some modern formats).
 alignas(16) constinit u8 g_mft_scratch[4096] = {};
 
-// Boot-sector field offsets (per NTFS on-disk format spec).
-constexpr u64 kOffOemId = 0x03;                // "NTFS    " (8 bytes)
-constexpr u64 kOffBytesPerSector = 0x0B;       // u16
-constexpr u64 kOffSectorsPerCluster = 0x0D;    // u8
-constexpr u64 kOffTotalSectors = 0x28;         // i64 signed (always positive)
-constexpr u64 kOffMftLcn = 0x30;               // u64
-constexpr u64 kOffClustersPerMftRecord = 0x40; // i8
-constexpr u64 kOffBootSig = 0x1FE;             // 0x55 0xAA
-
-// MFT record header layout.
-constexpr u64 kMftRecSig = 0x00;          // u32 = 'FILE'
-constexpr u64 kMftRecFirstAttrOff = 0x14; // u16
-constexpr u64 kMftRecFlags = 0x16;        // u16: bit 0 in-use, bit 1 dir
-
-// Attribute header common fields.
-constexpr u64 kAttrType = 0x00;        // u32
-constexpr u64 kAttrLength = 0x04;      // u32 (total bytes including header)
-constexpr u64 kAttrNonResident = 0x08; // u8
-constexpr u64 kAttrResValueLen = 0x10; // u32 (resident only)
-constexpr u64 kAttrResValueOff = 0x14; // u16 (resident only)
-
-constexpr u32 kAttrTypeFileName = 0x30;
-constexpr u32 kAttrTypeEnd = 0xFFFFFFFFu;
-
-// $FILE_NAME attribute body offsets. (namespace byte at 0x41 is
-// captured in the on-disk layout but unused here — we decode every
-// namespace's name identically.)
-constexpr u64 kFnNameLength = 0x40; // u8: UTF-16 code units
-constexpr u64 kFnNameUtf16 = 0x42;
-
-inline u16 LeU16(const u8* p)
-{
-    return u16(p[0]) | (u16(p[1]) << 8);
-}
-inline u32 LeU32(const u8* p)
-{
-    return u32(p[0]) | (u32(p[1]) << 8) | (u32(p[2]) << 16) | (u32(p[3]) << 24);
-}
-inline u64 LeU64(const u8* p)
-{
-    u64 r = 0;
-    for (u64 i = 0; i < 8; ++i)
-        r |= u64(p[i]) << (i * 8);
-    return r;
-}
-
 void ByteZero(void* dst, u64 n)
 {
     auto* d = static_cast<volatile u8*>(dst);
@@ -72,85 +37,26 @@ void ByteZero(void* dst, u64 n)
         d[i] = 0;
 }
 
-bool MatchesOem(const u8* sect)
+// Decode the resident $FILE_NAME UTF-16 name into the caller's
+// ASCII buffer using the project's safe-glyph filter. Returns true
+// if at least one code unit decoded into a printable ASCII glyph.
+bool DecodeFileName(const u8* rec, const DuetosNtfsFileNameSpan& span, char* out_name, u64 out_cap)
 {
-    const u8 ref[8] = {'N', 'T', 'F', 'S', ' ', ' ', ' ', ' '};
-    for (u64 i = 0; i < 8; ++i)
-    {
-        if (sect[kOffOemId + i] != ref[i])
-            return false;
-    }
-    return true;
-}
-
-// BPB's clusters_per_mft_record is a signed byte. Positive: that
-// many clusters per record. Negative N: record size = 2^(-N).
-u32 DecodeMftRecordSize(i8 raw, u32 bytes_per_cluster)
-{
-    if (raw > 0)
-        return u32(raw) * bytes_per_cluster;
-    const u32 shift = u32(-i32(raw)) & 0x3F;
-    if (shift >= 32)
-        return 0;
-    return 1u << shift;
-}
-
-// Extract the (first) $FILE_NAME attribute from an MFT record and
-// decode its UTF-16 name. Returns true on success. `rec` points to
-// the start of the MFT record (not the attribute); `rec_size` is
-// the total record size in bytes.
-bool ExtractFileName(const u8* rec, u32 rec_size, char* out_name, u64 out_cap)
-{
-    const u16 first_attr_off = LeU16(rec + kMftRecFirstAttrOff);
-    if (first_attr_off >= rec_size)
+    if (span.ok == 0 || out_cap == 0)
         return false;
-    u64 off = first_attr_off;
-    while (off + 8 <= rec_size) // at least type+length
+    u64 write_pos = 0;
+    for (u32 u = 0; u < span.utf16_units; ++u)
     {
-        const u32 type = LeU32(rec + off + kAttrType);
-        if (type == kAttrTypeEnd)
-            return false;
-        const u32 len = LeU32(rec + off + kAttrLength);
-        if (len == 0 || off + len > rec_size)
-            return false;
-
-        if (type == kAttrTypeFileName)
-        {
-            const u8 non_res = rec[off + kAttrNonResident];
-            if (non_res == 0) // only handle resident $FILE_NAME
-            {
-                const u32 val_len = LeU32(rec + off + kAttrResValueLen);
-                const u16 val_off = LeU16(rec + off + kAttrResValueOff);
-                if (u64(val_off) + val_len <= len)
-                {
-                    const u8* fn = rec + off + val_off;
-                    // Sanity: $FILE_NAME must carry at least the
-                    // fixed header + 1 UTF-16 unit.
-                    if (val_len >= kFnNameUtf16 + 2)
-                    {
-                        const u8 name_len = fn[kFnNameLength];
-                        u64 write_pos = 0;
-                        for (u32 u = 0; u < name_len; ++u)
-                        {
-                            const u64 byte_off = kFnNameUtf16 + u64(u) * 2;
-                            if (byte_off + 2 > val_len)
-                                break;
-                            const u16 cp = LeU16(fn + byte_off);
-                            const char c = duetos::util::Utf16CpToSafeAscii(u32(cp));
-                            if (c == '\0')
-                                break;
-                            if (write_pos + 1 < out_cap)
-                                out_name[write_pos++] = c;
-                        }
-                        out_name[write_pos] = '\0';
-                        return write_pos > 0;
-                    }
-                }
-            }
-        }
-        off += len;
+        const u64 byte_off = static_cast<u64>(span.utf16_offset) + static_cast<u64>(u) * 2;
+        const u16 cp = static_cast<u16>(rec[byte_off]) | (static_cast<u16>(rec[byte_off + 1]) << 8);
+        const char c = duetos::util::Utf16CpToSafeAscii(u32(cp));
+        if (c == '\0')
+            break;
+        if (write_pos + 1 < out_cap)
+            out_name[write_pos++] = c;
     }
-    return false;
+    out_name[write_pos] = '\0';
+    return write_pos > 0;
 }
 
 void WalkSystemRecords(Volume& v)
@@ -174,21 +80,27 @@ void WalkSystemRecords(Volume& v)
         const i32 rc = drivers::storage::BlockDeviceRead(v.block_handle, rec_lba, sectors_per_record, g_mft_scratch);
         if (rc < 0)
             break;
-        if (LeU32(g_mft_scratch + kMftRecSig) != kFileRecordMagic)
+
+        DuetosNtfsMftRecordHeader hdr{};
+        if (!duetos_ntfs_parse_mft_record_header(g_mft_scratch, v.mft_record_size, v.mft_record_size, &hdr))
+        {
+            // Not a "FILE" record (or truncated) — leave the slot
+            // unconsumed and continue.
             continue;
+        }
 
         MftEntry& slot = v.system_records[v.system_record_count++];
         ByteZero(&slot, sizeof(slot));
         slot.record_num = i;
-        const u16 flags = LeU16(g_mft_scratch + kMftRecFlags);
-        slot.in_use = (flags & 0x1) != 0;
-        slot.is_directory = (flags & 0x2) != 0;
-        const bool got_name = ExtractFileName(g_mft_scratch, v.mft_record_size, slot.name, sizeof(slot.name));
+        slot.in_use = hdr.in_use != 0;
+        slot.is_directory = hdr.is_directory != 0;
+
+        DuetosNtfsFileNameSpan span{};
+        const bool got_name =
+            duetos_ntfs_find_resident_file_name(g_mft_scratch, v.mft_record_size, v.mft_record_size, &span) &&
+            DecodeFileName(g_mft_scratch, span, slot.name, sizeof(slot.name));
         if (!got_name)
         {
-            // Record is valid but has no resident $FILE_NAME (rare
-            // for systems files 0..15, but possible for 8: $BadClus
-            // which stores its name in a namespace we didn't pick).
             slot.name[0] = '?';
             slot.name[1] = '\0';
         }
@@ -218,28 +130,29 @@ void WalkSystemRecords(Volume& v)
     const i32 rc = drivers::storage::BlockDeviceRead(block_handle, kBootSectorLba, 1, g_scratch);
     if (rc < 0)
         return Err{ErrorCode::IoError};
-    const u8* sect = g_scratch;
-    if (sect[kOffBootSig] != 0x55 || sect[kOffBootSig + 1] != 0xAA)
+
+    DuetosNtfsBootSector bs{};
+    if (!duetos_ntfs_parse_boot_sector(g_scratch, sizeof(g_scratch), &bs))
         return Err{ErrorCode::NotFound};
-    if (!MatchesOem(sect))
+    if (bs.ok == 0)
         return Err{ErrorCode::NotFound};
 
     Volume& v = g_volumes[g_volume_count];
     ByteZero(&v, sizeof(v));
     v.block_handle = block_handle;
-    v.bytes_per_sector = LeU16(sect + kOffBytesPerSector);
-    v.sectors_per_cluster = sect[kOffSectorsPerCluster];
-    // bytes_per_sector must be 512..4096 (NTFS spec) and sector
-    // count must be non-zero — otherwise downstream divides
-    // (sectors_per_record = mft_record_size / bps) produce zero
-    // and walks loop forever or read LBA 0 repeatedly.
+    // Field-by-field copy between the Rust struct and the C++
+    // Volume so layout drift can't silently break callers.
+    v.bytes_per_sector = bs.bytes_per_sector;
+    v.sectors_per_cluster = bs.sectors_per_cluster;
     if (v.bytes_per_sector == 0 || v.bytes_per_sector > 4096 || v.sectors_per_cluster == 0)
         return Err{ErrorCode::Corrupt};
-    v.total_sectors = LeU64(sect + kOffTotalSectors);
-    v.mft_lcn = LeU64(sect + kOffMftLcn);
-    v.clusters_per_mft_record = i8(sect[kOffClustersPerMftRecord]);
+    v.total_sectors = bs.total_sectors;
+    v.mft_lcn = bs.mft_lcn;
+    v.clusters_per_mft_record = bs.clusters_per_mft_record;
     const u32 bytes_per_cluster = u32(v.bytes_per_sector) * u32(v.sectors_per_cluster);
-    v.mft_record_size = DecodeMftRecordSize(v.clusters_per_mft_record, bytes_per_cluster);
+    v.mft_record_size = duetos_ntfs_decode_mft_record_size(v.clusters_per_mft_record, bytes_per_cluster);
+    if (v.mft_record_size == 0)
+        return Err{ErrorCode::Corrupt};
 
     arch::SerialWrite("[ntfs] probe OK handle=");
     arch::SerialWriteHex(block_handle);

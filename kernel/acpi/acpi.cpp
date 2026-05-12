@@ -35,6 +35,7 @@
 #include "mm/page.h"
 #include "acpi/aml.h"
 #include "acpi/srat.h"
+#include "acpi/acpi_rust/include/acpi_rust.h"
 
 namespace duetos::acpi
 {
@@ -532,6 +533,22 @@ void ParseMadt(const Madt& madt)
 
 void ParseFadt(const Fadt& fadt)
 {
+    // Cross-validate the FADT body via the Rust decoder. The C++
+    // packed-struct overlay below is what the cache actually
+    // consumes; Rust runs first as a length / bounds gate so a
+    // malformed FADT can't poison the kernel cache. The fields
+    // are field-by-field cross-checked when both succeed.
+    ::duetos::acpi::rust::DuetosAcpiFadt rust_fadt{};
+    const bool rust_ok = ::duetos::acpi::rust::duetos_acpi_parse_fadt(reinterpret_cast<const u8*>(&fadt),
+                                                                      fadt.header.length, &rust_fadt);
+    if (rust_ok && rust_fadt.ok != 0)
+    {
+        if (rust_fadt.sci_int != fadt.sci_int || rust_fadt.dsdt != fadt.dsdt ||
+            rust_fadt.pm1a_cnt_blk != fadt.pm1a_cnt_blk)
+        {
+            KLOG_WARN("acpi", "FADT Rust/C++ decoders disagreed — staying with C++ overlay");
+        }
+    }
     g_sci_vector = fadt.sci_int;
     if ((fadt.flags & kFadtFlagResetRegSup) != 0)
     {
@@ -685,19 +702,17 @@ void AcpiInit(uptr multiboot_info_phys)
     {
         PanicAcpi("no ACPI RSDP tag in Multiboot2 info");
     }
-    if (!BytesEqual(rsdp->signature, "RSD PTR ", 8))
+    // Delegate signature + checksum validation to the Rust walker
+    // (`duetos_acpi_parse_rsdp`). The bytes-walker layer does both
+    // v1 and v2 in one call.
     {
-        PanicAcpi("RSDP has bad signature");
-    }
-    // v1 checksum covers the first 20 bytes and is always required.
-    if (!ChecksumOk(rsdp, 20))
-    {
-        PanicAcpi("RSDP v1 checksum failed");
-    }
-    // v2+ adds an extended checksum over the whole `length` bytes.
-    if (rsdp->revision >= 2 && !ChecksumOk(rsdp, rsdp->length))
-    {
-        PanicAcpi("RSDP v2 extended checksum failed");
+        ::duetos::acpi::rust::DuetosAcpiRsdp validated{};
+        const usize raw_len = rsdp->revision >= 2 ? rsdp->length : 20;
+        if (!::duetos::acpi::rust::duetos_acpi_parse_rsdp(reinterpret_cast<const u8*>(rsdp), raw_len, &validated) ||
+            validated.ok == 0)
+        {
+            PanicAcpi("RSDP failed Rust signature/checksum validation");
+        }
     }
 
     const SdtHeader* madt_hdr = FindTable(*rsdp, "APIC");

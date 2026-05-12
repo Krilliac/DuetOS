@@ -1,12 +1,8 @@
-# DuetOS ext4 metadata walker — skeleton.
+# DuetOS ext4 metadata walker.
 #
-# Foundation crate for an eventual read-only ext4 driver. v0
-# ships only the superblock magic + block/inode layout extraction;
-# the inode table, directory-entry walker, extent tree, and HTREE
-# index are tracked in `wiki/filesystem/ext4.md` as next slices.
-#
-# Status: SKELETON. No C++ caller — DuetOS ships only FAT32 +
-# DuetFS today; the Linux subsystem doesn't currently touch ext4.
+# Production crate. Superblock probe + group-descriptor + inode +
+# extent-header + extent-leaf/index + linux_dirent decoders. C++
+# caller at `kernel/fs/ext4.cpp` delegates byte parsing here.
 #
 # Spec: https://www.kernel.org/doc/html/latest/filesystems/ext4/
 
@@ -16,7 +12,7 @@ version = "0.0.1"
 edition.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "DuetOS ext4 metadata walker (skeleton)"
+description = "DuetOS ext4 metadata walker"
 
 [lib]
 name = "duetos_ext4"
