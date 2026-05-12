@@ -210,7 +210,12 @@ i32 BlockDeviceRead(u32 handle, u64 lba, u32 count, void* buf)
     if (!ValidHandle(handle) || buf == nullptr || count == 0)
         return -1;
     const BlockDesc& d = g_devices[handle].desc;
-    if (lba >= d.sector_count || lba + count > d.sector_count)
+    // Subtractive bound: `lba + count` wraps u64 if a caller passes
+    // lba near u64-max. The backends (AHCI / NVMe) already use this
+    // form (fixed in batch 1); harmonise here too so the block layer
+    // can't be coerced into issuing an out-of-range LBA to a backend
+    // that trusts the layer above.
+    if (lba >= d.sector_count || count > d.sector_count - lba)
         return -1;
     return d.ops->read(d.cookie, lba, count, buf);
 }

@@ -1423,8 +1423,24 @@ void SyscallDispatch(arch::TrapFrame* frame)
             }
         }
         const u64 page_size = mm::kPageSize;
+        // Same gate as SYS_VM_ALLOCATE / SYS_VM_PROTECT — without
+        // overflow guards a hostile (or buggy) caller can pass
+        // size = UINT64_MAX so `(size + page_size - 1)` wraps to a
+        // small value, then march the loop into the kernel half and
+        // drive AddressSpaceUnmapUserPage into PanicAs.
+        constexpr u64 kVmUserMax = 0x00007FFFFFFFFFFFULL;
+        if (size == 0 || size > kVmUserMax)
+        {
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
         const u64 aligned_size = (size + page_size - 1) & ~(page_size - 1);
         const u64 aligned_base = base & ~(page_size - 1);
+        if (aligned_base > kVmUserMax || aligned_size == 0 || (aligned_size - 1) > (kVmUserMax - aligned_base))
+        {
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
         for (u64 va = aligned_base; va < aligned_base + aligned_size; va += page_size)
         {
             (void)mm::AddressSpaceUnmapUserPage(target->as, va);
@@ -2470,14 +2486,26 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = 0;
             return;
         }
+        // Scan + claim atomically — without arch::Cli the scan
+        // and the in_use write can be split by a preemption,
+        // letting a concurrent SYS_THREAD_OPEN pick the same slot.
+        // ProcessRetain is delayed until after the claim so two
+        // racing opens can't leak retains.
         u64 idx = Process::kWin32ForeignThreadCap;
-        for (u64 i = 0; i < Process::kWin32ForeignThreadCap; ++i)
         {
-            if (!caller->win32_foreign_threads[i].in_use)
+            arch::Cli();
+            for (u64 i = 0; i < Process::kWin32ForeignThreadCap; ++i)
             {
-                idx = i;
-                break;
+                if (!caller->win32_foreign_threads[i].in_use)
+                {
+                    idx = i;
+                    caller->win32_foreign_threads[idx].in_use = true;
+                    caller->win32_foreign_threads[idx].task = target_task;
+                    caller->win32_foreign_threads[idx].owner = owner;
+                    break;
+                }
             }
+            arch::Sti();
         }
         if (idx == Process::kWin32ForeignThreadCap)
         {
@@ -2485,9 +2513,6 @@ void SyscallDispatch(arch::TrapFrame* frame)
             return;
         }
         ProcessRetain(owner);
-        caller->win32_foreign_threads[idx].in_use = true;
-        caller->win32_foreign_threads[idx].task = target_task;
-        caller->win32_foreign_threads[idx].owner = owner;
         frame->rax = Process::kWin32ForeignThreadBase + idx;
         return;
     }
@@ -2495,7 +2520,25 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_THREAD_SUSPEND:
     case SYS_THREAD_RESUME:
     {
+        // Cap-gate: cross-process suspend/resume is the same threat
+        // class as cross-AS VM ops and GET/SET_CONTEXT. Without this
+        // check a sandboxed PE could freeze any other process's
+        // threads via a NtOpenThread-style foreign handle and deny
+        // service to the rest of the system. The handle lookup below
+        // accepts both local-thread and foreign-thread handles; the
+        // foreign-thread path is the dangerous one, but gating on
+        // the local-only path is harmless (a process can already
+        // self-DoS by other means).
         Process* caller = CurrentProcess();
+        if (caller == nullptr || !CapSetHas(caller->caps, kCapDebug))
+        {
+            if (caller != nullptr)
+            {
+                RecordSandboxDenial(kCapDebug);
+            }
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
         sched::Task* target = LookupThreadHandle(caller, frame->rdi);
         if (target == nullptr)
         {
