@@ -521,12 +521,16 @@ void RecordSandboxDenial(Cap cap)
             p->sandbox_denials, /*severity=*/1);
     }
 
-    // Threshold-crossing: fire once at exactly kSandbox-
-    // DenialKillThreshold and flag the task. Uses `==` so the
-    // message doesn't repeat for denials that race past the
-    // flag before Schedule picks them up.
-    if (p->sandbox_denials == kSandboxDenialKillThreshold)
+    // Threshold-crossing: fire once at the first denial that lands
+    // at-or-past kSandboxDenialKillThreshold. Use `>=` paired with
+    // the threshold-already-fired flag below so a concurrent burst
+    // of denials that jumps the counter from N to N+2 (on SMP, no
+    // atomic on this counter today) still trips the kill — and so
+    // the message itself only prints once because the next-greater
+    // value won't equal the threshold under `==`.
+    if (p->sandbox_denials >= kSandboxDenialKillThreshold && !p->sandbox_kill_flagged)
     {
+        p->sandbox_kill_flagged = true;
         arch::SerialWrite("[sandbox] pid=");
         arch::SerialWriteHex(p->pid);
         arch::SerialWrite(" hit ");

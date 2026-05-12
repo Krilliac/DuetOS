@@ -1423,8 +1423,24 @@ void SyscallDispatch(arch::TrapFrame* frame)
             }
         }
         const u64 page_size = mm::kPageSize;
+        // Same gate as SYS_VM_ALLOCATE / SYS_VM_PROTECT — without
+        // overflow guards a hostile (or buggy) caller can pass
+        // size = UINT64_MAX so `(size + page_size - 1)` wraps to a
+        // small value, then march the loop into the kernel half and
+        // drive AddressSpaceUnmapUserPage into PanicAs.
+        constexpr u64 kVmUserMax = 0x00007FFFFFFFFFFFULL;
+        if (size == 0 || size > kVmUserMax)
+        {
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
         const u64 aligned_size = (size + page_size - 1) & ~(page_size - 1);
         const u64 aligned_base = base & ~(page_size - 1);
+        if (aligned_base > kVmUserMax || aligned_size == 0 || (aligned_size - 1) > (kVmUserMax - aligned_base))
+        {
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
         for (u64 va = aligned_base; va < aligned_base + aligned_size; va += page_size)
         {
             (void)mm::AddressSpaceUnmapUserPage(target->as, va);
@@ -1564,7 +1580,15 @@ void SyscallDispatch(arch::TrapFrame* frame)
             u32 i = kPrefixLen;
             while (i < path_len && kpath[i] >= '0' && kpath[i] <= '9')
             {
-                disk_idx = disk_idx * 10 + static_cast<u32>(kpath[i] - '0');
+                // Saturate so a long decimal run can't silently wrap
+                // past kMaxVolumes and re-enter the valid range.
+                const u32 digit = static_cast<u32>(kpath[i] - '0');
+                if (disk_idx > (0xFFFFFFFFu - digit) / 10)
+                {
+                    frame->rax = static_cast<u64>(-1);
+                    return;
+                }
+                disk_idx = disk_idx * 10 + digit;
                 ++i;
             }
             if (i == kPrefixLen || i >= path_len || kpath[i] != '/')
@@ -2462,14 +2486,26 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = 0;
             return;
         }
+        // Scan + claim atomically — without arch::Cli the scan
+        // and the in_use write can be split by a preemption,
+        // letting a concurrent SYS_THREAD_OPEN pick the same slot.
+        // ProcessRetain is delayed until after the claim so two
+        // racing opens can't leak retains.
         u64 idx = Process::kWin32ForeignThreadCap;
-        for (u64 i = 0; i < Process::kWin32ForeignThreadCap; ++i)
         {
-            if (!caller->win32_foreign_threads[i].in_use)
+            arch::Cli();
+            for (u64 i = 0; i < Process::kWin32ForeignThreadCap; ++i)
             {
-                idx = i;
-                break;
+                if (!caller->win32_foreign_threads[i].in_use)
+                {
+                    idx = i;
+                    caller->win32_foreign_threads[idx].in_use = true;
+                    caller->win32_foreign_threads[idx].task = target_task;
+                    caller->win32_foreign_threads[idx].owner = owner;
+                    break;
+                }
             }
+            arch::Sti();
         }
         if (idx == Process::kWin32ForeignThreadCap)
         {
@@ -2477,9 +2513,6 @@ void SyscallDispatch(arch::TrapFrame* frame)
             return;
         }
         ProcessRetain(owner);
-        caller->win32_foreign_threads[idx].in_use = true;
-        caller->win32_foreign_threads[idx].task = target_task;
-        caller->win32_foreign_threads[idx].owner = owner;
         frame->rax = Process::kWin32ForeignThreadBase + idx;
         return;
     }
@@ -2487,7 +2520,25 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_THREAD_SUSPEND:
     case SYS_THREAD_RESUME:
     {
+        // Cap-gate: cross-process suspend/resume is the same threat
+        // class as cross-AS VM ops and GET/SET_CONTEXT. Without this
+        // check a sandboxed PE could freeze any other process's
+        // threads via a NtOpenThread-style foreign handle and deny
+        // service to the rest of the system. The handle lookup below
+        // accepts both local-thread and foreign-thread handles; the
+        // foreign-thread path is the dangerous one, but gating on
+        // the local-only path is harmless (a process can already
+        // self-DoS by other means).
         Process* caller = CurrentProcess();
+        if (caller == nullptr || !CapSetHas(caller->caps, kCapDebug))
+        {
+            if (caller != nullptr)
+            {
+                RecordSandboxDenial(kCapDebug);
+            }
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
         sched::Task* target = LookupThreadHandle(caller, frame->rdi);
         if (target == nullptr)
         {
@@ -2985,7 +3036,14 @@ void SyscallDispatch(arch::TrapFrame* frame)
         const u64 count = frame->rdi;
         const u64 user_handles_va = frame->rsi;
         const u64 wait_all = frame->rdx;
-        const u64 timeout_ms = frame->r10;
+        // Win32 WaitForMultipleObjects' timeout is u32 (DWORD); the
+        // sibling SYS_THREAD_WAIT already masks frame->rsi to 32 bits
+        // for the same reason. Without the mask, a caller passing
+        // u64-max would slip past the `== kInfinite` check and the
+        // downstream `(timeout_ms + 9) / 10` would wrap u64 to a tiny
+        // value, producing an immediate timeout instead of an infinite
+        // wait.
+        const u64 timeout_ms = frame->r10 & 0xFFFFFFFFu;
 
         if (count == 0 || count > kSyscallWaitMultiMax)
         {

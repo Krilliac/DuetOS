@@ -162,17 +162,20 @@ KObject* HandleTableLookupRef(HandleTable& table, Handle h, KObjectType expected
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
     }
 
-    KObject* obj = HandleTableLookup(src, h, KObjectType::Invalid);
+    // Use the Ref variant so the table-owned reference is bumped under
+    // src.lock — without that, a concurrent HandleTableRemove between
+    // the unlocked Lookup return and our KObjectAcquire could drop the
+    // last reference and free `obj`, leaving us calling Acquire on
+    // freed memory. The matching Release on the error path below balances
+    // the Ref-acquired reference; on success the destination table
+    // inherits ownership of that ref via Insert.
+    KObject* obj = HandleTableLookupRef(src, h, KObjectType::Invalid);
     if (obj == nullptr)
     {
         KLOG_WARN_AV(::duetos::core::LogArea::IPC, "ipc/handle_table", "Duplicate: src handle empty",
                      static_cast<u64>(h));
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
     }
-
-    // Add the destination's reference first. If Insert fails, we
-    // back it out so the refcount is unchanged on Err.
-    KObjectAcquire(obj);
 
     auto inserted = HandleTableInsert(dst, obj);
     if (!inserted.has_value())

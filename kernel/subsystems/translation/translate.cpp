@@ -456,9 +456,20 @@ i64 NtDoDelayExecution(arch::TrapFrame* f)
     // Positive = absolute since 1601 — we don't do absolute;
     // just diff from NowNs for an approximation.
     u64 ns = 0;
+    // NT FILETIME ticks are 100 ns each. A user-supplied interval of
+    // i64-min would underflow `-interval`, and any large absolute
+    // value would overflow `interval * 100`. Cap to a max sleep of
+    // ~14 years (UINT64_MAX/100 ≈ 1.84e17 ns ≈ 5.8 years) so the
+    // downstream tick math stays well-formed.
+    constexpr u64 kMaxIntervalUnits = 0xFFFFFFFFFFFFFFFFULL / 100ULL;
     if (interval < 0)
     {
-        ns = static_cast<u64>(-interval) * 100ull;
+        // Symmetric absolute-value: -i64-min wraps in two's complement
+        // so handle the extreme via the unsigned literal.
+        const u64 abs_val = (interval == (-static_cast<i64>(0x7FFFFFFFFFFFFFFFLL) - 1)) ? 0x8000000000000000ULL
+                                                                                        : static_cast<u64>(-interval);
+        const u64 capped = (abs_val > kMaxIntervalUnits) ? kMaxIntervalUnits : abs_val;
+        ns = capped * 100ull;
     }
     else
     {
@@ -466,7 +477,9 @@ i64 NtDoDelayExecution(arch::TrapFrame* f)
         // Good enough for v0; precise absolute wait arrives with
         // the RTC integration.
         const u64 now_ns = ::duetos::subsystems::linux::LinuxNowNs();
-        const u64 abs_ns = static_cast<u64>(interval) * 100ull;
+        const u64 ticks = static_cast<u64>(interval);
+        const u64 capped = (ticks > kMaxIntervalUnits) ? kMaxIntervalUnits : ticks;
+        const u64 abs_ns = capped * 100ull;
         ns = (abs_ns > now_ns) ? (abs_ns - now_ns) : 0;
     }
     struct

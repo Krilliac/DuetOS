@@ -157,6 +157,16 @@ void ProcessLeafExtents(Volume& v, u32 sector_size, const u8* hdr_buf, u32 hdr_b
             continue;
         for (u16 bi = 0; bi < ext.length_blocks && produced < kMaxRootDirEntries; ++bi)
         {
+            // ext.physical_block is parsed from on-disk data and can lie.
+            // Reject any block number that would overflow when scaled to
+            // bytes by v.block_size — without this the multiplication
+            // wraps u64 and the synthesised lba points somewhere we
+            // didn't intend to read from.
+            if (v.block_size != 0 && ext.physical_block > (u64(-1) - bi) / v.block_size)
+            {
+                any_failed = true;
+                break;
+            }
             const u64 block_phys = ext.physical_block + bi;
             const u64 lba = block_phys * v.block_size / sector_size;
             if (!ReadIntoBlockScratch(v.block_handle, lba, sector_size, v.block_size))
@@ -226,6 +236,13 @@ void WalkExtentIndexTree(Volume& v, u32 sector_size, const u8* root_buf, u32 roo
         }
         const u64 phys = stack[--sp];
         ++visits;
+        // Same overflow guard as the leaf walker above. `phys` came
+        // from a disk-resident extent-index entry — never trust it.
+        if (v.block_size != 0 && phys > u64(-1) / v.block_size)
+        {
+            any_failed = true;
+            break;
+        }
         const u64 lba = phys * v.block_size / sector_size;
         if (drivers::storage::BlockDeviceRead(v.block_handle, lba, count_per_block, g_extent_node_scratch) < 0)
         {

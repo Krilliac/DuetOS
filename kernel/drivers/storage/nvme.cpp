@@ -790,6 +790,15 @@ i32 NvmeDoIo(bool write, u64 lba, u32 count, void* user_buf)
     {
         return -1;
     }
+    // Zero-length transfers are a caller bug: NLB on the wire is
+    // 0-based, so `(count-1) & 0xFFFF` for count=0 wraps to 0xFFFF,
+    // commanding the controller to transfer 0x10000 sectors (32 MiB
+    // at 512 B/sector) into the 4 KiB io_buf. Refuse the call before
+    // we get anywhere near building the SQ entry.
+    if (count == 0)
+    {
+        return -1;
+    }
     // LBA range check: the namespace exposes a finite set of LBAs;
     // a request that runs off the end is a caller bug. Without this
     // guard we'd happily issue an out-of-range NVMe Read/Write and

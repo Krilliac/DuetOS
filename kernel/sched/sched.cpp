@@ -1849,7 +1849,15 @@ void OnTimerTick(u64 now_ticks)
     {
         static volatile u64 s_last_sample = 0;
         const u64 kSamplePeriod = 5ULL * ::duetos::time::TickHz();
-        if (now_ticks - s_last_sample >= kSamplePeriod)
+        // Signed-diff form: `now_ticks - s_last_sample` is unsigned,
+        // so once `now_ticks` wraps past UINT64_MAX -> 0 the
+        // straight comparison would produce a huge positive value
+        // and immediately satisfy the condition forever, or the
+        // opposite (depending on the wrap distance), freezing
+        // loadavg sampling. Cast through i64 so the comparison
+        // works across the wrap. Mirrors the TickReached pattern
+        // at line ~993.
+        if (static_cast<i64>(now_ticks - s_last_sample) >= static_cast<i64>(kSamplePeriod))
         {
             s_last_sample = now_ticks;
             u32 runnable = 0;
@@ -3107,7 +3115,13 @@ bool WaitQueueBlockTimeout(WaitQueue* wq, u64 ticks)
         KASSERT(t->state == TaskState::Running, "sched", "WaitQueueBlockTimeout on non-Running task");
         t->state = TaskState::Blocked;
         t->next = nullptr;
-        t->wake_tick = g_tick_now + ticks;
+        // Saturate the deadline rather than wrap. Without the clamp,
+        // `g_tick_now + ticks` could overflow u64 (e.g., a Linux ABI
+        // caller passing nsec_to_ticks(LLONG_MAX)); the wake-tick
+        // comparator uses signed-diff arithmetic and would then read
+        // the wrapped deadline as already-elapsed, making the wait
+        // return immediately instead of blocking.
+        t->wake_tick = (ticks > (~u64(0) - g_tick_now)) ? ~u64(0) : (g_tick_now + ticks);
         t->waiting_on = wq;
         t->wake_by_timeout = false;
 

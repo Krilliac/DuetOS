@@ -40,12 +40,20 @@ void ByteZero(void* dst, u64 n)
 
 // Decode the UTF-16 name span the Rust dirent walker returned into
 // the caller's ASCII buffer using the project's safe-glyph filter.
-void DecodeDirentName(const u8* buf, const DuetosExfatDirEntry& src, char* out_name, u64 out_cap)
+// `buf_len` is the size of `buf`; without it a malformed dirent set
+// with a bogus `name_offset` from the Rust parser would let this
+// read past `g_dir_scratch`.
+void DecodeDirentName(const u8* buf, u64 buf_len, const DuetosExfatDirEntry& src, char* out_name, u64 out_cap)
 {
     u64 write_pos = 0;
     for (u8 u = 0; u < src.name_units; ++u)
     {
         const u64 byte_off = static_cast<u64>(src.name_offset) + static_cast<u64>(u) * 2;
+        // Each UTF-16 unit is two bytes; reject the unit if either
+        // byte would fall outside the dirent buffer. Truncating here
+        // is safe — we already drop the trailing NUL below.
+        if (byte_off + 1 >= buf_len)
+            break;
         const u16 cp = static_cast<u16>(buf[byte_off]) | (static_cast<u16>(buf[byte_off + 1]) << 8);
         const char c = duetos::util::Utf16CpToSafeAscii(u32(cp));
         if (c == '\0')
@@ -113,7 +121,7 @@ void WalkRootDir(Volume& v)
         slot->valid_data_len = rust_entry.valid_data_len;
         slot->first_cluster = rust_entry.first_cluster;
         slot->size_bytes = rust_entry.size_bytes;
-        DecodeDirentName(g_dir_scratch, rust_entry, slot->name, sizeof(slot->name));
+        DecodeDirentName(g_dir_scratch, bytes_to_read, rust_entry, slot->name, sizeof(slot->name));
         v.root_entry_count = before + 1;
 
         arch::SerialWrite("[exfat]   entry ");

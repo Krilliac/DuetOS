@@ -318,6 +318,16 @@ bool Fat32Probe(u32 block_handle, u32* out_index)
     v.fat_size_sectors = LeU32(g_scratch + 36);
     v.total_sectors = LeU32(g_scratch + 32);
     v.root_cluster = LeU32(g_scratch + 44);
+    // Cluster numbers 0 and 1 are reserved (FAT[0] holds the media
+    // descriptor + dirty flag; FAT[1] is unused on FAT32). A BPB
+    // claiming root_cluster < 2 would make WalkDirChain bail
+    // immediately on the < 2 guard and the volume would look
+    // permanently empty without any operator-visible warning.
+    if (v.root_cluster < 2)
+    {
+        core::Log(core::LogLevel::Warn, "fs/fat32", "BPB root_cluster < 2 — refusing volume");
+        return false;
+    }
 
     // v0 sanity checks: 512 B sectors, a real cluster size, ≥1 FAT.
     if (v.bytes_per_sector != 512 || v.sectors_per_cluster == 0 || v.num_fats == 0 || v.fat_size_sectors == 0)
@@ -325,7 +335,19 @@ bool Fat32Probe(u32 block_handle, u32* out_index)
         core::Log(core::LogLevel::Warn, "fs/fat32", "BPB has unsupported geometry");
         return false;
     }
-    v.data_start_sector = v.reserved_sectors + v.num_fats * v.fat_size_sectors;
+    // Compute data-start in 64 bits so a malformed BPB whose
+    // `num_fats * fat_size_sectors` overflows u32 doesn't wrap into
+    // the low LBAs. Reject if the result wouldn't fit back into the
+    // u32 field — a real FAT32 volume tops out around 2 TiB so a
+    // value past u32-max means the BPB is lying.
+    const u64 fat_extent = static_cast<u64>(v.num_fats) * static_cast<u64>(v.fat_size_sectors);
+    const u64 data_start_u64 = static_cast<u64>(v.reserved_sectors) + fat_extent;
+    if (data_start_u64 > 0xFFFFFFFFULL)
+    {
+        core::Log(core::LogLevel::Warn, "fs/fat32", "BPB data_start_sector overflows u32 — refusing volume");
+        return false;
+    }
+    v.data_start_sector = static_cast<u32>(data_start_u64);
 
     SerialWrite("[fs/fat32] volume:");
     SerialWrite(" handle=");

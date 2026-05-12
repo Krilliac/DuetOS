@@ -1268,6 +1268,13 @@ void Dispatch(char* line)
     }
     if (StrEq(cmd, "dhcp"))
     {
+        // `dhcp renew` / `dhcp request` / `dhcp start` send DISCOVER
+        // and reconfigure the system's IP. Read-only `dhcp` (status)
+        // is inside CmdDhcp; the verbs that mutate state are gated
+        // here so an unprivileged shell-redirect can't reroute the
+        // box onto a hostile gateway.
+        if (!RequireAdmin("DHCP"))
+            return;
         CmdDhcp(argc, argv);
         return;
     }
@@ -1283,16 +1290,30 @@ void Dispatch(char* line)
     }
     if (StrEq(cmd, "wifi"))
     {
+        // `wifi connect/disconnect/activate` mutates wireless
+        // association — same threat class as DHCP renew.
+        if (!RequireAdmin("WIFI"))
+            return;
         CmdWifi(argc, argv);
         return;
     }
     if (StrEq(cmd, "firewall"))
     {
+        // Firewall rules + default policy are kernel-enforced packet
+        // filtering. Unprivileged mutation lets an attacker disable
+        // filtering or steer traffic; gate the whole verb.
+        if (!RequireAdmin("FIREWALL"))
+            return;
         CmdFirewall(argc, argv);
         return;
     }
     if (StrEq(cmd, "fwpolicy"))
     {
+        // Firmware-source policy decides whether the kernel will
+        // load open-source vs vendor-signed firmware blobs. Switching
+        // it without admin is a code-signing bypass.
+        if (!RequireAdmin("FWPOLICY"))
+            return;
         CmdFwPolicy(argc, argv);
         return;
     }
@@ -1315,6 +1336,12 @@ void Dispatch(char* line)
     }
     if (StrEq(cmd, "net"))
     {
+        // `net up` runs DhcpStart on iface 0 and rebinds the IP. Same
+        // mutation surface as `dhcp renew` — gate it. Read-only `net`
+        // subverbs (status / show) live inside CmdNet; an admin still
+        // sees those once they're past this gate.
+        if (!RequireAdmin("NET"))
+            return;
         CmdNet(argc, argv);
         return;
     }
@@ -1396,11 +1423,22 @@ void Dispatch(char* line)
     }
     if (StrEq(cmd, "instr"))
     {
+        // Disassembles arbitrary kernel memory. Same threat class
+        // as memdump / read — gate to admin so an unprivileged
+        // shell-redirect can't dump kernel code or peek at secrets
+        // by walking instruction byte streams.
+        if (!RequireAdmin("INSTR"))
+            return;
         CmdInstr(argc, argv);
         return;
     }
     if (StrEq(cmd, "addr2sym"))
     {
+        // Reverse-symbol-lookup exposes KASLR layout / kernel
+        // function bases. Gate to admin so an unprivileged probe
+        // can't enumerate the kernel symbol map.
+        if (!RequireAdmin("ADDR2SYM"))
+            return;
         CmdAddr2Sym(argc, argv);
         return;
     }

@@ -556,6 +556,12 @@ u64 WriteForProcess(::duetos::core::Process* proc, u64 handle, const void* src, 
         return u64(-1);
 
     const u64 size = h.fat32_entry.size_bytes;
+    // Overflow-safe: if `h.cursor + len` wraps u64 we'd mis-classify
+    // a humongous write as an in-place fast-path write. The cursor is
+    // bounded by FAT32's 4 GiB file-size cap, but `len` is the
+    // user-supplied count and can be u64-max. Use subtractive form.
+    if (len > (u64(-1) - h.cursor))
+        return u64(-1);
     const u64 end = h.cursor + len;
 
     // In-place fast path: write entirely within the existing file.

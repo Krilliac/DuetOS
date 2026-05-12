@@ -56,6 +56,12 @@ __declspec(dllexport) void free(void* ptr)
 
 __declspec(dllexport) NO_BUILTIN_MEM void* calloc(size_t n, size_t size)
 {
+    /* Overflow guard: `n * size` is the textbook calloc footgun.
+     * Without this check, calloc(0x100000000, 0x100000000) wraps to
+     * total=0, malloc returns a near-empty block, and the caller
+     * writes off the end. Reject before the multiply. */
+    if (n != 0 && size > (size_t)-1 / n)
+        return (void*)0;
     const size_t total = n * size;
     void* p = malloc(total);
     if (p == (void*)0)

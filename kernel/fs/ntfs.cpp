@@ -40,7 +40,7 @@ void ByteZero(void* dst, u64 n)
 // Decode the resident $FILE_NAME UTF-16 name into the caller's
 // ASCII buffer using the project's safe-glyph filter. Returns true
 // if at least one code unit decoded into a printable ASCII glyph.
-bool DecodeFileName(const u8* rec, const DuetosNtfsFileNameSpan& span, char* out_name, u64 out_cap)
+bool DecodeFileName(const u8* rec, u64 rec_len, const DuetosNtfsFileNameSpan& span, char* out_name, u64 out_cap)
 {
     if (span.ok == 0 || out_cap == 0)
         return false;
@@ -48,6 +48,11 @@ bool DecodeFileName(const u8* rec, const DuetosNtfsFileNameSpan& span, char* out
     for (u32 u = 0; u < span.utf16_units; ++u)
     {
         const u64 byte_off = static_cast<u64>(span.utf16_offset) + static_cast<u64>(u) * 2;
+        // Bound the read against the MFT record we were handed. A
+        // malformed $FILE_NAME span from the Rust parser would
+        // otherwise let this read past the scratch buffer's end.
+        if (byte_off + 1 >= rec_len)
+            break;
         const u16 cp = static_cast<u16>(rec[byte_off]) | (static_cast<u16>(rec[byte_off + 1]) << 8);
         const char c = duetos::util::Utf16CpToSafeAscii(u32(cp));
         if (c == '\0')
@@ -98,7 +103,7 @@ void WalkSystemRecords(Volume& v)
         DuetosNtfsFileNameSpan span{};
         const bool got_name =
             duetos_ntfs_find_resident_file_name(g_mft_scratch, v.mft_record_size, v.mft_record_size, &span) &&
-            DecodeFileName(g_mft_scratch, span, slot.name, sizeof(slot.name));
+            DecodeFileName(g_mft_scratch, v.mft_record_size, span, slot.name, sizeof(slot.name));
         if (!got_name)
         {
             slot.name[0] = '?';

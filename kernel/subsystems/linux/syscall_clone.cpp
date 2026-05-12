@@ -59,6 +59,9 @@ namespace
 // CLONE_VM (0x100) + CLONE_THREAD (0x10000) are required;
 // CLONE_PARENT_SETTID (0x100000) toggles the *ptid write-back.
 constexpr u64 kCloneVm = 0x00000100;
+constexpr u64 kCloneFs = 0x00000200;
+constexpr u64 kCloneFiles = 0x00000400;
+constexpr u64 kCloneSighand = 0x00000800;
 constexpr u64 kCloneThread = 0x00010000;
 constexpr u64 kCloneParentSettid = 0x00100000;
 
@@ -175,6 +178,20 @@ i64 DoFork()
     child->linux_brk_base = parent->linux_brk_base;
     child->linux_brk_current = parent->linux_brk_current;
     child->linux_mmap_cursor = parent->linux_mmap_cursor;
+    // POSIX fork(2): the child inherits the parent's signal mask
+    // and sigaction table; the pending-signal set is cleared. v0
+    // ProcessCreate zero-initialises these fields, so without the
+    // explicit copy below a parent that blocked SIGTERM would fork
+    // a child whose mask is empty — and a parent that installed a
+    // SIGCHLD handler would fork a child that silently uses the
+    // default action.
+    child->linux_signal_mask = parent->linux_signal_mask;
+    for (u32 i = 0; i < ::duetos::core::Process::kLinuxSignalCount; ++i)
+    {
+        child->linux_sigactions[i] = parent->linux_sigactions[i];
+    }
+    // Pending signals MUST start empty per POSIX.
+    child->linux_pending_signals = 0;
     // Establish the parent-pid linkage so the child's eventual exit
     // path (in ProcessRelease) finds this Process and pushes onto
     // the linux_wait_wq for any in-flight wait4 caller.
@@ -258,6 +275,21 @@ i64 DoClone(u64 flags, u64 child_stack, u64 ptid_user, u64 ctid_user, u64 tls)
     {
         core::RecordSandboxDenial(core::kCapSpawnThread);
         return kEPERM;
+    }
+
+    // POSIX/Linux invariants on flag combinations. Real Linux returns
+    // -EINVAL when any of these "must-pair" flags appears without
+    // CLONE_VM (because they only make sense for an in-process
+    // thread). Without this gate a caller could pass
+    // `CLONE_SIGHAND` alone, hit the fork-style path, and end up with
+    // a child that the caller believed was a thread — confusing
+    // semantics that a future SMP scheduler refactor could turn into
+    // an exploitable inconsistency.
+    if ((flags & kCloneVm) == 0)
+    {
+        constexpr u64 kRequiresVm = kCloneSighand | kCloneThread | kCloneFs | kCloneFiles;
+        if ((flags & kRequiresVm) != 0)
+            return kEINVAL;
     }
 
     // CLONE_THREAD-not-set is the fork-style call: new AS, new

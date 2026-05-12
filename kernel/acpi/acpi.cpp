@@ -409,7 +409,12 @@ const SdtHeader* FindTable(const Rsdp& rsdp, const char* sig4)
             PanicAcpi("XSDT checksum failed");
         }
 
-        const u64 count = (xsdt->length - sizeof(SdtHeader)) / sizeof(u64);
+        // Subtractive bound: a malformed XSDT with `length` less than
+        // the header itself would wrap the subtraction to a huge u64
+        // and the loop would walk hundreds of garbage bytes past the
+        // table's end. The checksum guard above doesn't catch this —
+        // a bad-length table can still sum to zero.
+        const u64 count = (xsdt->length >= sizeof(SdtHeader)) ? (xsdt->length - sizeof(SdtHeader)) / sizeof(u64) : 0;
         for (u64 i = 0; i < count; ++i)
         {
             const auto* h = PhysToHeader(XsdtEntryAt(xsdt, i));
@@ -431,7 +436,8 @@ const SdtHeader* FindTable(const Rsdp& rsdp, const char* sig4)
         PanicAcpi("RSDT checksum failed");
     }
 
-    const u64 count = (rsdt->length - sizeof(SdtHeader)) / sizeof(u32);
+    // Same underflow guard as the XSDT path above.
+    const u64 count = (rsdt->length >= sizeof(SdtHeader)) ? (rsdt->length - sizeof(SdtHeader)) / sizeof(u32) : 0;
     const auto* entries = reinterpret_cast<const u32*>(reinterpret_cast<uptr>(rsdt) + sizeof(SdtHeader));
     for (u64 i = 0; i < count; ++i)
     {
