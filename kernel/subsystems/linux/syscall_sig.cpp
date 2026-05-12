@@ -149,6 +149,18 @@ i64 DoRtSigaction(u64 signum, u64 new_act, u64 old_act, u64 sigsetsize)
     (void)sigsetsize; // we always store a single u64 mask
     if (signum == 0 || signum >= core::Process::kLinuxSignalCount)
         return kEINVAL;
+    // POSIX: SIGKILL (9) and SIGSTOP (19) MUST NOT have user-installable
+    // handlers. Linux rejects with -EINVAL at the syscall boundary. We
+    // do force-default these at delivery time (signal_deliver.cpp:148),
+    // but storing the user-supplied handler still pollutes the slot
+    // table — subsequent rt_sigaction queries observe it, and a future
+    // refactor that loses the force-default check would suddenly start
+    // dispatching the handler. Reject up-front so the contract holds
+    // independent of the delivery path's defenses.
+    constexpr u32 kSIGKILL = 9;
+    constexpr u32 kSIGSTOP = 19;
+    if (signum == kSIGKILL || signum == kSIGSTOP)
+        return kEINVAL;
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
         return kEINVAL;
@@ -203,6 +215,14 @@ i64 DoRtSigprocmask(u64 how, u64 user_set, u64 user_oldset, u64 sigsetsize)
         u64 set = 0;
         if (!mm::CopyFromUser(&set, reinterpret_cast<const void*>(user_set), sizeof(set)))
             return kEFAULT;
+        // POSIX: SIGKILL and SIGSTOP can never be blocked. Linux
+        // silently strips them from any incoming mask; mirror that
+        // so the stored mask never observably blocks them, even
+        // briefly.
+        constexpr u32 kSIGKILL = 9;
+        constexpr u32 kSIGSTOP = 19;
+        constexpr u64 kUnblockable = (1ULL << kSIGKILL) | (1ULL << kSIGSTOP);
+        set &= ~kUnblockable;
         switch (how)
         {
         case kSigBlock:
