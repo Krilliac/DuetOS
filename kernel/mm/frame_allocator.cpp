@@ -475,6 +475,64 @@ void FrameAllocatorInit(uptr multiboot_info_phys)
 namespace
 {
 
+// Walk [lo, hi) byte-wise looking for any 0 bit. Returns the frame
+// index of the first free bit found, or g_bitmap_frames on miss.
+// Whole-byte stride lets a fully-used 8-frame region be rejected
+// in a single load + compare instead of 8 bit tests, which is the
+// dominant cost on a large mostly-used bitmap.
+u64 BitmapFindFreeLinear(u64 lo, u64 hi)
+{
+    if (lo >= hi)
+        return g_bitmap_frames;
+    // Handle the (possibly partial) first byte explicitly so the
+    // bulk loop below can assume byte-aligned input.
+    u64 byte_idx = lo >> 3;
+    const u32 head_bit = static_cast<u32>(lo & 7u);
+    if (head_bit != 0)
+    {
+        u8 byte = g_bitmap[byte_idx];
+        // Mask off bits below lo so we don't return a stale free
+        // bit that came before our search window.
+        const u8 head_mask = static_cast<u8>((1u << head_bit) - 1u);
+        const u8 cand = static_cast<u8>((~byte) & static_cast<u8>(~head_mask));
+        if (cand != 0)
+        {
+            const u32 bit = static_cast<u32>(__builtin_ctz(cand));
+            const u64 frame = (byte_idx << 3) + bit;
+            if (frame < hi)
+                return frame;
+            return g_bitmap_frames;
+        }
+        ++byte_idx;
+    }
+    // Bulk: byte at a time. Stop at the byte containing hi-1.
+    const u64 end_byte = hi >> 3; // exclusive upper for full-byte loop
+    while (byte_idx < end_byte)
+    {
+        const u8 byte = g_bitmap[byte_idx];
+        if (byte != 0xFFu)
+        {
+            const u32 bit = static_cast<u32>(__builtin_ctz(static_cast<u8>(~byte)));
+            return (byte_idx << 3) + bit;
+        }
+        ++byte_idx;
+    }
+    // Final (possibly partial) tail byte if hi is not byte-aligned.
+    const u32 tail_bit = static_cast<u32>(hi & 7u);
+    if (tail_bit != 0)
+    {
+        const u8 byte = g_bitmap[byte_idx];
+        const u8 tail_mask = static_cast<u8>((1u << tail_bit) - 1u);
+        const u8 cand = static_cast<u8>((~byte) & tail_mask);
+        if (cand != 0)
+        {
+            const u32 bit = static_cast<u32>(__builtin_ctz(cand));
+            return (byte_idx << 3) + bit;
+        }
+    }
+    return g_bitmap_frames;
+}
+
 u64 BitmapFindFreeBelow(u64 max_frames)
 {
     if (max_frames > g_bitmap_frames)
@@ -482,13 +540,16 @@ u64 BitmapFindFreeBelow(u64 max_frames)
     if (max_frames == 0)
         return g_bitmap_frames;
     const u64 start = (g_next_hint < max_frames) ? g_next_hint : 0;
-    for (u64 i = 0; i < max_frames; ++i)
+    // Linearize the wrap: scan [start, max_frames) first, then
+    // [0, start). Each half drives the byte-stride scan helper.
+    const u64 first = BitmapFindFreeLinear(start, max_frames);
+    if (first < g_bitmap_frames)
+        return first;
+    if (start > 0)
     {
-        u64 frame = start + i;
-        if (frame >= max_frames)
-            frame -= max_frames;
-        if (!BitmapIsUsed(frame))
-            return frame;
+        const u64 second = BitmapFindFreeLinear(0, start);
+        if (second < g_bitmap_frames)
+            return second;
     }
     return g_bitmap_frames;
 }
@@ -506,14 +567,16 @@ u64 BitmapFindFreeInRange(u64 lo, u64 hi, u64 hint)
         return g_bitmap_frames;
     if (hint < lo || hint >= hi)
         hint = lo;
-    const u64 span = hi - lo;
-    for (u64 i = 0; i < span; ++i)
+    // Linearize the wrap and let the byte-stride scanner do both
+    // halves; identical structure to BitmapFindFreeBelow above.
+    const u64 first = BitmapFindFreeLinear(hint, hi);
+    if (first < g_bitmap_frames)
+        return first;
+    if (hint > lo)
     {
-        u64 frame = hint + i;
-        if (frame >= hi)
-            frame -= span;
-        if (!BitmapIsUsed(frame))
-            return frame;
+        const u64 second = BitmapFindFreeLinear(lo, hint);
+        if (second < g_bitmap_frames)
+            return second;
     }
     return g_bitmap_frames;
 }

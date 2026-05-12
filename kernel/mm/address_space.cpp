@@ -389,6 +389,52 @@ void AddressSpaceMapUserPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 fla
     ++as->region_count;
 }
 
+namespace
+{
+// Inner unmap: drop the region at `idx`, clear its PTE, broadcast
+// TLB shootdown, free the frame. Caller has already located the
+// row — UnmapUserPage scans first, while ClearUserMappings hands
+// in `region_count - 1` to avoid an O(n) scan on every teardown
+// step.
+void UnmapUserPageByIndex(AddressSpace* as, u16 idx)
+{
+    const u64 virt = as->regions[idx].vaddr;
+    const PhysAddr frame = as->regions[idx].frame;
+
+    // Clear the leaf PTE. If the walk can't find one the tables
+    // are corrupt relative to the region table — panic so the gap
+    // is visible, rather than silently leaving the region list out
+    // of sync with the page tables.
+    u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/false);
+    if (pte == nullptr || (*pte & kPagePresent) == 0)
+    {
+        PanicAs("AddressSpaceUnmapUserPage: region table claims mapping but PTE absent", virt);
+    }
+    *pte = 0;
+
+    // Flush both the local TLB (if this CPU is in `as`) AND every
+    // peer CPU whose CR3 also maps `as`. On uniprocessor the helper
+    // collapses to the local invlpg; on SMP it sends a TLB-shootdown
+    // IPI and waits for ack. See wiki/security/Linux-CVE-Audit.md
+    // class FF for the threat model — without the broadcast, a peer
+    // CPU keeps writing through a stale RW TLB entry to a frame
+    // that's been recycled into a different process.
+    TlbShootdownAddr(as, virt);
+
+    // Compact the region table — swap the dying slot with the last
+    // in-use slot. Order doesn't matter; destroy walks `region_count`
+    // entries.
+    const u16 last = u16(as->region_count - 1);
+    if (idx != last)
+    {
+        as->regions[idx] = as->regions[last];
+    }
+    --as->region_count;
+
+    FreeFrame(frame);
+}
+} // namespace
+
 bool AddressSpaceUnmapUserPage(AddressSpace* as, u64 virt)
 {
     if (as == nullptr)
@@ -415,39 +461,7 @@ bool AddressSpaceUnmapUserPage(AddressSpace* as, u64 virt)
     {
         return false;
     }
-    const PhysAddr frame = as->regions[found].frame;
-
-    // Clear the leaf PTE. If the walk can't find one the tables
-    // are corrupt relative to the region table — panic so the gap
-    // is visible, rather than silently leaving the region list out
-    // of sync with the page tables.
-    u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/false);
-    if (pte == nullptr || (*pte & kPagePresent) == 0)
-    {
-        PanicAs("AddressSpaceUnmapUserPage: region table claims mapping but PTE absent", virt);
-    }
-    *pte = 0;
-
-    // Flush both the local TLB (if this CPU is in `as`) AND every
-    // peer CPU whose CR3 also maps `as`. On uniprocessor the helper
-    // collapses to the local invlpg; on SMP it sends a TLB-shootdown
-    // IPI and waits for ack. See wiki/security/Linux-CVE-Audit.md
-    // class FF for the threat model — without the broadcast, a peer
-    // CPU keeps writing through a stale RW TLB entry to a frame
-    // that's been recycled into a different process.
-    TlbShootdownAddr(as, virt);
-
-    // Compact the region table — swap the dying slot with the last
-    // in-use slot. Order doesn't matter; destroy walks `region_count`
-    // entries.
-    const u16 last = u16(as->region_count - 1);
-    if (found != last)
-    {
-        as->regions[found] = as->regions[last];
-    }
-    --as->region_count;
-
-    FreeFrame(frame);
+    UnmapUserPageByIndex(as, found);
     return true;
 }
 
@@ -566,15 +580,15 @@ void AddressSpaceClearUserMappings(AddressSpace* as)
 {
     if (as == nullptr)
         return;
-    // Walk the regions table backward — popping from the tail
-    // costs O(n) cumulative instead of O(n²) since each
-    // UnmapUserPage's linear scan finds the entry at index 0.
+    // Pop entries off the tail. UnmapUserPageByIndex handles the
+    // PTE clear + TLB shootdown + frame free + region-table
+    // decrement; passing the index directly avoids the linear
+    // scan AddressSpaceUnmapUserPage does, taking teardown from
+    // O(n²) (each Unmap scans the full table to find the va we
+    // already knew the index of) down to O(n).
     while (as->region_count > 0)
     {
-        const u64 va = as->regions[as->region_count - 1].vaddr;
-        // UnmapUserPage decrements region_count + frees the
-        // backing frame for us. Don't predecrement here.
-        (void)AddressSpaceUnmapUserPage(as, va);
+        UnmapUserPageByIndex(as, u16(as->region_count - 1));
     }
 }
 

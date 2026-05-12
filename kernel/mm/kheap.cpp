@@ -194,6 +194,12 @@ inline bool ChunkAdjacent(const ChunkHeader* lhs, const ChunkHeader* rhs)
 // Insert `chunk` into the address-ordered freelist and coalesce with the
 // neighbours that turn out to be physically adjacent. Returns nothing —
 // the freelist invariant is restored before this returns.
+//
+// The freelist is singly-linked but address-sorted, so the insertion
+// walk already produces the predecessor (or nullptr for "insert at
+// head") for free. Reuse that predecessor for the backward coalesce
+// instead of re-walking the list — KFree was previously paying the
+// O(n) cost twice per free.
 void FreelistInsertAndCoalesce(ChunkHeader* chunk)
 {
     chunk->next = nullptr;
@@ -204,6 +210,7 @@ void FreelistInsertAndCoalesce(ChunkHeader* chunk)
         return;
     }
 
+    ChunkHeader* prev = nullptr;
     if (chunk < g_freelist)
     {
         chunk->next = g_freelist;
@@ -223,6 +230,7 @@ void FreelistInsertAndCoalesce(ChunkHeader* chunk)
         }
         chunk->next = cursor->next;
         cursor->next = chunk;
+        prev = cursor;
     }
 
     // Coalesce forward (chunk + next). Verify magic before folding —
@@ -235,21 +243,14 @@ void FreelistInsertAndCoalesce(ChunkHeader* chunk)
         chunk->next = chunk->next->next;
     }
 
-    // Coalesce backward (prev + chunk). Need a second walk to find prev,
-    // since the freelist is singly-linked. v0: pay the O(n) cost.
-    if (chunk != g_freelist)
+    // Coalesce backward (prev + chunk). `prev` was captured during the
+    // insertion walk above; nullptr means `chunk` is the new head and
+    // has no predecessor to coalesce with.
+    if (prev != nullptr && ChunkAdjacent(prev, chunk))
     {
-        ChunkHeader* prev = g_freelist;
-        while (prev->next != chunk)
-        {
-            prev = prev->next;
-        }
-        if (ChunkAdjacent(prev, chunk))
-        {
-            AssertMagic(prev, kHeapMagicFree, "Coalesce: backward neighbour not Free");
-            prev->size += chunk->size;
-            prev->next = chunk->next;
-        }
+        AssertMagic(prev, kHeapMagicFree, "Coalesce: backward neighbour not Free");
+        prev->size += chunk->size;
+        prev->next = chunk->next;
     }
 }
 
