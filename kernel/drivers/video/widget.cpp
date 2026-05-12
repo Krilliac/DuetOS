@@ -2340,6 +2340,28 @@ bool WindowAnyMessagePending(u64 pid)
     return false;
 }
 
+bool WindowPeekMessageAny(u64 pid, WindowMsg* out)
+{
+    if (pid == 0 || out == nullptr)
+    {
+        return false;
+    }
+    // Fused walk: direct field reads instead of WindowIsAlive +
+    // WindowOwnerPid + WindowPeekMessage per iteration. Each of
+    // those public APIs revalidates the handle; we already know
+    // i < g_window_count and we're reading the live struct
+    // directly.
+    for (u32 i = 0; i < g_window_count; ++i)
+    {
+        const auto& w = g_windows[i];
+        if (!w.alive || w.owner_pid != pid || w.msgs.count == 0)
+            continue;
+        *out = w.msgs.buf[w.msgs.head];
+        return true;
+    }
+    return false;
+}
+
 u32 WindowReapByOwner(u64 pid)
 {
     if (pid == 0)

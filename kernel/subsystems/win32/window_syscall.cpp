@@ -522,14 +522,7 @@ void DoWinPeekMsg(arch::TrapFrame* frame)
         }
         else
         {
-            for (u32 i = 0; i < kMaxWindows; ++i)
-            {
-                if (WindowIsAlive(i) && WindowOwnerPid(i) == proc->pid && WindowPeekMessage(i, &m))
-                {
-                    got = true;
-                    break;
-                }
-            }
+            got = WindowPeekMessageAny(proc->pid, &m);
         }
     }
     else
