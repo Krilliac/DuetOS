@@ -1564,7 +1564,15 @@ void SyscallDispatch(arch::TrapFrame* frame)
             u32 i = kPrefixLen;
             while (i < path_len && kpath[i] >= '0' && kpath[i] <= '9')
             {
-                disk_idx = disk_idx * 10 + static_cast<u32>(kpath[i] - '0');
+                // Saturate so a long decimal run can't silently wrap
+                // past kMaxVolumes and re-enter the valid range.
+                const u32 digit = static_cast<u32>(kpath[i] - '0');
+                if (disk_idx > (0xFFFFFFFFu - digit) / 10)
+                {
+                    frame->rax = static_cast<u64>(-1);
+                    return;
+                }
+                disk_idx = disk_idx * 10 + digit;
                 ++i;
             }
             if (i == kPrefixLen || i >= path_len || kpath[i] != '/')

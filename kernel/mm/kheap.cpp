@@ -296,6 +296,16 @@ void* KMalloc(u64 bytes)
     {
         return nullptr;
     }
+    // Reject obviously-insane sizes BEFORE the RoundUp + add below.
+    // Without this gate, `bytes` near u64-max would wrap `needed` to
+    // a tiny value and the chunk-fit loop would happily satisfy the
+    // request from a small free chunk — the caller then writes off
+    // the end. `g_pool_bytes` is the actual ceiling (nothing larger
+    // than the pool itself can ever fit), so use that.
+    if (bytes >= g_pool_bytes)
+    {
+        return nullptr;
+    }
     // IRQ-disable for the duration of the alloc — bracketing the
     // freelist + bins mutation matches the rest of the allocator
     // family (frame allocator, slab). See KheapIrqOff above.

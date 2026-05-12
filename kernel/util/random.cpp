@@ -8,6 +8,16 @@
 #include "log/klog.h"
 #include "core/panic.h"
 
+// Image-base symbols from the linker script — used as a last-ditch
+// non-constant input to the splitmix seed when every clock reads
+// zero. UEFI / KASLR loaders place the kernel at a runtime-chosen
+// address, so the address of `_kernel_start_phys` differs boot-to-
+// boot even on a deterministic VM where TSC / HPET / tick are all
+// synchronised at zero. Without this the fallback seed is a single
+// compiled-in constant, which is observable in the binary.
+extern "C" char _kernel_start_phys[];
+extern "C" char _kernel_end_phys[];
+
 namespace duetos::core
 {
 
@@ -107,6 +117,15 @@ void RandomInit()
     g_splitmix_state = ReadTsc();
     g_splitmix_state ^= arch::HpetReadCounter();
     g_splitmix_state ^= ::duetos::time::TickCount() << 32;
+    // Mix in the kernel image base AND the address of a stack-local
+    // so we still have boot-to-boot variation under KASLR even on a
+    // deterministic VM where every clock reads zero. The constant
+    // tail is just a domain-separator; the load-bearing entropy is
+    // the address bits the loader randomised.
+    volatile u8 stack_anchor = 0;
+    g_splitmix_state ^= reinterpret_cast<u64>(_kernel_start_phys);
+    g_splitmix_state ^= reinterpret_cast<u64>(_kernel_end_phys) << 16;
+    g_splitmix_state ^= reinterpret_cast<u64>(&stack_anchor);
     if (g_splitmix_state == 0)
         g_splitmix_state = 0xCAFEBABE12345678ULL;
 

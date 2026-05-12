@@ -359,7 +359,10 @@ i32 AhciBlockRead(void* cookie, u64 lba, u32 count, void* buf)
         return -1;
     if (count == 0 || count > kMaxSectorsPerXfer)
         return -1;
-    if (lba + count > p->sector_count)
+    // Subtractive bound: `lba + count` could wrap if a caller passes
+    // an lba near u64-max. Test the upper edge by subtracting from
+    // `sector_count` instead so the sum is never computed.
+    if (lba > p->sector_count || count > p->sector_count - lba)
         return -1;
 
     // Translate caller buffer to phys. Block layer guarantees
@@ -388,7 +391,8 @@ i32 AhciBlockWrite(void* cookie, u64 lba, u32 count, const void* buf)
         return -1;
     if (count == 0 || count > kMaxSectorsPerXfer)
         return -1;
-    if (lba + count > p->sector_count)
+    // Subtractive bound — mirror of the read path's overflow guard.
+    if (lba > p->sector_count || count > p->sector_count - lba)
         return -1;
 
     // Mirror of read path: translate caller buffer, issue slot 0
