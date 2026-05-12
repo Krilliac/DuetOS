@@ -669,6 +669,7 @@ const char* const kCommandSet[] = {
     "tty",         "type",      "printenv",  "df",         "du",        "loadavg",  "clearhist", "pause",
     "yes",         "sync",      "port",      "assert",     "watch",     "script",   "exit",      "mkfs",
     "mkfs.duetfs", "install",   "lastdump",  "loadtest",   "stress",    "bench",    "dbg",       "dfix",
+    "drshd",
 };
 const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1244,6 +1245,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "http"))
     {
         CmdHttp(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "drshd"))
+    {
+        CmdDrshd(argc, argv);
         return;
     }
     if (StrEq(cmd, "nic") || StrEq(cmd, "lsnic") || StrEq(cmd, "ip"))

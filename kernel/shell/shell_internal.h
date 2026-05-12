@@ -389,6 +389,7 @@ void CmdCrTrace(u32 argc, char** argv);
 void CmdNet(u32 argc, char** argv);
 void CmdUsbNet(u32 argc, char** argv);
 void CmdBt(u32 argc, char** argv);
+void CmdDrshd(u32 argc, char** argv);
 
 // ---------------------------------------------------------------
 // Kernel debug + introspection commands (shell_debug.cpp).
