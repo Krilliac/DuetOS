@@ -1221,9 +1221,105 @@ u8 DecodeOne(const u8* bytes, u64 available, u64 va, DecodedInsn* out)
             record_bytes(cur);
             return cur;
         }
-        // GAP: remaining 0x0F-prefix opcodes (BSWAP, BT/BTS/BTC,
-        // POPCNT, etc.) decode as `db` until they earn a slice.
-        FIX_NOTE_GAP("debug/disasm.cpp:0x0F-prefix", "decode BSWAP/BT/BSF/BSR/POPCNT");
+        // 0F BC: BSF r{16,32,64}, r/m{16,32,64} — bit scan forward.
+        // 0F BD: BSR r{16,32,64}, r/m{16,32,64} — bit scan reverse.
+        if (op2 == 0xBC || op2 == 0xBD)
+        {
+            if (cur >= available)
+                return fail_db(op);
+            const ModRm mr = DecodeModRmByte(bytes[cur], p);
+            ++cur;
+            const OpW w = GprWidth(p, false);
+            char rm_buf[48] = {0};
+            const u8 rm_extra = FormatRmOperand(rm_buf, sizeof(rm_buf), mr, w, w, p, &bytes[cur], available - cur);
+            if (rm_extra == 0xFF)
+                return fail_db(op);
+            cur += rm_extra;
+            StrCopy(out->mnemonic, kBufMnem, op2 == 0xBC ? "bsf" : "bsr");
+            StrAppend(out->operands, kBufOpr, RegName(mr.reg_idx, w, p.rex_seen));
+            StrAppend(out->operands, kBufOpr, ", ");
+            StrAppend(out->operands, kBufOpr, rm_buf);
+            out->len = cur;
+            out->decoded = true;
+            record_bytes(cur);
+            return cur;
+        }
+        // 0F C8..CF: BSWAP r{32,64} — operand in low 3 bits + REX.B.
+        // No ModR/M byte. 0x66 prefix produces an undefined encoding
+        // on Intel; refuse it as `db` rather than guess.
+        if (op2 >= 0xC8 && op2 <= 0xCF)
+        {
+            if (p.osize)
+                return fail_db(op);
+            const OpW w = p.rex_w ? OpW::Q64 : OpW::D32;
+            const u8 reg_idx = (op2 & 0x7) | (p.rex_b ? 0x8 : 0);
+            StrCopy(out->mnemonic, kBufMnem, "bswap");
+            StrAppend(out->operands, kBufOpr, RegName(reg_idx, w, p.rex_seen));
+            out->len = cur;
+            out->decoded = true;
+            record_bytes(cur);
+            return cur;
+        }
+        // 0F A3 + ModR/M: BT r/m, r (bit test).
+        // 0F AB / B3 / BB: BTS / BTR / BTC (set / reset / complement).
+        if (op2 == 0xA3 || op2 == 0xAB || op2 == 0xB3 || op2 == 0xBB)
+        {
+            if (cur >= available)
+                return fail_db(op);
+            const ModRm mr = DecodeModRmByte(bytes[cur], p);
+            ++cur;
+            const OpW w = GprWidth(p, false);
+            char rm_buf[48] = {0};
+            const u8 rm_extra = FormatRmOperand(rm_buf, sizeof(rm_buf), mr, w, w, p, &bytes[cur], available - cur);
+            if (rm_extra == 0xFF)
+                return fail_db(op);
+            cur += rm_extra;
+            const char* mnem = (op2 == 0xA3) ? "bt" : (op2 == 0xAB) ? "bts" : (op2 == 0xB3) ? "btr" : "btc";
+            StrCopy(out->mnemonic, kBufMnem, mnem);
+            StrAppend(out->operands, kBufOpr, rm_buf);
+            StrAppend(out->operands, kBufOpr, ", ");
+            StrAppend(out->operands, kBufOpr, RegName(mr.reg_idx, w, p.rex_seen));
+            out->len = cur;
+            out->decoded = true;
+            record_bytes(cur);
+            return cur;
+        }
+        // 0F BA /4..7 + ModR/M + imm8: BT/BTS/BTR/BTC r/m, imm8.
+        // ModR/M.reg field encodes the operation (4=BT, 5=BTS,
+        // 6=BTR, 7=BTC); /0..3 are undefined.
+        if (op2 == 0xBA)
+        {
+            if (cur >= available)
+                return fail_db(op);
+            const ModRm mr = DecodeModRmByte(bytes[cur], p);
+            ++cur;
+            const u8 sub = mr.reg_idx & 0x7; // /N field, raw (no REX.R extension wanted)
+            if (sub < 4)
+                return fail_db(op);
+            const OpW w = GprWidth(p, false);
+            char rm_buf[48] = {0};
+            const u8 rm_extra = FormatRmOperand(rm_buf, sizeof(rm_buf), mr, w, w, p, &bytes[cur], available - cur);
+            if (rm_extra == 0xFF)
+                return fail_db(op);
+            cur += rm_extra;
+            if (cur >= available)
+                return fail_db(op);
+            const u8 imm = bytes[cur];
+            ++cur;
+            const char* mnem = (sub == 4) ? "bt" : (sub == 5) ? "bts" : (sub == 6) ? "btr" : "btc";
+            StrCopy(out->mnemonic, kBufMnem, mnem);
+            StrAppend(out->operands, kBufOpr, rm_buf);
+            StrAppend(out->operands, kBufOpr, ", ");
+            AppendHexU64(out->operands, kBufOpr, imm);
+            out->len = cur;
+            out->decoded = true;
+            record_bytes(cur);
+            return cur;
+        }
+        // GAP: remaining 0x0F-prefix opcodes (POPCNT/LZCNT under
+        // 0xF3 prefix, XADD, CMPXCHG, prefetch, MOVNTQ, etc.)
+        // decode as `db` until they earn a slice.
+        FIX_NOTE_GAP("debug/disasm.cpp:0x0F-prefix", "decode XADD/CMPXCHG/POPCNT/prefetch");
         return fail_db(op);
     }
 
@@ -1291,11 +1387,16 @@ bool SelfTest()
         0xE8, 0x00, 0x00, 0x00, 0x00,             // call rel32 → next insn
         0x0F, 0x05,                               // syscall
         0xC9,                                     // leave
-        // 0x0F-prefix extensions landed in this slice:
+        // 0x0F-prefix extensions:
         0x0F, 0xB6, 0xC0,                   // movzx eax, al
         0x0F, 0xBE, 0xC0,                   // movsx eax, al
         0x48, 0x0F, 0x44, 0xC3,             // cmove rax, rbx
         0x0F, 0x94, 0xC0,                   // sete al
+        0x0F, 0xBC, 0xC0,                   // bsf eax, eax
+        0x48, 0x0F, 0xBD, 0xD8,             // bsr rbx, rax
+        0x48, 0x0F, 0xC8,                   // bswap rax
+        0x0F, 0xA3, 0xC8,                   // bt eax, ecx
+        0x0F, 0xBA, 0xE0, 0x05,             // bt eax, 5
         0xC4, 0xE3, 0x71, 0x60, 0xC1, 0x00, // VEX-prefixed → must reject as `db`
     };
     struct Expected
@@ -1322,13 +1423,18 @@ bool SelfTest()
         {"movsx", 3},
         {"cmove", 4},
         {"sete", 3},
+        {"bsf", 3},
+        {"bsr", 4},
+        {"bswap", 3},
+        {"bt", 3},
+        {"bt", 4},
         // The VEX byte rejects as `db 0xC4`, then the decoder walks
         // forward one byte at a time through the rest until end.
         {"db", 1},
     };
 
-    DecodedInsn rows[32];
-    const u64 n = DecodeStream(kFixture, sizeof(kFixture), 0x140000000ULL, rows, 32);
+    DecodedInsn rows[48];
+    const u64 n = DecodeStream(kFixture, sizeof(kFixture), 0x140000000ULL, rows, 48);
     if (n < sizeof(kExpected) / sizeof(kExpected[0]))
     {
         KLOG_WARN_V("dbg", "[smoke] disasm=FAIL too-few-rows", n);
