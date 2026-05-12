@@ -29,11 +29,11 @@ using duetos::drivers::video::WindowHandle;
 using duetos::drivers::video::WindowSetContentDraw;
 
 constexpr u32 kUrlCap = 256;
-// Body cap covers the post-strip plain text. Sized to match the
-// raw TCP receive buffer (kTcpActiveBufBytes = 64 KiB) so a fully-
-// filled response still fits even if the HTML stripper happens
-// to be a no-op (worst case: server sent already-plaintext bytes).
-constexpr u32 kBodyCap = net::kTcpActiveBufBytes + 256;
+// Body cap covers the post-strip plain text. 64 KiB is the same
+// budget the v0 single-slot TCP RX buffer carried — keep it for
+// pages with large header / inline-CSS prefixes.
+constexpr u32 kHttpResponseCap = 65536;
+constexpr u32 kBodyCap = kHttpResponseCap + 256;
 constexpr u32 kStatusCap = 96;
 constexpr u32 kHistoryCap = 32;
 constexpr u32 kBookmarkCap = 32;
@@ -785,40 +785,56 @@ void DoFetch(const char* url)
             request[off++] = part[i];
     }
 
-    if (!net::NetTcpConnect(0, ip, p.port, reinterpret_cast<const u8*>(request), off))
+    // Open a stream socket + connect. The socket layer routes
+    // through net/tcp.cpp's TCB table.
+    const i32 sock = net::SocketAlloc(net::kSocketDomainInet, net::kSocketTypeStream);
+    if (sock < 0)
     {
-        StatusSet("TCP connect rejected (slot busy / ARP miss)");
+        StatusSet("socket pool exhausted");
         return;
     }
-
-    StatusSet("fetching...");
-
-    // Wait up to 10 seconds for the response to complete.
-    for (u32 i = 0; i < 1000; ++i)
+    if (!net::SocketConnect(static_cast<u32>(sock), ip, p.port))
     {
-        sched::SchedSleepTicks(1);
-        const auto snap = net::NetTcpActiveSnapshot();
-        if (snap.response_complete)
-            break;
-        // Bail early when buffer is full — we can't grow the
-        // 2 KB slot, so further waiting won't add bytes.
-        if (snap.response_len >= net::kTcpActiveBufBytes)
+        net::SocketRelease(static_cast<u32>(sock));
+        StatusSet("TCP connect rejected");
+        return;
+    }
+    StatusSet("fetching...");
+    // Send the request.
+    {
+        u32 sent = 0;
+        while (sent < off)
         {
-            g_state.truncated = true;
-            break;
+            const i64 n =
+                net::SocketSendStream(static_cast<u32>(sock), reinterpret_cast<const u8*>(request) + sent, off - sent);
+            if (n <= 0)
+                break;
+            sent += static_cast<u32>(n);
         }
     }
+    net::SocketShutdown(static_cast<u32>(sock), /*how=*/1); // SHUT_WR — sends FIN
 
-    // 64 KiB scratch — too large for the kernel stack, so heap-
-    // allocate. Freed before this function returns; on the
-    // failure paths below the same Free runs in the cleanup tail.
-    u8* raw = static_cast<u8*>(mm::KMalloc(net::kTcpActiveBufBytes));
+    u8* raw = static_cast<u8*>(mm::KMalloc(kHttpResponseCap));
     if (raw == nullptr)
     {
+        net::SocketRelease(static_cast<u32>(sock));
         StatusSet("OOM (heap exhausted)");
         return;
     }
-    const u32 got = net::NetTcpActiveRead(raw, net::kTcpActiveBufBytes);
+    u32 got = 0;
+    // Pull up to 10 s of bytes.
+    for (u32 round = 0; round < 1000 && got < kHttpResponseCap; ++round)
+    {
+        const i64 n = net::SocketRecvStream(static_cast<u32>(sock), raw + got, kHttpResponseCap - got);
+        if (n == 0)
+            break; // peer FIN
+        if (n < 0)
+            break;
+        got += static_cast<u32>(n);
+    }
+    if (got >= kHttpResponseCap)
+        g_state.truncated = true;
+    net::SocketRelease(static_cast<u32>(sock));
     if (got == 0)
     {
         mm::KFree(raw);

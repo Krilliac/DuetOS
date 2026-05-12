@@ -349,6 +349,24 @@ void DrshSelfTest()
     tx.authenticated = true;
     rx.authenticated = true;
 
+    // DeriveSessionKeys produces a server-side session: SendFrame uses
+    // ctr_s2c, RecvFrame uses ctr_c2s. For the selftest's in-memory
+    // round-trip, tx acts as the server (sends on s2c) and rx must act
+    // as the client peer (receives s2c-encrypted bytes). Swap rx's
+    // counter slots so RecvFrame's ctr_c2s read decrypts with the
+    // counter tx used to encrypt. Production callers never need this
+    // swap — only the server runs in-tree today, and its SendFrame /
+    // RecvFrame pair is the natural s2c-out / c2s-in mapping.
+    {
+        u8 swap_tmp[kDrshCtrBytes];
+        for (u32 i = 0; i < kDrshCtrBytes; ++i)
+            swap_tmp[i] = rx.ctr_s2c[i];
+        for (u32 i = 0; i < kDrshCtrBytes; ++i)
+            rx.ctr_s2c[i] = rx.ctr_c2s[i];
+        for (u32 i = 0; i < kDrshCtrBytes; ++i)
+            rx.ctr_c2s[i] = swap_tmp[i];
+    }
+
     // Build a synthetic transport over an in-memory pipe.
     struct Pipe
     {

@@ -221,47 +221,20 @@ i64 DoAccept4(u64 fd, u64 user_addr, u64 user_addrlen, u64 flags)
     const auto* listener = ::duetos::net::SocketGet(listen_idx);
     if (listener == nullptr || !listener->listening)
         return kEINVAL;
-    // v0 accept blocks on the listener's read_wq until the stack
-    // reports an Established connection on the listen port. The
-    // accepted fd shares the listener's port with refs >= 2 since
-    // v0 has only one TCP connection slot — server send-after-
-    // establish is the documented sub-GAP.
-    while (true)
-    {
-        const auto snap = ::duetos::net::NetTcpActiveSnapshot();
-        if (snap.in_use && snap.response_len > 0)
-            break;
-        // Approximate "wait for connect" by polling — full event
-        // wiring is a follow-up. Single-CPU yields cheap enough
-        // for v0 server-shape tests; if no data arrives the
-        // caller controls retry via timeout / shutdown.
-        sched::SchedYield();
-    }
+    ::duetos::net::Ipv4Address peer_ip = {};
+    u16 peer_port = 0;
+    const i32 new_sock = ::duetos::net::SocketAccept(listen_idx, &peer_ip, &peer_port);
+    if (new_sock < 0)
+        return kEINVAL;
     const i32 new_fd = AllocFd(p);
     if (new_fd < 0)
-        return kEMFILE;
-    const i32 new_sock = ::duetos::net::SocketAlloc(::duetos::net::kSocketDomainInet, ::duetos::net::kSocketTypeStream);
-    if (new_sock < 0)
-        return kENFILE;
-    // Stamp peer endpoint from whatever the stack captured.
-    // NetTcpActiveSnapshot doesn't expose peer ip/port today —
-    // sub-GAP. Caller's getpeername() on the accepted fd will
-    // see all-zero.
-    FdAssignSocket(p, static_cast<u32>(new_fd), static_cast<u32>(new_sock));
-    if (!::duetos::net::SocketConnect(static_cast<u32>(new_sock), {}, 0))
     {
-        // Connect failed — release the fd + socket and propagate.
         ::duetos::net::SocketRelease(static_cast<u32>(new_sock));
-        p->linux_fds[new_fd].state = 0;
-        return kEINVAL;
+        return kEMFILE;
     }
+    FdAssignSocket(p, static_cast<u32>(new_fd), static_cast<u32>(new_sock));
     if (user_addr != 0 && user_addrlen != 0)
-    {
-        ::duetos::net::Ipv4Address peer_ip;
-        u16 peer_port;
-        ::duetos::net::SocketGetPeer(static_cast<u32>(new_sock), &peer_ip, &peer_port);
         WriteSockaddrIn(user_addr, user_addrlen, peer_ip, peer_port);
-    }
     return new_fd;
 }
 
@@ -458,12 +431,7 @@ i64 DoShutdown(u64 fd, u64 how)
         return kEINVAL;
     if (!::duetos::net::SocketShutdown(idx, static_cast<u32>(how)))
         return kEINVAL;
-    if (how == 1 || how == 2)
-    {
-        const auto* s = ::duetos::net::SocketGet(idx);
-        if (s != nullptr && s->type == ::duetos::net::kSocketTypeStream && s->tcp_owner_token != 0)
-            ::duetos::net::NetTcpActiveCloseTx();
-    }
+    // SocketShutdown handles the FIN — no extra TCP-close call needed.
     return 0;
 }
 

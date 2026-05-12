@@ -18,6 +18,7 @@
 
 #include "diag/event_trace.h"
 
+#include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
 #include "mm/kheap.h"
@@ -164,6 +165,15 @@ void EventTraceSelfTest()
 {
     arch::SerialWrite("[event-trace] self-test: append + snapshot + ordering\n");
 
+    // The IRQ path's scheduler tick records `kEventIrq` events
+    // (kernel/sched/sched.cpp), so any timer firing between the
+    // baseline read and the "total advanced by 3" check makes the
+    // delta race. Run the baseline -> append -> check window with
+    // IRQs disabled so only our three explicit appends affect total.
+    // EventTrace itself is IRQ-safe (atomic fetch-add), so this just
+    // prevents the timer from injecting events into our window.
+    arch::Cli();
+
     const u64 baseline_total = EventTraceTotalRecords();
     const u32 baseline_live = EventTraceLiveCount();
 
@@ -171,6 +181,7 @@ void EventTraceSelfTest()
     EventTrace(kEventNone, 0xdead, 0xbeef);
     if (EventTraceTotalRecords() != baseline_total)
     {
+        arch::Sti();
         core::Panic("diag/event-trace", "self-test: kEventNone advanced total");
     }
 
@@ -181,6 +192,7 @@ void EventTraceSelfTest()
     EventTrace(kEventCustom, 0x5555, 0x6666);
     if (EventTraceTotalRecords() != baseline_total + 3)
     {
+        arch::Sti();
         core::Panic("diag/event-trace", "self-test: total did not advance by 3");
     }
     const u32 new_live = EventTraceLiveCount();
@@ -188,8 +200,10 @@ void EventTraceSelfTest()
     {
         // Either we grew live count by 3 (under-cap), or we hit
         // the cap. Both are valid outcomes.
+        arch::Sti();
         core::Panic("diag/event-trace", "self-test: live count not consistent with append count");
     }
+    arch::Sti();
 
     // Snapshot the trailing 3 records and verify their args came
     // back in order. The full ring is `kEventRingCapacity * sizeof

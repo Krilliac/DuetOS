@@ -8539,3 +8539,53 @@ a real C++ caller now goes through its FFI.
     semantics that the kernel slot currently stores verbatim.
 - **Related roadmap track(s):** Storage / filesystem (DuetFS
   follow-ups), Track 8 (Scheduler / APC).
+
+## 2026-05-12 — TCP v1 multi-connection state machine over a TCB table
+
+- **What:** Replaced the single-slot v0 TCP machine in
+  `kernel/net/stack.cpp` with a full TCB table in
+  `kernel/net/tcp.{cpp,h}` + sibling TUs. 256 concurrent TCBs,
+  hash-bucketed lookup, real LISTEN backlog (up to 32 pending
+  children per listener), per-TCB retransmit + RTO + reassembly +
+  Reno-style congestion control + RFC-7323 options.
+- **Why:**
+  - The v0 "one bidirectional TCP connection at a time" limit was
+    blocking DRSH multi-session, a real HTTP server, and any
+    multi-tenant service. Scaling the slot count by adding more
+    slots would not fix the fundamental shape — the v0 code
+    didn't implement retransmit, sliding window, or out-of-order
+    reassembly, so any non-loopback workload that lost a single
+    segment broke.
+  - A TCB table is the conventional architecture for a real TCP
+    stack. The decision was whether to copy lwIP / smoltcp /
+    Linux verbatim (too large for one slice, drags dependencies)
+    or to write a focused subset that ships the contract the
+    socket layer needs and leaves the optimisations for follow-up
+    slices. v1 takes the second path.
+- **What it rules out / defers:**
+  - **CUBIC is deferred.** v1 ships Reno with RFC-6298 RTO. CUBIC's
+    convex/concave curvature math benefits from microsecond-RTT
+    precision; the kernel's 100 Hz scheduler tick rounds RTT samples
+    to 10 ms grains, which makes CUBIC's growth curve degenerate.
+    Revisiting CUBIC requires the HPET-backed monotonic clocksource
+    work (Phase-11 NIC offloads or the future fine-grained timer
+    slice).
+  - **SACK is deferred.** SACK-permitted is advertised so the option
+    stays negotiable; SACK block generation + RFC-6675 SACK-driven
+    recovery is a follow-up slice. The dup-ACK fast-retransmit path
+    handles the v1 workload (HTTP requests + DRSH sessions).
+  - **SYN cookies are deferred.** v1 drops SYNs when the listener
+    backlog is full (the common defence). RFC-4987 SYN cookies need
+    a careful ISN-encoding contract; that's a separate slice.
+  - **Per-bucket spinlocks are deferred to SMP.** v1 uses one
+    `arch::Cli` window per public entry. The bucket structure is
+    in place so per-bucket locks drop in cleanly when SMP lands.
+- **Revisit when:**
+  - The kernel grows a microsecond clocksource (HPET-direct read +
+    a monotonic accessor that doesn't round-trip the scheduler
+    tick). Then CUBIC becomes worth doing.
+  - The first 10 Gbps workload appears in CI and bulk transfer
+    needs SACK-driven recovery to stay efficient.
+  - The first multi-tenant inbound workload (HTTPS server, MTA,
+    SMB server) needs hardened SYN-flood defence.
+- **Related roadmap track(s):** Track 9 (Networking).
