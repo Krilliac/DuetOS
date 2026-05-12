@@ -91,8 +91,8 @@ enum class Panel : u8
     General = 0,  // existing theme / opacity / clock content
     Display = 1,  // resolution + brightness (DPMS) + theme
     Sound = 2,    // PC speaker test + future HDA volume
-    Keyboard = 3, // repeat rate + layout (placeholder)
-    Mouse = 4,    // double-click + sensitivity (placeholder)
+    Keyboard = 3, // PS/2 typematic rate + delay (session-persistent)
+    Mouse = 4,    // PS/2 mouse sensitivity + double-click timing
     DateTime = 5, // RTC + timezone
     kCount,
 };

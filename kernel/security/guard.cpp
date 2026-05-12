@@ -32,6 +32,7 @@
 #include "security/ir_runbook.h"
 #include "arch/x86_64/hpet.h"
 #include "arch/x86_64/serial.h"
+#include "crypto/sha256.h"
 #include "log/klog.h"
 #include "util/types.h"
 #include "drivers/input/ps2kbd.h"
@@ -59,13 +60,14 @@ constinit u64 g_deny_count = 0;
 constinit Report g_last_report = {};
 constinit bool g_init_done = false;
 
-// Persistent allow-list, keyed by FNV-1a image hash. A hash that
-// landed here during a previous boot (because the user answered
-// "yes" at a prompt) short-circuits Inspect -> Allow. Capacity is
-// static so the allowlist survives the life of the kernel without
-// depending on kmalloc.
+// Persistent allow-list, keyed by SHA-256 image digest. A hash
+// that landed here during a previous boot (because the user
+// answered "yes" at a prompt) short-circuits Inspect -> Allow.
+// Capacity is static so the allowlist survives the life of the
+// kernel without depending on kmalloc. 256 entries * 32 bytes =
+// 8 KiB BSS.
 constexpr u32 kMaxAllowed = 256;
-constinit u64 g_allowed_hashes[kMaxAllowed] = {};
+constinit u8 g_allowed_hashes[kMaxAllowed][32] = {};
 constinit u32 g_allowed_count = 0;
 
 // Path the persistent allowlist lives at inside tmpfs. Flat-name
@@ -85,17 +87,21 @@ constexpr const char* kDeniedNames[] = {
     nullptr,
 };
 
-// FNV-1a hash denylist. A real AV would use SHA-256; FNV-1a is
-// a placeholder so the code path + shell status line work
-// end-to-end before we have a cryptographic hash module.
+// SHA-256 hash denylist. Each entry pairs a 32-byte digest with
+// a human-readable label rendered to the boot log when the hash
+// matches. Seed table starts empty — add entries when an actual
+// incident gives us a fingerprint to block. The denylist is
+// matched after the cheap name-deny pass and before the
+// heuristic checks, so a known-bad hash short-circuits the
+// rest of Inspect.
 struct HashEntry
 {
-    u64 hash;
+    u8 hash[32];
     const char* label;
 };
 constexpr HashEntry kDeniedHashes[] = {
-    // (empty seed)
-    {0, nullptr},
+    // (empty seed — sentinel marks end of list)
+    {{0}, nullptr},
 };
 
 // Suspicious Windows API names. Presence of the ASCII substring
@@ -187,20 +193,36 @@ bool BytesContain(const u8* hay, u64 hay_len, const char* needle)
     return false;
 }
 
-// FNV-1a over the whole image. Deterministic, hardware-independent,
-// no third-party crypto dependency — matches the v0 hash-denylist
-// which is a content fingerprint, NOT a signature.
-u64 Fnv1aHash(const u8* data, u64 len)
+// SHA-256 over the whole image. Deterministic, collision-
+// resistant, and shares the same hash primitive as the WPA
+// stack and the rest of the kernel — one cryptographic hash
+// implementation. The caller passes a 32-byte output buffer;
+// we zero it on len==0 so an empty image still hashes to a
+// well-defined sentinel rather than reading stale stack bytes.
+void HashImage(const u8* data, u64 len, u8 out[32])
 {
-    constexpr u64 kFnvOffset = 0xCBF29CE484222325ull;
-    constexpr u64 kFnvPrime = 0x00000100000001B3ull;
-    u64 h = kFnvOffset;
-    for (u64 i = 0; i < len; ++i)
+    if (len > 0 && len > 0xFFFFFFFFull)
     {
-        h ^= data[i];
-        h *= kFnvPrime;
+        // Sha256Update takes u32 length; clamp absurdly-large
+        // sizes by hashing the prefix only. Real images never
+        // come anywhere near 4 GiB so this is purely defensive.
+        len = 0xFFFFFFFFull;
     }
-    return h;
+    crypto::Sha256Hash(data != nullptr ? data : reinterpret_cast<const u8*>(""), static_cast<u32>(len), out);
+}
+
+bool HashEq(const u8 a[32], const u8 b[32])
+{
+    // Linear compare — fine because the allowlist is small and
+    // the loop ends at the first byte mismatch on the common
+    // miss path. Not constant-time; the persistent allowlist is
+    // not a secret (the user installed every entry themselves)
+    // so timing side-channels don't add up to a meaningful
+    // attacker advantage here.
+    for (u32 i = 0; i < 32; ++i)
+        if (a[i] != b[i])
+            return false;
+    return true;
 }
 
 // ---------------------------------------------------------------
@@ -236,10 +258,11 @@ Verdict CheckHashDeny(const ImageDescriptor& desc, Report& r)
 {
     if (desc.bytes == nullptr || desc.size == 0)
         return Verdict::Allow;
-    const u64 h = Fnv1aHash(desc.bytes, desc.size);
+    u8 h[32];
+    HashImage(desc.bytes, desc.size, h);
     for (u32 i = 0; kDeniedHashes[i].label != nullptr; ++i)
     {
-        if (kDeniedHashes[i].hash == h)
+        if (HashEq(kDeniedHashes[i].hash, h))
         {
             AppendFinding(r, kFindingHashDeny, kDeniedHashes[i].label);
             return Verdict::Deny;
@@ -472,28 +495,30 @@ u64 HpetTicksToMs(u64 ticks)
 // Persistent allowlist (tmpfs-backed).
 // ---------------------------------------------------------------
 
-bool IsHashAllowed(u64 h)
+bool IsHashAllowed(const u8 h[32])
 {
     for (u32 i = 0; i < g_allowed_count; ++i)
     {
-        if (g_allowed_hashes[i] == h)
+        if (HashEq(g_allowed_hashes[i], h))
             return true;
     }
     return false;
 }
 
-void AppendAllowedHash(u64 h)
+void AppendAllowedHash(const u8 h[32])
 {
     if (g_allowed_count >= kMaxAllowed)
     {
         arch::SerialWrite("[guard] allowlist full (256 entries); dropping new entry\n");
         return;
     }
-    g_allowed_hashes[g_allowed_count++] = h;
+    for (u32 i = 0; i < 32; ++i)
+        g_allowed_hashes[g_allowed_count][i] = h[i];
+    ++g_allowed_count;
 }
 
-// Parse a 16-char hex byte into a u64 nibble count; accepts lower
-// or upper hex. Returns -1 on any non-hex character.
+// Parse one hex digit into 0..15. Accepts lower or upper hex.
+// Returns -1 on any non-hex character.
 i32 HexNibble(char c)
 {
     if (c >= '0' && c <= '9')
@@ -505,21 +530,24 @@ i32 HexNibble(char c)
     return -1;
 }
 
-// One line of the allowlist file: 16 hex chars + '\n'. Returns
-// the parsed hash in `*out`. False on malformed line.
-bool ParseHashLine(const char* line, u64 len, u64* out)
+// One line of the allowlist file: 64 hex chars + '\n'. Returns
+// the parsed 32-byte digest in `out`. False on malformed line.
+// Stale FNV-1a lines from previous builds (16 hex chars) hit the
+// len<64 path and get skipped silently, which is the right
+// migration behaviour — they'd never match a SHA-256 digest
+// anyway and trying to keep them would just clutter the table.
+bool ParseHashLine(const char* line, u64 len, u8 out[32])
 {
-    if (len < 16)
+    if (len < 64)
         return false;
-    u64 h = 0;
-    for (u32 i = 0; i < 16; ++i)
+    for (u32 i = 0; i < 32; ++i)
     {
-        const i32 n = HexNibble(line[i]);
-        if (n < 0)
+        const i32 hi = HexNibble(line[2 * i]);
+        const i32 lo = HexNibble(line[2 * i + 1]);
+        if (hi < 0 || lo < 0)
             return false;
-        h = (h << 4) | static_cast<u64>(n);
+        out[i] = static_cast<u8>((hi << 4) | lo);
     }
-    *out = h;
     return true;
 }
 
@@ -533,40 +561,53 @@ void LoadAllowlist()
         return;
     }
     u32 i = 0;
+    u32 skipped_legacy = 0;
     while (i < len)
     {
         // Find end of line.
         u32 j = i;
         while (j < len && bytes[j] != '\n')
             ++j;
-        u64 h = 0;
-        if (ParseHashLine(bytes + i, j - i, &h))
+        u8 h[32];
+        if (ParseHashLine(bytes + i, j - i, h))
         {
             AppendAllowedHash(h);
+        }
+        else if (j > i)
+        {
+            ++skipped_legacy;
         }
         i = j + 1;
     }
     arch::SerialWrite("[guard] loaded allowlist: ");
     arch::SerialWriteHex(g_allowed_count);
-    arch::SerialWrite(" entries\n");
+    arch::SerialWrite(" entries");
+    if (skipped_legacy > 0)
+    {
+        arch::SerialWrite(" (");
+        arch::SerialWriteHex(skipped_legacy);
+        arch::SerialWrite(" pre-SHA256 lines retired)");
+    }
+    arch::SerialWrite("\n");
 }
 
 void SaveAllowlist()
 {
-    // Render the whole list back out. 16 hex chars + '\n' per
-    // entry = 17 bytes; cap at kMaxAllowed so the buffer is
+    // Render the whole list back out. 64 hex chars + '\n' per
+    // entry = 65 bytes; cap at kMaxAllowed so the buffer is
     // bounded. tmpfs writes are cheap; we rewrite the whole file
-    // rather than tracking diffs.
-    static char buf[kMaxAllowed * 17 + 1];
+    // rather than tracking diffs. kMaxAllowed * 65 ≈ 16 KiB BSS.
+    static char buf[kMaxAllowed * 65 + 1];
     u32 w = 0;
     for (u32 i = 0; i < g_allowed_count; ++i)
     {
-        const u64 h = g_allowed_hashes[i];
-        for (u32 k = 0; k < 16; ++k)
+        for (u32 k = 0; k < 32; ++k)
         {
-            const u32 shift = (15 - k) * 4;
-            const u8 nib = static_cast<u8>((h >> shift) & 0xF);
-            buf[w++] = static_cast<char>(nib < 10 ? '0' + nib : 'a' + nib - 10);
+            const u8 byte = g_allowed_hashes[i][k];
+            const u8 hi = byte >> 4;
+            const u8 lo = byte & 0xF;
+            buf[w++] = static_cast<char>(hi < 10 ? '0' + hi : 'a' + hi - 10);
+            buf[w++] = static_cast<char>(lo < 10 ? '0' + lo : 'a' + lo - 10);
         }
         buf[w++] = '\n';
     }
@@ -738,7 +779,8 @@ bool Gate(const ImageDescriptor& desc)
     // every subsequent boot for apps the user has already vouched for.
     if (desc.bytes != nullptr && desc.size > 0)
     {
-        const u64 h = Fnv1aHash(desc.bytes, desc.size);
+        u8 h[32];
+        HashImage(desc.bytes, desc.size, h);
         if (IsHashAllowed(h))
         {
             ++g_allow_count;
@@ -785,7 +827,9 @@ bool Gate(const ImageDescriptor& desc)
             const bool allowed = PromptUser(desc, r);
             if (allowed && desc.bytes != nullptr && desc.size > 0)
             {
-                GuardRememberAllow(Fnv1aHash(desc.bytes, desc.size));
+                u8 h[32];
+                HashImage(desc.bytes, desc.size, h);
+                GuardRememberAllow(h);
             }
             return allowed;
         }
@@ -801,7 +845,9 @@ bool Gate(const ImageDescriptor& desc)
             const bool allowed = PromptUser(desc, r);
             if (allowed && desc.bytes != nullptr && desc.size > 0)
             {
-                GuardRememberAllow(Fnv1aHash(desc.bytes, desc.size));
+                u8 h[32];
+                HashImage(desc.bytes, desc.size, h);
+                GuardRememberAllow(h);
             }
             return allowed;
         }
@@ -839,7 +885,7 @@ void GuardLoadAllowlist()
     LoadAllowlist();
 }
 
-void GuardRememberAllow(u64 hash)
+void GuardRememberAllow(const u8 hash[32])
 {
     if (IsHashAllowed(hash))
         return;
