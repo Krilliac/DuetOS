@@ -140,6 +140,7 @@ lcov-report/
 
 # Rust
 target/
+target-host/
 Cargo.lock
 !/Cargo.lock
 

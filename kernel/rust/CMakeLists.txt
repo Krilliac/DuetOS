@@ -13,6 +13,10 @@ file(GLOB_RECURSE DUETOS_RUST_SUBSYSTEM_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_SOURCE_DIR}/kernel/drivers/usb/class_rust/Cargo.toml"
     "${CMAKE_SOURCE_DIR}/kernel/drivers/usb/hid_rust/src/*.rs"
     "${CMAKE_SOURCE_DIR}/kernel/drivers/usb/hid_rust/Cargo.toml"
+    "${CMAKE_SOURCE_DIR}/kernel/net/parsers_rust/src/*.rs"
+    "${CMAKE_SOURCE_DIR}/kernel/net/parsers_rust/Cargo.toml"
+    "${CMAKE_SOURCE_DIR}/kernel/drivers/usb/msc_scsi_rust/src/*.rs"
+    "${CMAKE_SOURCE_DIR}/kernel/drivers/usb/msc_scsi_rust/Cargo.toml"
 )
 
 duetos_add_rust_staticlib(
@@ -28,6 +32,8 @@ duetos_add_rust_staticlib(
         "${CMAKE_SOURCE_DIR}/kernel/fs/duetfs/include/duetfs.h"
         "${CMAKE_SOURCE_DIR}/kernel/drivers/usb/class_rust/include/usbclass.h"
         "${CMAKE_SOURCE_DIR}/kernel/drivers/usb/hid_rust/include/usbhid.h"
+        "${CMAKE_SOURCE_DIR}/kernel/net/parsers_rust/include/parsers_rust.h"
+        "${CMAKE_SOURCE_DIR}/kernel/drivers/usb/msc_scsi_rust/include/msc_scsi_rust.h"
 )
 
 set(DUETOS_KERNEL_RUST_STATIC_LIB "${DUETOS_KERNEL_RUST_STATIC_LIB}" PARENT_SCOPE)

@@ -119,8 +119,7 @@ pub const SYMLINK_TARGET_MAX: u32 = 1024;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-pub struct Extent
-{
+pub struct Extent {
     pub block: u32,
     pub blocks: u32,
 }
@@ -129,8 +128,7 @@ const _: () = assert!(core::mem::size_of::<Extent>() == 8);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct Superblock
-{
+pub struct Superblock {
     pub magic: u64,
     pub version: u32,
     pub block_size: u32,
@@ -173,8 +171,7 @@ pub struct Superblock
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct Node
-{
+pub struct Node {
     pub kind: u32,
     pub size_bytes: u32,
     pub extent_count: u32, // 0..=MAX_INLINE_EXTENTS
@@ -196,10 +193,8 @@ pub struct Node
 const _: () = assert!(core::mem::size_of::<Node>() == NODE_SIZE);
 const _: () = assert!(core::mem::size_of::<Superblock>() <= BLOCK_SIZE);
 
-impl Node
-{
-    pub const fn unused() -> Self
-    {
+impl Node {
+    pub const fn unused() -> Self {
         Self {
             kind: NODE_KIND_UNUSED,
             size_bytes: 0,
@@ -216,16 +211,13 @@ impl Node
         }
     }
 
-    pub fn name_bytes(&self) -> &[u8]
-    {
+    pub fn name_bytes(&self) -> &[u8] {
         let n = (self.name_len as usize).min(NAME_MAX);
         &self.name[..n]
     }
 
-    pub fn set_name(&mut self, name: &[u8]) -> bool
-    {
-        if name.len() > NAME_MAX
-        {
+    pub fn set_name(&mut self, name: &[u8]) -> bool {
+        if name.len() > NAME_MAX {
             return false;
         }
         self.name = [0u8; NAME_MAX];
@@ -234,18 +226,15 @@ impl Node
         true
     }
 
-    pub fn total_blocks(&self) -> u32
-    {
+    pub fn total_blocks(&self) -> u32 {
         let mut t: u32 = 0;
-        for i in 0..(self.extent_count as usize).min(MAX_INLINE_EXTENTS)
-        {
+        for i in 0..(self.extent_count as usize).min(MAX_INLINE_EXTENTS) {
             t = t.saturating_add(self.extents[i].blocks);
         }
         t
     }
 }
 
-pub const fn blocks_for_bytes(bytes: u32) -> u32
-{
+pub const fn blocks_for_bytes(bytes: u32) -> u32 {
     (bytes as usize).div_ceil(BLOCK_SIZE) as u32
 }

@@ -1,0 +1,24 @@
+# DuetOS rustfmt config.
+#
+# Style follows idiomatic Rust (K&R braces, default control flow) rather
+# than mirroring the C++ Allman house style; rustfmt's Allman support is
+# partial and the half-and-half output reads worse than either pure style.
+# The width / edition pins below match the C++ side so the column rules
+# don't diverge across languages.
+
+edition = "2021"
+max_width = 120
+tab_spaces = 4
+hard_tabs = false
+newline_style = "Unix"
+
+# Imports — group by std/extern/local and keep them sorted so the
+# existing `use core::{ptr, slice};` shape stays stable.
+group_imports = "StdExternalCrate"
+reorder_imports = true
+
+# Leave hand-written comments alone — the existing crates have block
+# comments documenting invariants we don't want rustfmt rewriting.
+normalize_comments = false
+wrap_comments = false
+format_code_in_doc_comments = false

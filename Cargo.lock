@@ -116,9 +116,19 @@ name = "duetos_kernel_rust"
 version = "0.0.1"
 dependencies = [
  "duetfs",
+ "duetos_net_parsers",
+ "duetos_usb_msc_scsi",
  "usbclass",
  "usbhid",
 ]
+
+[[package]]
+name = "duetos_net_parsers"
+version = "0.0.1"
+
+[[package]]
+name = "duetos_usb_msc_scsi"
+version = "0.0.1"
 
 [[package]]
 name = "generic-array"

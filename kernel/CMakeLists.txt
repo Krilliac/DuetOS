@@ -54,6 +54,8 @@ list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^tests/")
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^fs/duetfs/(target|cargo-target|duetfs-cargo-target)/")
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^drivers/usb/class_rust/(target|cargo-target|usbclass-cargo-target)/")
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^drivers/usb/hid_rust/(target|cargo-target|usbhid-cargo-target)/")
+list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^drivers/usb/msc_scsi_rust/(target|cargo-target|msc-scsi-cargo-target)/")
+list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^net/parsers_rust/(target|cargo-target|net-parsers-cargo-target)/")
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^rust/(target|cargo-target|duetos-kernel-rust-cargo-target)/")
 
 # security/stack_canary.cpp provides __stack_chk_fail and the
@@ -794,6 +796,8 @@ add_subdirectory(rust)
 set(USBCLASS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/drivers/usb/class_rust/include")
 set(USBHID_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/drivers/usb/hid_rust/include")
 set(DUETFS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/fs/duetfs/include")
+set(NETPARSERS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/net/parsers_rust/include")
+set(MSCSCSI_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/drivers/usb/msc_scsi_rust/include")
 
 # Stage 1 needs a stub `kernel_elf_blob` so ramfs.cpp's references
 # to kBinKernelElfBytes / kBinKernelElfBytes_len link cleanly.
@@ -821,6 +825,8 @@ target_include_directories(duetos-kernel-stage1 PRIVATE
     "${USBCLASS_INCLUDE_DIR}"
     "${USBHID_INCLUDE_DIR}"
     "${DUETFS_INCLUDE_DIR}"
+    "${NETPARSERS_INCLUDE_DIR}"
+    "${MSCSCSI_INCLUDE_DIR}"
 )
 add_dependencies(duetos-kernel-stage1 ${DUETOS_KERNEL_RUST_TARGET})
 set_target_properties(duetos-kernel-stage1 PROPERTIES
@@ -914,6 +920,8 @@ target_include_directories(duetos-kernel PRIVATE
     "${USBCLASS_INCLUDE_DIR}"
     "${USBHID_INCLUDE_DIR}"
     "${DUETFS_INCLUDE_DIR}"
+    "${NETPARSERS_INCLUDE_DIR}"
+    "${MSCSCSI_INCLUDE_DIR}"
 )
 add_dependencies(duetos-kernel ${DUETOS_KERNEL_RUST_TARGET})
 

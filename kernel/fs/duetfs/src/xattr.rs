@@ -20,9 +20,7 @@
 // follow-up once a real workload stresses this path.
 
 use crate::block_dev::BlockDevice;
-use crate::format::{
-    Extent, BLOCK_SIZE, XATTR_NAME_MAX, XATTR_VALUE_MAX,
-};
+use crate::format::{Extent, BLOCK_SIZE, XATTR_NAME_MAX, XATTR_VALUE_MAX};
 use crate::fs::{Fs, FsError, FsResult};
 
 /// Look up `name` in the xattr block of node `node_id`. On hit
@@ -31,26 +29,19 @@ use crate::fs::{Fs, FsError, FsResult};
 /// FsError::NotFound. `dst` may be shorter than the value — callers
 /// detect this by `*out_len > dst.len()` and re-call with a bigger
 /// buffer.
-impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
-{
-    pub fn xattr_get(
-        &self, node_id: u32, name: &[u8], dst: &mut [u8],
-    ) -> FsResult<usize>
-    {
-        if name.is_empty() || name.len() > XATTR_NAME_MAX
-        {
+impl<'d, D: BlockDevice + ?Sized> Fs<'d, D> {
+    pub fn xattr_get(&self, node_id: u32, name: &[u8], dst: &mut [u8]) -> FsResult<usize> {
+        if name.is_empty() || name.len() > XATTR_NAME_MAX {
             return Err(FsError::Invalid);
         }
         let node = self.read_node(node_id)?;
-        if node.xattr_extent.blocks == 0
-        {
+        if node.xattr_extent.blocks == 0 {
             return Err(FsError::NotFound);
         }
         let lba = node.xattr_extent.block;
         let mut block = [0u8; BLOCK_SIZE];
         self.read_data_block(lba, &mut block)?;
-        match find_record(&block, name)
-        {
+        match find_record(&block, name) {
             Some((value_off, value_len)) => {
                 let take = dst.len().min(value_len);
                 dst[..take].copy_from_slice(&block[value_off..value_off + take]);
@@ -64,11 +55,9 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
     /// `dst`. Returns the total byte count actually needed (which
     /// may exceed `dst.len()` — caller re-calls with a bigger
     /// buffer). Names without xattrs return 0.
-    pub fn xattr_list(&self, node_id: u32, dst: &mut [u8]) -> FsResult<usize>
-    {
+    pub fn xattr_list(&self, node_id: u32, dst: &mut [u8]) -> FsResult<usize> {
         let node = self.read_node(node_id)?;
-        if node.xattr_extent.blocks == 0
-        {
+        if node.xattr_extent.blocks == 0 {
             return Ok(0);
         }
         let lba = node.xattr_extent.block;
@@ -77,10 +66,8 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
         let mut needed: usize = 0;
         let mut written: usize = 0;
         for_each_record(&block, |name_off, name_len, _value_off, _value_len| {
-            if needed + name_len < dst.len()
-            {
-                dst[written..written + name_len]
-                    .copy_from_slice(&block[name_off..name_off + name_len]);
+            if needed + name_len < dst.len() {
+                dst[written..written + name_len].copy_from_slice(&block[name_off..name_off + name_len]);
                 dst[written + name_len] = 0;
                 written += name_len + 1;
             }
@@ -93,32 +80,23 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
     /// first set; rewrites in place on subsequent calls. Returns
     /// FsError::NoSpaceData if the resulting block would exceed
     /// BLOCK_SIZE.
-    pub fn xattr_set(
-        &mut self, node_id: u32, name: &[u8], value: &[u8],
-    ) -> FsResult<()>
-    {
-        if self.dev.is_read_only()
-        {
+    pub fn xattr_set(&mut self, node_id: u32, name: &[u8], value: &[u8]) -> FsResult<()> {
+        if self.dev.is_read_only() {
             return Err(FsError::ReadOnly);
         }
-        if name.is_empty() || name.len() > XATTR_NAME_MAX
-        {
+        if name.is_empty() || name.len() > XATTR_NAME_MAX {
             return Err(FsError::Invalid);
         }
-        if value.len() > XATTR_VALUE_MAX
-        {
+        if value.len() > XATTR_VALUE_MAX {
             return Err(FsError::Invalid);
         }
         let mut node = self.read_node(node_id)?;
         let mut block = [0u8; BLOCK_SIZE];
-        if node.xattr_extent.blocks == 0
-        {
+        if node.xattr_extent.blocks == 0 {
             // No prior xattrs — allocate the block.
             let lba = self.alloc_run(1)?;
             node.xattr_extent = Extent { block: lba, blocks: 1 };
-        }
-        else
-        {
+        } else {
             self.read_data_block(node.xattr_extent.block, &mut block)?;
         }
         // Strip the existing entry (if any), then append the new
@@ -132,39 +110,31 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D>
     /// Remove `name`'s entry. If the block becomes empty, frees it
     /// and clears `node.xattr_extent`. FsError::NotFound when the
     /// name isn't present.
-    pub fn xattr_remove(&mut self, node_id: u32, name: &[u8]) -> FsResult<()>
-    {
-        if self.dev.is_read_only()
-        {
+    pub fn xattr_remove(&mut self, node_id: u32, name: &[u8]) -> FsResult<()> {
+        if self.dev.is_read_only() {
             return Err(FsError::ReadOnly);
         }
-        if name.is_empty() || name.len() > XATTR_NAME_MAX
-        {
+        if name.is_empty() || name.len() > XATTR_NAME_MAX {
             return Err(FsError::Invalid);
         }
         let mut node = self.read_node(node_id)?;
-        if node.xattr_extent.blocks == 0
-        {
+        if node.xattr_extent.blocks == 0 {
             return Err(FsError::NotFound);
         }
         let lba = node.xattr_extent.block;
         let mut block = [0u8; BLOCK_SIZE];
         self.read_data_block(lba, &mut block)?;
         let (new_block, found) = rewrite_with_remove(&block, name);
-        if !found
-        {
+        if !found {
             return Err(FsError::NotFound);
         }
         // Detect "block now empty" — a fresh block holds only the
         // 4-byte zero terminator.
         let now_empty = new_block[0] == 0 && new_block[1] == 0 && new_block[2] == 0 && new_block[3] == 0;
-        if now_empty
-        {
+        if now_empty {
             self.free_run(lba, 1)?;
             node.xattr_extent = Extent { block: 0, blocks: 0 };
-        }
-        else
-        {
+        } else {
             self.write_data_block(lba, &new_block)?;
         }
         self.write_node(node_id, &node)?;
@@ -179,16 +149,13 @@ where
     F: FnMut(usize, usize, usize, usize),
 {
     let mut off: usize = 0;
-    while off + 4 <= BLOCK_SIZE
-    {
+    while off + 4 <= BLOCK_SIZE {
         let name_len = u16::from_le_bytes([block[off], block[off + 1]]) as usize;
-        if name_len == 0
-        {
+        if name_len == 0 {
             return;
         }
         let value_len = u16::from_le_bytes([block[off + 2], block[off + 3]]) as usize;
-        if off + 4 + name_len + value_len > BLOCK_SIZE
-        {
+        if off + 4 + name_len + value_len > BLOCK_SIZE {
             return;
         }
         cb(off + 4, name_len, off + 4 + name_len, value_len);
@@ -197,12 +164,10 @@ where
 }
 
 /// Find `name`'s record. Returns (value_off, value_len) on hit.
-fn find_record(block: &[u8; BLOCK_SIZE], name: &[u8]) -> Option<(usize, usize)>
-{
+fn find_record(block: &[u8; BLOCK_SIZE], name: &[u8]) -> Option<(usize, usize)> {
     let mut hit: Option<(usize, usize)> = None;
     for_each_record(block, |name_off, name_len, value_off, value_len| {
-        if hit.is_none() && name_len == name.len() && &block[name_off..name_off + name_len] == name
-        {
+        if hit.is_none() && name_len == name.len() && &block[name_off..name_off + name_len] == name {
             hit = Some((value_off, value_len));
         }
     });
@@ -211,25 +176,19 @@ fn find_record(block: &[u8; BLOCK_SIZE], name: &[u8]) -> Option<(usize, usize)>
 
 /// Rebuild the block with `name → value` set (replacing or appending).
 /// Returns None if the resulting record stream wouldn't fit.
-fn rewrite_with_set(
-    block: &[u8; BLOCK_SIZE], name: &[u8], value: &[u8],
-) -> Option<[u8; BLOCK_SIZE]>
-{
+fn rewrite_with_set(block: &[u8; BLOCK_SIZE], name: &[u8], value: &[u8]) -> Option<[u8; BLOCK_SIZE]> {
     let mut out = [0u8; BLOCK_SIZE];
     let mut cursor: usize = 0;
     // Copy existing records, skipping any whose name matches.
     for_each_record(block, |name_off, name_len, value_off, value_len| {
-        if name_len == name.len() && &block[name_off..name_off + name_len] == name
-        {
+        if name_len == name.len() && &block[name_off..name_off + name_len] == name {
             return; // dropped; will be replaced
         }
         let need = 4 + name_len + value_len;
-        if cursor + need <= BLOCK_SIZE - (4 + name.len() + value.len()) - 4
-        {
+        if cursor + need <= BLOCK_SIZE - (4 + name.len() + value.len()) - 4 {
             out[cursor..cursor + 2].copy_from_slice(&(name_len as u16).to_le_bytes());
             out[cursor + 2..cursor + 4].copy_from_slice(&(value_len as u16).to_le_bytes());
-            out[cursor + 4..cursor + 4 + name_len]
-                .copy_from_slice(&block[name_off..name_off + name_len]);
+            out[cursor + 4..cursor + 4 + name_len].copy_from_slice(&block[name_off..name_off + name_len]);
             out[cursor + 4 + name_len..cursor + 4 + name_len + value_len]
                 .copy_from_slice(&block[value_off..value_off + value_len]);
             cursor += need;
@@ -237,8 +196,7 @@ fn rewrite_with_set(
     });
     // Append the new record.
     let new_record_size = 4 + name.len() + value.len();
-    if cursor + new_record_size + 4 > BLOCK_SIZE
-    {
+    if cursor + new_record_size + 4 > BLOCK_SIZE {
         return None;
     }
     out[cursor..cursor + 2].copy_from_slice(&(name.len() as u16).to_le_bytes());
@@ -256,24 +214,20 @@ fn rewrite_with_set(
 
 /// Rebuild the block with `name`'s record removed. Returns the new
 /// block + a "found" flag.
-fn rewrite_with_remove(block: &[u8; BLOCK_SIZE], name: &[u8]) -> ([u8; BLOCK_SIZE], bool)
-{
+fn rewrite_with_remove(block: &[u8; BLOCK_SIZE], name: &[u8]) -> ([u8; BLOCK_SIZE], bool) {
     let mut out = [0u8; BLOCK_SIZE];
     let mut cursor: usize = 0;
     let mut found = false;
     for_each_record(block, |name_off, name_len, value_off, value_len| {
-        if name_len == name.len() && &block[name_off..name_off + name_len] == name
-        {
+        if name_len == name.len() && &block[name_off..name_off + name_len] == name {
             found = true;
             return;
         }
         let need = 4 + name_len + value_len;
-        if cursor + need + 4 <= BLOCK_SIZE
-        {
+        if cursor + need + 4 <= BLOCK_SIZE {
             out[cursor..cursor + 2].copy_from_slice(&(name_len as u16).to_le_bytes());
             out[cursor + 2..cursor + 4].copy_from_slice(&(value_len as u16).to_le_bytes());
-            out[cursor + 4..cursor + 4 + name_len]
-                .copy_from_slice(&block[name_off..name_off + name_len]);
+            out[cursor + 4..cursor + 4 + name_len].copy_from_slice(&block[name_off..name_off + name_len]);
             out[cursor + 4 + name_len..cursor + 4 + name_len + value_len]
                 .copy_from_slice(&block[value_off..value_off + value_len]);
             cursor += need;

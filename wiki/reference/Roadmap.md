@@ -665,18 +665,30 @@ DuetFS slice (trigger #1 — on-disk filesystem parsing). See
 pinned in `/rust-toolchain.toml`; CMake builds drive cargo through
 each crate's leaf `CMakeLists.txt`.
 
-The second and third Rust subsystems are now live: USB HID report-descriptor
-parsing (`kernel/drivers/usb/hid_rust/`) and USB class configuration parsing
-(`kernel/drivers/usb/class_rust/`) are standalone Rust rlibs called through
-hand-written C ABIs from the existing C++ USB class-driver surfaces. The USB
-class parser recognizes MSC bulk-only, hub, UVC, and Bluetooth USB descriptor
-sets. Remaining triggers for **future** Rust subsystems:
+The second through fifth Rust subsystems are now live: USB HID report-descriptor
+parsing (`kernel/drivers/usb/hid_rust/`), USB class configuration parsing
+(`kernel/drivers/usb/class_rust/`), DHCPv4 option + DNSv1 name walkers
+(`kernel/net/parsers_rust/`, replaces `DhcpFindOption` / `DnsSkipName` in
+`kernel/net/stack.cpp`), and USB MSC SCSI response parsers
+(`kernel/drivers/usb/msc_scsi_rust/`, replaces the INQUIRY / READ CAPACITY /
+GET CONFIGURATION / READ TOC / READ DISC INFORMATION parser bodies in
+`kernel/drivers/usb/msc_scsi.cpp`). All five are standalone Rust rlibs called
+through hand-written C ABIs from existing C++ surfaces.
 
-1. **Deeper USB class payload parsers** — MSC sense / hub status change / UVC
-   class-specific descriptor bodies beyond endpoint binding.
-2. **TCP/IP stack** — packet headers from untrusted peers; start at
-   the protocol stack boundary, not the link layer.
-3. **Anything else with non-trivial parsing of attacker-supplied
+Remaining triggers for **future** Rust subsystems:
+
+1. **Deeper USB class payload parsers (continued)** — MSC REQUEST SENSE /
+   hub status-change endpoint / UVC class-specific descriptor bodies. (MSC
+   INQUIRY / capacity / config / TOC / disc-info landed in `msc_scsi_rust`;
+   REQUEST SENSE waits for the CBW-stall-recovery path in the bulk transport.)
+2. **TCP/IP stack header walkers** — IPv4 / ICMP / UDP / TCP option-list
+   parsers. (DHCP + DNS option walkers are in `parsers_rust`; the IP-layer
+   headers are still C++.)
+3. **PE/COFF + ELF metadata readers** — project pillar surface; image
+   metadata is fully attacker-controlled.
+4. **Read-only disk-format parsers** — NTFS / exFAT / ext4 metadata walkers
+   (the kernel only ships FAT32 today; new formats land in Rust from day one).
+5. **Anything else with non-trivial parsing of attacker-supplied
    structured bytes** — image formats, compression, font files,
    crypto framings.
 

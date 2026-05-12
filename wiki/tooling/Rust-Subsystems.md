@@ -4,7 +4,7 @@
 >
 > **Execution context:** Kernel build tooling and kernel-linked Rust crates.
 >
-> **Maturity:** Stable foundation; DuetFS + USB HID + USB class config parsing are live Rust subsystems.
+> **Maturity:** Stable foundation; DuetFS, USB HID, USB class config parsing, DHCP/DNS byte-walkers, and USB MSC SCSI response parsers are live Rust subsystems.
 
 ## Overview
 
@@ -72,8 +72,42 @@ The repository now has one shared Rust foundation **and actual Rust subsystem co
   subsystem; C++ HID APIs are wrappers over this parser.
 - `/kernel/drivers/usb/class_rust/` parses USB configuration/interface/endpoint
   descriptor streams for MSC, hub, UVC, and Bluetooth class-driver binding.
+- `/kernel/net/parsers_rust/` (`duetos_net_parsers`) wraps the DHCPv4 option
+  walker and the DNSv1 name skipper. C++ callers in `kernel/net/stack.cpp`
+  delegate `DhcpFindOption` and `DnsSkipName` through this crate.
+- `/kernel/drivers/usb/msc_scsi_rust/` (`duetos_usb_msc_scsi`) parses USB MSC
+  SCSI INQUIRY / READ CAPACITY(10) / GET CONFIGURATION header / READ TOC
+  header / READ DISC INFORMATION responses. The C++ MSC driver
+  (`kernel/drivers/usb/msc_scsi.cpp`) delegates its parse functions through
+  this crate.
 - `/cmake/DuetOSRust.cmake` exposes `duetos_add_rust_staticlib(...)`, used by
   `/kernel/rust/CMakeLists.txt` to build the aggregate Rust link unit.
+
+## Lint + format policy
+
+The workspace pins one `[workspace.lints]` block in `/Cargo.toml`; every
+member crate inherits via `[lints] workspace = true`. The deny-set is
+intentionally small (`unsafe_op_in_unsafe_fn`, `unused_must_use`,
+`non_ascii_idents`, `clippy::todo`, `clippy::unimplemented`,
+`clippy::dbg_macro`); `undocumented_unsafe_blocks` is documented as an
+aspirational lint pending a SAFETY-comment backfill on the v0 crates.
+
+Style follows idiomatic Rust (K&R braces, default control flow); the
+C++ Allman convention does not bleed in. The pin lives in
+`/rustfmt.toml`; the local CI preflight (`tools/dev/check-local.sh`)
+runs `cargo fmt --check`, `cargo clippy -- -D warnings`, and a host
+unit-test smoke (`tools/dev/cargo-host-test.sh`) against every crate
+that ships `#[cfg(test)]` modules.
+
+## Host unit tests
+
+Workspace `.cargo/config.toml` forces `target = x86_64-unknown-none` +
+`unstable.build-std`, which makes `cargo test` unusable directly (the
+test harness needs std). `tools/dev/cargo-host-test.sh` works around
+this by calling `rustc --test` directly against each crate's
+`src/lib.rs`, building a hosted binary with the system libcore +
+libstd. New crates that ship `#[cfg(test)]` modules add themselves to
+the `HOST_TEST_CRATES` list at the top of the script.
 
 ## Contract for a new crate
 

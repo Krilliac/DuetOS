@@ -17,5 +17,10 @@ crate-type = ["staticlib"]
 
 [dependencies]
 duetfs = { path = "../fs/duetfs" }
+duetos_net_parsers = { path = "../net/parsers_rust" }
+duetos_usb_msc_scsi = { path = "../drivers/usb/msc_scsi_rust" }
 usbclass = { path = "../drivers/usb/class_rust" }
 usbhid = { path = "../drivers/usb/hid_rust" }
+
+[lints]
+workspace = true

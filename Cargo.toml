@@ -9,7 +9,9 @@ resolver = "2"
 members = [
     "kernel/drivers/usb/class_rust",
     "kernel/drivers/usb/hid_rust",
+    "kernel/drivers/usb/msc_scsi_rust",
     "kernel/fs/duetfs",
+    "kernel/net/parsers_rust",
     "kernel/rust",
 ]
 
@@ -17,6 +19,30 @@ members = [
 edition = "2021"
 publish = false
 license = "MIT"
+
+# Lint policy applied to every kernel-linked Rust crate. Subsystem
+# crates inherit by adding `[lints] workspace = true` to their
+# Cargo.toml; the only escape valve is per-symbol `#[allow(...)]`
+# with an explanatory comment.
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+non_ascii_idents = "deny"
+
+[workspace.lints.clippy]
+# Catch-all "you probably didn't mean this" lints. Keep the list
+# small — clippy::pedantic / clippy::cargo are off because they
+# fire on idiomatic no_std + FFI patterns we accept.
+#
+# `undocumented_unsafe_blocks` is intentionally NOT in this set yet:
+# the v0 duetfs + USB crates pre-date the SAFETY-comment discipline
+# and carry ~117 bare `unsafe { … }` blocks. Lift to "warn" / "deny"
+# once a dedicated backfill slice adds the comments. New crates
+# (parsers_rust, msc_sense_rust) ship with SAFETY comments on every
+# unsafe block so they don't add to the gap.
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
 
 [profile.release]
 panic = "abort"

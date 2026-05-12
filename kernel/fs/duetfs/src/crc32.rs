@@ -11,22 +11,16 @@
 
 const POLY: u32 = 0xEDB88320;
 
-const fn build_table() -> [u32; 256]
-{
+const fn build_table() -> [u32; 256] {
     let mut t = [0u32; 256];
     let mut i: u32 = 0;
-    while i < 256
-    {
+    while i < 256 {
         let mut c = i;
         let mut k = 0;
-        while k < 8
-        {
-            if c & 1 != 0
-            {
+        while k < 8 {
+            if c & 1 != 0 {
                 c = (c >> 1) ^ POLY;
-            }
-            else
-            {
+            } else {
                 c >>= 1;
             }
             k += 1;
@@ -41,11 +35,9 @@ static TABLE: [u32; 256] = build_table();
 
 /// Compute the CRC32 of `bytes`. Initial value 0xFFFFFFFF, final
 /// XOR 0xFFFFFFFF (matches zlib / IEEE 802.3 / kernel/util/crc32).
-pub fn crc32(bytes: &[u8]) -> u32
-{
+pub fn crc32(bytes: &[u8]) -> u32 {
     let mut c: u32 = 0xFFFFFFFF;
-    for &b in bytes
-    {
+    for &b in bytes {
         let idx = (c ^ b as u32) & 0xFF;
         c = (c >> 8) ^ TABLE[idx as usize];
     }

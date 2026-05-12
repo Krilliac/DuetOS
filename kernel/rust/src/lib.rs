@@ -9,5 +9,7 @@
 mod panic;
 
 pub use duetfs::ffi::*;
+pub use duetos_net_parsers::*;
+pub use duetos_usb_msc_scsi::*;
 pub use usbclass::*;
 pub use usbhid::*;

@@ -1,0 +1,38 @@
+# USB MSC SCSI response parsers for DuetOS.
+#
+# A USB mass-storage device (or a malicious dongle pretending to be
+# one) replies to SCSI probe CDBs with structured byte streams: the
+# INQUIRY standard data, READ CAPACITY(10), GET CONFIGURATION
+# feature header, READ TOC/PMA/ATIP header, and READ DISC
+# INFORMATION. Every field is attacker-supplied; the host runs
+# this code BEFORE deciding whether the device is a disk or an
+# optical drive (i.e. before the trust threshold for media
+# enumeration). Keeping the walker in safe Rust slice traversal
+# moves bounds-checks to the compiler.
+#
+# Scope (v0):
+#   - parse_inquiry           — 36-byte SPC-4 standard data
+#   - parse_read_capacity_10  — 8-byte SBC-3 response
+#   - parse_get_config_header — first 8 bytes of MMC-6 §6.6 reply
+#   - parse_read_toc_header   — 4-byte MMC-6 §6.27 format-0 header
+#   - parse_disc_information  — first 12 bytes of MMC-6 §6.22 reply
+#
+# Not in scope (v0):
+#   - REQUEST SENSE / mode-page parsers — the CBW-stall recovery
+#     path isn't wired in the C++ MSC driver yet; adding a parser
+#     before a caller would be dead code.
+
+[package]
+name = "duetos_usb_msc_scsi"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "DuetOS USB MSC SCSI response parsers"
+
+[lib]
+name = "duetos_usb_msc_scsi"
+crate-type = ["rlib"]
+
+[lints]
+workspace = true

@@ -1,0 +1,36 @@
+# Net-protocol parsers for DuetOS.
+#
+# Bytes-from-the-wire walkers for DHCPv4 options + DNSv1 names.
+# Both are byte-streams under attacker influence (DHCP server can be
+# anything on the LAN; DNS responses can be off-path). Keeping the
+# walkers in safe Rust slice traversal moves the bounds-check
+# responsibility to the compiler and shrinks the C++ side to a
+# single FFI call instead of a hand-rolled scanner.
+#
+# Scope (v0):
+#   - DHCP option walker: locate `opt_code` in a BOOTP options
+#     stream and return its value slice.
+#   - DNS name skipper: advance past a name (raw labels +
+#     RFC 1035 §4.1.4 compression pointers) with a hard iteration
+#     cap so a malformed packet can't loop us.
+#
+# Not in scope (v0):
+#   - DHCP option-stream iteration (one-shot find only — matches
+#     the C++ caller's existing access pattern).
+#   - DNS name materialisation (callers only need to skip past
+#     the name; the answer-RR walk happens in C++).
+
+[package]
+name = "duetos_net_parsers"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "DuetOS DHCPv4 + DNSv1 byte-walkers"
+
+[lib]
+name = "duetos_net_parsers"
+crate-type = ["rlib"]
+
+[lints]
+workspace = true
