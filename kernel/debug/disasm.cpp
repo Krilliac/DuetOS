@@ -1316,10 +1316,94 @@ u8 DecodeOne(const u8* bytes, u64 available, u64 va, DecodedInsn* out)
             record_bytes(cur);
             return cur;
         }
+        // 0F B0 + ModR/M: CMPXCHG r/m8, r8  (byte form)
+        // 0F B1 + ModR/M: CMPXCHG r/m{16,32,64}, r{16,32,64}.
+        // Both compare the accumulator (al/ax/eax/rax) against
+        // r/m; on equal write source into r/m, else load r/m into
+        // accumulator. We only print the explicit operands; the
+        // implicit accumulator is documented in the mnemonic.
+        if (op2 == 0xB0 || op2 == 0xB1)
+        {
+            if (cur >= available)
+                return fail_db(op);
+            const ModRm mr = DecodeModRmByte(bytes[cur], p);
+            ++cur;
+            const bool byte_form = (op2 == 0xB0);
+            const OpW w = GprWidth(p, byte_form);
+            char rm_buf[48] = {0};
+            const u8 rm_extra = FormatRmOperand(rm_buf, sizeof(rm_buf), mr, w, w, p, &bytes[cur], available - cur);
+            if (rm_extra == 0xFF)
+                return fail_db(op);
+            cur += rm_extra;
+            StrCopy(out->mnemonic, kBufMnem, "cmpxchg");
+            StrAppend(out->operands, kBufOpr, rm_buf);
+            StrAppend(out->operands, kBufOpr, ", ");
+            StrAppend(out->operands, kBufOpr, RegName(mr.reg_idx, w, p.rex_seen));
+            out->len = cur;
+            out->decoded = true;
+            record_bytes(cur);
+            return cur;
+        }
+        // 0F C0 + ModR/M: XADD r/m8, r8 (byte form)
+        // 0F C1 + ModR/M: XADD r/m{16,32,64}, r{16,32,64}.
+        // Exchange-and-add: dst += src; then src = old dst. We
+        // print (r/m, r) in dst-first order matching the spec.
+        if (op2 == 0xC0 || op2 == 0xC1)
+        {
+            if (cur >= available)
+                return fail_db(op);
+            const ModRm mr = DecodeModRmByte(bytes[cur], p);
+            ++cur;
+            const bool byte_form = (op2 == 0xC0);
+            const OpW w = GprWidth(p, byte_form);
+            char rm_buf[48] = {0};
+            const u8 rm_extra = FormatRmOperand(rm_buf, sizeof(rm_buf), mr, w, w, p, &bytes[cur], available - cur);
+            if (rm_extra == 0xFF)
+                return fail_db(op);
+            cur += rm_extra;
+            StrCopy(out->mnemonic, kBufMnem, "xadd");
+            StrAppend(out->operands, kBufOpr, rm_buf);
+            StrAppend(out->operands, kBufOpr, ", ");
+            StrAppend(out->operands, kBufOpr, RegName(mr.reg_idx, w, p.rex_seen));
+            out->len = cur;
+            out->decoded = true;
+            record_bytes(cur);
+            return cur;
+        }
+        // 0F 18 + ModR/M: PREFETCHh m8. The /N field picks the
+        // hint level: /0 PREFETCHNTA, /1 PREFETCHT0, /2 PREFETCHT1,
+        // /3 PREFETCHT2; /4..7 are reserved-NOP on most CPUs but
+        // assemble identically. The operand is always a byte
+        // memory reference.
+        if (op2 == 0x18)
+        {
+            if (cur >= available)
+                return fail_db(op);
+            const ModRm mr = DecodeModRmByte(bytes[cur], p);
+            ++cur;
+            char rm_buf[48] = {0};
+            const u8 rm_extra =
+                FormatRmOperand(rm_buf, sizeof(rm_buf), mr, OpW::B8, OpW::B8, p, &bytes[cur], available - cur);
+            if (rm_extra == 0xFF)
+                return fail_db(op);
+            cur += rm_extra;
+            const u8 sub = mr.reg_idx & 0x7;
+            const char* mnem = (sub == 0)   ? "prefetchnta"
+                               : (sub == 1) ? "prefetcht0"
+                               : (sub == 2) ? "prefetcht1"
+                               : (sub == 3) ? "prefetcht2"
+                                            : "prefetch";
+            StrCopy(out->mnemonic, kBufMnem, mnem);
+            StrAppend(out->operands, kBufOpr, rm_buf);
+            out->len = cur;
+            out->decoded = true;
+            record_bytes(cur);
+            return cur;
+        }
         // GAP: remaining 0x0F-prefix opcodes (POPCNT/LZCNT under
-        // 0xF3 prefix, XADD, CMPXCHG, prefetch, MOVNTQ, etc.)
-        // decode as `db` until they earn a slice.
-        FIX_NOTE_GAP("debug/disasm.cpp:0x0F-prefix", "decode XADD/CMPXCHG/POPCNT/prefetch");
+        // 0xF3 prefix, MOVNT*, SSE/AVX) decode as `db` until they
+        // earn a slice.
+        FIX_NOTE_GAP("debug/disasm.cpp:0x0F-prefix", "decode POPCNT/LZCNT/MOVNT/SSE");
         return fail_db(op);
     }
 
@@ -1388,16 +1472,19 @@ bool SelfTest()
         0x0F, 0x05,                               // syscall
         0xC9,                                     // leave
         // 0x0F-prefix extensions:
-        0x0F, 0xB6, 0xC0,                   // movzx eax, al
-        0x0F, 0xBE, 0xC0,                   // movsx eax, al
-        0x48, 0x0F, 0x44, 0xC3,             // cmove rax, rbx
-        0x0F, 0x94, 0xC0,                   // sete al
-        0x0F, 0xBC, 0xC0,                   // bsf eax, eax
-        0x48, 0x0F, 0xBD, 0xD8,             // bsr rbx, rax
-        0x48, 0x0F, 0xC8,                   // bswap rax
-        0x0F, 0xA3, 0xC8,                   // bt eax, ecx
-        0x0F, 0xBA, 0xE0, 0x05,             // bt eax, 5
-        0xC4, 0xE3, 0x71, 0x60, 0xC1, 0x00, // VEX-prefixed → must reject as `db`
+        0x0F, 0xB6, 0xC0,                         // movzx eax, al
+        0x0F, 0xBE, 0xC0,                         // movsx eax, al
+        0x48, 0x0F, 0x44, 0xC3,                   // cmove rax, rbx
+        0x0F, 0x94, 0xC0,                         // sete al
+        0x0F, 0xBC, 0xC0,                         // bsf eax, eax
+        0x48, 0x0F, 0xBD, 0xD8,                   // bsr rbx, rax
+        0x48, 0x0F, 0xC8,                         // bswap rax
+        0x0F, 0xA3, 0xC8,                         // bt eax, ecx
+        0x0F, 0xBA, 0xE0, 0x05,                   // bt eax, 5
+        0x0F, 0xB1, 0xCB,                         // cmpxchg ebx, ecx
+        0x48, 0x0F, 0xC1, 0xCB,                   // xadd rbx, rcx
+        0x0F, 0x18, 0x0D, 0x00, 0x00, 0x00, 0x00, // prefetcht0 [rip+0]
+        0xC4, 0xE3, 0x71, 0x60, 0xC1, 0x00,       // VEX-prefixed → must reject as `db`
     };
     struct Expected
     {
@@ -1428,6 +1515,9 @@ bool SelfTest()
         {"bswap", 3},
         {"bt", 3},
         {"bt", 4},
+        {"cmpxchg", 3},
+        {"xadd", 4},
+        {"prefetcht0", 7},
         // The VEX byte rejects as `db 0xC4`, then the decoder walks
         // forward one byte at a time through the rest until end.
         {"db", 1},
