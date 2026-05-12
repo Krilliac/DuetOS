@@ -291,6 +291,10 @@ struct Process
     // and is terminated. Complements the tick budget: a spinning
     // task would be caught by ticks, a retrying task by denials.
     u64 sandbox_denials;
+    // Latch so the threshold-kill log + FlagCurrentForKill run at
+    // most once even if multiple racing denials all observe a
+    // counter past the kill threshold.
+    bool sandbox_kill_flagged;
 
     // FS write rate-limit windows (multi-tier).
     //

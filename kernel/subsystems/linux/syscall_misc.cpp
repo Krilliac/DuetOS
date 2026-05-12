@@ -421,9 +421,20 @@ i64 DoGetRobustList(u64 pid, u64 user_head_ptr, u64 user_len_ptr)
 // user mode would alias our per-CPU area.
 i64 DoArchPrctl(u64 code, u64 addr)
 {
+    // Canonical user-half ceiling — bit 47 set marks kernel-half on
+    // x86_64. ARCH_SET_FS plants `addr` into MSR_FS_BASE; if the
+    // process is allowed to plant a kernel address there, a single
+    // `mov rax, [fs:0]` from ring 3 dereferences kernel memory via
+    // the segment-base addition. SMEP/SMAP don't see this — the
+    // addressing happens before the page walk's U-bit check decides
+    // what to do — so the only place to gate is here, BEFORE the MSR
+    // write commits.
+    constexpr u64 kUserHalfMaxExclusive = 0x0000800000000000ULL;
     switch (code)
     {
     case kArchSetFs:
+        if (addr >= kUserHalfMaxExclusive)
+            return kEINVAL;
         WriteMsr(kMsrFsBase, addr);
         return 0;
     case kArchGetFs:

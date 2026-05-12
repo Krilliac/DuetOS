@@ -3107,7 +3107,13 @@ bool WaitQueueBlockTimeout(WaitQueue* wq, u64 ticks)
         KASSERT(t->state == TaskState::Running, "sched", "WaitQueueBlockTimeout on non-Running task");
         t->state = TaskState::Blocked;
         t->next = nullptr;
-        t->wake_tick = g_tick_now + ticks;
+        // Saturate the deadline rather than wrap. Without the clamp,
+        // `g_tick_now + ticks` could overflow u64 (e.g., a Linux ABI
+        // caller passing nsec_to_ticks(LLONG_MAX)); the wake-tick
+        // comparator uses signed-diff arithmetic and would then read
+        // the wrapped deadline as already-elapsed, making the wait
+        // return immediately instead of blocking.
+        t->wake_tick = (ticks > (~u64(0) - g_tick_now)) ? ~u64(0) : (g_tick_now + ticks);
         t->waiting_on = wq;
         t->wake_by_timeout = false;
 

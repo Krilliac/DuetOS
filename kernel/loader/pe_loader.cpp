@@ -699,7 +699,13 @@ u64 CountTlsCallbacks(const u8* file, u64 file_len, const PeHeaders& h)
     // here against whatever h.image_base happens to hold.
     if (cb_va == 0 || cb_va < h.image_base)
         return 0;
-    const u32 cb_rva = static_cast<u32>(cb_va - h.image_base);
+    // PE RVAs are u32. A hostile TLS directory with cb_va more than 4
+    // GiB above image_base would silently truncate the difference and
+    // land RvaToFile on a wrong section. Refuse such images instead.
+    const u64 cb_va_delta = cb_va - h.image_base;
+    if (cb_va_delta > 0xFFFFFFFFULL)
+        return 0;
+    const u32 cb_rva = static_cast<u32>(cb_va_delta);
     const u64 cb_off = RvaToFile(file, h, cb_rva);
     if (cb_off == ~u64(0))
         return 0;

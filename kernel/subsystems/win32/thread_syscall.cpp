@@ -137,15 +137,28 @@ void DoThreadCreate(arch::TrapFrame* frame)
         return;
     }
 
-    // Find a free thread-table slot.
+    // Find and CLAIM a free thread-table slot. The scan + claim must
+    // be a single critical section: KMalloc / AllocateFrame /
+    // SchedCreateUser further down can sleep or yield, and a
+    // concurrent SYS_THREAD_CREATE on this same process must not
+    // pick the same slot. Mark `in_use = true` while still under the
+    // IRQ-off window so the second caller's scan sees this slot busy.
+    // The handle metadata (task, user_stack_va) gets filled in further
+    // down once SchedCreateUser succeeds.
     u32 slot = Process::kWin32ThreadCap;
-    for (u32 i = 0; i < Process::kWin32ThreadCap; ++i)
     {
-        if (!proc->win32_threads[i].in_use)
+        arch::Cli();
+        for (u32 i = 0; i < Process::kWin32ThreadCap; ++i)
         {
-            slot = i;
-            break;
+            if (!proc->win32_threads[i].in_use)
+            {
+                slot = i;
+                proc->win32_threads[i].in_use = true;
+                proc->win32_threads[i].task = nullptr;
+                break;
+            }
         }
+        arch::Sti();
     }
     if (slot == Process::kWin32ThreadCap)
     {
@@ -183,6 +196,8 @@ void DoThreadCreate(arch::TrapFrame* frame)
             SerialWriteHex(stack_pages);
             SerialWrite("\n");
             proc->thread_stack_cursor += stack_pages * mm::kPageSize;
+            // Release the slot we claimed above; no task ever attaches.
+            proc->win32_threads[slot].in_use = false;
             frame->rax = static_cast<u64>(-1);
             return;
         }
@@ -227,6 +242,7 @@ void DoThreadCreate(arch::TrapFrame* frame)
     if (desc == nullptr)
     {
         SerialWrite("[thread] create FAIL heap alloc for ThreadDesc\n");
+        proc->win32_threads[slot].in_use = false;
         frame->rax = static_cast<u64>(-1);
         return;
     }
@@ -274,10 +290,13 @@ void DoThreadCreate(arch::TrapFrame* frame)
         // ProcessRetain was consumed by SchedCreateUser's
         // gate-denial branch (ProcessRelease there) on nullptr
         // return. No manual release here — see sched.cpp.
+        proc->win32_threads[slot].in_use = false;
         frame->rax = static_cast<u64>(-1);
         return;
     }
 
+    // The pre-claim above already set in_use=true; the (slot,task)
+    // pair is now finalised so future Lookup hits this row.
     proc->win32_threads[slot].in_use = true;
     proc->win32_threads[slot].task = t;
     proc->win32_threads[slot].user_stack_va = stack_base_va;
