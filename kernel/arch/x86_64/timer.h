@@ -51,4 +51,21 @@ u64 TimerTicks();
 /// when the workload exposes drift.`
 void LapicTimerStartOnCurrent();
 
+/// Inform the init-wedge watchdog that boot init has finished. After
+/// this call, steady-state quiet windows (idle loop, compositor naps
+/// with no UI activity) stop counting toward the silent-heartbeats
+/// threshold. Idempotent; called from `core/main.cpp` at the end of
+/// the `Userland` phase.
+void MarkInitComplete();
+
+/// Configure the init-wedge watchdog escalation. 0 (default) =
+/// warn-only: the watchdog logs an `[init-wedge] WARN` line and
+/// fires the `boot.init_wedge` probe but the kernel keeps trying
+/// to progress. >0 = panic: after `silent_heartbeats` consecutive
+/// 5 s intervals of zero init progress, the watchdog calls
+/// `core::Panic` so an attached debugger / CI grep gets a hard
+/// failure instead of a stuck box. Parsed from the kernel cmdline
+/// arg `init-wedge-panic=<N>` in `core/main.cpp`.
+void SetInitWedgePanicThreshold(u32 silent_heartbeats);
+
 } // namespace duetos::arch

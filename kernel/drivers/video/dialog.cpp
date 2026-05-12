@@ -309,18 +309,16 @@ void DialogCompose()
         return;
     const auto& th = ThemeCurrent();
 
-    // Dim the desktop with a coarse dotted overlay so the panel
-    // reads as modal without needing a real alpha-blend pass.
-    // Every other pixel on every other row gets darkened —
-    // enough to let the user know the surface is inert.
-    constexpr u32 kDimRgb = 0x00202028;
-    for (u32 y = 0; y < fb.height; y += 2)
-    {
-        for (u32 x = (y & 2) ? 1 : 0; x < fb.width; x += 2)
-        {
-            FramebufferPutPixel(x, y, kDimRgb);
-        }
-    }
+    // Dim the desktop with a smooth alpha-blended overlay so the
+    // panel reads as the only interactive surface, mirroring the
+    // macOS / KDE / GNOME convention. The overlay tints the
+    // surface toward near-black at ~40 % opacity — strong enough
+    // to deemphasise the chrome behind it without making titles
+    // unreadable in case a user wants to glance at context.
+    // Replaces the older "every-other-pixel dotted" approximation
+    // that used the chrome's no-alpha era primitives.
+    constexpr u32 kDimArgb = (0x66U << 24) | 0x00080810U;
+    FramebufferFillRectAlpha(0, 0, fb.width, fb.height, kDimArgb);
 
     u32 px = 0, py = 0;
     PanelOrigin(&px, &py);

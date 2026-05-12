@@ -590,25 +590,40 @@ void WindowDraw(const WindowChrome& w)
         return;
     }
 
-    // Client area first — the title bar draw below overwrites
-    // the top strip. Painting the whole client-area colour up
-    // front avoids a branch-per-row "am I inside the title?"
-    // pattern.
-    FramebufferFillRect(w.x, w.y, w.w, w.h, w.colour_client);
-
-    // Title bar with a vertical gradient: a softly-lighter band
-    // at the top fades into the registered title colour at the
-    // bottom. The +24 lift is small enough to preserve the
-    // theme's hue identity while still reading as "depth" — the
-    // chrome no longer looks like a solid coloured bar.
     const u32 tbh = EffectiveTitleHeight(w);
     const u32 tbh_eff = (tbh > w.h) ? w.h : tbh;
-    const u32 title_top = LightenRgb(w.colour_title, 24);
-    FramebufferFillRectGradient(w.x, w.y, w.w, tbh_eff, title_top, w.colour_title);
 
-    // 1-pixel highlight at the very top of the title bar — a
-    // brighter ridge that catches the eye and makes the window
-    // read as a discrete object rather than a coloured fill.
+    // Client area paint — only the area BELOW the title bar gets
+    // the opaque client fill. The title-bar strip is filled
+    // separately with an alpha-blended gradient so the wallpaper
+    // underneath shows through at low opacity (the Win11 Mica /
+    // macOS BigSur "frosted title" idiom). Previously the entire
+    // window was painted opaque first; that gave a flat-coloured
+    // title with no awareness of what's behind the window.
+    if (w.h > tbh_eff)
+    {
+        FramebufferFillRect(w.x, w.y + tbh_eff, w.w, w.h - tbh_eff, w.colour_client);
+    }
+
+    // Title bar — three-stage paint:
+    //   1. Solid base fill at the title colour so the gradient
+    //      below reads even when the window covers a near-black
+    //      patch of wallpaper.
+    //   2. Alpha-blended brighter band over the top half (the
+    //      "glass shine" that simulates light catching the chrome).
+    //   3. 1-pixel highlight ridge along the very top edge.
+    // The 0xA0 alpha on the shine reads as "obviously chrome,
+    // subtly modern" without crossing into the see-through Mica
+    // look proper, which needs a per-pixel wallpaper read pass
+    // (deferred — fb API is write-only today).
+    const u32 title_top = LightenRgb(w.colour_title, 24);
+    FramebufferFillRect(w.x, w.y, w.w, tbh_eff, w.colour_title);
+    if (tbh_eff > 4)
+    {
+        const u32 shine_h = tbh_eff / 2;
+        const u32 shine_argb = (0xA0U << 24) | (title_top & 0x00FFFFFFU);
+        FramebufferFillRectAlpha(w.x, w.y, w.w, shine_h, shine_argb);
+    }
     if (tbh_eff > 0)
     {
         FramebufferFillRect(w.x + 2, w.y + 1, (w.w > 4) ? w.w - 4 : 0, 1, LightenRgb(w.colour_title, 56));
@@ -632,6 +647,32 @@ void WindowDraw(const WindowChrome& w)
     if (tbh_eff + 2 <= w.h)
     {
         FramebufferFillRect(w.x + 2, w.y + tbh_eff, w.w - 4, 1, w.colour_border);
+    }
+
+    // Drag affordance — a centred grid of small dimples that signals
+    // "this strip is a drag handle" to new users. Same idiom macOS
+    // uses on its document-style title bars and KDE uses on its
+    // dragger handles. Six dots in three rows × two columns, each
+    // 1-px, spaced 2-px apart, painted with the title bar's brighter
+    // ridge tint so they read as a tactile texture on top of the
+    // gradient rather than competing with the title text.
+    if (tbh_eff >= 14 && w.w > 240)
+    {
+        const u32 dot_rgb = LightenRgb(w.colour_title, 64);
+        const u32 dimple_cols = 2;
+        const u32 dimple_rows = 3;
+        const u32 dimple_step = 3;
+        const u32 dimple_block_w = dimple_cols * dimple_step;
+        const u32 dimple_block_h = dimple_rows * dimple_step;
+        const u32 dimple_x0 = w.x + (w.w - dimple_block_w) / 2;
+        const u32 dimple_y0 = w.y + (tbh_eff - dimple_block_h) / 2;
+        for (u32 row = 0; row < dimple_rows; ++row)
+        {
+            for (u32 col = 0; col < dimple_cols; ++col)
+            {
+                FramebufferFillRect(dimple_x0 + col * dimple_step, dimple_y0 + row * dimple_step, 1, 1, dot_rgb);
+            }
+        }
     }
 
     // Three title-bar control buttons (min / max / close), laid
@@ -658,12 +699,29 @@ void WindowDraw(const WindowChrome& w)
             // hover/control fill so min + max look like part of the
             // chrome, not separate UI. The close box keeps its
             // theme-distinct red.
+            //
+            // Mouse-hover state: the close / max / min boxes lighten
+            // toward white when the cursor is inside them, matching
+            // the universal Win/macOS/GNOME "this button is hot"
+            // affordance. The cursor position is sampled once per
+            // recompose; per-button hit-test is a single rect
+            // comparison. Close button's hover tint is also a lift
+            // (rather than a Win11-red flood) so the close box stays
+            // readable even under high cursor velocity.
+            u32 hover_x = 0;
+            u32 hover_y = 0;
+            CursorPosition(&hover_x, &hover_y);
+            auto inside = [&](u32 bx, u32 by) -> bool
+            { return hover_x >= bx && hover_x < bx + btn_w && hover_y >= by && hover_y < by + btn_h; };
             const u32 ctrl_fill = w.colour_title;
-            FramebufferFillRect(min_x, btn_y, btn_w, btn_h, ctrl_fill);
+            const u32 ctrl_fill_hot = LightenRgb(ctrl_fill, 48);
+            const u32 close_fill = w.colour_close_btn;
+            const u32 close_fill_hot = LightenRgb(close_fill, 48);
+            FramebufferFillRect(min_x, btn_y, btn_w, btn_h, inside(min_x, btn_y) ? ctrl_fill_hot : ctrl_fill);
             FramebufferDrawRect(min_x, btn_y, btn_w, btn_h, w.colour_border, 1);
-            FramebufferFillRect(max_x, btn_y, btn_w, btn_h, ctrl_fill);
+            FramebufferFillRect(max_x, btn_y, btn_w, btn_h, inside(max_x, btn_y) ? ctrl_fill_hot : ctrl_fill);
             FramebufferDrawRect(max_x, btn_y, btn_w, btn_h, w.colour_border, 1);
-            FramebufferFillRect(close_x, btn_y, btn_w, btn_h, w.colour_close_btn);
+            FramebufferFillRect(close_x, btn_y, btn_w, btn_h, inside(close_x, btn_y) ? close_fill_hot : close_fill);
             FramebufferDrawRect(close_x, btn_y, btn_w, btn_h, w.colour_border, 1);
 
             // Glyph dimensions use the smaller of width/height so
@@ -702,12 +760,11 @@ void WindowDraw(const WindowChrome& w)
         }
     }
 
-    // Soft drop shadow on the right + bottom edges. Makes the
-    // active window read as raised relative to the desktop and
-    // recedes the inactive ones into the surface — a small
-    // chrome polish that costs ~depth × (w + h) alpha-blended
-    // pixels per window.
-    FramebufferDropShadow(w.x, w.y, w.w, w.h, 4, 0x60);
+    // Drop shadow is painted by WindowDrawAllOrdered with depth +
+    // alpha tuned for the active vs inactive state. Centralising it
+    // there means every WindowDraw caller (currently only
+    // WindowDrawAllOrdered) gets focus-aware depth without having
+    // to thread an is_active flag down through the chrome paint.
 }
 
 namespace
@@ -1297,6 +1354,35 @@ void WindowSnapRight(WindowHandle h)
     g_windows[h].maximized = false;
 }
 
+void WindowSnapTop(WindowHandle h)
+{
+    if (!WindowValid(h))
+        return;
+    u32 wa_x = 0, wa_y = 0, wa_w = 0, wa_h = 0;
+    WorkArea(&wa_x, &wa_y, &wa_w, &wa_h);
+    auto& c = g_windows[h].chrome;
+    c.x = wa_x;
+    c.y = wa_y;
+    c.w = wa_w;
+    c.h = wa_h / 2u;
+    g_windows[h].maximized = false;
+}
+
+void WindowSnapBottom(WindowHandle h)
+{
+    if (!WindowValid(h))
+        return;
+    u32 wa_x = 0, wa_y = 0, wa_w = 0, wa_h = 0;
+    WorkArea(&wa_x, &wa_y, &wa_w, &wa_h);
+    auto& c = g_windows[h].chrome;
+    const u32 half = wa_h / 2u;
+    c.x = wa_x;
+    c.y = wa_y + half;
+    c.w = wa_w;
+    c.h = wa_h - half;
+    g_windows[h].maximized = false;
+}
+
 void WindowSetOpacity(WindowHandle h, u8 opacity)
 {
     if (!WindowValid(h))
@@ -1472,6 +1558,19 @@ void WindowDrawAllOrdered()
         {
             drawn.colour_title = kInactiveTitleRgb;
         }
+        // Focus-aware drop shadow. Painted BEFORE the chrome so the
+        // window covers the inner shadow bands; only the right +
+        // bottom fringe shows. The active window gets a deeper /
+        // stronger cast (6-px / α 0x88) so it visibly hovers above
+        // the desktop in the macOS / Win11 idiom; inactive windows
+        // get a shallow / faint cast (2-px / α 0x30) so they recede
+        // into the surface. Single-window scenes still get the
+        // active treatment regardless of the focus state — there's
+        // nothing else competing for the eye.
+        const bool only_window = (g_window_count == 1);
+        const u32 shadow_depth = (is_active || only_window) ? 6U : 2U;
+        const u8 shadow_alpha = (is_active || only_window) ? 0x88U : 0x30U;
+        FramebufferDropShadow(drawn.x, drawn.y, drawn.w, drawn.h, shadow_depth, shadow_alpha);
         WindowDraw(drawn);
         // Rounded-corner approximation for the Duet theme. The
         // chrome itself is painted as a rectangle; we then

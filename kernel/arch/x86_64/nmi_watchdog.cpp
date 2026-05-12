@@ -87,6 +87,16 @@ u64 MaskToWidth(u64 v, u32 width)
 void NmiWatchdogInit()
 {
     KLOG_TRACE_SCOPE("arch/nmi-watchdog", "NmiWatchdogInit");
+    // Idempotent — multiple calls (early post-TimerInit + the
+    // late tail call in main.cpp via RegisterDriverDomain) all
+    // arrive at the same configured state without disturbing
+    // the running counter. If it's already enabled, return
+    // before re-touching the LVT / MSRs so an in-flight overflow
+    // doesn't miss its NMI delivery.
+    if (g_enabled)
+    {
+        return;
+    }
 
     // CPUID leaf 0xA: architectural performance monitoring.
     // EAX[7:0]   = version

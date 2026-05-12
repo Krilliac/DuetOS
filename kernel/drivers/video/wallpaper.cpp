@@ -491,7 +491,12 @@ void WallpaperPaint(u32 desktop_rgb)
         // carry the variant's brand hue.
         PaintDuetArcs(desktop_rgb, info.width, info.height);
         PaintDuetBrandText(desktop_rgb, info.width, info.height);
-        PaintDuetKernelStats(desktop_rgb, info.width, info.height);
+        // Live kernel-stats footer used to paint syscall / DLL / export
+        // counts in the bottom-right of the wallpaper. With the chrome
+        // polish slice (drag affordance, focus shadow, app glyphs) the
+        // wallpaper competes with window content for the eye; the
+        // stats are reachable from Sysmon + About anyway. Skipped to
+        // keep the desktop reading as "calm surface, sharp chrome".
         break;
     case ThemeId::Classic:
         PaintClassicBubbles(desktop_rgb, info.width, info.height);

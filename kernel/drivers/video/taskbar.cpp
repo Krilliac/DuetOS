@@ -103,6 +103,180 @@ u32 LightenRgb(u32 rgb, u32 amount)
     return (r << 16) | (g << 8) | b;
 }
 
+// Paint a 10×10 app glyph for a taskbar tab. Each ThemeRole gets
+// a distinctive silhouette assembled from the framebuffer's
+// rect/line primitives — no glyph asset pipeline needed at v0.
+// Untagged windows (handle has no role registered) get a neutral
+// square placeholder so the tab layout stays uniform whether or
+// not the window is a registered native app. The glyph is drawn
+// from origin (gx, gy) in `size` × `size` pixels with `ink` over
+// the tab's fill (`bg`).
+void DrawTaskbarGlyph(u32 gx, u32 gy, u32 size, u32 ink, u32 bg, bool have_role, ThemeRole role)
+{
+    (void)bg;
+    if (!have_role)
+    {
+        FramebufferDrawRect(gx + 1, gy + 1, size - 2, size - 2, ink, 1);
+        FramebufferFillRect(gx + size / 2 - 1, gy + size / 2 - 1, 2, 2, ink);
+        return;
+    }
+    const u32 right = gx + size - 1;
+    const u32 bottom = gy + size - 1;
+    switch (role)
+    {
+    case ThemeRole::Calculator:
+        // Display strip on top + a 2×2 keypad grid.
+        FramebufferFillRect(gx, gy, size, 2, ink);
+        FramebufferDrawRect(gx, gy + 3, size, size - 3, ink, 1);
+        FramebufferFillRect(gx + size / 2, gy + 4, 1, size - 4, ink);
+        FramebufferFillRect(gx + 1, gy + 3 + (size - 3) / 2, size - 2, 1, ink);
+        break;
+    case ThemeRole::Notes:
+        // Page with three ruled rows.
+        FramebufferDrawRect(gx, gy, size, size, ink, 1);
+        FramebufferFillRect(gx + 2, gy + 3, size - 4, 1, ink);
+        FramebufferFillRect(gx + 2, gy + 5, size - 4, 1, ink);
+        FramebufferFillRect(gx + 2, gy + 7, size - 5, 1, ink);
+        break;
+    case ThemeRole::TaskManager:
+        // Bar chart: three ascending columns.
+        FramebufferFillRect(gx + 1, gy + size - 4, 2, 3, ink);
+        FramebufferFillRect(gx + 4, gy + size - 6, 2, 5, ink);
+        FramebufferFillRect(gx + 7, gy + size - 9, 2, 8, ink);
+        break;
+    case ThemeRole::LogView:
+        // Console with three text lines.
+        FramebufferDrawRect(gx, gy, size, size, ink, 1);
+        FramebufferFillRect(gx + 2, gy + 2, 4, 1, ink);
+        FramebufferFillRect(gx + 2, gy + 4, 6, 1, ink);
+        FramebufferFillRect(gx + 2, gy + 6, 5, 1, ink);
+        break;
+    case ThemeRole::Files:
+        // Folder silhouette: tab on top, body below.
+        FramebufferFillRect(gx, gy + 2, 4, 1, ink);
+        FramebufferDrawRect(gx, gy + 3, size, size - 3, ink, 1);
+        break;
+    case ThemeRole::Clock:
+        // Circle with two hands.
+        FramebufferStrokeArc(static_cast<i32>(gx + size / 2), static_cast<i32>(gy + size / 2),
+                             static_cast<i32>(size / 2 - 1), 0, 360, 1U, ink);
+        FramebufferDrawLine(static_cast<i32>(gx + size / 2), static_cast<i32>(gy + size / 2),
+                            static_cast<i32>(gx + size / 2), static_cast<i32>(gy + 2), ink);
+        FramebufferDrawLine(static_cast<i32>(gx + size / 2), static_cast<i32>(gy + size / 2),
+                            static_cast<i32>(gx + size - 2), static_cast<i32>(gy + size / 2), ink);
+        break;
+    case ThemeRole::GfxDemo:
+        // Triangle in a frame — the universal "graphics demo" sign.
+        FramebufferDrawRect(gx, gy, size, size, ink, 1);
+        FramebufferDrawLine(static_cast<i32>(gx + size / 2), static_cast<i32>(gy + 2), static_cast<i32>(gx + 2),
+                            static_cast<i32>(bottom - 2), ink);
+        FramebufferDrawLine(static_cast<i32>(gx + 2), static_cast<i32>(bottom - 2), static_cast<i32>(right - 2),
+                            static_cast<i32>(bottom - 2), ink);
+        FramebufferDrawLine(static_cast<i32>(right - 2), static_cast<i32>(bottom - 2), static_cast<i32>(gx + size / 2),
+                            static_cast<i32>(gy + 2), ink);
+        break;
+    case ThemeRole::Settings:
+        // Gear-suggesting diamond at centre.
+        FramebufferDrawLine(static_cast<i32>(gx + size / 2), static_cast<i32>(gy + 1), static_cast<i32>(right - 1),
+                            static_cast<i32>(gy + size / 2), ink);
+        FramebufferDrawLine(static_cast<i32>(right - 1), static_cast<i32>(gy + size / 2),
+                            static_cast<i32>(gx + size / 2), static_cast<i32>(bottom - 1), ink);
+        FramebufferDrawLine(static_cast<i32>(gx + size / 2), static_cast<i32>(bottom - 1), static_cast<i32>(gx + 1),
+                            static_cast<i32>(gy + size / 2), ink);
+        FramebufferDrawLine(static_cast<i32>(gx + 1), static_cast<i32>(gy + size / 2), static_cast<i32>(gx + size / 2),
+                            static_cast<i32>(gy + 1), ink);
+        FramebufferFillRect(gx + size / 2 - 1, gy + size / 2 - 1, 2, 2, ink);
+        break;
+    case ThemeRole::ImageView:
+        // Frame with a sun-and-mountain silhouette.
+        FramebufferDrawRect(gx, gy, size, size, ink, 1);
+        FramebufferStrokeArc(static_cast<i32>(gx + 3), static_cast<i32>(gy + 3), 1, 0, 360, 1U, ink);
+        FramebufferDrawLine(static_cast<i32>(gx + 1), static_cast<i32>(bottom - 1), static_cast<i32>(gx + 4),
+                            static_cast<i32>(gy + size / 2), ink);
+        FramebufferDrawLine(static_cast<i32>(gx + 4), static_cast<i32>(gy + size / 2), static_cast<i32>(right - 1),
+                            static_cast<i32>(bottom - 1), ink);
+        break;
+    case ThemeRole::About:
+        // Lower-case "i".
+        FramebufferDrawRect(gx + 1, gy + 1, size - 2, size - 2, ink, 1);
+        FramebufferFillRect(gx + size / 2, gy + 2, 1, 1, ink);
+        FramebufferFillRect(gx + size / 2, gy + 4, 1, size - 6, ink);
+        break;
+    case ThemeRole::Help:
+        // Question mark.
+        FramebufferStrokeArc(static_cast<i32>(gx + size / 2), static_cast<i32>(gy + 3), 2, 0, 270, 1U, ink);
+        FramebufferDrawLine(static_cast<i32>(gx + size / 2), static_cast<i32>(gy + 5), static_cast<i32>(gx + size / 2),
+                            static_cast<i32>(bottom - 3), ink);
+        FramebufferFillRect(gx + size / 2, bottom - 1, 1, 1, ink);
+        break;
+    case ThemeRole::Browser:
+        // Globe outline.
+        FramebufferStrokeArc(static_cast<i32>(gx + size / 2), static_cast<i32>(gy + size / 2),
+                             static_cast<i32>(size / 2 - 1), 0, 360, 1U, ink);
+        FramebufferDrawLine(static_cast<i32>(gx + 1), static_cast<i32>(gy + size / 2), static_cast<i32>(right - 1),
+                            static_cast<i32>(gy + size / 2), ink);
+        FramebufferDrawLine(static_cast<i32>(gx + size / 2), static_cast<i32>(gy + 1), static_cast<i32>(gx + size / 2),
+                            static_cast<i32>(bottom - 1), ink);
+        break;
+    case ThemeRole::Calendar:
+        // Grid layout with a header strip.
+        FramebufferDrawRect(gx, gy, size, size, ink, 1);
+        FramebufferFillRect(gx + 1, gy + 1, size - 2, 1, ink);
+        FramebufferFillRect(gx + 1, gy + 5, size - 2, 1, ink);
+        FramebufferFillRect(gx + size / 2, gy + 3, 1, size - 4, ink);
+        break;
+    case ThemeRole::NotifyCenter:
+        // Bell silhouette.
+        FramebufferDrawLine(static_cast<i32>(gx + 2), static_cast<i32>(bottom - 2), static_cast<i32>(right - 2),
+                            static_cast<i32>(bottom - 2), ink);
+        FramebufferDrawLine(static_cast<i32>(gx + 2), static_cast<i32>(bottom - 2), static_cast<i32>(gx + 3),
+                            static_cast<i32>(gy + 3), ink);
+        FramebufferDrawLine(static_cast<i32>(gx + 3), static_cast<i32>(gy + 3), static_cast<i32>(right - 3),
+                            static_cast<i32>(gy + 3), ink);
+        FramebufferDrawLine(static_cast<i32>(right - 3), static_cast<i32>(gy + 3), static_cast<i32>(right - 2),
+                            static_cast<i32>(bottom - 2), ink);
+        FramebufferFillRect(gx + size / 2, bottom - 1, 1, 1, ink);
+        break;
+    case ThemeRole::Sysmon:
+        // EKG-like line graph.
+        FramebufferDrawRect(gx, gy + 1, size, size - 2, ink, 1);
+        FramebufferDrawLine(static_cast<i32>(gx + 1), static_cast<i32>(gy + 6), static_cast<i32>(gx + 3),
+                            static_cast<i32>(gy + 6), ink);
+        FramebufferDrawLine(static_cast<i32>(gx + 3), static_cast<i32>(gy + 6), static_cast<i32>(gx + 4),
+                            static_cast<i32>(gy + 3), ink);
+        FramebufferDrawLine(static_cast<i32>(gx + 4), static_cast<i32>(gy + 3), static_cast<i32>(gx + 5),
+                            static_cast<i32>(gy + 8), ink);
+        FramebufferDrawLine(static_cast<i32>(gx + 5), static_cast<i32>(gy + 8), static_cast<i32>(gx + 6),
+                            static_cast<i32>(gy + 5), ink);
+        FramebufferDrawLine(static_cast<i32>(gx + 6), static_cast<i32>(gy + 5), static_cast<i32>(right - 1),
+                            static_cast<i32>(gy + 5), ink);
+        break;
+    case ThemeRole::HexView:
+        // Two columns of nibble dots.
+        for (u32 r = 0; r < 4; ++r)
+        {
+            FramebufferFillRect(gx + 2, gy + 1 + r * 2, 1, 1, ink);
+            FramebufferFillRect(gx + 4, gy + 1 + r * 2, 1, 1, ink);
+            FramebufferFillRect(gx + 7, gy + 1 + r * 2, 1, 1, ink);
+            FramebufferFillRect(gx + 9, gy + 1 + r * 2, 1, 1, ink);
+        }
+        break;
+    case ThemeRole::CharMap:
+        // Grid of squares (a 3×3 sample of glyph cells).
+        for (u32 r = 0; r < 3; ++r)
+        {
+            for (u32 c = 0; c < 3; ++c)
+            {
+                FramebufferDrawRect(gx + 1 + c * 3, gy + 1 + r * 3, 2, 2, ink, 1);
+            }
+        }
+        break;
+    default:
+        FramebufferDrawRect(gx + 1, gy + 1, size - 2, size - 2, ink, 1);
+        break;
+    }
+}
+
 } // namespace
 
 void TaskbarInit(u32 y, u32 height, u32 bg_rgb, u32 fg_rgb, u32 accent_rgb, u32 tab_inactive_rgb, u32 border_rgb)
@@ -324,12 +498,29 @@ void TaskbarRedraw()
         // chrome active/inactive distinction. Rounded fill +
         // outline match the START button so the tray reads as
         // a coherent set of affordances rather than mismatched
-        // styles.
+        // styles. Active tabs get a vertical gradient — same
+        // "lifted top" idiom as the window chrome — so the focused
+        // tab visibly pops out of the strip; inactive tabs stay
+        // flat to recede into the surface.
         const u32 tab_bg = is_active ? g_accent : g_tab_inactive;
         constexpr u32 tab_radius = 3;
         const u32 tab_h_eff = g_h - 8;
-        FramebufferFillRoundRect(tab_x, g_y + 4, tab_w, tab_h_eff, tab_radius, tab_bg);
+        if (is_active)
+        {
+            FramebufferFillRectGradient(tab_x, g_y + 4, tab_w, tab_h_eff, LightenRgb(g_accent, 32), g_accent);
+        }
+        else
+        {
+            FramebufferFillRoundRect(tab_x, g_y + 4, tab_w, tab_h_eff, tab_radius, tab_bg);
+        }
         FramebufferDrawRoundRect(tab_x, g_y + 4, tab_w, tab_h_eff, tab_radius, g_border);
+        // 1-px highlight ridge across the top edge of the active
+        // tab. Matches the window-chrome highlight band so the
+        // tab reads as a small piece of chrome lifted off the strip.
+        if (is_active && tab_w > 2 * tab_radius)
+        {
+            FramebufferFillRect(tab_x + tab_radius, g_y + 5, tab_w - 2 * tab_radius, 1, LightenRgb(g_accent, 56));
+        }
         // Focus dot under the active tab. Per the spec the dot
         // is 14 px wide for running-but-not-pinned active apps
         // and 8 px wide for pinned-and-active apps — the size
@@ -345,10 +536,27 @@ void TaskbarRedraw()
             const u32 dot_y = g_y + g_h - 4 - dot_h;
             FramebufferFillRect(dot_x, dot_y, dot_w, dot_h, strip_rgb);
         }
+        // Per-role app glyph in the tab's left gutter, before the
+        // title text. Gives each running app a visual identity beyond
+        // the truncated bitmap title — the same affordance the Win11
+        // taskbar / macOS Dock / GNOME panel have. Glyphs are drawn
+        // with the framebuffer's existing primitives (no SVG / TTF
+        // dependency at boot), 10×10 px so they fit comfortably
+        // inside the 20-px tab height without competing with the
+        // title text's 8×8 cell. Untagged windows (ring-3 PEs that
+        // skip ThemeRegisterWindow) get a neutral square placeholder.
+        const u32 glyph_x = tab_x + 6;
+        const u32 glyph_y = g_y + (g_h - 10) / 2;
+        constexpr u32 kGlyphSize = 10;
+        const u32 glyph_ink = g_fg;
+        ThemeRole role{};
+        const bool have_role = ThemeRoleForWindow(h, &role);
+        DrawTaskbarGlyph(glyph_x, glyph_y, kGlyphSize, glyph_ink, tab_bg, have_role, role);
+        const u32 text_x = tab_x + 6 + kGlyphSize + 6;
         const char* title = WindowTitle(h);
         if (title != nullptr)
         {
-            FramebufferDrawString(tab_x + 8, text_y, title, g_fg, tab_bg);
+            FramebufferDrawString(text_x, text_y, title, g_fg, tab_bg);
         }
         // Record the slot so subsequent hit-tests can map a
         // click back to a window without re-running the layout.

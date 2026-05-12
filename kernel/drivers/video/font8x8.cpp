@@ -78,6 +78,26 @@ constinit const u8 kGlyphStar[8] = {0x00, 0x50, 0x20, 0xF8, 0x20, 0x50, 0x00, 0x
 constinit const u8 kGlyphQuote[8] = {0x50, 0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 constinit const u8 kGlyphApostrophe[8] = {0x20, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
+// Previously fell through to the placeholder box. Every line is
+// a row of 8 pixels, MSB on the left. The shapes here are the
+// standard 5-wide square-corner forms; the same column/row budget
+// as the digits and letters above so they sit cleanly in mixed
+// text. The percent + hash glyphs are the most user-visible
+// (sysmon "USED N%", task manager headers, hex dumps) — the rest
+// were also rendering as boxes wherever shell output or a kernel
+// log touched them.
+constinit const u8 kGlyphPercent[8] = {0xC8, 0xC8, 0x10, 0x20, 0x40, 0x98, 0x98, 0x00};
+constinit const u8 kGlyphHash[8] = {0x50, 0x50, 0xF8, 0x50, 0xF8, 0x50, 0x50, 0x00};
+constinit const u8 kGlyphAt[8] = {0x70, 0x88, 0xB8, 0xA8, 0xB0, 0x80, 0x70, 0x00};
+constinit const u8 kGlyphAmp[8] = {0x40, 0xA0, 0xA0, 0x40, 0xA8, 0x90, 0x68, 0x00};
+constinit const u8 kGlyphDollar[8] = {0x20, 0x78, 0xA0, 0x70, 0x28, 0xF0, 0x20, 0x00};
+constinit const u8 kGlyphCaret[8] = {0x20, 0x50, 0x88, 0x00, 0x00, 0x00, 0x00, 0x00};
+constinit const u8 kGlyphTilde[8] = {0x00, 0x00, 0x48, 0xA8, 0x90, 0x00, 0x00, 0x00};
+constinit const u8 kGlyphPipe[8] = {0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x00};
+constinit const u8 kGlyphLBrace[8] = {0x18, 0x20, 0x20, 0x40, 0x20, 0x20, 0x18, 0x00};
+constinit const u8 kGlyphRBrace[8] = {0xC0, 0x20, 0x20, 0x10, 0x20, 0x20, 0xC0, 0x00};
+constinit const u8 kGlyphBacktick[8] = {0x40, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+
 } // namespace
 
 const u8* Font8x8Lookup(char ch)
@@ -206,6 +226,28 @@ const u8* Font8x8Lookup(char ch)
         return kGlyphQuote;
     case '\'':
         return kGlyphApostrophe;
+    case '%':
+        return kGlyphPercent;
+    case '#':
+        return kGlyphHash;
+    case '@':
+        return kGlyphAt;
+    case '&':
+        return kGlyphAmp;
+    case '$':
+        return kGlyphDollar;
+    case '^':
+        return kGlyphCaret;
+    case '~':
+        return kGlyphTilde;
+    case '|':
+        return kGlyphPipe;
+    case '{':
+        return kGlyphLBrace;
+    case '}':
+        return kGlyphRBrace;
+    case '`':
+        return kGlyphBacktick;
     default:
         return kGlyphBox;
     }

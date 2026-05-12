@@ -61,6 +61,40 @@ OVMF_VARS_TEMPLATE="${DUETOS_OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
 OVMF_VARS_COPY="${BUILD_DIR}/screen-ovmf-vars.fd"
 cp "${OVMF_VARS_TEMPLATE}" "${OVMF_VARS_COPY}"
 
+# DUETOS_NO_USB=1 skips the xHCI host controller + usb-kbd
+# attachment. Under TCG QEMU the xHCI emulation has an
+# intermittent reset-loop wedge that costs the entire boot,
+# without changing the captured image. PS/2 keyboard via the
+# ICH9 LPC stays available for typing — and the screenshot
+# harness doesn't need keyboard input anyway since GRUB nav
+# is driven through the monitor. Leaving usb on the boot is
+# strictly cheaper for the screenshot path; if you need the
+# xhci surface tested (driver work / regression), unset it.
+USB_ARGS=()
+if [[ "${DUETOS_NO_USB:-0}" != "1" ]]; then
+    USB_ARGS=(
+        -device "qemu-xhci,id=xhci"
+        -device "usb-kbd,bus=xhci.0"
+    )
+fi
+
+# Always pass `-net none` for the screenshot harness. QEMU 8.2
+# defaults to adding an e1000e + a user-mode netdev when no
+# `-netdev` is given, and the kernel's net stack bring-up under
+# that default occasionally wedges in ArpInsert when an ARP
+# reply / DHCP offer races with the rx-poll task spawn (see
+# kernel/net/stack.cpp:771 — chain walk against a partially-
+# initialised hash bucket). The screenshot doesn't need a
+# functional network, so dropping the default NIC removes the
+# race entirely. Networking-specific screenshots can override
+# by setting DUETOS_NET_DEVICE to a full `-netdev … -device …`
+# pair (not used today; kept as a future hook).
+NET_ARGS=(-net none)
+if [[ -n "${DUETOS_NET_DEVICE:-}" ]]; then
+    # shellcheck disable=SC2206
+    NET_ARGS=(${DUETOS_NET_DEVICE})
+fi
+
 qemu-system-x86_64 \
     -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}" \
     -drive "if=pflash,format=raw,file=${OVMF_VARS_COPY}" \
@@ -75,51 +109,89 @@ qemu-system-x86_64 \
     -device "ahci,id=ahci1" \
     -drive "file=${SATA_IMAGE},if=none,id=sata0,format=raw" \
     -device "ide-hd,bus=ahci1.0,drive=sata0" \
-    -device "qemu-xhci,id=xhci" \
-    -device "usb-kbd,bus=xhci.0" \
+    "${USB_ARGS[@]}" \
+    "${NET_ARGS[@]}" \
     -cdrom "${ISO_IMAGE}" -boot d &
 QEMU_PID=$!
 
 # Ensure QEMU is cleaned up on any exit.
 trap 'kill "${QEMU_PID}" 2>/dev/null || true; rm -f "${MON_SOCK}"' EXIT
 
-# If DUETOS_DEMO=1, drive GRUB via the monitor DURING its 3-
-# second timeout window: arrow-down past "Desktop" + "TTY" entries
-# to land on "Desktop (demo widgets)", then enter. Must happen
-# before GRUB auto-selects the default.
-if [[ "${DUETOS_DEMO:-0}" == "1" ]]; then
+# If DUETOS_DEMO=1, drive GRUB via the monitor DURING its
+# countdown window: arrow-down past "Desktop" + "TTY" entries to
+# land on "Desktop (demo widgets)" (entry 3), then enter. Must
+# happen before GRUB auto-selects the default.
+#
+# DUETOS_GRUB_ENTRY=<N> generalises this to any entry index in
+# boot/grub/grub.cfg — useful for the autologin variants
+# (entries 5/6 for Classic/Slate10 autologin, 10/11 for Duet
+# Amber/Duet autologin) so the screenshot harness captures a
+# composed desktop instead of the login gate.
+GRUB_NAV=""
+if [[ -n "${DUETOS_GRUB_ENTRY:-}" ]]; then
+    GRUB_NAV="${DUETOS_GRUB_ENTRY}"
+elif [[ "${DUETOS_DEMO:-0}" == "1" ]]; then
+    GRUB_NAV="3"
+fi
+if [[ -n "${GRUB_NAV}" ]]; then
     (
-        sleep 1  # let QEMU come up + monitor socket appear
-        python3 - <<'PY' "${MON_SOCK}"
+        # The QEMU monitor socket and GRUB's keystroke-eating loop
+        # both take a moment to settle. 3 s puts the first sendkey
+        # well after GRUB has drawn the menu (which takes ~2 s under
+        # UEFI+OVMF) and well before the 10 s auto-select countdown
+        # fires. Each down-arrow also waits 0.4 s so GRUB has time
+        # to repaint the highlight band — too fast and the menu
+        # skips entries.
+        sleep 3
+        python3 - <<'PY' "${MON_SOCK}" "${GRUB_NAV}"
 import socket, sys, time
-p = sys.argv[1]
+p, n_str = sys.argv[1], sys.argv[2]
+n = int(n_str)
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-for _ in range(30):
+for _ in range(60):
     try:
         s.connect(p); break
     except (FileNotFoundError, ConnectionRefusedError):
-        time.sleep(0.2)
-def send(cmd):
-    s.sendall((cmd + "\n").encode()); time.sleep(0.2)
-send("sendkey down")
-send("sendkey down")
-send("sendkey ret")
+        time.sleep(0.25)
+def send(cmd, settle=0.4):
+    s.sendall((cmd + "\n").encode()); time.sleep(settle)
+for _ in range(n):
+    send("sendkey down")
+send("sendkey ret", settle=0.2)
 s.close()
 PY
     ) &
 fi
 
 # Poll the serial log for a marker that means "desktop is composed
-# and the scheduler is running". kheartbeat fires periodically; once
-# we see one line, the compositor has painted at least once.
-for _ in $(seq 1 "${DUETOS_BOOT_WAIT_SECS:-60}"); do
-    if [[ -f "${SERIAL_LOG}" ]] && grep -q "kheartbeat" "${SERIAL_LOG}"; then
+# and the scheduler is running". `bringup-complete` fires once all
+# subsystems including the compositor have come online, BEFORE the
+# ring-3 PE smoke spawns that can add tens of seconds of guest time
+# on a TCG-emulated host. The desktop is already painting at this
+# point, so the screendump captures a representative frame without
+# waiting on the smoke tail.
+#
+# Historical: this was `kheartbeat`, which fires from a scheduler
+# thread that only starts AFTER the full ring-3 spawn chain has
+# settled — on a TCG host with no /dev/kvm that pushed the marker
+# past the default poll timeout. `bringup-complete` is the earliest
+# marker that guarantees the compositor has composed.
+readonly BOOT_MARKER="${DUETOS_BOOT_MARKER:-bringup-complete}"
+# Boot wait budget: under QEMU TCG (no /dev/kvm), the full
+# storage stack (NVMe + AHCI + e1000 + xHCI) emulates ~20× slower
+# than real-time. A bringup-complete signal that fires at t=22 s
+# guest time can take ~440 s wall on a fully-equipped harness
+# host. 600 s default keeps a comfortable margin; CI runners with
+# KVM see this finish in under a minute, so the budget is mostly
+# inert there. Manual overrides via DUETOS_BOOT_WAIT_SECS.
+for _ in $(seq 1 "${DUETOS_BOOT_WAIT_SECS:-600}"); do
+    if [[ -f "${SERIAL_LOG}" ]] && grep -q "${BOOT_MARKER}" "${SERIAL_LOG}"; then
         break
     fi
     sleep 1
 done
-if ! grep -q "kheartbeat" "${SERIAL_LOG}" 2>/dev/null; then
-    echo "error: kheartbeat marker never appeared in ${SERIAL_LOG}" >&2
+if ! grep -q "${BOOT_MARKER}" "${SERIAL_LOG}" 2>/dev/null; then
+    echo "error: '${BOOT_MARKER}' marker never appeared in ${SERIAL_LOG}" >&2
     tail -40 "${SERIAL_LOG}" >&2 || true
     exit 1
 fi

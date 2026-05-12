@@ -7,6 +7,7 @@
 #include "arch/x86_64/traps.h"
 
 #include "core/panic.h"
+#include "debug/probes.h"
 #include "log/klog.h"
 #include "sched/sched.h"
 
@@ -52,6 +53,26 @@ constexpr u8 kPitGateOut2Mask = 1U << 5;
 constinit u64 g_ticks = 0;
 constinit u64 g_lapic_ticks_per_period = 0;
 
+// Init-wedge watchdog state. The timer IRQ samples the running serial
+// byte count at every 5 s heartbeat and compares to the previous
+// sample. If the only progress between samples is the heartbeat line
+// itself (~50 bytes), `g_silent_heartbeats` ticks up. Three silent
+// heartbeats in a row (= ~15 s with no init progress) fires the
+// `boot.init_wedge` probe and a one-shot warning so an attached
+// debugger / CI grep catches a wedged xHCI bringup, deadlocked spin,
+// non-responding MMIO poll, etc.
+//
+// Disarmed after `g_init_complete` flips to true at the end of
+// `RunPhase(Userland)`. Steady-state quiet windows (compositor naps,
+// idle loop) shouldn't trip it.
+constinit u64 g_last_progress_byte_count = 0;
+constinit u32 g_silent_heartbeats = 0;
+constinit bool g_init_complete = false;
+constinit bool g_wedge_warned = false;
+constinit u32 g_wedge_panic_threshold = 0; // 0 = warn-only; >0 = panic after N silent heartbeats
+constexpr u32 kWedgeSilentHeartbeatsThreshold = 3;
+constexpr u64 kWedgeBytesIgnore = 96; // length of "[tick-irq] g_ticks=0x...\n" plus slack
+
 void TimerHandler()
 {
     ++g_ticks;
@@ -71,19 +92,85 @@ void TimerHandler()
     {
         core::LogWithValue(core::LogLevel::Debug, "arch/timer", "tick", g_ticks);
     }
-    // ALSO emit an unfiltered direct-serial heartbeat at 1 Hz so a
-    // CI failure log shows whether the timer kept firing during a
+    // ALSO emit an unfiltered direct-serial heartbeat so a CI
+    // failure log shows whether the timer kept firing during a
     // wedge. The kheartbeat scheduler thread depends on the
     // scheduler being healthy; this depends only on timer IRQs
     // being delivered. If the smoke task hangs but [tick-irq]
     // keeps printing, the timer is alive and the wedge is in
     // task wakeup. If [tick-irq] also stops, IRQs themselves
     // were disabled or the LAPIC stopped.
-    if ((g_ticks % kTickFrequencyHz) == 0)
+    //
+    // Period is 5 s rather than 1 s. The UART is the dominant
+    // slow path under QEMU TCG (~50 us per character), and 30+
+    // bytes/second of heartbeat-only traffic measurably extends
+    // boot. 5 s still resolves a wedge well within any
+    // human-noticed timeout, and matches the kheartbeat thread's
+    // own 5 s cadence so the two complementary signals interleave
+    // predictably. Real-hardware boots aren't UART-bound so the
+    // lower cadence costs them nothing.
+    constexpr u64 kRawHeartbeatPeriodTicks = 5U * kTickFrequencyHz;
+    if ((g_ticks % kRawHeartbeatPeriodTicks) == 0)
     {
+        // Sample serial-byte progress BEFORE writing the heartbeat
+        // so the delta we measure excludes the heartbeat itself.
+        const u64 byte_count_before = SerialBytesWritten();
+
         SerialWrite("[tick-irq] g_ticks=");
         SerialWriteHex(g_ticks);
         SerialWrite("\n");
+
+        // Init-wedge watchdog. Compares the byte count at this
+        // heartbeat with the previous heartbeat. If the delta is
+        // small enough that ONLY the previous heartbeat itself
+        // contributed (i.e. nothing else logged in the past 5 s),
+        // count a silent interval. Three consecutive silent
+        // intervals fires the boot.init_wedge probe — at that
+        // point ~15 s have passed with the timer running but no
+        // init progress, which on every driver bring-up path we
+        // care about means "wedged, not just slow".
+        if (!g_init_complete)
+        {
+            const u64 delta = byte_count_before - g_last_progress_byte_count;
+            if (delta <= kWedgeBytesIgnore)
+            {
+                ++g_silent_heartbeats;
+                if (g_silent_heartbeats >= kWedgeSilentHeartbeatsThreshold && !g_wedge_warned)
+                {
+                    g_wedge_warned = true;
+                    SerialWrite("[init-wedge] WARN: no boot progress for ");
+                    SerialWriteHex(g_silent_heartbeats * 5);
+                    SerialWrite(" s while timer IRQ kept firing. "
+                                "Last progress at byte count=");
+                    SerialWriteHex(g_last_progress_byte_count);
+                    SerialWrite(", current=");
+                    SerialWriteHex(byte_count_before);
+                    SerialWrite("\n");
+                    duetos::debug::ProbeFire(duetos::debug::ProbeId::kBootInitWedge, 0, g_silent_heartbeats * 5);
+                }
+                // Escalation: if the operator armed the panic path
+                // via `init-wedge-panic=<N>` on the kernel cmdline,
+                // the watchdog turns from advisory into a hard fault
+                // once `N` silent heartbeats have passed. Useful for
+                // CI: leave default (warn only), turn on for fuzz
+                // / stress runs that need an unambiguous failure.
+                if (g_wedge_panic_threshold > 0 && g_silent_heartbeats >= g_wedge_panic_threshold)
+                {
+                    SerialWrite("[init-wedge] PANIC: silent_heartbeats=");
+                    SerialWriteHex(g_silent_heartbeats);
+                    SerialWrite(" >= configured panic threshold ");
+                    SerialWriteHex(g_wedge_panic_threshold);
+                    SerialWrite("\n");
+                    duetos::core::Panic("init-wedge", "boot init wedged");
+                }
+            }
+            else
+            {
+                g_silent_heartbeats = 0;
+                g_wedge_warned = false;
+            }
+            g_last_progress_byte_count = byte_count_before;
+        }
     }
 
     // Request a reschedule on every tick. The IRQ dispatcher consults this
@@ -184,6 +271,16 @@ void LapicTimerStartOnCurrent()
     LapicWrite(kLapicRegTimerDivide, kLapicTimerDivBy16);
     LapicWrite(kLapicRegLvtTimer, kLvtTimerPeriodicBit | kTimerVector);
     LapicWrite(kLapicRegTimerInit, static_cast<u32>(ticks_per_kernel_tick));
+}
+
+void MarkInitComplete()
+{
+    g_init_complete = true;
+}
+
+void SetInitWedgePanicThreshold(u32 silent_heartbeats)
+{
+    g_wedge_panic_threshold = silent_heartbeats;
 }
 
 } // namespace duetos::arch
