@@ -42,6 +42,7 @@
 #include "arch/x86_64/usermode.h"
 #include "core/panic.h"
 #include "cpu/percpu.h"
+#include "mm/address_space.h"
 #include "mm/kheap.h"
 #include "mm/paging.h"
 #include "proc/process.h"
