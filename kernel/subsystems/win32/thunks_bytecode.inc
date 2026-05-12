@@ -3765,10 +3765,14 @@
     // documented "creation failed" return for this contract.
     0x31, 0xC0, 0xC3, // 0x11BB xor eax, eax ; ret
 
-    // kOffStrtoulNoop (0x11BE): strtoul → 0.
-    // TODO: real ASCII unsigned-long parser. Returning 0 is
-    // wrong for non-zero inputs; track via grep on the constant.
-    0x31, 0xC0, 0xC3, // 0x11BE xor eax, eax ; ret
+    // Dead 3 bytes at 0x11BE — formerly the strtoul noop sink.
+    // The constant was renamed to kOffStrtoul and re-pointed at the
+    // full ASCII unsigned-long parser appended at the end of this
+    // table (see kOffStrtoul comment below for the real bytecode).
+    // The bytes here remain so all subsequent kOff* constants keep
+    // their stable offsets; nothing in the table or hash map names
+    // 0x11BE anymore, so they're unreachable.
+    0x31, 0xC0, 0xC3, // 0x11BE xor eax, eax ; ret  (dead — see kOffStrtoul)
 
     // kOffCallnewhNoop (0x11C1): _callnewh → 0.
     // No new-handler installed; CRT new-failure path bails
@@ -3795,16 +3799,16 @@
     // hook to replace.
     0x31, 0xC0, 0xC3, // 0x11CD xor eax, eax ; ret
 
-    // kOffInitterm (0x11D0): _initterm → 0 (return ignored).
-    // TODO: walk array of fn-pointers between rcx (begin) and
-    // rdx (end) and call each non-NULL entry. v0 PEs that bind
-    // here don't rely on static-initializer side effects.
-    0x31, 0xC0, 0xC3, // 0x11D0 xor eax, eax ; ret
+    // Dead 3 bytes at 0x11D0 — formerly the _initterm noop sink.
+    // kOffInitterm now points at the real fn-pointer-array walker
+    // appended at the end of this table. Same rationale as the
+    // strtoul dead bytes above: keep the offset wall stable.
+    0x31, 0xC0, 0xC3, // 0x11D0 xor eax, eax ; ret  (dead — see kOffInitterm)
 
-    // kOffInittermE (0x11D3): _initterm_e → 0.
-    // TODO: same as _initterm but propagate first non-zero
-    // return as the function's result. v0 returns success.
-    0x31, 0xC0, 0xC3, // 0x11D3 xor eax, eax ; ret
+    // Dead 3 bytes at 0x11D3 — formerly the _initterm_e noop sink.
+    // kOffInittermE now points at the real fn-pointer walker with
+    // first-non-zero-return propagation, appended below.
+    0x31, 0xC0, 0xC3, // 0x11D3 xor eax, eax ; ret  (dead — see kOffInittermE)
 
     // kOffNoNarrowEnv (0x11D6): _get_initial_narrow_environment /
     // _initialize_narrow_environment → 0/NULL.
@@ -3892,3 +3896,209 @@
     // GetUserDefaultLCID export returns when the DLL preload
     // succeeds, so behaviour is identical via either path.
     0xB8, 0x09, 0x04, 0x00, 0x00, 0xC3, // 0x11F0 mov eax, 0x409 ; ret
+
+    // ===========================================================
+    // kOffStrtoul (0x11F6, 212 bytes): real strtoul.
+    //
+    // C signature:
+    //   unsigned long __cdecl strtoul(const char* str, char** endptr, int base);
+    //
+    // Win64 args: rcx = str, rdx = endptr, r8d = base.
+    // Returns the parsed value in eax. Uses only volatile registers
+    // (rax, rcx, rdx, r8, r9, r10, r11) so no callee-saved spill is
+    // needed. Layout:
+    //   r9  = current parse cursor (walks str)
+    //   r10b = sign flag (1 if leading '-')
+    //   r11d = scratch digit value
+    //   eax = accumulator (also return value)
+    //
+    // Semantics implemented:
+    //   * leading whitespace skip (' ', \t, \n, \v, \f, \r)
+    //   * optional leading sign (+/-). '-' negates the final value
+    //   * base == 0: detect "0x"/"0X" → 16, leading '0' → 8 (the
+    //     '0' itself is consumed as the first octal digit), else 10
+    //   * base == 16: optional "0x"/"0X" prefix is consumed
+    //   * digit parse: 0-9 and case-insensitive a-z; stops at first
+    //     character that is not a digit in the current base
+    //   * endptr writeback (skipped when endptr is NULL)
+    //   * NULL str returns 0 without touching endptr
+    //
+    // GAP: no overflow detection — accumulator is 32-bit and wraps
+    // modulo 2^32. The real C contract clamps to ULONG_MAX and sets
+    // errno to ERANGE; v0 PEs that pass digit strings beyond 32-bit
+    // range will see truncated values rather than ULONG_MAX. errno
+    // is not wired into the thunk plane (no thread-local pad yet).
+    //
+    // pos 0: prologue / null-str exit
+    0x31, 0xC0,                   // 0x11F6 xor eax, eax
+    0x48, 0x85, 0xC9,             // 0x11F8 test rcx, rcx
+    0x75, 0x01,                   // 0x11FB jne +1 -> 0x11FE
+    0xC3,                         // 0x11FD ret   (null str)
+    0x49, 0x89, 0xC9,             // 0x11FE mov r9, rcx
+    // pos 11 (.ws)
+    0x41, 0x8A, 0x01,             // 0x1201 mov al, [r9]
+    0x3C, 0x20,                   // 0x1204 cmp al, 0x20
+    0x74, 0x08,                   // 0x1206 je .ws_skip  -> 0x1210
+    0x3C, 0x09,                   // 0x1208 cmp al, 0x09
+    0x72, 0x09,                   // 0x120A jb .ws_done  -> 0x1215
+    0x3C, 0x0D,                   // 0x120C cmp al, 0x0D
+    0x77, 0x05,                   // 0x120E ja .ws_done  -> 0x1215
+    // pos 26 (.ws_skip)
+    0x49, 0xFF, 0xC1,             // 0x1210 inc r9
+    0xEB, 0xEC,                   // 0x1213 jmp .ws  -> 0x1201
+    // pos 31 (.ws_done) — al holds first non-ws char
+    0x45, 0x31, 0xD2,             // 0x1215 xor r10d, r10d
+    0x3C, 0x2B,                   // 0x1218 cmp al, '+'
+    0x75, 0x08,                   // 0x121A jne .check_neg  -> 0x1224
+    0x49, 0xFF, 0xC1,             // 0x121C inc r9
+    0x41, 0x8A, 0x01,             // 0x121F mov al, [r9]
+    0xEB, 0x0E,                   // 0x1222 jmp .prefix  -> 0x1232
+    // pos 46 (.check_neg)
+    0x3C, 0x2D,                   // 0x1224 cmp al, '-'
+    0x75, 0x0A,                   // 0x1226 jne .prefix  -> 0x1232
+    0x41, 0xC6, 0xC2, 0x01,       // 0x1228 mov r10b, 1
+    0x49, 0xFF, 0xC1,             // 0x122C inc r9
+    0x41, 0x8A, 0x01,             // 0x122F mov al, [r9]
+    // pos 60 (.prefix)
+    0x45, 0x85, 0xC0,             // 0x1232 test r8d, r8d
+    0x75, 0x2A,                   // 0x1235 jne .b_set  -> 0x1261
+    // base == 0 → autodetect
+    0x3C, 0x30,                   // 0x1237 cmp al, '0'
+    0x75, 0x1E,                   // 0x1239 jne .b_dec_set  -> 0x1259
+    0x41, 0x8A, 0x41, 0x01,       // 0x123B mov al, [r9+1]
+    0x0C, 0x20,                   // 0x123F or  al, 0x20
+    0x3C, 0x78,                   // 0x1241 cmp al, 'x'
+    0x74, 0x08,                   // 0x1243 je  .pfx_hex  -> 0x124D
+    // not hex prefix → octal (leading '0' kept as first digit)
+    0x41, 0xB8, 0x08, 0x00, 0x00, 0x00, // 0x1245 mov r8d, 8
+    0xEB, 0x2C,                         // 0x124B jmp .parse  -> 0x1279
+    // pos 87 (.pfx_hex)
+    0x49, 0x83, 0xC1, 0x02,             // 0x124D add r9, 2
+    0x41, 0xB8, 0x10, 0x00, 0x00, 0x00, // 0x1251 mov r8d, 16
+    0xEB, 0x20,                         // 0x1257 jmp .parse  -> 0x1279
+    // pos 99 (.b_dec_set)
+    0x41, 0xB8, 0x0A, 0x00, 0x00, 0x00, // 0x1259 mov r8d, 10
+    0xEB, 0x18,                         // 0x125F jmp .parse  -> 0x1279
+    // pos 107 (.b_set) — base was non-zero
+    0x41, 0x83, 0xF8, 0x10,             // 0x1261 cmp r8d, 16
+    0x75, 0x12,                         // 0x1265 jne .parse  -> 0x1279
+    0x3C, 0x30,                         // 0x1267 cmp al, '0'
+    0x75, 0x0E,                         // 0x1269 jne .parse  -> 0x1279
+    0x41, 0x8A, 0x41, 0x01,             // 0x126B mov al, [r9+1]
+    0x0C, 0x20,                         // 0x126F or  al, 0x20
+    0x3C, 0x78,                         // 0x1271 cmp al, 'x'
+    0x75, 0x04,                         // 0x1273 jne .parse  -> 0x1279
+    0x49, 0x83, 0xC1, 0x02,             // 0x1275 add r9, 2
+    // pos 131 (.parse)
+    0x31, 0xC0,                         // 0x1279 xor eax, eax
+    // pos 133 (.dgt)
+    0x45, 0x0F, 0xB6, 0x19,             // 0x127B movzx r11d, byte [r9]
+    0x41, 0x80, 0xFB, 0x30,             // 0x127F cmp r11b, '0'
+    0x72, 0x35,                         // 0x1283 jb  .dgt_done  -> 0x12BA
+    0x41, 0x80, 0xFB, 0x39,             // 0x1285 cmp r11b, '9'
+    0x77, 0x06,                         // 0x1289 ja  .alpha  -> 0x1291
+    0x41, 0x80, 0xEB, 0x30,             // 0x128B sub r11b, '0'
+    0xEB, 0x14,                         // 0x128F jmp .check_range  -> 0x12A5
+    // pos 155 (.alpha) — tolower + map a-z → 10-35
+    0x41, 0x80, 0xCB, 0x20,             // 0x1291 or  r11b, 0x20
+    0x41, 0x80, 0xFB, 0x61,             // 0x1295 cmp r11b, 'a'
+    0x72, 0x1F,                         // 0x1299 jb  .dgt_done  -> 0x12BA
+    0x41, 0x80, 0xFB, 0x7A,             // 0x129B cmp r11b, 'z'
+    0x77, 0x19,                         // 0x129F ja  .dgt_done  -> 0x12BA
+    0x41, 0x80, 0xEB, 0x57,             // 0x12A1 sub r11b, 'a'-10  (=0x57)
+    // pos 175 (.check_range) — reject digit >= base
+    0x45, 0x0F, 0xB6, 0xDB,             // 0x12A5 movzx r11d, r11b
+    0x45, 0x39, 0xC3,                   // 0x12A9 cmp r11d, r8d
+    0x73, 0x0C,                         // 0x12AC jae .dgt_done  -> 0x12BA
+    0x41, 0x0F, 0xAF, 0xC0,             // 0x12AE imul eax, r8d
+    0x44, 0x01, 0xD8,                   // 0x12B2 add eax, r11d
+    0x49, 0xFF, 0xC1,                   // 0x12B5 inc r9
+    0xEB, 0xC1,                         // 0x12B8 jmp .dgt  -> 0x127B
+    // pos 196 (.dgt_done)
+    0x45, 0x84, 0xD2,                   // 0x12BA test r10b, r10b
+    0x74, 0x02,                         // 0x12BD jz .write_endptr  -> 0x12C1
+    0xF7, 0xD8,                         // 0x12BF neg eax
+    // pos 203 (.write_endptr)
+    0x48, 0x85, 0xD2,                   // 0x12C1 test rdx, rdx
+    0x74, 0x03,                         // 0x12C4 jz .ret  -> 0x12C9
+    0x4C, 0x89, 0x0A,                   // 0x12C6 mov [rdx], r9
+    // pos 211 (.ret)
+    0xC3,                               // 0x12C9 ret
+
+    // ===========================================================
+    // kOffInitterm (0x12CA, 42 bytes): real _initterm.
+    //
+    // C signature:
+    //   void __cdecl _initterm(_PVFV* first, _PVFV* last);
+    //
+    // Walks the array of function pointers in [rcx, rdx) and calls
+    // each non-null entry once, in array order. Returns 0 (the
+    // return value is ignored by the CRT but we set it for clean
+    // register state on exit).
+    //
+    // Stack discipline (Win64): caller's rsp is 16-byte aligned at
+    // the call site; after the call instruction pushes the return
+    // address, rsp ≡ 8 (mod 16) at our entry. We push two callee-
+    // saved registers (rbx, rsi → 16 bytes) and reserve 0x28 = 40
+    // bytes of shadow space, landing rsp at 16-byte alignment for
+    // the inner CALL. After the inner CALL pushes its return addr,
+    // the inner callee sees rsp ≡ 8 (mod 16), matching ABI.
+    //
+    0x53,                               // 0x12CA push rbx
+    0x56,                               // 0x12CB push rsi
+    0x48, 0x83, 0xEC, 0x28,             // 0x12CC sub rsp, 0x28
+    0x48, 0x89, 0xCB,                   // 0x12D0 mov rbx, rcx  ; cursor
+    0x48, 0x89, 0xD6,                   // 0x12D3 mov rsi, rdx  ; end
+    // .loop @ 0x12D6
+    0x48, 0x39, 0xF3,                   // 0x12D6 cmp rbx, rsi
+    0x73, 0x10,                         // 0x12D9 jae .done  -> 0x12EB
+    0x48, 0x8B, 0x03,                   // 0x12DB mov rax, [rbx]
+    0x48, 0x83, 0xC3, 0x08,             // 0x12DE add rbx, 8
+    0x48, 0x85, 0xC0,                   // 0x12E2 test rax, rax
+    0x74, 0xEF,                         // 0x12E5 jz .loop  -> 0x12D6
+    0xFF, 0xD0,                         // 0x12E7 call rax
+    0xEB, 0xEB,                         // 0x12E9 jmp .loop  -> 0x12D6
+    // .done @ 0x12EB
+    0x48, 0x83, 0xC4, 0x28,             // 0x12EB add rsp, 0x28
+    0x5E,                               // 0x12EF pop rsi
+    0x5B,                               // 0x12F0 pop rbx
+    0x31, 0xC0,                         // 0x12F1 xor eax, eax
+    0xC3,                               // 0x12F3 ret
+
+    // ===========================================================
+    // kOffInittermE (0x12F4, 46 bytes): real _initterm_e.
+    //
+    // C signature:
+    //   int __cdecl _initterm_e(_PIFV* first, _PIFV* last);
+    //
+    // Identical loop to _initterm, but each pointer is treated as
+    // an int(*)() — on the first non-zero return value we stop and
+    // return that value (typically a CRT init error code). Returns
+    // 0 if every initializer succeeds.
+    //
+    // Stack layout and alignment are identical to _initterm (see
+    // its comment).
+    //
+    0x53,                               // 0x12F4 push rbx
+    0x56,                               // 0x12F5 push rsi
+    0x48, 0x83, 0xEC, 0x28,             // 0x12F6 sub rsp, 0x28
+    0x48, 0x89, 0xCB,                   // 0x12FA mov rbx, rcx
+    0x48, 0x89, 0xD6,                   // 0x12FD mov rsi, rdx
+    // .loop @ 0x1300
+    0x48, 0x39, 0xF3,                   // 0x1300 cmp rbx, rsi
+    0x73, 0x14,                         // 0x1303 jae .done_ok  -> 0x1319
+    0x48, 0x8B, 0x03,                   // 0x1305 mov rax, [rbx]
+    0x48, 0x83, 0xC3, 0x08,             // 0x1308 add rbx, 8
+    0x48, 0x85, 0xC0,                   // 0x130C test rax, rax
+    0x74, 0xEF,                         // 0x130F jz .loop  -> 0x1300
+    0xFF, 0xD0,                         // 0x1311 call rax
+    0x85, 0xC0,                         // 0x1313 test eax, eax
+    0x75, 0x04,                         // 0x1315 jnz .done_ret  -> 0x131B
+    0xEB, 0xE7,                         // 0x1317 jmp .loop  -> 0x1300
+    // .done_ok @ 0x1319
+    0x31, 0xC0,                         // 0x1319 xor eax, eax
+    // .done_ret @ 0x131B
+    0x48, 0x83, 0xC4, 0x28,             // 0x131B add rsp, 0x28
+    0x5E,                               // 0x131F pop rsi
+    0x5B,                               // 0x1320 pop rbx
+    0xC3,                               // 0x1321 ret

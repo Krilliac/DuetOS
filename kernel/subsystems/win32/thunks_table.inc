@@ -1095,12 +1095,12 @@
     // UCRT convert — return 0 for every parse. Callers that
     // check errno get the wrong answer (we don't wire errno)
     // but won't crash.
-    {"api-ms-win-crt-convert-l1-1-0.dll", "strtoul", kOffStrtoulNoop},
+    {"api-ms-win-crt-convert-l1-1-0.dll", "strtoul", kOffStrtoul},
     {"api-ms-win-crt-convert-l1-1-0.dll", "strtol", kOffPinReturn0},
     {"api-ms-win-crt-convert-l1-1-0.dll", "atoi", kOffPinReturn0},
-    {"api-ms-win-crt-convert-l1-1-0.dll", "atol", kOffPinReturn0}, {"ucrtbase.dll", "strtoul", kOffStrtoulNoop},
+    {"api-ms-win-crt-convert-l1-1-0.dll", "atol", kOffPinReturn0}, {"ucrtbase.dll", "strtoul", kOffStrtoul},
     {"ucrtbase.dll", "strtol", kOffPinReturn0}, {"ucrtbase.dll", "atoi", kOffPinReturn0},
-    {"ucrtbase.dll", "atol", kOffPinReturn0}, {"msvcrt.dll", "strtoul", kOffStrtoulNoop},
+    {"ucrtbase.dll", "atol", kOffPinReturn0}, {"msvcrt.dll", "strtoul", kOffStrtoul},
     {"msvcrt.dll", "strtol", kOffPinReturn0}, {"msvcrt.dll", "atoi", kOffPinReturn0},
     {"msvcrt.dll", "atol", kOffPinReturn0},
 
@@ -1720,7 +1720,7 @@
     {"api-ms-win-crt-convert-l1-1-0.dll", "atol", kOffPinReturn0},
     {"api-ms-win-crt-convert-l1-1-0.dll", "atoll", kOffPinReturn0},
     {"api-ms-win-crt-convert-l1-1-0.dll", "strtol", kOffPinReturn0},
-    {"api-ms-win-crt-convert-l1-1-0.dll", "strtoul", kOffStrtoulNoop},
+    {"api-ms-win-crt-convert-l1-1-0.dll", "strtoul", kOffStrtoul},
     {"api-ms-win-crt-convert-l1-1-0.dll", "strtoll", kOffPinReturn0},
     {"api-ms-win-crt-convert-l1-1-0.dll", "strtoull", kOffPinReturn0},
     {"api-ms-win-crt-convert-l1-1-0.dll", "wcstol", kOffPinReturn0},
