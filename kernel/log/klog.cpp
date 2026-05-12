@@ -107,12 +107,32 @@ constinit LogLevel g_log_threshold = static_cast<LogLevel>(kKlogDefaultLevel);
 // any string consumer) is up. Timestamps are NOT forwarded — they
 // would clutter on-screen output, and the serial log keeps them.
 constinit LogTee g_tee = nullptr;
-constinit LogTee g_file_sink = nullptr;
-constinit LogLevel g_file_sink_min_level = LogLevel::Info;
-// Per-line current level: set at the top of Log/LogWithValue/etc;
-// read by Tee when deciding whether to forward to the file sink.
-// Racy under SMP; accept that for v0 — the pattern is single-CPU.
+
+// Line-oriented sink (set via SetLogLineSink). Receives one
+// fully-assembled log line per call, tagged with level + area so
+// the receiver can route each line to a per-subsystem file rather
+// than flooding one aggregate log. The chunk Tee path accumulates
+// bytes into `g_line_accum` and fires the sink on '\n' or when the
+// buffer fills.
+constinit LogLineSink g_line_sink = nullptr;
+constinit LogLevel g_line_sink_min_level = LogLevel::Info;
+// Per-line current level / area: set at the top of each Log/LogA*
+// function and read by the Tee accumulator when emitting a complete
+// line through the line sink. Racy under SMP; accept that for v0 —
+// the pattern is single-CPU and the existing g_current_log_level
+// state already runs the same risk.
 constinit LogLevel g_current_log_level = LogLevel::Debug;
+constinit LogArea g_current_log_area = LogArea::General;
+
+// Per-line accumulator for the line sink. Each chunk fed to Tee()
+// is appended here until '\n' arrives (or the buffer is full),
+// then handed to the line sink as one record. 384 bytes covers a
+// long subsystem path + message + two value fields; longer lines
+// truncate at the buffer boundary (the serial sink still receives
+// the full unbuffered version, so nothing is lost from the
+// authoritative log).
+constinit char g_line_accum[384] = {};
+constinit u32 g_line_accum_used = 0;
 
 inline void Tee(const char* s)
 {
@@ -124,12 +144,28 @@ inline void Tee(const char* s)
     {
         g_tee(s);
     }
-    // File sink respects its own minimum level so low-noise captures
-    // (e.g. /tmp/boot.log on a 512-byte tmpfs file) don't fill up
-    // with Debug ticks.
-    if (g_file_sink != nullptr && static_cast<u8>(g_current_log_level) >= static_cast<u8>(g_file_sink_min_level))
+    // Line sink: buffer chunks until a newline arrives (or the
+    // accumulator is one byte from full), then emit the whole line
+    // with the current level + area so per-area file routing can
+    // pick the right output. Respects its own minimum level so
+    // low-noise captures aren't overwhelmed by Debug ticks.
+    if (g_line_sink != nullptr && static_cast<u8>(g_current_log_level) >= static_cast<u8>(g_line_sink_min_level))
     {
-        g_file_sink(s);
+        for (const char* p = s; *p != 0; ++p)
+        {
+            const char c = *p;
+            if (g_line_accum_used + 1 < sizeof(g_line_accum))
+            {
+                g_line_accum[g_line_accum_used++] = c;
+            }
+            const bool flush_now = (c == '\n') || (g_line_accum_used + 1 >= sizeof(g_line_accum));
+            if (flush_now)
+            {
+                g_line_accum[g_line_accum_used] = '\0';
+                g_line_sink(g_current_log_level, g_current_log_area, g_line_accum, g_line_accum_used);
+                g_line_accum_used = 0;
+            }
+        }
     }
 }
 
@@ -572,17 +608,25 @@ void SetLogTee(LogTee writer)
     g_tee = writer;
 }
 
-void SetLogFileSink(LogTee writer)
+void SetLogLineSink(LogLineSink sink)
 {
-    g_file_sink = writer;
-    // Back-fill: every log line that has fired up to now went through
-    // Tee but not through this sink (it wasn't installed yet). Replay
-    // the ring — with the current min-level filter applied — so the
-    // file sink sees the relevant boot history.
-    if (writer == nullptr)
+    g_line_sink = sink;
+    // Reset the per-line accumulator so a partial line carried over
+    // from the prior sink doesn't bleed into the first record this
+    // sink sees.
+    g_line_accum_used = 0;
+    if (sink == nullptr)
     {
         return;
     }
+    // Back-fill: every log line that fired up to now went through
+    // Tee but not through this sink (it wasn't installed yet).
+    // Replay the ring — with the current min-level filter applied
+    // — so the sink captures the relevant boot history before the
+    // first new live line lands. Each replayed line is reassembled
+    // into one contiguous record and shipped with its area derived
+    // from the subsystem prefix (the ring entry doesn't store the
+    // area separately — keeping the entry narrow on purpose).
     const u64 start = g_log_ring_next - g_log_ring_count;
     for (u64 i = 0; i < g_log_ring_count; ++i)
     {
@@ -592,21 +636,33 @@ void SetLogFileSink(LogTee writer)
         {
             continue;
         }
-        if (static_cast<u8>(e.level) < static_cast<u8>(g_file_sink_min_level))
+        if (static_cast<u8>(e.level) < static_cast<u8>(g_line_sink_min_level))
         {
             continue;
         }
-        writer(LevelTag(e.level));
-        writer(e.subsystem);
-        writer(" : ");
-        writer(e.message);
-        writer("\n");
+        char line[384];
+        u32 len = 0;
+        auto append = [&](const char* s)
+        {
+            while (*s != 0 && len + 1 < sizeof(line))
+            {
+                line[len++] = *s++;
+            }
+        };
+        append(LevelTag(e.level));
+        append(e.subsystem);
+        append(" : ");
+        append(e.message);
+        append("\n");
+        line[len] = '\0';
+        const LogArea area = AreaFromSubsystemImpl(e.subsystem);
+        sink(e.level, area, line, len);
     }
 }
 
-void SetLogFileSinkMinLevel(LogLevel min_level)
+void SetLogLineSinkMinLevel(LogLevel min_level)
 {
-    g_file_sink_min_level = min_level;
+    g_line_sink_min_level = min_level;
 }
 
 LogLevel GetLogThreshold()
@@ -643,7 +699,8 @@ void SetPostEmitHook(PostEmitHook hook)
 
 void Log(LogLevel level, const char* subsystem, const char* message)
 {
-    if (!LevelAndAreaEnabled(level, AreaFromSubsystemImpl(subsystem)))
+    const LogArea inferred_area = AreaFromSubsystemImpl(subsystem);
+    if (!LevelAndAreaEnabled(level, inferred_area))
     {
         return;
     }
@@ -659,6 +716,7 @@ void Log(LogLevel level, const char* subsystem, const char* message)
         message = "<null-msg>";
     }
     g_current_log_level = level;
+    g_current_log_area = inferred_area;
     const char* tag = LevelTag(level);
     WriteTimestampPrefix();
     OpenColor(level);
@@ -684,7 +742,8 @@ void Log(LogLevel level, const char* subsystem, const char* message)
 
 void LogWithValue(LogLevel level, const char* subsystem, const char* message, u64 value)
 {
-    if (!LevelAndAreaEnabled(level, AreaFromSubsystemImpl(subsystem)))
+    const LogArea inferred_area = AreaFromSubsystemImpl(subsystem);
+    if (!LevelAndAreaEnabled(level, inferred_area))
     {
         return;
     }
@@ -697,6 +756,7 @@ void LogWithValue(LogLevel level, const char* subsystem, const char* message, u6
         message = "<null-msg>";
     }
     g_current_log_level = level;
+    g_current_log_area = inferred_area;
     const char* tag = LevelTag(level);
     WriteTimestampPrefix();
     OpenColor(level);
@@ -722,7 +782,8 @@ void LogWithValue(LogLevel level, const char* subsystem, const char* message, u6
 
 void LogWithString(LogLevel level, const char* subsystem, const char* message, const char* label, const char* value_str)
 {
-    if (!LevelAndAreaEnabled(level, AreaFromSubsystemImpl(subsystem)))
+    const LogArea inferred_area = AreaFromSubsystemImpl(subsystem);
+    if (!LevelAndAreaEnabled(level, inferred_area))
     {
         return;
     }
@@ -743,6 +804,7 @@ void LogWithString(LogLevel level, const char* subsystem, const char* message, c
         value_str = "<null-value>";
     }
     g_current_log_level = level;
+    g_current_log_area = inferred_area;
     const char* tag = LevelTag(level);
     WriteTimestampPrefix();
     OpenColor(level);
@@ -776,7 +838,8 @@ void LogWithString(LogLevel level, const char* subsystem, const char* message, c
 void LogWith2Values(LogLevel level, const char* subsystem, const char* message, const char* a_label, u64 a_value,
                     const char* b_label, u64 b_value)
 {
-    if (!LevelAndAreaEnabled(level, AreaFromSubsystemImpl(subsystem)))
+    const LogArea inferred_area = AreaFromSubsystemImpl(subsystem);
+    if (!LevelAndAreaEnabled(level, inferred_area))
     {
         return;
     }
@@ -797,6 +860,7 @@ void LogWith2Values(LogLevel level, const char* subsystem, const char* message, 
         b_label = "b";
     }
     g_current_log_level = level;
+    g_current_log_area = inferred_area;
     const char* tag = LevelTag(level);
     WriteTimestampPrefix();
     OpenColor(level);
@@ -1092,6 +1156,7 @@ TraceScope::~TraceScope()
     // which no existing helper produces (LogWithString lacks a second
     // labelled value; LogWith2Values can't carry a string).
     g_current_log_level = LogLevel::Trace;
+    g_current_log_area = AreaFromSubsystemImpl(m_subsystem);
     const char* tag = LevelTag(LogLevel::Trace);
     WriteTimestampPrefix();
     OpenColor(LogLevel::Trace);
@@ -1166,6 +1231,7 @@ void LogMetrics(LogLevel level, const char* subsystem, const char* label)
     const auto sched_stats = sched::SchedStatsRead();
 
     g_current_log_level = level;
+    g_current_log_area = AreaFromSubsystemImpl(subsystem);
     const char* tag = LevelTag(level);
     WriteTimestampPrefix();
     OpenColor(level);
@@ -1243,6 +1309,7 @@ void LogA(LogLevel level, LogArea area, const char* subsystem, const char* messa
     if (message == nullptr)
         message = "<null-msg>";
     g_current_log_level = level;
+    g_current_log_area = area;
     const char* tag = LevelTag(level);
     WriteTimestampPrefix();
     OpenColor(level);
@@ -1270,6 +1337,7 @@ void LogAWithValue(LogLevel level, LogArea area, const char* subsystem, const ch
     if (message == nullptr)
         message = "<null-msg>";
     g_current_log_level = level;
+    g_current_log_area = area;
     const char* tag = LevelTag(level);
     WriteTimestampPrefix();
     OpenColor(level);
@@ -1305,6 +1373,7 @@ void LogAWithString(LogLevel level, LogArea area, const char* subsystem, const c
     if (value_str == nullptr)
         value_str = "<null>";
     g_current_log_level = level;
+    g_current_log_area = area;
     const char* tag = LevelTag(level);
     WriteTimestampPrefix();
     OpenColor(level);
@@ -1341,6 +1410,7 @@ void LogAWith2Values(LogLevel level, LogArea area, const char* subsystem, const 
     if (b_label == nullptr)
         b_label = "b";
     g_current_log_level = level;
+    g_current_log_area = area;
     const char* tag = LevelTag(level);
     WriteTimestampPrefix();
     OpenColor(level);
