@@ -49,6 +49,11 @@ constinit PerCpu g_bsp_percpu = {
     ._pad_topo = {},
     .runq_normal_len = 0,
     ._pad_runq_len = {},
+    .sched_tasks_live = 0,
+    .sched_tasks_sleeping = 0,
+    .sched_tasks_blocked = 0,
+    .sched_tasks_created = 0,
+    .sched_tasks_reaped = 0,
 };
 
 // One-shot flag so CurrentCpuIdOrBsp can return a sane value before
