@@ -94,6 +94,16 @@ i32 EncodeWStatus(const core::Process::LinuxChildExit& exit)
 
 i64 DoWait4(u64 pid, u64 user_status, u64 options, u64 user_rusage)
 {
+    // Linux rejects unknown options bits with -EINVAL. WUNTRACED (0x2)
+    // and WCONTINUED (0x8) are recognised but unimplemented in v0 —
+    // we accept them silently and fall back to the WNOHANG/blocking
+    // semantics only — but unknown bits past 0xF are a caller error
+    // that must surface so a misuse doesn't get swallowed.
+    constexpr u32 kWUNTRACED = 0x2;
+    constexpr u32 kWCONTINUED = 0x8;
+    constexpr u64 kValidOptions = kWNOHANG | kWUNTRACED | kWCONTINUED;
+    if ((options & ~kValidOptions) != 0)
+        return kEINVAL;
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
         return kECHILD;

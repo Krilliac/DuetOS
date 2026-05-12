@@ -3036,7 +3036,14 @@ void SyscallDispatch(arch::TrapFrame* frame)
         const u64 count = frame->rdi;
         const u64 user_handles_va = frame->rsi;
         const u64 wait_all = frame->rdx;
-        const u64 timeout_ms = frame->r10;
+        // Win32 WaitForMultipleObjects' timeout is u32 (DWORD); the
+        // sibling SYS_THREAD_WAIT already masks frame->rsi to 32 bits
+        // for the same reason. Without the mask, a caller passing
+        // u64-max would slip past the `== kInfinite` check and the
+        // downstream `(timeout_ms + 9) / 10` would wrap u64 to a tiny
+        // value, producing an immediate timeout instead of an infinite
+        // wait.
+        const u64 timeout_ms = frame->r10 & 0xFFFFFFFFu;
 
         if (count == 0 || count > kSyscallWaitMultiMax)
         {
