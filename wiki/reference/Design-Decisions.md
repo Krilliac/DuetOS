@@ -8589,3 +8589,55 @@ a real C++ caller now goes through its FFI.
   - The first multi-tenant inbound workload (HTTPS server, MTA,
     SMB server) needs hardened SYN-flood defence.
 - **Related roadmap track(s):** Track 9 (Networking).
+
+## 2026-05-12 — Periodic active load balancer (`PeriodicBalanceTick`)
+
+- **What:** Added a tick-driven active load balancer to the
+  scheduler. `OnTimerTick` calls `PeriodicBalanceTick` every
+  `kBalancePeriodTicks` (8 ticks ≈ 80 ms at 100 Hz), phase-shifted
+  by `cpu_id` so different CPUs balance on different ticks.
+  `PickBalanceVictim` selects the heaviest same-cluster peer whose
+  `runq_normal_len` exceeds the local CPU's by at least
+  `kBalanceMargin` (4); `BalancePullOnce` lifts one Ready task from
+  that peer's Normal-band runqueue and pushes it onto the local
+  runqueue. Boot self-test
+  (`sched-loadbalance-selftest`, Phase::Userland) verifies the
+  decision function under the lock; emits a single
+  `[sched-loadbalance-selftest] PASS` line.
+- **Why this is its own surface:** Wake-time placement
+  (`PickClusterPlacement`) only fires on a wake-side enqueue.
+  Work-stealing (`StealNormalFromPeer`) only fires when the local
+  runqueue is empty. Neither covers the case where two CPUs are
+  both busy with long-running compute tasks and neither goes idle
+  — exactly the case where N compute threads spawned on one CPU
+  would never spread across the cluster. The periodic balancer
+  closes that gap with a tiny per-tick cost (one CPU-load + one
+  modulo + one branch in the common case).
+- **Margin math:** `kBalanceMargin = 4` is the smallest value that
+  settles to the wake-placement floor without oscillation. After
+  one migration the delta drops to 2, which equals
+  `kClusterPlacementMargin` — so the next wake won't re-route the
+  task back across the cluster and the next periodic tick won't
+  pull anyone else.
+- **What it rules out / defers:**
+  - **Cross-cluster active migration is deliberately absent.**
+    The cache-miss + NUMA-hop cost dwarfs the imbalance savings.
+    Truly-idle cross-cluster peers are still covered by
+    `StealNormalFromPeer`'s pass-1 fallback; operator-pinned
+    steady-state load uses `SchedSetAffinity`.
+  - **`NeedResched` is NOT flagged after a migration.** The
+    stolen task lands at the tail of the local runqueue and will
+    run when the current task naturally yields or hits its tick
+    budget. Forcing a context switch would add ping-pong without
+    improving throughput.
+  - **Idle-band tasks are NOT balanced.** Idle tasks are pinned
+    per-CPU by construction (one idle per CPU sti+hlt) and have
+    no `runq_normal_len` accounting; balancing them would be
+    meaningless.
+- **Revisit when:** the per-CPU `g_sched_lock` split (Roadmap
+  **B2-followup**) lands. The balancer's cross-CPU walk currently
+  reads every peer's `runq_normal_len` under the global lock; the
+  split version will need a try-lock probe pattern matching
+  `StealNormalFromPeer`'s post-split design.
+- **Related roadmap track(s):** Topology-driven follow-ons (now
+  one item left: cluster-broadcast IPIs).

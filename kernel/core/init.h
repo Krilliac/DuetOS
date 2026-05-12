@@ -94,6 +94,21 @@ inline constexpr u32 kMaxInitcalls = 64;
 /// should not rely on this for "register once" semantics.
 Result<void> InitcallRegister(Phase phase, const char* name, InitcallFn fn);
 
+/// Remove the first row whose name matches `name`. Returns true if a
+/// row was removed, false otherwise. Pointer-equality match is the
+/// kernel idiom — every registrant passes a string literal, and the
+/// unregister site uses the same literal from the same TU.
+///
+/// Single-threaded init-only: the registry is not thread-safe (see
+/// the file header). Calling this after `SmpStartAps` is a bug.
+///
+/// Used by `InitSelfTest` to retire the deliberately-failing test
+/// row after the negative-path check verifies that `RunPhase` aborts
+/// on it. Without retirement, every subsequent `RunPhase(Userland)`
+/// would re-trip the same failure and skip every late-boot self-test
+/// registered after it.
+bool InitcallUnregister(const char* name);
+
 /// Number of currently-registered callbacks across all phases.
 u32 InitcallCount();
 

@@ -203,23 +203,32 @@ void EventTraceSelfTest()
         arch::Sti();
         core::Panic("diag/event-trace", "self-test: live count not consistent with append count");
     }
-    arch::Sti();
 
     // Snapshot the trailing 3 records and verify their args came
     // back in order. The full ring is `kEventRingCapacity * sizeof
     // (EventRecord)` = 128 KiB, twice the 64 KiB kernel stack —
     // a stack-allocated copy buffer overflows the guard page and
     // takes the box down. Heap-allocate instead.
+    //
+    // CRITICAL: stay under `Cli` across the KMalloc + snapshot read
+    // so no timer tick (which emits a `kEventIrq` record from
+    // `sched::OnTimerTick`) can slip in between our three explicit
+    // appends and the snapshot. Without the wider Cli window the
+    // "last 3" picked below would race against the IRQ events. KMalloc
+    // and KFree are safe under Cli — both use IrqOff RAII internally
+    // which nests cleanly with an outer Cli.
     EventRecord buf[3] = {};
     auto* all_buf = static_cast<EventRecord*>(::duetos::mm::KMalloc(sizeof(EventRecord) * kEventRingCapacity));
     if (all_buf == nullptr)
     {
+        arch::Sti();
         core::Panic("diag/event-trace", "self-test: KMalloc for snapshot buffer failed");
     }
     const u32 got = EventTraceSnapshot(all_buf, kEventRingCapacity);
     if (got < 3)
     {
         ::duetos::mm::KFree(all_buf);
+        arch::Sti();
         core::Panic("diag/event-trace", "self-test: snapshot returned fewer than 3 records");
     }
     // Look at the LAST 3 records — those must be ours.
@@ -228,6 +237,7 @@ void EventTraceSelfTest()
         buf[i] = all_buf[got - 3 + i];
     }
     ::duetos::mm::KFree(all_buf);
+    arch::Sti();
     if (buf[0].arg0 != 0x1111 || buf[0].arg1 != 0x2222)
     {
         core::Panic("diag/event-trace", "self-test: record 0 args wrong");

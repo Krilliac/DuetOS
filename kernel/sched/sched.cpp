@@ -849,6 +849,142 @@ Task* StealNormalFromPeer()
     return nullptr;
 }
 
+// Periodic active load balancer — pull-half.
+//
+// Distinct from `StealNormalFromPeer` (which fires only when the
+// local runqueue is empty) and from `PickClusterPlacement` (which
+// fires only on a wake-side enqueue). Periodic balance covers the
+// remaining case: both CPUs have work, neither is going idle, and
+// no new wake events are arriving — long-running compute tasks
+// piled onto one CPU while a same-cluster peer has plenty of slack.
+// Without this, a workload with N long-running threads spawned on
+// one CPU never spreads even if N idle peers are available.
+//
+// Margin reasoning: `kBalanceMargin = 4` means a peer must have at
+// least 4 more Normal-band Ready tasks than self before we migrate.
+// Stealing one drops the delta to 2, which exactly equals
+// `kClusterPlacementMargin` — the wake-placement floor. So the
+// periodic balancer settles at the same equilibrium the wake-side
+// code targets, with no further oscillation.
+//
+// Same-cluster only: cross-cluster work-stealing already covers
+// the truly-idle peer; cross-cluster active migration costs more
+// in cache miss than the imbalance saves. Cross-cluster steady-
+// state imbalance is the operator's signal to call SchedSetAffinity,
+// not the scheduler's to chase silently across NUMA nodes.
+constexpr u32 kBalanceMargin = 4;
+constexpr u64 kBalancePeriodTicks = 8; // 80 ms at 100 Hz — cheap enough every CPU.
+constexpr u32 kBalanceNoVictim = ~0u;
+
+// Pure decision: returns the cpu_id of the heaviest same-cluster
+// peer whose `runq_normal_len` strictly exceeds `self_len + margin
+// - 1` (i.e. by at least `kBalanceMargin`). Returns `kBalanceNoVictim`
+// if no peer qualifies (UP system, no same-cluster peer, every peer
+// within the margin). Caller holds g_sched_lock so the per-CPU
+// length snapshot is consistent with the runqueue contents.
+u32 PickBalanceVictim(u32 self_cpu, u16 self_cluster, u32 self_len)
+{
+    const u32 limit = arch::SmpCpuIdLimit();
+    if (limit <= 1)
+    {
+        return kBalanceNoVictim;
+    }
+    u32 best_id = kBalanceNoVictim;
+    u32 best_len = self_len + kBalanceMargin - 1; // strictly-greater required
+    for (u32 i = 0; i < limit; ++i)
+    {
+        if (i == self_cpu)
+        {
+            continue;
+        }
+        cpu::PerCpu* peer = arch::SmpGetPercpu(i);
+        if (peer == nullptr)
+        {
+            continue;
+        }
+        if (peer->cluster_id != self_cluster)
+        {
+            continue;
+        }
+        const u32 peer_len = peer->runq_normal_len;
+        if (peer_len > best_len)
+        {
+            best_id = i;
+            best_len = peer_len;
+        }
+    }
+    return best_id;
+}
+
+// Lift one Normal-band Ready task off the heaviest qualifying peer
+// and enqueue it on `self`. Returns the migrated Task* or nullptr
+// when no peer is heavy enough. Caller holds g_sched_lock; mirrors
+// `StealNormalFromPeer`'s pop/push contract exactly so the runqueue
+// invariants (counter, tail pointer, intrusive-link nulling, affinity
+// update) stay identical to the existing steal path.
+Task* BalancePullOnce(cpu::PerCpu* self)
+{
+    if (self == nullptr)
+    {
+        return nullptr;
+    }
+    const u32 victim_id = PickBalanceVictim(self->cpu_id, self->cluster_id, self->runq_normal_len);
+    if (victim_id == kBalanceNoVictim)
+    {
+        return nullptr;
+    }
+    cpu::PerCpu* victim = arch::SmpGetPercpu(victim_id);
+    if (victim == nullptr)
+    {
+        return nullptr; // PickBalanceVictim already filtered nulls; defensive belt
+    }
+    Task* head = RunqHeadNormal(victim);
+    KASSERT(head != nullptr, "sched", "BalancePullOnce: victim normal_len > 0 but head null");
+    RunqHeadNormal(victim) = head->next;
+    if (RunqHeadNormal(victim) == nullptr)
+    {
+        RunqTailNormal(victim) = nullptr;
+    }
+    head->next = nullptr;
+    KASSERT(victim->runq_normal_len > 0, "sched", "BalancePullOnce: victim normal_len underflow");
+    --victim->runq_normal_len;
+    head->last_cpu = self->cpu_id;
+    RunqueuePushOn(self, head);
+    return head;
+}
+
+// IRQ-context hook fired from `OnTimerTick`. Phase-shifted per CPU
+// so different CPUs don't all race for the same heaviest peer on
+// the same tick. Pulls at most one task per tick — a heavily
+// overloaded peer drains incrementally over multiple periods,
+// which keeps the migration cost bounded even when several CPUs
+// converge on it. No NeedResched flag: the migrated task lands
+// at the tail of `self`'s runqueue and will be picked when the
+// current task naturally yields or hits its tick budget; forcing
+// a context switch here would add ping-pong without improving
+// throughput.
+//
+// UP short-circuit BEFORE taking `g_sched_lock`: with one CPU there
+// is no peer to migrate from, and the unnecessary acquire/release
+// every `kBalancePeriodTicks` (12 Hz at 100 Hz/8) churns the lockdep
+// held-stack (depth `kLockdepHeldMax = 8`) enough to surface stale
+// overflow conditions long after boot. `SmpCpuIdLimit()` is a
+// monotonically-stable u32 read once APs are up; safe lock-free.
+void PeriodicBalanceTick()
+{
+    if (arch::SmpCpuIdLimit() <= 1)
+    {
+        return;
+    }
+    cpu::PerCpu* self = cpu::CurrentCpu();
+    if (self == nullptr)
+    {
+        return;
+    }
+    sync::SpinLockGuard guard(g_sched_lock);
+    (void)BalancePullOnce(self);
+}
+
 // Drain runqueue until a non-suspended task is found OR the
 // runqueue is empty. Suspended tasks popped along the way are
 // re-parked on g_suspended_head with state = Blocked. The wake
@@ -1838,6 +1974,27 @@ void OnTimerTick(u64 now_ticks)
         NeedResched() = true;
     }
 
+    // Periodic active load balancer. Runs every `kBalancePeriodTicks`
+    // on each CPU, phase-shifted by `cpu_id` so different CPUs don't
+    // all converge on the same heaviest peer in the same tick. Pulls
+    // one Ready task from the heaviest same-cluster peer when the
+    // local CPU is light by `kBalanceMargin` or more. See the comment
+    // block above `PickBalanceVictim` for the design rationale.
+    //
+    // Cost in the common case: one load (CurrentCpu), one modulo,
+    // one branch. Spinlock + cross-CPU walk only on the firing tick.
+    {
+        cpu::PerCpu* tick_cpu = cpu::CurrentCpu();
+        if (tick_cpu != nullptr)
+        {
+            const u64 phase = static_cast<u64>(tick_cpu->cpu_id);
+            if ((now_ticks + phase) % kBalancePeriodTicks == 0)
+            {
+                PeriodicBalanceTick();
+            }
+        }
+    }
+
     // Loadavg sample: once every 5 seconds, walk every CPU's
     // Normal runqueue counting nodes (plus the running task if
     // it's not idle), then
@@ -2076,6 +2233,103 @@ void SyscallTrailSelfTest()
     }
     self->trail_head = saved_head;
     self->trail_count = saved_count;
+}
+
+void LoadBalanceSelfTest()
+{
+    // Cap the per-CPU snapshot at the same bound the rest of the
+    // scheduler uses for SMP iteration. arch::SmpCpuIdLimit() returns
+    // the highest cpu_id ever allocated + 1; v0 SMP keeps that small.
+    // KASSERT below catches the day someone bumps the SMP cap past
+    // the inline-snapshot size without bumping this constant.
+    constexpr u32 kMaxCpus = 64;
+    u32 saved_len[kMaxCpus] = {0};
+
+    sync::SpinLockGuard guard(g_sched_lock);
+
+    cpu::PerCpu* self = cpu::CurrentCpu();
+    if (self == nullptr)
+    {
+        arch::SerialWrite("[sched-loadbalance-selftest] SKIP (no CurrentCpu — pre-SchedInit)\n");
+        return;
+    }
+    const u32 limit = arch::SmpCpuIdLimit();
+    KASSERT(limit <= kMaxCpus, "sched", "LoadBalanceSelfTest: SmpCpuIdLimit > kMaxCpus");
+
+    for (u32 i = 0; i < limit; ++i)
+    {
+        cpu::PerCpu* p = arch::SmpGetPercpu(i);
+        saved_len[i] = (p != nullptr) ? p->runq_normal_len : 0;
+    }
+
+    // Test 1: UP / single-CPU short-circuit. PickBalanceVictim must
+    // return kBalanceNoVictim regardless of synthetic length when
+    // there are no peers — the limit<=1 branch fires first.
+    if (limit <= 1)
+    {
+        const u32 picked = PickBalanceVictim(self->cpu_id, self->cluster_id, 0);
+        KASSERT(picked == kBalanceNoVictim, "sched", "LoadBalanceSelfTest: UP did not short-circuit");
+        arch::SerialWrite("[sched-loadbalance-selftest] PASS (UP)\n");
+        return;
+    }
+
+    // Test 2: locate a same-cluster peer. The boot toplogy always
+    // assigns at least one peer to each CPU's cluster on multi-CPU
+    // boots (every CPU is cluster 0 by default; SRAT/NUMA splits
+    // produce ≥2 CPUs per cluster, never a singleton).
+    u32 peer_id = kBalanceNoVictim;
+    for (u32 i = 0; i < limit; ++i)
+    {
+        if (i == self->cpu_id)
+        {
+            continue;
+        }
+        cpu::PerCpu* p = arch::SmpGetPercpu(i);
+        if (p != nullptr && p->cluster_id == self->cluster_id)
+        {
+            peer_id = i;
+            break;
+        }
+    }
+    KASSERT(peer_id != kBalanceNoVictim, "sched", "LoadBalanceSelfTest: no same-cluster peer (bad topology)");
+    cpu::PerCpu* peer = arch::SmpGetPercpu(peer_id);
+
+    // Force self's length to 0 so the margin arithmetic is unambiguous.
+    self->runq_normal_len = 0;
+
+    // 2a — peer exactly AT the margin: balancer must select it.
+    peer->runq_normal_len = kBalanceMargin;
+    {
+        const u32 picked = PickBalanceVictim(self->cpu_id, self->cluster_id, 0);
+        KASSERT(picked == peer_id, "sched", "LoadBalanceSelfTest: peer at margin not selected");
+    }
+
+    // 2b — peer one BELOW the margin: balancer must skip.
+    peer->runq_normal_len = kBalanceMargin - 1;
+    {
+        const u32 picked = PickBalanceVictim(self->cpu_id, self->cluster_id, 0);
+        KASSERT(picked == kBalanceNoVictim, "sched", "LoadBalanceSelfTest: sub-margin peer selected");
+    }
+
+    // 2c — peer well above the margin: still selected (sanity vs.
+    // an off-by-one that would clamp `best_len`).
+    peer->runq_normal_len = kBalanceMargin * 4;
+    {
+        const u32 picked = PickBalanceVictim(self->cpu_id, self->cluster_id, 0);
+        KASSERT(picked == peer_id, "sched", "LoadBalanceSelfTest: high-load peer not selected");
+    }
+
+    // Restore originals before releasing the lock.
+    for (u32 i = 0; i < limit; ++i)
+    {
+        cpu::PerCpu* p = arch::SmpGetPercpu(i);
+        if (p != nullptr)
+        {
+            p->runq_normal_len = saved_len[i];
+        }
+    }
+
+    arch::SerialWrite("[sched-loadbalance-selftest] PASS\n");
 }
 
 void DumpCurrentTaskSyscallTrail()
@@ -3422,6 +3676,15 @@ void CondvarWait(Condvar* cv, Mutex* m)
         return;
     }
 
+    // Drop the lockdep held-stack entry for `m` here, mirroring the
+    // owner transfer below. The caller pushed `m` onto the stack
+    // when it called MutexLock; the post-wake MutexLock(m) below
+    // will push it again. Without this pop, every CondvarWait
+    // leaks one orphan held-stack entry per call, which slowly
+    // poisons the lockdep view and surfaces as spurious
+    // "release with no matching held entry" warnings much later.
+    ::duetos::sync::LockdepBeforeRelease(m->class_id);
+
     {
         sync::SpinLockGuard guard(g_sched_lock);
 
@@ -3487,6 +3750,11 @@ bool CondvarWaitTimeout(Condvar* cv, Mutex* m, u64 ticks)
         core::DebugPanicOrWarn("sched", "CondvarWaitTimeout called without the companion mutex held");
         return false;
     }
+
+    // Same lockdep accounting as CondvarWait: drop `m` from the
+    // held-stack before the transfer, MutexLock(m) on wake will
+    // re-push.
+    ::duetos::sync::LockdepBeforeRelease(m->class_id);
 
     {
         sync::SpinLockGuard guard(g_sched_lock);
